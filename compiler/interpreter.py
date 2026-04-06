@@ -11,6 +11,7 @@ from .ast_nodes import (
     BoolNode,
     CallNode,
     ExprStmtNode,
+    IfExprNode,
     FunctionNode,
     ModuleCallNode,
     NumberNode,
@@ -101,7 +102,7 @@ class Interpreter:
             return self.set_var(node.name, value)
 
         if isinstance(node, UnaryOpNode):
-            value = self.eval(node.expr)
+            value = self.eval(node.node)
             op_type = node.op.typ
 
             if op_type == "PLUS":
@@ -126,6 +127,8 @@ class Interpreter:
                 return left * right
             if op_type == "DIV":
                 return left / right
+            if op_type == "PERCENT":
+                return left % right
             if op_type == "EQ":
                 return left == right
             if op_type == "NE":
@@ -144,6 +147,9 @@ class Interpreter:
                 return bool(left) or bool(right)
 
             raise RuntimeError(f"Ukjent operator: {op_type}")
+
+        if isinstance(node, IfExprNode):
+            return self.eval(node.then_expr if self.eval(node.condition) else node.else_expr)
 
         if isinstance(node, ExprStmtNode):
             return self.eval(node.expr)

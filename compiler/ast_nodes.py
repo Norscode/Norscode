@@ -72,6 +72,15 @@ class IfNode:
         self.else_block = else_block
 
 
+
+
+class IfExprNode:
+    def __init__(self, condition, then_expr, else_expr):
+        self.condition = condition
+        self.then_expr = then_expr
+        self.else_expr = else_expr
+
+
 class WhileNode:
     def __init__(self, condition, body):
         self.condition = condition

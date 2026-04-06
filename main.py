@@ -26,6 +26,7 @@ from compiler.lexer import Lexer
 from compiler.loader import ModuleLoader
 from compiler.parser import Parser
 from compiler.semantic import SemanticAnalyzer
+from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
 
 
 IR_OPS_WITH_ARG = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
@@ -3689,7 +3690,7 @@ def run_ci_pipeline(
 
 
 def main():
-    parser = argparse.ArgumentParser(prog="norcode", description="NorCode CLI")
+    parser = argparse.ArgumentParser(prog="norcode", description="Norscode CLI")
     sub = parser.add_subparsers(dest="cmd")
 
     run = sub.add_parser("run", help="Bygg og kjør en .no-fil")
@@ -3756,7 +3757,7 @@ def main():
 
     ci = sub.add_parser("ci", help="Kjør lokal CI-sekvens (snapshot, parity, test)")
     ci.add_argument("--json", action="store_true", help="Skriv CI-resultat som JSON")
-    ci.add_argument("--check-names", action="store_true", help="Inkluder sjekk for navnemigrering (legacy -> NorCode)")
+    ci.add_argument("--check-names", action="store_true", help="Inkluder sjekk for navnemigrering (legacy -> Norscode)")
     ci.add_argument("--parity-suite", choices=["m1", "m2", "all"], default="all", help="Velg parity-scope i CI")
     ci.add_argument(
         "--require-selfhost-ready",
@@ -3826,7 +3827,7 @@ def main():
     registry_mirror_cmd.add_argument("--output", help="Output-fil for mirror (default: build/registry_mirror.json)")
     registry_mirror_cmd.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
 
-    migrate_names_cmd = sub.add_parser("migrate-names", help="Migrer legacy navn (norsklang*) til NorCode-navn")
+    migrate_names_cmd = sub.add_parser("migrate-names", help="Migrer legacy navn (norsklang*) til Norscode-navn")
     migrate_names_cmd.add_argument("--apply", action="store_true", help="Utfør migrering (default er dry-run)")
     migrate_names_cmd.add_argument("--cleanup", action="store_true", help="Fjern legacy-filer etter vellykket migrering")
     migrate_names_cmd.add_argument("--check", action="store_true", help="Feil hvis migrering/cleanup fortsatt gjenstår")
@@ -3838,6 +3839,46 @@ def main():
     release.add_argument("--date", help="Release-dato (YYYY-MM-DD)")
     release.add_argument("--dry-run", action="store_true", help="Vis endringer uten å skrive filer")
     release.add_argument("--json", action="store_true", help="Skriv release-resultat som JSON")
+
+    selfhost_ast_export = sub.add_parser("selfhost-ast-export", help="Eksporter .no via selfhost-parser til AST-json (.shast.json)")
+    selfhost_ast_export.add_argument("file")
+    selfhost_ast_export.add_argument("--output", help="Valgfri output-fil")
+
+    ast_export = sub.add_parser("ast-export", help="Eksporter .no til AST-json (.nast.json)")
+    ast_export.add_argument("file")
+    ast_export.add_argument("--output", help="Valgfri output-fil")
+
+    bytecode_build = sub.add_parser("bytecode-build", help="Bygg .no eller .nast.json til bytecode-json (.ncb.json)")
+    bytecode_build.add_argument("file")
+    bytecode_build.add_argument("--output", help="Valgfri output-fil")
+    bytecode_build.add_argument("--ast", action="store_true", help="Tolker input som .nast.json i stedet for .no")
+
+    bytecode_run = sub.add_parser("bytecode-run", help="Kjør bytecode-backenden fra .no, .nast.json eller .ncb.json")
+    bytecode_run.add_argument("file")
+    bytecode_run.add_argument("--bytecode", action="store_true", help="Tolker input som .ncb.json i stedet for .no")
+    bytecode_run.add_argument("--ast", action="store_true", help="Tolker input som .nast.json i stedet for .no")
+
+    selfhost_chain_export = sub.add_parser("selfhost-chain-export", help="Eksporter full selfhost AST-bundle inkl. imports")
+    selfhost_chain_export.add_argument("file")
+    selfhost_chain_export.add_argument("--output", help="Valgfri output-fil")
+
+    selfhost_chain_run = sub.add_parser("selfhost-chain-run", help="Kjør full selfhost-kjede (.no -> selfhost AST -> bytecode -> VM)")
+    selfhost_chain_run.add_argument("file")
+    selfhost_chain_run.add_argument("--trace", action="store_true", help="Vis sporlogg ved feil")
+    selfhost_chain_run.add_argument("--max-steps", type=int, default=200000, help="Maks VM-steg før kjøring avbrytes")
+    selfhost_chain_run.add_argument("--trace-focus", help="Logg kun funksjoner som matcher denne teksten")
+    selfhost_chain_run.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
+    selfhost_chain_run.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
+    selfhost_chain_run.add_argument("--expr-probe-log", help="Skriv uttrykksprobe til fil")
+
+    selfhost_chain_check = sub.add_parser("selfhost-chain-check", help="Sjekk et sett filer gjennom full selfhost-kjede")
+    selfhost_chain_check.add_argument("files", nargs="*")
+    selfhost_chain_check.add_argument("--trace", action="store_true", help="Ta med sporlogg ved feil")
+    selfhost_chain_check.add_argument("--max-steps", type=int, default=200000, help="Maks VM-steg per fil")
+    selfhost_chain_check.add_argument("--trace-focus", help="Logg kun funksjoner som matcher denne teksten")
+    selfhost_chain_check.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
+    selfhost_chain_check.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
+    selfhost_chain_check.add_argument("--expr-probe-log", help="Skriv uttrykksprobe til fil")
 
     test = sub.add_parser("test", help="Kjør én testfil eller alle i tests/")
     test.add_argument("file", nargs="?", help="Valgfri testfil")
@@ -4484,6 +4525,70 @@ def main():
                 print(f"Dato: {payload['release_date']}")
                 print(f"Pyproject: {'oppdatert' if payload['changed_pyproject'] else 'uendret'} ({payload['pyproject']})")
                 print(f"Changelog: {'oppdatert' if payload['changed_changelog'] else 'uendret'} ({payload['changelog']})")
+
+        elif args.cmd == "selfhost-ast-export":
+            from compiler.selfhost_ast_bridge import export_selfhost_ast
+            out_path = export_selfhost_ast(args.file, output=args.output)
+            print(f"Selfhost AST: {out_path}")
+
+        elif args.cmd == "ast-export":
+            from compiler.ast_bridge import export_ast
+            out_path = export_ast(args.file, output=args.output)
+            print(f"AST: {out_path}")
+
+        elif args.cmd == "bytecode-build":
+            from compiler.bytecode_backend import build_command
+            if args.ast:
+                out_path = build_command(ast_file=args.file, output=args.output)
+            else:
+                out_path = build_command(source_file=args.file, output=args.output)
+            print(f"Bytecode: {out_path}")
+
+        elif args.cmd == "bytecode-run":
+            from compiler.bytecode_backend import run_command
+            if args.bytecode:
+                result = run_command(bytecode_file=args.file)
+            elif args.ast:
+                result = run_command(ast_file=args.file)
+            else:
+                result = run_command(source_file=args.file)
+            if result is not None:
+                print(f"Return: {result}")
+
+        elif args.cmd == "selfhost-chain-export":
+            out_path = export_selfhost_ast_bundle(args.file, output=args.output)
+            print(f"Selfhost chain AST: {out_path}")
+
+        elif args.cmd == "selfhost-chain-run":
+            result = run_chain(
+                args.file,
+                trace=args.trace,
+                max_steps=args.max_steps,
+                trace_focus=args.trace_focus,
+                repeat_limit=args.repeat_limit,
+                expr_probe=args.expr_probe,
+                expr_probe_log=args.expr_probe_log,
+            )
+            if result is not None:
+                print(f"Return: {result}")
+
+        elif args.cmd == "selfhost-chain-check":
+            payload = check_chain(
+                args.files,
+                trace=args.trace,
+                max_steps=args.max_steps,
+                trace_focus=args.trace_focus,
+                repeat_limit=args.repeat_limit,
+                expr_probe=args.expr_probe,
+                expr_probe_log=args.expr_probe_log,
+            )
+            print(f"{payload['passed']}/{payload['total']} OK")
+            for row in payload['results']:
+                status = "OK" if row.get("ok") else "FEIL"
+                detail = row.get("result") if row.get("ok") else row.get("error")
+                print(f"- {status}: {row['file']}" + (f" -> {detail}" if detail is not None else ""))
+            if not payload['ok']:
+                sys.exit(1)
 
         elif args.cmd == "test":
             if args.file:

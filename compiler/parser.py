@@ -161,49 +161,82 @@ class Parser:
         if self.current.typ in ("IDENT", "I") and self.next.typ == "ASSIGN":
             return self.var_set_stmt()
 
-        if (
-            self.current.typ in ("IDENT", "I")
-            and self.next.typ == "LBRACKET"
-            and self._looks_like_index_assignment()
-        ):
-            return self.index_set_stmt()
+        snapshot = self._snapshot()
+        expr = self.expr()
+        if self._is_assignment_op(self.current.typ):
+            op = self.current
+            self.advance()
+            value_expr = self.expr()
+            if isinstance(expr, VarAccessNode):
+                return self._build_var_assignment(expr.name, op, value_expr)
+            if isinstance(expr, IndexNode):
+                return self._build_index_assignment(expr, op, value_expr)
+            self.error("Ugyldig tilordning")
 
+        self._restore(snapshot)
         expr = self.expr()
         return ExprStmtNode(expr)
 
-    def _looks_like_index_assignment(self):
-        depth = 0
-        tokens = [self.current, self.next, self.next2]
-        idx = 1
+    def _snapshot(self):
+        return (
+            self.current,
+            self.next,
+            self.next2,
+            self.lexer.pos,
+            self.lexer.current,
+            self.lexer.line,
+            self.lexer.column,
+        )
 
-        while idx < len(tokens):
-            tok = tokens[idx]
-            if tok.typ == "LBRACKET":
-                depth += 1
-            elif tok.typ == "RBRACKET":
-                depth -= 1
-                if depth == 0:
-                    if idx + 1 < len(tokens) and tokens[idx + 1].typ == "ASSIGN":
-                        return True
-                    return False
-            idx += 1
+    def _restore(self, snapshot):
+        (
+            self.current,
+            self.next,
+            self.next2,
+            self.lexer.pos,
+            self.lexer.current,
+            self.lexer.line,
+            self.lexer.column,
+        ) = snapshot
 
-        return False
+    def _is_assignment_op(self, token_type):
+        return token_type in ("ASSIGN", "PLUS_ASSIGN", "MINUS_ASSIGN", "STAR_ASSIGN", "SLASH_ASSIGN", "PERCENT_ASSIGN")
 
-    def index_set_stmt(self):
-        name = self.eat_name()
-        self.eat("LBRACKET")
-        index_expr = self.expr()
-        self.eat("RBRACKET")
-        self.eat("ASSIGN")
-        value_expr = self.expr()
-        return IndexSetNode(name, index_expr, value_expr)
+    def _compound_binop(self, op_token):
+        mapping = {
+            "PLUS_ASSIGN": ("PLUS", "+"),
+            "MINUS_ASSIGN": ("MINUS", "-"),
+            "STAR_ASSIGN": ("MUL", "*"),
+            "SLASH_ASSIGN": ("DIV", "/"),
+            "PERCENT_ASSIGN": ("PERCENT", "%"),
+        }
+        typ, value = mapping[op_token.typ]
+        return type(op_token)(typ, value, op_token.line, op_token.column)
+
+    def _build_var_assignment(self, name, op, value_expr):
+        if op.typ == "ASSIGN":
+            return VarSetNode(name, value_expr)
+        lhs = VarAccessNode(name)
+        expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
+        return VarSetNode(name, expr)
+
+    def _build_index_assignment(self, index_node, op, value_expr):
+        target = getattr(index_node, "target", getattr(index_node, "list_expr", None))
+        if not isinstance(target, VarAccessNode):
+            self.error("Indekstilordning krever et variabelnavn")
+        if op.typ == "ASSIGN":
+            return IndexSetNode(target.name, index_node.index_expr, value_expr)
+        lhs = IndexNode(VarAccessNode(target.name), index_node.index_expr)
+        expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
+        return IndexSetNode(target.name, index_node.index_expr, expr)
 
     def var_decl(self):
         self.eat("LA")
         name = self.eat_name()
-        self.eat("COLON")
-        var_type = self.parse_type()
+        var_type = None
+        if self.current.typ == "COLON":
+            self.eat("COLON")
+            var_type = self.parse_type()
         self.eat("ASSIGN")
         expr = self.expr()
         return VarDeclareNode(name, var_type, expr)
@@ -263,9 +296,14 @@ class Parser:
 
     def if_stmt(self):
         self.eat("HVIS")
-        self.eat("LPAREN")
-        cond = self.expr()
-        self.eat("RPAREN")
+        if self.current.typ == "LPAREN":
+            self.eat("LPAREN")
+            cond = self.expr()
+            self.eat("RPAREN")
+        else:
+            cond = self.expr()
+        if self.current.typ == "DA":
+            self.eat("DA")
         then_block = self.block()
 
         elif_blocks = []
@@ -276,9 +314,14 @@ class Parser:
 
             if self.current.typ == "HVIS":
                 self.eat("HVIS")
-                self.eat("LPAREN")
-                elif_cond = self.expr()
-                self.eat("RPAREN")
+                if self.current.typ == "LPAREN":
+                    self.eat("LPAREN")
+                    elif_cond = self.expr()
+                    self.eat("RPAREN")
+                else:
+                    elif_cond = self.expr()
+                if self.current.typ == "DA":
+                    self.eat("DA")
                 elif_block = self.block()
                 elif_blocks.append((elif_cond, elif_block))
                 continue
@@ -322,7 +365,27 @@ class Parser:
         return ReturnNode(expr)
 
     def expr(self):
+        if self.current.typ == "HVIS":
+            return self.if_expr()
         return self.logic_or()
+
+    def if_expr(self):
+        self.eat("HVIS")
+        if self.current.typ == "LPAREN":
+            self.eat("LPAREN")
+            cond = self.expr()
+            self.eat("RPAREN")
+        else:
+            cond = self.logic_or()
+        if self.current.typ != "DA":
+            self.error("hvis-uttrykk mangler 'da'")
+        self.eat("DA")
+        then_expr = self.expr()
+        if self.current.typ != "ELLERS":
+            self.error("hvis-uttrykk mangler 'ellers'")
+        self.eat("ELLERS")
+        else_expr = self.expr()
+        return IfExprNode(cond, then_expr, else_expr)
 
     def logic_or(self):
         node = self.logic_and()
@@ -380,7 +443,7 @@ class Parser:
 
     def factor(self):
         node = self.unary()
-        while self.current.typ in ("MUL", "DIV"):
+        while self.current.typ in ("MUL", "DIV", "PERCENT"):
             op = self.current
             self.eat(self.current.typ)
             node = BinOpNode(node, op, self.unary())

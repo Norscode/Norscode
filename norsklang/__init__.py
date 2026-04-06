@@ -1,1 +1,1 @@
-"""Legacy compatibility package for NorCode."""
+"""Legacy compatibility package for Norscode."""

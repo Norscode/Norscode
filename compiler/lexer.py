@@ -16,6 +16,7 @@ KEYWORDS = {
     "la": "LA",
     "skriv": "SKRIV",
     "hvis": "HVIS",
+    "da": "DA",
     "ellers": "ELLERS",
     "mens": "MENS",
     "for": "FOR",
@@ -139,6 +140,13 @@ class Lexer:
                     return Token("EQ", "==", start_line, start_col)
                 return Token("ASSIGN", "=", start_line, start_col)
 
+            if self.current == "+":
+                self.advance()
+                if self.current == "=":
+                    self.advance()
+                    return Token("PLUS_ASSIGN", "+=", start_line, start_col)
+                return Token("PLUS", "+", start_line, start_col)
+
             if self.current == "!":
                 self.advance()
                 if self.current == "=":
@@ -165,7 +173,31 @@ class Lexer:
                 if self.current == ">":
                     self.advance()
                     return Token("ARROW", "->", start_line, start_col)
+                if self.current == "=":
+                    self.advance()
+                    return Token("MINUS_ASSIGN", "-=", start_line, start_col)
                 return Token("MINUS", "-", start_line, start_col)
+
+            if self.current == "*":
+                self.advance()
+                if self.current == "=":
+                    self.advance()
+                    return Token("STAR_ASSIGN", "*=", start_line, start_col)
+                return Token("MUL", "*", start_line, start_col)
+
+            if self.current == "/":
+                self.advance()
+                if self.current == "=":
+                    self.advance()
+                    return Token("SLASH_ASSIGN", "/=", start_line, start_col)
+                return Token("DIV", "/", start_line, start_col)
+
+            if self.current == "%":
+                self.advance()
+                if self.current == "=":
+                    self.advance()
+                    return Token("PERCENT_ASSIGN", "%=", start_line, start_col)
+                return Token("PERCENT", "%", start_line, start_col)
 
             single = {
                 ":": "COLON",
@@ -177,9 +209,6 @@ class Lexer:
                 "}": "RBRACE",
                 "[": "LBRACKET",
                 "]": "RBRACKET",
-                "+": "PLUS",
-                "*": "MUL",
-                "/": "DIV",
             }
 
             if self.current in single:

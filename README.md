@@ -1,6 +1,6 @@
 
 
-# NorCode 🚀
+# Norscode 🚀
 
 Et norsk programmeringsspråk som kompilerer til C.
 
@@ -38,7 +38,7 @@ python3 -m norsklang --help
 
 # Merk:
 # Legacy-aliasene `norsklang` og `python3 -m norsklang` viser et kort varsel
-# og videresender til NorCode-CLI.
+# og videresender til Norscode-CLI.
 # Ved bruk av legacy-filer (`norsklang.toml`, `norsklang.lock`, `.norsklang/`)
 # vises også et kort migreringsvarsel.
 
@@ -52,7 +52,7 @@ norcode migrate-names --apply
 norcode migrate-names --apply --cleanup
 
 # Sikkerhet:
-# --cleanup fjerner bare legacy-ressurser når innholdet matcher NorCode-ressursen.
+# --cleanup fjerner bare legacy-ressurser når innholdet matcher Norscode-ressursen.
 
 # CI-sjekk: feiler hvis migrering/cleanup gjenstår
 norcode migrate-names --cleanup --check
@@ -317,7 +317,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Run NorCode CI checks
+      - name: Run Norscode CI checks
         run: python3 -m norcode ci --check-names --require-selfhost-ready
 ```
 
@@ -526,38 +526,54 @@ norcode/
 
 ## 🔥 Status
 
-Dette prosjektet er under aktiv utvikling.
+Prosjektet er funksjonelt i god stand per 2026-04-06.
+
+- `norcode test` er grønt
+- `29/29` tester består
+- IR snapshot-parity er grønn
+- selfhost-banen dekker nå de nye syntaksene som brukes i testsettet
 
 ### Selv-hosting (nytt)
 
 Vi har startet en tidlig selv-hosting bane i `selfhost/`:
 
-- `selfhost/compiler.no` er en compiler skrevet i NorCode
+- `selfhost/compiler.no` er en compiler skrevet i Norscode
 - Første steg kompilerer et lite instruksjonssett (IR/bytecode) til C
-- Dette brukes som bootstrap før full lexer/parser i NorCode
+- Dette brukes som bootstrap før full lexer/parser i Norscode
+- Selv-hosting lexer/token-strøm har gode syntaksfeil og posisjonsinfo, og parity-suitene er i praksis på plass for det som brukes i testløpet
 
-Neste steg:
+#### Selvhost-status
 
-- Utvide selv-hosting til full parser (påbegynt: uttrykksparser + mini-skriptparser med `la`/`sett`/`returner` og aliasene `let`/`const`/`var`/`declare`/`set`/`assign`/`return`, compound assignment (`+=`, `-=`, `*=`, `/=`, `%=`), nestede `hvis ... da ... ellers ...` (uttrykk + assignment), `ellers_hvis`/`ellershvis`/`elif`/`elsif`-støtte, `if/then/else/elseif`-aliaser, `and/or/not/xor/xnor/nand/nor/implies/iff`-aliaser (inkludert norsk `xeller_ikke`, `og_ikke`, `eller_ikke`, `impliserer`, `impliserer_at`, `dette_impliserer`, `impliseres_av`, `medforer`, `impl`, `impliser`, `folger_av`, `folger_fra`, `folger_hvis`, `hvis_gitt`, `kun_hvis`, `krever`, `derfor`, `derav`, `ekvivalent`, `hvis_og_bare_hvis`, `gitt`, `gitt_at`, `gitt_dette`, `det_folger_at`, `forutsatt`, `forutsatt_at`, `forutsattvis`, `pa_vilkar_av_at`, `med_premiss`, `gitt_premiss`, `premiss_gitt`, `premiss_antatt`, `premiss_vilkar`, `antar`, `antar_at`, `nar_antatt`, `altsa`, `dermed`, `derved`, `derpa`, `folgelig`, `saledes`, `som_resultat`, `som_konsekvens`, `siden`, `fordi`, `ettersom`, `i_og_med_at`, og engelsk `and_not`, `or_not`, `equiv`, `follows`, `follows_if`, `follows_from`, `it_follows_that`, `therefore`, `hence`, `thus`, `thereby`, `thereupon`, `consequently`, `infer`, `as_a_result`, `as_consequence`, `ergo`, `only_if`, `requires`, `if_and_only_if`, `if_given`, `implied_by`, `given`, `given_that`, `given_premise`, `premise_given`, `premise_assumed`, `premise_condition`, `granted`, `provided`, `provided_that`, `on_condition_that`, `assuming`, `assuming_that`, `presuming`, `when_assuming`, `since`, `because`, `as`, `inasmuch_as`, `with_premise`, `implies_that`, `this_implies`, `->`, `=>`, `<-`, `<->`, `<=>`), bool-aliaser `on/off`, `yes/no`, `enabled/disabled`, `active/inactive`, `truthy/falsy`, `affirmative/negative`, `affirm/deny`, `approved/rejected`, `accepted/declined`, `confirmed/denied`, `pass/fail`, `success/failure`, `allow/block`, `permit/forbid`, `valid/invalid`, `ok/not_ok`, `ready/not_ready`, `safe/unsafe`, `secure/insecure`, `trusted/untrusted`, `open/closed`, `public/private`, `visible/hidden`, `present/absent`, `online/offline`, `connected/disconnected`, `available/unavailable`, `reachable/unreachable`, `working/broken`, `stable/unstable`, `correct/incorrect`, `complete/incomplete`, `clean/dirty`, `up/down`, `alive/dead`, `awake/asleep`, `healthy/unhealthy` og `synced/unsynced`, engelske sammenligningsaliaser (`is`, `isnt`, `eq`, `is_not`, `neq`, `<>`, `equals`, `equal_to`, `is_equal_to`, `not_equal_to`, `is_not_equal_to`, `less_than`, `is_less_than`, `greater_than`, `is_greater_than`, `less_equal`, `is_less_equal`, `greater_equal`, `is_greater_equal`, `less_or_equal`, `is_less_or_equal`, `is_less_or_equal_to`, `is_less_than_or_equal_to`, `greater_or_equal`, `is_greater_or_equal`, `is_greater_or_equal_to`, `is_greater_than_or_equal_to`) inkludert frasevarianter med mellomrom (`equal to`, `is equal to`, `not equal to`, `is not equal to`, `less than`, `is less than`, `greater than`, `is greater than`, `less or equal`, `less or equal to`, `is less or equal`, `is less or equal to`, `less than or equal`, `less than or equal to`, `is less than or equal to`, `greater or equal`, `greater or equal to`, `is greater or equal`, `is greater or equal to`, `greater than or equal`, `greater than or equal to`, `is greater than or equal to`), engelske aritmetikkaliaser (`times`, `multiplied_by`, `divided_by`, `add`, `subtract`, `divide`, `mod_of`, `modulo_of`, `remainder`) inkludert frasevarianter med mellomrom (`multiply by`, `multiplied by`, `divided by`, `divide by`, `modulo of`, `remainder of`), uttrykksstatements med `;` før sluttuttrykk, tomme statements (`;`), skript-separator med `;`, `,` og `:`, unary-operatorer (`!`, `-`, `+`), grupperingsstøtte med `()`, `{}` og `[]` og norske operator-ord (`og/eller/ikke`, `er/ikke_er`, `mindre_enn`/`storre_enn`, `pluss/minus/ganger/ganget med/delt pa/delt med/mod/modulo`) inkludert fraser med mellomrom (`mindre enn`, `ikke er`, `er ikke`, `lik`, `er lik`, `er lik med`, `ikke lik`, `ikke lik med`, `ulik`, `ulik med`, `er ulik`, `er ikke lik`, `er ikke lik med`, `er mindre enn`, `er storre enn`, `er mindre eller lik`, `er storre eller lik`, `mindre enn eller lik`, `storre enn eller lik`, `mindre enn lik`, `storre enn lik`, `er mindre enn lik`, `er storre enn lik`, `mindre lik`, `storre lik`, `er mindre lik`, `er storre lik`) i `selfhost/compiler.no`)
-- Selv-hosting lexer/token-strøm med bedre syntaksfeil og posisjonsinfo (utvidet: mini-skriptparser-feil + uttrykksparser-feil + `hvis`-parser-feil inkluderer token-posisjon)
+- `tests/selfhost_parser_m1_cases.json` og `tests/selfhost_parser_m2_cases.json` er i synk med utvidet suite
+- `norcode ci --check-names --require-selfhost-ready` er den relevante CI-gaten for denne delen
+- Workflowene kjører med selfhost-ready-sjekk aktiv
 
-#### M1 Status
+#### Neste fokus
 
-M1 er nå fullført og låst i CI:
-
-- `tests/selfhost_parser_m1_cases.json` er på 30 cases.
-- `tests/selfhost_parser_m2_cases.json` + M1 dekker 100% av `tests/selfhost_parser_core_cases.json` (49 cases totalt i utvidet suite).
-- `norcode ci --check-names --require-selfhost-ready` verifiserer M1/M2/utvidet parity + consistency + progress-gate.
-- GitHub workflows (`ci.yml`, `publish.yml`) kjører nå med selfhost-ready-gate aktiv.
-
-#### Neste Fokus (M2+)
-
-- Utvide selfhost-parser utover dagens parity-sett med nye språk-konstruksjoner.
-- Bygge flere representative parser-fixtures for nye features før de slippes i standardløpet.
-- Fortsette hardening av parserfeil (konsistente feiltyper + posisjon) mellom Python og selfhost.
-- Gradvis flytte mer av compile-pathen til selv-hostet implementasjon.
+- Fortsette å utvide selfhost-parseren kontrollert når nye språkfunksjoner legges til
+- Beholde parity mellom Python- og selfhost-banen når nye konstruksjoner introduseres
+- Holde feilmeldinger og posisjonsinfo konsistente på tvers av motorene
 
 ---
+
+## Historikk
+
+Noen få milepæler som er nyttige å kjenne til:
+
+- v17: første AST til bytecode-backend
+- v18: eksplisitt AST-bro mellom parser og bytecode
+- v19-v22: selfhost-broen ble utvidet med eksport, `IfExpr` og index assignment
+- v24-v26: selfhost-kjeden ble koblet til imports og bredere testsett
+- v27-v36: flere parser- og VM-fikser for strenger, operatorer, tracing og ytelse
+- v37-v43: videre diagnose- og parity-arbeid for selfhost-kjeden
+
+For daglig bruk er det viktigste at:
+
+- `norcode test` er grønn
+- selfhost-parity er i synk med testene som faktisk ligger i repoet
+- nye språkfunksjoner bør føres gjennom parser, semantic, codegen og selfhost-bro samtidig
+
+For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](/Users/jansteinarsaetre/Documents/VS%20code/norsklang_6i/docs/LEGACY_POLICY.md).
 
 ## 👨‍💻 Laget av
 

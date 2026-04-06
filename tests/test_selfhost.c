@@ -1892,8 +1892,16 @@ char * selfhost__compiler__uttrykk_til_ops_og_verdier_med_miljo(nl_list_text* to
             tok = "impliserer";
             tok_step = 2;
         }
+        else if (nl_streq(tok_raw, "->") || nl_streq(tok_raw, "=>")) {
+            tok = "impliserer";
+            tok_step = 1;
+        }
         else if (nl_streq(tok_raw, "<-")) {
             tok = "impliseres_av";
+            tok_step = 1;
+        }
+        else if (nl_streq(tok_raw, "<->") || nl_streq(tok_raw, "<=>")) {
+            tok = "xnor";
             tok_step = 1;
         }
         else if ((((i + 1) < nl_list_text_len(tokens)) && ((((nl_streq(tok_raw, "divided") || (nl_streq(tok_raw, "/") && nl_streq(tok_kilde, "divide"))) || (nl_streq(tok_raw, "*") && (nl_streq(tok_kilde, "multiply") || nl_streq(tok_kilde, "multiplied")))) || nl_streq(tok_raw, "modulo")) || (nl_streq(tok_raw, "%") && nl_streq(tok_kilde, "remainder")))) && (nl_streq(n1, "by") || nl_streq(n1, "of"))) {

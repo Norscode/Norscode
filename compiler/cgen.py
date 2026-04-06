@@ -9,6 +9,7 @@ class CGenerator:
         self.indent = 0
         self.var_types = {}
         self.current_module = "__main__"
+        self.current_return_type = None
         self.temp_counter = 0
         self.function_name_map = {}
         self._build_function_name_map()
@@ -529,7 +530,9 @@ class CGenerator:
 
     def visit_function(self, fn):
         previous_module = self.current_module
+        previous_return_type = self.current_return_type
         self.current_module = getattr(fn, "module_name", "__main__")
+        self.current_return_type = fn.return_type
         self.var_types = {p.name: p.type_name for p in fn.params}
 
         self.emit(self.signature(fn) + " {")
@@ -552,15 +555,23 @@ class CGenerator:
         self.indent -= 1
         self.emit("}")
         self.current_module = previous_module
+        self.current_return_type = previous_return_type
 
     def visit_stmt(self, stmt):
         if isinstance(stmt, VarDeclareNode):
-            self.var_types[stmt.name] = stmt.var_type
+            inferred_type = stmt.var_type
+            if inferred_type is None:
+                if isinstance(stmt.expr, ListLiteralNode):
+                    item_types = [self.expr_with_type(item)[1] for item in stmt.expr.items]
+                    inferred_type = TYPE_LIST_TEXT if item_types and item_types[0] == TYPE_TEXT else TYPE_LIST_INT
+                else:
+                    _, inferred_type = self.expr_with_type(stmt.expr)
+            self.var_types[stmt.name] = inferred_type
             if isinstance(stmt.expr, ListLiteralNode):
-                self.emit_list_literal_assignment(stmt.name, stmt.var_type, stmt.expr, declare=True)
+                self.emit_list_literal_assignment(stmt.name, inferred_type, stmt.expr, declare=True)
                 return
             expr_code, _expr_type = self.expr_with_type(stmt.expr)
-            self.emit(f"{self.c_type(stmt.var_type)} {stmt.name} = {expr_code};")
+            self.emit(f"{self.c_type(inferred_type)} {stmt.name} = {expr_code};")
             return
 
         if isinstance(stmt, VarSetNode):
@@ -683,7 +694,7 @@ class CGenerator:
             return
 
         if isinstance(stmt, ReturnNode):
-            expr_code, _expr_type = self.expr_with_type(stmt.expr)
+            expr_code, _expr_type = self.expr_with_type(stmt.expr, self.current_return_type)
             self.emit(f"return {expr_code};")
             return
 
@@ -700,7 +711,10 @@ class CGenerator:
             self.emit(f"{expr_code};")
             return
 
-    def expr_with_type(self, node):
+    def _is_empty_list(self, node):
+        return isinstance(node, ListLiteralNode) and not node.items
+
+    def expr_with_type(self, node, expected_type=None):
         if isinstance(node, NumberNode):
             return str(node.value), TYPE_INT
 
@@ -711,7 +725,13 @@ class CGenerator:
             return ("1" if node.value else "0"), TYPE_BOOL
 
         if isinstance(node, ListLiteralNode):
-            return ("nl_list_int_new()", TYPE_LIST_INT) if not node.items else ("0", TYPE_LIST_INT)
+            if not node.items:
+                if expected_type == TYPE_LIST_TEXT:
+                    return ("nl_list_text_new()", TYPE_LIST_TEXT)
+                if expected_type == TYPE_LIST_INT:
+                    return ("nl_list_int_new()", TYPE_LIST_INT)
+                return ("nl_list_int_new()", TYPE_LIST_INT)
+            return ("0", TYPE_LIST_INT)
 
         if isinstance(node, VarAccessNode):
             return node.name, self.var_types.get(node.name, TYPE_INT)
@@ -741,6 +761,8 @@ class CGenerator:
                 return f"({left_code} * {right_code})", TYPE_INT
             if node.op.typ == "DIV":
                 return f"({left_code} / {right_code})", TYPE_INT
+            if node.op.typ == "PERCENT":
+                return f"({left_code} % {right_code})", TYPE_INT
 
             if node.op.typ in ("GT", "LT", "GTE", "LTE"):
                 op_map = {"GT": ">", "LT": "<", "GTE": ">=", "LTE": "<="}
@@ -757,15 +779,37 @@ class CGenerator:
                 op = "&&" if node.op.typ == "OG" else "||"
                 return f"({left_code} {op} {right_code})", TYPE_BOOL
 
+        if isinstance(node, IfExprNode):
+            cond_code, _ = self.expr_with_type(node.condition)
+            then_code, then_type = self.expr_with_type(node.then_expr, expected_type)
+            else_code, else_type = self.expr_with_type(node.else_expr, expected_type)
+            if then_type != else_type:
+                if self._is_empty_list(node.then_expr) and else_type in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                    then_code, then_type = self.expr_with_type(node.then_expr, else_type)
+                elif self._is_empty_list(node.else_expr) and then_type in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                    else_code, else_type = self.expr_with_type(node.else_expr, then_type)
+            if then_type != else_type:
+                return "0", TYPE_INT
+            return f"(({cond_code}) ? {then_code} : {else_code})", then_type
+
         if isinstance(node, ModuleCallNode):
-            args = [self.expr_with_type(arg)[0] for arg in node.args]
             symbol, _full_name = self.resolve_symbol(node.func_name, module_name=node.module_name)
+            expected_args = list(getattr(symbol, "params", []) if symbol is not None else [])
+            args = [
+                self.expr_with_type(arg, expected_args[i] if i < len(expected_args) else None)[0]
+                for i, arg in enumerate(node.args)
+            ]
             c_name = self.resolve_c_function_name(node.func_name, module_name=node.module_name)
             return_type = symbol.return_type if symbol else TYPE_INT
             return f"{c_name}({', '.join(args)})", return_type
 
         if isinstance(node, CallNode):
-            args_with_types = [self.expr_with_type(arg) for arg in node.args]
+            symbol, _full_name = self.resolve_symbol(node.name)
+            expected_args = list(getattr(symbol, "params", []) if symbol is not None else [])
+            args_with_types = [
+                self.expr_with_type(arg, expected_args[i] if i < len(expected_args) else None)
+                for i, arg in enumerate(node.args)
+            ]
             args = [code for code, _t in args_with_types]
 
             if node.name == "assert":
@@ -831,7 +875,6 @@ class CGenerator:
                     return f"nl_list_text_set({args[0]}, {args[1]}, {args[2]})", TYPE_INT
                 return f"nl_list_int_set({args[0]}, {args[1]}, {args[2]})", TYPE_INT
 
-            symbol, _full_name = self.resolve_symbol(node.name)
             c_name = self.resolve_c_function_name(node.name)
             return_type = symbol.return_type if symbol else TYPE_INT
             return f"{c_name}({', '.join(args)})", return_type

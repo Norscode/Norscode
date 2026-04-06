@@ -57,6 +57,9 @@ class SemanticAnalyzer:
             raise RuntimeError(f"{message} [i funksjon {self.current_function_full_name}]")
         raise RuntimeError(message)
 
+    def is_empty_list_expr(self, expr):
+        return isinstance(expr, ListLiteralNode) and not expr.items
+
     def analyze(self, tree):
         for fn in tree.functions:
             full_name = (
@@ -108,15 +111,25 @@ class SemanticAnalyzer:
 
     def check_stmt(self, stmt, scope, expected_return_type, in_loop):
         if isinstance(stmt, VarDeclareNode):
+            is_empty_list = self.is_empty_list_expr(stmt.expr)
             expr_type = self.check_expr(stmt.expr, scope)
-            self.ensure_assignable(stmt.var_type, expr_type, f"variabel '{stmt.name}'")
-            scope[stmt.name] = stmt.var_type
+            if stmt.var_type is None:
+                scope[stmt.name] = expr_type
+            else:
+                if is_empty_list and stmt.var_type in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                    scope[stmt.name] = stmt.var_type
+                    return False
+                self.ensure_assignable(stmt.var_type, expr_type, f"variabel '{stmt.name}'")
+                scope[stmt.name] = stmt.var_type
             return False
 
         if isinstance(stmt, VarSetNode):
             if stmt.name not in scope:
                 self.error(f"Variabel '{stmt.name}' er ikke definert")
+            is_empty_list = self.is_empty_list_expr(stmt.expr)
             expr_type = self.check_expr(stmt.expr, scope)
+            if is_empty_list and scope[stmt.name] in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                return False
             self.ensure_assignable(scope[stmt.name], expr_type, f"variabel '{stmt.name}'")
             return False
 
@@ -146,6 +159,14 @@ class SemanticAnalyzer:
             self.check_block(stmt.then_block, dict(scope), expected_return_type, in_loop)
             if stmt.else_block:
                 self.check_block(stmt.else_block, dict(scope), expected_return_type, in_loop)
+            return False
+
+        if isinstance(stmt, IfExprNode):
+            cond_type = self.check_expr(stmt.condition, scope)
+            self.ensure_bool(cond_type, "hvis-betingelse")
+            then_type = self.check_expr(stmt.then_expr, scope)
+            else_type = self.check_expr(stmt.else_expr, scope)
+            self.ensure_assignable(then_type, else_type, "hvis-uttrykk")
             return False
 
         if isinstance(stmt, WhileNode):
@@ -179,7 +200,7 @@ class SemanticAnalyzer:
 
         if isinstance(stmt, ReturnNode):
             expr_type = self.check_expr(stmt.expr, scope)
-            self.ensure_assignable(expected_return_type, expr_type, "returverdi")
+            self.ensure_assignable(expected_return_type, expr_type, "returverdi", stmt.expr)
             return True
 
         if isinstance(stmt, BreakNode):
@@ -210,7 +231,7 @@ class SemanticAnalyzer:
 
         if isinstance(expr, ListLiteralNode):
             if not expr.items:
-                self.error("Tom liste er ikke støttet ennå")
+                return TYPE_LIST_INT
             item_types = [self.check_expr(item, scope) for item in expr.items]
             first = item_types[0]
             for t in item_types[1:]:
@@ -266,6 +287,10 @@ class SemanticAnalyzer:
                 if left != TYPE_INT or right != TYPE_INT:
                     self.error(f"Operator {expr.op.value} krever heltall")
                 return TYPE_INT
+            if expr.op.typ == "PERCENT":
+                if left != TYPE_INT or right != TYPE_INT:
+                    self.error("Operator % krever heltall")
+                return TYPE_INT
             if expr.op.typ in ("GT", "LT", "GTE", "LTE"):
                 if left != TYPE_INT or right != TYPE_INT:
                     self.error("Sammenligning krever heltall")
@@ -278,6 +303,20 @@ class SemanticAnalyzer:
                 if left != TYPE_BOOL or right != TYPE_BOOL:
                     self.error(f"{expr.op.value} krever bool på begge sider")
                 return TYPE_BOOL
+
+        if isinstance(expr, IfExprNode):
+            cond_type = self.check_expr(expr.condition, scope)
+            self.ensure_bool(cond_type, "hvis-betingelse")
+            then_type = self.check_expr(expr.then_expr, scope)
+            else_type = self.check_expr(expr.else_expr, scope)
+            if then_type == else_type:
+                return then_type
+            if self.is_empty_list_expr(expr.then_expr) and else_type in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                return else_type
+            if self.is_empty_list_expr(expr.else_expr) and then_type in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                return then_type
+            self.ensure_assignable(then_type, else_type, "hvis-uttrykk")
+            return then_type
 
         if isinstance(expr, ModuleCallNode):
             real_module = self.alias_map.get(expr.module_name, expr.module_name)
@@ -296,7 +335,7 @@ class SemanticAnalyzer:
             for i, (arg, param_type) in enumerate(zip(expr.args, fn.params), start=1):
                 arg_type = self.check_expr(arg, scope)
                 if param_type is not None:
-                    self.ensure_assignable(param_type, arg_type, f"argument {i} til {expr.module_name}.{expr.func_name}")
+                    self.ensure_assignable(param_type, arg_type, f"argument {i} til {expr.module_name}.{expr.func_name}", arg)
 
             return fn.return_type
 
@@ -380,13 +419,15 @@ class SemanticAnalyzer:
             for i, (arg, param_type) in enumerate(zip(expr.args, fn.params), start=1):
                 arg_type = self.check_expr(arg, scope)
                 if param_type is not None:
-                    self.ensure_assignable(param_type, arg_type, f"argument {i} til {resolved_name}")
+                    self.ensure_assignable(param_type, arg_type, f"argument {i} til {resolved_name}", arg)
             return fn.return_type
 
         self.error(f"Ukjent expression-type: {type(expr).__name__}")
 
-    def ensure_assignable(self, expected, actual, where):
+    def ensure_assignable(self, expected, actual, where, actual_expr=None):
         if expected != actual:
+            if actual_expr is not None and self.is_empty_list_expr(actual_expr) and expected in (TYPE_LIST_INT, TYPE_LIST_TEXT):
+                return
             self.error(f"Typefeil i {where}: forventet {expected}, fikk {actual}")
 
     def ensure_bool(self, actual, where):
