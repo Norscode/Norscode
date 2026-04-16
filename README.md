@@ -575,6 +575,11 @@ For daglig bruk er det viktigste at:
 
 For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](/Users/jansteinarsaetre/Documents/VS%20code/norsklang_6i/docs/LEGACY_POLICY.md).
 
+## Lisens
+
+Dette prosjektet er lisensiert under `Apache-2.0`.
+Se [LICENSE](/Users/jansteinarsaetre/Documents/language_handoff/projects/language/LICENSE).
+
 ## 👨‍💻 Laget av
 
 Jan Steinar Sætre
