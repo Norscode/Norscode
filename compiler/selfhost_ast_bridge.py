@@ -85,6 +85,17 @@ def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
         return {'type': 'VarAccess', 'name': node.get('value')}
     if kind == 'ListLiteral':
         return {'type': 'ListLiteral', 'items': [expr_to_data(item) for item in node.get('items', [])]}
+    if kind == 'MapLiteral':
+        return {
+            'type': 'MapLiteral',
+            'items': [
+                {
+                    'key': expr_to_data(entry.get('key', {})),
+                    'value': expr_to_data(entry.get('value', {})),
+                }
+                for entry in node.get('items', [])
+            ],
+        }
     if kind == 'Index':
         return {
             'type': 'Index',

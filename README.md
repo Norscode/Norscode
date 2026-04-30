@@ -25,19 +25,16 @@ python3 -m pip install -e .
 python3 -m pip install -e . --no-build-isolation
 
 # Deretter kan du bruke:
+norcode --help
+
+# Valgfrie alias (hvis installert):
 nor --help
 nc --help
 nl --help
-norcode --help
-# Legacy alias fungerer fortsatt:
 norsklang --help
 
-# Modul-kjøring:
-python3 -m norcode --help
-python3 -m norsklang --help
-
 # Merk:
-# Legacy-aliasene `norsklang` og `python3 -m norsklang` viser et kort varsel
+# Legacy-alias (`nor`, `nc`, `nl` og `norsklang`) viser et kort varsel
 # og videresender til Norscode-CLI.
 # Ved bruk av legacy-filer (`norsklang.toml`, `norsklang.lock`, `.norsklang/`)
 # vises også et kort migreringsvarsel.
@@ -63,7 +60,7 @@ norcode migrate-names --cleanup --check
 ```bash
 # Bygg distributerbare filer lokalt
 python3 -m pip install build twine
-pyproject-build
+python3 -m build
 python3 -m twine check dist/*
 
 # Forbered ny release lokalt (oppdaterer pyproject + CHANGELOG)
@@ -72,6 +69,44 @@ norcode release --bump patch
 # Se hva som ville skjedd uten å skrive filer
 norcode release --bump minor --dry-run --json
 ```
+
+### 0c. Lag lokal release-pakke
+
+```bash
+bash package-release.sh
+```
+
+Eller med make:
+
+```bash
+make release-package
+```
+
+Dette lager en tar.gz i `release-artifacts/` med manifest for distribusjon av dette repoet.
+
+Når pakken er bygget:
+
+```bash
+tar -xzf release-artifacts/norscode-language-*.tar.gz -C /tmp/norscode-release
+cd /tmp/norscode-release
+./bin/nc --help
+```
+
+I en release bygger `bin/`-scriptene mot:
+- `dist/norscode` om den finnes (binærflyt)
+- ellers `main.py` som tilbakefall når du vil kjøre uten ferdig binær
+
+### 0d. Fallback-bruk
+
+For eksplisitt legacy-arbeid kan du kjøre CLI via Python-kode direkte:
+
+```bash
+python3 main.py --help
+python3 main.py run app.no
+python3 main.py ci --check-names
+```
+
+Dette brukes som bevisst fallback når du trenger å kjøre koden uten ferdig binær.
 
 Publisering er satt opp i GitHub Actions via `.github/workflows/publish.yml`:
 
@@ -137,7 +172,7 @@ norcode add std_liste
 norcode add std_io
 
 # Samme via modul-kjøring
-python3 -m norcode add butikk
+norcode add butikk
 
 # Legg til pakke fra vilkårlig sti
 norcode add ./packages/butikk
@@ -289,7 +324,7 @@ norcode debug app.no --ast --symbols --json
 norcode update-snapshots
 
 # Oppdater selfhost parser parity-fixtures
-python3 -m norcode update-selfhost-parity-fixtures --suite all
+norcode update-selfhost-parity-fixtures --suite all
 
 # CI-sjekk: feiler hvis snapshots er utdaterte
 norcode update-snapshots --check
@@ -298,7 +333,7 @@ norcode update-snapshots --check
 norcode update-snapshots --check --json
 
 # CI-sjekk: feiler hvis parity-fixtures er utdaterte
-python3 -m norcode update-selfhost-parity-fixtures --suite all --check
+norcode update-selfhost-parity-fixtures --suite all --check
 ```
 
 ### 8. CI-eksempel (GitHub Actions)
@@ -318,26 +353,26 @@ jobs:
         with:
           python-version: "3.12"
       - name: Run Norscode CI checks
-        run: python3 -m norcode ci --check-names --require-selfhost-ready
+        run: norcode ci --check-names --require-selfhost-ready
 ```
 
 Lokal kjøring av samme sekvens:
 
 ```bash
 # Rask CI-løkke (kun M1 parity)
-python3 -m norcode ci --parity-suite m1
+norcode ci --parity-suite m1
 
 # Rask CI-løkke (kun M2 parity)
-python3 -m norcode ci --parity-suite m2
+norcode ci --parity-suite m2
 
 # Full CI-løkke (M1 + M2 + utvidet parity)
-python3 -m norcode ci
+norcode ci
 
 # Full CI + selfhost readiness-gate
-python3 -m norcode ci --require-selfhost-ready
+norcode ci --require-selfhost-ready
 
 # Maskinlesbar output
-python3 -m norcode ci --json
+norcode ci --json
 # Inkluderer workflow_action_check.issue_count for CI-policy funn
 # Inkluderer også steps.total og steps.name_check_enabled
 # Inkluderer workflow_action_check.policy med håndhevede regler
@@ -394,10 +429,10 @@ python3 -m norcode ci --json
 # Inkluderer runtime (python_version, python_major_minor, python_api_version, python_hexversion, python_implementation, python_compiler, python_build, python_cache_tag, python_executable, python_prefix, python_base_prefix, python_is_venv, byteorder, locale, encoding, path_entries, path_separator, env_var_count, stdin_isatty, stdout_isatty, stderr_isatty, shell, term, virtual_env, virtual_env_name, is_ci, is_github_actions, github_actions_run_id, github_actions_run_number, github_actions_run_attempt, github_actions_workflow, github_actions_job, github_actions_ref, github_actions_sha, github_actions_actor, github_actions_event_name, os, arch, platform, hostname, user, uid, gid, pid, ppid, process_group_id, home, tmpdir, cwd, cwd_has_spaces, timezone) for miljøsporing
 
 # Valgfri ekstra-sjekk for navnemigrering i CI
-python3 -m norcode ci --check-names
+norcode ci --check-names
 
 # Valgfri gate som krever selfhost parity progress = ready
-python3 -m norcode ci --require-selfhost-ready
+norcode ci --require-selfhost-ready
 ```
 
 Tolkning av `timings_ratio` (hurtigguide):
@@ -449,29 +484,29 @@ Med `--parity-suite m1` eller `--parity-suite m2` hopper `norcode ci` over stege
 Kjør parser parity separat uten full CI:
 
 ```bash
-python3 -m norcode selfhost-parity --suite m1
-python3 -m norcode selfhost-parity --suite m2
-python3 -m norcode selfhost-parity --suite extended
-python3 -m norcode selfhost-parity --suite all --json
-python3 -m norcode selfhost-parity-progress
-python3 -m norcode selfhost-parity-progress --json
-python3 -m norcode selfhost-parity-progress --require-ready
-python3 -m norcode selfhost-parity-progress --min-coverage 100
-python3 -m norcode selfhost-parity-consistency
-python3 -m norcode selfhost-parity-consistency --scope m2
-python3 -m norcode selfhost-parity-consistency --scope all
-python3 -m norcode selfhost-parity-consistency --json
+norcode selfhost-parity --suite m1
+norcode selfhost-parity --suite m2
+norcode selfhost-parity --suite extended
+norcode selfhost-parity --suite all --json
+norcode selfhost-parity-progress
+norcode selfhost-parity-progress --json
+norcode selfhost-parity-progress --require-ready
+norcode selfhost-parity-progress --min-coverage 100
+norcode selfhost-parity-consistency
+norcode selfhost-parity-consistency --scope m2
+norcode selfhost-parity-consistency --scope all
+norcode selfhost-parity-consistency --json
 
 # Regenerer forventninger for parity-fixtures
-python3 -m norcode update-selfhost-parity-fixtures --suite m1
-python3 -m norcode update-selfhost-parity-fixtures --suite m2
-python3 -m norcode update-selfhost-parity-fixtures --suite extended
-python3 -m norcode update-selfhost-parity-fixtures --suite all --check
-python3 -m norcode update-selfhost-parity-fixtures --suite all --no-sync-m2
+norcode update-selfhost-parity-fixtures --suite m1
+norcode update-selfhost-parity-fixtures --suite m2
+norcode update-selfhost-parity-fixtures --suite extended
+norcode update-selfhost-parity-fixtures --suite all --check
+norcode update-selfhost-parity-fixtures --suite all --no-sync-m2
 
 # Synk M2 deterministisk fra core - M1
-python3 -m norcode sync-selfhost-parity-m2
-python3 -m norcode sync-selfhost-parity-m2 --check
+norcode sync-selfhost-parity-m2
+norcode sync-selfhost-parity-m2 --check
 ```
 
 `selfhost-parity` rapporterer fordeling per suite: antall uttrykk, skript, linje-cases og feil-cases.
@@ -526,12 +561,13 @@ norcode/
 
 ## 🔥 Status
 
-Prosjektet er funksjonelt i god stand per 2026-04-06.
+Prosjektet er funksjonelt i god stand per 2026-04-30.
 
 - `norcode test` er grønt
-- `29/29` tester består
+- `22/22` kjente testsuiter består (`norcode test`)
 - IR snapshot-parity er grønn
 - selfhost-banen dekker nå de nye syntaksene som brukes i testsettet
+- map-literals (`{ "nøkkel": verdi }`) og tomme map-starters fungerer i både parser og selfhost-kjede
 
 ### Selv-hosting (nytt)
 
@@ -573,12 +609,12 @@ For daglig bruk er det viktigste at:
 - selfhost-parity er i synk med testene som faktisk ligger i repoet
 - nye språkfunksjoner bør føres gjennom parser, semantic, codegen og selfhost-bro samtidig
 
-For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](/Users/jansteinarsaetre/Documents/VS%20code/norsklang_6i/docs/LEGACY_POLICY.md).
+For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](docs/LEGACY_POLICY.md).
 
 ## Lisens
 
 Dette prosjektet er lisensiert under `Apache-2.0`.
-Se [LICENSE](/Users/jansteinarsaetre/Documents/language_handoff/projects/language/LICENSE).
+Se [LICENSE](LICENSE).
 
 ## 👨‍💻 Laget av
 

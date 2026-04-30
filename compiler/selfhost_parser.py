@@ -465,12 +465,30 @@ class Parser:
         tok = self.peek_token()
         if tok is None:
             raise ParseError('Uventet slutt i uttrykk')
-        if tok.value in {'(', '{'}:
-            closer = ')' if tok.value == '(' else '}'
+        if tok.value == '(':
             self.advance()
             expr = self.parse_expression()
-            self.expect(closer)
+            self.expect(')')
             return expr
+        if tok.value == '{':
+            self.advance()
+            if self.peek() == '}':
+                self.advance()
+                return {'node': 'MapLiteral', 'items': []}
+            entries: list[dict[str, dict]] = []
+            while True:
+                key = self.parse_expression()
+                if not self.match(':'):
+                    raise self.error("Forventet ':' i map-literal")
+                value = self.parse_expression()
+                entries.append({'key': key, 'value': value})
+                if self.match(','):
+                    if self.peek() == '}':
+                        raise self.error("Forventet nøkkel:verdi i map-literal etter ','")
+                    continue
+                break
+            self.expect('}')
+            return {'node': 'MapLiteral', 'items': entries}
         if tok.value == '[':
             self.advance()
             if self.peek() == ']':

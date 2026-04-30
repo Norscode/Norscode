@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import datetime as dt
 import difflib
@@ -14,7 +16,6 @@ import tarfile
 import tempfile
 import time
 import platform
-import tomllib
 import urllib.parse
 import urllib.request
 import uuid
@@ -27,6 +28,7 @@ from compiler.loader import ModuleLoader
 from compiler.parser import Parser
 from compiler.semantic import SemanticAnalyzer
 from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
+from compiler.toml_compat import loads as toml_loads
 
 
 IR_OPS_WITH_ARG = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
@@ -165,7 +167,7 @@ def _resolve_package_dir(package_path: str) -> tuple[Path, Path]:
 
 def _load_toml(path: Path) -> dict:
     try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
+        return toml_loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise RuntimeError(f"Kunne ikke lese TOML {path}: {exc}") from exc
 
@@ -372,7 +374,7 @@ def _parse_remote_registry_text(source_name: str, text: str) -> dict[str, dict]:
         data = json.loads(text)
     except Exception:
         try:
-            data = tomllib.loads(text)
+            data = toml_loads(text)
         except Exception as exc:
             raise RuntimeError(f"Ugyldig registry-format i {source_name}: {exc}") from exc
 
@@ -937,8 +939,15 @@ def generate_lockfile(check_only: bool = False):
         else:
             dep_path = _resolve_path_dependency(project_dir, dep_value)
             entry["kind"] = "path"
+            try:
+                if dep_path.is_absolute() and dep_path.is_relative_to(project_dir):
+                    resolved_path = dep_path.relative_to(project_dir)
+                else:
+                    resolved_path = dep_path
+            except ValueError:
+                resolved_path = dep_path
             resolved = {
-                "path": str(dep_path),
+                "path": str(resolved_path),
                 "exists": dep_path.exists(),
             }
             if dep_path.exists() and dep_path.is_dir():
@@ -1272,6 +1281,8 @@ def verify_lockfile():
                 continue
 
             path = Path(path_str)
+            if not path.is_absolute():
+                path = lock_path.parent / path
             if not path.exists():
                 results.append({"name": name, "status": f"mangler path: {path}"})
                 ok = False
@@ -3133,7 +3144,7 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
                     "type": "missing_norcode_ci_command",
                     "rule": "require_norcode_ci_command",
                     "found": "mangler run-linje med 'norcode ci'",
-                    "expected": "legg til run: python3 -m norcode ci --check-names --require-selfhost-ready",
+                    "expected": "legg til run: norcode ci --check-names --require-selfhost-ready",
                 }
             )
 
@@ -3165,7 +3176,7 @@ def run_ci_pipeline(
         raise RuntimeError(f"Ugyldig parity-suite for CI: {parity_suite}")
     run_m2_sync_check = parity_suite in {"m2", "all"}
     pipeline_started = time.perf_counter()
-    started_at_utc = dt.datetime.now(dt.UTC).isoformat()
+    started_at_utc = dt.datetime.now(dt.timezone.utc).isoformat()
     started_at_epoch_ms = int(time.time() * 1000)
     source_revision = get_current_git_revision()
     source_branch = get_current_git_branch()
@@ -3356,7 +3367,7 @@ def run_ci_pipeline(
     if fixture_check["updated"] > 0:
         raise RuntimeError(
             f"Selfhost parity-fixtures er utdaterte ({fixture_check['updated']} avvik). "
-            f"Kjør: python3 -m norcode update-selfhost-parity-fixtures --suite {fixture_suite}"
+            f"Kjør: norcode update-selfhost-parity-fixtures --suite {fixture_suite}"
         )
     if not json_output:
         print(
@@ -3536,7 +3547,7 @@ def run_ci_pipeline(
         if not payload["selfhost_m2_sync_check"]["ok"]:
             raise RuntimeError(
                 "Selfhost M2 sync-feil: M2-fixture er ute av synk med core minus M1. "
-                "Kjør: python3 -m norcode sync-selfhost-parity-m2"
+                "Kjør: norcode sync-selfhost-parity-m2"
             )
         if not json_output:
             print("OK")
@@ -3681,7 +3692,7 @@ def run_ci_pipeline(
     payload["timings_ratio"]["overhead_within_medium"] = (
         overhead_share <= payload["timings_ratio"]["overhead_policy"]["medium_max"]
     )
-    payload["finished_at_utc"] = dt.datetime.now(dt.UTC).isoformat()
+    payload["finished_at_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
     payload["finished_at_epoch_ms"] = int(time.time() * 1000)
     payload["timings_ms"]["wallclock_total"] = payload["finished_at_epoch_ms"] - payload["started_at_epoch_ms"]
     payload["timings_s"]["wallclock_total"] = round(payload["timings_ms"]["wallclock_total"] / 1000.0, 3)
