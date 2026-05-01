@@ -75,6 +75,11 @@ class SemanticAnalyzer:
             "web_auth_header": FunctionSymbol("web_auth_header", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_bearer_token": FunctionSymbol("web_bearer_token", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_require_bearer": FunctionSymbol("web_require_bearer", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
+            "web_role": FunctionSymbol("web_role", [TYPE_MAP_TEXT], TYPE_TEXT, True),
+            "web_has_role": FunctionSymbol("web_has_role", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
+            "web_require_role": FunctionSymbol("web_require_role", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
+            "web_has_permission": FunctionSymbol("web_has_permission", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
+            "web_require_permission": FunctionSymbol("web_require_permission", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_response_builder": FunctionSymbol("web_response_builder", [TYPE_INT, TYPE_MAP_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_response_status": FunctionSymbol("web_response_status", [TYPE_MAP_TEXT], TYPE_INT, True),
             "web_response_headers": FunctionSymbol("web_response_headers", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
@@ -1144,6 +1149,23 @@ class SemanticAnalyzer:
                 token_type = self.check_expr(expr.args[1], scope, field_schemas)
                 if not self.is_map_type(ctx_type) or token_type != TYPE_TEXT:
                     self.error("web.require_bearer krever ordbok og tekst")
+                return TYPE_BOOL
+
+            if full_name in {"web.role", "std.web.role"}:
+                if len(expr.args) != 1:
+                    self.error("web.role forventer 1 argument")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if not self.is_map_type(ctx_type):
+                    self.error("web.role krever ordbok")
+                return TYPE_TEXT
+
+            if full_name in {"web.has_role", "std.web.has_role", "web.require_role", "std.web.require_role", "web.has_permission", "std.web.has_permission", "web.require_permission", "std.web.require_permission"}:
+                if len(expr.args) != 2:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 2 argumenter")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                value_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if not self.is_map_type(ctx_type) or value_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever ordbok og tekst")
                 return TYPE_BOOL
 
             if full_name in {"web.handle_request", "std.web.handle_request"}:

@@ -3220,6 +3220,93 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_first_csv_value(const char *text) {")
+        self.indent += 1
+        self.emit("if (!text || !*text) { return nl_strdup(\"\"); }")
+        self.emit("char *copy = nl_strdup(text);")
+        self.emit("char *token = strtok(copy, \",;\");")
+        self.emit("while (token) {")
+        self.indent += 1
+        self.emit("while (*token && isspace((unsigned char)*token)) { token++; }")
+        self.emit("char *end = token + strlen(token);")
+        self.emit("while (end > token && isspace((unsigned char)*(end - 1))) { *(--end) = '\\0'; }")
+        self.emit("if (*token) {")
+        self.indent += 1
+        self.emit("char *result = nl_strdup(token);")
+        self.emit("free(copy);")
+        self.emit("return result;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("token = strtok(NULL, \",;\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("free(copy);")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_csv_contains_value(const char *text, const char *expected) {")
+        self.indent += 1
+        self.emit("if (!text || !expected || !*expected) { return 0; }")
+        self.emit("char *copy = nl_strdup(text);")
+        self.emit("char *token = strtok(copy, \",;\");")
+        self.emit("while (token) {")
+        self.indent += 1
+        self.emit("while (*token && isspace((unsigned char)*token)) { token++; }")
+        self.emit("char *end = token + strlen(token);")
+        self.emit("while (end > token && isspace((unsigned char)*(end - 1))) { *(--end) = '\\0'; }")
+        self.emit("if (strcmp(token, expected) == 0) {")
+        self.indent += 1
+        self.emit("free(copy);")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("token = strtok(NULL, \",;\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("free(copy);")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_role(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("nl_map_text *headers = nl_web_request_headers(ctx);")
+        self.emit("char *value = nl_map_text_get(headers, \"x-role\");")
+        self.emit("if (value && *value) { return nl_web_first_csv_value(value); }")
+        self.emit("value = nl_map_text_get(headers, \"x-user-role\");")
+        self.emit("if (value && *value) { return nl_web_first_csv_value(value); }")
+        self.emit("value = nl_map_text_get(headers, \"x-roles\");")
+        self.emit("if (value && *value) { return nl_web_first_csv_value(value); }")
+        self.emit("value = nl_map_text_get(headers, \"x-user-roles\");")
+        self.emit("if (value && *value) { return nl_web_first_csv_value(value); }")
+        self.emit("value = nl_map_text_get(headers, \"role\");")
+        self.emit("if (value && *value) { return nl_web_first_csv_value(value); }")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_has_role(nl_map_text *ctx, const char *expected) {")
+        self.indent += 1
+        self.emit("if (!expected || !*expected) { return 0; }")
+        self.emit("nl_map_text *headers = nl_web_request_headers(ctx);")
+        self.emit("return nl_web_csv_contains_value(nl_map_text_get(headers, \"x-role\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-user-role\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-roles\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-user-roles\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"role\"), expected);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_has_permission(nl_map_text *ctx, const char *expected) {")
+        self.indent += 1
+        self.emit("if (!expected || !*expected) { return 0; }")
+        self.emit("nl_map_text *headers = nl_web_request_headers(ctx);")
+        self.emit("return nl_web_csv_contains_value(nl_map_text_get(headers, \"x-permission\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-permissions\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-right\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-rights\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-scope\"), expected) || nl_web_csv_contains_value(nl_map_text_get(headers, \"x-scopes\"), expected);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_response_builder(int status, nl_map_text *headers, const char *body) {")
         self.indent += 1
         self.emit("nl_map_text *result = nl_map_text_new();")
@@ -4420,6 +4507,25 @@ class CGenerator:
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_require_bearer({ctx_code}, {key_code})", TYPE_BOOL
+                if node.func_name == "role":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    return f"nl_web_role({ctx_code})", TYPE_TEXT
+                if node.func_name == "has_role":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_has_role({ctx_code}, {key_code})", TYPE_BOOL
+                if node.func_name == "require_role":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_has_role({ctx_code}, {key_code})", TYPE_BOOL
+                if node.func_name == "has_permission":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_has_permission({ctx_code}, {key_code})", TYPE_BOOL
+                if node.func_name == "require_permission":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_has_permission({ctx_code}, {key_code})", TYPE_BOOL
                 if node.func_name == "request_json":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_request_json({ctx_code})", TYPE_MAP_TEXT

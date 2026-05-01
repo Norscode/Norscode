@@ -105,6 +105,7 @@ For subroutere og prefiksbaserte route-moduler, se [examples/web_subrouter.no](/
 For route-guards og policy-hooks, se [examples/web_guard.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_guard.no).
 For HEAD, OPTIONS og metodeforhandling, se [examples/web_methods.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_methods.no).
 For bearer-token auth med guards, se [examples/web_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_auth.no).
+For rolle- og rettighetsmodell, se [examples/web_roles.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_roles.no).
 
 For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
 

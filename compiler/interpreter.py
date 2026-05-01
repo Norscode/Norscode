@@ -632,6 +632,40 @@ class Interpreter:
             return auth[7:].strip()
         return ""
 
+    def _web_csv_values(self, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            values = [str(item).strip() for item in value]
+        else:
+            values = [part.strip() for part in re.split(r"[;,]", str(value))]
+        return [item for item in values if item]
+
+    def _web_header_csv_values(self, ctx: Any, *keys: str) -> list[str]:
+        if not isinstance(ctx, dict):
+            return []
+        headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+        values: list[str] = []
+        for key in keys:
+            values.extend(self._web_csv_values(headers.get(key, "")))
+        return values
+
+    def _web_role(self, ctx: Any) -> str:
+        roles = self._web_header_csv_values(ctx, "x-role", "x-user-role", "x-roles", "x-user-roles", "role")
+        return roles[0] if roles else ""
+
+    def _web_has_role(self, ctx: Any, expected: Any) -> bool:
+        role = str(expected)
+        if not role:
+            return False
+        return role in self._web_header_csv_values(ctx, "x-role", "x-user-role", "x-roles", "x-user-roles", "role")
+
+    def _web_has_permission(self, ctx: Any, expected: Any) -> bool:
+        permission = str(expected)
+        if not permission:
+            return False
+        return permission in self._web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
+
     def _make_web_request_context(self, method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
         self._request_counter += 1
         return {
@@ -1591,6 +1625,26 @@ class Interpreter:
                 if len(values) < 2:
                     return False
                 return self._extract_bearer_token(values[0]) == str(values[1])
+            if func_name == "role":
+                if not values:
+                    return ""
+                return self._web_role(values[0])
+            if func_name == "has_role":
+                if len(values) < 2:
+                    return False
+                return self._web_has_role(values[0], values[1])
+            if func_name == "require_role":
+                if len(values) < 2:
+                    return False
+                return self._web_has_role(values[0], values[1])
+            if func_name == "has_permission":
+                if len(values) < 2:
+                    return False
+                return self._web_has_permission(values[0], values[1])
+            if func_name == "require_permission":
+                if len(values) < 2:
+                    return False
+                return self._web_has_permission(values[0], values[1])
             if func_name == "response_builder":
                 if len(values) < 3:
                     return self._make_web_response(200, {}, "")

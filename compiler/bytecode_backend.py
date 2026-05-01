@@ -313,6 +313,45 @@ def _extract_bearer_token(ctx: Any) -> str:
     return ""
 
 
+def _web_csv_values(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        values = [str(item).strip() for item in value]
+    else:
+        values = [part.strip() for part in re.split(r"[;,]", str(value))]
+    return [item for item in values if item]
+
+
+def _web_header_csv_values(ctx: Any, *keys: str) -> list[str]:
+    if not isinstance(ctx, dict):
+        return []
+    headers = _decode_json_text_map(ctx.get("headers", ""))
+    values: list[str] = []
+    for key in keys:
+        values.extend(_web_csv_values(headers.get(key, "")))
+    return values
+
+
+def _web_role(ctx: Any) -> str:
+    roles = _web_header_csv_values(ctx, "x-role", "x-user-role", "x-roles", "x-user-roles", "role")
+    return roles[0] if roles else ""
+
+
+def _web_has_role(ctx: Any, expected: Any) -> bool:
+    role = str(expected)
+    if not role:
+        return False
+    return role in _web_header_csv_values(ctx, "x-role", "x-user-role", "x-roles", "x-user-roles", "role")
+
+
+def _web_has_permission(ctx: Any, expected: Any) -> bool:
+    permission = str(expected)
+    if not permission:
+        return False
+    return permission in _web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
+
+
 def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
     _make_web_request_context.counter += 1
     return {
@@ -2337,6 +2376,18 @@ class BytecodeVM:
             if len(args) < 2:
                 return False
             return _extract_bearer_token(args[0]) == str(args[1])
+        if name in {"web.role", "std.web.role"}:
+            if not args:
+                return ""
+            return _web_role(args[0])
+        if name in {"web.has_role", "std.web.has_role", "web.require_role", "std.web.require_role"}:
+            if len(args) < 2:
+                return False
+            return _web_has_role(args[0], args[1])
+        if name in {"web.has_permission", "std.web.has_permission", "web.require_permission", "std.web.require_permission"}:
+            if len(args) < 2:
+                return False
+            return _web_has_permission(args[0], args[1])
         if name in {"web.response_builder", "std.web.response_builder"}:
             if len(args) < 3:
                 return _make_web_response(0, {}, "")
