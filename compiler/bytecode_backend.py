@@ -248,6 +248,10 @@ def _combine_web_route_prefix(prefix: Any, spec: Any) -> str:
     return f"{method} {combined_path}".strip() if method else combined_path
 
 
+def _guard_response() -> dict[str, Any]:
+    return _make_web_response(403, {"content-type": "application/json"}, json.dumps({"error": "Forbudt"}, ensure_ascii=False))
+
+
 def _match_web_route_spec(spec: Any, method: Any, path: Any) -> dict[str, str] | None:
     route_method, route_path = _split_web_route_spec(spec)
     request_method = _normalize_web_method(method)
@@ -623,6 +627,7 @@ class BytecodeCompiler:
     def _collect_web_annotations(self, program: ProgramNode) -> tuple[list[dict[str, Any]], dict[str, str], list[str], list[str], list[str], list[str], list[str]]:
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
+        guard_providers: dict[str, str] = {}
         request_middlewares: list[str] = []
         response_middlewares: list[str] = []
         error_middlewares: list[str] = []
@@ -635,7 +640,9 @@ class BytecodeCompiler:
             spec = None
             route_prefix = ""
             deps: list[str] = []
+            guards: list[str] = []
             provided: list[str] = []
+            route_guard = False
             for stmt in statements:
                 if not isinstance(stmt, ExprStmtNode):
                     break
@@ -669,22 +676,31 @@ class BytecodeCompiler:
                 if expr.func_name in {"router", "subrouter"} and not route_prefix:
                     route_prefix = expr.args[0].value
                     continue
+                if expr.func_name == "guard":
+                    route_guard = True
+                    continue
                 if expr.func_name == "use_dependency":
                     deps.append(expr.args[0].value)
+                    continue
+                if expr.func_name == "use_guard":
+                    guards.append(expr.args[0].value)
                     continue
                 if expr.func_name == "dependency":
                     provided.append(expr.args[0].value)
                     continue
                 break
+            if route_guard:
+                guard_providers[fn.name] = self.function_key(fn)
             if spec is not None:
                 combined_spec = _combine_web_route_prefix(route_prefix, spec)
                 route_docs = self._route_docs_from_function(fn, combined_spec)
                 route_docs["deps"] = list(deps)
+                route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = self.function_key(fn)
-        return handlers, providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
+        return handlers, providers, guard_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
 
     def _run_named_hook(self, name: str) -> Any:
         if not name:
@@ -738,7 +754,7 @@ class BytecodeCompiler:
     def compile_program(self, program: ProgramNode) -> dict[str, Any]:
         functions = {}
         imports = []
-        route_handlers, dependency_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks = self._collect_web_annotations(program)
+        route_handlers, dependency_providers, guard_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks = self._collect_web_annotations(program)
         for imp in getattr(program, "imports", []):
             imports.append({"module": imp.module_name, "alias": imp.alias})
         for fn in getattr(program, "functions", []):
@@ -755,6 +771,7 @@ class BytecodeCompiler:
             "imports": imports,
             "route_handlers": route_handlers,
             "dependency_providers": dependency_providers,
+            "guard_providers": guard_providers,
             "request_middlewares": request_middlewares,
             "response_middlewares": response_middlewares,
             "error_middlewares": error_middlewares,
@@ -1371,6 +1388,7 @@ class BytecodeVM:
         self.functions = program.get("functions", {})
         self.route_handlers = program.get("route_handlers", [])
         self.dependency_providers = program.get("dependency_providers", {})
+        self.guard_providers = program.get("guard_providers", {})
         self.request_middlewares = program.get("request_middlewares", [])
         self.response_middlewares = program.get("response_middlewares", [])
         self.error_middlewares = program.get("error_middlewares", [])
@@ -2354,11 +2372,17 @@ class BytecodeVM:
             if not args:
                 return ""
             return str(args[0])
+        if name in {"web.guard", "std.web.guard"}:
+            return "guard"
         if name in {"web.dependency", "std.web.dependency"}:
             if not args:
                 return ""
             return str(args[0])
         if name in {"web.use_dependency", "std.web.use_dependency"}:
+            if not args:
+                return ""
+            return str(args[0])
+        if name in {"web.use_guard", "std.web.use_guard"}:
             if not args:
                 return ""
             return str(args[0])
@@ -2399,6 +2423,11 @@ class BytecodeVM:
                 handler, params = found
                 ctx = _make_route_context(current_ctx, params)
                 deps = [self._resolve_dependency_value(ctx, dep_name) for dep_name in handler.get("deps", [])]
+                for guard_name in handler.get("guards", []):
+                    guard_fn = self.guard_providers.get(guard_name, guard_name)
+                    guard_result = self.call_function(guard_fn, [ctx])
+                    if not bool(guard_result):
+                        return self._apply_error_middlewares(_guard_response())
                 result = self.call_function(handler["function"], [ctx] + deps)
                 if isinstance(result, dict):
                     return self._apply_response_middlewares(result)

@@ -91,6 +91,7 @@ class Interpreter:
         self.call_stack: list[str] = []
         self.route_handlers: list[dict[str, Any]] = []
         self.dependency_providers: dict[str, str] = {}
+        self.guard_providers: dict[str, str] = {}
         self.request_middlewares: list[str] = []
         self.response_middlewares: list[str] = []
         self.error_middlewares: list[str] = []
@@ -719,6 +720,7 @@ class Interpreter:
     def _collect_web_annotations(self, program: ProgramNode):
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
+        guard_providers: dict[str, str] = {}
         request_middlewares: list[str] = []
         response_middlewares: list[str] = []
         error_middlewares: list[str] = []
@@ -731,7 +733,9 @@ class Interpreter:
             spec = None
             route_prefix = ""
             deps: list[str] = []
+            guards: list[str] = []
             provided: list[str] = []
+            route_guard = False
             for stmt in statements:
                 if not isinstance(stmt, ExprStmtNode):
                     break
@@ -754,9 +758,9 @@ class Interpreter:
                         if expr.func_name == "startup_hook":
                             startup_hooks.append(fn.name)
                             continue
-                        if expr.func_name == "shutdown_hook":
-                            shutdown_hooks.append(fn.name)
-                            continue
+                    if expr.func_name == "shutdown_hook":
+                        shutdown_hooks.append(fn.name)
+                        continue
                     break
                 if expr.func_name == "route" and spec is None:
                     spec = expr.args[0].value
@@ -764,22 +768,31 @@ class Interpreter:
                 if expr.func_name in {"router", "subrouter"} and not route_prefix:
                     route_prefix = expr.args[0].value
                     continue
+                if expr.func_name == "guard":
+                    route_guard = True
+                    continue
                 if expr.func_name == "use_dependency":
                     deps.append(expr.args[0].value)
+                    continue
+                if expr.func_name == "use_guard":
+                    guards.append(expr.args[0].value)
                     continue
                 if expr.func_name == "dependency":
                     provided.append(expr.args[0].value)
                     continue
                 break
+            if route_guard:
+                guard_providers[fn.name] = fn.name
             if spec is not None:
                 combined_spec = self._combine_web_route_prefix(route_prefix, spec)
                 route_docs = self._route_docs_from_function(fn, combined_spec)
                 route_docs["deps"] = list(deps)
+                route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = fn.name
-        return handlers, providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
+        return handlers, providers, guard_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
 
     def _dependency_map(self, ctx: Any) -> dict[str, str]:
         if not isinstance(ctx, dict):
@@ -860,6 +873,7 @@ class Interpreter:
         (
             self.route_handlers,
             self.dependency_providers,
+            self.guard_providers,
             self.request_middlewares,
             self.response_middlewares,
             self.error_middlewares,
@@ -1602,11 +1616,17 @@ class Interpreter:
                 if not values:
                     return ""
                 return str(values[0])
+            if func_name == "guard":
+                return "guard"
             if func_name == "dependency":
                 if not values:
                     return ""
                 return str(values[0])
             if func_name == "use_dependency":
+                if not values:
+                    return ""
+                return str(values[0])
+            if func_name == "use_guard":
                 if not values:
                     return ""
                 return str(values[0])
@@ -1636,6 +1656,12 @@ class Interpreter:
                     deps = []
                     for dep_name in handler.get("deps", []):
                         deps.append(self._resolve_dependency_value(ctx, dep_name))
+                    for guard_name in handler.get("guards", []):
+                        guard_fn = self.guard_providers.get(guard_name, guard_name)
+                        guard_result = self.call_user_function(guard_fn, [ctx])
+                        if not bool(guard_result):
+                            response = self._make_web_response(403, {"content-type": "application/json"}, self.json_serialize_value({"error": "Forbudt"}))
+                            return self._apply_error_middlewares(response)
                     result = self.call_user_function(handler["function"], [ctx] + deps)
                     if isinstance(result, dict):
                         return self._apply_response_middlewares(result)

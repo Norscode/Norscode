@@ -37,6 +37,7 @@ class CGenerator:
         self.emitted_lambda_defs: set[str] = set()
         self.route_handlers: list[dict[str, Any]] = []
         self.dependency_providers: list[dict[str, Any]] = []
+        self.guard_providers: list[dict[str, Any]] = []
         self.request_middlewares: list[str] = []
         self.response_middlewares: list[str] = []
         self.error_middlewares: list[str] = []
@@ -296,16 +297,18 @@ class CGenerator:
     def _web_annotations_from_function(self, fn):
         statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
         if not statements:
-            return None, [], [], False, False, False, False, False
+            return None, [], [], [], False, False, False, False, False
         spec = None
         route_prefix = ""
         deps: list[str] = []
+        guards: list[str] = []
         provided: list[str] = []
         request_middleware = False
         response_middleware = False
         error_middleware = False
         startup_hook = False
         shutdown_hook = False
+        route_guard = False
         for stmt in statements:
             if not isinstance(stmt, ExprStmtNode):
                 break
@@ -339,8 +342,14 @@ class CGenerator:
             if expr.func_name in {"router", "subrouter"} and not route_prefix:
                 route_prefix = expr.args[0].value
                 continue
+            if expr.func_name == "guard":
+                route_guard = True
+                continue
             if expr.func_name == "use_dependency":
                 deps.append(expr.args[0].value)
+                continue
+            if expr.func_name == "use_guard":
+                guards.append(expr.args[0].value)
                 continue
             if expr.func_name == "dependency":
                 provided.append(expr.args[0].value)
@@ -348,18 +357,21 @@ class CGenerator:
             break
         if route_prefix:
             setattr(fn, "route_prefix", route_prefix)
-        return spec, deps, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook
+        if route_guard:
+            setattr(fn, "route_guard", True)
+        return spec, deps, guards, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook
 
     def _collect_route_handlers(self, tree):
         handlers = []
         providers = []
+        guard_providers = []
         request_middlewares = []
         response_middlewares = []
         error_middlewares = []
         startup_hooks = []
         shutdown_hooks = []
         for fn in getattr(tree, "functions", []):
-            spec, deps, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook = self._web_annotations_from_function(fn)
+            spec, deps, guards, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook = self._web_annotations_from_function(fn)
             if spec is None:
                 spec = None
             if spec is not None:
@@ -367,6 +379,7 @@ class CGenerator:
                 combined_spec = self._combine_web_route_prefix(route_prefix, spec)
                 route_docs = self._route_docs_from_function(fn, combined_spec)
                 route_docs["deps"] = list(deps)
+                route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
                 handlers.append(route_docs)
             for dep_name in provided:
@@ -376,6 +389,12 @@ class CGenerator:
                     "params": len(getattr(fn, "params", []) or []),
                 })
             function_name = self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None))
+            if getattr(fn, "route_guard", False):
+                guard_providers.append({
+                    "name": fn.name,
+                    "function": function_name,
+                    "params": len(getattr(fn, "params", []) or []),
+                })
             if request_middleware:
                 request_middlewares.append(function_name)
             if response_middleware:
@@ -391,7 +410,8 @@ class CGenerator:
         self.error_middlewares = error_middlewares
         self.startup_hooks = startup_hooks
         self.shutdown_hooks = shutdown_hooks
-        return handlers, providers
+        self.guard_providers = guard_providers
+        return handlers, providers, guard_providers
 
     def emit_web_route_dispatcher(self):
         self.emit("static int nl_web_route_match_params(const char *spec, const char *method, const char *path, nl_map_text *params) {")
@@ -445,6 +465,26 @@ class CGenerator:
             self.indent -= 1
             self.emit("}")
         self.emit("return nl_map_text_new();")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_guard_passed(const char *name, nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("if (!name) { return 1; }")
+        for provider in self.guard_providers:
+            guard_name = str(provider["name"]).replace("\\", "\\\\").replace('"', '\\"')
+            guard_fn = provider["function"]
+            if provider["params"] > 0:
+                call_expr = f"{guard_fn}(ctx)"
+            else:
+                call_expr = f"{guard_fn}()"
+            self.emit(f"if (strcmp(name, \"{guard_name}\") == 0) {{")
+            self.indent += 1
+            self.emit(f"return {call_expr} ? 1 : 0;")
+            self.indent -= 1
+            self.emit("}")
+        self.emit("return 1;")
         self.indent -= 1
         self.emit("}")
         self.emit()
@@ -534,6 +574,14 @@ class CGenerator:
             for dep_name in handler.get("deps", []):
                 dep_escaped = str(dep_name).replace("\\", "\\\\").replace('"', '\\"')
                 dep_args.append(f'nl_web_request_dependency(route_ctx, "{dep_escaped}")')
+            for guard_name in handler.get("guards", []):
+                guard_escaped = str(guard_name).replace("\\", "\\\\").replace('"', '\\"')
+                self.emit(f"if (!nl_web_guard_passed(\"{guard_escaped}\", route_ctx)) {{")
+                self.indent += 1
+                self.emit("result = nl_web_response_error(403, \"Forbudt\");")
+                self.emit("goto nl_web_handle_request_done;")
+                self.indent -= 1
+                self.emit("}")
             self.emit(f"result = {handler['function']}({', '.join(dep_args)});")
             self.emit("goto nl_web_handle_request_done;")
             self.indent -= 1
@@ -897,7 +945,7 @@ class CGenerator:
 
     def generate(self, tree):
         entry_function = None
-        self.route_handlers, self.dependency_providers = self._collect_route_handlers(tree)
+        self.route_handlers, self.dependency_providers, self.guard_providers = self._collect_route_handlers(tree)
         self.openapi_paths_json = self._render_openapi_paths_json()
         for fn in tree.functions:
             if fn.name == "start" and (getattr(fn, "module_name", None) in (None, "__main__")):
@@ -4345,10 +4393,15 @@ class CGenerator:
                 if node.func_name in {"router", "subrouter"}:
                     prefix_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return prefix_code, TYPE_TEXT
+                if node.func_name == "guard":
+                    return "nl_strdup(\"guard\")", TYPE_TEXT
                 if node.func_name == "dependency":
                     name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return name_code, TYPE_TEXT
                 if node.func_name == "use_dependency":
+                    name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return name_code, TYPE_TEXT
+                if node.func_name == "use_guard":
                     name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return name_code, TYPE_TEXT
                 if node.func_name == "request_dependency":

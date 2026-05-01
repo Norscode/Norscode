@@ -102,6 +102,7 @@ Se [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/langua
 
 For route-handlers i FastAPI-stil, se også [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no).
 For subroutere og prefiksbaserte route-moduler, se [examples/web_subrouter.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_subrouter.no).
+For route-guards og policy-hooks, se [examples/web_guard.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_guard.no).
 
 For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
 

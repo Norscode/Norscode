@@ -86,8 +86,10 @@ class SemanticAnalyzer:
             "web_route": FunctionSymbol("web_route", [TYPE_TEXT], TYPE_TEXT, True),
             "web_router": FunctionSymbol("web_router", [TYPE_TEXT], TYPE_TEXT, True),
             "web_subrouter": FunctionSymbol("web_subrouter", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_guard": FunctionSymbol("web_guard", [], TYPE_TEXT, True),
             "web_dependency": FunctionSymbol("web_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_use_dependency": FunctionSymbol("web_use_dependency", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_use_guard": FunctionSymbol("web_use_guard", [TYPE_TEXT], TYPE_TEXT, True),
             "web_request_middleware": FunctionSymbol("web_request_middleware", [], TYPE_TEXT, True),
             "web_response_middleware": FunctionSymbol("web_response_middleware", [], TYPE_TEXT, True),
             "web_error_middleware": FunctionSymbol("web_error_middleware", [], TYPE_TEXT, True),
@@ -1081,6 +1083,13 @@ class SemanticAnalyzer:
                     setattr(self.current_function, "route_prefix", expr.args[0].value)
                 return TYPE_TEXT
 
+            if full_name in {"web.guard", "std.web.guard"}:
+                if expr.args:
+                    self.error("web.guard forventer 0 argumenter")
+                if self.current_function is not None:
+                    setattr(self.current_function, "route_guard", True)
+                return TYPE_TEXT
+
             if full_name in {"web.dependency", "std.web.dependency"}:
                 if len(expr.args) != 1:
                     self.error("web.dependency forventer 1 argument")
@@ -1103,6 +1112,18 @@ class SemanticAnalyzer:
                     deps = list(getattr(self.current_function, "dependency_names", []) or [])
                     deps.append(expr.args[0].value)
                     setattr(self.current_function, "dependency_names", deps)
+                return TYPE_TEXT
+
+            if full_name in {"web.use_guard", "std.web.use_guard"}:
+                if len(expr.args) != 1:
+                    self.error("web.use_guard forventer 1 argument")
+                guard_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if guard_type != TYPE_TEXT:
+                    self.error("web.use_guard krever tekst")
+                if self.current_function is not None and isinstance(expr.args[0], StringNode):
+                    guards = list(getattr(self.current_function, "guard_names", []) or [])
+                    guards.append(expr.args[0].value)
+                    setattr(self.current_function, "guard_names", guards)
                 return TYPE_TEXT
 
             if full_name in {"web.handle_request", "std.web.handle_request"}:
