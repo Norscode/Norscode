@@ -64,6 +64,20 @@ norcode commands
 
 Ny bruker? Se [docs/START_HER.md](docs/START_HER.md) for den raskeste veien inn.
 
+På Windows er normal installasjonsflyt:
+
+```powershell
+py -m pip install norcode
+```
+
+For en lokal checkout på Windows kan du bruke:
+
+```powershell
+py -m pip install .
+```
+
+Se også [docs/WINDOWS.md](docs/WINDOWS.md) for egen Windows-guide.
+
 ### 0b. Bygg og publiser pakke
 
 ```bash
@@ -103,6 +117,7 @@ bash tools/install-release.sh release-artifacts/norscode-language-*.tar.gz
 Dette installerer pakken som en versjonert release under `~/.local/share/norscode/`, peker `current` til aktiv versjon og lager symlinker til `nc`, `nor`, `nl` og `bootstrap` i `~/.local/share/norscode/bin/`.
 Kjør samme kommando med en nyere releasepakke for å oppgradere.
 Rollback er bare å peke `current` tilbake til en tidligere versjon i `~/.local/share/norscode/releases/`, eller å installere en eldre releasepakke på nytt.
+Dette er Unix-flyten; på Windows bruker du `py -m pip install norcode` eller `py -m pip install .`.
 
 Når pakken er bygget:
 
