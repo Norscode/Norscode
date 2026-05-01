@@ -662,6 +662,54 @@ For mer realistiske flyter, se:
 - `norcode serve examples/web_routes.no --cors-origin https://app.example.com` for enkel CORS-konfigurasjon mot browser-klienter
 - [examples/web_cors.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_cors.no) for standard CORS i browser-klienter
 - [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no) for sammensatt språkbruk
+- [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md) for planen mot en full frontend-flate
+- [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_MODEL.md) for valgt frontend-modell
+- [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_STRUCTURE.md) for foreslått prosjektstruktur
+- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_LAYOUT_CONTRACT.md) for enkel side-/layout-kontrakt
+- [docs/FRONTEND_ASSETS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ASSETS.md) for statiske frontend-ressurser
+- [docs/FRONTEND_DEV_FLOW.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_DEV_FLOW.md) for enkel frontend-dev-flyt
+- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_COMPONENT_MODEL.md) for komponentmodellen
+- [docs/FRONTEND_SLOTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_SLOTS.md) for slots og barn-innhold
+- [docs/FRONTEND_PROPS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_PROPS.md) for komponent-props
+- [docs/FRONTEND_LIST_TABLE.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_LIST_TABLE.md) for liste- og tabellkomponenter
+- [docs/FRONTEND_PARTIALS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_PARTIALS.md) for layout-gjenbruk og partials
+- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_NAVIGATION_MODEL.md) for navigasjonsmodellen
+- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CLIENT_ROUTING.md) for client-side routing
+- [docs/FRONTEND_ROUTE_PARAMS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROUTE_PARAMS.md) for route- og query-parametre
+- [docs/FRONTEND_ACTIVE_NAV.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ACTIVE_NAV.md) for aktiv lenke-/menytilstand
+- [docs/FRONTEND_SERVER_FALLBACK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_SERVER_FALLBACK.md) for server fallback ved direkte lenker
+- [docs/FRONTEND_PAGE_MODULE_STRUCTURE.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_PAGE_MODULE_STRUCTURE.md) for side- og modulstruktur
+- [docs/FRONTEND_STATE_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_STATE_MODEL.md) for state-modellen
+- [docs/FRONTEND_STORE_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_STORE_MODEL.md) for delt app-state og store
+- [docs/FRONTEND_CACHE_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CACHE_MODEL.md) for cachemodell for lastede data
+- [docs/FRONTEND_OPTIMISTIC_UPDATES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_OPTIMISTIC_UPDATES.md) for optimistic updates
+- [docs/FRONTEND_FEEDBACK_STATES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_FEEDBACK_STATES.md) for loading-, feil- og tom-tilstander
+- [docs/FRONTEND_INPUT_COMPONENTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_INPUT_COMPONENTS.md) for input-komponenter
+- [docs/FRONTEND_FORM_BINDING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_FORM_BINDING.md) for skjema-binding
+- [docs/FRONTEND_CLIENT_VALIDATION.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CLIENT_VALIDATION.md) for klientvalidering
+- [docs/FRONTEND_SERVER_VALIDATION.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_SERVER_VALIDATION.md) for servervalidering
+- [docs/FRONTEND_ASYNC_SUBMIT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ASYNC_SUBMIT.md) for async submit og disabling
+- [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_DESIGN_TOKENS.md) for design tokens
+- [docs/FRONTEND_COMPONENT_LIBRARY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_COMPONENT_LIBRARY.md) for komponentbiblioteket
+- [docs/FRONTEND_COLOR_MODES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_COLOR_MODES.md) for mørk/lys modus
+- [docs/FRONTEND_RESPONSIVE_LAYOUTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_RESPONSIVE_LAYOUTS.md) for responsive layouts
+- [docs/FRONTEND_ACCESSIBILITY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ACCESSIBILITY.md) for tilgjengelighet
+- [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_API_CLIENT.md) for API-klient
+- [docs/FRONTEND_BROWSER_AUTH.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_BROWSER_AUTH.md) for auth i browser
+- [docs/FRONTEND_RETRY_POLICY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_RETRY_POLICY.md) for retry og backoff
+- [docs/FRONTEND_REALTIME_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_REALTIME_MODEL.md) for realtime-valg
+- [docs/FRONTEND_NETWORK_ERRORS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_NETWORK_ERRORS.md) for nettverksfeil
+- [docs/FRONTEND_COMPONENT_TESTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_COMPONENT_TESTS.md) for komponenttester
+- [docs/FRONTEND_ROUTE_TESTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROUTE_TESTS.md) for side- og route-tester
+- [docs/FRONTEND_BROWSER_E2E.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_BROWSER_E2E.md) for browser-E2E
+- [docs/FRONTEND_VISUAL_REGRESSION.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_VISUAL_REGRESSION.md) for visuell regresjon
+- [docs/FRONTEND_A11Y_TESTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_A11Y_TESTS.md) for tilgjengelighetssjekker
+- [docs/FRONTEND_ASSET_BUNDLING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ASSET_BUNDLING.md) for asset-publisering
+- [docs/FRONTEND_CACHE_HEADERS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CACHE_HEADERS.md) for cache-hoder
+- [docs/FRONTEND_CONTAINER_CDN.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CONTAINER_CDN.md) for container/CDN
+- [docs/FRONTEND_ENV_FLAGS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ENV_FLAGS.md) for miljø og feature flags
+- [docs/FRONTEND_DEPLOY_ROLLBACK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_DEPLOY_ROLLBACK.md) for deploy og rollback
+- [examples/frontend.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/frontend.no) for en kjørbar frontend-starter
 
 ---
 
