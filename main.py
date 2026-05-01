@@ -18,6 +18,7 @@ import time
 import platform
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+import signal
 import urllib.parse
 import urllib.request
 import uuid
@@ -2642,8 +2643,18 @@ class _NorscodeThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-def serve_program(source_file: str, host: str = "127.0.0.1", port: int = 8000, reload_enabled: bool = False, once: bool = False):
-    runtime = _ServeRuntime(source_file, reload_enabled=reload_enabled)
+def serve_program(
+    source_file: str,
+    host: str = "127.0.0.1",
+    port: int = 8000,
+    reload_enabled: bool = False,
+    once: bool = False,
+    production: bool = False,
+    health_path: str = "/healthz",
+    readiness_path: str = "/readyz",
+    liveness_path: str = "/livez",
+):
+    runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
 
     class Handler(BaseHTTPRequestHandler):
         def _dispatch(self):
@@ -2676,10 +2687,42 @@ def serve_program(source_file: str, host: str = "127.0.0.1", port: int = 8000, r
             if once:
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
 
+        def _health_response(self, kind: str):
+            if kind == "health":
+                payload = {"status": "ok", "mode": "production" if production else "development"}
+                status = 200
+            elif kind == "ready":
+                payload = {"ready": True, "mode": "production" if production else "development"}
+                status = 200
+            else:
+                payload = {"alive": True, "mode": "production" if production else "development"}
+                status = 200
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            if once:
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+
         def do_GET(self):
+            if self.path.split("?", 1)[0] == health_path:
+                return self._health_response("health")
+            if self.path.split("?", 1)[0] == readiness_path:
+                return self._health_response("ready")
+            if self.path.split("?", 1)[0] == liveness_path:
+                return self._health_response("live")
             self._dispatch()
 
         def do_HEAD(self):
+            if self.path.split("?", 1)[0] == health_path:
+                return self._health_response("health")
+            if self.path.split("?", 1)[0] == readiness_path:
+                return self._health_response("ready")
+            if self.path.split("?", 1)[0] == liveness_path:
+                return self._health_response("live")
             self._dispatch()
 
         def do_POST(self):
@@ -2704,13 +2747,35 @@ def serve_program(source_file: str, host: str = "127.0.0.1", port: int = 8000, r
     bind_host, bind_port = server.server_address
     print(f"Starter Norscode server fra {Path(source_file).expanduser().resolve()}")
     print(f"Lytter på http://{bind_host}:{bind_port}")
+    print(f"Health: {health_path} ready={readiness_path} live={liveness_path}")
+    if production:
+        print("Modus: production")
     if reload_enabled:
         print("Reload: på")
+    stop_lock = threading.Lock()
+    shutdown_requested = {"done": False}
+
+    def _request_shutdown(signum=None, frame=None):
+        with stop_lock:
+            if shutdown_requested["done"]:
+                return
+            shutdown_requested["done"] = True
+        print("Stopper serveren ...")
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    previous_sigint = signal.getsignal(signal.SIGINT)
+    previous_sigterm = signal.getsignal(signal.SIGTERM) if hasattr(signal, "SIGTERM") else None
+    signal.signal(signal.SIGINT, _request_shutdown)
+    if hasattr(signal, "SIGTERM"):
+        signal.signal(signal.SIGTERM, _request_shutdown)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print()
     finally:
+        signal.signal(signal.SIGINT, previous_sigint)
+        if hasattr(signal, "SIGTERM") and previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
         runtime.shutdown()
         server.server_close()
 
@@ -4818,6 +4883,10 @@ def main():
     serve.add_argument("--port", type=int, default=8000, help="Port for serveren")
     serve.add_argument("--reload", action="store_true", help="Rekompiler når kildefilen endrer seg")
     serve.add_argument("--once", action="store_true", help="Stopp etter første request (nyttig for smoke-test)")
+    serve.add_argument("--production", action="store_true", help="Kjør i produksjonsmodus med signalstyrt shutdown")
+    serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
+    serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
+    serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
 
     args = parser.parse_args()
 
@@ -5654,6 +5723,10 @@ def main():
                 port=args.port,
                 reload_enabled=args.reload,
                 once=args.once,
+                production=args.production,
+                health_path=args.health_path,
+                readiness_path=args.ready_path,
+                liveness_path=args.live_path,
             )
 
         elif args.cmd == "format":

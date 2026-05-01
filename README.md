@@ -155,6 +155,10 @@ For FastAPI-sporet, se [docs/FASTAPI_ROADMAP.md](docs/FASTAPI_ROADMAP.md).
 
 For en konkret vurdering av hvor backend-klar Norscode er, se [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md).
 
+For en mer konkret full-backend-sjekkliste, se [docs/FULL_BACKEND_CHECKLIST.md](docs/FULL_BACKEND_CHECKLIST.md).
+
+For produksjonskjøring av en webapp, bruk for eksempel `norcode serve examples/web_routes.no --production --host 0.0.0.0 --port 8000`.
+
 For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
 
 For en kort sluttstatus for videre overlevering, se [docs/HANDOFF.md](docs/HANDOFF.md).
