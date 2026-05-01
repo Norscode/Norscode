@@ -13,6 +13,14 @@ from pathlib import Path
 from typing import Any
 
 from .ast_nodes import (
+    TYPE_BOOL,
+    TYPE_INT,
+    TYPE_LIST_INT,
+    TYPE_LIST_TEXT,
+    TYPE_MAP_BOOL,
+    TYPE_MAP_INT,
+    TYPE_MAP_TEXT,
+    TYPE_TEXT,
     BinOpNode,
     BlockNode,
     BoolNode,
@@ -1441,6 +1449,55 @@ class BytecodeVM:
 
     def get_trace_tail(self, limit: int = 60) -> list[str]:
         return self.trace_log[-limit:]
+
+    def _run_named_hook(self, name: str) -> Any:
+        if not name:
+            return None
+        return self.call_function(name, [])
+
+    def _ensure_startup_hooks(self) -> int:
+        if self._startup_ran:
+            return 0
+        self._startup_ran = True
+        count = 0
+        for hook in self.startup_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _run_shutdown_hooks(self) -> int:
+        if self._shutdown_ran:
+            return 0
+        self._shutdown_ran = True
+        count = 0
+        for hook in self.shutdown_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _apply_request_middlewares(self, ctx: Any) -> Any:
+        current = ctx
+        for middleware in self.request_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_response_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.response_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_error_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.error_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
 
     def _record_expr_probe(self, lines: list[str]) -> None:
         payload = [str(line) for line in lines]

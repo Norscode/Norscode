@@ -129,15 +129,15 @@ Det siste steget er å kjøre appen som en ekte webserver.
 
 Leveranse:
 
-- [ ] lokal dev-server
-- [ ] produksjonsvennlig adapter
-- [ ] støtte for port og host-konfigurasjon
-- [ ] enkel reload i utvikling
-- [ ] tydelig exit og feilhåndtering ved oppstart
+- [x] lokal dev-server
+- [x] produksjonsvennlig adapter
+- [x] støtte for port og host-konfigurasjon
+- [x] enkel reload i utvikling
+- [x] tydelig exit og feilhåndtering ved oppstart
 
 Ferdig når:
 
-- [ ] en FastAPI-lignende app kan kjøres med én kommando
+- [x] en FastAPI-lignende app kan kjøres med én kommando
 
 ## Etappe 8: Test og eksempler
 
@@ -164,7 +164,7 @@ Ferdig når:
 - [x] Dependency injection
 - [x] OpenAPI og docs
 - [x] Middleware og hooks
-- [ ] Serveradapter
+- [x] Serveradapter
 - [x] Test og eksempler
 
 ## Kortversjon
@@ -174,4 +174,4 @@ FastAPI-sporet er ferdig når:
 - [x] det er lett å skrive en API-app i Norscode
 - [x] routing, validering og docs henger sammen
 - [x] handlerne blir små og lesbare
-- [ ] serverkjøring er enkel og stabil
+- [x] serverkjøring er enkel og stabil

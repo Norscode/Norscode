@@ -16,6 +16,8 @@ import tarfile
 import tempfile
 import time
 import platform
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import threading
 import urllib.parse
 import urllib.request
 import uuid
@@ -2529,6 +2531,190 @@ def run_program(source_file: str):
     return source_path
 
 
+def _decode_text_map(value: object) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        if isinstance(parsed, dict):
+            return {str(key): str(item) for key, item in parsed.items()}
+    return {}
+
+
+def _normalize_serve_response(response: object) -> tuple[int, dict[str, str], bytes]:
+    status = 200
+    headers: dict[str, str] = {}
+    body: object = response
+    if isinstance(response, dict):
+        try:
+            status = int(str(response.get("status", 200)).strip() or "200")
+        except Exception:
+            status = 200
+        headers = _decode_text_map(response.get("headers", {}))
+        body = response.get("body", "")
+    if isinstance(body, bytes):
+        body_bytes = body
+    elif body is None:
+        body_bytes = b""
+    else:
+        body_bytes = str(body).encode("utf-8")
+    if not any(key.lower() == "content-type" for key in headers):
+        headers["content-type"] = "text/plain; charset=utf-8"
+    headers["content-length"] = str(len(body_bytes))
+    return status, headers, body_bytes
+
+
+class _ServeRuntime:
+    def __init__(self, source_file: str, reload_enabled: bool = False):
+        self.source_file = str(source_file)
+        self.reload_enabled = reload_enabled
+        self.lock = threading.RLock()
+        self.source_path: Path | None = None
+        self.vm = None
+        self.source_mtime_ns = 0
+        self._load_initial()
+
+    def _compile(self):
+        from compiler.bytecode_backend import BytecodeVM, compile_source_to_bytecode
+
+        source_path, payload = compile_source_to_bytecode(self.source_file)
+        vm = BytecodeVM(payload)
+        vm.call_function("web.startup", [])
+        return source_path, vm
+
+    def _load_initial(self):
+        source_path, vm = self._compile()
+        self.source_path = source_path
+        self.vm = vm
+        try:
+            self.source_mtime_ns = source_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            self.source_mtime_ns = 0
+
+    def _reload_if_needed(self):
+        if not self.reload_enabled or self.source_path is None or self.vm is None:
+            return
+        try:
+            current_mtime = self.source_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            return
+        if current_mtime <= self.source_mtime_ns:
+            return
+        from compiler.bytecode_backend import BytecodeVM, compile_source_to_bytecode
+
+        source_path, payload = compile_source_to_bytecode(self.source_file)
+        new_vm = BytecodeVM(payload)
+        new_vm.call_function("web.startup", [])
+        old_vm = self.vm
+        self.vm = new_vm
+        self.source_path = source_path
+        self.source_mtime_ns = current_mtime
+        try:
+            old_vm.call_function("web.shutdown", [])
+        except Exception as exc:
+            print(f"Advarsel: shutdown ved reload feilet: {exc}", file=sys.stderr)
+
+    def handle(self, method: str, path: str, query: dict[str, str], headers: dict[str, str], body: str):
+        from compiler.bytecode_backend import BytecodeVM
+
+        with self.lock:
+            self._reload_if_needed()
+            if not isinstance(self.vm, BytecodeVM):
+                raise RuntimeError("Serverruntime er ikke klar")
+            ctx = self.vm.call_function("web.request_context", [method, path, query, headers, body])
+            return self.vm.call_function("web.handle_request", [ctx])
+
+    def shutdown(self):
+        with self.lock:
+            if self.vm is None:
+                return 0
+            try:
+                return self.vm.call_function("web.shutdown", [])
+            finally:
+                self.vm = None
+
+
+class _NorscodeThreadingHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+def serve_program(source_file: str, host: str = "127.0.0.1", port: int = 8000, reload_enabled: bool = False, once: bool = False):
+    runtime = _ServeRuntime(source_file, reload_enabled=reload_enabled)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _dispatch(self):
+            parsed = urllib.parse.urlsplit(self.path)
+            query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+            headers = {str(key): str(value) for key, value in self.headers.items()}
+            length_text = self.headers.get("Content-Length", "0")
+            try:
+                length = max(0, int(length_text))
+            except Exception:
+                length = 0
+            body_bytes = self.rfile.read(length) if length else b""
+            body = body_bytes.decode("utf-8", errors="replace")
+            try:
+                response = runtime.handle(self.command, parsed.path or "/", query, headers, body)
+                status, response_headers, response_body = _normalize_serve_response(response)
+            except Exception as exc:
+                status = 500
+                response_headers = {"content-type": "application/json; charset=utf-8"}
+                response_body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            for key, value in response_headers.items():
+                if key.lower() == "content-length":
+                    continue
+                self.send_header(key, value)
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(response_body)
+            if once:
+                threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+        def do_GET(self):
+            self._dispatch()
+
+        def do_HEAD(self):
+            self._dispatch()
+
+        def do_POST(self):
+            self._dispatch()
+
+        def do_PUT(self):
+            self._dispatch()
+
+        def do_PATCH(self):
+            self._dispatch()
+
+        def do_DELETE(self):
+            self._dispatch()
+
+        def do_OPTIONS(self):
+            self._dispatch()
+
+        def log_message(self, format, *args):
+            print(f"[serve] {self.address_string()} - {format % args}", file=sys.stderr)
+
+    server = _NorscodeThreadingHTTPServer((host, port), Handler)
+    bind_host, bind_port = server.server_address
+    print(f"Starter Norscode server fra {Path(source_file).expanduser().resolve()}")
+    print(f"Lytter på http://{bind_host}:{bind_port}")
+    if reload_enabled:
+        print("Reload: på")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print()
+    finally:
+        runtime.shutdown()
+        server.server_close()
+
+
 def _try_parse_expression(source_text: str):
     parser = Parser(Lexer(source_text))
     try:
@@ -4626,6 +4812,13 @@ def main():
     commands = sub.add_parser("commands", help="Vis stabil kommandooversikt")
     commands.add_argument("--json", action="store_true", help="Skriv kommandooversikt som JSON")
 
+    serve = sub.add_parser("serve", help="Start en lokal webserver for en Norscode-app")
+    serve.add_argument("file", help="Kildefil å kjøre som webapp")
+    serve.add_argument("--host", default="127.0.0.1", help="Bind-adresse for serveren")
+    serve.add_argument("--port", type=int, default=8000, help="Port for serveren")
+    serve.add_argument("--reload", action="store_true", help="Rekompiler når kildefilen endrer seg")
+    serve.add_argument("--once", action="store_true", help="Stopp etter første request (nyttig for smoke-test)")
+
     args = parser.parse_args()
 
     try:
@@ -5453,6 +5646,15 @@ def main():
                 print(f"CLI: {payload['prog']}")
                 for row in payload["commands"]:
                     print(f"- {row['name']}: {row['help']}")
+
+        elif args.cmd == "serve":
+            serve_program(
+                args.file,
+                host=args.host,
+                port=args.port,
+                reload_enabled=args.reload,
+                once=args.once,
+            )
 
         elif args.cmd == "format":
             result = format_program_file(args.file, check=args.check, diff=args.diff)

@@ -110,6 +110,8 @@ For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/lan
 
 For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no).
 
+For lokal serverkjøring, bruk `norcode serve examples/web_routes.no --reload` eller en egen webapp-fil du vil kjøre i dev-modus.
+
 ## Neste steg
 
 - [docs/START_HER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/START_HER.md)
