@@ -86,6 +86,24 @@ class CGenerator:
         path = parts[1].strip()
         return method, path
 
+    def _combine_web_route_prefix(self, prefix, spec):
+        route_prefix = str(prefix or "").strip()
+        route_spec = str(spec or "").strip()
+        if not route_prefix:
+            return route_spec
+        method, route_path = self._split_web_route_spec(route_spec)
+        if not route_path:
+            return route_spec
+        normalized_prefix = "/" + route_prefix.lstrip("/")
+        if normalized_prefix.endswith("/"):
+            normalized_prefix = normalized_prefix.rstrip("/")
+        normalized_path = route_path if route_path.startswith("/") else f"/{route_path}"
+        if normalized_path == "/":
+            combined_path = normalized_prefix or "/"
+        else:
+            combined_path = normalized_prefix + normalized_path
+        return f"{method} {combined_path}".strip() if method else combined_path
+
     def _walk_ast_nodes(self, node):
         if node is None:
             return
@@ -280,6 +298,7 @@ class CGenerator:
         if not statements:
             return None, [], [], False, False, False, False, False
         spec = None
+        route_prefix = ""
         deps: list[str] = []
         provided: list[str] = []
         request_middleware = False
@@ -317,6 +336,9 @@ class CGenerator:
             if expr.func_name == "route" and spec is None:
                 spec = expr.args[0].value
                 continue
+            if expr.func_name in {"router", "subrouter"} and not route_prefix:
+                route_prefix = expr.args[0].value
+                continue
             if expr.func_name == "use_dependency":
                 deps.append(expr.args[0].value)
                 continue
@@ -324,6 +346,8 @@ class CGenerator:
                 provided.append(expr.args[0].value)
                 continue
             break
+        if route_prefix:
+            setattr(fn, "route_prefix", route_prefix)
         return spec, deps, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook
 
     def _collect_route_handlers(self, tree):
@@ -339,9 +363,11 @@ class CGenerator:
             if spec is None:
                 spec = None
             if spec is not None:
-                route_docs = self._route_docs_from_function(fn, spec)
+                route_prefix = getattr(fn, "route_prefix", "")
+                combined_spec = self._combine_web_route_prefix(route_prefix, spec)
+                route_docs = self._route_docs_from_function(fn, combined_spec)
                 route_docs["deps"] = list(deps)
-                route_docs["spec"] = spec
+                route_docs["spec"] = combined_spec
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers.append({
@@ -4316,6 +4342,9 @@ class CGenerator:
                 if node.func_name == "route":
                     spec_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return f"nl_web_route({spec_code})", TYPE_TEXT
+                if node.func_name in {"router", "subrouter"}:
+                    prefix_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return prefix_code, TYPE_TEXT
                 if node.func_name == "dependency":
                     name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return name_code, TYPE_TEXT

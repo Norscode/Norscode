@@ -84,6 +84,8 @@ class SemanticAnalyzer:
             "web_openapi_json": FunctionSymbol("web_openapi_json", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "web_docs_html": FunctionSymbol("web_docs_html", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "web_route": FunctionSymbol("web_route", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_router": FunctionSymbol("web_router", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_subrouter": FunctionSymbol("web_subrouter", [TYPE_TEXT], TYPE_TEXT, True),
             "web_dependency": FunctionSymbol("web_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_use_dependency": FunctionSymbol("web_use_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_request_middleware": FunctionSymbol("web_request_middleware", [], TYPE_TEXT, True),
@@ -1067,6 +1069,16 @@ class SemanticAnalyzer:
                     self.error("web.route krever tekst")
                 if self.current_function is not None and isinstance(expr.args[0], StringNode):
                     setattr(self.current_function, "route_spec", expr.args[0].value)
+                return TYPE_TEXT
+
+            if full_name in {"web.router", "std.web.router", "web.subrouter", "std.web.subrouter"}:
+                if len(expr.args) != 1:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 1 argument")
+                prefix_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if prefix_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst")
+                if self.current_function is not None and isinstance(expr.args[0], StringNode):
+                    setattr(self.current_function, "route_prefix", expr.args[0].value)
                 return TYPE_TEXT
 
             if full_name in {"web.dependency", "std.web.dependency"}:

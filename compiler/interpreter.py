@@ -559,6 +559,24 @@ class Interpreter:
             return "", parts[0]
         return parts[0].upper(), parts[1]
 
+    def _combine_web_route_prefix(self, prefix: Any, spec: Any) -> str:
+        route_prefix = str(prefix).strip()
+        route_spec = str(spec).strip()
+        if not route_prefix:
+            return route_spec
+        method, route_path = self._split_web_route_spec(route_spec)
+        if not route_path:
+            return route_spec
+        normalized_prefix = "/" + route_prefix.lstrip("/")
+        if normalized_prefix.endswith("/"):
+            normalized_prefix = normalized_prefix.rstrip("/")
+        normalized_path = route_path if route_path.startswith("/") else f"/{route_path}"
+        if normalized_path == "/":
+            combined_path = normalized_prefix or "/"
+        else:
+            combined_path = normalized_prefix + normalized_path
+        return f"{method} {combined_path}".strip() if method else combined_path
+
     def _match_web_route_spec(self, spec: Any, method: Any, path: Any) -> dict[str, str] | None:
         route_method, route_path = self._split_web_route_spec(spec)
         request_method = self._normalize_web_method(method)
@@ -711,6 +729,7 @@ class Interpreter:
             if not statements:
                 continue
             spec = None
+            route_prefix = ""
             deps: list[str] = []
             provided: list[str] = []
             for stmt in statements:
@@ -742,6 +761,9 @@ class Interpreter:
                 if expr.func_name == "route" and spec is None:
                     spec = expr.args[0].value
                     continue
+                if expr.func_name in {"router", "subrouter"} and not route_prefix:
+                    route_prefix = expr.args[0].value
+                    continue
                 if expr.func_name == "use_dependency":
                     deps.append(expr.args[0].value)
                     continue
@@ -750,9 +772,10 @@ class Interpreter:
                     continue
                 break
             if spec is not None:
-                route_docs = self._route_docs_from_function(fn, spec)
+                combined_spec = self._combine_web_route_prefix(route_prefix, spec)
+                route_docs = self._route_docs_from_function(fn, combined_spec)
                 route_docs["deps"] = list(deps)
-                route_docs["spec"] = spec
+                route_docs["spec"] = combined_spec
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = fn.name
@@ -1572,6 +1595,10 @@ class Interpreter:
                 version = str(values[1]) if len(values) > 1 else "1.0.0"
                 return self._build_docs_html(title, version)
             if func_name == "route":
+                if not values:
+                    return ""
+                return str(values[0])
+            if func_name in {"router", "subrouter"}:
                 if not values:
                     return ""
                 return str(values[0])

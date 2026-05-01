@@ -23,7 +23,7 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 - [x] path-, query- og body-validering
 - [x] dependency injection
 - [x] middleware og hooks
-- [ ] subroutere eller router-moduler
+- [x] subroutere eller router-moduler
 - [ ] route-guards eller policy-hooks
 - [ ] standardisert håndtering av HEAD, OPTIONS og metodeforhandling
 

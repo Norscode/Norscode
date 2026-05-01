@@ -101,6 +101,7 @@ funksjon start() -> heltall {
 Se [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web.no) og [examples/web_request_response.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_request_response.no).
 
 For route-handlers i FastAPI-stil, se også [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no).
+For subroutere og prefiksbaserte route-moduler, se [examples/web_subrouter.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_subrouter.no).
 
 For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
 
