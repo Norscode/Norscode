@@ -153,6 +153,8 @@ For en praktisk startreise, se [docs/START_HER.md](docs/START_HER.md), [docs/COO
 
 For FastAPI-sporet, se [docs/FASTAPI_ROADMAP.md](docs/FASTAPI_ROADMAP.md).
 
+For en konkret vurdering av hvor backend-klar Norscode er, se [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md).
+
 For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
 
 For en kort sluttstatus for videre overlevering, se [docs/HANDOFF.md](docs/HANDOFF.md).
