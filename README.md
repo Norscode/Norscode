@@ -159,6 +159,7 @@ For en mer konkret full-backend-sjekkliste, se [docs/FULL_BACKEND_CHECKLIST.md](
 
 For produksjonskjøring av en webapp, bruk for eksempel `norcode serve examples/web_routes.no --production --host 0.0.0.0 --port 8000`.
 Bak reverse proxy kan du legge til `--proxy-headers --trusted-proxy 127.0.0.1` når proxyen sender forwarded headers.
+Hvis du vil ha en enkel restartstrategi ved krasj, legg til `--restart-on-crash --max-restarts 3`.
 
 For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
 

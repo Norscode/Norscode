@@ -2722,169 +2722,183 @@ def serve_program(
     request_timeout_seconds: float | None = None,
     proxy_headers: bool = False,
     trusted_proxies: set[str] | None = None,
+    restart_on_crash: bool = False,
+    max_restarts: int = 0,
+    restart_delay_seconds: float = 1.0,
     health_path: str = "/healthz",
     readiness_path: str = "/readyz",
     liveness_path: str = "/livez",
 ):
-    try:
-        runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
-    except Exception as exc:
-        raise RuntimeError(f"Oppstartfeil: kunne ikke laste {Path(source_file).expanduser().resolve()}: {exc}") from exc
+    def _serve_once():
+        try:
+            runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
+        except Exception as exc:
+            raise RuntimeError(f"Oppstartfeil: kunne ikke laste {Path(source_file).expanduser().resolve()}: {exc}") from exc
 
-    class Handler(BaseHTTPRequestHandler):
-        protocol_version = "HTTP/1.1" if keep_alive else "HTTP/1.0"
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1" if keep_alive else "HTTP/1.0"
 
-        def setup(self):
-            super().setup()
-            if request_timeout_seconds is not None:
+            def setup(self):
+                super().setup()
+                if request_timeout_seconds is not None:
+                    try:
+                        timeout = max(0.1, float(request_timeout_seconds))
+                    except Exception:
+                        timeout = None
+                    if timeout is not None:
+                        self.connection.settimeout(timeout)
+
+            def _dispatch(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+                client_ip = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
+                headers = _proxy_enrich_headers(
+                    {str(key): str(value) for key, value in self.headers.items()},
+                    client_ip=client_ip,
+                    path=parsed.path or "/",
+                    proxy_headers=proxy_headers,
+                    trusted_proxies=trusted_proxies or set(),
+                )
+                length_text = self.headers.get("Content-Length", "0")
                 try:
-                    timeout = max(0.1, float(request_timeout_seconds))
+                    length = max(0, int(length_text))
                 except Exception:
-                    timeout = None
-                if timeout is not None:
-                    self.connection.settimeout(timeout)
+                    length = 0
+                body_bytes = self.rfile.read(length) if length else b""
+                body = body_bytes.decode("utf-8", errors="replace")
+                try:
+                    response = runtime.handle(self.command, parsed.path or "/", query, headers, body)
+                    status, response_headers, response_body = _normalize_serve_response(response)
+                except Exception as exc:
+                    status = 500
+                    response_headers = {"content-type": "application/json; charset=utf-8"}
+                    response_body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                for key, value in response_headers.items():
+                    if key.lower() == "content-length":
+                        continue
+                    self.send_header(key, value)
+                self.send_header("Content-Length", str(len(response_body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(response_body)
+                if once:
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
 
-        def _dispatch(self):
-            parsed = urllib.parse.urlsplit(self.path)
-            query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
-            client_ip = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
-            headers = _proxy_enrich_headers(
-                {str(key): str(value) for key, value in self.headers.items()},
-                client_ip=client_ip,
-                path=parsed.path or "/",
-                proxy_headers=proxy_headers,
-                trusted_proxies=trusted_proxies or set(),
-            )
-            length_text = self.headers.get("Content-Length", "0")
-            try:
-                length = max(0, int(length_text))
-            except Exception:
-                length = 0
-            body_bytes = self.rfile.read(length) if length else b""
-            body = body_bytes.decode("utf-8", errors="replace")
-            try:
-                response = runtime.handle(self.command, parsed.path or "/", query, headers, body)
-                status, response_headers, response_body = _normalize_serve_response(response)
-            except Exception as exc:
-                status = 500
-                response_headers = {"content-type": "application/json; charset=utf-8"}
-                response_body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            for key, value in response_headers.items():
-                if key.lower() == "content-length":
-                    continue
-                self.send_header(key, value)
-            self.send_header("Content-Length", str(len(response_body)))
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(response_body)
-            if once:
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+            def _health_response(self, kind: str):
+                if kind == "health":
+                    payload = {"status": "ok", "mode": "production" if production else "development"}
+                elif kind == "ready":
+                    payload = {"ready": True, "mode": "production" if production else "development"}
+                else:
+                    payload = {"alive": True, "mode": "production" if production else "development"}
+                body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("content-type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(body)
+                if once:
+                    threading.Thread(target=self.server.shutdown, daemon=True).start()
 
-        def _health_response(self, kind: str):
-            if kind == "health":
-                payload = {"status": "ok", "mode": "production" if production else "development"}
-                status = 200
-            elif kind == "ready":
-                payload = {"ready": True, "mode": "production" if production else "development"}
-                status = 200
+            def do_GET(self):
+                if self.path.split("?", 1)[0] == health_path:
+                    return self._health_response("health")
+                if self.path.split("?", 1)[0] == readiness_path:
+                    return self._health_response("ready")
+                if self.path.split("?", 1)[0] == liveness_path:
+                    return self._health_response("live")
+                self._dispatch()
+
+            def do_HEAD(self):
+                if self.path.split("?", 1)[0] == health_path:
+                    return self._health_response("health")
+                if self.path.split("?", 1)[0] == readiness_path:
+                    return self._health_response("ready")
+                if self.path.split("?", 1)[0] == liveness_path:
+                    return self._health_response("live")
+                self._dispatch()
+
+            def do_POST(self):
+                self._dispatch()
+
+            def do_PUT(self):
+                self._dispatch()
+
+            def do_PATCH(self):
+                self._dispatch()
+
+            def do_DELETE(self):
+                self._dispatch()
+
+            def do_OPTIONS(self):
+                self._dispatch()
+
+            def log_message(self, format, *args):
+                print(f"[serve] {self.address_string()} - {format % args}", file=sys.stderr)
+
+        try:
+            server = _NorscodeThreadingHTTPServer((host, port), Handler)
+        except OSError as exc:
+            raise RuntimeError(f"Oppstartfeil: kunne ikke binde {host}:{port}: {exc}") from exc
+        bind_host, bind_port = server.server_address
+        print(f"Starter Norscode server fra {Path(source_file).expanduser().resolve()}")
+        print(f"Lytter på http://{bind_host}:{bind_port}")
+        print(f"Health: {health_path} ready={readiness_path} live={liveness_path}")
+        if production:
+            print("Modus: production")
+        if keep_alive:
+            print("Keep-alive: på")
+        if request_timeout_seconds is not None:
+            print(f"Timeout: {request_timeout_seconds} s")
+        if proxy_headers:
+            if trusted_proxies:
+                trusted = ", ".join(sorted(trusted_proxies))
+                print(f"Proxy headers: på (trusted: {trusted})")
             else:
-                payload = {"alive": True, "mode": "production" if production else "development"}
-                status = 200
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("content-type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-            if once:
-                threading.Thread(target=self.server.shutdown, daemon=True).start()
+                print("Proxy headers: på")
+        if reload_enabled:
+            print("Reload: på")
+        stop_lock = threading.Lock()
+        shutdown_requested = {"done": False}
 
-        def do_GET(self):
-            if self.path.split("?", 1)[0] == health_path:
-                return self._health_response("health")
-            if self.path.split("?", 1)[0] == readiness_path:
-                return self._health_response("ready")
-            if self.path.split("?", 1)[0] == liveness_path:
-                return self._health_response("live")
-            self._dispatch()
+        def _request_shutdown(signum=None, frame=None):
+            with stop_lock:
+                if shutdown_requested["done"]:
+                    return
+                shutdown_requested["done"] = True
+            print("Stopper serveren ...")
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
-        def do_HEAD(self):
-            if self.path.split("?", 1)[0] == health_path:
-                return self._health_response("health")
-            if self.path.split("?", 1)[0] == readiness_path:
-                return self._health_response("ready")
-            if self.path.split("?", 1)[0] == liveness_path:
-                return self._health_response("live")
-            self._dispatch()
+        previous_sigint = signal.getsignal(signal.SIGINT)
+        previous_sigterm = signal.getsignal(signal.SIGTERM) if hasattr(signal, "SIGTERM") else None
+        signal.signal(signal.SIGINT, _request_shutdown)
+        if hasattr(signal, "SIGTERM"):
+            signal.signal(signal.SIGTERM, _request_shutdown)
+        try:
+            server.serve_forever()
+        finally:
+            signal.signal(signal.SIGINT, previous_sigint)
+            if hasattr(signal, "SIGTERM") and previous_sigterm is not None:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+            runtime.shutdown()
+            server.server_close()
 
-        def do_POST(self):
-            self._dispatch()
-
-        def do_PUT(self):
-            self._dispatch()
-
-        def do_PATCH(self):
-            self._dispatch()
-
-        def do_DELETE(self):
-            self._dispatch()
-
-        def do_OPTIONS(self):
-            self._dispatch()
-
-        def log_message(self, format, *args):
-            print(f"[serve] {self.address_string()} - {format % args}", file=sys.stderr)
-
-    try:
-        server = _NorscodeThreadingHTTPServer((host, port), Handler)
-    except OSError as exc:
-        raise RuntimeError(f"Oppstartfeil: kunne ikke binde {host}:{port}: {exc}") from exc
-    bind_host, bind_port = server.server_address
-    print(f"Starter Norscode server fra {Path(source_file).expanduser().resolve()}")
-    print(f"Lytter på http://{bind_host}:{bind_port}")
-    print(f"Health: {health_path} ready={readiness_path} live={liveness_path}")
-    if production:
-        print("Modus: production")
-    if keep_alive:
-        print("Keep-alive: på")
-    if request_timeout_seconds is not None:
-        print(f"Timeout: {request_timeout_seconds} s")
-    if proxy_headers:
-        if trusted_proxies:
-            trusted = ", ".join(sorted(trusted_proxies))
-            print(f"Proxy headers: på (trusted: {trusted})")
-        else:
-            print("Proxy headers: på")
-    if reload_enabled:
-        print("Reload: på")
-    stop_lock = threading.Lock()
-    shutdown_requested = {"done": False}
-
-    def _request_shutdown(signum=None, frame=None):
-        with stop_lock:
-            if shutdown_requested["done"]:
-                return
-            shutdown_requested["done"] = True
-        print("Stopper serveren ...")
-        threading.Thread(target=server.shutdown, daemon=True).start()
-
-    previous_sigint = signal.getsignal(signal.SIGINT)
-    previous_sigterm = signal.getsignal(signal.SIGTERM) if hasattr(signal, "SIGTERM") else None
-    signal.signal(signal.SIGINT, _request_shutdown)
-    if hasattr(signal, "SIGTERM"):
-        signal.signal(signal.SIGTERM, _request_shutdown)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print()
-    finally:
-        signal.signal(signal.SIGINT, previous_sigint)
-        if hasattr(signal, "SIGTERM") and previous_sigterm is not None:
-            signal.signal(signal.SIGTERM, previous_sigterm)
-        runtime.shutdown()
-        server.server_close()
+    attempts = 0
+    while True:
+        try:
+            _serve_once()
+            return
+        except KeyboardInterrupt:
+            print()
+            return
+        except Exception as exc:
+            if not restart_on_crash or attempts >= max_restarts:
+                raise
+            attempts += 1
+            print(f"Advarsel: serveren krasjet ({exc}); restart {attempts}/{max_restarts}", file=sys.stderr)
+            time.sleep(max(0.0, float(restart_delay_seconds)))
 
 
 def _try_parse_expression(source_text: str):
@@ -4995,6 +5009,9 @@ def main():
     serve.add_argument("--request-timeout", type=float, help="Timeout i sekunder for en enkelt request/connection")
     serve.add_argument("--proxy-headers", action="store_true", help="Tolk og normaliser forwarded headers fra en reverse proxy")
     serve.add_argument("--trusted-proxy", action="append", default=[], help="Kjente proxy-IP-er som får lov til å sende forwarded headers")
+    serve.add_argument("--restart-on-crash", action="store_true", help="Restart serveren hvis den krasjer")
+    serve.add_argument("--max-restarts", type=int, default=0, help="Maks antall auto-restarts ved krasj")
+    serve.add_argument("--restart-delay", type=float, default=1.0, help="Forsinkelse i sekunder før restart")
     serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
     serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
     serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
@@ -5839,6 +5856,9 @@ def main():
                 request_timeout_seconds=args.request_timeout,
                 proxy_headers=args.proxy_headers,
                 trusted_proxies=set(args.trusted_proxy or []),
+                restart_on_crash=args.restart_on_crash,
+                max_restarts=args.max_restarts,
+                restart_delay_seconds=args.restart_delay,
                 health_path=args.health_path,
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
