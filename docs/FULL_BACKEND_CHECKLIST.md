@@ -8,7 +8,7 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 - [x] lokal dev-server via `norcode serve`
 - [x] produksjonsadapter for langkjørende tjeneste via `norcode serve --production`
 - [x] signalstyrt graceful shutdown
-- [ ] støtte for reverse proxy-oppsett
+- [x] støtte for reverse proxy-oppsett
 - [x] støtte for port og host-konfigurasjon
 - [x] støtte for timeouts og keep-alive i produksjon
 - [x] tydelig feilrapportering ved oppstart

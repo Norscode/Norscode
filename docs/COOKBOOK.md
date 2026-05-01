@@ -112,6 +112,8 @@ For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Proje
 
 For lokal serverkjøring, bruk `norcode serve examples/web_routes.no --reload` eller en egen webapp-fil du vil kjøre i dev-modus.
 
+For reverse proxy-oppsett, bruk `norcode serve ... --proxy-headers --trusted-proxy <proxy-ip>` og les forwarded headers via `web.request_header()`.
+
 ## Neste steg
 
 - [docs/START_HER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/START_HER.md)

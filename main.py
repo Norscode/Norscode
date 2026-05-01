@@ -2568,6 +2568,74 @@ def _normalize_serve_response(response: object) -> tuple[int, dict[str, str], by
     return status, headers, body_bytes
 
 
+def _lowercase_text_map(mapping: object) -> dict[str, str]:
+    if not isinstance(mapping, dict):
+        return {}
+    return {str(key).lower(): str(value) for key, value in mapping.items()}
+
+
+def _parse_forwarded_header(value: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if not value:
+        return result
+    first_segment = value.split(",", 1)[0].strip()
+    for part in first_segment.split(";"):
+        item = part.strip()
+        if "=" not in item:
+            continue
+        key, raw_value = item.split("=", 1)
+        key = key.strip().lower()
+        cleaned = raw_value.strip().strip('"')
+        if key and cleaned:
+            result[key] = cleaned
+    return result
+
+
+def _proxy_trusted(client_ip: str, trusted_proxies: set[str]) -> bool:
+    if not trusted_proxies:
+        return True
+    return client_ip in trusted_proxies
+
+
+def _proxy_enrich_headers(
+    raw_headers: dict[str, str],
+    client_ip: str,
+    path: str,
+    proxy_headers: bool,
+    trusted_proxies: set[str],
+) -> dict[str, str]:
+    headers = _lowercase_text_map(raw_headers)
+    headers["x-client-ip"] = client_ip
+    if not proxy_headers or not _proxy_trusted(client_ip, trusted_proxies):
+        return headers
+
+    forwarded = _parse_forwarded_header(headers.get("forwarded", ""))
+    proto = forwarded.get("proto") or headers.get("x-forwarded-proto", "")
+    host = forwarded.get("host") or headers.get("x-forwarded-host", headers.get("host", ""))
+    forwarded_for = forwarded.get("for") or headers.get("x-forwarded-for", client_ip)
+    prefix = headers.get("x-forwarded-prefix", "")
+    real_ip = headers.get("x-real-ip", forwarded_for or client_ip)
+
+    if proto:
+        headers["x-forwarded-proto"] = proto
+    if host:
+        headers["x-forwarded-host"] = host
+    if forwarded_for:
+        headers["x-forwarded-for"] = forwarded_for
+    if prefix:
+        headers["x-forwarded-prefix"] = prefix
+
+    headers["x-real-ip"] = real_ip
+    headers["x-external-scheme"] = proto or "http"
+    headers["x-external-host"] = host or ""
+    headers["x-external-prefix"] = prefix or ""
+    if proto and host:
+        headers["x-external-url"] = f"{proto}://{host}{prefix}{path}"
+    else:
+        headers["x-external-url"] = ""
+    return headers
+
+
 class _ServeRuntime:
     def __init__(self, source_file: str, reload_enabled: bool = False):
         self.source_file = str(source_file)
@@ -2652,6 +2720,8 @@ def serve_program(
     production: bool = False,
     keep_alive: bool = False,
     request_timeout_seconds: float | None = None,
+    proxy_headers: bool = False,
+    trusted_proxies: set[str] | None = None,
     health_path: str = "/healthz",
     readiness_path: str = "/readyz",
     liveness_path: str = "/livez",
@@ -2677,7 +2747,14 @@ def serve_program(
         def _dispatch(self):
             parsed = urllib.parse.urlsplit(self.path)
             query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
-            headers = {str(key): str(value) for key, value in self.headers.items()}
+            client_ip = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
+            headers = _proxy_enrich_headers(
+                {str(key): str(value) for key, value in self.headers.items()},
+                client_ip=client_ip,
+                path=parsed.path or "/",
+                proxy_headers=proxy_headers,
+                trusted_proxies=trusted_proxies or set(),
+            )
             length_text = self.headers.get("Content-Length", "0")
             try:
                 length = max(0, int(length_text))
@@ -2774,6 +2851,12 @@ def serve_program(
         print("Keep-alive: på")
     if request_timeout_seconds is not None:
         print(f"Timeout: {request_timeout_seconds} s")
+    if proxy_headers:
+        if trusted_proxies:
+            trusted = ", ".join(sorted(trusted_proxies))
+            print(f"Proxy headers: på (trusted: {trusted})")
+        else:
+            print("Proxy headers: på")
     if reload_enabled:
         print("Reload: på")
     stop_lock = threading.Lock()
@@ -4910,6 +4993,8 @@ def main():
     serve.add_argument("--production", action="store_true", help="Kjør i produksjonsmodus med signalstyrt shutdown")
     serve.add_argument("--keep-alive", action="store_true", help="Bruk HTTP/1.1 og hold forbindelsen åpen når mulig")
     serve.add_argument("--request-timeout", type=float, help="Timeout i sekunder for en enkelt request/connection")
+    serve.add_argument("--proxy-headers", action="store_true", help="Tolk og normaliser forwarded headers fra en reverse proxy")
+    serve.add_argument("--trusted-proxy", action="append", default=[], help="Kjente proxy-IP-er som får lov til å sende forwarded headers")
     serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
     serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
     serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
@@ -5752,6 +5837,8 @@ def main():
                 production=args.production,
                 keep_alive=args.keep_alive,
                 request_timeout_seconds=args.request_timeout,
+                proxy_headers=args.proxy_headers,
+                trusted_proxies=set(args.trusted_proxy or []),
                 health_path=args.health_path,
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
