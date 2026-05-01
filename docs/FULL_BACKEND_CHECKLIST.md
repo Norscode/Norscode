@@ -33,41 +33,42 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 - [x] rolle- og rettighetsmodell
 - [x] password hashing / secrets-håndtering
 - [x] CSRF-beskyttelse der det trengs
-- [ ] CORS-konfigurasjon som standard
-- [ ] secure cookies og cookie helpers
-- [ ] rate limiting og brute-force-beskyttelse
-- [ ] input-sanitizing og sikkerhetshelpers for vanlige webangrep
+- [x] CORS-konfigurasjon som standard
+- [x] secure cookies og cookie helpers
+- [x] rate limiting og brute-force-beskyttelse
+- [x] input-sanitizing og sikkerhetshelpers for vanlige webangrep
 
 ## 4. Data og persistens
 
-- [ ] databaseadapter for minst én primær database
-- [ ] migreringsverktøy som standard
-- [ ] transaksjoner og connection pooling
-- [ ] repository- eller modelmønstre som er dokumentert og anbefalt
-- [ ] enkel og tydelig JSON-/schema-mapping
-- [ ] fil- og objektlagring som standardmønster
-- [ ] cache-støtte eller cache-adapter
+- [x] databaseadapter for minst én primær database
+- [x] migreringsverktøy som standard
+- [x] transaksjoner som standard
+- [x] connection pooling
+- [x] repository- eller modelmønstre som er dokumentert og anbefalt
+- [x] enkel og tydelig JSON-/schema-mapping
+- [x] fil- og objektlagring som standardmønster
+- [x] cache-støtte eller cache-adapter
 
 ## 5. Observability og produksjonsdiagnostikk
 
-- [ ] strukturert logging
-- [ ] request-id gjennom hele kjeden
-- [ ] metrics / counters / histogrammer
-- [ ] tracing eller span-støtte
-- [ ] tydelige runtime-feil med kontekst og kallstakk
-- [ ] audit-/security-logger for sensitive hendelser
-- [ ] ferdige dashboard-/exporter-mønstre
+- [x] strukturert logging
+- [x] request-id gjennom hele kjeden
+- [x] metrics / counters / histogrammer
+- [x] tracing eller span-støtte
+- [x] tydelige runtime-feil med kontekst og kallstakk
+- [x] audit-/security-logger for sensitive hendelser
+- [x] ferdige dashboard-/exporter-mønstre
 
 ## 6. API-kontrakt og dokumentasjon
 
 - [x] OpenAPI JSON
 - [x] enkel docs-side
 - [x] examples for websporet
-- [ ] automatisk schema fra request- og response-typer i full bredde
-- [ ] autentisering dokumentert i OpenAPI
-- [ ] error responses dokumentert og eksemplifisert
-- [ ] versjonering av API-kontrakter
-- [ ] migreringsnotater mellom API-versjoner
+- [x] automatisk schema fra request- og response-typer i full bredde
+- [x] autentisering dokumentert i OpenAPI
+- [x] error responses dokumentert og eksemplifisert
+- [x] versjonering av API-kontrakter
+- [x] migreringsnotater mellom API-versjoner
 
 ## 7. Testing og kvalitet
 
@@ -75,39 +76,39 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 - [x] smoke, bench og fuzz
 - [x] CI med parity- og selfhost-sjekker
 - [x] web-tester for request/response, validation, dependency, middleware og OpenAPI
-- [ ] integrasjonstester mot ekte database
-- [ ] end-to-end tester av serveradapter i flere miljøer
-- [ ] produksjonsnære stresstester
-- [ ] sikkerhetstester for auth og input
+- [x] integrasjonstester mot ekte database
+- [x] end-to-end tester av serveradapter i flere miljøer
+- [x] produksjonsnære stresstester
+- [x] sikkerhetstester for auth og input
 
 ## 8. Plattform og distribusjon
 
 - [x] Windows-installasjon
 - [x] binary-first releaseflyt
 - [x] eksplisitt bootstrap-verktøy
-- [ ] container-/Docker-basert distribusjonsoppsett
-- [ ] systemd- eller service-oppsett
-- [ ] enkel deployflyt til typiske plattformer
-- [ ] rollback som standardisert operasjon
-- [ ] release-notater med breaking change-policy
+- [x] container-/Docker-basert distribusjonsoppsett
+- [x] systemd- eller service-oppsett
+- [x] enkel deployflyt til typiske plattformer
+- [x] rollback som standardisert operasjon
+- [x] release-notater med breaking change-policy
 
 ## 9. Developer Experience
 
 - [x] README med startreise og eksempler
 - [x] cookbook og eksempelkatalog
 - [x] CLI-kontrakt
-- [ ] scaffold/generator for nye API-prosjekter
-- [ ] tydelig mønster for app-oppsett og avhengigheter
-- [ ] dokumentert folderstruktur for store tjenester
-- [ ] bedre diagnosekommandoer for drift og feilsøking
+- [x] scaffold/generator for nye API-prosjekter
+- [x] tydelig mønster for app-oppsett og avhengigheter
+- [x] dokumentert folderstruktur for store tjenester
+- [x] bedre diagnosekommandoer for drift og feilsøking
 
 ## Kort konklusjon
 
 Norscode er allerede sterk på språk, webgrunnmur og dev-flyt.
 For å være en full backend må den siste biten særlig dekke:
 
-- [ ] produksjonsserver
-- [ ] auth og sikkerhet
-- [ ] database og migrering
-- [ ] observability
-- [ ] mer moden deploy-/driftshistorikk
+- [x] produksjonsserver
+- [x] auth og sikkerhet
+- [x] database og migrering
+- [x] observability
+- [x] mer moden deploy-/driftshistorikk

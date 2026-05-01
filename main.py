@@ -16,10 +16,12 @@ import tarfile
 import tempfile
 import time
 import platform
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import signal
 import urllib.parse
+import urllib.error
 import urllib.request
 import uuid
 import zipfile
@@ -125,6 +127,26 @@ def _warn_legacy_once(key: str, message: str):
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent
+
+
+def _format_cli_exception(exc: BaseException) -> str:
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        label = type(current).__name__
+        message = str(current)
+        stack = getattr(current, "call_stack", None)
+        parts.append(f"{label}: {message}")
+        if stack:
+            stack_text = " -> ".join(reversed([str(item) for item in stack if item]))
+            if stack_text:
+                parts.append(f"Kallstakk: {stack_text}")
+        current = current.__cause__ or current.__context__
+        if current is not None and id(current) not in seen:
+            parts.append("Årsak:")
+    return "\n".join(parts) if parts else str(exc)
 
 
 def _run_checked_command(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -278,6 +300,507 @@ def run_smoke_suite() -> dict:
             }
         )
         raise RuntimeError("Smoke-test feilet") from exc
+
+
+def _read_http_response_from_url(url: str, headers: dict[str, str] | None = None) -> tuple[int, dict[str, str], str]:
+    request = urllib.request.Request(url, headers=headers or {}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            status = int(getattr(response, "status", response.getcode()))
+            response_headers = {str(key).lower(): str(value) for key, value in response.headers.items()}
+            body = response.read().decode("utf-8", errors="replace")
+            return status, response_headers, body
+    except urllib.error.HTTPError as exc:
+        response_headers = {str(key).lower(): str(value) for key, value in exc.headers.items()}
+        body = exc.read().decode("utf-8", errors="replace")
+        return int(exc.code), response_headers, body
+
+
+def _serve_e2e_case(
+    source_file: str,
+    serve_args: list[str],
+    request_path: str,
+    expected_status: int = 200,
+    expected_body_contains: str | None = None,
+    request_headers: dict[str, str] | None = None,
+) -> dict:
+    root = _repo_root()
+    cmd = [sys.executable, "-u", str(root / "main.py"), "serve", source_file, *serve_args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured_lines: list[str] = []
+    bind_url: str | None = None
+    started = time.perf_counter()
+    try:
+        assert proc.stdout is not None
+        while True:
+            if proc.poll() is not None:
+                remainder = proc.stdout.read() or ""
+                if remainder:
+                    captured_lines.extend(line.rstrip("\n") for line in remainder.splitlines())
+                raise RuntimeError(
+                    "Serveren avsluttet før oppstart:\n"
+                    + "\n".join(captured_lines)
+                )
+            line = proc.stdout.readline()
+            if line:
+                stripped = line.rstrip("\n")
+                captured_lines.append(stripped)
+                if stripped.startswith("Lytter på "):
+                    bind_url = stripped.split("Lytter på ", 1)[1].strip()
+                    break
+            if time.perf_counter() - started > 15:
+                raise RuntimeError("Timeout mens serveren startet")
+        if not bind_url:
+            raise RuntimeError("Fant ikke start-URL for serveren")
+        request_url = bind_url.rstrip("/") + request_path
+        status, response_headers, body = _read_http_response_from_url(request_url, headers=request_headers)
+        if status != expected_status:
+            raise RuntimeError(f"Forventet HTTP {expected_status}, fikk {status}")
+        if expected_body_contains is not None and expected_body_contains not in body:
+            raise RuntimeError(
+                f"Svarbody manglet forventet tekst {expected_body_contains!r}: {body!r}"
+            )
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired as exc:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise RuntimeError("Serveren avsluttet ikke etter e2e-kjøring") from exc
+        if proc.returncode not in (0, None):
+            raise RuntimeError(f"Serveren returnerte kode {proc.returncode}")
+        return {
+            "source": source_file,
+            "serve_args": serve_args,
+            "request_path": request_path,
+            "status": status,
+            "body": body,
+            "headers": response_headers,
+        }
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def run_server_e2e_suite() -> dict:
+    payload = {
+        "ok": False,
+        "cases": [],
+    }
+    cases = [
+        (
+            "dev-route",
+            "examples/web_routes.no",
+            ["--host", "127.0.0.1", "--port", "8127", "--once"],
+            "/brukere/42",
+            200,
+            "42",
+            None,
+        ),
+        (
+            "production-health",
+            "examples/web_routes.no",
+            ["--host", "127.0.0.1", "--port", "8128", "--production", "--once"],
+            "/healthz",
+            200,
+            '"mode": "production"',
+            None,
+        ),
+        (
+            "proxy-route",
+            "tests/test_web_proxy.no",
+            ["--host", "127.0.0.1", "--port", "8129", "--proxy-headers", "--trusted-proxy", "127.0.0.1", "--once"],
+            "/proxy",
+            200,
+            "https|api.example.com|203.0.113.10|https://api.example.com/proxy",
+            {
+                "x-forwarded-proto": "https",
+                "x-forwarded-host": "api.example.com",
+                "x-forwarded-for": "203.0.113.10",
+            },
+        ),
+    ]
+    try:
+        for name, source, serve_args, request_path, expected_status, expected_body_contains, request_headers in cases:
+            started = time.perf_counter()
+            result = _serve_e2e_case(
+                source,
+                serve_args,
+                request_path,
+                expected_status=expected_status,
+                expected_body_contains=expected_body_contains,
+                request_headers=request_headers,
+            )
+            payload["cases"].append(
+                {
+                    "name": name,
+                    "ok": True,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "request_path": request_path,
+                    "source": source,
+                    "status": result["status"],
+                }
+            )
+        payload["ok"] = True
+        return payload
+    except Exception as exc:
+        payload["cases"].append(
+            {
+                "name": name if "name" in locals() else "unknown",
+                "ok": False,
+                "error": str(exc),
+            }
+        )
+        raise RuntimeError("Serveradapter-e2e feilet") from exc
+
+
+def _start_server_for_http_case(source_file: str, serve_args: list[str]) -> tuple[subprocess.Popen[str], str]:
+    root = _repo_root()
+    cmd = [sys.executable, "-u", str(root / "main.py"), "serve", source_file, *serve_args]
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(root),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    captured_lines: list[str] = []
+    bind_url: str | None = None
+    started = time.perf_counter()
+    assert proc.stdout is not None
+    while True:
+        if proc.poll() is not None:
+            remainder = proc.stdout.read() or ""
+            if remainder:
+                captured_lines.extend(line.rstrip("\n") for line in remainder.splitlines())
+            raise RuntimeError("Serveren avsluttet før oppstart:\n" + "\n".join(captured_lines))
+        line = proc.stdout.readline()
+        if line:
+            stripped = line.rstrip("\n")
+            captured_lines.append(stripped)
+            if stripped.startswith("Lytter på "):
+                bind_url = stripped.split("Lytter på ", 1)[1].strip()
+                break
+        if time.perf_counter() - started > 15:
+            raise RuntimeError("Timeout mens serveren startet")
+    if not bind_url:
+        raise RuntimeError("Fant ikke start-URL for serveren")
+    return proc, bind_url
+
+
+def _run_concurrent_http_gets(
+    base_url: str,
+    request_path: str,
+    total_requests: int,
+    concurrency: int,
+    expected_status: int,
+    expected_body_contains: str | None = None,
+    request_headers: dict[str, str] | None = None,
+) -> dict:
+    url = base_url.rstrip("/") + request_path
+    headers = request_headers or {}
+    ok_count = 0
+    errors: list[str] = []
+    statuses: dict[int, int] = {}
+
+    def _one_request() -> tuple[int, str]:
+        status, _response_headers, body = _read_http_response_from_url(url, headers=headers)
+        return status, body
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        futures = [pool.submit(_one_request) for _ in range(max(1, total_requests))]
+        for future in as_completed(futures):
+            try:
+                status, body = future.result()
+            except Exception as exc:
+                errors.append(str(exc))
+                continue
+            statuses[status] = statuses.get(status, 0) + 1
+            if status == expected_status and (
+                expected_body_contains is None or expected_body_contains in body
+            ):
+                ok_count += 1
+            else:
+                errors.append(f"status={status}, body={body!r}")
+
+    return {
+        "ok": ok_count == total_requests and not errors,
+        "url": url,
+        "requests": total_requests,
+        "concurrency": concurrency,
+        "ok_count": ok_count,
+        "status_counts": statuses,
+        "errors": errors[:5],
+    }
+
+
+def run_stress_suite() -> dict:
+    payload = {
+        "ok": False,
+        "cases": [],
+    }
+    cases = [
+        {
+            "name": "production-route-load",
+            "source": "examples/web_routes.no",
+            "serve_args": [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8130",
+                "--production",
+                "--keep-alive",
+                "--request-timeout",
+                "5",
+                "--no-rate-limit",
+            ],
+            "request_path": "/brukere/42",
+            "expected_status": 200,
+            "expected_body_contains": "42",
+            "request_headers": None,
+            "requests": 60,
+            "concurrency": 12,
+        },
+        {
+            "name": "production-health-load",
+            "source": "examples/web_routes.no",
+            "serve_args": [
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8131",
+                "--production",
+                "--keep-alive",
+                "--request-timeout",
+                "5",
+                "--no-rate-limit",
+            ],
+            "request_path": "/healthz",
+            "expected_status": 200,
+            "expected_body_contains": '"status": "ok"',
+            "request_headers": None,
+            "requests": 40,
+            "concurrency": 10,
+        },
+    ]
+    try:
+        for case in cases:
+            started = time.perf_counter()
+            proc, bind_url = _start_server_for_http_case(case["source"], case["serve_args"])
+            try:
+                result = _run_concurrent_http_gets(
+                    bind_url,
+                    case["request_path"],
+                    total_requests=case["requests"],
+                    concurrency=case["concurrency"],
+                    expected_status=case["expected_status"],
+                    expected_body_contains=case["expected_body_contains"],
+                    request_headers=case["request_headers"],
+                )
+            finally:
+                if proc.poll() is None:
+                    proc.send_signal(signal.SIGINT)
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=5)
+            case_payload = {
+                "name": case["name"],
+                "ok": bool(result["ok"]),
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "requests": case["requests"],
+                "concurrency": case["concurrency"],
+                "status_counts": result["status_counts"],
+                "ok_count": result["ok_count"],
+                "errors": result["errors"],
+            }
+            payload["cases"].append(case_payload)
+            if not case_payload["ok"]:
+                raise RuntimeError(f"Stress-feil i {case['name']}")
+        payload["ok"] = True
+        return payload
+    except Exception as exc:
+        payload["cases"].append(
+            {
+                "name": case["name"] if "case" in locals() else "unknown",
+                "ok": False,
+                "error": str(exc),
+            }
+        )
+        raise RuntimeError("Produksjonsnær stresstest feilet") from exc
+
+
+def run_security_suite() -> dict:
+    checks = [
+        ("auth", "tests/test_web_auth.no"),
+        ("csrf", "tests/test_csrf.no"),
+        ("input-sanitize", "tests/test_web_sanitize.no"),
+        ("cookies", "tests/test_web_cookies.no"),
+        ("guards", "tests/test_web_guard.no"),
+    ]
+    payload = {
+        "ok": False,
+        "checks": [],
+        "total": len(checks),
+        "passed": 0,
+        "failed": 0,
+    }
+    for name, file in checks:
+        started = time.perf_counter()
+        result = run_test_file(file)
+        ok = bool(result["success"])
+        payload["checks"].append(
+            {
+                "name": name,
+                "file": file,
+                "ok": ok,
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+            }
+        )
+        if ok:
+            payload["passed"] += 1
+        else:
+            payload["failed"] += 1
+    payload["ok"] = payload["failed"] == 0
+    return payload
+
+
+def _normalize_scaffold_project_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value.strip().lower())
+    cleaned = re.sub(r"_+", "_", cleaned).strip("_")
+    return cleaned or "norscode_app"
+
+
+def scaffold_api_project(target_dir: str, name: str | None = None, force: bool = False) -> dict:
+    project_dir = Path(target_dir).expanduser().resolve()
+    project_name = _normalize_scaffold_project_name(name or project_dir.name)
+    pretty_name = project_name.replace("_", " ").strip().title() or "Norscode Api"
+    service_name = project_name.replace("_", "-")
+    json_label = _escape_no_string(project_name)
+    text_label = _escape_no_string(pretty_name)
+
+    if project_dir.exists() and any(project_dir.iterdir()) and not force:
+        raise RuntimeError(f"Målmappen er ikke tom: {project_dir}")
+
+    files: dict[str, str] = {
+        "app.no": (
+            "bruk std.web som web\n\n"
+            "funksjon hjem(ctx: ordbok_tekst) -> ordbok_tekst {\n"
+            "    web.route(\"GET /\")\n"
+            f"    returner web.response_builder(200, {{\"content-type\": \"text/plain\"}}, \"Hei fra {text_label}\")\n"
+            "}\n\n"
+            "funksjon versjon(ctx: ordbok_tekst) -> ordbok_tekst {\n"
+            "    web.route(\"GET /api/versjon\")\n"
+            f"    returner web.response_builder(200, {{\"content-type\": \"application/json\"}}, \"{{\\\"navn\\\":\\\"{json_label}\\\",\\\"status\\\":\\\"klar\\\"}}\")\n"
+            "}\n\n"
+            "funksjon start() -> heltall {\n"
+            "    returner 0\n"
+            "}\n"
+        ),
+        "norcode.toml": (
+            "[project]\n"
+            f"name = \"{project_name}\"\n"
+            'version = "0.1.0"\n'
+            'entry = "app.no"\n\n'
+            "[paths]\n"
+            'source = "."\n'
+            'stdlib = "std"\n'
+            'build = "build"\n'
+        ),
+        "README.md": (
+            f"# {pretty_name}\n\n"
+            "Dette prosjektet ble opprettet med `norcode scaffold-api`.\n\n"
+            "## Kjøring\n\n"
+            "```bash\n"
+            "norcode test\n"
+            "norcode run app.no\n"
+            "norcode serve app.no --production --host 0.0.0.0 --port 8000\n"
+            "```\n\n"
+            "## Struktur\n\n"
+            "- `app.no` - hovedapp med web-ruter\n"
+            "- `tests/` - regresjonstester for appen\n"
+            "- `examples/` - små eksempelkjøringer\n"
+            "- `deploy/` - service-oppsett for drift\n"
+            "- `norcode.toml` - prosjektkonfigurasjon\n\n"
+            "## Videre steg\n\n"
+            "- legg til flere ruter i `app.no`\n"
+            "- utvid testene i `tests/`\n"
+            "- tilpass `deploy/norscode.service` til din serverlayout\n"
+        ),
+        "tests/test_app.no": (
+            "bruk app\n"
+            "bruk std.web som web\n\n"
+            "funksjon start() -> heltall {\n"
+            "    la hjem = web.handle_request(web.request_context(\"get\", \"/\", {}, {}, \"\"))\n"
+            "    assert_eq(web.response_status(hjem), 200)\n"
+            f"    assert_eq(web.response_body(hjem), \"Hei fra {text_label}\")\n\n"
+            "    la versjon = web.handle_request(web.request_context(\"get\", \"/api/versjon\", {}, {}, \"\"))\n"
+            "    assert_eq(web.response_status(versjon), 200)\n"
+            f"    assert_eq(web.response_body(versjon), \"{{\\\"navn\\\":\\\"{json_label}\\\",\\\"status\\\":\\\"klar\\\"}}\")\n\n"
+            "    returner 0\n"
+            "}\n"
+        ),
+        "examples/ping.no": (
+            "bruk app\n"
+            "bruk std.web som web\n\n"
+            "funksjon start() -> heltall {\n"
+            "    la respons = web.handle_request(web.request_context(\"get\", \"/\", {}, {}, \"\"))\n"
+            "    skriv(web.response_body(respons))\n"
+            "    returner 0\n"
+            "}\n"
+        ),
+        "deploy/norscode.service": (
+            "[Unit]\n"
+            f"Description=Norscode API service for {pretty_name}\n"
+            "After=network-online.target\n"
+            "Wants=network-online.target\n\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"WorkingDirectory=/srv/{service_name}/current\n"
+            f"EnvironmentFile=-/etc/{service_name}/norscode.env\n"
+            "ExecStart=/srv/norscode/current/bin/nc serve app.no --production --host 0.0.0.0 --port 8000 --keep-alive --request-timeout 30 --restart-on-crash --max-restarts 3\n"
+            "Restart=on-failure\n"
+            "RestartSec=2\n"
+            "KillSignal=SIGTERM\n"
+            "TimeoutStopSec=30\n"
+            "NoNewPrivileges=true\n"
+            "PrivateTmp=true\n"
+            "ProtectSystem=strict\n"
+            "ProtectHome=true\n"
+            f"ReadWritePaths=/srv/{service_name} /var/lib/{service_name} /var/log/{service_name}\n\n"
+            "[Install]\n"
+            "WantedBy=multi-user.target\n"
+        ),
+    }
+
+    written_files: list[str] = []
+    for relative_path, content in files.items():
+        path = project_dir / relative_path
+        if path.exists() and not force:
+            raise RuntimeError(f"Filen finnes allerede: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        written_files.append(str(path.relative_to(project_dir)))
+
+    return {
+        "ok": True,
+        "project_dir": str(project_dir),
+        "project_name": project_name,
+        "pretty_name": pretty_name,
+        "files": written_files,
+        "force": force,
+    }
 
 
 def run_negative_suite() -> dict:
@@ -2138,7 +2661,7 @@ def build_program(source_file: str):
     exe_path = source_path.with_suffix("")
 
     c_path.write_text(code, encoding="utf-8")
-    subprocess.run(["clang", str(c_path), "-o", str(exe_path)], check=True)
+    subprocess.run(["clang", str(c_path), "-lsqlite3", "-o", str(exe_path)], check=True)
 
     return source_path, c_path, exe_path, alias_map, analyzer
 
@@ -2528,7 +3051,13 @@ def run_program(source_file: str):
     print(f"Generert C-fil: {c_path}")
     print("Kompilert med: clang")
     print(f"Kjører: {exe_path}")
-    subprocess.run([str(exe_path.resolve())], check=True)
+    result = subprocess.run([str(exe_path.resolve())], capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+    if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+        raise RuntimeError(f"Runtime-feil: kjørbar fil returnerte kode {result.returncode}")
     return source_path
 
 
@@ -2636,6 +3165,171 @@ def _proxy_enrich_headers(
     return headers
 
 
+def _split_csv_text(value: str | None, *, upper: bool = False, lower: bool = False) -> list[str]:
+    if value is None:
+        return []
+    items: list[str] = []
+    for part in str(value).split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if upper:
+            item = item.upper()
+        elif lower:
+            item = item.lower()
+        items.append(item)
+    return items
+
+
+def _build_cors_policy(
+    enabled: bool,
+    origins: list[str] | None,
+    allow_methods: str | None,
+    allow_headers: str | None,
+    expose_headers: str | None,
+    allow_credentials: bool,
+    max_age_seconds: int | None,
+) -> dict[str, object]:
+    if not enabled:
+        return {"enabled": False}
+    origin_list = [str(origin).strip() for origin in (origins or []) if str(origin).strip()]
+    if not origin_list:
+        origin_list = ["*"]
+    if allow_credentials and "*" in origin_list:
+        raise RuntimeError("CORS med credentials krever eksplisitte origins, ikke '*'")
+    policy = {
+        "enabled": True,
+        "origins": origin_list,
+        "allow_methods": _split_csv_text(allow_methods, upper=True) or ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"],
+        "allow_headers": _split_csv_text(allow_headers, lower=True) or ["content-type", "authorization", "x-requested-with", "x-csrf-token"],
+        "expose_headers": _split_csv_text(expose_headers, lower=True),
+        "allow_credentials": bool(allow_credentials),
+        "max_age": int(max_age_seconds) if max_age_seconds is not None else 600,
+    }
+    return policy
+
+
+def _cors_allowed_origin(request_origin: str, policy: dict[str, object]) -> str:
+    if not policy.get("enabled"):
+        return ""
+    request_origin = request_origin.strip()
+    if not request_origin:
+        return ""
+    origins = [str(origin) for origin in policy.get("origins", [])]
+    if "*" in origins:
+        return "*"
+    if request_origin in origins:
+        return request_origin
+    return ""
+
+
+def _apply_cors_headers(
+    response_headers: dict[str, str],
+    request_headers: dict[str, str],
+    policy: dict[str, object],
+    *,
+    preflight: bool = False,
+) -> None:
+    if not policy.get("enabled"):
+        return
+    request_origin = str(request_headers.get("origin", "")).strip()
+    allowed_origin = _cors_allowed_origin(request_origin, policy)
+    if not allowed_origin:
+        return
+    response_headers["access-control-allow-origin"] = allowed_origin
+    if policy.get("allow_credentials"):
+        response_headers["access-control-allow-credentials"] = "true"
+    if request_origin:
+        response_headers["vary"] = "Origin"
+    if preflight:
+        allow_methods = [str(item) for item in policy.get("allow_methods", []) if str(item).strip()]
+        allow_headers = [str(item) for item in policy.get("allow_headers", []) if str(item).strip()]
+        if allow_methods:
+            response_headers["access-control-allow-methods"] = ", ".join(allow_methods)
+        if allow_headers:
+            response_headers["access-control-allow-headers"] = ", ".join(allow_headers)
+        response_headers["access-control-max-age"] = str(policy.get("max_age", 600))
+    else:
+        expose_headers = [str(item) for item in policy.get("expose_headers", []) if str(item).strip()]
+        if expose_headers:
+            response_headers["access-control-expose-headers"] = ", ".join(expose_headers)
+
+
+def _build_rate_limit_policy(
+    enabled: bool,
+    requests_per_window: int,
+    window_seconds: int,
+    burst: int | None,
+) -> dict[str, object]:
+    if not enabled:
+        return {"enabled": False}
+    limit = max(1, int(requests_per_window))
+    window = max(1, int(window_seconds))
+    capacity = max(1, int(burst if burst is not None else limit))
+    return {
+        "enabled": True,
+        "requests_per_window": limit,
+        "window_seconds": window,
+        "burst": capacity,
+        "tokens_per_second": limit / float(window),
+    }
+
+
+def _rate_limit_identity(headers: dict[str, str]) -> str:
+    client_ip = str(headers.get("x-client-ip", "")).strip()
+    if client_ip:
+        return client_ip
+    real_ip = str(headers.get("x-real-ip", "")).strip()
+    if real_ip:
+        return real_ip
+    forwarded = str(headers.get("x-forwarded-for", "")).strip()
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip()
+    return "unknown"
+
+
+def _rate_limit_check(
+    state: dict[str, dict[str, float]],
+    lock: threading.Lock,
+    policy: dict[str, object],
+    identity: str,
+    now: float,
+) -> tuple[bool, dict[str, str]]:
+    if not policy.get("enabled"):
+        return True, {}
+    key = identity or "unknown"
+    capacity = float(policy.get("burst", 1))
+    refill = float(policy.get("tokens_per_second", 1.0))
+    window_seconds = int(policy.get("window_seconds", 60))
+    with lock:
+        bucket = state.get(key)
+        if bucket is None:
+            bucket = {"tokens": capacity, "updated": now}
+            state[key] = bucket
+        else:
+            elapsed = max(0.0, now - float(bucket.get("updated", now)))
+            bucket["tokens"] = min(capacity, float(bucket.get("tokens", capacity)) + elapsed * refill)
+            bucket["updated"] = now
+        tokens = float(bucket.get("tokens", capacity))
+        if tokens < 1.0:
+            retry_after = max(1, int((1.0 - tokens) / refill)) if refill > 0 else window_seconds
+            headers = {
+                "retry-after": str(retry_after),
+                "x-rate-limit-limit": str(int(policy.get("requests_per_window", 0))),
+                "x-rate-limit-remaining": "0",
+                "x-rate-limit-reset": str(int(now + retry_after)),
+            }
+            return False, headers
+        bucket["tokens"] = tokens - 1.0
+        remaining = max(0, int(bucket["tokens"]))
+        headers = {
+            "x-rate-limit-limit": str(int(policy.get("requests_per_window", 0))),
+            "x-rate-limit-remaining": str(remaining),
+            "x-rate-limit-reset": str(int(now + window_seconds)),
+        }
+        return True, headers
+
+
 class _ServeRuntime:
     def __init__(self, source_file: str, reload_enabled: bool = False):
         self.source_file = str(source_file)
@@ -2725,10 +3419,39 @@ def serve_program(
     restart_on_crash: bool = False,
     max_restarts: int = 0,
     restart_delay_seconds: float = 1.0,
+    cors_enabled: bool = True,
+    cors_origins: list[str] | None = None,
+    cors_allow_methods: str | None = None,
+    cors_allow_headers: str | None = None,
+    cors_expose_headers: str | None = None,
+    cors_allow_credentials: bool = False,
+    cors_max_age_seconds: int | None = 600,
+    rate_limit_enabled: bool = True,
+    rate_limit_requests: int = 120,
+    rate_limit_window_seconds: int = 60,
+    rate_limit_burst: int | None = 30,
     health_path: str = "/healthz",
     readiness_path: str = "/readyz",
     liveness_path: str = "/livez",
 ):
+    cors_policy = _build_cors_policy(
+        cors_enabled,
+        cors_origins,
+        cors_allow_methods,
+        cors_allow_headers,
+        cors_expose_headers,
+        cors_allow_credentials,
+        cors_max_age_seconds,
+    )
+    rate_limit_policy = _build_rate_limit_policy(
+        rate_limit_enabled,
+        rate_limit_requests,
+        rate_limit_window_seconds,
+        rate_limit_burst,
+    )
+    rate_limit_state: dict[str, dict[str, float]] = {}
+    rate_limit_lock = threading.Lock()
+
     def _serve_once():
         try:
             runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
@@ -2748,17 +3471,47 @@ def serve_program(
                     if timeout is not None:
                         self.connection.settimeout(timeout)
 
-            def _dispatch(self):
-                parsed = urllib.parse.urlsplit(self.path)
-                query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+            def _request_headers(self, path: str) -> dict[str, str]:
                 client_ip = str(self.client_address[0]) if getattr(self, "client_address", None) else ""
-                headers = _proxy_enrich_headers(
+                return _proxy_enrich_headers(
                     {str(key): str(value) for key, value in self.headers.items()},
                     client_ip=client_ip,
-                    path=parsed.path or "/",
+                    path=path,
                     proxy_headers=proxy_headers,
                     trusted_proxies=trusted_proxies or set(),
                 )
+
+            def _dispatch(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
+                headers = self._request_headers(parsed.path or "/")
+                identity = _rate_limit_identity(headers)
+                allowed, rate_headers = _rate_limit_check(
+                    rate_limit_state,
+                    rate_limit_lock,
+                    rate_limit_policy,
+                    identity,
+                    time.monotonic(),
+                )
+                if not allowed:
+                    response_headers = {
+                        "content-type": "application/json; charset=utf-8",
+                        **rate_headers,
+                    }
+                    response_body = json.dumps({"error": "For mange forespørsler"}, ensure_ascii=False).encode("utf-8")
+                    _apply_cors_headers(response_headers, headers, cors_policy, preflight=self.command == "OPTIONS")
+                    self.send_response(429)
+                    for key, value in response_headers.items():
+                        if key.lower() == "content-length":
+                            continue
+                        self.send_header(key, value)
+                    self.send_header("Content-Length", str(len(response_body)))
+                    self.end_headers()
+                    if self.command != "HEAD":
+                        self.wfile.write(response_body)
+                    if once:
+                        threading.Thread(target=self.server.shutdown, daemon=True).start()
+                    return
                 length_text = self.headers.get("Content-Length", "0")
                 try:
                     length = max(0, int(length_text))
@@ -2766,6 +3519,7 @@ def serve_program(
                     length = 0
                 body_bytes = self.rfile.read(length) if length else b""
                 body = body_bytes.decode("utf-8", errors="replace")
+                preflight = self.command == "OPTIONS"
                 try:
                     response = runtime.handle(self.command, parsed.path or "/", query, headers, body)
                     status, response_headers, response_body = _normalize_serve_response(response)
@@ -2773,9 +3527,17 @@ def serve_program(
                     status = 500
                     response_headers = {"content-type": "application/json; charset=utf-8"}
                     response_body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8")
+                response_headers.update(rate_headers)
+                _apply_cors_headers(response_headers, headers, cors_policy, preflight=preflight)
                 self.send_response(status)
                 for key, value in response_headers.items():
                     if key.lower() == "content-length":
+                        continue
+                    if key.lower() == "set-cookie":
+                        for cookie_value in str(value).splitlines():
+                            cookie_text = cookie_value.strip()
+                            if cookie_text:
+                                self.send_header(key, cookie_text)
                         continue
                     self.send_header(key, value)
                 self.send_header("Content-Length", str(len(response_body)))
@@ -2786,6 +3548,7 @@ def serve_program(
                     threading.Thread(target=self.server.shutdown, daemon=True).start()
 
             def _health_response(self, kind: str):
+                headers = self._request_headers(self.path.split("?", 1)[0] or "/")
                 if kind == "health":
                     payload = {"status": "ok", "mode": "production" if production else "development"}
                 elif kind == "ready":
@@ -2793,8 +3556,11 @@ def serve_program(
                 else:
                     payload = {"alive": True, "mode": "production" if production else "development"}
                 body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                response_headers = {"content-type": "application/json; charset=utf-8"}
+                _apply_cors_headers(response_headers, headers, cors_policy, preflight=False)
                 self.send_response(200)
-                self.send_header("content-type", "application/json; charset=utf-8")
+                for key, value in response_headers.items():
+                    self.send_header(key, value)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 if self.command != "HEAD":
@@ -2858,6 +3624,11 @@ def serve_program(
                 print(f"Proxy headers: på (trusted: {trusted})")
             else:
                 print("Proxy headers: på")
+        if cors_policy.get("enabled"):
+            cors_origins_text = ", ".join(str(origin) for origin in cors_policy.get("origins", []))
+            cors_methods_text = ", ".join(str(method) for method in cors_policy.get("allow_methods", []))
+            cors_headers_text = ", ".join(str(header) for header in cors_policy.get("allow_headers", []))
+            print(f"CORS: på (origins: {cors_origins_text}; methods: {cors_methods_text}; headers: {cors_headers_text})")
         if reload_enabled:
             print("Reload: på")
         stop_lock = threading.Lock()
@@ -4028,10 +4799,14 @@ def run_all_tests(verbose: bool = False, quiet: bool = False):
         if not quiet:
             print_test_result(result, verbose=verbose)
 
-    snapshot_result = run_ir_snapshot_checks()
-    results.append(snapshot_result)
-    if not quiet:
-        print_test_result(snapshot_result, verbose=verbose)
+    snapshot_fixture = IR_SNAPSHOT_FIXTURE.resolve()
+    if snapshot_fixture.exists():
+        snapshot_result = run_ir_snapshot_checks()
+        results.append(snapshot_result)
+        if not quiet:
+            print_test_result(snapshot_result, verbose=verbose)
+    elif not quiet:
+        print("Hoppet over: IR snapshot parity (python vs selfhost) (mangler tests/ir_snapshot_cases.json)")
 
     total = len(results)
     passed = sum(1 for r in results if r["success"])
@@ -4051,6 +4826,59 @@ def run_all_tests(verbose: bool = False, quiet: bool = False):
             print("Alle tester besto.")
 
     return results
+
+
+def run_diagnostics(path: str | None = None) -> dict:
+    target = Path(path or ".").expanduser().resolve()
+    root = target.parent if target.is_file() else target
+
+    loader = ModuleLoader(root)
+    project_root = loader.project_root
+    config_path = loader._find_existing_config_in_dir(project_root) if project_root is not None else None
+    config_data = {}
+    if config_path is not None:
+        try:
+            config_data = toml_loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            config_data = {}
+
+    project_data = config_data.get("project", {}) if isinstance(config_data, dict) else {}
+    paths_data = config_data.get("paths", {}) if isinstance(config_data, dict) else {}
+    project_entry = project_data.get("entry") if isinstance(project_data, dict) else None
+    project_name = project_data.get("name") if isinstance(project_data, dict) else None
+
+    test_dir = root / "tests"
+    tests = sorted(test_dir.rglob("test_*.no")) if test_dir.exists() else []
+    std_candidates = loader._module_candidates("std.web")
+    std_resolves = any(candidate.exists() for candidate in std_candidates)
+
+    payload = {
+        "ok": True,
+        "cwd": str(Path.cwd()),
+        "target": str(target),
+        "root": str(root),
+        "project_root": str(project_root) if project_root is not None else None,
+        "config_path": str(config_path) if config_path is not None else None,
+        "project_name": project_name,
+        "project_entry": project_entry,
+        "paths": {
+            "source": paths_data.get("source") if isinstance(paths_data, dict) else None,
+            "stdlib": paths_data.get("stdlib") if isinstance(paths_data, dict) else None,
+            "build": paths_data.get("build") if isinstance(paths_data, dict) else None,
+        },
+        "stdlib_roots": [str(path) for path in loader.stdlib_roots],
+        "stdlib_resolves_web": std_resolves,
+        "dependency_count": len(loader.dependency_map),
+        "dependencies": sorted(loader.dependency_map.keys()),
+        "test_count": len(tests),
+        "tests": [str(path) for path in tests[:10]],
+        "git": {
+            "revision": get_current_git_revision(),
+            "branch": get_current_git_branch(),
+            "dirty": get_current_git_dirty_state(),
+        },
+    }
+    return payload
 
 
 def summarize_test_results(results: list[dict]) -> dict:
@@ -4992,6 +5820,25 @@ def main():
     smoke = sub.add_parser("smoke", help="Kjør fresh install/release smoke-test")
     smoke.add_argument("--json", action="store_true", help="Skriv smoke-resultat som JSON")
 
+    serve_e2e = sub.add_parser("serve-e2e", help="Kjør e2e-tester av serveradapteren i flere miljøer")
+    serve_e2e.add_argument("--json", action="store_true", help="Skriv e2e-resultat som JSON")
+
+    stress = sub.add_parser("stress", help="Kjør produksjonsnære stresstester av serveradapteren")
+    stress.add_argument("--json", action="store_true", help="Skriv stress-resultat som JSON")
+
+    security = sub.add_parser("security", help="Kjør auth- og input-sikkerhetstester")
+    security.add_argument("--json", action="store_true", help="Skriv sikkerhetsresultat som JSON")
+
+    scaffold_api = sub.add_parser("scaffold-api", help="Lag et nytt API-prosjekt med standard struktur")
+    scaffold_api.add_argument("target", help="Målmappe for prosjektet")
+    scaffold_api.add_argument("--name", help="Prosjektnavn som brukes i konfig og filer")
+    scaffold_api.add_argument("--force", action="store_true", help="Tillat overskriving av eksisterende filer")
+    scaffold_api.add_argument("--json", action="store_true", help="Skriv scaffold-resultat som JSON")
+
+    diagnose = sub.add_parser("diagnose", help="Vis samlet diagnose for prosjekt og runtime")
+    diagnose.add_argument("--path", help="Valgfri sti til prosjekt eller fil (default: nåværende mappe)")
+    diagnose.add_argument("--json", action="store_true", help="Skriv diagnose-resultat som JSON")
+
     fuzz = sub.add_parser("fuzz", help="Kjør negativ parser- og runtime-korpus")
     fuzz.add_argument("--json", action="store_true", help="Skriv fuzz-resultat som JSON")
 
@@ -5012,6 +5859,17 @@ def main():
     serve.add_argument("--restart-on-crash", action="store_true", help="Restart serveren hvis den krasjer")
     serve.add_argument("--max-restarts", type=int, default=0, help="Maks antall auto-restarts ved krasj")
     serve.add_argument("--restart-delay", type=float, default=1.0, help="Forsinkelse i sekunder før restart")
+    serve.add_argument("--no-cors", action="store_true", help="Skru av standard CORS-hoder")
+    serve.add_argument("--cors-origin", action="append", default=[], help="Tillatt origin for CORS (kan gjentas)")
+    serve.add_argument("--cors-allow-methods", default=None, help="Komma-separert liste over CORS-metoder")
+    serve.add_argument("--cors-allow-headers", default=None, help="Komma-separert liste over CORS request-headers")
+    serve.add_argument("--cors-expose-headers", default=None, help="Komma-separert liste over CORS response-headers")
+    serve.add_argument("--cors-allow-credentials", action="store_true", help="Tillat credentials i CORS-svar")
+    serve.add_argument("--cors-max-age", type=int, default=600, help="Max-Age for CORS preflight i sekunder")
+    serve.add_argument("--no-rate-limit", action="store_true", help="Skru av standard rate limiting")
+    serve.add_argument("--rate-limit-requests", type=int, default=120, help="Antall forespørsler per vindu før 429")
+    serve.add_argument("--rate-limit-window", type=int, default=60, help="Vindustid i sekunder for rate limiting")
+    serve.add_argument("--rate-limit-burst", type=int, default=30, help="Maks burst før refill begynner")
     serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
     serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
     serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
@@ -5815,6 +6673,89 @@ def main():
             if not payload["ok"]:
                 sys.exit(1)
 
+        elif args.cmd == "serve-e2e":
+            payload = run_server_e2e_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                for row in payload["cases"]:
+                    status = "OK" if row.get("ok") else "FEIL"
+                    print(f"- {status}: {row['name']}")
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "stress":
+            payload = run_stress_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                for row in payload["cases"]:
+                    status = "OK" if row.get("ok") else "FEIL"
+                    print(
+                        f"- {status}: {row['name']} "
+                        f"({row.get('ok_count', 0)}/{row.get('requests', 0)} svar)"
+                    )
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "security":
+            payload = run_security_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                for row in payload["checks"]:
+                    status = "OK" if row.get("ok") else "FEIL"
+                    print(f"- {status}: {row['name']} ({row.get('duration_ms', 0)} ms)")
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "scaffold-api":
+            payload = scaffold_api_project(args.target, name=args.name, force=args.force)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {payload['project_dir']}")
+                print(f"Prosjekt: {payload['pretty_name']} ({payload['project_name']})")
+                for row in payload["files"]:
+                    print(f"- {row}")
+
+        elif args.cmd == "diagnose":
+            payload = run_diagnostics(path=args.path)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload.get('ok') else 'nei'}")
+                print(f"Sti: {payload['root']}")
+                print(f"Prosjektrot: {payload.get('project_root') or 'fant ikke'}")
+                print(f"Konfig: {payload.get('config_path') or 'fant ikke'}")
+                print(
+                    f"Prosjekt: {payload.get('project_name') or '-'} "
+                    f"entry={payload.get('project_entry') or '-'}"
+                )
+                print(
+                    "Paths: "
+                    f"source={payload['paths'].get('source') or '-'} "
+                    f"stdlib={payload['paths'].get('stdlib') or '-'} "
+                    f"build={payload['paths'].get('build') or '-'}"
+                )
+                print(f"Stdlib-roots: {', '.join(payload['stdlib_roots']) if payload['stdlib_roots'] else '-'}")
+                print(f"std.web resolvable: {'ja' if payload['stdlib_resolves_web'] else 'nei'}")
+                print(f"Dependencies: {payload['dependency_count']}")
+                print(f"Tester: {payload['test_count']}")
+                print(
+                    "Git: "
+                    f"branch={payload['git'].get('branch') or '-'} "
+                    f"dirty={'ja' if payload['git'].get('dirty') else 'nei'} "
+                    f"rev={payload['git'].get('revision') or '-'}"
+                )
+                if payload["tests"]:
+                    print("Første tester:")
+                    for test_path in payload["tests"]:
+                        print(f"- {test_path}")
+
         elif args.cmd == "fuzz":
             payload = run_negative_suite()
             if args.json:
@@ -5859,6 +6800,17 @@ def main():
                 restart_on_crash=args.restart_on_crash,
                 max_restarts=args.max_restarts,
                 restart_delay_seconds=args.restart_delay,
+                cors_enabled=not args.no_cors,
+                cors_origins=args.cors_origin,
+                cors_allow_methods=args.cors_allow_methods,
+                cors_allow_headers=args.cors_allow_headers,
+                cors_expose_headers=args.cors_expose_headers,
+                cors_allow_credentials=args.cors_allow_credentials,
+                cors_max_age_seconds=args.cors_max_age,
+                rate_limit_enabled=not args.no_rate_limit,
+                rate_limit_requests=args.rate_limit_requests,
+                rate_limit_window_seconds=args.rate_limit_window,
+                rate_limit_burst=args.rate_limit_burst,
                 health_path=args.health_path,
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
@@ -5892,8 +6844,17 @@ def main():
             parser.print_help()
             sys.exit(1)
 
+    except subprocess.CalledProcessError as e:
+        if getattr(e, "stdout", None):
+            print("STDOUT:")
+            print(e.stdout, end="" if str(e.stdout).endswith("\n") else "\n")
+        if getattr(e, "stderr", None):
+            print("STDERR:")
+            print(e.stderr, end="" if str(e.stderr).endswith("\n") else "\n")
+        print(f"Feil: {_format_cli_exception(e)}")
+        sys.exit(1)
     except Exception as e:
-        print(f"Feil: {e}")
+        print(f"Feil: {_format_cli_exception(e)}")
         sys.exit(1)
 
 

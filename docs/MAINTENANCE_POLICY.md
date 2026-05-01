@@ -28,9 +28,15 @@ Dette dokumentet beskriver hvordan Norscode vedlikeholdes etter 1.0-kandidaten.
 - Brukeren skal få en tydelig migreringssti før gammel oppførsel fjernes.
 - Legacy-navn kan varsles, men skal ikke være normal vei for nye prosjekter.
 
+## Release-notater
+
+- Hver release skal ha en kort, lesbar oppsummering av hva som endret seg.
+- Breaking changes skal stå tydelig først i notatene og ha en egen migreringsforklaring.
+- Notatene skal nevne berørte kommandoer, dataformat eller deployflyt når det er relevant.
+- Release-notater skal være en del av standard publiseringsflyt, ikke en ettertanke.
+
 ## Hva som er normal support
 
 - `norcode` som primær CLI
 - `./bin/bootstrap` og `python3 main.py` som eksplisitt bootstrap
 - releasepakker som kan installeres, oppgraderes og rulles tilbake mekanisk
-

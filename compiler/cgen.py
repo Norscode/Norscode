@@ -44,6 +44,7 @@ class CGenerator:
         self.startup_hooks: list[str] = []
         self.shutdown_hooks: list[str] = []
         self.openapi_paths_json = "{}"
+        self.openapi_components_json = ""
         self._build_function_name_map()
 
     def _build_function_name_map(self):
@@ -141,9 +142,11 @@ class CGenerator:
         if type_name == TYPE_MAP_BOOL:
             return {"type": "object", "additionalProperties": {"type": "boolean"}}
         if isinstance(type_name, str) and type_name.startswith("liste_"):
-            return {"type": "array", "items": {"type": "string"}}
+            inner = type_name[len("liste_") :]
+            return {"type": "array", "items": self._schema_for_type(inner)}
         if isinstance(type_name, str) and type_name.startswith("ordbok_"):
-            return {"type": "object", "additionalProperties": {"type": "string"}}
+            inner = type_name[len("ordbok_") :]
+            return {"type": "object", "additionalProperties": self._schema_for_type(inner)}
         return {"type": "string"}
 
     def _sample_for_type(self, type_name):
@@ -162,26 +165,52 @@ class CGenerator:
         if type_name == TYPE_MAP_BOOL:
             return {"verdi": True}
         if isinstance(type_name, str) and type_name.startswith("liste_"):
-            return ["eksempel"]
+            inner = type_name[len("liste_") :]
+            return [self._sample_for_type(inner)]
         if isinstance(type_name, str) and type_name.startswith("ordbok_"):
-            return {"verdi": "eksempel"}
+            inner = type_name[len("ordbok_") :]
+            return {"verdi": self._sample_for_type(inner)}
         return "eksempel"
 
-    def _route_docs_from_function(self, fn, spec):
+    def _function_uses_bearer_auth(self, fn):
+        for node in self._walk_ast_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, ModuleCallNode):
+                continue
+            module_name = getattr(node, "module_name", "")
+            func_name = getattr(node, "func_name", "")
+            if module_name in {"web", "std.web"} and func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                return True
+        return False
+
+    def _route_docs_from_function(self, fn, spec, auth_guards=None):
         method, route_path = self._split_web_route_spec(spec)
         path_params = []
         query_params = []
         body_fields = []
+        error_responses = []
         seen_path = set()
         seen_query = set()
         seen_body = set()
+        auth_guards = auth_guards or set()
+        auth_required = False
         for node in self._walk_ast_nodes(getattr(fn, "body", None)):
             if not isinstance(node, ModuleCallNode):
                 continue
             module_name = getattr(node, "module_name", "")
             func_name = getattr(node, "func_name", "")
             args = getattr(node, "args", []) or []
-            if module_name not in {"web", "std.web"} or len(args) < 2 or not isinstance(args[1], StringNode):
+            if module_name not in {"web", "std.web"}:
+                continue
+            if func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                auth_required = True
+            if func_name == "use_guard" and args and isinstance(args[0], StringNode) and args[0].value in auth_guards:
+                auth_required = True
+            if func_name == "response_error" and args and isinstance(args[0], NumberNode):
+                error_responses.append({
+                    "status": int(args[0].value),
+                    "message": str(args[1].value) if len(args) > 1 and isinstance(args[1], StringNode) else "",
+                })
+            if len(args) < 2 or not isinstance(args[1], StringNode):
                 continue
             key = args[1].value
             if func_name == "request_param" and key not in seen_path:
@@ -221,7 +250,7 @@ class CGenerator:
                 for item in body_fields
             }
         response_type = getattr(fn, "return_type", TYPE_TEXT)
-        return {
+        operation = {
             "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
             "method": (method or "GET").lower(),
             "path": path_template,
@@ -234,10 +263,44 @@ class CGenerator:
             "request_example": request_example,
             "response_example": self._sample_for_type(response_type),
             "response_schema": self._schema_for_type(response_type),
+            "error_responses": error_responses,
+            "responses": {
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": self._schema_for_type(response_type),
+                            "example": self._sample_for_type(response_type),
+                        }
+                    },
+                }
+            },
         }
+        if auth_required:
+            operation["security"] = [{"bearerAuth": []}]
+            operation["responses"]["401"] = {"description": "Uautorisert"}
+            operation["responses"]["403"] = {"description": "Forbudt"}
+        for item in error_responses:
+            status = str(item.get("status", 500))
+            message = item.get("message", "")
+            operation["responses"][status] = {
+                "description": message or "Feil",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {"error": {"type": "string"}},
+                            "required": ["error"],
+                        },
+                        "example": {"error": message or "Feil"},
+                    }
+                },
+            }
+        return operation
 
     def _render_openapi_paths_json(self):
         paths = {}
+        has_bearer_auth = False
         for handler in self.route_handlers:
             path = handler.get("path", "")
             method = str(handler.get("method", "get")).lower()
@@ -261,7 +324,7 @@ class CGenerator:
                 "operationId": handler.get("operation_id", handler.get("function", "")),
                 "summary": handler.get("summary", handler.get("function", "")),
                 "parameters": parameters,
-                "responses": {
+                "responses": handler.get("responses", {
                     "200": {
                         "description": "OK",
                         "content": {
@@ -271,9 +334,28 @@ class CGenerator:
                             }
                         },
                     }
-                },
+                }),
                 "x-example-request": handler.get("request_example", {}),
             }
+            if handler.get("security"):
+                operation["security"] = handler.get("security")
+                has_bearer_auth = True
+            for item in handler.get("error_responses", []):
+                status = str(item.get("status", 500))
+                message = item.get("message", "")
+                operation["responses"][status] = {
+                    "description": message or "Feil",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"error": {"type": "string"}},
+                                "required": ["error"],
+                            },
+                            "example": {"error": message or "Feil"},
+                        }
+                    },
+                }
             body_fields = handler.get("body_fields", [])
             if body_fields:
                 required_fields = [item["name"] for item in body_fields if item.get("required", False)]
@@ -290,9 +372,21 @@ class CGenerator:
                             "example": handler.get("request_example", {}).get("body", {}),
                         }
                     },
-                }
+            }
             path_item[method] = operation
         return json.dumps(paths, ensure_ascii=False)
+
+    def _render_openapi_components_json(self):
+        if any(handler.get("security") for handler in self.route_handlers):
+            return json.dumps({
+                "securitySchemes": {
+                    "bearerAuth": {
+                        "type": "http",
+                        "scheme": "bearer",
+                    }
+                }
+            }, ensure_ascii=False)
+        return ""
 
     def _web_annotations_from_function(self, fn):
         statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
@@ -365,11 +459,27 @@ class CGenerator:
         handlers = []
         providers = []
         guard_providers = []
+        auth_guard_names = set()
         request_middlewares = []
         response_middlewares = []
         error_middlewares = []
         startup_hooks = []
         shutdown_hooks = []
+        for fn in getattr(tree, "functions", []):
+            statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
+            if not statements:
+                continue
+            for stmt in statements:
+                if not isinstance(stmt, ExprStmtNode):
+                    break
+                expr = stmt.expr
+                if not isinstance(expr, ModuleCallNode):
+                    break
+                if expr.module_name not in {"web", "std.web"}:
+                    break
+                if expr.func_name == "guard" and self._function_uses_bearer_auth(fn):
+                    auth_guard_names.add(fn.name)
+                break
         for fn in getattr(tree, "functions", []):
             spec, deps, guards, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook = self._web_annotations_from_function(fn)
             if spec is None:
@@ -377,10 +487,14 @@ class CGenerator:
             if spec is not None:
                 route_prefix = getattr(fn, "route_prefix", "")
                 combined_spec = self._combine_web_route_prefix(route_prefix, spec)
-                route_docs = self._route_docs_from_function(fn, combined_spec)
+                route_docs = self._route_docs_from_function(fn, combined_spec, auth_guard_names)
                 route_docs["deps"] = list(deps)
                 route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
+                if route_docs.get("security") is None and any(guard in auth_guard_names for guard in guards):
+                    route_docs["security"] = [{"bearerAuth": []}]
+                    route_docs["responses"]["401"] = {"description": "Uautorisert"}
+                    route_docs["responses"]["403"] = {"description": "Forbudt"}
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers.append({
@@ -395,6 +509,8 @@ class CGenerator:
                     "function": function_name,
                     "params": len(getattr(fn, "params", []) or []),
                 })
+                if self._function_uses_bearer_auth(fn):
+                    auth_guard_names.add(fn.name)
             if request_middleware:
                 request_middlewares.append(function_name)
             if response_middleware:
@@ -405,6 +521,7 @@ class CGenerator:
                 startup_hooks.append(function_name)
             if shutdown_hook:
                 shutdown_hooks.append(function_name)
+        self.auth_guard_names = auth_guard_names
         self.request_middlewares = request_middlewares
         self.response_middlewares = response_middlewares
         self.error_middlewares = error_middlewares
@@ -1019,6 +1136,7 @@ class CGenerator:
         entry_function = None
         self.route_handlers, self.dependency_providers, self.guard_providers = self._collect_route_handlers(tree)
         self.openapi_paths_json = self._render_openapi_paths_json()
+        self.openapi_components_json = self._render_openapi_components_json()
         for fn in tree.functions:
             if fn.name == "start" and (getattr(fn, "module_name", None) in (None, "__main__")):
                 entry_function = fn
@@ -1027,6 +1145,7 @@ class CGenerator:
         self.emit("#include <stdio.h>")
         self.emit("#include <stdlib.h>")
         self.emit("#include <string.h>")
+        self.emit("#include <sqlite3.h>")
         self.emit("#include <ctype.h>")
         self.emit("#include <stdint.h>")
         self.emit("#include <setjmp.h>")
@@ -3192,6 +3311,51 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_request_cookie(nl_map_text *ctx, const char *key) {")
+        self.indent += 1
+        self.emit("nl_map_text *headers = nl_web_request_headers(ctx);")
+        self.emit("char *cookie_header = nl_map_text_get(headers, \"cookie\");")
+        self.emit("if (!cookie_header || !*cookie_header || !key || !*key) { return nl_strdup(\"\"); }")
+        self.emit("char *copy = nl_strdup(cookie_header);")
+        self.emit("char *token = strtok(copy, \";\");")
+        self.emit("while (token) {")
+        self.indent += 1
+        self.emit("while (*token && isspace((unsigned char)*token)) { token++; }")
+        self.emit("char *eq = strchr(token, '=');")
+        self.emit("if (eq) {")
+        self.indent += 1
+        self.emit("*eq = '\\0';")
+        self.emit("char *name = token;")
+        self.emit("char *value = eq + 1;")
+        self.emit("char *end = value + strlen(value);")
+        self.emit("while (end > value && isspace((unsigned char)*(end - 1))) { *(--end) = '\\0'; }")
+        self.emit("if (strcmp(name, key) == 0) {")
+        self.indent += 1
+        self.emit("char *result = nl_strdup(value);")
+        self.emit("free(copy);")
+        self.emit("return result;")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("token = strtok(NULL, \";\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("free(copy);")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_request_cookie_or(nl_map_text *ctx, const char *key, const char *fallback) {")
+        self.indent += 1
+        self.emit("char *value = nl_web_request_cookie(ctx, key);")
+        self.emit("if (!value || !*value) { free(value); return nl_strdup(fallback ? fallback : \"\"); }")
+        self.emit("return value;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static char *nl_web_auth_header(nl_map_text *ctx) {")
         self.indent += 1
         self.emit("return nl_web_request_header(ctx, \"authorization\");")
@@ -3447,6 +3611,587 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_escape_html(const char *value) {")
+        self.indent += 1
+        self.emit("const char *text = value ? value : \"\";")
+        self.emit("size_t extra = 0;")
+        self.emit("for (const char *p = text; *p; ++p) {")
+        self.indent += 1
+        self.emit("switch (*p) {")
+        self.indent += 1
+        self.emit("case '&': extra += 4; break;")
+        self.emit("case '<': case '>': extra += 3; break;")
+        self.emit("case '\"': extra += 5; break;")
+        self.emit("case '\\'': extra += 4; break;")
+        self.emit("default: break;")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("size_t len = strlen(text);")
+        self.emit("char *out = (char *)malloc(len + extra + 1);")
+        self.emit("if (!out) { return nl_strdup(\"\"); }")
+        self.emit("char *dst = out;")
+        self.emit("for (const char *p = text; *p; ++p) {")
+        self.indent += 1
+        self.emit("switch (*p) {")
+        self.indent += 1
+        self.emit("case '&': memcpy(dst, \"&amp;\", 5); dst += 5; break;")
+        self.emit("case '<': memcpy(dst, \"&lt;\", 4); dst += 4; break;")
+        self.emit("case '>': memcpy(dst, \"&gt;\", 4); dst += 4; break;")
+        self.emit("case '\"': memcpy(dst, \"&quot;\", 6); dst += 6; break;")
+        self.emit("case '\\'': memcpy(dst, \"&#x27;\", 6); dst += 6; break;")
+        self.emit("default: *dst++ = *p; break;")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("*dst = '\\0';")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_safe_filename(const char *value) {")
+        self.indent += 1
+        self.emit("const char *text = value ? value : \"\";")
+        self.emit("char *copy = nl_strdup(text);")
+        self.emit("for (char *p = copy; *p; ++p) { if (*p == '\\\\') { *p = '/'; } }")
+        self.emit("char *slash = strchr(copy, '/');")
+        self.emit("char *base = slash ? slash + 1 : copy;")
+        self.emit("size_t len = strlen(base);")
+        self.emit("char *out = (char *)malloc(len + 1);")
+        self.emit("if (!out) { free(copy); return nl_strdup(\"fil\"); }")
+        self.emit("size_t pos = 0;")
+        self.emit("for (const char *p = base; *p; ++p) {")
+        self.indent += 1
+        self.emit("unsigned char ch = (unsigned char)*p;")
+        self.emit("if (isalnum(ch) || ch == '-' || ch == '_' || ch == '.') { out[pos++] = (char)ch; }")
+        self.emit("else { out[pos++] = '_'; }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("while (pos > 0 && (out[pos - 1] == '.' || out[pos - 1] == '_')) { pos--; }")
+        self.emit("while (pos > 0 && (out[0] == '.' || out[0] == '_')) { memmove(out, out + 1, --pos); }")
+        self.emit("out[pos] = '\\0';")
+        self.emit("free(copy);")
+        self.emit("if (!*out) { free(out); return nl_strdup(\"fil\"); }")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_safe_path_segment(const char *value) {")
+        self.indent += 1
+        self.emit("const char *text = value ? value : \"\";")
+        self.emit("size_t len = strlen(text);")
+        self.emit("char *out = (char *)malloc(len + 1);")
+        self.emit("if (!out) { return nl_strdup(\"segment\"); }")
+        self.emit("size_t pos = 0;")
+        self.emit("for (const char *p = text; *p; ++p) {")
+        self.indent += 1
+        self.emit("unsigned char ch = (unsigned char)*p;")
+        self.emit("if (isalnum(ch) || ch == '-' || ch == '_') { out[pos++] = (char)ch; }")
+        self.emit("else if (isspace(ch)) { if (pos == 0 || out[pos - 1] != '-') { out[pos++] = '-'; } }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("while (pos > 0 && (out[pos - 1] == '-' || out[pos - 1] == '_')) { pos--; }")
+        self.emit("while (pos > 0 && (out[0] == '-' || out[0] == '_')) { memmove(out, out + 1, --pos); }")
+        self.emit("out[pos] = '\\0';")
+        self.emit("if (!*out) { free(out); return nl_strdup(\"segment\"); }")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_safe_slug(const char *value) {")
+        self.indent += 1
+        self.emit("const char *text = value ? value : \"\";")
+        self.emit("size_t len = strlen(text);")
+        self.emit("char *out = (char *)malloc(len + 1);")
+        self.emit("if (!out) { return nl_strdup(\"slug\"); }")
+        self.emit("size_t pos = 0;")
+        self.emit("int last_dash = 0;")
+        self.emit("for (const char *p = text; *p; ++p) {")
+        self.indent += 1
+        self.emit("unsigned char ch = (unsigned char)tolower((unsigned char)*p);")
+        self.emit("if (isalnum(ch)) { out[pos++] = (char)ch; last_dash = 0; }")
+        self.emit("else if (isspace((unsigned char)*p) || *p == '-' || *p == '_') { if (!last_dash) { out[pos++] = '-'; last_dash = 1; } }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("while (pos > 0 && out[pos - 1] == '-') { pos--; }")
+        self.emit("while (pos > 0 && out[0] == '-') { memmove(out, out + 1, --pos); }")
+        self.emit("out[pos] = '\\0';")
+        self.emit("if (!*out) { free(out); return nl_strdup(\"slug\"); }")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_cookie_header(const char *name, const char *value) {")
+        self.indent += 1
+        self.emit("if (!name || !*name) { return nl_strdup(\"\"); }")
+        self.emit("char *encoded = nl_strdup(value ? value : \"\");")
+        self.emit("char *result = (char *)malloc(strlen(name) + strlen(encoded) + 64);")
+        self.emit("if (!result) { free(encoded); return nl_strdup(\"\"); }")
+        self.emit("snprintf(result, strlen(name) + strlen(encoded) + 64, \"%s=%s; Path=/; HttpOnly; Secure; SameSite=Lax\", name, encoded);")
+        self.emit("free(encoded);")
+        self.emit("return result;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static nl_map_text *nl_web_response_set_cookie(nl_map_text *response, const char *cookie) {")
+        self.indent += 1
+        self.emit("if (!response) { response = nl_web_response_builder(200, nl_map_text_new(), \"\"); }")
+        self.emit("if (!cookie || !*cookie) { return response; }")
+        self.emit("nl_map_text *headers = nl_web_response_headers(response);")
+        self.emit("char *existing = nl_map_text_get(headers, \"set-cookie\");")
+        self.emit("if (existing && *existing) {")
+        self.indent += 1
+        self.emit("char *joined = (char *)malloc(strlen(existing) + strlen(cookie) + 2);")
+        self.emit("if (!joined) { return response; }")
+        self.emit("snprintf(joined, strlen(existing) + strlen(cookie) + 2, \"%s\\n%s\", existing, cookie);")
+        self.emit("nl_map_text_set(headers, \"set-cookie\", joined);")
+        self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        self.emit("nl_map_text_set(headers, \"set-cookie\", nl_strdup(cookie));")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return nl_web_response_builder(nl_web_response_status(response), headers, nl_web_response_body(response));")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("typedef struct {")
+        self.indent += 1
+        self.emit("int active;")
+        self.emit("char *handle;")
+        self.emit("sqlite3 *conn;")
+        self.emit("char *pool_handle;")
+        self.emit("int pooled;")
+        self.indent -= 1
+        self.emit("} nl_db_slot;")
+        self.emit("static nl_db_slot nl_db_slots[64];")
+        self.emit("static int nl_db_next_handle = 1;")
+        self.emit()
+
+        self.emit("typedef struct {")
+        self.indent += 1
+        self.emit("int active;")
+        self.emit("int closed;")
+        self.emit("char *handle;")
+        self.emit("char *path;")
+        self.emit("int max_conn;")
+        self.emit("int open_count;")
+        self.emit("int idle_count;")
+        self.emit("sqlite3 *idle[16];")
+        self.indent -= 1
+        self.emit("} nl_db_pool;")
+        self.emit("static nl_db_pool nl_db_pools[32];")
+        self.emit("static int nl_db_next_pool_handle = 1;")
+        self.emit()
+
+        self.emit("static nl_db_slot *nl_db_find_slot(const char *handle) {")
+        self.indent += 1
+        self.emit("if (!handle || !*handle) { return NULL; }")
+        self.emit("for (size_t i = 0; i < 64; ++i) {")
+        self.indent += 1
+        self.emit("if (nl_db_slots[i].active && nl_db_slots[i].handle && strcmp(nl_db_slots[i].handle, handle) == 0) { return &nl_db_slots[i]; }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return NULL;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static nl_db_pool *nl_db_find_pool(const char *handle) {")
+        self.indent += 1
+        self.emit("if (!handle || !*handle) { return NULL; }")
+        self.emit("for (size_t i = 0; i < 32; ++i) {")
+        self.indent += 1
+        self.emit("if (nl_db_pools[i].active && nl_db_pools[i].handle && strcmp(nl_db_pools[i].handle, handle) == 0) { return &nl_db_pools[i]; }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return NULL;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static void nl_db_slot_release_to_pool(nl_db_slot *slot) {")
+        self.indent += 1
+        self.emit("if (!slot || !slot->pool_handle) { return; }")
+        self.emit("nl_db_pool *pool = nl_db_find_pool(slot->pool_handle);")
+        self.emit("if (!pool || pool->closed || pool->idle_count >= 16) {")
+        self.indent += 1
+        self.emit("if (slot->conn) { sqlite3_close(slot->conn); }")
+        self.emit("if (pool && pool->open_count > 0) { pool->open_count -= 1; }")
+        self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        self.emit("pool->idle[pool->idle_count++] = slot->conn;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("free(slot->handle);")
+        self.emit("slot->handle = NULL;")
+        self.emit("free(slot->pool_handle);")
+        self.emit("slot->pool_handle = NULL;")
+        self.emit("slot->conn = NULL;")
+        self.emit("slot->pooled = 0;")
+        self.emit("slot->active = 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_db_open(const char *path) {")
+        self.indent += 1
+        self.emit("const char *db_path = path && *path ? path : \":memory:\";")
+        self.emit("sqlite3 *conn = NULL;")
+        self.emit("if (sqlite3_open(db_path, &conn) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("if (conn) { sqlite3_close(conn); }")
+        self.emit("nl_throw(\"DBFeil: kunne ikke åpne database\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("for (size_t i = 0; i < 64; ++i) {")
+        self.indent += 1
+        self.emit("if (!nl_db_slots[i].active) {")
+        self.indent += 1
+        self.emit("char buffer[32];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"db-%d\", nl_db_next_handle++);")
+        self.emit("nl_db_slots[i].active = 1;")
+        self.emit("nl_db_slots[i].handle = nl_strdup(buffer);")
+        self.emit("nl_db_slots[i].conn = conn;")
+        self.emit("return nl_strdup(buffer);")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("sqlite3_close(conn);")
+        self.emit("nl_throw(\"DBFeil: for mange åpne database-tilkoblinger\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_close(const char *handle) {")
+        self.indent += 1
+        self.emit("nl_db_slot *slot = nl_db_find_slot(handle);")
+        self.emit("if (!slot) { nl_throw(\"DBFeil: ukjent database-handle\"); return 0; }")
+        self.emit("if (slot->pooled) {")
+        self.indent += 1
+        self.emit("nl_db_slot_release_to_pool(slot);")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("if (slot->conn) { sqlite3_close(slot->conn); }")
+        self.emit("free(slot->handle);")
+        self.emit("slot->handle = NULL;")
+        self.emit("slot->conn = NULL;")
+        self.emit("slot->active = 0;")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_db_pool_open(const char *path, int max_conn) {")
+        self.indent += 1
+        self.emit("const char *db_path = path && *path ? path : \":memory:\";")
+        self.emit("int limit = max_conn > 0 ? max_conn : 1;")
+        self.emit("sqlite3 *conn = NULL;")
+        self.emit("if (sqlite3_open(db_path, &conn) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("if (conn) { sqlite3_close(conn); }")
+        self.emit("nl_throw(\"DBFeil: kunne ikke åpne database\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("for (size_t i = 0; i < 32; ++i) {")
+        self.indent += 1
+        self.emit("if (!nl_db_pools[i].active) {")
+        self.indent += 1
+        self.emit("char buffer[32];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"pool-%d\", nl_db_next_pool_handle++);")
+        self.emit("nl_db_pools[i].active = 1;")
+        self.emit("nl_db_pools[i].closed = 0;")
+        self.emit("nl_db_pools[i].handle = nl_strdup(buffer);")
+        self.emit("nl_db_pools[i].path = nl_strdup(db_path);")
+        self.emit("nl_db_pools[i].max_conn = limit;")
+        self.emit("nl_db_pools[i].open_count = 1;")
+        self.emit("nl_db_pools[i].idle_count = 1;")
+        self.emit("nl_db_pools[i].idle[0] = conn;")
+        self.emit("return nl_strdup(buffer);")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("sqlite3_close(conn);")
+        self.emit("nl_throw(\"DBFeil: for mange åpne database-pooler\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_db_pool_acquire(const char *pool_handle) {")
+        self.indent += 1
+        self.emit("nl_db_pool *pool = nl_db_find_pool(pool_handle);")
+        self.emit("if (!pool) { nl_throw(\"DBFeil: ukjent database-pool\"); return nl_strdup(\"\"); }")
+        self.emit("if (pool->closed) { nl_throw(\"DBFeil: database-pool er lukket\"); return nl_strdup(\"\"); }")
+        self.emit("sqlite3 *conn = NULL;")
+        self.emit("if (pool->idle_count > 0) {")
+        self.indent += 1
+        self.emit("conn = pool->idle[--pool->idle_count];")
+        self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        self.emit("if (pool->max_conn > 0 && pool->open_count >= pool->max_conn) { nl_throw(\"DBFeil: ingen ledige forbindelser i poolen\"); return nl_strdup(\"\"); }")
+        self.emit("if (sqlite3_open(pool->path, &conn) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("if (conn) { sqlite3_close(conn); }")
+        self.emit("nl_throw(\"DBFeil: kunne ikke åpne database\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("pool->open_count += 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("for (size_t i = 0; i < 64; ++i) {")
+        self.indent += 1
+        self.emit("if (!nl_db_slots[i].active) {")
+        self.indent += 1
+        self.emit("char buffer[32];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"db-%d\", nl_db_next_handle++);")
+        self.emit("nl_db_slots[i].active = 1;")
+        self.emit("nl_db_slots[i].handle = nl_strdup(buffer);")
+        self.emit("nl_db_slots[i].conn = conn;")
+        self.emit("nl_db_slots[i].pool_handle = nl_strdup(pool_handle);")
+        self.emit("nl_db_slots[i].pooled = 1;")
+        self.emit("return nl_strdup(buffer);")
+        self.indent -= 1
+        self.emit("}")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("if (conn) { sqlite3_close(conn); }")
+        self.emit("nl_throw(\"DBFeil: for mange åpne database-tilkoblinger\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_pool_size(const char *pool_handle) {")
+        self.indent += 1
+        self.emit("nl_db_pool *pool = nl_db_find_pool(pool_handle);")
+        self.emit("if (!pool) { nl_throw(\"DBFeil: ukjent database-pool\"); return 0; }")
+        self.emit("return pool->idle_count;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_pool_close(const char *pool_handle) {")
+        self.indent += 1
+        self.emit("nl_db_pool *pool = nl_db_find_pool(pool_handle);")
+        self.emit("if (!pool) { nl_throw(\"DBFeil: ukjent database-pool\"); return 0; }")
+        self.emit("pool->closed = 1;")
+        self.emit("while (pool->idle_count > 0) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = pool->idle[--pool->idle_count];")
+        self.emit("if (conn) { sqlite3_close(conn); }")
+        self.emit("if (pool->open_count > 0) { pool->open_count -= 1; }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static sqlite3 *nl_db_conn(const char *handle) {")
+        self.indent += 1
+        self.emit("nl_db_slot *slot = nl_db_find_slot(handle);")
+        self.emit("if (!slot || !slot->conn) { nl_throw(\"DBFeil: ukjent database-handle\"); return NULL; }")
+        self.emit("return slot->conn;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_db_escape_sql_literal(const char *text) {")
+        self.indent += 1
+        self.emit("const char *src = text ? text : \"\";")
+        self.emit("size_t extra = 0;")
+        self.emit("for (const char *p = src; *p; ++p) { if (*p == '\\'') { extra += 1; } }")
+        self.emit("size_t len = strlen(src);")
+        self.emit("char *out = (char *)malloc(len + extra + 1);")
+        self.emit("if (!out) { return nl_strdup(\"\"); }")
+        self.emit("char *dst = out;")
+        self.emit("for (const char *p = src; *p; ++p) {")
+        self.indent += 1
+        self.emit("if (*p == '\\'') { *dst++ = '\\''; *dst++ = '\\''; } else { *dst++ = *p; }")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("*dst = '\\0';")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_execute(const char *handle, const char *sql) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = nl_db_conn(handle);")
+        self.emit("if (!conn) { return 0; }")
+        self.emit("char *err = NULL;")
+        self.emit("if (sqlite3_exec(conn, sql ? sql : \"\", NULL, NULL, &err) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("char buffer[1024];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"DBFeil: kunne ikke kjøre SQL: %s\", err ? err : \"ukjent feil\");")
+        self.emit("if (err) { sqlite3_free(err); }")
+        self.emit("nl_throw(buffer);")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return sqlite3_changes(conn);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_db_query_text(const char *handle, const char *sql) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = nl_db_conn(handle);")
+        self.emit("if (!conn) { return nl_strdup(\"\"); }")
+        self.emit("sqlite3_stmt *stmt = NULL;")
+        self.emit("if (sqlite3_prepare_v2(conn, sql ? sql : \"\", -1, &stmt, NULL) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("nl_throw(\"DBFeil: kunne ikke forberede SQL-spørring\");")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("char *out = nl_strdup(\"\");")
+        self.emit("if (sqlite3_step(stmt) == SQLITE_ROW) {")
+        self.indent += 1
+        self.emit("const unsigned char *text = sqlite3_column_text(stmt, 0);")
+        self.emit("out = nl_strdup(text ? (const char *)text : \"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("sqlite3_finalize(stmt);")
+        self.emit("return out;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_migrate(const char *handle, const char *script) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = nl_db_conn(handle);")
+        self.emit("if (!conn) { return 0; }")
+        self.emit("const char *sql = script ? script : \"\";")
+        self.emit("if (!*sql) { return 0; }")
+        self.emit("nl_db_execute(handle, \"CREATE TABLE IF NOT EXISTS norscode_migrations (script TEXT PRIMARY KEY)\");")
+        self.emit("char *escaped = nl_db_escape_sql_literal(sql);")
+        self.emit("char check_sql[4096];")
+        self.emit("snprintf(check_sql, sizeof(check_sql), \"SELECT 1 FROM norscode_migrations WHERE script = '%s' LIMIT 1\", escaped);")
+        self.emit("sqlite3_stmt *stmt = NULL;")
+        self.emit("if (sqlite3_prepare_v2(conn, check_sql, -1, &stmt, NULL) != SQLITE_OK) { free(escaped); nl_throw(\"DBFeil: kunne ikke lese migrasjonstabell\"); return 0; }")
+        self.emit("int exists = sqlite3_step(stmt) == SQLITE_ROW;")
+        self.emit("sqlite3_finalize(stmt);")
+        self.emit("if (exists) { free(escaped); return 0; }")
+        self.emit("char *err = NULL;")
+        self.emit("if (sqlite3_exec(conn, sql, NULL, NULL, &err) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("char buffer[1024];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"DBFeil: kunne ikke kjøre migrering: %s\", err ? err : \"ukjent feil\");")
+        self.emit("if (err) { sqlite3_free(err); }")
+        self.emit("free(escaped);")
+        self.emit("nl_throw(buffer);")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("char insert_sql[4096];")
+        self.emit("snprintf(insert_sql, sizeof(insert_sql), \"INSERT INTO norscode_migrations(script) VALUES ('%s')\", escaped);")
+        self.emit("free(escaped);")
+        self.emit("if (sqlite3_exec(conn, insert_sql, NULL, NULL, NULL) != SQLITE_OK) { nl_throw(\"DBFeil: kunne ikke registrere migrasjon\"); return 0; }")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_transaction(const char *handle, const char *script) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = nl_db_conn(handle);")
+        self.emit("if (!conn) { return 0; }")
+        self.emit("const char *sql = script ? script : \"\";")
+        self.emit("if (!*sql) { return 0; }")
+        self.emit("char *err = NULL;")
+        self.emit("if (sqlite3_exec(conn, \"BEGIN\", NULL, NULL, &err) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("char buffer[1024];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"DBFeil: kunne ikke starte transaksjon: %s\", err ? err : \"ukjent feil\");")
+        self.emit("if (err) { sqlite3_free(err); }")
+        self.emit("nl_throw(buffer);")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("if (sqlite3_exec(conn, sql, NULL, NULL, &err) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("sqlite3_exec(conn, \"ROLLBACK\", NULL, NULL, NULL);")
+        self.emit("if (err) { sqlite3_free(err); }")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("if (sqlite3_exec(conn, \"COMMIT\", NULL, NULL, &err) != SQLITE_OK) {")
+        self.indent += 1
+        self.emit("sqlite3_exec(conn, \"ROLLBACK\", NULL, NULL, NULL);")
+        self.emit("if (err) { sqlite3_free(err); }")
+        self.emit("return 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return 1;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_query_int(const char *handle, const char *sql) {")
+        self.indent += 1
+        self.emit("char *text = nl_db_query_text(handle, sql);")
+        self.emit("if (!text || !*text) { free(text); return 0; }")
+        self.emit("int value = atoi(text);")
+        self.emit("free(text);")
+        self.emit("return value;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_begin(const char *handle) {")
+        self.indent += 1
+        self.emit("return nl_db_execute(handle, \"BEGIN\") >= 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_commit(const char *handle) {")
+        self.indent += 1
+        self.emit("return nl_db_execute(handle, \"COMMIT\") >= 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_rollback(const char *handle) {")
+        self.indent += 1
+        self.emit("return nl_db_execute(handle, \"ROLLBACK\") >= 0;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_db_ping(const char *handle) {")
+        self.indent += 1
+        self.emit("sqlite3 *conn = nl_db_conn(handle);")
+        self.emit("if (!conn) { return 0; }")
+        self.emit("sqlite3_stmt *stmt = NULL;")
+        self.emit("if (sqlite3_prepare_v2(conn, \"SELECT 1\", -1, &stmt, NULL) != SQLITE_OK) { return 0; }")
+        self.emit("int ok = sqlite3_step(stmt) == SQLITE_ROW;")
+        self.emit("sqlite3_finalize(stmt);")
+        self.emit("return ok;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static char *nl_web_response_text(nl_map_text *response) {")
         self.indent += 1
         self.emit("return nl_web_response_body(response);")
@@ -3511,6 +4256,8 @@ class CGenerator:
 
         openapi_paths_literal = self.c_string(self.openapi_paths_json)
         self.emit(f"static const char *nl_web_openapi_paths_json = {openapi_paths_literal};")
+        openapi_components_literal = self.c_string(self.openapi_components_json)
+        self.emit(f"static const char *nl_web_openapi_components_json = {openapi_components_literal};")
         self.emit("static char *nl_web_openapi_json(const char *title, const char *version) {")
         self.indent += 1
         self.emit("nl_json_builder out;")
@@ -3524,6 +4271,12 @@ class CGenerator:
         self.emit("nl_json_builder_append_text(&out, version_json);")
         self.emit("nl_json_builder_append_text(&out, \"},\\\"paths\\\":\");")
         self.emit("nl_json_builder_append_text(&out, nl_web_openapi_paths_json);")
+        self.emit("if (nl_web_openapi_components_json[0] != '\\0') {")
+        self.indent += 1
+        self.emit("nl_json_builder_append_text(&out, \",\\\"components\\\":\");")
+        self.emit("nl_json_builder_append_text(&out, nl_web_openapi_components_json);")
+        self.indent -= 1
+        self.emit("}")
         self.emit("nl_json_builder_append_char(&out, '}');")
         self.emit("return out.data;")
         self.indent -= 1
@@ -4595,6 +5348,27 @@ class CGenerator:
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_request_header({ctx_code}, {key_code})", TYPE_TEXT
+                if node.func_name == "request_cookie":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_request_cookie({ctx_code}, {key_code})", TYPE_TEXT
+                if node.func_name == "request_cookie_or":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    fallback_code, _ = self.expr_with_type(node.args[2]) if len(node.args) > 2 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_request_cookie_or({ctx_code}, {key_code}, {fallback_code})", TYPE_TEXT
+                if node.func_name == "escape_html":
+                    value_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_escape_html({value_code})", TYPE_TEXT
+                if node.func_name == "safe_filename":
+                    value_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_safe_filename({value_code})", TYPE_TEXT
+                if node.func_name == "safe_path_segment":
+                    value_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_safe_path_segment({value_code})", TYPE_TEXT
+                if node.func_name == "safe_slug":
+                    value_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_safe_slug({value_code})", TYPE_TEXT
                 if node.func_name == "auth_header":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_auth_header({ctx_code})", TYPE_TEXT
@@ -4683,6 +5457,14 @@ class CGenerator:
                     response_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_response_header({response_code}, {key_code})", TYPE_TEXT
+                if node.func_name == "cookie_header":
+                    name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    value_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_cookie_header({name_code}, {value_code})", TYPE_TEXT
+                if node.func_name == "response_set_cookie":
+                    response_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    cookie_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_response_set_cookie({response_code}, {cookie_code})", TYPE_MAP_TEXT
                 if node.func_name == "response_error":
                     status_code, _ = self.expr_with_type(node.args[0]) if node.args else ("0", TYPE_INT)
                     message_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
@@ -4740,6 +5522,58 @@ class CGenerator:
                 if node.func_name == "handle_request":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_handle_request({ctx_code})", TYPE_MAP_TEXT
+            if node.module_name in ("db", "std.db"):
+                if node.func_name == "open":
+                    path_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_open({path_code})", TYPE_TEXT
+                if node.func_name == "close":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_close({handle_code})", TYPE_BOOL
+                if node.func_name == "execute":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    sql_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_execute({handle_code}, {sql_code})", TYPE_INT
+                if node.func_name == "query_text":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    sql_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_query_text({handle_code}, {sql_code})", TYPE_TEXT
+                if node.func_name == "query_int":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    sql_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_query_int({handle_code}, {sql_code})", TYPE_INT
+                if node.func_name == "migrate":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    migrations_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_migrate({handle_code}, {migrations_code})", TYPE_INT
+                if node.func_name == "transaction":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    script_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_transaction({handle_code}, {script_code})", TYPE_INT
+                if node.func_name == "pool":
+                    path_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    max_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("1", TYPE_INT)
+                    return f"nl_db_pool_open({path_code}, {max_code})", TYPE_TEXT
+                if node.func_name == "pool_acquire":
+                    pool_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_pool_acquire({pool_code})", TYPE_TEXT
+                if node.func_name == "pool_size":
+                    pool_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_pool_size({pool_code})", TYPE_INT
+                if node.func_name == "pool_close":
+                    pool_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_pool_close({pool_code})", TYPE_BOOL
+                if node.func_name == "begin":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_begin({handle_code})", TYPE_BOOL
+                if node.func_name == "commit":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_commit({handle_code})", TYPE_BOOL
+                if node.func_name == "rollback":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_rollback({handle_code})", TYPE_BOOL
+                if node.func_name == "ping":
+                    handle_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return f"nl_db_ping({handle_code})", TYPE_BOOL
             if node.module_name in ("sikkerhet", "std.sikkerhet"):
                 if node.func_name == "passord_hash":
                     passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)

@@ -49,6 +49,21 @@ class SemanticAnalyzer:
             "fil_skriv": FunctionSymbol("fil_skriv", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "fil_append": FunctionSymbol("fil_append", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "fil_finnes": FunctionSymbol("fil_finnes", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_open": FunctionSymbol("db_open", [TYPE_TEXT], TYPE_TEXT, True),
+            "db_close": FunctionSymbol("db_close", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_execute": FunctionSymbol("db_execute", [TYPE_TEXT, TYPE_TEXT], TYPE_INT, True),
+            "db_query_text": FunctionSymbol("db_query_text", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "db_query_int": FunctionSymbol("db_query_int", [TYPE_TEXT, TYPE_TEXT], TYPE_INT, True),
+            "db_migrate": FunctionSymbol("db_migrate", [TYPE_TEXT, TYPE_TEXT], TYPE_INT, True),
+            "db_transaction": FunctionSymbol("db_transaction", [TYPE_TEXT, TYPE_TEXT], TYPE_INT, True),
+            "db_pool": FunctionSymbol("db_pool", [TYPE_TEXT, TYPE_INT], TYPE_TEXT, True),
+            "db_pool_acquire": FunctionSymbol("db_pool_acquire", [TYPE_TEXT], TYPE_TEXT, True),
+            "db_pool_size": FunctionSymbol("db_pool_size", [TYPE_TEXT], TYPE_INT, True),
+            "db_pool_close": FunctionSymbol("db_pool_close", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_begin": FunctionSymbol("db_begin", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_commit": FunctionSymbol("db_commit", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_rollback": FunctionSymbol("db_rollback", [TYPE_TEXT], TYPE_BOOL, True),
+            "db_ping": FunctionSymbol("db_ping", [TYPE_TEXT], TYPE_BOOL, True),
             "sikkerhet_passord_hash": FunctionSymbol("sikkerhet_passord_hash", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "sikkerhet_passord_verifiser": FunctionSymbol("sikkerhet_passord_verifiser", [TYPE_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_path_match": FunctionSymbol("web_path_match", [TYPE_TEXT, TYPE_TEXT], TYPE_BOOL, True),
@@ -74,6 +89,12 @@ class SemanticAnalyzer:
             "web_request_json_field_bool": FunctionSymbol("web_request_json_field_bool", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_request_query_param": FunctionSymbol("web_request_query_param", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "web_request_header": FunctionSymbol("web_request_header", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_request_cookie": FunctionSymbol("web_request_cookie", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_request_cookie_or": FunctionSymbol("web_request_cookie_or", [TYPE_MAP_TEXT, TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_escape_html": FunctionSymbol("web_escape_html", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_safe_filename": FunctionSymbol("web_safe_filename", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_safe_path_segment": FunctionSymbol("web_safe_path_segment", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_safe_slug": FunctionSymbol("web_safe_slug", [TYPE_TEXT], TYPE_TEXT, True),
             "web_auth_header": FunctionSymbol("web_auth_header", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_bearer_token": FunctionSymbol("web_bearer_token", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_require_bearer": FunctionSymbol("web_require_bearer", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
@@ -89,6 +110,8 @@ class SemanticAnalyzer:
             "web_response_headers": FunctionSymbol("web_response_headers", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
             "web_response_body": FunctionSymbol("web_response_body", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_response_header": FunctionSymbol("web_response_header", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_cookie_header": FunctionSymbol("web_cookie_header", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_response_set_cookie": FunctionSymbol("web_response_set_cookie", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_response_text": FunctionSymbol("web_response_text", [TYPE_MAP_TEXT], TYPE_TEXT, True),
             "web_response_json": FunctionSymbol("web_response_json", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
             "web_response_error": FunctionSymbol("web_response_error", [TYPE_INT, TYPE_TEXT], TYPE_MAP_TEXT, True),
@@ -808,6 +831,74 @@ class SemanticAnalyzer:
                     self.error("http.response_header krever tekst og tekst")
                 return TYPE_TEXT
 
+            if full_name in {"db.open", "std.db.open"}:
+                if len(expr.args) != 1:
+                    self.error("db.open forventer 1 argument")
+                path_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if path_type != TYPE_TEXT:
+                    self.error("db.open krever tekst")
+                return TYPE_TEXT
+
+            if full_name in {"db.close", "std.db.close", "db.begin", "std.db.begin", "db.commit", "std.db.commit", "db.rollback", "std.db.rollback", "db.ping", "std.db.ping"}:
+                if len(expr.args) != 1:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 1 argument")
+                handle_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if handle_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst")
+                return TYPE_BOOL
+
+            if full_name in {"db.execute", "std.db.execute", "db.query_text", "std.db.query_text", "db.query_int", "std.db.query_int"}:
+                if len(expr.args) != 2:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 2 argumenter")
+                handle_type = self.check_expr(expr.args[0], scope, field_schemas)
+                sql_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if handle_type != TYPE_TEXT or sql_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst og tekst")
+                if full_name in {"db.execute", "std.db.execute"}:
+                    return TYPE_INT
+                if full_name in {"db.query_text", "std.db.query_text"}:
+                    return TYPE_TEXT
+                return TYPE_INT
+
+            if full_name in {"db.migrate", "std.db.migrate"}:
+                if len(expr.args) != 2:
+                    self.error("db.migrate forventer 2 argumenter")
+                handle_type = self.check_expr(expr.args[0], scope, field_schemas)
+                migrations_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if handle_type != TYPE_TEXT or migrations_type != TYPE_TEXT:
+                    self.error("db.migrate krever tekst og tekst")
+                return TYPE_INT
+
+            if full_name in {"db.transaction", "std.db.transaction"}:
+                if len(expr.args) != 2:
+                    self.error("db.transaction forventer 2 argumenter")
+                handle_type = self.check_expr(expr.args[0], scope, field_schemas)
+                script_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if handle_type != TYPE_TEXT or script_type != TYPE_TEXT:
+                    self.error("db.transaction krever tekst og tekst")
+                return TYPE_INT
+
+            if full_name in {"db.pool", "std.db.pool"}:
+                if len(expr.args) != 2:
+                    self.error("db.pool forventer 2 argumenter")
+                path_type = self.check_expr(expr.args[0], scope, field_schemas)
+                size_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if path_type != TYPE_TEXT or size_type != TYPE_INT:
+                    self.error("db.pool krever tekst og heltall")
+                return TYPE_TEXT
+
+            if full_name in {"db.pool_acquire", "std.db.pool_acquire", "db.pool_size", "std.db.pool_size", "db.pool_close", "std.db.pool_close"}:
+                if len(expr.args) != 1:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 1 argument")
+                handle_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if handle_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst")
+                if full_name in {"db.pool_acquire", "std.db.pool_acquire"}:
+                    return TYPE_TEXT
+                if full_name in {"db.pool_size", "std.db.pool_size"}:
+                    return TYPE_INT
+                return TYPE_BOOL
+
             if full_name in {"web.path_match", "std.web.path_match"}:
                 if len(expr.args) != 2:
                     self.error("web.path_match forventer 2 argumenter")
@@ -985,6 +1076,33 @@ class SemanticAnalyzer:
                     self.error(f"{expr.module_name}.{expr.func_name} krever ordbok og tekst")
                 return TYPE_TEXT
 
+            if full_name in {"web.escape_html", "std.web.escape_html", "web.safe_filename", "std.web.safe_filename", "web.safe_path_segment", "std.web.safe_path_segment", "web.safe_slug", "std.web.safe_slug"}:
+                if len(expr.args) != 1:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 1 argument")
+                value_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if value_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst")
+                return TYPE_TEXT
+
+            if full_name in {"web.request_cookie", "std.web.request_cookie"}:
+                if len(expr.args) != 2:
+                    self.error("web.request_cookie forventer 2 argumenter")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                key_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if not self.is_map_type(ctx_type) or key_type != TYPE_TEXT:
+                    self.error("web.request_cookie krever ordbok og tekst")
+                return TYPE_TEXT
+
+            if full_name in {"web.request_cookie_or", "std.web.request_cookie_or"}:
+                if len(expr.args) != 3:
+                    self.error("web.request_cookie_or forventer 3 argumenter")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                key_type = self.check_expr(expr.args[1], scope, field_schemas)
+                fallback_type = self.check_expr(expr.args[2], scope, field_schemas)
+                if not self.is_map_type(ctx_type) or key_type != TYPE_TEXT or fallback_type != TYPE_TEXT:
+                    self.error("web.request_cookie_or krever ordbok og tekst")
+                return TYPE_TEXT
+
             if full_name in {"web.response_builder", "std.web.response_builder"}:
                 if len(expr.args) != 3:
                     self.error("web.response_builder forventer 3 argumenter")
@@ -1023,6 +1141,24 @@ class SemanticAnalyzer:
                 if not self.is_map_type(ctx_type) or key_type != TYPE_TEXT:
                     self.error("web.response_header krever ordbok og tekst")
                 return TYPE_TEXT
+
+            if full_name in {"web.cookie_header", "std.web.cookie_header"}:
+                if len(expr.args) != 2:
+                    self.error("web.cookie_header forventer 2 argumenter")
+                name_type = self.check_expr(expr.args[0], scope, field_schemas)
+                value_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if name_type != TYPE_TEXT or value_type != TYPE_TEXT:
+                    self.error("web.cookie_header krever tekst og tekst")
+                return TYPE_TEXT
+
+            if full_name in {"web.response_set_cookie", "std.web.response_set_cookie"}:
+                if len(expr.args) != 2:
+                    self.error("web.response_set_cookie forventer 2 argumenter")
+                response_type = self.check_expr(expr.args[0], scope, field_schemas)
+                cookie_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if not self.is_map_type(response_type) or cookie_type != TYPE_TEXT:
+                    self.error("web.response_set_cookie krever ordbok og tekst")
+                return TYPE_MAP_TEXT
 
             if full_name in {"web.response_error", "std.web.response_error"}:
                 if len(expr.args) != 2:

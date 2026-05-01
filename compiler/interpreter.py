@@ -100,6 +100,11 @@ class Interpreter:
         self._startup_ran = False
         self._shutdown_ran = False
         self._request_counter = 0
+        self._db_connections: dict[str, Any] = {}
+        self._db_pools: dict[str, dict[str, Any]] = {}
+        self._db_pooled_handles: dict[str, str] = {}
+        self._db_next_handle = 1
+        self._db_next_pool_handle = 1
 
     def _walk_ast_nodes(self, node: Any):
         if node is None:
@@ -139,9 +144,11 @@ class Interpreter:
         if type_name == "ordbok_bool":
             return {"type": "object", "additionalProperties": {"type": "boolean"}}
         if type_name.startswith("liste_"):
-            return {"type": "array", "items": {"type": "string"}}
+            inner = type_name[len("liste_") :]
+            return {"type": "array", "items": self._schema_for_type(inner)}
         if type_name.startswith("ordbok_"):
-            return {"type": "object", "additionalProperties": {"type": "string"}}
+            inner = type_name[len("ordbok_") :]
+            return {"type": "object", "additionalProperties": self._schema_for_type(inner)}
         return {"type": "string"}
 
     def _sample_for_type(self, type_name: str) -> Any:
@@ -160,12 +167,24 @@ class Interpreter:
         if type_name == "ordbok_bool":
             return {"verdi": True}
         if type_name.startswith("liste_"):
-            return ["eksempel"]
+            inner = type_name[len("liste_") :]
+            return [self._sample_for_type(inner)]
         if type_name.startswith("ordbok_"):
-            return {"verdi": "eksempel"}
+            inner = type_name[len("ordbok_") :]
+            return {"verdi": self._sample_for_type(inner)}
         return "eksempel"
 
-    def _route_docs_from_function(self, fn: Any, spec: str) -> dict[str, Any]:
+    def _function_uses_bearer_auth(self, fn: Any) -> bool:
+        for node in self._walk_ast_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, ModuleCallNode):
+                continue
+            module_name = getattr(node, "module_name", "")
+            func_name = getattr(node, "func_name", "")
+            if module_name in {"web", "std.web"} and func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                return True
+        return False
+
+    def _route_docs_from_function(self, fn: Any, spec: str, auth_guards: set[str] | None = None) -> dict[str, Any]:
         method, route_path = self._split_web_route_spec(spec)
         path_params: list[dict[str, Any]] = []
         query_params: list[dict[str, Any]] = []
@@ -173,13 +192,29 @@ class Interpreter:
         seen_path: set[str] = set()
         seen_query: set[str] = set()
         seen_body: set[str] = set()
+        error_responses: list[dict[str, Any]] = []
+        auth_guards = auth_guards or set()
+        auth_required = False
         for node in self._walk_ast_nodes(getattr(fn, "body", None)):
             if not isinstance(node, ModuleCallNode):
                 continue
             module_name = getattr(node, "module_name", "")
             func_name = getattr(node, "func_name", "")
             args = getattr(node, "args", []) or []
-            if module_name not in {"web", "std.web"} or len(args) < 2 or not isinstance(args[1], StringNode):
+            if module_name not in {"web", "std.web"}:
+                continue
+            if func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                auth_required = True
+            if func_name == "use_guard" and args and isinstance(args[0], StringNode) and args[0].value in auth_guards:
+                auth_required = True
+            if func_name == "response_error" and args:
+                status_value = getattr(args[0], "value", None) if isinstance(args[0], NumberNode) else None
+                if status_value is not None:
+                    error_responses.append({
+                        "status": int(status_value),
+                        "message": str(getattr(args[1], "value", "")) if len(args) > 1 and isinstance(args[1], StringNode) else "",
+                    })
+            if len(args) < 2 or not isinstance(args[1], StringNode):
                 continue
             key = args[1].value
             if func_name == "request_param":
@@ -232,7 +267,7 @@ class Interpreter:
                 for item in body_fields
             }
         response_type = getattr(fn, "return_type", TYPE_TEXT)
-        return {
+        operation = {
             "function": getattr(fn, "name", ""),
             "method": (method or "GET").lower(),
             "path": path_template,
@@ -245,10 +280,17 @@ class Interpreter:
             "request_example": request_example,
             "response_example": self._sample_for_type(response_type),
             "response_schema": self._schema_for_type(response_type),
+            "error_responses": error_responses,
         }
+        if auth_required:
+            operation["security"] = [{"bearerAuth": []}]
+            operation["responses"]["401"] = {"description": "Uautorisert"}
+            operation["responses"]["403"] = {"description": "Forbudt"}
+        return operation
 
     def _build_openapi_document(self, title: str, version: str) -> str:
         paths: dict[str, Any] = {}
+        has_bearer_auth = False
         for handler in getattr(self, "route_handlers", []):
             path = handler.get("path", "")
             method = str(handler.get("method", "get")).lower()
@@ -285,6 +327,27 @@ class Interpreter:
                 },
                 "x-example-request": handler.get("request_example", {}),
             }
+            if handler.get("security"):
+                operation["security"] = handler.get("security")
+                operation["responses"]["401"] = {"description": "Uautorisert"}
+                operation["responses"]["403"] = {"description": "Forbudt"}
+                has_bearer_auth = True
+            for item in handler.get("error_responses", []):
+                status = str(item.get("status", 500))
+                message = item.get("message", "")
+                operation["responses"][status] = {
+                    "description": message or "Feil",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"error": {"type": "string"}},
+                                "required": ["error"],
+                            },
+                            "example": {"error": message or "Feil"},
+                        }
+                    },
+                }
             body_fields = handler.get("body_fields", [])
             if body_fields:
                 required_fields = [item["name"] for item in body_fields if item.get("required", False)]
@@ -311,6 +374,15 @@ class Interpreter:
             "info": {"title": title, "version": version},
             "paths": paths,
         }
+        if has_bearer_auth:
+            document["components"] = {
+                "securitySchemes": {
+                    "bearerAuth": {
+                        "type": "http",
+                        "scheme": "bearer",
+                    }
+                }
+            }
         return json.dumps(document, ensure_ascii=False, indent=2)
 
     def _build_docs_html(self, title: str, version: str) -> str:
@@ -680,6 +752,277 @@ class Interpreter:
         token = self._csrf_token(ctx)
         return bool(token) and token == str(expected)
 
+    def _escape_html(self, value: Any) -> str:
+        text = str(value)
+        return (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;")
+            .replace("'", "&#x27;")
+        )
+
+    def _safe_filename(self, value: Any) -> str:
+        text = str(value).strip()
+        if not text:
+            return "fil"
+        text = text.replace("\\", "/").split("/", 1)[-1]
+        result: list[str] = []
+        for ch in text:
+            if ch.isalnum() or ch in {"-", "_", "."}:
+                result.append(ch)
+            elif ch.isspace():
+                result.append("_")
+            else:
+                result.append("_")
+        cleaned = "".join(result).strip("._")
+        return cleaned or "fil"
+
+    def _safe_path_segment(self, value: Any) -> str:
+        text = str(value).strip().replace("\\", "/")
+        result: list[str] = []
+        for ch in text:
+            if ch.isalnum() or ch in {"-", "_"}:
+                result.append(ch)
+            elif ch.isspace():
+                result.append("-")
+        cleaned = "".join(result).strip("-_")
+        return cleaned or "segment"
+
+    def _safe_slug(self, value: Any) -> str:
+        text = str(value).strip().lower()
+        result: list[str] = []
+        last_dash = False
+        for ch in text:
+            if ch.isalnum():
+                result.append(ch)
+                last_dash = False
+            elif ch.isspace() or ch in {"-", "_"}:
+                if not last_dash:
+                    result.append("-")
+                    last_dash = True
+        cleaned = "".join(result).strip("-")
+        return cleaned or "slug"
+
+    def _db_escape_sql_literal(self, value: Any) -> str:
+        return str(value).replace("'", "''")
+
+    def _db_error(self, message: str) -> str:
+        return f"DBFeil: {message}"
+
+    def _db_module(self):
+        import sqlite3
+
+        return sqlite3
+
+    def _db_get_connection(self, handle: Any):
+        key = str(handle)
+        conn = self._db_connections.get(key)
+        if conn is None:
+            raise ThrowSignal(self._db_error(f"ukjent database-handle '{key}'"))
+        return conn
+
+    def _db_get_pool(self, handle: Any):
+        key = str(handle)
+        pool = self._db_pools.get(key)
+        if pool is None:
+            raise ThrowSignal(self._db_error(f"ukjent database-pool '{key}'"))
+        return pool
+
+    def _db_new_connection(self, sqlite3, db_path: str):
+        conn = sqlite3.connect(db_path)
+        conn.isolation_level = None
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _db_open(self, path: Any) -> str:
+        sqlite3 = self._db_module()
+        db_path = str(path)
+        try:
+            conn = self._db_new_connection(sqlite3, db_path)
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke åpne database {db_path}: {exc}"))
+        handle = f"db-{self._db_next_handle}"
+        self._db_next_handle += 1
+        self._db_connections[handle] = conn
+        return handle
+
+    def _db_pool_open(self, path: Any, max_connections: Any) -> str:
+        sqlite3 = self._db_module()
+        db_path = str(path)
+        try:
+            max_conn = int(max_connections)
+        except Exception:
+            max_conn = 1
+        if max_conn <= 0:
+            max_conn = 1
+        try:
+            conn = self._db_new_connection(sqlite3, db_path)
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke åpne database {db_path}: {exc}"))
+        handle = f"pool-{self._db_next_pool_handle}"
+        self._db_next_pool_handle += 1
+        self._db_pools[handle] = {
+            "path": db_path,
+            "max": max_conn,
+            "idle": [conn],
+            "closed": False,
+        }
+        return handle
+
+    def _db_pool_acquire(self, pool_handle: Any) -> str:
+        sqlite3 = self._db_module()
+        pool = self._db_get_pool(pool_handle)
+        if pool.get("closed"):
+            raise ThrowSignal(self._db_error(f"database-pool '{pool_handle}' er lukket"))
+        idle = pool["idle"]
+        if idle:
+            conn = idle.pop()
+        else:
+            active = len(self._db_pooled_handles)
+            total = active + len(idle)
+            max_conn = int(pool.get("max") or 1)
+            if max_conn > 0 and total >= max_conn:
+                raise ThrowSignal(self._db_error("ingen ledige forbindelser i poolen"))
+            try:
+                conn = self._db_new_connection(sqlite3, pool["path"])
+            except Exception as exc:
+                raise ThrowSignal(self._db_error(f"kunne ikke åpne database {pool['path']}: {exc}"))
+        handle = f"db-{self._db_next_handle}"
+        self._db_next_handle += 1
+        self._db_connections[handle] = conn
+        self._db_pooled_handles[handle] = str(pool_handle)
+        return handle
+
+    def _db_pool_size(self, pool_handle: Any) -> int:
+        pool = self._db_get_pool(pool_handle)
+        return len(pool["idle"])
+
+    def _db_pool_close(self, pool_handle: Any) -> bool:
+        pool = self._db_get_pool(pool_handle)
+        idle = pool["idle"]
+        while idle:
+            conn = idle.pop()
+            try:
+                conn.close()
+            except Exception:
+                pass
+        pool["closed"] = True
+        return True
+
+    def _db_close(self, handle: Any) -> bool:
+        key = str(handle)
+        conn = self._db_connections.pop(key, None)
+        if conn is None:
+            raise ThrowSignal(self._db_error(f"ukjent database-handle '{handle}'"))
+        try:
+            pool_handle = self._db_pooled_handles.pop(key, None)
+            if pool_handle is not None:
+                pool = self._db_pools.get(pool_handle)
+                if pool is not None and not pool.get("closed"):
+                    pool["idle"].append(conn)
+                    return True
+            conn.close()
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke lukke database: {exc}"))
+        return True
+
+    def _db_execute(self, handle: Any, sql: Any) -> int:
+        conn = self._db_get_connection(handle)
+        try:
+            cursor = conn.execute(str(sql))
+            return int(cursor.rowcount if cursor.rowcount != -1 else 0)
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke kjøre SQL: {exc}"))
+
+    def _db_query_text(self, handle: Any, sql: Any) -> str:
+        conn = self._db_get_connection(handle)
+        try:
+            cursor = conn.execute(str(sql))
+            row = cursor.fetchone()
+            if row is None:
+                return ""
+            value = row[0] if len(row) else ""
+            return "" if value is None else str(value)
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke lese SQL-resultat: {exc}"))
+
+    def _db_query_int(self, handle: Any, sql: Any) -> int:
+        text = self._db_query_text(handle, sql)
+        if not text:
+            return 0
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise ThrowSignal(self._db_error(f"forventet heltall fra SQL, fikk '{text}'")) from exc
+
+    def _db_migrate(self, handle: Any, migrations: Any) -> int:
+        conn = self._db_get_connection(handle)
+        script = str(migrations)
+        if not script.strip():
+            return 0
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS norscode_migrations (script TEXT PRIMARY KEY)")
+            escaped = self._db_escape_sql_literal(script)
+            existing = conn.execute(
+                f"SELECT 1 FROM norscode_migrations WHERE script = '{escaped}' LIMIT 1"
+            ).fetchone()
+            if existing is not None:
+                return 0
+            conn.executescript(script)
+            conn.execute(
+                f"INSERT INTO norscode_migrations(script) VALUES ('{escaped}')"
+            )
+            conn.commit()
+            return 1
+        except ThrowSignal:
+            raise
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke kjøre migreringer: {exc}"))
+
+    def _db_transaction(self, handle: Any, script: Any) -> int:
+        conn = self._db_get_connection(handle)
+        sql = str(script)
+        if not sql.strip():
+            return 0
+        try:
+            conn.execute("BEGIN")
+            conn.executescript(sql)
+            conn.commit()
+            return 1
+        except ThrowSignal:
+            raise
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            return 0
+
+    def _db_begin(self, handle: Any) -> bool:
+        conn = self._db_get_connection(handle)
+        try:
+            conn.execute("BEGIN")
+            return True
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke starte transaksjon: {exc}"))
+
+    def _db_commit(self, handle: Any) -> bool:
+        conn = self._db_get_connection(handle)
+        try:
+            conn.commit()
+            return True
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke committe transaksjon: {exc}"))
+
+    def _db_rollback(self, handle: Any) -> bool:
+        conn = self._db_get_connection(handle)
+        try:
+            conn.rollback()
+            return True
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke rulle tilbake transaksjon: {exc}"))
+
     def _password_hash_core(self, password: str, salt: str) -> str:
         data = f"{salt}\0{password}".encode("utf-8")
         state = 0xCBF29CE484222325
@@ -822,6 +1165,7 @@ class Interpreter:
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
         guard_providers: dict[str, str] = {}
+        auth_guard_names: set[str] = set()
         request_middlewares: list[str] = []
         response_middlewares: list[str] = []
         error_middlewares: list[str] = []
@@ -884,12 +1228,19 @@ class Interpreter:
                 break
             if route_guard:
                 guard_providers[fn.name] = fn.name
+                if self._function_uses_bearer_auth(fn):
+                    auth_guard_names.add(fn.name)
             if spec is not None:
                 combined_spec = self._combine_web_route_prefix(route_prefix, spec)
-                route_docs = self._route_docs_from_function(fn, combined_spec)
+                route_docs = self._route_docs_from_function(fn, combined_spec, auth_guard_names)
                 route_docs["deps"] = list(deps)
                 route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
+                if route_docs.get("security") is None and any(guard in auth_guard_names for guard in guards):
+                    route_docs["security"] = [{"bearerAuth": []}]
+                    route_docs.setdefault("responses", {})
+                    route_docs["responses"]["401"] = {"description": "Uautorisert"}
+                    route_docs["responses"]["403"] = {"description": "Forbudt"}
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = fn.name
@@ -1288,6 +1639,88 @@ class Interpreter:
         if name == "fil_finnes":
             return Path(str(values[0])).expanduser().exists() if values else False
 
+        if name == "db.open":
+            if not values:
+                return ""
+            return self._db_open(values[0])
+
+        if name == "db.close":
+            if not values:
+                return False
+            return self._db_close(values[0])
+
+        if name == "db.execute":
+            if len(values) < 2:
+                return 0
+            return self._db_execute(values[0], values[1])
+
+        if name == "db.query_text":
+            if len(values) < 2:
+                return ""
+            return self._db_query_text(values[0], values[1])
+
+        if name == "db.query_int":
+            if len(values) < 2:
+                return 0
+            return self._db_query_int(values[0], values[1])
+
+        if name == "db.migrate":
+            if len(values) < 2:
+                return 0
+            return self._db_migrate(values[0], values[1])
+
+        if name == "db.transaction":
+            if len(values) < 2:
+                return 0
+            return self._db_transaction(values[0], values[1])
+
+        if name == "db.pool":
+            if len(values) < 2:
+                return ""
+            return self._db_pool_open(values[0], values[1])
+
+        if name == "db.pool_acquire":
+            if not values:
+                return ""
+            return self._db_pool_acquire(values[0])
+
+        if name == "db.pool_size":
+            if not values:
+                return 0
+            return self._db_pool_size(values[0])
+
+        if name == "db.pool_close":
+            if not values:
+                return False
+            return self._db_pool_close(values[0])
+
+        if name == "db.begin":
+            if not values:
+                return False
+            return self._db_begin(values[0])
+
+        if name == "db.commit":
+            if not values:
+                return False
+            return self._db_commit(values[0])
+
+        if name == "db.rollback":
+            if not values:
+                return False
+            return self._db_rollback(values[0])
+
+        if name == "db.ping":
+            if not values:
+                return False
+            try:
+                conn = self._db_get_connection(values[0])
+                conn.execute("SELECT 1")
+                return True
+            except ThrowSignal:
+                raise
+            except Exception as exc:
+                raise ThrowSignal(self._db_error(f"kunne ikke ping database: {exc}"))
+
         if name == "json_parse":
             payload = str(values[0]) if values else ""
             try:
@@ -1417,6 +1850,74 @@ class Interpreter:
                 return text
             if func_name == "finnes":
                 return Path(str(values[0])).expanduser().exists() if values else False
+        if module_name == "db":
+            if func_name == "open":
+                if not values:
+                    return ""
+                return self._db_open(values[0])
+            if func_name == "close":
+                if not values:
+                    return False
+                return self._db_close(values[0])
+            if func_name == "execute":
+                if len(values) < 2:
+                    return 0
+                return self._db_execute(values[0], values[1])
+            if func_name == "query_text":
+                if len(values) < 2:
+                    return ""
+                return self._db_query_text(values[0], values[1])
+            if func_name == "query_int":
+                if len(values) < 2:
+                    return 0
+                return self._db_query_int(values[0], values[1])
+            if func_name == "migrate":
+                if len(values) < 2:
+                    return 0
+                return self._db_migrate(values[0], values[1])
+            if func_name == "transaction":
+                if len(values) < 2:
+                    return 0
+                return self._db_transaction(values[0], values[1])
+            if func_name == "pool":
+                if len(values) < 2:
+                    return ""
+                return self._db_pool_open(values[0], values[1])
+            if func_name == "pool_acquire":
+                if not values:
+                    return ""
+                return self._db_pool_acquire(values[0])
+            if func_name == "pool_size":
+                if not values:
+                    return 0
+                return self._db_pool_size(values[0])
+            if func_name == "pool_close":
+                if not values:
+                    return False
+                return self._db_pool_close(values[0])
+            if func_name == "begin":
+                if not values:
+                    return False
+                return self._db_begin(values[0])
+            if func_name == "commit":
+                if not values:
+                    return False
+                return self._db_commit(values[0])
+            if func_name == "rollback":
+                if not values:
+                    return False
+                return self._db_rollback(values[0])
+            if func_name == "ping":
+                if not values:
+                    return False
+                try:
+                    conn = self._db_get_connection(values[0])
+                    conn.execute("SELECT 1")
+                    return True
+                except ThrowSignal:
+                    raise
+                except Exception as exc:
+                    raise ThrowSignal(self._db_error(f"kunne ikke ping database: {exc}"))
         if module_name in ("vent", "std.vent"):
             if func_name == "timeout":
                 if len(values) < 2:
@@ -1647,6 +2148,55 @@ class Interpreter:
                 ctx = self._decode_json_text_map(values[0])
                 headers = self._decode_json_text_map(ctx.get("headers", "{}"))
                 return str(headers.get(str(values[1]), ""))
+            if func_name == "request_cookie":
+                if len(values) < 2:
+                    return ""
+                ctx = self._decode_json_text_map(values[0])
+                headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+                cookie_header = str(headers.get("cookie", ""))
+                target = str(values[1])
+                for chunk in cookie_header.split(";"):
+                    part = chunk.strip()
+                    if not part or "=" not in part:
+                        continue
+                    key, cookie_value = part.split("=", 1)
+                    if key.strip() == target:
+                        return cookie_value.strip()
+                return ""
+            if func_name == "request_cookie_or":
+                if len(values) < 3:
+                    return ""
+                ctx = self._decode_json_text_map(values[0])
+                headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+                cookie_header = str(headers.get("cookie", ""))
+                target = str(values[1])
+                for chunk in cookie_header.split(";"):
+                    part = chunk.strip()
+                    if not part or "=" not in part:
+                        continue
+                    key, cookie_value = part.split("=", 1)
+                    if key.strip() == target:
+                        value = cookie_value.strip()
+                        if value:
+                            return value
+                        break
+                return str(values[2])
+            if func_name == "escape_html":
+                if not values:
+                    return ""
+                return self._escape_html(values[0])
+            if func_name == "safe_filename":
+                if not values:
+                    return "fil"
+                return self._safe_filename(values[0])
+            if func_name == "safe_path_segment":
+                if not values:
+                    return "segment"
+                return self._safe_path_segment(values[0])
+            if func_name == "safe_slug":
+                if not values:
+                    return "slug"
+                return self._safe_slug(values[0])
             if func_name == "auth_header":
                 if not values:
                     return ""
@@ -1722,6 +2272,25 @@ class Interpreter:
                 ctx = self._decode_json_text_map(values[0])
                 headers = self._decode_json_text_map(ctx.get("headers", "{}"))
                 return str(headers.get(str(values[1]), ""))
+            if func_name == "cookie_header":
+                if len(values) < 2:
+                    return ""
+                name = str(values[0]).strip()
+                if not name:
+                    return ""
+                value = str(values[1])
+                return f"{name}={value}; Path=/; HttpOnly; Secure; SameSite=Lax"
+            if func_name == "response_set_cookie":
+                if len(values) < 2:
+                    return self._make_web_response(0, {}, "")
+                response = self._decode_json_text_map(values[0])
+                cookie_text = str(values[1]).strip()
+                if not cookie_text:
+                    return response
+                headers = self._decode_json_text_map(response.get("headers", "{}"))
+                existing = str(headers.get("set-cookie", "")).strip()
+                headers["set-cookie"] = f"{existing}\n{cookie_text}" if existing else cookie_text
+                return self._make_web_response(response.get("status", 200), headers, response.get("body", ""))
             if func_name == "response_text":
                 if not values:
                     return ""

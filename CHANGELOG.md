@@ -8,6 +8,8 @@
 - Konsolidert vedlikeholds- og releasepolicy.
 - Lagt til `std.web` path-matching og path-parametre.
 - Lagt til `std.web` router-dispatch for metode + path.
+- Lagt til deployment playbook, systemd-oppsett og container-oppsett.
+- Lagt til eksplisitt release-notat- og breaking-change-policy.
 
 ## [1.0.0] - 2026-04-30
 

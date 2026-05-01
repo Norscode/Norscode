@@ -11,6 +11,8 @@ Et norsk programmeringsspråk som kompilerer til C.
 - Modul- og pakke-system
 - Egen standardbibliotek (`std`)
 - Standardhjelpere for passordhashing, secrets og miljøvariabler
+- Standardhjelpere for HTML-escaping, trygge filnavn og sikre URL-slugs
+- Standard databaseadapter for SQLite via `std.db`, med innebygget migreringshjelper
 - Testsystem med `assert`, `assert_eq`, `assert_ne`
 - Feilhåndtering med `kast`, `prøv`/`fang` (inkludert nested rethrow)
 - Kompilerer til C → rask kjøring
@@ -161,6 +163,12 @@ For en mer konkret full-backend-sjekkliste, se [docs/FULL_BACKEND_CHECKLIST.md](
 For produksjonskjøring av en webapp, bruk for eksempel `norcode serve examples/web_routes.no --production --host 0.0.0.0 --port 8000`.
 Bak reverse proxy kan du legge til `--proxy-headers --trusted-proxy 127.0.0.1` når proxyen sender forwarded headers.
 Hvis du vil ha en enkel restartstrategi ved krasj, legg til `--restart-on-crash --max-restarts 3`.
+For browser-klienter kan du bruke `--cors-origin https://app.example.com` eller bare la standard CORS stå på.
+For enkel beskyttelse mot brute-force og request-spam, bruk `--rate-limit-requests 120 --rate-limit-window 60`.
+For containeroppsett, se [docs/CONTAINER.md](docs/CONTAINER.md) eller bygg `docker build -t norscode .` og kjør med et volum mountet til `/work`.
+For Linux-serviceoppsett, se [docs/SYSTEMD.md](docs/SYSTEMD.md) og [deploy/norscode.service](deploy/norscode.service).
+For en samlet deployflyt fra release til drift, se [docs/DEPLOYMENT_PLAYBOOK.md](docs/DEPLOYMENT_PLAYBOOK.md).
+For å starte et nytt API-prosjekt, bruk [docs/API_SCAFFOLD.md](docs/API_SCAFFOLD.md) eller kjør `norcode scaffold-api <mappe>`.
 
 For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
 
@@ -203,10 +211,16 @@ norcode test --json
 ```bash
 norcode bench
 norcode smoke
+norcode serve-e2e
+norcode stress
+norcode security
+norcode diagnose
 norcode fuzz
 ```
 
 Se [docs/QUALITY.md](docs/QUALITY.md) for terskler og tolkning.
+
+Se også [docs/DASHBOARD_EXPORTER_PATTERN.md](docs/DASHBOARD_EXPORTER_PATTERN.md) for eksportmønster til dashboards og observability-systemer.
 
 ### 4. IR disasm (debug/tooling)
 
@@ -632,10 +646,21 @@ For mer realistiske flyter, se:
 - [examples/web_roles.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_roles.no) for rolle- og rettighetsmodell med guards
 - [examples/secrets.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/secrets.no) for passordhashing og secrets-håndtering
 - [examples/csrf.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/csrf.no) for CSRF-tokenverifisering
+- [examples/web_cookies.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_cookies.no) for secure cookies og cookie helpers
+- [examples/db_integration.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_integration.no) for ekte databaseintegrasjon med reopen/persistens
+- [examples/db_repository.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_repository.no) for anbefalt repository-/modelmønster
+- [examples/json_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/json_schema.no) for enkel JSON-/schema-mapping
+- [examples/file_object_storage.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/file_object_storage.no) for fil- og objektlagring som standardmønster
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
 - [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no) for OpenAPI JSON og en enkel docs-side generert fra route-signaturer
+- [examples/web_openapi_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_auth.no) for OpenAPI med bearer-auth og `securitySchemes`
+- [examples/web_openapi_errors.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_errors.no) for OpenAPI med dokumenterte JSON-feilresponser
+- [examples/web_openapi_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_schema.no) for OpenAPI med nestede objekt-skjemaer
+- [examples/web_api_versioning.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_api_versioning.no) for API-versjonering med `/api/v1` og `/api/v2`
 - [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no) for request/response/error middleware samt startup/shutdown hooks
 - `norcode serve examples/web_routes.no --host 127.0.0.1 --port 8000 --reload` for lokal webserver og reload i utvikling
+- `norcode serve examples/web_routes.no --cors-origin https://app.example.com` for enkel CORS-konfigurasjon mot browser-klienter
+- [examples/web_cors.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_cors.no) for standard CORS i browser-klienter
 - [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no) for sammensatt språkbruk
 
 ---
@@ -679,6 +704,11 @@ Prosjektet er funksjonelt i god stand per 2026-04-30.
 - feltkonstruksjon med navngitte felt (`{navn: "Ada", rolle: "utvikler"}`) er støttet i parser/semantic/codegen/bytecode
 - `std.liste` dekker nå tekstsortering, søk, filtrering og slicing sammen med de eksisterende tallhjelperne
 - `std.json` har typed tilgangsfunksjoner (`hent_tekst`, `hent_tall`, `hent_bool`) og konvertering av JSON-arrays til lister (`hent_array_tekst`, `hent_array_tall`)
+- `std.cache` gir en liten in-memory cache-adapter for tekst, tall og bool
+- `std.log` skriver strukturerte JSON-linjer og spiller pent sammen med `std.web.request_id`
+- `std.metrics` gir counters, gauges og histogrammer for observability
+- `std.trace` gir lette trace- og span-objekter som kan logges videre
+- `std.audit` gir sikkerhets- og audit-hendelser som JSON-linjer
 
 ### Selv-hosting
 

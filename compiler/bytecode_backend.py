@@ -368,6 +368,350 @@ def _csrf_require(ctx: Any, expected: Any) -> bool:
     return bool(token) and token == str(expected)
 
 
+def _cookie_pairs(cookie_header: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    if not cookie_header:
+        return pairs
+    for chunk in str(cookie_header).split(";"):
+        part = chunk.strip()
+        if not part or "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if key:
+            pairs.append((key, value))
+    return pairs
+
+
+def _escape_html(value: Any) -> str:
+    text = str(value)
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&#x27;")
+    )
+
+
+def _safe_filename(value: Any) -> str:
+    text = str(value).strip()
+    if not text:
+        return "fil"
+    text = text.replace("\\", "/").split("/", 1)[-1]
+    result: list[str] = []
+    for ch in text:
+        if ch.isalnum() or ch in {"-", "_", "."}:
+            result.append(ch)
+        elif ch.isspace():
+            result.append("_")
+        else:
+            result.append("_")
+    cleaned = "".join(result).strip("._")
+    return cleaned or "fil"
+
+
+def _safe_path_segment(value: Any) -> str:
+    text = str(value).strip().replace("\\", "/")
+    result: list[str] = []
+    for ch in text:
+        if ch.isalnum() or ch in {"-", "_"}:
+            result.append(ch)
+        elif ch.isspace():
+            result.append("-")
+    cleaned = "".join(result).strip("-_")
+    return cleaned or "segment"
+
+
+def _safe_slug(value: Any) -> str:
+    text = str(value).strip().lower()
+    result: list[str] = []
+    last_dash = False
+    for ch in text:
+        if ch.isalnum():
+            result.append(ch)
+            last_dash = False
+        elif ch.isspace() or ch in {"-", "_"}:
+            if not last_dash:
+                result.append("-")
+                last_dash = True
+    cleaned = "".join(result).strip("-")
+    return cleaned or "slug"
+
+
+def _db_escape_sql_literal(value: Any) -> str:
+    return str(value).replace("'", "''")
+
+
+def _db_error(message: str) -> str:
+    return f"DBFeil: {message}"
+
+
+def _db_module():
+    import sqlite3
+
+    return sqlite3
+
+
+def _db_open(registry: dict[str, Any], next_handle: int, path: Any) -> tuple[str, int]:
+    sqlite3 = _db_module()
+    db_path = str(path)
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke åpne database {db_path}: {exc}"))
+    conn.isolation_level = None
+    conn.row_factory = sqlite3.Row
+    handle = f"db-{next_handle}"
+    registry[handle] = conn
+    return handle, next_handle + 1
+
+
+def _db_pool_open(pools: dict[str, dict[str, Any]], next_pool_handle: int, path: Any, max_connections: Any) -> tuple[str, int]:
+    import sqlite3
+
+    db_path = str(path)
+    try:
+        max_conn = int(max_connections)
+    except Exception:
+        max_conn = 1
+    if max_conn <= 0:
+        max_conn = 1
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke åpne database {db_path}: {exc}"))
+    conn.isolation_level = None
+    conn.row_factory = sqlite3.Row
+    handle = f"pool-{next_pool_handle}"
+    pools[handle] = {
+        "path": db_path,
+        "max": max_conn,
+        "idle": [conn],
+        "closed": False,
+        "open_count": 1,
+    }
+    return handle, next_pool_handle + 1
+
+
+def _db_pool_connection(pools: dict[str, dict[str, Any]], handle: Any):
+    key = str(handle)
+    pool = pools.get(key)
+    if pool is None:
+        raise BytecodeThrow(_db_error(f"ukjent database-pool '{key}'"))
+    return pool
+
+
+def _db_connection(registry: dict[str, Any], handle: Any):
+    key = str(handle)
+    conn = registry.get(key)
+    if conn is None:
+        raise BytecodeThrow(_db_error(f"ukjent database-handle '{key}'"))
+    return conn
+
+
+def _db_pool_acquire(registry: dict[str, Any], pools: dict[str, dict[str, Any]], next_handle: int, pool_handle: Any) -> tuple[str, int]:
+    import sqlite3
+
+    pool = _db_pool_connection(pools, pool_handle)
+    if pool.get("closed"):
+        raise BytecodeThrow(_db_error(f"database-pool '{pool_handle}' er lukket"))
+    idle = pool["idle"]
+    if idle:
+        conn = idle.pop()
+    else:
+        total = int(pool.get("open_count") or 0)
+        max_conn = int(pool.get("max") or 1)
+        if max_conn > 0 and total >= max_conn:
+            raise BytecodeThrow(_db_error("ingen ledige forbindelser i poolen"))
+        try:
+            conn = sqlite3.connect(pool["path"])
+        except Exception as exc:
+            raise BytecodeThrow(_db_error(f"kunne ikke åpne database {pool['path']}: {exc}"))
+        conn.isolation_level = None
+        conn.row_factory = sqlite3.Row
+        pool["open_count"] = total + 1
+    handle = f"db-{next_handle}"
+    registry[handle] = conn
+    return handle, next_handle + 1
+
+
+def _db_close(registry: dict[str, Any], pools: dict[str, dict[str, Any]], pooled_handles: dict[str, str], handle: Any) -> bool:
+    key = str(handle)
+    conn = registry.pop(key, None)
+    if conn is None:
+        raise BytecodeThrow(_db_error(f"ukjent database-handle '{key}'"))
+    try:
+        pool_handle = pooled_handles.pop(key, None)
+        if pool_handle is not None:
+            pool = pools.get(pool_handle)
+            if pool is not None and not pool.get("closed"):
+                pool["idle"].append(conn)
+                return True
+            if pool is not None:
+                pool["open_count"] = max(0, int(pool.get("open_count") or 1) - 1)
+        conn.close()
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke lukke database: {exc}"))
+    return True
+
+
+def _db_pool_size(pools: dict[str, dict[str, Any]], pool_handle: Any) -> int:
+    pool = _db_pool_connection(pools, pool_handle)
+    return int(len(pool["idle"]))
+
+
+def _db_pool_close(pools: dict[str, dict[str, Any]], pool_handle: Any) -> bool:
+    pool = _db_pool_connection(pools, pool_handle)
+    pool["closed"] = True
+    while pool["idle"]:
+        conn = pool["idle"].pop()
+        try:
+            conn.close()
+        except Exception:
+            pass
+        pool["open_count"] = max(0, int(pool.get("open_count") or 1) - 1)
+    return True
+
+
+def _db_execute(registry: dict[str, Any], handle: Any, sql: Any) -> int:
+    conn = _db_connection(registry, handle)
+    try:
+        cursor = conn.execute(str(sql))
+        return int(cursor.rowcount if cursor.rowcount != -1 else 0)
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke kjøre SQL: {exc}"))
+
+
+def _db_query_text(registry: dict[str, Any], handle: Any, sql: Any) -> str:
+    conn = _db_connection(registry, handle)
+    try:
+        cursor = conn.execute(str(sql))
+        row = cursor.fetchone()
+        if row is None:
+            return ""
+        value = row[0] if len(row) else ""
+        return "" if value is None else str(value)
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke lese SQL-resultat: {exc}"))
+
+
+def _db_query_int(registry: dict[str, Any], handle: Any, sql: Any) -> int:
+    text = _db_query_text(registry, handle, sql)
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError as exc:
+        raise BytecodeThrow(_db_error(f"forventet heltall fra SQL, fikk '{text}'")) from exc
+
+
+def _db_migrate(registry: dict[str, Any], handle: Any, migrations: Any) -> int:
+    conn = _db_connection(registry, handle)
+    script = str(migrations)
+    if not script.strip():
+        return 0
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS norscode_migrations (script TEXT PRIMARY KEY)")
+        escaped = _db_escape_sql_literal(script)
+        existing = conn.execute(
+            f"SELECT 1 FROM norscode_migrations WHERE script = '{escaped}' LIMIT 1"
+        ).fetchone()
+        if existing is not None:
+            return 0
+        conn.executescript(script)
+        conn.execute(
+            f"INSERT INTO norscode_migrations(script) VALUES ('{escaped}')"
+        )
+        conn.commit()
+        return 1
+    except BytecodeThrow:
+        raise
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke kjøre migreringer: {exc}"))
+
+
+def _db_transaction(registry: dict[str, Any], handle: Any, script: Any) -> int:
+    conn = _db_connection(registry, handle)
+    sql = str(script)
+    if not sql.strip():
+        return 0
+    try:
+        conn.execute("BEGIN")
+        conn.executescript(sql)
+        conn.commit()
+        return 1
+    except BytecodeThrow:
+        raise
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 0
+
+
+def _db_begin(registry: dict[str, Any], handle: Any) -> bool:
+    conn = _db_connection(registry, handle)
+    try:
+        conn.execute("BEGIN")
+        return True
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke starte transaksjon: {exc}"))
+
+
+def _db_commit(registry: dict[str, Any], handle: Any) -> bool:
+    conn = _db_connection(registry, handle)
+    try:
+        conn.commit()
+        return True
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke committe transaksjon: {exc}"))
+
+
+def _db_rollback(registry: dict[str, Any], handle: Any) -> bool:
+    conn = _db_connection(registry, handle)
+    try:
+        conn.rollback()
+        return True
+    except Exception as exc:
+        raise BytecodeThrow(_db_error(f"kunne ikke rulle tilbake transaksjon: {exc}"))
+
+
+def _request_cookie(ctx: Any, key: Any) -> str:
+    if not isinstance(ctx, dict):
+        return ""
+    headers = _decode_json_text_map(ctx.get("headers", ""))
+    target = str(key)
+    for cookie_key, cookie_value in _cookie_pairs(headers.get("cookie", "")):
+        if cookie_key == target:
+            return cookie_value
+    return ""
+
+
+def _cookie_header(name: Any, value: Any) -> str:
+    cookie_name = str(name).strip()
+    if not cookie_name:
+        return ""
+    cookie_value = str(value)
+    return f"{cookie_name}={cookie_value}; Path=/; HttpOnly; Secure; SameSite=Lax"
+
+
+def _response_set_cookie(response: Any, cookie: Any) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        response = _make_web_response(200, {}, "")
+    cookie_text = str(cookie).strip()
+    if not cookie_text:
+        return dict(response)
+    result = dict(response)
+    headers = _decode_json_text_map(result.get("headers", ""))
+    existing = str(headers.get("set-cookie", "")).strip()
+    headers["set-cookie"] = f"{existing}\n{cookie_text}" if existing else cookie_text
+    result["headers"] = json.dumps(headers, ensure_ascii=False)
+    return result
+
+
 def _password_hash_core(password: str, salt: str) -> str:
     data = f"{salt}\0{password}".encode("utf-8")
     state = 0xCBF29CE484222325
@@ -555,9 +899,11 @@ class BytecodeCompiler:
         if type_name == TYPE_MAP_BOOL:
             return {"type": "object", "additionalProperties": {"type": "boolean"}}
         if isinstance(type_name, str) and type_name.startswith("liste_"):
-            return {"type": "array", "items": {"type": "string"}}
+            inner = type_name[len("liste_") :]
+            return {"type": "array", "items": self._schema_for_type(inner)}
         if isinstance(type_name, str) and type_name.startswith("ordbok_"):
-            return {"type": "object", "additionalProperties": {"type": "string"}}
+            inner = type_name[len("ordbok_") :]
+            return {"type": "object", "additionalProperties": self._schema_for_type(inner)}
         return {"type": "string"}
 
     def _sample_for_type(self, type_name: str) -> Any:
@@ -576,26 +922,52 @@ class BytecodeCompiler:
         if type_name == TYPE_MAP_BOOL:
             return {"verdi": True}
         if isinstance(type_name, str) and type_name.startswith("liste_"):
-            return ["eksempel"]
+            inner = type_name[len("liste_") :]
+            return [self._sample_for_type(inner)]
         if isinstance(type_name, str) and type_name.startswith("ordbok_"):
-            return {"verdi": "eksempel"}
+            inner = type_name[len("ordbok_") :]
+            return {"verdi": self._sample_for_type(inner)}
         return "eksempel"
 
-    def _route_docs_from_function(self, fn: FunctionNode, spec: str) -> dict[str, Any]:
+    def _function_uses_bearer_auth(self, fn: FunctionNode) -> bool:
+        for node in self._walk_ast_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, ModuleCallNode):
+                continue
+            module_name = getattr(node, "module_name", "")
+            func_name = getattr(node, "func_name", "")
+            if module_name in {"web", "std.web"} and func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                return True
+        return False
+
+    def _route_docs_from_function(self, fn: FunctionNode, spec: str, auth_guards: set[str] | None = None) -> dict[str, Any]:
         method, route_path = _split_web_route_spec(spec)
         path_params: list[dict[str, Any]] = []
         query_params: list[dict[str, Any]] = []
         body_fields: list[dict[str, Any]] = []
+        error_responses: list[dict[str, Any]] = []
         seen_path: set[str] = set()
         seen_query: set[str] = set()
         seen_body: set[str] = set()
+        auth_guards = auth_guards or set()
+        auth_required = False
         for node in self._walk_ast_nodes(getattr(fn, "body", None)):
             if not isinstance(node, ModuleCallNode):
                 continue
             module_name = getattr(node, "module_name", "")
             func_name = getattr(node, "func_name", "")
             args = getattr(node, "args", []) or []
-            if module_name not in {"web", "std.web"} or len(args) < 2 or not isinstance(args[1], StringNode):
+            if module_name not in {"web", "std.web"}:
+                continue
+            if func_name in {"require_bearer", "bearer_token", "auth_header"}:
+                auth_required = True
+            if func_name == "use_guard" and args and isinstance(args[0], StringNode) and args[0].value in auth_guards:
+                auth_required = True
+            if func_name == "response_error" and args and isinstance(args[0], NumberNode):
+                error_responses.append({
+                    "status": int(args[0].value),
+                    "message": str(args[1].value) if len(args) > 1 and isinstance(args[1], StringNode) else "",
+                })
+            if len(args) < 2 or not isinstance(args[1], StringNode):
                 continue
             key = args[1].value
             if func_name == "request_param" and key not in seen_path:
@@ -635,7 +1007,7 @@ class BytecodeCompiler:
                 for item in body_fields
             }
         response_type = getattr(fn, "return_type", TYPE_TEXT)
-        return {
+        operation = {
             "function": self.function_key(fn),
             "method": (method or "GET").lower(),
             "path": path_template,
@@ -648,10 +1020,28 @@ class BytecodeCompiler:
             "request_example": request_example,
             "response_example": self._sample_for_type(response_type),
             "response_schema": self._schema_for_type(response_type),
+            "error_responses": error_responses,
+            "responses": {
+                "200": {
+                    "description": "OK",
+                    "content": {
+                        "application/json": {
+                            "schema": self._schema_for_type(response_type),
+                            "example": self._sample_for_type(response_type),
+                        }
+                    },
+                }
+            },
         }
+        if auth_required:
+            operation["security"] = [{"bearerAuth": []}]
+            operation["responses"]["401"] = {"description": "Uautorisert"}
+            operation["responses"]["403"] = {"description": "Forbudt"}
+        return operation
 
     def _build_openapi_document(self, title: str, version: str) -> str:
         paths: dict[str, Any] = {}
+        has_bearer_auth = False
         for handler in getattr(self, "route_handlers", []):
             path = handler.get("path", "")
             method = str(handler.get("method", "get")).lower()
@@ -675,7 +1065,7 @@ class BytecodeCompiler:
                 "operationId": handler.get("operation_id", handler.get("function", "")),
                 "summary": handler.get("summary", handler.get("function", "")),
                 "parameters": parameters,
-                "responses": {
+                "responses": handler.get("responses", {
                     "200": {
                         "description": "OK",
                         "content": {
@@ -685,9 +1075,28 @@ class BytecodeCompiler:
                             }
                         },
                     }
-                },
+                }),
                 "x-example-request": handler.get("request_example", {}),
             }
+            if handler.get("security"):
+                operation["security"] = handler.get("security")
+                has_bearer_auth = True
+            for item in handler.get("error_responses", []):
+                status = str(item.get("status", 500))
+                message = item.get("message", "")
+                operation["responses"][status] = {
+                    "description": message or "Feil",
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {"error": {"type": "string"}},
+                                "required": ["error"],
+                            },
+                            "example": {"error": message or "Feil"},
+                        }
+                    },
+                }
             body_fields = handler.get("body_fields", [])
             if body_fields:
                 required_fields = [item["name"] for item in body_fields if item.get("required", False)]
@@ -711,6 +1120,15 @@ class BytecodeCompiler:
             "info": {"title": title, "version": version},
             "paths": paths,
         }
+        if has_bearer_auth:
+            document["components"] = {
+                "securitySchemes": {
+                    "bearerAuth": {
+                        "type": "http",
+                        "scheme": "bearer",
+                    }
+                }
+            }
         return json.dumps(document, ensure_ascii=False, indent=2)
 
     def _build_docs_html(self, title: str, version: str) -> str:
@@ -741,11 +1159,29 @@ class BytecodeCompiler:
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
         guard_providers: dict[str, str] = {}
+        auth_guard_names: set[str] = set()
         request_middlewares: list[str] = []
         response_middlewares: list[str] = []
         error_middlewares: list[str] = []
         startup_hooks: list[str] = []
         shutdown_hooks: list[str] = []
+        for fn in getattr(program, "functions", []):
+            if getattr(fn, "body", None) is None:
+                continue
+            statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
+            if not statements:
+                continue
+            for stmt in statements:
+                if not isinstance(stmt, ExprStmtNode):
+                    break
+                expr = stmt.expr
+                if not isinstance(expr, ModuleCallNode):
+                    break
+                if expr.module_name not in {"web", "std.web"}:
+                    break
+                if expr.func_name == "guard" and self._function_uses_bearer_auth(fn):
+                    auth_guard_names.add(fn.name)
+                break
         for fn in getattr(program, "functions", []):
             statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
             if not statements:
@@ -804,12 +1240,19 @@ class BytecodeCompiler:
                 break
             if route_guard:
                 guard_providers[fn.name] = self.function_key(fn)
+                if self._function_uses_bearer_auth(fn):
+                    auth_guard_names.add(fn.name)
             if spec is not None:
                 combined_spec = _combine_web_route_prefix(route_prefix, spec)
-                route_docs = self._route_docs_from_function(fn, combined_spec)
+                route_docs = self._route_docs_from_function(fn, combined_spec, auth_guard_names)
                 route_docs["deps"] = list(deps)
                 route_docs["guards"] = list(guards)
                 route_docs["spec"] = combined_spec
+                if route_docs.get("security") is None and any(guard in auth_guard_names for guard in guards):
+                    route_docs["security"] = [{"bearerAuth": []}]
+                    route_docs.setdefault("responses", {})
+                    route_docs["responses"]["401"] = {"description": "Uautorisert"}
+                    route_docs["responses"]["403"] = {"description": "Forbudt"}
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = self.function_key(fn)
@@ -1478,6 +1921,7 @@ class BytecodeCompiler:
             "json_parse", "json_stringify",
             "slice",
             "fil_les", "fil_skriv", "fil_append", "fil_finnes",
+            "db_open", "db_close", "db_execute", "db_query_text", "db_query_int", "db_begin", "db_commit", "db_rollback", "db_ping",
             "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
             "miljo_hent", "miljo_finnes", "miljo_sett",
         }
@@ -1526,6 +1970,11 @@ class BytecodeVM:
         self._call_stack: list[str] = []
         self._startup_ran = False
         self._shutdown_ran = False
+        self._db_connections: dict[str, Any] = {}
+        self._db_pools: dict[str, dict[str, Any]] = {}
+        self._db_pooled_handles: dict[str, str] = {}
+        self._db_next_handle = 1
+        self._db_next_pool_handle = 1
         self._memoizable_functions = {
             "selfhost.compiler.normaliser_norsk_token",
             "selfhost.compiler.stack_behov",
@@ -2336,6 +2785,104 @@ class BytecodeVM:
                 return ""
             headers = _decode_json_text_map(args[0].get("headers", ""))
             return str(headers.get(str(args[1]), ""))
+        if name in {"web.request_cookie", "std.web.request_cookie"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            return _request_cookie(args[0], args[1])
+        if name in {"web.request_cookie_or", "std.web.request_cookie_or"}:
+            if len(args) < 3 or not isinstance(args[0], dict):
+                return ""
+            cookie = _request_cookie(args[0], args[1])
+            if not cookie:
+                return str(args[2])
+            return cookie
+        if name in {"web.escape_html", "std.web.escape_html"}:
+            if not args:
+                return ""
+            return _escape_html(args[0])
+        if name in {"web.safe_filename", "std.web.safe_filename"}:
+            if not args:
+                return "fil"
+            return _safe_filename(args[0])
+        if name in {"web.safe_path_segment", "std.web.safe_path_segment"}:
+            if not args:
+                return "segment"
+            return _safe_path_segment(args[0])
+        if name in {"web.safe_slug", "std.web.safe_slug"}:
+            if not args:
+                return "slug"
+            return _safe_slug(args[0])
+        if name in {"db.open", "std.db.open"}:
+            if not args:
+                return ""
+            handle, self._db_next_handle = _db_open(self._db_connections, self._db_next_handle, args[0])
+            return handle
+        if name in {"db.close", "std.db.close"}:
+            if not args:
+                return False
+            return _db_close(self._db_connections, self._db_pools, self._db_pooled_handles, args[0])
+        if name in {"db.execute", "std.db.execute"}:
+            if len(args) < 2:
+                return 0
+            return _db_execute(self._db_connections, args[0], args[1])
+        if name in {"db.query_text", "std.db.query_text"}:
+            if len(args) < 2:
+                return ""
+            return _db_query_text(self._db_connections, args[0], args[1])
+        if name in {"db.query_int", "std.db.query_int"}:
+            if len(args) < 2:
+                return 0
+            return _db_query_int(self._db_connections, args[0], args[1])
+        if name in {"db.migrate", "std.db.migrate"}:
+            if len(args) < 2:
+                return 0
+            return _db_migrate(self._db_connections, args[0], args[1])
+        if name in {"db.transaction", "std.db.transaction"}:
+            if len(args) < 2:
+                return 0
+            return _db_transaction(self._db_connections, args[0], args[1])
+        if name in {"db.pool", "std.db.pool"}:
+            if len(args) < 2:
+                return ""
+            handle, self._db_next_pool_handle = _db_pool_open(self._db_pools, self._db_next_pool_handle, args[0], args[1])
+            return handle
+        if name in {"db.pool_acquire", "std.db.pool_acquire"}:
+            if not args:
+                return ""
+            handle, self._db_next_handle = _db_pool_acquire(self._db_connections, self._db_pools, self._db_next_handle, args[0])
+            self._db_pooled_handles[handle] = str(args[0])
+            return handle
+        if name in {"db.pool_size", "std.db.pool_size"}:
+            if not args:
+                return 0
+            return _db_pool_size(self._db_pools, args[0])
+        if name in {"db.pool_close", "std.db.pool_close"}:
+            if not args:
+                return False
+            return _db_pool_close(self._db_pools, args[0])
+        if name in {"db.begin", "std.db.begin"}:
+            if not args:
+                return False
+            return _db_begin(self._db_connections, args[0])
+        if name in {"db.commit", "std.db.commit"}:
+            if not args:
+                return False
+            return _db_commit(self._db_connections, args[0])
+        if name in {"db.rollback", "std.db.rollback"}:
+            if not args:
+                return False
+            return _db_rollback(self._db_connections, args[0])
+        if name in {"db.ping", "std.db.ping"}:
+            if not args:
+                return False
+            try:
+                conn = _db_connection(self._db_connections, args[0])
+                conn.execute("SELECT 1")
+                return True
+            except BytecodeThrow:
+                raise
+            except Exception as exc:
+                raise BytecodeThrow(_db_error(f"kunne ikke ping database: {exc}"))
         if name in {"web.request_params", "std.web.request_params"}:
             if not args or not isinstance(args[0], dict):
                 return {}
@@ -2482,6 +3029,14 @@ class BytecodeVM:
                 return ""
             headers = _decode_json_text_map(args[0].get("headers", ""))
             return str(headers.get(str(args[1]), ""))
+        if name in {"web.cookie_header", "std.web.cookie_header"}:
+            if len(args) < 2:
+                return ""
+            return _cookie_header(args[0], args[1])
+        if name in {"web.response_set_cookie", "std.web.response_set_cookie"}:
+            if len(args) < 2:
+                return _make_web_response(0, {}, "")
+            return _response_set_cookie(args[0], args[1])
         if name in {"web.response_error", "std.web.response_error"}:
             if len(args) < 2:
                 return _make_web_response(500, {"content-type": "application/json"}, '{"error":""}')
@@ -2616,11 +3171,14 @@ class BytecodeVM:
                 "har_nokkel", "fjern_nokkel", "json_parse", "json_stringify",
                 "slice",
                 "fil_les", "fil_skriv", "fil_append", "fil_finnes",
+                "db_open", "db_close", "db_execute", "db_query_text", "db_query_int", "db_migrate", "db_transaction", "db_begin", "db_commit", "db_rollback", "db_ping",
                 "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
                 "miljo_hent", "miljo_finnes", "miljo_sett",
                 "route", "handle_request", "request_params", "request_param", "request_param_int",
                 "request_query_required", "request_query_int", "request_json", "request_json_field",
                 "request_json_field_or", "request_json_field_int", "request_json_field_bool",
+                "request_cookie", "request_cookie_or", "cookie_header", "response_set_cookie",
+                "escape_html", "safe_filename", "safe_path_segment", "safe_slug",
                 "openapi_json", "docs_html",
             }
             if short_name in builtin_like:
@@ -2980,6 +3538,69 @@ class BytecodeVM:
             return text
         if name == "fil_finnes":
             return Path(str(args[0])).expanduser().exists() if args else False
+        if name == "db.open":
+            if not args:
+                return ""
+            handle, self._db_next_handle = _db_open(self._db_connections, self._db_next_handle, args[0])
+            return handle
+        if name == "db.close":
+            if not args:
+                return False
+            return _db_close(self._db_connections, self._db_pools, self._db_pooled_handles, args[0])
+        if name == "db.execute":
+            if len(args) < 2:
+                return 0
+            return _db_execute(self._db_connections, args[0], args[1])
+        if name == "db.query_text":
+            if len(args) < 2:
+                return ""
+            return _db_query_text(self._db_connections, args[0], args[1])
+        if name == "db.query_int":
+            if len(args) < 2:
+                return 0
+            return _db_query_int(self._db_connections, args[0], args[1])
+        if name == "db.pool":
+            if len(args) < 2:
+                return ""
+            handle, self._db_next_pool_handle = _db_pool_open(self._db_pools, self._db_next_pool_handle, args[0], args[1])
+            return handle
+        if name == "db.pool_acquire":
+            if not args:
+                return ""
+            handle, self._db_next_handle = _db_pool_acquire(self._db_connections, self._db_pools, self._db_next_handle, args[0])
+            self._db_pooled_handles[handle] = str(args[0])
+            return handle
+        if name == "db.pool_size":
+            if not args:
+                return 0
+            return _db_pool_size(self._db_pools, args[0])
+        if name == "db.pool_close":
+            if not args:
+                return False
+            return _db_pool_close(self._db_pools, args[0])
+        if name == "db.begin":
+            if not args:
+                return False
+            return _db_begin(self._db_connections, args[0])
+        if name == "db.commit":
+            if not args:
+                return False
+            return _db_commit(self._db_connections, args[0])
+        if name == "db.rollback":
+            if not args:
+                return False
+            return _db_rollback(self._db_connections, args[0])
+        if name == "db.ping":
+            if not args:
+                return False
+            try:
+                conn = _db_connection(self._db_connections, args[0])
+                conn.execute("SELECT 1")
+                return True
+            except BytecodeThrow:
+                raise
+            except Exception as exc:
+                raise BytecodeThrow(_db_error(f"kunne ikke ping database: {exc}"))
         if name == "miljo_hent":
             key = str(args[0]) if args else ""
             return os.environ.get(key, "")

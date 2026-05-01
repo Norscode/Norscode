@@ -17,6 +17,7 @@ class ModuleLoader:
         self.loaded = {}
         self.loading = set()
         self.project_root = self._find_project_root()
+        self.stdlib_roots = self._load_stdlib_roots()
         self.dependency_map = self._load_dependencies()
 
     def _find_existing_config_in_dir(self, base: Path):
@@ -79,6 +80,31 @@ class ModuleLoader:
 
         return dep_map
 
+    def _load_stdlib_roots(self):
+        roots = []
+
+        if self.project_root is not None:
+            config_path = self._find_existing_config_in_dir(self.project_root)
+            if config_path is not None:
+                try:
+                    data = toml_loads(config_path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+                paths = data.get("paths", {})
+                if isinstance(paths, dict):
+                    raw_stdlib = paths.get("stdlib")
+                    if isinstance(raw_stdlib, str) and raw_stdlib.strip():
+                        stdlib_root = Path(raw_stdlib).expanduser()
+                        if not stdlib_root.is_absolute():
+                            stdlib_root = (self.project_root / stdlib_root).resolve()
+                        roots.append(stdlib_root)
+
+        default_stdlib_root = Path(__file__).resolve().parent.parent
+        if default_stdlib_root not in roots:
+            roots.append(default_stdlib_root)
+
+        return roots
+
     def parse_file(self, file_path: Path):
         resolved = file_path.resolve()
         stat = resolved.stat()
@@ -109,8 +135,15 @@ class ModuleLoader:
 
     def _merge_programs(self, programs):
         all_functions = []
+        seen = set()
         for program in programs:
-            all_functions.extend(getattr(program, "functions", []))
+            for fn in getattr(program, "functions", []):
+                module_name = getattr(fn, "module_name", None)
+                key = (module_name, fn.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_functions.append(fn)
         return ProgramNode([], all_functions)
 
     def _module_candidates(self, module_name: str):
@@ -121,6 +154,14 @@ class ModuleLoader:
         seen = set()
         for base in (self.root, *self.root.parents):
             for path in (base / dot_path, base / rel_path):
+                resolved = path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                candidates.append(path)
+
+        for stdlib_root in self.stdlib_roots:
+            for path in (stdlib_root / dot_path, stdlib_root / rel_path):
                 resolved = path.resolve()
                 if resolved in seen:
                     continue

@@ -109,17 +109,165 @@ For rolle- og rettighetsmodell, se [examples/web_roles.no](/Users/jansteinar/Pro
 For passordhashing og secrets-håndtering, se [examples/secrets.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/secrets.no).
 For CSRF-beskyttelse, se [examples/csrf.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/csrf.no).
 
+For secure cookies, se [examples/web_cookies.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_cookies.no).
+For input-sanitizing og sikre web-strenger, se [examples/web_sanitize.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_sanitize.no).
+For databasebruk med SQLite og migreringer, se [examples/db.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db.no).
+For ekte databaseintegrasjon med reopen og persistens, se [examples/db_integration.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_integration.no).
+For repository-/modelmønstre, se [examples/db_repository.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_repository.no).
+For enkel JSON-/schema-mapping, se [examples/json_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/json_schema.no).
+For fil- og objektlagring, se [examples/file_object_storage.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/file_object_storage.no).
+
+## Cache
+
+Bruk `std.cache` for små in-memory verdier, memoisering og per-request oppslag:
+
+```norscode
+bruk std.cache som cache
+
+funksjon start() -> heltall {
+    la c = cache.opprett()
+    cache.sett(c, "bruker:42", "Ada")
+    skriv(cache.hent_eller(c, "bruker:99", "ukjent"))
+    returner 0
+}
+```
+
+Se [examples/cache.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cache.no).
+
+## Logging
+
+Bruk `std.log` for strukturert logging i JSON-linjer:
+
+```norscode
+bruk std.log som logg
+
+funksjon start() -> heltall {
+    la e = logg.info("request ferdig")
+    logg.felt_tekst(e, "request_id", "req-123")
+    logg.felt_tall(e, "status", 200)
+    logg.emit(e)
+    returner 0
+}
+```
+
+Se [examples/logging.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/logging.no).
+
+## Metrics
+
+Bruk `std.metrics` for counters og histogrammer:
+
+```norscode
+bruk std.metrics som metrics
+
+funksjon start() -> heltall {
+    la m = metrics.opprett()
+    metrics.tell(m, "requests")
+    metrics.histogram(m, "latency_ms", 12)
+    skriv(tekst_fra_heltall(metrics.hent(m, "requests")))
+    returner 0
+}
+```
+
+Se [examples/metrics.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/metrics.no).
+
+## Tracing
+
+Bruk `std.trace` for span- og request-sporing:
+
+```norscode
+bruk std.trace som trace
+
+funksjon start() -> heltall {
+    la spor = trace.start("handler", "trace-1", "root")
+    trace.felt_tall(spor, "status", 200)
+    trace.slutt_ok(spor)
+    returner 0
+}
+```
+
+Se [examples/trace.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/trace.no).
+
+## Audit
+
+Bruk `std.audit` for sikkerhetshendelser og sensitive operasjoner:
+
+```norscode
+bruk std.audit som audit
+
+funksjon start() -> heltall {
+    la e = audit.access_denied("ada", "admin", "/admin")
+    audit.felt_bool(e, "blocked", sann)
+    audit.emit(e)
+    returner 0
+}
+```
+
+Se [examples/audit.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/audit.no).
+
+## Dashboard- og exporter-mønster
+
+Bruk `std.metrics`, `std.log`, `std.trace` og `std.audit` sammen når du vil levere data til dashboards eller observability-plattformer:
+
+```norscode
+bruk std.log som logg
+bruk std.metrics som metrics
+bruk std.trace som trace
+bruk std.audit som audit
+bruk std.web som web
+
+funksjon start() -> heltall {
+    la m = metrics.opprett()
+    metrics.tell(m, "requests_total")
+
+    la ctx = web.request_context("get", "/healthz", {}, {"x-request-id": "req-123"}, "")
+    la spor = trace.start("GET /healthz", "trace-1", "root")
+    trace.koble_request(spor, web.request_id(ctx), web.request_method(ctx), web.request_path(ctx))
+    trace.slutt_ok(spor)
+
+    la e = logg.info("request ferdig")
+    logg.felt_tekst(e, "request_id", web.request_id(ctx))
+    logg.felt_tall(e, "status", 200)
+    logg.emit(e)
+
+    la a = audit.access_denied("ada", "admin", "/admin")
+    audit.emit(a)
+
+    skriv(json_stringify(m))
+    skriv(json_stringify(trace.til_logg(spor)))
+    returner 0
+}
+```
+
+Se [examples/observability_export.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/observability_export.no).
+
 For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
 
 For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no).
 
 For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no).
 
+For OpenAPI med bearer-auth, se [examples/web_openapi_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_auth.no).
+
+For OpenAPI med dokumenterte JSON-feilresponser, se [examples/web_openapi_errors.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_errors.no).
+
+For OpenAPI med nestede objekt-skjemaer, se [examples/web_openapi_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_schema.no).
+
+For API-versjonering og migrasjonsnotater, se [docs/API_VERSIONING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_VERSIONING.md) og [docs/API_MIGRATION_NOTES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_MIGRATION_NOTES.md).
+
 For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no).
 
 For lokal serverkjøring, bruk `norcode serve examples/web_routes.no --reload` eller en egen webapp-fil du vil kjøre i dev-modus.
 
 For reverse proxy-oppsett, bruk `norcode serve ... --proxy-headers --trusted-proxy <proxy-ip>` og les forwarded headers via `web.request_header()`.
+
+For browser-klienter og CORS, bruk `norcode serve ... --cors-origin https://app.example.com` eller la standard-CORS stå på for en enkel API-flate.
+
+For enkel rate limiting og brute-force-beskyttelse, bruk `norcode serve ... --rate-limit-requests 120 --rate-limit-window 60`.
+
+For containeroppsett og volum-basert kjøring, se [docs/CONTAINER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/CONTAINER.md).
+For systemd-oppsett på Linux, se [docs/SYSTEMD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/SYSTEMD.md) og [deploy/norscode.service](/Users/jansteinar/Projects/language_handoff/projects/language/deploy/norscode.service).
+For en samlet deployflyt fra release til drift, se [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/DEPLOYMENT_PLAYBOOK.md).
+For å starte et nytt API-prosjekt, se [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_SCAFFOLD.md).
 
 ## Neste steg
 

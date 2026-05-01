@@ -65,6 +65,6 @@ Kjør det med:
 
 - [docs/COOKBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/COOKBOOK.md)
 - [docs/EXAMPLES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/EXAMPLES.md)
+- [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_SCAFFOLD.md)
 - [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/CLI_CONTRACT.md)
 - [docs/QUALITY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/QUALITY.md)
-
