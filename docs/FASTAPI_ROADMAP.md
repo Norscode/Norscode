@@ -78,15 +78,15 @@ Dette er en stor del av FastAPI-opplevelsen og gjør handlers enklere å gjenbru
 
 Leveranse:
 
-- [ ] eksplisitt dependency-registrering
-- [ ] automatisk innsetting av request-scoped verdier
-- [ ] støtte for enkle provider-funksjoner
-- [ ] støtte for konfigurasjon, auth og database-hjelpere
-- [ ] deterministisk rekkefølge for dependency-løsning
+- [x] eksplisitt dependency-registrering
+- [x] automatisk innsetting av request-scoped verdier
+- [x] støtte for enkle provider-funksjoner
+- [x] støtte for konfigurasjon, auth og database-hjelpere
+- [x] deterministisk rekkefølge for dependency-løsning
 
 Ferdig når:
 
-- [ ] handlers kan holde seg små fordi felles oppsett injiseres automatisk
+- [x] handlers kan holde seg små fordi felles oppsett injiseres automatisk
 
 ## Etappe 5: OpenAPI og docs
 
@@ -161,7 +161,7 @@ Ferdig når:
 - [x] Request og response
 - [x] Route handlers
 - [x] Validering
-- [ ] Dependency injection
+- [x] Dependency injection
 - [ ] OpenAPI og docs
 - [ ] Middleware og hooks
 - [ ] Serveradapter
@@ -173,5 +173,5 @@ FastAPI-sporet er ferdig når:
 
 - [ ] det er lett å skrive en API-app i Norscode
 - [ ] routing, validering og docs henger sammen
-- [ ] handlerne blir små og lesbare
+- [x] handlerne blir små og lesbare
 - [ ] serverkjøring er enkel og stabil

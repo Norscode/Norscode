@@ -600,6 +600,7 @@ For mer realistiske flyter, se:
 - [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web.no) for path-parametre, rute-matching og dispatch i en FastAPI-lignende stil
 - [examples/web_request_response.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_request_response.no) for request_context, response_builder, header/query-hjelpere og filrespons
 - [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no) for ekte route-handlers med `web.route()` og `web.handle_request()`
+- [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no) for dependency registration og automatisk injeksjon inn i route-handlers
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
 - [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no) for sammensatt språkbruk
 

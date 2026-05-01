@@ -34,6 +34,7 @@ class CGenerator:
         self.emitted_lambda_prototypes: set[str] = set()
         self.emitted_lambda_defs: set[str] = set()
         self.route_handlers: list[dict[str, Any]] = []
+        self.dependency_providers: list[dict[str, Any]] = []
         self._build_function_name_map()
 
     def _build_function_name_map(self):
@@ -63,33 +64,55 @@ class CGenerator:
     def resolve_name(self, name):
         return self.name_alias_stack[-1].get(name, name)
 
-    def _route_spec_from_function(self, fn):
+    def _web_annotations_from_function(self, fn):
         statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
         if not statements:
-            return None
-        first = statements[0]
-        if not isinstance(first, ExprStmtNode):
-            return None
-        expr = first.expr
-        if not isinstance(expr, ModuleCallNode):
-            return None
-        if expr.module_name not in {"web", "std.web"} or expr.func_name != "route":
-            return None
-        if not expr.args or not isinstance(expr.args[0], StringNode):
-            return None
-        return expr.args[0].value
+            return None, [], []
+        spec = None
+        deps: list[str] = []
+        provided: list[str] = []
+        for stmt in statements:
+            if not isinstance(stmt, ExprStmtNode):
+                break
+            expr = stmt.expr
+            if not isinstance(expr, ModuleCallNode):
+                break
+            if expr.module_name not in {"web", "std.web"}:
+                break
+            if not expr.args or not isinstance(expr.args[0], StringNode):
+                break
+            if expr.func_name == "route" and spec is None:
+                spec = expr.args[0].value
+                continue
+            if expr.func_name == "use_dependency":
+                deps.append(expr.args[0].value)
+                continue
+            if expr.func_name == "dependency":
+                provided.append(expr.args[0].value)
+                continue
+            break
+        return spec, deps, provided
 
     def _collect_route_handlers(self, tree):
         handlers = []
+        providers = []
         for fn in getattr(tree, "functions", []):
-            spec = self._route_spec_from_function(fn)
+            spec, deps, provided = self._web_annotations_from_function(fn)
             if spec is None:
-                continue
-            handlers.append({
-                "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
-                "spec": spec,
-            })
-        return handlers
+                spec = None
+            if spec is not None:
+                handlers.append({
+                    "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
+                    "spec": spec,
+                    "deps": deps,
+                })
+            for dep_name in provided:
+                providers.append({
+                    "name": dep_name,
+                    "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
+                    "params": len(getattr(fn, "params", []) or []),
+                })
+        return handlers, providers
 
     def emit_web_route_dispatcher(self):
         self.emit("static int nl_web_route_match_params(const char *spec, const char *method, const char *path, nl_map_text *params) {")
@@ -127,6 +150,26 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static nl_map_text *nl_web_request_dependency(nl_map_text *ctx, const char *name) {")
+        self.indent += 1
+        self.emit("if (!name) { return nl_map_text_new(); }")
+        for provider in self.dependency_providers:
+            dep_name = str(provider["name"]).replace("\\", "\\\\").replace('"', '\\"')
+            provider_fn = provider["function"]
+            if provider["params"] > 0:
+                call_expr = f"{provider_fn}(ctx)"
+            else:
+                call_expr = f"{provider_fn}()"
+            self.emit(f"if (strcmp(name, \"{dep_name}\") == 0) {{")
+            self.indent += 1
+            self.emit(f"return {call_expr};")
+            self.indent -= 1
+            self.emit("}")
+        self.emit("return nl_map_text_new();")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_handle_request(nl_map_text *ctx) {")
         self.indent += 1
         self.emit("char *method = nl_web_request_method(ctx);")
@@ -143,7 +186,11 @@ class CGenerator:
             self.indent += 1
             self.emit("nl_map_text *route_ctx = nl_web_request_context(method, path, nl_web_request_query(ctx), nl_web_request_headers(ctx), nl_web_request_body(ctx));")
             self.emit("nl_map_text_set(route_ctx, \"params\", json_stringify(params));")
-            self.emit(f"return {handler['function']}(route_ctx);")
+            dep_args = ["route_ctx"]
+            for dep_name in handler.get("deps", []):
+                dep_escaped = str(dep_name).replace("\\", "\\\\").replace('"', '\\"')
+                dep_args.append(f'nl_web_request_dependency(route_ctx, "{dep_escaped}")')
+            self.emit(f"return {handler['function']}({', '.join(dep_args)});")
             self.indent -= 1
             self.emit("}")
             self.emit("if (nl_web_route_path_match(\"%s\", path)) { path_mismatch = 1; }" % spec)
@@ -491,7 +538,7 @@ class CGenerator:
 
     def generate(self, tree):
         entry_function = None
-        self.route_handlers = self._collect_route_handlers(tree)
+        self.route_handlers, self.dependency_providers = self._collect_route_handlers(tree)
         for fn in tree.functions:
             if fn.name == "start" and (getattr(fn, "module_name", None) in (None, "__main__")):
                 entry_function = fn
@@ -507,6 +554,8 @@ class CGenerator:
         self.emit("#include <unistd.h>")
         self.emit()
         self.emit_runtime_helpers()
+        self.emit("static nl_map_text *nl_web_request_dependency(nl_map_text *ctx, const char *name);")
+        self.emit()
 
         for fn in tree.functions:
             self.visit_function(fn)
@@ -3844,6 +3893,16 @@ class CGenerator:
                 if node.func_name == "route":
                     spec_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return f"nl_web_route({spec_code})", TYPE_TEXT
+                if node.func_name == "dependency":
+                    name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return name_code, TYPE_TEXT
+                if node.func_name == "use_dependency":
+                    name_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    return name_code, TYPE_TEXT
+                if node.func_name == "request_dependency":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    name_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_request_dependency({ctx_code}, {name_code})", TYPE_MAP_TEXT
                 if node.func_name == "handle_request":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_handle_request({ctx_code})", TYPE_MAP_TEXT

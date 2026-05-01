@@ -89,6 +89,8 @@ class Interpreter:
         self.modules: dict[str, Any] = {}
         self.scopes: list[dict[str, Any]] = [self.globals]
         self.call_stack: list[str] = []
+        self.route_handlers: list[dict[str, Any]] = []
+        self.dependency_providers: dict[str, str] = {}
 
     def push_scope(self):
         self.scopes.append({})
@@ -344,6 +346,7 @@ class Interpreter:
             "headers": self._encode_json_text_map(headers),
             "body": "" if body is None else str(body),
             "params": self._encode_json_text_map({}),
+            "deps": self._encode_json_text_map({}),
         }
 
     def _make_web_response(self, status: Any, headers: Any, body: Any) -> dict[str, Any]:
@@ -358,6 +361,8 @@ class Interpreter:
             ctx = self._make_web_request_context("", "", {}, {}, "")
         new_ctx = dict(ctx)
         new_ctx["params"] = self._encode_json_text_map(params)
+        if "deps" not in new_ctx:
+            new_ctx["deps"] = self._encode_json_text_map({})
         return new_ctx
 
     def _request_json_object(self, ctx: Any) -> dict[str, str]:
@@ -394,28 +399,93 @@ class Interpreter:
             return False
         raise ThrowSignal(self.validation_error(f"felt '{field_name}' forventet bool, fikk '{value}'"))
 
-    def _collect_route_handlers(self, program: ProgramNode):
+    def _collect_web_annotations(self, program: ProgramNode):
         handlers: list[dict[str, Any]] = []
+        providers: dict[str, str] = {}
         for fn in getattr(program, "functions", []):
             statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
             if not statements:
                 continue
-            first = statements[0]
-            if not isinstance(first, ExprStmtNode):
-                continue
-            expr = first.expr
-            if not isinstance(expr, ModuleCallNode):
-                continue
-            if expr.module_name not in {"web", "std.web"} or expr.func_name != "route":
-                continue
-            if not expr.args or not isinstance(expr.args[0], StringNode):
-                continue
-            handler_name = fn.name
-            handlers.append({
-                "function": handler_name,
-                "spec": expr.args[0].value,
-            })
-        return handlers
+            spec = None
+            deps: list[str] = []
+            provided: list[str] = []
+            for stmt in statements:
+                if not isinstance(stmt, ExprStmtNode):
+                    break
+                expr = stmt.expr
+                if not isinstance(expr, ModuleCallNode):
+                    break
+                if expr.module_name not in {"web", "std.web"}:
+                    break
+                if not expr.args or not isinstance(expr.args[0], StringNode):
+                    break
+                if expr.func_name == "route" and spec is None:
+                    spec = expr.args[0].value
+                    continue
+                if expr.func_name == "use_dependency":
+                    deps.append(expr.args[0].value)
+                    continue
+                if expr.func_name == "dependency":
+                    provided.append(expr.args[0].value)
+                    continue
+                break
+            if spec is not None:
+                handlers.append({
+                    "function": fn.name,
+                    "spec": spec,
+                    "deps": deps,
+                })
+            for dep_name in provided:
+                providers[dep_name] = fn.name
+        return handlers, providers
+
+    def _dependency_map(self, ctx: Any) -> dict[str, str]:
+        if not isinstance(ctx, dict):
+            return {}
+        return self._decode_json_text_map(ctx.get("deps", "{}"))
+
+    def _store_dependency_map(self, ctx: Any, deps: dict[str, str]) -> None:
+        if isinstance(ctx, dict):
+            ctx["deps"] = self._encode_json_text_map(deps)
+
+    def _normalize_dependency_value(self, value: Any) -> dict[str, str]:
+        if isinstance(value, dict):
+            return {str(key): str(val) for key, val in value.items()}
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return {str(key): self.json_scalar_to_text(val) for key, val in parsed.items()}
+            except Exception:
+                pass
+            return {"value": value}
+        return {"value": self.json_scalar_to_text(value)}
+
+    def _resolve_dependency_value(self, ctx: Any, dep_name: str):
+        deps = self._dependency_map(ctx)
+        if dep_name in deps:
+            cached = deps.get(dep_name, "")
+            try:
+                parsed = json.loads(cached) if cached else {}
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                return {str(key): str(val) for key, val in parsed.items()}
+            return {}
+        provider_name = self.dependency_providers.get(dep_name)
+        if not provider_name:
+            raise RuntimeError(f"Mangler dependency-provider for '{dep_name}'")
+        provider_fn = self.functions.get(provider_name)
+        if provider_fn is None:
+            raise RuntimeError(f"Mangler dependency-funksjon '{provider_name}'")
+        provider_args = [ctx] if getattr(provider_fn.node, "params", []) else []
+        value = self.call_user_function(provider_name, provider_args)
+        normalized = self._normalize_dependency_value(value)
+        deps[dep_name] = json.dumps(normalized, ensure_ascii=False)
+        self._store_dependency_map(ctx, deps)
+        return normalized
 
     def _find_route_handler(self, method: Any, path: Any):
         method_text = self._normalize_web_method(method)
@@ -445,7 +515,7 @@ class Interpreter:
         return None
 
     def run(self, program: ProgramNode):
-        self.route_handlers = self._collect_route_handlers(program)
+        self.route_handlers, self.dependency_providers = self._collect_web_annotations(program)
         for fn in getattr(program, "functions", []):
             self.functions[fn.name] = UserFunction(fn)
 
@@ -1159,6 +1229,22 @@ class Interpreter:
                 if not values:
                     return ""
                 return str(values[0])
+            if func_name == "dependency":
+                if not values:
+                    return ""
+                return str(values[0])
+            if func_name == "use_dependency":
+                if not values:
+                    return ""
+                return str(values[0])
+            if func_name == "request_dependency":
+                if len(values) < 2:
+                    return {}
+                dep_name = str(values[1])
+                try:
+                    return self._resolve_dependency_value(values[0], dep_name)
+                except RuntimeError as exc:
+                    raise ThrowSignal(self.http_error(str(exc)))
             if func_name == "handle_request":
                 if not values:
                     return self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
@@ -1169,7 +1255,10 @@ class Interpreter:
                 if params == "__405__":
                     return self._make_web_response(405, {"content-type": "application/json"}, self.json_serialize_value({"error": "Metode ikke tillatt"}))
                 ctx = self._make_route_context(values[0], params)
-                return self.call_user_function(handler["function"], [ctx])
+                deps = []
+                for dep_name in handler.get("deps", []):
+                    deps.append(self._resolve_dependency_value(ctx, dep_name))
+                return self.call_user_function(handler["function"], [ctx] + deps)
         if module_name in ("feil", "std.feil"):
             return self.call_user_function(func_name, values)
 

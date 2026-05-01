@@ -82,7 +82,10 @@ class SemanticAnalyzer:
             "web_response_error": FunctionSymbol("web_response_error", [TYPE_INT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_response_file": FunctionSymbol("web_response_file", [TYPE_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_route": FunctionSymbol("web_route", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_dependency": FunctionSymbol("web_dependency", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_use_dependency": FunctionSymbol("web_use_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_handle_request": FunctionSymbol("web_handle_request", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
+            "web_request_dependency": FunctionSymbol("web_request_dependency", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "vent_timeout": FunctionSymbol("vent_timeout", [None, TYPE_INT], None, True),
             "vent_kanseller": FunctionSymbol("vent_kanseller", [None], None, True),
             "vent_er_kansellert": FunctionSymbol("vent_er_kansellert", [None], TYPE_BOOL, True),
@@ -211,6 +214,26 @@ class SemanticAnalyzer:
             scope = {p.name: p.type_name for p in fn.params}
             struct_fields = {}
             saw_return = self.check_block(fn.body, scope, fn.return_type, False, struct_fields)
+            dependency_names = list(getattr(fn, "dependency_names", []) or [])
+            provided_dependencies = list(getattr(fn, "provided_dependencies", []) or [])
+            if provided_dependencies:
+                if len(fn.params) not in (0, 1):
+                    self.error("dependency-providers bør ta 0 eller 1 argument")
+                if len(fn.params) == 1 and fn.params[0].type_name != TYPE_MAP_TEXT:
+                    self.error("dependency-providers med argument må ta ordbok_tekst")
+                if fn.return_type != TYPE_MAP_TEXT:
+                    self.error("dependency-providers må returnere ordbok_tekst")
+            if dependency_names:
+                expected_params = 1 + len(dependency_names)
+                if len(fn.params) != expected_params:
+                    self.error(
+                        f"Funksjonen '{fn.name}' forventer {expected_params} parameter(e) når den bruker dependencies"
+                    )
+                if fn.params and fn.params[0].type_name != TYPE_MAP_TEXT:
+                    self.error("Første parameter i web-handler må være ordbok_tekst")
+                for param in fn.params[1:]:
+                    if param.type_name != TYPE_MAP_TEXT:
+                        self.error("Dependency-parametere må være ordbok_tekst")
             if not saw_return and fn.name != "start":
                 self.error(f"Funksjonen '{fn.name}' må returnere {fn.return_type}")
         finally:
@@ -1003,12 +1026,45 @@ class SemanticAnalyzer:
                     setattr(self.current_function, "route_spec", expr.args[0].value)
                 return TYPE_TEXT
 
+            if full_name in {"web.dependency", "std.web.dependency"}:
+                if len(expr.args) != 1:
+                    self.error("web.dependency forventer 1 argument")
+                dep_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if dep_type != TYPE_TEXT:
+                    self.error("web.dependency krever tekst")
+                if self.current_function is not None and isinstance(expr.args[0], StringNode):
+                    deps = list(getattr(self.current_function, "provided_dependencies", []) or [])
+                    deps.append(expr.args[0].value)
+                    setattr(self.current_function, "provided_dependencies", deps)
+                return TYPE_TEXT
+
+            if full_name in {"web.use_dependency", "std.web.use_dependency"}:
+                if len(expr.args) != 1:
+                    self.error("web.use_dependency forventer 1 argument")
+                dep_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if dep_type != TYPE_TEXT:
+                    self.error("web.use_dependency krever tekst")
+                if self.current_function is not None and isinstance(expr.args[0], StringNode):
+                    deps = list(getattr(self.current_function, "dependency_names", []) or [])
+                    deps.append(expr.args[0].value)
+                    setattr(self.current_function, "dependency_names", deps)
+                return TYPE_TEXT
+
             if full_name in {"web.handle_request", "std.web.handle_request"}:
                 if len(expr.args) != 1:
                     self.error("web.handle_request forventer 1 argument")
                 ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
                 if not self.is_map_type(ctx_type):
                     self.error("web.handle_request krever ordbok")
+                return TYPE_MAP_TEXT
+
+            if full_name in {"web.request_dependency", "std.web.request_dependency"}:
+                if len(expr.args) != 2:
+                    self.error("web.request_dependency forventer 2 argumenter")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                dep_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if not self.is_map_type(ctx_type) or dep_type != TYPE_TEXT:
+                    self.error("web.request_dependency krever ordbok og tekst")
                 return TYPE_MAP_TEXT
 
             if full_name in {"vent.timeout", "std.vent.timeout"}:

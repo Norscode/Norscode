@@ -102,6 +102,8 @@ Se [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/langua
 
 For route-handlers i FastAPI-stil, se også [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no).
 
+For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
+
 For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no).
 
 ## Neste steg

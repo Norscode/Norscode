@@ -257,6 +257,7 @@ def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, 
         "headers": _encode_json_text_map(headers),
         "body": "" if body is None else str(body),
         "params": _encode_json_text_map({}),
+        "deps": _encode_json_text_map({}),
     }
 
 
@@ -277,6 +278,8 @@ def _make_route_context(ctx: Any, params: dict[str, str]) -> dict[str, Any]:
         ctx = _make_web_request_context("", "", {}, {}, "")
     new_ctx = dict(ctx)
     new_ctx["params"] = _encode_json_text_map(params)
+    if "deps" not in new_ctx:
+        new_ctx["deps"] = _encode_json_text_map({})
     return new_ctx
 
 
@@ -367,32 +370,50 @@ class BytecodeCompiler:
     def resolve_name(self, name: str) -> str:
         return self.name_alias_stack[-1].get(name, name)
 
-    def _collect_route_handlers(self, program: ProgramNode) -> list[dict[str, Any]]:
+    def _collect_web_annotations(self, program: ProgramNode) -> tuple[list[dict[str, Any]], dict[str, str]]:
         handlers: list[dict[str, Any]] = []
+        providers: dict[str, str] = {}
         for fn in getattr(program, "functions", []):
             statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
             if not statements:
                 continue
-            first = statements[0]
-            if not isinstance(first, ExprStmtNode):
-                continue
-            expr = first.expr
-            if not isinstance(expr, ModuleCallNode):
-                continue
-            if expr.module_name not in {"web", "std.web"} or expr.func_name != "route":
-                continue
-            if not expr.args or not isinstance(expr.args[0], StringNode):
-                continue
-            handlers.append({
-                "function": self.function_key(fn),
-                "spec": expr.args[0].value,
-            })
-        return handlers
+            spec = None
+            deps: list[str] = []
+            provided: list[str] = []
+            for stmt in statements:
+                if not isinstance(stmt, ExprStmtNode):
+                    break
+                expr = stmt.expr
+                if not isinstance(expr, ModuleCallNode):
+                    break
+                if expr.module_name not in {"web", "std.web"}:
+                    break
+                if not expr.args or not isinstance(expr.args[0], StringNode):
+                    break
+                if expr.func_name == "route" and spec is None:
+                    spec = expr.args[0].value
+                    continue
+                if expr.func_name == "use_dependency":
+                    deps.append(expr.args[0].value)
+                    continue
+                if expr.func_name == "dependency":
+                    provided.append(expr.args[0].value)
+                    continue
+                break
+            if spec is not None:
+                handlers.append({
+                    "function": self.function_key(fn),
+                    "spec": spec,
+                    "deps": deps,
+                })
+            for dep_name in provided:
+                providers[dep_name] = self.function_key(fn)
+        return handlers, providers
 
     def compile_program(self, program: ProgramNode) -> dict[str, Any]:
         functions = {}
         imports = []
-        route_handlers = self._collect_route_handlers(program)
+        route_handlers, dependency_providers = self._collect_web_annotations(program)
         for imp in getattr(program, "imports", []):
             imports.append({"module": imp.module_name, "alias": imp.alias})
         for fn in getattr(program, "functions", []):
@@ -408,6 +429,7 @@ class BytecodeCompiler:
             "entry": "__main__.start",
             "imports": imports,
             "route_handlers": route_handlers,
+            "dependency_providers": dependency_providers,
             "functions": functions,
         }
 
@@ -1018,6 +1040,7 @@ class BytecodeVM:
         self.program = program
         self.functions = program.get("functions", {})
         self.route_handlers = program.get("route_handlers", [])
+        self.dependency_providers = program.get("dependency_providers", {})
         self.output: list[str] = []
         self.trace = trace
         self.max_steps = max_steps
@@ -1062,6 +1085,54 @@ class BytecodeVM:
         self.trace_log.append(message)
         if len(self.trace_log) > 400:
             del self.trace_log[:200]
+
+    def _dependency_map(self, ctx: Any) -> dict[str, str]:
+        if not isinstance(ctx, dict):
+            return {}
+        return _decode_json_text_map(ctx.get("deps", "{}"))
+
+    def _store_dependency_map(self, ctx: Any, deps: dict[str, str]) -> None:
+        if isinstance(ctx, dict):
+            ctx["deps"] = _encode_json_text_map(deps)
+
+    def _normalize_dependency_value(self, value: Any) -> dict[str, str]:
+        if isinstance(value, dict):
+            return {str(key): str(val) for key, val in value.items()}
+        if value is None:
+            return {}
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return {str(key): str(item) for key, item in parsed.items()}
+            except Exception:
+                pass
+            return {"value": value}
+        return {"value": str(value)}
+
+    def _resolve_dependency_value(self, ctx: Any, dep_name: str):
+        deps = self._dependency_map(ctx)
+        if dep_name in deps:
+            cached = deps.get(dep_name, "")
+            try:
+                parsed = json.loads(cached) if cached else {}
+            except Exception:
+                parsed = {}
+            if isinstance(parsed, dict):
+                return {str(key): str(item) for key, item in parsed.items()}
+            return {}
+        provider_name = self.dependency_providers.get(dep_name)
+        if not provider_name:
+            raise BytecodeRuntimeError(f"Mangler dependency-provider for '{dep_name}'")
+        provider = self.functions.get(provider_name)
+        if provider is None:
+            raise BytecodeRuntimeError(f"Mangler dependency-funksjon '{provider_name}'")
+        provider_args = [ctx] if provider.get("params") else []
+        value = self.call_function(provider_name, provider_args)
+        normalized = self._normalize_dependency_value(value)
+        deps[dep_name] = json.dumps(normalized, ensure_ascii=False)
+        self._store_dependency_map(ctx, deps)
+        return normalized
 
     def get_trace_tail(self, limit: int = 60) -> list[str]:
         return self.trace_log[-limit:]
@@ -1863,6 +1934,18 @@ class BytecodeVM:
             if not args:
                 return ""
             return str(args[0])
+        if name in {"web.dependency", "std.web.dependency"}:
+            if not args:
+                return ""
+            return str(args[0])
+        if name in {"web.use_dependency", "std.web.use_dependency"}:
+            if not args:
+                return ""
+            return str(args[0])
+        if name in {"web.request_dependency", "std.web.request_dependency"}:
+            if len(args) < 2:
+                return {}
+            return self._resolve_dependency_value(args[0], str(args[1]))
         if name in {"web.handle_request", "std.web.handle_request"}:
             if not args or not isinstance(args[0], dict):
                 return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
@@ -1890,7 +1973,8 @@ class BytecodeVM:
                 return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
             handler, params = found
             ctx = _make_route_context(args[0], params)
-            return self.call_function(handler["function"], [ctx])
+            deps = [self._resolve_dependency_value(ctx, dep_name) for dep_name in handler.get("deps", [])]
+            return self.call_function(handler["function"], [ctx] + deps)
         fn = self.functions.get(name)
         if fn is None:
             short_name = name.rsplit('.', 1)[-1]
