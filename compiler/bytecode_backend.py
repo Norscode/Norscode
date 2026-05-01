@@ -352,6 +352,22 @@ def _web_has_permission(ctx: Any, expected: Any) -> bool:
     return permission in _web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
 
 
+def _csrf_token(ctx: Any) -> str:
+    if not isinstance(ctx, dict):
+        return ""
+    headers = _decode_json_text_map(ctx.get("headers", ""))
+    for key in ("x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrf"):
+        value = str(headers.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _csrf_require(ctx: Any, expected: Any) -> bool:
+    token = _csrf_token(ctx)
+    return bool(token) and token == str(expected)
+
+
 def _password_hash_core(password: str, salt: str) -> str:
     data = f"{salt}\0{password}".encode("utf-8")
     state = 0xCBF29CE484222325
@@ -2421,6 +2437,14 @@ class BytecodeVM:
             if len(args) < 2:
                 return False
             return _password_verify(args[0], args[1])
+        if name in {"csrf.token", "std.csrf.token"}:
+            if not args:
+                return ""
+            return _csrf_token(args[0])
+        if name in {"csrf.require", "std.csrf.require"}:
+            if len(args) < 2:
+                return False
+            return _csrf_require(args[0], args[1])
         if name in {"web.response_builder", "std.web.response_builder"}:
             if len(args) < 3:
                 return _make_web_response(0, {}, "")

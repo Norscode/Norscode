@@ -107,6 +107,7 @@ For HEAD, OPTIONS og metodeforhandling, se [examples/web_methods.no](/Users/jans
 For bearer-token auth med guards, se [examples/web_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_auth.no).
 For rolle- og rettighetsmodell, se [examples/web_roles.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_roles.no).
 For passordhashing og secrets-håndtering, se [examples/secrets.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/secrets.no).
+For CSRF-beskyttelse, se [examples/csrf.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/csrf.no).
 
 For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
 

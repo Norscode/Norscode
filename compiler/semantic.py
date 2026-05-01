@@ -82,6 +82,8 @@ class SemanticAnalyzer:
             "web_require_role": FunctionSymbol("web_require_role", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_has_permission": FunctionSymbol("web_has_permission", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_require_permission": FunctionSymbol("web_require_permission", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
+            "csrf_token": FunctionSymbol("csrf_token", [TYPE_MAP_TEXT], TYPE_TEXT, True),
+            "csrf_require": FunctionSymbol("csrf_require", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_response_builder": FunctionSymbol("web_response_builder", [TYPE_INT, TYPE_MAP_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_response_status": FunctionSymbol("web_response_status", [TYPE_MAP_TEXT], TYPE_INT, True),
             "web_response_headers": FunctionSymbol("web_response_headers", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
@@ -1186,6 +1188,23 @@ class SemanticAnalyzer:
                 lagret_type = self.check_expr(expr.args[1], scope, field_schemas)
                 if passord_type != TYPE_TEXT or lagret_type != TYPE_TEXT:
                     self.error("sikkerhet.passord_verifiser krever tekst og tekst")
+                return TYPE_BOOL
+
+            if full_name in {"csrf.token", "std.csrf.token"}:
+                if len(expr.args) != 1:
+                    self.error("csrf.token forventer 1 argument")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if not self.is_map_type(ctx_type):
+                    self.error("csrf.token krever ordbok")
+                return TYPE_TEXT
+
+            if full_name in {"csrf.require", "std.csrf.require"}:
+                if len(expr.args) != 2:
+                    self.error("csrf.require forventer 2 argumenter")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                expected_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if not self.is_map_type(ctx_type) or expected_type != TYPE_TEXT:
+                    self.error("csrf.require krever ordbok og tekst")
                 return TYPE_BOOL
 
             if full_name in {"web.handle_request", "std.web.handle_request"}:

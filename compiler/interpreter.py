@@ -666,6 +666,20 @@ class Interpreter:
             return False
         return permission in self._web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
 
+    def _csrf_token(self, ctx: Any) -> str:
+        if not isinstance(ctx, dict):
+            return ""
+        headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+        for key in ("x-csrf-token", "x-xsrf-token", "csrf-token", "x-csrf"):
+            value = str(headers.get(key, "")).strip()
+            if value:
+                return value
+        return ""
+
+    def _csrf_require(self, ctx: Any, expected: Any) -> bool:
+        token = self._csrf_token(ctx)
+        return bool(token) and token == str(expected)
+
     def _password_hash_core(self, password: str, salt: str) -> str:
         data = f"{salt}\0{password}".encode("utf-8")
         state = 0xCBF29CE484222325
@@ -1675,6 +1689,14 @@ class Interpreter:
                 if len(values) < 2:
                     return False
                 return self._password_verify(values[0], values[1])
+            if func_name == "csrf_token":
+                if not values:
+                    return ""
+                return self._csrf_token(values[0])
+            if func_name == "csrf_require":
+                if len(values) < 2:
+                    return False
+                return self._csrf_require(values[0], values[1])
             if func_name == "response_builder":
                 if len(values) < 3:
                     return self._make_web_response(200, {}, "")
@@ -1838,6 +1860,15 @@ class Interpreter:
                 if len(values) < 2:
                     return False
                 return self._password_verify(values[0], values[1])
+        if module_name in ("csrf", "std.csrf"):
+            if func_name == "token":
+                if not values:
+                    return ""
+                return self._csrf_token(values[0])
+            if func_name == "require":
+                if len(values) < 2:
+                    return False
+                return self._csrf_require(values[0], values[1])
         if module_name in ("feil", "std.feil"):
             return self.call_user_function(func_name, values)
 

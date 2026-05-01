@@ -3379,6 +3379,32 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_csrf_token(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("nl_map_text *headers = nl_web_request_headers(ctx);")
+        self.emit("char *value = nl_map_text_get(headers, \"x-csrf-token\");")
+        self.emit("if (value && *value) { return nl_strdup(value); }")
+        self.emit("value = nl_map_text_get(headers, \"x-xsrf-token\");")
+        self.emit("if (value && *value) { return nl_strdup(value); }")
+        self.emit("value = nl_map_text_get(headers, \"csrf-token\");")
+        self.emit("if (value && *value) { return nl_strdup(value); }")
+        self.emit("value = nl_map_text_get(headers, \"x-csrf\");")
+        self.emit("if (value && *value) { return nl_strdup(value); }")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_csrf_require(nl_map_text *ctx, const char *expected) {")
+        self.indent += 1
+        self.emit("char *token = nl_web_csrf_token(ctx);")
+        self.emit("int ok = token && expected && strcmp(token, expected) == 0;")
+        self.emit("free(token);")
+        self.emit("return ok;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_response_builder(int status, nl_map_text *headers, const char *body) {")
         self.indent += 1
         self.emit("nl_map_text *result = nl_map_text_new();")
@@ -4606,6 +4632,13 @@ class CGenerator:
                     passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     lagret_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_password_verify({passord_code}, {lagret_code})", TYPE_BOOL
+                if node.func_name == "token":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    return f"nl_web_csrf_token({ctx_code})", TYPE_TEXT
+                if node.func_name == "require":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_csrf_require({ctx_code}, {key_code})", TYPE_BOOL
                 if node.func_name == "request_json":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_request_json({ctx_code})", TYPE_MAP_TEXT
@@ -4914,6 +4947,12 @@ class CGenerator:
                 if self.is_map_type(map_type):
                     return f"nl_map_any_remove({args[0]}, {args[1]})", TYPE_INT
                 return "0", TYPE_INT
+
+            if node.name == "csrf_token":
+                return f"nl_web_csrf_token({args[0]})", TYPE_TEXT
+
+            if node.name == "csrf_require":
+                return f"nl_web_csrf_require({args[0]}, {args[1]})", TYPE_BOOL
 
             c_name = self.resolve_c_function_name(node.name)
             return_type = symbol.return_type if symbol else TYPE_INT
