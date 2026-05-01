@@ -5,14 +5,14 @@ Denne versjonen legger til en første bro fra selfhost-parseren til AST-formatet
 ## Ny kommando
 
 ```bash
-python3 main.py selfhost-ast-export tests/test_math.no
+norcode selfhost-ast-export tests/test_math.no
 ```
 
 Dette skriver en `.shast.json`-fil som kan brukes av den eksisterende bytecode-backenden:
 
 ```bash
-python3 main.py bytecode-build tests/test_math.shast.json --ast
-python3 main.py bytecode-run tests/test_math.shast.json --ast
+norcode bytecode-build tests/test_math.shast.json --ast
+norcode bytecode-run tests/test_math.shast.json --ast
 ```
 
 ## Støttet foreløpig

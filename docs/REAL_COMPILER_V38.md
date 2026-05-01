@@ -6,7 +6,7 @@ Nytt i v38:
 
 Verifisert:
 - `python3 -m py_compile compiler/bytecode_backend.py main.py`
-- `python3 main.py selfhost-chain-run tests/test_selfhost.no`
+- `norcode selfhost-chain-run tests/test_selfhost.no`
 
 Status:
 - forrige blokkering på tokenet `seg` er borte

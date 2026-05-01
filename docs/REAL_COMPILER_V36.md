@@ -10,8 +10,8 @@ Få selfhost-kjeden forbi hotpathen i `selfhost.compiler.uttrykk_til_ops_og_verd
 
 ## Verifisert
 - `python3 -m py_compile compiler/bytecode_backend.py`
-- `python3 main.py selfhost-chain-check`
-- `python3 main.py selfhost-chain-run tests/test_selfhost.no`
+- `norcode selfhost-chain-check`
+- `norcode selfhost-chain-run tests/test_selfhost.no`
 
 ## Status
 V36 flytter blokkeringen videre fra `uttrykk_til_ops_og_verdier_med_miljo` til `selfhost.compiler.instruksjon_til_tekst`.

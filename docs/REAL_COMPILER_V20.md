@@ -16,9 +16,9 @@ Denne versjonen utvider broen fra selfhost-parseren til `norscode-ast-v1`.
 ## Verifisert eksempel
 
 ```bash
-python3 main.py selfhost-ast-export tests/test_selfhost_bridge_v20.no
-python3 main.py bytecode-build tests/test_selfhost_bridge_v20.shast.json --ast
-python3 main.py bytecode-run tests/test_selfhost_bridge_v20.shast.json --ast
+norcode selfhost-ast-export tests/test_selfhost_bridge_v20.no
+norcode bytecode-build tests/test_selfhost_bridge_v20.shast.json --ast
+norcode bytecode-run tests/test_selfhost_bridge_v20.shast.json --ast
 ```
 
 Forventet resultat:

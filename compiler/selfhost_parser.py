@@ -11,6 +11,7 @@ TOKEN_ALIASES = {
     'let': 'la', 'const': 'la', 'var': 'la', 'declare': 'la',
     'set': 'sett', 'assign': 'sett', 'return': 'returner',
     'if': 'hvis', 'then': 'da', 'else': 'ellers',
+    'match': 'match', 'case': 'case',
     'elseif': 'ellers_hvis', 'elsif': 'ellers_hvis', 'elif': 'ellers_hvis', 'ellershvis': 'ellers_hvis',
     'while': 'mens', 'break': 'bryt', 'continue': 'fortsett',
     'and': 'og', 'or': 'eller', 'not': 'ikke', '&&': 'og', '||': 'eller',
@@ -239,6 +240,8 @@ class Parser:
             return {'node': 'Return', 'value': self.parse_expression()}
         if tok == 'hvis':
             return self.parse_if_statement()
+        if tok == 'match':
+            return self.parse_match_statement()
         if tok == 'mens':
             return self.parse_while_statement()
         if tok == 'for':
@@ -306,6 +309,39 @@ class Parser:
 
     def parse_if_statement_from_alias(self) -> dict:
         return self._parse_if_core(consume_keyword=False)
+
+    def parse_match_statement(self) -> dict:
+        self.expect('match')
+        subject = self.parse_expression()
+        self.expect('{')
+        cases: list[dict] = []
+        else_block: list[dict] | None = None
+        wildcard_seen = False
+        while self.peek() != '}':
+            if self.match('case'):
+                if wildcard_seen:
+                    raise self.error("Wildcard-case i match må være siste case")
+                if self.peek() == '_':
+                    self.advance()
+                    pattern = {'node': 'Wildcard'}
+                    wildcard_seen = True
+                else:
+                    pattern = self.parse_expression()
+                body_tokens, body = self.parse_block_with_tokens()
+                cases.append({
+                    'pattern': pattern,
+                    'body': body,
+                    'body_tokens': body_tokens,
+                })
+                continue
+            if self.match('ellers'):
+                if wildcard_seen:
+                    raise self.error("match kan ikke ha både wildcard-case og ellers-blokk")
+                else_tokens, else_block = self.parse_block_with_tokens()
+                break
+            raise self.error("Forventet 'case' eller 'ellers' i match")
+        self.expect('}')
+        return {'node': 'Match', 'subject': subject, 'cases': cases, 'else': else_block}
 
     def parse_while_statement(self) -> dict:
         self.expect('mens')

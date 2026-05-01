@@ -11,5 +11,5 @@ Gi selfhost-kjeden en presis uttrykksprobe før selve hotpath-kompileringen, sli
 
 ## Eksempel
 ```bash
-python3 main.py selfhost-chain-run tests/test_selfhost.no --expr-probe "eller" --expr-probe-log build/expr_probe.log
+norcode selfhost-chain-run tests/test_selfhost.no --expr-probe "eller" --expr-probe-log build/expr_probe.log
 ```

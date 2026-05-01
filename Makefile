@@ -1,7 +1,8 @@
 PYTHON ?= python3
 PIP ?= $(PYTHON) -m pip
+NORSCODE ?= ./bin/nc
 
-.PHONY: install install-dev test run check build ci
+.PHONY: install install-dev test run check build ci release-package
 
 install:
 	$(PIP) install -e .
@@ -11,16 +12,19 @@ install-dev:
 	$(PIP) install -r requirements-dev.txt
 
 test:
-	$(PYTHON) main.py test
+	$(NORSCODE) test
 
 run:
-	$(PYTHON) main.py run app.no
+	$(NORSCODE) run app.no
 
 check:
-	$(PYTHON) main.py check app.no
+	$(NORSCODE) check app.no
 
 build:
-	$(PYTHON) main.py build app.no
+	$(NORSCODE) build app.no
 
 ci:
-	$(PYTHON) main.py ci --check-names
+	$(NORSCODE) ci --check-names
+
+release-package:
+	./package-release.sh

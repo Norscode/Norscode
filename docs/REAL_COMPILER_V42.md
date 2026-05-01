@@ -14,8 +14,8 @@ selv om hotpathen kan håndtere uttrykket isolert.
 
 ## Kommandoer å kjøre etter at probe-koden er koblet inn
 ```bash
-python3 main.py selfhost-chain-run tests/test_selfhost.no --trace
-python3 main.py selfhost-chain-run tests/test_selfhost.no --trace-focus uttrykk_til_ops_og_verdier_med_miljo
+norcode selfhost-chain-run tests/test_selfhost.no --trace
+norcode selfhost-chain-run tests/test_selfhost.no --trace-focus uttrykk_til_ops_og_verdier_med_miljo
 ```
 
 ## Ærlig status

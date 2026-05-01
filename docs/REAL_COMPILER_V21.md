@@ -9,8 +9,8 @@
 ## Ny test
 
 ```bash
-python3 main.py selfhost-ast-export tests/test_selfhost_ifexpr_v21.no
-python3 main.py bytecode-run tests/test_selfhost_ifexpr_v21.shast.json --ast
+norcode selfhost-ast-export tests/test_selfhost_ifexpr_v21.no
+norcode bytecode-run tests/test_selfhost_ifexpr_v21.shast.json --ast
 ```
 
 Forventet sluttverdi er `11`.

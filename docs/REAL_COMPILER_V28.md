@@ -10,6 +10,6 @@
 
 ## Kommandoer
 ```bash
-python3 main.py selfhost-chain-run tests/test_selfhost.no
-python3 main.py selfhost-chain-check
+norcode selfhost-chain-run tests/test_selfhost.no
+norcode selfhost-chain-check
 ```

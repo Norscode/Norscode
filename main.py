@@ -21,8 +21,38 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 from compiler.cgen import CGenerator
+from compiler.ast_nodes import (
+    AwaitNode,
+    BinOpNode,
+    BreakNode,
+    CallNode,
+    ContinueNode,
+    ExprStmtNode,
+    FieldAccessNode,
+    ForEachNode,
+    ForNode,
+    IfNode,
+    IfExprNode,
+    IndexNode,
+    IndexSetNode,
+    ListLiteralNode,
+    MapLiteralNode,
+    ModuleCallNode,
+    PrintNode,
+    ReturnNode,
+    SliceNode,
+    StructLiteralNode,
+    ThrowNode,
+    TryCatchNode,
+    UnaryOpNode,
+    VarDeclareNode,
+    VarSetNode,
+    WhileNode,
+)
+from compiler.formatter import format_source
 from compiler.lexer import Lexer
 from compiler.loader import ModuleLoader
 from compiler.parser import Parser
@@ -88,6 +118,230 @@ def _warn_legacy_once(key: str, message: str):
         return
     _LEGACY_WARNINGS_EMITTED.add(key)
     print(message, file=sys.stderr)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def _run_checked_command(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        cwd=str(cwd or _repo_root()),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+
+def run_benchmark_suite() -> dict:
+    root = _repo_root()
+    benchmarks = [
+        {
+            "name": "check-map",
+            "kind": "check",
+            "file": "tests/test_map.no",
+            "budget_ms": 4000,
+        },
+        {
+            "name": "test-json",
+            "kind": "test",
+            "file": "tests/test_json.no",
+            "budget_ms": 4000,
+        },
+        {
+            "name": "test-selfhost",
+            "kind": "test",
+            "file": "tests/test_selfhost.no",
+            "budget_ms": 12000,
+        },
+        {
+            "name": "commands-json",
+            "kind": "cli",
+            "args": ["./bin/nc", "commands", "--json"],
+            "budget_ms": 2000,
+        },
+    ]
+    payload = {
+        "ok": False,
+        "benchmarks": [],
+        "total_duration_ms": 0,
+        "max_duration_ms": 0,
+        "budget_exceeded_count": 0,
+        "thresholds": {item["name"]: item["budget_ms"] for item in benchmarks},
+    }
+    started = time.perf_counter()
+    for item in benchmarks:
+        case_started = time.perf_counter()
+        if item["kind"] == "check":
+            result = check_program(item["file"])
+            case_ok = True
+            details = {"source": str(result[0]), "functions": len(result[3].functions)}
+        elif item["kind"] == "test":
+            result = run_test_file(item["file"])
+            case_ok = bool(result["success"])
+            details = {
+                "source": result["source"],
+                "success": result["success"],
+                "stdout_lines": len(result.get("stdout", "").splitlines()),
+            }
+            if not case_ok:
+                raise RuntimeError(f"Benchmark-feil i test {item['file']}")
+        else:
+            completed = _run_checked_command(item["args"], cwd=root)
+            case_ok = completed.returncode == 0
+            details = {
+                "cmd": " ".join(item["args"]),
+                "stdout_lines": len(completed.stdout.splitlines()),
+            }
+        duration_ms = int((time.perf_counter() - case_started) * 1000)
+        within_budget = duration_ms <= int(item["budget_ms"])
+        payload["benchmarks"].append(
+            {
+                "name": item["name"],
+                "kind": item["kind"],
+                "duration_ms": duration_ms,
+                "budget_ms": item["budget_ms"],
+                "within_budget": within_budget,
+                "ok": case_ok,
+                "details": details,
+            }
+        )
+        if not within_budget:
+            payload["budget_exceeded_count"] += 1
+        payload["max_duration_ms"] = max(payload["max_duration_ms"], duration_ms)
+    payload["total_duration_ms"] = int((time.perf_counter() - started) * 1000)
+    payload["ok"] = payload["budget_exceeded_count"] == 0
+    return payload
+
+
+def run_smoke_suite() -> dict:
+    root = _repo_root()
+    release_version = f"smoke-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+    temp_prefix = Path(tempfile.mkdtemp(prefix="norscode-smoke-"))
+    payload = {
+        "ok": False,
+        "release_version": release_version,
+        "temp_prefix": str(temp_prefix),
+        "steps": [],
+    }
+    try:
+        steps = [
+            ("build-bootstrap", ["bash", "tools/build-bootstrap-binary.sh"], root),
+            ("package-release", ["bash", "package-release.sh", release_version], root),
+            (
+                "install-release",
+                ["bash", "tools/install-release.sh", f"release-artifacts/norscode-language-{release_version}.tar.gz", "--prefix", str(temp_prefix)],
+                root,
+            ),
+            (
+                "installed-help",
+                [str(temp_prefix / "current" / "bin" / "nc"), "--help"],
+                temp_prefix / "current",
+            ),
+            (
+                "installed-test",
+                [str(temp_prefix / "current" / "bin" / "nc"), "test"],
+                temp_prefix / "current",
+            ),
+        ]
+        for name, args, cwd in steps:
+            started = time.perf_counter()
+            completed = subprocess.run(
+                args,
+                cwd=str(cwd),
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            payload["steps"].append(
+                {
+                    "name": name,
+                    "ok": True,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                    "stdout_lines": len(completed.stdout.splitlines()),
+                }
+            )
+        payload["ok"] = True
+        return payload
+    except subprocess.CalledProcessError as exc:
+        payload["steps"].append(
+            {
+                "name": "failed",
+                "ok": False,
+                "returncode": exc.returncode,
+                "stdout": exc.stdout,
+                "stderr": exc.stderr,
+            }
+        )
+        raise RuntimeError("Smoke-test feilet") from exc
+
+
+def run_negative_suite() -> dict:
+    parser_cases = [
+        {"name": "empty-op", "source": "funksjon start() -> heltall { + }"},
+        {"name": "broken-fun", "source": "funksjon start() -> heltall { fun }"},
+        {"name": "dangling-assign", "source": "funksjon start() -> heltall { la x = }"},
+        {"name": "unknown-token", "source": "funksjon start() -> heltall { ??? }"},
+        {"name": "missing-brace", "source": "funksjon start() -> heltall { la x = 1"},
+    ]
+    payload = {
+        "ok": False,
+        "parser_cases": [],
+        "runtime_cases": [],
+        "parser_failures": 0,
+        "runtime_failures": 0,
+    }
+    for case in parser_cases:
+        started = time.perf_counter()
+        failed = False
+        error_text = ""
+        try:
+            parse_source(case["source"])
+        except Exception as exc:
+            failed = True
+            error_text = str(exc)
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        payload["parser_cases"].append(
+            {
+                "name": case["name"],
+                "ok": failed,
+                "duration_ms": duration_ms,
+                "error": error_text,
+            }
+        )
+        if not failed:
+            payload["parser_failures"] += 1
+
+    runtime_source = "funksjon start() -> heltall { kast(\"boom\") }"
+    started = time.perf_counter()
+    runtime_ok = False
+    runtime_error = ""
+    with tempfile.TemporaryDirectory(prefix="norscode-negative-") as tmpdir:
+        tmp_path = Path(tmpdir) / "negative_runtime.no"
+        tmp_path.write_text(runtime_source, encoding="utf-8")
+        try:
+            run_program(str(tmp_path))
+        except subprocess.CalledProcessError as exc:
+            runtime_ok = True
+            runtime_error = (exc.stderr or "").strip() or (exc.stdout or "").strip()
+        except Exception as exc:
+            runtime_ok = True
+            runtime_error = str(exc)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    payload["runtime_cases"].append(
+        {
+            "name": "unhandled-throw",
+            "ok": runtime_ok,
+            "duration_ms": duration_ms,
+            "error": runtime_error,
+        }
+    )
+    if not runtime_ok:
+        payload["runtime_failures"] += 1
+
+    payload["ok"] = payload["parser_failures"] == 0 and payload["runtime_failures"] == 0
+    return payload
 
 
 def _find_existing_project_config_in_dir(base: Path) -> Path | None:
@@ -2275,11 +2529,149 @@ def run_program(source_file: str):
     return source_path
 
 
+def _try_parse_expression(source_text: str):
+    parser = Parser(Lexer(source_text))
+    try:
+        expr = parser.expr()
+    except Exception:
+        return None
+    if parser.current.typ != "EOF":
+        return None
+    return expr
+
+
+def _indent_repl_body(lines: list[str]) -> list[str]:
+    indented: list[str] = []
+    for line in lines:
+        if line.strip():
+            indented.append(f"    {line}")
+        else:
+            indented.append("")
+    return indented
+
+
+def _build_repl_source(imports: list[str], chunk: str) -> tuple[str, bool]:
+    expr = _try_parse_expression(chunk)
+    if expr is not None:
+        body_lines = [f"    skriv({chunk.strip()})", "    returner 0"]
+        is_expr = True
+    else:
+        body_lines = _indent_repl_body(chunk.splitlines())
+        body_lines.append("    returner 0")
+        is_expr = False
+
+    source_lines = []
+    source_lines.extend(imports)
+    if imports:
+        source_lines.append("")
+    source_lines.append("funksjon start() -> heltall {")
+    source_lines.extend(body_lines)
+    source_lines.append("}")
+    source_lines.append("")
+    return "\n".join(source_lines), is_expr
+
+
+def _run_repl_source(source_text: str):
+    suffix = uuid.uuid4().hex[:8]
+    source_path = Path.cwd() / f".norscode_repl_{suffix}.no"
+    c_path = source_path.with_suffix(".c")
+    exe_path = source_path.with_suffix("")
+    try:
+        source_path.write_text(source_text, encoding="utf-8")
+        _source_path, c_path, exe_path, _alias_map, _analyzer = build_program(str(source_path))
+        result = subprocess.run(
+            [str(exe_path.resolve())],
+            capture_output=True,
+            text=True,
+        )
+        return {
+            "source": str(source_path),
+            "c_file": str(c_path),
+            "exe_file": str(exe_path),
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
+    finally:
+        for path in (source_path, c_path, exe_path):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def run_repl():
+    print("Norscode REPL")
+    print("Skriv linjer og avslutt blokken med en tom linje.")
+    print("Kommandoer: :quit, :exit, :reset, :imports")
+    imports: list[str] = []
+    buffer: list[str] = []
+
+    while True:
+        prompt = ">>> " if not buffer else "... "
+        try:
+            line = input(prompt)
+        except EOFError:
+            print()
+            break
+
+        stripped = line.strip()
+        if not buffer and stripped in {":quit", ":exit", ":q"}:
+            break
+        if not buffer and stripped == ":reset":
+            imports.clear()
+            print("Session nullstilt.")
+            continue
+        if not buffer and stripped == ":imports":
+            if not imports:
+                print("Ingen importlinjer enda.")
+            else:
+                for item in imports:
+                    print(item)
+            continue
+
+        if stripped == "":
+            if not buffer:
+                continue
+            chunk = "\n".join(buffer).rstrip()
+            buffer.clear()
+
+            if not chunk:
+                continue
+            if chunk.lstrip().startswith("bruk "):
+                imports.append(chunk)
+                print("Import lagt til.")
+                continue
+
+            source_text, is_expr = _build_repl_source(imports, chunk)
+            try:
+                result = _run_repl_source(source_text)
+            except Exception as exc:
+                print(f"Feil: {exc}")
+                continue
+
+            stdout = result["stdout"]
+            stderr = result["stderr"]
+            if stdout:
+                end = "" if stdout.endswith("\n") else "\n"
+                print(stdout, end=end)
+            if stderr:
+                end = "" if stderr.endswith("\n") else "\n"
+                print(stderr, end=end, file=sys.stderr)
+            if result["returncode"] != 0:
+                print(f"[exit {result['returncode']}]")
+            elif is_expr and not stdout:
+                print("OK")
+            continue
+
+        buffer.append(line)
+
+
 def discover_tests() -> list[Path]:
     tests_dir = Path("tests").resolve()
     if not tests_dir.exists():
         return []
-    return sorted(p.resolve() for p in tests_dir.glob("test_*.no"))
+    return sorted(p.resolve() for p in tests_dir.rglob("test_*.no"))
 
 
 def run_test_file(source_file: str):
@@ -2320,6 +2712,243 @@ def print_test_result(result, verbose: bool = False):
         if result["stderr"]:
             print("STDERR:")
             print(result["stderr"], end="" if result["stderr"].endswith("\n") else "\n")
+
+
+def _collect_lint_issues(program, alias_map: dict[str, str] | None = None):
+    issues: list[dict] = []
+
+    imports = list(getattr(program, "imports", []))
+    if not imports and alias_map:
+        imports = [SimpleNamespace(module_name=module_name, alias=alias) for alias, module_name in alias_map.items()]
+    used_modules: set[str] = set()
+    seen_import_keys: set[str] = set()
+
+    for imp in imports:
+        key = imp.alias or imp.module_name
+        if key in seen_import_keys:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": "duplicate-import",
+                    "location": key,
+                    "message": f"Dobbel import: {key}",
+                }
+            )
+        else:
+            seen_import_keys.add(key)
+
+    def visit_expr(expr):
+        if expr is None:
+            return
+        if isinstance(expr, ModuleCallNode):
+            used_modules.add(expr.module_name)
+            for arg in expr.args:
+                visit_expr(arg)
+            return
+        if isinstance(expr, CallNode):
+            for arg in expr.args:
+                visit_expr(arg)
+            return
+        if isinstance(expr, IfExprNode):
+            visit_expr(expr.condition)
+            visit_expr(expr.then_expr)
+            visit_expr(expr.else_expr)
+            return
+        if isinstance(expr, AwaitNode):
+            visit_expr(expr.expr)
+            return
+        if isinstance(expr, UnaryOpNode):
+            visit_expr(expr.node)
+            return
+        if isinstance(expr, BinOpNode):
+            visit_expr(expr.left)
+            visit_expr(expr.right)
+            return
+        if isinstance(expr, IndexNode):
+            visit_expr(expr.list_expr)
+            visit_expr(expr.index_expr)
+            return
+        if isinstance(expr, SliceNode):
+            visit_expr(expr.target)
+            visit_expr(expr.start_expr)
+            visit_expr(expr.end_expr)
+            return
+        if isinstance(expr, FieldAccessNode):
+            visit_expr(expr.target)
+            return
+        if isinstance(expr, ListLiteralNode):
+            for item in expr.items:
+                visit_expr(item)
+            return
+        if isinstance(expr, MapLiteralNode):
+            for key_expr, value_expr in expr.items:
+                visit_expr(key_expr)
+                visit_expr(value_expr)
+            return
+        if isinstance(expr, StructLiteralNode):
+            for _field_name, value_expr in expr.fields:
+                visit_expr(value_expr)
+            return
+
+    def visit_stmt(stmt, function_name: str, in_loop: bool):
+        if isinstance(stmt, VarDeclareNode):
+            visit_expr(stmt.expr)
+            return False
+        if isinstance(stmt, VarSetNode):
+            visit_expr(stmt.expr)
+            return False
+        if isinstance(stmt, IndexSetNode):
+            visit_expr(stmt.index_expr)
+            visit_expr(stmt.value_expr)
+            return False
+        if isinstance(stmt, PrintNode):
+            visit_expr(stmt.expr)
+            return False
+        if isinstance(stmt, IfNode):
+            visit_expr(stmt.condition)
+            visit_block(stmt.then_block, function_name, in_loop)
+            for elif_cond, elif_block in getattr(stmt, "elif_blocks", []):
+                visit_expr(elif_cond)
+                visit_block(elif_block, function_name, in_loop)
+            if stmt.else_block:
+                visit_block(stmt.else_block, function_name, in_loop)
+            return False
+        if isinstance(stmt, IfExprNode):
+            visit_expr(stmt.condition)
+            visit_expr(stmt.then_expr)
+            visit_expr(stmt.else_expr)
+            return False
+        if isinstance(stmt, WhileNode):
+            visit_expr(stmt.condition)
+            visit_block(stmt.body, function_name, True)
+            return False
+        if isinstance(stmt, ForNode):
+            visit_expr(stmt.start_expr)
+            visit_expr(stmt.end_expr)
+            visit_expr(stmt.step_expr)
+            visit_block(stmt.body, function_name, True)
+            return False
+        if isinstance(stmt, ForEachNode):
+            visit_expr(stmt.list_expr)
+            visit_block(stmt.body, function_name, True)
+            return False
+        if isinstance(stmt, ReturnNode):
+            visit_expr(stmt.expr)
+            return True
+        if isinstance(stmt, ThrowNode):
+            visit_expr(stmt.expr)
+            return True
+        if isinstance(stmt, TryCatchNode):
+            visit_block(stmt.try_block, function_name, in_loop)
+            visit_block(stmt.catch_block, function_name, in_loop)
+            return False
+        if isinstance(stmt, ExprStmtNode):
+            visit_expr(stmt.expr)
+            return False
+        if isinstance(stmt, (BreakNode, ContinueNode)):
+            return True
+        return False
+
+    def visit_block(block, function_name: str, in_loop: bool):
+        dead = False
+        for stmt in getattr(block, "statements", []):
+            if dead:
+                issues.append(
+                    {
+                        "severity": "warning",
+                        "code": "unreachable-code",
+                        "location": function_name,
+                        "message": f"Uoppnåelig kode etter terminal statement i funksjon '{function_name}'",
+                    }
+                )
+                break
+            dead = visit_stmt(stmt, function_name, in_loop)
+
+    for fn in getattr(program, "functions", []):
+        visit_block(fn.body, fn.name, False)
+
+    for test in getattr(program, "tests", []):
+        visit_block(test.body, test.name, False)
+
+    for imp in imports:
+        key = imp.alias or imp.module_name
+        if key not in used_modules:
+            issues.append(
+                {
+                    "severity": "warning",
+                    "code": "unused-import",
+                    "location": key,
+                    "message": f"Ubrukt import: {imp.module_name}" + (f" som {imp.alias}" if imp.alias else ""),
+                }
+            )
+
+    return issues
+
+
+def lint_program(source_file: str):
+    source_path, program, alias_map = load_program(source_file)
+    issues = _collect_lint_issues(program, alias_map=alias_map)
+    return {
+        "source": str(source_path),
+        "alias_map": alias_map,
+        "issues": issues,
+        "success": len(issues) == 0,
+    }
+
+
+def print_lint_result(result, verbose: bool = False):
+    issues = result.get("issues", [])
+    status = "OK" if not issues else "FEIL"
+    print(f"{status}: {result['source']} ({len(issues)} funn)")
+    if verbose or issues:
+        for issue in issues:
+            location = issue.get("location")
+            prefix = f"{issue.get('severity', 'warning').upper()} {issue.get('code', 'lint')}"
+            if location:
+                print(f"- {prefix}: {location} -> {issue.get('message', '')}")
+            else:
+                print(f"- {prefix}: {issue.get('message', '')}")
+
+
+def format_program_file(source_file: str, check: bool = False, diff: bool = False):
+    source_path = _resolve_source_path(source_file)
+    original = source_path.read_text(encoding="utf-8")
+    formatted = format_source(original)
+    changed = formatted != original
+    diff_lines = None
+
+    if diff:
+        diff_lines = list(
+            difflib.unified_diff(
+                original.splitlines(),
+                formatted.splitlines(),
+                fromfile=str(source_path),
+                tofile=f"{source_path} (formatted)",
+                lineterm="",
+            )
+        )
+        if diff_lines:
+            print("\n".join(diff_lines))
+        else:
+            print(f"Ingen endringer for {source_path}")
+
+    if check:
+        return {
+            "source": str(source_path),
+            "changed": changed,
+            "written": False,
+            "diff": diff_lines,
+        }
+
+    if changed and not diff:
+        source_path.write_text(formatted, encoding="utf-8")
+
+    return {
+        "source": str(source_path),
+        "changed": changed,
+        "written": changed and not diff,
+        "diff": diff_lines,
+    }
 
 
 def run_ir_snapshot_checks():
@@ -2660,6 +3289,25 @@ def run_selfhost_parity_progress() -> dict:
             "mismatch_count": int(consistency.get("mismatch_count", 0) or 0),
         },
         "stderr": "" if ok else (consistency.get("stderr", "") or "\n".join(mismatch_lines) + "\n"),
+    }
+
+
+def run_selfhost_parity_gate(min_coverage: float | None = None) -> dict:
+    progress = run_selfhost_parity_progress()
+    coverage_total = None
+    if isinstance(progress.get("coverage"), dict):
+        coverage_total = progress["coverage"].get("total_pct")
+
+    ready = bool(progress.get("ready"))
+    if min_coverage is not None:
+        ready = ready and isinstance(coverage_total, (int, float)) and float(coverage_total) >= float(min_coverage)
+
+    return {
+        "ok": bool(progress.get("ok")) and ready,
+        "ready": ready,
+        "min_coverage": min_coverage,
+        "coverage_total_pct": coverage_total,
+        "progress": progress,
     }
 
 
@@ -3022,6 +3670,13 @@ def run_all_tests(verbose: bool = False, quiet: bool = False):
         print(f"Tester kjørt: {total}")
         print(f"Bestått: {passed}")
         print(f"Feilet: {failed}")
+        if failed:
+            print("Feilede tester:")
+            for result in results:
+                if not result["success"]:
+                    print(f"- {result['source']}")
+        else:
+            print("Alle tester besto.")
 
     return results
 
@@ -3031,12 +3686,39 @@ def summarize_test_results(results: list[dict]) -> dict:
     passed = sum(1 for r in results if r.get("success"))
     failed = total - passed
     duration_ms = sum(r.get("duration_ms", 0) for r in results if isinstance(r.get("duration_ms"), int))
+    timed_results = [r for r in results if isinstance(r.get("duration_ms"), int)]
+    sorted_by_duration = sorted(timed_results, key=lambda r: int(r.get("duration_ms", 0)), reverse=True)
     return {
         "total": total,
         "passed": passed,
         "failed": failed,
         "duration_ms": duration_ms,
+        "duration_s": round(duration_ms / 1000.0, 3),
         "ok": failed == 0,
+        "passed_sources": [r["source"] for r in results if r.get("success")],
+        "failed_sources": [r["source"] for r in results if not r.get("success")],
+        "slowest": [
+            {
+                "source": r["source"],
+                "duration_ms": int(r.get("duration_ms", 0)),
+            }
+            for r in sorted_by_duration[:5]
+        ],
+    }
+
+
+def summarize_lint_results(result: dict) -> dict:
+    issues = list(result.get("issues", []))
+    severity_counts: dict[str, int] = {}
+    for issue in issues:
+        severity = str(issue.get("severity", "warning"))
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+    return {
+        "source": result.get("source"),
+        "issue_count": len(issues),
+        "ok": not issues,
+        "severity_counts": severity_counts,
+        "codes": sorted({str(issue.get("code", "lint")) for issue in issues}),
     }
 
 
@@ -3067,7 +3749,7 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
         except OSError:
             continue
         has_node24_env = False
-        saw_norcode_ci_command = False
+        saw_ci_command = False
         for line_no, raw_line in enumerate(lines, start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -3111,8 +3793,8 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
             run_match = re.search(r"^\s*run\s*:\s*(.+)$", raw_line)
             if run_match:
                 run_cmd = run_match.group(1).strip()
-                if "norcode ci" in run_cmd:
-                    saw_norcode_ci_command = True
+                if "norcode ci" in run_cmd or "./bin/nc ci" in run_cmd:
+                    saw_ci_command = True
                     for flag in required_norcode_ci_flags:
                         if flag not in run_cmd:
                             payload["issues"].append(
@@ -3122,7 +3804,7 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
                                     "type": "missing_norcode_ci_flag",
                                     "rule": "require_norcode_ci_flag",
                                     "found": run_cmd,
-                                    "expected": f"run-linje med norcode ci må inkludere {flag}",
+                                    "expected": f"run-linje med norcode ci eller ./bin/nc ci må inkludere {flag}",
                                 }
                             )
         if not has_node24_env:
@@ -3136,15 +3818,15 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
                     "expected": 'FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"',
                 }
             )
-        if required_norcode_ci_flags and not saw_norcode_ci_command:
+        if required_norcode_ci_flags and not saw_ci_command:
             payload["issues"].append(
                 {
                     "file": str(workflow_path),
                     "line": 1,
                     "type": "missing_norcode_ci_command",
                     "rule": "require_norcode_ci_command",
-                    "found": "mangler run-linje med 'norcode ci'",
-                    "expected": "legg til run: norcode ci --check-names --require-selfhost-ready",
+                    "found": "mangler run-linje med 'norcode ci' eller './bin/nc ci'",
+                    "expected": "legg til run: norcode ci --check-names --require-selfhost-ready eller run: ./bin/nc ci --check-names --require-selfhost-ready",
                 }
             )
 
@@ -3704,8 +4386,21 @@ def main():
     parser = argparse.ArgumentParser(prog="norcode", description="Norscode CLI")
     sub = parser.add_subparsers(dest="cmd")
 
+    def _command_overview() -> list[dict[str, str]]:
+        overview: list[dict[str, str]] = []
+        for choice in sub._choices_actions:
+            overview.append(
+                {
+                    "name": choice.dest,
+                    "help": choice.help or "",
+                }
+            )
+        return sorted(overview, key=lambda row: row["name"])
+
     run = sub.add_parser("run", help="Bygg og kjør en .no-fil")
     run.add_argument("file")
+
+    repl = sub.add_parser("repl", help="Start en enkel interaktiv Norscode-REPL")
 
     check = sub.add_parser("check", help="Parser og valider en .no-fil uten å bygge")
     check.add_argument("file")
@@ -3796,6 +4491,17 @@ def main():
         help="Krev minimum total dekningsprosent (0-100)",
     )
 
+    selfhost_parity_gate = sub.add_parser(
+        "selfhost-parity-gate",
+        help="Kjør parity-progress som en eksplisitt gate",
+    )
+    selfhost_parity_gate.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
+    selfhost_parity_gate.add_argument(
+        "--min-coverage",
+        type=float,
+        help="Krev minimum total dekningsprosent (0-100)",
+    )
+
     selfhost_parity_consistency = sub.add_parser(
         "selfhost-parity-consistency",
         help="Sjekk consistency mellom parity-suiter og utvidet suite",
@@ -3876,7 +4582,7 @@ def main():
     selfhost_chain_run = sub.add_parser("selfhost-chain-run", help="Kjør full selfhost-kjede (.no -> selfhost AST -> bytecode -> VM)")
     selfhost_chain_run.add_argument("file")
     selfhost_chain_run.add_argument("--trace", action="store_true", help="Vis sporlogg ved feil")
-    selfhost_chain_run.add_argument("--max-steps", type=int, default=200000, help="Maks VM-steg før kjøring avbrytes")
+    selfhost_chain_run.add_argument("--max-steps", type=int, default=5000000, help="Maks VM-steg før kjøring avbrytes")
     selfhost_chain_run.add_argument("--trace-focus", help="Logg kun funksjoner som matcher denne teksten")
     selfhost_chain_run.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
     selfhost_chain_run.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
@@ -3885,7 +4591,7 @@ def main():
     selfhost_chain_check = sub.add_parser("selfhost-chain-check", help="Sjekk et sett filer gjennom full selfhost-kjede")
     selfhost_chain_check.add_argument("files", nargs="*")
     selfhost_chain_check.add_argument("--trace", action="store_true", help="Ta med sporlogg ved feil")
-    selfhost_chain_check.add_argument("--max-steps", type=int, default=200000, help="Maks VM-steg per fil")
+    selfhost_chain_check.add_argument("--max-steps", type=int, default=5000000, help="Maks VM-steg per fil")
     selfhost_chain_check.add_argument("--trace-focus", help="Logg kun funksjoner som matcher denne teksten")
     selfhost_chain_check.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
     selfhost_chain_check.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
@@ -3896,11 +4602,38 @@ def main():
     test.add_argument("--verbose", action="store_true", help="Vis output også for tester som består")
     test.add_argument("--json", action="store_true", help="Skriv testresultat som JSON")
 
+    format_cmd = sub.add_parser("format", help="Formater en .no-fil")
+    format_cmd.add_argument("file", help="Kildefil å formatere")
+    format_cmd.add_argument("--check", action="store_true", help="Feil hvis filen ikke er formatert")
+    format_cmd.add_argument("--diff", action="store_true", help="Vis diff uten å skrive filen")
+    format_cmd.add_argument("--json", action="store_true", help="Skriv format-resultat som JSON")
+
+    lint = sub.add_parser("lint", help="Kjør en enkel linter på en .no-fil")
+    lint.add_argument("file", help="Kildefil å lint'e")
+    lint.add_argument("--verbose", action="store_true", help="Vis alle funn eksplisitt")
+    lint.add_argument("--json", action="store_true", help="Skriv lint-resultat som JSON")
+    lint.add_argument("--check", action="store_true", help="Feil hvis linteren finner noe")
+
+    bench = sub.add_parser("bench", help="Kjør faste ytelsesmålinger")
+    bench.add_argument("--json", action="store_true", help="Skriv benchmark-resultat som JSON")
+
+    smoke = sub.add_parser("smoke", help="Kjør fresh install/release smoke-test")
+    smoke.add_argument("--json", action="store_true", help="Skriv smoke-resultat som JSON")
+
+    fuzz = sub.add_parser("fuzz", help="Kjør negativ parser- og runtime-korpus")
+    fuzz.add_argument("--json", action="store_true", help="Skriv fuzz-resultat som JSON")
+
+    commands = sub.add_parser("commands", help="Vis stabil kommandooversikt")
+    commands.add_argument("--json", action="store_true", help="Skriv kommandooversikt som JSON")
+
     args = parser.parse_args()
 
     try:
         if args.cmd == "run":
             run_program(args.file)
+
+        elif args.cmd == "repl":
+            run_repl()
 
         elif args.cmd == "check":
             source_path, _program, alias_map, analyzer = check_program(args.file)
@@ -4349,6 +5082,25 @@ def main():
                     )
                 sys.exit(1)
 
+        elif args.cmd == "selfhost-parity-gate":
+            threshold = None
+            if args.min_coverage is not None:
+                threshold = float(args.min_coverage)
+                if threshold < 0 or threshold > 100:
+                    raise RuntimeError("--min-coverage må være mellom 0 og 100")
+            payload = run_selfhost_parity_gate(min_coverage=threshold)
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload.get('ok') else 'nei'}")
+                print(f"Klar for gate: {'ja' if payload.get('ready') else 'nei'}")
+                if payload.get("coverage_total_pct") is not None:
+                    print(f"Dekning: {payload['coverage_total_pct']}%")
+                if payload.get("min_coverage") is not None:
+                    print(f"Min coverage: {payload['min_coverage']}%")
+            if not payload.get("ok"):
+                sys.exit(1)
+
         elif args.cmd == "selfhost-parity-consistency":
             if args.scope == "m1":
                 payload = run_selfhost_parser_suite_consistency_check(
@@ -4626,6 +5378,105 @@ def main():
                     print(json.dumps(payload, ensure_ascii=False, indent=2))
                 if any(not r["success"] for r in results):
                     sys.exit(1)
+
+        elif args.cmd == "lint":
+            result = lint_program(args.file)
+            if args.json:
+                payload = {
+                    "mode": "single",
+                    "result": result,
+                    "summary": summarize_lint_results(result),
+                }
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print_lint_result(result, verbose=args.verbose)
+            if args.check and result["issues"]:
+                sys.exit(1)
+
+        elif args.cmd == "bench":
+            payload = run_benchmark_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                print(f"Tid: {payload['total_duration_ms']} ms")
+                print(f"Topptid: {payload['max_duration_ms']} ms")
+                print(f"Budget-avvik: {payload['budget_exceeded_count']}")
+                for row in payload["benchmarks"]:
+                    status = "OK" if row["ok"] and row["within_budget"] else "FEIL"
+                    print(
+                        f"- {status}: {row['name']} "
+                        f"({row['duration_ms']} ms, budsjett {row['budget_ms']} ms)"
+                    )
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "smoke":
+            payload = run_smoke_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                print(f"Release: {payload['release_version']}")
+                print(f"Prefix: {payload['temp_prefix']}")
+                for row in payload["steps"]:
+                    status = "OK" if row.get("ok") else "FEIL"
+                    print(f"- {status}: {row['name']} ({row.get('duration_ms', 0)} ms)")
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "fuzz":
+            payload = run_negative_suite()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                print(f"Parser-feil fanget: {len(payload['parser_cases']) - payload['parser_failures']}/{len(payload['parser_cases'])}")
+                print(f"Runtime-feil fanget: {len(payload['runtime_cases']) - payload['runtime_failures']}/{len(payload['runtime_cases'])}")
+                for row in payload["parser_cases"]:
+                    status = "OK" if row["ok"] else "FEIL"
+                    print(f"- {status}: parser/{row['name']} ({row['duration_ms']} ms)")
+                for row in payload["runtime_cases"]:
+                    status = "OK" if row["ok"] else "FEIL"
+                    print(f"- {status}: runtime/{row['name']} ({row['duration_ms']} ms)")
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "commands":
+            payload = {
+                "prog": parser.prog,
+                "commands": _command_overview(),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"CLI: {payload['prog']}")
+                for row in payload["commands"]:
+                    print(f"- {row['name']}: {row['help']}")
+
+        elif args.cmd == "format":
+            result = format_program_file(args.file, check=args.check, diff=args.diff)
+            if args.json:
+                payload = {
+                    "mode": "single",
+                    "result": result,
+                    "summary": {
+                        "source": result["source"],
+                        "changed": result["changed"],
+                        "written": result["written"],
+                    },
+                }
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                if result["changed"]:
+                    if args.check:
+                        print(f"Uformatert: {result['source']}")
+                    elif not args.diff:
+                        print(f"Formatert: {result['source']}")
+                else:
+                    print(f"Allerede formatert: {result['source']}")
+            if args.check and result["changed"]:
+                sys.exit(1)
 
         else:
             parser.print_help()

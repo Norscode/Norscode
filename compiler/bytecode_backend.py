@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,13 +21,22 @@ from .ast_nodes import (
     ContinueNode,
     ExprStmtNode,
     ForNode,
+    ForEachNode,
     FunctionNode,
     IfNode,
     IfExprNode,
+    MatchNode,
+    AwaitNode,
     ImportNode,
     IndexNode,
     IndexSetNode,
+    FieldAccessNode,
     ListLiteralNode,
+    ListComprehensionNode,
+    LambdaNode,
+    MapLiteralNode,
+    SliceNode,
+    StructLiteralNode,
     ModuleCallNode,
     NumberNode,
     PrintNode,
@@ -34,6 +48,8 @@ from .ast_nodes import (
     VarDeclareNode,
     VarSetNode,
     WhileNode,
+    ThrowNode,
+    TryCatchNode,
 )
 from .ast_bridge import load_source_as_program, read_ast
 
@@ -46,10 +62,283 @@ class BytecodeRuntimeError(RuntimeError):
     pass
 
 
+class BytecodeThrow(RuntimeError):
+    def __init__(self, value: Any):
+        self.value = value
+        self.call_stack: list[str] = []
+        super().__init__()
+
+    def __str__(self) -> str:
+        message = f"kast: {self.value!r}"
+        if self.call_stack:
+            stack_text = " -> ".join(reversed(self.call_stack))
+            return f"{message}\nKallstakk: {stack_text}"
+        return message
+
+
+@dataclass
+class AsyncValue:
+    value: Any
+    cancelled: bool = False
+    timeout_deadline: float | None = None
+
+
+@dataclass
+class BytecodeLambdaValue:
+    function_name: str
+    capture_names: list[str]
+    capture_values: list[Any]
+
+
+def _http_request(method: str, url: str, headers: Any, query: Any, body: Any, timeout_ms: Any):
+    query_items = {}
+    if isinstance(query, dict):
+        query_items = {str(k): str(v) for k, v in query.items()}
+    elif query is not None:
+        query_items = {str(query): ""}
+    query_string = urllib.parse.urlencode(query_items)
+    if query_string:
+        parsed = urllib.parse.urlsplit(url)
+        url = urllib.parse.urlunsplit((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            query_string if not parsed.query else parsed.query + "&" + query_string,
+            parsed.fragment,
+        ))
+
+    req_headers = {}
+    if isinstance(headers, dict):
+        req_headers = {str(k): str(v) for k, v in headers.items()}
+
+    data = None
+    if body is not None and method.upper() in {"POST", "PUT", "PATCH"}:
+        data = str(body).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data, method=method.upper())
+    for key, value in req_headers.items():
+        request.add_header(key, value)
+    timeout = None if timeout_ms is None else max(0, int(timeout_ms)) / 1000.0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise BytecodeThrow(f"HTTPFeil: {exc.code} {exc.reason}: {payload}".strip())
+    except Exception as exc:
+        raise BytecodeThrow(f"HTTPFeil: {exc}")
+
+
+def _http_request_full(method: str, url: str, headers: Any, query: Any, body: Any, timeout_ms: Any):
+    query_items = {}
+    if isinstance(query, dict):
+        query_items = {str(k): str(v) for k, v in query.items()}
+    elif query is not None:
+        query_items = {str(query): ""}
+    query_string = urllib.parse.urlencode(query_items)
+    if query_string:
+        parsed = urllib.parse.urlsplit(url)
+        url = urllib.parse.urlunsplit((
+            parsed.scheme,
+            parsed.netloc,
+            parsed.path,
+            query_string if not parsed.query else parsed.query + "&" + query_string,
+            parsed.fragment,
+        ))
+
+    req_headers = {}
+    if isinstance(headers, dict):
+        req_headers = {str(k): str(v) for k, v in headers.items()}
+
+    data = None
+    if body is not None and method.upper() in {"POST", "PUT", "PATCH"}:
+        data = str(body).encode("utf-8")
+
+    request = urllib.request.Request(url, data=data, method=method.upper())
+    for key, value in req_headers.items():
+        request.add_header(key, value)
+    timeout = None if timeout_ms is None else max(0, int(timeout_ms)) / 1000.0
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            response_body = response.read().decode("utf-8")
+            payload = {
+                "status": int(getattr(response, "status", 200)),
+                "body": response_body,
+                "headers": {str(key): str(value) for key, value in response.headers.items()},
+            }
+            return json.dumps(payload, ensure_ascii=False)
+    except urllib.error.HTTPError as exc:
+        payload = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise BytecodeThrow(f"HTTPFeil: {exc.code} {exc.reason}: {payload}".strip())
+    except Exception as exc:
+        raise BytecodeThrow(f"HTTPFeil: {exc}")
+
+
+def _normalize_web_path(value: Any) -> list[str]:
+    text = str(value).strip()
+    if text in ("", "/"):
+        return []
+    return [segment for segment in text.strip("/").split("/") if segment != ""]
+
+
+def _match_web_path(pattern: Any, path: Any) -> dict[str, str] | None:
+    pattern_parts = _normalize_web_path(pattern)
+    path_parts = _normalize_web_path(path)
+    if len(pattern_parts) != len(path_parts):
+        return None
+
+    params: dict[str, str] = {}
+    for pattern_part, path_part in zip(pattern_parts, path_parts):
+        if pattern_part.startswith("{") and pattern_part.endswith("}"):
+            token = pattern_part[1:-1].strip()
+            if not token:
+                return None
+            param_name, _, param_type = token.partition(":")
+            param_name = param_name.strip()
+            param_type = param_type.strip()
+            if not param_name:
+                return None
+            if param_type == "int" and not re.fullmatch(r"-?\d+", path_part):
+                return None
+            params[param_name] = path_part
+            continue
+        if pattern_part != path_part:
+            return None
+    return params
+
+
+def _normalize_web_method(value: Any) -> str:
+    return str(value).strip().upper()
+
+
+def _split_web_route_spec(spec: Any) -> tuple[str, str]:
+    text = str(spec).strip()
+    if not text:
+        return "", ""
+    parts = text.split(None, 1)
+    if len(parts) == 1:
+        return "", parts[0]
+    return parts[0].upper(), parts[1]
+
+
+def _match_web_route_spec(spec: Any, method: Any, path: Any) -> dict[str, str] | None:
+    route_method, route_path = _split_web_route_spec(spec)
+    request_method = _normalize_web_method(method)
+    if route_method and route_method != request_method:
+        return None
+    return _match_web_path(route_path, path)
+
+
+def _encode_json_text_map(mapping: Any) -> str:
+    if not isinstance(mapping, dict):
+        return json.dumps({}, ensure_ascii=False)
+    return json.dumps({str(key): str(value) for key, value in mapping.items()}, ensure_ascii=False)
+
+
+def _decode_json_text_map(value: Any) -> dict[str, str]:
+    if isinstance(value, dict):
+        return {str(key): str(item) for key, item in value.items()}
+    if value in (None, ""):
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    if isinstance(parsed, dict):
+        return {str(key): str(item) for key, item in parsed.items()}
+    return {}
+
+
+def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
+    return {
+        "metode": _normalize_web_method(method),
+        "sti": str(path),
+        "query": _encode_json_text_map(query),
+        "headers": _encode_json_text_map(headers),
+        "body": "" if body is None else str(body),
+        "params": _encode_json_text_map({}),
+    }
+
+
+def _make_web_response(status: Any, headers: Any, body: Any) -> dict[str, Any]:
+    try:
+        status_text = str(int(status))
+    except Exception:
+        status_text = "0"
+    return {
+        "status": status_text,
+        "headers": _encode_json_text_map(headers),
+        "body": "" if body is None else str(body),
+    }
+
+
+def _make_route_context(ctx: Any, params: dict[str, str]) -> dict[str, Any]:
+    if not isinstance(ctx, dict):
+        ctx = _make_web_request_context("", "", {}, {}, "")
+    new_ctx = dict(ctx)
+    new_ctx["params"] = _encode_json_text_map(params)
+    return new_ctx
+
+
+def _validation_error(message: str) -> str:
+    return f"ValideringsFeil: {message}"
+
+
+def _request_json_object(ctx: Any) -> dict[str, str]:
+    if not isinstance(ctx, dict):
+        raise BytecodeThrow(_validation_error("body forventet gyldig JSON-objekt"))
+    body_text = str(ctx.get("body", "") or "")
+    if not body_text.strip():
+        return {}
+    try:
+        parsed = json.loads(body_text)
+    except Exception:
+        raise BytecodeThrow(_validation_error("body forventet gyldig JSON-objekt"))
+    if not isinstance(parsed, dict):
+        raise BytecodeThrow(_validation_error("body forventet JSON-objekt"))
+    return {str(key): _json_scalar_to_text(value) for key, value in parsed.items()}
+
+
+def _parse_required_text(value: Any, field_name: str, source_name: str) -> str:
+    text = str(value)
+    if text == "":
+        raise BytecodeThrow(_validation_error(f"mangler {source_name}-felt '{field_name}'"))
+    return text
+
+
+def _parse_int_value(value: Any, field_name: str, source_name: str) -> int:
+    text = str(value).strip()
+    if not re.fullmatch(r"-?\d+", text):
+        raise BytecodeThrow(_validation_error(f"felt '{field_name}' forventet heltall, fikk '{value}'"))
+    return int(text)
+
+
+def _parse_bool_value(value: Any, field_name: str, source_name: str) -> bool:
+    text = str(value).strip().lower()
+    if text in {"true", "1", "ja"}:
+        return True
+    if text in {"false", "0", "nei"}:
+        return False
+    raise BytecodeThrow(_validation_error(f"felt '{field_name}' forventet bool, fikk '{value}'"))
+
+
+def _route_is_exact(spec: Any) -> bool:
+    return "{" not in str(spec) and "}" not in str(spec)
+
+
+def _json_scalar_to_text(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
 @dataclass
 class LoopLabels:
     start: str
     end: str
+    continue_target: str
 
 
 class BytecodeCompiler:
@@ -58,23 +347,67 @@ class BytecodeCompiler:
         self.label_counter = 0
         self.loop_stack: list[LoopLabels] = []
         self.current_module = "__main__"
+        self.name_alias_stack: list[dict[str, str]] = [{}]
+        self.lambda_counter = 0
+        self.pending_lambda_specs: dict[str, dict[str, Any]] = {}
 
     def new_label(self, prefix: str) -> str:
         self.label_counter += 1
         return f"{prefix}_{self.label_counter}"
 
+    def push_name_aliases(self, aliases: dict[str, str]):
+        merged = dict(self.name_alias_stack[-1])
+        merged.update(aliases)
+        self.name_alias_stack.append(merged)
+
+    def pop_name_aliases(self):
+        if len(self.name_alias_stack) > 1:
+            self.name_alias_stack.pop()
+
+    def resolve_name(self, name: str) -> str:
+        return self.name_alias_stack[-1].get(name, name)
+
+    def _collect_route_handlers(self, program: ProgramNode) -> list[dict[str, Any]]:
+        handlers: list[dict[str, Any]] = []
+        for fn in getattr(program, "functions", []):
+            statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
+            if not statements:
+                continue
+            first = statements[0]
+            if not isinstance(first, ExprStmtNode):
+                continue
+            expr = first.expr
+            if not isinstance(expr, ModuleCallNode):
+                continue
+            if expr.module_name not in {"web", "std.web"} or expr.func_name != "route":
+                continue
+            if not expr.args or not isinstance(expr.args[0], StringNode):
+                continue
+            handlers.append({
+                "function": self.function_key(fn),
+                "spec": expr.args[0].value,
+            })
+        return handlers
+
     def compile_program(self, program: ProgramNode) -> dict[str, Any]:
         functions = {}
         imports = []
+        route_handlers = self._collect_route_handlers(program)
         for imp in getattr(program, "imports", []):
             imports.append({"module": imp.module_name, "alias": imp.alias})
         for fn in getattr(program, "functions", []):
             key = self.function_key(fn)
             functions[key] = self.compile_function(fn)
+        while self.pending_lambda_specs:
+            pending = list(self.pending_lambda_specs.items())
+            self.pending_lambda_specs = {}
+            for key, spec in pending:
+                functions[key] = self.compile_lambda_function(key, spec)
         return {
             "format": "norscode-bytecode-v1",
             "entry": "__main__.start",
             "imports": imports,
+            "route_handlers": route_handlers,
             "functions": functions,
         }
 
@@ -95,8 +428,188 @@ class BytecodeCompiler:
             "name": fn.name,
             "module": getattr(fn, "module_name", None) or "__main__",
             "params": [p.name for p in getattr(fn, "params", [])],
+            "is_async": bool(getattr(fn, "is_async", False)),
             "code": code,
         }
+
+    def compile_lambda_function(self, key: str, spec: dict[str, Any]) -> dict[str, Any]:
+        node = spec["node"]
+        capture_names = spec["capture_names"]
+        code: list[list[Any]] = []
+        previous_module = self.current_module
+        self.current_module = spec.get("module", "__main__")
+        self.emit_expr(node.body, code)
+        code.append(["RETURN"])
+        self.current_module = previous_module
+        return {
+            "name": key.rsplit(".", 1)[-1],
+            "module": spec.get("module", "__main__"),
+            "params": capture_names + [p.name for p in getattr(node, "params", [])],
+            "is_async": False,
+            "code": code,
+        }
+
+    def collect_free_vars(self, node: Any, bound: set[str] | None = None) -> set[str]:
+        bound = bound or set()
+        if node is None:
+            return set()
+        if isinstance(node, (NumberNode, StringNode, BoolNode)):
+            return set()
+        if isinstance(node, VarAccessNode):
+            return set() if node.name in bound else {node.name}
+        if isinstance(node, LambdaNode):
+            nested_bound = set(bound)
+            nested_bound.update(param.name for param in getattr(node, "params", []))
+            return self.collect_free_vars(node.body, nested_bound)
+        if isinstance(node, ListLiteralNode):
+            result = set()
+            for item in node.items:
+                result.update(self.collect_free_vars(item, bound))
+            return result
+        if isinstance(node, MapLiteralNode):
+            result = set()
+            for key_expr, value_expr in node.items:
+                result.update(self.collect_free_vars(key_expr, bound))
+                result.update(self.collect_free_vars(value_expr, bound))
+            return result
+        if isinstance(node, StructLiteralNode):
+            result = set()
+            for _field_name, value_expr in node.fields:
+                result.update(self.collect_free_vars(value_expr, bound))
+            return result
+        if isinstance(node, CallNode):
+            result = set()
+            for arg in node.args:
+                result.update(self.collect_free_vars(arg, bound))
+            return result
+        if isinstance(node, ModuleCallNode):
+            result = set()
+            for arg in node.args:
+                result.update(self.collect_free_vars(arg, bound))
+            return result
+        if isinstance(node, IfExprNode):
+            result = set()
+            result.update(self.collect_free_vars(node.condition, bound))
+            result.update(self.collect_free_vars(node.then_expr, bound))
+            result.update(self.collect_free_vars(node.else_expr, bound))
+            return result
+        if isinstance(node, AwaitNode):
+            return self.collect_free_vars(node.expr, bound)
+        if isinstance(node, UnaryOpNode):
+            return self.collect_free_vars(node.node, bound)
+        if isinstance(node, BinOpNode):
+            result = set()
+            result.update(self.collect_free_vars(node.left, bound))
+            result.update(self.collect_free_vars(node.right, bound))
+            return result
+        if isinstance(node, IndexNode):
+            result = set()
+            result.update(self.collect_free_vars(getattr(node, "list_expr", getattr(node, "target", None)), bound))
+            result.update(self.collect_free_vars(getattr(node, "index_expr", None), bound))
+            return result
+        if isinstance(node, SliceNode):
+            result = set()
+            result.update(self.collect_free_vars(node.target, bound))
+            result.update(self.collect_free_vars(node.start_expr, bound))
+            result.update(self.collect_free_vars(node.end_expr, bound))
+            return result
+        if isinstance(node, FieldAccessNode):
+            return self.collect_free_vars(node.target, bound)
+        if isinstance(node, ListComprehensionNode):
+            result = set()
+            result.update(self.collect_free_vars(node.source_expr, bound))
+            inner_bound = set(bound)
+            inner_bound.add(node.item_name)
+            if node.condition_expr is not None:
+                result.update(self.collect_free_vars(node.condition_expr, inner_bound))
+            result.update(self.collect_free_vars(node.item_expr, inner_bound))
+            return result
+        if isinstance(node, BlockNode):
+            result = set()
+            for stmt in node.statements:
+                result.update(self.collect_free_vars(stmt, bound))
+            return result
+        if isinstance(node, ExprStmtNode):
+            return self.collect_free_vars(node.expr, bound)
+        if isinstance(node, PrintNode):
+            return self.collect_free_vars(node.expr, bound)
+        if isinstance(node, VarDeclareNode):
+            result = self.collect_free_vars(node.expr, bound)
+            return result
+        if isinstance(node, VarSetNode):
+            result = self.collect_free_vars(node.expr, bound)
+            return result
+        if isinstance(node, IndexSetNode):
+            result = set()
+            result.update(self.collect_free_vars(node.index_expr, bound))
+            result.update(self.collect_free_vars(node.value_expr, bound))
+            return result
+        if isinstance(node, ReturnNode):
+            return self.collect_free_vars(node.expr, bound)
+        if isinstance(node, ThrowNode):
+            return self.collect_free_vars(node.expr, bound)
+        if isinstance(node, TryCatchNode):
+            result = set()
+            result.update(self.collect_free_vars(node.try_block, bound))
+            catch_bound = set(bound)
+            if node.catch_var_name:
+                catch_bound.add(node.catch_var_name)
+            result.update(self.collect_free_vars(node.catch_block, catch_bound))
+            return result
+        if isinstance(node, IfNode):
+            result = set()
+            result.update(self.collect_free_vars(node.condition, bound))
+            result.update(self.collect_free_vars(node.then_block, bound))
+            for cond, block in getattr(node, "elif_blocks", []):
+                result.update(self.collect_free_vars(cond, bound))
+                result.update(self.collect_free_vars(block, bound))
+            if node.else_block:
+                result.update(self.collect_free_vars(node.else_block, bound))
+            return result
+        if isinstance(node, MatchNode):
+            result = set()
+            result.update(self.collect_free_vars(node.subject, bound))
+            for case in getattr(node, "cases", []):
+                if not getattr(case, "wildcard", False):
+                    result.update(self.collect_free_vars(case.pattern, bound))
+                result.update(self.collect_free_vars(case.body, bound))
+            if node.else_block:
+                result.update(self.collect_free_vars(node.else_block, bound))
+            return result
+        if isinstance(node, WhileNode):
+            result = set()
+            result.update(self.collect_free_vars(node.condition, bound))
+            result.update(self.collect_free_vars(node.body, bound))
+            return result
+        if isinstance(node, ForNode):
+            result = set()
+            result.update(self.collect_free_vars(node.start_expr, bound))
+            result.update(self.collect_free_vars(node.end_expr, bound))
+            result.update(self.collect_free_vars(node.step_expr, bound))
+            inner_bound = set(bound)
+            inner_bound.add(node.name)
+            result.update(self.collect_free_vars(node.body, inner_bound))
+            return result
+        if isinstance(node, ForEachNode):
+            result = set()
+            result.update(self.collect_free_vars(node.list_expr, bound))
+            inner_bound = set(bound)
+            inner_bound.add(node.item_name)
+            result.update(self.collect_free_vars(node.body, inner_bound))
+            return result
+        return set()
+
+    def register_lambda(self, node: LambdaNode) -> tuple[str, list[str]]:
+        capture_names = sorted(self.collect_free_vars(node.body, {param.name for param in getattr(node, "params", [])}))
+        key = f"{self.current_module}.__lambda_{self.lambda_counter}"
+        self.lambda_counter += 1
+        if key not in self.pending_lambda_specs:
+            self.pending_lambda_specs[key] = {
+                "node": node,
+                "capture_names": capture_names,
+                "module": self.current_module,
+            }
+        return key, capture_names
 
     def emit_block(self, block: BlockNode, code: list[list[Any]]):
         for stmt in getattr(block, "statements", []):
@@ -130,6 +643,25 @@ class BytecodeCompiler:
             self.emit_expr(node.expr, code)
             code.append(["RETURN"])
             return
+        if isinstance(node, ThrowNode):
+            self.emit_expr(node.expr, code)
+            code.append(["THROW"])
+            return
+        if isinstance(node, TryCatchNode):
+            catch_label = self.new_label("catch")
+            after_label = self.new_label("after_try")
+            code.append(["TRY_BEGIN", catch_label])
+            self.emit_block(node.try_block, code)
+            code.append(["TRY_END"])
+            code.append(["JUMP", after_label])
+            code.append(["LABEL", catch_label])
+            code.append(["TRY_END"])
+            if node.catch_var_name:
+                code.append(["LOAD_EXCEPTION"])
+                code.append(["STORE_NAME", node.catch_var_name])
+            self.emit_block(node.catch_block, code)
+            code.append(["LABEL", after_label])
+            return
         if isinstance(node, IfNode):
             end_label = self.new_label("ifend")
             else_label = self.new_label("ifelse") if (node.else_block or node.elif_blocks) else end_label
@@ -152,10 +684,39 @@ class BytecodeCompiler:
                 self.emit_block(node.else_block, code)
             code.append(["LABEL", end_label])
             return
+        if isinstance(node, MatchNode):
+            subject_var = self.new_label("match_subject")
+            end_label = self.new_label("match_end")
+            self.emit_expr(node.subject, code)
+            code.append(["STORE_NAME", subject_var])
+            has_else = bool(node.else_block)
+            cases = list(getattr(node, "cases", []))
+            for idx, case in enumerate(cases):
+                if getattr(case, "wildcard", False):
+                    if idx != len(cases) - 1:
+                        raise BytecodeCompileError("Wildcard-case i match må være siste case")
+                    self.emit_block(case.body, code)
+                    code.append(["JUMP", end_label])
+                    continue
+
+                next_label = self.new_label(f"match_next_{idx}")
+                self.emit_expr(case.pattern, code)
+                code.append(["LOAD_NAME", subject_var])
+                code.append(["COMPARE_EQ"])
+                code.append(["JUMP_IF_FALSE", next_label])
+                self.emit_block(case.body, code)
+                code.append(["JUMP", end_label])
+                code.append(["LABEL", next_label])
+
+            if has_else:
+                self.emit_block(node.else_block, code)
+                code.append(["JUMP", end_label])
+            code.append(["LABEL", end_label])
+            return
         if isinstance(node, WhileNode):
             start = self.new_label("while_start")
             end = self.new_label("while_end")
-            self.loop_stack.append(LoopLabels(start, end))
+            self.loop_stack.append(LoopLabels(start, end, start))
             code.append(["LABEL", start])
             self.emit_expr(node.condition, code)
             code.append(["JUMP_IF_FALSE", end])
@@ -167,19 +728,52 @@ class BytecodeCompiler:
         if isinstance(node, ForNode):
             start = self.new_label("for_start")
             end = self.new_label("for_end")
+            continue_label = self.new_label("for_continue")
             self.emit_expr(node.start_expr, code)
             code.append(["STORE_NAME", node.name])
-            self.loop_stack.append(LoopLabels(start, end))
+            self.loop_stack.append(LoopLabels(start, end, continue_label))
             code.append(["LABEL", start])
             code.append(["LOAD_NAME", node.name])
             self.emit_expr(node.end_expr, code)
             code.append(["COMPARE_LE"])
             code.append(["JUMP_IF_FALSE", end])
             self.emit_block(node.body, code)
+            code.append(["LABEL", continue_label])
             code.append(["LOAD_NAME", node.name])
             self.emit_expr(node.step_expr, code)
             code.append(["BINARY_ADD"])
             code.append(["STORE_NAME", node.name])
+            code.append(["JUMP", start])
+            code.append(["LABEL", end])
+            self.loop_stack.pop()
+            return
+        if isinstance(node, ForEachNode):
+            list_var = self.new_label("foreach_list")
+            index_var = self.new_label("foreach_i")
+            start = self.new_label("foreach_start")
+            end = self.new_label("foreach_end")
+            continue_label = self.new_label("foreach_continue")
+            self.emit_expr(node.list_expr, code)
+            code.append(["STORE_NAME", list_var])
+            code.append(["PUSH_CONST", 0])
+            code.append(["STORE_NAME", index_var])
+            self.loop_stack.append(LoopLabels(start, end, continue_label))
+            code.append(["LABEL", start])
+            code.append(["LOAD_NAME", index_var])
+            code.append(["LOAD_NAME", list_var])
+            code.append(["CALL", "builtin.lengde", 1])
+            code.append(["COMPARE_LT"])
+            code.append(["JUMP_IF_FALSE", end])
+            code.append(["LOAD_NAME", list_var])
+            code.append(["LOAD_NAME", index_var])
+            code.append(["INDEX_GET"])
+            code.append(["STORE_NAME", node.item_name])
+            self.emit_block(node.body, code)
+            code.append(["LABEL", continue_label])
+            code.append(["LOAD_NAME", index_var])
+            code.append(["PUSH_CONST", 1])
+            code.append(["BINARY_ADD"])
+            code.append(["STORE_NAME", index_var])
             code.append(["JUMP", start])
             code.append(["LABEL", end])
             self.loop_stack.pop()
@@ -192,7 +786,7 @@ class BytecodeCompiler:
         if isinstance(node, ContinueNode):
             if not self.loop_stack:
                 raise BytecodeCompileError("'fortsett' utenfor løkke")
-            code.append(["JUMP", self.loop_stack[-1].start])
+            code.append(["JUMP", self.loop_stack[-1].continue_target])
             return
         raise BytecodeCompileError(f"Bytecode-backend støtter ikke statement: {type(node).__name__}")
 
@@ -207,16 +801,102 @@ class BytecodeCompiler:
             code.append(["PUSH_CONST", node.value])
             return
         if isinstance(node, VarAccessNode):
-            code.append(["LOAD_NAME", node.name])
+            code.append(["LOAD_NAME", self.resolve_name(node.name)])
             return
         if isinstance(node, ListLiteralNode):
             for item in node.items:
                 self.emit_expr(item, code)
             code.append(["BUILD_LIST", len(node.items)])
             return
+        if isinstance(node, ListComprehensionNode):
+            source_var = self.new_label("comp_source")
+            result_var = self.new_label("comp_result")
+            index_var = self.new_label("comp_i")
+            item_var = self.new_label("comp_item")
+            start = self.new_label("comp_start")
+            end = self.new_label("comp_end")
+            skip_append = self.new_label("comp_skip") if node.condition_expr is not None else None
+
+            self.emit_expr(node.source_expr, code)
+            code.append(["STORE_NAME", source_var])
+            code.append(["BUILD_LIST", 0])
+            code.append(["STORE_NAME", result_var])
+            code.append(["PUSH_CONST", 0])
+            code.append(["STORE_NAME", index_var])
+
+            self.loop_stack.append(LoopLabels(start, end, start))
+            code.append(["LABEL", start])
+            code.append(["LOAD_NAME", index_var])
+            code.append(["LOAD_NAME", source_var])
+            code.append(["CALL", "builtin.lengde", 1])
+            code.append(["COMPARE_LT"])
+            code.append(["JUMP_IF_FALSE", end])
+            code.append(["LOAD_NAME", source_var])
+            code.append(["LOAD_NAME", index_var])
+            code.append(["INDEX_GET"])
+            code.append(["STORE_NAME", item_var])
+            self.push_name_aliases({node.item_name: item_var})
+            if node.condition_expr is not None:
+                self.emit_expr(node.condition_expr, code)
+                code.append(["JUMP_IF_FALSE", skip_append])
+            code.append(["LOAD_NAME", result_var])
+            self.emit_expr(node.item_expr, code)
+            code.append(["CALL", "builtin.legg_til", 2])
+            code.append(["POP"])
+            if skip_append is not None:
+                code.append(["LABEL", skip_append])
+            self.pop_name_aliases()
+            code.append(["LOAD_NAME", index_var])
+            code.append(["PUSH_CONST", 1])
+            code.append(["BINARY_ADD"])
+            code.append(["STORE_NAME", index_var])
+            code.append(["JUMP", start])
+            code.append(["LABEL", end])
+            self.loop_stack.pop()
+            code.append(["LOAD_NAME", result_var])
+            return
+        if isinstance(node, MapLiteralNode):
+            for key_expr, value_expr in node.items:
+                self.emit_expr(key_expr, code)
+                self.emit_expr(value_expr, code)
+            code.append(["BUILD_MAP", len(node.items)])
+            return
+        if isinstance(node, StructLiteralNode):
+            for field_name, value_expr in node.fields:
+                code.append(["PUSH_CONST", field_name])
+                self.emit_expr(value_expr, code)
+            code.append(["BUILD_MAP", len(node.fields)])
+            return
         if isinstance(node, IndexNode):
             self.emit_expr(node.list_expr, code)
             self.emit_expr(node.index_expr, code)
+            code.append(["INDEX_GET"])
+            return
+        if isinstance(node, SliceNode):
+            self.emit_expr(node.target, code)
+            if node.start_expr is None:
+                code.append(["PUSH_CONST", None])
+            else:
+                self.emit_expr(node.start_expr, code)
+            if node.end_expr is None:
+                code.append(["PUSH_CONST", None])
+            else:
+                self.emit_expr(node.end_expr, code)
+            code.append(["CALL", "builtin.slice", 3])
+            return
+        if isinstance(node, AwaitNode):
+            self.emit_expr(node.expr, code)
+            code.append(["CALL", "builtin.await_value", 1])
+            return
+        if isinstance(node, LambdaNode):
+            lambda_name, capture_names = self.register_lambda(node)
+            for capture_name in capture_names:
+                code.append(["LOAD_NAME", self.resolve_name(capture_name)])
+            code.append(["BUILD_LAMBDA", lambda_name, capture_names])
+            return
+        if isinstance(node, FieldAccessNode):
+            self.emit_expr(node.target, code)
+            code.append(["PUSH_CONST", node.field])
             code.append(["INDEX_GET"])
             return
         if isinstance(node, UnaryOpNode):
@@ -280,6 +960,12 @@ class BytecodeCompiler:
             code.append([opcode])
             return
         if isinstance(node, CallNode):
+            if getattr(node, "call_kind", None) == "lambda":
+                code.append(["LOAD_NAME", self.resolve_name(node.name)])
+                for arg in node.args:
+                    self.emit_expr(arg, code)
+                code.append(["CALL_VALUE", len(node.args)])
+                return
             for arg in node.args:
                 self.emit_expr(arg, code)
             code.append(["CALL", self.resolve_call_name(node.name), len(node.args)])
@@ -305,8 +991,13 @@ class BytecodeCompiler:
 
     def resolve_call_name(self, name: str) -> str:
         builtins = {
-            "assert", "assert_eq", "assert_ne", "skriv", "lengde",
-            "tekst_fra_heltall", "tekst_fra_bool",
+            "assert", "assert_eq", "assert_ne", "assert_starter_med", "assert_slutter_med", "assert_inneholder", "skriv", "lengde",
+            "tekst_fra_heltall", "tekst_fra_bool", "har_nokkel",
+            "json_parse", "json_stringify",
+            "slice",
+            "fil_les", "fil_skriv", "fil_append", "fil_finnes",
+            "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
+            "miljo_hent", "miljo_finnes", "miljo_sett",
         }
         if name in builtins:
             return f"builtin.{name}"
@@ -318,7 +1009,7 @@ class BytecodeVM:
         self,
         program: dict[str, Any],
         trace: bool = False,
-        max_steps: int = 200000,
+        max_steps: int = 1000000000,
         trace_focus: str | None = None,
         repeat_limit: int = 0,
         expr_probe: str | None = None,
@@ -326,6 +1017,7 @@ class BytecodeVM:
     ):
         self.program = program
         self.functions = program.get("functions", {})
+        self.route_handlers = program.get("route_handlers", [])
         self.output: list[str] = []
         self.trace = trace
         self.max_steps = max_steps
@@ -340,6 +1032,9 @@ class BytecodeVM:
         self._repeat_state_count = 0
         self._selfhost_token_map = self._load_selfhost_token_map()
         self._memo_cache: dict[tuple[str, str], Any] = {}
+        self._exception_stack: list[dict[str, int]] = []
+        self._exception_value: Any = None
+        self._call_stack: list[str] = []
         self._memoizable_functions = {
             "selfhost.compiler.normaliser_norsk_token",
             "selfhost.compiler.stack_behov",
@@ -378,6 +1073,21 @@ class BytecodeVM:
             for line in payload:
                 self._log(line)
 
+    def _push_try_frame(self, handler_label: str) -> None:
+        self._exception_stack.append({"handler": handler_label})
+
+    def _pop_try_frame(self) -> None:
+        if self._exception_stack:
+            self._exception_stack.pop()
+
+    def _handle_throw(self, value: Any, labels: dict[str, int]) -> int | None:
+        for frame in reversed(self._exception_stack):
+            handler = frame["handler"]
+            if handler in labels:
+                self._exception_value = value
+                return labels[handler]
+        return None
+
     def dump_expr_probe(self) -> str:
         text = "\n".join(self.expr_probe_events)
         if text and not text.endswith("\n"):
@@ -406,6 +1116,9 @@ class BytecodeVM:
                 continue
             if line.startswith("hvis (") and "tok ==" in line:
                 pending = re.findall(r'"([^"]+)"', line)
+                continue
+            if line.startswith("eller ") and "tok ==" in line:
+                pending.extend(re.findall(r'"([^"]+)"', line))
                 continue
             if pending and line.startswith("returner "):
                 values = re.findall(r'"([^"]+)"', line)
@@ -528,6 +1241,8 @@ class BytecodeVM:
             n1 = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [toks[i + 1]])) if i + 1 < len(toks) else ""
             n2 = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [toks[i + 2]])) if i + 2 < len(toks) else ""
             n3 = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [toks[i + 3]])) if i + 3 < len(toks) else ""
+            n4 = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [toks[i + 4]])) if i + 4 < len(toks) else ""
+            n5 = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [toks[i + 5]])) if i + 5 < len(toks) else ""
             # compact normalizations for common multi-token forms
             if i + 1 < len(toks) and tok_raw == "-" and n1 == ">":
                 tok = "impliserer"; tok_step = 2
@@ -539,10 +1254,28 @@ class BytecodeVM:
                 tok = "impliseres_av"; tok_step = 1
             elif tok_raw in {"<->", "<=>"}:
                 tok = "xnor"; tok_step = 1
+            elif i + 1 < len(toks) and tok_raw == "divided" and n1 in {"by", "of"}:
+                tok = "/"; tok_step = 2
+            elif i + 1 < len(toks) and tok_raw == "modulo" and n1 in {"by", "of"}:
+                tok = "%"; tok_step = 2
+            elif i + 1 < len(toks) and tok in {"*", "/", "%"} and n1 in {"by", "of"}:
+                tok_step = 2
             elif i + 2 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn":
                 tok = "mindre_enn"; tok_step = 3
+            elif i + 3 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 3
+            elif i + 4 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 5
             elif i + 3 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "eller" and n3 == "lik":
                 tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 3 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn" and n3 == "lik":
+                tok = "storre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok == "er" and n1 == "storre" and n2 == "lik":
+                tok = "storre_eller_lik"; tok_step = 3
+            elif i + 4 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
+                tok = "storre_eller_lik"; tok_step = 5
             elif i + 3 < len(toks) and tok == "er" and n1 == "storre" and n2 == "eller" and n3 == "lik":
                 tok = "storre_eller_lik"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn":
@@ -553,10 +1286,18 @@ class BytecodeVM:
                 tok = "ikke_er"; tok_step = 3
             elif i + 2 < len(toks) and tok == "ikke" and n1 == "lik" and n2 == "med":
                 tok = "ikke_er"; tok_step = 3
+            elif i + 1 < len(toks) and tok == "ulik" and n1 == "med":
+                tok = "ikke_er"; tok_step = 2
             elif i + 2 < len(toks) and tok == "er" and n1 == "lik" and n2 == "med":
                 tok = "er"; tok_step = 3
-            elif i + 2 < len(toks) and tok == "ikke" and n1 == "er" and n2 == "to":
+            elif i + 2 < len(toks) and tok == "ikke" and n1 in {"er", "equal", "equals"} and n2 == "to":
                 tok = "ikke_er"; tok_step = 3
+            elif i + 3 < len(toks) and tok == "er" and n1 == "ikke" and n2 in {"er", "equal", "equals"} and n3 == "to":
+                tok = "ikke_er"; tok_step = 4
+            elif i + 3 < len(toks) and tok == "er" and n1 in {"er", "equal", "equals"} and n2 == "to":
+                tok = "er"; tok_step = 3
+            elif i + 1 < len(toks) and tok == "er" and n1 == "to":
+                tok = "er"; tok_step = 2
             elif i + 2 < len(toks) and tok == "er" and n1 == "ikke" and n2 == "er":
                 tok = "ikke_er"; tok_step = 3
             elif i + 1 < len(toks) and tok == "er" and n1 == "ulik":
@@ -569,10 +1310,64 @@ class BytecodeVM:
                 tok = "ikke_er"; tok_step = 2
             elif i + 1 < len(toks) and tok == "er" and n1 == "lik":
                 tok = "er"; tok_step = 2
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"} and n4 == "to":
+                tok = "mindre_eller_lik"; tok_step = 5
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"} and n4 == "to":
+                tok = "storre_eller_lik"; tok_step = 5
+            elif i + 3 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 3 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"}:
+                tok = "storre_eller_lik"; tok_step = 4
+            elif i + 5 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 == "than" and n3 in {"or", "eller"} and n4 in {"equal", "equals", "er"} and n5 == "to":
+                tok = "mindre_eller_lik"; tok_step = 6
+            elif i + 5 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 == "than" and n3 in {"or", "eller"} and n4 in {"equal", "equals", "er"} and n5 == "to":
+                tok = "storre_eller_lik"; tok_step = 6
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 == "than" and n3 in {"or", "eller"} and n4 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik"; tok_step = 5
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 == "than" and n3 in {"or", "eller"} and n4 in {"equal", "equals", "er"}:
+                tok = "storre_eller_lik"; tok_step = 5
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 == "than" and n3 in {"equal", "equals", "er"} and n4 == "to":
+                tok = "mindre_eller_lik"; tok_step = 5
+            elif i + 4 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 == "than" and n3 in {"equal", "equals", "er"} and n4 == "to":
+                tok = "storre_eller_lik"; tok_step = 5
+            elif i + 3 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 == "than" and n3 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 3 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 == "than" and n3 in {"equal", "equals", "er"}:
+                tok = "storre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "less" and n2 == "than":
+                tok = "mindre_enn"; tok_step = 3
+            elif i + 2 < len(toks) and tok in {"er", "equal", "equals"} and n1 == "greater" and n2 == "than":
+                tok = "storre_enn"; tok_step = 3
+            elif i + 4 < len(toks) and tok in {"less", "greater"} and n1 == "than" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"} and n4 == "to":
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 5
+            elif i + 3 < len(toks) and tok in {"less", "greater"} and n1 == "than" and n2 in {"or", "eller"} and n3 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 4
+            elif i + 3 < len(toks) and tok in {"less", "greater"} and n1 in {"or", "eller"} and n2 in {"equal", "equals", "er"} and n3 == "to":
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok in {"less", "greater"} and n1 in {"or", "eller"} and n2 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 3
+            elif i + 4 < len(toks) and tok in {"less", "greater"} and n1 == "than" and n2 in {"equal", "equals", "er"} and n3 == "to":
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 5
+            elif i + 3 < len(toks) and tok in {"less", "greater"} and n1 == "than" and n2 in {"equal", "equals", "er"}:
+                tok = "mindre_eller_lik" if tok == "less" else "storre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok in {"less", "greater"} and n1 == "than":
+                tok = "mindre_enn" if tok == "less" else "storre_enn"; tok_step = 2
+            elif i + 3 < len(toks) and tok == "mindre" and n1 == "enn" and n2 == "eller" and n3 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok == "mindre" and n1 == "enn" and n2 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 3
             elif i + 2 < len(toks) and tok == "mindre" and n1 == "eller" and n2 == "lik":
                 tok = "mindre_eller_lik"; tok_step = 3
+            elif i + 1 < len(toks) and tok == "mindre" and n1 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 2
+            elif i + 3 < len(toks) and tok == "storre" and n1 == "enn" and n2 == "eller" and n3 == "lik":
+                tok = "storre_eller_lik"; tok_step = 4
+            elif i + 2 < len(toks) and tok == "storre" and n1 == "enn" and n2 == "lik":
+                tok = "storre_eller_lik"; tok_step = 3
             elif i + 2 < len(toks) and tok == "storre" and n1 == "eller" and n2 == "lik":
                 tok = "storre_eller_lik"; tok_step = 3
+            elif i + 1 < len(toks) and tok == "storre" and n1 == "lik":
+                tok = "storre_eller_lik"; tok_step = 2
             elif i + 1 < len(toks) and tok == "mindre" and n1 == "enn":
                 tok = "mindre_enn"; tok_step = 2
             elif i + 1 < len(toks) and tok == "storre" and n1 == "enn":
@@ -803,125 +1598,507 @@ class BytecodeVM:
             return args[0] + args[1]
         if name == "std.math.minus":
             return args[0] - args[1]
+        if name in {"vent.timeout", "std.vent.timeout"}:
+            if len(args) < 2:
+                raise BytecodeRuntimeError("vent.timeout forventer 2 argumenter")
+            timeout_ms = max(0, int(args[1]))
+            value = args[0]
+            if isinstance(value, AsyncValue):
+                value = value.value
+            return AsyncValue(value, timeout_deadline=time.monotonic() + (timeout_ms / 1000.0))
+        if name in {"vent.kanseller", "std.vent.kanseller"}:
+            if not args:
+                raise BytecodeRuntimeError("vent.kanseller forventer 1 argument")
+            value = args[0]
+            if isinstance(value, AsyncValue):
+                return AsyncValue(value.value, cancelled=True, timeout_deadline=value.timeout_deadline)
+            return AsyncValue(value, cancelled=True)
+        if name in {"vent.er_kansellert", "std.vent.er_kansellert"}:
+            if not args:
+                return False
+            value = args[0]
+            return isinstance(value, AsyncValue) and value.cancelled
+        if name in {"vent.er_timeoutet", "std.vent.er_timeoutet"}:
+            if not args:
+                return False
+            value = args[0]
+            return isinstance(value, AsyncValue) and value.timeout_deadline is not None and time.monotonic() > value.timeout_deadline
+        if name in {"vent.sov", "std.vent.sov"}:
+            if not args:
+                raise BytecodeRuntimeError("vent.sov forventer 1 argument")
+            time.sleep(max(0, int(args[0])) / 1000.0)
+            return None
+        if name in {"http.request", "std.http.request"}:
+            if len(args) < 6:
+                raise BytecodeRuntimeError("http.request forventer 6 argumenter")
+            return _http_request(args[0], args[1], args[2], args[3], args[4], args[5])
+        if name in {"http.get", "std.http.get"}:
+            if len(args) < 4:
+                raise BytecodeRuntimeError("http.get forventer 4 argumenter")
+            return _http_request("GET", args[0], args[1], args[2], None, args[3])
+        if name in {"http.post", "std.http.post"}:
+            if len(args) < 5:
+                raise BytecodeRuntimeError("http.post forventer 5 argumenter")
+            return _http_request("POST", args[0], args[2], args[3], args[1], args[4])
+        if name in {"http.json_get", "std.http.json_get"}:
+            if len(args) < 4:
+                raise BytecodeRuntimeError("http.json_get forventer 4 argumenter")
+            return json.loads(_http_request("GET", args[0], args[1], args[2], None, args[3]))
+        if name in {"http.json_post", "std.http.json_post"}:
+            if len(args) < 5:
+                raise BytecodeRuntimeError("http.json_post forventer 5 argumenter")
+            body_text = json.dumps(args[1], ensure_ascii=False, separators=(",", ":"))
+            return json.loads(_http_request("POST", args[0], args[2], args[3], body_text, args[4]))
+        if name in {"http.request_full", "std.http.request_full"}:
+            if len(args) < 6:
+                raise BytecodeRuntimeError("http.request_full forventer 6 argumenter")
+            return _http_request_full(args[0], args[1], args[2], args[3], args[4], args[5])
+        if name in {"http.response_status", "std.http.response_status"}:
+            if not args:
+                return 0
+            return int(json.loads(str(args[0])).get("status", 0))
+        if name in {"http.response_text", "std.http.response_text"}:
+            if not args:
+                return ""
+            return str(json.loads(str(args[0])).get("body", ""))
+        if name in {"http.response_json", "std.http.response_json"}:
+            if not args:
+                return {}
+            body = str(json.loads(str(args[0])).get("body", ""))
+            return json.loads(body) if body else {}
+        if name in {"http.response_header", "std.http.response_header"}:
+            if len(args) < 2:
+                raise BytecodeRuntimeError("http.response_header forventer 2 argumenter")
+            headers = json.loads(str(args[0])).get("headers", {})
+            if isinstance(headers, dict):
+                return str(headers.get(str(args[1]), ""))
+            return ""
+        if name in {"web.path_match", "std.web.path_match"}:
+            if len(args) < 2:
+                return False
+            return _match_web_path(args[0], args[1]) is not None
+        if name in {"web.path_params", "std.web.path_params"}:
+            if len(args) < 2:
+                return {}
+            return _match_web_path(args[0], args[1]) or {}
+        if name in {"web.route_match", "std.web.route_match"}:
+            if len(args) < 3:
+                return False
+            return _match_web_route_spec(args[0], args[1], args[2]) is not None
+        if name in {"web.dispatch", "std.web.dispatch"}:
+            if len(args) < 3 or not isinstance(args[0], dict):
+                return ""
+            routes = args[0]
+            method = args[1]
+            path = args[2]
+            for route_name, route_spec in routes.items():
+                if _match_web_route_spec(route_spec, method, path) is not None:
+                    return str(route_name)
+            return ""
+        if name in {"web.dispatch_params", "std.web.dispatch_params"}:
+            if len(args) < 3 or not isinstance(args[0], dict):
+                return {}
+            routes = args[0]
+            method = args[1]
+            path = args[2]
+            for route_name, route_spec in routes.items():
+                params = _match_web_route_spec(route_spec, method, path)
+                if params is not None:
+                    return params
+            return {}
+        if name in {"web.request_context", "std.web.request_context"}:
+            if len(args) < 5:
+                return _make_web_request_context("", "", {}, {}, "")
+            return _make_web_request_context(args[0], args[1], args[2], args[3], args[4])
+        if name in {"web.request_method", "std.web.request_method"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            return str(args[0].get("metode", ""))
+        if name in {"web.request_path", "std.web.request_path"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            return str(args[0].get("sti", ""))
+        if name in {"web.request_query", "std.web.request_query"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            return _decode_json_text_map(args[0].get("query", ""))
+        if name in {"web.request_headers", "std.web.request_headers"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            return _decode_json_text_map(args[0].get("headers", ""))
+        if name in {"web.request_body", "std.web.request_body"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            return str(args[0].get("body", ""))
+        if name in {"web.request_query_param", "std.web.request_query_param"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            query = _decode_json_text_map(args[0].get("query", ""))
+            return str(query.get(str(args[1]), ""))
+        if name in {"web.request_header", "std.web.request_header"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            headers = _decode_json_text_map(args[0].get("headers", ""))
+            return str(headers.get(str(args[1]), ""))
+        if name in {"web.request_params", "std.web.request_params"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            return _decode_json_text_map(args[0].get("params", ""))
+        if name in {"web.request_param", "std.web.request_param"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            params = _decode_json_text_map(args[0].get("params", ""))
+            return str(params.get(str(args[1]), ""))
+        if name in {"web.request_param_int", "std.web.request_param_int"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return 0
+            params = _decode_json_text_map(args[0].get("params", ""))
+            key = str(args[1])
+            if key not in params or str(params.get(key, "")) == "":
+                raise BytecodeThrow(_validation_error(f"mangler path-felt '{key}'"))
+            return _parse_int_value(params.get(key, ""), key, "path")
+        if name in {"web.request_query_required", "std.web.request_query_required"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            query = _decode_json_text_map(args[0].get("query", ""))
+            key = str(args[1])
+            return _parse_required_text(query.get(key, ""), key, "query")
+        if name in {"web.request_query_int", "std.web.request_query_int"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return 0
+            query = _decode_json_text_map(args[0].get("query", ""))
+            key = str(args[1])
+            if key not in query or str(query.get(key, "")) == "":
+                raise BytecodeThrow(_validation_error(f"mangler query-felt '{key}'"))
+            return _parse_int_value(query.get(key, ""), key, "query")
+        if name in {"web.request_json", "std.web.request_json"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            return _request_json_object(args[0])
+        if name in {"web.request_json_field", "std.web.request_json_field"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            data = _request_json_object(args[0])
+            key = str(args[1])
+            if key not in data or str(data.get(key, "")) == "":
+                raise BytecodeThrow(_validation_error(f"mangler felt '{key}'"))
+            return str(data.get(key, ""))
+        if name in {"web.request_json_field_or", "std.web.request_json_field_or"}:
+            if len(args) < 3 or not isinstance(args[0], dict):
+                return ""
+            data = _request_json_object(args[0])
+            key = str(args[1])
+            fallback = str(args[2])
+            if key not in data or str(data.get(key, "")) == "":
+                return fallback
+            return str(data.get(key, ""))
+        if name in {"web.request_json_field_int", "std.web.request_json_field_int"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return 0
+            data = _request_json_object(args[0])
+            key = str(args[1])
+            if key not in data or str(data.get(key, "")) == "":
+                raise BytecodeThrow(_validation_error(f"mangler felt '{key}'"))
+            return _parse_int_value(data.get(key, ""), key, "body")
+        if name in {"web.request_json_field_bool", "std.web.request_json_field_bool"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return False
+            data = _request_json_object(args[0])
+            key = str(args[1])
+            if key not in data or str(data.get(key, "")) == "":
+                raise BytecodeThrow(_validation_error(f"mangler felt '{key}'"))
+            return _parse_bool_value(data.get(key, ""), key, "body")
+        if name in {"web.response_builder", "std.web.response_builder"}:
+            if len(args) < 3:
+                return _make_web_response(0, {}, "")
+            return _make_web_response(args[0], args[1], args[2])
+        if name in {"web.response_status", "std.web.response_status"}:
+            if not args or not isinstance(args[0], dict):
+                return 0
+            try:
+                return int(str(args[0].get("status", "0")))
+            except Exception:
+                return 0
+        if name in {"web.response_headers", "std.web.response_headers"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            return _decode_json_text_map(args[0].get("headers", ""))
+        if name in {"web.response_body", "std.web.response_body", "web.response_text", "std.web.response_text"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            return str(args[0].get("body", ""))
+        if name in {"web.response_json", "std.web.response_json"}:
+            if not args or not isinstance(args[0], dict):
+                return {}
+            body = str(args[0].get("body", ""))
+            if not body:
+                return {}
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                return {}
+            if isinstance(parsed, dict):
+                return {str(key): _json_scalar_to_text(value) for key, value in parsed.items()}
+            return {}
+        if name in {"web.response_header", "std.web.response_header"}:
+            if len(args) < 2 or not isinstance(args[0], dict):
+                return ""
+            headers = _decode_json_text_map(args[0].get("headers", ""))
+            return str(headers.get(str(args[1]), ""))
+        if name in {"web.response_error", "std.web.response_error"}:
+            if len(args) < 2:
+                return _make_web_response(500, {"content-type": "application/json"}, '{"error":""}')
+            body = json.dumps({"error": str(args[1])}, ensure_ascii=False)
+            return _make_web_response(args[0], {"content-type": "application/json"}, body)
+        if name in {"web.response_file", "std.web.response_file"}:
+            if len(args) < 2:
+                raise BytecodeRuntimeError("web.response_file forventer 2 argumenter")
+            path = Path(str(args[0])).expanduser()
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError:
+                raise BytecodeThrow(f"IOFeil: kunne ikke lese fil {path}")
+            return _make_web_response(200, {"content-type": str(args[1])}, body)
+        if name in {"web.route", "std.web.route"}:
+            if not args:
+                return ""
+            return str(args[0])
+        if name in {"web.handle_request", "std.web.handle_request"}:
+            if not args or not isinstance(args[0], dict):
+                return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
+            found = None
+            method_text = _normalize_web_method(args[0].get("metode", ""))
+            path_text = str(args[0].get("sti", ""))
+            path_mismatch = False
+            for handler in self.route_handlers:
+                spec = handler.get("spec", "")
+                route_method, route_path = _split_web_route_spec(spec)
+                route_params = _match_web_path(route_path, path_text)
+                if route_params is None:
+                    continue
+                if route_method and route_method != method_text:
+                    path_mismatch = True
+                    continue
+                if _route_is_exact(route_path):
+                    found = (handler, route_params)
+                    break
+                if found is None:
+                    found = (handler, route_params)
+            if found is None:
+                if path_mismatch:
+                    return _make_web_response(405, {"content-type": "application/json"}, json.dumps({"error": "Metode ikke tillatt"}, ensure_ascii=False))
+                return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
+            handler, params = found
+            ctx = _make_route_context(args[0], params)
+            return self.call_function(handler["function"], [ctx])
         fn = self.functions.get(name)
         if fn is None:
             short_name = name.rsplit('.', 1)[-1]
             builtin_like = {
-                "assert", "assert_eq", "assert_ne", "skriv", "lengde",
+                "assert", "assert_eq", "assert_ne", "assert_starter_med", "assert_slutter_med", "assert_inneholder", "skriv", "lengde",
                 "tekst_fra_heltall", "tekst_fra_bool", "heltall_fra_tekst",
+                "tekst_starter_med", "tekst_slutter_med", "tekst_inneholder", "tekst_trim",
                 "del_ord", "tokeniser_enkel", "tokeniser_uttrykk", "les_input",
                 "legg_til", "pop_siste", "fjern_indeks", "sett_inn",
+                "har_nokkel", "fjern_nokkel", "json_parse", "json_stringify",
+                "slice",
+                "fil_les", "fil_skriv", "fil_append", "fil_finnes",
+                "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
+                "miljo_hent", "miljo_finnes", "miljo_sett",
+                "route", "handle_request", "request_params", "request_param", "request_param_int",
+                "request_query_required", "request_query_int", "request_json", "request_json_field",
+                "request_json_field_or", "request_json_field_int", "request_json_field_bool",
             }
             if short_name in builtin_like:
                 return self.call_builtin(short_name, args)
             raise BytecodeRuntimeError(f"Ukjent funksjon: {name}")
+
         params = fn.get("params", [])
         locals_: dict[str, Any] = {param: value for param, value in zip(params, args)}
         code = fn.get("code", [])
         labels = {instr[1]: idx for idx, instr in enumerate(code) if instr[0] == "LABEL"}
         stack: list[Any] = []
         ip = 0
-        while ip < len(code):
-            self.steps += 1
-            if self.steps > self.max_steps:
-                raise BytecodeRuntimeError(f"Maks steg overskredet ({self.max_steps}) i {name} ved ip={ip}")
-            instr = code[ip]
-            op = instr[0]
-            local_preview = {key: locals_[key] for key in list(locals_.keys())[:6]}
-            if self._should_trace_function(name):
-                self._log(f"step={self.steps} fn={name} ip={ip} op={instr!r} stack={stack[-4:]} locals={local_preview}")
-            if self.repeat_limit > 0:
-                state_key = (name, ip, tuple(instr), repr(stack[-4:]), repr(local_preview))
-                if state_key == self._repeat_state_key:
-                    self._repeat_state_count += 1
-                else:
-                    self._repeat_state_key = state_key
-                    self._repeat_state_count = 1
-                if self._repeat_state_count > self.repeat_limit:
-                    raise BytecodeRuntimeError(
-                        f"Mulig fastlås/løkke oppdaget i {name} ved ip={ip} op={instr!r} "
-                        f"(samme tilstand > {self.repeat_limit} ganger)"
-                    )
-            if op == "LABEL":
-                ip += 1
-                continue
-            if op == "PUSH_CONST":
-                stack.append(instr[1])
-            elif op == "LOAD_NAME":
-                name2 = instr[1]
-                if name2 not in locals_:
-                    raise BytecodeRuntimeError(f"Ukjent variabel: {name2}")
-                stack.append(locals_[name2])
-            elif op == "STORE_NAME":
-                locals_[instr[1]] = stack.pop()
-            elif op == "POP":
-                if stack:
-                    stack.pop()
-            elif op == "BUILD_LIST":
-                n = instr[1]
-                items = stack[-n:] if n else []
-                if n:
-                    del stack[-n:]
-                stack.append(items)
-            elif op == "INDEX_GET":
-                idx = stack.pop(); lst = stack.pop(); stack.append(lst[idx])
-            elif op == "INDEX_SET":
-                value = stack.pop(); idx = stack.pop(); lst = stack.pop(); lst[idx] = value
-            elif op == "UNARY_NEG":
-                stack.append(-stack.pop())
-            elif op == "UNARY_NOT":
-                stack.append(not stack.pop())
-            elif op == "BINARY_ADD":
-                b = stack.pop(); a = stack.pop(); stack.append(a + b)
-            elif op == "BINARY_SUB":
-                b = stack.pop(); a = stack.pop(); stack.append(a - b)
-            elif op == "BINARY_MUL":
-                b = stack.pop(); a = stack.pop(); stack.append(a * b)
-            elif op == "BINARY_DIV":
-                b = stack.pop(); a = stack.pop(); stack.append(a / b)
-            elif op == "COMPARE_EQ":
-                b = stack.pop(); a = stack.pop(); stack.append(a == b)
-            elif op == "COMPARE_NE":
-                b = stack.pop(); a = stack.pop(); stack.append(a != b)
-            elif op == "COMPARE_GT":
-                b = stack.pop(); a = stack.pop(); stack.append(a > b)
-            elif op == "COMPARE_LT":
-                b = stack.pop(); a = stack.pop(); stack.append(a < b)
-            elif op == "COMPARE_GE":
-                b = stack.pop(); a = stack.pop(); stack.append(a >= b)
-            elif op == "COMPARE_LE":
-                b = stack.pop(); a = stack.pop(); stack.append(a <= b)
-            elif op == "BINARY_AND":
-                b = stack.pop(); a = stack.pop(); stack.append(bool(a) and bool(b))
-            elif op == "BINARY_OR":
-                b = stack.pop(); a = stack.pop(); stack.append(bool(a) or bool(b))
-            elif op == "CALL":
-                target, argc = instr[1], instr[2]
-                call_args = stack[-argc:] if argc else []
-                if argc:
-                    del stack[-argc:]
-                stack.append(self.call_function(target, call_args))
-            elif op == "JUMP":
-                ip = labels[instr[1]]
-                continue
-            elif op == "JUMP_IF_FALSE":
-                value = stack.pop()
-                if not value:
+        exception_frame_base = len(self._exception_stack)
+        self._call_stack.append(name)
+        try:
+            while ip < len(code):
+                self.steps += 1
+                if self.steps > self.max_steps:
+                    raise BytecodeRuntimeError(f"Maks steg overskredet ({self.max_steps}) i {name} ved ip={ip}")
+                instr = code[ip]
+                op = instr[0]
+                local_preview = {key: locals_[key] for key in list(locals_.keys())[:6]}
+                if self._should_trace_function(name):
+                    self._log(f"step={self.steps} fn={name} ip={ip} op={instr!r} stack={stack[-4:]} locals={local_preview}")
+                if self.repeat_limit > 0:
+                    state_key = (name, ip, tuple(instr), repr(stack[-4:]), repr(local_preview))
+                    if state_key == self._repeat_state_key:
+                        self._repeat_state_count += 1
+                    else:
+                        self._repeat_state_key = state_key
+                        self._repeat_state_count = 1
+                    if self._repeat_state_count > self.repeat_limit:
+                        raise BytecodeRuntimeError(
+                            f"Mulig fastlås/løkke oppdaget i {name} ved ip={ip} op={instr!r} "
+                            f"(samme tilstand > {self.repeat_limit} ganger)"
+                        )
+                if op == "LABEL":
+                    ip += 1
+                    continue
+                if op == "PUSH_CONST":
+                    stack.append(instr[1])
+                elif op == "LOAD_NAME":
+                    name2 = instr[1]
+                    if name2 not in locals_:
+                        raise BytecodeRuntimeError(f"Ukjent variabel: {name2}")
+                    stack.append(locals_[name2])
+                elif op == "STORE_NAME":
+                    locals_[instr[1]] = stack.pop()
+                elif op == "POP":
+                    if stack:
+                        stack.pop()
+                elif op == "BUILD_LIST":
+                    n = instr[1]
+                    items = stack[-n:] if n else []
+                    if n:
+                        del stack[-n:]
+                    stack.append(items)
+                elif op == "BUILD_MAP":
+                    n = instr[1]
+                    raw_items = stack[-(n * 2):] if n else []
+                    if n:
+                        del stack[-(n * 2):]
+                    out = {}
+                    for i in range(0, len(raw_items), 2):
+                        out[raw_items[i]] = raw_items[i + 1]
+                    stack.append(out)
+                elif op == "INDEX_GET":
+                    idx = stack.pop(); lst = stack.pop(); stack.append(lst[idx])
+                elif op == "INDEX_SET":
+                    value = stack.pop(); idx = stack.pop(); lst = stack.pop(); lst[idx] = value
+                elif op == "UNARY_NEG":
+                    stack.append(-stack.pop())
+                elif op == "UNARY_NOT":
+                    stack.append(not stack.pop())
+                elif op == "BINARY_ADD":
+                    b = stack.pop(); a = stack.pop(); stack.append(a + b)
+                elif op == "BINARY_SUB":
+                    b = stack.pop(); a = stack.pop(); stack.append(a - b)
+                elif op == "BINARY_MUL":
+                    b = stack.pop(); a = stack.pop(); stack.append(a * b)
+                elif op == "BINARY_DIV":
+                    b = stack.pop(); a = stack.pop(); stack.append(a / b)
+                elif op == "COMPARE_EQ":
+                    b = stack.pop(); a = stack.pop(); stack.append(a == b)
+                elif op == "COMPARE_NE":
+                    b = stack.pop(); a = stack.pop(); stack.append(a != b)
+                elif op == "COMPARE_GT":
+                    b = stack.pop(); a = stack.pop(); stack.append(a > b)
+                elif op == "COMPARE_LT":
+                    b = stack.pop(); a = stack.pop(); stack.append(a < b)
+                elif op == "COMPARE_GE":
+                    b = stack.pop(); a = stack.pop(); stack.append(a >= b)
+                elif op == "COMPARE_LE":
+                    b = stack.pop(); a = stack.pop(); stack.append(a <= b)
+                elif op == "BINARY_AND":
+                    b = stack.pop(); a = stack.pop(); stack.append(bool(a) and bool(b))
+                elif op == "BINARY_OR":
+                    b = stack.pop(); a = stack.pop(); stack.append(bool(a) or bool(b))
+                elif op == "TRY_BEGIN":
+                    self._push_try_frame(instr[1])
+                elif op == "TRY_END":
+                    self._pop_try_frame()
+                elif op == "LOAD_EXCEPTION":
+                    stack.append(self._exception_value)
+                elif op == "BUILD_LAMBDA":
+                    lambda_name = instr[1]
+                    capture_names = list(instr[2]) if len(instr) > 2 else []
+                    capture_values = []
+                    for _ in range(len(capture_names)):
+                        capture_values.append(stack.pop())
+                    capture_values.reverse()
+                    stack.append(BytecodeLambdaValue(lambda_name, capture_names, capture_values))
+                elif op == "THROW":
+                    exc = stack.pop() if stack else None
+                    handler_ip = self._handle_throw(exc, labels)
+                    if handler_ip is None:
+                        raise BytecodeThrow(exc)
+                    ip = handler_ip
+                    continue
+                elif op == "CALL":
+                    target, argc = instr[1], instr[2]
+                    call_args = stack[-argc:] if argc else []
+                    if argc:
+                        del stack[-argc:]
+                    try:
+                        stack.append(self.call_function(target, call_args))
+                    except BytecodeThrow as exc:
+                        handler_ip = self._handle_throw(exc.value, labels)
+                        if handler_ip is None:
+                            raise
+                        ip = handler_ip
+                        continue
+                elif op == "CALL_VALUE":
+                    argc = instr[1]
+                    call_args = stack[-argc:] if argc else []
+                    if argc:
+                        del stack[-argc:]
+                    callable_value = stack.pop() if stack else None
+                    try:
+                        stack.append(self.call_value(callable_value, call_args))
+                    except BytecodeThrow as exc:
+                        handler_ip = self._handle_throw(exc.value, labels)
+                        if handler_ip is None:
+                            raise
+                        ip = handler_ip
+                        continue
+                elif op == "JUMP":
                     ip = labels[instr[1]]
                     continue
-            elif op == "RETURN":
-                result = stack.pop() if stack else None
-                if memo_key is not None:
-                    self._memo_cache[memo_key] = result
-                return result
-            else:
-                raise BytecodeRuntimeError(f"Ukjent opcode: {op}")
-            ip += 1
-        if memo_key is not None:
-            self._memo_cache[memo_key] = None
-        return None
+                elif op == "JUMP_IF_FALSE":
+                    value = stack.pop()
+                    if not value:
+                        ip = labels[instr[1]]
+                        continue
+                elif op == "RETURN":
+                    result = stack.pop() if stack else None
+                    if fn.get("is_async"):
+                        result = AsyncValue(result)
+                    if memo_key is not None:
+                        self._memo_cache[memo_key] = result
+                    return result
+                else:
+                    raise BytecodeRuntimeError(f"Ukjent opcode: {op}")
+                ip += 1
+            if memo_key is not None:
+                self._memo_cache[memo_key] = None
+        except BytecodeThrow as exc:
+            exc.call_stack.append(name)
+            raise
+        finally:
+            self._call_stack.pop()
+            while len(self._exception_stack) > exception_frame_base:
+                self._exception_stack.pop()
+
+    def call_value(self, value: Any, args: list[Any]) -> Any:
+        if isinstance(value, BytecodeLambdaValue):
+            closure_args = list(value.capture_values) + list(args)
+            return self.call_function(value.function_name, closure_args)
+        raise BytecodeRuntimeError(f"Kan ikke kalle verdi av type {type(value).__name__}")
 
     def call_builtin(self, name: str, args: list[Any]) -> Any:
+        if name == "await_value":
+            if not args:
+                return None
+            value = args[0]
+            if isinstance(value, AsyncValue):
+                if value.cancelled:
+                    raise BytecodeThrow("AvbruttFeil: future ble kansellert")
+                if value.timeout_deadline is not None and time.monotonic() > value.timeout_deadline:
+                    raise BytecodeThrow("TimeoutFeil: future gikk ut på tid")
+                return value.value
+            return value
         if name == "skriv":
             text = " ".join(str(x) for x in args)
             print(text)
@@ -939,8 +2116,72 @@ class BytecodeVM:
             if args[0] == args[1]:
                 raise AssertionError(f"assert_ne feilet: {args[0]!r} == {args[1]!r}")
             return None
+        if name == "assert_starter_med":
+            if len(args) < 2 or not str(args[0]).startswith(str(args[1])):
+                raise AssertionError(f"assert_starter_med feilet: {args[0]!r} starter ikke med {args[1]!r}")
+            return None
+        if name == "assert_slutter_med":
+            if len(args) < 2 or not str(args[0]).endswith(str(args[1])):
+                raise AssertionError(f"assert_slutter_med feilet: {args[0]!r} slutter ikke med {args[1]!r}")
+            return None
+        if name == "assert_inneholder":
+            if len(args) < 2 or str(args[1]) not in str(args[0]):
+                raise AssertionError(f"assert_inneholder feilet: {args[0]!r} inneholder ikke {args[1]!r}")
+            return None
         if name == "lengde":
             return len(args[0])
+        if name == "har_nokkel":
+            if len(args) != 2:
+                raise BytecodeRuntimeError("har_nokkel forventer 2 argumenter")
+            return args[1] in args[0]
+        if name == "fjern_nokkel":
+            if len(args) != 2:
+                raise BytecodeRuntimeError("fjern_nokkel forventer 2 argumenter")
+            mapping = args[0]
+            key = args[1]
+            if isinstance(mapping, dict):
+                mapping.pop(key, None)
+                return len(mapping)
+            raise BytecodeRuntimeError("fjern_nokkel krever ordbok og tekstnøkkel")
+        if name == "json_parse":
+            payload = str(args[0]) if args else ""
+            try:
+                parsed = json.loads(payload)
+            except Exception as exc:
+                raise BytecodeRuntimeError(f"json_parse feilet: {exc}") from exc
+
+            if isinstance(parsed, list):
+                return {str(i): self._json_scalar_to_text(v) for i, v in enumerate(parsed)}
+            if isinstance(parsed, dict):
+                return {str(key): self._json_scalar_to_text(value) for key, value in parsed.items()}
+            raise BytecodeRuntimeError("json_parse forventer et JSON-objekt eller en JSON-liste")
+
+        if name == "json_stringify":
+            map_value = args[0]
+            if map_value is None:
+                map_value = {}
+            if not isinstance(map_value, dict):
+                raise BytecodeRuntimeError("json_stringify forventer en ordbok")
+            try:
+                pieces = []
+                for key, value in map_value.items():
+                    json_key = json.dumps(str(key), ensure_ascii=False, separators=(",", ":"))
+                    serialized_value = self._json_serialize_value(value)
+                    pieces.append(f"{json_key}:{serialized_value}")
+                return "{" + ",".join(pieces) + "}"
+            except Exception as exc:
+                raise BytecodeRuntimeError(f"json_stringify feilet: {exc}") from exc
+        if name == "slice":
+            if len(args) < 3:
+                raise BytecodeRuntimeError("slice forventer 3 argumenter")
+            target, start, end = args[0], args[1], args[2]
+            start_idx = None if start is None else int(start)
+            end_idx = None if end is None else int(end)
+            if isinstance(target, str):
+                return target[start_idx:end_idx]
+            if isinstance(target, list):
+                return target[start_idx:end_idx]
+            raise BytecodeRuntimeError("Slicing kan bare brukes på tekst og lister")
         if name == "tekst_fra_heltall":
             return str(args[0])
         if name == "tekst_fra_bool":
@@ -950,6 +2191,94 @@ class BytecodeVM:
                 return int(str(args[0]).strip())
             except Exception:
                 return 0
+        if name == "tekst_starter_med":
+            return str(args[0]).startswith(str(args[1])) if len(args) >= 2 else False
+        if name == "tekst_slutter_med":
+            return str(args[0]).endswith(str(args[1])) if len(args) >= 2 else False
+        if name == "tekst_inneholder":
+            return str(args[1]) in str(args[0]) if len(args) >= 2 else False
+        if name == "tekst_trim":
+            return str(args[0]).strip() if args else ""
+        if name == "sti_join":
+            parts = [str(part) for part in args if str(part)]
+            if not parts:
+                return ""
+            out = parts[0]
+            for part in parts[1:]:
+                if out.endswith("/"):
+                    out = out.rstrip("/") + "/" + part.lstrip("/")
+                elif out.endswith("\\"):
+                    out = out.rstrip("\\") + "/" + part.lstrip("/\\")
+                else:
+                    out = out.rstrip("/") + "/" + part.lstrip("/\\")
+            return out
+        if name == "sti_basename":
+            text = str(args[0]) if args else ""
+            text = text.rstrip("/\\")
+            if not text:
+                return ""
+            return re.split(r"[\\/]", text)[-1]
+        if name == "sti_dirname":
+            text = str(args[0]) if args else ""
+            text = text.rstrip("/\\")
+            if not text:
+                return ""
+            parts = re.split(r"[\\/]", text)
+            if len(parts) <= 1:
+                return ""
+            return "/".join(parts[:-1])
+        if name == "sti_exists":
+            return Path(str(args[0])).expanduser().exists() if args else False
+        if name == "sti_stem":
+            text = str(args[0]) if args else ""
+            base = re.split(r"[\\/]", text.rstrip("/\\"))[-1] if text else ""
+            if "." not in base:
+                return base
+            return base.rsplit(".", 1)[0]
+        if name == "fil_les":
+            path = Path(str(args[0])).expanduser() if args else Path("")
+            try:
+                return path.read_text(encoding="utf-8")
+            except OSError:
+                raise BytecodeThrow(f"IOFeil: kunne ikke lese fil {path}")
+        if name == "fil_skriv":
+            if len(args) < 2:
+                raise BytecodeRuntimeError("fil_skriv forventer 2 argumenter")
+            path = Path(str(args[0])).expanduser()
+            text = str(args[1])
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            except OSError:
+                raise BytecodeThrow(f"IOFeil: kunne ikke skrive fil {path}")
+            return text
+        if name == "fil_append":
+            if len(args) < 2:
+                raise BytecodeRuntimeError("fil_append forventer 2 argumenter")
+            path = Path(str(args[0])).expanduser()
+            text = str(args[1])
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(text)
+            except OSError:
+                raise BytecodeThrow(f"IOFeil: kunne ikke legge til i fil {path}")
+            return text
+        if name == "fil_finnes":
+            return Path(str(args[0])).expanduser().exists() if args else False
+        if name == "miljo_hent":
+            key = str(args[0]) if args else ""
+            return os.environ.get(key, "")
+        if name == "miljo_finnes":
+            key = str(args[0]) if args else ""
+            return key in os.environ
+        if name == "miljo_sett":
+            if len(args) < 2:
+                raise BytecodeRuntimeError("miljo_sett forventer 2 argumenter")
+            key = str(args[0])
+            value = str(args[1])
+            os.environ[key] = value
+            return value
         if name == "del_ord":
             return str(args[0]).split()
         if name == "tokeniser_enkel":
@@ -1011,6 +2340,37 @@ class BytecodeVM:
                 lst.append(value)
             return None
         raise BytecodeRuntimeError(f"Ukjent builtin: {name}")
+
+    def _json_scalar_to_text(self, value):
+        if value is None:
+            return ""
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if isinstance(value, (int, float)):
+            return json.dumps(value, ensure_ascii=False)
+        return str(value)
+
+    def _json_serialize_value(self, raw_value):
+        if raw_value is None:
+            return "null"
+        value = str(raw_value)
+        if value in {"", "true", "false", "null"}:
+            return value
+        if (value.startswith("[") and value.endswith("]")) or (value.startswith("{") and value.endswith("}")):
+            return value
+        if self._json_is_number_like(value):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _json_is_number_like(value: str) -> bool:
+        try:
+            float(value)
+            return True
+        except Exception:
+            return False
 
 
 def compile_program_to_bytecode(program, alias_map: dict[str, str] | None = None) -> dict[str, Any]:

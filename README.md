@@ -7,10 +7,11 @@ Et norsk programmeringsspråk som kompilerer til C.
 ## ✨ Funksjoner
 
 - Norsk syntaks (funksjon, hvis, ellers, osv.)
-- Statisk typing (heltall, tekst, bool, lister)
+- Statisk typing (heltall, tekst, bool, lister, ordbøker/strukturerte datafelt)
 - Modul- og pakke-system
 - Egen standardbibliotek (`std`)
 - Testsystem med `assert`, `assert_eq`, `assert_ne`
+- Feilhåndtering med `kast`, `prøv`/`fang` (inkludert nested rethrow)
 - Kompilerer til C → rask kjøring
 
 ---
@@ -23,6 +24,9 @@ Et norsk programmeringsspråk som kompilerer til C.
 python3 -m pip install -e .
 # Hvis miljøet er offline/strengt:
 python3 -m pip install -e . --no-build-isolation
+
+# Bygg eksplisitt bootstrap-binary for binary-first flyt
+bash tools/build-bootstrap-binary.sh
 
 # Deretter kan du bruke:
 norcode --help
@@ -53,7 +57,12 @@ norcode migrate-names --apply --cleanup
 
 # CI-sjekk: feiler hvis migrering/cleanup gjenstår
 norcode migrate-names --cleanup --check
+
+# Se stabil kommandooversikt
+norcode commands
 ```
+
+Ny bruker? Se [docs/START_HER.md](docs/START_HER.md) for den raskeste veien inn.
 
 ### 0b. Bygg og publiser pakke
 
@@ -83,6 +92,17 @@ make release-package
 ```
 
 Dette lager en tar.gz i `release-artifacts/` med manifest for distribusjon av dette repoet.
+Pakken inneholder også `dist/norscode`, som bygges eksplisitt før pakkingen, og en `*.sha256`-fil for enkel verifisering.
+
+### 0c.1 Installer eller oppgrader lokalt
+
+```bash
+bash tools/install-release.sh release-artifacts/norscode-language-*.tar.gz
+```
+
+Dette installerer pakken som en versjonert release under `~/.local/share/norscode/`, peker `current` til aktiv versjon og lager symlinker til `nc`, `nor`, `nl` og `bootstrap` i `~/.local/share/norscode/bin/`.
+Kjør samme kommando med en nyere releasepakke for å oppgradere.
+Rollback er bare å peke `current` tilbake til en tidligere versjon i `~/.local/share/norscode/releases/`, eller å installere en eldre releasepakke på nytt.
 
 Når pakken er bygget:
 
@@ -94,7 +114,7 @@ cd /tmp/norscode-release
 
 I en release bygger `bin/`-scriptene mot:
 - `dist/norscode` om den finnes (binærflyt)
-- ellers `main.py` som tilbakefall når du vil kjøre uten ferdig binær
+- ellers feiler de med beskjed om å bygge `dist/norscode` med `bash tools/build-bootstrap-binary.sh`
 
 ### 0d. Fallback-bruk
 
@@ -106,7 +126,21 @@ python3 main.py run app.no
 python3 main.py ci --check-names
 ```
 
-Dette brukes som bevisst fallback når du trenger å kjøre koden uten ferdig binær.
+Dette er nå bare bootstrap-verktøy når du starter eksplisitt via Python eller via `./bin/bootstrap`.
+Python brukes bare som utviklerverktøy der det fortsatt trengs.
+
+- Primærflyt: `norcode`/`nc` bruker ferdig binary.
+- Bootstrap: `./bin/bootstrap ...` eller `python3 main.py ...` brukes bare når du eksplisitt vil kjøre via Python.
+
+For den stabiliserte CLI-kontrakten, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
+
+For en praktisk startreise, se [docs/START_HER.md](docs/START_HER.md), [docs/COOKBOOK.md](docs/COOKBOOK.md) og [docs/EXAMPLES.md](docs/EXAMPLES.md).
+
+For FastAPI-sporet, se [docs/FASTAPI_ROADMAP.md](docs/FASTAPI_ROADMAP.md).
+
+For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
+
+For en kort sluttstatus for videre overlevering, se [docs/HANDOFF.md](docs/HANDOFF.md).
 
 Publisering er satt opp i GitHub Actions via `.github/workflows/publish.yml`:
 
@@ -123,6 +157,12 @@ norcode run app.no
 
 ```bash
 norcode check app.no
+
+# Kjør en enkel linter
+norcode lint app.no
+
+# Formater en fil
+norcode format app.no
 ```
 
 ### 3. Kjør tester
@@ -133,6 +173,16 @@ norcode test
 # Maskinlesbar testoutput
 norcode test --json
 ```
+
+### 3b. Kvalitetssjekker
+
+```bash
+norcode bench
+norcode smoke
+norcode fuzz
+```
+
+Se [docs/QUALITY.md](docs/QUALITY.md) for terskler og tolkning.
 
 ### 4. IR disasm (debug/tooling)
 
@@ -236,10 +286,16 @@ For integritets-pinning av registry metadata:
 ```bash
 # Beregn SHA256 for packages/registry.toml
 norcode registry-sign
-
-# Skriv SHA256 inn i norcode.toml (security.trusted_registry_sha256)
 norcode registry-sign --write-config
 ```
+
+### 6. REPL
+
+```bash
+norcode repl
+```
+
+REPL-en kan kjøre uttrykk, flerlinsjeblokker og enkle `bruk`-linjer i samme sesjon.
 
 Remote registry-indeks kan konfigureres i `norcode.toml`:
 
@@ -492,6 +548,8 @@ norcode selfhost-parity-progress
 norcode selfhost-parity-progress --json
 norcode selfhost-parity-progress --require-ready
 norcode selfhost-parity-progress --min-coverage 100
+norcode selfhost-parity-gate
+norcode selfhost-parity-gate --min-coverage 100
 norcode selfhost-parity-consistency
 norcode selfhost-parity-consistency --scope m2
 norcode selfhost-parity-consistency --scope all
@@ -511,6 +569,7 @@ norcode sync-selfhost-parity-m2 --check
 
 `selfhost-parity` rapporterer fordeling per suite: antall uttrykk, skript, linje-cases og feil-cases.
 `selfhost-parity-progress` viser samlet M1/M2-fremdrift mot utvidet suite (dekning, overlap, missing/extra, consistency), og kan brukes som egen gate med `--require-ready` og `--min-coverage`.
+`selfhost-parity-gate` er den korte, eksplisitte gate-kommandoen for samme readiness-sjekk.
 `update-selfhost-parity-fixtures` synkroniserer nå automatisk M2 som `core - M1` for `--suite m2|all` (kan overstyres med `--no-sync-m2`).
 
 ---
@@ -520,16 +579,29 @@ norcode sync-selfhost-parity-m2 --check
 ```no
 bruk std.math
 bruk std.tekst som t
+bruk std.liste som liste
 
 funksjon start() -> heltall {
     la sum: heltall = math.pluss(10, 20)
+    la ord: liste_tekst = ["z", "b", "a"]
 
     skriv(tekst_fra_heltall(sum))
     skriv(t.hilsen("Jan"))
+    liste.sorter_tekst(ord)
+    skriv(ord[0:2])
 
     returner 0
 }
 ```
+
+For mer realistiske flyter, se:
+- [examples/cli.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cli.no) for `std.fil`, `std.path`, `std.env` og `std.lagring` med lesbare `IOFeil` ved skrivefeil
+- [examples/http.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/http.no) for HTTP-integrasjon med enkle request helpers og type-sikker JSON-respons
+- [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web.no) for path-parametre, rute-matching og dispatch i en FastAPI-lignende stil
+- [examples/web_request_response.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_request_response.no) for request_context, response_builder, header/query-hjelpere og filrespons
+- [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no) for ekte route-handlers med `web.route()` og `web.handle_request()`
+- [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
+- [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no) for sammensatt språkbruk
 
 ---
 
@@ -564,12 +636,16 @@ norcode/
 Prosjektet er funksjonelt i god stand per 2026-04-30.
 
 - `norcode test` er grønt
-- `22/22` kjente testsuiter består (`norcode test`)
 - IR snapshot-parity er grønn
-- selfhost-banen dekker nå de nye syntaksene som brukes i testsettet
+- selfhost-banen dekker de nye syntaksene som brukes i testsettet
 - map-literals (`{ "nøkkel": verdi }`) og tomme map-starters fungerer i både parser og selfhost-kjede
+- nested map-literals med kjedet oppslag (`outer["gruppe"]["admin"]`) er støttet
+- punktum-oppslag på ordbokfelt (`person.navn`) er støttet i parser/semantic/codegen/bytecode
+- feltkonstruksjon med navngitte felt (`{navn: "Ada", rolle: "utvikler"}`) er støttet i parser/semantic/codegen/bytecode
+- `std.liste` dekker nå tekstsortering, søk, filtrering og slicing sammen med de eksisterende tallhjelperne
+- `std.json` har typed tilgangsfunksjoner (`hent_tekst`, `hent_tall`, `hent_bool`) og konvertering av JSON-arrays til lister (`hent_array_tekst`, `hent_array_tall`)
 
-### Selv-hosting (nytt)
+### Selv-hosting
 
 Vi har startet en tidlig selv-hosting bane i `selfhost/`:
 
@@ -609,6 +685,9 @@ For daglig bruk er det viktigste at:
 - selfhost-parity er i synk med testene som faktisk ligger i repoet
 - nye språkfunksjoner bør føres gjennom parser, semantic, codegen og selfhost-bro samtidig
 
+For neste fase etter 1.0, se [docs/ROADMAP_HELT_FERDIG.md](docs/ROADMAP_HELT_FERDIG.md).
+For stabil CLI-kontrakt, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
+For legacy-navn og migrering, se [docs/DEPRECATION_POLICY.md](docs/DEPRECATION_POLICY.md).
 For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](docs/LEGACY_POLICY.md).
 
 ## Lisens

@@ -19,4 +19,4 @@ echo
 echo "Norscode er klar."
 echo "Aktiver miljøet med: source $VENV_DIR/bin/activate"
 echo "Test CLI med: norcode --help"
-echo "Kjør tester med: python3 main.py test"
+echo "Kjør tester med: norcode test"

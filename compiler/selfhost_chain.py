@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
-import tomllib
 from pathlib import Path
+
+from .toml_compat import loads as toml_loads
 from typing import Any
 
 from .bytecode_backend import compile_program_to_bytecode, BytecodeVM
@@ -27,7 +28,7 @@ def _load_package_entry(package_dir: Path) -> str | None:
     for cfg_name in ('norcode.toml', 'norsklang.toml'):
         cfg = package_dir / cfg_name
         if cfg.exists():
-            data = tomllib.loads(cfg.read_text(encoding='utf-8'))
+            data = toml_loads(cfg.read_text(encoding='utf-8'))
             project = data.get('project', {}) if isinstance(data, dict) else {}
             entry = project.get('entry')
             if isinstance(entry, str) and entry.strip():
@@ -115,7 +116,7 @@ def export_selfhost_ast_bundle(source_file: str, output: str | None = None) -> P
 def run_chain(
     source_file: str,
     trace: bool = False,
-    max_steps: int = 200000,
+    max_steps: int = 5000000,
     trace_focus: str | None = None,
     repeat_limit: int = 0,
     expr_probe: str | None = None,
@@ -166,7 +167,7 @@ def _default_chain_cases(project_root: Path) -> list[str]:
 def check_chain(
     files: list[str] | None = None,
     trace: bool = False,
-    max_steps: int = 200000,
+    max_steps: int = 5000000,
     trace_focus: str | None = None,
     repeat_limit: int = 0,
     expr_probe: str | None = None,

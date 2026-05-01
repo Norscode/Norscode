@@ -1,10 +1,21 @@
-
-
 TYPE_INT = "heltall"
 TYPE_BOOL = "bool"
 TYPE_TEXT = "tekst"
 TYPE_LIST_INT = "liste_heltall"
 TYPE_LIST_TEXT = "liste_tekst"
+TYPE_MAP_INT = "ordbok_heltall"
+TYPE_MAP_TEXT = "ordbok_tekst"
+TYPE_MAP_BOOL = "ordbok_bool"
+TYPE_LAMBDA = "funksjon"
+TYPE_MAP_PREFIX = "ordbok_"
+
+
+def map_type_name(inner_type):
+    return f"{TYPE_MAP_PREFIX}{inner_type}"
+
+
+def is_map_type_name(type_name):
+    return isinstance(type_name, str) and type_name.startswith(TYPE_MAP_PREFIX)
 
 
 class ImportNode:
@@ -14,9 +25,10 @@ class ImportNode:
 
 
 class ProgramNode:
-    def __init__(self, imports, functions):
+    def __init__(self, imports, functions, tests=None):
         self.imports = imports
         self.functions = functions
+        self.tests = tests or []
 
 
 class Param:
@@ -26,12 +38,13 @@ class Param:
 
 
 class FunctionNode:
-    def __init__(self, name, params, return_type, body, module_name=None):
+    def __init__(self, name, params, return_type, body, module_name=None, is_async=False):
         self.name = name
         self.params = params
         self.return_type = return_type
         self.body = body
         self.module_name = module_name
+        self.is_async = is_async
 
 
 class BlockNode:
@@ -68,10 +81,8 @@ class IfNode:
     def __init__(self, condition, then_block, elif_blocks=None, else_block=None):
         self.condition = condition
         self.then_block = then_block
-        self.elif_blocks = elif_blocks or []  # <-- NY
+        self.elif_blocks = elif_blocks or []
         self.else_block = else_block
-
-
 
 
 class IfExprNode:
@@ -79,6 +90,31 @@ class IfExprNode:
         self.condition = condition
         self.then_expr = then_expr
         self.else_expr = else_expr
+
+
+class MatchCaseNode:
+    def __init__(self, pattern, body, wildcard=False):
+        self.pattern = pattern
+        self.body = body
+        self.wildcard = wildcard
+
+
+class MatchNode:
+    def __init__(self, subject, cases, else_block=None):
+        self.subject = subject
+        self.cases = cases
+        self.else_block = else_block
+
+
+class AwaitNode:
+    def __init__(self, expr):
+        self.expr = expr
+
+
+class LambdaNode:
+    def __init__(self, params, body):
+        self.params = params
+        self.body = body
 
 
 class WhileNode:
@@ -119,6 +155,18 @@ class ContinueNode:
 class ExprStmtNode:
     def __init__(self, expr):
         self.expr = expr
+
+
+class ThrowNode:
+    def __init__(self, expr):
+        self.expr = expr
+
+
+class TryCatchNode:
+    def __init__(self, try_block, catch_var_name, catch_block):
+        self.try_block = try_block
+        self.catch_var_name = catch_var_name
+        self.catch_block = catch_block
 
 
 class NumberNode:
@@ -172,22 +220,44 @@ class ListLiteralNode:
         self.items = items
 
 
-class IndexNode:
-    def __init__(self, target, index_expr):
-        self.target = target
-        self.index_expr = index_expr
+class ListComprehensionNode:
+    def __init__(self, item_name, source_expr, item_expr, condition_expr=None):
+        self.item_name = item_name
+        self.source_expr = source_expr
+        self.item_expr = item_expr
+        self.condition_expr = condition_expr
 
-class TestNode:
-    def __init__(self, name, body):
-        self.name = name
-        self.body = body     
 
-class ListNode:
-    def __init__(self, elements):
-        self.elements = elements
+class MapLiteralNode:
+    def __init__(self, items):
+        self.items = items
+
+
+class StructLiteralNode:
+    def __init__(self, fields):
+        self.fields = fields
 
 
 class IndexNode:
     def __init__(self, list_expr, index_expr):
         self.list_expr = list_expr
-        self.index_expr = index_expr         
+        self.index_expr = index_expr
+
+
+class SliceNode:
+    def __init__(self, target, start_expr=None, end_expr=None):
+        self.target = target
+        self.start_expr = start_expr
+        self.end_expr = end_expr
+
+
+class FieldAccessNode:
+    def __init__(self, target, field):
+        self.target = target
+        self.field = field
+
+
+class TestNode:
+    def __init__(self, name, body):
+        self.name = name
+        self.body = body

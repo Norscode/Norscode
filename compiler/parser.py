@@ -11,6 +11,9 @@ class Parser:
         "TYPE_TEXT",
         "TYPE_LIST_INT",
         "TYPE_LIST_TEXT",
+        "TYPE_MAP_INT",
+        "TYPE_MAP_TEXT",
+        "TYPE_MAP_BOOL",
     }
 
     def __init__(self, lexer: Lexer):
@@ -96,14 +99,60 @@ class Parser:
             "TYPE_TEXT": TYPE_TEXT,
             "TYPE_LIST_INT": TYPE_LIST_INT,
             "TYPE_LIST_TEXT": TYPE_LIST_TEXT,
+            "TYPE_MAP_INT": TYPE_MAP_INT,
+            "TYPE_MAP_TEXT": TYPE_MAP_TEXT,
+            "TYPE_MAP_BOOL": TYPE_MAP_BOOL,
         }
         if self.current.typ in mapping:
             t = mapping[self.current.typ]
             self.eat(self.current.typ)
             return t
+
+        if self.current.typ == "IDENT" and self.current.value == "liste":
+            self.eat("IDENT")
+            if self.current.typ != "LT":
+                self.error("Forventet '<' etter liste")
+            self.eat("LT")
+            inner = self.parse_type()
+            if self.current.typ != "GT":
+                self.error("Forventet '>' etter liste-type")
+            self.eat("GT")
+            if inner == TYPE_INT:
+                return TYPE_LIST_INT
+            if inner == TYPE_TEXT:
+                return TYPE_LIST_TEXT
+            return f"liste_{inner}"
+
+        if self.current.typ == "IDENT" and self.current.value == "ordbok":
+            self.eat("IDENT")
+            if self.current.typ != "LT":
+                self.error("Forventet '<' etter ordbok")
+            self.eat("LT")
+            key_type = self.parse_type()
+            if self.current.typ != "COMMA":
+                self.error("Forventet ',' i ordbok-type")
+            self.eat("COMMA")
+            value_type = self.parse_type()
+            if self.current.typ != "GT":
+                self.error("Forventet '>' etter ordbok-type")
+            self.eat("GT")
+            if key_type != TYPE_TEXT:
+                self.error("Ordbok-typer må bruke tekst som nøkkeltype")
+            if value_type == TYPE_INT:
+                return TYPE_MAP_INT
+            if value_type == TYPE_TEXT:
+                return TYPE_MAP_TEXT
+            if value_type == TYPE_BOOL:
+                return TYPE_MAP_BOOL
+            return f"ordbok_{value_type}"
+
         self.error(f"Forventet type, fikk {self.current.typ}")
 
     def function_def(self):
+        is_async = False
+        if self.current.typ == "ASYNC":
+            self.eat("ASYNC")
+            is_async = True
         self.eat("FUNKSJON")
         name = self.eat_name()
         self.eat("LPAREN")
@@ -122,7 +171,7 @@ class Parser:
         self.eat("ARROW")
         return_type = self.parse_type()
         body = self.block()
-        return FunctionNode(name, params, return_type, body)
+        return FunctionNode(name, params, return_type, body, is_async=is_async)
 
     def block(self):
         self.eat("LBRACE")
@@ -139,10 +188,16 @@ class Parser:
             return self.print_stmt()
         if self.current.typ == "HVIS":
             return self.if_stmt()
+        if self.current.typ == "MATCH":
+            return self.match_stmt()
         if self.current.typ == "MENS":
             return self.while_stmt()
         if self.current.typ == "FOR":
             return self.for_stmt()
+        if self.current.typ == "PROV":
+            return self.try_stmt()
+        if self.current.typ == "KAST":
+            return self.throw_stmt()
         if self.current.typ == "RETURNER":
             return self.return_stmt()
         if self.current.typ == "BRYT":
@@ -247,6 +302,25 @@ class Parser:
         expr = self.expr()
         return VarSetNode(name, expr)
 
+    def try_stmt(self):
+        self.eat("PROV")
+        try_block = self.block()
+        if self.current.typ != "FANG":
+            self.error("prøv må etterfølges av fang")
+        self.eat("FANG")
+        catch_var = None
+        if self.current.typ == "LPAREN":
+            self.eat("LPAREN")
+            catch_var = self.eat_name()
+            self.eat("RPAREN")
+        catch_block = self.block()
+        return TryCatchNode(try_block, catch_var, catch_block)
+
+    def throw_stmt(self):
+        self.eat("KAST")
+        expr = self.expr()
+        return ThrowNode(expr)
+
     def print_stmt(self):
         self.eat("SKRIV")
         self.eat("LPAREN")
@@ -330,6 +404,36 @@ class Parser:
             break
 
         return IfNode(cond, then_block, elif_blocks, else_block)
+
+    def match_stmt(self):
+        self.eat("MATCH")
+        subject = self.expr()
+        self.eat("LBRACE")
+        cases = []
+        else_block = None
+
+        while self.current.typ != "RBRACE":
+            if self.current.typ == "CASE":
+                self.eat("CASE")
+                wildcard = self.current.typ == "IDENT" and self.current.value == "_"
+                pattern = None
+                if wildcard:
+                    self.eat("IDENT")
+                else:
+                    pattern = self.expr()
+                body = self.block()
+                cases.append(MatchCaseNode(pattern, body, wildcard=wildcard))
+                continue
+
+            if self.current.typ == "ELLERS":
+                self.eat("ELLERS")
+                else_block = self.block()
+                break
+
+            self.error("Forventet case eller ellers i match")
+
+        self.eat("RBRACE")
+        return MatchNode(subject, cases, else_block)
 
     def while_stmt(self):
         self.eat("MENS")
@@ -450,6 +554,9 @@ class Parser:
         return node
 
     def unary(self):
+        if self.current.typ == "AWAIT":
+            self.eat("AWAIT")
+            return AwaitNode(self.unary())
         if self.current.typ in ("PLUS", "MINUS", "IKKE"):
             op = self.current
             self.eat(self.current.typ)
@@ -460,23 +567,25 @@ class Parser:
         node = self.primary()
         while True:
             if self.current.typ == "DOT":
-                if not isinstance(node, VarAccessNode):
-                    self.error("Kan bare bruke punktum på navn i denne versjonen")
-                module_name = node.name
                 self.eat("DOT")
                 if self.current.typ != "IDENT":
                     self.error("Forventet funksjonsnavn etter punktum")
-                func_name = self.current.value
+                field_or_func = self.current.value
                 self.eat("IDENT")
-                self.eat("LPAREN")
-                args = []
-                if self.current.typ != "RPAREN":
-                    args.append(self.expr())
-                    while self.current.typ == "COMMA":
-                        self.eat("COMMA")
+                if self.current.typ == "LPAREN":
+                    if not isinstance(node, VarAccessNode):
+                        self.error("Kan bare bruke modul-kall på navn i denne versjonen")
+                    self.eat("LPAREN")
+                    args = []
+                    if self.current.typ != "RPAREN":
                         args.append(self.expr())
-                self.eat("RPAREN")
-                node = ModuleCallNode(module_name, func_name, args)
+                        while self.current.typ == "COMMA":
+                            self.eat("COMMA")
+                            args.append(self.expr())
+                    self.eat("RPAREN")
+                    node = ModuleCallNode(node.name, field_or_func, args)
+                    continue
+                node = FieldAccessNode(node, field_or_func)
                 continue
 
             if self.current.typ == "LPAREN":
@@ -496,9 +605,29 @@ class Parser:
 
             if self.current.typ == "LBRACKET":
                 self.eat("LBRACKET")
-                idx = self.expr()
+                if self.current.typ == "COLON":
+                    self.eat("COLON")
+                    end_expr = None
+                    if self.current.typ != "RBRACKET":
+                        end_expr = self.expr()
+                    self.eat("RBRACKET")
+                    node = SliceNode(node, None, end_expr)
+                    continue
+
+                start_expr = self.expr()
+                if self.current.typ == "COLON":
+                    self.eat("COLON")
+                    end_expr = None
+                    if self.current.typ != "RBRACKET":
+                        end_expr = self.expr()
+                    if self.current.typ == "COLON":
+                        self.error("Slicing med steg er ikke støttet ennå")
+                    self.eat("RBRACKET")
+                    node = SliceNode(node, start_expr, end_expr)
+                    continue
+
                 self.eat("RBRACKET")
-                node = IndexNode(node, idx)
+                node = IndexNode(node, start_expr)
                 continue
 
             break
@@ -506,6 +635,8 @@ class Parser:
 
     def primary(self):
         token = self.current
+        if token.typ == "FUN":
+            return self.lambda_expr()
         if token.typ == "NUMBER":
             self.eat("NUMBER")
             return NumberNode(token.value)
@@ -526,15 +657,94 @@ class Parser:
             node = self.expr()
             self.eat("RPAREN")
             return node
+        if token.typ == "LBRACE":
+            return self.map_or_struct_literal()
         if token.typ == "LBRACKET":
             return self.list_literal()
         self.error(f"Uventet token: {token.typ}")
+
+    def lambda_expr(self):
+        self.eat("FUN")
+        self.eat("LPAREN")
+        params = []
+        if self.current.typ != "RPAREN":
+            while True:
+                pname = self.eat_name()
+                ptype = TYPE_INT
+                if self.current.typ == "COLON":
+                    self.eat("COLON")
+                    ptype = self.parse_type()
+                params.append(Param(pname, ptype))
+                if self.current.typ == "COMMA":
+                    self.eat("COMMA")
+                    continue
+                break
+        self.eat("RPAREN")
+        if self.current.typ != "ARROW":
+            self.error("Lambda mangler '->'")
+        self.eat("ARROW")
+        body = self.expr()
+        return LambdaNode(params, body)
+
+    def map_or_struct_literal(self):
+        self.eat("LBRACE")
+        if self.current.typ == "RBRACE":
+            self.eat("RBRACE")
+            return MapLiteralNode([])
+
+        is_struct_mode = self.current.typ == "IDENT" and self.next.typ == "COLON"
+        if is_struct_mode:
+            fields = []
+            while True:
+                if self.current.typ != "IDENT":
+                    self.error("Forventet feltnavn i record-literal")
+                field_name = self.eat_name()
+                self.eat("COLON")
+                value_expr = self.expr()
+                fields.append((field_name, value_expr))
+                if self.current.typ == "COMMA":
+                    self.eat("COMMA")
+                    if self.current.typ == "RBRACE":
+                        self.error("Forventet felt:verdi i record-literal etter ','")
+                    continue
+                break
+            self.eat("RBRACE")
+            return StructLiteralNode(fields)
+
+        items = []
+        while True:
+            key_expr = self.expr()
+            self.eat("COLON")
+            value_expr = self.expr()
+            items.append((key_expr, value_expr))
+            if self.current.typ == "COMMA":
+                self.eat("COMMA")
+                if self.current.typ == "RBRACE":
+                    self.error("Forventet nøkkel:verdi i map-literal etter ','")
+                continue
+            break
+        self.eat("RBRACE")
+        return MapLiteralNode(items)
 
     def list_literal(self):
         self.eat("LBRACKET")
         items = []
         if self.current.typ != "RBRACKET":
-            items.append(self.expr())
+            first_item = self.expr()
+            if self.current.typ == "FOR":
+                self.eat("FOR")
+                item_name = self.eat_name()
+                if self.current.typ != "I":
+                    self.error("Forventet 'i' i liste-comprehension")
+                self.eat("I")
+                source_expr = self.expr()
+                condition_expr = None
+                if self.current.typ == "HVIS":
+                    self.eat("HVIS")
+                    condition_expr = self.expr()
+                self.eat("RBRACKET")
+                return ListComprehensionNode(item_name, source_expr, first_item, condition_expr)
+            items.append(first_item)
             while self.current.typ == "COMMA":
                 self.eat("COMMA")
                 items.append(self.expr())

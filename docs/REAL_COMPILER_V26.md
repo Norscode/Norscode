@@ -9,6 +9,6 @@ V26 gjør selfhost-kjeden bedre for typede liste-deklarasjoner.
 
 ## Verifisering
 ```bash
-python3 main.py selfhost-chain-run tests/test_empty_string_list.no
-python3 main.py selfhost-chain-check
+norcode selfhost-chain-run tests/test_empty_string_list.no
+norcode selfhost-chain-check
 ```

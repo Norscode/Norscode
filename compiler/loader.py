@@ -1,10 +1,10 @@
 from pathlib import Path
 import copy
-import tomllib
 
 from .ast_nodes import ProgramNode
 from .lexer import Lexer
 from .parser import Parser
+from .toml_compat import loads as toml_loads
 
 
 _PARSE_CACHE_BY_PATH = {}
@@ -41,7 +41,7 @@ class ModuleLoader:
         if config_path is None:
             return {}
         try:
-            data = tomllib.loads(config_path.read_text(encoding="utf-8"))
+            data = toml_loads(config_path.read_text(encoding="utf-8"))
         except Exception:
             return {}
 
@@ -66,7 +66,7 @@ class ModuleLoader:
             dep_config = self._find_existing_config_in_dir(dep_path)
             if dep_config is not None and dep_config.exists():
                 try:
-                    dep_data = tomllib.loads(dep_config.read_text(encoding="utf-8"))
+                    dep_data = toml_loads(dep_config.read_text(encoding="utf-8"))
                     project = dep_data.get("project", {})
                     if isinstance(project, dict):
                         entry = project.get("entry")

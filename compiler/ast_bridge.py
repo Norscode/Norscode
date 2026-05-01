@@ -12,13 +12,22 @@ from .ast_nodes import (
     CallNode,
     ContinueNode,
     ExprStmtNode,
+    ForEachNode,
     ForNode,
     FunctionNode,
     IfNode,
     IfExprNode,
+    MatchCaseNode,
+    MatchNode,
     ImportNode,
     IndexNode,
     ListLiteralNode,
+    MapLiteralNode,
+    FieldAccessNode,
+    StructLiteralNode,
+    AwaitNode,
+    LambdaNode,
+    SliceNode,
     ModuleCallNode,
     NumberNode,
     Param,
@@ -27,11 +36,14 @@ from .ast_nodes import (
     ReturnNode,
     StringNode,
     UnaryOpNode,
+    ThrowNode,
+    TryCatchNode,
     VarAccessNode,
     VarDeclareNode,
     VarSetNode,
     IndexSetNode,
     WhileNode,
+    ListComprehensionNode,
 )
 from .lexer import Token
 from .loader import ModuleLoader
@@ -60,11 +72,48 @@ def expr_to_data(node: Any) -> dict[str, Any]:
         return {"type": "VarAccess", "name": node.name}
     if isinstance(node, ListLiteralNode):
         return {"type": "ListLiteral", "items": [expr_to_data(item) for item in node.items]}
+    if isinstance(node, ListComprehensionNode):
+        return {
+            "type": "ListComprehension",
+            "item_name": node.item_name,
+            "source_expr": expr_to_data(node.source_expr),
+            "item_expr": expr_to_data(node.item_expr),
+            "condition_expr": expr_to_data(node.condition_expr) if node.condition_expr is not None else None,
+        }
+    if isinstance(node, MapLiteralNode):
+        return {
+            "type": "MapLiteral",
+            "items": [
+                {"key": expr_to_data(key_expr), "value": expr_to_data(value_expr)}
+                for key_expr, value_expr in node.items
+            ],
+        }
+    if isinstance(node, StructLiteralNode):
+        return {
+            "type": "StructLiteral",
+            "fields": [
+                {"name": field_name, "value": expr_to_data(field_value)}
+                for field_name, field_value in node.fields
+            ],
+        }
+    if isinstance(node, FieldAccessNode):
+        return {
+            "type": "FieldAccess",
+            "target": expr_to_data(node.target),
+            "field": node.field,
+        }
     if isinstance(node, IndexNode):
         return {
             "type": "Index",
             "list_expr": expr_to_data(node.list_expr),
             "index_expr": expr_to_data(node.index_expr),
+        }
+    if isinstance(node, SliceNode):
+        return {
+            "type": "Slice",
+            "target": expr_to_data(node.target),
+            "start_expr": expr_to_data(node.start_expr) if node.start_expr is not None else None,
+            "end_expr": expr_to_data(node.end_expr) if node.end_expr is not None else None,
         }
     if isinstance(node, UnaryOpNode):
         return {
@@ -99,6 +148,18 @@ def expr_to_data(node: Any) -> dict[str, Any]:
             "then_expr": expr_to_data(node.then_expr),
             "else_expr": expr_to_data(node.else_expr),
         }
+    if isinstance(node, AwaitNode):
+        return {
+            "type": "Await",
+            "expr": expr_to_data(node.expr),
+        }
+    if isinstance(node, LambdaNode):
+        return {
+            "type": "Lambda",
+            "params": [{"name": p.name, "type_name": p.type_name} for p in node.params],
+            "body": expr_to_data(node.body),
+            "return_type": getattr(node, "return_type", None),
+        }
     raise AstBridgeError(f"AST-eksport støtter ikke uttrykk: {type(node).__name__}")
 
 
@@ -117,6 +178,8 @@ def stmt_to_data(node: Any) -> dict[str, Any]:
         return {"type": "IndexSet", "target_name": node.target_name, "index_expr": expr_to_data(node.index_expr), "value_expr": expr_to_data(node.value_expr)}
     if isinstance(node, ExprStmtNode):
         return {"type": "ExprStmt", "expr": expr_to_data(node.expr)}
+    if isinstance(node, ThrowNode):
+        return {"type": "Throw", "expr": expr_to_data(node.expr)}
     if isinstance(node, PrintNode):
         return {"type": "Print", "expr": expr_to_data(node.expr)}
     if isinstance(node, ReturnNode):
@@ -132,6 +195,20 @@ def stmt_to_data(node: Any) -> dict[str, Any]:
             ],
             "else_block": block_to_data(node.else_block) if node.else_block else None,
         }
+    if isinstance(node, MatchNode):
+        return {
+            "type": "Match",
+            "subject": expr_to_data(node.subject),
+            "cases": [
+                {
+                    "pattern": expr_to_data(case.pattern) if getattr(case, "pattern", None) is not None else None,
+                    "body": block_to_data(case.body),
+                    "wildcard": bool(getattr(case, "wildcard", False)),
+                }
+                for case in getattr(node, "cases", [])
+            ],
+            "else_block": block_to_data(node.else_block) if node.else_block else None,
+        }
     if isinstance(node, WhileNode):
         return {"type": "While", "condition": expr_to_data(node.condition), "body": block_to_data(node.body)}
     if isinstance(node, ForNode):
@@ -142,6 +219,13 @@ def stmt_to_data(node: Any) -> dict[str, Any]:
             "end_expr": expr_to_data(node.end_expr),
             "step_expr": expr_to_data(node.step_expr),
             "body": block_to_data(node.body),
+        }
+    if isinstance(node, TryCatchNode):
+        return {
+            "type": "TryCatch",
+            "try_block": block_to_data(node.try_block),
+            "catch_var_name": node.catch_var_name,
+            "catch_block": block_to_data(node.catch_block),
         }
     if isinstance(node, BreakNode):
         return {"type": "Break"}
@@ -172,6 +256,7 @@ def program_to_data(program: ProgramNode, alias_map: dict[str, str] | None = Non
                 "module_name": getattr(fn, "module_name", None),
                 "return_type": fn.return_type,
                 "params": [{"name": p.name, "type_name": p.type_name} for p in getattr(fn, "params", [])],
+                "is_async": bool(getattr(fn, "is_async", False)),
                 "body": block_to_data(fn.body),
             }
             for fn in getattr(program, "functions", [])
@@ -192,8 +277,40 @@ def expr_from_data(data: dict[str, Any]) -> Any:
         return VarAccessNode(data.get("name"))
     if typ == "ListLiteral":
         return ListLiteralNode([expr_from_data(item) for item in data.get("items", [])])
+    if typ == "ListComprehension":
+        condition_data = data.get("condition_expr")
+        return ListComprehensionNode(
+            data.get("item_name"),
+            expr_from_data(data.get("source_expr", {})),
+            expr_from_data(data.get("item_expr", {})),
+            expr_from_data(condition_data) if condition_data is not None else None,
+        )
+    if typ == "MapLiteral":
+        return MapLiteralNode(
+            [
+                (expr_from_data(item.get("key", {})), expr_from_data(item.get("value", {})))
+                for item in data.get("items", [])
+            ]
+        )
+    if typ == "StructLiteral":
+        return StructLiteralNode(
+            [
+                (item.get("name"), expr_from_data(item.get("value", {})))
+                for item in data.get("fields", [])
+            ]
+        )
+    if typ == "FieldAccess":
+        return FieldAccessNode(expr_from_data(data.get("target", {})), data.get("field"))
     if typ == "Index":
         return IndexNode(expr_from_data(data.get("list_expr", {})), expr_from_data(data.get("index_expr", {})))
+    if typ == "Slice":
+        start_data = data.get("start_expr")
+        end_data = data.get("end_expr")
+        return SliceNode(
+            expr_from_data(data.get("target", {})),
+            expr_from_data(start_data) if start_data is not None else None,
+            expr_from_data(end_data) if end_data is not None else None,
+        )
     if typ == "UnaryOp":
         return UnaryOpNode(_tok(str(data.get("op"))), expr_from_data(data.get("node", {})))
     if typ == "BinOp":
@@ -216,6 +333,14 @@ def expr_from_data(data: dict[str, Any]) -> Any:
             expr_from_data(data.get("then_expr", {})),
             expr_from_data(data.get("else_expr", {})),
         )
+    if typ == "Await":
+        return AwaitNode(expr_from_data(data.get("expr", {})))
+    if typ == "Lambda":
+        params = [Param(p.get("name"), p.get("type_name")) for p in data.get("params", [])]
+        node = LambdaNode(params, expr_from_data(data.get("body", {})))
+        if data.get("return_type") is not None:
+            setattr(node, "return_type", data.get("return_type"))
+        return node
     raise AstBridgeError(f"AST-import støtter ikke uttrykk-type: {typ}")
 
 
@@ -230,6 +355,8 @@ def stmt_from_data(data: dict[str, Any]) -> Any:
         return IndexSetNode(data.get("target_name"), expr_from_data(data.get("index_expr", {})), expr_from_data(data.get("value_expr", {})))
     if typ == "ExprStmt":
         return ExprStmtNode(expr_from_data(data.get("expr", {})))
+    if typ == "Throw":
+        return ThrowNode(expr_from_data(data.get("expr", {})))
     if typ == "Print":
         return PrintNode(expr_from_data(data.get("expr", {})))
     if typ == "Return":
@@ -244,6 +371,19 @@ def stmt_from_data(data: dict[str, Any]) -> Any:
             ],
             block_from_data(data.get("else_block")) if data.get("else_block") else None,
         )
+    if typ == "Match":
+        return MatchNode(
+            expr_from_data(data.get("subject", {})),
+            [
+                MatchCaseNode(
+                    expr_from_data(item.get("pattern", {})) if item.get("pattern") is not None else None,
+                    block_from_data(item.get("body")),
+                    bool(item.get("wildcard", False)),
+                )
+                for item in data.get("cases", [])
+            ],
+            block_from_data(data.get("else_block")) if data.get("else_block") else None,
+        )
     if typ == "While":
         return WhileNode(expr_from_data(data.get("condition", {})), block_from_data(data.get("body")))
     if typ == "For":
@@ -253,6 +393,12 @@ def stmt_from_data(data: dict[str, Any]) -> Any:
             expr_from_data(data.get("end_expr", {})),
             expr_from_data(data.get("step_expr", {})),
             block_from_data(data.get("body")),
+        )
+    if typ == "TryCatch":
+        return TryCatchNode(
+            block_from_data(data.get("try_block")),
+            data.get("catch_var_name"),
+            block_from_data(data.get("catch_block")),
         )
     if typ == "Break":
         return BreakNode()
@@ -283,6 +429,7 @@ def program_from_data(data: dict[str, Any]) -> tuple[ProgramNode, dict[str, str]
                 item.get("return_type"),
                 block_from_data(item.get("body")),
                 module_name=item.get("module_name"),
+                is_async=bool(item.get("is_async", False)),
             )
         )
     return ProgramNode(imports, functions), dict(data.get("alias_map") or {})

@@ -243,6 +243,42 @@ def _flatten_if_chain(node: dict[str, Any], ctx: BridgeContext) -> tuple[list[di
     return elif_blocks, None
 
 
+def _build_match_if_chain(subject_expr: dict[str, Any], cases: list[dict[str, Any]], else_block: dict[str, Any] | None, ctx: BridgeContext) -> dict[str, Any]:
+    if not cases:
+        return {
+            'node': 'If',
+            'condition': {'node': 'Literal', 'literal_type': 'bool', 'value': True},
+            'then': [{'node': 'ExprStmt', 'value': {'node': 'Literal', 'literal_type': 'heltall', 'value': 0}}],
+            'else': else_block or [],
+        }
+
+    first = cases[0]
+    pattern = first.get('pattern', {})
+    wildcard = isinstance(pattern, dict) and pattern.get('node') == 'Wildcard'
+    condition = {'node': 'Literal', 'literal_type': 'bool', 'value': True} if wildcard else {
+        'node': 'BinaryOp',
+        'op': '==',
+        'left': subject_expr,
+        'right': pattern,
+    }
+
+    if len(cases) == 1:
+        return {
+            'node': 'If',
+            'condition': condition,
+            'then': first.get('body', []),
+            'else': else_block or [],
+        }
+
+    nested = _build_match_if_chain(subject_expr, cases[1:], else_block, ctx)
+    return {
+        'node': 'If',
+        'condition': condition,
+        'then': first.get('body', []),
+        'else': [nested],
+    }
+
+
 def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any]]:
     kind = node.get('node')
     if kind == 'Let':
@@ -281,6 +317,14 @@ def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any
             'elif_blocks': elif_blocks,
             'else_block': else_block,
         }]
+    if kind == 'Match':
+        subject = node.get('subject', {})
+        cases = list(node.get('cases', []))
+        else_block = block_to_data(node.get('else', []), ctx) if isinstance(node.get('else'), list) else None
+        if not cases:
+            return []
+        lowered = _build_match_if_chain(subject, cases, else_block, ctx)
+        return stmt_to_data(lowered, ctx)
     if kind == 'While':
         return [{
             'type': 'While',

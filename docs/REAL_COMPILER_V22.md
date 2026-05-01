@@ -8,6 +8,6 @@ Nytt i v22:
 
 Eksempel:
 ```bash
-python3 main.py selfhost-ast-export tests/test_selfhost_indexset_v22.no
-python3 main.py bytecode-run tests/test_selfhost_indexset_v22.shast.json --ast
+norcode selfhost-ast-export tests/test_selfhost_indexset_v22.no
+norcode bytecode-run tests/test_selfhost_indexset_v22.shast.json --ast
 ```
