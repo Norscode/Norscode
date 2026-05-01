@@ -620,6 +620,7 @@ For mer realistiske flyter, se:
 - [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no) for dependency registration og automatisk injeksjon inn i route-handlers
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
 - [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no) for OpenAPI JSON og en enkel docs-side generert fra route-signaturer
+- [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no) for request/response/error middleware samt startup/shutdown hooks
 - [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no) for sammensatt språkbruk
 
 ---

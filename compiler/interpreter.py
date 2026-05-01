@@ -91,6 +91,14 @@ class Interpreter:
         self.call_stack: list[str] = []
         self.route_handlers: list[dict[str, Any]] = []
         self.dependency_providers: dict[str, str] = {}
+        self.request_middlewares: list[str] = []
+        self.response_middlewares: list[str] = []
+        self.error_middlewares: list[str] = []
+        self.startup_hooks: list[str] = []
+        self.shutdown_hooks: list[str] = []
+        self._startup_ran = False
+        self._shutdown_ran = False
+        self._request_counter = 0
 
     def _walk_ast_nodes(self, node: Any):
         if node is None:
@@ -575,6 +583,7 @@ class Interpreter:
         return {str(key): str(val) for key, val in parsed.items()}
 
     def _make_web_request_context(self, method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
+        self._request_counter += 1
         return {
             "metode": self._normalize_web_method(method),
             "sti": str(path),
@@ -583,6 +592,7 @@ class Interpreter:
             "body": "" if body is None else str(body),
             "params": self._encode_json_text_map({}),
             "deps": self._encode_json_text_map({}),
+            "request_id": f"req-{self._request_counter}",
         }
 
     def _make_web_response(self, status: Any, headers: Any, body: Any) -> dict[str, Any]:
@@ -600,6 +610,59 @@ class Interpreter:
         if "deps" not in new_ctx:
             new_ctx["deps"] = self._encode_json_text_map({})
         return new_ctx
+
+    def _run_named_hook(self, name: str) -> Any:
+        if not name:
+            return None
+        return self.call_user_function(name, [])
+
+    def _ensure_startup_hooks(self) -> int:
+        if self._startup_ran:
+            return 0
+        self._startup_ran = True
+        count = 0
+        for hook in self.startup_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _run_shutdown_hooks(self) -> int:
+        if self._shutdown_ran:
+            return 0
+        self._shutdown_ran = True
+        count = 0
+        for hook in self.shutdown_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _apply_request_middlewares(self, ctx: Any) -> Any:
+        current = ctx
+        for middleware in self.request_middlewares:
+            result = self.call_user_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_response_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.response_middlewares:
+            result = self.call_user_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_error_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.error_middlewares:
+            result = self.call_user_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _web_error_response(self, message: Any, status: int = 500) -> dict[str, Any]:
+        payload = {"error": str(message)}
+        return self._make_web_response(status, {"content-type": "application/json"}, self.json_serialize_value(payload))
 
     def _request_json_object(self, ctx: Any) -> dict[str, str]:
         if not isinstance(ctx, dict):
@@ -638,6 +701,11 @@ class Interpreter:
     def _collect_web_annotations(self, program: ProgramNode):
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
+        request_middlewares: list[str] = []
+        response_middlewares: list[str] = []
+        error_middlewares: list[str] = []
+        startup_hooks: list[str] = []
+        shutdown_hooks: list[str] = []
         for fn in getattr(program, "functions", []):
             statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
             if not statements:
@@ -654,6 +722,22 @@ class Interpreter:
                 if expr.module_name not in {"web", "std.web"}:
                     break
                 if not expr.args or not isinstance(expr.args[0], StringNode):
+                    if expr.func_name in {"request_middleware", "response_middleware", "error_middleware", "startup_hook", "shutdown_hook"} and not expr.args:
+                        if expr.func_name == "request_middleware":
+                            request_middlewares.append(fn.name)
+                            continue
+                        if expr.func_name == "response_middleware":
+                            response_middlewares.append(fn.name)
+                            continue
+                        if expr.func_name == "error_middleware":
+                            error_middlewares.append(fn.name)
+                            continue
+                        if expr.func_name == "startup_hook":
+                            startup_hooks.append(fn.name)
+                            continue
+                        if expr.func_name == "shutdown_hook":
+                            shutdown_hooks.append(fn.name)
+                            continue
                     break
                 if expr.func_name == "route" and spec is None:
                     spec = expr.args[0].value
@@ -672,7 +756,7 @@ class Interpreter:
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = fn.name
-        return handlers, providers
+        return handlers, providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
 
     def _dependency_map(self, ctx: Any) -> dict[str, str]:
         if not isinstance(ctx, dict):
@@ -750,7 +834,15 @@ class Interpreter:
         return None
 
     def run(self, program: ProgramNode):
-        self.route_handlers, self.dependency_providers = self._collect_web_annotations(program)
+        (
+            self.route_handlers,
+            self.dependency_providers,
+            self.request_middlewares,
+            self.response_middlewares,
+            self.error_middlewares,
+            self.startup_hooks,
+            self.shutdown_hooks,
+        ) = self._collect_web_annotations(program)
         for fn in getattr(program, "functions", []):
             self.functions[fn.name] = UserFunction(fn)
 
@@ -758,8 +850,14 @@ class Interpreter:
             self.functions[fn.name] = UserFunction(fn)
 
         if "start" not in self.functions:
+            self._ensure_startup_hooks()
+            self._run_shutdown_hooks()
             return None
-        return self.call_user_function("start", [])
+        self._ensure_startup_hooks()
+        try:
+            return self.call_user_function("start", [])
+        finally:
+            self._run_shutdown_hooks()
 
     def eval(self, node):
         if isinstance(node, NumberNode):
@@ -1291,6 +1389,11 @@ class Interpreter:
                 if len(values) < 5:
                     return self._make_web_request_context("", "", {}, {}, "")
                 return self._make_web_request_context(values[0], values[1], values[2], values[3], values[4])
+            if func_name == "request_id":
+                if not values:
+                    return ""
+                ctx = self._decode_json_text_map(values[0])
+                return str(ctx.get("request_id", ""))
             if func_name == "request_method":
                 if not values:
                     return ""
@@ -1491,17 +1594,45 @@ class Interpreter:
             if func_name == "handle_request":
                 if not values:
                     return self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
-                found = self._find_route_handler(values[0].get("metode", ""), values[0].get("sti", ""))
-                if found is None:
-                    return self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
-                params, handler = found
-                if params == "__405__":
-                    return self._make_web_response(405, {"content-type": "application/json"}, self.json_serialize_value({"error": "Metode ikke tillatt"}))
-                ctx = self._make_route_context(values[0], params)
-                deps = []
-                for dep_name in handler.get("deps", []):
-                    deps.append(self._resolve_dependency_value(ctx, dep_name))
-                return self.call_user_function(handler["function"], [ctx] + deps)
+                self._ensure_startup_hooks()
+                try:
+                    current_ctx = self._apply_request_middlewares(values[0])
+                    found = self._find_route_handler(current_ctx.get("metode", ""), current_ctx.get("sti", ""))
+                    if found is None:
+                        response = self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
+                        return self._apply_error_middlewares(response)
+                    params, handler = found
+                    if params == "__405__":
+                        response = self._make_web_response(405, {"content-type": "application/json"}, self.json_serialize_value({"error": "Metode ikke tillatt"}))
+                        return self._apply_error_middlewares(response)
+                    ctx = self._make_route_context(current_ctx, params)
+                    deps = []
+                    for dep_name in handler.get("deps", []):
+                        deps.append(self._resolve_dependency_value(ctx, dep_name))
+                    result = self.call_user_function(handler["function"], [ctx] + deps)
+                    if isinstance(result, dict):
+                        return self._apply_response_middlewares(result)
+                    return result
+                except ThrowSignal as signal:
+                    response = self._web_error_response(str(signal), 500)
+                    return self._apply_error_middlewares(response)
+                except Exception as exc:
+                    response = self._web_error_response(str(exc), 500)
+                    return self._apply_error_middlewares(response)
+            if func_name == "request_middleware":
+                return "request_middleware"
+            if func_name == "response_middleware":
+                return "response_middleware"
+            if func_name == "error_middleware":
+                return "error_middleware"
+            if func_name == "startup_hook":
+                return "startup_hook"
+            if func_name == "shutdown_hook":
+                return "shutdown_hook"
+            if func_name == "startup":
+                return self._ensure_startup_hooks()
+            if func_name == "shutdown":
+                return self._run_shutdown_hooks()
         if module_name in ("feil", "std.feil"):
             return self.call_user_function(func_name, values)
 

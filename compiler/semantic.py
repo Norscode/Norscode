@@ -86,8 +86,16 @@ class SemanticAnalyzer:
             "web_route": FunctionSymbol("web_route", [TYPE_TEXT], TYPE_TEXT, True),
             "web_dependency": FunctionSymbol("web_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_use_dependency": FunctionSymbol("web_use_dependency", [TYPE_TEXT], TYPE_TEXT, True),
+            "web_request_middleware": FunctionSymbol("web_request_middleware", [], TYPE_TEXT, True),
+            "web_response_middleware": FunctionSymbol("web_response_middleware", [], TYPE_TEXT, True),
+            "web_error_middleware": FunctionSymbol("web_error_middleware", [], TYPE_TEXT, True),
+            "web_startup_hook": FunctionSymbol("web_startup_hook", [], TYPE_TEXT, True),
+            "web_shutdown_hook": FunctionSymbol("web_shutdown_hook", [], TYPE_TEXT, True),
             "web_handle_request": FunctionSymbol("web_handle_request", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
             "web_request_dependency": FunctionSymbol("web_request_dependency", [TYPE_MAP_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
+            "web_request_id": FunctionSymbol("web_request_id", [TYPE_MAP_TEXT], TYPE_TEXT, True),
+            "web_startup": FunctionSymbol("web_startup", [], TYPE_INT, True),
+            "web_shutdown": FunctionSymbol("web_shutdown", [], TYPE_INT, True),
             "vent_timeout": FunctionSymbol("vent_timeout", [None, TYPE_INT], None, True),
             "vent_kanseller": FunctionSymbol("vent_kanseller", [None], None, True),
             "vent_er_kansellert": FunctionSymbol("vent_er_kansellert", [None], TYPE_BOOL, True),
@@ -1017,6 +1025,30 @@ class SemanticAnalyzer:
                 if path_type != TYPE_TEXT or content_type_type != TYPE_TEXT:
                     self.error("web.response_file krever tekst og tekst")
                 return TYPE_MAP_TEXT
+
+            if full_name in {
+                "web.request_middleware", "std.web.request_middleware",
+                "web.response_middleware", "std.web.response_middleware",
+                "web.error_middleware", "std.web.error_middleware",
+                "web.startup_hook", "std.web.startup_hook",
+                "web.shutdown_hook", "std.web.shutdown_hook",
+            }:
+                if expr.args:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 0 argumenter")
+                return TYPE_TEXT
+
+            if full_name in {"web.request_id", "std.web.request_id"}:
+                if len(expr.args) != 1:
+                    self.error("web.request_id forventer 1 argument")
+                ctx_type = self.check_expr(expr.args[0], scope, field_schemas)
+                if not self.is_map_type(ctx_type):
+                    self.error("web.request_id krever ordbok")
+                return TYPE_TEXT
+
+            if full_name in {"web.startup", "std.web.startup", "web.shutdown", "std.web.shutdown"}:
+                if expr.args:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 0 argumenter")
+                return TYPE_INT
 
             if full_name in {"web.openapi_json", "std.web.openapi_json", "web.docs_html", "std.web.docs_html"}:
                 if len(expr.args) != 2:

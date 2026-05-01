@@ -250,6 +250,7 @@ def _decode_json_text_map(value: Any) -> dict[str, str]:
 
 
 def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
+    _make_web_request_context.counter += 1
     return {
         "metode": _normalize_web_method(method),
         "sti": str(path),
@@ -258,7 +259,11 @@ def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, 
         "body": "" if body is None else str(body),
         "params": _encode_json_text_map({}),
         "deps": _encode_json_text_map({}),
+        "request_id": f"req-{_make_web_request_context.counter}",
     }
+
+
+_make_web_request_context.counter = 0
 
 
 def _make_web_response(status: Any, headers: Any, body: Any) -> dict[str, Any]:
@@ -588,9 +593,14 @@ class BytecodeCompiler:
             "</body></html>"
         )
 
-    def _collect_web_annotations(self, program: ProgramNode) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    def _collect_web_annotations(self, program: ProgramNode) -> tuple[list[dict[str, Any]], dict[str, str], list[str], list[str], list[str], list[str], list[str]]:
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
+        request_middlewares: list[str] = []
+        response_middlewares: list[str] = []
+        error_middlewares: list[str] = []
+        startup_hooks: list[str] = []
+        shutdown_hooks: list[str] = []
         for fn in getattr(program, "functions", []):
             statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
             if not statements:
@@ -606,7 +616,24 @@ class BytecodeCompiler:
                     break
                 if expr.module_name not in {"web", "std.web"}:
                     break
-                if not expr.args or not isinstance(expr.args[0], StringNode):
+                if not expr.args:
+                    if expr.func_name == "request_middleware":
+                        request_middlewares.append(self.function_key(fn))
+                        continue
+                    if expr.func_name == "response_middleware":
+                        response_middlewares.append(self.function_key(fn))
+                        continue
+                    if expr.func_name == "error_middleware":
+                        error_middlewares.append(self.function_key(fn))
+                        continue
+                    if expr.func_name == "startup_hook":
+                        startup_hooks.append(self.function_key(fn))
+                        continue
+                    if expr.func_name == "shutdown_hook":
+                        shutdown_hooks.append(self.function_key(fn))
+                        continue
+                    break
+                if not isinstance(expr.args[0], StringNode):
                     break
                 if expr.func_name == "route" and spec is None:
                     spec = expr.args[0].value
@@ -625,12 +652,61 @@ class BytecodeCompiler:
                 handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = self.function_key(fn)
-        return handlers, providers
+        return handlers, providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks
+
+    def _run_named_hook(self, name: str) -> Any:
+        if not name:
+            return None
+        return self.call_function(name, [])
+
+    def _ensure_startup_hooks(self) -> int:
+        if self._startup_ran:
+            return 0
+        self._startup_ran = True
+        count = 0
+        for hook in self.startup_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _run_shutdown_hooks(self) -> int:
+        if self._shutdown_ran:
+            return 0
+        self._shutdown_ran = True
+        count = 0
+        for hook in self.shutdown_hooks:
+            self._run_named_hook(hook)
+            count += 1
+        return count
+
+    def _apply_request_middlewares(self, ctx: Any) -> Any:
+        current = ctx
+        for middleware in self.request_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_response_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.response_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
+
+    def _apply_error_middlewares(self, response: Any) -> Any:
+        current = response
+        for middleware in self.error_middlewares:
+            result = self.call_function(middleware, [current])
+            if isinstance(result, dict):
+                current = result
+        return current
 
     def compile_program(self, program: ProgramNode) -> dict[str, Any]:
         functions = {}
         imports = []
-        route_handlers, dependency_providers = self._collect_web_annotations(program)
+        route_handlers, dependency_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks = self._collect_web_annotations(program)
         for imp in getattr(program, "imports", []):
             imports.append({"module": imp.module_name, "alias": imp.alias})
         for fn in getattr(program, "functions", []):
@@ -647,6 +723,11 @@ class BytecodeCompiler:
             "imports": imports,
             "route_handlers": route_handlers,
             "dependency_providers": dependency_providers,
+            "request_middlewares": request_middlewares,
+            "response_middlewares": response_middlewares,
+            "error_middlewares": error_middlewares,
+            "startup_hooks": startup_hooks,
+            "shutdown_hooks": shutdown_hooks,
             "functions": functions,
         }
 
@@ -1258,6 +1339,11 @@ class BytecodeVM:
         self.functions = program.get("functions", {})
         self.route_handlers = program.get("route_handlers", [])
         self.dependency_providers = program.get("dependency_providers", {})
+        self.request_middlewares = program.get("request_middlewares", [])
+        self.response_middlewares = program.get("response_middlewares", [])
+        self.error_middlewares = program.get("error_middlewares", [])
+        self.startup_hooks = program.get("startup_hooks", [])
+        self.shutdown_hooks = program.get("shutdown_hooks", [])
         self.output: list[str] = []
         self.trace = trace
         self.max_steps = max_steps
@@ -1275,6 +1361,8 @@ class BytecodeVM:
         self._exception_stack: list[dict[str, int]] = []
         self._exception_value: Any = None
         self._call_stack: list[str] = []
+        self._startup_ran = False
+        self._shutdown_ran = False
         self._memoizable_functions = {
             "selfhost.compiler.normaliser_norsk_token",
             "selfhost.compiler.stack_behov",
@@ -1867,7 +1955,11 @@ class BytecodeVM:
 
     def run(self, entry: str | None = None) -> Any:
         target = entry or self.program.get("entry") or "__main__.start"
-        return self.call_function(target, [])
+        self._ensure_startup_hooks()
+        try:
+            return self.call_function(target, [])
+        finally:
+            self._run_shutdown_hooks()
 
     def call_function(self, name: str, args: list[Any]) -> Any:
         if name.startswith("selfhost.compiler.") and name.rsplit(".", 1)[-1] in {
@@ -1998,6 +2090,10 @@ class BytecodeVM:
             if len(args) < 5:
                 return _make_web_request_context("", "", {}, {}, "")
             return _make_web_request_context(args[0], args[1], args[2], args[3], args[4])
+        if name in {"web.request_id", "std.web.request_id"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            return str(args[0].get("request_id", ""))
         if name in {"web.request_method", "std.web.request_method"}:
             if not args or not isinstance(args[0], dict):
                 return ""
@@ -2138,6 +2234,20 @@ class BytecodeVM:
                 return _make_web_response(500, {"content-type": "application/json"}, '{"error":""}')
             body = json.dumps({"error": str(args[1])}, ensure_ascii=False)
             return _make_web_response(args[0], {"content-type": "application/json"}, body)
+        if name in {"web.request_middleware", "std.web.request_middleware"}:
+            return "request_middleware"
+        if name in {"web.response_middleware", "std.web.response_middleware"}:
+            return "response_middleware"
+        if name in {"web.error_middleware", "std.web.error_middleware"}:
+            return "error_middleware"
+        if name in {"web.startup_hook", "std.web.startup_hook"}:
+            return "startup_hook"
+        if name in {"web.shutdown_hook", "std.web.shutdown_hook"}:
+            return "shutdown_hook"
+        if name in {"web.startup", "std.web.startup"}:
+            return self._ensure_startup_hooks()
+        if name in {"web.shutdown", "std.web.shutdown"}:
+            return self._run_shutdown_hooks()
         if name in {"web.response_file", "std.web.response_file"}:
             if len(args) < 2:
                 raise BytecodeRuntimeError("web.response_file forventer 2 argumenter")
@@ -2174,32 +2284,46 @@ class BytecodeVM:
         if name in {"web.handle_request", "std.web.handle_request"}:
             if not args or not isinstance(args[0], dict):
                 return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
-            found = None
-            method_text = _normalize_web_method(args[0].get("metode", ""))
-            path_text = str(args[0].get("sti", ""))
-            path_mismatch = False
-            for handler in self.route_handlers:
-                spec = handler.get("spec", "")
-                route_method, route_path = _split_web_route_spec(spec)
-                route_params = _match_web_path(route_path, path_text)
-                if route_params is None:
-                    continue
-                if route_method and route_method != method_text:
-                    path_mismatch = True
-                    continue
-                if _route_is_exact(route_path):
-                    found = (handler, route_params)
-                    break
+            self._ensure_startup_hooks()
+            try:
+                current_ctx = self._apply_request_middlewares(args[0])
+                found = None
+                method_text = _normalize_web_method(current_ctx.get("metode", ""))
+                path_text = str(current_ctx.get("sti", ""))
+                path_mismatch = False
+                for handler in self.route_handlers:
+                    spec = handler.get("spec", "")
+                    route_method, route_path = _split_web_route_spec(spec)
+                    route_params = _match_web_path(route_path, path_text)
+                    if route_params is None:
+                        continue
+                    if route_method and route_method != method_text:
+                        path_mismatch = True
+                        continue
+                    if _route_is_exact(route_path):
+                        found = (handler, route_params)
+                        break
+                    if found is None:
+                        found = (handler, route_params)
                 if found is None:
-                    found = (handler, route_params)
-            if found is None:
-                if path_mismatch:
-                    return _make_web_response(405, {"content-type": "application/json"}, json.dumps({"error": "Metode ikke tillatt"}, ensure_ascii=False))
-                return _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
-            handler, params = found
-            ctx = _make_route_context(args[0], params)
-            deps = [self._resolve_dependency_value(ctx, dep_name) for dep_name in handler.get("deps", [])]
-            return self.call_function(handler["function"], [ctx] + deps)
+                    if path_mismatch:
+                        response = _make_web_response(405, {"content-type": "application/json"}, json.dumps({"error": "Metode ikke tillatt"}, ensure_ascii=False))
+                        return self._apply_error_middlewares(response)
+                    response = _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
+                    return self._apply_error_middlewares(response)
+                handler, params = found
+                ctx = _make_route_context(current_ctx, params)
+                deps = [self._resolve_dependency_value(ctx, dep_name) for dep_name in handler.get("deps", [])]
+                result = self.call_function(handler["function"], [ctx] + deps)
+                if isinstance(result, dict):
+                    return self._apply_response_middlewares(result)
+                return result
+            except BytecodeThrow as exc:
+                response = _make_web_response(500, {"content-type": "application/json"}, json.dumps({"error": str(exc)}, ensure_ascii=False))
+                return self._apply_error_middlewares(response)
+            except Exception as exc:
+                response = _make_web_response(500, {"content-type": "application/json"}, json.dumps({"error": str(exc)}, ensure_ascii=False))
+                return self._apply_error_middlewares(response)
         fn = self.functions.get(name)
         if fn is None:
             short_name = name.rsplit('.', 1)[-1]

@@ -112,15 +112,15 @@ Mellomvare er nødvendig for logging, auth, timing og cross-cutting concerns.
 
 Leveranse:
 
-- [ ] request-middleware
-- [ ] response-middleware
-- [ ] error middleware
-- [ ] startup/shutdown hooks
-- [ ] request-id og logging-kroker
+- [x] request-middleware
+- [x] response-middleware
+- [x] error middleware
+- [x] startup/shutdown hooks
+- [x] request-id og logging-kroker
 
 Ferdig når:
 
-- [ ] vanlige tverrgående behov kan løses uten å kopiere kode inn i hver handler
+- [x] vanlige tverrgående behov kan løses uten å kopiere kode inn i hver handler
 
 ## Etappe 7: Serveradapter
 
@@ -146,15 +146,15 @@ En webflate uten gode eksempler og tester blir fort vanskelig å stole på.
 
 Leveranse:
 
-- [ ] web-eksempelapp
-- [ ] request/response-tester
-- [ ] validation-tester
-- [ ] middleware-tester
-- [ ] OpenAPI snapshot-test
+- [x] web-eksempelapp
+- [x] request/response-tester
+- [x] validation-tester
+- [x] middleware-tester
+- [x] OpenAPI snapshot-test
 
 Ferdig når:
 
-- [ ] webflaten er stabil nok til å være et produktområde og ikke bare et eksperiment
+- [x] webflaten er stabil nok til å være et produktområde og ikke bare et eksperiment
 
 ## Anbefalt rekkefolge
 
@@ -163,9 +163,9 @@ Ferdig når:
 - [x] Validering
 - [x] Dependency injection
 - [x] OpenAPI og docs
-- [ ] Middleware og hooks
+- [x] Middleware og hooks
 - [ ] Serveradapter
-- [ ] Test og eksempler
+- [x] Test og eksempler
 
 ## Kortversjon
 

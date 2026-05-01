@@ -37,6 +37,11 @@ class CGenerator:
         self.emitted_lambda_defs: set[str] = set()
         self.route_handlers: list[dict[str, Any]] = []
         self.dependency_providers: list[dict[str, Any]] = []
+        self.request_middlewares: list[str] = []
+        self.response_middlewares: list[str] = []
+        self.error_middlewares: list[str] = []
+        self.startup_hooks: list[str] = []
+        self.shutdown_hooks: list[str] = []
         self.openapi_paths_json = "{}"
         self._build_function_name_map()
 
@@ -273,10 +278,15 @@ class CGenerator:
     def _web_annotations_from_function(self, fn):
         statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
         if not statements:
-            return None, [], []
+            return None, [], [], False, False, False, False, False
         spec = None
         deps: list[str] = []
         provided: list[str] = []
+        request_middleware = False
+        response_middleware = False
+        error_middleware = False
+        startup_hook = False
+        shutdown_hook = False
         for stmt in statements:
             if not isinstance(stmt, ExprStmtNode):
                 break
@@ -285,7 +295,24 @@ class CGenerator:
                 break
             if expr.module_name not in {"web", "std.web"}:
                 break
-            if not expr.args or not isinstance(expr.args[0], StringNode):
+            if not expr.args:
+                if expr.func_name == "request_middleware":
+                    request_middleware = True
+                    continue
+                if expr.func_name == "response_middleware":
+                    response_middleware = True
+                    continue
+                if expr.func_name == "error_middleware":
+                    error_middleware = True
+                    continue
+                if expr.func_name == "startup_hook":
+                    startup_hook = True
+                    continue
+                if expr.func_name == "shutdown_hook":
+                    shutdown_hook = True
+                    continue
+                break
+            if not isinstance(expr.args[0], StringNode):
                 break
             if expr.func_name == "route" and spec is None:
                 spec = expr.args[0].value
@@ -297,13 +324,18 @@ class CGenerator:
                 provided.append(expr.args[0].value)
                 continue
             break
-        return spec, deps, provided
+        return spec, deps, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook
 
     def _collect_route_handlers(self, tree):
         handlers = []
         providers = []
+        request_middlewares = []
+        response_middlewares = []
+        error_middlewares = []
+        startup_hooks = []
+        shutdown_hooks = []
         for fn in getattr(tree, "functions", []):
-            spec, deps, provided = self._web_annotations_from_function(fn)
+            spec, deps, provided, request_middleware, response_middleware, error_middleware, startup_hook, shutdown_hook = self._web_annotations_from_function(fn)
             if spec is None:
                 spec = None
             if spec is not None:
@@ -317,6 +349,22 @@ class CGenerator:
                     "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
                     "params": len(getattr(fn, "params", []) or []),
                 })
+            function_name = self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None))
+            if request_middleware:
+                request_middlewares.append(function_name)
+            if response_middleware:
+                response_middlewares.append(function_name)
+            if error_middleware:
+                error_middlewares.append(function_name)
+            if startup_hook:
+                startup_hooks.append(function_name)
+            if shutdown_hook:
+                shutdown_hooks.append(function_name)
+        self.request_middlewares = request_middlewares
+        self.response_middlewares = response_middlewares
+        self.error_middlewares = error_middlewares
+        self.startup_hooks = startup_hooks
+        self.shutdown_hooks = shutdown_hooks
         return handlers, providers
 
     def emit_web_route_dispatcher(self):
@@ -375,11 +423,76 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static int nl_web_startup_ran = 0;")
+        self.emit("static int nl_web_shutdown_ran = 0;")
+        self.emit("static int nl_web_run_startup_hooks(void) {")
+        self.indent += 1
+        self.emit("if (nl_web_startup_ran) { return 0; }")
+        self.emit("nl_web_startup_ran = 1;")
+        self.emit("int count = 0;")
+        for hook in self.startup_hooks:
+            self.emit(f"(void){hook}();")
+            self.emit("count++;")
+        self.emit("return count;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_run_shutdown_hooks(void) {")
+        self.indent += 1
+        self.emit("if (nl_web_shutdown_ran) { return 0; }")
+        self.emit("nl_web_shutdown_ran = 1;")
+        self.emit("int count = 0;")
+        for hook in self.shutdown_hooks:
+            self.emit(f"(void){hook}();")
+            self.emit("count++;")
+        self.emit("return count;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static nl_map_text *nl_web_apply_request_middlewares(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("nl_map_text *current = ctx;")
+        for middleware in self.request_middlewares:
+            self.emit(f"{{ nl_map_text *result = {middleware}(current); if (result) current = result; }}")
+        self.emit("return current;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static nl_map_text *nl_web_apply_response_middlewares(nl_map_text *response) {")
+        self.indent += 1
+        self.emit("nl_map_text *current = response;")
+        for middleware in self.response_middlewares:
+            self.emit(f"{{ nl_map_text *result = {middleware}(current); if (result) current = result; }}")
+        self.emit("return current;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static nl_map_text *nl_web_apply_error_middlewares(nl_map_text *response) {")
+        self.indent += 1
+        self.emit("nl_map_text *current = response;")
+        for middleware in self.error_middlewares:
+            self.emit(f"{{ nl_map_text *result = {middleware}(current); if (result) current = result; }}")
+        self.emit("return current;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_handle_request(nl_map_text *ctx) {")
         self.indent += 1
-        self.emit("char *method = nl_web_request_method(ctx);")
-        self.emit("char *path = nl_web_request_path(ctx);")
+        self.emit("nl_try_frame req_try;")
+        self.emit("nl_push_try_frame(&req_try);")
+        self.emit("if (setjmp(req_try.jump_point) == 0) {")
+        self.indent += 1
+        self.emit("nl_web_run_startup_hooks();")
+        self.emit("nl_map_text *current_ctx = nl_web_apply_request_middlewares(ctx);")
+        self.emit("char *method = nl_web_request_method(current_ctx);")
+        self.emit("char *path = nl_web_request_path(current_ctx);")
         self.emit("int path_mismatch = 0;")
+        self.emit("nl_map_text *result = NULL;")
         exact_handlers = [handler for handler in self.route_handlers if "{" not in handler["spec"] and "}" not in handler["spec"]]
         param_handlers = [handler for handler in self.route_handlers if handler not in exact_handlers]
         for handler in exact_handlers + param_handlers:
@@ -389,24 +502,39 @@ class CGenerator:
             self.emit("nl_map_text *params = nl_map_text_new();")
             self.emit(f"if (nl_web_route_match_params(\"{spec}\", method, path, params)) {{")
             self.indent += 1
-            self.emit("nl_map_text *route_ctx = nl_web_request_context(method, path, nl_web_request_query(ctx), nl_web_request_headers(ctx), nl_web_request_body(ctx));")
+            self.emit("nl_map_text *route_ctx = nl_web_request_context(method, path, nl_web_request_query(current_ctx), nl_web_request_headers(current_ctx), nl_web_request_body(current_ctx));")
             self.emit("nl_map_text_set(route_ctx, \"params\", json_stringify(params));")
             dep_args = ["route_ctx"]
             for dep_name in handler.get("deps", []):
                 dep_escaped = str(dep_name).replace("\\", "\\\\").replace('"', '\\"')
                 dep_args.append(f'nl_web_request_dependency(route_ctx, "{dep_escaped}")')
-            self.emit(f"return {handler['function']}({', '.join(dep_args)});")
+            self.emit(f"result = {handler['function']}({', '.join(dep_args)});")
+            self.emit("goto nl_web_handle_request_done;")
             self.indent -= 1
             self.emit("}")
             self.emit("if (nl_web_route_path_match(\"%s\", path)) { path_mismatch = 1; }" % spec)
             self.indent -= 1
             self.emit("}")
+        self.emit("nl_web_handle_request_done:")
+        self.emit("nl_pop_try_frame();")
         self.emit("if (path_mismatch) {")
         self.indent += 1
-        self.emit("return nl_web_response_error(405, \"Metode ikke tillatt\");")
+        self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(405, \"Metode ikke tillatt\"));")
         self.indent -= 1
         self.emit("}")
-        self.emit("return nl_web_response_error(404, \"Ikke funnet\");")
+        self.emit("if (!result) {")
+        self.indent += 1
+        self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(404, \"Ikke funnet\"));")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return nl_web_apply_response_middlewares(result);")
+        self.indent -= 1
+        self.emit("} else {")
+        self.indent += 1
+        self.emit("nl_pop_try_frame();")
+        self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(500, req_try.error_message ? req_try.error_message : \"\"));")
+        self.indent -= 1
+        self.emit("}")
         self.indent -= 1
         self.emit("}")
         self.emit()
@@ -786,9 +914,12 @@ class CGenerator:
             self.emit("puts(result);")
             self.indent -= 1
             self.emit("}")
+            self.emit("nl_web_run_shutdown_hooks();")
             self.emit("return 0;")
         else:
-            self.emit("return start();")
+            self.emit("int exit_code = start();")
+            self.emit("nl_web_run_shutdown_hooks();")
+            self.emit("return exit_code;")
         self.indent -= 1
         self.emit("}")
 
@@ -2666,6 +2797,16 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static int nl_web_request_counter = 0;")
+        self.emit("static char *nl_web_next_request_id(void) {")
+        self.indent += 1
+        self.emit("char buffer[32];")
+        self.emit("snprintf(buffer, sizeof(buffer), \"req-%d\", ++nl_web_request_counter);")
+        self.emit("return nl_strdup(buffer);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_request_context(const char *method, const char *path, nl_map_text *query, nl_map_text *headers, const char *body) {")
         self.indent += 1
         self.emit("nl_map_text *result = nl_map_text_new();")
@@ -2677,9 +2818,20 @@ class CGenerator:
         self.emit("nl_map_text_set(result, \"headers\", json_stringify(headers ? headers : nl_map_text_new()));")
         self.emit("nl_map_text_set(result, \"body\", nl_strdup(body ? body : \"\"));")
         self.emit("nl_map_text_set(result, \"params\", json_stringify(nl_map_text_new()));")
+        self.emit("nl_map_text_set(result, \"request_id\", nl_web_next_request_id());")
         self.emit("return result;")
         self.indent -= 1
         self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_request_id(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("return nl_strdup(nl_map_text_get(ctx, \"request_id\"));")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+        self.emit("static int nl_web_run_startup_hooks(void);")
+        self.emit("static int nl_web_run_shutdown_hooks(void);")
         self.emit()
 
         self.emit("static char *nl_web_request_method(nl_map_text *ctx) {")
@@ -4144,6 +4296,23 @@ class CGenerator:
                     title_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"Norscode API\"", TYPE_TEXT)
                     version_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"1.0.0\"", TYPE_TEXT)
                     return f"nl_web_docs_html({title_code}, {version_code})", TYPE_TEXT
+                if node.func_name == "request_middleware":
+                    return "nl_strdup(\"request_middleware\")", TYPE_TEXT
+                if node.func_name == "response_middleware":
+                    return "nl_strdup(\"response_middleware\")", TYPE_TEXT
+                if node.func_name == "error_middleware":
+                    return "nl_strdup(\"error_middleware\")", TYPE_TEXT
+                if node.func_name == "startup_hook":
+                    return "nl_strdup(\"startup_hook\")", TYPE_TEXT
+                if node.func_name == "shutdown_hook":
+                    return "nl_strdup(\"shutdown_hook\")", TYPE_TEXT
+                if node.func_name == "request_id":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    return f"nl_web_request_id({ctx_code})", TYPE_TEXT
+                if node.func_name == "startup":
+                    return "nl_web_run_startup_hooks()", TYPE_INT
+                if node.func_name == "shutdown":
+                    return "nl_web_run_shutdown_hooks()", TYPE_INT
                 if node.func_name == "route":
                     spec_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return f"nl_web_route({spec_code})", TYPE_TEXT

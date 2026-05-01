@@ -13,6 +13,7 @@ Dette er de representative eksempelappene som viser de vanligste bruksmønstrene
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no): query-, path- og JSON-validering med lesbare feil.
 - [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no): dependency registration, `web.use_dependency()` og automatisk injeksjon inn i route-handlers.
 - [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no): OpenAPI JSON og docs-side generert fra route-signaturer.
+- [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no): request/response/error middleware og startup/shutdown hooks.
 - [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no): lister, slicing, sortering og løkker.
 - [examples/helpdesk.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/helpdesk.no): større interaktiv app med menydrevet flyt.
 - [examples/map.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/map.no): ordbøker og strukturerte data.

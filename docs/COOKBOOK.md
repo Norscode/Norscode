@@ -108,6 +108,8 @@ For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/
 
 For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no).
 
+For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no).
+
 ## Neste steg
 
 - [docs/START_HER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/START_HER.md)
