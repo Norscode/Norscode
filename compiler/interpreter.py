@@ -666,6 +666,28 @@ class Interpreter:
             return False
         return permission in self._web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
 
+    def _password_hash_core(self, password: str, salt: str) -> str:
+        data = f"{salt}\0{password}".encode("utf-8")
+        state = 0xCBF29CE484222325
+        for _ in range(4096):
+            for byte in data:
+                state ^= byte
+                state = (state * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+            data = state.to_bytes(8, "big") + data
+        return f"{salt}${state:016x}"
+
+    def _password_hash(self, password: Any, salt: Any) -> str:
+        return self._password_hash_core(str(password), str(salt))
+
+    def _password_verify(self, password: Any, stored: Any) -> bool:
+        stored_text = str(stored)
+        if "$" not in stored_text:
+            return False
+        salt, digest = stored_text.split("$", 1)
+        if not salt or not digest:
+            return False
+        return self._password_hash_core(str(password), salt) == stored_text
+
     def _make_web_request_context(self, method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
         self._request_counter += 1
         return {
@@ -1645,6 +1667,14 @@ class Interpreter:
                 if len(values) < 2:
                     return False
                 return self._web_has_permission(values[0], values[1])
+            if func_name == "passord_hash":
+                if len(values) < 2:
+                    return ""
+                return self._password_hash(values[0], values[1])
+            if func_name == "passord_verifiser":
+                if len(values) < 2:
+                    return False
+                return self._password_verify(values[0], values[1])
             if func_name == "response_builder":
                 if len(values) < 3:
                     return self._make_web_response(200, {}, "")
@@ -1799,6 +1829,15 @@ class Interpreter:
                 return self._ensure_startup_hooks()
             if func_name == "shutdown":
                 return self._run_shutdown_hooks()
+        if module_name in ("sikkerhet", "std.sikkerhet"):
+            if func_name == "passord_hash":
+                if len(values) < 2:
+                    return ""
+                return self._password_hash(values[0], values[1])
+            if func_name == "passord_verifiser":
+                if len(values) < 2:
+                    return False
+                return self._password_verify(values[0], values[1])
         if module_name in ("feil", "std.feil"):
             return self.call_user_function(func_name, values)
 

@@ -352,6 +352,31 @@ def _web_has_permission(ctx: Any, expected: Any) -> bool:
     return permission in _web_header_csv_values(ctx, "x-permission", "x-permissions", "x-right", "x-rights", "x-scope", "x-scopes")
 
 
+def _password_hash_core(password: str, salt: str) -> str:
+    data = f"{salt}\0{password}".encode("utf-8")
+    state = 0xCBF29CE484222325
+    for _ in range(4096):
+        for byte in data:
+            state ^= byte
+            state = (state * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+        data = state.to_bytes(8, "big") + data
+    return f"{salt}${state:016x}"
+
+
+def _password_hash(password: Any, salt: Any) -> str:
+    return _password_hash_core(str(password), str(salt))
+
+
+def _password_verify(password: Any, stored: Any) -> bool:
+    stored_text = str(stored)
+    if "$" not in stored_text:
+        return False
+    salt, digest = stored_text.split("$", 1)
+    if not salt or not digest:
+        return False
+    return _password_hash_core(str(password), salt) == stored_text
+
+
 def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
     _make_web_request_context.counter += 1
     return {
@@ -2388,6 +2413,14 @@ class BytecodeVM:
             if len(args) < 2:
                 return False
             return _web_has_permission(args[0], args[1])
+        if name in {"sikkerhet.passord_hash", "std.sikkerhet.passord_hash"}:
+            if len(args) < 2:
+                return ""
+            return _password_hash(args[0], args[1])
+        if name in {"sikkerhet.passord_verifiser", "std.sikkerhet.passord_verifiser"}:
+            if len(args) < 2:
+                return False
+            return _password_verify(args[0], args[1])
         if name in {"web.response_builder", "std.web.response_builder"}:
             if len(args) < 3:
                 return _make_web_response(0, {}, "")

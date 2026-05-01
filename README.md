@@ -10,6 +10,7 @@ Et norsk programmeringsspråk som kompilerer til C.
 - Statisk typing (heltall, tekst, bool, lister, ordbøker/strukturerte datafelt)
 - Modul- og pakke-system
 - Egen standardbibliotek (`std`)
+- Standardhjelpere for passordhashing, secrets og miljøvariabler
 - Testsystem med `assert`, `assert_eq`, `assert_ne`
 - Feilhåndtering med `kast`, `prøv`/`fang` (inkludert nested rethrow)
 - Kompilerer til C → rask kjøring
@@ -629,6 +630,7 @@ For mer realistiske flyter, se:
 - [examples/web_methods.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_methods.no) for HEAD, OPTIONS og metodeforhandling
 - [examples/web_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_auth.no) for bearer-token auth med guards
 - [examples/web_roles.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_roles.no) for rolle- og rettighetsmodell med guards
+- [examples/secrets.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/secrets.no) for passordhashing og secrets-håndtering
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
 - [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no) for OpenAPI JSON og en enkel docs-side generert fra route-signaturer
 - [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no) for request/response/error middleware samt startup/shutdown hooks

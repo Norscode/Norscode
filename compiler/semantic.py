@@ -49,6 +49,8 @@ class SemanticAnalyzer:
             "fil_skriv": FunctionSymbol("fil_skriv", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "fil_append": FunctionSymbol("fil_append", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "fil_finnes": FunctionSymbol("fil_finnes", [TYPE_TEXT], TYPE_BOOL, True),
+            "sikkerhet_passord_hash": FunctionSymbol("sikkerhet_passord_hash", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "sikkerhet_passord_verifiser": FunctionSymbol("sikkerhet_passord_verifiser", [TYPE_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_path_match": FunctionSymbol("web_path_match", [TYPE_TEXT, TYPE_TEXT], TYPE_BOOL, True),
             "web_path_params": FunctionSymbol("web_path_params", [TYPE_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_route_match": FunctionSymbol("web_route_match", [TYPE_TEXT, TYPE_TEXT, TYPE_TEXT], TYPE_BOOL, True),
@@ -1166,6 +1168,24 @@ class SemanticAnalyzer:
                 value_type = self.check_expr(expr.args[1], scope, field_schemas)
                 if not self.is_map_type(ctx_type) or value_type != TYPE_TEXT:
                     self.error(f"{expr.module_name}.{expr.func_name} krever ordbok og tekst")
+                return TYPE_BOOL
+
+            if full_name in {"sikkerhet.passord_hash", "std.sikkerhet.passord_hash"}:
+                if len(expr.args) != 2:
+                    self.error("sikkerhet.passord_hash forventer 2 argumenter")
+                passord_type = self.check_expr(expr.args[0], scope, field_schemas)
+                salt_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if passord_type != TYPE_TEXT or salt_type != TYPE_TEXT:
+                    self.error("sikkerhet.passord_hash krever tekst og tekst")
+                return TYPE_TEXT
+
+            if full_name in {"sikkerhet.passord_verifiser", "std.sikkerhet.passord_verifiser"}:
+                if len(expr.args) != 2:
+                    self.error("sikkerhet.passord_verifiser forventer 2 argumenter")
+                passord_type = self.check_expr(expr.args[0], scope, field_schemas)
+                lagret_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if passord_type != TYPE_TEXT or lagret_type != TYPE_TEXT:
+                    self.error("sikkerhet.passord_verifiser krever tekst og tekst")
                 return TYPE_BOOL
 
             if full_name in {"web.handle_request", "std.web.handle_request"}:

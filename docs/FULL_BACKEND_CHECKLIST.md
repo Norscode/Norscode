@@ -31,7 +31,7 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 
 - [x] sessions eller token-basert auth som standardmønster
 - [x] rolle- og rettighetsmodell
-- [ ] password hashing / secrets-håndtering
+- [x] password hashing / secrets-håndtering
 - [ ] CSRF-beskyttelse der det trengs
 - [ ] CORS-konfigurasjon som standard
 - [ ] secure cookies og cookie helpers

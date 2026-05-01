@@ -3220,6 +3220,78 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_password_hash_core(const char *password, const char *salt) {")
+        self.indent += 1
+        self.emit("const uint64_t fnv_offset = UINT64_C(14695981039346656037);")
+        self.emit("const uint64_t fnv_prime = UINT64_C(1099511628211);")
+        self.emit("size_t salt_len = salt ? strlen(salt) : 0;")
+        self.emit("size_t pass_len = password ? strlen(password) : 0;")
+        self.emit("size_t data_len = salt_len + 1 + pass_len;")
+        self.emit("char *data = (char *)malloc(data_len + 1);")
+        self.emit("if (!data) { return nl_strdup(\"\"); }")
+        self.emit("memcpy(data, salt ? salt : \"\", salt_len);")
+        self.emit("data[salt_len] = '\\0';")
+        self.emit("memcpy(data + salt_len + 1, password ? password : \"\", pass_len);")
+        self.emit("data[data_len] = '\\0';")
+        self.emit("uint64_t state = fnv_offset;")
+        self.emit("for (int round = 0; round < 4096; ++round) {")
+        self.indent += 1
+        self.emit("for (size_t i = 0; i < data_len; ++i) {")
+        self.indent += 1
+        self.emit("state ^= (unsigned char)data[i];")
+        self.emit("state *= fnv_prime;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("char state_bytes[8];")
+        self.emit("for (int i = 0; i < 8; ++i) {")
+        self.indent += 1
+        self.emit("state_bytes[7 - i] = (char)((state >> (i * 8)) & 0xff);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("char *next = (char *)malloc(data_len + 8 + 1);")
+        self.emit("if (!next) { free(data); return nl_strdup(\"\"); }")
+        self.emit("memcpy(next, state_bytes, 8);")
+        self.emit("memcpy(next + 8, data, data_len);")
+        self.emit("free(data);")
+        self.emit("data = next;")
+        self.emit("data_len += 8;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("char *result = (char *)malloc((salt_len ? salt_len : 0) + 1 + 16 + 1);")
+        self.emit("if (!result) { free(data); return nl_strdup(\"\"); }")
+        self.emit("memcpy(result, salt ? salt : \"\", salt_len);")
+        self.emit("result[salt_len] = '$';")
+        self.emit("snprintf(result + salt_len + 1, 17, \"%016llx\", (unsigned long long)state);")
+        self.emit("free(data);")
+        self.emit("return result;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_password_hash(const char *password, const char *salt) {")
+        self.indent += 1
+        self.emit("return nl_web_password_hash_core(password, salt);")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_password_verify(const char *password, const char *stored) {")
+        self.indent += 1
+        self.emit("if (!stored || !strchr(stored, '$')) { return 0; }")
+        self.emit("char *copy = nl_strdup(stored);")
+        self.emit("char *sep = strchr(copy, '$');")
+        self.emit("if (!sep) { free(copy); return 0; }")
+        self.emit("*sep = '\\0';")
+        self.emit("char *salt = copy;")
+        self.emit("char *actual = nl_web_password_hash_core(password, salt);")
+        self.emit("int ok = actual && strcmp(actual, stored) == 0;")
+        self.emit("free(actual);")
+        self.emit("free(copy);")
+        self.emit("return ok;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static char *nl_web_first_csv_value(const char *text) {")
         self.indent += 1
         self.emit("if (!text || !*text) { return nl_strdup(\"\"); }")
@@ -4526,6 +4598,14 @@ class CGenerator:
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_has_permission({ctx_code}, {key_code})", TYPE_BOOL
+                if node.func_name == "passord_hash":
+                    passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    salt_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_password_hash({passord_code}, {salt_code})", TYPE_TEXT
+                if node.func_name == "passord_verifiser":
+                    passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    lagret_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_password_verify({passord_code}, {lagret_code})", TYPE_BOOL
                 if node.func_name == "request_json":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_request_json({ctx_code})", TYPE_MAP_TEXT
@@ -4627,6 +4707,15 @@ class CGenerator:
                 if node.func_name == "handle_request":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_handle_request({ctx_code})", TYPE_MAP_TEXT
+            if node.module_name in ("sikkerhet", "std.sikkerhet"):
+                if node.func_name == "passord_hash":
+                    passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    salt_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_password_hash({passord_code}, {salt_code})", TYPE_TEXT
+                if node.func_name == "passord_verifiser":
+                    passord_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
+                    lagret_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_password_verify({passord_code}, {lagret_code})", TYPE_BOOL
             if node.module_name in ("vent", "std.vent"):
                 if node.func_name == "timeout":
                     value_code, _ = self.expr_with_type(node.args[0]) if node.args else ("0", TYPE_INT)
