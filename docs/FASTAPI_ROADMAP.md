@@ -95,15 +95,15 @@ Et moderne API trenger dokumentasjon som følger koden.
 
 Leveranse:
 
-- [ ] OpenAPI JSON
-- [ ] enkel Swagger/Docs-side
-- [ ] schema-generering fra handler-signaturer
-- [ ] dokumentasjon av path, query og response typer
-- [ ] examples per route
+- [x] OpenAPI JSON
+- [x] enkel Swagger/Docs-side
+- [x] schema-generering fra handler-signaturer
+- [x] dokumentasjon av path, query og response typer
+- [x] examples per route
 
 Ferdig når:
 
-- [ ] API-et kan utforskes uten å lese kildekoden
+- [x] API-et kan utforskes uten å lese kildekoden
 
 ## Etappe 6: Middleware og hooks
 
@@ -162,7 +162,7 @@ Ferdig når:
 - [x] Route handlers
 - [x] Validering
 - [x] Dependency injection
-- [ ] OpenAPI og docs
+- [x] OpenAPI og docs
 - [ ] Middleware og hooks
 - [ ] Serveradapter
 - [ ] Test og eksempler
@@ -171,7 +171,7 @@ Ferdig når:
 
 FastAPI-sporet er ferdig når:
 
-- [ ] det er lett å skrive en API-app i Norscode
-- [ ] routing, validering og docs henger sammen
+- [x] det er lett å skrive en API-app i Norscode
+- [x] routing, validering og docs henger sammen
 - [x] handlerne blir små og lesbare
 - [ ] serverkjøring er enkel og stabil

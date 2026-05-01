@@ -370,6 +370,224 @@ class BytecodeCompiler:
     def resolve_name(self, name: str) -> str:
         return self.name_alias_stack[-1].get(name, name)
 
+    def _walk_ast_nodes(self, node: Any):
+        if node is None:
+            return
+        if isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, list):
+            for item in node:
+                yield from self._walk_ast_nodes(item)
+            return
+        if isinstance(node, tuple):
+            for item in node:
+                yield from self._walk_ast_nodes(item)
+            return
+        if hasattr(node, "__dict__"):
+            yield node
+            for value in vars(node).values():
+                yield from self._walk_ast_nodes(value)
+
+    def _schema_for_type(self, type_name: str) -> dict[str, Any]:
+        if type_name == TYPE_INT:
+            return {"type": "integer"}
+        if type_name == TYPE_BOOL:
+            return {"type": "boolean"}
+        if type_name == TYPE_TEXT:
+            return {"type": "string"}
+        if type_name == TYPE_LIST_INT:
+            return {"type": "array", "items": {"type": "integer"}}
+        if type_name == TYPE_LIST_TEXT:
+            return {"type": "array", "items": {"type": "string"}}
+        if type_name == TYPE_MAP_INT:
+            return {"type": "object", "additionalProperties": {"type": "integer"}}
+        if type_name == TYPE_MAP_TEXT:
+            return {"type": "object", "additionalProperties": {"type": "string"}}
+        if type_name == TYPE_MAP_BOOL:
+            return {"type": "object", "additionalProperties": {"type": "boolean"}}
+        if isinstance(type_name, str) and type_name.startswith("liste_"):
+            return {"type": "array", "items": {"type": "string"}}
+        if isinstance(type_name, str) and type_name.startswith("ordbok_"):
+            return {"type": "object", "additionalProperties": {"type": "string"}}
+        return {"type": "string"}
+
+    def _sample_for_type(self, type_name: str) -> Any:
+        if type_name == TYPE_INT:
+            return 1
+        if type_name == TYPE_BOOL:
+            return True
+        if type_name == TYPE_TEXT:
+            return "eksempel"
+        if type_name == TYPE_LIST_INT:
+            return [1]
+        if type_name == TYPE_LIST_TEXT:
+            return ["eksempel"]
+        if type_name == TYPE_MAP_INT:
+            return {"verdi": 1}
+        if type_name == TYPE_MAP_BOOL:
+            return {"verdi": True}
+        if isinstance(type_name, str) and type_name.startswith("liste_"):
+            return ["eksempel"]
+        if isinstance(type_name, str) and type_name.startswith("ordbok_"):
+            return {"verdi": "eksempel"}
+        return "eksempel"
+
+    def _route_docs_from_function(self, fn: FunctionNode, spec: str) -> dict[str, Any]:
+        method, route_path = _split_web_route_spec(spec)
+        path_params: list[dict[str, Any]] = []
+        query_params: list[dict[str, Any]] = []
+        body_fields: list[dict[str, Any]] = []
+        seen_path: set[str] = set()
+        seen_query: set[str] = set()
+        seen_body: set[str] = set()
+        for node in self._walk_ast_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, ModuleCallNode):
+                continue
+            module_name = getattr(node, "module_name", "")
+            func_name = getattr(node, "func_name", "")
+            args = getattr(node, "args", []) or []
+            if module_name not in {"web", "std.web"} or len(args) < 2 or not isinstance(args[1], StringNode):
+                continue
+            key = args[1].value
+            if func_name == "request_param" and key not in seen_path:
+                path_params.append({"name": key, "type": "string"})
+                seen_path.add(key)
+            elif func_name == "request_param_int" and key not in seen_path:
+                path_params.append({"name": key, "type": "integer"})
+                seen_path.add(key)
+            elif func_name == "request_query_required" and key not in seen_query:
+                query_params.append({"name": key, "type": "string", "required": True})
+                seen_query.add(key)
+            elif func_name == "request_query_int" and key not in seen_query:
+                query_params.append({"name": key, "type": "integer", "required": True})
+                seen_query.add(key)
+            elif func_name == "request_query_param" and key not in seen_query:
+                query_params.append({"name": key, "type": "string", "required": False})
+                seen_query.add(key)
+            elif func_name == "request_json_field" and key not in seen_body:
+                body_fields.append({"name": key, "type": "string", "required": True})
+                seen_body.add(key)
+            elif func_name == "request_json_field_or" and key not in seen_body:
+                body_fields.append({"name": key, "type": "string", "required": False})
+                seen_body.add(key)
+            elif func_name == "request_json_field_int" and key not in seen_body:
+                body_fields.append({"name": key, "type": "integer", "required": True})
+                seen_body.add(key)
+            elif func_name == "request_json_field_bool" and key not in seen_body:
+                body_fields.append({"name": key, "type": "boolean", "required": True})
+                seen_body.add(key)
+        path_template = re.sub(r"\{([^}:]+)(?::[^}]+)?\}", r"{\1}", route_path)
+        request_example: dict[str, Any] = {"method": (method or "GET").lower(), "path": path_template}
+        if query_params:
+            request_example["query"] = {item["name"]: self._sample_for_type(TYPE_INT if item["type"] == "integer" else TYPE_TEXT) for item in query_params}
+        if body_fields:
+            request_example["body"] = {
+                item["name"]: self._sample_for_type(TYPE_INT if item["type"] == "integer" else TYPE_BOOL if item["type"] == "boolean" else TYPE_TEXT)
+                for item in body_fields
+            }
+        response_type = getattr(fn, "return_type", TYPE_TEXT)
+        return {
+            "function": self.function_key(fn),
+            "method": (method or "GET").lower(),
+            "path": path_template,
+            "path_params": path_params,
+            "query_params": query_params,
+            "body_fields": body_fields,
+            "response_type": response_type,
+            "summary": getattr(fn, "name", ""),
+            "operation_id": getattr(fn, "name", ""),
+            "request_example": request_example,
+            "response_example": self._sample_for_type(response_type),
+            "response_schema": self._schema_for_type(response_type),
+        }
+
+    def _build_openapi_document(self, title: str, version: str) -> str:
+        paths: dict[str, Any] = {}
+        for handler in getattr(self, "route_handlers", []):
+            path = handler.get("path", "")
+            method = str(handler.get("method", "get")).lower()
+            path_item = paths.setdefault(path, {})
+            parameters: list[dict[str, Any]] = []
+            for item in handler.get("path_params", []):
+                parameters.append({
+                    "name": item["name"],
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": item["type"]},
+                })
+            for item in handler.get("query_params", []):
+                parameters.append({
+                    "name": item["name"],
+                    "in": "query",
+                    "required": bool(item.get("required", False)),
+                    "schema": {"type": item["type"]},
+                })
+            operation: dict[str, Any] = {
+                "operationId": handler.get("operation_id", handler.get("function", "")),
+                "summary": handler.get("summary", handler.get("function", "")),
+                "parameters": parameters,
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": handler.get("response_schema", {"type": "string"}),
+                                "example": handler.get("response_example", "eksempel"),
+                            }
+                        },
+                    }
+                },
+                "x-example-request": handler.get("request_example", {}),
+            }
+            body_fields = handler.get("body_fields", [])
+            if body_fields:
+                required_fields = [item["name"] for item in body_fields if item.get("required", False)]
+                properties = {item["name"]: {"type": item["type"]} for item in body_fields}
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": properties,
+                                "required": required_fields,
+                            },
+                            "example": handler.get("request_example", {}).get("body", {}),
+                        }
+                    },
+                }
+            path_item[method] = operation
+        document = {
+            "openapi": "3.0.3",
+            "info": {"title": title, "version": version},
+            "paths": paths,
+        }
+        return json.dumps(document, ensure_ascii=False, indent=2)
+
+    def _build_docs_html(self, title: str, version: str) -> str:
+        spec = self._build_openapi_document(title, version)
+        rows = []
+        for handler in getattr(self, "route_handlers", []):
+            rows.append(
+                f"<li><code>{handler.get('method', 'get').upper()} {handler.get('path', '')}</code>"
+                f" - {handler.get('summary', handler.get('function', ''))}</li>"
+            )
+        route_list = "".join(rows) or "<li>Ingen ruter registrert</li>"
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            "<style>body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;}"
+            "pre{background:#f6f8fa;padding:1rem;overflow:auto;border-radius:8px;}"
+            "code{background:#f6f8fa;padding:0.15rem 0.35rem;border-radius:4px;}</style>"
+            "</head><body>"
+            f"<h1>{title}</h1>"
+            f"<p>Versjon: {version}</p>"
+            f"<h2>Ruter</h2><ul>{route_list}</ul>"
+            "<h2>OpenAPI JSON</h2>"
+            f"<pre>{spec}</pre>"
+            "</body></html>"
+        )
+
     def _collect_web_annotations(self, program: ProgramNode) -> tuple[list[dict[str, Any]], dict[str, str]]:
         handlers: list[dict[str, Any]] = []
         providers: dict[str, str] = {}
@@ -401,11 +619,10 @@ class BytecodeCompiler:
                     continue
                 break
             if spec is not None:
-                handlers.append({
-                    "function": self.function_key(fn),
-                    "spec": spec,
-                    "deps": deps,
-                })
+                route_docs = self._route_docs_from_function(fn, spec)
+                route_docs["deps"] = list(deps)
+                route_docs["spec"] = spec
+                handlers.append(route_docs)
             for dep_name in provided:
                 providers[dep_name] = self.function_key(fn)
         return handlers, providers
@@ -1930,6 +2147,14 @@ class BytecodeVM:
             except OSError:
                 raise BytecodeThrow(f"IOFeil: kunne ikke lese fil {path}")
             return _make_web_response(200, {"content-type": str(args[1])}, body)
+        if name in {"web.openapi_json", "std.web.openapi_json"}:
+            title = str(args[0]) if args else "Norscode API"
+            version = str(args[1]) if len(args) > 1 else "1.0.0"
+            return self._build_openapi_document(title, version)
+        if name in {"web.docs_html", "std.web.docs_html"}:
+            title = str(args[0]) if args else "Norscode API"
+            version = str(args[1]) if len(args) > 1 else "1.0.0"
+            return self._build_docs_html(title, version)
         if name in {"web.route", "std.web.route"}:
             if not args:
                 return ""
@@ -1992,6 +2217,7 @@ class BytecodeVM:
                 "route", "handle_request", "request_params", "request_param", "request_param_int",
                 "request_query_required", "request_query_int", "request_json", "request_json_field",
                 "request_json_field_or", "request_json_field_int", "request_json_field_bool",
+                "openapi_json", "docs_html",
             }
             if short_name in builtin_like:
                 return self.call_builtin(short_name, args)

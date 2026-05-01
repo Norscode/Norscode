@@ -81,6 +81,8 @@ class SemanticAnalyzer:
             "web_response_json": FunctionSymbol("web_response_json", [TYPE_MAP_TEXT], TYPE_MAP_TEXT, True),
             "web_response_error": FunctionSymbol("web_response_error", [TYPE_INT, TYPE_TEXT], TYPE_MAP_TEXT, True),
             "web_response_file": FunctionSymbol("web_response_file", [TYPE_TEXT, TYPE_TEXT], TYPE_MAP_TEXT, True),
+            "web_openapi_json": FunctionSymbol("web_openapi_json", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
+            "web_docs_html": FunctionSymbol("web_docs_html", [TYPE_TEXT, TYPE_TEXT], TYPE_TEXT, True),
             "web_route": FunctionSymbol("web_route", [TYPE_TEXT], TYPE_TEXT, True),
             "web_dependency": FunctionSymbol("web_dependency", [TYPE_TEXT], TYPE_TEXT, True),
             "web_use_dependency": FunctionSymbol("web_use_dependency", [TYPE_TEXT], TYPE_TEXT, True),
@@ -1015,6 +1017,15 @@ class SemanticAnalyzer:
                 if path_type != TYPE_TEXT or content_type_type != TYPE_TEXT:
                     self.error("web.response_file krever tekst og tekst")
                 return TYPE_MAP_TEXT
+
+            if full_name in {"web.openapi_json", "std.web.openapi_json", "web.docs_html", "std.web.docs_html"}:
+                if len(expr.args) != 2:
+                    self.error(f"{expr.module_name}.{expr.func_name} forventer 2 argumenter")
+                title_type = self.check_expr(expr.args[0], scope, field_schemas)
+                version_type = self.check_expr(expr.args[1], scope, field_schemas)
+                if title_type != TYPE_TEXT or version_type != TYPE_TEXT:
+                    self.error(f"{expr.module_name}.{expr.func_name} krever tekst og tekst")
+                return TYPE_TEXT
 
             if full_name in {"web.route", "std.web.route"}:
                 if len(expr.args) != 1:

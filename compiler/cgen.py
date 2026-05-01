@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import re
+import json
 from typing import Any
 
 from .ast_nodes import *
@@ -35,6 +37,7 @@ class CGenerator:
         self.emitted_lambda_defs: set[str] = set()
         self.route_handlers: list[dict[str, Any]] = []
         self.dependency_providers: list[dict[str, Any]] = []
+        self.openapi_paths_json = "{}"
         self._build_function_name_map()
 
     def _build_function_name_map(self):
@@ -63,6 +66,209 @@ class CGenerator:
 
     def resolve_name(self, name):
         return self.name_alias_stack[-1].get(name, name)
+
+    def _normalize_web_method(self, value):
+        return str(value or "").strip().upper()
+
+    def _split_web_route_spec(self, spec):
+        text = str(spec or "").strip()
+        if not text:
+            return "", ""
+        parts = text.split(maxsplit=1)
+        if len(parts) == 1:
+            return "", parts[0]
+        method = self._normalize_web_method(parts[0])
+        path = parts[1].strip()
+        return method, path
+
+    def _walk_ast_nodes(self, node):
+        if node is None:
+            return
+        if isinstance(node, (str, int, float, bool)):
+            return
+        if isinstance(node, list):
+            for item in node:
+                yield from self._walk_ast_nodes(item)
+            return
+        if isinstance(node, tuple):
+            for item in node:
+                yield from self._walk_ast_nodes(item)
+            return
+        if hasattr(node, "__dict__"):
+            yield node
+            for value in vars(node).values():
+                yield from self._walk_ast_nodes(value)
+
+    def _schema_for_type(self, type_name):
+        if type_name == TYPE_INT:
+            return {"type": "integer"}
+        if type_name == TYPE_BOOL:
+            return {"type": "boolean"}
+        if type_name == TYPE_TEXT:
+            return {"type": "string"}
+        if type_name == TYPE_LIST_INT:
+            return {"type": "array", "items": {"type": "integer"}}
+        if type_name == TYPE_LIST_TEXT:
+            return {"type": "array", "items": {"type": "string"}}
+        if type_name == TYPE_MAP_INT:
+            return {"type": "object", "additionalProperties": {"type": "integer"}}
+        if type_name == TYPE_MAP_TEXT:
+            return {"type": "object", "additionalProperties": {"type": "string"}}
+        if type_name == TYPE_MAP_BOOL:
+            return {"type": "object", "additionalProperties": {"type": "boolean"}}
+        if isinstance(type_name, str) and type_name.startswith("liste_"):
+            return {"type": "array", "items": {"type": "string"}}
+        if isinstance(type_name, str) and type_name.startswith("ordbok_"):
+            return {"type": "object", "additionalProperties": {"type": "string"}}
+        return {"type": "string"}
+
+    def _sample_for_type(self, type_name):
+        if type_name == TYPE_INT:
+            return 1
+        if type_name == TYPE_BOOL:
+            return True
+        if type_name == TYPE_TEXT:
+            return "eksempel"
+        if type_name == TYPE_LIST_INT:
+            return [1]
+        if type_name == TYPE_LIST_TEXT:
+            return ["eksempel"]
+        if type_name == TYPE_MAP_INT:
+            return {"verdi": 1}
+        if type_name == TYPE_MAP_BOOL:
+            return {"verdi": True}
+        if isinstance(type_name, str) and type_name.startswith("liste_"):
+            return ["eksempel"]
+        if isinstance(type_name, str) and type_name.startswith("ordbok_"):
+            return {"verdi": "eksempel"}
+        return "eksempel"
+
+    def _route_docs_from_function(self, fn, spec):
+        method, route_path = self._split_web_route_spec(spec)
+        path_params = []
+        query_params = []
+        body_fields = []
+        seen_path = set()
+        seen_query = set()
+        seen_body = set()
+        for node in self._walk_ast_nodes(getattr(fn, "body", None)):
+            if not isinstance(node, ModuleCallNode):
+                continue
+            module_name = getattr(node, "module_name", "")
+            func_name = getattr(node, "func_name", "")
+            args = getattr(node, "args", []) or []
+            if module_name not in {"web", "std.web"} or len(args) < 2 or not isinstance(args[1], StringNode):
+                continue
+            key = args[1].value
+            if func_name == "request_param" and key not in seen_path:
+                path_params.append({"name": key, "type": "string"})
+                seen_path.add(key)
+            elif func_name == "request_param_int" and key not in seen_path:
+                path_params.append({"name": key, "type": "integer"})
+                seen_path.add(key)
+            elif func_name == "request_query_required" and key not in seen_query:
+                query_params.append({"name": key, "type": "string", "required": True})
+                seen_query.add(key)
+            elif func_name == "request_query_int" and key not in seen_query:
+                query_params.append({"name": key, "type": "integer", "required": True})
+                seen_query.add(key)
+            elif func_name == "request_query_param" and key not in seen_query:
+                query_params.append({"name": key, "type": "string", "required": False})
+                seen_query.add(key)
+            elif func_name == "request_json_field" and key not in seen_body:
+                body_fields.append({"name": key, "type": "string", "required": True})
+                seen_body.add(key)
+            elif func_name == "request_json_field_or" and key not in seen_body:
+                body_fields.append({"name": key, "type": "string", "required": False})
+                seen_body.add(key)
+            elif func_name == "request_json_field_int" and key not in seen_body:
+                body_fields.append({"name": key, "type": "integer", "required": True})
+                seen_body.add(key)
+            elif func_name == "request_json_field_bool" and key not in seen_body:
+                body_fields.append({"name": key, "type": "boolean", "required": True})
+                seen_body.add(key)
+        path_template = re.sub(r"\{([^}:]+)(?::[^}]+)?\}", r"{\1}", route_path)
+        request_example = {"method": (method or "GET").lower(), "path": path_template}
+        if query_params:
+            request_example["query"] = {item["name"]: self._sample_for_type(TYPE_INT if item["type"] == "integer" else TYPE_TEXT) for item in query_params}
+        if body_fields:
+            request_example["body"] = {
+                item["name"]: self._sample_for_type(TYPE_INT if item["type"] == "integer" else TYPE_BOOL if item["type"] == "boolean" else TYPE_TEXT)
+                for item in body_fields
+            }
+        response_type = getattr(fn, "return_type", TYPE_TEXT)
+        return {
+            "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
+            "method": (method or "GET").lower(),
+            "path": path_template,
+            "path_params": path_params,
+            "query_params": query_params,
+            "body_fields": body_fields,
+            "response_type": response_type,
+            "summary": getattr(fn, "name", ""),
+            "operation_id": getattr(fn, "name", ""),
+            "request_example": request_example,
+            "response_example": self._sample_for_type(response_type),
+            "response_schema": self._schema_for_type(response_type),
+        }
+
+    def _render_openapi_paths_json(self):
+        paths = {}
+        for handler in self.route_handlers:
+            path = handler.get("path", "")
+            method = str(handler.get("method", "get")).lower()
+            path_item = paths.setdefault(path, {})
+            parameters = []
+            for item in handler.get("path_params", []):
+                parameters.append({
+                    "name": item["name"],
+                    "in": "path",
+                    "required": True,
+                    "schema": {"type": item["type"]},
+                })
+            for item in handler.get("query_params", []):
+                parameters.append({
+                    "name": item["name"],
+                    "in": "query",
+                    "required": bool(item.get("required", False)),
+                    "schema": {"type": item["type"]},
+                })
+            operation = {
+                "operationId": handler.get("operation_id", handler.get("function", "")),
+                "summary": handler.get("summary", handler.get("function", "")),
+                "parameters": parameters,
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": handler.get("response_schema", {"type": "string"}),
+                                "example": handler.get("response_example", "eksempel"),
+                            }
+                        },
+                    }
+                },
+                "x-example-request": handler.get("request_example", {}),
+            }
+            body_fields = handler.get("body_fields", [])
+            if body_fields:
+                required_fields = [item["name"] for item in body_fields if item.get("required", False)]
+                properties = {item["name"]: {"type": item["type"]} for item in body_fields}
+                operation["requestBody"] = {
+                    "required": True,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": properties,
+                                "required": required_fields,
+                            },
+                            "example": handler.get("request_example", {}).get("body", {}),
+                        }
+                    },
+                }
+            path_item[method] = operation
+        return json.dumps(paths, ensure_ascii=False)
 
     def _web_annotations_from_function(self, fn):
         statements = list(getattr(getattr(fn, "body", None), "statements", []) or [])
@@ -101,11 +307,10 @@ class CGenerator:
             if spec is None:
                 spec = None
             if spec is not None:
-                handlers.append({
-                    "function": self.resolve_c_function_name(fn.name, module_name=getattr(fn, "module_name", None)),
-                    "spec": spec,
-                    "deps": deps,
-                })
+                route_docs = self._route_docs_from_function(fn, spec)
+                route_docs["deps"] = list(deps)
+                route_docs["spec"] = spec
+                handlers.append(route_docs)
             for dep_name in provided:
                 providers.append({
                     "name": dep_name,
@@ -539,6 +744,7 @@ class CGenerator:
     def generate(self, tree):
         entry_function = None
         self.route_handlers, self.dependency_providers = self._collect_route_handlers(tree)
+        self.openapi_paths_json = self._render_openapi_paths_json()
         for fn in tree.functions:
             if fn.name == "start" and (getattr(fn, "module_name", None) in (None, "__main__")):
                 entry_function = fn
@@ -2792,6 +2998,46 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        openapi_paths_literal = self.c_string(self.openapi_paths_json)
+        self.emit(f"static const char *nl_web_openapi_paths_json = {openapi_paths_literal};")
+        self.emit("static char *nl_web_openapi_json(const char *title, const char *version) {")
+        self.indent += 1
+        self.emit("nl_json_builder out;")
+        self.emit("nl_json_builder_init(&out, 256);")
+        self.emit("nl_json_builder_append_text(&out, \"{\\\"openapi\\\":\\\"3.0.3\\\",\\\"info\\\":{\");")
+        self.emit("nl_json_builder_append_text(&out, \"\\\"title\\\":\");")
+        self.emit("char *title_json = nl_json_quote(title ? title : \"Norscode API\");")
+        self.emit("nl_json_builder_append_text(&out, title_json);")
+        self.emit("nl_json_builder_append_text(&out, \",\\\"version\\\":\");")
+        self.emit("char *version_json = nl_json_quote(version ? version : \"1.0.0\");")
+        self.emit("nl_json_builder_append_text(&out, version_json);")
+        self.emit("nl_json_builder_append_text(&out, \"},\\\"paths\\\":\");")
+        self.emit("nl_json_builder_append_text(&out, nl_web_openapi_paths_json);")
+        self.emit("nl_json_builder_append_char(&out, '}');")
+        self.emit("return out.data;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+        self.emit("static char *nl_web_docs_html(const char *title, const char *version) {")
+        self.indent += 1
+        self.emit("char *spec = nl_web_openapi_json(title, version);")
+        self.emit("nl_json_builder out;")
+        self.emit("nl_json_builder_init(&out, 256);")
+        self.emit("nl_json_builder_append_text(&out, \"<!doctype html><html><head><meta charset='utf-8'><title>\");")
+        self.emit("nl_json_builder_append_text(&out, title ? title : \"Norscode API\");")
+        self.emit("nl_json_builder_append_text(&out, \"</title><style>body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;}pre{background:#f6f8fa;padding:1rem;overflow:auto;border-radius:8px;}code{background:#f6f8fa;padding:0.15rem 0.35rem;border-radius:4px;}</style></head><body>\");")
+        self.emit("nl_json_builder_append_text(&out, \"<h1>\");")
+        self.emit("nl_json_builder_append_text(&out, title ? title : \"Norscode API\");")
+        self.emit("nl_json_builder_append_text(&out, \"</h1><p>Versjon: \");")
+        self.emit("nl_json_builder_append_text(&out, version ? version : \"1.0.0\");")
+        self.emit("nl_json_builder_append_text(&out, \"</p><h2>OpenAPI JSON</h2><pre>\");")
+        self.emit("nl_json_builder_append_text(&out, spec);")
+        self.emit("nl_json_builder_append_text(&out, \"</pre></body></html>\");")
+        self.emit("return out.data;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static int nl_web_is_int_segment(const char *text) {")
         self.indent += 1
         self.emit("if (!text || !*text) { return 0; }")
@@ -3890,6 +4136,14 @@ class CGenerator:
                     path_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     content_type_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"application/octet-stream\"", TYPE_TEXT)
                     return f"nl_web_response_file({path_code}, {content_type_code})", TYPE_MAP_TEXT
+                if node.func_name == "openapi_json":
+                    title_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"Norscode API\"", TYPE_TEXT)
+                    version_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"1.0.0\"", TYPE_TEXT)
+                    return f"nl_web_openapi_json({title_code}, {version_code})", TYPE_TEXT
+                if node.func_name == "docs_html":
+                    title_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"Norscode API\"", TYPE_TEXT)
+                    version_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"1.0.0\"", TYPE_TEXT)
+                    return f"nl_web_docs_html({title_code}, {version_code})", TYPE_TEXT
                 if node.func_name == "route":
                     spec_code, _ = self.expr_with_type(node.args[0]) if node.args else ("\"\"", TYPE_TEXT)
                     return f"nl_web_route({spec_code})", TYPE_TEXT

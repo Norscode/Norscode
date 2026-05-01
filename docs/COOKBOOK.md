@@ -106,6 +106,8 @@ For dependency injection i samme stil, se [examples/web_dependency.no](/Users/ja
 
 For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no).
 
+For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no).
+
 ## Neste steg
 
 - [docs/START_HER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/START_HER.md)
