@@ -2650,13 +2650,30 @@ def serve_program(
     reload_enabled: bool = False,
     once: bool = False,
     production: bool = False,
+    keep_alive: bool = False,
+    request_timeout_seconds: float | None = None,
     health_path: str = "/healthz",
     readiness_path: str = "/readyz",
     liveness_path: str = "/livez",
 ):
-    runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
+    try:
+        runtime = _ServeRuntime(source_file, reload_enabled=(reload_enabled and not production))
+    except Exception as exc:
+        raise RuntimeError(f"Oppstartfeil: kunne ikke laste {Path(source_file).expanduser().resolve()}: {exc}") from exc
 
     class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1" if keep_alive else "HTTP/1.0"
+
+        def setup(self):
+            super().setup()
+            if request_timeout_seconds is not None:
+                try:
+                    timeout = max(0.1, float(request_timeout_seconds))
+                except Exception:
+                    timeout = None
+                if timeout is not None:
+                    self.connection.settimeout(timeout)
+
         def _dispatch(self):
             parsed = urllib.parse.urlsplit(self.path)
             query = {str(key): str(value) for key, value in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)}
@@ -2743,13 +2760,20 @@ def serve_program(
         def log_message(self, format, *args):
             print(f"[serve] {self.address_string()} - {format % args}", file=sys.stderr)
 
-    server = _NorscodeThreadingHTTPServer((host, port), Handler)
+    try:
+        server = _NorscodeThreadingHTTPServer((host, port), Handler)
+    except OSError as exc:
+        raise RuntimeError(f"Oppstartfeil: kunne ikke binde {host}:{port}: {exc}") from exc
     bind_host, bind_port = server.server_address
     print(f"Starter Norscode server fra {Path(source_file).expanduser().resolve()}")
     print(f"Lytter på http://{bind_host}:{bind_port}")
     print(f"Health: {health_path} ready={readiness_path} live={liveness_path}")
     if production:
         print("Modus: production")
+    if keep_alive:
+        print("Keep-alive: på")
+    if request_timeout_seconds is not None:
+        print(f"Timeout: {request_timeout_seconds} s")
     if reload_enabled:
         print("Reload: på")
     stop_lock = threading.Lock()
@@ -4884,6 +4908,8 @@ def main():
     serve.add_argument("--reload", action="store_true", help="Rekompiler når kildefilen endrer seg")
     serve.add_argument("--once", action="store_true", help="Stopp etter første request (nyttig for smoke-test)")
     serve.add_argument("--production", action="store_true", help="Kjør i produksjonsmodus med signalstyrt shutdown")
+    serve.add_argument("--keep-alive", action="store_true", help="Bruk HTTP/1.1 og hold forbindelsen åpen når mulig")
+    serve.add_argument("--request-timeout", type=float, help="Timeout i sekunder for en enkelt request/connection")
     serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
     serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
     serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
@@ -5724,6 +5750,8 @@ def main():
                 reload_enabled=args.reload,
                 once=args.once,
                 production=args.production,
+                keep_alive=args.keep_alive,
+                request_timeout_seconds=args.request_timeout,
                 health_path=args.health_path,
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
