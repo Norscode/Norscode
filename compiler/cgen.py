@@ -3192,6 +3192,34 @@ class CGenerator:
         self.emit("}")
         self.emit()
 
+        self.emit("static char *nl_web_auth_header(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("return nl_web_request_header(ctx, \"authorization\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_bearer_token(nl_map_text *ctx) {")
+        self.indent += 1
+        self.emit("char *auth = nl_web_auth_header(ctx);")
+        self.emit("if (!auth) { return nl_strdup(\"\"); }")
+        self.emit("for (char *p = auth; *p; ++p) { *p = (char)tolower((unsigned char)*p); }")
+        self.emit("if (strncmp(auth, \"bearer \", 7) == 0) { return nl_strdup(auth + 7); }")
+        self.emit("return nl_strdup(\"\");")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static int nl_web_require_bearer(nl_map_text *ctx, const char *expected) {")
+        self.indent += 1
+        self.emit("char *token = nl_web_bearer_token(ctx);")
+        self.emit("int ok = token && expected && strcmp(token, expected) == 0;")
+        self.emit("free(token);")
+        self.emit("return ok;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
         self.emit("static nl_map_text *nl_web_response_builder(int status, nl_map_text *headers, const char *body) {")
         self.indent += 1
         self.emit("nl_map_text *result = nl_map_text_new();")
@@ -4382,6 +4410,16 @@ class CGenerator:
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
                     return f"nl_web_request_header({ctx_code}, {key_code})", TYPE_TEXT
+                if node.func_name == "auth_header":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    return f"nl_web_auth_header({ctx_code})", TYPE_TEXT
+                if node.func_name == "bearer_token":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    return f"nl_web_bearer_token({ctx_code})", TYPE_TEXT
+                if node.func_name == "require_bearer":
+                    ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
+                    key_code, _ = self.expr_with_type(node.args[1]) if len(node.args) > 1 else ("\"\"", TYPE_TEXT)
+                    return f"nl_web_require_bearer({ctx_code}, {key_code})", TYPE_BOOL
                 if node.func_name == "request_json":
                     ctx_code, _ = self.expr_with_type(node.args[0]) if node.args else ("nl_map_text_new()", TYPE_MAP_TEXT)
                     return f"nl_web_request_json({ctx_code})", TYPE_MAP_TEXT

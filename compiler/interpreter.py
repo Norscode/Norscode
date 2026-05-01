@@ -621,6 +621,17 @@ class Interpreter:
             return {}
         return {str(key): str(val) for key, val in parsed.items()}
 
+    def _extract_bearer_token(self, ctx: Any) -> str:
+        if not isinstance(ctx, dict):
+            return ""
+        headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+        auth = str(headers.get("authorization", "")).strip()
+        if not auth:
+            return ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return ""
+
     def _make_web_request_context(self, method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
         self._request_counter += 1
         return {
@@ -1566,6 +1577,20 @@ class Interpreter:
                 ctx = self._decode_json_text_map(values[0])
                 headers = self._decode_json_text_map(ctx.get("headers", "{}"))
                 return str(headers.get(str(values[1]), ""))
+            if func_name == "auth_header":
+                if not values:
+                    return ""
+                ctx = self._decode_json_text_map(values[0])
+                headers = self._decode_json_text_map(ctx.get("headers", "{}"))
+                return str(headers.get("authorization", ""))
+            if func_name == "bearer_token":
+                if not values:
+                    return ""
+                return self._extract_bearer_token(values[0])
+            if func_name == "require_bearer":
+                if len(values) < 2:
+                    return False
+                return self._extract_bearer_token(values[0]) == str(values[1])
             if func_name == "response_builder":
                 if len(values) < 3:
                     return self._make_web_response(200, {}, "")

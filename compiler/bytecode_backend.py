@@ -301,6 +301,18 @@ def _decode_json_text_map(value: Any) -> dict[str, str]:
     return {}
 
 
+def _extract_bearer_token(ctx: Any) -> str:
+    if not isinstance(ctx, dict):
+        return ""
+    headers = _decode_json_text_map(ctx.get("headers", ""))
+    auth = str(headers.get("authorization", "")).strip()
+    if not auth:
+        return ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    return ""
+
+
 def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
     _make_web_request_context.counter += 1
     return {
@@ -2312,6 +2324,19 @@ class BytecodeVM:
             if key not in data or str(data.get(key, "")) == "":
                 raise BytecodeThrow(_validation_error(f"mangler felt '{key}'"))
             return _parse_bool_value(data.get(key, ""), key, "body")
+        if name in {"web.auth_header", "std.web.auth_header"}:
+            if not args or not isinstance(args[0], dict):
+                return ""
+            headers = _decode_json_text_map(args[0].get("headers", ""))
+            return str(headers.get("authorization", ""))
+        if name in {"web.bearer_token", "std.web.bearer_token"}:
+            if not args:
+                return ""
+            return _extract_bearer_token(args[0])
+        if name in {"web.require_bearer", "std.web.require_bearer"}:
+            if len(args) < 2:
+                return False
+            return _extract_bearer_token(args[0]) == str(args[1])
         if name in {"web.response_builder", "std.web.response_builder"}:
             if len(args) < 3:
                 return _make_web_response(0, {}, "")

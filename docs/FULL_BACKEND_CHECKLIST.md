@@ -29,7 +29,7 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 
 ## 3. Autentisering og sikkerhet
 
-- [ ] sessions eller token-basert auth som standardmønster
+- [x] sessions eller token-basert auth som standardmønster
 - [ ] rolle- og rettighetsmodell
 - [ ] password hashing / secrets-håndtering
 - [ ] CSRF-beskyttelse der det trengs
