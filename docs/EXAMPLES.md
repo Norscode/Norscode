@@ -12,6 +12,7 @@ Dette er de representative eksempelappene som viser de vanligste bruksmønstrene
 - [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no): route-handlers med `web.route()` og `web.handle_request()`.
 - [examples/web_subrouter.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_subrouter.no): subroutere og prefiksbaserte route-moduler.
 - [examples/web_guard.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_guard.no): route-guards og policy-hooks.
+- [examples/web_methods.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_methods.no): HEAD, OPTIONS og metodeforhandling.
 - [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no): query-, path- og JSON-validering med lesbare feil.
 - [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no): dependency registration, `web.use_dependency()` og automatisk injeksjon inn i route-handlers.
 - [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no): OpenAPI JSON og docs-side generert fra route-signaturer.

@@ -25,7 +25,7 @@ Jeg bruker den som en sluttliste for produksjonsmoden webdrift, ikke bare som sp
 - [x] middleware og hooks
 - [x] subroutere eller router-moduler
 - [x] route-guards eller policy-hooks
-- [ ] standardisert håndtering av HEAD, OPTIONS og metodeforhandling
+- [x] standardisert håndtering av HEAD, OPTIONS og metodeforhandling
 
 ## 3. Autentisering og sikkerhet
 

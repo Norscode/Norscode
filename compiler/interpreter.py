@@ -581,9 +581,29 @@ class Interpreter:
     def _match_web_route_spec(self, spec: Any, method: Any, path: Any) -> dict[str, str] | None:
         route_method, route_path = self._split_web_route_spec(spec)
         request_method = self._normalize_web_method(method)
-        if route_method and route_method != request_method:
+        if route_method and route_method != request_method and not (request_method == "HEAD" and route_method == "GET"):
             return None
         return self._match_web_path(route_path, path)
+
+    def _allow_web_methods_for_path(self, path: Any) -> list[str]:
+        path_text = str(path)
+        methods: list[str] = []
+        seen: set[str] = set()
+        for handler in getattr(self, "route_handlers", []):
+            spec = handler.get("spec", "")
+            route_method, route_path = self._split_web_route_spec(spec)
+            if self._match_web_path(route_path, path_text) is None:
+                continue
+            if route_method:
+                if route_method not in seen:
+                    seen.add(route_method)
+                    methods.append(route_method)
+                if route_method == "GET" and "HEAD" not in seen:
+                    seen.add("HEAD")
+                    methods.append("HEAD")
+        if methods and "OPTIONS" not in seen:
+            methods.append("OPTIONS")
+        return methods
 
     def _encode_json_text_map(self, mapping: Any) -> str:
         if not isinstance(mapping, dict):
@@ -1644,13 +1664,23 @@ class Interpreter:
                 self._ensure_startup_hooks()
                 try:
                     current_ctx = self._apply_request_middlewares(values[0])
-                    found = self._find_route_handler(current_ctx.get("metode", ""), current_ctx.get("sti", ""))
+                    method_text = self._normalize_web_method(current_ctx.get("metode", ""))
+                    path_text = str(current_ctx.get("sti", ""))
+                    if method_text == "OPTIONS":
+                        allow_methods = self._allow_web_methods_for_path(path_text)
+                        if allow_methods:
+                            response = self._make_web_response(204, {"allow": ", ".join(allow_methods)}, "")
+                            return self._apply_response_middlewares(response)
+                        response = self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
+                        return self._apply_error_middlewares(response)
+                    found = self._find_route_handler(method_text, path_text)
                     if found is None:
                         response = self._make_web_response(404, {"content-type": "application/json"}, self.json_serialize_value({"error": "Ikke funnet"}))
                         return self._apply_error_middlewares(response)
                     params, handler = found
                     if params == "__405__":
-                        response = self._make_web_response(405, {"content-type": "application/json"}, self.json_serialize_value({"error": "Metode ikke tillatt"}))
+                        allow_methods = self._allow_web_methods_for_path(path_text)
+                        response = self._make_web_response(405, {"content-type": "application/json", "allow": ", ".join(allow_methods)}, self.json_serialize_value({"error": "Metode ikke tillatt"}))
                         return self._apply_error_middlewares(response)
                     ctx = self._make_route_context(current_ctx, params)
                     deps = []
@@ -1664,7 +1694,11 @@ class Interpreter:
                             return self._apply_error_middlewares(response)
                     result = self.call_user_function(handler["function"], [ctx] + deps)
                     if isinstance(result, dict):
-                        return self._apply_response_middlewares(result)
+                        result = self._apply_response_middlewares(result)
+                        if method_text == "HEAD":
+                            result = dict(result)
+                            result["body"] = ""
+                        return result
                     return result
                 except ThrowSignal as signal:
                     response = self._web_error_response(str(signal), 500)

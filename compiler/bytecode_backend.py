@@ -255,9 +255,30 @@ def _guard_response() -> dict[str, Any]:
 def _match_web_route_spec(spec: Any, method: Any, path: Any) -> dict[str, str] | None:
     route_method, route_path = _split_web_route_spec(spec)
     request_method = _normalize_web_method(method)
-    if route_method and route_method != request_method:
+    if route_method and route_method != request_method and not (request_method == "HEAD" and route_method == "GET"):
         return None
     return _match_web_path(route_path, path)
+
+
+def _allow_web_methods_for_path(route_handlers: list[dict[str, Any]], path: Any) -> list[str]:
+    path_text = str(path)
+    methods: list[str] = []
+    seen: set[str] = set()
+    for handler in route_handlers:
+        spec = handler.get("spec", "")
+        route_method, route_path = _split_web_route_spec(spec)
+        if _match_web_path(route_path, path_text) is None:
+            continue
+        if route_method:
+            if route_method not in seen:
+                seen.add(route_method)
+                methods.append(route_method)
+            if route_method == "GET" and "HEAD" not in seen:
+                seen.add("HEAD")
+                methods.append("HEAD")
+    if methods and "OPTIONS" not in seen:
+        methods.append("OPTIONS")
+    return methods
 
 
 def _encode_json_text_map(mapping: Any) -> str:
@@ -2400,6 +2421,13 @@ class BytecodeVM:
                 method_text = _normalize_web_method(current_ctx.get("metode", ""))
                 path_text = str(current_ctx.get("sti", ""))
                 path_mismatch = False
+                if method_text == "OPTIONS":
+                    allow_methods = _allow_web_methods_for_path(self.route_handlers, path_text)
+                    if allow_methods:
+                        response = _make_web_response(204, {"allow": ", ".join(allow_methods)}, "")
+                        return self._apply_response_middlewares(response)
+                    response = _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
+                    return self._apply_error_middlewares(response)
                 for handler in self.route_handlers:
                     spec = handler.get("spec", "")
                     route_method, route_path = _split_web_route_spec(spec)
@@ -2416,7 +2444,8 @@ class BytecodeVM:
                         found = (handler, route_params)
                 if found is None:
                     if path_mismatch:
-                        response = _make_web_response(405, {"content-type": "application/json"}, json.dumps({"error": "Metode ikke tillatt"}, ensure_ascii=False))
+                        allow_methods = _allow_web_methods_for_path(self.route_handlers, path_text)
+                        response = _make_web_response(405, {"content-type": "application/json", "allow": ", ".join(allow_methods)}, json.dumps({"error": "Metode ikke tillatt"}, ensure_ascii=False))
                         return self._apply_error_middlewares(response)
                     response = _make_web_response(404, {"content-type": "application/json"}, json.dumps({"error": "Ikke funnet"}, ensure_ascii=False))
                     return self._apply_error_middlewares(response)
@@ -2430,7 +2459,11 @@ class BytecodeVM:
                         return self._apply_error_middlewares(_guard_response())
                 result = self.call_function(handler["function"], [ctx] + deps)
                 if isinstance(result, dict):
-                    return self._apply_response_middlewares(result)
+                    result = self._apply_response_middlewares(result)
+                    if method_text == "HEAD":
+                        result = dict(result)
+                        result["body"] = ""
+                    return result
                 return result
             except BytecodeThrow as exc:
                 response = _make_web_response(500, {"content-type": "application/json"}, json.dumps({"error": str(exc)}, ensure_ascii=False))

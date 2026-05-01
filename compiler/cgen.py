@@ -424,7 +424,7 @@ class CGenerator:
         self.indent += 1
         self.emit("char *method_copy = nl_strdup(method ? method : \"\");")
         self.emit("for (char *p = method_copy; p && *p; ++p) { *p = (char)toupper((unsigned char)*p); }")
-        self.emit("ok = strcmp(route_method, method_copy) == 0;")
+        self.emit("ok = strcmp(route_method, method_copy) == 0 || (strcmp(method_copy, \"HEAD\") == 0 && strcmp(route_method, \"GET\") == 0);")
         self.emit("free(method_copy);")
         self.indent -= 1
         self.emit("}")
@@ -445,6 +445,60 @@ class CGenerator:
         self.emit("free(route_method);")
         self.emit("free(route_path);")
         self.emit("return ok;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        self.emit("static char *nl_web_append_allow(char *current, const char *method, int *first) {")
+        self.indent += 1
+        self.emit("if (!method || !*method) { return current; }")
+        self.emit("if (!current) { current = nl_strdup(\"\"); }")
+        self.emit("size_t current_len = strlen(current);")
+        self.emit("size_t method_len = strlen(method);")
+        self.emit("size_t extra = current_len == 0 ? method_len + 1 : method_len + 2;")
+        self.emit("char *next = realloc(current, current_len + extra + 1);")
+        self.emit("if (!next) { perror(\"realloc\"); exit(1); }")
+        self.emit("current = next;")
+        self.emit("if (*first) { sprintf(current + current_len, \"%s\", method); *first = 0; } else { sprintf(current + current_len, \", %s\", method); }")
+        self.emit("return current;")
+        self.indent -= 1
+        self.emit("}")
+        self.emit()
+
+        unique_methods: list[str] = []
+        for handler in self.route_handlers:
+            route_method, _ = self._split_web_route_spec(handler["spec"])
+            if route_method and route_method not in unique_methods:
+                unique_methods.append(route_method)
+        if "GET" in unique_methods and "HEAD" not in unique_methods:
+            unique_methods.append("HEAD")
+        if "OPTIONS" not in unique_methods:
+            unique_methods.append("OPTIONS")
+
+        self.emit("static char *nl_web_allow_methods_for_path(const char *path) {")
+        self.indent += 1
+        for method_name in unique_methods:
+            self.emit(f"int allow_{method_name} = 0;")
+        self.emit("int saw_any = 0;")
+        for handler in self.route_handlers:
+            spec = handler["spec"].replace("\\", "\\\\").replace('"', '\\"')
+            route_method, _route_path = self._split_web_route_spec(handler["spec"])
+            self.emit(f"if (nl_web_route_path_match(\"{spec}\", path)) {{")
+            self.indent += 1
+            if route_method:
+                self.emit("saw_any = 1;")
+                self.emit(f"allow_{route_method} = 1;")
+                if route_method == "GET":
+                    self.emit("allow_HEAD = 1;")
+            self.indent -= 1
+            self.emit("}")
+        self.emit("if (!saw_any) { return nl_strdup(\"\"); }")
+        self.emit("allow_OPTIONS = 1;")
+        self.emit("char *result = nl_strdup(\"\");")
+        self.emit("int first = 1;")
+        for method_name in unique_methods:
+            self.emit(f"if (allow_{method_name}) {{ result = nl_web_append_allow(result, \"{method_name}\", &first); }}")
+        self.emit("return result;")
         self.indent -= 1
         self.emit("}")
         self.emit()
@@ -559,6 +613,19 @@ class CGenerator:
         self.emit("char *path = nl_web_request_path(current_ctx);")
         self.emit("int path_mismatch = 0;")
         self.emit("nl_map_text *result = NULL;")
+        self.emit("if (strcmp(method, \"OPTIONS\") == 0) {")
+        self.indent += 1
+        self.emit("char *allow = nl_web_allow_methods_for_path(path);")
+        self.emit("if (allow && *allow) {")
+        self.indent += 1
+        self.emit("nl_map_text *headers = nl_map_text_new();")
+        self.emit("nl_map_text_set(headers, \"allow\", allow);")
+        self.emit("return nl_web_apply_response_middlewares(nl_web_response_builder(204, headers, \"\"));")
+        self.indent -= 1
+        self.emit("}")
+        self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(404, \"Ikke funnet\"));")
+        self.indent -= 1
+        self.emit("}")
         exact_handlers = [handler for handler in self.route_handlers if "{" not in handler["spec"] and "}" not in handler["spec"]]
         param_handlers = [handler for handler in self.route_handlers if handler not in exact_handlers]
         for handler in exact_handlers + param_handlers:
@@ -593,7 +660,10 @@ class CGenerator:
         self.emit("nl_pop_try_frame();")
         self.emit("if (path_mismatch) {")
         self.indent += 1
-        self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(405, \"Metode ikke tillatt\"));")
+        self.emit("char *allow = nl_web_allow_methods_for_path(path);")
+        self.emit("nl_map_text *headers = nl_map_text_new();")
+        self.emit("nl_map_text_set(headers, \"allow\", allow);")
+        self.emit("return nl_web_apply_error_middlewares(nl_web_response_builder(405, headers, \"{\\\"error\\\":\\\"Metode ikke tillatt\\\"}\"));")
         self.indent -= 1
         self.emit("}")
         self.emit("if (!result) {")
@@ -601,7 +671,9 @@ class CGenerator:
         self.emit("return nl_web_apply_error_middlewares(nl_web_response_error(404, \"Ikke funnet\"));")
         self.indent -= 1
         self.emit("}")
-        self.emit("return nl_web_apply_response_middlewares(result);")
+        self.emit("result = nl_web_apply_response_middlewares(result);")
+        self.emit("if (strcmp(method, \"HEAD\") == 0 && result) { nl_map_text_set(result, \"body\", nl_strdup(\"\")); }")
+        self.emit("return result;")
         self.indent -= 1
         self.emit("} else {")
         self.indent += 1
