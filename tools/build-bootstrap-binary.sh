@@ -3,10 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
+BIN_DIR="${ROOT_DIR}/bin"
 BIN_PATH="${DIST_DIR}/norscode"
+NC_PATH="${BIN_DIR}/nc"
 SRC_PATH="${DIST_DIR}/norscode_launcher.c"
 
-mkdir -p "${DIST_DIR}"
+mkdir -p "${DIST_DIR}" "${BIN_DIR}"
 
 cat > "${SRC_PATH}" <<'EOF'
 #include <libgen.h>
@@ -78,4 +80,11 @@ EOF
 
 cc -O2 -Wall -Wextra -Werror -o "${BIN_PATH}" "${SRC_PATH}"
 rm -f "${SRC_PATH}"
+
+# CI and release workflows use ./bin/nc as the canonical developer entrypoint.
+# Keep the release binary in dist/ while also publishing a local launcher path.
+cp "${BIN_PATH}" "${NC_PATH}"
+chmod +x "${BIN_PATH}" "${NC_PATH}"
+
 printf 'Bygde bootstrap-binary: %s\n' "${BIN_PATH}"
+printf 'Oppdaterte lokal CLI: %s\n' "${NC_PATH}"
