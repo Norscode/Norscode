@@ -11,8 +11,7 @@ SRC_PATH="${DIST_DIR}/norscode_launcher.c"
 mkdir -p "${DIST_DIR}" "${BIN_DIR}"
 
 cat > "${SRC_PATH}" <<'EOF'
-#include <libgen.h>
-#include <limits.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,49 +22,77 @@ static void die(const char *message) {
     exit(1);
 }
 
-int main(int argc, char **argv) {
-    char resolved[PATH_MAX];
-    char launcher_path[PATH_MAX];
-    char main_script[PATH_MAX];
-    char *dircopy;
-    char *dir;
-    char *args[argc + 2];
-
-    if (argv[0] == NULL) {
-        fprintf(stderr, "norscode launcher: mangler argv[0]\n");
-        return 1;
+static char *xstrdup(const char *value) {
+    size_t len = strlen(value) + 1;
+    char *copy = (char *)malloc(len);
+    if (copy == NULL) {
+        die("malloc");
     }
+    memcpy(copy, value, len);
+    return copy;
+}
 
-    if (argv[0][0] == '/') {
-        snprintf(resolved, sizeof(resolved), "%s", argv[0]);
+static char *path_dirname(const char *path) {
+    char *copy = xstrdup(path);
+    char *slash = strrchr(copy, '/');
+    if (slash == NULL) {
+        free(copy);
+        return xstrdup(".");
+    }
+    if (slash == copy) {
+        slash[1] = '\0';
+        return copy;
+    }
+    *slash = '\0';
+    return copy;
+}
+
+static char *join2(const char *left, const char *right) {
+    size_t left_len = strlen(left);
+    size_t right_len = strlen(right);
+    int need_slash = left_len > 0 && left[left_len - 1] != '/';
+    size_t total = left_len + (size_t)need_slash + right_len + 1;
+    char *out = (char *)malloc(total);
+    if (out == NULL) {
+        die("malloc");
+    }
+    memcpy(out, left, left_len);
+    if (need_slash) {
+        out[left_len] = '/';
+        memcpy(out + left_len + 1, right, right_len + 1);
     } else {
-        if (getcwd(resolved, sizeof(resolved)) == NULL) {
-            die("getcwd");
-        }
-        size_t len = strlen(resolved);
-        if (len + 1 + strlen(argv[0]) + 1 >= sizeof(resolved)) {
-            fprintf(stderr, "norscode launcher: sti er for lang\n");
-            return 1;
-        }
-        resolved[len] = '/';
-        resolved[len + 1] = '\0';
-        strncat(resolved, argv[0], sizeof(resolved) - strlen(resolved) - 1);
+        memcpy(out + left_len, right, right_len + 1);
+    }
+    return out;
+}
+
+static char *resolve_argv0(const char *argv0) {
+    if (argv0 == NULL || argv0[0] == '\0') {
+        fprintf(stderr, "norscode launcher: mangler argv[0]\n");
+        exit(1);
+    }
+    if (argv0[0] == '/') {
+        return xstrdup(argv0);
+    }
+    char *cwd = getcwd(NULL, 0);
+    if (cwd == NULL) {
+        die("getcwd");
+    }
+    char *resolved = join2(cwd, argv0);
+    free(cwd);
+    return resolved;
+}
+
+int main(int argc, char **argv) {
+    char *resolved = resolve_argv0(argv[0]);
+    char *dir = path_dirname(resolved);
+    char *main_script = join2(dir, "../main.py");
+    char **args = (char **)calloc((size_t)argc + 2, sizeof(char *));
+    if (args == NULL) {
+        die("calloc");
     }
 
-    snprintf(launcher_path, sizeof(launcher_path), "%s", resolved);
-    dircopy = strdup(launcher_path);
-    if (dircopy == NULL) {
-        die("strdup");
-    }
-    dir = dirname(dircopy);
-    if (snprintf(main_script, sizeof(main_script), "%s/../main.py", dir) >= (int)sizeof(main_script)) {
-        fprintf(stderr, "norscode launcher: main.py-sti er for lang\n");
-        free(dircopy);
-        return 1;
-    }
-    free(dircopy);
-
-    args[0] = "python3";
+    args[0] = (char *)"python3";
     args[1] = main_script;
     for (int i = 1; i < argc; i++) {
         args[i + 1] = argv[i];
@@ -81,8 +108,6 @@ EOF
 cc -O2 -Wall -Wextra -Werror -o "${BIN_PATH}" "${SRC_PATH}"
 rm -f "${SRC_PATH}"
 
-# CI and release workflows use ./bin/nc as the canonical developer entrypoint.
-# Keep the release binary in dist/ while also publishing a local launcher path.
 cp "${BIN_PATH}" "${NC_PATH}"
 chmod +x "${BIN_PATH}" "${NC_PATH}"
 
