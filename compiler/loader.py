@@ -252,3 +252,13 @@ class ModuleLoader:
 
         merged = self._merge_programs([*imported_programs, program])
         return merged, alias_map
+
+    def load(self, name):
+        """Backward-compatible entry-file loader alias.
+
+        Older compiler/runtime entry points call ``ModuleLoader.load(...)``.
+        The current loader API uses ``load_entry_file(...)``.  Keeping this
+        alias prevents those callers from failing before compile diagnostics can
+        reach the real selfhost lexer pipeline.
+        """
+        return self.load_entry_file(name)
