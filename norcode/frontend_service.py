@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from compiler.lexer import Lexer
-from compiler.loader import ModuleLoader
 
+from norcode.module_service import load_module_graph
 from norcode.parser_service import parse_text
 from norcode.semantic_service import SemanticResult, analyze_program
 
@@ -65,13 +65,11 @@ def parse_source_file(path: str) -> Any:
 
 
 def analyze_source_file(path: str) -> FrontendResult:
-    source_path = Path(path).expanduser().resolve()
-    loader = ModuleLoader(source_path)
-    program, alias_map = loader.load()
-    semantic = analyze_program(program)
+    module_graph = load_module_graph(path)
+    semantic = analyze_program(module_graph.program)
     return FrontendResult(
-        source_path=source_path,
-        program=program,
-        alias_map=alias_map,
+        source_path=module_graph.source_path,
+        program=module_graph.program,
+        alias_map=module_graph.alias_map,
         semantic=semantic,
     )
