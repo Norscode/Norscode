@@ -8,35 +8,55 @@ command can later own:
 - execution handler
 - documentation metadata
 - selfhost/runtime compatibility metadata
-
-The registry intentionally starts as metadata-only so it can be introduced
-without changing runtime behavior.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from norcode.commands.base import CommandModule
+from norcode.commands.check import CHECK_COMMAND
+from norcode.commands.run import RUN_COMMAND
+from norcode.commands.test import TEST_COMMAND
 
 
-@dataclass(frozen=True)
-class CommandSpec:
-    name: str
-    help: str
-    bootstrap_only: bool = False
-    experimental: bool = False
-
-
-COMMANDS: tuple[CommandSpec, ...] = (
-    CommandSpec("run", "Bygg og kjør en .no-fil"),
-    CommandSpec("repl", "Start en enkel interaktiv Norscode-REPL"),
-    CommandSpec("check", "Parser og valider en .no-fil uten å bygge"),
-    CommandSpec("build", "Generer C og bygg kjørbar fil", bootstrap_only=True),
-    CommandSpec("test", "Kjør én testfil eller alle i tests/"),
-    CommandSpec("ci", "Kjør lokal CI-sekvens (snapshot, parity, test)", bootstrap_only=True),
-    CommandSpec("selfhost-chain-run", "Kjør full selfhost-kjede", experimental=True),
-    CommandSpec("bytecode-run", "Kjør bytecode-backenden"),
-    CommandSpec("serve", "Start en lokal webserver for en Norscode-app"),
+COMMANDS: tuple[CommandModule, ...] = (
+    RUN_COMMAND,
+    CHECK_COMMAND,
+    TEST_COMMAND,
+    CommandModule(
+        name="repl",
+        help="Start en enkel interaktiv Norscode-REPL",
+        register_arguments=lambda parser: None,
+    ),
+    CommandModule(
+        name="build",
+        help="Generer C og bygg kjørbar fil",
+        register_arguments=lambda parser: parser.add_argument("file"),
+        bootstrap_only=True,
+    ),
+    CommandModule(
+        name="ci",
+        help="Kjør lokal CI-sekvens (snapshot, parity, test)",
+        register_arguments=lambda parser: None,
+        bootstrap_only=True,
+    ),
+    CommandModule(
+        name="selfhost-chain-run",
+        help="Kjør full selfhost-kjede",
+        register_arguments=lambda parser: parser.add_argument("file"),
+        experimental=True,
+    ),
+    CommandModule(
+        name="bytecode-run",
+        help="Kjør bytecode-backenden",
+        register_arguments=lambda parser: parser.add_argument("file"),
+    ),
+    CommandModule(
+        name="serve",
+        help="Start en lokal webserver for en Norscode-app",
+        register_arguments=lambda parser: parser.add_argument("file"),
+    ),
 )
+
 
 
 def command_names() -> list[str]:
