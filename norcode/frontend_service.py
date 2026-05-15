@@ -13,8 +13,9 @@ from typing import Any
 
 from compiler.lexer import Lexer
 from compiler.loader import ModuleLoader
-from compiler.parser import Parser
-from compiler.semantic import SemanticAnalyzer
+
+from norcode.parser_service import parse_text
+from norcode.semantic_service import SemanticResult, analyze_program
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class FrontendResult:
     source_path: Path
     program: Any
     alias_map: dict[str, str]
-    analyzer: SemanticAnalyzer
+    semantic: SemanticResult
 
 
 
@@ -53,7 +54,7 @@ def lex_source_file(path: str) -> list[TokenInfo]:
 
 
 def parse_source_text(source: str) -> Any:
-    return Parser(Lexer(source)).parse()
+    return parse_text(source).program
 
 
 
@@ -67,11 +68,10 @@ def analyze_source_file(path: str) -> FrontendResult:
     source_path = Path(path).expanduser().resolve()
     loader = ModuleLoader(source_path)
     program, alias_map = loader.load()
-    analyzer = SemanticAnalyzer()
-    analyzer.analyze(program)
+    semantic = analyze_program(program)
     return FrontendResult(
         source_path=source_path,
         program=program,
         alias_map=alias_map,
-        analyzer=analyzer,
+        semantic=semantic,
     )
