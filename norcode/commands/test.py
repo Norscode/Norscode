@@ -1,7 +1,7 @@
 """Test command module.
 
-The actual test execution still uses the legacy runtime implementation, but
-the command entrypoint is now separated from `main.py`.
+The command now goes through the compiler service facade instead of importing
+legacy runtime helpers from `main.py` directly.
 """
 
 from __future__ import annotations
@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 from norcode.commands.base import CommandModule
+from norcode.compiler_service import run_single_test_file, run_test_suite
 
 
 
@@ -20,15 +21,13 @@ def register_arguments(parser) -> None:
 
 
 def run(args) -> int:
-    from main import run_all_tests, run_test_file
-
     if args.file:
-        result = run_test_file(args.file, verbose=args.verbose)
+        result = run_single_test_file(args.file, verbose=args.verbose)
         if args.json:
             print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("success") else 1
 
-    results = run_all_tests(verbose=args.verbose, quiet=args.json)
+    results = run_test_suite(verbose=args.verbose, quiet=args.json)
     failed = sum(1 for item in results if not item["success"])
 
     if args.json:
