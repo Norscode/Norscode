@@ -3,6 +3,7 @@
 Runs the full phase-1 lexer QA flow:
 
 - selfhost lexer readiness
+- selfhost lexer compile smoke-check
 - Python lexer fixture presence/check
 - selfhost lexer runtime parity against fixtures
 
@@ -16,9 +17,10 @@ import json
 from pathlib import Path
 
 from norcode.commands.base import CommandModule
+from norcode.compiler_core import compile_source
 from norcode.lexer_parity_service import tokens_from_current_lexer_file
 from norcode.selfhost_lexer_runner import run_selfhost_lexer
-from norcode.selfhost_lexer_service import check_selfhost_lexer
+from norcode.selfhost_lexer_service import DEFAULT_SELFHOST_LEXER, check_selfhost_lexer
 
 
 DEFAULT_GLOBS = ("tests/*.no", "examples/*.no")
@@ -28,6 +30,7 @@ DEFAULT_GLOBS = ("tests/*.no", "examples/*.no")
 def register_arguments(parser) -> None:
     parser.add_argument("files", nargs="*", help="Valgfrie .no-filer. Hvis tomt brukes tests/*.no og examples/*.no")
     parser.add_argument("--write-fixtures", action="store_true", help="Skriv/oppdater Python lexer token fixtures først")
+    parser.add_argument("--skip-runtime", action="store_true", help="Kjør bare readiness + compile + fixture checks")
     parser.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
 
 
@@ -66,8 +69,23 @@ def _ensure_fixture(source_path: Path, write: bool) -> tuple[bool, bool, int]:
 
 
 
+def _compile_selfhost_lexer() -> tuple[bool, list[str], list[str]]:
+    errors: list[str] = []
+    function_names: list[str] = []
+    try:
+        compile_result = compile_source(str(DEFAULT_SELFHOST_LEXER))
+        functions = compile_result.bytecode.get("functions", {})
+        if isinstance(functions, dict):
+            function_names = sorted(str(name) for name in functions.keys())
+    except Exception as exc:
+        errors.append(str(exc))
+    return not errors, function_names, errors
+
+
+
 def run(args) -> int:
     readiness = check_selfhost_lexer()
+    compile_ok, compile_functions, compile_errors = _compile_selfhost_lexer() if readiness.ok else (False, [], [])
     files = _discover_files(args.files)
     results: list[dict[str, object]] = []
 
@@ -76,12 +94,16 @@ def run(args) -> int:
         fixture_path = _fixture_path(source_path)
         fixture_ok, fixture_written, expected_count = _ensure_fixture(source_path, args.write_fixtures)
 
-        runtime_result = run_selfhost_lexer(str(source_path)) if readiness.ok and fixture_ok else None
+        runtime_result = None
+        if readiness.ok and compile_ok and fixture_ok and not args.skip_runtime:
+            runtime_result = run_selfhost_lexer(str(source_path))
+
         actual_tokens = runtime_result.tokens if runtime_result else []
         expected_tokens = json.loads(fixture_path.read_text(encoding="utf-8")) if fixture_path.exists() else []
         parity_ok = bool(runtime_result and runtime_result.ok and expected_tokens == actual_tokens)
+        file_ok = fixture_ok if args.skip_runtime else parity_ok
 
-        if readiness.ok and fixture_ok and parity_ok:
+        if readiness.ok and compile_ok and file_ok:
             passed += 1
 
         results.append(
@@ -91,6 +113,7 @@ def run(args) -> int:
                 "fixture_ok": fixture_ok,
                 "fixture_written": fixture_written,
                 "runtime_ok": bool(runtime_result and runtime_result.ok),
+                "runtime_skipped": bool(args.skip_runtime),
                 "parity_ok": parity_ok,
                 "expected_count": expected_count,
                 "actual_count": len(actual_tokens),
@@ -99,7 +122,7 @@ def run(args) -> int:
         )
 
     summary = {
-        "ok": readiness.ok and passed == len(files),
+        "ok": readiness.ok and compile_ok and passed == len(files),
         "readiness": {
             "ok": readiness.ok,
             "exists": readiness.exists,
@@ -107,6 +130,12 @@ def run(args) -> int:
             "missing_functions": readiness.missing_functions,
             "missing_token_markers": readiness.missing_token_markers,
         },
+        "compile": {
+            "ok": compile_ok,
+            "functions": compile_functions,
+            "errors": compile_errors,
+        },
+        "runtime_skipped": bool(args.skip_runtime),
         "passed": passed,
         "total": len(files),
         "results": results,
@@ -117,8 +146,11 @@ def run(args) -> int:
     else:
         print(f"Selfhost lexer suite: {passed}/{len(files)} OK")
         print(f"Readiness: {'OK' if readiness.ok else 'FEIL'}")
+        print(f"Compile: {'OK' if compile_ok else 'FEIL'}")
+        for error in compile_errors:
+            print(f"  compile: {error}")
         for item in results:
-            if item["parity_ok"]:
+            if item["fixture_ok"] and (args.skip_runtime or item["parity_ok"]):
                 continue
             print(f"- FEIL: {item['source']}")
             if not item["fixture_ok"]:
