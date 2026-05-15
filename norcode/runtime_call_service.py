@@ -23,6 +23,7 @@ class RuntimeCallResult:
     value: Any = None
     errors: list[str] = field(default_factory=list)
     available_functions: list[str] = field(default_factory=list)
+    candidate_functions: list[str] = field(default_factory=list)
 
 
 
@@ -63,10 +64,12 @@ def call_function(source_file: str, function_name: str, args: list[Any] | None =
     source_path = Path(source_file).expanduser().resolve()
     call_args = list(args or [])
     available_functions: list[str] = []
+    candidates: list[str] = []
 
     try:
         compile_result = compile_source(str(source_path))
         available_functions = _bytecode_function_names(compile_result.bytecode)
+        candidates = _candidate_function_names(function_name, available_functions)
         vm = create_vm(compile_result.bytecode)
     except Exception as exc:
         return RuntimeCallResult(
@@ -76,10 +79,10 @@ def call_function(source_file: str, function_name: str, args: list[Any] | None =
             args=call_args,
             errors=[f"compile/runtime setup failed: {exc}"],
             available_functions=available_functions,
+            candidate_functions=candidates,
         )
 
     errors: list[str] = []
-    candidates = _candidate_function_names(function_name, available_functions)
     for candidate in candidates:
         try:
             value = vm.call_function(candidate, call_args)
@@ -90,6 +93,7 @@ def call_function(source_file: str, function_name: str, args: list[Any] | None =
                 args=call_args,
                 value=value,
                 available_functions=available_functions,
+                candidate_functions=candidates,
             )
         except Exception as exc:
             errors.append(f"{candidate}: {exc}")
@@ -101,4 +105,5 @@ def call_function(source_file: str, function_name: str, args: list[Any] | None =
         args=call_args,
         errors=errors or ["function call failed"],
         available_functions=available_functions,
+        candidate_functions=candidates,
     )
