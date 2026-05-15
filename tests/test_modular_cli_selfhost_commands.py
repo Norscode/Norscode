@@ -9,6 +9,7 @@ from norcode.commands.registry import COMMANDS, command_names
 REQUIRED_COMMANDS = {
     "runtime-call",
     "selfhost-lexer-token-smoke",
+    "selfhost-lexer-list-smoke",
     "selfhost-lexer-run",
     "selfhost-lexer-suite",
 }
@@ -35,6 +36,7 @@ def test_selfhost_runtime_commands_are_parseable_by_modular_cli() -> None:
     cases = [
         ["runtime-call", "tests/selfhost_lexer_token_smoke.no", "start"],
         ["selfhost-lexer-token-smoke"],
+        ["selfhost-lexer-list-smoke"],
         ["selfhost-lexer-run", "tests/test_empty_list_return.no"],
         ["selfhost-lexer-suite", "--skip-runtime"],
     ]
