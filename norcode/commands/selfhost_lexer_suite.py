@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from norcode.commands.base import CommandModule
 from norcode.compiler_core import compile_source
@@ -83,6 +84,48 @@ def _compile_selfhost_lexer() -> tuple[bool, list[str], list[str]]:
 
 
 
+def _first_token_diff(expected: Any, actual: Any) -> dict[str, Any] | None:
+    if not isinstance(expected, list) or not isinstance(actual, list):
+        return {"index": 0, "expected": expected, "actual": actual}
+    limit = min(len(expected), len(actual))
+    for index in range(limit):
+        if expected[index] != actual[index]:
+            return {"index": index, "expected": expected[index], "actual": actual[index]}
+    if len(expected) != len(actual):
+        return {
+            "index": limit,
+            "expected": expected[limit] if limit < len(expected) else None,
+            "actual": actual[limit] if limit < len(actual) else None,
+        }
+    return None
+
+
+
+def _failure_stage(
+    *,
+    readiness_ok: bool,
+    compile_ok: bool,
+    fixture_ok: bool,
+    runtime_ok: bool,
+    parity_ok: bool,
+    skip_runtime: bool,
+) -> str:
+    if not readiness_ok:
+        return "readiness"
+    if not compile_ok:
+        return "compile"
+    if not fixture_ok:
+        return "fixture"
+    if skip_runtime:
+        return "ok"
+    if not runtime_ok:
+        return "runtime"
+    if not parity_ok:
+        return "parity"
+    return "ok"
+
+
+
 def run(args) -> int:
     readiness = check_selfhost_lexer()
     compile_ok, compile_functions, compile_errors = _compile_selfhost_lexer() if readiness.ok else (False, [], [])
@@ -90,6 +133,15 @@ def run(args) -> int:
     results: list[dict[str, object]] = []
 
     passed = 0
+    stage_counts: dict[str, int] = {
+        "ok": 0,
+        "readiness": 0,
+        "compile": 0,
+        "fixture": 0,
+        "runtime": 0,
+        "parity": 0,
+    }
+
     for source_path in files:
         fixture_path = _fixture_path(source_path)
         fixture_ok, fixture_written, expected_count = _ensure_fixture(source_path, args.write_fixtures)
@@ -100,8 +152,18 @@ def run(args) -> int:
 
         actual_tokens = runtime_result.tokens if runtime_result else []
         expected_tokens = json.loads(fixture_path.read_text(encoding="utf-8")) if fixture_path.exists() else []
+        runtime_ok = bool(runtime_result and runtime_result.ok)
         parity_ok = bool(runtime_result and runtime_result.ok and expected_tokens == actual_tokens)
         file_ok = fixture_ok if args.skip_runtime else parity_ok
+        stage = _failure_stage(
+            readiness_ok=readiness.ok,
+            compile_ok=compile_ok,
+            fixture_ok=fixture_ok,
+            runtime_ok=runtime_ok,
+            parity_ok=parity_ok,
+            skip_runtime=bool(args.skip_runtime),
+        )
+        stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
         if readiness.ok and compile_ok and file_ok:
             passed += 1
@@ -110,13 +172,15 @@ def run(args) -> int:
             {
                 "source": str(source_path),
                 "fixture": str(fixture_path),
+                "stage": stage,
                 "fixture_ok": fixture_ok,
                 "fixture_written": fixture_written,
-                "runtime_ok": bool(runtime_result and runtime_result.ok),
+                "runtime_ok": runtime_ok,
                 "runtime_skipped": bool(args.skip_runtime),
                 "parity_ok": parity_ok,
                 "expected_count": expected_count,
                 "actual_count": len(actual_tokens),
+                "first_diff": _first_token_diff(expected_tokens, actual_tokens) if runtime_ok and not parity_ok else None,
                 "runtime_errors": runtime_result.errors if runtime_result else [],
             }
         )
@@ -138,6 +202,7 @@ def run(args) -> int:
         "runtime_skipped": bool(args.skip_runtime),
         "passed": passed,
         "total": len(files),
+        "stage_counts": stage_counts,
         "results": results,
     }
 
@@ -147,17 +212,22 @@ def run(args) -> int:
         print(f"Selfhost lexer suite: {passed}/{len(files)} OK")
         print(f"Readiness: {'OK' if readiness.ok else 'FEIL'}")
         print(f"Compile: {'OK' if compile_ok else 'FEIL'}")
+        print("Stages:")
+        for stage_name in ("ok", "readiness", "compile", "fixture", "runtime", "parity"):
+            print(f"  {stage_name}: {stage_counts.get(stage_name, 0)}")
         for error in compile_errors:
             print(f"  compile: {error}")
         for item in results:
-            if item["fixture_ok"] and (args.skip_runtime or item["parity_ok"]):
+            if item["stage"] == "ok":
                 continue
-            print(f"- FEIL: {item['source']}")
+            print(f"- FEIL [{item['stage']}]: {item['source']}")
             if not item["fixture_ok"]:
                 print(f"  fixture mangler/utdatert: {item['fixture']}")
             if item["runtime_errors"]:
                 for error in item["runtime_errors"]:
                     print(f"  runtime: {error}")
+            if item["first_diff"]:
+                print(f"  first diff: {item['first_diff']}")
 
     return 0 if summary["ok"] else 1
 
