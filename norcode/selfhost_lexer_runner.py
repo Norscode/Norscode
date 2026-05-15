@@ -3,10 +3,8 @@
 This module is the planned execution boundary for running the Norscode-native
 lexer (`selfhost/lexer/lexer_m1.no`) through the Norscode runtime.
 
-Today the runner is intentionally conservative: it verifies readiness and
-returns a structured status instead of pretending the selfhost lexer is already
-wired into the VM call ABI.  The next implementation step is to expose a stable
-runtime entrypoint that can call `lex(kilde)` and collect the token list.
+The runner now routes through `runtime_call_service`, which becomes the stable
+ABI boundary between selfhost compiler components and the VM/runtime.
 """
 
 from __future__ import annotations
@@ -15,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from norcode.runtime_call_service import call_function
 from norcode.selfhost_lexer_service import DEFAULT_SELFHOST_LEXER, check_selfhost_lexer
 
 
@@ -30,12 +29,6 @@ class SelfhostLexerRunResult:
 
 
 def run_selfhost_lexer(source_file: str, lexer_path: str | Path = DEFAULT_SELFHOST_LEXER) -> SelfhostLexerRunResult:
-    """Run the selfhost lexer once the VM call ABI is available.
-
-    For now this function acts as a safe integration boundary.  It prevents the
-    CLI and CI from depending on unfinished runtime behavior while still giving
-    the project a stable API to target.
-    """
     status = check_selfhost_lexer(lexer_path)
     source_path = Path(source_file).expanduser().resolve()
 
@@ -55,10 +48,13 @@ def run_selfhost_lexer(source_file: str, lexer_path: str | Path = DEFAULT_SELFHO
             errors=errors,
         )
 
+    runtime_result = call_function(str(status.path), "lex", [source_path.read_text(encoding="utf-8")])
+
     return SelfhostLexerRunResult(
-        ok=False,
+        ok=runtime_result.ok,
         ready=True,
         lexer_path=status.path,
         source_path=source_path,
-        errors=["runtime call ABI for selfhost lexer is not connected yet"],
+        tokens=runtime_result.value or [],
+        errors=list(runtime_result.errors),
     )
