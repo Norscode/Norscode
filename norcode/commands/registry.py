@@ -23,6 +23,7 @@ from norcode.commands.lexer_parity_fixture import LEXER_PARITY_FIXTURE_COMMAND
 from norcode.commands.lexer_parity_suite import LEXER_PARITY_SUITE_COMMAND
 from norcode.commands.parser_parity_fixture import PARSER_PARITY_FIXTURE_COMMAND
 from norcode.commands.run import RUN_COMMAND
+from norcode.commands.runtime_call import RUNTIME_CALL_COMMAND
 from norcode.commands.selfhost_lexer_compile_check import SELFHOST_LEXER_COMPILE_CHECK_COMMAND
 from norcode.commands.selfhost_lexer_parity import SELFHOST_LEXER_PARITY_COMMAND
 from norcode.commands.selfhost_lexer_run import SELFHOST_LEXER_RUN_COMMAND
@@ -44,6 +45,7 @@ COMMANDS: tuple[CommandModule, ...] = (
     LEXER_PARITY_FIXTURE_COMMAND,
     LEXER_PARITY_CHECK_COMMAND,
     LEXER_PARITY_SUITE_COMMAND,
+    RUNTIME_CALL_COMMAND,
     SELFHOST_LEXER_STATUS_COMMAND,
     SELFHOST_LEXER_COMPILE_CHECK_COMMAND,
     SELFHOST_LEXER_RUN_COMMAND,
