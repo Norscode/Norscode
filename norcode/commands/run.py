@@ -1,13 +1,13 @@
 """Run command module.
 
-This is the first command moved to the modular dispatch contract.  It still
-calls the legacy compiler implementation, but the command handler now lives
-outside `main.py`.
+This command now routes through the compiler service facade instead of
+importing `main.py` directly.
 """
 
 from __future__ import annotations
 
 from norcode.commands.base import CommandModule
+from norcode.compiler_service import run_program_file
 
 
 
@@ -17,9 +17,7 @@ def register_arguments(parser) -> None:
 
 
 def run(args) -> int:
-    from main import run_program
-
-    run_program(args.file)
+    run_program_file(args.file)
     return 0
 
 
