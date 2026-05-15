@@ -4,6 +4,7 @@ Runs the full phase-1 lexer QA flow:
 
 - selfhost lexer readiness
 - selfhost lexer compile smoke-check
+- token object runtime smoke-check
 - Python lexer fixture presence/check
 - selfhost lexer runtime parity against fixtures
 
@@ -20,11 +21,14 @@ from typing import Any
 from norcode.commands.base import CommandModule
 from norcode.compiler_core import compile_source
 from norcode.lexer_parity_service import tokens_from_current_lexer_file
+from norcode.runtime_call_service import call_function
 from norcode.selfhost_lexer_runner import run_selfhost_lexer
 from norcode.selfhost_lexer_service import DEFAULT_SELFHOST_LEXER, check_selfhost_lexer
+from norcode.token_validator import validate_token_stream
 
 
 DEFAULT_GLOBS = ("tests/*.no", "examples/*.no")
+DEFAULT_TOKEN_SMOKE = Path("tests/selfhost_lexer_token_smoke.no")
 
 
 
@@ -32,6 +36,7 @@ def register_arguments(parser) -> None:
     parser.add_argument("files", nargs="*", help="Valgfrie .no-filer. Hvis tomt brukes tests/*.no og examples/*.no")
     parser.add_argument("--write-fixtures", action="store_true", help="Skriv/oppdater Python lexer token fixtures først")
     parser.add_argument("--skip-runtime", action="store_true", help="Kjør bare readiness + compile + fixture checks")
+    parser.add_argument("--skip-token-smoke", action="store_true", help="Hopp over minimal token object runtime smoke-test")
     parser.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
 
 
@@ -84,6 +89,28 @@ def _compile_selfhost_lexer() -> tuple[bool, list[str], list[str]]:
 
 
 
+def _run_token_smoke() -> dict[str, Any]:
+    smoke_path = DEFAULT_TOKEN_SMOKE.expanduser().resolve()
+    runtime = call_function(str(smoke_path), "start", [])
+    token = runtime.value if isinstance(runtime.value, dict) else None
+    tokens = [token, {"type": "EOF", "value": "", "line": 1, "column": 2}] if token else []
+    validation = validate_token_stream(tokens)
+    return {
+        "ok": bool(runtime.ok and token is not None and validation.ok),
+        "source": str(smoke_path),
+        "runtime_ok": runtime.ok,
+        "token_object_ok": token is not None,
+        "validation_ok": validation.ok,
+        "called_function": runtime.function_name if runtime.ok else None,
+        "candidate_functions": runtime.candidate_functions,
+        "available_functions": runtime.available_functions,
+        "value": runtime.value,
+        "errors": runtime.errors,
+        "validation_errors": validation.errors,
+    }
+
+
+
 def _first_token_diff(expected: Any, actual: Any) -> dict[str, Any] | None:
     if not isinstance(expected, list) or not isinstance(actual, list):
         return {"index": 0, "expected": expected, "actual": actual}
@@ -105,6 +132,7 @@ def _failure_stage(
     *,
     readiness_ok: bool,
     compile_ok: bool,
+    token_smoke_ok: bool,
     fixture_ok: bool,
     runtime_ok: bool,
     validation_ok: bool,
@@ -115,10 +143,12 @@ def _failure_stage(
         return "readiness"
     if not compile_ok:
         return "compile"
+    if skip_runtime:
+        return "ok" if fixture_ok else "fixture"
+    if not token_smoke_ok:
+        return "token_smoke"
     if not fixture_ok:
         return "fixture"
-    if skip_runtime:
-        return "ok"
     if not runtime_ok:
         return "runtime"
     if not validation_ok:
@@ -132,6 +162,10 @@ def _failure_stage(
 def run(args) -> int:
     readiness = check_selfhost_lexer()
     compile_ok, compile_functions, compile_errors = _compile_selfhost_lexer() if readiness.ok else (False, [], [])
+    token_smoke = {"ok": True, "skipped": True}
+    if readiness.ok and compile_ok and not args.skip_runtime and not args.skip_token_smoke:
+        token_smoke = _run_token_smoke()
+        token_smoke["skipped"] = False
     files = _discover_files(args.files)
     results: list[dict[str, object]] = []
 
@@ -140,6 +174,7 @@ def run(args) -> int:
         "ok": 0,
         "readiness": 0,
         "compile": 0,
+        "token_smoke": 0,
         "fixture": 0,
         "runtime": 0,
         "validation": 0,
@@ -151,7 +186,7 @@ def run(args) -> int:
         fixture_ok, fixture_written, expected_count = _ensure_fixture(source_path, args.write_fixtures)
 
         runtime_result = None
-        if readiness.ok and compile_ok and fixture_ok and not args.skip_runtime:
+        if readiness.ok and compile_ok and token_smoke.get("ok") and fixture_ok and not args.skip_runtime:
             runtime_result = run_selfhost_lexer(str(source_path))
 
         actual_tokens = runtime_result.tokens if runtime_result else []
@@ -165,6 +200,7 @@ def run(args) -> int:
         stage = _failure_stage(
             readiness_ok=readiness.ok,
             compile_ok=compile_ok,
+            token_smoke_ok=bool(token_smoke.get("ok")),
             fixture_ok=fixture_ok,
             runtime_ok=runtime_ok,
             validation_ok=validation_ok,
@@ -173,7 +209,7 @@ def run(args) -> int:
         )
         stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
-        if readiness.ok and compile_ok and file_ok:
+        if readiness.ok and compile_ok and token_smoke.get("ok") and file_ok:
             passed += 1
 
         results.append(
@@ -199,7 +235,7 @@ def run(args) -> int:
         )
 
     summary = {
-        "ok": readiness.ok and compile_ok and passed == len(files),
+        "ok": readiness.ok and compile_ok and bool(token_smoke.get("ok")) and passed == len(files),
         "readiness": {
             "ok": readiness.ok,
             "exists": readiness.exists,
@@ -212,6 +248,7 @@ def run(args) -> int:
             "functions": compile_functions,
             "errors": compile_errors,
         },
+        "token_smoke": token_smoke,
         "runtime_skipped": bool(args.skip_runtime),
         "passed": passed,
         "total": len(files),
@@ -225,11 +262,21 @@ def run(args) -> int:
         print(f"Selfhost lexer suite: {passed}/{len(files)} OK")
         print(f"Readiness: {'OK' if readiness.ok else 'FEIL'}")
         print(f"Compile: {'OK' if compile_ok else 'FEIL'}")
+        if not args.skip_runtime:
+            print(f"Token smoke: {'OK' if token_smoke.get('ok') else 'FEIL'}")
         print("Stages:")
-        for stage_name in ("ok", "readiness", "compile", "fixture", "runtime", "validation", "parity"):
+        for stage_name in ("ok", "readiness", "compile", "token_smoke", "fixture", "runtime", "validation", "parity"):
             print(f"  {stage_name}: {stage_counts.get(stage_name, 0)}")
         for error in compile_errors:
             print(f"  compile: {error}")
+        if not token_smoke.get("ok"):
+            print(f"- FEIL [token_smoke]: {token_smoke.get('source')}")
+            if token_smoke.get("called_function"):
+                print(f"  called_function: {token_smoke.get('called_function')}")
+            for error in token_smoke.get("errors", []):
+                print(f"  runtime: {error}")
+            for error in token_smoke.get("validation_errors", []):
+                print(f"  validation: {error}")
         for item in results:
             if item["stage"] == "ok":
                 continue
