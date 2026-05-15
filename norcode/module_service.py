@@ -24,8 +24,8 @@ class ModuleLoadResult:
 
 def load_module_graph(path: str) -> ModuleLoadResult:
     source_path = Path(path).expanduser().resolve()
-    loader = ModuleLoader(source_path)
-    program, alias_map = loader.load()
+    loader = ModuleLoader(source_path.parent)
+    program, alias_map = loader.load_entry_file(source_path.name)
     return ModuleLoadResult(
         source_path=source_path,
         program=program,
