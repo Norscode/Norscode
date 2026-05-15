@@ -7,10 +7,11 @@ from pathlib import Path
 from .toml_compat import loads as toml_loads
 from typing import Any
 
-from .bytecode_backend import compile_program_to_bytecode, BytecodeVM
 from .ast_bridge import program_from_data
 from .selfhost_ast_bridge import program_payload_to_ast
 from .selfhost_parser import parse_selfhost_program
+from norcode.bytecode_service import compile_program_to_bytecode
+from norcode.runtime_service import RuntimeOptions, run_compiled_bytecode
 
 
 class SelfhostChainError(RuntimeError):
@@ -125,8 +126,7 @@ def run_chain(
     _source_path, bundle = build_selfhost_ast_bundle(source_file)
     program, alias_map = program_from_data(bundle)
     bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
-    vm = BytecodeVM(
-        bytecode,
+    options = RuntimeOptions(
         trace=trace,
         max_steps=max_steps,
         trace_focus=trace_focus,
@@ -135,16 +135,9 @@ def run_chain(
         expr_probe_log=expr_probe_log,
     )
     try:
-        return vm.run()
+        return run_compiled_bytecode(bytecode, options=options)
     except Exception as exc:
-        tail = vm.get_trace_tail() if hasattr(vm, "get_trace_tail") else []
-        probe = vm.dump_expr_probe() if hasattr(vm, "dump_expr_probe") else ""
-        parts = [str(exc)]
-        if trace and tail:
-            parts.append("TRACE TAIL:\n" + "\n".join(tail))
-        if probe:
-            parts.append("EXPR PROBE:\n" + probe.rstrip())
-        raise SelfhostChainError("\n".join(parts)) from exc
+        raise SelfhostChainError(str(exc)) from exc
 
 
 def _default_chain_cases(project_root: Path) -> list[str]:
