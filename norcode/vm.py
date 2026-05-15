@@ -16,6 +16,9 @@ class VMRuntime(Protocol):
     def run(self) -> Any:
         ...
 
+    def call_function(self, function_name: str, args: list[Any]) -> Any:
+        ...
+
     def get_trace_tail(self) -> list[str]:
         ...
 
@@ -33,6 +36,11 @@ class PythonBytecodeVMAdapter:
 
     def run(self) -> Any:
         return self._vm.run()
+
+    def call_function(self, function_name: str, args: list[Any]) -> Any:
+        if not hasattr(self._vm, "call_function"):
+            raise RuntimeError("Aktiv VM støtter ikke call_function")
+        return self._vm.call_function(function_name, args)
 
     def get_trace_tail(self) -> list[str]:
         if hasattr(self._vm, "get_trace_tail"):
