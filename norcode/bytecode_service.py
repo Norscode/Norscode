@@ -12,8 +12,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from compiler.ast_bridge import load_source_as_program, read_ast
+from compiler.ast_bridge import load_source_as_program
 from compiler.bytecode_backend import compile_program_to_bytecode
+
+from norcode.ast_service import load_ast_file
 from norcode.vm import create_vm
 
 
@@ -28,11 +30,11 @@ def compile_source_file_to_bytecode(path: str, *, alias_map: dict[str, str] | No
 
 
 def compile_ast_file_to_bytecode(path: str, *, alias_map: dict[str, str] | None = None) -> dict[str, Any]:
-    program, loaded_alias_map = read_ast(Path(path).expanduser().resolve())
-    merged_alias_map = dict(loaded_alias_map or {})
+    ast_document = load_ast_file(path)
+    merged_alias_map = dict(ast_document.alias_map or {})
     if alias_map:
         merged_alias_map.update(alias_map)
-    return compile_program_to_bytecode(program, alias_map=merged_alias_map)
+    return compile_program_to_bytecode(ast_document.program, alias_map=merged_alias_map)
 
 
 
