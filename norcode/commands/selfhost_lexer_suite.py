@@ -93,7 +93,7 @@ def _run_token_smoke() -> dict[str, Any]:
     smoke_path = DEFAULT_TOKEN_SMOKE.expanduser().resolve()
     runtime = call_function(str(smoke_path), "start", [])
     token = runtime.value if isinstance(runtime.value, dict) else None
-    tokens = [token, {"type": "EOF", "value": "", "line": 1, "column": 2}] if token else []
+    tokens = [token] if token else []
     validation = validate_token_stream(tokens)
     return {
         "ok": bool(runtime.ok and token is not None and validation.ok),
