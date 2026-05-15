@@ -1,27 +1,35 @@
 """Check command module.
 
-The semantic analysis still uses the legacy compiler implementation, but it is
-now accessed through the compiler service facade.
+The modular CLI now routes semantic analysis through the frontend service
+facade instead of directly through the legacy compiler orchestration.
 """
 
 from __future__ import annotations
 
 from norcode.commands.base import CommandModule
-from norcode.compiler_service import check_program_file
+from norcode.frontend_service import analyze_source_file
 
 
 
 def register_arguments(parser) -> None:
     parser.add_argument("file")
+    parser.add_argument("--tokens", action="store_true", help="Vis token-strøm")
 
 
 
 def run(args) -> int:
-    source_path, _program, alias_map, analyzer = check_program_file(args.file)
-    print(f"Kilde: {source_path}")
-    print(f"Aliaser: {alias_map}")
+    if args.tokens:
+        from norcode.frontend_service import lex_source_file
+
+        for token in lex_source_file(args.file):
+            print(f"{token.line}:{token.column} {token.type} {token.value!r}")
+        return 0
+
+    result = analyze_source_file(args.file)
+    print(f"Kilde: {result.source_path}")
+    print(f"Aliaser: {result.alias_map}")
     print("Semantikk: OK")
-    print(f"Funksjoner: {list(analyzer.functions.keys())}")
+    print(f"Funksjoner: {list(result.analyzer.functions.keys())}")
     return 0
 
 
