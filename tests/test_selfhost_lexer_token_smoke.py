@@ -18,7 +18,7 @@ def test_selfhost_lexer_token_smoke_runtime_object_return() -> None:
     assert result.ok, result.errors
     assert isinstance(result.value, dict)
 
-    tokens = [result.value, {"type": "EOF", "value": "", "line": 1, "column": 2}]
+    tokens = [result.value]
     validation = validate_token_stream(tokens)
 
     assert validation.ok, validation.errors
