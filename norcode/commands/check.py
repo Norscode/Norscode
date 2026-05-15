@@ -29,7 +29,7 @@ def run(args) -> int:
     print(f"Kilde: {result.source_path}")
     print(f"Aliaser: {result.alias_map}")
     print("Semantikk: OK")
-    print(f"Funksjoner: {list(result.analyzer.functions.keys())}")
+    print(f"Funksjoner: {result.semantic.function_names}")
     return 0
 
 
