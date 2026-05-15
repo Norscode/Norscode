@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+from norcode.runtime_kernel import active_runtime_kernel
+
 
 class VMRuntime(Protocol):
     def run(self) -> Any:
@@ -50,4 +52,9 @@ def create_vm(bytecode: dict[str, Any], **options: Any) -> VMRuntime:
     This factory is the single switch point for replacing the Python VM with a
     self-hosted Norscode VM later.
     """
-    return PythonBytecodeVMAdapter(bytecode, **options)
+    kernel = active_runtime_kernel()
+
+    if kernel.name == "python-bytecode":
+        return PythonBytecodeVMAdapter(bytecode, **options)
+
+    raise RuntimeError(f"Ukjent runtime-kernel: {kernel.name}")
