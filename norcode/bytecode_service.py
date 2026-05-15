@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from compiler.ast_bridge import load_source_as_program, read_ast
-from compiler.bytecode_backend import BytecodeVM, compile_program_to_bytecode
+from compiler.bytecode_backend import compile_program_to_bytecode
+from norcode.vm import create_vm
 
 
 
@@ -51,7 +52,7 @@ def load_bytecode_file(path: str) -> dict[str, Any]:
 
 
 def run_bytecode(bytecode: dict[str, Any], **vm_options: Any) -> Any:
-    vm = BytecodeVM(bytecode, **vm_options)
+    vm = create_vm(bytecode, **vm_options)
     return vm.run()
 
 
