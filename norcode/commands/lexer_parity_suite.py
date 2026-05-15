@@ -54,12 +54,12 @@ def run(args) -> int:
         up_to_date = existing_text == expected_text
         written = False
 
-        if args.write and not up_to_date:
+        if parity.validation_ok and args.write and not up_to_date:
             fixture_path.write_text(expected_text, encoding="utf-8")
             up_to_date = True
             written = True
 
-        ok = up_to_date
+        ok = parity.validation_ok and up_to_date
         if ok:
             passed += 1
 
@@ -69,7 +69,10 @@ def run(args) -> int:
                 "fixture": str(fixture_path),
                 "ok": ok,
                 "written": written,
+                "up_to_date": up_to_date,
                 "token_count": len(parity.tokens),
+                "validation_ok": parity.validation_ok,
+                "validation_errors": parity.validation_errors,
             }
         )
 
@@ -88,6 +91,11 @@ def run(args) -> int:
             if item["ok"]:
                 continue
             print(f"- FEIL: {item['source']} -> {item['fixture']}")
+            if not item["validation_ok"]:
+                for error in item["validation_errors"]:
+                    print(f"  validation: {error}")
+            elif not item["up_to_date"]:
+                print("  fixture mangler/utdatert")
         if args.write:
             written_count = sum(1 for item in results if item["written"])
             print(f"Fixtures skrevet/oppdatert: {written_count}")
