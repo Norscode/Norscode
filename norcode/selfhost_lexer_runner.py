@@ -1,10 +1,10 @@
 """Selfhost lexer runner boundary.
 
-This module is the planned execution boundary for running the Norscode-native
-lexer (`selfhost/lexer/lexer_m1.no`) through the Norscode runtime.
+This module is the execution boundary for running the Norscode-native lexer
+(`selfhost/lexer/lexer_m1.no`) through the Norscode runtime.
 
-The runner now routes through `runtime_call_service`, which becomes the stable
-ABI boundary between selfhost compiler components and the VM/runtime.
+The runner routes through `runtime_call_service`, validates the returned token
+stream, and returns structured diagnostics for the phase-1 QA suite.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Any
 
 from norcode.runtime_call_service import call_function
 from norcode.selfhost_lexer_service import DEFAULT_SELFHOST_LEXER, check_selfhost_lexer
+from norcode.token_validator import validate_token_stream
 
 
 @dataclass(frozen=True)
@@ -25,6 +26,16 @@ class SelfhostLexerRunResult:
     source_path: Path | None = None
     tokens: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    validation_errors: list[str] = field(default_factory=list)
+
+
+
+def _normalize_runtime_tokens(value: Any) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 
@@ -49,12 +60,16 @@ def run_selfhost_lexer(source_file: str, lexer_path: str | Path = DEFAULT_SELFHO
         )
 
     runtime_result = call_function(str(status.path), "lex", [source_path.read_text(encoding="utf-8")])
+    tokens = _normalize_runtime_tokens(runtime_result.value)
+    validation = validate_token_stream(tokens)
+    validation_errors = validation.errors if runtime_result.ok else []
 
     return SelfhostLexerRunResult(
-        ok=runtime_result.ok,
+        ok=runtime_result.ok and validation.ok,
         ready=True,
         lexer_path=status.path,
         source_path=source_path,
-        tokens=runtime_result.value or [],
+        tokens=tokens,
         errors=list(runtime_result.errors),
+        validation_errors=list(validation_errors),
     )
