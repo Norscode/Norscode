@@ -29,7 +29,7 @@ def run(args) -> int:
     source_path = Path(args.file).expanduser().resolve()
     result = call_function(str(source_path), "start", [])
     token = result.value if isinstance(result.value, dict) else None
-    tokens = [token, {"type": "EOF", "value": "", "line": 1, "column": 2}] if token else []
+    tokens = [token] if token else []
     validation = validate_token_stream(tokens)
 
     payload = {
