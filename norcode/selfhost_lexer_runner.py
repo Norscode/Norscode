@@ -28,6 +28,7 @@ class SelfhostLexerRunResult:
     errors: list[str] = field(default_factory=list)
     validation_errors: list[str] = field(default_factory=list)
     available_functions: list[str] = field(default_factory=list)
+    candidate_functions: list[str] = field(default_factory=list)
     called_function: str | None = None
 
 
@@ -75,5 +76,6 @@ def run_selfhost_lexer(source_file: str, lexer_path: str | Path = DEFAULT_SELFHO
         errors=list(runtime_result.errors),
         validation_errors=list(validation_errors),
         available_functions=list(runtime_result.available_functions),
+        candidate_functions=list(runtime_result.candidate_functions),
         called_function=runtime_result.function_name if runtime_result.ok else None,
     )
