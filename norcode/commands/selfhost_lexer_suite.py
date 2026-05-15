@@ -107,6 +107,7 @@ def _failure_stage(
     compile_ok: bool,
     fixture_ok: bool,
     runtime_ok: bool,
+    validation_ok: bool,
     parity_ok: bool,
     skip_runtime: bool,
 ) -> str:
@@ -120,6 +121,8 @@ def _failure_stage(
         return "ok"
     if not runtime_ok:
         return "runtime"
+    if not validation_ok:
+        return "validation"
     if not parity_ok:
         return "parity"
     return "ok"
@@ -139,6 +142,7 @@ def run(args) -> int:
         "compile": 0,
         "fixture": 0,
         "runtime": 0,
+        "validation": 0,
         "parity": 0,
     }
 
@@ -152,7 +156,10 @@ def run(args) -> int:
 
         actual_tokens = runtime_result.tokens if runtime_result else []
         expected_tokens = json.loads(fixture_path.read_text(encoding="utf-8")) if fixture_path.exists() else []
-        runtime_ok = bool(runtime_result and runtime_result.ok)
+        runtime_errors = runtime_result.errors if runtime_result else []
+        validation_errors = runtime_result.validation_errors if runtime_result else []
+        runtime_ok = bool(runtime_result and not runtime_errors)
+        validation_ok = bool(runtime_result and not validation_errors)
         parity_ok = bool(runtime_result and runtime_result.ok and expected_tokens == actual_tokens)
         file_ok = fixture_ok if args.skip_runtime else parity_ok
         stage = _failure_stage(
@@ -160,6 +167,7 @@ def run(args) -> int:
             compile_ok=compile_ok,
             fixture_ok=fixture_ok,
             runtime_ok=runtime_ok,
+            validation_ok=validation_ok,
             parity_ok=parity_ok,
             skip_runtime=bool(args.skip_runtime),
         )
@@ -176,12 +184,14 @@ def run(args) -> int:
                 "fixture_ok": fixture_ok,
                 "fixture_written": fixture_written,
                 "runtime_ok": runtime_ok,
+                "validation_ok": validation_ok,
                 "runtime_skipped": bool(args.skip_runtime),
                 "parity_ok": parity_ok,
                 "expected_count": expected_count,
                 "actual_count": len(actual_tokens),
-                "first_diff": _first_token_diff(expected_tokens, actual_tokens) if runtime_ok and not parity_ok else None,
-                "runtime_errors": runtime_result.errors if runtime_result else [],
+                "first_diff": _first_token_diff(expected_tokens, actual_tokens) if validation_ok and not parity_ok else None,
+                "runtime_errors": runtime_errors,
+                "validation_errors": validation_errors,
             }
         )
 
@@ -213,7 +223,7 @@ def run(args) -> int:
         print(f"Readiness: {'OK' if readiness.ok else 'FEIL'}")
         print(f"Compile: {'OK' if compile_ok else 'FEIL'}")
         print("Stages:")
-        for stage_name in ("ok", "readiness", "compile", "fixture", "runtime", "parity"):
+        for stage_name in ("ok", "readiness", "compile", "fixture", "runtime", "validation", "parity"):
             print(f"  {stage_name}: {stage_counts.get(stage_name, 0)}")
         for error in compile_errors:
             print(f"  compile: {error}")
@@ -226,6 +236,9 @@ def run(args) -> int:
             if item["runtime_errors"]:
                 for error in item["runtime_errors"]:
                     print(f"  runtime: {error}")
+            if item["validation_errors"]:
+                for error in item["validation_errors"]:
+                    print(f"  validation: {error}")
             if item["first_diff"]:
                 print(f"  first diff: {item['first_diff']}")
 
