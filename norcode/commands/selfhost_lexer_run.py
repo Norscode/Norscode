@@ -1,8 +1,8 @@
 """Selfhost lexer runner command.
 
-This command is the future execution entrypoint for the Norscode-native lexer.
-Initially it reports readiness/integration status until the runtime ABI is
-fully connected.
+This command is the execution entrypoint for the Norscode-native lexer through
+the runtime ABI.  It reports function discovery and token validation diagnostics
+so execution failures can be debugged directly from the CLI.
 """
 
 from __future__ import annotations
@@ -29,26 +29,42 @@ def run(args) -> int:
         "lexer_path": str(result.lexer_path),
         "source_path": str(result.source_path) if result.source_path else None,
         "token_count": len(result.tokens),
+        "called_function": result.called_function,
+        "available_functions": result.available_functions,
         "errors": result.errors,
+        "validation_errors": result.validation_errors,
     }
 
     if args.json:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
-        if result.ready:
-            print("Selfhost lexer er klar for runtime-integrasjon")
+        if result.ok:
+            print("Selfhost lexer runtime OK")
+        elif result.ready:
+            print("Selfhost lexer er klar, men runtime-kjøring feilet")
         else:
             print("Selfhost lexer er ikke klar")
 
+        print(f"Lexer: {result.lexer_path}")
+        if result.called_function:
+            print(f"Kalt funksjon: {result.called_function}")
+        if result.available_functions:
+            print("Tilgjengelige funksjoner:")
+            for name in result.available_functions:
+                print(f"- {name}")
+        print(f"Tokens: {len(result.tokens)}")
+
         for item in result.errors:
-            print(f"- {item}")
+            print(f"- runtime: {item}")
+        for item in result.validation_errors:
+            print(f"- validation: {item}")
 
     return 0 if result.ok else 1
 
 
 SELFHOST_LEXER_RUN_COMMAND = CommandModule(
     name="selfhost-lexer-run",
-    help="Kjør readiness/runtime-grense for selfhost lexer",
+    help="Kjør selfhost lexer gjennom runtime ABI",
     register_arguments=register_arguments,
     run=run,
 )
