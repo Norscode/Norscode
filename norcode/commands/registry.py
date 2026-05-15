@@ -18,6 +18,7 @@ from norcode.commands.base import CommandModule
 from norcode.commands.build_bytecode import BUILD_BYTECODE_COMMAND
 from norcode.commands.bytecode_run import BYTECODE_RUN_COMMAND
 from norcode.commands.check import CHECK_COMMAND
+from norcode.commands.lexer_parity_check import LEXER_PARITY_CHECK_COMMAND
 from norcode.commands.lexer_parity_fixture import LEXER_PARITY_FIXTURE_COMMAND
 from norcode.commands.parser_parity_fixture import PARSER_PARITY_FIXTURE_COMMAND
 from norcode.commands.run import RUN_COMMAND
@@ -34,6 +35,7 @@ COMMANDS: tuple[CommandModule, ...] = (
     AST_EXPORT_VALIDATE_COMMAND,
     PARSER_PARITY_FIXTURE_COMMAND,
     LEXER_PARITY_FIXTURE_COMMAND,
+    LEXER_PARITY_CHECK_COMMAND,
     CommandModule(
         name="repl",
         help="Start en enkel interaktiv Norscode-REPL",
