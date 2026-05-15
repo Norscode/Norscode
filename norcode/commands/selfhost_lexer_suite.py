@@ -190,6 +190,7 @@ def run(args) -> int:
                 "expected_count": expected_count,
                 "actual_count": len(actual_tokens),
                 "called_function": runtime_result.called_function if runtime_result else None,
+                "candidate_functions": runtime_result.candidate_functions if runtime_result else [],
                 "available_functions": runtime_result.available_functions if runtime_result else [],
                 "first_diff": _first_token_diff(expected_tokens, actual_tokens) if validation_ok and not parity_ok else None,
                 "runtime_errors": runtime_errors,
@@ -235,6 +236,10 @@ def run(args) -> int:
             print(f"- FEIL [{item['stage']}]: {item['source']}")
             if item["called_function"]:
                 print(f"  called_function: {item['called_function']}")
+            if item["candidate_functions"]:
+                print("  candidate_functions:")
+                for name in item["candidate_functions"]:
+                    print(f"    - {name}")
             if item["available_functions"]:
                 print("  available_functions:")
                 for name in item["available_functions"]:
