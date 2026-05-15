@@ -1,12 +1,13 @@
 """Check command module.
 
-The semantic analysis still uses the legacy compiler pipeline, but the command
-handler itself is now modular and dispatchable outside `main.py`.
+The semantic analysis still uses the legacy compiler implementation, but it is
+now accessed through the compiler service facade.
 """
 
 from __future__ import annotations
 
 from norcode.commands.base import CommandModule
+from norcode.compiler_service import check_program_file
 
 
 
@@ -16,9 +17,7 @@ def register_arguments(parser) -> None:
 
 
 def run(args) -> int:
-    from main import check_program
-
-    source_path, _program, alias_map, analyzer = check_program(args.file)
+    source_path, _program, alias_map, analyzer = check_program_file(args.file)
     print(f"Kilde: {source_path}")
     print(f"Aliaser: {alias_map}")
     print("Semantikk: OK")
