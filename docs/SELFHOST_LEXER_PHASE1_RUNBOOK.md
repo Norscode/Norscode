@@ -6,9 +6,10 @@ Målet med fase 1 er at `selfhost/lexer/lexer_m1.no` skal kunne:
 
 1. bestå readiness
 2. kompilere til bytecode
-3. kjøres gjennom runtime ABI
-4. returnere token-stream
-5. matche Python lexer fixtures
+3. validere at VM kan returnere TOKEN_FORMAT_V1-objekter
+4. kjøres gjennom runtime ABI
+5. returnere token-stream
+6. matche Python lexer fixtures
 
 ## Kommandoer
 
@@ -28,7 +29,23 @@ norcode-modular selfhost-lexer-compile-check
 
 Sjekker at selfhost lexeren kan kompileres gjennom `compiler_core`.
 
-### 3. Python lexer fixtures
+### 3. Token object smoke-test
+
+```bash
+norcode-modular selfhost-lexer-token-smoke
+```
+
+Tester en minimal TOKEN_FORMAT_V1 dictionary-retur gjennom runtime ABI før hele lexeren kjøres.
+
+Denne gaten isolerer:
+
+- dictionary literals
+- mixed token fields (`tekst` + `heltall`)
+- VM return values
+- runtime ABI object transport
+- token validation
+
+### 4. Python lexer fixtures
 
 ```bash
 norcode-modular lexer-parity-suite --write
@@ -36,7 +53,7 @@ norcode-modular lexer-parity-suite --write
 
 Lager eller oppdaterer `.tokens.json` fixtures fra dagens Python lexer.
 
-### 4. Selfhost runtime run
+### 5. Selfhost runtime run
 
 ```bash
 norcode-modular selfhost-lexer-run tests/test_math.no
@@ -44,7 +61,7 @@ norcode-modular selfhost-lexer-run tests/test_math.no
 
 Prøver å kjøre `lex(kilde)` gjennom runtime ABI.
 
-### 5. Selfhost parity
+### 6. Selfhost parity
 
 ```bash
 norcode-modular selfhost-lexer-parity tests/test_math.no
@@ -52,15 +69,15 @@ norcode-modular selfhost-lexer-parity tests/test_math.no
 
 Sammenligner tokens fra selfhost lexer mot Python fixture.
 
-### 6. Full suite
+### 7. Full suite
 
 ```bash
 norcode-modular selfhost-lexer-suite --write-fixtures
 ```
 
-Kjører hele QA-pipelinen.
+Kjører hele QA-pipelinen inkludert token object smoke-test.
 
-### 7. Full suite uten runtime
+### 8. Full suite uten runtime
 
 ```bash
 norcode-modular selfhost-lexer-suite --write-fixtures --skip-runtime
@@ -68,14 +85,24 @@ norcode-modular selfhost-lexer-suite --write-fixtures --skip-runtime
 
 Brukes når compile/fixture skal verifiseres før runtime ABI er helt stabil.
 
+### 9. Full suite uten token smoke
+
+```bash
+norcode-modular selfhost-lexer-suite --write-fixtures --skip-token-smoke
+```
+
+Brukes kun når token-smoke feiler kjent, men man fortsatt vil inspisere runtime/parity-diagnostikk.
+
 ## Feilstadier
 
 `selfhost-lexer-suite` klassifiserer feil i disse stadiene:
 
 - `readiness`
 - `compile`
+- `token_smoke`
 - `fixture`
 - `runtime`
+- `validation`
 - `parity`
 
 ## Typisk feilsøking
@@ -106,12 +133,39 @@ Løsning:
 - forenkle syntax i `lexer_m1.no`
 - unngå features som ikke støttes i bytecode-backend ennå
 
+### Token-smoke-feil
+
+Årsak:
+
+- VM kan ikke returnere dictionary/map-literal
+- runtime ABI mister objektstruktur
+- token-feltene følger ikke TOKEN_FORMAT_V1
+- mixed field values (`tekst` og `heltall`) håndteres feil
+
+Løsning:
+
+```bash
+norcode-modular selfhost-lexer-token-smoke --json
+```
+
+Se spesielt på:
+
+- `runtime_ok`
+- `token_object_ok`
+- `validation_ok`
+- `called_function`
+- `available_functions`
+- `candidate_functions`
+
+Hvis denne feiler, fiks VM/object-return før full lexer-runtime feilsøkes.
+
 ### Fixture-feil
 
 Årsak:
 
 - `.tokens.json` mangler
 - Python lexer-output har endret seg
+- Python baseline-tokenene validerer ikke mot TOKEN_FORMAT_V1
 
 Løsning:
 
@@ -137,7 +191,23 @@ Løsning:
 
 - kjør `selfhost-lexer-run <fil> --json`
 - sjekk `runtime_errors`
+- sjekk `available_functions`, `candidate_functions` og `called_function`
 - sjekk at `lex(kilde)` finnes i bytecode-funksjonene
+
+### Validation-feil
+
+Årsak:
+
+- selfhost lexer returnerer ikke en liste
+- token mangler `type`, `value`, `line` eller `column`
+- `line`/`column` er ikke gyldige heltall
+- EOF-token mangler
+
+Løsning:
+
+- kjør `selfhost-lexer-run <fil> --json`
+- se `validation_errors`
+- rett TOKEN_FORMAT_V1-kontrakten i `lexer_m1.no`
 
 ### Parity-feil
 
@@ -168,12 +238,15 @@ returnerer:
 Selfhost lexer suite: N/N OK
 Readiness: OK
 Compile: OK
+Token smoke: OK
 Stages:
   ok: N
   readiness: 0
   compile: 0
+  token_smoke: 0
   fixture: 0
   runtime: 0
+  validation: 0
   parity: 0
 ```
 
