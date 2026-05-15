@@ -1,15 +1,15 @@
 """Run command module.
 
-In the modular CLI, `run` is now bytecode-first by default.  The legacy C/Python
-execution path remains available through `--legacy` while migration continues.
+In the modular CLI, `run` is now bytecode-first by default and routes through
+`compiler_core` instead of directly orchestrating bytecode compilation.
 """
 
 from __future__ import annotations
 
-from norcode.bytecode_service import compile_source_file_to_bytecode
 from norcode.commands.base import CommandModule
+from norcode.compiler_core import run_source
 from norcode.compiler_service import run_program_file
-from norcode.runtime_service import RuntimeOptions, run_compiled_bytecode
+from norcode.runtime_service import RuntimeOptions
 
 
 
@@ -26,9 +26,8 @@ def run(args) -> int:
         run_program_file(args.file)
         return 0
 
-    bytecode = compile_source_file_to_bytecode(args.file)
     options = RuntimeOptions(trace=args.trace, max_steps=args.max_steps)
-    result = run_compiled_bytecode(bytecode, options=options)
+    result = run_source(args.file, options=options)
     if result is not None:
         print(result)
     return 0
