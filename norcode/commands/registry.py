@@ -13,6 +13,7 @@ command can later own:
 from __future__ import annotations
 
 from norcode.commands.base import CommandModule
+from norcode.commands.bytecode_run import BYTECODE_RUN_COMMAND
 from norcode.commands.check import CHECK_COMMAND
 from norcode.commands.run import RUN_COMMAND
 from norcode.commands.test import TEST_COMMAND
@@ -22,6 +23,7 @@ COMMANDS: tuple[CommandModule, ...] = (
     RUN_COMMAND,
     CHECK_COMMAND,
     TEST_COMMAND,
+    BYTECODE_RUN_COMMAND,
     CommandModule(
         name="repl",
         help="Start en enkel interaktiv Norscode-REPL",
@@ -44,11 +46,6 @@ COMMANDS: tuple[CommandModule, ...] = (
         help="Kjør full selfhost-kjede",
         register_arguments=lambda parser: parser.add_argument("file"),
         experimental=True,
-    ),
-    CommandModule(
-        name="bytecode-run",
-        help="Kjør bytecode-backenden",
-        register_arguments=lambda parser: parser.add_argument("file"),
     ),
     CommandModule(
         name="serve",
