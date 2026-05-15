@@ -12,6 +12,7 @@ command can later own:
 
 from __future__ import annotations
 
+from norcode.commands.ast_validate import AST_VALIDATE_COMMAND
 from norcode.commands.base import CommandModule
 from norcode.commands.build_bytecode import BUILD_BYTECODE_COMMAND
 from norcode.commands.bytecode_run import BYTECODE_RUN_COMMAND
@@ -26,6 +27,7 @@ COMMANDS: tuple[CommandModule, ...] = (
     TEST_COMMAND,
     BYTECODE_RUN_COMMAND,
     BUILD_BYTECODE_COMMAND,
+    AST_VALIDATE_COMMAND,
     CommandModule(
         name="repl",
         help="Start en enkel interaktiv Norscode-REPL",
