@@ -26,6 +26,7 @@ from norcode.commands.run import RUN_COMMAND
 from norcode.commands.selfhost_lexer_parity import SELFHOST_LEXER_PARITY_COMMAND
 from norcode.commands.selfhost_lexer_run import SELFHOST_LEXER_RUN_COMMAND
 from norcode.commands.selfhost_lexer_status import SELFHOST_LEXER_STATUS_COMMAND
+from norcode.commands.selfhost_lexer_suite import SELFHOST_LEXER_SUITE_COMMAND
 from norcode.commands.test import TEST_COMMAND
 
 
@@ -44,6 +45,7 @@ COMMANDS: tuple[CommandModule, ...] = (
     SELFHOST_LEXER_STATUS_COMMAND,
     SELFHOST_LEXER_RUN_COMMAND,
     SELFHOST_LEXER_PARITY_COMMAND,
+    SELFHOST_LEXER_SUITE_COMMAND,
     CommandModule(
         name="repl",
         help="Start en enkel interaktiv Norscode-REPL",
