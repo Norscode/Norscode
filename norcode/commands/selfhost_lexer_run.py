@@ -30,6 +30,7 @@ def run(args) -> int:
         "source_path": str(result.source_path) if result.source_path else None,
         "token_count": len(result.tokens),
         "called_function": result.called_function,
+        "candidate_functions": result.candidate_functions,
         "available_functions": result.available_functions,
         "errors": result.errors,
         "validation_errors": result.validation_errors,
@@ -48,6 +49,10 @@ def run(args) -> int:
         print(f"Lexer: {result.lexer_path}")
         if result.called_function:
             print(f"Kalt funksjon: {result.called_function}")
+        if result.candidate_functions:
+            print("Kandidatfunksjoner:")
+            for name in result.candidate_functions:
+                print(f"- {name}")
         if result.available_functions:
             print("Tilgjengelige funksjoner:")
             for name in result.available_functions:
