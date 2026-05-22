@@ -18,6 +18,11 @@ BIN_OP_MAP = {
     '*': 'MUL',
     '/': 'DIV',
     '%': 'MOD',
+    '<<': 'LSHIFT',
+    '>>': 'RSHIFT',
+    '&': 'BAND',
+    '|': 'BOR',
+    '^': 'BXOR',
     '==': 'EQ',
     '!=': 'NE',
     '<': 'LT',
@@ -38,6 +43,7 @@ UNARY_OP_MAP = {
     '-': 'MINUS',
     '+': 'PLUS',
     'ikke': 'IKKE',
+    '~': 'BNOT',
 }
 
 COMPOUND_TO_BINOP = {
@@ -70,6 +76,26 @@ def _module_path(node: dict[str, Any]) -> str | None:
     return None
 
 
+def _lvalue_path(node: dict[str, Any]) -> str | None:
+    kind = node.get('node')
+    if kind == 'Name':
+        return str(node.get('value'))
+    if kind == 'Member':
+        base = _lvalue_path(node.get('target', {}))
+        if base is None:
+            return None
+        return f"{base}.{node.get('name')}"
+    if kind == 'Index':
+        base = _lvalue_path(node.get('target', {}))
+        index = _lvalue_path(node.get('index', {}))
+        if base is None or index is None:
+            return None
+        return f"{base}[{index}]"
+    if kind == 'Literal':
+        return str(node.get('value'))
+    return None
+
+
 def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
     kind = node.get('node')
     if kind == 'Literal':
@@ -94,6 +120,17 @@ def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
                     'value': expr_to_data(entry.get('value', {})),
                 }
                 for entry in node.get('items', [])
+            ],
+        }
+    if kind == 'StructLiteral':
+        return {
+            'type': 'StructLiteral',
+            'fields': [
+                {
+                    'name': entry.get('name'),
+                    'value': expr_to_data(entry.get('value', {})),
+                }
+                for entry in node.get('fields', [])
             ],
         }
     if kind == 'Index':
@@ -129,10 +166,11 @@ def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
                 }
         raise SelfhostAstBridgeError('Call støtter bare navn(...) eller modul.funksjon(...)')
     if kind == 'Member':
-        module_name = _module_path(node)
-        if module_name is not None:
-            return {'type': 'VarAccess', 'name': module_name}
-        raise SelfhostAstBridgeError('Member-uttrykk støttes ikke i selfhost AST-broen ennå')
+        return {
+            'type': 'FieldAccess',
+            'target': expr_to_data(node.get('target', {})),
+            'field': node.get('name'),
+        }
     if kind == 'IfExpr':
         return {
             'type': 'IfExpr',
@@ -367,6 +405,15 @@ def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any
         return [{'type': 'Break'}]
     if kind == 'Continue':
         return [{'type': 'Continue'}]
+    if kind == 'Throw':
+        return [{'type': 'Throw', 'expr': expr_to_data(node.get('value', {}))}]
+    if kind == 'TryCatch':
+        return [{
+            'type': 'TryCatch',
+            'try_block': block_to_data(node.get('try', []), ctx),
+            'catch_var_name': node.get('catch_name') or 'feil',
+            'catch_block': block_to_data(node.get('catch', []), ctx),
+        }]
     if kind == 'Assign':
         target = node.get('target', {})
         op = node.get('op')
@@ -378,7 +425,23 @@ def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any
         if target_kind == 'Index':
             base_name = _module_path(target.get('target', {}))
             if base_name is None:
-                raise SelfhostAstBridgeError('Index-assignment krever navn eller medlem som base')
+                target_name = _lvalue_path(target)
+                if target_name is None:
+                    raise SelfhostAstBridgeError('Index-assignment krever navn eller medlem som base')
+                if op == '=':
+                    return [{'type': 'VarSet', 'name': target_name, 'expr': expr_to_data(value)}]
+                if op in COMPOUND_TO_BINOP:
+                    return [{
+                        'type': 'VarSet',
+                        'name': target_name,
+                        'expr': {
+                            'type': 'BinOp',
+                            'op': BIN_OP_MAP[COMPOUND_TO_BINOP[op]],
+                            'left': {'type': 'VarAccess', 'name': target_name},
+                            'right': expr_to_data(value),
+                        },
+                    }]
+                raise SelfhostAstBridgeError(f'Ukjent assignment-operator: {op}')
             if op != '=':
                 return [{
                     'type': 'IndexSet',
@@ -402,6 +465,8 @@ def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any
                 'value_expr': expr_to_data(value),
             }]
 
+        if target_name is None:
+            target_name = _lvalue_path(target)
         if target_name is None:
             raise SelfhostAstBridgeError('Assignment-target støttes ikke i selfhost AST-broen ennå')
 

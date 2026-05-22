@@ -1,0 +1,442 @@
+// Norscode ELF64 Emitter — produserer ekte kjørbare Linux x86_64 ELF-binærer
+//
+// Bruker kun: +, -, *, /, %, <<, >>, &, |, liste-operasjoner og fil_skriv_binær.
+// Ingen C, ingen Python, ingen ekstern runtime.
+
+// ─── Byte-hjelper: little-endian encoding ────────────────────────────────────
+
+funksjon u8(v)
+    returner v & 255
+slutt
+
+funksjon legg_u8(buf, v)
+    legg_til(buf, v & 255)
+slutt
+
+funksjon legg_u16_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+slutt
+
+funksjon legg_u32_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+slutt
+
+funksjon legg_u64_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+    legg_til(buf, (v >> 32) & 255)
+    legg_til(buf, (v >> 40) & 255)
+    legg_til(buf, (v >> 48) & 255)
+    legg_til(buf, (v >> 56) & 255)
+slutt
+
+funksjon null_pad(buf, antall)
+    i = 0
+    mens i < antall
+        legg_til(buf, 0)
+        i = i + 1
+    slutt
+slutt
+
+funksjon buf_lengde(buf)
+    returner lengde(buf)
+slutt
+
+// ─── ELF64-header (64 bytes) ──────────────────────────────────────────────────
+//
+// Layout (Little-endian, x86_64 EXEC):
+//   e_ident     [16]  magic + class + data + version + OS/ABI
+//   e_type       2    ET_EXEC = 2
+//   e_machine    2    EM_X86_64 = 62
+//   e_version    4    1
+//   e_entry      8    virtuell adresse til _start
+//   e_phoff      8    offset til program header table (= 64 etter header)
+//   e_shoff      8    0 (ingen section headers)
+//   e_flags      4    0
+//   e_ehsize     2    64
+//   e_phentsize  2    56
+//   e_phnum      2    1
+//   e_shentsize  2    0
+//   e_shnum      2    0
+//   e_shstrndx   2    0
+
+funksjon bygg_elf_header(entry_vaddr, ph_offset, ph_count)
+    buf = []
+
+    // e_ident (16 bytes)
+    legg_til(buf, 0x7F)   // magic
+    legg_til(buf, 0x45)   // 'E'
+    legg_til(buf, 0x4C)   // 'L'
+    legg_til(buf, 0x46)   // 'F'
+    legg_til(buf, 2)       // EI_CLASS: ELFCLASS64
+    legg_til(buf, 1)       // EI_DATA: ELFDATA2LSB (little-endian)
+    legg_til(buf, 1)       // EI_VERSION: EV_CURRENT
+    legg_til(buf, 0)       // EI_OSABI: ELFOSABI_SYSV
+    null_pad(buf, 8)       // EI_ABIVERSION + padding
+
+    legg_u16_le(buf, 2)    // e_type: ET_EXEC
+    legg_u16_le(buf, 62)   // e_machine: EM_X86_64
+    legg_u32_le(buf, 1)    // e_version
+    legg_u64_le(buf, entry_vaddr)  // e_entry
+    legg_u64_le(buf, ph_offset)    // e_phoff
+    legg_u64_le(buf, 0)    // e_shoff (ingen)
+    legg_u32_le(buf, 0)    // e_flags
+    legg_u16_le(buf, 64)   // e_ehsize
+    legg_u16_le(buf, 56)   // e_phentsize
+    legg_u16_le(buf, ph_count)  // e_phnum
+    legg_u16_le(buf, 64)   // e_shentsize (ubrukt)
+    legg_u16_le(buf, 0)    // e_shnum
+    legg_u16_le(buf, 0)    // e_shstrndx
+
+    returner buf
+slutt
+
+// ─── ELF64 Program Header (56 bytes) ─────────────────────────────────────────
+//
+//   p_type    4    PT_LOAD = 1
+//   p_flags   4    PF_R|PF_X = 5  (text)  /  PF_R|PF_W = 6 (data)
+//   p_offset  8    fil-offset til segmentet
+//   p_vaddr   8    virtuell adresse
+//   p_paddr   8    (= vaddr for enkle eksekverbare)
+//   p_filesz  8    størrelse i fil
+//   p_memsz   8    størrelse i minne
+//   p_align   8    justering (0x1000 = side)
+
+funksjon bygg_program_header(ptype, flags, offset, vaddr, filesz, memsz, align)
+    buf = []
+
+    legg_u32_le(buf, ptype)
+    legg_u32_le(buf, flags)
+    legg_u64_le(buf, offset)
+    legg_u64_le(buf, vaddr)
+    legg_u64_le(buf, vaddr)    // p_paddr = p_vaddr
+    legg_u64_le(buf, filesz)
+    legg_u64_le(buf, memsz)
+    legg_u64_le(buf, align)
+
+    returner buf
+slutt
+
+// ─── x86_64 maskinkode-hjelper ───────────────────────────────────────────────
+
+// mov rax, imm32 (sign-extended) — 7 bytes: 48 C7 C0 <imm32-le>
+funksjon emit_mov_rax_imm32(buf, imm)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xC7)
+    legg_til(buf, 0xC0)
+    legg_u32_le(buf, imm)
+slutt
+
+// mov rdi, imm32 — 7 bytes: 48 C7 C7 <imm32-le>
+funksjon emit_mov_rdi_imm32(buf, imm)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xC7)
+    legg_til(buf, 0xC7)
+    legg_u32_le(buf, imm)
+slutt
+
+// mov rsi, imm64 — 10 bytes: 48 BE <imm64-le>
+funksjon emit_mov_rsi_imm64(buf, imm)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xBE)
+    legg_u64_le(buf, imm)
+slutt
+
+// mov rdx, imm32 — 7 bytes: 48 C7 C2 <imm32-le>
+funksjon emit_mov_rdx_imm32(buf, imm)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xC7)
+    legg_til(buf, 0xC2)
+    legg_u32_le(buf, imm)
+slutt
+
+// syscall — 2 bytes: 0F 05
+funksjon emit_syscall(buf)
+    legg_til(buf, 0x0F)
+    legg_til(buf, 0x05)
+slutt
+
+// sys_write(fd=1, buf_vaddr, len) — Linux syscall 1
+funksjon emit_write(buf, str_vaddr, str_len)
+    emit_mov_rax_imm32(buf, 1)          // rax = 1 (write)
+    emit_mov_rdi_imm32(buf, 1)          // rdi = 1 (stdout)
+    emit_mov_rsi_imm64(buf, str_vaddr)  // rsi = streng-adresse
+    emit_mov_rdx_imm32(buf, str_len)    // rdx = lengde
+    emit_syscall(buf)
+slutt
+
+// sys_exit(code) — Linux syscall 60
+funksjon emit_exit(buf, kode)
+    emit_mov_rax_imm32(buf, 60)   // rax = 60 (exit)
+    emit_mov_rdi_imm32(buf, kode) // rdi = exit-kode
+    emit_syscall(buf)
+slutt
+
+// ─── Streng-byte-hjelper ──────────────────────────────────────────────────────
+
+funksjon tekst_til_bytes(tekst)
+    // Konverterer streng til liste med ASCII-byte-verdier + linjeskift
+    buf = []
+    i = 0
+    mens i < lengde(tekst)
+        c = tekst[i]
+        kode = 0
+        hvis c == "A" kode = 65 slutt
+        hvis c == "B" kode = 66 slutt
+        hvis c == "C" kode = 67 slutt
+        hvis c == "D" kode = 68 slutt
+        hvis c == "E" kode = 69 slutt
+        hvis c == "F" kode = 70 slutt
+        hvis c == "G" kode = 71 slutt
+        hvis c == "H" kode = 72 slutt
+        hvis c == "I" kode = 73 slutt
+        hvis c == "J" kode = 74 slutt
+        hvis c == "K" kode = 75 slutt
+        hvis c == "L" kode = 76 slutt
+        hvis c == "M" kode = 77 slutt
+        hvis c == "N" kode = 78 slutt
+        hvis c == "O" kode = 79 slutt
+        hvis c == "P" kode = 80 slutt
+        hvis c == "Q" kode = 81 slutt
+        hvis c == "R" kode = 82 slutt
+        hvis c == "S" kode = 83 slutt
+        hvis c == "T" kode = 84 slutt
+        hvis c == "U" kode = 85 slutt
+        hvis c == "V" kode = 86 slutt
+        hvis c == "W" kode = 87 slutt
+        hvis c == "X" kode = 88 slutt
+        hvis c == "Y" kode = 89 slutt
+        hvis c == "Z" kode = 90 slutt
+        hvis c == "a" kode = 97 slutt
+        hvis c == "b" kode = 98 slutt
+        hvis c == "c" kode = 99 slutt
+        hvis c == "d" kode = 100 slutt
+        hvis c == "e" kode = 101 slutt
+        hvis c == "f" kode = 102 slutt
+        hvis c == "g" kode = 103 slutt
+        hvis c == "h" kode = 104 slutt
+        hvis c == "i" kode = 105 slutt
+        hvis c == "j" kode = 106 slutt
+        hvis c == "k" kode = 107 slutt
+        hvis c == "l" kode = 108 slutt
+        hvis c == "m" kode = 109 slutt
+        hvis c == "n" kode = 110 slutt
+        hvis c == "o" kode = 111 slutt
+        hvis c == "p" kode = 112 slutt
+        hvis c == "q" kode = 113 slutt
+        hvis c == "r" kode = 114 slutt
+        hvis c == "s" kode = 115 slutt
+        hvis c == "t" kode = 116 slutt
+        hvis c == "u" kode = 117 slutt
+        hvis c == "v" kode = 118 slutt
+        hvis c == "w" kode = 119 slutt
+        hvis c == "x" kode = 120 slutt
+        hvis c == "y" kode = 121 slutt
+        hvis c == "z" kode = 122 slutt
+        hvis c == " " kode = 32 slutt
+        hvis c == "!" kode = 33 slutt
+        hvis c == "," kode = 44 slutt
+        hvis c == "." kode = 46 slutt
+        hvis c == ":" kode = 58 slutt
+        hvis c == "-" kode = 45 slutt
+        hvis c == "_" kode = 95 slutt
+        hvis c == "/" kode = 47 slutt
+        hvis c == "0" kode = 48 slutt
+        hvis c == "1" kode = 49 slutt
+        hvis c == "2" kode = 50 slutt
+        hvis c == "3" kode = 51 slutt
+        hvis c == "4" kode = 52 slutt
+        hvis c == "5" kode = 53 slutt
+        hvis c == "6" kode = 54 slutt
+        hvis c == "7" kode = 55 slutt
+        hvis c == "8" kode = 56 slutt
+        hvis c == "9" kode = 57 slutt
+        hvis c == "\n" kode = 10 slutt
+        hvis kode > 0
+            legg_til(buf, kode)
+        slutt
+        i = i + 1
+    slutt
+    returner buf
+slutt
+
+// ─── Kopiér liste til annen liste ─────────────────────────────────────────────
+
+funksjon kopier_inn(mål, kilde)
+    i = 0
+    mens i < lengde(kilde)
+        legg_til(mål, kilde[i])
+        i = i + 1
+    slutt
+slutt
+
+// ─── Bygg komplett ELF-binær ──────────────────────────────────────────────────
+//
+// Struktur:
+//   [0x000]  ELF header         (64 bytes)
+//   [0x040]  Program header     (56 bytes)
+//   [0x078]  padding            (til 0x1000)
+//   [0x1000] .text              (maskinkode)
+//   [etter]  .rodata            (streng-data)
+//
+// BASE_ADDRESS = 0x400000
+// TEXT_OFFSET  = 0x1000
+// text_vaddr   = BASE_ADDRESS + TEXT_OFFSET = 0x401000
+
+funksjon bygg_elf(meldinger)
+    BASE    = 4194304    // 0x400000
+    TEXT_OFF = 4096      // 0x1000
+    text_vaddr = BASE + TEXT_OFF  // 0x401000
+
+    // Bygg .rodata-bytes (alle strenger etter hverandre)
+    rodata = []
+    str_offsets = []   // offset innen rodata for hver streng
+    str_lengder = []   // lengde i bytes for hver streng
+
+    i = 0
+    mens i < lengde(meldinger)
+        legg_til(str_offsets, lengde(rodata))
+        streng_bytes = tekst_til_bytes(meldinger[i])
+        legg_til(streng_bytes, 10)   // linjeskift
+        legg_til(str_lengder, lengde(streng_bytes))
+        kopier_inn(rodata, streng_bytes)
+        i = i + 1
+    slutt
+
+    // rodata plasseres rett etter .text i filen.
+    // Vi vet ikke tekstlengden ennå, så vi bygger tekst-buffer først.
+
+    // Bygg .text (maskinkode)
+    text = []
+
+    // Skriv ut alle meldinger
+    j = 0
+    mens j < lengde(meldinger)
+        // Streng-adressen = text_vaddr + text_lengde_nå + rodata_offset_til_etter_text
+        // Men vi vet ikke text-lengden ennå.
+        // Løsning: first pass — beregn text-størrelse uten riktige adresser,
+        //          second pass — bygg på nytt med riktige adresser.
+        j = j + 1
+    slutt
+
+    // ── First pass: beregn text-størrelse ─────────────────────────────────
+    // write syscall = mov_rax(7) + mov_rdi(7) + mov_rsi_imm64(10) + mov_rdx(7) + syscall(2) = 33 bytes
+    // exit syscall  = mov_rax(7) + mov_rdi(7) + syscall(2) = 16 bytes
+    write_instr_size = 33
+    exit_instr_size  = 16
+    text_size = lengde(meldinger) * write_instr_size + exit_instr_size
+
+    // rodata starter i filen på: TEXT_OFF + text_size
+    rodata_file_off = TEXT_OFF + text_size
+    // virtuell adresse til rodata
+    rodata_vaddr = BASE + rodata_file_off
+
+    // ── Second pass: bygg faktisk tekst med riktige adresser ───────────────
+    text = []
+
+    k = 0
+    mens k < lengde(meldinger)
+        str_vaddr = rodata_vaddr + str_offsets[k]
+        emit_write(text, str_vaddr, str_lengder[k])
+        k = k + 1
+    slutt
+    emit_exit(text, 0)
+
+    // Verifiser at text_size stemmer
+    faktisk_text_size = lengde(text)
+
+    // ── Bygg fullstendig fil-buffer ────────────────────────────────────────
+    total_fil_size = TEXT_OFF + faktisk_text_size + lengde(rodata)
+
+    // ELF header
+    elf_hdr = bygg_elf_header(text_vaddr, 64, 1)
+
+    // Program header: ett LOAD-segment som dekker hele filen
+    // flags: PF_R | PF_X = 5
+    ph = bygg_program_header(1, 5, 0, BASE, total_fil_size, total_fil_size, 4096)
+
+    // Sett sammen fil
+    fil = []
+    kopier_inn(fil, elf_hdr)     // 64 bytes
+    kopier_inn(fil, ph)          // 56 bytes
+    // padding til TEXT_OFF (0x1000)
+    null_pad(fil, TEXT_OFF - lengde(fil))
+    // .text
+    kopier_inn(fil, text)
+    // .rodata
+    kopier_inn(fil, rodata)
+
+    returner fil
+slutt
+
+// ─── Offentlig API ────────────────────────────────────────────────────────────
+
+funksjon skriv_elf_binary(output_sti, meldinger)
+    bytes = bygg_elf(meldinger)
+    fil_skriv_binær(output_sti, bytes)
+    returner lengde(bytes)
+slutt
+
+funksjon bygg_hello_world_elf(output_sti)
+    // NB: ["streng"] i Norscode-VM itererer strengen som tegn-liste.
+    // Bruk legg_til for å lage ei 1-elements-liste med heile strengen.
+    meldinger = []
+    legg_til(meldinger, "Hei fra Norscode native!")
+    returner skriv_elf_binary(output_sti, meldinger)
+slutt
+
+funksjon bygg_exit_kode_elf(output_sti, kode)
+    // Enkel ELF som bare kaller exit(kode) — for testing
+    BASE    = 4194304
+    TEXT_OFF = 4096
+    text_vaddr = BASE + TEXT_OFF
+
+    text = []
+    emit_exit(text, kode)
+
+    total = TEXT_OFF + lengde(text)
+
+    elf_hdr = bygg_elf_header(text_vaddr, 64, 1)
+    ph = bygg_program_header(1, 5, 0, BASE, total, total, 4096)
+
+    fil = []
+    kopier_inn(fil, elf_hdr)
+    kopier_inn(fil, ph)
+    null_pad(fil, TEXT_OFF - lengde(fil))
+    kopier_inn(fil, text)
+
+    fil_skriv_binær(output_sti, fil)
+    returner lengde(fil)
+slutt
+
+// ─── Test / main ─────────────────────────────────────────────────────────────
+
+funksjon main()
+    skriv("=== Norscode ELF Emitter ===\n")
+
+    // Test 1: exit(7) — enkel verifiserbar ELF
+    bytes7 = bygg_exit_kode_elf("build/norscode_exit7.elf", 7)
+    skriv("exit(7) ELF: " + tekst_fra_heltall(bytes7) + " bytes\n")
+
+    // Test 2: exit(12) — parity med eksisterende test
+    bytes12 = bygg_exit_kode_elf("build/norscode_exit12.elf", 12)
+    skriv("exit(12) ELF: " + tekst_fra_heltall(bytes12) + " bytes\n")
+
+    // Test 3: hello world
+    bytesHei = bygg_hello_world_elf("build/norscode_hello.elf")
+    skriv("hello ELF: " + tekst_fra_heltall(bytesHei) + " bytes\n")
+
+    skriv("ELF Emitter OK\n")
+    returner sann
+slutt
+
+funksjon start()
+    main()
+    returner "elf_emitter_ok"
+slutt

@@ -1,36 +1,57 @@
-# Windows
+# Norscode på Windows
 
-Norscode kan installeres på Windows med vanlig `pip`-flyt.
+## Rask installasjon
 
-## Anbefalt installasjon
-
-For en publisert release:
-
+**Alternativ A – automatisk (PowerShell):**
 ```powershell
-py -m pip install norcode
+irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.ps1 | iex
 ```
 
-For en lokal utviklerkopi:
-
+**Alternativ B – via pip:**
 ```powershell
+py -m pip install norscode
+```
+
+**Alternativ C – fra kildekode:**
+```powershell
+git clone https://github.com/rfwwp8k542-maker/Norscode-language
+cd Norscode-language
 py -m pip install .
 ```
 
 ## Kjøring
 
-Etter installasjon kan du bruke:
-
+Etter installasjon via pip:
 ```powershell
 norcode --help
-norcode check tests\test_web_dependency.no
+norcode run app.no
+norcode test
 ```
 
-Hvis du vil kjøre direkte fra kildekoden uten installasjon, bruk:
-
+Direkte fra kildekode (uten pip-installasjon):
 ```powershell
-py -m norcode --help
+# Med bin/nc.ps1 (PowerShell, anbefalt):
+.\bin\nc.ps1 run app.no
+
+# Med bin/nc.cmd (CMD):
+bin\nc.cmd run app.no
+
+# Med Python direkte:
+py main.py run app.no
 ```
 
-## Merknad
+## Plattformstatus
 
-De Unix-spesifikke `bin/*`-skriptene brukes fortsatt på macOS og Linux. På Windows er `pip`-installerte console scripts den normale veien.
+| Funksjon                    | Status              |
+|-----------------------------|---------------------|
+| `norcode run app.no`        | Ja (via Python/pip) |
+| `norcode test`              | Ja (via Python/pip) |
+| `norcode build`             | Ja (via Python/pip) |
+| `bin/nc.cmd` og `bin/nc.ps1`| Ja                  |
+| Native `.exe` (Python-fri)  | Planlagt            |
+
+## Krav
+
+Python 3.10 eller nyere. Last ned fra https://python.org.
+
+Se README.md for full plattformoversikt.

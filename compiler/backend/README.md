@@ -3,13 +3,16 @@
 ## Purpose
 
 The backend layer is responsible for deterministic compiler output generation.
+In this repo, that includes real machine encoding, ELF emission, and execution-oriented backend plumbing rather than only a planned architecture.
 
 ---
 
 # Responsibilities
 
-The backend layer should contain:
+The backend layer contains:
 - bytecode generation
+- machine-code emission
+- ELF layout emission
 - backend transforms
 - backend serialization
 - runtime integration
@@ -41,6 +44,8 @@ Backend determinism is critical for:
 
 backend/
  ├── bytecode/
+ ├── machinecode/
+ ├── elf/
  ├── serialization/
  ├── transforms/
  ├── runtime/
@@ -51,4 +56,4 @@ backend/
 
 # Long-Term Goal
 
-A fully deterministic and self-hosted compiler backend pipeline.
+A fully deterministic and self-hosted compiler backend pipeline with native code emission.
