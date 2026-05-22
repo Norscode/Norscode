@@ -1,19 +1,158 @@
 #!/usr/bin/env sh
+# bin/nc - Norscode CLI (native-first, Python-fri)
+#
+# Rekkefølge:
+#   1. dist/norcode-bootstrap-compile  (ekte native Norscode-kompilator)
+#   2. python3 main.py                 (fallback for kommandoer som ennå ikke støttes nativt)
 set -eu
 
-ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-BINARY="$ROOT_DIR/dist/norscode"
-if [ ! -x "$BINARY" ]; then
-  BINARY="$ROOT_DIR/../dist/norscode"
-fi
-if [ ! -x "$BINARY" ]; then
-  BINARY="$ROOT_DIR/../../dist/norscode"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+NATIVE_BIN="$ROOT_DIR/dist/norcode-bootstrap-compile"
+
+# ─── Hjelpefunksjon: les version fra norcode.toml ───────────────────────────
+_nc_version() {
+    _toml="$ROOT_DIR/norcode.toml"
+    if [ -f "$_toml" ]; then
+        grep '^version' "$_toml" | head -1 | sed 's/.*= *"\(.*\)"/\1/'
+    else
+        printf 'ukjent'
+    fi
+}
+
+# ─── Native bootstrap-kompilator ────────────────────────────────────────────
+if [ -x "$NATIVE_BIN" ] && [ $# -ge 1 ]; then
+    CMD="$1"; shift
+
+    case "$CMD" in
+
+        run)
+            SRC="${1:-app.no}"
+            ARCH="${2:-aarch64}"
+            mkdir -p "$ROOT_DIR/build"
+            OUT="$ROOT_DIR/build/_nc_run.elf"
+            export NORCODE_BOOTSTRAP_VM=1
+            export NORCODE_CMD=run
+            export NORCODE_SRC="$SRC"
+            export NORCODE_OUT="$OUT"
+            export NORCODE_ARCH="$ARCH"
+            exec "$NATIVE_BIN"
+            ;;
+
+        build)
+            SRC="${1:-}"
+            OUT="${2:-}"
+            ARCH="${3:-aarch64}"
+            if [ -z "$SRC" ] || [ -z "$OUT" ]; then
+                printf 'bruk: nc build <kilde.no> <utdata.elf> [aarch64|x86_64]\n' >&2
+                exit 2
+            fi
+            export NORCODE_BOOTSTRAP_VM=1
+            export NORCODE_CMD=build
+            export NORCODE_SRC="$SRC"
+            export NORCODE_OUT="$OUT"
+            export NORCODE_ARCH="$ARCH"
+            exec "$NATIVE_BIN"
+            ;;
+
+        check)
+            # Syntaks- og semantikksjekk uten å kjøre.
+            # Bygger til en tempfil og sletter den – exit-koden er svaret.
+            SRC="${1:-}"
+            if [ -z "$SRC" ]; then
+                printf 'bruk: nc check <kilde.no>\n' >&2
+                exit 2
+            fi
+            _tmpdir="$(mktemp -d)"
+            _rc=0
+            export NORCODE_BOOTSTRAP_VM=1
+            export NORCODE_CMD=build
+            export NORCODE_SRC="$SRC"
+            export NORCODE_OUT="$_tmpdir/_check.elf"
+            export NORCODE_ARCH="aarch64"
+            "$NATIVE_BIN" && printf '%s: OK\n' "$SRC" || _rc=$?
+            rm -rf "$_tmpdir"
+            exit "$_rc"
+            ;;
+
+        --version|-V|version)
+            printf 'Norscode %s\n' "$(_nc_version)"
+            exit 0
+            ;;
+
+        commands)
+            printf 'Norscode CLI – native kommandoer:\n'
+            printf '  run <fil.no> [aarch64|x86_64]   Kompiler og kjør\n'
+            printf '  build <fil.no> <ut.elf> [arch]   Kompiler til binary\n'
+            printf '  check <fil.no>                   Valider syntaks og semantikk\n'
+            printf '  test                             Kjør testsuite\n'
+            printf '  selfcheck                        Verifiser kompilatoren\n'
+            printf '  identity                         Kompilatoridentitet\n'
+            printf '  release                          Bygg release\n'
+            printf '  release-targets                  Vis release-mål\n'
+            printf '  ci --bootstrap-lane              CI-gate (selfhost)\n'
+            printf '  --version                        Vis versjon\n'
+            printf '  help                             Vis hjelp\n'
+            printf '\nAndre kommandoer delegeres til Python-backend:\n'
+            printf '  repl serve format lint add lock update migrate-names ...\n'
+            exit 0
+            ;;
+
+        native-build)
+            # Bygg til native ELF via Python-native-pipeline (ingen clang)
+            # Delegerer til Python, men denne pipelinen bruker ikke clang
+            set -- "$CMD" "$@"
+            ;;
+
+        native-run)
+            # Bygg og kjør native ELF via Python-native-pipeline (ingen clang)
+            set -- "$CMD" "$@"
+            ;;
+
+        ci)
+            # ci --bootstrap-lane → native selfcheck
+            # Andre ci-flagg faller tilbake til Python
+            _is_bootstrap_lane=0
+            for _a in "$@"; do
+                if [ "$_a" = "--bootstrap-lane" ]; then _is_bootstrap_lane=1; fi
+            done
+            if [ "$_is_bootstrap_lane" = "1" ]; then
+                export NORCODE_BOOTSTRAP_VM=1
+                export NORCODE_BOOTSTRAP_CLI=1
+                export NORCODE_ARGC=1
+                export NORCODE_ARG0=selfcheck
+                exec "$NATIVE_BIN"
+            fi
+            set -- "$CMD" "$@"
+            ;;
+
+        test|selfcheck|identity|release|release-targets|help|--help|-h)
+            export NORCODE_BOOTSTRAP_VM=1
+            export NORCODE_BOOTSTRAP_CLI=1
+            NORCODE_ARGC=$(( $# + 1 ))
+            export NORCODE_ARGC
+            export NORCODE_ARG0="$CMD"
+            _i=1
+            for _arg in "$@"; do
+                eval "export NORCODE_ARG$_i=\$_arg"
+                _i=$(( _i + 1 ))
+            done
+            exec "$NATIVE_BIN"
+            ;;
+
+        *)
+            # Kommandoen støttes ikke nativt ennå – gjenbygg args og fall tilbake
+            set -- "$CMD" "$@"
+            ;;
+    esac
 fi
 
-if [ -x "$BINARY" ]; then
-  exec "$BINARY" "$@"
+# ─── Python-fallback (kun for kommandoer utenom native-settet) ───────────────
+MAIN_SCRIPT="$ROOT_DIR/main.py"
+if [ -f "$MAIN_SCRIPT" ]; then
+    exec python3 "$MAIN_SCRIPT" "$@"
 fi
 
-printf 'Norscode binary not found at: %s\n' "$BINARY" >&2
-printf 'Bygg dist/norscode for normal bruk, eller kjør eksplisitt via python3 main.py.\n' >&2
+printf 'Norscode: fant ingen kjørbar kompilator.\n' >&2
+printf 'Installer med: bash tools/build-bootstrap-binary.sh\n' >&2
+printf 'Forventet native binary: %s\n' "$NATIVE_BIN" >&2
 exit 1

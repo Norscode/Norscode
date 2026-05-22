@@ -35,6 +35,7 @@ KEYWORDS = {
     "fortsett": "FORTSETT",
     "returner": "RETURNER",
     "heltall": "TYPE_INT",
+    "heiltall": "TYPE_INT",
     "bool": "TYPE_BOOL",
     "tekst": "TYPE_TEXT",
     "liste_heltall": "TYPE_LIST_INT",
@@ -43,7 +44,9 @@ KEYWORDS = {
     "ordbok_tekst": "TYPE_MAP_TEXT",
     "ordbok_bool": "TYPE_MAP_BOOL",
     "sann": "SANN",
+    "sant": "SANN",
     "usann": "USANN",
+    "usant": "USANN",
     "og": "OG",
     "eller": "ELLER",
     "ikke": "IKKE",
@@ -167,6 +170,9 @@ class Lexer:
 
             if self.current == ">":
                 self.advance()
+                if self.current == ">":
+                    self.advance()
+                    return Token("RSHIFT", ">>", start_line, start_col)
                 if self.current == "=":
                     self.advance()
                     return Token("GTE", ">=", start_line, start_col)
@@ -174,10 +180,29 @@ class Lexer:
 
             if self.current == "<":
                 self.advance()
+                if self.current == "<":
+                    self.advance()
+                    return Token("LSHIFT", "<<", start_line, start_col)
                 if self.current == "=":
                     self.advance()
                     return Token("LTE", "<=", start_line, start_col)
                 return Token("LT", "<", start_line, start_col)
+
+            if self.current == "&":
+                self.advance()
+                return Token("BAND", "&", start_line, start_col)
+
+            if self.current == "|":
+                self.advance()
+                return Token("BOR", "|", start_line, start_col)
+
+            if self.current == "^":
+                self.advance()
+                return Token("BXOR", "^", start_line, start_col)
+
+            if self.current == "~":
+                self.advance()
+                return Token("BNOT", "~", start_line, start_col)
 
             if self.current == "-":
                 self.advance()
@@ -198,6 +223,9 @@ class Lexer:
 
             if self.current == "/":
                 self.advance()
+                if self.current == "/":
+                    self.skip_comment()
+                    continue
                 if self.current == "=":
                     self.advance()
                     return Token("SLASH_ASSIGN", "/=", start_line, start_col)

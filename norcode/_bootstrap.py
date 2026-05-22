@@ -25,7 +25,7 @@ def load_main_callable() -> Callable[[], None]:
     except Exception as exc:  # pragma: no cover - only used at runtime
         raise RuntimeError(
             "Kunne ikke laste Norscode CLI. "
-            "Sjekk at prosjektet er installert riktig med 'python3 -m pip install -e .'."
+            "Bygg og kjør dist/norscode for normal bruk, eller bruk ./bin/bootstrap som eksplisitt fallback."
         ) from exc
 
     main_func = getattr(module, "main", None)

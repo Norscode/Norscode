@@ -1,115 +1,57 @@
 #!/usr/bin/env bash
+# tools/build-bootstrap-binary.sh
+#
+# Installerer Norscode native bootstrap-kompilator.
+#
+# Rekkefølge:
+#   1. dist/norcode-bootstrap-compile  finnes allerede → bekreft og ferdig
+#   2. Ikke funnet → bygg fra selfhost-kildekode via Python-bootstrap (engangsoperasjon)
+#
+# Python trengs BARE i trinn 2 (engangsbygging av den native kompilatoren).
+# Etter første bygging er Python ikke lenger nødvendig for daglig bruk.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
-BIN_DIR="${ROOT_DIR}/bin"
-BIN_PATH="${DIST_DIR}/norscode"
-NC_PATH="${BIN_DIR}/nc"
-SRC_PATH="${DIST_DIR}/norscode_launcher.c"
+BUILD_DIR="${ROOT_DIR}/build"
+BOOTSTRAP_BIN="${DIST_DIR}/norcode-bootstrap-compile"
+LEGACY_LAUNCHER="${DIST_DIR}/norscode"
 
-mkdir -p "${DIST_DIR}" "${BIN_DIR}"
+mkdir -p "${DIST_DIR}" "${BUILD_DIR}"
 
-cat > "${SRC_PATH}" <<'EOF'
-#include <errno.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
+# ─── Sjekk om native kompilator allerede finnes ─────────────────────────────
+if [ -x "${BOOTSTRAP_BIN}" ]; then
+    printf 'Native bootstrap-kompilator klar: %s\n' "${BOOTSTRAP_BIN}"
+    printf 'Norscode er klar (Python-fri). Kjør: ./bin/nc run app.no\n'
+    exit 0
+fi
 
-static void die(const char *message) {
-    perror(message);
-    exit(1);
-}
+# ─── Bygg native kompilator fra selfhost-kildekode ──────────────────────────
+printf 'Native kompilator ikke funnet. Bygger fra selfhost-kildekode...\n'
+printf '(Python brukes kun til dette engangssteget.)\n'
 
-static char *xstrdup(const char *value) {
-    size_t len = strlen(value) + 1;
-    char *copy = (char *)malloc(len);
-    if (copy == NULL) {
-        die("malloc");
-    }
-    memcpy(copy, value, len);
-    return copy;
-}
+if ! command -v python3 >/dev/null 2>&1; then
+    printf 'Feil: python3 trengs for å bygge native kompilator første gang.\n' >&2
+    printf 'Installer Python 3.10+ og kjør dette scriptet igjen.\n' >&2
+    exit 1
+fi
 
-static char *path_dirname(const char *path) {
-    char *copy = xstrdup(path);
-    char *slash = strrchr(copy, '/');
-    if (slash == NULL) {
-        free(copy);
-        return xstrdup(".");
-    }
-    if (slash == copy) {
-        slash[1] = '\0';
-        return copy;
-    }
-    *slash = '\0';
-    return copy;
-}
+python3 "${ROOT_DIR}/main.py" selfhost-bootstrap-gate
 
-static char *join2(const char *left, const char *right) {
-    size_t left_len = strlen(left);
-    size_t right_len = strlen(right);
-    int need_slash = left_len > 0 && left[left_len - 1] != '/';
-    size_t total = left_len + (size_t)need_slash + right_len + 1;
-    char *out = (char *)malloc(total);
-    if (out == NULL) {
-        die("malloc");
-    }
-    memcpy(out, left, left_len);
-    if (need_slash) {
-        out[left_len] = '/';
-        memcpy(out + left_len + 1, right, right_len + 1);
-    } else {
-        memcpy(out + left_len, right, right_len + 1);
-    }
-    return out;
-}
+BUILT_BIN="${BUILD_DIR}/norcode-bootstrap-compile"
+if [ ! -x "${BUILT_BIN}" ]; then
+    printf 'Feil: selfhost-bootstrap-gate fullførte, men %s ble ikke generert.\n' "${BUILT_BIN}" >&2
+    exit 1
+fi
 
-static char *resolve_argv0(const char *argv0) {
-    if (argv0 == NULL || argv0[0] == '\0') {
-        fprintf(stderr, "norscode launcher: mangler argv[0]\n");
-        exit(1);
-    }
-    if (argv0[0] == '/') {
-        return xstrdup(argv0);
-    }
-    char *cwd = getcwd(NULL, 0);
-    if (cwd == NULL) {
-        die("getcwd");
-    }
-    char *resolved = join2(cwd, argv0);
-    free(cwd);
-    return resolved;
-}
+cp "${BUILT_BIN}" "${BOOTSTRAP_BIN}"
+chmod +x "${BOOTSTRAP_BIN}"
 
-int main(int argc, char **argv) {
-    char *resolved = resolve_argv0(argv[0]);
-    char *dir = path_dirname(resolved);
-    char *main_script = join2(dir, "../main.py");
-    char **args = (char **)calloc((size_t)argc + 2, sizeof(char *));
-    if (args == NULL) {
-        die("calloc");
-    }
+printf 'Bygde og installerte: %s\n' "${BOOTSTRAP_BIN}"
+printf 'Norscode er klar (Python-fri). Kjør: ./bin/nc run app.no\n'
 
-    args[0] = (char *)"python3";
-    args[1] = main_script;
-    for (int i = 1; i < argc; i++) {
-        args[i + 1] = argv[i];
-    }
-    args[argc + 1] = NULL;
-
-    execvp("python3", args);
-    die("execvp");
-    return 1;
-}
-EOF
-
-cc -O2 -Wall -Wextra -Werror -o "${BIN_PATH}" "${SRC_PATH}"
-rm -f "${SRC_PATH}"
-
-cp "${BIN_PATH}" "${NC_PATH}"
-chmod +x "${BIN_PATH}" "${NC_PATH}"
-
-printf 'Bygde bootstrap-binary: %s\n' "${BIN_PATH}"
-printf 'Oppdaterte lokal CLI: %s\n' "${NC_PATH}"
+# ─── Fjern gammel C/Python-launcher hvis den eksisterer ─────────────────────
+if [ -f "${LEGACY_LAUNCHER}" ]; then
+    # Behold for bakoverkompatibilitet, men merk den som utdatert
+    printf 'Merk: %s er den gamle Python-launcheren og er ikke lenger nødvendig.\n' "${LEGACY_LAUNCHER}"
+fi

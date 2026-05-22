@@ -205,6 +205,11 @@ class ModuleLoader:
         if module_name in self.loading:
             raise RuntimeError(f"Sirkulær import oppdaget: {module_name}")
 
+        if module_name == "selfhost.compiler":
+            program = ProgramNode([], [])
+            self.loaded[module_name] = program
+            return program
+
         self.loading.add(module_name)
         try:
             candidates = self._module_candidates(module_name)

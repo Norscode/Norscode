@@ -17,7 +17,85 @@ permissions:
   contents: read
 
 jobs:
-  build:
+
+  # ─── macOS arm64: native binary (Python-fri) ────────────────────────────────
+  build-macos-arm64:
+    name: Binary – macOS arm64
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Verifiser og pakk native binary
+        run: |
+          chmod +x dist/norcode-bootstrap-compile
+          NORCODE_BOOTSTRAP_VM=1 NORCODE_BOOTSTRAP_CLI=1 \
+            NORCODE_ARGC=1 NORCODE_ARG0=selfcheck \
+            ./dist/norcode-bootstrap-compile
+          cp dist/norcode-bootstrap-compile norscode-macos-arm64
+          shasum -a 256 norscode-macos-arm64 > norscode-macos-arm64.sha256
+
+      - name: Last opp artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: norscode-macos-arm64
+          path: |
+            norscode-macos-arm64
+            norscode-macos-arm64.sha256
+
+  # ─── Linux x86_64: freestanding binary via Docker ───────────────────────────
+  build-linux-x86_64:
+    name: Binary – Linux x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python (generer NCB-data hvis nødvendig)
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Generer NCB-datablokker
+        run: python3 main.py selfhost-bootstrap-gate
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Bygg Linux x86_64 freestanding binary via Docker
+        run: |
+          docker buildx build \
+            --platform linux/amd64 \
+            --file Dockerfile.linux-build \
+            --target export \
+            --output type=local,dest=dist-linux \
+            .
+          cp dist-linux/norscode-linux-x86_64 norscode-linux-x86_64
+          chmod +x norscode-linux-x86_64
+          sha256sum norscode-linux-x86_64 > norscode-linux-x86_64.sha256
+
+      - name: Verifiser binæren
+        run: |
+          file norscode-linux-x86_64
+          NORCODE_BOOTSTRAP_VM=1 NORCODE_BOOTSTRAP_CLI=1 \
+            NORCODE_ARGC=1 NORCODE_ARG0=selfcheck \
+            ./norscode-linux-x86_64
+          echo "Linux x86_64 selfcheck: OK"
+
+      - name: Last opp artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: norscode-linux-x86_64
+          path: |
+            norscode-linux-x86_64
+            norscode-linux-x86_64.sha256
+
+  # ─── Python-pakke (sdist + wheel) ────────────────────────────────────────────
+  build-python-package:
+    name: Python-pakke (pip)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -30,31 +108,79 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      - name: Build bootstrap binary
-        run: bash tools/build-bootstrap-binary.sh
+      - name: Selfhost bootstrap gate
+        run: python3 main.py selfhost-bootstrap-gate
 
-      - name: Run NorCode CI checks
-        run: ./bin/nc ci --check-names --require-selfhost-ready
+      - name: Bygg pakke
+        run: |
+          python3 -m pip install --upgrade build twine
+          python3 -m build
 
-      - name: Install packaging tools
-        run: python3 -m pip install --upgrade build twine
-
-      - name: Build sdist and wheel
-        run: python3 -m build
-
-      - name: Validate distribution
+      - name: Valider pakke
         run: python3 -m twine check dist/*.whl dist/*.tar.gz
 
-      - name: Upload dist artifact
+      - name: Last opp artefakt
         uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: python-dist
           path: dist/
 
-  publish-pypi:
+  # ─── GitHub Release: last opp alle binærer ───────────────────────────────────
+  github-release:
+    name: GitHub Release
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    needs: build
+    needs: [build-macos-arm64, build-linux-x86_64, build-python-package]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Last ned alle artefakter
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+
+      - name: Publiser GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/**/*
+          generate_release_notes: true
+          body: |
+            ## Installasjon
+
+            **macOS (M1/M2/M3/M4 – arm64):**
+            ```sh
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/norscode-macos-arm64 -o norscode
+            chmod +x norscode && sudo mv norscode /usr/local/bin/
+            ```
+
+            **Linux x86_64:**
+            ```sh
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/norscode-linux-x86_64 -o norscode
+            chmod +x norscode && sudo mv norscode /usr/local/bin/
+            ```
+
+            **Alle plattformer (automatisk):**
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/tools/install.sh | sh
+            ```
+
+            **Windows:**
+            ```powershell
+            irm https://raw.githubusercontent.com/${{ github.repository }}/main/tools/install.ps1 | iex
+            ```
+
+            **Via pip (alle plattformer):**
+            ```sh
+            pip install norscode==${{ github.ref_name }}
+            ```
+
+  # ─── PyPI-publisering ────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publiser til PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: github-release
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
       id-token: write
@@ -62,11 +188,11 @@ jobs:
     environment:
       name: pypi
     steps:
-      - name: Download dist artifact
+      - name: Last ned Python-dist
         uses: actions/download-artifact@v4
         with:
-          name: dist
+          name: python-dist
           path: dist/
 
-      - name: Publish to PyPI
+      - name: Publiser til PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
