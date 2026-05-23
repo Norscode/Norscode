@@ -1358,12 +1358,12 @@ class SemanticAnalyzer:
                 return TYPE_BOOL
 
             if full_name in {"sikkerhet.passord_hash", "std.sikkerhet.passord_hash"}:
-                if len(expr.args) != 2:
-                    self.error("sikkerhet.passord_hash forventer 2 argumenter")
+                # Aksepterer 1 argument (passord) eller 2 (passord, salt_ignorert)
+                if len(expr.args) < 1 or len(expr.args) > 2:
+                    self.error("sikkerhet.passord_hash forventer 1 eller 2 argument(er)")
                 passord_type = self.check_expr(expr.args[0], scope, field_schemas)
-                salt_type = self.check_expr(expr.args[1], scope, field_schemas)
-                if passord_type != TYPE_TEXT or salt_type != TYPE_TEXT:
-                    self.error("sikkerhet.passord_hash krever tekst og tekst")
+                if passord_type != TYPE_TEXT:
+                    self.error("sikkerhet.passord_hash krever tekst som første argument")
                 return TYPE_TEXT
 
             if full_name in {"sikkerhet.passord_verifiser", "std.sikkerhet.passord_verifiser"}:

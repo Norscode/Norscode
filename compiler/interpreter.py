@@ -2491,6 +2491,16 @@ class Interpreter:
             self._fs_check_path(path)
             return path.expanduser().exists()
 
+        # ─── Direkte web-sikkerheitsbuiltins ─────────────────────────────────
+        if name == "web_escape_html":
+            return self._escape_html(values[0]) if values else ""
+        if name == "web_safe_filename":
+            return self._safe_filename(values[0]) if values else "fil"
+        if name == "web_safe_path_segment":
+            return self._safe_path_segment(values[0]) if values else "segment"
+        if name == "web_safe_slug":
+            return self._safe_slug(values[0]) if values else "slug"
+
         if name == "db.open":
             if not values:
                 return ""
@@ -3366,6 +3376,11 @@ class Interpreter:
         raise RuntimeError(f"Ukjent modulfunksjon: {module_name}.{func_name}")
 
     def call_user_function(self, name: str, args: list[Any]):
+        if len(self.call_stack) >= self._MAX_CALL_DEPTH:
+            raise ThrowSignal(
+                f"Sikkerheitsfeil: maks kall-djupn ({self._MAX_CALL_DEPTH}) overskreden "
+                f"— mogleg uendeleg rekursjon i '{name}'"
+            )
         fn = self.functions[name].node
         self.push_scope()
         self.call_stack.append(name)
