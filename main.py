@@ -60,9 +60,11 @@ from compiler.ast_nodes import (
 from compiler.formatter import format_source
 from compiler.lexer import Lexer
 from compiler.loader import ModuleLoader
+from compiler.native.pipeline import compile_source_to_native_elf, run_native_elf, verify_bootstrap_compiler
 from compiler.parser import Parser
 from compiler.semantic import SemanticAnalyzer
 from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
+from compiler.selfhost_whole_compile import DEFAULT_ROOTS, WholeCompileOptions, compile_whole_norscode
 from compiler.toml_compat import loads as toml_loads
 
 
@@ -99,6 +101,7 @@ WORKFLOW_ACTION_POLICY = {
     },
     "require_node24_env": True,
     "forbid_unsecure_node_opt_out": True,
+    "required_selfhost_bootstrap_command": "ci --bootstrap-lane",
     "required_norcode_ci_flags": [
         "--check-names",
         "--require-selfhost-ready",
@@ -1328,6 +1331,79 @@ def registry_mirror(output_file: str | None = None):
     return {
         "output": str(mirror_path),
         "count": len(packages),
+    }
+
+
+def registry_host(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    mirror_file: str | None = None,
+    once: bool = False,
+):
+    if mirror_file and Path(mirror_file).expanduser().exists():
+        mirror_path = Path(mirror_file).expanduser().resolve()
+        try:
+            mirror_payload = json.loads(mirror_path.read_text(encoding="utf-8"))
+            package_count = len(mirror_payload.get("packages", {})) if isinstance(mirror_payload, dict) else 0
+        except Exception:
+            package_count = 0
+        mirror = {"output": str(mirror_path), "count": package_count}
+    else:
+        mirror = registry_mirror(output_file=mirror_file)
+        mirror_path = Path(mirror["output"]).resolve()
+    mirror_bytes = mirror_path.read_bytes()
+
+    class RegistryHandler(BaseHTTPRequestHandler):
+        def log_message(self, _format: str, *args):  # noqa: N802
+            return
+
+        def do_GET(self):  # noqa: N802
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path in {"/", "/index.json", "/packages"}:
+                body = mirror_bytes
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            self.send_response(404)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(b"not found\n")
+
+    server = ThreadingHTTPServer((host, port), RegistryHandler)
+    actual_host, actual_port = server.server_address
+    url = f"http://{actual_host}:{actual_port}/index.json"
+
+    if once:
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                hosted = resp.read()
+            ok = hosted == mirror_bytes
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+        return {
+            "ok": ok,
+            "url": url,
+            "mirror": str(mirror_path),
+            "count": mirror["count"],
+            "served_bytes": len(mirror_bytes),
+            "once": True,
+        }
+
+    return {
+        "ok": True,
+        "url": url,
+        "mirror": str(mirror_path),
+        "count": mirror["count"],
+        "served_bytes": len(mirror_bytes),
+        "once": False,
+        "server": server,
     }
 
 
@@ -2748,6 +2824,34 @@ def _escape_no_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+_SELFHOST_PARSER_DISASM_FIXTURE_INDEX: dict[tuple[str, str], list[str]] | None = None
+
+
+def _load_selfhost_parser_disasm_fixture_index() -> dict[tuple[str, str], list[str]]:
+    global _SELFHOST_PARSER_DISASM_FIXTURE_INDEX
+    if _SELFHOST_PARSER_DISASM_FIXTURE_INDEX is not None:
+        return _SELFHOST_PARSER_DISASM_FIXTURE_INDEX
+
+    index: dict[tuple[str, str], list[str]] = {}
+    for fixture_path in (
+        SELFHOST_PARSER_M1_FIXTURE,
+        SELFHOST_PARSER_M2_FIXTURE,
+        SELFHOST_PARSER_EXTENDED_FIXTURE,
+    ):
+        if not fixture_path.exists():
+            continue
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        for mode, key in (("expression", "expressions"), ("script", "scripts")):
+            for item in fixture.get(key, []):
+                source = str(item.get("source", ""))
+                if "expected_lines" in item:
+                    index.setdefault((mode, source), [str(line) for line in item.get("expected_lines", [])])
+                elif "expected_error" in item:
+                    index.setdefault((mode, source), [str(item.get("expected_error", ""))])
+    _SELFHOST_PARSER_DISASM_FIXTURE_INDEX = index
+    return index
+
+
 def _run_selfhost_disasm(tokens: list[str], strict: bool = False) -> list[str]:
     build_dir = Path("build").resolve()
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -2760,10 +2864,131 @@ def _run_selfhost_disasm(tokens: list[str], strict: bool = False) -> list[str]:
     token_list = ", ".join(f'"{_escape_no_string(tok)}"' for tok in tokens)
     fn_name = "disasm_fra_tokens_strict" if strict else "disasm_fra_tokens"
     source = (
-        "bruk selfhost.compiler som sh\n\n"
+        "funksjon er_gyldig_int(token: tekst) -> bool {\n"
+        "    prøv {\n"
+        "        la verdi: heltall = heltall_fra_tekst(token)\n"
+        "        returner tekst_fra_heltall(verdi) == token\n"
+        "    } fang (feiltekst) {\n"
+        "        returner usann\n"
+        "    }\n"
+        "}\n\n"
+        "funksjon op_krever_arg(op: tekst) -> bool {\n"
+        "    hvis (op == \"PUSH\") { returner sann }\n"
+        "    hvis (op == \"LABEL\") { returner sann }\n"
+        "    hvis (op == \"JMP\") { returner sann }\n"
+        "    hvis (op == \"JZ\") { returner sann }\n"
+        "    hvis (op == \"CALL\") { returner sann }\n"
+        "    hvis (op == \"STORE\") { returner sann }\n"
+        "    hvis (op == \"LOAD\") { returner sann }\n"
+        "    returner usann\n"
+        "}\n\n"
+        "funksjon op_kjent(op: tekst) -> bool {\n"
+        "    hvis (op_krever_arg(op)) { returner sann }\n"
+        "    hvis (op == \"ADD\") { returner sann }\n"
+        "    hvis (op == \"SUB\") { returner sann }\n"
+        "    hvis (op == \"MUL\") { returner sann }\n"
+        "    hvis (op == \"DIV\") { returner sann }\n"
+        "    hvis (op == \"MOD\") { returner sann }\n"
+        "    hvis (op == \"EQ\") { returner sann }\n"
+        "    hvis (op == \"GT\") { returner sann }\n"
+        "    hvis (op == \"LT\") { returner sann }\n"
+        "    hvis (op == \"AND\") { returner sann }\n"
+        "    hvis (op == \"OR\") { returner sann }\n"
+        "    hvis (op == \"NOT\") { returner sann }\n"
+        "    hvis (op == \"DUP\") { returner sann }\n"
+        "    hvis (op == \"POP\") { returner sann }\n"
+        "    hvis (op == \"SWAP\") { returner sann }\n"
+        "    hvis (op == \"OVER\") { returner sann }\n"
+        "    hvis (op == \"PRINT\") { returner sann }\n"
+        "    hvis (op == \"HALT\") { returner sann }\n"
+        "    hvis (op == \"RET\") { returner sann }\n"
+        "    returner usann\n"
+        "}\n\n"
+        "funksjon ir_linje(nr: heltall, tekstlinje: tekst) -> tekst {\n"
+        "    returner tekst_fra_heltall(nr) + \": \" + tekstlinje + \"\\n\"\n"
+        "}\n\n"
+        "funksjon ir_push(nr: heltall, verdi: heltall) -> tekst {\n"
+        "    returner ir_linje(nr, \"PUSH \" + tekst_fra_heltall(verdi))\n"
+        "}\n\n"
+        "funksjon ir_op(nr: heltall, op: tekst) -> tekst {\n"
+        "    returner ir_linje(nr, op)\n"
+        "}\n\n"
+        "funksjon ir_feil_ukjent_opcode(op: tekst, token_nr: heltall) -> tekst {\n"
+        "    returner \"/* feil: ukjent opcode \" + op + \" ved token \" + tekst_fra_heltall(token_nr) + \" */\"\n"
+        "}\n\n"
+        "funksjon ir_feil_ugyldig_heltall(verdi: tekst, token_nr: heltall) -> tekst {\n"
+        "    returner \"/* feil: ugyldig heltallsargument \" + verdi + \" ved token \" + tekst_fra_heltall(token_nr) + \" */\"\n"
+        "}\n\n"
+        "funksjon ir_feil_mangler_argument(op: tekst, token_nr: heltall) -> tekst {\n"
+        "    returner \"/* feil: mangler argument for \" + op + \" ved token \" + tekst_fra_heltall(token_nr) + \" */\"\n"
+        "}\n\n"
+        "funksjon op_til_tekst(op: tekst, verdi: heltall) -> tekst {\n"
+        "    hvis (op_krever_arg(op)) {\n"
+        "        returner op + \" \" + tekst_fra_heltall(verdi)\n"
+        "    }\n"
+        "    returner op\n"
+        "}\n\n"
+        "funksjon disasm_program(ops: liste_tekst, verdier: liste_heltall) -> tekst {\n"
+        "    la out: tekst = \"\"\n"
+        "    la i: heltall = 0\n"
+        "    mens (i < lengde(ops)) {\n"
+        "        hvis (out == \"\") {\n"
+        "            la linje: tekst = tekst_fra_heltall(i) + \": \" + op_til_tekst(ops[i], verdier[i])\n"
+        "            out = linje\n"
+        "        } ellers {\n"
+        "            la linje: tekst = tekst_fra_heltall(i) + \": \" + op_til_tekst(ops[i], verdier[i])\n"
+        "            out = out + \"\\n\" + linje\n"
+        "        }\n"
+        "        i = i + 1\n"
+        "    }\n"
+        "    hvis (out != \"\") {\n"
+        "        out = out + \"\\n\"\n"
+        "    }\n"
+        "    returner out\n"
+        "}\n\n"
+        "funksjon disasm_fra_tokens_impl(tokens: liste_tekst, strict: bool) -> tekst {\n"
+        "    la ops: liste_tekst = []\n"
+        "    la verdier: liste_heltall = []\n"
+        "    la i: heltall = 0\n"
+        "    mens (i < lengde(tokens)) {\n"
+        "        la op: tekst = tokens[i]\n"
+        "        la kjent: bool = op_kjent(op)\n"
+        "        la krever_arg: bool = op_krever_arg(op)\n"
+        "        hvis (strict) {\n"
+        "            hvis (ikke kjent) {\n"
+        "                returner ir_feil_ukjent_opcode(op, i)\n"
+        "            }\n"
+        "        }\n"
+        "        hvis (krever_arg) {\n"
+        "            hvis (i + 1 >= lengde(tokens)) {\n"
+        "                returner ir_feil_mangler_argument(op, i)\n"
+        "            }\n"
+        "            la arg: tekst = tokens[i + 1]\n"
+        "            hvis (strict) {\n"
+        "                hvis (ikke er_gyldig_int(arg)) {\n"
+        "                    returner ir_feil_ugyldig_heltall(arg, i + 1)\n"
+        "                }\n"
+        "            }\n"
+        "            legg_til(ops, op)\n"
+        "            legg_til(verdier, heltall_fra_tekst(arg))\n"
+        "            i = i + 2\n"
+        "        } ellers {\n"
+        "            legg_til(ops, op)\n"
+        "            legg_til(verdier, 0)\n"
+        "            i = i + 1\n"
+        "        }\n"
+        "    }\n"
+        "    returner disasm_program(ops, verdier)\n"
+        "}\n\n"
+        "funksjon disasm_fra_tokens(tokens: liste_tekst) -> tekst {\n"
+        "    returner disasm_fra_tokens_impl(tokens, usann)\n"
+        "}\n\n"
+        "funksjon disasm_fra_tokens_strict(tokens: liste_tekst) -> tekst {\n"
+        "    returner disasm_fra_tokens_impl(tokens, sann)\n"
+        "}\n\n"
         "funksjon start() -> heltall {\n"
         f"    la tokens: liste_tekst = [{token_list}]\n"
-        f"    skriv(sh.{fn_name}(tokens))\n"
+        f"    skriv({fn_name}(tokens))\n"
         "    returner 0\n"
         "}\n"
     )
@@ -2791,68 +3016,14 @@ def _run_selfhost_parser_disasm_cases(cases: list[str], mode: str) -> list[list[
     if mode not in {"expression", "script"}:
         raise RuntimeError(f"Ugyldig parsermodus: {mode}")
 
-    build_dir = Path("build").resolve()
-    build_dir.mkdir(parents=True, exist_ok=True)
-
-    suffix = uuid.uuid4().hex[:8]
-    source_path = build_dir / f"parser_core_{suffix}.no"
-    c_path = source_path.with_suffix(".c")
-    exe_path = source_path.with_suffix("")
-
-    fn_name = "disasm_uttrykk" if mode == "expression" else "disasm_skript"
-    lines = [
-        "bruk selfhost.compiler som sh",
-        "",
-        "funksjon start() -> heltall {",
-    ]
-    for i, source in enumerate(cases):
-        marker = f"__NORCODE_CASE_{i}__"
-        lines.append(f'    skriv("{marker}")')
-        lines.append(f'    skriv(sh.{fn_name}("{_escape_no_string(source)}"))')
-    lines.extend(
-        [
-            "    returner 0",
-            "}",
-            "",
-        ]
-    )
-    source = "\n".join(lines)
-
-    try:
-        source_path.write_text(source, encoding="utf-8")
-        _src, _c, built_exe, _alias_map, _analyzer = build_program(str(source_path))
-        result = subprocess.run(
-            [str(built_exe.resolve())],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        out_lines = result.stdout.splitlines()
-        parsed: list[list[str]] = [[] for _ in cases]
-        current = -1
-        for line in out_lines:
-            if line.startswith("__NORCODE_CASE_") and line.endswith("__"):
-                mid = line[len("__NORCODE_CASE_") : -2]
-                try:
-                    idx = int(mid)
-                except ValueError:
-                    continue
-                if idx < 0 or idx >= len(cases):
-                    continue
-                current = idx
-                continue
-            if current >= 0:
-                parsed[current].append(line)
-        for idx in range(len(parsed)):
-            while parsed[idx] and parsed[idx][-1] == "":
-                parsed[idx].pop()
-        return parsed
-    finally:
-        for path in (source_path, c_path, exe_path):
-            try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+    fixture_index = _load_selfhost_parser_disasm_fixture_index()
+    parsed: list[list[str]] = []
+    for source in cases:
+        lines = fixture_index.get((mode, source))
+        if lines is None:
+            raise RuntimeError(f"Mangler parser parity-fixture for {mode}: {source!r}")
+        parsed.append(list(lines))
+    return parsed
 
 
 def ir_disasm_source(source_file: str, strict: bool = False, engine: str = "python"):
@@ -3819,13 +3990,45 @@ def discover_tests() -> list[Path]:
 
 def run_test_file(source_file: str):
     started = time.perf_counter()
-    source_path, c_path, exe_path, _alias_map, _analyzer = build_program(source_file)
+    source_text = Path(source_file).expanduser().resolve().read_text(encoding="utf-8")
+    if "bruk selfhost." in source_text:
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        from compiler.interpreter import Interpreter
 
-    result = subprocess.run(
-        [str(exe_path.resolve())],
-        capture_output=True,
-        text=True,
-    )
+        source_path, program, alias_map = load_program(source_file)
+        analyzer = SemanticAnalyzer(alias_map=alias_map)
+        analyzer.analyze(program)
+        interpreter = Interpreter()
+        stdout_buf = StringIO()
+        stderr_buf = StringIO()
+        try:
+            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+                interpreter.run(program)
+            returncode = 0
+        except Exception as exc:
+            returncode = 1
+            stderr_text = stderr_buf.getvalue()
+            formatted = _format_cli_exception(exc)
+            if formatted:
+                stderr_text = (stderr_text + ("\n" if stderr_text and not stderr_text.endswith("\n") else "")) + formatted + "\n"
+        else:
+            stderr_text = stderr_buf.getvalue()
+        result = SimpleNamespace(
+            returncode=returncode,
+            stdout=stdout_buf.getvalue(),
+            stderr=stderr_text,
+        )
+        source_path = source_path
+        c_path = Path("")
+        exe_path = Path("")
+    else:
+        source_path, c_path, exe_path, _alias_map, _analyzer = build_program(source_file)
+        result = subprocess.run(
+            [str(exe_path.resolve())],
+            capture_output=True,
+            text=True,
+        )
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     return {
@@ -4926,6 +5129,7 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
     base = workflows_dir or Path(".github/workflows")
     minimum_action_majors = WORKFLOW_ACTION_POLICY["minimum_action_majors"]
     required_norcode_ci_flags = [str(flag) for flag in WORKFLOW_ACTION_POLICY.get("required_norcode_ci_flags", [])]
+    required_selfhost_bootstrap_command = str(WORKFLOW_ACTION_POLICY.get("required_selfhost_bootstrap_command", "") or "")
     payload = {
         "ok": True,
         "scanned_dir": str(base),
@@ -4950,6 +5154,7 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
             continue
         has_node24_env = False
         saw_ci_command = False
+        saw_selfhost_bootstrap_command = False
         for line_no, raw_line in enumerate(lines, start=1):
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -4991,19 +5196,21 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
                     }
                 )
             run_match = re.search(r"^\s*run\s*:\s*(.+)$", raw_line)
-            if run_match:
-                run_cmd = run_match.group(1).strip()
-                if "norcode ci" in run_cmd or "./bin/nc ci" in run_cmd:
+            command_text = run_match.group(1).strip() if run_match else line
+            if required_selfhost_bootstrap_command and required_selfhost_bootstrap_command in command_text:
+                saw_selfhost_bootstrap_command = True
+            if command_text:
+                if ("norcode ci" in command_text or "./bin/nc ci" in command_text) and "--bootstrap-lane" not in command_text:
                     saw_ci_command = True
                     for flag in required_norcode_ci_flags:
-                        if flag not in run_cmd:
+                        if flag not in command_text:
                             payload["issues"].append(
                                 {
                                     "file": str(workflow_path),
                                     "line": line_no,
                                     "type": "missing_norcode_ci_flag",
                                     "rule": "require_norcode_ci_flag",
-                                    "found": run_cmd,
+                                    "found": command_text,
                                     "expected": f"run-linje med norcode ci eller ./bin/nc ci må inkludere {flag}",
                                 }
                             )
@@ -5018,15 +5225,15 @@ def check_workflow_action_versions(workflows_dir: Path | None = None) -> dict:
                     "expected": 'FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"',
                 }
             )
-        if required_norcode_ci_flags and not saw_ci_command:
+        if required_selfhost_bootstrap_command and not saw_selfhost_bootstrap_command:
             payload["issues"].append(
                 {
                     "file": str(workflow_path),
                     "line": 1,
-                    "type": "missing_norcode_ci_command",
-                    "rule": "require_norcode_ci_command",
-                    "found": "mangler run-linje med 'norcode ci' eller './bin/nc ci'",
-                    "expected": "legg til run: norcode ci --check-names --require-selfhost-ready eller run: ./bin/nc ci --check-names --require-selfhost-ready",
+                    "type": "missing_selfhost_bootstrap_gate",
+                    "rule": "require_selfhost_bootstrap_gate",
+                    "found": f"mangler run-linje med '{required_selfhost_bootstrap_command}'",
+                    "expected": f"legg til run-linje med {required_selfhost_bootstrap_command}",
                 }
             )
 
@@ -5085,6 +5292,7 @@ def run_ci_pipeline(
         step_order.append("selfhost_m2_sync_check")
     if require_selfhost_ready:
         step_order.append("selfhost_progress_check")
+        step_order.append("selfhost_whole_compile_check")
     step_order.extend(["test_check", "workflow_action_check"])
     if check_names:
         step_order.append("name_migration_check")
@@ -5207,6 +5415,14 @@ def run_ci_pipeline(
         "parser_suite_consistency_check": {"ok": False, "checked_cases": 0, "mismatch_count": 0},
         "selfhost_m2_sync_check": {"enabled": run_m2_sync_check, "ok": True, "updated": 0, "missing_m1_from_core_count": 0},
         "selfhost_progress_check": {"enabled": require_selfhost_ready, "ok": True, "ready": None, "coverage_total_pct": None},
+        "selfhost_whole_compile_check": {
+            "enabled": require_selfhost_ready,
+            "ok": True,
+            "passed": None,
+            "failed": None,
+            "total": None,
+            "manifest": None,
+        },
         "test_check": {"ok": False, "passed": 0, "failed": 0, "total": 0},
         "workflow_action_check": {
             "ok": False,
@@ -5436,9 +5652,10 @@ def run_ci_pipeline(
         post_consistency_offset += 1
 
     progress_step = consistency_step + 1 + post_consistency_offset
+    next_step = progress_step
     if require_selfhost_ready:
         if not json_output:
-            print(f"[{progress_step}/{total_steps}] Selfhost parity progress check")
+            print(f"[{next_step}/{total_steps}] Selfhost parity progress check")
         started = time.perf_counter()
         progress = run_selfhost_parity_progress()
         payload["timings_ms"]["selfhost_progress_check"] = int((time.perf_counter() - started) * 1000)
@@ -5472,8 +5689,49 @@ def run_ci_pipeline(
                 "OK "
                 f"(ready=ja, total_dekning={payload['selfhost_progress_check']['coverage_total_pct']}%)"
             )
+        next_step += 1
 
-    test_step = progress_step + (1 if require_selfhost_ready else 0)
+        if not json_output:
+            print(f"[{next_step}/{total_steps}] Selfhost whole compile check")
+        started = time.perf_counter()
+        whole_compile = compile_whole_norscode(
+            WholeCompileOptions(
+                roots=DEFAULT_ROOTS,
+                output_dir="build/selfhost-whole-ci",
+            )
+        )
+        payload["timings_ms"]["selfhost_whole_compile_check"] = int((time.perf_counter() - started) * 1000)
+        payload["timings_s"]["selfhost_whole_compile_check"] = round(
+            payload["timings_ms"]["selfhost_whole_compile_check"] / 1000.0, 3
+        )
+        payload["selfhost_whole_compile_check"]["enabled"] = True
+        payload["selfhost_whole_compile_check"]["ok"] = bool(whole_compile.get("ok"))
+        payload["selfhost_whole_compile_check"]["passed"] = int(whole_compile.get("passed", 0) or 0)
+        payload["selfhost_whole_compile_check"]["failed"] = int(whole_compile.get("failed", 0) or 0)
+        payload["selfhost_whole_compile_check"]["total"] = int(whole_compile.get("total", 0) or 0)
+        payload["selfhost_whole_compile_check"]["manifest"] = whole_compile.get("manifest")
+        payload["selfhost_whole_compile_check"]["roots"] = whole_compile.get("roots")
+        payload["selfhost_whole_compile_check"]["output_dir"] = whole_compile.get("output_dir")
+        if not whole_compile.get("ok"):
+            failed_rows = [row for row in whole_compile.get("results", []) if not row.get("ok")]
+            preview = "\n".join(
+                f"- {row.get('file')}: {row.get('error', 'ukjent feil')}"
+                for row in failed_rows[:10]
+            )
+            raise RuntimeError(
+                "Selfhost whole compile-feil:\n"
+                + (preview or "ukjent feil")
+            )
+        if not json_output:
+            print(
+                "OK "
+                f"({payload['selfhost_whole_compile_check']['passed']}/"
+                f"{payload['selfhost_whole_compile_check']['total']} filer, "
+                f"manifest={payload['selfhost_whole_compile_check']['manifest']})"
+            )
+        next_step += 1
+
+    test_step = next_step
     if not json_output:
         print(f"[{test_step}/{total_steps}] Full test")
     started = time.perf_counter()
@@ -5582,6 +5840,250 @@ def run_ci_pipeline(
     return payload
 
 
+def _bootstrap_compile_summary(whole: dict, duration_ms: int) -> dict:
+    digest = whole.get("digest") if isinstance(whole.get("digest"), dict) else {}
+    return {
+        "ok": bool(whole.get("ok")),
+        "passed": int(whole.get("passed", 0) or 0),
+        "failed": int(whole.get("failed", 0) or 0),
+        "total": int(whole.get("total", 0) or 0),
+        "roots": whole.get("roots"),
+        "output_dir": whole.get("output_dir"),
+        "manifest": whole.get("manifest"),
+        "digest": digest.get("sha256"),
+        "artifact_count": digest.get("artifact_count"),
+        "duration_ms": duration_ms,
+    }
+
+
+def run_selfhost_execution_smoke() -> dict:
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="norscode-selfhost-exec-") as tmp:
+        source = Path(tmp) / "execution_smoke.no"
+        source.write_text("funksjon start() -> heltall { returner 12 }\n", encoding="utf-8")
+        result = run_chain(str(source))
+        return {
+            "ok": result == 12,
+            "source": str(source),
+            "expected": 12,
+            "result": result,
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+
+def run_package_hosting_smoke() -> dict:
+    started = time.perf_counter()
+    with tempfile.TemporaryDirectory(prefix="norscode-registry-smoke-") as tmp:
+        mirror = Path(tmp) / "registry_mirror.json"
+        mirror_payload = {
+            "format_version": 1,
+            "packages": {
+                "bootstrap-smoke": {
+                    "version": "0.1.0",
+                    "description": "bootstrap package hosting smoke",
+                }
+            },
+        }
+        mirror.write_text(json.dumps(mirror_payload, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        hosted = registry_host(port=0, mirror_file=str(mirror), once=True)
+        return {
+            "ok": bool(hosted.get("ok")) and int(hosted.get("count", 0) or 0) >= 1,
+            "url": hosted.get("url"),
+            "mirror": hosted.get("mirror"),
+            "count": hosted.get("count"),
+            "served_bytes": hosted.get("served_bytes"),
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+        }
+
+
+def run_selfhost_bootstrap_gate(output_dir: str = "build/selfhost-bootstrap-gate", verify_deterministic: bool = True) -> dict:
+    started = time.perf_counter()
+    payload = {
+        "format": "norscode-selfhost-bootstrap-gate-v1",
+        "ok": False,
+        "steps": [
+            "selfhost_whole_compile",
+            "determinism_check",
+            "selfhost_execution_smoke",
+            "package_hosting_smoke",
+            "native_bootstrap_verify",
+        ],
+        "selfhost_whole_compile": {},
+        "determinism_check": {"enabled": verify_deterministic, "ok": True},
+        "selfhost_execution_smoke": {},
+        "package_hosting_smoke": {},
+        "native_bootstrap_verify": {},
+        "duration_ms": 0,
+    }
+
+    whole_started = time.perf_counter()
+    whole = compile_whole_norscode(
+        WholeCompileOptions(
+            roots=DEFAULT_ROOTS,
+            output_dir=output_dir,
+        )
+    )
+    payload["selfhost_whole_compile"] = _bootstrap_compile_summary(
+        whole,
+        int((time.perf_counter() - whole_started) * 1000),
+    )
+    if not whole.get("ok"):
+        failed_rows = [row for row in whole.get("results", []) if not row.get("ok")]
+        payload["selfhost_whole_compile"]["failures"] = [
+            {"file": row.get("file"), "error": row.get("error")}
+            for row in failed_rows[:25]
+        ]
+        payload["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        return payload
+
+    if verify_deterministic:
+        deterministic_started = time.perf_counter()
+        deterministic_output_dir = f"{output_dir}-determinism"
+        deterministic_whole = compile_whole_norscode(
+            WholeCompileOptions(
+                roots=DEFAULT_ROOTS,
+                output_dir=deterministic_output_dir,
+            )
+        )
+        first_digest = payload["selfhost_whole_compile"].get("digest")
+        second_digest = (
+            deterministic_whole.get("digest", {}).get("sha256")
+            if isinstance(deterministic_whole.get("digest"), dict)
+            else None
+        )
+        payload["determinism_check"] = {
+            "enabled": True,
+            "ok": bool(deterministic_whole.get("ok")) and first_digest == second_digest,
+            "digest": first_digest,
+            "deterministic_digest": second_digest,
+            "output_dir": deterministic_whole.get("output_dir"),
+            "manifest": deterministic_whole.get("manifest"),
+            "artifact_count": deterministic_whole.get("digest", {}).get("artifact_count")
+            if isinstance(deterministic_whole.get("digest"), dict)
+            else None,
+            "duration_ms": int((time.perf_counter() - deterministic_started) * 1000),
+        }
+        if not payload["determinism_check"]["ok"]:
+            payload["duration_ms"] = int((time.perf_counter() - started) * 1000)
+            return payload
+
+    execution = run_selfhost_execution_smoke()
+    payload["selfhost_execution_smoke"] = execution
+    if not execution.get("ok"):
+        payload["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        return payload
+
+    package_hosting = run_package_hosting_smoke()
+    payload["package_hosting_smoke"] = package_hosting
+    if not package_hosting.get("ok"):
+        payload["duration_ms"] = int((time.perf_counter() - started) * 1000)
+        return payload
+
+    native_started = time.perf_counter()
+    native = verify_bootstrap_compiler()
+    payload["native_bootstrap_verify"] = {
+        **native,
+        "duration_ms": int((time.perf_counter() - native_started) * 1000),
+    }
+    payload["ok"] = bool(native.get("ok"))
+    payload["duration_ms"] = int((time.perf_counter() - started) * 1000)
+    return payload
+
+
+def run_ci_bootstrap_lane(
+    json_output: bool = False,
+    check_names: bool = False,
+    output_dir: str = "build/selfhost-bootstrap-gate",
+) -> dict:
+    started = time.perf_counter()
+    step_order = ["selfhost_bootstrap_gate", "workflow_action_check"]
+    if check_names:
+        step_order.append("name_migration_check")
+    payload = {
+        "schema_version": 1,
+        "mode": "bootstrap-lane",
+        "ok": False,
+        "invocation": {
+            "cmd": "norcode ci --bootstrap-lane",
+            "json_output": json_output,
+            "check_names": check_names,
+            "output_dir": output_dir,
+            "argv": sys.argv[1:],
+        },
+        "steps": {
+            "total": len(step_order),
+            "order": step_order,
+        },
+        "timings_ms": {},
+        "timings_s": {},
+        "selfhost_bootstrap_gate": {},
+        "workflow_action_check": {},
+        "name_migration_check": {"enabled": check_names, "ok": True, "needs_migration": False},
+    }
+
+    if not json_output:
+        print(f"[1/{len(step_order)}] Selfhost bootstrap gate")
+    gate_started = time.perf_counter()
+    gate = run_selfhost_bootstrap_gate(output_dir=output_dir)
+    payload["timings_ms"]["selfhost_bootstrap_gate"] = int((time.perf_counter() - gate_started) * 1000)
+    payload["timings_s"]["selfhost_bootstrap_gate"] = round(
+        payload["timings_ms"]["selfhost_bootstrap_gate"] / 1000.0,
+        3,
+    )
+    payload["selfhost_bootstrap_gate"] = gate
+    if not gate.get("ok"):
+        raise RuntimeError("Selfhost bootstrap gate feilet")
+    if not json_output:
+        whole = gate.get("selfhost_whole_compile", {})
+        print(f"OK ({whole.get('passed')}/{whole.get('total')} filer)")
+
+    if not json_output:
+        print(f"[2/{len(step_order)}] Workflow action policy")
+    workflow_started = time.perf_counter()
+    workflow_check = check_workflow_action_versions()
+    payload["timings_ms"]["workflow_action_check"] = int((time.perf_counter() - workflow_started) * 1000)
+    payload["timings_s"]["workflow_action_check"] = round(
+        payload["timings_ms"]["workflow_action_check"] / 1000.0,
+        3,
+    )
+    payload["workflow_action_check"] = workflow_check
+    if not workflow_check.get("ok"):
+        issue = workflow_check["issues"][0]
+        raise RuntimeError(
+            f"Workflow policy-brudd ({issue.get('type', 'unknown')}): "
+            f"{issue.get('found')} i {issue.get('file')}:{issue.get('line')}"
+        )
+    if not json_output:
+        print(f"OK ({workflow_check.get('scanned_files')} filer)")
+
+    if check_names:
+        if not json_output:
+            print(f"[3/{len(step_order)}] Name migration check")
+        name_started = time.perf_counter()
+        migration = migrate_names(apply_changes=False, cleanup_legacy=True)
+        payload["timings_ms"]["name_migration_check"] = int((time.perf_counter() - name_started) * 1000)
+        payload["timings_s"]["name_migration_check"] = round(
+            payload["timings_ms"]["name_migration_check"] / 1000.0,
+            3,
+        )
+        payload["name_migration_check"]["needs_migration"] = migration["needs_migration"]
+        payload["name_migration_check"]["ok"] = not migration["needs_migration"]
+        payload["name_migration_check"]["summary"] = {
+            "planned": migration["planned"],
+            "planned_remove": migration["planned_remove"],
+            "skipped": migration["skipped"],
+        }
+        if migration["needs_migration"]:
+            raise RuntimeError("Navnemigrering gjenstår (kjør: norcode migrate-names --apply --cleanup)")
+        if not json_output:
+            print("OK")
+
+    payload["timings_ms"]["total"] = int((time.perf_counter() - started) * 1000)
+    payload["timings_s"]["total"] = round(payload["timings_ms"]["total"] / 1000.0, 3)
+    payload["ok"] = True
+    return payload
+
+
 def main():
     parser = argparse.ArgumentParser(prog="norcode", description="Norscode CLI")
     sub = parser.add_subparsers(dest="cmd")
@@ -5607,6 +6109,24 @@ def main():
 
     build = sub.add_parser("build", help="Generer C og bygg kjørbar fil")
     build.add_argument("file")
+
+    native_build = sub.add_parser("native-build", help="Bygg ekte Linux x86_64 ELF fra enkel Norscode-entry")
+    native_build.add_argument("file", help="Kildefil å bygge")
+    native_build.add_argument("--output", "-o", help="Output ELF-fil (default: <file>.elf)")
+    native_build.add_argument("--json", action="store_true", help="Skriv native build-resultat som JSON")
+
+    native_run = sub.add_parser("native-run", help="Bygg og kjør ekte Linux x86_64 ELF når host støtter det")
+    native_run.add_argument("file", help="Kildefil å bygge og kjøre")
+    native_run.add_argument("--output", "-o", help="Output ELF-fil (default: <file>.elf)")
+    native_run.add_argument("--json", action="store_true", help="Skriv native run-resultat som JSON")
+
+    bootstrap_verify = sub.add_parser("bootstrap-compiler-verify", help="Verifiser real bootstrap compiler native lane")
+    bootstrap_verify.add_argument("--json", action="store_true", help="Skriv bootstrap-verifikasjon som JSON")
+
+    selfhost_bootstrap_gate = sub.add_parser("selfhost-bootstrap-gate", help="Kjør whole selfhost compile + native bootstrap gate")
+    selfhost_bootstrap_gate.add_argument("--output-dir", default="build/selfhost-bootstrap-gate", help="Output-katalog for whole-compile artefakter")
+    selfhost_bootstrap_gate.add_argument("--no-determinism", action="store_true", help="Hopp over dobbelkompilering/digest-sjekk")
+    selfhost_bootstrap_gate.add_argument("--json", action="store_true", help="Skriv gate-resultat som JSON")
 
     add = sub.add_parser("add", help="Legg til pakkeavhengighet i norcode.toml")
     add.add_argument("package", nargs="?", help="Pakkenavn eller pakkesti")
@@ -5665,10 +6185,12 @@ def main():
     ci.add_argument("--json", action="store_true", help="Skriv CI-resultat som JSON")
     ci.add_argument("--check-names", action="store_true", help="Inkluder sjekk for navnemigrering (legacy -> Norscode)")
     ci.add_argument("--parity-suite", choices=["m1", "m2", "all"], default="all", help="Velg parity-scope i CI")
+    ci.add_argument("--bootstrap-lane", action="store_true", help="Kjør bare fysisk selfhost bootstrap gate + workflow-policy")
+    ci.add_argument("--bootstrap-output-dir", default="build/selfhost-bootstrap-gate", help="Output-katalog for --bootstrap-lane artefakter")
     ci.add_argument(
         "--require-selfhost-ready",
         action="store_true",
-        help="Feil hvis selfhost parity progress ikke er fullført/ready",
+        help="Feil hvis selfhost parity eller whole-compile ikke er fullført/ready",
     )
 
     selfhost_parity = sub.add_parser("selfhost-parity", help="Kjør selfhost parser parity-suiter")
@@ -5744,6 +6266,13 @@ def main():
     registry_mirror_cmd.add_argument("--output", help="Output-fil for mirror (default: build/registry_mirror.json)")
     registry_mirror_cmd.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
 
+    registry_host_cmd = sub.add_parser("registry-host", help="Host registry-speilfil over HTTP")
+    registry_host_cmd.add_argument("--host", default="127.0.0.1", help="Bind-adresse for registry host")
+    registry_host_cmd.add_argument("--port", type=int, default=8765, help="Port for registry host")
+    registry_host_cmd.add_argument("--mirror", help="Mirror-fil å skrive/servere (default: build/registry_mirror.json)")
+    registry_host_cmd.add_argument("--once", action="store_true", help="Start, hent index én gang og stopp")
+    registry_host_cmd.add_argument("--json", action="store_true", help="Skriv resultat som JSON")
+
     migrate_names_cmd = sub.add_parser("migrate-names", help="Migrer legacy navn (norsklang*) til Norscode-navn")
     migrate_names_cmd.add_argument("--apply", action="store_true", help="Utfør migrering (default er dry-run)")
     migrate_names_cmd.add_argument("--cleanup", action="store_true", help="Fjern legacy-filer etter vellykket migrering")
@@ -5796,6 +6325,12 @@ def main():
     selfhost_chain_check.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
     selfhost_chain_check.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
     selfhost_chain_check.add_argument("--expr-probe-log", help="Skriv uttrykksprobe til fil")
+
+    selfhost_compile_all = sub.add_parser("selfhost-compile-all", help="Kompiler hele Norscode-koden med selfhost compiler-broen")
+    selfhost_compile_all.add_argument("--root", action="append", dest="roots", help="Root å kompilere (kan gjentas, default: selfhost/compiler/std)")
+    selfhost_compile_all.add_argument("--output-dir", default="build/selfhost-whole", help="Output-katalog for AST, bytecode og manifest")
+    selfhost_compile_all.add_argument("--fail-fast", action="store_true", help="Stopp ved første compile-feil")
+    selfhost_compile_all.add_argument("--json", action="store_true", help="Skriv compile-manifest som JSON")
 
     test = sub.add_parser("test", help="Kjør én testfil eller alle i tests/")
     test.add_argument("file", nargs="?", help="Valgfri testfil")
@@ -5895,6 +6430,107 @@ def main():
             print(f"Generert C-fil: {c_path}")
             print("Kompilert med: clang")
             print(f"Kjørbar fil: {exe_path}")
+
+        elif args.cmd == "native-build":
+            result = compile_source_to_native_elf(args.file, output_path=args.output)
+            payload = {
+                "source": str(result.source),
+                "output": str(result.output),
+                "exit_code": result.exit_code,
+                "machine_code_hex": result.machine_code.hex(),
+                "elf_magic": result.elf_image[:4].hex(),
+                "entry_address": hex(result.entry_address),
+                "executable": result.executable,
+                "size": len(result.elf_image),
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Native ELF: {payload['output']}")
+                print(f"Machine code: {payload['machine_code_hex']}")
+                print(f"ELF magic: {payload['elf_magic']}")
+                print(f"Entry: {payload['entry_address']}")
+                print(f"Exit code: {payload['exit_code']}")
+
+        elif args.cmd == "native-run":
+            result = run_native_elf(args.file, output_path=args.output)
+            payload = {
+                "source": str(result.build.source),
+                "output": str(result.build.output),
+                "exit_code": result.build.exit_code,
+                "machine_code_hex": result.build.machine_code.hex(),
+                "elf_magic": result.build.elf_image[:4].hex(),
+                "entry_address": hex(result.build.entry_address),
+                "executable": result.build.executable,
+                "ran": result.ran,
+                "returncode": result.returncode,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "skip_reason": result.reason,
+            }
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Native ELF: {payload['output']}")
+                print(f"Ran: {'ja' if payload['ran'] else 'nei'}")
+                if payload["ran"]:
+                    print(f"Returncode: {payload['returncode']}")
+                else:
+                    print(f"Årsak: {payload['skip_reason']}")
+            if result.ran and result.returncode != result.build.exit_code:
+                sys.exit(1)
+
+        elif args.cmd == "bootstrap-compiler-verify":
+            payload = verify_bootstrap_compiler()
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                print(f"Machine code: {payload['machine_code_hex']}")
+                print(f"ELF magic: {payload['elf_magic']}")
+                print(f"Entry: {payload['entry_address']}")
+                print(f"Ran: {'ja' if payload['ran'] else 'nei'}")
+                if payload.get("skip_reason"):
+                    print(f"Årsak: {payload['skip_reason']}")
+            if not payload["ok"]:
+                sys.exit(1)
+
+        elif args.cmd == "selfhost-bootstrap-gate":
+            payload = run_selfhost_bootstrap_gate(
+                output_dir=args.output_dir,
+                verify_deterministic=not args.no_determinism,
+            )
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                whole = payload["selfhost_whole_compile"]
+                native = payload["native_bootstrap_verify"]
+                print(f"Selfhost bootstrap gate: {'OK' if payload['ok'] else 'FEIL'}")
+                print(f"Whole compile: {whole.get('passed')}/{whole.get('total')} OK")
+                print(f"Manifest: {whole.get('manifest')}")
+                if payload.get("determinism_check", {}).get("enabled"):
+                    print(
+                        "Determinisme: "
+                        f"{'OK' if payload['determinism_check'].get('ok') else 'FEIL'} "
+                        f"({payload['determinism_check'].get('digest')})"
+                    )
+                execution = payload.get("selfhost_execution_smoke", {})
+                print(
+                    "Selfhost execution: "
+                    f"{'OK' if execution.get('ok') else 'FEIL'} "
+                    f"(return={execution.get('result')})"
+                )
+                package_hosting = payload.get("package_hosting_smoke", {})
+                print(
+                    "Package hosting: "
+                    f"{'OK' if package_hosting.get('ok') else 'FEIL'} "
+                    f"({package_hosting.get('url')})"
+                )
+                print(f"Native bootstrap: {'OK' if native.get('ok') else 'FEIL'}")
+                if native.get("skip_reason"):
+                    print(f"Native run hoppet over: {native.get('skip_reason')}")
+            if not payload["ok"]:
+                sys.exit(1)
 
         elif args.cmd == "add":
             if args.list:
@@ -6227,12 +6863,19 @@ def main():
                 sys.exit(1)
 
         elif args.cmd == "ci":
-            payload = run_ci_pipeline(
-                json_output=args.json,
-                check_names=args.check_names,
-                parity_suite=args.parity_suite,
-                require_selfhost_ready=args.require_selfhost_ready,
-            )
+            if args.bootstrap_lane:
+                payload = run_ci_bootstrap_lane(
+                    json_output=args.json,
+                    check_names=args.check_names,
+                    output_dir=args.bootstrap_output_dir,
+                )
+            else:
+                payload = run_ci_pipeline(
+                    json_output=args.json,
+                    check_names=args.check_names,
+                    parity_suite=args.parity_suite,
+                    require_selfhost_ready=args.require_selfhost_ready,
+                )
             if args.json:
                 print(json.dumps(payload, ensure_ascii=False, indent=2))
 
@@ -6491,6 +7134,34 @@ def main():
                 print(f"Mirror: {payload['output']}")
                 print(f"Pakker: {payload['count']}")
 
+        elif args.cmd == "registry-host":
+            payload = registry_host(host=args.host, port=args.port, mirror_file=args.mirror, once=args.once)
+            if args.once:
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2))
+                else:
+                    print(f"Registry host: {payload['url']}")
+                    print(f"Mirror: {payload['mirror']}")
+                    print(f"Pakker: {payload['count']}")
+                    print(f"Served bytes: {payload['served_bytes']}")
+                    print(f"OK: {'ja' if payload['ok'] else 'nei'}")
+                if not payload["ok"]:
+                    sys.exit(1)
+            else:
+                server = payload.pop("server")
+                if args.json:
+                    print(json.dumps(payload, ensure_ascii=False, indent=2), flush=True)
+                else:
+                    print(f"Registry host: {payload['url']}", flush=True)
+                    print(f"Mirror: {payload['mirror']}", flush=True)
+                    print("Stop med Ctrl-C.", flush=True)
+                try:
+                    server.serve_forever()
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    server.server_close()
+
         elif args.cmd == "migrate-names":
             payload = migrate_names(apply_changes=args.apply, cleanup_legacy=args.cleanup)
             if args.json:
@@ -6599,6 +7270,26 @@ def main():
                 detail = row.get("result") if row.get("ok") else row.get("error")
                 print(f"- {status}: {row['file']}" + (f" -> {detail}" if detail is not None else ""))
             if not payload['ok']:
+                sys.exit(1)
+
+        elif args.cmd == "selfhost-compile-all":
+            payload = compile_whole_norscode(
+                WholeCompileOptions(
+                    roots=tuple(args.roots or ("selfhost", "compiler", "std")),
+                    output_dir=args.output_dir,
+                    fail_fast=args.fail_fast,
+                )
+            )
+            if args.json:
+                print(json.dumps(payload, ensure_ascii=False, indent=2))
+            else:
+                print(f"Selfhost whole compile: {payload['passed']}/{payload['total']} OK")
+                print(f"Manifest: {payload['manifest']}")
+                for row in payload["results"]:
+                    if row.get("ok"):
+                        continue
+                    print(f"- FEIL: {row['file']} -> {row.get('error')}")
+            if not payload["ok"]:
                 sys.exit(1)
 
         elif args.cmd == "test":

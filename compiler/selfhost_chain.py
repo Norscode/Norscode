@@ -60,6 +60,15 @@ def resolve_module_file(module_name: str, source_path: Path) -> Path:
     for cand in candidates:
         if cand.exists() and cand.is_file():
             return cand.resolve()
+    module_dir = project_root / dot_path
+    if module_dir.exists() and module_dir.is_dir():
+        for entry_name in ('index.no', 'main.no', f'{dot_path.name}.no', 'allocator.no'):
+            cand = module_dir / entry_name
+            if cand.exists() and cand.is_file():
+                return cand.resolve()
+        package_files = sorted(module_dir.glob('*.no'))
+        if package_files:
+            return package_files[0].resolve()
     raise SelfhostChainError(f'Fant ikke modulfil for import: {module_name}')
 
 

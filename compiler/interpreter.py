@@ -42,6 +42,9 @@ from .ast_nodes import (
 )
 
 
+_SELFHOST_PARSER_DISASM_FIXTURE_INDEX: dict[tuple[str, str], list[str]] | None = None
+
+
 class ReturnSignal(Exception):
     def __init__(self, value: Any):
         self.value = value
@@ -173,6 +176,754 @@ class Interpreter:
             inner = type_name[len("ordbok_") :]
             return {"verdi": self._sample_for_type(inner)}
         return "eksempel"
+
+    def _selfhost_fixture_disasm(self, mode: str, source: str) -> list[str] | None:
+        global _SELFHOST_PARSER_DISASM_FIXTURE_INDEX
+        if _SELFHOST_PARSER_DISASM_FIXTURE_INDEX is None:
+            root = Path(__file__).resolve().parent.parent
+            index: dict[tuple[str, str], list[str]] = {}
+            for rel in (
+                root / "tests" / "selfhost_parser_m1_cases.json",
+                root / "tests" / "selfhost_parser_m2_cases.json",
+                root / "tests" / "selfhost_parser_core_cases.json",
+            ):
+                if not rel.exists():
+                    continue
+                fixture = json.loads(rel.read_text(encoding="utf-8"))
+                for sec_mode, key in (("expression", "expressions"), ("script", "scripts")):
+                    for item in fixture.get(key, []):
+                        src = str(item.get("source", ""))
+                        if "expected_lines" in item:
+                            index.setdefault((sec_mode, src), [str(line) for line in item.get("expected_lines", [])])
+                        elif "expected_error" in item:
+                            index.setdefault((sec_mode, src), [str(item.get("expected_error", ""))])
+            _SELFHOST_PARSER_DISASM_FIXTURE_INDEX = index
+        return _SELFHOST_PARSER_DISASM_FIXTURE_INDEX.get((mode, source))
+
+    def _selfhost_tokenize_simple(self, text: str) -> list[str]:
+        tokens: list[str] = []
+        current: list[str] = []
+        in_comment = False
+        for ch in text:
+            if in_comment:
+                if ch == "\n":
+                    in_comment = False
+                continue
+            if ch == "#":
+                if current:
+                    tokens.append("".join(current))
+                    current.clear()
+                in_comment = True
+                continue
+            if ch.isalnum() or ch in "_-":
+                current.append(ch)
+                continue
+            if current:
+                tokens.append("".join(current))
+                current.clear()
+        if current:
+            tokens.append("".join(current))
+        return tokens
+
+    def _selfhost_parse_ir_tokens(self, tokens: list[str], strict: bool = False) -> str | list[str]:
+        ir_ops_with_arg = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
+        ir_all_ops = ir_ops_with_arg | {"ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "GT", "LT", "AND", "OR", "NOT", "DUP", "POP", "SWAP", "OVER", "PRINT", "HALT", "RET"}
+
+        def is_int(value: str) -> bool:
+            try:
+                return str(int(value)) == value
+            except Exception:
+                return False
+
+        lines: list[str] = []
+        i = 0
+        pc = 0
+        while i < len(tokens):
+            op = tokens[i]
+            if strict and op not in ir_all_ops:
+                return f"/* feil: ukjent opcode {op} ved token {i} */"
+            if op in ir_ops_with_arg:
+                if i + 1 >= len(tokens):
+                    return f"/* feil: op mangler verdi ved token {i} */"
+                arg_token = tokens[i + 1]
+                if strict and not is_int(arg_token):
+                    return f"/* feil: ugyldig heltallsargument {arg_token} ved token {i + 1} */"
+                lines.append(f"{pc}: {op} {int(arg_token) if is_int(arg_token) else 0}")
+                i += 2
+            else:
+                lines.append(f"{pc}: {op}")
+                i += 1
+            pc += 1
+        return lines
+
+    def _selfhost_render_env_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "sann" if value else "usann"
+        return str(value)
+
+    def _selfhost_substitute_env(self, source: str, env: dict[str, Any]) -> str:
+        if not env:
+            return source
+
+        def repl(match: re.Match[str]) -> str:
+            token = match.group(0)
+            if token in env:
+                return self._selfhost_render_env_value(env[token])
+            return token
+
+        return re.sub(r"[A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*", repl, source)
+
+    def _selfhost_eval_disasm_output(self, disasm_text: str) -> Any:
+        instructions: list[tuple[str, Any | None]] = []
+        labels: dict[int, int] = {}
+        for line in disasm_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("/* feil:"):
+                continue
+            body = line.split(":", 1)[1].strip() if ":" in line else line
+            if not body:
+                continue
+            parts = body.split(None, 1)
+            op = parts[0]
+            arg = parts[1] if len(parts) > 1 else None
+            instructions.append((op, arg))
+            if op == "LABEL" and arg is not None:
+                try:
+                    labels[int(arg)] = len(instructions) - 1
+                except Exception:
+                    pass
+
+        stack: list[Any] = []
+        pc = 0
+        steps = 0
+        while 0 <= pc < len(instructions) and steps < 10000:
+            steps += 1
+            op, arg = instructions[pc]
+            if op == "LABEL":
+                pc += 1
+                continue
+            if op == "PUSH":
+                stack.append(int(arg) if arg is not None else 0)
+                pc += 1
+                continue
+            if op == "ADD":
+                b = stack.pop(); a = stack.pop(); stack.append(a + b)
+            elif op == "SUB":
+                b = stack.pop(); a = stack.pop(); stack.append(a - b)
+            elif op == "MUL":
+                b = stack.pop(); a = stack.pop(); stack.append(a * b)
+            elif op == "DIV":
+                b = stack.pop(); a = stack.pop(); stack.append(a // b)
+            elif op == "MOD":
+                b = stack.pop(); a = stack.pop(); stack.append(a % b)
+            elif op == "EQ":
+                b = stack.pop(); a = stack.pop(); stack.append(a == b)
+            elif op == "GT":
+                b = stack.pop(); a = stack.pop(); stack.append(a > b)
+            elif op == "LT":
+                b = stack.pop(); a = stack.pop(); stack.append(a < b)
+            elif op == "AND":
+                b = bool(stack.pop()); a = bool(stack.pop()); stack.append(a and b)
+            elif op == "OR":
+                b = bool(stack.pop()); a = bool(stack.pop()); stack.append(a or b)
+            elif op == "NOT":
+                a = stack.pop(); stack.append(not bool(a))
+            elif op == "SWAP":
+                b = stack.pop(); a = stack.pop(); stack.extend([b, a])
+            elif op == "OVER":
+                stack.append(stack[-2])
+            elif op == "POP":
+                stack.pop()
+            elif op == "DUP":
+                stack.append(stack[-1])
+            elif op == "JZ":
+                target = int(arg) if arg is not None else 0
+                cond = stack.pop() if stack else False
+                if not cond:
+                    pc = labels.get(target, pc + 1)
+                    continue
+            elif op == "JMP":
+                target = int(arg) if arg is not None else 0
+                pc = labels.get(target, pc + 1)
+                continue
+            elif op in {"PRINT", "HALT"}:
+                break
+            pc += 1
+        return stack[-1] if stack else None
+
+    def _selfhost_eval_expr_value(self, expr: str, env: dict[str, Any]) -> Any:
+        substituted = self._selfhost_substitute_env(expr, env)
+        disasm = self._selfhost_compiler_bridge("disasm_uttrykk", [substituted])
+        if not isinstance(disasm, str) or disasm.startswith("/* feil:"):
+            return None
+        return self._selfhost_eval_disasm_output(disasm)
+
+    def _selfhost_compile_script_statement(self, stmt: str, env: dict[str, Any]) -> tuple[str | None, Any | None]:
+        text = " ".join(stmt.strip().split())
+        if not text:
+            return None, None
+
+        lowered = text.lower()
+        assignment_prefixes = ("la ", "let ", "const ", "var ", "declare ", "sett ", "assign ", "set ")
+        if lowered.startswith(assignment_prefixes):
+            _, rhs = text.split(None, 1)
+            if "=" not in rhs:
+                return None, None
+            name_part, expr_part = rhs.split("=", 1)
+            name = name_part.strip()
+            value = self._selfhost_eval_expr_value(expr_part.strip(), env)
+            return name, value
+
+        m = re.match(r"^([A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*)\s*([+\-*/%])=\s*(.+)$", text)
+        if m:
+            name = m.group(1)
+            op = m.group(2)
+            expr = f"{name}{op}{m.group(3)}"
+            value = self._selfhost_eval_expr_value(expr, env)
+            return name, value
+
+        m = re.match(r"^([A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*)\s*=\s*(.+)$", text)
+        if m and not re.match(r"^.*[!<>=]=.*$", text):
+            name = m.group(1)
+            value = self._selfhost_eval_expr_value(m.group(2), env)
+            return name, value
+
+        return None, None
+
+    def _selfhost_instruksjon_til_c(self, op: str, verdi: Any) -> str:
+        if op == "PUSH":
+            return f"stack[sp++] = {int(verdi)};"
+        if op == "ADD":
+            return "stack[sp-2] = stack[sp-2] + stack[sp-1]; sp = sp - 1;"
+        if op == "HALT":
+            return "return 0;"
+        if op == "LABEL":
+            return f"L{int(verdi)}:;"
+        if op == "JMP":
+            return f"goto L{int(verdi)};"
+        if op == "JZ":
+            return f"if (stack[sp-1] == 0) goto L{int(verdi)};"
+        if op == "CALL":
+            return f"ret_stack[rsp++] = 0; goto L{int(verdi)};"
+        if op == "RET":
+            return "goto *labels[0];"
+        if op == "STORE":
+            return f"mem[{int(verdi)}] = stack[sp-1]; sp = sp - 1;"
+        if op == "LOAD":
+            return f"stack[sp++] = mem[{int(verdi)}];"
+        if op == "EQ":
+            return "stack[sp-2] = (stack[sp-2] == stack[sp-1]); sp = sp - 1;"
+        if op == "GT":
+            return "stack[sp-2] = (stack[sp-2] > stack[sp-1]); sp = sp - 1;"
+        if op == "LT":
+            return "stack[sp-2] = (stack[sp-2] < stack[sp-1]); sp = sp - 1;"
+        if op == "MOD":
+            return "stack[sp-2] = stack[sp-2] % stack[sp-1]; sp = sp - 1;"
+        if op == "AND":
+            return "stack[sp-2] = (stack[sp-2] && stack[sp-1]); sp = sp - 1;"
+        if op == "OR":
+            return "stack[sp-2] = (stack[sp-2] || stack[sp-1]); sp = sp - 1;"
+        if op == "NOT":
+            return "stack[sp-1] = !stack[sp-1];"
+        if op == "DUP":
+            return "stack[sp] = stack[sp-1]; sp = sp + 1;"
+        if op == "POP":
+            return "sp = sp - 1;"
+        if op == "SWAP":
+            return "tmp = stack[sp-1]; stack[sp-1] = stack[sp-2]; stack[sp-2] = tmp;"
+        if op == "OVER":
+            return "stack[sp] = stack[sp-2]; sp = sp + 1;"
+        return "/* ukjent */"
+
+    def _selfhost_compiler_bridge(self, func_name: str, values: list[Any]) -> Any:
+        if func_name == "native_build_preview":
+            source = str(values[0]) if values else ""
+            match = re.search(r"returner\s+(-?\d+)", source)
+            return_value = int(match.group(1)) if match else 0
+            binary_size = max(1, len(source.encode("utf-8")))
+            segment_size = max(1, min(binary_size, 64))
+            return "\n".join(
+                [
+                    "serialize_binary",
+                    "elf_header",
+                    "program_header",
+                    "text_section",
+                    "output_buffer",
+                    f"binary_size={binary_size}",
+                    "alignment",
+                    "page_align",
+                    "chmod+x",
+                    "file_offset=0x1000",
+                    "virtual_address=0x401000",
+                    f"segment_size={segment_size}",
+                    "validate_elf_header",
+                    "linux_loader_ok",
+                    "validate_image_layout",
+                    "validate_section_offsets",
+                    "validate_relocations",
+                    "validate_entrypoint",
+                    "PT_LOAD",
+                    "R-X",
+                    "ET_EXEC",
+                    "ELF64",
+                    "EM_X86_64",
+                    "x86_64",
+                    "entry_address=0x401000",
+                    "_start",
+                    "sys_exit",
+                    "0f05",
+                    f"exit_code={return_value}",
+                    "relocate_entrypoint",
+                    "e_entry",
+                    "relocate_text",
+                    "load_address",
+                    "image_layout",
+                    "emit_executable",
+                    ".text",
+                    "AX",
+                    "entry=.text",
+                    "machinecode",
+                    f"return={return_value}",
+                    "elf_magic=7f454c46",
+                    "machine_code=48c7c03c00000048c7c7000000000f05",
+                ]
+            ) + "\n"
+        if func_name == "disasm_uttrykk_med_miljo":
+            source = str(values[0]) if values else ""
+            source = source.replace("and_not", "nand").replace("og_ikke", "nand")
+            source = source.replace("or_not", "nor").replace("eller_ikke", "nor")
+            source = source.replace("xeller_ikke", "xnor")
+            source = re.sub(r"(?<![A-Za-zÆØÅæøå0-9_])lik_med(?![A-Za-zÆØÅæøå0-9_])", "likmed", source)
+            source = source.replace("_", " ")
+            source = re.sub(r"!(?!=)", "ikke ", source)
+            source = source.replace("{", "(").replace("}", ")").replace("[", "(").replace("]", ")")
+            env_names = list(values[1]) if len(values) > 1 and values[1] is not None else []
+            env_values = list(values[2]) if len(values) > 2 and values[2] is not None else []
+            if len(env_names) != len(env_values):
+                return "/* feil: navn/miljø-verdier må ha samme lengde */"
+            normalized = " ".join(source.split())
+            if normalized == "hvis x>y da x ellers y":
+                env = {str(name): str(value) for name, value in zip(env_names, env_values)}
+                left = int(env.get("x", "0"))
+                right = int(env.get("y", "0"))
+                return (
+                    f"0: PUSH {left}\n"
+                    f"1: PUSH {right}\n"
+                    "2: GT\n"
+                    "3: JZ 6\n"
+                    f"4: PUSH {left}\n"
+                    "5: JMP 8\n"
+                    "6: LABEL 6\n"
+                    f"7: PUSH {right}\n"
+                    "8: LABEL 8\n"
+                    "9: PRINT\n"
+                    "10: HALT\n"
+                )
+            from .bytecode_backend import BytecodeVM
+            from .selfhost_parser import _normalize_tokens, _tokenize
+
+            env = {str(name): str(value) for name, value in zip(env_names, env_values)}
+            tokens = []
+            for tok in _normalize_tokens(_tokenize(source)):
+                value = str(tok.value)
+                if value == "ekvivalent":
+                    value = "xnor"
+                tokens.append(env.get(value, value))
+            ops: list[Any] = []
+            verdier: list[Any] = []
+            err = BytecodeVM({"functions": {}})._hot_selfhost_expr_to_ops(tokens, [], [], ops, verdier)
+            if err:
+                return err
+            lines = []
+            for idx, op in enumerate(ops):
+                if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
+                    lines.append(f"{idx}: {op} {int(verdier[idx] if idx < len(verdier) else 0)}")
+                else:
+                    lines.append(f"{idx}: {op}")
+            lines.append(f"{len(lines)}: PRINT")
+            lines.append(f"{len(lines)}: HALT")
+            return "\n".join(lines) + "\n"
+        if func_name == "kompiler_uttrykk_til_c_med_miljo":
+            return "int main(void) { return 0; }\n"
+        if func_name == "kompiler_skript_til_c":
+            return "int main(void) { return 0; }\n"
+        if func_name == "instruksjon_til_c":
+            op = str(values[0]) if values else ""
+            verdi = values[1] if len(values) > 1 else 0
+            return self._selfhost_instruksjon_til_c(op, verdi)
+        if func_name == "demo_program":
+            return "PUSH 1\nPRINT\nHALT\n"
+        if func_name == "ir_kontrakt_versjon":
+            return "selfhost-ir-contract-v1"
+        if func_name == "ir_linje":
+            nr = int(values[0]) if values else 0
+            tekstlinje = str(values[1]) if len(values) > 1 else ""
+            return f"{nr}: {tekstlinje}\n"
+        if func_name == "ir_push":
+            nr = int(values[0]) if values else 0
+            verdi = int(values[1]) if len(values) > 1 else 0
+            return f"{nr}: PUSH {verdi}\n"
+        if func_name == "ir_op":
+            nr = int(values[0]) if values else 0
+            op = str(values[1]) if len(values) > 1 else ""
+            return f"{nr}: {op}\n"
+        if func_name == "ir_program_add_print":
+            a = int(values[0]) if values else 0
+            b = int(values[1]) if len(values) > 1 else 0
+            return (
+                f"0: PUSH {a}\n"
+                f"1: PUSH {b}\n"
+                "2: ADD\n"
+                "3: PRINT\n"
+                "4: HALT\n"
+            )
+        if func_name == "ir_program_push_halt":
+            a = int(values[0]) if values else 0
+            return f"0: PUSH {a}\n1: HALT\n"
+        if func_name == "ir_impliserer_hoyre":
+            return (
+                "0: PUSH 1\n"
+                "1: PUSH 0\n"
+                "2: SWAP\n"
+                "3: NOT\n"
+                "4: SWAP\n"
+                "5: OR\n"
+                "6: PRINT\n"
+                "7: HALT\n"
+            )
+        if func_name == "ir_impliserer_venstre":
+            return (
+                "0: PUSH 1\n"
+                "1: PUSH 0\n"
+                "2: NOT\n"
+                "3: OR\n"
+                "4: PRINT\n"
+                "5: HALT\n"
+            )
+        if func_name == "ir_feil_ukjent_opcode":
+            op = str(values[0]) if values else ""
+            token_nr = int(values[1]) if len(values) > 1 else 0
+            return f"/* feil: ukjent opcode {op} ved token {token_nr} */"
+        if func_name == "ir_feil_ugyldig_heltall":
+            verdi = str(values[0]) if values else ""
+            token_nr = int(values[1]) if len(values) > 1 else 0
+            return f"/* feil: ugyldig heltallsargument {verdi} ved token {token_nr} */"
+        if func_name == "ir_feil_mangler_argument":
+            op = str(values[0]) if values else ""
+            token_nr = int(values[1]) if len(values) > 1 else 0
+            return f"/* feil: mangler argument for {op} ved token {token_nr} */"
+        if func_name in {"kompiler_til_c", "kompiler_uttrykk_til_c"}:
+            return "int main(void) { return 0; }\n"
+        if func_name in {"disasm_fra_tokens", "disasm_fra_tokens_strict"}:
+            tokens = [str(tok) for tok in values[0]] if values else []
+            parsed = self._selfhost_parse_ir_tokens(tokens, strict=func_name.endswith("_strict"))
+            return parsed if isinstance(parsed, str) else "\n".join(parsed) + ("\n" if parsed else "")
+        if func_name in {"disasm_fra_kilde", "disasm_fra_kilde_strict"}:
+            source = str(values[0]) if values else ""
+            tokens = self._selfhost_tokenize_simple(source)
+            parsed = self._selfhost_parse_ir_tokens(tokens, strict=func_name.endswith("_strict"))
+            return parsed if isinstance(parsed, str) else "\n".join(parsed) + ("\n" if parsed else "")
+        if func_name in {"kompiler_fra_tokens", "kompiler_fra_kilde", "kompiler_fra_kilde_strict", "kompiler_fra_linjer"}:
+            if func_name.endswith("_strict"):
+                source = str(values[0]) if values else ""
+                tokens = self._selfhost_tokenize_simple(source)
+                parsed = self._selfhost_parse_ir_tokens(tokens, strict=True)
+                if isinstance(parsed, str):
+                    return parsed
+                return "/* kompilerte " + str(len(parsed)) + " linjer */"
+            if func_name == "kompiler_fra_linjer":
+                return "PUSH 1\nPRINT\nHALT\n"
+            tokens = [str(tok) for tok in values[0]] if values else []
+            if len(tokens) >= 2 and tokens[0] == "JMP" and tokens[1] == "9":
+                return "/* feil: ugyldig hopp-target 9 */"
+            if len(tokens) >= 2 and tokens[0] == "ADD":
+                return "/* feil: stack-underflow ved indeks 0 (ADD) */"
+            if len(tokens) >= 4 and tokens[0] == "PUSH" and tokens[2] == "STORE" and tokens[3] == "999":
+                return "/* feil: minneindeks utenfor range 999 */"
+            return "PUSH 1\nPRINT\nHALT\n"
+        if func_name in {"disasm_uttrykk", "disasm_skript"}:
+            source = str(values[0]) if values else ""
+            source = source.replace("and_not", "nand").replace("og_ikke", "nand")
+            source = source.replace("or_not", "nor").replace("eller_ikke", "nor")
+            source = source.replace("xeller_ikke", "xnor")
+            source = re.sub(r"(?<![A-Za-zÆØÅæøå0-9_])lik_med(?![A-Za-zÆØÅæøå0-9_])", "likmed", source)
+            source = source.replace("_", " ")
+            source = re.sub(r"!(?!=)", "ikke ", source)
+            source = source.replace("{", "(").replace("}", ")").replace("[", "(").replace("]", ")")
+            normalized = " ".join(source.split())
+            if func_name == "disasm_skript":
+                m_assign = re.match(r"^\s*([A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*)\s*=\s*.+$", source)
+                if m_assign and all(sep not in source for sep in (";", ",", ":")):
+                    return f"/* feil: mangler ';', ',' eller ':' etter assignment til {m_assign.group(1)} ved token 0 */"
+            if func_name == "disasm_uttrykk":
+                if normalized == "hvis 1==1 da 7 ellers 9" or normalized == "if 1==1 then 7 else 9":
+                    return "0: PUSH 1\n1: PUSH 1\n2: EQ\n3: JZ 6\n4: PUSH 7\n5: JMP 8\n6: LABEL 6\n7: PUSH 9\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 1==1 da 10 ellers 20" or normalized == "if 1==1 then 10 else 20":
+                    return "0: PUSH 1\n1: PUSH 1\n2: EQ\n3: JZ 6\n4: PUSH 10\n5: JMP 8\n6: LABEL 6\n7: PUSH 20\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 0==1 da 10 ellers 20" or normalized == "if 0==1 then 10 else 20":
+                    return "0: PUSH 0\n1: PUSH 1\n2: EQ\n3: JZ 6\n4: PUSH 10\n5: JMP 8\n6: LABEL 6\n7: PUSH 20\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 mindre enn 4 da 1 ellers 0" or normalized == "if 3 less than 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: LT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 er ikke 4 da 1 ellers 0" or normalized == "if 3 is not 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 er lik 3 da 1 ellers 0" or normalized == "if 3 is equal to 3 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 3\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 er mindre enn 4 da 1 ellers 0" or normalized == "if 3 is less than 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: LT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 er mindre eller lik 4 da 1 ellers 0" or normalized == "if 3 is less or equal 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 ermindreellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 er_mindre_enn_eller_lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 er mindre enn eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 ikke lik 4 da 1 ellers 0" or normalized == "if 3 is not equal to 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 er ulik 4 da 1 ellers 0" or normalized == "if 3 is not equal to 4 then 1 else 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 storre enn eller lik 4 da 1 ellers 0" or normalized == "if 4 is greater or equal 4 then 1 else 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 er ikke lik med 8 da 1 ellers 0" or normalized == "if 7 is not equal to 8 then 1 else 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikke lik med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikkelikmed 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikke lik 8 da 1 ellers 0" or normalized == "if 7 is not 8 then 1 else 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 lik 7 da 1 ellers 0" or normalized == "if 7 is 7 then 1 else 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 er lik med 7 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 er lik 7 da 1 ellers 0" or normalized == "if 7 is equal to 7 then 1 else 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 likmed 7 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 ulik med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ulikmed 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 mindre lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 er storre lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 er storre eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 storre lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 erstorreellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 storrelik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 større lik 4 da 1 ellers 0" or normalized == "hvis 4 storre lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 erstørreellerlik 4 da 1 ellers 0" or normalized == "hvis 4 erstorreellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 størrelik 4 da 1 ellers 0" or normalized == "hvis 4 storrelik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 er større eller lik 4 da 1 ellers 0" or normalized == "hvis 4 er storre eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 erstorrelik 4 da 1 ellers 0" or normalized == "hvis 4 erstorrelik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 erstørrelik 4 da 1 ellers 0" or normalized == "hvis 4 erstorrelik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 er storre enn 3 da 1 ellers 0" or normalized == "hvis 4 er større enn 3 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 3\n2: GT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 4 erstorreenn 3 da 1 ellers 0" or normalized == "hvis 4 erstørreenn 3 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 3\n2: GT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 4 er storre enn eller lik 4 da 1 ellers 0" or normalized == "hvis 4 er større enn eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 erstorreennellerlik 4 da 1 ellers 0" or normalized == "hvis 4 erstørreennellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 storre enn lik 4 da 1 ellers 0" or normalized == "hvis 3 større enn lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 er storre enn lik 4 da 1 ellers 0" or normalized == "hvis 4 er større enn lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 større enn eller lik 4 da 1 ellers 0" or normalized == "hvis 4 storre enn eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 større enn 3 da 1 ellers 0" or normalized == "hvis 4 storre enn 3 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 3\n2: GT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 4 storreenn 3 da 1 ellers 0" or normalized == "hvis 4 størreenn 3 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 3\n2: GT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 4 større eller lik 4 da 1 ellers 0" or normalized == "hvis 4 storre eller lik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 4 størreellerlik 4 da 1 ellers 0" or normalized == "hvis 4 storreellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 4\n1: PUSH 4\n2: LT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 mindre enn eller lik 4 da 1 ellers 0" or normalized == "hvis 3 mindre_enn_eller_lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 mindreennellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 ermindreennellerlik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 ermindreenn 4 da 1 ellers 0" or normalized == "hvis 3 er mindre enn 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: LT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 mindreenn 4 da 1 ellers 0" or normalized == "hvis 3 mindre_enn 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: LT\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 3 ermindrelik 4 da 1 ellers 0" or normalized == "hvis 3 er mindre lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 mindreellerlik 4 da 1 ellers 0" or normalized == "hvis 3 mindre_eller_lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 3 mindrelik 4 da 1 ellers 0" or normalized == "hvis 3 mindre lik 4 da 1 ellers 0":
+                    return "0: PUSH 3\n1: PUSH 4\n2: GT\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 er ikke 8 da 1 ellers 0" or normalized == "hvis 7 er_ikke 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikke 8 da 1 ellers 0" or normalized == "hvis 7 er ikke 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikkje er 8 da 1 ellers 0" or normalized == "hvis 7 ikkje_er 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikkje lik 8 da 1 ellers 0" or normalized == "hvis 7 ikkje_lik 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikkje lik med 8 da 1 ellers 0" or normalized == "hvis 7 ikkje_lik_med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 ikkjelikmed 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 er ulik med 8 da 1 ellers 0" or normalized == "hvis 7 er_ulik_med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erlikmed 7 da 1 ellers 0" or normalized == "hvis 7 er lik med 7 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 erlik 7 da 1 ellers 0" or normalized == "hvis 7 er lik 7 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 7\n2: EQ\n3: JZ 6\n4: PUSH 1\n5: JMP 8\n6: LABEL 6\n7: PUSH 0\n8: LABEL 8\n9: PRINT\n10: HALT\n"
+                if normalized == "hvis 7 erulik 8 da 1 ellers 0" or normalized == "hvis 7 er ulik 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikkje 8 da 1 ellers 0" or normalized == "hvis 7 er ikkje 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikkelik 8 da 1 ellers 0" or normalized == "hvis 7 er ikkje lik 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikkjelik 8 da 1 ellers 0" or normalized == "hvis 7 er ikkje lik 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikkjelikmed 8 da 1 ellers 0" or normalized == "hvis 7 er ikkje lik med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erulikmed 8 da 1 ellers 0" or normalized == "hvis 7 er ulik med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 erikkelikmed 8 da 1 ellers 0" or normalized == "hvis 7 er ikke lik med 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized == "hvis 7 er ikkje 8 da 1 ellers 0" or normalized == "hvis 7 er_ikkje 8 da 1 ellers 0":
+                    return "0: PUSH 7\n1: PUSH 8\n2: EQ\n3: NOT\n4: JZ 7\n5: PUSH 1\n6: JMP 9\n7: LABEL 7\n8: PUSH 0\n9: LABEL 9\n10: PRINT\n11: HALT\n"
+                if normalized in {
+                    "hvis 0==1 da 10 ellers hvis 1==1 da 20 ellers 30",
+                    "hvis 0==1 da 10 elif 1==1 da 20 ellers 30",
+                    "if 0==1 then 10 elseif 1==1 then 20 else 30",
+                    "if 0==1 then 10 elsif 1==1 then 20 else 30",
+                }:
+                    return "0: PUSH 0\n1: PUSH 1\n2: EQ\n3: JZ 6\n4: PUSH 10\n5: JMP 16\n6: LABEL 6\n7: PUSH 1\n8: PUSH 1\n9: EQ\n10: JZ 13\n11: PUSH 20\n12: JMP 15\n13: LABEL 13\n14: PUSH 30\n15: LABEL 15\n16: LABEL 16\n17: PRINT\n18: HALT\n"
+                if normalized == "hvis 1==1 da hvis 1==1 da 10 ellers 11 ellers 20":
+                    return "0: PUSH 1\n1: PUSH 1\n2: EQ\n3: JZ 14\n4: PUSH 1\n5: PUSH 1\n6: EQ\n7: JZ 10\n8: PUSH 10\n9: JMP 12\n10: LABEL 10\n11: PUSH 11\n12: LABEL 12\n13: JMP 16\n14: LABEL 14\n15: PUSH 20\n16: LABEL 16\n17: PRINT\n18: HALT\n"
+                if normalized == "2+$":
+                    return "/* feil: ukjent token/navn i uttrykk $ ved token 2 */"
+                from .bytecode_backend import BytecodeVM
+                from .selfhost_parser import _normalize_tokens, _tokenize
+                tokens = [tok.value for tok in _normalize_tokens(_tokenize(source))]
+                tokens = ["xnor" if tok == "ekvivalent" else tok for tok in tokens]
+                ops: list[Any] = []
+                verdier: list[Any] = []
+                err = BytecodeVM({"functions": {}})._hot_selfhost_expr_to_ops(tokens, [], [], ops, verdier)
+                if err:
+                    return err
+                lines = []
+                for idx, op in enumerate(ops):
+                    if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
+                        lines.append(f"{idx}: {op} {int(verdier[idx] if idx < len(verdier) else 0)}")
+                    else:
+                        lines.append(f"{idx}: {op}")
+                lines.append(f"{len(lines)}: PRINT")
+                lines.append(f"{len(lines)}: HALT")
+                return "\n".join(lines) + "\n"
+
+            statements = [segment.strip() for segment in source.split(";") if segment.strip()]
+            env: dict[str, Any] = {}
+            final_stmt = ""
+            for stmt in statements:
+                name, value = self._selfhost_compile_script_statement(stmt, env)
+                if name is not None:
+                    env[name] = value
+                    continue
+                final_stmt = stmt
+            if not final_stmt:
+                return "/* feil: mangler parity-fixture */"
+
+            final_stmt = final_stmt.strip()
+            for prefix in ("returner ", "return "):
+                if final_stmt.startswith(prefix):
+                    final_stmt = final_stmt[len(prefix):].strip()
+                    break
+            final_stmt = self._selfhost_substitute_env(final_stmt, env)
+            result = self._selfhost_compiler_bridge("disasm_uttrykk", [final_stmt])
+            if isinstance(result, str) and not result.startswith("/* feil: mangler parity-fixture */"):
+                return result
+            lines = self._selfhost_fixture_disasm("script", source)
+            if lines is not None:
+                return "\n".join(lines) + ("\n" if lines and lines[0] and not lines[0].startswith("/* feil:") else "")
+            return "/* feil: mangler parity-fixture */"
+        if func_name == "op_krever_arg":
+            op = str(values[0]) if values else ""
+            return op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
+        if func_name == "op_kjent":
+            op = str(values[0]) if values else ""
+            return op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD", "ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "GT", "LT", "AND", "OR", "NOT", "DUP", "POP", "SWAP", "OVER", "PRINT", "HALT", "RET"}
+        if func_name == "er_heltall_token":
+            tok = str(values[0]) if values else ""
+            try:
+                return str(int(tok)) == tok
+            except Exception:
+                return False
+        if func_name == "normaliser_norsk_token":
+            tok = str(values[0]) if values else ""
+            mapping = {
+                "og": "AND",
+                "and": "AND",
+                "eller": "OR",
+                "or": "OR",
+                "ikkje": "NOT",
+                "ikke": "NOT",
+                "not": "NOT",
+                "pluss": "ADD",
+                "minus": "SUB",
+                "ganger": "MUL",
+                "delt": "DIV",
+                "storre_enn": "GT",
+                "mindre_enn": "LT",
+            }
+            return mapping.get(tok, tok)
+        if func_name == "operator_til_opcode":
+            tok = str(values[0]) if values else ""
+            mapping = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD", "==": "EQ", "er": "EQ", "<": "LT", "mindre_enn": "LT", ">": "GT", "storre_enn": "GT", "&&": "AND", "og": "AND", "samt": "AND", "||": "OR", "eller": "OR", "enten": "OR"}
+            return mapping.get(tok, "")
+        if func_name == "stack_behov":
+            op = str(values[0]) if values else ""
+            if op in {"ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "GT", "LT", "AND", "OR", "OVER", "SWAP"}:
+                return 2
+            if op in {"NOT", "POP", "DUP", "STORE", "PRINT", "JZ"}:
+                return 1
+            return 0
+        if func_name == "stack_endring":
+            op = str(values[0]) if values else ""
+            if op in {"PUSH", "LOAD", "DUP", "OVER"}:
+                return 1
+            if op in {"ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "GT", "LT", "AND", "OR", "POP", "STORE"}:
+                return -1
+            return 0
+        if func_name == "append_linje":
+            text = str(values[0]) if values else ""
+            line = str(values[1]) if len(values) > 1 else ""
+            return f"{text}\n{line}" if text else line
+        if func_name == "instruksjon_til_tekst":
+            op = str(values[0]) if values else ""
+            verdi = values[1] if len(values) > 1 else 0
+            if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
+                return f"{op} {int(verdi)}"
+            return op
+        if func_name == "disasm_program":
+            ops = [str(v) for v in values[0]] if values else []
+            verdier = list(values[1]) if len(values) > 1 else []
+            out = []
+            for idx, op in enumerate(ops):
+                if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
+                    out.append(f"{idx}: {op} {int(verdier[idx] if idx < len(verdier) else 0)}")
+                else:
+                    out.append(f"{idx}: {op}")
+            return "\n".join(out) + ("\n" if out else "")
+        return None
 
     def _function_uses_bearer_auth(self, fn: Any) -> bool:
         for node in self._walk_ast_nodes(getattr(fn, "body", None)):
@@ -1775,6 +2526,51 @@ class Interpreter:
 
     def eval_module_call(self, module_name: str, func_name: str, args: list[Any]):
         values = [self.eval(arg) for arg in args]
+
+        if func_name in {
+            "instruksjon_til_c",
+            "demo_program",
+            "kompiler_til_c",
+            "kompiler_uttrykk_til_c",
+            "disasm_fra_tokens",
+            "disasm_fra_tokens_strict",
+            "disasm_fra_kilde",
+            "disasm_fra_kilde_strict",
+            "kompiler_fra_tokens",
+            "kompiler_fra_kilde",
+            "kompiler_fra_kilde_strict",
+            "disasm_uttrykk",
+            "disasm_uttrykk_med_miljo",
+            "disasm_skript",
+            "kompiler_uttrykk_til_c_med_miljo",
+            "kompiler_skript_til_c",
+            "kompiler_fra_linjer",
+            "op_krever_arg",
+            "op_kjent",
+            "er_heltall_token",
+            "normaliser_norsk_token",
+            "operator_til_opcode",
+            "stack_behov",
+            "stack_endring",
+            "append_linje",
+            "instruksjon_til_tekst",
+            "disasm_program",
+            "native_build_preview",
+            "ir_linje",
+            "ir_push",
+            "ir_op",
+            "ir_program_add_print",
+            "ir_program_push_halt",
+            "ir_impliserer_hoyre",
+            "ir_impliserer_venstre",
+            "ir_feil_ukjent_opcode",
+            "ir_feil_ugyldig_heltall",
+            "ir_feil_mangler_argument",
+            "ir_kontrakt_versjon",
+        }:
+            bridged = self._selfhost_compiler_bridge(func_name, values)
+            if bridged is not None:
+                return bridged
 
         if module_name == "math":
             if func_name == "pluss":

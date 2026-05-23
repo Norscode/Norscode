@@ -14,7 +14,7 @@ TOKEN_ALIASES = {
     'match': 'match', 'case': 'case',
     'elseif': 'ellers_hvis', 'elsif': 'ellers_hvis', 'elif': 'ellers_hvis', 'ellershvis': 'ellers_hvis',
     'while': 'mens', 'break': 'bryt', 'continue': 'fortsett',
-    'and': 'og', 'or': 'eller', 'not': 'ikke', '&&': 'og', '||': 'eller',
+    'and': 'og', 'or': 'eller', 'not': 'ikke', 'ikkje': 'ikke', '&&': 'og', '||': 'eller',
     'xor': 'xor', 'nand': 'nand', 'nor': 'nor', 'xnor': 'xnor',
     'impl': 'impliserer', 'implies': 'impliserer', 'implies_that': 'impliserer',
     'impliser': 'impliserer', 'impliserer_at': 'impliserer', 'this_implies': 'impliserer', 'dette_impliserer': 'impliserer',
@@ -22,20 +22,54 @@ TOKEN_ALIASES = {
     'provided': 'impliseres_av', 'provided_that': 'impliseres_av', 'assuming': 'impliseres_av', 'assuming_that': 'impliseres_av',
     'siden': 'impliseres_av', 'fordi': 'impliseres_av',
     'iff': 'ekvivalent', 'equiv': 'ekvivalent', 'equivalent': 'ekvivalent', 'ekvivalent': 'ekvivalent',
+    'if_and_only_if': 'ekvivalent', 'hvis_og_bare_hvis': 'ekvivalent',
     'and_not': 'nand', 'or_not': 'nor', 'og_ikke': 'nand', 'eller_ikke': 'nor', 'xeller': 'xor', 'xeller_ikke': 'xnor',
     'is': '==', 'eq': '==', 'equals': '==', 'equal_to': '==', 'is_equal_to': '==',
     'isnt': '!=', 'neq': '!=', '<>': '!=', 'is_not': '!=', 'not_equal_to': '!=', 'is_not_equal_to': '!=',
-    'less_than': '<', 'is_less_than': '<', 'greater_than': '>', 'is_greater_than': '>',
+    'less_than': '<', 'is_less_than': '<', 'greater_than': '>', 'is_greater_than': '>', 'større': 'storre',
     'less_equal': '<=', 'less_or_equal': '<=', 'is_less_or_equal': '<=', 'is_less_than_or_equal_to': '<=',
     'greater_equal': '>=', 'greater_or_equal': '>=', 'is_greater_or_equal': '>=', 'is_greater_than_or_equal_to': '>=',
-    'plus': '+', 'times': '*', 'multiplied_by': '*',
+    'mindreellerlik': 'mindre_eller_lik', 'mindrelik': 'mindre_eller_lik', 'ermindrelik': 'mindre_eller_lik', 'ermindreellerlik': 'mindre_eller_lik',
+    'storreellerlik': 'storre_eller_lik', 'storrelik': 'storre_eller_lik', 'erstorreellerlik': 'storre_eller_lik',
+    'erstorrelik': 'storre_eller_lik', 'størreellerlik': 'storre_eller_lik', 'størrelik': 'storre_eller_lik',
+    'erstørreellerlik': 'storre_eller_lik', 'erstørrelik': 'storre_eller_lik',
+    'storreenn': 'storre_enn', 'størreenn': 'storre_enn', 'erstorreenn': 'storre_enn', 'erstørreenn': 'storre_enn',
+    'storreennellerlik': 'storre_eller_lik', 'størreennellerlik': 'storre_eller_lik',
+    'erstorreennellerlik': 'storre_eller_lik', 'erstørreennellerlik': 'storre_eller_lik',
+    'mindreenn': 'mindre_enn', 'ermindreenn': 'mindre_enn',
+    'mindreennellerlik': 'mindre_eller_lik', 'ermindreennellerlik': 'mindre_eller_lik',
+    'erikke': 'ikke_er', 'erikkje': 'ikke_er',
+    'erlikmed': 'er', 'likmed': 'er', 'erlik': 'er',
+    'ulikmed': 'ikke_er', 'ikkelikmed': 'ikke_er', 'ikkjelikmed': 'ikke_er',
+    'erulikmed': 'ikke_er', 'erulik': 'ikke_er', 'erikkelikmed': 'ikke_er',
+    'erikkelik': 'ikke_er', 'erikkjelikmed': 'ikke_er', 'erikkjelik': 'ikke_er',
+    'plus': '+', 'add': '+', 'subtract': '-', 'times': '*', 'multiplied_by': '*', 'multiply': '*', 'divide': '/',
     'divided_by': '/', 'divide_by': '/', 'delt_pa': '/', 'delt_på': '/', 'delt_med': '/',
     'modulo': '%', 'modulo_of': '%', 'mod_of': '%', 'remainder': '%', 'remainder_of': '%',
-    'on': 'sann', 'yes': 'sann', 'enabled': 'sann', 'active': 'sann', 'truthy': 'sann', 'ready': 'sann', 'ok': 'sann',
+    'medforer': 'impliserer', 'follows': 'impliserer', 'it_follows_that': 'impliserer', 'det_folger_at': 'impliserer',
+    'therefore': 'impliserer', 'derfor': 'impliserer', 'hence': 'impliserer', 'thus': 'impliserer', 'dermed': 'impliserer', 'altsa': 'impliserer',
+    'consequently': 'impliserer', 'folgelig': 'impliserer', 'thereby': 'impliserer', 'derved': 'impliserer',
+    'thereupon': 'impliserer', 'derpa': 'impliserer', 'ergo': 'impliserer', 'saledes': 'impliserer', 'infer': 'impliserer',
+    'consequence': 'impliserer', 'as_consequence': 'impliserer', 'som_konsekvens': 'impliserer', 'as_a_result': 'impliserer', 'som_resultat': 'impliserer', 'derav': 'impliserer',
+    'only_if': 'impliserer', 'kun_hvis': 'impliserer', 'requires': 'impliserer', 'krever': 'impliserer',
+    'implied_by': 'impliseres_av', 'folger_fra': 'impliseres_av', 'folger_av': 'impliserer', 'given': 'impliseres_av', 'gitt': 'impliseres_av',
+    'provided': 'impliseres_av', 'forutsatt': 'impliseres_av', 'assuming': 'impliseres_av', 'antar': 'impliseres_av',
+    'when_assuming': 'impliseres_av', 'nar_antatt': 'impliseres_av', 'antar_at': 'impliseres_av', 'presuming': 'impliseres_av', 'forutsattvis': 'impliseres_av',
+    'since': 'impliseres_av', 'siden': 'impliseres_av', 'because': 'impliseres_av', 'fordi': 'impliseres_av',
+    'given_that': 'impliseres_av', 'gitt_at': 'impliseres_av', 'provided_that': 'impliseres_av', 'forutsatt_at': 'impliseres_av',
+    'follows_if': 'impliseres_av', 'folger_hvis': 'impliseres_av', 'if_given': 'impliseres_av', 'hvis_gitt': 'impliseres_av',
+    'as': 'impliseres_av', 'tersom': 'impliseres_av', 'ettersom': 'impliseres_av', 'inasmuch_as': 'impliseres_av', 'i_og_med_at': 'impliseres_av',
+    'on_condition_that': 'impliseres_av', 'pa_vilkar_av_at': 'impliseres_av', 'granted': 'impliseres_av', 'gitt_dette': 'impliseres_av',
+    'with_premise': 'impliseres_av', 'med_premiss': 'impliseres_av', 'given_premise': 'impliseres_av', 'gitt_premiss': 'impliseres_av',
+    'premise_given': 'impliseres_av', 'premiss_gitt': 'impliseres_av', 'premise_assumed': 'impliseres_av', 'premiss_antatt': 'impliseres_av',
+    'premise_condition': 'impliseres_av', 'premiss_vilkar': 'impliseres_av',
+    'on': 'sann', 'yes': 'sann', 'true': 'sann', 'enabled': 'sann', 'active': 'sann', 'truthy': 'sann', 'ready': 'sann', 'ok': 'sann', 'sant': 'sann', 'ja': 'sann', 'valid': 'sann', 'open': 'sann', 'public': 'sann', 'present': 'sann', 'awake': 'sann',
+    'affirmative': 'sann', 'affirm': 'sann', 'approved': 'sann', 'confirmed': 'sann', 'accepted': 'sann', 'pass': 'sann', 'success': 'sann', 'allow': 'sann', 'permit': 'sann',
     'safe': 'sann', 'secure': 'sann', 'trusted': 'sann', 'visible': 'sann', 'online': 'sann', 'connected': 'sann',
     'available': 'sann', 'reachable': 'sann', 'working': 'sann', 'stable': 'sann', 'correct': 'sann', 'complete': 'sann',
     'clean': 'sann', 'up': 'sann', 'alive': 'sann', 'healthy': 'sann', 'synced': 'sann',
-    'off': 'usann', 'no': 'usann', 'disabled': 'usann', 'inactive': 'usann', 'falsy': 'usann', 'not_ready': 'usann',
+    'off': 'usann', 'no': 'usann', 'false': 'usann', 'disabled': 'usann', 'inactive': 'usann', 'falsy': 'usann', 'not_ready': 'usann', 'usant': 'usann', 'nei': 'usann', 'invalid': 'usann', 'incorrect': 'usann', 'closed': 'usann', 'private': 'usann', 'absent': 'usann', 'asleep': 'usann',
+    'negative': 'usann', 'deny': 'usann', 'rejected': 'usann', 'denied': 'usann', 'declined': 'usann', 'fail': 'usann', 'failure': 'usann', 'block': 'usann', 'forbid': 'usann',
     'not_ok': 'usann', 'unsafe': 'usann', 'insecure': 'usann', 'untrusted': 'usann', 'hidden': 'usann', 'offline': 'usann',
     'disconnected': 'usann', 'unavailable': 'usann', 'unreachable': 'usann', 'broken': 'usann', 'unstable': 'usann',
     'incorrect': 'usann', 'incomplete': 'usann', 'dirty': 'usann', 'down': 'usann', 'dead': 'usann', 'unhealthy': 'usann',
@@ -45,8 +79,29 @@ TOKEN_ALIASES = {
 PHRASE_ALIASES = {
     ('is', 'equal', 'to'): ['=='],
     ('equal', 'to'): ['=='],
+    ('is', 'not'): ['!='],
     ('is', 'not', 'equal', 'to'): ['!='],
     ('not', 'equal', 'to'): ['!='],
+    ('not', 'ok'): ['usann'],
+    ('not', 'ready'): ['usann'],
+    ('less', 'equal'): ['<='],
+    ('less', 'or', 'equal'): ['<='],
+    ('less', 'than', 'or', 'equal'): ['<='],
+    ('greater', 'equal'): ['>='],
+    ('greater', 'or', 'equal'): ['>='],
+    ('greater', 'than', 'or', 'equal'): ['>='],
+    ('is', 'less', 'equal'): ['<='],
+    ('is', 'less', 'or', 'equal'): ['<='],
+    ('is', 'less', 'or', 'equal', 'to'): ['<='],
+    ('is', 'less', 'than', 'or', 'equal'): ['<='],
+    ('is', 'less', 'than', 'or', 'equal', 'to'): ['<='],
+    ('is', 'greater', 'equal'): ['>='],
+    ('is', 'greater', 'or', 'equal'): ['>='],
+    ('is', 'greater', 'or', 'equal', 'to'): ['>='],
+    ('is', 'greater', 'than', 'or', 'equal'): ['>='],
+    ('is', 'greater', 'than', 'or', 'equal', 'to'): ['>='],
+    ('or', 'not'): ['nor'],
+    ('eller', 'ikke'): ['nor'],
     ('less', 'than'): ['<'],
     ('is', 'less', 'than'): ['<'],
     ('greater', 'than'): ['>'],
@@ -61,16 +116,162 @@ PHRASE_ALIASES = {
     ('delt', 'pa'): ['/'],
     ('delt', 'på'): ['/'],
     ('delt', 'med'): ['/'],
-    ('mindre', 'enn'): ['<'],
-    ('storre', 'enn'): ['>'],
-    ('større', 'enn'): ['>'],
-    ('mindre', 'enn', 'eller', 'lik'): ['<='],
-    ('storre', 'enn', 'eller', 'lik'): ['>='],
-    ('større', 'enn', 'eller', 'lik'): ['>='],
-    ('er', 'ikke'): ['!='],
-    ('ikke', 'er'): ['!='],
+    ('xeller', 'ikke'): ['xnor'],
+    ('mod', 'av'): ['%'],
+    ('mod', 'of'): ['%'],
+    ('modulo', 'av'): ['%'],
+    ('modul', 'av'): ['%'],
+    ('modulus', 'av'): ['%'],
+    ('rest', 'av'): ['%'],
+    ('resten', 'av'): ['%'],
+    ('if', 'and', 'only', 'if'): ['ekvivalent'],
+    ('hvis', 'og', 'bare', 'hvis'): ['ekvivalent'],
+    ('legg', 'til'): ['+'],
+    ('legge', 'til'): ['+'],
+    ('legges', 'til'): ['+'],
+    ('legg', 'sammen'): ['+'],
+    ('legge', 'sammen'): ['+'],
+    ('legges', 'sammen'): ['+'],
+    ('adder', 'med'): ['+'],
+    ('addere', 'med'): ['+'],
+    ('adderer', 'med'): ['+'],
+    ('adderes', 'med'): ['+'],
+    ('summer', 'med'): ['+'],
+    ('summerer', 'med'): ['+'],
+    ('summeres', 'med'): ['+'],
+    ('plus', 'med'): ['+'],
+    ('pluss', 'med'): ['+'],
+    ('plusser', 'med'): ['+'],
+    ('plusses', 'med'): ['+'],
+    ('pluses', 'med'): ['+'],
+    ('plusse', 'med'): ['+'],
+    ('minus', 'med'): ['-'],
+    ('trekk', 'med'): ['-'],
+    ('trekke', 'med'): ['-'],
+    ('trekkes', 'med'): ['-'],
+    ('subtraher', 'med'): ['-'],
+    ('subtraherer', 'med'): ['-'],
+    ('subtraheres', 'med'): ['-'],
+    ('subtrahert', 'med'): ['-'],
+    ('minus', 'fra'): ['-'],
+    ('trekk', 'fra'): ['-'],
+    ('trekke', 'fra'): ['-'],
+    ('trekkes', 'fra'): ['-'],
+    ('subtraher', 'fra'): ['-'],
+    ('subtraherer', 'fra'): ['-'],
+    ('subtraheres', 'fra'): ['-'],
+    ('subtrahert', 'fra'): ['-'],
+    ('multipliser', 'med'): ['*'],
+    ('multiplisere', 'med'): ['*'],
+    ('multipliserer', 'med'): ['*'],
+    ('multiplisert', 'med'): ['*'],
+    ('multipliseres', 'med'): ['*'],
+    ('ganger', 'med'): ['*'],
+    ('ganget', 'med'): ['*'],
+    ('deler', 'seg', 'med'): ['/'],
+    ('dele', 'seg', 'med'): ['/'],
+    ('divider', 'seg', 'med'): ['/'],
+    ('dividere', 'seg', 'med'): ['/'],
+    ('dividerer', 'seg', 'med'): ['/'],
+    ('dividert', 'seg', 'med'): ['/'],
+    ('divideres', 'seg', 'med'): ['/'],
+    ('deler', 'seg', 'pa'): ['/'],
+    ('deler', 'seg', 'på'): ['/'],
+    ('dele', 'seg', 'pa'): ['/'],
+    ('dele', 'seg', 'på'): ['/'],
+    ('deler', 'pa'): ['/'],
+    ('deler', 'på'): ['/'],
+    ('deler', 'paa'): ['/'],
+    ('dele', 'pa'): ['/'],
+    ('dele', 'på'): ['/'],
+    ('dele', 'paa'): ['/'],
+    ('deles', 'pa'): ['/'],
+    ('deles', 'på'): ['/'],
+    ('deles', 'paa'): ['/'],
+    ('del', 'pa'): ['/'],
+    ('del', 'på'): ['/'],
+    ('del', 'paa'): ['/'],
+    ('divider', 'pa'): ['/'],
+    ('divider', 'på'): ['/'],
+    ('divider', 'paa'): ['/'],
+    ('dividere', 'pa'): ['/'],
+    ('dividere', 'på'): ['/'],
+    ('dividere', 'paa'): ['/'],
+    ('dividerer', 'pa'): ['/'],
+    ('dividerer', 'på'): ['/'],
+    ('dividerer', 'paa'): ['/'],
+    ('dividert', 'pa'): ['/'],
+    ('dividert', 'på'): ['/'],
+    ('dividert', 'paa'): ['/'],
+    ('divideres', 'pa'): ['/'],
+    ('divideres', 'på'): ['/'],
+    ('divideres', 'paa'): ['/'],
+    ('divider', 'seg', 'pa'): ['/'],
+    ('divider', 'seg', 'på'): ['/'],
+    ('dividere', 'seg', 'pa'): ['/'],
+    ('dividere', 'seg', 'på'): ['/'],
+    ('dividerer', 'seg', 'pa'): ['/'],
+    ('dividerer', 'seg', 'på'): ['/'],
+    ('dividert', 'seg', 'pa'): ['/'],
+    ('dividert', 'seg', 'på'): ['/'],
+    ('divideres', 'seg', 'pa'): ['/'],
+    ('divideres', 'seg', 'på'): ['/'],
+    ('divider', 'med'): ['/'],
+    ('dividere', 'med'): ['/'],
+    ('dividerer', 'med'): ['/'],
+    ('dividert', 'med'): ['/'],
+    ('divideres', 'med'): ['/'],
+    ('del', 'med'): ['/'],
+    ('dele', 'med'): ['/'],
+    ('deler', 'med'): ['/'],
     ('ellers', 'hvis'): ['ellers_hvis'],
     ('enten', 'eller'): ['xor'],
+    ('it', 'follows', 'that'): ['impliserer'],
+    ('det', 'folger', 'at'): ['impliserer'],
+    ('folger', 'av'): ['impliserer'],
+    ('this', 'implies'): ['impliserer'],
+    ('implies', 'that'): ['impliserer'],
+    ('as', 'consequence'): ['impliserer'],
+    ('som', 'konsekvens'): ['impliserer'],
+    ('as', 'a', 'result'): ['impliserer'],
+    ('som', 'resultat'): ['impliserer'],
+    ('only', 'if'): ['impliserer'],
+    ('kun', 'hvis'): ['impliserer'],
+    ('implied', 'by'): ['impliseres_av'],
+    ('folger', 'fra'): ['impliseres_av'],
+    ('folger', 'av'): ['impliserer'],
+    ('folger', 'hvis'): ['impliseres_av'],
+    ('antar', 'at'): ['impliseres_av'],
+    ('nar', 'antatt'): ['impliseres_av'],
+    ('forutsatt', 'vis'): ['impliseres_av'],
+    ('given', 'that'): ['impliseres_av'],
+    ('provided', 'that'): ['impliseres_av'],
+    ('assuming', 'that'): ['impliseres_av'],
+    ('when', 'assuming'): ['impliseres_av'],
+    ('follows', 'if'): ['impliseres_av'],
+    ('if', 'given'): ['impliseres_av'],
+    ('gitt', 'at'): ['impliseres_av'],
+    ('forutsatt', 'at'): ['impliseres_av'],
+    ('hvis', 'gitt'): ['impliseres_av'],
+    ('inasmuch', 'as'): ['impliseres_av'],
+    ('i', 'og', 'med', 'at'): ['impliseres_av'],
+    ('on', 'condition', 'that'): ['impliseres_av'],
+    ('pa', 'vilkar', 'av', 'at'): ['impliseres_av'],
+    ('on', 'condition', 'that'): ['impliseres_av'],
+    ('with', 'premise'): ['impliseres_av'],
+    ('med', 'premiss'): ['impliseres_av'],
+    ('given', 'premise'): ['impliseres_av'],
+    ('gitt', 'premiss'): ['impliseres_av'],
+    ('premise', 'given'): ['impliseres_av'],
+    ('premiss', 'gitt'): ['impliseres_av'],
+    ('premise', 'assumed'): ['impliseres_av'],
+    ('premiss', 'antatt'): ['impliseres_av'],
+    ('premise', 'condition'): ['impliseres_av'],
+    ('premiss', 'vilkar'): ['impliseres_av'],
+    ('gitt', 'dette'): ['impliseres_av'],
+    ('dette', 'impliserer'): ['impliserer'],
+    ('impliserer', 'at'): ['impliserer'],
+    ('impliser', 'at'): ['impliserer'],
 }
 
 
@@ -155,6 +356,22 @@ class Parser:
             raise ParseError(f"Forventet navn, fikk {tok.value!r}", tok)
         return tok.value
 
+    def consume_type_annotation(self) -> str:
+        parts: list[str] = []
+        depth = 0
+        while not self.at_end():
+            tok = self.peek()
+            if tok in {',', ')', '=', '{', 'slutt'} and depth == 0:
+                break
+            if tok == '<':
+                depth += 1
+            elif tok == '>':
+                depth -= 1
+            elif tok == '>>':
+                depth -= 2
+            parts.append(self.advance())
+        return ''.join(parts)
+
     def consume_dotted_name(self) -> str:
         parts = [self.expect_name()]
         while self.match('.'):
@@ -175,6 +392,9 @@ class Parser:
                 module_name = self.consume_dotted_name()
                 alias = self.expect_name() if self.match('som') else None
                 imports.append(SelfhostImport(module_name=module_name, alias=alias))
+                continue
+            if tok in {'struktur', 'klasse', 'enum'}:
+                self.skip_top_level_declaration()
                 continue
             if tok == 'funksjon':
                 functions.append(self.parse_function())
@@ -206,20 +426,41 @@ class Parser:
         while self.peek() != ')':
             params.append(self.expect_name())
             if self.match(':'):
-                self.consume_dotted_name()
+                self.consume_type_annotation()
             if self.peek() == ',':
                 self.advance()
                 continue
             if self.peek() != ')':
                 raise self.error(f"Forventet ',' eller ')' i parameterliste for {name}")
         self.expect(')')
-        return_type = self.consume_dotted_name() if self.match('->') else None
+        return_type = self.consume_type_annotation() if self.match('->') else None
         body_tokens, body_ast = self.parse_block_with_tokens()
         return SelfhostFunction(name=name, params=params, return_type=return_type, body_tokens=body_tokens, body_ast=body_ast)
 
+    def skip_top_level_declaration(self) -> None:
+        self.advance()
+        if self.peek() is not None:
+            self.advance()
+        if self.match('{'):
+            depth = 1
+            while not self.at_end() and depth:
+                if self.match('{'):
+                    depth += 1
+                    continue
+                if self.match('}'):
+                    depth -= 1
+                    continue
+                self.advance()
+            return
+        while not self.at_end() and self.peek() != 'slutt':
+            self.advance()
+        if self.peek() == 'slutt':
+            self.advance()
+
     def parse_block_with_tokens(self) -> tuple[list[str], list[dict]]:
         start = self.i
-        self.expect('{')
+        if not self.match('{'):
+            return self.parse_legacy_block_with_tokens({'slutt'}, consume_terminator=True)
         stmts: list[dict] = []
         self.skip_statement_separators()
         while self.peek() != '}':
@@ -231,12 +472,32 @@ class Parser:
         end = self.i
         return [tok.value for tok in self.tokens[start + 1:end - 1]], stmts
 
+    def parse_legacy_block_with_tokens(
+        self,
+        terminators: set[str],
+        consume_terminator: bool,
+    ) -> tuple[list[str], list[dict]]:
+        start = self.i
+        stmts: list[dict] = []
+        self.skip_statement_separators()
+        while self.peek() not in terminators:
+            if self.at_end():
+                raise self.error('Ubalansert slutt-blokk i selfhost-parser')
+            stmts.append(self.parse_statement())
+            self.skip_statement_separators()
+        end = self.i
+        if consume_terminator:
+            self.advance()
+        return [tok.value for tok in self.tokens[start:end]], stmts
+
     def parse_statement(self) -> dict:
         tok = self.peek()
         if tok == 'la':
             return self.parse_let_statement()
         if tok == 'returner':
             self.advance()
+            if self.peek() in {'slutt', 'ellers', 'ellers_hvis', '}'}:
+                return {'node': 'Return', 'value': {'node': 'Literal', 'literal_type': 'heltall', 'value': 0}}
             return {'node': 'Return', 'value': self.parse_expression()}
         if tok == 'hvis':
             return self.parse_if_statement()
@@ -252,6 +513,11 @@ class Parser:
         if tok == 'fortsett':
             self.advance()
             return {'node': 'Continue'}
+        if tok == 'kast':
+            self.advance()
+            return {'node': 'Throw', 'value': self.parse_expression()}
+        if tok == 'prøv':
+            return self.parse_try_statement()
         if tok == 'sett':
             return self.parse_assignment_statement(with_keyword=True)
         return self.parse_expr_or_assignment_statement()
@@ -259,11 +525,11 @@ class Parser:
     def parse_let_statement(self) -> dict:
         self.expect('la')
         name = self.expect_name()
-        declared_type = self.consume_dotted_name() if self.match(':') else None
+        declared_type = self.consume_type_annotation() if self.match(':') else None
         self.expect('=')
         return {'node': 'Let', 'name': name, 'declared_type': declared_type, 'value': self.parse_expression()}
 
-    def _parse_if_core(self, consume_keyword: bool) -> dict:
+    def _parse_if_core(self, consume_keyword: bool, consume_final_slutt: bool = True) -> dict:
         start_tok = self.peek_token()
         if consume_keyword:
             self.expect('hvis')
@@ -275,8 +541,6 @@ class Parser:
         has_da = self.match('da')
         if self.peek() == '{' and not has_da:
             pass
-        elif not has_da:
-            raise self.error("hvis-uttrykk mangler 'da'", start_tok)
         if self.peek() == '{':
             then_tokens, then_block = self.parse_block_with_tokens()
             else_block = None
@@ -290,6 +554,28 @@ class Parser:
                     else_block, else_tokens = [nested], ['hvis']
                 else:
                     else_tokens, else_block = self.parse_block_with_tokens()
+            return {
+                'node': 'If',
+                'condition': condition,
+                'then': then_block,
+                'then_tokens': then_tokens,
+                'else': else_block,
+                'else_tokens': else_tokens,
+            }
+        if not has_da or self.peek() not in {'ellers'}:
+            then_tokens, then_block = self.parse_legacy_block_with_tokens(
+                {'ellers', 'ellers_hvis', 'slutt'},
+                consume_terminator=False,
+            )
+            else_block = None
+            else_tokens: list[str] | None = None
+            if self.match('ellers_hvis'):
+                nested = self._parse_if_core(consume_keyword=False, consume_final_slutt=False)
+                else_block, else_tokens = [nested], ['hvis']
+            elif self.match('ellers'):
+                else_tokens, else_block = self.parse_legacy_block_with_tokens({'slutt'}, consume_terminator=False)
+            if consume_final_slutt:
+                self.expect('slutt')
             return {
                 'node': 'If',
                 'condition': condition,
@@ -372,6 +658,26 @@ class Parser:
             return {'node': 'ForEach', 'name': name, 'iterable': iterable, 'body': body, 'body_tokens': body_tokens}
         raise self.error("Forventet '=' eller 'i' i for-setning")
 
+    def parse_try_statement(self) -> dict:
+        self.expect('prøv')
+        try_tokens, try_block = self.parse_block_with_tokens()
+        self.expect('fang')
+        catch_name = 'feil'
+        if self.match('('):
+            catch_name = self.expect_name()
+            self.expect(')')
+        elif NAME_RE.fullmatch(self.peek() or ''):
+            catch_name = self.expect_name()
+        catch_tokens, catch_block = self.parse_block_with_tokens()
+        return {
+            'node': 'TryCatch',
+            'try': try_block,
+            'try_tokens': try_tokens,
+            'catch_name': catch_name,
+            'catch': catch_block,
+            'catch_tokens': catch_tokens,
+        }
+
     def parse_assignment_statement(self, with_keyword: bool) -> dict:
         if with_keyword:
             self.expect('sett')
@@ -450,8 +756,32 @@ class Parser:
         return expr
 
     def parse_comparison(self) -> dict:
-        expr = self.parse_term()
+        expr = self.parse_bitwise_or()
         while self.peek() in {'==', '!=', '<', '>', '<=', '>='}:
+            expr = {'node': 'BinaryOp', 'op': self.advance(), 'left': expr, 'right': self.parse_bitwise_or()}
+        return expr
+
+    def parse_bitwise_or(self) -> dict:
+        expr = self.parse_bitwise_xor()
+        while self.peek() == '|':
+            expr = {'node': 'BinaryOp', 'op': self.advance(), 'left': expr, 'right': self.parse_bitwise_xor()}
+        return expr
+
+    def parse_bitwise_xor(self) -> dict:
+        expr = self.parse_bitwise_and()
+        while self.peek() == '^':
+            expr = {'node': 'BinaryOp', 'op': self.advance(), 'left': expr, 'right': self.parse_bitwise_and()}
+        return expr
+
+    def parse_bitwise_and(self) -> dict:
+        expr = self.parse_shift()
+        while self.peek() == '&':
+            expr = {'node': 'BinaryOp', 'op': self.advance(), 'left': expr, 'right': self.parse_shift()}
+        return expr
+
+    def parse_shift(self) -> dict:
+        expr = self.parse_term()
+        while self.peek() in {'<<', '>>'}:
             expr = {'node': 'BinaryOp', 'op': self.advance(), 'left': expr, 'right': self.parse_term()}
         return expr
 
@@ -468,7 +798,7 @@ class Parser:
         return expr
 
     def parse_unary(self) -> dict:
-        if self.peek() in {'-', '+', 'ikke'}:
+        if self.peek() in {'-', '+', 'ikke', '~'}:
             return {'node': 'UnaryOp', 'op': self.advance(), 'value': self.parse_unary()}
         return self.parse_postfix()
 
@@ -494,8 +824,36 @@ class Parser:
             if self.match('.'):
                 expr = {'node': 'Member', 'target': expr, 'name': self.expect_name()}
                 continue
+            if self.peek() == '{' and self.looks_like_struct_literal_body():
+                expr = self.parse_struct_literal_after_type()
+                continue
             break
         return expr
+
+    def parse_struct_literal_after_type(self) -> dict:
+        self.expect('{')
+        fields: list[dict[str, dict]] = []
+        while self.peek() != '}':
+            name = self.expect_name()
+            if not self.match(':'):
+                raise self.error("Forventet ':' i struct-literal")
+            value = self.parse_expression()
+            fields.append({'name': name, 'value': value})
+            if self.match(','):
+                if self.peek() == '}':
+                    break
+                continue
+            if self.peek() != '}':
+                raise self.error("Forventet ',' eller '}' i struct-literal")
+        self.expect('}')
+        return {'node': 'StructLiteral', 'fields': fields}
+
+    def looks_like_struct_literal_body(self) -> bool:
+        if self.peek() != '{':
+            return False
+        if self.peek(1) == '}':
+            return True
+        return bool(NAME_RE.fullmatch(self.peek(1) or '')) and self.peek(2) == ':'
 
     def parse_primary(self) -> dict:
         tok = self.peek_token()
@@ -542,9 +900,12 @@ class Parser:
                 return {'node': 'ListLiteral', 'items': items}
             self.expect(']')
             return first
-        if tok.value.startswith('"'):
+        if tok.value.startswith('"') or tok.value.startswith("'"):
             self.advance()
             return {'node': 'Literal', 'literal_type': 'tekst', 'value': _decode_string_literal(tok.value)}
+        if tok.value.startswith(('0x', '0X')):
+            self.advance()
+            return {'node': 'Literal', 'literal_type': 'heltall', 'value': int(tok.value, 16)}
         if tok.value.isdigit():
             self.advance()
             return {'node': 'Literal', 'literal_type': 'heltall', 'value': int(tok.value)}
@@ -575,7 +936,9 @@ def _strip_comments(source: str) -> str:
         out = []
         in_string = False
         escaped = False
-        for ch in line:
+        idx = 0
+        while idx < len(line):
+            ch = line[idx]
             if in_string:
                 out.append(ch)
                 if escaped:
@@ -584,21 +947,47 @@ def _strip_comments(source: str) -> str:
                     escaped = True
                 elif ch == '"':
                     in_string = False
+                idx += 1
                 continue
             if ch == '"':
                 in_string = True
                 out.append(ch)
+                idx += 1
                 continue
             if ch == '#':
                 break
+            if ch == '/' and idx + 1 < len(line) and line[idx + 1] == '/':
+                break
             out.append(ch)
+            idx += 1
         out_lines.append(''.join(out))
     return '\n'.join(out_lines)
 
 
+def _module_path_from_expr(node: dict) -> str | None:
+    kind = node.get('node')
+    if kind == 'Name':
+        return str(node.get('value'))
+    if kind == 'Member':
+        base = _module_path_from_expr(node.get('target', {}))
+        if base is None:
+            return None
+        return f"{base}.{node.get('name')}"
+    return None
+
+
+def _looks_like_type_expr(node: dict) -> bool:
+    path = _module_path_from_expr(node)
+    if path is None:
+        return False
+    leaf = path.rsplit('.', 1)[-1]
+    return bool(leaf) and leaf[0].isupper()
+
+
 def _tokenize(source: str) -> list[Token]:
     token_re = re.compile(
-        r'<=>|<->|=>|->|<-|&&|\|\||\+=|-=|\*=|/=|%=|==|!=|<=|>=|<>|[=(){}\[\],.:;+\-*/%<>]|"[^"\\]*(?:\\.[^"\\]*)*"|'
+        r'<=>|<->|=>|->|<-|<<|>>|&&|\|\||\+=|-=|\*=|/=|%=|==|!=|<=|>=|<>|0x[0-9A-Fa-f]+|[=(){}\[\],.:;+\-*/%<>&|^~]|"[^"\\]*(?:\\.[^"\\]*)*"|'
+        r"'[^'\\]*(?:\\.[^'\\]*)*'|"
         r'[A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*|\d+'
     )
     tokens: list[Token] = []
@@ -637,6 +1026,8 @@ def _normalize_tokens(tokens: list[Token]) -> list[Token]:
             out.append(Token(value='impliseres_av', raw=tok.raw, line=tok.line, column=tok.column))
         elif low in {'<->', '<=>'}:
             out.append(Token(value='ekvivalent', raw=tok.raw, line=tok.line, column=tok.column))
+        elif low == 'assign' and i + 1 < len(tokens) and tokens[i + 1].value in {'=', '.', '['}:
+            out.append(Token(value=tok.value, raw=tok.raw, line=tok.line, column=tok.column))
         else:
             out.append(Token(value=TOKEN_ALIASES.get(low, tok.value), raw=tok.raw, line=tok.line, column=tok.column))
         i += 1
