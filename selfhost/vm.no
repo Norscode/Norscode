@@ -1,128 +1,559 @@
-// Norscode Selfhost VM v0
-// Initial stack-based runtime for bytecode execution.
+// selfhost/vm.no — Norscode Bytecode VM
+// Køyrer NCB JSON produsert av bytecode_backend.py / bytecode_backend.no
+// Opcode-sett: norscode-bytecode-v1
+//
+// Støttar:
+//   PUSH_CONST, STORE_NAME, LOAD_NAME, POP
+//   BINARY_ADD/SUB/MUL/DIV/MOD
+//   UNARY_NEG, UNARY_NOT
+//   COMPARE_EQ/NE/LT/GT/LE/GE
+//   JUMP, JUMP_IF_FALSE, LABEL
+//   CALL (brukar- og innebygde funksjonar)
+//   RETURN
+//   BUILD_LIST, BUILD_MAP
+//   INDEX_GET, INDEX_SET
+//   TRY_BEGIN, TRY_END, THROW, LOAD_EXCEPTION
+//   LOAD_FIELD, STORE_FIELD
 
-struktur VM
-    stack
-    variabler
-    ip
-    instruksjoner
-slutt
+// ─── Verdi-typar ─────────────────────────────────────────────────────────────
+// Verdiar er native Norscode-verdiar: heltall, tekst, bool, liste, ordbok.
+// Norscode har dynamisk typing i dette laget; type-sjekking skjer i semantic.no.
 
-funksjon ny_vm(instruksjoner)
-    vm = VM()
-    vm.stack = []
-    vm.variabler = {}
-    vm.ip = 0
-    vm.instruksjoner = instruksjoner
-    returner vm
-slutt
+// ─── VM-tilstand ─────────────────────────────────────────────────────────────
 
-funksjon push(vm, verdi)
-    legg_til(vm.stack, verdi)
-slutt
+funksjon ny_rammeverk(namn: tekst, ip: heltall) -> ordbok<tekst, tekst> {
+    la ramme: ordbok<tekst, tekst> = {}
+    ramme["namn"] = namn
+    ramme["ip"] = ip
+    ramme["vars"] = {}
+    ramme["stack"] = []
+    returner ramme
+}
 
-funksjon pop(vm)
-    hvis lengde(vm.stack) == 0
-        feil("Stack underflow")
-    slutt
+funksjon ramme_les_var(ramme: ordbok<tekst, tekst>, namn: tekst) -> tekst {
+    la vars = ramme["vars"]
+    hvis ikke finnes_nøkkel(vars, namn) {
+        kast "Ukjent variabel: " + namn
+    }
+    returner vars[namn]
+}
 
-    indeks = lengde(vm.stack) - 1
-    verdi = vm.stack[indeks]
+funksjon ramme_sett_var(ramme: ordbok<tekst, tekst>, namn: tekst, verdi: tekst) {
+    ramme["vars"][namn] = verdi
+}
 
-    fjern_siste(vm.stack)
+funksjon stack_push(ramme: ordbok<tekst, tekst>, verdi: tekst) {
+    legg_til(ramme["stack"], verdi)
+}
 
-    returner verdi
-slutt
+funksjon stack_pop(ramme: ordbok<tekst, tekst>) -> tekst {
+    la stk = ramme["stack"]
+    la n: heltall = lengde(stk)
+    hvis n == 0 {
+        kast "Stack underflow"
+    }
+    la v = stk[n - 1]
+    fjern_siste(stk)
+    returner v
+}
 
-funksjon hent_variabel(vm, navn)
-    hvis ikkje finnes(vm.variabler, navn)
-        feil("Ukjent variabel: " + navn)
-    slutt
+funksjon stack_topp(ramme: ordbok<tekst, tekst>) -> tekst {
+    la stk = ramme["stack"]
+    la n: heltall = lengde(stk)
+    hvis n == 0 {
+        kast "Stack underflow (topp)"
+    }
+    returner stk[n - 1]
+}
 
-    returner vm.variabler[navn]
-slutt
+// ─── Label-oppslag ────────────────────────────────────────────────────────────
+// Bygg eit ordbok: label-namn → indeks i kode-lista
 
-funksjon sett_variabel(vm, navn, verdi)
-    vm.variabler[navn] = verdi
-slutt
+funksjon bygg_label_kart(kode: liste<tekst>) -> ordbok<tekst, heltall> {
+    la kart: ordbok<tekst, heltall> = {}
+    la i: heltall = 0
+    mens (i < lengde(kode)) {
+        la instr = kode[i]
+        hvis instr[0] == "LABEL" {
+            kart[instr[1]] = i
+        }
+        i = i + 1
+    }
+    returner kart
+}
 
-funksjon kjør_instruksjon(vm, instr)
-    hvis instr.opcode == "PUSH_CONST"
-        push(vm, instr.operand)
-        returner ingen
-    slutt
+// ─── Try/catch-stack ──────────────────────────────────────────────────────────
+// Kvar TRY_BEGIN legg til eit oppslag {catch_label, stack_depth}
+// TRY_END fjernar det siste oppslaget
 
-    hvis instr.opcode == "LOAD"
-        verdi = hent_variabel(vm, instr.operand)
-        push(vm, verdi)
-        returner ingen
-    slutt
+funksjon ny_try_post(catch_label: tekst, stack_djupn: heltall) -> ordbok<tekst, tekst> {
+    la post: ordbok<tekst, tekst> = {}
+    post["catch_label"] = catch_label
+    post["stack_djupn"] = stack_djupn
+    returner post
+}
 
-    hvis instr.opcode == "STORE"
-        verdi = pop(vm)
-        sett_variabel(vm, instr.operand, verdi)
-        returner ingen
-    slutt
+// ─── Innebygde funksjonar ─────────────────────────────────────────────────────
 
-    hvis instr.opcode == "ADD"
-        hoyre = pop(vm)
-        venstre = pop(vm)
-        push(vm, venstre + hoyre)
-        returner ingen
-    slutt
+funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
+    // builtin.skriv
+    hvis namn == "builtin.skriv" {
+        la s: tekst = args[0]
+        skriv(s)
+        returner 0
+    }
 
-    hvis instr.opcode == "SUB"
-        hoyre = pop(vm)
-        venstre = pop(vm)
-        push(vm, venstre - hoyre)
-        returner ingen
-    slutt
+    // builtin.lengde
+    hvis namn == "builtin.lengde" {
+        la obj = args[0]
+        returner lengde(obj)
+    }
 
-    hvis instr.opcode == "MUL"
-        hoyre = pop(vm)
-        venstre = pop(vm)
-        push(vm, venstre * hoyre)
-        returner ingen
-    slutt
+    // builtin.legg_til
+    hvis namn == "builtin.legg_til" || namn == "__main__.legg_til" {
+        legg_til(args[0], args[1])
+        returner 0
+    }
 
-    hvis instr.opcode == "DIV"
-        hoyre = pop(vm)
-        venstre = pop(vm)
+    // builtin.fjern_siste
+    hvis namn == "builtin.fjern_siste" || namn == "__main__.fjern_siste" {
+        fjern_siste(args[0])
+        returner 0
+    }
 
-        hvis hoyre == 0
-            feil("Divisjon med null")
-        slutt
+    // builtin.fjern
+    hvis namn == "builtin.fjern" || namn == "__main__.fjern" {
+        fjern(args[0], args[1])
+        returner 0
+    }
 
-        push(vm, venstre / hoyre)
-        returner ingen
-    slutt
+    // builtin.heltall (parse)
+    hvis namn == "builtin.heltall" || namn == "__main__.heltall" {
+        returner heltall(args[0])
+    }
 
-    hvis instr.opcode == "RET"
-        returner pop(vm)
-    slutt
+    // builtin.tekst (stringify)
+    hvis namn == "builtin.tekst" || namn == "__main__.tekst" {
+        returner tekst(args[0])
+    }
 
-    feil("Ukjent opcode: " + instr.opcode)
-slutt
+    // builtin.bool
+    hvis namn == "builtin.bool" {
+        returner bool(args[0])
+    }
 
-funksjon kjør(vm)
-    mens vm.ip < lengde(vm.instruksjoner)
-        instr = vm.instruksjoner[vm.ip]
+    kast "Ukjent innebygd funksjon: " + namn
+}
 
-        resultat = kjør_instruksjon(vm, instr)
+// ─── Hovud-VM-løkke ──────────────────────────────────────────────────────────
+// køyr_funksjon: køyrer éin funksjon med gitte argumentverdiar.
+// functions: ordbok<tekst, ordbok> — heile NCB-funksjonssamlinga
+// Returns: returverdi (eller null/0)
 
-        hvis resultat != ingen
-            returner resultat
-        slutt
+funksjon køyr_funksjon(
+    fn_namn: tekst,
+    arg_verdiar: liste<tekst>,
+    functions: ordbok<tekst, tekst>,
+    djupn: heltall
+) -> tekst {
+    hvis djupn > 500 {
+        kast "Sikkerheitsfeil: maks kall-djupn overskreden — mogleg uendeleg rekursjon"
+    }
 
-        vm.ip = vm.ip + 1
-    slutt
+    hvis ikke finnes_nøkkel(functions, fn_namn) {
+        kast "Ukjent funksjon: " + fn_namn
+    }
 
-    returner ingen
-slutt
+    la fn_def = functions[fn_namn]
+    la kode = fn_def["code"]
+    la params = fn_def["params"]
 
-// Runtime goals:
-// - deterministic execution
-// - minimal VM
-// - stable stack behavior
-// - explicit opcode handling
-// - no Python evaluation layer
+    la ramme = ny_rammeverk(fn_namn, 0)
+    la try_stack: liste<tekst> = []
+    la siste_unntak: tekst = ""
+
+    // Bind parametrar
+    la pi: heltall = 0
+    mens (pi < lengde(params)) {
+        ramme_sett_var(ramme, params[pi], arg_verdiar[pi])
+        pi = pi + 1
+    }
+
+    // Label-kart
+    la label_kart = bygg_label_kart(kode)
+
+    la ip: heltall = 0
+    mens (ip < lengde(kode)) {
+        la instr = kode[ip]
+        la op: tekst = instr[0]
+
+        // ── Konstantar og variablar ──────────────────────────────────────
+        hvis op == "PUSH_CONST" {
+            stack_push(ramme, instr[1])
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "STORE_NAME" {
+            la v = stack_pop(ramme)
+            ramme_sett_var(ramme, instr[1], v)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "LOAD_NAME" {
+            la v = ramme_les_var(ramme, instr[1])
+            stack_push(ramme, v)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "POP" {
+            stack_pop(ramme)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Aritmetikk ──────────────────────────────────────────────────
+        hvis op == "BINARY_ADD" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a + b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "BINARY_SUB" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a - b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "BINARY_MUL" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a * b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "BINARY_DIV" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            hvis b == 0 {
+                kast "Divisjon med null"
+            }
+            stack_push(ramme, a / b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "BINARY_MOD" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            hvis b == 0 {
+                kast "Modulo med null"
+            }
+            stack_push(ramme, a % b)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Unær ────────────────────────────────────────────────────────
+        hvis op == "UNARY_NEG" {
+            la a = stack_pop(ramme)
+            stack_push(ramme, -a)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "UNARY_NOT" {
+            la a = stack_pop(ramme)
+            stack_push(ramme, ikke a)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Samanlikningar ───────────────────────────────────────────────
+        hvis op == "COMPARE_EQ" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a == b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "COMPARE_NE" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a != b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "COMPARE_LT" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a < b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "COMPARE_GT" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a > b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "COMPARE_LE" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a <= b)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "COMPARE_GE" {
+            la b = stack_pop(ramme)
+            la a = stack_pop(ramme)
+            stack_push(ramme, a >= b)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Hopp ────────────────────────────────────────────────────────
+        hvis op == "JUMP" {
+            la mål: tekst = instr[1]
+            hvis ikke finnes_nøkkel(label_kart, mål) {
+                kast "Ukjent label: " + mål
+            }
+            ip = label_kart[mål]
+            fortsett
+        }
+
+        hvis op == "JUMP_IF_FALSE" {
+            la cond = stack_pop(ramme)
+            la mål: tekst = instr[1]
+            hvis ikke cond {
+                hvis ikke finnes_nøkkel(label_kart, mål) {
+                    kast "Ukjent label: " + mål
+                }
+                ip = label_kart[mål]
+                fortsett
+            }
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "LABEL" {
+            // Berre ein markør — ingenting å gjere
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Lister og ordbøker ──────────────────────────────────────────
+        hvis op == "BUILD_LIST" {
+            la n: heltall = instr[1]
+            la ny_liste: liste<tekst> = []
+            la li: heltall = 0
+            // Elementa ligg på stacken i omvendt rekkefølgje
+            la tmp: liste<tekst> = []
+            mens (li < n) {
+                legg_til(tmp, stack_pop(ramme))
+                li = li + 1
+            }
+            // Snu
+            la si: heltall = n - 1
+            mens (si >= 0) {
+                legg_til(ny_liste, tmp[si])
+                si = si - 1
+            }
+            stack_push(ramme, ny_liste)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "BUILD_MAP" {
+            la par_n: heltall = instr[1]
+            la ny_map: ordbok<tekst, tekst> = {}
+            // Nøkkel/verdi-par på stack: ..., nøkkel_N, verdi_N, nøkkel_N-1, verdi_N-1 ...
+            // popp i omvendt rekkefølgje
+            la kv_tmp: liste<tekst> = []
+            la kvi: heltall = 0
+            mens (kvi < par_n * 2) {
+                legg_til(kv_tmp, stack_pop(ramme))
+                kvi = kvi + 1
+            }
+            // kv_tmp er: [verdi_1, nøkkel_1, verdi_2, nøkkel_2, ...]
+            // (siste poppet = første par øvst)
+            la mi: heltall = lengde(kv_tmp) - 1
+            mens (mi >= 1) {
+                la nøkkel = kv_tmp[mi]
+                la verdi = kv_tmp[mi - 1]
+                ny_map[nøkkel] = verdi
+                mi = mi - 2
+            }
+            stack_push(ramme, ny_map)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "INDEX_GET" {
+            la indeks = stack_pop(ramme)
+            la obj = stack_pop(ramme)
+            stack_push(ramme, obj[indeks])
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "INDEX_SET" {
+            la verdi = stack_pop(ramme)
+            la indeks = stack_pop(ramme)
+            la obj = stack_pop(ramme)
+            obj[indeks] = verdi
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Felt-aksess (struktur) ───────────────────────────────────────
+        hvis op == "LOAD_FIELD" {
+            la obj = stack_pop(ramme)
+            la felt: tekst = instr[1]
+            stack_push(ramme, obj[felt])
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "STORE_FIELD" {
+            la verdi = stack_pop(ramme)
+            la obj = stack_pop(ramme)
+            la felt: tekst = instr[1]
+            obj[felt] = verdi
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Funksjonskall ────────────────────────────────────────────────
+        hvis op == "CALL" {
+            la mål_namn: tekst = instr[1]
+            la arg_n: heltall = instr[2]
+
+            // Samle argumenter frå stack (omvendt)
+            la call_args_rev: liste<tekst> = []
+            la ai: heltall = 0
+            mens (ai < arg_n) {
+                legg_til(call_args_rev, stack_pop(ramme))
+                ai = ai + 1
+            }
+            // Snu til rett rekkefølgje
+            la call_args: liste<tekst> = []
+            la ari: heltall = arg_n - 1
+            mens (ari >= 0) {
+                legg_til(call_args, call_args_rev[ari])
+                ari = ari - 1
+            }
+
+            la retur_verdi = 0
+
+            // Innebygd?
+            hvis mål_namn == "builtin.skriv" || mål_namn == "builtin.lengde"
+            || mål_namn == "builtin.legg_til" || mål_namn == "builtin.fjern_siste"
+            || mål_namn == "builtin.fjern" || mål_namn == "builtin.heltall"
+            || mål_namn == "builtin.tekst" || mål_namn == "builtin.bool"
+            || mål_namn == "__main__.legg_til" || mål_namn == "__main__.fjern_siste"
+            || mål_namn == "__main__.fjern" || mål_namn == "__main__.heltall"
+            || mål_namn == "__main__.tekst" {
+                retur_verdi = kall_innebygd(mål_namn, call_args)
+            } ellers {
+                retur_verdi = køyr_funksjon(mål_namn, call_args, functions, djupn + 1)
+            }
+
+            stack_push(ramme, retur_verdi)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Retur ────────────────────────────────────────────────────────
+        hvis op == "RETURN" {
+            la ret_v = stack_pop(ramme)
+            returner ret_v
+        }
+
+        // ── Unntak (try/catch/throw) ─────────────────────────────────────
+        hvis op == "TRY_BEGIN" {
+            la catch_lbl: tekst = instr[1]
+            la stack_djupn: heltall = lengde(ramme["stack"])
+            legg_til(try_stack, ny_try_post(catch_lbl, stack_djupn))
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "TRY_END" {
+            hvis lengde(try_stack) > 0 {
+                fjern_siste(try_stack)
+            }
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "THROW" {
+            la unntak_melding = stack_pop(ramme)
+            siste_unntak = unntak_melding
+
+            // Finn nærmaste try-handler
+            hvis lengde(try_stack) == 0 {
+                kast unntak_melding
+            }
+
+            la handler = try_stack[lengde(try_stack) - 1]
+            fjern_siste(try_stack)
+
+            la catch_lbl: tekst = handler["catch_label"]
+            hvis ikke finnes_nøkkel(label_kart, catch_lbl) {
+                kast unntak_melding
+            }
+
+            // Tøm stack til rett djupn
+            la mål_djupn: heltall = handler["stack_djupn"]
+            mens (lengde(ramme["stack"]) > mål_djupn) {
+                stack_pop(ramme)
+            }
+
+            ip = label_kart[catch_lbl]
+            fortsett
+        }
+
+        hvis op == "LOAD_EXCEPTION" {
+            stack_push(ramme, siste_unntak)
+            ip = ip + 1
+            fortsett
+        }
+
+        // ── Ukjent opcode ────────────────────────────────────────────────
+        kast "Ukjent opcode: " + op
+    }
+
+    // Funksjonen fall gjennom utan RETURN → returner 0
+    returner 0
+}
+
+// ─── Inngangspunkt: køyr NCB-program ─────────────────────────────────────────
+
+funksjon køyr_ncb(ncb: ordbok<tekst, tekst>) -> heltall {
+    la functions = ncb["functions"]
+    la entry: tekst = ncb["entry"]
+
+    la resultat = køyr_funksjon(entry, [], functions, 0)
+    returner resultat
+}
+
+// ─── Test-inngangspunkt ───────────────────────────────────────────────────────
+
+funksjon start() -> heltall {
+    skriv("selfhost/vm.no: lasta OK\n")
+    returner 0
+}
