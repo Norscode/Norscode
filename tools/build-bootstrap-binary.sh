@@ -17,6 +17,8 @@ DIST_DIR="${ROOT_DIR}/dist"
 BUILD_DIR="${ROOT_DIR}/build"
 BOOTSTRAP_BIN="${DIST_DIR}/norcode-bootstrap-compile"
 LEGACY_LAUNCHER="${DIST_DIR}/norscode"
+BOOTSTRAP_BUNDLE_SRC="${BUILD_DIR}/bootstrap_compiler_bundle.ncb"
+NATIVE_BUNDLE_SRC="${BUILD_DIR}/native_elf_compiler_bundle.ncb"
 BOOTSTRAP_BUNDLE_BIN="${BUILD_DIR}/bootstrap_compiler_bundle.ncb.bin"
 NATIVE_BUNDLE_BIN="${BUILD_DIR}/native_elf_compiler_bundle.ncb.bin"
 BOOTSTRAP_DATA="${BUILD_DIR}/bootstrap_compiler_bundle_ncb_data.c"
@@ -56,11 +58,19 @@ fi
 
 python3 "${ROOT_DIR}/main.py" selfhost-bootstrap-gate
 
-if [ ! -f "${BOOTSTRAP_BUNDLE_BIN}" ] || [ ! -f "${NATIVE_BUNDLE_BIN}" ]; then
-    printf 'Feil: selfhost-bootstrap-gate fullførte, men genererte ikke NCBB-bundlene som trengs for bootstrap-build.\n' >&2
-    printf 'Mangler: %s og/eller %s\n' "${BOOTSTRAP_BUNDLE_BIN}" "${NATIVE_BUNDLE_BIN}" >&2
+if [ ! -f "${BOOTSTRAP_BUNDLE_SRC}" ] || [ ! -f "${NATIVE_BUNDLE_SRC}" ]; then
+    printf 'Feil: selfhost-bootstrap-gate fullførte, men genererte ikke NCBB-kildene som trengs for bootstrap-build.\n' >&2
+    printf 'Mangler: %s og/eller %s\n' "${BOOTSTRAP_BUNDLE_SRC}" "${NATIVE_BUNDLE_SRC}" >&2
     exit 1
 fi
+
+python3 -B "${ROOT_DIR}/tools/export_ncbb_as_bin.py" \
+    "${BOOTSTRAP_BUNDLE_SRC}" \
+    "${BOOTSTRAP_BUNDLE_BIN}"
+
+python3 -B "${ROOT_DIR}/tools/export_ncbb_as_bin.py" \
+    "${NATIVE_BUNDLE_SRC}" \
+    "${NATIVE_BUNDLE_BIN}"
 
 python3 -B "${ROOT_DIR}/tools/export_ncbb_as_c.py" \
     --symbol-prefix norcode_bootstrap_ncbb \
