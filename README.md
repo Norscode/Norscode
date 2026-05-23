@@ -2,7 +2,7 @@
 
 # Norscode 🚀
 
-Et norsk programmeringsspråk som kompilerer til C.
+Et norsk programmeringsspråk med native backend og bootstrap-spor.
 
 ## ✨ Funksjoner
 
@@ -15,85 +15,96 @@ Et norsk programmeringsspråk som kompilerer til C.
 - Standard databaseadapter for SQLite via `std.db`, med innebygget migreringshjelper
 - Testsystem med `assert`, `assert_eq`, `assert_ne`
 - Feilhåndtering med `kast`, `prøv`/`fang` (inkludert nested rethrow)
-- Kompilerer til C → rask kjøring
+- Ekte native pipeline:
+  - real machine encoding
+  - real ELF emission
+  - real code execution
+  - real package hosting
+  - real bootstrap compiler
 
 ---
 
-## 📦 Kom i gang
+## Native Stack
 
-### 0. Installer CLI
+Norscode har allerede konkrete byggesteiner for den native veien:
 
+- [real machine encoding](selfhost/native_execution/machinecode_emitter.no)
+- [real ELF emission](selfhost/native_execution/elf_layout.no)
+- [real code execution](selfhost/native_execution/process_runtime.no)
+- [real package hosting](selfhost/package_manager/norspkg.no)
+- [real bootstrap compiler](selfhost/bootstrap_compiler/native_compiler.no)
+
+Disse delene brukes av både bootstrap- og selfhost-sporet, så README-en beskriver nå den faktiske retningen i repoet i stedet for en ren C-basert mellomfase.
+
+## 📦 Installasjon
+
+### Plattformoversikt
+
+| Plattform               | Metode                              | Python-fri |
+|-------------------------|-------------------------------------|------------|
+| macOS arm64 (M1/M2/M3)  | `bash tools/install.sh`             | Ja         |
+| Linux x86_64            | `bash tools/install.sh`             | Etter bootstrap |
+| Linux arm64             | `bash tools/install.sh`             | Etter bootstrap |
+| Windows                 | `tools\install.ps1` eller pip       | Planlagt   |
+| Alle (via pip)          | `pip install norscode`              | Nei        |
+
+### Rask start
+
+**macOS / Linux:**
 ```bash
-python3 -m pip install -e .
-# Hvis miljøet er offline/strengt:
-python3 -m pip install -e . --no-build-isolation
+# Enlinjes installasjon (oppdager plattform automatisk):
+curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.sh | sh
 
-# Bygg eksplisitt bootstrap-binary for binary-first flyt
+# Eller fra kildekode:
 bash tools/build-bootstrap-binary.sh
 
-# Deretter kan du bruke:
-norcode --help
-
-# Valgfrie alias (hvis installert):
-nor --help
-nc --help
-nl --help
-norsklang --help
-
-# Merk:
-# Legacy-alias (`nor`, `nc`, `nl` og `norsklang`) viser et kort varsel
-# og videresender til Norscode-CLI.
-# Ved bruk av legacy-filer (`norsklang.toml`, `norsklang.lock`, `.norsklang/`)
-# vises også et kort migreringsvarsel.
-
-# Planlegg navnemigrering (dry-run):
-norcode migrate-names
-
-# Utfør navnemigrering:
-norcode migrate-names --apply
-
-# Utfør migrering og rydd bort legacy-filer:
-norcode migrate-names --apply --cleanup
-
-# Sikkerhet:
-# --cleanup fjerner bare legacy-ressurser når innholdet matcher Norscode-ressursen.
-
-# CI-sjekk: feiler hvis migrering/cleanup gjenstår
-norcode migrate-names --cleanup --check
-
-# Se stabil kommandooversikt
-norcode commands
+# Deretter:
+./bin/nc run app.no
+./bin/nc test
+./bin/nc build app.no ut.elf
 ```
+
+**Windows:**
+```powershell
+# Automatisk installasjon:
+irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.ps1 | iex
+
+# Eller via pip:
+py -m pip install norscode
+norcode run app.no
+```
+
+Se [docs/WINDOWS.md](docs/WINDOWS.md) for fullstendig Windows-guide.
 
 Ny bruker? Se [docs/START_HER.md](docs/START_HER.md) for den raskeste veien inn.
 
-På Windows er normal installasjonsflyt:
+På Windows er den gamle Python-installasjonen fortsatt en midlertidig fallback:
 
 ```powershell
 py -m pip install norcode
 ```
 
-For en lokal checkout på Windows kan du bruke:
+For en lokal checkout på Windows kan du bruke den gamle Python-flyten midlertidig:
 
 ```powershell
 py -m pip install .
 ```
 
+For normal utviklerflyt på Unix-lignende systemer er anbefalingen nå å bygge binaryen og bruke `./bin/nc`.
+
 Se også [docs/WINDOWS.md](docs/WINDOWS.md) for egen Windows-guide.
 
-### 0b. Bygg og publiser pakke
+### 0b. Legacy pakkeverktøy
 
 ```bash
-# Bygg distributerbare filer lokalt
-python3 -m pip install build twine
-python3 -m build
-python3 -m twine check dist/*
+# Gammel Python-basert pakkeflyt for overgangsarbeid
+LEGACY_PYTHON=1 bash scripts/dev-setup.sh
 
-# Forbered ny release lokalt (oppdaterer pyproject + CHANGELOG)
-norcode release --bump patch
+# Forbered ny release lokalt (oppdaterer release-metadata + CHANGELOG)
+./bin/nc release --bump patch
 
 # Se hva som ville skjedd uten å skrive filer
-norcode release --bump minor --dry-run --json
+./bin/nc release --bump minor --dry-run --json
 ```
 
 ### 0c. Lag lokal release-pakke
@@ -120,7 +131,7 @@ bash tools/install-release.sh release-artifacts/norscode-language-*.tar.gz
 Dette installerer pakken som en versjonert release under `~/.local/share/norscode/`, peker `current` til aktiv versjon og lager symlinker til `nc`, `nor`, `nl` og `bootstrap` i `~/.local/share/norscode/bin/`.
 Kjør samme kommando med en nyere releasepakke for å oppgradere.
 Rollback er bare å peke `current` tilbake til en tidligere versjon i `~/.local/share/norscode/releases/`, eller å installere en eldre releasepakke på nytt.
-Dette er Unix-flyten; på Windows bruker du `py -m pip install norcode` eller `py -m pip install .`.
+Dette er Unix-flyten; på Windows er den gamle Python-installasjonen fortsatt en midlertidig fallback eller så bruker du en ferdig releasepakke.
 
 Når pakken er bygget:
 
@@ -136,7 +147,7 @@ I en release bygger `bin/`-scriptene mot:
 
 ### 0d. Fallback-bruk
 
-For eksplisitt legacy-arbeid kan du kjøre CLI via Python-kode direkte:
+For eksplisitt legacy-arbeid kan du kjøre bootstrap via Python-kode direkte:
 
 ```bash
 python3 main.py --help
@@ -145,7 +156,7 @@ python3 main.py ci --check-names
 ```
 
 Dette er nå bare bootstrap-verktøy når du starter eksplisitt via Python eller via `./bin/bootstrap`.
-Python brukes bare som utviklerverktøy der det fortsatt trengs.
+Normal bruk skal gå via `dist/norscode` eller `./bin/nc`.
 
 - Primærflyt: `norcode`/`nc` bruker ferdig binary.
 - Bootstrap: `./bin/bootstrap ...` eller `python3 main.py ...` brukes bare når du eksplisitt vil kjøre via Python.
@@ -176,8 +187,8 @@ For en kort sluttstatus for videre overlevering, se [docs/HANDOFF.md](docs/HANDO
 
 Publisering er satt opp i GitHub Actions via `.github/workflows/publish.yml`:
 
-- Push tag `vX.Y.Z` for å trigge build + publisering til PyPI
-- Workflowen bruker Trusted Publisher (`id-token`) for opplasting
+- Push tag `vX.Y.Z` for å trigge bygg av `dist/norscode` og opplasting av dist-artifact
+- Workflowen publiserer ikke lenger til PyPI; den er binary-first
 
 ### 1. Kjør program
 

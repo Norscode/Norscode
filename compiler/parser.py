@@ -516,7 +516,7 @@ class Parser:
         return node
 
     def comparison(self):
-        node = self.term()
+        node = self.bitwise_or()
         comparison_tokens = {
             "GT": "GT",
             "LT": "LT",
@@ -533,6 +533,38 @@ class Parser:
             normalized_typ = comparison_tokens[op.typ]
             if op.typ != normalized_typ:
                 op = type(op)(normalized_typ, op.value, op.line, op.column)
+            self.eat(self.current.typ)
+            node = BinOpNode(node, op, self.bitwise_or())
+        return node
+
+    def bitwise_or(self):
+        node = self.bitwise_xor()
+        while self.current.typ == "BOR":
+            op = self.current
+            self.eat("BOR")
+            node = BinOpNode(node, op, self.bitwise_xor())
+        return node
+
+    def bitwise_xor(self):
+        node = self.bitwise_and()
+        while self.current.typ == "BXOR":
+            op = self.current
+            self.eat("BXOR")
+            node = BinOpNode(node, op, self.bitwise_and())
+        return node
+
+    def bitwise_and(self):
+        node = self.shift()
+        while self.current.typ == "BAND":
+            op = self.current
+            self.eat("BAND")
+            node = BinOpNode(node, op, self.shift())
+        return node
+
+    def shift(self):
+        node = self.term()
+        while self.current.typ in ("LSHIFT", "RSHIFT"):
+            op = self.current
             self.eat(self.current.typ)
             node = BinOpNode(node, op, self.term())
         return node
@@ -557,7 +589,7 @@ class Parser:
         if self.current.typ == "AWAIT":
             self.eat("AWAIT")
             return AwaitNode(self.unary())
-        if self.current.typ in ("PLUS", "MINUS", "IKKE"):
+        if self.current.typ in ("PLUS", "MINUS", "IKKE", "BNOT"):
             op = self.current
             self.eat(self.current.typ)
             return UnaryOpNode(op, self.unary())

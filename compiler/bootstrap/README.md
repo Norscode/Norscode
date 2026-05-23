@@ -3,17 +3,20 @@
 ## Purpose
 
 The bootstrap layer is responsible for deterministic self-host compiler generation.
+This repo already has concrete bootstrap pieces for native compiler bring-up, package bootstrap, and Python-free verification.
 
 ---
 
 # Responsibilities
 
-The bootstrap layer should contain:
+The bootstrap layer contains:
 - compiler stage orchestration
 - self-host verification
 - deterministic stage comparison
 - bootstrap tracing
 - compiler equivalence validation
+- package bootstrap
+- native compiler verification
 
 ---
 
@@ -41,6 +44,8 @@ Bootstrap correctness is critical for:
 
 bootstrap/
  ├── stages/
+ ├── native/
+ ├── package/
  ├── verification/
  ├── tracing/
  ├── artifacts/
@@ -51,4 +56,4 @@ bootstrap/
 
 # Long-Term Goal
 
-A fully deterministic and self-hosted compiler bootstrap pipeline.
+A fully deterministic and self-hosted compiler bootstrap pipeline that no longer depends on Python for normal operation.

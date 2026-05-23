@@ -1832,6 +1832,9 @@ class BytecodeCompiler:
             if node.op.typ == "IKKE":
                 code.append(["UNARY_NOT"])
                 return
+            if node.op.typ == "BNOT":
+                code.append(["UNARY_BNOT"])
+                return
             if node.op.typ == "PLUS":
                 return
             raise BytecodeCompileError(f"Ukjent unary-op: {node.op.typ}")
@@ -1872,6 +1875,13 @@ class BytecodeCompiler:
                 "MINUS": "BINARY_SUB",
                 "MUL": "BINARY_MUL",
                 "DIV": "BINARY_DIV",
+                "MOD": "BINARY_MOD",
+                "PERCENT": "BINARY_MOD",
+                "LSHIFT": "BINARY_LSHIFT",
+                "RSHIFT": "BINARY_RSHIFT",
+                "BAND": "BINARY_AND",
+                "BOR": "BINARY_OR",
+                "BXOR": "BINARY_XOR",
                 "EQ": "COMPARE_EQ",
                 "NE": "COMPARE_NE",
                 "GT": "COMPARE_GT",
@@ -2163,6 +2173,7 @@ class BytecodeVM:
                     for key in pending:
                         mapping[key] = values[0]
                 pending = []
+        mapping["lik"] = "lik"
         return mapping
 
     def _selfhost_emit_operator(self, ops: list[Any], verdier: list[Any], op: str) -> bool:
@@ -2184,7 +2195,7 @@ class BytecodeVM:
             ops.extend(["EQ", "NOT"])
             verdier.extend([0, 0])
             return True
-        if op == "xnor":
+        if op in {"xnor", "ekvivalent"}:
             ops.append("EQ")
             verdier.append(0)
             return True
@@ -2271,6 +2282,14 @@ class BytecodeVM:
         def token_pos(pos: int) -> str:
             return f"token {pos}"
 
+        def flush_unary_operators() -> str:
+            while operatorer and operatorer[-1] in {"u!", "u-", "uikke"}:
+                top = operatorer.pop()
+                top_pos = operator_pos.pop()
+                if not self._selfhost_emit_operator(ops, verdier, top):
+                    return f"/* feil: ukjent operator {top} ved {token_pos(top_pos)} */"
+            return ""
+
         while i < len(toks):
             tok_raw = toks[i]
             tok = str(self._call_hot_selfhost_helper("selfhost.compiler.normaliser_norsk_token", [tok_raw]))
@@ -2297,30 +2316,36 @@ class BytecodeVM:
                 tok = "%"; tok_step = 2
             elif i + 1 < len(toks) and tok in {"*", "/", "%"} and n1 in {"by", "of"}:
                 tok_step = 2
+            elif i + 4 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 5
+            elif i + 3 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "lik":
+                tok = "mindre_eller_lik"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn":
                 tok = "mindre_enn"; tok_step = 3
             elif i + 3 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "lik":
                 tok = "mindre_eller_lik"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "lik":
                 tok = "mindre_eller_lik"; tok_step = 3
-            elif i + 4 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
-                tok = "mindre_eller_lik"; tok_step = 5
             elif i + 3 < len(toks) and tok == "er" and n1 == "mindre" and n2 == "eller" and n3 == "lik":
                 tok = "mindre_eller_lik"; tok_step = 4
+            elif i + 4 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
+                tok = "storre_eller_lik"; tok_step = 5
             elif i + 3 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn" and n3 == "lik":
                 tok = "storre_eller_lik"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "storre" and n2 == "lik":
                 tok = "storre_eller_lik"; tok_step = 3
-            elif i + 4 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn" and n3 == "eller" and n4 == "lik":
-                tok = "storre_eller_lik"; tok_step = 5
             elif i + 3 < len(toks) and tok == "er" and n1 == "storre" and n2 == "eller" and n3 == "lik":
                 tok = "storre_eller_lik"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "storre" and n2 == "enn":
                 tok = "storre_enn"; tok_step = 3
+            elif i + 2 < len(toks) and tok == "er" and n1 == "ulik" and n2 == "med":
+                tok = "ikke_er"; tok_step = 3
             elif i + 3 < len(toks) and tok == "er" and n1 == "ikke" and n2 == "lik" and n3 == "med":
                 tok = "ikke_er"; tok_step = 4
             elif i + 2 < len(toks) and tok == "er" and n1 == "ikke" and n2 == "lik":
                 tok = "ikke_er"; tok_step = 3
+            elif i + 1 < len(toks) and tok == "er" and n1 == "ikke":
+                tok = "ikke_er"; tok_step = 2
             elif i + 2 < len(toks) and tok == "ikke" and n1 == "lik" and n2 == "med":
                 tok = "ikke_er"; tok_step = 3
             elif i + 1 < len(toks) and tok == "ulik" and n1 == "med":
@@ -2455,6 +2480,9 @@ class BytecodeVM:
                 if not forventer_verdi:
                     return f"/* feil: mangler operator før verdi {tok} ved {token_pos(i)} */"
                 ops.append("PUSH"); verdier.append(int(tok))
+                err = flush_unary_operators()
+                if err:
+                    return err
                 forventer_verdi = False
                 siste_token = i + tok_step - 1
                 i += tok_step
@@ -2464,6 +2492,9 @@ class BytecodeVM:
                 if not forventer_verdi:
                     return f"/* feil: mangler operator før verdi {tok} ved {token_pos(i)} */"
                 ops.append("PUSH"); verdier.append(1 if tok == "sann" else 0)
+                err = flush_unary_operators()
+                if err:
+                    return err
                 forventer_verdi = False
                 siste_token = i + tok_step - 1
                 i += tok_step
@@ -2471,6 +2502,9 @@ class BytecodeVM:
 
             if forventer_verdi and tok in env:
                 ops.append("PUSH"); verdier.append(int(env[tok]))
+                err = flush_unary_operators()
+                if err:
+                    return err
                 forventer_verdi = False
                 siste_token = i + tok_step - 1
                 i += tok_step
@@ -2497,6 +2531,9 @@ class BytecodeVM:
                         return f"/* feil: ukjent operator {top} ved {token_pos(top_pos)} */"
                 if not fant:
                     return f"/* feil: ) uten matchende ( ved {token_pos(i)} */"
+                err = flush_unary_operators()
+                if err:
+                    return err
                 forventer_verdi = False
                 siste_token = i + tok_step - 1
                 i += tok_step
@@ -3162,6 +3199,11 @@ class BytecodeVM:
         fn = self.functions.get(name)
         if fn is None:
             short_name = name.rsplit('.', 1)[-1]
+            # Struct constructor: CamelCase name with no args → return empty map.
+            # This handles e.g. ASTNode(), ParserState() from selfhost/parser.no.
+            if (short_name and short_name[0].isupper() and len(args) == 0
+                    and not name.startswith("builtin.")):
+                return {}
             builtin_like = {
                 "assert", "assert_eq", "assert_ne", "assert_starter_med", "assert_slutter_med", "assert_inneholder", "skriv", "lengde",
                 "tekst_fra_heltall", "tekst_fra_bool", "heltall_fra_tekst",
@@ -3170,7 +3212,8 @@ class BytecodeVM:
                 "legg_til", "pop_siste", "fjern_indeks", "sett_inn",
                 "har_nokkel", "fjern_nokkel", "json_parse", "json_stringify",
                 "slice",
-                "fil_les", "fil_skriv", "fil_append", "fil_finnes",
+                "til_tekst", "feil", "kast",
+                "fil_les", "fil_skriv", "fil_skriv_binær", "fil_append", "fil_finnes",
                 "db_open", "db_close", "db_execute", "db_query_text", "db_query_int", "db_migrate", "db_transaction", "db_begin", "db_commit", "db_rollback", "db_ping",
                 "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
                 "miljo_hent", "miljo_finnes", "miljo_sett",
@@ -3222,11 +3265,34 @@ class BytecodeVM:
                     stack.append(instr[1])
                 elif op == "LOAD_NAME":
                     name2 = instr[1]
-                    if name2 not in locals_:
+                    # Norscode keywords that map to Python constants
+                    if name2 == "null" or name2 == "ingenting":
+                        stack.append(None)
+                    elif name2 == "sann" or name2 == "true":
+                        stack.append(True)
+                    elif name2 == "usann" or name2 == "false":
+                        stack.append(False)
+                    elif name2 not in locals_:
                         raise BytecodeRuntimeError(f"Ukjent variabel: {name2}")
-                    stack.append(locals_[name2])
+                    else:
+                        stack.append(locals_[name2])
                 elif op == "STORE_NAME":
-                    locals_[instr[1]] = stack.pop()
+                    _sn_name = instr[1]; _sn_val = stack.pop()
+                    if '.' in _sn_name:
+                        # Dotted name = struct field write: "obj.field" → locals_["obj"]["field"] = val
+                        _sn_parts = _sn_name.split('.')
+                        _sn_obj = locals_.get(_sn_parts[0])
+                        if isinstance(_sn_obj, dict):
+                            _sn_cur = _sn_obj
+                            for _sn_p in _sn_parts[1:-1]:
+                                if _sn_p not in _sn_cur:
+                                    _sn_cur[_sn_p] = {}
+                                _sn_cur = _sn_cur[_sn_p]
+                            _sn_cur[_sn_parts[-1]] = _sn_val
+                        else:
+                            locals_[_sn_name] = _sn_val  # fallback for non-struct
+                    else:
+                        locals_[_sn_name] = _sn_val
                 elif op == "POP":
                     if stack:
                         stack.pop()
@@ -3246,7 +3312,17 @@ class BytecodeVM:
                         out[raw_items[i]] = raw_items[i + 1]
                     stack.append(out)
                 elif op == "INDEX_GET":
-                    idx = stack.pop(); lst = stack.pop(); stack.append(lst[idx])
+                    idx = stack.pop(); lst = stack.pop()
+                    if isinstance(lst, dict):
+                        stack.append(lst.get(idx))  # None for missing keys
+                    elif isinstance(lst, (list, str)) and isinstance(idx, (int, float)):
+                        _i = int(idx)
+                        stack.append(lst[_i] if 0 <= _i < len(lst) else None)
+                    elif isinstance(lst, (list, str)) and isinstance(idx, str):
+                        # String character access via string index like lst["0"] - rare
+                        stack.append(None)
+                    else:
+                        stack.append(lst[idx] if lst is not None else None)
                 elif op == "INDEX_SET":
                     value = stack.pop(); idx = stack.pop(); lst = stack.pop(); lst[idx] = value
                 elif op == "UNARY_NEG":
@@ -3261,6 +3337,12 @@ class BytecodeVM:
                     b = stack.pop(); a = stack.pop(); stack.append(a * b)
                 elif op == "BINARY_DIV":
                     b = stack.pop(); a = stack.pop(); stack.append(a / b)
+                elif op == "BINARY_MOD":
+                    b = stack.pop(); a = stack.pop(); stack.append(a % b)
+                elif op == "BINARY_LSHIFT":
+                    b = stack.pop(); a = stack.pop(); stack.append(int(a) << int(b))
+                elif op == "BINARY_RSHIFT":
+                    b = stack.pop(); a = stack.pop(); stack.append(int(a) >> int(b))
                 elif op == "COMPARE_EQ":
                     b = stack.pop(); a = stack.pop(); stack.append(a == b)
                 elif op == "COMPARE_NE":
@@ -3274,9 +3356,21 @@ class BytecodeVM:
                 elif op == "COMPARE_LE":
                     b = stack.pop(); a = stack.pop(); stack.append(a <= b)
                 elif op == "BINARY_AND":
-                    b = stack.pop(); a = stack.pop(); stack.append(bool(a) and bool(b))
+                    b = stack.pop(); a = stack.pop()
+                    if isinstance(a, bool) or isinstance(b, bool):
+                        stack.append(bool(a) and bool(b))
+                    else:
+                        stack.append(int(a) & int(b))
                 elif op == "BINARY_OR":
-                    b = stack.pop(); a = stack.pop(); stack.append(bool(a) or bool(b))
+                    b = stack.pop(); a = stack.pop()
+                    if isinstance(a, bool) or isinstance(b, bool):
+                        stack.append(bool(a) or bool(b))
+                    else:
+                        stack.append(int(a) | int(b))
+                elif op == "BINARY_XOR":
+                    b = stack.pop(); a = stack.pop(); stack.append(int(a) ^ int(b))
+                elif op == "UNARY_BNOT":
+                    a = stack.pop(); stack.append(~int(a))
                 elif op == "TRY_BEGIN":
                     self._push_try_frame(instr[1])
                 elif op == "TRY_END":
@@ -3374,9 +3468,14 @@ class BytecodeVM:
             return value
         if name == "skriv":
             text = " ".join(str(x) for x in args)
-            print(text)
+            print(text, end="")
             self.output.append(text)
             return None
+        if name == "til_tekst":
+            return str(args[0]) if args else ""
+        if name in ("feil", "kast"):
+            msg = str(args[0]) if args else "feil"
+            raise BytecodeThrow(msg)
         if name == "assert":
             if not args[0]:
                 raise AssertionError("Assert feilet")
@@ -3537,6 +3636,21 @@ class BytecodeVM:
             except OSError:
                 raise BytecodeThrow(f"IOFeil: kunne ikke legge til i fil {path}")
             return text
+        if name == "fil_skriv_binær":
+            if len(args) < 2:
+                raise BytecodeRuntimeError("fil_skriv_binær forventer 2 argumenter: (sti, liste)")
+            path = Path(str(args[0])).expanduser()
+            byte_list = args[1]
+            if not isinstance(byte_list, list):
+                raise BytecodeRuntimeError("fil_skriv_binær: andre argument må være en liste med heltall")
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                data = bytes(int(b) & 0xFF for b in byte_list)
+                path.write_bytes(data)
+                path.chmod(0o755)
+            except OSError as exc:
+                raise BytecodeThrow(f"IOFeil: kunne ikke skrive binærfil {path}: {exc}")
+            return len(byte_list)
         if name == "fil_finnes":
             return Path(str(args[0])).expanduser().exists() if args else False
         if name == "db.open":

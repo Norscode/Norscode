@@ -1,0 +1,637 @@
+// Norscode Selfhost Bytecode Compiler
+// Fase 3 — IR-til-bytecode
+//
+// Tar AST-noder fra selfhost/parser.no og produserer norscode-bytecode-v1 JSON.
+// Krever ingen C, ingen Python — kjøres via C VM (NCBB) eller Python-chain.
+//
+// Input:  ASTNode (Program) frå parser.no
+// Output: JSON-tekst (norscode-bytecode-v1 format)
+
+// ─── JSON-hjelparar ──────────────────────────────────────────────────────────
+
+funksjon json_escape_tegn(c)
+    hvis c == "\""
+        returner "\\\""
+    slutt
+    hvis c == "\\"
+        returner "\\\\"
+    slutt
+    hvis c == "\n"
+        returner "\\n"
+    slutt
+    hvis c == "\t"
+        returner "\\t"
+    slutt
+    returner c
+slutt
+
+funksjon json_escape_tekst(t)
+    ut = "\""
+    i = 0
+    mens i < lengde(t)
+        ut = ut + json_escape_tegn(t[i])
+        i = i + 1
+    slutt
+    returner ut + "\""
+slutt
+
+funksjon json_liste(element)
+    // element er ein liste med JSON-tekst-strenger
+    ut = "["
+    i = 0
+    mens i < lengde(element)
+        hvis i > 0
+            ut = ut + ","
+        slutt
+        ut = ut + element[i]
+        i = i + 1
+    slutt
+    returner ut + "]"
+slutt
+
+funksjon json_instruksjon(instr)
+    // instr = [opcode_tekst, arg1, arg2, ...]  (liste av blanda verdiar)
+    ut = "["
+    i = 0
+    mens i < lengde(instr)
+        hvis i > 0
+            ut = ut + ","
+        slutt
+        del = instr[i]
+        // Første element er alltid opcode-tekst
+        ut = ut + json_escape_tekst(del)
+        i = i + 1
+    slutt
+    returner ut + "]"
+slutt
+
+funksjon json_instruksjon_med_int(opcode, n)
+    returner "[" + json_escape_tekst(opcode) + "," + tekst_fra_heltall(n) + "]"
+slutt
+
+funksjon json_instruksjon_med_tekst(opcode, s)
+    returner "[" + json_escape_tekst(opcode) + "," + json_escape_tekst(s) + "]"
+slutt
+
+funksjon json_instruksjon_med_bool(opcode, b)
+    hvis b
+        returner "[" + json_escape_tekst(opcode) + ",true]"
+    slutt
+    returner "[" + json_escape_tekst(opcode) + ",false]"
+slutt
+
+funksjon json_kall(fn_navn, arg_antal)
+    returner "[\"CALL\"," + json_escape_tekst(fn_navn) + "," + tekst_fra_heltall(arg_antal) + "]"
+slutt
+
+funksjon json_instruksjon_uten_arg(opcode)
+    returner "[" + json_escape_tekst(opcode) + "]"
+slutt
+
+// ─── Kompilator-tilstand ──────────────────────────────────────────────────────
+
+funksjon ny_komp()
+    komp = {}
+    komp["teller"] = 0         // etikett-teller
+    komp["modul"] = "__main__" // gjeldande modul-namn
+    komp["funk_kart"] = {}     // name → params (for CALL-resolving)
+    komp["loop_start"] = []    // stack: start-etiketter for løkker (continue)
+    komp["loop_slutt"] = []    // stack: slutt-etiketter for løkker (break)
+    returner komp
+slutt
+
+funksjon ny_etikett(komp)
+    n = komp["teller"]
+    komp["teller"] = n + 1
+    returner "__L" + tekst_fra_heltall(n) + "__"
+slutt
+
+funksjon push_loop(komp, start, slutt)
+    legg_til(komp["loop_start"], start)
+    legg_til(komp["loop_slutt"], slutt)
+slutt
+
+funksjon pop_loop(komp)
+    n = lengde(komp["loop_start"])
+    hvis n > 0
+        komp["loop_start"] = komp["loop_start"]
+        komp["loop_slutt"] = komp["loop_slutt"]
+        // fjern siste element
+        fjern_indeks(komp["loop_start"], n - 1)
+        fjern_indeks(komp["loop_slutt"], n - 1)
+    slutt
+slutt
+
+funksjon gjeldande_loop_start(komp)
+    n = lengde(komp["loop_start"])
+    hvis n == 0
+        returner ""
+    slutt
+    returner komp["loop_start"][n - 1]
+slutt
+
+funksjon gjeldande_loop_slutt(komp)
+    n = lengde(komp["loop_slutt"])
+    hvis n == 0
+        returner ""
+    slutt
+    returner komp["loop_slutt"][n - 1]
+slutt
+
+// ─── Operator-mapping ────────────────────────────────────────────────────────
+
+funksjon binop_til_opcode(op)
+    hvis op == "PLUS"    returner "BINARY_ADD"  slutt
+    hvis op == "MINUS"   returner "BINARY_SUB"  slutt
+    hvis op == "STAR"    returner "BINARY_MUL"  slutt
+    hvis op == "SLASH"   returner "BINARY_DIV"  slutt
+    hvis op == "PERCENT" returner "BINARY_MOD"  slutt
+    hvis op == "EQ"      returner "COMPARE_EQ"  slutt
+    hvis op == "NE"      returner "COMPARE_NE"  slutt
+    hvis op == "GT"      returner "COMPARE_GT"  slutt
+    hvis op == "LT"      returner "COMPARE_LT"  slutt
+    hvis op == "GTE"     returner "COMPARE_GE"  slutt
+    hvis op == "LTE"     returner "COMPARE_LE"  slutt
+    // Logiske operatorar — behandla som short-circuit i emit_uttrykk
+    hvis op == "AND"     returner "LOGICAL_AND" slutt
+    hvis op == "OG"      returner "LOGICAL_AND" slutt
+    hvis op == "OR"      returner "LOGICAL_OR"  slutt
+    hvis op == "ELLER"   returner "LOGICAL_OR"  slutt
+    // Bitwise
+    hvis op == "BAND"    returner "BINARY_AND"  slutt
+    hvis op == "BOR"     returner "BINARY_OR"   slutt
+    hvis op == "BXOR"    returner "BINARY_XOR"  slutt
+    hvis op == "LSHIFT"  returner "BINARY_LSHIFT" slutt
+    hvis op == "RSHIFT"  returner "BINARY_RSHIFT" slutt
+    returner "BINARY_ADD"  // fallback
+slutt
+
+funksjon unar_til_opcode(op)
+    hvis op == "MINUS"  returner "UNARY_NEG"  slutt
+    hvis op == "NOT"    returner "UNARY_NOT"  slutt
+    hvis op == "IKKJE"  returner "UNARY_NOT"  slutt
+    hvis op == "IKKE"   returner "UNARY_NOT"  slutt
+    hvis op == "BNOT"   returner "UNARY_BNOT" slutt
+    returner "UNARY_NEG"
+slutt
+
+funksjon aug_til_binop(aug_type)
+    hvis aug_type == "PLUS_ASSIGN"    returner "BINARY_ADD" slutt
+    hvis aug_type == "MINUS_ASSIGN"   returner "BINARY_SUB" slutt
+    hvis aug_type == "STAR_ASSIGN"    returner "BINARY_MUL" slutt
+    hvis aug_type == "SLASH_ASSIGN"   returner "BINARY_DIV" slutt
+    hvis aug_type == "PERCENT_ASSIGN" returner "BINARY_MOD" slutt
+    returner "BINARY_ADD"
+slutt
+
+// ─── Kompiler uttrykk ────────────────────────────────────────────────────────
+// Appendar instruksjonar til `kode`-lista
+
+funksjon emit_uttrykk(komp, node, kode)
+    t = node.type
+
+    hvis t == "Ident"
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node.verdi))
+        returner sann
+    slutt
+
+    hvis t == "Heltall"
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", heltall_fra_tekst(node.verdi)))
+        returner sann
+    slutt
+
+    hvis t == "Tekst"
+        legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node.verdi))
+        returner sann
+    slutt
+
+    hvis t == "Bool"
+        hvis node.verdi == "sann"
+            legg_til(kode, json_instruksjon_med_bool("PUSH_CONST", sann))
+        ellers
+            legg_til(kode, json_instruksjon_med_bool("PUSH_CONST", usann))
+        slutt
+        returner sann
+    slutt
+
+    hvis t == "Binop"
+        opcode = binop_til_opcode(node.verdi)
+
+        // Short-circuit AND
+        hvis opcode == "LOGICAL_AND"
+            etikett_false = ny_etikett(komp)
+            etikett_ferdig = ny_etikett(komp)
+            emit_uttrykk(komp, node.barn[0], kode)
+            legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", etikett_false))
+            emit_uttrykk(komp, node.barn[1], kode)
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", etikett_ferdig))
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_false))
+            legg_til(kode, json_instruksjon_med_bool("PUSH_CONST", usann))
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_ferdig))
+            returner sann
+        slutt
+
+        // Short-circuit OR
+        hvis opcode == "LOGICAL_OR"
+            etikett_true = ny_etikett(komp)
+            etikett_ferdig = ny_etikett(komp)
+            emit_uttrykk(komp, node.barn[0], kode)
+            legg_til(kode, "[\"JUMP_IF_FALSE\"," + json_escape_tekst(etikett_true) + "]")
+            legg_til(kode, json_instruksjon_med_bool("PUSH_CONST", sann))
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", etikett_ferdig))
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_true))
+            emit_uttrykk(komp, node.barn[1], kode)
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_ferdig))
+            returner sann
+        slutt
+
+        emit_uttrykk(komp, node.barn[0], kode)
+        emit_uttrykk(komp, node.barn[1], kode)
+        legg_til(kode, json_instruksjon_uten_arg(opcode))
+        returner sann
+    slutt
+
+    hvis t == "Unar"
+        opcode = unar_til_opcode(node.verdi)
+        emit_uttrykk(komp, node.barn[0], kode)
+        legg_til(kode, json_instruksjon_uten_arg(opcode))
+        returner sann
+    slutt
+
+    hvis t == "Kall"
+        // Barn: [Ident(kallenavn), Argumenter[arg0, arg1, ...]]
+        fn_ident = node.barn[0]
+        argumenter = node.barn[1]
+        arg_antal = lengde(argumenter.barn)
+
+        // Evaluer alle argument
+        i = 0
+        mens i < arg_antal
+            emit_uttrykk(komp, argumenter.barn[i], kode)
+            i = i + 1
+        slutt
+
+        // Resolve funksjonsnavn
+        fn_navn = fn_ident.verdi
+        modul = komp["modul"]
+        fullt_namn = modul + "." + fn_navn
+
+        // Sjekk om det er ein brukardefinert funksjon i same modul
+        hvis har_nokkel(komp["funk_kart"], fn_navn)
+            legg_til(kode, json_kall(fullt_namn, arg_antal))
+        ellers
+            // Antatt builtin eller ekstern
+            legg_til(kode, json_kall("builtin." + fn_navn, arg_antal))
+        slutt
+        returner sann
+    slutt
+
+    hvis t == "Indeks"
+        // Barn: [liste-uttrykk, indeks-uttrykk]
+        emit_uttrykk(komp, node.barn[0], kode)
+        emit_uttrykk(komp, node.barn[1], kode)
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    slutt
+
+    hvis t == "Felt"
+        // Barn: [objekt-uttrykk]  verdi = feltnamn
+        emit_uttrykk(komp, node.barn[0], kode)
+        legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node.verdi))
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        returner sann
+    slutt
+
+    hvis t == "Liste"
+        i = 0
+        mens i < lengde(node.barn)
+            emit_uttrykk(komp, node.barn[i], kode)
+            i = i + 1
+        slutt
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(node.barn)))
+        returner sann
+    slutt
+
+    hvis t == "Map"
+        i = 0
+        mens i < lengde(node.barn)
+            par = node.barn[i]
+            emit_uttrykk(komp, par.barn[0], kode)  // nøkkel
+            emit_uttrykk(komp, par.barn[1], kode)  // verdi
+            i = i + 1
+        slutt
+        legg_til(kode, json_instruksjon_med_int("BUILD_MAP", lengde(node.barn)))
+        returner sann
+    slutt
+
+    // Fallback: ukjent node-type, push null
+    legg_til(kode, "[\"PUSH_CONST\",null]")
+    returner usann
+slutt
+
+// ─── Kompiler setningar ──────────────────────────────────────────────────────
+
+funksjon emit_setning(komp, node, kode)
+    t = node.type
+
+    // La x = expr  (variabel-deklarasjon)
+    hvis t == "La"
+        namn = node.verdi
+        hvis lengde(node.barn) > 0
+            // Siste barn er verdi-uttrykket (etter eventuell Type-node)
+            siste = node.barn[lengde(node.barn) - 1]
+            hvis siste.type != "Type" og siste.type != "Returtype"
+                emit_uttrykk(komp, siste, kode)
+            ellers
+                legg_til(kode, "[\"PUSH_CONST\",null]")
+            slutt
+        ellers
+            legg_til(kode, "[\"PUSH_CONST\",null]")
+        slutt
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", namn))
+        returner sann
+    slutt
+
+    // x = expr  (tilordning)
+    hvis t == "Sett"
+        mål = node.barn[0]
+        verdi_node = node.barn[1]
+
+        hvis mål.type == "Ident"
+            emit_uttrykk(komp, verdi_node, kode)
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", mål.verdi))
+        ellers
+            hvis mål.type == "Indeks"
+                // liste[i] = verdi → LOAD liste, eval i, eval verdi, INDEX_SET
+                emit_uttrykk(komp, mål.barn[0], kode)
+                emit_uttrykk(komp, mål.barn[1], kode)
+                emit_uttrykk(komp, verdi_node, kode)
+                legg_til(kode, json_instruksjon_uten_arg("INDEX_SET"))
+            ellers
+                // obj.felt = verdi → LOAD obj, PUSH felt, eval verdi, INDEX_SET
+                emit_uttrykk(komp, mål.barn[0], kode)
+                legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", mål.verdi))
+                emit_uttrykk(komp, verdi_node, kode)
+                legg_til(kode, json_instruksjon_uten_arg("INDEX_SET"))
+            slutt
+        slutt
+        returner sann
+    slutt
+
+    // x += expr  (augmented tilordning)
+    hvis t == "AugSett"
+        mål = node.barn[0]
+        verdi_node = node.barn[1]
+        binop_opcode = aug_til_binop(node.verdi)
+
+        hvis mål.type == "Ident"
+            emit_uttrykk(komp, mål, kode)
+            emit_uttrykk(komp, verdi_node, kode)
+            legg_til(kode, json_instruksjon_uten_arg(binop_opcode))
+            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", mål.verdi))
+        slutt
+        returner sann
+    slutt
+
+    // returner [uttrykk]
+    hvis t == "Returner"
+        hvis lengde(node.barn) > 0
+            emit_uttrykk(komp, node.barn[0], kode)
+        ellers
+            legg_til(kode, "[\"PUSH_CONST\",null]")
+        slutt
+        legg_til(kode, json_instruksjon_uten_arg("RETURN"))
+        returner sann
+    slutt
+
+    // hvis uttrykk blokk [ellers blokk]
+    hvis t == "Hvis"
+        etikett_ellers = ny_etikett(komp)
+        etikett_ferdig = ny_etikett(komp)
+
+        emit_uttrykk(komp, node.barn[0], kode)
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", etikett_ellers))
+
+        emit_blokk(komp, node.barn[1], kode)
+
+        hvis lengde(node.barn) > 2
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", etikett_ferdig))
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_ellers))
+            emit_blokk(komp, node.barn[2], kode)
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_ferdig))
+        ellers
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_ellers))
+        slutt
+        returner sann
+    slutt
+
+    // mens uttrykk blokk
+    hvis t == "Mens"
+        etikett_start = ny_etikett(komp)
+        etikett_slutt = ny_etikett(komp)
+
+        push_loop(komp, etikett_start, etikett_slutt)
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_start))
+        emit_uttrykk(komp, node.barn[0], kode)
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", etikett_slutt))
+        emit_blokk(komp, node.barn[1], kode)
+        legg_til(kode, json_instruksjon_med_tekst("JUMP", etikett_start))
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", etikett_slutt))
+        pop_loop(komp)
+        returner sann
+    slutt
+
+    // bryt
+    hvis t == "Bryt"
+        lbl = gjeldande_loop_slutt(komp)
+        hvis lbl != ""
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
+        slutt
+        returner sann
+    slutt
+
+    // fortsett
+    hvis t == "Fortsett"
+        lbl = gjeldande_loop_start(komp)
+        hvis lbl != ""
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl))
+        slutt
+        returner sann
+    slutt
+
+    // Uttrykk-setning (kall osv.)
+    emit_uttrykk(komp, node, kode)
+    legg_til(kode, json_instruksjon_uten_arg("POP"))
+    returner sann
+slutt
+
+funksjon emit_blokk(komp, blokk, kode)
+    i = 0
+    mens i < lengde(blokk.barn)
+        emit_setning(komp, blokk.barn[i], kode)
+        i = i + 1
+    slutt
+slutt
+
+// ─── Kompiler funksjonar ─────────────────────────────────────────────────────
+
+funksjon kompiler_funksjon(komp, fn_node)
+    // fn_node.barn = [Parametere, Returtype, Blokk]
+    param_node = fn_node.barn[0]  // Parametere
+    blokk = fn_node.barn[2]       // Blokk (etter Parametere og Returtype)
+
+    // Samle parameter-namn
+    params = []
+    i = 0
+    mens i < lengde(param_node.barn)
+        legg_til(params, param_node.barn[i].verdi)
+        i = i + 1
+    slutt
+
+    // Bygg kode-lista
+    kode = []
+    emit_blokk(komp, blokk, kode)
+
+    // Legg til implisitt returner null
+    legg_til(kode, "[\"PUSH_CONST\",null]")
+    legg_til(kode, "[\"RETURN\"]")
+
+    // Serialiser til JSON
+    modul = komp["modul"]
+    fn_namn = fn_node.verdi
+    fullt_namn = modul + "." + fn_namn
+
+    // Bygg params JSON
+    params_json = "["
+    j = 0
+    mens j < lengde(params)
+        hvis j > 0
+            params_json = params_json + ","
+        slutt
+        params_json = params_json + json_escape_tekst(params[j])
+        j = j + 1
+    slutt
+    params_json = params_json + "]"
+
+    // Bygg code JSON
+    kode_json = "["
+    k = 0
+    mens k < lengde(kode)
+        hvis k > 0
+            kode_json = kode_json + ","
+        slutt
+        kode_json = kode_json + kode[k]
+        k = k + 1
+    slutt
+    kode_json = kode_json + "]"
+
+    // Fullt funksjon-objekt
+    fn_json = "{"
+    fn_json = fn_json + "\"name\":" + json_escape_tekst(fn_namn) + ","
+    fn_json = fn_json + "\"module\":" + json_escape_tekst(modul) + ","
+    fn_json = fn_json + "\"params\":" + params_json + ","
+    fn_json = fn_json + "\"is_async\":false,"
+    fn_json = fn_json + "\"code\":" + kode_json
+    fn_json = fn_json + "}"
+
+    returner fullt_namn + "|SEP|" + fn_json
+slutt
+
+// ─── Kompiler heile programmet ────────────────────────────────────────────────
+
+funksjon kompiler_program(ast_program, modul_namn)
+    komp = ny_komp()
+    komp["modul"] = modul_namn
+
+    // Første pass: registrer alle funksjonar
+    i = 0
+    mens i < lengde(ast_program.barn)
+        node = ast_program.barn[i]
+        hvis node.type == "Funksjon"
+            komp["funk_kart"][node.verdi] = sann
+        slutt
+        i = i + 1
+    slutt
+
+    // Andre pass: kompiler kvar funksjon
+    funk_json_par = []
+    j = 0
+    mens j < lengde(ast_program.barn)
+        node = ast_program.barn[j]
+        hvis node.type == "Funksjon"
+            resultat = kompiler_funksjon(komp, node)
+            legg_til(funk_json_par, resultat)
+        slutt
+        j = j + 1
+    slutt
+
+    // Bygg functions-objekt
+    funk_obj = "{"
+    k = 0
+    mens k < lengde(funk_json_par)
+        par = funk_json_par[k]
+        // finn separator
+        sep_pos = 0
+        p = 0
+        mens p < lengde(par)
+            hvis par[p] == "|" og p + 4 < lengde(par)
+                // sjekk om det er "|SEP|"
+                chunk = par[p] + par[p+1] + par[p+2] + par[p+3] + par[p+4]
+                hvis chunk == "|SEP|"
+                    sep_pos = p
+                    bryt
+                slutt
+            slutt
+            p = p + 1
+        slutt
+
+        fn_key = ""
+        fn_val = ""
+        q = 0
+        mens q < sep_pos
+            fn_key = fn_key + par[q]
+            q = q + 1
+        slutt
+        r = sep_pos + 5
+        mens r < lengde(par)
+            fn_val = fn_val + par[r]
+            r = r + 1
+        slutt
+
+        hvis k > 0
+            funk_obj = funk_obj + ","
+        slutt
+        funk_obj = funk_obj + json_escape_tekst(fn_key) + ":" + fn_val
+        k = k + 1
+    slutt
+    funk_obj = funk_obj + "}"
+
+    // Bygg heile bytecode-dokumentet
+    entry = modul_namn + ".start"
+    doc = "{"
+    doc = doc + "\"format\":\"norscode-bytecode-v1\","
+    doc = doc + "\"entry\":" + json_escape_tekst(entry) + ","
+    doc = doc + "\"imports\":[],"
+    doc = doc + "\"route_handlers\":[],"
+    doc = doc + "\"dependency_providers\":[],"
+    doc = doc + "\"guard_providers\":[],"
+    doc = doc + "\"request_middlewares\":[],"
+    doc = doc + "\"response_middlewares\":[],"
+    doc = doc + "\"error_middlewares\":[],"
+    doc = doc + "\"startup_hooks\":[],"
+    doc = doc + "\"shutdown_hooks\":[],"
+    doc = doc + "\"functions\":" + funk_obj
+    doc = doc + "}"
+
+    returner doc
+slutt
+
+// ─── Offentleg API ───────────────────────────────────────────────────────────
+
+funksjon kompiler_til_ncb_json(ast_program, modul_namn)
+    returner kompiler_program(ast_program, modul_namn)
+slutt
+
+funksjon start()
+    returner "ir_to_bytecode_ready"
+slutt
