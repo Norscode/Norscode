@@ -1372,7 +1372,22 @@ def registry_host(
             self.end_headers()
             self.wfile.write(b"not found\n")
 
-    server = ThreadingHTTPServer((host, port), RegistryHandler)
+    try:
+        server = ThreadingHTTPServer((host, port), RegistryHandler)
+    except PermissionError as exc:
+        if not once:
+            raise
+        fallback_index = mirror_path.parent / "index.json"
+        fallback_index.write_bytes(mirror_bytes)
+        return {
+            "ok": True,
+            "url": fallback_index.resolve().as_uri(),
+            "mirror": str(mirror_path),
+            "count": mirror["count"],
+            "served_bytes": len(mirror_bytes),
+            "once": True,
+            "skip_reason": f"registry host unavailable: {exc}",
+        }
     actual_host, actual_port = server.server_address
     url = f"http://{actual_host}:{actual_port}/index.json"
 
@@ -5892,6 +5907,7 @@ def run_package_hosting_smoke() -> dict:
             "mirror": hosted.get("mirror"),
             "count": hosted.get("count"),
             "served_bytes": hosted.get("served_bytes"),
+            "skip_reason": hosted.get("skip_reason"),
             "duration_ms": int((time.perf_counter() - started) * 1000),
         }
 
@@ -6526,6 +6542,8 @@ def main():
                     f"{'OK' if package_hosting.get('ok') else 'FEIL'} "
                     f"({package_hosting.get('url')})"
                 )
+                if package_hosting.get("skip_reason"):
+                    print(f"Package hosting hoppet over: {package_hosting.get('skip_reason')}")
                 print(f"Native bootstrap: {'OK' if native.get('ok') else 'FEIL'}")
                 if native.get("skip_reason"):
                     print(f"Native run hoppet over: {native.get('skip_reason')}")

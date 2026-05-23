@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 
+import main
 from compiler.native.pipeline import compile_source_to_native_elf, run_native_elf, verify_bootstrap_compiler
 from main import registry_host
 
@@ -49,6 +50,24 @@ def test_real_package_hosting_serves_registry_index_once(tmp_path):
     assert result["count"] >= 1
     assert result["served_bytes"] == mirror.stat().st_size
     assert result["url"].endswith("/index.json")
+
+
+def test_real_package_hosting_falls_back_when_socket_bind_is_blocked(tmp_path, monkeypatch):
+    mirror = tmp_path / "registry_mirror.json"
+    mirror.write_text('{"format_version":1,"packages":{"std":{"version":"0.1.0"}}}\n', encoding="utf-8")
+
+    def fake_server(*_args, **_kwargs):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(main, "ThreadingHTTPServer", fake_server)
+
+    result = registry_host(port=0, mirror_file=str(mirror), once=True)
+
+    assert result["ok"] is True
+    assert result["count"] >= 1
+    assert result["served_bytes"] == mirror.stat().st_size
+    assert result["url"].endswith("/index.json")
+    assert result["skip_reason"]
 
 
 def test_real_bootstrap_compiler_verification_has_native_artifacts():

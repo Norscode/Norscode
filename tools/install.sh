@@ -84,10 +84,10 @@ if [ -z "$DOWNLOAD_URL" ]; then
     printf 'Advarsel: Ingen pre-bygd binary for %s i siste release.\n' "$PLATFORM" >&2
     printf 'Bygger fra kilde via Python-bootstrap...\n'
     if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/main.py" ]; then
-        python3 "$ROOT_DIR/main.py" selfhost-bootstrap-gate
-        if [ -f "$ROOT_DIR/build/norcode-bootstrap-compile" ]; then
+        bash "$ROOT_DIR/tools/build-bootstrap-binary.sh"
+        if [ -x "$ROOT_DIR/dist/norcode-bootstrap-compile" ]; then
             mkdir -p "$BIN_DIR"
-            cp "$ROOT_DIR/build/norcode-bootstrap-compile" "$BIN_DIR/norscode"
+            cp "$ROOT_DIR/dist/norcode-bootstrap-compile" "$BIN_DIR/norscode"
             chmod +x "$BIN_DIR/norscode"
             printf 'Installert fra kilde: %s/norscode\n' "$BIN_DIR"
             exit 0
