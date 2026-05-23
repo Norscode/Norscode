@@ -712,29 +712,37 @@ def _response_set_cookie(response: Any, cookie: Any) -> dict[str, Any]:
     return result
 
 
-def _password_hash_core(password: str, salt: str) -> str:
-    data = f"{salt}\0{password}".encode("utf-8")
-    state = 0xCBF29CE484222325
-    for _ in range(4096):
-        for byte in data:
-            state ^= byte
-            state = (state * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-        data = state.to_bytes(8, "big") + data
-    return f"{salt}${state:016x}"
+# ─── Passord-hashing: PBKDF2-HMAC-SHA256 ────────────────────────────────────
+# Format: "pbkdf2:sha256:<iter>:<salt_hex>:<hash_hex>"
+_PBKDF2_ITER = 260_000
+_PBKDF2_HASH = "sha256"
+_PBKDF2_DKLEN = 32
 
 
-def _password_hash(password: Any, salt: Any) -> str:
-    return _password_hash_core(str(password), str(salt))
+def _password_hash(password: Any, _salt_ignored: Any = None) -> str:
+    """Hash passord med PBKDF2-HMAC-SHA256 og tilfeldig 32-byte salt."""
+    import hashlib, os
+    salt = os.urandom(_PBKDF2_DKLEN)
+    dk = hashlib.pbkdf2_hmac(_PBKDF2_HASH, str(password).encode("utf-8"), salt, _PBKDF2_ITER, dklen=_PBKDF2_DKLEN)
+    return f"pbkdf2:{_PBKDF2_HASH}:{_PBKDF2_ITER}:{salt.hex()}:{dk.hex()}"
 
 
 def _password_verify(password: Any, stored: Any) -> bool:
+    """Verifiser passord mot pbkdf2-hash. Timing-safe samanlikning."""
+    import hashlib, hmac as _hmac
     stored_text = str(stored)
-    if "$" not in stored_text:
-        return False
-    salt, digest = stored_text.split("$", 1)
-    if not salt or not digest:
-        return False
-    return _password_hash_core(str(password), salt) == stored_text
+    parts = stored_text.split(":")
+    if len(parts) == 5 and parts[0] == "pbkdf2":
+        _, algo, iter_str, salt_hex, hash_hex = parts
+        try:
+            salt = bytes.fromhex(salt_hex)
+            expected = bytes.fromhex(hash_hex)
+            iterations = int(iter_str)
+        except (ValueError, TypeError):
+            return False
+        dk = hashlib.pbkdf2_hmac(algo, str(password).encode("utf-8"), salt, iterations, dklen=len(expected))
+        return _hmac.compare_digest(dk, expected)
+    return False  # Legacy-format avvist
 
 
 def _make_web_request_context(method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
@@ -3014,9 +3022,9 @@ class BytecodeVM:
                 return False
             return _web_has_permission(args[0], args[1])
         if name in {"sikkerhet.passord_hash", "std.sikkerhet.passord_hash"}:
-            if len(args) < 2:
+            if not args:
                 return ""
-            return _password_hash(args[0], args[1])
+            return _password_hash(args[0])
         if name in {"sikkerhet.passord_verifiser", "std.sikkerhet.passord_verifiser"}:
             if len(args) < 2:
                 return False
@@ -3222,6 +3230,7 @@ class BytecodeVM:
                 "request_json_field_or", "request_json_field_int", "request_json_field_bool",
                 "request_cookie", "request_cookie_or", "cookie_header", "response_set_cookie",
                 "escape_html", "safe_filename", "safe_path_segment", "safe_slug",
+                "web_escape_html", "web_safe_filename", "web_safe_path_segment", "web_safe_slug",
                 "openapi_json", "docs_html",
             }
             if short_name in builtin_like:
@@ -3401,6 +3410,13 @@ class BytecodeVM:
                         if self.trace:
                             print("CALL:", target)
                         stack.append(self.call_function(target, call_args))
+                    except RecursionError:
+                        exc_msg = f"Sikkerheitsfeil: maks kall-djupn overskreden — mogleg uendeleg rekursjon i '{target}'"
+                        handler_ip = self._handle_throw(exc_msg, labels)
+                        if handler_ip is None:
+                            raise BytecodeThrow(exc_msg)
+                        ip = handler_ip
+                        continue
                     except BytecodeThrow as exc:
                         handler_ip = self._handle_throw(exc.value, labels)
                         if handler_ip is None:
@@ -3474,6 +3490,15 @@ class BytecodeVM:
             return None
         if name == "til_tekst":
             return str(args[0]) if args else ""
+        # ─── Direkte web-sikkerheitsbuiltins ─────────────────────────────────
+        if name == "web_escape_html":
+            return _escape_html(args[0]) if args else ""
+        if name == "web_safe_filename":
+            return _safe_filename(args[0]) if args else "fil"
+        if name == "web_safe_path_segment":
+            return _safe_path_segment(args[0]) if args else "segment"
+        if name == "web_safe_slug":
+            return _safe_slug(args[0]) if args else "slug"
         if name in ("feil", "kast"):
             msg = str(args[0]) if args else "feil"
             raise BytecodeThrow(msg)
