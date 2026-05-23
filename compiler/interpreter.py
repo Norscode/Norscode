@@ -86,6 +86,10 @@ class AsyncValue:
 
 
 class Interpreter:
+    # ─── Sikkerheitsgrenser ──────────────────────────────────────────────────────
+    # Maks kall-djupn før stack overflow-feil kastast
+    _MAX_CALL_DEPTH: int = 500
+
     def __init__(self):
         self.globals: dict[str, Any] = {}
         self.functions: dict[str, UserFunction] = {}
@@ -108,6 +112,33 @@ class Interpreter:
         self._db_pooled_handles: dict[str, str] = {}
         self._db_next_handle = 1
         self._db_next_pool_handle = 1
+        # Filsystem-sandbox: tillate mapper (None = ingen avgrensing)
+        self._fs_allowed_paths: list[Path] | None = self._load_fs_allowed_paths()
+
+    @staticmethod
+    def _load_fs_allowed_paths() -> "list[Path] | None":
+        """Les NORSCODE_ALLOWED_PATHS frå miljø — kommaseparert liste med mapper."""
+        import os
+        raw = os.environ.get("NORSCODE_ALLOWED_PATHS", "").strip()
+        if not raw:
+            return None  # Ingen avgrensing
+        return [Path(p.strip()).resolve() for p in raw.split(",") if p.strip()]
+
+    def _fs_check_path(self, path: Path) -> None:
+        """Sjekk at path ligg innanfor tillate mapper. Kastar ThrowSignal ved brot."""
+        if self._fs_allowed_paths is None:
+            return  # Sandbox ikkje aktivert
+        resolved = path.expanduser().resolve()
+        for allowed in self._fs_allowed_paths:
+            try:
+                resolved.relative_to(allowed)
+                return  # OK — innanfor ein tillaten mappe
+            except ValueError:
+                pass
+        raise ThrowSignal(
+            f"Sikkerheitsfeil: filstien '{resolved}' er utanfor tillatne mapper. "
+            f"Set NORSCODE_ALLOWED_PATHS for å konfigurere."
+        )
 
     def _walk_ast_nodes(self, node: Any):
         if node is None:
@@ -1556,7 +1587,43 @@ class Interpreter:
         return cleaned or "slug"
 
     def _db_escape_sql_literal(self, value: Any) -> str:
+        # Kept for migration-tracking internals only. Never use for user data.
         return str(value).replace("'", "''")
+
+    def _db_execute_params(self, handle: Any, sql: Any, params: Any) -> int:
+        """Parameterisert execute — trygg mot SQL-injeksjon."""
+        conn = self._db_get_connection(handle)
+        param_list = list(params) if isinstance(params, (list, tuple)) else []
+        try:
+            cursor = conn.execute(str(sql), param_list)
+            conn.commit()
+            return int(cursor.rowcount if cursor.rowcount != -1 else 0)
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke kjøre SQL: {exc}"))
+
+    def _db_query_row(self, handle: Any, sql: Any, params: Any) -> list:
+        """Parameterisert spørjing — returnerer første rad som liste."""
+        conn = self._db_get_connection(handle)
+        param_list = list(params) if isinstance(params, (list, tuple)) else []
+        try:
+            cursor = conn.execute(str(sql), param_list)
+            row = cursor.fetchone()
+            if row is None:
+                return []
+            return [("" if v is None else v) for v in row]
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke lese SQL-resultat: {exc}"))
+
+    def _db_query_all(self, handle: Any, sql: Any, params: Any) -> list:
+        """Parameterisert spørjing — returnerer alle rader som liste av lister."""
+        conn = self._db_get_connection(handle)
+        param_list = list(params) if isinstance(params, (list, tuple)) else []
+        try:
+            cursor = conn.execute(str(sql), param_list)
+            rows = cursor.fetchall()
+            return [[("" if v is None else v) for v in row] for row in rows]
+        except Exception as exc:
+            raise ThrowSignal(self._db_error(f"kunne ikke lese SQL-resultat: {exc}"))
 
     def _db_error(self, message: str) -> str:
         return f"DBFeil: {message}"
@@ -1714,15 +1781,14 @@ class Interpreter:
             return 0
         try:
             conn.execute("CREATE TABLE IF NOT EXISTS norscode_migrations (script TEXT PRIMARY KEY)")
-            escaped = self._db_escape_sql_literal(script)
             existing = conn.execute(
-                f"SELECT 1 FROM norscode_migrations WHERE script = '{escaped}' LIMIT 1"
+                "SELECT 1 FROM norscode_migrations WHERE script = ? LIMIT 1", (script,)
             ).fetchone()
             if existing is not None:
                 return 0
             conn.executescript(script)
             conn.execute(
-                f"INSERT INTO norscode_migrations(script) VALUES ('{escaped}')"
+                "INSERT INTO norscode_migrations(script) VALUES (?)", (script,)
             )
             conn.commit()
             return 1
@@ -1774,27 +1840,55 @@ class Interpreter:
         except Exception as exc:
             raise ThrowSignal(self._db_error(f"kunne ikke rulle tilbake transaksjon: {exc}"))
 
-    def _password_hash_core(self, password: str, salt: str) -> str:
-        data = f"{salt}\0{password}".encode("utf-8")
-        state = 0xCBF29CE484222325
-        for _ in range(4096):
-            for byte in data:
-                state ^= byte
-                state = (state * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
-            data = state.to_bytes(8, "big") + data
-        return f"{salt}${state:016x}"
+    # ─── Passord-hashing: PBKDF2-HMAC-SHA256 ────────────────────────────────────
+    # Format: "pbkdf2:sha256:<iter>:<salt_hex>:<hash_hex>"
+    # 260 000 iterasjonar, 32-byte tilfeldig salt, 32-byte digest.
+    # Timings-safe samanlikning via hmac.compare_digest.
+    _PBKDF2_ITER = 260_000
+    _PBKDF2_HASH = "sha256"
+    _PBKDF2_DKLEN = 32
 
-    def _password_hash(self, password: Any, salt: Any) -> str:
-        return self._password_hash_core(str(password), str(salt))
+    def _password_hash(self, password: Any, _salt_ignored: Any = None) -> str:
+        """Hash eit passord med PBKDF2-HMAC-SHA256 og tilfeldig 32-byte salt.
+
+        _salt_ignored er berre til bakoverkompatibilitet med gammal signatur
+        passord_hash(passord, salt) — vert ikkje brukt (salt genererast alltid tilfeldig).
+        """
+        import hashlib, os
+        salt = os.urandom(32)
+        dk = hashlib.pbkdf2_hmac(
+            self._PBKDF2_HASH,
+            str(password).encode("utf-8"),
+            salt,
+            self._PBKDF2_ITER,
+            dklen=self._PBKDF2_DKLEN,
+        )
+        return f"pbkdf2:{self._PBKDF2_HASH}:{self._PBKDF2_ITER}:{salt.hex()}:{dk.hex()}"
 
     def _password_verify(self, password: Any, stored: Any) -> bool:
+        """Verifiser eit passord mot ein lagra hash (pbkdf2-format eller legacy)."""
+        import hashlib, hmac as _hmac
         stored_text = str(stored)
-        if "$" not in stored_text:
-            return False
-        salt, digest = stored_text.split("$", 1)
-        if not salt or not digest:
-            return False
-        return self._password_hash_core(str(password), salt) == stored_text
+        parts = stored_text.split(":")
+        if len(parts) == 5 and parts[0] == "pbkdf2":
+            # Nytt format: pbkdf2:sha256:iter:salt_hex:hash_hex
+            _, algo, iter_str, salt_hex, hash_hex = parts
+            try:
+                salt = bytes.fromhex(salt_hex)
+                expected = bytes.fromhex(hash_hex)
+                iterations = int(iter_str)
+            except (ValueError, TypeError):
+                return False
+            dk = hashlib.pbkdf2_hmac(
+                algo,
+                str(password).encode("utf-8"),
+                salt,
+                iterations,
+                dklen=len(expected),
+            )
+            return _hmac.compare_digest(dk, expected)
+        # Legacy-format: "salt$hex" (gammal FNV-variant — avvist for tryggleik)
+        return False
 
     def _make_web_request_context(self, method: Any, path: Any, query: Any, headers: Any, body: Any) -> dict[str, Any]:
         self._request_counter += 1
@@ -2357,6 +2451,7 @@ class Interpreter:
 
         if name == "fil_les":
             path = Path(str(values[0])) if values else Path("")
+            self._fs_check_path(path)
             try:
                 return path.expanduser().read_text(encoding="utf-8")
             except OSError:
@@ -2366,6 +2461,7 @@ class Interpreter:
             if len(values) < 2:
                 raise RuntimeError("fil_skriv forventer 2 argumenter")
             path = Path(str(values[0])).expanduser()
+            self._fs_check_path(path)
             text = str(values[1])
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2378,6 +2474,7 @@ class Interpreter:
             if len(values) < 2:
                 raise RuntimeError("fil_append forventer 2 argumenter")
             path = Path(str(values[0])).expanduser()
+            self._fs_check_path(path)
             text = str(values[1])
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -2388,7 +2485,11 @@ class Interpreter:
             return text
 
         if name == "fil_finnes":
-            return Path(str(values[0])).expanduser().exists() if values else False
+            if not values:
+                return False
+            path = Path(str(values[0]))
+            self._fs_check_path(path)
+            return path.expanduser().exists()
 
         if name == "db.open":
             if not values:
@@ -2405,6 +2506,13 @@ class Interpreter:
                 return 0
             return self._db_execute(values[0], values[1])
 
+        # Parameterisert execute — trygg mot SQL-injeksjon
+        # db.execute_params(handle, sql, params_liste)
+        if name == "db.execute_params":
+            if len(values) < 3:
+                return 0
+            return self._db_execute_params(values[0], values[1], values[2])
+
         if name == "db.query_text":
             if len(values) < 2:
                 return ""
@@ -2414,6 +2522,19 @@ class Interpreter:
             if len(values) < 2:
                 return 0
             return self._db_query_int(values[0], values[1])
+
+        # Parameteriserte spørjingar — trygg mot SQL-injeksjon
+        # db.query_row(handle, sql, params) → første rad som liste
+        if name == "db.query_row":
+            if len(values) < 3:
+                return []
+            return self._db_query_row(values[0], values[1], values[2])
+
+        # db.query_all(handle, sql, params) → alle rader som liste av lister
+        if name == "db.query_all":
+            if len(values) < 3:
+                return []
+            return self._db_query_all(values[0], values[1], values[2])
 
         if name == "db.migrate":
             if len(values) < 2:
@@ -2505,6 +2626,11 @@ class Interpreter:
             display_name = call_name or lambda_value.display_name
             raise RuntimeError(
                 f"Lambda '{display_name}' forventer {len(lambda_value.params)} argument(er), fikk {len(args)}"
+            )
+        if len(self.call_stack) >= self._MAX_CALL_DEPTH:
+            raise ThrowSignal(
+                f"Sikkerheitsfeil: maks kall-djupn ({self._MAX_CALL_DEPTH}) overskreden "
+                f"— mogleg uendeleg rekursjon i '{call_name or lambda_value.display_name}'"
             )
 
         previous_scopes = self.scopes
