@@ -1869,6 +1869,10 @@ class Interpreter:
         """Verifiser eit passord mot ein lagra hash (pbkdf2-format eller legacy)."""
         import hashlib, hmac as _hmac
         stored_text = str(stored)
+        if "$" in stored_text:
+            _, maybe_pbkdf2 = stored_text.split("$", 1)
+            if maybe_pbkdf2.startswith("pbkdf2:"):
+                stored_text = maybe_pbkdf2
         parts = stored_text.split(":")
         if len(parts) == 5 and parts[0] == "pbkdf2":
             # Nytt format: pbkdf2:sha256:iter:salt_hex:hash_hex
@@ -2490,6 +2494,15 @@ class Interpreter:
             path = Path(str(values[0]))
             self._fs_check_path(path)
             return path.expanduser().exists()
+
+        if name == "sikkerhet_passord_hash":
+            if not values:
+                return ""
+            return self._password_hash(values[0])
+        if name == "sikkerhet_passord_verifiser":
+            if len(values) < 2:
+                return False
+            return self._password_verify(values[0], values[1])
 
         # ─── Direkte web-sikkerheitsbuiltins ─────────────────────────────────
         if name == "web_escape_html":

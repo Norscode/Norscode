@@ -182,7 +182,7 @@ def _build_source(src: str, out: str, arch: str) -> int:
     bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
     out_path = Path(out) if out else Path(src).with_suffix(".ncb.json")
     out_path.write_text(json.dumps(bytecode, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"norcode: NCB JSON → {out_path}")
+    print(f"norcode: NCB JSON -> {out_path}")
     return 0
 
 
