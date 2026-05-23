@@ -74,8 +74,12 @@ def resolve_module_file(module_name: str, source_path: Path) -> Path:
 
 def _ast_from_payload(payload: dict[str, Any], module_name: str) -> dict[str, Any]:
     ast = program_payload_to_ast(payload)
+    # Selfhost-kompilatoren bruker ein flat enkelt-namespace der alle funksjonar
+    # er tilgjengelege som '__main__.<namn>'.  Importerte modular flatar ut i
+    # same namespace slik at ukvalifiserte kall (lex(), parse_program() osb.)
+    # frå kompiler.no finn dei rette funksjonane ved runtime.
     for fn in ast.get('functions', []):
-        fn['module_name'] = module_name
+        fn['module_name'] = '__main__'
     return ast
 
 

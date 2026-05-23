@@ -36,6 +36,21 @@ class Parser:
         else:
             self.error(f"Forventet {token_type}, fikk {self.current.typ}")
 
+    def eat_gt(self):
+        """Consume one '>' from current token. If '>>' (RSHIFT), split it: consume
+        the first '>' and leave a synthetic GT token as the new current so the
+        outer generic-type parser can consume the second '>'."""
+        if self.current.typ == "GT":
+            self.advance()
+        elif self.current.typ == "RSHIFT":
+            from .lexer import Token
+            synthetic = Token(typ="GT", value=">", line=self.current.line,
+                              column=self.current.column + 1)
+            # Replace RSHIFT in-place with synthetic GT; next/next2 stay intact.
+            self.current = synthetic
+        else:
+            self.error(f"Forventet '>', fikk {self.current.typ}")
+
     def eat_name(self):
         if self.current.typ in ("IDENT", "I"):
             value = self.current.value
@@ -114,9 +129,9 @@ class Parser:
                 self.error("Forventet '<' etter liste")
             self.eat("LT")
             inner = self.parse_type()
-            if self.current.typ != "GT":
+            if self.current.typ not in ("GT", "RSHIFT"):
                 self.error("Forventet '>' etter liste-type")
-            self.eat("GT")
+            self.eat_gt()
             if inner == TYPE_INT:
                 return TYPE_LIST_INT
             if inner == TYPE_TEXT:
@@ -133,9 +148,9 @@ class Parser:
                 self.error("Forventet ',' i ordbok-type")
             self.eat("COMMA")
             value_type = self.parse_type()
-            if self.current.typ != "GT":
+            if self.current.typ not in ("GT", "RSHIFT"):
                 self.error("Forventet '>' etter ordbok-type")
-            self.eat("GT")
+            self.eat_gt()
             if key_type != TYPE_TEXT:
                 self.error("Ordbok-typer må bruke tekst som nøkkeltype")
             if value_type == TYPE_INT:
