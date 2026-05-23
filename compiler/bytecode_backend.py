@@ -731,6 +731,10 @@ def _password_verify(password: Any, stored: Any) -> bool:
     """Verifiser passord mot pbkdf2-hash. Timing-safe samanlikning."""
     import hashlib, hmac as _hmac
     stored_text = str(stored)
+    if "$" in stored_text:
+        _, maybe_pbkdf2 = stored_text.split("$", 1)
+        if maybe_pbkdf2.startswith("pbkdf2:"):
+            stored_text = maybe_pbkdf2
     parts = stored_text.split(":")
     if len(parts) == 5 and parts[0] == "pbkdf2":
         _, algo, iter_str, salt_hex, hash_hex = parts
@@ -1940,6 +1944,7 @@ class BytecodeCompiler:
             "slice",
             "fil_les", "fil_skriv", "fil_append", "fil_finnes",
             "db_open", "db_close", "db_execute", "db_query_text", "db_query_int", "db_begin", "db_commit", "db_rollback", "db_ping",
+            "sikkerhet_passord_hash", "sikkerhet_passord_verifiser",
             "sti_join", "sti_basename", "sti_dirname", "sti_exists", "sti_stem",
             "miljo_hent", "miljo_finnes", "miljo_sett",
         }
@@ -3490,6 +3495,12 @@ class BytecodeVM:
             return None
         if name == "til_tekst":
             return str(args[0]) if args else ""
+        if name == "sikkerhet_passord_hash":
+            return _password_hash(args[0]) if args else ""
+        if name == "sikkerhet_passord_verifiser":
+            if len(args) < 2:
+                return False
+            return _password_verify(args[0], args[1])
         # ─── Direkte web-sikkerheitsbuiltins ─────────────────────────────────
         if name == "web_escape_html":
             return _escape_html(args[0]) if args else ""

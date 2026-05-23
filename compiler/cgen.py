@@ -5675,6 +5675,16 @@ class CGenerator:
             if node.name == "tekst_trim":
                 return f"nl_text_trim({args[0]})", TYPE_TEXT
 
+            if node.name == "sikkerhet_passord_hash":
+                password_code = args[0] if args else '""'
+                salt_code = args[1] if len(args) > 1 else '""'
+                return f"nl_web_password_hash({password_code}, {salt_code})", TYPE_TEXT
+
+            if node.name == "sikkerhet_passord_verifiser":
+                password_code = args[0] if args else '""'
+                stored_code = args[1] if len(args) > 1 else '""'
+                return f"nl_web_password_verify({password_code}, {stored_code})", TYPE_BOOL
+
             if node.name == "sti_join":
                 return f"nl_path_join({args[0]}, {args[1]})", TYPE_TEXT
 
