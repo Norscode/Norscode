@@ -3398,7 +3398,8 @@ class BytecodeVM:
                     if argc:
                         del stack[-argc:]
                     try:
-                        print("CALL:", target)
+                        if self.trace:
+                            print("CALL:", target)
                         stack.append(self.call_function(target, call_args))
                     except BytecodeThrow as exc:
                         handler_ip = self._handle_throw(exc.value, labels)
