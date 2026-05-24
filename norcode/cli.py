@@ -1,8 +1,8 @@
 """Primary Norscode CLI entrypoint.
 
-The default entrypoint still forwards to the legacy Python bootstrap so the
-full existing CLI remains compatible.  A modular CLI entrypoint is also exposed
-for the commands that have already been moved to `norcode.commands`.
+The default entrypoint now prefers the modular CLI path for migrated commands
+and falls back to the legacy Python bootstrap only for commands that still
+live in `main.py`.
 """
 
 from __future__ import annotations
@@ -16,6 +16,19 @@ from norcode.cli_parser import build_parser
 
 
 def main_cli() -> None:
+    parser = build_parser()
+    args = parser.parse_args(sys.argv[1:])
+    if getattr(args, "cmd", None) is None:
+        parser.print_help()
+        return
+
+    command = getattr(args, "command_module", None)
+    if command is not None and command.run is not None:
+        exit_code = dispatch_command(args)
+        if exit_code != 0:
+            raise SystemExit(exit_code)
+        return
+
     bootstrap_main()
 
 

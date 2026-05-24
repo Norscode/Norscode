@@ -22,8 +22,10 @@ from norcode.commands.lexer_parity_check import LEXER_PARITY_CHECK_COMMAND
 from norcode.commands.lexer_parity_fixture import LEXER_PARITY_FIXTURE_COMMAND
 from norcode.commands.lexer_parity_suite import LEXER_PARITY_SUITE_COMMAND
 from norcode.commands.parser_parity_fixture import PARSER_PARITY_FIXTURE_COMMAND
+from norcode.commands.lint import LINT_COMMAND
 from norcode.commands.run import RUN_COMMAND
 from norcode.commands.runtime_call import RUNTIME_CALL_COMMAND
+from norcode.commands.format import FORMAT_COMMAND
 from norcode.commands.selfhost_lexer_compile_check import SELFHOST_LEXER_COMPILE_CHECK_COMMAND
 from norcode.commands.selfhost_lexer_list_smoke import SELFHOST_LEXER_LIST_SMOKE_COMMAND
 from norcode.commands.selfhost_lexer_parity import SELFHOST_LEXER_PARITY_COMMAND
@@ -31,6 +33,7 @@ from norcode.commands.selfhost_lexer_run import SELFHOST_LEXER_RUN_COMMAND
 from norcode.commands.selfhost_lexer_status import SELFHOST_LEXER_STATUS_COMMAND
 from norcode.commands.selfhost_lexer_suite import SELFHOST_LEXER_SUITE_COMMAND
 from norcode.commands.selfhost_lexer_token_smoke import SELFHOST_LEXER_TOKEN_SMOKE_COMMAND
+from norcode.commands.serve import SERVE_COMMAND
 from norcode.commands.ui_render import UI_RENDER_COMMAND
 from norcode.commands.test import TEST_COMMAND
 from norcode.commands.token_validate import TOKEN_VALIDATE_COMMAND
@@ -57,6 +60,8 @@ COMMANDS: tuple[CommandModule, ...] = (
     SELFHOST_LEXER_PARITY_COMMAND,
     SELFHOST_LEXER_SUITE_COMMAND,
     TOKEN_VALIDATE_COMMAND,
+    FORMAT_COMMAND,
+    LINT_COMMAND,
     UI_RENDER_COMMAND,
     CommandModule(
         name="repl",
@@ -149,11 +154,7 @@ COMMANDS: tuple[CommandModule, ...] = (
         bootstrap_only=True,
         experimental=True,
     ),
-    CommandModule(
-        name="serve",
-        help="Start en lokal webserver for en Norscode-app",
-        register_arguments=lambda parser: parser.add_argument("file"),
-    ),
+    SERVE_COMMAND,
 )
 
 

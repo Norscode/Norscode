@@ -1,13 +1,25 @@
 # Frontend Component Model
 
 Frontendens første komponentmodell i Norscode bør være enkel og funksjonell.
-Den hører først og fremst hjemme i component mode, men kan også brukes fra template- og native UI-lag:
+Den hører først og fremst hjemme i component mode, men kan også brukes fra template- og native UI-lag.
+
+Se også de lesbare gull-eksemplene i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+
+Den anbefalte flaten er nå samlet i [`std/frontend.no`](/Users/jansteinar/Projects/Norscode/std/frontend.no), mens [`std/html.no`](/Users/jansteinar/Projects/Norscode/std/html.no) fortsatt er den lavnivå, eksplisitte HTML-byggesteinen:
 
 - komponenter er rene funksjoner som returnerer HTML-vennlig tekst
 - komponenter tar inn eksplisitte parametere
 - komponenter kan settes sammen hierarkisk
 - layout og innhold skal kunne kombineres uten skjult global state
 - bruk `std.html` for `tag(...)`, `void_tag(...)`, `class_attr(...)`, `page(...)` og vanlige tag-hjelpere som `div(...)`, `section(...)`, `h1(...)` og `p(...)` der det reduserer rå string-konkatenasjon
+- bruk `std.frontend` for anbefalte layout- og komponenthjelpere som `layout_main(...)`, `layout_app(...)`, `komponent_kort(...)`, `komponent_nav(...)`, `komponent_liste(...)`, `komponent_tabell(...)` og `slot(...)`
+
+`std.frontend` utvider dette med noen sammensatte komponenter som gjør sidebygging raskere og renere:
+
+- `komponent_hero(...)`
+- `komponent_alert(...)`
+- `komponent_empty(...)`
+- `komponent_loading(...)`
 
 ## Grunnprinsipper
 
@@ -46,5 +58,7 @@ Et første frontend-prosjekt bør kunne bruke:
 - `frontend/components/`
 - `frontend/layouts/`
 - `frontend/pages/`
+- `std.frontend` som standard inngang for gjenbrukbare komponenter
+- `std.html` som lavnivå-verktøy når du trenger full kontroll
 
 Se også [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STRUCTURE.md) og [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md).

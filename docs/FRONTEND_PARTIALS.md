@@ -2,6 +2,8 @@
 
 Layout-gjenbruk og delvise visninger gjør frontend vedlikeholdbar.
 
+De mest lesbare full-eksemplene ligger i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+
 ## Mål
 
 - gjenbruke layout på tvers av sider
@@ -16,12 +18,14 @@ Layout-gjenbruk og delvise visninger gjør frontend vedlikeholdbar.
 
 ## Praktisk modell
 
-- `layout_main(innhold)`
-- `partial_nav(...)`
-- `partial_card(...)`
-- `partial_table(...)`
-- `partial_list(...)`
-- standard partials kan komme fra `std.html`
+- `std.frontend.layout_main(innhold)`
+- `std.frontend.layout_app(...)`
+- `std.frontend.slot(...)`
+- `std.frontend.komponent_nav(...)`
+- `std.frontend.komponent_kort(...)`
+- `std.frontend.komponent_tabell(...)`
+- `std.frontend.komponent_liste(...)`
+- lavnivå partials kan fortsatt komme fra `std.html`
 
 ## Regler
 
@@ -37,5 +41,5 @@ Layout-gjenbruk og delvise visninger gjør frontend vedlikeholdbar.
 
 Se også:
 
-- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_LAYOUT_CONTRACT.md)
-- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_COMPONENT_MODEL.md)
+- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
+- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
