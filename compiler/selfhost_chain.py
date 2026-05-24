@@ -10,8 +10,36 @@ from typing import Any
 from .ast_bridge import program_from_data
 from .selfhost_ast_bridge import program_payload_to_ast
 from .selfhost_parser import parse_selfhost_program
-from norcode.bytecode_service import compile_program_to_bytecode
-from norcode.runtime_service import RuntimeOptions, run_compiled_bytecode
+from .bytecode_backend import compile_program_to_bytecode, BytecodeVM
+
+
+# ─── Minimal RuntimeOptions (erstatter norcode.runtime_service) ──────────────
+from dataclasses import dataclass, field
+
+@dataclass(frozen=True)
+class RuntimeOptions:
+    trace: bool = False
+    max_steps: int = 5_000_000
+    trace_focus: str | None = None
+    repeat_limit: int = 0
+    expr_probe: str | None = None
+    expr_probe_log: str | None = None
+
+    def to_vm_options(self) -> dict:
+        return {
+            "trace": self.trace,
+            "max_steps": self.max_steps,
+            "trace_focus": self.trace_focus,
+            "repeat_limit": self.repeat_limit,
+            "expr_probe": self.expr_probe,
+            "expr_probe_log": self.expr_probe_log,
+        }
+
+
+def run_compiled_bytecode(bytecode: dict, options: RuntimeOptions | None = None) -> Any:
+    opts = (options or RuntimeOptions()).to_vm_options()
+    vm = BytecodeVM(bytecode, **opts)
+    return vm.run()
 
 
 class SelfhostChainError(RuntimeError):
