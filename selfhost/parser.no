@@ -184,13 +184,24 @@ slutt
 // ─── bruk-import ──────────────────────────────────────────────────────────────
 // bruk selfhost.kompiler
 // bruk selfhost.kompiler som k
+// Hjelpefunksjon: les eitt segment av ein modul-sti (IDENT eller type-nøkkelord)
+funksjon les_modul_del(state, feilmelding)
+    t = gjeldende(state).type
+    hvis t == "IDENT" eller t == "TYPE_TEXT" eller t == "TYPE_INT" eller t == "TYPE_BOOL"
+    eller t == "TYPE_LIST_INT" eller t == "TYPE_LIST_TEXT"
+    eller t == "TYPE_MAP_INT" eller t == "TYPE_MAP_TEXT" eller t == "TYPE_MAP_BOOL"
+        returner neste(state)
+    slutt
+    parserfeil(state, feilmelding)
+slutt
+
 funksjon parse_bruk(state)
     start = forvent(state, "BRUK", "forventet bruk")
-    // Les modul-sti: kan vere a.b.c (IDENT.IDENT.IDENT)
-    sti = token_verdi(forvent(state, "IDENT", "forventet modulnamn"))
+    // Les modul-sti: kan vere a.b.c (IDENT.IDENT.IDENT), der delar kan vere type-nøkkelord
+    sti = token_verdi(les_modul_del(state, "forventet modulnamn"))
     mens gjeldende(state).type == "DOT"
         neste(state)  // et .
-        del = forvent(state, "IDENT", "forventet modulnamn etter .")
+        del = les_modul_del(state, "forventet modulnamn etter .")
         sti = sti + "." + token_verdi(del)
     slutt
     // Valfri aliasing: som <ident>
@@ -454,10 +465,19 @@ funksjon parse_hvis(state)
     node = ny_node("Hvis", "", token_linje(start), token_kolonne(start))
 
     legg_barn(node, parse_uttrykk(state))
+    // Valfri 'da' mellom vilkår og blokk (både statement- og uttrykksform)
+    matcher(state, "DA")
     legg_barn(node, parse_blokk(state))
 
     hvis matcher(state, "ELLERS") != null
-        legg_barn(node, parse_blokk(state))
+        // Sjekk for 'ellers hvis' (elif) — wrap rekursivt
+        hvis gjeldende(state).type == "HVIS"
+            ellers_blokk = ny_node("Blokk", "", token_linje(gjeldende(state)), token_kolonne(gjeldende(state)))
+            legg_barn(ellers_blokk, parse_hvis(state))
+            legg_barn(node, ellers_blokk)
+        ellers
+            legg_barn(node, parse_blokk(state))
+        slutt
     slutt
 
     returner node
@@ -496,7 +516,7 @@ funksjon presedens(type)
     hvis type == "PLUS" eller type == "MINUS"
         returner 8
     slutt
-    hvis type == "STAR" eller type == "SLASH" eller type == "PERCENT"
+    hvis type == "STAR" eller type == "SLASH" eller type == "PERCENT" eller type == "MUL" eller type == "DIV"
         returner 9
     slutt
     returner 0
@@ -512,6 +532,33 @@ funksjon parse_for(state)
     ellers
         var_tok = forvent(state, "IDENT", "forventet løkkevariabel etter for")
     slutt
+
+    // Range-form: for i = start til end [steg s]
+    hvis gjeldende(state).type == "ASSIGN"
+        neste(state)
+        start_uttrykk = parse_uttrykk(state)
+        forvent(state, "TIL", "forventet til etter startverdi")
+        end_uttrykk = parse_uttrykk(state)
+        steg_uttrykk = null
+        hvis gjeldende(state).type == "STEG"
+            neste(state)
+            steg_uttrykk = parse_uttrykk(state)
+        slutt
+        kropp = parse_blokk(state)
+        node = ny_node("ForRange", token_verdi(var_tok), token_linje(start), token_kolonne(start))
+        legg_barn(node, start_uttrykk)
+        legg_barn(node, end_uttrykk)
+        hvis steg_uttrykk != null
+            legg_barn(node, steg_uttrykk)
+        ellers
+            steg_node = ny_node("Tall", "1", token_linje(start), token_kolonne(start))
+            legg_barn(node, steg_node)
+        slutt
+        legg_barn(node, kropp)
+        returner node
+    slutt
+
+    // ForEach-form: for i in liste
     forvent(state, "I", "forventet i etter løkkevariabel")
     liste_uttrykk = parse_uttrykk(state)
     kropp = parse_blokk(state)
@@ -565,7 +612,7 @@ funksjon parse_binop(state, min_presedens)
 slutt
 
 funksjon parse_unar(state)
-    hvis gjeldende(state).type == "NOT" eller gjeldende(state).type == "IKKJE" eller gjeldende(state).type == "MINUS" eller gjeldende(state).type == "BNOT"
+    hvis gjeldende(state).type == "NOT" eller gjeldende(state).type == "IKKJE" eller gjeldende(state).type == "IKKE" eller gjeldende(state).type == "MINUS" eller gjeldende(state).type == "BNOT"
         operator = neste(state)
         node = ny_node("Unar", operator.type, token_linje(operator), token_kolonne(operator))
         legg_barn(node, parse_unar(state))
@@ -586,11 +633,48 @@ funksjon parse_postfix(state)
             forvent(state, "RPAREN", "forventet ) etter argumentliste")
             uttrykk = kall
         ellers hvis matcher(state, "LBRACKET") != null
-            indeks = ny_node("Indeks", "", uttrykk.linje, uttrykk.kolonne)
-            legg_barn(indeks, uttrykk)
-            legg_barn(indeks, parse_uttrykk(state))
-            forvent(state, "RBRACKET", "forventet ] etter indeks")
-            uttrykk = indeks
+            // Sjekk for slice-syntaks: [start:end], [:end], [start:]
+            hvis gjeldende(state).type == "COLON"
+                // [:end] eller [:]
+                neste(state)
+                start_node = ny_node("Heltall", "0", uttrykk.linje, uttrykk.kolonne)
+                hvis gjeldende(state).type == "RBRACKET"
+                    neste(state)
+                    end_node = ny_node("Heltall", "-1", uttrykk.linje, uttrykk.kolonne)
+                ellers
+                    end_node = parse_uttrykk(state)
+                    forvent(state, "RBRACKET", "forventet ] etter slice")
+                slutt
+                slice_node = ny_node("Slice", "", uttrykk.linje, uttrykk.kolonne)
+                legg_barn(slice_node, uttrykk)
+                legg_barn(slice_node, start_node)
+                legg_barn(slice_node, end_node)
+                uttrykk = slice_node
+            ellers
+                indeks_expr = parse_uttrykk(state)
+                hvis gjeldende(state).type == "COLON"
+                    // [start:end] eller [start:]
+                    neste(state)
+                    hvis gjeldende(state).type == "RBRACKET"
+                        neste(state)
+                        end_node = ny_node("Heltall", "-1", uttrykk.linje, uttrykk.kolonne)
+                    ellers
+                        end_node = parse_uttrykk(state)
+                        forvent(state, "RBRACKET", "forventet ] etter slice")
+                    slutt
+                    slice_node = ny_node("Slice", "", uttrykk.linje, uttrykk.kolonne)
+                    legg_barn(slice_node, uttrykk)
+                    legg_barn(slice_node, indeks_expr)
+                    legg_barn(slice_node, end_node)
+                    uttrykk = slice_node
+                ellers
+                    forvent(state, "RBRACKET", "forventet ] etter indeks")
+                    indeks = ny_node("Indeks", "", uttrykk.linje, uttrykk.kolonne)
+                    legg_barn(indeks, uttrykk)
+                    legg_barn(indeks, indeks_expr)
+                    uttrykk = indeks
+                slutt
+            slutt
         ellers
             punktum = forvent(state, "DOT", "forventet .")
             felt = forvent(state, "IDENT", "forventet feltnavn etter .")
@@ -682,6 +766,35 @@ funksjon parse_primar(state)
     hvis gjeldende(state).type == "SKRIV"
         tok = neste(state)
         returner ny_node("Ident", "skriv", token_linje(tok), token_kolonne(tok))
+    slutt
+
+    // 'assert', 'assert_eq', 'assert_ne' er nøkkelord men brukast som funksjonskall
+    hvis gjeldende(state).type == "ASSERT"
+        tok = neste(state)
+        returner ny_node("Ident", "assert", token_linje(tok), token_kolonne(tok))
+    slutt
+    hvis gjeldende(state).type == "ASSERT_EQ"
+        tok = neste(state)
+        returner ny_node("Ident", "assert_eq", token_linje(tok), token_kolonne(tok))
+    slutt
+    hvis gjeldende(state).type == "ASSERT_NE"
+        tok = neste(state)
+        returner ny_node("Ident", "assert_ne", token_linje(tok), token_kolonne(tok))
+    slutt
+
+    // If-uttrykk: hvis cond da then_expr ellers else_expr
+    hvis gjeldende(state).type == "HVIS"
+        start_tok = neste(state)
+        cond_node = parse_uttrykk(state)
+        forvent(state, "DA", "forventet da etter if-vilkår")
+        then_node = parse_uttrykk(state)
+        forvent(state, "ELLERS", "forventet ellers etter then-uttrykk")
+        else_node = parse_uttrykk(state)
+        ifexpr = ny_node("IfUttrykk", "", token_linje(start_tok), token_kolonne(start_tok))
+        legg_barn(ifexpr, cond_node)
+        legg_barn(ifexpr, then_node)
+        legg_barn(ifexpr, else_node)
+        returner ifexpr
     slutt
 
     // Lambda: funksjon(params) { kropp } eller funksjon(params) ... slutt
