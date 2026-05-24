@@ -155,54 +155,6 @@ def export_selfhost_ast_bundle(source_file: str, output: str | None = None) -> P
     return out_path
 
 
-def export_selfhost_ncb(source_file: str, output: str | None = None) -> Path:
-    """Kompiler source_file heilt til NCB-bytecode og skriv til .chain.ncb.json.
-
-    Resultatet kan lastast inn att av run_from_ncb() utan å gjennomføra Python-parsinga på nytt.
-    """
-    source_path, bundle = build_selfhost_ast_bundle(source_file)
-    program, alias_map = program_from_data(bundle)
-    bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
-    out_path = Path(output).expanduser().resolve() if output else source_path.with_suffix('.chain.ncb.json')
-    out_path.write_text(json.dumps(bytecode, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    return out_path
-
-
-def run_from_ncb(
-    ncb_file: str,
-    trace: bool = False,
-    max_steps: int = 5_000_000,
-    trace_focus: str | None = None,
-    repeat_limit: int = 0,
-    expr_probe: str | None = None,
-    expr_probe_log: str | None = None,
-) -> Any:
-    """Last inn pre-kompilert NCB-fil og køyr via BytecodeVM.
-
-    Hoppar over Python-parsing og AST-kompilering — berre VM-køyring.
-    """
-    ncb_path = Path(ncb_file).expanduser().resolve()
-    if not ncb_path.exists():
-        raise SelfhostChainError(f'Fant ikke NCB-fil: {ncb_path}')
-    bytecode = json.loads(ncb_path.read_text(encoding='utf-8'))
-    options = RuntimeOptions(
-        trace=trace,
-        max_steps=max_steps,
-        trace_focus=trace_focus,
-        repeat_limit=repeat_limit,
-        expr_probe=expr_probe,
-        expr_probe_log=expr_probe_log,
-    )
-    try:
-        return run_compiled_bytecode(bytecode, options=options)
-    except Exception as exc:
-        raise SelfhostChainError(str(exc)) from exc
-
-
-def _ncb_cache_path(source_path: Path) -> Path:
-    return source_path.with_suffix('.chain.ncb.json')
-
-
 def run_chain(
     source_file: str,
     trace: bool = False,
@@ -211,10 +163,10 @@ def run_chain(
     repeat_limit: int = 0,
     expr_probe: str | None = None,
     expr_probe_log: str | None = None,
-    use_ncb_cache: bool = False,
-    write_ncb_cache: bool = False,
 ) -> Any:
-    source_path = Path(source_file).expanduser().resolve()
+    _source_path, bundle = build_selfhost_ast_bundle(source_file)
+    program, alias_map = program_from_data(bundle)
+    bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
     options = RuntimeOptions(
         trace=trace,
         max_steps=max_steps,
@@ -223,29 +175,6 @@ def run_chain(
         expr_probe=expr_probe,
         expr_probe_log=expr_probe_log,
     )
-
-    # Prøv å lasta NCB-cache viss aktivert og nyare enn kjeldekoda
-    if use_ncb_cache:
-        cache = _ncb_cache_path(source_path)
-        if cache.exists() and cache.stat().st_mtime >= source_path.stat().st_mtime:
-            bytecode = json.loads(cache.read_text(encoding='utf-8'))
-            try:
-                return run_compiled_bytecode(bytecode, options=options)
-            except Exception as exc:
-                raise SelfhostChainError(str(exc)) from exc
-
-    _source_path, bundle = build_selfhost_ast_bundle(source_file)
-    program, alias_map = program_from_data(bundle)
-    bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
-
-    # Skriv NCB-cache til disk om aktivert
-    if write_ncb_cache:
-        cache = _ncb_cache_path(source_path)
-        try:
-            cache.write_text(json.dumps(bytecode, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-        except OSError:
-            pass  # Ignorer skrivefeil — caching er ikkje kritisk
-
     try:
         return run_compiled_bytecode(bytecode, options=options)
     except Exception as exc:
@@ -277,8 +206,6 @@ def check_chain(
     repeat_limit: int = 0,
     expr_probe: str | None = None,
     expr_probe_log: str | None = None,
-    use_ncb_cache: bool = False,
-    write_ncb_cache: bool = False,
 ) -> dict[str, Any]:
     root = _find_project_root(Path.cwd())
     targets = files or _default_chain_cases(root)
@@ -294,34 +221,9 @@ def check_chain(
                 repeat_limit=repeat_limit,
                 expr_probe=expr_probe,
                 expr_probe_log=expr_probe_log,
-                use_ncb_cache=use_ncb_cache,
-                write_ncb_cache=write_ncb_cache,
             )
             ok += 1
             results.append({'file': str(Path(item).resolve()), 'ok': True, 'result': result})
         except Exception as exc:
             results.append({'file': str(Path(item).resolve()), 'ok': False, 'error': str(exc)})
     return {'ok': ok == len(targets), 'passed': ok, 'total': len(targets), 'results': results}
-
-
-def build_ncb_cache(
-    files: list[str] | None = None,
-) -> dict[str, Any]:
-    """Pre-kompiler alle filer til NCB-cache. Hopp over filer som allereie er ferske."""
-    root = _find_project_root(Path.cwd())
-    targets = files or _default_chain_cases(root)
-    built = []
-    skipped = []
-    errors = []
-    for item in targets:
-        source_path = Path(item).expanduser().resolve()
-        cache = _ncb_cache_path(source_path)
-        if cache.exists() and cache.stat().st_mtime >= source_path.stat().st_mtime:
-            skipped.append(str(source_path))
-            continue
-        try:
-            out = export_selfhost_ncb(item, output=str(cache))
-            built.append(str(out))
-        except Exception as exc:
-            errors.append({'file': str(source_path), 'error': str(exc)})
-    return {'built': built, 'skipped': skipped, 'errors': errors}
