@@ -20,7 +20,7 @@ Anbefalingen er å bruke dem slik:
 
 ## Eksempel
 
-Se [examples/file_object_storage.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/file_object_storage.no).
+Se [examples/file_object_storage.no](/Users/jansteinar/Projects/Norscode/examples/file_object_storage.no).
 
 Eksemplet viser:
 - portabel tempsti

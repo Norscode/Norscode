@@ -25,7 +25,7 @@ Modeller bør være små og stabile. I dagens Norscode-flate betyr det ofte:
 
 ## Eksempel
 
-Se [examples/db_repository.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_repository.no) for en liten og praktisk repository-variant.
+Se [examples/db_repository.no](/Users/jansteinar/Projects/Norscode/examples/db_repository.no) for en liten og praktisk repository-variant.
 
 Eksemplet viser:
 - oppretting av tabell

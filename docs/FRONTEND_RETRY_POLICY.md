@@ -25,4 +25,4 @@ Retry og backoff bør være kontrollert og enkel.
 - frontenden håndterer korte nettverksglitcher bedre
 - API-kall blir mer robust uten å bli aggressiv
 
-Se også [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_API_CLIENT.md).
+Se også [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_API_CLIENT.md).

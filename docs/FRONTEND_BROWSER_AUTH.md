@@ -27,5 +27,5 @@ Browser-auth bør håndtere token og cookies på en eksplisitt måte.
 
 Se også:
 
-- [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_API_CLIENT.md)
-- [docs/FRONTEND_FEEDBACK_STATES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_FEEDBACK_STATES.md)
+- [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_API_CLIENT.md)
+- [docs/FRONTEND_FEEDBACK_STATES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FEEDBACK_STATES.md)

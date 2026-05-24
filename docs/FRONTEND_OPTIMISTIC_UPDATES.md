@@ -31,4 +31,4 @@ Optimistic updates betyr at UI oppdateres før serveren har svart, når det er t
 - UI føles raskere uten å bli uforutsigbart
 - brukeren kan se hva som skjer mens serveren jobber
 
-Se også [docs/FRONTEND_CACHE_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CACHE_MODEL.md).
+Se også [docs/FRONTEND_CACHE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CACHE_MODEL.md).

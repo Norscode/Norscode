@@ -25,4 +25,4 @@ Visuell regresjon hjelper oss å oppdage layout- og designendringer.
 - visuelle brudd oppdages tidlig
 - UI-endringer er mindre risikable
 
-Se også [docs/FRONTEND_BROWSER_E2E.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_BROWSER_E2E.md).
+Se også [docs/FRONTEND_BROWSER_E2E.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_BROWSER_E2E.md).

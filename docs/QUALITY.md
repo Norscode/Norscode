@@ -90,7 +90,7 @@ Bruk:
 norcode diagnose
 ```
 
-og [docs/DASHBOARD_EXPORTER_PATTERN.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/DASHBOARD_EXPORTER_PATTERN.md) når du vil koble observability-data til dashboards eller eksportere dem videre til eksterne systemer.
+og [docs/DASHBOARD_EXPORTER_PATTERN.md](/Users/jansteinar/Projects/Norscode/docs/DASHBOARD_EXPORTER_PATTERN.md) når du vil koble observability-data til dashboards eller eksportere dem videre til eksterne systemer.
 
 Mønsteret samler:
 
