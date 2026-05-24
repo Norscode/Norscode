@@ -26,6 +26,7 @@ Feil- og loading-tilstander bør være en standard del av frontend-designen.
 - spinner eller skeleton ved lasting
 - feilmelding med retry-tilbud
 - tom visning med kort forklaring
+- bygg disse tilfellene med `std.html.loading_state(...)`, `std.html.alert(...)` og `std.html.empty_state(...)` der det passer
 
 ## Når dette er ferdig
 

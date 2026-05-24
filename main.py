@@ -66,6 +66,7 @@ from compiler.semantic import SemanticAnalyzer
 from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
 from compiler.selfhost_whole_compile import DEFAULT_ROOTS, WholeCompileOptions, compile_whole_norscode
 from compiler.toml_compat import loads as toml_loads
+from norcode.commands.ui_render import render_native_ui
 
 
 IR_OPS_WITH_ARG = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
@@ -6425,6 +6426,11 @@ def main():
     serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
     serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
 
+    ui_render = sub.add_parser("ui-render", help="Render Native UI-syntax til HTML")
+    ui_render.add_argument("file", help="UI-kildefil med innrykket side-/kort-syntaks")
+    ui_render.add_argument("--output", "-o", help="Skriv HTML til fil i stedet for stdout")
+    ui_render.add_argument("--title", default=None, help="Overstyr sidetittel i HTML-dokumentet")
+
     args = parser.parse_args()
 
     try:
@@ -7524,6 +7530,9 @@ def main():
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
             )
+
+        elif args.cmd == "ui-render":
+            render_native_ui(args.file, output=args.output, title=args.title)
 
         elif args.cmd == "format":
             result = format_program_file(args.file, check=args.check, diff=args.diff)

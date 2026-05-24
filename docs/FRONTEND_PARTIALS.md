@@ -20,6 +20,8 @@ Layout-gjenbruk og delvise visninger gjør frontend vedlikeholdbar.
 - `partial_nav(...)`
 - `partial_card(...)`
 - `partial_table(...)`
+- `partial_list(...)`
+- standard partials kan komme fra `std.html`
 
 ## Regler
 

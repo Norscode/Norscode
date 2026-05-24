@@ -24,6 +24,7 @@ Input-komponenter er grunnlaget for skjemaer i frontend.
 - hjelp og feilmelding skal være nær feltet
 - bruk samme stil og oppførsel på tvers av appen
 - felt bør kunne deaktiveres og markeres som loading
+- bygg felt med `std.html.form(...)`, `std.html.label(...)`, `std.html.input(...)`, `std.html.textarea(...)` og `std.html.select(...)` der det passer
 
 ## Hva et felt bør støtte
 

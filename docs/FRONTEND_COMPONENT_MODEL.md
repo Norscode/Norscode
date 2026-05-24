@@ -1,11 +1,13 @@
 # Frontend Component Model
 
-Frontendens første komponentmodell i Norscode bør være enkel og funksjonell:
+Frontendens første komponentmodell i Norscode bør være enkel og funksjonell.
+Den hører først og fremst hjemme i component mode, men kan også brukes fra template- og native UI-lag:
 
 - komponenter er rene funksjoner som returnerer HTML-vennlig tekst
 - komponenter tar inn eksplisitte parametere
 - komponenter kan settes sammen hierarkisk
 - layout og innhold skal kunne kombineres uten skjult global state
+- bruk `std.html` for `tag(...)`, `void_tag(...)`, `class_attr(...)`, `page(...)` og vanlige tag-hjelpere som `div(...)`, `section(...)`, `h1(...)` og `p(...)` der det reduserer rå string-konkatenasjon
 
 ## Grunnprinsipper
 
@@ -45,4 +47,4 @@ Et første frontend-prosjekt bør kunne bruke:
 - `frontend/layouts/`
 - `frontend/pages/`
 
-Se også [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_STRUCTURE.md) og [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_LAYOUT_CONTRACT.md).
+Se også [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STRUCTURE.md) og [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md).

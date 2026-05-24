@@ -1,6 +1,7 @@
 # Frontend Layout Contract
 
 Dette er den enkle kontrakten for sider og layout i Norscode-frontenden.
+Den er særlig viktig i HTML mode, template mode, component mode og Native UI mode.
 
 ## Mål
 
@@ -32,6 +33,7 @@ En layout er en funksjon eller modul som:
 - `side(...)` bygger innholdet
 - `layout(...)` pakker inn innholdet
 - `render(...)` eller `html(...)` gjør sluttkonvertering til respons
+- `std.html.page(...)` kan brukes som standard for enkel server-rendret HTML
 
 ## Praktisk eksempel
 
@@ -48,5 +50,5 @@ En layout er en funksjon eller modul som:
 
 ## Hva dette betyr for roadmapen
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md).
+Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md).
 Med denne kontrakten er frontend-etappe 1 litt nærmere ferdig.
