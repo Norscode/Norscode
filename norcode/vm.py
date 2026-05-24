@@ -1,0 +1,68 @@
+"""VM abstraction layer for Norscode.
+
+The current VM implementation is still the Python `compiler.bytecode_backend.BytecodeVM`.
+This module defines the runtime-facing contract so a future VM written in
+Norscode can replace the Python implementation behind the same boundary.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+from norcode.runtime_kernel import active_runtime_kernel
+
+
+class VMRuntime(Protocol):
+    def run(self) -> Any:
+        ...
+
+    def call_function(self, function_name: str, args: list[Any]) -> Any:
+        ...
+
+    def get_trace_tail(self) -> list[str]:
+        ...
+
+    def dump_expr_probe(self) -> str:
+        ...
+
+
+class PythonBytecodeVMAdapter:
+    """Adapter around the current Python bytecode VM."""
+
+    def __init__(self, bytecode: dict[str, Any], **options: Any) -> None:
+        from compiler.bytecode_backend import BytecodeVM
+
+        self._vm = BytecodeVM(bytecode, **options)
+
+    def run(self) -> Any:
+        return self._vm.run()
+
+    def call_function(self, function_name: str, args: list[Any]) -> Any:
+        if not hasattr(self._vm, "call_function"):
+            raise RuntimeError("Aktiv VM støtter ikke call_function")
+        return self._vm.call_function(function_name, args)
+
+    def get_trace_tail(self) -> list[str]:
+        if hasattr(self._vm, "get_trace_tail"):
+            return list(self._vm.get_trace_tail())
+        return []
+
+    def dump_expr_probe(self) -> str:
+        if hasattr(self._vm, "dump_expr_probe"):
+            return str(self._vm.dump_expr_probe())
+        return ""
+
+
+
+def create_vm(bytecode: dict[str, Any], **options: Any) -> VMRuntime:
+    """Create the active VM implementation.
+
+    This factory is the single switch point for replacing the Python VM with a
+    self-hosted Norscode VM later.
+    """
+    kernel = active_runtime_kernel()
+
+    if kernel.name == "python-bytecode":
+        return PythonBytecodeVMAdapter(bytecode, **options)
+
+    raise RuntimeError(f"Ukjent runtime-kernel: {kernel.name}")
