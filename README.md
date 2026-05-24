@@ -53,7 +53,7 @@ Disse delene brukes av både bootstrap- og selfhost-sporet, så README-en beskri
 **macOS / Linux:**
 ```bash
 # Enlinjes installasjon (oppdager plattform automatisk):
-curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
 
 # Eller fra kildekode:
 bash tools/build-bootstrap-binary.sh
@@ -67,7 +67,7 @@ bash tools/build-bootstrap-binary.sh
 **Windows:**
 ```powershell
 # Automatisk installasjon:
-irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.ps1 | iex
+irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
 
 # Eller via pip:
 py -m pip install norscode

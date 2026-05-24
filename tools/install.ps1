@@ -1,7 +1,7 @@
 # tools/install.ps1 - Installer Norscode på Windows
 #
 # Bruk:
-#   irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode-language/main/tools/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
 #   .\tools\install.ps1
 #   .\tools\install.ps1 -Prefix C:\Tools
 #
@@ -12,7 +12,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$Repo = "rfwwp8k542-maker/Norscode-language"
+$Repo = "rfwwp8k542-maker/Norscode"
 $BinDir = Join-Path $Prefix "bin"
 
 Write-Host "Norscode installasjon for Windows" -ForegroundColor Cyan
