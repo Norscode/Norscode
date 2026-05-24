@@ -707,22 +707,8 @@ class Parser:
         expr = self.parse_primary()
         while True:
             if self.match('['):
-                if self.peek() == ':':
-                    # [:end] form
-                    self.advance()
-                    end = self.parse_expression() if self.peek() != ']' else None
-                    self.expect(']')
-                    expr = {'node': 'Slice', 'target': expr, 'start': None, 'end': end}
-                else:
-                    inner = self.parse_expression()
-                    if self.peek() == ':':
-                        self.advance()
-                        end = self.parse_expression() if self.peek() != ']' else None
-                        self.expect(']')
-                        expr = {'node': 'Slice', 'target': expr, 'start': inner, 'end': end}
-                    else:
-                        self.expect(']')
-                        expr = {'node': 'Index', 'target': expr, 'index': inner}
+                expr = {'node': 'Index', 'target': expr, 'index': self.parse_expression()}
+                self.expect(']')
                 continue
             if self.match('.'):
                 expr = {'node': 'Member', 'target': expr, 'name': self.expect_name()}
@@ -743,38 +729,13 @@ class Parser:
             raise self.error("hvis-uttrykk mangler 'da'", start_tok)
         then_expr = self.parse_expression()
         if self.match('ellers_hvis'):
-            # ellers_hvis er allereie det kombinerte "else if"-tokenet —
-            # neste token er sjølve vilkåret, ikkje eit nytt 'hvis'
-            condition2 = self.parse_implies()
-            if not self.match('da'):
-                raise self.error("ellers hvis-uttrykk mangler 'da'")
-            then2 = self.parse_expression()
-            rest = {'node': 'IfExpr', 'condition': condition2, 'then': then2,
-                    'else': self._parse_ifexpr_else()}
-            return {'node': 'IfExpr', 'condition': condition, 'then': then_expr, 'else': rest}
+            if self.peek() != 'hvis':
+                raise self.error("hvis-uttrykk mangler 'hvis' etter 'ellers_hvis'")
+            return {'node': 'IfExpr', 'condition': condition, 'then': then_expr, 'else': self.parse_if_expression()}
         if not self.match('ellers'):
             raise self.error("hvis-uttrykk mangler 'ellers'")
-        # Etter 'ellers': sjekk om neste er 'hvis' (kjeda if-uttrykk)
-        if self.peek() == 'hvis':
-            return {'node': 'IfExpr', 'condition': condition, 'then': then_expr,
-                    'else': self.parse_if_expression()}
         else_expr = self.parse_expression()
         return {'node': 'IfExpr', 'condition': condition, 'then': then_expr, 'else': else_expr}
-
-    def _parse_ifexpr_else(self) -> dict:
-        """Hjelpar: parser else-greina av eit if-uttrykk (etter vilkår+then er lest)."""
-        if self.match('ellers_hvis'):
-            condition2 = self.parse_implies()
-            if not self.match('da'):
-                raise self.error("ellers hvis-uttrykk mangler 'da'")
-            then2 = self.parse_expression()
-            return {'node': 'IfExpr', 'condition': condition2, 'then': then2,
-                    'else': self._parse_ifexpr_else()}
-        if self.match('ellers'):
-            if self.peek() == 'hvis':
-                return self.parse_if_expression()
-            return self.parse_expression()
-        raise self.error("if-uttrykk mangler 'ellers'")
 
     def parse_implies(self) -> dict:
         expr = self.parse_or_family()
@@ -857,22 +818,8 @@ class Parser:
                 expr = {'node': 'Call', 'callee': expr, 'args': args}
                 continue
             if self.match('['):
-                if self.peek() == ':':
-                    # [:end] form
-                    self.advance()
-                    end = self.parse_expression() if self.peek() != ']' else None
-                    self.expect(']')
-                    expr = {'node': 'Slice', 'target': expr, 'start': None, 'end': end}
-                else:
-                    inner = self.parse_expression()
-                    if self.peek() == ':':
-                        self.advance()
-                        end = self.parse_expression() if self.peek() != ']' else None
-                        self.expect(']')
-                        expr = {'node': 'Slice', 'target': expr, 'start': inner, 'end': end}
-                    else:
-                        self.expect(']')
-                        expr = {'node': 'Index', 'target': expr, 'index': inner}
+                expr = {'node': 'Index', 'target': expr, 'index': self.parse_expression()}
+                self.expect(']')
                 continue
             if self.match('.'):
                 expr = {'node': 'Member', 'target': expr, 'name': self.expect_name()}
@@ -924,19 +871,14 @@ class Parser:
                 return {'node': 'MapLiteral', 'items': []}
             entries: list[dict[str, dict]] = []
             while True:
-                # Støtt bare nøkkelord (identifikatorar) som streng-nøklar: {namn: val}
-                if NAME_RE.fullmatch(self.peek() or '') and self.peek(1) == ':':
-                    key_name = self.advance()
-                    key: dict = {'node': 'Literal', 'literal_type': 'tekst', 'value': key_name}
-                else:
-                    key = self.parse_expression()
+                key = self.parse_expression()
                 if not self.match(':'):
                     raise self.error("Forventet ':' i map-literal")
                 value = self.parse_expression()
                 entries.append({'key': key, 'value': value})
                 if self.match(','):
                     if self.peek() == '}':
-                        break
+                        raise self.error("Forventet nøkkel:verdi i map-literal etter ','")
                     continue
                 break
             self.expect('}')
@@ -947,19 +889,6 @@ class Parser:
                 self.expect(']')
                 return {'node': 'ListLiteral', 'items': []}
             first = self.parse_expression()
-            # Liste-comprehension: [uttrykk for var i liste hvis filter]
-            if self.peek() == 'for':
-                self.advance()  # eat 'for'
-                var = self.expect_name()
-                if not (self.match('i') or self.match('in')):
-                    raise self.error("Forventet 'i' eller 'in' i liste-comprehension")
-                iterable = self.parse_expression()
-                filter_expr = None
-                if self.match('hvis') or self.match('if'):
-                    filter_expr = self.parse_expression()
-                self.expect(']')
-                return {'node': 'Comprehension', 'expr': first, 'var': var,
-                        'iterable': iterable, 'filter': filter_expr}
             if self.peek() == ',':
                 items = [first]
                 while self.peek() == ',':

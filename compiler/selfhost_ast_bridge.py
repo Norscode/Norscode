@@ -178,23 +178,6 @@ def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
             'then_expr': expr_to_data(node.get('then', {})),
             'else_expr': expr_to_data(node.get('else', {})),
         }
-    if kind == 'Comprehension':
-        # [uttrykk for var i liste hvis filter]
-        filter_data = node.get('filter')
-        return {
-            'type': 'ListComprehension',
-            'item_name': node.get('var'),
-            'source_expr': expr_to_data(node.get('iterable', {})),
-            'item_expr': expr_to_data(node.get('expr', {})),
-            'condition_expr': expr_to_data(filter_data) if filter_data is not None else None,
-        }
-    if kind == 'Slice':
-        return {
-            'type': 'Slice',
-            'target': expr_to_data(node.get('target', {})),
-            'start_expr': expr_to_data(node['start']) if node.get('start') is not None else None,
-            'end_expr': expr_to_data(node['end']) if node.get('end') is not None else None,
-        }
     if kind == 'Lambda':
         # fun(param: type, ...) -> expr  — kompakt lambda frå selfhost_parser.py
         # params er lista av parameternamn (type-annotasjonar er strippet av parsaren)
