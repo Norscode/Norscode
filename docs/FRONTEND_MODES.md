@@ -3,6 +3,8 @@
 Norscode kan beskrive frontend på flere nivåer, fra ren HTML til mer deklarativ og reaktiv UI.
 Dette dokumentet samler de viktigste modusene i én kontrakt.
 
+For de mest lesbare full-eksemplene, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+
 ## 1. HTML Mode
 
 Vanlig HTML er den laveste og mest direkte formen.
@@ -82,6 +84,79 @@ side:
         seksjon:
             tittel "Er det interaktivt?"
             tekst "Ja, men interaktivitet kan bygges stegvis på toppen."
+    panel:
+        tittel "Status"
+        tekst "Dette er en nøytral panel-container."
+    grid:
+        tittel "Nøkkelpunkter"
+        kolonne:
+            tittel "HTML mode"
+            tekst "Vanlig HTML"
+        kolonne:
+            tittel "Component mode"
+            tekst "Gjenbrukbare komponenter"
+    sidebar:
+        tittel "Navigasjon"
+        sidefelt:
+            tittel "Seksjoner"
+            nav:
+                lenke "HTML mode" /
+                lenke "Component mode" /component
+        hoved:
+            tittel "Velkommen tilbake"
+            tekst "Hovedinnholdet ligger her."
+    breadcrumb:
+        lenke "Hjem" /
+        lenke "Frontend" /frontend
+        aktiv "Native UI"
+    toolbar:
+        tittel "Handlinger"
+        tekst "Velg en av de vanlige operasjonene."
+        knapp "Lagre"
+        knapp "Avbryt"
+        lenke "Les mer" /docs
+    dialog:
+        tittel "Bekreft handling"
+        tekst "Vil du lagre endringene?"
+        knapp "Fortsett"
+        knapp "Avbryt"
+    toast:
+        tittel "Lagret"
+        tekst "Endringene ble lagret uten feil."
+        lenke "Angre" /undo
+    chip:
+        tekst "Beta"
+    chip:
+        tekst "Ny funksjon"
+        lenke /features
+    avatar:
+        navn "Jane Doe"
+        tekst "JD"
+        src "/avatar.png"
+    form:
+        felt:
+            label:
+                tekst "Søk"
+                for_id "søk"
+            search:
+                navn "søk"
+                placeholder "Søk i innholdet"
+        felt:
+            label:
+                tekst "Profilbilde"
+                for_id "profilbilde"
+            file:
+                navn "profilbilde"
+                accept "image/*"
+        felt:
+            switch:
+                navn "varsling"
+                tekst "Slå på varslinger"
+                checked "checked"
+        felt:
+            submit "Lagre skjema"
+        felt:
+            reset "Nullstill"
     badge:
         tekst "Ny"
     alert:
@@ -168,6 +243,7 @@ side:
 Implementasjon:
 
 - `norcode ui-render examples/native_ui.nui`
+- `python -m norcode ui-render examples/native_ui.nui`
 - CLI-kommandoen starter [`std/nativeui.no`](/Users/jansteinar/Projects/Norscode/std/nativeui.no) via `bin/nc run`
 - renderer- og parserlogikken ligger i [`std/nativeui.no`](/Users/jansteinar/Projects/Norscode/std/nativeui.no)
 - Python brukes bare som CLI-launcher, ikke som selve UI-implementasjonen
@@ -203,9 +279,32 @@ Bruk når:
 Eksempel:
 
 ```no
-state.teller = state.teller + 1
-ui.oppdater()
+bruk std.html som html
+bruk std.reactive som reactive
+
+funksjon tellerkort(verdi: tekst) -> tekst {
+    returner reactive.reactive_root(
+        "teller",
+        reactive.bind_panel(
+            "Teller",
+            html.p(reactive.bind_text("teller-verdi"), html.escape(verdi)),
+            "teller-verdi",
+            verdi
+        )
+            + html.button(
+                reactive.click_attr("state.teller = state.teller + 1"),
+                html.escape("Øk")
+            )
+    )
+}
 ```
+
+Implementasjon:
+
+- bruk [`std/reactive.no`](/Users/jansteinar/Projects/Norscode/std/reactive.no) for state-markører, bindings og event-attributter
+- bruk [`docs/FRONTEND_STATE_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STATE_MODEL.md) for hvordan lokal og delt state bør organiseres
+- bruk `reactive_root(...)` når du vil markere en widget eller region som reaktiv
+- bruk `vis_hvis(...)` og `skjul_hvis(...)` for enkel betinget rendering i komponenter
 
 ## Anbefalt rekkefølge
 

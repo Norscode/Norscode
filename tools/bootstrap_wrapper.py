@@ -145,7 +145,7 @@ def _run_source(src: str, out: str, arch: str) -> int:
     """Kompiler og køyr eit .no-program."""
     from compiler.selfhost_chain import run_chain
     result = run_chain(src, max_steps=20_000_000)
-    if result is not None:
+    if result is not None and os.environ.get("NORSCODE_SUPPRESS_RETURN") not in {"1", "true", "TRUE", "yes", "YES"}:
         print(f"Return: {result}")
     return 0
 

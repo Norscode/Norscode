@@ -27,9 +27,7 @@ def run(args) -> int:
         return 0
 
     options = RuntimeOptions(trace=args.trace, max_steps=args.max_steps)
-    result = run_source(args.file, options=options)
-    if result is not None:
-        print(result)
+    run_source(args.file, options=options)
     return 0
 
 

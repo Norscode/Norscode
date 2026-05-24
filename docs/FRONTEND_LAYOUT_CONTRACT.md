@@ -3,6 +3,8 @@
 Dette er den enkle kontrakten for sider og layout i Norscode-frontenden.
 Den er særlig viktig i HTML mode, template mode, component mode og Native UI mode.
 
+For et konkret, lesbart oppsett, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+
 ## Mål
 
 - gjøre det tydelig hva en side er
@@ -33,7 +35,8 @@ En layout er en funksjon eller modul som:
 - `side(...)` bygger innholdet
 - `layout(...)` pakker inn innholdet
 - `render(...)` eller `html(...)` gjør sluttkonvertering til respons
-- `std.html.page(...)` kan brukes som standard for enkel server-rendret HTML
+- `std.html.page(...)` kan brukes som lavnivå standard for enkel server-rendret HTML
+- `std.frontend.layout_main(...)` og `std.frontend.layout_app(...)` kan brukes når du vil ha en anbefalt komponent-/slot-flate
 
 ## Praktisk eksempel
 

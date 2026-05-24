@@ -66,7 +66,15 @@ from compiler.semantic import SemanticAnalyzer
 from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
 from compiler.selfhost_whole_compile import DEFAULT_ROOTS, WholeCompileOptions, compile_whole_norscode
 from compiler.toml_compat import loads as toml_loads
-from norcode.commands.ui_render import render_native_ui
+from norcode.command_dispatch import dispatch_command
+from norcode.commands.registry import COMMANDS
+
+
+MODULAR_COMMANDS = {
+    command.name: command
+    for command in COMMANDS
+    if command.run is not None
+}
 
 
 IR_OPS_WITH_ARG = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
@@ -4273,44 +4281,9 @@ def print_lint_result(result, verbose: bool = False):
 
 
 def format_program_file(source_file: str, check: bool = False, diff: bool = False):
-    source_path = _resolve_source_path(source_file)
-    original = source_path.read_text(encoding="utf-8")
-    formatted = format_source(original)
-    changed = formatted != original
-    diff_lines = None
+    from norcode.formatting import format_program_file as shared_format_program_file
 
-    if diff:
-        diff_lines = list(
-            difflib.unified_diff(
-                original.splitlines(),
-                formatted.splitlines(),
-                fromfile=str(source_path),
-                tofile=f"{source_path} (formatted)",
-                lineterm="",
-            )
-        )
-        if diff_lines:
-            print("\n".join(diff_lines))
-        else:
-            print(f"Ingen endringer for {source_path}")
-
-    if check:
-        return {
-            "source": str(source_path),
-            "changed": changed,
-            "written": False,
-            "diff": diff_lines,
-        }
-
-    if changed and not diff:
-        source_path.write_text(formatted, encoding="utf-8")
-
-    return {
-        "source": str(source_path),
-        "changed": changed,
-        "written": changed and not diff,
-        "diff": diff_lines,
-    }
+    return shared_format_program_file(source_file, check=check, diff=diff)
 
 
 def run_ir_snapshot_checks():
@@ -6122,7 +6095,7 @@ def main():
     repl = sub.add_parser("repl", help="Start en enkel interaktiv Norscode-REPL")
 
     check = sub.add_parser("check", help="Parser og valider en .no-fil uten å bygge")
-    check.add_argument("file")
+    MODULAR_COMMANDS["check"].register_arguments(check)
 
     build = sub.add_parser("build", help="Generer C og bygg kjørbar fil")
     build.add_argument("file")
@@ -6350,21 +6323,13 @@ def main():
     selfhost_compile_all.add_argument("--json", action="store_true", help="Skriv compile-manifest som JSON")
 
     test = sub.add_parser("test", help="Kjør én testfil eller alle i tests/")
-    test.add_argument("file", nargs="?", help="Valgfri testfil")
-    test.add_argument("--verbose", action="store_true", help="Vis output også for tester som består")
-    test.add_argument("--json", action="store_true", help="Skriv testresultat som JSON")
+    MODULAR_COMMANDS["test"].register_arguments(test)
 
     format_cmd = sub.add_parser("format", help="Formater en .no-fil")
-    format_cmd.add_argument("file", help="Kildefil å formatere")
-    format_cmd.add_argument("--check", action="store_true", help="Feil hvis filen ikke er formatert")
-    format_cmd.add_argument("--diff", action="store_true", help="Vis diff uten å skrive filen")
-    format_cmd.add_argument("--json", action="store_true", help="Skriv format-resultat som JSON")
+    MODULAR_COMMANDS["format"].register_arguments(format_cmd)
 
     lint = sub.add_parser("lint", help="Kjør en enkel linter på en .no-fil")
-    lint.add_argument("file", help="Kildefil å lint'e")
-    lint.add_argument("--verbose", action="store_true", help="Vis alle funn eksplisitt")
-    lint.add_argument("--json", action="store_true", help="Skriv lint-resultat som JSON")
-    lint.add_argument("--check", action="store_true", help="Feil hvis linteren finner noe")
+    MODULAR_COMMANDS["lint"].register_arguments(lint)
 
     bench = sub.add_parser("bench", help="Kjør faste ytelsesmålinger")
     bench.add_argument("--json", action="store_true", help="Skriv benchmark-resultat som JSON")
@@ -6398,54 +6363,26 @@ def main():
     commands.add_argument("--json", action="store_true", help="Skriv kommandooversikt som JSON")
 
     serve = sub.add_parser("serve", help="Start en lokal webserver for en Norscode-app")
-    serve.add_argument("file", help="Kildefil å kjøre som webapp")
-    serve.add_argument("--host", default="127.0.0.1", help="Bind-adresse for serveren")
-    serve.add_argument("--port", type=int, default=8000, help="Port for serveren")
-    serve.add_argument("--reload", action="store_true", help="Rekompiler når kildefilen endrer seg")
-    serve.add_argument("--once", action="store_true", help="Stopp etter første request (nyttig for smoke-test)")
-    serve.add_argument("--production", action="store_true", help="Kjør i produksjonsmodus med signalstyrt shutdown")
-    serve.add_argument("--keep-alive", action="store_true", help="Bruk HTTP/1.1 og hold forbindelsen åpen når mulig")
-    serve.add_argument("--request-timeout", type=float, help="Timeout i sekunder for en enkelt request/connection")
-    serve.add_argument("--proxy-headers", action="store_true", help="Tolk og normaliser forwarded headers fra en reverse proxy")
-    serve.add_argument("--trusted-proxy", action="append", default=[], help="Kjente proxy-IP-er som får lov til å sende forwarded headers")
-    serve.add_argument("--restart-on-crash", action="store_true", help="Restart serveren hvis den krasjer")
-    serve.add_argument("--max-restarts", type=int, default=0, help="Maks antall auto-restarts ved krasj")
-    serve.add_argument("--restart-delay", type=float, default=1.0, help="Forsinkelse i sekunder før restart")
-    serve.add_argument("--no-cors", action="store_true", help="Skru av standard CORS-hoder")
-    serve.add_argument("--cors-origin", action="append", default=[], help="Tillatt origin for CORS (kan gjentas)")
-    serve.add_argument("--cors-allow-methods", default=None, help="Komma-separert liste over CORS-metoder")
-    serve.add_argument("--cors-allow-headers", default=None, help="Komma-separert liste over CORS request-headers")
-    serve.add_argument("--cors-expose-headers", default=None, help="Komma-separert liste over CORS response-headers")
-    serve.add_argument("--cors-allow-credentials", action="store_true", help="Tillat credentials i CORS-svar")
-    serve.add_argument("--cors-max-age", type=int, default=600, help="Max-Age for CORS preflight i sekunder")
-    serve.add_argument("--no-rate-limit", action="store_true", help="Skru av standard rate limiting")
-    serve.add_argument("--rate-limit-requests", type=int, default=120, help="Antall forespørsler per vindu før 429")
-    serve.add_argument("--rate-limit-window", type=int, default=60, help="Vindustid i sekunder for rate limiting")
-    serve.add_argument("--rate-limit-burst", type=int, default=30, help="Maks burst før refill begynner")
-    serve.add_argument("--health-path", default="/healthz", help="Sti for health-endepunkt")
-    serve.add_argument("--ready-path", default="/readyz", help="Sti for readiness-endepunkt")
-    serve.add_argument("--live-path", default="/livez", help="Sti for liveness-endepunkt")
+    MODULAR_COMMANDS["serve"].register_arguments(serve)
 
     ui_render = sub.add_parser("ui-render", help="Render Native UI-syntax til HTML")
-    ui_render.add_argument("file", help="UI-kildefil med innrykket side-/kort-syntaks")
-    ui_render.add_argument("--output", "-o", help="Skriv HTML til fil i stedet for stdout")
-    ui_render.add_argument("--title", default=None, help="Overstyr sidetittel i HTML-dokumentet")
+    MODULAR_COMMANDS["ui-render"].register_arguments(ui_render)
 
     args = parser.parse_args()
 
     try:
+        modular_command = MODULAR_COMMANDS.get(args.cmd)
+        if modular_command is not None:
+            exit_code = dispatch_command(SimpleNamespace(**vars(args), command_module=modular_command))
+            if exit_code != 0:
+                sys.exit(exit_code)
+            return
+
         if args.cmd == "run":
             run_program(args.file)
 
         elif args.cmd == "repl":
             run_repl()
-
-        elif args.cmd == "check":
-            source_path, _program, alias_map, analyzer = check_program(args.file)
-            print(f"Kilde: {source_path}")
-            print(f"Aliaser: {alias_map}")
-            print("Semantikk: OK")
-            print(f"Funksjoner: {list(analyzer.functions.keys())}")
 
         elif args.cmd == "build":
             _source_path, c_path, exe_path, _alias_map, _analyzer = build_program(args.file)
@@ -7258,7 +7195,7 @@ def main():
                 result = run_command(ast_file=args.file)
             else:
                 result = run_command(source_file=args.file)
-            if result is not None:
+            if result is not None and os.environ.get("NORCODE_SUPPRESS_RETURN") not in {"1", "true", "TRUE", "yes", "YES"}:
                 print(f"Return: {result}")
 
         elif args.cmd == "selfhost-chain-export":
@@ -7275,7 +7212,7 @@ def main():
                 expr_probe=args.expr_probe,
                 expr_probe_log=args.expr_probe_log,
             )
-            if result is not None:
+            if result is not None and os.environ.get("NORCODE_SUPPRESS_RETURN") not in {"1", "true", "TRUE", "yes", "YES"}:
                 print(f"Return: {result}")
 
         elif args.cmd == "selfhost-chain-check":
@@ -7314,46 +7251,6 @@ def main():
                         continue
                     print(f"- FEIL: {row['file']} -> {row.get('error')}")
             if not payload["ok"]:
-                sys.exit(1)
-
-        elif args.cmd == "test":
-            if args.file:
-                result = run_test_file(args.file)
-                if args.json:
-                    payload = {
-                        "mode": "single",
-                        "results": [result],
-                        "summary": summarize_test_results([result]),
-                    }
-                    print(json.dumps(payload, ensure_ascii=False, indent=2))
-                else:
-                    print_test_result(result, verbose=args.verbose)
-                if not result["success"]:
-                    sys.exit(1)
-            else:
-                results = run_all_tests(verbose=args.verbose, quiet=args.json)
-                if args.json:
-                    payload = {
-                        "mode": "all",
-                        "results": results,
-                        "summary": summarize_test_results(results),
-                    }
-                    print(json.dumps(payload, ensure_ascii=False, indent=2))
-                if any(not r["success"] for r in results):
-                    sys.exit(1)
-
-        elif args.cmd == "lint":
-            result = lint_program(args.file)
-            if args.json:
-                payload = {
-                    "mode": "single",
-                    "result": result,
-                    "summary": summarize_lint_results(result),
-                }
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                print_lint_result(result, verbose=args.verbose)
-            if args.check and result["issues"]:
                 sys.exit(1)
 
         elif args.cmd == "bench":
@@ -7530,33 +7427,6 @@ def main():
                 readiness_path=args.ready_path,
                 liveness_path=args.live_path,
             )
-
-        elif args.cmd == "ui-render":
-            render_native_ui(args.file, output=args.output, title=args.title)
-
-        elif args.cmd == "format":
-            result = format_program_file(args.file, check=args.check, diff=args.diff)
-            if args.json:
-                payload = {
-                    "mode": "single",
-                    "result": result,
-                    "summary": {
-                        "source": result["source"],
-                        "changed": result["changed"],
-                        "written": result["written"],
-                    },
-                }
-                print(json.dumps(payload, ensure_ascii=False, indent=2))
-            else:
-                if result["changed"]:
-                    if args.check:
-                        print(f"Uformatert: {result['source']}")
-                    elif not args.diff:
-                        print(f"Formatert: {result['source']}")
-                else:
-                    print(f"Allerede formatert: {result['source']}")
-            if args.check and result["changed"]:
-                sys.exit(1)
 
         else:
             parser.print_help()

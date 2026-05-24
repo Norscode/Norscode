@@ -29,7 +29,7 @@ def check_program_file(path: str) -> tuple[Any, Any, Any, Any]:
 def run_single_test_file(path: str, verbose: bool = False) -> dict[str, Any]:
     from main import run_test_file
 
-    return run_test_file(path, verbose=verbose)
+    return run_test_file(path)
 
 
 
