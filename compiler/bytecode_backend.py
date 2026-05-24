@@ -3240,7 +3240,16 @@ class BytecodeVM:
             }
             if short_name in builtin_like:
                 return self.call_builtin(short_name, args)
-            raise BytecodeRuntimeError(f"Ukjent funksjon: {name}")
+            # Selfhost-chain fallback: build_selfhost_ast_bundle flatar alle
+            # funksjonar til __main__-namespacet, men alias_map gjer at CALL-
+            # instruksjonen brukar det opphavlege modulnamnet (t.d. std.tekst.hilsen).
+            # Prøv __main__.<funksjonsnamn> som siste utveg.
+            main_fallback = f"__main__.{short_name}"
+            fn = self.functions.get(main_fallback)
+            if fn is not None:
+                name = main_fallback
+            else:
+                raise BytecodeRuntimeError(f"Ukjent funksjon: {name}")
 
         params = fn.get("params", [])
         locals_: dict[str, Any] = {param: value for param, value in zip(params, args)}
