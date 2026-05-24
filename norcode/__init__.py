@@ -1,1 +1,0 @@
-"""Norscode Python package."""
