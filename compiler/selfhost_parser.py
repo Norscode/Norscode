@@ -924,6 +924,26 @@ class Parser:
                     raise self.error("Forventet ',' eller ']' i liste-literal")
             self.expect(']')
             return {'node': 'ListLiteral', 'items': items}
+        # fun(param: type, ...) -> expr  — kompakt lambda-uttrykk
+        if tok.value == 'fun':
+            self.advance()  # eat 'fun'
+            self.expect('(')
+            params: list[str] = []
+            while self.peek() != ')':
+                pname = self.expect_name()
+                params.append(pname)
+                if self.match(':'):
+                    self.consume_type_annotation()  # skip type annotation
+                if self.peek() == ',':
+                    self.advance()
+                    continue
+                if self.peek() != ')':
+                    raise self.error("Forventet ',' eller ')' i fun-lambda-parameterliste")
+            self.expect(')')
+            if not self.match('->'):
+                raise self.error("Forventet '->' etter fun-lambda-parametrar")
+            body = self.parse_expression()
+            return {'node': 'Lambda', 'params': params, 'body': body}
         if NAME_RE.fullmatch(tok.value):
             self.advance()
             return {'node': 'Name', 'value': tok.value}

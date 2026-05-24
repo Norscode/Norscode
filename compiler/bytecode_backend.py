@@ -3423,7 +3423,14 @@ class BytecodeVM:
                     try:
                         if self.trace:
                             print("CALL:", target)
-                        stack.append(self.call_function(target, call_args))
+                        # Selfhost-chain-fallback: sjekk om target er ein
+                        # lambda-variabel i lokalt skop (semantisk analyse er
+                        # ikkje køyrd, så call_kind=="lambda" er ikkje sett).
+                        _short = target.rsplit('.', 1)[-1]
+                        if _short in locals_ and isinstance(locals_[_short], BytecodeLambdaValue):
+                            stack.append(self.call_value(locals_[_short], call_args))
+                        else:
+                            stack.append(self.call_function(target, call_args))
                     except RecursionError:
                         exc_msg = f"Sikkerheitsfeil: maks kall-djupn overskreden — mogleg uendeleg rekursjon i '{target}'"
                         handler_ip = self._handle_throw(exc_msg, labels)
