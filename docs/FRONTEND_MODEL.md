@@ -62,5 +62,8 @@ Frontend-roadmapens første etappe blir derfor å etablere:
 - side-/layout-kontrakt
 - statiske assets
 - enkel dev-flyt for frontend-ressurser
+- en gradvis vei fra HTML mode til template, component, native UI og reactive mode
 
-Se også [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md) for hele planen.
+Native UI er nå en ekte Norscode-modul i [`std/nativeui.no`](/Users/jansteinar/Projects/Norscode/std/nativeui.no) og brukes av `ui-render` som den kanoniske renderer-veien.
+
+Se også [docs/FRONTEND_MODES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODES.md) og [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) for hele planen.

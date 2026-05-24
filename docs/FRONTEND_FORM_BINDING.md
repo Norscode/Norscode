@@ -31,5 +31,6 @@ Skjema-binding kobler inputfelt til data og state.
 
 - skjemaer kan bygges uten manuell synkronisering av hvert felt
 - data og UI henger tydelig sammen
+- standard byggesteiner kan komme fra `std.html`
 
 Se også [docs/FRONTEND_INPUT_COMPONENTS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_INPUT_COMPONENTS.md).

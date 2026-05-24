@@ -17,8 +17,13 @@ Et komponentbibliotek samler de viktigste visuelle byggesteinene.
 - panel
 - dialog
 - badge
+- alert
+- empty state
+- loading state
 - navigasjon
 - tabell
+- liste
+- oversiktspanel
 
 ## Regler
 
