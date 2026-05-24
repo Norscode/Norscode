@@ -178,6 +178,17 @@ def expr_to_data(node: dict[str, Any]) -> dict[str, Any]:
             'then_expr': expr_to_data(node.get('then', {})),
             'else_expr': expr_to_data(node.get('else', {})),
         }
+    if kind == 'Lambda':
+        # fun(param: type, ...) -> expr  — kompakt lambda frå selfhost_parser.py
+        # params er lista av parameternamn (type-annotasjonar er strippet av parsaren)
+        raw_params = node.get('params', [])
+        params = [{'name': p, 'type_name': 'heltall'} for p in raw_params]
+        return {
+            'type': 'Lambda',
+            'params': params,
+            'body': expr_to_data(node.get('body', {})),
+            'return_type': None,
+        }
     raise SelfhostAstBridgeError(f'AST-broen støtter ikke uttrykk: {kind}')
 
 
@@ -281,13 +292,16 @@ def _flatten_if_chain(node: dict[str, Any], ctx: BridgeContext) -> tuple[list[di
     return elif_blocks, None
 
 
-def _build_match_if_chain(subject_expr: dict[str, Any], cases: list[dict[str, Any]], else_block: dict[str, Any] | None, ctx: BridgeContext) -> dict[str, Any]:
+def _build_match_if_chain(subject_expr: dict[str, Any], cases: list[dict[str, Any]], else_stmts: list[dict[str, Any]], ctx: BridgeContext) -> dict[str, Any]:
+    # else_stmts must be a raw statement list (not a pre-lowered Block dict) so that
+    # stmt_to_data for 'If' can detect it via isinstance(raw_else, list) and call
+    # block_to_data on it correctly.
     if not cases:
         return {
             'node': 'If',
             'condition': {'node': 'Literal', 'literal_type': 'bool', 'value': True},
             'then': [{'node': 'ExprStmt', 'value': {'node': 'Literal', 'literal_type': 'heltall', 'value': 0}}],
-            'else': else_block or [],
+            'else': else_stmts or [],
         }
 
     first = cases[0]
@@ -305,10 +319,10 @@ def _build_match_if_chain(subject_expr: dict[str, Any], cases: list[dict[str, An
             'node': 'If',
             'condition': condition,
             'then': first.get('body', []),
-            'else': else_block or [],
+            'else': else_stmts or [],
         }
 
-    nested = _build_match_if_chain(subject_expr, cases[1:], else_block, ctx)
+    nested = _build_match_if_chain(subject_expr, cases[1:], else_stmts, ctx)
     return {
         'node': 'If',
         'condition': condition,
@@ -358,10 +372,12 @@ def stmt_to_data(node: dict[str, Any], ctx: BridgeContext) -> list[dict[str, Any
     if kind == 'Match':
         subject = node.get('subject', {})
         cases = list(node.get('cases', []))
-        else_block = block_to_data(node.get('else', []), ctx) if isinstance(node.get('else'), list) else None
+        # Pass raw stmt list — _build_match_if_chain needs a list (not a Block dict)
+        # so stmt_to_data for the built 'If' node can detect it with isinstance(raw_else, list).
+        else_stmts = node.get('else') if isinstance(node.get('else'), list) else []
         if not cases:
             return []
-        lowered = _build_match_if_chain(subject, cases, else_block, ctx)
+        lowered = _build_match_if_chain(subject, cases, else_stmts, ctx)
         return stmt_to_data(lowered, ctx)
     if kind == 'While':
         return [{
