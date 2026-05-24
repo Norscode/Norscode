@@ -32,4 +32,4 @@ Cache for lastet data bør være eksplisitt og lett å forstå.
 - appen kan gjenbruke lastede data uten å bli forvirrende
 - utviklerne vet hva som caches og hvorfor
 
-Se også [docs/FRONTEND_STORE_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_STORE_MODEL.md).
+Se også [docs/FRONTEND_STORE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STORE_MODEL.md).

@@ -5,6 +5,7 @@ Norscode sin første frontend-versjon bør være:
 - server-renderte sider som standard
 - komponentbasert templating for gjenbruk
 - små interaktive islands der det faktisk trengs
+- server-drevne fragmenter når en del av siden bør rendres separat
 
 Dette gir en smal og stabil grunnmur:
 
@@ -69,5 +70,7 @@ Native UI er nå en ekte Norscode-modul i [`std/nativeui.no`](/Users/jansteinar/
 For komponent- og slot-modell er [`std/frontend.no`](/Users/jansteinar/Projects/Norscode/std/frontend.no) den anbefalte inngangen, [`std/reactive.no`](/Users/jansteinar/Projects/Norscode/std/reactive.no) er den anbefalte kontraktflaten for state/bindings/events, [`std/islands.no`](/Users/jansteinar/Projects/Norscode/std/islands.no) er kontraktflaten for server/client-splitt, mens [`std/html.no`](/Users/jansteinar/Projects/Norscode/std/html.no) fortsatt er lavnivåflaten.
 
 For lesbare startpunkter og gull-eksempler, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md), [`examples/frontend_golden.no`](/Users/jansteinar/Projects/Norscode/examples/frontend_golden.no) og [`examples/native_ui_golden.nui`](/Users/jansteinar/Projects/Norscode/examples/native_ui_golden.nui).
+
+Server-drevne fragmenter er dokumentert i [`docs/FRONTEND_FRAGMENT_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md).
 
 Se også [docs/FRONTEND_MODES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODES.md), [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) og [docs/FRONTEND_NATIVE_UI_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NATIVE_UI_ROADMAP.md) for hele planen.

@@ -12,7 +12,7 @@ Den anbefalte flaten er nå samlet i [`std/frontend.no`](/Users/jansteinar/Proje
 - komponenter kan settes sammen hierarkisk
 - layout og innhold skal kunne kombineres uten skjult global state
 - bruk `std.html` for `tag(...)`, `void_tag(...)`, `class_attr(...)`, `page(...)` og vanlige tag-hjelpere som `div(...)`, `section(...)`, `h1(...)` og `p(...)` der det reduserer rå string-konkatenasjon
-- bruk `std.frontend` for anbefalte layout- og komponenthjelpere som `layout_main(...)`, `layout_app(...)`, `komponent_kort(...)`, `komponent_nav(...)`, `komponent_liste(...)`, `komponent_tabell(...)` og `slot(...)`
+- bruk `std.frontend` for anbefalte layout- og komponenthjelpere som `layout_main(...)`, `layout_app(...)`, `nav_link(...)`, `komponent_kort(...)`, `komponent_nav(...)`, `komponent_liste(...)`, `komponent_tabell(...)` og `slot(...)`
 
 `std.frontend` utvider dette med noen sammensatte komponenter som gjør sidebygging raskere og renere:
 

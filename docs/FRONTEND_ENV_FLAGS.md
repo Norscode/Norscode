@@ -24,4 +24,4 @@ Frontend bør kunne styres av miljøvariabler og feature flags.
 
 - frontend kan kjøre i flere miljøer uten kodeendring
 
-Se også [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_API_CLIENT.md).
+Se også [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_API_CLIENT.md).
