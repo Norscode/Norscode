@@ -63,7 +63,7 @@ from compiler.loader import ModuleLoader
 from compiler.native.pipeline import compile_source_to_native_elf, run_native_elf, verify_bootstrap_compiler
 from compiler.parser import Parser
 from compiler.semantic import SemanticAnalyzer
-from compiler.selfhost_chain import export_selfhost_ast_bundle, run_chain, check_chain
+from compiler.selfhost_chain import export_selfhost_ast_bundle, export_selfhost_ncb, run_chain, run_from_ncb, check_chain, build_ncb_cache
 from compiler.selfhost_whole_compile import DEFAULT_ROOTS, WholeCompileOptions, compile_whole_norscode
 from compiler.toml_compat import loads as toml_loads
 from norcode.command_dispatch import dispatch_command
@@ -6315,6 +6315,20 @@ def main():
     selfhost_chain_check.add_argument("--repeat-limit", type=int, default=0, help="Avbryt hvis samme VM-tilstand gjentas mer enn N ganger")
     selfhost_chain_check.add_argument("--expr-probe", help="Logg uttrykkstokens som matcher denne teksten")
     selfhost_chain_check.add_argument("--expr-probe-log", help="Skriv uttrykksprobe til fil")
+    selfhost_chain_check.add_argument("--use-cache", action="store_true", help="Bruk NCB-cache (.chain.ncb.json) om tilgjengelig og fersk")
+    selfhost_chain_check.add_argument("--write-cache", action="store_true", help="Skriv NCB-cache etter kompilering")
+
+    selfhost_ncb_export = sub.add_parser("selfhost-ncb-export", help="Kompiler .no heilt til NCB-bytecode og skriv til .chain.ncb.json")
+    selfhost_ncb_export.add_argument("file")
+    selfhost_ncb_export.add_argument("--output", help="Valgfri output-fil (default: <fil>.chain.ncb.json)")
+
+    selfhost_ncb_run = sub.add_parser("selfhost-ncb-run", help="Køyr pre-kompilert NCB-fil via BytecodeVM (utan Python-parsing)")
+    selfhost_ncb_run.add_argument("file", help="Sti til .chain.ncb.json-fil")
+    selfhost_ncb_run.add_argument("--trace", action="store_true")
+    selfhost_ncb_run.add_argument("--max-steps", type=int, default=5000000)
+
+    selfhost_ncb_build_cache = sub.add_parser("selfhost-ncb-build-cache", help="Pre-kompiler alle chain-testfiler til NCB-cache")
+    selfhost_ncb_build_cache.add_argument("files", nargs="*", help="Filer å pre-kompilere (default: standard chain-testfiler)")
 
     selfhost_compile_all = sub.add_parser("selfhost-compile-all", help="Kompiler hele Norscode-koden med selfhost compiler-broen")
     selfhost_compile_all.add_argument("--root", action="append", dest="roots", help="Root å kompilere (kan gjentas, default: selfhost/compiler/std)")
@@ -7224,12 +7238,38 @@ def main():
                 repeat_limit=args.repeat_limit,
                 expr_probe=args.expr_probe,
                 expr_probe_log=args.expr_probe_log,
+                use_ncb_cache=getattr(args, 'use_cache', False),
+                write_ncb_cache=getattr(args, 'write_cache', False),
             )
             print(f"{payload['passed']}/{payload['total']} OK")
             for row in payload['results']:
                 status = "OK" if row.get("ok") else "FEIL"
                 detail = row.get("result") if row.get("ok") else row.get("error")
                 print(f"- {status}: {row['file']}" + (f" -> {detail}" if detail is not None else ""))
+
+        elif args.cmd == "selfhost-ncb-export":
+            from compiler.selfhost_chain import export_selfhost_ncb
+            out_path = export_selfhost_ncb(args.file, output=getattr(args, 'output', None))
+            print(f"NCB: {out_path}")
+
+        elif args.cmd == "selfhost-ncb-run":
+            from compiler.selfhost_chain import run_from_ncb
+            result = run_from_ncb(
+                args.file,
+                trace=getattr(args, 'trace', False),
+                max_steps=getattr(args, 'max_steps', 5000000),
+            )
+            if result is not None and os.environ.get("NORCODE_SUPPRESS_RETURN") not in {"1", "true", "TRUE", "yes", "YES"}:
+                print(f"Return: {result}")
+
+        elif args.cmd == "selfhost-ncb-build-cache":
+            from compiler.selfhost_chain import build_ncb_cache
+            report = build_ncb_cache(args.files or None)
+            print(f"Bygd: {len(report['built'])}, Hoppa over: {len(report['skipped'])}, Feil: {len(report['errors'])}")
+            for item in report['built']:
+                print(f"  + {item}")
+            for err in report['errors']:
+                print(f"  ! FEIL {err['file']}: {err['error']}")
             if not payload['ok']:
                 sys.exit(1)
 
