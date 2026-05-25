@@ -43,8 +43,8 @@ For hver kildefil skal Norscode-lexer og Python-lexer gi samme token-sekvens, bo
 
 ## Status
 
-- [ ] Definer token-format
-- [ ] Lag M1 lexer i Norscode
-- [ ] Lag token fixture-kommando
-- [ ] Lag parity-check mellom Python og Norscode lexer
+- [x] Definer token-format
+- [x] Lag M1 lexer i Norscode
+- [x] Lag token fixture-kommando
+- [x] Lag parity-check mellom Python og Norscode lexer
 - [ ] Koble lexer-service til valgfri Norscode lexer

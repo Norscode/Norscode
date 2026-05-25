@@ -28,9 +28,14 @@ Norscode-frontenden bør starte med en enkel, path-basert navigasjonsmodell:
 Frontend-appens første navigasjon bør kunne beskrives som:
 
 - `/` for hjem
+- `/sok` for søk med query-parametre
+- `/poster` for paginerte listevisninger
+- `/ruter` for en samleside over de viktigste URL-ene
 - `/side` for egne sider
 - `/kategori/objekt` for dypere strukturer når det trengs
 
 ## Neste steg
 
 Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) og [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md) for resten av navigasjon-etappen.
+
+For en kort lesesti som binder sammen hele frontend-modellen, se [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).

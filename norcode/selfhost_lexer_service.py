@@ -45,7 +45,6 @@ REQUIRED_M1_TOKEN_MARKERS = (
     "COMMA",
     "COLON",
     "EOF",
-    "UNKNOWN",
 )
 
 

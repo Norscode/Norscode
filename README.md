@@ -813,6 +813,7 @@ For neste fase etter 1.0, se [docs/ROADMAP_HELT_FERDIG.md](docs/ROADMAP_HELT_FER
 For stabil CLI-kontrakt, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
 For legacy-navn og migrering, se [docs/DEPRECATION_POLICY.md](docs/DEPRECATION_POLICY.md).
 For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](docs/LEGACY_POLICY.md).
+For samlet migrering, bootstrap-grenser og leserekkefølge, se [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
 
 ## Lisens
 

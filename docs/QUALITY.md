@@ -107,13 +107,8 @@ Kjør:
 norcode diagnose
 ```
 
-Denne kontrollen gir en samlet status for prosjektet:
-
-- prosjektrot og konfig
-- stdlib-oppslag
-- avhengigheter
-- testdiscovery
-- git-status og revision
+Denne kontrollen gir en samlet status for prosjektet.
+Se [`docs/SELFHOST_DIAGNOSTICS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_DIAGNOSTICS.md) for den fullstendige kontrakten.
 
 Bruk den når du vil feilsøke et nytt prosjekt eller få en rask driftssjekk av arbeidskopien.
 

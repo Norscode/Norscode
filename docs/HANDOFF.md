@@ -21,6 +21,7 @@ Dette er den korte statusen for Norscode etter fullført roadmap og 1.0-kandidat
 ## Referanser
 
 - [docs/ROADMAP_HELT_FERDIG.md](/Users/jansteinar/Projects/Norscode/docs/ROADMAP_HELT_FERDIG.md)
+- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
 - [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/CLI_CONTRACT.md)
 - [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
 - [docs/MAINTENANCE_POLICY.md](/Users/jansteinar/Projects/Norscode/docs/MAINTENANCE_POLICY.md)

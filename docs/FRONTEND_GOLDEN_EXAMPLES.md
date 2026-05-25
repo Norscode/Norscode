@@ -3,6 +3,8 @@
 Dette er de to anbefalte inngangene når du vil se hele frontend-modellen i praksis.
 Bruk dem som første referanse for nye sider, nye komponenter og ny UI-struktur.
 
+For en kort lesesti som binder sammen modell, modes, komponenter og fragmenter, se [`docs/FRONTEND_LEARNING_PATH.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+
 ## Component Mode
 
 - Kilde: [`examples/frontend_golden.no`](/Users/jansteinar/Projects/Norscode/examples/frontend_golden.no)
@@ -47,9 +49,21 @@ side:
 - De viser de anbefalte flatenes faktiske inngangspunkter.
 - De har egne render-tester som holder dem stabile over tid.
 
+## Additional Practical Example
+
+I tillegg er [`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no) et godt referansepunkt for server-drevne fragmenter, søk og paginerte lister.
+
+Det eksemplet viser:
+
+- full side og fragment-svar fra samme route
+- søk via query-parametre
+- paginering og sortering uten JS
+- gjenbruk av `std.frontend` og `std.islands`
+
 Se også:
 
 - [`docs/FRONTEND_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md)
 - [`docs/FRONTEND_MODES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODES.md)
 - [`docs/FRONTEND_COMPONENT_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
 - [`docs/FRONTEND_LAYOUT_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
+- [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)

@@ -5,6 +5,11 @@ Gjøre Norscode helt ferdig som produkt. Det betyr at normal bruk er binary-firs
 
 Dette er ikke en videreføring av den gamle språk-roadmapen. Den er allerede fullført. Denne planen beskriver det som gjenstår før Norscode kan regnes som helt selvstendig i praksis.
 
+For selve selvstendighets-sporet i compiler/runtime, se [`docs/SELFSTENDIG_NORSCODE_ROADMAP.md`](/Users/jansteinar/Projects/Norscode/docs/SELFSTENDIG_NORSCODE_ROADMAP.md) og [`docs/PHASE8_PYTHON_FALLBACK.md`](/Users/jansteinar/Projects/Norscode/docs/PHASE8_PYTHON_FALLBACK.md).
+
+Resten av arbeidet etter Omgang 10 er samlet i [`docs/SELFHOST_REMAINING_ROADMAP.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_REMAINING_ROADMAP.md).
+For migrering, legacy-navn og leserekkefølge, se [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
+
 ## Hva "helt ferdig" betyr
 
 - [x] normal kjøring trenger ikke Python

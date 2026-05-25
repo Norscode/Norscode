@@ -25,9 +25,9 @@ nc run app.no
 nc run app.no --python-fallback
 nc check app.no
 nc check app.no --python-fallback
-nc selfhost-check
-nc selfhost-parity
-nc ci --require-selfhost-ready
+nc --python-fallback selfhost-check
+nc --python-fallback selfhost-parity
+nc --python-fallback ci --require-selfhost-ready
 ```
 
 ## Fallback-regler
@@ -45,7 +45,7 @@ Advarsel: Python-fallback brukes. Dette er overgangsstøtte, ikke primær Norsco
 
 ## Parity-måling
 
-`nc selfhost-parity` bør sammenligne:
+`nc --python-fallback selfhost-parity` bør sammenligne:
 
 - tokens
 - AST snapshot
@@ -80,9 +80,9 @@ parser: DIFF
 CI bør kjøre:
 
 ```bash
-nc ci --check-names --require-selfhost-ready
-nc selfhost-check
-nc selfhost-parity
+nc --python-fallback ci --check-names --require-selfhost-ready
+nc --python-fallback selfhost-check
+nc --python-fallback selfhost-parity
 ```
 
 ## Feature gates
@@ -115,3 +115,7 @@ Fase 8 er ferdig når:
 - fallback gir tydelig varsel
 - CI måler selfhost-parity
 - selfhost-klare tester feiler hvis Python brukes skjult
+
+## Videre lesing
+
+- [`docs/SELFHOST_FALLBACK_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_FALLBACK_CONTRACT.md)

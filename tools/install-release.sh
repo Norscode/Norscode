@@ -84,5 +84,32 @@ ln -sfn "${CURRENT_LINK}/bin/nor" "${PREFIX}/bin/nor"
 ln -sfn "${CURRENT_LINK}/bin/nl" "${PREFIX}/bin/nl"
 ln -sfn "${CURRENT_LINK}/bin/bootstrap" "${PREFIX}/bin/bootstrap"
 
+# Mirror the release root at the install prefix so wrapper scripts that derive
+# ROOT_DIR from their own location can still resolve dist/, main.py and modules.
+for _entry in \
+  compiler \
+  dist \
+  docs \
+  examples \
+  main.py \
+  norcode \
+  norcode.toml \
+  selfhost \
+  scripts \
+  std \
+  tests \
+  tools \
+  README.md \
+  LICENSE \
+  CHANGELOG.md \
+  Makefile \
+  app.c \
+  app.no
+do
+  if [ -e "${CURRENT_LINK}/${_entry}" ]; then
+    ln -sfn "${CURRENT_LINK}/${_entry}" "${PREFIX}/${_entry}"
+  fi
+done
+
 printf 'Installert release: %s\n' "$TARGET_DIR"
 printf 'Aktiv versjon: %s\n' "$CURRENT_LINK"

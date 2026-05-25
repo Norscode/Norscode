@@ -97,10 +97,10 @@ class Lexer:
             self.advance()
         return result
 
-    def read_string(self):
+    def read_string(self, delimiter='"'):
         self.advance()
         result = ""
-        while self.current is not None and self.current != '"':
+        while self.current is not None and self.current != delimiter:
             if self.current == "\\":
                 self.advance()
                 if self.current == "n":
@@ -109,6 +109,8 @@ class Lexer:
                     result += "\t"
                 elif self.current == '"':
                     result += '"'
+                elif self.current == "'":
+                    result += "'"
                 elif self.current == "\\":
                     result += "\\"
                 else:
@@ -117,8 +119,8 @@ class Lexer:
             else:
                 result += self.current
                 self.advance()
-        if self.current != '"':
-            raise SyntaxError(f'Tekststreng ble ikke avsluttet med " ved linje {self.line}, kolonne {self.column}')
+        if self.current != delimiter:
+            raise SyntaxError(f"Tekststreng ble ikke avsluttet med {delimiter!r} ved linje {self.line}, kolonne {self.column}")
         self.advance()
         return result
 
@@ -144,8 +146,8 @@ class Lexer:
                     return Token(KEYWORDS[ident], ident, start_line, start_col)
                 return Token("IDENT", ident, start_line, start_col)
 
-            if self.current == '"':
-                return Token("STRING", self.read_string(), start_line, start_col)
+            if self.current in ('"', "'"):
+                return Token("STRING", self.read_string(self.current), start_line, start_col)
 
             if self.current == "=":
                 self.advance()
