@@ -8,7 +8,11 @@ from pathlib import Path
 from norcode.compiler_core import compile_source
 
 
-SOURCE = 'funksjon start() -> ordbok_tekst { returner { navn: "Ada", by: "Oslo" } }\n'
+SOURCE = (
+    'funksjon start() -> ordbok_tekst { '
+    'returner { navn: "Ada", by: "Oslo" } '
+    '}\n'
+)
 
 
 def _run_selfhost_bytecode() -> dict[str, object]:
