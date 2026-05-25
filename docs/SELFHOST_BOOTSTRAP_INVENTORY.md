@@ -24,6 +24,7 @@ Disse filene er fortsatt bærere av bootstrap-orienteringen og er de første ste
 - [`norcode/ci_pipeline.py`](/Users/jansteinar/Projects/Norscode/norcode/ci_pipeline.py)
 - [`norcode/bootstrap_support.py`](/Users/jansteinar/Projects/Norscode/norcode/bootstrap_support.py)
 - [`norcode/diagnostics.py`](/Users/jansteinar/Projects/Norscode/norcode/diagnostics.py)
+- [`norcode/legacy_main.py`](/Users/jansteinar/Projects/Norscode/norcode/legacy_main.py)
 - [`norcode/migrations.py`](/Users/jansteinar/Projects/Norscode/norcode/migrations.py)
 - [`norcode/commands/release.py`](/Users/jansteinar/Projects/Norscode/norcode/commands/release.py)
 - [`norcode/commands/scaffold_api.py`](/Users/jansteinar/Projects/Norscode/norcode/commands/scaffold_api.py)
@@ -45,11 +46,12 @@ Disse filene er fortsatt bærere av bootstrap-orienteringen og er de første ste
 
 Forventet levetid:
 - `bin/nc` skal forbli tynn og native-first.
-- `main.py` skal være eksplisitt bootstrap-/utviklervariant.
+- `main.py` er nå en tynn wrapper til den gamle Python-entrypointen i [`norcode/legacy_main.py`](/Users/jansteinar/Projects/Norscode/norcode/legacy_main.py).
 - `norcode/bootstrap_ci.py` samler bootstrap-gate og workflow-policy uten å bo i entrypointen.
 - `norcode/ci_pipeline.py` samler den bredere CI-lanen uten å bo i entrypointen.
 - `norcode/bootstrap_support.py` samler små delte bootstrap-helpers uten å bo i entrypointen.
 - `norcode/diagnostics.py` samler delte git- og prosjektmetadata uten å bo i entrypointen.
+- `norcode/legacy_main.py` samler den gamle Python-entrypointen uten å bo i `main.py` og er nå den historiske fallback-implementasjonen bak wrapperen.
 - `norcode/migrations.py` samler navnemigrering og legacy cleanup uten å bo i entrypointen.
 - `norcode/commands/release.py` samler CLI-bindingen for release uten å bo i `main.py`.
 - `norcode/commands/scaffold_api.py` samler CLI-bindingen for scaffold-api uten å bo i `main.py`.
@@ -141,7 +143,7 @@ Disse områdene er identifisert som gode kandidater for ytterligere slanking:
 
 | Område | Filer | Hvorfor den fortsatt er tung | Retning videre |
 | --- | --- | --- | --- |
-| Bootstrap-orchestration | `main.py`, `norcode/bootstrap_ci.py`, `norcode/ci_pipeline.py`, `norcode/diagnostics.py` | `main.py` samler fortsatt mange historiske kommandoer og fallback-løp, men de tunge bootstrap-gate/policy/ci-lane/git-delen er flyttet ut | Splitt bootstrap fra produkt og hold resten tynn |
+| Bootstrap-orchestration | `main.py`, `norcode/legacy_main.py`, `norcode/bootstrap_ci.py`, `norcode/ci_pipeline.py`, `norcode/diagnostics.py` | `main.py` er nå en tynn wrapper, mens `norcode/legacy_main.py` bærer den historiske Python-entrypointen | Hold wrapperen tynn og flytt resten ut når det er praktisk |
 | Wrapper/entry | `bin/nc`, `tools/bootstrap_wrapper.py` | Binder normalflyt og legacy sammen | Hold dem tynne og native-first |
 | Build/install | `tools/build-bootstrap-binary.sh`, `tools/install.sh`, `tools/install-release.sh`, `scripts/dev-setup.sh` | Har fortsatt overgangskode og flere alternative ruter | Gjør normalveien eksplisitt og minimal |
 | Fallback- og parity-kommandoer | `norcode/commands/selfhost_*` og `norcode/commands/doctor.py` | De må eksistere, men bør være tydelig merket som overgangs-/diagnoseverktøy | Behold, men slank og dokumenter |

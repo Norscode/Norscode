@@ -5,12 +5,12 @@ Mål: fullføre selfhost parser-kjernen til et nivå hvor parity, recovery og mo
 ## Struct Parser
 
 - [ ] parse_struct_def
-- [ ] parse_struct_literal
+- [x] parse_struct_literal
 - [ ] parse_field_value
-- [ ] nested structs
-- [ ] struct parity fixtures
-- [ ] semantic struct validation
-- [ ] BUILD_STRUCT lowering
+- [x] nested structs
+- [x] struct parity fixtures
+- [x] semantic struct validation
+- [x] BUILD_STRUCT lowering
 - [ ] GET_FIELD lowering
 - [ ] struct runtime objects
 
