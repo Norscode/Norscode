@@ -19,7 +19,7 @@ Dette gjør kontrakten lett å lese og lett å teste.
 
 ## Eksempel
 
-Se [examples/json_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/json_schema.no) for en praktisk og minimal mapper.
+Se [examples/json_schema.no](/Users/jansteinar/Projects/Norscode/examples/json_schema.no) for en praktisk og minimal mapper.
 
 ## Når dette er nok
 

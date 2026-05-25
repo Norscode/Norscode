@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import importlib
-
 from norcode.commands.base import CommandModule
+from norcode.server_runtime import serve_program
 
 
 def register_arguments(parser) -> None:
@@ -38,8 +37,7 @@ def register_arguments(parser) -> None:
 
 
 def run(args) -> int:
-    legacy_main = importlib.import_module("main")
-    return legacy_main.serve_program(
+    return serve_program(
         args.file,
         host=args.host,
         port=args.port,

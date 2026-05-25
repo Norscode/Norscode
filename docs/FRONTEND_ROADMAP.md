@@ -198,4 +198,4 @@ Frontend-sporet er ferdig når:
 - [x] design og tilgjengelighet er standard, ikke ettertanke
 - [x] browserflyten kan testes og distribueres trygt
 
-Se også [docs/FRONTEND_NATIVE_UI_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NATIVE_UI_ROADMAP.md) for den mer konkrete planen for Native UI-delen av frontenden.
+Se også [docs/FRONTEND_HTML_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_HTML_ROADMAP.md) for den mer konkrete planen for HTML-delen av frontenden, og [docs/FRONTEND_NATIVE_UI_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NATIVE_UI_ROADMAP.md) for Native UI-delen.

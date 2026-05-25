@@ -10,6 +10,10 @@ Dette er den praktiske flyten for å ta Norscode fra release til drift.
 4. Velg enten `systemd` eller container avhengig av miljø.
 5. Bruk `norcode serve --production` som runtime-kommando i begge tilfeller.
 
+Se også:
+
+- [`docs/SELFHOST_RELEASE_CHECKLIST.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_RELEASE_CHECKLIST.md)
+
 ## Lokalt eller på egen server
 
 Bruk release + install:

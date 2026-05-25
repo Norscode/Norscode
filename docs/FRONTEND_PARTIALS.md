@@ -20,11 +20,15 @@ De mest lesbare full-eksemplene ligger i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/U
 
 - `std.frontend.layout_main(innhold)`
 - `std.frontend.layout_app(...)`
+- `std.frontend.fragment_page(...)`
 - `std.frontend.slot(...)`
+- `std.frontend.komponent_stack(...)`
+- `std.frontend.nav_link(...)`
 - `std.frontend.komponent_nav(...)`
 - `std.frontend.komponent_kort(...)`
 - `std.frontend.komponent_tabell(...)`
 - `std.frontend.komponent_liste(...)`
+- server-drevne fragmenter og delvis rendering kan bygges med `std.islands.fragment_root(...)`, `std.islands.fragment_shell(...)` og `std.islands.fragment_or_full_response(...)`
 - lavnivå partials kan fortsatt komme fra `std.html`
 
 ## Regler
@@ -43,3 +47,4 @@ Se også:
 
 - [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
 - [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
+- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)

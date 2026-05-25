@@ -17,5 +17,4 @@ Dette gjør det enkelt å kjøre flere kontraktsversjoner parallelt mens kliente
 
 ## Eksempel
 
-Se [examples/web_api_versioning.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_api_versioning.no).
-
+Se [examples/web_api_versioning.no](/Users/jansteinar/Projects/Norscode/examples/web_api_versioning.no).

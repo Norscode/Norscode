@@ -24,4 +24,4 @@ Frontend kan distribueres via container eller CDN avhengig av miljø.
 
 - frontend kan kjøres i container eller publiseres som statiske assets
 
-Se også [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/DEPLOYMENT_PLAYBOOK.md) og [docs/CONTAINER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/CONTAINER.md).
+Se også [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/DEPLOYMENT_PLAYBOOK.md) og [docs/CONTAINER.md](/Users/jansteinar/Projects/Norscode/docs/CONTAINER.md).

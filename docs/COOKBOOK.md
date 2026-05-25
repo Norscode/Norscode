@@ -35,7 +35,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se også [examples/cli.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cli.no).
+Se også [examples/cli.no](/Users/jansteinar/Projects/Norscode/examples/cli.no).
 
 ## Filer
 
@@ -50,7 +50,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se også [examples/cli.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cli.no) og [examples/helpdesk.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/helpdesk.no).
+Se også [examples/cli.no](/Users/jansteinar/Projects/Norscode/examples/cli.no) og [examples/helpdesk.no](/Users/jansteinar/Projects/Norscode/examples/helpdesk.no).
 
 ## Skript
 
@@ -79,7 +79,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/http.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/http.no).
+Se [examples/http.no](/Users/jansteinar/Projects/Norscode/examples/http.no).
 
 ## Web
 
@@ -98,24 +98,24 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/web.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web.no) og [examples/web_request_response.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_request_response.no).
+Se [examples/web.no](/Users/jansteinar/Projects/Norscode/examples/web.no) og [examples/web_request_response.no](/Users/jansteinar/Projects/Norscode/examples/web_request_response.no).
 
-For route-handlers i FastAPI-stil, se også [examples/web_routes.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_routes.no).
-For subroutere og prefiksbaserte route-moduler, se [examples/web_subrouter.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_subrouter.no).
-For route-guards og policy-hooks, se [examples/web_guard.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_guard.no).
-For HEAD, OPTIONS og metodeforhandling, se [examples/web_methods.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_methods.no).
-For bearer-token auth med guards, se [examples/web_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_auth.no).
-For rolle- og rettighetsmodell, se [examples/web_roles.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_roles.no).
-For passordhashing og secrets-håndtering, se [examples/secrets.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/secrets.no).
-For CSRF-beskyttelse, se [examples/csrf.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/csrf.no).
+For route-handlers i FastAPI-stil, se også [examples/web_routes.no](/Users/jansteinar/Projects/Norscode/examples/web_routes.no).
+For subroutere og prefiksbaserte route-moduler, se [examples/web_subrouter.no](/Users/jansteinar/Projects/Norscode/examples/web_subrouter.no).
+For route-guards og policy-hooks, se [examples/web_guard.no](/Users/jansteinar/Projects/Norscode/examples/web_guard.no).
+For HEAD, OPTIONS og metodeforhandling, se [examples/web_methods.no](/Users/jansteinar/Projects/Norscode/examples/web_methods.no).
+For bearer-token auth med guards, se [examples/web_auth.no](/Users/jansteinar/Projects/Norscode/examples/web_auth.no).
+For rolle- og rettighetsmodell, se [examples/web_roles.no](/Users/jansteinar/Projects/Norscode/examples/web_roles.no).
+For passordhashing og secrets-håndtering, se [examples/secrets.no](/Users/jansteinar/Projects/Norscode/examples/secrets.no).
+For CSRF-beskyttelse, se [examples/csrf.no](/Users/jansteinar/Projects/Norscode/examples/csrf.no).
 
-For secure cookies, se [examples/web_cookies.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_cookies.no).
-For input-sanitizing og sikre web-strenger, se [examples/web_sanitize.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_sanitize.no).
-For databasebruk med SQLite og migreringer, se [examples/db.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db.no).
-For ekte databaseintegrasjon med reopen og persistens, se [examples/db_integration.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_integration.no).
-For repository-/modelmønstre, se [examples/db_repository.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/db_repository.no).
-For enkel JSON-/schema-mapping, se [examples/json_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/json_schema.no).
-For fil- og objektlagring, se [examples/file_object_storage.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/file_object_storage.no).
+For secure cookies, se [examples/web_cookies.no](/Users/jansteinar/Projects/Norscode/examples/web_cookies.no).
+For input-sanitizing og sikre web-strenger, se [examples/web_sanitize.no](/Users/jansteinar/Projects/Norscode/examples/web_sanitize.no).
+For databasebruk med SQLite og migreringer, se [examples/db.no](/Users/jansteinar/Projects/Norscode/examples/db.no).
+For ekte databaseintegrasjon med reopen og persistens, se [examples/db_integration.no](/Users/jansteinar/Projects/Norscode/examples/db_integration.no).
+For repository-/modelmønstre, se [examples/db_repository.no](/Users/jansteinar/Projects/Norscode/examples/db_repository.no).
+For enkel JSON-/schema-mapping, se [examples/json_schema.no](/Users/jansteinar/Projects/Norscode/examples/json_schema.no).
+For fil- og objektlagring, se [examples/file_object_storage.no](/Users/jansteinar/Projects/Norscode/examples/file_object_storage.no).
 
 ## Cache
 
@@ -132,7 +132,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/cache.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cache.no).
+Se [examples/cache.no](/Users/jansteinar/Projects/Norscode/examples/cache.no).
 
 ## Logging
 
@@ -150,7 +150,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/logging.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/logging.no).
+Se [examples/logging.no](/Users/jansteinar/Projects/Norscode/examples/logging.no).
 
 ## Metrics
 
@@ -168,7 +168,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/metrics.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/metrics.no).
+Se [examples/metrics.no](/Users/jansteinar/Projects/Norscode/examples/metrics.no).
 
 ## Tracing
 
@@ -185,7 +185,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/trace.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/trace.no).
+Se [examples/trace.no](/Users/jansteinar/Projects/Norscode/examples/trace.no).
 
 ## Audit
 
@@ -202,7 +202,7 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/audit.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/audit.no).
+Se [examples/audit.no](/Users/jansteinar/Projects/Norscode/examples/audit.no).
 
 ## Dashboard- og exporter-mønster
 
@@ -238,23 +238,23 @@ funksjon start() -> heltall {
 }
 ```
 
-Se [examples/observability_export.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/observability_export.no).
+Se [examples/observability_export.no](/Users/jansteinar/Projects/Norscode/examples/observability_export.no).
 
-For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_dependency.no).
+For dependency injection i samme stil, se [examples/web_dependency.no](/Users/jansteinar/Projects/Norscode/examples/web_dependency.no).
 
-For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_validation.no).
+For inputvalidering, se [examples/web_validation.no](/Users/jansteinar/Projects/Norscode/examples/web_validation.no).
 
-For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi.no).
+For OpenAPI og docs, se [examples/web_openapi.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi.no).
 
-For OpenAPI med bearer-auth, se [examples/web_openapi_auth.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_auth.no).
+For OpenAPI med bearer-auth, se [examples/web_openapi_auth.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_auth.no).
 
-For OpenAPI med dokumenterte JSON-feilresponser, se [examples/web_openapi_errors.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_errors.no).
+For OpenAPI med dokumenterte JSON-feilresponser, se [examples/web_openapi_errors.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_errors.no).
 
-For OpenAPI med nestede objekt-skjemaer, se [examples/web_openapi_schema.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_openapi_schema.no).
+For OpenAPI med nestede objekt-skjemaer, se [examples/web_openapi_schema.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_schema.no).
 
-For API-versjonering og migrasjonsnotater, se [docs/API_VERSIONING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_VERSIONING.md) og [docs/API_MIGRATION_NOTES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_MIGRATION_NOTES.md).
+For API-versjonering og migrasjonsnotater, se [docs/API_VERSIONING.md](/Users/jansteinar/Projects/Norscode/docs/API_VERSIONING.md) og [docs/API_MIGRATION_NOTES.md](/Users/jansteinar/Projects/Norscode/docs/API_MIGRATION_NOTES.md).
 
-For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/web_middleware.no).
+For middleware og hooks, se [examples/web_middleware.no](/Users/jansteinar/Projects/Norscode/examples/web_middleware.no).
 
 For lokal serverkjøring, bruk `norcode serve examples/web_routes.no --reload` eller en egen webapp-fil du vil kjøre i dev-modus.
 
@@ -264,13 +264,13 @@ For browser-klienter og CORS, bruk `norcode serve ... --cors-origin https://app.
 
 For enkel rate limiting og brute-force-beskyttelse, bruk `norcode serve ... --rate-limit-requests 120 --rate-limit-window 60`.
 
-For containeroppsett og volum-basert kjøring, se [docs/CONTAINER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/CONTAINER.md).
-For systemd-oppsett på Linux, se [docs/SYSTEMD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/SYSTEMD.md) og [deploy/norscode.service](/Users/jansteinar/Projects/language_handoff/projects/language/deploy/norscode.service).
-For en samlet deployflyt fra release til drift, se [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/DEPLOYMENT_PLAYBOOK.md).
-For å starte et nytt API-prosjekt, se [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_SCAFFOLD.md).
+For containeroppsett og volum-basert kjøring, se [docs/CONTAINER.md](/Users/jansteinar/Projects/Norscode/docs/CONTAINER.md).
+For systemd-oppsett på Linux, se [docs/SYSTEMD.md](/Users/jansteinar/Projects/Norscode/docs/SYSTEMD.md) og [deploy/norscode.service](/Users/jansteinar/Projects/Norscode/deploy/norscode.service).
+For en samlet deployflyt fra release til drift, se [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/DEPLOYMENT_PLAYBOOK.md).
+For å starte et nytt API-prosjekt, se [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/Norscode/docs/API_SCAFFOLD.md).
 
 ## Neste steg
 
-- [docs/START_HER.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/START_HER.md)
-- [docs/EXAMPLES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/EXAMPLES.md)
-- [docs/QUALITY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/QUALITY.md)
+- [docs/START_HER.md](/Users/jansteinar/Projects/Norscode/docs/START_HER.md)
+- [docs/EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/EXAMPLES.md)
+- [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)

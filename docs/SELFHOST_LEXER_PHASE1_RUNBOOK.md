@@ -75,7 +75,7 @@ Sammenligner tokens fra selfhost lexer mot Python fixture.
 norcode-modular selfhost-lexer-suite --write-fixtures
 ```
 
-Kjører hele QA-pipelinen inkludert token object smoke-test.
+Kjører hele QA-pipelinen inkludert token object smoke-test og den representative parity-pakken.
 
 ### 8. Full suite uten runtime
 
@@ -84,6 +84,30 @@ norcode-modular selfhost-lexer-suite --write-fixtures --skip-runtime
 ```
 
 Brukes når compile/fixture skal verifiseres før runtime ABI er helt stabil.
+
+Som standard kjører `selfhost-lexer-suite` disse representative filene:
+
+- `tests/selfhost_lexer_token_smoke.no`
+- `tests/selfhost_lexer_list_smoke.no`
+- `tests/std.math.no`
+- `tests/test_assert.no`
+- `tests/test_assert_eq.no`
+- `tests/test_assert_text.no`
+- `tests/test_empty_int_list.no`
+- `tests/test_empty_list_return.no`
+- `tests/test_empty_string_list.no`
+- `tests/test_empty_text_list.no`
+- `examples/web_routes.no`
+- `examples/web_openapi.no`
+- `examples/web_request_response.no`
+- `examples/web_methods.no`
+- `examples/web_middleware.no`
+- `examples/web_guard.no`
+- `examples/web_openapi_auth.no`
+- `examples/web_proxy.no`
+- `examples/web_sanitize.no`
+- `examples/web_validation.no`
+- `examples/web_dependency.no`
 
 ### 9. Full suite uten token smoke
 
@@ -235,15 +259,17 @@ norcode-modular selfhost-lexer-suite --write-fixtures
 returnerer:
 
 ```text
-Selfhost lexer suite: N/N OK
+Selfhost lexer suite: 21/21 OK
 Readiness: OK
 Compile: OK
 Token smoke: OK
+List smoke: OK
 Stages:
   ok: N
   readiness: 0
   compile: 0
   token_smoke: 0
+  list_smoke: 0
   fixture: 0
   runtime: 0
   validation: 0

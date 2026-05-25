@@ -16,6 +16,7 @@ class ModuleLoader:
         self.root = Path(root).resolve()
         self.loaded = {}
         self.loading = set()
+        self.alias_map = {}
         self.project_root = self._find_project_root()
         self.stdlib_roots = self._load_stdlib_roots()
         self.dependency_map = self._load_dependencies()
@@ -132,9 +133,12 @@ class ModuleLoader:
     def _set_module_name(self, program, module_name):
         for fn in getattr(program, "functions", []):
             fn.module_name = module_name
+        for test in getattr(program, "tests", []):
+            test.module_name = module_name
 
     def _merge_programs(self, programs):
         all_functions = []
+        all_tests = []
         seen = set()
         for program in programs:
             for fn in getattr(program, "functions", []):
@@ -144,7 +148,22 @@ class ModuleLoader:
                     continue
                 seen.add(key)
                 all_functions.append(fn)
-        return ProgramNode([], all_functions)
+            for test in getattr(program, "tests", []):
+                module_name = getattr(test, "module_name", None)
+                key = (module_name, test.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                all_tests.append(test)
+        return ProgramNode([], all_functions, all_tests)
+
+    def _register_import_aliases(self, program):
+        for imp in getattr(program, "imports", []):
+            alias_name = getattr(imp, "alias", None) or imp.module_name.split(".")[-1]
+            existing = self.alias_map.get(alias_name)
+            if existing is not None and existing != imp.module_name:
+                raise RuntimeError(f"Alias brukt flere ganger: {alias_name}")
+            self.alias_map[alias_name] = imp.module_name
 
     def _module_candidates(self, module_name: str):
         rel_path = Path(*module_name.split(".")).with_suffix(".no")
@@ -226,6 +245,7 @@ class ModuleLoader:
 
             program = self.parse_file(file_path)
             self._set_module_name(program, module_name)
+            self._register_import_aliases(program)
 
             imported_programs = []
             for imp in getattr(program, "imports", []):
@@ -244,19 +264,14 @@ class ModuleLoader:
 
         program = self.parse_file(entry_path)
         self._set_module_name(program, "__main__")
-
-        alias_map = {}
+        self._register_import_aliases(program)
         imported_programs = []
 
         for imp in getattr(program, "imports", []):
             imported_programs.append(self.load_module(imp.module_name))
-            alias_name = getattr(imp, "alias", None) or imp.module_name.split(".")[-1]
-            if alias_name in alias_map:
-                raise RuntimeError(f"Alias brukt flere ganger: {alias_name}")
-            alias_map[alias_name] = imp.module_name
 
         merged = self._merge_programs([*imported_programs, program])
-        return merged, alias_map
+        return merged, dict(self.alias_map)
 
     def load(self, name):
         """Backward-compatible entry-file loader alias."""

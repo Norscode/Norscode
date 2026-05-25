@@ -24,4 +24,4 @@ Frontend bør kunne støtte mørk eller lys modus når det gir verdi.
 
 - appen kan vises i lys og mørk stil uten å brekke layout
 
-Se også [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_DESIGN_TOKENS.md).
+Se også [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DESIGN_TOKENS.md).

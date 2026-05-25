@@ -50,4 +50,4 @@ En første app trenger bare:
 - én komponent i `components/`
 - én statisk stylesheet-fil i `assets/css/`
 
-Se også [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_MODEL.md) for valgt modell, og [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md) for resten av planen.
+Se også [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md) for valgt modell, og [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) for resten av planen.

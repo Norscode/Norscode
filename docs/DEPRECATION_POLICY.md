@@ -2,6 +2,8 @@
 
 Norscode holder en lav-friksjons policy for navn og CLI-overganger.
 
+Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for samlet migreringssti og leserekkefølge.
+
 ## Grunnregler
 
 - Nye brukere skal møte `norcode` og `Norscode`.

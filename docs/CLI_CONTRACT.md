@@ -21,11 +21,21 @@ Dette dokumentet beskriver den stabiliserte kontrakten for Norscode-CLI-en.
 - Legacy-navn brukes bare for migrering og bakoverkompatibilitet.
 - Eventuelle nye brudd skal dokumenteres først, implementeres deretter.
 
+Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for den samlede migreringsregelen og leserekkefølgen.
+
 ## Migreringshistorikk
 
 - Python-fallback i CLI-wrapperne er fjernet som standard vei.
 - `main.py` er nå eksplisitt bootstrap i stedet for skjult fallback.
 - `commands`-kommandoen er lagt til som generert kontraktoversikt.
+
+## Eksplisitt fallback
+
+Når Python fortsatt trengs, skal det alltid være synlig og eksplisitt:
+
+- `--python-fallback` er den eneste standardveien inn i Python-flaten fra `nc`.
+- Vanlige kommandoer skal ikke falle tilbake til Python uten at brukeren ber om det.
+- Fallback-oppførselen er dokumentert i [`docs/SELFHOST_FALLBACK_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_FALLBACK_CONTRACT.md).
 
 ## Kommandooversikt
 

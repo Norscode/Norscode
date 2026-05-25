@@ -106,8 +106,22 @@ def _ast_from_payload(payload: dict[str, Any], module_name: str) -> dict[str, An
     # er tilgjengelege som '__main__.<namn>'.  Importerte modular flatar ut i
     # same namespace slik at ukvalifiserte kall (lex(), parse_program() osb.)
     # frå kompiler.no finn dei rette funksjonane ved runtime.
+    #
+    # For modular utanfor __main__ (t.d. std.trace, std.log) vert funksjonane
+    # lagra BÅDE som '__main__.<namn>' (flat tilgang) OG som
+    # '<modul>.<namn>' (kvalifisert tilgang, t.d. trace.start).  Dette hindrar
+    # uendeleg rekursjon når ein modul definerer ein funksjon med same namn som
+    # test-fila si start()-funksjon.
+    if module_name != '__main__':
+        extra_fns = []
+        for fn in ast.get('functions', []):
+            qualified_fn = dict(fn)
+            qualified_fn['module_name'] = module_name
+            extra_fns.append(qualified_fn)
+        ast.get('functions', []).extend(extra_fns)
     for fn in ast.get('functions', []):
-        fn['module_name'] = '__main__'
+        if fn.get('module_name') != module_name or module_name == '__main__':
+            fn['module_name'] = '__main__'
     return ast
 
 

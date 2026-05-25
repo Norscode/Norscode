@@ -21,22 +21,28 @@ Ingen feature regnes som ferdig før den har snapshot/parity-test.
 
 | Feature | Lexer | Parser | AST | Semantic | IR/backend | Parity |
 | --- | --- | --- | --- | --- | --- | --- |
-| Structs | TODO | TODO | TODO | TODO | TODO | TODO |
-| Maps | Delvis | Delvis | Delvis | Delvis | Delvis | TODO |
-| JSON-flyt | TODO | TODO | TODO | TODO | TODO | TODO |
-| Try/catch | TODO | TODO | TODO | TODO | TODO | TODO |
-| Async/await | TODO | TODO | TODO | TODO | TODO | TODO |
-| Generics | TODO | TODO | TODO | TODO | TODO | TODO |
-| Lambdaer | TODO | TODO | TODO | TODO | TODO | TODO |
-| Pattern matching | TODO | TODO | TODO | TODO | TODO | TODO |
-| Web/server-kjerne | TODO | TODO | TODO | TODO | TODO | TODO |
-| Test runner | TODO | TODO | TODO | TODO | TODO | TODO |
+| Structs | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Maps | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| JSON-flyt | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Try/catch | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Async/await | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Generics | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Lambdaer | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Pattern matching | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Web/server-kjerne | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
+| Test runner | Delvis | Delvis | Delvis | Delvis | Delvis | Delvis |
 
 ## Prioritert rekkefølge
 
 ### 1. Structs
 
 Structs bør komme først fordi compiler, AST og runtime trenger strukturerte data.
+
+M1-status:
+
+- brace-baserte struct-literals med ident-felt er nå støttet i selfhost
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel `returner { navn: "Ada", by: "Oslo" }`-flyt
 
 Må støtte:
 
@@ -97,6 +103,12 @@ Semantic-regler:
 - generic instansiering må være deterministisk
 - feil typeargument skal feile
 
+M1-status:
+
+- generiske containere som `liste<heltall>`, `liste<tekst>` og `ordbok<tekst, heltall>` er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker en liten `summer(xs: liste<heltall>)`-flyt og container-bruk i `start`
+
 ### 4. Lambdaer
 
 Må støtte:
@@ -110,6 +122,18 @@ Semantic:
 - closure scope
 - parameterinferens eller eksplisitt type
 - kallbar type
+
+M1-status:
+
+- en enkel lambda som blir bundet i en variabel er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten `la x = fun(a) -> a + 1`-flyt i `start`
+
+### 5. JSON-flyt
+
+- En enkel `json_stringify({"navn": "Norscode", "alder": 2, "aktiv": sann})`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel JSON-serialisering av en map med tekst, tall og bool via builtin
 
 ### 5. Async/await
 
@@ -128,6 +152,12 @@ IR/backend:
 - `AWAIT`
 - promise/task runtime
 
+M1-status:
+
+- En enkel `async funksjon` og `await`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten `hent()` + `await hent()`-flyt med async-retur
+
 ### 6. Pattern matching
 
 Kan bygges etter structs og enums/variant-typer.
@@ -140,6 +170,12 @@ match verdi
     ellers -> "annet"
 slutt
 ```
+
+M1-status:
+
+- En enkel `match`-flyt med heltall, tekst og bool er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten `match`-flyt med eksplisitte case, wildcard og ellers
 
 ### 7. Web/server-kjerne
 
@@ -154,6 +190,12 @@ Minimum:
 - statuskoder
 - middleware hook
 
+M1-status:
+
+- En enkel `web.route("GET /status")`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten route-annotasjon med full bytecode-metadata, inkludert `route_handlers`
+
 ### 8. Test runner
 
 Selfhost må kunne kjøre egne tester.
@@ -165,6 +207,44 @@ test "summerer" {
     assert_eq(1 + 2, 3)
 }
 ```
+
+M1-status:
+
+- en enkel `test "..." { ... }`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten test-blokk og en `tests`-metadata-array i bytecode
+
+## M1-status
+
+### Structs
+
+- Brace-baserte struct-literals med ident-felt er nå støttet i selfhost
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel `returner { navn: "Ada", by: "Oslo" }`-flyt
+
+### Maps
+
+- Brace-baserte map-literals med tekstnøkler og homogene tekstverdier er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel `returner {"en": "1", "to": "2"}`-flyt
+
+### Try/catch
+
+- En enkel `prøv` / `fang (feil)` / `kast("boom")`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel `returner feil`-flyt etter exception-unwind
+
+### Generics
+
+- Generiske containere som `liste<heltall>`, `liste<tekst>` og `ordbok<tekst, heltall>` er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en liten `summer(xs: liste<heltall>)`-flyt og container-bruk i `start`
+
+### JSON-flyt
+
+- En enkel `json_stringify({"navn": "Norscode", "alder": 2, "aktiv": sann})`-flyt er nå låst i parity
+- selfhost parser, semantic og bytecode matcher Python-kontrakten for denne M1-formen
+- parity-testen dekker nå en enkel JSON-serialisering av en map med tekst, tall og bool via builtin
 
 ## Parity-suiter
 

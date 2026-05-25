@@ -4,7 +4,7 @@ Norscode kan kjøres som en vanlig systemd-tjeneste på Linux ved å peke unit-f
 
 ## Eksempel
 
-Filen [deploy/norscode.service](/Users/jansteinar/Projects/language_handoff/projects/language/deploy/norscode.service) er et konkret utgangspunkt.
+Filen [deploy/norscode.service](/Users/jansteinar/Projects/Norscode/deploy/norscode.service) er et konkret utgangspunkt.
 
 Den antar:
 
