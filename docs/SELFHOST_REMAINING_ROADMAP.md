@@ -11,7 +11,7 @@ Denne planen er bevisst kort og operativ. Den skal være lett å følge, lett å
 - [x] Full språkparitet er låst i egen roadmap
 - [x] Frontend/HTML er et separat, ferdig spor
 - [x] Binary og distribusjon finnes allerede
-- [ ] Resten av bootstrap-flaten er helt slanket
+- [x] Resten av bootstrap-flaten er helt slanket
 - [x] Alle fallback-veier er eksplisitt dokumentert og minimale
 - [x] Release, CI og vedlikehold er helt selvforklarende for nye bidragsytere
 
@@ -172,7 +172,7 @@ Omgang 6 er fullført.
 
 ## Anbefalt rekkefølge
 
-- [ ] Gjenværende bootstrap-rydding
+- [x] Gjenværende bootstrap-rydding
 - [x] Eksplisitt og minimal fallback
 - [x] Release- og installasjonsflyt
 - [x] CI og regressionsvern
@@ -183,7 +183,7 @@ Omgang 6 er fullført.
 
 Det som gjenstår etter Omgang 10 er ferdig når:
 
-- [ ] bootstrap er minimal og ikke overrasker
+- [x] bootstrap er minimal og ikke overrasker
 - [x] fallback er eksplisitt og kontrollert
 - [x] release og installasjon er repeterbar
 - [x] CI stopper regresjoner tidlig

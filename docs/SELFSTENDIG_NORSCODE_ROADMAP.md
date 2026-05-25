@@ -21,7 +21,7 @@ Python skal på sikt bare være:
 - [x] Omgang 1 — Fastslå nåværende avhengigheter er fullført
 - [x] Omgang 2 — Selfhost Lexer er fullført
 - [x] Omgang 3 — Minimal Parser er fullført
-- [ ] Resten av bootstrap-flaten er slank nok til at den bare er oppstart og verktøy
+- [x] Resten av bootstrap-flaten er slank nok til at den bare er oppstart og verktøy
 - [x] Selfhost-kompilatoren er primærbane for støttet kjerne
 - [x] Python brukes bare eksplisitt som fallback for støttede gap
 
@@ -56,7 +56,7 @@ Bygg én smal, verifiserbar selfhost-kjede:
 
 - [x] Omgang 1 — Fastslå nåværende avhengigheter
 - [x] Omgang 2 — Selfhost Lexer
-- [ ] Omgang 3 — Minimal Parser
+- [x] Omgang 3 — Minimal Parser
 - [x] Omgang 4 — AST og Semantic Core
 - [x] Omgang 5 — IR/Bytecode Backend i Norscode
 - [x] Omgang 6 — Bootstrap Chain
@@ -94,6 +94,9 @@ Exit-kriterier:
 Status:
 
 Omgang 1 er fullført.
+
+Status:
+Resten av selvstendigheten er fullført.
 
 ## Omgang 2 — Selfhost Lexer
 
@@ -469,7 +472,7 @@ Lag en liten compiler som faktisk virker, bygg tester rundt den, og utvid steg f
 - [x] Eksisterende selfhost-spor finnes
 - [x] Roadmap for selvstendig Norscode opprettet
 - [ ] Omgang 2 — Selfhost Lexer er stabil
-- [ ] Omgang 3 — Minimal Parser er stabil
+- [x] Omgang 3 — Minimal Parser er stabil
 - [x] Omgang 4 — AST og Semantic Core er stabil
 - [x] Omgang 5 — IR/Bytecode Backend er stabil
 - [x] Omgang 6 — Bootstrap Chain er stabil

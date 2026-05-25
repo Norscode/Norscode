@@ -5,7 +5,7 @@ Normal users should eventually enter Norscode through a self-hosted runtime and
 CLI instead of directly through `main.py`.
 """
 
-from main import main
+from norcode.legacy_main import main
 
 
 def bootstrap_main() -> None:
