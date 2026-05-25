@@ -20,7 +20,9 @@ De mest lesbare full-eksemplene ligger i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/U
 
 - `std.frontend.layout_main(innhold)`
 - `std.frontend.layout_app(...)`
+- `std.frontend.fragment_page(...)`
 - `std.frontend.slot(...)`
+- `std.frontend.komponent_stack(...)`
 - `std.frontend.nav_link(...)`
 - `std.frontend.komponent_nav(...)`
 - `std.frontend.komponent_kort(...)`

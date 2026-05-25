@@ -19,8 +19,8 @@ class SemanticResult:
 
 
 
-def analyze_program(program: Any) -> SemanticResult:
-    analyzer = SemanticAnalyzer()
+def analyze_program(program: Any, alias_map: dict[str, str] | None = None) -> SemanticResult:
+    analyzer = SemanticAnalyzer(alias_map=alias_map)
     analyzer.analyze(program)
     return SemanticResult(
         analyzer=analyzer,

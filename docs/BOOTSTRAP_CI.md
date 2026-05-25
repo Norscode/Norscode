@@ -52,3 +52,9 @@ This workflow protects against:
 # Long-Term Goal
 
 A fully reproducible and self-hosted Norscode compiler platform.
+
+---
+
+Se også:
+
+- [`docs/SELFHOST_CI_GATES.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_CI_GATES.md)

@@ -68,3 +68,4 @@ Kjør det med:
 - [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/Norscode/docs/API_SCAFFOLD.md)
 - [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/CLI_CONTRACT.md)
 - [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
+- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)

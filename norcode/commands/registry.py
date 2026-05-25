@@ -16,16 +16,27 @@ from norcode.commands.ast_export_validate import AST_EXPORT_VALIDATE_COMMAND
 from norcode.commands.ast_validate import AST_VALIDATE_COMMAND
 from norcode.commands.base import CommandModule
 from norcode.commands.build_bytecode import BUILD_BYTECODE_COMMAND
+from norcode.commands.doctor import DOCTOR_COMMAND
 from norcode.commands.bytecode_run import BYTECODE_RUN_COMMAND
 from norcode.commands.check import CHECK_COMMAND
+from norcode.commands.diagnose import DIAGNOSE_COMMAND
 from norcode.commands.lexer_parity_check import LEXER_PARITY_CHECK_COMMAND
 from norcode.commands.lexer_parity_fixture import LEXER_PARITY_FIXTURE_COMMAND
 from norcode.commands.lexer_parity_suite import LEXER_PARITY_SUITE_COMMAND
 from norcode.commands.parser_parity_fixture import PARSER_PARITY_FIXTURE_COMMAND
 from norcode.commands.lint import LINT_COMMAND
+from norcode.commands.release import RELEASE_COMMAND
 from norcode.commands.run import RUN_COMMAND
 from norcode.commands.runtime_call import RUNTIME_CALL_COMMAND
 from norcode.commands.format import FORMAT_COMMAND
+from norcode.commands.bench import BENCH_COMMAND
+from norcode.commands.fuzz import FUZZ_COMMAND
+from norcode.commands.migrate_names import MIGRATE_NAMES_COMMAND
+from norcode.commands.scaffold_api import SCAFFOLD_API_COMMAND
+from norcode.commands.smoke import SMOKE_COMMAND
+from norcode.commands.serve_e2e import SERVE_E2E_COMMAND
+from norcode.commands.stress import STRESS_COMMAND
+from norcode.commands.security import SECURITY_COMMAND
 from norcode.commands.selfhost_lexer_compile_check import SELFHOST_LEXER_COMPILE_CHECK_COMMAND
 from norcode.commands.selfhost_lexer_list_smoke import SELFHOST_LEXER_LIST_SMOKE_COMMAND
 from norcode.commands.selfhost_lexer_parity import SELFHOST_LEXER_PARITY_COMMAND
@@ -33,6 +44,12 @@ from norcode.commands.selfhost_lexer_run import SELFHOST_LEXER_RUN_COMMAND
 from norcode.commands.selfhost_lexer_status import SELFHOST_LEXER_STATUS_COMMAND
 from norcode.commands.selfhost_lexer_suite import SELFHOST_LEXER_SUITE_COMMAND
 from norcode.commands.selfhost_lexer_token_smoke import SELFHOST_LEXER_TOKEN_SMOKE_COMMAND
+from norcode.commands.selfhost_parser_suite import SELFHOST_PARSER_SUITE_COMMAND
+from norcode.commands.selfhost_bytecode_suite import SELFHOST_BYTECODE_SUITE_COMMAND
+from norcode.commands.selfhost_bootstrap_build import SELFHOST_BOOTSTRAP_BUILD_COMMAND
+from norcode.commands.selfhost_bootstrap_check import SELFHOST_BOOTSTRAP_CHECK_COMMAND
+from norcode.commands.selfhost_semantic_suite import SELFHOST_SEMANTIC_SUITE_COMMAND
+from norcode.commands.selfhost_stdlib_suite import SELFHOST_STDLIB_SUITE_COMMAND
 from norcode.commands.serve import SERVE_COMMAND
 from norcode.commands.ui_render import UI_RENDER_COMMAND
 from norcode.commands.test import TEST_COMMAND
@@ -60,8 +77,25 @@ COMMANDS: tuple[CommandModule, ...] = (
     SELFHOST_LEXER_PARITY_COMMAND,
     SELFHOST_LEXER_SUITE_COMMAND,
     TOKEN_VALIDATE_COMMAND,
+    SELFHOST_PARSER_SUITE_COMMAND,
+    SELFHOST_BYTECODE_SUITE_COMMAND,
+    SELFHOST_BOOTSTRAP_BUILD_COMMAND,
+    SELFHOST_BOOTSTRAP_CHECK_COMMAND,
+    SELFHOST_SEMANTIC_SUITE_COMMAND,
+    SELFHOST_STDLIB_SUITE_COMMAND,
     FORMAT_COMMAND,
     LINT_COMMAND,
+    SCAFFOLD_API_COMMAND,
+    FUZZ_COMMAND,
+    RELEASE_COMMAND,
+    SMOKE_COMMAND,
+    BENCH_COMMAND,
+    SERVE_E2E_COMMAND,
+    STRESS_COMMAND,
+    SECURITY_COMMAND,
+    DOCTOR_COMMAND,
+    DIAGNOSE_COMMAND,
+    MIGRATE_NAMES_COMMAND,
     UI_RENDER_COMMAND,
     CommandModule(
         name="repl",

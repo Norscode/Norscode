@@ -1,74 +1,86 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-COMMON_SCRIPT="${SCRIPT_DIR}/../../scripts/package-release-common.sh"
-BOOTSTRAP_BUILD_SCRIPT="${SCRIPT_DIR}/tools/build-bootstrap-binary.sh"
+usage() {
+  printf 'Bruk: bash package-release.sh <versjon>\n' >&2
+}
 
-if [ -x "${BOOTSTRAP_BUILD_SCRIPT}" ]; then
-  "${BOOTSTRAP_BUILD_SCRIPT}"
-fi
-
-if [ ! -f "${COMMON_SCRIPT}" ]; then
-  printf 'Fant ikke felles release-script: %s\n' "${COMMON_SCRIPT}" >&2
+if [ "$#" -lt 1 ]; then
+  usage
   exit 1
 fi
 
-PROJECT_ROOT="${SCRIPT_DIR}"
-PROJECT_NAME="norscode-language"
-ENTRYPOINT="README.md"
+VERSION="$1"
+shift || true
 
-REQUIRED_PATHS=(
-  "main.py"
-  "norcode"
-  "norsklang"
-  "compiler"
-  "selfhost"
-  "selfhost_parity"
-  "std"
-  "packages"
-  "docs"
-  "scripts"
-  "README.md"
-  "LICENSE"
-  "CHANGELOG.md"
-  "pyproject.toml"
-  "setup.py"
-  "bin"
-)
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+DIST_DIR="$ROOT_DIR/dist"
+RELEASE_DIR="$ROOT_DIR/release-artifacts"
+ARCHIVE_NAME="norscode-language-${VERSION}.tar.gz"
+ARCHIVE_PATH="${RELEASE_DIR}/${ARCHIVE_NAME}"
 
-OPTIONAL_PATHS=(
-  "examples"
-  "tests"
-  "website"
-  "dist"
-  "app.c"
-  "app.no"
-  "README.md"
-  "norcode.toml"
-  "app.lock"
-  "lock"
-  "registry"
-)
+mkdir -p "$RELEASE_DIR"
 
-EXCLUDE_PATHS=(
-  ".git"
-  ".github"
-  ".vscode"
-  ".venv"
-  ".build-linux-venv"
-  ".build-macos-venv"
-  "__pycache__"
-  ".DS_Store"
-  "release-artifacts"
-)
-
-# Wrapperen beskriver hvilke filer prosjektet trenger; felles logikk bor i scripts/.
-# shellcheck source=../../scripts/package-release-common.sh
-source "${COMMON_SCRIPT}"
-
-if [ "$#" -gt 0 ]; then
-  package_release "$@"
-else
-  package_release
+if [ ! -x "$DIST_DIR/norcode-bootstrap-compile" ]; then
+  printf 'Manglar bootstrap-binary: %s\n' "$DIST_DIR/norcode-bootstrap-compile" >&2
+  exit 1
 fi
+
+if [ ! -x "$DIST_DIR/norscode" ]; then
+  printf 'Manglar distribusjonsbinary: %s\n' "$DIST_DIR/norscode" >&2
+  exit 1
+fi
+
+if [ ! -f "$ROOT_DIR/norcode.toml" ]; then
+  printf 'Manglar norcode.toml\n' >&2
+  exit 1
+fi
+
+rm -f "$ARCHIVE_PATH" "${ARCHIVE_PATH}.sha256"
+
+tar -czf "$ARCHIVE_PATH" -C "$ROOT_DIR" \
+  backend \
+  bin \
+  cli \
+  compiler \
+  deploy \
+  dist \
+  docs \
+  examples \
+  frontend \
+  main.py \
+  nc \
+  nl \
+  nor \
+  norcode \
+  norcode.toml \
+  norsklang \
+  package-release.sh \
+  packages \
+  pyproject.toml \
+  runtime \
+  scripts \
+  selfhost \
+  std \
+  stdlib \
+  tests \
+  toolchain \
+  tools \
+  vscode-norscode \
+  README.md \
+  LICENSE \
+  CHANGELOG.md \
+  Makefile \
+  app.c \
+  app.no
+
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}' > "${ARCHIVE_PATH}.sha256"
+elif command -v sha256sum >/dev/null 2>&1; then
+  sha256sum "$ARCHIVE_PATH" | awk '{print $1}' > "${ARCHIVE_PATH}.sha256"
+else
+  printf 'Fant ikkje verktøy for SHA256-sjekksum\n' >&2
+  exit 1
+fi
+
+printf 'Bygde releasepakke: %s\n' "$ARCHIVE_PATH"

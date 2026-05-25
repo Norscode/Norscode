@@ -14,12 +14,14 @@ Norscode kan bruke server-drevne fragmenter når en app vil levere deler av en s
 - `std.islands.fragment_root(...)` markerer et fragmentområde i markup
 - `std.islands.fragment_shell(...)` gir en liten wrapper for delvis innhold
 - `std.islands.fragment_response(...)` og `std.islands.fragment_response_ok(...)` returnerer fragment-svar fra serveren
+- `std.frontend.fragment_page(...)` er en anbefalt høy-nivå helper når en route skal kunne svare både som full side og fragment
 
 ## Praktisk bruk
 
 - en route kan returnere full side ved vanlig navigasjon
 - en route kan returnere fragment innhold når du vil isolere en del av siden
 - samme komponenter kan brukes i begge tilfeller
+- typiske eksempler er søk, paginerte lister og sorterte visninger, der samme URL kan gi både fullside- og fragment-svar
 
 ## Eksempel
 
@@ -41,6 +43,23 @@ funksjon status(ctx: ordbok_tekst) -> ordbok_tekst {
 }
 ```
 
+Et annet praktisk mønster er en søke- eller liste-route:
+
+```no
+funksjon sok(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /sok")
+
+    la query = web.request_query_param(ctx, "q")
+    la fragment = islands.fragment_shell("Søk", sok_innhold(query))
+
+    returner islands.fragment_or_full_response(
+        ctx,
+        frontend.layout_app("Norscode Frontend", toppnavigasjon, fragment, "Bygd med component mode."),
+        fragment
+    )
+}
+```
+
 ## Regler
 
 - bruk fragmenter når du vil isolere en del av server-renderingen
@@ -56,4 +75,8 @@ Se også:
 
 - [docs/FRONTEND_SERVER_FALLBACK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SERVER_FALLBACK.md)
 - [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
+- [docs/FRONTEND_FRAGMENT_EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
+- [docs/FRONTEND_FRAGMENT_PATTERNS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PATTERNS.md)
+- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PLAYBOOK.md)
+- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)
 - [`std/islands.no`](/Users/jansteinar/Projects/Norscode/std/islands.no)

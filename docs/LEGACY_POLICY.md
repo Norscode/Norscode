@@ -2,6 +2,8 @@
 
 This repository uses `Norscode` as the primary product name.
 
+See also [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for the current migration path and reading order.
+
 ## Canonical names
 
 - User-facing product name: `Norscode`
@@ -40,4 +42,3 @@ Use `Norscode` instead of `norsklang` in:
 
 If a name is visible to a new user, it should be `Norscode`.
 If a name exists only to keep older projects working, `norsklang` is acceptable.
-
