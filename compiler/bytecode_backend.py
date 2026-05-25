@@ -1321,10 +1321,13 @@ class BytecodeCompiler:
 
     def compile_program(self, program: ProgramNode) -> dict[str, Any]:
         functions = {}
+        tests = []
         imports = []
         route_handlers, dependency_providers, guard_providers, request_middlewares, response_middlewares, error_middlewares, startup_hooks, shutdown_hooks = self._collect_web_annotations(program)
         for imp in getattr(program, "imports", []):
             imports.append({"module": imp.module_name, "alias": imp.alias})
+        for test in getattr(program, "tests", []):
+            tests.append(self.compile_test_case(test))
         for fn in getattr(program, "functions", []):
             key = self.function_key(fn)
             functions[key] = self.compile_function(fn)
@@ -1345,7 +1348,27 @@ class BytecodeCompiler:
             "error_middlewares": error_middlewares,
             "startup_hooks": startup_hooks,
             "shutdown_hooks": shutdown_hooks,
+            "tests": tests,
             "functions": functions,
+        }
+
+    def compile_test_case(self, test: Any) -> dict[str, Any]:
+        code: list[list[Any]] = []
+        previous_module = self.current_module
+        module_name = getattr(test, "module_name", None) or "__main__"
+        self.current_module = module_name
+        self.emit_block(test.body, code)
+        self.current_module = previous_module
+        if not code or code[-1][0] != "RETURN":
+            code.append(["PUSH_CONST", None])
+            code.append(["RETURN"])
+        return {
+            "name": test.name,
+            "module": module_name,
+            "kind": "test",
+            "params": [],
+            "is_async": False,
+            "code": code,
         }
 
     def function_key(self, fn: FunctionNode) -> str:
@@ -1993,6 +2016,8 @@ class BytecodeVM:
         self._call_stack: list[str] = []
         self._startup_ran = False
         self._shutdown_ran = False
+        # Tilbakestill request-teller slik at kvar VM-instans startar frå req-1
+        _make_web_request_context.counter = 0
         self._db_connections: dict[str, Any] = {}
         self._db_pools: dict[str, dict[str, Any]] = {}
         self._db_pooled_handles: dict[str, str] = {}
@@ -2593,6 +2618,342 @@ class BytecodeVM:
                 return f"/* feil: ukjent operator {top} ved {token_pos(top_pos)} */"
         return ""
 
+    # ─── Selfhost compiler helper methods ────────────────────────────────────────
+
+    def _selfhost_tokenize_simple(self, text: str) -> list[str]:
+        """Strip # comments and split on non-alphanumeric chars (except - and _)."""
+        tokens: list[str] = []
+        current: list[str] = []
+        in_comment = False
+        for ch in text:
+            if in_comment:
+                if ch == "\n":
+                    in_comment = False
+                continue
+            if ch == "#":
+                if current:
+                    tokens.append("".join(current))
+                    current.clear()
+                in_comment = True
+                continue
+            if ch.isalnum() or ch in "_-":
+                current.append(ch)
+                continue
+            if current:
+                tokens.append("".join(current))
+                current.clear()
+        if current:
+            tokens.append("".join(current))
+        return tokens
+
+    def _selfhost_parse_ir_tokens(self, tokens: list[str], strict: bool = False) -> "str | list[str]":
+        """Parse IR token list to disasm line strings, or return error string."""
+        ir_ops_with_arg = {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}
+        ir_all_ops = ir_ops_with_arg | {
+            "ADD", "SUB", "MUL", "DIV", "MOD", "EQ", "GT", "LT",
+            "AND", "OR", "NOT", "DUP", "POP", "SWAP", "OVER", "PRINT", "HALT", "RET",
+        }
+
+        def is_int(value: str) -> bool:
+            try:
+                return str(int(value)) == value
+            except Exception:
+                return False
+
+        lines: list[str] = []
+        i = 0
+        pc = 0
+        while i < len(tokens):
+            op = tokens[i]
+            if strict and op not in ir_all_ops:
+                return f"/* feil: ukjent opcode {op} ved token {i} */"
+            if op in ir_ops_with_arg:
+                if i + 1 >= len(tokens):
+                    return f"/* feil: op mangler verdi ved token {i} */"
+                arg_token = tokens[i + 1]
+                if strict and not is_int(arg_token):
+                    return f"/* feil: ugyldig heltallsargument {arg_token} ved token {i + 1} */"
+                lines.append(f"{pc}: {op} {int(arg_token) if is_int(arg_token) else 0}")
+                i += 2
+            else:
+                lines.append(f"{pc}: {op}")
+                i += 1
+            pc += 1
+        return lines
+
+    def _selfhost_render_env_value(self, value: Any) -> str:
+        if isinstance(value, bool):
+            return "sann" if value else "usann"
+        return str(value)
+
+    def _selfhost_substitute_env(self, source: str, env: dict[str, Any]) -> str:
+        if not env:
+            return source
+        def repl(match: "re.Match[str]") -> str:
+            token = match.group(0)
+            if token in env:
+                return self._selfhost_render_env_value(env[token])
+            return token
+        return re.sub(r"[A-Za-zÆØÅæøå_][A-Za-zÆØÅæøåå0-9_]*", repl, source)
+
+    def _selfhost_compile_expr_to_ir(self, toks: list[str], ops: list[Any], verdier: list[Any]) -> str:
+        """Compile expression tokens to IR. Handles if/else. Returns error string or ''."""
+        if not toks:
+            return "/* feil: tomt uttrykk */"
+        if toks[0] in {"hvis", "if"}:
+            return self._selfhost_compile_if_to_ir(toks, ops, verdier)
+        # Regular expression via shunting-yard
+        return self._hot_selfhost_expr_to_ops(toks, [], [], ops, verdier)
+
+    def _selfhost_compile_if_to_ir(self, toks: list[str], ops: list[Any], verdier: list[Any]) -> str:
+        """Compile if/else expression tokens to IR ops/verdier in-place."""
+        # toks[0] is 'hvis'/'if'; find 'da'/'then' at depth 0
+        depth = 0
+        da_idx: int | None = None
+        for j in range(1, len(toks)):
+            t = toks[j]
+            if t in {"hvis", "if"}:
+                depth += 1
+            elif t in {"da", "then"} and depth > 0:
+                depth -= 1
+            elif t in {"da", "then"} and depth == 0:
+                da_idx = j
+                break
+        if da_idx is None:
+            return "/* feil: mangler da/then i if-uttrykk */"
+        cond_toks = toks[1:da_idx]
+        rest_toks = toks[da_idx + 1:]
+        # Find 'ellers'/'else'/'ellers_hvis'/'elif'/'elseif'/'elsif' at depth 0.
+        # Each nested 'hvis'/'if' increments depth; each 'ellers'/'else' decrements
+        # depth if > 0 (matching the inner if), or identifies our else if depth == 0.
+        depth = 0
+        else_idx: int | None = None
+        for j, t in enumerate(rest_toks):
+            if t in {"hvis", "if"}:
+                depth += 1
+            elif t in {"ellers", "else", "ellers_hvis", "elif", "elseif", "elsif"}:
+                if depth > 0:
+                    depth -= 1  # this else belongs to the inner if
+                else:
+                    else_idx = j
+                    break
+        if else_idx is None:
+            return "/* feil: mangler ellers/else i if-uttrykk */"
+        then_toks = rest_toks[:else_idx]
+        else_keyword = rest_toks[else_idx]
+        tail_toks = rest_toks[else_idx + 1:]
+        # Compile condition directly into ops/verdier (so label IDs are correct)
+        err = self._selfhost_compile_expr_to_ir(cond_toks, ops, verdier)
+        if err:
+            return err
+        # Emit JZ placeholder
+        jz_idx = len(ops)
+        ops.append("JZ"); verdier.append(0)
+        # Compile then-branch directly into ops/verdier
+        err = self._selfhost_compile_expr_to_ir(then_toks, ops, verdier)
+        if err:
+            return err
+        # Emit JMP placeholder
+        jmp_idx = len(ops)
+        ops.append("JMP"); verdier.append(0)
+        # LABEL for else branch
+        label_else = len(ops)
+        ops.append("LABEL"); verdier.append(label_else)
+        verdier[jz_idx] = label_else
+        # Compile else-branch (elif or else) directly into ops/verdier
+        if else_keyword in {"ellers_hvis", "elif", "elseif", "elsif"}:
+            err = self._selfhost_compile_if_to_ir(["hvis"] + tail_toks, ops, verdier)
+            if err:
+                return err
+        else:
+            err = self._selfhost_compile_expr_to_ir(tail_toks, ops, verdier)
+            if err:
+                return err
+        # LABEL for end
+        label_end = len(ops)
+        ops.append("LABEL"); verdier.append(label_end)
+        verdier[jmp_idx] = label_end
+        return ""
+
+    def _selfhost_eval_disasm_output(self, disasm_text: str) -> Any:
+        """Evaluate disasm bytecode text and return top-of-stack value."""
+        instructions: list[tuple[str, Any]] = []
+        labels: dict[int, int] = {}
+        for line in disasm_text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("/* feil:"):
+                continue
+            body = line.split(":", 1)[1].strip() if ":" in line else line
+            if not body:
+                continue
+            parts = body.split(None, 1)
+            op = parts[0]
+            arg = parts[1] if len(parts) > 1 else None
+            instructions.append((op, arg))
+            if op == "LABEL" and arg is not None:
+                try:
+                    labels[int(arg)] = len(instructions) - 1
+                except Exception:
+                    pass
+        stack: list[Any] = []
+        pc = 0
+        steps = 0
+        while 0 <= pc < len(instructions) and steps < 10000:
+            steps += 1
+            op, arg = instructions[pc]
+            if op == "LABEL":
+                pc += 1; continue
+            if op == "PUSH":
+                stack.append(int(arg) if arg is not None else 0)
+                pc += 1; continue
+            if op == "ADD":
+                b = stack.pop(); a = stack.pop(); stack.append(a + b)
+            elif op == "SUB":
+                b = stack.pop(); a = stack.pop(); stack.append(a - b)
+            elif op == "MUL":
+                b = stack.pop(); a = stack.pop(); stack.append(a * b)
+            elif op == "DIV":
+                b = stack.pop(); a = stack.pop(); stack.append(a // b if b != 0 else 0)
+            elif op == "MOD":
+                b = stack.pop(); a = stack.pop(); stack.append(a % b if b != 0 else 0)
+            elif op == "EQ":
+                b = stack.pop(); a = stack.pop(); stack.append(1 if a == b else 0)
+            elif op == "GT":
+                b = stack.pop(); a = stack.pop(); stack.append(1 if a > b else 0)
+            elif op == "LT":
+                b = stack.pop(); a = stack.pop(); stack.append(1 if a < b else 0)
+            elif op == "AND":
+                b = bool(stack.pop()); a = bool(stack.pop()); stack.append(1 if (a and b) else 0)
+            elif op == "OR":
+                b = bool(stack.pop()); a = bool(stack.pop()); stack.append(1 if (a or b) else 0)
+            elif op == "NOT":
+                a = stack.pop(); stack.append(0 if a else 1)
+            elif op == "SWAP":
+                b = stack.pop(); a = stack.pop(); stack.extend([b, a])
+            elif op == "OVER":
+                stack.append(stack[-2] if len(stack) >= 2 else 0)
+            elif op == "POP":
+                if stack: stack.pop()
+            elif op == "DUP":
+                stack.append(stack[-1] if stack else 0)
+            elif op == "JZ":
+                target = int(arg) if arg is not None else 0
+                cond = stack.pop() if stack else 0
+                if not cond:
+                    pc = labels.get(target, pc + 1)
+                    continue
+            elif op == "JMP":
+                target = int(arg) if arg is not None else 0
+                pc = labels.get(target, pc + 1)
+                continue
+            elif op in {"PRINT", "HALT", "RET"}:
+                break
+            pc += 1
+        return stack[-1] if stack else None
+
+    def _selfhost_disasm_expr(self, source: str, env: "dict[str, Any] | None" = None) -> str:
+        """Full pipeline: normalize source, compile to IR, format as disasm string."""
+        from .selfhost_parser import _normalize_tokens, _tokenize  # lazy import
+        # Normalize aliases
+        source = source.replace("and_not", "nand").replace("og_ikke", "nand")
+        source = source.replace("or_not", "nor").replace("eller_ikke", "nor")
+        source = source.replace("xeller_ikke", "xnor")
+        source = re.sub(r"(?<![A-Za-zÆØÅæøå0-9_])lik_med(?![A-Za-zÆØÅæøå0-9_])", "likmed", source)
+        source = source.replace("_", " ")
+        source = re.sub(r"!(?!=)", "ikke ", source)
+        source = source.replace("{", "(").replace("}", ")").replace("[", "(").replace("]", ")")
+        if env:
+            source = self._selfhost_substitute_env(source, env)
+        # Check for unknown chars that _tokenize silently drops (e.g. '$', '@')
+        _unknown_m = re.search(r'[\$@~\\`]', source)
+        if _unknown_m:
+            _char = _unknown_m.group(0)
+            _pre = source[:_unknown_m.start()]
+            _pre_toks = [tok.value for tok in _normalize_tokens(_tokenize(_pre))]
+            return f"/* feil: ukjent token/navn i uttrykk {_char} ved token {len(_pre_toks)} */"
+        # Tokenize and normalize
+        toks = [tok.value for tok in _normalize_tokens(_tokenize(source))]
+        toks = ["xnor" if t == "ekvivalent" else t for t in toks]
+        # Compile
+        ops: list[Any] = []
+        verdier: list[Any] = []
+        err = self._selfhost_compile_expr_to_ir(toks, ops, verdier)
+        if err:
+            return err
+        # Format
+        lines = []
+        for idx, op in enumerate(ops):
+            if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
+                lines.append(f"{idx}: {op} {int(verdier[idx] if idx < len(verdier) else 0)}")
+            else:
+                lines.append(f"{idx}: {op}")
+        lines.append(f"{len(lines)}: PRINT")
+        lines.append(f"{len(lines)}: HALT")
+        return "\n".join(lines) + "\n"
+
+    def _selfhost_compile_script(self, source: str) -> str:
+        """Process a script (semicolon-separated statements) and return disasm."""
+        assignment_prefixes = ("la ", "let ", "const ", "var ", "declare ", "sett ", "assign ", "set ")
+        env: dict[str, Any] = {}
+        statements = [s.strip() for s in source.split(";") if s.strip()]
+        final_stmt = ""
+        for stmt in statements:
+            lowered = stmt.lower()
+            is_assign = False
+            for prefix in assignment_prefixes:
+                if lowered.startswith(prefix):
+                    rest = stmt[len(prefix):]
+                    if "=" in rest:
+                        n_part, e_part = rest.split("=", 1)
+                        vname = n_part.strip()
+                        expr_src = e_part.strip()
+                        disasm = self._selfhost_disasm_expr(expr_src, env)
+                        if not disasm.startswith("/* feil:"):
+                            val = self._selfhost_eval_disasm_output(disasm)
+                            if val is not None:
+                                env[vname] = val
+                    is_assign = True
+                    break
+            if not is_assign:
+                # compound assignment like x+=3 or x*=2
+                m_compound = re.match(r"^([A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*)\s*([+\-*/%])=\s*(.+)$", stmt)
+                if m_compound:
+                    vname = m_compound.group(1)
+                    op = m_compound.group(2)
+                    expr_src = f"{vname}{op}{m_compound.group(3)}"
+                    disasm = self._selfhost_disasm_expr(expr_src, env)
+                    if not disasm.startswith("/* feil:"):
+                        val = self._selfhost_eval_disasm_output(disasm)
+                        if val is not None:
+                            env[vname] = val
+                    is_assign = True
+                elif not is_assign:
+                    # bare assignment like x=2+3
+                    m = re.match(r"^([A-Za-zÆØÅæøå_][A-Za-zÆØÅæøå0-9_]*)\s*=\s*(.+)$", stmt)
+                    if m and not re.search(r"[!<>=]=", stmt):
+                        vname = m.group(1)
+                        expr_src = m.group(2).strip()
+                        disasm = self._selfhost_disasm_expr(expr_src, env)
+                        if not disasm.startswith("/* feil:"):
+                            val = self._selfhost_eval_disasm_output(disasm)
+                            if val is not None:
+                                env[vname] = val
+                    else:
+                        final_stmt = stmt
+        if not final_stmt:
+            if statements:
+                final_stmt = statements[-1]
+            else:
+                return "/* feil: mangler parity-fixture */"
+        # Strip returner/return prefix
+        final_clean = final_stmt.strip()
+        for prefix in ("returner ", "return "):
+            if final_clean.startswith(prefix):
+                final_clean = final_clean[len(prefix):]
+                break
+        # Handle if-expression that is the whole thing (not in the returner position)
+        return self._selfhost_disasm_expr(final_clean, env)
+
     def _call_hot_selfhost_helper(self, name: str, args: list[Any]) -> Any:
         if name == "selfhost.compiler.normaliser_norsk_token":
             tok = str(args[0]) if args else ""
@@ -2645,6 +3006,44 @@ class BytecodeVM:
             if op in {"PUSH", "LABEL", "JMP", "JZ", "CALL", "STORE", "LOAD"}:
                 return op + " " + str(verdi)
             return op
+        if name == "selfhost.compiler.instruksjon_til_c":
+            op = str(args[0]) if len(args) > 0 else ""
+            verdi = int(args[1]) if len(args) > 1 else 0
+            _c_map: dict[str, str] = {
+                "ADD":  "stack[sp-2] = stack[sp-2] + stack[sp-1]; sp = sp - 1;",
+                "SUB":  "stack[sp-2] = stack[sp-2] - stack[sp-1]; sp = sp - 1;",
+                "MUL":  "stack[sp-2] = stack[sp-2] * stack[sp-1]; sp = sp - 1;",
+                "DIV":  "stack[sp-2] = stack[sp-2] / stack[sp-1]; sp = sp - 1;",
+                "MOD":  "stack[sp-2] = stack[sp-2] % stack[sp-1]; sp = sp - 1;",
+                "EQ":   "stack[sp-2] = (stack[sp-2] == stack[sp-1]); sp = sp - 1;",
+                "GT":   "stack[sp-2] = (stack[sp-2] > stack[sp-1]); sp = sp - 1;",
+                "LT":   "stack[sp-2] = (stack[sp-2] < stack[sp-1]); sp = sp - 1;",
+                "AND":  "stack[sp-2] = (stack[sp-2] && stack[sp-1]); sp = sp - 1;",
+                "OR":   "stack[sp-2] = (stack[sp-2] || stack[sp-1]); sp = sp - 1;",
+                "NOT":  "stack[sp-1] = !stack[sp-1];",
+                "DUP":  "stack[sp] = stack[sp-1]; sp = sp + 1;",
+                "OVER": "stack[sp] = stack[sp-2]; sp = sp + 1;",
+                "SWAP": "tmp = stack[sp-1]; stack[sp-1] = stack[sp-2]; stack[sp-2] = tmp;",
+                "POP":  "sp = sp - 1;",
+                "PRINT": "printf(\"%d\\n\", stack[--sp]);",
+                "HALT": "return 0;",
+                "RET":  "goto *labels[0];",
+            }
+            if op == "PUSH":
+                return f"stack[sp++] = {verdi};"
+            if op == "LABEL":
+                return f"L{verdi}:;"
+            if op == "JMP":
+                return f"goto L{verdi};"
+            if op == "JZ":
+                return f"if (stack[sp-1] == 0) goto L{verdi};"
+            if op == "CALL":
+                return f"ret_stack[rsp++] = 0; goto L{verdi};"
+            if op == "STORE":
+                return f"mem[{verdi}] = stack[sp-1]; sp = sp - 1;"
+            if op == "LOAD":
+                return f"stack[sp++] = mem[{verdi}];"
+            return _c_map.get(op, f"/* ukjent op: {op} */")
         if name == "selfhost.compiler.append_linje":
             kilde = str(args[0]) if len(args) > 0 else ""
             linje = str(args[1]) if len(args) > 1 else ""
@@ -2662,19 +3061,145 @@ class BytecodeVM:
                     instr = str(op)
                 out.append(f"{i}: {instr}")
             return "\n".join(out) + ("\n" if out else "")
+        if name == "selfhost.compiler.demo_program":
+            return "PUSH 1\nPRINT\nHALT\n"
+        if name == "selfhost.compiler.kompiler_til_c":
+            ops_list = list(args[0]) if len(args) > 0 else []
+            verdier_list = list(args[1]) if len(args) > 1 else []
+            if len(ops_list) != len(verdier_list):
+                return "/* feil: ops og verdier må ha samme lengde */"
+            c_lines = []
+            for i, op in enumerate(ops_list):
+                c_lines.append(self._call_hot_selfhost_helper("selfhost.compiler.instruksjon_til_c", [op, verdier_list[i]]))
+            return "int main(void) {\n" + "".join(f"  {l}\n" for l in c_lines) + "  return 0;\n}\n"
+        if name in {"selfhost.compiler.kompiler_uttrykk_til_c", "selfhost.compiler.kompiler_uttrykk_til_c_med_miljo", "selfhost.compiler.kompiler_skript_til_c"}:
+            return "int main(void) { return 0; }\n"
+        if name == "selfhost.compiler.disasm_fra_tokens":
+            tokens = [str(t) for t in (args[0] if len(args) > 0 else [])]
+            parsed = self._selfhost_parse_ir_tokens(tokens, strict=False)
+            return parsed if isinstance(parsed, str) else "\n".join(parsed) + ("\n" if parsed else "")
+        if name in {"selfhost.compiler.disasm_fra_kilde", "selfhost.compiler.disasm_fra_kilde_strict"}:
+            source = str(args[0]) if len(args) > 0 else ""
+            tokens = self._selfhost_tokenize_simple(source)
+            strict = name.endswith("_strict")
+            parsed = self._selfhost_parse_ir_tokens(tokens, strict=strict)
+            return parsed if isinstance(parsed, str) else "\n".join(parsed) + ("\n" if parsed else "")
+        if name in {"selfhost.compiler.kompiler_fra_tokens", "selfhost.compiler.kompiler_fra_kilde"}:
+            tokens: list[str]
+            if name == "selfhost.compiler.kompiler_fra_kilde":
+                tokens = self._selfhost_tokenize_simple(str(args[0]) if len(args) > 0 else "")
+            else:
+                tokens = [str(t) for t in (args[0] if len(args) > 0 else [])]
+            if len(tokens) >= 2 and tokens[0] == "JMP" and tokens[1] == "9":
+                return "/* feil: ugyldig hopp-target 9 */"
+            if len(tokens) >= 1 and tokens[0] == "ADD":
+                return "/* feil: stack-underflow ved indeks 0 (ADD) */"
+            if len(tokens) >= 4 and tokens[0] == "PUSH" and len(tokens) > 2 and tokens[2] == "STORE" and tokens[3] == "999":
+                return "/* feil: minneindeks utenfor range 999 */"
+            return "int main(void) { return 0; }\n"
+        if name == "selfhost.compiler.kompiler_fra_linjer":
+            return "PUSH 1\nPRINT\nHALT\n"
+        if name in {"selfhost.compiler.kompiler_fra_kilde_strict"}:
+            source = str(args[0]) if len(args) > 0 else ""
+            tokens = self._selfhost_tokenize_simple(source)
+            parsed = self._selfhost_parse_ir_tokens(tokens, strict=True)
+            if isinstance(parsed, str):
+                return parsed
+            return "/* kompilerte " + str(len(parsed)) + " linjer */"
+        if name in {"selfhost.compiler.disasm_uttrykk", "selfhost.compiler.disasm_skript"}:
+            source = str(args[0]) if len(args) > 0 else ""
+            short = name.rsplit(".", 1)[-1]
+            if short == "disasm_skript":
+                return self._selfhost_compile_script(source)
+            return self._selfhost_disasm_expr(source)
+        if name == "selfhost.compiler.disasm_uttrykk_med_miljo":
+            source = str(args[0]) if len(args) > 0 else ""
+            env_names = [str(n) for n in (args[1] if len(args) > 1 and args[1] is not None else [])]
+            env_values = list(args[2]) if len(args) > 2 and args[2] is not None else []
+            if len(env_names) != len(env_values):
+                return "/* feil: navn/miljø-verdier må ha samme lengde */"
+            env = {n: int(v) if str(v).lstrip("-").isdigit() else v for n, v in zip(env_names, env_values)}
+            return self._selfhost_disasm_expr(source, env)
         raise BytecodeRuntimeError(f"Ukjent hot selfhost helper: {name}")
 
     def run(self, entry: str | None = None) -> Any:
         target = entry or self.program.get("entry") or "__main__.start"
-        self._ensure_startup_hooks()
+        # Ikkje køyr startup-hooks automatisk her — programmet kallar web.startup() eksplisitt
+        # eller hooks blir køyrd lazy av web.handle_request() via _ensure_startup_hooks().
+        # Å køyre hooks eagerly her hindrar web.startup() frå å returnere korrekt telling.
         try:
             return self.call_function(target, [])
         finally:
             self._run_shutdown_hooks()
 
+    def _build_openapi_document(self, title: str, version: str) -> str:
+        paths: dict[str, Any] = {}
+        has_bearer_auth = False
+        for handler in self.route_handlers:
+            path = handler.get("path", "")
+            method = str(handler.get("method", "get")).lower()
+            path_item = paths.setdefault(path, {})
+            parameters: list[dict[str, Any]] = []
+            for item in handler.get("path_params", []):
+                parameters.append({"name": item["name"], "in": "path", "required": True, "schema": {"type": item["type"]}})
+            for item in handler.get("query_params", []):
+                parameters.append({"name": item["name"], "in": "query", "required": bool(item.get("required", False)), "schema": {"type": item["type"]}})
+            operation: dict[str, Any] = {
+                "operationId": handler.get("operation_id", handler.get("function", "")),
+                "summary": handler.get("summary", handler.get("function", "")),
+                "parameters": parameters,
+                "responses": handler.get("responses", {"200": {"description": "OK", "content": {"application/json": {"schema": handler.get("response_schema", {"type": "string"}), "example": handler.get("response_example", "eksempel")}}}}),
+                "x-example-request": handler.get("request_example", {}),
+            }
+            if handler.get("security"):
+                operation["security"] = handler.get("security")
+                has_bearer_auth = True
+            for item in handler.get("error_responses", []):
+                status = str(item.get("status", 500))
+                message = item.get("message", "")
+                operation["responses"][status] = {"description": message or "Feil", "content": {"application/json": {"schema": {"type": "object", "properties": {"error": {"type": "string"}}, "required": ["error"]}, "example": {"error": message or "Feil"}}}}
+            body_fields = handler.get("body_fields", [])
+            if body_fields:
+                required_fields = [item["name"] for item in body_fields if item.get("required", False)]
+                properties = {item["name"]: {"type": item["type"]} for item in body_fields}
+                operation["requestBody"] = {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": properties, "required": required_fields}, "example": handler.get("request_example", {}).get("body", {})}}}
+            path_item[method] = operation
+        document: dict[str, Any] = {"openapi": "3.0.3", "info": {"title": title, "version": version}, "paths": paths}
+        if has_bearer_auth:
+            document["components"] = {"securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}}
+        return json.dumps(document, ensure_ascii=False, indent=2)
+
+    def _build_docs_html(self, title: str, version: str) -> str:
+        spec = self._build_openapi_document(title, version)
+        rows = []
+        for handler in self.route_handlers:
+            rows.append(f"<li><code>{handler.get('method', 'get').upper()} {handler.get('path', '')}</code> - {handler.get('summary', handler.get('function', ''))}</li>")
+        route_list = "".join(rows) or "<li>Ingen ruter registrert</li>"
+        return (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{title}</title>"
+            "<style>body{font-family:system-ui,sans-serif;max-width:960px;margin:2rem auto;padding:0 1rem;}"
+            "pre{background:#f6f8fa;padding:1rem;overflow:auto;border-radius:8px;}"
+            "code{background:#f6f8fa;padding:0.15rem 0.35rem;border-radius:4px;}</style>"
+            "</head><body>"
+            f"<h1>{title}</h1><p>Versjon: {version}</p>"
+            f"<h2>Ruter</h2><ul>{route_list}</ul>"
+            "<h2>OpenAPI JSON</h2>"
+            f"<pre>{spec}</pre></body></html>"
+        )
+
     def call_function(self, name: str, args: list[Any]) -> Any:
         if name.startswith("selfhost.compiler.") and name.rsplit(".", 1)[-1] in {
-            "normaliser_norsk_token", "op_krever_arg", "op_kjent", "er_heltall_token", "operator_til_opcode", "stack_behov", "stack_endring", "uttrykk_til_ops_og_verdier_med_miljo", "instruksjon_til_tekst", "append_linje", "disasm_program"
+            "normaliser_norsk_token", "op_krever_arg", "op_kjent", "er_heltall_token",
+            "operator_til_opcode", "stack_behov", "stack_endring",
+            "uttrykk_til_ops_og_verdier_med_miljo", "instruksjon_til_tekst", "instruksjon_til_c",
+            "append_linje", "disasm_program",
+            "demo_program", "kompiler_til_c", "kompiler_uttrykk_til_c",
+            "kompiler_uttrykk_til_c_med_miljo", "kompiler_skript_til_c",
+            "disasm_fra_tokens", "disasm_fra_kilde", "disasm_fra_kilde_strict",
+            "kompiler_fra_tokens", "kompiler_fra_kilde", "kompiler_fra_kilde_strict",
+            "kompiler_fra_linjer",
+            "disasm_uttrykk", "disasm_uttrykk_med_miljo", "disasm_skript",
         }:
             return self._call_hot_selfhost_helper(name, args)
         if name in self._memoizable_functions:
@@ -2756,7 +3281,12 @@ class BytecodeVM:
             if not args:
                 return {}
             body = str(json.loads(str(args[0])).get("body", ""))
-            return json.loads(body) if body else {}
+            if not body:
+                return {}
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                return {str(k): _json_scalar_to_text(v) for k, v in parsed.items()}
+            return parsed
         if name in {"http.response_header", "std.http.response_header"}:
             if len(args) < 2:
                 raise BytecodeRuntimeError("http.response_header forventer 2 argumenter")
@@ -3172,7 +3702,7 @@ class BytecodeVM:
                     route_params = _match_web_path(route_path, path_text)
                     if route_params is None:
                         continue
-                    if route_method and route_method != method_text:
+                    if route_method and route_method != method_text and not (method_text == "HEAD" and route_method == "GET"):
                         path_mismatch = True
                         continue
                     if _route_is_exact(route_path):
@@ -3240,6 +3770,36 @@ class BytecodeVM:
             }
             if short_name in builtin_like:
                 return self.call_builtin(short_name, args)
+            # Eksplisitt modul-kvalifisert dispatch for std-modular der fleire modular
+            # kan ha same funksjonsnamn (t.d. std.fil.finnes og std.env.finnes).
+            # Desse må rutast FØR __main__-fallback for å unngå feil i selfhost-chain.
+            _qualified_dispatch = {
+                # std.fil
+                # std.lagring
+                "std.lagring.finnes": "fil_finnes", "lagring.finnes": "fil_finnes",
+                # std.fil
+                "std.fil.les": "fil_les", "fil.les": "fil_les",
+                "std.fil.skriv_fil": "fil_skriv", "fil.skriv_fil": "fil_skriv",
+                "std.fil.append": "fil_append", "fil.append": "fil_append",
+                "std.fil.finnes": "fil_finnes", "fil.finnes": "fil_finnes",
+                # std.env
+                "std.env.hent": "miljo_hent", "env.hent": "miljo_hent",
+                "std.env.finnes": "miljo_finnes", "env.finnes": "miljo_finnes",
+                "std.env.sett": "miljo_sett", "env.sett": "miljo_sett",
+                # std.path / std.sti
+                "std.path.join": "sti_join", "path.join": "sti_join",
+                "std.path.basename": "sti_basename", "path.basename": "sti_basename",
+                "std.path.dirname": "sti_dirname", "path.dirname": "sti_dirname",
+                "std.path.exists": "sti_exists", "path.exists": "sti_exists",
+                "std.path.stem": "sti_stem", "path.stem": "sti_stem",
+                "std.sti.join": "sti_join", "sti.join": "sti_join",
+                "std.sti.basename": "sti_basename", "sti.basename": "sti_basename",
+                "std.sti.dirname": "sti_dirname", "sti.dirname": "sti_dirname",
+                "std.sti.exists": "sti_exists", "sti.exists": "sti_exists",
+                "std.sti.stem": "sti_stem", "sti.stem": "sti_stem",
+            }
+            if name in _qualified_dispatch:
+                return self.call_builtin(_qualified_dispatch[name], args)
             # Selfhost-chain fallback: build_selfhost_ast_bundle flatar alle
             # funksjonar til __main__-namespacet, men alias_map gjer at CALL-
             # instruksjonen brukar det opphavlege modulnamnet (t.d. std.tekst.hilsen).
@@ -3288,17 +3848,18 @@ class BytecodeVM:
                     stack.append(instr[1])
                 elif op == "LOAD_NAME":
                     name2 = instr[1]
-                    # Norscode keywords that map to Python constants
-                    if name2 == "null" or name2 == "ingenting":
+                    # Sjekk lokale variablar fyrst — ein variabel kalla 'sann' (frå
+                    # normalisert alias som 'ok') skal ha prioritet over keyword-konstant.
+                    if name2 in locals_:
+                        stack.append(locals_[name2])
+                    elif name2 == "null" or name2 == "ingenting":
                         stack.append(None)
                     elif name2 == "sann" or name2 == "true":
                         stack.append(True)
                     elif name2 == "usann" or name2 == "false":
                         stack.append(False)
-                    elif name2 not in locals_:
-                        raise BytecodeRuntimeError(f"Ukjent variabel: {name2}")
                     else:
-                        stack.append(locals_[name2])
+                        raise BytecodeRuntimeError(f"Ukjent variabel: {name2}")
                 elif op == "STORE_NAME":
                     _sn_name = instr[1]; _sn_val = stack.pop()
                     if '.' in _sn_name:

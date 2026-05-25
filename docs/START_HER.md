@@ -55,16 +55,17 @@ Kjør det med:
 
 ## 5. Se de beste eksemplene
 
-- [examples/basic.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/basic.no)
-- [examples/cli.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/cli.no)
-- [examples/http.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/http.no)
-- [examples/advanced.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/advanced.no)
-- [examples/helpdesk.no](/Users/jansteinar/Projects/language_handoff/projects/language/examples/helpdesk.no)
+- [examples/basic.no](/Users/jansteinar/Projects/Norscode/examples/basic.no)
+- [examples/cli.no](/Users/jansteinar/Projects/Norscode/examples/cli.no)
+- [examples/http.no](/Users/jansteinar/Projects/Norscode/examples/http.no)
+- [examples/advanced.no](/Users/jansteinar/Projects/Norscode/examples/advanced.no)
+- [examples/helpdesk.no](/Users/jansteinar/Projects/Norscode/examples/helpdesk.no)
 
 ## 6. Når du vil videre
 
-- [docs/COOKBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/COOKBOOK.md)
-- [docs/EXAMPLES.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/EXAMPLES.md)
-- [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/API_SCAFFOLD.md)
-- [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/CLI_CONTRACT.md)
-- [docs/QUALITY.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/QUALITY.md)
+- [docs/COOKBOOK.md](/Users/jansteinar/Projects/Norscode/docs/COOKBOOK.md)
+- [docs/EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/EXAMPLES.md)
+- [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/Norscode/docs/API_SCAFFOLD.md)
+- [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/CLI_CONTRACT.md)
+- [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
+- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)

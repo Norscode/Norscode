@@ -5,6 +5,8 @@ Dette dokumentet samler de viktigste modusene i én kontrakt.
 
 For de mest lesbare full-eksemplene, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
 
+For en kort vei inn i resten av frontend-dokumentasjonen, se [`docs/FRONTEND_LEARNING_PATH.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+
 ## 1. HTML Mode
 
 Vanlig HTML er den laveste og mest direkte formen.

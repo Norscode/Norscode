@@ -25,4 +25,4 @@ En standard API-klient gjør frontend-til-backend kommunikasjon enkel og konsist
 - frontenden kan snakke med backend på en standardisert måte
 - nettverkskode er samlet og lettere å teste
 
-Se også [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md).
+Se også [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md).

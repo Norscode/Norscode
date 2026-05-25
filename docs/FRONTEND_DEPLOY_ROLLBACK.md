@@ -24,4 +24,4 @@ Frontend deploy og rollback bør være enkle og trygge.
 
 - frontend kan distribueres og reverseres uten drama
 
-Se også [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/DEPLOYMENT_PLAYBOOK.md).
+Se også [docs/DEPLOYMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/DEPLOYMENT_PLAYBOOK.md).

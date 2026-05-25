@@ -35,6 +35,12 @@ Dette dokumentet beskriver hvordan Norscode vedlikeholdes etter 1.0-kandidaten.
 - Notatene skal nevne berørte kommandoer, dataformat eller deployflyt når det er relevant.
 - Release-notater skal være en del av standard publiseringsflyt, ikke en ettertanke.
 
+## Migrering og legacy
+
+- Legacy-navn og gamle filnavn kan beholdes så lenge migrering trenger dem.
+- Når noe fases ut, skal det lenkes til en tydelig migreringssti.
+- Den samlede kontrakten ligger i [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
+
 ## Hva som er normal support
 
 - `norcode` som primær CLI

@@ -17,8 +17,12 @@ Route-parametre og query-parametre er en del av frontenden sin adressestruktur.
 ## Eksempler
 
 - `/brukere/42` for en bestemt bruker
+- `/ruter` for en tydelig inngang til de viktigste URL-ene
 - `/produkter?kategori=sykler&sort=pris`
 - `/sok?q=norscode&page=2`
+- `/poster?side=2` for en server-rendret og fragmenterbar listevisning
+- `/poster?side=2&sort=desc` for samme visning med alternativ sortering
+- `/poster?side=2&kategori=server` for filtrering av samme listevisning
 
 ## Regler
 
@@ -40,5 +44,6 @@ Route-parametre og query-parametre er en del av frontenden sin adressestruktur.
 
 Se også:
 
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CLIENT_ROUTING.md)
+- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
+- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_ROUTING.md)
+- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)

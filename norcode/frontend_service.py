@@ -66,7 +66,7 @@ def parse_source_file(path: str) -> Any:
 
 def analyze_source_file(path: str) -> FrontendResult:
     module_graph = load_module_graph(path)
-    semantic = analyze_program(module_graph.program)
+    semantic = analyze_program(module_graph.program, alias_map=module_graph.alias_map)
     return FrontendResult(
         source_path=module_graph.source_path,
         program=module_graph.program,

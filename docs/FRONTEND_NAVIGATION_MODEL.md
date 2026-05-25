@@ -6,6 +6,7 @@ Norscode-frontenden bør starte med en enkel, path-basert navigasjonsmodell:
 - ruter kan være server-renderte
 - direkte lenker skal fungere uten ekstra oppsett
 - browseren kan senere få client-side routing oppå samme struktur
+- server-drevne fragmenter kan brukes som en mellomvei for delvis rendering
 
 ## Hvorfor denne modellen
 
@@ -20,15 +21,21 @@ Norscode-frontenden bør starte med en enkel, path-basert navigasjonsmodell:
 - hold navigasjon eksplisitt
 - skill mellom sideflyt og intern komponentstate
 - behold server fallback som standard
+- bruk fragmenter når du vil dele opp renderingen uten å introdusere en klientruntime
 
 ## Praktisk konsekvens
 
 Frontend-appens første navigasjon bør kunne beskrives som:
 
 - `/` for hjem
+- `/sok` for søk med query-parametre
+- `/poster` for paginerte listevisninger
+- `/ruter` for en samleside over de viktigste URL-ene
 - `/side` for egne sider
 - `/kategori/objekt` for dypere strukturer når det trengs
 
 ## Neste steg
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_ROADMAP.md) for resten av navigasjon-etappen.
+Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) og [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md) for resten av navigasjon-etappen.
+
+For en kort lesesti som binder sammen hele frontend-modellen, se [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).

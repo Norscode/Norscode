@@ -23,8 +23,12 @@ Direkte lenker og refresh skal alltid fungere via server fallback.
 ## Praktisk konsekvens
 
 - `/brukere/42` kan åpnes direkte
+- `/ruter` kan åpnes direkte og vise en samlet ruteoversikt
+- `/sok?q=server` kan åpnes direkte og fortsatt gi samme søkeflyt
+- `/poster?side=2` kan åpnes direkte og fortsatt gi samme paginerte visning
 - refresh på en side skal fungere
 - delte lenker skal være stabile
+- fragmenter kan brukes når bare deler av siden skal server-rendres separat
 
 ## Når dette er ferdig
 
@@ -33,5 +37,7 @@ Direkte lenker og refresh skal alltid fungere via server fallback.
 
 Se også:
 
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/language_handoff/projects/language/docs/FRONTEND_CLIENT_ROUTING.md)
+- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
+- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_ROUTING.md)
+- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
+- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)

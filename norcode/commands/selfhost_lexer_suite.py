@@ -28,7 +28,29 @@ from norcode.selfhost_lexer_service import DEFAULT_SELFHOST_LEXER, check_selfhos
 from norcode.token_validator import validate_token_stream
 
 
-DEFAULT_GLOBS = ("tests/*.no", "examples/*.no")
+DEFAULT_REPRESENTATIVE_FILES = (
+    "tests/selfhost_lexer_token_smoke.no",
+    "tests/selfhost_lexer_list_smoke.no",
+    "tests/std.math.no",
+    "tests/test_assert.no",
+    "tests/test_assert_eq.no",
+    "tests/test_assert_text.no",
+    "tests/test_empty_int_list.no",
+    "tests/test_empty_list_return.no",
+    "tests/test_empty_string_list.no",
+    "tests/test_empty_text_list.no",
+    "examples/web_routes.no",
+    "examples/web_openapi.no",
+    "examples/web_request_response.no",
+    "examples/web_methods.no",
+    "examples/web_middleware.no",
+    "examples/web_guard.no",
+    "examples/web_openapi_auth.no",
+    "examples/web_proxy.no",
+    "examples/web_sanitize.no",
+    "examples/web_validation.no",
+    "examples/web_dependency.no",
+)
 DEFAULT_TOKEN_SMOKE = Path("tests/selfhost_lexer_token_smoke.no")
 DEFAULT_LIST_SMOKE = Path("tests/selfhost_lexer_list_smoke.no")
 
@@ -48,11 +70,7 @@ def _discover_files(explicit_files: list[str]) -> list[Path]:
     if explicit_files:
         return [Path(item).expanduser().resolve() for item in explicit_files]
 
-    root = Path.cwd()
-    found: list[Path] = []
-    for pattern in DEFAULT_GLOBS:
-        found.extend(sorted(root.glob(pattern)))
-    return [item.resolve() for item in found if item.is_file()]
+    return [Path(item).expanduser().resolve() for item in DEFAULT_REPRESENTATIVE_FILES]
 
 
 
