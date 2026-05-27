@@ -2,7 +2,7 @@
 #
 # Rekkefølge:
 #   1. dist\norscode.exe  (native Windows binary, når tilgjengelig)
-#   2. python main.py     (fallback via Python)
+#   2. python -m norcode.legacy_main     (fallback via Python)
 
 $RootDir = Split-Path -Parent $PSScriptRoot
 
@@ -14,11 +14,8 @@ if (Test-Path $NativeExe) {
 }
 
 # ─── Python-fallback ─────────────────────────────────────────────────────────
-$MainScript = Join-Path $RootDir "main.py"
-if (Test-Path $MainScript) {
-    python $MainScript @args
-    exit $LASTEXITCODE
-}
+python -m norcode.legacy_main @args
+exit $LASTEXITCODE
 
 Write-Error "Norscode: fant ingen kompilator."
 Write-Error "Installer med: py -m pip install norscode"

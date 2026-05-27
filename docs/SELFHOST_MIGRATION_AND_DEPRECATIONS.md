@@ -6,7 +6,8 @@ Dette dokumentet samler det nye, kanoniske bildet for migrering, legacy-navn og 
 
 - Normal bruk skal møte `Norscode` og `norcode`.
 - `./bin/nc` er normal vei for brukere.
-- `./bin/bootstrap` og `python3 main.py` er eksplisitt bootstrap og utviklerstøtte.
+- `./bin/bootstrap` og `./bin/nc --legacy-python-fallback` er eksplisitt bootstrap og utviklerstøtte.
+- `norcode/cli.py` er normal modulær CLI-vei, mens `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` er eksplisitt Python-kompatibilitet.
 - Legacy-navn og gamle filnavn kan eksistere så lenge de trengs for kompatibilitet.
 - Migrering skal være dokumentert, ikke gjettet.
 
@@ -14,11 +15,14 @@ Dette dokumentet samler det nye, kanoniske bildet for migrering, legacy-navn og 
 
 Dette er fortsatt overgangs- eller støtteflaten:
 
-- `main.py`
 - `./bin/bootstrap`
+- `./bin/nc --legacy-python-fallback`
+- `norcode/legacy_main.py`
+- `norcode/bootstrap/python_entry.py`
+- aktive wrappers bruker `python -m norcode.legacy_main` når fallback er eksplisitt valgt
 - `tools/build-bootstrap-binary.sh`
 - `tools/bootstrap_wrapper.py`
-- eksplisitte fallback-veier som `--python-fallback`
+- eksplisitte fallback-veier som `--legacy-python-fallback`
 
 Dette er ikke normal produktflyt. Det er støtte for bygg, verifisering, overgang og feilsøking.
 

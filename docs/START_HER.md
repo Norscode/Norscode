@@ -15,7 +15,7 @@ Hvis du trenger eksplisitt bootstrap:
 
 ```bash
 ./bin/bootstrap --help
-python3 main.py --help
+./bin/nc --legacy-python-fallback --help
 ```
 
 ## 2. Verifiser at alt virker

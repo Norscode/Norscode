@@ -12,6 +12,8 @@ Python skal på sikt bare være:
 - nød-/debug-fallback
 - utviklerhjelp i overgangsfasen
 
+Den normale CLI-veien er allerede modulær i `norcode/cli.py`; den gjenværende Python-flaten er eksplisitt bootstrap-kompatibilitet.
+
 ## Kort status
 
 - [x] Målet om selvstendig Norscode er formulert
@@ -22,6 +24,7 @@ Python skal på sikt bare være:
 - [x] Omgang 2 — Selfhost Lexer er fullført
 - [x] Omgang 3 — Minimal Parser er fullført
 - [x] Resten av bootstrap-flaten er slank nok til at den bare er oppstart og verktøy
+- [x] Normal CLI-vei er modulær i `norcode/cli.py`, og Python-flaten er eksplisitt bootstrap-kompatibilitet
 - [x] Selfhost-kompilatoren er primærbane for støttet kjerne
 - [x] Python brukes bare eksplisitt som fallback for støttede gap
 
@@ -80,7 +83,7 @@ Oppgaver:
 - [x] Dele Python-motoren i moduler: lexer, parser, semantic, runtime, codegen, CLI, test
 - [x] Markere hvilke deler som allerede har selfhost-ekvivalent
 - [x] Markere hvilke deler som bare finnes i Python
-- [x] Lage avhengighetskart for `main.py`
+- [x] Lage avhengighetskart for den gjenværende Python-bootstrapen
 - [x] Lage minimumskjerne for første selfhost-compiler
 
 Exit-kriterier:
@@ -88,7 +91,7 @@ Exit-kriterier:
 - [x] Det finnes en dokumentert oversikt over hva som må flyttes først
 - [x] Det finnes en tydelig liste over hva selfhost-v1 skal støtte
 - [x] Eksisterende selfhost-spor er dokumentert i repoet
-- [x] Avhengighetskart for `main.py` er komplett
+- [x] Avhengighetskart for den gjenværende Python-bootstrapen er komplett
 - [x] Minimumskjerne for første selfhost-compiler er låst
 
 Status:
@@ -383,7 +386,7 @@ Oppgaver:
 
 - [x] Dokumentere offisiell selfhost-kompileringsflyt
 - [x] Gjøre selfhost som standard for støttet kjerne
-- [x] Beholde Python som `--python-fallback`
+- [x] Beholde Python som `--legacy-python-fallback`
 - [x] Varsle når Python-fallback brukes
 - [x] Måle selfhost-parity i CI
 
@@ -396,7 +399,7 @@ Gjennomførte punkter:
 
 - [x] Python-fallback-prinsippet er dokumentert
 - [x] `nc run` er selfhost-first for støttet kjerne
-- [x] `--python-fallback` er eneste vei til Python-bane
+- [x] `--legacy-python-fallback` er eneste tydelige vei til Python-bane
 - [x] CI håndhever fallback-regelen
 
 Status:

@@ -37,7 +37,7 @@ def test_format_check_reports_unformatted_source(tmp_path: Path) -> None:
     )
 
     completed = subprocess.run(
-        [sys.executable, "main.py", "format", str(source), "--check"],
+        [sys.executable, "-m", "norcode.legacy_main", "format", str(source), "--check"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,

@@ -1,9 +1,9 @@
-"""Command dispatch bridge for the CLI migration.
+"""Command dispatch bridge for the modular CLI.
 
-The legacy implementation still dispatches most commands inside `main.py`.
-This module provides the new dispatch contract: command modules may expose a
-`run(args)` handler, while commands without a handler are explicitly marked as
-still requiring the Python bootstrap path.
+Command modules may expose a `run(args)` handler, while commands without a
+handler can still be marked as bootstrap-only.  The dispatch layer keeps that
+distinction explicit so the modular CLI and the legacy wrapper can share the
+same registry without duplicating execution logic.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from typing import Any
 
 class CommandDispatchError(RuntimeError):
     pass
-
 
 
 def dispatch_command(args: Any) -> int:

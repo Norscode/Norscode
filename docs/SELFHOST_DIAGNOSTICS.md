@@ -5,6 +5,8 @@ Gjøre det enkelt å forstå hva som skjer i et prosjekt uten å lese kildekoden
 
 ## Diagnosekommandoen
 
+`norcode diagnose` er en normal modulær CLI-kommando i `norcode/cli.py`.
+
 Kjør:
 
 ```bash
@@ -61,11 +63,10 @@ Diagnosen er ment for:
 
 - Bruk `norcode diagnose` når du vil forstå hvorfor et miljø ser annerledes ut enn forventet.
 - Bruk `norcode diagnose --json` når et script eller en pipeline skal lese resultatet maskinelt.
-- Kombiner gjerne med `doctor` når du vil verifisere installasjon og release i tillegg til prosjektstatus.
+- Kombiner gjerne med `doctor` når du vil verifisere installasjon og release i tillegg til prosjektstatus; `doctor` er fortsatt den eksplisitte verifiseringsflaten for release-/installasjonsmiljøet.
 
 ## Relatert
 
 - [`docs/OBSERVABILITY_PATTERN.md`](/Users/jansteinar/Projects/Norscode/docs/OBSERVABILITY_PATTERN.md)
 - [`docs/QUALITY.md`](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
 - [`docs/SELFHOST_CI_GATES.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_CI_GATES.md)
-

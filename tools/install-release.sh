@@ -85,13 +85,12 @@ ln -sfn "${CURRENT_LINK}/bin/nl" "${PREFIX}/bin/nl"
 ln -sfn "${CURRENT_LINK}/bin/bootstrap" "${PREFIX}/bin/bootstrap"
 
 # Mirror the release root at the install prefix so wrapper scripts that derive
-# ROOT_DIR from their own location can still resolve dist/, main.py and modules.
+# ROOT_DIR from their own location can still resolve dist/ and modules.
 for _entry in \
   compiler \
   dist \
   docs \
   examples \
-  main.py \
   norcode \
   norcode.toml \
   selfhost \

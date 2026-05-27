@@ -15,6 +15,7 @@ Standardflyt skal være:
 ```
 
 Python-flyten skal bare brukes når brukeren ber om det, eller når en feature ennå ikke er støttet av selfhost.
+I dagens CLI er den eksplisitte legacy-veien `--legacy-python-fallback`.
 
 ## CLI-kontrakt
 
@@ -22,19 +23,19 @@ Foreslåtte kommandoer/flagg:
 
 ```bash
 nc run app.no
-nc run app.no --python-fallback
+nc run app.no --legacy-python-fallback
 nc check app.no
-nc check app.no --python-fallback
-nc --python-fallback selfhost-check
-nc --python-fallback selfhost-parity
-nc --python-fallback ci --require-selfhost-ready
+nc check app.no --legacy-python-fallback
+nc --legacy-python-fallback selfhost-check
+nc --legacy-python-fallback selfhost-parity
+nc --legacy-python-fallback ci --require-selfhost-ready
 ```
 
 ## Fallback-regler
 
 1. `nc run` prøver selfhost først for støttet kjerne.
 2. Hvis selfhost ikke støtter en feature, skal feilen si hvilken feature som mangler.
-3. Python brukes bare hvis `--python-fallback` er satt.
+3. Python brukes bare hvis `--legacy-python-fallback` er satt.
 4. Når Python brukes, skal CLI skrive tydelig varsel:
 
 ```text
@@ -45,7 +46,7 @@ Advarsel: Python-fallback brukes. Dette er overgangsstøtte, ikke primær Norsco
 
 ## Parity-måling
 
-`nc --python-fallback selfhost-parity` bør sammenligne:
+`nc --legacy-python-fallback selfhost-parity` bør sammenligne:
 
 - tokens
 - AST snapshot
@@ -80,9 +81,9 @@ parser: DIFF
 CI bør kjøre:
 
 ```bash
-nc --python-fallback ci --check-names --require-selfhost-ready
-nc --python-fallback selfhost-check
-nc --python-fallback selfhost-parity
+nc --legacy-python-fallback ci --check-names --require-selfhost-ready
+nc --legacy-python-fallback selfhost-check
+nc --legacy-python-fallback selfhost-parity
 ```
 
 ## Feature gates
@@ -111,7 +112,7 @@ Første støttede kjerne:
 Fase 8 er ferdig når:
 
 - `nc run` bruker selfhost som standard for støttet kjerne
-- Python krever eksplisitt `--python-fallback`
+- Python krever eksplisitt `--legacy-python-fallback`
 - fallback gir tydelig varsel
 - CI måler selfhost-parity
 - selfhost-klare tester feiler hvis Python brukes skjult

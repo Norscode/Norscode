@@ -26,14 +26,16 @@ Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Proje
 ## Migreringshistorikk
 
 - Python-fallback i CLI-wrapperne er fjernet som standard vei.
-- `main.py` er nå eksplisitt bootstrap i stedet for skjult fallback.
+- `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` bærer nå den eksplisitte Python-kompatibiliteten.
+- `norcode/cli.py` bruker modulær registry-dispatch som normal vei.
 - `commands`-kommandoen er lagt til som generert kontraktoversikt.
 
 ## Eksplisitt fallback
 
 Når Python fortsatt trengs, skal det alltid være synlig og eksplisitt:
 
-- `--python-fallback` er den eneste standardveien inn i Python-flaten fra `nc`.
+- `--legacy-python-fallback` er den tydelige veien inn i Python-flaten fra `nc`.
+- `--python-fallback` kan fortsatt fungere som kompatibilitetsalias, men skal ikke brukes i ny dokumentasjon.
 - Vanlige kommandoer skal ikke falle tilbake til Python uten at brukeren ber om det.
 - Fallback-oppførselen er dokumentert i [`docs/SELFHOST_FALLBACK_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_FALLBACK_CONTRACT.md).
 

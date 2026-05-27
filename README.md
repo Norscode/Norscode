@@ -2,7 +2,7 @@
 
 # Norscode 🚀
 
-Et norsk programmeringsspråk med native backend og bootstrap-spor.
+Et norsk programmeringsspråk med native backend, modulær CLI og eksplisitt bootstrap-kompatibilitet.
 
 ## ✨ Funksjoner
 
@@ -147,19 +147,19 @@ I en release bygger `bin/`-scriptene mot:
 
 ### 0d. Fallback-bruk
 
-For eksplisitt legacy-arbeid kan du kjøre bootstrap via Python-kode direkte:
+For eksplisitt legacy-arbeid kan du kjøre bootstrap via Python-kode indirekte gjennom `bin/nc`:
 
 ```bash
-python3 main.py --help
-python3 main.py run app.no
-python3 main.py ci --check-names
+./bin/nc --legacy-python-fallback --help
+./bin/nc --legacy-python-fallback run app.no
+./bin/nc --legacy-python-fallback ci --check-names
 ```
 
-Dette er nå bare bootstrap-verktøy når du starter eksplisitt via Python eller via `./bin/bootstrap`.
+Dette er nå bare bootstrap-verktøy når du starter eksplisitt via legacy-fallback eller via `./bin/bootstrap`.
 Normal bruk skal gå via `dist/norscode` eller `./bin/nc`.
 
 - Primærflyt: `norcode`/`nc` bruker ferdig binary.
-- Bootstrap: `./bin/bootstrap ...` eller `python3 main.py ...` brukes bare når du eksplisitt vil kjøre via Python.
+- Bootstrap: `./bin/bootstrap ...` eller `./bin/nc --legacy-python-fallback ...` brukes bare når du eksplisitt vil kjøre via den gjenværende Python-bootstrapen i `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py`.
 
 For den stabiliserte CLI-kontrakten, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
 
@@ -739,9 +739,11 @@ funksjon start() -> heltall {
 ## 📁 Struktur
 
 ```
-norcode/
-├── main.py
+.
+├── bin/
 ├── compiler/
+├── docs/
+├── norcode/
 ├── std/
 ├── tests/
 ├── app.no

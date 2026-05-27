@@ -1,7 +1,7 @@
 # Norscode — Vegkart
 
 > Sist oppdatert: mai 2026  
-> Status: Python-VM aktiv, selfhost-pipeline under ferdigstilling
+> Status: selfhost-pipeline under ferdigstilling; fase 0 er lokalt verifisert, men GitHub Actions-bekreftelse gjenstår
 
 ---
 
@@ -15,34 +15,38 @@
 | IR → Bytecode (`selfhost/compiler/ir_to_bytecode.no`) | ✅ Aktiv, kjørbar |
 | VM (`selfhost/vm.no`) | ✅ Aktiv, kjørbar |
 | CLI (`selfhost/main.no`) | ✅ Aktiv, kjørbar |
-| Python VM (`compiler/`, `norcode/`) | 🔄 Fallback — fjernes i fase 1 |
-| CI (GitHub Actions) | ⚠️ 3 jobber feiler (macOS, Linux Docker, Windows) |
+| Python bootstrap/runtime (`compiler/`, `norcode/legacy_main.py`, `norcode/bootstrap/python_entry.py`) | 🔄 Legacy fallback — begrenset og eksplisitt |
+| CI (GitHub Actions) | 🟡 `phase0-verify` er på plass; ekstern grønn-bekreftelse gjenstår |
 
 ---
 
 ## Fase 0 — Rydding og CI-stabilisering (blokkerer alt)
 
-Ingenting kan gå framover med 3 røde CI-jobber. Dette er akutt.
+Ingenting kan gå framover med CI-feil. De kjente blokkeringene er ryddet ut av workflowene, og det finnes nå en egen `phase0-verify`-gate. Resten er å bekrefte grønn CI i GitHub Actions og fullføre siste opprydding i fase 0 og den gjenværende Python-bootstrap-flaten.
 
-**CI-feil som må fikses:**
+Se også [docs/SELFHOST_PHASE0_REMAINING_ROUNDS.md](docs/SELFHOST_PHASE0_REMAINING_ROUNDS.md) for en kort, omgangsbasert arbeidsliste over det som gjenstår.
+Verifiser sluttstatus med `bash tools/selfhost_phase0_verify.sh`.
+For en samlet plan for full selvstendighet, se [docs/SELFHOST_FULL_AUTONOMY_PLAN.md](docs/SELFHOST_FULL_AUTONOMY_PLAN.md).
 
-1. **macOS** — `./bin/nc test` utløser registry-oppslag i `norcode.toml` → Git-auth feiler.  
-   Fix: Bytt `./bin/nc test` → `./bin/nc selfhost-bootstrap-gate` i `ci.yml`.
+**CI-endringer som ble gjort:**
 
-2. **Linux** — `tools/docker-build-linux.sh` bruker `Dockerfile.linux-build` som refererer slettet C-kode.  
-   Fix: Fjern Docker-byggesteget. Erstatt med Python selfhost-bootstrap-gate.
+1. **macOS** — `./bin/nc test` var en dårlig vei for denne jobben.  
+   Status: byttet til `./bin/nc --legacy-python-fallback selfhost-bootstrap-gate` i `ci.yml`.
 
-3. **Windows** — `norcode check tests/test_web_dependency.no` prøver å laste pakke `std.web` som ikke finst.  
-   Fix: Bytt til `norcode check tests/test_if.no` eller tilsvarende ren test.
+2. **Linux** — Docker-byggesteget refererte slettet C-kode.  
+   Status: Docker-steget er fjernet fra release-flyten, og `tools/docker-build-linux.sh` er nå en legacy-wrapper rundt native bootstrap-pakken.
 
-**Daud kode som fjernes:**
+3. **Windows** — smoke-testen er nå rettet mot en ren test.  
+   Status: `ci.yml` bruker en ren test uten `std.web`, så denne blokkeren er ryddet.
+
+**Daud kode som allereie er fjerna eller gjort overflødig:**
 - `norsklang/` (3 filer) — aldri i bruk, gamalt alias
 - `setup.py` — erstatta av `pyproject.toml`
 - `tests/test_ci_selfhost_ready_gate.py` og 4 andre pytest-filer som refererer slettet C VM
 - `tools/export_ncbb_as_bin.py`, `export_ncbb_as_c.py`, `generate_linux_bootstrap_artifacts.py`, `v42_trace_probe.py`
 - `build/norcode-native-stage0.py`
 
-**Leveranse:** Alle CI-jobber grønne. Ingen daud Python.
+**Leveranse:** Lokal verifikasjon er på plass; neste milepæl er bekreftet grønn CI i GitHub Actions.
 
 ---
 

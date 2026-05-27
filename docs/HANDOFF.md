@@ -12,7 +12,7 @@ Dette er den korte statusen for Norscode etter fullført roadmap og 1.0-kandidat
 ## Hva som er viktigst å vite
 
 - `./bin/nc` er normal vei.
-- `./bin/bootstrap` og `python3 main.py` er eksplisitt bootstrap.
+- `./bin/bootstrap` og `./bin/nc --legacy-python-fallback` er eksplisitt bootstrap.
 - `./bin/nc test`, `./bin/nc smoke`, `./bin/nc bench` og `./bin/nc fuzz` er de viktigste kontrollene.
 - [docs/START_HER.md](/Users/jansteinar/Projects/Norscode/docs/START_HER.md) er den beste inngangen for nye brukere.
 - [docs/COOKBOOK.md](/Users/jansteinar/Projects/Norscode/docs/COOKBOOK.md) er den praktiske oppskriften.

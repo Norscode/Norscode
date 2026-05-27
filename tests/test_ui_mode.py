@@ -18,7 +18,7 @@ side:
     )
     output_file = tmp_path / "demo.html"
     completed = subprocess.run(
-        [sys.executable, "main.py", "ui-render", str(ui_file), "-o", str(output_file), "--title", "Demo"],
+        [sys.executable, "-m", "norcode.legacy_main", "ui-render", str(ui_file), "-o", str(output_file), "--title", "Demo"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,
@@ -71,7 +71,7 @@ def test_serve_help_uses_modular_registration() -> None:
         check=True,
     )
     legacy = subprocess.run(
-        [sys.executable, "main.py", "serve", "--help"],
+        [sys.executable, "-m", "norcode.legacy_main", "serve", "--help"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,
@@ -93,7 +93,7 @@ def test_check_help_uses_modular_registration() -> None:
         check=True,
     )
     legacy = subprocess.run(
-        [sys.executable, "main.py", "check", "--help"],
+        [sys.executable, "-m", "norcode.legacy_main", "check", "--help"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,
@@ -115,7 +115,7 @@ def test_test_help_uses_modular_registration() -> None:
         check=True,
     )
     legacy = subprocess.run(
-        [sys.executable, "main.py", "test", "--help"],
+        [sys.executable, "-m", "norcode.legacy_main", "test", "--help"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,

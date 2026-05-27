@@ -1,9 +1,8 @@
 """Argparse construction for the modular Norscode CLI.
 
-This module is introduced as a migration bridge.  The authoritative CLI is still
-assembled in `main.py`, but new command modules should be wired through this
-builder first.  Once command handlers have moved out of `main.py`, `norcode.cli`
-can call this parser directly.
+This module is the shared parser builder for both the normal CLI and the
+legacy bootstrap wrapper.  Command modules register their own arguments and
+handlers here, so the parser structure stays in one place.
 """
 
 from __future__ import annotations

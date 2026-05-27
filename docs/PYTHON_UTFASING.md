@@ -9,7 +9,7 @@ Python er fortsatt nødvendig for enkelte bootstrap-, test- og parity-steg. Dett
 ## Prinsipp
 
 1. `dist/norscode` og `bin/nc` er primær flyt.
-2. `python3 main.py` er legacy/bootstrap, ikke hovedplattform.
+2. `./bin/nc --legacy-python-fallback` er legacy/bootstrap, ikke hovedplattform.
 3. Nye compiler-funksjoner bør først få selfhost-implementasjon.
 4. Python kan brukes som orakel i overgangsfasen, men skal ikke være endelig kilde til sannhet.
 5. CI skal gradvis gå fra Python-parity til selfhost-only gates.
@@ -24,7 +24,7 @@ Python er fortsatt nødvendig for enkelte bootstrap-, test- og parity-steg. Dett
 ## Fase 2 — Legacy-grense for Python
 
 - Flytt Python-only verktøy til `legacy_python/` eller tilsvarende mappe.
-- La `main.py` være bootstrap-wrapper, ikke hoved-compiler.
+- La `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` være bootstrap-kompatibilitet, ikke hoved-compiler.
 - Dokumenter alle kommandoer som fortsatt krever Python.
 - Ikke legg nye features direkte i Python uten selfhost-plan.
 

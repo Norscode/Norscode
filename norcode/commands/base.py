@@ -1,8 +1,9 @@
-"""Shared command abstractions for the CLI migration.
+"""Shared command abstractions for the modular CLI.
 
-The current CLI still runs through the legacy bootstrap path.  These small
-abstractions let us move commands out of `main.py` incrementally while keeping
-metadata, argument registration and execution handlers together.
+These small abstractions keep metadata, argument registration and execution
+handlers together so commands can be registered once and used by both the
+modern CLI entrypoint and the legacy wrapper while the migration is still in
+flight.
 """
 
 from __future__ import annotations

@@ -5,21 +5,23 @@ Gjøre det helt tydelig at Python er en eksplisitt nødvei, ikke en skjult stand
 
 ## Normalflyt
 
-- `./bin/nc` skal bruke native binary først.
+- `./bin/nc` skal bruke native binary først og `norcode/cli.py` som normal modulær vei når kommandoen er tilgjengelig der.
 - Kommandoer som kan kjøres uten Python skal gjøre det uten fallback.
 - Brukeren skal ikke trenge å kjenne intern bootstrap-historikk for normal bruk.
 
 ## Eksplisitt fallback
 
-Når Python brukes, skal det alltid være fordi brukeren har bedt om det med `--python-fallback`.
+Når Python brukes, skal det alltid være fordi brukeren har bedt om det med `--legacy-python-fallback`.
 
 Eksempler:
 
 ```bash
-./bin/nc --python-fallback doctor
-./bin/nc --python-fallback smoke
-./bin/nc --python-fallback selfhost-parity --suite m1
+./bin/nc --legacy-python-fallback doctor
+./bin/nc --legacy-python-fallback smoke
+./bin/nc --legacy-python-fallback selfhost-parity --suite m1
 ```
+
+`--python-fallback` kan fortsatt fungere som kompatibilitetsalias, men det er ikke navnet som skal brukes i ny dokumentasjon.
 
 Fallback skal:
 
@@ -52,4 +54,3 @@ Disse testene skal holde kontrakten stabil:
 
 - `tests/test_distribution_commands.py`
 - eventuelle nye tester for fallback- og bootstrap-veier
-

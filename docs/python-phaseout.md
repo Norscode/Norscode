@@ -47,7 +47,7 @@ Selfhost-kompilatoren skal slutte å returnere hardkodede svar for enkelttester.
 Når parity er grønn:
 
 - `./bin/nc` skal bruke selfhost som primær compiler.
-- Python skal kun brukes med eksplisitt flagg, for eksempel `--python-fallback`.
+- Python skal kun brukes med eksplisitt flagg, for eksempel `--legacy-python-fallback`.
 - CI skal ha en egen jobb for legacy parity, ikke som hovedbygg.
 
 ## Fase 4 — flytt Python ut av hovedkoden

@@ -13,8 +13,8 @@ Repoet har allerede en sterk binary-first retning:
 - `nc`, `nl`, `nor` og `norsklang` er legacy-/kompatibilitetsalias.
 - Python er dokumentert som eksplisitt bootstrap-/utviklerverktøy.
 - C-backend finnes fortsatt som viktig compiler-retning.
-- `main.py` inneholder fremdeles mye av CLI-, build-, test-, server- og compiler-orchestration.
-- `norcode/cli.py` peker fortsatt inn til `main.main()`.
+- Det ligger fortsatt igjen bootstrap- og orchestration-logikk i Python-laget, men mye av CLI-en er allerede flyttet til modulære kommandoer.
+- `norcode/cli.py` bruker nå modulær registry-dispatch, mens `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` bærer den gjenværende Python-kompatibiliteten.
 
 Det betyr at prosjektet er selvstendig i brukeropplevelse, men ikke fullt selvstendig i intern compiler/runtime-arkitektur.
 
@@ -70,8 +70,8 @@ Leveranse:
 - [ ] Flytt CLI-kommandoer ut av `main.py`.
 - [ ] Flytt build/release-verktøy ut av `main.py`.
 - [ ] Flytt serverkommandoer ut av `main.py`.
-- [ ] Behold `main.py` kun som bootstrap-entrypoint.
-- [ ] Gjør `norcode/cli.py` til ekte CLI-entrypoint i stedet for bare wrapper til `main.main()`.
+- [ ] Behold bare den nødvendige bootstrap-kompatibiliteten i Python-laget.
+- [ ] Gjør modulær CLI-dispatch til standardvei for nye kommandoer.
 
 Ferdig når:
 
@@ -199,7 +199,7 @@ Ferdig når:
 Neste omgang bør være:
 
 ```text
-Omgang 2: Splitte `main.py` i moduler og gjøre `norcode/cli.py` til ekte entrypoint.
+Omgang 2: Fortsette å flytte gjenværende bootstrap- og runtime-ansvar ut av Python-laget.
 ```
 
 Foreslått ny struktur:
@@ -229,14 +229,14 @@ runtime/
   stdlib.py
 ```
 
-Dette må gjøres før vi flytter lexer/parser til Norscode, ellers blir selfhost-arbeidet vanskelig å teste trygt.
+Dette må gjøres videre før vi flytter lexer/parser-arbeidet enda lenger over i Norscode, ellers blir selfhost-arbeidet vanskelig å teste trygt.
 
 ## Risikoer
 
 - For tidlig fjerning av Python kan ødelegge bootstrap.
 - For tidlig fjerning av C kan ødelegge eksisterende brukerflyt.
 - Selfhost kan bli ustabil hvis bytecode-formatet ikke låses først.
-- `main.py` er et sentralt risikopunkt fordi for mye ansvar ligger samlet der.
+- Den gjenværende Python-bootstrapen er et sentralt risikopunkt fordi for mye ansvar fortsatt kan samle seg der.
 
 ## Beslutning
 

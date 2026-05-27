@@ -5,7 +5,7 @@
 #
 # Ny pipeline (ingen C-kompilator):
 #   1. Sjekk om dist/norcode-bootstrap-compile allerede finnes og er OK
-#   2. Køyr selfhost bootstrap gate  (./bin/nc --python-fallback selfhost-bootstrap-gate)
+#   2. Køyr selfhost bootstrap gate  (./bin/nc --legacy-python-fallback selfhost-bootstrap-gate)
 #   3. Generer Python VM-wrapper som dist/norcode-bootstrap-compile
 #
 # Python trengst berre til gate og wrapper-generering.
@@ -39,7 +39,7 @@ fi
 
 # ─── Selfhost bootstrap gate ─────────────────────────────────────────────────
 printf 'Køyrer selfhost bootstrap gate...\n'
-if ! bash "${ROOT_DIR}/bin/nc" --python-fallback selfhost-bootstrap-gate; then
+if ! bash "${ROOT_DIR}/bin/nc" --legacy-python-fallback selfhost-bootstrap-gate; then
     printf 'Feil: selfhost bootstrap gate feila.\n' >&2
     exit 1
 fi

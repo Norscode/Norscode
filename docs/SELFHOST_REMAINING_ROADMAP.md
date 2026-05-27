@@ -13,6 +13,7 @@ Denne planen er bevisst kort og operativ. Den skal være lett å følge, lett å
 - [x] Binary og distribusjon finnes allerede
 - [x] Resten av bootstrap-flaten er helt slanket
 - [x] Alle fallback-veier er eksplisitt dokumentert og minimale
+- [x] `norcode/cli.py` er normal modulær vei, mens `legacy_main.py` og `bootstrap/python_entry.py` er eksplisitt Python-kompatibilitet
 - [x] Release, CI og vedlikehold er helt selvforklarende for nye bidragsytere
 
 ## Definisjon av ferdig
@@ -21,6 +22,7 @@ Resten av selvstendigheten regnes som ferdig når:
 
 - `nc` kan bygges og verifiseres uten skjulte Python-steg i normalflyten
 - fallback er eksplisitt, liten og lett å slå av/på
+- normal CLI bruker modulær dispatch, mens Python-flaten bare er eksplisitt kompatibilitet
 - releaseprosessen er repeterbar og fullstendig dokumentert
 - CI fanger regresjoner i bootstrap, fallback og distribusjon tidlig
 - nye bidragsytere kan forstå hvor Python fortsatt brukes uten å lese kildekoden først

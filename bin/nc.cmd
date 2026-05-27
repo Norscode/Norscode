@@ -3,7 +3,7 @@
 ::
 :: Rekkefølge:
 ::   1. dist\norscode.exe  (native Windows binary, når tilgjengelig)
-::   2. python main.py     (fallback via Python)
+::   2. python -m norcode.legacy_main     (fallback via Python)
 setlocal enabledelayedexpansion
 
 set "ROOT_DIR=%~dp0.."
@@ -16,11 +16,8 @@ if exist "%NATIVE_EXE%" (
 )
 
 :: ─── Python-fallback ─────────────────────────────────────────────────────────
-set "MAIN_SCRIPT=%ROOT_DIR%\main.py"
-if exist "%MAIN_SCRIPT%" (
-    python "%MAIN_SCRIPT%" %*
-    exit /b %errorlevel%
-)
+python -m norcode.legacy_main %*
+exit /b %errorlevel%
 
 echo Norscode: fant ingen kompilator. >&2
 echo Installer med: py -m pip install norscode >&2

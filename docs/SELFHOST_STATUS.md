@@ -10,7 +10,7 @@ Norscode skal kunne kompilere, teste og kjøre seg selv uten at Python er normal
 
 | Område | Status | Kommentar |
 |---|---:|---|
-| CLI/binær flyt | Delvis | `dist/norscode` og `bin/nc` finnes, men bygges fortsatt via bootstrap. |
+| CLI/binær flyt | Delvis | `dist/norscode` og `bin/nc` finnes; `norcode/cli.py` er normal modulær vei, og den gjenværende bootstrap-kompatibiliteten ligger eksplisitt i `legacy_main.py` og `bootstrap/python_entry.py`. |
 | Parser parity | Klar / overvåkes | Selfhost parity rapporterer 100% dekning, men CI viser fortsatt enkelte IR-mismatch. |
 | IR disasm | Delvis | Python og selfhost avviker fortsatt på strict IR-cases og enkelte uttrykk. |
 | Uttrykksparser | Delvis | `1 -> 0` viser mismatch: selfhost/Python forventning må avklares og samles. |
@@ -67,6 +67,7 @@ Dette peker på at selfhost mangler komplett IR-linjeparser eller strict-disasm-
 
 - Nye compiler-features skal ha selfhost-sjekk eller selfhost-plan.
 - Python-endringer skal merkes som bootstrap/legacy hvis de ikke har selfhost-ekvivalent.
+- `norcode/cli.py` er normal modulær vei; `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` er eksplisitt kompatibilitetslag for den gjenværende Python-flaten.
 - CI-feil skal ikke løses ved å senke krav uten dokumentert grunn.
 - Målet er færre Python-avhengigheter for hver fase.
 

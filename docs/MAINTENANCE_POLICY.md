@@ -44,5 +44,5 @@ Dette dokumentet beskriver hvordan Norscode vedlikeholdes etter 1.0-kandidaten.
 ## Hva som er normal support
 
 - `norcode` som primær CLI
-- `./bin/bootstrap` og `python3 main.py` som eksplisitt bootstrap
+- `./bin/bootstrap` og `./bin/nc --legacy-python-fallback` som eksplisitt bootstrap
 - releasepakker som kan installeres, oppgraderes og rulles tilbake mekanisk

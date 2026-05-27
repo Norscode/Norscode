@@ -6,8 +6,8 @@ Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres pun
 ## Før release
 
 - [ ] `./bin/nc --version` viser riktig versjon
-- [ ] `./bin/nc --python-fallback doctor` går grønt
-- [ ] `./bin/nc --python-fallback smoke` går grønt
+- [ ] `./bin/nc --legacy-python-fallback doctor` går grønt via den gjenværende Python-kompatibiliteten
+- [ ] `./bin/nc --legacy-python-fallback smoke` går grønt via den gjenværende Python-kompatibiliteten
 - [ ] `python3 -m pytest tests/test_distribution_commands.py tests/test_release_install_flow.py` går grønt
 - [ ] release-pakke kan bygges med `bash package-release.sh <versjon>`
 
@@ -33,7 +33,7 @@ Verifiser:
 
 - [ ] `current`-lenken peker på riktig versjon
 - [ ] `bin/nc --version` virker fra installert release
-- [ ] `bin/nc --python-fallback doctor` kan kjøres i installert miljø
+- [ ] `bin/nc --legacy-python-fallback doctor` kan kjøres i installert miljø via den gjenværende Python-kompatibiliteten
 
 ## Rollback
 

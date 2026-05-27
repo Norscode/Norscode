@@ -32,7 +32,7 @@ def test_lint_check_exits_nonzero_on_issues(tmp_path: Path) -> None:
     )
 
     completed = subprocess.run(
-        [sys.executable, "main.py", "lint", str(source), "--check"],
+        [sys.executable, "-m", "norcode.legacy_main", "lint", str(source), "--check"],
         cwd=Path(__file__).resolve().parents[1],
         text=True,
         capture_output=True,

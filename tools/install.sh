@@ -72,7 +72,7 @@ printf 'Henter siste release...\n'
 
 RELEASE_JSON="$($DOWNLOAD "$RELEASES_URL" 2>/dev/null)" || {
     printf 'Feil: Kunne ikke hente release-info fra GitHub.\n' >&2
-    printf 'Prøv manuell installasjon: python3 main.py selfhost-bootstrap-gate\n' >&2
+    printf 'Prøv manuell installasjon: ./bin/nc --legacy-python-fallback selfhost-bootstrap-gate\n' >&2
     exit 1
 }
 
@@ -82,8 +82,8 @@ DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" | grep -o "\"browser_download_url\":
 
 if [ -z "$DOWNLOAD_URL" ]; then
     printf 'Advarsel: Ingen pre-bygd binary for %s i siste release.\n' "$PLATFORM" >&2
-    printf 'Bygger fra kilde via Python-bootstrap...\n'
-    if command -v python3 >/dev/null 2>&1 && [ -f "$ROOT_DIR/main.py" ]; then
+    printf 'Bygger fra kilde via legacy bootstrap...\n'
+    if command -v python3 >/dev/null 2>&1; then
         bash "$ROOT_DIR/tools/build-bootstrap-binary.sh"
         if [ -x "$ROOT_DIR/dist/norcode-bootstrap-compile" ]; then
             mkdir -p "$BIN_DIR"

@@ -24,7 +24,7 @@ def run(args) -> int:
 
 
 BUILD_BYTECODE_COMMAND = CommandModule(
-    name="build-bytecode",
+    name="bytecode-build",
     help="Bygg .ncb.json bytecode-artifact",
     register_arguments=register_arguments,
     run=run,

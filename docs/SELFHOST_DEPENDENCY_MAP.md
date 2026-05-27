@@ -7,7 +7,8 @@ Målet er å gjøre det helt tydelig hva som fortsatt eies av Python, hva som al
 
 - [x] Python-flaten er kartlagt
 - [x] Selfhost-ekvivalenter er identifisert
-- [x] `main.py`-ansvaret er delt inn i tydelige grupper
+- [x] Python-bootstrap-/orchestration-ansvaret er delt inn i tydelige grupper
+- [x] Normal CLI-vei er flyttet til `norcode/cli.py`; Python-flaten er nå eksplisitt bootstrap-kompatibilitet
 - [x] Minimumskjernen for selfhost-v1 er definert
 - [x] Denne oversikten kan brukes som inngang for senere omganger
 
@@ -81,11 +82,11 @@ Disse områdene har fortsatt Python som primærmotor eller bootstrap-bro:
 - legacy interpreter/runtime-flyter
 - modul-lading/import-resolusjon
 - TOML-kompatibilitet
-- bootstrap/orchestration i `main.py`
+- bootstrap/orchestration i den gjenværende Python-bootstrapen
 
-## `main.py` dependency map
+## Python bootstrap dependency map
 
-`main.py` er fortsatt et stort bootstrap- og orchestration-senter. Det drar inn disse hovedgruppene:
+Den gjenværende Python-bootstrapen er fortsatt et bootstrap- og orchestration-senter. Den drar inn disse hovedgruppene:
 
 ### 1. CLI og modulær dispatch
 
@@ -118,7 +119,8 @@ Disse områdene har fortsatt Python som primærmotor eller bootstrap-bro:
 
 ### 5. Hva dette betyr
 
-- `main.py` er fortsatt ikke liten nok til å være “bare oppstart” i full forstand.
+- `norcode/cli.py` er den normale modulære veien for CLI-dispatch.
+- Den gjenværende Python-bootstrapen er fortsatt ikke liten nok til å være “bare oppstart” i full forstand.
 - Frontend- og HTML-delen er allerede ute av bootstrap som hovedmotor.
 - Resten av selvstendighetsarbeidet ligger primært i compiler/runtime og bootstrap-verktøy utenfor frontend.
 

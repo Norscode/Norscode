@@ -34,13 +34,14 @@ Denne veien skal:
 Kjør:
 
 ```bash
-./bin/nc --python-fallback smoke
+./bin/nc --legacy-python-fallback smoke
 ```
 
 Denne veien skal:
 
 - vise tydelig fallback-varsel
 - kjøre CI som eksplisitt overgangs-/diagnoseflyt
+- gå via den gjenværende Python-kompatibiliteten i `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py`
 - brukes for representative install-/run-smoke-sjekker der Python fortsatt er eksplisitt
 
 ## Representative smoke tests

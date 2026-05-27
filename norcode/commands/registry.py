@@ -1,8 +1,7 @@
-"""Static command registry used during CLI migration.
+"""Static command registry for the modular CLI.
 
-Today the authoritative argparse implementation still lives in `main.py`.
-This registry is the first step toward a modular command system where each
-command can later own:
+This registry is the shared source of truth for command metadata and parser
+registration.  Each command can own:
 
 - argument registration
 - execution handler
@@ -13,6 +12,14 @@ command can later own:
 from __future__ import annotations
 
 from norcode.commands.ast_export_validate import AST_EXPORT_VALIDATE_COMMAND
+from norcode.commands.bootstrap_runtime import (
+    BOOTSTRAP_COMPILER_VERIFY_COMMAND,
+    REGISTRY_HOST_COMMAND,
+    SELFHOST_CHAIN_RUN_COMMAND,
+    SELFHOST_COMPILE_ALL_COMMAND,
+)
+from norcode.commands.build_targets import BUILD_COMMAND, NATIVE_BUILD_COMMAND, NATIVE_RUN_COMMAND
+from norcode.commands.inspection import DEBUG_COMMAND, DISASM_COMMAND, IR_DISASM_COMMAND, UPDATE_SNAPSHOTS_COMMAND
 from norcode.commands.ast_validate import AST_VALIDATE_COMMAND
 from norcode.commands.base import CommandModule
 from norcode.commands.build_bytecode import BUILD_BYTECODE_COMMAND
@@ -30,8 +37,27 @@ from norcode.commands.run import RUN_COMMAND
 from norcode.commands.runtime_call import RUNTIME_CALL_COMMAND
 from norcode.commands.format import FORMAT_COMMAND
 from norcode.commands.bench import BENCH_COMMAND
+from norcode.commands.ci import CI_COMMAND
 from norcode.commands.fuzz import FUZZ_COMMAND
 from norcode.commands.migrate_names import MIGRATE_NAMES_COMMAND
+from norcode.commands.package_registry_commands import (
+    ADD_COMMAND,
+    LOCK_COMMAND,
+    REGISTRY_MIRROR_COMMAND,
+    REGISTRY_SIGN_COMMAND,
+    REGISTRY_SYNC_COMMAND,
+    UPDATE_COMMAND,
+)
+from norcode.commands.meta_commands import COMMANDS_COMMAND, REPL_COMMAND
+from norcode.commands.selfhost_artifacts import (
+    AST_EXPORT_COMMAND,
+    SELFHOST_AST_EXPORT_COMMAND,
+    SELFHOST_CHAIN_CHECK_COMMAND,
+    SELFHOST_CHAIN_EXPORT_COMMAND,
+    SELFHOST_NCB_BUILD_CACHE_COMMAND,
+    SELFHOST_NCB_EXPORT_COMMAND,
+    SELFHOST_NCB_RUN_COMMAND,
+)
 from norcode.commands.scaffold_api import SCAFFOLD_API_COMMAND
 from norcode.commands.smoke import SMOKE_COMMAND
 from norcode.commands.serve_e2e import SERVE_E2E_COMMAND
@@ -44,6 +70,17 @@ from norcode.commands.selfhost_lexer_run import SELFHOST_LEXER_RUN_COMMAND
 from norcode.commands.selfhost_lexer_status import SELFHOST_LEXER_STATUS_COMMAND
 from norcode.commands.selfhost_lexer_suite import SELFHOST_LEXER_SUITE_COMMAND
 from norcode.commands.selfhost_lexer_token_smoke import SELFHOST_LEXER_TOKEN_SMOKE_COMMAND
+from norcode.commands.selfhost_bootstrap_gate import SELFHOST_BOOTSTRAP_GATE_COMMAND
+from norcode.commands.selfhost_parity import (
+    SELFHOST_PARITY_COMMAND,
+    SELFHOST_PARITY_CONSISTENCY_COMMAND,
+    SELFHOST_PARITY_GATE_COMMAND,
+    SELFHOST_PARITY_PROGRESS_COMMAND,
+)
+from norcode.commands.selfhost_parity_fixtures import (
+    SYNC_SELFHOST_PARITY_M2_COMMAND,
+    UPDATE_SELFHOST_PARITY_FIXTURES_COMMAND,
+)
 from norcode.commands.selfhost_parser_suite import SELFHOST_PARSER_SUITE_COMMAND
 from norcode.commands.selfhost_bytecode_suite import SELFHOST_BYTECODE_SUITE_COMMAND
 from norcode.commands.selfhost_bootstrap_build import SELFHOST_BOOTSTRAP_BUILD_COMMAND
@@ -60,6 +97,10 @@ COMMANDS: tuple[CommandModule, ...] = (
     RUN_COMMAND,
     CHECK_COMMAND,
     TEST_COMMAND,
+    DEBUG_COMMAND,
+    DISASM_COMMAND,
+    IR_DISASM_COMMAND,
+    UPDATE_SNAPSHOTS_COMMAND,
     BYTECODE_RUN_COMMAND,
     BUILD_BYTECODE_COMMAND,
     AST_VALIDATE_COMMAND,
@@ -83,6 +124,13 @@ COMMANDS: tuple[CommandModule, ...] = (
     SELFHOST_BOOTSTRAP_CHECK_COMMAND,
     SELFHOST_SEMANTIC_SUITE_COMMAND,
     SELFHOST_STDLIB_SUITE_COMMAND,
+    SELFHOST_AST_EXPORT_COMMAND,
+    AST_EXPORT_COMMAND,
+    SELFHOST_CHAIN_EXPORT_COMMAND,
+    SELFHOST_CHAIN_CHECK_COMMAND,
+    SELFHOST_NCB_EXPORT_COMMAND,
+    SELFHOST_NCB_RUN_COMMAND,
+    SELFHOST_NCB_BUILD_CACHE_COMMAND,
     FORMAT_COMMAND,
     LINT_COMMAND,
     SCAFFOLD_API_COMMAND,
@@ -96,99 +144,31 @@ COMMANDS: tuple[CommandModule, ...] = (
     DOCTOR_COMMAND,
     DIAGNOSE_COMMAND,
     MIGRATE_NAMES_COMMAND,
+    ADD_COMMAND,
+    LOCK_COMMAND,
+    UPDATE_COMMAND,
+    REGISTRY_SIGN_COMMAND,
+    REGISTRY_SYNC_COMMAND,
+    REGISTRY_MIRROR_COMMAND,
     UI_RENDER_COMMAND,
-    CommandModule(
-        name="repl",
-        help="Start en enkel interaktiv Norscode-REPL",
-        register_arguments=lambda parser: None,
-    ),
-    CommandModule(
-        name="build",
-        help="Generer C og bygg kjørbar fil",
-        register_arguments=lambda parser: parser.add_argument("file"),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="native-build",
-        help="Bygg ekte Linux x86_64 ELF fra enkel Norscode-entry",
-        register_arguments=lambda parser: (
-            parser.add_argument("file"),
-            parser.add_argument("--output", "-o"),
-            parser.add_argument("--json", action="store_true"),
-        ),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="native-run",
-        help="Bygg og kjør ekte Linux x86_64 ELF når host støtter det",
-        register_arguments=lambda parser: (
-            parser.add_argument("file"),
-            parser.add_argument("--output", "-o"),
-            parser.add_argument("--json", action="store_true"),
-        ),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="bootstrap-compiler-verify",
-        help="Verifiser real bootstrap compiler native lane",
-        register_arguments=lambda parser: parser.add_argument("--json", action="store_true"),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="selfhost-bootstrap-gate",
-        help="Kjør whole selfhost compile + native bootstrap gate",
-        register_arguments=lambda parser: (
-            parser.add_argument("--output-dir", default="build/selfhost-bootstrap-gate"),
-            parser.add_argument("--no-determinism", action="store_true"),
-            parser.add_argument("--json", action="store_true"),
-        ),
-        bootstrap_only=True,
-        experimental=True,
-    ),
-    CommandModule(
-        name="registry-host",
-        help="Host registry-speilfil over HTTP",
-        register_arguments=lambda parser: (
-            parser.add_argument("--host", default="127.0.0.1"),
-            parser.add_argument("--port", type=int, default=8765),
-            parser.add_argument("--mirror"),
-            parser.add_argument("--once", action="store_true"),
-            parser.add_argument("--json", action="store_true"),
-        ),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="ci",
-        help="Kjør lokal CI-sekvens (snapshot, parity, test)",
-        register_arguments=lambda parser: (
-            parser.add_argument("--json", action="store_true"),
-            parser.add_argument("--check-names", action="store_true"),
-            parser.add_argument("--parity-suite", choices=["m1", "m2", "all"], default="all"),
-            parser.add_argument("--bootstrap-lane", action="store_true"),
-            parser.add_argument("--bootstrap-output-dir", default="build/selfhost-bootstrap-gate"),
-            parser.add_argument("--require-selfhost-ready", action="store_true"),
-        ),
-        bootstrap_only=True,
-    ),
-    CommandModule(
-        name="selfhost-chain-run",
-        help="Kjør full selfhost-kjede",
-        register_arguments=lambda parser: parser.add_argument("file"),
-        experimental=True,
-    ),
-    CommandModule(
-        name="selfhost-compile-all",
-        help="Kompiler hele Norscode-koden med selfhost compiler-broen",
-        register_arguments=lambda parser: (
-            parser.add_argument("--root", action="append", dest="roots"),
-            parser.add_argument("--output-dir", default="build/selfhost-whole"),
-            parser.add_argument("--fail-fast", action="store_true"),
-            parser.add_argument("--json", action="store_true"),
-        ),
-        bootstrap_only=True,
-        experimental=True,
-    ),
+    REPL_COMMAND,
+    BUILD_COMMAND,
+    NATIVE_BUILD_COMMAND,
+    NATIVE_RUN_COMMAND,
+    BOOTSTRAP_COMPILER_VERIFY_COMMAND,
+    REGISTRY_HOST_COMMAND,
+    CI_COMMAND,
+    SELFHOST_BOOTSTRAP_GATE_COMMAND,
+    UPDATE_SELFHOST_PARITY_FIXTURES_COMMAND,
+    SYNC_SELFHOST_PARITY_M2_COMMAND,
+    SELFHOST_PARITY_COMMAND,
+    SELFHOST_PARITY_PROGRESS_COMMAND,
+    SELFHOST_PARITY_GATE_COMMAND,
+    SELFHOST_PARITY_CONSISTENCY_COMMAND,
+    SELFHOST_CHAIN_RUN_COMMAND,
+    SELFHOST_COMPILE_ALL_COMMAND,
     SERVE_COMMAND,
+    COMMANDS_COMMAND,
 )
 
 
