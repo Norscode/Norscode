@@ -461,6 +461,9 @@ class Parser:
     def for_stmt(self):
         self.eat("FOR")
         item_name = self.eat_name()
+        # "for hver X i Y" / "for hvert X i Y" — skip the qualifier word
+        if item_name in ("hver", "hvert") and self.current.typ in ("IDENT", "I"):
+            item_name = self.eat_name()
         if self.current.typ == "I":
             self.eat("I")
             list_expr = self.expr()

@@ -655,6 +655,9 @@ class Parser:
     def parse_for_statement(self) -> dict:
         self.expect('for')
         name = self.expect_name()
+        # "for hver X i Y" / "for hvert X i Y" — skip the qualifier word
+        if name in ('hver', 'hvert') and self.peek() and NAME_RE.fullmatch(self.peek()):
+            name = self.expect_name()
         if self.match('='):
             start_expr = self.parse_expression()
             if not self.match('til'):
