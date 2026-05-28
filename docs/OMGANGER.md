@@ -358,3 +358,143 @@ Neste store omgang bør være **WASM-backend** (z263+):
 6. WASM kjøretid og validering
 7. WASM kildekart
 8. WASI system interface
+
+---
+
+## Fase 9: WASM-backend (z263–z272)
+
+Omgang 263–272 introduserte komplett WASM-backend fra IR til distribuerbar binær.
+
+Siste dokumenterte store milepæl: Omgang 272.
+
+Kjerne:
+
+```text
+typed_ir -> wasm_backend -> lower_to_wasm -> emit_driver -> wasm_bytes
+```
+
+### z263 — WASM binary format og modulstruktur
+
+- `wasm_module`, `wasm_section`, `section_id`, `section_order`
+- Alle seksjoner: `type_section`, `import_section`, `function_section`, `code_section`, `data_section` m.fl.
+- `func_type`, `type_index`, `func_index`
+- `wasm_import`, `wasm_export`, `wasm_global`
+- `magic_bytes`, `leb128_encode`, `wasm_buffer`
+
+### z264 — WASM instruksjonssett og bytekode-koding
+
+- Aritmetikk: `add_i32/i64/f64`, `sub`, `mul`, `div`, `rem`
+- Sammenligning: `eq_i32`, `lt_i32_s`, `eqz_i32`
+- Lokal-/global-tilgang: `local_get`, `local_set`, `local_tee`, `global_get`, `global_set`
+- Minneaksess: `load_i32/f64`, `store_i32/f64`, `load_offset`, `load_align`
+- Kontrollflyt: `block`, `loop_instr`, `if_instr`, `br`, `br_if`, `br_table`
+- Kall: `call`, `call_indirect`, `return_instr`
+- Konverteringer: `i32_wrap_i64`, `i64_extend_i32_s`, `f64_convert_i32_s`
+
+### z265 — WASM lineær minnemodell og heap-layout
+
+- `linear_memory`, `page_size`, `initial_pages`, `memory_grow`
+- Regioner: `static_region`, `stack_region`, `heap_region`, `data_region`
+- `bump_alloc`, `alloc_addr`, `alloc_align`
+- Objektlayout: `string_layout`, `list_layout`, `struct_layout`
+- `rc_header`, `rc_increment`, `rc_decrement`, `rc_free`
+- `data_segment`, `segment_offset`, `segment_bytes`
+
+### z266 — WASM funksjonskall, kallekonvensjon og closures
+
+- `wasm_func`, `func_body`, `func_locals`, `func_prologue`, `func_epilogue`
+- `call_conv`, `arg_passing`, `result_passing`, `multi_value_return`
+- `closure`, `closure_ptr`, `closure_env`, `closure_alloc`, `closure_call`
+- `trampoline`, `indirect_call_table`, `table_slot`
+- `builtin_func`, `builtin_dispatch`, `runtime_import`
+- `tail_call_opt`, `shadow_stack`, `shadow_frame`
+
+### z267 — WASM JS-interop og host bindings
+
+- `host_env`, `host_func`, `host_import`, `host_export`
+- `js_value`, `extern_ref`, `extern_ref_table`
+- `marshal_to_js`, `marshal_from_js`, `coerce_js_string`, `coerce_js_number`
+- `wasm_bindgen`, `export_attr`, `ts_decl`
+- `dom_api`, `fetch_api`, `promise`, `async_bridge`
+
+### z268 — WASM validering og modulverifisering
+
+- `validator`, `validate_module`, `validate_func`, `validate_instr`
+- `val_stack`, `val_push`, `val_pop`, `ctrl_stack`, `ctrl_frame`
+- `type_check_instr`, `reachability`, `polymorphic_stack`
+- `stack_underflow`, `type_mismatch_val`, `undefined_func`
+- `validation_result`, `error_location`
+
+### z269 — WASM kjøretid og eksekusjonsmotor
+
+- `wasm_instance`, `instantiate`, `invoke_export`, `invoke_func`
+- `value_stack`, `wasm_value`, `val_i32/i64/f32/f64/ref`
+- `dispatch_instr`, `exec_arith`, `exec_memory_load/store`, `exec_call`
+- `trap`, `trap_memory_oob`, `trap_div_zero`, `trap_indirect_type_mismatch`
+- `fuel`, `fuel_limit`, `fuel_check`, `fuel_exhausted`
+- `jit_tier`, `jit_threshold`, `jit_compile`, `jit_cache`
+
+### z270 — WASM kildekart og debug-informasjon
+
+- `source_map`, `source_map_mappings`, `mapping`, `vlq_encode`, `vlq_segment`
+- `instr_location`, `instr_offset`, `source_line`, `source_col`
+- `wasm_name_section`, `func_name`, `local_name`, `name_map`
+- `debug_info_section`, `die_subprogram`, `die_variable`, `die_type_ref`
+- `breakpoint_table`, `bp_entry`, `bp_instr_offset`
+- `sourcemap_emit`, `sourcemap_encode`, `sourcemap_json`
+
+### z271 — WASI systemgrensesnitt og plattformintegrasjon
+
+- `wasi_snapshot_preview1`, `wasi_import`, `wasi_errno`
+- `fd_read`, `fd_write`, `fd_seek`, `fd_close`, `fd_stat`
+- `path_open`, `path_stat`, `path_unlink_file`, `path_rename`
+- `args_get`, `args_sizes_get`, `environ_get`, `environ_sizes_get`
+- `clock_time_get`, `clock_realtime`, `clock_monotonic`
+- `proc_exit`, `random_get`, `poll_oneoff`
+- `preopened_dir`, `iovec`, `wasi_rights`, `wasi_filetype`
+
+### z272 — WASM backend-pipeline og emit-driver
+
+- `wasm_backend`, `backend_session`, `backend_options`
+- `lower_to_wasm`, `lower_func`, `lower_block`, `lower_instr`
+- `local_map`, `local_alloc`, `type_map`, `ir_type_to_wasm`
+- `const_pool`, `emit_const_pool`
+- `wasm_optimizer`, `opt_const_fold`, `opt_local_reduce`
+- `emit_driver`: alle seksjons-emittere i riktig rekkefølge
+- `output_artifact`: `wasm_file`, `ts_decl_file`, `sourcemap_file`, `output_manifest`
+
+### Nåværende modell etter Omgang 272
+
+```text
+typed_ir_module
+-> wasm_backend (backend_session + backend_options)
+-> lower_to_wasm:
+   for each typed_ir_func:
+     local_map + local_alloc
+     lower_func -> lower_block -> lower_instr*
+     type_map (ir_type -> wasm val type)
+     closure_alloc + shadow_stack (ved behov)
+-> const_pool (strenger + type_metadata)
+-> wasm_optimizer (const_fold, local_reduce, dead_instr)
+-> emit_driver:
+   type_section -> import_section -> function_section
+   -> memory_section -> export_section -> code_section
+   -> data_section (const_pool) -> name_section -> sourcemap_section
+-> wasm_bytes -> wasm_file
+-> ts_decl_file + sourcemap_file
+-> wasi_imports (fd_read/write, path_open, clock, args, proc_exit)
+-> output_manifest -> build_cache
+```
+
+### Neste naturlige fase etter z272
+
+Neste store omgang bør være **LSP og IDE-støtte** (z273+):
+
+1. JSON-RPC 2.0 protokoll og meldingsloop
+2. Inkrementell parsing og dokument-synkronisering
+3. Diagnostikk i sanntid (syntaks- og typefeil)
+4. Hover (type og dokumentasjon ved cursor)
+5. Go-to-definition
+6. Autocomplete (variabel, funksjon, felt)
+7. Rename symbol
+8. Format on save
