@@ -769,3 +769,131 @@ Neste store omgang bør være **CI/CD og release-automatisering** (z293+):
 6. Kanari-utsetting og automatisk rollback
 7. Nightly builds og pre-release kanaler
 8. Dependabot-kompatibilitet og automatiske sikkerhetsoppdateringer
+
+---
+
+## Fase 12: CI/CD og release-automatisering (z293–z302)
+
+Omgang 293–302 introduserte komplett CI/CD-pipeline og release-automatisering.
+
+Siste dokumenterte store milepæl: Omgang 302.
+
+Kjerne:
+
+```text
+git push → CI validate → tag → release pipeline → plattformbygg → GitHub Release → kanari
+```
+
+### z293 — GitHub Actions workflow-struktur og CI-jobbmodell
+- `workflow`, `trigger`, `job`, `step`, `runner`, `matrix`
+- `trigger_push/pull_request/schedule/workflow_dispatch/release`
+- `job_needs`, `job_strategy`, `job_matrix`, `job_fail_fast`
+- `step_uses`, `step_run`, `step_if`, `github_token`, `github_context`
+
+### z294 — CI-pipeline for push og PR-validering
+- `ci_job_check/test/lint/format_check/parity/audit`
+- `setup_norscode`, `cache_step`, `cache_restore_keys`
+- `junit_xml`, `upload_test_results`, `lint_annotations`
+- `pr_status_check`, `required_checks`, `branch_protection`
+- `commit_annotation`, `annotation_level`, `annotation_path`
+
+### z295 — Release-pipeline utløst av versjonstagg
+- `release_workflow`, `semver_tag`, `validate_tag`
+- `version_match_check`, `changelog_entry_check`, `no_pre_release_deps`
+- `build_matrix` per plattform, `artifact_upload/download`
+- `github_release`, `release_body`, `release_assets`, `asset_upload`
+- `extract_changelog_entry`, `release_notify`
+
+### z296 — Kryssplattform-bygg og native binærproduksjon
+- `universal_binary`, `lipo_merge`, `codesign`, `notarize`
+- `musl_target`, `static_linux_binary`, `docker_build_image`
+- `pe_binary`, `windows_signing`, `signtool`
+- `wasm_opt`, `wasm_strip`, `wasm_size`
+- `artifact_checksum`, `artifact_sign_file`
+
+### z297 — Artefaktpakking og GitHub Releases-publisering
+- `artifact_packager`, `tarball_builder`, `zip_builder`
+- `package_layout`, `install_script`, `checksums_file`
+- `release_publisher`, `gh_release_create`, `gh_asset_upload`
+- `release_index`, `update_latest_pointer`, `latest_json`
+- `cdn_publish`, `cdn_invalidate`
+
+### z298 — Kanari-utsetting og automatisk rollback
+- `canary_release`, `canary_percentage`, `canary_increment`
+- `rollout_controller`, `rollout_state`, `health_check`
+- `metric_collector`, `crash_rate`, `error_rate`, `metric_threshold`
+- `rollout_gate`, `promote_canary`, `promote_full`
+- `auto_rollback`, `rollback_to_version`, `nc_update_command`
+
+### z299 — Nightly builds og pre-release kanaler
+- `nightly_workflow`, `nightly_cron`, `nightly_version`, `nightly_build_id`
+- `nightly_prune_policy`, `max_nightly_builds`, `prune_older_than`
+- `pre_release`, `kind_alpha/beta/rc`, `pre_release_tag`
+- `channel_nightly/beta/rc/stable`, `channel_manifest`, `switch_channel`
+- `fuzz_run`, `fuzz_corpus`, `fuzz_crash`, `fuzz_minimize`
+
+### z300 — Sikkerhetsscanning og sårbarhetsadministrasjon
+- `sast`, `sast_finding`, `sarif_output`, `upload_sarif`
+- `dependency_scan`, `dep_vulnerability`, `advisory_database`, `advisory_db_update`
+- `audit_fix`, `auto_update_patch`
+- `secret_scanner`, `secret_finding`, `allowed_patterns`
+- `sbom`, `sbom_spdx`, `sbom_cyclonedx`, `sbom_attest`
+- `dependabot_config`, `dependabot_schedule`
+
+### z301 — CI-cache og pipeline-ytelsesoptimalisering
+- `dep_cache_key`, `build_cache_ci`, `incremental_cache`, `tool_cache`
+- `split_test_matrix`, `test_shard`, `shard_index`, `shard_count`
+- `skip_unchanged`, `path_based_skip`, `affected_packages`, `change_detector`
+- `reuse_artifacts`, `artifact_fingerprint`, `fingerprint_match`
+- `timing_report`, `slowest_step`, `bottleneck_step`
+
+### z302 — CI/CD-integrasjon, overvåking og observabilitet
+- `build_badge`, `badge_ci/coverage/version`
+- `coverage_tool`, `coverage_threshold`, `coverage_upload`, `bench_regression`
+- `bench_comment_pr`, `continuous_benchmark`
+- `pipeline_flakiness`, `flake_rate`, `quarantine_flaky`, `retry_flaky`
+- `deployment_log`, `log_entry`, `log_actor`
+- `environment_protection`, `required_reviewers`, `deployment_approval`
+
+### Nåværende modell etter Omgang 302
+
+```text
+git push (branch/PR):
+  trigger_push/pull_request
+  -> ci_job_check + ci_job_test (sharded) + ci_job_lint + ci_job_format_check
+     + ci_job_parity + ci_job_audit + sast + secret_scanner
+  -> cache: dep_cache + build_cache + tool_cache
+  -> path_based_skip (docs-only → hopp over bygg)
+  -> required_checks -> PR merge gate
+
+git tag v1.2.3:
+  release_workflow -> validate_tag + changelog_entry_check
+  -> build_matrix (macOS arm64/x64, Linux x64/arm64 musl, Windows x64, WASM)
+  -> artifact_packager + checksums_file
+  -> sbom_generate + sbom_attest
+  -> gh_release_create + asset_upload
+  -> registry publish
+  -> canary_release (5% → 100% med health_check + metric_threshold)
+  -> auto_rollback ved gate_fail
+
+nightly (02:00 UTC):
+  nightly_version (date+sha) -> full bygg + extended_test + fuzz_run
+  -> channel_nightly oppdatert -> nightly_prune
+
+sikkerhet (ukentlig):
+  advisory_db_update -> dependency_scan -> auto_update_patch PR
+  sast + secret_scanner på all kode
+```
+
+### Neste naturlige fase etter z302
+
+Neste store omgang bør være **dokumentasjonsside og læringssenter** (z303+):
+
+1. Statisk nettstedgenerator i Norscode
+2. Språkreferanse auto-generert fra kildekode
+3. Standardbibliotek-dokumentasjon
+4. Interaktiv playground (WASM i nettleser)
+5. Tutorial-system med steg-for-steg eksempler
+6. Søkemotor for dokumentasjon
+7. Versjonert dokumentasjon (per release)
+8. Norskspråklig terminologiordliste
