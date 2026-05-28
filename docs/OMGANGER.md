@@ -1857,3 +1857,78 @@ Neste store omgang bør være **kompilatorkjerne og bytekode-VM** (z398+):
 6. Debugger-støtte i VM (breakpoints, step)
 7. Profilering og ytelsestelling
 8. VM-snapshot og serialisering
+
+---
+
+## Fase 22: VM-kjerne fortsettelse (z398–z407)
+
+z398–z407 fullførte VM-kjernen og modulsystemet.
+
+- **z398** Bytekode-instruksjonssett: encode_abc/abx, fullt opcode-vokabular
+- **z399** Stakk-VM: call frames, closures, upvalues, constant pool
+- **z400** Builtins: I/O, liste/map/tekst, matte, fil, JSON, assert
+- **z401** GC: tri-color mark-sweep, inkrementell, generational
+- **z402** JIT: type-profilering, trace-opptak, OSR, deoptimering
+- **z403** Debugger: betingede breakpoints, step-modi, frame-inspeksjon
+- **z404** Profiler: sampling, flame graph, call graph
+- **z405** Snapshot: inkrementell heap-serialisering, format-migrering
+- **z406** Modulsystem: laster, resolver, cross-module dispatch, hot reload
+- **z407** Unntak: unwind + finally, handler-søk, panic, result-propagering
+
+---
+
+## Fase 23: Flertrådskjøring og async/await runtime (z408–z417)
+
+Omgang 408–417 introduserte komplett concurrency- og async-infrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 417.
+
+Kjerne:
+
+```text
+green_threads + channels + async/await + reactor + mutex/atomic
++ structured_concurrency + async_io + async_net + async_fs + runtime
+```
+
+- **z408** Green threads: cooperative scheduling, context switch, work stealing
+- **z409** Channels: buffered/unbuffered, select med fair scheduling, fan-out/in
+- **z410** Async/await: future-trait, waker, state machine desugaring, join_all/race
+- **z411** I/O reactor: epoll/kqueue/io_uring, timer wheel, async read/write
+- **z412** Mutex/RWLock/atomics: mutex_guard, condvar, CAS, memory ordering, spin_lock
+- **z413** Structured concurrency: task_group, cancel_token, nursery, deadline
+- **z414** Async streams og sinks: combinatorer, buffered I/O, framing, json_lines
+- **z415** Async TCP/UDP: connect/accept/listen, split_stream, dns_lookup, timeouts
+- **z416** Async filsystem: open/read/write/seek, dir ops, file watching, spawn_blocking
+- **z417** Async runtime stdlib: multi-thread executor, sleep/interval, broadcast/watch/mpsc, `nc async`
+
+### Nåværende modell etter Omgang 417
+
+```text
+Norscode concurrency-stack:
+
+Grunnlag:    green_thread + stack_g + context_switch + work_steal
+Kommunikasjon: channel (buffered/unbuffered) + select + oneshot
+Async:       future + waker + state_machine + await_expr
+Reaktor:     epoll/kqueue/io_uring + timer_wheel + io_source
+Synkronisering: mutex + rwlock + condvar + atomic (CAS, ordering)
+Struktur:    task_group + cancel_token + nursery + deadline
+Strømmer:    async_stream + async_sink + buf_reader + framed
+Nettverk:    async_tcp + async_udp + dns_lookup_a
+Filsystem:   async_file + dir_read + watch_a + spawn_blocking
+Runtime:     multi_thread executor + sleep + broadcast/watch/mpsc
+stdlib:      std.async.io/net/fs/sync/time/task
+CLI:         nc async run / bench / trace
+```
+
+### Neste naturlige fase etter z417
+
+Neste store omgang bør være **kodegenerering og native backend** (z418+):
+
+1. IR → AArch64 instruksjonsvalg for full Norscode-delmengde
+2. Funksjonskall-konvensjon (ABI) og stakkhåndtering
+3. Strenghåndtering og heap-allokering i native
+4. Liste og map-operasjoner i native
+5. Kontrollflyt: alle betingede og ubetingede hopp
+6. Modulkall og ekstern symboloppløsning
+7. Debug-info og kildekart for native binær
+8. Kompiler `selfhost/vm.no` til native macOS-binær
