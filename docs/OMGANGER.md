@@ -2011,15 +2011,87 @@ std.logg    — strukturert logging/roterende filer
 std.feil    — rik feiltype med kontekst-kjede
 ```
 
-### Neste naturlige fase etter z437
+---
 
-Neste store omgang bør være **web-rammeverk og HTTP-server** (z438+):
+## Fase 26: Web-rammeverk og HTTP-server (z438–z442)
 
-1. HTTP-ruter og middleware-pipeline i Norscode
-2. Request/response-modell og header-håndtering
-3. JSON API og innholdsforhandling
-4. Autentisering og autorisasjon
-5. WebSocket-støtte i web-rammeverket
-6. Statisk filservering og cache-kontroll
-7. Maler og server-side rendering
-8. `nc serve` og produksjons-deployment
+Omgang 438–442 introduserte komplett web-rammeverk for Norscode.
+
+Siste dokumenterte store milepæl: Omgang 442.
+
+```text
+HTTP-ruter + JSON API + autentisering + statiske filer + WebSocket + nc serve
+```
+
+- **z438** HTTP-ruter og middleware-pipeline: app, rute, middleware-kjede, router_tre, prefiks-gruppe, cors, rate-limit
+- **z439** JSON API og innholdsforhandling: json_api, validering, skjema, paginator, api_versjon, openapi-spec
+- **z440** Autentisering og autorisasjon: jwt, sesjon, oauth2, rbac, tillatelse, csrf, api_nøkkel
+- **z441** Statiske filer, maler og SSR: statiske_filer, template_motor, komponent, hydreringspunkt, SSR-cache
+- **z442** WebSocket og `nc serve`: ws_rute, ws_meldinger, produksjon-server, tls_terminering, health_check
+
+### Nåværende modell etter Omgang 442
+
+```text
+Norscode web-rammeverk:
+
+HTTP-lag     — ruter/middleware/cors/rate-limit
+JSON API     — validering/schema/paginator/openapi
+Auth         — jwt/sesjon/oauth2/rbac/csrf
+Statisk/SSR  — template/komponent/hydration/cache
+WebSocket    — ws_rute/ws_meldinger/pub_sub
+nc serve     — produksjon/tls/health/graceful-shutdown
+```
+
+---
+
+## Fase 27: Spillmotor og grafikk (z443–z452)
+
+Omgang 443–452 introduserte komplett spillmotor for Norscode.
+
+Siste dokumenterte store milepæl: Omgang 452.
+
+```text
+spill_løkke + ECS + 2D/3D-rendering + fysikk + inndata + scene + AI + nettverk + nc spill
+```
+
+- **z443** Spill-løkke og livssyklus: spill_løkke, fast_tidssteg, fps_begrenset, tilstand_maskin, spill_klokke
+- **z444** ECS-arkitektur: entitet, komponent, system, arketype, bue_spørring, system_plan, parallell_system
+- **z445** 2D-rendering og sprites: sprite, sprite_blad, animasjon, tilkart, rendring_lag, sprite_batcher
+- **z446** Fysikk og kollisjonsdeteksjon: stivkropp, kollisjons_form, SAT-kollisjonstesting, impuls, kvadtre
+- **z447** Inndata, lyd og ressursadministrasjon: tastatur, mus, spillkontroller, lyd_kilde, ressurs_laster
+- **z448** Sceneliste og hierarki: scene_tre, scene_node, transform, kamera, lys, prefab, instansiering
+- **z449** 3D-rendering og shadere: nett, PBR-materiale, skyggelegger_uniformer, render_kø, etterbehandling
+- **z450** Banesøking og AI: A_stjar, navigasjonsnett, mengde_simulering, atferd_tre, AI_agent
+- **z451** Flerspiller-nettverk: rollback_netcode, snapshot_delta, matchmaking, lag_kompensasjon, elo
+- **z452** Spillmotor-stdlib: innebygde komponenter/systemer, `nc spill`-kommandoer, spill_template
+
+### Nåværende modell etter Omgang 452
+
+```text
+Norscode spillmotor:
+
+Kjerne       — spill_løkke/tilstand_maskin/fast_tidssteg
+ECS          — entitet/komponent/system/arketype/bue_spørring
+2D           — sprite/animasjon/tilkart/fysikk2d/kollisjons_detektor
+3D           — nett/PBR/skyggelegger/render_kø/etterbehandling
+Inndata      — tastatur/mus/spillkontroller/berøring
+Lyd          — lyd_kilde/3D-lyd/miksepanel/strøm
+Ressurser    — ressurs_laster/asset-pakke/asynkron-laster
+Scene        — scene_tre/prefab/kamera/lys/instansiering
+AI           — A*/navigasjonsnett/mengde/atferd_tre
+Nettverk     — rollback/snapshot_delta/matchmaking/elo
+nc spill     — spill_ny/spill_kjør/legg_til_scene/publiser
+```
+
+### Neste naturlige fase etter z452
+
+Neste store omgang bør være **editor-verktøy og DevEx** (z453+):
+
+1. Spillredigeringsprogram (scene-editor, komponent-inspektor)
+2. Visuell debugger og profiler for spill
+3. Hot-reload for kode og ressurser
+4. Asset-pipeline (bilde/lyd/3D-modell → pakkeformat)
+5. Skripting-sandkasse med hot-patch
+6. Plugin-system for spillmotor-utvidelser
+7. Norscode Playground (nettleserbasert REPL/sandbox)
+8. `nc studio` — integrert utviklingsmiljø
