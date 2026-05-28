@@ -1932,3 +1932,35 @@ Neste store omgang bør være **kodegenerering og native backend** (z418+):
 6. Modulkall og ekstern symboloppløsning
 7. Debug-info og kildekart for native binær
 8. Kompiler `selfhost/vm.no` til native macOS-binær
+
+---
+
+## Fase 24: Kodegenerering og native backend (z418–z427)
+
+Omgang 418–427 definerer komplett native kompileringspipeline og bootstrap-fullføring.
+
+Siste dokumenterte store milepæl: Omgang 427.
+
+- **z418** Instruksjonsvalg: BURS tiling, virtuelle registre, cmp+branch fusjon
+- **z419** ABI: AArch64 macOS/Linux kallekonvensjon, stakk-layout, prologue/epilogue
+- **z420** Verdirepr: tagged pointer, inline strings, alloc_header, RC
+- **z421** Liste/map native: ring_buffer, robin_hood hashing, builtins
+- **z422** Kontrollflyt: jump table, exception table, landing pad, unwind
+- **z423** Modulkobling: symbol_table, GOT/PLT, dlopen, module ctors
+- **z424** Debug-info: DWARF, line table, di_subprogram, dSYM
+- **z425** Runtime-bibliotek: rt_alloc/str/list/map/io/error/gc
+- **z426** Full pipeline: parse → typecheck → SSA → isel → regalloc → emit → link
+- **z427** Bootstrap-fullføring: stage A/B/C, replace_python_wrapper, python_free_check
+
+### Neste naturlige fase etter z427
+
+Neste store omgang bør være **standardbibliotek nativ implementasjon** (z428+):
+
+1. `std.tekst` nativ — split, replace, trim, format, regex
+2. `std.liste` nativ — sort, map, filter, fold, zip
+3. `std.ordbok` nativ — merge, filter, transform
+4. `std.fil` nativ — path, read, write, walk
+5. `std.json` nativ — parse, stringify med full typestøtte
+6. `std.math` nativ — aritmetikk, trigonometri, statistikk
+7. `std.tid` nativ — now, format, parse, duration
+8. `std.env` nativ — args, getenv, platform
