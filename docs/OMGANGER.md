@@ -1798,3 +1798,62 @@ Neste store omgang bør være **databasemotor og lagringsmotor** (z388+):
 6. Lagringsformat og sidehåndtering
 7. Replikering og point-in-time recovery
 8. Norscode SQL-dialekt og ORM
+
+---
+
+## Fase 21: Databasemotor og lagringsmotor (z388–z397)
+
+Omgang 388–397 introduserte komplett databasemotor og lagrings-infrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 397.
+
+Kjerne:
+
+```text
+B+-tre + WAL(ARIES) + MVCC + optimizer + sidehåndtering
++ replikering + SQL-builder + ORM + migrasjoner + stdlib
+```
+
+- **z388** B-tre/B+-tre: node-split, rotering, sammenslåing, bplus_leaf_chain, btree_cursor
+- **z389** WAL (ARIES): LSN, rtype_full_page, group_commit, checkpoint, Analysis→Redo→Undo recovery
+- **z390** MVCC: tuple_xmin/xmax, txn_snapshot, is_visible, SSI (rw_anti_dependency), VACUUM, wraparound
+- **z391** Sidehåndtering: page_header, item_id, heap_tuple, buffer_pool med clock_sweep, FSM, visibility_map
+- **z392** Query optimizer: statistics (NDV, histogram), selectivity, dp join order, GEQO, access paths, plan_cache
+- **z393** Replikering og PITR: streaming (walsender/receiver), synchronous_replication, logical decoding, base_backup
+- **z394** SQL-dialekt og query builder: qb_from/where/join/group, eb_eq/like/in, CTE, lateral, window functions
+- **z395** ORM og migrasjoner: model→tabell, rel_belongs_to/has_many/many_to_many, auto_migration, schema_diff, seeder
+- **z396** Tilkoblingspool og drivere: pool_min/max, health_check, driver_postgres/sqlite/duckdb, with_timeout
+- **z397** DB stdlib: with_tx, savepoints, slow_query_log, test_helper (within_tx_test), `nc db migrate/console/generate`, norscodedb (embedded)
+
+### Nåværende modell etter Omgang 397
+
+```text
+Norscode databasemotor:
+
+Indeks:      B+-tre med leaf_chain + btree_cursor (range scan O(log n + k))
+WAL:         LSN + ARIES (Analysis/Redo/Undo) + group_commit + archiving
+MVCC:        tuple_xmin/xmax + snapshot_isolation + SSI + VACUUM + wraparound
+Lagring:     8KB pages + buffer_pool(clock_sweep) + free_space_map + visibility_map
+Optimizer:   histogram + NDV + dynamic_programming join order + GEQO + plan_cache
+Replikering: streaming (sync/async) + logical decoding + base_backup + PITR
+SQL:         query_builder + expr_builder + CTE + lateral + window functions
+ORM:         model → tabell + relasjoner + eager load + auto_migration
+Pool:        min/max conns + health_check + ctx_timeout + slow_query_log
+Test:        within_tx_test (alltid rollback) + test_snapshot_db
+stdlib:      std.db.orm / std.db.sql / std.db.pool / std.db.migration
+embedded:    norscodedb (WAL, in-memory, ingen ekstern server)
+CLI:         nc db migrate / rollback / status / console / schema / diff / generate
+```
+
+### Neste naturlige fase etter z397
+
+Neste store omgang bør være **kompilatorkjerne og bytekode-VM** (z398+):
+
+1. Bytekode-instruksjonssett og opcode-definisjon
+2. Stakk-basert VM med call frames
+3. Innebygde funksjoner (builtins) i VM
+4. Garbage collector for VM-heap
+5. JIT-kompilering av varme funksjoner
+6. Debugger-støtte i VM (breakpoints, step)
+7. Profilering og ytelsestelling
+8. VM-snapshot og serialisering
