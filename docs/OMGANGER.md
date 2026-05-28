@@ -1151,3 +1151,131 @@ Neste store omgang bør være **distribuert kjøretid og cloud-native** (z323+):
 6. Feil-toleranse og circuit breaker
 7. Distribuert cache og datalagring
 8. Cloud-native deployment (Kubernetes, containere)
+
+---
+
+## Fase 15: Distribuert kjøretid og cloud-native (z323–z332)
+
+Omgang 323–332 introduserte komplett distribuert kjøretid og cloud-native infrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 332.
+
+Kjerne:
+
+```text
+aktørmodell + konsensus + observabilitet + service mesh + feil-toleranse
++ Kubernetes + API-gateway + cloud-orkestrasjon
+```
+
+### z323 — Aktørmodell og distribuert meldingsutveksling
+- `actor`, `actor_ref`, `actor_mailbox`, `mailbox_overflow`
+- `tell` (asynk), `ask` (synk med timeout), `fire_and_forget`
+- `receive_loop`, `stash`, `supervision`, `supervisor_strategy`
+- `strategy_restart/stop/escalate/resume`, `failure_budget`
+- `location_transparent`, `remote_ref`, `serialize_message`
+
+### z324 — Horisontal skalering og lastbalansering
+- `cluster`, `gossip_protocol`, `phi_accrual`, `failure_detector`
+- `load_balancer`: round_robin, least_conn, consistent_hash, power_of_two
+- `health_probe`, `unhealthy_threshold`, `upstream_unhealthy`
+- `shard`, `consistent_hash_ring`, `virtual_node`, `rebalance_shards`
+- `autoscaler`, `scale_metric`, `scale_cooldown`, `min/max_replicas`
+
+### z325 — Distribuert tilstand og konsensus (Raft)
+- `raft_node`: leader/follower/candidate, `raft_term`, `raft_log`
+- `leader_election`, `request_vote`, `quorum`, `majority`
+- `log_replication`, `replicate_entry`, `commit_if_majority`
+- `state_machine`, `sm_snapshot`, `sm_restore`
+- `distributed_kv`, `kv_watch`, `kv_lease`
+- `distributed_lock`, `lock_fencing_token`
+- `crdt`, `crdt_merge`, `eventual_consistency`
+
+### z326 — Observabilitet (OpenTelemetry)
+- `tracer`, `span`, `trace_id`, `span_kind`, `span_attr`, `span_event`
+- `w3c_trace_context`, `traceparent`, `extract_context`, `inject_context`
+- `counter`, `histogram`, `gauge`, `exemplar`
+- `log_record`, `log_level`, `log_span_context`
+- `otlp_exporter` (gRPC/HTTP), `prometheus_exporter`, `export_batch`
+
+### z327 — Service mesh og tjenesteoppdag
+- `sidecar_proxy`, `data_plane`, `control_plane`
+- `service_registry`, `dns_discovery`, `watch_services`
+- `mTLS`, `spiffe_id`, `cert_rotation`
+- `traffic_split`, `canary_route`, `mirror_traffic`
+- `retry_policy`, `timeout_policy`, `outlier_detection`
+- `ejection_percent`, `base_ejection_time`
+
+### z328 — Feil-toleranse og circuit breaker
+- `circuit_breaker`: closed/open/half_open, `cb_trip`, `cb_reset`
+- `bulkhead`: semaphore/thread_pool, `bulkhead_rejected`
+- `token_bucket`, `leaky_bucket`
+- `retry_backoff_exp`, `retry_jitter`, `deadline`
+- `fallback_fn`, `fallback_cache`, `stale_if_error`
+- `hedge`, `shed_load`, `priority_shed`
+- `chaos_engineering`, `fault_inject`, `inject_latency/error`
+
+### z329 — Distribuert cache og datalagring
+- `dist_cache`: single/replicated/partitioned/hybrid
+- `eviction_policy`: LRU, LFU, ARC, TTL
+- `write_through/behind/around`, `read_through`, `stale_while_revalidate`
+- `invalidate_tag`, `cache_flush`
+- `consistency_level`: strong/bounded_staleness/session/eventual
+- `replication_factor`, `primary/secondary_replica`
+- `compaction`, `tombstone`, `write_amplification`
+
+### z330 — Container-runtime og Kubernetes
+- `multi_stage_build`, `distroless_base`, `image_digest`
+- `oci_spec`, `cgroup_v2`, `cpu/memory_limit`
+- `pod`, `liveness/readiness/startup_probe`
+- `deployment`, `rolling_update`, `max_unavailable/surge`
+- `hpa`, `hpa_metric`, `hpa_scale_up/down`
+- `helm_chart`, `helm_upgrade`, `helm_rollback`
+- `kustomize_overlay`, `kustomize_patch`
+
+### z331 — API-gateway og cloud-native ingress
+- `api_gateway`, `gateway_route`, `request_pipeline`
+- `jwt_auth`, `oauth2_introspect`, `api_key_auth`
+- `rate_limit_plugin`: per_ip/user/api_key, `rl_retry_after`
+- `transform_plugin`: rewrite_path, strip_prefix, add_cors
+- `response_cache`, `stale_while_revalidate`, `bypass_cache`
+- `cert_manager`, `lets_encrypt`, `acme_challenge`
+- `websocket_support`
+
+### z332 — Distribuert runtime-integrasjon og cloud-orkestrasjon
+- `infrastructure_as_code`: `iac_plan`, `iac_apply`, `iac_drift_detect`
+- `managed_services`: db, cache, queue, object_storage, secret_store
+- `event_bus`: `at_least_once`, `exactly_once`, `dead_letter_queue`
+- `workflow_engine`: `durable_execution`, `workflow_replay`, `workflow_history`
+- `distributed_scheduler`, `job_idempotency_key`
+- `multi_region`, `geo_routing`, `failover_region`, `data_residency`
+- `gitops`, `reconcile_loop`, `desired_state`, `drift_detected`
+
+### Nåværende modell etter Omgang 332
+
+```text
+Distribuert Norscode-applikasjon:
+
+Aktørlag:        aktørmodell + mailbox + supervision + location_transparent
+Klusterlag:      gossip + phi_accrual + consistent_hash + autoscaler
+Konsensus:       Raft (leader election + log replication) + distributed_kv
+Observabilitet:  OTel traces + metrics + logs + OTLP export + Prometheus
+Service mesh:    sidecar + mTLS + spiffe_id + traffic_split + retry/timeout
+Feil-toleranse:  circuit_breaker + bulkhead + token_bucket + hedge + chaos
+Cache/lagring:   consistent_hash_ring + LRU + write_through + strong/eventual
+Kubernetes:      pod + rolling_update + HPA + Helm + Kustomize
+API-gateway:     JWT/OAuth2 + rate_limit + transform + response_cache + CORS
+Cloud:           IaC + managed_services + event_bus + workflow_engine + GitOps
+```
+
+### Neste naturlige fase etter z332
+
+Neste store omgang bør være **AI og maskinlæring-integrasjon** (z333+):
+
+1. Innebygd ML-inferens-kjøretid
+2. Vektordatabase og semantisk søk
+3. LLM-integrasjon og prompt-pipeline
+4. RAG (Retrieval-Augmented Generation)
+5. Strømmende LLM-svar og token-håndtering
+6. Embeddings og semantisk likhetsberegning
+7. AI-agent-rammeverk med verktøy og minne
+8. Evaluering og observabilitet for AI-systemer
