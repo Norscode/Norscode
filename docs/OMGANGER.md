@@ -1552,3 +1552,128 @@ Neste store omgang bør være **databehandling og strøm-prosessering** (z353+):
 6. Graf-prosessering og traversal
 7. Dataformat-serde (Parquet, Arrow, Avro)
 8. Distribuert join og aggregering
+
+---
+
+## Fase 18: Databehandling og strøm-prosessering (z353–z362)
+
+Omgang 353–362 introduserte komplett databehandlings-infrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 362.
+
+Kjerne:
+
+```text
+event_log + stream_pipeline + ETL + SQL + reaktiv + tidsserie
++ graf + Parquet/Arrow/Avro + distribuert join + dataframe stdlib
+```
+
+### z353 — Strøm-prosessering og event sourcing
+- `stream_processor`, `event_log`, `append_event`, `read_from_offset`
+- `consumer_group`, `commit_offset`, `lag`
+- `watermark`, `event_time`, `allowed_lateness`, `drop_late`
+- `operator_map/filter/flatmap/reduce/scan/merge/zip`
+- `event_sourcing`: `apply_event`, `rebuild_state`, `snapshot_agg`
+
+### z354 — Batch-databehandling og ETL-pipeline
+- `etl_pipeline`: extract → transform → load
+- `read_page`, `page_token`, `write_mode`: append/overwrite/upsert
+- `row_transform`: map, filter, cast, enrich, drop/rename columns
+- `aggregate_transform`: group_by + agg_sum/count/avg/min/max/collect
+- `join_transform`: inner/left_outer/right_outer/full_outer/cross
+- `data_quality`: check_not_null/unique/range/pattern/referential → quarantine_sink
+
+### z355 — SQL-query-motor og relasjonell algebra
+- `sql_parse` → `sql_ast` → `logical_plan` → `physical_plan`
+- RA-operatorer: scan, filter, project, hash_join, merge_join, aggregate, sort
+- `query_planner`: push_filter, eliminate_projection, join_reorder, use_index
+- `btree_index`, `hash_index`, `index_scan`, `index_range_scan`
+- `statistics`, `cost_model`, `estimated_rows`, `batch_iterator`
+
+### z356 — Reaktiv dataflyt og backpressure
+- `publisher/subscriber/subscription`, `request_n`, `on_next/complete/error`
+- `overflow_strategy`: buffer/drop/error/latest
+- `observable`: create/just/from_list/interval/timer
+- `op_rx_switchmap/debounce/throttle/sample/combine_latest`
+- `publish_subject/behavior_subject/replay_subject`
+- `schedule_on/observe_on`, `retry_when`, `on_error_resume`
+
+### z357 — Tidsseriedata og vindusoperasjoner
+- `ts_store`: `ts_write/read/range_query/compaction`
+- `tumbling_window`, `sliding_window`, `session_window`
+- `wf_rate/increase/delta/percentile/ewma`
+- `downsample`: mean/max/min/sum/last + `interp_linear/step`
+- `anomaly_detect`: z_score + iqr_bounds + moving_avg
+- `rollup_rule`, `stale_marker`, promql/flux/sql_timeseries
+
+### z358 — Graf-prosessering og traversal
+- `graph`: directed/weighted, adjacency_list, CSR
+- `bfs`, `dfs`: pre/post-order, `topological_sort`
+- `dijkstra`, `bellman_ford`, `a_star`
+- `connected_components`, `scc` (Tarjan), `bridge`, `articulation_point`
+- `pagerank` (alpha + iterativ konvergens)
+- `louvain`, `label_propagation`, `modularity`
+- `graph_pattern`, Cypher/Gremlin
+
+### z359 — Dataformat-serde (Parquet, Arrow, Avro)
+- Parquet: row_group, column_chunk, encoding_rle/delta/dict, compress_snappy/zstd
+- `parquet_statistics`, `bloom_filter`, `predicate_pushdown`, `column_projection`
+- Arrow: `array_buffer`, `validity_bitmap`, `record_batch`, IPC, `flight_protocol`
+- `arrow_compute`: vektoriserte kernel-funksjoner
+- Avro: `avro_schema_registry`, `schema_id`, `schema_evolution`, avro_union
+
+### z360 — Distribuert join og aggregering
+- `shuffle`: hash_partition/range_partition → `shuffle_write/read`
+- `broadcast_join` (< broadcast_threshold), `strategy_sort_merge_dist`
+- `partial_aggregate` → `final_aggregate`, `combine_fn`
+- `hyperloglog`: `hll_merge`, `hll_estimate` (distinct count)
+- `skew_detect`, `salt_key`, `salted_join`
+- `all_reduce/all_gather/reduce_scatter`
+- `query_fragment`, `coordinator`, `stream_exchange`
+
+### z361 — Pipeline-orkestrering og datalinagg
+- `dag`: `dag_validate`, `cycle_detect`, `topological_order`
+- `task_dp`: extract/transform/load/sql/python/norscode
+- `run`: queued/running/success/failed + `task_instance`, `xcom_push/pull`
+- `sensor`: file/sql/http/external_task
+- `lineage_graph`: `edge_input/output`, `impact_analysis`, `root_cause_analysis`
+- `data_catalog`: `catalog_dataset`, `dataset_quality_score`, `catalog_search`
+
+### z362 — Databehandlings-stdlib og integrasjon
+- `dataframe`: `df_from_csv/parquet/json`, `df_select/filter/groupby/agg/join`
+- `df_pivot/unpivot`, `df_fillna/dropna`, `df_dedup`, `df_cast`
+- `lazy_frame`: `lf_scan/filter/groupby/agg/collect/explain`
+- `nc data run/schema/validate/convert/sample/stats/diff/merge`
+- `pipeline_builder`: `pb_source/transform/sink/branch/merge/build/run/dry_run`
+- `data_test`: `test_no_nulls/freshness/duplicate_free/column_range`
+
+### Nåværende modell etter Omgang 362
+
+```text
+Norscode databehandlings-stack:
+
+Strøm:        event_log + watermark + consumer_group + operator_scan
+ETL:          extract(page) → transform(map/filter/cast/join) → load(upsert)
+SQL:          parse → RA-plan → optimize(push_filter/index/join_order) → batch execute
+Reaktiv:      Observable + backpressure + debounce/switchmap + subject
+Tidsserie:    ts_chunk + tumbling/session_window + ewma + anomaly + rollup
+Graf:         CSR + dijkstra + SCC(Tarjan) + PageRank + Louvain
+Formater:     Parquet(bloom/pushdown) + Arrow(IPC/Flight) + Avro(schema registry)
+Dist join:    shuffle(hash) + broadcast + HLL(distinct) + skew-salt + fragment
+Orkestrering: DAG + sensor + XCom + lineage_graph + data_catalog
+stdlib:       dataframe + lazy_frame + pipeline_builder + data_test
+CLI:          nc data run/schema/validate/convert/stats/diff
+```
+
+### Neste naturlige fase etter z362
+
+Neste store omgang bør være **nettverksprotokoll og socket-runtime** (z363+):
+
+1. TCP/UDP socket-primitiver og asynkron I/O
+2. HTTP/1.1 og HTTP/2 protokollimplementasjon
+3. WebSocket og server-sent events
+4. DNS-oppslag og navneoppløsning
+5. gRPC og protobuf-koding
+6. Proxy og tunneling (SOCKS5, HTTP CONNECT)
+7. Nettverks-middlerware og request-pipeline
+8. Nettverkssimulering og testing
