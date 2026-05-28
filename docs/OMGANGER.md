@@ -1743,3 +1743,58 @@ Neste store omgang bør være **terminal og TUI runtime** (z378+):
 6. Asynkron terminal-event-loop
 7. TUI-animasjon og progressbar
 8. `nc tui` — interaktivt CLI-rammeverk
+
+---
+
+## Fase 20: Terminal og TUI runtime (z378–z387)
+
+Omgang 378–387 introduserte komplett TUI-rammeverk for Norscode.
+
+Siste dokumenterte store milepæl: Omgang 387.
+
+Kjerne:
+
+```text
+ANSI escapes + raw_mode + cell_buffer + layout + farger
++ event_loop + animasjon + input + app_framework + stdlib
+```
+
+- **z378** Terminal I/O: ANSI CSI/OSC, cursor_goto, alternate_screen, hyperlinks, SIGWINCH
+- **z379** Raw mode: termios, escape-sekvens-timeout, mouse_sgr, bracketed_paste, kitty_keyboard
+- **z380** TUI-widgets: cell_buffer, block_widget, list/table, gauge, sparkline, chart, braille_canvas
+- **z381** TUI-layout: constraint_length/percentage/fill, hstack/vstack/zstack, grid, overlay, popup_center
+- **z382** Farger og stil: basic16/256/RGB, style_tui (bold/dim/italic/undercurl), span_t, tui_theme (Nord/Dracula)
+- **z383** Event-loop: input_parser, escape_seq_timeout, event_channel, tick_rate, tui_frame, backend_draw
+- **z384** Animasjon: spinner (braille/arc/clock/moon), progress_bar med ETA, multi_progress, smooth_value, typewriter
+- **z385** Interaktiv input: text_input (cursor/mask/word-jump), textarea, fuzzy_finder, select_input, file_picker
+- **z386** App-rammeverk: screen_stack, component, focus_ring, keymap, command_palette, notification, modal, pane_split
+- **z387** TUI-stdlib: pre-bygde apper (list/table/log/explorer/process), `nc tui pick/table/log/confirm/form/run`
+
+### Nåværende modell etter Omgang 387
+
+```text
+Norscode TUI-stack:
+
+Terminal:    alternate_screen + cursor_hide + raw_mode + SIGWINCH
+Widgets:     cell_buffer + block_border + list + table + gauge + chart + braille
+Layout:      constraint(length/pct/fill) + hstack/vstack + grid + popup_center
+Farger:      basic16 / xterm-256 / RGB (truecolor) + style modifiers + tui_theme
+Input:       text_input + textarea + fuzzy_finder + file_picker + form
+Event-loop:  async poll + escape_timeout + tick + event_channel (async tasks)
+Animasjon:   spinner(10 stiler) + progress_bar(ETA) + smooth_value + typewriter
+App:         screen_stack + focus_ring + keymap + command_palette + modal + pane
+stdlib:      nc tui pick / table / log / confirm / form / run / menu
+```
+
+### Neste naturlige fase etter z387
+
+Neste store omgang bør være **databasemotor og lagringsmotor** (z388+):
+
+1. B-tre og B+-tre indeks-implementasjon
+2. WAL (Write-Ahead Logging) og durability
+3. MVCC (Multi-Version Concurrency Control)
+4. Spørsmål-optimizer og plan-cache
+5. Transaksjonsmotor og isolasjonsnivåer
+6. Lagringsformat og sidehåndtering
+7. Replikering og point-in-time recovery
+8. Norscode SQL-dialekt og ORM
