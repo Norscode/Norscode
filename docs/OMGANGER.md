@@ -498,3 +498,138 @@ Neste store omgang bør være **LSP og IDE-støtte** (z273+):
 6. Autocomplete (variabel, funksjon, felt)
 7. Rename symbol
 8. Format on save
+
+---
+
+## Fase 10: LSP og IDE-støtte (z273–z282)
+
+Omgang 273–282 introduserte komplett language server og IDE-integrasjon.
+
+Siste dokumenterte store milepæl: Omgang 282.
+
+Kjerne:
+
+```text
+nc lsp -> message_loop -> dispatch_message -> LSP capabilities -> editor
+```
+
+### z273 — JSON-RPC 2.0 protokoll og meldingsloop
+
+- `jsonrpc_message`, `jsonrpc_request`, `jsonrpc_response`, `jsonrpc_notification`
+- `lsp_transport`, `stdio_transport`, `read_message`, `write_message`, `message_framing`
+- `content_length`, `header_separator`, `body_bytes`
+- `message_loop`, `dispatch_message`, `handle_request`, `handle_notification`
+- `leb128_encode`, `utf8_encode`, `cancel_request`, `progress_token`
+
+### z274 — Dokumentsynkronisering og inkrementell parsing
+
+- `document_store`, `document_uri`, `document_version`, `document_text`
+- `did_open`, `did_change`, `did_close`, `did_save`
+- `text_edit`, `apply_edit`, `line_index`, `build_line_index`
+- `offset_to_position`, `position_to_offset`, `utf16_offset`
+- `reparse_debounce`, `document_snapshot`, `doc_cache`
+
+### z275 — Diagnostikk og sanntids-feilrapportering
+
+- `diagnostic`, `diagnostic_severity`, `diagnostic_code`, `diagnostic_source`
+- `publish_diagnostics`, `push_diagnostics`, `pull_diagnostics`
+- `from_parse_errors`, `from_type_errors`, `from_lint_rules`
+- `merge_diagnostics`, `sort_diagnostics`, `cap_diagnostics`
+- `lint_rule`, `lint_fix`, `tag_unnecessary`, `tag_deprecated`, `version_guard`
+
+### z276 — Hover-provider og dokumentasjon
+
+- `hover_request`, `hover_response`, `hover_contents`, `hover_range`
+- `markup_markdown`, `compute_hover`, `node_at_position`, `enclosing_node`
+- `type_display`, `format_func_sig`, `format_struct_type`, `format_union_type`
+- `doc_extractor`, `doc_paragraph`, `doc_param`, `doc_return`, `doc_example`
+- `hover_sections`, `section_signature`, `section_doc`, `section_defined_in`
+
+### z277 — Go-to-definition og symboloppløsning
+
+- `definition_request`, `definition_location`, `definition_link`
+- `declaration_request`, `type_definition_request`, `references_request`
+- `resolve_at_position`, `resolve_ident`, `resolve_field`, `resolve_method`
+- `definition_index`, `index_by_position`, `cross_file_resolve`
+- `workspace_symbol`, `fuzzy_match`, `symbol_result_list`
+
+### z278 — Autocomplete og komplettering
+
+- `completion_request`, `completion_list`, `completion_item`, `item_kind`
+- `scope_completions`, `member_completions`, `keyword_completions`, `import_completions`
+- `snippet_completions`, `insert_text_format_snippet`, `snippet_tab_stop`
+- `prefix_at_position`, `fuzzy_filter_items`, `sort_completion_items`
+- `resolve_completion`, `trigger_dot`, `trigger_open_paren`
+
+### z279 — Rename, code actions og refaktorering
+
+- `rename_request`, `prepare_rename`, `validate_new_name`, `rename_all_references`
+- `workspace_edit`, `document_changes`, `text_document_edit`, `annotated_edit`
+- `code_action_request`, `code_action`, `action_kind`, `action_is_preferred`
+- `quickfix_provider`, `quickfix_insert_import`, `quickfix_fix_type_coerce`
+- `extract_function`, `extract_variable`, `organize_imports`
+
+### z280 — Formattering, signaturhjelp og semantiske tokens
+
+- `format_request`, `formatter`, `format_edits`, `indent_level`, `trailing_comma`
+- `on_type_format_request`, `range_format_request`
+- `signature_help_request`, `signature_information`, `parameter_information`, `active_parameter`
+- `inlay_hint`, `hint_kind_type`, `hint_kind_parameter`, `hint_text_edits`
+- `semantic_tokens_full`, `token_data`, `token_type_*`, `semantic_tokens_legend`
+
+### z281 — Server-livssyklus og capability-forhandling
+
+- `lsp_server`, `server_state`: `uninitialized → initializing → running → shutdown → exited`
+- `initialize_request`, `initialize_params`, `capabilities_client`, `capabilities_server`
+- `initialized_notification`, `shutdown_request`, `exit_notification`
+- `client_capability_check`, `supports_markdown`, `supports_snippet`, `supports_prepare_rename`
+- `work_done_progress_create`, `progress_notification`
+
+### z282 — LSP-klientintegrasjon og IDE-utvidelser
+
+- `vscode_extension`, `extension_id`, `activation_events`, `contribute_languages`
+- `textmate_grammar`, `grammar_scope_name`, `contribute_commands`, `contribute_configuration`
+- `neovim_config`, `lspconfig_setup`, `lspconfig_on_attach`, `lspconfig_capabilities`
+- `helix_config`, `helix_language_server`, `helix_formatter`
+- `keybind_definition/hover/references/rename/code_action/format`
+- `vsix_package`, `marketplace_publish`
+
+### Nåværende modell etter Omgang 282
+
+```text
+nc lsp (stdio_transport)
+-> message_loop + dispatch_message
+-> initialize_request:
+   capabilities_server (hover, completion, definition, references,
+   rename, format, code_actions, semantic_tokens, inlay_hints,
+   diagnostics push+pull, signature_help, workspace_symbol)
+-> state_running:
+   did_open/change/close -> document_store + reparse_debounce
+   -> document_snapshot (ast + tokens + parse_errors)
+   -> publish_diagnostics (parse + type + lint)
+   textDocument/hover      -> node_at_position -> type_display + doc_extractor
+   textDocument/completion -> scope/member/keyword/snippet completions
+   textDocument/definition -> resolve_at_position -> definition_index
+   textDocument/references -> find_all_refs -> reference_list
+   textDocument/rename     -> rename_all_references -> workspace_edit
+   textDocument/formatting -> formatter(ast) -> format_edits
+   textDocument/codeAction -> quickfix_provider + refactor actions
+   textDocument/semanticTokens/full -> token classification -> token_data
+   textDocument/inlayHint  -> typed_ast walk -> hint_kind_type + hint_kind_parameter
+-> VS Code: vscode_extension + textmate_grammar + contribute_*
+-> Neovim: lspconfig_setup + lspconfig_on_attach
+-> Helix: helix_config entry
+```
+
+### Neste naturlige fase etter z282
+
+Neste store omgang bør være **pakkebehandler og registry** (z283+):
+
+1. `norcode.toml` pakkeformat og feltmodell
+2. Versjonering, SemVer og kompatibilitetsregler
+3. Avhengighetsgraf og oppløsningsalgoritme
+4. Låsefil og reproduserbare bygg
+5. Registry-protokoll (HTTP, manifest, SHA256)
+6. `nc hent` — nedlasting og caching
+7. `nc publiser` — pakking, signering og opplasting
+8. Privat registry og speilservere
