@@ -897,3 +897,121 @@ Neste store omgang bør være **dokumentasjonsside og læringssenter** (z303+):
 6. Søkemotor for dokumentasjon
 7. Versjonert dokumentasjon (per release)
 8. Norskspråklig terminologiordliste
+
+---
+
+## Fase 13: Dokumentasjonsside og læringssenter (z303–z312)
+
+Omgang 303–312 introduserte komplett dokumentasjonsside og interaktivt læringssenter.
+
+Siste dokumenterte store milepæl: Omgang 312.
+
+Kjerne:
+
+```text
+kilde + doc-kommentarer -> site_builder -> statisk HTML -> CDN -> norscode.dev
+```
+
+### z303 — Statisk nettstedgenerator og byggpipeline
+- `site_builder`, `site_config`, `page`, `section`, `template_engine`
+- `markdown_parser`, `frontmatter`, `asset_pipeline`, `asset_fingerprint`
+- `build_pipeline`: `collect_content` → `render_pages` → `write_output`
+- `build_sitemap`, `build_feed`, `build_search_index`
+- `dev_server`, `dev_watch`, `dev_reload`
+
+### z304 — Språkreferanse auto-generert fra kildekode
+- `lang_ref_builder`, `keyword_entry`, `operator_ref`, `type_ref`
+- `statement_ref`, `stmt_syntax`, `stmt_errors`
+- `control_flow_ref`: hvis, ellers, mens, for, bryt, fortsett, returner, prøv/fang/kast
+- `grammar_rule`, `grammar_ebnf`, `grammar_diagram` (SVG railroad diagrams)
+- `example_snippet`, `snippet_runnable`, `cross_ref`
+
+### z305 — Standardbibliotek-dokumentasjon
+- `stdlib_doc_builder`, `doc_extractor`, `doc_comment`, `doc_summary`
+- `doc_param_tag`, `doc_return_tag`, `doc_throws_tag`, `doc_example_tag`
+- `func_doc`, `struct_doc`, `module_doc`, `field_doc`
+- `stdlib_index`, `index_by_module`, `index_by_name`
+- `module_nav`, `func_source_link`
+
+### z306 — Interaktiv playground (WASM i nettleser)
+- `playground`, `playground_embed`, `playground_standalone`
+- `editor` (CodeMirror 6), `norscode_language_support`, `syntax_highlighting_wasm`
+- `wasm_runner`, `compile_source`, `execute_wasm`, `sandbox`
+- `sandbox_fuel_limit`, `sandbox_io_capture`
+- `share_button`, `share_encode/decode`, `example_picker`
+
+### z307 — Tutorial-system med steg-for-steg validering
+- `tutorial`, `tutorial_step`, `step_validation`, `step_validation_rule`
+- `rule_output_contains`, `rule_compiles`, `rule_type_checks`
+- `progress_tracker`, `hint_system`, `hint_level`, `reveal_solution`
+- `kom_i_gang`-spor: installasjon → første program → variabler → funksjoner → strukturer
+- `learning_path`, `code_challenge`, `challenge_tests`
+
+### z308 — Søkemotor for dokumentasjon
+- `search_index`, `index_builder`, `tokenize_text`, `stem_token`, `stop_words`
+- `bm25_score`, `title_boost`, `keyword_boost`, `rank_results`
+- `search_result`, `result_snippet`, `result_highlights`
+- `client_search`, `search_modal` (Ctrl+K), `keyboard_nav`
+- `search_debounce`, `no_results_message`, `search_suggestions`
+
+### z309 — Versjonert dokumentasjon
+- `versioned_docs`, `doc_version`, `version_status`, `version_switcher`
+- `version_build`, `version_deploy_path`, `version_manifest`
+- `canonical_url`, `noindex_old_versions`, `archive_policy`
+- `migration_guide`, `migration_change_entry`, `change_before/after`
+- `deprecation_notice`, `notice_banner`, `removed_in`, `replacement`
+
+### z310 — Norsk terminologiordliste og lokalisering
+- `glossary`, `term`, `term_norsk`, `term_engelsk`, `term_definition`
+- `norsk_nøkkelord`, `nøkkelord_engelsk_ekvivalent`
+- Fullstendig nøkkelordtabell: funksjon/function, hvis/if, mens/while osv.
+- `oversettelse_tabell` (maskinlesbar JSON for navngivningslinter)
+- `lokalisering`, `locale_no/en`, `locale_plural`
+- `style_guide`, `tech_norsk_norm`, `loanword_policy`
+
+### z311 — Kokebok, how-to-guider og praktiske eksempler
+- `cookbook`, `recipe`: problem + løsning + forklaring
+- Web-oppskrifter: HTTP-server, JSON API, HTML-maler, middleware
+- Fil-oppskrifter: lese/skrive filer, traversere mapper, parse CSV
+- CLI-oppskrifter: argumentparsing, delkommandoer, fremdriftslinje
+- Dataoppskrifter: sortering, gruppering, filter/map, akkumulering
+- Feiloppskrifter: propagering, tilpassede feiltyper, retry, timeout
+
+### z312 — Nettsteddeployering og bidragsarbeidsflyt
+- `deploy_pipeline`, `deploy_preview`, `preview_pr_comment`
+- `hosting_cloudflare_pages`, `set_redirects`, `set_headers`
+- `cache_control_immutable/html`, `csp_header`, `hsts_header`
+- `analytics` (cookie-fritt, respekterer DNT)
+- `feedback_widget`, `page_rating`, `feedback_store`
+- `broken_link_checker`, `sitemap_submit`
+
+### Nåværende modell etter Omgang 312
+
+```text
+norscode.dev (statisk, CDN-levert):
+  site_builder:
+    lang_ref_builder    -> /referanse/ (alle nøkkelord, operatorer, typer, grammatikk)
+    stdlib_doc_builder  -> /stdlib/    (alle moduler med doc-kommentarer)
+    tutorial_builder    -> /lær/       (kom-i-gang-spor + interaktiv validering)
+    cookbook_builder    -> /kokebok/   (oppskrifter + how-to-guider)
+    glossary_builder    -> /ordliste/  (norsk terminologi + nøkkelordtabell)
+    playground          -> /prøv/      (full editor + WASM-kompilering i nettleser)
+    search_index        -> search.json (BM25, offline, Ctrl+K)
+  versioned_docs: /docs/v1.2/, /docs/v1.1/, ... + version_switcher
+  deploy_pipeline: push → bygg → CDN + preview per PR
+  feedback_widget: per-side vurdering → feedback_report
+  analytics: privacy-first, ingen cookies
+```
+
+### Neste naturlige fase etter z312
+
+Neste store omgang bør være **native optimizer og ytelsespipeline** (z313+):
+
+1. IR-optimeringer: constant folding, dead code elimination, inlining
+2. Registerallokering (graph-coloring, x86_64 og AArch64)
+3. Loop-optimeringer: LICM, loop unrolling, strength reduction
+4. Profilstyrt optimering (PGO): instrumentering og bruksprofil
+5. Benchmark-suite og ytelsesregresjonsdetektor
+6. Peephole-optimeringer og instruksjonsvalg
+7. Escape analysis og stack allocation
+8. Link-time optimization (LTO)
