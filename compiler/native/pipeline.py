@@ -742,6 +742,23 @@ def compile_source_to_native_elf(source_path: str | Path, output_path: str | Pat
     except NativeCompileError:
         exit_code = -1
 
+    if _is_macos_arm64():
+        from compiler.native.aarch64_lowering import syscall_exit
+        actual_exit = exit_code if exit_code >= 0 else 0
+        machine_code = syscall_exit(actual_exit)
+        macho_output = output.with_suffix("") if output.suffix == ".elf" else output
+        result = _compile_macos_arm64(actual_exit, macho_output)
+        if result is not None:
+            return NativeBuildResult(
+                source=source,
+                output=result["path"],
+                exit_code=actual_exit,
+                machine_code=machine_code,
+                elf_image=result["image"],
+                entry_address=result["entry"],
+                executable=os.access(result["path"], os.X_OK),
+            )
+
     text_base_vaddr = BASE_ADDRESS + TEXT_ALIGNMENT
     text, data = lower_program(la_decls, ops, exit_form, text_base_vaddr)
     machine_code = text  # eksponer kun den eksekverbare koden via NativeBuildResult
@@ -762,20 +779,94 @@ def compile_source_to_native_elf(source_path: str | Path, output_path: str | Pat
     )
 
 
+def _is_macos_arm64() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
+
+
+def _compile_macos_arm64(exit_code: int, output: Path) -> dict | None:
+    """Compile a minimal exit(exit_code) binary for macOS AArch64 via clang.
+
+    Returns a dict with 'path', 'image', and 'entry' on success, or None
+    if clang is not available.
+    """
+    clang = _find_clang()
+    if clang is None:
+        return None
+    with TemporaryDirectory(prefix="norscode-macos-native-") as tmp:
+        asm_path = Path(tmp) / "bootstrap.s"
+        asm_path.write_text(
+            f""".section __TEXT,__text,regular,pure_instructions
+.global _main
+_main:
+    mov x0, #{exit_code}
+    mov x16, #1
+    svc #0x80
+""",
+            encoding="utf-8",
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [clang, "-arch", "arm64", "-o", str(output), str(asm_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not output.exists():
+            return None
+        image = output.read_bytes()
+        entry = _macho_entry_address(image)
+        return {"path": output, "image": image, "entry": entry}
+
+
+def _find_clang() -> str | None:
+    for candidate in ("/usr/bin/clang", "/usr/local/bin/clang"):
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    result = subprocess.run(["which", "clang"], capture_output=True, text=True)
+    path = result.stdout.strip()
+    return path if path else None
+
+
+def _macho_entry_address(image: bytes) -> int:
+    """Extract the __text section address from a Mach-O image (best effort)."""
+    # Mach-O 64-bit: magic at offset 0, ncmds at 16, sizeofcmds at 20
+    import struct as _struct
+    if len(image) < 32 or image[:4] != b"\xcf\xfa\xed\xfe":
+        return 0
+    ncmds = _struct.unpack_from("<I", image, 16)[0]
+    offset = 32
+    for _ in range(ncmds):
+        if offset + 8 > len(image):
+            break
+        cmd, cmdsize = _struct.unpack_from("<II", image, offset)
+        if cmd == 0x19 and offset + 72 + 80 <= len(image):  # LC_SEGMENT_64 with 1 section
+            # Section64 addr is at offset + 72 + 32 (after 16+16 byte names)
+            addr = _struct.unpack_from("<Q", image, offset + 72 + 32)[0]
+            return addr
+        offset += cmdsize
+    return 0x100000000
+
+
+def host_can_execute_elf() -> bool:
+    """True if the host can directly execute the binary produced by the native pipeline."""
+    return _is_macos_arm64() or (
+        platform.system() == "Linux" and platform.machine() in {"x86_64", "AMD64"}
+    )
+
+
 def host_can_execute_linux_x86_64_elf() -> bool:
     return platform.system() == "Linux" and platform.machine() in {"x86_64", "AMD64"}
 
 
 def run_native_elf(source_path: str | Path, output_path: str | Path | None = None) -> NativeRunResult:
     build = compile_source_to_native_elf(source_path, output_path=output_path)
-    if not host_can_execute_linux_x86_64_elf():
+    if not host_can_execute_elf():
         return NativeRunResult(
             build=build,
             ran=False,
             returncode=None,
             stdout="",
             stderr="",
-            reason="Host kan ikke kjøre Linux x86_64 ELF direkte",
+            reason="Host kan ikke kjøre denne binærtypen direkte",
         )
 
     proc = subprocess.run(
@@ -793,6 +884,14 @@ def run_native_elf(source_path: str | Path, output_path: str | Path | None = Non
     )
 
 
+_MACHO_MAGIC = b"\xcf\xfa\xed\xfe"  # 0xFEEDFACF little-endian
+_ELF_MAGIC   = b"\x7fELF"
+# macOS AArch64 syscall instruction: svc #0x80 = D4001001 (LE: 01 10 00 D4)
+_MACOS_SVC   = bytes([0x01, 0x10, 0x00, 0xD4])
+# Linux x86_64 syscall: 0F 05
+_LINUX_SYSCALL = b"\x0f\x05"
+
+
 def verify_bootstrap_compiler() -> dict[str, object]:
     with TemporaryDirectory(prefix="norscode-native-bootstrap-") as tmp:
         source = Path(tmp) / "bootstrap.no"
@@ -800,16 +899,24 @@ def verify_bootstrap_compiler() -> dict[str, object]:
         source.write_text("funksjon start() -> heltall { returner 0 }\n", encoding="utf-8")
         run = run_native_elf(source, output)
         build = run.build
+        image = build.elf_image
+        code  = build.machine_code
+        is_macho = image.startswith(_MACHO_MAGIC)
+        is_elf   = image.startswith(_ELF_MAGIC)
+        valid_code = (
+            (is_macho and _MACOS_SVC in code)
+            or (is_elf  and code.endswith(_LINUX_SYSCALL))
+        )
+        ok = (is_macho or is_elf) and valid_code and build.executable and (
+            not run.ran or run.returncode == 0
+        )
         return {
-            "ok": build.elf_image.startswith(b"\x7fELF")
-            and build.machine_code.endswith(b"\x0f\x05")
-            and build.executable
-            and (not run.ran or run.returncode == 0),
+            "ok": ok,
             "source": str(build.source),
             "output": str(build.output),
             "exit_code": build.exit_code,
-            "machine_code_hex": build.machine_code.hex(),
-            "elf_magic": build.elf_image[:4].hex(),
+            "machine_code_hex": code.hex(),
+            "elf_magic": image[:4].hex(),
             "entry_address": hex(build.entry_address),
             "executable": build.executable,
             "ran": run.ran,
