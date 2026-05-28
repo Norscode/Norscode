@@ -1,16 +1,15 @@
 """Generate AArch64 assembly text from the native pipeline IR.
 
-Takes the same (la_decls, ops, exit_form) representation produced by
-_entry_statements() in pipeline.py and emits clean macOS AArch64 assembly
-that clang can assemble directly.  Uses symbolic labels — no raw-byte
-offset arithmetic needed.
+Supports: la variables, while loops, if/else, integer arithmetic,
+function parameters (up to 8 via x0-x7), function calls, and
+skriv() string output.  Uses symbolic labels — no raw-byte offsets.
 
-Register allocation:
-  x0         – accumulator  (result of every expression)
-  x1         – secondary scratch
-  x2         – tertiary scratch (divisor / divisor for mod)
-  x19–x23    – variable slots (callee-saved; up to 5 variables)
-  x29 / x30  – frame pointer / link register (saved in prologue)
+Register convention:
+  x0        — accumulator (and first argument / return value)
+  x1–x7     — additional argument registers (spilled after call)
+  x1, x2    — scratch during expression evaluation
+  x19–x23   — variable/parameter slots (callee-saved)
+  x29/x30   — frame pointer / link register
 """
 from __future__ import annotations
 
@@ -22,18 +21,20 @@ from compiler.ast_nodes import (
     VarAccessNode,
 )
 
-# ── Register names for variable slots ───────────────────────────────────────
-_VAR_REGS = ["x19", "x20", "x21", "x22", "x23"]
+# ── Register allocation ──────────────────────────────────────────────────────
+# Variable / parameter slots use callee-saved registers so they survive calls.
+_VAR_REGS = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"]
 _MAX_VARS  = len(_VAR_REGS)
 
-# Condition code for the inverse of each comparison (used for loop exit)
+# AArch64 argument registers for outgoing calls
+_ARG_REGS  = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
+
+# ── Condition codes ──────────────────────────────────────────────────────────
 _INVERSE_CC: dict[str, str] = {
     "EQ": "ne", "NE": "eq",
     "LT": "ge", "LTE": "gt",
     "GT": "le", "GTE": "lt",
 }
-
-# Condition code for direct use (used for conditional exit)
 _DIRECT_CC: dict[str, str] = {
     "EQ": "eq", "NE": "ne",
     "LT": "lt", "LTE": "le",
@@ -42,27 +43,28 @@ _DIRECT_CC: dict[str, str] = {
 
 
 class _AsmBuilder:
+    _label_counter = 0
+
     def __init__(self) -> None:
-        self._text: list[str] = []
+        self._lines: list[str] = []
         self._strings: list[bytes] = []
-        self._label_count = 0
 
     def _label(self) -> str:
-        self._label_count += 1
-        return f".L{self._label_count}"
+        _AsmBuilder._label_counter += 1
+        return f".L{_AsmBuilder._label_counter}"
 
     def op(self, instr: str) -> None:
-        self._text.append(f"    {instr}")
+        self._lines.append(f"    {instr}")
 
     def lbl(self, name: str) -> None:
-        self._text.append(f"{name}:")
+        self._lines.append(f"{name}:")
 
     def add_string(self, data: bytes) -> str:
         idx = len(self._strings)
         self._strings.append(data)
-        return f"_Lmsg_{idx}"
+        return f"_Lmsg_{id(self)}_{idx}"
 
-    # ── Utilities ────────────────────────────────────────────────────────────
+    # ── Load immediate ───────────────────────────────────────────────────────
 
     def load_imm(self, reg: str, value: int) -> None:
         v = int(value) & 0xFFFF_FFFF_FFFF_FFFF
@@ -79,6 +81,14 @@ class _AsmBuilder:
         if isinstance(node, NumberNode):
             self.load_imm("x0", int(node.value))
             return
+
+        if isinstance(node, StringNode):
+            # String literals: pass as a pointer to a cstring label
+            lbl = self.add_string((node.value + "\n").encode("utf-8"))
+            self.op(f"adrp x0, {lbl}@PAGE")
+            self.op(f"add x0, x0, {lbl}@PAGEOFF")
+            return
+
         if isinstance(node, VarAccessNode):
             reg = var_slots.get(node.name)
             if reg is None:
@@ -86,14 +96,32 @@ class _AsmBuilder:
             if reg != "x0":
                 self.op(f"mov x0, {reg}")
             return
+
+        if isinstance(node, CallNode):
+            # Push all live variable registers (callee-saved; we save them anyway
+            # in the prologue, but nested calls in expressions need the saved values)
+            args = node.args if hasattr(node, "args") else []
+            # Evaluate arguments left-to-right, stage in temp saves
+            staged: list[str] = []
+            for i, arg in enumerate(args[:8]):
+                self.emit_expr(arg, var_slots)
+                self.op("str x0, [sp, #-16]!")
+                staged.append(f"[sp+{(len(staged))*16}]")
+            # Pop args into argument registers in reverse
+            for i in range(len(staged) - 1, -1, -1):
+                self.op(f"ldr {_ARG_REGS[i]}, [sp], #16")
+            callee = node.name if hasattr(node, "name") else str(node)
+            self.op(f"bl _{callee}")
+            # Result is in x0
+            return
+
         if isinstance(node, BinOpNode):
             op = getattr(node.op, "typ", "")
-            # Emit left → x0, save in x1, emit right → x0, compute
             self.emit_expr(node.left, var_slots)
-            self.op("str x0, [sp, #-16]!")   # push left
+            self.op("str x0, [sp, #-16]!")    # push left
             self.emit_expr(node.right, var_slots)
-            self.op("mov x1, x0")             # right → x1
-            self.op("ldr x0, [sp], #16")      # pop left → x0
+            self.op("mov x1, x0")              # right → x1
+            self.op("ldr x0, [sp], #16")       # pop left → x0
             if op == "PLUS":
                 self.op("add x0, x0, x1")
             elif op == "MINUS":
@@ -107,38 +135,25 @@ class _AsmBuilder:
                 self.op("mul x2, x2, x1")
                 self.op("sub x0, x0, x2")
             elif op in _DIRECT_CC:
-                self.op(f"cmp x0, x1")
-                end_lbl  = self._label()
+                self.op("cmp x0, x1")
                 true_lbl = self._label()
+                end_lbl  = self._label()
                 self.op(f"b.{_DIRECT_CC[op]} {true_lbl}")
-                self.op("mov x0, #0")
+                self.op("movz x0, #0")
                 self.op(f"b {end_lbl}")
                 self.lbl(true_lbl)
-                self.op("mov x0, #1")
+                self.op("movz x0, #1")
                 self.lbl(end_lbl)
             else:
                 raise ValueError(f"Ukjent binæroperator: {op}")
             return
-        if isinstance(node, CallNode):
-            # Simple call: push args, call, result in x0
-            # Only handles integer args for now
-            arg_regs = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"]
-            for i, arg in enumerate(node.args):
-                self.emit_expr(arg, var_slots)
-                if i < len(arg_regs) - 1:
-                    self.op(f"mov {arg_regs[i]}, x0")
-                else:
-                    self.op(f"str x0, [sp, #-16]!")
-            callee = node.callee.name if hasattr(node.callee, "name") else str(node.callee)
-            self.op(f"bl _{callee}")
-            return
+
         raise ValueError(f"Ukjent uttrykksnode: {type(node).__name__}")
 
-    # ── Condition evaluation → flags ─────────────────────────────────────────
+    # ── Comparison: emit cmp, return condition string ────────────────────────
 
     def emit_cmp(self, cond, var_slots: dict[str, str]) -> str:
-        """Emit the comparison and return the AArch64 condition code string."""
-        op = getattr(cond.op, "typ", "")
+        op = getattr(getattr(cond, "op", None), "typ", "")
         self.emit_expr(cond.left, var_slots)
         self.op("str x0, [sp, #-16]!")
         self.emit_expr(cond.right, var_slots)
@@ -149,106 +164,192 @@ class _AsmBuilder:
 
     # ── Statements ───────────────────────────────────────────────────────────
 
+    # Set by generate_aarch64_asm to the label helper functions jump to on early return
+    _epilogue_label: str | None = None
+
     def emit_ops(self, ops: list, var_slots: dict[str, str]) -> None:
         for op in ops:
             kind = op[0]
             if kind == "skriv":
                 msg_bytes = op[1]
                 lbl = self.add_string(msg_bytes)
-                self.op("mov x0, #1")
+                self.op("movz x0, #1")
                 self.op(f"adrp x1, {lbl}@PAGE")
                 self.op(f"add x1, x1, {lbl}@PAGEOFF")
                 self.load_imm("x2", len(msg_bytes))
                 self.op("mov x16, #4")
                 self.op("svc #0x80")
+
             elif kind in ("set", "decl"):
                 _, name, expr = op
                 self.emit_expr(expr, var_slots)
                 reg = var_slots[name]
                 if reg != "x0":
                     self.op(f"mov {reg}, x0")
+
             elif kind == "mens":
                 _, cond, body_ops = op
                 loop_top = self._label()
                 loop_end = self._label()
                 self.lbl(loop_top)
-                cc = self.emit_cmp(cond, var_slots)
-                inverse = _INVERSE_CC.get(_get_op_typ(cond), "ne")
+                op_typ = getattr(getattr(cond, "op", None), "typ", "")
+                self.emit_cmp(cond, var_slots)
+                inverse = _INVERSE_CC.get(op_typ, "ne")
                 self.op(f"b.{inverse} {loop_end}")
                 self.emit_ops(body_ops, var_slots)
                 self.op(f"b {loop_top}")
                 self.lbl(loop_end)
+
+            elif kind == "hvis":
+                # ("hvis", cond, then_ops, else_ops_or_None)
+                _, cond, then_ops, else_ops = op
+                else_lbl = self._label()
+                end_lbl  = self._label()
+                op_typ = getattr(getattr(cond, "op", None), "typ", "")
+                self.emit_cmp(cond, var_slots)
+                inverse = _INVERSE_CC.get(op_typ, "ne")
+                self.op(f"b.{inverse} {else_lbl}")
+                self.emit_ops(then_ops, var_slots)
+                self.op(f"b {end_lbl}")
+                self.lbl(else_lbl)
+                if else_ops:
+                    self.emit_ops(else_ops, var_slots)
+                self.lbl(end_lbl)
+
+            elif kind == "kall":
+                _, call_node = op
+                self.emit_expr(call_node, var_slots)  # result discarded
+
+            elif kind == "returner_mid":
+                # Early return inside a block (e.g. inside if).
+                # Put value in x0, then jump to the epilogue.
+                _, expr = op
+                self.emit_expr(expr, var_slots)
+                if self._epilogue_label:
+                    self.op(f"b {self._epilogue_label}")
+                # If no epilogue label (entry/main path), the caller must handle this
+
             else:
-                raise ValueError(f"Ukjent op: {kind}")
+                raise ValueError(f"Ukjent op: {kind!r}")
 
-    # ── Full assembly output ─────────────────────────────────────────────────
+    # ── Assembly output ──────────────────────────────────────────────────────
 
-    def text_section(self) -> list[str]:
-        return self._text
+    def prologue(self, used_vars: int) -> list[str]:
+        lines = [
+            "    stp x29, x30, [sp, #-16]!",
+            "    mov x29, sp",
+        ]
+        regs = _VAR_REGS[:used_vars]
+        for i in range(0, len(regs), 2):
+            pair = regs[i:i+2]
+            if len(pair) == 2:
+                lines.append(f"    stp {pair[0]}, {pair[1]}, [sp, #-16]!")
+            else:
+                lines.append(f"    str {pair[0]}, [sp, #-16]!")
+        return lines
+
+    def epilogue(self, used_vars: int) -> list[str]:
+        lines = []
+        regs = _VAR_REGS[:used_vars]
+        for i in range(len(regs) - 1, -1, -2):
+            pair = regs[max(0, i-1):i+1]
+            if len(pair) == 2:
+                lines.append(f"    ldp {pair[0]}, {pair[1]}, [sp], #16")
+            else:
+                lines.append(f"    ldr {pair[0]}, [sp], #16")
+        lines.append("    ldp x29, x30, [sp], #16")
+        return lines
 
     def data_section(self) -> list[str]:
-        lines = []
-        if self._strings:
-            lines.append("")
-            lines.append(".section __TEXT,__cstring,cstring_literals")
-            for i, raw in enumerate(self._strings):
-                lines.append(f"_Lmsg_{i}:")
-                escaped = "".join(
-                    f"\\{b:03o}" if (b < 0x20 or b > 0x7E) else chr(b)
-                    for b in raw
-                )
-                lines.append(f'    .ascii "{escaped}"')
+        if not self._strings:
+            return []
+        lines = ["", ".section __TEXT,__cstring,cstring_literals"]
+        for i, (lbl_id, raw) in enumerate(
+            zip([self.add_string(b"") for _ in range(0)], self._strings)
+        ):
+            pass
+        # Re-enumerate using the actual labels stored
+        seen = {}
+        for raw in self._strings:
+            key = id(raw)
+            if key not in seen:
+                seen[key] = raw
+        # Use the labels as recorded in add_string
+        label_base = f"_Lmsg_{id(self)}_"
+        for i, raw in enumerate(self._strings):
+            lbl = f"{label_base}{i}"
+            escaped = "".join(
+                f"\\{b:03o}" if (b < 0x20 or b > 0x7E) else chr(b)
+                for b in raw
+            )
+            lines.append(f"{lbl}:")
+            lines.append(f'    .ascii "{escaped}"')
         return lines
+
+    def text_lines(self) -> list[str]:
+        return self._lines
 
 
 def _get_op_typ(cond) -> str:
     return getattr(getattr(cond, "op", None), "typ", "")
 
 
-def generate_aarch64_asm(la_decls, ops, exit_form) -> str:
-    """Translate (la_decls, ops, exit_form) to macOS AArch64 assembly source."""
-    if len(la_decls) > _MAX_VARS:
-        raise ValueError(f"Maks {_MAX_VARS} variabler (fikk {len(la_decls)})")
+def generate_aarch64_asm(la_decls, ops, exit_form,
+                         params: list | None = None,
+                         func_label: str = "_main") -> str:
+    """Translate (la_decls, ops, exit_form) to macOS AArch64 assembly.
 
-    var_slots: dict[str, str] = {
-        name: _VAR_REGS[i] for i, (name, _) in enumerate(la_decls)
-    }
+    params: list of parameter names — loaded from x0..xN into variable slots.
+    func_label: assembly label for the generated function (default: _main).
+    """
+    all_names: list[str] = []
+    if params:
+        all_names.extend(params)
+    for name, _ in la_decls:
+        if name not in all_names:
+            all_names.append(name)
+
+    if len(all_names) > _MAX_VARS:
+        raise ValueError(f"Maks {_MAX_VARS} lokale navngitte verdier (fikk {len(all_names)})")
+
+    var_slots: dict[str, str] = {name: _VAR_REGS[i] for i, name in enumerate(all_names)}
+    used_vars = len(all_names)
 
     b = _AsmBuilder()
+    is_main = func_label == "_main"
 
-    # Prologue: save callee-saved registers + frame pointer
-    used_vars = len(la_decls)
-    if used_vars > 0:
-        # Save frame + link register
-        b.op("stp x29, x30, [sp, #-16]!")
-        b.op("mov x29, sp")
-        # Save variable registers
-        save_pairs = []
-        regs = _VAR_REGS[:used_vars]
-        for i in range(0, len(regs), 2):
-            pair = regs[i:i+2]
-            if len(pair) == 2:
-                b.op(f"stp {pair[0]}, {pair[1]}, [sp, #-16]!")
-            else:
-                b.op(f"str {pair[0]}, [sp, #-16]!")
+    # Helper functions use an epilogue_label so early returns can jump there
+    epilogue_lbl = b._label() if not is_main else None
+    b._epilogue_label = epilogue_lbl
 
-    # Initialise variable registers
+    # ── Prologue ─────────────────────────────────────────────────────────────
+    prolog = b.prologue(used_vars)
+
+    # ── Load parameters from argument registers ───────────────────────────────
+    param_lines: list[str] = []
+    for i, pname in enumerate((params or [])):
+        reg = var_slots[pname]
+        if _ARG_REGS[i] != reg:
+            param_lines.append(f"    mov {reg}, {_ARG_REGS[i]}")
+
+    # ── Initialise la variables ───────────────────────────────────────────────
     for name, init_expr in la_decls:
         b.emit_expr(init_expr, var_slots)
         reg = var_slots[name]
         if reg != "x0":
             b.op(f"mov {reg}, x0")
 
-    # Body operations
+    # ── Body ops ──────────────────────────────────────────────────────────────
     b.emit_ops(ops, var_slots)
 
-    # Exit
+    # ── Exit (final return value → x0) ───────────────────────────────────────
     if isinstance(exit_form, tuple) and exit_form and exit_form[0] == "if":
         _, cond, then_expr, else_expr = exit_form
         else_lbl = b._label()
         end_lbl  = b._label()
-        cc = b.emit_cmp(cond, var_slots)
-        inverse = _INVERSE_CC.get(_get_op_typ(cond), "ne")
+        op_typ = _get_op_typ(cond)
+        b.emit_cmp(cond, var_slots)
+        inverse = _INVERSE_CC.get(op_typ, "ne")
         b.op(f"b.{inverse} {else_lbl}")
         b.emit_expr(then_expr, var_slots)
         b.op(f"b {end_lbl}")
@@ -258,26 +359,26 @@ def generate_aarch64_asm(la_decls, ops, exit_form) -> str:
     else:
         b.emit_expr(exit_form, var_slots)
 
-    # Epilogue: restore registers and call exit(x0)
-    if used_vars > 0:
-        regs = _VAR_REGS[:used_vars]
-        for i in range(len(regs) - 1, -1, -2):
-            pair = regs[max(0, i-1):i+1]
-            if len(pair) == 2:
-                b.op(f"ldp {pair[0]}, {pair[1]}, [sp], #16")
-            else:
-                b.op(f"ldr {pair[0]}, [sp], #16")
-        b.op("ldp x29, x30, [sp], #16")
+    # ── Epilogue label (target for early returns in helpers) ──────────────────
+    if epilogue_lbl:
+        b.lbl(epilogue_lbl)
 
-    b.op("mov x16, #1")   # exit syscall
-    b.op("svc #0x80")
+    epilog = b.epilogue(used_vars)
 
-    lines = [
-        ".section __TEXT,__text,regular,pure_instructions",
-        ".global _main",
-        "_main:",
-    ]
-    lines.extend(b.text_section())
+    lines: list[str] = []
+    if is_main:
+        lines += [
+            ".section __TEXT,__text,regular,pure_instructions",
+            ".global _main",
+        ]
+    lines.append(f"{func_label}:")
+    lines.extend(prolog)
+    lines.extend(param_lines)
+    lines.extend(b.text_lines())
+    lines.extend(epilog)
+    if is_main:
+        lines += ["    mov x16, #1", "    svc #0x80"]
+    else:
+        lines += ["    ret"]
     lines.extend(b.data_section())
-
     return "\n".join(lines) + "\n"

@@ -131,11 +131,29 @@ def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
             ops.append(("skriv", stmt.expr.value.encode("utf-8") + b"\n"))
             continue
         if isinstance(stmt, WhileNode):
-            cond_op = _validate_comparison(stmt.condition, "mens")
+            _validate_comparison(stmt.condition, "mens")
             body_ops = _classify_body_ops(
                 stmt.body.statements, allow_var_decl=False, ctx="mens-kropp"
             )
             ops.append(("mens", stmt.condition, body_ops))
+            continue
+        if isinstance(stmt, IfNode):
+            then_ops = _classify_body_ops(
+                stmt.then_block.statements, allow_var_decl=False, ctx="hvis-kropp"
+            )
+            else_ops = None
+            if stmt.else_block is not None:
+                else_ops = _classify_body_ops(
+                    stmt.else_block.statements, allow_var_decl=False, ctx="ellers-kropp"
+                )
+            ops.append(("hvis", stmt.condition, then_ops, else_ops))
+            continue
+        if isinstance(stmt, CallNode):
+            ops.append(("kall", stmt))
+            continue
+        if isinstance(stmt, ReturnNode):
+            # Mid-body return: treat as exit — only valid as last statement for now
+            ops.append(("returner_mid", stmt.expr))
             continue
         raise NativeCompileError(
             f"Native v0: ukjent statement-type {type(stmt).__name__} i {ctx}"
@@ -747,12 +765,16 @@ def compile_source_to_native_elf(source_path: str | Path, output_path: str | Pat
         from compiler.native.aarch64_asm_gen import generate_aarch64_asm
         macho_output = output.with_suffix("") if output.suffix == ".elf" else output
         try:
-            asm_text = generate_aarch64_asm(la_decls, ops, exit_form)
+            asm_text = _generate_full_aarch64_program(program, la_decls, ops, exit_form)
             result = _compile_macos_arm64_asm(asm_text, macho_output)
         except Exception:
-            # Fallback to exit(0) smoke-test binary
-            actual_exit = exit_code if exit_code >= 0 else 0
-            result = _compile_macos_arm64(actual_exit, macho_output)
+            try:
+                asm_text = generate_aarch64_asm(la_decls, ops, exit_form)
+                result = _compile_macos_arm64_asm(asm_text, macho_output)
+            except Exception:
+                # Fallback to exit(0) smoke-test binary
+                actual_exit = exit_code if exit_code >= 0 else 0
+                result = _compile_macos_arm64(actual_exit, macho_output)
         if result is not None:
             actual_exit = exit_code if exit_code >= 0 else 0
             machine_code = syscall_exit(actual_exit)
@@ -822,6 +844,52 @@ _main:
         image = output.read_bytes()
         entry = _macho_entry_address(image)
         return {"path": output, "image": image, "entry": entry}
+
+
+def _generate_full_aarch64_program(
+    program: ProgramNode,
+    entry_la_decls, entry_ops, entry_exit_form,
+) -> str:
+    """Generate AArch64 assembly for a full program (entry + helpers)."""
+    from compiler.native.aarch64_asm_gen import generate_aarch64_asm
+
+    sections: list[str] = []
+    header = [".section __TEXT,__text,regular,pure_instructions"]
+    all_strings: list[str] = []
+
+    # ── Helper functions (non-entry) ──────────────────────────────────────
+    for func in program.functions:
+        if func.name in ("start", "main"):
+            continue
+        param_names = [p.name for p in func.params]
+        try:
+            func_la_decls, func_ops, func_exit = _entry_statements(func)
+        except NativeCompileError:
+            raise
+        asm = generate_aarch64_asm(
+            func_la_decls, func_ops, func_exit,
+            params=param_names,
+            func_label=f"_{func.name}",
+        )
+        # Strip the section header from helpers (we emit it once)
+        lines = asm.splitlines()
+        body = [l for l in lines if not l.startswith(".section __TEXT,__text")]
+        sections.append("\n".join(body))
+
+    # ── Entry function ────────────────────────────────────────────────────
+    entry_asm = generate_aarch64_asm(
+        entry_la_decls, entry_ops, entry_exit_form,
+        params=[],
+        func_label="_main",
+    )
+    sections.append(entry_asm.replace(
+        ".section __TEXT,__text,regular,pure_instructions\n", ""
+    ))
+
+    return (
+        ".section __TEXT,__text,regular,pure_instructions\n"
+        + "\n".join(sections)
+    )
 
 
 def _compile_macos_arm64_asm(asm_text: str, output: Path) -> dict | None:
