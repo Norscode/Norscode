@@ -1418,3 +1418,137 @@ Neste store omgang bør være **sikkerhet og kryptografi** (z343+):
 6. Hashing, HMAC og digitale signaturer
 7. Hemmelige-håndtering og rotation
 8. Sikker lagring og kryptert backup
+
+---
+
+## Fase 17: Sikkerhet og kryptografi (z343–z352)
+
+Omgang 343–352 introduserte komplett kryptografi og sikkerhets-infrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 352.
+
+Kjerne:
+
+```text
+symmetrisk AEAD + asymmetrisk krypto + TLS + autentisering + autorisasjon
++ tokens + KMS + hemmeligheter + sikker lagring + security stdlib
+```
+
+### z343 — Symmetrisk kryptografi (AES-GCM, ChaCha20-Poly1305)
+- `aes_gcm`: nonce, tag, aad, `gcm_encrypt/decrypt`, `gcm_verify_tag`
+- `chacha20_poly1305`, `xchacha20` (utvidet nonce)
+- `aead`: unified interface over GCM og ChaCha20-Poly1305
+- `generate_key`, `zeroize_key`, `random_nonce`, `nonce_reuse_detect`
+- `pkcs7_pad/unpad`, `padding_error`
+
+### z344 — Asymmetrisk kryptografi (RSA, ECC, Ed25519, X25519)
+- `rsa_oaep` (kryptering), `rsa_pss` (signering)
+- `ec_curve`: P-256/384/521, secp256k1
+- `ecdsa_sign/verify`, `der_encode_sig`
+- `ed25519_sign/verify` (deterministisk)
+- `x25519_dh` (Diffie-Hellman, forward secrecy)
+- `hybrid_encrypt`: `kem_encapsulate/decapsulate` + AEAD
+
+### z345 — Hashing, HMAC og passordhashing
+- SHA-256/384/512, SHA-3, BLAKE3 (keyed + context)
+- `hmac_sha256/512`, `hmac_verify` (constant-time)
+- `hkdf`: `extract` + `expand`, `hkdf_info` (domain separation)
+- `pbkdf2` (600k iterasjoner min), `scrypt`
+- `argon2id` (anbefalt): memory/iterations/parallelism, PHC-streng
+- `password_needs_rehash`, `upgrade_hash`
+- `merkle_tree`, `merkle_proof`, `merkle_verify_proof`
+
+### z346 — TLS 1.3 og sertifikathåndtering
+- `tls_1_3`, `ecdhe_key_exchange`, `session_ticket`, `zero_rtt`, `anti_replay`
+- `cipher_suite`: AES-128-GCM-SHA256, AES-256-GCM-SHA384, ChaCha20-Poly1305
+- `certificate`, `cert_san`, `cert_extensions`, `chain_verify`, `path_building`
+- `crl_check`, `ocsp_staple`
+- `mtls`: `verify_client_cert`, `peer_identity`, `spiffe_uri`
+- `acme`, `acme_challenge_http/dns`, `auto_renew`, `cert_manager_tls`
+
+### z347 — Autentisering: OIDC, OAuth2 og sesjoner
+- `authorization_code_flow`, `pkce` (code_verifier + challenge)
+- `id_token_verify`: `jwks`, `kid_header`, `audience_check`, `nonce_oidc`
+- `token_introspect`, `token_active`
+- `session`: `session_id`, `session_rotate_id`, `sliding/absolute_expiry`
+- `csrf_token`, `double_submit_cookie`, `same_site_strict`
+- `totp_verify` (RFC 6238), `webauthn_authenticate`, `recovery_code`
+
+### z348 — Autorisasjon: RBAC, ABAC og policy engine
+- `rbac`: `role`, `role_hierarchy`, `inherited_permissions`, `rbac_check`
+- `abac`: `policy`, `effect_allow/deny`, `policy_conditions`, `condition_operator`
+- `policy_engine`: `engine_evaluate`, `policy_decision`
+- `opa`: `opa_input`, `opa_query`, `opa_bundle` (Rego)
+- `row_level_security`, `rls_filter`, `data_mask`, `field_mask`
+- `audit_decision`, `audit_record`
+
+### z349 — Sikkerhets-tokens: JWT, PASETO og API-nøkler
+- `jwt_sign/verify`, `alg_eddsa` (anbefalt), `alg_es256`
+- `jwt_claims`: iss/sub/aud/exp/nbf/iat/jti
+- `jwks_endpoint`, `kid_header`, `jwks_cache` (nøkkelrotasjon)
+- `paseto_v4_local` (ChaCha20) + `paseto_v4_public` (Ed25519)
+- `paseto_implicit_assertion` (kontekst-binding)
+- `api_key_generate/verify/revoke`, `api_key_prefix`, `api_key_hash`
+- `token_blocklist`, `jti_check`
+- `dpop_proof`, `sender_constrained`
+
+### z350 — Nøkkelhåndtering: KMS og HSM
+- `kms_provider`: AWS KMS, GCP KMS, Azure Key Vault, Vault, lokal
+- `envelope_encryption`: `kms_generate_data_key` → AEAD krypterer data
+- `kms_sign` (nøkkel aldri forlater KMS)
+- `hsm`, `pkcs11`, `pkcs11_key_handle`
+- `key_hierarchy`: root_key → KEK → DEK
+- `key_rotation`: `rotation_schedule`, `re_encrypt_data`
+- `per_tenant_key`, `context_binding`
+- `shamir_secret_sharing`: shards + threshold → `reconstruct_key`
+
+### z351 — Hemmelighets-håndtering og rotasjon
+- `vault`: `vault_auth_method` (K8s/AppRole/AWS), `vault_lease`, `lease_renew`
+- `dynamic_secret`: `database_secret` → unike credentials per instans
+- `secret_rotation`: `dual_active_secrets`, `rotation_step`
+- `k8s_secret_sync`, `external_secrets_operator`, `inject_env`
+- `secret_scan_sm`: `trufflehog`, `gitleaks`, `allowlist_sm`
+- `just_in_time_access`, `temporary_credential`, `access_approval`
+
+### z352 — Sikker lagring, herding og security stdlib
+- `encrypt_file`, `file_header`, `secure_delete`, `overwrite_passes`
+- `transparent_encryption`, `encrypt_page/decrypt_page`
+- `secure_alloc`, `guard_page`, `canary_value`, `aslr`, `pie_binary`, `nx_bit`
+- `validate_input`: path_traversal, command_inject, sql_inject
+- `html_escape`, `url_encode`, `json_escape`
+- `security_headers`: CSP, HSTS, X-Frame-Options, Permissions-Policy
+- `security_stdlib`: `std.crypto` / `std.auth` / `std.authz` / `std.secrets` / `std.tls`
+- `nc sec audit/scan/keygen/encrypt/decrypt/hash`
+
+### Nåværende modell etter Omgang 352
+
+```text
+Norscode sikkerhets-stack:
+
+Symmetrisk:    AES-256-GCM + ChaCha20-Poly1305 via AEAD-abstraksjon
+Asymmetrisk:   Ed25519 (sign) + X25519 (DH) + hybrid KEM
+Hashing:       BLAKE3 + SHA-3 + Argon2id (passord) + HKDF (KDF)
+TLS:           TLS 1.3 + ECDHE + OCSP-staple + mTLS + ACME auto-renew
+Autentisering: OIDC/OAuth2 + PKCE + JWT/PASETO + TOTP + WebAuthn
+Autorisasjon:  RBAC + ABAC + OPA (Rego) + RLS + audit log
+Tokens:        JWT (EdDSA) + PASETO v4 + API-nøkler + DPoP
+KMS/HSM:       Envelope-kryptering + nøkkelhierarki + Shamir sharding
+Hemmeligheter: Vault + dynamiske credentials + rotasjon + K8s sync
+Lagring:       Krypterte filer + DB-sider + sikker sletting
+Herding:       ASLR + guard pages + canary + NX-bit + input-validering
+stdlib:        std.crypto / std.auth / std.authz / std.secrets / std.tls
+CLI:           nc sec audit/scan/keygen/encrypt/decrypt/hash
+```
+
+### Neste naturlige fase etter z352
+
+Neste store omgang bør være **databehandling og strøm-prosessering** (z353+):
+
+1. Strøm-prosessering og event sourcing
+2. Batch-databehandling og ETL-pipeline
+3. SQL-query-motor og relasjonell algebra
+4. Reaktiv dataflyt og back-pressure
+5. Tidsseriedata og vindusoperasjoner
+6. Graf-prosessering og traversal
+7. Dataformat-serde (Parquet, Arrow, Avro)
+8. Distribuert join og aggregering
