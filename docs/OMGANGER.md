@@ -1964,3 +1964,62 @@ Neste store omgang bør være **standardbibliotek nativ implementasjon** (z428+)
 6. `std.math` nativ — aritmetikk, trigonometri, statistikk
 7. `std.tid` nativ — now, format, parse, duration
 8. `std.env` nativ — args, getenv, platform
+
+---
+
+## Fase 25: Standardbibliotek nativ implementasjon (z428–z437)
+
+Omgang 428–437 introduserte komplett nativ standardbibliotek for Norscode.
+
+Siste dokumenterte store milepæl: Omgang 437.
+
+```text
+std.tekst + std.liste + std.ordbok + std.fil + std.json
++ std.math + std.tid + std.env + std.mønster + stdlib-integrasjon
+```
+
+- **z428** `std.tekst`: split/join, trim, søk/erstatt, formater, case, Unicode-norm
+- **z429** `std.liste`: map/filter/fold/skann, zip, grupper, vinduer, biter, sorter, sett-ops
+- **z430** `std.ordbok` + `std.fil` + `std.path`: map-transform, path-join, fil-les/skriv, mappetraversering
+- **z431** `std.json`: rekursiv-descent parser, serialisering, JSON Pointer, schema-validering, streaming
+- **z432** `std.math`: abs/min/max/klamp, sqrt/exp/log/trig, statistikk, random, interpolasjon
+- **z433** `std.tid`: tidspunkt/dato/klokkeslett/dato_tid, tidssone, varighet, formatering, sov/vent
+- **z434** `std.env` + `std.prosess` + `std.plattform`: args, env-vars, prosess-spawn, signaler, CPU/minne
+- **z435** `std.mønster`: Thompson NFA → DFA, capture-grupper, erstatt_funksjon, glob
+- **z436** `std.kanal` + `std.logg` + `std.feil`: pub/sub, signal-hooks, roterende logg, rik feiltype
+- **z437** Stdlib-integrasjon: modul-registry, lazy/eager loading, compat-sjekk, property-testing
+
+### Nåværende modell etter Omgang 437
+
+```text
+Norscode standardbibliotek (nativt):
+
+std.tekst   — split/join/trim/søk/erstatt/formater/Unicode
+std.liste   — map/filter/fold/grupper/vinduer/sorter/sett
+std.ordbok  — transform/filtrer/slå_sammen/inverter
+std.fil     — les/skriv/kopier/flytt/slett + mappe-traversering
+std.path    — join/normalisér/kanonisér/komponenter
+std.json    — parse/stringify/pointer/schema/stream
+std.math    — arith/trig/log/statistikk/random
+std.tid     — tidspunkt/dato/varighet/sov/formater
+std.env     — args/getenv/setenv
+std.prosess — spawn/vent/rør/signal
+std.plattform — os/arch/cpu/minne
+std.mønster — regex(NFA→DFA)/glob
+std.kanal   — kanal_ny/pub_sub/signal_hook
+std.logg    — strukturert logging/roterende filer
+std.feil    — rik feiltype med kontekst-kjede
+```
+
+### Neste naturlige fase etter z437
+
+Neste store omgang bør være **web-rammeverk og HTTP-server** (z438+):
+
+1. HTTP-ruter og middleware-pipeline i Norscode
+2. Request/response-modell og header-håndtering
+3. JSON API og innholdsforhandling
+4. Autentisering og autorisasjon
+5. WebSocket-støtte i web-rammeverket
+6. Statisk filservering og cache-kontroll
+7. Maler og server-side rendering
+8. `nc serve` og produksjons-deployment
