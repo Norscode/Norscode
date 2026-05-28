@@ -1279,3 +1279,142 @@ Neste store omgang bør være **AI og maskinlæring-integrasjon** (z333+):
 6. Embeddings og semantisk likhetsberegning
 7. AI-agent-rammeverk med verktøy og minne
 8. Evaluering og observabilitet for AI-systemer
+
+---
+
+## Fase 16: AI og maskinlæring-integrasjon (z333–z342)
+
+Omgang 333–342 introduserte komplett AI og ML-integrasjon i Norscode.
+
+Siste dokumenterte store milepæl: Omgang 342.
+
+Kjerne:
+
+```text
+inferens-runtime + vektor-DB + LLM-klient + RAG + agenter + evaluering
+```
+
+### z333 — ML-inferens-kjøretid og tensoroperasjoner
+- `inference_runtime`: CPU/GPU/NPU/WASM-backends
+- `model_format`: ONNX, safetensors, GGUF
+- `tensor`, `tensor_shape`, `dtype_f32/f16/bf16/i8`
+- `op_matmul`, `op_gelu`, `op_softmax`, `op_layer_norm`, `op_rms_norm`
+- `quantization`: int8/int4, `quant_scale`, `quant_zero_point`, `dequantize`
+- `session`, `input_binding`, `output_binding`
+
+### z334 — Vektordatabase og semantisk søk
+- `vector_db`, `vdb_collection`, `distance_cosine/euclidean/dot_product`
+- `index_hnsw`: `hnsw_m`, `hnsw_ef_construction/search`
+- `upsert`, `search`, `search_filter` (must/should/must_not)
+- `sparse_vector`, `bm25_vector`
+- `hybrid_search`, `hybrid_rrf`, `rrf_k`, `fusion_score`
+- `snapshot_create`, `collection_alias`
+
+### z335 — LLM-klient og prompt-pipeline
+- `llm_client`: Anthropic, OpenAI, Mistral, Ollama, lokal
+- `message_role`: system/user/assistant/tool
+- `content_tool_use`, `content_tool_result`, `content_image`
+- `prompt_template`, `template_render`, `prompt_registry`, `prompt_version`
+- `completion_request`: temp, top_p, stop_sequences, tools
+- `prompt_cache`, `cache_control_persistent`, `cache_read_tokens`
+- `count_tokens`, `trim_history`, `history_token_budget`
+
+### z336 — Strømmende LLM-svar og token-håndtering
+- `stream_event`: message_start/content_block_delta/message_stop
+- `delta_text`, `delta_input_json`, `delta_thinking`
+- `sse_parser`, `parse_sse_line`, `sse_dispatch`
+- `text_accumulator`, `partial_json`, `json_stream_parser`
+- `backpressure`, `pause_stream`, `resume_stream`
+- `time_to_first_token`, `tokens_per_second`
+- `thinking_block`, `thinking_signature`, `redacted_thinking`
+
+### z337 — RAG (Retrieval-Augmented Generation)
+- `chunker`: fixed_size/sentence/paragraph/recursive/semantic
+- `chunk_overlap`, `embedder.embed_batch`, `embed_cache`
+- `indexer` → `vector_db`, `retriever.retrieve(top_k, filter)`
+- `reranker`, `cross_encoder_rerank`, `rerank_score`
+- `context_builder`: dedup + sort + cite_sources
+- `query_rewrite`, `multi_query`, `hypothetical_document` (HyDE)
+- `faithfulness`, `answer_relevance`, `context_precision/recall`
+
+### z338 — Embeddings og semantisk likhet
+- `embedding_model`: tekst/kode/multimodal
+- `cosine_similarity`, `euclidean_distance`, `similarity_threshold`
+- `semantic_cluster`: kmeans/hierarchical/dbscan
+- `dimensionality_reduction`: PCA, UMAP, t-SNE → 2D/3D
+- `semantic_dedup`, `dedup_threshold`, `canonical_doc`
+- `cross_lingual`, `multilingual_model`, `align_embeddings`
+- `fine_tune_embeddings`: contrastive learning, triplet_loss
+
+### z339 — AI-agent-rammeverk med verktøy og minne
+- `agent`, `agent_run`, `step`: thought → action → observation
+- `tool_registry`, `tool_handler`, `builtin_tools`
+- `tool_web_search/read_file/write_file/run_code/http_request`
+- `working_memory`, `wm_token_budget`
+- `episodic_memory`: recall_episodes, forget, episode_importance
+- `semantic_memory_agent`: remember_fact, recall_fact
+- `memory_consolidation`, `summarize_memory`
+- `multi_agent`: orchestrator, sub_agent, agent_handoff, shared_memory
+
+### z340 — AI-observabilitet og evaluering
+- `span_llm_call/tool_call/embedding/retrieval/rerank`
+- `attr_cost_usd`, `attr_input/output_tokens`, `prompt_trace`
+- `eval_suite`, `evaluator`: exact_match/regex/llm_judge
+- `judge_score`, `judge_reasoning`
+- `metric_faithfulness/hallucination/toxicity/bias`
+- `regression_eval`, `eval_regression_threshold`
+- `ab_test_ai`, `statistical_significance`
+- `guardrail`: block_toxic/PII, `prompt_injection_detect`, `jailbreak_detect`
+
+### z341 — Modell-finjustering og modellhåndtering
+- `fine_tune`, `ft_job`: LoRA (rank, alpha, dropout, target_modules)
+- `training_data`: JSONL, chat-format, validering
+- `ft_hyperparams`: lr, scheduler, batch_size, num_epochs
+- `ft_checkpoint`, `early_stopping`, `patience`
+- `model_registry`: versjon, artifact, tags, lineage
+- `promote_to_prod`, `serve_canary_ml`, `serve_shadow`, `serve_rollback_ml`
+- `continuous_training`: data_drift, concept_drift, retrain_pipeline
+
+### z342 — AI-pipeline-integrasjon og applikasjonsmønstre
+- `ai_pipeline`: preprocess → embed → retrieve → rerank → augment → generate → postprocess → evaluate
+- `cost_tracker`, `budget_daily_usd`, `budget_alert_threshold`
+- `batch_processor`, `batch_parallel`
+- `structured_output`: json_mode / tool_use_extraction + `retry_on_invalid`
+- `classifier`: zero_shot/few_shot, `classification_threshold`
+- `summarizer`: bullet/paragraph/executive, extractive/abstractive
+- `translation`, `chat_interface`, `inject_context_chat`
+- `norscode_ai_stdlib`: std_ai_llm/embed/rag/agent/eval
+- `nc ai run`, `nc ai eval`, `nc ai search`
+
+### Nåværende modell etter Omgang 342
+
+```text
+Norscode AI-applikasjon:
+
+Inferens:     ONNX/GGUF session → tensor_ops (matmul, softmax, layer_norm)
+              quantization (int8/int4, LoRA)
+Vektor-DB:    HNSW-indeks + hybrid_search (dense + BM25) + RRF-fusjon
+LLM-klient:   multi-provider + prompt_cache + streaming SSE + thinking
+RAG:          chunk → embed → index → retrieve → rerank → context → generate
+Agenter:      reasoning loop + tool_registry + working/episodic/semantic memory
+              multi_agent orchestration + agent_handoff
+Evaluering:   llm_judge + faithfulness/hallucination + regression_eval
+              guardrails (toxic/PII/injection/jailbreak)
+Fintuning:    LoRA fine-tune → model_registry → canary serve → drift retrain
+Pipeline:     ai_pipeline (compose stages) + batch_processor + structured_output
+stdlib:       std.ai.llm / std.ai.embed / std.ai.rag / std.ai.agent / std.ai.eval
+CLI:          nc ai run / nc ai eval / nc ai search / nc ai embed
+```
+
+### Neste naturlige fase etter z342
+
+Neste store omgang bør være **sikkerhet og kryptografi** (z343+):
+
+1. Kryptografisk primitiver (AES, ChaCha20, RSA, ECC)
+2. Nøkkelhåndtering og nøkkellagre (KMS, HSM)
+3. TLS/mTLS-implementasjon
+4. Autentisering og autorisasjon (OIDC, RBAC)
+5. Sikkerhets-tokens: JWT, PASETO, Macaroons
+6. Hashing, HMAC og digitale signaturer
+7. Hemmelige-håndtering og rotation
+8. Sikker lagring og kryptert backup
