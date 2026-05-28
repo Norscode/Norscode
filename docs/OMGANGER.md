@@ -1015,3 +1015,139 @@ Neste store omgang bør være **native optimizer og ytelsespipeline** (z313+):
 6. Peephole-optimeringer og instruksjonsvalg
 7. Escape analysis og stack allocation
 8. Link-time optimization (LTO)
+
+---
+
+## Fase 14: Native optimizer og ytelsespipeline (z313–z322)
+
+Omgang 313–322 introduserte komplett optimeringspipeline fra IR til binær.
+
+Siste dokumenterte store milepæl: Omgang 322.
+
+Kjerne:
+
+```text
+typed_ir -> opt_pipeline -> regalloc -> peephole -> machine_code -> LTO -> binær
+```
+
+### z313 — IR-optimaliseringsrammeverk og pass manager
+- `opt_pipeline`, `pass_manager`, `pass_kind` (function/module/loop)
+- `analysis_cache`: `dominator_tree`, `loop_info`, `alias_analysis`, `call_graph`
+- `pass_changed`, `analysis_invalidate`, `worklist`
+- `opt_level`: none/basic/standard/aggressive
+- `opt_stat`, `opt_report`
+
+### z314 — Konstantfold og algebraisk forenkling
+- `const_fold_pass`: fold_add/sub/mul/div/compare/cast
+- `algebraic_simplify`: x+0→x, x*1→x, x*0→0, !!x→x
+- `strength_reduce`: x*8→x<<3, x/4→x>>2, x%16→x&15
+- `const_propagate`, `known_map`, `propagate_into_uses`
+- `sparse_conditional_constant` (SCC): lattice-basert analyse
+
+### z315 — Dead code elimination og utilgjengelig kode
+- `dce_pass`: `liveness_pass`, `zero_uses`, `side_effect_free`
+- `reachability_pass`: BFS fra entry → `prune_unreachable_blocks`
+- `dead_branch_elim`: kjent betingelse → `fold_unconditional_branch`
+- `dse_pass`: `subsequent_store` uten load → `remove_dead_store`
+- `dead_alloc_elim`, `dfce_pass`, `global_dce`
+
+### z316 — Funksjonsinlining og kallstedoptimering
+- `inline_pass`, `inline_cost`, `inline_threshold`, `always_inline`
+- `clone_callee`, `substitute_args`, `redirect_returns`, `merge_into_caller`
+- `devirtualize`, `speculative_devirt`, `devirt_guard`
+- `partial_inlining`: inline hot_path, ekstraher cold_path
+- `ipa_const_propagate`, `ipa_dead_arg`, `remove_dead_arg`
+
+### z317 — Loop-optimeringer: LICM, unrolling, vektorisering
+- `licm_pass`: `loop_invariant_instr` → `hoist_instr` til preheader
+- `loop_unroll`: `unroll_full` (kjent tripcnt) / `unroll_partial` + remainder
+- `loop_unswitch`: `loop_invariant_condition` → klon løkke for hver gren
+- `strength_reduce_loop`: multiplikasjon → akkumulering
+- `loop_vectorize`: `dep_check` + `vector_cost_model` → SIMD + `scalar_epilogue`
+- `loop_interchange`, `loop_fusion`, `eliminate_loop`
+
+### z318 — Registerallokering: graph-coloring og spilling
+- `interference_graph`, `graph_color`: simplify → coalesce → select → spill
+- `conservative_coalesce` / `aggressive_coalesce`
+- `spill_cost`, `spill_slot`, `spill_store/load`, `rematerialize`
+- `linear_scan` (raskere, lavere opt-nivå)
+- `register_hint`, `copy_propagate_reg`
+- x86_64: rax/rbx/../r15, xmm0-15 | AArch64: x0-x30, v0-v31
+
+### z319 — Profilstyrt optimering (PGO)
+- `instrument_pass`: `edge_counter`, `block_counter`, `value_profile`
+- `profile_data`, `profile_merge` (multiple runs)
+- `block_frequency`, `branch_probability`, `hot_threshold`
+- `pgo_inline` (aggressiv for varme kallsted), `pgo_inline_cold_suppress`
+- `pgo_layout`: `hot_function_first`, `hot_blocks_together`, `section_cold`
+- `pgo_devirt`: `value_histogram` → toppverdi → spekulativ direkte kall
+- `sample_pgo`, `coverage_guided`
+
+### z320 — Peephole-optimeringer og instruksjonsvalg
+- `peephole_pass`: sliding window, `peephole_rule` (before → after)
+- `eliminate_move`, `forward_store_value`, `compare_branch_fuse`, `fma_instr`
+- `zero_idiom`: mov 0 → xor-self; `fall_through_opt`
+- `instruction_select`: `tile_ir` + `cost_tile` → `emit_machine_instr`
+- x86_64: `use_lea`, `use_cmov`, `use_test`, `use_movzx`
+- AArch64: `use_madd/msub`, `use_csel`, `use_ldp_stp`, `use_ubfx`
+
+### z321 — Escape analysis og stack allocation
+- `escape_analysis`: points_to_graph → `escaped_value` / `non_escaped_value`
+- `escape_reason`: returned, stored_global, captured_closure, address_taken
+- `stack_alloc`: `non_escaped` → `replace_heap_alloc` → `stack_slot`
+- `sroa_pass`: split aggregat → `scalar_field` per felt
+- `alloc_elim`: aldri escaped + aldri lest → `eliminate_allocation`
+- `promote_capture`: lukket variabel som ikke endres → by-value
+- `capture_on_stack`: lukking som ikke escaper → miljø på stakken
+
+### z322 — Link-time optimization og benchmark-suite
+- `lto_full`: merge all IR → full optimizer pipeline → binær
+- `lto_thin`: `thin_summary_file` → `thin_import_list` → parallell codegen + `thin_cache`
+- `lto_internalize`, `lto_dce_cross_module`, `lto_inline_cross_module`
+- `bench_suite`: fibonacci, sort, json_parse, string_ops, list/map_ops, compile_self
+- `bench_runner`: warmup + iterations → mean/stddev/min/max/throughput
+- `bench_compare`: `regression_threshold` → CI-feil + `report_pr_comment`
+- `bench_history`, `bench_trend`
+
+### Nåværende modell etter Omgang 322
+
+```text
+typed_ir
+-> opt_pipeline (pass_manager, opt_level):
+   const_fold + algebraic_simplify + strength_reduce
+   const_propagate (SCC)
+   dce (liveness + zero_uses)
+   unreachable block prune + dead_branch_elim
+   dse + dead_alloc_elim + global_dce
+   inline_pass (cost-based + always_inline + ipa_const_prop)
+   devirtualize + speculative_devirt
+   licm + loop_unroll + loop_unswitch
+   strength_reduce_loop + loop_vectorize
+   escape_analysis -> stack_alloc + sroa + alloc_elim
+   [PGO feedback: pgo_inline + pgo_layout + pgo_devirt]
+-> regalloc (graph_color or linear_scan)
+   spill + rematerialize + coalesce
+-> peephole + instruction_select
+   fma_fuse + zero_idiom + compare_branch_fuse
+   x86_64/AArch64 idioms
+-> LTO (thin eller full)
+   cross-module inline + dce + const_prop + internalize
+-> binær
+
+Benchmark: bench_suite i CI
+   -> bench_compare(current, baseline) -> regression_threshold
+   -> bench_history + bench_trend
+```
+
+### Neste naturlige fase etter z322
+
+Neste store omgang bør være **distribuert kjøretid og cloud-native** (z323+):
+
+1. Distribuert meldingssystem og aktørmodell
+2. Horisontal skalering og lastbalansering
+3. Distribuert tilstand og konsensus
+4. Observabilitet: traces, metrics og logs (OpenTelemetry)
+5. Service mesh og tjenesteoppdag
+6. Feil-toleranse og circuit breaker
+7. Distribuert cache og datalagring
+8. Cloud-native deployment (Kubernetes, containere)
