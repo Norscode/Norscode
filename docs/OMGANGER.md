@@ -633,3 +633,139 @@ Neste store omgang bør være **pakkebehandler og registry** (z283+):
 6. `nc hent` — nedlasting og caching
 7. `nc publiser` — pakking, signering og opplasting
 8. Privat registry og speilservere
+
+---
+
+## Fase 11: Pakkebehandler og registry (z283–z292)
+
+Omgang 283–292 introduserte komplett pakkebehandler fra manifest til distribusjon.
+
+Siste dokumenterte store milepæl: Omgang 292.
+
+Kjerne:
+
+```text
+norcode.toml -> resolver -> lockfile -> fetch -> build -> publish -> registry
+```
+
+### z283 — norcode.toml manifestformat og prosjektmodell
+
+- `manifest`, `project_section`: navn, versjon, beskrivelse, forfattere, lisens
+- `dependencies_section`, `dependency_entry`, `dep_version_req`, `dep_path`, `dep_optional`
+- `dev_dependencies_section`, `build_dependencies_section`
+- `features_section`, `feature_name`, `feature_deps`, `default_features`
+- `workspace_section`, `workspace_members`
+- `registry_section`, `toml_parse`, `toml_table`
+
+### z284 — SemVer versjonering og kompatibilitetsregler
+
+- `version`: `ver_major.ver_minor.ver_patch[-pre][+build]`
+- `version_req`, `req_op`: `op_caret`, `op_tilde`, `op_wildcard`, `op_exact`, `op_greater_eq`
+- `caret_rule`: ^1.2.3 → >=1.2.3, <2.0.0; ^0.2.3 → >=0.2.3, <0.3.0
+- `req_matches`, `filter_by_req`, `select_best`, `latest_compatible`
+- `bump_major`, `bump_minor`, `bump_patch`, `next_version`
+
+### z285 — Avhengighetsgraf og oppløsningsalgoritme
+
+- `dep_graph`, `dep_node`, `dep_edge`, `resolver`
+- `candidate_set`, `activate`, `activation_stack`
+- `conflict`, `backtrack`, `backtrack_point`, `backtrack_limit`
+- `feature_activation`, `propagate_features`, `optional_dep_gate`
+- `strategy_newest`, `strategy_locked`, `cycle_check`, `multiple_versions`
+
+### z286 — Låsefil og reproduserbare bygg
+
+- `lockfile`, `locked_package`, `locked_version`, `locked_checksum`, `locked_source`
+- `source_kind`: registry, git (med commit-pin), path
+- `checksum_verify`, `checksum_mismatch`
+- `lock_generate`, `lock_diff`, `lock_check`, `lock_stale`
+- `reproducible_build`, `build_input_hash`, `deterministic_output`, `build_id`
+- `update_conservative`, `update_minimal`, `lock_audit`, `audit_advisory`
+
+### z287 — Registry-protokoll og pakkeindeks
+
+- `registry`, `registry_url`, `registry_auth`, `auth_token`, `auth_bearer`
+- `index`, `index_entry`, `index_version_list`, `index_etag`, `index_refresh`
+- `package_metadata`, `meta_checksum`, `meta_yanked`
+- `http_client`, `http_retry`, `http_user_agent`
+- `search_query`, `search_results`, `result_score`
+- `yank`, `yank_reason`
+
+### z288 — nc hent — nedlasting, verifisering og lokal cache
+
+- `fetch_command`, `fetch_all`, `fetch_offline`
+- `download_manager`, `download_job`, `download_progress`, `parallel_download`
+- `archive_tar_gz`, `extract_archive`, `extract_strip_prefix`
+- `package_cache`, `cache_dir`, `cache_key`, `cache_lock`, `cache_evict`
+- `verify_download`, `verify_signature`, `ed25519_verify`
+- `registry_token`, `token_store`
+
+### z289 — nc publiser — pakking, signering og opplasting
+
+- `publish_command`, `publish_dry_run`, `publish_allow_dirty`
+- `package_builder`, `include_glob`, `exclude_glob`, `build_source_list`
+- `archive_builder`, `archive_checksum`
+- `package_signer`, `ed25519_sign`, `signing_key`
+- `publish_metadata`, `publish_readme_content`, `publish_links`
+- `publish_form`, `multipart_boundary`
+- `pre_publish_check`: versjon ny, lisens, readme, ren git, manifest gyldig
+- `version_bump_command`, `bump_and_tag`, `git_tag_push`
+
+### z290 — Privat registry og speilservere
+
+- `registry_server`, `server_config`, `server_tls`
+- `storage_filesystem`, `storage_s3`, `storage_gcs`
+- `registry_db`, `db_packages`, `db_versions`, `db_tokens`, `db_owners`
+- `auth_system`, `api_token`, `scope_publish`, `scope_yank`
+- `owner_record`, `owner_add`, `owner_remove`
+- `mirror`, `mirror_upstream`, `mirror_sync`, `proxy_fetch_upstream`
+- `rate_limiter`, `rate_exceeded`
+
+### z291 — Workspace og multi-pakke-prosjekter
+
+- `workspace`, `workspace_root`, `workspace_members`, `unified_lockfile`
+- `cross_member_dep`, `internal_dep_path`
+- `workspace_resolver`, `build_order`, `build_layer`, `parallel_build`
+- `workspace_inheritance`, `inherit_version`, `workspace_dep`
+- `patch_section`, `patch_with_path`, `patch_with_git`
+- `virtual_manifest`, `private_package`, `publish_order`
+
+### z292 — Pakkebehandler-CLI og byggesystem-integrasjon
+
+- `pm_cli`: `init`, `add`, `remove`, `update`, `fetch`, `bygg`, `test`, `run`, `publiser`
+- `cmd_search`, `cmd_audit`, `cmd_clean`, `cmd_version_bump`, `cmd_login`, `cmd_yank`
+- `init_template`: `template_lib`, `template_bin`, `template_wasm`
+- `build_script`, `rerun_if_changed`, `build_script_output`
+- `build_cache`, `cached_artifact`, `artifact_key`, `artifact_invalidate`
+- `output_json` for verktøy-integrasjon
+
+### Nåværende modell etter Omgang 292
+
+```text
+norcode.toml (manifest)
+-> toml_parse -> project_section + dependencies_section + features_section
+-> resolver: candidate_set + backtracking SAT + feature_propagation
+-> unified_lockfile (alle workspace-members)
+-> fetch_all: parallel_download + verify_checksum + package_cache
+-> build_order (topologisk) -> parallel_build per lag
+   build_cache: artifact_key -> cache_hit (hopp over) eller compile
+   build_script (om den finnes) -> rerun_if_changed
+-> nc test -> test_runner -> test_result_aggregate
+-> nc publiser: pre_publish_check -> archive_builder -> ed25519_sign
+   -> multipart HTTP POST -> registry
+-> registry_server: storage (FS/S3/GCS) + db + auth + mirror + rate_limit
+-> workspace: unified_lockfile + workspace_dep + patch_section
+```
+
+### Neste naturlige fase etter z292
+
+Neste store omgang bør være **CI/CD og release-automatisering** (z293+):
+
+1. GitHub Actions workflow for Norscode-prosjekter
+2. Automatisk bygg og test på push og PR
+3. Release-pipeline utløst av versjonstagg
+4. Plattformkryssbygg (macOS, Linux, Windows, WASM)
+5. Artefakt-publisering til GitHub Releases
+6. Kanari-utsetting og automatisk rollback
+7. Nightly builds og pre-release kanaler
+8. Dependabot-kompatibilitet og automatiske sikkerhetsoppdateringer
