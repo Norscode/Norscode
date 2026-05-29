@@ -2083,15 +2083,112 @@ Nettverk     — rollback/snapshot_delta/matchmaking/elo
 nc spill     — spill_ny/spill_kjør/legg_til_scene/publiser
 ```
 
-### Neste naturlige fase etter z452
+---
 
-Neste store omgang bør være **editor-verktøy og DevEx** (z453+):
+## Fase 28: Editor-verktøy og DevEx (z453–z457)
 
-1. Spillredigeringsprogram (scene-editor, komponent-inspektor)
-2. Visuell debugger og profiler for spill
-3. Hot-reload for kode og ressurser
-4. Asset-pipeline (bilde/lyd/3D-modell → pakkeformat)
-5. Skripting-sandkasse med hot-patch
-6. Plugin-system for spillmotor-utvidelser
-7. Norscode Playground (nettleserbasert REPL/sandbox)
-8. `nc studio` — integrert utviklingsmiljø
+Omgang 453–457 introduserte komplett editor-infrastruktur for Norscode.
+
+- **z453** Scene-editor: hierarki, komponent-inspektør, transform-gizmos, undo/redo, prefab
+- **z454** Visuell debugger og profiler: FPS-diagram, system-profil, render/fysikk/nett-debugger
+- **z455** Hot-reload: fil-vakt, tilstandsbevaring, shader-fallback, scene-diff
+- **z456** Asset-pipeline: bilde/lyd/3D-behandler, mipmap/LOD/atlas, pakkeformat
+- **z457** Plugin-system og nc studio: utvidelsespunkter, sandbox, dockbar IDE med LSP
+
+---
+
+## Fase 29: Skripting, Playground, testing, l10n og telemetri (z458–z462)
+
+Omgang 458–462 dekket utviklerverktøy og internasjonalisering.
+
+- **z458** Skripting-sandkasse: isolert VM, ressurskvoter, hot-patch, live REPL, WASM-sandbox
+- **z459** Norscode Playground: nettleser-REPL, notatbok-modell, deling, innebygde eksempler
+- **z460** Spilltesting: enhetstester, simulasjonstest, fuzzing, egenskapstest, benchmark
+- **z461** Lokalisering: kataloger, flertallsregler, bidi-tekst, pseudolokalisering
+- **z462** Analytikk og krasj-rapportering: samtykke, hendelser, trakt, behold, offline-buffer
+
+---
+
+## Fase 30: Sky, tilgjengelighet, byggesystem, monetisering og sosiale funksjoner (z463–z467)
+
+Omgang 463–467 dekket plattform og forretningsfunksjoner.
+
+- **z463** Sky-deploy: container-bygg, rullende/blå-grønn/kanarie, auto-skalering, spillserverpool
+- **z464** Tilgjengelighet (a11y): skjermleser, semantisk tre, fargekontrast, bevegelsesreduksjon
+- **z465** Byggesystem: inkrementell kompilering, parallell bygg, kryssplattform, prosjektmaler
+- **z466** Monetisering: IAP, abonnementer, kvitteringsvalidering, virtuell valuta, belønningsannonser
+- **z467** Sosiale funksjoner: topplister, prestasjoner, venner, tilstedeværelse, aktivitetsstrøm
+
+---
+
+## Fase 31: Moderasjon, lagring, prosedyregenerering, shadere og plattformintegrasjon (z468–z472)
+
+Omgang 468–472 dekket innholdssikkerhet og avansert rendering.
+
+- **z468** Innholdsmoderasjon: tekst/bilde-screening, rapportsystem, anti-juks, foreldrekontroll
+- **z469** Lagringssystem: lokal/sky-backend, auto-lagring, konfliktløsning, skjemaversjonering
+- **z470** Prosedyrebasert generering: støyfunksjoner, BSP, WFC, L-systemer, navngenerering
+- **z471** Avansert shader-system: kryssbackend-kompilering, post-process stack (bloom/DoF/SSAO)
+- **z472** Plattformintegrasjon: varslinger, dype lenker, widgets, bakgrunnshenting, termisk tilstand
+
+---
+
+## Fase 32: Tilstand, animasjon, DSP, VR, ORM, makroer, terreng, ML, observerbarhet og flagg (z473–z482)
+
+Omgang 473–482 er den største enkeltfasen — ti filer som dekker kjerneinfrastruktur.
+
+Siste dokumenterte store milepæl: Omgang 482.
+
+- **z473** Reaktiv tilstandsadministrasjon: signaler, avledet, effekter, reduserer, optimistiske oppdateringer
+- **z474** Animasjonssystem: tweening, lettingskurver, nøkkelrammer, fjærfysikk, lag-blanding
+- **z475** Audio DSP: nodegrafer, oscillatorer, ADSR, filtre, reverb/delay, granulær, steg-sekvenser
+- **z476** VR/AR: OpenXR, stereo-rendering, foveation, håndsporing, romlige ankere, AR-plan-detektor
+- **z477** ORM: modell/felt/relasjoner, spørringsbygger, transaksjoner, migrasjoner, tilkoblingsbasseng
+- **z478** Makrosystem: prosedyremakroer, avlede-makroer, deklarative mønstre, kompileringstidsevaluering
+- **z479** Terrengrendering: chunked LOD, clipmap, splat-teksturering, GPU-vegetasjon, hydraulisk erosjon
+- **z480** ML-inferens: ONNX/GGUF/SafeTensors, kvantisering, LLM med KV-buffer, objektdeteksjon
+- **z481** Observerbarhet: OpenTelemetry-sporing, metrikker, strukturert logging, hale-basert sampling
+- **z482** Konfigurasjon og funksjonsflagg: lagdelte kilder, hemmeligheter, målretting, gradvis utrulling, A/B
+
+### Nåværende modell etter Omgang 482
+
+```text
+Norscode runtime-dekning (z001–z482):
+
+Kjerne-VM       — bytekode, GC, typer, unntak, moduler
+Kompilator      — parser, typesjekker, optimizer, native-backend (AArch64)
+Stdlib          — tekst/liste/ordbok/fil/json/math/tid/env/mønster/kanal/logg
+Async/konk      — løfter, oppgaver, kanaler, aktører, STM, reaktive strømmer
+Nettverk        — TCP/UDP/HTTP/WebSocket/gRPC/QUIC/DNS
+Web             — ruter/middleware/JSON API/auth/SSR/WebSocket/nc serve
+Spillmotor      — spill_løkke/ECS/2D-3D-rendering/fysikk/lyd/AI/nettverk
+Editor          — scene-editor/profiler/hot-reload/asset-pipeline/nc studio
+Prosedyre       — støy/BSP/WFC/L-system/navngenerering/erosjon
+Tilstand        — signaler/reduserer/effekter/tilstandsmaskiner
+Animasjon       — tween/nøkkelrammer/fjær/bane/sekvenser
+DSP             — nodegrafer/filtre/reverb/granulær/steg-sekvenser
+VR/AR           — OpenXR/stereo/foveation/håndsporing/romlige ankere
+ORM             — modell/spørringsbygger/transaksjoner/migrasjoner
+Makroer         — prosedyre/avlede/deklarativ/kompileringstid
+Terreng         — LOD/clipmap/splat/vegetasjon/erosjon
+ML              — ONNX/GGUF/kvantisering/LLM/deteksjon
+Observerbarhet  — OTel-sporing/metrikker/logg/hale-sampling
+Flagg           — funksjonsflagg/målretting/A-B/gradvis utrulling
+Sky             — container/auto-skalering/serverhosting/IaC
+Plattform       — varslinger/dype lenker/widgets/termisk
+Tilgjengelighet — skjermleser/kontrast/bevegelse/teksting
+Sikkerhet       — krypto/TLS/auth/RBAC/anti-juks/moderasjon
+```
+
+### Neste naturlige fase etter z482
+
+Neste store omgang bør dekke **distribuerte systemer og databehandling** (z483+):
+
+1. Event sourcing og CQRS
+2. Saga-mønster og distribuerte transaksjoner
+3. Meldingskø-integrasjon (Kafka, NATS, RabbitMQ)
+4. GraphQL-server og -klient
+5. Reaktive datastrømmer (Rx-stil operatorer)
+6. Datapipeline og ETL
+7. Strømmende aggregering og vinduer
+8. Distribuert koordinering (leder-valg, distribuerte låser)
