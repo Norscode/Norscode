@@ -2180,15 +2180,116 @@ Tilgjengelighet — skjermleser/kontrast/bevegelse/teksting
 Sikkerhet       — krypto/TLS/auth/RBAC/anti-juks/moderasjon
 ```
 
-### Neste naturlige fase etter z482
+---
 
-Neste store omgang bør dekke **distribuerte systemer og databehandling** (z483+):
+## Fase 33: Distribuerte systemer og databehandling (z483–z492)
 
-1. Event sourcing og CQRS
-2. Saga-mønster og distribuerte transaksjoner
-3. Meldingskø-integrasjon (Kafka, NATS, RabbitMQ)
-4. GraphQL-server og -klient
-5. Reaktive datastrømmer (Rx-stil operatorer)
-6. Datapipeline og ETL
-7. Strømmende aggregering og vinduer
-8. Distribuert koordinering (leder-valg, distribuerte låser)
+Omgang 483–492 dekket kjerne-infrastruktur for distribuerte systemer.
+
+- **z483** Event sourcing og CQRS: hendelseslager, projeksjoner, prosessledere, optimistisk låsing
+- **z484** Saga-mønster: orkestrering/koreografi, kompenserende transaksjoner, 2PC, TCC, utboks
+- **z485** Meldingskøer: Kafka (produsent/forbruker/KTable), NATS JetStream, RabbitMQ exchange-topologi
+- **z486** GraphQL: skjema, resolvere, DataLoader (N+1), abonnementer, klient-cache, kodegenerering
+- **z487** Reaktive strømmer: kald/varm observable, flatMap/switchMap, debounce, emner, planleggere
+- **z488** Data-pipeline/ETL: DAG-kjøring, inkrementell ekstraksjon, validering, karantene, kontrollpunkt
+- **z489** Strøm-aggregering: tumle/skyve/økt-vinduer, vannmerker, sen data, HyperLogLog, strøm-SQL
+- **z490** Distribuert koordinering: leder-valg, Raft-konsensus, distribuerte låser, Redlock, gjerdingstoken
+- **z491** Skjemaregister: Avro/Protobuf, kompatibilitetsnivåer, datakontraktstesting, evolusjonsstrategi
+- **z492** CDC: PostgreSQL WAL/MySQL binlog, før/etter-bilder, full+inkrementell sync, feltsensurering
+
+---
+
+## Fase 34: Søk, IAM, arbeidsflyt, GIS, TSDB, grafdb, vektordb, agenter, IR og innebygd (z493–z502)
+
+Omgang 493–502 dekket spesialiserte databaser og infrastruktur.
+
+- **z493** Søkemotor: invertert indeks, BM25, bool-spørringer, aggregeringer, fuzzy, hybrid vektor+tekst
+- **z494** IAM: OIDC/PKCE, SAML-påstander, MFA/FIDO2/TOTP, ABAC-policyer, JIT-provisjonering
+- **z495** Arbeidsflyt-motor: varig utførelse via hendelseslogg-replay, aktiviteter, signaler, parallellflyt
+- **z496** GIS: koordinatsystemer, romlige operatorer, R-tree/H3-indeksering, CH-ruting, vektorfliser
+- **z497** Tidsserie-DB: LSM-tre, Gorilla-komprimering, nedsampling, kontinuerlige spørringer, PromQL
+- **z498** Graf-DB: node/kant-modell, traversal, korteste sti, PageRank, Louvain, Cypher/GQL
+- **z499** Vektor-DB: HNSW, IVF-PQ, filtrert søk, hybrid BM25+vektor, MMR, binær kvantisering
+- **z500** Fleragens-systemer: verktøybruk, flerlagminne, ReAct, refleksjon, orkestrator/underagent
+- **z501** Kompilator-mellomende: SSA-IR, dominanstre, konstant-folding/propagering, sløyfe-opt, inlining
+- **z502** Innebygd system: oppstartsekvens, GPIO/UART/SPI/I2C, avbrudd, PWM, strømstyring, RTOS
+
+---
+
+## Fase 35: Blokkjede, CV, NLP, P2P, formell, IoT, robotikk, simulering, OS og kvanteberegning (z503–z512)
+
+Omgang 503–512 dekket avanserte domener fra krypto til kvantefysikk.
+
+- **z503** Blokkjede: blokker, transaksjoner, HD-lommebøker, smarte kontrakter, PoS, ERC20/721
+- **z504** Datamaskin-syn: kantdeteksjon, ORB-egenskaper, YOLO-deteksjon, SAM-segmentering, ansiktsgjenkjenning
+- **z505** NLP: tokenisering, POS-tagging, avhengighetstre, NER, koferens, sentiment, dialogsystem
+- **z506** P2P-nettverk: Kademlia DHT, CID-innholdsadressering, GossipSub, yamux, NAT-traversal
+- **z507** Formell verifisering: avhengige typer, lineære typer, effektsystem, CTL/LTL, SMT-løser
+- **z508** Digital tvilling/IoT: MQTT/CoAP/LoRaWAN, ønsket/rapportert tilstand, kantberegning
+- **z509** Robotikk: DH-kinematikk, IK-Jacobian, RRT*, SLAM med EKF, MPC-styring, ROS2
+- **z510** Simuleringsmotor: Monte Carlo, kvasitilfeldige sekvenser, agentbasert, diskret hendelse
+- **z511** OS-primitiver: prosess-spawn, mutex/rwlokk, inotify, mmap, io_uring, null-kopi
+- **z512** Kvanteberegning: qubit-tilstander, porter, QFT, Grover, Shor, VQE, feilkorreksjon
+
+---
+
+## Fase 36: Numerisk, vitenskapelig, finans, frontend, minnemodell, kodek, bio, verktøy, netsim, regalloc (z513–z522)
+
+Omgang 513–522 dekket dyp teknisk infrastruktur på tvers av alle fagfelt.
+
+Siste dokumenterte store milepæl: Omgang 522.
+
+- **z513** Numerisk beregning: BLAS/LAPACK, matrise-dekomponering (LU/QR/SVD/Chol), FFT, sparse
+- **z514** Vitenskapelig beregning: RK45/Rosenbrock ODE, finite differanser/elementer for PDE
+- **z515** Finansiell beregning: Black-Scholes, greske bokstaver, rentekurve, VaR/CVaR, Markowitz
+- **z516** Kompilator-frontend: lekser, Pratt-parser, inkrementell re-parsing, rike diagnostikker
+- **z517** Minnemodell: SC/acq-rel/avslappet, låsfri kø/stabel, hazard-pekere, epochbasert GC
+- **z518** Audio/video-kodek: H.264/H.265/AV1, AAC/Opus, MP4/MKV, transcode-pipeline, HLS/DASH
+- **z519** Bioinformatikk: Needleman-Wunsch, BLAST, BWA-justering, variantanrop, RNA-seq
+- **z520** Språkverktøy: formaterer med importsortering, linter med syklomatisk kompleksitet, full REPL
+- **z521** Nettverksimulering: OSPF/BGP, CoDel-køer, TCP BBR-analyse, kaos-nett med feilinjeksjon
+- **z522** Registerallokering og instruksjonsplanlegging: lineær scan, graffarging med koalesering, listeplanlegger
+
+### Nåværende modell etter Omgang 522
+
+```text
+Norscode runtime-dekning (z001–z522):
+
+Kjerne-VM          — bytekode, GC, typer, unntak, moduler, minnemodell
+Kompilator         — frontend (lekser/Pratt-parser/inkrementell), IR/SSA, opt-passes,
+                     registerallokering (lineær scan/graffarging), instruksjonsplanlegging,
+                     AArch64/WASM-backend
+Stdlib             — tekst/liste/ordbok/fil/json/math/tid/env/regex
+Async/konk         — løfter, oppgaver, kanaler, aktører, STM, reaktive strømmer (Rx)
+Nettverk           — TCP/UDP/HTTP/WebSocket/gRPC/QUIC + nettverksimulering
+Web                — ruter/middleware/JSON API/auth/SSR/WebSocket/nc serve
+Spillmotor         — spill_løkke/ECS/2D-3D/fysikk/lyd/AI/nettverk/nc spill
+Editor             — scene-editor/profiler/hot-reload/asset-pipeline/nc studio
+Distribuert        — event sourcing/CQRS/saga/Kafka/GraphQL/CDC/koordinering
+Databaser          — ORM/søkemotor/tidsserie/grafdb/vektordb/skjemaregister
+Prosedyre          — støy/BSP/WFC/L-system/navngenerering/erosjon
+Tilstand/UI        — signaler/reduserer/animasjon/tweening/fjærfysikk
+DSP/Media          — nodegrafer/filtre/reverb/granulær + H.264/AV1/AAC/Opus/HLS
+VR/AR              — OpenXR/stereo/foveation/håndsporing/romlige ankere
+Numerisk           — BLAS/LAPACK/FFT/sparse + ODE/PDE + finansiell + bioinformatikk
+ML/AI              — ONNX/GGUF/kvantisering/LLM + fleragens/ReAct/verktøybruk
+Observerbarhet     — OTel-sporing/metrikker/logg + funksjonsflagg/A-B
+Sky/Plattform      — container/skalering/spillserver/a11y/IAM/krypto
+Innebygd/OS        — GPIO/UART/mmap/io_uring + RTOS + kvanteberegning
+Verktøy            — formaterer/linter/REPL/byggesystem/prosjektmaler/playground
+```
+
+### Neste naturlige fase etter z522
+
+Neste store omgang bør dekke **avansert type- og bevisinfrastruktur** (z523+):
+
+1. Algebraiske effekter og algebraiske datatyper
+2. Typeklasse-system (ad-hoc polymorfisme)
+3. Generative testing og egenskap-bevis
+4. LLVM-integrasjon for native codegen
+5. JIT-kompilering og deoptimisering
+6. Søppelsamler-algoritmer (generasjonell, concurrent, incremental)
+7. Minneprofiler og heap-visualisering
+8. Cross-language FFI (C, Rust, Python, JS interop)
+9. Dokumentasjonsgenerator (doc-kommentarer → HTML/PDF)
+10. Pakkeregister og semantisk versjonering
