@@ -2487,3 +2487,22 @@ Siste dokumenterte store milepæl: **Omgang 612** — 612 runtime-spesifikasjons
 - **z610** Automateori avansert: Myhill-Nerode, Büchi-automater, tre-automater, vektede automater, L*-læring
 - **z611** Kvanteprogrammering: kvantporter, Grover/Shor, kvantefeilretting, BQP, lineære typer for kvantedata
 - **z612** Beregningskompleksitet avansert: polynomhierarkiet, kretskompleksitet, CC, parametrisert FPT/W-hierarki
+
+---
+
+## Fase 46: Språkdesign, optimalisering, krypto og verifikasjon (z613–z622)
+
+Omgang 613–622 dekket praktisk og teoretisk bredde fra kompilatordesign til nettverksvitenskap.
+
+Siste dokumenterte store milepæl: **Omgang 622** — 622 runtime-spesifikasjonsfiler.
+
+- **z613** Programmeringsspråkdesign: syntaks-UI, typesystem-valg, minnemodell, modul-system, utvidbarhet
+- **z614** Kompilatorkonstruksjon adv: SSA/Cytron, registerallokering (Chaitin/lineær-scan), BURS, JIT/deopt
+- **z615** Optimaliseringsteori: LP/simplex/dualitet, heltalsprogrammering, konveks opt, SDP, Goemans-Williamson
+- **z616** Avansert grafteori: Ramsey-teori, Szemerédi-regularitet, ekspandere (Cheeger), Robertson-Seymour
+- **z617** Post-kvantum kryptografi: ECC/Edwards-kurver, pairings, LWE/Ring-LWE, Kyber, Dilithium, SPHINCS+
+- **z618** Statistisk læringsteori: PAC/Valiant, VC-dimensjon, Rademacher, bias-varians, dobbel nedsenkn.
+- **z619** Differensialprivathet: (ε,δ)-DP, Laplace/Gauss/eks.mek., LDP/RAPPOR, DP-SGD, moment-accountant
+- **z620** Formell verifikasjon: LTL/CTL/mu-kalkyle, OBDD, CEGAR, SMT/Z3, SLAM/CBMC, hardware-verifik.
+- **z621** Distribuerte algoritmer: FLP-umulighet, Paxos/Raft adv., PBFT/HotStuff, CAP, vektor-klokker
+- **z622** Nettverksteori: skalfrie/small-world, SIR-modell, perkolasjon, innflytelse-maksimering, cascading
