@@ -2393,17 +2393,36 @@ Siste dokumenterte store milepæl: Omgang 562.
 - **z561** Approksimative algoritmer: PTAS/FPTAS, streaming frekvens-momenter, lokal søk, greedy
 - **z562** Cache-oblivious: VEB-layout, funnel-sort, rekursiv matmul, NUMA, TLB-optimalisering
 
-### Neste naturlige fase etter z562
+---
 
-Neste store omgang bør dekke **grafalgoritmers og nettverks-algoritmer** (z563+):
+## Fase 41: Grafalgoritmer og kunnskapsgrafer (z563–z572)
 
-1. Korteste sti: Dijkstra, Bellman-Ford, Floyd-Warshall, A* forbedringer
-2. Nettverksflyt: max-flow (Push-Relabel, Dinic), min-cost flow
-3. Matching: Hopcroft-Karp bipartitt, generell matching (Blossom)
-4. Sterk sammenkobling og DAG-algoritmer
-5. Planargraf-algoritmer
-6. Spektralgrafteori og random walks
-7. Grafpartisjonering og community detection
-8. Dynamiske grafalgoritmer
-9. Parallelle grafalgoritmer (BFS, SSSP)
-10. Grafnøytralisering og grafkomprimering
+Omgang 563–572 dekket grafteori fra klassiske algoritmer til moderne kunnskapsrepresentasjon.
+
+Siste dokumenterte store milepæl: Omgang 572.
+
+- **z563** Korteste sti og graftraversal: Dijkstra/Bellman-Ford/Floyd-Warshall/A*/CH/BFS/DFS
+- **z564** Nettverksflyt og matching: Dinic/Push-Relabel, min-cost flow, Hopcroft-Karp, Blossom, Gale-Shapley
+- **z565** SCC og spenntrær: Tarjan/Kosaraju, broer/leddpunkter, Kruskal/Prim/Borůvka, Union-Find
+- **z566** Spektralgrafteori: Laplacian/Fiedler, spektral clustering, random walks, PageRank, GNN, MCMC
+- **z567** Community detection: Louvain/Leiden, label propagation, Infomap, Girvan-Newman, overlapp
+- **z568** Dynamiske grafalgoritmer: Link-Cut trær, Euler tour forest, Holm sammenkobling, temporal grafer
+- **z569** Parallelle grafalgoritmer: hybrid BFS, delta-stepping, GraphBLAS, Pregel, Ligra, GPU
+- **z570** Planargraf-algoritmer: Boyer-Myrvold, DCEL, fire-farge, planar separator, SSSP linear
+- **z571** Grafkomprimering og indeksering: BV-format, K²-tre, Thorup-Zwick, k-kjerne, tree decomposition
+- **z572** Kunnskapsgrafer: RDF/SPARQL, OWL/EL++ resonnering, TransE/RotatE embeddings, SHACL
+
+### Neste naturlige fase etter z572
+
+Neste store omgang bør dekke **avansert maskinlæring og statistisk læring** (z573+):
+
+1. Dyp læring: aktiviseringer, initialisering, batch-norm, dropout, residual connections
+2. Konvolusjonsnettverk: CNN-arkitekturer, pooling, dilated convolutions
+3. Rekurrente nettverk: LSTM, GRU, transformers og attention
+4. Forsterkningslæring: Q-learning, policy gradients, PPO, MCTS
+5. Generative modeller: VAE, GAN, diffusjonsmodeller
+6. Meta-læring: few-shot, MAML, prototype networks
+7. Kalibrering og usikkerhet: Bayesiansk NN, Laplace-approksimering
+8. Optimalisering: Adam, Lion, schedule-free, gradient clipping
+9. Distribuert opplæring: data/modell-parallellisme, ZeRO, FSDP
+10. Effektiv inferens: kvantisering, sparsitet, speculative decoding
