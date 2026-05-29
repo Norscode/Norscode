@@ -13,6 +13,8 @@ from compiler.ast_nodes import (
     CallNode,
     ExprStmtNode,
     FieldAccessNode,
+    ForEachNode,
+    ForNode,
     FunctionNode,
     IfNode,
     IndexNode,
@@ -237,12 +239,43 @@ def _classify_body_ops(
             continue
         if isinstance(stmt, IndexSetNode):
             # m["nøkkel"] = verdi  eller  liste[i] = verdi
+            target = stmt.target_name
             key_is_str = isinstance(stmt.index_expr, StringNode)
-            if key_is_str:
-                ops.append(("ordbok_sett", stmt.target_name,
-                            stmt.index_expr, stmt.value_expr))
+            if isinstance(target, IndexNode):
+                # Nestet: a[k1][k2] = verdi  → ordbok_sett_nestet
+                ops.append(("ordbok_sett_nestet", target, stmt.index_expr, stmt.value_expr))
+            elif key_is_str:
+                ops.append(("ordbok_sett", target, stmt.index_expr, stmt.value_expr))
             else:
-                ops.append(("kall", stmt))  # kompleks indeks-sett, handle via kall
+                ops.append(("liste_sett", target, stmt.index_expr, stmt.value_expr))
+            continue
+        if isinstance(stmt, ForEachNode):
+            # for x i liste { ... }
+            # Registrer item-variabelen slik at den får en register-slot
+            if allow_var_decl and stmt.item_name not in var_types:
+                var_types[stmt.item_name] = "heltall"
+                ops.append(("decl", stmt.item_name, NumberNode(0)))
+            body_ops = _classify_body_ops(
+                stmt.body.statements,
+                allow_var_decl=False,
+                ctx="for-kropp",
+                var_types=var_types,
+            )
+            ops.append(("for_each", stmt.item_name, stmt.list_expr, body_ops))
+            continue
+        if isinstance(stmt, ForNode):
+            # for i = start til end { ... }
+            if allow_var_decl and stmt.name not in var_types:
+                var_types[stmt.name] = "heltall"
+                ops.append(("decl", stmt.name, NumberNode(0)))
+            body_ops = _classify_body_ops(
+                stmt.body.statements,
+                allow_var_decl=False,
+                ctx="for-kropp",
+                var_types=var_types,
+            )
+            ops.append(("for_range", stmt.name, stmt.start_expr,
+                        stmt.end_expr, stmt.step_expr, body_ops))
             continue
         if isinstance(stmt, ExprStmtNode):
             # Uttrykk-setning: kan være et funksjonskall (f.eks. legg_til)
@@ -995,6 +1028,10 @@ def _ops_need_print_int(ops: list) -> bool:
             return True
         if kind == "mens" and _ops_need_print_int(op[2]):
             return True
+        if kind == "for_each" and _ops_need_print_int(op[3]):
+            return True
+        if kind == "for_range" and _ops_need_print_int(op[5]):
+            return True
         if kind == "hvis":
             if _ops_need_print_int(op[2]):
                 return True
@@ -1007,9 +1044,13 @@ def _ops_need_skriv_tekst(ops: list) -> bool:
     """Returner True hvis ops-treet inneholder en skriv_tekst_var-operasjon."""
     for op in ops:
         kind = op[0]
-        if kind == "skriv_tekst_var":
+        if kind in ("skriv_tekst_var", "skriv_tekst_expr"):
             return True
         if kind == "mens" and _ops_need_skriv_tekst(op[2]):
+            return True
+        if kind == "for_each" and _ops_need_skriv_tekst(op[3]):
+            return True
+        if kind == "for_range" and _ops_need_skriv_tekst(op[5]):
             return True
         if kind == "hvis":
             if _ops_need_skriv_tekst(op[2]):

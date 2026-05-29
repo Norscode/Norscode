@@ -331,13 +331,21 @@ class Parser:
 
     def _build_index_assignment(self, index_node, op, value_expr):
         target = getattr(index_node, "target", getattr(index_node, "list_expr", None))
-        if not isinstance(target, VarAccessNode):
-            self.error("Indekstilordning krever et variabelnavn")
-        if op.typ == "ASSIGN":
-            return IndexSetNode(target.name, index_node.index_expr, value_expr)
-        lhs = IndexNode(VarAccessNode(target.name), index_node.index_expr)
-        expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
-        return IndexSetNode(target.name, index_node.index_expr, expr)
+        if isinstance(target, VarAccessNode):
+            # Enkelt tilfelle: navn[nøkkel] = verdi
+            if op.typ == "ASSIGN":
+                return IndexSetNode(target.name, index_node.index_expr, value_expr)
+            lhs = IndexNode(VarAccessNode(target.name), index_node.index_expr)
+            expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
+            return IndexSetNode(target.name, index_node.index_expr, expr)
+        if isinstance(target, IndexNode):
+            # Nestet tilfelle: a[k1][k2] = verdi  → IndexSetNode(IndexNode(a,k1), k2, verdi)
+            if op.typ == "ASSIGN":
+                return IndexSetNode(target, index_node.index_expr, value_expr)
+            lhs = IndexNode(target, index_node.index_expr)
+            expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
+            return IndexSetNode(target, index_node.index_expr, expr)
+        self.error("Indekstilordning krever et variabelnavn")
 
     def _build_field_assignment(self, field_node, op, value_expr):
         """obj.felt = val  →  IndexSetNode("obj", StringNode("felt"), val)."""
@@ -778,6 +786,10 @@ class Parser:
             self.eat("USANN")
             return BoolNode(False)
         if token.typ in ("IDENT", "I"):
+            self.eat(token.typ)
+            return VarAccessNode(token.value)
+        # Tillat typekeywords som funksjonsnavn: heltall(x), tekst(x), bool(x)
+        if token.typ in ("TYPE_INT", "TYPE_TEXT", "TYPE_BOOL") and self.next.typ == "LPAREN":
             self.eat(token.typ)
             return VarAccessNode(token.value)
         if token.typ == "LPAREN":

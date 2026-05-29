@@ -417,6 +417,109 @@ class _AsmBuilder:
                     self.op(f"b {self._epilogue_label}")
                 # If no epilogue label (entry/main path), the caller must handle this
 
+            elif kind == "ordbok_sett_nestet":
+                # a[k1][k2] = val  →  nc_map_sett_val(nc_map_hent_val(a, k1), k2, val)
+                _, outer_idx, inner_key_expr, val_expr = op
+                # 1. Evaluer outer_idx (inner map) → x0
+                self.emit_expr(outer_idx, var_slots)
+                self.op("str x0, [sp, #-16]!")   # push inner_map
+                # 2. Evaluer inner_key → string
+                self.emit_expr(inner_key_expr, var_slots)
+                self.op("str x0, [sp, #-16]!")   # push key
+                # 3. Evaluer val → x0
+                self.emit_expr(val_expr, var_slots)
+                self.op("mov x2, x0")             # val → x2
+                self.op("ldr x1, [sp], #16")      # key → x1
+                self.op("ldr x0, [sp], #16")      # inner_map → x0
+                self.op("bl _nc_map_sett_val")
+
+            elif kind == "liste_sett":
+                # liste[i] = verdi  →  nc_liste_sett_val(liste, i, verdi)
+                _, liste_name, idx_expr, val_expr = op
+                reg = var_slots.get(liste_name)
+                if reg and reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("str x0, [sp, #-16]!")    # push liste
+                self.emit_expr(idx_expr, var_slots)
+                self.op("str x0, [sp, #-16]!")    # push indeks
+                self.emit_expr(val_expr, var_slots)
+                self.op("mov x2, x0")              # verdi → x2
+                self.op("ldr x1, [sp], #16")       # indeks → x1
+                self.op("ldr x0, [sp], #16")       # liste → x0
+                self.op("bl _nc_liste_sett_val")
+
+            elif kind == "for_each":
+                # for item i liste { body_ops }
+                # Stack-layout (16 bytes): [sp+0]=teller i, [sp+8]=liste-peker
+                _, item_name, list_expr, body_ops = op
+                if item_name not in var_slots:
+                    raise ValueError(f"for-variabel '{item_name}' mangler i var_slots")
+                item_reg = var_slots[item_name]
+                loop_top = self._label()
+                loop_end = self._label()
+                # Alloker slot og init teller
+                self.op("sub sp, sp, #16")
+                self.op("movz x3, #0")
+                self.op("str x3, [sp]")           # i = 0
+                # Evaluer liste-uttrykk og lagre peker
+                self.emit_expr(list_expr, var_slots)
+                self.op("str x0, [sp, #8]")       # liste_ptr = x0
+                # Loop
+                self.lbl(loop_top)
+                self.op("ldr x0, [sp, #8]")
+                self.op("bl _nc_liste_lengde_val") # x0 = len
+                self.op("ldr x3, [sp]")            # x3 = i
+                self.op("cmp x3, x0")
+                self.op(f"b.ge {loop_end}")
+                # item = liste[i]
+                self.op("ldr x0, [sp, #8]")        # x0 = liste
+                self.op("ldr x1, [sp]")             # x1 = i
+                self.op("bl _nc_liste_les_val")     # x0 = item
+                if item_reg != "x0":
+                    self.op(f"mov {item_reg}, x0")
+                # Body
+                self.emit_ops(body_ops, var_slots)
+                # i += 1
+                self.op("ldr x3, [sp]")
+                self.op("add x3, x3, #1")
+                self.op("str x3, [sp]")
+                self.op(f"b {loop_top}")
+                self.lbl(loop_end)
+                self.op("add sp, sp, #16")
+
+            elif kind == "for_range":
+                # for i = start til end [steg step] { body_ops }
+                _, var_name, start_expr, end_expr, step_expr, body_ops = op
+                loop_top = self._label()
+                loop_end = self._label()
+                if var_name not in var_slots:
+                    raise ValueError(f"for-range variabel '{var_name}' mangler i var_slots")
+                reg = var_slots[var_name]
+                self.emit_expr(start_expr, var_slots)
+                if reg != "x0":
+                    self.op(f"mov {reg}, x0")
+                self.lbl(loop_top)
+                self.emit_expr(end_expr, var_slots)
+                self.op("mov x1, x0")
+                if reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("cmp x0, x1")
+                self.op(f"b.ge {loop_end}")
+                self.emit_ops(body_ops, var_slots)
+                # Inkrement
+                step = 1
+                if step_expr is not None:
+                    from compiler.ast_nodes import NumberNode as _NN
+                    if isinstance(step_expr, _NN):
+                        step = step_expr.value
+                if reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op(f"add x0, x0, #{step}")
+                if reg != "x0":
+                    self.op(f"mov {reg}, x0")
+                self.op(f"b {loop_top}")
+                self.lbl(loop_end)
+
             else:
                 raise ValueError(f"Ukjent op: {kind!r}")
 
