@@ -10,6 +10,9 @@ class Token:
 
 
 KEYWORDS = {
+    "slutt": "SLUTT",
+    "struktur": "STRUKTUR",
+    "ikkje": "IKKE",        # nynorsk-alias for ikke
     "bruk": "BRUK",
     "som": "SOM",
     "funksjon": "FUNKSJON",

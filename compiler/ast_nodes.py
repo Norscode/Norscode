@@ -257,6 +257,13 @@ class FieldAccessNode:
         self.field = field
 
 
+class StructDeclNode:
+    """struktur Name\n    felt1\n    felt2\nslutt — felt-liste av navn (uten typer)."""
+    def __init__(self, name: str, fields: list):
+        self.name = name
+        self.fields = fields   # list[str]
+
+
 class TestNode:
     def __init__(self, name, body):
         self.name = name

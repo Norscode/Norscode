@@ -16,6 +16,7 @@ from __future__ import annotations
 from compiler.ast_nodes import (
     BinOpNode,
     CallNode,
+    FieldAccessNode,
     IndexNode,
     NumberNode,
     StringNode,
@@ -100,6 +101,17 @@ class _AsmBuilder:
                 self.op(f"mov x0, {reg}")
             return
 
+        if isinstance(node, FieldAccessNode):
+            # obj.felt  →  nc_map_hent_val(obj_ptr, "felt")
+            self.emit_expr(node.target, var_slots)
+            self.op("str x0, [sp, #-16]!")          # push obj-peker
+            felt_lbl = self.add_string(node.field.encode("utf-8"))
+            self.op(f"adrp x1, {felt_lbl}@PAGE")
+            self.op(f"add x1, x1, {felt_lbl}@PAGEOFF")
+            self.op("ldr x0, [sp], #16")             # pop obj-peker → x0
+            self.op("bl _nc_map_hent_val")
+            return
+
         if isinstance(node, UnaryOpNode):
             op = getattr(node.op, "typ", str(node.op))
             self.emit_expr(node.node, var_slots)
@@ -134,6 +146,10 @@ class _AsmBuilder:
         if isinstance(node, CallNode):
             fn = getattr(node, "name", "")
             args = node.args if hasattr(node, "args") else []
+            # Struct-konstruktør: Navn() med stor forbokstav → tom map
+            if fn and fn[0].isupper() and not args:
+                self.op("bl _nc_map_ny_val")
+                return
             # Spesiell håndtering for innebygde runtime-funksjoner
             if fn == "lengde" and len(args) == 1:
                 self.emit_expr(args[0], var_slots)
@@ -615,21 +631,10 @@ def generate_aarch64_asm(la_decls, ops, exit_form,
         if _ARG_REGS[i] != reg:
             param_lines.append(f"    mov {reg}, {_ARG_REGS[i]}")
 
-    # ── Initialise la variables ───────────────────────────────────────────────
-    for name, vtype, init_expr in _la_normalized:
-        if vtype == "liste" and init_expr is None:
-            b.op("bl _nc_liste_ny_val")
-        elif vtype == "ordbok" and init_expr is None:
-            b.op("bl _nc_map_ny_val")
-        elif init_expr is not None:
-            b.emit_expr(init_expr, var_slots)
-        else:
-            b.op("movz x0, #0")   # fallback: nil
-        reg = var_slots[name]
-        if reg != "x0":
-            b.op(f"mov {reg}, x0")
+    # la-variabler initialiseres i source-rekkefølge via ops (ikke i prologen).
+    # Prologen allokerer bare registre (via var_slots ovenfor).
 
-    # ── Body ops ──────────────────────────────────────────────────────────────
+    # ── Body ops (inkl. variabel-initialisering i source-rekkefølge) ─────────
     b.emit_ops(ops, var_slots)
 
     # ── Exit (final return value → x0) ───────────────────────────────────────

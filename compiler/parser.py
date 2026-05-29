@@ -74,6 +74,8 @@ class Parser:
         while self.current.typ != "EOF":
             if self.current.typ == "TEST":
                 tests.append(self.test_block())
+            elif self.current.typ == "STRUKTUR":
+                functions.append(self.struct_decl())
             else:
                 functions.append(self.function_def())
         try:
@@ -82,6 +84,28 @@ class Parser:
             program = ProgramNode(imports, functions)
             setattr(program, "tests", tests)
             return program
+
+    def struct_decl(self):
+        """Pars 'struktur Navn\\n    felt1\\n    felt2\\nslutt'."""
+        from .ast_nodes import StructDeclNode
+        self.eat("STRUKTUR")
+        name = self.eat_name()
+        fields = []
+        while self.current.typ not in ("SLUTT", "EOF"):
+            if self.current.typ == "IDENT":
+                fields.append(self.eat_name())
+            else:
+                # Hopp over uventede tokens (newlines m.m. håndteres av lekseren)
+                self.advance()
+        self.eat("SLUTT")
+        return StructDeclNode(name, fields)
+
+    def _block_slutt(self):
+        """Pars setninger frem til SLUTT eller ELLERS (brukes i slutt-dialekten)."""
+        stmts = []
+        while self.current.typ not in ("SLUTT", "ELLERS", "EOF"):
+            stmts.append(self.statement())
+        return BlockNode(stmts)
 
     def import_stmt(self):
         self.eat("BRUK")
@@ -176,17 +200,28 @@ class Parser:
         if self.current.typ != "RPAREN":
             while True:
                 pname = self.eat_name()
-                self.eat("COLON")
-                ptype = self.parse_type()
+                if self.current.typ == "COLON":
+                    self.eat("COLON")
+                    ptype = self.parse_type()
+                else:
+                    ptype = "auto"   # slutt-dialekt: ingen typeannotering
                 params.append(Param(pname, ptype))
                 if self.current.typ == "COMMA":
                     self.eat("COMMA")
                     continue
                 break
         self.eat("RPAREN")
-        self.eat("ARROW")
-        return_type = self.parse_type()
-        body = self.block()
+        if self.current.typ == "ARROW":
+            self.eat("ARROW")
+            return_type = self.parse_type()
+        else:
+            return_type = "auto"     # slutt-dialekt: ingen returtype
+        # Blokk: enten {}-stil eller slutt-stil
+        if self.current.typ == "LBRACE":
+            body = self.block()
+        else:
+            body = self._block_slutt()
+            self.eat("SLUTT")
         return FunctionNode(name, params, return_type, body, is_async=is_async)
 
     def block(self):
@@ -242,6 +277,9 @@ class Parser:
                 return self._build_var_assignment(expr.name, op, value_expr)
             if isinstance(expr, IndexNode):
                 return self._build_index_assignment(expr, op, value_expr)
+            if isinstance(expr, FieldAccessNode):
+                # obj.felt = val  (slutt-dialekt struktur-tildeling)
+                return self._build_field_assignment(expr, op, value_expr)
             self.error("Ugyldig tilordning")
 
         self._restore(snapshot)
@@ -300,6 +338,19 @@ class Parser:
         lhs = IndexNode(VarAccessNode(target.name), index_node.index_expr)
         expr = BinOpNode(lhs, self._compound_binop(op), value_expr)
         return IndexSetNode(target.name, index_node.index_expr, expr)
+
+    def _build_field_assignment(self, field_node, op, value_expr):
+        """obj.felt = val  →  IndexSetNode("obj", StringNode("felt"), val)."""
+        if not isinstance(field_node.target, VarAccessNode):
+            self.error("Felt-tildeling krever en variabel som mål")
+        name = field_node.target.name
+        key = StringNode(field_node.field)
+        if op.typ == "ASSIGN":
+            return IndexSetNode(name, key, value_expr)
+        # Sammensatt: obj.felt += val  →  obj.felt = obj.felt + val
+        lhs = FieldAccessNode(field_node.target, field_node.field)
+        compound = BinOpNode(lhs, self._compound_binop(op), value_expr)
+        return IndexSetNode(name, key, compound)
 
     def var_decl(self):
         self.eat("LA")
@@ -394,30 +445,42 @@ class Parser:
             cond = self.expr()
         if self.current.typ == "DA":
             self.eat("DA")
-        then_block = self.block()
 
         elif_blocks = []
         else_block = None
 
-        while self.current.typ == "ELLERS":
-            self.eat("ELLERS")
-
-            if self.current.typ == "HVIS":
-                self.eat("HVIS")
-                if self.current.typ == "LPAREN":
-                    self.eat("LPAREN")
-                    elif_cond = self.expr()
-                    self.eat("RPAREN")
+        if self.current.typ == "LBRACE":
+            # {}-stil
+            then_block = self.block()
+            while self.current.typ == "ELLERS":
+                self.eat("ELLERS")
+                if self.current.typ == "HVIS":
+                    self.eat("HVIS")
+                    if self.current.typ == "LPAREN":
+                        self.eat("LPAREN")
+                        elif_cond = self.expr()
+                        self.eat("RPAREN")
+                    else:
+                        elif_cond = self.expr()
+                    if self.current.typ == "DA":
+                        self.eat("DA")
+                    elif_block = self.block()
+                    elif_blocks.append((elif_cond, elif_block))
+                    continue
+                else_block = self.block()
+                break
+        else:
+            # slutt-stil: hvis cond\n...\nellers\n...\nslutt
+            then_block = self._block_slutt()
+            if self.current.typ == "ELLERS":
+                self.eat("ELLERS")
+                if self.current.typ == "HVIS":
+                    # ellers hvis — kjed rekursivt
+                    nested = self.if_stmt()   # leser sin egen slutt
+                    else_block = BlockNode([nested])
                 else:
-                    elif_cond = self.expr()
-                if self.current.typ == "DA":
-                    self.eat("DA")
-                elif_block = self.block()
-                elif_blocks.append((elif_cond, elif_block))
-                continue
-
-            else_block = self.block()
-            break
+                    else_block = self._block_slutt()
+            self.eat("SLUTT")
 
         return IfNode(cond, then_block, elif_blocks, else_block)
 
@@ -460,7 +523,11 @@ class Parser:
         cond = self.expr()
         if has_paren:
             self.eat("RPAREN")
-        body = self.block()
+        if self.current.typ == "LBRACE":
+            body = self.block()
+        else:
+            body = self._block_slutt()
+            self.eat("SLUTT")
         return WhileNode(cond, body)
 
     def for_stmt(self):
@@ -488,6 +555,12 @@ class Parser:
 
     def return_stmt(self):
         self.eat("RETURNER")
+        # Void return: ingen uttrykk (slutt, ellers, }, EOF, neste nøkkelord)
+        _no_expr = ("SLUTT", "ELLERS", "RBRACE", "EOF",
+                    "HVIS", "MENS", "FOR", "FUNKSJON", "STRUKTUR", "RETURNER",
+                    "SKRIV", "LA", "BRYT", "FORTSETT")
+        if self.current.typ in _no_expr:
+            return ReturnNode(NumberNode(0))  # void → returner 0
         expr = self.expr()
         return ReturnNode(expr)
 

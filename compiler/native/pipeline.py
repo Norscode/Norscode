@@ -12,6 +12,7 @@ from compiler.ast_nodes import (
     BlockNode,
     CallNode,
     ExprStmtNode,
+    FieldAccessNode,
     FunctionNode,
     IfNode,
     IndexNode,
@@ -21,6 +22,7 @@ from compiler.ast_nodes import (
     ProgramNode,
     ReturnNode,
     StringNode,
+    StructDeclNode,
     UnaryOpNode,
     VarAccessNode,
     VarDeclareNode,
@@ -106,6 +108,8 @@ def _expr_produserer_tekst(node, var_types: dict) -> bool:
         return True
     if isinstance(node, VarAccessNode):
         return var_types.get(node.name) == "tekst"
+    if isinstance(node, FieldAccessNode):
+        return False   # felt-typer er ukjent; konservativt nei
     if isinstance(node, CallNode):
         fn = getattr(node, "name", "")
         return fn in ("tekst_fra_heltall", "til_tekst", "str", "nc_heltall_til_tekst")
@@ -175,7 +179,23 @@ def _classify_body_ops(
                 ops.append(("decl", stmt.name, stmt.expr))
             continue
         if isinstance(stmt, VarSetNode):
-            ops.append(("set", stmt.name, stmt.expr))
+            # Slutt-dialekt: implisitt `la name = expr` når variabelen er ukjent
+            if allow_var_decl and stmt.name not in var_types:
+                init = stmt.expr
+                # Struct-konstruktør (f.eks. Lexer(), Token()) → ordbok
+                is_struct_ctor = (
+                    isinstance(init, CallNode)
+                    and getattr(init, "name", "")[:1].isupper()
+                    and not getattr(init, "args", None)
+                )
+                if is_struct_ctor:
+                    var_types[stmt.name] = "ordbok"
+                    ops.append(("ordbok_ny", stmt.name))
+                    continue
+                var_types[stmt.name] = "heltall"
+                ops.append(("decl", stmt.name, stmt.expr))
+            else:
+                ops.append(("set", stmt.name, stmt.expr))
             continue
         if isinstance(stmt, PrintNode):
             if isinstance(stmt.expr, StringNode):
@@ -267,7 +287,8 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
     """
     statements = function.body.statements
     if not statements:
-        raise NativeCompileError("Native v0 krever en returner-setning i entry-funksjonen")
+        # Tom funksjon → returner 0
+        return [], [], NumberNode(0)
 
     final = statements[-1]
     if isinstance(final, ReturnNode):
@@ -288,11 +309,9 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
         exit_form = ("if", final.condition, then_expr, else_expr)
         body_stmts = statements[:-1]
     else:
-        raise NativeCompileError(
-            "Native v0 krever at siste setning i entry er en returner-setning "
-            "eller en hvis(...)/ellers med returner i hver gren "
-            f"(fikk {type(final).__name__})"
-        )
+        # Slutt-dialekt: funksjoner uten eksplisitt siste return → returner 0
+        exit_form = NumberNode(0)
+        body_stmts = statements
 
     # Klassifiser body. la-deklarasjoner tillates kun på dette nivået.
     var_types: dict[str, str] = {}
@@ -300,34 +319,35 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
         body_stmts, allow_var_decl=True, ctx="entry-kropp", var_types=var_types
     )
 
-    # Splitt: la_decls (med duplikatsjekk) først, så øvrige ops.
-    # la_decls er nå enten ("decl", name, expr) eller ("decl_tekst", name, expr).
-    la_decls: list[tuple[str, str, object]] = []  # (name, type, expr)
+    # Bygg la_decls (kun for register-allokering) og behold kilde-rekkefølge i ops.
+    # la_decls: (name, type, None) — initialisering skjer i ops, ikke i prologen.
+    la_decls: list[tuple[str, str, object]] = []  # (name, type, None)
     declared: set[str] = set()
-    other_ops: list = []
+    ordered_ops: list = []
     for op in raw_ops:
         if op[0] in ("decl", "decl_tekst"):
             vtype = "tekst" if op[0] == "decl_tekst" else "heltall"
             _, name, init_expr = op
-            if name in declared:
-                raise NativeCompileError(
-                    f"Native v0: variabel '{name}' deklarert to ganger"
-                )
-            declared.add(name)
-            la_decls.append((name, vtype, init_expr))
+            if name not in declared:
+                if name in declared:
+                    raise NativeCompileError(
+                        f"Native v0: variabel '{name}' deklarert to ganger"
+                    )
+                declared.add(name)
+                la_decls.append((name, vtype, None))  # register-allokering
+            # Behold init-op i source-rekkefølge
+            ordered_ops.append(op)
         elif op[0] in ("liste_ny", "ordbok_ny"):
             vtype = "liste" if op[0] == "liste_ny" else "ordbok"
             _, name = op
-            if name in declared:
-                raise NativeCompileError(
-                    f"Native v0: variabel '{name}' deklarert to ganger"
-                )
-            declared.add(name)
-            la_decls.append((name, vtype, None))
+            if name not in declared:
+                declared.add(name)
+                la_decls.append((name, vtype, None))
+            ordered_ops.append(op)
         else:
-            other_ops.append(op)
+            ordered_ops.append(op)
 
-    return la_decls, other_ops, exit_form
+    return la_decls, ordered_ops, exit_form
 
 
 def _constant_int(expr, env: dict[str, int] | None = None) -> int:
@@ -1016,6 +1036,8 @@ def _generate_full_aarch64_program(
 
     # ── Helper functions (non-entry) ──────────────────────────────────────
     for func in program.functions:
+        if isinstance(func, StructDeclNode):
+            continue   # Struktur-deklarasjoner gir ingen kode; konstruktøren er en generisk map
         if func.name in ("start", "main"):
             continue
         param_names = [p.name for p in func.params]
