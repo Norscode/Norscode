@@ -125,8 +125,9 @@ class Parser:
 
         if self.current.typ == "IDENT" and self.current.value == "liste":
             self.eat("IDENT")
+            # Aksepter `liste` uten type-parameter (native pipeline)
             if self.current.typ != "LT":
-                self.error("Forventet '<' etter liste")
+                return "liste"   # generisk liste uten element-type
             self.eat("LT")
             inner = self.parse_type()
             if self.current.typ not in ("GT", "RSHIFT"):

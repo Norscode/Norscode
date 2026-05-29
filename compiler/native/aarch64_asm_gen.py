@@ -16,6 +16,7 @@ from __future__ import annotations
 from compiler.ast_nodes import (
     BinOpNode,
     CallNode,
+    IndexNode,
     NumberNode,
     StringNode,
     UnaryOpNode,
@@ -98,24 +99,6 @@ class _AsmBuilder:
                 self.op(f"mov x0, {reg}")
             return
 
-        if isinstance(node, CallNode):
-            # Push all live variable registers (callee-saved; we save them anyway
-            # in the prologue, but nested calls in expressions need the saved values)
-            args = node.args if hasattr(node, "args") else []
-            # Evaluate arguments left-to-right, stage in temp saves
-            staged: list[str] = []
-            for i, arg in enumerate(args[:8]):
-                self.emit_expr(arg, var_slots)
-                self.op("str x0, [sp, #-16]!")
-                staged.append(f"[sp+{(len(staged))*16}]")
-            # Pop args into argument registers in reverse
-            for i in range(len(staged) - 1, -1, -1):
-                self.op(f"ldr {_ARG_REGS[i]}, [sp], #16")
-            callee = node.name if hasattr(node, "name") else str(node)
-            self.op(f"bl _{callee}")
-            # Result is in x0
-            return
-
         if isinstance(node, UnaryOpNode):
             op = getattr(node.op, "typ", str(node.op))
             self.emit_expr(node.node, var_slots)
@@ -127,6 +110,40 @@ class _AsmBuilder:
                 self.op("cset x0, eq")
             else:
                 raise ValueError(f"Ukjent unær operator: {op}")
+            return
+
+        if isinstance(node, IndexNode):
+            # liste[indeks] → x0 via nc_liste_les_val(liste_ptr, idx)
+            self.emit_expr(node.list_expr, var_slots)
+            self.op("str x0, [sp, #-16]!")        # lagre liste-peker
+            self.emit_expr(node.index_expr, var_slots)
+            self.op("mov x1, x0")                 # idx → x1
+            self.op("ldr x0, [sp], #16")          # liste-peker → x0
+            self.op("bl _nc_liste_les_val")
+            return
+
+        if isinstance(node, CallNode):
+            fn = getattr(node, "name", "")
+            args = node.args if hasattr(node, "args") else []
+            # Spesiell håndtering for innebygde runtime-funksjoner
+            if fn == "lengde" and len(args) == 1:
+                self.emit_expr(args[0], var_slots)
+                self.op("bl _nc_liste_lengde_val")
+                return
+            if fn == "tekst_fra_heltall" and len(args) == 1:
+                self.emit_expr(args[0], var_slots)
+                self.op("bl _nc_heltall_til_tekst")
+                return
+            # Generelt funksjonskall (eksisterende logikk)
+            staged: list[str] = []
+            for i, arg in enumerate(args[:8]):
+                self.emit_expr(arg, var_slots)
+                self.op("str x0, [sp, #-16]!")
+                staged.append(f"[sp+{len(staged)*16}]")
+            for i in range(len(staged) - 1, -1, -1):
+                self.op(f"ldr {_ARG_REGS[i]}, [sp], #16")
+            callee = node.name if hasattr(node, "name") else str(node)
+            self.op(f"bl _{callee}")
             return
 
         if isinstance(node, BinOpNode):
@@ -231,10 +248,57 @@ class _AsmBuilder:
                 self.lbl(end_lbl)
 
             elif kind == "skriv_expr":
-                # Evaluer uttrykket → x0, kall deretter _nc_print_int
+                # Evaluer uttrykket → x0
                 _, expr = op
-                self.emit_expr(expr, var_slots)
-                self.op("bl _nc_print_int")
+                from compiler.ast_nodes import CallNode as _CN
+                # Sjekk om uttrykket er tekst_fra_heltall (returnerer char*)
+                if (isinstance(expr, _CN) and getattr(expr, "name", "") == "tekst_fra_heltall"
+                        and len(expr.args) == 1):
+                    self.emit_expr(expr.args[0], var_slots)
+                    self.op("bl _nc_heltall_til_tekst")
+                    self.op("bl _nc_skriv_tekst")
+                else:
+                    self.emit_expr(expr, var_slots)
+                    self.op("bl _nc_print_int")
+
+            elif kind == "liste_ny":
+                # Opprett ny tom liste → x0 (peker)
+                self.op("bl _nc_liste_ny_val")
+                _, name = op
+                reg = var_slots.get(name)
+                if reg and reg != "x0":
+                    self.op(f"mov {reg}, x0")
+
+            elif kind == "legg_til":
+                # legg_til(liste, verdi): liste_reg, verdi
+                _, liste_name, val_expr = op
+                reg = var_slots.get(liste_name)
+                if reg and reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("str x0, [sp, #-16]!")     # lagre liste-peker
+                self.emit_expr(val_expr, var_slots)
+                self.op("mov x1, x0")              # verdi → x1
+                self.op("ldr x0, [sp], #16")       # liste-peker → x0
+                self.op("bl _nc_liste_legg_til_val")
+
+            elif kind == "liste_les":
+                # liste[idx] → x0
+                _, liste_name, idx_expr = op
+                reg = var_slots.get(liste_name)
+                if reg and reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("str x0, [sp, #-16]!")
+                self.emit_expr(idx_expr, var_slots)
+                self.op("mov x1, x0")
+                self.op("ldr x0, [sp], #16")
+                self.op("bl _nc_liste_les_val")
+
+            elif kind == "lengde_kall":
+                # lengde(val) → x0
+                _, val_expr = op
+                self.emit_expr(val_expr, var_slots)
+                # Kall nc_liste_lengde_val (for lister) eller tekst-lengde
+                self.op("bl _nc_liste_lengde_val")
 
             elif kind == "skriv_tekst_var":
                 # Tekst-variabel: last pekeren fra register → x0, kall _nc_skriv_tekst
@@ -465,8 +529,14 @@ def generate_aarch64_asm(la_decls, ops, exit_form,
             param_lines.append(f"    mov {reg}, {_ARG_REGS[i]}")
 
     # ── Initialise la variables ───────────────────────────────────────────────
-    for name, _vtype, init_expr in _la_normalized:
-        b.emit_expr(init_expr, var_slots)
+    for name, vtype, init_expr in _la_normalized:
+        if vtype == "liste" and init_expr is None:
+            # Opprett tom liste via runtime
+            b.op("bl _nc_liste_ny_val")
+        elif init_expr is not None:
+            b.emit_expr(init_expr, var_slots)
+        else:
+            b.op("movz x0, #0")   # fallback: nil
         reg = var_slots[name]
         if reg != "x0":
             b.op(f"mov {reg}, x0")

@@ -11,8 +11,10 @@ from compiler.ast_nodes import (
     BinOpNode,
     BlockNode,
     CallNode,
+    ExprStmtNode,
     FunctionNode,
     IfNode,
+    IndexNode,
     NumberNode,
     PrintNode,
     ProgramNode,
@@ -112,6 +114,10 @@ def _classify_body_ops(
         ("set",             name, expr)
         ("decl",            name, expr)    — heltall, kun hvis allow_var_decl=True
         ("decl_tekst",      name, expr)    — tekst,   kun hvis allow_var_decl=True
+        ("decl_liste",      name)          — tom liste, kun hvis allow_var_decl=True
+        ("liste_ny",        name)          — opprett ny tom liste
+        ("legg_til",        liste_name, val_expr)
+        ("lengde_kall",     val_expr)
         ("mens",            cond, body_ops)
         ("hvis",            cond, then_ops, else_ops_or_None)
         ("kall",            call_node)
@@ -139,9 +145,12 @@ def _classify_body_ops(
             elif vtype == "heltall":
                 var_types[stmt.name] = "heltall"
                 ops.append(("decl", stmt.name, stmt.expr))
+            elif vtype in ("liste", "Liste"):
+                var_types[stmt.name] = "liste"
+                ops.append(("liste_ny", stmt.name))
             else:
                 raise NativeCompileError(
-                    f"Native v0 støtter heltall og tekst-variabler (fikk {vtype!r})"
+                    f"Native v0 støtter heltall, tekst og liste-variabler (fikk {vtype!r})"
                 )
             continue
         if isinstance(stmt, VarSetNode):
@@ -186,7 +195,22 @@ def _classify_body_ops(
                 )
             ops.append(("hvis", stmt.condition, then_ops, else_ops))
             continue
+        if isinstance(stmt, ExprStmtNode):
+            # Uttrykk-setning: kan være et funksjonskall (f.eks. legg_til)
+            inner = stmt.expr if hasattr(stmt, "expr") else None
+            if isinstance(inner, CallNode):
+                stmt = inner  # fall through to CallNode handling
+            else:
+                # Ignorer andre uttrykk-setninger (sideeffektfrie)
+                continue
         if isinstance(stmt, CallNode):
+            # Innebygde liste-operasjoner som statements
+            fn = getattr(stmt, "name", None)
+            if fn == "legg_til" and len(stmt.args) == 2:
+                liste_expr = stmt.args[0]
+                if isinstance(liste_expr, VarAccessNode):
+                    ops.append(("legg_til", liste_expr.name, stmt.args[1]))
+                    continue
             ops.append(("kall", stmt))
             continue
         if isinstance(stmt, ReturnNode):
@@ -259,6 +283,14 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
                 )
             declared.add(name)
             la_decls.append((name, vtype, init_expr))
+        elif op[0] == "liste_ny":
+            _, name = op
+            if name in declared:
+                raise NativeCompileError(
+                    f"Native v0: variabel '{name}' deklarert to ganger"
+                )
+            declared.add(name)
+            la_decls.append((name, "liste", None))
         else:
             other_ops.append(op)
 
@@ -655,7 +687,8 @@ def _compile_helper(helper: FunctionNode) -> bytes:
     var_regs: dict[str, int] = {}
     for i, p in enumerate(params):
         var_regs[p.name] = _VAR_REGS[i]
-    for i, (name, _) in enumerate(la_decls):
+    for i, entry in enumerate(la_decls):
+        name = entry[0]
         var_regs[name] = _VAR_REGS[len(params) + i]
 
     lowering = NativeArithmeticLowering()
@@ -666,7 +699,8 @@ def _compile_helper(helper: FunctionNode) -> bytes:
     for i, p in enumerate(params):
         lowering.emit_mov_reg_reg(var_regs[p.name], _PARAM_REGS[i])
     # La-initialisering.
-    for name, init_expr in la_decls:
+    for entry in la_decls:
+        name, init_expr = entry[0], entry[-1]
         # Helpers kan ikke kalle helpers, så helpers_offsets=None.
         _emit_expr_to_rax(init_expr, var_regs, lowering, None, 0)
         lowering.emit_mov_reg_reg(var_regs[name], _RAX)
@@ -729,7 +763,7 @@ def lower_program(
         )
 
     var_regs: dict[str, int] = {
-        name: _VAR_REGS[i] for i, (name, _) in enumerate(la_decls)
+        entry[0]: _VAR_REGS[i] for i, entry in enumerate(la_decls)
     }
     all_messages = _collect_messages(ops)
 
@@ -740,9 +774,11 @@ def lower_program(
     def emit_entry(msg_vaddrs: list[int], helpers_offsets: dict) -> bytes:
         lowering = NativeArithmeticLowering()
         env_so_far: dict[str, int] = {}
-        for name, init_expr in la_decls:
-            _emit_expr_to_rax(init_expr, env_so_far, lowering, helpers_offsets, 0)
-            lowering.emit_mov_reg_reg(var_regs[name], _RAX)
+        for entry in la_decls:
+            name, init_expr = entry[0], entry[-1]
+            if init_expr is not None:
+                _emit_expr_to_rax(init_expr, env_so_far, lowering, helpers_offsets, 0)
+                lowering.emit_mov_reg_reg(var_regs[name], _RAX)
             env_so_far[name] = var_regs[name]
         _emit_ops(ops, var_regs, iter(msg_vaddrs), lowering, helpers_offsets, 0)
         if isinstance(exit_form, tuple) and exit_form and exit_form[0] == "if":
@@ -991,19 +1027,27 @@ def _generate_full_aarch64_program(
 
 
 def _compile_macos_arm64_asm(asm_text: str, output: Path) -> dict | None:
-    """Compile AArch64 assembly text to a macOS native binary via clang."""
+    """Compile AArch64 assembly text to a macOS native binary via clang.
+
+    Linker med nc_runtime.c for liste/map/streng-støtte.
+    """
     clang = _find_clang()
     if clang is None:
         return None
+
+    # Path to nc_runtime.c (beside this file)
+    runtime_c = Path(__file__).parent / "nc_runtime.c"
+
     with TemporaryDirectory(prefix="norscode-macos-asm-") as tmp:
         asm_path = Path(tmp) / "program.s"
         asm_path.write_text(asm_text, encoding="utf-8")
         output.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            [clang, "-arch", "arm64", "-o", str(output), str(asm_path)],
-            capture_output=True,
-            text=True,
-        )
+
+        cmd = [clang, "-arch", "arm64", "-O1", "-o", str(output), str(asm_path)]
+        if runtime_c.exists():
+            cmd.append(str(runtime_c))
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0 or not output.exists():
             return None
         image = output.read_bytes()
