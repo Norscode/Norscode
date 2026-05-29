@@ -2450,17 +2450,35 @@ Siste dokumenterte store milepæl: Omgang 592.
 - **z591** Sesjon-typer: binær/multiparti, dualitet, π-kalkulus, Scribble, subtyping, deadlock-frihet
 - **z592** Substrukturelle typer: lineær/afin/relevant hierarki, gradert typeteori med semiring, Rust-eierskap formalisert
 
-### Neste naturlige fase etter z592
+---
 
-Neste store omgang bør dekke **kategoriteori og denotasjonell semantikk** (z593+):
+## Fase 44: Kategoriteori og formell semantikk (z593–z602)
 
-1. Kategoriteori: kategorier, funktorer, naturlige transformasjoner
-2. Adjunksjoner og universelle konstruksjoner
-3. Monader og algebraiske effekter kategoriteoretisk
-4. Topos-teori og geometrisk logikk
-5. Enriched kategoriteori
-6. ∞-kategoriteori og modelkategorier
-7. Denotasjonell semantikk: domene-teori, CPO
-8. Spill-semantikk
-9. Relasjonell semantikk og logical relations
-10. Operasjonell vs denotasjonell ekvivalens
+Omgang 593–602 dekket matematisk grunnlag for programmeringsspråkteori.
+
+Siste dokumenterte store milepæl: **Omgang 600** — milepæl for 600 runtime-spesifikasjonsfiler.
+
+- **z593** Kategoriteori: kategorier, funktorer, naturlige transformasjoner, Yoneda-lemmaet
+- **z594** Adjunksjoner: fri/glemsom, monader fra adjunksjoner, Kleisli/Eilenberg-Moore, monoidal kategorier, Kan-extensions
+- **z595** Topos-teori: subobject-klassifikatoren, intern logikk, geometriske morfismer, sheaver, klassifiserende toposer
+- **z596** Denotasjonell semantikk: Scott-domener, CPO, Kleene-kjede-iterasjon, full abstraksjon via spill-semantikk
+- **z597** ∞-kategoriteori: modelkategorier med Quillen-adjunksjoner, quasikategorier, stabile ∞-kategorier
+- **z598** Spill-semantikk: arenaer/strategier, innocent strategier, AJM og Hyland-Ong full abstraksjon for PCF
+- **z599** Logiske relasjoner: unary/binary/Kripke/step-indexed, bisimulasjon, abstraksjonsteoremet
+- **z600** 🏆 Milepæl: 600 runtime-spesifikasjonsfiler — komplett plattformdekning
+- **z601** Operasjonell vs denotasjonell ekvivalens: bisimulasjon, kongruens, full abstraksjon, kompileringskorrekthet
+- **z602** Enriched kategoriteori: Ab-kategorier, Lawvere-metrikk, bikategorier, Grothendieck-fibrasjoner
+
+### Neste naturlige fase etter z602
+
+Norscode har nå passert **z600** — et naturlig refleksjonspunkt. Prosjektet har:
+
+- **602 runtime-spesifikasjonsfiler** som dekker nær sagt alle domener av moderne informatikk
+- **43 dokumenterte faser** fra grunnleggende VM til kategoriteoretiske fundament
+- **Fullt Python-fri native AArch64 pipeline** for et bredt spekter av programmer
+
+Neste store omgang kan dekke hva som helst fra **brukerens agenda** — enten:
+1. Fortsette runtime-serien (z603+) med nye domener
+2. Fokusere på Python-fri bootstrap (selfhost/vm.no nativt)
+3. Starte dokumentasjon og community-arbeid
+4. Implementere konkrete runtime-komponenter i Norscode
