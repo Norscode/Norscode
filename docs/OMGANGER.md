@@ -2412,17 +2412,36 @@ Siste dokumenterte store milepæl: Omgang 572.
 - **z571** Grafkomprimering og indeksering: BV-format, K²-tre, Thorup-Zwick, k-kjerne, tree decomposition
 - **z572** Kunnskapsgrafer: RDF/SPARQL, OWL/EL++ resonnering, TransE/RotatE embeddings, SHACL
 
-### Neste naturlige fase etter z572
+---
 
-Neste store omgang bør dekke **avansert maskinlæring og statistisk læring** (z573+):
+## Fase 42: Avansert maskinlæring og statistisk læring (z573–z582)
 
-1. Dyp læring: aktiviseringer, initialisering, batch-norm, dropout, residual connections
-2. Konvolusjonsnettverk: CNN-arkitekturer, pooling, dilated convolutions
-3. Rekurrente nettverk: LSTM, GRU, transformers og attention
-4. Forsterkningslæring: Q-learning, policy gradients, PPO, MCTS
-5. Generative modeller: VAE, GAN, diffusjonsmodeller
-6. Meta-læring: few-shot, MAML, prototype networks
-7. Kalibrering og usikkerhet: Bayesiansk NN, Laplace-approksimering
-8. Optimalisering: Adam, Lion, schedule-free, gradient clipping
-9. Distribuert opplæring: data/modell-parallellisme, ZeRO, FSDP
-10. Effektiv inferens: kvantisering, sparsitet, speculative decoding
+Omgang 573–582 dekket moderne dyp læring fra grunnlag til state-of-the-art.
+
+Siste dokumenterte store milepæl: Omgang 582.
+
+- **z573** Dyp læring grunnlag: autograd, GELU/SiLU, Xavier/Kaiming, BatchNorm/RMSNorm, residual, focal tap
+- **z574** CNN-arkitekturer: ResNet/DenseNet/EfficientNet/MobileNet, FPN, U-Net/DeepLab, CutMix/RandAugment
+- **z575** Transformers: skalert dot-produkt, MHA/GQA, RoPE/ALiBi, Flash Attention, KV-cache, LLaMA/Mistral
+- **z576** Forsterkningslæring: Q-learning/DQN, PPO, AlphaZero MCTS, Dreamer, multi-agent RL
+- **z577** Generative modeller: VAE/VQ-VAE, WGAN-GP, DDPM/DDIM, latent diffusjon, CFG, LoRA
+- **z578** Meta-læring: prototypisk nettverk, Siamese/triplet, MAML/Reptile, EWC, hypernettverk
+- **z579** Optimalisering: Adam/AdamW/Lion/Adafactor, Schedule-Free, cosine/OneCycle, ZeRO, checkpointing
+- **z580** Distribuert trening: DDP, tensor/pipeline-parallellisme, FSDP, 3D-parallellisme, ring-attention
+- **z581** Effektiv inferens: GPTQ/AWQ, MoE, kunnskap-destillering, spekulativ dekoding, kontinuerlig batching
+- **z582** Kalibrering og usikkerhet: temperatur-skalering, MC-Dropout, Laplace, conformal prediksjon, OOD
+
+### Neste naturlige fase etter z582
+
+Neste store omgang bør dekke **programmeringsspråkteori og typesystemer** (z583+):
+
+1. Lambda-kalkulus og reduksjonsstrategier
+2. System F og polymorfisme
+3. Lineær logikk og ressurstyper
+4. Avhengige typer og universer
+5. Homotopi-typeteori (HoTT)
+6. Substrukturelle typesystemer
+7. Sesjon-typer og kommunikasjonsprotokoll-typer
+8. Type inferens algoritmer (Hindley-Milner, bidireksjonell)
+9. Modul-typeteori og høyere-orden moduler
+10. Parametrisitet og fri-teorem
