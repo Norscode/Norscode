@@ -452,9 +452,13 @@ class Parser:
 
     def while_stmt(self):
         self.eat("MENS")
-        self.eat("LPAREN")
+        # Aksepter både `mens (cond)` og `mens cond` (selfhost-syntaks)
+        has_paren = self.current.typ == "LPAREN"
+        if has_paren:
+            self.eat("LPAREN")
         cond = self.expr()
-        self.eat("RPAREN")
+        if has_paren:
+            self.eat("RPAREN")
         body = self.block()
         return WhileNode(cond, body)
 

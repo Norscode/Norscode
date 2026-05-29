@@ -236,6 +236,16 @@ class _AsmBuilder:
                 self.emit_expr(expr, var_slots)
                 self.op("bl _nc_print_int")
 
+            elif kind == "skriv_tekst_var":
+                # Tekst-variabel: last pekeren fra register → x0, kall _nc_skriv_tekst
+                _, name = op
+                reg = var_slots.get(name)
+                if reg is None:
+                    raise ValueError(f"Ukjent tekst-variabel: {name}")
+                if reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("bl _nc_skriv_tekst")
+
             elif kind == "kall":
                 _, call_node = op
                 self.emit_expr(call_node, var_slots)  # result discarded
@@ -308,6 +318,34 @@ class _AsmBuilder:
 
     def text_lines(self) -> list[str]:
         return self._lines
+
+
+def nc_skriv_tekst_helper_asm() -> str:
+    """Returner AArch64-assembly for _nc_skriv_tekst (macOS/AArch64).
+
+    Konvensjon: x0 = peker til null-avsluttet streng (inkl. \\n).
+    Beregner lengde med inline strlen, skriver til stdout.
+    Bevarer alle callee-saved registre; ødelegger kun x0–x5, x16.
+    Stack-ramme: 16 bytes (bare x29/x30).
+    """
+    return """\
+_nc_skriv_tekst:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x1, x0
+    mov x2, #0
+.Lst_loop:
+    ldrb w3, [x1, x2]
+    cbz w3, .Lst_done
+    add x2, x2, #1
+    b .Lst_loop
+.Lst_done:
+    mov x0, #1
+    mov x16, #4
+    svc #0x80
+    ldp x29, x30, [sp], #16
+    ret
+"""
 
 
 def _get_op_typ(cond) -> str:
@@ -384,13 +422,22 @@ def generate_aarch64_asm(la_decls, ops, exit_form,
                          func_label: str = "_main") -> str:
     """Translate (la_decls, ops, exit_form) to macOS AArch64 assembly.
 
-    params: list of parameter names — loaded from x0..xN into variable slots.
-    func_label: assembly label for the generated function (default: _main).
+    la_decls: liste av (name, type, init_expr) eller (name, init_expr) (bakoverkompatibelt).
+    params: liste av parameter-navn — lastes fra x0..xN til variabelplasser.
+    func_label: assembly-etikett for generert funksjon (standard: _main).
     """
+    # Normaliser la_decls til (name, vtype, init_expr)
+    _la_normalized: list[tuple[str, str, object]] = []
+    for entry in la_decls:
+        if len(entry) == 3:
+            _la_normalized.append(entry)           # (name, vtype, expr)
+        else:
+            _la_normalized.append((entry[0], "heltall", entry[1]))  # bakoverkompatibelt
+
     all_names: list[str] = []
     if params:
         all_names.extend(params)
-    for name, _ in la_decls:
+    for name, _vtype, _expr in _la_normalized:
         if name not in all_names:
             all_names.append(name)
 
@@ -418,7 +465,7 @@ def generate_aarch64_asm(la_decls, ops, exit_form,
             param_lines.append(f"    mov {reg}, {_ARG_REGS[i]}")
 
     # ── Initialise la variables ───────────────────────────────────────────────
-    for name, init_expr in la_decls:
+    for name, _vtype, init_expr in _la_normalized:
         b.emit_expr(init_expr, var_slots)
         reg = var_slots[name]
         if reg != "x0":

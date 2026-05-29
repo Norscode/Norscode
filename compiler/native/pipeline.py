@@ -97,14 +97,28 @@ def _validate_comparison(cond, ctx: str) -> str:
     return op
 
 
-def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
+def _classify_body_ops(
+    statements,
+    allow_var_decl: bool,
+    ctx: str,
+    var_types: dict | None = None,
+) -> list:
     """Klassifiser en liste statements til ops-tupler.
+
     ops-formater:
-        ("skriv", bytes)
-        ("set",  name, expr)
-        ("decl", name, init_expr)    — kun hvis allow_var_decl=True
-        ("mens", cond, body_ops)
+        ("skriv",           bytes)
+        ("skriv_expr",      expr)          — heltall-uttrykk → _nc_print_int
+        ("skriv_tekst_var", name)          — tekst-variabel  → _nc_skriv_tekst
+        ("set",             name, expr)
+        ("decl",            name, expr)    — heltall, kun hvis allow_var_decl=True
+        ("decl_tekst",      name, expr)    — tekst,   kun hvis allow_var_decl=True
+        ("mens",            cond, body_ops)
+        ("hvis",            cond, then_ops, else_ops_or_None)
+        ("kall",            call_node)
+        ("returner_mid",    expr)
     """
+    if var_types is None:
+        var_types = {}
     ops: list = []
     for stmt in statements:
         if isinstance(stmt, VarDeclareNode):
@@ -113,11 +127,22 @@ def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
                     f"Native v0: `la` (deklarasjon) er ikke tillatt inni {ctx}; "
                     "bruk `NAVN = UTTRYKK` for re-tilordning"
                 )
-            if stmt.var_type not in (None, "heltall"):
+            vtype = stmt.var_type or "heltall"
+            if vtype == "tekst":
+                if not isinstance(stmt.expr, StringNode):
+                    raise NativeCompileError(
+                        f"Native v0: tekst-variabel '{stmt.name}' må initialiseres med en "
+                        "streng-literal"
+                    )
+                var_types[stmt.name] = "tekst"
+                ops.append(("decl_tekst", stmt.name, stmt.expr))
+            elif vtype == "heltall":
+                var_types[stmt.name] = "heltall"
+                ops.append(("decl", stmt.name, stmt.expr))
+            else:
                 raise NativeCompileError(
-                    f"Native v0 støtter bare heltall-variabler (fikk {stmt.var_type!r})"
+                    f"Native v0 støtter heltall og tekst-variabler (fikk {vtype!r})"
                 )
-            ops.append(("decl", stmt.name, stmt.expr))
             continue
         if isinstance(stmt, VarSetNode):
             ops.append(("set", stmt.name, stmt.expr))
@@ -125,26 +150,39 @@ def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
         if isinstance(stmt, PrintNode):
             if isinstance(stmt.expr, StringNode):
                 ops.append(("skriv", stmt.expr.value.encode("utf-8") + b"\n"))
+            elif (
+                isinstance(stmt.expr, VarAccessNode)
+                and var_types.get(stmt.expr.name) == "tekst"
+            ):
+                ops.append(("skriv_tekst_var", stmt.expr.name))
             else:
-                # Heltall-uttrykk (variabel, kall, aritmetikk) — evalueres til x0
-                # og skrives ut via _nc_print_int-hjelper (kun macOS AArch64)
+                # Heltall-uttrykk (variabel, kall, aritmetikk) → _nc_print_int
                 ops.append(("skriv_expr", stmt.expr))
             continue
         if isinstance(stmt, WhileNode):
             _validate_comparison(stmt.condition, "mens")
             body_ops = _classify_body_ops(
-                stmt.body.statements, allow_var_decl=False, ctx="mens-kropp"
+                stmt.body.statements,
+                allow_var_decl=False,
+                ctx="mens-kropp",
+                var_types=var_types,
             )
             ops.append(("mens", stmt.condition, body_ops))
             continue
         if isinstance(stmt, IfNode):
             then_ops = _classify_body_ops(
-                stmt.then_block.statements, allow_var_decl=False, ctx="hvis-kropp"
+                stmt.then_block.statements,
+                allow_var_decl=False,
+                ctx="hvis-kropp",
+                var_types=var_types,
             )
             else_ops = None
             if stmt.else_block is not None:
                 else_ops = _classify_body_ops(
-                    stmt.else_block.statements, allow_var_decl=False, ctx="ellers-kropp"
+                    stmt.else_block.statements,
+                    allow_var_decl=False,
+                    ctx="ellers-kropp",
+                    var_types=var_types,
                 )
             ops.append(("hvis", stmt.condition, then_ops, else_ops))
             continue
@@ -152,7 +190,6 @@ def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
             ops.append(("kall", stmt))
             continue
         if isinstance(stmt, ReturnNode):
-            # Mid-body return: treat as exit — only valid as last statement for now
             ops.append(("returner_mid", stmt.expr))
             continue
         raise NativeCompileError(
@@ -202,21 +239,26 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
         )
 
     # Klassifiser body. la-deklarasjoner tillates kun på dette nivået.
-    raw_ops = _classify_body_ops(body_stmts, allow_var_decl=True, ctx="entry-kropp")
+    var_types: dict[str, str] = {}
+    raw_ops = _classify_body_ops(
+        body_stmts, allow_var_decl=True, ctx="entry-kropp", var_types=var_types
+    )
 
     # Splitt: la_decls (med duplikatsjekk) først, så øvrige ops.
-    la_decls: list[tuple[str, object]] = []
+    # la_decls er nå enten ("decl", name, expr) eller ("decl_tekst", name, expr).
+    la_decls: list[tuple[str, str, object]] = []  # (name, type, expr)
     declared: set[str] = set()
     other_ops: list = []
     for op in raw_ops:
-        if op[0] == "decl":
+        if op[0] in ("decl", "decl_tekst"):
+            vtype = "tekst" if op[0] == "decl_tekst" else "heltall"
             _, name, init_expr = op
             if name in declared:
                 raise NativeCompileError(
                     f"Native v0: variabel '{name}' deklarert to ganger"
                 )
             declared.add(name)
-            la_decls.append((name, init_expr))
+            la_decls.append((name, vtype, init_expr))
         else:
             other_ops.append(op)
 
@@ -756,8 +798,13 @@ def compile_source_to_native_elf(source_path: str | Path, output_path: str | Pat
     # Conditional hvis-form eller dynamiske ops gir -1.
     try:
         env_ct: dict[str, int] = {}
-        for name, init_expr in la_decls:
-            env_ct[name] = _constant_int(init_expr, env_ct)
+        for entry in la_decls:
+            name = entry[0]
+            init_expr = entry[-1]  # virker for (name, expr) og (name, type, expr)
+            try:
+                env_ct[name] = _constant_int(init_expr, env_ct)
+            except NativeCompileError:
+                pass  # tekst-variabler og ikke-konstante uttrykk ignoreres
         if isinstance(exit_form, tuple) or any(op[0] != "skriv" for op in ops):
             exit_code = -1
         else:
@@ -867,15 +914,36 @@ def _ops_need_print_int(ops: list) -> bool:
     return False
 
 
+def _ops_need_skriv_tekst(ops: list) -> bool:
+    """Returner True hvis ops-treet inneholder en skriv_tekst_var-operasjon."""
+    for op in ops:
+        kind = op[0]
+        if kind == "skriv_tekst_var":
+            return True
+        if kind == "mens" and _ops_need_skriv_tekst(op[2]):
+            return True
+        if kind == "hvis":
+            if _ops_need_skriv_tekst(op[2]):
+                return True
+            if op[3] and _ops_need_skriv_tekst(op[3]):
+                return True
+    return False
+
+
 def _generate_full_aarch64_program(
     program: ProgramNode,
     entry_la_decls, entry_ops, entry_exit_form,
 ) -> str:
     """Generate AArch64 assembly for a full program (entry + helpers)."""
-    from compiler.native.aarch64_asm_gen import generate_aarch64_asm, nc_print_int_helper_asm
+    from compiler.native.aarch64_asm_gen import (
+        generate_aarch64_asm,
+        nc_print_int_helper_asm,
+        nc_skriv_tekst_helper_asm,
+    )
 
     sections: list[str] = []
     need_print_int = _ops_need_print_int(entry_ops)
+    need_skriv_tekst = _ops_need_skriv_tekst(entry_ops)
 
     # ── Helper functions (non-entry) ──────────────────────────────────────
     for func in program.functions:
@@ -888,6 +956,8 @@ def _generate_full_aarch64_program(
             raise
         if _ops_need_print_int(func_ops):
             need_print_int = True
+        if _ops_need_skriv_tekst(func_ops):
+            need_skriv_tekst = True
         asm = generate_aarch64_asm(
             func_la_decls, func_ops, func_exit,
             params=param_names,
@@ -898,9 +968,11 @@ def _generate_full_aarch64_program(
         body = [l for l in lines if not l.startswith(".section __TEXT,__text")]
         sections.append("\n".join(body))
 
-    # ── _nc_print_int runtime-hjelper (kun hvis trengs) ───────────────────
+    # ── Runtime-hjelpere (kun hvis trengs) ────────────────────────────────
     if need_print_int:
         sections.append(nc_print_int_helper_asm())
+    if need_skriv_tekst:
+        sections.append(nc_skriv_tekst_helper_asm())
 
     # ── Entry function ────────────────────────────────────────────────────
     entry_asm = generate_aarch64_asm(
