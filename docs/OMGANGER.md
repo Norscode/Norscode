@@ -2319,17 +2319,53 @@ Spesialisert      — numerisk, vitenskapelig, finans, bioinformatikk, CV, NLP, 
 Plattform         — spillmotor, VR/AR, IoT, robotikk, blokkjede, sky
 ```
 
-### Neste naturlige fase etter z532
+---
 
-Neste store omgang bør dekke **avansert språkfunksjoner og metaprogrammering** (z533+):
+## Fase 38: Avanserte språkfunksjoner og metaprogrammering (z533–z542)
 
-1. Makro-hygiene og prosedyre-makroer (avansert)
-2. Bevis-assistert programmering (Curry-Howard)
-3. Gradert typeteori og lineære ressurser
-4. Kompileringstids-beregning (konst-evaluering, konst-generikk)
-5. Effekt-polymorfisme og row-inference
-6. Modularsystem med functor-moduler
-7. Inkrementell kompilering med avhengighetssporing
-8. Distribuert kompilering og build-cache
-9. Spesialiseringsbasert kodegenerering
-10. Profileringsstyrt optimalisering (PGO)
+Omgang 533–542 fullførte det teoretiske grunnlaget for Norscode som et avansert programmeringsspråk.
+
+Siste dokumenterte store milepæl: Omgang 542.
+
+- **z533** Avansert makro-hygiene: quasi-quotation, def/call-site spans, derive-motor med struct/enum-data
+- **z534** Bevis-assistert programmering: Curry-Howard, pi/sigma-typer, taktikker (simp/omega/aesop), ekstraksjon
+- **z535** Kompileringstids-beregning: konst-funksjoner, konst-generikk, forhåndsberegnede oppslagstabeller
+- **z536** Funktor-modularsystem: ML-signaturer/strukturer, opake typer, generative/applikative funktorer
+- **z537** Inkrementell kompilering: Salsa spørringssystem, API/impl-hashing, parallell kompilering
+- **z538** Distribuert bygg: innholdsadressert cache, hermetiske sandkasser, reproduserbare bygg
+- **z539** Spesialiseringsbasert kodegen: monomorfe instansiering, delvis evaluering, polytypisme
+- **z540** Profileringsstyrt optimalisering: instrumentering, gren-vektlegging, AutoFDO, BOLT
+- **z541** Gradert typeteori: lineære/afine ressurser, eierskap, levetider, kapabiliteter, sesjonstyper
+- **z542** Effekt-polymorfisme: rad-type-inferens, HM med effektbegrensninger, rad-unifikasjon
+
+### Nåværende modell etter Omgang 542
+
+```text
+Norscode fullstendig dekning (z001–z542):
+
+Typeteori          — ADT, avhengige typer, lineære typer, graderte typer,
+                    effektrekker (row), typeklasser, HKT, bevistyper (Curry-Howard)
+Kompilator-kjerne  — inkrementell (Salsa), parallell, distribuert (CAS-cache),
+                    LLVM/AArch64-backend, JIT (tiered), PGO, spesialisering
+Runtime            — GC (generasjons/concurrent), minnemodell, JIT-deopt,
+                    minneprofiler, safepoints
+Modularsystem      — ML-funktor-moduler, signaturer, opake typer
+Metaprogrammering  — hygienske makroer, quasi-quote, derive, konst-evaluering
+Bevis              — Curry-Howard, taktikker, terminering, ekstraksjon
+[... alle tidligere domenener fra Fase 1–37 ...]
+```
+
+### Neste naturlige fase etter z542
+
+Neste store omgang bør dekke **avansert kjøretidssystemer og plattformmodning** (z543+):
+
+1. Persisteringsrammeverk (append-only log, snapshot-restore)
+2. Sikkerhets-sandkasse og capability-VM
+3. Språkserver-protokoll (LSP) full implementasjon
+4. Multippel-retur og unstrukturert kontrollflyt
+5. Heterogen beregning (GPU-kjerne-programmering)
+6. Programsyntese og skisse-basert programmering
+7. Adaptiv runtime-optimalisering
+8. Minnekomprimering og heap-compaction
+9. Nettverks-namespaces og container-runtime
+10. Formell semantikk og operasjonell semantikk
