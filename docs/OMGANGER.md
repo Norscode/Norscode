@@ -2431,17 +2431,36 @@ Siste dokumenterte store milepæl: Omgang 582.
 - **z581** Effektiv inferens: GPTQ/AWQ, MoE, kunnskap-destillering, spekulativ dekoding, kontinuerlig batching
 - **z582** Kalibrering og usikkerhet: temperatur-skalering, MC-Dropout, Laplace, conformal prediksjon, OOD
 
-### Neste naturlige fase etter z582
+---
 
-Neste store omgang bør dekke **programmeringsspråkteori og typesystemer** (z583+):
+## Fase 43: Programmeringsspråkteori og typesystemer (z583–z592)
 
-1. Lambda-kalkulus og reduksjonsstrategier
-2. System F og polymorfisme
-3. Lineær logikk og ressurstyper
-4. Avhengige typer og universer
-5. Homotopi-typeteori (HoTT)
-6. Substrukturelle typesystemer
-7. Sesjon-typer og kommunikasjonsprotokoll-typer
-8. Type inferens algoritmer (Hindley-Milner, bidireksjonell)
-9. Modul-typeteori og høyere-orden moduler
-10. Parametrisitet og fri-teorem
+Omgang 583–592 dekket dybden av formell programmeringsspråkteori.
+
+Siste dokumenterte store milepæl: Omgang 592.
+
+- **z583** Lambda-kalkulus: de Bruijn, alfa-konvertering, beta/eta-reduksjon, Church-Rosser, CBN/CBV/CBNeed, Church-tall, Y-kombinatoren, STLC
+- **z584** System F: universell/eksistensiell polymorfisme, Fω med kind-system, Boehm-Berarducci, fri-teorem, System Fc
+- **z585** Lineær logikk: tensor/par/with/plus/bang, ressurs-splitting, Curry-Howard → sesjon-typer, deadlock-frihet
+- **z586** Avhengige typer: Π/Σ-typer, univers-hierarki, induktive typer, vektorer, CoC, Cubical TT
+- **z587** Homotopi-typeteori: sti-typer, homotopi-nivåer, høyere induktive typer, univalensaksiomet, HIT
+- **z588** Type inferens: Hindley-Milner algoritme W, Robinson-unifikasjon, bidireksjonell type-sjekking, begrensnings-inferens
+- **z589** Modul-typeteori: ML signaturer/strukturer/funktorer, sealing, generativ/applikativ, first-class moduler
+- **z590** Parametrisitet: Reynolds relasjonell parametrisitet, fri-teorem, Yoneda-lemma, MacLane-koherens
+- **z591** Sesjon-typer: binær/multiparti, dualitet, π-kalkulus, Scribble, subtyping, deadlock-frihet
+- **z592** Substrukturelle typer: lineær/afin/relevant hierarki, gradert typeteori med semiring, Rust-eierskap formalisert
+
+### Neste naturlige fase etter z592
+
+Neste store omgang bør dekke **kategoriteori og denotasjonell semantikk** (z593+):
+
+1. Kategoriteori: kategorier, funktorer, naturlige transformasjoner
+2. Adjunksjoner og universelle konstruksjoner
+3. Monader og algebraiske effekter kategoriteoretisk
+4. Topos-teori og geometrisk logikk
+5. Enriched kategoriteori
+6. ∞-kategoriteori og modelkategorier
+7. Denotasjonell semantikk: domene-teori, CPO
+8. Spill-semantikk
+9. Relasjonell semantikk og logical relations
+10. Operasjonell vs denotasjonell ekvivalens
