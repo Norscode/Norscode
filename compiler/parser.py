@@ -142,7 +142,7 @@ class Parser:
         if self.current.typ == "IDENT" and self.current.value == "ordbok":
             self.eat("IDENT")
             if self.current.typ != "LT":
-                self.error("Forventet '<' etter ordbok")
+                return "ordbok"   # generisk ordbok uten type-parameter
             self.eat("LT")
             key_type = self.parse_type()
             if self.current.typ != "COMMA":

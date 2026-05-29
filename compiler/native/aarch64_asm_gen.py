@@ -85,8 +85,9 @@ class _AsmBuilder:
             return
 
         if isinstance(node, StringNode):
-            # String literals: pass as a pointer to a cstring label
-            lbl = self.add_string((node.value + "\n").encode("utf-8"))
+            # String literals: pass as a pointer to a null-terminated cstring.
+            # Newline is NOT embedded here — nc_skriv_tekst adds its own \n.
+            lbl = self.add_string(node.value.encode("utf-8"))
             self.op(f"adrp x0, {lbl}@PAGE")
             self.op(f"add x0, x0, {lbl}@PAGEOFF")
             return
@@ -113,13 +114,21 @@ class _AsmBuilder:
             return
 
         if isinstance(node, IndexNode):
-            # liste[indeks] → x0 via nc_liste_les_val(liste_ptr, idx)
+            # Kan være liste[int] eller ordbok["nøkkel"]
+            # Sjekk om indeksen er en streng (ordbok-oppslag)
+            is_str_key = isinstance(node.index_expr, StringNode) or (
+                isinstance(node.index_expr, VarAccessNode)
+                and var_slots.get(node.index_expr.name + "_is_str")
+            )
             self.emit_expr(node.list_expr, var_slots)
-            self.op("str x0, [sp, #-16]!")        # lagre liste-peker
+            self.op("str x0, [sp, #-16]!")
             self.emit_expr(node.index_expr, var_slots)
-            self.op("mov x1, x0")                 # idx → x1
-            self.op("ldr x0, [sp], #16")          # liste-peker → x0
-            self.op("bl _nc_liste_les_val")
+            self.op("mov x1, x0")
+            self.op("ldr x0, [sp], #16")
+            if isinstance(node.index_expr, StringNode):
+                self.op("bl _nc_map_hent_val")   # ordbok[str] → verdi
+            else:
+                self.op("bl _nc_liste_les_val")  # liste[int] → verdi
             return
 
         if isinstance(node, CallNode):
@@ -131,6 +140,23 @@ class _AsmBuilder:
                 self.op("bl _nc_liste_lengde_val")
                 return
             if fn == "tekst_fra_heltall" and len(args) == 1:
+                self.emit_expr(args[0], var_slots)
+                self.op("bl _nc_heltall_til_tekst")
+                return
+            if fn in ("finnes_nøkkel", "har_nokkel", "har_nøkkel",
+                      "finnes_nokkel") and len(args) == 2:
+                self.emit_expr(args[0], var_slots)
+                self.op("str x0, [sp, #-16]!")
+                self.emit_expr(args[1], var_slots)
+                self.op("mov x1, x0")
+                self.op("ldr x0, [sp], #16")
+                self.op("bl _nc_map_har_nokkel_val")
+                return
+            if fn == "fjern_siste" and len(args) == 1:
+                self.emit_expr(args[0], var_slots)
+                self.op("bl _nc_liste_fjern_siste_val")
+                return
+            if fn in ("til_tekst", "str") and len(args) == 1:
                 self.emit_expr(args[0], var_slots)
                 self.op("bl _nc_heltall_til_tekst")
                 return
@@ -153,7 +179,11 @@ class _AsmBuilder:
             self.emit_expr(node.right, var_slots)
             self.op("mov x1, x0")              # right → x1
             self.op("ldr x0, [sp], #16")       # pop left → x0
-            if op == "PLUS":
+            if op == "PLUS" and (isinstance(node.left, StringNode)
+                                  or isinstance(node.right, StringNode)):
+                # Streng-sammenkobling — x0=a, x1=b
+                self.op("bl _nc_tekst_sammenslaa")
+            elif op == "PLUS":
                 self.op("add x0, x0, x1")
             elif op == "MINUS":
                 self.op("sub x0, x0, x1")
@@ -297,8 +327,38 @@ class _AsmBuilder:
                 # lengde(val) → x0
                 _, val_expr = op
                 self.emit_expr(val_expr, var_slots)
-                # Kall nc_liste_lengde_val (for lister) eller tekst-lengde
                 self.op("bl _nc_liste_lengde_val")
+
+            elif kind == "ordbok_ny":
+                # Opprett ny tom ordbok → x0 (peker)
+                self.op("bl _nc_map_ny_val")
+                _, name = op
+                reg = var_slots.get(name)
+                if reg and reg != "x0":
+                    self.op(f"mov {reg}, x0")
+
+            elif kind == "ordbok_sett":
+                # m["nøkkel"] = verdi
+                _, map_name, key_expr, val_expr = op
+                reg = var_slots.get(map_name)
+                if reg and reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("str x0, [sp, #-16]!")      # lagre map-peker
+                self.emit_expr(key_expr, var_slots)  # nøkkel → x0 (char*)
+                self.op("str x0, [sp, #-16]!")
+                self.emit_expr(val_expr, var_slots)   # verdi → x0
+                self.op("mov x2, x0")                 # verdi → x2
+                self.op("ldr x1, [sp], #16")          # nøkkel → x1
+                self.op("ldr x0, [sp], #16")          # map → x0
+                self.op("bl _nc_map_sett_val")
+
+            elif kind == "fjern_siste_kall":
+                # fjern_siste(liste) → x0 (siste element)
+                _, liste_name = op
+                reg = var_slots.get(liste_name)
+                if reg and reg != "x0":
+                    self.op(f"mov x0, {reg}")
+                self.op("bl _nc_liste_fjern_siste_val")
 
             elif kind == "skriv_tekst_var":
                 # Tekst-variabel: last pekeren fra register → x0, kall _nc_skriv_tekst
@@ -308,6 +368,24 @@ class _AsmBuilder:
                     raise ValueError(f"Ukjent tekst-variabel: {name}")
                 if reg != "x0":
                     self.op(f"mov x0, {reg}")
+                self.op("bl _nc_skriv_tekst")
+
+            elif kind == "skriv_tekst_expr":
+                # Streng-uttrykk (sammenkobling, tekst_fra_heltall, osv.) → nc_skriv_tekst
+                _, expr = op
+                from compiler.ast_nodes import CallNode as _CN, BinOpNode as _BON, StringNode as _SN
+                # tekst_fra_heltall(n) → heltall_til_tekst → skriv_tekst
+                if (isinstance(expr, _CN)
+                        and getattr(expr, "name", "") == "tekst_fra_heltall"
+                        and len(expr.args) == 1):
+                    self.emit_expr(expr.args[0], var_slots)
+                    self.op("bl _nc_heltall_til_tekst")
+                elif isinstance(expr, _SN):
+                    # Direkte streng-literal
+                    self.emit_expr(expr, var_slots)
+                else:
+                    # Sammenkobling eller annen streng-produserende node
+                    self.emit_expr(expr, var_slots)
                 self.op("bl _nc_skriv_tekst")
 
             elif kind == "kall":
@@ -387,14 +465,14 @@ class _AsmBuilder:
 def nc_skriv_tekst_helper_asm() -> str:
     """Returner AArch64-assembly for _nc_skriv_tekst (macOS/AArch64).
 
-    Konvensjon: x0 = peker til null-avsluttet streng (inkl. \\n).
-    Beregner lengde med inline strlen, skriver til stdout.
-    Bevarer alle callee-saved registre; ødelegger kun x0–x5, x16.
-    Stack-ramme: 16 bytes (bare x29/x30).
+    Konvensjon: x0 = peker til null-avsluttet streng (UTEN \\n).
+    Beregner lengde med inline strlen, skriver til stdout, deretter \\n.
+    Bevarer alle callee-saved registre; ødelegger kun x0–x3, x16.
+    Stack-ramme: 32 bytes (x29/x30 + 16 b scratch for \\n-tegn).
     """
     return """\
 _nc_skriv_tekst:
-    stp x29, x30, [sp, #-16]!
+    stp x29, x30, [sp, #-32]!
     mov x29, sp
     mov x1, x0
     mov x2, #0
@@ -404,10 +482,19 @@ _nc_skriv_tekst:
     add x2, x2, #1
     b .Lst_loop
 .Lst_done:
+    cbz x2, .Lst_skip
     mov x0, #1
     mov x16, #4
     svc #0x80
-    ldp x29, x30, [sp], #16
+.Lst_skip:
+    mov w3, #10
+    strb w3, [x29, #16]
+    mov x0, #1
+    add x1, x29, #16
+    mov x2, #1
+    mov x16, #4
+    svc #0x80
+    ldp x29, x30, [sp], #32
     ret
 """
 
@@ -531,8 +618,9 @@ def generate_aarch64_asm(la_decls, ops, exit_form,
     # ── Initialise la variables ───────────────────────────────────────────────
     for name, vtype, init_expr in _la_normalized:
         if vtype == "liste" and init_expr is None:
-            # Opprett tom liste via runtime
             b.op("bl _nc_liste_ny_val")
+        elif vtype == "ordbok" and init_expr is None:
+            b.op("bl _nc_map_ny_val")
         elif init_expr is not None:
             b.emit_expr(init_expr, var_slots)
         else:

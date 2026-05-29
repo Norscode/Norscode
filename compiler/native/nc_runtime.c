@@ -172,21 +172,37 @@ int64_t nc_liste_lengde_val(int64_t liste_ptr) {
     return nc_liste_lengde((nc_list_t *)(uintptr_t)liste_ptr);
 }
 
+/* ── Tekst-sammenkobling (eksportert til assembly) ──────────────────────── */
+/* Kalt som nc_tekst_sammenslå(a: char*, b: char*) → char*                  */
+char *nc_tekst_sammensl(const char *a, const char *b) {
+    if (!a) a = ""; if (!b) b = "";
+    size_t la = strlen(a), lb = strlen(b);
+    char *r = malloc(la + lb + 1);
+    memcpy(r, a, la); memcpy(r + la, b, lb + 1);
+    return r;
+}
+
+/* C mangler ø i eksportnavn — bruk ASCII-alias */
+char *nc_tekst_sammenslaa(const char *a, const char *b) {
+    return nc_tekst_sammensl(a, b);
+}
+
 /* ── Mappeoperasjoner for assembly ─────────────────────────────────────────── */
 int64_t nc_map_ny_val(void) {
     return (int64_t)(uintptr_t)nc_map_ny();
 }
 
 int64_t nc_map_hent_val(int64_t map_ptr, const char *k) {
-    return nc_map_hent((nc_map_t *)(uintptr_t)map_ptr, k);
+    return nc_map_hent((nc_map_t *)(uintptr_t)map_ptr, k ? k : "");
 }
 
 void nc_map_sett_val(int64_t map_ptr, const char *k, int64_t val) {
-    nc_map_sett((nc_map_t *)(uintptr_t)map_ptr, k, val);
+    nc_map_sett((nc_map_t *)(uintptr_t)map_ptr, k ? k : "", val);
 }
 
-int64_t nc_map_har_nøkkel_val(int64_t map_ptr, const char *k) {
-    return nc_map_har_nøkkel((nc_map_t *)(uintptr_t)map_ptr, k);
+/* Eksportér som nc_map_har_nokkel_val (ASCII, kompatibel med assembler) */
+int64_t nc_map_har_nokkel_val(int64_t map_ptr, const char *k) {
+    return nc_map_har_nøkkel((nc_map_t *)(uintptr_t)map_ptr, k ? k : "");
 }
 
 int64_t nc_map_lengde_val(int64_t map_ptr) {

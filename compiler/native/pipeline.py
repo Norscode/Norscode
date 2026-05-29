@@ -15,6 +15,7 @@ from compiler.ast_nodes import (
     FunctionNode,
     IfNode,
     IndexNode,
+    IndexSetNode,
     NumberNode,
     PrintNode,
     ProgramNode,
@@ -99,6 +100,23 @@ def _validate_comparison(cond, ctx: str) -> str:
     return op
 
 
+def _expr_produserer_tekst(node, var_types: dict) -> bool:
+    """Returner True hvis uttrykket produserer en streng-verdi (char*)."""
+    if isinstance(node, StringNode):
+        return True
+    if isinstance(node, VarAccessNode):
+        return var_types.get(node.name) == "tekst"
+    if isinstance(node, CallNode):
+        fn = getattr(node, "name", "")
+        return fn in ("tekst_fra_heltall", "til_tekst", "str", "nc_heltall_til_tekst")
+    if isinstance(node, BinOpNode):
+        op = getattr(getattr(node, "op", None), "typ", "")
+        if op == "PLUS":
+            return (_expr_produserer_tekst(node.left, var_types)
+                    or _expr_produserer_tekst(node.right, var_types))
+    return False
+
+
 def _classify_body_ops(
     statements,
     allow_var_decl: bool,
@@ -148,10 +166,13 @@ def _classify_body_ops(
             elif vtype in ("liste", "Liste"):
                 var_types[stmt.name] = "liste"
                 ops.append(("liste_ny", stmt.name))
+            elif vtype in ("ordbok", "Ordbok", "dict", "map"):
+                var_types[stmt.name] = "ordbok"
+                ops.append(("ordbok_ny", stmt.name))
             else:
-                raise NativeCompileError(
-                    f"Native v0 støtter heltall, tekst og liste-variabler (fikk {vtype!r})"
-                )
+                # Ukjent type — prøv som heltall (generelt fallback)
+                var_types[stmt.name] = "heltall"
+                ops.append(("decl", stmt.name, stmt.expr))
             continue
         if isinstance(stmt, VarSetNode):
             ops.append(("set", stmt.name, stmt.expr))
@@ -159,13 +180,12 @@ def _classify_body_ops(
         if isinstance(stmt, PrintNode):
             if isinstance(stmt.expr, StringNode):
                 ops.append(("skriv", stmt.expr.value.encode("utf-8") + b"\n"))
-            elif (
-                isinstance(stmt.expr, VarAccessNode)
-                and var_types.get(stmt.expr.name) == "tekst"
-            ):
+            elif (isinstance(stmt.expr, VarAccessNode)
+                  and var_types.get(stmt.expr.name) == "tekst"):
                 ops.append(("skriv_tekst_var", stmt.expr.name))
+            elif _expr_produserer_tekst(stmt.expr, var_types):
+                ops.append(("skriv_tekst_expr", stmt.expr))
             else:
-                # Heltall-uttrykk (variabel, kall, aritmetikk) → _nc_print_int
                 ops.append(("skriv_expr", stmt.expr))
             continue
         if isinstance(stmt, WhileNode):
@@ -195,21 +215,33 @@ def _classify_body_ops(
                 )
             ops.append(("hvis", stmt.condition, then_ops, else_ops))
             continue
+        if isinstance(stmt, IndexSetNode):
+            # m["nøkkel"] = verdi  eller  liste[i] = verdi
+            key_is_str = isinstance(stmt.index_expr, StringNode)
+            if key_is_str:
+                ops.append(("ordbok_sett", stmt.target_name,
+                            stmt.index_expr, stmt.value_expr))
+            else:
+                ops.append(("kall", stmt))  # kompleks indeks-sett, handle via kall
+            continue
         if isinstance(stmt, ExprStmtNode):
             # Uttrykk-setning: kan være et funksjonskall (f.eks. legg_til)
             inner = stmt.expr if hasattr(stmt, "expr") else None
             if isinstance(inner, CallNode):
                 stmt = inner  # fall through to CallNode handling
             else:
-                # Ignorer andre uttrykk-setninger (sideeffektfrie)
-                continue
+                continue  # sideeffektfri uttrykk-setning
         if isinstance(stmt, CallNode):
-            # Innebygde liste-operasjoner som statements
             fn = getattr(stmt, "name", None)
             if fn == "legg_til" and len(stmt.args) == 2:
                 liste_expr = stmt.args[0]
                 if isinstance(liste_expr, VarAccessNode):
                     ops.append(("legg_til", liste_expr.name, stmt.args[1]))
+                    continue
+            if fn == "fjern_siste" and len(stmt.args) == 1:
+                liste_expr = stmt.args[0]
+                if isinstance(liste_expr, VarAccessNode):
+                    ops.append(("fjern_siste_kall", liste_expr.name))
                     continue
             ops.append(("kall", stmt))
             continue
@@ -283,14 +315,15 @@ def _entry_statements(function: FunctionNode) -> tuple[list[tuple[str, object]],
                 )
             declared.add(name)
             la_decls.append((name, vtype, init_expr))
-        elif op[0] == "liste_ny":
+        elif op[0] in ("liste_ny", "ordbok_ny"):
+            vtype = "liste" if op[0] == "liste_ny" else "ordbok"
             _, name = op
             if name in declared:
                 raise NativeCompileError(
                     f"Native v0: variabel '{name}' deklarert to ganger"
                 )
             declared.add(name)
-            la_decls.append((name, "liste", None))
+            la_decls.append((name, vtype, None))
         else:
             other_ops.append(op)
 
