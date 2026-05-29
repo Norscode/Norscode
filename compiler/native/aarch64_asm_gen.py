@@ -18,6 +18,7 @@ from compiler.ast_nodes import (
     CallNode,
     NumberNode,
     StringNode,
+    UnaryOpNode,
     VarAccessNode,
 )
 
@@ -113,6 +114,19 @@ class _AsmBuilder:
             callee = node.name if hasattr(node, "name") else str(node)
             self.op(f"bl _{callee}")
             # Result is in x0
+            return
+
+        if isinstance(node, UnaryOpNode):
+            op = getattr(node.op, "typ", str(node.op))
+            self.emit_expr(node.node, var_slots)
+            if op == "MINUS":
+                self.op("neg x0, x0")
+            elif op == "IKKE":
+                # logisk ikke: 0 → 1, ikke-null → 0
+                self.op("cmp x0, #0")
+                self.op("cset x0, eq")
+            else:
+                raise ValueError(f"Ukjent unær operator: {op}")
             return
 
         if isinstance(node, BinOpNode):
@@ -216,6 +230,12 @@ class _AsmBuilder:
                     self.emit_ops(else_ops, var_slots)
                 self.lbl(end_lbl)
 
+            elif kind == "skriv_expr":
+                # Evaluer uttrykket → x0, kall deretter _nc_print_int
+                _, expr = op
+                self.emit_expr(expr, var_slots)
+                self.op("bl _nc_print_int")
+
             elif kind == "kall":
                 _, call_node = op
                 self.emit_expr(call_node, var_slots)  # result discarded
@@ -283,7 +303,7 @@ class _AsmBuilder:
                 for b in raw
             )
             lines.append(f"{lbl}:")
-            lines.append(f'    .ascii "{escaped}"')
+            lines.append(f'    .asciz "{escaped}"')  # null-avsluttet → hindrer linker-merging
         return lines
 
     def text_lines(self) -> list[str]:
@@ -292,6 +312,71 @@ class _AsmBuilder:
 
 def _get_op_typ(cond) -> str:
     return getattr(getattr(cond, "op", None), "typ", "")
+
+
+# ── Runtime-hjelper: skriv heltall til stdout ────────────────────────────────
+
+def nc_print_int_helper_asm() -> str:
+    """Returner AArch64-assembly for _nc_print_int (macOS/AArch64).
+
+    Konvensjon: x0 = heltall å skrive (signed 64-bit).
+    Skriver desimalrepresentasjonen etterfulgt av linjeskift til stdout.
+    Bevarer alle callee-saved registre; ødelegger kun x0–x8, x16.
+    Stack-ramme: 48 bytes — x29/x30 (16 b) + siffer-buffer (32 b).
+    """
+    return """\
+_nc_print_int:
+    stp x29, x30, [sp, #-48]!
+    mov x29, sp
+    // buffer [x29+16 .. x29+47], bygg baklengs fra x29+48
+    add x4, x29, #48
+
+    cbz x0, .Lpi_zero
+
+    mov x8, #0
+    cmp x0, xzr
+    b.ge .Lpi_loop_start
+    mov x8, #1
+    neg x0, x0
+
+.Lpi_loop_start:
+    mov x3, #10
+.Lpi_loop:
+    udiv x5, x0, x3
+    msub x6, x5, x3, x0
+    add x6, x6, #48
+    sub x4, x4, #1
+    strb w6, [x4]
+    mov x0, x5
+    cbnz x0, .Lpi_loop
+    cbz x8, .Lpi_write
+    sub x4, x4, #1
+    mov x5, #45
+    strb w5, [x4]
+    b .Lpi_write
+
+.Lpi_zero:
+    sub x4, x4, #1
+    mov x5, #48
+    strb w5, [x4]
+
+.Lpi_write:
+    add x5, x29, #48
+    sub x2, x5, x4
+    mov x0, #1
+    mov x1, x4
+    mov x16, #4
+    svc #0x80
+    mov x5, #10
+    strb w5, [x29, #16]
+    mov x0, #1
+    add x1, x29, #16
+    mov x2, #1
+    mov x16, #4
+    svc #0x80
+    ldp x29, x30, [sp], #48
+    ret
+"""
 
 
 def generate_aarch64_asm(la_decls, ops, exit_form,

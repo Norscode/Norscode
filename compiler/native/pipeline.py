@@ -123,12 +123,12 @@ def _classify_body_ops(statements, allow_var_decl: bool, ctx: str) -> list:
             ops.append(("set", stmt.name, stmt.expr))
             continue
         if isinstance(stmt, PrintNode):
-            if not isinstance(stmt.expr, StringNode):
-                raise NativeCompileError(
-                    "Native v0 støtter bare skriv(\"streng-literal\") "
-                    f"(fikk {type(stmt.expr).__name__})"
-                )
-            ops.append(("skriv", stmt.expr.value.encode("utf-8") + b"\n"))
+            if isinstance(stmt.expr, StringNode):
+                ops.append(("skriv", stmt.expr.value.encode("utf-8") + b"\n"))
+            else:
+                # Heltall-uttrykk (variabel, kall, aritmetikk) — evalueres til x0
+                # og skrives ut via _nc_print_int-hjelper (kun macOS AArch64)
+                ops.append(("skriv_expr", stmt.expr))
             continue
         if isinstance(stmt, WhileNode):
             _validate_comparison(stmt.condition, "mens")
@@ -498,6 +498,11 @@ def _emit_ops(
         elif kind == "mens":
             _, cond, body_ops = op
             _emit_while_loop(cond, body_ops, var_regs, msg_vaddr_iter, lowering, helpers_offsets, code_base)
+        elif kind == "skriv_expr":
+            raise NativeCompileError(
+                "skriv(uttrykk) støttes kun på macOS AArch64 i Native v0 — "
+                "bruk skriv(\"tekst\") på Linux/ELF"
+            )
         else:
             raise NativeCompileError(f"Ukjent op-type: {kind}")
 
@@ -846,16 +851,31 @@ _main:
         return {"path": output, "image": image, "entry": entry}
 
 
+def _ops_need_print_int(ops: list) -> bool:
+    """Returner True hvis ops-treet inneholder en skriv_expr-operasjon."""
+    for op in ops:
+        kind = op[0]
+        if kind == "skriv_expr":
+            return True
+        if kind == "mens" and _ops_need_print_int(op[2]):
+            return True
+        if kind == "hvis":
+            if _ops_need_print_int(op[2]):
+                return True
+            if op[3] and _ops_need_print_int(op[3]):
+                return True
+    return False
+
+
 def _generate_full_aarch64_program(
     program: ProgramNode,
     entry_la_decls, entry_ops, entry_exit_form,
 ) -> str:
     """Generate AArch64 assembly for a full program (entry + helpers)."""
-    from compiler.native.aarch64_asm_gen import generate_aarch64_asm
+    from compiler.native.aarch64_asm_gen import generate_aarch64_asm, nc_print_int_helper_asm
 
     sections: list[str] = []
-    header = [".section __TEXT,__text,regular,pure_instructions"]
-    all_strings: list[str] = []
+    need_print_int = _ops_need_print_int(entry_ops)
 
     # ── Helper functions (non-entry) ──────────────────────────────────────
     for func in program.functions:
@@ -866,6 +886,8 @@ def _generate_full_aarch64_program(
             func_la_decls, func_ops, func_exit = _entry_statements(func)
         except NativeCompileError:
             raise
+        if _ops_need_print_int(func_ops):
+            need_print_int = True
         asm = generate_aarch64_asm(
             func_la_decls, func_ops, func_exit,
             params=param_names,
@@ -875,6 +897,10 @@ def _generate_full_aarch64_program(
         lines = asm.splitlines()
         body = [l for l in lines if not l.startswith(".section __TEXT,__text")]
         sections.append("\n".join(body))
+
+    # ── _nc_print_int runtime-hjelper (kun hvis trengs) ───────────────────
+    if need_print_int:
+        sections.append(nc_print_int_helper_asm())
 
     # ── Entry function ────────────────────────────────────────────────────
     entry_asm = generate_aarch64_asm(
