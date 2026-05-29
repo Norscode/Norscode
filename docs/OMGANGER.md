@@ -2469,16 +2469,21 @@ Siste dokumenterte store milepæl: **Omgang 600** — milepæl for 600 runtime-s
 - **z601** Operasjonell vs denotasjonell ekvivalens: bisimulasjon, kongruens, full abstraksjon, kompileringskorrekthet
 - **z602** Enriched kategoriteori: Ab-kategorier, Lawvere-metrikk, bikategorier, Grothendieck-fibrasjoner
 
-### Neste naturlige fase etter z602
+---
 
-Norscode har nå passert **z600** — et naturlig refleksjonspunkt. Prosjektet har:
+## Fase 45: Teoretisk informatikk, typer og logikk (z603–z612)
 
-- **602 runtime-spesifikasjonsfiler** som dekker nær sagt alle domener av moderne informatikk
-- **43 dokumenterte faser** fra grunnleggende VM til kategoriteoretiske fundament
-- **Fullt Python-fri native AArch64 pipeline** for et bredt spekter av programmer
+Omgang 603–612 dekket avansert teori innen typer, bevis, beregbarhet og kvantedatabehandling.
 
-Neste store omgang kan dekke hva som helst fra **brukerens agenda** — enten:
-1. Fortsette runtime-serien (z603+) med nye domener
-2. Fokusere på Python-fri bootstrap (selfhost/vm.no nativt)
-3. Starte dokumentasjon og community-arbeid
-4. Implementere konkrete runtime-komponenter i Norscode
+Siste dokumenterte store milepæl: **Omgang 612** — 612 runtime-spesifikasjonsfiler.
+
+- **z603** Kubisk typeteori: intervall-type, åpne bokser, Kan-fyllinger, Glue-type, univalens konstruktivt
+- **z604** Effektsystemer: algebraiske effekter og behandlere, effekt-rader, one/multi-shot, Koka/OCaml 5
+- **z605** Separasjonslogikk: heapmodell, sep. konjunksjon, rammeregelen, CSL, Iris, fraksjonerte tillatelser
+- **z606** Abstrakt interpretasjon: Galois-forbindelsen, fortegns/intervall/polyhedron-domener, Astrée-analyse
+- **z607** Bevisteori: sekvenstkalkyle LK/LJ, snitt-eliminasjon (Hauptsatz), Curry-Howard, tabeau/resolution
+- **z608** Realiserbarhet: Kleene-realiserbarhet, effektiv topos, halting-problem, Rice-teorem, aritmetisk hierarki
+- **z609** Domeneteori avansert: DCPO, kontinuerlige funksjoner, Scott-induksjon, fast-punkt, full abstraksjon
+- **z610** Automateori avansert: Myhill-Nerode, Büchi-automater, tre-automater, vektede automater, L*-læring
+- **z611** Kvanteprogrammering: kvantporter, Grover/Shor, kvantefeilretting, BQP, lineære typer for kvantedata
+- **z612** Beregningskompleksitet avansert: polynomhierarkiet, kretskompleksitet, CC, parametrisert FPT/W-hierarki
