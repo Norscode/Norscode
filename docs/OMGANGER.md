@@ -2279,17 +2279,57 @@ Innebygd/OS        — GPIO/UART/mmap/io_uring + RTOS + kvanteberegning
 Verktøy            — formaterer/linter/REPL/byggesystem/prosjektmaler/playground
 ```
 
-### Neste naturlige fase etter z522
+---
 
-Neste store omgang bør dekke **avansert type- og bevisinfrastruktur** (z523+):
+## Fase 37: Typeteori, JIT, GC, LLVM, profiler, FFI, dokumentasjon, register og testing (z523–z532)
 
-1. Algebraiske effekter og algebraiske datatyper
-2. Typeklasse-system (ad-hoc polymorfisme)
-3. Generative testing og egenskap-bevis
-4. LLVM-integrasjon for native codegen
-5. JIT-kompilering og deoptimisering
-6. Søppelsamler-algoritmer (generasjonell, concurrent, incremental)
-7. Minneprofiler og heap-visualisering
-8. Cross-language FFI (C, Rust, Python, JS interop)
-9. Dokumentasjonsgenerator (doc-kommentarer → HTML/PDF)
-10. Pakkeregister og semantisk versjonering
+Omgang 523–532 fullførte kjerneinfrastrukturen for Norscode som selvstendig plattform.
+
+Siste dokumenterte store milepæl: Omgang 532.
+
+- **z523** Algebraiske effekter og ADT: typede effektrekker, delimited continuations, uttømmende mønster-matching
+- **z524** Typeklasse-system: Functor/Monad/Semigroup, høyere-kinded typer, dictionary-passing
+- **z525** JIT-kompilering: nivåbasert utførelse, spekulativ inlining, inline-cacher, deoptimisering
+- **z526** Søppelsamler: generasjons-GC, trifarget invariant, write-barriere, concurrent mark, safepoints
+- **z527** LLVM-integrasjon: komplett IR, alle instruksjoner, SROA/GVN/LICM/vektorisering-passes
+- **z528** Minneprofiler: allokerings-sporing, heap-snapshot, retensjonstrær, lekkasjepåvisning
+- **z529** Kryssplatform-FFI: C (dlopen/dlsym), Rust (cbindgen/uniffi), Python (pyo3/NumPy), JS (V8/N-API)
+- **z530** Dokumentasjonsgenerator: doc-kommentarer, kjørbare doctests, søkeindeks, versjonert publisering
+- **z531** Pakkeregister: PubGrub-løsning, lockfil, Sigstore-signering, CVE-revisjon, SBOM
+- **z532** Generativ testing: typede generatorer, krymping, tilstandsbasert modell-testing, dekningsrettet fuzzing
+
+### Nåværende modell etter Omgang 532
+
+```text
+Norscode kjerne (z001–z532) — fullstendig plattformdekning:
+
+Typesystem        — ADT/sum-typer, avhengige typer, lineære typer, effektrekker,
+                    typeklasser (Eq/Ord/Hash/Functor/Monad), HKT, algebraiske effekter
+Kompilator        — frontend (lekser/Pratt/inkrementell), IR/SSA, opt-passes,
+                    registerallokering, instruksjonsplanlegging, LLVM-backend, JIT
+Runtime           — generasjons-GC (trifarget/concurrent), minnemodell (SC/acq-rel),
+                    safepoints, finalizers, svake referanser, minneprofiler
+Stdlib            — komplett standardbibliotek + FFI (C/Rust/Python/JS)
+Verktøy           — formaterer, linter, REPL, LSP, docs-generator, pakkeregister
+Testing           — enhet, integrasjon, simulasjon, generativ, fuzzing, egenskap-bevis
+Distribuert       — event sourcing, saga, Kafka, GraphQL, CDC, koordinering, schema
+Databaser         — ORM, søk, tidsserie, grafdb, vektordb, dokumentdb
+Systemer          — OS-primitiver, innebygd (GPIO/UART/RTOS), kvanteberegning
+Spesialisert      — numerisk, vitenskapelig, finans, bioinformatikk, CV, NLP, GIS
+Plattform         — spillmotor, VR/AR, IoT, robotikk, blokkjede, sky
+```
+
+### Neste naturlige fase etter z532
+
+Neste store omgang bør dekke **avansert språkfunksjoner og metaprogrammering** (z533+):
+
+1. Makro-hygiene og prosedyre-makroer (avansert)
+2. Bevis-assistert programmering (Curry-Howard)
+3. Gradert typeteori og lineære ressurser
+4. Kompileringstids-beregning (konst-evaluering, konst-generikk)
+5. Effekt-polymorfisme og row-inference
+6. Modularsystem med functor-moduler
+7. Inkrementell kompilering med avhengighetssporing
+8. Distribuert kompilering og build-cache
+9. Spesialiseringsbasert kodegenerering
+10. Profileringsstyrt optimalisering (PGO)
