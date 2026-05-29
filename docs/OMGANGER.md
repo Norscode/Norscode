@@ -2355,17 +2355,36 @@ Bevis              — Curry-Howard, taktikker, terminering, ekstraksjon
 [... alle tidligere domenener fra Fase 1–37 ...]
 ```
 
-### Neste naturlige fase etter z542
+---
 
-Neste store omgang bør dekke **avansert kjøretidssystemer og plattformmodning** (z543+):
+## Fase 39: Kjøretidssystemer og plattformmodning (z543–z552)
 
-1. Persisteringsrammeverk (append-only log, snapshot-restore)
-2. Sikkerhets-sandkasse og capability-VM
-3. Språkserver-protokoll (LSP) full implementasjon
-4. Multippel-retur og unstrukturert kontrollflyt
-5. Heterogen beregning (GPU-kjerne-programmering)
-6. Programsyntese og skisse-basert programmering
-7. Adaptiv runtime-optimalisering
-8. Minnekomprimering og heap-compaction
-9. Nettverks-namespaces og container-runtime
-10. Formell semantikk og operasjonell semantikk
+Omgang 543–552 dekket dybde-infrastruktur på tvers av runtime, verktøy og formell teori.
+
+Siste dokumenterte store milepæl: Omgang 552.
+
+- **z543** Persisteringsrammeverk: append-only logg, WAL, snapshot/restore, event-sourced
+- **z544** Sikkerhets-sandkasse: capability-VM, WASM-isolasjon, seccomp, navnerom, cgroup
+- **z545** LSP full implementasjon: diagnostikk, autofullføring, hover, gå-til, kodehandlinger, rename
+- **z546** Heterogen beregning: GPU compute shaders, delt minne, atomikk, async DMA
+- **z547** Programsyntese: PBE, CEGIS, skisse-programmering, LLM-syntese med filtrering
+- **z548** Adaptiv runtime-optimalisering: hotspot-profilering, spekulativ spesialisering, self-tuning
+- **z549** Heap-kompaktering: LISP2, sliding compaction, NaN-boxing, komprimerte pekere
+- **z550** Container-runtime: OCI/overlayfs/CNI-nettverk/VXLAN, cgroup-ressursbegrensning
+- **z551** Formell semantikk: liten/stor-steg, Hoare-logikk, separasjonslogikk, fiksepunkt-teori
+- **z552** Avansert feilhåndtering: typed sum-type feil, SLO-feilbudsjett, kontekstkjeder
+
+### Neste naturlige fase etter z552
+
+Neste store omgang bør dekke **avanserte datastrukturer og algoritme-runtime** (z553+):
+
+1. Persistente/funksjonelle datastrukturer
+2. Lock-free og wait-free strukturer
+3. Probabilistiske datastrukturer (Bloom, HyperLogLog, Count-Min)
+4. Cache-oblivious algoritmer
+5. Komprimeringsalgoritmer (LZ4, Zstd, Brotli internals)
+6. Kryptografiske primitiver (ChaCha20, AES-GCM, SHA3)
+7. Parallelle sorteringsalgoritmer
+8. Ekstern-minne algoritmer (B-tree, external merge sort)
+9. Streng-algoritmer (Aho-Corasick, suffix automaton)
+10. Approksimative algoritmer og randomiserte metoder
