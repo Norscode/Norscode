@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from compiler.bytecode_backend import compile_program_to_bytecode
+# LAZY IMPORT: from compiler.bytecode_backend import compile_program_to_bytecode
 
 from norcode.bytecode_service import write_bytecode
 from norcode.frontend_service import FrontendResult, analyze_source_file

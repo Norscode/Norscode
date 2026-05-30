@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from compiler.cgen import CGenerator
+# LAZY: from compiler.cgen import CGenerator
 from compiler.lexer import Lexer
 from compiler.loader import ModuleLoader
 from compiler.parser import Parser
@@ -54,6 +54,9 @@ def check_program(source_file: str):
 def build_program(source_file: str):
     source_path, program, alias_map, analyzer = check_program(source_file)
 
+    from compiler.cgen import CGenerator
+
+
     cgen = CGenerator(analyzer.functions, alias_map=alias_map)
     code = cgen.generate(program)
 
@@ -68,6 +71,8 @@ def build_program(source_file: str):
 
 def disasm_program(source_file: str):
     source_path, program, alias_map, analyzer = check_program(source_file)
+    from compiler.cgen import CGenerator
+
     cgen = CGenerator(analyzer.functions, alias_map=alias_map)
     code = cgen.generate(program)
     return source_path, code

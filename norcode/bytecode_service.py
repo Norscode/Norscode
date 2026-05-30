@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from compiler.ast_bridge import load_source_as_program
-from compiler.bytecode_backend import compile_program_to_bytecode
+# LAZY: from compiler.bytecode_backend import compile_program_to_bytecode
 
 from norcode.ast_service import load_ast_file
 from norcode.vm import create_vm

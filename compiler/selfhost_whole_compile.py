@@ -11,8 +11,8 @@ from typing import Any
 
 from compiler.ast_bridge import program_from_data
 from compiler.selfhost_chain import build_selfhost_ast_bundle
-from norcode.bytecode_service import write_bytecode
-from norcode.bytecode_service import compile_program_to_bytecode
+# LAZY: from norcode.bytecode_service import write_bytecode
+# LAZY: from norcode.bytecode_service import compile_program_to_bytecode
 
 
 DEFAULT_ROOTS = ("selfhost", "compiler", "std")
@@ -64,7 +64,10 @@ def compile_one(project_root: Path, output_dir: Path, source: Path) -> dict[str,
     ast_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     program, alias_map = program_from_data(bundle)
+    from compiler.bytecode_backend import compile_program_to_bytecode
     bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
+    from norcode.bytecode_service import write_bytecode
+
     write_bytecode(bytecode, str(bytecode_path))
 
     return {

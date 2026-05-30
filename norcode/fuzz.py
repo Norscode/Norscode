@@ -1,37 +1,32 @@
-"""Negative parser/runtime corpus used by `norcode fuzz`."""
-
+"""Python-fri fuzz suite — bruke nc-vm for negative testing."""
 from __future__ import annotations
-
-import subprocess
-import tempfile
-import time
+import json, os, subprocess, tempfile, time
 from pathlib import Path
 
-from compiler.cgen import CGenerator
-from compiler.lexer import Lexer
-from compiler.parser import Parser
-from compiler.semantic import SemanticAnalyzer
+def _nc_vm():
+    here = Path(__file__).resolve().parents[1]
+    return str(here / "dist" / "nc-vm")
 
-
-def parse_source(source_text: str):
-    parser = Parser(Lexer(source_text))
-    return parser.parse()
-
-
-def _run_runtime_source(source_text: str) -> None:
-    with tempfile.TemporaryDirectory(prefix="norscode-negative-") as tmpdir:
-        tmp_path = Path(tmpdir) / "negative_runtime.no"
-        c_path = tmp_path.with_suffix(".c")
-        exe_path = tmp_path.with_suffix("")
-
-        tmp_path.write_text(source_text, encoding="utf-8")
-        program = parse_source(source_text)
-        analyzer = SemanticAnalyzer()
-        analyzer.analyze(program)
-        c_code = CGenerator(analyzer.functions).generate(program)
-        c_path.write_text(c_code, encoding="utf-8")
-        subprocess.run(["clang", str(c_path), "-lsqlite3", "-o", str(exe_path)], check=True)
-        subprocess.run([str(exe_path.resolve())], check=True, capture_output=True, text=True)
+def _run_source_via_ncvm(source: str, expect_failure: bool = True) -> tuple[bool, str]:
+    """Køyr kjeldekode via nc-vm. Returner (ok, error_message)."""
+    nc_vm = _nc_vm()
+    if not os.path.isfile(nc_vm):
+        return False, "nc-vm ikkje funne"
+    with tempfile.NamedTemporaryFile(suffix=".no", mode="w", delete=False) as f:
+        f.write(source)
+        tmp = f.name
+    try:
+        result = subprocess.run([nc_vm, "--nc-run", tmp], capture_output=True, text=True, timeout=10)
+        if expect_failure:
+            failed = result.returncode != 0
+            error = (result.stderr or result.stdout or "").strip()
+            return failed, error
+        else:
+            return result.returncode == 0, result.stderr.strip()
+    except Exception as exc:
+        return True, str(exc)
+    finally:
+        os.unlink(tmp)
 
 
 def run_negative_suite() -> dict:
@@ -51,48 +46,33 @@ def run_negative_suite() -> dict:
     }
     for case in parser_cases:
         started = time.perf_counter()
-        failed = False
-        error_text = ""
-        try:
-            parse_source(case["source"])
-        except Exception as exc:
-            failed = True
-            error_text = str(exc)
+        ok, error = _run_source_via_ncvm(case["source"], expect_failure=True)
         duration_ms = int((time.perf_counter() - started) * 1000)
-        payload["parser_cases"].append(
-            {
-                "name": case["name"],
-                "ok": failed,
-                "duration_ms": duration_ms,
-                "error": error_text,
-            }
-        )
-        if not failed:
+        payload["parser_cases"].append({
+            "name": case["name"],
+            "ok": ok,
+            "duration_ms": duration_ms,
+            "error": error,
+        })
+        if not ok:
             payload["parser_failures"] += 1
 
-    runtime_source = "funksjon start() -> heltall { kast(\"boom\") }"
+    runtime_source = 'funksjon start() -> heltall { kast("boom") returner 0 }'
     started = time.perf_counter()
-    runtime_ok = False
-    runtime_error = ""
-    try:
-        _run_runtime_source(runtime_source)
-    except subprocess.CalledProcessError as exc:
-        runtime_ok = True
-        runtime_error = (exc.stderr or "").strip() or (exc.stdout or "").strip()
-    except Exception as exc:
-        runtime_ok = True
-        runtime_error = str(exc)
+    ok, error = _run_source_via_ncvm(runtime_source, expect_failure=True)
     duration_ms = int((time.perf_counter() - started) * 1000)
-    payload["runtime_cases"].append(
-        {
-            "name": "unhandled-throw",
-            "ok": runtime_ok,
-            "duration_ms": duration_ms,
-            "error": runtime_error,
-        }
-    )
-    if not runtime_ok:
+    payload["runtime_cases"].append({
+        "name": "unhandled-throw",
+        "ok": ok,
+        "duration_ms": duration_ms,
+        "error": error,
+    })
+    if not ok:
         payload["runtime_failures"] += 1
 
     payload["ok"] = payload["parser_failures"] == 0 and payload["runtime_failures"] == 0
     return payload
+
+
+def run_fuzz_suite() -> dict:
+    return run_negative_suite()

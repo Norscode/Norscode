@@ -13,7 +13,7 @@ from typing import Any
 from .ast_bridge import program_from_data
 from .selfhost_ast_bridge import program_payload_to_ast
 from .selfhost_parser import parse_selfhost_program
-from .bytecode_backend import compile_program_to_bytecode, BytecodeVM
+# LAZY: from .bytecode_backend import compile_program_to_bytecode, BytecodeVM
 
 
 # ─── Minimal RuntimeOptions (erstatter norcode.runtime_service) ──────────────
@@ -179,6 +179,7 @@ def export_selfhost_ncb(source_file: str, output: str | None = None) -> Path:
     """
     source_path, bundle = build_selfhost_ast_bundle(source_file)
     program, alias_map = program_from_data(bundle)
+    from compiler.bytecode_backend import compile_program_to_bytecode
     bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
     out_path = Path(output).expanduser().resolve() if output else source_path.with_suffix('.chain.ncb.json')
     out_path.write_text(json.dumps(bytecode, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
@@ -253,6 +254,7 @@ def run_chain(
 
     _source_path, bundle = build_selfhost_ast_bundle(source_file)
     program, alias_map = program_from_data(bundle)
+    from compiler.bytecode_backend import compile_program_to_bytecode
     bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
 
     # Skriv NCB-cache til disk om aktivert
