@@ -7,8 +7,35 @@ import subprocess
 import urllib.parse
 from pathlib import Path
 
-from compiler.loader import ModuleLoader
 from compiler.toml_compat import loads as toml_loads
+
+
+def _find_config(root: Path) -> Path | None:
+    for name in ("norcode.toml", "norscode.toml"):
+        for d in [root, *root.parents]:
+            p = d / name
+            if p.exists():
+                return p
+    return None
+
+
+def _stdlib_roots(root: Path, config_data: dict) -> list[Path]:
+    paths_data = config_data.get("paths", {}) if isinstance(config_data, dict) else {}
+    stdlib_hint = paths_data.get("stdlib") if isinstance(paths_data, dict) else None
+    candidates = []
+    if stdlib_hint:
+        candidates.append(root / stdlib_hint)
+    for std_dir in ["std", "stdlib", "../std", "../stdlib"]:
+        candidates.append(root / std_dir)
+    return [p for p in candidates if p.exists()]
+
+
+def _module_candidates_web(stdlib_roots: list[Path]) -> list[Path]:
+    return [r / "web.no" for r in stdlib_roots] + [r / "web" / "__init__.no" for r in stdlib_roots]
+
+
+def _dependency_map(config_data: dict) -> dict:
+    return config_data.get("dependencies", {}) if isinstance(config_data, dict) else {}
 
 
 def get_current_git_revision() -> str | None:
@@ -204,10 +231,8 @@ def run_diagnostics(path: str | None = None) -> dict:
     target = Path(path or ".").expanduser().resolve()
     root = target.parent if target.is_file() else target
 
-    loader = ModuleLoader(root)
-    project_root = loader.project_root
-    config_path = loader._find_existing_config_in_dir(project_root) if project_root is not None else None
-    config_data = {}
+    config_path = _find_config(root)
+    config_data: dict = {}
     if config_path is not None:
         try:
             config_data = toml_loads(config_path.read_text(encoding="utf-8"))
@@ -219,17 +244,20 @@ def run_diagnostics(path: str | None = None) -> dict:
     project_entry = project_data.get("entry") if isinstance(project_data, dict) else None
     project_name = project_data.get("name") if isinstance(project_data, dict) else None
 
+    stdlib_roots = _stdlib_roots(root, config_data)
+    web_candidates = _module_candidates_web(stdlib_roots)
+    std_resolves = any(p.exists() for p in web_candidates)
+    dep_map = _dependency_map(config_data)
+
     test_dir = root / "tests"
     tests = sorted(test_dir.rglob("test_*.no")) if test_dir.exists() else []
-    std_candidates = loader._module_candidates("std.web")
-    std_resolves = any(candidate.exists() for candidate in std_candidates)
 
     return {
         "ok": True,
         "cwd": str(Path.cwd()),
         "target": str(target),
         "root": str(root),
-        "project_root": str(project_root) if project_root is not None else None,
+        "project_root": str(config_path.parent) if config_path is not None else None,
         "config_path": str(config_path) if config_path is not None else None,
         "project_name": project_name,
         "project_entry": project_entry,
@@ -238,12 +266,12 @@ def run_diagnostics(path: str | None = None) -> dict:
             "stdlib": paths_data.get("stdlib") if isinstance(paths_data, dict) else None,
             "build": paths_data.get("build") if isinstance(paths_data, dict) else None,
         },
-        "stdlib_roots": [str(path) for path in loader.stdlib_roots],
+        "stdlib_roots": [str(p) for p in stdlib_roots],
         "stdlib_resolves_web": std_resolves,
-        "dependency_count": len(loader.dependency_map),
-        "dependencies": sorted(loader.dependency_map.keys()),
+        "dependency_count": len(dep_map),
+        "dependencies": sorted(dep_map.keys()),
         "test_count": len(tests),
-        "tests": [str(path) for path in tests[:10]],
+        "tests": [str(p) for p in tests[:10]],
         "git": {
             "revision": get_current_git_revision(),
             "branch": get_current_git_branch(),

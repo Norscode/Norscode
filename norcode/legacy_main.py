@@ -51,10 +51,6 @@ def main() -> None:
         result = subprocess.run(["sh", os.path.join(root, "tools", "nc_test.sh")] + sys.argv[2:])
         sys.exit(result.returncode)
 
-    if cmd == "selfhost-chain-run":
-        _selfhost_chain_run(sys.argv[2:])
-        return
-
     if cmd in _AVVIKLA:
         erstatning = _ERSTATNING.get(cmd)
         if erstatning:
@@ -77,25 +73,6 @@ def main() -> None:
     )
     sys.exit(2)
 
-
-def _selfhost_chain_run(args: list[str]) -> None:
-    """Python-fallback for selfhost-bootstrap-gate (berre om nc-vm manglar)."""
-    import os
-    import subprocess
-
-    if not args:
-        print("selfhost-chain-run: manglar kjeldekode-argument", file=sys.stderr)
-        sys.exit(1)
-
-    source = args[0]
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    try:
-        from compiler.selfhost_chain import run_selfhost_chain
-        result = run_selfhost_chain(source, extra_args=args[1:])
-        sys.exit(0 if result else 1)
-    except Exception as exc:
-        print(f"selfhost-chain-run: {exc}", file=sys.stderr)
-        sys.exit(1)
 
 
 def _run_legacy_cmd(cmd: str, args: list[str]) -> None:
