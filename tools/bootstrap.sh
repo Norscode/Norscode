@@ -1,83 +1,37 @@
 #!/bin/sh
-# bootstrap.sh — bygg Norscode uten Python
+# tools/bootstrap.sh — bygg Norscode uten Python
 #
-# Krev: clang (eller cc) + bootstrap/c/norscode_generated.c
-# Etter kjøring: dist/norscode_native er klar til bruk
+# Bygger dist/norscode_native frå pre-genererte C-filer i bootstrap/c/.
+# Krev KUN: clang (eller cc)
 #
 # Bruk:
 #   sh tools/bootstrap.sh
 #   ./bin/nc run program.no
-#
-# Note: byggjer framleis nc-vm for bakoverkompatibilitet,
-# men norscode_native er den primære binæren.
 
 set -e
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
-# ── Finn kompilator ──────────────────────────────────────────────────────────
 CC="${CC:-clang}"
+if ! command -v "$CC" >/dev/null 2>&1; then CC=cc; fi
 if ! command -v "$CC" >/dev/null 2>&1; then
-    CC=cc
-fi
-if ! command -v "$CC" >/dev/null 2>&1; then
-    printf 'bootstrap: trenger clang eller cc\n' >&2
-    exit 1
+    printf 'bootstrap: trenger clang eller cc\n' >&2; exit 1
 fi
 
-# ── Bygg nc-vm fra kilde ─────────────────────────────────────────────────────
-printf 'Bygger dist/nc-vm med %s...\n' "$CC"
-mkdir -p dist
-"$CC" -O2 -o dist/nc-vm tools/nc_vm.c
-printf '✓ dist/nc-vm bygget\n'
-
-# ── Verifiser bootstrap/kompiler.ncb.json ───────────────────────────────────
-if [ ! -f bootstrap/kompiler.ncb.json ]; then
-    printf '✗ bootstrap/kompiler.ncb.json mangler!\n' >&2
-    printf '  Kjør: sh tools/nc_regen_bootstrap.sh  (Python-fri)\n' >&2
-    exit 1
-fi
-printf '✓ bootstrap/kompiler.ncb.json funnet\n'
-
-# ── Kompilér standardbibliotek (Python-fri) ─────────────────────────────────
-printf 'Kompilerer stdlib NCBs...\n'
-mkdir -p bootstrap/stdlib
-_stdlib_ok=0; _stdlib_fail=0
-for _mod in std/math.no std/tekst.no std/liste.no std/ordbok.no std/json.no \
-            std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no \
-            std/cache.no \
-            selfhost/common.no selfhost/ir_contract.no selfhost/compiler.no; do
-    [ -f "$_mod" ] || continue
-    _outname="bootstrap/stdlib/$(echo "$_mod" | sed 's|/|_|g' | sed 's|\.no$|.ncb.json|')"
-    if ./dist/nc-vm --nc-compile "$_mod" "$_outname" >/dev/null 2>&1; then
-        _stdlib_ok=$((_stdlib_ok+1))
-    else
-        _stdlib_fail=$((_stdlib_fail+1))
-        printf '  ⚠ %s feilet\n' "$_mod"
-    fi
-done
-printf '✓ Stdlib: %d kompilert, %d feilet\n' "$_stdlib_ok" "$_stdlib_fail"
+# ── Bygg norscode_native ─────────────────────────────────────────────────────
+bash "$ROOT/tools/build_norscode_native.sh"
 
 # ── Røyktest ─────────────────────────────────────────────────────────────────
 printf 'Røyktester...\n'
-RESULT=$(printf 'funksjon start() -> heltall { skriv("bootstrap OK") returner 0 }' \
-    | (cat > /tmp/_nc_bootstrap_smoke.no && ./dist/nc-vm --nc-run /tmp/_nc_bootstrap_smoke.no 2>/dev/null))
+printf 'funksjon start() { skriv("bootstrap OK") }' > /tmp/_nc_bootstrap_smoke.no
+RESULT=$(NORSCODE_CMD=run NORSCODE_FILE=/tmp/_nc_bootstrap_smoke.no \
+    "$ROOT/dist/norscode_native" 2>/dev/null || echo "")
 if [ "$RESULT" = "bootstrap OK" ]; then
     printf '✓ Røyktest bestått\n'
 else
-    printf '✗ Røyktest feilet (fikk: %s)\n' "$RESULT" >&2
-    exit 1
+    printf '✗ Røyktest feilet (fikk: "%s")\n' "$RESULT" >&2; exit 1
 fi
 
-printf '\nNorscode bootstrap fullført.\n'
-printf 'Norscode er klar. Bruk: ./bin/nc run program.no\n'
-
-# ── Bygg norscode_native (primær binary) ──────────────────────────────────────
-printf 'Byggjer dist/norscode_native (primær binary)...\n'
-if bash "$ROOT/tools/build_norscode_native.sh" 2>/dev/null; then
-    printf '✓ dist/norscode_native klar\n'
-else
-    printf 'Advarsel: norscode_native bygg feila, brukar nc-vm\n' >&2
-fi
-printf 'Eller: ./bin/nc run program.no\n'
+printf '\n✓ Norscode bootstrap fullført.\n'
+printf 'Bruk: ./bin/nc run program.no\n'

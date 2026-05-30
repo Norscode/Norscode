@@ -32,8 +32,6 @@ if [ "$_should_regen" = "1" ]; then
     _runner=""
     if [ -x "${ROOT}/dist/norscode_native" ]; then
         _runner="${ROOT}/dist/norscode_native"
-    elif [ -x "${ROOT}/dist/nc-vm" ]; then
-        _runner="${ROOT}/dist/nc-vm"
     else
         printf "Advarsel: bruker eksisterande C-filer (ingen runner funnen)\n" >&2
     fi

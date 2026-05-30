@@ -45,3 +45,18 @@
 1. Flytt `compiler/` til `legacy/compiler/` (behold for --legacy)
 2. Slett norcode/server_runtime.py (nc serve er avvikla og øydelagt)
 3. Slett resten av norcode/ (parity_tools, quality_suites, migrations, osv.)
+
+## C-kode-status (2026-05-31)
+
+### tools/nc_vm.c — SLETTA
+
+2520 linjar C-bytekode-tolkar fjerna. Sjå C_DEPRECATION.md for detaljar.
+
+### Resterande C (auto-generert)
+
+- `bootstrap/c/norscode_generated.c` — generert frå Norscode via ncb_to_c.no
+- `bootstrap/c/nc_dispatch.c` — generert dispatch-tabell
+- `tools/nc_runtime_mini.c` — minimal runtime (~700 linjar)
+- `tools/nc_native_main.c` — executor + main (~500 linjar)
+
+Alle primærkommandoar køyrer via `dist/norscode_native` (Norscode→C→clang).

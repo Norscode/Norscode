@@ -15,7 +15,6 @@ ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
 NC_NATIVE="${NC_NATIVE:-$ROOT/dist/norscode_native}"
-NC_VM="${NC_VM:-$ROOT/dist/nc-vm}"
 TESTS_DIR="${TESTS_DIR:-$ROOT/tests}"
 NC_VERBOSE="${NC_VERBOSE:-0}"
 TIMEOUT="${TEST_TIMEOUT:-30}"

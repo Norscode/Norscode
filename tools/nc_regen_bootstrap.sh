@@ -12,12 +12,10 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/bin/nc"
-NC_VM="${NC_VM:-$ROOT/dist/nc-vm}"
-
-# Sjekk at bin/nc eller nc-vm finst
-if [ ! -x "$ROOT/dist/norscode_native" ] && [ ! -x "$NC_VM" ]; then
-    printf '✗ Trenger dist/norscode_native eller dist/nc-vm.\n' >&2
-    printf '  Køyr: bash tools/build-bootstrap-binary.sh\n' >&2
+# Sjekk at norscode_native finst
+if [ ! -x "$ROOT/dist/norscode_native" ]; then
+    printf '✗ Trenger dist/norscode_native.\n' >&2
+    printf '  Køyr: bash tools/build_norscode_native.sh\n' >&2
     exit 1
 fi
 

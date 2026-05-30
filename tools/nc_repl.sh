@@ -4,13 +4,10 @@
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 NC_NATIVE="$ROOT/dist/norscode_native"
-NC_VM="$ROOT/dist/nc-vm"
 
 # Velg runner
 if [ -x "$NC_NATIVE" ]; then
     _run_file() { NORSCODE_CMD=run NORSCODE_FILE="$1" "$NC_NATIVE" 2>&1; }
-elif [ -x "$NC_VM" ]; then
-    _run_file() { "$NC_VM" --nc-run "$1" 2>&1; }
 else
     printf 'Feil: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2
     exit 1
