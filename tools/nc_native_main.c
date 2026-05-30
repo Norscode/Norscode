@@ -275,6 +275,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             /* Handter builtins direkte */
             const char *cn = callee;
             if (strncmp(cn,"builtin.",8)==0) cn+=8;
+            if (strncmp(cn,"builtin.",8)==0) cn+=8; /* strip dobbelt prefiks */
             /* Variabel-kall: sjekk om cn er ein variabel som held eit fn-namn */
             NcVal *var_fn = nc_nil();
             for (int _vi=0; _vi<nvars; _vi++) {

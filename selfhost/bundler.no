@@ -1,0 +1,178 @@
+// selfhost/bundler.no — Norscode bundle-kompilator
+// Kompilerer fleire .no-filer og slår saman til éin NCB-bundle.
+//
+// Bruk:
+//   NORSCODE_BUNDLE_ARGS="mod1=fil1.no mod2=fil2.no" \
+//   NORSCODE_BUNDLE_OUTPUT="bundle.ncb.json" \
+//   ./dist/norscode_native ... (via nc_native_main.c)
+//
+// Kvar arg er "modul.namn=sti/til/fil.no"
+// Funksjonar vert omdøypte frå __main__.X → modul.X
+
+bruk selfhost.kompiler
+
+// ─── Omdøyp funksjonar frå __main__. til modul. ─────────────────────────────
+
+funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) -> tekst {
+    // Enkel tekstleg erstatning: "__main__." → "modul_namn."
+    la erstatna = builtin.replace(ncb_json, "\"__main__.", "\"" + modul_namn + ".")
+    returner erstatna
+}
+
+// ─── Slå saman funksjonsordbok frå JSON-streng ───────────────────────────────
+
+funksjon hent_funksjonar_json(ncb_json: tekst) -> tekst {
+    // Finn "functions":{ ... } blokka — handterer JSON-strenger korrekt
+    la start_nøkkel = "\"functions\":{"
+    la start_idx = builtin.index_of(ncb_json, start_nøkkel)
+    hvis start_idx < 0 {
+        returner "{}"
+    }
+    la brace_start = start_idx + lengde(start_nøkkel) - 1
+    la djupn: heltall = 0
+    la i = brace_start
+    la ferdig: boolsk = usann
+    la i_streng: boolsk = usann
+    la forrige_escape: boolsk = usann
+    mens ikke ferdig og i < lengde(ncb_json) {
+        la ch = builtin.slice(ncb_json, i, i + 1)
+        hvis forrige_escape {
+            forrige_escape = usann
+        } ellers hvis ch == "\\" {
+            forrige_escape = sann
+        } ellers hvis ch == "\"" {
+            i_streng = ikke i_streng
+        } ellers hvis ikke i_streng {
+            hvis ch == "{" { djupn = djupn + 1 }
+            ellers hvis ch == "}" {
+                djupn = djupn - 1
+                hvis djupn == 0 { ferdig = sann }
+            }
+        }
+        i = i + 1
+    }
+    returner builtin.slice(ncb_json, brace_start, i)
+}
+
+// ─── Bygg bundle ─────────────────────────────────────────────────────────────
+
+funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
+    skriv("=== Norscode Bundle ===\n")
+
+    la alle_fns: tekst = "{"
+    la første: boolsk = sann
+    la ok_teller: heltall = 0
+
+    la i: heltall = 0
+    mens i < lengde(modular) {
+        la arg: tekst = modular[i]
+
+        // Parse "modul.namn=sti/til/fil.no"
+        la eq_idx = builtin.index_of(arg, "=")
+        la modul_namn: tekst = ""
+        la fil_sti: tekst = ""
+
+        hvis eq_idx > 0 {
+            modul_namn = builtin.slice(arg, 0, eq_idx)
+            fil_sti = builtin.slice(arg, eq_idx + 1, lengde(arg))
+        } ellers {
+            // Utled modul-namn frå filsti: selfhost/parser.no → selfhost.parser
+            la utan_prefix = arg
+            hvis builtin.starts_with(arg, "./") {
+                utan_prefix = builtin.slice(arg, 2, lengde(arg))
+            }
+            la utan_no = utan_prefix
+            hvis builtin.ends_with(utan_prefix, ".no") {
+                utan_no = builtin.slice(utan_prefix, 0, lengde(utan_prefix) - 3)
+            }
+            modul_namn = builtin.replace(utan_no, "/", ".")
+            fil_sti = arg
+        }
+
+        // Kompiler fila
+        skriv("  Kompilerer " + fil_sti + " → " + modul_namn + "...\n")
+        la kjelde = fil_les(fil_sti)
+        la ncb_json = kompiler_fil(kjelde, "__main__")
+
+        // Omdøyp funksjonar
+        la omdøypt = omdøyp_funksjonar(ncb_json, modul_namn)
+
+        // Hent funksjonblokka
+        la fns_json = hent_funksjonar_json(omdøypt)
+
+        // Tell funksjonar (enkel telling av "funksjon"-oppslag)
+        la fn_teller: heltall = 0
+        la søk = "\"name\":"
+        la søk_pos: heltall = 0
+        la teller_gaar: boolsk = sann
+        mens teller_gaar {
+            la funnen = builtin.index_of(builtin.slice(fns_json, søk_pos, lengde(fns_json)), søk)
+            hvis funnen < 0 { teller_gaar = usann }
+            ellers {
+                fn_teller = fn_teller + 1
+                søk_pos = søk_pos + funnen + 1
+            }
+        }
+
+        // Spleisast saman (fjern omsluttande {} og kombiner)
+        // fns_json = "{...}" → ta ut innhald
+        la fns_innhald: tekst = ""
+        hvis lengde(fns_json) > 2 {
+            fns_innhald = builtin.slice(fns_json, 1, lengde(fns_json) - 1)
+        }
+
+        hvis lengde(fns_innhald) > 0 {
+            hvis ikke første { alle_fns = alle_fns + "," }
+            alle_fns = alle_fns + fns_innhald
+            første = usann
+        }
+
+        ok_teller = ok_teller + 1
+        skriv("  [OK] " + fil_sti + " → " + modul_namn + " (" + tekst_fra_heltall(fn_teller) + " funcs)\n")
+        i = i + 1
+    }
+    alle_fns = alle_fns + "}"
+
+    // Bygg ferdig bundle
+    la bundle = "{\"format\":\"ncb-v1\",\"entry\":\"__main__.start\"," +
+        "\"imports\":[],\"route_handlers\":{}," +
+        "\"dependency_providers\":{},\"guard_providers\":{}," +
+        "\"request_middlewares\":[],\"response_middlewares\":[]," +
+        "\"error_middlewares\":[],\"startup_hooks\":[],\"shutdown_hooks\":[]," +
+        "\"tests\":{},\"functions\":" + alle_fns + "}"
+
+    fil_skriv(utfil, bundle)
+    skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(bundle)) + " bytes)\n")
+}
+
+// ─── Inngangspunkt ───────────────────────────────────────────────────────────
+
+funksjon start() {
+    la args_str = miljo_hent("NORSCODE_BUNDLE_ARGS")
+    la utfil = miljo_hent("NORSCODE_BUNDLE_OUTPUT")
+
+    hvis args_str == "" {
+        skriv("Feil: NORSCODE_BUNDLE_ARGS ikkje sett\n")
+        returner 1
+    }
+    hvis utfil == "" {
+        utfil = "bootstrap/kompiler.ncb.json"
+    }
+
+    // Splitt args på mellomrom
+    la modular = builtin.split(args_str, " ")
+
+    // Filtrer vekk tomme strings
+    la reine_modular: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(modular) {
+        la m: tekst = modular[i]
+        hvis lengde(builtin.trim(m)) > 0 {
+            legg_til(reine_modular, builtin.trim(m))
+        }
+        i = i + 1
+    }
+
+    bygg_bundle(reine_modular, utfil)
+    returner 0
+}
