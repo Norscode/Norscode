@@ -1,51 +1,56 @@
 #!/usr/bin/env bash
 # tools/build-bootstrap-binary.sh
 #
-# Bygger/oppdaterer Norscode native bootstrap-kompilator.
+# Bygger/oppdaterer Norscode bootstrap-kompilator.
 #
-# Ny pipeline (ingen C-kompilator):
-#   1. Sjekk om dist/norcode-bootstrap-compile allerede finnes og er OK
-#   2. Køyr selfhost bootstrap gate  (./bin/nc --legacy-python-fallback selfhost-bootstrap-gate)
-#   3. Generer Python VM-wrapper som dist/norcode-bootstrap-compile
+# Pipeline:
+#   1. Sjekk om dist/norcode-bootstrap-compile allereie er OK
+#   2. Bygg dist/nc-vm frå tools/nc_vm.c (clang/cc) om ikkje tilgjengeleg
+#   3. Køyr selfhost bootstrap gate Python-fri via nc-vm
+#   4. Generer Python VM-wrapper som dist/norcode-bootstrap-compile
+#      (fallback for selfcheck/identity via NATIVE_BIN-protokollen)
 #
-# Python trengst berre til gate og wrapper-generering.
-# Ingen clang / gcc / cc nødvendig.
+# Python trengst IKKJE for bootstrap-gate — berre for wrapper-generering.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 BOOTSTRAP_BIN="${DIST_DIR}/norcode-bootstrap-compile"
+NC_VM="${DIST_DIR}/nc-vm"
 WRAPPER_SRC="${ROOT_DIR}/tools/bootstrap_wrapper.py"
 
 mkdir -p "${DIST_DIR}"
 
-# ─── Sjekk om Python er tilgjengeleg ────────────────────────────────────────
-if ! command -v python3 >/dev/null 2>&1; then
-    printf 'Feil: python3 trengs for å generere bootstrap-kompilator.\n' >&2
-    printf 'Installer Python 3.10+ og kjør dette scriptet igjen.\n' >&2
-    exit 1
-fi
-
-# ─── Sjekk om binaryen allerede er OK ───────────────────────────────────────
-_bootstrap_ok() {
-    [ -x "${BOOTSTRAP_BIN}" ] && return 0 || return 1
-}
-
-if _bootstrap_ok; then
+# ─── Sjekk om binaryen allereie er OK ───────────────────────────────────────
+if [ -x "${BOOTSTRAP_BIN}" ]; then
     printf 'Bootstrap-kompilator klar: %s\n' "${BOOTSTRAP_BIN}"
-    printf 'Norscode er klar. Kjør: ./bin/nc run app.no\n'
+    printf 'Norscode er klar. Køyr: ./bin/nc run app.no\n'
     exit 0
 fi
 
-# ─── Selfhost bootstrap gate ─────────────────────────────────────────────────
-printf 'Køyrer selfhost bootstrap gate...\n'
-if ! bash "${ROOT_DIR}/bin/nc" --legacy-python-fallback selfhost-bootstrap-gate; then
+# ─── Bygg nc-vm frå kilde om ikkje tilgjengeleg ─────────────────────────────
+if [ ! -x "${NC_VM}" ]; then
+    printf 'Byggjer dist/nc-vm frå tools/nc_vm.c...\n'
+    CC="${CC:-clang}"
+    if ! command -v "$CC" >/dev/null 2>&1; then CC=cc; fi
+    if ! command -v "$CC" >/dev/null 2>&1; then
+        printf 'Feil: trenger clang eller cc for å byggje nc-vm.\n' >&2
+        printf 'Installer ein C-kompilator og køyr scriptet igjen.\n' >&2
+        exit 1
+    fi
+    "$CC" -O2 -o "${NC_VM}" "${ROOT_DIR}/tools/nc_vm.c"
+    printf '✓ dist/nc-vm bygget med %s\n' "$CC"
+fi
+
+# ─── Selfhost bootstrap gate — Python-fri via nc-vm ─────────────────────────
+printf 'Køyrer selfhost bootstrap gate (Python-fri)...\n'
+if ! "${ROOT_DIR}/bin/nc" selfhost-bootstrap-gate; then
     printf 'Feil: selfhost bootstrap gate feila.\n' >&2
     exit 1
 fi
 printf 'Bootstrap gate: BESTÅTT\n'
 
-# ─── Generer Python VM-wrapper ───────────────────────────────────────────────
+# ─── Generer Python VM-wrapper (for NATIVE_BIN selfcheck/identity) ──────────
 printf 'Genererer Python VM-wrapper: %s\n' "${BOOTSTRAP_BIN}"
 
 if [ ! -f "${WRAPPER_SRC}" ]; then
@@ -68,4 +73,4 @@ NORCODE_ARGC=1 NORCODE_ARG0=selfcheck \
 "${BOOTSTRAP_BIN}"
 
 printf 'Bygde og installerte: %s\n' "${BOOTSTRAP_BIN}"
-printf 'Norscode er klar (ingen C-kompilator). Kjør: ./bin/nc run app.no\n'
+printf 'Norscode er klar. Køyr: ./bin/nc run app.no\n'

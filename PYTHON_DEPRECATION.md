@@ -30,6 +30,11 @@
 - `compiler/interpreter.py`   → legacy bootstrap-gate
 - `compiler/toml_compat.py`   → TOML-parsing (legacy)
 
+### Python-fri bootstrap-pipeline:
+- `tools/build-bootstrap-binary.sh` byggjer nc-vm automatisk (clang/cc) om ikkje tilgjengeleg
+- `selfhost-bootstrap-gate` køyrer Python-fri i alle CI-workflows
+- `--legacy-python-fallback` er fjerna frå alle CI selfhost-bootstrap-gate-kall
+
 ### Neste steg mot full Python-fjerning:
 1. Flytt `compiler/` til `legacy/compiler/` (behold for --legacy)
 2. Vurder fjerning av heile norcode/commands/ (alle avvikla)
