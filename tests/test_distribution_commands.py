@@ -53,8 +53,15 @@ def test_nc_commands_shows_python_free_commands() -> None:
     assert "test" in result.stdout
 
 
+def test_nc_doctor_is_python_free() -> None:
+    """bin/nc doctor skal kjøre utan Python."""
+    result = _run(["./bin/nc", "doctor"])
+    assert result.returncode == 0, result.stderr
+    assert "Python-fallback" not in result.stderr
+    assert "OK" in result.stdout or "✓" in result.stdout
+
 def test_nc_python_commands_require_explicit_fallback() -> None:
     """Kommandoar utan nc-vm-støtte skal krevje --legacy-python-fallback."""
-    result = _run(["./bin/nc", "doctor"])
+    result = _run(["./bin/nc", "serve"])
     assert result.returncode != 0
     assert "python-fallback" in result.stderr.lower()
