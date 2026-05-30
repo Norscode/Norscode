@@ -1224,7 +1224,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Bruk:\n");
         fprintf(stderr, "  nc-vm <fil.ncb.json> [<ekstra.ncb.json>...]\n");
         fprintf(stderr, "  nc-vm --nc-run <kilde.no>\n");
-        fprintf(stderr, "  (sett NC_SELFHOST_DIR for --nc-run)\n");
+        fprintf(stderr, "  nc-vm --nc-compile <kilde.no> [utdata.ncb.json]\n");
         return 1;
     }
 
@@ -1307,6 +1307,61 @@ int main(int argc, char **argv) {
             return 1;
         }
         exec_fn(compiled_entry, NULL, 0);
+        return 0;
+    }
+
+    /* --nc-compile mode: compile source → write .ncb.json, do NOT run */
+    if (!strcmp(argv[1], "--nc-compile")) {
+        if (argc < 3) { fprintf(stderr, "nc-vm --nc-compile: mangler kildefil\n"); return 1; }
+        const char *src_path = argv[2];
+        const char *out_path = (argc >= 4) ? argv[3] : NULL;
+
+        /* Default output: replace .no with .ncb.json */
+        char out_buf[1024];
+        if (!out_path) {
+            strncpy(out_buf, src_path, sizeof(out_buf)-20);
+            out_buf[sizeof(out_buf)-20] = 0;
+            char *dot = strrchr(out_buf, '.');
+            if (dot && !strcmp(dot, ".no")) strcpy(dot, ".ncb.json");
+            else strcat(out_buf, ".ncb.json");
+            out_path = out_buf;
+        }
+
+        /* Load selfhost compiler NCBs */
+        const char *precomp = getenv("NC_PRECOMPILED_DIR");
+        if (!precomp) precomp = "build/nc-precompiled";
+        char sp[512], cp[512];
+        snprintf(sp, sizeof(sp), "%s/selfhost",  precomp);
+        snprintf(cp, sizeof(cp), "%s/compiler",  precomp);
+        load_ncb_dir(sp);
+        load_ncb_dir(cp);
+        if (g_nfns == 0) {
+            fprintf(stderr, "nc-vm: ingen selfhost-bytekoder i: %s\n", precomp);
+            return 1;
+        }
+
+        /* Read source */
+        FILE *sf = fopen(src_path, "rb");
+        if (!sf) { fprintf(stderr, "nc-vm: kan ikke åpne: %s\n", src_path); return 1; }
+        fseek(sf, 0, SEEK_END); long ssz = ftell(sf); rewind(sf);
+        char *src_text = malloc(ssz+1); fread(src_text, 1, ssz, sf); fclose(sf); src_text[ssz]=0;
+        Val *sv = val_str_own(src_text);
+        Val *mv = val_str("__main__");
+
+        /* Compile */
+        Val *ca[] = { sv, mv };
+        Val *ncb_json = call_fn("kompiler_fil", ca, 2);
+        if (!ncb_json || ncb_json->type != T_STR) {
+            fprintf(stderr, "nc-vm --nc-compile: kompilering feilet\n");
+            return 1;
+        }
+
+        /* Write to file */
+        FILE *of = fopen(out_path, "wb");
+        if (!of) { fprintf(stderr, "nc-vm: kan ikke skrive: %s\n", out_path); return 1; }
+        fwrite(ncb_json->s, 1, strlen(ncb_json->s), of);
+        fclose(of);
+        fprintf(stdout, "%s\n", out_path);   /* print output path */
         return 0;
     }
 
