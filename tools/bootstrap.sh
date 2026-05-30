@@ -32,7 +32,7 @@ printf '✓ dist/nc-vm bygget\n'
 # ── Verifiser bootstrap/kompiler.ncb.json ───────────────────────────────────
 if [ ! -f bootstrap/kompiler.ncb.json ]; then
     printf '✗ bootstrap/kompiler.ncb.json mangler!\n' >&2
-    printf '  Kjør: python3 tools/nc_precompile.py  (én gang)\n' >&2
+    printf '  Kjør: sh tools/nc_regen_bootstrap.sh  (Python-fri)\n' >&2
     exit 1
 fi
 printf '✓ bootstrap/kompiler.ncb.json funnet\n'

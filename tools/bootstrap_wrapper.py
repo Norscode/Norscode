@@ -171,19 +171,12 @@ def _build_source(src: str, out: str, arch: str) -> int:
             print(f"norcode: native ELF feil: {exc}", file=sys.stderr)
             return 1
 
-    # Fallback: selfhost-chain produserer NCB JSON (portabelt bytecode)
-    from compiler.selfhost_chain import build_selfhost_ast_bundle
-    from compiler.ast_bridge import program_from_data
-    from norcode.bytecode_service import compile_program_to_bytecode
-    import json
-
-    _src_path, bundle = build_selfhost_ast_bundle(src)
-    program, alias_map = program_from_data(bundle)
-    bytecode = compile_program_to_bytecode(program, alias_map=alias_map)
-    out_path = Path(out) if out else Path(src).with_suffix(".ncb.json")
-    out_path.write_text(json.dumps(bytecode, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"norcode: NCB JSON -> {out_path}")
-    return 0
+    # Fallback: nc-vm --nc-compile (Python-fri)
+    import subprocess
+    nc_vm = ROOT / "dist" / "nc-vm"
+    out_path = out if out else str(Path(src).with_suffix(".ncb.json"))
+    result = subprocess.run([str(nc_vm), "--nc-compile", src, out_path])
+    return result.returncode
 
 
 # ─── Native-modus: ikkje tilgjengeleg ────────────────────────────────────────
