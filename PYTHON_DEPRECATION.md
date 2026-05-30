@@ -35,7 +35,13 @@
 - `selfhost-bootstrap-gate` køyrer Python-fri i alle CI-workflows
 - `--legacy-python-fallback` er fjerna frå alle CI selfhost-bootstrap-gate-kall
 
+### norcode/commands/ — SLETTA (2704 linjar Python):
+- Alle 54 kommandofiler sletta
+- `norcode/cli_parser.py` og `norcode/command_dispatch.py` sletta
+- `norcode/legacy_main.py` er no minimal direkte dispatcher (ingen kommandoregister)
+- `norcode/cli.py` delegerer til legacy_main (for pip-kompatibilitet)
+
 ### Neste steg mot full Python-fjerning:
 1. Flytt `compiler/` til `legacy/compiler/` (behold for --legacy)
-2. Vurder fjerning av heile norcode/commands/ (alle avvikla)
-3. Slett norcode/server_runtime.py når nc serve ikkje lenger er i bruk
+2. Slett norcode/server_runtime.py (nc serve er avvikla og øydelagt)
+3. Slett resten av norcode/ (parity_tools, quality_suites, migrations, osv.)
