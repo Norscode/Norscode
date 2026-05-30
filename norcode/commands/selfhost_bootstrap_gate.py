@@ -1,4 +1,9 @@
-"""Modular selfhost bootstrap gate command."""
+"""Modular selfhost bootstrap gate command.
+
+AVVIKLA: bin/nc selfhost-bootstrap-gate køyrer no via nc-vm (ingen Python).
+Bruk: bin/nc selfhost-bootstrap-gate  (Python-fri)
+Dette er --legacy-python-fallback-stien.
+"""
 
 from __future__ import annotations
 

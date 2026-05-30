@@ -1,3 +1,6 @@
+# AVVIKLA: compiler/selfhost_whole_compile.py er erstatta av nc-vm + tools/nc_regen_bootstrap.sh
+# Behalde for --legacy-python-fallback-overgang.
+
 from __future__ import annotations
 
 import json

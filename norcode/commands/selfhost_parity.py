@@ -1,4 +1,7 @@
-"""Modular selfhost parity commands."""
+"""Modular selfhost parity commands.
+
+AVVIKLA: erstatta av nc-vm --nc-run (ingen Python nødvendig).
+"""
 
 from __future__ import annotations
 

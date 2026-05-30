@@ -1,3 +1,6 @@
+# AVVIKLA: compiler/selfhost_chain.py er erstatta av nc-vm --nc-run
+# Bruk: dist/nc-vm --nc-run foo.no  (ingen Python nødvendig)
+# Behalde for --legacy-python-fallback-overgang.
 
 from __future__ import annotations
 

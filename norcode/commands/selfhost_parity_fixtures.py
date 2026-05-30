@@ -1,4 +1,7 @@
-"""Modular commands for selfhost parity fixture maintenance."""
+"""Modular commands for selfhost parity fixture maintenance.
+
+AVVIKLA: erstatta av nc-vm --nc-run (ingen Python nødvendig).
+"""
 
 from __future__ import annotations
 

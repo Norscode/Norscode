@@ -1,4 +1,7 @@
-"""Selfhost stdlib/compiler suite command."""
+"""Selfhost stdlib/compiler suite command.
+
+AVVIKLA: erstatta av nc-vm --nc-run (ingen Python nødvendig).
+"""
 
 from __future__ import annotations
 
