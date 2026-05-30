@@ -1,5 +1,4 @@
-from .cli import main_cli
-
+from norcode.legacy_main import main
 
 if __name__ == "__main__":
-    raise SystemExit(main_cli())
+    main()
