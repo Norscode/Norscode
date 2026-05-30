@@ -45,12 +45,12 @@ printf 'Plattform oppdaget: %s\n' "$PLATFORM"
 # ─── Sjekk om pre-bygd binary allerede finnes lokalt ────────────────────────
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-# macOS arm64: binary er alltid med i repoet
-if [ "$PLATFORM" = "macos-arm64" ] && [ -x "$ROOT_DIR/dist/norcode-bootstrap-compile" ]; then
-    printf 'Pre-bygd binary funnet lokalt.\n'
+# Bruk norscode_native om tilgjengeleg lokalt
+if [ -x "$ROOT_DIR/dist/norscode_native" ]; then
+    printf 'Pre-bygd norscode_native funnet lokalt.\n'
     mkdir -p "$BIN_DIR"
-    cp "$ROOT_DIR/dist/norcode-bootstrap-compile" "$BIN_DIR/norscode"
-    cp "$ROOT_DIR/dist/norcode-bootstrap-compile" "$BIN_DIR/nc"
+    cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/norscode"
+    cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/nc"
     chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
     printf 'Installert: %s/norscode\n' "$BIN_DIR"
     printf 'Legg til PATH: export PATH="%s:$PATH"\n' "$BIN_DIR"

@@ -1,12 +1,15 @@
 #!/bin/sh
 # bootstrap.sh — bygg Norscode uten Python
 #
-# Krever kun: clang (eller cc) og bootstrap/kompiler.ncb.json
-# Etter kjøring: dist/nc-vm er klar til bruk
+# Krev: clang (eller cc) + bootstrap/c/norscode_generated.c
+# Etter kjøring: dist/norscode_native er klar til bruk
 #
 # Bruk:
 #   sh tools/bootstrap.sh
-#   ./dist/nc-vm --nc-run program.no
+#   ./bin/nc run program.no
+#
+# Note: byggjer framleis nc-vm for bakoverkompatibilitet,
+# men norscode_native er den primære binæren.
 
 set -e
 
@@ -68,5 +71,13 @@ else
 fi
 
 printf '\nNorscode bootstrap fullført.\n'
-printf 'Bruk: ./dist/nc-vm --nc-run program.no\n'
+printf 'Norscode er klar. Bruk: ./bin/nc run program.no\n'
+
+# ── Bygg norscode_native (primær binary) ──────────────────────────────────────
+printf 'Byggjer dist/norscode_native (primær binary)...\n'
+if bash "$ROOT/tools/build_norscode_native.sh" 2>/dev/null; then
+    printf '✓ dist/norscode_native klar\n'
+else
+    printf 'Advarsel: norscode_native bygg feila, brukar nc-vm\n' >&2
+fi
 printf 'Eller: ./bin/nc run program.no\n'

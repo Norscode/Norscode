@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
 # dist/norcode-bootstrap-compile — shell-wrapper rundt nc-vm
+# AVVIKLA: Bruk dist/norscode_native i staden.
+# Dette er berre ein bakoverkompatibel wrapper.
 # Handterar NORCODE_BOOTSTRAP_* env-var-protokollen.
 set -eu
 

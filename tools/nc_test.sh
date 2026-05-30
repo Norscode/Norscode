@@ -1,7 +1,7 @@
 #!/bin/sh
 # tools/nc_test.sh — Python-fri testløpar for Norscode
 #
-# Køyrer alle tests/test_*.no via dist/nc-vm --nc-run
+# Køyrer alle tests/test_*.no via norscode_native (eller nc-vm som fallback)
 # og rapporterer pass/fail med farga output.
 #
 # Bruk:
@@ -14,6 +14,7 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
+NC_NATIVE="${NC_NATIVE:-$ROOT/dist/norscode_native}"
 NC_VM="${NC_VM:-$ROOT/dist/nc-vm}"
 TESTS_DIR="${TESTS_DIR:-$ROOT/tests}"
 NC_VERBOSE="${NC_VERBOSE:-0}"
@@ -27,9 +28,16 @@ else
     GRN=''; RED=''; YLW=''; BLD=''; RST=''
 fi
 
-# Sjekk at nc-vm er tilgjengeleg
-if [ ! -x "$NC_VM" ]; then
-    printf '%s✗ dist/nc-vm ikkje funnen. Køyr: sh tools/bootstrap.sh%s\n' "$RED" "$RST" >&2
+# Velg beste runner
+if [ -x "$NC_NATIVE" ]; then
+    _NC_RUN="env NORSCODE_CMD=run NORSCODE_FILE="
+    _NC_RUNNER="$NC_NATIVE"
+elif [ -x "$NC_VM" ]; then
+    printf '%sAdvarsel: brukar nc-vm (eldre). Bygg norscode_native for betre ytelse.%s\n' "$YLW" "$RST" >&2
+    _NC_RUN="$NC_VM --nc-run "
+    _NC_RUNNER=""
+else
+    printf '%s✗ Trenger dist/norscode_native eller dist/nc-vm. Køyr: bash tools/build_norscode_native.sh%s\n' "$RED" "$RST" >&2
     exit 1
 fi
 
@@ -81,7 +89,11 @@ run_test() {
         return
     fi
 
-    _out=$("$NC_VM" --nc-run "$_file" 2>&1) || true
+    if [ -n "$_NC_RUNNER" ]; then
+        _out=$(NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+    else
+        _out=$(${_NC_RUN}"$_file" 2>&1) || true
+    fi
     _ec=$?
 
     if [ "$_ec" -eq 0 ]; then
@@ -96,7 +108,7 @@ run_test() {
         fi
     else
         fail=$((fail + 1))
-        _msg=$(printf '%s' "$_out" | grep -v '^\[nc-vm\]' | grep -v '^$' | head -1)
+        _msg=$(printf '%s' "$_out" | grep -v '^\[nc-vm\]' | grep -v '^\[norscode\]' | grep -v '^$' | head -1)
         printf '\n  %s✗%s %s\n    %s\n' "$RED" "$RST" "$_name" "$_msg"
     fi
 }
@@ -108,7 +120,7 @@ if [ $# -ge 1 ] && [ "${1:-}" != "--no-color" ] && [ -f "${1:-}" ]; then
     run_test "$1"
 else
     printf '%sNorscode Python-fri testløpar%s\n' "$BLD" "$RST"
-    printf 'Kompilerer og køyrer tests/test_*.no via dist/nc-vm...\n\n'
+    printf 'Kompilerer og køyrer tests/test_*.no via norscode_native...\n\n'
 
     for _f in "$TESTS_DIR"/test_*.no; do
         [ -f "$_f" ] || continue
