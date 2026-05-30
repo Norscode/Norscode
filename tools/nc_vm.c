@@ -1238,21 +1238,37 @@ int main(int argc, char **argv) {
         if (argc < 3) { fprintf(stderr, "nc-vm --nc-run: mangler kildefil\n"); return 1; }
         const char *src_path = argv[2];
 
-        /* Load selfhost bytecodes + std library */
+        /* Last selfhost bytekoder.
+           Prioritet:
+             1. NC_PRECOMPILED_DIR env-variabel (eksplisitt overstyring)
+             2. bootstrap/kompiler.ncb.json  (enkelt fil, committed i git)
+             3. build/nc-precompiled/selfhost/ (generert av Python)
+        */
         const char *precomp = getenv("NC_PRECOMPILED_DIR");
-        if (!precomp) precomp = "build/nc-precompiled";
-        char selfhost_path[512], std_path[512], compiler_path[512];
-        snprintf(selfhost_path,  sizeof(selfhost_path),  "%s/selfhost",  precomp);
-        snprintf(std_path,       sizeof(std_path),       "%s/std",       precomp);
-        snprintf(compiler_path,  sizeof(compiler_path),  "%s/compiler",  precomp);
-        /* Last kun selfhost — kompiler.no trenger ikke std-biblioteket.
-           Std-biblioteket definerer __main__.feil etc. som kolliderer med
-           selfhost sine innebygde funksjoner. */
-        load_ncb_dir(selfhost_path);
-        load_ncb_dir(compiler_path);
+        if (precomp) {
+            char sp[512], cp[512];
+            snprintf(sp, sizeof(sp), "%s/selfhost",  precomp);
+            snprintf(cp, sizeof(cp), "%s/compiler",  precomp);
+            load_ncb_dir(sp);
+            load_ncb_dir(cp);
+        } else {
+            /* Prøv bootstrap/kompiler.ncb.json først (Python-fri bootstrap) */
+            FILE *bf = fopen("bootstrap/kompiler.ncb.json", "rb");
+            if (bf) {
+                fclose(bf);
+                load_ncb("bootstrap/kompiler.ncb.json");
+            }
+            if (g_nfns == 0) {
+                /* Fallback: full pre-kompilert katalog (generert av Python) */
+                load_ncb_dir("build/nc-precompiled/selfhost");
+                load_ncb_dir("build/nc-precompiled/compiler");
+            }
+        }
 
         if (g_nfns == 0) {
-            fprintf(stderr, "nc-vm: ingen selfhost-bytekoder i: %s\n", precomp);
+            fprintf(stderr, "nc-vm: ingen selfhost-bytekoder funnet.\n");
+            fprintf(stderr, "  Prøv: clang -O2 -o dist/nc-vm tools/nc_vm.c\n");
+            fprintf(stderr, "  Eller: python3 tools/nc_precompile.py\n");
             return 1;
         }
 
@@ -1327,16 +1343,23 @@ int main(int argc, char **argv) {
             out_path = out_buf;
         }
 
-        /* Load selfhost compiler NCBs */
-        const char *precomp = getenv("NC_PRECOMPILED_DIR");
-        if (!precomp) precomp = "build/nc-precompiled";
-        char sp[512], cp[512];
-        snprintf(sp, sizeof(sp), "%s/selfhost",  precomp);
-        snprintf(cp, sizeof(cp), "%s/compiler",  precomp);
-        load_ncb_dir(sp);
-        load_ncb_dir(cp);
+        /* Load selfhost compiler NCBs (same priority as --nc-run) */
+        const char *precomp2 = getenv("NC_PRECOMPILED_DIR");
+        if (precomp2) {
+            char sp2[512], cp2[512];
+            snprintf(sp2, sizeof(sp2), "%s/selfhost", precomp2);
+            snprintf(cp2, sizeof(cp2), "%s/compiler", precomp2);
+            load_ncb_dir(sp2); load_ncb_dir(cp2);
+        } else {
+            FILE *bf2 = fopen("bootstrap/kompiler.ncb.json","rb");
+            if (bf2) { fclose(bf2); load_ncb("bootstrap/kompiler.ncb.json"); }
+            if (g_nfns == 0) {
+                load_ncb_dir("build/nc-precompiled/selfhost");
+                load_ncb_dir("build/nc-precompiled/compiler");
+            }
+        }
         if (g_nfns == 0) {
-            fprintf(stderr, "nc-vm: ingen selfhost-bytekoder i: %s\n", precomp);
+            fprintf(stderr, "nc-vm --nc-compile: ingen selfhost-bytekoder funnet\n");
             return 1;
         }
 
