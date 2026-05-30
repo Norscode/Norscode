@@ -1,3 +1,4 @@
+# AVVIKLA: Behalde for --legacy-python-fallback. Erstatta av nc-vm.
 """Shared IR token, disassembly, and snapshot helpers."""
 
 from __future__ import annotations

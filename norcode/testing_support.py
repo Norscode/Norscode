@@ -1,3 +1,4 @@
+# AVVIKLA: Behalde for --legacy-python-fallback. Erstatta av nc-vm.
 """Shared test-suite helpers for the modular CLI."""
 
 from __future__ import annotations

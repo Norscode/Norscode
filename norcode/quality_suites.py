@@ -1,3 +1,4 @@
+# AVVIKLA: Behalde for --legacy-python-fallback. Erstatta av nc-vm.
 from __future__ import annotations
 
 import signal
