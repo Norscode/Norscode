@@ -37,6 +37,23 @@ if [ ! -f bootstrap/kompiler.ncb.json ]; then
 fi
 printf '✓ bootstrap/kompiler.ncb.json funnet\n'
 
+# ── Kompilér standardbibliotek (Python-fri) ─────────────────────────────────
+printf 'Kompilerer stdlib NCBs...\n'
+mkdir -p bootstrap/stdlib
+_stdlib_ok=0; _stdlib_fail=0
+for _mod in std/math.no std/tekst.no std/liste.no std/ordbok.no std/json.no \
+            std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no; do
+    [ -f "$_mod" ] || continue
+    _outname="bootstrap/stdlib/$(echo "$_mod" | sed 's|/|_|g' | sed 's|\.no$|.ncb.json|')"
+    if ./dist/nc-vm --nc-compile "$_mod" "$_outname" >/dev/null 2>&1; then
+        _stdlib_ok=$((_stdlib_ok+1))
+    else
+        _stdlib_fail=$((_stdlib_fail+1))
+        printf '  ⚠ %s feilet\n' "$_mod"
+    fi
+done
+printf '✓ Stdlib: %d kompilert, %d feilet\n' "$_stdlib_ok" "$_stdlib_fail"
+
 # ── Røyktest ─────────────────────────────────────────────────────────────────
 printf 'Røyktester...\n'
 RESULT=$(printf 'funksjon start() -> heltall { skriv("bootstrap OK") returner 0 }' \

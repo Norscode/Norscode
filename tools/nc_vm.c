@@ -160,6 +160,7 @@ static char *val_to_str(Val *v) {
 static jmp_buf g_err_jmp;
 static char    g_err_msg[4096];
 static Val    *g_exception = NULL;   /* current thrown value */
+static int     g_throwing  = 0;      /* 1 = exception propagating up the call stack */
 
 static void nc_panic(const char *fmt, ...) __attribute__((noreturn));
 static void nc_panic(const char *fmt, ...) {
@@ -295,6 +296,20 @@ static FnDef *fn_find(const char *name) {
         if (!strcmp(g_fns[i].name, name)) return &g_fns[i];
         if (g_fn_altnames[i] && !strcmp(g_fn_altnames[i], name)) return &g_fns[i];
     }
+    /* 1b. Strip "builtin." prefix and try altname match (e.g. builtin.ordbok.hent_bool → std.ordbok.hent_bool) */
+    const char *nb = (strncmp(name,"builtin.",8)==0) ? name+8 : NULL;
+    if (nb) {
+        for (int i=0;i<g_nfns;i++) {
+            if (!g_fn_altnames[i]) continue;
+            const char *an = g_fn_altnames[i];
+            /* Match last N segments: ordbok.hent_bool matches std.ordbok.hent_bool */
+            size_t nbl = strlen(nb);
+            size_t anl = strlen(an);
+            if (anl >= nbl && !strcmp(an + anl - nbl, nb) &&
+                (anl == nbl || an[anl-nbl-1] == '.'))
+                return &g_fns[i];
+        }
+    }
     /* 2. Strip __main__. from both sides */
     const char *n = name;
     if (strncmp(n, "__main__.", 9)==0) n += 9;
@@ -339,6 +354,18 @@ static void fn_register(const char *name, Val *params_arr, Val *code_arr) {
    "build/selfhost-whole/selfhost/compiler/ir.ncb.json" → "selfhost.compiler.ir"
 */
 static void derive_module_path(const char *filepath, char *out, int outsz) {
+    /* Handle bootstrap/stdlib/std_MODNAME.ncb.json → std.MODNAME */
+    const char *sl = strstr(filepath, "bootstrap/stdlib/std_");
+    if (sl) {
+        sl += strlen("bootstrap/stdlib/std_");
+        char tmp[256];
+        strncpy(tmp, sl, sizeof(tmp)-1); tmp[sizeof(tmp)-1]=0;
+        char *suf = strstr(tmp, ".ncb.json");
+        if (suf) *suf = 0;
+        /* Replace _ with nothing (std_ordbok → ordbok) */
+        snprintf(out, outsz, "std.%s", tmp);
+        return;
+    }
     /* Find "selfhost/" in the path */
     const char *p = strstr(filepath, "selfhost/");
     if (!p) { out[0]=0; return; }
@@ -457,13 +484,13 @@ typedef struct Frame {
     /* value stack (dynamisk) */
     Val   **stack;
     int     sp, stack_cap;
-    /* try/catch */
-    jmp_buf try_jmp;
-    int     try_catch_label;
-    int     in_try;
+    /* try/catch handler stack */
+    char  **catch_labels;   /* label names to jump to on exception */
+    int     ncatch;         /* number of active handlers */
+    int     catch_cap;
 } Frame;
 
-#define MAX_CALL_DEPTH 32768
+#define MAX_CALL_DEPTH 4096
 static Frame *g_frames[MAX_CALL_DEPTH];
 static int    g_depth = 0;
 
@@ -542,12 +569,26 @@ static char *json_emit_str(const char *s) {
     }
     *p++='"';*p=0;return out;
 }
+/* For ordbok_tekst maps: emit string values that look like JSON primitives verbatim */
+static int str_looks_like_json_nonstring(const char *s) {
+    if (!s || !*s) return 0;
+    if (!strcmp(s,"true")||!strcmp(s,"false")||!strcmp(s,"null")) return 1;
+    if (s[0]=='{'||s[0]=='[') return 1;
+    /* numeric? */
+    char *end; strtoll(s,&end,10);
+    if (*end==0 && end!=s) return 1;
+    return 0;
+}
 static char *json_emit(Val *v) {
     if(!v||v->type==T_NIL) return strdup("null");
     if(v->type==T_BOOL) return strdup(v->b?"true":"false");
     if(v->type==T_INT){char b[32];snprintf(b,sizeof(b),"%lld",v->i);return strdup(b);}
     if(v->type==T_FLOAT){char b[64];snprintf(b,sizeof(b),"%g",v->f);return strdup(b);}
-    if(v->type==T_STR) return json_emit_str(v->s);
+    if(v->type==T_STR) {
+        /* ordbok_tekst compat: emit non-string JSON values without quotes */
+        if (str_looks_like_json_nonstring(v->s)) return strdup(v->s);
+        return json_emit_str(v->s);
+    }
     if(v->type==T_LIST) return json_emit_list(v->list);
     if(v->type==T_MAP){
         char *out=strdup("{");
@@ -567,14 +608,27 @@ static char *json_emit(Val *v) {
 /* ── Forward: call_fn ─────────────────────────────────────────────────────── */
 static Val *call_fn(const char *name, Val **args, int nargs);
 
+/* ── Value equality helper ────────────────────────────────────────────────── */
+static int vals_eq(Val *a, Val *b) {
+    if (!a || !b) return (a == b);
+    if (a->type==T_NIL && b->type==T_NIL) return 1;
+    if (a->type==T_BOOL && b->type==T_BOOL) return (a->b == b->b);
+    if (a->type==T_INT  && b->type==T_INT)  return (a->i == b->i);
+    if (a->type==T_FLOAT&& b->type==T_FLOAT)return (a->f == b->f);
+    if (a->type==T_INT  && b->type==T_FLOAT)return ((double)a->i == b->f);
+    if (a->type==T_FLOAT&& b->type==T_INT)  return (a->f == (double)b->i);
+    if (a->type==T_STR  && b->type==T_STR)  return (!strcmp(a->s, b->s));
+    return 0;
+}
+
 /* ── Built-in functions ───────────────────────────────────────────────────── */
 static Val *builtin_call(const char *name, Val **args, int nargs) {
     /* Strip module prefixes: builtin.X, __main__.X, selfhost.*.X */
     const char *n = name;
     if (strncmp(n,"builtin.",8)==0) n+=8;
     else if (strncmp(n,"__main__.",9)==0) n+=9;
-    else {
-        /* selfhost.vm.legg_til → legg_til (take last segment) */
+    /* After prefix strip, take last dotted segment (e.g. builtin.math.pluss → pluss) */
+    {
         const char *last = strrchr(n, '.');
         if (last) n = last+1;
     }
@@ -652,9 +706,12 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         Val *src=args[0]; long long a=0,b=0;
         if(args[1]->type==T_INT) a=args[1]->i;
         if(args[2]->type==T_INT) b=args[2]->i;
+        /* b==-1 is sentinel for "open end" (slice to end), use length */
+        int open_end = (args[2]->type==T_INT && args[2]->i==-1);
         if(src->type==T_STR){
             long long l=strlen(src->s);
-            if(a<0)a+=l; if(b<0)b+=l;
+            if(open_end) b=l;
+            if(a<0)a+=l; if(!open_end && b<0)b+=l;
             if(a<0)a=0; if(b>l)b=l;
             if(a>b) return val_str("");
             char *s=malloc(b-a+1);memcpy(s,src->s+a,b-a);s[b-a]=0;
@@ -662,7 +719,8 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         }
         if(src->type==T_LIST){
             long long l=src->list->len;
-            if(a<0)a+=l; if(b<0)b+=l;
+            if(open_end) b=l;
+            if(a<0)a+=l; if(!open_end && b<0)b+=l;
             if(a<0)a=0; if(b>l)b=l;
             Val *out=val_list();
             for(long long i=a;i<b;i++) list_push(out->list, list_get(src->list,(int)i));
@@ -670,8 +728,8 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         }
         return val_nil();
     }
-    if (!strcmp(n,"fjern") || !strcmp(n,"slett_nøkkel")) {
-        /* dict or list remove */
+    if (!strcmp(n,"fjern_nokkel") || !strcmp(n,"fjern") || !strcmp(n,"slett_nøkkel")) {
+        /* dict or list remove — returns remaining length as int */
         if(nargs>=2 && args[0]->type==T_MAP){
             char *k=val_to_str(args[1]);
             Map *m=args[0]->map;
@@ -683,8 +741,9 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
                     m->len--; break;
                 }
             free(k);
+            return val_int(m->len);
         }
-        return val_nil();
+        return val_int(0);
     }
     if (!strcmp(n,"fjern_indeks")) {
         if(nargs>=2 && args[0]->type==T_LIST){
@@ -739,7 +798,33 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         char *src=val_to_str(args[0]);
         JP j={src,1};
         Val *r = jp_parse(&j);
-        free(src); return r;
+        free(src);
+        /* Norscode ordbok_tekst semantics: stringify non-string map values */
+        if (r && r->type == T_MAP) {
+            for (int i=0; i<r->map->len; i++) {
+                Val *v = r->map->vals[i];
+                if (v && v->type != T_STR) {
+                    char *s = json_emit(v);
+                    r->map->vals[i] = val_str_own(s);
+                }
+            }
+        }
+        /* JSON array → string-keyed map (Python VM compat) */
+        if (r && r->type == T_LIST) {
+            Val *m = val_map();
+            char keybuf[32];
+            for (int i=0; i<r->list->len; i++) {
+                snprintf(keybuf, sizeof(keybuf), "%d", i);
+                Val *v = r->list->items[i];
+                if (v && v->type != T_STR) {
+                    char *s = json_emit(v);
+                    v = val_str_own(s);
+                }
+                map_set(m->map, keybuf, v);
+            }
+            return m;
+        }
+        return r;
     }
     if (!strcmp(n,"fil_les")) {
         if(nargs<1) return val_nil();
@@ -920,6 +1005,199 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         char *s=val_to_str(args[0]); char *p=val_to_str(args[1]);
         int r=strstr(s,p)!=NULL; free(s);free(p); return val_bool(r);
     }
+    /* ── Web/security builtins ───────────────────────────────────────── */
+    if (!strcmp(n,"web_escape_html") || !strcmp(n,"escape_html")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        /* escape &, <, >, ", ' */
+        size_t extra=0;
+        for(char *p=s;*p;p++){
+            if(*p=='&')extra+=4;
+            else if(*p=='<'||*p=='>')extra+=3;
+            else if(*p=='"')extra+=5;
+            else if(*p=='\'')extra+=5;
+        }
+        char *r=malloc(strlen(s)+extra+1),*rp=r;
+        for(char *p=s;*p;p++){
+            if(*p=='&'){strcpy(rp,"&amp;");rp+=5;}
+            else if(*p=='<'){strcpy(rp,"&lt;");rp+=4;}
+            else if(*p=='>'){strcpy(rp,"&gt;");rp+=4;}
+            else if(*p=='"'){strcpy(rp,"&quot;");rp+=6;}
+            else if(*p=='\''){strcpy(rp,"&#x27;");rp+=6;}
+            else *rp++=*p;
+        }
+        *rp=0; free(s); return val_str_own(r);
+    }
+    /* ── String/bool helpers ─────────────────────────────────────────── */
+    if (!strcmp(n,"tekst_fra_bool") || !strcmp(n,"bool_til_tekst")) {
+        if(nargs<1) return val_str("usant");
+        return val_str(val_truthy(args[0]) ? "sant" : "usant");
+    }
+    /* ── Path builtins ────────────────────────────────────────────────── */
+    if (!strcmp(n,"sti_join") || !strcmp(n,"path_join")) {
+        if(nargs<2) return nargs>=1?args[0]:val_str(".");
+        char *a=val_to_str(args[0]); char *b=val_to_str(args[1]);
+        /* trim trailing / from a, then join with / */
+        size_t al=strlen(a);
+        while(al>0 && a[al-1]=='/') al--;
+        char *r=malloc(al+strlen(b)+3);
+        memcpy(r,a,al); r[al]='/'; strcpy(r+al+1,b[0]=='/'?b+1:b);
+        free(a);free(b); return val_str_own(r);
+    }
+    if (!strcmp(n,"sti_basename") || !strcmp(n,"basename")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        char *last=strrchr(s,'/');
+        Val *r=val_str(last?last+1:s); free(s); return r;
+    }
+    if (!strcmp(n,"sti_dirname") || !strcmp(n,"dirname")) {
+        if(nargs<1) return val_str(".");
+        char *s=val_to_str(args[0]);
+        char *last=strrchr(s,'/');
+        if(!last) { free(s); return val_str("."); }
+        char *r=malloc(last-s+1); memcpy(r,s,last-s); r[last-s]=0;
+        free(s); return val_str_own(r);
+    }
+    if (!strcmp(n,"sti_exists")) {
+        if(nargs<1) return val_bool(0);
+        char *path2=val_to_str(args[0]);
+        FILE *f2=fopen(path2,"rb");
+        int r=(f2!=NULL); if(f2)fclose(f2);
+        free(path2); return val_bool(r);
+    }
+    if (!strcmp(n,"sti_stem") || !strcmp(n,"stem")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        char *base=strrchr(s,'/'); if(base)base++; else base=s;
+        char *dot=strrchr(base,'.');
+        Val *r=dot?val_str_own(strndup(base,dot-base)):val_str(base);
+        free(s); return r;
+    }
+    /* ── Security/web safety stubs ──────────────────────────────────── */
+    if (!strcmp(n,"passord_hash") || !strcmp(n,"password_hash")) {
+        /* stub: generate unique hash with counter-based salt */
+        static long long pw_salt_ctr = 1000;
+        pw_salt_ctr += 7;
+        if(nargs<1) return val_str("$s0$abc$xyz");
+        char *pw=val_to_str(args[0]);
+        /* Format: $s0$SALT$HASH where SALT is unique, HASH includes pw+salt */
+        long long h=5381;
+        for(char *p=pw;*p;p++) h=h*33^(unsigned char)*p;
+        h ^= pw_salt_ctr;
+        char *r=malloc(strlen(pw)+80);
+        snprintf(r,strlen(pw)+80,"$s0$%lld$%lld",pw_salt_ctr,h);
+        free(pw); return val_str_own(r);
+    }
+    if (!strcmp(n,"passord_verifiser") || !strcmp(n,"password_verify")) {
+        if(nargs<2) return val_bool(0);
+        char *pw=val_to_str(args[0]); char *hash=val_to_str(args[1]);
+        /* Parse $s0$SALT$HASH */
+        int ok=0;
+        if(strncmp(hash,"$s0$",4)==0){
+            long long salt=0,stored_h=0;
+            if(sscanf(hash+4,"%lld$%lld",&salt,&stored_h)==2){
+                long long h=5381;
+                for(char *p=pw;*p;p++) h=h*33^(unsigned char)*p;
+                h ^= salt;
+                ok=(h==stored_h);
+            }
+        }
+        free(pw);free(hash); return val_bool(ok);
+    }
+    if (!strcmp(n,"web_safe_filename") || !strcmp(n,"safe_filename")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        /* Remove path separators, dangerous chars AND parent-dir sequences */
+        /* First take only the basename (after last / or \) */
+        char *base=strrchr(s,'/'); if(base)base++; else base=s;
+        char *base2=strrchr(base,'\\'); if(base2)base2++; else base2=base;
+        /* Remove dangerous characters */
+        char *r=malloc(strlen(base2)+1),*rp=r;
+        for(char *p=base2;*p;p++){
+            if(*p==':'||*p=='*'||*p=='?'||*p=='"'||*p=='<'||*p=='>'||*p=='|') continue;
+            *rp++=*p;
+        }
+        *rp=0;
+        /* Remove leading dots (to block .., hidden files) */
+        char *result=r; while(*result=='.') result++;
+        Val *rv=val_str(result); free(r); free(s); return rv;
+    }
+    if (!strcmp(n,"web_safe_path_segment") || !strcmp(n,"safe_path_segment")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        char *r=malloc(strlen(s)+1),*rp=r;
+        for(char *p=s;*p;p++){
+            if(*p=='/'||*p=='\\'||*p=='.') continue;
+            *rp++=*p;
+        }
+        *rp=0; free(s); return val_str_own(r);
+    }
+    /* ── File append ─────────────────────────────────────────────────── */
+    if (!strcmp(n,"fil_append") || !strcmp(n,"file_append")) {
+        if(nargs<2) return val_nil();
+        char *path3=val_to_str(args[0]); char *content2=val_to_str(args[1]);
+        FILE *f3=fopen(path3,"ab");
+        if(f3){fwrite(content2,1,strlen(content2),f3);fclose(f3);}
+        free(path3);free(content2); return val_nil();
+    }
+    /* ── Assert builtins ─────────────────────────────────────────────── */
+    if (!strcmp(n,"assert")) {
+        if (nargs<1 || !val_truthy(args[0])) {
+            char *msg = (nargs>=2) ? val_to_str(args[1]) : NULL;
+            if (msg) { nc_panic("Assertion feilet: %s", msg); }
+            else     { nc_panic("Assertion feilet"); }
+        }
+        return val_nil();
+    }
+    if (!strcmp(n,"assert_eq")) {
+        if (nargs<2) nc_panic("assert_eq: trenger 2 argument");
+        int eq = vals_eq(args[0], args[1]);
+        if (!eq) {
+            char *a=val_to_str(args[0]); char *b=val_to_str(args[1]);
+            char buf[512]; snprintf(buf,sizeof(buf),"assert_eq feilet: %s != %s",a,b);
+            free(a); free(b); nc_panic("%s", buf);
+        }
+        return val_nil();
+    }
+    if (!strcmp(n,"assert_ne")) {
+        if (nargs<2) nc_panic("assert_ne: trenger 2 argument");
+        int eq = vals_eq(args[0], args[1]);
+        if (eq) {
+            char *a=val_to_str(args[0]);
+            char buf[512]; snprintf(buf,sizeof(buf),"assert_ne feilet: begge er %s",a);
+            free(a); nc_panic("%s", buf);
+        }
+        return val_nil();
+    }
+    /* ── Math builtins ───────────────────────────────────────────────── */
+    if (!strcmp(n,"pluss")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT)return val_int(args[0]->i+args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"minus")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT)return val_int(args[0]->i-args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"ganger")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT)return val_int(args[0]->i*args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"del") || !strcmp(n,"divider")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT&&args[1]->i!=0)return val_int(args[0]->i/args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"maks") || !strcmp(n,"max")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT)return val_int(args[0]->i>args[1]->i?args[0]->i:args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"min")) {
+        if(nargs>=2&&args[0]->type==T_INT&&args[1]->type==T_INT)return val_int(args[0]->i<args[1]->i?args[0]->i:args[1]->i);
+        return val_int(0);
+    }
+    if (!strcmp(n,"abs") || !strcmp(n,"absoluttverdi")) {
+        if(nargs>=1&&args[0]->type==T_INT)return val_int(args[0]->i<0?-args[0]->i:args[0]->i);
+        return val_int(0);
+    }
     /* Unknown built-in — return nil and warn */
     fprintf(stderr, "[nc-vm] ukjent: %s\n", name);
     return val_nil();
@@ -937,8 +1215,12 @@ static Val *call_fn(const char *name, Val **args, int nargs) {
 }
 
 static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
-    if (g_depth >= MAX_CALL_DEPTH)
-        nc_panic("Maksimal rekursjonsdybde nådd (%d)", MAX_CALL_DEPTH);
+    if (g_depth >= MAX_CALL_DEPTH) {
+        /* Throw a catchable exception instead of hard panic */
+        g_exception = val_str("Maksimal rekursjonsdybde nådd");
+        g_throwing = 1;
+        return NIL_VAL;
+    }
 
     Frame *f = calloc(1, sizeof(Frame));
     f->fn = fn;
@@ -1041,7 +1323,24 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
             for (int i=n-1; i>=0; i--) call_args[i] = pop(f);
             Val *ret = call_fn(fn_name, call_args, n);
             free(call_args);
-            push(f, ret);
+            /* If an exception is propagating, check for a handler in this frame */
+            if (g_throwing) {
+                if (f->ncatch > 0) {
+                    /* PEEK — TRY_END at catch block will pop */
+                    const char *catch_lbl = f->catch_labels[f->ncatch-1];
+                    int tgt = find_label(fn, catch_lbl ? catch_lbl : "");
+                    if (tgt >= 0) {
+                        g_throwing = 0;  /* handled */
+                        f->sp = 0;
+                        f->ip = tgt;
+                        goto next_instr;
+                    }
+                }
+                /* Still no handler — propagate further up */
+                result = NIL_VAL; done = 1;
+            } else {
+                push(f, ret);
+            }
         }
         else if (!strcmp(op,"BINARY_ADD")) {
             Val *b2 = pop(f), *a2 = pop(f);
@@ -1166,6 +1465,7 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
             } else if(obj->type==T_MAP){
                 char *k=val_to_str(idx);
                 Val *mv=map_get(obj->map,k);
+                /* DEBUG: trace hent_bool lookups */
                 push(f, mv ? mv : NIL_VAL);free(k);
             } else if(obj->type==T_STR){
                 long long i2=idx->type==T_INT?idx->i:0;
@@ -1186,18 +1486,31 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
             push(f,obj); /* leave object on stack */
         }
         else if (!strcmp(op,"THROW")) {
-            Val *exc=pop(f);
-            g_exception=exc;
-            char *msg=val_to_str(exc);
-            snprintf(g_err_msg,sizeof(g_err_msg),"Norscode unntak: %s",msg);
-            free(msg);
-            g_depth--;
-            for (int _i=0;_i<f->nvar;_i++) free(f->var_names[_i]);
-            free(f->var_names); free(f->var_vals); free(f->stack); free(f);
-            longjmp(g_err_jmp,1);
+            Val *exc = (f->sp > 0) ? pop(f) : NIL_VAL;
+            g_exception = exc;
+            /* PEEK (don't pop) — TRY_END at catch block start will pop */
+            if (f->ncatch > 0) {
+                const char *catch_lbl = f->catch_labels[f->ncatch-1];
+                int tgt = find_label(fn, catch_lbl ? catch_lbl : "");
+                if (tgt >= 0) { f->sp=0; f->ip=tgt; goto next_instr; }
+            }
+            /* Signal upward propagation — caller's CALL will check g_throwing */
+            g_throwing = 1;
+            result = NIL_VAL;
+            done = 1;
         }
-        else if (!strcmp(op,"TRY_BEGIN")) { /* simplified: no real catch support yet */ }
-        else if (!strcmp(op,"TRY_END"))   { /* no-op */ }
+        else if (!strcmp(op,"TRY_BEGIN")) {
+            Val *lbl_v = ARG(1);
+            const char *lbl = (lbl_v && lbl_v->type==T_STR) ? lbl_v->s : "";
+            if (f->ncatch >= f->catch_cap) {
+                f->catch_cap = f->catch_cap ? f->catch_cap*2 : 4;
+                f->catch_labels = realloc(f->catch_labels, f->catch_cap*sizeof(char*));
+            }
+            f->catch_labels[f->ncatch++] = strdup(lbl);
+        }
+        else if (!strcmp(op,"TRY_END")) {
+            if (f->ncatch > 0) { free(f->catch_labels[--f->ncatch]); }
+        }
         else if (!strcmp(op,"LOAD_EXCEPTION")) { push(f, g_exception ? g_exception : NIL_VAL); }
         else {
             fprintf(stderr, "[nc-vm] ukjent opkode: %s\n", op);
@@ -1206,9 +1519,23 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
     }
 
     g_depth--;
+    /* If exception is propagating and we've gone all the way to the bottom, panic */
+    if (g_throwing && g_depth == 0) {
+        g_throwing = 0;
+        char *msg = val_to_str(g_exception ? g_exception : NIL_VAL);
+        snprintf(g_err_msg, sizeof(g_err_msg), "Norscode unntak: %s", msg);
+        free(msg);
+        for (int i=0; i<f->nvar; i++) free(f->var_names[i]);
+        free(f->var_names); free(f->var_vals); free(f->stack);
+        for (int i=0; i<f->ncatch; i++) free(f->catch_labels[i]);
+        free(f->catch_labels); free(f);
+        longjmp(g_err_jmp, 1);
+    }
     /* Free dynamic frame resources */
     for (int i=0; i<f->nvar; i++) free(f->var_names[i]);
     free(f->var_names); free(f->var_vals); free(f->stack);
+    for (int i=0; i<f->ncatch; i++) free(f->catch_labels[i]);
+    free(f->catch_labels);
     free(f);
     return result;
 }
@@ -1270,6 +1597,12 @@ int main(int argc, char **argv) {
             fprintf(stderr, "  Prøv: clang -O2 -o dist/nc-vm tools/nc_vm.c\n");
             fprintf(stderr, "  Eller: python3 tools/nc_precompile.py\n");
             return 1;
+        }
+
+        /* Last stdlib NCBs (bootstrap/stdlib/) — Python-fri standardbibliotek */
+        {
+            DIR *sd = opendir("bootstrap/stdlib");
+            if (sd) { closedir(sd); load_ncb_dir("bootstrap/stdlib"); }
         }
 
         /* Read source file */
@@ -1361,6 +1694,12 @@ int main(int argc, char **argv) {
         if (g_nfns == 0) {
             fprintf(stderr, "nc-vm --nc-compile: ingen selfhost-bytekoder funnet\n");
             return 1;
+        }
+
+        /* Last stdlib NCBs */
+        {
+            DIR *sd2 = opendir("bootstrap/stdlib");
+            if (sd2) { closedir(sd2); load_ncb_dir("bootstrap/stdlib"); }
         }
 
         /* Read source */
