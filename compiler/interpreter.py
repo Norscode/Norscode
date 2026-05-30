@@ -1,3 +1,8 @@
+# AVVIKLA: compiler/interpreter.py er erstatta av nc-vm.
+# For Python-fri kjøring: dist/nc-vm --nc-run foo.no
+# Behalde for --legacy-python-fallback under overgang.
+# Python LOC: 3420
+
 
 
 from __future__ import annotations
