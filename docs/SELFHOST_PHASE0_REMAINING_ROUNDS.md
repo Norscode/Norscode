@@ -39,7 +39,7 @@ Fjerne filer og referanser som bare finnes som historisk ballast.
 
 Leveranser:
 
-- [x] `setup.py` er fjernet eller gjort helt overflødig.
+- [x] `pyproject.toml` er einaste Python-bygge-konfig (setup.py fjerna).
 - [x] Gamle pytest-filer som peker på slettet C/legacy-VM er ryddet bort.
 - [x] `tools/export_ncbb_as_bin.py`, `export_ncbb_as_c.py`, `generate_linux_bootstrap_artifacts.py`, `v42_trace_probe.py` er enten fjernet eller flyttet til tydelig legacy-lag.
 - [x] `build/norcode-native-stage0.py` er borte eller erstattet av ny native flyt.
