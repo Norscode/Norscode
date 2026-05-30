@@ -1,11 +1,13 @@
 /*
  * nc_vm.c — Norscode native bytecode interpreter
  *
- * Runs pre-compiled .ncb.json bytecode without Python.
- * Supports all 30 opcodes and the core built-in functions.
+ * AVVIKLA: Bruk dist/norscode_native i staden (generert frå Norscode→C).
+ * nc_vm.c er no berre ein eingongs-bootstrap-hjelpar for første bygg.
  *
- * Build: clang -O2 -o dist/nc-vm tools/nc_vm.c
- * Usage: dist/nc-vm <file.ncb.json> [<extra.ncb.json>...]
+ * Primær bygg:  bash tools/build_norscode_native.sh  (berre clang, ingen nc-vm)
+ * nc-vm-bygg:   clang -O2 -o dist/nc-vm tools/nc_vm.c  (berre om norscode_native manglar)
+ *
+ * Original: Runs pre-compiled .ncb.json bytecode without Python.
  */
 
 #include <stdio.h>
