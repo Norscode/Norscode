@@ -352,14 +352,35 @@ static FnDef *fn_find(const char *name) {
         if (strncmp(fn,"__main__.",9)==0) fn+=9;
         if (!strcmp(fn, n)) return &g_fns[i];
     }
-    /* 3. Last segment match: selfhost.vm.køyr_ncb → look for any fn named køyr_ncb */
+    /* 3. Last segment match: query "builtin.lex" → find any fn whose last segment == "lex" */
     const char *last = strrchr(name, '.');
     if (last) {
         last++;
         for (int i=0;i<g_nfns;i++) {
             const char *fn = g_fns[i].name;
+            /* Strip __main__. prefix */
             if (strncmp(fn,"__main__.",9)==0) fn+=9;
+            /* Direct match (e.g. short name or stripped name) */
             if (!strcmp(fn, last)) return &g_fns[i];
+            /* Also compare last segment of stored name (e.g. selfhost.lexer.lex → lex) */
+            const char *fn_last = strrchr(fn, '.');
+            if (fn_last && !strcmp(fn_last+1, last)) return &g_fns[i];
+        }
+    }
+    /* 4. Reverse short-name match: query "kompiler_fil" matches "selfhost.kompiler.kompiler_fil"
+       (no dots in query → scan stored function names for matching last segment) */
+    if (!strchr(name, '.')) {
+        for (int i=0;i<g_nfns;i++) {
+            const char *fn = g_fns[i].name;
+            const char *fn_last = strrchr(fn, '.');
+            if (fn_last) fn_last++;
+            else fn_last = fn;
+            if (!strcmp(fn_last, name)) return &g_fns[i];
+            /* Also check altname */
+            if (g_fn_altnames[i]) {
+                const char *an_last = strrchr(g_fn_altnames[i], '.');
+                if (an_last && !strcmp(an_last+1, name)) return &g_fns[i];
+            }
         }
     }
     return NULL;
@@ -603,11 +624,48 @@ static char *json_emit_str(const char *s) {
     }
     *p++='"';*p=0;return out;
 }
+/* Raw JSON emit: always quote strings (for NCB serialization, no smart stripping) */
+static char *json_emit_raw(Val *v);
+static char *json_emit_raw_list(List *l) {
+    char *out=strdup("[");
+    for(int i=0;i<l->len;i++){
+        char *s=json_emit_raw(l->items[i]);
+        out=realloc(out,strlen(out)+strlen(s)+3);
+        if(i)strcat(out,",");
+        strcat(out,s);free(s);
+    }
+    out=realloc(out,strlen(out)+2);strcat(out,"]");return out;
+}
+static char *json_emit_raw(Val *v) {
+    if(!v||v->type==T_NIL) return strdup("null");
+    if(v->type==T_BOOL) return strdup(v->b?"true":"false");
+    if(v->type==T_INT){char b[32];snprintf(b,sizeof(b),"%lld",v->i);return strdup(b);}
+    if(v->type==T_FLOAT){char b[64];snprintf(b,sizeof(b),"%g",v->f);return strdup(b);}
+    if(v->type==T_STR) return json_emit_str(v->s); /* ALWAYS quote strings */
+    if(v->type==T_LIST) return json_emit_raw_list(v->list);
+    if(v->type==T_MAP){
+        char *out=strdup("{");
+        for(int i=0;i<v->map->len;i++){
+            char *k=json_emit_str(v->map->keys[i]);
+            char *val=json_emit_raw(v->map->vals[i]);
+            out=realloc(out,strlen(out)+strlen(k)+strlen(val)+4);
+            if(i)strcat(out,",");
+            strcat(out,k);strcat(out,":");strcat(out,val);
+            free(k);free(val);
+        }
+        out=realloc(out,strlen(out)+2);strcat(out,"}");return out;
+    }
+    return strdup("null");
+}
+
 /* For ordbok_tekst maps: emit string values that look like JSON primitives verbatim */
 static int str_looks_like_json_nonstring(const char *s) {
     if (!s || !*s) return 0;
     if (!strcmp(s,"true")||!strcmp(s,"false")||!strcmp(s,"null")) return 1;
-    if (s[0]=='{'||s[0]=='[') return 1;
+    /* JSON object/array: must be balanced (start+end match) */
+    size_t sl=strlen(s);
+    if (s[0]=='{' && s[sl-1]=='}' && sl>=2) return 1;
+    if (s[0]=='[' && s[sl-1]==']' && sl>=2) return 1;
     /* numeric? */
     char *end; strtoll(s,&end,10);
     if (*end==0 && end!=s) return 1;
@@ -2089,6 +2147,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "  nc-vm <fil.ncb.json> [<ekstra.ncb.json>...]\n");
         fprintf(stderr, "  nc-vm --nc-run <kilde.no>\n");
         fprintf(stderr, "  nc-vm --nc-compile <kilde.no> [utdata.ncb.json]\n");
+        fprintf(stderr, "  nc-vm --nc-bundle [mod=fil.no ...] --output bundle.ncb.json\n");
         return 1;
     }
 
@@ -2262,6 +2321,151 @@ int main(int argc, char **argv) {
         fclose(of);
         fprintf(stdout, "%s\n", out_path);   /* print output path */
         return 0;
+    }
+
+    /* --nc-bundle: compile multiple .no files and merge into one NCB bundle ──── */
+    if (argc >= 2 && !strcmp(argv[1], "--nc-bundle")) {
+        /* Usage: nc-vm --nc-bundle module1=file1.no module2=file2.no --output bundle.ncb.json
+           Each arg is "module.name=path/to/file.no" or just "path/to/file.no" (module derived from path)
+           Functions are renamed from __main__.X → module.X
+        */
+        if (argc < 3) {
+            fprintf(stderr, "bruk: nc-vm --nc-bundle [mod=file.no...] --output bundle.ncb.json\n");
+            return 1;
+        }
+        /* Load selfhost compiler */
+        {
+            FILE *bf=fopen("bootstrap/kompiler.ncb.json","rb");
+            if(bf){fclose(bf);load_ncb("bootstrap/kompiler.ncb.json");}
+        }
+        {
+            DIR *sd=opendir("bootstrap/stdlib");
+            if(sd){closedir(sd);load_ncb_dir("bootstrap/stdlib");}
+        }
+        if(g_nfns==0){fprintf(stderr,"nc-vm --nc-bundle: ingen compiler-bytekoder\n");return 1;}
+
+        /* Parse args */
+        const char *out_path = "bootstrap/kompiler.ncb.json";
+        /* Collect module=file pairs */
+        typedef struct { char mod[256]; char file[512]; } ModFile;
+        ModFile mods[64]; int nmods=0;
+        for(int i=2;i<argc;i++){
+            if(!strcmp(argv[i],"--output")&&i+1<argc){out_path=argv[++i];continue;}
+            /* Check for "module=file" or just "file" */
+            const char *eq=strchr(argv[i],'=');
+            if(eq && eq!=argv[i]){
+                int ml=(int)(eq-argv[i]); if(ml>255)ml=255;
+                strncpy(mods[nmods].mod,argv[i],ml); mods[nmods].mod[ml]=0;
+                strncpy(mods[nmods].file,eq+1,511); mods[nmods].file[511]=0;
+            } else {
+                /* Derive module name from file path: selfhost/parser.no → selfhost.parser */
+                const char *fp=argv[i]; int flen=(int)strlen(fp);
+                /* Strip leading ./ */
+                if(fp[0]=='.'&&fp[1]=='/') fp+=2;
+                char tmp[512]; strncpy(tmp,fp,511); tmp[511]=0;
+                /* Strip .no suffix */
+                char *dot=strrchr(tmp,'.'); if(dot&&!strcmp(dot,".no"))*dot=0;
+                /* Replace / with . */
+                for(char *c=tmp;*c;c++) if(*c=='/') *c='.';
+                strncpy(mods[nmods].mod,tmp,255); mods[nmods].mod[255]=0;
+                strncpy(mods[nmods].file,fp,511); mods[nmods].file[511]=0;
+            }
+            nmods++;
+        }
+
+        /* Compile each file and collect renamed functions */
+        /* Heap-allocated growing buffer */
+        size_t bundle_cap = 4*1024*1024; /* start 4MB, grow as needed */
+        char *bundle_buf = malloc(bundle_cap);
+        if(!bundle_buf){fprintf(stderr,"nc-vm --nc-bundle: out of memory\n");return 1;}
+        int blen=0;
+        #define BUNDLE_ENSURE(need) do { \
+            if((size_t)(blen+(need)) >= bundle_cap) { \
+                bundle_cap = bundle_cap*2 + (need); \
+                bundle_buf = realloc(bundle_buf, bundle_cap); \
+                if(!bundle_buf){fprintf(stderr,"nc-vm --nc-bundle: realloc feilet\n");return 1;} \
+            } \
+        } while(0)
+        BUNDLE_ENSURE(512);
+        blen+=snprintf(bundle_buf+blen,bundle_cap-blen,
+            "{\"format\":\"ncb-v1\",\"entry\":\"__main__.start\","
+            "\"imports\":[],\"route_handlers\":{},\"dependency_providers\":{},"
+            "\"guard_providers\":{},\"request_middlewares\":[],\"response_middlewares\":[],"
+            "\"error_middlewares\":[],\"startup_hooks\":[],\"shutdown_hooks\":[],"
+            "\"tests\":{},\"functions\":{");
+        int first_fn=1;
+
+        for(int mi=0;mi<nmods;mi++){
+            /* Read source */
+            FILE *sf=fopen(mods[mi].file,"rb");
+            if(!sf){fprintf(stderr,"nc-vm --nc-bundle: kan ikkje lese: %s\n",mods[mi].file);return 1;}
+            fseek(sf,0,SEEK_END);long ssz=ftell(sf);rewind(sf);
+            char *src=malloc(ssz+1);fread(src,1,ssz,sf);fclose(sf);src[ssz]=0;
+
+            /* Compile */
+            Val *sv=val_str_own(src);
+            Val *mv=val_str("__main__");
+            Val *ca[]={sv,mv};
+            Val *ncb_json_val=call_fn("kompiler_fil",ca,2);
+            if(!ncb_json_val||ncb_json_val->type!=T_STR){
+                fprintf(stderr,"nc-vm --nc-bundle: kompilering feilet for %s\n",mods[mi].file);
+                return 1;
+            }
+
+            /* Parse the compiled NCB to extract functions */
+            Val *ncb_data=json_parse_str(ncb_json_val->s);
+            if(!ncb_data||ncb_data->type!=T_MAP){
+                fprintf(stderr,"nc-vm --nc-bundle: ugyldig NCB frå %s\n",mods[mi].file);
+                return 1;
+            }
+            Val *fns_val=map_get(ncb_data->map,"functions");
+            if(!fns_val||fns_val->type!=T_MAP) continue;
+
+            const char *mod=mods[mi].mod;
+            for(int fi=0;fi<fns_val->map->len;fi++){
+                const char *fn_key=fns_val->map->keys[fi];
+                Val *fn_obj=fns_val->map->vals[fi];
+                if(!fn_obj||fn_obj->type!=T_MAP) continue;
+
+                /* Rename __main__.X → module.X, __main__ → module */
+                char new_key[512];
+                if(strncmp(fn_key,"__main__.",9)==0){
+                    snprintf(new_key,sizeof(new_key),"%s.%s",mod,fn_key+9);
+                } else {
+                    strncpy(new_key,fn_key,511); new_key[511]=0;
+                }
+
+                /* Also update the "name" field in fn_obj if present */
+                /* and "module" field */
+                Val *name_v=map_get(fn_obj->map,"name");
+                Val *mod_v=map_get(fn_obj->map,"module");
+                if(mod_v&&mod_v->type==T_STR) {
+                    /* Update module to new module name */
+                    map_set(fn_obj->map,"module",val_str(mod));
+                }
+
+                /* Serialize function entry (use raw emitter — never smart-strip strings) */
+                char *key_json=json_emit_str(new_key);
+                char *val_json=json_emit_raw(fn_obj);
+                int needed=(int)(strlen(key_json)+strlen(val_json)+4);
+                BUNDLE_ENSURE(needed+8);
+                if(!first_fn) bundle_buf[blen++]=',';
+                first_fn=0;
+                blen+=snprintf(bundle_buf+blen,bundle_cap-blen,"%s:%s",key_json,val_json);
+                free(key_json);free(val_json);
+            }
+            fprintf(stderr,"  [OK] %s → %s (%d funcs)\n",mods[mi].file,mod,(int)(fns_val->map->len));
+        }
+        BUNDLE_ENSURE(4);
+        blen+=snprintf(bundle_buf+blen,bundle_cap-blen,"}}");
+
+        FILE *of=fopen(out_path,"wb");
+        if(!of){fprintf(stderr,"nc-vm --nc-bundle: kan ikkje skrive: %s\n",out_path);free(bundle_buf);return 1;}
+        fwrite(bundle_buf,1,blen,of);fclose(of);
+        free(bundle_buf);
+        fprintf(stderr,"Bundle: %s (%d bytes)\n",out_path,blen);
+        return 0;
+        #undef BUNDLE_ENSURE
     }
 
     /* Load all bytecode files; remember entry from first file */
