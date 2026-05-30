@@ -1,3 +1,4 @@
+# AVVIKLA: erstatta av nc-vm. Behalde for --legacy-python-fallback.
 from __future__ import annotations
 
 import json

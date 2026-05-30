@@ -1,3 +1,4 @@
+# AVVIKLA: erstatta av nc-vm. Behalde for --legacy-python-fallback.
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -356,14 +357,6 @@ class Parser:
             raise ParseError(f"Forventet navn, fikk {tok.value!r}", tok)
         return tok.value
 
-    def expect_raw_name(self) -> str:
-        """Som expect_name, men returnerer pre-normalisert råverdi (tok.raw).
-        Bruk dette for feltnamn etter '.', der normalisering øydelegg nøklar som 'ok' → 'sann'."""
-        tok = self.advance_token()
-        if not NAME_RE.fullmatch(tok.value):
-            raise ParseError(f"Forventet navn, fikk {tok.value!r}", tok)
-        return tok.raw if tok.raw else tok.value
-
     def consume_type_annotation(self) -> str:
         parts: list[str] = []
         depth = 0
@@ -504,11 +497,7 @@ class Parser:
             return self.parse_let_statement()
         if tok == 'returner':
             self.advance()
-            if self.peek() in {'ellers', 'ellers_hvis', '}'}:
-                return {'node': 'Return', 'value': {'node': 'Literal', 'literal_type': 'heltall', 'value': 0}}
-            # 'slutt' er berre blokk-terminatorord når det IKKJE følgjast av '('
-            # (dvs. ikkje eit funksjonskall som returner slutt(spor, "ok"))
-            if self.peek() == 'slutt' and self.peek(1) != '(':
+            if self.peek() in {'slutt', 'ellers', 'ellers_hvis', '}'}:
                 return {'node': 'Return', 'value': {'node': 'Literal', 'literal_type': 'heltall', 'value': 0}}
             return {'node': 'Return', 'value': self.parse_expression()}
         if tok == 'hvis':
@@ -655,9 +644,6 @@ class Parser:
     def parse_for_statement(self) -> dict:
         self.expect('for')
         name = self.expect_name()
-        # "for hver X i Y" / "for hvert X i Y" — skip the qualifier word
-        if name in ('hver', 'hvert') and self.peek() and NAME_RE.fullmatch(self.peek()):
-            name = self.expect_name()
         if self.match('='):
             start_expr = self.parse_expression()
             if not self.match('til'):
@@ -740,7 +726,7 @@ class Parser:
                         expr = {'node': 'Index', 'target': expr, 'index': inner}
                 continue
             if self.match('.'):
-                expr = {'node': 'Member', 'target': expr, 'name': self.expect_raw_name()}
+                expr = {'node': 'Member', 'target': expr, 'name': self.expect_name()}
                 continue
             break
         return expr
@@ -890,7 +876,7 @@ class Parser:
                         expr = {'node': 'Index', 'target': expr, 'index': inner}
                 continue
             if self.match('.'):
-                expr = {'node': 'Member', 'target': expr, 'name': self.expect_raw_name()}
+                expr = {'node': 'Member', 'target': expr, 'name': self.expect_name()}
                 continue
             if self.peek() == '{' and self.looks_like_struct_literal_body():
                 expr = self.parse_struct_literal_after_type()
@@ -995,11 +981,7 @@ class Parser:
         if tok.value.isdigit():
             self.advance()
             return {'node': 'Literal', 'literal_type': 'heltall', 'value': int(tok.value)}
-        if tok.value in {'sann', 'usann'} and tok.raw == tok.value:
-            # Berre behandle 'sann'/'usann' som boolsk literal når tokenet er
-            # bokstavleg skrive i kjelda (tok.raw == tok.value).
-            # Aliases som 'ok', 'true', 'ja' har tok.raw != tok.value og skal
-            # falla gjennom til Name-noden, slik at dei kan brukast som variabelnamn.
+        if tok.value in {'sann', 'usann'}:
             self.advance()
             return {'node': 'Literal', 'literal_type': 'bool', 'value': tok.value == 'sann'}
         if tok.value == '[':
