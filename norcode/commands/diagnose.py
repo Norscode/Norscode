@@ -1,8 +1,4 @@
-"""Project and runtime diagnostics command.
-
-This command surfaces the practical status of a checkout or installed tree in
-a stable, human-readable format, with optional JSON output for tooling.
-"""
+"""Diagnose command — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback. Bruk nc doctor."""
 
 from __future__ import annotations
 

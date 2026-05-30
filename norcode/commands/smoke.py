@@ -1,4 +1,4 @@
-"""Release/install smoke command."""
+"""Smoke command — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback. Bruk nc test."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Legacy name migration command."""
+"""Migrate-names command — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback."""
 
 from __future__ import annotations
 

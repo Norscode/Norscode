@@ -1,3 +1,4 @@
+"""Stress command — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback."""
 from __future__ import annotations
 
 import json

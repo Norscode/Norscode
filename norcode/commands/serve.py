@@ -1,4 +1,4 @@
-"""Serve command — Python-fallback only. Bruk nc serve (kjem snart)."""
+"""Serve command — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback."""
 from __future__ import annotations
 from norcode.commands.base import CommandModule
 

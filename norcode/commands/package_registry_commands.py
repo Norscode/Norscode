@@ -1,4 +1,4 @@
-"""Modular dependency and registry commands."""
+"""Package registry commands — AVVIKLA. Berre tilgjengeleg via --legacy-python-fallback."""
 
 from __future__ import annotations
 

@@ -1,37 +1,36 @@
 # Python-fil-avvikling plan
 
-## Status: praktisk Python-fri for primærbruk
+## Status: Python-fri for alle primær- og dev-kommandoar
 
-### Allereie Python-fri (via nc-vm):
+### Python-fri (via nc-vm):
 - `bin/nc run foo.no`    → dist/nc-vm --nc-run
-- `bin/nc compile foo.no` → dist/nc-vm --nc-compile  
+- `bin/nc compile foo.no` → dist/nc-vm --nc-compile
 - `bin/nc build foo.no`  → dist/norcode-bootstrap-compile
 - `bin/nc check foo.no`  → dist/norcode-bootstrap-compile
+- `bin/nc format foo.no` → selfhost/formatter.no (nc-vm)
+- `bin/nc lint foo.no`   → selfhost/linter.no (nc-vm)
+- `bin/nc doctor`        → selfhost/doctor.no (nc-vm)
+- `bin/nc repl`          → tools/nc_repl.sh (nc-vm)
 - `bin/nc test`          → tools/nc_test.sh
 
-### Python-filer som KAN fjernast no:
-(Erstatta av nc-vm / selfhost-kompilatoren)
+### Eksplisitt avvikla (krev --legacy-python-fallback):
+- `nc serve`             → norcode/commands/serve.py
+- `nc smoke`             → norcode/commands/smoke.py (bruk nc test)
+- `nc bench`             → norcode/commands/bench.py
+- `nc migrate-names`     → norcode/commands/migrate_names.py
+- `nc diagnose`          → norcode/commands/diagnose.py (bruk nc doctor)
+- `nc stress`            → norcode/commands/stress.py
+- `nc fuzz`              → norcode/commands/fuzz.py
+- `nc add/update/lock/packages` → norcode/commands/package_registry_commands.py
+- `nc scaffold-api`      → norcode/commands/scaffold_api.py
 
-- `compiler/lexer.py`         → selfhost/lexer/lexer_m1.no
-- `compiler/parser.py`        → selfhost/parser.no  
-- `compiler/semantic.py`      → selfhost/compiler/semantic.no
-- `compiler/bytecode_backend.py` → selfhost/compiler/ir_to_bytecode.no
-- `compiler/selfhost_chain.py` → nc-vm --nc-run/--nc-compile
-- `compiler/selfhost_whole_compile.py` → nc-vm bundler
-
-### Python-filer som IKKJE kan fjernast enno:
-(Brukt av dev-verktøy eller --legacy-python-fallback)
-
+### Python-filer som framleis er i bruk (via --legacy-python-fallback):
 - `norcode/legacy_main.py`    → --legacy-python-fallback entrypoint
-- `norcode/commands/format.py` → `nc format` (ikkje erstatta enno)
-- `norcode/commands/lint.py`   → `nc lint` (ikkje erstatta enno)
-- `norcode/repl.py`            → `nc repl` (ikkje erstatta enno)
-- `norcode/server_runtime.py`  → `nc serve` (ikkje erstatta enno)
-- `compiler/interpreter.py`    → selfhost-bootstrap-gate brukar det
-- `compiler/toml_compat.py`    → TOML-parsing (ikkje erstatta enno)
+- `norcode/server_runtime.py` → nc serve (legacy)
+- `compiler/interpreter.py`   → legacy bootstrap-gate
+- `compiler/toml_compat.py`   → TOML-parsing (legacy)
 
 ### Neste steg mot full Python-fjerning:
 1. Flytt `compiler/` til `legacy/compiler/` (behold for --legacy)
-2. Lag Python-fri `nc format` via selfhost-formatering
-3. Lag Python-fri `nc repl` via nc-vm REPL
-4. Fjern norcode/commands/ etter kvart
+2. Vurder fjerning av heile norcode/commands/ (alle avvikla)
+3. Slett norcode/server_runtime.py når nc serve ikkje lenger er i bruk
