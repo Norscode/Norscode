@@ -42,7 +42,9 @@ printf 'Kompilerer stdlib NCBs...\n'
 mkdir -p bootstrap/stdlib
 _stdlib_ok=0; _stdlib_fail=0
 for _mod in std/math.no std/tekst.no std/liste.no std/ordbok.no std/json.no \
-            std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no; do
+            std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no \
+            std/cache.no \
+            selfhost/common.no selfhost/ir_contract.no selfhost/compiler.no; do
     [ -f "$_mod" ] || continue
     _outname="bootstrap/stdlib/$(echo "$_mod" | sed 's|/|_|g' | sed 's|\.no$|.ncb.json|')"
     if ./dist/nc-vm --nc-compile "$_mod" "$_outname" >/dev/null 2>&1; then

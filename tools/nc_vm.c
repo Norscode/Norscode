@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <ctype.h>
 #include <setjmp.h>
 #include <errno.h>
 #include <dirent.h>
@@ -1005,6 +1006,149 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
         char *s=val_to_str(args[0]); char *p=val_to_str(args[1]);
         int r=strstr(s,p)!=NULL; free(s);free(p); return val_bool(r);
     }
+    /* ── HTTP response helpers ────────────────────────────────────────── */
+    if (!strcmp(n,"response_status") || !strcmp(n,"http_response_status")) {
+        /* Parse {"status":N,...} */
+        if(nargs<1) return val_int(0);
+        char *s=val_to_str(args[0]);
+        JP j2={s,1}; Val *parsed=jp_parse(&j2); free(s);
+        if(parsed&&parsed->type==T_MAP){
+            Val *sv=map_get(parsed->map,"status");
+            if(sv&&sv->type==T_INT) return sv;
+            if(sv&&sv->type==T_STR) return val_int(atoll(sv->s));
+        }
+        return val_int(0);
+    }
+    if (!strcmp(n,"response_text") || !strcmp(n,"http_response_text")) {
+        if(nargs<1) return val_str("");
+        char *s=val_to_str(args[0]);
+        JP j2={s,1}; Val *parsed=jp_parse(&j2); free(s);
+        if(parsed&&parsed->type==T_MAP){
+            Val *bv=map_get(parsed->map,"body");
+            if(bv&&bv->type==T_STR) return bv;
+        }
+        return val_str("");
+    }
+    if (!strcmp(n,"response_json") || !strcmp(n,"http_response_json")) {
+        if(nargs<1) return val_map();
+        char *s=val_to_str(args[0]);
+        JP j2={s,1}; Val *parsed=jp_parse(&j2); free(s);
+        if(parsed&&parsed->type==T_MAP){
+            Val *bv=map_get(parsed->map,"body");
+            if(bv&&bv->type==T_STR){
+                JP j3={bv->s,1}; Val *body=jp_parse(&j3);
+                if(body&&body->type==T_MAP){
+                    /* Stringify non-string values */
+                    for(int _i=0;_i<body->map->len;_i++){
+                        Val *v=body->map->vals[_i];
+                        if(v&&v->type!=T_STR){char *s2=json_emit(v);body->map->vals[_i]=val_str_own(s2);}
+                    }
+                    return body;
+                }
+            }
+        }
+        return val_map();
+    }
+    if (!strcmp(n,"response_header") || !strcmp(n,"http_response_header")) {
+        if(nargs<2) return val_str("");
+        char *s=val_to_str(args[0]); char *key=val_to_str(args[1]);
+        JP j2={s,1}; Val *parsed=jp_parse(&j2); free(s);
+        if(parsed&&parsed->type==T_MAP){
+            Val *hv=map_get(parsed->map,"headers");
+            if(hv&&hv->type==T_MAP){
+                Val *v=map_get(hv->map,key); free(key);
+                if(v&&v->type==T_STR) return v;
+                return val_str("");
+            }
+        }
+        free(key); return val_str("");
+    }
+    if (!strcmp(n,"response_header_or") || !strcmp(n,"http_response_header_or")) {
+        if(nargs<3) return nargs>=3?args[2]:val_str("");
+        char *s=val_to_str(args[0]); char *key=val_to_str(args[1]); char *fb=val_to_str(args[2]);
+        JP j2={s,1}; Val *parsed=jp_parse(&j2); free(s);
+        Val *result=NULL;
+        if(parsed&&parsed->type==T_MAP){
+            Val *hv=map_get(parsed->map,"headers");
+            if(hv&&hv->type==T_MAP){
+                Val *v=map_get(hv->map,key);
+                if(v&&v->type==T_STR&&v->s[0]) result=v;
+            }
+        }
+        free(key);
+        if(result){free(fb);return result;}
+        return val_str_own(fb);
+    }
+    if (!strcmp(n,"response_ok") || !strcmp(n,"http_response_ok")) {
+        Val *status_args[1]={args[0]};
+        Val *sv=builtin_call("response_status", status_args, 1);
+        long long st=(sv&&sv->type==T_INT)?sv->i:0;
+        return val_bool(st>=200&&st<300);
+    }
+    if (!strcmp(n,"response_json_checked") || !strcmp(n,"http_response_json_checked")) {
+        Val *r_args[1]={args[0]};
+        return builtin_call("response_json", r_args, 1);
+    }
+    /* ── Selfhost/common builtins ────────────────────────────────────── */
+    if (!strcmp(n,"tokeniser_uttrykk") || !strcmp(n,"tokeniser_enkel")) {
+        /* Tokenize a simple expression string into a list of tokens */
+        if(nargs<1) return val_list();
+        char *src=val_to_str(args[0]);
+        Val *out=val_list();
+        const char *p=src;
+        while(*p) {
+            while(*p && (unsigned char)*p<=' ') p++;
+            if(!*p) break;
+            /* Multi-char operators (longest first) */
+            static const char *multi_ops[]={"<=>","<->","=>","->","<-","&&","||","+=","-=","*=","/=","%=","==","!=","<=",">=","<>",NULL};
+            int matched=0;
+            for(int _i=0;multi_ops[_i];_i++){
+                size_t ol=strlen(multi_ops[_i]);
+                if(strncmp(p,multi_ops[_i],ol)==0){
+                    list_push(out->list,val_str(multi_ops[_i]));
+                    p+=ol; matched=1; break;
+                }
+            }
+            if(matched) continue;
+            /* Quoted string */
+            if(*p=='"'){
+                const char *start=p; p++;
+                while(*p && !(*p=='"' && *(p-1)!='\\')) p++;
+                if(*p=='"') p++;
+                char *tok=malloc(p-start+1); memcpy(tok,start,p-start); tok[p-start]=0;
+                list_push(out->list,val_str_own(tok)); continue;
+            }
+            /* Identifier (ASCII + UTF-8 extended bytes for Norwegian) */
+            if(isalpha((unsigned char)*p)||*p=='_'||(unsigned char)*p>0x7f){
+                const char *start=p;
+                while(*p&&(isalnum((unsigned char)*p)||*p=='_'||(unsigned char)*p>0x7f)) p++;
+                char *tok=malloc(p-start+1); memcpy(tok,start,p-start); tok[p-start]=0;
+                list_push(out->list,val_str_own(tok)); continue;
+            }
+            /* Number */
+            if(isdigit((unsigned char)*p)){
+                const char *start=p;
+                while(*p&&isdigit((unsigned char)*p)) p++;
+                char *tok=malloc(p-start+1); memcpy(tok,start,p-start); tok[p-start]=0;
+                list_push(out->list,val_str_own(tok)); continue;
+            }
+            /* Single char (skip whitespace-only) */
+            if((unsigned char)*p>' '){ char tok[2]={*p,0}; list_push(out->list,val_str(tok)); }
+            p++;
+        }
+        free(src); return out;
+    }
+    if (!strcmp(n,"sett_inn") || !strcmp(n,"insert")) {
+        if(nargs>=3 && args[0]->type==T_LIST){
+            long long idx=args[1]->type==T_INT?args[1]->i:0;
+            List *l=args[0]->list;
+            if(idx<0)idx+=l->len; if(idx<0)idx=0; if(idx>l->len)idx=l->len;
+            list_push(l,NIL_VAL); /* grow by 1 */
+            memmove(&l->items[idx+1],&l->items[idx],(l->len-idx-1)*sizeof(Val*));
+            l->items[idx]=args[2];
+        }
+        return val_nil();
+    }
     /* ── Web/security builtins ───────────────────────────────────────── */
     if (!strcmp(n,"web_escape_html") || !strcmp(n,"escape_html")) {
         if(nargs<1) return val_str("");
@@ -1206,10 +1350,35 @@ static Val *builtin_call(const char *name, Val **args, int nargs) {
 /* ── Core interpreter ─────────────────────────────────────────────────────── */
 static Val *exec_fn(FnDef *fn, Val **args, int nargs);
 
+/* Global captured vars for closure execution.
+   Set before exec_fn call; LOAD_NAME falls back to this map if var not in frame. */
+static Val *g_closure_captures = NULL;
+
 static Val *call_fn(const char *name, Val **args, int nargs) {
     /* Try user-defined first */
     FnDef *d = fn_find(name);
     if (d) return exec_fn(d, args, nargs);
+    /* Check if name refers to a closure val in the topmost frame */
+    if (g_depth > 0) {
+        const char *local_name = name;
+        if (strncmp(local_name,"builtin.",8)==0) local_name+=8;
+        const char *last_dot = strrchr(local_name,'.'); if(last_dot) local_name=last_dot+1;
+        Frame *cf = g_frames[g_depth-1];
+        Val *maybe_closure = frame_get(cf, local_name);
+        if (maybe_closure && maybe_closure != NIL_VAL && maybe_closure->type==T_MAP) {
+            Val *cl_fn_v = map_get(maybe_closure->map, "__closure__");
+            if (cl_fn_v && cl_fn_v->type==T_STR) {
+                FnDef *cl_def = fn_find(cl_fn_v->s);
+                if (cl_def) {
+                    Val *saved = g_closure_captures;
+                    g_closure_captures = maybe_closure;
+                    Val *ret = exec_fn(cl_def, args, nargs);
+                    g_closure_captures = saved;
+                    return ret;
+                }
+            }
+        }
+    }
     /* Try built-in */
     return builtin_call(name, args, nargs);
 }
@@ -1277,6 +1446,11 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
             Val *name_v = ARG(1);
             const char *name2 = (name_v->type==T_STR) ? name_v->s : "?";
             Val *result2 = frame_get(f, name2);
+            /* Fall back to closure captured vars if not found in frame */
+            if ((!result2 || result2 == NIL_VAL) && g_closure_captures && !strchr(name2,'.')) {
+                Val *cv = map_get(g_closure_captures->map, name2);
+                if (cv && cv != NIL_VAL) result2 = cv;
+            }
             /* Handle "obj.field" notation if flat lookup gave NIL */
             if ((!result2 || result2 == NIL_VAL) && strchr(name2, '.')) {
                 const char *dot = strchr(name2, '.');
@@ -1512,6 +1686,36 @@ static Val *exec_fn(FnDef *fn, Val **args, int nargs) {
             if (f->ncatch > 0) { free(f->catch_labels[--f->ncatch]); }
         }
         else if (!strcmp(op,"LOAD_EXCEPTION")) { push(f, g_exception ? g_exception : NIL_VAL); }
+        else if (!strcmp(op,"BUILD_LAMBDA")) {
+            /* BUILD_LAMBDA fn_name, [captures] → closure map */
+            Val *fn_name_v = ARG(1);
+            Val *captures_v = ARG(2);
+            const char *lname = (fn_name_v && fn_name_v->type==T_STR) ? fn_name_v->s : "";
+            Val *closure = val_map();
+            map_set(closure->map, "__closure__", val_str(lname));
+            /* Capture variables: either explicit list or snapshot of current frame */
+            if (captures_v && captures_v->type==T_LIST && captures_v->list->len > 0) {
+                for (int _i=0;_i<captures_v->list->len;_i++){
+                    Val *cv = captures_v->list->items[_i];
+                    if (cv && cv->type==T_STR) {
+                        Val *captured_val = frame_get(f, cv->s);
+                        map_set(closure->map, cv->s, captured_val);
+                    }
+                }
+            } else {
+                /* Capture all current frame vars (implicit closure) */
+                for (int _i=0;_i<f->nvar;_i++) {
+                    map_set(closure->map, f->var_names[_i], f->var_vals[_i]);
+                }
+            }
+            push(f, closure);
+        }
+        else if (!strcmp(op,"UNARY_MINUS")) {
+            Val *a2=pop(f);
+            if(a2->type==T_INT) push(f,val_int(-a2->i));
+            else if(a2->type==T_FLOAT) push(f,val_float(-a2->f));
+            else push(f,val_int(0));
+        }
         else {
             fprintf(stderr, "[nc-vm] ukjent opkode: %s\n", op);
         }
