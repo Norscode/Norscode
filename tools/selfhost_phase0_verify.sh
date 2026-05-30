@@ -34,15 +34,20 @@ check_sh_syntax() {
 }
 
 check_active_surface() {
-  rg -n \
-    "python3 main.py|docker buildx build|Dockerfile\.linux-build|setup\.py|test_web_dependency\.no" \
+  grep -rn \
+    "python3 main\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no" \
     "${ACTIVE_ROOTS[@]}" \
-    -g '!selfhost_phase0_verify.sh' \
-    -g '!**/.git/**'
+    --exclude="selfhost_phase0_verify.sh" \
+    --exclude-dir=".git" \
+    2>/dev/null
 }
 
 check_legacy_flag_present() {
-  rg -n -- "--legacy-python-fallback" "$ROOT_DIR/bin/nc" "$ROOT_DIR/bin/bootstrap" "$ROOT_DIR/docs"
+  grep -rn -- "--legacy-python-fallback" \
+    "$ROOT_DIR/bin/nc" \
+    "$ROOT_DIR/bin/bootstrap" \
+    "$ROOT_DIR/docs" \
+    2>/dev/null
 }
 
 main() {
@@ -50,6 +55,7 @@ main() {
   check_legacy_flag_present >/dev/null
   if check_active_surface >/dev/null; then
     printf 'Fase 0-verifisering feila: gamle blokkere finst framleis i aktiv flate.\n' >&2
+    check_active_surface >&2 || true
     exit 1
   fi
 
