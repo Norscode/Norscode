@@ -169,6 +169,14 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         } else if (!strcmp(op, "COMPARE_GE")) {
             NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
             nc_push(&sp,stack_arr,nc_cmp(a,b,2)); ip++;
+        } else if (!strcmp(op, "BUILD_LAMBDA")) {
+            /* Push lambda-funksjonsnamnet som ein streng-verdi */
+            if (instr->list->len >= 2) {
+                nc_push(&sp, stack_arr, instr->list->items[1]);
+            } else {
+                nc_push(&sp, stack_arr, nc_nil());
+            }
+            ip++;
         } else if (!strcmp(op, "BUILD_LIST")) {
             int n = instr->list->len>=2 && instr->list->items[1]->type==NC_INT ? (int)instr->list->items[1]->i : 0;
             nc_push(&sp,stack_arr,nc_build_list(&sp,stack_arr,n)); ip++;
@@ -191,6 +199,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             /* Handter builtins direkte */
             const char *cn = callee;
             if (strncmp(cn,"builtin.",8)==0) cn+=8;
+            /* Variabel-kall: sjekk om cn er ein variabel som held eit fn-namn */
+            NcVal *var_fn = nc_nil();
+            for (int _vi=0; _vi<nvars; _vi++) {
+                if (!strcmp(varnames[_vi], cn)) { var_fn = vars_arr[_vi]; break; }
+            }
+            if (var_fn && var_fn->type == NC_STR && nc_exec_find_fn(functions, var_fn->s)) {
+                NcVal *lambda_r = nc_exec_call(functions, var_fn->s, cargs, narg, depth+1);
+                free(cargs); free(callee);
+                nc_push(&sp,stack_arr,lambda_r); ip++;
+                continue;
+            }
             NcVal *fn_r = nc_nil();
             if (!strcmp(cn,"skriv"))                fn_r = nc_builtin_skriv(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lengde"))           fn_r = nc_builtin_lengde(narg>0?cargs[0]:nc_nil());
@@ -212,8 +231,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"nøkler"))           fn_r=nc_builtin_nokler(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"verdier"))          fn_r=nc_builtin_verdier(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fjern_nokkel"))     { if(narg>=2) nc_builtin_fjern_nokkel(cargs[0],cargs[1]); }
-            else if (!strcmp(cn,"json_stringify"))   fn_r=nc_builtin_json_stringify(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_str(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json_stringify"))   fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_les"))          fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_skriv"))        { if(narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"fil_finnes"))       fn_r=nc_builtin_fil_finnes(narg>0?cargs[0]:nc_nil());
@@ -226,6 +245,48 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"upper"))            fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lower"))            fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"exit")||!strcmp(cn,"stopp")) nc_builtin_exit(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.gange")||!strcmp(cn,"std.math.gange"))   fn_r=nc_mul(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.dele")||!strcmp(cn,"std.math.dele"))     fn_r=nc_div(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.rest")||!strcmp(cn,"std.math.rest"))     fn_r=nc_mod(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.abs")||!strcmp(cn,"std.math.abs")) {
+                NcVal *v=narg>0?cargs[0]:nc_nil();
+                fn_r = (v->type==NC_INT && v->i<0) ? nc_int(-v->i) : v;
+            }
+            else if (!strcmp(cn,"math.min")||!strcmp(cn,"std.math.min"))   fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),-1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"assert")) {
+                if (narg>0 && !nc_truthy(cargs[0])) {
+                    char *msg = narg>1 ? nc_to_str_raw(cargs[1]) : strdup("assert feilet");
+                    nc_throw(msg); free(msg);
+                }
+            }
+            else if (!strcmp(cn,"assert_eq")) {
+                if (narg>=2 && !nc_eq(cargs[0],cargs[1])) {
+                    char *a=nc_to_str_raw(cargs[0]),*b=nc_to_str_raw(cargs[1]);
+                    char msg[512]; snprintf(msg,sizeof(msg),"assert_eq feilet: %s != %s",a,b);
+                    free(a); free(b); nc_throw(msg);
+                }
+            }
+            else if (!strcmp(cn,"assert_ne")) {
+                if (narg>=2 && nc_eq(cargs[0],cargs[1])) {
+                    char *a=nc_to_str_raw(cargs[0]);
+                    char msg[512]; snprintf(msg,sizeof(msg),"assert_ne feilet: %s == %s",a,a);
+                    free(a); nc_throw(msg);
+                }
+            }
+            else if (!strcmp(cn,"tekst_fra_bool")||!strcmp(cn,"tekst_fra_boolsk")) {
+                fn_r = nc_str(narg>0 && nc_truthy(cargs[0]) ? "sann" : "usann");
+            }
+            else if (!strcmp(cn,"desimaltall"))     fn_r=nc_builtin_desimaltall(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
+            /* env.*, json.*, t.* aliases */
+            else if (!strcmp(cn,"env.finnes")||!strcmp(cn,"env_finnes")) fn_r=nc_builtin_miljo_finnes(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"env.hent")||!strcmp(cn,"env_hent"))     fn_r=nc_builtin_miljo_hent(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json.parse")||!strcmp(cn,"json_parse")) fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json.stringify")||!strcmp(cn,"json_stringify")) fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
             free(cargs); free(callee);
@@ -233,6 +294,20 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         } else if (!strcmp(op, "THROW")) {
             NcVal *e = nc_pop(&sp,stack_arr); char *s=nc_to_str_raw(e);
             nc_throw(s); free(s); ip++;
+        } else if (!strcmp(op, "TRY_BEGIN")) {
+            /* Minimal TRY: lagre catch-label */
+            if (instr->list->len >= 2) {
+                NcVal *catch_lbl = instr->list->items[1];
+                nc_push(&sp, stack_arr, catch_lbl); /* marker på stack */
+            }
+            ip++;
+        } else if (!strcmp(op, "TRY_END")) {
+            /* Fjern TRY-marker frå stack */
+            ip++;
+        } else if (!strcmp(op, "LOAD_EXCEPTION")) {
+            /* Last unntak-meldinga */
+            nc_push(&sp, stack_arr, nc_str(g_err_msg[0] ? g_err_msg : "ukjent feil"));
+            ip++;
         } else {
             ip++;
         }

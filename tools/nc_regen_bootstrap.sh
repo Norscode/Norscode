@@ -57,3 +57,24 @@ if [ "$_res" = "regen OK" ]; then
 else
     printf '✗ Røyktest feilet: %s\n' "$_res" >&2; exit 1
 fi
+
+# ─── Bygg norscode_native frå generert C ────────────────────────────────────
+if command -v clang >/dev/null 2>&1 || command -v cc >/dev/null 2>&1; then
+    printf 'Byggjer dist/norscode_native...\n'
+    CC_CMD="${CC:-clang}"
+    if ! command -v "$CC_CMD" >/dev/null 2>&1; then CC_CMD=cc; fi
+    # Generer C frå bootstrap-NCB
+    NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
+    NC_C_OUTPUT="$ROOT/dist/norscode_kompiler.c" \
+        "$NC_VM" --nc-run "$ROOT/selfhost/ncb_to_c.no" >/dev/null 2>&1
+    if [ -f "$ROOT/dist/norscode_kompiler.c" ]; then
+        cat "$ROOT/tools/nc_runtime_mini.c" > /tmp/_nc_full.c
+        grep -v '#include.*nc_runtime' "$ROOT/dist/norscode_kompiler.c" | \
+            sed 's/^int main/static int nc_gen_main/' >> /tmp/_nc_full.c
+        cat "$ROOT/tools/nc_native_main.c" >> /tmp/_nc_full.c
+        "$CC_CMD" -O2 -Wno-everything -o "$ROOT/dist/norscode_native" /tmp/_nc_full.c 2>/dev/null
+        if [ -x "$ROOT/dist/norscode_native" ]; then
+            printf '✓ dist/norscode_native bygget\n'
+        fi
+    fi
+fi

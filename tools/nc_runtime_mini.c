@@ -306,10 +306,19 @@ static NcVal *nc_builtin_fjern(NcVal *lst, NcVal *idx_v) {
     return r;
 }
 static NcVal *nc_builtin_slice(NcVal *v, NcVal *a_v, NcVal *b_v) {
-    if (!v || v->type != NC_STR) return nc_str("");
-    long long a = a_v->type == NC_INT ? a_v->i : 0;
-    long long b = b_v->type == NC_INT ? b_v->i : (long long)strlen(v->s);
+    if (!v) return nc_str("");
+    long long a = (a_v && a_v->type==NC_INT) ? a_v->i : 0;
+    if (v->type == NC_LIST) {
+        long long len = v->list->len;
+        long long b = (b_v && b_v->type==NC_INT && b_v->i != -1) ? b_v->i : len;
+        if (a < 0) a = 0; if (b < 0 || b > len) b = len; if (b < a) b = a;
+        NcVal *r = nc_list_new();
+        for (long long i=a; i<b; i++) nc_builtin_legg_til(r, v->list->items[i]);
+        return r;
+    }
+    if (v->type != NC_STR) return nc_str("");
     long long len = (long long)strlen(v->s);
+    long long b = (b_v && b_v->type==NC_INT && b_v->i != -1) ? b_v->i : len;
     if (a < 0) a = 0; if (a > len) a = len;
     if (b < a) b = a; if (b > len) b = len;
     char *r = malloc(b-a+1);
@@ -625,3 +634,80 @@ static NcVal *nc_builtin_json_parse_str(NcVal *v) {
     char *s = nc_to_str_raw(v); JP2 j={s}; NcVal *r=jp2_parse(&j); free(s); return r;
 }
 static NcVal *nc_to_str(NcVal *v) { return nc_str_own(nc_to_str_raw(v)); }
+
+/* old json_parse removed */
+
+/* Smart json_stringify (same semantikk som nc_vm.c json_emit) */
+static int nc_str_looks_like_json_nonstring(const char *s) {
+    if (!s || !*s) return 0;
+    if (!strcmp(s,"true")||!strcmp(s,"false")||!strcmp(s,"null")) return 1;
+    size_t sl = strlen(s);
+    if (s[0]=='{' && s[sl-1]=='}' && sl>=2) return 1;
+    if (s[0]=='[' && s[sl-1]==']' && sl>=2) return 1;
+    char *end; strtoll(s,&end,10);
+    if (*end==0 && end!=s) return 1;
+    return 0;
+}
+static NcVal *nc_builtin_json_stringify_smart(NcVal *v);
+static NcVal *nc_builtin_json_stringify_smart(NcVal *v) {
+    if (!v || v->type==NC_NIL) return nc_str("null");
+    if (v->type==NC_BOOL) return nc_str(v->b?"true":"false");
+    if (v->type==NC_INT) { char b[32]; snprintf(b,sizeof(b),"%lld",v->i); return nc_str(b); }
+    if (v->type==NC_STR) {
+        if (nc_str_looks_like_json_nonstring(v->s)) return nc_str(v->s);
+        return nc_builtin_json_stringify(v);  /* normal string quoting */
+    }
+    if (v->type==NC_LIST) {
+        char *r = strdup("["); int first=1;
+        for (int i=0; i<v->list->len; i++) {
+            NcVal *item_json = nc_builtin_json_stringify_smart(v->list->items[i]);
+            r = realloc(r, strlen(r)+strlen(item_json->s)+3);
+            if (!first) strcat(r,",");
+            strcat(r, item_json->s); first=0;
+        }
+        r = realloc(r, strlen(r)+2); strcat(r,"]");
+        return nc_str_own(r);
+    }
+    if (v->type==NC_MAP) {
+        char *r = strdup("{"); int first=1;
+        for (int i=0; i<v->map->len; i++) {
+            NcVal *kj = nc_builtin_json_stringify(nc_str(v->map->keys[i]));
+            NcVal *vj = nc_builtin_json_stringify_smart(v->map->vals[i]);
+            r = realloc(r, strlen(r)+strlen(kj->s)+strlen(vj->s)+4);
+            if (!first) strcat(r,",");
+            strcat(r, kj->s); strcat(r,":"); strcat(r, vj->s); first=0;
+        }
+        r = realloc(r, strlen(r)+2); strcat(r,"}");
+        return nc_str_own(r);
+    }
+    return nc_str("null");
+}
+
+/* nc_builtin_json_parse_norscode — full nc-vm-kompatibel json.parse */
+static NcVal *nc_builtin_json_parse_norscode(NcVal *v) {
+    char *s = nc_to_str_raw(v); JP2 j={s};
+    NcVal *r = jp2_parse(&j); free(s);
+    if (!r) return nc_nil();
+    /* MAP: stringify non-string values */
+    if (r->type == NC_MAP) {
+        for (int i=0; i<r->map->len; i++) {
+            NcVal *mv = r->map->vals[i];
+            if (mv && mv->type != NC_STR) {
+                r->map->vals[i] = nc_builtin_json_stringify_smart(mv);
+            }
+        }
+        return r;
+    }
+    /* LIST: konverter til string-keyed map */
+    if (r->type == NC_LIST) {
+        NcVal *m = nc_map_new();
+        for (int i=0; i<r->list->len; i++) {
+            char keybuf[32]; snprintf(keybuf, sizeof(keybuf), "%d", i);
+            NcVal *mv = r->list->items[i];
+            if (mv && mv->type != NC_STR) mv = nc_builtin_json_stringify_smart(mv);
+            nc_index_set(m, nc_str(keybuf), mv);
+        }
+        return m;
+    }
+    return r;
+}
