@@ -1,31 +1,19 @@
-"""Build-bytecode command module.
-
-This command produces portable `.ncb.json` bytecode artifacts without going
-through the legacy C backend.
-"""
-
+"""AVVIKLA: erstatta av nc-vm (Python-fri). Bruk bin/nc i staden."""
 from __future__ import annotations
-
 from norcode.commands.base import CommandModule
-from norcode.compiler_core import build_bytecode_file
 
+def _noop_register(parser) -> None:
+    pass
 
-
-def register_arguments(parser) -> None:
-    parser.add_argument("file")
-    parser.add_argument("-o", "--output", help="Output .ncb.json file")
-
-
-
-def run(args) -> int:
-    result = build_bytecode_file(args.file, output=args.output)
-    print(f"Bytecode skrevet til: {result.output_path}")
-    return 0
-
+def _noop_run(args) -> int:
+    import subprocess
+    nc = __import__("subprocess")
+    print(f"AVVIKLA: '" + name + "' er erstatta. Bruk: bin/nc run/compile/test")
+    return 2
 
 BUILD_BYTECODE_COMMAND = CommandModule(
     name="bytecode-build",
-    help="Bygg .ncb.json bytecode-artifact",
-    register_arguments=register_arguments,
-    run=run,
+    help="[avvikla — bruk bin/nc]",
+    register_arguments=_noop_register,
+    run=_noop_run,
 )
