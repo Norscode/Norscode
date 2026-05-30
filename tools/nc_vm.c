@@ -545,7 +545,7 @@ typedef struct Frame {
     int     catch_cap;
 } Frame;
 
-#define MAX_CALL_DEPTH 4096
+#define MAX_CALL_DEPTH 8192
 static Frame *g_frames[MAX_CALL_DEPTH];
 static int    g_depth = 0;
 
