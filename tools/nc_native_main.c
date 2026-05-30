@@ -40,7 +40,62 @@ static NcVal *nc_exec_find_fn(NcVal *functions, const char *name) {
 }
 
 /* Forward decl */
+static NcVal *g_nc_closure_fwd;
+#define g_nc_closure g_nc_closure_fwd
 static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, int nargs, int depth);
+static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth);
+
+/* Stubs for nc-vm internal builtins */
+static NcVal *nc_stub_sh_disasm(NcVal *v) {
+    /* stub: returnerer "disasm ikkje tilgjengeleg" */
+    return nc_str("[disasm ikkje tilgjengeleg]");
+}
+static NcVal *nc_stub_sh_tokens(NcVal *v) { return nc_list_new(); }
+static NcVal *nc_stub_sh_parse_feil(NcVal *v) { return nc_bool(0); }
+static NcVal *nc_stub_t_hilsen(NcVal *navn) { char *n=nc_to_str_raw(navn); char r[256]; snprintf(r,sizeof(r),"Hei %s",n); free(n); return nc_str(r); }
+static NcVal *nc_stub_t_starter_med(NcVal *s, NcVal *p) { return nc_builtin_starts_with(s, p); }
+static NcVal *nc_stub_assert_slutter_med(NcVal *s, NcVal *p) {
+    if (!nc_truthy(nc_builtin_ends_with(s, p))) {
+        char *sv=nc_to_str_raw(s), *pv=nc_to_str_raw(p);
+        char msg[512]; snprintf(msg, sizeof(msg), "assert_slutter_med: '%s' sluttar ikkje med '%s'", sv, pv);
+        free(sv); free(pv); nc_throw(msg);
+    }
+    return nc_nil();
+}
+static NcVal *nc_stub_assert_starter_med(NcVal *s, NcVal *p) {
+    if (!nc_truthy(nc_builtin_starts_with(s, p))) {
+        char *sv=nc_to_str_raw(s), *pv=nc_to_str_raw(p);
+        char msg[512]; snprintf(msg, sizeof(msg), "assert_starter_med feilet: '%s' startar ikkje med '%s'", sv, pv);
+        free(sv); free(pv); nc_throw(msg);
+    }
+    return nc_nil();
+}
+static NcVal *nc_stub_path_join(NcVal *a, NcVal *b) {
+    char *sa=nc_to_str_raw(a), *sb=nc_to_str_raw(b);
+    size_t la=strlen(sa), lb=strlen(sb);
+    char *r = malloc(la+lb+2);
+    strcpy(r, sa);
+    if (la>0 && sa[la-1]!='/' && lb>0 && sb[0]!='/') strcat(r, "/");
+    strcat(r, sb);
+    free(sa); free(sb);
+    return nc_str_own(r);
+}
+static NcVal *nc_stub_web_escape_html(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    /* Minimal HTML escape */
+    char *r = malloc(strlen(s)*6+1); char *wp = r;
+    for (char *p=s; *p; p++) {
+        if (*p=='<') { strcpy(wp,"&lt;"); wp+=4; }
+        else if (*p=='>') { strcpy(wp,"&gt;"); wp+=4; }
+        else if (*p=='&') { strcpy(wp,"&amp;"); wp+=5; }
+        else if (*p=='"') { strcpy(wp,"&quot;"); wp+=6; }
+        else if (*p=='\'') { strcpy(wp,"&#39;"); wp+=5; }
+        else *wp++ = *p;
+    }
+    *wp=0; free(s);
+    return nc_str_own(r);
+}
+
 
 /* Kjøyr ein funksjon */
 static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, int nargs, int depth) {
@@ -59,6 +114,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
     NcVal **stack_arr = calloc(512, sizeof(NcVal*)); int sp = 0;
     NcVal **vars_arr  = calloc(128, sizeof(NcVal*));
     char **varnames   = calloc(128, sizeof(char*)); int nvars = 0;
+    /* TRY/CATCH stack */
+    struct { const char *catch_lbl; int sp_depth; jmp_buf jmp; } try_stack[32];
+    int try_depth = 0;
+    static char last_exception[4096];
 
     /* Last inn parametrar */
     if (params_v && params_v->type == NC_LIST) {
@@ -108,7 +167,19 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         } else if (!strcmp(op, "LOAD_NAME")) {
             if (instr->list->len >= 2) {
                 char *n = nc_to_str_raw(instr->list->items[1]);
-                nc_push(&sp, stack_arr, nc_load(vars_arr, varnames, nvars, n)); free(n);
+                /* Sjekk lokale vars fyrst */
+                NcVal *lv = nc_nil();
+                for (int _li=0; _li<nvars; _li++) {
+                    if (!strcmp(varnames[_li], n)) { lv = vars_arr[_li]; goto _load_done; }
+                }
+                /* Sjekk global closure-captures */
+                if (g_nc_closure && g_nc_closure->type == NC_MAP) {
+                    NcVal *cv = nc_index_get(g_nc_closure, nc_str(n));
+                    if (cv && cv->type != NC_NIL) { lv = cv; goto _load_done; }
+                }
+                lv = nc_load(vars_arr, varnames, nvars, n); /* kastar for ukjent */
+                _load_done: free(n);
+                nc_push(&sp, stack_arr, lv);
             }
             ip++;
         } else if (!strcmp(op, "POP")) {
@@ -170,12 +241,16 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
             nc_push(&sp,stack_arr,nc_cmp(a,b,2)); ip++;
         } else if (!strcmp(op, "BUILD_LAMBDA")) {
-            /* Push lambda-funksjonsnamnet som ein streng-verdi */
+            /* Lag closure-map med fn-namn + alle noverande variablar */
+            NcVal *closure = nc_map_new();
             if (instr->list->len >= 2) {
-                nc_push(&sp, stack_arr, instr->list->items[1]);
-            } else {
-                nc_push(&sp, stack_arr, nc_nil());
+                nc_index_set(closure, nc_str("__closure__"), instr->list->items[1]);
             }
+            /* Fang alle noverande variablar */
+            for (int _ci=0; _ci<nvars; _ci++) {
+                nc_index_set(closure, nc_str(varnames[_ci]), vars_arr[_ci]);
+            }
+            nc_push(&sp, stack_arr, closure);
             ip++;
         } else if (!strcmp(op, "BUILD_LIST")) {
             int n = instr->list->len>=2 && instr->list->items[1]->type==NC_INT ? (int)instr->list->items[1]->i : 0;
@@ -204,6 +279,21 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             for (int _vi=0; _vi<nvars; _vi++) {
                 if (!strcmp(varnames[_vi], cn)) { var_fn = vars_arr[_vi]; break; }
             }
+            /* Closure-kall: var er ein MAP med __closure__ */
+            if (var_fn && var_fn->type == NC_MAP) {
+                NcVal *cl_fn = nc_index_get(var_fn, nc_str("__closure__"));
+                if (cl_fn && cl_fn->type == NC_STR && nc_exec_find_fn(functions, cl_fn->s)) {
+                    /* Legg closure-vars til args-kontekst via ein wrapper */
+                    NcVal **cl_cargs = calloc(narg + var_fn->map->len, sizeof(NcVal*));
+                    memcpy(cl_cargs, cargs, narg * sizeof(NcVal*));
+                    /* Kjøyr med closure som ekstra kontekst */
+                    NcVal *lambda_r = nc_exec_call_closure(functions, cl_fn->s, cargs, narg, var_fn, depth+1);
+                    free(cl_cargs); free(cargs); free(callee);
+                    nc_push(&sp,stack_arr,lambda_r); ip++;
+                    continue;
+                }
+            }
+            /* Direkte funksjonsnamnkall */
             if (var_fn && var_fn->type == NC_STR && nc_exec_find_fn(functions, var_fn->s)) {
                 NcVal *lambda_r = nc_exec_call(functions, var_fn->s, cargs, narg, depth+1);
                 free(cargs); free(callee);
@@ -282,31 +372,85 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"desimaltall"))     fn_r=nc_builtin_desimaltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
+            /* sh.*, t.*, path.*, web-stubs */
+            else if (!strcmp(cn,"sh.disasm_uttrykk")||!strcmp(cn,"sh.disasm_uttrykk_med_miljo")||
+                     !strcmp(cn,"sh.disasm_fra_kilde")||!strcmp(cn,"sh.disasm_uttrykk_strict")||
+                     !strcmp(cn,"sh.disasm_fra_tokens")||!strcmp(cn,"sh.disasm_fra_tokens_strict")||
+                     !strcmp(cn,"sh.disasm_skript"))  fn_r=nc_stub_sh_disasm(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"sh.tokens_uttrykk")) fn_r=nc_stub_sh_tokens(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"sh.parse_feil"))     fn_r=nc_stub_sh_parse_feil(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"t.hilsen"))           fn_r=nc_stub_t_hilsen(narg>0?cargs[0]:nc_str(""));
+            else if (!strcmp(cn,"t.starter_med")||!strcmp(cn,"t.rop"))  fn_r=nc_stub_t_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"t.slutter_med")) fn_r=nc_builtin_ends_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"assert_slutter_med")) fn_r=nc_stub_assert_slutter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"assert_starter_med")) fn_r=nc_stub_assert_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"path.join"))          fn_r=nc_stub_path_join(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"web_escape_html")||!strcmp(cn,"html.escape")) fn_r=nc_stub_web_escape_html(narg>0?cargs[0]:nc_nil());
             /* env.*, json.*, t.* aliases */
             else if (!strcmp(cn,"env.finnes")||!strcmp(cn,"env_finnes")) fn_r=nc_builtin_miljo_finnes(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"env.hent")||!strcmp(cn,"env_hent"))     fn_r=nc_builtin_miljo_hent(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json.parse")||!strcmp(cn,"json_parse")) fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json.stringify")||!strcmp(cn,"json_stringify")) fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
-            else fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
+            else {
+                /* Fang cross-function exceptions */
+                int _had_try = try_depth > 0;
+                if (_had_try) {
+                    jmp_buf _saved_jmp;
+                    memcpy(&_saved_jmp, &g_err_jmp, sizeof(jmp_buf));
+                    if (setjmp(g_err_jmp)) {
+                        memcpy(&g_err_jmp, &_saved_jmp, sizeof(jmp_buf));
+                        free(cargs); free(callee);
+                        if (try_depth > 0) {
+                            { const char *_em = g_err_msg;
+                          if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
+                          else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
+                          strncpy(last_exception, _em, sizeof(last_exception)-1); }
+                            g_err_msg[0] = 0;
+                            try_depth--;
+                            const char *cl = try_stack[try_depth].catch_lbl;
+                            sp = try_stack[try_depth].sp_depth;
+                            NcVal *tgt = nc_index_get(label_map, nc_str(cl));
+                            if (tgt && tgt->type == NC_INT) { ip = (int)tgt->i + 1; continue; }
+                        }
+                        fn_r = nc_nil();
+                    } else {
+                        fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
+                        memcpy(&g_err_jmp, &_saved_jmp, sizeof(jmp_buf));
+                    }
+                } else {
+                    fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
+                }
+            }
             free(cargs); free(callee);
             nc_push(&sp,stack_arr,fn_r); ip++;
         } else if (!strcmp(op, "THROW")) {
             NcVal *e = nc_pop(&sp,stack_arr); char *s=nc_to_str_raw(e);
+            if (try_depth > 0) {
+                strncpy(last_exception, s, sizeof(last_exception)-1);
+                free(s);
+                /* Hopp til catch-label */
+                try_depth--;
+                const char *cl = try_stack[try_depth].catch_lbl;
+                sp = try_stack[try_depth].sp_depth;
+                NcVal *tgt = nc_index_get(label_map, nc_str(cl));
+                if (tgt && tgt->type == NC_INT) { ip = (int)tgt->i; continue; }
+            }
             nc_throw(s); free(s); ip++;
         } else if (!strcmp(op, "TRY_BEGIN")) {
-            /* Minimal TRY: lagre catch-label */
-            if (instr->list->len >= 2) {
-                NcVal *catch_lbl = instr->list->items[1];
-                nc_push(&sp, stack_arr, catch_lbl); /* marker på stack */
+            if (instr->list->len >= 2 && try_depth < 32) {
+                char *cl = nc_to_str_raw(instr->list->items[1]);
+                try_stack[try_depth].catch_lbl = strdup(cl); free(cl);
+                try_stack[try_depth].sp_depth = sp;
+                try_depth++;
             }
             ip++;
         } else if (!strcmp(op, "TRY_END")) {
-            /* Fjern TRY-marker frå stack */
+            if (try_depth > 0) try_depth--;
             ip++;
         } else if (!strcmp(op, "LOAD_EXCEPTION")) {
-            /* Last unntak-meldinga */
-            nc_push(&sp, stack_arr, nc_str(g_err_msg[0] ? g_err_msg : "ukjent feil"));
+            nc_push(&sp, stack_arr, nc_str(last_exception[0] ? last_exception : "ukjent feil"));
+            last_exception[0] = 0;
             ip++;
         } else {
             ip++;
@@ -315,6 +459,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
 done:
     free(stack_arr); free(vars_arr); free(varnames);
     return retval;
+}
+
+/* g_nc_closure defined via macro above */
+
+/* Køyr lambda med closure-kontekst */
+static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth) {
+    NcVal *saved = g_nc_closure;
+    g_nc_closure = closure;
+    NcVal *r = nc_exec_call(functions, fn_name, args, nargs, depth);
+    g_nc_closure = saved;
+    return r;
 }
 
 /* ── Wrap kompiler_fil som NcExecCtx-kall ── */
@@ -394,3 +549,4 @@ int main(int argc, char **argv) {
     fprintf(stderr, "Ukjent kommando: %s\n", cmd);
     return 1;
 }
+
