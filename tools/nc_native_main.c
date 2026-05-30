@@ -11,6 +11,7 @@
  */
 
 /* Forhandsdeklarasjonar for genererte funksjonar */
+/* nc_dispatch.c inkluderast av build-scriptet */
 static NcVal *nc_fn_selfhost_kompiler_kompiler_fil(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_kompiler_kompiler_fil_til_disk(NcVal **args, int nargs);
 
@@ -393,6 +394,13 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"json.stringify")||!strcmp(cn,"json_stringify")) fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else {
+                /* Sjekk dispatch-tabell for genererte C-funksjonar */
+                NcVal *dispatch_r = nc_dispatch_call(callee, cargs, narg);
+                if (dispatch_r != NULL) {
+                    free(cargs); free(callee);
+                    nc_push(&sp, stack_arr, dispatch_r); ip++;
+                    continue;
+                }
                 /* Fang cross-function exceptions */
                 int _had_try = try_depth > 0;
                 if (_had_try) {
