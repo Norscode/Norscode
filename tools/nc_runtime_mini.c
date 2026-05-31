@@ -159,6 +159,26 @@ static NcVal *nc_mod(NcVal *a, NcVal *b) {
     }
     return nc_nil();
 }
+static NcVal *nc_lshift(NcVal *a, NcVal *b) {
+    long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+    return nc_int(av<<bv);
+}
+static NcVal *nc_rshift(NcVal *a, NcVal *b) {
+    long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+    return nc_int(av>>bv);
+}
+static NcVal *nc_band(NcVal *a, NcVal *b) {
+    long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+    return nc_int(av&bv);
+}
+static NcVal *nc_bor(NcVal *a, NcVal *b) {
+    long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+    return nc_int(av|bv);
+}
+static NcVal *nc_bxor(NcVal *a, NcVal *b) {
+    long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+    return nc_int(av^bv);
+}
 static NcVal *nc_neg(NcVal *a) {
     if (a->type == NC_INT) return nc_int(-a->i);
     return nc_nil();
@@ -344,6 +364,20 @@ static NcVal *nc_builtin_fil_skriv(NcVal *path_v, NcVal *data_v) {
     fputs(data, f); fclose(f); free(data);
     return nc_nil();
 }
+static NcVal *nc_builtin_fil_skriv_binary(NcVal *path_v, NcVal *list_v) {
+    char *path = nc_to_str_raw(path_v);
+    FILE *f = fopen(path, "wb"); free(path);
+    if (!f) return nc_nil();
+    if (list_v && list_v->type == NC_LIST) {
+        for (int i = 0; i < list_v->list->len; i++) {
+            NcVal *bv = list_v->list->items[i];
+            unsigned char byte = (unsigned char)(bv && bv->type == NC_INT ? (int)bv->i : 0);
+            fwrite(&byte, 1, 1, f);
+        }
+    }
+    fclose(f);
+    return nc_nil();
+}
 static NcVal *nc_builtin_fil_finnes(NcVal *path_v) {
     char *path = nc_to_str_raw(path_v);
     FILE *f = fopen(path, "rb"); free(path);
@@ -469,7 +503,7 @@ static NcVal *nc_builtin_tekst_fra_heltall(NcVal *v) {
 }
 static NcVal *nc_builtin_heltall(NcVal *v) {
     if (v->type == NC_INT) return v;
-    if (v->type == NC_STR) return nc_int(atoll(v->s));
+    if (v->type == NC_STR) return nc_int(strtoll(v->s, NULL, 0));
     if (v->type == NC_BOOL) return nc_int(v->b);
     return nc_int(0);
 }

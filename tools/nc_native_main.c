@@ -10,10 +10,7 @@
  *         norscode_generated.c tools/nc_native_main.c -o dist/norscode_native
  */
 
-/* Forhandsdeklarasjonar for genererte funksjonar */
-/* nc_dispatch.c inkluderast av build-scriptet */
-static NcVal *nc_fn_selfhost_kompiler_kompiler_fil(NcVal **args, int nargs);
-static NcVal *nc_fn_selfhost_kompiler_kompiler_fil_til_disk(NcVal **args, int nargs);
+/* Forhandsdeklarasjonar — brukar nc_dispatch_call for dynamisk oppslag */
 
 /* ── NC executor: kjøyr eit NCB via C (ikkje selfhost/vm.no) ── */
 
@@ -219,6 +216,26 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         } else if (!strcmp(op, "BINARY_MOD")) {
             NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
             nc_push(&sp,stack_arr,nc_mod(a,b)); ip++;
+        } else if (!strcmp(op, "BINARY_LSHIFT")) {
+            NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
+            long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+            nc_push(&sp,stack_arr,nc_int(av<<bv)); ip++;
+        } else if (!strcmp(op, "BINARY_RSHIFT")) {
+            NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
+            long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+            nc_push(&sp,stack_arr,nc_int(av>>bv)); ip++;
+        } else if (!strcmp(op, "BINARY_AND")) {
+            NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
+            long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+            nc_push(&sp,stack_arr,nc_int(av&bv)); ip++;
+        } else if (!strcmp(op, "BINARY_OR")) {
+            NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
+            long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+            nc_push(&sp,stack_arr,nc_int(av|bv)); ip++;
+        } else if (!strcmp(op, "BINARY_XOR")) {
+            NcVal *b=nc_pop(&sp,stack_arr),*a=nc_pop(&sp,stack_arr);
+            long long av=a&&a->type==NC_INT?a->i:0, bv=b&&b->type==NC_INT?b->i:0;
+            nc_push(&sp,stack_arr,nc_int(av^bv)); ip++;
         } else if (!strcmp(op, "UNARY_NEG")) {
             nc_push(&sp,stack_arr,nc_neg(nc_pop(&sp,stack_arr))); ip++;
         } else if (!strcmp(op, "UNARY_NOT")) {
@@ -327,6 +344,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_les"))          fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_skriv"))        { if(narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]); }
+            else if (!strcmp(cn,"fil_skriv_bin\xc3\xa6r")||!strcmp(cn,"fil_skriv_binary")) { if(narg>=2) nc_builtin_fil_skriv_binary(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"fil_finnes"))       fn_r=nc_builtin_fil_finnes(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_hent"))       fn_r=nc_builtin_miljo_hent(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_finnes"))     fn_r=nc_builtin_miljo_finnes(narg>0?cargs[0]:nc_nil());
@@ -487,7 +505,7 @@ static NcVal *nc_native_kompiler(const char *src_path, const char *modul) {
     NcVal *src = nc_builtin_fil_les(nc_str(src_path));
     NcVal *mod = nc_str(modul);
     NcVal *args[] = {src, mod};
-    return nc_fn_selfhost_kompiler_kompiler_fil(args, 2);
+    return nc_dispatch_call("selfhost.kompiler.kompiler_fil", args, 2);
 }
 
 /* ── Overskriv main() ── */
