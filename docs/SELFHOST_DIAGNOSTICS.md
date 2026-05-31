@@ -67,6 +67,6 @@ Diagnosen er ment for:
 
 ## Relatert
 
-- [`docs/OBSERVABILITY_PATTERN.md`](/Users/jansteinar/Projects/Norscode/docs/OBSERVABILITY_PATTERN.md)
-- [`docs/QUALITY.md`](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
-- [`docs/SELFHOST_CI_GATES.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_CI_GATES.md)
+- [`docs/OBSERVABILITY_PATTERN.md`](./OBSERVABILITY_PATTERN.md)
+- [`docs/QUALITY.md`](./QUALITY.md)
+- [`docs/SELFHOST_CI_GATES.md`](./SELFHOST_CI_GATES.md)

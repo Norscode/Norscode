@@ -1,31 +1,31 @@
 # Selfhost Dependency Map
 
 Dette dokumentet er Omgang 1 for selvstendighetsarbeidet.
-Målet er å gjøre det helt tydelig hva som fortsatt eies av Python, hva som allerede har Norscode-ekvivalent, og hva som må flyttes først.
+Målet er å gjøre det helt tydelig hva som fortsatt eies av historisk vei, hva som allerede har Norscode-ekvivalent, og hva som må flyttes først.
 
 ## Kort status
 
-- [x] Python-flaten er kartlagt
+- [x] historisk vei-flaten er kartlagt
 - [x] Selfhost-ekvivalenter er identifisert
-- [x] Python-bootstrap-/orchestration-ansvaret er delt inn i tydelige grupper
-- [x] Normal CLI-vei er flyttet til `norcode/cli.py`; Python-flaten er nå eksplisitt bootstrap-kompatibilitet
+- [x] eldre bootstrap-/orchestration-ansvaret er delt inn i tydelige grupper
+- [x] Normal CLI-vei er flyttet til `norcode/cli.py`; historisk vei-flaten er nå eksplisitt bootstrap-kompatibilitet
 - [x] Minimumskjernen for selfhost-v1 er definert
 - [x] Denne oversikten kan brukes som inngang for senere omganger
 
-## Hva som er Python i `compiler/`
+## Hva som er historisk vei i `compiler/`
 
 ### Frontend og analyse
 
-- `compiler/lexer.py` - Python-lexer for dagens compiler frontend
-- `compiler/parser.py` - Python-parser for dagens compiler frontend
+- `compiler/lexer.py` - historisk lexer for dagens compiler frontend
+- `compiler/parser.py` - historisk parser for dagens compiler frontend
 - `compiler/semantic.py` - semantic analyzer og type-/scope-sjekk
-- `compiler/ast_nodes.py` - AST-node-definisjoner brukt av Python-frontenden
+- `compiler/ast_nodes.py` - AST-node-definisjoner brukt av historisk vei-frontenden
 - `compiler/ast_bridge.py` - AST serialisering/parity-/bridge-lag
-- `compiler/loader.py` - modul-lading og import-graph for Python-pipelinen
+- `compiler/loader.py` - modul-lading og import-graph for historisk vei-pipelinen
 
 ### Backend og runtime
 
-- `compiler/bytecode_backend.py` - Python bytecode-compiler og VM-flyt
+- `compiler/bytecode_backend.py` - historisk vei bytecode-compiler og VM-flyt
 - `compiler/interpreter.py` - legacy/runtime-interpreter og web/runtime-biter
 - `compiler/cgen.py` - C-generering for legacy/bootstrapping
 - `compiler/native/pipeline.py` - native pipeline og bootstrapverktøy
@@ -54,27 +54,27 @@ Målet er å gjøre det helt tydelig hva som fortsatt eies av Python, hva som al
 
 Dette betyr ikke at alt er ferdig, bare at en tilsvarende Norscode-vei allerede finnes eller er på plass som egen modul-/sporflate.
 
-| Python-modul | Status | Norscode-/selfhost-ekvivalent |
+| historisk vei-modul | Status | Norscode-/selfhost-ekvivalent |
 |---|---:|---|
-| `compiler/lexer.py` | Delvis | [`selfhost/lexer.no`](/Users/jansteinar/Projects/Norscode/selfhost/lexer.no), [`selfhost/lexer/lexer_m1.no`](/Users/jansteinar/Projects/Norscode/selfhost/lexer/lexer_m1.no) |
-| `compiler/parser.py` | Delvis | [`selfhost/parser.no`](/Users/jansteinar/Projects/Norscode/selfhost/parser.no), [`selfhost/parser_real.no`](/Users/jansteinar/Projects/Norscode/selfhost/parser_real.no) |
-| `compiler/semantic.py` | Delvis | [`selfhost/semantic.no`](/Users/jansteinar/Projects/Norscode/selfhost/semantic.no), [`selfhost/frontend/selfhost_semantic.no`](/Users/jansteinar/Projects/Norscode/selfhost/frontend/selfhost_semantic.no) |
-| `compiler/ast_nodes.py` | Delvis | [`selfhost/ast.no`](/Users/jansteinar/Projects/Norscode/selfhost/ast.no) |
-| `compiler/ast_bridge.py` | Delvis | [`selfhost/serialization.no`](/Users/jansteinar/Projects/Norscode/selfhost/serialization.no), AST-format docs |
-| `compiler/bytecode_backend.py` | Delvis | [`selfhost/bytecode_backend.no`](/Users/jansteinar/Projects/Norscode/selfhost/bytecode_backend.no), [`selfhost/backend.no`](/Users/jansteinar/Projects/Norscode/selfhost/backend.no) |
-| `compiler/interpreter.py` | Delvis | [`selfhost/vm.no`](/Users/jansteinar/Projects/Norscode/selfhost/vm.no), [`selfhost/runtime_core/runtime_core.no`](/Users/jansteinar/Projects/Norscode/selfhost/runtime_core/runtime_core.no) |
-| `compiler/native/*` | Delvis | [`selfhost/native_execution/*`](/Users/jansteinar/Projects/Norscode/selfhost/native_execution/) |
-| `compiler/selfhost_chain.py` | Ja | [`selfhost/bootstrap.no`](/Users/jansteinar/Projects/Norscode/selfhost/bootstrap.no), [`selfhost/bootstrap_compiler/*`](/Users/jansteinar/Projects/Norscode/selfhost/bootstrap_compiler/) |
+| `compiler/lexer.py` | Delvis | [`selfhost/lexer.no`](../selfhost/lexer.no), [`selfhost/lexer/lexer_m1.no`](../selfhost/lexer/lexer_m1.no) |
+| `compiler/parser.py` | Delvis | [`selfhost/parser.no`](../selfhost/parser.no), [`selfhost/parser_real.no`](../selfhost/parser_real.no) |
+| `compiler/semantic.py` | Delvis | [`selfhost/semantic.no`](../selfhost/semantic.no), [`selfhost/frontend/selfhost_semantic.no`](../selfhost/frontend/selfhost_semantic.no) |
+| `compiler/ast_nodes.py` | Delvis | [`selfhost/ast.no`](../selfhost/ast.no) |
+| `compiler/ast_bridge.py` | Delvis | [`selfhost/serialization.no`](../selfhost/serialization.no), AST-format docs |
+| `compiler/bytecode_backend.py` | Delvis | [`selfhost/bytecode_backend.no`](../selfhost/bytecode_backend.no), [`selfhost/backend.no`](../selfhost/backend.no) |
+| `compiler/interpreter.py` | Delvis | [`selfhost/vm.no`](../selfhost/vm.no), [`selfhost/runtime_core/runtime_core.no`](../selfhost/runtime_core/runtime_core.no) |
+| `compiler/native/*` | Delvis | [`selfhost/native_execution/*`](../selfhost/native_execution/) |
+| `compiler/selfhost_chain.py` | Ja | [`selfhost/bootstrap.no`](../selfhost/bootstrap.no), [`selfhost/bootstrap_compiler/*`](../selfhost/bootstrap_compiler/) |
 | `compiler/selfhost_parser.py` | Delvis | parser-relaterte selfhost-moduler og parity-spor |
-| `compiler/selfhost_whole_compile.py` | Delvis | [`selfhost/full_selfhost_pipeline.no`](/Users/jansteinar/Projects/Norscode/selfhost/full_selfhost_pipeline.no) |
-| `compiler/loader.py` | Delvis | [`selfhost/module_linker.no`](/Users/jansteinar/Projects/Norscode/selfhost/module_linker.no), [`selfhost/modules.no`](/Users/jansteinar/Projects/Norscode/selfhost/modules.no) |
+| `compiler/selfhost_whole_compile.py` | Delvis | [`selfhost/full_selfhost_pipeline.no`](../selfhost/full_selfhost_pipeline.no) |
+| `compiler/loader.py` | Delvis | [`selfhost/module_linker.no`](../selfhost/module_linker.no), [`selfhost/modules.no`](../selfhost/modules.no) |
 | `compiler/formatter.py` | Nei | ingen full selfhost-ekvivalent ennå |
 | `compiler/cgen.py` | Nei | legacy C-spor, ingen full selfhost-ekvivalent ennå |
-| `compiler/toml_compat.py` | Nei | støtte skjer foreløpig via Python/bootstrap |
+| `compiler/toml_compat.py` | Nei | støtte skjer foreløpig via historisk vei/bootstrap |
 
-## Hva som fortsatt bare er Python i praksis
+## Hva som fortsatt bare er historisk vei i praksis
 
-Disse områdene har fortsatt Python som primærmotor eller bootstrap-bro:
+Disse områdene har fortsatt historisk vei som primærmotor eller bootstrap-bro:
 
 - formattering
 - C-generering
@@ -82,11 +82,11 @@ Disse områdene har fortsatt Python som primærmotor eller bootstrap-bro:
 - legacy interpreter/runtime-flyter
 - modul-lading/import-resolusjon
 - TOML-kompatibilitet
-- bootstrap/orchestration i den gjenværende Python-bootstrapen
+- bootstrap/orchestration i den gjenværende eldre bootstrapen
 
-## Python bootstrap dependency map
+## historisk vei bootstrap dependency map
 
-Den gjenværende Python-bootstrapen er fortsatt et bootstrap- og orchestration-senter. Den drar inn disse hovedgruppene:
+Den gjenværende eldre bootstrapen er fortsatt et bootstrap- og orchestration-senter. Den drar inn disse hovedgruppene:
 
 ### 1. CLI og modulær dispatch
 
@@ -120,7 +120,7 @@ Den gjenværende Python-bootstrapen er fortsatt et bootstrap- og orchestration-s
 ### 5. Hva dette betyr
 
 - `norcode/cli.py` er den normale modulære veien for CLI-dispatch.
-- Den gjenværende Python-bootstrapen er fortsatt ikke liten nok til å være “bare oppstart” i full forstand.
+- Den gjenværende eldre bootstrapen er fortsatt ikke liten nok til å være “bare oppstart” i full forstand.
 - Frontend- og HTML-delen er allerede ute av bootstrap som hovedmotor.
 - Resten av selvstendighetsarbeidet ligger primært i compiler/runtime og bootstrap-verktøy utenfor frontend.
 
@@ -133,7 +133,7 @@ Dette er den minste selfhost-kjernen som gir mening for videre arbeid:
 - AST-format som kan serialiseres deterministisk
 - semantic-sjekk for navn, scopes, typer og returflyt
 - IR-/bytecode-output for små programmer
-- parity-flyter mot Python-motoren
+- parity-flyter mot historisk vei-motoren
 
 Det er denne kjernen som gjør at senere selfhost-omganger kan bygges trygt uten å måtte gjette hva “v1” egentlig betyr.
 
@@ -148,8 +148,7 @@ Det er denne kjernen som gjør at senere selfhost-omganger kan bygges trygt uten
 
 ## Les videre
 
-- [`docs/SELFSTENDIG_NORSCODE_ROADMAP.md`](/Users/jansteinar/Projects/Norscode/docs/SELFSTENDIG_NORSCODE_ROADMAP.md)
-- [`docs/SELFHOST_STATUS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_STATUS.md)
-- [`docs/SELFHOST_NO_PYTHON_NO_C_PLAN.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_NO_PYTHON_NO_C_PLAN.md)
-- [`docs/PHASE8_PYTHON_FALLBACK.md`](/Users/jansteinar/Projects/Norscode/docs/PHASE8_PYTHON_FALLBACK.md)
-- [`docs/SELFHOST_RUNTIME_SEPARATION.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_RUNTIME_SEPARATION.md)
+- [`docs/SELFHOST_STATUS.md`](./SELFHOST_STATUS.md)
+- [`docs/SELFHOST_HANDLINGSPLAN.md`](./SELFHOST_HANDLINGSPLAN.md)
+- [`docs/ARCHIVE_INDEX.md`](./ARCHIVE_INDEX.md)
+- [`docs/SELFHOST_RUNTIME_SEPARATION.md`](./SELFHOST_RUNTIME_SEPARATION.md)

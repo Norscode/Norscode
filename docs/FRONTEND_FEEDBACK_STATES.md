@@ -27,7 +27,7 @@ Feil- og loading-tilstander bør være en standard del av frontend-designen.
 - feilmelding med retry-tilbud
 - tom visning med kort forklaring
 - bygg disse tilfellene med `std.html.loading_state(...)`, `std.html.alert(...)` og `std.html.empty_state(...)` der det passer
-- bruk klassefamiliene i [docs/FRONTEND_CSS_CLASS_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CSS_CLASS_CONTRACT.md) når du utvider disse mønstrene
+- bruk klassefamiliene i [docs/FRONTEND_CSS_CLASS_CONTRACT.md](./FRONTEND_CSS_CLASS_CONTRACT.md) når du utvider disse mønstrene
 
 ## Når dette er ferdig
 
@@ -36,5 +36,5 @@ Feil- og loading-tilstander bør være en standard del av frontend-designen.
 
 Se også:
 
-- [docs/FRONTEND_STATE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STATE_MODEL.md)
-- [docs/FRONTEND_CACHE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CACHE_MODEL.md)
+- [docs/FRONTEND_STATE_MODEL.md](./FRONTEND_STATE_MODEL.md)
+- [docs/FRONTEND_CACHE_MODEL.md](./FRONTEND_CACHE_MODEL.md)

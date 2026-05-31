@@ -24,4 +24,4 @@ SSE eller WebSocket bør bare brukes når appen faktisk trenger sanntidsdata.
 
 - appen vet når den skal bruke vanlig polling, SSE eller WebSocket
 
-Se også [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_API_CLIENT.md).
+Se også [docs/FRONTEND_API_CLIENT.md](./FRONTEND_API_CLIENT.md).

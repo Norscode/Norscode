@@ -33,4 +33,4 @@ Skjema-binding kobler inputfelt til data og state.
 - data og UI henger tydelig sammen
 - standard byggesteiner kan komme fra `std.html`
 
-Se også [docs/FRONTEND_INPUT_COMPONENTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_INPUT_COMPONENTS.md).
+Se også [docs/FRONTEND_INPUT_COMPONENTS.md](./FRONTEND_INPUT_COMPONENTS.md).

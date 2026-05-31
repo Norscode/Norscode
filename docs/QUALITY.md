@@ -90,7 +90,7 @@ Bruk:
 norcode diagnose
 ```
 
-og [docs/DASHBOARD_EXPORTER_PATTERN.md](/Users/jansteinar/Projects/Norscode/docs/DASHBOARD_EXPORTER_PATTERN.md) når du vil koble observability-data til dashboards eller eksportere dem videre til eksterne systemer.
+og [docs/DASHBOARD_EXPORTER_PATTERN.md](./DASHBOARD_EXPORTER_PATTERN.md) når du vil koble observability-data til dashboards eller eksportere dem videre til eksterne systemer.
 
 Mønsteret samler:
 
@@ -108,7 +108,7 @@ norcode diagnose
 ```
 
 Denne kontrollen gir en samlet status for prosjektet.
-Se [`docs/SELFHOST_DIAGNOSTICS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_DIAGNOSTICS.md) for den fullstendige kontrakten.
+Se [`docs/SELFHOST_DIAGNOSTICS.md`](./SELFHOST_DIAGNOSTICS.md) for den fullstendige kontrakten.
 
 Bruk den når du vil feilsøke et nytt prosjekt eller få en rask driftssjekk av arbeidskopien.
 

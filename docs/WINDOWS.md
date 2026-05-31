@@ -36,7 +36,7 @@ Direkte fra kildekode (uten pip-installasjon):
 # Med bin/nc.cmd (CMD):
 bin\nc.cmd run app.no
 
-# Med Python direkte:
+# Med historisk vei direkte:
 py main.py run app.no
 ```
 
@@ -44,14 +44,14 @@ py main.py run app.no
 
 | Funksjon                    | Status              |
 |-----------------------------|---------------------|
-| `norcode run app.no`        | Ja (via Python/pip) |
-| `norcode test`              | Ja (via Python/pip) |
-| `norcode build`             | Ja (via Python/pip) |
+| `norcode run app.no`        | Ja (via historisk vei/pip) |
+| `norcode test`              | Ja (via historisk vei/pip) |
+| `norcode build`             | Ja (via historisk vei/pip) |
 | `bin/nc.cmd` og `bin/nc.ps1`| Ja                  |
-| Native `.exe` (Python-fri)  | Planlagt            |
+| Native `.exe` (native-first)  | Planlagt            |
 
 ## Krav
 
-Python 3.10 eller nyere. Last ned fra https://python.org.
+Historisk bootstrap-lag 3.10 eller nyere. Installer via `install.ps1` eller den vanlige oppdateringsrutinen.
 
 Se README.md for full plattformoversikt.

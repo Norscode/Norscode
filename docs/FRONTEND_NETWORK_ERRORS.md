@@ -26,4 +26,4 @@ Nettverksfeil bør være tydelige og håndterbare i frontend.
 - nettverksfeil føles håndterbare
 - appen mister ikke brukerens arbeid ved et midlertidig avbrudd
 
-Se også [docs/FRONTEND_RETRY_POLICY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_RETRY_POLICY.md).
+Se også [docs/FRONTEND_RETRY_POLICY.md](./FRONTEND_RETRY_POLICY.md).

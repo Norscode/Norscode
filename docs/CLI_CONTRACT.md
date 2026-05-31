@@ -21,23 +21,23 @@ Dette dokumentet beskriver den stabiliserte kontrakten for Norscode-CLI-en.
 - Legacy-navn brukes bare for migrering og bakoverkompatibilitet.
 - Eventuelle nye brudd skal dokumenteres først, implementeres deretter.
 
-Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for den samlede migreringsregelen og leserekkefølgen.
+Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](./SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for den samlede migreringsregelen og leserekkefølgen.
 
 ## Migreringshistorikk
 
-- Python-fallback i CLI-wrapperne er fjernet som standard vei.
-- `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` bærer nå den eksplisitte Python-kompatibiliteten.
+- Den historiske fallback-veien i CLI-wrapperne er fjernet som normal vei og skal ikke brukes i aktiv drift.
+- `bin/bootstrap` bærer den eksplisitte bootstrap-flaten.
 - `norcode/cli.py` bruker modulær registry-dispatch som normal vei.
 - `commands`-kommandoen er lagt til som generert kontraktoversikt.
 
 ## Eksplisitt fallback
 
-Når Python fortsatt trengs, skal det alltid være synlig og eksplisitt:
+Når historiske veier fortsatt trengs, skal det alltid være synlig at de er historikk:
 
-- `--legacy-python-fallback` er den tydelige veien inn i Python-flaten fra `nc`.
-- `--python-fallback` kan fortsatt fungere som kompatibilitetsalias, men skal ikke brukes i ny dokumentasjon.
-- Vanlige kommandoer skal ikke falle tilbake til Python uten at brukeren ber om det.
-- Fallback-oppførselen er dokumentert i [`docs/SELFHOST_FALLBACK_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_FALLBACK_CONTRACT.md).
+- `bin/bootstrap` er den tydelige veien inn i bootstrap-flaten fra `nc`.
+- Vanlige kommandoer skal ikke falle tilbake til den historiske banen i normal bruk.
+- Historiske veier skal ikke omtales som standard eller anbefalt vei.
+- Fallback-oppførselen er dokumentert i [`docs/SELFHOST_FALLBACK_CONTRACT.md`](./SELFHOST_FALLBACK_CONTRACT.md).
 
 ## Kommandooversikt
 

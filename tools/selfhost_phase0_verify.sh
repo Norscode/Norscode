@@ -42,17 +42,8 @@ check_active_surface() {
     2>/dev/null
 }
 
-check_legacy_flag_present() {
-  grep -rn -- "--legacy-python-fallback" \
-    "$ROOT_DIR/bin/nc" \
-    "$ROOT_DIR/bin/bootstrap" \
-    "$ROOT_DIR/docs" \
-    2>/dev/null
-}
-
 main() {
   check_sh_syntax
-  check_legacy_flag_present >/dev/null
   if check_active_surface >/dev/null; then
     printf 'Fase 0-verifisering feila: gamle blokkere finst framleis i aktiv flate.\n' >&2
     check_active_surface >&2 || true

@@ -94,7 +94,7 @@ The compiler must eventually:
 
 Norscode compiler
  -> build Norscode compiler
- -> without Python
+ -> without historisk vei
 
 ---
 

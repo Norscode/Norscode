@@ -3,7 +3,7 @@
 Dette er den enkle kontrakten for sider og layout i Norscode-frontenden.
 Den er særlig viktig i HTML mode, template mode, component mode og Native UI mode.
 
-For et konkret, lesbart oppsett, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+For et konkret, lesbart oppsett, se [`FRONTEND_GOLDEN_EXAMPLES`](./FRONTEND_GOLDEN_EXAMPLES.md).
 
 ## Mål
 
@@ -53,5 +53,8 @@ En layout er en funksjon eller modul som:
 
 ## Hva dette betyr for roadmapen
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md).
 Med denne kontrakten er frontend-etappe 1 litt nærmere ferdig.
+
+## Se også
+
+- [`FRONTEND_MODEL`](./FRONTEND_MODEL.md)

@@ -4,7 +4,7 @@ Dette dokumentet definerer den stabile AST-kontrakten for Norscode.
 
 Målet er at flere compiler-fronter kan produsere samme format:
 
-- dagens Python-parser
+- dagens historisk parser
 - selfhost-parser
 - fremtidig Norscode-parser
 - eventuelle IDE-/tooling-parserere
@@ -161,7 +161,7 @@ For at Norscode-parseren skal regnes som kompatibel må den kunne:
 - produsere `norscode-ast-v1`
 - bevare `module_name`
 - bevare import/alias-informasjon
-- produsere samme funksjonsstruktur som Python-parseren for kjerneprogrammer
+- produsere samme funksjonsstruktur som historisk parseren for kjerneprogrammer
 - passere parser parity-fixtures
 
 ## Neste steg

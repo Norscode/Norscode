@@ -1,13 +1,13 @@
 # Frontend Component Model
 
-Frontendens første komponentmodell i Norscode bør være enkel og funksjonell.
+Frontendens første komponentmodell i Norscode bør være enkel, eksplisitt og funksjonell.
 Den hører først og fremst hjemme i component mode, men kan også brukes fra template- og native UI-lag.
 
-Se også de lesbare gull-eksemplene i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+Se også de lesbare gull-eksemplene i [`FRONTEND_GOLDEN_EXAMPLES`](./FRONTEND_GOLDEN_EXAMPLES.md).
 
-For en kort og samlet lesesti, se [`docs/FRONTEND_LEARNING_PATH.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+For en kort og samlet lesesti, se [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md).
 
-Den anbefalte flaten er nå samlet i [`std/frontend.no`](/Users/jansteinar/Projects/Norscode/std/frontend.no), mens [`std/html.no`](/Users/jansteinar/Projects/Norscode/std/html.no) fortsatt er den lavnivå, eksplisitte HTML-byggesteinen:
+Den anbefalte flaten er nå samlet i [`std/frontend.no`](../std/frontend.no), mens [`std/html.no`](../std/html.no) fortsatt er den lavnivå, eksplisitte HTML-byggesteinen:
 
 - komponenter er rene funksjoner som returnerer HTML-vennlig tekst
 - komponenter tar inn eksplisitte parametere
@@ -65,4 +65,7 @@ Et første frontend-prosjekt bør kunne bruke:
 - `std.frontend` som standard inngang for gjenbrukbare komponenter
 - `std.html` som lavnivå-verktøy når du trenger full kontroll
 
-Se også [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STRUCTURE.md) og [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md).
+## Se også
+
+- [`FRONTEND_STRUCTURE`](./FRONTEND_STRUCTURE.md)
+- [`FRONTEND_LAYOUT_CONTRACT`](./FRONTEND_LAYOUT_CONTRACT.md)

@@ -12,7 +12,7 @@ Norscode-frontenden bør starte med en enkel, path-basert navigasjonsmodell:
 
 - den er lett å forstå
 - den fungerer godt med `norcode serve`
-- den passer både små og store apps
+- den passer både små og store apper
 - den gir en naturlig vei videre til client-side routing senere
 
 ## Første regler
@@ -36,6 +36,6 @@ Frontend-appens første navigasjon bør kunne beskrives som:
 
 ## Neste steg
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) og [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md) for resten av navigasjon-etappen.
-
-For en kort lesesti som binder sammen hele frontend-modellen, se [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+- [`FRONTEND_MODEL`](./FRONTEND_MODEL.md)
+- [`FRONTEND_FRAGMENT_MODEL`](./FRONTEND_FRAGMENT_MODEL.md)
+- [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md)

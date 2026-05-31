@@ -2,12 +2,12 @@
 
 Layout-gjenbruk og delvise visninger gjør frontend vedlikeholdbar.
 
-De mest lesbare full-eksemplene ligger i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+De mest lesbare full-eksemplene ligger i [`FRONTEND_GOLDEN_EXAMPLES`](./FRONTEND_GOLDEN_EXAMPLES.md).
 
 ## Mål
 
 - gjenbruke layout på tvers av sider
-- gjenbruke delvise visninger som kort, heads, footers og nav
+- gjenbruke delvise visninger som kort, toppseksjoner, footere og nav
 - holde sidekode liten og lesbar
 
 ## Kontrakt
@@ -43,8 +43,8 @@ De mest lesbare full-eksemplene ligger i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/U
 - gjenbruk er tydelig og forutsigbar
 - markup-duplisering er redusert
 
-Se også:
+## Se også
 
-- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
-- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
-- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
+- [`FRONTEND_LAYOUT_CONTRACT`](./FRONTEND_LAYOUT_CONTRACT.md)
+- [`FRONTEND_COMPONENT_MODEL`](./FRONTEND_COMPONENT_MODEL.md)
+- [`FRONTEND_FRAGMENT_MODEL`](./FRONTEND_FRAGMENT_MODEL.md)

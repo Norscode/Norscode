@@ -24,4 +24,4 @@ Første versjon bruker liste-comprehensions med norsk nøkkelordflyt.
 
 - Den er lesbar for eksisterende Norscode-brukere.
 - Den kan senere ekspanderes direkte til en vanlig løkke i compiler-banen.
-- Den holder første versjon enkel nok til å porteres mellom Python-, bytecode- og C-banen.
+- Den holder første versjon enkel nok til å porteres mellom historisk vei-, bytecode- og C-banen.

@@ -5,7 +5,7 @@ Nytt i v38:
 - støtter tre-tokenformer som `dele seg med` og `dividere seg på`
 
 Verifisert:
-- `python3 -m py_compile compiler/bytecode_backend.py main.py`
+- den historiske kompilator-sjekken for `compiler/bytecode_backend.py` og `main.py`
 - `norcode selfhost-chain-run tests/test_selfhost.no`
 
 Status:

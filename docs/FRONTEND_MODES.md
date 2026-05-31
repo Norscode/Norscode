@@ -3,9 +3,9 @@
 Norscode kan beskrive frontend på flere nivåer, fra ren HTML til mer deklarativ og reaktiv UI.
 Dette dokumentet samler de viktigste modusene i én kontrakt.
 
-For de mest lesbare full-eksemplene, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+For de mest lesbare full-eksemplene, se [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](./FRONTEND_GOLDEN_EXAMPLES.md).
 
-For en kort vei inn i resten av frontend-dokumentasjonen, se [`docs/FRONTEND_LEARNING_PATH.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+For en kort vei inn i resten av frontend-dokumentasjonen, se [`docs/FRONTEND_LEARNING_PATH.md`](./FRONTEND_LEARNING_PATH.md).
 
 ## 1. HTML Mode
 
@@ -245,10 +245,10 @@ side:
 Implementasjon:
 
 - `norcode ui-render examples/native_ui.nui`
-- `python -m norcode ui-render examples/native_ui.nui`
-- CLI-kommandoen starter [`std/nativeui.no`](/Users/jansteinar/Projects/Norscode/std/nativeui.no) via `bin/nc run`
-- renderer- og parserlogikken ligger i [`std/nativeui.no`](/Users/jansteinar/Projects/Norscode/std/nativeui.no)
-- Python brukes bare som CLI-launcher, ikke som selve UI-implementasjonen
+- `norcode ui-render examples/native_ui.nui`
+- CLI-kommandoen starter [`std/nativeui.no`](../std/nativeui.no) via `bin/nc run`
+- renderer- og parserlogikken ligger i [`std/nativeui.no`](../std/nativeui.no)
+- historisk vei brukes bare som CLI-launcher, ikke som selve UI-implementasjonen
 
 ## 4. Component Mode
 
@@ -303,8 +303,8 @@ funksjon tellerkort(verdi: tekst) -> tekst {
 
 Implementasjon:
 
-- bruk [`std/reactive.no`](/Users/jansteinar/Projects/Norscode/std/reactive.no) for state-markører, bindings og event-attributter
-- bruk [`docs/FRONTEND_STATE_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STATE_MODEL.md) for hvordan lokal og delt state bør organiseres
+- bruk [`std/reactive.no`](../std/reactive.no) for state-markører, bindings og event-attributter
+- bruk [`docs/FRONTEND_STATE_MODEL.md`](./FRONTEND_STATE_MODEL.md) for hvordan lokal og delt state bør organiseres
 - bruk `reactive_root(...)` når du vil markere en widget eller region som reaktiv
 - bruk `vis_hvis(...)` og `skjul_hvis(...)` for enkel betinget rendering i komponenter
 
@@ -325,6 +325,6 @@ Bruk det enkleste nivået som passer problemet.
 
 Se også:
 
-- [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md)
-- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
-- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
+- [docs/FRONTEND_MODEL.md](./FRONTEND_MODEL.md)
+- [docs/FRONTEND_COMPONENT_MODEL.md](./FRONTEND_COMPONENT_MODEL.md)
+- [docs/FRONTEND_LAYOUT_CONTRACT.md](./FRONTEND_LAYOUT_CONTRACT.md)

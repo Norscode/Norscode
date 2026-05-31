@@ -15,7 +15,7 @@ En delt app-state eller store bør være enkel og modulær.
 - komponenter abonnerer eller leser state direkte
 - sideeffekter holdes utenfor selve state-dataene
 
-I repoet er [`std/state.no`](/Users/jansteinar/Projects/Norscode/std/state.no) den lille, anbefalte startflaten for dette mønsteret.
+I repoet er [`std/state.no`](../std/state.no) den lille, anbefalte startflaten for dette mønsteret.
 
 ## Regler
 
@@ -42,4 +42,4 @@ I repoet er [`std/state.no`](/Users/jansteinar/Projects/Norscode/std/state.no) d
 - appen har et tydelig sted for delt data
 - state kan versjoneres deterministisk og testes isolert
 
-Se også [docs/FRONTEND_STATE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STATE_MODEL.md) og [`std/state.no`](/Users/jansteinar/Projects/Norscode/std/state.no).
+Se også [docs/FRONTEND_STATE_MODEL.md](./FRONTEND_STATE_MODEL.md) og [`std/state.no`](../std/state.no).

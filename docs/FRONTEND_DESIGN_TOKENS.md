@@ -37,4 +37,4 @@ Design tokens er den grunnleggende visuelle kontrakten for frontend.
 - komponenter kan styles med samme visuelle språk
 - design kan endres uten at hver komponent må skrives om
 
-Se også [frontend/assets/css/app.css](/Users/jansteinar/Projects/Norscode/frontend/assets/css/app.css).
+Se også [frontend/assets/css/app.css](../frontend/assets/css/app.css).

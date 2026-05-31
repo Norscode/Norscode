@@ -25,4 +25,4 @@ Accessibility-sjekker bør være en fast del av frontend-kvaliteten.
 - viktige a11y-problemer oppdages automatisk
 - frontend er mer tilgjengelig for flere brukere
 
-Se også [docs/FRONTEND_ACCESSIBILITY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ACCESSIBILITY.md).
+Se også [docs/FRONTEND_ACCESSIBILITY.md](./FRONTEND_ACCESSIBILITY.md).

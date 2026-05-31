@@ -26,4 +26,4 @@ Tilgjengelighet bør være en standarddel av frontend-designet.
 - appen fungerer for flere brukergrupper
 - tilgjengelighet er en del av standardkomponentene
 
-Se også [docs/FRONTEND_COMPONENT_LIBRARY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_LIBRARY.md).
+Se også [docs/FRONTEND_COMPONENT_LIBRARY.md](./FRONTEND_COMPONENT_LIBRARY.md).

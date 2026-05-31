@@ -2,35 +2,42 @@
 
 Dette er den korteste veien inn i Norscode for nye brukere.
 
-## 1. Installer eller bruk binary-first
+## Først
 
-Normalt bruker du ferdig binary:
+Hvis du bare vil komme i gang, gjør dette:
 
 ```bash
 ./bin/nc --help
 ./bin/nc test
 ```
 
-Hvis du trenger eksplisitt bootstrap:
+Hvis du ikke har bygget binary ennå, les først:
+
+- [docs/INDEX.md](INDEX.md)
+- [docs/WINDOWS.md](WINDOWS.md)
+- [docs/CLI_CONTRACT.md](CLI_CONTRACT.md)
+
+## Installer
+
+På macOS og Linux bruker du vanligvis:
 
 ```bash
-./bin/bootstrap --help
-./bin/nc --legacy-python-fallback --help
+curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
 ```
 
-## 2. Verifiser at alt virker
+På Windows:
 
-Kjør de tre vanligste sjekkene:
+```powershell
+irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
+```
+
+Hvis du vil bygge fra kildekode:
 
 ```bash
-./bin/nc test
-./bin/nc smoke
-./bin/nc bench
+bash tools/build-bootstrap-binary.sh
 ```
 
-## 3. Kjør ditt første program
-
-Start med det minste mulige programmet:
+## Ditt første program
 
 ```norscode
 funksjon start() -> heltall {
@@ -45,27 +52,19 @@ Kjør det med:
 ./bin/nc run min.no
 ```
 
-## 4. Lær de viktigste kommandoene
+## De viktigste kommandoene
 
-- `./bin/nc check fil.no` validerer kode uten å kjore den.
-- `./bin/nc format fil.no` formaterer kode.
-- `./bin/nc lint fil.no` finner vanlige problemer.
-- `./bin/nc test` kjører hele testpakken.
-- `./bin/nc commands` viser den stabile CLI-kontrakten.
+- `./bin/nc check fil.no` validerer kode uten å kjøre den
+- `./bin/nc format fil.no` formaterer kode
+- `./bin/nc lint fil.no` finner vanlige problemer
+- `./bin/nc test` kjører testpakken
+- `./bin/nc commands` viser den stabile CLI-kontrakten
 
-## 5. Se de beste eksemplene
+## Lær videre
 
-- [examples/basic.no](/Users/jansteinar/Projects/Norscode/examples/basic.no)
-- [examples/cli.no](/Users/jansteinar/Projects/Norscode/examples/cli.no)
-- [examples/http.no](/Users/jansteinar/Projects/Norscode/examples/http.no)
-- [examples/advanced.no](/Users/jansteinar/Projects/Norscode/examples/advanced.no)
-- [examples/helpdesk.no](/Users/jansteinar/Projects/Norscode/examples/helpdesk.no)
-
-## 6. Når du vil videre
-
-- [docs/COOKBOOK.md](/Users/jansteinar/Projects/Norscode/docs/COOKBOOK.md)
-- [docs/EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/EXAMPLES.md)
-- [docs/API_SCAFFOLD.md](/Users/jansteinar/Projects/Norscode/docs/API_SCAFFOLD.md)
-- [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/CLI_CONTRACT.md)
-- [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
-- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
+- [docs/COOKBOOK.md](COOKBOOK.md)
+- [docs/EXAMPLES.md](EXAMPLES.md)
+- [docs/FRONTEND_LEARNING_PATH.md](FRONTEND_LEARNING_PATH.md)
+- [docs/SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md)
+- [docs/LANE_MAP.md](LANE_MAP.md)
+- [docs/ARCHIVE_INDEX.md](ARCHIVE_INDEX.md)

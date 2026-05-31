@@ -113,7 +113,7 @@ funksjon bruker(ctx: ordbok_tekst) -> ordbok_tekst {
 
 Se også:
 
-- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
-- [docs/FRONTEND_FRAGMENT_EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
-- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PLAYBOOK.md)
-- [`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no)
+- [docs/FRONTEND_FRAGMENT_MODEL.md](./FRONTEND_FRAGMENT_MODEL.md)
+- [docs/FRONTEND_FRAGMENT_EXAMPLES.md](./FRONTEND_FRAGMENT_EXAMPLES.md)
+- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](./FRONTEND_FRAGMENT_PLAYBOOK.md)
+- [`examples/frontend.no`](../examples/frontend.no)

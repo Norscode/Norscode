@@ -7,7 +7,7 @@ Denne spesifikasjonen beskriver hvordan Norscode skal separere:
 - bootstrap
 - backend
 
-for å eliminere Python-avhengigheter.
+for å eliminere historisk vei-avhengigheter.
 
 ---
 
@@ -16,7 +16,7 @@ for å eliminere Python-avhengigheter.
 Fra:
 
 ```text
-Python runtime
+historisk vei runtime
  ↓
 Compiler
  ↓
@@ -144,7 +144,7 @@ Backend skal kunne:
 
 # 6. Bootstrap elimination
 
-Python skal fases ut i denne rekkefølgen:
+historisk vei skal fases ut i denne rekkefølgen:
 
 ## Fase A
 
@@ -213,9 +213,9 @@ Runtime separation er vellykket når:
 
 fungerer uten:
 
-- Python runtime
-- Python orchestration
-- Python parser
+- historisk vei runtime
+- historisk vei orchestration
+- historisk vei parser
 
 ---
 
@@ -227,4 +227,4 @@ Runtime separation er ferdig når:
 - runtime er separat
 - backend targeter runtime ABI
 - binaries kjører standalone
-- Python ikke er nødvendig i compile path
+- historisk vei ikke er nødvendig i compile path

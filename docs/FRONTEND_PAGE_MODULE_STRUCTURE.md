@@ -35,5 +35,5 @@ Frontendens side- og modulstruktur bør være enkel og forutsigbar.
 
 Se også:
 
-- [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STRUCTURE.md)
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
+- [docs/FRONTEND_STRUCTURE.md](./FRONTEND_STRUCTURE.md)
+- [docs/FRONTEND_NAVIGATION_MODEL.md](./FRONTEND_NAVIGATION_MODEL.md)

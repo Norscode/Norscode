@@ -1,29 +1,52 @@
-# Selfhost-status for Norscode
+# Selfhost status
 
-Denne filen brukes for å følge overgangen fra Python-basert bootstrap til selfhosted Norscode.
+Denne siden oppsummerer hvor langt Norscode har kommet mot en selvstendig selfhost-flate, og hva som fortsatt blokkerer en helt ren normalvei.
+
+![Selfhost status](assets/selfhost-status.svg)
 
 ## Mål
 
-Norscode skal kunne kompilere, teste og kjøre seg selv uten at Python er normal runtime.
+Norscode skal kunne kompilere, teste og kjøre seg selv uten at en eldre bootstrap-runtime er normal vei.
+
+## Flyt
+
+```mermaid
+flowchart LR
+    N[Native-first normalvei] --> S[Selfhost-kjerne]
+    S --> I[IR-kontrakt]
+    I --> C[CI-paritet]
+    C --> R[Release og installasjon]
+    L[Bootstrap / legacy] -.-> N
+```
+
+## Statuslinje
+
+```mermaid
+timeline
+    title Selfhost-modning
+    2024-1Q : Bootstrap og tidlig bro
+    2025-2Q : IR-kontrakt og parity-rydding
+    2026-2Q : Native-first normalvei og dokumentasjonsrydd
+```
 
 ## Statusoversikt
 
 | Område | Status | Kommentar |
-|---|---:|---|
-| CLI/binær flyt | Delvis | `dist/norscode` og `bin/nc` finnes; `norcode/cli.py` er normal modulær vei, og den gjenværende bootstrap-kompatibiliteten ligger eksplisitt i `legacy_main.py` og `bootstrap/python_entry.py`. |
-| Parser parity | Klar / overvåkes | Selfhost parity rapporterer 100% dekning, men CI viser fortsatt enkelte IR-mismatch. |
-| IR disasm | Delvis | Python og selfhost avviker fortsatt på strict IR-cases og enkelte uttrykk. |
-| Uttrykksparser | Delvis | `1 -> 0` viser mismatch: selfhost/Python forventning må avklares og samles. |
-| IR fra kilde | Delvis | Flere snapshot-cases viser tom selfhost-output mot Python-output. |
-| Testsystem | Delvis | Testene kjører, men CI bruker fortsatt Python-orakel og Python-verktøy. |
-| Web/runtime | Tidlig | Web-eksempler kompilerer, men dette er ikke ferdig selfhost-runtime. |
-| Pakking/release | Delvis | Release-pakker finnes, men Python brukes fortsatt i bygg og publisering. |
+|---|---|---|
+| CLI og binærflyt | Delvis | `dist/norscode` og `bin/nc` finnes; `bin/bootstrap` er fortsatt en eksplisitt bootstrap-flate. |
+| Parser-paritet | Overvåkes | Parity er god på de fleste dekkede tilfellene, men CI viser fortsatt enkelte avvik nedstrøms. |
+| IR-disasm | Delvis | Selfhost og historisk forventning er ikke fullt samstemt på strict IR-cases. |
+| Uttrykksparsing | Delvis | Enkelte uttrykk, som `1 -> 0`, har fortsatt kontraktssplitt mellom forventning og implementasjon. |
+| IR fra kilde | Delvis | Noen snapshot-cases gir tom selfhost-output der historisk forventning har konkret bytecode. |
+| Testsystem | Delvis | Testene kjører, men enkelte parity-løp er fortsatt bundet til historiske orakler. |
+| Web og runtime | Tidlig | Web-eksempler kompilerer, men dette er ikke en ferdig selfhost-runtime. |
+| Pakking og release | Delvis | Release-pakker finnes, og normal installasjon kan skje uten C-verktøykjede. |
 
-## Kjente CI-feil som må ryddes
+## Kjente avvik
 
-### 1. `test_selfhost.no`
+### `test_selfhost.no`
 
-Feil rundt implication/operator-disasm:
+Det finnes fortsatt en mismatch i hvordan implication og operator-disasm skrives ut:
 
 ```text
 0: PUSH 1
@@ -47,58 +70,44 @@ mot
 5: HALT
 ```
 
-Dette må avgjøres som én offisiell IR-kontrakt. Deretter må både Python og selfhost følge samme kontrakt.
+Dette må løses som én offisiell IR-kontrakt, og deretter bør både selfhost og historiske referanser følge samme linje.
 
-### 2. IR snapshot parity
+### IR snapshot-paritet
 
-Selfhost gir tom output for enkelte `.nlir` cases der Python gir `PUSH`, `ADD`, `PRINT`, `HALT`.
+Enkelte `.nlir`-cases gir tom output i selfhost der historisk forventning gir `PUSH`, `ADD`, `PRINT` og `HALT`.
 
-Dette peker på at selfhost mangler komplett IR-linjeparser eller strict-disasm-logikk.
+Det peker på at selfhost fortsatt mangler helt full linjeparser eller strict-disasm-logikk for IR.
 
 ## Prioritet nå
 
-1. Lag en tydelig IR-kontrakt for `->`, `NOT`, `OR`, `SWAP`.
-2. Implementer ekte `.nlir` tokenizer/parser i selfhost.
-3. Gjør `ir-disasm --strict` lik mellom Python og selfhost.
-4. Fjern hardkodede snapshot-cases.
-5. Når IR-disasm er grønn, flytt neste del av compiler til selfhost.
+1. Lås én tydelig IR-kontrakt for `->`, `NOT`, `OR`, `SWAP`.
+2. Implementer ekte `.nlir`-tokenisering og parsing i selfhost.
+3. Gjør `ir-disasm --strict` konsistent mellom selfhost og historisk forventning.
+4. Fjern hardkodede snapshot-orakler der det er mulig.
+5. Flytt neste del av compiler til selfhost først når IR-disasm er grønn.
+
+## Kontrakt og implementasjon
+
+- [docs/IR_CONTRACT.md](IR_CONTRACT.md)
+- [selfhost/ir_contract.no](../selfhost/ir_contract.no)
+
+Det viktigste som gjenstår i denne omgang er at resten av selfhost-flaten bruker samme kontrakt konsekvent, særlig strict-disasm og snapshot-paritet.
 
 ## Regler for nye endringer
 
-- Nye compiler-features skal ha selfhost-sjekk eller selfhost-plan.
-- Python-endringer skal merkes som bootstrap/legacy hvis de ikke har selfhost-ekvivalent.
-- `norcode/cli.py` er normal modulær vei; `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py` er eksplisitt kompatibilitetslag for den gjenværende Python-flaten.
+- Nye compiler-features skal ha selfhost-sjekk eller en eksplisitt selfhost-plan.
+- Historiske referanser skal merkes som arkiv eller legacy hvis de ikke har en selfhost-ekvivalent.
+- `bin/bootstrap` er en eksplisitt bootstrap-flate; normal bruk går via `dist/norscode` og `bin/nc`.
 - CI-feil skal ikke løses ved å senke krav uten dokumentert grunn.
-- Målet er færre Python-avhengigheter for hver fase.
-
-## Neste konkrete patch etter denne filen
-
-Lag eller oppdater en IR-kontraktfil:
-
-```text
-docs/IR_CONTRACT.md
-```
-
-Den skal definere offisiell output for:
-
-- `PUSH`
-- `ADD`
-- `PRINT`
-- `HALT`
-- `NOT`
-- `OR`
-- `SWAP`
-- `OVER`
-- strict-feil for ukjent opcode
-- strict-feil for ugyldig heltall
-- implication `a -> b`
+- Målet er færre historiske avhengigheter for hver fase.
 
 ## Les videre
 
-- [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
-- [`docs/SELFHOST_DIAGNOSTICS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_DIAGNOSTICS.md)
-- [`docs/SELFHOST_CI_GATES.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_CI_GATES.md)
-- [`docs/SELFHOST_RELEASE_CHECKLIST.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_RELEASE_CHECKLIST.md)
-- [`docs/SELFHOST_FALLBACK_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_FALLBACK_CONTRACT.md)
-- [`docs/SELFHOST_BOOTSTRAP_INVENTORY.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_BOOTSTRAP_INVENTORY.md)
-- [`docs/SELFHOST_REMAINING_ROADMAP.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_REMAINING_ROADMAP.md)
+- [docs/LANE_MAP.md](LANE_MAP.md)
+- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
+- [docs/SELFHOST_DIAGNOSTICS.md](SELFHOST_DIAGNOSTICS.md)
+- [docs/SELFHOST_CI_GATES.md](SELFHOST_CI_GATES.md)
+- [docs/SELFHOST_RELEASE_CHECKLIST.md](SELFHOST_RELEASE_CHECKLIST.md)
+- [docs/SELFHOST_FALLBACK_CONTRACT.md](SELFHOST_FALLBACK_CONTRACT.md)
+- [docs/ARCHIVE_INDEX.md](ARCHIVE_INDEX.md)
+- [docs/SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md)

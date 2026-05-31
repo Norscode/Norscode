@@ -38,14 +38,14 @@ Hvis du vil slippe repetisjon i rutene, bruk gjerne `std.frontend.fragment_page(
 
 ## Startpunkter
 
-- [`docs/FRONTEND_FRAGMENT_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
-- [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
-- [`docs/FRONTEND_FRAGMENT_PATTERNS.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PATTERNS.md)
-- [`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no)
+- [`docs/FRONTEND_FRAGMENT_MODEL.md`](./FRONTEND_FRAGMENT_MODEL.md)
+- [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](./FRONTEND_FRAGMENT_EXAMPLES.md)
+- [`docs/FRONTEND_FRAGMENT_PATTERNS.md`](./FRONTEND_FRAGMENT_PATTERNS.md)
+- [`examples/frontend.no`](../examples/frontend.no)
 
 ## Anbefalt leserekkefølge
 
-1. [`docs/FRONTEND_FRAGMENT_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
-2. [`docs/FRONTEND_FRAGMENT_PATTERNS.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PATTERNS.md)
-3. [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
-4. [`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no)
+1. [`docs/FRONTEND_FRAGMENT_MODEL.md`](./FRONTEND_FRAGMENT_MODEL.md)
+2. [`docs/FRONTEND_FRAGMENT_PATTERNS.md`](./FRONTEND_FRAGMENT_PATTERNS.md)
+3. [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](./FRONTEND_FRAGMENT_EXAMPLES.md)
+4. [`examples/frontend.no`](../examples/frontend.no)

@@ -1,6 +1,9 @@
-# Maintenance Policy
+# Vedlikeholdspolicy
 
 Dette dokumentet beskriver hvordan Norscode vedlikeholdes etter 1.0-kandidaten.
+Målet er å holde CLI, installasjon og bootstrap-forløp rolig, forutsigbart og enkelt å migrere fra.
+
+![Maintenance policy](assets/maintenance-policy.svg)
 
 ## Mål
 
@@ -39,10 +42,19 @@ Dette dokumentet beskriver hvordan Norscode vedlikeholdes etter 1.0-kandidaten.
 
 - Legacy-navn og gamle filnavn kan beholdes så lenge migrering trenger dem.
 - Når noe fases ut, skal det lenkes til en tydelig migreringssti.
-- Den samlede kontrakten ligger i [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
+- Den samlede kontrakten ligger i [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
+- Lane-skillet ligger i [docs/LANE_MAP.md](LANE_MAP.md).
+- Historiske referanser og arkiverte veier samles i [docs/ARCHIVE_INDEX.md](ARCHIVE_INDEX.md).
 
-## Hva som er normal support
+## Verifikasjon
+
+- `tools/selfhost_maintenance_verify.sh` skal gå grønt når driftsdocs, arkiv og deprecations peker samme vei.
+- `tools/selfhost_drift_guard.sh` skal gå grønt som samlet gate for fase 0 og vedlikeholdsregler.
+- Regresjoner i normal drift skal fanges før de blir del av release-prosessen.
+- Når en vedlikeholdsregel endres, skal verifikatoren oppdateres i samme omgang.
+
+## Normal support
 
 - `norcode` som primær CLI
-- `./bin/bootstrap` og `./bin/nc --legacy-python-fallback` som eksplisitt bootstrap
+- `./bin/bootstrap` som eksplisitt bootstrap
 - releasepakker som kan installeres, oppgraderes og rulles tilbake mekanisk

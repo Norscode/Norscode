@@ -40,4 +40,7 @@ Før Norscode eventuelt får en klientruntime, kan vi bruke server-drevne fragme
 - appen kan bruke klientnavigasjon uten å miste server-støtte
 - routes oppfører seg likt på første last og senere navigasjon
 
-Se også [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md) og [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md).
+## Se også
+
+- [`FRONTEND_NAVIGATION_MODEL`](./FRONTEND_NAVIGATION_MODEL.md)
+- [`FRONTEND_FRAGMENT_MODEL`](./FRONTEND_FRAGMENT_MODEL.md)

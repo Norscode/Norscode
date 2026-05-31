@@ -3,7 +3,7 @@
 Denne spesifikasjonen beskriver hele compiler-kjeden som kreves for å gjøre Norscode:
 
 - full selfhosted
-- Python-uavhengig
+- historisk vei-uavhengig
 - deterministisk
 - standalone
 
@@ -14,7 +14,7 @@ Denne spesifikasjonen beskriver hele compiler-kjeden som kreves for å gjøre No
 Fra:
 
 ```text
-Python
+historisk vei
  ↓
 Norscode compiler
 ```
@@ -38,7 +38,7 @@ uten ekstern bootstrap-runtime.
 Dette er dagens situasjon.
 
 ```text
-Python runtime
+historisk vei runtime
  ↓
 Bootstrap compiler
  ↓
@@ -95,7 +95,7 @@ Backend må kunne generere:
 - C backend
 - senere native backend
 
-uten Python.
+uten historisk vei.
 
 ---
 
@@ -201,7 +201,7 @@ norcode ci --require-selfhost-ready
 
 # Bootstrap elimination
 
-Python kan fjernes når:
+historisk vei kan fjernes når:
 
 - compiler chain er stabil
 - compiler builds compiler
@@ -234,4 +234,4 @@ Norscode compiler
 Norscode compiler
 ```
 
-uten Python.
+uten historisk vei.

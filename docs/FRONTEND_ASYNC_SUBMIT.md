@@ -29,5 +29,5 @@ Async submit betyr at skjemaet kan sende data uten å fryse UI.
 
 Se også:
 
-- [docs/FRONTEND_FEEDBACK_STATES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FEEDBACK_STATES.md)
-- [docs/FRONTEND_SERVER_VALIDATION.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SERVER_VALIDATION.md)
+- [docs/FRONTEND_FEEDBACK_STATES.md](./FRONTEND_FEEDBACK_STATES.md)
+- [docs/FRONTEND_SERVER_VALIDATION.md](./FRONTEND_SERVER_VALIDATION.md)

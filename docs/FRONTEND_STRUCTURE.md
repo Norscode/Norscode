@@ -21,14 +21,14 @@ frontend/
 └── tests/
 ```
 
-## Hva mappene brukes til
+## Mappene
 
 - `frontend/app.no` er appens inngangspunkt
 - `frontend/pages/` inneholder sider og route-nære handlerfunksjoner
 - `frontend/components/` inneholder gjenbrukbare UI-komponenter
 - `frontend/layouts/` inneholder felles side-skjelett
 - `frontend/assets/` inneholder statiske filer
-- `frontend/state/` inneholder delt app-state og små datahjelpere
+- `frontend/state/` inneholder delt state og små datahjelpere
 - `frontend/routes.no` samler registrering av ruter og sidekoblinger
 - `frontend/tests/` inneholder side- og komponenttester
 
@@ -50,4 +50,7 @@ En første app trenger bare:
 - én komponent i `components/`
 - én statisk stylesheet-fil i `assets/css/`
 
-Se også [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md) for valgt modell, og [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) for resten av planen.
+## Se også
+
+- [`FRONTEND_MODEL`](./FRONTEND_MODEL.md)
+- [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md)

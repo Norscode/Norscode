@@ -3,7 +3,7 @@
 ## Goal
 
 Provide a safe and deterministic migration order
-for removing Python dependencies from the Norscode compiler.
+for removing historisk vei dependencies from the Norscode compiler.
 
 ---
 
@@ -76,9 +76,9 @@ All compiler stages must be reproducible.
 
 ---
 
-## Phase 7 — Python Core Removal
+## Phase 7 — historisk vei Core Removal
 
-Remove remaining Python dependencies from:
+Remove remaining historisk vei dependencies from:
 - semantic layer
 - parser layer
 - backend layer

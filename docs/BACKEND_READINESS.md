@@ -1,50 +1,44 @@
-# Backend Readiness
+# Backend readiness
 
-Denne sjekklisten beskriver hvor nær Norscode er å være en fullverdig backend-plattform i praksis, ikke bare et språk med web-hjelpere.
+Dette er en praktisk status for hvor nær Norscode er å være en fullverdig backend-plattform, ikke bare et språk med web-hjelpere.
 
-## Allerede på plass
+![Backend readiness](assets/backend-readiness.svg)
 
-- [x] `std.http` for klient-HTTP
-- [x] `std.web` med path-matching, routing, request/response og filrespons
-- [x] query/path/body-validering
-- [x] dependency injection
-- [x] `async`/`await`
-- [x] JSON-støtte
-- [x] strukturert feilhåndtering
-- [x] test, lint, format, bench, smoke og fuzz
-- [x] Windows-installasjon via `pip`
-- [x] binary-first release- og installasjonsflyt
+## Kort vurdering
 
-## Delvis på plass
+- Norscode er backend-klar for mindre og mellomstore tjenester.
+- Norscode er ikke ennå helt på nivå med de mest modne backend-rammeverkene.
 
-- [x] ekte serveradapter for produksjonstrafikk
-- [x] autentisering og autorisasjon som standardmønster
-- [x] middleware-kjede
-- [x] livssyklus-hooks for oppstart og nedstenging
-- [x] cookies og session-hjelpere
-- [x] input-sanitizing og sikkerhetshelpers for vanlige webangrep
-- [x] database-/persistenskonvensjoner
-- [x] cache-adapter for små in-memory verdier
-- [x] observability med logger, metrics og tracing
-- [x] mer komplett OpenAPI/Swagger-generering
+## På plass
 
-## Mangler før jeg ville kalt det fullverdig backend
+- `std.http` for klient-HTTP
+- `std.web` med path-matching, routing, request/response og filrespons
+- query-, path- og body-validering
+- dependency injection
+- `async` og `await`
+- JSON-støtte
+- strukturert feilhåndtering
+- test, lint, format, bench, smoke og fuzz
+- Windows-installasjon
+- binary-first release- og installasjonsflyt
 
-- [x] en stabil HTTP-server som kan driftes uten å starte via utviklerverktøy
-- [x] tydelige mønstre for auth, rolle- og tilgansstyring
-- [x] request validation som føles like automatisk som i etablerte webrammeverk
-- [x] første klasses støtte for middleware og sikkerhetshjelpere
-- [x] rate limiting og brute-force-beskyttelse
-- [x] migrering og databaseoppsett som standardisert del av produktet
-- [x] transaksjoner som standard
-- [x] connection pooling
-- [x] repository- eller modelmønstre som er dokumentert og anbefalt
-- [x] enkel og tydelig JSON-/schema-mapping
-- [x] fil- og objektlagring som standardmønster
-- [x] observability og produksjonsdiagnostikk som standard
-- [x] dokumentasjon som viser en komplett backend-app fra første request til deploy
+## Modenhetsområder
+
+- stabil HTTP-server som kan driftes uten utviklerverktøy
+- tydelige mønstre for auth, rolle- og tilgangsstyring
+- request validation som føles automatisk og forutsigbar
+- første klasses støtte for middleware og sikkerhetshjelpere
+- rate limiting og brute-force-beskyttelse
+- migrering og databaseoppsett som standardisert del av produktet
+- transaksjoner som standard
+- connection pooling
+- repository- eller modelmønstre som er dokumentert og anbefalt
+- enkel og tydelig JSON-/schema-mapping
+- fil- og objektlagring som standardmønster
+- observability og produksjonsdiagnostikk som standard
+- dokumentasjon som viser en komplett backend-app fra første request til deploy
 
 ## Praktisk konklusjon
 
-- [x] Norscode er backend-klar for mindre og mellomstore tjenester
-- [x] Norscode er ennå ikke en helt moden backend-plattform på nivå med de største rammeverkene
+Norscode har de viktigste byggesteinene på plass for backend-bruk.
+Det som gjenstår er i mindre grad rå funksjonalitet, og mer produktisering, dokumentasjon og driftsklarhet.

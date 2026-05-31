@@ -35,7 +35,7 @@ Disse går grønt i bytecode-backenden:
 
 ## Status
 
-Dette er en første bytecode-backend, ikke full erstatning for C-backenden eller full selfhost-backend ennå.
+Dette er en første bytecode-backend, ikke full erstatning for den gamle backend-veienen eller full selfhost-backend ennå.
 
 Det viktige i v17 er at kjeden nå finnes og virker:
 
@@ -45,4 +45,4 @@ Det viktige i v17 er at kjeden nå finnes og virker:
 
 - koble selfhost-AST inn i samme backend
 - utvide bytecode-dekning for flere AST-noder
-- bygge native VM for `.ncb` som alternativ til Python-VM
+- bygge native VM for `.ncb` som alternativ til historisk vei-VM

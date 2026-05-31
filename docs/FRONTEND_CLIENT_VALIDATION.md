@@ -33,4 +33,4 @@ Klientvalidering skal gi rask og tydelig tilbakemelding før submit.
 - brukeren får umiddelbar feedback
 - skjemaer blir enklere å bruke uten å vente på serveren
 
-Se også [docs/FRONTEND_FORM_BINDING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FORM_BINDING.md).
+Se også [docs/FRONTEND_FORM_BINDING.md](./FRONTEND_FORM_BINDING.md).

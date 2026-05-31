@@ -4,7 +4,7 @@ Dette dokumentet definerer stabil token-kontrakt for Norscode.
 
 Målet er at flere lexer-implementasjoner kan produsere samme tokenformat:
 
-- dagens Python-lexer
+- dagens historisk lexer
 - fremtidig Norscode-native lexer
 - IDE-/tooling-lexer
 - incremental lexer
@@ -59,10 +59,10 @@ M1-lexer skal støtte:
 
 ## Parity-regler
 
-1. Token-rekkefølgen må være lik mellom Python-lexer og Norscode-lexer.
+1. Token-rekkefølgen må være lik mellom historisk lexer og Norscode-lexer.
 2. `type`, `value`, `line` og `column` må være like.
 3. Whitespace skal ikke eksporteres som token, med mindre en fremtidig versjon definerer det eksplisitt.
-4. Kommentarer skal som hovedregel hoppes over hvis Python-lexer gjør det samme.
+4. Kommentarer skal som hovedregel hoppes over hvis historisk lexer gjør det samme.
 5. Breaking changes krever nytt formatnavn, for eksempel `norscode-token-v2`.
 
 ## Bruk i verktøy

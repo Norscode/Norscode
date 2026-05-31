@@ -26,4 +26,4 @@ Servervalidering skal være autoritativ og gi tydelige feilmeldinger.
 - skjemaet kan vise valideringsfeil uten å miste brukerdata
 - appen er trygg selv når klienten er manipulert
 
-Se også [docs/FRONTEND_CLIENT_VALIDATION.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_VALIDATION.md).
+Se også [docs/FRONTEND_CLIENT_VALIDATION.md](./FRONTEND_CLIENT_VALIDATION.md).

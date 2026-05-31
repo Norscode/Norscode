@@ -25,4 +25,4 @@ Side- og route-tester verifiserer at navigasjonen fungerer som den skal.
 - appens sideflyt kan endres med trygghet
 - URL-er og visninger er stabile
 
-Se også [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md).
+Se også [docs/FRONTEND_NAVIGATION_MODEL.md](./FRONTEND_NAVIGATION_MODEL.md).

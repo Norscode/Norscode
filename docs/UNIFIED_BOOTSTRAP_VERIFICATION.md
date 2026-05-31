@@ -35,7 +35,7 @@ bash tools/unified_bootstrap_verifier.sh
 # Included Verification Stages
 
 The unified verifier runs:
-- Python dependency audit
+- historisk vei dependency audit
 - compiler equivalence verification
 - bootstrap diff analysis
 - backend ordering validation

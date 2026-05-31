@@ -42,4 +42,4 @@ Input-komponenter er grunnlaget for skjemaer i frontend.
 - skjemaer kan bygges av standardfelt
 - brukeropplevelsen blir konsistent
 
-Se også [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md).
+Se også [docs/FRONTEND_COMPONENT_MODEL.md](./FRONTEND_COMPONENT_MODEL.md).

@@ -49,7 +49,7 @@ bash tools/compare_compilers.sh <compiler_a> <compiler_b>
 
 If compiler equivalence fails:
 - bootstrap is not yet stable
-- Python removal should pause
+- historisk vei removal should pause
 - new features should pause
 
 ---

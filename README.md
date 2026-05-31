@@ -1,802 +1,177 @@
+# Norscode
 
+Et norsk programmeringsspråk med native-first CLI, selfhost-bane og modulær verktøykjede.
 
-# Norscode 🚀
+![Norscode overview](docs/assets/norscode-overview.svg)
 
-Et norsk programmeringsspråk med native backend, modulær CLI og eksplisitt bootstrap-kompatibilitet.
+## Kort Fortalt
 
-## ✨ Funksjoner
-
-- Norsk syntaks (funksjon, hvis, ellers, osv.)
-- Statisk typing (heltall, tekst, bool, lister, ordbøker/strukturerte datafelt)
+- Norsk syntaks for funksjoner, kontrollflyt og uttrykk
+- Statisk typing for heltall, tekst, bool, lister og ordbøker
 - Modul- og pakke-system
-- Egen standardbibliotek (`std`)
-- Standardhjelpere for passordhashing, secrets og miljøvariabler
-- Standardhjelpere for HTML-escaping, trygge filnavn og sikre URL-slugs
-- Standard databaseadapter for SQLite via `std.db`, med innebygget migreringshjelper
-- Testsystem med `assert`, `assert_eq`, `assert_ne`
-- Feilhåndtering med `kast`, `prøv`/`fang` (inkludert nested rethrow)
-- Ekte native pipeline:
-  - real machine encoding
-  - real ELF emission
-  - real code execution
-  - real package hosting
-  - real bootstrap compiler
+- Standardbiblioteket `std`
+- Feilhåndtering med `kast`, `prøv` og `fang`
+- Native-first pipeline for bygg, testing og kjøring
 
----
+## Oversikt
 
-## Native Stack
+```mermaid
+flowchart LR
+    U[Nye brukere] --> R[README]
+    R --> S[START_HER]
+    R --> I[docs/INDEX]
+    I --> P[SELFHOST_HANDLINGSPLAN]
+    I --> B[BACKEND_READINESS]
+    R --> H[SELFHOST_STATUS]
+```
 
-Norscode har allerede konkrete byggesteiner for den native veien:
+## Veikart
 
-- [real machine encoding](selfhost/native_execution/machinecode_emitter.no)
-- [real ELF emission](selfhost/native_execution/elf_layout.no)
-- [real code execution](selfhost/native_execution/process_runtime.no)
-- [real package hosting](selfhost/package_manager/norspkg.no)
-- [real bootstrap compiler](selfhost/bootstrap_compiler/native_compiler.no)
+```mermaid
+flowchart LR
+    subgraph A[Bruk]
+        A1[Les README]
+        A2[Start med START_HER]
+        A3[Kjør nc run / test]
+    end
 
-Disse delene brukes av både bootstrap- og selfhost-sporet, så README-en beskriver nå den faktiske retningen i repoet i stedet for en ren C-basert mellomfase.
+    subgraph B[Utvikling]
+        B1[Se docs/INDEX]
+        B2[Følg selfhost-plan]
+        B3[Arbeid mot IR-kontrakt]
+    end
 
-## 📦 Installasjon
+    subgraph C[Drift]
+        C1[Release-pakke]
+        C2[Installasjon]
+        C3[Verifisering og rollback]
+    end
 
-### Plattformoversikt
+    A --> B --> C
+```
 
-| Plattform               | Metode                              | Python-fri |
-|-------------------------|-------------------------------------|------------|
-| macOS arm64 (M1/M2/M3)  | `bash tools/install.sh`             | Ja         |
-| Linux x86_64            | `bash tools/install.sh`             | Etter bootstrap |
-| Linux arm64             | `bash tools/install.sh`             | Etter bootstrap |
-| Windows                 | `tools\install.ps1` eller pip       | Planlagt   |
-| Alle (via pip)          | `pip install norscode`              | Nei        |
+## Eksempel
 
-### Rask start
+```norscode
+funksjon start() -> heltall {
+    skriv("Hei, Norscode!")
+    returner 0
+}
+```
 
-**macOS / Linux:**
+Kjør et program med:
+
 ```bash
-# Enlinjes installasjon (oppdager plattform automatisk):
+./bin/nc run app.no
+```
+
+## Rask start
+
+### macOS / Linux
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
-
-# Eller fra kildekode:
-bash tools/build-bootstrap-binary.sh
-
-# Deretter:
+./bin/nc --help
 ./bin/nc run app.no
 ./bin/nc test
-./bin/nc build app.no ut.elf
 ```
 
-**Windows:**
+### Windows
+
 ```powershell
-# Automatisk installasjon:
 irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
-
-# Eller via pip:
-py -m pip install norscode
-norcode run app.no
+.\bin\nc.ps1 --help
+.\bin\nc.ps1 run app.no
 ```
 
-Se [docs/WINDOWS.md](docs/WINDOWS.md) for fullstendig Windows-guide.
-
-Ny bruker? Se [docs/START_HER.md](docs/START_HER.md) for den raskeste veien inn.
-
-På Windows er den gamle Python-installasjonen fortsatt en midlertidig fallback:
-
-```powershell
-py -m pip install norcode
-```
-
-For en lokal checkout på Windows kan du bruke den gamle Python-flyten midlertidig:
-
-```powershell
-py -m pip install .
-```
-
-For normal utviklerflyt på Unix-lignende systemer er anbefalingen nå å bygge binaryen og bruke `./bin/nc`.
-
-Se også [docs/WINDOWS.md](docs/WINDOWS.md) for egen Windows-guide.
-
-### 0b. Legacy pakkeverktøy
+Hvis du starter fra kildekode i repoet, bygg native binary først:
 
 ```bash
-# Gammel Python-basert pakkeflyt for overgangsarbeid
-LEGACY_PYTHON=1 bash scripts/dev-setup.sh
-
-# Forbered ny release lokalt (oppdaterer release-metadata + CHANGELOG)
-./bin/nc release --bump patch
-
-# Se hva som ville skjedd uten å skrive filer
-./bin/nc release --bump minor --dry-run --json
-```
-
-### 0c. Lag lokal release-pakke
-
-```bash
-bash package-release.sh
-```
-
-Eller med make:
-
-```bash
-make release-package
-```
-
-Dette lager en tar.gz i `release-artifacts/` med manifest for distribusjon av dette repoet.
-Pakken inneholder også `dist/norscode`, som bygges eksplisitt før pakkingen, og en `*.sha256`-fil for enkel verifisering.
-
-### 0c.1 Installer eller oppgrader lokalt
-
-```bash
-bash tools/install-release.sh release-artifacts/norscode-language-*.tar.gz
-```
-
-Dette installerer pakken som en versjonert release under `~/.local/share/norscode/`, peker `current` til aktiv versjon og lager symlinker til `nc`, `nor`, `nl` og `bootstrap` i `~/.local/share/norscode/bin/`.
-Kjør samme kommando med en nyere releasepakke for å oppgradere.
-Rollback er bare å peke `current` tilbake til en tidligere versjon i `~/.local/share/norscode/releases/`, eller å installere en eldre releasepakke på nytt.
-Dette er Unix-flyten; på Windows er den gamle Python-installasjonen fortsatt en midlertidig fallback eller så bruker du en ferdig releasepakke.
-
-Når pakken er bygget:
-
-```bash
-tar -xzf release-artifacts/norscode-language-*.tar.gz -C /tmp/norscode-release
-cd /tmp/norscode-release
+bash tools/build-bootstrap-binary.sh
 ./bin/nc --help
 ```
 
-I en release bygger `bin/`-scriptene mot:
-- `dist/norscode` om den finnes (binærflyt)
-- ellers feiler de med beskjed om å bygge `dist/norscode` med `bash tools/build-bootstrap-binary.sh`
-
-### 0d. Fallback-bruk
-
-For eksplisitt legacy-arbeid kan du kjøre bootstrap via Python-kode indirekte gjennom `bin/nc`:
+## Vanlige kommandoer
 
 ```bash
-./bin/nc --legacy-python-fallback --help
-./bin/nc --legacy-python-fallback run app.no
-./bin/nc --legacy-python-fallback ci --check-names
+./bin/nc run app.no
+./bin/nc check app.no
+./bin/nc test
+./bin/nc lint app.no
+./bin/nc format app.no
+./bin/nc bench
+./bin/nc smoke
+./bin/nc serve-e2e
+./bin/nc stress
+./bin/nc security
+./bin/nc diagnose
+./bin/nc fuzz
+./bin/nc ir-disasm path/to/program.nlir --strict
+./bin/nc ci --require-selfhost-ready
 ```
 
-Dette er nå bare bootstrap-verktøy når du starter eksplisitt via legacy-fallback eller via `./bin/bootstrap`.
-Normal bruk skal gå via `dist/norscode` eller `./bin/nc`.
+## Installasjon og release
 
-- Primærflyt: `norcode`/`nc` bruker ferdig binary.
-- Bootstrap: `./bin/bootstrap ...` eller `./bin/nc --legacy-python-fallback ...` brukes bare når du eksplisitt vil kjøre via den gjenværende Python-bootstrapen i `norcode/legacy_main.py` og `norcode/bootstrap/python_entry.py`.
+- Plattformguide: [docs/WINDOWS.md](docs/WINDOWS.md)
+- Startreise: [docs/START_HER.md](docs/START_HER.md)
+- CLI-kontrakt: [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md)
+- Backend-status: [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md)
 
-For den stabiliserte CLI-kontrakten, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
-
-For en praktisk startreise, se [docs/START_HER.md](docs/START_HER.md), [docs/COOKBOOK.md](docs/COOKBOOK.md) og [docs/EXAMPLES.md](docs/EXAMPLES.md).
-
-For FastAPI-sporet, se [docs/FASTAPI_ROADMAP.md](docs/FASTAPI_ROADMAP.md).
-
-For en konkret vurdering av hvor backend-klar Norscode er, se [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md).
-
-For en mer konkret full-backend-sjekkliste, se [docs/FULL_BACKEND_CHECKLIST.md](docs/FULL_BACKEND_CHECKLIST.md).
-
-For produksjonskjøring av en webapp, bruk for eksempel `norcode serve examples/web_routes.no --production --host 0.0.0.0 --port 8000`.
-Bak reverse proxy kan du legge til `--proxy-headers --trusted-proxy 127.0.0.1` når proxyen sender forwarded headers.
-Hvis du vil ha en enkel restartstrategi ved krasj, legg til `--restart-on-crash --max-restarts 3`.
-For browser-klienter kan du bruke `--cors-origin https://app.example.com` eller bare la standard CORS stå på.
-For enkel beskyttelse mot brute-force og request-spam, bruk `--rate-limit-requests 120 --rate-limit-window 60`.
-For containeroppsett, se [docs/CONTAINER.md](docs/CONTAINER.md) eller bygg `docker build -t norscode .` og kjør med et volum mountet til `/work`.
-For Linux-serviceoppsett, se [docs/SYSTEMD.md](docs/SYSTEMD.md) og [deploy/norscode.service](deploy/norscode.service).
-For en samlet deployflyt fra release til drift, se [docs/DEPLOYMENT_PLAYBOOK.md](docs/DEPLOYMENT_PLAYBOOK.md).
-For å starte et nytt API-prosjekt, bruk [docs/API_SCAFFOLD.md](docs/API_SCAFFOLD.md) eller kjør `norcode scaffold-api <mappe>`.
-
-For vedlikeholdsreglene og release-kadensen, se [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md).
-
-For en kort sluttstatus for videre overlevering, se [docs/HANDOFF.md](docs/HANDOFF.md).
-
-Publisering er satt opp i GitHub Actions via `.github/workflows/publish.yml`:
-
-- Push tag `vX.Y.Z` for å trigge bygg av `dist/norscode` og opplasting av dist-artifact
-- Workflowen publiserer ikke lenger til PyPI; den er binary-first
-
-### 1. Kjør program
+Lokal release-pakke:
 
 ```bash
-norcode run app.no
+bash package-release.sh
+bash tools/install-release.sh release-artifacts/norscode-language-*.tar.gz
 ```
 
-### 2. Sjekk kode
-
-```bash
-norcode check app.no
-
-# Kjør en enkel linter
-norcode lint app.no
-
-# Formater en fil
-norcode format app.no
-```
-
-### 3. Kjør tester
-
-```bash
-norcode test
-
-# Maskinlesbar testoutput
-norcode test --json
-```
-
-### 3b. Kvalitetssjekker
-
-```bash
-norcode bench
-norcode smoke
-norcode serve-e2e
-norcode stress
-norcode security
-norcode diagnose
-norcode fuzz
-```
-
-Se [docs/QUALITY.md](docs/QUALITY.md) for terskler og tolkning.
-
-Se også [docs/DASHBOARD_EXPORTER_PATTERN.md](docs/DASHBOARD_EXPORTER_PATTERN.md) for eksportmønster til dashboards og observability-systemer.
-
-### 4. IR disasm (debug/tooling)
-
-```bash
-# Generer IR disassembly fra tekstfil
-norcode ir-disasm path/to/program.nlir
-
-# Streng validering av opcodes/argumenter
-norcode ir-disasm path/to/program.nlir --strict
-
-# Sammenlign python- og selfhost-motor
-norcode ir-disasm path/to/program.nlir --diff
-
-# Feil hvis strict-resultat avviker mellom motorene
-norcode ir-disasm path/to/program.nlir --diff --fail-on-warning
-
-# Lagre diff til fil (for CI artifacts)
-norcode ir-disasm path/to/program.nlir --diff --save-diff /tmp/ir.diff
-
-# JSON-output (for scripts/CI)
-norcode ir-disasm path/to/program.nlir --json
-```
-
-### 5. Pakker (`nl add`)
-
-```bash
-# Se registry-pakker
-norcode add --list
-
-# Legg til lokal pakke fra ./packages/<navn>
-norcode add butikk
-
-# Legg til innebygde standardpakker fra registry
-norcode add std_math
-norcode add std_tekst
-norcode add std_liste
-norcode add std_io
-
-# Samme via modul-kjøring
-norcode add butikk
-
-# Legg til pakke fra vilkårlig sti
-norcode add ./packages/butikk
-
-# Egendefinert dependency-navn
-norcode add ./packages/butikk --name butikk_local
-
-# Direkte Git-kilde
-norcode add minpakke --git https://github.com/org/repo.git --ref v1.2.0
-
-# Direkte URL-kilde
-norcode add minpakke --url https://example.com/mypkg-1.2.0.tar.gz
-
-# Last ned/cach ekstern kilde til lokal mappe og skriv sti i dependencies
-norcode add demo_git --fetch
-norcode add minpakke --url https://example.com/mypkg-1.2.0.tar.gz --fetch
-
-# Tving ny nedlasting av cache
-norcode add demo_git --fetch --refresh
-
-# Krev låst git-ref ved add
-norcode add minpakke --git https://github.com/org/repo.git --ref v1.2.0 --pin
-
-# Verifiser URL-arkiv med SHA256 ved fetch
-norcode add minpakke --url https://example.com/mypkg-1.2.0.tar.gz --fetch --sha256 <sha256>
-
-# Overstyr trusted host-policy for én kommando
-norcode add minpakke --url https://ukjent.example/pkg.tar.gz --allow-untrusted
-```
-
-Registry kan defineres i `packages/registry.toml`:
-
-```toml
-[packages]
-butikk = "./butikk"
-
-[registry.packages.eksempel]
-path = "./butikk"
-description = "Eksempeloppføring"
-
-[registry.packages.demo_git]
-git = "https://github.com/org/repo.git"
-ref = "v1.2.0"
-description = "Hent pakke fra Git"
-
-[registry.packages.demo_url]
-url = "https://example.com/mypkg-1.2.0.tar.gz"
-description = "Hent pakke fra URL"
-```
-
-Trusted host-policy kan settes i `norcode.toml`:
-
-```toml
-[security]
-trusted_git_hosts = ["github.com", "*.github.com"]
-trusted_url_hosts = ["example.com"]
-```
-
-For integritets-pinning av registry metadata:
-
-```bash
-# Beregn SHA256 for packages/registry.toml
-norcode registry-sign
-norcode registry-sign --write-config
-```
-
-### 6. REPL
-
-```bash
-norcode repl
-```
-
-REPL-en kan kjøre uttrykk, flerlinsjeblokker og enkle `bruk`-linjer i samme sesjon.
-
-Remote registry-indeks kan konfigureres i `norcode.toml`:
-
-```toml
-[registry]
-sources = ["packages/remote_registry_example.json"]
-```
-
-Synkroniser indeks til lokal cache:
-
-```bash
-norcode registry-sync
-norcode registry-sync --json
-
-# Feil hvis en source feiler
-norcode registry-sync --require-all
-
-# Tillat delvis sync og fallback til gammel cache
-norcode registry-sync
-```
-
-Bygg distribuerbar speilfil:
-
-```bash
-norcode registry-mirror
-norcode registry-mirror --output build/registry_mirror.json
-```
-
-Cache for eksterne pakker lagres under `.norcode/cache/`.
-Modul-loaderen leser `[dependencies]` i `norcode.toml` automatisk ved `bruk ...`.
-Modul-loaderen bruker også en in-memory parse-cache per fil (med mtime/size-sjekk) for raskere test/bygg-kjøringer.
-
-### 5b. Lockfile
-
-```bash
-# Generer/oppdater lockfile
-norcode lock
-
-# CI-sjekk: feiler hvis lockfile mangler/er utdatert
-norcode lock --check
-
-# Verifiser lockfile mot faktiske path-digests
-norcode lock --verify
-```
-
-### 5c. Oppgrader dependencies
-
-```bash
-# Oppdater alle dependencies som finnes i registry
-norcode update
-
-# Oppdater én dependency
-norcode update butikk
-
-# Check-modus: feiler hvis noe ville blitt oppdatert
-norcode update --check
-
-# Oppdater + regenerer lockfile
-norcode update --lock
-
-# Overstyr trusted host-policy for én oppdateringskjøring
-norcode update --allow-untrusted
-```
-
-### 6. Debug tools
-
-```bash
-# Kort symbol-oversikt (default)
-norcode debug app.no
-
-# Vis tokens
-norcode debug app.no --tokens
-
-# Vis AST + symboler som JSON
-norcode debug app.no --ast --symbols --json
-```
-
-### 7. Snapshot-oppsett (CI)
-
-```bash
-# Oppdater strict snapshot-forventninger
-norcode update-snapshots
-
-# Oppdater selfhost parser parity-fixtures
-norcode update-selfhost-parity-fixtures --suite all
-
-# CI-sjekk: feiler hvis snapshots er utdaterte
-norcode update-snapshots --check
-
-# Maskinlesbar snapshot-status
-norcode update-snapshots --check --json
-
-# CI-sjekk: feiler hvis parity-fixtures er utdaterte
-norcode update-selfhost-parity-fixtures --suite all --check
-```
-
-### 8. CI-eksempel (GitHub Actions)
-
-```yaml
-name: ci
-on: [push, pull_request]
-
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - name: Run Norscode CI checks
-        run: norcode ci --check-names --require-selfhost-ready
-```
-
-Lokal kjøring av samme sekvens:
-
-```bash
-# Rask CI-løkke (kun M1 parity)
-norcode ci --parity-suite m1
-
-# Rask CI-løkke (kun M2 parity)
-norcode ci --parity-suite m2
-
-# Full CI-løkke (M1 + M2 + utvidet parity)
-norcode ci
-
-# Full CI + selfhost readiness-gate
-norcode ci --require-selfhost-ready
-
-# Maskinlesbar output
-norcode ci --json
-# Inkluderer workflow_action_check.issue_count for CI-policy funn
-# Inkluderer også steps.total og steps.name_check_enabled
-# Inkluderer workflow_action_check.policy med håndhevede regler
-# Inkluderer timings_ms per CI-del (millisekunder)
-# Inkluderer timings_s per CI-del (sekunder)
-# Inkluderer timings_ms.total for total CI-varighet
-# Inkluderer timings_ms.wallclock_total / timings_s.wallclock_total basert på epoch-tid
-# Inkluderer timings_ms.step_sum / timings_s.step_sum (sum av delsteg)
-# Inkluderer timings_ms.overhead / timings_s.overhead (total minus sum av delsteg)
-# Inkluderer timings_ratio.step_coverage (andel av total tid brukt i målte delsteg)
-# Inkluderer timings_ratio.overhead_share (andel av total tid brukt i overhead)
-# Inkluderer timings_ratio.step_coverage_pct (samme andel i prosent)
-# Inkluderer timings_ratio.overhead_share_pct (samme andel i prosent)
-# Inkluderer timings_ratio.ratio_sum (kontrollsum for andeler, forventet ~1.0)
-# Inkluderer timings_ratio.ratio_delta (absolutt avvik fra 1.0 etter avrunding)
-# Inkluderer timings_ratio.percent_sum (kontrollsum i prosent, forventet ~100.0)
-# Inkluderer timings_ratio.percent_delta (absolutt avvik fra 100.0 etter avrunding)
-# Inkluderer timings_ratio.overhead_level (low/medium/high basert på overhead_share)
-# Inkluderer timings_ratio.overhead_policy (terskler brukt for overhead_level)
-# Inkluderer timings_ratio.overhead_within_medium (boolsk gate: overhead_share <= medium_max)
-# Inkluderer started_at_utc og finished_at_utc for kjøringstidsstempel
-# Inkluderer started_at_epoch_ms og finished_at_epoch_ms for numerisk sortering
-# Inkluderer schema_version for stabil maskinlesbar kontrakt
-# Inkluderer run_id (unik ID per CI-kjøring)
-# Inkluderer toppnivå ok for samlet CI-status
-# Inkluderer steps.order for eksplisitt sjekkrekkefølge
-# Inkluderer workflow_action_check.file_extensions for skannegrunnlag
-# Inkluderer workflow_action_check.scanned_dir for skannemappe
-# Inkluderer invocation med brukte CI-flagg
-# Inkluderer invocation.argv med faktisk argumentliste
-# Inkluderer invocation.argv0 og invocation.raw for reproduksjon
-# Inkluderer source_revision (git commit hash) når tilgjengelig
-# Inkluderer source_revision_short (kort commit hash) når tilgjengelig
-# Inkluderer source_branch (git branch) når tilgjengelig
-# Inkluderer source_tag (eksakt git tag) når tilgjengelig
-# Inkluderer source_ref (tag eller branch) for entydig kilde-referanse
-# Inkluderer source_ref_type (tag/branch/unknown)
-# Inkluderer source_remote (git origin URL) når tilgjengelig
-# Inkluderer source_remote_protocol (https/ssh/unknown)
-# Inkluderer source_remote_is_https / source_remote_is_ssh for enkel filtrering
-# Inkluderer source_remote_host (f.eks. github.com) når tilgjengelig
-# Inkluderer source_remote_provider (github/gitlab/bitbucket/unknown)
-# Inkluderer source_remote_is_github / source_remote_is_gitlab / source_remote_is_bitbucket / source_remote_is_unknown for enkel host-filtrering
-# Inkluderer source_repo_slug (f.eks. owner/repo) når tilgjengelig
-# Inkluderer source_repo_owner og source_repo_name for enkel grouping
-# Inkluderer source_repo_url (normalisert web-URL) når tilgjengelig
-# Inkluderer source_branch_url og source_tag_url når tilgjengelig
-# Inkluderer source_ref_url når remote og ref er kjent
-# Inkluderer source_revision_url når remote og commit er kjent
-# Inkluderer source_is_tagged (om commit har eksakt tag)
-# Inkluderer source_is_main (om branch er main)
-# Inkluderer source_dirty (om worktree har lokale endringer)
-# Inkluderer source_clean (inverse av source_dirty når kjent)
-# Inkluderer runtime (python_version, python_major_minor, python_api_version, python_hexversion, python_implementation, python_compiler, python_build, python_cache_tag, python_executable, python_prefix, python_base_prefix, python_is_venv, byteorder, locale, encoding, path_entries, path_separator, env_var_count, stdin_isatty, stdout_isatty, stderr_isatty, shell, term, virtual_env, virtual_env_name, is_ci, is_github_actions, github_actions_run_id, github_actions_run_number, github_actions_run_attempt, github_actions_workflow, github_actions_job, github_actions_ref, github_actions_sha, github_actions_actor, github_actions_event_name, os, arch, platform, hostname, user, uid, gid, pid, ppid, process_group_id, home, tmpdir, cwd, cwd_has_spaces, timezone) for miljøsporing
-
-# Valgfri ekstra-sjekk for navnemigrering i CI
-norcode ci --check-names
-
-# Valgfri gate som krever selfhost parity progress = ready
-norcode ci --require-selfhost-ready
-```
-
-Tolkning av `timings_ratio` (hurtigguide):
-
-- `step_coverage` / `step_coverage_pct`: hvor mye av total CI-tid som er direkte målt i delsteg.
-- `overhead_share` / `overhead_share_pct`: tid utenfor målte delsteg (oppstart, avrunding, osv.).
-- `overhead_level`: grov klassifisering (`low`, `medium`, `high`) basert på policy i `overhead_policy`.
-- `overhead_within_medium`: enkel boolsk gate for automasjon (`true` når overhead er innen medium-grensen).
-- `ratio_sum` og `percent_sum` bør være nær `1.0` / `100.0`; `ratio_delta` og `percent_delta` viser avrundingsavvik.
-
-Eksempel på `timings_ratio` i `ci --json`:
-
-```json
-{
-  "step_coverage": 0.9884,
-  "overhead_share": 0.0116,
-  "step_coverage_pct": 98.84,
-  "overhead_share_pct": 1.16,
-  "ratio_sum": 1.0,
-  "ratio_delta": 0.0,
-  "percent_sum": 100.0,
-  "percent_delta": 0.0,
-  "overhead_policy": {
-    "low_max": 0.02,
-    "medium_max": 0.05,
-    "unit": "share"
-  },
-  "overhead_level": "low",
-  "overhead_within_medium": true
-}
-```
-
-`norcode ci` kjører nå disse stegene:
-1. Snapshot check
-2. Selfhost parity fixture check (feiler hvis fixtures er utdaterte)
-3. Engine parity check
-4. Selfhost parser parity (M1)
-5. Selfhost parser parity (M2)
-6. Selfhost parser parity (utvidet)
-7. Parser suite consistency (verifiserer valgt scope: M1, M2 eller M1+M2 mot utvidet suite)
-8. Selfhost M2 sync check (kun for `--parity-suite m2|all`, verifiserer `M2 = core - M1`)
-9. Selfhost parity progress check (kun med `--require-selfhost-ready`)
-10. Full test
-11. Workflow action version check (stopper på deprecated action-versjoner, usikker Node opt-out og manglende `--require-selfhost-ready`/`--check-names` i `norcode ci`-run-linjer)
-12. Name migration check (kun med `--check-names`)
-
-Med `--parity-suite m1` eller `--parity-suite m2` hopper `norcode ci` over stegene for de andre parser-suitene for raskere lokal iterasjon.
-
-Kjør parser parity separat uten full CI:
-
-```bash
-norcode selfhost-parity --suite m1
-norcode selfhost-parity --suite m2
-norcode selfhost-parity --suite extended
-norcode selfhost-parity --suite all --json
-norcode selfhost-parity-progress
-norcode selfhost-parity-progress --json
-norcode selfhost-parity-progress --require-ready
-norcode selfhost-parity-progress --min-coverage 100
-norcode selfhost-parity-gate
-norcode selfhost-parity-gate --min-coverage 100
-norcode selfhost-parity-consistency
-norcode selfhost-parity-consistency --scope m2
-norcode selfhost-parity-consistency --scope all
-norcode selfhost-parity-consistency --json
-
-# Regenerer forventninger for parity-fixtures
-norcode update-selfhost-parity-fixtures --suite m1
-norcode update-selfhost-parity-fixtures --suite m2
-norcode update-selfhost-parity-fixtures --suite extended
-norcode update-selfhost-parity-fixtures --suite all --check
-norcode update-selfhost-parity-fixtures --suite all --no-sync-m2
-
-# Synk M2 deterministisk fra core - M1
-norcode sync-selfhost-parity-m2
-norcode sync-selfhost-parity-m2 --check
-```
-
-`selfhost-parity` rapporterer fordeling per suite: antall uttrykk, skript, linje-cases og feil-cases.
-`selfhost-parity-progress` viser samlet M1/M2-fremdrift mot utvidet suite (dekning, overlap, missing/extra, consistency), og kan brukes som egen gate med `--require-ready` og `--min-coverage`.
-`selfhost-parity-gate` er den korte, eksplisitte gate-kommandoen for samme readiness-sjekk.
-`update-selfhost-parity-fixtures` synkroniserer nå automatisk M2 som `core - M1` for `--suite m2|all` (kan overstyres med `--no-sync-m2`).
-
----
-
-## 🧠 Eksempel
-
-```no
-bruk std.math
-bruk std.tekst som t
-bruk std.liste som liste
-
-funksjon start() -> heltall {
-    la sum: heltall = math.pluss(10, 20)
-    la ord: liste_tekst = ["z", "b", "a"]
-
-    skriv(tekst_fra_heltall(sum))
-    skriv(t.hilsen("Jan"))
-    liste.sorter_tekst(ord)
-    skriv(ord[0:2])
-
-    returner 0
-}
-```
-
-For mer realistiske flyter, se:
-- [examples/cli.no](/Users/jansteinar/Projects/Norscode/examples/cli.no) for `std.fil`, `std.path`, `std.env` og `std.lagring` med lesbare `IOFeil` ved skrivefeil
-- [examples/http.no](/Users/jansteinar/Projects/Norscode/examples/http.no) for HTTP-integrasjon med enkle request helpers og type-sikker JSON-respons
-- [examples/web.no](/Users/jansteinar/Projects/Norscode/examples/web.no) for path-parametre, rute-matching og dispatch i en FastAPI-lignende stil
-- [examples/web_request_response.no](/Users/jansteinar/Projects/Norscode/examples/web_request_response.no) for request_context, response_builder, header/query-hjelpere og filrespons
-- [examples/web_routes.no](/Users/jansteinar/Projects/Norscode/examples/web_routes.no) for ekte route-handlers med `web.route()` og `web.handle_request()`
-- [examples/web_dependency.no](/Users/jansteinar/Projects/Norscode/examples/web_dependency.no) for dependency registration og automatisk injeksjon inn i route-handlers
-- [examples/web_subrouter.no](/Users/jansteinar/Projects/Norscode/examples/web_subrouter.no) for subroutere og prefiksbaserte route-moduler
-- [examples/web_guard.no](/Users/jansteinar/Projects/Norscode/examples/web_guard.no) for route-guards og policy-hooks
-- [examples/web_methods.no](/Users/jansteinar/Projects/Norscode/examples/web_methods.no) for HEAD, OPTIONS og metodeforhandling
-- [examples/web_auth.no](/Users/jansteinar/Projects/Norscode/examples/web_auth.no) for bearer-token auth med guards
-- [examples/web_roles.no](/Users/jansteinar/Projects/Norscode/examples/web_roles.no) for rolle- og rettighetsmodell med guards
-- [examples/secrets.no](/Users/jansteinar/Projects/Norscode/examples/secrets.no) for passordhashing og secrets-håndtering
-- [examples/csrf.no](/Users/jansteinar/Projects/Norscode/examples/csrf.no) for CSRF-tokenverifisering
-- [examples/web_cookies.no](/Users/jansteinar/Projects/Norscode/examples/web_cookies.no) for secure cookies og cookie helpers
-- [examples/db_integration.no](/Users/jansteinar/Projects/Norscode/examples/db_integration.no) for ekte databaseintegrasjon med reopen/persistens
-- [examples/db_repository.no](/Users/jansteinar/Projects/Norscode/examples/db_repository.no) for anbefalt repository-/modelmønster
-- [examples/json_schema.no](/Users/jansteinar/Projects/Norscode/examples/json_schema.no) for enkel JSON-/schema-mapping
-- [examples/file_object_storage.no](/Users/jansteinar/Projects/Norscode/examples/file_object_storage.no) for fil- og objektlagring som standardmønster
-- [examples/web_validation.no](/Users/jansteinar/Projects/Norscode/examples/web_validation.no) for query-, path- og JSON-validering med lesbare feil
-- [examples/web_openapi.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi.no) for OpenAPI JSON og en enkel docs-side generert fra route-signaturer
-- [examples/web_openapi_auth.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_auth.no) for OpenAPI med bearer-auth og `securitySchemes`
-- [examples/web_openapi_errors.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_errors.no) for OpenAPI med dokumenterte JSON-feilresponser
-- [examples/web_openapi_schema.no](/Users/jansteinar/Projects/Norscode/examples/web_openapi_schema.no) for OpenAPI med nestede objekt-skjemaer
-- [examples/web_api_versioning.no](/Users/jansteinar/Projects/Norscode/examples/web_api_versioning.no) for API-versjonering med `/api/v1` og `/api/v2`
-- [examples/web_middleware.no](/Users/jansteinar/Projects/Norscode/examples/web_middleware.no) for request/response/error middleware samt startup/shutdown hooks
-- `norcode serve examples/web_routes.no --host 127.0.0.1 --port 8000 --reload` for lokal webserver og reload i utvikling
-- `norcode serve examples/web_routes.no --cors-origin https://app.example.com` for enkel CORS-konfigurasjon mot browser-klienter
-- [examples/web_cors.no](/Users/jansteinar/Projects/Norscode/examples/web_cors.no) for standard CORS i browser-klienter
-- [examples/advanced.no](/Users/jansteinar/Projects/Norscode/examples/advanced.no) for sammensatt språkbruk
-- [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md) for planen mot en full frontend-flate
-- [docs/FRONTEND_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md) for valgt frontend-modell
-- [docs/FRONTEND_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STRUCTURE.md) for foreslått prosjektstruktur
-- [docs/FRONTEND_LAYOUT_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md) for enkel side-/layout-kontrakt
-- [docs/FRONTEND_ASSETS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ASSETS.md) for statiske frontend-ressurser
-- [docs/FRONTEND_DEV_FLOW.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DEV_FLOW.md) for enkel frontend-dev-flyt
-- [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md) for komponentmodellen
-- [docs/FRONTEND_SLOTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SLOTS.md) for slots og barn-innhold
-- [docs/FRONTEND_PROPS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_PROPS.md) for komponent-props
-- [docs/FRONTEND_LIST_TABLE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LIST_TABLE.md) for liste- og tabellkomponenter
-- [docs/FRONTEND_PARTIALS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_PARTIALS.md) for layout-gjenbruk og partials
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md) for navigasjonsmodellen
-- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_ROUTING.md) for client-side routing
-- [docs/FRONTEND_ROUTE_PARAMS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROUTE_PARAMS.md) for route- og query-parametre
-- [docs/FRONTEND_ACTIVE_NAV.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ACTIVE_NAV.md) for aktiv lenke-/menytilstand
-- [docs/FRONTEND_SERVER_FALLBACK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SERVER_FALLBACK.md) for server fallback ved direkte lenker
-- [docs/FRONTEND_PAGE_MODULE_STRUCTURE.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_PAGE_MODULE_STRUCTURE.md) for side- og modulstruktur
-- [docs/FRONTEND_STATE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STATE_MODEL.md) for state-modellen
-- [docs/FRONTEND_STORE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_STORE_MODEL.md) for delt app-state og store
-- [docs/FRONTEND_CACHE_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CACHE_MODEL.md) for cachemodell for lastede data
-- [docs/FRONTEND_OPTIMISTIC_UPDATES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_OPTIMISTIC_UPDATES.md) for optimistic updates
-- [docs/FRONTEND_FEEDBACK_STATES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FEEDBACK_STATES.md) for loading-, feil- og tom-tilstander
-- [docs/FRONTEND_INPUT_COMPONENTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_INPUT_COMPONENTS.md) for input-komponenter
-- [docs/FRONTEND_FORM_BINDING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FORM_BINDING.md) for skjema-binding
-- [docs/FRONTEND_CLIENT_VALIDATION.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_VALIDATION.md) for klientvalidering
-- [docs/FRONTEND_SERVER_VALIDATION.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SERVER_VALIDATION.md) for servervalidering
-- [docs/FRONTEND_ASYNC_SUBMIT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ASYNC_SUBMIT.md) for async submit og disabling
-- [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DESIGN_TOKENS.md) for design tokens
-- [docs/FRONTEND_COMPONENT_LIBRARY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_LIBRARY.md) for komponentbiblioteket
-- [docs/FRONTEND_COLOR_MODES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COLOR_MODES.md) for mørk/lys modus
-- [docs/FRONTEND_RESPONSIVE_LAYOUTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_RESPONSIVE_LAYOUTS.md) for responsive layouts
-- [docs/FRONTEND_ACCESSIBILITY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ACCESSIBILITY.md) for tilgjengelighet
-- [docs/FRONTEND_API_CLIENT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_API_CLIENT.md) for API-klient
-- [docs/FRONTEND_BROWSER_AUTH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_BROWSER_AUTH.md) for auth i browser
-- [docs/FRONTEND_RETRY_POLICY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_RETRY_POLICY.md) for retry og backoff
-- [docs/FRONTEND_REALTIME_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_REALTIME_MODEL.md) for realtime-valg
-- [docs/FRONTEND_NETWORK_ERRORS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NETWORK_ERRORS.md) for nettverksfeil
-- [docs/FRONTEND_COMPONENT_TESTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_TESTS.md) for komponenttester
-- [docs/FRONTEND_ROUTE_TESTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROUTE_TESTS.md) for side- og route-tester
-- [docs/FRONTEND_BROWSER_E2E.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_BROWSER_E2E.md) for browser-E2E
-- [docs/FRONTEND_VISUAL_REGRESSION.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_VISUAL_REGRESSION.md) for visuell regresjon
-- [docs/FRONTEND_A11Y_TESTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_A11Y_TESTS.md) for tilgjengelighetssjekker
-- [docs/FRONTEND_ASSET_BUNDLING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ASSET_BUNDLING.md) for asset-publisering
-- [docs/FRONTEND_CACHE_HEADERS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CACHE_HEADERS.md) for cache-hoder
-- [docs/FRONTEND_CONTAINER_CDN.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CONTAINER_CDN.md) for container/CDN
-- [docs/FRONTEND_ENV_FLAGS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ENV_FLAGS.md) for miljø og feature flags
-- [docs/FRONTEND_DEPLOY_ROLLBACK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DEPLOY_ROLLBACK.md) for deploy og rollback
-- [examples/frontend.no](/Users/jansteinar/Projects/Norscode/examples/frontend.no) for en kjørbar frontend-starter
-
----
-
-## 🧪 Testing
-
-```no
-funksjon start() -> heltall {
-    assert_eq(2 + 2, 4)
-    assert_ne(5, 6)
-    returner 0
-}
-```
-
----
-
-## 📁 Struktur
-
-```
+## Dokumentasjon
+
+- [docs/INDEX.md](docs/INDEX.md) - dokumentasjonsportal
+- [docs/START_HER.md](docs/START_HER.md) - raskeste vei inn
+- [docs/COOKBOOK.md](docs/COOKBOOK.md) - praktiske oppskrifter
+- [docs/EXAMPLES.md](docs/EXAMPLES.md) - representative eksempler
+- [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) - aktiv plan
+- [docs/SELFHOST_STATUS.md](docs/SELFHOST_STATUS.md) - status
+- [docs/SELFHOST_RELEASE_CHECKLIST.md](docs/SELFHOST_RELEASE_CHECKLIST.md) - release-sjekkliste
+- [docs/HANDOFF.md](docs/HANDOFF.md) - kort overlevering
+- [docs/LANE_MAP.md](docs/LANE_MAP.md) - aktiv vei, legacy og arkiv
+- [docs/ARCHIVE_INDEX.md](docs/ARCHIVE_INDEX.md) - historikk
+- [docs/FRONTEND_LEARNING_PATH.md](docs/FRONTEND_LEARNING_PATH.md) - frontend-lesesti
+- [docs/BACKEND_READINESS.md](docs/BACKEND_READINESS.md) - backend-status
+
+## Selvhost og status
+
+Norscode har en aktiv selfhost-bane i `selfhost/`, og normal bruk er native-first.
+For dagens status og videre arbeid, se:
+
+- [docs/SELFHOST_STATUS.md](docs/SELFHOST_STATUS.md)
+- [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md)
+- [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md)
+
+## Struktur
+
+```text
 .
 ├── bin/
 ├── compiler/
 ├── docs/
-├── norcode/
+├── examples/
+├── selfhost/
 ├── std/
 ├── tests/
-├── app.no
-└── norcode.toml
+└── app.no
 ```
 
----
+## Status
 
-## 🔥 Status
-
-Prosjektet er funksjonelt i god stand per 2026-04-30.
-
-- `norcode test` er grønt
-- IR snapshot-parity er grønn
-- selfhost-banen dekker de nye syntaksene som brukes i testsettet
-- map-literals (`{ "nøkkel": verdi }`) og tomme map-starters fungerer i både parser og selfhost-kjede
-- nested map-literals med kjedet oppslag (`outer["gruppe"]["admin"]`) er støttet
-- punktum-oppslag på ordbokfelt (`person.navn`) er støttet i parser/semantic/codegen/bytecode
-- feltkonstruksjon med navngitte felt (`{navn: "Ada", rolle: "utvikler"}`) er støttet i parser/semantic/codegen/bytecode
-- `std.liste` dekker nå tekstsortering, søk, filtrering og slicing sammen med de eksisterende tallhjelperne
-- `std.json` har typed tilgangsfunksjoner (`hent_tekst`, `hent_tall`, `hent_bool`) og konvertering av JSON-arrays til lister (`hent_array_tekst`, `hent_array_tall`)
-- `std.cache` gir en liten in-memory cache-adapter for tekst, tall og bool
-- `std.log` skriver strukturerte JSON-linjer og spiller pent sammen med `std.web.request_id`
-- `std.metrics` gir counters, gauges og histogrammer for observability
-- `std.trace` gir lette trace- og span-objekter som kan logges videre
-- `std.audit` gir sikkerhets- og audit-hendelser som JSON-linjer
-
-### Selv-hosting
-
-Vi har startet en tidlig selv-hosting bane i `selfhost/`:
-
-- `selfhost/compiler.no` er en compiler skrevet i Norscode
-- Første steg kompilerer et lite instruksjonssett (IR/bytecode) til C
-- Dette brukes som bootstrap før full lexer/parser i Norscode
-- Selv-hosting lexer/token-strøm har gode syntaksfeil og posisjonsinfo, og parity-suitene er i praksis på plass for det som brukes i testløpet
-
-#### Selvhost-status
-
-- `tests/selfhost_parser_m1_cases.json` og `tests/selfhost_parser_m2_cases.json` er i synk med utvidet suite
-- `norcode ci --check-names --require-selfhost-ready` er den relevante CI-gaten for denne delen
-- Workflowene kjører med selfhost-ready-sjekk aktiv
-
-#### Neste fokus
-
-- Fortsette å utvide selfhost-parseren kontrollert når nye språkfunksjoner legges til
-- Beholde parity mellom Python- og selfhost-banen når nye konstruksjoner introduseres
-- Holde feilmeldinger og posisjonsinfo konsistente på tvers av motorene
-
----
+- `./bin/nc test` er grønn
+- IR snapshot-parity er grønn for de dekkede tilfellene
+- selfhost-banen dekker kjernefunksjonene som brukes i testløpet
+- release, installasjon og oppgradering er dokumentert og verifiserbar
 
 ## Historikk
 
-Noen få milepæler som er nyttige å kjenne til:
+Noen milepæler som er nyttige å kjenne til:
 
 - v17: første AST til bytecode-backend
 - v18: eksplisitt AST-bro mellom parser og bytecode
@@ -805,23 +180,17 @@ Noen få milepæler som er nyttige å kjenne til:
 - v27-v36: flere parser- og VM-fikser for strenger, operatorer, tracing og ytelse
 - v37-v43: videre diagnose- og parity-arbeid for selfhost-kjeden
 
-For daglig bruk er det viktigste at:
+## Videre lesing
 
-- `norcode test` er grønn
-- selfhost-parity er i synk med testene som faktisk ligger i repoet
-- nye språkfunksjoner bør føres gjennom parser, semantic, codegen og selfhost-bro samtidig
-
-For neste fase etter 1.0, se [docs/ROADMAP_HELT_FERDIG.md](docs/ROADMAP_HELT_FERDIG.md).
-For stabil CLI-kontrakt, se [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md).
-For legacy-navn og migrering, se [docs/DEPRECATION_POLICY.md](docs/DEPRECATION_POLICY.md).
-For navnebruk og legacy-kompatibilitet, se [docs/LEGACY_POLICY.md](docs/LEGACY_POLICY.md).
-For samlet migrering, bootstrap-grenser og leserekkefølge, se [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md).
+- [docs/CLI_CONTRACT.md](docs/CLI_CONTRACT.md)
+- [docs/QUALITY.md](docs/QUALITY.md)
+- [docs/DEPLOYMENT_PLAYBOOK.md](docs/DEPLOYMENT_PLAYBOOK.md)
+- [docs/MAINTENANCE_POLICY.md](docs/MAINTENANCE_POLICY.md)
 
 ## Lisens
 
-Dette prosjektet er lisensiert under `Apache-2.0`.
-Se [LICENSE](LICENSE).
+Apache-2.0. Se [LICENSE](LICENSE).
 
-## 👨‍💻 Laget av
+## Forfatter
 
 Jan Steinar Sætre

@@ -40,4 +40,4 @@ En tabellkomponent bør:
 - tabellmarkup blir ikke duplisert overalt
 - bygg visningene med `std.html.ol(...)`, `std.html.ul(...)`, `std.html.table(...)`, `std.html.thead(...)`, `std.html.tbody(...)`, `std.html.tr(...)`, `std.html.th(...)` og `std.html.td(...)` der det passer
 
-Se også [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md).
+Se også [docs/FRONTEND_COMPONENT_MODEL.md](./FRONTEND_COMPONENT_MODEL.md).

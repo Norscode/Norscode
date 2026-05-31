@@ -2,7 +2,7 @@
 
 Denne spesifikasjonen definerer obligatoriske gates som må passeres før:
 
-- Python-bootstrap kan fjernes
+- eldre bootstrap kan fjernes
 - compiler kan regnes som selfhosted
 - native backend kan stabiliseres
 
@@ -197,7 +197,7 @@ identical compiler output
 
 # Gate 9 — Bootstrap elimination
 
-Python kan fjernes når:
+historisk vei kan fjernes når:
 
 - token parity = 100%
 - AST parity = 100%

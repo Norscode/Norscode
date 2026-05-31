@@ -1,10 +1,10 @@
 # Frontend State Model
 
-State i Norscode-frontenden bør starte enkelt:
+State i Norscode-frontenden bør starte enkelt og eksplisitt.
 
 - komponenter kan ha lokal state
 - felles state kan samles i små moduler
-- all stateflyt bør være eksplisitt
+- all stateflyt bør være synlig og lett å følge
 
 ## Mål
 
@@ -31,7 +31,7 @@ State i Norscode-frontenden bør starte enkelt:
 
 ### Reaktiv kontrakt
 
-Når komponenter trenger en tydelig markeringsflate for state, bindings og events, bruk [`std.reactive`](/Users/jansteinar/Projects/Norscode/std/reactive.no).
+Når komponenter trenger en tydelig markeringsflate for state, bindings og events, bruk [`std.reactive`](../std/reactive.no).
 
 - `state_attr(...)` for state-markører
 - `bind_text(...)`, `bind_value(...)` og `bind_checked(...)` for bindingsnavn
@@ -41,7 +41,7 @@ Når komponenter trenger en tydelig markeringsflate for state, bindings og event
 
 ### Islands
 
-Når noe skal være tydelig server-rendret, klientstyrt eller hydrert, bruk [`std.islands`](/Users/jansteinar/Projects/Norscode/std/islands.no).
+Når noe skal være tydelig server-rendret, klientstyrt eller hydrert, bruk [`std.islands`](../std/islands.no).
 
 - `island_root(...)` for markering av et interaktivt område
 - `server_only(...)` for server-rendret innhold
@@ -78,4 +78,9 @@ Når noe skal være tydelig server-rendret, klientstyrt eller hydrert, bruk [`st
 - islands kan skille server-rendering fra klientoppførsel uten skjult magi
 - widgets kan skille mellom reaktiv og statisk oppførsel med tydelige markører
 
-Se også [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md), [docs/FRONTEND_FORM_BINDING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FORM_BINDING.md), [`std/reactive.no`](/Users/jansteinar/Projects/Norscode/std/reactive.no) og [`std/islands.no`](/Users/jansteinar/Projects/Norscode/std/islands.no).
+## Se også
+
+- [`FRONTEND_MODEL`](./FRONTEND_MODEL.md)
+- [`FRONTEND_FORM_BINDING`](./FRONTEND_FORM_BINDING.md)
+- [`std/reactive.no`](../std/reactive.no)
+- [`std/islands.no`](../std/islands.no)

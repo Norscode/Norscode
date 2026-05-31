@@ -24,4 +24,4 @@ Browser-E2E tester hele flyten slik en bruker opplever den.
 
 - de viktigste brukerflytene er automatisk verifisert i browser
 
-Se også [docs/FRONTEND_ROUTE_TESTS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROUTE_TESTS.md).
+Se også [docs/FRONTEND_ROUTE_TESTS.md](./FRONTEND_ROUTE_TESTS.md).

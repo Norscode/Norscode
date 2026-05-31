@@ -48,7 +48,6 @@ Målet er å gjøre Native UI, component mode og de gjenbrukbare partialsene mer
 
 ## Relaterte dokumenter
 
-- [`docs/FRONTEND_COMPONENT_LIBRARY.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_LIBRARY.md)
-- [`docs/FRONTEND_FEEDBACK_STATES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FEEDBACK_STATES.md)
-- [`docs/FRONTEND_MODES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODES.md)
-- [`docs/FRONTEND_NATIVE_UI_ROADMAP.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NATIVE_UI_ROADMAP.md)
+- [`docs/FRONTEND_COMPONENT_LIBRARY.md`](./FRONTEND_COMPONENT_LIBRARY.md)
+- [`docs/FRONTEND_FEEDBACK_STATES.md`](./FRONTEND_FEEDBACK_STATES.md)
+- [`docs/FRONTEND_MODES.md`](./FRONTEND_MODES.md)

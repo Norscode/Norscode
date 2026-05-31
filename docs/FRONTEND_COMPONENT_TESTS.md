@@ -26,4 +26,4 @@ Komponenttester bør være den første testtypen for frontend.
 - komponentbiblioteket har trygg dekning
 - endringer i UI blir lettere å gjøre uten å bryte alt
 
-Se også [docs/FRONTEND_COMPONENT_LIBRARY.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_LIBRARY.md).
+Se også [docs/FRONTEND_COMPONENT_LIBRARY.md](./FRONTEND_COMPONENT_LIBRARY.md).

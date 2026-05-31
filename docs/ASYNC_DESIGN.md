@@ -16,7 +16,7 @@ Add a small, understandable async model that works well for IO-heavy code withou
 
 ## Why this shape
 
-- It keeps the syntax close to Python while still being easy to lower in the compiler.
+- It keeps the syntax close to historisk vei while still being easy to lower in the compiler.
 - It fits the existing compiler structure: parser -> semantic -> runtime -> codegen.
 - It allows a first implementation that can start with a small task runtime and grow later.
 

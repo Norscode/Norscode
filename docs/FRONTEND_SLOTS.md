@@ -2,7 +2,7 @@
 
 Slots og barn-innhold gjør det mulig å bygge layout og sammensatte komponenter uten å kopiere markup.
 
-Se også de gull-eksemplene i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md).
+Se også de gull-eksemplene i [`docs/FRONTEND_GOLDEN_EXAMPLES.md`](./FRONTEND_GOLDEN_EXAMPLES.md).
 
 ## Kontrakt
 
@@ -33,4 +33,4 @@ funksjon layout_main(tittel: tekst, innhold: tekst) -> tekst {
 - cards/panels kan pakke inn egen body
 - sider kan komponeres av små, gjenbrukbare biter
 
-Se også [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md).
+Se også [docs/FRONTEND_COMPONENT_MODEL.md](./FRONTEND_COMPONENT_MODEL.md).

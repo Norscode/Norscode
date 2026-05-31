@@ -24,4 +24,4 @@ Frontend bør ha en enkel og forutsigbar strategi for statiske filer.
 
 - frontend-ressurser kan bygges og publiseres forutsigbart
 
-Se også [docs/FRONTEND_ASSETS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ASSETS.md).
+Se også [docs/FRONTEND_ASSETS.md](./FRONTEND_ASSETS.md).

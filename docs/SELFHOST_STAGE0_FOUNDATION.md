@@ -2,7 +2,7 @@
 
 ## Main Goal
 
-Remove Python and C from the compile chain over time.
+Remove historisk vei and C from the compile chain over time.
 
 Target:
 
@@ -14,7 +14,7 @@ Norscode -> compiles Norscode
 
 # Stage 0 — Foundation
 
-Before removing Python, the language core must become stable.
+Before removing historisk vei, the language core must become stable.
 
 ## Required Stable Systems
 
@@ -45,7 +45,7 @@ Before removing Python, the language core must become stable.
 
 Goal:
 
-Replace Python tokenizer with Norscode implementation.
+Replace historisk vei tokenizer with Norscode implementation.
 
 ## Required Features
 
@@ -166,22 +166,22 @@ Avoid early complexity:
 
 ---
 
-# Python Removal Strategy
+# historisk vei Removal Strategy
 
-Python must be removed module-by-module.
+historisk vei must be removed module-by-module.
 
 ## Correct Strategy
 
 ```
-Python lexer -> Norscode lexer
-Python parser -> Norscode parser
-Python backend -> Norscode backend
+historisk vei lexer -> Norscode lexer
+historisk vei parser -> Norscode parser
+historisk vei backend -> Norscode backend
 ```
 
 Not:
 
 ```
-Delete Python immediately
+Delete historisk vei immediately
 ```
 
 ---
@@ -226,4 +226,4 @@ bytecode
 VM/native
 ```
 
-Norscode becomes fully self-hosted and independent from Python.
+Norscode becomes fully self-hosted and independent from historisk vei.

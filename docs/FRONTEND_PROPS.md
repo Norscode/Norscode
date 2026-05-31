@@ -35,4 +35,4 @@ funksjon knapp(tekst: tekst, variant: tekst, disabled: boolsk) -> tekst {
 - det er tydelig hvilke data hver komponent trenger
 - sideoppsett blir mindre avhengig av skjulte konvensjoner
 
-Se også [docs/FRONTEND_COMPONENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md).
+Se også [docs/FRONTEND_COMPONENT_MODEL.md](./FRONTEND_COMPONENT_MODEL.md).

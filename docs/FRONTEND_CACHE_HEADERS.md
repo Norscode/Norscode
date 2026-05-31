@@ -24,4 +24,4 @@ Statiske filer bør leveres med tydelige cache-hoder.
 
 - frontend kan levere statiske filer effektivt
 
-Se også [docs/FRONTEND_ASSETS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ASSETS.md).
+Se også [docs/FRONTEND_ASSETS.md](./FRONTEND_ASSETS.md).

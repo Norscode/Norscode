@@ -1,6 +1,6 @@
 # Frontend Fragment Examples
 
-[`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no) er et praktisk eksempel på server-drevne fragmenter i Norscode.
+[`examples/frontend.no`](../examples/frontend.no) er et praktisk eksempel på server-drevne fragmenter i Norscode.
 
 Det eksemplet viser:
 
@@ -30,8 +30,8 @@ Det eksemplet viser:
 
 Se også:
 
-- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
-- [docs/FRONTEND_FRAGMENT_PATTERNS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PATTERNS.md)
-- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PLAYBOOK.md)
-- [docs/FRONTEND_GOLDEN_EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_GOLDEN_EXAMPLES.md)
-- [examples/frontend.no](/Users/jansteinar/Projects/Norscode/examples/frontend.no)
+- [docs/FRONTEND_FRAGMENT_MODEL.md](./FRONTEND_FRAGMENT_MODEL.md)
+- [docs/FRONTEND_FRAGMENT_PATTERNS.md](./FRONTEND_FRAGMENT_PATTERNS.md)
+- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](./FRONTEND_FRAGMENT_PLAYBOOK.md)
+- [docs/FRONTEND_GOLDEN_EXAMPLES.md](./FRONTEND_GOLDEN_EXAMPLES.md)
+- [examples/frontend.no](../examples/frontend.no)

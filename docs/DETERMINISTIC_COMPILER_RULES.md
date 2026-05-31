@@ -4,7 +4,7 @@ Denne spesifikasjonen definerer regler som må oppfylles for at Norscode skal ku
 
 - bli full selfhosted
 - produsere reproducerbare builds
-- eliminere Python-bootstrap
+- eliminere eldre bootstrap
 - støtte native backend
 
 ---

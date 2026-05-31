@@ -1,27 +1,29 @@
 # Handoff
 
-Dette er den korte statusen for Norscode etter fullført roadmap og 1.0-kandidat.
+Kort status for Norscode etter roadmap og 1.0-kandidat.
 
 ## Status
 
 - Normal bruk er binary-first.
-- Python brukes bare eksplisitt som bootstrap eller utviklerverktøy.
+- Bootstrap og legacy er eksplisitt støtte, ikke normal drift.
 - Release, installasjon og oppgradering er selvstendige og verifiserbare.
 - Dokumentasjon, kvalitet og eksempler peker samme vei.
 
-## Hva som er viktigst å vite
+## Det viktigste
 
 - `./bin/nc` er normal vei.
-- `./bin/bootstrap` og `./bin/nc --legacy-python-fallback` er eksplisitt bootstrap.
+- `./bin/bootstrap` er eksplisitt bootstrap.
 - `./bin/nc test`, `./bin/nc smoke`, `./bin/nc bench` og `./bin/nc fuzz` er de viktigste kontrollene.
-- [docs/START_HER.md](/Users/jansteinar/Projects/Norscode/docs/START_HER.md) er den beste inngangen for nye brukere.
-- [docs/COOKBOOK.md](/Users/jansteinar/Projects/Norscode/docs/COOKBOOK.md) er den praktiske oppskriften.
-- [docs/EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/EXAMPLES.md) viser representative bruksmønstre.
+- [START_HER](./START_HER.md) er inngangen for nye brukere.
+- [LANE_MAP](./LANE_MAP.md) forklarer normalvei, bootstrap/legacy og arkiv.
+- [COOKBOOK](./COOKBOOK.md) er den praktiske oppskriften.
+- [EXAMPLES](./EXAMPLES.md) viser representative bruksmønstre.
+- [ARCHIVE_INDEX](./ARCHIVE_INDEX.md) samler historikk, legacy og utfasing.
 
 ## Referanser
 
-- [docs/ROADMAP_HELT_FERDIG.md](/Users/jansteinar/Projects/Norscode/docs/ROADMAP_HELT_FERDIG.md)
-- [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
-- [docs/CLI_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/CLI_CONTRACT.md)
-- [docs/QUALITY.md](/Users/jansteinar/Projects/Norscode/docs/QUALITY.md)
-- [docs/MAINTENANCE_POLICY.md](/Users/jansteinar/Projects/Norscode/docs/MAINTENANCE_POLICY.md)
+- [SELFHOST_HANDLINGSPLAN](./SELFHOST_HANDLINGSPLAN.md)
+- [SELFHOST_MIGRATION_AND_DEPRECATIONS](./SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
+- [CLI_CONTRACT](./CLI_CONTRACT.md)
+- [QUALITY](./QUALITY.md)
+- [MAINTENANCE_POLICY](./MAINTENANCE_POLICY.md)

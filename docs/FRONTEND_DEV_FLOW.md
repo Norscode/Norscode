@@ -31,4 +31,4 @@ Dette er den enkle arbeidsflyten for frontend-ressurser i Norscode.
 
 ## Neste steg
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md).
+Se [docs/FRONTEND_MODEL.md](./FRONTEND_MODEL.md).

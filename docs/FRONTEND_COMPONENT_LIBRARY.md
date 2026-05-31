@@ -31,11 +31,11 @@ Et komponentbibliotek samler de viktigste visuelle byggesteinene.
 - komponentene skal ha tydelige props
 - komponenter skal være enkle å teste
 - komponentene skal fungere på små og store skjermer
-- komponenter skal følge klassefamiliene i [docs/FRONTEND_CSS_CLASS_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CSS_CLASS_CONTRACT.md)
+- komponenter skal følge klassefamiliene i [docs/FRONTEND_CSS_CLASS_CONTRACT.md](./FRONTEND_CSS_CLASS_CONTRACT.md)
 
 ## Når dette er ferdig
 
 - nye sider kan bygges raskere
 - visuelle forskjeller blir mindre tilfeldige
 
-Se også [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DESIGN_TOKENS.md) og [docs/FRONTEND_CSS_CLASS_CONTRACT.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CSS_CLASS_CONTRACT.md).
+Se også [docs/FRONTEND_DESIGN_TOKENS.md](./FRONTEND_DESIGN_TOKENS.md) og [docs/FRONTEND_CSS_CLASS_CONTRACT.md](./FRONTEND_CSS_CLASS_CONTRACT.md).

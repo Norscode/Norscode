@@ -180,9 +180,9 @@ state
 -> updated + output
 ```
 
-## Python-fri status
+## native-first status
 
-Norscode er nå tydelig på vei mot Python-uavhengig runtime-arkitektur, men er ikke en full Python-erstatning ennå.
+Norscode er nå tydelig på vei mot historisk vei-uavhengig runtime-arkitektur, men er ikke en full historisk vei-erstatning ennå.
 
 Sterkt utviklet:
 
@@ -1633,7 +1633,7 @@ event_log + stream_pipeline + ETL + SQL + reaktiv + tidsserie
 
 ### z361 — Pipeline-orkestrering og datalinagg
 - `dag`: `dag_validate`, `cycle_detect`, `topological_order`
-- `task_dp`: extract/transform/load/sql/python/norscode
+- `task_dp`: extract/transform/load/sql/historisk/norscode
 - `run`: queued/running/success/failed + `task_instance`, `xcom_push/pull`
 - `sensor`: file/sql/http/external_task
 - `lineage_graph`: `edge_input/output`, `impact_analysis`, `root_cause_analysis`
@@ -1950,7 +1950,7 @@ Siste dokumenterte store milepæl: Omgang 427.
 - **z424** Debug-info: DWARF, line table, di_subprogram, dSYM
 - **z425** Runtime-bibliotek: rt_alloc/str/list/map/io/error/gc
 - **z426** Full pipeline: parse → typecheck → SSA → isel → regalloc → emit → link
-- **z427** Bootstrap-fullføring: stage A/B/C, replace_python_wrapper, python_free_check
+- **z427** Bootstrap-fullføring: stage A/B/C, replace_historisk_wrapper, historisk_free_check
 
 ### Neste naturlige fase etter z427
 
@@ -2293,7 +2293,7 @@ Siste dokumenterte store milepæl: Omgang 532.
 - **z526** Søppelsamler: generasjons-GC, trifarget invariant, write-barriere, concurrent mark, safepoints
 - **z527** LLVM-integrasjon: komplett IR, alle instruksjoner, SROA/GVN/LICM/vektorisering-passes
 - **z528** Minneprofiler: allokerings-sporing, heap-snapshot, retensjonstrær, lekkasjepåvisning
-- **z529** Kryssplatform-FFI: C (dlopen/dlsym), Rust (cbindgen/uniffi), Python (pyo3/NumPy), JS (V8/N-API)
+- **z529** Kryssplatform-FFI: C (dlopen/dlsym), Rust (cbindgen/uniffi), historisk vei (pyo3/NumPy), JS (V8/N-API)
 - **z530** Dokumentasjonsgenerator: doc-kommentarer, kjørbare doctests, søkeindeks, versjonert publisering
 - **z531** Pakkeregister: PubGrub-løsning, lockfil, Sigstore-signering, CVE-revisjon, SBOM
 - **z532** Generativ testing: typede generatorer, krymping, tilstandsbasert modell-testing, dekningsrettet fuzzing
@@ -2309,7 +2309,7 @@ Kompilator        — frontend (lekser/Pratt/inkrementell), IR/SSA, opt-passes,
                     registerallokering, instruksjonsplanlegging, LLVM-backend, JIT
 Runtime           — generasjons-GC (trifarget/concurrent), minnemodell (SC/acq-rel),
                     safepoints, finalizers, svake referanser, minneprofiler
-Stdlib            — komplett standardbibliotek + FFI (C/Rust/Python/JS)
+Stdlib            — komplett standardbibliotek + FFI (C/Rust/historisk vei/JS)
 Verktøy           — formaterer, linter, REPL, LSP, docs-generator, pakkeregister
 Testing           — enhet, integrasjon, simulasjon, generativ, fuzzing, egenskap-bevis
 Distribuert       — event sourcing, saga, Kafka, GraphQL, CDC, koordinering, schema

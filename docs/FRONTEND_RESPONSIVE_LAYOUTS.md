@@ -24,4 +24,4 @@ Frontend må fungere godt på små og store skjermer.
 
 - appen ser bra ut på mobil, nettbrett og desktop
 
-Se også [docs/FRONTEND_DESIGN_TOKENS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_DESIGN_TOKENS.md).
+Se også [docs/FRONTEND_DESIGN_TOKENS.md](./FRONTEND_DESIGN_TOKENS.md).

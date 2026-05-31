@@ -2,12 +2,12 @@
 
 This repository uses `Norscode` as the primary product name.
 
-See also [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for the current migration path and reading order.
+See also [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](./SELFHOST_MIGRATION_AND_DEPRECATIONS.md) for the current migration path and reading order.
 
 ## Canonical names
 
 - User-facing product name: `Norscode`
-- Python package namespace: `norcode`
+- historisk vei package namespace: `norcode`
 - Primary CLI command: `norcode`
 
 ## Allowed legacy names
@@ -17,7 +17,7 @@ See also [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](/Users/jansteinar/Proje
 Allowed legacy uses:
 
 - CLI wrappers that forward to `norcode`
-- `python -m norsklang` compatibility entrypoint
+- historisk kompatibilitetsentrypoint for eldre installasjoner
 - old config and cache file names when reading or migrating existing projects
 - import/package compatibility shims that keep older installs working
 

@@ -2,7 +2,7 @@
 
 Denne guiden beskriver anbefalt arbeidsflyt for å feilsøke parity-avvik mellom:
 
-- bootstrap compiler (Python)
+- bootstrap compiler (historisk vei)
 - selfhost compiler
 - IR/backend
 - runtime
@@ -189,4 +189,4 @@ Backend
 Binary/runtime
 ```
 
-Python skal på sikt kun være bootstrap-verktøy.
+historisk vei skal på sikt kun være bootstrap-verktøy.

@@ -17,7 +17,7 @@ Målet er å få en enkel og forutsigbar generics-modell som passer Norscode sin
 
 ## Prinsipper
 
-- Hold modellen enkel nok til å fungere i både Python-, bytecode- og C-banen.
+- Hold modellen enkel nok til å fungere i både historisk vei-, bytecode- og C-banen.
 - Unngå type-erasure der det skaper uklare feil eller treg runtime.
 - Gjør spesialisering deterministisk og lett å debugge.
 

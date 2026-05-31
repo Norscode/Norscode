@@ -42,8 +42,8 @@ Route-parametre og query-parametre er en del av frontenden sin adressestruktur.
 - appen kan bruke URL-en som del av state-modellen
 - brukere kan dele og gjenåpne spesifikke visninger
 
-Se også:
+## Se også
 
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_ROUTING.md)
-- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)
+- [`FRONTEND_NAVIGATION_MODEL`](./FRONTEND_NAVIGATION_MODEL.md)
+- [`FRONTEND_CLIENT_ROUTING`](./FRONTEND_CLIENT_ROUTING.md)
+- [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md)

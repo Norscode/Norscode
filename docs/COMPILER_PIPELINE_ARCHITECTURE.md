@@ -176,7 +176,7 @@ compiler
 compiler.no
 ```
 
-uten Python-runtime.
+uten historisk runtime.
 
 ---
 

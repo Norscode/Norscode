@@ -6,10 +6,12 @@ Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres pun
 ## Før release
 
 - [ ] `./bin/nc --version` viser riktig versjon
-- [ ] `./bin/nc --legacy-python-fallback doctor` går grønt via den gjenværende Python-kompatibiliteten
-- [ ] `./bin/nc --legacy-python-fallback smoke` går grønt via den gjenværende Python-kompatibiliteten
-- [ ] `python3 -m pytest tests/test_distribution_commands.py tests/test_release_install_flow.py` går grønt
+- [ ] `./bin/bootstrap doctor` går grønt via native bootstrap
+- [ ] `./bin/bootstrap smoke` går grønt via native bootstrap
+- [ ] relevant release-/install-test går grønt
 - [ ] release-pakke kan bygges med `bash package-release.sh <versjon>`
+- [ ] release/install-flaten krever ikke C-verktøykjede i normal drift
+- [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
 
 ## Bygg release
 
@@ -22,6 +24,7 @@ Verifiser:
 - [ ] `.tar.gz`-arkivet ble opprettet
 - [ ] tilsvarende `.sha256` ble opprettet
 - [ ] checksum matcher arkivet
+- [ ] release-arkivet inneholder ikke C som normal produktavhengighet
 
 ## Installer release
 
@@ -33,7 +36,8 @@ Verifiser:
 
 - [ ] `current`-lenken peker på riktig versjon
 - [ ] `bin/nc --version` virker fra installert release
-- [ ] `bin/nc --legacy-python-fallback doctor` kan kjøres i installert miljø via den gjenværende Python-kompatibiliteten
+- [ ] `bin/bootstrap doctor` kan kjøres i installert miljø via native bootstrap
+- [ ] installert release krever ikke C-verktøykjede for normal bruk
 
 ## Rollback
 

@@ -71,12 +71,12 @@ funksjon sok(ctx: ordbok_tekst) -> ordbok_tekst {
 - serveren kan returnere både hele sider og tydelige delvis-renderte biter
 - route-flyten holder seg stabil uten å kreve JS
 
-Se også:
+## Se også
 
-- [docs/FRONTEND_SERVER_FALLBACK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_SERVER_FALLBACK.md)
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_FRAGMENT_EXAMPLES.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
-- [docs/FRONTEND_FRAGMENT_PATTERNS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PATTERNS.md)
-- [docs/FRONTEND_FRAGMENT_PLAYBOOK.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_PLAYBOOK.md)
-- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)
-- [`std/islands.no`](/Users/jansteinar/Projects/Norscode/std/islands.no)
+- [`FRONTEND_SERVER_FALLBACK`](./FRONTEND_SERVER_FALLBACK.md)
+- [`FRONTEND_NAVIGATION_MODEL`](./FRONTEND_NAVIGATION_MODEL.md)
+- [`FRONTEND_FRAGMENT_EXAMPLES`](./FRONTEND_FRAGMENT_EXAMPLES.md)
+- [`FRONTEND_FRAGMENT_PATTERNS`](./FRONTEND_FRAGMENT_PATTERNS.md)
+- [`FRONTEND_FRAGMENT_PLAYBOOK`](./FRONTEND_FRAGMENT_PLAYBOOK.md)
+- [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md)
+- [`std/islands.no`](../std/islands.no)

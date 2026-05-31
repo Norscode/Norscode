@@ -71,7 +71,6 @@ tar -czf "$ARCHIVE_PATH" -C "$ROOT_DIR" \
   LICENSE \
   CHANGELOG.md \
   Makefile \
-  app.c \
   app.no
 
 if command -v shasum >/dev/null 2>&1; then

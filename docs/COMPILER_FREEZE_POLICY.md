@@ -7,7 +7,7 @@ Norscode is currently in the selfhost stabilization phase.
 Primary goal:
 - deterministic compiler builds
 - stable bootstrap chain
-- reduced Python dependencies
+- reduced historisk vei dependencies
 - self-hosted compiler
 
 ---
@@ -34,7 +34,7 @@ Allowed work:
 - regression tests
 - semantic cleanup
 - backend stabilization
-- Python dependency reduction
+- historisk vei dependency reduction
 - compiler architecture cleanup
 
 ---

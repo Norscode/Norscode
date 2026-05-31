@@ -17,7 +17,7 @@ Målet er å få en kompakt syntaks for å bygge lister og ordbøker uten å mis
 
 - Syntaksen skal være lett å lese i kodegjennomgang.
 - Den skal kunne oversettes til eksisterende `for`- og `hvis`-primitiver.
-- Første versjon skal være enkel nok til å bli støttet likt i Python-, bytecode- og C-banen.
+- Første versjon skal være enkel nok til å bli støttet likt i historisk vei-, bytecode- og C-banen.
 
 ## Første implementasjonssteg
 

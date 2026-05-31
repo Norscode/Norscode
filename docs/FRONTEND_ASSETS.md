@@ -35,4 +35,4 @@ frontend/
 
 ## Hva som gjenstår etter dette
 
-Se [docs/FRONTEND_ROADMAP.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROADMAP.md).
+Se [docs/FRONTEND_MODEL.md](./FRONTEND_MODEL.md).

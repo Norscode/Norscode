@@ -33,5 +33,5 @@ Aktiv lenke- og menytilstand gjør navigasjonen tydelig for brukeren.
 
 Se også:
 
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_ROUTE_PARAMS.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_ROUTE_PARAMS.md)
+- [docs/FRONTEND_NAVIGATION_MODEL.md](./FRONTEND_NAVIGATION_MODEL.md)
+- [docs/FRONTEND_ROUTE_PARAMS.md](./FRONTEND_ROUTE_PARAMS.md)

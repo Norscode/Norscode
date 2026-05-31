@@ -102,7 +102,6 @@ for _entry in \
   LICENSE \
   CHANGELOG.md \
   Makefile \
-  app.c \
   app.no
 do
   if [ -e "${CURRENT_LINK}/${_entry}" ]; then

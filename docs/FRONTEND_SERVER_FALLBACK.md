@@ -11,7 +11,7 @@ Direkte lenker og refresh skal alltid fungere via server fallback.
 ## Kontrakt
 
 - serveren må kunne levere samme side for direkte tilgang og navigering
-- unknown routes bør kunne gi ryddig 404
+- ukjente ruter bør kunne gi en ryddig 404
 - fallback må ikke bryte canonical URL-er
 
 ## Regler
@@ -35,9 +35,9 @@ Direkte lenker og refresh skal alltid fungere via server fallback.
 - brukeren kan dele en URL og komme tilbake til samme visning
 - appen fungerer også uten client-side state i minnet
 
-Se også:
+## Se også
 
-- [docs/FRONTEND_NAVIGATION_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_NAVIGATION_MODEL.md)
-- [docs/FRONTEND_CLIENT_ROUTING.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_CLIENT_ROUTING.md)
-- [docs/FRONTEND_FRAGMENT_MODEL.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_MODEL.md)
-- [docs/FRONTEND_LEARNING_PATH.md](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md)
+- [`FRONTEND_NAVIGATION_MODEL`](./FRONTEND_NAVIGATION_MODEL.md)
+- [`FRONTEND_CLIENT_ROUTING`](./FRONTEND_CLIENT_ROUTING.md)
+- [`FRONTEND_FRAGMENT_MODEL`](./FRONTEND_FRAGMENT_MODEL.md)
+- [`FRONTEND_LEARNING_PATH`](./FRONTEND_LEARNING_PATH.md)

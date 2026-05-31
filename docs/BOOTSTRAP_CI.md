@@ -12,7 +12,7 @@ on every push and pull request.
 The bootstrap verification workflow performs:
 
 1. Repository cleanup
-2. Python dependency audit
+2. historisk vei dependency audit
 3. Bootstrap verification
 4. Compiler equivalence verification
 
@@ -57,4 +57,4 @@ A fully reproducible and self-hosted Norscode compiler platform.
 
 Se også:
 
-- [`docs/SELFHOST_CI_GATES.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_CI_GATES.md)
+- [`docs/SELFHOST_CI_GATES.md`](./SELFHOST_CI_GATES.md)

@@ -72,7 +72,7 @@ printf 'Henter siste release...\n'
 
 RELEASE_JSON="$($DOWNLOAD "$RELEASES_URL" 2>/dev/null)" || {
     printf 'Feil: Kunne ikke hente release-info fra GitHub.\n' >&2
-    printf 'Prøv manuell installasjon: ./bin/nc --legacy-python-fallback selfhost-bootstrap-gate\n' >&2
+    printf 'Prøv å bygge lokalt: bash tools/build-bootstrap-binary.sh\n' >&2
     exit 1
 }
 
@@ -82,19 +82,8 @@ DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" | grep -o "\"browser_download_url\":
 
 if [ -z "$DOWNLOAD_URL" ]; then
     printf 'Advarsel: Ingen pre-bygd binary for %s i siste release.\n' "$PLATFORM" >&2
-    printf 'Bygger fra kilde via legacy bootstrap...\n'
-    if command -v python3 >/dev/null 2>&1; then
-        bash "$ROOT_DIR/tools/build-bootstrap-binary.sh"
-        if [ -x "$ROOT_DIR/dist/norcode-bootstrap-compile" ]; then
-            mkdir -p "$BIN_DIR"
-            cp "$ROOT_DIR/dist/norcode-bootstrap-compile" "$BIN_DIR/norscode"
-            chmod +x "$BIN_DIR/norscode"
-            printf 'Installert fra kilde: %s/norscode\n' "$BIN_DIR"
-            exit 0
-        fi
-    fi
     printf 'Feil: Kunne ikke installere Norscode for %s.\n' "$PLATFORM" >&2
-
+    printf 'Bygg lokalt med: bash tools/build-bootstrap-binary.sh\n' >&2
     exit 1
 fi
 

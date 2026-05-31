@@ -12,7 +12,7 @@ Dette er den praktiske flyten for å ta Norscode fra release til drift.
 
 Se også:
 
-- [`docs/SELFHOST_RELEASE_CHECKLIST.md`](/Users/jansteinar/Projects/Norscode/docs/SELFHOST_RELEASE_CHECKLIST.md)
+- [`docs/SELFHOST_RELEASE_CHECKLIST.md`](./SELFHOST_RELEASE_CHECKLIST.md)
 
 ## Lokalt eller på egen server
 
@@ -65,6 +65,6 @@ Rollback skal være den samme operasjonen hver gang: velg forrige stabile versjo
 
 ## Hva som skal være sant
 
-- Normal drift skal ikke kreve Python.
+- Normal drift skal ikke kreve historisk vei.
 - Rollback skal være en vanlig operasjon, ikke en manuell redningsaksjon.
 - Deploy skal følge samme mønster hver gang.

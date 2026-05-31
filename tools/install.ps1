@@ -43,28 +43,9 @@ if ($Asset) {
     Copy-Item $ExePath (Join-Path $BinDir "nc.exe")
     Write-Host "Native binary installert: $ExePath" -ForegroundColor Green
 } else {
-    # ─── Fallback: installer Python-pakke ────────────────────────────────────
-    Write-Warning "Ingen Windows native binary tilgjengelig ennå. Installerer via pip..."
-
-    $PythonCmd = $null
-    foreach ($cmd in @("python", "python3", "py")) {
-        try {
-            $ver = & $cmd --version 2>&1
-            if ($ver -match "Python 3") { $PythonCmd = $cmd; break }
-        } catch {}
-    }
-
-    if (-not $PythonCmd) {
-        Write-Error "Python 3 ikke funnet. Installer fra https://python.org og prøv igjen."
-        exit 1
-    }
-
-    Write-Host "Installerer norscode via pip..."
-    & $PythonCmd -m pip install norscode --quiet
-
-    Write-Host "Python-pakke installert." -ForegroundColor Yellow
-    Write-Host "Kjør: norcode --help"
-    exit 0
+    Write-Error "Ingen Windows native binary tilgjengelig i siste release."
+    Write-Host "Bygg lokalt med tools\\build-bootstrap-binary.sh eller publiser en Windows release." -ForegroundColor Yellow
+    exit 1
 }
 
 # ─── Legg til PATH ───────────────────────────────────────────────────────────

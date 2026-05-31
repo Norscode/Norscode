@@ -15,23 +15,22 @@
 | IR → Bytecode (`selfhost/compiler/ir_to_bytecode.no`) | ✅ Aktiv, kjørbar |
 | VM (`selfhost/vm.no`) | ✅ Aktiv, kjørbar |
 | CLI (`selfhost/main.no`) | ✅ Aktiv, kjørbar |
-| Python bootstrap/runtime (`compiler/`, `norcode/legacy_main.py`, `norcode/bootstrap/python_entry.py`) | 🔄 Legacy fallback — begrenset og eksplisitt |
+| Legacy bootstrap/runtime | 🔄 Arkivert/utfases fra normalflyt |
 | CI (GitHub Actions) | 🟡 `phase0-verify` er på plass; ekstern grønn-bekreftelse gjenstår |
 
 ---
 
 ## Fase 0 — Rydding og CI-stabilisering (blokkerer alt)
 
-Ingenting kan gå framover med CI-feil. De kjente blokkeringene er ryddet ut av workflowene, og det finnes nå en egen `phase0-verify`-gate. Resten er å bekrefte grønn CI i GitHub Actions og fullføre siste opprydding i fase 0 og den gjenværende Python-bootstrap-flaten.
+Ingenting kan gå framover med CI-feil. De kjente blokkeringene er ryddet ut av workflowene, og det finnes nå en egen `phase0-verify`-gate. Resten er å bekrefte grønn CI i GitHub Actions og fullføre siste opprydding i fase 0.
 
-Se også [docs/SELFHOST_PHASE0_REMAINING_ROUNDS.md](docs/SELFHOST_PHASE0_REMAINING_ROUNDS.md) for en kort, omgangsbasert arbeidsliste over det som gjenstår.
 Verifiser sluttstatus med `bash tools/selfhost_phase0_verify.sh`.
-For en samlet plan for full selvstendighet, se [docs/SELFHOST_FULL_AUTONOMY_PLAN.md](docs/SELFHOST_FULL_AUTONOMY_PLAN.md).
+For en samlet plan for full selvstendighet, se [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md).
 
 **CI-endringer som ble gjort:**
 
 1. **macOS** — `./bin/nc test` var en dårlig vei for denne jobben.  
-   Status: byttet til `./bin/nc --legacy-python-fallback selfhost-bootstrap-gate` i `ci.yml`.
+   Status: byttet til native bootstrap-verktøy i `ci.yml`.
 
 2. **Linux** — Docker-byggesteget refererte slettet C-kode.  
    Status: Docker-steget er fjernet fra release-flyten, og `tools/docker-build-linux.sh` er nå en legacy-wrapper rundt native bootstrap-pakken.
@@ -52,7 +51,7 @@ For en samlet plan for full selvstendighet, se [docs/SELFHOST_FULL_AUTONOMY_PLAN
 
 ## Fase 1 — Fullføre selfhost
 
-**Mål:** Norscode kompilerer seg selv uten Python. Python-VM kan fjernes.
+**Mål:** Norscode kompilerer seg selv uten den gamle bootstrap-flaten. Den gamle VM-en kan fjernes.
 
 Selfhost-kjeden (`lexer → parser → semantic → ir_to_bytecode → vm`) er teknisk på plass, men har hull:
 
@@ -74,26 +73,26 @@ Strategi: Legg til manglende builtins i `kall_innebygd()`-funksjonen i vm.no for
 
 ### 1.3 Bootstrap-sekvens
 
-Tre steg for å nå Python-frihet:
+Tre steg for å nå full uavhengighet:
 
 ```
-Steg A: Python VM kompilerer selfhost/ → produserer nc.ncb (NCB JSON)
-Steg B: nc.ncb kjøres av selfhost/vm.no (via Python VM) — verifiserer at NCB-en er korrekt
-Steg C: nc.ncb kjøres av nc.ncb selv (bootstrapped) — ingen Python i løkken
+Steg A: native bootstrap-kompilator bygger selfhost/ → produserer nc.ncb (NCB JSON)
+Steg B: nc.ncb kjøres av selfhost/vm.no — verifiserer at NCB-en er korrekt
+Steg C: nc.ncb kjøres av nc.ncb selv (bootstrapped)
 ```
 
 Verktøy: `selfhost/bootstrap_gate.no` allerede på plass for steg A/B.  
 Nytt arbeid: Steg C — `bin/nc bootstrap-self` som kjører selfhost-VM med selfhost-kompilator.
 
-### 1.4 Slett Python
+### 1.4 Slett den gamle flaten
 
 Etter at steg C er verifisert i CI:
-- Slett `compiler/`, `norcode/`, `main.py`
-- `tools/bootstrap_wrapper.py` konverteres til ren shell-wrapper (kaller nc.ncb direkte)
-- `pyproject.toml` arkiveres eller simplificeres til kun metadata
+- rydde bort gjenværende legacy/bootstrap-helpers
+- holde normalflyt helt native
+- arkivere historiske overgangsdokumenter
 
 **Blokkeres av:** Fase 0  
-**Leveranse:** `./bin/nc compile selfhost/parser.no` uten Python i PATH
+**Leveranse:** `./bin/nc compile selfhost/parser.no` i normalflyt uten legacy-fallback
 
 ---
 
@@ -158,7 +157,7 @@ funksjon første[T](liste: liste[T]) -> Valgfri[T]
 
 ### 3.2 Kanonisk map-iterasjonsrekkefølge
 
-I dag er `ordbok`-iterasjon Python-dict-rekkefølge (innsettingsrekkefølge). Det spesifiseres eksplisitt i språkstandarden og håndheves av VM.
+I dag er `ordbok`-iterasjon innsettingsrekkefølge. Det spesifiseres eksplisitt i språkstandarden og håndheves av VM.
 
 ### 3.3 Feilhåndtering — klargjør `prøv/fang`
 
@@ -411,5 +410,5 @@ Fase 0 (CI + rydding)
 ## Neste tre ting å gjøre (i dag)
 
 1. **Fix `ci.yml`** — tre kirurgiske endringer (macOS, Linux Docker, Windows smoke test)
-2. **Slett daud Python** — `norsklang/`, `setup.py`, 9 filer totalt
+2. **Slett daud legacy-kode** — `norsklang/`, `setup.py`, 9 filer totalt
 3. **Verifiser selfhost-kjeden ende-til-ende** — `selfhost/main.no compile selfhost/parser.no` skal produsere gyldig NCB

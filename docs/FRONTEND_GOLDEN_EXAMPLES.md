@@ -3,12 +3,12 @@
 Dette er de to anbefalte inngangene når du vil se hele frontend-modellen i praksis.
 Bruk dem som første referanse for nye sider, nye komponenter og ny UI-struktur.
 
-For en kort lesesti som binder sammen modell, modes, komponenter og fragmenter, se [`docs/FRONTEND_LEARNING_PATH.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LEARNING_PATH.md).
+For en kort lesesti som binder sammen modell, modes, komponenter og fragmenter, se [`docs/FRONTEND_LEARNING_PATH.md`](./FRONTEND_LEARNING_PATH.md).
 
 ## Component Mode
 
-- Kilde: [`examples/frontend_golden.no`](/Users/jansteinar/Projects/Norscode/examples/frontend_golden.no)
-- Test: [`tests/test_frontend_golden.py`](/Users/jansteinar/Projects/Norscode/tests/test_frontend_golden.py)
+- Kilde: [`examples/frontend_golden.no`](../examples/frontend_golden.no)
+- Test: [`tests/test_frontend_golden.py`](../tests/test_frontend_golden.py)
 - Viser: komponent- og layout-komposisjon i en selvstendig, kjørbar variant av samme mønster som `std.frontend` anbefaler
 
 Eksempel på det som bygges:
@@ -24,8 +24,8 @@ frontend.layout_app(
 
 ## Native UI Mode
 
-- Kilde: [`examples/native_ui_golden.nui`](/Users/jansteinar/Projects/Norscode/examples/native_ui_golden.nui)
-- Test: [`tests/test_native_ui_golden.py`](/Users/jansteinar/Projects/Norscode/tests/test_native_ui_golden.py)
+- Kilde: [`examples/native_ui_golden.nui`](../examples/native_ui_golden.nui)
+- Test: [`tests/test_native_ui_golden.py`](../tests/test_native_ui_golden.py)
 - Viser: `side`, `hero`, `kort`, `liste` og en enkel layout i ren Norscode-syntaks
 
 Eksempel på det som bygges:
@@ -49,9 +49,9 @@ side:
 - De viser de anbefalte flatenes faktiske inngangspunkter.
 - De har egne render-tester som holder dem stabile over tid.
 
-## Additional Practical Example
+## Praktisk eksempel
 
-I tillegg er [`examples/frontend.no`](/Users/jansteinar/Projects/Norscode/examples/frontend.no) et godt referansepunkt for server-drevne fragmenter, søk og paginerte lister.
+I tillegg er [`examples/frontend.no`](../examples/frontend.no) et godt referansepunkt for server-drevne fragmenter, søk og paginerte lister.
 
 Det eksemplet viser:
 
@@ -60,10 +60,10 @@ Det eksemplet viser:
 - paginering og sortering uten JS
 - gjenbruk av `std.frontend` og `std.islands`
 
-Se også:
+## Se også
 
-- [`docs/FRONTEND_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODEL.md)
-- [`docs/FRONTEND_MODES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_MODES.md)
-- [`docs/FRONTEND_COMPONENT_MODEL.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_COMPONENT_MODEL.md)
-- [`docs/FRONTEND_LAYOUT_CONTRACT.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_LAYOUT_CONTRACT.md)
-- [`docs/FRONTEND_FRAGMENT_EXAMPLES.md`](/Users/jansteinar/Projects/Norscode/docs/FRONTEND_FRAGMENT_EXAMPLES.md)
+- [`FRONTEND_MODEL`](./FRONTEND_MODEL.md)
+- [`FRONTEND_MODES`](./FRONTEND_MODES.md)
+- [`FRONTEND_COMPONENT_MODEL`](./FRONTEND_COMPONENT_MODEL.md)
+- [`FRONTEND_LAYOUT_CONTRACT`](./FRONTEND_LAYOUT_CONTRACT.md)
+- [`FRONTEND_FRAGMENT_EXAMPLES`](./FRONTEND_FRAGMENT_EXAMPLES.md)
