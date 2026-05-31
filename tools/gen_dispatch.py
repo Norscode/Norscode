@@ -29,6 +29,6 @@ lines.extend(["  {NULL, NULL}","};","",
     '    {char s2[256];strncpy(s2,l,255);char *t=strstr(s2,"_token");if(t){*t=0;return nc_dispatch_call(s2,a,na);}}',
     "    return NULL;",
     "}",
-    "static NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) { return nc_dispatch_call(\"neste\",a,na); }",
+    "NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) { return nc_dispatch_call(\"neste\",a,na); }",
 ])
 print('\n'.join(lines))

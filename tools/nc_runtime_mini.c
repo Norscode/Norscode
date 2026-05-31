@@ -634,6 +634,9 @@ static NcVal *nc_builtin_json_parse_str(NcVal *v) {
     char *s = nc_to_str_raw(v); JP2 j={s}; NcVal *r=jp2_parse(&j); free(s); return r;
 }
 static NcVal *nc_to_str(NcVal *v) { return nc_str_own(nc_to_str_raw(v)); }
+/* Forward: definert i nc_dispatch.c etter runtime */
+NcVal *nc_fn_builtin_neste_token(NcVal **args, int nargs);
+
 
 /* old json_parse removed */
 

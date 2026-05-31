@@ -23,7 +23,7 @@ if [ "${1:-}" = "--full" ]; then
     printf 'Genererer full bootstrap/kompiler.ncb.json...\n'
     TMP="$(mktemp /tmp/nc_bundle_XXXXXX.ncb.json 2>/dev/null || echo /tmp/nc_bundle_$$.ncb.json)"
     # Bruk Python til å bundle (unngår bootstrap-sirkel med bundler.no)
-    python3 "$ROOT/tools/python_bundle.py" \
+    "$NC" bundle \
         selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
         selfhost.parser=selfhost/parser.no \
         selfhost.compiler.semantic=selfhost/compiler/semantic.no \
@@ -34,6 +34,7 @@ if [ "${1:-}" = "--full" ]; then
         selfhost.main=selfhost/main.no \
         selfhost.bundler=selfhost/bundler.no \
         selfhost.nc_main=selfhost/nc_main.no \
+        selfhost.gen_dispatch=selfhost/gen_dispatch.no \
         --output "$TMP"
     cp "$TMP" bootstrap/kompiler.ncb.json
     rm -f "$TMP"
@@ -44,8 +45,10 @@ if [ "${1:-}" = "--full" ]; then
     NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
     NC_C_OUTPUT="$ROOT/bootstrap/c/norscode_generated.c" \
         "$NC" run "$ROOT/selfhost/ncb_to_c.no"
-    python3 "$ROOT/tools/gen_dispatch.py" "$ROOT/bootstrap/kompiler.ncb.json" \
-        > "$ROOT/bootstrap/c/nc_dispatch.c"
+    env NORSCODE_CMD=run NORSCODE_FILE="$ROOT/selfhost/gen_dispatch.no" \
+        NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
+        NC_DISPATCH_OUTPUT="$ROOT/bootstrap/c/nc_dispatch.c" \
+        "$NC" run "$ROOT/selfhost/gen_dispatch.no"
     bash "$ROOT/tools/build_norscode_native.sh"
     printf '✓ norscode_native regenerert\n'
 fi

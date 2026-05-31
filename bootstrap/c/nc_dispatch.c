@@ -1,4 +1,4 @@
-/* Auto-generert av tools/gen_dispatch.py — IKKJE REDIGER */
+/* Auto-generert av selfhost/gen_dispatch.no — IKKJE REDIGER */
 typedef struct { const char *name; NcVal *(*fn)(NcVal **, int); } NcDispatch;
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_bokstav(NcVal **args, int nargs);
@@ -169,6 +169,8 @@ static NcVal *nc_fn_selfhost_nc_main_nc_k__yr_ncb_json(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_nc_main_nc_run(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_nc_main_nc_compile(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_nc_main_start(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_gen_dispatch_sanitiser(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_gen_dispatch_start(NcVal **args, int nargs);
 
 static NcDispatch nc_dispatch[] = {
   {"selfhost.lexer.lexer_m1.er_bokstav", nc_fn_selfhost_lexer_lexer_m1_er_bokstav},
@@ -339,6 +341,8 @@ static NcDispatch nc_dispatch[] = {
   {"selfhost.nc_main.nc_run", nc_fn_selfhost_nc_main_nc_run},
   {"selfhost.nc_main.nc_compile", nc_fn_selfhost_nc_main_nc_compile},
   {"selfhost.nc_main.start", nc_fn_selfhost_nc_main_start},
+  {"selfhost.gen_dispatch.sanitiser", nc_fn_selfhost_gen_dispatch_sanitiser},
+  {"selfhost.gen_dispatch.start", nc_fn_selfhost_gen_dispatch_start},
   {NULL, NULL}
 };
 
@@ -351,4 +355,4 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
     {char s2[256];strncpy(s2,l,255);char *t=strstr(s2,"_token");if(t){*t=0;return nc_dispatch_call(s2,a,na);}}
     return NULL;
 }
-static NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) { return nc_dispatch_call("neste",a,na); }
+NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) { return nc_dispatch_call("neste",a,na); }
