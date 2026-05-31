@@ -1,0 +1,303 @@
+// selfhost/native_execution/kernel_builder.no
+//
+// Genererer ein Multiboot1-kompatibel 32-bit ELF-kernel
+// som QEMU og GRUB kan boote.
+//
+// Layout:
+//   [0..51]   32-bit ELF-header
+//   [52..83]  32-bit Program header (PT_LOAD)
+//   [84..4095] padding (nullar)
+//   [4096..]  .text: multiboot-header + x86-32 startup-kode
+//
+// Last-adresse: 0x100000 (1 MB)
+// Tekst-vaddr:  0x101000
+// Entry:        0x10100C (etter 12-byte multiboot-header)
+//
+// Bruk:
+//   NC_OUTPUT=norscode_kernel.elf ./bin/nc run selfhost/native_execution/kernel_builder.no
+//   qemu-system-i386 -kernel norscode_kernel.elf -nographic
+
+// ─── Konstantar ──────────────────────────────────────────────────────────────
+
+funksjon load_base()    { returner 1048576 }   // 0x100000
+funksjon text_page()    { returner 4096 }       // 0x1000 — tekstseksjon-offset i fila
+funksjon text_vaddr()   { returner 1052672 }   // 0x101000
+funksjon entry_vaddr()  { returner 1052684 }   // 0x10100C (+12 for multiboot-header)
+funksjon vga_base()     { returner 0xB8000 }   // 753664 — VGA tekstbuffer
+funksjon stack_top()    { returner 589824 }    // 0x90000
+
+// ─── Byte-hjelpar ────────────────────────────────────────────────────────────
+
+funksjon legg_u8(buf, v)
+    legg_til(buf, v & 255)
+slutt
+
+funksjon legg_u16_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+slutt
+
+funksjon legg_u32_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+slutt
+
+funksjon null_pad(buf, antall)
+    la i: heltall = 0
+    mens i < antall
+        legg_til(buf, 0)
+        i = i + 1
+    slutt
+slutt
+
+funksjon kopier_inn(dst, src)
+    la i: heltall = 0
+    mens i < lengde(src)
+        legg_til(dst, src[i])
+        i = i + 1
+    slutt
+slutt
+
+// ─── 32-bit ELF-header (52 bytes) ────────────────────────────────────────────
+
+funksjon bygg_elf32_header(entry, ph_offset)
+    la buf: liste<heltall> = []
+    // e_ident (16 bytes)
+    legg_til(buf, 0x7F)
+    legg_til(buf, 0x45)   // E
+    legg_til(buf, 0x4C)   // L
+    legg_til(buf, 0x46)   // F
+    legg_til(buf, 1)       // ELFCLASS32
+    legg_til(buf, 1)       // ELFDATA2LSB
+    legg_til(buf, 1)       // EV_CURRENT
+    legg_til(buf, 0)       // ELFOSABI_SYSV
+    null_pad(buf, 8)       // padding
+    legg_u16_le(buf, 2)    // ET_EXEC
+    legg_u16_le(buf, 3)    // EM_386
+    legg_u32_le(buf, 1)    // e_version
+    legg_u32_le(buf, entry)      // e_entry
+    legg_u32_le(buf, ph_offset)  // e_phoff
+    legg_u32_le(buf, 0)          // e_shoff
+    legg_u32_le(buf, 0)          // e_flags
+    legg_u16_le(buf, 52)         // e_ehsize (32-bit ELF header)
+    legg_u16_le(buf, 32)         // e_phentsize (32-bit program header)
+    legg_u16_le(buf, 1)          // e_phnum
+    legg_u16_le(buf, 40)         // e_shentsize
+    legg_u16_le(buf, 0)          // e_shnum
+    legg_u16_le(buf, 0)          // e_shstrndx
+    returner buf
+slutt
+
+// ─── 32-bit Program Header (32 bytes) ────────────────────────────────────────
+
+funksjon bygg_ph32(ptype, flags, offset, vaddr, paddr, filesz, memsz, align)
+    la buf: liste<heltall> = []
+    legg_u32_le(buf, ptype)
+    legg_u32_le(buf, offset)
+    legg_u32_le(buf, vaddr)
+    legg_u32_le(buf, paddr)
+    legg_u32_le(buf, filesz)
+    legg_u32_le(buf, memsz)
+    legg_u32_le(buf, flags)
+    legg_u32_le(buf, align)
+    returner buf
+slutt
+
+// ─── Multiboot1-header (12 bytes) ────────────────────────────────────────────
+//
+// GRUB søkjer etter magien 0x1BADB002 i dei første 8 KB av binæren.
+
+funksjon bygg_multiboot_header()
+    la buf: liste<heltall> = []
+    la magic: heltall = 464367618    // 0x1BADB002
+    la flags: heltall = 0
+    // checksum = -(magic + flags) & 0xFFFFFFFF
+    la checksum: heltall = (0 - magic) & 0xFFFFFFFF
+    legg_u32_le(buf, magic)
+    legg_u32_le(buf, flags)
+    legg_u32_le(buf, checksum)
+    returner buf
+slutt
+
+// ─── x86-32 instruksjonar ────────────────────────────────────────────────────
+//
+// Alle instruksjonar er 32-bit protected mode (ingen prefiks nødvendig).
+
+// mov esp, imm32  (5 bytes): BC <imm32>
+funksjon emit32_mov_esp_imm(buf, v)
+    legg_til(buf, 0xBC)
+    legg_u32_le(buf, v)
+slutt
+
+// mov edi, imm32  (5 bytes): BF <imm32>
+funksjon emit32_mov_edi_imm(buf, v)
+    legg_til(buf, 0xBF)
+    legg_u32_le(buf, v)
+slutt
+
+// mov byte [edi], imm8  (3 bytes): C6 07 <imm8>
+funksjon emit32_mov_byte_edi_imm(buf, imm8)
+    legg_til(buf, 0xC6)
+    legg_til(buf, 0x07)
+    legg_til(buf, imm8 & 255)
+slutt
+
+// mov byte [edi+disp8], imm8  (4 bytes): C6 47 <disp8> <imm8>
+funksjon emit32_mov_byte_edi_disp_imm(buf, disp, imm8)
+    legg_til(buf, 0xC6)
+    legg_til(buf, 0x47)
+    legg_til(buf, disp & 255)
+    legg_til(buf, imm8 & 255)
+slutt
+
+// add edi, imm32  (6 bytes): 81 C7 <imm32>  [for store offset]
+funksjon emit32_add_edi_imm(buf, v)
+    legg_til(buf, 0x81)
+    legg_til(buf, 0xC7)
+    legg_u32_le(buf, v)
+slutt
+
+// cli (1 byte): FA
+funksjon emit32_cli(buf)
+    legg_til(buf, 0xFA)
+slutt
+
+// hlt (1 byte): F4
+funksjon emit32_hlt(buf)
+    legg_til(buf, 0xF4)
+slutt
+
+// jmp $-1 (uendeleg løkke) (2 bytes): EB FE
+funksjon emit32_jmp_self(buf)
+    legg_til(buf, 0xEB)
+    legg_til(buf, 0xFE)
+slutt
+
+// ─── VGA-skriving ─────────────────────────────────────────────────────────────
+//
+// VGA tekst-modus: 0xB8000, kvar celle = 2 bytes [char, attr]
+// Attributt 0x0F = kvit tekst på svart bakgrunn
+// Max offset for ein 80-kolonne rad: disp < 128 for 4-byte form,
+// elles brukar vi add edi-trick for neste seksjon.
+
+funksjon emit_vga_char_at(buf, disp, ch, attr)
+    // char byte
+    hvis disp == 0
+        emit32_mov_byte_edi_imm(buf, builtin.char_code(ch))
+    ellers
+        emit32_mov_byte_edi_disp_imm(buf, disp, builtin.char_code(ch))
+    slutt
+    // attr byte (disp+1)
+    la adip: heltall = disp + 1
+    emit32_mov_byte_edi_disp_imm(buf, adip, attr & 255)
+slutt
+
+funksjon emit_vga_streng(buf, streng, start_disp, attr)
+    la i: heltall = 0
+    la disp: heltall = start_disp
+    mens i < lengde(streng)
+        la ch = streng[i]
+        la code: heltall = 0
+        // Enkel ASCII
+        hvis ch == " " { code = 32 }
+        ellers hvis ch == "!" { code = 33 }
+        ellers hvis ch == "O" { code = 79 }
+        ellers hvis ch == "S" { code = 83 }
+        ellers { code = builtin.char_code(ch) }
+        // Hald disp < 128 (plass til attr byte)
+        hvis disp > 126
+            // Rull til neste rad via add edi
+            emit32_add_edi_imm(buf, disp)
+            disp = 0
+        slutt
+        // Emit char
+        hvis disp == 0
+            emit32_mov_byte_edi_imm(buf, code)
+        ellers
+            emit32_mov_byte_edi_disp_imm(buf, disp, code)
+        slutt
+        // Emit attr
+        emit32_mov_byte_edi_disp_imm(buf, disp + 1, attr)
+        disp = disp + 2
+        i = i + 1
+    slutt
+slutt
+
+// ─── Startup-kode ────────────────────────────────────────────────────────────
+
+funksjon bygg_startup_kode()
+    la buf: liste<heltall> = []
+
+    // Sett opp stack
+    emit32_mov_esp_imm(buf, stack_top())
+
+    // Pek edi på VGA-buffer
+    emit32_mov_edi_imm(buf, vga_base())
+
+    // Skriv "Norscode OS 0.1  Booted OK!" i VGA
+    // Linje 1: "Norscode OS 0.1" med gul attributt (0x0E)
+    emit_vga_streng(buf, "Norscode OS 0.1", 0, 0x0E)
+
+    // Linje 2: "Booted OK!" med cyan (0x0B)
+    // Start på rad 1: offset = 80 * 2 = 160 bytes frå B8000
+    // Vi brukar add edi for å flytte dit
+    emit32_add_edi_imm(buf, 160)
+    emit32_mov_edi_imm(buf, vga_base() + 160)
+    emit_vga_streng(buf, "Booted OK!", 0, 0x0B)
+
+    // Halt-løkke
+    emit32_cli(buf)
+    emit32_hlt(buf)
+    emit32_jmp_self(buf)    // om hlt blir avbrutt
+
+    returner buf
+slutt
+
+// ─── Hovudbyggjar ─────────────────────────────────────────────────────────────
+
+funksjon bygg_kernel()
+    la mboot = bygg_multiboot_header()   // 12 bytes
+    la kode = bygg_startup_kode()
+
+    // .text = multiboot header + kode
+    la text: liste<heltall> = []
+    kopier_inn(text, mboot)
+    kopier_inn(text, kode)
+
+    // Fil-størrelse = TEXT_PAGE + text-størrelse
+    la text_size: heltall = lengde(text)
+    la total: heltall = text_page() + text_size
+
+    // ELF-header med entry = 0x10100C (etter multiboot-header)
+    la elf_hdr = bygg_elf32_header(entry_vaddr(), 52)
+
+    // Program header: PT_LOAD (1), PF_R|PF_X (5)
+    // p_offset=0: heile fila er eitt segment frå 0x100000
+    la ph = bygg_ph32(1, 5, 0, load_base(), load_base(), total, total, 4096)
+
+    // Sett saman fil
+    la fil: liste<heltall> = []
+    kopier_inn(fil, elf_hdr)   // 52 bytes
+    kopier_inn(fil, ph)        // 32 bytes
+    null_pad(fil, text_page() - lengde(fil))  // pad til offset 4096
+    kopier_inn(fil, text)      // multiboot + kode
+
+    returner fil
+slutt
+
+// ─── Inngangspunkt ───────────────────────────────────────────────────────────
+
+funksjon start()
+    la output = miljo_hent("NC_OUTPUT")
+    hvis output == "" { output = "build/norscode_kernel.elf" }
+
+    skriv("kernel_builder: genererer " + output + "...\n")
+    la bytes = bygg_kernel()
+    fil_skriv_binær(output, bytes)
+
+    skriv("kernel_builder: " + tekst_fra_heltall(lengde(bytes)) + " bytes\n")
+    skriv("Test: qemu-system-i386 -kernel " + output + " -nographic\n")
+    returner 0
+slutt
