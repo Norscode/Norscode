@@ -13926,7 +13926,7 @@ lbl_nc_fn___L24__:;
   goto lbl_nc_fn___L29__;
 lbl_nc_fn___L28__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__.legg_til"));
+  nc_push(&sp, stack, nc_str("selfhost.vm.legg_til"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L29__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L26__;
@@ -13949,7 +13949,7 @@ lbl_nc_fn___L26__:;
   goto lbl_nc_fn___L33__;
 lbl_nc_fn___L32__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__.fjern_siste"));
+  nc_push(&sp, stack, nc_str("selfhost.vm.fjern_siste"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L33__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L30__;
@@ -13969,7 +13969,7 @@ lbl_nc_fn___L30__:;
   goto lbl_nc_fn___L39__;
 lbl_nc_fn___L38__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__.fjern"));
+  nc_push(&sp, stack, nc_str("selfhost.vm.fjern"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L39__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L36__;
@@ -14000,7 +14000,7 @@ lbl_nc_fn___L34__:;
   goto lbl_nc_fn___L45__;
 lbl_nc_fn___L44__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__.heltall"));
+  nc_push(&sp, stack, nc_str("selfhost.vm.heltall"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L45__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L42__;
@@ -14026,7 +14026,7 @@ lbl_nc_fn___L40__:;
   goto lbl_nc_fn___L49__;
 lbl_nc_fn___L48__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__.tekst"));
+  nc_push(&sp, stack, nc_str("selfhost.vm.tekst"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L49__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L46__;
@@ -14908,7 +14908,7 @@ lbl_nc_fn___L208__:;
   goto lbl_nc_fn___L211__;
 lbl_nc_fn___L210__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  nc_push(&sp, stack, nc_str("__main__."));
+  nc_push(&sp, stack, nc_str("selfhost.vm."));
   { NcVal *_a23_1=nc_pop(&sp,stack); NcVal *_a23_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a23_0,_a23_1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L212__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
@@ -16417,7 +16417,7 @@ static NcVal *nc_fn_selfhost_bundler_omd__yp_funksjonar(NcVal **args, int nargs)
   nc_store(vars,varnames,&nvars,"modul_namn",nargs>1?args[1]:nc_nil());
 
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ncb_json"));
-  nc_push(&sp, stack, nc_str("\"__main__."));
+  nc_push(&sp, stack, nc_str("\"selfhost.bundler."));
   nc_push(&sp, stack, nc_str("\""));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modul_namn"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -16777,7 +16777,7 @@ lbl_nc_fn___L21__:;
   nc_push(&sp, stack, nc_str("}"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "alle_fns", nc_pop(&sp, stack));
-  nc_push(&sp, stack, nc_str("{\"format\":\"ncb-v1\",\"entry\":\"__main__.start\","));
+  nc_push(&sp, stack, nc_str("{\"format\":\"ncb-v1\",\"entry\":\"selfhost.bundler.start\","));
   nc_push(&sp, stack, nc_str("\"imports\":[],\"route_handlers\":{},"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str("\"dependency_providers\":{},\"guard_providers\":{},"));
