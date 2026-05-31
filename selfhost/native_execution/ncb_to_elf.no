@@ -1,0 +1,390 @@
+// selfhost/native_execution/ncb_to_elf.no
+//
+// NCB → x86-64 ELF-kompilator (minimal subset, sjølvstendig)
+//
+// Støttar instruksjonane som trengst for Hello World og enkle program:
+//   - PUSH_CONST (streng/heltall/null)
+//   - CALL builtin.skriv → Linux write(2) syscall
+//   - CALL builtin.exit / RETURN → Linux exit(2) syscall
+//   - POP
+//
+// Bruk:
+//   NC_INPUT=fil.ncb.json NC_OUTPUT=fil.elf ./bin/nc run selfhost/native_execution/ncb_to_elf.no
+
+// ─── ELF-layout ──────────────────────────────────────────────────────────────
+
+funksjon base_addr() { returner 4194304 }        // 0x400000
+funksjon text_off() { returner 4096 }       // 0x1000 — .text startar her i fila
+
+// ─── Little-endian byte-hjelpar ──────────────────────────────────────────────
+
+funksjon legg_u16_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+slutt
+
+funksjon legg_u32_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+slutt
+
+funksjon legg_u64_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+    legg_til(buf, (v >> 32) & 255)
+    legg_til(buf, (v >> 40) & 255)
+    legg_til(buf, (v >> 48) & 255)
+    legg_til(buf, (v >> 56) & 255)
+slutt
+
+funksjon null_pad(buf, antall)
+    la i: heltall = 0
+    mens i < antall
+        legg_til(buf, 0)
+        i = i + 1
+    slutt
+slutt
+
+funksjon kopier_inn(dst, src)
+    la i: heltall = 0
+    mens i < lengde(src)
+        legg_til(dst, src[i])
+        i = i + 1
+    slutt
+slutt
+
+// ─── ELF64-header (64 bytes) ─────────────────────────────────────────────────
+
+funksjon bygg_elf_header(entry_vaddr, ph_offset, ph_count)
+    la buf: liste<heltall> = []
+    legg_til(buf, 0x7F)
+    legg_til(buf, 0x45)   // E
+    legg_til(buf, 0x4C)   // L
+    legg_til(buf, 0x46)   // F
+    legg_til(buf, 2)       // ELFCLASS64
+    legg_til(buf, 1)       // ELFDATA2LSB
+    legg_til(buf, 1)       // EV_CURRENT
+    legg_til(buf, 0)       // ELFOSABI_SYSV
+    null_pad(buf, 8)       // padding
+    legg_u16_le(buf, 2)    // ET_EXEC
+    legg_u16_le(buf, 62)   // EM_X86_64
+    legg_u32_le(buf, 1)    // e_version
+    legg_u64_le(buf, entry_vaddr)
+    legg_u64_le(buf, ph_offset)
+    legg_u64_le(buf, 0)    // e_shoff
+    legg_u32_le(buf, 0)    // e_flags
+    legg_u16_le(buf, 64)   // e_ehsize
+    legg_u16_le(buf, 56)   // e_phentsize
+    legg_u16_le(buf, ph_count)
+    legg_u16_le(buf, 64)   // e_shentsize
+    legg_u16_le(buf, 0)    // e_shnum
+    legg_u16_le(buf, 0)    // e_shstrndx
+    returner buf
+slutt
+
+// ─── ELF64 Program Header (56 bytes) ────────────────────────────────────────
+
+funksjon bygg_program_header(ptype, flags, offset, vaddr, filesz, memsz, align)
+    la buf: liste<heltall> = []
+    legg_u32_le(buf, ptype)
+    legg_u32_le(buf, flags)
+    legg_u64_le(buf, offset)
+    legg_u64_le(buf, vaddr)
+    legg_u64_le(buf, vaddr)   // p_paddr = p_vaddr
+    legg_u64_le(buf, filesz)
+    legg_u64_le(buf, memsz)
+    legg_u64_le(buf, align)
+    returner buf
+slutt
+
+// ─── x86-64 instruksjonar ────────────────────────────────────────────────────
+
+funksjon emit_mov_rax_imm64(buf, v)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xB8)
+    legg_u64_le(buf, v)
+slutt
+
+funksjon emit_mov_rdi_imm64(buf, v)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xBF)
+    legg_u64_le(buf, v)
+slutt
+
+funksjon emit_mov_rsi_imm64(buf, v)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xBE)
+    legg_u64_le(buf, v)
+slutt
+
+funksjon emit_mov_rdx_imm64(buf, v)
+    legg_til(buf, 0x48)
+    legg_til(buf, 0xBA)
+    legg_u64_le(buf, v)
+slutt
+
+funksjon emit_syscall_instr(buf)
+    legg_til(buf, 0x0F)
+    legg_til(buf, 0x05)
+slutt
+
+funksjon emit_exit_syscall(buf, kode)
+    emit_mov_rax_imm64(buf, 60)
+    emit_mov_rdi_imm64(buf, kode)
+    emit_syscall_instr(buf)
+slutt
+
+funksjon emit_write_syscall(buf, str_vaddr, str_len)
+    emit_mov_rax_imm64(buf, 1)
+    emit_mov_rdi_imm64(buf, 1)
+    emit_mov_rsi_imm64(buf, str_vaddr)
+    emit_mov_rdx_imm64(buf, str_len)
+    emit_syscall_instr(buf)
+slutt
+
+// ─── Streng → bytes (ASCII + vanleg escape) ──────────────────────────────────
+
+funksjon streng_til_bytes(s)
+    la bytes: liste<heltall> = []
+    la i: heltall = 0
+    mens i < lengde(s)
+        la ch = s[i]
+        la b: heltall = 0
+        hvis ch == "\n" { b = 10 }
+        ellers hvis ch == "\t" { b = 9 }
+        ellers hvis ch == "\r" { b = 13 }
+        ellers hvis ch == "\\" { b = 92 }
+        ellers hvis ch == "\"" { b = 34 }
+        ellers { b = builtin.char_code(ch) }
+        legg_til(bytes, b)
+        i = i + 1
+    slutt
+    returner bytes
+slutt
+
+// ─── To-pass NCB-kompilator ───────────────────────────────────────────────────
+//
+// Pass 1: Samle alle streng-konstantar, bygg rodata-tabell
+// Pass 2: Emit x86-64 med riktige rodata-adresser
+
+funksjon kompiler_ncb_til_elf(ncb_json)
+    la ncb = json_parse_raw(ncb_json)
+    la fns = ncb["functions"]
+    la entry: tekst = tekst(ncb["entry"])
+
+    // Finn start-funksjon
+    la start_fn: tekst = ""
+    hvis finnes_nøkkel(fns, entry)
+        start_fn = entry
+    ellers
+        la nk = nøkler(fns)
+        la si: heltall = 0
+        mens si < lengde(nk)
+            la k: tekst = nk[si]
+            hvis builtin.ends_with(k, ".start") eller k == "start" eller k == "__main__.start"
+                start_fn = k
+            slutt
+            si = si + 1
+        slutt
+    slutt
+
+    hvis start_fn == ""
+        kast "Ingen start-funksjon i NCB"
+    slutt
+
+    la fn_def = fns[start_fn]
+    la kode = fn_def["code"]
+
+    // Pass 1: Samle streng-konstantar i rekkefølge
+    la rd_strenger: liste<tekst> = []
+    la rd_byte_sizes: liste<heltall> = []
+    la rd_offsets: liste<heltall> = []
+    la rd_total: heltall = 0
+
+    la pi: heltall = 0
+    mens pi < lengde(kode)
+        la instr = kode[pi]
+        la iop: tekst = instr[0]
+        hvis iop == "PUSH_CONST"
+            la v = instr[1]
+            hvis v != null og builtin.type(v) == "tekst"
+                la s: tekst = tekst(v)
+                la sbytes = streng_til_bytes(s)
+                legg_til(rd_strenger, s)
+                legg_til(rd_byte_sizes, lengde(sbytes))
+                legg_til(rd_offsets, rd_total)
+                rd_total = rd_total + lengde(sbytes)
+            slutt
+        slutt
+        pi = pi + 1
+    slutt
+
+    // Bygg rodata-seksjon
+    la rodata: liste<heltall> = []
+    la ri: heltall = 0
+    mens ri < lengde(rd_strenger)
+        la sbytes2 = streng_til_bytes(rd_strenger[ri])
+        kopier_inn(rodata, sbytes2)
+        ri = ri + 1
+    slutt
+
+    // Estimert text-storleik (konservativt: 50 bytes per instruksjon + 64 prolog)
+    la est_text: heltall = lengde(kode) * 50 + 64
+
+    // Virtuelle adresser
+    la text_vaddr: heltall = base_addr() + text_off()    // 0x401000
+    la rodata_vaddr: heltall = text_vaddr + est_text
+
+    // Pass 2: Emit x86-64 maskinkode
+    la text: liste<heltall> = []
+    la str_idx: heltall = 0   // indeks i rd_strenger (ein per PUSH_CONST-streng)
+
+    la ci: heltall = 0
+    la val_stack: liste<tekst> = []   // compile-time verdistack
+
+    mens ci < lengde(kode)
+        la instr2 = kode[ci]
+        la op: tekst = instr2[0]
+
+        hvis op == "PUSH_CONST"
+            la v2 = instr2[1]
+            hvis v2 == null
+                legg_til(val_stack, "null")
+                // push 0
+                emit_mov_rax_imm64(text, 0)
+                legg_til(text, 0x50)   // push rax
+            ellers hvis builtin.type(v2) == "heltall"
+                legg_til(val_stack, "int:" + tekst_fra_heltall(v2))
+                emit_mov_rax_imm64(text, heltall(v2))
+                legg_til(text, 0x50)   // push rax
+            ellers
+                // Streng — bruk rodata-adresse
+                la s2: tekst = tekst(v2)
+                la rd_off: heltall = rd_offsets[str_idx]
+                la rd_sz: heltall = rd_byte_sizes[str_idx]
+                la str_vaddr: heltall = rodata_vaddr + rd_off
+                str_idx = str_idx + 1
+                legg_til(val_stack, "str:" + tekst_fra_heltall(str_vaddr) + ":" + tekst_fra_heltall(rd_sz))
+                emit_mov_rax_imm64(text, str_vaddr)
+                legg_til(text, 0x50)   // push rax
+            slutt
+
+        ellers hvis op == "POP"
+            hvis lengde(val_stack) > 0 { fjern_siste(val_stack) }
+            legg_til(text, 0x58)   // pop rax
+
+        ellers hvis op == "CALL"
+            la fn2: tekst = instr2[1]
+            la nargs: heltall = heltall(instr2[2])
+
+            // Sjekk om det er skriv
+            la er_skriv: boolsk = fn2 == "builtin.skriv" eller fn2 == "skriv" eller
+                builtin.ends_with(fn2, ".skriv")
+            la er_exit: boolsk = fn2 == "builtin.exit" eller fn2 == "stopp" eller
+                builtin.ends_with(fn2, ".exit")
+
+            hvis er_skriv og nargs == 1 og lengde(val_stack) > 0
+                la top: tekst = val_stack[lengde(val_stack) - 1]
+                fjern_siste(val_stack)
+                // Pop adresse frå stack til rsi
+                legg_til(text, 0x5E)   // pop rsi
+
+                la str_len: heltall = 0
+                la str_addr: heltall = 0
+                hvis builtin.starts_with(top, "str:")
+                    la deler = builtin.split(top, ":")
+                    str_addr = heltall_fra_tekst(deler[1])
+                    str_len = heltall_fra_tekst(deler[2])
+                slutt
+
+                emit_mov_rax_imm64(text, 1)    // sys_write
+                emit_mov_rdi_imm64(text, 1)    // stdout
+                emit_mov_rdx_imm64(text, str_len)
+                emit_syscall_instr(text)
+
+                // Returverdi (dummy null)
+                legg_til(val_stack, "null")
+                emit_mov_rax_imm64(text, 0)
+                legg_til(text, 0x50)
+
+            ellers hvis er_exit og nargs == 1 og lengde(val_stack) > 0
+                la exit_top: tekst = val_stack[lengde(val_stack) - 1]
+                fjern_siste(val_stack)
+                legg_til(text, 0x5F)   // pop rdi (exit code)
+                emit_mov_rax_imm64(text, 60)
+                emit_syscall_instr(text)
+
+            ellers
+                // Ukjend kall — pop alle argumentar, push null
+                la ai: heltall = 0
+                mens ai < nargs
+                    hvis lengde(val_stack) > 0 { fjern_siste(val_stack) }
+                    legg_til(text, 0x58)   // pop rax
+                    ai = ai + 1
+                slutt
+                legg_til(val_stack, "null")
+                emit_mov_rax_imm64(text, 0)
+                legg_til(text, 0x50)
+            slutt
+
+        ellers hvis op == "RETURN"
+            hvis lengde(val_stack) > 0
+                fjern_siste(val_stack)
+                legg_til(text, 0x58)   // pop rax (returverdi)
+            slutt
+            // start() returnerer → exit(0)
+            emit_exit_syscall(text, 0)
+
+        slutt
+        ci = ci + 1
+    slutt
+
+    // Dersom ingen RETURN/exit — legg til exit(0) på slutten
+    emit_exit_syscall(text, 0)
+
+    // Pad .text til est_text med NOP (0x90) — slik at rodata ligg på riktig adresse
+    mens lengde(text) < est_text
+        legg_til(text, 0x90)   // NOP
+    slutt
+
+    // Bygg ELF-fil
+    la text_size: heltall = lengde(text)
+    la total_size2: heltall = text_off() + text_size + rd_total
+
+    la elf_hdr = bygg_elf_header(text_vaddr, 64, 1)
+    la ph = bygg_program_header(1, 5, 0, base_addr(), total_size2, total_size2, 4096)
+
+    la fil: liste<heltall> = []
+    kopier_inn(fil, elf_hdr)
+    kopier_inn(fil, ph)
+    null_pad(fil, text_off() - lengde(fil))
+    kopier_inn(fil, text)
+    kopier_inn(fil, rodata)
+
+    returner fil
+slutt
+
+// ─── Inngangspunkt ───────────────────────────────────────────────────────────
+
+funksjon start()
+    la input_sti = miljo_hent("NC_INPUT")
+    la output_sti = miljo_hent("NC_OUTPUT")
+
+    hvis input_sti == ""
+        skriv("ncb_to_elf: set NC_INPUT=fil.ncb.json og NC_OUTPUT=fil.elf\n")
+        returner 1
+    slutt
+    hvis output_sti == "" { output_sti = "a.out" }
+
+    skriv("ncb_to_elf: " + input_sti + " → " + output_sti + "\n")
+    la ncb_json = fil_les(input_sti)
+    la bytes = kompiler_ncb_til_elf(ncb_json)
+
+    fil_skriv_binær(output_sti, bytes)
+    skriv("ncb_to_elf: " + tekst_fra_heltall(lengde(bytes)) + " bytes ELF skrive\n")
+    returner 0
+slutt

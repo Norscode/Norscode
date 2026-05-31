@@ -345,6 +345,9 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"fil_les"))          fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_skriv"))        { if(narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"fil_skriv_bin\xc3\xa6r")||!strcmp(cn,"fil_skriv_binary")) { if(narg>=2) nc_builtin_fil_skriv_binary(cargs[0],cargs[1]); }
+            else if (!strcmp(cn,"char_code")) fn_r=nc_builtin_char_code(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"chr")) fn_r=nc_builtin_chr(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json_parse_raw")) fn_r=nc_builtin_json_parse_raw(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_finnes"))       fn_r=nc_builtin_fil_finnes(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_hent"))       fn_r=nc_builtin_miljo_hent(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_finnes"))     fn_r=nc_builtin_miljo_finnes(narg>0?cargs[0]:nc_nil());

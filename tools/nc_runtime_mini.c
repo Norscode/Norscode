@@ -495,6 +495,15 @@ static NcVal *nc_builtin_replace(NcVal *s_v, NcVal *old_v, NcVal *new_v) {
     free(s); free(old); free(newstr);
     return nc_str_own(r);
 }
+static NcVal *nc_builtin_chr(NcVal *v) {
+    int code = v && v->type == NC_INT ? (int)v->i : 0;
+    char buf[2] = {(char)(unsigned char)code, 0};
+    return nc_str(buf);
+}
+static NcVal *nc_builtin_char_code(NcVal *v) {
+    if (!v || v->type != NC_STR || !v->s || !v->s[0]) return nc_int(0);
+    return nc_int((unsigned char)v->s[0]);
+}
 static NcVal *nc_builtin_tekst_fra_heltall(NcVal *v) {
     char buf[32];
     if (v->type == NC_INT) snprintf(buf, sizeof(buf), "%lld", v->i);

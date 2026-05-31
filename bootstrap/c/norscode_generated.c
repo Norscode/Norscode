@@ -497,6 +497,15 @@ static NcVal *nc_builtin_replace(NcVal *s_v, NcVal *old_v, NcVal *new_v) {
     free(s); free(old); free(newstr);
     return nc_str_own(r);
 }
+static NcVal *nc_builtin_chr(NcVal *v) {
+    int code = v && v->type == NC_INT ? (int)v->i : 0;
+    char buf[2] = {(char)(unsigned char)code, 0};
+    return nc_str(buf);
+}
+static NcVal *nc_builtin_char_code(NcVal *v) {
+    if (!v || v->type != NC_STR || !v->s || !v->s[0]) return nc_int(0);
+    return nc_int((unsigned char)v->s[0]);
+}
 static NcVal *nc_builtin_tekst_fra_heltall(NcVal *v) {
     char buf[32];
     if (v->type == NC_INT) snprintf(buf, sizeof(buf), "%lld", v->i);
@@ -1490,7 +1499,7 @@ lbl_nc_fn___L129__:;
   goto lbl_nc_fn___L127__;
 lbl_nc_fn___L126__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
-  nc_push(&sp, stack, nc_str("	"));
+  nc_push(&sp, stack, nc_str("\t"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L127__:;
   return nc_pop(&sp, stack);
@@ -2907,9 +2916,25 @@ lbl_nc_fn___L432__:;
   nc_push(&sp, stack, nc_str("t"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L434__;
-  nc_push(&sp, stack, nc_str("	"));
+  nc_push(&sp, stack, nc_str("\t"));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L434__:;
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "neste"));
+  nc_push(&sp, stack, nc_str("r"));
+  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L436__;
+  nc_push(&sp, stack, nc_int(13LL));
+  { NcVal *_a40_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_chr(_a40_0)); }
+  return nc_pop(&sp, stack);
+lbl_nc_fn___L436__:;
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "neste"));
+  nc_push(&sp, stack, nc_str("0"));
+  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L438__;
+  nc_push(&sp, stack, nc_int(0LL));
+  { NcVal *_a48_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_chr(_a48_0)); }
+  return nc_pop(&sp, stack);
+lbl_nc_fn___L438__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "neste"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -2924,29 +2949,29 @@ static NcVal *nc_fn___main___unescape_tekst(NcVal **args, int nargs) {
   nc_store(vars, varnames, &nvars, "ut", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_int(0LL));
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-lbl_nc_fn___L436__:;
+lbl_nc_fn___L440__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "raw"));
   { NcVal *_a7_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a7_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L437__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L441__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "raw"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("\\"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L440__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L444__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "raw"));
   { NcVal *_a20_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a20_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  goto lbl_nc_fn___L441__;
-lbl_nc_fn___L440__:;
+  goto lbl_nc_fn___L445__;
+lbl_nc_fn___L444__:;
   nc_push(&sp, stack, nc_bool(0));
-lbl_nc_fn___L441__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L438__;
+lbl_nc_fn___L445__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L442__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ut"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "raw"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
@@ -2960,8 +2985,8 @@ lbl_nc_fn___L441__:;
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L439__;
-lbl_nc_fn___L438__:;
+  goto lbl_nc_fn___L443__;
+lbl_nc_fn___L442__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ut"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "raw"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
@@ -2972,9 +2997,9 @@ lbl_nc_fn___L438__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-lbl_nc_fn___L439__:;
-  goto lbl_nc_fn___L436__;
-lbl_nc_fn___L437__:;
+lbl_nc_fn___L443__:;
+  goto lbl_nc_fn___L440__;
+lbl_nc_fn___L441__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ut"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -2992,7 +3017,7 @@ static NcVal *nc_fn___main___les_operator(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   { NcVal *_a4_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a4_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L442__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L446__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
@@ -3003,12 +3028,28 @@ static NcVal *nc_fn___main___les_operator(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
   nc_push(&sp, stack, nc_str("=="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L470__;
+  nc_push(&sp, stack, nc_bool(1));
+  goto lbl_nc_fn___L471__;
+lbl_nc_fn___L470__:;
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
+  nc_push(&sp, stack, nc_str("!="));
+  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
+lbl_nc_fn___L471__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L468__;
+  nc_push(&sp, stack, nc_bool(1));
+  goto lbl_nc_fn___L469__;
+lbl_nc_fn___L468__:;
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
+  nc_push(&sp, stack, nc_str("<="));
+  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
+lbl_nc_fn___L469__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L466__;
   nc_push(&sp, stack, nc_bool(1));
   goto lbl_nc_fn___L467__;
 lbl_nc_fn___L466__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("!="));
+  nc_push(&sp, stack, nc_str(">="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L467__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L464__;
@@ -3016,7 +3057,7 @@ lbl_nc_fn___L467__:;
   goto lbl_nc_fn___L465__;
 lbl_nc_fn___L464__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("<="));
+  nc_push(&sp, stack, nc_str("->"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L465__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L462__;
@@ -3024,7 +3065,7 @@ lbl_nc_fn___L465__:;
   goto lbl_nc_fn___L463__;
 lbl_nc_fn___L462__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str(">="));
+  nc_push(&sp, stack, nc_str("+="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L463__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L460__;
@@ -3032,7 +3073,7 @@ lbl_nc_fn___L463__:;
   goto lbl_nc_fn___L461__;
 lbl_nc_fn___L460__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("->"));
+  nc_push(&sp, stack, nc_str("-="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L461__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L458__;
@@ -3040,7 +3081,7 @@ lbl_nc_fn___L461__:;
   goto lbl_nc_fn___L459__;
 lbl_nc_fn___L458__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("+="));
+  nc_push(&sp, stack, nc_str("*="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L459__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L456__;
@@ -3048,7 +3089,7 @@ lbl_nc_fn___L459__:;
   goto lbl_nc_fn___L457__;
 lbl_nc_fn___L456__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("-="));
+  nc_push(&sp, stack, nc_str("/="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L457__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L454__;
@@ -3056,7 +3097,7 @@ lbl_nc_fn___L457__:;
   goto lbl_nc_fn___L455__;
 lbl_nc_fn___L454__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("*="));
+  nc_push(&sp, stack, nc_str("%="));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L455__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L452__;
@@ -3064,7 +3105,7 @@ lbl_nc_fn___L455__:;
   goto lbl_nc_fn___L453__;
 lbl_nc_fn___L452__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("/="));
+  nc_push(&sp, stack, nc_str("<<"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L453__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L450__;
@@ -3072,30 +3113,14 @@ lbl_nc_fn___L453__:;
   goto lbl_nc_fn___L451__;
 lbl_nc_fn___L450__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("%="));
+  nc_push(&sp, stack, nc_str(">>"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L451__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L448__;
-  nc_push(&sp, stack, nc_bool(1));
-  goto lbl_nc_fn___L449__;
-lbl_nc_fn___L448__:;
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str("<<"));
-  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-lbl_nc_fn___L449__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L446__;
-  nc_push(&sp, stack, nc_bool(1));
-  goto lbl_nc_fn___L447__;
-lbl_nc_fn___L446__:;
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
-  nc_push(&sp, stack, nc_str(">>"));
-  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-lbl_nc_fn___L447__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L444__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "to"));
   return nc_pop(&sp, stack);
-lbl_nc_fn___L444__:;
-lbl_nc_fn___L442__:;
+lbl_nc_fn___L448__:;
+lbl_nc_fn___L446__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
@@ -3114,28 +3139,28 @@ static NcVal *nc_fn___main___hopp_kommentar(NcVal **args, int nargs) {
 
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-lbl_nc_fn___L468__:;
+lbl_nc_fn___L472__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   { NcVal *_a5_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a5_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L470__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L474__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("\n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(!nc_eq(a,b))); }
-  goto lbl_nc_fn___L471__;
-lbl_nc_fn___L470__:;
+  goto lbl_nc_fn___L475__;
+lbl_nc_fn___L474__:;
   nc_push(&sp, stack, nc_bool(0));
-lbl_nc_fn___L471__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L469__;
+lbl_nc_fn___L475__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L473__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L468__;
-lbl_nc_fn___L469__:;
+  goto lbl_nc_fn___L472__;
+lbl_nc_fn___L473__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -3154,46 +3179,46 @@ static NcVal *nc_fn___main___lex(NcVal **args, int nargs) {
   nc_store(vars, varnames, &nvars, "linje", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_int(1LL));
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-lbl_nc_fn___L472__:;
+lbl_nc_fn___L476__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   { NcVal *_a11_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a11_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L473__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L477__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_store(vars, varnames, &nvars, "tegn", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c19_0=nc_pop(&sp,stack); NcVal *_arr19[]={_c19_0}; nc_push(&sp,stack,nc_fn___main___er_whitespace(_arr19,1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L474__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L478__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   nc_push(&sp, stack, nc_str("\n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L476__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L480__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "linje"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "linje", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_int(1LL));
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L477__;
-lbl_nc_fn___L476__:;
+  goto lbl_nc_fn___L481__;
+lbl_nc_fn___L480__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kolonne"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-lbl_nc_fn___L477__:;
+lbl_nc_fn___L481__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L474__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L478__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   nc_push(&sp, stack, nc_str("#"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L478__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L482__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *_c50_1=nc_pop(&sp,stack); NcVal *_c50_0=nc_pop(&sp,stack); NcVal *_arr50[]={_c50_0,_c50_1}; nc_push(&sp,stack,nc_fn___main___hopp_kommentar(_arr50,2)); }
@@ -3206,23 +3231,23 @@ lbl_nc_fn___L474__:;
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_indeks"));
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L478__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L482__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   nc_push(&sp, stack, nc_str("/"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L484__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L488__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   { NcVal *_a70_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a70_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
-  goto lbl_nc_fn___L485__;
-lbl_nc_fn___L484__:;
+  goto lbl_nc_fn___L489__;
+lbl_nc_fn___L488__:;
   nc_push(&sp, stack, nc_bool(0));
-lbl_nc_fn___L485__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L482__;
+lbl_nc_fn___L489__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L486__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -3230,22 +3255,22 @@ lbl_nc_fn___L485__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("/"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  goto lbl_nc_fn___L483__;
-lbl_nc_fn___L482__:;
+  goto lbl_nc_fn___L487__;
+lbl_nc_fn___L486__:;
   nc_push(&sp, stack, nc_bool(0));
-lbl_nc_fn___L483__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L480__;
+lbl_nc_fn___L487__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L484__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *_c91_1=nc_pop(&sp,stack); NcVal *_c91_0=nc_pop(&sp,stack); NcVal *_arr91[]={_c91_0,_c91_1}; nc_push(&sp,stack,nc_fn___main___hopp_kommentar(_arr91,2)); }
   nc_store(vars, varnames, &nvars, "ny_indeks", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_indeks"));
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L480__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L484__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c98_0=nc_pop(&sp,stack); NcVal *_arr98[]={_c98_0}; nc_push(&sp,stack,nc_fn___main___er_bokstav(_arr98,1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L486__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L490__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *_c102_1=nc_pop(&sp,stack); NcVal *_c102_0=nc_pop(&sp,stack); NcVal *_arr102[]={_c102_0,_c102_1}; nc_push(&sp,stack,nc_fn___main___les_ident(_arr102,2)); }
@@ -3269,11 +3294,11 @@ lbl_nc_fn___L480__:;
   { NcVal *_a120_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a120_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L486__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L490__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c126_0=nc_pop(&sp,stack); NcVal *_arr126[]={_c126_0}; nc_push(&sp,stack,nc_fn___main___er_tall(_arr126,1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L488__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L492__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *_c130_1=nc_pop(&sp,stack); NcVal *_c130_0=nc_pop(&sp,stack); NcVal *_arr130[]={_c130_0,_c130_1}; nc_push(&sp,stack,nc_fn___main___les_tall(_arr130,2)); }
@@ -3296,20 +3321,20 @@ lbl_nc_fn___L486__:;
   { NcVal *_a147_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a147_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L488__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L492__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   nc_push(&sp, stack, nc_str("\""));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L492__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L496__;
   nc_push(&sp, stack, nc_bool(1));
-  goto lbl_nc_fn___L493__;
-lbl_nc_fn___L492__:;
+  goto lbl_nc_fn___L497__;
+lbl_nc_fn___L496__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   nc_push(&sp, stack, nc_str("'"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-lbl_nc_fn___L493__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L490__;
+lbl_nc_fn___L497__:;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L494__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
@@ -3342,11 +3367,11 @@ lbl_nc_fn___L493__:;
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L490__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L494__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c199_0=nc_pop(&sp,stack); NcVal *_arr199[]={_c199_0}; nc_push(&sp,stack,nc_fn___main___er_operator_start(_arr199,1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L494__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L498__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kilde"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *_c203_1=nc_pop(&sp,stack); NcVal *_c203_0=nc_pop(&sp,stack); NcVal *_arr203[]={_c203_0,_c203_1}; nc_push(&sp,stack,nc_fn___main___les_operator(_arr203,2)); }
@@ -3370,11 +3395,11 @@ lbl_nc_fn___L490__:;
   { NcVal *_a221_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a221_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L494__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L498__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c227_0=nc_pop(&sp,stack); NcVal *_arr227[]={_c227_0}; nc_push(&sp,stack,nc_fn___main___er_punctuation(_arr227,1)); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L496__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L500__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tokens"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *_c231_0=nc_pop(&sp,stack); NcVal *_arr231[]={_c231_0}; nc_push(&sp,stack,nc_fn___main___punctuation_type(_arr231,1)); }
@@ -3392,8 +3417,8 @@ lbl_nc_fn___L494__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "kolonne", nc_pop(&sp, stack));
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L496__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L500__:;
   nc_push(&sp, stack, nc_str("Ugyldig tegn: "));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -3408,8 +3433,8 @@ lbl_nc_fn___L496__:;
   { NcVal *_a259_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a259_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *e=nc_pop(&sp,stack); nc_throw(nc_to_str(e)); }
-  goto lbl_nc_fn___L472__;
-lbl_nc_fn___L473__:;
+  goto lbl_nc_fn___L476__;
+lbl_nc_fn___L477__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tokens"));
   nc_push(&sp, stack, nc_str("EOF"));
   nc_push(&sp, stack, nc_str(""));
@@ -8118,7 +8143,7 @@ lbl_nc_fn___L2__:;
   return nc_pop(&sp, stack);
 lbl_nc_fn___L4__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "c"));
-  nc_push(&sp, stack, nc_str("	"));
+  nc_push(&sp, stack, nc_str("\t"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L6__;
   nc_push(&sp, stack, nc_str("\\t"));
@@ -14244,7 +14269,7 @@ lbl_nc_fn___L4__:;
   goto lbl_nc_fn___L13__;
 lbl_nc_fn___L12__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ch"));
-  nc_push(&sp, stack, nc_str("	"));
+  nc_push(&sp, stack, nc_str("\t"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L13__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L10__;
@@ -14260,7 +14285,7 @@ lbl_nc_fn___L11__:;
   goto lbl_nc_fn___L9__;
 lbl_nc_fn___L8__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ch"));
-  nc_push(&sp, stack, nc_str("r"));
+  nc_push(&sp, stack, nc_str("\r"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
 lbl_nc_fn___L9__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L6__;
@@ -14364,7 +14389,7 @@ lbl_nc_fn___L28__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L30__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "r"));
-  nc_push(&sp, stack, nc_str("r"));
+  nc_push(&sp, stack, nc_str("\r"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "r", nc_pop(&sp, stack));
   goto lbl_nc_fn___L31__;
@@ -14374,7 +14399,7 @@ lbl_nc_fn___L30__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L32__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "r"));
-  nc_push(&sp, stack, nc_str("	"));
+  nc_push(&sp, stack, nc_str("\t"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_store(vars, varnames, &nvars, "r", nc_pop(&sp, stack));
   goto lbl_nc_fn___L33__;
