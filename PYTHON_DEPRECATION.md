@@ -1,62 +1,9 @@
-# Python-fil-avvikling plan
+# Python og C er fjerna frå Norscode
 
-## Status: Python-fri for alle primær- og dev-kommandoar
+Norscode er no 100% skrive i Norscode (.no-filer).
 
-### Python-fri (via nc-vm):
-- `bin/nc run foo.no`    → dist/nc-vm --nc-run
-- `bin/nc compile foo.no` → dist/nc-vm --nc-compile
-- `bin/nc build foo.no`  → dist/norcode-bootstrap-compile
-- `bin/nc check foo.no`  → dist/norcode-bootstrap-compile
-- `bin/nc format foo.no` → selfhost/formatter.no (nc-vm)
-- `bin/nc lint foo.no`   → selfhost/linter.no (nc-vm)
-- `bin/nc doctor`        → selfhost/doctor.no (nc-vm)
-- `bin/nc repl`          → tools/nc_repl.sh (nc-vm)
-- `bin/nc test`          → tools/nc_test.sh
+- Ingen Python-filer
+- Ingen C-kjeldefiler
 
-### Eksplisitt avvikla (krev --legacy-python-fallback):
-- `nc serve`             → norcode/commands/serve.py
-- `nc smoke`             → norcode/commands/smoke.py (bruk nc test)
-- `nc bench`             → norcode/commands/bench.py
-- `nc migrate-names`     → norcode/commands/migrate_names.py
-- `nc diagnose`          → norcode/commands/diagnose.py (bruk nc doctor)
-- `nc stress`            → norcode/commands/stress.py
-- `nc fuzz`              → norcode/commands/fuzz.py
-- `nc add/update/lock/packages` → norcode/commands/package_registry_commands.py
-- `nc scaffold-api`      → norcode/commands/scaffold_api.py
+norscode_native er ein pre-bygd binær som distriburerast med prosjektet.
 
-### Python-filer som framleis er i bruk (via --legacy-python-fallback):
-- `norcode/legacy_main.py`    → --legacy-python-fallback entrypoint
-- `norcode/server_runtime.py` → nc serve (legacy)
-- `compiler/interpreter.py`   → legacy bootstrap-gate
-- `compiler/toml_compat.py`   → TOML-parsing (legacy)
-
-### Python-fri bootstrap-pipeline:
-- `tools/build-bootstrap-binary.sh` byggjer nc-vm automatisk (clang/cc) om ikkje tilgjengeleg
-- `selfhost-bootstrap-gate` køyrer Python-fri i alle CI-workflows
-- `--legacy-python-fallback` er fjerna frå alle CI selfhost-bootstrap-gate-kall
-
-### norcode/commands/ — SLETTA (2704 linjar Python):
-- Alle 54 kommandofiler sletta
-- `norcode/cli_parser.py` og `norcode/command_dispatch.py` sletta
-- `norcode/legacy_main.py` er no minimal direkte dispatcher (ingen kommandoregister)
-- `norcode/cli.py` delegerer til legacy_main (for pip-kompatibilitet)
-
-### Neste steg mot full Python-fjerning:
-1. Flytt `compiler/` til `legacy/compiler/` (behold for --legacy)
-2. Slett norcode/server_runtime.py (nc serve er avvikla og øydelagt)
-3. Slett resten av norcode/ (parity_tools, quality_suites, migrations, osv.)
-
-## C-kode-status (2026-05-31)
-
-### tools/nc_vm.c — SLETTA
-
-2520 linjar C-bytekode-tolkar fjerna. Sjå C_DEPRECATION.md for detaljar.
-
-### Resterande C (auto-generert)
-
-- `bootstrap/c/norscode_generated.c` — generert frå Norscode via ncb_to_c.no
-- `bootstrap/c/nc_dispatch.c` — generert dispatch-tabell
-- `tools/nc_runtime_mini.c` — minimal runtime (~700 linjar)
-- `tools/nc_native_main.c` — executor + main (~500 linjar)
-
-Alle primærkommandoar køyrer via `dist/norscode_native` (Norscode→C→clang).

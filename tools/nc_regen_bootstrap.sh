@@ -2,27 +2,25 @@
 # tools/nc_regen_bootstrap.sh — regenerer bootstrap-NCBs
 #
 # Brukar bin/nc (norscode_native) for alle operasjonar.
-# nc-vm trengst berre som fallback om norscode_native ikkje finst.
 #
 # BRUK:
 #   sh tools/nc_regen_bootstrap.sh         # regenerer stdlib-NCBs
-#   sh tools/nc_regen_bootstrap.sh --full  # full bundle + norscode_native
+#   sh tools/nc_regen_bootstrap.sh --full  # full bundle av kompilator-NCB
 
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/bin/nc"
-# Sjekk at norscode_native finst
+
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     printf '✗ Trenger dist/norscode_native.\n' >&2
-    printf '  Køyr: bash tools/build_norscode_native.sh\n' >&2
+    printf '  Last ned frå: https://github.com/jansteinar/Norscode1/releases\n' >&2
     exit 1
 fi
 
 if [ "${1:-}" = "--full" ]; then
     printf 'Genererer full bootstrap/kompiler.ncb.json...\n'
     TMP="$(mktemp /tmp/nc_bundle_XXXXXX.ncb.json 2>/dev/null || echo /tmp/nc_bundle_$$.ncb.json)"
-    # Bruk Python til å bundle (unngår bootstrap-sirkel med bundler.no)
     "$NC" bundle \
         selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
         selfhost.parser=selfhost/parser.no \
@@ -39,18 +37,6 @@ if [ "${1:-}" = "--full" ]; then
     cp "$TMP" bootstrap/kompiler.ncb.json
     rm -f "$TMP"
     printf '✓ bootstrap/kompiler.ncb.json: %d bytes\n' "$(wc -c < bootstrap/kompiler.ncb.json)"
-
-    # Regenerer C-filer og norscode_native
-    printf 'Regenererer bootstrap/c/ og norscode_native...\n'
-    NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
-    NC_C_OUTPUT="$ROOT/bootstrap/c/norscode_generated.c" \
-        "$NC" run "$ROOT/selfhost/ncb_to_c.no"
-    env NORSCODE_CMD=run NORSCODE_FILE="$ROOT/selfhost/gen_dispatch.no" \
-        NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
-        NC_DISPATCH_OUTPUT="$ROOT/bootstrap/c/nc_dispatch.c" \
-        "$NC" run "$ROOT/selfhost/gen_dispatch.no"
-    bash "$ROOT/tools/build_norscode_native.sh"
-    printf '✓ norscode_native regenerert\n'
 fi
 
 printf 'Oppdaterer stdlib-NCBs...\n'
