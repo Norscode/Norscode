@@ -30,20 +30,25 @@ fi
 printf "Kompilerer norscode_native...\n"
 TMP="$(mktemp /tmp/nc_native_$$.c 2>/dev/null || echo /tmp/nc_native_$$.c)"
 
-# Sjekk om runtime er embedded i generated.c
+# norscode_generated.c er no sjølvstendig (runtime embedded + nc_main.start som main)
+# nc_native_main.c er ikkje lenger nødvendig!
 if grep -q "nc_runtime_mini.c embedded" "${ROOT}/bootstrap/c/norscode_generated.c" 2>/dev/null; then
-    # Runtime embedded — sett dispatch ETTER, native_main sist
-    grep -v '#include.*nc_runtime' "${ROOT}/bootstrap/c/norscode_generated.c" |
+    # Runtime embedded — dispatch etter + nc_native_main.c for C-executor
+    grep -v '#include.*nc_runtime' "${ROOT}/bootstrap/c/norscode_generated.c" | \
         sed 's/^int main/static int nc_gen_main/' > "$TMP"
     cat "${ROOT}/bootstrap/c/nc_dispatch.c" >> "$TMP"
-    cat "${ROOT}/tools/nc_native_main.c" >> "$TMP"
+    if [ -f "${ROOT}/tools/nc_native_main.c" ]; then
+        cat "${ROOT}/tools/nc_native_main.c" >> "$TMP"
+    fi
 else
-    # Runtime IKKJE embedded — legg til separat
+    # Gamal stil
     cat "${ROOT}/tools/nc_runtime_mini.c" > "$TMP"
     cat "${ROOT}/bootstrap/c/nc_dispatch.c" >> "$TMP"
     grep -v '#include.*nc_runtime' "${ROOT}/bootstrap/c/norscode_generated.c" |
         sed 's/^int main/static int nc_gen_main/' >> "$TMP"
-    cat "${ROOT}/tools/nc_native_main.c" >> "$TMP"
+    if [ -f "${ROOT}/tools/nc_native_main.c" ]; then
+        cat "${ROOT}/tools/nc_native_main.c" >> "$TMP"
+    fi
 fi
 
 "$CC" -O2 -Wno-everything -o "$OUT" "$TMP"

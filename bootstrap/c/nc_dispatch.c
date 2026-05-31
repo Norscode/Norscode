@@ -347,12 +347,64 @@ static NcDispatch nc_dispatch[] = {
 };
 
 static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
+    /* Direkte C-builtin shortcuts */
+    if(!strcmp(n,"json_parse")) return nc_builtin_json_parse_norscode(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"json_parse_raw")) return nc_builtin_json_parse_raw(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"json_stringify")) return nc_builtin_json_stringify_smart(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"json_les")) return nc_builtin_json_parse_norscode(na>0?a[0]:nc_nil());
     for(int i=0;nc_dispatch[i].name;i++) if(!strcmp(nc_dispatch[i].name,n)) return nc_dispatch[i].fn(a,na);
     const char *l=strrchr(n,'.');if(l)l++;else l=n;
     for(int i=0;nc_dispatch[i].name;i++){const char *fl=strrchr(nc_dispatch[i].name,'.');fl=fl?fl+1:nc_dispatch[i].name;if(!strcmp(fl,l))return nc_dispatch[i].fn(a,na);}
-    if(!strncmp(n,"builtin.",8)) return nc_dispatch_call(n+8,a,na);
+    if(!strncmp(n,"builtin.",8)) { n+=8; if(!strncmp(n,"builtin.",8)) n+=8; return nc_dispatch_call(n,a,na); }
     if(!strncmp(n,"__main__.",9)) return nc_dispatch_call(n+9,a,na);
     {char s2[256];strncpy(s2,l,255);char *t=strstr(s2,"_token");if(t){*t=0;return nc_dispatch_call(s2,a,na);}}
+    /* Generell builtin-dispatch */
+    if(!strcmp(n,"lengde")) return nc_builtin_lengde(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"legg_til")) { if(na>=2) nc_builtin_legg_til(a[0],a[1]); return nc_nil(); }
+    if(!strcmp(n,"fjern_siste")) return nc_builtin_fjern_siste(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"fjern")||!strcmp(n,"fjern_indeks")) return nc_builtin_fjern(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"slice")) return nc_builtin_slice(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil(),na>2?a[2]:nc_nil());
+    if(!strcmp(n,"skriv")) return nc_builtin_skriv(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"fil_les")) return nc_builtin_fil_les(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"fil_skriv")) { if(na>=2) nc_builtin_fil_skriv(a[0],a[1]); return nc_nil(); }
+    if(!strcmp(n,"fil_finnes")) return nc_builtin_fil_finnes(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"miljo_hent")) return nc_builtin_miljo_hent(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"miljo_finnes")) return nc_builtin_miljo_finnes(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"finnes_nÃ¸kkel")||!strcmp(n,"finnes_nokkel")||!strcmp(n,"har_nokkel")) return nc_builtin_finnes_nokkel(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"nÃ¸kler")||!strcmp(n,"nokler")) return nc_builtin_nokler(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"verdier")) return nc_builtin_verdier(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"starts_with")||!strcmp(n,"tekst_starter_med")) return nc_builtin_starts_with(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"ends_with")||!strcmp(n,"tekst_slutter_med")) return nc_builtin_ends_with(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"contains")||!strcmp(n,"tekst_inneholder")) return nc_builtin_contains(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"split")||!strcmp(n,"tekst_splitt")) return nc_builtin_split(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"join")||!strcmp(n,"tekst_join")) return nc_builtin_join(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"trim")||!strcmp(n,"tekst_trim")) return nc_builtin_trim(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"replace")||!strcmp(n,"tekst_erstatt")) return nc_builtin_replace(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil(),na>2?a[2]:nc_nil());
+    if(!strcmp(n,"tekst_fra_heltall")) return nc_builtin_tekst_fra_heltall(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"heltall")||!strcmp(n,"heltall_fra_tekst")) return nc_builtin_heltall(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"tekst")||!strcmp(n,"til_tekst")) return nc_to_str(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"bool")) return nc_builtin_bool(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"feil")) { nc_builtin_feil(na>0?a[0]:nc_nil()); return nc_nil(); }
+    if(!strcmp(n,"type")||!strcmp(n,"type_av")) return nc_builtin_type(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"desimaltall")) return nc_builtin_desimaltall(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"exit")||!strcmp(n,"stopp")) { nc_builtin_exit(na>0?a[0]:nc_nil()); return nc_nil(); }
+    if(!strcmp(n,"fjern_nokkel")) { if(na>=2) nc_builtin_fjern_nokkel(a[0],a[1]); return nc_nil(); }
+    if(!strcmp(n,"json_stringify")) return nc_builtin_json_stringify_smart(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"json_parse")) return nc_builtin_json_parse_norscode(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"json_parse_raw")) return nc_builtin_json_parse_raw(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"index_of")) return nc_builtin_index_of(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil());
+    if(!strcmp(n,"upper")) return nc_builtin_upper(na>0?a[0]:nc_nil());
+    if(!strcmp(n,"lower")) return nc_builtin_lower(na>0?a[0]:nc_nil());
+    /* Struktur-konstruktørar (stor forbokstav) */
+    if(n[0]>='A'&&n[0]<='Z') return nc_map_new();
     return NULL;
 }
 NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) { return nc_dispatch_call("neste",a,na); }
+
+/* Aliasering for json-builtins */
+static NcVal *nc_fn_builtin_json_parse_alias(NcVal **a, int na) {
+    return nc_builtin_json_parse_norscode(na>0?a[0]:nc_nil());
+}
+static NcVal *nc_fn_builtin_json_parse_raw_alias(NcVal **a, int na) {
+    return nc_builtin_json_parse_raw(na>0?a[0]:nc_nil());
+}
