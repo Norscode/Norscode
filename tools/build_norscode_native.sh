@@ -41,22 +41,35 @@ download_release_binary() {
     platform="$(platform_name)" || return 1
     asset_name="norscode-${platform}"
     releases_url="https://api.github.com/repos/${repo}/releases/latest"
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
 
     if command -v curl >/dev/null 2>&1; then
-        fetch='curl -fsSL'
+        if [ -n "$token" ]; then
+            fetch_json=(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json")
+            fetch_file=(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/octet-stream")
+        else
+            fetch_json=(curl -fsSL)
+            fetch_file=(curl -fsSL)
+        fi
     elif command -v wget >/dev/null 2>&1; then
-        fetch='wget -qO-'
+        if [ -n "$token" ]; then
+            fetch_json=(wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/vnd.github+json")
+            fetch_file=(wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/octet-stream")
+        else
+            fetch_json=(wget -qO-)
+            fetch_file=(wget -qO-)
+        fi
     else
         return 1
     fi
 
-    release_json="$($fetch "$releases_url" 2>/dev/null)" || return 1
+    release_json="$("${fetch_json[@]}" "$releases_url" 2>/dev/null)" || return 1
     download_url="$(printf '%s' "$release_json" | grep -o "\"browser_download_url\": \"[^\"]*${asset_name}[^\"]*\"" | head -1 | cut -d'"' -f4)"
     [ -n "$download_url" ] || return 1
 
     tmp_file="$(mktemp)"
     trap 'rm -f "$tmp_file"' EXIT
-    if ! $fetch "$download_url" > "$tmp_file"; then
+    if ! "${fetch_file[@]}" "$download_url" > "$tmp_file"; then
         rm -f "$tmp_file"
         trap - EXIT
         return 1
