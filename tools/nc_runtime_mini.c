@@ -720,3 +720,5 @@ static NcVal *nc_builtin_json_parse_raw(NcVal *v) {
     NcVal *r = jp2_parse(&j); free(s);
     return r ? r : nc_nil();
 }
+
+static NcVal *nc_fn_builtin_json_parse_raw(NcVal **a, int na) { return nc_builtin_json_parse_raw(na>0?a[0]:nc_nil()); }
