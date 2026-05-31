@@ -1,0 +1,847 @@
+// selfhost/native_execution/kernel_v2.no
+//
+// Norscode OS v2 — 64-bit kernel med userspace ring 3
+//
+// Minnekart:
+//   0x1000  PML4 (4KB)
+//   0x2000  PDP  (4KB)
+//   0x3000  PD   (4KB, 2MB-sider)
+//   0x4000  IDT  (256 * 16 = 4096 bytes)
+//   0x5000  TSS  (104 bytes)
+//   0x8000  Kernel stack topp
+//   0xA000  Userspace stack topp
+//
+// .text-layout (text_vaddr=0x100000, fil-offset 4096):
+//   +0    Multiboot-header (12 bytes)
+//   +12   32-bit oppstartskode (88 bytes → til +100)
+//   +128  GDT-deskriptor (10 bytes)
+//   +256  GDT (56 bytes: null + ring0code + ring0data + ring3code + ring3data + TSS*2)
+//   +312  padding → +400
+//   +400  64-bit kjernekode (set segments, IDT, TSS, IRETQ→userspace)
+//   +600  INT 0x80 handler (skriv til VGA / exit)
+//   +900  Userspace-kode (ring 3: skriv melding, exit)
+//   +940  Brukarmelding: "Ring 3: Norscode OS!\n" (22 bytes)
+//
+// Bruk:
+//   NC_OUTPUT=build/norscode_kernel_v2.elf ./bin/nc run selfhost/native_execution/kernel_v2.no
+//   qemu-system-i386 -kernel build/norscode_kernel_v2.elf -display none -S -monitor stdio
+
+// ─── Faste adresser ──────────────────────────────────────────────────────────
+
+funksjon tv()        { returner 1048576 }   // 0x100000 text_vaddr
+funksjon tp()        { returner 4096 }      // TEXT_OFF i fil
+
+// Seksjon-offsetar (relativt til text_vaddr)
+funksjon GDT_DESC_OFF() { returner 128 }   // GDT-deskriptor
+funksjon GDT_OFF()      { returner 256 }   // GDT data
+funksjon CODE64_OFF()   { returner 400 }   // 64-bit kernelkode
+funksjon HANDLER_OFF()  { returner 600 }   // INT 0x80 handler
+funksjon USER_OFF()     { returner 900 }   // Userspace-kode
+funksjon MSG_OFF()      { returner 940 }   // Brukarmelding
+
+// Absolutte virtuelle adresser
+funksjon GDT_DESC_VA() { returner tv() + GDT_DESC_OFF() }  // 0x100080
+funksjon GDT_VA()      { returner tv() + GDT_OFF() }       // 0x100100
+funksjon CODE64_VA()   { returner tv() + CODE64_OFF() }    // 0x100190
+funksjon HANDLER_VA()  { returner tv() + HANDLER_OFF() }   // 0x100258
+funksjon USER_VA()     { returner tv() + USER_OFF() }      // 0x100384
+funksjon MSG_VA()      { returner tv() + MSG_OFF() }       // 0x1003AC
+
+// Lav-minne adresser
+funksjon PML4_ADDR()   { returner 0x1000 }
+funksjon PDP_ADDR()    { returner 0x2000 }
+funksjon PD_ADDR()     { returner 0x3000 }
+funksjon IDT_ADDR()    { returner 0x4000 }
+funksjon TSS_ADDR()    { returner 0x5000 }
+funksjon KSTACK_TOP()  { returner 0x8000 }
+funksjon USTACK_TOP()  { returner 0xA000 }
+
+// IDT-oppslag for INT 0x80 (slice 128)
+funksjon IDT80_ADDR()  { returner IDT_ADDR() + 128 * 16 }  // 0x4800
+
+// GDT-selektorar
+funksjon SEL_CODE0()   { returner 0x08 }   // ring 0 code
+funksjon SEL_DATA0()   { returner 0x10 }   // ring 0 data
+funksjon SEL_CODE3()   { returner 0x1B }   // ring 3 code (0x18 | RPL=3)
+funksjon SEL_DATA3()   { returner 0x23 }   // ring 3 data (0x20 | RPL=3)
+funksjon SEL_TSS()     { returner 0x28 }   // TSS
+
+// ─── Byte-hjelpar ────────────────────────────────────────────────────────────
+
+funksjon legg_u8(buf, v)
+    legg_til(buf, v & 255)
+slutt
+
+funksjon legg_u16_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+slutt
+
+funksjon legg_u32_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+slutt
+
+funksjon legg_u64_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+    legg_til(buf, (v >> 32) & 255)
+    legg_til(buf, (v >> 40) & 255)
+    legg_til(buf, (v >> 48) & 255)
+    legg_til(buf, (v >> 56) & 255)
+slutt
+
+funksjon null_pad(buf, n)
+    la i: heltall = 0
+    mens i < n
+        legg_til(buf, 0)
+        i = i + 1
+    slutt
+slutt
+
+funksjon kopier_inn(dst, src)
+    la i: heltall = 0
+    mens i < lengde(src)
+        legg_til(dst, src[i])
+        i = i + 1
+    slutt
+slutt
+
+funksjon pad_to(buf, target_size)
+    mens lengde(buf) < target_size
+        legg_til(buf, 0)
+    slutt
+slutt
+
+// ─── Multiboot1-header ───────────────────────────────────────────────────────
+
+funksjon bygg_multiboot()
+    la buf: liste<heltall> = []
+    la magic: heltall = 0x1BADB002
+    la flags: heltall = 0
+    la cksum: heltall = (0 - magic) & 0xFFFFFFFF
+    legg_u32_le(buf, magic)
+    legg_u32_le(buf, flags)
+    legg_u32_le(buf, cksum)
+    returner buf
+slutt
+
+// ─── 32-bit ELF ──────────────────────────────────────────────────────────────
+
+funksjon bygg_elf32(entry, ph_off, ph_file_off, ph_vaddr, ph_filesz)
+    la buf: liste<heltall> = []
+    legg_til(buf, 0x7F)
+    legg_til(buf, 0x45)
+    legg_til(buf, 0x4C)
+    legg_til(buf, 0x46)
+    legg_til(buf, 1)
+    legg_til(buf, 1)
+    legg_til(buf, 1)
+    legg_til(buf, 0)
+    null_pad(buf, 8)
+    legg_u16_le(buf, 2)   // ET_EXEC
+    legg_u16_le(buf, 3)   // EM_386
+    legg_u32_le(buf, 1)   // e_version
+    legg_u32_le(buf, entry)
+    legg_u32_le(buf, ph_off)
+    legg_u32_le(buf, 0)
+    legg_u32_le(buf, 0)
+    legg_u16_le(buf, 52)  // e_ehsize
+    legg_u16_le(buf, 32)  // e_phentsize
+    legg_u16_le(buf, 1)   // e_phnum
+    legg_u16_le(buf, 40)
+    legg_u16_le(buf, 0)
+    legg_u16_le(buf, 0)
+    returner buf
+slutt
+
+funksjon bygg_ph32(p_off, vaddr, filesz)
+    la buf: liste<heltall> = []
+    legg_u32_le(buf, 1)       // PT_LOAD
+    legg_u32_le(buf, p_off)   // p_offset
+    legg_u32_le(buf, vaddr)   // p_vaddr
+    legg_u32_le(buf, vaddr)   // p_paddr
+    legg_u32_le(buf, filesz)  // p_filesz
+    legg_u32_le(buf, filesz)  // p_memsz
+    legg_u32_le(buf, 5)       // PF_R|PF_X
+    legg_u32_le(buf, 4096)    // p_align
+    returner buf
+slutt
+
+// ─── GDT ─────────────────────────────────────────────────────────────────────
+
+funksjon gdt_entry(access, flags_nibble)
+    // Enkel 64-bit deskriptor: base=0, limit=0xFFFFF
+    la buf: liste<heltall> = []
+    legg_u16_le(buf, 0xFFFF)              // limit[15:0]
+    legg_u16_le(buf, 0x0000)              // base[15:0]
+    legg_til(buf, 0x00)                   // base[23:16]
+    legg_til(buf, access)                 // access byte
+    legg_til(buf, (flags_nibble << 4) | 0x0F)  // flags + limit[19:16]
+    legg_til(buf, 0x00)                   // base[31:24]
+    returner buf
+slutt
+
+funksjon bygg_gdt()
+    la buf: liste<heltall> = []
+    // [0x00] null
+    null_pad(buf, 8)
+    // [0x08] ring 0 code 64-bit: access=0x9A, flags=0xA (G=1,L=1)
+    kopier_inn(buf, gdt_entry(0x9A, 0xA))
+    // [0x10] ring 0 data: access=0x92, flags=0xC (G=1,D/B=1)
+    kopier_inn(buf, gdt_entry(0x92, 0xC))
+    // [0x18] ring 3 code 64-bit: access=0xFA, flags=0xA
+    kopier_inn(buf, gdt_entry(0xFA, 0xA))
+    // [0x20] ring 3 data: access=0xF2, flags=0xC
+    kopier_inn(buf, gdt_entry(0xF2, 0xC))
+    // [0x28] TSS (16 bytes) — low deskriptor
+    // limit=0x67 (104-1), base=TSS_ADDR=0x5000, access=0x89 (64-bit TSS available)
+    legg_til(buf, 0x67)
+    legg_til(buf, 0x00)           // limit[15:0]
+    legg_til(buf, TSS_ADDR() & 255)                    // base[7:0]
+    legg_til(buf, (TSS_ADDR() >> 8) & 255)             // base[15:8]
+    legg_til(buf, (TSS_ADDR() >> 16) & 255)            // base[23:16]
+    legg_til(buf, 0x89)                                // access: P=1,DPL=0,type=1001
+    legg_til(buf, 0x00)                                // flags=0, limit_high=0
+    legg_til(buf, (TSS_ADDR() >> 24) & 255)            // base[31:24]
+    // [0x30] TSS high deskriptor (64-bit har 16-byte TSS)
+    legg_u32_le(buf, 0)   // base[63:32] = 0
+    null_pad(buf, 4)
+    returner buf
+slutt
+
+funksjon bygg_gdt_descriptor()
+    la buf: liste<heltall> = []
+    legg_u16_le(buf, 55)           // limit = 56 bytes - 1
+    legg_u32_le(buf, GDT_VA())     // base (32-bit, loaded in 32-bit mode)
+    null_pad(buf, 4)               // upper 4 bytes = 0
+    returner buf
+slutt
+
+// ─── 32-bit oppstartskode ────────────────────────────────────────────────────
+// Kjem etter multiboot-headeren (offset +12 i .text)
+
+funksjon bygg_32bit_startup()
+    la b: liste<heltall> = []
+
+    // ── Set up page tables ─────────────────────────────────────────────────
+    // PML4[0] = PDP | 0x07 (P+RW+US)
+    // mov eax, 0x2007: B8 07 20 00 00
+    legg_til(b, 0xB8)
+    legg_u32_le(b, PDP_ADDR() | 7)
+    // mov [PML4_ADDR], eax: A3 <addr32>
+    legg_til(b, 0xA3)
+    legg_u32_le(b, PML4_ADDR())
+
+    // PDP[0] = PD | 0x07
+    legg_til(b, 0xB8)
+    legg_u32_le(b, PD_ADDR() | 7)
+    legg_til(b, 0xA3)
+    legg_u32_le(b, PDP_ADDR())
+
+    // PD[0] = 2MB page at 0 | 0x87 (PS+P+RW+US) - dekker 0x0-0x1FFFFF (inkl. 0x100000)
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 0x87)
+    legg_til(b, 0xA3)
+    legg_u32_le(b, PD_ADDR())
+
+    // ── LGDT ──────────────────────────────────────────────────────────────
+    // lgdt [GDT_DESC_VA]: 0F 01 15 <addr32>
+    legg_til(b, 0x0F)
+    legg_til(b, 0x01)
+    legg_til(b, 0x15)
+    legg_u32_le(b, GDT_DESC_VA())
+
+    // ── Enable PAE (CR4 bit 5) ─────────────────────────────────────────────
+    // mov eax, cr4: 0F 20 E0
+    legg_til(b, 0x0F)
+    legg_til(b, 0x20)
+    legg_til(b, 0xE0)
+    // or eax, 0x20: 0D 20 00 00 00
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x20)
+    // mov cr4, eax: 0F 22 E0
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xE0)
+
+    // ── Load CR3 = PML4 ──────────────────────────────────────────────────
+    legg_til(b, 0xB8)
+    legg_u32_le(b, PML4_ADDR())
+    // mov cr3, eax: 0F 22 D8
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xD8)
+
+    // ── Enable EFER.LME (MSR 0xC0000080, bit 8) ──────────────────────────
+    // mov ecx, 0xC0000080: B9 80 00 00 C0
+    legg_til(b, 0xB9)
+    legg_u32_le(b, 0xC0000080)
+    // rdmsr: 0F 32
+    legg_til(b, 0x0F)
+    legg_til(b, 0x32)
+    // or eax, 0x100: 0D 00 01 00 00
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x100)
+    // wrmsr: 0F 30
+    legg_til(b, 0x0F)
+    legg_til(b, 0x30)
+
+    // ── Enable paging (CR0.PG=1) ─────────────────────────────────────────
+    // mov eax, cr0: 0F 20 C0
+    legg_til(b, 0x0F)
+    legg_til(b, 0x20)
+    legg_til(b, 0xC0)
+    // or eax, 0x80000000: 0D 00 00 00 80
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x80000000)
+    // mov cr0, eax: 0F 22 C0
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xC0)
+
+    // ── Far jump til 64-bit kode ──────────────────────────────────────────
+    // jmp 0x08:CODE64_VA: EA <offset32> <seg16>
+    legg_til(b, 0xEA)
+    legg_u32_le(b, CODE64_VA())
+    legg_u16_le(b, SEL_CODE0())
+
+    returner b
+slutt
+
+// ─── 64-bit kjernekode ───────────────────────────────────────────────────────
+// Startar ved CODE64_OFF() = +400, vaddr CODE64_VA() = 0x100190
+
+funksjon bygg_64bit_kernel()
+    la b: liste<heltall> = []
+
+    // ── Set opp datasegment-register ──────────────────────────────────────
+    // mov ax, SEL_DATA0: 66 B8 10 00
+    legg_til(b, 0x66)
+    legg_til(b, 0xB8)
+    legg_u16_le(b, SEL_DATA0())
+    // mov ds, ax: 8E D8
+    legg_til(b, 0x8E)
+    legg_til(b, 0xD8)
+    // mov es, ax: 8E C0
+    legg_til(b, 0x8E)
+    legg_til(b, 0xC0)
+    // mov ss, ax: 8E D0
+    legg_til(b, 0x8E)
+    legg_til(b, 0xD0)
+    // mov fs, ax: 8E E0
+    legg_til(b, 0x8E)
+    legg_til(b, 0xE0)
+    // mov gs, ax: 8E E8
+    legg_til(b, 0x8E)
+    legg_til(b, 0xE8)
+
+    // ── Kernel stack ──────────────────────────────────────────────────────
+    // mov rsp, KSTACK_TOP: 48 BC <imm64>
+    legg_til(b, 0x48)
+    legg_til(b, 0xBC)
+    legg_u64_le(b, KSTACK_TOP())
+
+    // ── Fyll IDT-entry for INT 0x80 ───────────────────────────────────────
+    // IDT80_ADDR = 0x4800
+    // Entry (16 bytes):
+    //   [0-1]:  offset[15:0]  = HANDLER_VA & 0xFFFF
+    //   [2-3]:  CS = 0x0008
+    //   [4]:    IST = 0
+    //   [5]:    type+flags = 0xEE (P=1, DPL=3, type=0xE=64-bit int gate)
+    //   [6-7]:  offset[31:16]
+    //   [8-11]: offset[63:32]
+    //   [12-15]:reserved = 0
+    // Bruk RDI som base
+    // mov rdi, IDT80_ADDR: 48 BF <imm64>
+    legg_til(b, 0x48)
+    legg_til(b, 0xBF)
+    legg_u64_le(b, IDT80_ADDR())
+
+    la h_lo: heltall = HANDLER_VA() & 0xFFFF
+    la h_mi: heltall = (HANDLER_VA() >> 16) & 0xFFFF
+
+    // mov word [rdi], h_lo: 66 C7 07 <lo> <hi>
+    legg_til(b, 0x66)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x07)
+    legg_u16_le(b, h_lo)
+    // mov word [rdi+2], 0x0008: 66 C7 47 02 08 00
+    legg_til(b, 0x66)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x47)
+    legg_til(b, 2)
+    legg_u16_le(b, 0x0008)
+    // mov word [rdi+4], 0xEE00 (IST=0, type/DPL/P=0xEE): 66 C7 47 04 00 EE
+    legg_til(b, 0x66)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x47)
+    legg_til(b, 4)
+    legg_til(b, 0x00)
+    legg_til(b, 0xEE)
+    // mov word [rdi+6], h_mi: 66 C7 47 06 <lo> <hi>
+    legg_til(b, 0x66)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x47)
+    legg_til(b, 6)
+    legg_u16_le(b, h_mi)
+    // mov dword [rdi+8], 0: C7 47 08 00 00 00 00
+    legg_til(b, 0xC7)
+    legg_til(b, 0x47)
+    legg_til(b, 8)
+    legg_u32_le(b, 0)
+    // mov dword [rdi+12], 0: C7 47 0C 00 00 00 00
+    legg_til(b, 0xC7)
+    legg_til(b, 0x47)
+    legg_til(b, 12)
+    legg_u32_le(b, 0)
+
+    // ── Set opp TSS.RSP0 ──────────────────────────────────────────────────
+    // TSS er på TSS_ADDR=0x5000. RSP0 er på offset 4 i TSS.
+    // mov rdi, TSS_ADDR+4: 48 BF <imm64>
+    legg_til(b, 0x48)
+    legg_til(b, 0xBF)
+    legg_u64_le(b, TSS_ADDR() + 4)
+    // mov qword [rdi], KSTACK_TOP: 48 C7 07 <imm32>  (NB: 64-bit krev REX.W prefix)
+    // For KSTACK_TOP = 0x8000, fits i 32-bit sign-extended
+    legg_til(b, 0x48)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x07)
+    legg_u32_le(b, KSTACK_TOP())
+
+    // ── Load TSS (LTR) ────────────────────────────────────────────────────
+    // mov ax, SEL_TSS: 66 B8 28 00
+    legg_til(b, 0x66)
+    legg_til(b, 0xB8)
+    legg_u16_le(b, SEL_TSS())
+    // ltr ax: 0F 00 D8
+    legg_til(b, 0x0F)
+    legg_til(b, 0x00)
+    legg_til(b, 0xD8)
+
+    // ── Load IDT ──────────────────────────────────────────────────────────
+    // IDT descriptor: limit=0xFFF (4096-1), base=IDT_ADDR=0x4000
+    // Embed descriptor på stack (RSP-10):
+    // sub rsp, 10: 48 83 EC 0A
+    legg_til(b, 0x48)
+    legg_til(b, 0x83)
+    legg_til(b, 0xEC)
+    legg_til(b, 10)
+    // mov word [rsp], 0x0FFF: 66 C7 04 24 FF 0F
+    legg_til(b, 0x66)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x04)
+    legg_til(b, 0x24)
+    legg_u16_le(b, 0x0FFF)
+    // mov qword [rsp+2], IDT_ADDR: 48 C7 44 24 02 <imm32>
+    legg_til(b, 0x48)
+    legg_til(b, 0xC7)
+    legg_til(b, 0x44)
+    legg_til(b, 0x24)
+    legg_til(b, 2)
+    legg_u32_le(b, IDT_ADDR())
+    // lidt [rsp]: 0F 01 1C 24
+    legg_til(b, 0x0F)
+    legg_til(b, 0x01)
+    legg_til(b, 0x1C)
+    legg_til(b, 0x24)
+    // add rsp, 10: 48 83 C4 0A
+    legg_til(b, 0x48)
+    legg_til(b, 0x83)
+    legg_til(b, 0xC4)
+    legg_til(b, 10)
+
+    // ── Skriv "64OK" til VGA linje 2 for å bekrefte 64-bit modus ─────────
+    // VGA base = 0xB8000, linje 2 = 0xB8000 + 80*2*1 = 0xB80A0
+    // mov rdi, 0xB80A0: 48 BF <imm64>
+    legg_til(b, 0x48)
+    legg_til(b, 0xBF)
+    legg_u64_le(b, 0xB80A0)
+    // '6' = 0x36, '4' = 0x34, 'O' = 0x4F, 'K' = 0x4B, attr = 0x0A (green)
+    // mov byte [rdi+0], 0x36: C6 07 36
+    legg_til(b, 0xC6)
+    legg_til(b, 0x07)
+    legg_til(b, 0x36)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 1)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 2)
+    legg_til(b, 0x34)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 3)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 4)
+    legg_til(b, 0x4F)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 5)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 6)
+    legg_til(b, 0x4B)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 7)
+    legg_til(b, 0x0A)
+
+    // ── Switch til ring 3 (IRETQ) ─────────────────────────────────────────
+    // IRETQ pop-rekkefølge: RIP, CS, RFLAGS, RSP, SS
+    // push user SS = SEL_DATA3 = 0x23
+    // push qword 0x23: 6A 23
+    legg_til(b, 0x6A)
+    legg_til(b, SEL_DATA3())
+    // push user RSP = USTACK_TOP: 48 68 <imm32> sign-extended
+    legg_til(b, 0x68)
+    legg_u32_le(b, USTACK_TOP())
+    // pushfq: 9C
+    legg_til(b, 0x9C)
+    // or qword [rsp], 0x200 (sett IF): 48 83 0C 24 00  ... hmm
+    // Enklare: pop rax, or rax,0x200, push rax
+    // pop rax: 58
+    legg_til(b, 0x58)
+    // or eax, 0x200: 0D 00 02 00 00
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x200)
+    // push rax: 50
+    legg_til(b, 0x50)
+    // push user CS = SEL_CODE3 = 0x1B: 6A 1B
+    legg_til(b, 0x6A)
+    legg_til(b, SEL_CODE3())
+    // push user RIP = USER_VA(): 48 68 <imm32>
+    legg_til(b, 0x68)
+    legg_u32_le(b, USER_VA())
+    // iretq: 48 CF
+    legg_til(b, 0x48)
+    legg_til(b, 0xCF)
+
+    returner b
+slutt
+
+// ─── INT 0x80 handler ────────────────────────────────────────────────────────
+// Startar ved HANDLER_OFF() = +600, vaddr HANDLER_VA()
+//
+// Syscall-ABI (same som Linux 32-bit INT 0x80):
+//   rax=1:  write(rdi=fd, rsi=buf, rdx=len) → skriv til VGA
+//   rax=60: exit(rdi=code) → hlt-løkke
+
+funksjon bygg_int80_handler()
+    la b: liste<heltall> = []
+
+    // Lagre register
+    // push rax; push rbx; push rcx; push rdx; push rsi; push rdi
+    legg_til(b, 0x50)  // push rax
+    legg_til(b, 0x53)  // push rbx
+    legg_til(b, 0x51)  // push rcx
+    legg_til(b, 0x52)  // push rdx
+    legg_til(b, 0x56)  // push rsi
+    legg_til(b, 0x57)  // push rdi
+    legg_til(b, 0x41)
+    legg_til(b, 0x50)  // push r8
+    legg_til(b, 0x41)
+    legg_til(b, 0x51)  // push r9
+
+    // Hent original rax (no 9 push = 9*8 = 72 bytes frå RSP)
+    // Opphavleg rax er på [rsp+72]
+    // mov rax, [rsp+64]: 48 8B 44 24 40  (64 = 0x40)
+    legg_til(b, 0x48)
+    legg_til(b, 0x8B)
+    legg_til(b, 0x44)
+    legg_til(b, 0x24)
+    legg_til(b, 64)
+
+    // cmp rax, 1: 48 83 F8 01
+    legg_til(b, 0x48)
+    legg_til(b, 0x83)
+    legg_til(b, 0xF8)
+    legg_til(b, 1)
+    // jne check_exit: 75 <rel8>
+    // (check_exit kjem om ca. 60 bytes seinare — vi brukar forward-ref)
+    legg_til(b, 0x75)
+    la jne_write_pos: heltall = lengde(b)
+    legg_til(b, 0)  // placeholder
+
+    // ── sys_write ──────────────────────────────────────────────────────────
+    // rsi = buf addr, rdx = len
+    // Hent rsi frå stack: [rsp+16]
+    legg_til(b, 0x48)
+    legg_til(b, 0x8B)
+    legg_til(b, 0x74)
+    legg_til(b, 0x24)
+    legg_til(b, 16)
+    // Hent rdx frå stack: [rsp+24]
+    legg_til(b, 0x48)
+    legg_til(b, 0x8B)
+    legg_til(b, 0x54)
+    legg_til(b, 0x24)
+    legg_til(b, 24)
+
+    // VGA kursor-peikar i rbx (startverdi = VGA_LINE2_COL12)
+    // Linje 1 = 0xB8000 + 80*2 = 0xB80A0
+    // Etter "Norscode OS 0.1" (15 teikn = 30 bytes), + "64OK" (4 teikn = 8 bytes)
+    // Vi skriv frå kolonne 0 på linje 3: 0xB8000 + 80*2*2 = 0xB8140
+    legg_til(b, 0x48)
+    legg_til(b, 0xBB)
+    legg_u64_le(b, 0xB8140)  // mov rbx, 0xB8140
+
+    // Loop: for i in range(rdx): write VGA[rbx + i*2] = buf[i], 0x0B
+    // rcx = rdx (len counter)
+    legg_til(b, 0x48)
+    legg_til(b, 0x89)
+    legg_til(b, 0xD1)  // mov rcx, rdx
+    // rcx == 0? jmp done
+    // test rcx, rcx: 48 85 C9
+    legg_til(b, 0x48)
+    legg_til(b, 0x85)
+    legg_til(b, 0xC9)
+    // jz done_write: 74 <rel8>
+    legg_til(b, 0x74)
+    la jz_done_pos: heltall = lengde(b)
+    legg_til(b, 0)
+
+    // Loop start:
+    la loop_start: heltall = lengde(b)
+    // al = [rsi]: 8A 06
+    legg_til(b, 0x8A)
+    legg_til(b, 0x06)
+    // [rbx] = al (char): 88 03
+    legg_til(b, 0x88)
+    legg_til(b, 0x03)
+    // mov byte [rbx+1], 0x0B: C6 43 01 0B
+    legg_til(b, 0xC6)
+    legg_til(b, 0x43)
+    legg_til(b, 1)
+    legg_til(b, 0x0B)
+    // inc rsi: 48 FF C6
+    legg_til(b, 0x48)
+    legg_til(b, 0xFF)
+    legg_til(b, 0xC6)
+    // add rbx, 2: 48 83 C3 02
+    legg_til(b, 0x48)
+    legg_til(b, 0x83)
+    legg_til(b, 0xC3)
+    legg_til(b, 2)
+    // dec rcx: 48 FF C9
+    legg_til(b, 0x48)
+    legg_til(b, 0xFF)
+    legg_til(b, 0xC9)
+    // jnz loop_start: 75 <rel8>
+    legg_til(b, 0x75)
+    legg_til(b, (0 - (lengde(b) - loop_start + 1)) & 255)
+
+    // done_write: fiks forward ref
+    b[jz_done_pos] = lengde(b) - jz_done_pos - 1
+
+    // jmp epilog: EB <rel8>
+    legg_til(b, 0xEB)
+    la jmp_epilog_pos: heltall = lengde(b)
+    legg_til(b, 0)
+
+    // ── check_exit ─────────────────────────────────────────────────────────
+    // Fiks JNE placeholder
+    b[jne_write_pos] = lengde(b) - jne_write_pos - 1
+
+    // cmp rax, 60: 48 83 F8 3C
+    legg_til(b, 0x48)
+    legg_til(b, 0x83)
+    legg_til(b, 0xF8)
+    legg_til(b, 60)
+    // jne epilog: 75 <rel8>
+    legg_til(b, 0x75)
+    la jne_exit_pos: heltall = lengde(b)
+    legg_til(b, 0)
+
+    // exit: cli + hlt loop
+    legg_til(b, 0xFA)  // cli
+    legg_til(b, 0xF4)  // hlt
+    legg_til(b, 0xEB)
+    legg_til(b, 0xFE)  // jmp $
+
+    // Fiks JNE for exit
+    b[jne_exit_pos] = lengde(b) - jne_exit_pos - 1
+
+    // ── epilog ─────────────────────────────────────────────────────────────
+    b[jmp_epilog_pos] = lengde(b) - jmp_epilog_pos - 1
+
+    legg_til(b, 0x41)
+    legg_til(b, 0x59)  // pop r9
+    legg_til(b, 0x41)
+    legg_til(b, 0x58)  // pop r8
+    legg_til(b, 0x5F)  // pop rdi
+    legg_til(b, 0x5E)  // pop rsi
+    legg_til(b, 0x5A)  // pop rdx
+    legg_til(b, 0x59)  // pop rcx
+    legg_til(b, 0x5B)  // pop rbx
+    legg_til(b, 0x58)  // pop rax
+    // iretq: 48 CF
+    legg_til(b, 0x48)
+    legg_til(b, 0xCF)
+
+    returner b
+slutt
+
+// ─── Userspace-kode (ring 3) ─────────────────────────────────────────────────
+// Startar ved USER_OFF() = +900, vaddr USER_VA()
+// Melding: "Ring 3: Norscode OS!\n" (22 bytes) ved MSG_OFF() = +940
+
+funksjon bygg_userspace()
+    la b: liste<heltall> = []
+
+    // MSG_VA() er vaddr til meldinga, 40 bytes etter start av userspace-kode
+    la msg_rip_offset: heltall = MSG_OFF() - USER_OFF()   // = 40
+
+    // sys_write(1, MSG_VA, 22)
+    // mov eax, 1: B8 01 00 00 00
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 1)
+    // mov edi, 1: BF 01 00 00 00
+    legg_til(b, 0xBF)
+    legg_u32_le(b, 1)
+    // lea rsi, [rip + msg_rip_offset - current_offset]
+    // RIP-relative: lea rsi, [rip + disp32]  = 48 8D 35 <disp32>
+    // disp32 = MSG_VA - (USER_VA + len_so_far + 7)
+    // len_so_far no = 10, instruksjonen er 7 bytes, så RIP = USER_VA + 17
+    // disp = MSG_VA - (USER_VA + 17) = MSG_OFF - USER_OFF - 17 = 40 - 17 = 23
+    legg_til(b, 0x48)
+    legg_til(b, 0x8D)
+    legg_til(b, 0x35)
+    la disp_write: heltall = (MSG_OFF() - USER_OFF()) - (lengde(b) + 4)
+    legg_u32_le(b, disp_write & 0xFFFFFFFF)
+    // mov edx, 22: BA 16 00 00 00
+    legg_til(b, 0xBA)
+    legg_u32_le(b, 22)
+    // int 0x80: CD 80
+    legg_til(b, 0xCD)
+    legg_til(b, 0x80)
+
+    // sys_exit(0)
+    // mov eax, 60: B8 3C 00 00 00
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 60)
+    // xor edi, edi: 31 FF
+    legg_til(b, 0x31)
+    legg_til(b, 0xFF)
+    // int 0x80: CD 80
+    legg_til(b, 0xCD)
+    legg_til(b, 0x80)
+
+    // Pad til msg_rip_offset = 40
+    pad_to(b, MSG_OFF() - USER_OFF())
+
+    // Meldinga: "Ring 3: Norscode OS!\n" (22 bytes)
+    la msg = "Ring 3: Norscode OS!\n"
+    la i: heltall = 0
+    mens i < lengde(msg)
+        la ch = msg[i]
+        la code: heltall = builtin.char_code(ch)
+        legg_til(b, code)
+        i = i + 1
+    slutt
+
+    returner b
+slutt
+
+// ─── 32-bit ELF header + program header ──────────────────────────────────────
+
+funksjon bygg_elf_headers(text_size)
+    la entry = tv() + 12     // entry = etter multiboot header
+    // ELF entry = multiboot entry = 0x10000C
+    la elf_hdr = bygg_elf32(
+        tv() + 12,        // entry point
+        52,               // phoff (right after ELF header)
+        tp(),             // p_offset: segment frå fil-offset 4096
+        tv(),             // p_vaddr: 0x100000
+        text_size         // p_filesz
+    )
+    la ph = bygg_ph32(tp(), tv(), text_size)
+    la buf: liste<heltall> = []
+    kopier_inn(buf, elf_hdr)
+    kopier_inn(buf, ph)
+    returner buf
+slutt
+
+// ─── Hovudbyggjar ─────────────────────────────────────────────────────────────
+
+funksjon bygg_kernel_v2()
+    // Bygg .text-seksjon
+    la text: liste<heltall> = []
+
+    // +0: Multiboot-header (12 bytes)
+    kopier_inn(text, bygg_multiboot())
+
+    // +12: 32-bit oppstartskode
+    kopier_inn(text, bygg_32bit_startup())
+
+    // Pad til GDT_DESC_OFF = 128
+    pad_to(text, GDT_DESC_OFF())
+
+    // +128: GDT-deskriptor (10 bytes)
+    kopier_inn(text, bygg_gdt_descriptor())
+
+    // Pad til GDT_OFF = 256
+    pad_to(text, GDT_OFF())
+
+    // +256: GDT (56 bytes)
+    kopier_inn(text, bygg_gdt())
+
+    // Pad til CODE64_OFF = 400
+    pad_to(text, CODE64_OFF())
+
+    // +400: 64-bit kjernekode
+    kopier_inn(text, bygg_64bit_kernel())
+
+    // Pad til HANDLER_OFF = 600
+    pad_to(text, HANDLER_OFF())
+
+    // +600: INT 0x80 handler
+    kopier_inn(text, bygg_int80_handler())
+
+    // Pad til USER_OFF = 900
+    pad_to(text, USER_OFF())
+
+    // +900: Userspace-kode + melding
+    kopier_inn(text, bygg_userspace())
+
+    // Pad til minst MSG_OFF + melding-lengde
+    la min_size: heltall = MSG_OFF() - USER_OFF() + 22
+    pad_to(text, USER_OFF() + min_size)
+
+    la text_size: heltall = lengde(text)
+
+    // Bygg ELF-fil
+    la headers = bygg_elf_headers(text_size)
+
+    la fil: liste<heltall> = []
+    kopier_inn(fil, headers)
+    // Pad til fil-offset 4096 (text_page)
+    pad_to(fil, tp())
+    // Legg til .text
+    kopier_inn(fil, text)
+
+    returner fil
+slutt
+
+// ─── Inngangspunkt ───────────────────────────────────────────────────────────
+
+funksjon start()
+    la output = miljo_hent("NC_OUTPUT")
+    hvis output == "" { output = "build/norscode_kernel_v2.elf" }
+
+    skriv("kernel_v2: bygger 64-bit kernel med ring-3 support...\n")
+    la bytes = bygg_kernel_v2()
+    fil_skriv_binær(output, bytes)
+
+    skriv("kernel_v2: " + tekst_fra_heltall(lengde(bytes)) + " bytes → " + output + "\n")
+    skriv("Boot: qemu-system-i386 -kernel " + output + " -display none -S -monitor stdio\n")
+    returner 0
+slutt

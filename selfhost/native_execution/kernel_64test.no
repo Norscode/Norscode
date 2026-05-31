@@ -1,0 +1,333 @@
+// selfhost/native_execution/kernel_64test.no
+// Minimal 64-bit test: multiboot → long mode → VGA "64OK" → HLT
+// Identisk struktur som kernel_builder.no (v1) som fungerer.
+
+funksjon legg_u16_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+slutt
+
+funksjon legg_u32_le(buf, v)
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+slutt
+
+funksjon null_pad(buf, n)
+    la i: heltall = 0
+    mens i < n
+        legg_til(buf, 0)
+        i = i + 1
+    slutt
+slutt
+
+funksjon kopier_inn(dst, src)
+    la i: heltall = 0
+    mens i < lengde(src)
+        legg_til(dst, src[i])
+        i = i + 1
+    slutt
+slutt
+
+// ELF-adressar
+funksjon BASE()     { returner 1048576 }  // 0x100000
+funksjon TEXT_PAGE(){ returner 4096 }
+
+// Multiboot1-header (12 bytes)
+funksjon bygg_mb()
+    la buf: liste<heltall> = []
+    la magic: heltall = 0x1BADB002
+    la cksum: heltall = (0 - magic) & 0xFFFFFFFF
+    legg_u32_le(buf, magic)
+    legg_u32_le(buf, 0)
+    legg_u32_le(buf, cksum)
+    returner buf
+slutt
+
+// 32-bit startup → setup page tables → long mode → jmp 64-bit kode
+// GDT ligg embedded på offset 256 frå tekst-start = 0x100100
+// 64-bit entry på offset 300 = 0x10012C
+funksjon bygg_32bit()
+    la b: liste<heltall> = []
+
+    // PML4[0] = PDP | 0x07 (P+RW+US)
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 0x2007)  // mov eax, 0x2007
+    legg_til(b, 0xA3)
+    legg_u32_le(b, 0x1000)  // mov [0x1000], eax
+
+    // PDP[0] = PD | 0x07
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 0x3007)
+    legg_til(b, 0xA3)
+    legg_u32_le(b, 0x2000)
+
+    // PD[0] = 2MB page at 0 | 0x87 (PS+P+RW+US)
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 0x87)
+    legg_til(b, 0xA3)
+    legg_u32_le(b, 0x3000)
+
+    // LGDT [0x100080]
+    legg_til(b, 0x0F)
+    legg_til(b, 0x01)
+    legg_til(b, 0x15)
+    legg_u32_le(b, 0x100080)
+
+    // Enable PAE: mov eax, cr4; or eax, 0x20; mov cr4, eax
+    legg_til(b, 0x0F)
+    legg_til(b, 0x20)
+    legg_til(b, 0xE0)
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x20)
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xE0)
+
+    // CR3 = PML4 (0x1000)
+    legg_til(b, 0xB8)
+    legg_u32_le(b, 0x1000)
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xD8)
+
+    // EFER.LME
+    legg_til(b, 0xB9)
+    legg_u32_le(b, 0xC0000080)
+    legg_til(b, 0x0F)
+    legg_til(b, 0x32)
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x100)
+    legg_til(b, 0x0F)
+    legg_til(b, 0x30)
+
+    // Enable paging
+    legg_til(b, 0x0F)
+    legg_til(b, 0x20)
+    legg_til(b, 0xC0)
+    legg_til(b, 0x0D)
+    legg_u32_le(b, 0x80000000)
+    legg_til(b, 0x0F)
+    legg_til(b, 0x22)
+    legg_til(b, 0xC0)
+
+    // Far jump: jmp 0x08:0x10012C
+    legg_til(b, 0xEA)
+    legg_u32_le(b, 0x10012C)
+    legg_u16_le(b, 0x08)
+
+    returner b
+slutt
+
+// GDT-deskriptor ved 0x100080 (offset 128 i tekst)
+funksjon bygg_gdt_desc()
+    la buf: liste<heltall> = []
+    legg_u16_le(buf, 23)      // limit = 24 bytes - 1 (null + ring0code + ring0data = 3*8=24)
+    legg_u32_le(buf, 0x100100) // base = GDT at offset 256
+    null_pad(buf, 4)
+    returner buf
+slutt
+
+// GDT ved 0x100100 (offset 256 i tekst)
+funksjon bygg_gdt()
+    la buf: liste<heltall> = []
+    // null
+    null_pad(buf, 8)
+    // ring 0 code 64-bit: access=0x9A, G=1, L=1
+    legg_u16_le(buf, 0xFFFF)  // limit low
+    legg_u16_le(buf, 0x0000)  // base low
+    legg_til(buf, 0x00)       // base mid
+    legg_til(buf, 0x9A)       // access
+    legg_til(buf, 0xAF)       // flags + limit_hi (G=1,L=1,limit=F)
+    legg_til(buf, 0x00)       // base hi
+    // ring 0 data
+    legg_u16_le(buf, 0xFFFF)
+    legg_u16_le(buf, 0x0000)
+    legg_til(buf, 0x00)
+    legg_til(buf, 0x92)       // access: data, writable
+    legg_til(buf, 0xCF)       // G=1,D/B=1
+    legg_til(buf, 0x00)
+    returner buf
+slutt
+
+// 64-bit kode ved 0x10012C (offset 300 i tekst)
+funksjon bygg_64bit()
+    la b: liste<heltall> = []
+
+    // Set datasegment til 0x10 (ring 0 data)
+    legg_til(b, 0x66)
+    legg_til(b, 0xB8)
+    legg_u16_le(b, 0x10)  // mov ax, 0x10
+    legg_til(b, 0x8E)
+    legg_til(b, 0xD8)  // mov ds, ax
+    legg_til(b, 0x8E)
+    legg_til(b, 0xC0)  // mov es, ax
+    legg_til(b, 0x8E)
+    legg_til(b, 0xD0)  // mov ss, ax
+    legg_til(b, 0x8E)
+    legg_til(b, 0xE0)  // mov fs, ax
+    legg_til(b, 0x8E)
+    legg_til(b, 0xE8)  // mov gs, ax
+
+    // Stack
+    legg_til(b, 0x48)
+    legg_til(b, 0xBC)  // mov rsp, 0x9000
+    la i: heltall = 0
+    mens i < 8
+        la byt: heltall = 0
+        hvis i == 1 { byt = 0x90 }  // 0x9000 bytes
+        legg_til(b, byt)
+        i = i + 1
+    slutt
+
+    // Skriv "64OK" til VGA linje 2: 0xB80A0
+    // mov rdi, 0xB80A0: 48 BF <imm64>
+    legg_til(b, 0x48)
+    legg_til(b, 0xBF)
+    // 0xB80A0 = 753824
+    legg_til(b, 0xA0)
+    legg_til(b, 0x80)
+    legg_til(b, 0x0B)
+    la j: heltall = 0
+    mens j < 5
+        legg_til(b, 0)
+        j = j + 1
+    slutt
+
+    // '6' = 0x36, '4' = 0x34, 'O' = 0x4F, 'K' = 0x4B, attr 0x0A (green)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x07)
+    legg_til(b, 0x36)  // [rdi] = '6'
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 1)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 2)
+    legg_til(b, 0x34)  // '4'
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 3)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 4)
+    legg_til(b, 0x4F)  // 'O'
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 5)
+    legg_til(b, 0x0A)
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 6)
+    legg_til(b, 0x4B)  // 'K'
+    legg_til(b, 0xC6)
+    legg_til(b, 0x47)
+    legg_til(b, 7)
+    legg_til(b, 0x0A)
+
+    // HLT
+    legg_til(b, 0xFA)  // cli
+    legg_til(b, 0xF4)  // hlt
+    legg_til(b, 0xEB)
+    legg_til(b, 0xFE)  // jmp $
+
+    returner b
+slutt
+
+funksjon start()
+    la output = miljo_hent("NC_OUTPUT")
+    hvis output == "" { output = "build/norscode_kernel_64test.elf" }
+
+    // Bygg .text
+    la text: liste<heltall> = []
+
+    // +0: Multiboot (12 bytes)
+    kopier_inn(text, bygg_mb())
+
+    // +12: 32-bit startup (~88 bytes)
+    kopier_inn(text, bygg_32bit())
+
+    // Pad til 128
+    mens lengde(text) < 128 
+         legg_til(text, 0) 
+    slutt
+
+    // +128: GDT descriptor (10 bytes)
+    kopier_inn(text, bygg_gdt_desc())
+
+    // Pad til 256
+    mens lengde(text) < 256 
+         legg_til(text, 0) 
+    slutt
+
+    // +256: GDT (24 bytes)
+    kopier_inn(text, bygg_gdt())
+
+    // Pad til 300
+    mens lengde(text) < 300 
+         legg_til(text, 0) 
+    slutt
+
+    // +300: 64-bit code
+    kopier_inn(text, bygg_64bit())
+
+    // Pad litt meir
+    mens lengde(text) < 350 
+         legg_til(text, 0) 
+    slutt
+
+    la text_size: heltall = lengde(text)
+    skriv("text_size=" + tekst_fra_heltall(text_size) + "\n")
+
+    // Bygg ELF32 (entry=0x10000C, phoff=52, segment frå fil-offset 4096 til vaddr 0x100000)
+    la fil: liste<heltall> = []
+
+    // ELF header (52 bytes)
+    legg_til(fil, 0x7F)
+    legg_til(fil, 0x45)
+    legg_til(fil, 0x4C)
+    legg_til(fil, 0x46)
+    legg_til(fil, 1)
+    legg_til(fil, 1)
+    legg_til(fil, 1)
+    legg_til(fil, 0)
+    null_pad(fil, 8)
+    legg_u16_le(fil, 2)          // ET_EXEC
+    legg_u16_le(fil, 3)          // EM_386
+    legg_u32_le(fil, 1)          // e_version
+    legg_u32_le(fil, 0x10000C)   // e_entry
+    legg_u32_le(fil, 52)         // e_phoff
+    legg_u32_le(fil, 0)          // e_shoff
+    legg_u32_le(fil, 0)          // e_flags
+    legg_u16_le(fil, 52)         // e_ehsize
+    legg_u16_le(fil, 32)         // e_phentsize
+    legg_u16_le(fil, 1)          // e_phnum
+    legg_u16_le(fil, 40)
+    legg_u16_le(fil, 0)
+    legg_u16_le(fil, 0)
+
+    // Program header (32 bytes) - PT_LOAD from file offset 4096 to vaddr 0x100000
+    legg_u32_le(fil, 1)          // PT_LOAD
+    legg_u32_le(fil, 4096)       // p_offset
+    legg_u32_le(fil, 0x100000)   // p_vaddr
+    legg_u32_le(fil, 0x100000)   // p_paddr
+    legg_u32_le(fil, text_size)  // p_filesz
+    legg_u32_le(fil, text_size)  // p_memsz
+    legg_u32_le(fil, 5)          // PF_R|PF_X
+    legg_u32_le(fil, 4096)       // p_align
+
+    // Pad til fil-offset 4096
+    mens lengde(fil) < 4096 
+         legg_til(fil, 0) 
+    slutt
+
+    // .text
+    kopier_inn(fil, text)
+
+    fil_skriv_binær(output, fil)
+    skriv("kernel_64test: " + tekst_fra_heltall(lengde(fil)) + " bytes → " + output + "\n")
+    returner 0
+slutt
