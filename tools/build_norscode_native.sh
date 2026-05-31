@@ -50,12 +50,12 @@ if [ "$_should_regen" = "1" ]; then
 fi
 
 printf "Kompilerer norscode_native...\n"
-TMP="$(mktemp /tmp/nc_native_XXXXXX.c)"
+TMP="$(mktemp /tmp/nc_native_$$.c 2>/dev/null || echo /tmp/nc_native_$$.c)"
 cat "${ROOT}/tools/nc_runtime_mini.c" > "$TMP"
 cat "${ROOT}/bootstrap/c/nc_dispatch.c" >> "$TMP"
-grep -v '#include.*nc_runtime' "${ROOT}/bootstrap/c/norscode_generated.c" | \
-    sed 's/^int main/static int nc_gen_main/' >> "$TMP"
-cat "${ROOT}/tools/nc_native_main.c" >> "$TMP"
+# norscode_generated.c inneheld no nc_main.start som main()-inngangspunkt
+# nc_native_main.c er ikkje lenger nødvendig
+grep -v '#include.*nc_runtime' "${ROOT}/bootstrap/c/norscode_generated.c" >> "$TMP"
 "$CC" -O2 -Wno-everything -o "$OUT" "$TMP"
 rm -f "$TMP"
 

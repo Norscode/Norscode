@@ -164,6 +164,11 @@ static NcVal *nc_fn_selfhost_bundler_omd__yp_funksjonar(NcVal **args, int nargs)
 static NcVal *nc_fn_selfhost_bundler_hent_funksjonar_json(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_bundler_bygg_bundle(NcVal **args, int nargs);
 static NcVal *nc_fn_selfhost_bundler_start(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_nc_main_nc_kompiler_fil(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_nc_main_nc_k__yr_ncb_json(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_nc_main_nc_run(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_nc_main_nc_compile(NcVal **args, int nargs);
+static NcVal *nc_fn_selfhost_nc_main_start(NcVal **args, int nargs);
 
 static NcDispatch nc_dispatch[] = {
   {"selfhost.lexer.lexer_m1.er_bokstav", nc_fn_selfhost_lexer_lexer_m1_er_bokstav},
@@ -329,6 +334,11 @@ static NcDispatch nc_dispatch[] = {
   {"selfhost.bundler.hent_funksjonar_json", nc_fn_selfhost_bundler_hent_funksjonar_json},
   {"selfhost.bundler.bygg_bundle", nc_fn_selfhost_bundler_bygg_bundle},
   {"selfhost.bundler.start", nc_fn_selfhost_bundler_start},
+  {"selfhost.nc_main.nc_kompiler_fil", nc_fn_selfhost_nc_main_nc_kompiler_fil},
+  {"selfhost.nc_main.nc_køyr_ncb_json", nc_fn_selfhost_nc_main_nc_k__yr_ncb_json},
+  {"selfhost.nc_main.nc_run", nc_fn_selfhost_nc_main_nc_run},
+  {"selfhost.nc_main.nc_compile", nc_fn_selfhost_nc_main_nc_compile},
+  {"selfhost.nc_main.start", nc_fn_selfhost_nc_main_start},
   {NULL, NULL}
 };
 

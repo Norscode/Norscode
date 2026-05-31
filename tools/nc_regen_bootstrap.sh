@@ -22,7 +22,8 @@ fi
 if [ "${1:-}" = "--full" ]; then
     printf 'Genererer full bootstrap/kompiler.ncb.json...\n'
     TMP="$(mktemp /tmp/nc_bundle_XXXXXX.ncb.json 2>/dev/null || echo /tmp/nc_bundle_$$.ncb.json)"
-    "$NC" bundle \
+    # Bruk Python til å bundle (unngår bootstrap-sirkel med bundler.no)
+    python3 "$ROOT/tools/python_bundle.py" \
         selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
         selfhost.parser=selfhost/parser.no \
         selfhost.compiler.semantic=selfhost/compiler/semantic.no \
@@ -32,6 +33,7 @@ if [ "${1:-}" = "--full" ]; then
         selfhost.vm=selfhost/vm.no \
         selfhost.main=selfhost/main.no \
         selfhost.bundler=selfhost/bundler.no \
+        selfhost.nc_main=selfhost/nc_main.no \
         --output "$TMP"
     cp "$TMP" bootstrap/kompiler.ncb.json
     rm -f "$TMP"
