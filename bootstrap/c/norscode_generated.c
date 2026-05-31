@@ -17151,7 +17151,7 @@ static NcVal *nc_fn_selfhost_bundler_omd__yp_funksjonar(NcVal **args, int nargs)
   nc_store(vars,varnames,&nvars,"modul_namn",nargs>1?args[1]:nc_nil());
 
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ncb_json"));
-  nc_push(&sp, stack, nc_str("\"selfhost.bundler."));
+  nc_push(&sp, stack, nc_str("\"__main__."));
   nc_push(&sp, stack, nc_str("\""));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modul_namn"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
