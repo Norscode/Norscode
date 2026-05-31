@@ -453,19 +453,26 @@ static NcVal *nc_builtin_split(NcVal *s_v, NcVal *sep_v) {
 static NcVal *nc_builtin_join(NcVal *lst, NcVal *sep_v) {
     if (!lst || lst->type != NC_LIST) return nc_str("");
     char *sep = nc_to_str_raw(sep_v);
-    size_t total = 0, seplen = strlen(sep);
-    char **parts = malloc(lst->list->len * sizeof(char*));
-    for (int i = 0; i < lst->list->len; i++) {
+    size_t seplen = strlen(sep);
+    int n = lst->list->len;
+    size_t total = 0;
+    char **parts = malloc(n * sizeof(char*));
+    size_t *lens = malloc(n * sizeof(size_t));
+    for (int i = 0; i < n; i++) {
         parts[i] = nc_to_str_raw(lst->list->items[i]);
-        total += strlen(parts[i]);
+        lens[i] = strlen(parts[i]);
+        total += lens[i];
     }
-    if (lst->list->len > 1) total += seplen * (lst->list->len - 1);
-    char *r = malloc(total + 1); r[0] = 0;
-    for (int i = 0; i < lst->list->len; i++) {
-        if (i > 0) strcat(r, sep);
-        strcat(r, parts[i]); free(parts[i]);
+    if (n > 1) total += seplen * (n - 1);
+    char *r = malloc(total + 1);
+    char *wp = r;
+    for (int i = 0; i < n; i++) {
+        if (i > 0) { memcpy(wp, sep, seplen); wp += seplen; }
+        memcpy(wp, parts[i], lens[i]); wp += lens[i];
+        free(parts[i]);
     }
-    free(parts); free(sep);
+    *wp = 0;
+    free(parts); free(lens); free(sep);
     return nc_str_own(r);
 }
 static NcVal *nc_builtin_trim(NcVal *s_v) {
@@ -628,8 +635,11 @@ static NcVal *jp2_parse(JP2 *j);
 static void jp2_ws(JP2 *j) { while (*j->p==' '||*j->p=='\t'||*j->p=='\n'||*j->p=='\r') j->p++; }
 static char *jp2_str(JP2 *j) {
     j->p++;
-    char buf[65536]; int bi=0;
+    /* Bruk heap i staden for stack for å unngå stack overflow på store NCB-ar */
+    size_t cap = 4096, bi = 0;
+    char *buf = malloc(cap);
     while (*j->p && *j->p!='"') {
+        if (bi + 4 >= cap) { cap *= 2; buf = realloc(buf, cap); }
         if (*j->p=='\\') { j->p++;
             switch(*j->p) {
                 case '"': buf[bi++]='"'; break; case '\\': buf[bi++]='\\'; break;
@@ -641,7 +651,10 @@ static char *jp2_str(JP2 *j) {
         j->p++;
     }
     if (*j->p=='"') j->p++;
-    buf[bi]=0; return strdup(buf);
+    buf[bi]=0;
+    char *result = strdup(buf);
+    free(buf);
+    return result;
 }
 static NcVal *jp2_parse(JP2 *j) {
     jp2_ws(j);
