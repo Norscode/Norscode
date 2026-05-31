@@ -24,9 +24,7 @@ if [ -x "${ROOT}/dist/norscode_native" ] && \
     env NORSCODE_CMD=run NORSCODE_FILE="${ROOT}/selfhost/gen_dispatch.no" \
         NC_NCB_INPUT="${ROOT}/bootstrap/kompiler.ncb.json" \
         NC_DISPATCH_OUTPUT="${ROOT}/bootstrap/c/nc_dispatch.c" \
-        "${ROOT}/dist/norscode_native" 2>/dev/null || \
-    python3 "${ROOT}/tools/gen_dispatch.py" "${ROOT}/bootstrap/kompiler.ncb.json" \
-        > "${ROOT}/bootstrap/c/nc_dispatch.c" 2>/dev/null || true
+        "${ROOT}/dist/norscode_native" 2>/dev/null || true
 fi
 
 printf "Kompilerer norscode_native...\n"
