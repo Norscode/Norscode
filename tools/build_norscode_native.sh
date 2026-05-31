@@ -37,13 +37,10 @@ if [ "$_should_regen" = "1" ]; then
     fi
 
     if [ -n "$_runner" ]; then
-        NC_NCB_INPUT="${ROOT}/bootstrap/kompiler.ncb.json" \
-        NC_C_OUTPUT="${ROOT}/bootstrap/c/norscode_generated.c" \
-            env NORSCODE_CMD=run NORSCODE_FILE="${ROOT}/selfhost/ncb_to_c.no" \
-            "$_runner" 2>/dev/null || \
-        NC_NCB_INPUT="${ROOT}/bootstrap/kompiler.ncb.json" \
-        NC_C_OUTPUT="${ROOT}/bootstrap/c/norscode_generated.c" \
-            "$_runner" --nc-run "${ROOT}/selfhost/ncb_to_c.no" 2>/dev/null || true
+        env NORSCODE_CMD=run NORSCODE_FILE="${ROOT}/selfhost/ncb_to_c.no" \
+            NC_NCB_INPUT="${ROOT}/bootstrap/kompiler.ncb.json" \
+            NC_C_OUTPUT="${ROOT}/bootstrap/c/norscode_generated.c" \
+            "$_runner" 2>/dev/null || true
 
         # Generer dispatch-tabell
         python3 "${ROOT}/tools/gen_dispatch.py" \

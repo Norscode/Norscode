@@ -1,3 +1,4 @@
+/* Auto-generert av tools/gen_dispatch.py — IKKJE REDIGER */
 typedef struct { const char *name; NcVal *(*fn)(NcVal **, int); } NcDispatch;
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_bokstav(NcVal **args, int nargs);

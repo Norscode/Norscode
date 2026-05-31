@@ -711,3 +711,12 @@ static NcVal *nc_builtin_json_parse_norscode(NcVal *v) {
     }
     return r;
 }
+
+/* nc_builtin_json_parse_raw — JSON-parse utan string-konvertering
+ * Returnerer native NcVal-ordbøker og lister (ikkje stringifiserte verdiar).
+ * Brukt av ncb_to_c.no for å parse bootstrap/kompiler.ncb.json. */
+static NcVal *nc_builtin_json_parse_raw(NcVal *v) {
+    char *s = nc_to_str_raw(v); JP2 j={s};
+    NcVal *r = jp2_parse(&j); free(s);
+    return r ? r : nc_nil();
+}
