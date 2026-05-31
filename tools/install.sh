@@ -94,7 +94,7 @@ if [ -z "$DOWNLOAD_URL" ]; then
         fi
     fi
     printf 'Feil: Kunne ikke installere Norscode for %s.\n' "$PLATFORM" >&2
-    printf 'Manuell installasjon: pip install norscode\n' >&2
+
     exit 1
 fi
 
