@@ -70,7 +70,7 @@ Kjør et program med:
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
 ./bin/nc --help
 ./bin/nc run app.no
 ./bin/nc test
@@ -79,7 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tool
 ### Windows
 
 ```powershell
-irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
+irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 | iex
 .\bin\nc.ps1 --help
 .\bin\nc.ps1 run app.no
 ```

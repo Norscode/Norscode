@@ -5,12 +5,12 @@
 # og legger den på PATH.
 #
 # Bruk:
-#   curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
 #   bash tools/install.sh               # fra lokal kildekode
 #   bash tools/install.sh --prefix /usr/local
 set -eu
 
-REPO="rfwwp8k542-maker/Norscode"
+REPO="Norscode/Norscode"
 INSTALL_PREFIX="${1:-$HOME/.local}"
 BIN_DIR="$INSTALL_PREFIX/bin"
 

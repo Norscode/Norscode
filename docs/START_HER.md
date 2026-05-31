@@ -22,13 +22,13 @@ Hvis du ikke har bygget binary ennå, les først:
 På macOS og Linux bruker du vanligvis:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
 ```
 
 På Windows:
 
 ```powershell
-irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
+irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 | iex
 ```
 
 Hvis du vil bygge fra kildekode:

@@ -71,6 +71,7 @@ Leveranser:
 - legacy-flater er tydelig merket og ligger utenfor normal bruk
 - README, startdokumenter og CI-dokumentasjon beskriver native først
 - CI stopper hvis normal vei prøver å bruke fallback-banen
+- release/install-flaten krever ikke C-verktøykjede i normal drift
 
 Ferdig når:
 

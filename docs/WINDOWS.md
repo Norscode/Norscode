@@ -4,7 +4,7 @@
 
 **Alternativ A – automatisk (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/rfwwp8k542-maker/Norscode/main/tools/install.ps1 | iex
+irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 | iex
 ```
 
 **Alternativ B – via pip:**
@@ -14,7 +14,7 @@ py -m pip install norscode
 
 **Alternativ C – fra kildekode:**
 ```powershell
-git clone https://github.com/rfwwp8k542-maker/Norscode
+git clone https://github.com/Norscode/Norscode
 cd Norscode
 py -m pip install .
 ```

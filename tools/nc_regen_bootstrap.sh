@@ -14,7 +14,7 @@ NC="$ROOT/bin/nc"
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     printf '✗ Trenger dist/norscode_native.\n' >&2
-    printf '  Last ned frå: https://github.com/jansteinar/Norscode1/releases\n' >&2
+    printf '  Last ned frå: https://github.com/Norscode/Norscode/releases\n' >&2
     exit 1
 fi
 
