@@ -87,9 +87,13 @@ irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 |
 Hvis du starter fra kildekode i repoet, bygg native binary først:
 
 ```bash
-bash tools/build-bootstrap-binary.sh
+bash tools/build_norscode_native.sh
 ./bin/nc --help
 ```
+
+**CI / stage-0:** GitHub Actions trenger `dist/norscode_native` (NORSCODE_CMD-runtime). Legg binær i
+[bootstrap/stage0/](bootstrap/stage0/README.md) eller publiser GitHub Release — uten dette feiler
+`tools/build_norscode_native.sh` etter release-nedlasting.
 
 ## Vanlige kommandoer
 

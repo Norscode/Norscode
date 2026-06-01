@@ -24,16 +24,11 @@ if ! command -v "$CC" >/dev/null 2>&1; then
     exit 1
 fi
 
-for f in \
-    build/bootstrap_compiler_bundle_ncb_data.c \
-    build/native_elf_compiler_bundle_ncb_data.c \
-    build/mv_bootstrap_stub_manifest_dispatch.inc
-do
-    if [ ! -f "$ROOT/$f" ]; then
-        printf 'Feil: manglar %s\n' "$f" >&2
-        exit 1
-    fi
-done
+if [ ! -f "$ROOT/build/mv_bootstrap_stub_manifest_dispatch.inc" ]; then
+    printf 'Feil: manglar build/mv_bootstrap_stub_manifest_dispatch.inc\n' >&2
+    exit 1
+fi
+bash "$ROOT/tools/generate_build_embed_c.sh"
 
 mkdir -p "$ROOT/build" "$(dirname "$OUT")"
 

@@ -6,9 +6,11 @@
 # Rekkefølge:
 #   1. Eksisterande dist/norscode_native
 #   2. bootstrap/stage0/norscode-<plattform>
-#   3. GitHub Release (krev GITHUB_TOKEN på privat repo)
+#   3. GitHub Release (GITHUB_TOKEN på privat repo)
+#   4. Linux CI: Docker (Dockerfile.linux-build) — bootstrap-binær
 #
-# CI: GITHUB_TOKEN og GITHUB_REPOSITORY er sett i workflow-env.
+# Merk: Steg 4 gir berre C/NCBB-bootstrap; ./bin/nc test treng NORSCODE_CMD-runtime.
+#       Legg ekte binær i bootstrap/stage0/ eller publiser release (sjå README der).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${ROOT}/dist/norscode_native"
@@ -35,6 +37,21 @@ platform_name() {
             return 1
             ;;
     esac
+}
+
+ensure_embed_c_files() {
+    local need=0
+    for f in \
+        build/bootstrap_compiler_bundle_ncb_data.c \
+        build/native_elf_compiler_bundle_ncb_data.c
+    do
+        if [ ! -f "$ROOT/$f" ]; then
+            need=1
+        fi
+    done
+    if [ "$need" -eq 1 ]; then
+        bash "$ROOT/tools/generate_build_embed_c.sh"
+    fi
 }
 
 copy_stage0_binary() {
@@ -80,7 +97,7 @@ download_release_binary() {
 
     release_json="$("${fetch_json[@]}" "$releases_url" 2>/dev/null)" || {
         if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-            printf 'CI: klarte ikkje hente %s (sjekk token og at release finst)\n' "$releases_url" >&2
+            printf 'CI: klarte ikkje hente %s (ingen release eller manglar tilgang)\n' "$releases_url" >&2
         fi
         return 1
     }
@@ -107,21 +124,47 @@ download_release_binary() {
         trap - EXIT
         return 1
     fi
+    mkdir -p "$(dirname "$OUT")"
     mv "$tmp_file" "$OUT"
     chmod +x "$OUT"
     trap - EXIT
     return 0
 }
 
+build_linux_via_docker() {
+    [ "$(uname -s)" = "Linux" ] || return 1
+    command -v docker >/dev/null 2>&1 || return 1
+    ensure_embed_c_files
+    if [ ! -f "$ROOT/build/mv_bootstrap_stub_manifest_dispatch.inc" ]; then
+        printf 'Feil: manglar build/mv_bootstrap_stub_manifest_dispatch.inc\n' >&2
+        return 1
+    fi
+    local dest="${ROOT}/.ci-docker-native-out"
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    printf 'CI: byggjer Linux bootstrap via Docker...\n' >&2
+    if ! docker buildx build --platform linux/amd64 -f "$ROOT/Dockerfile.linux-build" \
+        --output "type=local,dest=$dest" "$ROOT" >&2; then
+        return 1
+    fi
+    if [ ! -f "$dest/norscode-linux-x86_64" ]; then
+        return 1
+    fi
+    mkdir -p "$(dirname "$OUT")"
+    cp "$dest/norscode-linux-x86_64" "$OUT"
+    chmod +x "$OUT"
+    printf '✓ dist/norscode_native frå Docker (%d bytes) — kan mangle NORSCODE_CMD; legg inn stage0/release\n' \
+        "$(wc -c < "$OUT" | tr -d ' ')" >&2
+    return 0
+}
+
 ci_fail_help() {
     platform="$(platform_name 2>/dev/null || printf '?')"
-    printf '\n' >&2
-    printf '=== Stage-0 manglar (norscode_native) ===\n' >&2
-    printf 'CI treng ein ferdig binær som støttar NORSCODE_CMD=run (ikkje berre C-bootstrap).\n' >&2
-    printf '\n' >&2
-    printf 'Løysing (vel éin):\n' >&2
-    printf '  1. Publiser GitHub Release med asset: norscode-%s\n' "$platform" >&2
-    printf '  2. Legg same fil i bootstrap/stage0/norscode-%s og commit\n' "$platform" >&2
+    printf '\n=== Stage-0 manglar (norscode_native) ===\n' >&2
+    printf 'CI treng binær med NORSCODE_CMD=run for ./bin/nc test.\n' >&2
+    printf '\nLøysing:\n' >&2
+    printf '  1. Legg %s i bootstrap/stage0/norscode-%s og commit\n' "fil" "$platform" >&2
+    printf '  2. Publiser GitHub Release med asset norscode-%s\n' "$platform" >&2
     printf '  3. Sjå bootstrap/stage0/README.md\n' >&2
     printf '\n' >&2
 }
@@ -138,16 +181,12 @@ if copy_stage0_binary; then
 fi
 
 if download_release_binary; then
-    SIZE="$(wc -c < "$OUT")"
-    printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$SIZE"
+    printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
     exit 0
 fi
 
-# C-bootstrap kan selfcheck, men dekkar ikkje ./bin/nc test — bygg berre for diagnose
-if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-    if bash "$ROOT/tools/build_norscode_native_from_source.sh"; then
-        printf 'CI: norcode-bootstrap-compile bygget, men norscode_native manglar framleis.\n' >&2
-    fi
+if [ "${GITHUB_ACTIONS:-}" = "true" ] && build_linux_via_docker; then
+    exit 0
 fi
 
 ci_fail_help

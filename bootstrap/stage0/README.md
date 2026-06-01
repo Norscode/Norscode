@@ -28,5 +28,8 @@ gh release upload v0.1.0 bootstrap/stage0/norscode-macos-arm64 --clobber
 
 Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.sh` fungere utan nettverk.
 
-**Merk:** C/NCBB-kjeldebygg (`tools/build_norscode_native_from_source.sh`) produserer berre
-`norcode-bootstrap-compile` — det er ikkje det same som `norscode_native` for `./bin/nc test`.
+**Merk:** Docker/C-bootstrap på Linux CI produserer berre ein mellombinær C-runtime — den
+dekkar ikkje `./bin/nc test` før du har lagt inn ekte `norscode_native` her eller i release.
+
+`build/*_ncb_data.c` genereres i CI frå `build/*.ncb` med `tools/generate_build_embed_c.sh`
+om dei manglar (sjå `.gitignore`).
