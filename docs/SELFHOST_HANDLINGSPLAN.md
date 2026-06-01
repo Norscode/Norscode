@@ -15,6 +15,19 @@ Norscode er selvstendig når:
 - CI verifiserer bootstrap, selfhost, release og regresjoner uten skjulte bakdører
 - nye bidragsytere ser normal vei, avvik og historikk uten å måtte lese kildekoden først
 
+### Ingen Python eller C i normal flyt
+
+| Tillatt | Ikke tillatt i normal flyt |
+|---|---|
+| `.no` → NCB JSON → `selfhost/vm.no` | Nye `tools/*.py` som kompilerer, konverterer eller kjører kjerne |
+| `dist/norscode_native` som **stage-0** (release-binær eller selfhost-kompilert ELF) | `python3 main.py`, pytest som orakel for kompilatoren |
+| `tools/c_minimal_vm/` kun som **arkivert** legacy (ikke dokumentert som vei) | NCBB/C-VM som påkrevd steg for `run` / `compile` / CI |
+| Nye verktøy i `selfhost/*.no` | `selfhost/ncb_to_c.no` i produksjonskjede |
+
+**Artefaktformat:** Kjøring og bootstrap bruker **NCB JSON** (`*.ncb.json`). Binært NCBB hører til legacy C-VM og skal ikke gjeninnføres via Python eller nye C-verktøy. Trengs binær serialisering senere, implementeres den i Norscode (`selfhost/…`), ikke i `tools/*.py`.
+
+**Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges én gang fra selfhost). Det er bootstrap, ikke daglig avhengighet av clang eller Python.
+
 ## Omgangsregel
 
 Hver omgang skal være liten nok til å:

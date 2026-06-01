@@ -42,7 +42,7 @@ For en samlet plan for full selvstendighet, se [docs/SELFHOST_HANDLINGSPLAN.md](
 - `norsklang/` (3 filer) — aldri i bruk, gamalt alias
 - `setup.py` — erstatta av `pyproject.toml`
 - `tests/test_ci_selfhost_ready_gate.py` og 4 andre pytest-filer som refererer slettet C VM
-- `tools/export_ncbb_as_bin.py`, `export_ncbb_as_c.py`, `generate_linux_bootstrap_artifacts.py`, `v42_trace_probe.py`
+- `tools/export_ncbb_as_bin.py`, `export_ncbb_as_c.py`, `tools/json_ncb_to_ncbb.py`, `generate_linux_bootstrap_artifacts.py`, `v42_trace_probe.py` (fjerna; normal flyt bruker NCB JSON + selfhost VM)
 - `build/norcode-native-stage0.py`
 
 **Leveranse:** Lokal verifikasjon er på plass; neste milepæl er bekreftet grønn CI i GitHub Actions.
