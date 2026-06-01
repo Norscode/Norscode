@@ -28,6 +28,8 @@ Norscode er selvstendig når:
 
 **Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges én gang fra selfhost). Det er bootstrap, ikke daglig avhengighet av clang eller Python.
 
+**Operativ plan mot full selvstendighet:** [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md)
+
 ## Omgangsregel
 
 Hver omgang skal være liten nok til å:
