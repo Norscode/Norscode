@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 # tools/build_norscode_native.sh
 #
-# Sikrar at dist/norscode_native finst for den aktive plattforma.
+# Sikrar at dist/norscode_native finst (NORSCODE_CMD-runtime).
 #
 # Rekkefølge:
-#   1. Eksisterande dist/norscode_native
+#   1. Eksisterande, fungerande dist/norscode_native
 #   2. bootstrap/stage0/norscode-<plattform>
-#   3. GitHub Release (GITHUB_TOKEN på privat repo)
-#   4. Linux CI: Docker (Dockerfile.linux-build) — bootstrap-binær
-#
-# Merk: Steg 4 gir berre C/NCBB-bootstrap; ./bin/nc test treng NORSCODE_CMD-runtime.
-#       Legg ekte binær i bootstrap/stage0/ eller publiser release (sjå README der).
+#   3. GitHub Release
+#   4. Kompiler frå bootstrap/c/*.c + tools/nc_*.c (clang, stage-0 — ingen Python)
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${ROOT}/dist/norscode_native"
@@ -39,30 +36,27 @@ platform_name() {
     esac
 }
 
-ensure_embed_c_files() {
-    local need=0
-    for f in \
-        build/bootstrap_compiler_bundle_ncb_data.c \
-        build/native_elf_compiler_bundle_ncb_data.c
-    do
-        if [ ! -f "$ROOT/$f" ]; then
-            need=1
-        fi
-    done
-    if [ "$need" -eq 1 ]; then
-        bash "$ROOT/tools/generate_build_embed_c.sh"
+smoke_ok() {
+    [ -x "$1" ] || return 1
+    local tmp
+    tmp="$(mktemp /tmp/nc_smoke_XXXXXX.no)"
+    printf 'funksjon start() { returner 42 }\n' > "$tmp"
+    if NORSCODE_CMD=run NORSCODE_FILE="$tmp" "$1" >/dev/null 2>&1; then
+        rm -f "$tmp"
+        return 0
     fi
+    rm -f "$tmp"
+    return 1
 }
 
 copy_stage0_binary() {
     platform="$(platform_name)" || return 1
     stage0="${ROOT}/bootstrap/stage0/norscode-${platform}"
-    if [ ! -f "$stage0" ]; then
-        return 1
-    fi
+    [ -f "$stage0" ] || return 1
     mkdir -p "$(dirname "$OUT")"
     cp "$stage0" "$OUT"
     chmod +x "$OUT"
+    smoke_ok "$OUT" || return 1
     printf "✓ dist/norscode_native frå bootstrap/stage0/norscode-%s (%d bytes)\n" \
         "$platform" "$(wc -c < "$OUT" | tr -d ' ')"
     return 0
@@ -95,12 +89,7 @@ download_release_binary() {
         return 1
     fi
 
-    release_json="$("${fetch_json[@]}" "$releases_url" 2>/dev/null)" || {
-        if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
-            printf 'CI: klarte ikkje hente %s (ingen release eller manglar tilgang)\n' "$releases_url" >&2
-        fi
-        return 1
-    }
+    release_json="$("${fetch_json[@]}" "$releases_url" 2>/dev/null)" || return 1
 
     if command -v jq >/dev/null 2>&1; then
         download_url="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
@@ -109,85 +98,80 @@ download_release_binary() {
         download_url="$(printf '%s' "$release_json" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*${asset_name}[^\"]*\"" | head -1 | cut -d'"' -f4)"
     fi
 
-    if [ -z "$download_url" ] || [ "$download_url" = "null" ]; then
-        if [ "${GITHUB_ACTIONS:-}" = "true" ] && command -v jq >/dev/null 2>&1; then
-            printf 'CI: release har ikkje asset %s. Tilgjengelege:\n' "$asset_name" >&2
-            printf '%s' "$release_json" | jq -r '.assets[].name' >&2 || true
-        fi
-        return 1
-    fi
+    [ -n "$download_url" ] && [ "$download_url" != "null" ] || return 1
 
     tmp_file="$(mktemp)"
     trap 'rm -f "$tmp_file"' EXIT
-    if ! "${fetch_file[@]}" "$download_url" > "$tmp_file"; then
-        rm -f "$tmp_file"
-        trap - EXIT
-        return 1
-    fi
+    "${fetch_file[@]}" "$download_url" > "$tmp_file" || { rm -f "$tmp_file"; trap - EXIT; return 1; }
     mkdir -p "$(dirname "$OUT")"
     mv "$tmp_file" "$OUT"
     chmod +x "$OUT"
     trap - EXIT
+    smoke_ok "$OUT" || return 1
     return 0
 }
 
-build_linux_via_docker() {
-    [ "$(uname -s)" = "Linux" ] || return 1
-    command -v docker >/dev/null 2>&1 || return 1
-    ensure_embed_c_files
-    if [ ! -f "$ROOT/build/mv_bootstrap_stub_manifest_dispatch.inc" ]; then
-        printf 'Feil: manglar build/mv_bootstrap_stub_manifest_dispatch.inc\n' >&2
+build_from_bootstrap_c() {
+    local gen="${ROOT}/bootstrap/c/norscode_generated.c"
+    local disp="${ROOT}/bootstrap/c/nc_dispatch.c"
+    local main="${ROOT}/tools/nc_native_main.c"
+
+    for f in "$gen" "$disp" "$main"; do
+        if [ ! -f "$f" ]; then
+            printf 'Feil: manglar %s (stage-0 C-kjelde)\n' "$f" >&2
+            return 1
+        fi
+    done
+
+    CC="${CC:-clang}"
+    command -v "$CC" >/dev/null 2>&1 || CC=cc
+    command -v "$CC" >/dev/null 2>&1 || {
+        printf 'Feil: trenger clang eller gcc for stage-0-bygg\n' >&2
         return 1
-    fi
-    local dest="${ROOT}/.ci-docker-native-out"
-    rm -rf "$dest"
-    mkdir -p "$dest"
-    printf 'CI: byggjer Linux bootstrap via Docker...\n' >&2
-    if ! docker buildx build --platform linux/amd64 -f "$ROOT/Dockerfile.linux-build" \
-        --output "type=local,dest=$dest" "$ROOT" >&2; then
-        return 1
-    fi
-    if [ ! -f "$dest/norscode-linux-x86_64" ]; then
-        return 1
-    fi
+    }
+
     mkdir -p "$(dirname "$OUT")"
-    cp "$dest/norscode-linux-x86_64" "$OUT"
+    local tmp
+    tmp="$(mktemp /tmp/nc_native_XXXXXX.c)"
+    trap 'rm -f "$tmp"' EXIT
+
+    # norscode_generated.c har runtime innebygd; ikkje legg til nc_runtime_mini.c
+    grep -v '#include.*nc_runtime' "$gen" | sed 's/^int main/static int nc_gen_main/' >> "$tmp"
+    cat "$disp" >> "$tmp"
+    cat "$main" >> "$tmp"
+
+    printf 'Kompilerer norscode_native frå bootstrap/c (stage-0, %s)...\n' "$CC" >&2
+    "$CC" -O2 -Wno-everything -o "$OUT" "$tmp"
+    rm -f "$tmp"
+    trap - EXIT
     chmod +x "$OUT"
-    printf '✓ dist/norscode_native frå Docker (%d bytes) — kan mangle NORSCODE_CMD; legg inn stage0/release\n' \
-        "$(wc -c < "$OUT" | tr -d ' ')" >&2
+
+    smoke_ok "$OUT" || {
+        printf 'Feil: bygget binær feila NORSCODE_CMD-røyktest\n' >&2
+        return 1
+    }
+    printf "✓ dist/norscode_native bygget frå bootstrap/c (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
     return 0
 }
 
-ci_fail_help() {
-    platform="$(platform_name 2>/dev/null || printf '?')"
-    printf '\n=== Stage-0 manglar (norscode_native) ===\n' >&2
-    printf 'CI treng binær med NORSCODE_CMD=run for ./bin/nc test.\n' >&2
-    printf '\nLøysing:\n' >&2
-    printf '  1. Legg %s i bootstrap/stage0/norscode-%s og commit\n' "fil" "$platform" >&2
-    printf '  2. Publiser GitHub Release med asset norscode-%s\n' "$platform" >&2
-    printf '  3. Sjå bootstrap/stage0/README.md\n' >&2
-    printf '\n' >&2
-}
-
-if [ -x "$OUT" ]; then
+if [ -x "$OUT" ] && smoke_ok "$OUT"; then
     printf "✓ dist/norscode_native er allereie bygget (%d KB)\n" "$(( $(wc -c < "$OUT") / 1024 ))"
     exit 0
 fi
 
 mkdir -p "$(dirname "$OUT")"
 
-if copy_stage0_binary; then
-    exit 0
-fi
+if copy_stage0_binary; then exit 0; fi
 
 if download_release_binary; then
     printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
     exit 0
 fi
 
-if [ "${GITHUB_ACTIONS:-}" = "true" ] && build_linux_via_docker; then
-    exit 0
-fi
+if build_from_bootstrap_c; then exit 0; fi
 
-ci_fail_help
+platform="$(platform_name 2>/dev/null || printf '?')"
+printf '\n=== Kunne ikkje skaffe norscode_native ===\n' >&2
+printf 'Prøv: bash tools/build_norscode_native.sh (krev bootstrap/c + clang)\n' >&2
+printf 'Eller legg norscode-%s i bootstrap/stage0/\n' "$platform" >&2
 exit 1

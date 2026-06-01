@@ -91,9 +91,9 @@ bash tools/build_norscode_native.sh
 ./bin/nc --help
 ```
 
-**CI / stage-0:** GitHub Actions trenger `dist/norscode_native` (NORSCODE_CMD-runtime). Legg binær i
-[bootstrap/stage0/](bootstrap/stage0/README.md) eller publiser GitHub Release — uten dette feiler
-`tools/build_norscode_native.sh` etter release-nedlasting.
+**CI / stage-0:** `bash tools/build_norscode_native.sh` bygger `dist/norscode_native` frå `bootstrap/c/`
+med clang (ingen Python). Valgfritt: forhåndsbygd binær i [bootstrap/stage0/](bootstrap/stage0/README.md)
+eller GitHub Release.
 
 ## Vanlige kommandoer
 
