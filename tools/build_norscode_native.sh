@@ -3,14 +3,16 @@
 #
 # Sikrar at dist/norscode_native finst (NORSCODE_CMD-runtime).
 #
-# Rekkefølge:
+# Rekkefølge (default):
 #   1. Eksisterande, fungerande dist/norscode_native
-#   2. bootstrap/stage0/norscode-<plattform>
-#   3. GitHub Release
-#   4. Kompiler frå bootstrap/c/*.c + tools/nc_*.c (clang, stage-0 — ingen Python)
+#   2. bootstrap/stage0/norscode-<plattform> (seed)
+#   3. GitHub Release (seed)
+#
+# Ved REGEN=1 (maintainer): seed → tools/regen_native.sh → bootstrap/c/ → clang
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${ROOT}/dist/norscode_native"
+REGEN="${REGEN:-0}"
 
 platform_name() {
     OS="$(uname -s)"
@@ -39,7 +41,11 @@ platform_name() {
 smoke_ok() {
     [ -x "$1" ] || return 1
     local tmp
-    tmp="$(mktemp /tmp/nc_smoke_XXXXXX.no)"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/nc_smoke_XXXXXX.no" 2>/dev/null || true)"
+    if [ -z "$tmp" ]; then
+        tmp="${TMPDIR:-/tmp}/nc_smoke_$$.no"
+    fi
+    rm -f "$tmp"
     printf 'funksjon start() { returner 42 }\n' > "$tmp"
     if NORSCODE_CMD=run NORSCODE_FILE="$tmp" "$1" >/dev/null 2>&1; then
         rm -f "$tmp"
@@ -111,6 +117,21 @@ download_release_binary() {
     return 0
 }
 
+bootstrap_c_present() {
+    [ -f "${ROOT}/bootstrap/c/norscode_generated.c" ] \
+        && [ -f "${ROOT}/bootstrap/c/nc_dispatch.c" ]
+}
+
+regen_bootstrap_c() {
+    if ! [ -x "${ROOT}/dist/norscode_native" ]; then
+        printf 'Feil: trenger seed (dist/norscode_native) for regen\n' >&2
+        return 1
+    fi
+    printf 'Regenererer bootstrap/c/ frå .no (L6)...\n' >&2
+    REGEN_ROOT="${ROOT}/bootstrap" bash "${ROOT}/tools/regen_native.sh" || return 1
+    bootstrap_c_present
+}
+
 build_from_bootstrap_c() {
     local gen="${ROOT}/bootstrap/c/norscode_generated.c"
     local disp="${ROOT}/bootstrap/c/nc_dispatch.c"
@@ -132,11 +153,18 @@ build_from_bootstrap_c() {
 
     mkdir -p "$(dirname "$OUT")"
     local tmp
-    tmp="$(mktemp /tmp/nc_native_XXXXXX.c)"
+    tmp="$(mktemp "${TMPDIR:-/tmp}/nc_native_XXXXXX.c" 2>/dev/null || echo "${TMPDIR:-/tmp}/nc_native_$$.c")"
     trap 'rm -f "$tmp"' EXIT
 
     # norscode_generated.c har runtime innebygd; ikkje legg til nc_runtime_mini.c
-    grep -v '#include.*nc_runtime' "$gen" | sed 's/^int main/static int nc_gen_main/' >> "$tmp"
+    {
+        printf '/* Host FFI forward decl (Omgang 4) */\n'
+        printf 'struct NcVal;\n'
+        printf 'typedef struct NcVal NcVal;\n'
+        printf 'NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na);\n'
+        printf 'NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na);\n\n'
+        grep -v '#include.*nc_runtime' "$gen" | sed 's/^int main/static int nc_gen_main/'
+    } >> "$tmp"
     cat "$disp" >> "$tmp"
     cat "$main" >> "$tmp"
 
@@ -154,24 +182,36 @@ build_from_bootstrap_c() {
     return 0
 }
 
-if [ -x "$OUT" ] && smoke_ok "$OUT"; then
+if [ "$REGEN" != "1" ] && [ -x "$OUT" ] && smoke_ok "$OUT"; then
     printf "✓ dist/norscode_native er allereie bygget (%d KB)\n" "$(( $(wc -c < "$OUT") / 1024 ))"
     exit 0
 fi
 
 mkdir -p "$(dirname "$OUT")"
 
-if copy_stage0_binary; then exit 0; fi
-
-if download_release_binary; then
+if copy_stage0_binary; then :
+elif download_release_binary; then
     printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
+else
+    platform="$(platform_name 2>/dev/null || printf '?')"
+    printf '\n=== Kunne ikkje skaffe seed for norscode_native ===\n' >&2
+    printf 'Legg norscode-%s i bootstrap/stage0/ eller publiser release-binær.\n' "$platform" >&2
+    exit 1
+fi
+
+if [ "$REGEN" != "1" ]; then
+    printf 'ℹ︎ Bruk seed-binær (ingen clang). Set REGEN=1 for stage-0 regen + clang.\n'
     exit 0
 fi
 
-if build_from_bootstrap_c; then exit 0; fi
+if [ "$REGEN" = "1" ]; then
+    if regen_bootstrap_c && build_from_bootstrap_c; then exit 0; fi
+elif bootstrap_c_present && build_from_bootstrap_c; then
+    exit 0
+fi
 
 platform="$(platform_name 2>/dev/null || printf '?')"
-printf '\n=== Kunne ikkje skaffe norscode_native ===\n' >&2
-printf 'Prøv: bash tools/build_norscode_native.sh (krev bootstrap/c + clang)\n' >&2
-printf 'Eller legg norscode-%s i bootstrap/stage0/\n' "$platform" >&2
+printf '\n=== Kunne ikkje byggje norscode_native etter regen ===\n' >&2
+printf 'Sjekk clang og køyr: bash tools/regen_native.sh --rebuild\n' >&2
+printf 'Tips: default utan REGEN brukar seed-binær og krev ikkje clang.\n' >&2
 exit 1

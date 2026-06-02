@@ -14,6 +14,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/bin/nc"
 REBUILD=0
+# REGEN_ROOT: der output lagrast (standard bootstrap/). Bruk build/regen_verify for sjekk utan å endre repo.
+REGEN_ROOT="${REGEN_ROOT:-$ROOT/bootstrap}"
 
 if [ "${1:-}" = "--rebuild" ]; then
     REBUILD=1
@@ -29,6 +31,7 @@ printf '=== Regenerer bootstrap/c/ (utan Python) ===\n\n'
 printf '[1/4] Bundle kompilator-modular...\n'
 TMP="$(mktemp "${TMPDIR:-/tmp}/nc_bundle_XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
+# Same modular sett som L5 (runtime-kompilator); ncb_to_c/gen_dispatch køyrast som eigne .no-filer
 "$NC" bundle \
     selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
     selfhost.parser=selfhost/parser.no \
@@ -37,30 +40,29 @@ trap 'rm -f "$TMP"' EXIT
     selfhost.kompiler=selfhost/kompiler.no \
     selfhost.json=selfhost/json.no \
     selfhost.vm=selfhost/vm.no \
+    selfhost.bundler=selfhost/bundler.no \
     selfhost.nc_main=selfhost/nc_main.no \
-    selfhost.ncb_to_c=selfhost/ncb_to_c.no \
-    selfhost.gen_dispatch=selfhost/gen_dispatch.no \
     --output "$TMP"
-mkdir -p bootstrap
-cp "$TMP" bootstrap/kompiler.ncb.json
-printf '  ✓ bootstrap/kompiler.ncb.json (%d bytes)\n' "$(wc -c < bootstrap/kompiler.ncb.json | tr -d ' ')"
+mkdir -p "$REGEN_ROOT"
+cp "$TMP" "$REGEN_ROOT/kompiler.ncb.json"
+printf '  ✓ %s/kompiler.ncb.json (%d bytes)\n' "$REGEN_ROOT" "$(wc -c < "$REGEN_ROOT/kompiler.ncb.json" | tr -d ' ')"
 
-printf '[2/4] ncb_to_c → bootstrap/c/norscode_generated.c...\n'
-mkdir -p bootstrap/c
+printf '[2/4] ncb_to_c → %s/c/norscode_generated.c...\n' "$REGEN_ROOT"
+mkdir -p "$REGEN_ROOT/c"
 env NORSCODE_CMD=run \
     NORSCODE_FILE="$ROOT/selfhost/ncb_to_c.no" \
-    NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
-    NC_C_OUTPUT="$ROOT/bootstrap/c/norscode_generated.c" \
+    NC_NCB_INPUT="$REGEN_ROOT/kompiler.ncb.json" \
+    NC_C_OUTPUT="$REGEN_ROOT/c/norscode_generated.c" \
     "$ROOT/dist/norscode_native"
-printf '  ✓ norscode_generated.c (%d bytes)\n' "$(wc -c < bootstrap/c/norscode_generated.c | tr -d ' ')"
+printf '  ✓ norscode_generated.c (%d bytes)\n' "$(wc -c < "$REGEN_ROOT/c/norscode_generated.c" | tr -d ' ')"
 
-printf '[3/4] gen_dispatch → bootstrap/c/nc_dispatch.c...\n'
+printf '[3/4] gen_dispatch → %s/c/nc_dispatch.c...\n' "$REGEN_ROOT"
 env NORSCODE_CMD=run \
     NORSCODE_FILE="$ROOT/selfhost/gen_dispatch.no" \
-    NC_NCB_INPUT="$ROOT/bootstrap/kompiler.ncb.json" \
-    NC_DISPATCH_OUTPUT="$ROOT/bootstrap/c/nc_dispatch.c" \
+    NC_NCB_INPUT="$REGEN_ROOT/kompiler.ncb.json" \
+    NC_DISPATCH_OUTPUT="$REGEN_ROOT/c/nc_dispatch.c" \
     "$ROOT/dist/norscode_native"
-printf '  ✓ nc_dispatch.c (%d bytes)\n' "$(wc -c < bootstrap/c/nc_dispatch.c | tr -d ' ')"
+printf '  ✓ nc_dispatch.c (%d bytes)\n' "$(wc -c < "$REGEN_ROOT/c/nc_dispatch.c" | tr -d ' ')"
 
 if [ "$REBUILD" -eq 1 ]; then
     printf '[4/4] Bygg ny dist/norscode_native...\n'
@@ -73,4 +75,4 @@ fi
 
 printf '\n=== Regen ferdig ===\n'
 printf 'Køyr: bash tools/verify_selvstendighet.sh\n'
-printf 'Commit: git add bootstrap/kompiler.ncb.json bootstrap/c/\n'
+printf 'L6: bootstrap/c/ og kompiler.ncb.json er generert lokalt (ikkje commit).\n'

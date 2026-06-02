@@ -18,6 +18,30 @@ typedef struct NcExecCtx {
     NcVal *functions; /* NC_MAP: fn_namn → fn_def */
 } NcExecCtx;
 
+/* Kompilator-pipeline i bundle skal bruke C-dispatch, ikkje bytecode frå Gen1-NCB */
+static int nc_exec_prefer_dispatch(const char *name) {
+    if (!strncmp(name, "selfhost.kompiler.", 18)) return 1;
+    if (!strncmp(name, "selfhost.lexer.", 15)) return 1;
+    if (!strncmp(name, "selfhost.parser.", 16)) return 1;
+    if (!strncmp(name, "selfhost.compiler.", 18)) return 1;
+    if (!strncmp(name, "selfhost.json.", 14)) return 1;
+    if (!strcmp(name, "kompiler_fil")) return 1;
+    if (!strcmp(name, "json_skriv")) return 1;
+    if (!strcmp(name, "json_parse_raw")) return 1;
+    if (!strcmp(name, "json_parse")) return 1;
+    return 0;
+}
+
+/* Bundler frå fersk .no skal bruke lokal bytecode, ikkje innebygd C __main__.bygg_bundle */
+static int nc_exec_prefer_local(const char *name) {
+    if (!strncmp(name, "selfhost.bundler.", 17)) return 1;
+    if (!strncmp(name, "__main__.", 9)) return 1;
+    const char *last = strrchr(name, '.');
+    last = last ? last + 1 : name;
+    if (!strcmp(last, "bygg_bundle")) return 1;
+    return 0;
+}
+
 /* Finn funksjon med fuzzy matching */
 static NcVal *nc_exec_find_fn(NcVal *functions, const char *name) {
     /* Direkte treff */
@@ -42,14 +66,47 @@ static NcVal *g_nc_closure_fwd;
 #define g_nc_closure g_nc_closure_fwd
 static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, int nargs, int depth);
 static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth);
+static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
+static NcVal *nc_native_kompiler_kjelde(const char *src, const char *modul);
 
-/* Stubs for nc-vm internal builtins */
-static NcVal *nc_stub_sh_disasm(NcVal *v) {
-    /* stub: returnerer "disasm ikkje tilgjengeleg" */
-    return nc_str("[disasm ikkje tilgjengeleg]");
+/* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
+static NcVal *g_sh_common_fns = NULL;
+
+static void nc_ensure_sh_common(void) {
+    if (g_sh_common_fns) return;
+    NcVal *ncb_json = nc_native_kompiler("selfhost/common.no", "selfhost.common");
+    if (!ncb_json || ncb_json->type != NC_STR) {
+        nc_throw("Kunne ikkje kompilere selfhost/common.no");
+        return;
+    }
+    NcVal *ncb = nc_builtin_json_parse_str(ncb_json);
+    NcVal *fns = nc_index_get(ncb, nc_str("functions"));
+    if (!fns || fns->type != NC_MAP) {
+        nc_throw("selfhost/common.no manglar functions");
+        return;
+    }
+    g_sh_common_fns = fns;
 }
-static NcVal *nc_stub_sh_tokens(NcVal *v) { return nc_list_new(); }
-static NcVal *nc_stub_sh_parse_feil(NcVal *v) { return nc_bool(0); }
+
+static int nc_is_sh_api(const char *cn) {
+    if (!strncmp(cn, "sh.", 3)) return 1;
+    if (!strncmp(cn, "selfhost.common.", 16)) return 1;
+    if (!strncmp(cn, "selfhost.compiler.", 18)) return 1;
+    return 0;
+}
+
+static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
+    nc_ensure_sh_common();
+    const char *short_fn = strrchr(cn, '.');
+    short_fn = short_fn ? short_fn + 1 : cn;
+    char full[160];
+    snprintf(full, sizeof(full), "selfhost.common.%s", short_fn);
+    if (!nc_exec_find_fn(g_sh_common_fns, full) && !nc_exec_find_fn(g_sh_common_fns, short_fn)) {
+        nc_panic("Ukjent selfhost API: %s", cn);
+        return nc_nil();
+    }
+    return nc_exec_call(g_sh_common_fns, full, args, nargs, 0);
+}
 static NcVal *nc_stub_t_hilsen(NcVal *navn) { char *n=nc_to_str_raw(navn); char r[256]; snprintf(r,sizeof(r),"Hei %s",n); free(n); return nc_str(r); }
 static NcVal *nc_stub_t_starter_med(NcVal *s, NcVal *p) { return nc_builtin_starts_with(s, p); }
 static NcVal *nc_stub_assert_slutter_med(NcVal *s, NcVal *p) {
@@ -110,8 +167,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
     NcVal *code_v   = nc_index_get(fn_def, nc_str("code"));
 
     NcVal **stack_arr = calloc(512, sizeof(NcVal*)); int sp = 0;
-    NcVal **vars_arr  = calloc(128, sizeof(NcVal*));
-    char **varnames   = calloc(128, sizeof(char*)); int nvars = 0;
+    NcVal **vars_arr  = calloc(2048, sizeof(NcVal*));
+    char **varnames   = calloc(2048, sizeof(char*)); int nvars = 0;
     /* TRY/CATCH stack */
     struct { const char *catch_lbl; int sp_depth; jmp_buf jmp; } try_stack[32];
     int try_depth = 0;
@@ -323,7 +380,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             if (!strcmp(cn,"skriv"))                fn_r = nc_builtin_skriv(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lengde"))           fn_r = nc_builtin_lengde(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"legg_til"))         { if(narg>=2) nc_builtin_legg_til(cargs[0],cargs[1]); }
-            else if (!strcmp(cn,"fjern_siste"))      fn_r = nc_builtin_fjern_siste(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"fjern_siste")||!strcmp(cn,"pop_siste")||!strcmp(cn,"builtin.pop_siste")||!strcmp(cn,"builtin.fjern_siste"))
+                fn_r = nc_builtin_fjern_siste(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fjern")||!strcmp(cn,"fjern_indeks")) fn_r = nc_builtin_fjern(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"slice"))            fn_r = nc_builtin_slice(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),narg>2?cargs[2]:nc_nil());
             else if (!strcmp(cn,"starts_with")||!strcmp(cn,"tekst_starter_med")) fn_r=nc_builtin_starts_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
@@ -355,7 +413,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"feil"))             fn_r=nc_builtin_feil(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"type")||!strcmp(cn,"type_av")) fn_r=nc_builtin_type(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"index_of"))         fn_r=nc_builtin_index_of(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"upper"))            fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"upper")||!strcmp(cn,"tekst_til_store")||!strcmp(cn,"builtin.upper")||!strcmp(cn,"builtin.tekst_til_store")||!strcmp(cn,"builtin.tekst_store"))
+                fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lower"))            fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"exit")||!strcmp(cn,"stopp")) nc_builtin_exit(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
@@ -395,13 +454,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"desimaltall"))     fn_r=nc_builtin_desimaltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
-            /* sh.*, t.*, path.*, web-stubs */
-            else if (!strcmp(cn,"sh.disasm_uttrykk")||!strcmp(cn,"sh.disasm_uttrykk_med_miljo")||
-                     !strcmp(cn,"sh.disasm_fra_kilde")||!strcmp(cn,"sh.disasm_uttrykk_strict")||
-                     !strcmp(cn,"sh.disasm_fra_tokens")||!strcmp(cn,"sh.disasm_fra_tokens_strict")||
-                     !strcmp(cn,"sh.disasm_skript"))  fn_r=nc_stub_sh_disasm(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"sh.tokens_uttrykk")) fn_r=nc_stub_sh_tokens(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"sh.parse_feil"))     fn_r=nc_stub_sh_parse_feil(narg>0?cargs[0]:nc_nil());
+            /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
+            else if (nc_is_sh_api(cn)) {
+                fn_r = nc_call_sh_api(cn, cargs, narg);
+            }
             else if (!strcmp(cn,"t.hilsen"))           fn_r=nc_stub_t_hilsen(narg>0?cargs[0]:nc_str(""));
             else if (!strcmp(cn,"t.starter_med")||!strcmp(cn,"t.rop"))  fn_r=nc_stub_t_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"t.slutter_med")) fn_r=nc_builtin_ends_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
@@ -415,13 +471,39 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"json.parse")||!strcmp(cn,"json_parse")) fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json.parse_raw")||!strcmp(cn,"json_parse_raw")) fn_r=nc_builtin_json_parse_raw(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json.stringify")||!strcmp(cn,"json_stringify")) fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"json_skriv")) fn_r=nc_builtin_json_stringify(narg>0?cargs[0]:nc_nil());
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else {
-                /* Sjekk dispatch-tabell for genererte C-funksjonar */
-                NcVal *dispatch_r = nc_dispatch_call(callee, cargs, narg);
-                if (dispatch_r != NULL) {
+                NcVal *local_fn = nc_exec_find_fn(functions, callee);
+                int dispatch_first = nc_exec_prefer_dispatch(callee) && !nc_exec_prefer_local(callee);
+                NcVal *dispatch_r = NULL;
+
+                if (dispatch_first) {
+                    dispatch_r = nc_dispatch_call(callee, cargs, narg);
+                    if (dispatch_r != NULL) {
+                        free(cargs); free(callee);
+                        nc_push(&sp, stack_arr, dispatch_r); ip++;
+                        continue;
+                    }
+                }
+                if (local_fn && !dispatch_first) {
+                    fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
                     free(cargs); free(callee);
-                    nc_push(&sp, stack_arr, dispatch_r); ip++;
+                    nc_push(&sp, stack_arr, fn_r); ip++;
+                    continue;
+                }
+                if (!dispatch_first) {
+                    dispatch_r = nc_dispatch_call(callee, cargs, narg);
+                    if (dispatch_r != NULL) {
+                        free(cargs); free(callee);
+                        nc_push(&sp, stack_arr, dispatch_r); ip++;
+                        continue;
+                    }
+                }
+                if (local_fn) {
+                    fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
+                    free(cargs); free(callee);
+                    nc_push(&sp, stack_arr, fn_r); ip++;
                     continue;
                 }
                 /* Fang cross-function exceptions */
@@ -503,81 +585,160 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
     return r;
 }
 
+/* Splitt NORSCODE_BUNDLE_ARGS på mellomrom → NC_LIST (tomme token filtrert bort) */
+static NcVal *nc_bundle_args_list(const char *args_str) {
+    if (!args_str) args_str = "";
+    NcVal *raw = nc_builtin_split(nc_str(args_str), nc_str(" "));
+    NcVal *out = nc_list_new();
+    if (!raw || raw->type != NC_LIST) return out;
+    for (int i = 0; i < raw->list->len; i++) {
+        NcVal *it = raw->list->items[i];
+        if (!it || it->type != NC_STR) continue;
+        char *t = nc_to_str_raw(it);
+        char *p = t;
+        while (*p == ' ' || *p == '\t') p++;
+        char *end = p + strlen(p);
+        while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        if (end > p) {
+            char saved = *end;
+            *end = 0;
+            nc_builtin_legg_til(out, nc_str(p));
+            *end = saved;
+        }
+        free(t);
+    }
+    return out;
+}
+
 /* ── Wrap kompiler_fil som NcExecCtx-kall ── */
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul) {
     NcVal *src = nc_builtin_fil_les(nc_str(src_path));
+    if (!src || src->type != NC_STR) return nc_nil();
+    return nc_native_kompiler_kjelde(src->s, modul);
+}
+
+/* ── Wrap kompiler_fil for rå kjeldetekst (unngår temp-fil i host) ── */
+static NcVal *nc_native_kompiler_kjelde(const char *src, const char *modul) {
+    NcVal *src_v = nc_str(src ? src : "");
     NcVal *mod = nc_str(modul);
-    NcVal *args[] = {src, mod};
+    NcVal *args[] = {src_v, mod};
     return nc_dispatch_call("selfhost.kompiler.kompiler_fil", args, 2);
 }
 
-/* ── Overskriv main() ── */
+static void nc_merge_fns(NcVal *dst, NcVal *src) {
+    if (!dst || dst->type != NC_MAP || !src || src->type != NC_MAP) return;
+    for (int i = 0; i < src->map->len; i++) {
+        NcVal *existing = nc_index_get(dst, nc_str(src->map->keys[i]));
+        if (!existing || existing->type == NC_NIL)
+            nc_index_set(dst, nc_str(src->map->keys[i]), src->map->vals[i]);
+    }
+}
+
+/* Host FFI: køyr ein namngitt funksjon i Gen1-NCB med to argument (for l5b bygg_bundle) */
+NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na) {
+    if (na < 3 || !args[0] || args[0]->type != NC_STR) return nc_int(1);
+    NcVal *ncb = nc_builtin_json_parse_str(args[0]);
+    if (!ncb || ncb->type != NC_MAP) return nc_int(1);
+    NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
+    if (!fns_v || fns_v->type != NC_MAP) {
+        fprintf(stderr, "NCB manglar functions\n"); return nc_int(1);
+    }
+    if (!nc_exec_find_fn(fns_v, "selfhost.bundler.bygg_bundle")) {
+        fprintf(stderr, "NCB manglar selfhost.bundler.bygg_bundle\n"); return nc_int(1);
+    }
+    NcVal *call_args[] = { args[1], args[2] };
+    nc_exec_call(fns_v, "selfhost.bundler.bygg_bundle", call_args, 2, 0);
+    return nc_int(0);
+}
+
+/* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
+NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_int(1);
+    NcVal *ncb = nc_builtin_json_parse_str(args[0]);
+    if (!ncb || ncb->type != NC_MAP) return nc_int(1);
+    NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
+    NcVal *entry_v = nc_index_get(ncb, nc_str("entry"));
+    if (!fns_v || fns_v->type != NC_MAP) return nc_int(1);
+    char *entry = nc_to_str_raw(entry_v);
+    if (!entry || !entry[0]) { free(entry); return nc_int(1); }
+    nc_ensure_sh_common();
+    if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
+    nc_exec_call(fns_v, entry, NULL, 0, 0);
+    free(entry);
+    return nc_int(0);
+}
+
+static int nc_use_nc_main_host(void) {
+    /* nc_main.no er no standard host — alltid aktiv */
+    return 1;
+}
+
+static int nc_val_til_exit(NcVal *v) {
+    if (v && v->type == NC_INT) return (int)v->i;
+    return 0;
+}
+
+static char *g_nc_source_buf;
+static char *g_nc_common_ncb_buf;
+
+static void nc_free_nc_main_env_bufs(void) {
+    free(g_nc_source_buf);
+    free(g_nc_common_ncb_buf);
+    g_nc_source_buf = NULL;
+    g_nc_common_ncb_buf = NULL;
+}
+
+static int nc_prep_nc_main_env(const char *src) {
+    if (!src) return 1;
+    NcVal *kj = nc_builtin_fil_les(nc_str(src));
+    if (!kj || kj->type != NC_STR) {
+        fprintf(stderr, "Kunne ikkje lese %s\n", src);
+        return 1;
+    }
+    free(g_nc_source_buf);
+    g_nc_source_buf = strdup(kj->s);
+    if (!g_nc_source_buf) return 1;
+    setenv("NORSCODE_SOURCE", g_nc_source_buf, 1);
+    return 0;
+}
+
+static void nc_prep_common_ncb_env(void) {
+    NcVal *ncb = nc_native_kompiler("selfhost/common.no", "selfhost.common");
+    if (!ncb || ncb->type != NC_STR) return;
+    free(g_nc_common_ncb_buf);
+    g_nc_common_ncb_buf = strdup(ncb->s);
+    if (g_nc_common_ncb_buf) setenv("NORSCODE_COMMON_NCB", g_nc_common_ncb_buf, 1);
+}
+
+/* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
+static int nc_try_nc_main_host(void) {
+    const char *cmd = getenv("NORSCODE_CMD");
+    const char *src = getenv("NORSCODE_FILE");
+    if (cmd && src && (!strcmp(cmd, "run") || !strcmp(cmd, "compile"))) {
+        if (nc_prep_nc_main_env(src) != 0) return 1;
+    }
+    NcVal *r = nc_dispatch_call("selfhost.nc_main.start", NULL, 0);
+    nc_free_nc_main_env_bufs();
+    unsetenv("NORSCODE_SOURCE");
+    unsetenv("NORSCODE_COMMON_NCB");
+    if (!r) return -1;
+    return nc_val_til_exit(r);
+}
+
+/* ── main() — alle kommandoar delegert til selfhost.nc_main.no ── */
 int main(int argc, char **argv) {
     if (setjmp(g_err_jmp)) {
         fprintf(stderr, "norscode: %s\n", g_err_msg);
         return 1;
     }
 
-    const char *cmd     = getenv("NORSCODE_CMD");
-    const char *src     = getenv("NORSCODE_FILE");
-    const char *out     = getenv("NORSCODE_OUTPUT");
-    const char *modul   = getenv("NORSCODE_MODULE");
+    const char *cmd = getenv("NORSCODE_CMD");
+    if (!cmd) cmd = "selftest";
 
-    if (!cmd)   cmd   = "selftest";
-    if (!modul) modul = "__main__";
+    int rc = nc_try_nc_main_host();
+    if (rc >= 0) return rc;
 
-    /* ── compile ── */
-    if (!strcmp(cmd, "compile")) {
-        if (!src) { fprintf(stderr, "NORSCODE_FILE ikkje sett\n"); return 1; }
-        printf("Kompilerer %s...\n", src);
-        NcVal *ncb_json = nc_native_kompiler(src, modul);
-        if (!ncb_json || ncb_json->type != NC_STR) {
-            fprintf(stderr, "Kompilering feila\n"); return 1;
-        }
-        const char *outpath = out ? out : "/dev/stdout";
-        nc_builtin_fil_skriv(nc_str(outpath), ncb_json);
-        if (out) printf("NCB skrive til %s (%d bytes)\n", out, (int)strlen(ncb_json->s));
-        return 0;
-    }
-
-    /* ── run ── */
-    if (!strcmp(cmd, "run")) {
-        if (!src) { fprintf(stderr, "NORSCODE_FILE ikkje sett\n"); return 1; }
-        NcVal *ncb_json = nc_native_kompiler(src, modul);
-        if (!ncb_json || ncb_json->type != NC_STR) {
-            fprintf(stderr, "Kompilering feila\n"); return 1;
-        }
-        /* Parse NCB med C JSON parser */
-        NcVal *ncb = nc_builtin_json_parse_str(ncb_json);
-        /* Køyr entry via C executor */
-        NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
-        NcVal *entry_v = nc_index_get(ncb, nc_str("entry"));
-        char *entry = nc_to_str_raw(entry_v);
-        if (!fns_v || !strcmp(entry, "")) {
-            fprintf(stderr, "Ingen entry-funksjon funnen\n"); free(entry); return 1;
-        }
-        nc_exec_call(fns_v, entry, NULL, 0, 0);
-        free(entry);
-        return 0;
-    }
-
-    /* ── selftest ── */
-    if (!strcmp(cmd, "selftest")) {
-        printf("=== norscode_native selftest ===\n");
-        NcVal *ncb_json = nc_native_kompiler("/tmp/hei_test.no", "__main__");
-        /* Skriv ein test-fil */
-        nc_builtin_fil_skriv(nc_str("/tmp/hei_test.no"),
-            nc_str("funksjon start() { skriv(\"selftest OK\\n\") }\n"));
-        ncb_json = nc_native_kompiler("/tmp/hei_test.no", "__main__");
-        if (ncb_json && ncb_json->type == NC_STR && strlen(ncb_json->s) > 10) {
-            printf("Kompilering: OK (%d bytes NCB)\n", (int)strlen(ncb_json->s));
-        } else {
-            fprintf(stderr, "Kompilering feila\n"); return 1;
-        }
-        return 0;
-    }
-
-    fprintf(stderr, "Ukjent kommando: %s\n", cmd);
+    fprintf(stderr, "norscode: ukjend kommando: %s\n", cmd);
     return 1;
 }
 

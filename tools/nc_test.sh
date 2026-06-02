@@ -40,17 +40,6 @@ else
     exit 1
 fi
 
-# ─── Tester som krev Python (test av Python-spesifikke selfhost.compiler-alias)
-PYTHON_ONLY_TESTS="test_selfhost.no"
-
-is_python_only() {
-    _base="$(basename "$1")"
-    for _pt in $PYTHON_ONLY_TESTS; do
-        if [ "$_base" = "$_pt" ]; then return 0; fi
-    done
-    return 1
-}
-
 # ─── Tester som krev server/async/web (ikkje støtta av nc-vm --nc-run)
 is_server_test() {
     case "$(basename "$1")" in
@@ -58,9 +47,8 @@ is_server_test() {
         test_html*|test_csrf*|test_audit*|test_storage*|test_db*|\
         test_path_env*|test_logging*|test_metrics*|test_io_error*|\
         test_secrets*|test_json_schema*|test_state*|test_native_*|\
-        test_selfhost_bytecode*|test_selfhost_bridge*|test_selfhost_ast*|\
-        test_selfhost_comparison*|test_selfhost_boolean_parity*|\
-        test_snapshot*|test_boolean_precedence*|test_trace*|test_comprehension*)
+        test_selfhost_bytecode*|test_selfhost_bridge*|\
+        test_snapshot*|test_trace*|test_comprehension*)
             return 0;;
     esac
     return 1
@@ -73,12 +61,6 @@ run_test() {
     _file="$1"
     _name="$(basename "$_file" .no)"
     total=$((total + 1))
-
-    if is_python_only "$_file"; then
-        skip=$((skip + 1))
-        printf '  %s⊘ skipped (Python-only):%s %s\n' "$YLW" "$RST" "$_name"
-        return
-    fi
 
     if is_server_test "$_file"; then
         skip=$((skip + 1))
@@ -136,7 +118,7 @@ if [ "$fail" -gt 0 ]; then
 else
     printf '  Feilet:   %d\n' "$fail"
 fi
-printf '  Hoppa:    %d  (server/async/Python-only)\n' "$skip"
+printf '  Hoppa:    %d  (server/async)\n' "$skip"
 printf '  Totalt:   %d\n' "$total"
 printf '\n'
 

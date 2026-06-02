@@ -1,4 +1,6 @@
 // selfhost/vm.no — Norscode Bytecode VM
+
+bruk selfhost.json
 // Køyrer NCB JSON produsert av bytecode_backend.py / bytecode_backend.no
 // Opcode-sett: norscode-bytecode-v1
 //
@@ -173,6 +175,11 @@ funksjon ny_try_post(catch_label: tekst, stack_djupn: heltall) -> ordbok<tekst, 
 // ─── Innebygde funksjonar ─────────────────────────────────────────────────────
 
 funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
+    // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
+    mens builtin.starts_with(namn, "builtin.builtin.")
+        namn = builtin.slice(namn, 8, lengde(namn))
+    slutt
+
     // builtin.skriv
     hvis namn == "builtin.skriv" {
         la s: tekst = args[0]
@@ -280,20 +287,22 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     hvis namn == "builtin.json_parse_raw" {
         returner builtin.json_parse_raw(args[0])
     }
+    hvis namn == "builtin.json_skriv" {
+        returner json_skriv(args[0])
+    }
 
     // builtin.json_stringify
     hvis namn == "builtin.json_stringify" {
         returner json_stringify(args[0])
     }
 
-    // builtin.fil_les
-    hvis namn == "builtin.fil_les" {
-        returner fil_les(args[0])
+    // fil_les / fil_skriv (direkte og builtin.-prefiks)
+    hvis namn == "fil_les" eller namn == "builtin.fil_les" {
+        returner builtin.fil_les(args[0])
     }
 
-    // builtin.fil_skriv
-    hvis namn == "builtin.fil_skriv" {
-        fil_skriv(args[0], args[1])
+    hvis namn == "fil_skriv" eller namn == "builtin.fil_skriv" {
+        builtin.fil_skriv(args[0], args[1])
         returner 0
     }
 
@@ -395,6 +404,12 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     hvis namn == "builtin.index_of" eller namn == "builtin.tekst_indeks" {
         returner builtin.index_of(args[0], args[1])
     }
+    hvis namn == "builtin.char_code" {
+        returner builtin.char_code(args[0])
+    }
+    hvis namn == "builtin.chr" {
+        returner builtin.chr(args[0])
+    }
 
     // Fil-system
     hvis namn == "builtin.fil_finnes" {
@@ -456,6 +471,17 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     kast "Ukjent innebygd funksjon: " + namn
 }
 
+// Sikker felt/indeks-lesing (same semantikk som nc_index_get → nil ved manglande nøkkel)
+funksjon vm_sikker_get(obj, nokkel)
+    hvis obj == null
+        returner 0
+    slutt
+    hvis finnes_nøkkel(obj, nokkel)
+        returner obj[nokkel]
+    slutt
+    returner 0
+slutt
+
 // ─── Hovud-VM-løkke ──────────────────────────────────────────────────────────
 // finn_funksjon: fuzzy function lookup (same logikk som nc_vm.c fn_find)
 // Prøvar i rekkefølge:
@@ -468,12 +494,28 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
         returner namn
     }
 
+    // 1b. Intern common-bytecode: __main__.X → selfhost.common.X i function-tabellen
+    hvis builtin.starts_with(namn, "__main__.") {
+        la alt = "selfhost.common." + builtin.slice(namn, 9, lengde(namn))
+        hvis finnes_nøkkel(functions, alt) {
+            returner alt
+        }
+    }
+
     // 2. Fjern "builtin." prefiks og søk suffix
     la søk: tekst = namn
     hvis builtin.starts_with(namn, "builtin.") {
         søk = builtin.slice(namn, 8, lengde(namn))
     } ellers hvis builtin.starts_with(namn, "__main__.") {
         søk = builtin.slice(namn, 9, lengde(namn))
+    }
+
+    // 3. Alias sh.* → selfhost.common.* (kompilator emit: builtin.sh.X)
+    hvis builtin.starts_with(søk, "sh.") {
+        la alt = "selfhost.common." + builtin.slice(søk, 3, lengde(søk))
+        hvis finnes_nøkkel(functions, alt) {
+            returner alt
+        }
     }
 
     // Finn siste segment av søk (etter siste .)
@@ -517,6 +559,16 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
     returner ""
 }
 
+funksjon vm_opcode_fra_instr(instr: liste_tekst) -> tekst {
+    la raw = instr[0]
+    // C/json_parse_raw kan gi NC_INT for enkelte felt; normaliser til opcode-streng
+    la som_heltall = tekst_fra_heltall(raw)
+    hvis som_heltall != "" {
+        returner som_heltall
+    }
+    returner raw
+}
+
 // køyr_funksjon: køyrer éin funksjon med gitte argumentverdiar.
 // functions: ordbok<tekst, ordbok> — heile NCB-funksjonssamlinga
 // Returns: returverdi (eller null/0)
@@ -556,7 +608,7 @@ funksjon køyr_funksjon(
     la ip: heltall = 0
     mens (ip < lengde(kode)) {
         la instr = kode[ip]
-        la op: tekst = instr[0]
+        la op: tekst = vm_opcode_fra_instr(instr)
 
         // ── Konstantar og variablar ──────────────────────────────────────
         hvis op == "PUSH_CONST" {
@@ -794,7 +846,7 @@ funksjon køyr_funksjon(
         hvis op == "LOAD_FIELD" {
             la obj = stack_pop(ramme)
             la felt: tekst = instr[1]
-            stack_push(ramme, obj[felt])
+            stack_push(ramme, vm_sikker_get(obj, felt))
             ip = ip + 1
             fortsett
         }
@@ -899,8 +951,19 @@ funksjon køyr_funksjon(
             fortsett
         }
 
+        hvis op == "PRINT" {
+            la v = stack_pop(ramme)
+            skriv(tekst(v))
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "HALT" {
+            returner 0
+        }
+
         // ── Ukjent opcode ────────────────────────────────────────────────
-        kast "Ukjent opcode: " + op
+        kast "Ukjent opcode: " + tekst(op)
     }
 
     // Funksjonen fall gjennom utan RETURN → returner 0
