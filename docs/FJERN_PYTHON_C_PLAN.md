@@ -213,14 +213,20 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 **Omgang 5:** ✅ (2026-06) — `scripts/regen_fraser.no` erstatter `scripts/gen_expr_fraser.py`; `scripts/gen_expr_fraser.py` sletta; `find . -name '*.py'` gjev tom liste; identisk phrase-tabell (338 fraser); `./bin/nc regen-fraser` som ny CLI-kommando. Testsuite grønn etter regen.
 
-**Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64:
+**Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64 (sjå over).
 
-- `native_codegen_v2.no` + innebygd NcVal-runtime (hex) → deterministisk ELF64
-- `./bin/nc bygg-native` — standardkommando
-- `bash tools/verify_omgang6.sh` — bygg + byte-paritet + Linux-køyring (CI)
-- `bash tools/selfcompile_native_elf.sh` — Gen1==Gen2 ELF-paritet
-- CI: `native-linux` køyrer Omgang 6-gates
+**Omgang 6b (pågår):** ELF stage-0 — erstatte `bootstrap/c/` + clang:
 
-**Framtid (6b):** Erstatte `bootstrap/c/` + clang med ELF stage-0 (`norscode_native` bygget av seg sjølv). Krev full kompilator i ELF — eige spor.
+| Milepæl | Status | Verifikasjon |
+|---------|--------|--------------|
+| **6b.1** | 🔄 | `bash tools/verify_omgang6b.sh` — host-ELF + kompilator-kjede NCB→ELF, determinisme, Linux-køyring |
+| **6b.2** | ⬜ | ELF `compile` av eksternt `.no`-program |
+| **6b.3** | ⬜ | Gen1 ELF → Gen2 ELF byte-paritet (stage-0) |
+| **6b.4** | ⬜ | Seed-ELF i release; fjern committed `bootstrap/c/` |
 
-Neste steg: **Omgang 6b** — ELF stage-0; deretter fjerne committed `.c` når seed-ELF er på plass.
+Kommandoar:
+- `./bin/nc bygg-native --ncb bundle.ncb.json ut.elf`
+- `bash tools/build_omgang6b_compiler_ncb.sh`
+- `./bin/nc verify-omgang6b`
+
+Neste steg: **6b.2** — kompilator-ELF som klarer `kompiler_fil` på ekstern kilde.
