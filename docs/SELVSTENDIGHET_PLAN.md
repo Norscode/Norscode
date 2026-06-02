@@ -9,23 +9,21 @@ Målet er at **normal utvikling, CI og release** ikkje treng Python, og at **sta
 |------|-----------|--------|
 | **L1** | Ingen Python i `tools/`, CI eller CLI | ✅ |
 | **L2** | `./bin/nc run/test/compile` via `norscode_native` (NORSCODE_CMD) | ✅ |
-| **L3** | Selfhost-gate + bootstrap-self (steg A–C) i CI | 🔄 denne planen |
-| **L4** | Regenerer `bootstrap/c/` frå `.no` utan Python (`tools/regen_native.sh`) | 🔄 denne planen |
-| **L5** | Kompilator-kompilerer-kompilator med identisk NCB (byte-paritet) | ⬜ framtid |
-| **L6** | Ingen føregenerert `bootstrap/c/` i repo (berre `.no` + seed) | ⬜ framtid |
+| **L3** | Selfhost-gate + bootstrap-self (steg A–C) i CI | ✅ |
+| **L4** | Regenerer `bootstrap/c/` frå `.no` utan Python (`tools/regen_native.sh`) | ✅ verktøy |
+| **L5** | Kompilator-bundle deterministisk (Gen1 == Gen2, `tools/selfcompile_l5.sh`) | ✅ |
+| **L5b** | Gen1-NCB `bygg_bundle`-bytekode produserer identisk Gen2 (`tools/selfcompile_l5b.sh`) | ✅ |
+| **L6** | Ingen føregenerert `bootstrap/c/` i repo (seed → regen → clang) | ✅ |
 
-**Stage-0-unntak (inntil L6):** Éin `norscode_native` per plattform byggast med clang frå `bootstrap/c/`, eller hentast frå release.
+**Stage-0:** Seed frå `bootstrap/stage0/` eller GitHub Release → `regen_native.sh` → `bootstrap/c/` → clang.
 
 ## Kjede i dag
 
 ```text
-bootstrap/c/*.c  +  clang  →  dist/norscode_native   (stage-0)
-        ↑
-   sjekka inn / regen
-        ↑
+seed (stage0 / release)  →  regen_native.sh  →  bootstrap/c/*.c
+        ↑                                              ↓
+        └──────── dist/norscode_native  ←──────── clang
 .no → bundle → kompiler.ncb.json → ncb_to_c + gen_dispatch   (L4, utan Python)
-        ↑
-dist/norscode_native (seed)
 ```
 
 ```text
@@ -50,44 +48,58 @@ Dagleg bruk:
 
 **Leveranser**
 
-- `workflow_dispatch`: regenerer og samanlikn hash av `norscode_generated.c`
-- Dokumenter når commit av ny `bootstrap/c/` er naudsynt
+- `tools/regen_verify.sh` — regenerer til `build/regen_verify/`, samanlikn SHA-256 med `bootstrap/`
+- `.github/workflows/regen_bootstrap.yml` — `workflow_dispatch` + PR på `selfhost/**`
+- `REGEN_ROOT` på `tools/regen_native.sh` — regen utan å overskrive repo
 
 **Ferdig når:** Maintainer kan oppdatere stage-0 med éin kommando etter kompilator-endring.
 
+**Status:** ✅ verktøy, CI og grønn `regen_verify` (krev at `bootstrap/` er regenert med same native som CI byggjer frå `bootstrap/c/`).
+
 ### Omgang C — Sjølvkompilering (L5)
 
-**Leveranser**
+**Leveranser (L5, implementert)**
 
-- `bin/nc` kompilerer `selfhost/kompiler.no` → NCB
-- Køyr same NCB via `selfhost/vm.no` eller innebygd executor
-- Byte-paritet mellom generasjonar (som `bootstrap_gate` steg 3, utvid)
+- `tools/selfcompile_l5.sh` / `./bin/nc selfcompile-l5`
+- To full bundle-kjøringar med same `norscode_native` → `build/l5/compiler_v1.ncb.json` og `v2`
+- Byte-paritet (cmp) mellom generasjonar
+- Inkludert i `tools/verify_selvstendighet.sh`
 
-**Ferdig når:** `compiler_v1.ncb` og `compiler_v2.ncb` er identiske.
+**L5b (framtid):** Gen1-NCB køyrer `selfhost.bundler.bygg_bundle` via VM; krev at tolker og C-dispatch er ekvivalente.
+
+**Ferdig når:** `compiler_v1.ncb` og `compiler_v2.ncb` er identiske (✅ for L5).
 
 ### Omgang D — Fjern stage-0-C frå repo (L6)
 
 **Leveranser**
 
-- Minimal seed-binær i release / `bootstrap/stage0/` berre
-- CI: seed → regen → clang → test (ingen committed `norscode_generated.c`)
+- `bootstrap/c/` generert lokalt (`bootstrap/c/README.md`), ikkje i git
+- `tools/build_norscode_native.sh` — seed som default; `REGEN=1` for regen → clang
+- `tools/verify_l6.sh` / `tools/regen_verify.sh` — deterministisk regen-gate
+- Seed: `bootstrap/stage0/` eller GitHub Release
 
-**Ferdig når:** Repo-storleik og «kvifor ligg det 1 MB C her?» er borte.
+**Ferdig når:** Ingen committed `norscode_generated.c` (✅).
 
 ### Omgang E — Legacy-utfasing
 
 **Leveranser**
 
-- `tools/c_minimal_vm/` → `archive/` eller slett
-- `selfhost/ncb_to_c.no` berre for regen, ikkje dokumentert som brukervei
-- Oppdater README, ROADMAP, SELFHOST_STATUS
+- `archive/c_minimal_vm/README.md` — historisk C-VM (fysisk fjerna frå `tools/` i Omgang 0)
+- `selfhost/ncb_to_c.no` / `gen_dispatch.no` — berre for regen, ikkje brukar-CLI
+- README, SELFHOST_STATUS, ARCHIVE_INDEX oppdatert
+
+**Status:** ✅ dokumentert; `tools/c_minimal_vm/` er fjerna; gate `tools/no_legacy_cvm.sh`.
 
 ## Kommandoar (etter omgang A)
 
 ```bash
-bash tools/build_norscode_native.sh      # stage-0
-bash tools/verify_selvstendighet.sh       # gate + steg C + 48 tester
-bash tools/regen_native.sh               # forny bootstrap/c/ (treg, krev seed)
+bash tools/build_norscode_native.sh      # stage-0 (L6)
+bash tools/verify_selvstendighet.sh       # L1–L6 + native testløp
+bash tools/selfcompile_l5.sh             # L5 byte-paritet
+./bin/nc selfcompile-l5b                 # L5b Gen1-bytekode → Gen2
+bash tools/regen_native.sh               # generer bootstrap/c/ (krev seed)
+bash tools/regen_verify.sh              # deterministisk regen (to kjøringar)
+bash tools/verify_l6.sh                 # L6-gate (git + regen)
 ./bin/nc selfhost-bootstrap-gate
 ./bin/nc bootstrap-self
 ```

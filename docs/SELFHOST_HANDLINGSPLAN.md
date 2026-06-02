@@ -21,7 +21,7 @@ Norscode er selvstendig når:
 |---|---|
 | `.no` → NCB JSON → `selfhost/vm.no` | Nye `tools/*.py` som kompilerer, konverterer eller kjører kjerne |
 | `dist/norscode_native` som **stage-0** (release-binær eller selfhost-kompilert ELF) | `python3 main.py`, pytest som orakel for kompilatoren |
-| `tools/c_minimal_vm/` kun som **arkivert** legacy (ikke dokumentert som vei) | NCBB/C-VM som påkrevd steg for `run` / `compile` / CI |
+| Legacy C-VM fjerna frå `tools/` (sjå `archive/c_minimal_vm/`) | NCBB/C-VM som påkrevd steg for `run` / `compile` / CI |
 | Nye verktøy i `selfhost/*.no` | `selfhost/ncb_to_c.no` i produksjonskjede |
 
 **Artefaktformat:** Kjøring og bootstrap bruker **NCB JSON** (`*.ncb.json`). Binært NCBB hører til legacy C-VM og skal ikke gjeninnføres via Python eller nye C-verktøy. Trengs binær serialisering senere, implementeres den i Norscode (`selfhost/…`), ikke i `tools/*.py`.

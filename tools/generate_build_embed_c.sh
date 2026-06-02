@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-ncbb_to_c() {
+ncb_embed_to_c() {
     local input="$1"
     local out="$2"
     local size_name="$3"
@@ -36,16 +36,16 @@ ncbb_to_c() {
 
 mkdir -p "$ROOT/build"
 
-ncbb_to_c \
+ncb_embed_to_c \
     "$ROOT/build/bootstrap_compiler_bundle.ncb" \
     "$ROOT/build/bootstrap_compiler_bundle_ncb_data.c" \
-    norcode_bootstrap_ncbb_data_size \
-    norcode_bootstrap_ncbb_data
+    norcode_bootstrap_ncb_data_size \
+    norcode_bootstrap_ncb_data
 
-ncbb_to_c \
+ncb_embed_to_c \
     "$ROOT/build/native_elf_compiler_bundle.ncb" \
     "$ROOT/build/native_elf_compiler_bundle_ncb_data.c" \
-    norcode_ncbb_data_size \
-    norcode_ncbb_data
+    norcode_ncb_data_size \
+    norcode_ncb_data
 
 printf '✓ Genererte build/*_ncb_data.c\n'

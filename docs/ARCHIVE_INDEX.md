@@ -19,6 +19,11 @@ Hvis du egentlig leter etter dagens dokumentasjon, start her:
 - [docs/SELFHOST_RELEASE_CHECKLIST.md](SELFHOST_RELEASE_CHECKLIST.md)
 - [docs/MAINTENANCE_POLICY.md](MAINTENANCE_POLICY.md)
 
+## Legacy-kode (ikkje normalvei)
+
+- [archive/c_minimal_vm/README.md](../archive/c_minimal_vm/README.md) — tidleg NCBB/C-VM (fjerna frå `tools/`, 2026-06)
+- [archive/README.md](../archive/README.md) — oversikt
+
 ## Arkivregel
 
 - Arkivet er for historikk

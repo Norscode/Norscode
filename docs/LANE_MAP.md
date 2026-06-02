@@ -21,7 +21,8 @@ Dette er støtteflater som er dokumenterte, men ikke normal produktvei:
 
 - [`./bin/bootstrap`](../bin/bootstrap)
 - [`tools/build-bootstrap-binary.sh`](../tools/build-bootstrap-binary.sh)
-- [`tools/bootstrap_wrapper.py`](../tools/bootstrap_wrapper.py)
+- [`tools/build_norscode_native.sh`](../tools/build_norscode_native.sh) — stage-0 (seed default; clang berre ved `REGEN=1`)
+- [`scripts/gen_expr_fraser.py`](../scripts/gen_expr_fraser.py) — dev: regenerer frase-tabell i `common.no`
 - legacy-navn som `nor`, `nc`, `nl` og `norsklang`
 
 ## Ren historikk

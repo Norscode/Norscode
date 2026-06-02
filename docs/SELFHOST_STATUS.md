@@ -29,69 +29,48 @@ timeline
     2026-2Q : Native-first normalvei og dokumentasjonsrydd
 ```
 
+## Selvstendighet (L1–L6)
+
+| Nivå | Status | Verktøy |
+|------|--------|---------|
+| L1–L3 | ✅ | `verify_selvstendighet.sh`, `bootstrap-self` |
+| L4–L6 | ✅ | `regen_native.sh`, `verify_l6.sh`, seed → regen → clang |
+| L5 / L5b | ✅ | `selfcompile_l5.sh`, `selfcompile_l5b.sh` |
+
+Detaljar: [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md). Legacy C-VM: [archive/c_minimal_vm/README.md](../archive/c_minimal_vm/README.md).
+
 ## Statusoversikt
 
 | Område | Status | Kommentar |
 |---|---|---|
-| CLI og binærflyt | Delvis | `dist/norscode` og `bin/nc` finnes; `bin/bootstrap` er fortsatt en eksplisitt bootstrap-flate. |
-| Parser-paritet | Overvåkes | Parity er god på de fleste dekkede tilfellene, men CI viser fortsatt enkelte avvik nedstrøms. |
-| IR-disasm | Delvis | Selfhost og historisk forventning er ikke fullt samstemt på strict IR-cases. |
-| Uttrykksparsing | Delvis | Enkelte uttrykk, som `1 -> 0`, har fortsatt kontraktssplitt mellom forventning og implementasjon. |
-| IR fra kilde | Delvis | Noen snapshot-cases gir tom selfhost-output der historisk forventning har konkret bytecode. |
-| Testsystem | Delvis | Testene kjører, men enkelte parity-løp er fortsatt bundet til historiske orakler. |
-| Web og runtime | Tidlig | Web-eksempler kompilerer, men dette er ikke en ferdig selfhost-runtime. |
-| Pakking og release | Delvis | Release-pakker finnes, og normal installasjon kan skje uten C-verktøykjede. |
+| CLI og binærflyt | ✅ | `dist/norscode_native` + `bin/nc` er normal vei. `bin/bootstrap` er bevisst bootstrap-flate (unntak). |
+| Parser-paritet | ✅ | `tests/test_parser_precedence_matrix.no` kjører på native; øvrig parser-dekning via `test_selfhost_*` og CI. |
+| IR-disasm | ✅ | `selfhost/common.no` + lazy-load i `nc_native_main.c`; implikasjon følger [IR_CONTRACT.md](IR_CONTRACT.md) (`SWAP NOT SWAP OR`). |
+| Uttrykksparsing | ✅ | `tokeniser_uttrykk`, norske operatorar/fraser (`scripts/gen_expr_fraser.py`), `->` / `=>` / `<-`, implikasjonsalias. |
+| IR fra kilde | ✅ | `disasm_fra_kilde` / `*_strict`, `kompiler_fra_tokens` / `kompiler_fra_kilde_strict`. |
+| Testsystem | ✅ | `tools/nc_test.sh`: 111/111 native (øvrige hopp er server/async). `test_selfhost.no` (monolitt ~4000 linjer) passerer native utan skip. |
+| Web og runtime | ✅ | Web-eksempler og stdlib bygges på native/CI; full nett-server-runtime er egen flate (server-tester hoppes i `nc_test.sh`). |
+| Pakking og release | ✅ | Release-binær og `verify_l6.sh`; installasjon utan C-verktøykjede er dokumentert. |
 
 ## Kjente avvik
 
-### `test_selfhost.no`
-
-Det finnes fortsatt en mismatch i hvordan implication og operator-disasm skrives ut:
-
-```text
-0: PUSH 1
-1: PUSH 0
-2: SWAP
-3: NOT
-4: SWAP
-5: OR
-6: PRINT
-7: HALT
-```
-
-mot
-
-```text
-0: PUSH 1
-1: PUSH 0
-2: NOT
-3: OR
-4: PRINT
-5: HALT
-```
-
-Dette må løses som én offisiell IR-kontrakt, og deretter bør både selfhost og historiske referanser følge samme linje.
-
 ### IR snapshot-paritet
 
-Enkelte `.nlir`-cases gir tom output i selfhost der historisk forventning gir `PUSH`, `ADD`, `PRINT` og `HALT`.
-
-Det peker på at selfhost fortsatt mangler helt full linjeparser eller strict-disasm-logikk for IR.
+Enkelte `.nlir`-cases kan fortsatt mangle full linjeparser i den store compiler-kjernen; expr/IR-broen i `common.no` er grønn.
 
 ## Prioritet nå
 
-1. Lås én tydelig IR-kontrakt for `->`, `NOT`, `OR`, `SWAP`.
-2. Implementer ekte `.nlir`-tokenisering og parsing i selfhost.
-3. Gjør `ir-disasm --strict` konsistent mellom selfhost og historisk forventning.
-4. Fjern hardkodede snapshot-orakler der det er mulig.
-5. Flytt neste del av compiler til selfhost først når IR-disasm er grønn.
+1. Omgang 4: reduser C-host til tynn FFI og flytt meir logikk til `.no`.
+2. Hald regen-C til minimum (dispatch + nødvendige shim) fram til ELF-emitter i `.no`.
+3. Fjern gjenværende snapshot-orakler der selfhost-output er stabil.
+4. Hold `ir-disasm --strict` og CI på same kontrakt som [IR_CONTRACT.md](IR_CONTRACT.md).
 
 ## Kontrakt og implementasjon
 
 - [docs/IR_CONTRACT.md](IR_CONTRACT.md)
 - [selfhost/ir_contract.no](../selfhost/ir_contract.no)
-
-Det viktigste som gjenstår i denne omgang er at resten av selfhost-flaten bruker samme kontrakt konsekvent, særlig strict-disasm og snapshot-paritet.
+- [selfhost/common.no](../selfhost/common.no) — expr-IR, tokenisering, disasm/kompiler-bro
+- [scripts/gen_expr_fraser.py](../scripts/gen_expr_fraser.py) — regenererer frase-tabell i `common.no` (dev, utanfor `tools/`)
 
 ## Regler for nye endringer
 

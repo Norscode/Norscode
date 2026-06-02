@@ -91,7 +91,8 @@ Etter at steg C er verifisert i CI:
 - holde normalflyt helt native
 - arkivere historiske overgangsdokumenter
 
-**Blokkeres av:** Fase 0  
+**Status (2026):** L1–L6 selvstendighet er på plass (`docs/SELVSTENDIGHET_PLAN.md`). Legacy C-VM er dokumentert under `archive/c_minimal_vm/`.
+
 **Leveranse:** `./bin/nc compile selfhost/parser.no` i normalflyt uten legacy-fallback
 
 ---

@@ -92,10 +92,10 @@ bash tools/build_norscode_native.sh
 ```
 
 **Selvstendighet:** Sjå [docs/SELVSTENDIGHET_PLAN.md](docs/SELVSTENDIGHET_PLAN.md). Verifiser med
-`bash tools/verify_selvstendighet.sh` (gate + bootstrap-self + 48 tester, utan Python).
+`bash tools/verify_selvstendighet.sh` (L1–L6 + native testløp, utan Python).
 
-**CI / stage-0:** `bash tools/build_norscode_native.sh` bygger `dist/norscode_native` frå `bootstrap/c/`
-med clang. Regenerer C frå `.no`: `bash tools/regen_native.sh --rebuild`.
+**Stage-0 (L6):** `bash tools/build_norscode_native.sh` brukar seed (`bootstrap/stage0/` eller GitHub Release) som default.
+For maintainer-regen: `REGEN=1 bash tools/build_norscode_native.sh` (`regen_native.sh` → `bootstrap/c/` → clang).
 
 ## Vanlige kommandoer
 

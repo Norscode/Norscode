@@ -89,7 +89,7 @@ static void nc_store(NcVal **vars, char **varnames, int *nvars, const char *name
     for (int i = 0; i < *nvars; i++) {
         if (!strcmp(varnames[i], name)) { vars[i] = val; return; }
     }
-    if (*nvars >= 128) nc_panic("For mange variablar");
+    if (*nvars >= 2048) nc_panic("For mange variablar");
     varnames[*nvars] = strdup(name);
     vars[(*nvars)++] = val;
 }

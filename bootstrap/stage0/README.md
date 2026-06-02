@@ -28,5 +28,11 @@ gh release upload v0.1.0 bootstrap/stage0/norscode-macos-arm64 --clobber
 
 Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.sh` fungere utan nettverk.
 
-**Standard i CI:** `tools/build_norscode_native.sh` kompilerer frå `bootstrap/c/` + `tools/nc_native_main.c`
-(clang, utan Python). Filene i denne mappa er valfrie forhåndsbygde kopiar for å spare byggetid.
+**Standard:** `tools/build_norscode_native.sh` brukar seed herifrå (eller release) og krev ikkje clang.
+
+**Maintainer / regen:** `REGEN=1 bash tools/build_norscode_native.sh` køyrer
+`tools/regen_native.sh` for å lage `bootstrap/c/`, og kompilerer med clang.
+Ingen committed `.c` i repo.
+
+**Opt-in .no-host:** `NORSCODE_USE_NC_MAIN=1` delegerer `run`/`compile`/`selftest` til
+`selfhost.nc_main.start` (krev regen-bundle med `nc_main.no`). Smoke: `bash tools/verify_nc_main_host.sh`.
