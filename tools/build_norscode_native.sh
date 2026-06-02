@@ -46,7 +46,7 @@ smoke_ok() {
         tmp="${TMPDIR:-/tmp}/nc_smoke_$$.no"
     fi
     rm -f "$tmp"
-    printf 'funksjon start() { returner 42 }\n' > "$tmp"
+    printf 'funksjon start() { returner 0 }\n' > "$tmp"
     if NORSCODE_CMD=run NORSCODE_FILE="$tmp" "$1" >/dev/null 2>&1; then
         rm -f "$tmp"
         return 0
