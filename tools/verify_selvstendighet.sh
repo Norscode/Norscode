@@ -41,6 +41,10 @@ run_step '5. L5 sjølvkompilering (Gen1 == Gen2)...' bash "$ROOT/tools/selfcompi
 
 run_step '6. L5b Gen1-bytekode → Gen2 (bygg_bundle i NCB)...' bash "$ROOT/tools/selfcompile_l5b.sh"
 
-run_step '7. Testsuite (native)...' ./bin/nc test
+if [ "${VERIFY_SKIP_TEST:-0}" = "1" ]; then
+    printf '7. Testsuite: hoppa over (VERIFY_SKIP_TEST=1 — CI native-jobs testar)\n\n'
+else
+    run_step '7. Testsuite (native)...' ./bin/nc test
+fi
 
 printf '=== Selvstendighet L1–L6: BESTÅTT ===\n'
