@@ -1,5 +1,8 @@
 # Bootstrap Verification CI
 
+Verifikasjonen køyrer no som del av **`.github/workflows/ci.yml`** (Native macOS/Linux, bootstrap-self, lint).
+Full L1–L6-gate køyrer berre på push til `main` via **`.github/workflows/selvstendighet.yml`**.
+
 ## Goal
 
 Automatically verify compiler stability and deterministic builds
