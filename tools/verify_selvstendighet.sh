@@ -15,6 +15,9 @@ run_step() {
     fi
     local ec=$?
     printf '\n[FEIL] %s (exit %d)\n' "$label" "$ec" >&2
+    if [ "$ec" -eq 2 ]; then
+        printf '  Hint: exit 2 = oftast manglande fil ved cmp, eller bash-syntaxfeil i eit script.\n' >&2
+    fi
     exit 1
 }
 

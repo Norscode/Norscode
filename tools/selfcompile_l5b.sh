@@ -52,11 +52,11 @@ if ! env NORSCODE_CMD=l5b-gen2 \
     NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR" \
     "$NATIVE"; then
     _gen2_ec=$?
-    printf '  [FEIL] l5b-gen2 feila (exit %d)\n' "$_gen2_ec" >&2
+    printf '  [FEIL] l5b-gen2 feila med exit %d\n' "$_gen2_ec" >&2
     exit 1
 fi
 if [ ! -f "$V2" ]; then
-    printf '  [FEIL] Gen2 skreiv ikkje %s — sjekk l5b-gen2 og host_kall_bygg_bundle\n' "$V2" >&2
+    printf '  [FEIL] Gen2 skreiv ikkje %s - sjekk l5b-gen2 og host_kall_bygg_bundle\n' "$V2" >&2
     exit 1
 fi
 printf '\n'
