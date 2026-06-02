@@ -37,16 +37,24 @@ printf '=== L5 sjølvkompilering (byte-paritet) ===\n\n'
 
 printf '[1/3] Gen1: kompilator-bundle (første kompilasjon)...\n'
 "$NC" bundle "${BUNDLE_ARGS[@]}" --output "$V1"
+if [ ! -f "$V1" ]; then
+    printf '  [FEIL] Gen1 skreiv ikkje %s\n' "$V1" >&2
+    exit 1
+fi
 V1_BYTES="$(wc -c < "$V1" | tr -d ' ')"
 printf '  ✓ %s bytes\n\n' "$V1_BYTES"
 
 printf '[2/3] Gen2: kompilator-bundle (andre kompilasjon, same native)...\n'
 "$NC" bundle "${BUNDLE_ARGS[@]}" --output "$V2"
+if [ ! -f "$V2" ]; then
+    printf '  [FEIL] Gen2 skreiv ikkje %s\n' "$V2" >&2
+    exit 1
+fi
 V2_BYTES="$(wc -c < "$V2" | tr -d ' ')"
 printf '  ✓ %s bytes\n\n' "$V2_BYTES"
 
 printf '[3/3] Byte-paritet Gen1 == Gen2...\n'
-if cmp -s "$V1" "$V2"; then
+if cmp -s "$V1" "$V2" 2>/dev/null; then
     printf '  [OK] %s bytes identiske\n\n' "$V1_BYTES"
     printf '=== L5: BESTÅTT ===\n'
     printf 'Kompilator-bundle er deterministisk (to generasjonar, same output).\n'

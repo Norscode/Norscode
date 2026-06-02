@@ -169,7 +169,12 @@ build_from_bootstrap_c() {
     cat "$main" >> "$tmp"
 
     printf 'Kompilerer norscode_native frå bootstrap/c (stage-0, %s)...\n' "$CC" >&2
-    "$CC" -O2 -Wno-everything -o "$OUT" "$tmp"
+    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp"; then
+        _clang_ec=$?
+        rm -f "$tmp"
+        printf 'Feil: clang kompilering feila (exit %d)\n' "$_clang_ec" >&2
+        return 1
+    fi
     rm -f "$tmp"
     trap - EXIT
     chmod +x "$OUT"

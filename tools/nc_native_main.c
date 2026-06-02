@@ -648,8 +648,9 @@ NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na) {
         fprintf(stderr, "NCB manglar selfhost.bundler.bygg_bundle\n"); return nc_int(1);
     }
     NcVal *call_args[] = { args[1], args[2] };
-    nc_exec_call(fns_v, "selfhost.bundler.bygg_bundle", call_args, 2, 0);
-    return nc_int(0);
+    NcVal *r = nc_exec_call(fns_v, "selfhost.bundler.bygg_bundle", call_args, 2, 0);
+    int code = nc_val_til_exit(r);
+    return nc_int(code != 0 ? code : 0);
 }
 
 /* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
@@ -736,6 +737,10 @@ static void nc_prep_common_ncb_env(void) {
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
     const char *src = getenv("NORSCODE_FILE");
+    if (cmd && !strcmp(cmd, "l5b-gen2")) {
+        unsetenv("NORSCODE_FILE");
+        unsetenv("NORSCODE_OUTPUT");
+    }
     if (cmd && src && (!strcmp(cmd, "run") || !strcmp(cmd, "compile"))) {
         if (nc_prep_nc_main_env(src) != 0) return 1;
     }

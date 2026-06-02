@@ -27,5 +27,12 @@ env NORSCODE_CMD=l5b-gen2 \
     NORSCODE_L5B_V2="$V2" \
     NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR" \
     "$NATIVE"
-cmp -s "$V1" "$V2"
+if [ ! -f "$V1" ] || [ ! -f "$V2" ]; then
+    printf 'FEIL: manglar v1/v2 bundle\n' >&2
+    exit 1
+fi
+if ! cmp -s "$V1" "$V2" 2>/dev/null; then
+    printf 'FEIL: v1 og v2 differ\n' >&2
+    exit 1
+fi
 printf '\n=== L5b-mini: BESTÅTT ===\n'

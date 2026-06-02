@@ -3490,22 +3490,27 @@ static NcVal *nc_fn_selfhost_parser_ny_node(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("type"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "type"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("linje"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "linje"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("kolonne"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kolonne"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -3522,14 +3527,17 @@ static NcVal *nc_fn_selfhost_parser_ny_state(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("tokens"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tokens"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("posisjon"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("feil"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -3679,18 +3687,22 @@ static NcVal *nc_fn_selfhost_parser_gjeldende(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("type"));
   nc_push(&sp, stack, nc_str("EOF"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "eof"));
   nc_push(&sp, stack, nc_str("verdi"));
   nc_push(&sp, stack, nc_str(""));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "eof"));
   nc_push(&sp, stack, nc_str("linje"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "eof"));
   nc_push(&sp, stack, nc_str("kolonne"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "eof"));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L14__:;
@@ -3762,6 +3774,7 @@ static NcVal *nc_fn_selfhost_parser_neste(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
 lbl_nc_fn___L18__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "token"));
   return nc_pop(&sp, stack);
@@ -4049,6 +4062,7 @@ lbl_nc_fn___L33__:;
   nc_push(&sp, stack, nc_str("tests"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tests"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "rot"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -4379,41 +4393,42 @@ lbl_nc_fn___L74__:;
   nc_push(&sp, stack, nc_str("is_async"));
   nc_push(&sp, stack, nc_bool(1));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
 lbl_nc_fn___L76__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("LPAREN"));
   nc_push(&sp, stack, nc_str("forventet ( etter funksjonsnavn"));
-  { NcVal *_c44_2=nc_pop(&sp,stack); NcVal *_c44_1=nc_pop(&sp,stack); NcVal *_c44_0=nc_pop(&sp,stack); NcVal *_arr44[]={_c44_0,_c44_1,_c44_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr44,3)); }
+  { NcVal *_c45_2=nc_pop(&sp,stack); NcVal *_c45_1=nc_pop(&sp,stack); NcVal *_c45_0=nc_pop(&sp,stack); NcVal *_arr45[]={_c45_0,_c45_1,_c45_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr45,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c48_0=nc_pop(&sp,stack); NcVal *_arr48[]={_c48_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_parameterliste(_arr48,1)); }
-  { NcVal *_c49_1=nc_pop(&sp,stack); NcVal *_c49_0=nc_pop(&sp,stack); NcVal *_arr49[]={_c49_0,_c49_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr49,2)); }
+  { NcVal *_c49_0=nc_pop(&sp,stack); NcVal *_arr49[]={_c49_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_parameterliste(_arr49,1)); }
+  { NcVal *_c50_1=nc_pop(&sp,stack); NcVal *_c50_0=nc_pop(&sp,stack); NcVal *_arr50[]={_c50_0,_c50_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr50,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("RPAREN"));
   nc_push(&sp, stack, nc_str("forventet ) etter parameterliste"));
-  { NcVal *_c54_2=nc_pop(&sp,stack); NcVal *_c54_1=nc_pop(&sp,stack); NcVal *_c54_0=nc_pop(&sp,stack); NcVal *_arr54[]={_c54_0,_c54_1,_c54_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr54,3)); }
+  { NcVal *_c55_2=nc_pop(&sp,stack); NcVal *_c55_1=nc_pop(&sp,stack); NcVal *_c55_0=nc_pop(&sp,stack); NcVal *_arr55[]={_c55_0,_c55_1,_c55_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr55,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("ARROW"));
-  { NcVal *_c58_1=nc_pop(&sp,stack); NcVal *_c58_0=nc_pop(&sp,stack); NcVal *_arr58[]={_c58_0,_c58_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_matcher(_arr58,2)); }
+  { NcVal *_c59_1=nc_pop(&sp,stack); NcVal *_c59_0=nc_pop(&sp,stack); NcVal *_arr59[]={_c59_0,_c59_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_matcher(_arr59,2)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "null"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(!nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L78__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c63_0=nc_pop(&sp,stack); NcVal *_arr63[]={_c63_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_les_type_token(_arr63,1)); }
+  { NcVal *_c64_0=nc_pop(&sp,stack); NcVal *_arr64[]={_c64_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_les_type_token(_arr64,1)); }
   nc_store(vars, varnames, &nvars, "retur", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("Returtype"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "retur"));
-  { NcVal *_c68_0=nc_pop(&sp,stack); NcVal *_arr68[]={_c68_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_verdi(_arr68,1)); }
+  { NcVal *_c69_0=nc_pop(&sp,stack); NcVal *_arr69[]={_c69_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_verdi(_arr69,1)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "retur"));
-  { NcVal *_c70_0=nc_pop(&sp,stack); NcVal *_arr70[]={_c70_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr70,1)); }
+  { NcVal *_c71_0=nc_pop(&sp,stack); NcVal *_arr71[]={_c71_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr71,1)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "retur"));
-  { NcVal *_c72_0=nc_pop(&sp,stack); NcVal *_arr72[]={_c72_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr72,1)); }
-  { NcVal *_c73_3=nc_pop(&sp,stack); NcVal *_c73_2=nc_pop(&sp,stack); NcVal *_c73_1=nc_pop(&sp,stack); NcVal *_c73_0=nc_pop(&sp,stack); NcVal *_arr73[]={_c73_0,_c73_1,_c73_2,_c73_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr73,4)); }
-  { NcVal *_c74_1=nc_pop(&sp,stack); NcVal *_c74_0=nc_pop(&sp,stack); NcVal *_arr74[]={_c74_0,_c74_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr74,2)); }
+  { NcVal *_c73_0=nc_pop(&sp,stack); NcVal *_arr73[]={_c73_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr73,1)); }
+  { NcVal *_c74_3=nc_pop(&sp,stack); NcVal *_c74_2=nc_pop(&sp,stack); NcVal *_c74_1=nc_pop(&sp,stack); NcVal *_c74_0=nc_pop(&sp,stack); NcVal *_arr74[]={_c74_0,_c74_1,_c74_2,_c74_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr74,4)); }
+  { NcVal *_c75_1=nc_pop(&sp,stack); NcVal *_c75_0=nc_pop(&sp,stack); NcVal *_arr75[]={_c75_0,_c75_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr75,2)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L79__;
 lbl_nc_fn___L78__:;
@@ -4421,17 +4436,17 @@ lbl_nc_fn___L78__:;
   nc_push(&sp, stack, nc_str("Returtype"));
   nc_push(&sp, stack, nc_str("tom"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
-  { NcVal *_c82_0=nc_pop(&sp,stack); NcVal *_arr82[]={_c82_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr82,1)); }
+  { NcVal *_c83_0=nc_pop(&sp,stack); NcVal *_arr83[]={_c83_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr83,1)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "start"));
-  { NcVal *_c84_0=nc_pop(&sp,stack); NcVal *_arr84[]={_c84_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr84,1)); }
-  { NcVal *_c85_3=nc_pop(&sp,stack); NcVal *_c85_2=nc_pop(&sp,stack); NcVal *_c85_1=nc_pop(&sp,stack); NcVal *_c85_0=nc_pop(&sp,stack); NcVal *_arr85[]={_c85_0,_c85_1,_c85_2,_c85_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr85,4)); }
-  { NcVal *_c86_1=nc_pop(&sp,stack); NcVal *_c86_0=nc_pop(&sp,stack); NcVal *_arr86[]={_c86_0,_c86_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr86,2)); }
+  { NcVal *_c85_0=nc_pop(&sp,stack); NcVal *_arr85[]={_c85_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr85,1)); }
+  { NcVal *_c86_3=nc_pop(&sp,stack); NcVal *_c86_2=nc_pop(&sp,stack); NcVal *_c86_1=nc_pop(&sp,stack); NcVal *_c86_0=nc_pop(&sp,stack); NcVal *_arr86[]={_c86_0,_c86_1,_c86_2,_c86_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr86,4)); }
+  { NcVal *_c87_1=nc_pop(&sp,stack); NcVal *_c87_0=nc_pop(&sp,stack); NcVal *_arr87[]={_c87_0,_c87_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr87,2)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L79__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c91_0=nc_pop(&sp,stack); NcVal *_arr91[]={_c91_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_blokk(_arr91,1)); }
-  { NcVal *_c92_1=nc_pop(&sp,stack); NcVal *_c92_0=nc_pop(&sp,stack); NcVal *_arr92[]={_c92_0,_c92_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr92,2)); }
+  { NcVal *_c92_0=nc_pop(&sp,stack); NcVal *_arr92[]={_c92_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_blokk(_arr92,1)); }
+  { NcVal *_c93_1=nc_pop(&sp,stack); NcVal *_c93_0=nc_pop(&sp,stack); NcVal *_arr93[]={_c93_0,_c93_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr93,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   return nc_pop(&sp, stack);
@@ -5505,18 +5520,19 @@ lbl_nc_fn___L203__:;
   nc_push(&sp, stack, nc_str("verdi"));
   nc_push(&sp, stack, nc_str("case"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "pattern"));
-  { NcVal *_c104_1=nc_pop(&sp,stack); NcVal *_c104_0=nc_pop(&sp,stack); NcVal *_arr104[]={_c104_0,_c104_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr104,2)); }
+  { NcVal *_c105_1=nc_pop(&sp,stack); NcVal *_c105_0=nc_pop(&sp,stack); NcVal *_arr105[]={_c105_0,_c105_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr105,2)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L206__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "body"));
-  { NcVal *_c109_1=nc_pop(&sp,stack); NcVal *_c109_0=nc_pop(&sp,stack); NcVal *_arr109[]={_c109_0,_c109_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr109,2)); }
+  { NcVal *_c110_1=nc_pop(&sp,stack); NcVal *_c110_0=nc_pop(&sp,stack); NcVal *_arr110[]={_c110_0,_c110_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr110,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_node"));
-  { NcVal *_c113_1=nc_pop(&sp,stack); NcVal *_c113_0=nc_pop(&sp,stack); NcVal *_arr113[]={_c113_0,_c113_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr113,2)); }
+  { NcVal *_c114_1=nc_pop(&sp,stack); NcVal *_c114_0=nc_pop(&sp,stack); NcVal *_arr114[]={_c114_0,_c114_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr114,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "wildcard"));
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L208__;
@@ -5525,46 +5541,46 @@ lbl_nc_fn___L208__:;
   goto lbl_nc_fn___L196__;
 lbl_nc_fn___L200__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c122_0=nc_pop(&sp,stack); NcVal *_arr122[]={_c122_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_gjeldende(_arr122,1)); }
+  { NcVal *_c123_0=nc_pop(&sp,stack); NcVal *_arr123[]={_c123_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_gjeldende(_arr123,1)); }
   nc_push(&sp, stack, nc_str("type"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("ELLERS"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L210__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c129_0=nc_pop(&sp,stack); NcVal *_arr129[]={_c129_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_neste(_arr129,1)); }
+  { NcVal *_c130_0=nc_pop(&sp,stack); NcVal *_arr130[]={_c130_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_neste(_arr130,1)); }
   nc_store(vars, varnames, &nvars, "else_tok", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
-  { NcVal *_c132_0=nc_pop(&sp,stack); NcVal *_arr132[]={_c132_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_blokk(_arr132,1)); }
+  { NcVal *_c133_0=nc_pop(&sp,stack); NcVal *_arr133[]={_c133_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_parse_blokk(_arr133,1)); }
   nc_store(vars, varnames, &nvars, "else_block", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_str("MatchElse"));
   nc_push(&sp, stack, nc_str(""));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_tok"));
-  { NcVal *_c137_0=nc_pop(&sp,stack); NcVal *_arr137[]={_c137_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr137,1)); }
+  { NcVal *_c138_0=nc_pop(&sp,stack); NcVal *_arr138[]={_c138_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_linje(_arr138,1)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_tok"));
-  { NcVal *_c139_0=nc_pop(&sp,stack); NcVal *_arr139[]={_c139_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr139,1)); }
-  { NcVal *_c140_3=nc_pop(&sp,stack); NcVal *_c140_2=nc_pop(&sp,stack); NcVal *_c140_1=nc_pop(&sp,stack); NcVal *_c140_0=nc_pop(&sp,stack); NcVal *_arr140[]={_c140_0,_c140_1,_c140_2,_c140_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr140,4)); }
+  { NcVal *_c140_0=nc_pop(&sp,stack); NcVal *_arr140[]={_c140_0}; nc_push(&sp,stack,nc_fn_selfhost_parser_token_kolonne(_arr140,1)); }
+  { NcVal *_c141_3=nc_pop(&sp,stack); NcVal *_c141_2=nc_pop(&sp,stack); NcVal *_c141_1=nc_pop(&sp,stack); NcVal *_c141_0=nc_pop(&sp,stack); NcVal *_arr141[]={_c141_0,_c141_1,_c141_2,_c141_3}; nc_push(&sp,stack,nc_fn_selfhost_parser_ny_node(_arr141,4)); }
   nc_store(vars, varnames, &nvars, "else_node", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_block"));
-  { NcVal *_c144_1=nc_pop(&sp,stack); NcVal *_c144_0=nc_pop(&sp,stack); NcVal *_arr144[]={_c144_0,_c144_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr144,2)); }
+  { NcVal *_c145_1=nc_pop(&sp,stack); NcVal *_c145_0=nc_pop(&sp,stack); NcVal *_arr145[]={_c145_0,_c145_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr145,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_node"));
-  { NcVal *_c148_1=nc_pop(&sp,stack); NcVal *_c148_0=nc_pop(&sp,stack); NcVal *_arr148[]={_c148_0,_c148_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr148,2)); }
+  { NcVal *_c149_1=nc_pop(&sp,stack); NcVal *_c149_0=nc_pop(&sp,stack); NcVal *_arr149[]={_c149_0,_c149_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_legg_barn(_arr149,2)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L197__;
 lbl_nc_fn___L210__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("forventet case eller ellers i match"));
-  { NcVal *_c154_1=nc_pop(&sp,stack); NcVal *_c154_0=nc_pop(&sp,stack); NcVal *_arr154[]={_c154_0,_c154_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_parserfeil(_arr154,2)); }
+  { NcVal *_c155_1=nc_pop(&sp,stack); NcVal *_c155_0=nc_pop(&sp,stack); NcVal *_arr155[]={_c155_0,_c155_1}; nc_push(&sp,stack,nc_fn_selfhost_parser_parserfeil(_arr155,2)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L196__;
 lbl_nc_fn___L197__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "state"));
   nc_push(&sp, stack, nc_str("RBRACE"));
   nc_push(&sp, stack, nc_str("forventet } etter match"));
-  { NcVal *_c161_2=nc_pop(&sp,stack); NcVal *_c161_1=nc_pop(&sp,stack); NcVal *_c161_0=nc_pop(&sp,stack); NcVal *_arr161[]={_c161_0,_c161_1,_c161_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr161,3)); }
+  { NcVal *_c162_2=nc_pop(&sp,stack); NcVal *_c162_1=nc_pop(&sp,stack); NcVal *_c162_0=nc_pop(&sp,stack); NcVal *_arr162[]={_c162_0,_c162_1,_c162_2}; nc_push(&sp,stack,nc_fn_selfhost_parser_forvent(_arr162,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   return nc_pop(&sp, stack);
@@ -7722,10 +7738,12 @@ static NcVal *nc_fn_selfhost_compiler_semantic_ny_symbol_tabell(NcVal **args, in
   nc_push(&sp, stack, nc_str("funksjonar"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tabell"));
   nc_push(&sp, stack, nc_str("feil"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tabell"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -7744,6 +7762,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_registrer_funksjon(NcVal **args, 
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "params"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_nil());
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -10013,82 +10032,98 @@ lbl_nc_fn___L224__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("spec"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "combined_spec"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("method"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "spec_delar"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("path"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "spec_delar"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("summary"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("operation_id"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("path_params"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("query_params"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("body_fields"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("error_responses"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("deps"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route_deps"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("guards"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route_guards"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("request_example"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("request_example"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("method"));
   nc_push(&sp, stack, nc_str("get"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("request_example"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("path"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "combined_spec"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("response_type"));
   nc_push(&sp, stack, nc_str("tekst"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a507_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a507_0)); }
+  { NcVal *_a523_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a523_0)); }
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L232__;
@@ -10130,31 +10165,36 @@ lbl_nc_fn___L231__:;
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
 lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("response_example"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("response_type"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c555_0=nc_pop(&sp,stack); NcVal *_arr555[]={_c555_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_eksempel(_arr555,1)); }
+  { NcVal *_c572_0=nc_pop(&sp,stack); NcVal *_arr572[]={_c572_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_eksempel(_arr572,1)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("response_schema"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("response_type"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c562_0=nc_pop(&sp,stack); NcVal *_arr562[]={_c562_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_schema(_arr562,1)); }
+  { NcVal *_c580_0=nc_pop(&sp,stack); NcVal *_arr580[]={_c580_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_schema(_arr580,1)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_str("200"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10163,6 +10203,7 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("description"));
   nc_push(&sp, stack, nc_str("OK"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10171,6 +10212,7 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("content"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10181,6 +10223,7 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("application/json"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10193,6 +10236,7 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("schema"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10207,6 +10251,7 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("response_schema"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("responses"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -10221,9 +10266,10 @@ lbl_nc_fn___L228__:;
   nc_push(&sp, stack, nc_str("response_example"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "handlers"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
-  { NcVal *_a642_1=nc_pop(&sp,stack); NcVal *_a642_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a642_0,_a642_1)); }
+  { NcVal *_a669_1=nc_pop(&sp,stack); NcVal *_a669_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a669_0,_a669_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L226__:;
   nc_push(&sp, stack, nc_int(0LL));
@@ -10231,7 +10277,7 @@ lbl_nc_fn___L226__:;
 lbl_nc_fn___L234__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "l"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route_provided"));
-  { NcVal *_a650_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a650_0)); }
+  { NcVal *_a677_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a677_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L235__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "providers"));
@@ -10248,7 +10294,7 @@ lbl_nc_fn___L234__:;
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a667_1=nc_pop(&sp,stack); NcVal *_a667_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a667_0,_a667_1)); }
+  { NcVal *_a694_1=nc_pop(&sp,stack); NcVal *_a694_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a694_0,_a694_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "l"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -10268,34 +10314,42 @@ lbl_nc_fn___L171__:;
   nc_push(&sp, stack, nc_str("route_handlers"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "handlers"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("dependency_providers"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "providers"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("guard_providers"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "guard_providers"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("request_middlewares"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "request_middlewares"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("response_middlewares"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "response_middlewares"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("error_middlewares"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "error_middlewares"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("startup_hooks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "startup_hooks"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   nc_push(&sp, stack, nc_str("shutdown_hooks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "shutdown_hooks"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -10334,36 +10388,42 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_samanfatt_rute(NcVal **args
   nc_push(&sp, stack, nc_str("function"));
   { NcVal *_c6_1=nc_pop(&sp,stack); NcVal *_c6_0=nc_pop(&sp,stack); NcVal *_arr6[]={_c6_0,_c6_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr6,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   nc_push(&sp, stack, nc_str("method"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("method"));
-  { NcVal *_c12_1=nc_pop(&sp,stack); NcVal *_c12_0=nc_pop(&sp,stack); NcVal *_arr12[]={_c12_0,_c12_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr12,2)); }
+  { NcVal *_c13_1=nc_pop(&sp,stack); NcVal *_c13_0=nc_pop(&sp,stack); NcVal *_arr13[]={_c13_0,_c13_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr13,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   nc_push(&sp, stack, nc_str("path"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("path"));
-  { NcVal *_c18_1=nc_pop(&sp,stack); NcVal *_c18_0=nc_pop(&sp,stack); NcVal *_arr18[]={_c18_0,_c18_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr18,2)); }
+  { NcVal *_c20_1=nc_pop(&sp,stack); NcVal *_c20_0=nc_pop(&sp,stack); NcVal *_arr20[]={_c20_0,_c20_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr20,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   nc_push(&sp, stack, nc_str("spec"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("spec"));
-  { NcVal *_c24_1=nc_pop(&sp,stack); NcVal *_c24_0=nc_pop(&sp,stack); NcVal *_arr24[]={_c24_0,_c24_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr24,2)); }
+  { NcVal *_c27_1=nc_pop(&sp,stack); NcVal *_c27_0=nc_pop(&sp,stack); NcVal *_arr27[]={_c27_0,_c27_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr27,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   nc_push(&sp, stack, nc_str("summary"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("summary"));
-  { NcVal *_c30_1=nc_pop(&sp,stack); NcVal *_c30_0=nc_pop(&sp,stack); NcVal *_arr30[]={_c30_0,_c30_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr30,2)); }
+  { NcVal *_c34_1=nc_pop(&sp,stack); NcVal *_c34_0=nc_pop(&sp,stack); NcVal *_arr34[]={_c34_0,_c34_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr34,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   nc_push(&sp, stack, nc_str("operation_id"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "route"));
   nc_push(&sp, stack, nc_str("operation_id"));
-  { NcVal *_c36_1=nc_pop(&sp,stack); NcVal *_c36_0=nc_pop(&sp,stack); NcVal *_arr36[]={_c36_0,_c36_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr36,2)); }
+  { NcVal *_c41_1=nc_pop(&sp,stack); NcVal *_c41_0=nc_pop(&sp,stack); NcVal *_arr41[]={_c41_0,_c41_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(_arr41,2)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "summary"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -10597,30 +10657,37 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_komp(NcVal **args, int n
   nc_push(&sp, stack, nc_str("teller"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("modul"));
   nc_push(&sp, stack, nc_str("__main__"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("funk_kart"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("lambda_funk_par"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("lambda_teller"));
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_start"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_slutt"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -10641,9 +10708,10 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(NcVal **args, in
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_str("__L"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "n"));
-  { NcVal *_a12_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a12_0)); }
+  { NcVal *_a13_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a13_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str("__"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -10695,19 +10763,21 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(NcVal **args, int 
   nc_push(&sp, stack, nc_str("loop_start"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_slutt"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_slutt"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_start"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "n"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_sub(a,b)); }
-  { NcVal *_a27_1=nc_pop(&sp,stack); NcVal *_a27_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern(_a27_0,_a27_1)); }
+  { NcVal *_a29_1=nc_pop(&sp,stack); NcVal *_a29_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern(_a29_0,_a29_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("loop_slutt"));
@@ -10715,7 +10785,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(NcVal **args, int 
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "n"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_sub(a,b)); }
-  { NcVal *_a35_1=nc_pop(&sp,stack); NcVal *_a35_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern(_a35_0,_a35_1)); }
+  { NcVal *_a37_1=nc_pop(&sp,stack); NcVal *_a37_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern(_a37_0,_a37_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L252__:;
   nc_push(&sp, stack, nc_nil());
@@ -11545,10 +11615,11 @@ lbl_nc_fn___L352__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "helper_namn"));
-  { NcVal *_c508_2=nc_pop(&sp,stack); NcVal *_c508_1=nc_pop(&sp,stack); NcVal *_c508_0=nc_pop(&sp,stack); NcVal *_arr508[]={_c508_0,_c508_1,_c508_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_lambda_hjelpefunksjon(_arr508,3)); }
+  { NcVal *_c509_2=nc_pop(&sp,stack); NcVal *_c509_1=nc_pop(&sp,stack); NcVal *_c509_0=nc_pop(&sp,stack); NcVal *_arr509[]={_c509_0,_c509_1,_c509_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_lambda_hjelpefunksjon(_arr509,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"BUILD_LAMBDA\","));
@@ -11559,16 +11630,16 @@ lbl_nc_fn___L352__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "helper_namn"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_c519_0=nc_pop(&sp,stack); NcVal *_arr519[]={_c519_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr519,1)); }
+  { NcVal *_c520_0=nc_pop(&sp,stack); NcVal *_arr520[]={_c520_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr520,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
-  { NcVal *_c524_0=nc_pop(&sp,stack); NcVal *_arr524[]={_c524_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_liste_tekst(_arr524,1)); }
+  { NcVal *_c525_0=nc_pop(&sp,stack); NcVal *_arr525[]={_c525_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_liste_tekst(_arr525,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str("]"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a528_1=nc_pop(&sp,stack); NcVal *_a528_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a528_0,_a528_1)); }
+  { NcVal *_a529_1=nc_pop(&sp,stack); NcVal *_a529_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a529_0,_a529_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -11580,7 +11651,7 @@ lbl_nc_fn___L356__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a540_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a540_0)); }
+  { NcVal *_a541_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a541_0)); }
   nc_store(vars, varnames, &nvars, "n", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
@@ -11590,6 +11661,7 @@ lbl_nc_fn___L356__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_str("__ifexpr_else_"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -11609,13 +11681,13 @@ lbl_nc_fn___L356__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c569_2=nc_pop(&sp,stack); NcVal *_c569_1=nc_pop(&sp,stack); NcVal *_c569_0=nc_pop(&sp,stack); NcVal *_arr569[]={_c569_0,_c569_1,_c569_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr569,3)); }
+  { NcVal *_c571_2=nc_pop(&sp,stack); NcVal *_c571_1=nc_pop(&sp,stack); NcVal *_c571_0=nc_pop(&sp,stack); NcVal *_arr571[]={_c571_0,_c571_1,_c571_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr571,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_lbl"));
-  { NcVal *_c574_1=nc_pop(&sp,stack); NcVal *_c574_0=nc_pop(&sp,stack); NcVal *_arr574[]={_c574_0,_c574_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr574,2)); }
-  { NcVal *_a575_1=nc_pop(&sp,stack); NcVal *_a575_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a575_0,_a575_1)); }
+  { NcVal *_c576_1=nc_pop(&sp,stack); NcVal *_c576_0=nc_pop(&sp,stack); NcVal *_arr576[]={_c576_0,_c576_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr576,2)); }
+  { NcVal *_a577_1=nc_pop(&sp,stack); NcVal *_a577_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a577_0,_a577_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -11624,19 +11696,19 @@ lbl_nc_fn___L356__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c584_2=nc_pop(&sp,stack); NcVal *_c584_1=nc_pop(&sp,stack); NcVal *_c584_0=nc_pop(&sp,stack); NcVal *_arr584[]={_c584_0,_c584_1,_c584_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr584,3)); }
+  { NcVal *_c586_2=nc_pop(&sp,stack); NcVal *_c586_1=nc_pop(&sp,stack); NcVal *_c586_0=nc_pop(&sp,stack); NcVal *_arr586[]={_c586_0,_c586_1,_c586_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr586,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c589_1=nc_pop(&sp,stack); NcVal *_c589_0=nc_pop(&sp,stack); NcVal *_arr589[]={_c589_0,_c589_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr589,2)); }
-  { NcVal *_a590_1=nc_pop(&sp,stack); NcVal *_a590_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a590_0,_a590_1)); }
+  { NcVal *_c591_1=nc_pop(&sp,stack); NcVal *_c591_0=nc_pop(&sp,stack); NcVal *_arr591[]={_c591_0,_c591_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr591,2)); }
+  { NcVal *_a592_1=nc_pop(&sp,stack); NcVal *_a592_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a592_0,_a592_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "else_lbl"));
-  { NcVal *_c595_1=nc_pop(&sp,stack); NcVal *_c595_0=nc_pop(&sp,stack); NcVal *_arr595[]={_c595_0,_c595_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr595,2)); }
-  { NcVal *_a596_1=nc_pop(&sp,stack); NcVal *_a596_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a596_0,_a596_1)); }
+  { NcVal *_c597_1=nc_pop(&sp,stack); NcVal *_c597_0=nc_pop(&sp,stack); NcVal *_arr597[]={_c597_0,_c597_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr597,2)); }
+  { NcVal *_a598_1=nc_pop(&sp,stack); NcVal *_a598_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a598_0,_a598_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -11645,13 +11717,13 @@ lbl_nc_fn___L356__:;
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c605_2=nc_pop(&sp,stack); NcVal *_c605_1=nc_pop(&sp,stack); NcVal *_c605_0=nc_pop(&sp,stack); NcVal *_arr605[]={_c605_0,_c605_1,_c605_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr605,3)); }
+  { NcVal *_c607_2=nc_pop(&sp,stack); NcVal *_c607_1=nc_pop(&sp,stack); NcVal *_c607_0=nc_pop(&sp,stack); NcVal *_arr607[]={_c607_0,_c607_1,_c607_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr607,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c610_1=nc_pop(&sp,stack); NcVal *_c610_0=nc_pop(&sp,stack); NcVal *_arr610[]={_c610_0,_c610_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr610,2)); }
-  { NcVal *_a611_1=nc_pop(&sp,stack); NcVal *_a611_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a611_0,_a611_1)); }
+  { NcVal *_c612_1=nc_pop(&sp,stack); NcVal *_c612_0=nc_pop(&sp,stack); NcVal *_arr612[]={_c612_0,_c612_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr612,2)); }
+  { NcVal *_a613_1=nc_pop(&sp,stack); NcVal *_a613_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a613_0,_a613_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -11667,20 +11739,20 @@ lbl_nc_fn___L358__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c627_2=nc_pop(&sp,stack); NcVal *_c627_1=nc_pop(&sp,stack); NcVal *_c627_0=nc_pop(&sp,stack); NcVal *_arr627[]={_c627_0,_c627_1,_c627_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr627,3)); }
+  { NcVal *_c629_2=nc_pop(&sp,stack); NcVal *_c629_1=nc_pop(&sp,stack); NcVal *_c629_0=nc_pop(&sp,stack); NcVal *_arr629[]={_c629_0,_c629_1,_c629_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr629,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("PUSH_CONST"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c634_1=nc_pop(&sp,stack); NcVal *_c634_0=nc_pop(&sp,stack); NcVal *_arr634[]={_c634_0,_c634_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr634,2)); }
-  { NcVal *_a635_1=nc_pop(&sp,stack); NcVal *_a635_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a635_0,_a635_1)); }
+  { NcVal *_c636_1=nc_pop(&sp,stack); NcVal *_c636_0=nc_pop(&sp,stack); NcVal *_arr636[]={_c636_0,_c636_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr636,2)); }
+  { NcVal *_a637_1=nc_pop(&sp,stack); NcVal *_a637_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a637_0,_a637_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("INDEX_GET"));
-  { NcVal *_c639_0=nc_pop(&sp,stack); NcVal *_arr639[]={_c639_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr639,1)); }
-  { NcVal *_a640_1=nc_pop(&sp,stack); NcVal *_a640_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a640_0,_a640_1)); }
+  { NcVal *_c641_0=nc_pop(&sp,stack); NcVal *_arr641[]={_c641_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr641,1)); }
+  { NcVal *_a642_1=nc_pop(&sp,stack); NcVal *_a642_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a642_0,_a642_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -11696,7 +11768,7 @@ lbl_nc_fn___L364__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a656_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a656_0)); }
+  { NcVal *_a658_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a658_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L365__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
@@ -11706,7 +11778,7 @@ lbl_nc_fn___L364__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c666_2=nc_pop(&sp,stack); NcVal *_c666_1=nc_pop(&sp,stack); NcVal *_c666_0=nc_pop(&sp,stack); NcVal *_arr666[]={_c666_0,_c666_1,_c666_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr666,3)); }
+  { NcVal *_c668_2=nc_pop(&sp,stack); NcVal *_c668_1=nc_pop(&sp,stack); NcVal *_c668_0=nc_pop(&sp,stack); NcVal *_arr668[]={_c668_0,_c668_1,_c668_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr668,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -11719,9 +11791,9 @@ lbl_nc_fn___L365__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a679_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a679_0)); }
-  { NcVal *_c680_1=nc_pop(&sp,stack); NcVal *_c680_0=nc_pop(&sp,stack); NcVal *_arr680[]={_c680_0,_c680_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr680,2)); }
-  { NcVal *_a681_1=nc_pop(&sp,stack); NcVal *_a681_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a681_0,_a681_1)); }
+  { NcVal *_a681_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a681_0)); }
+  { NcVal *_c682_1=nc_pop(&sp,stack); NcVal *_c682_0=nc_pop(&sp,stack); NcVal *_arr682[]={_c682_0,_c682_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr682,2)); }
+  { NcVal *_a683_1=nc_pop(&sp,stack); NcVal *_a683_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a683_0,_a683_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -11737,7 +11809,7 @@ lbl_nc_fn___L368__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a697_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a697_0)); }
+  { NcVal *_a699_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a699_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L369__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -11753,7 +11825,7 @@ lbl_nc_fn___L368__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c713_2=nc_pop(&sp,stack); NcVal *_c713_1=nc_pop(&sp,stack); NcVal *_c713_0=nc_pop(&sp,stack); NcVal *_arr713[]={_c713_0,_c713_1,_c713_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr713,3)); }
+  { NcVal *_c715_2=nc_pop(&sp,stack); NcVal *_c715_1=nc_pop(&sp,stack); NcVal *_c715_0=nc_pop(&sp,stack); NcVal *_arr715[]={_c715_0,_c715_1,_c715_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr715,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
@@ -11762,7 +11834,7 @@ lbl_nc_fn___L368__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c722_2=nc_pop(&sp,stack); NcVal *_c722_1=nc_pop(&sp,stack); NcVal *_c722_0=nc_pop(&sp,stack); NcVal *_arr722[]={_c722_0,_c722_1,_c722_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr722,3)); }
+  { NcVal *_c724_2=nc_pop(&sp,stack); NcVal *_c724_1=nc_pop(&sp,stack); NcVal *_c724_0=nc_pop(&sp,stack); NcVal *_arr724[]={_c724_0,_c724_1,_c724_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr724,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -11775,9 +11847,9 @@ lbl_nc_fn___L369__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a735_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a735_0)); }
-  { NcVal *_c736_1=nc_pop(&sp,stack); NcVal *_c736_0=nc_pop(&sp,stack); NcVal *_arr736[]={_c736_0,_c736_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr736,2)); }
-  { NcVal *_a737_1=nc_pop(&sp,stack); NcVal *_a737_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a737_0,_a737_1)); }
+  { NcVal *_a737_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a737_0)); }
+  { NcVal *_c738_1=nc_pop(&sp,stack); NcVal *_c738_0=nc_pop(&sp,stack); NcVal *_arr738[]={_c738_0,_c738_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr738,2)); }
+  { NcVal *_a739_1=nc_pop(&sp,stack); NcVal *_a739_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a739_0,_a739_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -11793,7 +11865,7 @@ lbl_nc_fn___L372__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a753_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a753_0)); }
+  { NcVal *_a755_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a755_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L373__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -11807,8 +11879,8 @@ lbl_nc_fn___L372__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c767_1=nc_pop(&sp,stack); NcVal *_c767_0=nc_pop(&sp,stack); NcVal *_arr767[]={_c767_0,_c767_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr767,2)); }
-  { NcVal *_a768_1=nc_pop(&sp,stack); NcVal *_a768_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a768_0,_a768_1)); }
+  { NcVal *_c769_1=nc_pop(&sp,stack); NcVal *_c769_0=nc_pop(&sp,stack); NcVal *_arr769[]={_c769_0,_c769_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr769,2)); }
+  { NcVal *_a770_1=nc_pop(&sp,stack); NcVal *_a770_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a770_0,_a770_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
@@ -11817,7 +11889,7 @@ lbl_nc_fn___L372__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c777_2=nc_pop(&sp,stack); NcVal *_c777_1=nc_pop(&sp,stack); NcVal *_c777_0=nc_pop(&sp,stack); NcVal *_arr777[]={_c777_0,_c777_1,_c777_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr777,3)); }
+  { NcVal *_c779_2=nc_pop(&sp,stack); NcVal *_c779_1=nc_pop(&sp,stack); NcVal *_c779_0=nc_pop(&sp,stack); NcVal *_arr779[]={_c779_0,_c779_1,_c779_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr779,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -11830,16 +11902,16 @@ lbl_nc_fn___L373__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a790_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a790_0)); }
-  { NcVal *_c791_1=nc_pop(&sp,stack); NcVal *_c791_0=nc_pop(&sp,stack); NcVal *_arr791[]={_c791_0,_c791_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr791,2)); }
-  { NcVal *_a792_1=nc_pop(&sp,stack); NcVal *_a792_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a792_0,_a792_1)); }
+  { NcVal *_a792_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a792_0)); }
+  { NcVal *_c793_1=nc_pop(&sp,stack); NcVal *_c793_0=nc_pop(&sp,stack); NcVal *_arr793[]={_c793_0,_c793_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr793,2)); }
+  { NcVal *_a794_1=nc_pop(&sp,stack); NcVal *_a794_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a794_0,_a794_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L370__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"PUSH_CONST\",null]"));
-  { NcVal *_a799_1=nc_pop(&sp,stack); NcVal *_a799_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a799_0,_a799_1)); }
+  { NcVal *_a801_1=nc_pop(&sp,stack); NcVal *_a801_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a801_0,_a801_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(0));
   return nc_pop(&sp, stack);
@@ -12010,8 +12082,9 @@ lbl_nc_fn___L384__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c46_0=nc_pop(&sp,stack); NcVal *_arr46[]={_c46_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr46,1)); }
+  { NcVal *_c47_0=nc_pop(&sp,stack); NcVal *_arr47[]={_c47_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr47,1)); }
   nc_store(vars, varnames, &nvars, "end_lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12020,13 +12093,13 @@ lbl_nc_fn___L384__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c55_2=nc_pop(&sp,stack); NcVal *_c55_1=nc_pop(&sp,stack); NcVal *_c55_0=nc_pop(&sp,stack); NcVal *_arr55[]={_c55_0,_c55_1,_c55_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr55,3)); }
+  { NcVal *_c56_2=nc_pop(&sp,stack); NcVal *_c56_1=nc_pop(&sp,stack); NcVal *_c56_0=nc_pop(&sp,stack); NcVal *_arr56[]={_c56_0,_c56_1,_c56_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr56,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "subject_var"));
-  { NcVal *_c60_1=nc_pop(&sp,stack); NcVal *_c60_0=nc_pop(&sp,stack); NcVal *_arr60[]={_c60_0,_c60_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr60,2)); }
-  { NcVal *_a61_1=nc_pop(&sp,stack); NcVal *_a61_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a61_0,_a61_1)); }
+  { NcVal *_c61_1=nc_pop(&sp,stack); NcVal *_c61_0=nc_pop(&sp,stack); NcVal *_arr61[]={_c61_0,_c61_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr61,2)); }
+  { NcVal *_a62_1=nc_pop(&sp,stack); NcVal *_a62_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a62_0,_a62_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_int(1LL));
   nc_store(vars, varnames, &nvars, "case_indeks", nc_pop(&sp, stack));
@@ -12035,7 +12108,7 @@ lbl_nc_fn___L386__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a70_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a70_0)); }
+  { NcVal *_a71_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a71_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L387__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12057,13 +12130,13 @@ lbl_nc_fn___L386__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c92_2=nc_pop(&sp,stack); NcVal *_c92_1=nc_pop(&sp,stack); NcVal *_c92_0=nc_pop(&sp,stack); NcVal *_arr92[]={_c92_0,_c92_1,_c92_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr92,3)); }
+  { NcVal *_c93_2=nc_pop(&sp,stack); NcVal *_c93_1=nc_pop(&sp,stack); NcVal *_c93_0=nc_pop(&sp,stack); NcVal *_arr93[]={_c93_0,_c93_1,_c93_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr93,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c97_1=nc_pop(&sp,stack); NcVal *_c97_0=nc_pop(&sp,stack); NcVal *_arr97[]={_c97_0,_c97_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr97,2)); }
-  { NcVal *_a98_1=nc_pop(&sp,stack); NcVal *_a98_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a98_0,_a98_1)); }
+  { NcVal *_c98_1=nc_pop(&sp,stack); NcVal *_c98_0=nc_pop(&sp,stack); NcVal *_arr98[]={_c98_0,_c98_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr98,2)); }
+  { NcVal *_a99_1=nc_pop(&sp,stack); NcVal *_a99_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a99_0,_a99_1)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L387__;
 lbl_nc_fn___L388__:;
@@ -12080,18 +12153,18 @@ lbl_nc_fn___L388__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c115_2=nc_pop(&sp,stack); NcVal *_c115_1=nc_pop(&sp,stack); NcVal *_c115_0=nc_pop(&sp,stack); NcVal *_arr115[]={_c115_0,_c115_1,_c115_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr115,3)); }
+  { NcVal *_c116_2=nc_pop(&sp,stack); NcVal *_c116_1=nc_pop(&sp,stack); NcVal *_c116_0=nc_pop(&sp,stack); NcVal *_arr116[]={_c116_0,_c116_1,_c116_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr116,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c120_1=nc_pop(&sp,stack); NcVal *_c120_0=nc_pop(&sp,stack); NcVal *_arr120[]={_c120_0,_c120_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr120,2)); }
-  { NcVal *_a121_1=nc_pop(&sp,stack); NcVal *_a121_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a121_0,_a121_1)); }
+  { NcVal *_c121_1=nc_pop(&sp,stack); NcVal *_c121_0=nc_pop(&sp,stack); NcVal *_arr121[]={_c121_0,_c121_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr121,2)); }
+  { NcVal *_a122_1=nc_pop(&sp,stack); NcVal *_a122_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a122_0,_a122_1)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L387__;
 lbl_nc_fn___L390__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c126_0=nc_pop(&sp,stack); NcVal *_arr126[]={_c126_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr126,1)); }
+  { NcVal *_c127_0=nc_pop(&sp,stack); NcVal *_arr127[]={_c127_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr127,1)); }
   nc_store(vars, varnames, &nvars, "next_lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_node"));
@@ -12100,24 +12173,24 @@ lbl_nc_fn___L390__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c135_2=nc_pop(&sp,stack); NcVal *_c135_1=nc_pop(&sp,stack); NcVal *_c135_0=nc_pop(&sp,stack); NcVal *_arr135[]={_c135_0,_c135_1,_c135_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr135,3)); }
+  { NcVal *_c136_2=nc_pop(&sp,stack); NcVal *_c136_1=nc_pop(&sp,stack); NcVal *_c136_0=nc_pop(&sp,stack); NcVal *_arr136[]={_c136_0,_c136_1,_c136_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr136,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "subject_var"));
-  { NcVal *_c140_1=nc_pop(&sp,stack); NcVal *_c140_0=nc_pop(&sp,stack); NcVal *_arr140[]={_c140_0,_c140_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr140,2)); }
-  { NcVal *_a141_1=nc_pop(&sp,stack); NcVal *_a141_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a141_0,_a141_1)); }
+  { NcVal *_c141_1=nc_pop(&sp,stack); NcVal *_c141_0=nc_pop(&sp,stack); NcVal *_arr141[]={_c141_0,_c141_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr141,2)); }
+  { NcVal *_a142_1=nc_pop(&sp,stack); NcVal *_a142_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a142_0,_a142_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("COMPARE_EQ"));
-  { NcVal *_c145_0=nc_pop(&sp,stack); NcVal *_arr145[]={_c145_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr145,1)); }
-  { NcVal *_a146_1=nc_pop(&sp,stack); NcVal *_a146_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a146_0,_a146_1)); }
+  { NcVal *_c146_0=nc_pop(&sp,stack); NcVal *_arr146[]={_c146_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr146,1)); }
+  { NcVal *_a147_1=nc_pop(&sp,stack); NcVal *_a147_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a147_0,_a147_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "next_lbl"));
-  { NcVal *_c151_1=nc_pop(&sp,stack); NcVal *_c151_0=nc_pop(&sp,stack); NcVal *_arr151[]={_c151_0,_c151_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr151,2)); }
-  { NcVal *_a152_1=nc_pop(&sp,stack); NcVal *_a152_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a152_0,_a152_1)); }
+  { NcVal *_c152_1=nc_pop(&sp,stack); NcVal *_c152_0=nc_pop(&sp,stack); NcVal *_arr152[]={_c152_0,_c152_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr152,2)); }
+  { NcVal *_a153_1=nc_pop(&sp,stack); NcVal *_a153_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a153_0,_a153_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_node"));
@@ -12126,19 +12199,19 @@ lbl_nc_fn___L390__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c161_2=nc_pop(&sp,stack); NcVal *_c161_1=nc_pop(&sp,stack); NcVal *_c161_0=nc_pop(&sp,stack); NcVal *_arr161[]={_c161_0,_c161_1,_c161_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr161,3)); }
+  { NcVal *_c162_2=nc_pop(&sp,stack); NcVal *_c162_1=nc_pop(&sp,stack); NcVal *_c162_0=nc_pop(&sp,stack); NcVal *_arr162[]={_c162_0,_c162_1,_c162_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr162,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c166_1=nc_pop(&sp,stack); NcVal *_c166_0=nc_pop(&sp,stack); NcVal *_arr166[]={_c166_0,_c166_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr166,2)); }
-  { NcVal *_a167_1=nc_pop(&sp,stack); NcVal *_a167_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a167_0,_a167_1)); }
+  { NcVal *_c167_1=nc_pop(&sp,stack); NcVal *_c167_0=nc_pop(&sp,stack); NcVal *_arr167[]={_c167_0,_c167_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr167,2)); }
+  { NcVal *_a168_1=nc_pop(&sp,stack); NcVal *_a168_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a168_0,_a168_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "next_lbl"));
-  { NcVal *_c172_1=nc_pop(&sp,stack); NcVal *_c172_0=nc_pop(&sp,stack); NcVal *_arr172[]={_c172_0,_c172_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr172,2)); }
-  { NcVal *_a173_1=nc_pop(&sp,stack); NcVal *_a173_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a173_0,_a173_1)); }
+  { NcVal *_c173_1=nc_pop(&sp,stack); NcVal *_c173_0=nc_pop(&sp,stack); NcVal *_arr173[]={_c173_0,_c173_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr173,2)); }
+  { NcVal *_a174_1=nc_pop(&sp,stack); NcVal *_a174_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a174_0,_a174_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "case_indeks"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -12149,8 +12222,8 @@ lbl_nc_fn___L387__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "end_lbl"));
-  { NcVal *_c184_1=nc_pop(&sp,stack); NcVal *_c184_0=nc_pop(&sp,stack); NcVal *_arr184[]={_c184_0,_c184_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr184,2)); }
-  { NcVal *_a185_1=nc_pop(&sp,stack); NcVal *_a185_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a185_0,_a185_1)); }
+  { NcVal *_c185_1=nc_pop(&sp,stack); NcVal *_c185_0=nc_pop(&sp,stack); NcVal *_arr185[]={_c185_0,_c185_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr185,2)); }
+  { NcVal *_a186_1=nc_pop(&sp,stack); NcVal *_a186_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a186_0,_a186_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12166,7 +12239,7 @@ lbl_nc_fn___L382__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a201_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a201_0)); }
+  { NcVal *_a202_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a202_0)); }
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L394__;
@@ -12176,7 +12249,7 @@ lbl_nc_fn___L382__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a211_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a211_0)); }
+  { NcVal *_a212_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a212_0)); }
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_sub(a,b)); }
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -12200,27 +12273,27 @@ lbl_nc_fn___L399__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "siste"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c235_2=nc_pop(&sp,stack); NcVal *_c235_1=nc_pop(&sp,stack); NcVal *_c235_0=nc_pop(&sp,stack); NcVal *_arr235[]={_c235_0,_c235_1,_c235_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr235,3)); }
+  { NcVal *_c236_2=nc_pop(&sp,stack); NcVal *_c236_1=nc_pop(&sp,stack); NcVal *_c236_0=nc_pop(&sp,stack); NcVal *_arr236[]={_c236_0,_c236_1,_c236_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr236,3)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L397__;
 lbl_nc_fn___L396__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"PUSH_CONST\",null]"));
-  { NcVal *_a241_1=nc_pop(&sp,stack); NcVal *_a241_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a241_0,_a241_1)); }
+  { NcVal *_a242_1=nc_pop(&sp,stack); NcVal *_a242_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a242_0,_a242_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L397__:;
   goto lbl_nc_fn___L395__;
 lbl_nc_fn___L394__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"PUSH_CONST\",null]"));
-  { NcVal *_a248_1=nc_pop(&sp,stack); NcVal *_a248_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a248_0,_a248_1)); }
+  { NcVal *_a249_1=nc_pop(&sp,stack); NcVal *_a249_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a249_0,_a249_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L395__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
-  { NcVal *_c254_1=nc_pop(&sp,stack); NcVal *_c254_0=nc_pop(&sp,stack); NcVal *_arr254[]={_c254_0,_c254_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr254,2)); }
-  { NcVal *_a255_1=nc_pop(&sp,stack); NcVal *_a255_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a255_0,_a255_1)); }
+  { NcVal *_c255_1=nc_pop(&sp,stack); NcVal *_c255_0=nc_pop(&sp,stack); NcVal *_arr255[]={_c255_0,_c255_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr255,2)); }
+  { NcVal *_a256_1=nc_pop(&sp,stack); NcVal *_a256_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a256_0,_a256_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12245,7 +12318,7 @@ lbl_nc_fn___L392__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c280_3=nc_pop(&sp,stack); NcVal *_c280_2=nc_pop(&sp,stack); NcVal *_c280_1=nc_pop(&sp,stack); NcVal *_c280_0=nc_pop(&sp,stack); NcVal *_arr280[]={_c280_0,_c280_1,_c280_2,_c280_3}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_sett_verdi(_arr280,4)); }
+  { NcVal *_c281_3=nc_pop(&sp,stack); NcVal *_c281_2=nc_pop(&sp,stack); NcVal *_c281_1=nc_pop(&sp,stack); NcVal *_c281_0=nc_pop(&sp,stack); NcVal *_arr281[]={_c281_0,_c281_1,_c281_2,_c281_3}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_sett_verdi(_arr281,4)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12269,7 +12342,7 @@ lbl_nc_fn___L400__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c304_0=nc_pop(&sp,stack); NcVal *_arr304[]={_c304_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_aug_til_binop(_arr304,1)); }
+  { NcVal *_c305_0=nc_pop(&sp,stack); NcVal *_arr305[]={_c305_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_aug_til_binop(_arr305,1)); }
   nc_store(vars, varnames, &nvars, "binop_opcode", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
   nc_push(&sp, stack, nc_str("type"));
@@ -12280,25 +12353,25 @@ lbl_nc_fn___L400__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c315_2=nc_pop(&sp,stack); NcVal *_c315_1=nc_pop(&sp,stack); NcVal *_c315_0=nc_pop(&sp,stack); NcVal *_arr315[]={_c315_0,_c315_1,_c315_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr315,3)); }
+  { NcVal *_c316_2=nc_pop(&sp,stack); NcVal *_c316_1=nc_pop(&sp,stack); NcVal *_c316_0=nc_pop(&sp,stack); NcVal *_arr316[]={_c316_0,_c316_1,_c316_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr316,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c320_2=nc_pop(&sp,stack); NcVal *_c320_1=nc_pop(&sp,stack); NcVal *_c320_0=nc_pop(&sp,stack); NcVal *_arr320[]={_c320_0,_c320_1,_c320_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr320,3)); }
+  { NcVal *_c321_2=nc_pop(&sp,stack); NcVal *_c321_1=nc_pop(&sp,stack); NcVal *_c321_0=nc_pop(&sp,stack); NcVal *_arr321[]={_c321_0,_c321_1,_c321_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr321,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "binop_opcode"));
-  { NcVal *_c324_0=nc_pop(&sp,stack); NcVal *_arr324[]={_c324_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr324,1)); }
-  { NcVal *_a325_1=nc_pop(&sp,stack); NcVal *_a325_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a325_0,_a325_1)); }
+  { NcVal *_c325_0=nc_pop(&sp,stack); NcVal *_arr325[]={_c325_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr325,1)); }
+  { NcVal *_a326_1=nc_pop(&sp,stack); NcVal *_a326_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a326_0,_a326_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c332_1=nc_pop(&sp,stack); NcVal *_c332_0=nc_pop(&sp,stack); NcVal *_arr332[]={_c332_0,_c332_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr332,2)); }
-  { NcVal *_a333_1=nc_pop(&sp,stack); NcVal *_a333_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a333_0,_a333_1)); }
+  { NcVal *_c333_1=nc_pop(&sp,stack); NcVal *_c333_0=nc_pop(&sp,stack); NcVal *_arr333[]={_c333_0,_c333_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr333,2)); }
+  { NcVal *_a334_1=nc_pop(&sp,stack); NcVal *_a334_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a334_0,_a334_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
@@ -12314,7 +12387,7 @@ lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c349_2=nc_pop(&sp,stack); NcVal *_c349_1=nc_pop(&sp,stack); NcVal *_c349_0=nc_pop(&sp,stack); NcVal *_arr349[]={_c349_0,_c349_1,_c349_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr349,3)); }
+  { NcVal *_c350_2=nc_pop(&sp,stack); NcVal *_c350_1=nc_pop(&sp,stack); NcVal *_c350_0=nc_pop(&sp,stack); NcVal *_arr350[]={_c350_0,_c350_1,_c350_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr350,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
@@ -12323,7 +12396,7 @@ lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c358_2=nc_pop(&sp,stack); NcVal *_c358_1=nc_pop(&sp,stack); NcVal *_c358_0=nc_pop(&sp,stack); NcVal *_arr358[]={_c358_0,_c358_1,_c358_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr358,3)); }
+  { NcVal *_c359_2=nc_pop(&sp,stack); NcVal *_c359_1=nc_pop(&sp,stack); NcVal *_c359_0=nc_pop(&sp,stack); NcVal *_arr359[]={_c359_0,_c359_1,_c359_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr359,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
@@ -12332,7 +12405,7 @@ lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c367_2=nc_pop(&sp,stack); NcVal *_c367_1=nc_pop(&sp,stack); NcVal *_c367_0=nc_pop(&sp,stack); NcVal *_arr367[]={_c367_0,_c367_1,_c367_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr367,3)); }
+  { NcVal *_c368_2=nc_pop(&sp,stack); NcVal *_c368_1=nc_pop(&sp,stack); NcVal *_c368_0=nc_pop(&sp,stack); NcVal *_arr368[]={_c368_0,_c368_1,_c368_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr368,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål"));
@@ -12341,31 +12414,31 @@ lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c376_2=nc_pop(&sp,stack); NcVal *_c376_1=nc_pop(&sp,stack); NcVal *_c376_0=nc_pop(&sp,stack); NcVal *_arr376[]={_c376_0,_c376_1,_c376_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr376,3)); }
+  { NcVal *_c377_2=nc_pop(&sp,stack); NcVal *_c377_1=nc_pop(&sp,stack); NcVal *_c377_0=nc_pop(&sp,stack); NcVal *_arr377[]={_c377_0,_c377_1,_c377_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr377,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("INDEX_GET"));
-  { NcVal *_c380_0=nc_pop(&sp,stack); NcVal *_arr380[]={_c380_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr380,1)); }
-  { NcVal *_a381_1=nc_pop(&sp,stack); NcVal *_a381_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a381_0,_a381_1)); }
+  { NcVal *_c381_0=nc_pop(&sp,stack); NcVal *_arr381[]={_c381_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr381,1)); }
+  { NcVal *_a382_1=nc_pop(&sp,stack); NcVal *_a382_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a382_0,_a382_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi_node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c386_2=nc_pop(&sp,stack); NcVal *_c386_1=nc_pop(&sp,stack); NcVal *_c386_0=nc_pop(&sp,stack); NcVal *_arr386[]={_c386_0,_c386_1,_c386_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr386,3)); }
+  { NcVal *_c387_2=nc_pop(&sp,stack); NcVal *_c387_1=nc_pop(&sp,stack); NcVal *_c387_0=nc_pop(&sp,stack); NcVal *_arr387[]={_c387_0,_c387_1,_c387_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr387,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "binop_opcode"));
-  { NcVal *_c390_0=nc_pop(&sp,stack); NcVal *_arr390[]={_c390_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr390,1)); }
-  { NcVal *_a391_1=nc_pop(&sp,stack); NcVal *_a391_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a391_0,_a391_1)); }
+  { NcVal *_c391_0=nc_pop(&sp,stack); NcVal *_arr391[]={_c391_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr391,1)); }
+  { NcVal *_a392_1=nc_pop(&sp,stack); NcVal *_a392_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a392_0,_a392_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("INDEX_SET"));
-  { NcVal *_c395_0=nc_pop(&sp,stack); NcVal *_arr395[]={_c395_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr395,1)); }
-  { NcVal *_a396_1=nc_pop(&sp,stack); NcVal *_a396_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a396_0,_a396_1)); }
+  { NcVal *_c396_0=nc_pop(&sp,stack); NcVal *_arr396[]={_c396_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr396,1)); }
+  { NcVal *_a397_1=nc_pop(&sp,stack); NcVal *_a397_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a397_0,_a397_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"POP\"]"));
-  { NcVal *_a400_1=nc_pop(&sp,stack); NcVal *_a400_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a400_0,_a400_1)); }
+  { NcVal *_a401_1=nc_pop(&sp,stack); NcVal *_a401_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a401_0,_a401_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L406__:;
   nc_push(&sp, stack, nc_bool(1));
@@ -12378,7 +12451,7 @@ lbl_nc_fn___L402__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a413_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a413_0)); }
+  { NcVal *_a414_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a414_0)); }
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L410__;
@@ -12389,19 +12462,19 @@ lbl_nc_fn___L402__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c424_2=nc_pop(&sp,stack); NcVal *_c424_1=nc_pop(&sp,stack); NcVal *_c424_0=nc_pop(&sp,stack); NcVal *_arr424[]={_c424_0,_c424_1,_c424_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr424,3)); }
+  { NcVal *_c425_2=nc_pop(&sp,stack); NcVal *_c425_1=nc_pop(&sp,stack); NcVal *_c425_0=nc_pop(&sp,stack); NcVal *_arr425[]={_c425_0,_c425_1,_c425_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr425,3)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L411__;
 lbl_nc_fn___L410__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("[\"PUSH_CONST\",null]"));
-  { NcVal *_a430_1=nc_pop(&sp,stack); NcVal *_a430_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a430_0,_a430_1)); }
+  { NcVal *_a431_1=nc_pop(&sp,stack); NcVal *_a431_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a431_0,_a431_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L411__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("RETURN"));
-  { NcVal *_c435_0=nc_pop(&sp,stack); NcVal *_arr435[]={_c435_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr435,1)); }
-  { NcVal *_a436_1=nc_pop(&sp,stack); NcVal *_a436_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a436_0,_a436_1)); }
+  { NcVal *_c436_0=nc_pop(&sp,stack); NcVal *_arr436[]={_c436_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr436,1)); }
+  { NcVal *_a437_1=nc_pop(&sp,stack); NcVal *_a437_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a437_0,_a437_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12411,10 +12484,10 @@ lbl_nc_fn___L408__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L412__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c446_0=nc_pop(&sp,stack); NcVal *_arr446[]={_c446_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr446,1)); }
+  { NcVal *_c447_0=nc_pop(&sp,stack); NcVal *_arr447[]={_c447_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr447,1)); }
   nc_store(vars, varnames, &nvars, "etikett_ellers", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c449_0=nc_pop(&sp,stack); NcVal *_arr449[]={_c449_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr449,1)); }
+  { NcVal *_c450_0=nc_pop(&sp,stack); NcVal *_arr450[]={_c450_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr450,1)); }
   nc_store(vars, varnames, &nvars, "etikett_ferdig", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12423,13 +12496,13 @@ lbl_nc_fn___L408__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c458_2=nc_pop(&sp,stack); NcVal *_c458_1=nc_pop(&sp,stack); NcVal *_c458_0=nc_pop(&sp,stack); NcVal *_arr458[]={_c458_0,_c458_1,_c458_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr458,3)); }
+  { NcVal *_c459_2=nc_pop(&sp,stack); NcVal *_c459_1=nc_pop(&sp,stack); NcVal *_c459_0=nc_pop(&sp,stack); NcVal *_arr459[]={_c459_0,_c459_1,_c459_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr459,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_ellers"));
-  { NcVal *_c463_1=nc_pop(&sp,stack); NcVal *_c463_0=nc_pop(&sp,stack); NcVal *_arr463[]={_c463_0,_c463_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr463,2)); }
-  { NcVal *_a464_1=nc_pop(&sp,stack); NcVal *_a464_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a464_0,_a464_1)); }
+  { NcVal *_c464_1=nc_pop(&sp,stack); NcVal *_c464_0=nc_pop(&sp,stack); NcVal *_arr464[]={_c464_0,_c464_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr464,2)); }
+  { NcVal *_a465_1=nc_pop(&sp,stack); NcVal *_a465_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a465_0,_a465_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12438,26 +12511,26 @@ lbl_nc_fn___L408__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c473_2=nc_pop(&sp,stack); NcVal *_c473_1=nc_pop(&sp,stack); NcVal *_c473_0=nc_pop(&sp,stack); NcVal *_arr473[]={_c473_0,_c473_1,_c473_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr473,3)); }
+  { NcVal *_c474_2=nc_pop(&sp,stack); NcVal *_c474_1=nc_pop(&sp,stack); NcVal *_c474_0=nc_pop(&sp,stack); NcVal *_arr474[]={_c474_0,_c474_1,_c474_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr474,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a478_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a478_0)); }
+  { NcVal *_a479_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a479_0)); }
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L414__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_ferdig"));
-  { NcVal *_c485_1=nc_pop(&sp,stack); NcVal *_c485_0=nc_pop(&sp,stack); NcVal *_arr485[]={_c485_0,_c485_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr485,2)); }
-  { NcVal *_a486_1=nc_pop(&sp,stack); NcVal *_a486_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a486_0,_a486_1)); }
+  { NcVal *_c486_1=nc_pop(&sp,stack); NcVal *_c486_0=nc_pop(&sp,stack); NcVal *_arr486[]={_c486_0,_c486_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr486,2)); }
+  { NcVal *_a487_1=nc_pop(&sp,stack); NcVal *_a487_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a487_0,_a487_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_ellers"));
-  { NcVal *_c491_1=nc_pop(&sp,stack); NcVal *_c491_0=nc_pop(&sp,stack); NcVal *_arr491[]={_c491_0,_c491_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr491,2)); }
-  { NcVal *_a492_1=nc_pop(&sp,stack); NcVal *_a492_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a492_0,_a492_1)); }
+  { NcVal *_c492_1=nc_pop(&sp,stack); NcVal *_c492_0=nc_pop(&sp,stack); NcVal *_arr492[]={_c492_0,_c492_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr492,2)); }
+  { NcVal *_a493_1=nc_pop(&sp,stack); NcVal *_a493_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a493_0,_a493_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12466,21 +12539,21 @@ lbl_nc_fn___L408__:;
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c501_2=nc_pop(&sp,stack); NcVal *_c501_1=nc_pop(&sp,stack); NcVal *_c501_0=nc_pop(&sp,stack); NcVal *_arr501[]={_c501_0,_c501_1,_c501_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr501,3)); }
+  { NcVal *_c502_2=nc_pop(&sp,stack); NcVal *_c502_1=nc_pop(&sp,stack); NcVal *_c502_0=nc_pop(&sp,stack); NcVal *_arr502[]={_c502_0,_c502_1,_c502_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr502,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_ferdig"));
-  { NcVal *_c506_1=nc_pop(&sp,stack); NcVal *_c506_0=nc_pop(&sp,stack); NcVal *_arr506[]={_c506_0,_c506_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr506,2)); }
-  { NcVal *_a507_1=nc_pop(&sp,stack); NcVal *_a507_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a507_0,_a507_1)); }
+  { NcVal *_c507_1=nc_pop(&sp,stack); NcVal *_c507_0=nc_pop(&sp,stack); NcVal *_arr507[]={_c507_0,_c507_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr507,2)); }
+  { NcVal *_a508_1=nc_pop(&sp,stack); NcVal *_a508_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a508_0,_a508_1)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L415__;
 lbl_nc_fn___L414__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_ellers"));
-  { NcVal *_c514_1=nc_pop(&sp,stack); NcVal *_c514_0=nc_pop(&sp,stack); NcVal *_arr514[]={_c514_0,_c514_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr514,2)); }
-  { NcVal *_a515_1=nc_pop(&sp,stack); NcVal *_a515_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a515_0,_a515_1)); }
+  { NcVal *_c515_1=nc_pop(&sp,stack); NcVal *_c515_0=nc_pop(&sp,stack); NcVal *_arr515[]={_c515_0,_c515_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr515,2)); }
+  { NcVal *_a516_1=nc_pop(&sp,stack); NcVal *_a516_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a516_0,_a516_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L415__:;
   nc_push(&sp, stack, nc_bool(1));
@@ -12491,21 +12564,21 @@ lbl_nc_fn___L412__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L416__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c526_0=nc_pop(&sp,stack); NcVal *_arr526[]={_c526_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr526,1)); }
+  { NcVal *_c527_0=nc_pop(&sp,stack); NcVal *_arr527[]={_c527_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr527,1)); }
   nc_store(vars, varnames, &nvars, "etikett_start", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c529_0=nc_pop(&sp,stack); NcVal *_arr529[]={_c529_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr529,1)); }
+  { NcVal *_c530_0=nc_pop(&sp,stack); NcVal *_arr530[]={_c530_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr530,1)); }
   nc_store(vars, varnames, &nvars, "etikett_slutt", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_start"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_slutt"));
-  { NcVal *_c534_2=nc_pop(&sp,stack); NcVal *_c534_1=nc_pop(&sp,stack); NcVal *_c534_0=nc_pop(&sp,stack); NcVal *_arr534[]={_c534_0,_c534_1,_c534_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr534,3)); }
+  { NcVal *_c535_2=nc_pop(&sp,stack); NcVal *_c535_1=nc_pop(&sp,stack); NcVal *_c535_0=nc_pop(&sp,stack); NcVal *_arr535[]={_c535_0,_c535_1,_c535_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr535,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_start"));
-  { NcVal *_c539_1=nc_pop(&sp,stack); NcVal *_c539_0=nc_pop(&sp,stack); NcVal *_arr539[]={_c539_0,_c539_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr539,2)); }
-  { NcVal *_a540_1=nc_pop(&sp,stack); NcVal *_a540_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a540_0,_a540_1)); }
+  { NcVal *_c540_1=nc_pop(&sp,stack); NcVal *_c540_0=nc_pop(&sp,stack); NcVal *_arr540[]={_c540_0,_c540_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr540,2)); }
+  { NcVal *_a541_1=nc_pop(&sp,stack); NcVal *_a541_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a541_0,_a541_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12514,13 +12587,13 @@ lbl_nc_fn___L412__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c549_2=nc_pop(&sp,stack); NcVal *_c549_1=nc_pop(&sp,stack); NcVal *_c549_0=nc_pop(&sp,stack); NcVal *_arr549[]={_c549_0,_c549_1,_c549_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr549,3)); }
+  { NcVal *_c550_2=nc_pop(&sp,stack); NcVal *_c550_1=nc_pop(&sp,stack); NcVal *_c550_0=nc_pop(&sp,stack); NcVal *_arr550[]={_c550_0,_c550_1,_c550_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr550,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_slutt"));
-  { NcVal *_c554_1=nc_pop(&sp,stack); NcVal *_c554_0=nc_pop(&sp,stack); NcVal *_arr554[]={_c554_0,_c554_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr554,2)); }
-  { NcVal *_a555_1=nc_pop(&sp,stack); NcVal *_a555_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a555_0,_a555_1)); }
+  { NcVal *_c555_1=nc_pop(&sp,stack); NcVal *_c555_0=nc_pop(&sp,stack); NcVal *_arr555[]={_c555_0,_c555_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr555,2)); }
+  { NcVal *_a556_1=nc_pop(&sp,stack); NcVal *_a556_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a556_0,_a556_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12529,22 +12602,22 @@ lbl_nc_fn___L412__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c564_2=nc_pop(&sp,stack); NcVal *_c564_1=nc_pop(&sp,stack); NcVal *_c564_0=nc_pop(&sp,stack); NcVal *_arr564[]={_c564_0,_c564_1,_c564_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr564,3)); }
+  { NcVal *_c565_2=nc_pop(&sp,stack); NcVal *_c565_1=nc_pop(&sp,stack); NcVal *_c565_0=nc_pop(&sp,stack); NcVal *_arr565[]={_c565_0,_c565_1,_c565_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr565,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_start"));
-  { NcVal *_c569_1=nc_pop(&sp,stack); NcVal *_c569_0=nc_pop(&sp,stack); NcVal *_arr569[]={_c569_0,_c569_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr569,2)); }
-  { NcVal *_a570_1=nc_pop(&sp,stack); NcVal *_a570_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a570_0,_a570_1)); }
+  { NcVal *_c570_1=nc_pop(&sp,stack); NcVal *_c570_0=nc_pop(&sp,stack); NcVal *_arr570[]={_c570_0,_c570_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr570,2)); }
+  { NcVal *_a571_1=nc_pop(&sp,stack); NcVal *_a571_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a571_0,_a571_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "etikett_slutt"));
-  { NcVal *_c575_1=nc_pop(&sp,stack); NcVal *_c575_0=nc_pop(&sp,stack); NcVal *_arr575[]={_c575_0,_c575_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr575,2)); }
-  { NcVal *_a576_1=nc_pop(&sp,stack); NcVal *_a576_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a576_0,_a576_1)); }
+  { NcVal *_c576_1=nc_pop(&sp,stack); NcVal *_c576_0=nc_pop(&sp,stack); NcVal *_arr576[]={_c576_0,_c576_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr576,2)); }
+  { NcVal *_a577_1=nc_pop(&sp,stack); NcVal *_a577_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a577_0,_a577_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c579_0=nc_pop(&sp,stack); NcVal *_arr579[]={_c579_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr579,1)); }
+  { NcVal *_c580_0=nc_pop(&sp,stack); NcVal *_arr580[]={_c580_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr580,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12554,7 +12627,7 @@ lbl_nc_fn___L416__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L418__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c589_0=nc_pop(&sp,stack); NcVal *_arr589[]={_c589_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_slutt(_arr589,1)); }
+  { NcVal *_c590_0=nc_pop(&sp,stack); NcVal *_arr590[]={_c590_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_slutt(_arr590,1)); }
   nc_store(vars, varnames, &nvars, "lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lbl"));
   nc_push(&sp, stack, nc_str(""));
@@ -12563,8 +12636,8 @@ lbl_nc_fn___L416__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lbl"));
-  { NcVal *_c598_1=nc_pop(&sp,stack); NcVal *_c598_0=nc_pop(&sp,stack); NcVal *_arr598[]={_c598_0,_c598_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr598,2)); }
-  { NcVal *_a599_1=nc_pop(&sp,stack); NcVal *_a599_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a599_0,_a599_1)); }
+  { NcVal *_c599_1=nc_pop(&sp,stack); NcVal *_c599_0=nc_pop(&sp,stack); NcVal *_arr599[]={_c599_0,_c599_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr599,2)); }
+  { NcVal *_a600_1=nc_pop(&sp,stack); NcVal *_a600_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a600_0,_a600_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L420__:;
   nc_push(&sp, stack, nc_bool(1));
@@ -12575,7 +12648,7 @@ lbl_nc_fn___L418__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L422__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c610_0=nc_pop(&sp,stack); NcVal *_arr610[]={_c610_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_start(_arr610,1)); }
+  { NcVal *_c611_0=nc_pop(&sp,stack); NcVal *_arr611[]={_c611_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_start(_arr611,1)); }
   nc_store(vars, varnames, &nvars, "lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lbl"));
   nc_push(&sp, stack, nc_str(""));
@@ -12584,8 +12657,8 @@ lbl_nc_fn___L418__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lbl"));
-  { NcVal *_c619_1=nc_pop(&sp,stack); NcVal *_c619_0=nc_pop(&sp,stack); NcVal *_arr619[]={_c619_0,_c619_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr619,2)); }
-  { NcVal *_a620_1=nc_pop(&sp,stack); NcVal *_a620_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a620_0,_a620_1)); }
+  { NcVal *_c620_1=nc_pop(&sp,stack); NcVal *_c620_0=nc_pop(&sp,stack); NcVal *_arr620[]={_c620_0,_c620_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr620,2)); }
+  { NcVal *_a621_1=nc_pop(&sp,stack); NcVal *_a621_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a621_0,_a621_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L424__:;
   nc_push(&sp, stack, nc_bool(1));
@@ -12602,12 +12675,12 @@ lbl_nc_fn___L422__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c637_2=nc_pop(&sp,stack); NcVal *_c637_1=nc_pop(&sp,stack); NcVal *_c637_0=nc_pop(&sp,stack); NcVal *_arr637[]={_c637_0,_c637_1,_c637_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr637,3)); }
+  { NcVal *_c638_2=nc_pop(&sp,stack); NcVal *_c638_1=nc_pop(&sp,stack); NcVal *_c638_0=nc_pop(&sp,stack); NcVal *_arr638[]={_c638_0,_c638_1,_c638_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr638,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("THROW"));
-  { NcVal *_c641_0=nc_pop(&sp,stack); NcVal *_arr641[]={_c641_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr641,1)); }
-  { NcVal *_a642_1=nc_pop(&sp,stack); NcVal *_a642_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a642_0,_a642_1)); }
+  { NcVal *_c642_0=nc_pop(&sp,stack); NcVal *_arr642[]={_c642_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr642,1)); }
+  { NcVal *_a643_1=nc_pop(&sp,stack); NcVal *_a643_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a643_0,_a643_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12617,16 +12690,16 @@ lbl_nc_fn___L426__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L428__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c652_0=nc_pop(&sp,stack); NcVal *_arr652[]={_c652_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr652,1)); }
+  { NcVal *_c653_0=nc_pop(&sp,stack); NcVal *_arr653[]={_c653_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr653,1)); }
   nc_store(vars, varnames, &nvars, "catch_lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c655_0=nc_pop(&sp,stack); NcVal *_arr655[]={_c655_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr655,1)); }
+  { NcVal *_c656_0=nc_pop(&sp,stack); NcVal *_arr656[]={_c656_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(_arr656,1)); }
   nc_store(vars, varnames, &nvars, "after_lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("TRY_BEGIN"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "catch_lbl"));
-  { NcVal *_c660_1=nc_pop(&sp,stack); NcVal *_c660_0=nc_pop(&sp,stack); NcVal *_arr660[]={_c660_0,_c660_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr660,2)); }
-  { NcVal *_a661_1=nc_pop(&sp,stack); NcVal *_a661_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a661_0,_a661_1)); }
+  { NcVal *_c661_1=nc_pop(&sp,stack); NcVal *_c661_0=nc_pop(&sp,stack); NcVal *_arr661[]={_c661_0,_c661_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr661,2)); }
+  { NcVal *_a662_1=nc_pop(&sp,stack); NcVal *_a662_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a662_0,_a662_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12635,42 +12708,42 @@ lbl_nc_fn___L426__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c670_2=nc_pop(&sp,stack); NcVal *_c670_1=nc_pop(&sp,stack); NcVal *_c670_0=nc_pop(&sp,stack); NcVal *_arr670[]={_c670_0,_c670_1,_c670_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr670,3)); }
+  { NcVal *_c671_2=nc_pop(&sp,stack); NcVal *_c671_1=nc_pop(&sp,stack); NcVal *_c671_0=nc_pop(&sp,stack); NcVal *_arr671[]={_c671_0,_c671_1,_c671_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr671,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("TRY_END"));
-  { NcVal *_c674_0=nc_pop(&sp,stack); NcVal *_arr674[]={_c674_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr674,1)); }
-  { NcVal *_a675_1=nc_pop(&sp,stack); NcVal *_a675_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a675_0,_a675_1)); }
+  { NcVal *_c675_0=nc_pop(&sp,stack); NcVal *_arr675[]={_c675_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr675,1)); }
+  { NcVal *_a676_1=nc_pop(&sp,stack); NcVal *_a676_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a676_0,_a676_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "after_lbl"));
-  { NcVal *_c680_1=nc_pop(&sp,stack); NcVal *_c680_0=nc_pop(&sp,stack); NcVal *_arr680[]={_c680_0,_c680_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr680,2)); }
-  { NcVal *_a681_1=nc_pop(&sp,stack); NcVal *_a681_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a681_0,_a681_1)); }
+  { NcVal *_c681_1=nc_pop(&sp,stack); NcVal *_c681_0=nc_pop(&sp,stack); NcVal *_arr681[]={_c681_0,_c681_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr681,2)); }
+  { NcVal *_a682_1=nc_pop(&sp,stack); NcVal *_a682_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a682_0,_a682_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "catch_lbl"));
-  { NcVal *_c686_1=nc_pop(&sp,stack); NcVal *_c686_0=nc_pop(&sp,stack); NcVal *_arr686[]={_c686_0,_c686_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr686,2)); }
-  { NcVal *_a687_1=nc_pop(&sp,stack); NcVal *_a687_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a687_0,_a687_1)); }
+  { NcVal *_c687_1=nc_pop(&sp,stack); NcVal *_c687_0=nc_pop(&sp,stack); NcVal *_arr687[]={_c687_0,_c687_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr687,2)); }
+  { NcVal *_a688_1=nc_pop(&sp,stack); NcVal *_a688_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a688_0,_a688_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("TRY_END"));
-  { NcVal *_c691_0=nc_pop(&sp,stack); NcVal *_arr691[]={_c691_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr691,1)); }
-  { NcVal *_a692_1=nc_pop(&sp,stack); NcVal *_a692_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a692_0,_a692_1)); }
+  { NcVal *_c692_0=nc_pop(&sp,stack); NcVal *_arr692[]={_c692_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr692,1)); }
+  { NcVal *_a693_1=nc_pop(&sp,stack); NcVal *_a693_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a693_0,_a693_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_EXCEPTION"));
-  { NcVal *_c696_0=nc_pop(&sp,stack); NcVal *_arr696[]={_c696_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr696,1)); }
-  { NcVal *_a697_1=nc_pop(&sp,stack); NcVal *_a697_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a697_0,_a697_1)); }
+  { NcVal *_c697_0=nc_pop(&sp,stack); NcVal *_arr697[]={_c697_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr697,1)); }
+  { NcVal *_a698_1=nc_pop(&sp,stack); NcVal *_a698_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a698_0,_a698_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c704_1=nc_pop(&sp,stack); NcVal *_c704_0=nc_pop(&sp,stack); NcVal *_arr704[]={_c704_0,_c704_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr704,2)); }
-  { NcVal *_a705_1=nc_pop(&sp,stack); NcVal *_a705_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a705_0,_a705_1)); }
+  { NcVal *_c705_1=nc_pop(&sp,stack); NcVal *_c705_0=nc_pop(&sp,stack); NcVal *_arr705[]={_c705_0,_c705_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr705,2)); }
+  { NcVal *_a706_1=nc_pop(&sp,stack); NcVal *_a706_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a706_0,_a706_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12679,13 +12752,13 @@ lbl_nc_fn___L426__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c714_2=nc_pop(&sp,stack); NcVal *_c714_1=nc_pop(&sp,stack); NcVal *_c714_0=nc_pop(&sp,stack); NcVal *_arr714[]={_c714_0,_c714_1,_c714_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr714,3)); }
+  { NcVal *_c715_2=nc_pop(&sp,stack); NcVal *_c715_1=nc_pop(&sp,stack); NcVal *_c715_0=nc_pop(&sp,stack); NcVal *_arr715[]={_c715_0,_c715_1,_c715_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr715,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "after_lbl"));
-  { NcVal *_c719_1=nc_pop(&sp,stack); NcVal *_c719_0=nc_pop(&sp,stack); NcVal *_arr719[]={_c719_0,_c719_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr719,2)); }
-  { NcVal *_a720_1=nc_pop(&sp,stack); NcVal *_a720_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a720_0,_a720_1)); }
+  { NcVal *_c720_1=nc_pop(&sp,stack); NcVal *_c720_0=nc_pop(&sp,stack); NcVal *_arr720[]={_c720_0,_c720_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr720,2)); }
+  { NcVal *_a721_1=nc_pop(&sp,stack); NcVal *_a721_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a721_0,_a721_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12697,7 +12770,7 @@ lbl_nc_fn___L428__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a732_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a732_0)); }
+  { NcVal *_a733_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a733_0)); }
   nc_store(vars, varnames, &nvars, "loop_n", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
@@ -12707,6 +12780,7 @@ lbl_nc_fn___L428__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_str("__iter_lst_"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -12744,90 +12818,90 @@ lbl_nc_fn___L428__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c779_2=nc_pop(&sp,stack); NcVal *_c779_1=nc_pop(&sp,stack); NcVal *_c779_0=nc_pop(&sp,stack); NcVal *_arr779[]={_c779_0,_c779_1,_c779_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr779,3)); }
+  { NcVal *_c781_2=nc_pop(&sp,stack); NcVal *_c781_1=nc_pop(&sp,stack); NcVal *_c781_0=nc_pop(&sp,stack); NcVal *_arr781[]={_c781_0,_c781_1,_c781_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr781,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_liste_var"));
-  { NcVal *_c784_1=nc_pop(&sp,stack); NcVal *_c784_0=nc_pop(&sp,stack); NcVal *_arr784[]={_c784_0,_c784_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr784,2)); }
-  { NcVal *_a785_1=nc_pop(&sp,stack); NcVal *_a785_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a785_0,_a785_1)); }
+  { NcVal *_c786_1=nc_pop(&sp,stack); NcVal *_c786_0=nc_pop(&sp,stack); NcVal *_arr786[]={_c786_0,_c786_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr786,2)); }
+  { NcVal *_a787_1=nc_pop(&sp,stack); NcVal *_a787_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a787_0,_a787_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("PUSH_CONST"));
   nc_push(&sp, stack, nc_int(0LL));
-  { NcVal *_c790_1=nc_pop(&sp,stack); NcVal *_c790_0=nc_pop(&sp,stack); NcVal *_arr790[]={_c790_0,_c790_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr790,2)); }
-  { NcVal *_a791_1=nc_pop(&sp,stack); NcVal *_a791_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a791_0,_a791_1)); }
+  { NcVal *_c792_1=nc_pop(&sp,stack); NcVal *_c792_0=nc_pop(&sp,stack); NcVal *_arr792[]={_c792_0,_c792_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr792,2)); }
+  { NcVal *_a793_1=nc_pop(&sp,stack); NcVal *_a793_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a793_0,_a793_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_idx_var"));
-  { NcVal *_c796_1=nc_pop(&sp,stack); NcVal *_c796_0=nc_pop(&sp,stack); NcVal *_arr796[]={_c796_0,_c796_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr796,2)); }
-  { NcVal *_a797_1=nc_pop(&sp,stack); NcVal *_a797_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a797_0,_a797_1)); }
+  { NcVal *_c798_1=nc_pop(&sp,stack); NcVal *_c798_0=nc_pop(&sp,stack); NcVal *_arr798[]={_c798_0,_c798_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr798,2)); }
+  { NcVal *_a799_1=nc_pop(&sp,stack); NcVal *_a799_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a799_0,_a799_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_cont_lbl"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c802_2=nc_pop(&sp,stack); NcVal *_c802_1=nc_pop(&sp,stack); NcVal *_c802_0=nc_pop(&sp,stack); NcVal *_arr802[]={_c802_0,_c802_1,_c802_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr802,3)); }
+  { NcVal *_c804_2=nc_pop(&sp,stack); NcVal *_c804_1=nc_pop(&sp,stack); NcVal *_c804_0=nc_pop(&sp,stack); NcVal *_arr804[]={_c804_0,_c804_1,_c804_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr804,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_start_lbl"));
-  { NcVal *_c807_1=nc_pop(&sp,stack); NcVal *_c807_0=nc_pop(&sp,stack); NcVal *_arr807[]={_c807_0,_c807_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr807,2)); }
-  { NcVal *_a808_1=nc_pop(&sp,stack); NcVal *_a808_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a808_0,_a808_1)); }
+  { NcVal *_c809_1=nc_pop(&sp,stack); NcVal *_c809_0=nc_pop(&sp,stack); NcVal *_arr809[]={_c809_0,_c809_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr809,2)); }
+  { NcVal *_a810_1=nc_pop(&sp,stack); NcVal *_a810_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a810_0,_a810_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_idx_var"));
-  { NcVal *_c813_1=nc_pop(&sp,stack); NcVal *_c813_0=nc_pop(&sp,stack); NcVal *_arr813[]={_c813_0,_c813_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr813,2)); }
-  { NcVal *_a814_1=nc_pop(&sp,stack); NcVal *_a814_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a814_0,_a814_1)); }
+  { NcVal *_c815_1=nc_pop(&sp,stack); NcVal *_c815_0=nc_pop(&sp,stack); NcVal *_arr815[]={_c815_0,_c815_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr815,2)); }
+  { NcVal *_a816_1=nc_pop(&sp,stack); NcVal *_a816_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a816_0,_a816_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_liste_var"));
-  { NcVal *_c819_1=nc_pop(&sp,stack); NcVal *_c819_0=nc_pop(&sp,stack); NcVal *_arr819[]={_c819_0,_c819_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr819,2)); }
-  { NcVal *_a820_1=nc_pop(&sp,stack); NcVal *_a820_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a820_0,_a820_1)); }
+  { NcVal *_c821_1=nc_pop(&sp,stack); NcVal *_c821_0=nc_pop(&sp,stack); NcVal *_arr821[]={_c821_0,_c821_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr821,2)); }
+  { NcVal *_a822_1=nc_pop(&sp,stack); NcVal *_a822_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a822_0,_a822_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("builtin.lengde"));
   nc_push(&sp, stack, nc_int(1LL));
-  { NcVal *_c825_1=nc_pop(&sp,stack); NcVal *_c825_0=nc_pop(&sp,stack); NcVal *_arr825[]={_c825_0,_c825_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_kall(_arr825,2)); }
-  { NcVal *_a826_1=nc_pop(&sp,stack); NcVal *_a826_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a826_0,_a826_1)); }
+  { NcVal *_c827_1=nc_pop(&sp,stack); NcVal *_c827_0=nc_pop(&sp,stack); NcVal *_arr827[]={_c827_0,_c827_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_kall(_arr827,2)); }
+  { NcVal *_a828_1=nc_pop(&sp,stack); NcVal *_a828_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a828_0,_a828_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("COMPARE_LT"));
-  { NcVal *_c830_0=nc_pop(&sp,stack); NcVal *_arr830[]={_c830_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr830,1)); }
-  { NcVal *_a831_1=nc_pop(&sp,stack); NcVal *_a831_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a831_0,_a831_1)); }
+  { NcVal *_c832_0=nc_pop(&sp,stack); NcVal *_arr832[]={_c832_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr832,1)); }
+  { NcVal *_a833_1=nc_pop(&sp,stack); NcVal *_a833_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a833_0,_a833_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c836_1=nc_pop(&sp,stack); NcVal *_c836_0=nc_pop(&sp,stack); NcVal *_arr836[]={_c836_0,_c836_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr836,2)); }
-  { NcVal *_a837_1=nc_pop(&sp,stack); NcVal *_a837_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a837_0,_a837_1)); }
+  { NcVal *_c838_1=nc_pop(&sp,stack); NcVal *_c838_0=nc_pop(&sp,stack); NcVal *_arr838[]={_c838_0,_c838_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr838,2)); }
+  { NcVal *_a839_1=nc_pop(&sp,stack); NcVal *_a839_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a839_0,_a839_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_liste_var"));
-  { NcVal *_c842_1=nc_pop(&sp,stack); NcVal *_c842_0=nc_pop(&sp,stack); NcVal *_arr842[]={_c842_0,_c842_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr842,2)); }
-  { NcVal *_a843_1=nc_pop(&sp,stack); NcVal *_a843_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a843_0,_a843_1)); }
+  { NcVal *_c844_1=nc_pop(&sp,stack); NcVal *_c844_0=nc_pop(&sp,stack); NcVal *_arr844[]={_c844_0,_c844_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr844,2)); }
+  { NcVal *_a845_1=nc_pop(&sp,stack); NcVal *_a845_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a845_0,_a845_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_idx_var"));
-  { NcVal *_c848_1=nc_pop(&sp,stack); NcVal *_c848_0=nc_pop(&sp,stack); NcVal *_arr848[]={_c848_0,_c848_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr848,2)); }
-  { NcVal *_a849_1=nc_pop(&sp,stack); NcVal *_a849_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a849_0,_a849_1)); }
+  { NcVal *_c850_1=nc_pop(&sp,stack); NcVal *_c850_0=nc_pop(&sp,stack); NcVal *_arr850[]={_c850_0,_c850_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr850,2)); }
+  { NcVal *_a851_1=nc_pop(&sp,stack); NcVal *_a851_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a851_0,_a851_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("INDEX_GET"));
-  { NcVal *_c853_0=nc_pop(&sp,stack); NcVal *_arr853[]={_c853_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr853,1)); }
-  { NcVal *_a854_1=nc_pop(&sp,stack); NcVal *_a854_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a854_0,_a854_1)); }
+  { NcVal *_c855_0=nc_pop(&sp,stack); NcVal *_arr855[]={_c855_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr855,1)); }
+  { NcVal *_a856_1=nc_pop(&sp,stack); NcVal *_a856_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a856_0,_a856_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c861_1=nc_pop(&sp,stack); NcVal *_c861_0=nc_pop(&sp,stack); NcVal *_arr861[]={_c861_0,_c861_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr861,2)); }
-  { NcVal *_a862_1=nc_pop(&sp,stack); NcVal *_a862_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a862_0,_a862_1)); }
+  { NcVal *_c863_1=nc_pop(&sp,stack); NcVal *_c863_0=nc_pop(&sp,stack); NcVal *_arr863[]={_c863_0,_c863_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr863,2)); }
+  { NcVal *_a864_1=nc_pop(&sp,stack); NcVal *_a864_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a864_0,_a864_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12836,51 +12910,51 @@ lbl_nc_fn___L428__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c871_2=nc_pop(&sp,stack); NcVal *_c871_1=nc_pop(&sp,stack); NcVal *_c871_0=nc_pop(&sp,stack); NcVal *_arr871[]={_c871_0,_c871_1,_c871_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr871,3)); }
+  { NcVal *_c873_2=nc_pop(&sp,stack); NcVal *_c873_1=nc_pop(&sp,stack); NcVal *_c873_0=nc_pop(&sp,stack); NcVal *_arr873[]={_c873_0,_c873_1,_c873_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr873,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_cont_lbl"));
-  { NcVal *_c876_1=nc_pop(&sp,stack); NcVal *_c876_0=nc_pop(&sp,stack); NcVal *_arr876[]={_c876_0,_c876_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr876,2)); }
-  { NcVal *_a877_1=nc_pop(&sp,stack); NcVal *_a877_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a877_0,_a877_1)); }
+  { NcVal *_c878_1=nc_pop(&sp,stack); NcVal *_c878_0=nc_pop(&sp,stack); NcVal *_arr878[]={_c878_0,_c878_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr878,2)); }
+  { NcVal *_a879_1=nc_pop(&sp,stack); NcVal *_a879_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a879_0,_a879_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_idx_var"));
-  { NcVal *_c882_1=nc_pop(&sp,stack); NcVal *_c882_0=nc_pop(&sp,stack); NcVal *_arr882[]={_c882_0,_c882_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr882,2)); }
-  { NcVal *_a883_1=nc_pop(&sp,stack); NcVal *_a883_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a883_0,_a883_1)); }
+  { NcVal *_c884_1=nc_pop(&sp,stack); NcVal *_c884_0=nc_pop(&sp,stack); NcVal *_arr884[]={_c884_0,_c884_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr884,2)); }
+  { NcVal *_a885_1=nc_pop(&sp,stack); NcVal *_a885_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a885_0,_a885_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("PUSH_CONST"));
   nc_push(&sp, stack, nc_int(1LL));
-  { NcVal *_c888_1=nc_pop(&sp,stack); NcVal *_c888_0=nc_pop(&sp,stack); NcVal *_arr888[]={_c888_0,_c888_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr888,2)); }
-  { NcVal *_a889_1=nc_pop(&sp,stack); NcVal *_a889_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a889_0,_a889_1)); }
+  { NcVal *_c890_1=nc_pop(&sp,stack); NcVal *_c890_0=nc_pop(&sp,stack); NcVal *_arr890[]={_c890_0,_c890_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(_arr890,2)); }
+  { NcVal *_a891_1=nc_pop(&sp,stack); NcVal *_a891_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a891_0,_a891_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("BINARY_ADD"));
-  { NcVal *_c893_0=nc_pop(&sp,stack); NcVal *_arr893[]={_c893_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr893,1)); }
-  { NcVal *_a894_1=nc_pop(&sp,stack); NcVal *_a894_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a894_0,_a894_1)); }
+  { NcVal *_c895_0=nc_pop(&sp,stack); NcVal *_arr895[]={_c895_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr895,1)); }
+  { NcVal *_a896_1=nc_pop(&sp,stack); NcVal *_a896_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a896_0,_a896_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "iter_idx_var"));
-  { NcVal *_c899_1=nc_pop(&sp,stack); NcVal *_c899_0=nc_pop(&sp,stack); NcVal *_arr899[]={_c899_0,_c899_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr899,2)); }
-  { NcVal *_a900_1=nc_pop(&sp,stack); NcVal *_a900_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a900_0,_a900_1)); }
+  { NcVal *_c901_1=nc_pop(&sp,stack); NcVal *_c901_0=nc_pop(&sp,stack); NcVal *_arr901[]={_c901_0,_c901_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr901,2)); }
+  { NcVal *_a902_1=nc_pop(&sp,stack); NcVal *_a902_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a902_0,_a902_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_start_lbl"));
-  { NcVal *_c905_1=nc_pop(&sp,stack); NcVal *_c905_0=nc_pop(&sp,stack); NcVal *_arr905[]={_c905_0,_c905_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr905,2)); }
-  { NcVal *_a906_1=nc_pop(&sp,stack); NcVal *_a906_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a906_0,_a906_1)); }
+  { NcVal *_c907_1=nc_pop(&sp,stack); NcVal *_c907_0=nc_pop(&sp,stack); NcVal *_arr907[]={_c907_0,_c907_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr907,2)); }
+  { NcVal *_a908_1=nc_pop(&sp,stack); NcVal *_a908_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a908_0,_a908_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c911_1=nc_pop(&sp,stack); NcVal *_c911_0=nc_pop(&sp,stack); NcVal *_arr911[]={_c911_0,_c911_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr911,2)); }
-  { NcVal *_a912_1=nc_pop(&sp,stack); NcVal *_a912_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a912_0,_a912_1)); }
+  { NcVal *_c913_1=nc_pop(&sp,stack); NcVal *_c913_0=nc_pop(&sp,stack); NcVal *_arr913[]={_c913_0,_c913_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr913,2)); }
+  { NcVal *_a914_1=nc_pop(&sp,stack); NcVal *_a914_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a914_0,_a914_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c915_0=nc_pop(&sp,stack); NcVal *_arr915[]={_c915_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr915,1)); }
+  { NcVal *_c917_0=nc_pop(&sp,stack); NcVal *_arr917[]={_c917_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr917,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -12892,7 +12966,7 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a927_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a927_0)); }
+  { NcVal *_a929_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a929_0)); }
   nc_store(vars, varnames, &nvars, "loop_n", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("teller"));
@@ -12902,6 +12976,7 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_str("__forr_start_"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -12927,34 +13002,34 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c962_2=nc_pop(&sp,stack); NcVal *_c962_1=nc_pop(&sp,stack); NcVal *_c962_0=nc_pop(&sp,stack); NcVal *_arr962[]={_c962_0,_c962_1,_c962_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr962,3)); }
+  { NcVal *_c965_2=nc_pop(&sp,stack); NcVal *_c965_1=nc_pop(&sp,stack); NcVal *_c965_0=nc_pop(&sp,stack); NcVal *_arr965[]={_c965_0,_c965_1,_c965_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr965,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c969_1=nc_pop(&sp,stack); NcVal *_c969_0=nc_pop(&sp,stack); NcVal *_arr969[]={_c969_0,_c969_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr969,2)); }
-  { NcVal *_a970_1=nc_pop(&sp,stack); NcVal *_a970_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a970_0,_a970_1)); }
+  { NcVal *_c972_1=nc_pop(&sp,stack); NcVal *_c972_0=nc_pop(&sp,stack); NcVal *_arr972[]={_c972_0,_c972_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr972,2)); }
+  { NcVal *_a973_1=nc_pop(&sp,stack); NcVal *_a973_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a973_0,_a973_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_cont_lbl"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c975_2=nc_pop(&sp,stack); NcVal *_c975_1=nc_pop(&sp,stack); NcVal *_c975_0=nc_pop(&sp,stack); NcVal *_arr975[]={_c975_0,_c975_1,_c975_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr975,3)); }
+  { NcVal *_c978_2=nc_pop(&sp,stack); NcVal *_c978_1=nc_pop(&sp,stack); NcVal *_c978_0=nc_pop(&sp,stack); NcVal *_arr978[]={_c978_0,_c978_1,_c978_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(_arr978,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_start_lbl"));
-  { NcVal *_c980_1=nc_pop(&sp,stack); NcVal *_c980_0=nc_pop(&sp,stack); NcVal *_arr980[]={_c980_0,_c980_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr980,2)); }
-  { NcVal *_a981_1=nc_pop(&sp,stack); NcVal *_a981_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a981_0,_a981_1)); }
+  { NcVal *_c983_1=nc_pop(&sp,stack); NcVal *_c983_0=nc_pop(&sp,stack); NcVal *_arr983[]={_c983_0,_c983_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr983,2)); }
+  { NcVal *_a984_1=nc_pop(&sp,stack); NcVal *_a984_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a984_0,_a984_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c988_1=nc_pop(&sp,stack); NcVal *_c988_0=nc_pop(&sp,stack); NcVal *_arr988[]={_c988_0,_c988_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr988,2)); }
-  { NcVal *_a989_1=nc_pop(&sp,stack); NcVal *_a989_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a989_0,_a989_1)); }
+  { NcVal *_c991_1=nc_pop(&sp,stack); NcVal *_c991_0=nc_pop(&sp,stack); NcVal *_arr991[]={_c991_0,_c991_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr991,2)); }
+  { NcVal *_a992_1=nc_pop(&sp,stack); NcVal *_a992_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a992_0,_a992_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12963,18 +13038,18 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c998_2=nc_pop(&sp,stack); NcVal *_c998_1=nc_pop(&sp,stack); NcVal *_c998_0=nc_pop(&sp,stack); NcVal *_arr998[]={_c998_0,_c998_1,_c998_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr998,3)); }
+  { NcVal *_c1001_2=nc_pop(&sp,stack); NcVal *_c1001_1=nc_pop(&sp,stack); NcVal *_c1001_0=nc_pop(&sp,stack); NcVal *_arr1001[]={_c1001_0,_c1001_1,_c1001_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr1001,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("COMPARE_LE"));
-  { NcVal *_c1002_0=nc_pop(&sp,stack); NcVal *_arr1002[]={_c1002_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1002,1)); }
-  { NcVal *_a1003_1=nc_pop(&sp,stack); NcVal *_a1003_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1003_0,_a1003_1)); }
+  { NcVal *_c1005_0=nc_pop(&sp,stack); NcVal *_arr1005[]={_c1005_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1005,1)); }
+  { NcVal *_a1006_1=nc_pop(&sp,stack); NcVal *_a1006_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1006_0,_a1006_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP_IF_FALSE"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c1008_1=nc_pop(&sp,stack); NcVal *_c1008_0=nc_pop(&sp,stack); NcVal *_arr1008[]={_c1008_0,_c1008_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1008,2)); }
-  { NcVal *_a1009_1=nc_pop(&sp,stack); NcVal *_a1009_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1009_0,_a1009_1)); }
+  { NcVal *_c1011_1=nc_pop(&sp,stack); NcVal *_c1011_0=nc_pop(&sp,stack); NcVal *_arr1011[]={_c1011_0,_c1011_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1011,2)); }
+  { NcVal *_a1012_1=nc_pop(&sp,stack); NcVal *_a1012_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1012_0,_a1012_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -12983,21 +13058,21 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_int(3LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c1018_2=nc_pop(&sp,stack); NcVal *_c1018_1=nc_pop(&sp,stack); NcVal *_c1018_0=nc_pop(&sp,stack); NcVal *_arr1018[]={_c1018_0,_c1018_1,_c1018_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr1018,3)); }
+  { NcVal *_c1021_2=nc_pop(&sp,stack); NcVal *_c1021_1=nc_pop(&sp,stack); NcVal *_c1021_0=nc_pop(&sp,stack); NcVal *_arr1021[]={_c1021_0,_c1021_1,_c1021_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(_arr1021,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_cont_lbl"));
-  { NcVal *_c1023_1=nc_pop(&sp,stack); NcVal *_c1023_0=nc_pop(&sp,stack); NcVal *_arr1023[]={_c1023_0,_c1023_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1023,2)); }
-  { NcVal *_a1024_1=nc_pop(&sp,stack); NcVal *_a1024_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1024_0,_a1024_1)); }
+  { NcVal *_c1026_1=nc_pop(&sp,stack); NcVal *_c1026_0=nc_pop(&sp,stack); NcVal *_arr1026[]={_c1026_0,_c1026_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1026,2)); }
+  { NcVal *_a1027_1=nc_pop(&sp,stack); NcVal *_a1027_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1027_0,_a1027_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LOAD_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c1031_1=nc_pop(&sp,stack); NcVal *_c1031_0=nc_pop(&sp,stack); NcVal *_arr1031[]={_c1031_0,_c1031_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1031,2)); }
-  { NcVal *_a1032_1=nc_pop(&sp,stack); NcVal *_a1032_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1032_0,_a1032_1)); }
+  { NcVal *_c1034_1=nc_pop(&sp,stack); NcVal *_c1034_0=nc_pop(&sp,stack); NcVal *_arr1034[]={_c1034_0,_c1034_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1034,2)); }
+  { NcVal *_a1035_1=nc_pop(&sp,stack); NcVal *_a1035_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1035_0,_a1035_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -13006,35 +13081,35 @@ lbl_nc_fn___L430__:;
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c1041_2=nc_pop(&sp,stack); NcVal *_c1041_1=nc_pop(&sp,stack); NcVal *_c1041_0=nc_pop(&sp,stack); NcVal *_arr1041[]={_c1041_0,_c1041_1,_c1041_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr1041,3)); }
+  { NcVal *_c1044_2=nc_pop(&sp,stack); NcVal *_c1044_1=nc_pop(&sp,stack); NcVal *_c1044_0=nc_pop(&sp,stack); NcVal *_arr1044[]={_c1044_0,_c1044_1,_c1044_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr1044,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("BINARY_ADD"));
-  { NcVal *_c1045_0=nc_pop(&sp,stack); NcVal *_arr1045[]={_c1045_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1045,1)); }
-  { NcVal *_a1046_1=nc_pop(&sp,stack); NcVal *_a1046_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1046_0,_a1046_1)); }
+  { NcVal *_c1048_0=nc_pop(&sp,stack); NcVal *_arr1048[]={_c1048_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1048,1)); }
+  { NcVal *_a1049_1=nc_pop(&sp,stack); NcVal *_a1049_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1049_0,_a1049_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("STORE_NAME"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_str("verdi"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c1053_1=nc_pop(&sp,stack); NcVal *_c1053_0=nc_pop(&sp,stack); NcVal *_arr1053[]={_c1053_0,_c1053_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1053,2)); }
-  { NcVal *_a1054_1=nc_pop(&sp,stack); NcVal *_a1054_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1054_0,_a1054_1)); }
+  { NcVal *_c1056_1=nc_pop(&sp,stack); NcVal *_c1056_0=nc_pop(&sp,stack); NcVal *_arr1056[]={_c1056_0,_c1056_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1056,2)); }
+  { NcVal *_a1057_1=nc_pop(&sp,stack); NcVal *_a1057_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1057_0,_a1057_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("JUMP"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_start_lbl"));
-  { NcVal *_c1059_1=nc_pop(&sp,stack); NcVal *_c1059_0=nc_pop(&sp,stack); NcVal *_arr1059[]={_c1059_0,_c1059_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1059,2)); }
-  { NcVal *_a1060_1=nc_pop(&sp,stack); NcVal *_a1060_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1060_0,_a1060_1)); }
+  { NcVal *_c1062_1=nc_pop(&sp,stack); NcVal *_c1062_0=nc_pop(&sp,stack); NcVal *_arr1062[]={_c1062_0,_c1062_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1062,2)); }
+  { NcVal *_a1063_1=nc_pop(&sp,stack); NcVal *_a1063_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1063_0,_a1063_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("LABEL"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "loop_end_lbl"));
-  { NcVal *_c1065_1=nc_pop(&sp,stack); NcVal *_c1065_0=nc_pop(&sp,stack); NcVal *_arr1065[]={_c1065_0,_c1065_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1065,2)); }
-  { NcVal *_a1066_1=nc_pop(&sp,stack); NcVal *_a1066_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1066_0,_a1066_1)); }
+  { NcVal *_c1068_1=nc_pop(&sp,stack); NcVal *_c1068_0=nc_pop(&sp,stack); NcVal *_arr1068[]={_c1068_0,_c1068_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(_arr1068,2)); }
+  { NcVal *_a1069_1=nc_pop(&sp,stack); NcVal *_a1069_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1069_0,_a1069_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
-  { NcVal *_c1069_0=nc_pop(&sp,stack); NcVal *_arr1069[]={_c1069_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr1069,1)); }
+  { NcVal *_c1072_0=nc_pop(&sp,stack); NcVal *_arr1072[]={_c1072_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(_arr1072,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -13042,12 +13117,12 @@ lbl_nc_fn___L432__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
-  { NcVal *_c1077_2=nc_pop(&sp,stack); NcVal *_c1077_1=nc_pop(&sp,stack); NcVal *_c1077_0=nc_pop(&sp,stack); NcVal *_arr1077[]={_c1077_0,_c1077_1,_c1077_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr1077,3)); }
+  { NcVal *_c1080_2=nc_pop(&sp,stack); NcVal *_c1080_1=nc_pop(&sp,stack); NcVal *_c1080_0=nc_pop(&sp,stack); NcVal *_arr1080[]={_c1080_0,_c1080_1,_c1080_2}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(_arr1080,3)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_push(&sp, stack, nc_str("POP"));
-  { NcVal *_c1081_0=nc_pop(&sp,stack); NcVal *_arr1081[]={_c1081_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1081,1)); }
-  { NcVal *_a1082_1=nc_pop(&sp,stack); NcVal *_a1082_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1082_0,_a1082_1)); }
+  { NcVal *_c1084_0=nc_pop(&sp,stack); NcVal *_arr1084[]={_c1084_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(_arr1084,1)); }
+  { NcVal *_a1085_1=nc_pop(&sp,stack); NcVal *_a1085_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a1085_0,_a1085_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
@@ -13412,9 +13487,10 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_program(NcVal **ar
   nc_push(&sp, stack, nc_str("modul"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modul_namn"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ast_program"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modul_namn"));
-  { NcVal *_c8_1=nc_pop(&sp,stack); NcVal *_c8_0=nc_pop(&sp,stack); NcVal *_arr8[]={_c8_0,_c8_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_samla_web_annotasjonar(_arr8,2)); }
+  { NcVal *_c9_1=nc_pop(&sp,stack); NcVal *_c9_0=nc_pop(&sp,stack); NcVal *_arr9[]={_c9_0,_c9_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_samla_web_annotasjonar(_arr9,2)); }
   nc_store(vars, varnames, &nvars, "web_meta", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("funk_kart"));
@@ -13427,7 +13503,7 @@ lbl_nc_fn___L452__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ast_program"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a21_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a21_0)); }
+  { NcVal *_a22_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a22_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L453__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ast_program"));
@@ -13448,6 +13524,7 @@ lbl_nc_fn___L452__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_bool(1));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
 lbl_nc_fn___L454__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -13466,7 +13543,7 @@ lbl_nc_fn___L456__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ast_program"));
   nc_push(&sp, stack, nc_str("barn"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a60_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a60_0)); }
+  { NcVal *_a62_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a62_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L457__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ast_program"));
@@ -13483,11 +13560,11 @@ lbl_nc_fn___L456__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L458__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
-  { NcVal *_c77_1=nc_pop(&sp,stack); NcVal *_c77_0=nc_pop(&sp,stack); NcVal *_arr77[]={_c77_0,_c77_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_funksjon(_arr77,2)); }
+  { NcVal *_c79_1=nc_pop(&sp,stack); NcVal *_c79_0=nc_pop(&sp,stack); NcVal *_arr79[]={_c79_0,_c79_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_funksjon(_arr79,2)); }
   nc_store(vars, varnames, &nvars, "resultat", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_json_par"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
-  { NcVal *_a81_1=nc_pop(&sp,stack); NcVal *_a81_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a81_0,_a81_1)); }
+  { NcVal *_a83_1=nc_pop(&sp,stack); NcVal *_a83_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a83_0,_a83_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L458__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
@@ -13498,11 +13575,11 @@ lbl_nc_fn___L458__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L460__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "node"));
-  { NcVal *_c92_1=nc_pop(&sp,stack); NcVal *_c92_0=nc_pop(&sp,stack); NcVal *_arr92[]={_c92_0,_c92_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_test(_arr92,2)); }
+  { NcVal *_c94_1=nc_pop(&sp,stack); NcVal *_c94_0=nc_pop(&sp,stack); NcVal *_arr94[]={_c94_0,_c94_1}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_test(_arr94,2)); }
   nc_store(vars, varnames, &nvars, "resultat", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "test_json_par"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "resultat"));
-  { NcVal *_a96_1=nc_pop(&sp,stack); NcVal *_a96_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a96_0,_a96_1)); }
+  { NcVal *_a98_1=nc_pop(&sp,stack); NcVal *_a98_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a98_0,_a98_1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L460__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "j"));
@@ -13518,7 +13595,7 @@ lbl_nc_fn___L462__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "komp"));
   nc_push(&sp, stack, nc_str("lambda_funk_par"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a112_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a112_0)); }
+  { NcVal *_a114_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a114_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L463__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_json_par"));
@@ -13527,7 +13604,7 @@ lbl_nc_fn___L462__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "j"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a121_1=nc_pop(&sp,stack); NcVal *_a121_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a121_0,_a121_1)); }
+  { NcVal *_a123_1=nc_pop(&sp,stack); NcVal *_a123_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a123_0,_a123_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "j"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -13542,7 +13619,7 @@ lbl_nc_fn___L463__:;
 lbl_nc_fn___L464__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_json_par"));
-  { NcVal *_a136_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a136_0)); }
+  { NcVal *_a138_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a138_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L465__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_json_par"));
@@ -13553,7 +13630,7 @@ lbl_nc_fn___L464__:;
   nc_store(vars, varnames, &nvars, "sep_str", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "sep_str"));
-  { NcVal *_a147_1=nc_pop(&sp,stack); NcVal *_a147_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_index_of(_a147_0,_a147_1)); }
+  { NcVal *_a149_1=nc_pop(&sp,stack); NcVal *_a149_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_index_of(_a149_0,_a149_1)); }
   nc_store(vars, varnames, &nvars, "sep_pos", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "sep_pos"));
   nc_push(&sp, stack, nc_int(0LL));
@@ -13565,18 +13642,18 @@ lbl_nc_fn___L466__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
   nc_push(&sp, stack, nc_int(0LL));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "sep_pos"));
-  { NcVal *_a159_2=nc_pop(&sp,stack); NcVal *_a159_1=nc_pop(&sp,stack); NcVal *_a159_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a159_0,_a159_1,_a159_2)); }
+  { NcVal *_a161_2=nc_pop(&sp,stack); NcVal *_a161_1=nc_pop(&sp,stack); NcVal *_a161_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a161_0,_a161_1,_a161_2)); }
   nc_store(vars, varnames, &nvars, "fn_key", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "sep_pos"));
   nc_push(&sp, stack, nc_int(5LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "par"));
-  { NcVal *_a166_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a166_0)); }
-  { NcVal *_a167_2=nc_pop(&sp,stack); NcVal *_a167_1=nc_pop(&sp,stack); NcVal *_a167_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a167_0,_a167_1,_a167_2)); }
+  { NcVal *_a168_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a168_0)); }
+  { NcVal *_a169_2=nc_pop(&sp,stack); NcVal *_a169_1=nc_pop(&sp,stack); NcVal *_a169_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a169_0,_a169_1,_a169_2)); }
   nc_store(vars, varnames, &nvars, "fn_val", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn_key"));
-  { NcVal *_c170_0=nc_pop(&sp,stack); NcVal *_arr170[]={_c170_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr170,1)); }
+  { NcVal *_c172_0=nc_pop(&sp,stack); NcVal *_arr172[]={_c172_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr172,1)); }
   nc_push(&sp, stack, nc_str(":"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn_val"));
@@ -13584,7 +13661,7 @@ lbl_nc_fn___L466__:;
   nc_store(vars, varnames, &nvars, "del", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_deler"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "del"));
-  { NcVal *_a178_1=nc_pop(&sp,stack); NcVal *_a178_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a178_0,_a178_1)); }
+  { NcVal *_a180_1=nc_pop(&sp,stack); NcVal *_a180_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a180_0,_a180_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -13595,7 +13672,7 @@ lbl_nc_fn___L465__:;
   nc_push(&sp, stack, nc_str("{"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "funk_deler"));
   nc_push(&sp, stack, nc_str(","));
-  { NcVal *_a189_1=nc_pop(&sp,stack); NcVal *_a189_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_join(_a189_0,_a189_1)); }
+  { NcVal *_a191_1=nc_pop(&sp,stack); NcVal *_a191_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_join(_a191_0,_a191_1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str("}"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13607,14 +13684,14 @@ lbl_nc_fn___L465__:;
 lbl_nc_fn___L468__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "test_json_par"));
-  { NcVal *_a201_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a201_0)); }
+  { NcVal *_a203_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a203_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,-1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L469__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "test_deler"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "test_json_par"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a208_1=nc_pop(&sp,stack); NcVal *_a208_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a208_0,_a208_1)); }
+  { NcVal *_a210_1=nc_pop(&sp,stack); NcVal *_a210_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a210_0,_a210_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -13625,7 +13702,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_str("["));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "test_deler"));
   nc_push(&sp, stack, nc_str(","));
-  { NcVal *_a219_1=nc_pop(&sp,stack); NcVal *_a219_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_join(_a219_0,_a219_1)); }
+  { NcVal *_a221_1=nc_pop(&sp,stack); NcVal *_a221_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_join(_a221_0,_a221_1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str("]"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13644,7 +13721,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_str("\"entry\":"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "entry"));
-  { NcVal *_c238_0=nc_pop(&sp,stack); NcVal *_arr238[]={_c238_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr238,1)); }
+  { NcVal *_c240_0=nc_pop(&sp,stack); NcVal *_arr240[]={_c240_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(_arr240,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13659,7 +13736,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("route_handlers"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c253_0=nc_pop(&sp,stack); NcVal *_arr253[]={_c253_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_ruteliste(_arr253,1)); }
+  { NcVal *_c255_0=nc_pop(&sp,stack); NcVal *_arr255[]={_c255_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_ruteliste(_arr255,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13670,7 +13747,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("dependency_providers"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c264_0=nc_pop(&sp,stack); NcVal *_arr264[]={_c264_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_map_parliste(_arr264,1)); }
+  { NcVal *_c266_0=nc_pop(&sp,stack); NcVal *_arr266[]={_c266_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_map_parliste(_arr266,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13681,7 +13758,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("guard_providers"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c275_0=nc_pop(&sp,stack); NcVal *_arr275[]={_c275_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_map_parliste(_arr275,1)); }
+  { NcVal *_c277_0=nc_pop(&sp,stack); NcVal *_arr277[]={_c277_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_map_parliste(_arr277,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13692,7 +13769,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("request_middlewares"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c286_0=nc_pop(&sp,stack); NcVal *_arr286[]={_c286_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr286,1)); }
+  { NcVal *_c288_0=nc_pop(&sp,stack); NcVal *_arr288[]={_c288_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr288,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13703,7 +13780,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("response_middlewares"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c297_0=nc_pop(&sp,stack); NcVal *_arr297[]={_c297_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr297,1)); }
+  { NcVal *_c299_0=nc_pop(&sp,stack); NcVal *_arr299[]={_c299_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr299,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13714,7 +13791,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("error_middlewares"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c308_0=nc_pop(&sp,stack); NcVal *_arr308[]={_c308_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr308,1)); }
+  { NcVal *_c310_0=nc_pop(&sp,stack); NcVal *_arr310[]={_c310_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr310,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13725,7 +13802,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("startup_hooks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c319_0=nc_pop(&sp,stack); NcVal *_arr319[]={_c319_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr319,1)); }
+  { NcVal *_c321_0=nc_pop(&sp,stack); NcVal *_arr321[]={_c321_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr321,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13736,7 +13813,7 @@ lbl_nc_fn___L469__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "web_meta"));
   nc_push(&sp, stack, nc_str("shutdown_hooks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c330_0=nc_pop(&sp,stack); NcVal *_arr330[]={_c330_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr330,1)); }
+  { NcVal *_c332_0=nc_pop(&sp,stack); NcVal *_arr332[]={_c332_0}; nc_push(&sp,stack,nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(_arr332,1)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(","));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -13984,10 +14061,12 @@ static NcVal *nc_fn_selfhost_json_json_ny(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("s"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "s"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   nc_push(&sp, stack, nc_str("p"));
   nc_push(&sp, stack, nc_str("0"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -14070,6 +14149,7 @@ lbl_nc_fn___L2__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *_a27_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a27_0)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ch"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -14512,11 +14592,12 @@ lbl_nc_fn___L68__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "k"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "v"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c73_0=nc_pop(&sp,stack); NcVal *_arr73[]={_c73_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr73,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c76_0=nc_pop(&sp,stack); NcVal *_arr76[]={_c76_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr76,1)); }
+  { NcVal *_c74_0=nc_pop(&sp,stack); NcVal *_arr74[]={_c74_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr74,1)); }
+  nc_pop(&sp, stack);
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
+  { NcVal *_c77_0=nc_pop(&sp,stack); NcVal *_arr77[]={_c77_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr77,1)); }
   nc_store(vars, varnames, &nvars, "c", nc_pop(&sp, stack));
   goto lbl_nc_fn___L64__;
 lbl_nc_fn___L65__:;
@@ -14525,7 +14606,7 @@ lbl_nc_fn___L65__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L70__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c85_0=nc_pop(&sp,stack); NcVal *_arr85[]={_c85_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr85,1)); }
+  { NcVal *_c86_0=nc_pop(&sp,stack); NcVal *_arr86[]={_c86_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr86,1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L70__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "obj"));
@@ -14536,15 +14617,15 @@ lbl_nc_fn___L62__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L72__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c96_0=nc_pop(&sp,stack); NcVal *_arr96[]={_c96_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr96,1)); }
+  { NcVal *_c97_0=nc_pop(&sp,stack); NcVal *_arr97[]={_c97_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr97,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   nc_store(vars, varnames, &nvars, "lst", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c101_0=nc_pop(&sp,stack); NcVal *_arr101[]={_c101_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr101,1)); }
+  { NcVal *_c102_0=nc_pop(&sp,stack); NcVal *_arr102[]={_c102_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr102,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c104_0=nc_pop(&sp,stack); NcVal *_arr104[]={_c104_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr104,1)); }
+  { NcVal *_c105_0=nc_pop(&sp,stack); NcVal *_arr105[]={_c105_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr105,1)); }
   nc_store(vars, varnames, &nvars, "c", nc_pop(&sp, stack));
 lbl_nc_fn___L74__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "c"));
@@ -14564,24 +14645,24 @@ lbl_nc_fn___L77__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L78__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c124_0=nc_pop(&sp,stack); NcVal *_arr124[]={_c124_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr124,1)); }
+  { NcVal *_c125_0=nc_pop(&sp,stack); NcVal *_arr125[]={_c125_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr125,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c127_0=nc_pop(&sp,stack); NcVal *_arr127[]={_c127_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr127,1)); }
+  { NcVal *_c128_0=nc_pop(&sp,stack); NcVal *_arr128[]={_c128_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr128,1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L78__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c131_0=nc_pop(&sp,stack); NcVal *_arr131[]={_c131_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_verdi(_arr131,1)); }
+  { NcVal *_c132_0=nc_pop(&sp,stack); NcVal *_arr132[]={_c132_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_verdi(_arr132,1)); }
   nc_store(vars, varnames, &nvars, "v", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lst"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "v"));
-  { NcVal *_a135_1=nc_pop(&sp,stack); NcVal *_a135_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a135_0,_a135_1)); }
+  { NcVal *_a136_1=nc_pop(&sp,stack); NcVal *_a136_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a136_0,_a136_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c138_0=nc_pop(&sp,stack); NcVal *_arr138[]={_c138_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr138,1)); }
+  { NcVal *_c139_0=nc_pop(&sp,stack); NcVal *_arr139[]={_c139_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_ws(_arr139,1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c141_0=nc_pop(&sp,stack); NcVal *_arr141[]={_c141_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr141,1)); }
+  { NcVal *_c142_0=nc_pop(&sp,stack); NcVal *_arr142[]={_c142_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_peek(_arr142,1)); }
   nc_store(vars, varnames, &nvars, "c", nc_pop(&sp, stack));
   goto lbl_nc_fn___L74__;
 lbl_nc_fn___L75__:;
@@ -14590,14 +14671,14 @@ lbl_nc_fn___L75__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L80__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c150_0=nc_pop(&sp,stack); NcVal *_arr150[]={_c150_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr150,1)); }
+  { NcVal *_c151_0=nc_pop(&sp,stack); NcVal *_arr151[]={_c151_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_les_ch(_arr151,1)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L80__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "lst"));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L72__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c157_0=nc_pop(&sp,stack); NcVal *_arr157[]={_c157_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_p(_arr157,1)); }
+  { NcVal *_c158_0=nc_pop(&sp,stack); NcVal *_arr158[]={_c158_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_p(_arr158,1)); }
   nc_store(vars, varnames, &nvars, "p", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   nc_push(&sp, stack, nc_str("s"));
@@ -14608,47 +14689,50 @@ lbl_nc_fn___L72__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "p"));
   nc_push(&sp, stack, nc_int(5LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a168_2=nc_pop(&sp,stack); NcVal *_a168_1=nc_pop(&sp,stack); NcVal *_a168_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a168_0,_a168_1,_a168_2)); }
+  { NcVal *_a169_2=nc_pop(&sp,stack); NcVal *_a169_1=nc_pop(&sp,stack); NcVal *_a169_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_slice(_a169_0,_a169_1,_a169_2)); }
   nc_store(vars, varnames, &nvars, "rest", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "rest"));
   nc_push(&sp, stack, nc_str("true"));
-  { NcVal *_a172_1=nc_pop(&sp,stack); NcVal *_a172_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a172_0,_a172_1)); }
+  { NcVal *_a173_1=nc_pop(&sp,stack); NcVal *_a173_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a173_0,_a173_1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L82__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   nc_push(&sp, stack, nc_str("p"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "p"));
   nc_push(&sp, stack, nc_int(4LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a179_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a179_0)); }
+  { NcVal *_a180_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a180_0)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(1));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L82__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "rest"));
   nc_push(&sp, stack, nc_str("false"));
-  { NcVal *_a186_1=nc_pop(&sp,stack); NcVal *_a186_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a186_0,_a186_1)); }
+  { NcVal *_a188_1=nc_pop(&sp,stack); NcVal *_a188_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a188_0,_a188_1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L84__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   nc_push(&sp, stack, nc_str("p"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "p"));
   nc_push(&sp, stack, nc_int(5LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a193_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a193_0)); }
+  { NcVal *_a195_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a195_0)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_bool(0));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L84__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "rest"));
   nc_push(&sp, stack, nc_nil());
-  { NcVal *_a200_1=nc_pop(&sp,stack); NcVal *_a200_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a200_0,_a200_1)); }
+  { NcVal *_a203_1=nc_pop(&sp,stack); NcVal *_a203_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_starts_with(_a203_0,_a203_1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L86__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
   nc_push(&sp, stack, nc_str("p"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "p"));
   nc_push(&sp, stack, nc_int(4LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a207_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a207_0)); }
+  { NcVal *_a210_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a210_0)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_int(0LL));
   return nc_pop(&sp, stack);
 lbl_nc_fn___L86__:;
@@ -14673,7 +14757,7 @@ lbl_nc_fn___L90__:;
 lbl_nc_fn___L91__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L88__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "t"));
-  { NcVal *_c233_0=nc_pop(&sp,stack); NcVal *_arr233[]={_c233_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_tal(_arr233,1)); }
+  { NcVal *_c237_0=nc_pop(&sp,stack); NcVal *_arr237[]={_c237_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_tal(_arr237,1)); }
   return nc_pop(&sp, stack);
 lbl_nc_fn___L88__:;
   nc_push(&sp, stack, nc_str("JSON: uventa teikn: "));
@@ -14722,18 +14806,22 @@ static NcVal *nc_fn_selfhost_vm_ny_rammeverk(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("namn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_str("ip"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_str("vars"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_str("stack"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -14824,6 +14912,7 @@ static NcVal *nc_fn_selfhost_vm_ramme_sett_var(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "namn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_nil());
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -15202,6 +15291,7 @@ lbl_nc_fn___L60__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
 lbl_nc_fn___L62__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -15226,10 +15316,12 @@ static NcVal *nc_fn_selfhost_vm_ny_try_post(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_str("catch_label"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "catch_label"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "post"));
   nc_push(&sp, stack, nc_str("stack_djupn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "stack_djupn"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "post"));
   return nc_pop(&sp, stack);
   return nc_nil();
@@ -17185,6 +17277,7 @@ lbl_nc_fn___L372__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "nøkkel"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mi"));
   nc_push(&sp, stack, nc_int(2LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_sub(a,b)); }
@@ -17193,7 +17286,7 @@ lbl_nc_fn___L372__:;
 lbl_nc_fn___L373__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_map"));
-  { NcVal *_c634_1=nc_pop(&sp,stack); NcVal *_c634_0=nc_pop(&sp,stack); NcVal *_arr634[]={_c634_0,_c634_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr634,2)); }
+  { NcVal *_c635_1=nc_pop(&sp,stack); NcVal *_c635_0=nc_pop(&sp,stack); NcVal *_arr635[]={_c635_0,_c635_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr635,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17206,16 +17299,16 @@ lbl_nc_fn___L368__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L374__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c647_0=nc_pop(&sp,stack); NcVal *_arr647[]={_c647_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr647,1)); }
+  { NcVal *_c648_0=nc_pop(&sp,stack); NcVal *_arr648[]={_c648_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr648,1)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c650_0=nc_pop(&sp,stack); NcVal *_arr650[]={_c650_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr650,1)); }
+  { NcVal *_c651_0=nc_pop(&sp,stack); NcVal *_arr651[]={_c651_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr651,1)); }
   nc_store(vars, varnames, &nvars, "obj", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "obj"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_c656_1=nc_pop(&sp,stack); NcVal *_c656_0=nc_pop(&sp,stack); NcVal *_arr656[]={_c656_0,_c656_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr656,2)); }
+  { NcVal *_c657_1=nc_pop(&sp,stack); NcVal *_c657_0=nc_pop(&sp,stack); NcVal *_arr657[]={_c657_0,_c657_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr657,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17228,18 +17321,19 @@ lbl_nc_fn___L374__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L376__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c669_0=nc_pop(&sp,stack); NcVal *_arr669[]={_c669_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr669,1)); }
+  { NcVal *_c670_0=nc_pop(&sp,stack); NcVal *_arr670[]={_c670_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr670,1)); }
   nc_store(vars, varnames, &nvars, "verdi", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c672_0=nc_pop(&sp,stack); NcVal *_arr672[]={_c672_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr672,1)); }
+  { NcVal *_c673_0=nc_pop(&sp,stack); NcVal *_arr673[]={_c673_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr673,1)); }
   nc_store(vars, varnames, &nvars, "indeks", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c675_0=nc_pop(&sp,stack); NcVal *_arr675[]={_c675_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr675,1)); }
+  { NcVal *_c676_0=nc_pop(&sp,stack); NcVal *_arr676[]={_c676_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr676,1)); }
   nc_store(vars, varnames, &nvars, "obj", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "obj"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "indeks"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -17251,7 +17345,7 @@ lbl_nc_fn___L376__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L378__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c692_0=nc_pop(&sp,stack); NcVal *_arr692[]={_c692_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr692,1)); }
+  { NcVal *_c694_0=nc_pop(&sp,stack); NcVal *_arr694[]={_c694_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr694,1)); }
   nc_store(vars, varnames, &nvars, "obj", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "instr"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17260,8 +17354,8 @@ lbl_nc_fn___L376__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "obj"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "felt"));
-  { NcVal *_c701_1=nc_pop(&sp,stack); NcVal *_c701_0=nc_pop(&sp,stack); NcVal *_arr701[]={_c701_0,_c701_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_vm_sikker_get(_arr701,2)); }
-  { NcVal *_c702_1=nc_pop(&sp,stack); NcVal *_c702_0=nc_pop(&sp,stack); NcVal *_arr702[]={_c702_0,_c702_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr702,2)); }
+  { NcVal *_c703_1=nc_pop(&sp,stack); NcVal *_c703_0=nc_pop(&sp,stack); NcVal *_arr703[]={_c703_0,_c703_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_vm_sikker_get(_arr703,2)); }
+  { NcVal *_c704_1=nc_pop(&sp,stack); NcVal *_c704_0=nc_pop(&sp,stack); NcVal *_arr704[]={_c704_0,_c704_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr704,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17274,10 +17368,10 @@ lbl_nc_fn___L378__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L380__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c715_0=nc_pop(&sp,stack); NcVal *_arr715[]={_c715_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr715,1)); }
+  { NcVal *_c717_0=nc_pop(&sp,stack); NcVal *_arr717[]={_c717_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr717,1)); }
   nc_store(vars, varnames, &nvars, "verdi", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c718_0=nc_pop(&sp,stack); NcVal *_arr718[]={_c718_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr718,1)); }
+  { NcVal *_c720_0=nc_pop(&sp,stack); NcVal *_arr720[]={_c720_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr720,1)); }
   nc_store(vars, varnames, &nvars, "obj", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "instr"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17287,6 +17381,7 @@ lbl_nc_fn___L378__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "felt"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -17316,8 +17411,8 @@ lbl_nc_fn___L384__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L385__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_args_rev"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c757_0=nc_pop(&sp,stack); NcVal *_arr757[]={_c757_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr757,1)); }
-  { NcVal *_a758_1=nc_pop(&sp,stack); NcVal *_a758_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a758_0,_a758_1)); }
+  { NcVal *_c760_0=nc_pop(&sp,stack); NcVal *_arr760[]={_c760_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr760,1)); }
+  { NcVal *_a761_1=nc_pop(&sp,stack); NcVal *_a761_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a761_0,_a761_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ai"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17340,7 +17435,7 @@ lbl_nc_fn___L386__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_args_rev"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ari"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a781_1=nc_pop(&sp,stack); NcVal *_a781_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a781_0,_a781_1)); }
+  { NcVal *_a784_1=nc_pop(&sp,stack); NcVal *_a784_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a784_0,_a784_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ari"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17352,7 +17447,7 @@ lbl_nc_fn___L387__:;
   nc_store(vars, varnames, &nvars, "retur_verdi", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål_namn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
-  { NcVal *_c793_1=nc_pop(&sp,stack); NcVal *_c793_0=nc_pop(&sp,stack); NcVal *_arr793[]={_c793_0,_c793_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_finn_funksjon(_arr793,2)); }
+  { NcVal *_c796_1=nc_pop(&sp,stack); NcVal *_c796_0=nc_pop(&sp,stack); NcVal *_arr796[]={_c796_0,_c796_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_finn_funksjon(_arr796,2)); }
   nc_store(vars, varnames, &nvars, "løyst_namn", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "løyst_namn"));
   nc_push(&sp, stack, nc_str(""));
@@ -17364,18 +17459,18 @@ lbl_nc_fn___L387__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "djupn"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_c805_3=nc_pop(&sp,stack); NcVal *_c805_2=nc_pop(&sp,stack); NcVal *_c805_1=nc_pop(&sp,stack); NcVal *_c805_0=nc_pop(&sp,stack); NcVal *_arr805[]={_c805_0,_c805_1,_c805_2,_c805_3}; nc_push(&sp,stack,nc_fn_selfhost_vm_k__yr_funksjon(_arr805,4)); }
+  { NcVal *_c808_3=nc_pop(&sp,stack); NcVal *_c808_2=nc_pop(&sp,stack); NcVal *_c808_1=nc_pop(&sp,stack); NcVal *_c808_0=nc_pop(&sp,stack); NcVal *_arr808[]={_c808_0,_c808_1,_c808_2,_c808_3}; nc_push(&sp,stack,nc_fn_selfhost_vm_k__yr_funksjon(_arr808,4)); }
   nc_store(vars, varnames, &nvars, "retur_verdi", nc_pop(&sp, stack));
   goto lbl_nc_fn___L389__;
 lbl_nc_fn___L388__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål_namn"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_args"));
-  { NcVal *_c811_1=nc_pop(&sp,stack); NcVal *_c811_0=nc_pop(&sp,stack); NcVal *_arr811[]={_c811_0,_c811_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_kall_innebygd(_arr811,2)); }
+  { NcVal *_c814_1=nc_pop(&sp,stack); NcVal *_c814_0=nc_pop(&sp,stack); NcVal *_arr814[]={_c814_0,_c814_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_kall_innebygd(_arr814,2)); }
   nc_store(vars, varnames, &nvars, "retur_verdi", nc_pop(&sp, stack));
 lbl_nc_fn___L389__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "retur_verdi"));
-  { NcVal *_c816_1=nc_pop(&sp,stack); NcVal *_c816_0=nc_pop(&sp,stack); NcVal *_arr816[]={_c816_0,_c816_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr816,2)); }
+  { NcVal *_c819_1=nc_pop(&sp,stack); NcVal *_c819_0=nc_pop(&sp,stack); NcVal *_arr819[]={_c819_0,_c819_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr819,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17388,7 +17483,7 @@ lbl_nc_fn___L382__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L390__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c829_0=nc_pop(&sp,stack); NcVal *_arr829[]={_c829_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr829,1)); }
+  { NcVal *_c832_0=nc_pop(&sp,stack); NcVal *_arr832[]={_c832_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr832,1)); }
   nc_store(vars, varnames, &nvars, "ret_v", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ret_v"));
   return nc_pop(&sp, stack);
@@ -17404,13 +17499,13 @@ lbl_nc_fn___L390__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_str("stack"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a845_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a845_0)); }
+  { NcVal *_a848_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a848_0)); }
   nc_store(vars, varnames, &nvars, "stack_djupn", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "catch_lbl"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "stack_djupn"));
-  { NcVal *_c850_1=nc_pop(&sp,stack); NcVal *_c850_0=nc_pop(&sp,stack); NcVal *_arr850[]={_c850_0,_c850_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_ny_try_post(_arr850,2)); }
-  { NcVal *_a851_1=nc_pop(&sp,stack); NcVal *_a851_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a851_0,_a851_1)); }
+  { NcVal *_c853_1=nc_pop(&sp,stack); NcVal *_c853_0=nc_pop(&sp,stack); NcVal *_arr853[]={_c853_0,_c853_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_ny_try_post(_arr853,2)); }
+  { NcVal *_a854_1=nc_pop(&sp,stack); NcVal *_a854_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_legg_til(_a854_0,_a854_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17423,12 +17518,12 @@ lbl_nc_fn___L392__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L394__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
-  { NcVal *_a864_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a864_0)); }
+  { NcVal *_a867_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a867_0)); }
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L396__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
-  { NcVal *_a869_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern_siste(_a869_0)); }
+  { NcVal *_a872_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fjern_siste(_a872_0)); }
   nc_pop(&sp, stack);
 lbl_nc_fn___L396__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
@@ -17442,12 +17537,12 @@ lbl_nc_fn___L394__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L398__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c883_0=nc_pop(&sp,stack); NcVal *_arr883[]={_c883_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr883,1)); }
+  { NcVal *_c886_0=nc_pop(&sp,stack); NcVal *_arr886[]={_c886_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr886,1)); }
   nc_store(vars, varnames, &nvars, "unntak_melding", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_store(vars, varnames, &nvars, "siste_unntak", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
-  { NcVal *_a888_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a888_0)); }
+  { NcVal *_a891_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a891_0)); }
   nc_push(&sp, stack, nc_int(0LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L400__;
@@ -17456,7 +17551,7 @@ lbl_nc_fn___L394__:;
 lbl_nc_fn___L400__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
-  { NcVal *_a897_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a897_0)); }
+  { NcVal *_a900_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a900_0)); }
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_sub(a,b)); }
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
@@ -17467,7 +17562,7 @@ lbl_nc_fn___L400__:;
   nc_store(vars, varnames, &nvars, "catch_lbl", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "label_kart"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "catch_lbl"));
-  { NcVal *_a908_1=nc_pop(&sp,stack); NcVal *_a908_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_finnes_nokkel(_a908_0,_a908_1)); }
+  { NcVal *_a911_1=nc_pop(&sp,stack); NcVal *_a911_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_finnes_nokkel(_a911_0,_a911_1)); }
   { NcVal *a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(!nc_truthy(a))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L402__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
@@ -17481,12 +17576,12 @@ lbl_nc_fn___L404__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_str("stack"));
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
-  { NcVal *_a922_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a922_0)); }
+  { NcVal *_a925_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a925_0)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mål_djupn"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_cmp(a,b,1)); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L405__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c927_0=nc_pop(&sp,stack); NcVal *_arr927[]={_c927_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr927,1)); }
+  { NcVal *_c930_0=nc_pop(&sp,stack); NcVal *_arr930[]={_c930_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr930,1)); }
   nc_pop(&sp, stack);
   goto lbl_nc_fn___L404__;
 lbl_nc_fn___L405__:;
@@ -17502,7 +17597,7 @@ lbl_nc_fn___L398__:;
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L406__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "siste_unntak"));
-  { NcVal *_c943_1=nc_pop(&sp,stack); NcVal *_c943_0=nc_pop(&sp,stack); NcVal *_arr943[]={_c943_0,_c943_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr943,2)); }
+  { NcVal *_c946_1=nc_pop(&sp,stack); NcVal *_c946_0=nc_pop(&sp,stack); NcVal *_arr946[]={_c946_0,_c946_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_push(_arr946,2)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17515,11 +17610,11 @@ lbl_nc_fn___L406__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
   if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L408__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
-  { NcVal *_c956_0=nc_pop(&sp,stack); NcVal *_arr956[]={_c956_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr956,1)); }
+  { NcVal *_c959_0=nc_pop(&sp,stack); NcVal *_arr959[]={_c959_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_stack_pop(_arr959,1)); }
   nc_store(vars, varnames, &nvars, "v", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "v"));
-  { NcVal *_a959_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a959_0)); }
-  { NcVal *_a960_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a960_0)); }
+  { NcVal *_a962_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a962_0)); }
+  { NcVal *_a963_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a963_0)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_push(&sp, stack, nc_int(1LL));
@@ -17536,7 +17631,7 @@ lbl_nc_fn___L408__:;
 lbl_nc_fn___L410__:;
   nc_push(&sp, stack, nc_str("Ukjent opcode: "));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "op"));
-  { NcVal *_a977_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a977_0)); }
+  { NcVal *_a980_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a980_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   { NcVal *e=nc_pop(&sp,stack); nc_throw(nc_to_str(e)); }
   goto lbl_nc_fn___L310__;
@@ -17628,10 +17723,12 @@ lbl_nc_fn___L0__:;
   nc_push(&sp, stack, nc_str("module"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modul_namn"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_fns"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_nøkkel"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "i"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -17642,8 +17739,9 @@ lbl_nc_fn___L1__:;
   nc_push(&sp, stack, nc_str("functions"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ny_fns"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ncb"));
-  { NcVal *_c55_0=nc_pop(&sp,stack); NcVal *_arr55[]={_c55_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_skriv(_arr55,1)); }
+  { NcVal *_c58_0=nc_pop(&sp,stack); NcVal *_arr58[]={_c58_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_skriv(_arr58,1)); }
   return nc_pop(&sp, stack);
   return nc_nil();
 }
@@ -17675,6 +17773,7 @@ lbl_nc_fn___L2__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "j"));
   nc_push(&sp, stack, nc_int(1LL));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
@@ -17843,60 +17942,73 @@ lbl_nc_fn___L5__:;
   nc_push(&sp, stack, nc_str("format"));
   nc_push(&sp, stack, nc_str("ncb-v1"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("entry"));
   nc_push(&sp, stack, nc_str("selfhost.bundler.start"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("imports"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("route_handlers"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("dependency_providers"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("guard_providers"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("request_middlewares"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("response_middlewares"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("error_middlewares"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("startup_hooks"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("shutdown_hooks"));
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("tests"));
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
   nc_push(&sp, stack, nc_str("functions"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "alle_fns"));
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
+  nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle_ncb"));
-  { NcVal *_c200_0=nc_pop(&sp,stack); NcVal *_arr200[]={_c200_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_skriv(_arr200,1)); }
+  { NcVal *_c213_0=nc_pop(&sp,stack); NcVal *_arr213[]={_c213_0}; nc_push(&sp,stack,nc_fn_selfhost_json_json_skriv(_arr213,1)); }
   nc_store(vars, varnames, &nvars, "bundle", nc_pop(&sp, stack));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "utfil"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle"));
-  { NcVal *_a204_1=nc_pop(&sp,stack); NcVal *_a204_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fil_skriv(_a204_0,_a204_1)); }
+  { NcVal *_a217_1=nc_pop(&sp,stack); NcVal *_a217_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_fil_skriv(_a217_0,_a217_1)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_str("Bundle: "));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "utfil"));
@@ -17904,12 +18016,12 @@ lbl_nc_fn___L5__:;
   nc_push(&sp, stack, nc_str(" ("));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "bundle"));
-  { NcVal *_a212_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a212_0)); }
-  { NcVal *_a213_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a213_0)); }
+  { NcVal *_a225_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_lengde(_a225_0)); }
+  { NcVal *_a226_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a226_0)); }
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_push(&sp, stack, nc_str(" bytes)\n"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
-  { NcVal *_a217_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a217_0)); }
+  { NcVal *_a230_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a230_0)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_nil());
   return nc_pop(&sp, stack);
@@ -18206,6 +18318,15 @@ lbl_nc_fn___L15__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "modular"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "v2"));
   { NcVal *_c74_2=nc_pop(&sp,stack); NcVal *_c74_1=nc_pop(&sp,stack); NcVal *_c74_0=nc_pop(&sp,stack); NcVal *_arr74[]={_c74_0,_c74_1,_c74_2}; nc_push(&sp,stack,nc_fn_builtin_host_kall_bygg_bundle(_arr74,3)); }
+  nc_store(vars, varnames, &nvars, "rc", nc_pop(&sp, stack));
+  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "rc"));
+  nc_push(&sp, stack, nc_int(0LL));
+  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(!nc_eq(a,b))); }
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L18__;
+  nc_push(&sp, stack, nc_int(1LL));
+  return nc_pop(&sp, stack);
+lbl_nc_fn___L18__:;
+  nc_push(&sp, stack, nc_int(0LL));
   return nc_pop(&sp, stack);
   return nc_nil();
 }
@@ -18226,51 +18347,51 @@ static NcVal *nc_fn_selfhost_nc_main_start(NcVal **args, int nargs) {
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   nc_push(&sp, stack, nc_str(""));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L18__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L20__;
   nc_push(&sp, stack, nc_str("selftest"));
   nc_store(vars, varnames, &nvars, "cmd", nc_pop(&sp, stack));
-lbl_nc_fn___L18__:;
+lbl_nc_fn___L20__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   nc_push(&sp, stack, nc_str("run"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L20__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L22__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "src"));
   nc_push(&sp, stack, nc_str(""));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L22__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L24__;
   nc_push(&sp, stack, nc_str("Feil: NORSCODE_FILE ikkje sett\n"));
   { NcVal *_a25_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a25_0)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_int(1LL));
   return nc_pop(&sp, stack);
-lbl_nc_fn___L22__:;
+lbl_nc_fn___L24__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "src"));
   { NcVal *_c31_0=nc_pop(&sp,stack); NcVal *_arr31[]={_c31_0}; nc_push(&sp,stack,nc_fn_selfhost_nc_main_nc_run(_arr31,1)); }
   return nc_pop(&sp, stack);
-lbl_nc_fn___L20__:;
+lbl_nc_fn___L22__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   nc_push(&sp, stack, nc_str("compile"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L24__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L26__;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "src"));
   nc_push(&sp, stack, nc_str(""));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L26__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L28__;
   nc_push(&sp, stack, nc_str("Feil: NORSCODE_FILE ikkje sett\n"));
   { NcVal *_a43_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a43_0)); }
   nc_pop(&sp, stack);
   nc_push(&sp, stack, nc_int(1LL));
   return nc_pop(&sp, stack);
-lbl_nc_fn___L26__:;
+lbl_nc_fn___L28__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "src"));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ut"));
   { NcVal *_c50_1=nc_pop(&sp,stack); NcVal *_c50_0=nc_pop(&sp,stack); NcVal *_arr50[]={_c50_0,_c50_1}; nc_push(&sp,stack,nc_fn_selfhost_nc_main_nc_compile(_arr50,2)); }
   return nc_pop(&sp, stack);
-lbl_nc_fn___L24__:;
+lbl_nc_fn___L26__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   nc_push(&sp, stack, nc_str("selftest"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L28__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L30__;
   nc_push(&sp, stack, nc_str("=== nc_main.no selftest ===\n"));
   { NcVal *_a58_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_skriv(_a58_0)); }
   nc_pop(&sp, stack);
@@ -18298,14 +18419,14 @@ lbl_nc_fn___L24__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ncb"));
   { NcVal *_c82_0=nc_pop(&sp,stack); NcVal *_arr82[]={_c82_0}; nc_push(&sp,stack,nc_fn_selfhost_nc_main_nc_k__yr_ncb_json(_arr82,1)); }
   return nc_pop(&sp, stack);
-lbl_nc_fn___L28__:;
+lbl_nc_fn___L30__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   nc_push(&sp, stack, nc_str("l5b-gen2"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L30__;
+  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L32__;
   { nc_push(&sp,stack,nc_fn_selfhost_nc_main_nc_l5b_gen2(NULL,0)); }
   return nc_pop(&sp, stack);
-lbl_nc_fn___L30__:;
+lbl_nc_fn___L32__:;
   nc_push(&sp, stack, nc_str("Ukjend NORSCODE_CMD: "));
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cmd"));
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }

@@ -37,19 +37,32 @@ printf '=== L5b: VM sjølvkompilering (byte-paritet) ===\n\n'
 
 printf '[1/3] Gen1: kompilator-bundle (C-dispatch)...\n'
 "$NC" bundle "${BUNDLE_ARGS[@]}" --output "$V1"
+if [ ! -f "$V1" ]; then
+    printf '  [FEIL] Gen1 skreiv ikkje %s\n' "$V1" >&2
+    exit 1
+fi
 V1_BYTES="$(wc -c < "$V1" | tr -d ' ')"
 printf '  ✓ %s bytes\n\n' "$V1_BYTES"
 
 printf '[2/3] Gen2: bundle via Gen1-bytekode (bygg_bundle)...\n'
-env NORSCODE_CMD=l5b-gen2 \
+_gen2_ec=0
+if ! env NORSCODE_CMD=l5b-gen2 \
     NORSCODE_L5B_V1="$V1" \
     NORSCODE_L5B_V2="$V2" \
     NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR" \
-    "$NATIVE"
+    "$NATIVE"; then
+    _gen2_ec=$?
+    printf '  [FEIL] l5b-gen2 feila (exit %d)\n' "$_gen2_ec" >&2
+    exit 1
+fi
+if [ ! -f "$V2" ]; then
+    printf '  [FEIL] Gen2 skreiv ikkje %s — sjekk l5b-gen2 og host_kall_bygg_bundle\n' "$V2" >&2
+    exit 1
+fi
 printf '\n'
 
 printf '[3/3] Byte-paritet Gen1 == Gen2...\n'
-if cmp -s "$V1" "$V2"; then
+if cmp -s "$V1" "$V2" 2>/dev/null; then
     printf '  [OK] %s bytes identiske\n\n' "$V1_BYTES"
     printf '=== L5b: BESTÅTT ===\n'
     printf 'Kompilator-bundle frå VM er byte-identisk med C-dispatch.\n'
