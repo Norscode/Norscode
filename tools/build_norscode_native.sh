@@ -192,26 +192,27 @@ mkdir -p "$(dirname "$OUT")"
 if copy_stage0_binary; then :
 elif download_release_binary; then
     printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
+elif bootstrap_c_present && build_from_bootstrap_c; then
+    :
 else
     platform="$(platform_name 2>/dev/null || printf '?')"
-    printf '\n=== Kunne ikkje skaffe seed for norscode_native ===\n' >&2
-    printf 'Legg norscode-%s i bootstrap/stage0/ eller publiser release-binær.\n' "$platform" >&2
+    printf '\n=== Kunne ikkje skaffe norscode_native ===\n' >&2
+    printf 'Legg norscode-%s i bootstrap/stage0/, publiser release-binær, eller commit bootstrap/c/ + clang.\n' "$platform" >&2
     exit 1
-fi
-
-if [ "$REGEN" != "1" ]; then
-    printf 'ℹ︎ Bruk seed-binær (ingen clang). Set REGEN=1 for stage-0 regen + clang.\n'
-    exit 0
 fi
 
 if [ "$REGEN" = "1" ]; then
     if regen_bootstrap_c && build_from_bootstrap_c; then exit 0; fi
-elif bootstrap_c_present && build_from_bootstrap_c; then
+    platform="$(platform_name 2>/dev/null || printf '?')"
+    printf '\n=== Kunne ikkje byggje norscode_native etter regen ===\n' >&2
+    printf 'Sjekk clang og køyr: bash tools/regen_native.sh --rebuild\n' >&2
+    exit 1
+fi
+
+if smoke_ok "$OUT"; then
+    printf 'ℹ︎ Klar (ingen regen). Set REGEN=1 for stage-0 regen + clang.\n'
     exit 0
 fi
 
-platform="$(platform_name 2>/dev/null || printf '?')"
-printf '\n=== Kunne ikkje byggje norscode_native etter regen ===\n' >&2
-printf 'Sjekk clang og køyr: bash tools/regen_native.sh --rebuild\n' >&2
-printf 'Tips: default utan REGEN brukar seed-binær og krev ikkje clang.\n' >&2
+printf 'Feil: norscode_native feila røyktest\n' >&2
 exit 1
