@@ -54,12 +54,26 @@ is_server_test() {
     return 1
 }
 
+# ─── CI: parser-stress / monolitt (køyr i eiga jobb, sjå native-*-slow i ci.yml)
+is_slow_test() {
+    case "$(basename "$1")" in
+        test_chunk_*|test_selfhost.no)
+            return 0;;
+    esac
+    return 1
+}
+
 # ─── Tellorar
 pass=0; fail=0; skip=0; total=0
 
 run_test() {
     _file="$1"
     _name="$(basename "$_file" .no)"
+
+    if [ "${NC_SLOW_TESTS:-0}" = "1" ] && ! is_slow_test "$_file"; then
+        return
+    fi
+
     total=$((total + 1))
 
     if is_server_test "$_file"; then
@@ -68,10 +82,20 @@ run_test() {
             printf '  %s⊘ skipped (server/async):%s %s\n' "$YLW" "$RST" "$_name"
         fi
         return
+    elif [ "${NC_CI:-0}" = "1" ] && is_slow_test "$_file"; then
+        skip=$((skip + 1))
+        if [ "${NC_VERBOSE:-0}" = "2" ]; then
+            printf '  %s⊘ skipped (ci-slow):%s %s\n' "$YLW" "$RST" "$_name"
+        fi
+        return
     fi
 
     if [ -n "$_NC_RUNNER" ]; then
-        _out=$(NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+        if command -v timeout >/dev/null 2>&1; then
+            _out=$(timeout "$TIMEOUT" env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+        else
+            _out=$(NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+        fi
     else
         _out=$(${_NC_RUN}"$_file" 2>&1) || true
     fi
@@ -118,7 +142,7 @@ if [ "$fail" -gt 0 ]; then
 else
     printf '  Feilet:   %d\n' "$fail"
 fi
-printf '  Hoppa:    %d  (server/async)\n' "$skip"
+printf '  Hoppa:    %d  (server/async eller ci-slow)\n' "$skip"
 printf '  Totalt:   %d\n' "$total"
 printf '\n'
 
