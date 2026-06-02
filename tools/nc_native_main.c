@@ -66,6 +66,7 @@ static NcVal *g_nc_closure_fwd;
 #define g_nc_closure g_nc_closure_fwd
 static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, int nargs, int depth);
 static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth);
+static int nc_val_til_exit(NcVal *v);
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
 static NcVal *nc_native_kompiler_kjelde(const char *src, const char *modul);
 
@@ -661,11 +662,32 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     if (!fns_v || fns_v->type != NC_MAP) return nc_int(1);
     char *entry = nc_to_str_raw(entry_v);
     if (!entry || !entry[0]) { free(entry); return nc_int(1); }
+    /* Ikkje la barne-NCB arve host NORSCODE_* (unngår driver-rekursjon ved nc run) */
+    const char *env_keys[] = {
+        "NORSCODE_CMD", "NORSCODE_FILE", "NORSCODE_OUTPUT",
+        "NORSCODE_MODULE", "NORSCODE_SOURCE", NULL
+    };
+    char *saved[8];
+    int nsaved = 0;
+    for (int i = 0; env_keys[i]; i++) {
+        const char *v = getenv(env_keys[i]);
+        saved[nsaved] = v ? strdup(v) : NULL;
+        nsaved++;
+        unsetenv(env_keys[i]);
+    }
     nc_ensure_sh_common();
     if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
-    nc_exec_call(fns_v, entry, NULL, 0, 0);
+    NcVal *r = nc_exec_call(fns_v, entry, NULL, 0, 0);
+    for (int i = 0; i < nsaved; i++) {
+        if (saved[i]) {
+            setenv(env_keys[i], saved[i], 1);
+            free(saved[i]);
+        } else {
+            unsetenv(env_keys[i]);
+        }
+    }
     free(entry);
-    return nc_int(0);
+    return nc_int(nc_val_til_exit(r));
 }
 
 static int nc_use_nc_main_host(void) {
