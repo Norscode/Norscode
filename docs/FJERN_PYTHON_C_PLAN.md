@@ -213,6 +213,14 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 **Omgang 5:** ✅ (2026-06) — `scripts/regen_fraser.no` erstatter `scripts/gen_expr_fraser.py`; `scripts/gen_expr_fraser.py` sletta; `find . -name '*.py'` gjev tom liste; identisk phrase-tabell (338 fraser); `./bin/nc regen-fraser` som ny CLI-kommando. Testsuite grønn etter regen.
 
-**Omgang 6 (pågår):** Grunnlag og ny runtime lagt: (1) kompilatorbug `INDEX_SET` utan `POP` fiksa; (2) `native_codegen.no` emit_data_op-bug fiksa; (3) `tools/nc_runtime_full.c` — komplett NcVal-runtime (994 linjer, x86-64 Linux, ingen libc): skriv, fil-I/O, JSON, map/liste/streng-ops, miljø; (4) `native_codegen_v2.no` — ny kodegenerator som brukar NcVal-runtime, produserer ~20KB ELF64; (5) `./bin/nc bygg-native` no standardkommando. Testar: 114/114 grøne. Gjenstår: Linux-køyreverifikasjon (krev Docker/CI), fjerne .c-filer frå git.
+**Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64:
 
-Neste steg: **Omgang 6** — utvid `bygg_runtime()` med map/string/fil/json-ops, test ELF på Linux.
+- `native_codegen_v2.no` + innebygd NcVal-runtime (hex) → deterministisk ELF64
+- `./bin/nc bygg-native` — standardkommando
+- `bash tools/verify_omgang6.sh` — bygg + byte-paritet + Linux-køyring (CI)
+- `bash tools/selfcompile_native_elf.sh` — Gen1==Gen2 ELF-paritet
+- CI: `native-linux` køyrer Omgang 6-gates
+
+**Framtid (6b):** Erstatte `bootstrap/c/` + clang med ELF stage-0 (`norscode_native` bygget av seg sjølv). Krev full kompilator i ELF — eige spor.
+
+Neste steg: **Omgang 6b** — ELF stage-0; deretter fjerne committed `.c` når seed-ELF er på plass.
