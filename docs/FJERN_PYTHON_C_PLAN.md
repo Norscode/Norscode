@@ -219,14 +219,18 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 | Milepæl | Status | Verifikasjon |
 |---------|--------|--------------|
-| **6b.1** | 🔄 | `bash tools/verify_omgang6b.sh` — host-ELF + kompilator-kjede NCB→ELF, determinisme, Linux-køyring |
-| **6b.2** | ⬜ | ELF `compile` av eksternt `.no`-program |
-| **6b.3** | ⬜ | Gen1 ELF → Gen2 ELF byte-paritet (stage-0) |
-| **6b.4** | ⬜ | Seed-ELF i release; fjern committed `bootstrap/c/` |
+| **6b.1** | ✅ | `bash tools/verify_omgang6b.sh` — host-ELF + stage-0 NCB→ELF, determinisme, Linux-køyring |
+| **6b.2** | ✅ | ELF `compile` av eksternt `.no` via `NORSCODE_FILE` / `elf_compile_driver` |
+| **6b.3** | ✅ | Gen1 ELF → Gen2 ELF byte-paritet (`tools/selfcompile_stage0_elf.sh`, Linux) |
+| **6b.4** | 🔄 | macOS seed committed; Linux via `export-stage0-linux.yml` → `finish_6b4.sh` → fjern `bootstrap/c/*.c` |
 
 Kommandoar:
 - `./bin/nc bygg-native --ncb bundle.ncb.json ut.elf`
 - `bash tools/build_omgang6b_compiler_ncb.sh`
+- `bash tools/selfcompile_stage0_elf.sh`
+- `bash tools/ensure_stage0_seed.sh`
+- `bash tools/fetch_stage0_seed.sh`
+- `bash tools/build_stage0_release_assets.sh`
 - `./bin/nc verify-omgang6b`
 
-Neste steg: **6b.2** — kompilator-ELF som klarer `kompiler_fil` på ekstern kilde.
+Neste steg: **6b.4 ferdig** — køyr GitHub Actions «Export stage0 Linux seed», commit `norscode-linux-x86_64`, `./bin/nc finish-6b4`.

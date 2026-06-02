@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/verify_omgang6b.sh — Omgang 6b.1: NCB → ELF stage-0 grunnlag
+# tools/verify_omgang6b.sh — Omgang 6b.1 + 6b.2 + 6b.3: NCB → ELF stage-0, compile, sjølvkompilering
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -8,7 +8,7 @@ cd "$ROOT"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
-printf '=== Omgang 6b.1: ELF stage-0 grunnlag ===\n\n'
+printf '=== Omgang 6b: ELF stage-0 (6b.1 + 6b.2 + 6b.3) ===\n\n'
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     bash "$ROOT/tools/build_norscode_native.sh"
@@ -26,16 +26,21 @@ if ! cmp -s build/6b/host_v1.elf build/6b/host_v2.elf; then
 fi
 printf '  [OK] host ELF deterministisk (%d bytes)\n\n' "$(wc -c < build/6b/host_v1.elf | tr -d ' ')"
 
-# ─── 6b.1b: kompilator-kjede NCB → ELF ────────────────────────────────────────
-printf '1b. Kompilator-kjede NCB → ELF...\n'
-bash "$ROOT/tools/build_omgang6b_compiler_ncb.sh" build/6b/compiler_chain.ncb.json
-bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_chain.ncb.json build/6b/compiler_v1.elf
-bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_chain.ncb.json build/6b/compiler_v2.elf
+# ─── 6b.1b + 6b.2: kompilator stage-0 NCB → ELF ─────────────────────────────
+printf '1b. Stage-0 NCB (driver entry) → ELF...\n'
+bash "$ROOT/tools/build_omgang6b_compiler_ncb.sh" build/6b/compiler_stage0.ncb.json
+ENTRY="$(python3 -c "import json; print(json.load(open('build/6b/compiler_stage0.ncb.json'))['entry'])")"
+if [ "$ENTRY" != "selfhost.elf_compile_driver.start" ]; then
+    printf '  [FEIL] entry er %s, forventa selfhost.elf_compile_driver.start\n' "$ENTRY" >&2
+    exit 1
+fi
+bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_stage0.ncb.json build/6b/compiler_v1.elf
+bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_stage0.ncb.json build/6b/compiler_v2.elf
 if ! cmp -s build/6b/compiler_v1.elf build/6b/compiler_v2.elf; then
     printf '  [FEIL] kompilator-ELF ikkje deterministisk\n' >&2
     exit 1
 fi
-printf '  [OK] kompilator-ELF deterministisk (%d bytes)\n\n' "$(wc -c < build/6b/compiler_v1.elf | tr -d ' ')"
+printf '  [OK] stage-0 ELF deterministisk (%d bytes)\n\n' "$(wc -c < build/6b/compiler_v1.elf | tr -d ' ')"
 
 # ─── Linux: køyr ELF ──────────────────────────────────────────────────────────
 if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; then
@@ -46,20 +51,52 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     echo "$OUT" | grep -q "7" || { printf '  [FEIL] host-ELF 3+4\n' >&2; exit 1; }
     printf '  [OK] host-ELF\n\n'
 
-    printf '3. Køyr kompilator-kjede ELF (røyk-test)...\n'
+    printf '3. Køyr stage-0 ELF (røyk-modus utan env)...\n'
     COUT="$(build/6b/compiler_v1.elf 2>&1)" || {
-        printf '  [FEIL] kompilator-ELF exit %d\n' "$?" >&2
+        printf '  [FEIL] stage-0 ELF exit %d\n' "$?" >&2
         printf '%s\n' "$COUT" >&2
         exit 1
     }
     printf '%s' "$COUT"
-    echo "$COUT" | grep -q "Selfhost-kompilator" || { printf '  [FEIL] manglar Selfhost-kompilator\n' >&2; exit 1; }
-    echo "$COUT" | grep -q "Røyk-test" || { printf '  [FEIL] manglar Røyk-test\n' >&2; exit 1; }
-    printf '  [OK] kompilator-ELF køyrer røyk-test\n\n'
+    echo "$COUT" | grep -q "ELF compile driver" || { printf '  [FEIL] manglar driver-røyk\n' >&2; exit 1; }
+    echo "$COUT" | grep -q "inline compile" || { printf '  [FEIL] manglar inline compile\n' >&2; exit 1; }
+    printf '  [OK] stage-0 ELF røyk-modus\n\n'
+
+    printf '4. Kompiler eksternt .no via NORSCODE_FILE...\n'
+    rm -f build/6b/target.ncb.json
+    export NORSCODE_FILE="$ROOT/tests/fixtures/omgang6b_target.no"
+    export NORSCODE_OUTPUT="$ROOT/build/6b/target.ncb.json"
+    export NORSCODE_MODULE="__main__"
+    COUT2="$(build/6b/compiler_v1.elf 2>&1)" || {
+        printf '  [FEIL] ekstern compile exit %d\n' "$?" >&2
+        printf '%s\n' "$COUT2" >&2
+        exit 1
+    }
+    printf '%s' "$COUT2"
+    echo "$COUT2" | grep -q "ELF compile:" || { printf '  [FEIL] manglar compile-linje\n' >&2; exit 1; }
+    if [ ! -f build/6b/target.ncb.json ]; then
+        printf '  [FEIL] target.ncb.json ikkje skrive\n' >&2
+        exit 1
+    fi
+    python3 -c "
+import json, sys
+with open('build/6b/target.ncb.json') as f:
+    d = json.load(f)
+assert 'functions' in d and len(d['functions']) > 0, 'tom bundle'
+assert any('start' in k for k in d['functions']), 'manglar start'
+print('  [OK] target NCB:', len(d['functions']), 'funksjonar')
+"
+    printf '  [OK] ekstern .no → NCB via stage-0 ELF\n\n'
+    unset NORSCODE_FILE NORSCODE_OUTPUT NORSCODE_MODULE
 else
-    printf '2–3. Hopp over ELF-køyring (%s/%s — krev Linux x86-64)\n\n' "$OS" "$ARCH"
+    printf '2–4. Hopp over ELF-køyring (%s/%s — krev Linux x86-64)\n\n' "$OS" "$ARCH"
 fi
 
-printf '=== Omgang 6b.1: BESTÅTT ===\n'
-printf 'NCB → ELF for host og kompilator-kjede er deterministisk.\n'
-printf 'Neste (6b.2): ELF klarer compile av eksternt .no-program.\n'
+# ─── 6b.3: Gen1 ELF → Gen2 ELF byte-paritet ───────────────────────────────────
+printf '5. Stage-0/6b.3 sjølvkompilering (Gen1 ELF == Gen2 ELF)...\n'
+bash "$ROOT/tools/selfcompile_stage0_elf.sh"
+printf '\n'
+
+printf '=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===\n'
+printf 'NCB → ELF deterministisk; Linux: røyk, ekstern compile, sjølvkompilering.\n'
+printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/c/*.c frå git.\n'

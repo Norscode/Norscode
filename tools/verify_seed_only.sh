@@ -21,7 +21,7 @@ platform="$(platform_name 2>/dev/null || printf '?')"
 stage0="${ROOT}/bootstrap/stage0/norscode-${platform}"
 if [ ! -f "$stage0" ]; then
     printf '=== Seed-only: hoppa over (ingen stage0-seed for %s) ===\n' "$platform"
-    printf 'Seed-only lane krev bootstrap/stage0/norscode-<plattform>; Linux CI brukar bootstrap/c + clang.\n'
+    printf 'Seed-only lane krev bootstrap/stage0/norscode-<plattform> (eller bash tools/fetch_stage0_seed.sh).\n'
     exit 0
 fi
 

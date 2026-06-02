@@ -28,6 +28,15 @@ gh release upload v0.1.0 bootstrap/stage0/norscode-macos-arm64 --clobber
 
 Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.sh` fungere utan nettverk.
 
+**Linux-seed (migrering frå bootstrap/c):**
+
+```sh
+# På Linux, eller GitHub Actions → «Export stage0 Linux seed»
+bash tools/migrate_bootstrap_c_to_stage0.sh
+git add bootstrap/stage0/norscode-linux-x86_64
+bash tools/finish_6b4.sh   # git rm bootstrap/c/*.c
+```
+
 **Standard:** `tools/build_norscode_native.sh` brukar seed herifrå (eller release) og krev ikkje clang.
 
 **Maintainer / regen:** `REGEN=1 bash tools/build_norscode_native.sh` køyrer

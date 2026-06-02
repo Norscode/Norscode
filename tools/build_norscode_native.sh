@@ -7,6 +7,7 @@
 #   1. Eksisterande, fungerande dist/norscode_native
 #   2. bootstrap/stage0/norscode-<plattform> (seed)
 #   3. GitHub Release (seed)
+#   4. NORSCODE_BOOTSTRAP_C=1 + bootstrap/c/ + clang (berre maintainer / regen)
 #
 # Ved REGEN=1 (maintainer): seed → tools/regen_native.sh → bootstrap/c/ → clang
 set -euo pipefail
@@ -197,12 +198,13 @@ mkdir -p "$(dirname "$OUT")"
 if copy_stage0_binary; then :
 elif download_release_binary; then
     printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
-elif bootstrap_c_present && build_from_bootstrap_c; then
-    :
+elif [ "${NORSCODE_BOOTSTRAP_C:-0}" = "1" ] && bootstrap_c_present && build_from_bootstrap_c; then
+    printf 'ℹ︎ Bygde frå bootstrap/c/ (NORSCODE_BOOTSTRAP_C=1). Normal: bootstrap/stage0/ eller release.\n' >&2
 else
     platform="$(platform_name 2>/dev/null || printf '?')"
     printf '\n=== Kunne ikkje skaffe norscode_native ===\n' >&2
-    printf 'Legg norscode-%s i bootstrap/stage0/, publiser release-binær, eller commit bootstrap/c/ + clang.\n' "$platform" >&2
+    printf 'Køyr: bash tools/fetch_stage0_seed.sh\n' >&2
+    printf 'Eller legg norscode-%s i bootstrap/stage0/, eller sett NORSCODE_BOOTSTRAP_C=1 med regenert bootstrap/c/.\n' "$platform" >&2
     exit 1
 fi
 
