@@ -21,7 +21,7 @@ Dette er fortsatt overgangs- eller støtteflaten:
 - `./bin/bootstrap`
 - `tools/build-bootstrap-binary.sh`
 - `tools/build_norscode_native.sh` (stage-0; ikkje legacy C-VM)
-- `scripts/gen_expr_fraser.py` (dev-verktøy utanfor `tools/`)
+- `scripts/regen_fraser.no` (dev-verktøy utanfor `tools/`)
 - eksplisitte bootstrap-veier
 - eventuelle gjenværende historiske kompatibilitetsspor i arkivert dokumentasjon
 
