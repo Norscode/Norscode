@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
+MODE="${1:-all}"
 
 printf '=== Omgang 6: Native ELF (bygg-native) ===\n\n'
 
@@ -21,6 +22,7 @@ trap 'rm -f "$SRC1" "$SRC2" "$OUT1" "$OUT2" "$OUT3"' EXIT
 printf 'funksjon start() {\n  skriv("ELF-smoke OK\\n")\n}\n' > "$SRC1"
 printf 'funksjon start() {\n  la x: heltall = 6 * 7\n  skriv(tekst_fra_heltall(x) + "\\n")\n}\n' > "$SRC2"
 
+if [ "$MODE" = "skriv" ] || [ "$MODE" = "all" ]; then
 printf '1. bygg-native (Gen1, skriv-smoke)...\n'
 "$ROOT/bin/nc" bygg-native "$SRC1" "$OUT1"
 BYTES1="$(wc -c < "$OUT1" | tr -d ' ')"
@@ -34,10 +36,12 @@ if ! cmp -s "$OUT1" "$OUT2"; then
     exit 1
 fi
 printf '  [OK] Gen1 == Gen2 (%s bytes)\n\n' "$BYTES1"
+fi
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; then
+    if [ "$MODE" = "skriv" ] || [ "$MODE" = "all" ]; then
     printf '3. Køyr skriv-smoke på Linux x86-64...\n'
     chmod +x "$OUT1"
     set +e
@@ -53,7 +57,9 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     fi
     echo "$RUN_OUT" | grep -q "ELF-smoke OK" || { printf '  [FEIL] manglar ELF-smoke OK\n' >&2; exit 1; }
     printf '  [OK] skriv-smoke køyrer korrekt\n\n'
+    fi
 
+    if [ "$MODE" = "int" ] || [ "$MODE" = "all" ]; then
     printf '4. bygg-native (Gen1, int-to-str smoke)...\n'
     "$ROOT/bin/nc" bygg-native "$SRC2" "$OUT3"
     BYTES3="$(wc -c < "$OUT3" | tr -d ' ')"
@@ -74,6 +80,7 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     fi
     echo "$RUN_OUT" | grep -q "42" || { printf '  [FEIL] manglar 42\n' >&2; exit 1; }
     printf '  [OK] int-to-str smoke køyrer korrekt\n\n'
+    fi
 else
     printf '3. Hopp over ELF-køyring (plattform %s/%s — ELF er Linux x86-64)\n\n' "$OS" "$ARCH"
 fi
