@@ -5,17 +5,15 @@ set -euo pipefail
 NCB="${1:?bruk: patch_ncb_entry.sh fil.ncb.json entry.funksjon}"
 ENTRY="${2:?}"
 
-python3 - "$NCB" "$ENTRY" <<'PY'
-import json, sys
-path, entry = sys.argv[1], sys.argv[2]
-with open(path, encoding="utf-8") as f:
-    d = json.load(f)
-fns = d.get("functions") or {}
-if entry not in fns:
-    print(f"Feil: entry {entry!r} finst ikkje i bundle ({len(fns)} funksjonar)", file=sys.stderr)
-    sys.exit(1)
-d["entry"] = entry
-with open(path, "w", encoding="utf-8") as f:
-    json.dump(d, f, ensure_ascii=False, separators=(",", ":"))
-print(f"  entry → {entry}")
-PY
+if ! grep -Fq "\"$ENTRY\":{" "$NCB"; then
+    printf "Feil: entry %s finst ikkje i bundle\n" "$ENTRY" >&2
+    exit 1
+fi
+
+if ! grep -Eq '"entry"[[:space:]]*:' "$NCB"; then
+    printf 'Feil: manglar entry-felt i %s\n' "$NCB" >&2
+    exit 1
+fi
+
+NC_ENTRY="$ENTRY" perl -0pi -e 's/"entry"[[:space:]]*:[[:space:]]*"[^"]*"/"entry":"$ENV{NC_ENTRY}"/' "$NCB"
+printf '  entry → %s\n' "$ENTRY"

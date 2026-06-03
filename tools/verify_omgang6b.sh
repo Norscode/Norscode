@@ -8,6 +8,20 @@ cd "$ROOT"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
+ncb_entry() {
+    local path="$1"
+    local line
+    line="$(grep -o '"entry":"[^"]*"' "$path" | head -1 || true)"
+    line="${line#\"entry\":\"}"
+    line="${line%\"}"
+    printf '%s' "$line"
+}
+
+ncb_function_count() {
+    local path="$1"
+    grep -o '":{"name"' "$path" | wc -l | tr -d ' '
+}
+
 printf '=== Omgang 6b: ELF stage-0 (6b.1 + 6b.2 + 6b.3) ===\n\n'
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
@@ -29,7 +43,7 @@ printf '  [OK] host ELF deterministisk (%d bytes)\n\n' "$(wc -c < build/6b/host_
 # ─── 6b.1b + 6b.2: kompilator stage-0 NCB → ELF ─────────────────────────────
 printf '1b. Stage-0 NCB (driver entry) → ELF...\n'
 bash "$ROOT/tools/build_omgang6b_compiler_ncb.sh" build/6b/compiler_stage0.ncb.json
-ENTRY="$(python3 -c "import json; print(json.load(open('build/6b/compiler_stage0.ncb.json'))['entry'])")"
+ENTRY="$(ncb_entry build/6b/compiler_stage0.ncb.json)"
 if [ "$ENTRY" != "selfhost.elf_compile_driver.start" ]; then
     printf '  [FEIL] entry er %s, forventa selfhost.elf_compile_driver.start\n' "$ENTRY" >&2
     exit 1
@@ -78,14 +92,15 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
         printf '  [FEIL] target.ncb.json ikkje skrive\n' >&2
         exit 1
     fi
-    python3 -c "
-import json, sys
-with open('build/6b/target.ncb.json') as f:
-    d = json.load(f)
-assert 'functions' in d and len(d['functions']) > 0, 'tom bundle'
-assert any('start' in k for k in d['functions']), 'manglar start'
-print('  [OK] target NCB:', len(d['functions']), 'funksjonar')
-"
+    if ! grep -q '"functions":{' build/6b/target.ncb.json; then
+        printf '  [FEIL] target NCB manglar functions\n' >&2
+        exit 1
+    fi
+    if ! grep -Eq '"[^"]*start":\{' build/6b/target.ncb.json; then
+        printf '  [FEIL] target NCB manglar start\n' >&2
+        exit 1
+    fi
+    printf '  [OK] target NCB: %s funksjonar\n' "$(ncb_function_count build/6b/target.ncb.json)"
     printf '  [OK] ekstern .no → NCB via stage-0 ELF\n\n'
     unset NORSCODE_FILE NORSCODE_OUTPUT NORSCODE_MODULE
 else
