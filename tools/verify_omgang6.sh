@@ -37,8 +37,17 @@ ARCH="$(uname -m)"
 if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; then
     printf '3. Køyr ELF på Linux x86-64...\n'
     chmod +x "$OUT1"
-    RUN_OUT="$("$OUT1")"
-    printf '%s\n' "$RUN_OUT"
+    set +e
+    RUN_OUT="$("$OUT1" 2>&1)"
+    RUN_RC=$?
+    set -e
+    if [ -n "$RUN_OUT" ]; then
+        printf '%s\n' "$RUN_OUT"
+    fi
+    if [ "$RUN_RC" -ne 0 ]; then
+        printf '  [FEIL] ELF exit code %d\n' "$RUN_RC" >&2
+        exit "$RUN_RC"
+    fi
     echo "$RUN_OUT" | grep -q "ELF-smoke OK" || { printf '  [FEIL] manglar ELF-smoke OK\n' >&2; exit 1; }
     echo "$RUN_OUT" | grep -q "42" || { printf '  [FEIL] manglar 42\n' >&2; exit 1; }
     printf '  [OK] ELF køyrer korrekt\n\n'
