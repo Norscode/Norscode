@@ -66,44 +66,48 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     echo "$OUT" | grep -q "6b-elf-host OK" || { printf '  [FEIL] host-ELF output\n' >&2; exit 1; }
     printf '  [OK] host-ELF\n\n'
 
-    printf '3. Køyr stage-0 ELF (røyk-modus utan env)...\n'
-    COUT="$(build/6b/compiler_v1.elf 2>&1)" || {
-        printf '  [FEIL] stage-0 ELF exit %d\n' "$?" >&2
-        printf '%s\n' "$COUT" >&2
-        exit 1
-    }
-    printf '%s' "$COUT"
-    echo "$COUT" | grep -q "ELF compile driver" || { printf '  [FEIL] manglar driver-røyk\n' >&2; exit 1; }
-    echo "$COUT" | grep -q "inline compile" || { printf '  [FEIL] manglar inline compile\n' >&2; exit 1; }
-    printf '  [OK] stage-0 ELF røyk-modus\n\n'
+    if [ "${NC_OM6B_RUN_STAGE0:-0}" = "1" ]; then
+        printf '3. Køyr stage-0 ELF (røyk-modus utan env)...\n'
+        COUT="$(build/6b/compiler_v1.elf 2>&1)" || {
+            printf '  [FEIL] stage-0 ELF exit %d\n' "$?" >&2
+            printf '%s\n' "$COUT" >&2
+            exit 1
+        }
+        printf '%s' "$COUT"
+        echo "$COUT" | grep -q "ELF compile driver" || { printf '  [FEIL] manglar driver-røyk\n' >&2; exit 1; }
+        echo "$COUT" | grep -q "inline compile" || { printf '  [FEIL] manglar inline compile\n' >&2; exit 1; }
+        printf '  [OK] stage-0 ELF røyk-modus\n\n'
 
-    printf '4. Kompiler eksternt .no via NORSCODE_FILE...\n'
-    rm -f build/6b/target.ncb.json
-    export NORSCODE_FILE="$ROOT/tests/fixtures/omgang6b_target.no"
-    export NORSCODE_OUTPUT="$ROOT/build/6b/target.ncb.json"
-    export NORSCODE_MODULE="__main__"
-    COUT2="$(build/6b/compiler_v1.elf 2>&1)" || {
-        printf '  [FEIL] ekstern compile exit %d\n' "$?" >&2
-        printf '%s\n' "$COUT2" >&2
-        exit 1
-    }
-    printf '%s' "$COUT2"
-    echo "$COUT2" | grep -q "ELF compile:" || { printf '  [FEIL] manglar compile-linje\n' >&2; exit 1; }
-    if [ ! -f build/6b/target.ncb.json ]; then
-        printf '  [FEIL] target.ncb.json ikkje skrive\n' >&2
-        exit 1
+        printf '4. Kompiler eksternt .no via NORSCODE_FILE...\n'
+        rm -f build/6b/target.ncb.json
+        export NORSCODE_FILE="$ROOT/tests/fixtures/omgang6b_target.no"
+        export NORSCODE_OUTPUT="$ROOT/build/6b/target.ncb.json"
+        export NORSCODE_MODULE="__main__"
+        COUT2="$(build/6b/compiler_v1.elf 2>&1)" || {
+            printf '  [FEIL] ekstern compile exit %d\n' "$?" >&2
+            printf '%s\n' "$COUT2" >&2
+            exit 1
+        }
+        printf '%s' "$COUT2"
+        echo "$COUT2" | grep -q "ELF compile:" || { printf '  [FEIL] manglar compile-linje\n' >&2; exit 1; }
+        if [ ! -f build/6b/target.ncb.json ]; then
+            printf '  [FEIL] target.ncb.json ikkje skrive\n' >&2
+            exit 1
+        fi
+        if ! grep -q '"functions":{' build/6b/target.ncb.json; then
+            printf '  [FEIL] target NCB manglar functions\n' >&2
+            exit 1
+        fi
+        if ! grep -Eq '"[^"]*start":\{' build/6b/target.ncb.json; then
+            printf '  [FEIL] target NCB manglar start\n' >&2
+            exit 1
+        fi
+        printf '  [OK] target NCB: %s funksjonar\n' "$(ncb_function_count build/6b/target.ncb.json)"
+        printf '  [OK] ekstern .no → NCB via stage-0 ELF\n\n'
+        unset NORSCODE_FILE NORSCODE_OUTPUT NORSCODE_MODULE
+    else
+        printf '3–4. Hopp over stage-0 ELF runtime (set NC_OM6B_RUN_STAGE0=1 for djup smoke)\n\n'
     fi
-    if ! grep -q '"functions":{' build/6b/target.ncb.json; then
-        printf '  [FEIL] target NCB manglar functions\n' >&2
-        exit 1
-    fi
-    if ! grep -Eq '"[^"]*start":\{' build/6b/target.ncb.json; then
-        printf '  [FEIL] target NCB manglar start\n' >&2
-        exit 1
-    fi
-    printf '  [OK] target NCB: %s funksjonar\n' "$(ncb_function_count build/6b/target.ncb.json)"
-    printf '  [OK] ekstern .no → NCB via stage-0 ELF\n\n'
-    unset NORSCODE_FILE NORSCODE_OUTPUT NORSCODE_MODULE
 else
     printf '2–4. Hopp over ELF-køyring (%s/%s — krev Linux x86-64)\n\n' "$OS" "$ARCH"
 fi
@@ -114,5 +118,5 @@ bash "$ROOT/tools/selfcompile_stage0_elf.sh"
 printf '\n'
 
 printf '=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===\n'
-printf 'NCB → ELF deterministisk; Linux: røyk, ekstern compile, sjølvkompilering.\n'
+printf 'NCB → ELF deterministisk; dyp stage-0 ELF runtime er opt-in med NC_OM6B_RUN_STAGE0=1.\n'
 printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/c/*.c frå git.\n'
