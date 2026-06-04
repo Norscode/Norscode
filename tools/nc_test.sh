@@ -40,6 +40,24 @@ else
     exit 1
 fi
 
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT" "$@"
+        return $?
+    fi
+
+    if command -v perl >/dev/null 2>&1; then
+        perl -e '
+            my $t = shift @ARGV;
+            alarm $t;
+            exec @ARGV or die "exec failed: $!\n";
+        ' "$TIMEOUT" "$@"
+        return $?
+    fi
+
+    "$@"
+}
+
 # ─── Tester som krev server/async/web (ikkje støtta av nc-vm --nc-run)
 is_server_test() {
     case "$(basename "$1")" in
@@ -91,15 +109,18 @@ run_test() {
     fi
 
     if [ -n "$_NC_RUNNER" ]; then
-        if command -v timeout >/dev/null 2>&1; then
-            _out=$(timeout "$TIMEOUT" env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+        if _out=$(run_with_timeout env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1); then
+            _ec=0
         else
-            _out=$(NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+            _ec=$?
         fi
     else
-        _out=$(${_NC_RUN}"$_file" 2>&1) || true
+        if _out=$(${_NC_RUN}"$_file" 2>&1); then
+            _ec=0
+        else
+            _ec=$?
+        fi
     fi
-    _ec=$?
 
     if [ "$_ec" -eq 0 ]; then
         pass=$((pass + 1))
