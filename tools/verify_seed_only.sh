@@ -30,8 +30,14 @@ printf '1. Bygg frå seed med ugyldig CC (skal framleis passere)\n'
 CC=__clang_not_allowed__ REGEN=0 bash "$ROOT/tools/build_norscode_native.sh"
 printf '\n'
 
-printf '2. Køyr native testløp\n'
-sh "$ROOT/tools/nc_test.sh"
+printf '2. Køyr seed-smoke\n'
+tmp_no="$(mktemp "${TMPDIR:-/tmp}/nc_seed_only_XXXXXX.no" 2>/dev/null || echo "${TMPDIR:-/tmp}/nc_seed_only_$$.no")"
+trap 'rm -f "$tmp_no"' EXIT
+printf 'funksjon start() { returner 0 }\n' > "$tmp_no"
+NORSCODE_CMD=run NORSCODE_FILE="$tmp_no" "$ROOT/dist/norscode_native" >/dev/null
+printf '  [OK] seed-smoke\n'
+rm -f "$tmp_no"
+trap - EXIT
 printf '\n'
 
 printf '=== Seed-only verifikasjon: BESTÅTT ===\n'

@@ -1,7 +1,5 @@
+#!/usr/bin/env sh
+set -eu
 
-
-#!/usr/bin/env python3
-from main import main
-
-if __name__ == "__main__":
-    main()
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec "$ROOT/bin/nc" "$@"

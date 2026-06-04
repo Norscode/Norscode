@@ -201,7 +201,7 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 **Kortare normalvei = færre språk i kritiske steg.**
 
-**Omgang 0:** ✅ (2026-06) — `scripts/gen_expr_fraser.py`, `tools/c_minimal_vm/` og `build_norscode_native_from_source.sh` fjerna; `no_legacy_cvm.sh` + oppdaterte docs.
+**Omgang 0:** ✅ (2026-06) — `scripts/gen_expr_fraser.py`, `tools/c_minimal_vm/` og `build_norscode_native_from_source.sh` fjerna; root-Python-wrappane `nc`/`nor`/`nl` er bytta til shell; `no_legacy_cvm.sh` + oppdaterte docs.
 
 **Omgang 1:** ✅ (2026-06) — `tests/test_selfhost.no` grønn på `dist/norscode_native` (111/111 testar, inkl. monolitt); `PYTHON_ONLY_TESTS`-skip fjerna frå `tools/nc_test.sh`; `kompiler_fra_linjer`, `kompiler_fra_kilde`, nested `hvis`-IR, skript-validering og norsk/engelsk alias-støtte lagt til `selfhost/common.no`.
 
@@ -215,14 +215,14 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 **Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64 (sjå over).
 
-**Omgang 6b (pågår):** ELF stage-0 — erstatte `bootstrap/c/` + clang:
+**Omgang 6b:** ELF stage-0 — erstatte `bootstrap/c/` + clang:
 
 | Milepæl | Status | Verifikasjon |
 |---------|--------|--------------|
 | **6b.1** | ✅ | `bash tools/verify_omgang6b.sh` — host-ELF + stage-0 NCB→ELF, determinisme, Linux-køyring |
 | **6b.2** | ✅ | ELF `compile` av eksternt `.no` via `NORSCODE_FILE` / `elf_compile_driver` |
 | **6b.3** | ✅ | Gen1 ELF → Gen2 ELF byte-paritet (`tools/selfcompile_stage0_elf.sh`, Linux) |
-| **6b.4** | 🔄 | macOS seed committed; Linux via `export-stage0-linux.yml` → `finish_6b4.sh` → fjern `bootstrap/c/*.c` |
+| **6b.4** | ✅ | macOS seed committed; Linux-seed committed og publisert som release-asset (`stage0-bootstrap-20260604`). `finish_6b4.sh` har fjerna/validerte `bootstrap/c/*.c` |
 
 Kommandoar:
 - `./bin/nc bygg-native --ncb bundle.ncb.json ut.elf`
@@ -233,4 +233,4 @@ Kommandoar:
 - `bash tools/build_stage0_release_assets.sh`
 - `./bin/nc verify-omgang6b`
 
-Neste steg: **6b.4 ferdig** — køyr GitHub Actions «Export stage0 Linux seed», commit `norscode-linux-x86_64`, `./bin/nc finish-6b4`.
+Neste steg: **6b.4 ferdig** — `bootstrap/stage0/norscode-linux-x86_64` er i repoet og som release-asset i `stage0-bootstrap-20260604`; `./bin/nc finish-6b4` er no berre ein verifikator.

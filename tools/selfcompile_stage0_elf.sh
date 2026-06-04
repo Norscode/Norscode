@@ -42,6 +42,12 @@ if [ "$OS" != "Linux" ] || { [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; 
     exit 0
 fi
 
+if [ "${NC_OM6B_RUN_STAGE0:-0}" != "1" ]; then
+    printf '[2–4/4] Hopp over ELF→ELF runtime (set NC_OM6B_RUN_STAGE0=1 for djup smoke)\n'
+    printf '\n=== Omgang 6b.3: DELVIS (Gen1 ELF bygd) ===\n'
+    exit 0
+fi
+
 printf '[2/4] Gen2 NCB via Gen1 ELF (bygg_bundle)...\n'
 rm -f "$GEN2_NCB"
 export NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR"

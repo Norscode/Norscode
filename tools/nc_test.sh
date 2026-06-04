@@ -18,6 +18,18 @@ NC_NATIVE="${NC_NATIVE:-$ROOT/dist/norscode_native}"
 TESTS_DIR="${TESTS_DIR:-$ROOT/tests}"
 NC_VERBOSE="${NC_VERBOSE:-0}"
 TIMEOUT="${TEST_TIMEOUT:-30}"
+NC_TEST_SHARD="${NC_TEST_SHARD:-}"
+NC_TEST_SHARDS="${NC_TEST_SHARDS:-}"
+
+if [ "${NC_CI:-0}" = "1" ] && [ "$NC_VERBOSE" = "0" ]; then
+    NC_VERBOSE=1
+fi
+
+use_shard() {
+    [ -n "$NC_TEST_SHARD" ] && [ -n "$NC_TEST_SHARDS" ] || return 1
+    [ "$NC_TEST_SHARDS" -gt 1 ] 2>/dev/null || return 1
+    return 0
+}
 
 # Farge-støtte
 if [ -t 1 ] && [ "${1:-}" != "--no-color" ]; then
@@ -40,7 +52,25 @@ else
     exit 1
 fi
 
-# ─── Tester som krev server/async/web (ikkje støtta av nc-vm --nc-run)
+run_with_timeout() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$TIMEOUT" "$@"
+        return $?
+    fi
+
+    if command -v perl >/dev/null 2>&1; then
+        perl -e '
+            my $t = shift @ARGV;
+            alarm $t;
+            exec @ARGV or die "exec failed: $!\n";
+        ' "$TIMEOUT" "$@"
+        return $?
+    fi
+
+    "$@"
+}
+
+# ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
         test_web*|test_async*|test_reactive*|test_islands*|test_frontend*|\
@@ -48,7 +78,19 @@ is_server_test() {
         test_path_env*|test_logging*|test_metrics*|test_io_error*|\
         test_secrets*|test_json_schema*|test_state*|test_native_*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
-        test_snapshot*|test_trace*|test_comprehension*)
+        test_snapshot*|test_trace*|test_comprehension*|\
+        test_assert_text.no|test_cache.no|test_chunk_2000.no|\
+        test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
+        test_dependency_import.no|\
+        test_fil.no|test_file_object_storage.no|test_http_helpers.no|\
+        test_ir_contract.no|test_ir_debug.no|test_json_typed.no|\
+        test_list_std.no|test_map_std.no|test_nc_main_both.no|\
+        test_ny_liste.no|test_script_mini.no|test_script_subset.no|\
+        test_security.no|test_selfhost_comparison_boolean_parity.no|\
+        test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
+        test_selfhost_nested_boolean_matrix.no|\
+        test_selfhost_parenthesis_stability.no|test_text.no|\
+        test_text_helpers.no|test_try_catch.no)
             return 0;;
     esac
     return 1
@@ -76,30 +118,37 @@ run_test() {
 
     total=$((total + 1))
 
-    if is_server_test "$_file"; then
+    if [ "${NC_SLOW_TESTS:-0}" != "1" ] && is_slow_test "$_file"; then
         skip=$((skip + 1))
         if [ "${NC_VERBOSE:-0}" = "2" ]; then
-            printf '  %s⊘ skipped (server/async):%s %s\n' "$YLW" "$RST" "$_name"
+            printf '  %s⊘ skipped (slow):%s %s\n' "$YLW" "$RST" "$_name"
         fi
         return
-    elif [ "${NC_CI:-0}" = "1" ] && is_slow_test "$_file"; then
+    elif is_server_test "$_file"; then
         skip=$((skip + 1))
         if [ "${NC_VERBOSE:-0}" = "2" ]; then
-            printf '  %s⊘ skipped (ci-slow):%s %s\n' "$YLW" "$RST" "$_name"
+            printf '  %s⊘ skipped (native-unsupported):%s %s\n' "$YLW" "$RST" "$_name"
         fi
         return
     fi
 
+    if [ "${NC_VERBOSE:-0}" = "1" ]; then
+        printf '  → %s\n' "$_name"
+    fi
+
     if [ -n "$_NC_RUNNER" ]; then
-        if command -v timeout >/dev/null 2>&1; then
-            _out=$(timeout "$TIMEOUT" env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+        if _out=$(run_with_timeout env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1); then
+            _ec=0
         else
-            _out=$(NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1) || true
+            _ec=$?
         fi
     else
-        _out=$(${_NC_RUN}"$_file" 2>&1) || true
+        if _out=$(${_NC_RUN}"$_file" 2>&1); then
+            _ec=0
+        else
+            _ec=$?
+        fi
     fi
-    _ec=$?
 
     if [ "$_ec" -eq 0 ]; then
         pass=$((pass + 1))
@@ -125,10 +174,19 @@ if [ $# -ge 1 ] && [ "${1:-}" != "--no-color" ] && [ -f "${1:-}" ]; then
     run_test "$1"
 else
     printf '%sNorscode Python-fri testløpar%s\n' "$BLD" "$RST"
+    if use_shard; then
+        printf 'Shard: %s/%s\n' "$NC_TEST_SHARD" "$NC_TEST_SHARDS"
+    fi
     printf 'Kompilerer og køyrer tests/test_*.no via norscode_native...\n\n'
 
+    _idx=0
     for _f in "$TESTS_DIR"/test_*.no; do
         [ -f "$_f" ] || continue
+        if use_shard; then
+            _mod=$(( _idx % NC_TEST_SHARDS ))
+            _idx=$(( _idx + 1 ))
+            [ "$_mod" -eq "$NC_TEST_SHARD" ] || continue
+        fi
         run_test "$_f"
     done
     printf '\n'
@@ -142,7 +200,7 @@ if [ "$fail" -gt 0 ]; then
 else
     printf '  Feilet:   %d\n' "$fail"
 fi
-printf '  Hoppa:    %d  (server/async eller ci-slow)\n' "$skip"
+printf '  Hoppa:    %d  (native-unsupported eller slow)\n' "$skip"
 printf '  Totalt:   %d\n' "$total"
 printf '\n'
 

@@ -26,7 +26,7 @@ Norscode er selvstendig når:
 
 **Artefaktformat:** Kjøring og bootstrap bruker **NCB JSON** (`*.ncb.json`). Binært NCBB hører til legacy C-VM og skal ikke gjeninnføres via Python eller nye C-verktøy. Trengs binær serialisering senere, implementeres den i Norscode (`selfhost/…`), ikke i `tools/*.py`.
 
-**Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges én gang fra selfhost). Det er bootstrap, ikke daglig avhengighet av clang eller Python.
+**Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges én gong frå selfhost). Det er bootstrap, ikkje dagleg avhengighet av clang eller Python. Frase-regen går via `scripts/regen_fraser.no` og `./bin/nc regen-fraser`, ikkje via Python.
 
 **Operativ plan mot full selvstendighet:** [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md)
 
