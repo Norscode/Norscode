@@ -472,6 +472,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 int dispatch_first = nc_exec_prefer_dispatch(callee) && !nc_exec_prefer_local(callee);
                 NcVal *dispatch_r = NULL;
 
+                /* Dispatch-only kall (ingen lokal fn, dispatch_first) kan skippa try-wrapping */
                 if (dispatch_first) {
                     dispatch_r = nc_dispatch_call(callee, cargs, narg);
                     if (dispatch_r != NULL) {
@@ -479,12 +480,6 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         nc_push(&sp, stack_arr, dispatch_r); ip++;
                         continue;
                     }
-                }
-                if (local_fn && !dispatch_first) {
-                    fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
-                    free(cargs); free(callee);
-                    nc_push(&sp, stack_arr, fn_r); ip++;
-                    continue;
                 }
                 if (!dispatch_first) {
                     dispatch_r = nc_dispatch_call(callee, cargs, narg);
@@ -494,14 +489,12 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         continue;
                     }
                 }
-                if (local_fn) {
-                    fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
-                    free(cargs); free(callee);
-                    nc_push(&sp, stack_arr, fn_r); ip++;
-                    continue;
-                }
-                /* Fang cross-function exceptions */
+
+                /* Fang cross-function exceptions for alle lokale kall */
                 int _had_try = try_depth > 0;
+                /* nc_try_call: kall med unntak-fang når try_depth > 0
+                 * TRY_END i catch-blokken fjernar try-ramma, ikkje THROW/setjmp. */
+                int _nc_exn_caught = 0;
                 if (_had_try) {
                     jmp_buf _saved_jmp;
                     memcpy(&_saved_jmp, &g_err_jmp, sizeof(jmp_buf));
@@ -510,15 +503,14 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         free(cargs); free(callee);
                         if (try_depth > 0) {
                             { const char *_em = g_err_msg;
-                          if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
-                          else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
-                          strncpy(last_exception, _em, sizeof(last_exception)-1); }
+                              if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
+                              else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
+                              strncpy(last_exception, _em, sizeof(last_exception)-1); }
                             g_err_msg[0] = 0;
-                            try_depth--;
-                            const char *cl = try_stack[try_depth].catch_lbl;
-                            sp = try_stack[try_depth].sp_depth;
-                            NcVal *tgt = nc_index_get(label_map, nc_str(cl));
-                            if (tgt && tgt->type == NC_INT) { ip = (int)tgt->i + 1; continue; }
+                            const char *cl2 = try_stack[try_depth - 1].catch_lbl;
+                            sp = try_stack[try_depth - 1].sp_depth;
+                            NcVal *tgt2 = nc_index_get(label_map, nc_str(cl2));
+                            if (tgt2 && tgt2->type == NC_INT) { ip = (int)tgt2->i + 1; _nc_exn_caught = 1; }
                         }
                         fn_r = nc_nil();
                     } else {
@@ -528,6 +520,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 } else {
                     fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
                 }
+                if (_nc_exn_caught) continue;
             }
             free(cargs); free(callee);
             nc_push(&sp,stack_arr,fn_r); ip++;
@@ -536,10 +529,9 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             if (try_depth > 0) {
                 strncpy(last_exception, s, sizeof(last_exception)-1);
                 free(s);
-                /* Hopp til catch-label */
-                try_depth--;
-                const char *cl = try_stack[try_depth].catch_lbl;
-                sp = try_stack[try_depth].sp_depth;
+                /* Hopp til catch-label — TRY_END i catch-blokken fjernar frå stacken */
+                const char *cl = try_stack[try_depth - 1].catch_lbl;
+                sp = try_stack[try_depth - 1].sp_depth;
                 NcVal *tgt = nc_index_get(label_map, nc_str(cl));
                 if (tgt && tgt->type == NC_INT) { ip = (int)tgt->i; continue; }
             }

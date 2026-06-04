@@ -90,7 +90,7 @@ is_server_test() {
         test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
         test_selfhost_nested_boolean_matrix.no|\
         test_selfhost_parenthesis_stability.no|test_text.no|\
-        test_text_helpers.no|test_try_catch.no)
+        test_text_helpers.no)
             return 0;;
     esac
     return 1
