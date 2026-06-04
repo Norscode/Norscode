@@ -19,6 +19,10 @@ TESTS_DIR="${TESTS_DIR:-$ROOT/tests}"
 NC_VERBOSE="${NC_VERBOSE:-0}"
 TIMEOUT="${TEST_TIMEOUT:-30}"
 
+if [ "${NC_CI:-0}" = "1" ] && [ "$NC_VERBOSE" = "0" ]; then
+    NC_VERBOSE=1
+fi
+
 # Farge-støtte
 if [ -t 1 ] && [ "${1:-}" != "--no-color" ]; then
     GRN='\033[0;32m'; RED='\033[0;31m'; YLW='\033[0;33m'
