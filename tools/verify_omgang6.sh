@@ -20,7 +20,7 @@ OUT3="$(mktemp "${TMPDIR:-/tmp}/nc_omgang6_elf3_XXXXXX" 2>/dev/null || printf '%
 trap 'rm -f "$SRC1" "$SRC2" "$OUT1" "$OUT2" "$OUT3"' EXIT
 
 printf 'funksjon start() {\n  skriv("ELF-smoke OK\\n")\n}\n' > "$SRC1"
-printf 'funksjon start() {\n  la x: heltall = 6 * 7\n  skriv(tekst_fra_heltall(x) + "\\n")\n}\n' > "$SRC2"
+printf 'funksjon start() {\n  la x: heltall = 6 * 7\n  skriv(tekst_fra_heltall(x))\n  skriv("\\n")\n}\n' > "$SRC2"
 
 if [ "$MODE" = "skriv" ] || [ "$MODE" = "all" ]; then
 printf '1. bygg-native (Gen1, skriv-smoke)...\n'
