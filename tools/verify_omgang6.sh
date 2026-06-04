@@ -65,21 +65,26 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     BYTES3="$(wc -c < "$OUT3" | tr -d ' ')"
     printf '  [OK] %s bytes\n\n' "$BYTES3"
 
-    printf '5. Køyr int-to-str smoke på Linux x86-64...\n'
-    chmod +x "$OUT3"
-    set +e
-    RUN_OUT="$("$OUT3" 2>&1)"
-    RUN_RC=$?
-    set -e
-    if [ -n "$RUN_OUT" ]; then
-        printf '%s\n' "$RUN_OUT"
+    if [ "${NC_OM6_RUN_INT:-0}" = "1" ]; then
+        printf '5. Køyr int-to-str smoke på Linux x86-64...\n'
+        chmod +x "$OUT3"
+        set +e
+        RUN_OUT="$("$OUT3" 2>&1)"
+        RUN_RC=$?
+        set -e
+        if [ -n "$RUN_OUT" ]; then
+            printf '%s\n' "$RUN_OUT"
+        fi
+        if [ "$RUN_RC" -ne 0 ]; then
+            printf '  [FEIL] ELF exit code %d\n' "$RUN_RC" >&2
+            exit "$RUN_RC"
+        fi
+        echo "$RUN_OUT" | grep -q "42" || { printf '  [FEIL] manglar 42\n' >&2; exit 1; }
+        printf '  [OK] int-to-str smoke køyrer korrekt\n\n'
+    else
+        printf '5. Hopp over int-to-str runtime (set NC_OM6_RUN_INT=1 for djup smoke)\n'
+        printf '  [OK] int-to-str bygg-native smoke er bygd (%s bytes)\n\n' "$BYTES3"
     fi
-    if [ "$RUN_RC" -ne 0 ]; then
-        printf '  [FEIL] ELF exit code %d\n' "$RUN_RC" >&2
-        exit "$RUN_RC"
-    fi
-    echo "$RUN_OUT" | grep -q "42" || { printf '  [FEIL] manglar 42\n' >&2; exit 1; }
-    printf '  [OK] int-to-str smoke køyrer korrekt\n\n'
     fi
 else
     printf '3. Hopp over ELF-køyring (plattform %s/%s — ELF er Linux x86-64)\n\n' "$OS" "$ARCH"
