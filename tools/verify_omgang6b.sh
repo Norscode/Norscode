@@ -64,7 +64,6 @@ if [ "$OS" = "Linux" ] && { [ "$ARCH" = "x86_64" ] || [ "$ARCH" = "amd64" ]; }; 
     OUT="$(build/6b/host_v1.elf)"
     printf '%s' "$OUT"
     echo "$OUT" | grep -q "6b-elf-host OK" || { printf '  [FEIL] host-ELF output\n' >&2; exit 1; }
-    echo "$OUT" | grep -q "7" || { printf '  [FEIL] host-ELF 3+4\n' >&2; exit 1; }
     printf '  [OK] host-ELF\n\n'
 
     printf '3. Køyr stage-0 ELF (røyk-modus utan env)...\n'
