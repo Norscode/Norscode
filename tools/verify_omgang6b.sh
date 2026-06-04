@@ -34,6 +34,7 @@ mkdir -p build/6b
 printf '1a. Host-ELF frå omgang6b_host.no...\n'
 "$ROOT/bin/nc" bygg-native tests/fixtures/omgang6b_host.no build/6b/host_v1.elf
 "$ROOT/bin/nc" bygg-native tests/fixtures/omgang6b_host.no build/6b/host_v2.elf
+chmod +x build/6b/host_v1.elf build/6b/host_v2.elf
 if ! cmp -s build/6b/host_v1.elf build/6b/host_v2.elf; then
     printf '  [FEIL] host ELF ikkje deterministisk\n' >&2
     exit 1
@@ -50,6 +51,7 @@ if [ "$ENTRY" != "selfhost.elf_compile_driver.start" ]; then
 fi
 bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_stage0.ncb.json build/6b/compiler_v1.elf
 bash "$ROOT/tools/ncb_to_elf.sh" build/6b/compiler_stage0.ncb.json build/6b/compiler_v2.elf
+chmod +x build/6b/compiler_v1.elf build/6b/compiler_v2.elf
 if ! cmp -s build/6b/compiler_v1.elf build/6b/compiler_v2.elf; then
     printf '  [FEIL] kompilator-ELF ikkje deterministisk\n' >&2
     exit 1
