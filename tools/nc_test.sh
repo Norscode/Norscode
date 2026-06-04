@@ -18,10 +18,18 @@ NC_NATIVE="${NC_NATIVE:-$ROOT/dist/norscode_native}"
 TESTS_DIR="${TESTS_DIR:-$ROOT/tests}"
 NC_VERBOSE="${NC_VERBOSE:-0}"
 TIMEOUT="${TEST_TIMEOUT:-30}"
+NC_TEST_SHARD="${NC_TEST_SHARD:-}"
+NC_TEST_SHARDS="${NC_TEST_SHARDS:-}"
 
 if [ "${NC_CI:-0}" = "1" ] && [ "$NC_VERBOSE" = "0" ]; then
     NC_VERBOSE=1
 fi
+
+use_shard() {
+    [ -n "$NC_TEST_SHARD" ] && [ -n "$NC_TEST_SHARDS" ] || return 1
+    [ "$NC_TEST_SHARDS" -gt 1 ] 2>/dev/null || return 1
+    return 0
+}
 
 # Farge-støtte
 if [ -t 1 ] && [ "${1:-}" != "--no-color" ]; then
@@ -162,10 +170,19 @@ if [ $# -ge 1 ] && [ "${1:-}" != "--no-color" ] && [ -f "${1:-}" ]; then
     run_test "$1"
 else
     printf '%sNorscode Python-fri testløpar%s\n' "$BLD" "$RST"
+    if use_shard; then
+        printf 'Shard: %s/%s\n' "$NC_TEST_SHARD" "$NC_TEST_SHARDS"
+    fi
     printf 'Kompilerer og køyrer tests/test_*.no via norscode_native...\n\n'
 
+    _idx=0
     for _f in "$TESTS_DIR"/test_*.no; do
         [ -f "$_f" ] || continue
+        if use_shard; then
+            _mod=$(( _idx % NC_TEST_SHARDS ))
+            _idx=$(( _idx + 1 ))
+            [ "$_mod" -eq "$NC_TEST_SHARD" ] || continue
+        fi
         run_test "$_f"
     done
     printf '\n'
