@@ -132,6 +132,10 @@ run_test() {
         return
     fi
 
+    if [ "${NC_VERBOSE:-0}" = "1" ]; then
+        printf '  → %s\n' "$_name"
+    fi
+
     if [ -n "$_NC_RUNNER" ]; then
         if _out=$(run_with_timeout env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1); then
             _ec=0
