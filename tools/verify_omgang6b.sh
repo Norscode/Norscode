@@ -119,4 +119,4 @@ printf '\n'
 
 printf '=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===\n'
 printf 'NCB → ELF deterministisk; dyp stage-0 ELF runtime er opt-in med NC_OM6B_RUN_STAGE0=1.\n'
-printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/c/*.c frå git.\n'
+printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/maint/c/*.c frå git.\n'

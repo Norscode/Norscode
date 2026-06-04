@@ -12,13 +12,7 @@
 
 /* Forhandsdeklarasjonar — brukar nc_dispatch_call for dynamisk oppslag */
 
-/* ── NC executor: kjøyr eit NCB via C (ikkje selfhost/vm.no) ── */
-
-typedef struct NcExecCtx {
-    NcVal *functions; /* NC_MAP: fn_namn → fn_def */
-} NcExecCtx;
-
-/* Kompilator-pipeline i bundle skal bruke C-dispatch, ikkje bytecode frå Gen1-NCB */
+/* Kompilator-pipeline i bundle skal bruke bootstrap-host-dispatch, ikkje bytecode frå Gen1-NCB */
 static int nc_exec_prefer_dispatch(const char *name) {
     if (!strncmp(name, "selfhost.kompiler.", 18)) return 1;
     if (!strncmp(name, "selfhost.lexer.", 15)) return 1;
@@ -68,7 +62,6 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
 static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth);
 static int nc_val_til_exit(NcVal *v);
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
-static NcVal *nc_native_kompiler_kjelde(const char *src, const char *modul);
 
 /* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
 static NcVal *g_sh_common_fns = NULL;
@@ -586,41 +579,11 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
     return r;
 }
 
-/* Splitt NORSCODE_BUNDLE_ARGS på mellomrom → NC_LIST (tomme token filtrert bort) */
-static NcVal *nc_bundle_args_list(const char *args_str) {
-    if (!args_str) args_str = "";
-    NcVal *raw = nc_builtin_split(nc_str(args_str), nc_str(" "));
-    NcVal *out = nc_list_new();
-    if (!raw || raw->type != NC_LIST) return out;
-    for (int i = 0; i < raw->list->len; i++) {
-        NcVal *it = raw->list->items[i];
-        if (!it || it->type != NC_STR) continue;
-        char *t = nc_to_str_raw(it);
-        char *p = t;
-        while (*p == ' ' || *p == '\t') p++;
-        char *end = p + strlen(p);
-        while (end > p && (end[-1] == ' ' || end[-1] == '\t')) end--;
-        if (end > p) {
-            char saved = *end;
-            *end = 0;
-            nc_builtin_legg_til(out, nc_str(p));
-            *end = saved;
-        }
-        free(t);
-    }
-    return out;
-}
-
-/* ── Wrap kompiler_fil som NcExecCtx-kall ── */
+/* ── Wrap kompiler_fil via bootstrap-host dispatcher ── */
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul) {
     NcVal *src = nc_builtin_fil_les(nc_str(src_path));
     if (!src || src->type != NC_STR) return nc_nil();
-    return nc_native_kompiler_kjelde(src->s, modul);
-}
-
-/* ── Wrap kompiler_fil for rå kjeldetekst (unngår temp-fil i host) ── */
-static NcVal *nc_native_kompiler_kjelde(const char *src, const char *modul) {
-    NcVal *src_v = nc_str(src ? src : "");
+    NcVal *src_v = nc_str(src->s);
     NcVal *mod = nc_str(modul);
     NcVal *args[] = {src_v, mod};
     return nc_dispatch_call("selfhost.kompiler.kompiler_fil", args, 2);
@@ -666,7 +629,7 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     /* Ikkje la barne-NCB arve host NORSCODE_* (unngår driver-rekursjon ved nc run) */
     const char *env_keys[] = {
         "NORSCODE_CMD", "NORSCODE_FILE", "NORSCODE_OUTPUT",
-        "NORSCODE_MODULE", "NORSCODE_SOURCE", NULL
+        "NORSCODE_MODULE", NULL
     };
     char *saved[8];
     int nsaved = 0;
@@ -691,63 +654,19 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     return nc_int(nc_val_til_exit(r));
 }
 
-static int nc_use_nc_main_host(void) {
-    /* nc_main.no er no standard host — alltid aktiv */
-    return 1;
-}
-
 static int nc_val_til_exit(NcVal *v) {
     if (v && v->type == NC_INT) return (int)v->i;
     return 0;
 }
 
-static char *g_nc_source_buf;
-static char *g_nc_common_ncb_buf;
-
-static void nc_free_nc_main_env_bufs(void) {
-    free(g_nc_source_buf);
-    free(g_nc_common_ncb_buf);
-    g_nc_source_buf = NULL;
-    g_nc_common_ncb_buf = NULL;
-}
-
-static int nc_prep_nc_main_env(const char *src) {
-    if (!src) return 1;
-    NcVal *kj = nc_builtin_fil_les(nc_str(src));
-    if (!kj || kj->type != NC_STR) {
-        fprintf(stderr, "Kunne ikkje lese %s\n", src);
-        return 1;
-    }
-    free(g_nc_source_buf);
-    g_nc_source_buf = strdup(kj->s);
-    if (!g_nc_source_buf) return 1;
-    setenv("NORSCODE_SOURCE", g_nc_source_buf, 1);
-    return 0;
-}
-
-static void nc_prep_common_ncb_env(void) {
-    NcVal *ncb = nc_native_kompiler("selfhost/common.no", "selfhost.common");
-    if (!ncb || ncb->type != NC_STR) return;
-    free(g_nc_common_ncb_buf);
-    g_nc_common_ncb_buf = strdup(ncb->s);
-    if (g_nc_common_ncb_buf) setenv("NORSCODE_COMMON_NCB", g_nc_common_ncb_buf, 1);
-}
-
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
-    const char *src = getenv("NORSCODE_FILE");
     if (cmd && !strcmp(cmd, "l5b-gen2")) {
         unsetenv("NORSCODE_FILE");
         unsetenv("NORSCODE_OUTPUT");
     }
-    if (cmd && src && (!strcmp(cmd, "run") || !strcmp(cmd, "compile"))) {
-        if (nc_prep_nc_main_env(src) != 0) return 1;
-    }
     NcVal *r = nc_dispatch_call("selfhost.nc_main.start", NULL, 0);
-    nc_free_nc_main_env_bufs();
-    unsetenv("NORSCODE_SOURCE");
-    unsetenv("NORSCODE_COMMON_NCB");
     if (!r) return -1;
     return nc_val_til_exit(r);
 }
@@ -768,4 +687,3 @@ int main(int argc, char **argv) {
     fprintf(stderr, "norscode: ukjend kommando: %s\n", cmd);
     return 1;
 }
-

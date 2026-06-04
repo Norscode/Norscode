@@ -95,7 +95,7 @@ bash tools/build_norscode_native.sh
 `bash tools/verify_selvstendighet.sh` (L1–L6 + native testløp, utan Python).
 
 **Stage-0 (L6):** `bash tools/build_norscode_native.sh` brukar seed (`bootstrap/stage0/` eller GitHub Release) som default.
-For maintainer-regen: `REGEN=1 bash tools/build_norscode_native.sh` (`regen_native.sh` → `bootstrap/c/` → clang).
+For maintainer-regen: `REGEN=1 bash tools/build_norscode_native.sh` (`tools/maint/regen_native.sh` → `bootstrap/maint/c/` → clang).
 Frase-regen går via [`scripts/regen_fraser.no`](scripts/regen_fraser.no) med `./bin/nc regen-fraser`.
 
 ## Vanlige kommandoer

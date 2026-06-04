@@ -25,10 +25,14 @@ flowchart TB
 |-----|-------------------------------|---------------|
 | Python | `tools/*.py`, pytest-orakler, bootstrap-wrapper | `.no`-verktøy eller `scripts/` utanfor L1-gate |
 | Legacy C-VM | `tools/c_minimal_vm/` | Arkiv + sletting; kun `archive/c_minimal_vm/` som doc |
-| Regen-C i dag | `bootstrap/c/*.c` + clang i dagleg loop | Seed-ELF + (seinare) native ELF frå `selfhost/` |
-| C-host | `nc_native_main.c` | Mellombels: minimal host; langsiktig: emitter i `.no` |
+| Regen-C i dag | `bootstrap/maint/c/*.c` + clang i dagleg loop | Seed-ELF + (seinare) native ELF frå `selfhost/` |
+| C-host | `tools/maint/c/nc_native_main.c` | Mellombels: minimal host; langsiktig: emitter i `.no` |
 
 **Viktig:** Fullstendig **null C i repo** krev at Norscode kan **bygge og kjøre seg sjølv som ELF** utan clang. Det er eit eige spor (Omgang 6). Inntil da: **ingen C/Python i det brukaren og CI kallar dagleg**.
+
+**Web-server:** Web-server-funksjonalitet krev nye `web`- og `db`-builtins i `norscode_native`.
+
+**Status presist:** Python er i praksis ute av normal flyt, men repoet er ikkje heilt C-fritt enno. Det gjeld særleg `tools/maint/c/nc_native_main.c`, `tools/maint/c/nc_runtime_full.c`, `tools/maint/c/nc_runtime_mini.c` og genererte C-artefakt under `build/`.
 
 ## Inventar i dag (kva «alt» er)
 
@@ -42,9 +46,9 @@ flowchart TB
 
 | Fil / mappe | Formål | Handling |
 |-------------|--------|----------|
-| `tools/nc_native_main.c` | NORSCODE_CMD-host, lazy `common.no` | Behold til ELF i `.no`; dokumenter som siste C-grense |
-| `tools/nc_runtime_mini.c` | Runtime-bit | Same som over |
-| `bootstrap/c/*.c` | Regen frå `.no` (L4/L6) | Allereie ikkje i git som krav; berre seed + regen |
+| `tools/maint/c/nc_native_main.c` | NORSCODE_CMD-host, lazy `common.no` | Behold til ELF i `.no`; dokumenter som siste C-grense |
+| `tools/maint/c/nc_runtime_mini.c` | Runtime-bit | Same som over |
+| `bootstrap/maint/c/*.c` | Regen frå `.no` (L4/L6) | Allereie ikkje i git som krav; berre seed + regen |
 | `tools/c_minimal_vm/*.c` | Eldre C-VM | **Slett** (eller flytt til `archive/`) |
 | `tools/build_norscode_native_from_source.sh` | Bygg via c_minimal_vm | **Slett** eller merk deprecated |
 | `build/**/*.c` | Regen-artefakt | `.gitignore`, ikkje kilde |
@@ -122,14 +126,14 @@ sh tools/nc_test.sh                   # 51/51
 
 ### Omgang 4 — Regen-C inn i selfhost (2–4 uker)
 
-**Mål:** `bootstrap/c/` generert utan å vedlikehalde handskriven C-host.
+**Mål:** `bootstrap/maint/c/` generert utan å vedlikehalde handskriven C-host.
 
-1. Reduser `nc_native_main.c` til tynn FFI (load NCB, kall `start`).
+1. Reduser `nc_native_main.c` til tynn bootstrap-host (load NCB, kall `start`, ingen ekstra runtime-logic).
 2. Flytt meir logikk til `selfhost/nc_main.no` / `native_execution/`.
 3. `regen_native.sh` produserer berre det som **må** vere C (dispatch-tabell) inntil ELF-emitter finst.
 4. `regen_verify.sh` grønn i CI på `workflow_dispatch`.
 
-**Ferdig når:** Endring i `selfhost/ncb_to_c.no` → regen → byte-identisk `bootstrap/c/` (L4/L6 grønn).
+**Ferdig når:** Endring i `selfhost/maint/ncb_to_c.no` → regen → byte-identisk `bootstrap/maint/c/` (L4/L6 grønn).
 
 ---
 
@@ -151,7 +155,7 @@ sh tools/nc_test.sh                   # 51/51
 
 1. ELF/layout frå `selfhost/native_execution/` (finst delvis).
 2. `selfcompile` produserer ny `norscode_native` som er stage-0 for neste runde.
-3. Fjern `nc_native_main.c` / `bootstrap/c/` frå normal historie; berre signert bootstrap i release.
+3. Fjern `nc_native_main.c` / `bootstrap/maint/c/` frå normal historie; berre signert bootstrap i release.
 
 **Ferdig når:** L6 + «ingen .c i repo» + grønn `verify_selvstendighet.sh`.
 
@@ -187,7 +191,7 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 ## Kva vi **ikkje** gjør i denne planen
 
 - Slette `dist/norscode_native` eller slutte å shippe binærar (brukarane treng stage-0).
-- Fjerne `selfhost/ncb_to_c.no` før Omgang 4 er verifisert (regen kollapsar).
+- Fjerne `selfhost/maint/ncb_to_c.no` før Omgang 4 er verifisert (regen kollapsar).
 - Merke alt ✅ i `SELFHOST_STATUS.md` utan gates over.
 
 ## Dokumentasjon å oppdatere undervegs
@@ -215,20 +219,20 @@ NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
 
 **Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64 (sjå over).
 
-**Omgang 6b:** ELF stage-0 — erstatte `bootstrap/c/` + clang:
+**Omgang 6b:** ELF stage-0 — erstatte `bootstrap/maint/c/` + clang:
 
 | Milepæl | Status | Verifikasjon |
 |---------|--------|--------------|
 | **6b.1** | ✅ | `bash tools/verify_omgang6b.sh` — host-ELF + stage-0 NCB→ELF, determinisme, Linux-køyring |
 | **6b.2** | ✅ | ELF `compile` av eksternt `.no` via `NORSCODE_FILE` / `elf_compile_driver` |
 | **6b.3** | ✅ | Gen1 ELF → Gen2 ELF byte-paritet (`tools/selfcompile_stage0_elf.sh`, Linux) |
-| **6b.4** | ✅ | macOS seed committed; Linux-seed committed og publisert som release-asset (`stage0-bootstrap-20260604`). `finish_6b4.sh` har fjerna/validerte `bootstrap/c/*.c` |
+| **6b.4** | ✅ | macOS seed committed; Linux-seed committed og publisert som release-asset (`stage0-bootstrap-20260604`). `finish_6b4.sh` har fjerna/validerte `bootstrap/maint/c/*.c` |
 
 Kommandoar:
 - `./bin/nc bygg-native --ncb bundle.ncb.json ut.elf`
 - `bash tools/build_omgang6b_compiler_ncb.sh`
 - `bash tools/selfcompile_stage0_elf.sh`
-- `bash tools/ensure_stage0_seed.sh`
+- `bash tools/maint/ensure_stage0_seed.sh`
 - `bash tools/fetch_stage0_seed.sh`
 - `bash tools/build_stage0_release_assets.sh`
 - `./bin/nc verify-omgang6b`

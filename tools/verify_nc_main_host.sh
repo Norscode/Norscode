@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/dist/norscode_native"
-DISPATCH="$ROOT/bootstrap/c/nc_dispatch.c"
+DISPATCH="$ROOT/bootstrap/maint/c/nc_dispatch.c"
 
 printf '=== nc_main host-verifikasjon ===\n\n'
 

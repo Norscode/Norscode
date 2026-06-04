@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tools/selfcompile_l5b.sh — L5b: Gen1-NCB køyrer Gen2 via VM (byte-paritet)
 #
-# Gen1: stage-0 byggjer kompilator-bundle (C-dispatch, fersk bundler.no).
+# Gen1: stage-0 byggjer kompilator-bundle (bootstrap-host med C-dispatch).
 # Gen2: nc_exec køyrer selfhost.bundler.bygg_bundle-bytekode frå Gen1-NCB
-# (kompiler-kall går til C-dispatch for hastigheit).
+# (kompiler-kall går via bootstrap-host for hastigheit).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -35,7 +35,7 @@ mkdir -p build/l5b
 
 printf '=== L5b: VM sjølvkompilering (byte-paritet) ===\n\n'
 
-printf '[1/3] Gen1: kompilator-bundle (C-dispatch)...\n'
+printf '[1/3] Gen1: kompilator-bundle (bootstrap-host)...\n'
 "$NC" bundle "${BUNDLE_ARGS[@]}" --output "$V1"
 if [ ! -f "$V1" ]; then
     printf '  [FEIL] Gen1 skreiv ikkje %s\n' "$V1" >&2
@@ -65,7 +65,7 @@ printf '[3/3] Byte-paritet Gen1 == Gen2...\n'
 if cmp -s "$V1" "$V2" 2>/dev/null; then
     printf '  [OK] %s bytes identiske\n\n' "$V1_BYTES"
     printf '=== L5b: BESTÅTT ===\n'
-    printf 'Kompilator-bundle frå VM er byte-identisk med C-dispatch.\n'
+    printf 'Kompilator-bundle frå VM er byte-identisk med bootstrap-host.\n'
     exit 0
 fi
 

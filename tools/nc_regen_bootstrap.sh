@@ -32,7 +32,7 @@ if [ "${1:-}" = "--full" ]; then
         selfhost.main=selfhost/main.no \
         selfhost.bundler=selfhost/bundler.no \
         selfhost.nc_main=selfhost/nc_main.no \
-        selfhost.gen_dispatch=selfhost/gen_dispatch.no \
+        selfhost.maint.gen_dispatch=selfhost/maint/gen_dispatch.no \
         --output "$TMP"
     cp "$TMP" bootstrap/kompiler.ncb.json
     rm -f "$TMP"
