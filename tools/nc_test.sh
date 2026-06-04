@@ -79,7 +79,7 @@ is_server_test() {
         test_secrets*|test_json_schema*|test_state*|test_native_*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
         test_snapshot*|test_trace*|test_comprehension*|\
-        test_assert_text.no|test_cache.no|test_chunk_2000.no|\
+        test_cache.no|test_chunk_2000.no|\
         test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
         test_dependency_import.no|\
         test_fil.no|test_file_object_storage.no|test_http_helpers.no|\
@@ -89,8 +89,7 @@ is_server_test() {
         test_security.no|test_selfhost_comparison_boolean_parity.no|\
         test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
         test_selfhost_nested_boolean_matrix.no|\
-        test_selfhost_parenthesis_stability.no|test_text.no|\
-        test_text_helpers.no)
+        test_selfhost_parenthesis_stability.no)
             return 0;;
     esac
     return 1

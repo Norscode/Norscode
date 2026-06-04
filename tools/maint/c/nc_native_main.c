@@ -452,11 +452,18 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (nc_is_sh_api(cn)) {
                 fn_r = nc_call_sh_api(cn, cargs, narg);
             }
-            else if (!strcmp(cn,"t.hilsen"))           fn_r=nc_stub_t_hilsen(narg>0?cargs[0]:nc_str(""));
-            else if (!strcmp(cn,"t.starter_med")||!strcmp(cn,"t.rop"))  fn_r=nc_stub_t_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"t.slutter_med")) fn_r=nc_builtin_ends_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"assert_slutter_med")) fn_r=nc_stub_assert_slutter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            /* Globale assert-helpers for testar */
             else if (!strcmp(cn,"assert_starter_med")) fn_r=nc_stub_assert_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"assert_slutter_med")) fn_r=nc_stub_assert_slutter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"assert_inneholder")) {
+                NcVal *s2=narg>0?cargs[0]:nc_nil(), *sub=narg>1?cargs[1]:nc_nil();
+                if (!nc_truthy(nc_builtin_contains(s2,sub))) {
+                    char *sv=nc_to_str_raw(s2), *pv=nc_to_str_raw(sub);
+                    char msg[512]; snprintf(msg,sizeof(msg),"assert_inneholder: '%s' inneheld ikkje '%s'",sv,pv);
+                    free(sv); free(pv); nc_throw(msg);
+                }
+                fn_r = nc_nil();
+            }
             else if (!strcmp(cn,"path.join"))          fn_r=nc_stub_path_join(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"web_escape_html")||!strcmp(cn,"html.escape")) fn_r=nc_stub_web_escape_html(narg>0?cargs[0]:nc_nil());
             /* env.*, json.*, t.* aliases */
