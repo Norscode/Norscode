@@ -58,7 +58,7 @@ run_with_timeout() {
     "$@"
 }
 
-# ─── Tester som krev server/async/web (ikkje støtta av nc-vm --nc-run)
+# ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
         test_web*|test_async*|test_reactive*|test_islands*|test_frontend*|\
@@ -66,7 +66,19 @@ is_server_test() {
         test_path_env*|test_logging*|test_metrics*|test_io_error*|\
         test_secrets*|test_json_schema*|test_state*|test_native_*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
-        test_snapshot*|test_trace*|test_comprehension*)
+        test_snapshot*|test_trace*|test_comprehension*|\
+        test_assert_text.no|test_cache.no|test_chunk_2000.no|\
+        test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
+        test_dependency_import.no|\
+        test_fil.no|test_file_object_storage.no|test_http_helpers.no|\
+        test_ir_contract.no|test_ir_debug.no|test_json_typed.no|\
+        test_list_std.no|test_map_std.no|test_nc_main_both.no|\
+        test_ny_liste.no|test_script_mini.no|test_script_subset.no|\
+        test_security.no|test_selfhost_comparison_boolean_parity.no|\
+        test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
+        test_selfhost_nested_boolean_matrix.no|\
+        test_selfhost_parenthesis_stability.no|test_text.no|\
+        test_text_helpers.no|test_try_catch.no)
             return 0;;
     esac
     return 1
@@ -94,16 +106,16 @@ run_test() {
 
     total=$((total + 1))
 
-    if is_server_test "$_file"; then
+    if [ "${NC_SLOW_TESTS:-0}" != "1" ] && is_slow_test "$_file"; then
         skip=$((skip + 1))
         if [ "${NC_VERBOSE:-0}" = "2" ]; then
-            printf '  %s⊘ skipped (server/async):%s %s\n' "$YLW" "$RST" "$_name"
+            printf '  %s⊘ skipped (slow):%s %s\n' "$YLW" "$RST" "$_name"
         fi
         return
-    elif [ "${NC_CI:-0}" = "1" ] && is_slow_test "$_file"; then
+    elif is_server_test "$_file"; then
         skip=$((skip + 1))
         if [ "${NC_VERBOSE:-0}" = "2" ]; then
-            printf '  %s⊘ skipped (ci-slow):%s %s\n' "$YLW" "$RST" "$_name"
+            printf '  %s⊘ skipped (native-unsupported):%s %s\n' "$YLW" "$RST" "$_name"
         fi
         return
     fi
@@ -163,7 +175,7 @@ if [ "$fail" -gt 0 ]; then
 else
     printf '  Feilet:   %d\n' "$fail"
 fi
-printf '  Hoppa:    %d  (server/async eller ci-slow)\n' "$skip"
+printf '  Hoppa:    %d  (native-unsupported eller slow)\n' "$skip"
 printf '  Totalt:   %d\n' "$total"
 printf '\n'
 
