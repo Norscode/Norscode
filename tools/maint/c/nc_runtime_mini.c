@@ -781,3 +781,60 @@ static NcVal *nc_builtin_json_parse_raw(NcVal *v) {
 }
 
 static NcVal *nc_fn_builtin_json_parse_raw(NcVal **a, int na) { return nc_builtin_json_parse_raw(na>0?a[0]:nc_nil()); }
+
+/* ─── Sti-hjelpere ─────────────────────────────────────────────────────────── */
+#include <sys/stat.h>
+static NcVal *nc_builtin_sti_join(NcVal *a, NcVal *b) {
+    char *sa = nc_to_str_raw(a), *sb = nc_to_str_raw(b);
+    size_t la = strlen(sa), lb = strlen(sb);
+    char *r = malloc(la + lb + 2);
+    strcpy(r, sa);
+    if (la > 0 && sa[la-1] != '/' && lb > 0) strcat(r, "/");
+    strcat(r, sb);
+    free(sa); free(sb);
+    return nc_str_own(r);
+}
+static NcVal *nc_builtin_sti_basename(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    char *last = strrchr(s, '/');
+    NcVal *r = nc_str(last ? last + 1 : s);
+    free(s); return r;
+}
+static NcVal *nc_builtin_sti_dirname(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    char *last = strrchr(s, '/');
+    NcVal *r;
+    if (!last) r = nc_str(".");
+    else if (last == s) r = nc_str("/");
+    else { *last = 0; r = nc_str(s); }
+    free(s); return r;
+}
+static NcVal *nc_builtin_sti_exists(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    struct stat st; int ok = (stat(s, &st) == 0);
+    free(s); return nc_bool(ok);
+}
+static NcVal *nc_builtin_sti_stem(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    char *base = strrchr(s, '/'); base = base ? base + 1 : s;
+    char *dot = strrchr(base, '.');
+    NcVal *r;
+    if (dot && dot != base) { char tmp = *dot; *dot = 0; r = nc_str(base); *dot = tmp; }
+    else r = nc_str(base);
+    free(s); return r;
+}
+
+/* ─── Miljø-sett ────────────────────────────────────────────────────────────── */
+static NcVal *nc_builtin_miljo_sett(NcVal *key, NcVal *val) {
+    char *k = nc_to_str_raw(key), *v = nc_to_str_raw(val);
+    setenv(k, v, 1);
+    NcVal *r = nc_str(v);
+    free(k); free(v); return r;
+}
+
+/* ─── OpenAPI/docs (stubs) ───────────────────────────────────────────────────── */
+static NcVal *nc_builtin_openapi_json(NcVal *tittel, NcVal *versjon) {
+    char *t = nc_to_str_raw(tittel), *v = nc_to_str_raw(versjon);
+    char buf[512]; snprintf(buf, sizeof(buf), "{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"%s\",\"version\":\"%s\"},\"paths\":{}}", t, v);
+    free(t); free(v); return nc_str(buf);
+}

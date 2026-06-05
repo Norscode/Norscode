@@ -73,7 +73,8 @@ run_with_timeout() {
 # ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
-        test_web*|test_async*|test_reactive*|test_islands*|test_frontend*|\
+        test_web_dependency*|test_web_openapi*|\
+        test_async*|test_reactive*|test_islands*|test_frontend*|\
         test_html_state*|test_csrf*|test_audit*|test_storage*|test_db*|\
         test_path_env*|test_logging*|test_metrics*|test_io_error*|\
         test_secrets*|test_json_schema*|test_state*|test_native_*|\

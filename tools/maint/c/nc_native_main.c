@@ -11,6 +11,11 @@
  */
 
 /* Forhandsdeklarasjonar — brukar nc_dispatch_call for dynamisk oppslag */
+struct NcVal; typedef struct NcVal NcVal;
+NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na);
+NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
+NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
+NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
 
 /* Kompilator-pipeline i bundle skal bruke bootstrap-host-dispatch, ikkje bytecode frå Gen1-NCB */
 static int nc_exec_prefer_dispatch(const char *name) {
@@ -409,7 +414,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"index_of"))         fn_r=nc_builtin_index_of(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"upper")||!strcmp(cn,"tekst_til_store")||!strcmp(cn,"builtin.upper")||!strcmp(cn,"builtin.tekst_til_store")||!strcmp(cn,"builtin.tekst_store"))
                 fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"lower"))            fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"lower")||!strcmp(cn,"tekst_til_liten")) fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"exit")||!strcmp(cn,"stopp")) nc_builtin_exit(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
@@ -502,6 +507,47 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"json.parse_raw")||!strcmp(cn,"json_parse_raw")) fn_r=nc_builtin_json_parse_raw(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json.stringify")||!strcmp(cn,"json_stringify")) fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json_skriv")) fn_r=nc_builtin_json_stringify(narg>0?cargs[0]:nc_nil());
+            /* Sti-hjelpere */
+            else if (!strcmp(cn,"sti_join")||!strcmp(cn,"path.join"))     fn_r=nc_builtin_sti_join(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"sti_basename")||!strcmp(cn,"path.basename")) fn_r=nc_builtin_sti_basename(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"sti_dirname")||!strcmp(cn,"path.dirname"))   fn_r=nc_builtin_sti_dirname(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"sti_exists")||!strcmp(cn,"path.exists"))     fn_r=nc_builtin_sti_exists(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"sti_stem")||!strcmp(cn,"path.stem"))         fn_r=nc_builtin_sti_stem(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"miljo_sett")||!strcmp(cn,"env.sett"))        fn_r=nc_builtin_miljo_sett(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            /* Web-builtins */
+            else if (!strcmp(cn,"ncb_route_handlers")) fn_r=nc_builtin_ncb_route_handlers(cargs,narg);
+            else if (!strcmp(cn,"ncb_metadata"))       fn_r=nc_builtin_ncb_metadata(cargs,narg);
+            else if (!strcmp(cn,"ncb_next_request_id"))fn_r=nc_builtin_ncb_next_request_id(cargs,narg);
+            else if (!strcmp(cn,"ncb_call_fn")) {
+                /* ncb_call_fn kan kaste unntak — bruk setjmp ved try_depth > 0 */
+                if (try_depth > 0) {
+                    jmp_buf _ncb_saved;
+                    memcpy(&_ncb_saved, &g_err_jmp, sizeof(jmp_buf));
+                    int _ncb_caught = 0;
+                    if (setjmp(g_err_jmp)) {
+                        memcpy(&g_err_jmp, &_ncb_saved, sizeof(jmp_buf));
+                        if (try_depth > 0) {
+                            const char *_em = g_err_msg;
+                            if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
+                            else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
+                            strncpy(last_exception, _em, sizeof(last_exception)-1);
+                            g_err_msg[0] = 0;
+                            const char *_cl = try_stack[try_depth-1].catch_lbl;
+                            sp = try_stack[try_depth-1].sp_depth;
+                            NcVal *_tgt = nc_index_get(label_map, nc_str(_cl));
+                            if (_tgt && _tgt->type == NC_INT) { ip = (int)_tgt->i + 1; _ncb_caught = 1; }
+                        }
+                        fn_r = nc_nil();
+                    } else {
+                        fn_r = nc_builtin_ncb_call_fn(cargs, narg);
+                        memcpy(&g_err_jmp, &_ncb_saved, sizeof(jmp_buf));
+                    }
+                    if (_ncb_caught) { free(cargs); free(callee); continue; }
+                } else {
+                    fn_r = nc_builtin_ncb_call_fn(cargs, narg);
+                }
+            }
+            /* openapi_json er implementert i std/web.no — ikkje C-stub her */
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else {
                 NcVal *local_fn = nc_exec_find_fn(functions, callee);
@@ -644,6 +690,38 @@ NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na) {
     return nc_int(code != 0 ? code : 0);
 }
 
+/* Global: route_handlers frå køyrande NCB; tilgjengeleg via builtin.ncb_route_handlers() */
+static NcVal *g_current_route_handlers = NULL;
+static NcVal *g_current_functions = NULL;
+
+/* Ikkje static — norscode_generated.c kan ha forward-deklarasjonar for desse */
+static NcVal *g_current_ncb = NULL;
+static int g_request_counter = 0;
+
+NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na) {
+    (void)args; (void)na;
+    return g_current_route_handlers ? g_current_route_handlers : nc_list_new();
+}
+NcVal *nc_builtin_ncb_metadata(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_list_new();
+    if (!g_current_ncb) return nc_list_new();
+    NcVal *v = nc_index_get(g_current_ncb, args[0]);
+    return (v && v->type != NC_NIL) ? v : nc_list_new();
+}
+NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na) {
+    (void)args; (void)na;
+    g_request_counter++;
+    char buf[32]; snprintf(buf, sizeof(buf), "req-%d", g_request_counter);
+    return nc_str(buf);
+}
+NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
+    NcVal *ctx = na > 1 ? args[1] : nc_nil();
+    NcVal *call_args[] = { ctx };
+    if (!g_current_functions) return nc_nil();
+    return nc_exec_call(g_current_functions, args[0]->s, call_args, 1, 0);
+}
+
 /* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
 NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_int(1);
@@ -654,6 +732,11 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     if (!fns_v || fns_v->type != NC_MAP) return nc_int(1);
     char *entry = nc_to_str_raw(entry_v);
     if (!entry || !entry[0]) { free(entry); return nc_int(1); }
+    /* Lagre route_handlers, NCB og functions for std.web */
+    NcVal *rh = nc_index_get(ncb, nc_str("route_handlers"));
+    g_current_route_handlers = (rh && rh->type != NC_NIL) ? rh : nc_list_new();
+    g_current_ncb = ncb;
+    g_request_counter = 0;
     /* Ikkje la barne-NCB arve host NORSCODE_* (unngår driver-rekursjon ved nc run) */
     const char *env_keys[] = {
         "NORSCODE_CMD", "NORSCODE_FILE", "NORSCODE_OUTPUT",
@@ -669,7 +752,9 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     }
     nc_ensure_sh_common();
     if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
+    g_current_functions = fns_v;
     NcVal *r = nc_exec_call(fns_v, entry, NULL, 0, 0);
+    g_current_functions = NULL;
     for (int i = 0; i < nsaved; i++) {
         if (saved[i]) {
             setenv(env_keys[i], saved[i], 1);
