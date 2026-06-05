@@ -138,7 +138,7 @@ static NcVal *nc_stub_web_escape_html(NcVal *v) {
         else if (*p=='>') { strcpy(wp,"&gt;"); wp+=4; }
         else if (*p=='&') { strcpy(wp,"&amp;"); wp+=5; }
         else if (*p=='"') { strcpy(wp,"&quot;"); wp+=6; }
-        else if (*p=='\'') { strcpy(wp,"&#39;"); wp+=5; }
+        else if (*p=='\'') { strcpy(wp,"&#x27;"); wp+=6; }
         else *wp++ = *p;
     }
     *wp=0; free(s);
@@ -148,7 +148,7 @@ static NcVal *nc_stub_web_escape_html(NcVal *v) {
 
 /* Kjøyr ein funksjon */
 static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, int nargs, int depth) {
-    if (depth > 500) { nc_throw("For djup rekursjon"); return nc_nil(); }
+    if (depth > 800) { nc_throw("For djup rekursjon"); return nc_nil(); }
 
     NcVal *fn_def = nc_exec_find_fn(functions, fn_name);
     if (!fn_def) {

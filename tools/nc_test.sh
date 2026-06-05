@@ -74,11 +74,11 @@ run_with_timeout() {
 is_server_test() {
     case "$(basename "$1")" in
         test_web*|test_async*|test_reactive*|test_islands*|test_frontend*|\
-        test_html*|test_csrf*|test_audit*|test_storage*|test_db*|\
+        test_html_state*|test_csrf*|test_audit*|test_storage*|test_db*|\
         test_path_env*|test_logging*|test_metrics*|test_io_error*|\
         test_secrets*|test_json_schema*|test_state*|test_native_*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
-        test_snapshot*|test_trace*|test_comprehension*|\
+        test_snapshot*|test_trace*|\
         test_cache.no|test_chunk_2000.no|\
         test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
         test_dependency_import.no|\
