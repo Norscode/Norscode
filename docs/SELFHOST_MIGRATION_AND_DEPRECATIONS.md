@@ -120,3 +120,4 @@ git log --all --full-history -- "archive/c_minimal_vm/"
 - [docs/NATIVE_FIRST_ENFORCEMENT.md](NATIVE_FIRST_ENFORCEMENT.md)
 - [docs/SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md)
 - [docs/LANE_MAP.md](LANE_MAP.md)
+- [docs/ARCHIVE_INDEX.md](ARCHIVE_INDEX.md) — Historisk referanse
