@@ -112,7 +112,8 @@ static int nc_is_sh_api(const char *cn) {
 }
 
 static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
-    nc_ensure_sh_common();
+    // TODO: Steg C - skip runtime-compilation av selfhost/common.no
+    // nc_ensure_sh_common();
     const char *short_fn = strrchr(cn, '.');
     short_fn = short_fn ? short_fn + 1 : cn;
     char full[160];
@@ -798,8 +799,10 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
         nsaved++;
         unsetenv(env_keys[i]);
     }
-    nc_ensure_sh_common();
-    if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
+    // TODO: Steg C - skip runtime-compilation av selfhost/common.no (infinite loop på stor fil)
+    // Forutsetter at common-funksjonar allereie er i kompilert NCB
+    // nc_ensure_sh_common();
+    // if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
     g_current_functions = fns_v;
     NcVal *r = nc_exec_call(fns_v, entry, NULL, 0, 0);
     g_current_functions = NULL;
