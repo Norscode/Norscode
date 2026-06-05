@@ -450,7 +450,36 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
             /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
             else if (nc_is_sh_api(cn)) {
-                fn_r = nc_call_sh_api(cn, cargs, narg);
+                if (try_depth > 0) {
+                    /* Bruk setjmp-veg så prøv/fang i kallaren kan fange unntak */
+                    jmp_buf _sh_saved_jmp;
+                    memcpy(&_sh_saved_jmp, &g_err_jmp, sizeof(jmp_buf));
+                    int _sh_caught = 0;
+                    if (setjmp(g_err_jmp)) {
+                        memcpy(&g_err_jmp, &_sh_saved_jmp, sizeof(jmp_buf));
+                        if (try_depth > 0) {
+                            const char *_em = g_err_msg;
+                            if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
+                            else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
+                            strncpy(last_exception, _em, sizeof(last_exception)-1);
+                            g_err_msg[0] = 0;
+                            const char *_cl = try_stack[try_depth - 1].catch_lbl;
+                            sp = try_stack[try_depth - 1].sp_depth;
+                            NcVal *_tgt = nc_index_get(label_map, nc_str(_cl));
+                            if (_tgt && _tgt->type == NC_INT) { ip = (int)_tgt->i + 1; _sh_caught = 1; }
+                        }
+                        fn_r = nc_nil();
+                    } else {
+                        /* Prøv bundle-funksjonen først, deretter sh-api */
+                        NcVal *_local = nc_exec_find_fn(functions, callee);
+                        if (_local) fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
+                        else fn_r = nc_call_sh_api(cn, cargs, narg);
+                        memcpy(&g_err_jmp, &_sh_saved_jmp, sizeof(jmp_buf));
+                    }
+                    if (_sh_caught) { free(cargs); free(callee); continue; }
+                } else {
+                    fn_r = nc_call_sh_api(cn, cargs, narg);
+                }
             }
             /* Globale assert-helpers for testar */
             else if (!strcmp(cn,"assert_starter_med")) fn_r=nc_stub_assert_starter_med(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());

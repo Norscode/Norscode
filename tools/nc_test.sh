@@ -86,10 +86,8 @@ is_server_test() {
         test_ir_contract.no|test_ir_debug.no|test_json_typed.no|\
         test_list_std.no|test_map_std.no|test_nc_main_both.no|\
         test_ny_liste.no|test_script_mini.no|test_script_subset.no|\
-        test_security.no|test_selfhost_comparison_boolean_parity.no|\
-        test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
-        test_selfhost_nested_boolean_matrix.no|\
-        test_selfhost_parenthesis_stability.no)
+        test_security.no|\
+        test_selfhost.no)
             return 0;;
     esac
     return 1
