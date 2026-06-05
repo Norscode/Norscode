@@ -350,7 +350,11 @@ funksjon shutdown() -> heltall {
     returner siste
 }
 
-funksjon request_dependency(ctx: ordbok_tekst, nøkkel: tekst) -> ordbok_tekst { returner {} }
+funksjon request_dependency(ctx: ordbok_tekst, nøkkel: tekst) -> ordbok_tekst {
+    la dep_key: tekst = "__dep_" + nøkkel + "__"
+    hvis har_nokkel(ctx, dep_key) { returner ctx[dep_key] }
+    returner {}
+}
 
 # ─── Path matching ──────────────────────────────────────────────────────────────
 
@@ -569,9 +573,42 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
                         gi = gi + 1
                     }
                     hvis ikkje guard_ok { returner response_error(403, "Forbudt") }
+                    // Dependency injection
+                    la deps = handler["deps"]
+                    la dep_providers = ncb_metadata("dependency_providers")
+                    la dep_args: liste = [ctx]
+                    la di: heltall = 0
+                    mens di < lengde(deps) {
+                        la dep_namn: tekst = deps[di]
+                        la dep_fn: tekst = dep_namn
+                        hvis har_nokkel(dep_providers, dep_namn) { dep_fn = dep_providers[dep_namn] }
+                        ellers { dep_fn = "__main__." + dep_namn }
+                        la dep_ctx: ordbok_tekst = {}
+                        la nk2 = nøkler(ctx)
+                        la ck: heltall = 0
+                        mens ck < lengde(nk2) {
+                            dep_ctx[nk2[ck]] = ctx[nk2[ck]]
+                            ck = ck + 1
+                        }
+                        dep_ctx["__dep_name__"] = dep_namn
+                        la dep_r = builtin.ncb_call_fn(dep_fn, dep_ctx)
+                        legg_til(dep_args, dep_r)
+                        // Lagre dep-resultatet i ctx for bruk av seinare deps
+                        ctx["__dep_" + dep_namn + "__"] = dep_r
+                        di = di + 1
+                    }
                     la resp: ordbok_tekst = {}
                     prøv {
-                        resp = builtin.ncb_call_fn(fn_namn, ctx)
+                        // Kall handler med ctx + dep-args
+                        hvis lengde(dep_args) == 1 {
+                            resp = builtin.ncb_call_fn(fn_namn, dep_args[0])
+                        } ellers hvis lengde(dep_args) == 2 {
+                            resp = builtin.ncb_call_fn(fn_namn, dep_args[0], dep_args[1])
+                        } ellers hvis lengde(dep_args) == 3 {
+                            resp = builtin.ncb_call_fn(fn_namn, dep_args[0], dep_args[1], dep_args[2])
+                        } ellers {
+                            resp = builtin.ncb_call_fn(fn_namn, ctx)
+                        }
                         hvis er_head { resp["__body__"] = "" }
                         returner _apply_response_middlewares(resp)
                     } fang (err) {
@@ -667,26 +704,114 @@ funksjon safe_slug(tekst_verdi: tekst) -> tekst {
 
 # ─── OpenAPI ───────────────────────────────────────────────────────────────────
 
+funksjon _openapi_schema(type_namn: tekst) -> tekst {
+    hvis type_namn == "heltall" eller type_namn == "int" { returner "{\"type\": \"integer\"}" }
+    hvis type_namn == "boolsk" eller type_namn == "bool" { returner "{\"type\": \"boolean\"}" }
+    hvis type_namn == "ordbok_heltall" { returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"integer\"}}" }
+    hvis type_namn == "ordbok_tekst" { returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}" }
+    hvis type_namn == "ordbok" eller tekst_starter_med(type_namn, "ordbok<") {
+        returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}}"
+    }
+    returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}"
+}
+
+funksjon _openapi_example(type_namn: tekst) -> tekst {
+    hvis type_namn == "heltall" eller type_namn == "int" { returner "1" }
+    hvis type_namn == "boolsk" eller type_namn == "bool" { returner "true" }
+    hvis type_namn == "ordbok" eller tekst_starter_med(type_namn, "ordbok<") {
+        returner "{\"verdi\": {\"verdi\": \"eksempel\"}}"
+    }
+    returner "{\"verdi\": \"eksempel\"}"
+}
+
 funksjon openapi_json(tittel: tekst, versjon: tekst) -> tekst {
     la rh = ncb_route_handlers()
     la paths: tekst = ""
+    la har_security: boolsk = usann
     la i: heltall = 0
     mens i < lengde(rh) {
         la handler = rh[i]
         la spec: tekst = handler["spec"]
         la deler = builtin.split(spec, " ")
         hvis lengde(deler) >= 2 {
-            la path: tekst = deler[1]
+            // Normaliser sti: fjern type-annotasjonar frå path params ({id:int} → {id})
+            la raw_path: tekst = deler[1]
+            la path_segs = builtin.split(raw_path, "/")
+            la norm_path: tekst = ""
+            la psi: heltall = 0
+            mens psi < lengde(path_segs) {
+                la seg: tekst = path_segs[psi]
+                la norm_seg: tekst = seg
+                hvis tekst_starter_med(seg, "{") og tekst_slutter_med(seg, "}") {
+                    la inner = builtin.slice(seg, 1, lengde(seg) - 1)
+                    la c = builtin.index_of(inner, ":")
+                    hvis c > 0 { norm_seg = "{" + builtin.slice(inner, 0, c) + "}" }
+                }
+                hvis psi == 0 { norm_path = norm_seg }
+                ellers { norm_path = norm_path + "/" + norm_seg }
+                psi = psi + 1
+            }
+            la path: tekst = norm_path
             la method: tekst = tekst_til_liten(deler[0])
-            la entry: tekst = "\"" + path + "\":{\"" + method + "\":{\"operationId\":\"" + handler["operation_id"] + "\"}}"
+            // Bygg parameters (query params)
+            la qp = handler["query_params"]
+            la params_json: tekst = ""
+            la pi: heltall = 0
+            mens pi < lengde(qp) {
+                la p: tekst = "{\"name\":\"" + qp[pi] + "\",\"in\":\"query\",\"schema\":{\"type\":\"string\"}}"
+                hvis params_json == "" { params_json = p } ellers { params_json = params_json + "," + p }
+                pi = pi + 1
+            }
+            // Bygg requestBody (body fields)
+            la bf = handler["body_fields"]
+            la body_schema: tekst = ""
+            la bi: heltall = 0
+            mens bi < lengde(bf) {
+                la f: tekst = "\"" + bf[bi] + "\":{\"type\":\"string\"}"
+                hvis body_schema == "" { body_schema = f } ellers { body_schema = body_schema + "," + f }
+                bi = bi + 1
+            }
+            la op: tekst = "{\"operationId\":\"" + handler["operation_id"] + "\""
+            hvis params_json != "" { op = op + ",\"parameters\":[" + params_json + "]" }
+            hvis body_schema != "" { op = op + ",\"requestBody\":{\"content\":{\"application/json\":{\"schema\":{\"type\":\"object\",\"properties\":{" + body_schema + "}}}}}" }
+            // Guards → security + error responses
+            la guards2 = handler["guards"]
+            la errs = handler["error_responses"]
+            // Response schema frå NCB response_type → web_type_til_schema-stil
+            la resp_type: tekst = tekst(handler["response_type"])
+            la resp_schema: tekst = _openapi_schema(resp_type)
+            la resp_example: tekst = _openapi_example(resp_type)
+            la responses_json: tekst = "\"200\":{\"description\":\"OK\",\"content\":{\"application/json\":{\"schema\": " + resp_schema + ",\"example\": " + resp_example + "}}}"
+            la eri: heltall = 0
+            mens eri < lengde(errs) {
+                la er = errs[eri]
+                la sc: tekst = tekst(er["status"])
+                la sm: tekst = tekst(er["message"])
+                responses_json = responses_json + ",\"" + sc + "\":{\"description\":\"" + sm + "\",\"content\":{\"application/json\":{\"schema\":{\"properties\":{\"error\":{\"type\":\"string\"}}}}}}"
+                eri = eri + 1
+            }
+            hvis lengde(guards2) > 0 {
+                op = op + ",\"security\":[{\"bearerAuth\":[]}]"
+                responses_json = responses_json + ",\"401\":{\"description\":\"Ikkje autentisert\"},\"403\":{\"description\":\"Forbudt\"}"
+                har_security = sann
+            }
+            // Alltid inkluder responses-seksjonen
+            op = op + ",\"responses\":{" + responses_json + "}"
+            op = op + "}"
+            la entry: tekst = "\"" + path + "\":{\"" + method + "\":" + op + "}"
             hvis paths == "" { paths = entry }
             ellers { paths = paths + "," + entry }
         }
         i = i + 1
     }
-    returner "{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"" + tittel + "\",\"version\":\"" + versjon + "\"},\"paths\":{" + paths + "}}"
+    la components: tekst = ""
+    hvis har_security {
+        components = ",\"components\":{\"securitySchemes\":{\"bearerAuth\":{\"type\":\"http\",\"scheme\":\"bearer\",\"bearerFormat\":\"JWT\"}}}"
+    }
+    returner "{\"openapi\":\"3.0.3\",\"info\":{\"title\":\"" + tittel + "\",\"version\":\"" + versjon + "\"},\"paths\":{" + paths + "}" + components + "}"
 }
 
 funksjon docs_html(tittel: tekst, versjon: tekst) -> tekst {
-    returner "<html><body><h1>" + tittel + " v" + versjon + "</h1></body></html>"
+    la spec = openapi_json(tittel, versjon)
+    returner "<!doctype html><html><head><title>" + tittel + "</title></head><body><h1>" + tittel + "</h1><pre>" + spec + "</pre></body></html>"
 }

@@ -351,16 +351,18 @@ static NcVal *nc_builtin_skriv(NcVal *v) {
 }
 static NcVal *nc_builtin_fil_les(NcVal *path_v) {
     char *path = nc_to_str_raw(path_v);
-    FILE *f = fopen(path, "rb"); free(path);
-    if (!f) nc_panic("Kan ikkje opne fil: %s", path_v->s);
+    FILE *f = fopen(path, "rb");
+    if (!f) { char msg[512]; snprintf(msg,sizeof(msg),"Kan ikkje opne fil: %s",path); free(path); nc_throw(msg); return nc_nil(); }
+    free(path);
     fseek(f, 0, SEEK_END); long sz = ftell(f); rewind(f);
     char *buf = malloc(sz+1); fread(buf, 1, sz, f); fclose(f); buf[sz] = 0;
     return nc_str_own(buf);
 }
 static NcVal *nc_builtin_fil_skriv(NcVal *path_v, NcVal *data_v) {
     char *path = nc_to_str_raw(path_v), *data = nc_to_str_raw(data_v);
-    FILE *f = fopen(path, "wb"); free(path);
-    if (!f) { free(data); return nc_nil(); }
+    FILE *f = fopen(path, "wb");
+    if (!f) { char msg[512]; snprintf(msg,sizeof(msg),"Kan ikkje skrive fil: %s",path); free(path); free(data); nc_throw(msg); return nc_nil(); }
+    free(path);
     fputs(data, f); fclose(f); free(data);
     return nc_nil();
 }
@@ -838,3 +840,5 @@ static NcVal *nc_builtin_openapi_json(NcVal *tittel, NcVal *versjon) {
     char buf[512]; snprintf(buf, sizeof(buf), "{\"openapi\":\"3.0.0\",\"info\":{\"title\":\"%s\",\"version\":\"%s\"},\"paths\":{}}", t, v);
     free(t); free(v); return nc_str(buf);
 }
+NcVal *nc_fn_builtin_tekst_erstatt(NcVal **a, int na) { return nc_builtin_replace(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil(),na>2?a[2]:nc_nil()); }
+NcVal *nc_fn_builtin_tekst_starter_med(NcVal **a, int na) { return nc_builtin_starts_with(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil()); }

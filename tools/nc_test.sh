@@ -73,20 +73,19 @@ run_with_timeout() {
 # ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
-        test_web_dependency*|test_web_openapi*|\
-        test_async*|test_reactive*|test_islands*|test_frontend*|\
-        test_html_state*|test_csrf*|test_audit*|test_storage*|test_db*|\
-        test_path_env*|test_logging*|test_metrics*|test_io_error*|\
-        test_secrets*|test_json_schema*|test_state*|test_native_*|\
+        test_async*|test_reactive*|test_islands*|\
+        test_html_state*|test_audit*|test_db*|\
+        test_logging*|test_metrics*|\
+        test_json_schema*|test_state*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
-        test_snapshot*|test_trace*|\
+        test_snapshot*|\
         test_cache.no|test_chunk_2000.no|\
         test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
         test_dependency_import.no|\
-        test_fil.no|test_file_object_storage.no|test_http_helpers.no|\
-        test_ir_contract.no|test_ir_debug.no|test_json_typed.no|\
-        test_list_std.no|test_map_std.no|test_nc_main_both.no|\
-        test_ny_liste.no|test_script_mini.no|test_script_subset.no|\
+        test_file_object_storage.no|test_http_helpers.no|\
+        test_ir_debug.no|\
+        test_nc_main_both.no|\
+        test_ny_liste.no|\
         test_security.no|\
         test_selfhost.no)
             return 0;;

@@ -46,18 +46,35 @@ static NcVal *nc_exec_find_fn(NcVal *functions, const char *name) {
     /* Direkte treff */
     NcVal *k = nc_str(name); NcVal *r = nc_index_get(functions, k);
     if (r && r->type != NC_NIL) return r;
-    /* Siste segment */
-    const char *last = strrchr(name, '.'); if (last) last++;
-    else last = name;
+    /* Strip "builtin." og prøv direkte */
+    const char *qname = name;
+    if (!strncmp(name, "builtin.", 8)) qname = name + 8;
+    if (qname != name) {
+        NcVal *k2 = nc_str(qname); NcVal *r2 = nc_index_get(functions, k2);
+        if (r2 && r2->type != NC_NIL) return r2;
+    }
+    /* Fuzzy: søk etter siste segment, med prefix-prioritering */
+    const char *last = strrchr(qname, '.'); if (last) last++; else last = qname;
+    /* Berekn alias-prefix frå søkenamnet (det som er foran siste .):
+     * "builtin.trace.start" → qname="trace.start" → prefix="trace"
+     * "__main__.request_header" → qname=same → prefix="__main__"      */
+    size_t pfx_len = last > qname ? (size_t)(last - qname - 1) : 0;
+    NcVal *fuzzy_match = NULL;
     if (functions->type == NC_MAP) {
         for (int i = 0; i < functions->map->len; i++) {
             const char *fn = functions->map->keys[i];
             const char *fn_last = strrchr(fn, '.'); fn_last = fn_last ? fn_last+1 : fn;
-            if (!strcmp(fn_last, last)) return functions->map->vals[i];
-            if (!strcmp(fn, last)) return functions->map->vals[i];
+            if (!strcmp(fn_last, last) || !strcmp(fn, last)) {
+                /* Prefix-prioritering: føretrekk om prefikset matchar */
+                if (pfx_len > 0) {
+                    size_t fn_pfx = fn_last > fn ? (size_t)(fn_last - fn - 1) : 0;
+                    if (fn_pfx == pfx_len && !strncmp(fn, qname, pfx_len)) return functions->map->vals[i];
+                }
+                if (!fuzzy_match) fuzzy_match = functions->map->vals[i];
+            }
         }
     }
-    return NULL;
+    return fuzzy_match;
 }
 
 /* Forward decl */
@@ -399,8 +416,36 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"fjern_nokkel"))     { if(narg>=2) nc_builtin_fjern_nokkel(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"json_stringify"))   fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"fil_les"))          fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"fil_skriv"))        { if(narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]); }
+            else if (!strcmp(cn,"fil_les")||!strcmp(cn,"fil_skriv")) {
+                /* fil_les og fil_skriv kan kaste IOFeil — bruk setjmp */
+                int _fil_caught = 0;
+                if (try_depth > 0) {
+                    jmp_buf _fil_saved; memcpy(&_fil_saved,&g_err_jmp,sizeof(jmp_buf));
+                    if (setjmp(g_err_jmp)) {
+                        memcpy(&g_err_jmp,&_fil_saved,sizeof(jmp_buf));
+                        if (try_depth > 0) {
+                            { const char *_em=g_err_msg;
+                              if (strncmp(_em,"Norscode unntak: ",17)==0) _em+=17;
+                              else if (strncmp(_em,"nc-vm feil: Norscode unntak: ",28)==0) _em+=28;
+                              strncpy(last_exception,_em,sizeof(last_exception)-1); }
+                            g_err_msg[0]=0;
+                            const char *_cl=try_stack[try_depth-1].catch_lbl;
+                            sp=try_stack[try_depth-1].sp_depth;
+                            NcVal *_tgt=nc_index_get(label_map,nc_str(_cl));
+                            if (_tgt&&_tgt->type==NC_INT){ip=(int)_tgt->i+1;_fil_caught=1;}
+                        }
+                        fn_r=nc_nil();
+                    } else {
+                        if (!strcmp(cn,"fil_les")) fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
+                        else if (narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]);
+                        memcpy(&g_err_jmp,&_fil_saved,sizeof(jmp_buf));
+                    }
+                } else {
+                    if (!strcmp(cn,"fil_les")) fn_r=nc_builtin_fil_les(narg>0?cargs[0]:nc_nil());
+                    else if (narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]);
+                }
+                if (_fil_caught) { free(cargs); free(callee); continue; }
+            }
             else if (!strcmp(cn,"fil_skriv_bin\xc3\xa6r")||!strcmp(cn,"fil_skriv_binary")) { if(narg>=2) nc_builtin_fil_skriv_binary(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"char_code")) fn_r=nc_builtin_char_code(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"chr")) fn_r=nc_builtin_chr(narg>0?cargs[0]:nc_nil());
@@ -554,8 +599,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 int dispatch_first = nc_exec_prefer_dispatch(callee) && !nc_exec_prefer_local(callee);
                 NcVal *dispatch_r = NULL;
 
-                /* Dispatch-only kall (ingen lokal fn, dispatch_first) kan skippa try-wrapping */
-                if (dispatch_first) {
+                /* Dispatch: bruk berre om det IKKJE finst ein lokal funksjon som matchar.
+                 * Dette hindrar at dispatch-tabell sin fuzzy-match overstyrer
+                 * eksplisitt bundla modular (t.d. trace.start vs selfhost.lexer.lexer_m1.start). */
+                if (dispatch_first && !local_fn) {
                     dispatch_r = nc_dispatch_call(callee, cargs, narg);
                     if (dispatch_r != NULL) {
                         free(cargs); free(callee);
@@ -563,7 +610,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         continue;
                     }
                 }
-                if (!dispatch_first) {
+                if (!dispatch_first && !local_fn) {
                     dispatch_r = nc_dispatch_call(callee, cargs, narg);
                     if (dispatch_r != NULL) {
                         free(cargs); free(callee);
@@ -716,10 +763,11 @@ NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na) {
 }
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na) {
     if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
-    NcVal *ctx = na > 1 ? args[1] : nc_nil();
-    NcVal *call_args[] = { ctx };
     if (!g_current_functions) return nc_nil();
-    return nc_exec_call(g_current_functions, args[0]->s, call_args, 1, 0);
+    /* Pass all args except the first (fn name) */
+    int nfn_args = na - 1;
+    NcVal **fn_args = nfn_args > 0 ? &args[1] : NULL;
+    return nc_exec_call(g_current_functions, args[0]->s, fn_args, nfn_args, 0);
 }
 
 /* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
