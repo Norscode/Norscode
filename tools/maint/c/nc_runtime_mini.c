@@ -686,7 +686,6 @@ static NcVal *jp2_parse(JP2 *j) {
     if (strncmp(j->p,"null",4)==0){j->p+=4;return nc_nil();}
     char *end; long long iv=strtoll(j->p,&end,10);
     if (end!=j->p){j->p=end;return nc_int(iv);}
-    if (*j->p) j->p++; /* skip unknown character to prevent infinite loop */
     return nc_nil();
 }
 static NcVal *nc_builtin_json_parse_str(NcVal *v) {
