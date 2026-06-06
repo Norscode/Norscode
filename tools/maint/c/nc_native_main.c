@@ -612,7 +612,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             /* openapi_json er implementert i std/web.no — ikkje C-stub her */
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else {
-                /* ── STDLIB DISPATCH (std.path.*, std.env.*, etc) ── */
+                /* ── STDLIB DISPATCH (std.path.*, std.env.*, builtin.path.*, builtin.env.*) ── */
                 if (!strncmp(cn, "std.path.basename", 17)) fn_r = nc_std_path_basename(cargs, narg);
                 else if (!strncmp(cn, "std.path.dirname", 16)) fn_r = nc_std_path_dirname(cargs, narg);
                 else if (!strncmp(cn, "std.path.stem", 13)) fn_r = nc_std_path_stem(cargs, narg);
@@ -621,6 +621,15 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 else if (!strncmp(cn, "std.env.sett", 12)) fn_r = nc_std_env_sett(cargs, narg);
                 else if (!strncmp(cn, "std.env.hent", 12)) fn_r = nc_std_env_hent(cargs, narg);
                 else if (!strncmp(cn, "std.env.finnes", 14)) fn_r = nc_std_env_finnes(cargs, narg);
+                /* builtin.path.* dispatchers (same handlers as std.path.*) */
+                else if (!strncmp(cn, "builtin.path.basename", 21)) fn_r = nc_std_path_basename(cargs, narg);
+                else if (!strncmp(cn, "builtin.path.dirname", 20)) fn_r = nc_std_path_dirname(cargs, narg);
+                else if (!strncmp(cn, "builtin.path.stem", 17)) fn_r = nc_std_path_stem(cargs, narg);
+                else if (!strncmp(cn, "builtin.path.join", 17)) fn_r = nc_std_path_join(cargs, narg);
+                else if (!strncmp(cn, "builtin.path.exists", 19)) fn_r = nc_std_path_exists(cargs, narg);
+                else if (!strncmp(cn, "builtin.env.sett", 16)) fn_r = nc_std_env_sett(cargs, narg);
+                else if (!strncmp(cn, "builtin.env.hent", 16)) fn_r = nc_std_env_hent(cargs, narg);
+                else if (!strncmp(cn, "builtin.env.finnes", 18)) fn_r = nc_std_env_finnes(cargs, narg);
 
                 else {
                 NcVal *local_fn = nc_exec_find_fn(functions, callee);
