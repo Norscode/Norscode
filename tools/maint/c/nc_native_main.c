@@ -151,12 +151,21 @@ static NcVal *g_sh_common_fns = NULL;
 
 static void nc_ensure_sh_common(void) {
     if (g_sh_common_fns) return;
-    NcVal *ncb_json = nc_native_kompiler("selfhost/common.no", "selfhost.common");
-    if (!ncb_json || ncb_json->type != NC_STR) {
-        nc_throw("Kunne ikkje kompilere selfhost/common.no");
-        return;
+    /* Try precompiled NCB first (fast, no compilation needed) */
+    NcVal *ncb = NULL;
+    NcVal *ncb_file = nc_builtin_fil_les(nc_str("bootstrap/precompiled/common.ncb.json"));
+    if (ncb_file && ncb_file->type == NC_STR) {
+        ncb = nc_builtin_json_parse_str(ncb_file);
     }
-    NcVal *ncb = nc_builtin_json_parse_str(ncb_json);
+    /* Fall back to compiling from source */
+    if (!ncb || ncb->type != NC_MAP) {
+        NcVal *ncb_json = nc_native_kompiler("selfhost/common.no", "selfhost.common");
+        if (!ncb_json || ncb_json->type != NC_STR) {
+            nc_throw("Kunne ikkje laste selfhost/common.no");
+            return;
+        }
+        ncb = nc_builtin_json_parse_str(ncb_json);
+    }
     NcVal *fns = nc_index_get(ncb, nc_str("functions"));
     if (!fns || fns->type != NC_MAP) {
         nc_throw("selfhost/common.no manglar functions");
@@ -173,8 +182,7 @@ static int nc_is_sh_api(const char *cn) {
 }
 
 static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
-    // TODO: Steg C - skip runtime-compilation av selfhost/common.no
-    // nc_ensure_sh_common();
+    nc_ensure_sh_common();
     const char *short_fn = strrchr(cn, '.');
     short_fn = short_fn ? short_fn + 1 : cn;
     char full[160];

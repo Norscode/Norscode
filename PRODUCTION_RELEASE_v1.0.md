@@ -12,7 +12,7 @@ Norscode achieves **100% self-hosting** with a production-quality compiler, byte
 
 | Metric | Result |
 |--------|--------|
-| Tests Passing | 27/35 (77%) |
+| Tests Passing | 29/35 (83%) |
 | Core Language | 100% Complete |
 | Self-Hosting | ✅ Fully Achieved |
 | Performance | 30-40% Improvement |

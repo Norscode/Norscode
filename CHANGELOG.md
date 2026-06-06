@@ -2,6 +2,19 @@
 
 All notable changes to Norscode are documented in this file.
 
+## [1.0.1] - 2026-06-06
+
+### 🐛 Bug Fixes
+
+#### Module System (bruk-import)
+- **Fixed:** `bruk std.math` (and any `bruk <modul>`) caused infinite OOM loop at runtime — `nc_bundle_ncb` passed a dict object to `tekst_erstatt`, which serialised to `"[verdi]"`, then `json_parse_raw("[verdi]")` looped forever adding nil to a list until 2 GB RAM was exhausted
+- **Fix:** string replacement runs on the raw JSON before `omdøyp_funksjonar` is called
+- **Fixed:** `finn_bruk_imports` no longer tries to runtime-compile `selfhost.*` modules (pre-compiled into the binary; recompiling `selfhost/common.no` at 2 400 lines caused OOM)
+- **Fixed:** `jp2_parse` defensive guard — advance past unknown JSON tokens to prevent infinite loop on malformed input
+- **Verified:** `bruk std.math`, `bruk std.path`, `bruk std.math som alias` all work correctly
+
+---
+
 ## [1.0.0] - 2026-06-06
 
 ### 🎉 Major Achievement: Complete Self-Hosting
