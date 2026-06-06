@@ -101,17 +101,71 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
 static int nc_val_til_exit(NcVal *v);
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
 
+/* ── SQLite3 forward declarations (no header required — links against -lsqlite3) ── */
+typedef struct sqlite3 sqlite3;
+typedef struct sqlite3_stmt sqlite3_stmt;
+typedef long long sqlite3_int64;
+#define SQLITE_OK   0
+#define SQLITE_ROW  100
+#define SQLITE_DONE 101
+extern int sqlite3_open(const char *filename, sqlite3 **ppDb);
+extern int sqlite3_close(sqlite3 *db);
+extern int sqlite3_exec(sqlite3 *db, const char *sql, int (*cb)(void*,int,char**,char**), void *arg, char **errmsg);
+extern void sqlite3_free(void *p);
+extern const char *sqlite3_errmsg(sqlite3 *db);
+extern int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+extern int sqlite3_bind_text(sqlite3_stmt *pStmt, int n, const char *zData, int nData, void (*xDel)(void*));
+extern int sqlite3_step(sqlite3_stmt *pStmt);
+extern int sqlite3_finalize(sqlite3_stmt *pStmt);
+extern const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
+extern sqlite3_int64 sqlite3_column_int64(sqlite3_stmt *pStmt, int iCol);
+extern int sqlite3_changes(sqlite3 *db);
+#define SQLITE_TRANSIENT ((void*)(-1))
+
+/* ── DB pool state ── */
+#define NC_DB_MAX_POOLS 8
+#define NC_DB_MAX_POOL_CONNS 16
+typedef struct { sqlite3 *conns[NC_DB_MAX_POOL_CONNS]; int avail; char path[512]; } NcDbPool;
+static NcDbPool g_nc_db_pools[NC_DB_MAX_POOLS];
+static int g_nc_db_pool_count = 0;
+
+static sqlite3 *nc_db_handle_ptr(NcVal *h) {
+    if (!h || h->type != NC_MAP) return NULL;
+    NcVal *p = nc_index_get(h, nc_str("__db"));
+    return (p && p->type == NC_INT) ? (sqlite3*)(intptr_t)(unsigned long long)p->i : NULL;
+}
+static NcVal *nc_db_make_handle(sqlite3 *db, int pool_idx) {
+    NcVal *m = nc_map_new();
+    nc_index_set(m, nc_str("__db"), nc_int((long long)(intptr_t)(unsigned long long)db));
+    if (pool_idx >= 0) nc_index_set(m, nc_str("__pool"), nc_int(pool_idx));
+    return m;
+}
+static unsigned long long nc_db_sql_hash(const char *s) {
+    unsigned long long h = 5381;
+    for (int c; (c = (unsigned char)*s++);) h = ((h << 5) + h) ^ c;
+    return h;
+}
+
 /* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
 static NcVal *g_sh_common_fns = NULL;
 
 static void nc_ensure_sh_common(void) {
     if (g_sh_common_fns) return;
-    NcVal *ncb_json = nc_native_kompiler("selfhost/common.no", "selfhost.common");
-    if (!ncb_json || ncb_json->type != NC_STR) {
-        nc_throw("Kunne ikkje kompilere selfhost/common.no");
-        return;
+    /* Try precompiled NCB first (fast, no compilation needed) */
+    NcVal *ncb = NULL;
+    NcVal *ncb_file = nc_builtin_fil_les(nc_str("bootstrap/precompiled/common.ncb.json"));
+    if (ncb_file && ncb_file->type == NC_STR) {
+        ncb = nc_builtin_json_parse_str(ncb_file);
     }
-    NcVal *ncb = nc_builtin_json_parse_str(ncb_json);
+    /* Fall back to compiling from source */
+    if (!ncb || ncb->type != NC_MAP) {
+        NcVal *ncb_json = nc_native_kompiler("selfhost/common.no", "selfhost.common");
+        if (!ncb_json || ncb_json->type != NC_STR) {
+            nc_throw("Kunne ikkje laste selfhost/common.no");
+            return;
+        }
+        ncb = nc_builtin_json_parse_str(ncb_json);
+    }
     NcVal *fns = nc_index_get(ncb, nc_str("functions"));
     if (!fns || fns->type != NC_MAP) {
         nc_throw("selfhost/common.no manglar functions");
@@ -128,13 +182,13 @@ static int nc_is_sh_api(const char *cn) {
 }
 
 static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
-    // TODO: Steg C - skip runtime-compilation av selfhost/common.no
-    // nc_ensure_sh_common();
+    nc_ensure_sh_common();
     const char *short_fn = strrchr(cn, '.');
     short_fn = short_fn ? short_fn + 1 : cn;
     char full[160];
     snprintf(full, sizeof(full), "selfhost.common.%s", short_fn);
-    if (!nc_exec_find_fn(g_sh_common_fns, full) && !nc_exec_find_fn(g_sh_common_fns, short_fn)) {
+    if (!g_sh_common_fns ||
+        (!nc_exec_find_fn(g_sh_common_fns, full) && !nc_exec_find_fn(g_sh_common_fns, short_fn))) {
         nc_panic("Ukjent selfhost API: %s", cn);
         return nc_nil();
     }
@@ -478,17 +532,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lower")||!strcmp(cn,"tekst_til_liten")) fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"exit")||!strcmp(cn,"stopp")) nc_builtin_exit(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.gange")||!strcmp(cn,"std.math.gange"))   fn_r=nc_mul(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.dele")||!strcmp(cn,"std.math.dele"))     fn_r=nc_div(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.rest")||!strcmp(cn,"std.math.rest"))     fn_r=nc_mod(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.abs")||!strcmp(cn,"std.math.abs")) {
+            else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss")||!strcmp(cn,"builtin.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus")||!strcmp(cn,"builtin.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.gange")||!strcmp(cn,"std.math.gange")||!strcmp(cn,"builtin.math.gange"))   fn_r=nc_mul(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.dele")||!strcmp(cn,"std.math.dele")||!strcmp(cn,"builtin.math.dele"))     fn_r=nc_div(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.rest")||!strcmp(cn,"std.math.rest")||!strcmp(cn,"builtin.math.rest"))     fn_r=nc_mod(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.abs")||!strcmp(cn,"std.math.abs")||!strcmp(cn,"builtin.math.abs")) {
                 NcVal *v=narg>0?cargs[0]:nc_nil();
                 fn_r = (v->type==NC_INT && v->i<0) ? nc_int(-v->i) : v;
             }
-            else if (!strcmp(cn,"math.min")||!strcmp(cn,"std.math.min"))   fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),-1))?cargs[0]:cargs[1];
-            else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"math.min")||!strcmp(cn,"std.math.min")||!strcmp(cn,"builtin.math.min"))   fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),-1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")||!strcmp(cn,"builtin.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
             else if (!strcmp(cn,"assert")) {
                 if (narg>0 && !nc_truthy(cargs[0])) {
                     char *msg = narg>1 ? nc_to_str_raw(cargs[1]) : strdup("assert feilet");
@@ -515,6 +569,193 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"desimaltall"))     fn_r=nc_builtin_desimaltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
+            /* ── async/await — synchronous implementation ── */
+            else if (!strcmp(cn,"await_value")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                const char *_async_exc = NULL;
+                if (v && v->type == NC_MAP) {
+                    NcVal *tm = nc_index_get(v, nc_str("__timeout"));
+                    if (tm && nc_truthy(tm)) _async_exc = "TimeoutFeil: vent.timeout utlaupt";
+                    if (!_async_exc) {
+                        NcVal *cm = nc_index_get(v, nc_str("__kansellert"));
+                        if (cm && nc_truthy(cm)) _async_exc = "AvbruttFeil: vent.kanseller avbrutt";
+                    }
+                }
+                if (_async_exc) {
+                    free(cargs); free(callee);
+                    if (try_depth > 0) {
+                        strncpy(last_exception, _async_exc, sizeof(last_exception)-1);
+                        const char *_cl = try_stack[try_depth-1].catch_lbl;
+                        sp = try_stack[try_depth-1].sp_depth;
+                        try_depth--;
+                        NcVal *_tgt = nc_index_get(label_map, nc_str(_cl));
+                        if (_tgt && _tgt->type == NC_INT) { ip = (int)_tgt->i; continue; }
+                    }
+                    nc_throw(_async_exc);
+                }
+                fn_r = v;
+            }
+            else if (!strcmp(cn,"vent.sov")) { /* noop — sync runtime */ }
+            else if (!strcmp(cn,"vent.timeout")) {
+                /* vent.timeout(value, ms) — ms=0 → always timed out in sync mode */
+                NcVal *m = nc_map_new();
+                nc_index_set(m, nc_str("__timeout"), nc_bool(1));
+                nc_index_set(m, nc_str("value"), narg>0 ? cargs[0] : nc_nil());
+                fn_r = m;
+            }
+            else if (!strcmp(cn,"vent.er_timeoutet")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                NcVal *tm = (v && v->type==NC_MAP) ? nc_index_get(v, nc_str("__timeout")) : NULL;
+                fn_r = nc_bool(tm && nc_truthy(tm));
+            }
+            else if (!strcmp(cn,"vent.kanseller")) {
+                NcVal *m = nc_map_new();
+                nc_index_set(m, nc_str("__kansellert"), nc_bool(1));
+                fn_r = m;
+            }
+            else if (!strcmp(cn,"vent.er_kansellert")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                NcVal *cm = (v && v->type==NC_MAP) ? nc_index_get(v, nc_str("__kansellert")) : NULL;
+                fn_r = nc_bool(cm && nc_truthy(cm));
+            }
+            /* ── std.db — SQLite backend ── */
+            else if (!strcmp(cn,"db.open")) {
+                char *p = nc_to_str_raw(narg>0?cargs[0]:nc_nil()); sqlite3 *db=NULL;
+                fn_r = (sqlite3_open(p,&db)==SQLITE_OK) ? nc_db_make_handle(db,-1) : nc_nil(); free(p);
+            }
+            else if (!strcmp(cn,"db.close")) {
+                NcVal *h=narg>0?cargs[0]:nc_nil();
+                sqlite3 *db=nc_db_handle_ptr(h);
+                if (!db) { fn_r=nc_bool(0); } else {
+                    NcVal *pv=nc_index_get(h,nc_str("__pool"));
+                    if (pv&&pv->type==NC_INT&&pv->i>=0&&(int)pv->i<g_nc_db_pool_count) {
+                        int idx=(int)pv->i;
+                        if (g_nc_db_pools[idx].avail<NC_DB_MAX_POOL_CONNS)
+                            g_nc_db_pools[idx].conns[g_nc_db_pools[idx].avail++]=db;
+                        else sqlite3_close(db);
+                    } else sqlite3_close(db);
+                    fn_r=nc_bool(1);
+                }
+            }
+            else if (!strcmp(cn,"db.ping")) { fn_r=nc_bool(nc_db_handle_ptr(narg>0?cargs[0]:nc_nil())!=NULL); }
+            else if (!strcmp(cn,"db.execute")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                if (!db) { fn_r=nc_int(-1); } else {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); char *e=NULL;
+                    sqlite3_exec(db,s,NULL,NULL,&e); free(s);
+                    if (e) { sqlite3_free(e); fn_r=nc_int(-1); } else fn_r=nc_int(sqlite3_changes(db));
+                }
+            }
+            else if (!strcmp(cn,"db.query_text")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_str(""); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); sqlite3_stmt *st=NULL;
+                    if (sqlite3_prepare_v2(db,s,-1,&st,NULL)==SQLITE_OK) {
+                        if (sqlite3_step(st)==SQLITE_ROW) {
+                            const unsigned char *t=sqlite3_column_text(st,0);
+                            if (t) fn_r=nc_str((const char*)t);
+                        }
+                        sqlite3_finalize(st);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.query_int")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); sqlite3_stmt *st=NULL;
+                    if (sqlite3_prepare_v2(db,s,-1,&st,NULL)==SQLITE_OK) {
+                        if (sqlite3_step(st)==SQLITE_ROW) fn_r=nc_int((long long)sqlite3_column_int64(st,0));
+                        sqlite3_finalize(st);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.begin")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"BEGIN",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.commit")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"COMMIT",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.rollback")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"ROLLBACK",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.migrate")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil());
+                    sqlite3_exec(db,"CREATE TABLE IF NOT EXISTS __nc_migrations(hash TEXT PRIMARY KEY)",NULL,NULL,NULL);
+                    char hstr[24]; snprintf(hstr,sizeof(hstr),"%llu",nc_db_sql_hash(s));
+                    char qsql[80]; snprintf(qsql,sizeof(qsql),"SELECT 1 FROM __nc_migrations WHERE hash='%s'",hstr);
+                    sqlite3_stmt *chk=NULL; int already=0;
+                    if (sqlite3_prepare_v2(db,qsql,-1,&chk,NULL)==SQLITE_OK) { if(sqlite3_step(chk)==SQLITE_ROW) already=1; sqlite3_finalize(chk); }
+                    if (!already) {
+                        char *e=NULL; int rc=sqlite3_exec(db,s,NULL,NULL,&e);
+                        if (!e && rc==SQLITE_OK) {
+                            char isql[80]; snprintf(isql,sizeof(isql),"INSERT INTO __nc_migrations VALUES('%s')",hstr);
+                            sqlite3_exec(db,isql,NULL,NULL,NULL); fn_r=nc_int(1);
+                        } else if (e) sqlite3_free(e);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.transaction")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); char *e=NULL;
+                    sqlite3_exec(db,"BEGIN",NULL,NULL,NULL);
+                    int rc=sqlite3_exec(db,s,NULL,NULL,&e); free(s);
+                    if (e||rc!=SQLITE_OK) { if(e) sqlite3_free(e); sqlite3_exec(db,"ROLLBACK",NULL,NULL,NULL); }
+                    else { fn_r=nc_int(sqlite3_changes(db)); sqlite3_exec(db,"COMMIT",NULL,NULL,NULL); }
+                }
+            }
+            else if (!strcmp(cn,"db.pool")) {
+                char *p=nc_to_str_raw(narg>0?cargs[0]:nc_nil());
+                int sz=narg>1&&cargs[1]&&cargs[1]->type==NC_INT?(int)cargs[1]->i:1;
+                int idx=g_nc_db_pool_count++;
+                if (idx<NC_DB_MAX_POOLS) {
+                    strncpy(g_nc_db_pools[idx].path,p,511); g_nc_db_pools[idx].avail=0;
+                    sqlite3 *db=NULL;
+                    if (sqlite3_open(p,&db)==SQLITE_OK) g_nc_db_pools[idx].conns[g_nc_db_pools[idx].avail++]=db;
+                    NcVal *m=nc_map_new(); nc_index_set(m,nc_str("__pool"),nc_int(idx)); (void)sz;
+                    fn_r=m;
+                } else fn_r=nc_nil();
+                free(p);
+            }
+            else if (!strcmp(cn,"db.pool_size")) {
+                NcVal *p=narg>0?cargs[0]:nc_nil(); fn_r=nc_int(0);
+                if (p&&p->type==NC_MAP) { NcVal *iv=nc_index_get(p,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT&&iv->i<g_nc_db_pool_count) fn_r=nc_int(g_nc_db_pools[(int)iv->i].avail); }
+            }
+            else if (!strcmp(cn,"db.pool_acquire")) {
+                NcVal *pool=narg>0?cargs[0]:nc_nil(); fn_r=nc_nil();
+                if (pool&&pool->type==NC_MAP) { NcVal *iv=nc_index_get(pool,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT) { int idx=(int)iv->i;
+                        if (idx<g_nc_db_pool_count) {
+                            sqlite3 *db=NULL;
+                            if (g_nc_db_pools[idx].avail>0) db=g_nc_db_pools[idx].conns[--g_nc_db_pools[idx].avail];
+                            else sqlite3_open(g_nc_db_pools[idx].path,&db);
+                            if (db) fn_r=nc_db_make_handle(db,idx);
+                        }
+                    }
+                }
+            }
+            else if (!strcmp(cn,"db.pool_close")) {
+                NcVal *pool=narg>0?cargs[0]:nc_nil(); fn_r=nc_bool(0);
+                if (pool&&pool->type==NC_MAP) { NcVal *iv=nc_index_get(pool,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT&&iv->i<g_nc_db_pool_count) {
+                        int idx=(int)iv->i;
+                        for (int _i=0;_i<g_nc_db_pools[idx].avail;_i++) sqlite3_close(g_nc_db_pools[idx].conns[_i]);
+                        g_nc_db_pools[idx].avail=0; fn_r=nc_bool(1);
+                    }
+                }
+            }
             /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
             else if (nc_is_sh_api(cn)) {
                 if (try_depth > 0) {

@@ -36,6 +36,7 @@ struct NcVal {
         NcList   *list;
         NcMap    *map;
     };
+    size_t slen; /* cached strlen for NC_STR — avoids O(N²) character indexing */
 };
 
 /* ── Feilhandtering ── */
@@ -60,10 +61,12 @@ static NcVal *nc_bool(int b) {
     NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_BOOL; v->b = b; return v;
 }
 static NcVal *nc_str(const char *s) {
-    NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_STR; v->s = strdup(s ? s : ""); return v;
+    NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_STR;
+    v->s = strdup(s ? s : ""); v->slen = strlen(v->s); return v;
 }
 static NcVal *nc_str_own(char *s) {
-    NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_STR; v->s = s; return v;
+    NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_STR;
+    v->s = s; v->slen = s ? strlen(s) : 0; return v;
 }
 static NcVal *nc_list_new(void) {
     NcVal *v = calloc(1, sizeof(NcVal)); v->type = NC_LIST;
@@ -223,9 +226,12 @@ static NcVal *nc_build_map(int *sp, NcVal **stack, int n) {
     for (int i = 0; i < n; i++) {
         NcVal *v = nc_pop(sp, stack), *k = nc_pop(sp, stack);
         char *ks = nc_to_str_raw(k);
-        /* resize */
-        m->map->keys = realloc(m->map->keys, (m->map->len+1)*sizeof(char*));
-        m->map->vals = realloc(m->map->vals, (m->map->len+1)*sizeof(NcVal*));
+        /* resize — doubling strategy like NcList (avoids O(N²) realloc) */
+        if (m->map->len >= m->map->cap) {
+            m->map->cap = m->map->cap ? m->map->cap*2 : 4;
+            m->map->keys = realloc(m->map->keys, m->map->cap*sizeof(char*));
+            m->map->vals = realloc(m->map->vals, m->map->cap*sizeof(NcVal*));
+        }
         m->map->keys[m->map->len] = ks;
         m->map->vals[m->map->len] = v;
         m->map->len++;
@@ -251,8 +257,9 @@ static NcVal *nc_index_get(NcVal *obj, NcVal *key) {
     }
     if (obj->type == NC_STR) {
         long long idx = (key->type == NC_INT) ? key->i : atoll(key->s);
-        if (idx < 0) idx = (long long)strlen(obj->s) + idx;
-        if (idx < 0 || idx >= (long long)strlen(obj->s)) return nc_str("");
+        long long slen = (long long)(obj->slen ? obj->slen : (obj->slen = strlen(obj->s)));
+        if (idx < 0) idx = slen + idx;
+        if (idx < 0 || idx >= slen) return nc_str("");
         char buf[2] = {obj->s[idx], 0};
         return nc_str(buf);
     }
@@ -280,8 +287,11 @@ static void nc_index_set(NcVal *obj, NcVal *key, NcVal *val) {
         for (int i = 0; i < obj->map->len; i++) {
             if (!strcmp(obj->map->keys[i], ks)) { obj->map->vals[i] = val; free(ks); return; }
         }
-        obj->map->keys = realloc(obj->map->keys, (obj->map->len+1)*sizeof(char*));
-        obj->map->vals = realloc(obj->map->vals, (obj->map->len+1)*sizeof(NcVal*));
+        if (obj->map->len >= obj->map->cap) {
+            obj->map->cap = obj->map->cap ? obj->map->cap*2 : 4;
+            obj->map->keys = realloc(obj->map->keys, obj->map->cap*sizeof(char*));
+            obj->map->vals = realloc(obj->map->vals, obj->map->cap*sizeof(NcVal*));
+        }
         obj->map->keys[obj->map->len] = ks;
         obj->map->vals[obj->map->len] = val;
         obj->map->len++;
@@ -298,7 +308,7 @@ static void nc_throw(const char *msg) {
 /* ── Innebygde funksjonar ── */
 static NcVal *nc_builtin_lengde(NcVal *v) {
     if (!v) return nc_int(0);
-    if (v->type == NC_STR)  return nc_int((long long)strlen(v->s));
+    if (v->type == NC_STR)  return nc_int((long long)(v->slen ? v->slen : (v->slen=strlen(v->s))));
     if (v->type == NC_LIST) return nc_int(v->list->len);
     if (v->type == NC_MAP)  return nc_int(v->map->len);
     return nc_int(0);
@@ -337,7 +347,7 @@ static NcVal *nc_builtin_slice(NcVal *v, NcVal *a_v, NcVal *b_v) {
         return r;
     }
     if (v->type != NC_STR) return nc_str("");
-    long long len = (long long)strlen(v->s);
+    long long len = (long long)(v->slen ? v->slen : (v->slen=strlen(v->s)));
     long long b = (b_v && b_v->type==NC_INT && b_v->i != -1) ? b_v->i : len;
     if (a < 0) a = 0; if (a > len) a = len;
     if (b < a) b = a; if (b > len) b = len;
@@ -686,6 +696,7 @@ static NcVal *jp2_parse(JP2 *j) {
     if (strncmp(j->p,"null",4)==0){j->p+=4;return nc_nil();}
     char *end; long long iv=strtoll(j->p,&end,10);
     if (end!=j->p){j->p=end;return nc_int(iv);}
+    if (*j->p) j->p++; /* skip unknown character to prevent infinite loop */
     return nc_nil();
 }
 static NcVal *nc_builtin_json_parse_str(NcVal *v) {

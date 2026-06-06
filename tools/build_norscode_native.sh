@@ -171,7 +171,23 @@ build_from_bootstrap_c() {
     cat "$main" >> "$tmp"
 
     printf 'Kompilerer norscode_native frå bootstrap/maint/c (stage-0, %s)...\n' "$CC" >&2
-    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp"; then
+    # Detect sqlite3 linkage
+    # On macOS, sqlite3 ships with Xcode/CommandLineTools → always use -lsqlite3.
+    # On Linux, prefer -lsqlite3 (libsqlite3-dev); fall back to direct .so path.
+    _sqlite_flag="-lsqlite3"
+    case "$(uname -s)" in
+        Linux)
+            # Test with a trivial source to confirm -lsqlite3 links
+            _sqlite_test=$(mktemp /tmp/nc_sq_XXXXXX.c)
+            printf 'int sqlite3_open(const char*,void**); int main(){return 0;}\n' > "$_sqlite_test"
+            if ! "$CC" -o /dev/null "$_sqlite_test" -lsqlite3 2>/dev/null; then
+                _found=$(find /usr/lib /usr/local/lib 2>/dev/null -name "libsqlite3.so*" | sort | head -1)
+                [ -n "$_found" ] && _sqlite_flag="-Wl,$_found" || _sqlite_flag=""
+            fi
+            rm -f "$_sqlite_test"
+            ;;
+    esac
+    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_sqlite_flag; then
         _clang_ec=$?
         rm -f "$tmp"
         printf 'Feil: clang kompilering feila (exit %d)\n' "$_clang_ec" >&2
