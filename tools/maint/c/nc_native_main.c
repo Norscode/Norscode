@@ -17,6 +17,17 @@ NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
 NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
 
+/* Stdlib dispatch handlers */
+static NcVal *nc_std_path_basename(NcVal **args, int na);
+static NcVal *nc_std_path_dirname(NcVal **args, int na);
+static NcVal *nc_std_path_stem(NcVal **args, int na);
+static NcVal *nc_std_path_join(NcVal **args, int na);
+static NcVal *nc_std_path_exists(NcVal **args, int na);
+static NcVal *nc_std_env_sett(NcVal **args, int na);
+static NcVal *nc_std_env_hent(NcVal **args, int na);
+static NcVal *nc_std_env_finnes(NcVal **args, int na);
+static NcVal *g_std_env;
+
 /* Kompilator-pipeline i bundle skal bruke bootstrap-host-dispatch, ikkje bytecode frå Gen1-NCB */
 static int nc_exec_prefer_dispatch(const char *name) {
     if (!strncmp(name, "selfhost.kompiler.", 18)) return 1;
@@ -24,6 +35,11 @@ static int nc_exec_prefer_dispatch(const char *name) {
     if (!strncmp(name, "selfhost.parser.", 16)) return 1;
     if (!strncmp(name, "selfhost.compiler.", 18)) return 1;
     if (!strncmp(name, "selfhost.json.", 14)) return 1;
+    if (!strncmp(name, "std.path.", 9)) return 1;
+    if (!strncmp(name, "std.env.", 8)) return 1;
+    if (!strncmp(name, "std.web.", 8)) return 1;
+    if (!strncmp(name, "std.csrf.", 9)) return 1;
+    if (!strncmp(name, "std.security.", 13)) return 1;
     if (!strcmp(name, "kompiler_fil")) return 1;
     if (!strcmp(name, "json_skriv")) return 1;
     if (!strcmp(name, "json_parse_raw")) return 1;
@@ -596,6 +612,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             /* openapi_json er implementert i std/web.no — ikkje C-stub her */
             else if (cn[0]>='A'&&cn[0]<='Z')        fn_r=nc_map_new(); /* struct constructor */
             else {
+                /* ── STDLIB DISPATCH (std.path.*, std.env.*, etc) ── */
+                if (!strncmp(cn, "std.path.basename", 17)) fn_r = nc_std_path_basename(cargs, narg);
+                else if (!strncmp(cn, "std.path.dirname", 16)) fn_r = nc_std_path_dirname(cargs, narg);
+                else if (!strncmp(cn, "std.path.stem", 13)) fn_r = nc_std_path_stem(cargs, narg);
+                else if (!strncmp(cn, "std.path.join", 13)) fn_r = nc_std_path_join(cargs, narg);
+                else if (!strncmp(cn, "std.path.exists", 15)) fn_r = nc_std_path_exists(cargs, narg);
+                else if (!strncmp(cn, "std.env.sett", 12)) fn_r = nc_std_env_sett(cargs, narg);
+                else if (!strncmp(cn, "std.env.hent", 12)) fn_r = nc_std_env_hent(cargs, narg);
+                else if (!strncmp(cn, "std.env.finnes", 14)) fn_r = nc_std_env_finnes(cargs, narg);
+
+                else {
                 NcVal *local_fn = nc_exec_find_fn(functions, callee);
                 int dispatch_first = nc_exec_prefer_dispatch(callee) && !nc_exec_prefer_local(callee);
                 NcVal *dispatch_r = NULL;
@@ -651,6 +678,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     fn_r = nc_exec_call(functions, callee, cargs, narg, depth+1);
                 }
                 if (_nc_exn_caught) continue;
+                } /* close else for stdlib check */
             }
             free(cargs); free(callee);
             nc_push(&sp,stack_arr,fn_r); ip++;
@@ -711,6 +739,7 @@ static NcVal *nc_native_kompiler(const char *src_path, const char *modul) {
     return nc_dispatch_call("selfhost.kompiler.kompiler_fil", args, 2);
 }
 
+
 static void nc_merge_fns(NcVal *dst, NcVal *src) {
     if (!dst || dst->type != NC_MAP || !src || src->type != NC_MAP) return;
     for (int i = 0; i < src->map->len; i++) {
@@ -718,6 +747,82 @@ static void nc_merge_fns(NcVal *dst, NcVal *src) {
         if (!existing || existing->type == NC_NIL)
             nc_index_set(dst, nc_str(src->map->keys[i]), src->map->vals[i]);
     }
+}
+
+/* ── Standard Library Dispatch Handlers (implementations) ── */
+static NcVal *nc_std_path_basename(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
+    const char *path = args[0]->s;
+    const char *last = strrchr(path, '/');
+    return nc_str(last ? last + 1 : path);
+}
+
+static NcVal *nc_std_path_dirname(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
+    const char *path = args[0]->s;
+    const char *last = strrchr(path, '/');
+    if (!last) return nc_str(".");
+    if (last == path) return nc_str("/");
+    char buf[1024];
+    snprintf(buf, (size_t)(last - path + 1), "%s", path);
+    return nc_str(buf);
+}
+
+static NcVal *nc_std_path_stem(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
+    const char *path = args[0]->s;
+    const char *last_slash = strrchr(path, '/');
+    const char *base = last_slash ? last_slash + 1 : path;
+    const char *last_dot = strrchr(base, '.');
+    if (!last_dot) return nc_str(base);
+    char buf[1024];
+    snprintf(buf, (size_t)(last_dot - base + 1), "%s", base);
+    return nc_str(buf);
+}
+
+static NcVal *nc_std_path_join(NcVal **args, int na) {
+    if (na < 2) return nc_nil();
+    const char *a = (args[0] && args[0]->type == NC_STR) ? args[0]->s : "";
+    const char *b = (args[1] && args[1]->type == NC_STR) ? args[1]->s : "";
+    if (!*a) return nc_str(b);
+    if (!*b) return nc_str(a);
+    char buf[2048];
+    snprintf(buf, sizeof(buf), "%s/%s", a, b);
+    return nc_str(buf);
+}
+
+static NcVal *nc_std_path_exists(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_bool(0);
+    FILE *f = fopen(args[0]->s, "r");
+    if (f) { fclose(f); return nc_bool(1); }
+    return nc_bool(0);
+}
+
+static NcVal *nc_std_env_sett(NcVal **args, int na) {
+    if (na < 2) return nc_nil();
+    if (!g_std_env) g_std_env = nc_map_new();
+    const char *key = (args[0] && args[0]->type == NC_STR) ? args[0]->s : "";
+    NcVal *val = args[1];
+    nc_index_set(g_std_env, nc_str(key), val);
+    return val;
+}
+
+static NcVal *nc_std_env_hent(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
+    if (!g_std_env) return nc_nil();
+    return nc_index_get(g_std_env, nc_str(args[0]->s));
+}
+
+static NcVal *nc_std_env_finnes(NcVal **args, int na) {
+    if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_bool(0);
+    if (!g_std_env) return nc_bool(0);
+    NcVal *v = nc_index_get(g_std_env, nc_str(args[0]->s));
+    return nc_bool(v && v->type != NC_NIL);
+}
+
+/* Initialize g_std_env */
+static void nc_init_std_env() {
+    if (!g_std_env) g_std_env = nc_map_new();
 }
 
 /* Host FFI: køyr ein namngitt funksjon i Gen1-NCB med to argument (for l5b bygg_bundle) */
