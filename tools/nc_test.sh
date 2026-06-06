@@ -85,7 +85,6 @@ is_server_test() {
         test_file_object_storage.no|test_http_helpers.no|\
         test_ir_debug.no|\
         test_nc_main_both.no|\
-        test_ny_liste.no|\
         test_frontend.no|\
         test_html.no|\
         test_html_components.no|test_html_components_v2.no|\
