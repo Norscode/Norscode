@@ -187,6 +187,14 @@ funksjon web_type_til_schema(type_namn)
     hvis type_namn == "ordbok_tekst"
         returner "{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}"
     slutt
+    // Generisk ordbok<tekst, ordbok<tekst, tekst>> og liknande
+    hvis tekst_starter_med(type_namn, "ordbok<")
+        returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}}"
+    slutt
+    // Plain 'ordbok' utan generisk annotasjon — treat as nested dict
+    hvis type_namn == "ordbok"
+        returner "{\"type\": \"object\", \"additionalProperties\": {\"type\": \"object\", \"additionalProperties\": {\"type\": \"string\"}}}"
+    slutt
     returner "{\"type\":\"string\"}"
 slutt
 
@@ -202,6 +210,9 @@ funksjon web_type_til_eksempel(type_namn)
     slutt
     hvis type_namn == "liste_tekst"
         returner "[\"eksempel\"]"
+    slutt
+    hvis tekst_starter_med(type_namn, "ordbok<") eller type_namn == "ordbok"
+        returner "{\"verdi\": {\"verdi\": \"eksempel\"}}"
     slutt
     hvis type_namn == "ordbok_heltall"
         returner "{\"verdi\":1}"
@@ -227,42 +238,46 @@ funksjon web_normaliser_sti(sti)
 slutt
 
 funksjon web_kombiner_prefiks(prefiks, spec)
-    route_prefix = prefiks
-    route_spec = spec
-    hvis route_prefix == ""
-        returner route_spec
+    hvis prefiks == ""
+        returner spec
     slutt
+    // Finn metode og sti
     metode = ""
-    sti = route_spec
-    mellomrom_pos = 0
-    i = 0
-    mens i < lengde(route_spec)
-        hvis route_spec[i] == " "
-            mellomrom_pos = i
+    sti = spec
+    pos = -1
+    k = 0
+    mens k < lengde(spec)
+        hvis spec[k] == " "
+            pos = k
             bryt
         slutt
-        i = i + 1
+        k = k + 1
     slutt
-    hvis mellomrom_pos > 0
-        metode = route_spec[:mellomrom_pos]
-        sti = route_spec[mellomrom_pos + 1:]
+    hvis pos > 0
+        metode = builtin.slice(spec, 0, pos)
+        sti = builtin.slice(spec, pos + 1, lengde(spec))
     slutt
-    route_prefix = web_normaliser_sti(route_prefix)
-    hvis lengde(route_prefix) > 1 og route_prefix[lengde(route_prefix) - 1] == "/"
-        route_prefix = route_prefix[:lengde(route_prefix) - 1]
+    // Normaliser prefiks
+    prefix_n = web_normaliser_sti(prefiks)
+    hvis lengde(prefix_n) > 1 og prefix_n[lengde(prefix_n) - 1] == "/"
+        prefix_n = builtin.slice(prefix_n, 0, lengde(prefix_n) - 1)
     slutt
+    // Legg saman
     hvis sti == "" eller sti == "/"
-        kombinert = route_prefix
-    ellers
-        hvis sti[0] != "/"
-            sti = "/" + sti
+        kombinert2 = prefix_n
+        hvis metode == ""
+            returner kombinert2
         slutt
-        kombinert = route_prefix + sti
+        returner metode + " " + kombinert2
     slutt
+    hvis sti[0] != "/"
+        sti = "/" + sti
+    slutt
+    kombinert3 = prefix_n + sti
     hvis metode == ""
-        returner kombinert
+        returner kombinert3
     slutt
-    returner metode + " " + kombinert
+    returner metode + " " + kombinert3
 slutt
 
 funksjon web_split_spec(spec)
@@ -358,7 +373,29 @@ funksjon web_rute_til_json(route)
     route_json = route_json + "},"
     route_json = route_json + "\"response_example\":" + web_type_til_eksempel(response_type) + ","
     route_json = route_json + "\"response_schema\":" + web_type_til_schema(response_type) + ","
-    route_json = route_json + "\"error_responses\":" + json_fra_tekstliste(route_felt_liste(route, "error_responses")) + ","
+    // Serialiser error_responses som liste av {status, message}-objekt
+    la errs_json: tekst = "["
+    la errs_list = route_felt_liste(route, "error_responses")
+    la ei: heltall = 0
+    mens ei < lengde(errs_list)
+        la er_item = errs_list[ei]
+        la er_status = ""
+        la er_msg = ""
+        hvis har_nokkel(er_item, "status")
+            er_status = tekst(er_item["status"])
+        slutt
+        hvis har_nokkel(er_item, "message")
+            er_msg = tekst(er_item["message"])
+        slutt
+        la er_json = "{\"status\":\"" + er_status + "\",\"message\":\"" + er_msg + "\"}"
+        hvis ei > 0
+            errs_json = errs_json + ","
+        slutt
+        errs_json = errs_json + er_json
+        ei = ei + 1
+    slutt
+    errs_json = errs_json + "]"
+    route_json = route_json + "\"error_responses\":" + errs_json + ","
     route_json = route_json + "\"responses\":{"
     route_json = route_json + "\"200\":{"
     route_json = route_json + "\"description\":\"OK\","
@@ -561,9 +598,53 @@ funksjon samla_web_annotasjonar(ast_program, modul_namn)
             route["summary"] = fn.verdi
             route["operation_id"] = fn.verdi
             route["path_params"] = []
-            route["query_params"] = []
-            route["body_fields"] = []
-            route["error_responses"] = []
+            // Scan alle setningar for request_query/request_json_field/response_error kall
+            route_query_params = []
+            route_body_fields = []
+            route_error_responses = []
+            sk = 0
+            mens sk < lengde(statements)
+                scan_stmt = statements[sk]
+                // Sjekk direkte kall, La-setning, ELLER Returner-setning
+                scan_kall = scan_stmt
+                hvis scan_stmt.type == "La" og lengde(scan_stmt.barn) > 0
+                    scan_kall = scan_stmt.barn[0]
+                ellers hvis scan_stmt.type == "Returner" og lengde(scan_stmt.barn) > 0
+                    scan_kall = scan_stmt.barn[0]
+                slutt
+                scan_nm = web_kall_namn(scan_kall)
+                hvis scan_nm != "" og lengde(scan_kall.barn) > 1 og lengde(scan_kall.barn[1].barn) > 0
+                    scan_arg = scan_kall.barn[1].barn
+                    hvis tekst_ender_med(scan_nm, ".request_query_int") eller tekst_ender_med(scan_nm, ".request_query_param") eller tekst_ender_med(scan_nm, ".request_query_required") eller tekst_ender_med(scan_nm, ".request_query_float")
+                        hvis lengde(scan_arg) >= 2 og scan_arg[1].type == "Tekst"
+                            legg_til(route_query_params, scan_arg[1].verdi)
+                        slutt
+                    slutt
+                    hvis tekst_ender_med(scan_nm, ".request_json_field") eller tekst_ender_med(scan_nm, ".request_json_field_or") eller tekst_ender_med(scan_nm, ".request_json_field_int") eller tekst_ender_med(scan_nm, ".request_json_field_bool") eller tekst_ender_med(scan_nm, ".request_json_field_float")
+                        hvis lengde(scan_arg) >= 2 og scan_arg[1].type == "Tekst"
+                            legg_til(route_body_fields, scan_arg[1].verdi)
+                        slutt
+                    slutt
+                    // Skann for response_error(status, msg) → legg til i error_responses
+                    // scan_nm og kall-type er tilgjengelege her
+                    hvis tekst_ender_med(scan_nm, ".response_error")
+                        hvis lengde(scan_arg) >= 2
+                            la err_entry = {}
+                            err_entry["status"] = scan_arg[0].verdi
+                            hvis scan_arg[1].type == "Tekst"
+                                err_entry["message"] = scan_arg[1].verdi
+                            ellers
+                                err_entry["message"] = "error"
+                            slutt
+                            legg_til(route_error_responses, err_entry)
+                        slutt
+                    slutt
+                slutt
+                sk = sk + 1
+            slutt
+            route["query_params"] = route_query_params
+            route["body_fields"] = route_body_fields
+            route["error_responses"] = route_error_responses
             route["deps"] = route_deps
             route["guards"] = route_guards
             route["request_example"] = {}
@@ -954,6 +1035,72 @@ funksjon emit_uttrykk(komp, node, kode)
             i = i + 1
         slutt
         legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(node.barn)))
+        returner sann
+    slutt
+
+    // ─── List comprehension: [expr for var i liste (hvis cond)] ────────────────
+    hvis t == "ListeKomprehensjon"
+        n = tekst_fra_heltall(komp["teller"])
+        komp["teller"] = komp["teller"] + 1
+        res_var     = "__comp_res_" + n + "__"
+        lst_var     = "__comp_lst_" + n + "__"
+        idx_var     = "__comp_idx_" + n + "__"
+        lbl_start   = "__comp_start_" + n + "__"
+        lbl_cont    = "__comp_cont_"  + n + "__"
+        lbl_end     = "__comp_end_"   + n + "__"
+        loop_var    = node.verdi
+
+        // Bygg tom resultat-liste
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", 0))
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", res_var))
+
+        // Evaluer kjelde
+        emit_uttrykk(komp, node.barn[0], kode)
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", lst_var))
+
+        // Indeks = 0
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", idx_var))
+
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_start))
+
+        // if idx < lengde(lst): gå inn
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", lst_var))
+        legg_til(kode, json_kall("builtin.lengde", 1))
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_LT"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", lbl_end))
+
+        // var = lst[idx]
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", lst_var))
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", loop_var))
+
+        // Valfri filter
+        hvis lengde(node.barn) > 2
+            emit_uttrykk(komp, node.barn[2], kode)
+            legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", lbl_cont))
+        slutt
+
+        // Legg til expr i resultat
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", res_var))
+        emit_uttrykk(komp, node.barn[1], kode)
+        legg_til(kode, json_kall("builtin.legg_til", 2))
+        legg_til(kode, json_instruksjon_uten_arg("POP"))
+
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_cont))
+
+        // idx = idx + 1
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 1))
+        legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", idx_var))
+
+        legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl_start))
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_end))
+
+        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", res_var))
         returner sann
     slutt
 

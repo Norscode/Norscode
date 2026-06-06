@@ -1,26 +1,181 @@
-// selfhost/nc_main.no — Norscode inngangspunkt (erstatter tools/nc_native_main.c)
+// selfhost/nc_main.no — Norscode inngangspunkt (erstatter tools/maint/c/nc_native_main.c)
 //
 // Handterar NORSCODE_CMD og NORSCODE_FILE miljøvariablar.
-// Kompilerer via selfhost-pipeline; køyring delegerer til C-exec FFI (host_exec_ncb_json).
+// Kompilerer via selfhost-pipeline; køyring delegerer til host_exec_ncb_json
+// som noverande bootstrap-/host-grense.
 
 bruk selfhost.kompiler
 bruk selfhost.json
+bruk selfhost.bundler
 
 // ─── Kompiler kjeldekode-fil til NCB ─────────────────────────────────────────
 
 funksjon nc_kompiler_fil(src_sti: tekst, modul: tekst) -> tekst {
-    // C-host set NORSCODE_SOURCE ved run/compile (fil_les i generert nc_main er upåliteleg).
-    la kjelde = miljo_hent("NORSCODE_SOURCE")
-    hvis kjelde == "" {
-        kjelde = fil_les(src_sti)
-    }
+    la kjelde = fil_les(src_sti)
     returner kompiler_fil(kjelde, modul)
 }
 
-// ─── Køyr NCB via C-exec FFI (host_exec_ncb_json i nc_native_main.c) ─────────
+// ─── Køyr NCB via host-grensa (host_exec_ncb_json i tools/maint/c/nc_native_main.c) ───────
 
 funksjon nc_køyr_ncb_json(ncb_json: tekst) -> heltall {
     returner host_exec_ncb_json(ncb_json)
+}
+
+// ─── Scan kjelde for bruk-imports ────────────────────────────────────────────
+// Returnerer liste av "alias=sti/til/fil.no" for kvar bruk-linje som ikkje er selfhost.*
+
+funksjon finn_bruk_imports(kjelde: tekst) -> liste<tekst> {
+    la imports: liste<tekst> = []
+    la linjer = builtin.split(kjelde, "\n")
+    la i: heltall = 0
+    mens i < lengde(linjer) {
+        la linje = builtin.trim(linjer[i])
+        hvis builtin.starts_with(linje, "bruk ") {
+            la rest = builtin.trim(builtin.slice(linje, 5, lengde(linje)))
+            // Fjern avsluttande semikolon
+            hvis builtin.ends_with(rest, ";") {
+                rest = builtin.slice(rest, 0, lengde(rest) - 1)
+            }
+            // Sjekk etter "som alias"
+            la alias = ""
+            la modul = rest
+            la som_idx = builtin.index_of(rest, " som ")
+            hvis som_idx >= 0 {
+                modul = builtin.trim(builtin.slice(rest, 0, som_idx))
+                alias = builtin.trim(builtin.slice(rest, som_idx + 5, lengde(rest)))
+            } ellers {
+                // Alias = siste segment av modul-sti
+                la segs = builtin.split(modul, ".")
+                alias = segs[lengde(segs) - 1]
+            }
+            // Legg til alle imports — prøv/fang i nc_bundle_ncb handterer manglande filer.
+            // Modular som er bundla i binæren og òg lastast som alias er uskadelege
+            // (slå_saman_funksjonar let siste skriving vinne).
+            la fil = builtin.replace(modul, ".", "/") + ".no"
+            legg_til(imports, alias + "=" + fil)
+        }
+        i = i + 1
+    }
+    returner imports
+}
+
+// ─── Bundle fleire modular til NCB utan diskskriving ─────────────────────────
+
+funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> tekst {
+    la alle_fns: ordbok<tekst, tekst> = {}
+    la alle_rh: liste = []  // Samla route_handlers frå alle importerte modular
+    // BFS-kø for transitive imports
+    la kø: liste<tekst> = []
+    la besøkt: ordbok<tekst, boolsk> = {}
+
+    la j: heltall = 0
+    mens j < lengde(imports) {
+        legg_til(kø, imports[j])
+        j = j + 1
+    }
+
+    mens lengde(kø) > 0 {
+        la arg: tekst = kø[0]
+        fjern(kø, 0)
+
+        la eq = builtin.index_of(arg, "=")
+        la alias = builtin.slice(arg, 0, eq)
+        la fil = builtin.slice(arg, eq + 1, lengde(arg))
+
+        // Hopp over allereie prosesserte filer
+        hvis finnes_nøkkel(besøkt, fil) { fortsett }
+        besøkt[fil] = sann
+
+        prøv {
+            la kjelde = fil_les(fil)
+            la ncb_json = kompiler_fil(kjelde, "__main__")
+            la omdøypt = omdøyp_funksjonar(ncb_json, alias)
+            // Rename __main__. → alias. i CALL-mål (internt modul-kall)
+            la fiksa = tekst_erstatt(omdøypt, "\"__main__.", "\"" + alias + ".")
+            la mod_ncb = json_parse_raw(fiksa)
+            slå_saman_funksjonar(alle_fns, mod_ncb["functions"])
+            // Samle route_handlers frå importerte modular — fix opp function-namn til alias
+            la mod_rh_raw_ncb = json_parse_raw(ncb_json)
+            la mod_rh_raw = mod_rh_raw_ncb["route_handlers"]
+            hvis mod_rh_raw != null {
+                la ri: heltall = 0
+                mens ri < lengde(mod_rh_raw) {
+                    la rh_item = mod_rh_raw[ri]
+                    // Rename __main__.X → alias.X i function-feltet
+                    la fn_nam: tekst = tekst(rh_item["function"])
+                    la new_fn: tekst = tekst_erstatt(fn_nam, "__main__.", alias + ".")
+                    rh_item["function"] = new_fn
+                    legg_til(alle_rh, rh_item)
+                    ri = ri + 1
+                }
+            }
+
+            // Scan denne fila for transitive imports og legg til i kø
+            la trans = finn_bruk_imports(kjelde)
+            la ti: heltall = 0
+            mens ti < lengde(trans) {
+                la t_arg = trans[ti]
+                la t_eq = builtin.index_of(t_arg, "=")
+                la t_fil = builtin.slice(t_arg, t_eq + 1, lengde(t_arg))
+                hvis ikkje finnes_nøkkel(besøkt, t_fil) {
+                    legg_til(kø, t_arg)
+                }
+                ti = ti + 1
+            }
+        } fang (e) {
+            // Fil finst ikkje — hopp over
+        }
+    }
+
+    // Kompiler hovudfila som __main__
+    la hoved_ncb_json = nc_kompiler_fil(src_sti, modul)
+    la hoved_ncb = json_parse_raw(hoved_ncb_json)
+    slå_saman_funksjonar(alle_fns, hoved_ncb["functions"])
+
+    // Bygg bundle-NCB med riktig entry
+    la bundle: ordbok<tekst, tekst> = {}
+    bundle["format"] = "ncb-v1"
+    bundle["entry"] = modul + ".start"
+    bundle["imports"] = []
+    bundle["functions"] = alle_fns
+    // Slå saman route_handlers frå importerte modular + hovudfila
+    la rh = hoved_ncb["route_handlers"]
+    la alle_rh_merged: liste = []
+    // Legg til route_handlers frå importerte modular (med alias-prefix fixup)
+    la ai: heltall = 0
+    mens ai < lengde(alle_rh) {
+        legg_til(alle_rh_merged, alle_rh[ai])
+        ai = ai + 1
+    }
+    // Legg til route_handlers frå hovudfila
+    hvis rh != null {
+        la ri2: heltall = 0
+        mens ri2 < lengde(rh) {
+            legg_til(alle_rh_merged, rh[ri2])
+            ri2 = ri2 + 1
+        }
+    }
+    hvis lengde(alle_rh_merged) > 0 { bundle["route_handlers"] = alle_rh_merged }
+    ellers hvis rh != null { bundle["route_handlers"] = rh }
+    la tests_v = hoved_ncb["tests"]
+    hvis tests_v != null { bundle["tests"] = tests_v }
+    la metadata_keys = ["request_middlewares", "response_middlewares", "error_middlewares", "startup_hooks", "shutdown_hooks", "guard_providers", "dependency_providers"]
+    la mi: heltall = 0
+    mens mi < lengde(metadata_keys) {
+        la mk: tekst = metadata_keys[mi]
+        la mv = hoved_ncb[mk]
+        hvis mv != null { bundle[mk] = mv }
+        mi = mi + 1
+    }
+    // Bygg bundle-JSON manuelt: legg route_handlers som siste felt for å unngå
+    // at json_skriv mister data i komplekse nøsta lister
+    la rh_json = json_skriv(alle_rh_merged)
+    la bundle_json_inner = json_skriv(bundle)
+    // Fjern avsluttande } og legg til route_handlers-feltet
+    la bundle_len = lengde(bundle_json_inner)
+    la bundle_without_end = builtin.slice(bundle_json_inner, 0, bundle_len - 1)
+    la bundle_json_final = bundle_without_end + ",\"route_handlers\":" + rh_json + "}"
+    returner bundle_json_final
 }
 
 // ─── NORSCODE_CMD=run ────────────────────────────────────────────────────────
@@ -28,7 +183,14 @@ funksjon nc_køyr_ncb_json(ncb_json: tekst) -> heltall {
 funksjon nc_run(src_sti: tekst) -> heltall {
     la modul = miljo_hent("NORSCODE_MODULE")
     hvis modul == "" { modul = "__main__" }
-    la ncb_json = nc_kompiler_fil(src_sti, modul)
+    la kjelde = fil_les(src_sti)
+    la imports = finn_bruk_imports(kjelde)
+    la ncb_json = ""
+    hvis lengde(imports) > 0 {
+        ncb_json = nc_bundle_ncb(src_sti, modul, imports)
+    } ellers {
+        ncb_json = kompiler_fil(kjelde, modul)
+    }
     returner nc_køyr_ncb_json(ncb_json)
 }
 

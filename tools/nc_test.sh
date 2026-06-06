@@ -70,27 +70,63 @@ run_with_timeout() {
     "$@"
 }
 
-# ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
+# ─── Tester som krev runtimeflater eller modulstøtte som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
-        test_web*|test_async*|test_reactive*|test_islands*|test_frontend*|\
-        test_html*|test_csrf*|test_audit*|test_storage*|test_db*|\
-        test_path_env*|test_logging*|test_metrics*|test_io_error*|\
-        test_secrets*|test_json_schema*|test_state*|test_native_*|\
+        test_async*|test_reactive*|test_islands*|\
+        test_html_state*|test_audit*|test_db*|\
+        test_logging*|test_metrics*|\
+        test_json_schema*|test_state*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
-        test_snapshot*|test_trace*|test_comprehension*|\
-        test_assert_text.no|test_cache.no|test_chunk_2000.no|\
+        test_snapshot*|\
+        test_cache.no|test_chunk_2000.no|\
         test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|\
         test_dependency_import.no|\
-        test_fil.no|test_file_object_storage.no|test_http_helpers.no|\
-        test_ir_contract.no|test_ir_debug.no|test_json_typed.no|\
-        test_list_std.no|test_map_std.no|test_nc_main_both.no|\
-        test_ny_liste.no|test_script_mini.no|test_script_subset.no|\
-        test_security.no|test_selfhost_comparison_boolean_parity.no|\
-        test_selfhost.no|test_selfhost_invalid_boolean_syntax.no|\
-        test_selfhost_nested_boolean_matrix.no|\
-        test_selfhost_parenthesis_stability.no|test_text.no|\
-        test_text_helpers.no|test_try_catch.no)
+        test_file_object_storage.no|test_http_helpers.no|\
+        test_ir_debug.no|\
+        test_nc_main_both.no|\
+        test_ny_liste.no|\
+        test_assert_text.no|\
+        test_comprehension.no|\
+        test_fil.no|\
+        test_frontend.no|\
+        test_html.no|\
+        test_html_components.no|test_html_components_v2.no|\
+        test_io_error.no|\
+        test_ir_contract.no|\
+        test_json_typed.no|\
+        test_list_std.no|\
+        test_map_std.no|\
+        test_native_ui.no|test_native_ui_errors.no|\
+        test_path_env.no|\
+        test_script_mini.no|test_script_subset.no|\
+        test_secrets.no|\
+        test_selfhost_invalid_boolean_syntax.no|\
+        test_storage.no|test_storage_error.no|\
+        test_text.no|test_text_helpers.no|\
+        test_trace.no|\
+        test_try_catch.no|\
+        test_web_api_versioning.no|\
+        test_web_auth.no|\
+        test_csrf.no|\
+        test_web_dependency.no|\
+        test_web_cookies.no|\
+        test_web_guard.no|\
+        test_web_methods.no|\
+        test_web_middleware.no|\
+        test_web_openapi.no|\
+        test_web_openapi_auth.no|\
+        test_web_openapi_errors.no|\
+        test_web_openapi_schema.no|\
+        test_web_request_response.no|\
+        test_web_path.no|\
+        test_web_routes.no|\
+        test_web_roles.no|\
+        test_web_sanitize.no|\
+        test_web_subrouter.no|\
+        test_web_validation.no|\
+        test_security.no|\
+        test_selfhost.no)
             return 0;;
     esac
     return 1

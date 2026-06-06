@@ -27,11 +27,11 @@ run_step '0. Python-gate i tools/...' bash "$ROOT/tools/python_dependency_audit.
 
 run_step '0b. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
 
-printf '1. L6: bootstrap/c/ er generert frå .no (ikkje handskrive C)...\n'
-if [ -f "$ROOT/bootstrap/c/norscode_generated.c" ]; then
+printf '1. L6: bootstrap/maint/c/ er generert frå .no (ikkje handskrive C)...\n'
+if [ -f "$ROOT/bootstrap/maint/c/norscode_generated.c" ]; then
     printf '  [OK] norscode_generated.c er generert av ncb_to_c.no\n\n'
 else
-    printf '  [OK] bootstrap/c/ er ikkje committed (optimal)\n\n'
+    printf '  [OK] bootstrap/maint/c/ er ikkje committed (optimal)\n\n'
 fi
 
 run_step '2. Stage-0: norscode_native...' bash "$ROOT/tools/build_norscode_native.sh"

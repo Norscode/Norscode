@@ -1,37 +1,5 @@
 #!/bin/sh
-# tools/bootstrap.sh — bygg Norscode uten Python
-#
-# Bygger dist/norscode_native frå pre-genererte C-filer i bootstrap/c/.
-# Krev KUN: clang (eller cc)
-#
-# Bruk:
-#   sh tools/bootstrap.sh
-#   ./bin/nc run program.no
-
-set -e
-
+# Compatibility wrapper: maintainer-bootstrap bur no under tools/maint/.
+set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-cd "$ROOT"
-
-CC="${CC:-clang}"
-if ! command -v "$CC" >/dev/null 2>&1; then CC=cc; fi
-if ! command -v "$CC" >/dev/null 2>&1; then
-    printf 'bootstrap: trenger clang eller cc\n' >&2; exit 1
-fi
-
-# ── Bygg norscode_native ─────────────────────────────────────────────────────
-bash "$ROOT/tools/build_norscode_native.sh"
-
-# ── Røyktest ─────────────────────────────────────────────────────────────────
-printf 'Røyktester...\n'
-printf 'funksjon start() { skriv("bootstrap OK") }' > /tmp/_nc_bootstrap_smoke.no
-RESULT=$(NORSCODE_CMD=run NORSCODE_FILE=/tmp/_nc_bootstrap_smoke.no \
-    "$ROOT/dist/norscode_native" 2>/dev/null || echo "")
-if [ "$RESULT" = "bootstrap OK" ]; then
-    printf '✓ Røyktest bestått\n'
-else
-    printf '✗ Røyktest feilet (fikk: "%s")\n' "$RESULT" >&2; exit 1
-fi
-
-printf '\n✓ Norscode bootstrap fullført.\n'
-printf 'Bruk: ./bin/nc run program.no\n'
+exec sh "$ROOT/tools/maint/bootstrap.sh" "$@"

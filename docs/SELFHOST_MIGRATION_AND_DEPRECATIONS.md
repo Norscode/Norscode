@@ -1,105 +1,123 @@
-# Selfhost migration and deprecations
+# Norscode Selfhost Migration and Deprecations
 
-Dette dokumentet samler det kanoniske bildet for migrering, legacy-navn og hva som fortsatt er bootstrap i Norscode.
-For et samlet kart over aktive og historiske flater, se [`LANE_MAP`](./LANE_MAP.md).
-For et samlet kart over historiske dokumenter, se [`ARCHIVE_INDEX`](./ARCHIVE_INDEX.md).
+Status: **Fase 2 (June 2026)** — Native-first enforcement
 
-## Kort versjon
+## Overview
 
-- Normal bruk skal møte `Norscode` og `norcode`.
-- `./bin/nc` er normal vei for brukere.
-- `./bin/bootstrap` er eksplisitt bootstrap og utviklerstøtte.
-- `norcode/cli.py` er en historisk modulær CLI-vei som fortsatt kan dukke opp i eldre spor.
-- Legacy-navn og gamle filnavn kan eksistere så lenge de trengs for kompatibilitet.
-- Den historiske kompatibilitetsflaten er ikke normal produktflyt.
-- Migrering skal være dokumentert, ikke gjettet.
+This document tracks what was **removed**, **deprecated**, and **why** during selfhost migration.
 
-## Hva som fortsatt er bootstrap
+## Removed in Fase 2
 
-Dette er fortsatt overgangs- eller støtteflaten:
+### ❌ Python-based compilation pipeline
 
-- `./bin/bootstrap`
-- `tools/build-bootstrap-binary.sh`
-- `tools/build_norscode_native.sh` (stage-0; ikkje legacy C-VM)
-- `scripts/regen_fraser.no` (dev-verktøy utanfor `tools/`)
-- eksplisitte bootstrap-veier
-- eventuelle gjenværende historiske kompatibilitetsspor i arkivert dokumentasjon
+**What was removed:**
+- `tools/main.py` (Python entry point)
+- `tools/compile.py` (Python compiler)
+- Python invocations from normal workflow
 
-Dette er ikke normal produktflyt. Det er støtte for bygg, verifisering, overgang og feilsøking.
+**Why:**
+- Norscode is self-compiling via `dist/norscode_native`
+- Python was bootstrap-only, not needed daily
+- Simpler path: `.no` → `norscode_native` → bytecode
 
-## Hva som er kanonisk
+**Migration:**
+```bash
+# Old (removed):
+python3 tools/main.py run app.no
 
-Dette er den normale brukerflaten:
+# New:
+./bin/nc run app.no
+```
 
-- `norcode`
-- `./bin/nc`
-- `norcode.toml`
-- `.norcode/`
-- dokumentasjonen under `docs/`
+### ❌ C bytecode VM as primary executor
 
-## Legacy-navn og aliaser
+**What was deprecated:**
+- `tools/c_minimal_vm/` (legacy C-based stack VM)
+- Direct C VM invocations from normal pipeline
 
-Legacy-navn og aliaser er kun for kompatibilitet:
+**Why:**
+- `selfhost/vm.no` is canonical VM
+- Bytecode standard is NCB JSON
+- C VM was bootstrap artifact only
 
-- `nor`
-- `nc`
-- `nl`
-- `norsklang`
+**Status:** Moved to `archive/c_minimal_vm/` for reference.
 
-Regel:
+### ⚠️ `bin/bootstrap` as normal entry point
 
-- nye brukere skal møte `Norscode` og `norcode`
-- legacy-navn skal ikke få ny primærfunksjonalitet
-- nye prosjekter skal bruke `norcode.toml` og `.norcode/`
+**What changed:**
+- `bin/bootstrap` is still available but **not normal path**
+- Explicitly marked as bootstrap-only
+- Normal users use `bin/nc` exclusively
 
-## Migreringssti
+**Why:**
+- `bin/nc` is single unified entry point
+- Native-first eliminates intermediate launchers
 
-Når du flytter et gammelt prosjekt eller en gammel arbeidsflyt:
+## What's Kept
 
-1. Bytt brukerflate til `norcode`.
-2. Bytt wrapper- eller scriptkall til `./bin/nc`.
-3. Flytt konfigurasjon til `norcode.toml` og `.norcode/`.
-4. Bruk eksplisitt bootstrap bare der det virkelig trengs.
-5. Verifiser med `norcode diagnose`, `norcode doctor`, `norcode smoke` og `norcode ci`.
-6. Behold den historiske referansen kun som eksplisitt legacy, ikke som daglig vei.
+### ✅ `bootstrap/stage0/` seed binaries
 
-## Leserekkefølge
+**Why kept:**
+- Necessary for chicken-and-egg bootstrap (L6)
+- Each platform needs seed binary
+- Generated via `tools/maint/regen_native.sh` (no Python)
 
-Hvis du er ny bidragsyter, les i denne rekkefølgen:
+### ✅ `bootstrap/maint/c/` C generation
 
-1. [`START_HER`](./START_HER.md)
-2. [`CLI_CONTRACT`](./CLI_CONTRACT.md)
-3. [`SELFHOST_STATUS`](./SELFHOST_STATUS.md)
-4. [`ARCHIVE_INDEX`](./ARCHIVE_INDEX.md)
-5. [`SELFHOST_HANDLINGSPLAN`](./SELFHOST_HANDLINGSPLAN.md)
-6. [`SELFHOST_FALLBACK_CONTRACT`](./SELFHOST_FALLBACK_CONTRACT.md)
-7. [`SELFHOST_RELEASE_CHECKLIST`](./SELFHOST_RELEASE_CHECKLIST.md)
-8. [`SELFHOST_DIAGNOSTICS`](./SELFHOST_DIAGNOSTICS.md)
-9. [`LANE_MAP`](./LANE_MAP.md) hvis du trenger å skille aktiv, legacy og arkiv.
+**Why kept:**
+- Bridge between NCB JSON and native ELF
+- Stage-0 verification (L6 level)
+- Will be replaced by ELF emitter in `.no` (Fase 6+)
 
-## Hvorfor bootstrap fortsatt finnes
+### ✅ `archive/` historical code
 
-Bootstrap finnes fortsatt fordi Norscode fortsatt trenger:
+**What's there:**
+- Old bootstrap pipelines
+- C VM implementation
+- Early parser experiments
+- Legacy bytecode formats
 
-- bygg av release-artifacts
-- eksplisitt fallback for sammenligning og feilsøking
-- installasjon og verifisering av eldre eller midlertidige flyter
-- kompatibilitet med eldre prosjekter og gamle aliaser
+**Why:** Learn from history, audit trail, reference for maintainers
 
-Det viktige er at bootstrap er tydelig merket og ikke er standardbanen for vanlige brukere.
+## For Users: No Breaking Changes
 
-## Deprecation-regel
+```bash
+# All of these work exactly the same:
+./bin/nc run app.no
+./bin/nc test
+./bin/nc compile program.no
+./bin/nc check program.no
+```
 
-Når noe skal fases ut:
+## For Contributors: Significant Changes
 
-- dokumenter det først
-- legg inn migreringssti
-- behold kompatibilitet så lenge det er rimelig
-- fjern det først når den nye veien er godt etablert
+**No longer do this:**
+```bash
+python3 tools/main.py run app.no              # ❌ Removed
+python3 tools/compile.py app.no               # ❌ Removed
+./bin/bootstrap run app.no                    # ❌ Use bin/nc
+nc tools/c_minimal_vm run prog.ncb.json       # ❌ Removed
+```
 
-## Se også
+**Do this instead:**
+```bash
+./bin/nc run app.no                           # ✅ Native
+./bin/nc compile app.no out.ncb.json          # ✅ Native
+./bin/nc test                                 # ✅ Native
+```
 
-- [`DEPRECATION_POLICY`](./DEPRECATION_POLICY.md)
-- [`LEGACY_POLICY`](./LEGACY_POLICY.md)
-- [`MAINTENANCE_POLICY`](./MAINTENANCE_POLICY.md)
-- [`SELFHOST_STATUS`](./SELFHOST_STATUS.md)
+## Verification
+
+All code is in Git history:
+
+```bash
+git log --all --full-history -- "tools/main.py"
+git log --all --full-history -- "archive/c_minimal_vm/"
+```
+
+## See also
+
+- [docs/NATIVE_FIRST_ENFORCEMENT.md](NATIVE_FIRST_ENFORCEMENT.md)
+- [docs/SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md)
+- [docs/LANE_MAP.md](LANE_MAP.md)
+- [docs/ARCHIVE_INDEX.md](ARCHIVE_INDEX.md) — Historisk referanse
