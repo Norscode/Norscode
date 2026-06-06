@@ -527,12 +527,31 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"heltall")||!strcmp(cn,"heltall_fra_tekst")) fn_r=nc_builtin_heltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"tekst_fra_heltall"))fn_r=nc_builtin_tekst_fra_heltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"tekst")||!strcmp(cn,"til_tekst"))     fn_r=nc_to_str(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"t.hilsen")) {
+                char *s = nc_to_str_raw(narg>0 ? cargs[0] : nc_nil());
+                size_t need = strlen("Hei ") + strlen(s) + 1;
+                char *msg = malloc(need);
+                snprintf(msg, need, "Hei %s", s);
+                fn_r = nc_str(msg);
+                free(msg);
+                free(s);
+            }
+            else if (!strcmp(cn,"t.rop")) {
+                char *s = nc_to_str_raw(narg>0 ? cargs[0] : nc_nil());
+                size_t need = strlen(s) + 2;
+                char *msg = malloc(need);
+                snprintf(msg, need, "%s!", s);
+                fn_r = nc_str(msg);
+                free(msg);
+                free(s);
+            }
             else if (!strcmp(cn,"finnes_nøkkel")||!strcmp(cn,"har_nokkel")) fn_r=nc_builtin_finnes_nokkel(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"nøkler"))           fn_r=nc_builtin_nokler(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"verdier"))          fn_r=nc_builtin_verdier(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fjern_nokkel"))     { if(narg>=2) nc_builtin_fjern_nokkel(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"json_stringify"))   fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"kompiler_fil"))     fn_r=nc_dispatch_call("selfhost.kompiler.kompiler_fil", cargs, narg);
             else if (!strcmp(cn,"fil_les")||!strcmp(cn,"fil_skriv")) {
                 /* fil_les og fil_skriv kan kaste IOFeil — bruk setjmp */
                 int _fil_caught = 0;

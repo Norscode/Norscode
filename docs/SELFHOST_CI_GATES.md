@@ -53,6 +53,7 @@ CI bør også ha små, raske tester for:
 - `doctor`
 - `smoke`
 - `--version`
+- ELF self-compile parity på Linux x86_64
 - samlet driftsvakt via `tools/selfhost_drift_guard.sh`
 
 ## Failure policy
@@ -63,6 +64,7 @@ CI skal feile hvis:
 - eksplisitt fallback-lane feiler
 - release-/install-smoke feiler
 - workflow-policy eller parity-sjekker viser avvik
+- ELF self-compile parity viser avvik
 
 ## Verifikasjon
 
