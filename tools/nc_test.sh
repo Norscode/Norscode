@@ -90,7 +90,6 @@ is_server_test() {
         test_html.no|\
         test_html_components.no|test_html_components_v2.no|\
         test_io_error.no|\
-        test_ir_contract.no|\
         test_ir_debug.no|\
         test_native_ui.no|test_native_ui_errors.no|\
         test_secrets.no|\
