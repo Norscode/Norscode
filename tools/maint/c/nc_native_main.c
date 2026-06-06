@@ -516,6 +516,55 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"desimaltall"))     fn_r=nc_builtin_desimaltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
+            /* ── async/await — synchronous implementation ── */
+            else if (!strcmp(cn,"await_value")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                const char *_async_exc = NULL;
+                if (v && v->type == NC_MAP) {
+                    NcVal *tm = nc_index_get(v, nc_str("__timeout"));
+                    if (tm && nc_truthy(tm)) _async_exc = "TimeoutFeil: vent.timeout utlaupt";
+                    if (!_async_exc) {
+                        NcVal *cm = nc_index_get(v, nc_str("__kansellert"));
+                        if (cm && nc_truthy(cm)) _async_exc = "AvbruttFeil: vent.kanseller avbrutt";
+                    }
+                }
+                if (_async_exc) {
+                    free(cargs); free(callee);
+                    if (try_depth > 0) {
+                        strncpy(last_exception, _async_exc, sizeof(last_exception)-1);
+                        const char *_cl = try_stack[try_depth-1].catch_lbl;
+                        sp = try_stack[try_depth-1].sp_depth;
+                        try_depth--;
+                        NcVal *_tgt = nc_index_get(label_map, nc_str(_cl));
+                        if (_tgt && _tgt->type == NC_INT) { ip = (int)_tgt->i; continue; }
+                    }
+                    nc_throw(_async_exc);
+                }
+                fn_r = v;
+            }
+            else if (!strcmp(cn,"vent.sov")) { /* noop — sync runtime */ }
+            else if (!strcmp(cn,"vent.timeout")) {
+                /* vent.timeout(value, ms) — ms=0 → always timed out in sync mode */
+                NcVal *m = nc_map_new();
+                nc_index_set(m, nc_str("__timeout"), nc_bool(1));
+                nc_index_set(m, nc_str("value"), narg>0 ? cargs[0] : nc_nil());
+                fn_r = m;
+            }
+            else if (!strcmp(cn,"vent.er_timeoutet")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                NcVal *tm = (v && v->type==NC_MAP) ? nc_index_get(v, nc_str("__timeout")) : NULL;
+                fn_r = nc_bool(tm && nc_truthy(tm));
+            }
+            else if (!strcmp(cn,"vent.kanseller")) {
+                NcVal *m = nc_map_new();
+                nc_index_set(m, nc_str("__kansellert"), nc_bool(1));
+                fn_r = m;
+            }
+            else if (!strcmp(cn,"vent.er_kansellert")) {
+                NcVal *v = narg>0 ? cargs[0] : nc_nil();
+                NcVal *cm = (v && v->type==NC_MAP) ? nc_index_get(v, nc_str("__kansellert")) : NULL;
+                fn_r = nc_bool(cm && nc_truthy(cm));
+            }
             /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
             else if (nc_is_sh_api(cn)) {
                 if (try_depth > 0) {
