@@ -101,6 +101,51 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
 static int nc_val_til_exit(NcVal *v);
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
 
+/* ── SQLite3 forward declarations (no header required — links against -lsqlite3) ── */
+typedef struct sqlite3 sqlite3;
+typedef struct sqlite3_stmt sqlite3_stmt;
+typedef long long sqlite3_int64;
+#define SQLITE_OK   0
+#define SQLITE_ROW  100
+#define SQLITE_DONE 101
+extern int sqlite3_open(const char *filename, sqlite3 **ppDb);
+extern int sqlite3_close(sqlite3 *db);
+extern int sqlite3_exec(sqlite3 *db, const char *sql, int (*cb)(void*,int,char**,char**), void *arg, char **errmsg);
+extern void sqlite3_free(void *p);
+extern const char *sqlite3_errmsg(sqlite3 *db);
+extern int sqlite3_prepare_v2(sqlite3 *db, const char *zSql, int nByte, sqlite3_stmt **ppStmt, const char **pzTail);
+extern int sqlite3_bind_text(sqlite3_stmt *pStmt, int n, const char *zData, int nData, void (*xDel)(void*));
+extern int sqlite3_step(sqlite3_stmt *pStmt);
+extern int sqlite3_finalize(sqlite3_stmt *pStmt);
+extern const unsigned char *sqlite3_column_text(sqlite3_stmt *pStmt, int iCol);
+extern sqlite3_int64 sqlite3_column_int64(sqlite3_stmt *pStmt, int iCol);
+extern int sqlite3_changes(sqlite3 *db);
+#define SQLITE_TRANSIENT ((void*)(-1))
+
+/* ── DB pool state ── */
+#define NC_DB_MAX_POOLS 8
+#define NC_DB_MAX_POOL_CONNS 16
+typedef struct { sqlite3 *conns[NC_DB_MAX_POOL_CONNS]; int avail; char path[512]; } NcDbPool;
+static NcDbPool g_nc_db_pools[NC_DB_MAX_POOLS];
+static int g_nc_db_pool_count = 0;
+
+static sqlite3 *nc_db_handle_ptr(NcVal *h) {
+    if (!h || h->type != NC_MAP) return NULL;
+    NcVal *p = nc_index_get(h, nc_str("__db"));
+    return (p && p->type == NC_INT) ? (sqlite3*)(intptr_t)(unsigned long long)p->i : NULL;
+}
+static NcVal *nc_db_make_handle(sqlite3 *db, int pool_idx) {
+    NcVal *m = nc_map_new();
+    nc_index_set(m, nc_str("__db"), nc_int((long long)(intptr_t)(unsigned long long)db));
+    if (pool_idx >= 0) nc_index_set(m, nc_str("__pool"), nc_int(pool_idx));
+    return m;
+}
+static unsigned long long nc_db_sql_hash(const char *s) {
+    unsigned long long h = 5381;
+    for (int c; (c = (unsigned char)*s++);) h = ((h << 5) + h) ^ c;
+    return h;
+}
+
 /* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
 static NcVal *g_sh_common_fns = NULL;
 
@@ -564,6 +609,144 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 NcVal *v = narg>0 ? cargs[0] : nc_nil();
                 NcVal *cm = (v && v->type==NC_MAP) ? nc_index_get(v, nc_str("__kansellert")) : NULL;
                 fn_r = nc_bool(cm && nc_truthy(cm));
+            }
+            /* ── std.db — SQLite backend ── */
+            else if (!strcmp(cn,"db.open")) {
+                char *p = nc_to_str_raw(narg>0?cargs[0]:nc_nil()); sqlite3 *db=NULL;
+                fn_r = (sqlite3_open(p,&db)==SQLITE_OK) ? nc_db_make_handle(db,-1) : nc_nil(); free(p);
+            }
+            else if (!strcmp(cn,"db.close")) {
+                NcVal *h=narg>0?cargs[0]:nc_nil();
+                sqlite3 *db=nc_db_handle_ptr(h);
+                if (!db) { fn_r=nc_bool(0); } else {
+                    NcVal *pv=nc_index_get(h,nc_str("__pool"));
+                    if (pv&&pv->type==NC_INT&&pv->i>=0&&(int)pv->i<g_nc_db_pool_count) {
+                        int idx=(int)pv->i;
+                        if (g_nc_db_pools[idx].avail<NC_DB_MAX_POOL_CONNS)
+                            g_nc_db_pools[idx].conns[g_nc_db_pools[idx].avail++]=db;
+                        else sqlite3_close(db);
+                    } else sqlite3_close(db);
+                    fn_r=nc_bool(1);
+                }
+            }
+            else if (!strcmp(cn,"db.ping")) { fn_r=nc_bool(nc_db_handle_ptr(narg>0?cargs[0]:nc_nil())!=NULL); }
+            else if (!strcmp(cn,"db.execute")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                if (!db) { fn_r=nc_int(-1); } else {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); char *e=NULL;
+                    sqlite3_exec(db,s,NULL,NULL,&e); free(s);
+                    if (e) { sqlite3_free(e); fn_r=nc_int(-1); } else fn_r=nc_int(sqlite3_changes(db));
+                }
+            }
+            else if (!strcmp(cn,"db.query_text")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_str(""); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); sqlite3_stmt *st=NULL;
+                    if (sqlite3_prepare_v2(db,s,-1,&st,NULL)==SQLITE_OK) {
+                        if (sqlite3_step(st)==SQLITE_ROW) {
+                            const unsigned char *t=sqlite3_column_text(st,0);
+                            if (t) fn_r=nc_str((const char*)t);
+                        }
+                        sqlite3_finalize(st);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.query_int")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); sqlite3_stmt *st=NULL;
+                    if (sqlite3_prepare_v2(db,s,-1,&st,NULL)==SQLITE_OK) {
+                        if (sqlite3_step(st)==SQLITE_ROW) fn_r=nc_int((long long)sqlite3_column_int64(st,0));
+                        sqlite3_finalize(st);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.begin")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"BEGIN",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.commit")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"COMMIT",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.rollback")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil()); char *e=NULL;
+                fn_r = (db && sqlite3_exec(db,"ROLLBACK",NULL,NULL,&e)==SQLITE_OK) ? nc_bool(1) : nc_bool(0);
+                if (e) sqlite3_free(e);
+            }
+            else if (!strcmp(cn,"db.migrate")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil());
+                    sqlite3_exec(db,"CREATE TABLE IF NOT EXISTS __nc_migrations(hash TEXT PRIMARY KEY)",NULL,NULL,NULL);
+                    char hstr[24]; snprintf(hstr,sizeof(hstr),"%llu",nc_db_sql_hash(s));
+                    char qsql[80]; snprintf(qsql,sizeof(qsql),"SELECT 1 FROM __nc_migrations WHERE hash='%s'",hstr);
+                    sqlite3_stmt *chk=NULL; int already=0;
+                    if (sqlite3_prepare_v2(db,qsql,-1,&chk,NULL)==SQLITE_OK) { if(sqlite3_step(chk)==SQLITE_ROW) already=1; sqlite3_finalize(chk); }
+                    if (!already) {
+                        char *e=NULL; int rc=sqlite3_exec(db,s,NULL,NULL,&e);
+                        if (!e && rc==SQLITE_OK) {
+                            char isql[80]; snprintf(isql,sizeof(isql),"INSERT INTO __nc_migrations VALUES('%s')",hstr);
+                            sqlite3_exec(db,isql,NULL,NULL,NULL); fn_r=nc_int(1);
+                        } else if (e) sqlite3_free(e);
+                    }
+                    free(s);
+                }
+            }
+            else if (!strcmp(cn,"db.transaction")) {
+                sqlite3 *db=nc_db_handle_ptr(narg>0?cargs[0]:nc_nil());
+                fn_r=nc_int(0); if (db) {
+                    char *s=nc_to_str_raw(narg>1?cargs[1]:nc_nil()); char *e=NULL;
+                    sqlite3_exec(db,"BEGIN",NULL,NULL,NULL);
+                    int rc=sqlite3_exec(db,s,NULL,NULL,&e); free(s);
+                    if (e||rc!=SQLITE_OK) { if(e) sqlite3_free(e); sqlite3_exec(db,"ROLLBACK",NULL,NULL,NULL); }
+                    else { fn_r=nc_int(sqlite3_changes(db)); sqlite3_exec(db,"COMMIT",NULL,NULL,NULL); }
+                }
+            }
+            else if (!strcmp(cn,"db.pool")) {
+                char *p=nc_to_str_raw(narg>0?cargs[0]:nc_nil());
+                int sz=narg>1&&cargs[1]&&cargs[1]->type==NC_INT?(int)cargs[1]->i:1;
+                int idx=g_nc_db_pool_count++;
+                if (idx<NC_DB_MAX_POOLS) {
+                    strncpy(g_nc_db_pools[idx].path,p,511); g_nc_db_pools[idx].avail=0;
+                    sqlite3 *db=NULL;
+                    if (sqlite3_open(p,&db)==SQLITE_OK) g_nc_db_pools[idx].conns[g_nc_db_pools[idx].avail++]=db;
+                    NcVal *m=nc_map_new(); nc_index_set(m,nc_str("__pool"),nc_int(idx)); (void)sz;
+                    fn_r=m;
+                } else fn_r=nc_nil();
+                free(p);
+            }
+            else if (!strcmp(cn,"db.pool_size")) {
+                NcVal *p=narg>0?cargs[0]:nc_nil(); fn_r=nc_int(0);
+                if (p&&p->type==NC_MAP) { NcVal *iv=nc_index_get(p,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT&&iv->i<g_nc_db_pool_count) fn_r=nc_int(g_nc_db_pools[(int)iv->i].avail); }
+            }
+            else if (!strcmp(cn,"db.pool_acquire")) {
+                NcVal *pool=narg>0?cargs[0]:nc_nil(); fn_r=nc_nil();
+                if (pool&&pool->type==NC_MAP) { NcVal *iv=nc_index_get(pool,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT) { int idx=(int)iv->i;
+                        if (idx<g_nc_db_pool_count) {
+                            sqlite3 *db=NULL;
+                            if (g_nc_db_pools[idx].avail>0) db=g_nc_db_pools[idx].conns[--g_nc_db_pools[idx].avail];
+                            else sqlite3_open(g_nc_db_pools[idx].path,&db);
+                            if (db) fn_r=nc_db_make_handle(db,idx);
+                        }
+                    }
+                }
+            }
+            else if (!strcmp(cn,"db.pool_close")) {
+                NcVal *pool=narg>0?cargs[0]:nc_nil(); fn_r=nc_bool(0);
+                if (pool&&pool->type==NC_MAP) { NcVal *iv=nc_index_get(pool,nc_str("__pool"));
+                    if (iv&&iv->type==NC_INT&&iv->i<g_nc_db_pool_count) {
+                        int idx=(int)iv->i;
+                        for (int _i=0;_i<g_nc_db_pools[idx].avail;_i++) sqlite3_close(g_nc_db_pools[idx].conns[_i]);
+                        g_nc_db_pools[idx].avail=0; fn_r=nc_bool(1);
+                    }
+                }
             }
             /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
             else if (nc_is_sh_api(cn)) {

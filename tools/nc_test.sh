@@ -74,7 +74,7 @@ run_with_timeout() {
 is_server_test() {
     case "$(basename "$1")" in
         test_reactive*|test_islands*|\
-        test_html_state*|test_audit*|test_db*|\
+        test_html_state*|test_audit*|test_db_integration*|\
         test_logging*|test_metrics*|\
         test_json_schema*|test_state*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\

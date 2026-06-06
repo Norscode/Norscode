@@ -171,7 +171,13 @@ build_from_bootstrap_c() {
     cat "$main" >> "$tmp"
 
     printf 'Kompilerer norscode_native frå bootstrap/maint/c (stage-0, %s)...\n' "$CC" >&2
-    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp"; then
+    # Detect sqlite3 linkage: prefer -lsqlite3 (needs dev headers), fall back to versioned .so
+    _sqlite_flag="-lsqlite3"
+    if ! "$CC" -lsqlite3 2>/dev/null; then
+        _found=$(find /usr/lib /usr/local/lib 2>/dev/null -name "libsqlite3.so*" | sort | head -1)
+        [ -n "$_found" ] && _sqlite_flag="-Wl,$_found" || _sqlite_flag=""
+    fi 2>/dev/null
+    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_sqlite_flag; then
         _clang_ec=$?
         rm -f "$tmp"
         printf 'Feil: clang kompilering feila (exit %d)\n' "$_clang_ec" >&2
