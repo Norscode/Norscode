@@ -3,6 +3,7 @@
 Pre-compiled bytecode (NCB JSON) for large selfhost modules to avoid runtime compilation overhead.
 
 **Files:**
+- `lexer_m1.ncb.json` — lexer tokeniser for bootstrap path (41 KB)
 - `json.ncb.json` — JSON parsing/stringifying (15 KB)
 - `parser.ncb.json` — Norscode parser (91 KB)
 - `semantic.ncb.json` — Semantic analysis (11 KB)
@@ -13,6 +14,7 @@ These files are loaded by the bootstrap system to avoid runtime compilation of l
 
 **Building:**
 ```bash
+./bin/nc compile selfhost/lexer/lexer_m1.no bootstrap/precompiled/lexer_m1.ncb.json
 ./bin/nc compile selfhost/json.no bootstrap/precompiled/json.ncb.json
 ./bin/nc compile selfhost/parser.no bootstrap/precompiled/parser.ncb.json
 ./bin/nc compile selfhost/compiler/semantic.no bootstrap/precompiled/semantic.ncb.json

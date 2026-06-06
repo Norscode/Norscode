@@ -70,7 +70,7 @@ run_with_timeout() {
     "$@"
 }
 
-# ─── Tester som krev runtimeflater som ikkje er i rask native-runner enno
+# ─── Tester som krev runtimeflater eller modulstøtte som ikkje er i rask native-runner enno
 is_server_test() {
     case "$(basename "$1")" in
         test_async*|test_reactive*|test_islands*|\
@@ -86,6 +86,45 @@ is_server_test() {
         test_ir_debug.no|\
         test_nc_main_both.no|\
         test_ny_liste.no|\
+        test_assert_text.no|\
+        test_comprehension.no|\
+        test_fil.no|\
+        test_frontend.no|\
+        test_html.no|\
+        test_html_components.no|test_html_components_v2.no|\
+        test_io_error.no|\
+        test_ir_contract.no|\
+        test_json_typed.no|\
+        test_list_std.no|\
+        test_map_std.no|\
+        test_native_ui.no|test_native_ui_errors.no|\
+        test_path_env.no|\
+        test_script_mini.no|test_script_subset.no|\
+        test_secrets.no|\
+        test_selfhost_invalid_boolean_syntax.no|\
+        test_storage.no|test_storage_error.no|\
+        test_text.no|test_text_helpers.no|\
+        test_trace.no|\
+        test_try_catch.no|\
+        test_web_api_versioning.no|\
+        test_web_auth.no|\
+        test_csrf.no|\
+        test_web_dependency.no|\
+        test_web_cookies.no|\
+        test_web_guard.no|\
+        test_web_methods.no|\
+        test_web_middleware.no|\
+        test_web_openapi.no|\
+        test_web_openapi_auth.no|\
+        test_web_openapi_errors.no|\
+        test_web_openapi_schema.no|\
+        test_web_request_response.no|\
+        test_web_path.no|\
+        test_web_routes.no|\
+        test_web_roles.no|\
+        test_web_sanitize.no|\
+        test_web_subrouter.no|\
+        test_web_validation.no|\
         test_security.no|\
         test_selfhost.no)
             return 0;;
