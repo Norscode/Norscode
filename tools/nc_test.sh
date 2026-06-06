@@ -129,6 +129,10 @@ is_server_test() {
         test_selfhost.no)
             return 0;;
     esac
+    # Testar som krev selfhost.common (ikkje tilgjengeleg i native runtime)
+    if grep -q "bruk selfhost\.common" "$1" 2>/dev/null; then
+        return 0
+    fi
     return 1
 }
 

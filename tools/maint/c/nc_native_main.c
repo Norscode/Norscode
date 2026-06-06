@@ -134,7 +134,8 @@ static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
     short_fn = short_fn ? short_fn + 1 : cn;
     char full[160];
     snprintf(full, sizeof(full), "selfhost.common.%s", short_fn);
-    if (!nc_exec_find_fn(g_sh_common_fns, full) && !nc_exec_find_fn(g_sh_common_fns, short_fn)) {
+    if (!g_sh_common_fns ||
+        (!nc_exec_find_fn(g_sh_common_fns, full) && !nc_exec_find_fn(g_sh_common_fns, short_fn))) {
         nc_panic("Ukjent selfhost API: %s", cn);
         return nc_nil();
     }
@@ -478,17 +479,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 fn_r=nc_builtin_upper(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"lower")||!strcmp(cn,"tekst_til_liten")) fn_r=nc_builtin_lower(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"exit")||!strcmp(cn,"stopp")) nc_builtin_exit(narg>0?cargs[0]:nc_nil());
-            else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.gange")||!strcmp(cn,"std.math.gange"))   fn_r=nc_mul(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.dele")||!strcmp(cn,"std.math.dele"))     fn_r=nc_div(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.rest")||!strcmp(cn,"std.math.rest"))     fn_r=nc_mod(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
-            else if (!strcmp(cn,"math.abs")||!strcmp(cn,"std.math.abs")) {
+            else if (!strcmp(cn,"math.pluss")||!strcmp(cn,"std.math.pluss")||!strcmp(cn,"builtin.math.pluss"))   fn_r=nc_add(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.minus")||!strcmp(cn,"std.math.minus")||!strcmp(cn,"builtin.math.minus"))   fn_r=nc_sub(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.gange")||!strcmp(cn,"std.math.gange")||!strcmp(cn,"builtin.math.gange"))   fn_r=nc_mul(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.dele")||!strcmp(cn,"std.math.dele")||!strcmp(cn,"builtin.math.dele"))     fn_r=nc_div(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.rest")||!strcmp(cn,"std.math.rest")||!strcmp(cn,"builtin.math.rest"))     fn_r=nc_mod(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"math.abs")||!strcmp(cn,"std.math.abs")||!strcmp(cn,"builtin.math.abs")) {
                 NcVal *v=narg>0?cargs[0]:nc_nil();
                 fn_r = (v->type==NC_INT && v->i<0) ? nc_int(-v->i) : v;
             }
-            else if (!strcmp(cn,"math.min")||!strcmp(cn,"std.math.min"))   fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),-1))?cargs[0]:cargs[1];
-            else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"math.min")||!strcmp(cn,"std.math.min")||!strcmp(cn,"builtin.math.min"))   fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),-1))?cargs[0]:cargs[1];
+            else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")||!strcmp(cn,"builtin.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
             else if (!strcmp(cn,"assert")) {
                 if (narg>0 && !nc_truthy(cargs[0])) {
                     char *msg = narg>1 ? nc_to_str_raw(cargs[1]) : strdup("assert feilet");

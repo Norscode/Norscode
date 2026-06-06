@@ -26,12 +26,12 @@ printf '3. Enkel run via nc_main...\n'
 NORSCODE_CMD=run NORSCODE_FILE=tests/test_nc_main_smoke.no "$NC" >/dev/null
 printf '  ✓ tests/test_nc_main_smoke.no\n\n'
 
-printf '4. Expr-smoke via nc_main...\n'
-_out="$(NORSCODE_CMD=run NORSCODE_FILE=tests/test_one_plus_two.no "$NC" 2>&1)"
-printf '%s' "$_out" | grep -q 'PUSH 1' || {
-    printf 'Feil: forventa IR frå test_one_plus_two, fekk:\n%s\n' "$_out" >&2
+printf '4. Math-smoke via nc_main (bruk std.math)...\n'
+_out="$(NORSCODE_CMD=run NORSCODE_FILE=tests/test_math.no "$NC" 2>&1)"
+printf '%s' "$_out" | grep -q 'test_math OK' || {
+    printf 'Feil: forventa "test_math OK", fekk:\n%s\n' "$_out" >&2
     exit 1
 }
-printf '  ✓ tests/test_one_plus_two.no\n\n'
+printf '  ✓ tests/test_math.no\n\n'
 
 printf '=== nc_main host-verifikasjon: BESTÅTT ===\n'
