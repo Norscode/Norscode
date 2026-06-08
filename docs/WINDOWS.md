@@ -7,51 +7,43 @@
 irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 | iex
 ```
 
-**Alternativ B – via pip:**
-```powershell
-py -m pip install norscode
-```
-
-**Alternativ C – fra kildekode:**
+**Alternativ B – fra kildekode:**
 ```powershell
 git clone https://github.com/Norscode/Norscode
 cd Norscode
-py -m pip install .
+bash tools/build_norscode_native.sh
 ```
 
 ## Kjøring
 
-Etter installasjon via pip:
+Etter installasjon:
 ```powershell
-norcode --help
-norcode run app.no
-norcode test
+.\bin\nc.ps1 --help
+.\bin\nc.ps1 run app.no
+.\bin\nc.ps1 test
 ```
 
-Direkte fra kildekode (uten pip-installasjon):
+Direkte fra repoet:
 ```powershell
 # Med bin/nc.ps1 (PowerShell, anbefalt):
 .\bin\nc.ps1 run app.no
 
 # Med bin/nc.cmd (CMD):
 bin\nc.cmd run app.no
-
-# Med historisk vei direkte:
-py main.py run app.no
 ```
 
 ## Plattformstatus
 
 | Funksjon                    | Status              |
 |-----------------------------|---------------------|
-| `norcode run app.no`        | Ja (via historisk vei/pip) |
-| `norcode test`              | Ja (via historisk vei/pip) |
-| `norcode build`             | Ja (via historisk vei/pip) |
+| `bin\nc.ps1 run app.no`     | Ja                  |
+| `bin\nc.ps1 test`           | Ja                  |
+| `bin\nc.ps1 build`          | Ja                  |
 | `bin/nc.cmd` og `bin/nc.ps1`| Ja                  |
 | Native `.exe` (native-first)  | Planlagt            |
 
 ## Krav
 
-Historisk bootstrap-lag 3.10 eller nyere. Installer via `install.ps1` eller den vanlige oppdateringsrutinen.
+Windows-bruk går via `bin/nc.ps1` / `bin/nc.cmd` og stage-0/native-first-kjeda. Ingen normal Python-entrypoint er i bruk.
 
 Se README.md for full plattformoversikt.

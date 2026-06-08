@@ -17,16 +17,18 @@ Norscode er selvstendig når:
 
 ### Ingen Python eller C i normal flyt
 
+Historiske eller vedlikehaldsrelaterte unntak skal berre peike til `archive/` eller eksplisitt maintainer-lane, aldri presenterast som normal bruk.
+
 | Tillatt | Ikke tillatt i normal flyt |
 |---|---|
 | `.no` → NCB JSON → `selfhost/vm.no` | Nye `tools/*.py` som kompilerer, konverterer eller kjører kjerne |
-| `dist/norscode_native` som **stage-0** (release-binær eller selfhost-kompilert ELF) | `python3 main.py`, pytest som orakel for kompilatoren |
+| `dist/norscode_native` som **stage-0** (release-binær eller selfhost-kompilert ELF) | Historiske Python-entrypoints og pytest som orakel for kompilatoren |
 | Legacy C-VM fjerna frå `tools/` (sjå `archive/c_minimal_vm/`) | NCBB/C-VM som påkrevd steg for `run` / `compile` / CI |
-| Nye verktøy i `selfhost/*.no` | `selfhost/maint/ncb_to_c.no` i produksjonskjede |
+| Nye verktøy i `selfhost/*.no` | `archive/legacy_c_backend/ncb_to_c.no` kun i vedlikehald/regen lane |
 
 **Artefaktformat:** Kjøring og bootstrap bruker **NCB JSON** (`*.ncb.json`). Binært NCBB hører til legacy C-VM og skal ikke gjeninnføres via Python eller nye C-verktøy. Trengs binær serialisering senere, implementeres den i Norscode (`selfhost/…`), ikke i `tools/*.py`.
 
-**Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges én gong frå selfhost). Det er bootstrap, ikkje dagleg avhengighet av clang eller Python. Den gjenværende C-hostgrensa (`tools/maint/c/nc_native_main.c` / `host_exec_ncb_json`) er også bootstrap, ikkje normal kjede. Frase-regen går via `scripts/regen_fraser.no` og `./bin/nc regen-fraser`, ikkje via Python.
+**Stage-0-unntak:** Én ferdig `norscode_native` per plattform (hentes med `tools/build_norscode_native.sh` eller bygges éin gong frå selfhost). Det er bootstrap, ikkje dagleg avhengighet av clang eller Python. Den gjenværende C-hostgrensa (`archive/legacy_c_backend/nc_native_main.c` / `host_exec_ncb_json`) er også bootstrap, ikkje normal kjede. Frase-regen går via `scripts/regen_fraser.no` og `./bin/nc regen-fraser`, ikkje via Python.
 
 **Operativ plan mot full selvstendighet:** [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md)
 
@@ -137,6 +139,7 @@ Leveranser:
 Ferdig når:
 
 - nye bidragsytere møter en enkel og sannferdig dokumentasjonsflate
+- historiske spor er tydeleg merka som `archive only` eller vedlikehald
 
 ## Omgang 5 - Lås vedlikehold og drift
 

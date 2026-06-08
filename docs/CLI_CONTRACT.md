@@ -4,9 +4,10 @@ Dette dokumentet beskriver den stabiliserte kontrakten for Norscode-CLI-en.
 
 ## Stabil bruk
 
-- Primærkommandoen er `norcode`.
-- Legacy-aliasene `nor`, `nc`, `nl` og `norsklang` er kun kompatibilitetsskjell og skal ikke få ny funksjonalitet som avviker fra `norcode`.
-- Kommandooversikten er tilgjengelig med `norcode commands`.
+- Primærkommandoen i repoet er `./bin/nc`.
+- Normal kjede er `./bin/nc` → `dist/norscode_native` → NCB JSON / VM / native ELF.
+- Eventuelle alias skal ikke få ny funksjonalitet som avviker fra `./bin/nc`.
+- Kommandooversikten er tilgjengelig med `./bin/nc commands`.
 
 ## Exit-koder
 
@@ -27,8 +28,7 @@ Se også [`docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md`](./SELFHOST_MIGRATION_AN
 
 - Den historiske fallback-veien i CLI-wrapperne er fjernet som normal vei og skal ikke brukes i aktiv drift.
 - `bin/bootstrap` bærer den eksplisitte bootstrap-flaten.
-- `norcode/cli.py` bruker modulær registry-dispatch som normal vei.
-- `commands`-kommandoen er lagt til som generert kontraktoversikt.
+- `commands`-kommandoen er lagt til som kontraktoversikt for den aktive CLI-flata.
 
 ## Eksplisitt fallback
 
@@ -41,4 +41,4 @@ Når historiske veier fortsatt trengs, skal det alltid være synlig at de er his
 
 ## Kommandooversikt
 
-Bruk `norcode commands` for den genererte, maskinlesbare oversikten over aktive kommandoer.
+Bruk `./bin/nc commands` for oversikten over aktive kommandoer.

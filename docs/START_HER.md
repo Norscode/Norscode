@@ -34,7 +34,7 @@ irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 |
 Hvis du vil bygge fra kildekode:
 
 ```bash
-bash tools/build-bootstrap-binary.sh
+bash tools/build_norscode_native.sh
 ```
 
 ## Ditt første program
@@ -55,6 +55,8 @@ Kjør det med:
 ## De viktigste kommandoene
 
 - `./bin/nc check fil.no` validerer kode uten å kjøre den
+- `./bin/nc build fil.no ut.ncb.json` bygger NCB JSON
+- `./bin/nc bygg --mål elf64 fil.no ut.elf` bygger native ELF
 - `./bin/nc format fil.no` formaterer kode
 - `./bin/nc lint fil.no` finner vanlige problemer
 - `./bin/nc test` kjører testpakken

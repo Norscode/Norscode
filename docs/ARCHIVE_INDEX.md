@@ -4,6 +4,8 @@ Bruk denne siden når du trenger historikk, migreringsspor eller utfasing som ik
 
 ## Les først
 
+Hvis du leter etter dagens bruk, gå heller til normalreferansene under.
+
 - [docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md](SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
 - [docs/SELFHOST_FALLBACK_CONTRACT.md](SELFHOST_FALLBACK_CONTRACT.md)
 - [docs/SELFHOST_STATUS.md](SELFHOST_STATUS.md)
@@ -22,6 +24,7 @@ Hvis du egentlig leter etter dagens dokumentasjon, start her:
 ## Legacy-kode (ikkje normalvei)
 
 - [archive/c_minimal_vm/README.md](../archive/c_minimal_vm/README.md) — tidleg NCBB/C-VM (fjerna frå `tools/`, 2026-06)
+- [archive/legacy_c_backend/ncb_to_c.no](../archive/legacy_c_backend/ncb_to_c.no) — vedlikehalds-/regen-spor, ikkje normal bygg- eller CI-veg
 - [archive/README.md](../archive/README.md) — oversikt
 
 ## Arkivregel
@@ -29,3 +32,4 @@ Hvis du egentlig leter etter dagens dokumentasjon, start her:
 - Arkivet er for historikk
 - Normalveien er for dagens bruk
 - Legacy brukes bare når dokumentasjonen eksplisitt sier det
+- Innhold under `archive/` er `archive only` med mindre ein vedlikehaldsworkflow seier noko anna

@@ -5,18 +5,12 @@ Gjøre det enkelt å forstå hva som skjer i et prosjekt uten å lese kildekoden
 
 ## Diagnosekommandoen
 
-`norcode diagnose` er en normal modulær CLI-kommando i `norcode/cli.py`.
+`./bin/nc doctor` er den normale diagnose-/verifiseringskommandoen i dagens CLI.
 
 Kjør:
 
 ```bash
-norcode diagnose
-```
-
-eller som JSON for verktøy:
-
-```bash
-norcode diagnose --json
+./bin/nc doctor
 ```
 
 Diagnosen er ment for:
@@ -40,30 +34,10 @@ Diagnosen er ment for:
 - git-branchnet, dirty-state og revision
 - en kort liste over de første testfilene
 
-### JSON output
-
-`--json` gir et stabilt objekt som er egnet for verktøy og CI:
-
-- `ok`
-- `root`
-- `project_root`
-- `config_path`
-- `project_name`
-- `project_entry`
-- `paths`
-- `stdlib_roots`
-- `stdlib_resolves_web`
-- `dependency_count`
-- `dependencies`
-- `test_count`
-- `tests`
-- `git`
-
 ## Hvordan bruke den
 
-- Bruk `norcode diagnose` når du vil forstå hvorfor et miljø ser annerledes ut enn forventet.
-- Bruk `norcode diagnose --json` når et script eller en pipeline skal lese resultatet maskinelt.
-- Kombiner gjerne med `doctor` når du vil verifisere installasjon og release i tillegg til prosjektstatus; `doctor` er fortsatt den eksplisitte verifiseringsflaten for release-/installasjonsmiljøet.
+- Bruk `./bin/nc doctor` når du vil forstå kvifor eit miljø ser annleis ut enn forventa.
+- Kombiner gjerne med `./bin/nc test` og `bash tools/verify_selvstendighet.sh` når du vil verifisere både prosjektstatus og bootstrap-/releaseflate.
 
 ## Relatert
 

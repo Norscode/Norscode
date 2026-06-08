@@ -5,7 +5,7 @@
 #
 # Steg:
 #   1. bundle → bootstrap/kompiler.ncb.json
-#   2. selfhost/maint/ncb_to_c.no → bootstrap/maint/c/norscode_generated.c
+#   2. archive/legacy_c_backend/ncb_to_c.no → bootstrap/maint/c/norscode_generated.c
 #   3. selfhost/maint/gen_dispatch.no → bootstrap/maint/c/nc_dispatch.c
 #   4. clang → dist/norscode_native (valfritt med --rebuild)
 set -euo pipefail
@@ -31,7 +31,7 @@ printf '=== Regenerer bootstrap/maint/c/ (utan Python) ===\n\n'
 printf '[1/4] Bundle kompilator-modular...\n'
 TMP="$(mktemp "${TMPDIR:-/tmp}/nc_bundle_XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
-# Same modular sett som L5 (runtime-kompilator); maint/ncb_to_c og maint/gen_dispatch køyrast som eigne .no-filer
+# Same modular sett som L5 (runtime-kompilator); maint/ncb_to_c og maint/gen_dispatch køyrast som eigne filer.
 "$NC" bundle \
     selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
     selfhost.parser=selfhost/parser.no \
@@ -50,7 +50,7 @@ printf '  ✓ %s/kompiler.ncb.json (%d bytes)\n' "$REGEN_ROOT" "$(wc -c < "$REGE
 printf '[2/4] ncb_to_c → %s/maint/c/norscode_generated.c...\n' "$REGEN_ROOT"
 mkdir -p "$REGEN_ROOT/maint/c"
 env NORSCODE_CMD=run \
-    NORSCODE_FILE="$ROOT/selfhost/maint/ncb_to_c.no" \
+    NORSCODE_FILE="$ROOT/archive/legacy_c_backend/ncb_to_c.no" \
     NC_NCB_INPUT="$REGEN_ROOT/kompiler.ncb.json" \
     NC_C_OUTPUT="$REGEN_ROOT/maint/c/norscode_generated.c" \
     "$ROOT/dist/norscode_native"

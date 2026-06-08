@@ -19,10 +19,12 @@ GEN1_NCB="$ROOT/build/6b/compiler_stage0.ncb.json"
 GEN1_ELF="$ROOT/build/6b/selfcompile/gen1_compiler.elf"
 GEN2_NCB="$ROOT/build/6b/selfcompile/gen2.ncb.json"
 GEN2_ELF="$ROOT/build/6b/selfcompile/gen2_compiler.elf"
+PASS_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_passed.marker"
 
 BUNDLE_ARGS_STR="${OMGANG6B_BUNDLE_ARGS[*]}"
 
 mkdir -p "$ROOT/build/6b/selfcompile"
+rm -f "$PASS_MARKER"
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     bash "$ROOT/tools/build_norscode_native.sh"
@@ -50,12 +52,39 @@ fi
 
 printf '[2/4] Gen2 NCB frå Gen1 NCB (paritet)...\n'
 rm -f "$GEN2_NCB"
-cp "$GEN1_NCB" "$GEN2_NCB"
+
+printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
+# Gi Gen1 ELF absolutte signal om kva entry som skal eksporterast,
+# så vi slepp host-copiert NCB + patching.
+GEN2_ENTRY="selfhost.elf_compile_driver.start"
+# Kjør Gen1-ELFen i eit reinvask miljø for å unngå uventa
+# testmiljø-variablar (som NORSCODE_BUNDLE_ARGS frå utviklar-maskina)
+# som kan setje oss inn i feil modus.
+GEN1_ELF_RUN=(
+    env -i
+    "PATH=$PATH"
+    "NORSCODE_CMD=run"
+    "NORSCODE_BUNDLE_PRESET=omgang6b"
+    "NORSCODE_BUNDLE_ARGS=__OM6B__"
+    "NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB"
+    "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
+    "$GEN1_ELF"
+)
+set +e
+"${GEN1_ELF_RUN[@]}"
+_gen2_rc=$?
+set -e
+if [ "$_gen2_rc" -ne 0 ]; then
+    printf '  [FEIL] Gen1 ELF bundel-køyring feila med exit %d\n' "$_gen2_rc" >&2
+    printf '  [FEIL] Køyr Gen1 ELF direkte med same miljø for detaljert feil.\n' >&2
+    exit 1
+fi
+
 if [ ! -f "$GEN2_NCB" ]; then
     printf '  [FEIL] Gen2 NCB ikkje skrive\n' >&2
     exit 1
 fi
-bash "$ROOT/tools/patch_ncb_entry.sh" "$GEN2_NCB" "selfhost.elf_compile_driver.start"
+
 N1="$(wc -c < "$GEN1_NCB" | tr -d ' ')"
 N2="$(wc -c < "$GEN2_NCB" | tr -d ' ')"
 printf '  [OK] Gen2 NCB %s bytes (Gen1 NCB %s bytes)\n' "$N2" "$N1"
@@ -65,7 +94,6 @@ else
     printf '  [MERK] NCB differ — sjekkar ELF-paritet likevel\n\n'
 fi
 
-printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
 bash "$ROOT/tools/ncb_to_elf.sh" "$GEN2_NCB" "$GEN2_ELF"
 B2="$(wc -c < "$GEN2_ELF" | tr -d ' ')"
 printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
@@ -73,6 +101,7 @@ printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF...\n'
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
+    printf 'ok\n' > "$PASS_MARKER"
     printf '=== Omgang 6b.3: BESTÅTT ===\n'
     exit 0
 fi

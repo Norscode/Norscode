@@ -8,7 +8,7 @@ From June 2026 onward, Norscode development follows **native-first** principle:
 
 - **Normal vei:** `bin/nc` → `dist/norscode_native` (mandatory)
 - **Bootstrap:** `bin/bootstrap` (only for stage-0 seed generation)
-- **Legacy:** C bootstrap tools (`tools/maint/c/`) — stage-0 only, not daily workflow
+- **Legacy:** C bootstrap tools (`archive/legacy_c_backend/`) — stage-0/maintainer-only, ikkje dagleg workflow
 
 ### What "native-first" means
 
@@ -35,19 +35,13 @@ From June 2026 onward, Norscode development follows **native-first** principle:
 # REQUIRED: dist/norscode_native exists and is executable
 test -x dist/norscode_native
 
-# FAIL: If any command falls back to:
-# - python3 main.py
-# - bin/bootstrap
-# - legacy tools/c_minimal_vm/
-# - snapshot oracles (except for explicit --snapshot-compare)
+# FAIL: If any command falls back to bin/bootstrap, legacy tools/c_minimal_vm/,
+# or snapshot oracles (except for explicit --snapshot-compare)
 ```
 
 **CI enforcement:**
 
-```bash
-# tools/nc_test.sh should NOT use fallback
-grep -v "^#" tools/nc_test.sh | grep -i "python\|bootstrap\|c_vm" && exit 1
-```
+CI bruker `bash tools/no_c_python_active_surface.sh` for aa stoppe nye Python-/C-spor i aktiv flyt.
 
 **README and documentation** list native-first first, legacy in archive.
 
@@ -68,17 +62,15 @@ All directly use `dist/norscode_native` via environment dispatch.
 ### ❌ Fallback (incorrect, removed)
 
 ```bash
-# These should NOT exist:
-python3 tools/main.py run app.no
-python3 tools/compile.py app.no
-./bin/bootstrap run app.no  # only for stage-0
+# These should NOT be part of normal workflow:
+./bin/bootstrap run app.no
 nc tools/c_minimal_vm run program.ncb.json
 ```
 
 ## Migration path (Fase 2)
 
 1. ✅ Verify `bin/nc` always uses native (done)
-2. ⏳ Remove Python-based compile from normal scripts
+2. ✅ Remove Python-based compile from normal scripts
 3. ⏳ Add CI gate that fails if legacy fallback detected
 4. ⏳ Update README to show native-first path first
 5. ⏳ Move old bootstrap docs to archive/

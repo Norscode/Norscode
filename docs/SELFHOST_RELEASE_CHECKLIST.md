@@ -1,7 +1,7 @@
 # Selfhost release checklist
 
 Mål:
-Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres punkt for punkt uten å kjenne bootstrap-historikken.
+Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres punkt for punkt utan å måtte bruke vedlikehalds- eller bootstrap-historikk.
 
 ## Før release
 
@@ -12,6 +12,7 @@ Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres pun
 - [ ] release-pakke kan bygges med `bash package-release.sh <versjon>`
 - [ ] release/install-flaten krever ikke C-verktøykjede i normal drift
 - [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
+- [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
 
 ## Bygg release
 
@@ -25,6 +26,7 @@ Verifiser:
 - [ ] tilsvarende `.sha256` ble opprettet
 - [ ] checksum matcher arkivet
 - [ ] release-arkivet inneholder ikke C som normal produktavhengighet
+- [ ] release-dokumentasjonen peiker på `bin/nc` / `dist/norscode_native`, ikkje maintainer-laner
 
 ## Installer release
 

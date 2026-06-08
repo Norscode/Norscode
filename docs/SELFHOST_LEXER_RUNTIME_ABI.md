@@ -2,7 +2,7 @@
 
 Dette dokumentet definerer runtime-kontrakten for å kjøre Norscode-native lexer fra verktøykjeden.
 
-Målet er at historisk vei-verktøyene midlertidig kan kalle en lexer skrevet i Norscode gjennom VM/runtime, hente tokenlisten og sammenligne den mot historisk lexer fixtures.
+Målet er at vedlikehalds- og parity-verktøy mellombels kan kalle ein lexer skriven i Norscode gjennom VM/runtime, hente tokenlista og samanlikne henne mot historiske lexer-fixtures.
 
 ## Entry point
 
@@ -56,17 +56,17 @@ Output skal være en liste med token-objekter som følger `docs/TOKEN_FORMAT_V1.
 
 - [x] Lexer M1 workspace
 - [x] Token format v1
-- [x] historisk vei lexer fixtures
+- [x] historiske lexer-fixtures
 - [x] Lexer parity suite
 - [x] Selfhost lexer readiness
 - [x] Runtime boundary
 - [ ] VM function-call ABI
 - [ ] Selfhost lexer token extraction
-- [ ] Selfhost lexer vs historisk vei fixture parity
+- [ ] Selfhost lexer vs historiske fixture-parity
 
 ## Neste steg
 
 1. Lage en runtime call facade.
 2. Eksponere `call_function(source_file, function_name, args)`.
-3. Koble `selfhost_lexer_runner.py` til runtime call facade.
+3. Koble lexer-runneren til runtime call facade.
 4. Sammenligne selfhost tokens mot `.tokens.json` fixtures.

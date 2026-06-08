@@ -53,7 +53,7 @@ CI bør også ha små, raske tester for:
 - `doctor`
 - `smoke`
 - `--version`
-- ELF self-compile parity på Linux x86_64
+- ELF self-compile parity på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
 - samlet driftsvakt via `tools/selfhost_drift_guard.sh`
 
 ## Failure policy

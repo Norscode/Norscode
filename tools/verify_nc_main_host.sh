@@ -10,7 +10,7 @@ DISPATCH="$ROOT/bootstrap/maint/c/nc_dispatch.c"
 printf '=== nc_main host-verifikasjon ===\n\n'
 
 printf '1. Regenererer og byggjer (inkl. nc_main i bundle)...\n'
-REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
+NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
 printf '\n'
 
 if ! grep -q 'selfhost\.nc_main\.start' "$DISPATCH"; then

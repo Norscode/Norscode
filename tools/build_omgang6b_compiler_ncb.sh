@@ -10,8 +10,7 @@ OUT="${1:-$ROOT/build/6b/compiler_stage0.ncb.json}"
 
 mkdir -p "$(dirname "$OUT")"
 
-"$ROOT/bin/nc" bundle "${OMGANG6B_BUNDLE_ARGS[@]}" --output "$OUT"
-
-bash "$ROOT/tools/patch_ncb_entry.sh" "$OUT" "selfhost.elf_compile_driver.start"
+env NORSCODE_BUNDLE_ENTRY="selfhost.elf_compile_driver.start" \
+    "$ROOT/bin/nc" bundle "${OMGANG6B_BUNDLE_ARGS[@]}" --output "$OUT"
 
 printf '✓ Omgang 6b stage-0 NCB: %s (%d bytes)\n' "$OUT" "$(wc -c < "$OUT" | tr -d ' ')"

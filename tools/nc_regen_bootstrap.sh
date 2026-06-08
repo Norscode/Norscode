@@ -29,7 +29,6 @@ if [ "${1:-}" = "--full" ]; then
         selfhost.kompiler=selfhost/kompiler.no \
         selfhost.json=selfhost/json.no \
         selfhost.vm=selfhost/vm.no \
-        selfhost.main=selfhost/main.no \
         selfhost.bundler=selfhost/bundler.no \
         selfhost.nc_main=selfhost/nc_main.no \
         selfhost.maint.gen_dispatch=selfhost/maint/gen_dispatch.no \

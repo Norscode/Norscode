@@ -1,240 +1,276 @@
-# Plan: fjern Python og legacy-C, start rein normalvei
+# Plan: fjern C og Python
 
-Operativ plan for å fjerne gjenværende Python og C-spor fra **normal** utvikling, test og CI — og å starte arbeidet i små, verifiserbare steg.
+Operativ avhukingsplan for aa fjerne C og Python fra repoets aktive flate, normal utvikling, bygg, test, CI og release.
 
-Bygger på [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md) og [SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md).
+Planen bygger paa [SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md) og [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md).
 
-## Målbilde (slutt)
+## Maal
 
-```mermaid
-flowchart TB
-    subgraph bruker [Normal bruk — kun .no + binær]
-        SRC[program.no]
-        NC[dist/norscode_native eller release-ELF]
-        VM[selfhost VM / NCB JSON]
-        SRC --> NC --> VM
-    end
-    subgraph unntak [Kun maintainer, ikkje dagleg]
-        SEED[signert seed per OS/arch]
-        REGEN[regen frå .no — til det ELF byggast i .no]
-    end
-    SEED -.-> NC
+Norscode skal kunne utvikles, bygges, testes og publiseres uten C- eller Python-kilde i normal flyt.
+
+Normal kjede:
+
+```text
+.no -> lexer/parser/semantic/bytecode -> NCB JSON -> selfhost/vm.no -> native ELF
 ```
 
-| Lag | Fjernes fra repo / normal flyt | Erstattes med |
-|-----|-------------------------------|---------------|
-| Python | `tools/*.py`, pytest-orakler, bootstrap-wrapper | `.no`-verktøy eller `scripts/` utanfor L1-gate |
-| Legacy C-VM | `tools/c_minimal_vm/` | Arkiv + sletting; kun `archive/c_minimal_vm/` som doc |
-| Regen-C i dag | `bootstrap/maint/c/*.c` + clang i dagleg loop | Seed-ELF + (seinare) native ELF frå `selfhost/` |
-| C-host | `tools/maint/c/nc_native_main.c` | Mellombels: minimal host; langsiktig: emitter i `.no` |
+Ferdig betyr:
 
-**Viktig:** Fullstendig **null C i repo** krev at Norscode kan **bygge og kjøre seg sjølv som ELF** utan clang. Det er eit eige spor (Omgang 6). Inntil da: **ingen C/Python i det brukaren og CI kallar dagleg**.
+- [x] Ingen `.c` eller `.h` i aktiv kildeflate.
+- [x] Ingen `.py` i aktiv kildeflate.
+- [x] Ingen normale CI-steg bruker `python`, `python3`, `clang`, `gcc`, `cc`, `ncb_to_c` eller C-VM.
+  - Attverande unntak er avgrensa til eksplisitte maintainer-workflowar: `regen_bootstrap.yml` og `export-stage0-linux.yml`.
+- [x] `./bin/nc run`, `test`, `check`, `bundle`, `bygg-native` og release bruker Norscode-native vei.
+- [x] Stage-0 er en verifisert binær seed per plattform, ikke en C-kilde som bygges i daglig flyt.
+  - Normal build/CI/release brukar seed-first; C-regenerering er avgrensa til eksplisitt vedlikehaldsmodus.
+- [x] Historikk er enten slettet eller samlet i `archive/` med tydelig legacy-merking.
+  - Legacy C-host/runtime ligg no i `archive/legacy_c_backend/`; lokal/generert `bootstrap/maint/c/` er berre maintainer-regen-output og ikkje committed normalflate.
 
-**Web-server:** Web-server-funksjonalitet krev nye `web`- og `db`-builtins i `norscode_native`.
+## Naavaerende kjente spor
 
-**Status presist:** Python er i praksis ute av normal flyt, men repoet er ikkje heilt C-fritt enno. Det gjeld særleg `tools/maint/c/nc_native_main.c`, `tools/maint/c/nc_runtime_full.c`, `tools/maint/c/nc_runtime_mini.c` og genererte C-artefakt under `build/`.
+- [x] `tools/maint/c/nc_native_main.c` (flytta til `archive/legacy_c_backend/`)
+- [x] `tools/maint/c/nc_runtime_full.c` (flytta til archive)
+- [x] `tools/maint/c/nc_runtime_mini.c` (flytta til archive, brukt frå legacy bane ved behov)
+- [x] `archive/legacy_c_backend/ncb_to_c.no` (flytta ut frå aktiv flate)
+- [x] `archive/c_minimal_vm/` (ligg i `archive/` og er tydeleg legacy)
+- [x] `tools/python_dependency_audit.sh` (er no shell-launcher for `.no`-audit)
+- [x] `tools/python_free_ci.sh` (er no shell-gate utan Python-avhengigheit)
+- [x] `reports/python_dependency_report.txt` (er fjerna/erstatta)
+- [x] CI- eller scriptsok etter `python`, `clang`, `gcc`, `cc`, `ncb_to_c`, `.c`, `.h` (inventarisert; attverande treff er vedlikehald/historikk)
 
-## Inventar i dag (kva «alt» er)
+## Fase 0: Sann inventory
 
-### Python (1 fil)
+Maal: vite nøyaktig hva som finnes, hva som brukes, og hva som bare er historikk.
 
-| Fil | Formål | Handling |
-|-----|--------|----------|
-| `tools/gen_expr_fraser.py` | Regenerer frase-tabell i `common.no` | Flytt til `scripts/gen_expr_fraser.py` eller implementer i `selfhost/tools.no` |
+- [x] Lag `reports/no_c_python_inventory.txt` fra `rg --files`.
+- [x] List alle `.c`, `.h` og `.py`.
+- [x] List alle shell-/CI-referanser til `python`, `clang`, `gcc`, `cc`, `ncb_to_c`, `c_minimal_vm`.
+- [x] Merk hver forekomst som `aktiv`, `bootstrap`, `legacy`, `kan slettes`.
+- [x] Oppdater denne planen med eventuelle funn som mangler over.
 
-### C (aktiv + legacy)
+Funn etter inventory:
 
-| Fil / mappe | Formål | Handling |
-|-------------|--------|----------|
-| `tools/maint/c/nc_native_main.c` | NORSCODE_CMD-host, lazy `common.no` | Behold til ELF i `.no`; dokumenter som siste C-grense |
-| `tools/maint/c/nc_runtime_mini.c` | Runtime-bit | Same som over |
-| `bootstrap/maint/c/*.c` | Regen frå `.no` (L4/L6) | Allereie ikkje i git som krav; berre seed + regen |
-| `tools/c_minimal_vm/*.c` | Eldre C-VM | **Slett** (eller flytt til `archive/`) |
-| `tools/build_norscode_native_from_source.sh` | Bygg via c_minimal_vm | **Slett** eller merk deprecated |
-| `build/**/*.c` | Regen-artefakt | `.gitignore`, ikkje kilde |
+- Ingen aktive `.py`-filer finst i repoet; `rg --files -g '*.py'` er tom.
+- Ingen aktive `.c`/`.h` ligg i `.github`, `tools`, `selfhost`, `bin` eller `bootstrap`; attverande C-kjelder ligg i `archive/legacy_c_backend/`.
+- Attverande teksttreff for `clang`, `gcc`, `cc`, `bootstrap/maint/c/` og `ncb_to_c` kjem frå:
+  - vedlikehaldsskript under `tools/maint/`
+  - eksplisitte vedlikehalds-workflowar
+  - historiske/arkiv-merkte dokument
+  - plan-/statusdokument som forklarer utfasinga
 
-### Merkingar som lyg
-
-| Ting | Problem | Handling |
-|------|---------|----------|
-| `test_selfhost.no` Python-only i `nc_test.sh` | Køyrer faktisk på native (delvis) | Fullfør skript-API → fjern skip |
-| `LANE_MAP.md` → `bootstrap_wrapper.py` | Finst ikkje | Oppdater docs |
-| L1 ✅ med `gen_expr_fraser.py` i `tools/` | Gate feiler | Flytt fil før «L1 lukka» på nytt |
-
-## Omganger (start her)
-
-### Omgang 0 — Rydding utan arkitektur (1–2 dager)
-
-**Mål:** Repo og gates svarer sannferdig «ingen Python i tools/».
-
-1. Flytt `tools/gen_expr_fraser.py` → `scripts/gen_expr_fraser.py` (eller `selfhost/dev/gen_expr_fraser.no`).
-2. Oppdater `docs/SELFHOST_STATUS.md`, `SELFHOST_STATUS` frase-kommando, ev. `Makefile`-target `regen-fraser`.
-3. Køyr `bash tools/python_dependency_audit.sh` → må gi OK.
-4. Slett `tools/c_minimal_vm/` (heile mappa).
-5. Slett eller arkiver `tools/build_norscode_native_from_source.sh`.
-6. Oppdater `docs/LANE_MAP.md`, `SELFHOST_MIGRATION_AND_DEPRECATIONS.md` (fjern døde referansar).
-
-**Ferdig når:**
+Verifikasjon:
 
 ```bash
-bash tools/python_dependency_audit.sh
-bash tools/verify_selvstendighet.sh   # L1–L6
-sh tools/nc_test.sh                   # 51/51
+rg --files | rg '(\.c$|\.h$|\.py$)'
+rg -n 'python3?|clang|gcc|(^|[^a-z])cc([^a-z]|$)|ncb_to_c|c_minimal_vm|nc_runtime|nc_native_main' .github tools selfhost docs bin bootstrap
 ```
 
-**Verifikasjon:** Ingen `.py` under `tools/`; `find tools/c_minimal_vm` finst ikkje.
+## Fase 1: Stabiliser ekte native runtime
 
----
+Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
 
-### Omgang 1 — Lukk expr + test på native (3–5 dager)
+- [x] Fiks ekte Gen1 ELF `bygg_bundle` i `selfhost/elf_compile_driver.no`.
+- [x] Fiks native runtime/kodegen for store `fil_les`/`fil_skriv`-operasjoner.
+  - [x] Løyst lokalt: typeinfo, dispatch-alias og smoke-testar gjer at `./bin/nc test`, `./bin/nc selfcheck` og `bash tools/verify_selvstendighet.sh` passerer.
+- [x] Planlegg/implementer eigentleg runtime-røtt for store fil-I/O-kall (full smoke-verifisering).
+  - [x] Legg til `fil_skriv_binary`-alias i runtime-dispatch (`native_codegen_v2.no`).
+  - [x] Legg inn smoke-test `tests/test_file_io.no` for `fil_les`/`fil_skriv`/`fil_skriv_binar`/`fil_finnes`.
+- [x] Fiks native runtime/kodegen for map/list/json nok til compiler-bundle.
+- [x] Fjern midlertidig NCB-kopi i `tools/selfcompile_stage0_elf.sh` naar ekte Gen1 ELF bundle fungerer.
+- [x] Fjern host-patching av stage-0 bundle-entry i 6b-kjeda.
+  - Entry blir no sett i sjølve bundleren via `NORSCODE_BUNDLE_ENTRY`, både for host-bygd Gen1 NCB og Gen1 ELF → Gen2 NCB.
+  - Det tidlegare hjelpeskriptet `tools/patch_ncb_entry.sh` er fjerna.
+- [ ] Verifiser Gen1 ELF -> Gen2 NCB -> Gen2 ELF uten host-kopi.
+  - [ ] Linux x86_64 sjølvkompilering står att som eigen ELF/stage-0-verifikasjon; resten av L1-L6-kjeda er no grønn lokalt.
+  - [ ] Linux CI køyrer denne som transitional steg med `NC_OM6B_RUN_STAGE0=1`, men Gen1 ELF bundle-køyring feilar framleis med `Illegal instruction` og er ikkje hard gate enno.
+  - [x] Transitional CI rapporterer no ekte Gen1 ELF exit-kode og lastar ikkje opp stage-0-kandidat utan full paritet-marker.
+- [x] Dokumenter runtime-adresse-/ABI-kontrakt for `native_codegen_v2.no` i `docs/NATIVE_CODEGEN_V2_ABI.md`.
 
-**Mål:** `test_selfhost.no` og fraser er heilt på native; ingen Python-only i testløpar.
-
-1. Fullfør `disasm_skript`, `disasm_uttrykk_med_miljo`, `kompiler_fra_kilde` / `kompiler_fra_linjer` i `selfhost/common.no` (eller `script_ir.no`).
-2. Køyr `tests/test_selfhost.no` på native; fiks resterande (UTF-8 `på`, skript, `hvis` i uttrykk).
-3. Fjern `PYTHON_ONLY_TESTS=test_selfhost.no` frå `tools/nc_test.sh`.
-4. (Valgfritt) Splitt `test_selfhost_core.no` (expr) + `test_selfhost_script.no` for rask CI.
-
-**Ferdig når:** `NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native` exit 0 og `nc_test.sh` køyrer den utan skip.
-
----
-
-### Omgang 2 — C-VM og NCBB heilt ut av dokumentasjon og CI (1 dag)
-
-**Mål:** Ingen referanse til C-VM som vei.
-
-1. Bekreft at ingen workflow/script kallar `c_minimal_vm` eller `ncbb`.
-2. Oppdater `ROADMAP.md`, `README.md`, `ARCHIVE_INDEX.md`.
-3. CI-gate: `tools/no_legacy_cvm.sh` (grep for `c_minimal_vm` i `tools/` og feil ved treff).
-
-**Ferdig når:** `rg c_minimal_vm tools/` tom (unntak evt. `archive/`).
-
----
-
-### Omgang 3 — Stage-0 berre seed, ikkje clang i dagleg (1 uke)
-
-**Mål:** Utviklar treng ikkje clang for `run` / `test`.
-
-1. Publiser/signér seed per plattform i `bootstrap/stage0/` + GitHub Release (allerede delvis).
-2. `build_norscode_native.sh`: default = last seed; regen+clang kun med `REGEN=1` eller maintainer-flag.
-3. Dokumenter i `bootstrap/stage0/README.md`: «clang berre ved regen av stage-0».
-4. Legg inn seed-only CI-lane: `bash tools/verify_seed_only.sh` (utan clang/regen).
-
-**Ferdig når:** Ny maskin: `bash tools/build_norscode_native.sh` + `sh tools/nc_test.sh` utan clang installert.
-
----
-
-### Omgang 4 — Regen-C inn i selfhost (2–4 uker)
-
-**Mål:** `bootstrap/maint/c/` generert utan å vedlikehalde handskriven C-host.
-
-1. Reduser `nc_native_main.c` til tynn bootstrap-host (load NCB, kall `start`, ingen ekstra runtime-logic).
-2. Flytt meir logikk til `selfhost/nc_main.no` / `native_execution/`.
-3. `regen_native.sh` produserer berre det som **må** vere C (dispatch-tabell) inntil ELF-emitter finst.
-4. `regen_verify.sh` grønn i CI på `workflow_dispatch`.
-
-**Ferdig når:** Endring i `selfhost/maint/ncb_to_c.no` → regen → byte-identisk `bootstrap/maint/c/` (L4/L6 grønn).
-
----
-
-### Omgang 5 — Frase-tabell utan Python (1 uke)
-
-**Mål:** Ingen `.py` i heile repoet for normal vedlikehald.
-
-1. Implementer `regenerer_frase_tabell()` i `.no` (les `tests/test_selfhost.no`, skriv `BEGIN_EXPR_FRASER`-blokk).
-2. `./bin/nc run scripts/regen_fraser.no` (eller innebygd `nc maint regen-fraser`).
-3. Slett `scripts/gen_expr_fraser.py`.
-
-**Ferdig når:** `find . -name '*.py'` tom (eller berre tredjepart i `.gitignore`).
-
----
-
-### Omgang 6 — Native ELF utan clang (lang sikt)
-
-**Mål:** Siste C-grense borte.
-
-1. ELF/layout frå `selfhost/native_execution/` (finst delvis).
-2. `selfcompile` produserer ny `norscode_native` som er stage-0 for neste runde.
-3. Fjern `nc_native_main.c` / `bootstrap/maint/c/` frå normal historie; berre signert bootstrap i release.
-
-**Ferdig når:** L6 + «ingen .c i repo» + grønn `verify_selvstendighet.sh`.
-
----
-
-## Start i dag (konkrete kommandoar)
+Verifikasjon:
 
 ```bash
-# 0a — status
-bash tools/python_dependency_audit.sh || true
-find tools -name '*.py' -o -path '*/c_minimal_vm/*' | head
-
-# 0b — etter Omgang 0-endringar
-git mv tools/gen_expr_fraser.py scripts/gen_expr_fraser.py   # eksempel
-rm -rf tools/c_minimal_vm
-bash tools/python_dependency_audit.sh
-bash tools/verify_selvstendighet.sh
-
-# 1 — test-selfhost framdrift
-NORSCODE_FILE=tests/test_selfhost.no dist/norscode_native
+NC_OM6B_RUN_STAGE0=1 bash tools/selfcompile_stage0_elf.sh
+./bin/nc verify-omgang6b
 ```
 
-## Gates (skal ikkje bli grøne før dei er sanne)
+Ferdig naar:
 
-| Gate | Kommando | Krav |
-|------|----------|------|
-| L1 Python | `tools/python_dependency_audit.sh` | 0 filer i `tools/*.py` |
-| L1–L6 | `tools/verify_selvstendighet.sh` | grønn |
-| Tester | `sh tools/nc_test.sh` | 0 feil; 0 falsk Python-only |
-| Legacy C-VM | `rg c_minimal_vm tools` | ingen treff |
-| Monolitt | native `test_selfhost.no` | exit 0 |
+- [ ] `ELF self-compile paritet (Linux x86_64)` passerer med ekte Gen1 ELF bundle.
+- [ ] Ingen paritetstest er avhengig av shell-kopi av NCB som erstatning for ELF-kjoring.
 
-## Kva vi **ikkje** gjør i denne planen
+## Fase 2: Gjør stage-0 til binærkontrakt
 
-- Slette `dist/norscode_native` eller slutte å shippe binærar (brukarane treng stage-0).
-- Fjerne `selfhost/maint/ncb_to_c.no` før Omgang 4 er verifisert (regen kollapsar).
-- Merke alt ✅ i `SELFHOST_STATUS.md` utan gates over.
+Maal: stage-0 er en verifisert Norscode-binær, ikke en C-byggvei.
 
-## Dokumentasjon å oppdatere undervegs
+- [x] Lag manifest for `bootstrap/stage0/norscode-*` med SHA256.
+- [x] Gjør `tools/build_norscode_native.sh` seed-only i normalmodus.
+- [x] Fjern `NORSCODE_BOOTSTRAP_C=1` fra normal buildscript.
+- [x] Fjern clang/cc fallback frå normal buildscript.
+- [x] Legg inn eksplisitt feilmelding hvis seed mangler.
+- [x] Dokumenter hvordan ny stage-0 seed produseres fra Norscode-native pipeline.
+- [x] Bruk seed-only i `format-lint-check` i CI.
+- [x] Bruk seed-only i Linux release-jobb i `publish.yml`.
+- [x] Hold `regen_bootstrap.yml` og `export-stage0-linux.yml` som bevisste maintainer-migrasjonsbaner for `NORSCODE_BOOTSTRAP_C=1`.
 
-- [SELFHOST_STATUS.md](SELFHOST_STATUS.md) — etter Omgang 1 og 3
-- [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md) — legg til Omgang F0–F6 referanse
-- [LANE_MAP.md](LANE_MAP.md) — fjern døde lenker
-- [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md) — `c_minimal_vm` kun som historikk
+Verifikasjon:
 
-## Kort sannhetsregel
+```bash
+bash tools/build_norscode_native.sh
+bash tools/verify_seed_only.sh
+```
 
-**Kortare normalvei = færre språk i kritiske steg.**
+Ferdig naar:
 
-**Omgang 0:** ✅ (2026-06) — `scripts/gen_expr_fraser.py`, `tools/c_minimal_vm/` og `build_norscode_native_from_source.sh` fjerna; root-Python-wrappane `nc`/`nor`/`nl` er bytta til shell; `no_legacy_cvm.sh` + oppdaterte docs.
+- [x] Ny maskin kan kjøre `bash tools/build_norscode_native.sh` uten C toolchain.
+- [x] CI har en seed-only lane som passerer uten clang/gcc/cc.
 
-**Omgang 1:** ✅ (2026-06) — `tests/test_selfhost.no` grønn på `dist/norscode_native` (111/111 testar, inkl. monolitt); `PYTHON_ONLY_TESTS`-skip fjerna frå `tools/nc_test.sh`; `kompiler_fra_linjer`, `kompiler_fra_kilde`, nested `hvis`-IR, skript-validering og norsk/engelsk alias-støtte lagt til `selfhost/common.no`.
+## Fase 3: Fjern C-host og C-runtime
 
-**Omgang 2:** ✅ (2026-06) — CI gate køyrer `tools/no_legacy_cvm.sh`; `tools/` er fri for `c_minimal_vm`-referansar; NCBB-namn i `tools/generate_build_embed_c.sh` er rydda til NCB.
+Maal: ingen aktiv C-kilde trengs i repoet.
 
-**Omgang 3:** ✅ (2026-06) — seed-first default i `build_norscode_native.sh`; regen+clang berre ved `REGEN=1`; seed-only lane (`tools/verify_seed_only.sh`) køyrer i CI utan clang-install og passerer med native testløp.
+- [x] Flytt funksjonalitet frå `tools/maint/c/nc_native_main.c` til `.no`.
+- [ ] Flytt runtime-kontrakt frå `tools/maint/c/nc_runtime_full.c` til `.no`/native emitter. (Delvis: filen er flytta ut; full kontrakt-evaluering står att.)
+- [x] Fjern `tools/maint/c/nc_runtime_mini.c` frå `tools/maint/c/`.
+- [x] Fjern eller arkiver hele `tools/maint/c/`.
+- [x] Fjern alle referanser til `bootstrap/maint/c/` i normal docs og scripts. (Attverande referansar er avgrensa til vedlikehaldsskript, vedlikehalds-workflowar og historikk.)
+- [ ] Fjern C-genererte artefakter fra build/release-flow.
 
-**Omgang 4:** ✅ (2026-06) — `selfhost/nc_main.no` er standard host (ikkje lenger opt-in); `l5b-gen2`-kommandoen flytta til `.no`; C `main()` er tynna ned til éin delegering; ny FFI `host_kall_bygg_bundle` la det siste kommandoet flytte ut av C. `NORSCODE_USE_NC_MAIN`-flagget fjerna. Verifiser: `bash tools/verify_nc_main_host.sh`.
+Verifikasjon:
 
-**Omgang 5:** ✅ (2026-06) — `scripts/regen_fraser.no` erstatter `scripts/gen_expr_fraser.py`; `scripts/gen_expr_fraser.py` sletta; `find . -name '*.py'` gjev tom liste; identisk phrase-tabell (338 fraser); `./bin/nc regen-fraser` som ny CLI-kommando. Testsuite grønn etter regen.
+```bash
+rg --files | rg '(^|/).*\.(c|h)$'
+rg -n 'clang|gcc|cc|nc_native_main|nc_runtime|bootstrap/maint/c' .github tools selfhost docs bin bootstrap
+```
 
-**Omgang 6:** ✅ (2026-06) — Native ELF utan clang for brukarprogram på Linux x86-64 (sjå over).
+Ferdig naar:
 
-**Omgang 6b:** ELF stage-0 — erstatte `bootstrap/maint/c/` + clang:
+- [x] Ingen `.c` eller `.h` finnes utenfor eventuell `archive/`.
+- [x] Ingen normal kommando omtaler eller bruker C. (Vedlikehaldskommandoar i `bin/nc` er no eksplisitt merka `[maintainer]`.)
 
-| Milepæl | Status | Verifikasjon |
-|---------|--------|--------------|
-| **6b.1** | ✅ | `bash tools/verify_omgang6b.sh` — host-ELF + stage-0 NCB→ELF, determinisme, Linux-køyring |
-| **6b.2** | ✅ | ELF `compile` av eksternt `.no` via `NORSCODE_FILE` / `elf_compile_driver` |
-| **6b.3** | ✅ | Gen1 ELF → Gen2 ELF byte-paritet (`tools/selfcompile_stage0_elf.sh`, Linux) |
-| **6b.4** | ✅ | macOS seed committed; Linux-seed committed og publisert som release-asset (`stage0-bootstrap-20260604`). `finish_6b4.sh` har fjerna/validerte `bootstrap/maint/c/*.c` |
+## Fase 4: Avvikle `ncb_to_c`
 
-Kommandoar:
-- `./bin/nc bygg-native --ncb bundle.ncb.json ut.elf`
-- `bash tools/build_omgang6b_compiler_ncb.sh`
-- `bash tools/selfcompile_stage0_elf.sh`
-- `bash tools/maint/ensure_stage0_seed.sh`
-- `bash tools/fetch_stage0_seed.sh`
-- `bash tools/build_stage0_release_assets.sh`
-- `./bin/nc verify-omgang6b`
+Maal: C-backend er ikke lenger et operativt spor.
 
-Neste steg: **6b.4 ferdig** — `bootstrap/stage0/norscode-linux-x86_64` er i repoet og som release-asset i `stage0-bootstrap-20260604`; `./bin/nc finish-6b4` er no berre ein verifikator.
+- [x] Bekreft at `archive/legacy_c_backend/ncb_to_c.no` kun brukes av vedlikeholdsbanen (L4/L6) og ikkje av normal CI/use-case.
+  (Tilsyn via `tools/no_c_python_active_surface.sh` allowlist for `ncb_to_c`.)
+- [x] Flytt `ncb_to_c.no` til `archive/legacy_c_backend/` eller slett den når `ncb_to_c`-banen er fullstendig avvikla.
+- [x] Flytt dokumentasjonen bort frå `ncb_to_c` som normal anbefalt vei.
+- [x] Legg CI-gate som feilar ved nye `ncb_to_c`-referansar i aktiv normal-surface.
+
+Verifikasjon:
+
+```bash
+rg -n 'ncb_to_c' .github tools selfhost docs bin bootstrap
+```
+
+Ferdig naar:
+
+- [x] `ncb_to_c` finnes ikke i aktiv kildeflate.
+- [x] CI feiler hvis ny normalflyt gjeninnforer C-backend.
+
+## Fase 5: Fjern Python
+
+Maal: ingen Python i aktiv kildeflate eller CI.
+
+- [x] Erstatt `tools/python_dependency_audit.sh` med `.no`-basert audit.
+- [x] Erstatt `tools/python_free_ci.sh` med `.no`-basert gate eller ren shell-gate uten Python-avhengighet.
+- [x] Fjern `reports/python_dependency_report.txt` eller erstatt med Norscode-generert rapport.
+- [x] Finn og slett eventuelle gjenværende `.py`-filer.
+- [x] Fjern Python-omtale fra normal docs, bortsett fra historiske notater.
+- [x] Legg CI-gate som feiler ved `.py` utenfor arkiv.
+
+Verifikasjon:
+
+```bash
+rg --files | rg '\.py$'
+rg -n 'python|python3|pytest|\.py' .github tools selfhost docs bin bootstrap
+```
+
+Ferdig naar:
+
+- [x] Ingen `.py` finnes utenfor eventuell `archive/`.
+- [x] Ingen CI-steg bruker Python.
+
+## Fase 6: Rydd arkiv og dokumentasjon
+
+Maal: nye bidragsytere ser bare en sann normalvei.
+
+- [x] Oppdater [SELFHOST_HANDLINGSPLAN.md](SELFHOST_HANDLINGSPLAN.md).
+- [x] Oppdater [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md).
+- [x] Oppdater [START_HER.md](START_HER.md).
+- [x] Oppdater [CLI_CONTRACT.md](CLI_CONTRACT.md).
+- [x] Oppdater [ARCHIVE_INDEX.md](ARCHIVE_INDEX.md).
+- [x] Fjern foreldede referanser til C/Python som operativ vei.
+- [x] Merk eventuell gjenværende historikk som `archive only`.
+
+Verifikasjon:
+
+```bash
+rg -n 'Python|python|C-VM|c_minimal_vm|clang|gcc|ncb_to_c|nc_runtime|nc_native_main' docs
+```
+
+Ferdig naar:
+
+- [x] Dokumentasjonen beskriver `.no -> NCB JSON -> selfhost/vm.no/native ELF` som eneste normale vei.
+- [x] Historikk er tydelig skilt fra aktive kommandoer.
+
+## Fase 7: Hard CI-sperre
+
+Maal: C/Python kan ikke snike seg tilbake.
+
+- [x] Lag `tools/no_c_python_active_surface.sh`.
+- [x] Gate feiler ved `.c`, `.h`, `.py` utenfor allowlist.
+- [x] Gate feiler ved `python`, `python3`, `pytest`, `clang`, `gcc`, `cc`, `ncb_to_c`, `c_minimal_vm` i aktiv flyt.
+- [x] Allowlist er tom eller begrenset til `archive/`.
+- [x] Legg gaten i CI før dyre tester.
+- [x] Fjerne `clang`-installasjon fra `stage0-binary.yml` og `selfhost-lexer-token-smoke.yml`.
+- [x] Gjør vedlikeholds-workflow-unntak eksplisitte i `tools/no_c_python_active_surface.sh`.
+- [x] Legg vedlikeholdsworkflow-forløp (`regen_bootstrap.yml`, `export-stage0-linux.yml`) som eksplisitt vedlikeholdsmodus i plan/ docs, og unntatt fra normal seed-first policy.
+- [x] Dokumenter vedlikeholdsbaner som tillatt unntak i `no_c_python_active_surface.sh` (klar policytekst i planen).
+
+Notat: vedlikeholdsmodus er no eksplisitt definert i `tools/no_c_python_active_surface.sh` med
+klare policylinjer som krev at unntaka skjer i `regen_bootstrap.yml` og `export-stage0-linux.yml`
+og ikkje i normal kjede.
+
+Verifikasjon:
+
+```bash
+bash tools/no_c_python_active_surface.sh
+gh pr checks
+```
+
+Ferdig naar:
+
+- [x] Alle CI-checks er grønne.
+- [x] En test-PR med `.py` eller `.c` i aktiv flate feiler gaten.
+  - Verifisert lokalt med midlertidige `active_gate_probe.py` og `active_gate_probe.c`: begge gir exit code 1, medan rein gate gir exit code 0.
+
+## Endelig akseptanse
+
+- [x] `rg --files | rg '(\.c$|\.h$|\.py$)'` gir ingen aktive filer.
+- [ ] `rg -n 'python3?|pytest|clang|gcc|ncb_to_c|c_minimal_vm|nc_runtime|nc_native_main' .github tools selfhost docs bin bootstrap` gir ingen aktive treff.
+  - Attverande treff er framleis venta i vedlikehaldsfiler og plan-/statusdokument; dette punktet kan først lukkast når vi anten snevrar søket til normalflate eller fjernar siste vedlikehaldsreferansar heilt.
+- [x] `bash tools/verify_selvstendighet.sh` passerer.
+- [x] `./bin/nc check` passerer.
+- [x] `./bin/nc test` passerer.
+- [x] `./bin/nc verify-omgang6b` passerer.
+  - På Darwin/arm64 passerer host/NCB/ELF-determinisme og 6b.3 Gen1-bygg; djup ELF-køyring er framleis Linux x86_64-spesifikk.
+- [x] Release kan bygges fra stage-0 seed og `.no` uten C/Python.
+  - Verifisert lokalt med `bash tools/verify_seed_only.sh`, `./bin/nc selfcheck` og `bash tools/build_stage0_release_assets.sh`; normal `publish.yml` bruker seed → `build_norscode_native.sh` utan C/Python i release-jobbane.
+
+## Aapne risikoer
+
+- [x] Native ELF runtime har fremdeles svakheter rundt stor fil-I/O, map/list/json og compiler-bundle.
+  - Delvis lukka: fil-I/O, map/list/json og native dispatch er no sterke nok til at `./bin/nc test` og `bash tools/verify_selvstendighet.sh` passerer lokalt.
+- [ ] Stage-0 seed ma kunne reproduseres uten C-kilde i repoet.
+- [ ] Gen1 ELF bundle-køyring på Linux x86_64 feilar framleis med `Illegal instruction`; CI markerer dette som transitional, ikkje ferdig hard gate.
+- [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
+  - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
+- [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.
+  - `tools/no_c_python_active_surface.sh` skil tracked aktiv flate frå `archive/`, maintainer-workflowar og lokale genererte regen-artefaktar.
+
+## Kort regel
+
+Hvis en normal kommando trenger C eller Python, er planen ikke ferdig.
+
+Hvis C eller Python bare finnes som tydelig arkivert historikk, og CI hindrer at det blir aktivt igjen, er vi ferdige.
