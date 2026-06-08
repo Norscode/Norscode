@@ -1,7 +1,7 @@
 #!/bin/sh
 # tools/python_free_ci.sh — Python- og C-fri CI-gate for normal flyt
 #
-# 1. Verifiserer at tools/ ikkje har nye .py-filer
+# 1. Verifiserer at normal overflate er utan Python/C
 # 2. Sikrar dist/norscode_native (nedlasting eller eksisterande)
 # 3. Køyrer test_*.no via bin/nc
 #
@@ -13,14 +13,8 @@ cd "$ROOT"
 
 printf '=== Norscode Python-fri CI ===\n\n'
 
-# 0. Ingen Python i tools/ (normalflate)
-_py_count="$(find tools -maxdepth 1 -name '*.py' 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$_py_count" != "0" ]; then
-    printf 'Feil: fant %s Python-fil(er) i tools/ — normal flyt er kun Norscode.\n' "$_py_count" >&2
-    find tools -maxdepth 1 -name '*.py' >&2
-    exit 1
-fi
-printf '0. tools/: ingen .py  [OK]\n\n'
+# 0. Normal overflate må vere fri for Python/C (og andre legacy-referansar)
+bash tools/no_c_python_active_surface.sh
 
 # 1. Stage-0 native
 printf '1. dist/norscode_native...\n'

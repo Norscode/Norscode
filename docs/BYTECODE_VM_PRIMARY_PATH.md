@@ -24,8 +24,8 @@ Program output
 
 | Phase | Status | Path |
 |-------|--------|------|
-| **Fase 1–2** | Historical | `ncb_to_c.no` → C code → clang (only for bootstrap) |
-| **Fase 3 (now)** | Deprecated | Moved to tools/maint/ (maintainer-only for L6 regen) |
+| **Fase 1–2** | Historical / maintenance | `archive/legacy_c_backend/ncb_to_c.no` → C code → clang (vedlikehald/sjekkbanar) |
+| **Fase 3 (now)** | Deprecation (maintainer lane) | Vedlikehaldsregen går via `tools/maint/regen_native.sh` → `bootstrap/maint/c/` og er ikkje del av normal bruk |
 | **Fase 6+ (planned)** | Replaced | Native ELF emitter in `.no` (no C needed ever) |
 
 ## Normal User Commands
@@ -42,13 +42,13 @@ All of these work **without any C toolchain**:
 
 ## What Requires C (Developer-only)
 
-Only maintenance tasks in `tools/maint/` need C toolchain:
+Only explicit maintenance tasks in `tools/maint/` need C toolchain:
 
 ```bash
-# Bootstrap L6 only (regenerate stage-0 seed):
+# Bootstrap L6 only (maintainer lane; regenerate stage-0 bridge when needed):
 NORSCODE_BOOTSTRAP_C=1 bash tools/build_norscode_native.sh
 
-# Maintainer: regen bootstrap/maint/c/ from NCB
+# Maintainer: regen bootstrap/maint/c/ from Norscode
 bash tools/maint/regen_native.sh
 ```
 

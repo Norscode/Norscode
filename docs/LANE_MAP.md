@@ -13,7 +13,7 @@ Dette er veien de fleste bør bruke først:
 - [`docs/START_HER.md`](START_HER.md)
 - [`docs/CLI_CONTRACT.md`](CLI_CONTRACT.md)
 - [`./bin/nc`](../bin/nc)
-- [`dist/norscode`](../dist/norscode)
+- [`dist/norscode_native`](../dist/norscode_native)
 
 ## Eksplisitt bootstrap og legacy
 

@@ -8,7 +8,7 @@ Målet er å gjøre det helt tydelig hva som fortsatt eies av historisk vei, hva
 - [x] historisk vei-flaten er kartlagt
 - [x] Selfhost-ekvivalenter er identifisert
 - [x] eldre bootstrap-/orchestration-ansvaret er delt inn i tydelige grupper
-- [x] Normal CLI-vei er flyttet til `norcode/cli.py`; historisk vei-flaten er nå eksplisitt bootstrap-kompatibilitet
+- [x] Normal CLI-vei er flyttet til `./bin/nc`; historisk vei-flaten er nå eksplisitt bootstrap-kompatibilitet
 - [x] Minimumskjernen for selfhost-v1 er definert
 - [x] Denne oversikten kan brukes som inngang for senere omganger
 
@@ -119,7 +119,7 @@ Den gjenværende eldre bootstrapen er fortsatt et bootstrap- og orchestration-se
 
 ### 5. Hva dette betyr
 
-- `norcode/cli.py` er den normale modulære veien for CLI-dispatch.
+- `./bin/nc` er den normale veien for CLI-dispatch.
 - Den gjenværende eldre bootstrapen er fortsatt ikke liten nok til å være “bare oppstart” i full forstand.
 - Frontend- og HTML-delen er allerede ute av bootstrap som hovedmotor.
 - Resten av selvstendighetsarbeidet ligger primært i compiler/runtime og bootstrap-verktøy utenfor frontend.

@@ -2,6 +2,7 @@
 
 Verifikasjonen køyrer no som del av **`.github/workflows/ci.yml`** (Native macOS/Linux, bootstrap-self, ELF self-compile paritet, lint).
 Full L1–L6-gate køyrer berre på push til `main` via **`.github/workflows/selvstendighet.yml`**.
+Linux ELF self-compile parity blir køyrd som hard gate med `NC_OM6B_RUN_STAGE0=1` i begge workflowane.
 
 ## Goal
 
@@ -15,10 +16,10 @@ on every push and pull request.
 The bootstrap verification workflow performs:
 
 1. Repository cleanup
-2. historisk vei dependency audit
-3. Bootstrap verification
+2. active-surface / policy audit
+3. Bootstrap verification on native-first path
 4. Compiler equivalence verification
-5. ELF self-compile parity verification
+5. ELF self-compile parity verification on Linux x86_64
 
 ---
 
@@ -41,6 +42,7 @@ CI should fail if:
 - compiler equivalence fails
 - compiler outputs differ
 - ELF self-compile parity fails
+- normal workflow drifts tilbake mot hidden fallback or maintenance-only lanes
 
 ---
 

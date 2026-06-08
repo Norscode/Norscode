@@ -50,12 +50,35 @@ fi
 
 printf '[2/4] Gen2 NCB frå Gen1 NCB (paritet)...\n'
 rm -f "$GEN2_NCB"
-cp "$GEN1_NCB" "$GEN2_NCB"
+
+printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
+# Gi Gen1 ELF absolutte signal om kva entry som skal eksporterast,
+# så vi slepp host-copiert NCB + patching.
+GEN2_ENTRY="selfhost.elf_compile_driver.start"
+# Kjør Gen1-ELFen i eit reinvask miljø for å unngå uventa
+# testmiljø-variablar (som NORSCODE_BUNDLE_ARGS frå utviklar-maskina)
+# som kan setje oss inn i feil modus.
+GEN1_ELF_RUN=(
+    env -i
+    "PATH=$PATH"
+    "NORSCODE_CMD=run"
+    "NORSCODE_BUNDLE_ARGS=$BUNDLE_ARGS_STR"
+    "NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB"
+    "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
+    "$GEN1_ELF"
+)
+if ! "${GEN1_ELF_RUN[@]}"; then
+    _gen2_rc=$?
+    printf '  [FEIL] Gen1 ELF bundel-køyring feila med exit %d\n' "$_gen2_rc" >&2
+    printf '  [FEIL] Start med lågare køyring for detaljert feil: %s\n' "$_gen2_rc" >&2
+    exit 1
+fi
+
 if [ ! -f "$GEN2_NCB" ]; then
     printf '  [FEIL] Gen2 NCB ikkje skrive\n' >&2
     exit 1
 fi
-bash "$ROOT/tools/patch_ncb_entry.sh" "$GEN2_NCB" "selfhost.elf_compile_driver.start"
+
 N1="$(wc -c < "$GEN1_NCB" | tr -d ' ')"
 N2="$(wc -c < "$GEN2_NCB" | tr -d ' ')"
 printf '  [OK] Gen2 NCB %s bytes (Gen1 NCB %s bytes)\n' "$N2" "$N1"
@@ -65,7 +88,6 @@ else
     printf '  [MERK] NCB differ — sjekkar ELF-paritet likevel\n\n'
 fi
 
-printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
 bash "$ROOT/tools/ncb_to_elf.sh" "$GEN2_NCB" "$GEN2_ELF"
 B2="$(wc -c < "$GEN2_ELF" | tr -d ' ')"
 printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"

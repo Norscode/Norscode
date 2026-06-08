@@ -34,7 +34,7 @@ timeline
 | Nivå | Status | Verktøy |
 |------|--------|---------|
 | L1–L3 | ✅ | `verify_selvstendighet.sh`, `bootstrap-self` |
-| L4–L6 | ✅ | `regen_native.sh`, `verify_l6.sh`, seed → regen → clang |
+| L4–L6 | ✅ | `regen_native.sh`, `verify_l6.sh`, seed → regen → clang i eksplisitt maintainer-lane |
 | L5 / L5b | ✅ | `selfcompile_l5.sh`, `selfcompile_l5b.sh` |
 
 Detaljar: [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md). Legacy C-VM: [archive/c_minimal_vm/README.md](../archive/c_minimal_vm/README.md).
@@ -45,7 +45,7 @@ Detaljar: [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md). Legacy C-VM: [archiv
 |---|---|---|
 | CLI og binærflyt | ✅ | `dist/norscode_native` + `bin/nc` er normal vei. `bin/bootstrap` er bevisst bootstrap-flate (unntak). |
 | Parser-paritet | ✅ | `tests/test_parser_precedence_matrix.no` kjører på native; øvrig parser-dekning via `test_selfhost_*` og CI. |
-| IR-disasm | ✅ | `selfhost/common.no` + lazy-load i `tools/maint/c/nc_native_main.c`; implikasjon følger [IR_CONTRACT.md](IR_CONTRACT.md) (`SWAP NOT SWAP OR`). |
+| IR-disasm | ✅ | `selfhost/common.no`; historisk host-kopling ligg berre i `archive/legacy_c_backend/`. Implikasjon følger [IR_CONTRACT.md](IR_CONTRACT.md) (`SWAP NOT SWAP OR`). |
 | Uttrykksparsing | ✅ | `tokeniser_uttrykk`, norske operatorar/fraser (`scripts/regen_fraser.no`), `->` / `=>` / `<-`, implikasjonsalias. |
 | IR fra kilde | ✅ | `disasm_fra_kilde` / `*_strict`, `kompiler_fra_tokens` / `kompiler_fra_kilde_strict`. |
 | Testsystem | ✅ | `tools/nc_test.sh`: 111/111 native (øvrige hopp er server/async). `test_selfhost.no` (monolitt ~4000 linjer) passerer native utan skip. |
@@ -60,8 +60,8 @@ Enkelte `.nlir`-cases kan fortsatt mangle full linjeparser i den store compiler-
 
 ## Prioritet nå
 
-1. Omgang 4: reduser C-host til tynn FFI og flytt meir logikk til `.no`.
-2. Hald regen-C til minimum (dispatch + nødvendige shim) fram til ELF-emitter i `.no`.
+1. Hald Linux x86_64 ELF self-compile-paritet grøn i GitHub CI.
+2. Hald regen-C til minimum i eksplisitt maintainer-lane fram til ELF-emitter i `.no`.
 3. Fjern gjenværende snapshot-orakler der selfhost-output er stabil.
 4. Hold `ir-disasm --strict` og CI på same kontrakt som [IR_CONTRACT.md](IR_CONTRACT.md).
 
@@ -76,7 +76,7 @@ Enkelte `.nlir`-cases kan fortsatt mangle full linjeparser i den store compiler-
 
 - Nye compiler-features skal ha selfhost-sjekk eller en eksplisitt selfhost-plan.
 - Historiske referanser skal merkes som arkiv eller legacy hvis de ikke har en selfhost-ekvivalent.
-- `bin/bootstrap` er en eksplisitt bootstrap-flate; normal bruk går via `dist/norscode` og `bin/nc`.
+- `bin/bootstrap` er en eksplisitt bootstrap-flate; normal bruk går via `dist/norscode_native` og `bin/nc`.
 - CI-feil skal ikke løses ved å senke krav uten dokumentert grunn.
 - Målet er færre historiske avhengigheter for hver fase.
 

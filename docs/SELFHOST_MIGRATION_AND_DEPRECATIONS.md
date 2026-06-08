@@ -10,6 +10,10 @@ This document tracks what was **removed**, **deprecated**, and **why** during se
 
 ### ❌ Python-based compilation pipeline
 
+**Historical note:**
+
+This section exists only to explain what was removed. It is not part of the normal workflow.
+
 **What was removed:**
 - `tools/main.py` (Python entry point)
 - `tools/compile.py` (Python compiler)
@@ -22,7 +26,7 @@ This document tracks what was **removed**, **deprecated**, and **why** during se
 
 **Migration:**
 ```bash
-# Old (removed):
+# Historical (removed):
 python3 tools/main.py run app.no
 
 # New:
@@ -62,12 +66,16 @@ python3 tools/main.py run app.no
 - Each platform needs seed binary
 - Generated via `tools/maint/regen_native.sh` (no Python)
 
-### ✅ `bootstrap/maint/c/` C generation
+### ✅ `bootstrap/maint/c/` C generation (maintainer-only)
 
 **Why kept:**
-- Bridge between NCB JSON and native ELF
-- Stage-0 verification (L6 level)
+- Vedlikehaldsbro mellom NCB JSON og native ELF
+- Stage-0 verification (L6) i vedlikehaldspipe (`NORSCODE_BOOTSTRAP_C=1` / explicit rebuild)
 - Will be replaced by ELF emitter in `.no` (Fase 6+)
+
+**Boundary:**
+- Dette er ikkje normal CLI-, CI- eller release-veg
+- Normal flyt går via `bootstrap/stage0/`, `dist/norscode_native`, `bin/nc` og native/selfhost-verifikasjon
 
 ### ✅ `archive/` historical code
 
@@ -91,7 +99,7 @@ python3 tools/main.py run app.no
 
 ## For Contributors: Significant Changes
 
-**No longer do this:**
+**No longer do this (historical examples):**
 ```bash
 python3 tools/main.py run app.no              # ❌ Removed
 python3 tools/compile.py app.no               # ❌ Removed

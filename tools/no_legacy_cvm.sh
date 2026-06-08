@@ -17,9 +17,15 @@ fi
 _grep_tools() {
     local pattern="$1"
     if command -v rg >/dev/null 2>&1; then
-        rg -l "$pattern" "$ROOT/tools" --glob '!no_legacy_cvm.sh' 2>/dev/null || true
+        rg -l "$pattern" "$ROOT/tools" \
+            --glob '!no_legacy_cvm.sh' \
+            --glob '!no_c_python_active_surface.sh' \
+            2>/dev/null || true
     else
-        grep -rl "$pattern" "$ROOT/tools" 2>/dev/null | grep -v 'no_legacy_cvm\.sh$' || true
+        grep -rl "$pattern" "$ROOT/tools" 2>/dev/null \
+            | grep -v 'no_legacy_cvm\.sh$' \
+            | grep -v 'no_c_python_active_surface\.sh$' \
+            || true
     fi
 }
 

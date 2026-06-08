@@ -15,6 +15,20 @@ CI og `./bin/nc` trenger én ferdig `norscode_native` per plattform. Normal rekk
 | Linux x86_64 | `norscode-linux-x86_64` |
 | Linux arm64 | `norscode-linux-arm64` |
 
+## Kontrollpanel
+
+`SHA256SUMS` inneheld SHA256-samandraging for stage-0-fila i denne mappa.
+
+```sh
+shasum -a 256 -c SHA256SUMS
+```
+
+Oppdater manifestet med:
+
+```sh
+bash tools/update_stage0_manifest.sh
+```
+
 ## Legg inn binærer (første gang / når CI er rød)
 
 ```sh
@@ -38,6 +52,17 @@ bash tools/maint/finish_6b4.sh   # git rm bootstrap/maint/c/*.c
 ```
 
 **Standard:** `tools/build_norscode_native.sh` brukar seed herifrå (eller release) og krev ikkje clang.
+
+## Kva som er produksjonsløpet for ny seed
+
+Ny `bootstrap/stage0/norscode-<plattform>` produseres frå same normale pipeline som bygg `dist/norscode_native`:
+
+1. `./bin/nc`/`dist/norscode_native` må vere tilgjengeleg.
+2. `tools/build_norscode_native.sh` byggjer/oppdaterer `dist/norscode_native` frå seed.
+3. `publish.yml` (Linux/OS X byggesteg) kopierer `dist/norscode_native` til plattformartefakt.
+4. Ved vedlikehald kan ein også bruke `bash tools/maint/migrate_bootstrap_c_to_stage0.sh` i `export-stage0-linux.yml` for éin-gong migrering til `bootstrap/stage0/`.
+
+Når ny seed er verifisert, legg vi berre inn fila i git og køyrer evt. `bash tools/update_stage0_manifest.sh`.
 
 **Maintainer / regen:** `REGEN=1 bash tools/build_norscode_native.sh` køyrer
 `tools/maint/regen_native.sh` for å lage `bootstrap/maint/c/`, og kompilerer med clang.

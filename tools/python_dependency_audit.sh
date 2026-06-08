@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/python_dependency_audit.sh — rapport + gate for Python i normal flate
+# tools/python_dependency_audit.sh — tynn launcher for Norscode-basert Python-audit
 
 set -euo pipefail
 
@@ -10,29 +10,56 @@ OUTPUT_DIR="reports"
 OUTPUT_FILE="$OUTPUT_DIR/python_dependency_report.txt"
 mkdir -p "$OUTPUT_DIR"
 
-TOOLS_PY="$(find tools -maxdepth 1 -name '*.py' 2>/dev/null | sort || true)"
-TOOLS_PY_COUNT="$(printf '%s\n' "$TOOLS_PY" | sed '/^$/d' | wc -l | tr -d ' ')"
+platform_name() {
+    local os arch
+    os="$(uname -s)"
+    arch="$(uname -m)"
+    case "$os" in
+        Darwin)
+            case "$arch" in
+                arm64) printf 'macos-arm64' ;;
+                x86_64) printf 'macos-x86_64' ;;
+                *) return 1 ;;
+            esac
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64) printf 'linux-x86_64' ;;
+                aarch64|arm64) printf 'linux-arm64' ;;
+                *) return 1 ;;
+            esac
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
-{
-    echo "=== Norscode Python Dependency Report ==="
-    echo ""
-    echo "Python files in tools/ (skal vere 0 i normal flyt): $TOOLS_PY_COUNT"
-    if [ "$TOOLS_PY_COUNT" != "0" ]; then
-        echo "$TOOLS_PY"
+resolve_native() {
+    local platform stage0
+    if platform="$(platform_name 2>/dev/null)"; then
+        stage0="$ROOT/bootstrap/stage0/norscode-$platform"
+        if [ -x "$stage0" ]; then
+            printf '%s\n' "$stage0"
+            return 0
+        fi
     fi
-    echo ""
-    echo "All .py in repo (ekskl. .git):"
-    find . -path './.git' -prune -o -name '*.py' -print | sort
-    echo ""
-    echo "Count:"
-    find . -path './.git' -prune -o -name '*.py' -print | wc -l
-} > "$OUTPUT_FILE"
+    if [ -x "$ROOT/dist/norscode_native" ]; then
+        printf '%s\n' "$ROOT/dist/norscode_native"
+        return 0
+    fi
+    printf 'Feil: fann verken stage-0-seed eller dist/norscode_native for Python-audit\n' >&2
+    return 1
+}
 
-echo "Dependency audit written to: $OUTPUT_FILE"
+TOOLS_PY="$(rg --files tools 2>/dev/null | rg '\.py$' || true)"
+REPO_PY="$(rg --files -g '*.py' 2>/dev/null || true)"
+NC_NATIVE="$(resolve_native)"
 
-if [ "$TOOLS_PY_COUNT" != "0" ]; then
-    printf 'Feil: Python i tools/ er ikkje tillatt i normal flyt. Sjå %s\n' "$OUTPUT_FILE" >&2
-    exit 1
-fi
-
-printf 'OK: ingen Python i tools/\n'
+env \
+    NORSCODE_CMD=run \
+    NORSCODE_FILE="$ROOT/scripts/python_dependency_audit.no" \
+    NC_PY_AUDIT_TOOLS="$TOOLS_PY" \
+    NC_PY_AUDIT_REPO="$REPO_PY" \
+    NC_PY_AUDIT_OUTPUT="$OUTPUT_FILE" \
+    "$NC_NATIVE"

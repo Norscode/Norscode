@@ -10,12 +10,12 @@ Målet er at **normal utvikling, CI og release** ikkje treng Python, og at **sta
 | **L1** | Ingen Python i `tools/`, CI eller CLI | ✅ |
 | **L2** | `./bin/nc run/test/compile` via `norscode_native` (NORSCODE_CMD) | ✅ |
 | **L3** | Selfhost-gate + bootstrap-self (steg A–C) i CI | ✅ |
-| **L4** | Regenerer `bootstrap/maint/c/` frå `.no` utan Python (`tools/maint/regen_native.sh`) | ✅ verktøy |
+| **L4** | Regenerer `bootstrap/maint/c/` frå `.no` utan Python (`tools/maint/regen_native.sh`) | ✅ verktøy (vedlikehald) |
 | **L5** | Kompilator-bundle deterministisk (Gen1 == Gen2, `tools/selfcompile_l5.sh`) | ✅ |
 | **L5b** | Gen1-NCB `bygg_bundle`-bytekode produserer identisk Gen2 (`tools/selfcompile_l5b.sh`) | ✅ |
 | **L6** | Ingen føregenerert `bootstrap/maint/c/` i repo (seed → regen → clang) | ✅ |
 
-**Stage-0:** Seed frå `bootstrap/stage0/` eller GitHub Release → `tools/maint/regen_native.sh` → `bootstrap/maint/c/` → clang. `tools/maint/c/nc_native_main.c` / `host_exec_ncb_json` er bootstrap-host, ikkje normal utviklingskjede.
+**Stage-0:** Seed frå `bootstrap/stage0/` eller GitHub Release → `tools/maint/regen_native.sh` → `bootstrap/maint/c/` → clang. Dette er berre maintainer-/bootstrap-lane, ikkje normal utviklingskjede. Historisk C-host ligg i `archive/legacy_c_backend/`, ikkje i aktiv normalflate.
 
 ## Kjede i dag
 
@@ -23,13 +23,15 @@ Målet er at **normal utvikling, CI og release** ikkje treng Python, og at **sta
 seed (stage0 / release)  →  tools/maint/regen_native.sh  →  bootstrap/maint/c/*.c
         ↑                                              ↓
         └──────── dist/norscode_native  ←──────── clang
-.no → bundle → kompiler.ncb.json → ncb_to_c + gen_dispatch   (L4, utan Python)
+.no → bundle → kompiler.ncb.json → archive/legacy_c_backend/ncb_to_c.no + gen_dispatch   (L4/vedlikehald, utan Python)
 ```
 
 ```text
 Dagleg bruk:
   program.no  →  nc (native)  →  NCB JSON  →  VM / native køring
 ```
+
+Alt som går via `bootstrap/maint/c/`, `archive/legacy_c_backend/` eller clang er vedlikehald eller historikk, ikkje normal brukarveg.
 
 ## Omganger
 
@@ -38,7 +40,7 @@ Dagleg bruk:
 **Leveranser**
 
 - `tools/verify_selvstendighet.sh` — éin kommando for gate + bootstrap-self + test
-- `tools/maint/regen_native.sh` — regenerer `bootstrap/maint/c/` frå seed (utan Python)
+- `tools/maint/regen_native.sh` — regenerer `bootstrap/maint/c/` frå seed (utan Python, maintainer-only)
 - CI: `./bin/nc bootstrap-self` på macOS og Linux
 - CI: `bash tools/verify_selvstendighet.sh` på Ubuntu
 
@@ -54,7 +56,7 @@ Dagleg bruk:
 
 **Ferdig når:** Maintainer kan oppdatere stage-0 med éin kommando etter kompilator-endring.
 
-**Status:** ✅ verktøy, CI og grønn `regen_verify` (krev at `bootstrap/` er regenert med same native som CI byggjer frå `bootstrap/maint/c/`).
+**Status:** ✅ verktøy, CI og grønn `regen_verify` i vedlikehaldsløypa (krev at `bootstrap/` er regenert med same native som CI byggjer frå `bootstrap/maint/c/`).
 
 ### Omgang C — Sjølvkompilering (L5)
 
@@ -85,7 +87,7 @@ Dagleg bruk:
 **Leveranser**
 
 - `archive/c_minimal_vm/README.md` — historisk C-VM (fysisk fjerna frå `tools/` i Omgang 0)
-- `selfhost/maint/ncb_to_c.no` / `selfhost/maint/gen_dispatch.no` — berre for regen, ikkje brukar-CLI
+- `archive/legacy_c_backend/ncb_to_c.no` / `selfhost/maint/gen_dispatch.no` — berre for regen, ikkje brukar-CLI
 - README, SELFHOST_STATUS, ARCHIVE_INDEX oppdatert
 
 **Status:** ✅ dokumentert; `tools/c_minimal_vm/` er fjerna; gate `tools/no_legacy_cvm.sh`.
@@ -97,7 +99,7 @@ bash tools/build_norscode_native.sh      # stage-0 (L6)
 bash tools/verify_selvstendighet.sh       # L1–L6 + native testløp
 bash tools/selfcompile_l5.sh             # L5 byte-paritet
 ./bin/nc selfcompile-l5b                 # L5b Gen1-bytekode → Gen2
-bash tools/maint/regen_native.sh        # generer bootstrap/maint/c/ (krev seed)
+bash tools/maint/regen_native.sh        # maintainer: generer bootstrap/maint/c/ (krev seed)
 bash tools/maint/regen_verify.sh        # deterministisk regen (to kjøringar)
 bash tools/maint/verify_l6.sh           # L6-gate (git + regen)
 ./bin/nc selfhost-bootstrap-gate
