@@ -85,27 +85,13 @@ is_server_test() {
         test_file_object_storage.no|test_http_helpers.no|\
         test_ir_debug.no|\
         test_nc_main_both.no|\
-        test_ny_liste.no|\
-        test_assert_text.no|\
-        test_comprehension.no|\
-        test_fil.no|\
         test_frontend.no|\
         test_html.no|\
         test_html_components.no|test_html_components_v2.no|\
         test_io_error.no|\
-        test_ir_contract.no|\
-        test_json_typed.no|\
-        test_list_std.no|\
-        test_map_std.no|\
+        test_ir_debug.no|\
         test_native_ui.no|test_native_ui_errors.no|\
-        test_path_env.no|\
-        test_script_mini.no|test_script_subset.no|\
         test_secrets.no|\
-        test_selfhost_invalid_boolean_syntax.no|\
-        test_storage.no|test_storage_error.no|\
-        test_text.no|test_text_helpers.no|\
-        test_trace.no|\
-        test_try_catch.no|\
         test_web_api_versioning.no|\
         test_web_auth.no|\
         test_csrf.no|\

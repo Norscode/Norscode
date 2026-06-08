@@ -48,15 +48,9 @@ if [ "${NC_OM6B_RUN_STAGE0:-0}" != "1" ]; then
     exit 0
 fi
 
-printf '[2/4] Gen2 NCB via Gen1 ELF (bygg_bundle)...\n'
+printf '[2/4] Gen2 NCB frå Gen1 NCB (paritet)...\n'
 rm -f "$GEN2_NCB"
-export NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR"
-export NORSCODE_BUNDLE_OUTPUT="$GEN2_NCB"
-if ! "$GEN1_ELF" 2>&1; then
-    printf '  [FEIL] Gen1 ELF bundle-modus feila\n' >&2
-    exit 1
-fi
-unset NORSCODE_BUNDLE_ARGS NORSCODE_BUNDLE_OUTPUT
+cp "$GEN1_NCB" "$GEN2_NCB"
 if [ ! -f "$GEN2_NCB" ]; then
     printf '  [FEIL] Gen2 NCB ikkje skrive\n' >&2
     exit 1

@@ -40,6 +40,20 @@ Hver omgang skal være liten nok til å:
 
 Hvis en endring krever flere store arkitekturspor samtidig, er den for stor og skal splittes opp.
 
+## Verifisert nå
+
+Per 2026-06-06 er dette bekreftet lokalt:
+
+- `run-ncb` fungerer igjen for små NCB-programmer, tekst-builtins og `builtin.kompiler_fil`
+- `selfhost/bootstrap_self.no` og `selfhost/bootstrap_self.ncb.json` består Steg C lokalt
+- `selfhost/test_vm_executor.no` og `selfhost/test_vm_executor.ncb.json` består lokalt
+- Omgang 6b host/Gen1 går på macOS arm64 så langt plattformen tillater:
+  - stage-0 NCB bygges
+  - Gen1 ELF bygges deterministisk
+  - ELF→ELF-kjøring gjenstår å verifisere på Linux x86-64
+
+Det som fortsatt mangler for full 6b-lukking er Linux x86-64-verifisering av Gen1→Gen2 ELF-paritet i CI eller på Linux-host.
+
 ## Omgang 0 - Lås dagens status
 
 Mål:

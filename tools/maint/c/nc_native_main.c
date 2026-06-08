@@ -194,6 +194,52 @@ static NcVal *nc_call_sh_api(const char *cn, NcVal **args, int nargs) {
     }
     return nc_exec_call(g_sh_common_fns, full, args, nargs, 0);
 }
+
+/* Lazy-load selfhost/ir_contract.no for ir.* / selfhost.ir_contract.* */
+static NcVal *g_sh_ir_contract_fns = NULL;
+
+static void nc_ensure_sh_ir_contract(void) {
+    if (g_sh_ir_contract_fns) return;
+    NcVal *ncb = NULL;
+    NcVal *ncb_file = nc_builtin_fil_les(nc_str("bootstrap/precompiled/ir_contract.ncb.json"));
+    if (ncb_file && ncb_file->type == NC_STR) {
+        ncb = nc_builtin_json_parse_str(ncb_file);
+    }
+    if (!ncb || ncb->type != NC_MAP) {
+        NcVal *ncb_json = nc_native_kompiler("selfhost/ir_contract.no", "selfhost.ir_contract");
+        if (!ncb_json || ncb_json->type != NC_STR) {
+            nc_throw("Kunne ikkje laste selfhost/ir_contract.no");
+            return;
+        }
+        ncb = nc_builtin_json_parse_str(ncb_json);
+    }
+    NcVal *fns = nc_index_get(ncb, nc_str("functions"));
+    if (!fns || fns->type != NC_MAP) {
+        nc_throw("selfhost/ir_contract.no manglar functions");
+        return;
+    }
+    g_sh_ir_contract_fns = fns;
+}
+
+static int nc_is_ir_contract_api(const char *cn) {
+    if (!strncmp(cn, "ir.", 3)) return 1;
+    if (!strncmp(cn, "selfhost.ir_contract.", 21)) return 1;
+    return 0;
+}
+
+static NcVal *nc_call_ir_contract_api(const char *cn, NcVal **args, int nargs) {
+    nc_ensure_sh_ir_contract();
+    const char *short_fn = strrchr(cn, '.');
+    short_fn = short_fn ? short_fn + 1 : cn;
+    char full[160];
+    snprintf(full, sizeof(full), "selfhost.ir_contract.%s", short_fn);
+    if (!g_sh_ir_contract_fns ||
+        (!nc_exec_find_fn(g_sh_ir_contract_fns, full) && !nc_exec_find_fn(g_sh_ir_contract_fns, short_fn))) {
+        nc_panic("Ukjent ir_contract API: %s", cn);
+        return nc_nil();
+    }
+    return nc_exec_call(g_sh_ir_contract_fns, full, args, nargs, 0);
+}
 static NcVal *nc_stub_t_hilsen(NcVal *navn) { char *n=nc_to_str_raw(navn); char r[256]; snprintf(r,sizeof(r),"Hei %s",n); free(n); return nc_str(r); }
 static NcVal *nc_stub_t_starter_med(NcVal *s, NcVal *p) { return nc_builtin_starts_with(s, p); }
 static NcVal *nc_stub_assert_slutter_med(NcVal *s, NcVal *p) {
@@ -481,12 +527,31 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"heltall")||!strcmp(cn,"heltall_fra_tekst")) fn_r=nc_builtin_heltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"tekst_fra_heltall"))fn_r=nc_builtin_tekst_fra_heltall(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"tekst")||!strcmp(cn,"til_tekst"))     fn_r=nc_to_str(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"t.hilsen")) {
+                char *s = nc_to_str_raw(narg>0 ? cargs[0] : nc_nil());
+                size_t need = strlen("Hei ") + strlen(s) + 1;
+                char *msg = malloc(need);
+                snprintf(msg, need, "Hei %s", s);
+                fn_r = nc_str(msg);
+                free(msg);
+                free(s);
+            }
+            else if (!strcmp(cn,"t.rop")) {
+                char *s = nc_to_str_raw(narg>0 ? cargs[0] : nc_nil());
+                size_t need = strlen(s) + 2;
+                char *msg = malloc(need);
+                snprintf(msg, need, "%s!", s);
+                fn_r = nc_str(msg);
+                free(msg);
+                free(s);
+            }
             else if (!strcmp(cn,"finnes_nøkkel")||!strcmp(cn,"har_nokkel")) fn_r=nc_builtin_finnes_nokkel(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"nøkler"))           fn_r=nc_builtin_nokler(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"verdier"))          fn_r=nc_builtin_verdier(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fjern_nokkel"))     { if(narg>=2) nc_builtin_fjern_nokkel(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"json_stringify"))   fn_r=nc_builtin_json_stringify_smart(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"kompiler_fil"))     fn_r=nc_dispatch_call("selfhost.kompiler.kompiler_fil", cargs, narg);
             else if (!strcmp(cn,"fil_les")||!strcmp(cn,"fil_skriv")) {
                 /* fil_les og fil_skriv kan kaste IOFeil — bruk setjmp */
                 int _fil_caught = 0;
@@ -755,6 +820,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         g_nc_db_pools[idx].avail=0; fn_r=nc_bool(1);
                     }
                 }
+            }
+            /* ir.* / selfhost.ir_contract.* (lazy ir_contract.no) */
+            else if (nc_is_ir_contract_api(cn)) {
+                fn_r = nc_call_ir_contract_api(cn, cargs, narg);
             }
             /* sh.* / selfhost.common.* / selfhost.compiler.* (lazy common.no) */
             else if (nc_is_sh_api(cn)) {
