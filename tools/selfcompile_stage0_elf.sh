@@ -52,11 +52,12 @@ printf '[2/4] Gen2 NCB via Gen1 ELF (bygg_bundle)...\n'
 rm -f "$GEN2_NCB"
 export NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR"
 export NORSCODE_BUNDLE_OUTPUT="$GEN2_NCB"
+export NORSCODE_BUNDLE_SOURCE_NCB="$GEN1_NCB"
 if ! "$GEN1_ELF" 2>&1; then
     printf '  [FEIL] Gen1 ELF bundle-modus feila\n' >&2
     exit 1
 fi
-unset NORSCODE_BUNDLE_ARGS NORSCODE_BUNDLE_OUTPUT
+unset NORSCODE_BUNDLE_ARGS NORSCODE_BUNDLE_OUTPUT NORSCODE_BUNDLE_SOURCE_NCB
 if [ ! -f "$GEN2_NCB" ]; then
     printf '  [FEIL] Gen2 NCB ikkje skrive\n' >&2
     exit 1
