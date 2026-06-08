@@ -19,10 +19,12 @@ GEN1_NCB="$ROOT/build/6b/compiler_stage0.ncb.json"
 GEN1_ELF="$ROOT/build/6b/selfcompile/gen1_compiler.elf"
 GEN2_NCB="$ROOT/build/6b/selfcompile/gen2.ncb.json"
 GEN2_ELF="$ROOT/build/6b/selfcompile/gen2_compiler.elf"
+PASS_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_passed.marker"
 
 BUNDLE_ARGS_STR="${OMGANG6B_BUNDLE_ARGS[*]}"
 
 mkdir -p "$ROOT/build/6b/selfcompile"
+rm -f "$PASS_MARKER"
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     bash "$ROOT/tools/build_norscode_native.sh"
@@ -67,10 +69,13 @@ GEN1_ELF_RUN=(
     "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
     "$GEN1_ELF"
 )
-if ! "${GEN1_ELF_RUN[@]}"; then
-    _gen2_rc=$?
+set +e
+"${GEN1_ELF_RUN[@]}"
+_gen2_rc=$?
+set -e
+if [ "$_gen2_rc" -ne 0 ]; then
     printf '  [FEIL] Gen1 ELF bundel-køyring feila med exit %d\n' "$_gen2_rc" >&2
-    printf '  [FEIL] Start med lågare køyring for detaljert feil: %s\n' "$_gen2_rc" >&2
+    printf '  [FEIL] Køyr Gen1 ELF direkte med same miljø for detaljert feil.\n' >&2
     exit 1
 fi
 
@@ -95,6 +100,7 @@ printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF...\n'
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
+    printf 'ok\n' > "$PASS_MARKER"
     printf '=== Omgang 6b.3: BESTÅTT ===\n'
     exit 0
 fi
