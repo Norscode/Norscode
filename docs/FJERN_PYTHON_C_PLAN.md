@@ -23,7 +23,8 @@ Ferdig betyr:
 - [x] `./bin/nc run`, `test`, `check`, `bundle`, `bygg-native` og release bruker Norscode-native vei.
 - [x] Stage-0 er en verifisert binær seed per plattform, ikke en C-kilde som bygges i daglig flyt.
   - Normal build/CI/release brukar seed-first; C-regenerering er avgrensa til eksplisitt vedlikehaldsmodus.
-- [ ] Historikk er enten slettet eller samlet i `archive/` med tydelig legacy-merking.
+- [x] Historikk er enten slettet eller samlet i `archive/` med tydelig legacy-merking.
+  - Legacy C-host/runtime ligg no i `archive/legacy_c_backend/`; lokal/generert `bootstrap/maint/c/` er berre maintainer-regen-output og ikkje committed normalflate.
 
 ## Naavaerende kjente spor
 
@@ -81,7 +82,7 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - Det tidlegare hjelpeskriptet `tools/patch_ncb_entry.sh` er fjerna.
 - [ ] Verifiser Gen1 ELF -> Gen2 NCB -> Gen2 ELF uten host-kopi.
   - [ ] Linux x86_64 sjølvkompilering står att som eigen ELF/stage-0-verifikasjon; resten av L1-L6-kjeda er no grønn lokalt.
-  - [x] Linux CI-workflowane køyrer allereie denne som hard gate med `NC_OM6B_RUN_STAGE0=1`; attståande status er å få og halde han grøn på GitHub.
+  - [ ] Linux CI køyrer denne som transitional steg med `NC_OM6B_RUN_STAGE0=1`, men Gen1 ELF bundle-køyring feilar framleis med `Illegal instruction` og er ikkje hard gate enno.
 - [x] Dokumenter runtime-adresse-/ABI-kontrakt for `native_codegen_v2.no` i `docs/NATIVE_CODEGEN_V2_ABI.md`.
 
 Verifikasjon:
@@ -239,8 +240,9 @@ gh pr checks
 
 Ferdig naar:
 
-- [ ] Alle CI-checks er grønne.
-- [ ] En test-PR med `.py` eller `.c` i aktiv flate feiler gaten.
+- [x] Alle CI-checks er grønne.
+- [x] En test-PR med `.py` eller `.c` i aktiv flate feiler gaten.
+  - Verifisert lokalt med midlertidige `active_gate_probe.py` og `active_gate_probe.c`: begge gir exit code 1, medan rein gate gir exit code 0.
 
 ## Endelig akseptanse
 
@@ -260,8 +262,11 @@ Ferdig naar:
 - [x] Native ELF runtime har fremdeles svakheter rundt stor fil-I/O, map/list/json og compiler-bundle.
   - Delvis lukka: fil-I/O, map/list/json og native dispatch er no sterke nok til at `./bin/nc test` og `bash tools/verify_selvstendighet.sh` passerer lokalt.
 - [ ] Stage-0 seed ma kunne reproduseres uten C-kilde i repoet.
-- [ ] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
-- [ ] CI maa skille historikk i `archive/` fra aktiv normal flyt.
+- [ ] Gen1 ELF bundle-køyring på Linux x86_64 feilar framleis med `Illegal instruction`; CI markerer dette som transitional, ikkje ferdig hard gate.
+- [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
+  - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
+- [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.
+  - `tools/no_c_python_active_surface.sh` skil tracked aktiv flate frå `archive/`, maintainer-workflowar og lokale genererte regen-artefaktar.
 
 ## Kort regel
 

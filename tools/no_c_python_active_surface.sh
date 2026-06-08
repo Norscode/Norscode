@@ -65,11 +65,13 @@ ALLOWLIST_PATTERNS=(
 is_allowlisted_path() {
     local path="$1"
     local item
-    for item in "${ALLOWLIST_FILES[@]}"; do
-        if [ "$path" = "$item" ]; then
-            return 0
-        fi
-    done
+    if [ "${#ALLOWLIST_FILES[@]}" -gt 0 ]; then
+        for item in "${ALLOWLIST_FILES[@]}"; do
+            if [ "$path" = "$item" ]; then
+                return 0
+            fi
+        done
+    fi
     for item in "${ALLOWLIST_PATTERNS[@]}"; do
         case "$path" in
             "$item"*) return 0 ;;
@@ -100,31 +102,21 @@ is_maintenance_workflow() {
     return 1
 }
 
-collect_source_hits() {
-    local ext_pattern="$1"
-    local dir
-    for dir in "${ACTIVE_DIRS[@]}"; do
-        [ -d "$dir" ] || continue
-        find "$dir" -type f $ext_pattern 2>/dev/null || true
-    done | sort -u
-}
-
-collect_repo_hits() {
-    local ext_pattern="$1"
-    find "$ROOT" \
-        -path "$ROOT/.git" -prune -o \
-        -type f $ext_pattern -print 2>/dev/null | sort -u
+collect_repo_c_hits() {
+    {
+        if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git -C "$ROOT" ls-files '*.c' '*.h' 2>/dev/null | sed "s|^|$ROOT/|"
+        fi
+        find "$ROOT" \
+            -path "$ROOT/.git" -prune -o \
+            -path "$ROOT/build" -prune -o \
+            -path "$ROOT/bootstrap/maint/c" -prune -o \
+            -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null
+    } | sort -u
 }
 
 collect_repo_py_hits() {
-    if command -v rg >/dev/null 2>&1; then
-        (
-            cd "$ROOT"
-            rg --files -g '*.py' 2>/dev/null || true
-        ) | sed "s|^|$ROOT/|" | sort -u
-    else
-        find "$ROOT" -path "$ROOT/.git" -prune -o -type f -name '*.py' -print 2>/dev/null | sort -u
-    fi
+    find "$ROOT" -path "$ROOT/.git" -prune -o -type f -name '*.py' -print 2>/dev/null | sort -u
 }
 
 collect_ref_files() {
@@ -180,7 +172,7 @@ fi
 
 tmp_c_hits="$(mktemp)"
 trap 'rm -f "$tmp_py_hits" "$tmp_c_hits"' EXIT
-collect_source_hits "\\( -name '*.c' -o -name '*.h' \\)" > "$tmp_c_hits"
+collect_repo_c_hits > "$tmp_c_hits"
 
 non_allowlisted_c=""
 while IFS= read -r path; do
