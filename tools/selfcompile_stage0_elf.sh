@@ -20,11 +20,13 @@ GEN1_ELF="$ROOT/build/6b/selfcompile/gen1_compiler.elf"
 GEN2_NCB="$ROOT/build/6b/selfcompile/gen2.ncb.json"
 GEN2_ELF="$ROOT/build/6b/selfcompile/gen2_compiler.elf"
 PASS_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_passed.marker"
+TRANSITIONAL_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_transitional.marker"
 
 BUNDLE_ARGS_STR="${OMGANG6B_BUNDLE_ARGS[*]}"
 
 mkdir -p "$ROOT/build/6b/selfcompile"
 rm -f "$PASS_MARKER"
+rm -f "$TRANSITIONAL_MARKER"
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     bash "$ROOT/tools/build_norscode_native.sh"
@@ -100,8 +102,8 @@ printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF...\n'
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
-    printf 'ok\n' > "$PASS_MARKER"
-    printf '=== Omgang 6b.3: BESTÅTT ===\n'
+    printf 'transitional-source-ncb\n' > "$TRANSITIONAL_MARKER"
+    printf '=== Omgang 6b.3: TRANSITIONAL BESTÅTT (Gen1 ELF skreiv Gen2 NCB frå source NCB) ===\n'
     exit 0
 fi
 
