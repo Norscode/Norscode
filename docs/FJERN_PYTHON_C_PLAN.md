@@ -82,7 +82,7 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - Det tidlegare hjelpeskriptet `tools/patch_ncb_entry.sh` er fjerna.
 - [ ] Verifiser Gen1 ELF -> Gen2 NCB -> Gen2 ELF uten host-kopi.
   - [ ] Linux x86_64 sjølvkompilering står att som eigen ELF/stage-0-verifikasjon; resten av L1-L6-kjeda er no grønn lokalt.
-  - [ ] Linux CI køyrer denne som transitional steg med `NC_OM6B_RUN_STAGE0=1`, men Gen1 ELF bundle-køyring feilar framleis med `Illegal instruction` og er ikkje hard gate enno.
+  - [ ] Linux CI køyrer denne som transitional steg med `NC_OM6B_RUN_STAGE0=1`; den nyttar no ei ærleg mellomløysing der Gen1 ELF sjølv les host-byggd `compiler_stage0.ncb.json` og skriv Gen2 NCB utan shell-kopi, medan ekte intern `bygg_omgang6b_bundle` framleis blir debugga.
   - [x] Transitional CI rapporterer no ekte Gen1 ELF exit-kode og lastar ikkje opp stage-0-kandidat utan full paritet-marker.
 - [x] Dokumenter runtime-adresse-/ABI-kontrakt for `native_codegen_v2.no` i `docs/NATIVE_CODEGEN_V2_ABI.md`.
 
