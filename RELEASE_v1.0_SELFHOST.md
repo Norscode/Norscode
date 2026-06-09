@@ -1,7 +1,7 @@
-# Norscode v1.0-selfhost — Complete Self-Hosting Release
+# Norscode v1.0-selfhost — Self-Hosting Release Snapshot
 
 **Release Date:** June 6, 2026  
-**Status:** 🎉 PRODUCTION READY
+**Status:** Historical snapshot; newer repo work has made Omgang 6b.3 transitional again while native self-hosting remains intact.
 
 ---
 
@@ -78,12 +78,12 @@ Program output
 
 ## 📊 Test Results
 
-### Critical Path (100% Pass)
+### Critical Path (Historical Snapshot)
 ```
 ✅ selfhost-bootstrap-gate (Steg A+B)
 ✅ bootstrap-self (Steg C - Pure VM)
 ✅ Omgang 6 (native ELF generation)
-✅ Omgang 6b (stage-0 ELF compilation)
+⚠️ Omgang 6b.3 now tracked separately as transitional source-NCB parity until ekte intern ELF-bundle is stable again
 ```
 
 ### Test Suite
