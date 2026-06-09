@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# tools/build_stage0_release_assets.sh — Omgang 6b.4: pakk stage-0 ELF for GitHub Release
+# tools/build_stage0_release_assets.sh — Omgang 6b.4: pakk host-byggd stage-0 ELF for GitHub Release
 #
-# Produserer compiler_stage0-<plattform>.elf i gjeldande katalog.
-# Krev: dist/norscode_native, Linux x86-64 for full pipeline.
+# Produserer compiler_stage0-<plattform>.elf i gjeldande katalog frå host-byggd stage-0 NCB.
+# Dette er release-pakking av Gen1-artefakt; ekte Gen1 ELF -> Gen2 ELF intern bundle-paritet er framleis eiga transitional verifisering.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

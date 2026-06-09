@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/verify_omgang6b.sh — Omgang 6b.1 + 6b.2 + 6b.3: NCB → ELF stage-0, compile, sjølvkompilering
+# tools/verify_omgang6b.sh — Omgang 6b.1 + 6b.2 + 6b.3: NCB → ELF stage-0, compile, transitional sjølvkompilering
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -113,10 +113,11 @@ else
 fi
 
 # ─── 6b.3: Gen1 ELF → Gen2 ELF byte-paritet ───────────────────────────────────
-printf '5. Stage-0/6b.3 sjølvkompilering (Gen1 ELF == Gen2 ELF)...\n'
+printf '5. Stage-0/6b.3 sjølvkompilering (transitional source-ncb / ekte ELF-bundle når tilgjengeleg)...\n'
 bash "$ROOT/tools/selfcompile_stage0_elf.sh"
 printf '\n'
 
 printf '=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===\n'
 printf 'NCB → ELF deterministisk; dyp stage-0 ELF runtime er opt-in med NC_OM6B_RUN_STAGE0=1.\n'
+printf 'Merk: 6b.3 brukar for tida transitional source-NCB-løype i staden for hard-gata ekte intern ELF-bundle.\n'
 printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/maint/c/*.c frå git.\n'
