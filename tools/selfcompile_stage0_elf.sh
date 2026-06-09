@@ -52,7 +52,7 @@ if [ "${NC_OM6B_RUN_STAGE0:-0}" != "1" ]; then
     exit 0
 fi
 
-printf '[2/4] Gen2 NCB frå Gen1 NCB (paritet)...\n'
+printf '[2/4] Gen2 NCB frå Gen1 ELF (transitional source-ncb)...\n'
 rm -f "$GEN2_NCB"
 
 printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
@@ -90,16 +90,16 @@ N1="$(wc -c < "$GEN1_NCB" | tr -d ' ')"
 N2="$(wc -c < "$GEN2_NCB" | tr -d ' ')"
 printf '  [OK] Gen2 NCB %s bytes (Gen1 NCB %s bytes)\n' "$N2" "$N1"
 if cmp -s "$GEN1_NCB" "$GEN2_NCB"; then
-    printf '  [OK] NCB byte-paritet Gen1 == Gen2\n\n'
+    printf '  [OK] NCB byte-paritet Gen1 == Gen2 (transitional source-ncb)\n\n'
 else
-    printf '  [MERK] NCB differ — sjekkar ELF-paritet likevel\n\n'
+    printf '  [MERK] NCB differ i transitional source-ncb-modus — sjekkar ELF-paritet likevel\n\n'
 fi
 
 bash "$ROOT/tools/ncb_to_elf.sh" "$GEN2_NCB" "$GEN2_ELF"
 B2="$(wc -c < "$GEN2_ELF" | tr -d ' ')"
 printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 
-printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF...\n'
+printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (transitional source-ncb)...\n'
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
     printf 'transitional-source-ncb\n' > "$TRANSITIONAL_MARKER"
