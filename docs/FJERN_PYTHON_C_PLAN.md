@@ -82,9 +82,52 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - Det tidlegare hjelpeskriptet `tools/patch_ncb_entry.sh` er fjerna.
 - [ ] Verifiser Gen1 ELF -> Gen2 NCB -> Gen2 ELF uten host-kopi.
   - [ ] Linux x86_64 sjølvkompilering står att som eigen ELF/stage-0-verifikasjon; resten av L1-L6-kjeda er no grønn lokalt.
-  - [ ] Linux CI køyrer denne som transitional steg med `NC_OM6B_RUN_STAGE0=1`; den nyttar no ei ærleg mellomløysing der Gen1 ELF sjølv les host-byggd `compiler_stage0.ncb.json` og skriv Gen2 NCB utan shell-kopi, medan ekte intern `bygg_omgang6b_bundle` framleis blir debugga.
-  - [x] Transitional source-NCB-paritet skriv ikkje lenger full `stage0_elf_passed.marker`; berre ekte intern ELF-bundle kan produsere stage-0-kandidatmarkør.
+  - [ ] Linux CI køyrer denne med `NC_OM6B_RUN_STAGE0=1` og prøver no ekte preset-bundle først; ved Gen1 ELF-krasj prøver han direkte source-NCB, og berre deretter transitional chunked source-NCB, utan shell-kopi.
+  - [x] Transitional source-NCB er no chunka i `NC_OM6B_CHUNK_SIZE`-delar (default 64 KiB), slik at `elf_compile_driver.no` kan rekonstruere same NCB utan éi stor `fil_les`.
+  - [x] `NORSCODE_OM6B_PRESET=1` via `dist/norscode_native` rekonstruerer no stage-0 NCB korrekt; `NC_OM6B_VERIFY_PRESET=1` er verifiseringsbane for denne preset-løypa.
+  - [x] Fallback-løypene med `direct-source-ncb` og `chunked-source-ncb` skriv ikkje full `stage0_elf_passed.marker`; berre ekte intern ELF-bundle/preset-paritet kan produsere stage-0-kandidatmarkør.
+  - [x] `tools/selfcompile_stage0_elf.sh` skil no eksplisitt mellom transitional-modusane:
+    - `direct-source-ncb`
+    - `chunked-source-ncb`
+    - denne modusen blir skrive både i logg og `stage0_elf_transitional.marker`
+  - [x] `tools/verify_omgang6b.sh` verifiserer no begge transitional-rekonstruksjonsbanene lokalt:
+    - direkte source-NCB via `NORSCODE_OM6B_SOURCE_NCB`
+    - chunked source-NCB via `NORSCODE_OM6B_SOURCE_NCB_DIR` + `NORSCODE_OM6B_SOURCE_NCB_COUNT`
   - [x] Transitional CI rapporterer no ekte Gen1 ELF exit-kode og lastar ikkje opp stage-0-kandidat utan full paritet-marker.
+  - [x] Transitional CI lastar opp `gen1_elf_bundle.log` som eige artefakt når Gen1 ELF faktisk køyrer.
+  - [x] Transitional CI lastar opp `gen1_elf_diagnose.txt` med `file`, `readelf`, SHA256, kommando og log-tail for Gen1 ELF.
+  - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
+    - chunk count
+    - kvar `part_XXX.json` som blir lesen
+    - akkumulert byte-lengd etter kvar chunk
+    - før/etter `fil_skriv` i chunk-løypa
+    - før/etter `fil_les`/`fil_skriv` i direkte source-NCB-løypa
+  - [x] Korrigerte `_start`/runtime-kontrakt for `envp`: `native_codegen_v2.no` lagrar no `envp` til `HEAP_VA + 8`, som er adressa runtimeen faktisk les i `miljo_hent()`.
+  - [x] Korrigerte `_start`-maskinkode for `argc/argv/envp`-lesing: generatoren bruker no faktisk `%r12` som base-register, ikkje `%rsp` etter diagnose-push/pop.
+  - [x] Verifisert lokalt etter `envp`-rettinga:
+    - `./bin/nc check selfhost/native_execution/native_codegen_v2.no`
+    - `./bin/nc verify-omgang6b`
+    - `./bin/nc test`
+  - [x] Verifisert med objdump på fersk Gen1 ELF at `_start` no emitterer:
+    - `mov (%r12), %rdi`
+    - `lea 0x8(%r12), %rsi`
+    - `lea (%r12,%rdi,8), %rdx`
+  - [x] Ingen `bootstrap/precompiled/*.ncb.json` måtte regenererast for denne rettinga, fordi endringa ligg i `selfhost/native_execution/native_codegen_v2.no` og ikkje i modulane som blir lest frå `bootstrap/precompiled/`.
+  - [x] `_start` i `native_codegen_v2.no` skriv no diagnosemarkørar for Linux-sporet:
+    - `0`: før envp-utrekning
+    - `1`: etter envp-lagring
+    - `2`: etter stack-align
+    - `A`: før `rt_init_heap`
+    - `B`: etter `rt_init_heap`
+    - `C`: rett før kall til `start()`
+  - [x] Hypotese-matrise for Linux-markørar:
+    - Ingen markør: krasj før eller i aller første `_start`-instruksjon; sjekk ELF-header, entrypoint og loader/segment-layout.
+    - Berre `0`: krasj mellom tidleg `_start` og envp-lagring; sjekk `argc/argv/envp`-adresseutrekning og registerbruk rundt `r12/rdi/rdx`.
+    - `01` men ikkje `2`: envp er lagra, men krasj før eller under stack-align; sjekk stack-manipulasjon og skriveadresse for envp-slot.
+    - `012` men ikkje `A`: krasj rett etter align og før første runtime-kall; sjekk overgang frå handskriven `_start` til call-reloc/runtime-adresser.
+    - `012A` men ikkje `B`: krasj inni `rt_init_heap`; sjekk heap-base, init-rutine og skrivebarheit i data/heap-segment.
+    - `012AB` men ikkje `C`: heap-init er ferdig, men krasj før hopp til `start()`; sjekk `main_va`-oppslag og `call_rel32`.
+    - `012ABC` og så krasj: inngang til `start()` skjer, så feilen ligg i `elf_compile_driver.no` eller seinare runtime-kall.
 - [x] Dokumenter runtime-adresse-/ABI-kontrakt for `native_codegen_v2.no` i `docs/NATIVE_CODEGEN_V2_ABI.md`.
 
 Verifikasjon:
@@ -264,7 +307,9 @@ Ferdig naar:
 - [x] Native ELF runtime har fremdeles svakheter rundt stor fil-I/O, map/list/json og compiler-bundle.
   - Delvis lukka: fil-I/O, map/list/json og native dispatch er no sterke nok til at `./bin/nc test` og `bash tools/verify_selvstendighet.sh` passerer lokalt.
 - [ ] Stage-0 seed ma kunne reproduseres uten C-kilde i repoet.
-- [ ] Ekte Gen1 ELF bundle-køyring på Linux x86_64 er framleis ikkje stabil; vi har flytta feilen frå tidleg `Illegal instruction` til seinare krasj i intern bundle-sti, og CI brukar derfor transitional source-NCB-løype i staden for hard gate.
+- [ ] Ekte Gen1 ELF bundle-køyring på Linux x86_64 er framleis ikkje stabil; preset-bundle via `dist/norscode_native` er no verifisert, og CI prøver denne først, men fell framleis tilbake til transitional chunked source-NCB til den djupe ELF→ELF-køyringa er stabil.
+  - Siste konkrete Linux-hypotese som er retta lokalt: `_start` lagra `envp` til feil slot. Runtimeen les `envp` frå `HEAP_VA + 8` (`0x600008`), og generatoren brukar no same kontrollslot i staden for siste heap-slot.
+  - Neste konkrete Linux-feil som er retta lokalt: `_start` sa at han brukte `%r12` til å lese `argc/argv/envp`, men maskinkoden brukte faktisk `%rsp` etter diagnosemarkørane. Gen1 ELF emitterer no rett `%r12`-basert lesing.
 - [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
   - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
 - [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.
