@@ -103,6 +103,9 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
     - `gen1_elf_bundle.log` som samla logg med exit-kodar
     - `gen1_elf_attempts.txt` som kort indeks over modus, exit-kode og loggfil
     - dette hindrar at ein vellykka fallback overskriv feilloggen frå ekte preset/direct-source-løype.
+  - [x] `elf_compile_driver.no` vel no Omgang 6b-modus frå `miljo_hent(...) != ""` i staden for `miljo_finnes(...)`.
+    - GitHub-diagnosen viste at Gen1 ELF gjekk til chunked branch også i preset/source-run.
+    - Dette snevrar inn feilen til branch-val/runtime-miljøoppslag og fjernar avhengigheita av ein svak `miljo_finnes`-builtin i denne kritiske løypa.
   - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
     - chunk count
     - kvar `part_XXX.json` som blir lesen
@@ -318,6 +321,7 @@ Ferdig naar:
   - Siste konkrete Linux-hypotese som er retta lokalt: `_start` lagra `envp` til feil slot. Runtimeen les `envp` frå `HEAP_VA + 8` (`0x600008`), og generatoren brukar no same kontrollslot i staden for siste heap-slot.
   - Neste konkrete Linux-feil som er retta lokalt: `_start` sa at han brukte `%r12` til å lese `argc/argv/envp`, men maskinkoden brukte faktisk `%rsp` etter diagnosemarkørane. Gen1 ELF emitterer no rett `%r12`-basert lesing.
   - Ny diagnoseforbetring: CI bevarer no feilloggen frå preset/direct-source separat frå chunked fallback, og skriv ein kort attempts-indeks, slik at neste Linux-run kan vise nøyaktig kva runtime-kall som stoppar ekte bundle-løype.
+  - Ny konkret retting: `elf_compile_driver.no` brukar no ikkje `miljo_finnes` for Omgang 6b branch-val; precompiled driver-snapshot er regenerert.
 - [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
   - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
 - [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.
