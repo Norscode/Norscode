@@ -142,7 +142,7 @@ rm -f "$GEN2_NCB"
 brukte_transitional=0
 transitional_mode=""
 GEN2_ENTRY="selfhost.elf_compile_driver.start"
-GEN2_BUNDLE_ARGS="${OMGANG6B_BUNDLE_ARGS[*]}"
+GEN2_BUNDLE_ARGS="__omgang6b__"
 
 koyr_gen1_elf() {
     local mode="$1"
