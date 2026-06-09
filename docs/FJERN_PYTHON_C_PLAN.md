@@ -96,6 +96,13 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - [x] Transitional CI rapporterer no ekte Gen1 ELF exit-kode og lastar ikkje opp stage-0-kandidat utan full paritet-marker.
   - [x] Transitional CI lastar opp `gen1_elf_bundle.log` som eige artefakt når Gen1 ELF faktisk køyrer.
   - [x] Transitional CI lastar opp `gen1_elf_diagnose.txt` med `file`, `readelf`, SHA256, kommando og log-tail for Gen1 ELF.
+  - [x] Gen1 ELF-diagnose bevarer no separate modusloggar for Linux-køyringa:
+    - `gen1_elf_preset.log`
+    - `gen1_elf_source_ncb.log`
+    - `gen1_elf_chunked_source_ncb.log`
+    - `gen1_elf_bundle.log` som samla logg med exit-kodar
+    - `gen1_elf_attempts.txt` som kort indeks over modus, exit-kode og loggfil
+    - dette hindrar at ein vellykka fallback overskriv feilloggen frå ekte preset/direct-source-løype.
   - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
     - chunk count
     - kvar `part_XXX.json` som blir lesen
@@ -310,6 +317,7 @@ Ferdig naar:
 - [ ] Ekte Gen1 ELF bundle-køyring på Linux x86_64 er framleis ikkje stabil; preset-bundle via `dist/norscode_native` er no verifisert, og CI prøver denne først, men fell framleis tilbake til transitional chunked source-NCB til den djupe ELF→ELF-køyringa er stabil.
   - Siste konkrete Linux-hypotese som er retta lokalt: `_start` lagra `envp` til feil slot. Runtimeen les `envp` frå `HEAP_VA + 8` (`0x600008`), og generatoren brukar no same kontrollslot i staden for siste heap-slot.
   - Neste konkrete Linux-feil som er retta lokalt: `_start` sa at han brukte `%r12` til å lese `argc/argv/envp`, men maskinkoden brukte faktisk `%rsp` etter diagnosemarkørane. Gen1 ELF emitterer no rett `%r12`-basert lesing.
+  - Ny diagnoseforbetring: CI bevarer no feilloggen frå preset/direct-source separat frå chunked fallback, og skriv ein kort attempts-indeks, slik at neste Linux-run kan vise nøyaktig kva runtime-kall som stoppar ekte bundle-løype.
 - [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
   - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
 - [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.

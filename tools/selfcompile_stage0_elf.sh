@@ -23,7 +23,11 @@ GEN2_NCB="$ROOT/build/6b/selfcompile/gen2.ncb.json"
 GEN2_ELF="$ROOT/build/6b/selfcompile/gen2_compiler.elf"
 GEN1_NCB_CHUNK_DIR="$ROOT/build/6b/selfcompile/gen1_ncb_chunks"
 GEN1_ELF_LOG="$ROOT/build/6b/selfcompile/gen1_elf_bundle.log"
+GEN1_ELF_PRESET_LOG="$ROOT/build/6b/selfcompile/gen1_elf_preset.log"
+GEN1_ELF_SOURCE_LOG="$ROOT/build/6b/selfcompile/gen1_elf_source_ncb.log"
+GEN1_ELF_CHUNK_LOG="$ROOT/build/6b/selfcompile/gen1_elf_chunked_source_ncb.log"
 GEN1_ELF_DIAG="$ROOT/build/6b/selfcompile/gen1_elf_diagnose.txt"
+GEN1_ELF_ATTEMPTS="$ROOT/build/6b/selfcompile/gen1_elf_attempts.txt"
 PASS_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_passed.marker"
 TRANSITIONAL_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_transitional.marker"
 
@@ -31,7 +35,11 @@ mkdir -p "$ROOT/build/6b/selfcompile"
 rm -f "$PASS_MARKER"
 rm -f "$TRANSITIONAL_MARKER"
 rm -f "$GEN1_ELF_LOG"
+rm -f "$GEN1_ELF_PRESET_LOG"
+rm -f "$GEN1_ELF_SOURCE_LOG"
+rm -f "$GEN1_ELF_CHUNK_LOG"
 rm -f "$GEN1_ELF_DIAG"
+rm -f "$GEN1_ELF_ATTEMPTS"
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     bash "$ROOT/tools/build_norscode_native.sh"
@@ -60,6 +68,7 @@ skriv_gen1_elf_diagnose() {
     local modus="$1"
     local rc="$2"
     local cmd_txt="${3:-}"
+    local log_path="${4:-$GEN1_ELF_LOG}"
     {
         printf 'modus=%s\n' "$modus"
         printf 'exit_code=%s\n' "$rc"
@@ -97,9 +106,13 @@ skriv_gen1_elf_diagnose() {
                 readelf -l "$GEN1_ELF" || true
             fi
         fi
-        if [ -f "$GEN1_ELF_LOG" ]; then
+        if [ -f "$log_path" ]; then
             printf '\n[log tail]\n'
-            tail -n 80 "$GEN1_ELF_LOG" || true
+            tail -n 80 "$log_path" || true
+        fi
+        if [ -f "$GEN1_ELF_LOG" ] && [ "$log_path" != "$GEN1_ELF_LOG" ]; then
+            printf '\n[aggregate log tail]\n'
+            tail -n 120 "$GEN1_ELF_LOG" || true
         fi
     } > "$GEN1_ELF_DIAG"
 }
@@ -131,11 +144,20 @@ transitional_mode=""
 GEN2_ENTRY="selfhost.elf_compile_driver.start"
 
 koyr_gen1_elf() {
+    local mode="$1"
+    local mode_log="$2"
+    shift 2
     local -a cmd=("$@")
+    printf '\n=== %s ===\n' "$mode" >> "$GEN1_ELF_LOG"
     set +e
-    ("${cmd[@]}") 2>&1 | tee "$GEN1_ELF_LOG"
+    ("${cmd[@]}") 2>&1 | tee "$mode_log"
     local rc=$?
     set -e
+    {
+        printf 'exit_code=%s\n' "$rc"
+        cat "$mode_log"
+    } >> "$GEN1_ELF_LOG"
+    printf 'mode=%s exit_code=%s log=%s\n' "$mode" "$rc" "$mode_log" >> "$GEN1_ELF_ATTEMPTS"
     return "$rc"
 }
 
@@ -151,11 +173,11 @@ GEN1_ELF_PRESET_RUN=(
 )
 
 printf '  [INFO] Prøver ekte preset-bundle via Gen1 ELF...\n'
-if koyr_gen1_elf "${GEN1_ELF_PRESET_RUN[@]}"; then
+if koyr_gen1_elf "preset-bundle" "$GEN1_ELF_PRESET_LOG" "${GEN1_ELF_PRESET_RUN[@]}"; then
     printf '  [OK] Gen1 ELF skreiv Gen2 NCB via preset-bundle\n'
 else
     _gen2_rc=$?
-    skriv_gen1_elf_diagnose "preset" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF"
+    skriv_gen1_elf_diagnose "preset" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
     printf '  [MERK] Preset-bundle feila med exit %d; prøver direkte source-ncb\n' "$_gen2_rc"
     rm -f "$GEN2_NCB"
 
@@ -169,14 +191,14 @@ else
         "$GEN1_ELF"
     )
 
-    if koyr_gen1_elf "${GEN1_ELF_SOURCE_RUN[@]}"; then
+    if koyr_gen1_elf "direct-source-ncb" "$GEN1_ELF_SOURCE_LOG" "${GEN1_ELF_SOURCE_RUN[@]}"; then
         printf '  [OK] Gen1 ELF skreiv Gen2 NCB via direkte source-ncb\n'
         brukte_transitional=1
         transitional_mode="direct-source-ncb"
-        skriv_gen1_elf_diagnose "preset_failed_source_ok" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF"
+        skriv_gen1_elf_diagnose "preset_failed_source_ok" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
     else
         _source_rc=$?
-        skriv_gen1_elf_diagnose "source" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF"
+        skriv_gen1_elf_diagnose "source" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_SOURCE_LOG"
         printf '  [MERK] Direkte source-ncb feila med exit %d; fell tilbake til transitional chunked source-ncb\n' "$_source_rc"
         rm -f "$GEN2_NCB"
         GEN1_NCB_CHUNK_COUNT="$(lag_gen1_ncb_chunks "$GEN1_NCB" "$GEN1_NCB_CHUNK_DIR")"
@@ -191,9 +213,9 @@ else
             "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
             "$GEN1_ELF"
         )
-        if ! koyr_gen1_elf "${GEN1_ELF_FALLBACK_RUN[@]}"; then
+        if ! koyr_gen1_elf "chunked-source-ncb" "$GEN1_ELF_CHUNK_LOG" "${GEN1_ELF_FALLBACK_RUN[@]}"; then
             _fallback_rc=$?
-            skriv_gen1_elf_diagnose "fallback" "$_fallback_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB_DIR=$GEN1_NCB_CHUNK_DIR NORSCODE_OM6B_SOURCE_NCB_COUNT=$GEN1_NCB_CHUNK_COUNT NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF"
+            skriv_gen1_elf_diagnose "fallback" "$_fallback_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB_DIR=$GEN1_NCB_CHUNK_DIR NORSCODE_OM6B_SOURCE_NCB_COUNT=$GEN1_NCB_CHUNK_COUNT NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_CHUNK_LOG"
             printf '  [FEIL] Gen1 ELF bundel-køyring feila også i chunked fallback med exit %d\n' "$_fallback_rc" >&2
             printf '  [FEIL] Sjå logg: %s\n' "$GEN1_ELF_LOG" >&2
             printf '  [FEIL] Sjå diagnose: %s\n' "$GEN1_ELF_DIAG" >&2
@@ -201,7 +223,7 @@ else
         fi
         brukte_transitional=1
         transitional_mode="chunked-source-ncb"
-        skriv_gen1_elf_diagnose "preset_failed_source_failed_chunk_ok" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF"
+        skriv_gen1_elf_diagnose "preset_failed_source_failed_chunk_ok" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_SOURCE_LOG"
     fi
 fi
 
