@@ -121,7 +121,7 @@ is_server_test() {
 # ─── CI: parser-stress / monolitt (køyr i eiga jobb, sjå native-*-slow i ci.yml)
 is_slow_test() {
     case "$(basename "$1")" in
-        test_chunk_*|test_selfhost.no)
+        test_chunk_*|test_file_io_large.no|test_selfhost.no)
             return 0;;
     esac
     return 1
