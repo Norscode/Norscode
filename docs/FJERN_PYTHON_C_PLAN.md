@@ -110,6 +110,7 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
     - Dette brukar miljøvariablane som allereie fungerte fram til `etter args`/`etter out`.
     - Omgang6b source/chunk-flagg er no berre fallback-løyper.
     - Førsteforsøket går direkte til lokal `bygg_omgang6b_bundle(...)` når `NORSCODE_BUNDLE_ARGS` er sett, utan tekst-samanlikning eller generell args-parser som krasja på Linux.
+    - Precompiled-filnamn blir no sendt eksplisitt til helperen, slik at Gen1 ELF slepp `split`/`ends_with`/`slice` under første moduloppslag.
   - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
     - chunk count
     - kvar `part_XXX.json` som blir lesen
