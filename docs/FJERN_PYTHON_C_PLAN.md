@@ -109,7 +109,7 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - [x] Ekte Gen1-førsteforsøk brukar no `NORSCODE_BUNDLE_ARGS` før Omgang6b-flagg.
     - Dette brukar miljøvariablane som allereie fungerte fram til `etter args`/`etter out`.
     - Omgang6b source/chunk-flagg er no berre fallback-løyper.
-    - Førsteforsøket brukar sentinel-verdien `__omgang6b__`, slik at Gen1 ELF kan gå direkte til lokal `bygg_omgang6b_bundle(...)` utan å treffe den generelle args-parseren som krasja på Linux.
+    - Førsteforsøket går direkte til lokal `bygg_omgang6b_bundle(...)` når `NORSCODE_BUNDLE_ARGS` er sett, utan tekst-samanlikning eller generell args-parser som krasja på Linux.
   - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
     - chunk count
     - kvar `part_XXX.json` som blir lesen
