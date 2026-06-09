@@ -82,7 +82,7 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - Det tidlegare hjelpeskriptet `tools/patch_ncb_entry.sh` er fjerna.
 - [ ] Verifiser Gen1 ELF -> Gen2 NCB -> Gen2 ELF uten host-kopi.
   - [ ] Linux x86_64 sjølvkompilering står att som eigen ELF/stage-0-verifikasjon; resten av L1-L6-kjeda er no grønn lokalt.
-  - [ ] Linux CI køyrer denne med `NC_OM6B_RUN_STAGE0=1` og prøver no ekte preset-bundle først; ved Gen1 ELF-krasj prøver han direkte source-NCB, og berre deretter transitional chunked source-NCB, utan shell-kopi.
+  - [ ] Linux CI køyrer denne med `NC_OM6B_RUN_STAGE0=1` og prøver no ekte `NORSCODE_BUNDLE_ARGS` først; ved Gen1 ELF-krasj prøver han direkte source-NCB, og berre deretter transitional chunked source-NCB, utan shell-kopi.
   - [x] Transitional source-NCB er no chunka i `NC_OM6B_CHUNK_SIZE`-delar (default 64 KiB), slik at `elf_compile_driver.no` kan rekonstruere same NCB utan éi stor `fil_les`.
   - [x] `NORSCODE_OM6B_PRESET=1` via `dist/norscode_native` rekonstruerer no stage-0 NCB korrekt; `NC_OM6B_VERIFY_PRESET=1` er verifiseringsbane for denne preset-løypa.
   - [x] Fallback-løypene med `direct-source-ncb` og `chunked-source-ncb` skriv ikkje full `stage0_elf_passed.marker`; berre ekte intern ELF-bundle/preset-paritet kan produsere stage-0-kandidatmarkør.
@@ -106,6 +106,9 @@ Maal: fjerne den tekniske grunnen til at C fortsatt frister som fallback.
   - [x] `elf_compile_driver.no` vel no Omgang 6b-modus frå `miljo_hent(...) != ""` i staden for `miljo_finnes(...)`.
     - GitHub-diagnosen viste at Gen1 ELF gjekk til chunked branch også i preset/source-run.
     - Dette snevrar inn feilen til branch-val/runtime-miljøoppslag og fjernar avhengigheita av ein svak `miljo_finnes`-builtin i denne kritiske løypa.
+  - [x] Ekte Gen1-førsteforsøk brukar no `NORSCODE_BUNDLE_ARGS` før Omgang6b-flagg.
+    - Dette brukar miljøvariablane som allereie fungerte fram til `etter args`/`etter out`.
+    - Omgang6b source/chunk-flagg er no berre fallback-løyper.
   - [x] `elf_compile_driver.no` loggar no chunk-for-chunk i transitional source-NCB-løypa:
     - chunk count
     - kvar `part_XXX.json` som blir lesen

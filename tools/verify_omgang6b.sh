@@ -200,12 +200,12 @@ else
 fi
 
 # ─── 6b.3: Gen1 ELF → Gen2 ELF byte-paritet ───────────────────────────────────
-printf '5. Stage-0/6b.3 sjølvkompilering (preset-bundle først, så direkte source-ncb, så chunked source-ncb)...\n'
+printf '5. Stage-0/6b.3 sjølvkompilering (bundle-args først, så direkte source-ncb, så chunked source-ncb)...\n'
 bash "$ROOT/tools/selfcompile_stage0_elf.sh"
 printf '\n'
 
 printf '=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===\n'
 printf 'NCB → ELF deterministisk; dyp stage-0 ELF runtime er opt-in med NC_OM6B_RUN_STAGE0=1.\n'
-printf 'Merk: 6b.3 prøver no ekte preset-bundle først; ved Gen1 ELF-feil prøver han direkte source-NCB, og berre deretter chunked source-NCB.\n'
+printf 'Merk: 6b.3 prøver no ekte NORSCODE_BUNDLE_ARGS først; ved Gen1 ELF-feil prøver han direkte source-NCB, og berre deretter chunked source-NCB.\n'
 printf 'Merk: NC_OM6B_VERIFY_PRESET=1 verifiserer at preset-bundle rekonstruerer stage-0 NCB via elf_compile_driver.no.\n'
 printf 'Neste: commit bootstrap/stage0/norscode-linux-x86_64 og fjern bootstrap/maint/c/*.c frå git.\n'

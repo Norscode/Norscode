@@ -137,11 +137,12 @@ if [ "${NC_OM6B_RUN_STAGE0:-0}" != "1" ]; then
     exit 0
 fi
 
-printf '[2/4] Gen2 NCB frå Gen1 ELF (prøv preset-bundle, elles direkte source-ncb, elles chunked source-ncb)...\n'
+printf '[2/4] Gen2 NCB frå Gen1 ELF (prøv bundle-args, elles direkte source-ncb, elles chunked source-ncb)...\n'
 rm -f "$GEN2_NCB"
 brukte_transitional=0
 transitional_mode=""
 GEN2_ENTRY="selfhost.elf_compile_driver.start"
+GEN2_BUNDLE_ARGS="${OMGANG6B_BUNDLE_ARGS[*]}"
 
 koyr_gen1_elf() {
     local mode="$1"
@@ -166,19 +167,19 @@ GEN1_ELF_PRESET_RUN=(
     env -i
     "PATH=$PATH"
     "NORSCODE_CMD=run"
-    "NORSCODE_OM6B_PRESET=1"
+    "NORSCODE_BUNDLE_ARGS=$GEN2_BUNDLE_ARGS"
     "NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB"
     "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
     "$GEN1_ELF"
 )
 
-printf '  [INFO] Prøver ekte preset-bundle via Gen1 ELF...\n'
-if koyr_gen1_elf "preset-bundle" "$GEN1_ELF_PRESET_LOG" "${GEN1_ELF_PRESET_RUN[@]}"; then
-    printf '  [OK] Gen1 ELF skreiv Gen2 NCB via preset-bundle\n'
+printf '  [INFO] Prøver ekte bundle-args via Gen1 ELF...\n'
+if koyr_gen1_elf "bundle-args" "$GEN1_ELF_PRESET_LOG" "${GEN1_ELF_PRESET_RUN[@]}"; then
+    printf '  [OK] Gen1 ELF skreiv Gen2 NCB via bundle-args\n'
 else
     _gen2_rc=$?
-    skriv_gen1_elf_diagnose "preset" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
-    printf '  [MERK] Preset-bundle feila med exit %d; prøver direkte source-ncb\n' "$_gen2_rc"
+    skriv_gen1_elf_diagnose "bundle_args" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_BUNDLE_ARGS=\"$GEN2_BUNDLE_ARGS\" NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
+    printf '  [MERK] Bundle-args feila med exit %d; prøver direkte source-ncb\n' "$_gen2_rc"
     rm -f "$GEN2_NCB"
 
     GEN1_ELF_SOURCE_RUN=(
@@ -195,7 +196,7 @@ else
         printf '  [OK] Gen1 ELF skreiv Gen2 NCB via direkte source-ncb\n'
         brukte_transitional=1
         transitional_mode="direct-source-ncb"
-        skriv_gen1_elf_diagnose "preset_failed_source_ok" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_PRESET=1 NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
+        skriv_gen1_elf_diagnose "bundle_args_failed_source_ok" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_BUNDLE_ARGS=\"$GEN2_BUNDLE_ARGS\" NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
     else
         _source_rc=$?
         skriv_gen1_elf_diagnose "source" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_SOURCE_LOG"
@@ -223,7 +224,7 @@ else
         fi
         brukte_transitional=1
         transitional_mode="chunked-source-ncb"
-        skriv_gen1_elf_diagnose "preset_failed_source_failed_chunk_ok" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_SOURCE_LOG"
+        skriv_gen1_elf_diagnose "bundle_args_failed_source_failed_chunk_ok" "$_source_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_OM6B_SOURCE_NCB=$GEN1_NCB NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_SOURCE_LOG"
     fi
 fi
 
@@ -239,13 +240,13 @@ if cmp -s "$GEN1_NCB" "$GEN2_NCB"; then
     if [ "$brukte_transitional" -eq 1 ]; then
         printf '  [OK] NCB byte-paritet Gen1 == Gen2 (%s)\n\n' "$transitional_mode"
     else
-        printf '  [OK] NCB byte-paritet Gen1 == Gen2 (preset-bundle)\n\n'
+        printf '  [OK] NCB byte-paritet Gen1 == Gen2 (bundle-args)\n\n'
     fi
 else
     if [ "$brukte_transitional" -eq 1 ]; then
         printf '  [MERK] NCB differ i %s-modus — sjekkar ELF-paritet likevel\n\n' "$transitional_mode"
     else
-        printf '  [MERK] NCB differ i preset-bundle-modus — sjekkar ELF-paritet likevel\n\n'
+        printf '  [MERK] NCB differ i bundle-args-modus — sjekkar ELF-paritet likevel\n\n'
     fi
 fi
 
@@ -257,7 +258,7 @@ printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 if [ "$brukte_transitional" -eq 1 ]; then
     printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (%s)...\n' "$transitional_mode"
 else
-    printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (preset-bundle)...\n'
+    printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (bundle-args)...\n'
 fi
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
@@ -265,8 +266,8 @@ if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
         printf '%s\n' "$transitional_mode" > "$TRANSITIONAL_MARKER"
         printf '=== Omgang 6b.3: TRANSITIONAL BESTÅTT (Gen1 ELF skreiv Gen2 NCB via %s) ===\n' "$transitional_mode"
     else
-        printf 'preset-bundle\n' > "$PASS_MARKER"
-        printf '=== Omgang 6b.3: BESTÅTT (Gen1 ELF skreiv Gen2 NCB via preset-bundle) ===\n'
+        printf 'bundle-args\n' > "$PASS_MARKER"
+        printf '=== Omgang 6b.3: BESTÅTT (Gen1 ELF skreiv Gen2 NCB via bundle-args) ===\n'
     fi
     exit 0
 fi
