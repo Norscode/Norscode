@@ -264,7 +264,7 @@ Ferdig naar:
 - [x] Native ELF runtime har fremdeles svakheter rundt stor fil-I/O, map/list/json og compiler-bundle.
   - Delvis lukka: fil-I/O, map/list/json og native dispatch er no sterke nok til at `./bin/nc test` og `bash tools/verify_selvstendighet.sh` passerer lokalt.
 - [ ] Stage-0 seed ma kunne reproduseres uten C-kilde i repoet.
-- [ ] Gen1 ELF bundle-køyring på Linux x86_64 feilar framleis med `Illegal instruction`; CI markerer dette som transitional, ikkje ferdig hard gate.
+- [ ] Ekte Gen1 ELF bundle-køyring på Linux x86_64 er framleis ikkje stabil; vi har flytta feilen frå tidleg `Illegal instruction` til seinare krasj i intern bundle-sti, og CI brukar derfor transitional source-NCB-løype i staden for hard gate.
 - [x] Dokumentasjonen har mange historiske referanser som maa ryddes varsomt.
   - Historiske referansar er no merka som arkiv/vedlikehald der dei står att.
 - [x] CI maa skille historikk i `archive/` fra aktiv normal flyt.

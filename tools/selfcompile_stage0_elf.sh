@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# tools/selfcompile_stage0_elf.sh — Omgang 6b.3: Gen1 stage-0 ELF → Gen2 ELF (byte-paritet)
+# tools/selfcompile_stage0_elf.sh — Omgang 6b.3: Gen1 stage-0 ELF → Gen2 ELF (transitional paritet)
 #
 # Gen1: host byggjer stage-0 NCB + ELF.
-# Gen2: Gen1 ELF køyrer bygg_bundle (same moduler) → NCB → host ncb_to_elf.
-# Bestått når Gen1.elf og Gen2.elf er identiske (Linux x86-64).
+# Gen2: Gen1 ELF les transitional source-NCB via elf_compile_driver → NCB → host ncb_to_elf.
+# Full stage-0 bestått krev ekte intern ELF-bundle; transitional source-NCB skriv berre eigen markør.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
