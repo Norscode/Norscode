@@ -218,10 +218,12 @@ build_from_bootstrap_c() {
     # On Linux, prefer -lsqlite3 (libsqlite3-dev); fall back to direct .so path.
     _sqlite_flag="-lsqlite3"
     _static_flag=""
+    _static_extra_libs=""
     case "$(uname -s)" in
         Linux)
             if [ "$STATIC_STAGE0" = "1" ]; then
                 _static_flag="-static"
+                _static_extra_libs="-lm"
             fi
             # Test with a trivial source to confirm -lsqlite3 links
             _sqlite_test=$(mktemp /tmp/nc_sq_XXXXXX.c)
@@ -233,7 +235,7 @@ build_from_bootstrap_c() {
             rm -f "$_sqlite_test"
             ;;
     esac
-    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_static_flag $_sqlite_flag; then
+    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_static_flag $_sqlite_flag $_static_extra_libs; then
         _clang_ec=$?
         rm -f "$tmp"
         tmp=""
