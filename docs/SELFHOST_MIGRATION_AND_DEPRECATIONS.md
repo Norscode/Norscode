@@ -1,12 +1,12 @@
 # Norscode Selfhost Migration and Deprecations
 
-Status: **Fase 2 (June 2026)** — Native-first enforcement
+Status: **Fase 3 (June 2026)** — Native-first med vedlikehalds-C som eksplisitt nødbane; både maintainer-gater og full normalflate er verifisert grøne
 
 ## Overview
 
 This document tracks what was **removed**, **deprecated**, and **why** during selfhost migration.
 
-## Removed in Fase 2
+## Removed in Fase 2 (historisk)
 
 ### ❌ Python-based compilation pipeline
 
@@ -64,18 +64,21 @@ python3 tools/main.py run app.no
 **Why kept:**
 - Necessary for chicken-and-egg bootstrap (L6)
 - Each platform needs seed binary
-- Generated via `tools/maint/regen_native.sh` (no Python)
+- Maintained via `tools/maint/regen_native.sh` with isolated maintainer-output under `build/maintainer_regen/` (no Python)
 
 ### ✅ `bootstrap/maint/c/` C generation (maintainer-only)
 
 **Why kept:**
 - Vedlikehaldsbro mellom NCB JSON og native ELF
 - Stage-0 verification (L6) i vedlikehaldspipe (`NORSCODE_BOOTSTRAP_C=1` / explicit rebuild)
-- Will be replaced by ELF emitter in `.no` (Fase 6+)
+- Haldast enno som vedlikehaldsbru i Fase 3; er planlagt vurdert vidare for full erstatning i seinare fase.
 
 **Boundary:**
 - Dette er ikkje normal CLI-, CI- eller release-veg
+- Standard vedlikehaldsregen går no til isolerte build-katalogar; `bootstrap/maint/c/` er berre aktuell når output vert peika dit eksplisitt
 - Normal flyt går via `bootstrap/stage0/`, `dist/norscode_native`, `bin/nc` og native/selfhost-verifikasjon
+- Vedlikehaldsbrua er no eksplisitt verifisert via `tools/verify_nc_main_host.sh`, `tools/maint/regen_verify.sh` og `tools/maint/verify_l6.sh`
+- Full normalflate er òg verifisert via `tools/verify_selvstendighet.sh`, inkludert grøne `std.json`-kompattestar
 
 ### ✅ `archive/` historical code
 

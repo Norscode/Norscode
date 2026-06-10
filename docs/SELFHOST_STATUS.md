@@ -33,8 +33,8 @@ timeline
 
 | Nivå | Status | Verktøy |
 |------|--------|---------|
-| L1–L3 | ✅ | `verify_selvstendighet.sh`, `bootstrap-self` |
-| L4–L6 | ✅ | `regen_native.sh`, `verify_l6.sh`, seed → regen → clang i eksplisitt maintainer-lane |
+| L1–L3 | ✅ | `verify_selvstendighet.sh`, `bootstrap-self`; full normalflate er verifisert grøn etter siste JSON-kompatfikser |
+| L4–L6 | ✅ | `regen_native.sh`, `regen_verify.sh`, `verify_l6.sh`, `verify_nc_main_host.sh`; seed-fornying i eksplisitt maintainer-lane, ikkje del av normal CI/bruk |
 | L5 / L5b | ✅ | `selfcompile_l5.sh`, `selfcompile_l5b.sh` |
 
 Detaljar: [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md). Legacy C-VM: [archive/c_minimal_vm/README.md](../archive/c_minimal_vm/README.md).
@@ -51,6 +51,8 @@ Detaljar: [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md). Legacy C-VM: [archiv
 | Testsystem | ✅ | `tools/nc_test.sh`: 111/111 native (øvrige hopp er server/async). `test_selfhost.no` (monolitt ~4000 linjer) passerer native utan skip. |
 | Web og runtime | ✅ | Web-eksempler og stdlib bygges på native/CI; full nett-server-runtime er egen flate (server-tester hoppes i `nc_test.sh`). |
 | Pakking og release | ✅ | Release-binær og `verify_l6.sh`; installasjon utan C-verktøykjede er dokumentert. |
+| JSON-kompat | ✅ | `tests/test_json.no` og `tests/test_json_invalid.no` er grønne igjen i normal `./bin/nc`-løype og inngår i grønn `verify_selvstendighet.sh`. |
+| Maintainer-bru | ✅ | Attverande generated-C-bru er isolert og verifisert via `verify_nc_main_host.sh`, `regen_verify.sh` og `verify_l6.sh`. |
 
 ## Kjente avvik
 
@@ -61,7 +63,7 @@ Enkelte `.nlir`-cases kan fortsatt mangle full linjeparser i den store compiler-
 ## Prioritet nå
 
 1. Hald Linux x86_64 ELF self-compile-paritet grøn i GitHub CI.
-2. Hald regen-C til minimum i eksplisitt maintainer-lane fram til ELF-emitter i `.no`.
+2. Hald maintainer-brua via generated-C smal, eksplisitt og avgrensa til seed-fornying.
 3. Fjern gjenværende snapshot-orakler der selfhost-output er stabil.
 4. Hold `ir-disasm --strict` og CI på same kontrakt som [IR_CONTRACT.md](IR_CONTRACT.md).
 
