@@ -1,20 +1,27 @@
 #!/usr/bin/env bash
-# tools/verify_nc_main_host.sh — smoke for .no-host (nc_main.no er no standard)
+# tools/verify_nc_main_host.sh — maintainer-smoke for opt-in .no-host / nc_main
+#
+# Dette er ikkje normal dagleg flyt. Skriptet verifiserer den opt-in host-banen
+# som krev maintainer-regenerering for aa bygge bundle med nc_main.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/dist/norscode_native"
-DISPATCH="$ROOT/bootstrap/maint/c/nc_dispatch.c"
+VERIFY_ROOT="$ROOT/build/verify_nc_main_host"
+NCB="$VERIFY_ROOT/kompiler.ncb.json"
 
-printf '=== nc_main host-verifikasjon ===\n\n'
+printf '=== nc_main host-verifikasjon (maintainer / opt-in) ===\n\n'
 
-printf '1. Regenererer og byggjer (inkl. nc_main i bundle)...\n'
-NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
+rm -rf "$VERIFY_ROOT"
+mkdir -p "$VERIFY_ROOT"
+
+printf '1. Regenererer og byggjer i isolert maintainer-modus (inkl. nc_main i bundle)...\n'
+BOOTSTRAP_C_ROOT="$VERIFY_ROOT" NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
 printf '\n'
 
-if ! grep -q 'selfhost\.nc_main\.start' "$DISPATCH"; then
-    printf 'Feil: nc_dispatch manglar selfhost.nc_main.start etter regen\n' >&2
+if ! grep -q 'selfhost\.nc_main\.start' "$NCB"; then
+    printf 'Feil: %s manglar selfhost.nc_main.start etter isolert regen\n' "$NCB" >&2
     exit 1
 fi
 
@@ -34,4 +41,4 @@ printf '%s' "$_out" | grep -q 'test_math OK' || {
 }
 printf '  ✓ tests/test_math.no\n\n'
 
-printf '=== nc_main host-verifikasjon: BESTÅTT ===\n'
+printf '=== nc_main host-verifikasjon (maintainer / opt-in): BESTÅTT ===\n'

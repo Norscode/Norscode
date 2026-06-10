@@ -1,29 +1,28 @@
 #!/usr/bin/env bash
-# tools/maint/verify_l6.sh — L6: seed → regen → clang (lokal verifikasjon)
+# tools/maint/verify_l6.sh — maintainer-verifikasjon av L6: seed → regen → clang
 #
-# bootstrap/maint/c/*.c er generert frå .no; committed kopi er tillatt for CI-bootstrap.
+# Dette er ikkje normal build/test-flyt.
+# bootstrap/maint/c/ er lokal maintainer-output frå regen-lanen.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+L6_ROOT="$ROOT/build/verify_l6"
 
-printf '=== L6: seed → regen → clang ===\n\n'
+printf '=== L6 maintainer-verifikasjon: seed → regen → clang ===\n\n'
 
-printf '1. Sjekk at bootstrap/maint/c/*.c er generert (ikkje handskrive)...\n'
-if [ -f "$ROOT/bootstrap/maint/c/norscode_generated.c" ]; then
-    printf '  [OK] norscode_generated.c er generert av ncb_to_c.no\n\n'
-else
-    printf '  [OK] bootstrap/maint/c/ finst ikkje (vert generert ved REGEN=1)\n\n'
-fi
+printf '1. Klargjer isolert maintainer-output i build/verify_l6/...\n'
+rm -rf "$L6_ROOT"
+mkdir -p "$L6_ROOT"
+printf '  [OK] bruker %s som isolert maintainer-output\n\n' "$L6_ROOT"
 
-printf '2. Bygg frå seed + regen (slettar generert c om det finst)...\n'
-rm -f "$ROOT/bootstrap/maint/c/norscode_generated.c" "$ROOT/bootstrap/maint/c/nc_dispatch.c"
+printf '2. Maintainer-bygg frå seed + regen (utan aa skrive til bootstrap/maint/c/)...\n'
 rm -f "$ROOT/dist/norscode_native"
-bash "$ROOT/tools/build_norscode_native.sh"
+BOOTSTRAP_C_ROOT="$L6_ROOT" NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
 printf '\n'
 
-printf '3. Deterministisk regen (to kjøringar)...\n'
+printf '3. Deterministisk maintainer-regen (to køyringar)...\n'
 bash "$ROOT/tools/maint/regen_verify.sh"
 printf '\n'
 
-printf '=== L6: BESTÅTT ===\n'
+printf '=== L6 maintainer-verifikasjon: BESTÅTT ===\n'

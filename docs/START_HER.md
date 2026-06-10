@@ -37,6 +37,8 @@ Hvis du vil bygge fra kildekode:
 bash tools/build_norscode_native.sh
 ```
 
+Dette brukar stage-0-seed og krev ikkje C-verktøykjede i normal bruk. Maintainer-regen er ein separat, eksplisitt vedlikehaldsløype.
+
 ## Ditt første program
 
 ```norscode

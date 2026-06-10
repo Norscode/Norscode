@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/verify_selvstendighet.sh — verifiser L1–L6 selvstendighet (utan Python)
+# tools/verify_selvstendighet.sh — verifiser normal L1–L6-sjølvstendighet (utan Python)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -21,17 +21,17 @@ run_step() {
     exit 1
 }
 
-printf '=== Norscode selvstendighet (L1–L6) ===\n\n'
+printf '=== Norscode sjølvstendighet (normalflate, L1–L6) ===\n\n'
 
 run_step '0. Python-gate i tools/...' bash "$ROOT/tools/python_dependency_audit.sh"
 
 run_step '0b. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
 
-printf '1. L6: bootstrap/maint/c/ er generert frå .no (ikkje handskrive C)...\n'
+printf '1. L6 maintainer-lane: eventuell bootstrap/maint/c/ er generert frå .no (ikkje handskrive C)...\n'
 if [ -f "$ROOT/bootstrap/maint/c/norscode_generated.c" ]; then
-    printf '  [OK] norscode_generated.c er generert av ncb_to_c.no\n\n'
+    printf '  [OK] bootstrap/maint/c/ er berre eksplisitt maintainer-output, ikkje normalflate\n\n'
 else
-    printf '  [OK] bootstrap/maint/c/ er ikkje committed (optimal)\n\n'
+    printf '  [OK] bootstrap/maint/c/ er ikkje committed i normalflata (optimal)\n\n'
 fi
 
 run_step '2. Stage-0: norscode_native...' bash "$ROOT/tools/build_norscode_native.sh"
@@ -50,4 +50,4 @@ else
     run_step '7. Testsuite (native)...' ./bin/nc test
 fi
 
-printf '=== Selvstendighet L1–L6: BESTÅTT ===\n'
+printf '=== Sjølvstendighet L1–L6 (normalflate): BESTÅTT ===\n'

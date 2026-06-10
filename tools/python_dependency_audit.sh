@@ -37,16 +37,16 @@ platform_name() {
 
 resolve_native() {
     local platform stage0
+    if [ -x "$ROOT/dist/norscode_native" ]; then
+        printf '%s\n' "$ROOT/dist/norscode_native"
+        return 0
+    fi
     if platform="$(platform_name 2>/dev/null)"; then
         stage0="$ROOT/bootstrap/stage0/norscode-$platform"
         if [ -x "$stage0" ]; then
             printf '%s\n' "$stage0"
             return 0
         fi
-    fi
-    if [ -x "$ROOT/dist/norscode_native" ]; then
-        printf '%s\n' "$ROOT/dist/norscode_native"
-        return 0
     fi
     printf 'Feil: fann verken stage-0-seed eller dist/norscode_native for Python-audit\n' >&2
     return 1

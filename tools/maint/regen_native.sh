@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
-# tools/maint/regen_native.sh — regenerer bootstrap/maint/c/ frå Norscode (utan Python)
+# tools/maint/regen_native.sh — regenerer isolert maintainer-output frå Norscode (utan Python)
 #
 # Krever: dist/norscode_native (seed), clang, selfhost/*.no
 #
 # Steg:
-#   1. bundle → bootstrap/kompiler.ncb.json
-#   2. archive/legacy_c_backend/ncb_to_c.no → bootstrap/maint/c/norscode_generated.c
-#   3. selfhost/maint/gen_dispatch.no → bootstrap/maint/c/nc_dispatch.c
-#   4. clang → dist/norscode_native (valfritt med --rebuild)
+#   1. bundle → <REGEN_ROOT>/kompiler.ncb.json
+#   2. archive/legacy_c_backend/ncb_to_c.no → <REGEN_ROOT>/maint/c/norscode_generated.c
+#   3. clang → dist/norscode_native (valfritt med --rebuild)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 NC="$ROOT/bin/nc"
 REBUILD=0
-# REGEN_ROOT: der output lagrast (standard bootstrap/). Bruk build/regen_verify for sjekk utan å endre repo.
-REGEN_ROOT="${REGEN_ROOT:-$ROOT/bootstrap}"
+# REGEN_ROOT: der output lagrast. Standard er isolert build-root for å unngå
+# å gjere bootstrap/maint/c/ til aktiv arbeidsflate.
+REGEN_ROOT="${REGEN_ROOT:-$ROOT/build/maintainer_regen}"
 
 if [ "${1:-}" = "--rebuild" ]; then
     REBUILD=1
@@ -26,12 +26,12 @@ if [ ! -x "$ROOT/dist/norscode_native" ]; then
     exit 1
 fi
 
-printf '=== Regenerer bootstrap/maint/c/ (utan Python) ===\n\n'
+printf '=== Regenerer isolert maintainer-output (utan Python) ===\n\n'
 
 printf '[1/4] Bundle kompilator-modular...\n'
 TMP="$(mktemp "${TMPDIR:-/tmp}/nc_bundle_XXXXXX")"
 trap 'rm -f "$TMP"' EXIT
-# Same modular sett som L5 (runtime-kompilator); maint/ncb_to_c og maint/gen_dispatch køyrast som eigne filer.
+# Same modular sett som L5 (runtime-kompilator); C-host-tabellen blir no generert direkte i ncb_to_c-løypa.
 "$NC" bundle \
     selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
     selfhost.parser=selfhost/parser.no \
@@ -56,23 +56,15 @@ env NORSCODE_CMD=run \
     "$ROOT/dist/norscode_native"
 printf '  ✓ norscode_generated.c (%d bytes)\n' "$(wc -c < "$REGEN_ROOT/maint/c/norscode_generated.c" | tr -d ' ')"
 
-printf '[3/4] gen_dispatch → %s/maint/c/nc_dispatch.c...\n' "$REGEN_ROOT"
-env NORSCODE_CMD=run \
-    NORSCODE_FILE="$ROOT/selfhost/maint/gen_dispatch.no" \
-    NC_NCB_INPUT="$REGEN_ROOT/kompiler.ncb.json" \
-    NC_DISPATCH_OUTPUT="$REGEN_ROOT/maint/c/nc_dispatch.c" \
-    "$ROOT/dist/norscode_native"
-printf '  ✓ nc_dispatch.c (%d bytes)\n' "$(wc -c < "$REGEN_ROOT/maint/c/nc_dispatch.c" | tr -d ' ')"
-
 if [ "$REBUILD" -eq 1 ]; then
-    printf '[4/4] Bygg ny dist/norscode_native...\n'
+    printf '[3/3] Bygg ny dist/norscode_native frå %s/maint/c...\n' "$REGEN_ROOT"
     rm -f "$ROOT/dist/norscode_native"
-    bash "$ROOT/tools/build_norscode_native.sh"
-    printf '  ✓ dist/norscode_native oppdatert\n'
+    BOOTSTRAP_C_ROOT="$REGEN_ROOT" NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"
+    printf '  ✓ dist/norscode_native oppdatert frå %s/maint/c\n' "$REGEN_ROOT"
 else
-    printf '[4/4] Hopp over clang (--rebuild for å byggje ny binær)\n'
+    printf '[3/3] Hopp over clang (--rebuild for å byggje ny binær)\n'
 fi
 
 printf '\n=== Regen ferdig ===\n'
 printf 'Køyr: bash tools/verify_selvstendighet.sh\n'
-printf 'L6: bootstrap/maint/c/ og kompiler.ncb.json er generert lokalt (ikkje commit).\n'
+printf 'L6: maintainer-output og kompiler.ncb.json er generert lokalt i %s (ikkje commit).\n' "$REGEN_ROOT"

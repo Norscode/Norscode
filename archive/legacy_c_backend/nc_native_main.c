@@ -16,6 +16,8 @@ NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na);
 NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
 NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
+static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
+NcVal *nc_fn_builtin_neste_token(NcVal **a, int na);
 
 /* Stdlib dispatch handlers */
 static NcVal *nc_std_path_basename(NcVal **args, int na);
@@ -91,6 +93,41 @@ static NcVal *nc_exec_find_fn(NcVal *functions, const char *name) {
         }
     }
     return fuzzy_match;
+}
+
+static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
+    if (!strcmp(n, "host_exec_ncb_json")) return nc_fn_builtin_host_exec_ncb_json(a, na);
+    if (!strcmp(n, "host_kall_bygg_bundle")) return nc_fn_builtin_host_kall_bygg_bundle(a, na);
+
+    for (int i = 0; nc_dispatch[i].name; i++) {
+        if (!strcmp(nc_dispatch[i].name, n)) return nc_dispatch[i].fn(a, na);
+    }
+
+    const char *last = strrchr(n, '.');
+    last = last ? last + 1 : n;
+    for (int i = 0; nc_dispatch[i].name; i++) {
+        const char *fn_last = strrchr(nc_dispatch[i].name, '.');
+        fn_last = fn_last ? fn_last + 1 : nc_dispatch[i].name;
+        if (!strcmp(fn_last, last)) return nc_dispatch[i].fn(a, na);
+    }
+
+    if (!strncmp(n, "builtin.", 8)) return nc_dispatch_call(n + 8, a, na);
+    if (!strncmp(n, "__main__.", 9)) return nc_dispatch_call(n + 9, a, na);
+
+    char alias_buf[256];
+    strncpy(alias_buf, last, sizeof(alias_buf) - 1);
+    alias_buf[sizeof(alias_buf) - 1] = '\0';
+    char *token_suffix = strstr(alias_buf, "_token");
+    if (token_suffix) {
+        *token_suffix = '\0';
+        return nc_dispatch_call(alias_buf, a, na);
+    }
+
+    return NULL;
+}
+
+NcVal *nc_fn_builtin_neste_token(NcVal **a, int na) {
+    return nc_dispatch_call("neste", a, na);
 }
 
 /* Forward decl */

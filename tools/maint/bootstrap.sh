@@ -1,7 +1,10 @@
 #!/bin/sh
 # tools/maint/bootstrap.sh — maintainer-bootstrap via stage-0 / bootstrap-c
 #
-# Bygger dist/norscode_native frå pre-genererte C-filer i bootstrap/maint/c/.
+# Maintainer-skript for overgangs-/vedlikehaldsspor.
+# Bygger dist/norscode_native frå pre-genererte maintainer-filer i vald BOOTSTRAP_C_ROOT
+# (standard: repoets bootstrap/ som historisk kompatibilitetsflate).
+# Dette er ikkje normal build/CI-flyt; normalvegen er seed frå bootstrap/stage0/ eller release.
 # Krev KUN: clang (eller cc)
 #
 # Bruk:
