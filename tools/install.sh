@@ -52,6 +52,9 @@ if [ -x "$ROOT_DIR/dist/norscode_native" ]; then
     cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/norscode"
     cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/nc"
     chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
+    if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/tools/install-macos-file-icons.sh" ]; then
+        bash "$ROOT_DIR/tools/install-macos-file-icons.sh" || true
+    fi
     printf 'Installert: %s/norscode\n' "$BIN_DIR"
     printf 'Legg til PATH: export PATH="%s:$PATH"\n' "$BIN_DIR"
     exit 0
@@ -97,6 +100,10 @@ chmod +x "$BIN_DIR/norscode"
 
 # Lag nc-alias
 ln -sf "$BIN_DIR/norscode" "$BIN_DIR/nc" 2>/dev/null || cp "$BIN_DIR/norscode" "$BIN_DIR/nc"
+
+if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/tools/install-macos-file-icons.sh" ]; then
+    bash "$ROOT_DIR/tools/install-macos-file-icons.sh" || true
+fi
 
 printf '\nNorscode installert!\n'
 printf '  Binary: %s/norscode\n' "$BIN_DIR"

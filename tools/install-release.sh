@@ -109,5 +109,9 @@ do
   fi
 done
 
+if [ "$(uname -s)" = "Darwin" ] && [ -x "${CURRENT_LINK}/tools/install-macos-file-icons.sh" ]; then
+  bash "${CURRENT_LINK}/tools/install-macos-file-icons.sh" || true
+fi
+
 printf 'Installert release: %s\n' "$TARGET_DIR"
 printf 'Aktiv versjon: %s\n' "$CURRENT_LINK"
