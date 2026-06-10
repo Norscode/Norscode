@@ -55,21 +55,11 @@ int main() {
 }
 ```
 
-### gen_dispatch.no (VM Dispatch)
+### gen_dispatch.no
 
-Generates C dispatch table for VM opcodes.
-
-```c
-static const void *labels[] = {
-    &&L_PUSH,   // 0
-    &&L_ADD,    // 1
-    &&L_PRINT,  // 2
-    &&L_HALT    // 3
-};
-
-// ...
-goto *labels[opcode];
-```
+Historisk hjelpeskript for generated dispatch i den gamle C-løypa.
+I dagens maintainer-lane blir dispatch-tabellen generert direkte i
+`norscode_generated.c`, og `selfhost/maint/gen_dispatch.no` er no fjerna.
 
 ## Why It Was Removed
 

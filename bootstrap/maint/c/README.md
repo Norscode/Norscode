@@ -1,21 +1,21 @@
-# Generert C (ikkje i git)
+# Lokal maintainer-output (historisk vedlikehaldsbane)
 
-`norscode_generated.c` og `nc_dispatch.c` vert laga av `tools/maint/regen_native.sh` frå `.no`-kjelda.
+`bootstrap/maint/c/` er ikkje brukt som aktiv normalflate, og bør normalt vere tomt.
+Vedlikehald/regen-output går i staden til `build/maintainer_regen/` som standard.
+`norscode_generated.c` er no normalt skrive til `REGEN_ROOT/maint/c/norscode_generated.c`.
 
 ```bash
 # Maintainer (krev seed i bootstrap/stage0/ eller release):
-REGEN=1 bash tools/build_norscode_native.sh
+NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash tools/build_norscode_native.sh
 
 # eller
 bash tools/maint/regen_native.sh --rebuild
 ```
 
-Normal utvikling og CI bruker **ikkje** denne mappa — berre `bootstrap/stage0/norscode-*` eller GitHub Release.
+Normal utvikling og CI bruker **ikkje** denne mappa. Normalvegen er `bootstrap/stage0/norscode-*` eller GitHub Release.
 
-Engangsmigrering frå committed C til stage0-seed (Linux):
+Skulle du trenge fastlåste lokale snapshots i denne mappa (t.d. midlertidig):
 
 ```bash
-bash tools/maint/migrate_bootstrap_c_to_stage0.sh
-git add bootstrap/stage0/norscode-linux-x86_64
-git rm bootstrap/maint/c/norscode_generated.c bootstrap/maint/c/nc_dispatch.c
+REGEN_ROOT=bootstrap/maint/c NORSCODE_BOOTSTRAP_C=1 bash tools/maint/regen_native.sh --rebuild
 ```

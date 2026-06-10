@@ -24,8 +24,8 @@ Program output
 
 | Phase | Status | Path |
 |-------|--------|------|
-| **Fase 1–2** | Historical / maintenance | `archive/legacy_c_backend/ncb_to_c.no` → C code → clang (vedlikehald/sjekkbanar) |
-| **Fase 3 (now)** | Deprecation (maintainer lane) | Vedlikehaldsregen går via `tools/maint/regen_native.sh` → `bootstrap/maint/c/` og er ikkje del av normal bruk |
+| **Fase 1–2** | Historical / maintenance | `archive/legacy_c_backend/ncb_to_c.no` → C code → clang (historisk / vedlikehald) |
+| **Fase 3 (now)** | Maintainer-only exception | Vedlikehaldsregen går via `tools/maint/regen_native.sh` → isolert `build/maintainer_regen/` → clang (berre seed-fornying) |
 | **Fase 6+ (planned)** | Replaced | Native ELF emitter in `.no` (no C needed ever) |
 
 ## Normal User Commands
@@ -40,19 +40,19 @@ All of these work **without any C toolchain**:
 ./bin/nc build program.no out.json   # Build bytecode
 ```
 
-## What Requires C (Developer-only)
+## What Requires C (Maintainer-only)
 
-Only explicit maintenance tasks in `tools/maint/` need C toolchain:
+Only explicit seed-maintenance tasks need C toolchain:
 
 ```bash
-# Bootstrap L6 only (maintainer lane; regenerate stage-0 bridge when needed):
+# Maintainer-only: rebuild the historical seed bridge when seed maintenance requires it
 NORSCODE_BOOTSTRAP_C=1 bash tools/build_norscode_native.sh
 
-# Maintainer: regen bootstrap/maint/c/ from Norscode
+# Maintainer-only: regenerate isolated maintainer-output from Norscode
 bash tools/maint/regen_native.sh
 ```
 
-These are **not** part of normal workflow. See [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md).
+These are **not** part of normal workflow, normal CI, or release. See [SELVSTENDIGHET_PLAN.md](SELVSTENDIGHET_PLAN.md).
 
 ## Bytecode Format: NCB JSON
 
@@ -81,7 +81,7 @@ Executed by `selfhost/vm.no` with deterministic semantics.
 
 ## For Native Binary Output (Fase 6+)
 
-Currently: NCB JSON → `nc bygg --mål elf64` (via native codegen)
+Currently: NCB JSON → `nc bygg-native` (via native codegen)
 
 Planned (Fase 6+): Direct ELF emission in `.no` without C.
 
@@ -113,7 +113,7 @@ No clang needed.
 
 ## Migration from C Backend
 
-**If you were using C backend:**
+**If you were using the old C backend:**
 
 Old path (removed):
 ```bash
@@ -122,15 +122,15 @@ gcc -O2 app.c -o app                 # Compiled C
 ./app                                # Ran native binary
 ```
 
-New path (Fase 3):
+Normal path now:
 ```bash
 ./bin/nc compile app.no out.ncb.json # Bytecode
 ./bin/nc run app.no                  # VM executes
 ```
 
-Future path (Fase 6):
+Native path now:
 ```bash
-./bin/nc bygg --mål elf64 app.no     # Direct ELF (no C)
+./bin/nc bygg-native app.no app.elf  # Direct ELF (no C)
 ./app.elf                            # Native binary
 ```
 

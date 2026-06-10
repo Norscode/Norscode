@@ -13,4 +13,7 @@ mkdir -p "$(dirname "$OUT")"
 env NORSCODE_BUNDLE_ENTRY="selfhost.elf_compile_driver.start" \
     "$ROOT/bin/nc" bundle "${OMGANG6B_BUNDLE_ARGS[@]}" --output "$OUT"
 
+mkdir -p "$ROOT/bootstrap/precompiled_fragments" "$ROOT/bootstrap/precompiled_fragments_inner"
+"$ROOT/bin/nc" run "$ROOT/selfhost/tooling/regenerate_omgang6b_fragments.no" >/dev/null
+
 printf '✓ Omgang 6b stage-0 NCB: %s (%d bytes)\n' "$OUT" "$(wc -c < "$OUT" | tr -d ' ')"

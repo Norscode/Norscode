@@ -139,6 +139,9 @@ fi
 
 printf '[2/4] Gen2 NCB frå Gen1 ELF (prøv bundle-args, elles direkte source-ncb, elles chunked source-ncb)...\n'
 rm -f "$GEN2_NCB"
+GEN2_CHUNK_DIR="$ROOT/build/6b/selfcompile"
+GEN2_CHUNK_ENV="build/6b/selfcompile"
+rm -f "$GEN2_CHUNK_DIR"/part_*.json
 brukte_transitional=0
 transitional_mode=""
 GEN2_ENTRY="selfhost.elf_compile_driver.start"
@@ -169,20 +172,34 @@ GEN1_ELF_PRESET_RUN=(
     "NORSCODE_CMD=run"
     "NORSCODE_BUNDLE_ARGS=$GEN2_BUNDLE_ARGS"
     "NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB"
+    "NORSCODE_BUNDLE_OUTPUT_CHUNKS=1"
     "NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY"
     "$GEN1_ELF"
 )
 
 printf '  [INFO] Prøver ekte bundle-args via Gen1 ELF...\n'
 if koyr_gen1_elf "bundle-args" "$GEN1_ELF_PRESET_LOG" "${GEN1_ELF_PRESET_RUN[@]}"; then
-    printf '  [OK] Gen1 ELF skreiv Gen2 NCB via bundle-args\n'
+    if [ -f "$GEN2_NCB" ]; then
+        printf '  [OK] Gen1 ELF skreiv Gen2 NCB via bundle-args\n'
+    elif [ -f "$GEN2_CHUNK_DIR/part_000.json" ]; then
+        cat "$GEN2_CHUNK_DIR"/part_*.json > "$GEN2_NCB"
+        printf '  [OK] Gen1 ELF skreiv Gen2 NCB via bundle-args chunk-output\n'
+    else
+        printf '  [FEIL] Gen1 ELF returnerte suksess utan output\n' >&2
+        exit 1
+    fi
 else
     _gen2_rc=$?
-    skriv_gen1_elf_diagnose "bundle_args" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_BUNDLE_ARGS=\"$GEN2_BUNDLE_ARGS\" NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
-    printf '  [MERK] Bundle-args feila med exit %d; brukar transitional host-kopi av Gen1 NCB\n' "$_gen2_rc"
-    cp "$GEN1_NCB" "$GEN2_NCB"
-    brukte_transitional=1
-    transitional_mode="host-copy-source-ncb"
+    if ls "$GEN2_CHUNK_DIR"/part_*.json >/dev/null 2>&1; then
+        cat "$GEN2_CHUNK_DIR"/part_*.json > "$GEN2_NCB"
+        printf '  [MERK] Bundle-args krasja med exit %d, men chunk-output vart skrive; brukar artifactet\n' "$_gen2_rc"
+    else
+        skriv_gen1_elf_diagnose "bundle_args" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_BUNDLE_ARGS=\"$GEN2_BUNDLE_ARGS\" NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
+        printf '  [MERK] Bundle-args feila med exit %d; brukar transitional host-kopi av Gen1 NCB\n' "$_gen2_rc"
+        cp "$GEN1_NCB" "$GEN2_NCB"
+        brukte_transitional=1
+        transitional_mode="host-copy-source-ncb"
+    fi
 fi
 
 if [ ! -f "$GEN2_NCB" ]; then

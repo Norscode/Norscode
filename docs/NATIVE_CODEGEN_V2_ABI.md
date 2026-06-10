@@ -13,6 +13,21 @@ runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging/bootstrappin
 Kompilerte ELF-plattformer plasserer runtime-kode på `TEXT_VA` og data/heap i faste områder
 for deterministic bygging.
 
+## Skilje mot historisk C-runtime
+
+Det finst no to ulike runtime-kontraktar i repoet:
+
+- Aktiv native kontrakt:
+  - `selfhost/native_execution/native_codegen_v2.no`
+  - brukar fast `RT_*`-tabell, ELF-segment og `NcVal*`-basert kallkonvensjon direkte i native output
+- Historisk / maintainer-only C-kontrakt:
+  - `archive/legacy_c_backend/ncb_to_c.no`
+  - embedder `archive/legacy_c_backend/nc_runtime_mini.c` i generert `bootstrap/maint/c/norscode_generated.c`
+  - blir berre brukt i maintainer-lanen for seed-regenerering
+
+`archive/legacy_c_backend/nc_runtime_full.c` er per no historisk referanse, ikkje del av normal native kjede
+og ikkje del av seed-first bygg i dagleg flyt.
+
 ## Oppstart og stack
 
 `_start`:

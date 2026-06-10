@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # tools/no_c_python_active_surface.sh
-# Gate for active repository surface while C/Python are phased out.
+# Gate for aktiv repository-surface medan C/Python vert avgrensa til eksplisitt maintainer-lane.
 #
 # Current policy:
 # - No .py files anywhere in repository outside archive/
 # - No new .c/.h files outside the current bootstrap allowlist
-# - No references to Python/C bootstrap in active flow outside the current allowlist
+# - No references to Python/C bootstrap i normal flyt utanfor gjeldande allowlist
 #
 # Vedlikeholdsunntak:
-# - REGEN/MIGRATION-workflows som enno bruker C-bootstrap-intensjon er markerte i MAINTENANCE_WORKFLOWS.
+# - REGEN/MIGRATION-workflows som framleis bruker maintainer-bootstrap er markerte i
+#   MAINTENANCE_WORKFLOWS.
 # - Desse får avvik for `python`, `clang`, `gcc`, `cc`, `ncb_to_c` og C-filer
 #   når og berre når dei køyrer i uttrykkeleg vedlikeholdsmodus.
-# - For `.c/.h` er tillatt aktive flate no avgrensa til `archive/` (allowlist er tom for filer).
+# - For `.c/.h` er tillatt aktiv flate avgrensa til `archive/`; lokal maintainer-output
+#   under build/ eller eksplisitt peika `bootstrap/maint/c/` er ikkje normalflate.
 
 set -euo pipefail
 
@@ -45,6 +47,7 @@ NCB_TO_C_ALLOWLIST=(
   "$ROOT/docs/BYTECODE_VM_PRIMARY_PATH.md"
   "$ROOT/docs/ARCHIVE_INDEX.md"
   "$ROOT/docs/FJERN_PYTHON_C_PLAN.md"
+  "$ROOT/docs/NATIVE_CODEGEN_V2_ABI.md"
   "$ROOT/docs/SELFHOST_HANDLINGSPLAN.md"
   "$ROOT/docs/SELVSTENDIGHET_PLAN.md"
   "$ROOT/docs/SELFHOST_STATUS.md"
@@ -52,7 +55,6 @@ NCB_TO_C_ALLOWLIST=(
   "$ROOT/tools/maint/regen_native.sh"
   "$ROOT/tools/maint/verify_l6.sh"
   "$ROOT/tools/verify_selvstendighet.sh"
-  "$ROOT/bootstrap/maint/c/norscode_generated.c"
 )
 
 ALLOWLIST_FILES=(
@@ -141,9 +143,9 @@ collect_ref_files() {
 print_policy() {
     printf '\nPolicy (no-c/python active surface):\n'
     printf '  - Aktiv flyt: sjølvstendig .no/NCB/Native-ELF, utan Python/C i kjede.\n'
-    printf '  - Vedlikeholdsmodus: berre desse workflowene kan innehalde C/Python/clang/gcc:\n'
+    printf '  - Vedlikeholdsmodus: berre desse workflowene kan innehalde maintainer-bootstrap med C/Python/clang/gcc:\n'
     printf '    - %s\n' "${MAINTENANCE_WORKFLOWS[@]}"
-    printf '  - Vedlikeholdsmodus må vere eksplisitt dokumentert i bootstrap-policy/CI-plan.\n\n'
+    printf '  - Vedlikeholdsmodus må vere eksplisitt dokumentert i bootstrap-policy/CI-plan, og brukar isolert output som standard.\n\n'
 }
 
 fail=0

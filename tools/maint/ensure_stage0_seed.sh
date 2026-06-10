@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # tools/maint/ensure_stage0_seed.sh — sørg for bootstrap/stage0/norscode-<plattform>
 #
-# Rekkefølge: committed stage0 → GitHub release → (siste utvei) bootstrap/maint/c + clang
+# Normal rekkefølge: committed stage0 → GitHub release
+# Maintainer siste utvei: bootstrap/maint/c + clang
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
+ENSURE_ROOT="${ROOT}/build/ensure_stage0_seed"
 
 platform_name() {
     OS="$(uname -s)"
@@ -36,16 +38,16 @@ if bash "$ROOT/tools/fetch_stage0_seed.sh" 2>/dev/null; then
     exit 0
 fi
 
-if [ -f "${ROOT}/bootstrap/maint/c/norscode_generated.c" ] \
-    && [ -f "${ROOT}/bootstrap/maint/c/nc_dispatch.c" ]; then
-    printf 'ℹ︎ Migrerer seed frå bootstrap/maint/c/ (ein gong — fjern C frå git etterpå)\n' >&2
-    NORSCODE_BOOTSTRAP_C=1 bash "$ROOT/tools/build_norscode_native.sh"
+printf 'ℹ︎ Maintainer fallback: byggjer mellombels maintainer-output i %s\n' "$ENSURE_ROOT" >&2
+rm -rf "$ENSURE_ROOT"
+mkdir -p "$ENSURE_ROOT"
+if BOOTSTRAP_C_ROOT="$ENSURE_ROOT" NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash "$ROOT/tools/build_norscode_native.sh"; then
     cp "$ROOT/dist/norscode_native" "$DEST"
     chmod +x "$DEST"
-    printf '✓ stage0-seed frå bootstrap/maint/c: %s (%d bytes)\n' "$DEST" "$(wc -c < "$DEST" | tr -d ' ')"
+    printf '✓ stage0-seed frå isolert maintainer-regen: %s (%d bytes)\n' "$DEST" "$(wc -c < "$DEST" | tr -d ' ')"
     exit 0
 fi
 
 printf 'Feil: ingen stage0-seed for %s\n' "$platform" >&2
-printf 'Køyr på Linux: NORSCODE_BOOTSTRAP_C=1 bash tools/build_norscode_native.sh && cp dist/norscode_native %s\n' "$DEST" >&2
+printf 'Maintainer siste utvei på Linux: køyr isolert regen via BOOTSTRAP_C_ROOT=build/ensure_stage0_seed NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash tools/build_norscode_native.sh og kopier deretter dist/norscode_native til %s\n' "$DEST" >&2
 exit 1
