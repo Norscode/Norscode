@@ -36,7 +36,9 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
-  typedef int ssize_t;
+  #ifndef _SSIZE_T_DEFINED
+  typedef long long ssize_t;
+  #endif
   #define NC_SOCK_CLOSE(fd) closesocket(fd)
   static void nc_winsock_ensure(void) {
       static int done = 0;
@@ -74,7 +76,7 @@ static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v) {
     int port = (port_v && port_v->type==NC_INT) ? (int)port_v->i : 8000;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return nc_int(-1);
-    int opt = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int opt = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
     if (strcmp(host,"0.0.0.0")==0 || strcmp(host,"")==0) addr.sin_addr.s_addr = INADDR_ANY;
@@ -2383,8 +2385,8 @@ static int nc_try_nc_main_host(void) {
         return nc_val_til_exit(r);
     }
     if (cmd && !strcmp(cmd, "l5b-gen2")) {
-        unsetenv("NORSCODE_FILE");
-        unsetenv("NORSCODE_OUTPUT");
+        nc_unsetenv("NORSCODE_FILE");
+        nc_unsetenv("NORSCODE_OUTPUT");
     }
     NcVal *r = nc_dispatch_call("selfhost.nc_main.start", NULL, 0);
     if (!r) return -1;

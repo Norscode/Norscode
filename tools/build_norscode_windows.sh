@@ -152,7 +152,7 @@ build_exe() {
             ;;
         *)
             # GCC / MinGW / krysskompilar
-            "$CC" -O2 -Wno-everything \
+            "$CC" -O2 -w \
                 -o "$OUT" \
                 "$merged" "$SQLITE3_C" \
                 && compile_ok=1 || true
