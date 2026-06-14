@@ -1,0 +1,599 @@
+# mal.no — Generisk template-motor for Norscode
+# Django/Jinja2-inspirert interpolasjon
+#
+# Syntaks:
+#   {{variabel}}              — set inn verdi frå kontekst
+#   {{variabel|stor}}         — filter: stor, liten, lengde, standard:X
+#   {{@for element i liste}}  — løkke-blokk (avslutt med {{@slutt}})
+#   {{@hvis betingelse}}      — betinga blokk ({{@ellers}}, {{@slutt}})
+#   {{@inkluder "sti"}}       — inkluder anna mal-fil (krev fil-tilgang)
+#   {{! kommentar }}          — kommentar, fjernast frå output
+#
+# Bruk:
+#   bruk std.mal som mal
+#   la tmpl = "Hei, {{namn}}! Du har {{tal}} meldingar."
+#   la ctx: ordbok_tekst = {"namn": "Ola", "tal": "3"}
+#   skriv(mal.gjengi(tmpl, ctx))
+
+# ─── Hovudfunksjonar ──────────────────────────────────────────────────────────
+
+funksjon gjengi(tmpl: tekst, ctx: ordbok_tekst) -> tekst {
+    la tokens = _tokeniser(tmpl)
+    la resultat = _evaluer(tokens, ctx, 0)
+    returner resultat["output"]
+}
+
+funksjon gjengi_fil(sti: tekst, ctx: ordbok_tekst) -> tekst {
+    prøv {
+        la innhald = fil_les(sti)
+        returner gjengi(innhald, ctx)
+    } fang (e) {
+        returner "<!-- Mal-feil: kunne ikkje lese " + sti + " -->"
+    }
+    returner ""
+}
+
+# Gjengi med liste av kontekst-ordbøker (nyttig for fleire rader)
+funksjon gjengi_alle(tmpl: tekst, rader: liste<ordbok_tekst>) -> tekst {
+    la ut = ""
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        ut = ut + gjengi(tmpl, rader[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Tokenisering ─────────────────────────────────────────────────────────────
+
+# Token-typar: "tekst", "var", "for", "slutt", "hvis", "ellers", "inkluder", "kommentar"
+funksjon _tokeniser(tmpl: tekst) -> liste<ordbok_tekst> {
+    la tokens: liste<ordbok_tekst> = []
+    la pos: heltall = 0
+    la len: heltall = lengde(tmpl)
+
+    mens pos < len {
+        la opn = _finn_frå(tmpl, "{{", pos)
+        hvis opn < 0 {
+            // Resten er rein tekst
+            la rest = builtin.slice(tmpl, pos, len)
+            hvis rest != "" { legg_til(tokens, _token("tekst", rest)) }
+            pos = len
+        } ellers {
+            // Tekst før {{
+            hvis opn > pos {
+                la før = builtin.slice(tmpl, pos, opn)
+                legg_til(tokens, _token("tekst", før))
+            }
+            la luk = _finn_frå(tmpl, "}}", opn + 2)
+            hvis luk < 0 {
+                // Ugyldig — behandle resten som tekst
+                la rest2 = builtin.slice(tmpl, pos, len)
+                legg_til(tokens, _token("tekst", rest2))
+                pos = len
+            } ellers {
+                la innhald = builtin.trim(builtin.slice(tmpl, opn + 2, luk))
+                legg_til(tokens, _klassifiser(innhald))
+                pos = luk + 2
+            }
+        }
+    }
+    returner tokens
+}
+
+funksjon _klassifiser(innhald: tekst) -> ordbok_tekst {
+    // Kommentar: {{! ... }}
+    hvis tekst_starter_med(innhald, "!") {
+        returner _token("kommentar", "")
+    }
+    // Direktiv: {{@...}}
+    hvis tekst_starter_med(innhald, "@") {
+        la dir = builtin.trim(builtin.slice(innhald, 1, lengde(innhald)))
+        hvis tekst_starter_med(dir, "for ") {
+            returner _token("for", builtin.trim(builtin.slice(dir, 4, lengde(dir))))
+        }
+        hvis dir == "slutt" eller dir == "end" {
+            returner _token("slutt", "")
+        }
+        hvis tekst_starter_med(dir, "hvis ") {
+            returner _token("hvis", builtin.trim(builtin.slice(dir, 5, lengde(dir))))
+        }
+        hvis dir == "ellers" eller dir == "else" {
+            returner _token("ellers", "")
+        }
+        hvis tekst_starter_med(dir, "inkluder ") {
+            returner _token("inkluder", builtin.trim(builtin.slice(dir, 9, lengde(dir))))
+        }
+        returner _token("tekst", "{{@" + innhald + "}}")
+    }
+    // Variabel
+    returner _token("var", innhald)
+}
+
+funksjon _token(type: tekst, verdi: tekst) -> ordbok_tekst {
+    la t: ordbok_tekst = {}
+    t["type"] = type
+    t["verdi"] = verdi
+    returner t
+}
+
+# ─── Evaluering ───────────────────────────────────────────────────────────────
+
+# Returnerer {"output": tekst, "pos": heltall}
+funksjon _evaluer(tokens: liste<ordbok_tekst>, ctx: ordbok_tekst, start: heltall) -> ordbok_tekst {
+    la ut = ""
+    la pos: heltall = start
+    la len: heltall = lengde(tokens)
+
+    mens pos < len {
+        la tok = tokens[pos]
+        la type: tekst = tok["type"]
+
+        hvis type == "tekst" {
+            ut = ut + tok["verdi"]
+            pos = pos + 1
+        } ellers hvis type == "kommentar" {
+            pos = pos + 1
+        } ellers hvis type == "var" {
+            ut = ut + _løs_var(tok["verdi"], ctx)
+            pos = pos + 1
+        } ellers hvis type == "for" {
+            // {{@for element i liste}}
+            la spec = tok["verdi"]
+            la for_res = _evaluer_for(tokens, ctx, pos + 1, spec)
+            ut = ut + for_res["output"]
+            pos = heltall_fra_tekst(for_res["neste"])
+        } ellers hvis type == "hvis" {
+            la hvis_res = _evaluer_hvis(tokens, ctx, pos + 1, tok["verdi"])
+            ut = ut + hvis_res["output"]
+            pos = heltall_fra_tekst(hvis_res["neste"])
+        } ellers hvis type == "slutt" eller type == "ellers" {
+            // Stoppmerke for overordna blokk
+            la r: ordbok_tekst = {}
+            r["output"] = ut
+            r["neste"] = tekst_fra_heltall(pos)
+            returner r
+        } ellers hvis type == "inkluder" {
+            la sti = _avkleip_sitat(tok["verdi"])
+            ut = ut + gjengi_fil(sti, ctx)
+            pos = pos + 1
+        } ellers {
+            pos = pos + 1
+        }
+    }
+
+    la r: ordbok_tekst = {}
+    r["output"] = ut
+    r["neste"] = tekst_fra_heltall(pos)
+    returner r
+}
+
+funksjon _evaluer_for(tokens: liste<ordbok_tekst>, ctx: ordbok_tekst, start: heltall, spec: tekst) -> ordbok_tekst {
+    // spec: "element i liste_variabel"
+    la deler = builtin.split(spec, " i ")
+    la ut = ""
+    la neste: heltall = lengde(tokens)
+
+    hvis lengde(deler) < 2 {
+        la r: ordbok_tekst = {}
+        r["output"] = "<!-- for-feil: ugyldig spec '" + spec + "' -->"
+        r["neste"] = tekst_fra_heltall(neste)
+        returner r
+    }
+
+    la var_namn: tekst = builtin.trim(deler[0])
+    la liste_namn: tekst = builtin.trim(deler[1])
+
+    // Samle kropp-tokens (til @slutt)
+    la kropp: liste<ordbok_tekst> = []
+    la i: heltall = start
+    la djupn: heltall = 1
+    mens i < lengde(tokens) og djupn > 0 {
+        la t = tokens[i]
+        la tt: tekst = t["type"]
+        hvis tt == "for" eller tt == "hvis" { djupn = djupn + 1 }
+        hvis tt == "slutt" {
+            djupn = djupn - 1
+            hvis djupn == 0 {
+                neste = i + 1
+                i = lengde(tokens) // bryt
+            } ellers {
+                legg_til(kropp, t)
+            }
+        } ellers {
+            legg_til(kropp, t)
+        }
+        i = i + 1
+    }
+
+    // Hent listeverdi frå kontekst
+    la liste_verdi = _hent_verdi(liste_namn, ctx)
+    la type_verdi = builtin.type(liste_verdi)
+
+    hvis type_verdi == "liste" {
+        la j: heltall = 0
+        mens j < lengde(liste_verdi) {
+            la element = liste_verdi[j]
+            la iterasjon_ctx: ordbok_tekst = {}
+            // Kopier eksisterande kontekst
+            la nk = nøkler(ctx)
+            la k: heltall = 0
+            mens k < lengde(nk) {
+                iterasjon_ctx[nk[k]] = ctx[nk[k]]
+                k = k + 1
+            }
+            // Sett element-variabelen
+            la el_type = builtin.type(element)
+            hvis el_type == "ordbok" {
+                // Flatten ordbok-felt inn i kontekst med prefiks
+                iterasjon_ctx[var_namn] = tekst(element)
+                la enk = nøkler(element)
+                la ek: heltall = 0
+                mens ek < lengde(enk) {
+                    iterasjon_ctx[var_namn + "." + enk[ek]] = tekst(element[enk[ek]])
+                    iterasjon_ctx[enk[ek]] = tekst(element[enk[ek]])
+                    ek = ek + 1
+                }
+            } ellers {
+                iterasjon_ctx[var_namn] = tekst(element)
+            }
+            iterasjon_ctx["sløyfe.teller"] = tekst_fra_heltall(j + 1)
+            iterasjon_ctx["sløyfe.indeks"] = tekst_fra_heltall(j)
+            iterasjon_ctx["sløyfe.siste"] = hvis j == lengde(liste_verdi) - 1 { "sann" } ellers { "usann" }
+            la res = _evaluer(kropp, iterasjon_ctx, 0)
+            ut = ut + res["output"]
+            j = j + 1
+        }
+    }
+
+    la r: ordbok_tekst = {}
+    r["output"] = ut
+    r["neste"] = tekst_fra_heltall(neste)
+    returner r
+}
+
+funksjon _evaluer_hvis(tokens: liste<ordbok_tekst>, ctx: ordbok_tekst, start: heltall, betingelse: tekst) -> ordbok_tekst {
+    la sant_kropp: liste<ordbok_tekst> = []
+    la usant_kropp: liste<ordbok_tekst> = []
+    la i: heltall = start
+    la neste: heltall = lengde(tokens)
+    la i_ellers: boolsk = usann
+    la djupn: heltall = 1
+
+    mens i < lengde(tokens) og djupn > 0 {
+        la t = tokens[i]
+        la tt: tekst = t["type"]
+        hvis tt == "for" eller tt == "hvis" { djupn = djupn + 1 }
+        hvis tt == "slutt" {
+            djupn = djupn - 1
+            hvis djupn == 0 {
+                neste = i + 1
+                i = lengde(tokens)
+            } ellers {
+                hvis i_ellers { legg_til(usant_kropp, t) }
+                ellers { legg_til(sant_kropp, t) }
+            }
+        } ellers hvis tt == "ellers" og djupn == 1 {
+            i_ellers = sann
+        } ellers {
+            hvis i_ellers { legg_til(usant_kropp, t) }
+            ellers { legg_til(sant_kropp, t) }
+        }
+        i = i + 1
+    }
+
+    la er_sann = _evaluer_betingelse(betingelse, ctx)
+    la resultat_kropp: liste<ordbok_tekst> = []
+    hvis er_sann { resultat_kropp = sant_kropp }
+    ellers { resultat_kropp = usant_kropp }
+
+    la res = _evaluer(resultat_kropp, ctx, 0)
+    la r: ordbok_tekst = {}
+    r["output"] = res["output"]
+    r["neste"] = tekst_fra_heltall(neste)
+    returner r
+}
+
+# ─── Variabeloppslag og filter ────────────────────────────────────────────────
+
+funksjon _løs_var(uttrykk: tekst, ctx: ordbok_tekst) -> tekst {
+    // Sjekk for filter: "variabel|filter" eller "variabel|filter:arg"
+    la pipe = builtin.index_of(uttrykk, "|")
+    hvis pipe > 0 {
+        la var_del = builtin.trim(builtin.slice(uttrykk, 0, pipe))
+        la filter_del = builtin.trim(builtin.slice(uttrykk, pipe + 1, lengde(uttrykk)))
+        la verdi = tekst(_hent_verdi(var_del, ctx))
+        returner _bruk_filter(verdi, filter_del)
+    }
+    returner tekst(_hent_verdi(uttrykk, ctx))
+}
+
+funksjon _hent_verdi(namn: tekst, ctx: ordbok_tekst) -> tekst {
+    // Støttar punkt-notasjon: "bruker.namn"
+    la dot = builtin.index_of(namn, ".")
+    hvis dot > 0 {
+        la hoved = builtin.slice(namn, 0, dot)
+        la under = builtin.slice(namn, dot + 1, lengde(namn))
+        hvis har_nokkel(ctx, hoved) {
+            la sub = ctx[hoved]
+            la sub_type = builtin.type(sub)
+            hvis sub_type == "ordbok" {
+                la sub_ctx = sub
+                returner _hent_verdi(under, sub_ctx)
+            }
+        }
+    }
+    hvis har_nokkel(ctx, namn) { returner tekst(ctx[namn]) }
+    returner ""
+}
+
+funksjon _bruk_filter(verdi: tekst, filter: tekst) -> tekst {
+    // filter med argument: "standard:Ukjent", "maks:100" osv.
+    la kolon = builtin.index_of(filter, ":")
+    la filter_namn: tekst = filter
+    la filter_arg: tekst = ""
+    hvis kolon > 0 {
+        filter_namn = builtin.slice(filter, 0, kolon)
+        filter_arg = builtin.slice(filter, kolon + 1, lengde(filter))
+    }
+
+    hvis filter_namn == "stor"     { returner tekst_til_store(verdi) }
+    hvis filter_namn == "liten"    { returner tekst_til_liten(verdi) }
+    hvis filter_namn == "lengde"   { returner tekst_fra_heltall(lengde(verdi)) }
+    hvis filter_namn == "standard" {
+        hvis verdi == "" { returner filter_arg }
+        returner verdi
+    }
+    hvis filter_namn == "kutt" {
+        la maks = heltall_fra_tekst(filter_arg)
+        hvis maks > 0 og lengde(verdi) > maks {
+            returner builtin.slice(verdi, 0, maks) + "…"
+        }
+        returner verdi
+    }
+    hvis filter_namn == "html"     { returner _escape_html(verdi) }
+    hvis filter_namn == "strip"    { returner builtin.trim(verdi) }
+    hvis filter_namn == "tittel"   { returner _tittel_casing(verdi) }
+    // Ukjent filter — returner verdi uendra
+    returner verdi
+}
+
+# ─── Betingelseseval ──────────────────────────────────────────────────────────
+
+funksjon _evaluer_betingelse(betingelse: tekst, ctx: ordbok_tekst) -> boolsk {
+    la b = builtin.trim(betingelse)
+
+    // "ikke X" / "not X"
+    hvis tekst_starter_med(b, "ikke ") {
+        returner ikkje _evaluer_betingelse(builtin.slice(b, 5, lengde(b)), ctx)
+    }
+    hvis tekst_starter_med(b, "not ") {
+        returner ikkje _evaluer_betingelse(builtin.slice(b, 4, lengde(b)), ctx)
+    }
+
+    // "A == B"
+    la eq_pos = _finn_frå(b, " == ", 0)
+    hvis eq_pos >= 0 {
+        la venstre = builtin.trim(builtin.slice(b, 0, eq_pos))
+        la høyre   = builtin.trim(builtin.slice(b, eq_pos + 4, lengde(b)))
+        la v_val = _løs_var(venstre, ctx)
+        la h_val = _avkleip_sitat(høyre)
+        hvis h_val == høyre { h_val = _løs_var(høyre, ctx) }
+        returner v_val == h_val
+    }
+
+    // "A != B"
+    la neq_pos = _finn_frå(b, " != ", 0)
+    hvis neq_pos >= 0 {
+        la venstre2 = builtin.trim(builtin.slice(b, 0, neq_pos))
+        la høyre2   = builtin.trim(builtin.slice(b, neq_pos + 4, lengde(b)))
+        la v_val2 = _løs_var(venstre2, ctx)
+        la h_val2 = _avkleip_sitat(høyre2)
+        hvis h_val2 == høyre2 { h_val2 = _løs_var(høyre2, ctx) }
+        returner v_val2 != h_val2
+    }
+
+    // Berre variabelnamn — sann om ikkje tom
+    la v = _løs_var(b, ctx)
+    returner v != "" og v != "usann" og v != "false" og v != "0"
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _finn_frå(s: tekst, mønster: tekst, frå: heltall) -> heltall {
+    la s_len = lengde(s)
+    la m_len = lengde(mønster)
+    la i: heltall = frå
+    mens i <= s_len - m_len {
+        la del = builtin.slice(s, i, i + m_len)
+        hvis del == mønster { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon _avkleip_sitat(s: tekst) -> tekst {
+    la trimmed = builtin.trim(s)
+    hvis (tekst_starter_med(trimmed, "\"") og tekst_slutter_med(trimmed, "\"")) eller
+       (tekst_starter_med(trimmed, "'") og tekst_slutter_med(trimmed, "'")) {
+        returner builtin.slice(trimmed, 1, lengde(trimmed) - 1)
+    }
+    returner s
+}
+
+funksjon _escape_html(v: tekst) -> tekst {
+    la r = v
+    r = tekst_erstatt(r, "&", "&amp;")
+    r = tekst_erstatt(r, "<", "&lt;")
+    r = tekst_erstatt(r, ">", "&gt;")
+    r = tekst_erstatt(r, "\"", "&quot;")
+    returner r
+}
+
+funksjon _tittel_casing(v: tekst) -> tekst {
+    // Naiv: stor forbokstav etter mellomrom
+    la tegn = builtin.split(v, "")
+    la r = ""
+    la neste_stor: boolsk = sann
+    la i: heltall = 0
+    mens i < lengde(tegn) {
+        la c: tekst = tegn[i]
+        hvis c == " " {
+            r = r + c
+            neste_stor = sann
+        } ellers hvis neste_stor {
+            r = r + tekst_til_store(c)
+            neste_stor = usann
+        } ellers {
+            r = r + c
+        }
+        i = i + 1
+    }
+    returner r
+}
+
+# ─── Template inheritance (@utvid / @blokk) ───────────────────────────────────
+#
+# Syntaks i barnmal:
+#   {{@utvid "base.html"}}
+#   {{@blokk innhald}}
+#     <p>Eige innhald her</p>
+#   {{@slutt_blokk}}
+#
+# Syntaks i foreldremal:
+#   {{@blokk innhald}}
+#     Standard innhald
+#   {{@slutt_blokk}}
+
+funksjon gjengi_arv(sti: tekst, ctx: ordbok_tekst, mal_mappe: tekst) -> tekst {
+    prøv {
+        la innhald = fil_les(sti)
+        returner gjengi_arv_tekst(innhald, ctx, mal_mappe)
+    } fang (e) {
+        returner "[mal-arv feil: " + tekst(e) + "]"
+    }
+    returner ""
+}
+
+funksjon gjengi_arv_tekst(barn_tmpl: tekst, ctx: ordbok_tekst, mal_mappe: tekst) -> tekst {
+    // 1. Finn @utvid-direktiv
+    la forelder_sti = _hent_utvid(barn_tmpl)
+    hvis forelder_sti == "" {
+        // Ingen arv — vanleg gjengi
+        returner gjengi(barn_tmpl, ctx)
+    }
+
+    // 2. Hent foreldremalen
+    la forelder_tmpl = ""
+    prøv {
+        forelder_tmpl = fil_les(mal_mappe + forelder_sti)
+    } fang (e) {
+        returner "[mal-arv: kan ikkje laste forelder '" + forelder_sti + "': " + tekst(e) + "]"
+    }
+
+    // 3. Hent blokkane frå barnmalen
+    la barn_blokkar = _hent_blokkar(barn_tmpl)
+
+    // 4. Erstatt blokkar i foreldremalen
+    la resultat = _erstatt_blokkar(forelder_tmpl, barn_blokkar)
+
+    // 5. Gjengi med kontekst
+    returner gjengi(resultat, ctx)
+}
+
+funksjon _hent_utvid(tmpl: tekst) -> tekst {
+    // Finn {{@utvid "filnamn"}}
+    la søk = "{{@utvid \""
+    la idx = builtin.index_of(tmpl, søk)
+    hvis idx < 0 { returner "" }
+    la start = idx + lengde(søk)
+    la slutt_idx = builtin.index_of(builtin.slice(tmpl, start, lengde(tmpl)), "\"}}")
+    hvis slutt_idx < 0 { returner "" }
+    returner builtin.slice(tmpl, start, start + slutt_idx)
+}
+
+funksjon _hent_blokkar(tmpl: tekst) -> ordbok_tekst {
+    la blokkar: ordbok_tekst = {}
+    la rest = tmpl
+    la maks_iterasjonar: heltall = 50
+    la iter: heltall = 0
+
+    mens iter < maks_iterasjonar {
+        la blokk_start = "{{@blokk "
+        la idx = builtin.index_of(rest, blokk_start)
+        hvis idx < 0 { iter = maks_iterasjonar fortsett }
+
+        // Hent blokk-namn
+        la etter_tag = builtin.slice(rest, idx + lengde(blokk_start), lengde(rest))
+        la namn_slutt = builtin.index_of(etter_tag, "}}")
+        hvis namn_slutt < 0 { iter = maks_iterasjonar fortsett }
+        la namn = builtin.trim(builtin.slice(etter_tag, 0, namn_slutt))
+
+        // Hent innhald mellom {{@blokk navn}} og {{@slutt_blokk}}
+        la etter_opning = builtin.slice(etter_tag, namn_slutt + 2, lengde(etter_tag))
+        la slutt_tag = "{{@slutt_blokk}}"
+        la slutt_idx = builtin.index_of(etter_opning, slutt_tag)
+        hvis slutt_idx < 0 { iter = maks_iterasjonar fortsett }
+
+        la innhald = builtin.slice(etter_opning, 0, slutt_idx)
+        blokkar[namn] = innhald
+
+        // Fortsett frå etter blokken
+        la forbrukt = idx + lengde(blokk_start) + namn_slutt + 2 + slutt_idx + lengde(slutt_tag)
+        rest = builtin.slice(rest, forbrukt, lengde(rest))
+        iter = iter + 1
+    }
+    returner blokkar
+}
+
+funksjon _erstatt_blokkar(forelder_tmpl: tekst, barn_blokkar: ordbok_tekst) -> tekst {
+    la resultat = forelder_tmpl
+    la blokk_namn = nøkler(barn_blokkar)
+    la i: heltall = 0
+    mens i < lengde(blokk_namn) {
+        la namn: tekst = blokk_namn[i]
+        la barn_innhald = tekst(barn_blokkar[namn])
+
+        // Erstatt {{@blokk namn}}...{{@slutt_blokk}} i foreldremal med barn-innhald
+        la opning = "{{@blokk " + namn + "}}"
+        la start_idx = builtin.index_of(resultat, opning)
+        hvis start_idx >= 0 {
+            la etter_opning = builtin.slice(resultat, start_idx + lengde(opning), lengde(resultat))
+            la slutt_tag = "{{@slutt_blokk}}"
+            la slutt_idx = builtin.index_of(etter_opning, slutt_tag)
+            hvis slutt_idx >= 0 {
+                la før  = builtin.slice(resultat, 0, start_idx)
+                la etter = builtin.slice(etter_opning, slutt_idx + lengde(slutt_tag), lengde(etter_opning))
+                resultat = før + barn_innhald + etter
+            }
+        }
+        i = i + 1
+    }
+    // Fjern attverande tomme blokkar frå foreldremalen (standard-innhald vert behaldt)
+    // {{@blokk xxx}}standard{{@slutt_blokk}} → standard
+    resultat = _løys_standard_blokkar(resultat)
+    returner resultat
+}
+
+funksjon _løys_standard_blokkar(tmpl: tekst) -> tekst {
+    la resultat = tmpl
+    la maks: heltall = 50
+    la iter: heltall = 0
+    mens iter < maks {
+        la idx = builtin.index_of(resultat, "{{@blokk ")
+        hvis idx < 0 { iter = maks fortsett }
+        la etter = builtin.slice(resultat, idx, lengde(resultat))
+        la lukk_idx = builtin.index_of(etter, "}}")
+        hvis lukk_idx < 0 { iter = maks fortsett }
+        la etter_opning = builtin.slice(etter, lukk_idx + 2, lengde(etter))
+        la slutt_tag = "{{@slutt_blokk}}"
+        la slutt_idx = builtin.index_of(etter_opning, slutt_tag)
+        hvis slutt_idx < 0 { iter = maks fortsett }
+        la standard_innhald = builtin.slice(etter_opning, 0, slutt_idx)
+        la før  = builtin.slice(resultat, 0, idx)
+        la resten = builtin.slice(etter_opning, slutt_idx + lengde(slutt_tag), lengde(etter_opning))
+        resultat = før + standard_innhald + resten
+        iter = iter + 1
+    }
+    returner resultat
+}

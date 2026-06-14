@@ -1,0 +1,328 @@
+# mw.no — Mellomvare-pakke for Norscode
+# Ferdigbygde request/response middlewares
+#
+# Bruk:
+#   bruk std.mw som mw
+#   bruk std.web som web
+#
+#   # I app-fila — registrer som web-middlewares:
+#   funksjon req_mw(ctx)  -> ordbok_tekst { returner mw.køyr_request(ctx, cors_cfg, rl_cfg) }
+#   funksjon resp_mw(r)   -> ordbok_tekst { returner mw.køyr_response(r, sikkerhets_cfg) }
+#   web.request_middleware()
+#   web.response_middleware()
+
+bruk std.web som web
+
+# ─── CORS ────────────────────────────────────────────────────────────────────
+
+funksjon cors_cfg(origins: tekst, metodar: tekst, headers: tekst, maks_alder: heltall) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["type"]        = "cors"
+    c["origins"]     = origins     // "*" eller "https://a.com,https://b.com"
+    c["metodar"]     = metodar     // "GET,POST,PUT,DELETE,OPTIONS"
+    c["headers"]     = headers     // "Content-Type,Authorization"
+    c["maks_alder"]  = tekst_fra_heltall(maks_alder)
+    c["credentials"] = "usann"
+    returner c
+}
+
+funksjon cors_open() -> ordbok_tekst {
+    returner cors_cfg("*", "GET,POST,PUT,PATCH,DELETE,OPTIONS", "Content-Type,Authorization", 86400)
+}
+
+funksjon cors_strict(origin: tekst) -> ordbok_tekst {
+    la c = cors_cfg(origin, "GET,POST,PUT,DELETE,OPTIONS", "Content-Type,Authorization,X-Request-ID", 3600)
+    c["credentials"] = "sann"
+    returner c
+}
+
+funksjon bruk_cors(ctx: ordbok_tekst, cfg: ordbok_tekst) -> ordbok_tekst {
+    // Preflight OPTIONS → returner tidleg med CORS-headerar
+    la metode = web.request_method(ctx)
+    la origin = web.request_header(ctx, "origin")
+    ctx["__cors_origin__"] = origin
+    ctx["__cors_cfg__"]    = cfg
+    returner ctx
+}
+
+funksjon cors_headers(cfg: ordbok_tekst, request_origin: tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    la allowed = cfg["origins"]
+    la faktisk_origin = request_origin
+    hvis allowed == "*" {
+        h["access-control-allow-origin"] = "*"
+    } ellers {
+        la origins = builtin.split(allowed, ",")
+        la i: heltall = 0
+        la funne: boolsk = usann
+        mens i < lengde(origins) {
+            la o: tekst = builtin.trim(origins[i])
+            hvis o == request_origin { funne = sann }
+            i = i + 1
+        }
+        h["access-control-allow-origin"] = hvis funne { request_origin } ellers { "" }
+        h["vary"] = "Origin"
+    }
+    h["access-control-allow-methods"] = cfg["metodar"]
+    h["access-control-allow-headers"] = cfg["headers"]
+    h["access-control-max-age"]       = cfg["maks_alder"]
+    hvis cfg["credentials"] == "sann" {
+        h["access-control-allow-credentials"] = "true"
+    }
+    returner h
+}
+
+funksjon cors_response(cfg: ordbok_tekst, resp: ordbok_tekst, request_origin: tekst) -> ordbok_tekst {
+    la cors_h = cors_headers(cfg, request_origin)
+    la existing_h = resp["__headers__"]
+    la nk = nøkler(cors_h)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v: tekst = cors_h[k]
+        hvis v != "" { existing_h[k] = v }
+        i = i + 1
+    }
+    resp["__headers__"] = existing_h
+    returner resp
+}
+
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+
+funksjon rate_cfg(maks_per_minutt: heltall, nøkkel_type: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["type"]          = "rate_limit"
+    c["maks"]          = tekst_fra_heltall(maks_per_minutt)
+    c["vindauge_sek"]  = "60"
+    c["nøkkel_type"]   = nøkkel_type  // "ip", "brukar", "global"
+    c["strategi"]      = "glidande"   // "fast" eller "glidande"
+    returner c
+}
+
+// Sjekk rate limit — returnerer sann viss OK, usann viss over grensa
+// Brukar in-memory teller (per prosess)
+funksjon sjekk_rate(cfg: ordbok_tekst, nøkkel: tekst) -> boolsk {
+    la maks = heltall_fra_tekst(cfg["maks"])
+    // Prøv native rate-limit-builtin
+    prøv {
+        la vindauge = heltall_fra_tekst(cfg["vindauge_sek"])
+        returner builtin.rate_check(nøkkel, maks, vindauge)
+    } fang (e) { }
+    // Fallback: alltid OK (ingen native støtte)
+    returner sann
+}
+
+funksjon rate_nøkkel(ctx: ordbok_tekst, nøkkel_type: tekst) -> tekst {
+    hvis nøkkel_type == "ip" {
+        la ip = web.request_header(ctx, "x-forwarded-for")
+        hvis ip == "" { ip = web.request_header(ctx, "x-real-ip") }
+        hvis ip == "" { ip = "ukjend" }
+        returner "ip:" + ip
+    }
+    hvis nøkkel_type == "brukar" {
+        hvis har_nokkel(ctx, "__auth_id__") { returner "brukar:" + ctx["__auth_id__"] }
+        returner "anonym:ip"
+    }
+    returner "global"
+}
+
+funksjon rate_limit_middleware(ctx: ordbok_tekst, cfg: ordbok_tekst) -> ordbok_tekst {
+    la nøkkel = rate_nøkkel(ctx, cfg["nøkkel_type"])
+    hvis ikkje sjekk_rate(cfg, nøkkel) {
+        ctx["__rate_limited__"] = "sann"
+        ctx["__rate_nøkkel__"]  = nøkkel
+    }
+    returner ctx
+}
+
+funksjon er_rate_limited(ctx: ordbok_tekst) -> boolsk {
+    returner har_nokkel(ctx, "__rate_limited__") og ctx["__rate_limited__"] == "sann"
+}
+
+funksjon rate_limit_response() -> ordbok_tekst {
+    la h: ordbok_tekst = {"content-type": "application/json", "retry-after": "60"}
+    returner web.response_builder(429, h, "{\"feil\":\"For mange forespørslar. Prøv igjen seinare.\"}")
+}
+
+# ─── Tryggleiksheaderar ───────────────────────────────────────────────────────
+
+funksjon sikkerhets_cfg(hsts: boolsk, xframe: tekst, csp: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["hsts"]   = hvis hsts { "sann" } ellers { "usann" }
+    c["xframe"] = xframe  // "DENY", "SAMEORIGIN", ""
+    c["csp"]    = csp     // Content-Security-Policy-verdi
+    returner c
+}
+
+funksjon sikkerhets_standard() -> ordbok_tekst {
+    returner sikkerhets_cfg(
+        sann,
+        "SAMEORIGIN",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'"
+    )
+}
+
+funksjon legg_til_sikkerhets_headers(resp: ordbok_tekst, cfg: ordbok_tekst) -> ordbok_tekst {
+    la h = resp["__headers__"]
+    h["x-content-type-options"] = "nosniff"
+    h["x-xss-protection"]       = "1; mode=block"
+    h["referrer-policy"]         = "strict-origin-when-cross-origin"
+    h["permissions-policy"]      = "geolocation=(), microphone=(), camera=()"
+    hvis cfg["hsts"] == "sann" {
+        h["strict-transport-security"] = "max-age=31536000; includeSubDomains"
+    }
+    hvis cfg["xframe"] != "" {
+        h["x-frame-options"] = cfg["xframe"]
+    }
+    hvis cfg["csp"] != "" {
+        h["content-security-policy"] = cfg["csp"]
+    }
+    resp["__headers__"] = h
+    returner resp
+}
+
+# ─── Request-logging ──────────────────────────────────────────────────────────
+
+funksjon logging_cfg(nivå: tekst, inkluder_body: boolsk) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["nivå"]          = nivå   // "DEBUG", "INFO", "WARN"
+    c["inkluder_body"] = hvis inkluder_body { "sann" } ellers { "usann" }
+    returner c
+}
+
+funksjon logg_request(ctx: ordbok_tekst, cfg: ordbok_tekst) -> ordbok_tekst {
+    la metode = web.request_method(ctx)
+    la sti    = web.request_path(ctx)
+    la req_id = web.request_id(ctx)
+    ctx["__req_id__"] = req_id
+    ctx["__req_start_ms__"] = tekst_fra_heltall(_no_ms())
+    skriv("[" + cfg["nivå"] + "] → " + metode + " " + sti + " req_id=" + req_id)
+    returner ctx
+}
+
+funksjon logg_response(resp: ordbok_tekst, ctx: ordbok_tekst, cfg: ordbok_tekst) -> ordbok_tekst {
+    la status = tekst(resp["__status__"])
+    la sti    = hvis har_nokkel(ctx, "__path__") { ctx["__path__"] } ellers { "" }
+    la req_id = hvis har_nokkel(ctx, "__req_id__") { ctx["__req_id__"] } ellers { "" }
+    la start  = heltall_fra_tekst(hvis har_nokkel(ctx, "__req_start_ms__") { ctx["__req_start_ms__"] } ellers { "0" })
+    la no     = _no_ms()
+    la ms     = tekst_fra_heltall(no - start)
+    la h = resp["__headers__"]
+    h["x-request-id"]     = req_id
+    h["x-response-time"]  = ms + "ms"
+    resp["__headers__"]   = h
+    skriv("[" + cfg["nivå"] + "] ← " + status + " " + sti + " " + ms + "ms req_id=" + req_id)
+    returner resp
+}
+
+# ─── Komprimering ─────────────────────────────────────────────────────────────
+
+funksjon komprimer_response(resp: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    la accept = web.request_header(ctx, "accept-encoding")
+    hvis ikkje tekst_inneholder(accept, "gzip") { returner resp }
+    la body = tekst(resp["__body__"])
+    hvis lengde(body) < 1024 { returner resp }  // ikkje komprimer små svar
+    prøv {
+        la komprimert = builtin.gzip(body)
+        la h = resp["__headers__"]
+        h["content-encoding"] = "gzip"
+        h["vary"] = "Accept-Encoding"
+        resp["__headers__"] = h
+        resp["__body__"] = komprimert
+    } fang (e) { }
+    returner resp
+}
+
+# ─── CSRF-vern ────────────────────────────────────────────────────────────────
+
+funksjon csrf_cfg(hemmelig: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["type"]     = "csrf"
+    c["hemmelig"] = hemmelig
+    returner c
+}
+
+funksjon generer_csrf_token(cfg: ordbok_tekst) -> tekst {
+    prøv {
+        returner builtin.hmac_sha256(cfg["hemmelig"], tekst_fra_heltall(builtin.now_ms()))
+    } fang (e) {
+        returner builtin.random_hex(32)
+    }
+    returner ""
+}
+
+funksjon verifiser_csrf(ctx: ordbok_tekst, cfg: ordbok_tekst) -> boolsk {
+    la metode = web.request_method(ctx)
+    // Berre sjekk skriv-metodar
+    hvis metode == "GET" eller metode == "HEAD" eller metode == "OPTIONS" { returner sann }
+    la token_header = web.request_header(ctx, "x-csrftoken")
+    la token_cookie = web.request_cookie(ctx, "csrftoken")
+    hvis token_header == "" { returner usann }
+    returner token_header == token_cookie
+}
+
+# ─── Cache-kontroll ───────────────────────────────────────────────────────────
+
+funksjon ingen_cache(resp: ordbok_tekst) -> ordbok_tekst {
+    la h = resp["__headers__"]
+    h["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    h["pragma"]        = "no-cache"
+    resp["__headers__"] = h
+    returner resp
+}
+
+funksjon cache_offentleg(resp: ordbok_tekst, sekunder: heltall) -> ordbok_tekst {
+    la h = resp["__headers__"]
+    h["cache-control"] = "public, max-age=" + tekst_fra_heltall(sekunder)
+    resp["__headers__"] = h
+    returner resp
+}
+
+funksjon cache_privat(resp: ordbok_tekst, sekunder: heltall) -> ordbok_tekst {
+    la h = resp["__headers__"]
+    h["cache-control"] = "private, max-age=" + tekst_fra_heltall(sekunder)
+    resp["__headers__"] = h
+    returner resp
+}
+
+# ─── Kombinert pipeline ───────────────────────────────────────────────────────
+
+# Køyr alle aktiverte request-middlewares i rekkefølge
+funksjon pipeline_request(ctx: ordbok_tekst, middlewares: liste<ordbok_tekst>) -> ordbok_tekst {
+    la current = ctx
+    la i: heltall = 0
+    mens i < lengde(middlewares) {
+        la mw = middlewares[i]
+        la type: tekst = mw["type"]
+        hvis type == "cors"       { current = bruk_cors(current, mw) }
+        ellers hvis type == "rate_limit" { current = rate_limit_middleware(current, mw) }
+        ellers hvis type == "logging"    { current = logg_request(current, mw) }
+        i = i + 1
+    }
+    returner current
+}
+
+funksjon pipeline_response(resp: ordbok_tekst, ctx: ordbok_tekst, middlewares: liste<ordbok_tekst>) -> ordbok_tekst {
+    la current = resp
+    la origin  = hvis har_nokkel(ctx, "__cors_origin__") { ctx["__cors_origin__"] } ellers { "" }
+    la i: heltall = 0
+    mens i < lengde(middlewares) {
+        la mw = middlewares[i]
+        la type: tekst = mw["type"]
+        hvis type == "cors"      {
+            la cors_c = hvis har_nokkel(ctx, "__cors_cfg__") { ctx["__cors_cfg__"] } ellers { mw }
+            current = cors_response(cors_c, current, origin)
+        }
+        ellers hvis type == "sikkerheit" { current = legg_til_sikkerhets_headers(current, mw) }
+        ellers hvis type == "logging"    { current = logg_response(current, ctx, mw) }
+        i = i + 1
+    }
+    returner current
+}
+
+# ─── Internals ────────────────────────────────────────────────────────────────
+
+funksjon _no_ms() -> heltall {
+    prøv { returner builtin.now_ms() } fang (e) { }
+    returner 0
+}

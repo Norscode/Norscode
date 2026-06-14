@@ -1,0 +1,277 @@
+# asynkron.no — Kooperativ event-loop (asyncio-stil)
+# Python: asyncio
+#
+# Norscode har ikkje native koroutinar eller async/await.
+# Dette modulet simulerer ein kooperativ event-loop med:
+#   - Oppgåvekø (FIFO-liste av "coro-tilstander")
+#   - Løfte-mønster (Promise-liknande, via ordbok_tekst)
+#   - Timer-basert planlegging
+#   - Callbacks
+#
+# Oppgåvetilstand: liste_tekst
+#   [id, status, funksjon_namn, resultat, feilmelding]
+#   status: "ventar", "kjørar", "ferdig", "feil"
+#
+# Event-loop: ordbok (kan ikkje ha reell concurrency utan OS-støtte,
+#   men mogleggjer batcha/sekvensert køyring av fleire oppgåver.)
+#
+# Bruk:
+#   bruk std.asynkron som asynk
+#   la loop = asynk.ny_loop()
+#   la t1 = asynk.opprett_oppgåve(loop, "min_modul.min_funksjon")
+#   asynk.køyr(loop)
+#   skriv(asynk.resultat(t1))
+
+# ─── Oppgåve ──────────────────────────────────────────────────────────────────
+
+funksjon _ny_oppgåve_id(loop: ordbok_tekst) -> tekst {
+    la n: heltall = builtin.heltall_fra_tekst(loop["_neste_id"])
+    loop["_neste_id"] = tekst_fra_heltall(n + 1)
+    returner "t" + tekst_fra_heltall(n)
+}
+
+funksjon ny_loop() -> ordbok_tekst {
+    la loop: ordbok_tekst = {}
+    loop["_neste_id"] = "0"
+    loop["_kø"] = "[]"          # JSON-liste av oppgåve-id-ar
+    loop["_status"] = "stopp"
+    loop["_syklus"] = "0"
+    returner loop
+}
+
+funksjon opprett_oppgåve(loop: ordbok_tekst, funksjon_namn: tekst) -> ordbok_tekst {
+    la id: tekst = _ny_oppgåve_id(loop)
+    la oppgåve: ordbok_tekst = {}
+    oppgåve["id"] = id
+    oppgåve["status"] = "ventar"
+    oppgåve["funksjon"] = funksjon_namn
+    oppgåve["resultat"] = ""
+    oppgåve["feil"] = ""
+    oppgåve["args"] = "{}"
+
+    # Registrer i loop
+    loop[id] = builtin.json_stringify(oppgåve)
+
+    # Legg til i køen
+    la kø_tekst: tekst = loop["_kø"]
+    la kø = builtin.json_parse(kø_tekst)
+    la kø_tekst_ny: tekst = ""
+    # Bygg ny JSON-liste
+    la n: heltall = lengde(builtin.split(kø_tekst, ""))
+    # Enkel append til JSON-array
+    hvis (kø_tekst == "[]") {
+        loop["_kø"] = "[\"" + id + "\"]"
+    } ellers {
+        # Fjern siste "]" og legg til id
+        la t = builtin.split(kø_tekst, "")
+        la sn: heltall = lengde(t) - 1
+        la utan_slutt: tekst = ""
+        la i: heltall = 0
+        mens (i < sn) { utan_slutt = utan_slutt + t[i]  i = i + 1 }
+        loop["_kø"] = utan_slutt + ",\"" + id + "\"]"
+    }
+
+    returner oppgåve
+}
+
+funksjon legg_til_kø(loop: ordbok_tekst, id: tekst) -> heltall {
+    la kø_tekst: tekst = loop["_kø"]
+    hvis (kø_tekst == "[]") {
+        loop["_kø"] = "[\"" + id + "\"]"
+    } ellers {
+        la t = builtin.split(kø_tekst, "")
+        la sn: heltall = lengde(t) - 1
+        la utan_slutt: tekst = ""
+        la i: heltall = 0
+        mens (i < sn) { utan_slutt = utan_slutt + t[i]  i = i + 1 }
+        loop["_kø"] = utan_slutt + ",\"" + id + "\"]"
+    }
+    returner 0
+}
+
+# ─── Køyr oppgåver ────────────────────────────────────────────────────────────
+
+# Køyr alle ventande oppgåver med builtin.ncb_call_fn
+funksjon steg(loop: ordbok_tekst) -> heltall {
+    la syklus: heltall = builtin.heltall_fra_tekst(loop["_syklus"])
+    loop["_syklus"] = tekst_fra_heltall(syklus + 1)
+
+    la kø_tekst: tekst = loop["_kø"]
+    hvis (kø_tekst == "[]" eller kø_tekst == "") { returner 0 }
+
+    la kø = builtin.json_parse(kø_tekst)
+    la n: heltall = lengde(builtin.nøkler(kø))
+    # Merk: json_parse av array gir ordbok med indeks som nøklar
+    la utført: heltall = 0
+    la i: heltall = 0
+    mens (i < n) {
+        la id: tekst = kø[tekst_fra_heltall(i)]
+        hvis (har_nokkel(loop, id)) {
+            la oppg_tekst: tekst = loop[id]
+            la oppg = builtin.json_parse(oppg_tekst)
+            la status: tekst = oppg["status"]
+
+            hvis (status == "ventar") {
+                oppg["status"] = "kjørar"
+                loop[id] = builtin.json_stringify(oppg)
+
+                # Køyr funksjon
+                la fn: tekst = oppg["funksjon"]
+                la args = builtin.json_parse(oppg["args"])
+                prøv {
+                    la res: tekst = builtin.ncb_call_fn(fn, args)
+                    oppg["resultat"] = res
+                    oppg["status"] = "ferdig"
+                } fang (e) {
+                    oppg["feil"] = e
+                    oppg["status"] = "feil"
+                }
+                loop[id] = builtin.json_stringify(oppg)
+                utført = utført + 1
+            }
+        }
+        i = i + 1
+    }
+    returner utført
+}
+
+# Køyr event-loop til alle oppgåver er ferdige
+funksjon køyr(loop: ordbok_tekst) -> heltall {
+    loop["_status"] = "kjørar"
+    la maks_syklusar: heltall = 10000
+    la utført: heltall = 0
+    la syklus: heltall = 0
+    mens (syklus < maks_syklusar) {
+        la n: heltall = steg(loop)
+        utført = utført + n
+        hvis (n == 0) { syklus = maks_syklusar }  # Ingen meir å gjere
+        syklus = syklus + 1
+    }
+    loop["_status"] = "stopp"
+    returner utført
+}
+
+# ─── Løfte (Promise) ──────────────────────────────────────────────────────────
+
+funksjon ny_løfte() -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["status"] = "ventande"
+    p["verdi"] = ""
+    p["feil"] = ""
+    p["callbacks"] = "[]"
+    returner p
+}
+
+funksjon løys_løfte(p: ordbok_tekst, verdi: tekst) -> heltall {
+    p["status"] = "løyst"
+    p["verdi"] = verdi
+    returner 0
+}
+
+funksjon avvis_løfte(p: ordbok_tekst, feil: tekst) -> heltall {
+    p["status"] = "avvist"
+    p["feil"] = feil
+    returner 0
+}
+
+funksjon er_løyst(p: ordbok_tekst) -> bool { returner p["status"] == "løyst" }
+funksjon er_avvist(p: ordbok_tekst) -> bool { returner p["status"] == "avvist" }
+funksjon er_ventande(p: ordbok_tekst) -> bool { returner p["status"] == "ventande" }
+funksjon løfte_verdi(p: ordbok_tekst) -> tekst { returner p["verdi"] }
+funksjon løfte_feil(p: ordbok_tekst) -> tekst { returner p["feil"] }
+
+# ─── Oppgåve-status ────────────────────────────────────────────────────────────
+
+funksjon hent_oppgåve(loop: ordbok_tekst, id: tekst) -> ordbok_tekst {
+    la tom: ordbok_tekst = {}
+    tom["id"] = id  tom["status"] = "ukjent"  tom["resultat"] = ""  tom["feil"] = ""
+    hvis (ikkje har_nokkel(loop, id)) { returner tom }
+    returner builtin.json_parse(loop[id])
+}
+
+funksjon er_ferdig(loop: ordbok_tekst, id: tekst) -> bool {
+    la oppg = hent_oppgåve(loop, id)
+    returner oppg["status"] == "ferdig" eller oppg["status"] == "feil"
+}
+
+funksjon resultat(loop: ordbok_tekst, id: tekst) -> tekst {
+    returner hent_oppgåve(loop, id)["resultat"]
+}
+
+funksjon feilmelding(loop: ordbok_tekst, id: tekst) -> tekst {
+    returner hent_oppgåve(loop, id)["feil"]
+}
+
+# ─── Timer-planlegging ────────────────────────────────────────────────────────
+# Sidan vi ikkje har real sleep/wakeup, støttar vi "seinka oppstart"
+# basert på syklusteller.
+
+funksjon planlegg_etter(loop: ordbok_tekst, fn: tekst, etter_syklusar: heltall) -> tekst {
+    la id: tekst = _ny_oppgåve_id(loop)
+    la oppgåve: ordbok_tekst = {}
+    oppgåve["id"] = id
+    oppgåve["status"] = "utsett"
+    oppgåve["funksjon"] = fn
+    oppgåve["resultat"] = ""
+    oppgåve["feil"] = ""
+    oppgåve["args"] = "{}"
+    la syklus_no: heltall = builtin.heltall_fra_tekst(loop["_syklus"])
+    oppgåve["start_syklus"] = tekst_fra_heltall(syklus_no + etter_syklusar)
+    loop[id] = builtin.json_stringify(oppgåve)
+    returner id
+}
+
+# Aktivér utsette oppgåver viss syklustid er nådd
+funksjon oppdater_timarar(loop: ordbok_tekst) -> heltall {
+    la syklus_no: heltall = builtin.heltall_fra_tekst(loop["_syklus"])
+    la nøklar = builtin.nøkler(loop)
+    la aktivert: heltall = 0
+    la i: heltall = 0
+    mens (i < lengde(nøklar)) {
+        la k: tekst = nøklar[i]
+        hvis (tekst_starter_med(k, "t")) {
+            la oppg = builtin.json_parse(loop[k])
+            hvis (oppg["status"] == "utsett") {
+                la start: heltall = builtin.heltall_fra_tekst(oppg["start_syklus"])
+                hvis (syklus_no >= start) {
+                    oppg["status"] = "ventar"
+                    loop[k] = builtin.json_stringify(oppg)
+                    legg_til_kø(loop, k)
+                    aktivert = aktivert + 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner aktivert
+}
+
+# ─── gather: vent på fleire oppgåver ──────────────────────────────────────────
+
+funksjon gather(loop: ordbok_tekst, id_ar: liste_tekst) -> liste_tekst {
+    la resultat_ar: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(id_ar)) {
+        legg_til(resultat_ar, resultat(loop, id_ar[i]))
+        i = i + 1
+    }
+    returner resultat_ar
+}
+
+funksjon alle_ferdige(loop: ordbok_tekst, id_ar: liste_tekst) -> bool {
+    la i: heltall = 0
+    mens (i < lengde(id_ar)) {
+        hvis (ikkje er_ferdig(loop, id_ar[i])) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+# ─── Enkelt asynkront mønster (run_until_complete) ───────────────────────────
+
+funksjon køyr_funksjon(loop: ordbok_tekst, fn: tekst) -> tekst {
+    la oppg = opprett_oppgåve(loop, fn)
+    la id: tekst = oppg["id"]
+    køyr(loop)
+    returner resultat(loop, id)
+}

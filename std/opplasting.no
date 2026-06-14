@@ -1,0 +1,422 @@
+# opplasting.no — Filopplasting for Norscode
+# Handterer multipart/form-data, lagrar filer, validerer type og storleik
+#
+# Bruk:
+#   bruk std.opplasting som opl
+#   bruk std.web som web
+#
+#   funksjon last_opp(ctx) -> ordbok_tekst {
+#       web.route("POST /last-opp")
+#       la cfg = opl.cfg("media/opplastingar", ["image/jpeg","image/png"], 5242880)
+#       la filer = opl.parse(ctx, cfg)
+#       viss opl.ok(filer) {
+#           la sti = opl.lagre_fil(filer, "bilde", cfg)
+#           returner web.response_builder(201, {}, "{\"sti\":\"" + sti + "\"}")
+#       }
+#       returner web.response_error(400, opl.feilmelding(filer))
+#   }
+
+bruk std.web som web
+
+# ─── Konfigurasjon ────────────────────────────────────────────────────────────
+
+funksjon cfg(opplastings_mappe: tekst, tillatte_typar: liste<tekst>, maks_storleik_bytes: heltall) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["mappe"]        = opplastings_mappe
+    c["maks_bytes"]   = tekst_fra_heltall(maks_storleik_bytes)
+    la typar_str = tekst_saman(tillatte_typar, ",")
+    c["typar"]        = typar_str
+    c["nye_namn"]     = "sann"   // gi filer nye tilfeldige namn
+    c["bevar_namn"]   = "usann"
+    returner c
+}
+
+funksjon cfg_bilete(mappe: tekst) -> ordbok_tekst {
+    returner cfg(mappe, ["image/jpeg", "image/png", "image/gif", "image/webp"], 10485760)
+}
+
+funksjon cfg_dokument(mappe: tekst) -> ordbok_tekst {
+    returner cfg(mappe, ["application/pdf", "text/plain", "application/msword"], 52428800)
+}
+
+funksjon cfg_alle_typar(mappe: tekst, maks_mb: heltall) -> ordbok_tekst {
+    returner cfg(mappe, ["*"], maks_mb * 1048576)
+}
+
+# ─── Parsing ─────────────────────────────────────────────────────────────────
+
+# Parse multipart/form-data frå request-body
+funksjon parse(ctx: ordbok_tekst, oppl_cfg: ordbok_tekst) -> ordbok_tekst {
+    la resultat: ordbok_tekst = {}
+    resultat["ok"]     = "usann"
+    resultat["feil"]   = ""
+    resultat["filer"]  = {}
+    resultat["felt"]   = {}
+
+    la content_type = web.request_header(ctx, "content-type")
+    la body         = web.request_body(ctx)
+
+    // Sjekk content-type
+    hvis ikkje tekst_inneholder(content_type, "multipart/form-data") {
+        // Prøv enkle base64-opplastingar (API-stil)
+        hvis tekst_inneholder(content_type, "application/json") {
+            returner _parse_json_fil(ctx, oppl_cfg)
+        }
+        // Binær body (single-file upload via PUT/POST)
+        hvis lengde(body) > 0 {
+            returner _parse_raw_body(ctx, body, content_type, oppl_cfg)
+        }
+        resultat["feil"] = "Forventa multipart/form-data, fekk: " + content_type
+        returner resultat
+    }
+
+    // Hent boundary
+    la boundary = _hent_boundary(content_type)
+    hvis boundary == "" {
+        resultat["feil"] = "Manglande multipart boundary"
+        returner resultat
+    }
+
+    // Parse delar
+    la delar = _split_multipart(body, boundary)
+    la filer: ordbok_tekst = {}
+    la felt: ordbok_tekst  = {}
+
+    la i: heltall = 0
+    mens i < lengde(delar) {
+        la del = delar[i]
+        la parsed_del = _parse_del(del)
+        la del_namn = parsed_del["namn"]
+        la del_type: tekst = parsed_del["type"]
+
+        hvis del_type == "fil" {
+            la validering = _valider_fil(parsed_del, oppl_cfg)
+            hvis validering != "" {
+                resultat["feil"]   = validering
+                returner resultat
+            }
+            filer[del_namn] = parsed_del
+        } ellers {
+            felt[del_namn] = parsed_del["innhald"]
+        }
+        i = i + 1
+    }
+
+    resultat["ok"]    = "sann"
+    resultat["filer"] = filer
+    resultat["felt"]  = felt
+    returner resultat
+}
+
+# ─── Lagring ──────────────────────────────────────────────────────────────────
+
+funksjon lagre_fil(resultat: ordbok_tekst, felt_namn: tekst, oppl_cfg: ordbok_tekst) -> tekst {
+    la filer = resultat["filer"]
+    hvis ikkje har_nokkel(filer, felt_namn) {
+        kast "OpplastingsFeil: felt '" + felt_namn + "' ikkje funne"
+    }
+    la fil_data = filer[felt_namn]
+    la originalt_namn = fil_data["filnamn"]
+    la innhald        = fil_data["innhald"]
+
+    // Lag mappe viss han ikkje finst
+    prøv {
+        builtin.mkdir_p(oppl_cfg["mappe"])
+    } fang (e) { }
+
+    // Generer fil-namn
+    la fil_namn: tekst = ""
+    hvis oppl_cfg["nye_namn"] == "sann" {
+        la ext = _hent_extension(originalt_namn)
+        fil_namn = _generer_filnamn() + ext
+    } ellers {
+        fil_namn = _trygg_filnamn(originalt_namn)
+    }
+
+    la full_sti = oppl_cfg["mappe"] + "/" + fil_namn
+    fil_skriv(full_sti, innhald)
+    returner full_sti
+}
+
+funksjon lagre_alle(resultat: ordbok_tekst, oppl_cfg: ordbok_tekst) -> ordbok_tekst {
+    la filer = resultat["filer"]
+    la stiar: ordbok_tekst = {}
+    la nk = nøkler(filer)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la felt_namn: tekst = nk[i]
+        la sti = lagre_fil(resultat, felt_namn, oppl_cfg)
+        stiar[felt_namn] = sti
+        i = i + 1
+    }
+    returner stiar
+}
+
+funksjon slett_fil(sti: tekst) -> boolsk {
+    prøv {
+        builtin.fil_slett(sti)
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+# ─── Validering ───────────────────────────────────────────────────────────────
+
+funksjon ok(resultat: ordbok_tekst) -> boolsk {
+    returner resultat["ok"] == "sann"
+}
+
+funksjon feilmelding(resultat: ordbok_tekst) -> tekst {
+    returner resultat["feil"]
+}
+
+funksjon hent_filnamn(resultat: ordbok_tekst, felt_namn: tekst) -> tekst {
+    la filer = resultat["filer"]
+    hvis ikkje har_nokkel(filer, felt_namn) { returner "" }
+    returner filer[felt_namn]["filnamn"]
+}
+
+funksjon hent_content_type(resultat: ordbok_tekst, felt_namn: tekst) -> tekst {
+    la filer = resultat["filer"]
+    hvis ikkje har_nokkel(filer, felt_namn) { returner "" }
+    returner filer[felt_namn]["content_type"]
+}
+
+funksjon hent_storleik(resultat: ordbok_tekst, felt_namn: tekst) -> heltall {
+    la filer = resultat["filer"]
+    hvis ikkje har_nokkel(filer, felt_namn) { returner 0 }
+    returner lengde(filer[felt_namn]["innhald"])
+}
+
+funksjon hent_felt(resultat: ordbok_tekst, felt_namn: tekst) -> tekst {
+    la felt = resultat["felt"]
+    hvis har_nokkel(felt, felt_namn) { returner felt[felt_namn] }
+    returner ""
+}
+
+# ─── Bilde-hjelparar ──────────────────────────────────────────────────────────
+
+funksjon er_bilde(content_type: tekst) -> boolsk {
+    returner tekst_starter_med(content_type, "image/")
+}
+
+funksjon er_pdf(content_type: tekst) -> boolsk {
+    returner content_type == "application/pdf"
+}
+
+funksjon tillatt_type(content_type: tekst, tillatte: liste<tekst>) -> boolsk {
+    la i: heltall = 0
+    mens i < lengde(tillatte) {
+        la t: tekst = tillatte[i]
+        hvis t == "*" eller t == content_type { returner sann }
+        // Wildcard: "image/*"
+        hvis tekst_slutter_med(t, "/*") {
+            la prefiks = builtin.slice(t, 0, lengde(t) - 2)
+            hvis tekst_starter_med(content_type, prefiks) { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+# ─── Internals ────────────────────────────────────────────────────────────────
+
+funksjon _hent_boundary(content_type: tekst) -> tekst {
+    la idx = builtin.index_of(content_type, "boundary=")
+    hvis idx < 0 { returner "" }
+    la b = builtin.slice(content_type, idx + 9, lengde(content_type))
+    // Fjern evt. sitat
+    la trimmed = builtin.trim(b)
+    hvis tekst_starter_med(trimmed, "\"") og tekst_slutter_med(trimmed, "\"") {
+        returner builtin.slice(trimmed, 1, lengde(trimmed) - 1)
+    }
+    returner trimmed
+}
+
+funksjon _split_multipart(body: tekst, boundary: tekst) -> liste<tekst> {
+    la delar: liste<tekst> = []
+    la sep = "--" + boundary
+    la chunks = builtin.split(body, sep)
+    la i: heltall = 1  // hopp over første tomme del
+    mens i < lengde(chunks) {
+        la chunk: tekst = chunks[i]
+        // Hopp over avsluttande "--"
+        la trimmed = builtin.trim(chunk)
+        hvis trimmed != "--" og trimmed != "" og ikkje tekst_starter_med(trimmed, "--") {
+            legg_til(delar, chunk)
+        }
+        i = i + 1
+    }
+    returner delar
+}
+
+funksjon _parse_del(del: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["type"]         = "felt"
+    r["namn"]         = ""
+    r["filnamn"]      = ""
+    r["content_type"] = "text/plain"
+    r["innhald"]      = ""
+
+    // Splitt headerar frå innhald (delt ved \r\n\r\n)
+    la header_split = builtin.index_of(del, "\r\n\r\n")
+    la headers_str: tekst = ""
+    la innhald: tekst = ""
+    hvis header_split > 0 {
+        headers_str = builtin.slice(del, 0, header_split)
+        innhald     = builtin.slice(del, header_split + 4, lengde(del))
+    } ellers {
+        // Prøv \n\n
+        la nn = builtin.index_of(del, "\n\n")
+        hvis nn > 0 {
+            headers_str = builtin.slice(del, 0, nn)
+            innhald     = builtin.slice(del, nn + 2, lengde(del))
+        } ellers {
+            r["innhald"] = del
+            returner r
+        }
+    }
+
+    // Fjern trailing \r\n frå innhald
+    la innhald_trimmed = innhald
+    hvis tekst_slutter_med(innhald_trimmed, "\r\n") {
+        innhald_trimmed = builtin.slice(innhald_trimmed, 0, lengde(innhald_trimmed) - 2)
+    }
+    r["innhald"] = innhald_trimmed
+
+    // Parse Content-Disposition
+    la header_linjer = builtin.split(headers_str, "\r\n")
+    la i: heltall = 0
+    mens i < lengde(header_linjer) {
+        la linje: tekst = header_linjer[i]
+        la linje_liten = tekst_til_liten(linje)
+        hvis tekst_starter_med(linje_liten, "content-disposition:") {
+            la namn = _hent_disposition_param(linje, "name")
+            la filnamn = _hent_disposition_param(linje, "filename")
+            r["namn"]    = namn
+            r["filnamn"] = filnamn
+            hvis filnamn != "" { r["type"] = "fil" }
+        } ellers hvis tekst_starter_med(linje_liten, "content-type:") {
+            la ct_idx = builtin.index_of(linje, ":")
+            r["content_type"] = builtin.trim(builtin.slice(linje, ct_idx + 1, lengde(linje)))
+        }
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon _hent_disposition_param(header: tekst, param: tekst) -> tekst {
+    la søk = param + "=\""
+    la idx = builtin.index_of(header, søk)
+    hvis idx < 0 { returner "" }
+    la start = idx + lengde(søk)
+    la rest  = builtin.slice(header, start, lengde(header))
+    la end   = builtin.index_of(rest, "\"")
+    hvis end < 0 { returner rest }
+    returner builtin.slice(rest, 0, end)
+}
+
+funksjon _valider_fil(fil_data: ordbok_tekst, oppl_cfg: ordbok_tekst) -> tekst {
+    la innhald      = fil_data["innhald"]
+    la content_type = fil_data["content_type"]
+    la maks_bytes   = heltall_fra_tekst(oppl_cfg["maks_bytes"])
+
+    // Storleik
+    hvis lengde(innhald) > maks_bytes {
+        returner "Fil for stor: " + tekst_fra_heltall(lengde(innhald)) + " bytes (maks: " + tekst_fra_heltall(maks_bytes) + ")"
+    }
+
+    // Type
+    la typar_str = oppl_cfg["typar"]
+    hvis typar_str != "*" {
+        la typar = builtin.split(typar_str, ",")
+        hvis ikkje tillatt_type(content_type, typar) {
+            returner "Filtype ikkje tillatt: " + content_type + " (tillatte: " + typar_str + ")"
+        }
+    }
+    returner ""
+}
+
+funksjon _generer_filnamn() -> tekst {
+    prøv { returner builtin.random_hex(16) } fang (e) { }
+    returner "fil_" + tekst_fra_heltall(builtin.now_ms())
+}
+
+funksjon _hent_extension(filnamn: tekst) -> tekst {
+    la idx = builtin.index_of(filnamn, ".")
+    la siste_dot: heltall = -1
+    la i: heltall = 0
+    la tegn = builtin.split(filnamn, "")
+    mens i < lengde(tegn) {
+        hvis tegn[i] == "." { siste_dot = i }
+        i = i + 1
+    }
+    hvis siste_dot < 0 { returner "" }
+    returner builtin.slice(filnamn, siste_dot, lengde(filnamn))
+}
+
+funksjon _trygg_filnamn(namn: tekst) -> tekst {
+    la tegn = builtin.split(namn, "")
+    la r = ""
+    la i: heltall = 0
+    mens i < lengde(tegn) {
+        la c: tekst = tegn[i]
+        la code = builtin.char_code(c)
+        la ok = (code >= 97 og code <= 122) eller (code >= 65 og code <= 90) eller
+                (code >= 48 og code <= 57) eller c == "." eller c == "-" eller c == "_"
+        hvis ok { r = r + c }
+        ellers { r = r + "_" }
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon _parse_json_fil(ctx: ordbok_tekst, oppl_cfg: ordbok_tekst) -> ordbok_tekst {
+    la resultat: ordbok_tekst = {}
+    resultat["ok"]    = "usann"
+    resultat["feil"]  = ""
+    la data = web.request_json(ctx)
+    la innhald = ""
+    la filnamn = "opplasta_fil"
+    la content_type = "application/octet-stream"
+    hvis har_nokkel(data, "data") { innhald = tekst(data["data"]) }
+    hvis har_nokkel(data, "filnamn") { filnamn = tekst(data["filnamn"]) }
+    hvis har_nokkel(data, "type") { content_type = tekst(data["type"]) }
+    // Prøv base64-dekoding
+    prøv {
+        la dekoda = builtin.base64_decode(innhald)
+        innhald = dekoda
+    } fang (e) { }
+    la fil_data: ordbok_tekst = {
+        "type": "fil", "namn": "fil",
+        "filnamn": filnamn, "content_type": content_type, "innhald": innhald
+    }
+    la feil = _valider_fil(fil_data, oppl_cfg)
+    hvis feil != "" { resultat["feil"] = feil; returner resultat }
+    la filer: ordbok_tekst = {}
+    filer["fil"] = fil_data
+    resultat["ok"]    = "sann"
+    resultat["filer"] = filer
+    resultat["felt"]  = {}
+    returner resultat
+}
+
+funksjon _parse_raw_body(ctx: ordbok_tekst, body: tekst, content_type: tekst, oppl_cfg: ordbok_tekst) -> ordbok_tekst {
+    la resultat: ordbok_tekst = {}
+    resultat["ok"]    = "usann"
+    resultat["feil"]  = ""
+    la fil_data: ordbok_tekst = {
+        "type": "fil", "namn": "fil",
+        "filnamn": "opplasta_fil", "content_type": content_type, "innhald": body
+    }
+    la feil = _valider_fil(fil_data, oppl_cfg)
+    hvis feil != "" { resultat["feil"] = feil; returner resultat }
+    la filer: ordbok_tekst = {}
+    filer["fil"] = fil_data
+    resultat["ok"]    = "sann"
+    resultat["filer"] = filer
+    resultat["felt"]  = {}
+    returner resultat
+}

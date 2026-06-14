@@ -1,0 +1,186 @@
+# pg.no — PostgreSQL-drivar for Norscode
+# Same API som std/db.no
+#
+# Bruk:
+#   bruk std.pg som pg
+#
+#   la conn = pg.open("host=localhost port=5432 dbname=myapp user=app password=hemmeleg")
+#   // Eller via URL:
+#   la conn = pg.open_url("postgresql://app:hemmeleg@localhost:5432/myapp")
+#   pg.execute(conn, "INSERT INTO brukar (namn) VALUES ($1)", ["Ola"])
+#   la rader = pg.query(conn, "SELECT * FROM brukar WHERE aktiv = $1", ["sann"])
+
+# ─── Tilkopling ───────────────────────────────────────────────────────────────
+
+funksjon open(dsn: tekst) -> tekst {
+    prøv {
+        la conn_id = builtin.pg_connect(dsn)
+        returner tekst(conn_id)
+    } fang (e) {
+        kast "PG-tilkoplingsfeil: " + tekst(e)
+    }
+    returner ""
+}
+
+funksjon open_url(url: tekst) -> tekst {
+    // postgresql://brukar:passord@host:port/database
+    la dsn = _url_til_dsn(url)
+    returner open(dsn)
+}
+
+funksjon open_cfg(host: tekst, port: heltall, database: tekst, brukar: tekst, passord: tekst) -> tekst {
+    la dsn = "host=" + host + " port=" + tekst_fra_heltall(port) +
+             " dbname=" + database + " user=" + brukar + " password=" + passord
+    returner open(dsn)
+}
+
+funksjon close(conn: tekst) -> heltall {
+    prøv { builtin.pg_close(conn) } fang (e) { }
+    returner 0
+}
+
+funksjon er_tilkopla(conn: tekst) -> boolsk {
+    prøv { returner builtin.pg_ping(conn) } fang (e) { returner usann }
+    returner usann
+}
+
+# ─── Spørjingar ───────────────────────────────────────────────────────────────
+
+// Execute med parameteriserte spørjingar ($1, $2, ...)
+funksjon execute(conn: tekst, sql: tekst, params: liste<tekst>) -> heltall {
+    prøv {
+        returner builtin.pg_execute(conn, sql, params)
+    } fang (e) {
+        kast "PG-feil: " + tekst(e) + " | SQL: " + builtin.slice(sql, 0, 100)
+    }
+    returner 0
+}
+
+funksjon execute_raw(conn: tekst, sql: tekst) -> heltall {
+    la tom: liste<tekst> = []
+    returner execute(conn, sql, tom)
+}
+
+funksjon query(conn: tekst, sql: tekst, params: liste<tekst>) -> liste<ordbok_tekst> {
+    prøv {
+        la rader = builtin.pg_query(conn, sql, params)
+        returner rader
+    } fang (e) {
+        kast "PG-spørjingsfeil: " + tekst(e)
+    }
+    returner []
+}
+
+funksjon query_raw(conn: tekst, sql: tekst) -> liste<ordbok_tekst> {
+    la tom: liste<tekst> = []
+    returner query(conn, sql, tom)
+}
+
+funksjon query_ein(conn: tekst, sql: tekst, params: liste<tekst>) -> ordbok_tekst {
+    la rader = query(conn, sql, params)
+    hvis lengde(rader) == 0 { returner {} }
+    returner rader[0]
+}
+
+funksjon query_verdi(conn: tekst, sql: tekst, params: liste<tekst>) -> tekst {
+    la rad = query_ein(conn, sql, params)
+    la nk = nøkler(rad)
+    hvis lengde(nk) == 0 { returner "" }
+    returner tekst(rad[nk[0]])
+}
+
+funksjon query_int(conn: tekst, sql: tekst) -> heltall {
+    la tom: liste<tekst> = []
+    la v = query_verdi(conn, sql, tom)
+    hvis v == "" { returner 0 }
+    prøv { returner heltall_fra_tekst(v) } fang (e) { returner 0 }
+    returner 0
+}
+
+# ─── Transaksjonar ────────────────────────────────────────────────────────────
+
+funksjon begin(conn: tekst) -> heltall {
+    returner execute_raw(conn, "BEGIN")
+}
+
+funksjon commit(conn: tekst) -> heltall {
+    returner execute_raw(conn, "COMMIT")
+}
+
+funksjon rollback(conn: tekst) -> heltall {
+    returner execute_raw(conn, "ROLLBACK")
+}
+
+funksjon savepoint(conn: tekst, namn: tekst) -> heltall {
+    returner execute_raw(conn, "SAVEPOINT " + namn)
+}
+
+funksjon rollback_to(conn: tekst, namn: tekst) -> heltall {
+    returner execute_raw(conn, "ROLLBACK TO SAVEPOINT " + namn)
+}
+
+# ─── Schema-hjelpar ───────────────────────────────────────────────────────────
+
+funksjon tabell_finst(conn: tekst, tabell: tekst) -> boolsk {
+    la tom: liste<tekst> = []
+    la n = query_int(conn, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '" + tabell + "'")
+    returner n > 0
+}
+
+funksjon kolonne_finst(conn: tekst, tabell: tekst, kolonne: tekst) -> boolsk {
+    la n = query_int(conn, "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='" + tabell + "' AND column_name='" + kolonne + "'")
+    returner n > 0
+}
+
+funksjon opprett_utvidinga(conn: tekst, namn: tekst) -> heltall {
+    returner execute_raw(conn, "CREATE EXTENSION IF NOT EXISTS \"" + namn + "\"")
+}
+
+# ─── COPY / bulk insert ───────────────────────────────────────────────────────
+
+funksjon bulk_insert(conn: tekst, tabell: tekst, kolonnar: liste<tekst>, rader: liste<liste<tekst>>) -> heltall {
+    la kol_str = tekst_saman(kolonnar, ", ")
+    la n: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        la rad: liste<tekst> = rader[i]
+        la verdi_delar: liste<tekst> = []
+        la j: heltall = 0
+        mens j < lengde(rad) {
+            la v: tekst = rad[j]
+            legg_til(verdi_delar, "'" + _esc(v) + "'")
+            j = j + 1
+        }
+        la sql = "INSERT INTO " + tabell + " (" + kol_str + ") VALUES (" + tekst_saman(verdi_delar, ",") + ")"
+        la tom: liste<tekst> = []
+        execute(conn, sql, tom)
+        n = n + 1
+        i = i + 1
+    }
+    returner n
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _url_til_dsn(url: tekst) -> tekst {
+    // postgresql://brukar:passord@host:port/database
+    la u = tekst_erstatt(url, "postgresql://", "")
+    u = tekst_erstatt(u, "postgres://", "")
+    la at_idx = builtin.index_of(u, "@")
+    la kredential = builtin.slice(u, 0, at_idx)
+    la rest = builtin.slice(u, at_idx + 1, lengde(u))
+    la colon_idx = builtin.index_of(kredential, ":")
+    la brukar = builtin.slice(kredential, 0, colon_idx)
+    la passord = builtin.slice(kredential, colon_idx + 1, lengde(kredential))
+    la slash_idx = builtin.index_of(rest, "/")
+    la host_port = builtin.slice(rest, 0, slash_idx)
+    la database = builtin.slice(rest, slash_idx + 1, lengde(rest))
+    la port_idx = builtin.index_of(host_port, ":")
+    la host = hvis port_idx >= 0 { builtin.slice(host_port, 0, port_idx) } ellers { host_port }
+    la port = hvis port_idx >= 0 { builtin.slice(host_port, port_idx + 1, lengde(host_port)) } ellers { "5432" }
+    returner "host=" + host + " port=" + port + " dbname=" + database + " user=" + brukar + " password=" + passord
+}
+
+funksjon _esc(s: tekst) -> tekst {
+    returner tekst_erstatt(s, "'", "''")
+}

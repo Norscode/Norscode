@@ -1,0 +1,263 @@
+# sched.no — Hendingsplanlegging
+# Python: sched
+#
+# Planleggar hendingar etter tid (ms) eller prioritet.
+# Brukar builtin.tid_ms() for gjeldande tid.
+#
+# Hendingskø: min-heap sortert etter (tid_ms, prioritet)
+# Kvar hending: ordbok_tekst
+#   "tid"      → planlagt køyringstid (ms)
+#   "prioritet"→ prioritet (lågare = tidlegare)
+#   "fn"       → funksjonsnamn (for ncb_call_fn)
+#   "args"     → JSON-serialisert args-ordbok
+#   "id"       → unik hending-ID
+#
+# Bruk:
+#   bruk std.sched som sc
+#   la planleggar = sc.ny()
+#   sc.enter(planleggar, 1000, 1, "min.funksjon", {})  # om 1000ms
+#   sc.run(planleggar)
+
+# ─── Planleggar-tilstand ──────────────────────────────────────────────────────
+
+la _neste_id: heltall = 0
+
+funksjon ny() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["kø"] = "[]"       # JSON-liste av hending-spec
+    s["aktiv"] = "sann"
+    returner s
+}
+
+funksjon _ny_id() -> tekst {
+    _neste_id = _neste_id + 1
+    returner "hend_" + tekst_fra_heltall(_neste_id)
+}
+
+# ─── Legg til hendingar ───────────────────────────────────────────────────────
+
+# enter: forsinka innlegging (delay_ms etter no)
+funksjon enter(s: ordbok_tekst, delay_ms: heltall, prioritet: heltall,
+               fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    la tid_ms: heltall = builtin.tid_ms() + delay_ms
+    returner enterabs(s, tid_ms, prioritet, fn_namn, args)
+}
+
+# enterabs: absolutt tid
+funksjon enterabs(s: ordbok_tekst, tid_ms: heltall, prioritet: heltall,
+                   fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    la hend: ordbok_tekst = {}
+    la id: tekst = _ny_id()
+    hend["id"] = id
+    hend["tid"] = tekst_fra_heltall(tid_ms)
+    hend["prioritet"] = tekst_fra_heltall(prioritet)
+    hend["fn"] = fn_namn
+    hend["args"] = builtin.json_stringify(args)
+
+    la kø = builtin.json_parse(s["kø"])
+    legg_til(kø, builtin.json_stringify(hend))
+    _heap_push_sched(kø, lengde(kø) - 1)
+    s["kø"] = builtin.json_stringify(kø)
+    returner id
+}
+
+# Snarveg: enter med 0 delay
+funksjon call_soon(s: ordbok_tekst, fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    returner enter(s, 0, 1, fn_namn, args)
+}
+
+# ─── Avbryt hending ──────────────────────────────────────────────────────────
+
+funksjon cancel(s: ordbok_tekst, hend_id: tekst) -> bool {
+    la kø = builtin.json_parse(s["kø"])
+    la ny_kø: liste_tekst = []
+    la funne: bool = usann
+    la i: heltall = 0
+    mens (i < lengde(kø)) {
+        la hend = builtin.json_parse(kø[i])
+        hvis (hend["id"] == hend_id) {
+            funne = sann
+        } ellers {
+            legg_til(ny_kø, kø[i])
+        }
+        i = i + 1
+    }
+    # Bygg heap på nytt etter fjerning
+    _heapify_sched(ny_kø)
+    s["kø"] = builtin.json_stringify(ny_kø)
+    returner funne
+}
+
+# ─── Køyr hendingar ───────────────────────────────────────────────────────────
+
+# Køyr alle hendingar som er forfalne no
+funksjon run_ferdig(s: ordbok_tekst) -> heltall {
+    la køyrt: heltall = 0
+    la kont: bool = sann
+    mens (kont) {
+        la kø = builtin.json_parse(s["kø"])
+        la n: heltall = lengde(kø)
+        hvis (n == 0) { kont = usann }
+        ellers {
+            la neste = builtin.json_parse(kø[0])
+            la hend_tid: heltall = builtin.heltall_fra_tekst(neste["tid"])
+            la no: heltall = builtin.tid_ms()
+            hvis (hend_tid <= no) {
+                # Pop frå heap
+                la siste: tekst = kø[n - 1]
+                la ny_kø = builtin.slice(kø, 0, n - 1)
+                hvis (n > 1) {
+                    ny_kø[0] = siste
+                    _sil_ned_sched(ny_kø, 0, n - 1)
+                }
+                s["kø"] = builtin.json_stringify(ny_kø)
+
+                # Køyr hendinga
+                la fn_namn: tekst = neste["fn"]
+                la args = builtin.json_parse(neste["args"])
+                prøv {
+                    builtin.ncb_call_fn(fn_namn, args)
+                } fang (e) {
+                    # Hending-feil vert logga men ikkje stoppar planleggaren
+                }
+                køyrt = køyrt + 1
+            } ellers {
+                kont = usann
+            }
+        }
+    }
+    returner køyrt
+}
+
+# Køyr éi hending (vent til neste er klar)
+funksjon run_neste(s: ordbok_tekst) -> bool {
+    la kø = builtin.json_parse(s["kø"])
+    la n: heltall = lengde(kø)
+    hvis (n == 0) { returner usann }
+
+    la neste = builtin.json_parse(kø[0])
+    la hend_tid: heltall = builtin.heltall_fra_tekst(neste["tid"])
+    la no: heltall = builtin.tid_ms()
+    la ventetid: heltall = hend_tid - no
+    hvis (ventetid > 0) {
+        # Vi kan ikkje faktisk vente i Norscode, men vi rapporterer
+        returner usann
+    }
+
+    la siste: tekst = kø[n - 1]
+    la ny_kø = builtin.slice(kø, 0, n - 1)
+    hvis (n > 1) {
+        ny_kø[0] = siste
+        _sil_ned_sched(ny_kø, 0, n - 1)
+    }
+    s["kø"] = builtin.json_stringify(ny_kø)
+
+    la fn_namn: tekst = neste["fn"]
+    la args = builtin.json_parse(neste["args"])
+    prøv {
+        builtin.ncb_call_fn(fn_namn, args)
+    } fang (e) {}
+    returner sann
+}
+
+# Kor mange ms til neste hending?
+funksjon tid_til_neste(s: ordbok_tekst) -> heltall {
+    la kø = builtin.json_parse(s["kø"])
+    hvis (lengde(kø) == 0) { returner -1 }
+    la neste = builtin.json_parse(kø[0])
+    la hend_tid: heltall = builtin.heltall_fra_tekst(neste["tid"])
+    la ventetid: heltall = hend_tid - builtin.tid_ms()
+    hvis (ventetid < 0) { returner 0 }
+    returner ventetid
+}
+
+# ─── Tilstandssjekkar ─────────────────────────────────────────────────────────
+
+funksjon er_tom(s: ordbok_tekst) -> bool {
+    la kø = builtin.json_parse(s["kø"])
+    returner lengde(kø) == 0
+}
+
+funksjon tal_ventande(s: ordbok_tekst) -> heltall {
+    la kø = builtin.json_parse(s["kø"])
+    returner lengde(kø)
+}
+
+funksjon hent_kø(s: ordbok_tekst) -> liste_tekst {
+    returner builtin.json_parse(s["kø"])
+}
+
+funksjon neste_hending(s: ordbok_tekst) -> ordbok_tekst {
+    la kø = builtin.json_parse(s["kø"])
+    la tom: ordbok_tekst = {}
+    hvis (lengde(kø) == 0) { returner tom }
+    returner builtin.json_parse(kø[0])
+}
+
+# ─── Gjentak-mønster ──────────────────────────────────────────────────────────
+# Neste køyring av ein gjentak-hending vert registrert etter at fn køyrar
+
+funksjon enter_gjentak(s: ordbok_tekst, intervall_ms: heltall, prioritet: heltall,
+                        fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    # Legg til hending-ID i args slik at fn kan re-registrere seg
+    la nye_args = builtin.json_parse(builtin.json_stringify(args))
+    nye_args["_planleggar"] = builtin.json_stringify(s)
+    nye_args["_intervall"] = tekst_fra_heltall(intervall_ms)
+    nye_args["_prioritet"] = tekst_fra_heltall(prioritet)
+    nye_args["_fn"] = fn_namn
+    returner enter(s, intervall_ms, prioritet, fn_namn, nye_args)
+}
+
+# ─── Heap-operasjonar for scheduler ──────────────────────────────────────────
+
+funksjon _sched_prioritet(kø: liste_tekst, i: heltall) -> heltall {
+    la hend = builtin.json_parse(kø[i])
+    la tid: heltall = builtin.heltall_fra_tekst(hend["tid"])
+    la pri: heltall = builtin.heltall_fra_tekst(hend["prioritet"])
+    # Kombiner: tid * 1000 + prioritet (tid dominerer)
+    returner tid * 1000 + pri
+}
+
+funksjon _heap_push_sched(kø: liste_tekst, i: heltall) {
+    mens (i > 0) {
+        la forelder: heltall = (i - 1) / 2
+        hvis (_sched_prioritet(kø, i) < _sched_prioritet(kø, forelder)) {
+            la tmp: tekst = kø[i]
+            kø[i] = kø[forelder]
+            kø[forelder] = tmp
+            i = forelder
+        } ellers {
+            i = 0
+        }
+    }
+}
+
+funksjon _sil_ned_sched(kø: liste_tekst, i: heltall, n: heltall) {
+    la kont: bool = sann
+    mens (kont) {
+        la venstre: heltall = 2 * i + 1
+        la høgre: heltall = 2 * i + 2
+        la minst: heltall = i
+        hvis (venstre < n og _sched_prioritet(kø, venstre) < _sched_prioritet(kø, minst)) {
+            minst = venstre
+        }
+        hvis (høgre < n og _sched_prioritet(kø, høgre) < _sched_prioritet(kø, minst)) {
+            minst = høgre
+        }
+        hvis (minst != i) {
+            la tmp: tekst = kø[i]
+            kø[i] = kø[minst]
+            kø[minst] = tmp
+            i = minst
+        } ellers { kont = usann }
+    }
+}
+
+funksjon _heapify_sched(kø: liste_tekst) {
+    la n: heltall = lengde(kø)
+    la i: heltall = n / 2 - 1
+    mens (i >= 0) {
+        _sil_ned_sched(kø, i, n)
+        i = i - 1
+    }
+}

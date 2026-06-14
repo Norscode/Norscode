@@ -27,6 +27,7 @@ if [ ! -x "$ROOT/dist/norscode_native" ]; then
 fi
 
 printf '=== Regenerer isolert maintainer-output (utan Python) ===\n\n'
+printf 'Merk: dette er vedlikehaldsmodus for seed-fornying, ikkje normal utviklingsflyt.\n\n'
 
 printf '[1/4] Bundle kompilator-modular...\n'
 TMP="$(mktemp "${TMPDIR:-/tmp}/nc_bundle_XXXXXX")"

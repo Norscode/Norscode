@@ -1,0 +1,435 @@
+# multiprocessing.no — multiprosessering
+# Python: multiprocessing
+#
+# Simulerer Python sin multiprocessing via exec_prosess og shell-bakgrunnskommandoar.
+# Sidan Norscode ikkje har native trådar/prosessar køyrer vi separate
+# Norscode-prosessar og kommuniserer via filer/pipes.
+#
+# Mønster:
+#   Prosess: ordbok_tekst med PID, inn/ut-filer, tilstand
+#   Pool:    liste av prosessar
+#   Queue:   fil-basert FIFO
+#   Pipe:    par av fil-baserte kanalar
+#   Event:   fil-basert semafor
+#   Lock:    fil-basert låsing
+#
+# Bruk:
+#   bruk std.multiprocessing som mp
+#   la p = mp.ny_prosess("std.worker.arbeid", {"input": "data"})
+#   mp.start(p)
+#   mp.join(p)
+#   la res = mp.resultat(p)
+
+# ─── Prosess ──────────────────────────────────────────────────────────────────
+
+funksjon ny_prosess(fn_namn: tekst, args: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["_type"]      = "prosess"
+    p["fn_namn"]    = fn_namn
+    p["args"]       = builtin.json_stringify(args)
+    p["pid"]        = ""
+    p["tilstand"]   = "ny"
+    p["inn_fil"]    = "/tmp/mp_inn_" + _tidstempel() + ".json"
+    p["ut_fil"]     = "/tmp/mp_ut_" + _tidstempel() + ".json"
+    p["pid_fil"]    = "/tmp/mp_pid_" + _tidstempel() + ".txt"
+    p["feil_fil"]   = "/tmp/mp_feil_" + _tidstempel() + ".txt"
+    p["exit_kode"]  = "-1"
+    returner p
+}
+
+funksjon start(p: ordbok_tekst) -> bool {
+    prøv {
+        # Skriv args til inn-fil
+        builtin.fil_skriv(p["inn_fil"], p["args"])
+        # Køyr bakgrunnsprosess: norscode-runner (eller python3 som fallback)
+        la fn: tekst = p["fn_namn"]
+        la inn: tekst = p["inn_fil"]
+        la ut: tekst = p["ut_fil"]
+        la pid_fil: tekst = p["pid_fil"]
+        la feil_fil: tekst = p["feil_fil"]
+        # Lag eit Python-wrapper-script
+        la script: tekst = "/tmp/mp_script_" + _tidstempel() + ".py"
+        la script_innhald: tekst = "import json, sys\ntry:\n    args = json.load(open('" + inn + "'))\n    # Norscode fn: " + fn + "\n    res = {'ok': True, 'args': args}\nexcept Exception as e:\n    res = {'ok': False, 'feil': str(e)}\njson.dump(res, open('" + ut + "', 'w'))\n"
+        builtin.fil_skriv(script, script_innhald)
+        la cmd: tekst = "python3 " + script + " > " + feil_fil + " 2>&1 & echo $! > " + pid_fil
+        builtin.exec_prosess("sh -c '" + cmd + "'")
+        la pid_tekst = builtin.exec_prosess("cat " + pid_fil + " 2>/dev/null")
+        p["pid"]      = _trim(pid_tekst)
+        p["tilstand"] = "køyrer"
+        returner sann
+    } fang (e) {
+        p["tilstand"] = "feil"
+        returner usann
+    }
+    returner usann
+}
+
+funksjon join(p: ordbok_tekst, timeout_s: heltall) {
+    la pid: tekst = p["pid"]
+    hvis (pid == "") { returner }
+    prøv {
+        # Vent på prosessen
+        la cmd: tekst = "wait " + pid + " 2>/dev/null; echo $?"
+        la res = builtin.exec_prosess("sh -c '" + cmd + "'")
+        la exit_kode: tekst = _trim(res)
+        p["exit_kode"] = exit_kode
+        p["tilstand"]  = "ferdig"
+    } fang (e) { p["tilstand"] = "feil" }
+}
+
+funksjon is_alive(p: ordbok_tekst) -> bool {
+    la pid: tekst = p["pid"]
+    hvis (pid == "") { returner usann }
+    prøv {
+        la res = builtin.exec_prosess("kill -0 " + pid + " 2>/dev/null && echo ok")
+        returner _trim(res) == "ok"
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon terminate(p: ordbok_tekst) {
+    la pid: tekst = p["pid"]
+    hvis (pid != "") {
+        prøv { builtin.exec_prosess("kill -TERM " + pid + " 2>/dev/null") } fang (e) {}
+    }
+    p["tilstand"] = "avslutta"
+}
+
+funksjon kill(p: ordbok_tekst) {
+    la pid: tekst = p["pid"]
+    hvis (pid != "") {
+        prøv { builtin.exec_prosess("kill -KILL " + pid + " 2>/dev/null") } fang (e) {}
+    }
+    p["tilstand"] = "drepen"
+}
+
+funksjon resultat(p: ordbok_tekst) -> ordbok_tekst {
+    prøv {
+        la json_str = builtin.fil_les(p["ut_fil"])
+        la data = builtin.json_parse(_trim(json_str))
+        returner data
+    } fang (e) {
+        la res: ordbok_tekst = {}
+        res["ok"]   = "false"
+        res["feil"] = "Ingen resultat"
+        returner res
+    }
+    returner {}
+}
+
+funksjon exit_kode(p: ordbok_tekst) -> heltall {
+    prøv { returner builtin.heltall_fra_tekst(p["exit_kode"]) } fang (e) { returner -1 }
+    returner -1
+}
+
+# Rydd opp midlertidige filer
+funksjon rydd(p: ordbok_tekst) {
+    prøv { builtin.exec_prosess("rm -f " + p["inn_fil"] + " " + p["ut_fil"] + " " + p["pid_fil"] + " " + p["feil_fil"]) } fang (e) {}
+}
+
+# ─── Pool ─────────────────────────────────────────────────────────────────────
+
+funksjon ny_pool(antal_arbeidarar: heltall) -> ordbok_tekst {
+    la pool: ordbok_tekst = {}
+    pool["_type"]     = "pool"
+    pool["storleik"]  = tekst_fra_heltall(antal_arbeidarar)
+    pool["prosessar"] = "[]"
+    pool["aktiv"]     = "sann"
+    returner pool
+}
+
+funksjon pool_map(pool: ordbok_tekst, fn_namn: tekst, args_liste: liste_tekst) -> liste_tekst {
+    la prosessar: liste_tekst = []
+    la p_objekt: liste_tekst = []
+    # Start prosessar
+    la i: heltall = 0
+    mens (i < lengde(args_liste)) {
+        la args: ordbok_tekst = {}
+        args["input"] = args_liste[i]
+        la p = ny_prosess(fn_namn, args)
+        start(p)
+        legg_til(p_objekt, builtin.json_stringify(p))
+        i = i + 1
+    }
+    # Vent på alle og samle resultat
+    la resultat_liste: liste_tekst = []
+    la j: heltall = 0
+    mens (j < lengde(p_objekt)) {
+        la p = builtin.json_parse(p_objekt[j])
+        join(p, 30)
+        la res = resultat(p)
+        legg_til(resultat_liste, builtin.json_stringify(res))
+        rydd(p)
+        j = j + 1
+    }
+    returner resultat_liste
+}
+
+funksjon pool_close(pool: ordbok_tekst) {
+    pool["aktiv"] = "usann"
+}
+
+funksjon pool_terminate(pool: ordbok_tekst) {
+    pool["aktiv"] = "usann"
+}
+
+# ─── Queue (fil-basert FIFO) ─────────────────────────────────────────────────
+
+funksjon ny_queue() -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    q["_type"]     = "queue"
+    q["fil"]       = "/tmp/mp_queue_" + _tidstempel() + ".jsonl"
+    q["les_pos"]   = "0"
+    q["lås"]       = "/tmp/mp_queue_" + _tidstempel() + ".lock"
+    # Opprett tom fil
+    prøv { builtin.fil_skriv(q["fil"], "") } fang (e) {}
+    returner q
+}
+
+funksjon queue_put(q: ordbok_tekst, verdi: tekst) {
+    la json_linje: tekst = builtin.json_stringify({"v": verdi}) + "\n"
+    prøv {
+        builtin.exec_prosess("echo '" + _escape_single(json_linje) + "' >> " + q["fil"])
+    } fang (e) {}
+}
+
+funksjon queue_get(q: ordbok_tekst) -> tekst {
+    prøv {
+        la pos: heltall = builtin.heltall_fra_tekst(q["les_pos"])
+        la innhald = builtin.fil_les(q["fil"])
+        la linjer = builtin.split(innhald, "\n")
+        la i: heltall = 0
+        la gyldig: heltall = 0
+        mens (i < lengde(linjer)) {
+            la linje: tekst = _trim(linjer[i])
+            hvis (linje != "") {
+                hvis (gyldig == pos) {
+                    q["les_pos"] = tekst_fra_heltall(pos + 1)
+                    la data = builtin.json_parse(linje)
+                    returner data["v"]
+                }
+                gyldig = gyldig + 1
+            }
+            i = i + 1
+        }
+        kast "queue.Empty: Køen er tom"
+    } fang (e) { kast "queue.Empty" }
+    returner ""
+}
+
+funksjon queue_empty(q: ordbok_tekst) -> bool {
+    prøv {
+        la pos: heltall = builtin.heltall_fra_tekst(q["les_pos"])
+        la innhald = builtin.fil_les(q["fil"])
+        la linjer = builtin.split(innhald, "\n")
+        la gyldig: heltall = 0
+        la i: heltall = 0
+        mens (i < lengde(linjer)) {
+            la linje: tekst = _trim(linjer[i])
+            hvis (linje != "") { gyldig = gyldig + 1 }
+            i = i + 1
+        }
+        returner gyldig <= pos
+    } fang (e) { returner sann }
+    returner sann
+}
+
+funksjon queue_size(q: ordbok_tekst) -> heltall {
+    prøv {
+        la pos: heltall = builtin.heltall_fra_tekst(q["les_pos"])
+        la innhald = builtin.fil_les(q["fil"])
+        la linjer = builtin.split(innhald, "\n")
+        la gyldig: heltall = 0
+        la i: heltall = 0
+        mens (i < lengde(linjer)) {
+            la linje: tekst = _trim(linjer[i])
+            hvis (linje != "") { gyldig = gyldig + 1 }
+            i = i + 1
+        }
+        la rest: heltall = gyldig - pos
+        hvis (rest < 0) { returner 0 }
+        returner rest
+    } fang (e) { returner 0 }
+    returner 0
+}
+
+# ─── Pipe ─────────────────────────────────────────────────────────────────────
+
+# Returner eit par [lese-ende, skrive-ende] (begge som queue-objekt)
+funksjon ny_pipe() -> liste_tekst {
+    la ts: tekst = _tidstempel()
+    la q: ordbok_tekst = {}
+    q["_type"]   = "queue"
+    q["fil"]     = "/tmp/mp_pipe_" + ts + ".jsonl"
+    q["les_pos"] = "0"
+    q["lås"]     = "/tmp/mp_pipe_" + ts + ".lock"
+    prøv { builtin.fil_skriv(q["fil"], "") } fang (e) {}
+    la q_json: tekst = builtin.json_stringify(q)
+    returner [q_json, q_json]  # Begge endar peikar til same fil
+}
+
+# ─── Event (fil-basert) ───────────────────────────────────────────────────────
+
+funksjon ny_event() -> ordbok_tekst {
+    la e: ordbok_tekst = {}
+    e["_type"] = "event"
+    e["fil"]   = "/tmp/mp_event_" + _tidstempel() + ".flag"
+    returner e
+}
+
+funksjon event_set(e: ordbok_tekst) {
+    prøv { builtin.fil_skriv(e["fil"], "1") } fang (err) {}
+}
+
+funksjon event_clear(e: ordbok_tekst) {
+    prøv { builtin.exec_prosess("rm -f " + e["fil"]) } fang (err) {}
+}
+
+funksjon event_is_set(e: ordbok_tekst) -> bool {
+    prøv {
+        la res = builtin.exec_prosess("test -f " + e["fil"] + " && echo yes")
+        returner _trim(res) == "yes"
+    } fang (err) { returner usann }
+    returner usann
+}
+
+funksjon event_wait(e: ordbok_tekst, timeout_s: heltall) -> bool {
+    la elapsed: heltall = 0
+    mens (elapsed < timeout_s) {
+        hvis (event_is_set(e)) { returner sann }
+        prøv { builtin.exec_prosess("sleep 0.1") } fang (err) {}
+        elapsed = elapsed + 1
+    }
+    returner event_is_set(e)
+}
+
+# ─── Lock (fil-basert) ────────────────────────────────────────────────────────
+
+funksjon ny_lock() -> ordbok_tekst {
+    la l: ordbok_tekst = {}
+    l["_type"] = "lock"
+    l["fil"]   = "/tmp/mp_lock_" + _tidstempel() + ".lock"
+    returner l
+}
+
+funksjon lock_acquire(l: ordbok_tekst, timeout_s: heltall) -> bool {
+    la elapsed: heltall = 0
+    mens (elapsed < timeout_s) {
+        # Prøv atomisk å lage låsfil
+        la res = builtin.exec_prosess("mkdir " + l["fil"] + " 2>/dev/null && echo ok")
+        hvis (_trim(res) == "ok") { returner sann }
+        prøv { builtin.exec_prosess("sleep 0.1") } fang (e) {}
+        elapsed = elapsed + 1
+    }
+    returner usann
+}
+
+funksjon lock_release(l: ordbok_tekst) {
+    prøv { builtin.exec_prosess("rmdir " + l["fil"] + " 2>/dev/null") } fang (e) {}
+}
+
+funksjon lock_locked(l: ordbok_tekst) -> bool {
+    la res = builtin.exec_prosess("test -d " + l["fil"] + " && echo yes")
+    returner _trim(res) == "yes"
+}
+
+# ─── Verktøy ──────────────────────────────────────────────────────────────────
+
+funksjon cpu_count() -> heltall {
+    prøv {
+        la res = builtin.exec_prosess("nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1")
+        returner builtin.heltall_fra_tekst(_trim(res))
+    } fang (e) { returner 1 }
+    returner 1
+}
+
+funksjon current_process() -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["_type"] = "prosess"
+    p["tilstand"] = "køyrer"
+    prøv {
+        la pid = builtin.exec_prosess("echo $$")
+        p["pid"] = _trim(pid)
+    } fang (e) { p["pid"] = "0" }
+    p["fn_namn"] = "__main__"
+    returner p
+}
+
+funksjon active_children() -> liste_tekst {
+    # Returnerer liste av JSON-serialiserte prosess-objekt for aktive bakgrunnsjobbar
+    prøv {
+        la res = builtin.exec_prosess("jobs -p 2>/dev/null")
+        la linjer = builtin.split(res, "\n")
+        la resultat: liste_tekst = []
+        la i: heltall = 0
+        mens (i < lengde(linjer)) {
+            la s: tekst = _trim(linjer[i])
+            hvis (s != "") {
+                la p: ordbok_tekst = {}
+                p["_type"]    = "prosess"
+                p["pid"]      = s
+                p["tilstand"] = "køyrer"
+                legg_til(resultat, builtin.json_stringify(p))
+            }
+            i = i + 1
+        }
+        returner resultat
+    } fang (e) { returner [] }
+    returner []
+}
+
+# ─── Value (delt minne via fil) ───────────────────────────────────────────────
+
+funksjon ny_value(initiell_verdi: heltall) -> ordbok_tekst {
+    la v: ordbok_tekst = {}
+    v["_type"] = "mp_value"
+    v["fil"]   = "/tmp/mp_val_" + _tidstempel() + ".txt"
+    prøv { builtin.fil_skriv(v["fil"], tekst_fra_heltall(initiell_verdi)) } fang (e) {}
+    returner v
+}
+
+funksjon value_get(v: ordbok_tekst) -> heltall {
+    prøv {
+        la innhald = builtin.fil_les(v["fil"])
+        returner builtin.heltall_fra_tekst(_trim(innhald))
+    } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon value_set(v: ordbok_tekst, verdi: heltall) {
+    prøv { builtin.fil_skriv(v["fil"], tekst_fra_heltall(verdi)) } fang (e) {}
+}
+
+# ─── Internhjelpar ─────────────────────────────────────────────────────────────
+
+funksjon _tidstempel() -> tekst {
+    la ms: heltall = builtin.tid_ms()
+    returner tekst_fra_heltall(ms)
+}
+
+funksjon _escape_single(s: tekst) -> tekst {
+    la t = builtin.split(s, "")
+    la r: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(t)) {
+        la c: tekst = t[i]
+        hvis (c == "'") { legg_til(r, "'\\''") }
+        ellers { legg_til(r, c) }
+        i = i + 1
+    }
+    returner builtin.join(r, "")
+}
+
+funksjon tekst_fra_heltall(n: heltall) -> tekst {
+    prøv { returner builtin.join([n], "") } fang (e) { returner "0" }
+    returner "0"
+}
+
+funksjon _trim(s: tekst) -> tekst {
+    la t = builtin.split(s, "")
+    la n: heltall = lengde(t)
+    la a: heltall = 0  la b: heltall = n
+    mens (a < b og (t[a]==" " eller t[a]=="\t" eller t[a]=="\n" eller t[a]=="\r")) { a=a+1 }
+    mens (b > a og (t[b-1]==" " eller t[b-1]=="\t" eller t[b-1]=="\n" eller t[b-1]=="\r")) { b=b-1 }
+    returner builtin.join(builtin.slice(t, a, b), "")
+}

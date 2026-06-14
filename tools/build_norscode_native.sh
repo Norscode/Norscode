@@ -110,9 +110,17 @@ copy_stage0_binary() {
     [ -f "$stage0" ] || return 1
     mkdir -p "$(dirname "$OUT")"
     rm -f "$OUT"
-    ln -s "../bootstrap/stage0/norscode-${platform}" "$OUT"
-    printf "✓ dist/norscode_native → bootstrap/stage0/norscode-%s (%d bytes)\n" \
-        "$platform" "$(wc -c < "$stage0" | tr -d ' ')"
+    cp "$stage0" "$OUT"
+    chmod +x "$OUT"
+    case "$(uname -s)" in
+        Darwin)
+            # Materialiser ein rein lokal kopi på macOS.
+            # Direkte stage-0-symlink kan bli drepen av vertsmetadata/provenance sjølv når binæren er byte-lik.
+            xattr -c "$OUT" 2>/dev/null || true
+            ;;
+    esac
+    printf "✓ dist/norscode_native ← bootstrap/stage0/norscode-%s (%d bytes)\n" \
+        "$platform" "$(wc -c < "$OUT" | tr -d ' ')"
     return 0
 }
 

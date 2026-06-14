@@ -1,0 +1,256 @@
+# pool.no — DB-tilkoplingspool for Norscode
+# SQLAlchemy connection pool / pgbouncer-ekvivalent
+#
+# Bruk:
+#   bruk std.pool som pool
+#
+#   la p = pool.ny("app.db", maks: 10)            // SQLite
+#   la p = pool.ny_pg("postgresql://...", maks: 20)
+#   la p = pool.ny_mysql("mysql://...", maks: 15)
+#
+#   la conn = pool.hent(p)
+#   db.execute(conn, "INSERT ...")
+#   pool.slipp(p, conn)
+#
+#   // Eller med automatisk hent+slipp:
+#   pool.køyr(p, funksjon(conn) {
+#       returner db.query_int(conn, "SELECT COUNT(*) FROM brukar")
+#   })
+
+bruk std.db som db
+
+# ─── Pool-oppretting ──────────────────────────────────────────────────────────
+
+funksjon ny(dsn: tekst, maks: heltall) -> ordbok_tekst {
+    returner _ny_pool(dsn, "sqlite", maks)
+}
+
+funksjon ny_pg(dsn: tekst, maks: heltall) -> ordbok_tekst {
+    returner _ny_pool(dsn, "pg", maks)
+}
+
+funksjon ny_mysql(dsn: tekst, maks: heltall) -> ordbok_tekst {
+    returner _ny_pool(dsn, "mysql", maks)
+}
+
+funksjon _ny_pool(dsn: tekst, type: tekst, maks: heltall) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["dsn"]           = dsn
+    p["type"]          = type
+    p["maks"]          = tekst_fra_heltall(maks)
+    p["min_idle"]      = "1"
+    p["timeout_ms"]    = "5000"
+    p["maks_alder_ms"] = "300000"   // 5 min — tilkoplingar eldre enn dette vert erstatta
+    p["__aktive__"]    = "0"
+    p["__ledig__"]     = "[]"
+    p["__oppretta__"]  = "0"
+    p["__treff__"]     = "0"
+    p["__bom__"]       = "0"
+    // Lag første tilkopling
+    _varm_opp(p)
+    returner p
+}
+
+funksjon sett_min_idle(p: ordbok_tekst, n: heltall) -> ordbok_tekst {
+    p["min_idle"] = tekst_fra_heltall(n)
+    returner p
+}
+
+funksjon sett_timeout(p: ordbok_tekst, ms: heltall) -> ordbok_tekst {
+    p["timeout_ms"] = tekst_fra_heltall(ms)
+    returner p
+}
+
+# ─── Hent / slipp ────────────────────────────────────────────────────────────
+
+funksjon hent(p: ordbok_tekst) -> tekst {
+    // Prøv å hente ledig tilkopling
+    la ledig = _les_ledig(p)
+    mens lengde(ledig) > 0 {
+        la conn: tekst = ledig[lengde(ledig) - 1]
+        // Fjern frå ledigliste
+        la ny_ledig: liste<tekst> = []
+        la i: heltall = 0
+        mens i < lengde(ledig) - 1 {
+            legg_til(ny_ledig, ledig[i])
+            i = i + 1
+        }
+        _skriv_ledig(p, ny_ledig)
+
+        // Verifiser at tilkoplinga framleis er i live
+        hvis _er_i_live(p, conn) {
+            p["__aktive__"] = tekst_fra_heltall(heltall_fra_tekst(p["__aktive__"]) + 1)
+            p["__treff__"]  = tekst_fra_heltall(heltall_fra_tekst(p["__treff__"]) + 1)
+            returner conn
+        }
+        // Daud tilkopling — prøv neste
+        ledig = _les_ledig(p)
+    }
+
+    // Ingen ledig — lag ny viss under maks
+    la aktive = heltall_fra_tekst(p["__aktive__"])
+    la oppretta = heltall_fra_tekst(p["__oppretta__"])
+    la maks = heltall_fra_tekst(p["maks"])
+
+    hvis aktive + lengde(_les_ledig(p)) < maks {
+        la conn = _ny_tilkopling(p)
+        p["__aktive__"]  = tekst_fra_heltall(aktive + 1)
+        p["__oppretta__"] = tekst_fra_heltall(oppretta + 1)
+        p["__bom__"]     = tekst_fra_heltall(heltall_fra_tekst(p["__bom__"]) + 1)
+        returner conn
+    }
+
+    // Pool full — vent
+    kast "PoolFeil: alle " + tekst_fra_heltall(maks) + " tilkoplingar er i bruk"
+    returner ""
+}
+
+funksjon slipp(p: ordbok_tekst, conn: tekst) -> heltall {
+    la aktive = heltall_fra_tekst(p["__aktive__"])
+    p["__aktive__"] = tekst_fra_heltall(aktive - 1)
+    la ledig = _les_ledig(p)
+    la maks = heltall_fra_tekst(p["maks"])
+    // Ikkje hald på fleire enn maks ledigtilkoplingar
+    hvis lengde(ledig) < maks {
+        legg_til(ledig, conn)
+        _skriv_ledig(p, ledig)
+    } ellers {
+        _lukk_tilkopling(p, conn)
+    }
+    returner 0
+}
+
+# ─── Køyr med automatisk hent/slipp ──────────────────────────────────────────
+
+funksjon køyr(p: ordbok_tekst, fn_namn: tekst) -> tekst {
+    la conn = hent(p)
+    prøv {
+        la resultat = builtin.ncb_call_fn(fn_namn, {"conn": conn})
+        slipp(p, conn)
+        returner tekst(resultat)
+    } fang (e) {
+        slipp(p, conn)
+        kast tekst(e)
+    }
+    returner ""
+}
+
+# ─── Statistikk ───────────────────────────────────────────────────────────────
+
+funksjon statistikk(p: ordbok_tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["aktive"]    = p["__aktive__"]
+    s["ledig"]     = tekst_fra_heltall(lengde(_les_ledig(p)))
+    s["oppretta"]  = p["__oppretta__"]
+    s["maks"]      = p["maks"]
+    s["treff"]     = p["__treff__"]
+    s["bom"]       = p["__bom__"]
+    la tot = heltall_fra_tekst(p["__treff__"]) + heltall_fra_tekst(p["__bom__"])
+    la hit_rate = hvis tot > 0 { (heltall_fra_tekst(p["__treff__"]) * 100) / tot } ellers { 0 }
+    s["treff_rate"] = tekst_fra_heltall(hit_rate) + "%"
+    returner s
+}
+
+funksjon vis_statistikk(p: ordbok_tekst) -> heltall {
+    la s = statistikk(p)
+    skriv("=== Tilkoplingspool ===")
+    skriv("  Aktive:    " + s["aktive"] + "/" + s["maks"])
+    skriv("  Ledige:    " + s["ledig"])
+    skriv("  Oppretta:  " + s["oppretta"])
+    skriv("  Treff:     " + s["treff"] + " (" + s["treff_rate"] + ")")
+    returner 0
+}
+
+# ─── Vedlikehald ─────────────────────────────────────────────────────────────
+
+funksjon tøm(p: ordbok_tekst) -> heltall {
+    la ledig = _les_ledig(p)
+    la i: heltall = 0
+    mens i < lengde(ledig) {
+        _lukk_tilkopling(p, ledig[i])
+        i = i + 1
+    }
+    la tom: liste<tekst> = []
+    _skriv_ledig(p, tom)
+    p["__aktive__"] = "0"
+    returner lengde(ledig)
+}
+
+funksjon varm_opp(p: ordbok_tekst, n: heltall) -> heltall {
+    la laga: heltall = 0
+    la i: heltall = 0
+    mens i < n {
+        prøv {
+            la conn = _ny_tilkopling(p)
+            la ledig = _les_ledig(p)
+            legg_til(ledig, conn)
+            _skriv_ledig(p, ledig)
+            p["__oppretta__"] = tekst_fra_heltall(heltall_fra_tekst(p["__oppretta__"]) + 1)
+            laga = laga + 1
+        } fang (e) {
+            skriv("[pool] Advarsel: kunne ikkje opprette tilkopling: " + tekst(e))
+        }
+        i = i + 1
+    }
+    returner laga
+}
+
+# ─── Interne hjelpefunksjonar ─────────────────────────────────────────────────
+
+funksjon _varm_opp(p: ordbok_tekst) -> heltall {
+    la min_idle = heltall_fra_tekst(p["min_idle"])
+    returner varm_opp(p, min_idle)
+}
+
+funksjon _ny_tilkopling(p: ordbok_tekst) -> tekst {
+    la type = p["type"]
+    la dsn  = p["dsn"]
+    hvis type == "pg" {
+        prøv { returner tekst(builtin.pg_connect(dsn)) } fang (e) { kast "PG: " + tekst(e) }
+    } ellers hvis type == "mysql" {
+        prøv { returner tekst(builtin.mysql_connect(dsn)) } fang (e) { kast "MySQL: " + tekst(e) }
+    } ellers {
+        returner db.open(dsn)
+    }
+    returner ""
+}
+
+funksjon _lukk_tilkopling(p: ordbok_tekst, conn: tekst) -> heltall {
+    la type = p["type"]
+    prøv {
+        hvis type == "pg"    { builtin.pg_close(conn) }
+        ellers hvis type == "mysql" { builtin.mysql_close(conn) }
+        ellers { db.close(conn) }
+    } fang (e) { }
+    returner 0
+}
+
+funksjon _er_i_live(p: ordbok_tekst, conn: tekst) -> boolsk {
+    la type = p["type"]
+    prøv {
+        hvis type == "pg"    { returner builtin.pg_ping(conn) }
+        ellers hvis type == "mysql" { returner builtin.mysql_ping(conn) }
+        ellers { db.query_int(conn, "SELECT 1") returner sann }
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon _les_ledig(p: ordbok_tekst) -> liste<tekst> {
+    prøv {
+        la parsed = builtin.json_parse_raw(p["__ledig__"])
+        returner parsed
+    } fang (e) { returner [] }
+    returner []
+}
+
+funksjon _skriv_ledig(p: ordbok_tekst, ledig: liste<tekst>) -> heltall {
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(ledig) {
+        la c: tekst = ledig[i]
+        legg_til(delar, "\"" + c + "\"")
+        i = i + 1
+    }
+    p["__ledig__"] = "[" + tekst_saman(delar, ",") + "]"
+    returner 0
+}

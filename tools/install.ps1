@@ -14,12 +14,15 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "Norscode/Norscode"
 $BinDir = Join-Path $Prefix "bin"
+$VersionsDir = Join-Path $Prefix "versions"
+$CurrentVersionFile = Join-Path $Prefix "CURRENT_VERSION.txt"
 
 Write-Host "Norscode installasjon for Windows" -ForegroundColor Cyan
-Write-Host "Installasjonsskatalog: $BinDir"
+Write-Host "Installasjonsrot: $Prefix"
 
 # ─── Lag installasjonskatalog ────────────────────────────────────────────────
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+New-Item -ItemType Directory -Force -Path $VersionsDir | Out-Null
 
 # ─── Hent siste release ──────────────────────────────────────────────────────
 $ReleasesUrl = "https://api.github.com/repos/$Repo/releases/latest"
@@ -34,14 +37,53 @@ try {
 }
 
 if ($Asset) {
-    # ─── Last ned Windows binary ─────────────────────────────────────────────
-    $ExePath = Join-Path $BinDir "norscode.exe"
+    # ─── Last ned Windows app-zip ────────────────────────────────────────────
+    $ArchivePath = Join-Path $env:TEMP $Asset.name
     Write-Host "Laster ned $($Asset.name)..."
-    Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $ExePath -UseBasicParsing
+    Invoke-WebRequest -Uri $Asset.browser_download_url -OutFile $ArchivePath -UseBasicParsing
 
-    # Lag nc.exe-alias
-    Copy-Item $ExePath (Join-Path $BinDir "nc.exe")
-    Write-Host "Native binary installert: $ExePath" -ForegroundColor Green
+    $Version = if ($Release.tag_name) { $Release.tag_name.TrimStart("v") } else { "ukjent" }
+    $VersionRoot = Join-Path $VersionsDir $Version
+    $ExpandedRoot = Join-Path $VersionRoot "expanded"
+    $LayoutRoot = Join-Path $VersionRoot "Norscode"
+
+    if (Test-Path $ExpandedRoot) {
+        Remove-Item -Recurse -Force $ExpandedRoot
+    }
+
+    New-Item -ItemType Directory -Force -Path $VersionRoot | Out-Null
+    Expand-Archive -Path $ArchivePath -DestinationPath $ExpandedRoot -Force
+
+    $ExtractedLayout = Join-Path $ExpandedRoot "Norscode"
+    if (-not (Test-Path $ExtractedLayout)) {
+        Write-Error "Ugyldig Windows release-layout: manglar Norscode/-katalog i ZIP."
+        exit 1
+    }
+
+    if (Test-Path $LayoutRoot) {
+        Remove-Item -Recurse -Force $LayoutRoot
+    }
+
+    Move-Item -Path $ExtractedLayout -Destination $LayoutRoot
+
+    $VersionBin = Join-Path $LayoutRoot "bin"
+    if (-not (Test-Path (Join-Path $VersionBin "norscode.exe"))) {
+        Write-Error "Ugyldig Windows release-layout: manglar bin\\norscode.exe."
+        exit 1
+    }
+
+    if (Test-Path $BinDir) {
+        Get-ChildItem -Path $BinDir -Force | Remove-Item -Recurse -Force
+    } else {
+        New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
+    }
+
+    Copy-Item -Path (Join-Path $VersionBin "*") -Destination $BinDir -Recurse -Force
+    Set-Content -Path $CurrentVersionFile -Value $Version
+
+    Write-Host "Windows app installert: $LayoutRoot" -ForegroundColor Green
+    Write-Host "Aktiv bin-mappe: $BinDir" -ForegroundColor Green
+    Write-Host "Aktiv versjon: $Version" -ForegroundColor Green
 } else {
     Write-Error "Ingen Windows native binary tilgjengelig i siste release."
     Write-Host "Bygg lokalt med tools\\build-bootstrap-binary.sh eller publiser en Windows release." -ForegroundColor Yellow
@@ -59,7 +101,8 @@ if ($CurrentPath -notlike "*$BinDir*") {
 
 Write-Host ""
 Write-Host "Norscode installert!" -ForegroundColor Green
-Write-Host "  norscode --help"
-Write-Host "  norscode run app.no"
+Write-Host "  nc.ps1 --help"
+Write-Host "  nc.cmd --help"
+Write-Host "  norscode.exe --help"
 Write-Host ""
 Write-Host "Start en ny terminal for at PATH-endringen skal tre i kraft."

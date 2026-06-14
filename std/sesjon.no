@@ -1,0 +1,270 @@
+# sesjon.no — Serverside sesjonslagring for Norscode
+# django.contrib.sessions-ekvivalent
+#
+# Bruk:
+#   bruk std.sesjon som sesjon
+#
+#   la conn = db.open("app.db")
+#   sesjon.migrer(conn)
+#
+#   // I ein rute:
+#   la token = sesjon.start(conn, ctx)          // ny sesjon
+#   sesjon.sett(conn, token, "handlevogn", "[1,2,3]")
+#   la vogn = sesjon.hent(conn, token, "handlevogn", "[]")
+#   sesjon.sett_cookie(resp, token)             // send cookie til klient
+
+bruk std.db som db
+bruk std.orm som orm
+bruk std.web som web
+
+# ─── Schema ───────────────────────────────────────────────────────────────────
+
+funksjon migrer(conn: tekst) -> heltall {
+    orm.migrer(conn, "_sesjon", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "token TEXT NOT NULL UNIQUE",
+        "data TEXT NOT NULL DEFAULT '{}'",
+        "oppretta TEXT DEFAULT (datetime('now'))",
+        "sist_aktiv TEXT DEFAULT (datetime('now'))",
+        "utløper TEXT DEFAULT (datetime('now', '+1 day'))",
+        "ip TEXT DEFAULT ''",
+        "brukar_agent TEXT DEFAULT ''"
+    ])
+    returner 1
+}
+
+# ─── Sesjon-livssyklus ────────────────────────────────────────────────────────
+
+funksjon start(conn: tekst, ctx: ordbok_tekst) -> tekst {
+    la token = _generer_token()
+    la ip = _hent_ip(ctx)
+    la ua = _hent_ua(ctx)
+    orm.lagre(conn, "_sesjon", {
+        "token":       token,
+        "data":        "{}",
+        "ip":          ip,
+        "brukar_agent": ua
+    })
+    returner token
+}
+
+funksjon start_med_ttl(conn: tekst, ctx: ordbok_tekst, ttl_sek: heltall) -> tekst {
+    la token = _generer_token()
+    la ip = _hent_ip(ctx)
+    la ua = _hent_ua(ctx)
+    la sql = "INSERT INTO _sesjon (token, data, ip, brukar_agent, utløper) VALUES ('" +
+             orm._escape(token) + "','{}','" + orm._escape(ip) + "','" + orm._escape(ua) +
+             "', datetime('now', '+" + tekst_fra_heltall(ttl_sek) + " seconds'));"
+    db.execute(conn, sql)
+    returner token
+}
+
+funksjon forny(conn: tekst, token: tekst, ttl_sek: heltall) -> boolsk {
+    la sql = "UPDATE _sesjon SET sist_aktiv = datetime('now'), " +
+             "utløper = datetime('now', '+" + tekst_fra_heltall(ttl_sek) + " seconds') " +
+             "WHERE token = '" + orm._escape(token) + "' AND utløper > datetime('now');"
+    la n = db.execute(conn, sql)
+    returner n > 0
+}
+
+funksjon avslutt(conn: tekst, token: tekst) -> heltall {
+    la sql = "DELETE FROM _sesjon WHERE token = '" + orm._escape(token) + "';"
+    returner db.execute(conn, sql)
+}
+
+funksjon er_gyldig(conn: tekst, token: tekst) -> boolsk {
+    la sql = "SELECT COUNT(*) FROM _sesjon WHERE token = '" + orm._escape(token) +
+             "' AND utløper > datetime('now');"
+    returner db.query_int(conn, sql) > 0
+}
+
+# ─── Datalagring ──────────────────────────────────────────────────────────────
+
+funksjon sett(conn: tekst, token: tekst, nøkkel: tekst, verdi: tekst) -> heltall {
+    la data = _les_data(conn, token)
+    data[nøkkel] = verdi
+    la json = _til_json(data)
+    la sql = "UPDATE _sesjon SET data = '" + orm._escape(json) +
+             "', sist_aktiv = datetime('now') WHERE token = '" + orm._escape(token) + "';"
+    returner db.execute(conn, sql)
+}
+
+funksjon hent(conn: tekst, token: tekst, nøkkel: tekst, standard: tekst) -> tekst {
+    la data = _les_data(conn, token)
+    hvis har_nokkel(data, nøkkel) { returner tekst(data[nøkkel]) }
+    returner standard
+}
+
+funksjon slett_nøkkel(conn: tekst, token: tekst, nøkkel: tekst) -> heltall {
+    la data = _les_data(conn, token)
+    fjern_nokkel(data, nøkkel)
+    la json = _til_json(data)
+    la sql = "UPDATE _sesjon SET data = '" + orm._escape(json) + "' WHERE token = '" + orm._escape(token) + "';"
+    returner db.execute(conn, sql)
+}
+
+funksjon tøm_data(conn: tekst, token: tekst) -> heltall {
+    la sql = "UPDATE _sesjon SET data = '{}' WHERE token = '" + orm._escape(token) + "';"
+    returner db.execute(conn, sql)
+}
+
+funksjon alle_nøklar(conn: tekst, token: tekst) -> liste<tekst> {
+    la data = _les_data(conn, token)
+    returner nøkler(data)
+}
+
+funksjon har_nøkkel(conn: tekst, token: tekst, nøkkel: tekst) -> boolsk {
+    la data = _les_data(conn, token)
+    returner har_nokkel(data, nøkkel)
+}
+
+# ─── Flash-meldingar (Django messages-ekvivalent) ────────────────────────────
+
+funksjon flash_sett(conn: tekst, token: tekst, type: tekst, melding: tekst) -> heltall {
+    la nøkkel = "__flash__" + type
+    la eksisterande = hent(conn, token, nøkkel, "")
+    la ny_v = hvis eksisterande == "" { melding } ellers { eksisterande + "|||" + melding }
+    returner sett(conn, token, nøkkel, ny_v)
+}
+
+funksjon flash_hent(conn: tekst, token: tekst, type: tekst) -> liste<tekst> {
+    la nøkkel = "__flash__" + type
+    la v = hent(conn, token, nøkkel, "")
+    slett_nøkkel(conn, token, nøkkel)
+    hvis v == "" { returner [] }
+    returner builtin.split(v, "|||")
+}
+
+funksjon flash_hent_alle(conn: tekst, token: tekst) -> ordbok_tekst {
+    la typar = ["suksess", "feil", "åtvaring", "info"]
+    la r: ordbok_tekst = {}
+    la i: heltall = 0
+    mens i < lengde(typar) {
+        la type: tekst = typar[i]
+        la meldingar = flash_hent(conn, token, type)
+        hvis lengde(meldingar) > 0 {
+            r[type] = tekst_saman(meldingar, "|||")
+        }
+        i = i + 1
+    }
+    returner r
+}
+
+# ─── Cookie-hjelpar ───────────────────────────────────────────────────────────
+
+funksjon hent_token(ctx: ordbok_tekst) -> tekst {
+    // Prøv cookie
+    prøv {
+        la cookies = web.request_header(ctx, "cookie")
+        la delar = builtin.split(cookies, ";")
+        la i: heltall = 0
+        mens i < lengde(delar) {
+            la del = builtin.trim(delar[i])
+            hvis tekst_starter_med(del, "session=") {
+                returner builtin.slice(del, 8, lengde(del))
+            }
+            i = i + 1
+        }
+    } fang (e) { }
+    returner ""
+}
+
+funksjon sett_cookie(resp: ordbok_tekst, token: tekst, ttl_sek: heltall, sikker: boolsk) -> ordbok_tekst {
+    la flagg = "HttpOnly; SameSite=Lax; Path=/"
+    la sikker_flagg = hvis sikker { "; Secure" } ellers { "" }
+    la max_age = "; Max-Age=" + tekst_fra_heltall(ttl_sek)
+    la cookie = "session=" + token + "; " + flagg + max_age + sikker_flagg
+    la h: ordbok_tekst = {}
+    h["set-cookie"] = cookie
+    // Slå saman med eksisterande headers
+    la eksist_h = hvis har_nokkel(resp, "headers") { resp["headers"] } ellers { {} }
+    la nk = nøkler(h)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        eksist_h[k] = h[k]
+        i = i + 1
+    }
+    resp["headers"] = eksist_h
+    returner resp
+}
+
+funksjon slett_cookie(resp: ordbok_tekst) -> ordbok_tekst {
+    la cookie = "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+    la h: ordbok_tekst = {}
+    h["set-cookie"] = cookie
+    resp["headers"] = h
+    returner resp
+}
+
+# ─── Middleware-integrasjon ───────────────────────────────────────────────────
+
+funksjon berik_ctx(conn: tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    la token = hent_token(ctx)
+    ctx["__sesjon_token__"] = token
+    ctx["__sesjon_gyldig__"] = hvis token != "" og er_gyldig(conn, token) { "sann" } ellers { "usann" }
+    returner ctx
+}
+
+# ─── Opprydding ───────────────────────────────────────────────────────────────
+
+funksjon rydd_utløpte(conn: tekst) -> heltall {
+    la sql = "DELETE FROM _sesjon WHERE utløper < datetime('now');"
+    returner db.execute(conn, sql)
+}
+
+funksjon statistikk(conn: tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["aktive"]   = tekst_fra_heltall(db.query_int(conn, "SELECT COUNT(*) FROM _sesjon WHERE utløper > datetime('now');"))
+    s["utløpte"]  = tekst_fra_heltall(db.query_int(conn, "SELECT COUNT(*) FROM _sesjon WHERE utløper <= datetime('now');"))
+    s["totalt"]   = tekst_fra_heltall(orm.tell(conn, "_sesjon"))
+    returner s
+}
+
+# ─── Intern ───────────────────────────────────────────────────────────────────
+
+funksjon _les_data(conn: tekst, token: tekst) -> ordbok_tekst {
+    la sql = "SELECT data FROM _sesjon WHERE token = '" + orm._escape(token) + "' AND utløper > datetime('now') LIMIT 1;"
+    la rad = orm.spør_én(conn, sql)
+    hvis ikkje har_nokkel(rad, "data") { returner {} }
+    prøv {
+        la parsed = builtin.json_parse_raw(tekst(rad["data"]))
+        returner parsed
+    } fang (e) { returner {} }
+    returner {}
+}
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        la ke = tekst_erstatt(k, "\"", "\\\"")
+        legg_til(delar, "\"" + ke + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}
+
+funksjon _generer_token() -> tekst {
+    prøv { returner builtin.random_hex(32) } fang (e) { }
+    returner tekst_fra_heltall(_no_ms()) + "_" + tekst_fra_heltall(_no_ms() * 31337)
+}
+
+funksjon _no_ms() -> heltall {
+    prøv { returner builtin.now_ms() } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon _hent_ip(ctx: ordbok_tekst) -> tekst {
+    prøv { returner web.request_header(ctx, "x-forwarded-for") } fang (e) { }
+    prøv { returner web.request_header(ctx, "x-real-ip") } fang (e) { }
+    returner ""
+}
+
+funksjon _hent_ua(ctx: ordbok_tekst) -> tekst {
+    prøv { returner web.request_header(ctx, "user-agent") } fang (e) { }
+    returner ""
+}

@@ -1,0 +1,564 @@
+# xml.no — Stack-basert SAX/DOM XML-parser
+# Python: xml.etree.ElementTree, xml.sax
+#
+# Representasjon:
+#   Element: ordbok_tekst med nøklar:
+#     "tag"       → teikn-namn
+#     "tekst"     → tekstinnhald (mellom opning- og lukkingstag)
+#     "hale"      → tekst etter lukkingstag (til neste søsken)
+#     "attrs"     → JSON-streng med attributt-ordbok
+#     "born"      → JSON-streng med liste av barne-ID-ar (heltall som tekst)
+#     "id"        → unikt ID (tekst av heltall)
+#
+#   DOM-tre:
+#     ordbok_tekst der kvar nøkkel er element-ID,
+#     pluss "root" → ID til rot-elementet
+#     pluss "_neste_id" → teljar for neste ID
+#
+# Bruk:
+#   bruk std.xml som xml
+#   la dom = xml.parse("<rot><barn a=\"1\">Hei</barn></rot>")
+#   la rot = xml.rot(dom)
+#   la born = xml.born(dom, rot)
+#   la tekst = xml.tekst(dom, born[0])
+#   la attr = xml.attr(dom, born[0], "a")
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _trim(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la n: heltall = lengde(teikn)
+    la start: heltall = 0
+    la slutt: heltall = n - 1
+    mens (start <= slutt og (teikn[start] == " " eller teikn[start] == "\t" eller
+          teikn[start] == "\n" eller teikn[start] == "\r")) {
+        start = start + 1
+    }
+    mens (slutt >= start og (teikn[slutt] == " " eller teikn[slutt] == "\t" eller
+          teikn[slutt] == "\n" eller teikn[slutt] == "\r")) {
+        slutt = slutt - 1
+    }
+    hvis (start > slutt) { returner "" }
+    returner builtin.join(builtin.slice(teikn, start, slutt + 1), "")
+}
+
+funksjon _er_whitespace(c: tekst) -> bool {
+    returner c == " " eller c == "\t" eller c == "\n" eller c == "\r"
+}
+
+funksjon _er_bokstav_eller_siffer(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller
+             (k >= 48 og k <= 57) eller c == "_" eller c == "-" eller
+             c == "." eller c == ":"
+}
+
+# ─── Tokenisering ─────────────────────────────────────────────────────────────
+# Token-typar: "open" "close" "self" "tekst" "kommentar" "pi" "doctype"
+# Representert som liste_tekst per token: [type, verdi, attrs_json]
+
+funksjon _les_tag_namn(teikn: liste_tekst, start: heltall) -> liste_tekst {
+    # Returnerer [namn, ny_posisjon]
+    la i: heltall = start
+    la n: heltall = lengde(teikn)
+    la namn: tekst = ""
+    mens (i < n og _er_bokstav_eller_siffer(teikn[i])) {
+        namn = namn + teikn[i]
+        i = i + 1
+    }
+    la res: liste_tekst = [namn, tekst_fra_heltall(i)]
+    returner res
+}
+
+funksjon _les_attributtar(teikn: liste_tekst, start: heltall) -> liste_tekst {
+    # Returnerer [attrs_json, ny_posisjon]
+    la i: heltall = start
+    la n: heltall = lengde(teikn)
+    la attrs: ordbok_tekst = {}
+
+    mens (i < n og teikn[i] != ">" og teikn[i] != "/") {
+        # Hopp over mellomrom
+        mens (i < n og _er_whitespace(teikn[i])) { i = i + 1 }
+        hvis (i >= n eller teikn[i] == ">" eller teikn[i] == "/") {
+            i = i  # bryt
+        } ellers {
+            # Les attributt-namn
+            la attr_namn: tekst = ""
+            mens (i < n og _er_bokstav_eller_siffer(teikn[i])) {
+                attr_namn = attr_namn + teikn[i]
+                i = i + 1
+            }
+            # Hopp over =
+            mens (i < n og _er_whitespace(teikn[i])) { i = i + 1 }
+            la attr_verdi: tekst = ""
+            hvis (i < n og teikn[i] == "=") {
+                i = i + 1
+                mens (i < n og _er_whitespace(teikn[i])) { i = i + 1 }
+                # Les verdi i anførselstegn
+                hvis (i < n og (teikn[i] == "\"" eller teikn[i] == "'")) {
+                    la quotechar: tekst = teikn[i]
+                    i = i + 1
+                    mens (i < n og teikn[i] != quotechar) {
+                        attr_verdi = attr_verdi + teikn[i]
+                        i = i + 1
+                    }
+                    hvis (i < n) { i = i + 1 }  # hopp over avsluttande quote
+                } ellers {
+                    # Verdi utan anførselstegn
+                    mens (i < n og ikkje _er_whitespace(teikn[i]) og
+                          teikn[i] != ">" og teikn[i] != "/") {
+                        attr_verdi = attr_verdi + teikn[i]
+                        i = i + 1
+                    }
+                }
+            }
+            hvis (lengde(builtin.split(attr_namn, "")) > 0) {
+                attrs[attr_namn] = attr_verdi
+            }
+        }
+    }
+    la attrs_json: tekst = builtin.json_stringify(attrs)
+    la res: liste_tekst = [attrs_json, tekst_fra_heltall(i)]
+    returner res
+}
+
+# Tokenisering: returner liste_tekst der kvart 3. element er [type, verdi, attrs]
+# Lagra flat: [type0, verdi0, attrs0, type1, verdi1, attrs1, ...]
+funksjon _tokeniser(xml: tekst) -> liste_tekst {
+    la teikn = builtin.split(xml, "")
+    la n: heltall = lengde(teikn)
+    la tokens: liste_tekst = []
+    la i: heltall = 0
+
+    mens (i < n) {
+        la c: tekst = teikn[i]
+
+        hvis (c == "<") {
+            i = i + 1
+            hvis (i >= n) { i = i + 1 }  # ugyldig, hopp
+            ellers hvis (teikn[i] == "!") {
+                # Kommentar eller DOCTYPE
+                i = i + 1
+                hvis (i + 1 < n og teikn[i] == "-" og teikn[i + 1] == "-") {
+                    # Kommentar: <!-- ... -->
+                    i = i + 2
+                    la komm: tekst = ""
+                    mens (i + 2 < n og ikkje (teikn[i] == "-" og teikn[i + 1] == "-" og teikn[i + 2] == ">")) {
+                        komm = komm + teikn[i]
+                        i = i + 1
+                    }
+                    i = i + 3  # hopp over -->
+                    legg_til(tokens, "kommentar")
+                    legg_til(tokens, komm)
+                    legg_til(tokens, "{}")
+                } ellers {
+                    # DOCTYPE eller anna — hopp til >
+                    la innhald: tekst = ""
+                    mens (i < n og teikn[i] != ">") {
+                        innhald = innhald + teikn[i]
+                        i = i + 1
+                    }
+                    i = i + 1
+                    legg_til(tokens, "doctype")
+                    legg_til(tokens, innhald)
+                    legg_til(tokens, "{}")
+                }
+            } ellers hvis (teikn[i] == "?") {
+                # Processing instruction <?...?>
+                i = i + 1
+                la pi: tekst = ""
+                mens (i + 1 < n og ikkje (teikn[i] == "?" og teikn[i + 1] == ">")) {
+                    pi = pi + teikn[i]
+                    i = i + 1
+                }
+                i = i + 2
+                legg_til(tokens, "pi")
+                legg_til(tokens, pi)
+                legg_til(tokens, "{}")
+            } ellers hvis (teikn[i] == "/") {
+                # Lukkingstag </tag>
+                i = i + 1
+                la tag_res = _les_tag_namn(teikn, i)
+                la tag_namn: tekst = tag_res[0]
+                i = builtin.heltall_fra_tekst(tag_res[1])
+                mens (i < n og teikn[i] != ">") { i = i + 1 }
+                i = i + 1
+                legg_til(tokens, "close")
+                legg_til(tokens, tag_namn)
+                legg_til(tokens, "{}")
+            } ellers {
+                # Opningstag eller self-closing
+                la tag_res = _les_tag_namn(teikn, i)
+                la tag_namn: tekst = tag_res[0]
+                i = builtin.heltall_fra_tekst(tag_res[1])
+                # Hopp over mellomrom
+                mens (i < n og _er_whitespace(teikn[i])) { i = i + 1 }
+                la attr_res = _les_attributtar(teikn, i)
+                la attrs_json: tekst = attr_res[0]
+                i = builtin.heltall_fra_tekst(attr_res[1])
+                # Sjekk self-closing
+                mens (i < n og _er_whitespace(teikn[i])) { i = i + 1 }
+                hvis (i < n og teikn[i] == "/") {
+                    legg_til(tokens, "self")
+                    i = i + 1
+                } ellers {
+                    legg_til(tokens, "open")
+                }
+                legg_til(tokens, tag_namn)
+                legg_til(tokens, attrs_json)
+                mens (i < n og teikn[i] != ">") { i = i + 1 }
+                i = i + 1
+            }
+        } ellers {
+            # Tekstinnhald
+            la tekst_v: tekst = ""
+            mens (i < n og teikn[i] != "<") {
+                tekst_v = tekst_v + teikn[i]
+                i = i + 1
+            }
+            la trimma: tekst = _trim(tekst_v)
+            hvis (lengde(builtin.split(trimma, "")) > 0) {
+                legg_til(tokens, "tekst")
+                legg_til(tokens, trimma)
+                legg_til(tokens, "{}")
+            }
+        }
+    }
+    returner tokens
+}
+
+# ─── DOM-bygging ──────────────────────────────────────────────────────────────
+
+funksjon _ny_id(dom: ordbok_tekst) -> tekst {
+    la neste: heltall = builtin.heltall_fra_tekst(dom["_neste_id"])
+    dom["_neste_id"] = tekst_fra_heltall(neste + 1)
+    returner tekst_fra_heltall(neste)
+}
+
+funksjon _nytt_element(dom: ordbok_tekst, tag: tekst, attrs_json: tekst) -> tekst {
+    la id: tekst = _ny_id(dom)
+    la el: ordbok_tekst = {}
+    el["tag"] = tag
+    el["tekst"] = ""
+    el["hale"] = ""
+    el["attrs"] = attrs_json
+    el["born"] = "[]"
+    el["id"] = id
+    dom[id] = builtin.json_stringify(el)
+    returner id
+}
+
+funksjon _legg_til_born(dom: ordbok_tekst, forelder_id: tekst, barn_id: tekst) {
+    la el_json: tekst = dom[forelder_id]
+    la el = builtin.json_parse(el_json)
+    la born_liste = builtin.json_parse(el["born"])
+    legg_til(born_liste, barn_id)
+    el["born"] = builtin.json_stringify(born_liste)
+    dom[forelder_id] = builtin.json_stringify(el)
+}
+
+funksjon _set_tekst(dom: ordbok_tekst, id: tekst, tekst_v: tekst) {
+    la el = builtin.json_parse(dom[id])
+    el["tekst"] = tekst_v
+    dom[id] = builtin.json_stringify(el)
+}
+
+# Parse XML-streng til DOM-tre
+funksjon parse(xml_tekst: tekst) -> ordbok_tekst {
+    la tokens = _tokeniser(xml_tekst)
+    la n: heltall = lengde(tokens)
+    la dom: ordbok_tekst = {}
+    dom["_neste_id"] = "0"
+    dom["root"] = ""
+
+    # Stack av opne element-ID-ar
+    la stabel: liste_tekst = []
+
+    la i: heltall = 0
+    mens (i + 2 < n) {
+        la type: tekst = tokens[i]
+        la verdi: tekst = tokens[i + 1]
+        la attrs: tekst = tokens[i + 2]
+
+        hvis (type == "open") {
+            la id: tekst = _nytt_element(dom, verdi, attrs)
+            hvis (lengde(stabel) == 0) {
+                dom["root"] = id
+            } ellers {
+                la forelder: tekst = stabel[lengde(stabel) - 1]
+                _legg_til_born(dom, forelder, id)
+            }
+            legg_til(stabel, id)
+        } ellers hvis (type == "self") {
+            la id: tekst = _nytt_element(dom, verdi, attrs)
+            hvis (lengde(stabel) == 0) {
+                dom["root"] = id
+            } ellers {
+                la forelder: tekst = stabel[lengde(stabel) - 1]
+                _legg_til_born(dom, forelder, id)
+            }
+        } ellers hvis (type == "close") {
+            hvis (lengde(stabel) > 0) {
+                fjern_indeks(stabel, lengde(stabel) - 1)
+            }
+        } ellers hvis (type == "tekst") {
+            hvis (lengde(stabel) > 0) {
+                la forelder: tekst = stabel[lengde(stabel) - 1]
+                _set_tekst(dom, forelder, verdi)
+            }
+        }
+        # kommentar, pi, doctype: ignorer
+
+        i = i + 3
+    }
+    returner dom
+}
+
+# ─── DOM-navigering ───────────────────────────────────────────────────────────
+
+# Hent rot-elementet
+funksjon rot(dom: ordbok_tekst) -> ordbok_tekst {
+    la id: tekst = dom["root"]
+    returner builtin.json_parse(dom[id])
+}
+
+# Hent element etter ID
+funksjon element(dom: ordbok_tekst, id: tekst) -> ordbok_tekst {
+    returner builtin.json_parse(dom[id])
+}
+
+# Hent liste av barne-element (som ordbok_tekst)
+funksjon born(dom: ordbok_tekst, el: ordbok_tekst) -> liste_tekst {
+    la born_id_ar = builtin.json_parse(el["born"])
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(born_id_ar)) {
+        legg_til(resultat, dom[born_id_ar[i]])
+        i = i + 1
+    }
+    returner resultat
+}
+
+# Hent tekstinnhald i eit element
+funksjon tekst_innhald(el: ordbok_tekst) -> tekst {
+    returner el["tekst"]
+}
+
+# Hent tag-namn
+funksjon tag(el: ordbok_tekst) -> tekst {
+    returner el["tag"]
+}
+
+# Hent attributt-verdi (tom streng viss ikkje funne)
+funksjon attr(el: ordbok_tekst, namn: tekst) -> tekst {
+    la attrs = builtin.json_parse(el["attrs"])
+    hvis (har_nokkel(attrs, namn)) { returner attrs[namn] }
+    returner ""
+}
+
+# Hent alle attributt som ordbok_tekst
+funksjon alle_attr(el: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.json_parse(el["attrs"])
+}
+
+# Sjekk om eit element har eit attributt
+funksjon har_attr(el: ordbok_tekst, namn: tekst) -> bool {
+    la attrs = builtin.json_parse(el["attrs"])
+    returner har_nokkel(attrs, namn)
+}
+
+# ─── Søk ──────────────────────────────────────────────────────────────────────
+
+# Finn alle element med eit gitt tag-namn (djupne-først)
+funksjon finn_alle(dom: ordbok_tekst, el: ordbok_tekst, tag_namn: tekst) -> liste_tekst {
+    la resultat: liste_tekst = []
+    la borna = born(dom, el)
+    la i: heltall = 0
+    mens (i < lengde(borna)) {
+        la barn = builtin.json_parse(borna[i])
+        hvis (barn["tag"] == tag_namn) {
+            legg_til(resultat, borna[i])
+        }
+        la neste = finn_alle(dom, barn, tag_namn)
+        la j: heltall = 0
+        mens (j < lengde(neste)) {
+            legg_til(resultat, neste[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner resultat
+}
+
+# Finn første element med eit gitt tag-namn
+funksjon finn_første(dom: ordbok_tekst, el: ordbok_tekst, tag_namn: tekst) -> ordbok_tekst {
+    la borna = born(dom, el)
+    la i: heltall = 0
+    mens (i < lengde(borna)) {
+        la barn = builtin.json_parse(borna[i])
+        hvis (barn["tag"] == tag_namn) { returner barn }
+        la neste = finn_første(dom, barn, tag_namn)
+        hvis (har_nokkel(neste, "tag")) { returner neste }
+        i = i + 1
+    }
+    returner {}
+}
+
+# Finn element med eit bestemt attributt og verdi
+funksjon finn_med_attr(dom: ordbok_tekst, el: ordbok_tekst, attr_namn: tekst, attr_verdi: tekst) -> liste_tekst {
+    la resultat: liste_tekst = []
+    la borna = born(dom, el)
+    la i: heltall = 0
+    mens (i < lengde(borna)) {
+        la barn = builtin.json_parse(borna[i])
+        la av: tekst = attr(barn, attr_namn)
+        hvis (av == attr_verdi) {
+            legg_til(resultat, borna[i])
+        }
+        la neste = finn_med_attr(dom, barn, attr_namn, attr_verdi)
+        la j: heltall = 0
+        mens (j < lengde(neste)) {
+            legg_til(resultat, neste[j])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner resultat
+}
+
+# ─── XML-generering ───────────────────────────────────────────────────────────
+
+# Escape XML-spesialteikn i tekst
+funksjon xml_escape(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        la c: tekst = teikn[i]
+        hvis (c == "&") { ut = ut + "&amp;" }
+        ellers hvis (c == "<") { ut = ut + "&lt;" }
+        ellers hvis (c == ">") { ut = ut + "&gt;" }
+        ellers hvis (c == "\"") { ut = ut + "&quot;" }
+        ellers hvis (c == "'") { ut = ut + "&apos;" }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Serialiser eit element til XML-tekst
+funksjon til_xml(dom: ordbok_tekst, el: ordbok_tekst, innrykk: heltall) -> tekst {
+    la mellomrom: tekst = ""
+    la k: heltall = 0
+    mens (k < innrykk) { mellomrom = mellomrom + "  "  k = k + 1 }
+
+    la tag_namn: tekst = el["tag"]
+    la attrs = builtin.json_parse(el["attrs"])
+    la attr_str: tekst = ""
+    la nøklar = builtin.nøkler(attrs)
+    la ai: heltall = 0
+    mens (ai < lengde(nøklar)) {
+        la k: tekst = nøklar[ai]
+        attr_str = attr_str + " " + k + "=\"" + xml_escape(attrs[k]) + "\""
+        ai = ai + 1
+    }
+
+    la borna = born(dom, el)
+    la tekst_v: tekst = el["tekst"]
+
+    hvis (lengde(borna) == 0 og lengde(builtin.split(tekst_v, "")) == 0) {
+        returner mellomrom + "<" + tag_namn + attr_str + "/>"
+    }
+
+    la ut: tekst = mellomrom + "<" + tag_namn + attr_str + ">"
+    hvis (lengde(builtin.split(tekst_v, "")) > 0) {
+        ut = ut + xml_escape(tekst_v)
+    }
+    la i: heltall = 0
+    mens (i < lengde(borna)) {
+        la barn = builtin.json_parse(borna[i])
+        ut = ut + "\n" + til_xml(dom, barn, innrykk + 1)
+        i = i + 1
+    }
+    hvis (lengde(borna) > 0) { ut = ut + "\n" + mellomrom }
+    ut = ut + "</" + tag_namn + ">"
+    returner ut
+}
+
+# Serialiser heile DOM-treet
+funksjon til_xml_streng(dom: ordbok_tekst) -> tekst {
+    la r = rot(dom)
+    returner "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + til_xml(dom, r, 0)
+}
+
+# ─── XPath-subset (enkel attributtpaths) ─────────────────────────────────────
+# Støttar: "tag", "tag/undertag", "tag[@attr='verdi']"
+
+funksjon xpath(dom: ordbok_tekst, uttrykk: tekst) -> liste_tekst {
+    la segment = builtin.split(uttrykk, "/")
+    la gjeldande: liste_tekst = [dom[dom["root"]]]
+    la i: heltall = 0
+    mens (i < lengde(segment)) {
+        la seg: tekst = segment[i]
+        la neste: liste_tekst = []
+        # Sjekk for predikat [@attr='verdi']
+        la har_predikat: bool = tekst_inneholder(seg, "[")
+        la tag_del: tekst = seg
+        la attr_n: tekst = ""
+        la attr_v: tekst = ""
+        hvis (har_predikat) {
+            la open_pos: heltall = 0
+            la seg_teikn = builtin.split(seg, "")
+            la j: heltall = 0
+            mens (j < lengde(seg_teikn) og seg_teikn[j] != "[") {
+                open_pos = open_pos + 1
+                j = j + 1
+            }
+            tag_del = builtin.join(builtin.slice(seg_teikn, 0, open_pos), "")
+            # Les [@attr='verdi']
+            la predikat = builtin.slice(seg_teikn, open_pos + 1, lengde(seg_teikn) - 1)
+            la pred_str: tekst = builtin.join(predikat, "")
+            # Forvent @attr='verdi' eller @attr="verdi"
+            la pred_teikn = builtin.split(pred_str, "")
+            la start: heltall = 0
+            hvis (start < lengde(pred_teikn) og pred_teikn[start] == "@") { start = start + 1 }
+            la a_namn: tekst = ""
+            mens (start < lengde(pred_teikn) og pred_teikn[start] != "=") {
+                a_namn = a_namn + pred_teikn[start]
+                start = start + 1
+            }
+            start = start + 1  # hopp over =
+            hvis (start < lengde(pred_teikn)) { start = start + 1 }  # hopp over quote
+            la a_verdi: tekst = ""
+            mens (start < lengde(pred_teikn) og pred_teikn[start] != "\"" og pred_teikn[start] != "'") {
+                a_verdi = a_verdi + pred_teikn[start]
+                start = start + 1
+            }
+            attr_n = a_namn
+            attr_v = a_verdi
+        }
+
+        la ei: heltall = 0
+        mens (ei < lengde(gjeldande)) {
+            la el = builtin.json_parse(gjeldande[ei])
+            la borna = born(dom, el)
+            la bi: heltall = 0
+            mens (bi < lengde(borna)) {
+                la barn = builtin.json_parse(borna[bi])
+                la tag_treff: bool = (tag_del == "*" eller barn["tag"] == tag_del)
+                la attr_treff: bool = sann
+                hvis (har_predikat) {
+                    attr_treff = attr(barn, attr_n) == attr_v
+                }
+                hvis (tag_treff og attr_treff) {
+                    legg_til(neste, borna[bi])
+                }
+                bi = bi + 1
+            }
+            ei = ei + 1
+        }
+        gjeldande = neste
+        i = i + 1
+    }
+    returner gjeldande
+}

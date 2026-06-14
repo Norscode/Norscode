@@ -35,7 +35,7 @@ check_sh_syntax() {
 
 check_active_surface() {
   grep -rn \
-    "python3 main\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no" \
+    "python3 main\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\." \
     "${ACTIVE_ROOTS[@]}" \
     --exclude="selfhost_phase0_verify.sh" \
     --exclude-dir=".git" \

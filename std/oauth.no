@@ -1,0 +1,275 @@
+# oauth.no — OAuth 2.0 / SSO for Norscode
+# social-auth / django-allauth-ekvivalent
+#
+# Støttar: Authorization Code + PKCE, token-refresh
+# Innebygde providers: Google, GitHub, Microsoft, GitLab, Discord
+#
+# Bruk:
+#   bruk std.oauth som oauth
+#
+#   la cfg = oauth.google(client_id, client_secret, "https://app.no/auth/callback")
+#   la auth_url = oauth.autoriser_url(cfg, state, scopes)
+#   // redirect brukar til auth_url
+#
+#   // Etter redirect tilbake:
+#   la token = oauth.veksle_kode(cfg, ctx)
+#   la brukar = oauth.hent_brukar(cfg, token)
+
+bruk std.http som http
+bruk std.krypto som krypto
+
+# ─── Provider-konfigurasjonar ────────────────────────────────────────────────
+
+funksjon google(client_id: tekst, client_secret: tekst, redirect_uri: tekst) -> ordbok_tekst {
+    la c = _ny_cfg("google", client_id, client_secret, redirect_uri)
+    c["auth_url"]    = "https://accounts.google.com/o/oauth2/v2/auth"
+    c["token_url"]   = "https://oauth2.googleapis.com/token"
+    c["brukar_url"]  = "https://www.googleapis.com/oauth2/v3/userinfo"
+    c["scopes"]      = "openid email profile"
+    c["brukar_id_felt"]    = "sub"
+    c["brukar_namn_felt"]  = "name"
+    c["brukar_epost_felt"] = "email"
+    returner c
+}
+
+funksjon github(client_id: tekst, client_secret: tekst, redirect_uri: tekst) -> ordbok_tekst {
+    la c = _ny_cfg("github", client_id, client_secret, redirect_uri)
+    c["auth_url"]    = "https://github.com/login/oauth/authorize"
+    c["token_url"]   = "https://github.com/login/oauth/access_token"
+    c["brukar_url"]  = "https://api.github.com/user"
+    c["scopes"]      = "read:user user:email"
+    c["brukar_id_felt"]    = "id"
+    c["brukar_namn_felt"]  = "name"
+    c["brukar_epost_felt"] = "email"
+    returner c
+}
+
+funksjon microsoft(client_id: tekst, client_secret: tekst, redirect_uri: tekst, tenant: tekst) -> ordbok_tekst {
+    la t = hvis tenant == "" { "common" } ellers { tenant }
+    la c = _ny_cfg("microsoft", client_id, client_secret, redirect_uri)
+    c["auth_url"]    = "https://login.microsoftonline.com/" + t + "/oauth2/v2.0/authorize"
+    c["token_url"]   = "https://login.microsoftonline.com/" + t + "/oauth2/v2.0/token"
+    c["brukar_url"]  = "https://graph.microsoft.com/v1.0/me"
+    c["scopes"]      = "openid email profile User.Read"
+    c["brukar_id_felt"]    = "id"
+    c["brukar_namn_felt"]  = "displayName"
+    c["brukar_epost_felt"] = "mail"
+    returner c
+}
+
+funksjon gitlab(client_id: tekst, client_secret: tekst, redirect_uri: tekst) -> ordbok_tekst {
+    la c = _ny_cfg("gitlab", client_id, client_secret, redirect_uri)
+    c["auth_url"]    = "https://gitlab.com/oauth/authorize"
+    c["token_url"]   = "https://gitlab.com/oauth/token"
+    c["brukar_url"]  = "https://gitlab.com/api/v4/user"
+    c["scopes"]      = "read_user email"
+    c["brukar_id_felt"]    = "id"
+    c["brukar_namn_felt"]  = "name"
+    c["brukar_epost_felt"] = "email"
+    returner c
+}
+
+funksjon discord(client_id: tekst, client_secret: tekst, redirect_uri: tekst) -> ordbok_tekst {
+    la c = _ny_cfg("discord", client_id, client_secret, redirect_uri)
+    c["auth_url"]    = "https://discord.com/api/oauth2/authorize"
+    c["token_url"]   = "https://discord.com/api/oauth2/token"
+    c["brukar_url"]  = "https://discord.com/api/users/@me"
+    c["scopes"]      = "identify email"
+    c["brukar_id_felt"]    = "id"
+    c["brukar_namn_felt"]  = "username"
+    c["brukar_epost_felt"] = "email"
+    returner c
+}
+
+funksjon eigendefinert(namn: tekst, client_id: tekst, client_secret: tekst, redirect_uri: tekst,
+                       auth_url: tekst, token_url: tekst, brukar_url: tekst) -> ordbok_tekst {
+    la c = _ny_cfg(namn, client_id, client_secret, redirect_uri)
+    c["auth_url"]   = auth_url
+    c["token_url"]  = token_url
+    c["brukar_url"] = brukar_url
+    returner c
+}
+
+funksjon _ny_cfg(provider: tekst, client_id: tekst, client_secret: tekst, redirect_uri: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["provider"]      = provider
+    c["client_id"]     = client_id
+    c["client_secret"] = client_secret
+    c["redirect_uri"]  = redirect_uri
+    c["pkce"]          = "sann"
+    returner c
+}
+
+# ─── Authorization URL ────────────────────────────────────────────────────────
+
+funksjon autoriser_url(cfg: ordbok_tekst, state: tekst) -> tekst {
+    la standard_scopes = hvis har_nokkel(cfg, "scopes") { tekst(cfg["scopes"]) } ellers { "openid" }
+    returner autoriser_url_med_scopes(cfg, state, standard_scopes)
+}
+
+funksjon autoriser_url_med_scopes(cfg: ordbok_tekst, state: tekst, scopes: tekst) -> tekst {
+    la params: ordbok_tekst = {}
+    params["response_type"] = "code"
+    params["client_id"]     = cfg["client_id"]
+    params["redirect_uri"]  = cfg["redirect_uri"]
+    params["scope"]         = scopes
+    params["state"]         = state
+
+    // PKCE
+    hvis cfg["pkce"] == "sann" {
+        la verifier  = krypto.token(32)
+        la challenge = krypto.sha256(verifier)
+        params["code_challenge"]        = challenge
+        params["code_challenge_method"] = "S256"
+        // caller må lagre verifier i sesjon
+        params["__pkce_verifier__"] = verifier
+    }
+
+    la qs_delar: liste<tekst> = []
+    la nk = nøkler(params)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        hvis ikkje tekst_starter_med(k, "__") {
+            legg_til(qs_delar, _url_encode(k) + "=" + _url_encode(tekst(params[k])))
+        }
+        i = i + 1
+    }
+    returner cfg["auth_url"] + "?" + tekst_saman(qs_delar, "&")
+}
+
+# ─── Token-veksling ───────────────────────────────────────────────────────────
+
+funksjon veksle_kode(cfg: ordbok_tekst, kode: tekst) -> ordbok_tekst {
+    returner veksle_kode_pkce(cfg, kode, "")
+}
+
+funksjon veksle_kode_pkce(cfg: ordbok_tekst, kode: tekst, pkce_verifier: tekst) -> ordbok_tekst {
+    la body_deler: liste<tekst> = []
+    legg_til(body_deler, "grant_type=authorization_code")
+    legg_til(body_deler, "code=" + _url_encode(kode))
+    legg_til(body_deler, "client_id=" + _url_encode(cfg["client_id"]))
+    legg_til(body_deler, "client_secret=" + _url_encode(cfg["client_secret"]))
+    legg_til(body_deler, "redirect_uri=" + _url_encode(cfg["redirect_uri"]))
+    hvis pkce_verifier != "" {
+        legg_til(body_deler, "code_verifier=" + _url_encode(pkce_verifier))
+    }
+    la body = tekst_saman(body_deler, "&")
+
+    la h: ordbok_tekst = {}
+    h["content-type"] = "application/x-www-form-urlencoded"
+    h["accept"]       = "application/json"
+    // GitHub treng Accept: application/json
+    hvis cfg["provider"] == "github" { h["accept"] = "application/json" }
+
+    prøv {
+        la resp = http.post_with_headers(cfg["token_url"], h, body)
+        la token_data = _parse_token_resp(resp)
+        returner token_data
+    } fang (e) {
+        kast "OAuth token-feil: " + tekst(e)
+    }
+    returner {}
+}
+
+funksjon forny_token(cfg: ordbok_tekst, refresh_token: tekst) -> ordbok_tekst {
+    la body = "grant_type=refresh_token&refresh_token=" + _url_encode(refresh_token) +
+              "&client_id=" + _url_encode(cfg["client_id"]) +
+              "&client_secret=" + _url_encode(cfg["client_secret"])
+    la h: ordbok_tekst = {}
+    h["content-type"] = "application/x-www-form-urlencoded"
+    prøv {
+        la resp = http.post_with_headers(cfg["token_url"], h, body)
+        returner _parse_token_resp(resp)
+    } fang (e) {
+        kast "OAuth refresh-feil: " + tekst(e)
+    }
+    returner {}
+}
+
+# ─── Brukarinformasjon ────────────────────────────────────────────────────────
+
+funksjon hent_brukar(cfg: ordbok_tekst, token: ordbok_tekst) -> ordbok_tekst {
+    la access_token = tekst(token["access_token"])
+    la h: ordbok_tekst = {}
+    h["authorization"] = "Bearer " + access_token
+    h["accept"]        = "application/json"
+
+    prøv {
+        la resp = http.get_with_headers(cfg["brukar_url"], h)
+        la brukar_data = _parse_json_resp(resp)
+        // Normaliser til felles format
+        la brukar: ordbok_tekst = {}
+        brukar["provider"]    = cfg["provider"]
+        brukar["provider_id"] = tekst(brukar_data[cfg["brukar_id_felt"]])
+        brukar["namn"]        = tekst(brukar_data[cfg["brukar_namn_felt"]])
+        brukar["epost"]       = tekst(brukar_data[cfg["brukar_epost_felt"]])
+        brukar["rå_data"]     = _til_json(brukar_data)
+        returner brukar
+    } fang (e) {
+        kast "OAuth brukar-feil: " + tekst(e)
+    }
+    returner {}
+}
+
+# ─── State / CSRF-beskyttelse ─────────────────────────────────────────────────
+
+funksjon generer_state() -> tekst {
+    returner krypto.token(16)
+}
+
+funksjon verifiser_state(forventa: tekst, faktisk: tekst) -> boolsk {
+    returner krypto.konstant_lik(forventa, faktisk)
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _parse_token_resp(resp: tekst) -> ordbok_tekst {
+    prøv {
+        la parsed = builtin.json_parse_raw(resp)
+        returner parsed
+    } fang (e) {
+        // Prøv form-encoded: access_token=xxx&token_type=bearer
+        la r: ordbok_tekst = {}
+        la delar = builtin.split(resp, "&")
+        la i: heltall = 0
+        mens i < lengde(delar) {
+            la del: tekst = delar[i]
+            la eq = builtin.index_of(del, "=")
+            hvis eq >= 0 {
+                la k = builtin.slice(del, 0, eq)
+                la v = builtin.slice(del, eq + 1, lengde(del))
+                r[k] = v
+            }
+            i = i + 1
+        }
+        returner r
+    }
+    returner {}
+}
+
+funksjon _parse_json_resp(resp: tekst) -> ordbok_tekst {
+    prøv {
+        la parsed = builtin.json_parse_raw(resp)
+        returner parsed
+    } fang (e) { returner {} }
+    returner {}
+}
+
+funksjon _url_encode(s: tekst) -> tekst {
+    prøv { returner builtin.url_encode(s) } fang (e) { returner s }
+    returner s
+}
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}

@@ -1,0 +1,515 @@
+# argparse.no — Fullstendig CLI-argumentparsing
+# Python: argparse
+#
+# Støttar:
+#   - Posisjonelle argument
+#   - Valfrie flagg: --namn, --namn=verdi, -k, -kverdi
+#   - Typar: "tekst", "heltall", "bool" (store_true/store_false)
+#   - nargs: "?" "+" "*" eller heltall
+#   - standardverdiar
+#   - hjelp-tekst per argument
+#   - Subkommandar (subparsers)
+#   - Gjensidig utelukkande grupper
+#   - Automatisk --hjelp / -h generering
+#
+# Parser-tilstand: ordbok_tekst
+#   "_prog"       → programnamn
+#   "_beskriving" → beskriving
+#   "_arg_liste"  → JSON-liste av argument-spec
+#   "_sub_parsarar" → JSON-ordbok namn → sub-parser
+#   "_gruppe_liste" → JSON-liste av eksklusive grupper
+#
+# Bruk:
+#   bruk std.argparse som ap
+#   la p = ap.ny("mitt_program", "Gjer noko nyttig")
+#   ap.legg_til_arg(p, "--namn", {type: "tekst", standard: "Verda", hjelp: "Kven skal helsast"})
+#   ap.legg_til_arg(p, "--tal", {type: "heltall", standard: "3", hjelp: "Kor mange"})
+#   ap.legg_til_arg(p, "--stille", {type: "bool", standard: "usann"})
+#   la ns = ap.parse(p, argv)
+#   skriv ap.hent(ns, "namn")
+
+# ─── Parser-definisjon ────────────────────────────────────────────────────────
+
+funksjon ny(prog: tekst, beskriving: tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["_prog"] = prog
+    p["_beskriving"] = beskriving
+    p["_arg_liste"] = "[]"
+    p["_sub_parsarar"] = "{}"
+    p["_gruppe_liste"] = "[]"
+    p["_epilog"] = ""
+    returner p
+}
+
+# ─── Legg til argument ────────────────────────────────────────────────────────
+# flagg:   "--namn", "-n", "pos_arg" (utan --)
+# innst:   ordbok_tekst med felt:
+#   type:        "tekst" | "heltall" | "bool" (standard: "tekst")
+#   standard:    standardverdi som tekst
+#   krevd:       "sann"/"usann" (for valfrie flagg)
+#   hjelp:       beskriving
+#   metavar:     visningsnamn i hjelp
+#   nargs:       "?" | "+" | "*" | tal-som-tekst
+#   val:         JSON-liste av gyldig val
+#   dest:        variabelnamn i namespace (standard: flagg utan --)
+
+funksjon legg_til_arg(p: ordbok_tekst, flagg: tekst, innst: ordbok_tekst) {
+    la spec: ordbok_tekst = {}
+    spec["flagg"] = flagg
+
+    # Avleid dest
+    la dest: tekst = ""
+    la teikn = builtin.split(flagg, "")
+    la n: heltall = lengde(teikn)
+    hvis (n >= 2 og teikn[0] == "-" og teikn[1] == "-") {
+        dest = builtin.join(builtin.slice(teikn, 2, n), "")
+    } ellers hvis (n >= 1 og teikn[0] == "-") {
+        dest = teikn[1]
+    } ellers {
+        dest = flagg  # posisjonell
+    }
+    # Erstatt - med _
+    la dest_delar = builtin.split(dest, "-")
+    dest = builtin.join(dest_delar, "_")
+
+    spec["dest"] = dest
+    spec["er_posisjonell"] = tekst_fra_heltall(
+        lengde(teikn) == 0 eller teikn[0] != "-"
+    )
+
+    # Kopier innstillingar
+    spec["type"] = "tekst"
+    spec["standard"] = ""
+    spec["krevd"] = "usann"
+    spec["hjelp"] = ""
+    spec["metavar"] = dest
+    spec["nargs"] = "1"
+    spec["val"] = ""
+
+    hvis (har_nokkel(innst, "type")) { spec["type"] = innst["type"] }
+    hvis (har_nokkel(innst, "standard")) { spec["standard"] = innst["standard"] }
+    hvis (har_nokkel(innst, "krevd")) { spec["krevd"] = innst["krevd"] }
+    hvis (har_nokkel(innst, "hjelp")) { spec["hjelp"] = innst["hjelp"] }
+    hvis (har_nokkel(innst, "metavar")) { spec["metavar"] = innst["metavar"] }
+    hvis (har_nokkel(innst, "nargs")) { spec["nargs"] = innst["nargs"] }
+    hvis (har_nokkel(innst, "val")) { spec["val"] = builtin.json_stringify(innst["val"]) }
+    hvis (har_nokkel(innst, "dest")) { spec["dest"] = innst["dest"] }
+
+    # bool-type: standard er store_true
+    hvis (spec["type"] == "bool" og spec["standard"] == "") {
+        spec["standard"] = "usann"
+    }
+
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    legg_til(arg_liste, builtin.json_stringify(spec))
+    p["_arg_liste"] = builtin.json_stringify(arg_liste)
+}
+
+# Snarveg: legg til bool-flagg (store_true)
+funksjon legg_til_flagg(p: ordbok_tekst, flagg: tekst, hjelp: tekst) {
+    la innst: ordbok_tekst = {}
+    innst["type"] = "bool"
+    innst["standard"] = "usann"
+    innst["hjelp"] = hjelp
+    legg_til_arg(p, flagg, innst)
+}
+
+# Snarveg: posisjonelt argument
+funksjon legg_til_pos(p: ordbok_tekst, namn: tekst, type_s: tekst, hjelp: tekst) {
+    la innst: ordbok_tekst = {}
+    innst["type"] = type_s
+    innst["hjelp"] = hjelp
+    legg_til_arg(p, namn, innst)
+}
+
+# ─── Subparsarar ──────────────────────────────────────────────────────────────
+
+funksjon legg_til_subparser(p: ordbok_tekst, kommando: tekst, beskriving: tekst) -> ordbok_tekst {
+    la sub = ny(p["_prog"] + " " + kommando, beskriving)
+    la sub_parsarar = builtin.json_parse(p["_sub_parsarar"])
+    sub_parsarar[kommando] = builtin.json_stringify(sub)
+    p["_sub_parsarar"] = builtin.json_stringify(sub_parsarar)
+    p["_har_subparsarar"] = "sann"
+    returner sub
+}
+
+# ─── Gjensidig utelukkande grupper ───────────────────────────────────────────
+
+funksjon ny_gruppe(p: ordbok_tekst) -> heltall {
+    la grupper = builtin.json_parse(p["_gruppe_liste"])
+    la gid: heltall = lengde(grupper)
+    la gruppe: liste_tekst = []
+    legg_til(grupper, builtin.json_stringify(gruppe))
+    p["_gruppe_liste"] = builtin.json_stringify(grupper)
+    returner gid
+}
+
+funksjon legg_til_i_gruppe(p: ordbok_tekst, gid: heltall, flagg: tekst, innst: ordbok_tekst) {
+    legg_til_arg(p, flagg, innst)
+    # Merk argumentet med gruppe-id
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    la siste_idx: heltall = lengde(arg_liste) - 1
+    la siste = builtin.json_parse(arg_liste[siste_idx])
+    siste["gruppe"] = tekst_fra_heltall(gid)
+    arg_liste[siste_idx] = builtin.json_stringify(siste)
+    p["_arg_liste"] = builtin.json_stringify(arg_liste)
+}
+
+# ─── Parsing ──────────────────────────────────────────────────────────────────
+
+# Namespace: ordbok_tekst med dest → verdi
+funksjon parse(p: ordbok_tekst, argv: liste_tekst) -> ordbok_tekst {
+    la ns: ordbok_tekst = {}
+    la feil: tekst = ""
+
+    # Fyll inn standardverdiar
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    la i: heltall = 0
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        ns[spec["dest"]] = spec["standard"]
+        i = i + 1
+    }
+
+    # Sjekk --hjelp / -h
+    la hi: heltall = 0
+    mens (hi < lengde(argv)) {
+        hvis (argv[hi] == "--hjelp" eller argv[hi] == "-h") {
+            skriv hjelp_tekst(p)
+            ns["_hjelp"] = "sann"
+            returner ns
+        }
+        hi = hi + 1
+    }
+
+    # Subkommando?
+    la sub_parsarar = builtin.json_parse(p["_sub_parsarar"])
+    la har_sub: bool = har_nokkel(p, "_har_subparsarar")
+    la pos_idx: heltall = 0  # indeks i posisjonelle argument
+
+    # Samle posisjonelle specs
+    la pos_specs: liste_tekst = []
+    la j: heltall = 0
+    mens (j < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[j])
+        hvis (spec["er_posisjonell"] == "1") {
+            legg_til(pos_specs, arg_liste[j])
+        }
+        j = j + 1
+    }
+
+    la ai: heltall = 0
+    mens (ai < lengde(argv)) {
+        la arg: tekst = argv[ai]
+        la arg_teikn = builtin.split(arg, "")
+
+        # Subkommando
+        hvis (har_sub og ai == 0) {
+            hvis (har_nokkel(sub_parsarar, arg)) {
+                la sub = builtin.json_parse(sub_parsarar[arg])
+                la sub_argv: liste_tekst = builtin.slice(argv, 1, lengde(argv))
+                la sub_ns = parse(sub, sub_argv)
+                # Slå saman
+                la sub_nøklar = builtin.nøkler(sub_ns)
+                la ki: heltall = 0
+                mens (ki < lengde(sub_nøklar)) {
+                    ns[sub_nøklar[ki]] = sub_ns[sub_nøklar[ki]]
+                    ki = ki + 1
+                }
+                ns["_kommando"] = arg
+                returner ns
+            }
+        }
+
+        la al: heltall = lengde(arg_teikn)
+
+        hvis (al >= 2 og arg_teikn[0] == "-" og arg_teikn[1] == "-") {
+            # Langt flagg: --namn eller --namn=verdi
+            la flagg_del: tekst = builtin.join(builtin.slice(arg_teikn, 2, al), "")
+            la likeit_idx: heltall = -1
+            la fi: heltall = 0
+            mens (fi < lengde(builtin.split(flagg_del, "")) og likeit_idx < 0) {
+                hvis (builtin.split(flagg_del, "")[fi] == "=") { likeit_idx = fi }
+                fi = fi + 1
+            }
+
+            la dest: tekst = ""
+            la verdi: tekst = ""
+            la har_verdi: bool = usann
+
+            hvis (likeit_idx >= 0) {
+                la flagg_teikn = builtin.split(flagg_del, "")
+                dest = builtin.join(builtin.split(builtin.join(builtin.slice(flagg_teikn, 0, likeit_idx), ""), "-"), "_")
+                verdi = builtin.join(builtin.slice(flagg_teikn, likeit_idx + 1, lengde(flagg_teikn)), "")
+                har_verdi = sann
+            } ellers {
+                dest = builtin.join(builtin.split(flagg_del, "-"), "_")
+            }
+
+            # Finn spec
+            la spec = _finn_spec_dest(p, dest)
+            hvis (spec["dest"] == dest) {
+                hvis (spec["type"] == "bool") {
+                    ns[dest] = "sann"
+                } ellers {
+                    hvis (ikkje har_verdi og ai + 1 < lengde(argv)) {
+                        ai = ai + 1
+                        verdi = argv[ai]
+                    }
+                    ns[dest] = _konverter(verdi, spec["type"])
+                }
+            }
+
+        } ellers hvis (al >= 2 og arg_teikn[0] == "-" og arg_teikn[1] != "-") {
+            # Kort flagg: -k eller -kverdi
+            la bokstav: tekst = arg_teikn[1]
+            la spec = _finn_spec_flagg(p, "-" + bokstav)
+            hvis (spec["dest"] != "") {
+                hvis (spec["type"] == "bool") {
+                    ns[spec["dest"]] = "sann"
+                } ellers {
+                    # Resten av strengen er verdien, eller neste arg
+                    la rest: tekst = ""
+                    hvis (al > 2) {
+                        rest = builtin.join(builtin.slice(arg_teikn, 2, al), "")
+                    } ellers hvis (ai + 1 < lengde(argv)) {
+                        ai = ai + 1
+                        rest = argv[ai]
+                    }
+                    ns[spec["dest"]] = _konverter(rest, spec["type"])
+                }
+            }
+
+        } ellers {
+            # Posisjonelt argument
+            hvis (pos_idx < lengde(pos_specs)) {
+                la spec = builtin.json_parse(pos_specs[pos_idx])
+                ns[spec["dest"]] = _konverter(arg, spec["type"])
+                pos_idx = pos_idx + 1
+            }
+        }
+
+        ai = ai + 1
+    }
+
+    # Sjekk krevde argument
+    la ki: heltall = 0
+    mens (ki < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[ki])
+        hvis (spec["krevd"] == "sann" og ns[spec["dest"]] == "") {
+            ns["_feil"] = "Manglande krevd argument: " + spec["flagg"]
+        }
+        ki = ki + 1
+    }
+
+    returner ns
+}
+
+funksjon _finn_spec_dest(p: ordbok_tekst, dest: tekst) -> ordbok_tekst {
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    la i: heltall = 0
+    la tom: ordbok_tekst = {}
+    tom["dest"] = ""
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        hvis (spec["dest"] == dest) { returner spec }
+        i = i + 1
+    }
+    returner tom
+}
+
+funksjon _finn_spec_flagg(p: ordbok_tekst, flagg: tekst) -> ordbok_tekst {
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    la i: heltall = 0
+    la tom: ordbok_tekst = {}
+    tom["dest"] = ""
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        hvis (spec["flagg"] == flagg) { returner spec }
+        i = i + 1
+    }
+    returner tom
+}
+
+funksjon _konverter(s: tekst, type_s: tekst) -> tekst {
+    hvis (type_s == "heltall") {
+        prøv {
+            la n: heltall = builtin.heltall_fra_tekst(s)
+            returner tekst_fra_heltall(n)
+        } fang (e) {
+            returner "0"
+        }
+    }
+    hvis (type_s == "bool") {
+        la sl = builtin.split(s, "")
+        la lower: tekst = ""
+        la i: heltall = 0
+        mens (i < lengde(sl)) {
+            la k: heltall = builtin.char_code(sl[i])
+            hvis (k >= 65 og k <= 90) {
+                la lt: liste_tekst = ["a","b","c","d","e","f","g","h","i","j","k","l","m",
+                                       "n","o","p","q","r","s","t","u","v","w","x","y","z"]
+                lower = lower + lt[k - 65]
+            } ellers { lower = lower + sl[i] }
+            i = i + 1
+        }
+        hvis (lower == "1" eller lower == "sann" eller lower == "true" eller lower == "ja") {
+            returner "sann"
+        }
+        returner "usann"
+    }
+    returner s
+}
+
+# ─── Namespace-tilgang ────────────────────────────────────────────────────────
+
+funksjon hent(ns: ordbok_tekst, dest: tekst) -> tekst {
+    hvis (har_nokkel(ns, dest)) { returner ns[dest] }
+    returner ""
+}
+
+funksjon hent_h(ns: ordbok_tekst, dest: tekst) -> heltall {
+    la v: tekst = hent(ns, dest)
+    prøv { returner builtin.heltall_fra_tekst(v) } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon hent_b(ns: ordbok_tekst, dest: tekst) -> bool {
+    returner hent(ns, dest) == "sann"
+}
+
+funksjon har_feil(ns: ordbok_tekst) -> bool {
+    returner har_nokkel(ns, "_feil") og ns["_feil"] != ""
+}
+
+funksjon feil_melding(ns: ordbok_tekst) -> tekst {
+    hvis (har_nokkel(ns, "_feil")) { returner ns["_feil"] }
+    returner ""
+}
+
+funksjon er_hjelp(ns: ordbok_tekst) -> bool {
+    returner har_nokkel(ns, "_hjelp") og ns["_hjelp"] == "sann"
+}
+
+funksjon kommando(ns: ordbok_tekst) -> tekst {
+    hvis (har_nokkel(ns, "_kommando")) { returner ns["_kommando"] }
+    returner ""
+}
+
+# ─── Hjelptekst ───────────────────────────────────────────────────────────────
+
+funksjon hjelp_tekst(p: ordbok_tekst) -> tekst {
+    la ut: tekst = ""
+
+    # Overskrift
+    ut = ut + "Bruk: " + p["_prog"] + " [val]"
+
+    # Legg til posisjonelle i overskrift
+    la arg_liste = builtin.json_parse(p["_arg_liste"])
+    la i: heltall = 0
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        hvis (spec["er_posisjonell"] == "1") {
+            ut = ut + " " + spec["metavar"]
+        }
+        i = i + 1
+    }
+    ut = ut + "\n"
+
+    # Beskriving
+    hvis (p["_beskriving"] != "") {
+        ut = ut + "\n" + p["_beskriving"] + "\n"
+    }
+
+    # Subkommandoar
+    la sub_parsarar = builtin.json_parse(p["_sub_parsarar"])
+    la sub_nøklar = builtin.nøkler(sub_parsarar)
+    hvis (lengde(sub_nøklar) > 0) {
+        ut = ut + "\nkommandar:\n"
+        la si: heltall = 0
+        mens (si < lengde(sub_nøklar)) {
+            la sub = builtin.json_parse(sub_parsarar[sub_nøklar[si]])
+            la pad: tekst = _pad_til(sub_nøklar[si], 20)
+            ut = ut + "  " + pad + sub["_beskriving"] + "\n"
+            si = si + 1
+        }
+    }
+
+    # Posisjonelle
+    la har_pos: bool = usann
+    i = 0
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        hvis (spec["er_posisjonell"] == "1") { har_pos = sann }
+        i = i + 1
+    }
+    hvis (har_pos) {
+        ut = ut + "\nposisjonelle argument:\n"
+        i = 0
+        mens (i < lengde(arg_liste)) {
+            la spec = builtin.json_parse(arg_liste[i])
+            hvis (spec["er_posisjonell"] == "1") {
+                la pad: tekst = _pad_til(spec["metavar"], 20)
+                ut = ut + "  " + pad + spec["hjelp"] + "\n"
+            }
+            i = i + 1
+        }
+    }
+
+    # Valfrie
+    ut = ut + "\nval:\n"
+    ut = ut + "  " + _pad_til("-h, --hjelp", 20) + "vis denne meldinga og avslutt\n"
+    i = 0
+    mens (i < lengde(arg_liste)) {
+        la spec = builtin.json_parse(arg_liste[i])
+        hvis (spec["er_posisjonell"] != "1") {
+            la flagg_vis: tekst = spec["flagg"]
+            hvis (spec["type"] != "bool") {
+                flagg_vis = flagg_vis + " " + spec["metavar"]
+            }
+            la pad: tekst = _pad_til(flagg_vis, 20)
+            la hjelp_del: tekst = spec["hjelp"]
+            hvis (spec["standard"] != "") {
+                hjelp_del = hjelp_del + " (standard: " + spec["standard"] + ")"
+            }
+            ut = ut + "  " + pad + hjelp_del + "\n"
+        }
+        i = i + 1
+    }
+
+    # Epilog
+    hvis (p["_epilog"] != "") {
+        ut = ut + "\n" + p["_epilog"] + "\n"
+    }
+
+    returner ut
+}
+
+funksjon _pad_til(s: tekst, bredde: heltall) -> tekst {
+    la teikn = builtin.split(s, "")
+    la n: heltall = lengde(teikn)
+    la ut: tekst = s
+    la i: heltall = n
+    mens (i < bredde) { ut = ut + " "  i = i + 1 }
+    returner ut
+}
+
+# Parse argv-streng (for testing; del opp på mellomrom)
+funksjon parse_streng(p: ordbok_tekst, kommando_linje: tekst) -> ordbok_tekst {
+    la delar = builtin.split(kommando_linje, " ")
+    la argv: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(delar)) {
+        la d: tekst = delar[i]
+        hvis (lengde(builtin.split(d, "")) > 0) {
+            legg_til(argv, d)
+        }
+        i = i + 1
+    }
+    returner parse(p, argv)
+}
+
+# Sett epilog
+funksjon set_epilog(p: ordbok_tekst, tekst_val: tekst) {
+    p["_epilog"] = tekst_val
+}

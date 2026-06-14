@@ -1,35 +1,43 @@
 # API Scaffold
 
-Bruk `norcode scaffold-api` når du vil starte et nytt API-prosjekt med en standardisert, liten prosjektstruktur.
+Bruk `nc startproject` når du vil starte et nytt prosjekt med en standardisert, liten prosjektstruktur.
+
+`nc scaffold-api` er avvikla og er no eit alias for `nc startproject`.
 
 ## Opprett et nytt prosjekt
 
 ```bash
-norcode scaffold-api min-api
+nc startproject min-api
 ```
 
 Med `--name` kan du overstyre prosjektnavnet som brukes i `norcode.toml` og genererte filer:
 
 ```bash
-norcode scaffold-api /path/to/new-app --name butikk_api
+nc startproject /path/to/new-app --name butikk_api
 ```
 
 ## Hva som genereres
 
-Generatoren lager en enkel base med:
+Generatoren lager ein demo med:
 
-- `app.no` med en liten webflate
+- `app.no` med:
+  - `GET /api/hello` som returnerer `{"message":"Hello World"}`
+  - `GET /admin` som returnerer eit HTML-svar definert i `app.no`
 - `norcode.toml` med `[project]` og `entry = "app.no"`
-- `tests/test_app.no` med første regresjonstest og eksplisitt `bruk app`
-- `examples/ping.no` som viser hvordan appen kan kjøres og importeres
+- `src/routes.no` som utvidbar plass for fleire ruter
+- `tests/test_app.no` med starttest som verifiserer kjøretidsflyt
+- `examples/ping.no` med ei enkel `GET /ping`-route
 - `deploy/norscode.service` som et Linux-serviceutgangspunkt
 - `README.md` med neste steg og kjørekommandoer
+- `app.no` inneheld også HTML for `GET /admin`
 
 ## Anbefalt struktur
 
 ```text
 min-api/
 ├── app.no
+├── src/
+│   └── routes.no
 ├── deploy/
 │   └── norscode.service
 ├── examples/
