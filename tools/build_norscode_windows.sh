@@ -155,6 +155,7 @@ build_exe() {
             "$CC" -O2 -w \
                 -o "$OUT" \
                 "$merged" "$SQLITE3_C" \
+                -lws2_32 \
                 && compile_ok=1 || true
             ;;
     esac
