@@ -188,7 +188,12 @@ regen_bootstrap_c() {
 
 build_from_bootstrap_c() {
     local gen="${BOOTSTRAP_C_ROOT}/maint/c/norscode_generated.c"
-    local main="${ROOT}/archive/legacy_c_backend/nc_native_main.c"
+    local main
+    if [ -f "${ROOT}/tools/maint/c/nc_native_main.c" ]; then
+        main="${ROOT}/tools/maint/c/nc_native_main.c"
+    else
+        main="${ROOT}/archive/legacy_c_backend/nc_native_main.c"
+    fi
     local tmp=""
 
     for f in "$gen" "$main"; do
