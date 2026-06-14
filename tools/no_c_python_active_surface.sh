@@ -63,6 +63,7 @@ ALLOWLIST_FILES=(
 
 ALLOWLIST_PATTERNS=(
   "$ROOT/archive/"
+  "$ROOT/tools/maint/c/"
 )
 
 is_allowlisted_path() {
