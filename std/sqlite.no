@@ -1,0 +1,609 @@
+# sqlite.no — In-memory SQL-subset
+# Python: sqlite3
+#
+# Støtta SQL:
+#   CREATE TABLE namn (kol1 TYPE, kol2 TYPE, ...)
+#   INSERT INTO tabell (kol1, kol2) VALUES (val1, val2)
+#   SELECT kol1, kol2 FROM tabell [WHERE uttrykk] [ORDER BY kol [ASC|DESC]] [LIMIT n]
+#   UPDATE tabell SET kol=verdi [WHERE uttrykk]
+#   DELETE FROM tabell [WHERE uttrykk]
+#   DROP TABLE tabell
+#
+# Representasjon:
+#   DB: ordbok_tekst
+#     "_tabeller" → JSON-liste av tabellnamn
+#     Per tabell "t_NAMN":
+#       "kolonnar"  → JSON-liste av {namn, type}
+#       "rader"     → JSON-liste av ordbokar (ein per rad)
+#       "neste_id"  → heltall-streng for autoincrement
+#
+# Bruk:
+#   bruk std.sqlite som db
+#   la conn = db.ny()
+#   db.køyr(conn, "CREATE TABLE brukar (id INTEGER, namn TEXT, alder INTEGER)")
+#   db.køyr(conn, "INSERT INTO brukar VALUES (1, 'Ola', 30)")
+#   la resultat = db.vel(conn, "SELECT * FROM brukar WHERE alder > 20")
+
+# ─── DB-init ──────────────────────────────────────────────────────────────────
+
+funksjon ny() -> ordbok_tekst {
+    la db: ordbok_tekst = {}
+    db["_tabeller"] = "[]"
+    returner db
+}
+
+# ─── SQL-tokenisering (enkel) ─────────────────────────────────────────────────
+
+funksjon _er_ws(c: tekst) -> bool {
+    returner c == " " eller c == "\t" eller c == "\n" eller c == "\r"
+}
+
+funksjon _er_siffer(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner k >= 48 og k <= 57
+}
+
+funksjon _er_ident_teikn(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller
+             (k >= 48 og k <= 57) eller c == "_"
+}
+
+funksjon _til_store(s: tekst) -> tekst {
+    returner tekst_til_store(s)
+}
+
+funksjon tekst_til_store(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        la c: tekst = teikn[i]
+        la k: heltall = builtin.char_code(c)
+        hvis (k >= 97 og k <= 122) {
+            la store_t: liste_tekst = ["A","B","C","D","E","F","G","H","I","J","K","L","M",
+                                        "N","O","P","Q","R","S","T","U","V","W","X","Y","Z"]
+            ut = ut + store_t[k - 97]
+        } ellers {
+            ut = ut + c
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Tokeniser SQL til liste_tekst av tokens
+funksjon _tokeniser(sql: tekst) -> liste_tekst {
+    la teikn = builtin.split(sql, "")
+    la n: heltall = lengde(teikn)
+    la tokens: liste_tekst = []
+    la i: heltall = 0
+    mens (i < n) {
+        la c: tekst = teikn[i]
+        # Mellomrom
+        hvis (_er_ws(c)) { i = i + 1 }
+        # Streng-literal
+        ellers hvis (c == "'") {
+            i = i + 1
+            la s: tekst = ""
+            mens (i < n og teikn[i] != "'") {
+                s = s + teikn[i]
+                i = i + 1
+            }
+            i = i + 1  # hopp over '
+            legg_til(tokens, "'" + s + "'")
+        }
+        # Tal
+        ellers hvis (_er_siffer(c) eller (c == "-" og i + 1 < n og _er_siffer(teikn[i + 1]))) {
+            la s: tekst = c
+            i = i + 1
+            mens (i < n og (_er_siffer(teikn[i]) eller teikn[i] == ".")) {
+                s = s + teikn[i]
+                i = i + 1
+            }
+            legg_til(tokens, s)
+        }
+        # Spesialteikn
+        ellers hvis (c == "(" eller c == ")" eller c == "," eller c == ";" eller
+                     c == "=" eller c == ">" eller c == "<" eller c == "*") {
+            # Sjekk for >= <=  !=
+            hvis (i + 1 < n og (c == ">" eller c == "<" eller c == "!") og teikn[i + 1] == "=") {
+                legg_til(tokens, c + "=")
+                i = i + 2
+            } ellers {
+                legg_til(tokens, c)
+                i = i + 1
+            }
+        }
+        # Identifikator eller nøkkelord
+        ellers hvis (_er_ident_teikn(c)) {
+            la s: tekst = c
+            i = i + 1
+            mens (i < n og _er_ident_teikn(teikn[i])) {
+                s = s + teikn[i]
+                i = i + 1
+            }
+            legg_til(tokens, s)
+        } ellers {
+            i = i + 1  # hopp over ukjend teikn
+        }
+    }
+    returner tokens
+}
+
+# ─── Verdi-hjelparar ──────────────────────────────────────────────────────────
+
+funksjon _er_streng_token(t: tekst) -> bool {
+    la teikn = builtin.split(t, "")
+    returner lengde(teikn) >= 2 og teikn[0] == "'"
+}
+
+funksjon _pak_ut_streng(t: tekst) -> tekst {
+    la teikn = builtin.split(t, "")
+    la n: heltall = lengde(teikn)
+    returner builtin.join(builtin.slice(teikn, 1, n - 1), "")
+}
+
+funksjon _er_tal_token(t: tekst) -> bool {
+    la teikn = builtin.split(t, "")
+    la n: heltall = lengde(teikn)
+    hvis (n == 0) { returner usann }
+    la start: heltall = 0
+    hvis (teikn[0] == "-") { start = 1 }
+    la i: heltall = start
+    mens (i < n) {
+        la k: heltall = builtin.char_code(teikn[i])
+        hvis (ikkje (_er_siffer(teikn[i]) eller teikn[i] == ".")) { returner usann }
+        i = i + 1
+    }
+    returner i > start
+}
+
+funksjon _token_til_verdi(t: tekst) -> tekst {
+    hvis (_er_streng_token(t)) { returner _pak_ut_streng(t) }
+    returner t
+}
+
+# ─── WHERE-evaluering ─────────────────────────────────────────────────────────
+
+funksjon _hent_rad_verdi(rad: ordbok_tekst, kol: tekst) -> tekst {
+    la kol_store: tekst = _til_store(kol)
+    hvis (har_nokkel(rad, kol_store)) { returner rad[kol_store] }
+    hvis (har_nokkel(rad, kol)) { returner rad[kol] }
+    returner ""
+}
+
+funksjon _samanlikn(a: tekst, op: tekst, b: tekst) -> bool {
+    # Prøv numerisk samanlikning
+    hvis (_er_tal_token(a) og _er_tal_token(b)) {
+        la ai: heltall = builtin.heltall_fra_tekst(a)
+        la bi: heltall = builtin.heltall_fra_tekst(b)
+        hvis (op == "=") { returner ai == bi }
+        hvis (op == "!=") { returner ai != bi }
+        hvis (op == ">") { returner ai > bi }
+        hvis (op == "<") { returner ai < bi }
+        hvis (op == ">=") { returner ai >= bi }
+        hvis (op == "<=") { returner ai <= bi }
+    }
+    # Tekst-samanlikning
+    hvis (op == "=") { returner a == b }
+    hvis (op == "!=") { returner a != b }
+    hvis (op == ">") { returner a > b }
+    hvis (op == "<") { returner a < b }
+    returner usann
+}
+
+# Enkel WHERE-evaluering: kol OP verdi [AND kol OP verdi ...]
+funksjon _evaluer_where(rad: ordbok_tekst, where_tokens: liste_tekst) -> bool {
+    la n: heltall = lengde(where_tokens)
+    la i: heltall = 0
+    la resultat: bool = sann
+    la forrige_og: bool = sann
+
+    mens (i + 2 < n) {
+        la kol: tekst = where_tokens[i]
+        la op: tekst = where_tokens[i + 1]
+        la verdi_token: tekst = where_tokens[i + 2]
+        la verdi: tekst = _token_til_verdi(verdi_token)
+        la rad_verdi: tekst = _hent_rad_verdi(rad, kol)
+        la treff: bool = _samanlikn(rad_verdi, op, verdi)
+
+        hvis (forrige_og) {
+            resultat = resultat og treff
+        } ellers {
+            resultat = resultat eller treff
+        }
+        i = i + 3
+
+        # Sjekk AND / OR
+        hvis (i < n) {
+            la konj: tekst = _til_store(where_tokens[i])
+            hvis (konj == "AND") { forrige_og = sann  i = i + 1 }
+            ellers hvis (konj == "OR") { forrige_og = usann  i = i + 1 }
+        }
+    }
+    returner resultat
+}
+
+# ─── CREATE TABLE ─────────────────────────────────────────────────────────────
+
+funksjon _create_table(db: ordbok_tekst, tokens: liste_tekst) {
+    # CREATE TABLE namn (kol TYPE, ...)
+    la tabellnamn: tekst = _til_store(tokens[2])
+    la kolonnar: liste_tekst = []
+    la i: heltall = 4  # hopp over CREATE TABLE namn (
+    la n: heltall = lengde(tokens)
+    mens (i < n og tokens[i] != ")") {
+        la kol_namn: tekst = _til_store(tokens[i])
+        la kol_type: tekst = "TEXT"
+        hvis (i + 1 < n og tokens[i + 1] != "," og tokens[i + 1] != ")") {
+            kol_type = _til_store(tokens[i + 1])
+            i = i + 2
+        } ellers {
+            i = i + 1
+        }
+        la kol_info: ordbok_tekst = {}
+        kol_info["namn"] = kol_namn
+        kol_info["type"] = kol_type
+        legg_til(kolonnar, builtin.json_stringify(kol_info))
+        # Hopp over komma
+        hvis (i < n og tokens[i] == ",") { i = i + 1 }
+    }
+    la tabell: ordbok_tekst = {}
+    tabell["kolonnar"] = builtin.json_stringify(kolonnar)
+    tabell["rader"] = "[]"
+    tabell["neste_id"] = "1"
+    db["t_" + tabellnamn] = builtin.json_stringify(tabell)
+    la tabelliste = builtin.json_parse(db["_tabeller"])
+    legg_til(tabelliste, tabellnamn)
+    db["_tabeller"] = builtin.json_stringify(tabelliste)
+}
+
+# ─── INSERT ───────────────────────────────────────────────────────────────────
+
+funksjon _insert(db: ordbok_tekst, tokens: liste_tekst) {
+    # INSERT INTO tabell (kol1,kol2) VALUES (v1,v2)
+    # eller INSERT INTO tabell VALUES (v1,v2)
+    la tabellnamn: tekst = _til_store(tokens[2])
+    la tabell_nøkkel: tekst = "t_" + tabellnamn
+    hvis (ikkje har_nokkel(db, tabell_nøkkel)) { returner }
+    la tabell = builtin.json_parse(db[tabell_nøkkel])
+    la kolonnar = builtin.json_parse(tabell["kolonnar"])
+    la rader = builtin.json_parse(tabell["rader"])
+
+    la n: heltall = lengde(tokens)
+    la i: heltall = 3
+    la kol_namn_ar: liste_tekst = []
+    la verdiar: liste_tekst = []
+
+    # Sjekk om kolonnar er oppgjeve
+    hvis (i < n og tokens[i] == "(") {
+        i = i + 1
+        mens (i < n og tokens[i] != ")") {
+            hvis (tokens[i] != ",") { legg_til(kol_namn_ar, _til_store(tokens[i])) }
+            i = i + 1
+        }
+        i = i + 1  # hopp over )
+    }
+
+    # Finn VALUES
+    mens (i < n og _til_store(tokens[i]) != "VALUES") { i = i + 1 }
+    i = i + 1
+    # Hopp over (
+    hvis (i < n og tokens[i] == "(") { i = i + 1 }
+    mens (i < n og tokens[i] != ")") {
+        hvis (tokens[i] != ",") { legg_til(verdiar, _token_til_verdi(tokens[i])) }
+        i = i + 1
+    }
+
+    # Bygg rad
+    la rad: ordbok_tekst = {}
+    hvis (lengde(kol_namn_ar) > 0) {
+        la vi: heltall = 0
+        mens (vi < lengde(kol_namn_ar) og vi < lengde(verdiar)) {
+            rad[kol_namn_ar[vi]] = verdiar[vi]
+            vi = vi + 1
+        }
+    } ellers {
+        # Bruk kolonn-rekkefølge frå schema
+        la vi: heltall = 0
+        mens (vi < lengde(kolonnar) og vi < lengde(verdiar)) {
+            la kol_info = builtin.json_parse(kolonnar[vi])
+            rad[kol_info["namn"]] = verdiar[vi]
+            vi = vi + 1
+        }
+    }
+    # Legg til rowid
+    la rowid: tekst = tabell["neste_id"]
+    rad["_rowid"] = rowid
+    tabell["neste_id"] = tekst_fra_heltall(builtin.heltall_fra_tekst(rowid) + 1)
+    legg_til(rader, builtin.json_stringify(rad))
+    tabell["rader"] = builtin.json_stringify(rader)
+    db[tabell_nøkkel] = builtin.json_stringify(tabell)
+}
+
+# ─── SELECT ───────────────────────────────────────────────────────────────────
+
+funksjon _select(db: ordbok_tekst, tokens: liste_tekst) -> liste_tekst {
+    # SELECT kol1,kol2,* FROM tabell [WHERE ...] [ORDER BY kol [ASC|DESC]] [LIMIT n]
+    la n: heltall = lengde(tokens)
+    la i: heltall = 1
+
+    # Samle SELECT-kolonnar
+    la sel_kolar: liste_tekst = []
+    la alle_kolonnar: bool = usann
+    mens (i < n og _til_store(tokens[i]) != "FROM") {
+        la t: tekst = tokens[i]
+        hvis (t == "*") { alle_kolonnar = sann }
+        ellers hvis (t != ",") { legg_til(sel_kolar, _til_store(t)) }
+        i = i + 1
+    }
+    i = i + 1  # hopp over FROM
+    la tabellnamn: tekst = _til_store(tokens[i])
+    i = i + 1
+    la tabell_nøkkel: tekst = "t_" + tabellnamn
+    hvis (ikkje har_nokkel(db, tabell_nøkkel)) { returner [] }
+    la tabell = builtin.json_parse(db[tabell_nøkkel])
+    la rader = builtin.json_parse(tabell["rader"])
+
+    # WHERE
+    la where_tokens: liste_tekst = []
+    la order_kol: tekst = ""
+    la order_asc: bool = sann
+    la limit_n: heltall = -1
+    mens (i < n) {
+        la kw: tekst = _til_store(tokens[i])
+        hvis (kw == "WHERE") {
+            i = i + 1
+            mens (i < n og _til_store(tokens[i]) != "ORDER" og _til_store(tokens[i]) != "LIMIT") {
+                legg_til(where_tokens, tokens[i])
+                i = i + 1
+            }
+        } ellers hvis (kw == "ORDER") {
+            i = i + 2  # hopp over BY
+            ordre_kol = _til_store(tokens[i])
+            i = i + 1
+            hvis (i < n og _til_store(tokens[i]) == "DESC") {
+                order_asc = usann
+                i = i + 1
+            } ellers hvis (i < n og _til_store(tokens[i]) == "ASC") {
+                i = i + 1
+            }
+        } ellers hvis (kw == "LIMIT") {
+            i = i + 1
+            limit_n = builtin.heltall_fra_tekst(tokens[i])
+            i = i + 1
+        } ellers {
+            i = i + 1
+        }
+    }
+
+    # Filtrer rader
+    la filtrert: liste_tekst = []
+    la ri: heltall = 0
+    mens (ri < lengde(rader)) {
+        la rad = builtin.json_parse(rader[ri])
+        la ta_med: bool = sann
+        hvis (lengde(where_tokens) > 0) {
+            ta_med = _evaluer_where(rad, where_tokens)
+        }
+        hvis (ta_med) { legg_til(filtrert, rader[ri]) }
+        ri = ri + 1
+    }
+
+    # Prosjeksjon
+    la schema_kolonnar = builtin.json_parse(tabell["kolonnar"])
+    la resultat: liste_tekst = []
+    la fi: heltall = 0
+    mens (fi < lengde(filtrert)) {
+        la rad = builtin.json_parse(filtrert[fi])
+        la ut_rad: ordbok_tekst = {}
+        hvis (alle_kolonnar) {
+            la si: heltall = 0
+            mens (si < lengde(schema_kolonnar)) {
+                la kol_info = builtin.json_parse(schema_kolonnar[si])
+                la kn: tekst = kol_info["namn"]
+                hvis (har_nokkel(rad, kn)) { ut_rad[kn] = rad[kn] }
+                ellers { ut_rad[kn] = "" }
+                si = si + 1
+            }
+        } ellers {
+            la ki: heltall = 0
+            mens (ki < lengde(sel_kolar)) {
+                la kn: tekst = sel_kolar[ki]
+                la verdi: tekst = _hent_rad_verdi(rad, kn)
+                ut_rad[kn] = verdi
+                ki = ki + 1
+            }
+        }
+        legg_til(resultat, builtin.json_stringify(ut_rad))
+        fi = fi + 1
+    }
+
+    # LIMIT
+    hvis (limit_n >= 0 og lengde(resultat) > limit_n) {
+        resultat = builtin.slice(resultat, 0, limit_n)
+    }
+    returner resultat
+}
+
+# ─── UPDATE ───────────────────────────────────────────────────────────────────
+
+funksjon _update(db: ordbok_tekst, tokens: liste_tekst) {
+    # UPDATE tabell SET kol=verdi [WHERE ...]
+    la tabellnamn: tekst = _til_store(tokens[1])
+    la tabell_nøkkel: tekst = "t_" + tabellnamn
+    hvis (ikkje har_nokkel(db, tabell_nøkkel)) { returner }
+    la tabell = builtin.json_parse(db[tabell_nøkkel])
+    la rader = builtin.json_parse(tabell["rader"])
+    la n: heltall = lengde(tokens)
+
+    # Finn SET-del
+    la i: heltall = 3  # hopp over SET
+    la set_kol: tekst = ""
+    la set_verdi: tekst = ""
+    mens (i < n og _til_store(tokens[i]) != "WHERE") {
+        la t: tekst = tokens[i]
+        hvis (t == "=") {
+            la j: heltall = i + 1
+            set_verdi = _token_til_verdi(tokens[j])
+            i = j + 1
+        } ellers hvis (t != ",") {
+            set_kol = _til_store(t)
+            i = i + 1
+        } ellers {
+            i = i + 1
+        }
+    }
+
+    # WHERE
+    la where_tokens: liste_tekst = []
+    la wi: heltall = i
+    hvis (wi < n og _til_store(tokens[wi]) == "WHERE") {
+        wi = wi + 1
+        mens (wi < n) {
+            legg_til(where_tokens, tokens[wi])
+            wi = wi + 1
+        }
+    }
+
+    # Oppdater rader
+    la ny_rader: liste_tekst = []
+    la ri: heltall = 0
+    mens (ri < lengde(rader)) {
+        la rad = builtin.json_parse(rader[ri])
+        la match: bool = sann
+        hvis (lengde(where_tokens) > 0) {
+            match = _evaluer_where(rad, where_tokens)
+        }
+        hvis (match og lengde(builtin.split(set_kol, "")) > 0) {
+            rad[set_kol] = set_verdi
+        }
+        legg_til(ny_rader, builtin.json_stringify(rad))
+        ri = ri + 1
+    }
+    tabell["rader"] = builtin.json_stringify(ny_rader)
+    db[tabell_nøkkel] = builtin.json_stringify(tabell)
+}
+
+# ─── DELETE ───────────────────────────────────────────────────────────────────
+
+funksjon _delete(db: ordbok_tekst, tokens: liste_tekst) {
+    # DELETE FROM tabell [WHERE ...]
+    la tabellnamn: tekst = _til_store(tokens[2])
+    la tabell_nøkkel: tekst = "t_" + tabellnamn
+    hvis (ikkje har_nokkel(db, tabell_nøkkel)) { returner }
+    la tabell = builtin.json_parse(db[tabell_nøkkel])
+    la rader = builtin.json_parse(tabell["rader"])
+    la n: heltall = lengde(tokens)
+
+    la where_tokens: liste_tekst = []
+    la i: heltall = 3
+    hvis (i < n og _til_store(tokens[i]) == "WHERE") {
+        i = i + 1
+        mens (i < n) {
+            legg_til(where_tokens, tokens[i])
+            i = i + 1
+        }
+    }
+
+    la ny_rader: liste_tekst = []
+    la ri: heltall = 0
+    mens (ri < lengde(rader)) {
+        la rad = builtin.json_parse(rader[ri])
+        la slett: bool = sann
+        hvis (lengde(where_tokens) > 0) {
+            slett = _evaluer_where(rad, where_tokens)
+        }
+        hvis (ikkje slett) { legg_til(ny_rader, rader[ri]) }
+        ri = ri + 1
+    }
+    tabell["rader"] = builtin.json_stringify(ny_rader)
+    db[tabell_nøkkel] = builtin.json_stringify(tabell)
+}
+
+# ─── DROP TABLE ───────────────────────────────────────────────────────────────
+
+funksjon _drop_table(db: ordbok_tekst, tokens: liste_tekst) {
+    la tabellnamn: tekst = _til_store(tokens[2])
+    la tabell_nøkkel: tekst = "t_" + tabellnamn
+    fjern_nokkel(db, tabell_nøkkel)
+    la tabelliste = builtin.json_parse(db["_tabeller"])
+    la ny_liste: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(tabelliste)) {
+        hvis (_til_store(tabelliste[i]) != tabellnamn) {
+            legg_til(ny_liste, tabelliste[i])
+        }
+        i = i + 1
+    }
+    db["_tabeller"] = builtin.json_stringify(ny_liste)
+}
+
+# ─── Hovudfunksjonar ──────────────────────────────────────────────────────────
+
+# Køyr SQL-setning (ikkje-SELECT). Returnerer feilmelding eller ""
+funksjon køyr(db: ordbok_tekst, sql: tekst) -> tekst {
+    prøv {
+        la tokens = _tokeniser(sql)
+        hvis (lengde(tokens) == 0) { returner "" }
+        la første: tekst = _til_store(tokens[0])
+        hvis (første == "CREATE") { _create_table(db, tokens) }
+        ellers hvis (første == "INSERT") { _insert(db, tokens) }
+        ellers hvis (første == "UPDATE") { _update(db, tokens) }
+        ellers hvis (første == "DELETE") { _delete(db, tokens) }
+        ellers hvis (første == "DROP") { _drop_table(db, tokens) }
+        returner ""
+    } fang (e) {
+        returner "Feil: " + e
+    }
+    returner ""
+}
+
+# Køyr SELECT. Returnerer liste_tekst (JSON-rader) eller tom liste
+funksjon vel(db: ordbok_tekst, sql: tekst) -> liste_tekst {
+    prøv {
+        la tokens = _tokeniser(sql)
+        hvis (lengde(tokens) == 0) { returner [] }
+        la første: tekst = _til_store(tokens[0])
+        hvis (første == "SELECT") { returner _select(db, tokens) }
+        returner []
+    } fang (e) {
+        returner []
+    }
+    returner []
+}
+
+# Hent ei enkelt rad som ordbok
+funksjon fetchone(db: ordbok_tekst, sql: tekst) -> ordbok_tekst {
+    la rader = vel(db, sql)
+    hvis (lengde(rader) == 0) { returner {} }
+    returner builtin.json_parse(rader[0])
+}
+
+# Hent alle rader som liste av ordbøker
+funksjon fetchall(db: ordbok_tekst, sql: tekst) -> liste_tekst {
+    returner vel(db, sql)
+}
+
+# Hent kolonnverdi frå ein rad
+funksjon kolonne(rad: ordbok_tekst, namn: tekst) -> tekst {
+    la store_namn: tekst = _til_store(namn)
+    hvis (har_nokkel(rad, store_namn)) { returner rad[store_namn] }
+    hvis (har_nokkel(rad, namn)) { returner rad[namn] }
+    returner ""
+}
+
+# Tell rader i ein tabell
+funksjon tell(db: ordbok_tekst, tabellnamn: tekst) -> heltall {
+    la tabell_nøkkel: tekst = "t_" + _til_store(tabellnamn)
+    hvis (ikkje har_nokkel(db, tabell_nøkkel)) { returner 0 }
+    la tabell = builtin.json_parse(db[tabell_nøkkel])
+    la rader = builtin.json_parse(tabell["rader"])
+    returner lengde(rader)
+}
+
+# List alle tabellnamn
+funksjon tabellnamn(db: ordbok_tekst) -> liste_tekst {
+    returner builtin.json_parse(db["_tabeller"])
+}

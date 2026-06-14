@@ -1,0 +1,659 @@
+# Fase 6: nc – Norscode pakkestyrar CLI
+# Kommandoar: add, remove, update, lock, fetch, publish, install
+# Brukar berre Norscode-kode.
+
+import toolchain.norspkg.manifest_parser
+import toolchain.norspkg.resolver
+import toolchain.norspkg.lockfile_flow
+import toolchain.norspkg.registry_protocol
+import toolchain.norspkg.cache
+import toolchain.norspkg.publisher
+import toolchain.norspkg.auth
+
+# =========================
+# Hjelpetekst
+# =========================
+
+funksjon nc_hjelp()
+    skriv("nc – Norscode pakkestyrar")
+    skriv("")
+    skriv("BRUK:")
+    skriv("  nc add <pakke> [spesifikator]   Legg til avhengigheit")
+    skriv("  nc remove <pakke>               Fjern avhengigheit")
+    skriv("  nc update [pakke]               Oppdater ein eller alle pakkar")
+    skriv("  nc lock                         Generer / oppdater norcode.lock")
+    skriv("  nc fetch                        Last ned alle pakkar i lock")
+    skriv("  nc install                      Løys, lås og installer alt")
+    skriv("  nc publish                      Publiser pakke til registry")
+    skriv("  nc info <pakke>                 Vis metadata for pakke")
+    skriv("  nc search <tekst>               Søk i registry")
+    skriv("  nc yank <pakke> <versjon>       Yanke ein publisert versjon")
+    skriv("  nc version                      Vis nc-versjon")
+    skriv("")
+    skriv("FLAGG:")
+    skriv("  --registry <url>    Bruk anna registry-URL")
+    skriv("  --token <token>     Auth-token for publish/yank")
+    skriv("  --offline           Berre bruk lokal cache")
+    skriv("  --verbose           Meir detaljert output")
+slutt
+
+# =========================
+# nc-kontekst (lasta ein gong per køyring)
+# =========================
+
+funksjon nc_kontekst_lag()
+    ctx = {
+        cwd: gjeldande_mappe(),
+        registry_url: "https://registry.norscode.dev",
+        token: null,
+        offline: usann,
+        verbose: usann,
+        manifest: null,
+        lock: null,
+        cache: cache_lag(),
+        registry_tilstand: registry_tilstand_lag(),
+        feil: []
+    }
+
+    # Les manifest
+    toml_sti = ctx.cwd + "/norcode.toml"
+    viss fil_finst(toml_sti)
+        rå = les_fil(toml_sti)
+        ctx.manifest = parse_toml_til_manifest(rå)
+    slutt
+
+    # Les lock
+    lock_sti = ctx.cwd + "/norcode.lock"
+    viss fil_finst(lock_sti)
+        rå = les_fil(lock_sti)
+        ctx.lock = lockfile_frå_json(rå)
+    slutt
+
+    returner ctx
+slutt
+
+# =========================
+# Hjelpefunksjonar
+# =========================
+
+funksjon parse_toml_til_manifest(toml_tekst)
+    # Enkel TOML-lesar for norcode.toml-formatet
+    linjor = splitt(toml_tekst, "\n")
+    namn = ""
+    versjon = ""
+    entry = ""
+    avhengigheiter = {}
+
+    i = 0
+    seksjon = ""
+    mens i < lengde(linjor)
+        linje = trim(linjor[i])
+
+        viss starts_with(linje, "[project]")
+            seksjon = "project"
+        ellers viss starts_with(linje, "[package]")
+            seksjon = "project"
+        ellers viss starts_with(linje, "[dependencies]")
+            seksjon = "dependencies"
+        ellers viss starts_with(linje, "[deps]")
+            seksjon = "dependencies"
+        ellers viss starts_with(linje, "[registry]")
+            seksjon = "registry"
+        ellers viss starts_with(linje, "#") eller lengde(linje) == 0
+            # kommentar eller tom linje
+        ellers
+            deler = splitt(linje, "=")
+            viss lengde(deler) >= 2
+                nokkel = trim(deler[0])
+                verdi = trim(join(deler, "=", 1))
+                verdi = fjern_anforselseteikn(verdi)
+
+                viss seksjon == "project"
+                    viss nokkel == "name"
+                        namn = verdi
+                    slutt
+                    viss nokkel == "version"
+                        versjon = verdi
+                    slutt
+                    viss nokkel == "entry"
+                        entry = verdi
+                    slutt
+                    viss nokkel == "deps" og starts_with(verdi, "{") og builtin.ends_with(verdi, "}")
+                        innhald = substr(verdi, 1, lengde(verdi) - 1)
+                        innhald = trim(innhald)
+                        innhald = substr(innhald, 1, lengde(innhald) - 1)
+                        deler_deps = splitt(innhald, ",")
+                        j = 0
+                        mens j < lengde(deler_deps)
+                            par = trim(deler_deps[j])
+                            viss lengde(par) > 0
+                                par_deler = splitt(par, "=")
+                                viss lengde(par_deler) >= 2
+                                    dep_namn = trim(par_deler[0])
+                                    dep_verdi = trim(join(par_deler, "=", 1))
+                                    dep_verdi = fjern_anforselseteikn(dep_verdi)
+                                    avhengigheiter[dep_namn] = dep_verdi
+                                slutt
+                            slutt
+                            j = j + 1
+                        slutt
+                    slutt
+                slutt
+
+                viss seksjon == "dependencies"
+                    avhengigheiter[nokkel] = verdi
+                slutt
+            slutt
+        slutt
+
+        i = i + 1
+    slutt
+
+    manifest = manifest_lag(namn, versjon, entry)
+    nyklar = ordbok_nyklar(avhengigheiter)
+    j = 0
+    mens j < lengde(nyklar)
+        manifest_legg_avhengigheit(manifest, nyklar[j], avhengigheiter[nyklar[j]])
+        j = j + 1
+    slutt
+
+    returner manifest
+slutt
+
+funksjon skriv_manifest_til_toml(manifest)
+    linjer = []
+    legg_til(linjer, "[project]")
+    legg_til(linjer, "name = \"" + manifest.namn + "\"")
+    legg_til(linjer, "version = \"" + manifest.versjon + "\"")
+    legg_til(linjer, "entry = \"" + manifest.entry + "\"")
+    legg_til(linjer, "")
+
+    viss lengde(manifest.avhengigheiter) > 0
+        legg_til(linjer, "[dependencies]")
+        nyklar = ordbok_nyklar(manifest.avhengigheiter)
+        sorter(nyklar)
+        i = 0
+        mens i < lengde(nyklar)
+            k = nyklar[i]
+            legg_til(linjer, k + " = \"" + manifest.avhengigheiter[k] + "\"")
+            i = i + 1
+        slutt
+    slutt
+
+    returner join(linjer, "\n")
+slutt
+
+funksjon logg(ctx, tekst)
+    viss ctx.verbose
+        skriv("[nc] " + tekst)
+    slutt
+slutt
+
+# =========================
+# nc add <pakke> [spesifikator]
+# =========================
+
+funksjon nc_add(ctx, pakke_namn, spesifikator)
+    viss ctx.manifest == null
+        skriv("Feil: ingen norcode.toml i gjeldande mappe")
+        returner usann
+    slutt
+
+    viss spesifikator == null eller lengde(spesifikator) == 0
+        spesifikator = "*"
+    slutt
+
+    feil = valider_spesifikator(pakke_namn, spesifikator)
+    viss feil != null
+        skriv("Feil: " + feil)
+        returner usann
+    slutt
+
+    manifest_legg_avhengigheit(ctx.manifest, pakke_namn, spesifikator)
+    skriv_fil(ctx.cwd + "/norcode.toml", skriv_manifest_til_toml(ctx.manifest))
+
+    skriv("La til: " + pakke_namn + " " + spesifikator)
+    skriv("Køyr 'nc lock' for å oppdatere lockfila.")
+    returner sann
+slutt
+
+# =========================
+# nc remove <pakke>
+# =========================
+
+funksjon nc_remove(ctx, pakke_namn)
+    viss ctx.manifest == null
+        skriv("Feil: ingen norcode.toml")
+        returner usann
+    slutt
+
+    viss ctx.manifest.avhengigheiter[pakke_namn] == null
+        skriv("Feil: " + pakke_namn + " er ikkje ein avhengigheit")
+        returner usann
+    slutt
+
+    slett_nokkel(ctx.manifest.avhengigheiter, pakke_namn)
+    skriv_fil(ctx.cwd + "/norcode.toml", skriv_manifest_til_toml(ctx.manifest))
+
+    skriv("Fjerna: " + pakke_namn)
+    skriv("Køyr 'nc lock' for å oppdatere lockfila.")
+    returner sann
+slutt
+
+# =========================
+# nc update [pakke]
+# =========================
+
+funksjon nc_update(ctx, pakke_namn)
+    viss ctx.manifest == null
+        skriv("Feil: ingen norcode.toml")
+        returner usann
+    slutt
+
+    viss pakke_namn != null og lengde(pakke_namn) > 0
+        # Oppdater berre éin pakke: sett spesifikator til nyaste versjon
+        noverande = ctx.manifest.avhengigheiter[pakke_namn]
+        viss noverande == null
+            skriv("Feil: " + pakke_namn + " er ikkje ein avhengigheit")
+            returner usann
+        slutt
+        # Hald spesifikatoren, men tving re-resolving
+        skriv("Oppdaterer " + pakke_namn + "...")
+    ellers
+        skriv("Oppdaterer alle avhengigheiter...")
+    slutt
+
+    # Re-generer lock
+    nc_lock(ctx)
+    skriv("Ferdig. Køyr 'nc fetch' for å laste ned.")
+    returner sann
+slutt
+
+# =========================
+# nc lock
+# =========================
+
+funksjon nc_lock(ctx)
+    viss ctx.manifest == null
+        skriv("Feil: ingen norcode.toml")
+        returner usann
+    slutt
+
+    ok_manifest = valider_manifest(ctx.manifest)
+    viss ikkje ok_manifest
+        skriv("Feil i norcode.toml:")
+        i = 0
+        mens i < lengde(ctx.manifest.feil)
+            skriv("  " + ctx.manifest.feil[i])
+            i = i + 1
+        slutt
+        returner usann
+    slutt
+
+    logg(ctx, "Løyser avhengigheitar...")
+    resolver_res = resolver_kjoyr(ctx.registry_tilstand, ctx.manifest)
+
+    viss ikkje resolver_res.ok
+        skriv("Resolver-feil:")
+        i = 0
+        mens i < lengde(resolver_res.feil)
+            skriv("  " + resolver_res.feil[i])
+            i = i + 1
+        slutt
+        returner usann
+    slutt
+
+    logg(ctx, "Genererer lockfile...")
+    lock_res = generer_lockfile(ctx.manifest, resolver_res)
+
+    viss ikkje lock_res.ok
+        skriv("Lockfile-feil:")
+        i = 0
+        mens i < lengde(lock_res.feil)
+            skriv("  " + lock_res.feil[i])
+            i = i + 1
+        slutt
+        returner usann
+    slutt
+
+    ctx.lock = lock_res.lock
+    skriv_fil(ctx.cwd + "/norcode.lock", lockfile_til_json(ctx.lock))
+
+    skriv("norcode.lock oppdatert (" + til_tekst(lengde(ctx.lock.pakkar)) + " pakkar)")
+    returner sann
+slutt
+
+# =========================
+# nc fetch
+# =========================
+
+funksjon nc_fetch(ctx)
+    viss ctx.lock == null
+        skriv("Feil: ingen norcode.lock – køyr 'nc lock' først")
+        returner usann
+    slutt
+
+    dest = ctx.cwd + "/.norscode/packages"
+
+    hent_fn = funksjon(url, namn, versjon)
+        viss ctx.offline
+            returner null
+        slutt
+        returner http_get_bytes(url)
+    slutt
+
+    res = installer_alle(ctx.lock, ctx.cache, hent_fn, dest)
+
+    i = 0
+    mens i < lengde(res.installert)
+        p = res.installert[i]
+        logg(ctx, p.namn + " [" + p.frå + "]")
+        i = i + 1
+    slutt
+
+    viss ikkje res.ok
+        skriv("Feil under fetch:")
+        i = 0
+        mens i < lengde(res.feil)
+            skriv("  " + res.feil[i])
+            i = i + 1
+        slutt
+        returner usann
+    slutt
+
+    skriv("Ferdig: " + til_tekst(lengde(res.installert)) + " pakkar henta")
+    skriv("  Cache-treff: " + til_tekst(res.stats.treff)
+        + "  Nedlastingar: " + til_tekst(res.stats.nedlastingar))
+    returner sann
+slutt
+
+# =========================
+# nc install (lock + fetch i éitt)
+# =========================
+
+funksjon nc_install(ctx)
+    ok_lock = nc_lock(ctx)
+    viss ikkje ok_lock
+        returner usann
+    slutt
+    returner nc_fetch(ctx)
+slutt
+
+# =========================
+# nc publish
+# =========================
+
+funksjon nc_publish(ctx)
+    viss ctx.manifest == null
+        skriv("Feil: ingen norcode.toml")
+        returner usann
+    slutt
+
+    viss ctx.token == null eller lengde(ctx.token) == 0
+        skriv("Feil: --token er påkravd for publish")
+        returner usann
+    slutt
+
+    pub_ctx = publish_kontekst_lag(ctx.registry_url, ctx.token)
+    res = publish_pakke(pub_ctx, ctx.registry_tilstand, ctx.manifest, ctx.cwd)
+
+    viss ikkje res.ok
+        skriv("Publish feila:")
+        i = 0
+        mens i < lengde(res.feil)
+            skriv("  " + res.feil[i])
+            i = i + 1
+        slutt
+        returner usann
+    slutt
+
+    skriv("Publisert " + res.namn + "@" + res.versjon)
+    skriv("  " + res.checksum)
+    returner sann
+slutt
+
+# =========================
+# nc info <pakke>
+# =========================
+
+funksjon nc_info(ctx, pakke_namn)
+    svar = endpoint_get_metadata(ctx.registry_tilstand, pakke_namn)
+    viss ikkje svar.ok
+        skriv("Feil: " + svar.feil)
+        returner usann
+    slutt
+
+    data = svar.data
+    skriv("Pakke: " + data.namn)
+    skriv("Siste: " + data.siste)
+    skriv("Versjonar:")
+    i = 0
+    mens i < lengde(data.versjonar)
+        v = data.versjonar[i]
+        skriv("  " + v.versjon + "  " + v.checksum)
+        i = i + 1
+    slutt
+    returner sann
+slutt
+
+# =========================
+# nc search <tekst>
+# =========================
+
+funksjon nc_search(ctx, søkjetekst)
+    svar = endpoint_list_packages(ctx.registry_tilstand, søkjetekst)
+    viss ikkje svar.ok
+        skriv("Feil: " + svar.feil)
+        returner usann
+    slutt
+
+    pakkar = svar.data.pakkar
+    viss lengde(pakkar) == 0
+        skriv("Ingen treff for: " + søkjetekst)
+        returner sann
+    slutt
+
+    skriv(til_tekst(lengde(pakkar)) + " treff:")
+    i = 0
+    mens i < lengde(pakkar)
+        p = pakkar[i]
+        yanket_tekst = ""
+        viss p.yanket
+            yanket_tekst = " [YANKET]"
+        slutt
+        skriv("  " + p.namn + " @ " + p.siste_versjon + yanket_tekst)
+        i = i + 1
+    slutt
+    returner sann
+slutt
+
+# =========================
+# nc yank <pakke> <versjon>
+# =========================
+
+funksjon nc_yank(ctx, pakke_namn, versjon)
+    viss ctx.token == null eller lengde(ctx.token) == 0
+        skriv("Feil: --token er påkravd for yank")
+        returner usann
+    slutt
+
+    svar = endpoint_yank(ctx.registry_tilstand, ctx.token, pakke_namn, versjon)
+    viss ikkje svar.ok
+        skriv("Feil: " + svar.feil)
+        returner usann
+    slutt
+
+    skriv("Yanket: " + pakke_namn + "@" + versjon)
+    returner sann
+slutt
+
+# =========================
+# Sjølvtest for kort manifest
+# =========================
+
+funksjon test_kort_manifest()
+    toml = "[package]\nname = \"min_app\"\nentry = \"main.no\"\ndeps = { std_math = \"^1.0.0\", std_io = \"^1.0.0\" }\n"
+
+    manifest = parse_toml_til_manifest(toml)
+
+    skriv("Kort manifest: " + manifest.namn + "@" + manifest.versjon + " entry=" + manifest.entry)
+    skriv("Deps: " + til_tekst(lengde(ordbok_nyklar(manifest.avhengigheiter))))
+
+    returner manifest.namn == "min_app" og manifest.entry == "main.no" og manifest.avhengigheiter["std_math"] == "^1.0.0"
+slutt
+
+# =========================
+# Hovudinngong: parse args og dispater
+# =========================
+
+funksjon nc_parse_flagg(args)
+    flagg = {
+        registry: null,
+        token: null,
+        offline: usann,
+        verbose: usann,
+        rest: []
+    }
+
+    i = 0
+    mens i < lengde(args)
+        arg = args[i]
+        viss arg == "--registry" og i + 1 < lengde(args)
+            flagg.registry = args[i + 1]
+            i = i + 2
+            fortsett
+        slutt
+        viss arg == "--token" og i + 1 < lengde(args)
+            flagg.token = args[i + 1]
+            i = i + 2
+            fortsett
+        slutt
+        viss arg == "--offline"
+            flagg.offline = sann
+        ellers viss arg == "--verbose" eller arg == "-v"
+            flagg.verbose = sann
+        ellers
+            legg_til(flagg.rest, arg)
+        slutt
+        i = i + 1
+    slutt
+
+    returner flagg
+slutt
+
+funksjon main(args)
+    viss lengde(args) == 0
+        nc_hjelp()
+        returner
+    slutt
+
+    flagg = nc_parse_flagg(args)
+
+    ctx = nc_kontekst_lag()
+    ctx.verbose = flagg.verbose
+    ctx.offline = flagg.offline
+    viss flagg.token != null
+        ctx.token = flagg.token
+    slutt
+    viss flagg.registry != null
+        ctx.registry_url = flagg.registry
+    slutt
+
+    viss lengde(flagg.rest) == 0
+        nc_hjelp()
+        returner
+    slutt
+
+    kommando = flagg.rest[0]
+
+    viss kommando == "add"
+        spesifikator = null
+        viss lengde(flagg.rest) >= 3
+            spesifikator = flagg.rest[2]
+        slutt
+        viss lengde(flagg.rest) < 2
+            skriv("Bruk: nc add <pakke> [spesifikator]")
+            returner
+        slutt
+        nc_add(ctx, flagg.rest[1], spesifikator)
+        returner
+    slutt
+
+    viss kommando == "remove"
+        viss lengde(flagg.rest) < 2
+            skriv("Bruk: nc remove <pakke>")
+            returner
+        slutt
+        nc_remove(ctx, flagg.rest[1])
+        returner
+    slutt
+
+    viss kommando == "update"
+        pakke = null
+        viss lengde(flagg.rest) >= 2
+            pakke = flagg.rest[1]
+        slutt
+        nc_update(ctx, pakke)
+        returner
+    slutt
+
+    viss kommando == "lock"
+        nc_lock(ctx)
+        returner
+    slutt
+
+    viss kommando == "fetch"
+        nc_fetch(ctx)
+        returner
+    slutt
+
+    viss kommando == "install"
+        nc_install(ctx)
+        returner
+    slutt
+
+    viss kommando == "publish"
+        nc_publish(ctx)
+        returner
+    slutt
+
+    viss kommando == "info"
+        viss lengde(flagg.rest) < 2
+            skriv("Bruk: nc info <pakke>")
+            returner
+        slutt
+        nc_info(ctx, flagg.rest[1])
+        returner
+    slutt
+
+    viss kommando == "search"
+        viss lengde(flagg.rest) < 2
+            skriv("Bruk: nc search <tekst>")
+            returner
+        slutt
+        nc_search(ctx, flagg.rest[1])
+        returner
+    slutt
+
+    viss kommando == "yank"
+        viss lengde(flagg.rest) < 3
+            skriv("Bruk: nc yank <pakke> <versjon>")
+            returner
+        slutt
+        nc_yank(ctx, flagg.rest[1], flagg.rest[2])
+        returner
+    slutt
+
+    viss kommando == "version"
+        skriv("nc 1.0.0 (Norscode pakkestyrar)")
+        returner
+    slutt
+
+    viss kommando == "help" eller kommando == "--help" eller kommando == "-h"
+        nc_hjelp()
+        returner
+    slutt
+
+    skriv("Ukjend kommando: " + kommando)
+    skriv("Køyr 'nc help' for ei liste over kommandoar.")
+slutt

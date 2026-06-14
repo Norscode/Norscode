@@ -1,0 +1,323 @@
+# kø.no — Jobb-kø og bakgrunnsoppgåver for Norscode
+# Celery-inspirert
+#
+# Bruk:
+#   bruk std.kø som kø
+#   bruk std.db som db
+#
+#   la conn = db.open("app.db")
+#   kø.migrer(conn)
+#
+#   # Legg til jobb
+#   kø.legg_til(conn, "send_epost", {"til": "ola@example.com", "emne": "Hei"})
+#   kø.legg_til_forsinka(conn, "ryd_logg", {}, 3600)  // 1 time seinare
+#   kø.legg_til_planlagt(conn, "dagleg_rapport", {}, "02:00")
+#
+#   # Prosesser jobbar (køyr i eigen prosess / cron)
+#   kø.prosesser(conn, max_jobbar: 10)
+
+bruk std.db som db
+bruk std.orm som orm
+
+# ─── Schema ───────────────────────────────────────────────────────────────────
+
+funksjon migrer(conn: tekst) -> heltall {
+    orm.migrer(conn, "_jobb_kø", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "jobb_type TEXT NOT NULL",
+        "payload TEXT NOT NULL DEFAULT '{}'",
+        "status TEXT NOT NULL DEFAULT 'ventande'",
+        "prioritet INTEGER DEFAULT 0",
+        "forsøk INTEGER DEFAULT 0",
+        "maks_forsøk INTEGER DEFAULT 3",
+        "klar_etter TEXT DEFAULT (datetime('now'))",
+        "starta TEXT",
+        "ferdig TEXT",
+        "feil TEXT",
+        "køyrt_av TEXT DEFAULT ''",
+        "oppretta TEXT DEFAULT (datetime('now'))"
+    ])
+    orm.migrer(conn, "_jobb_resultat", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "jobb_id INTEGER NOT NULL",
+        "jobb_type TEXT NOT NULL",
+        "resultat TEXT",
+        "feil TEXT",
+        "varighet_ms INTEGER",
+        "ferdig TEXT DEFAULT (datetime('now'))"
+    ])
+    returner 1
+}
+
+# ─── Legg til jobbar ──────────────────────────────────────────────────────────
+
+funksjon legg_til(conn: tekst, jobb_type: tekst, payload: ordbok_tekst) -> heltall {
+    la payload_json = _til_json(payload)
+    returner orm.lagre(conn, "_jobb_kø", {
+        "jobb_type": jobb_type,
+        "payload":   payload_json,
+        "status":    "ventande"
+    })
+}
+
+funksjon legg_til_med_prioritet(conn: tekst, jobb_type: tekst, payload: ordbok_tekst, prioritet: heltall) -> heltall {
+    la payload_json = _til_json(payload)
+    returner orm.lagre(conn, "_jobb_kø", {
+        "jobb_type": jobb_type,
+        "payload":   payload_json,
+        "status":    "ventande",
+        "prioritet": tekst_fra_heltall(prioritet)
+    })
+}
+
+funksjon legg_til_forsinka(conn: tekst, jobb_type: tekst, payload: ordbok_tekst, sekunder: heltall) -> heltall {
+    la payload_json = _til_json(payload)
+    la klar_etter = _no_pluss_sekunder(sekunder)
+    returner orm.lagre(conn, "_jobb_kø", {
+        "jobb_type":   jobb_type,
+        "payload":     payload_json,
+        "status":      "ventande",
+        "klar_etter":  klar_etter
+    })
+}
+
+funksjon legg_til_planlagt(conn: tekst, jobb_type: tekst, payload: ordbok_tekst, tid: tekst) -> heltall {
+    // tid = "HH:MM" for neste køyring
+    la payload_json = _til_json(payload)
+    returner orm.lagre(conn, "_jobb_kø", {
+        "jobb_type":   jobb_type,
+        "payload":     payload_json,
+        "status":      "ventande",
+        "klar_etter":  _neste_tid(tid)
+    })
+}
+
+funksjon legg_til_maks_forsøk(conn: tekst, jobb_type: tekst, payload: ordbok_tekst, maks: heltall) -> heltall {
+    la payload_json = _til_json(payload)
+    returner orm.lagre(conn, "_jobb_kø", {
+        "jobb_type":   jobb_type,
+        "payload":     payload_json,
+        "status":      "ventande",
+        "maks_forsøk": tekst_fra_heltall(maks)
+    })
+}
+
+# ─── Prosessering ─────────────────────────────────────────────────────────────
+
+funksjon hent_neste(conn: tekst, arbeidar_id: tekst) -> ordbok_tekst {
+    la sql = "SELECT * FROM _jobb_kø WHERE status = 'ventande' " +
+             "AND klar_etter <= datetime('now') " +
+             "ORDER BY prioritet DESC, id ASC LIMIT 1;"
+    la rad = orm.spør_én(conn, sql)
+    hvis ikkje har_nokkel(rad, "id") { returner {} }
+
+    // Reserver jobben atomisk
+    la jobb_id = heltall_fra_tekst(rad["id"])
+    la update_sql = "UPDATE _jobb_kø SET status = 'i_gang', starta = datetime('now'), køyrt_av = '" +
+                    orm._escape(arbeidar_id) + "' WHERE id = " + tekst_fra_heltall(jobb_id) +
+                    " AND status = 'ventande';"
+    la oppdatert = db.execute(conn, update_sql)
+    hvis oppdatert == 0 { returner {} }  // nokon annan tok jobben
+
+    returner orm.finn(conn, "_jobb_kø", jobb_id)
+}
+
+funksjon merk_ferdig(conn: tekst, jobb_id: heltall, resultat: tekst, varighet_ms: heltall) -> heltall {
+    orm.oppdater(conn, "_jobb_kø", jobb_id, {
+        "status": "ferdig",
+        "ferdig": _no_iso()
+    })
+    la jobb = orm.finn(conn, "_jobb_kø", jobb_id)
+    orm.lagre(conn, "_jobb_resultat", {
+        "jobb_id":     tekst_fra_heltall(jobb_id),
+        "jobb_type":   jobb["jobb_type"],
+        "resultat":    resultat,
+        "varighet_ms": tekst_fra_heltall(varighet_ms)
+    })
+    returner 1
+}
+
+funksjon merk_feila(conn: tekst, jobb_id: heltall, feil: tekst, varighet_ms: heltall) -> heltall {
+    la jobb = orm.finn(conn, "_jobb_kø", jobb_id)
+    la forsøk = heltall_fra_tekst(jobb["forsøk"]) + 1
+    la maks   = heltall_fra_tekst(jobb["maks_forsøk"])
+    la ny_status = hvis forsøk >= maks { "mislykka" } ellers { "ventande" }
+    la backoff = forsøk * forsøk * 60  // eksponentiell backoff i sekunder
+
+    orm.oppdater(conn, "_jobb_kø", jobb_id, {
+        "status":  ny_status,
+        "forsøk":  tekst_fra_heltall(forsøk),
+        "feil":    feil,
+        "klar_etter": hvis ny_status == "ventande" { _no_pluss_sekunder(backoff) } ellers { _no_iso() }
+    })
+    orm.lagre(conn, "_jobb_resultat", {
+        "jobb_id":     tekst_fra_heltall(jobb_id),
+        "jobb_type":   jobb["jobb_type"],
+        "feil":        feil,
+        "varighet_ms": tekst_fra_heltall(varighet_ms)
+    })
+    returner forsøk
+}
+
+funksjon merk_avbrote(conn: tekst, jobb_id: heltall) -> heltall {
+    returner orm.oppdater(conn, "_jobb_kø", jobb_id, {"status": "avbrote", "ferdig": _no_iso()})
+}
+
+# ─── Køyr jobbar ──────────────────────────────────────────────────────────────
+
+funksjon prosesser(conn: tekst, maks_jobbar: heltall) -> heltall {
+    la arbeidar_id = _generer_arbeidar_id()
+    la køyrte: heltall = 0
+    la i: heltall = 0
+    mens i < maks_jobbar {
+        la jobb = hent_neste(conn, arbeidar_id)
+        hvis ikkje har_nokkel(jobb, "id") {
+            i = maks_jobbar  // Ingen fleire jobbar
+        } ellers {
+            la jobb_id = heltall_fra_tekst(jobb["id"])
+            la jobb_type: tekst = jobb["jobb_type"]
+            la payload = _frå_json(jobb["payload"])
+            la start_ms = _no_ms()
+
+            skriv("[kø] Startar: " + jobb_type + " #" + tekst_fra_heltall(jobb_id))
+            prøv {
+                la resultat = builtin.ncb_call_fn("__main__." + jobb_type, payload)
+                la varighet = _no_ms() - start_ms
+                merk_ferdig(conn, jobb_id, tekst(resultat), varighet)
+                skriv("[kø] Ferdig: " + jobb_type + " #" + tekst_fra_heltall(jobb_id) + " (" + tekst_fra_heltall(varighet) + "ms)")
+                køyrte = køyrte + 1
+            } fang (e) {
+                la varighet = _no_ms() - start_ms
+                la forsøk = merk_feila(conn, jobb_id, tekst(e), varighet)
+                skriv("[kø] FEIL: " + jobb_type + " #" + tekst_fra_heltall(jobb_id) + ": " + tekst(e) + " (forsøk " + tekst_fra_heltall(forsøk) + ")")
+            }
+        }
+        i = i + 1
+    }
+    returner køyrte
+}
+
+funksjon prosesser_ein(conn: tekst, jobb_type: tekst) -> heltall {
+    la sql = "SELECT * FROM _jobb_kø WHERE status = 'ventande' AND jobb_type = '" +
+             orm._escape(jobb_type) + "' AND klar_etter <= datetime('now') LIMIT 1;"
+    la jobb = orm.spør_én(conn, sql)
+    hvis ikkje har_nokkel(jobb, "id") { returner 0 }
+    la arbeidar_id = _generer_arbeidar_id()
+    la jobb_id = heltall_fra_tekst(jobb["id"])
+    orm.oppdater(conn, "_jobb_kø", jobb_id, {"status": "i_gang", "køyrt_av": arbeidar_id})
+    la payload = _frå_json(jobb["payload"])
+    la start_ms = _no_ms()
+    prøv {
+        la resultat = builtin.ncb_call_fn("__main__." + jobb_type, payload)
+        merk_ferdig(conn, jobb_id, tekst(resultat), _no_ms() - start_ms)
+        returner 1
+    } fang (e) {
+        merk_feila(conn, jobb_id, tekst(e), _no_ms() - start_ms)
+        returner -1
+    }
+    returner 0
+}
+
+# ─── Status og statistikk ─────────────────────────────────────────────────────
+
+funksjon tell_status(conn: tekst, status: tekst) -> heltall {
+    returner orm.tell_hvor(conn, "_jobb_kø", "status = '" + orm._escape(status) + "'")
+}
+
+funksjon statistikk(conn: tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["ventande"]  = tekst_fra_heltall(tell_status(conn, "ventande"))
+    s["i_gang"]    = tekst_fra_heltall(tell_status(conn, "i_gang"))
+    s["ferdig"]    = tekst_fra_heltall(tell_status(conn, "ferdig"))
+    s["mislykka"]  = tekst_fra_heltall(tell_status(conn, "mislykka"))
+    s["avbrote"]   = tekst_fra_heltall(tell_status(conn, "avbrote"))
+    returner s
+}
+
+funksjon vis_statistikk(conn: tekst) -> heltall {
+    la s = statistikk(conn)
+    skriv("=== Jobb-kø statistikk ===")
+    skriv("  Ventande:  " + s["ventande"])
+    skriv("  I gang:    " + s["i_gang"])
+    skriv("  Ferdig:    " + s["ferdig"])
+    skriv("  Mislykka:  " + s["mislykka"])
+    skriv("  Avbrote:   " + s["avbrote"])
+    returner 0
+}
+
+funksjon siste_feil(conn: tekst, n: heltall) -> liste<ordbok_tekst> {
+    la sql = "SELECT * FROM _jobb_kø WHERE status = 'mislykka' ORDER BY id DESC LIMIT " + tekst_fra_heltall(n) + ";"
+    returner orm.spør(conn, sql)
+}
+
+funksjon rydd_ferdig(conn: tekst, eldre_enn_dagar: heltall) -> heltall {
+    la sql = "DELETE FROM _jobb_kø WHERE status IN ('ferdig','avbrote') " +
+             "AND ferdig < datetime('now', '-" + tekst_fra_heltall(eldre_enn_dagar) + " days');"
+    returner db.execute(conn, sql)
+}
+
+funksjon avbryt_hengande(conn: tekst, maks_minuttar: heltall) -> heltall {
+    la sql = "UPDATE _jobb_kø SET status = 'ventande', starta = NULL, køyrt_av = '' " +
+             "WHERE status = 'i_gang' " +
+             "AND starta < datetime('now', '-" + tekst_fra_heltall(maks_minuttar) + " minutes');"
+    returner db.execute(conn, sql)
+}
+
+# ─── Planlegging (enkel cron-liknande) ──────────────────────────────────────
+
+funksjon registrer_periodisk(conn: tekst, jobb_type: tekst, intervall_sekunder: heltall) -> heltall {
+    // Legg til ein ny jobb berre viss ingen anna av same type venter eller køyrer
+    la sql = "SELECT COUNT(*) FROM _jobb_kø WHERE jobb_type = '" + orm._escape(jobb_type) +
+             "' AND status IN ('ventande', 'i_gang');"
+    la eksisterande = db.query_int(conn, sql)
+    hvis eksisterande > 0 { returner 0 }
+    returner legg_til_forsinka(conn, jobb_type, {}, intervall_sekunder)
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst(data[k])
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}
+
+funksjon _frå_json(json_str: tekst) -> ordbok_tekst {
+    prøv {
+        la parsed = builtin.json_parse_raw(json_str)
+        la type_v = builtin.type(parsed)
+        hvis type_v == "ordbok" { returner parsed }
+    } fang (e) { }
+    returner {}
+}
+
+funksjon _no_ms() -> heltall {
+    prøv { returner builtin.now_ms() } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon _no_iso() -> tekst {
+    prøv { returner builtin.now_iso() } fang (e) { returner "1970-01-01T00:00:00" }
+    returner ""
+}
+
+funksjon _no_pluss_sekunder(sekunder: heltall) -> tekst {
+    returner "datetime('now', '+" + tekst_fra_heltall(sekunder) + " seconds')"
+}
+
+funksjon _neste_tid(tid: tekst) -> tekst {
+    // "HH:MM" → dato+tid for neste køyring
+    returner "datetime('now', 'start of day', '+1 day', '" + tid + "')"
+}
+
+funksjon _generer_arbeidar_id() -> tekst {
+    prøv { returner "w_" + builtin.random_hex(8) } fang (e) { }
+    returner "w_" + tekst_fra_heltall(_no_ms())
+}

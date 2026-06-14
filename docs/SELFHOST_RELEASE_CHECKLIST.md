@@ -6,13 +6,13 @@ Gjøre release, installasjon og rollback så forutsigbart at det kan kjøres pun
 ## Før release
 
 - [ ] `./bin/nc --version` viser riktig versjon
-- [ ] `./bin/bootstrap doctor` går grønt via native bootstrap
-- [ ] `./bin/bootstrap smoke` går grønt via native bootstrap
+- [ ] `./bin/nc selfhost-bootstrap-gate` går grønt
 - [ ] relevant release-/install-test går grønt
 - [ ] release-pakke kan bygges med `bash package-release.sh <versjon>`
 - [ ] release/install-flaten krever ikke C-verktøykjede i normal drift
 - [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
 - [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
+- [ ] ingen release-instruks peiker brukaren mot `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generated-C-løypa
 
 ## Bygg release
 
@@ -38,7 +38,7 @@ Verifiser:
 
 - [ ] `current`-lenken peker på riktig versjon
 - [ ] `bin/nc --version` virker fra installert release
-- [ ] `bin/bootstrap doctor` kan kjøres i installert miljø via native bootstrap
+- [ ] installert `bin/nc` kan kjøre normal kommando i installert miljø
 - [ ] installert release krever ikke C-verktøykjede for normal bruk
 
 ## Rollback

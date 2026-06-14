@@ -1,0 +1,199 @@
+# Fase 8: Publiseringsflyt
+# Validerer, pakkar og sender pakke til registry.
+# Deterministisk pakking. Checksum-beskytting.
+
+import toolchain.norspkg.manifest_parser
+import toolchain.norspkg.registry_protocol
+
+# =========================
+# Publiseringskontekst
+# =========================
+
+funksjon publish_kontekst_lag(registry_url, token)
+    returner {
+        registry_url: registry_url,
+        token: token,
+        feil: []
+    }
+slutt
+
+# =========================
+# Valider pakke før publisering
+# =========================
+
+funksjon valider_for_publish(manifest, kildemappe)
+    feil = []
+
+    # Manifest-validering
+    ok = valider_manifest(manifest)
+    viss ikkje ok
+        i = 0
+        mens i < lengde(manifest.feil)
+            legg_til(feil, manifest.feil[i])
+            i = i + 1
+        slutt
+    slutt
+
+    # Entry-fil må finst
+    entry_sti = kildemappe + "/" + manifest.entry
+    viss ikkje fil_finst(entry_sti)
+        legg_til(feil, "Entry-fil finst ikkje: " + entry_sti)
+    slutt
+
+    # norcode.toml må finst
+    toml_sti = kildemappe + "/norcode.toml"
+    viss ikkje fil_finst(toml_sti)
+        legg_til(feil, "norcode.toml manglar i: " + kildemappe)
+    slutt
+
+    returner {
+        ok: lengde(feil) == 0,
+        feil: feil
+    }
+slutt
+
+# =========================
+# Deterministisk pakking
+# Pakkar kjeldefiler til ein reproducerbar tar.gz
+# =========================
+
+funksjon pakk_kjelder(kildemappe, manifest)
+    # Samle alle .no-filer + norcode.toml
+    filer = []
+
+    legg_til(filer, "norcode.toml")
+
+    entry_filer = list_filer_med_endelse(kildemappe, ".no")
+    i = 0
+    mens i < lengde(entry_filer)
+        legg_til(filer, entry_filer[i])
+        i = i + 1
+    slutt
+
+    # Sorter for determinisme
+    sorter(filer)
+
+    # Lag arkiv
+    arkiv_namn = manifest.namn + "-" + manifest.versjon + ".tar.gz"
+    arkiv_sti = tmp_mappe() + "/" + arkiv_namn
+
+    lag_arkiv_deterministisk(filer, kildemappe, arkiv_sti)
+
+    # Rekn ut checksum
+    arkiv_bytes = les_fil_bytes(arkiv_sti)
+    checksum = "sha256:" + sha256(arkiv_bytes)
+
+    returner {
+        ok: sann,
+        arkiv_sti: arkiv_sti,
+        arkiv_namn: arkiv_namn,
+        checksum: checksum,
+        storleik: lengde(arkiv_bytes)
+    }
+slutt
+
+# =========================
+# Sjekk at versjonen ikkje allereie er publisert
+# =========================
+
+funksjon sjekk_ny_versjon(registry_tilstand, namn, versjon)
+    nokkel = namn + "@" + versjon
+    viss registry_tilstand.versjonar[nokkel] != null
+        returner {
+            ok: usann,
+            feil: "Versjon finst allereie i registry: " + nokkel
+        }
+    slutt
+    returner { ok: sann, feil: null }
+slutt
+
+# =========================
+# Hovudfunksjon: publiser pakke
+# =========================
+
+funksjon publish_pakke(ctx, registry_tilstand, manifest, kildemappe)
+    # 1. Valider
+    validering = valider_for_publish(manifest, kildemappe)
+    viss ikkje validering.ok
+        returner { ok: usann, feil: validering.feil }
+    slutt
+
+    # 2. Sjekk at versjon ikkje finst
+    versjon_sjekk = sjekk_ny_versjon(registry_tilstand, manifest.namn, manifest.versjon)
+    viss ikkje versjon_sjekk.ok
+        returner { ok: usann, feil: [versjon_sjekk.feil] }
+    slutt
+
+    # 3. Pakk kjelder
+    pakk_res = pakk_kjelder(kildemappe, manifest)
+    viss ikkje pakk_res.ok
+        returner { ok: usann, feil: ["Pakking feila"] }
+    slutt
+
+    # 4. Bygg pakkedata
+    pakke_data = {
+        namn: manifest.namn,
+        versjon: manifest.versjon,
+        checksum: pakk_res.checksum,
+        kjelde_url: ctx.registry_url + "/packages/" + manifest.namn + "/" + manifest.versjon + ".tar.gz",
+        avhengigheiter: manifest.avhengigheiter,
+        metadata: {
+            entry: manifest.entry,
+            storleik: pakk_res.storleik
+        }
+    }
+
+    # 5. Send til registry
+    svar = endpoint_publish(registry_tilstand, ctx.token, pakke_data)
+
+    viss ikkje svar.ok
+        returner { ok: usann, feil: [svar.feil] }
+    slutt
+
+    # 6. Logg
+    skriv("Publisert: " + manifest.namn + " @ " + manifest.versjon)
+    skriv("  Checksum: " + pakk_res.checksum)
+    skriv("  Storleik: " + til_tekst(pakk_res.storleik) + " bytes")
+
+    returner {
+        ok: sann,
+        namn: manifest.namn,
+        versjon: manifest.versjon,
+        checksum: pakk_res.checksum,
+        arkiv: pakk_res.arkiv_sti
+    }
+slutt
+
+# =========================
+# Sjølvtest
+# =========================
+
+funksjon test_publisher()
+    registry_tilstand = registry_tilstand_lag()
+    auth_registrer(registry_tilstand, "jan", "token_test")
+
+    ctx = publish_kontekst_lag("https://registry.norscode.dev", "token_test")
+
+    manifest = manifest_lag("test_pakke", "1.0.0", "main.no")
+    manifest_legg_avhengigheit(manifest, "std_math", "^1.0.0")
+
+    # I test: hopp over ekte filoprasjonar, simuler pakking
+    pakke_data = {
+        namn: manifest.namn,
+        versjon: manifest.versjon,
+        checksum: "sha256:test_checksum_123",
+        kjelde_url: ctx.registry_url + "/packages/test_pakke/1.0.0.tar.gz",
+        avhengigheiter: manifest.avhengigheiter,
+        metadata: { entry: manifest.entry, storleik: 1024 }
+    }
+
+    svar = endpoint_publish(registry_tilstand, ctx.token, pakke_data)
+    skriv("Publish OK: " + til_tekst(svar.ok))
+
+    # Forsøk på å publisere same versjon igjen
+    svar2 = endpoint_publish(registry_tilstand, ctx.token, pakke_data)
+    skriv("Duplikat avvist (forventa): " + til_tekst(ikkje svar2.ok))
+    skriv("  " + svar2.feil)
+
+    returner svar.ok og ikkje svar2.ok
+slutt

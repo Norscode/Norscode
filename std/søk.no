@@ -1,0 +1,266 @@
+# søk.no — Fulltekstsøk for Norscode
+# Django Haystack / Whoosh-ekvivalent
+#
+# Bruk:
+#   bruk std.søk som søk
+#   bruk std.db som db
+#
+#   la conn = db.open("app.db")
+#   søk.migrer(conn)
+#
+#   // Indekser eit dokument
+#   søk.indekser(conn, "artikkel", "42", "Tittel her", "Innhald her...", {"kategori": "nyheit"})
+#
+#   // Søk
+#   la treff = søk.finn(conn, "norsk programmering", 10)
+#   // treff = [{id, type, ekstern_id, tittel, snippet, score}, ...]
+
+bruk std.db som db
+bruk std.orm som orm
+
+# ─── Schema ───────────────────────────────────────────────────────────────────
+
+funksjon migrer(conn: tekst) -> heltall {
+    orm.migrer(conn, "_søk_indeks", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "type TEXT NOT NULL",
+        "ekstern_id TEXT NOT NULL",
+        "tittel TEXT NOT NULL DEFAULT ''",
+        "innhald TEXT NOT NULL DEFAULT ''",
+        "nøkkelord TEXT NOT NULL DEFAULT ''",
+        "metadata TEXT NOT NULL DEFAULT '{}'",
+        "oppdatert TEXT DEFAULT (datetime('now'))",
+        "UNIQUE(type, ekstern_id)"
+    ])
+    // FTS5 virtuell tabell (SQLite full-text search)
+    prøv {
+        db.execute(conn, "CREATE VIRTUAL TABLE IF NOT EXISTS _søk_fts USING fts5(ekstern_id, type, tittel, innhald, nøkkelord, content='_søk_indeks', content_rowid='id');")
+    } fang (e) {
+        // FTS5 ikkje tilgjengeleg — fall tilbake til LIKE-søk
+        skriv("[søk] FTS5 ikkje tilgjengeleg, bruker LIKE-fallback")
+    }
+    returner 1
+}
+
+# ─── Indeksering ──────────────────────────────────────────────────────────────
+
+funksjon indekser(conn: tekst, type: tekst, ekstern_id: tekst, tittel: tekst, innhald: tekst, metadata: ordbok_tekst) -> heltall {
+    la nøkkelord = _hent_nøkkelord(tittel + " " + innhald)
+    la meta_json = _til_json(metadata)
+    la escaped_type  = orm._escape(type)
+    la escaped_id    = orm._escape(ekstern_id)
+    la escaped_tittel = orm._escape(tittel)
+    la escaped_innhald = orm._escape(builtin.slice(innhald, 0, 5000))
+    la escaped_nk    = orm._escape(nøkkelord)
+    la escaped_meta  = orm._escape(meta_json)
+
+    la sql = "INSERT INTO _søk_indeks (type, ekstern_id, tittel, innhald, nøkkelord, metadata, oppdatert) " +
+             "VALUES ('" + escaped_type + "','" + escaped_id + "','" + escaped_tittel + "','" +
+             escaped_innhald + "','" + escaped_nk + "','" + escaped_meta + "',datetime('now')) " +
+             "ON CONFLICT(type, ekstern_id) DO UPDATE SET " +
+             "tittel=excluded.tittel, innhald=excluded.innhald, nøkkelord=excluded.nøkkelord, " +
+             "metadata=excluded.metadata, oppdatert=datetime('now');"
+    returner db.execute(conn, sql)
+}
+
+funksjon indekser_mange(conn: tekst, dokument_liste: liste<ordbok_tekst>) -> heltall {
+    la n: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(dokument_liste) {
+        la d: ordbok_tekst = dokument_liste[i]
+        la meta: ordbok_tekst = {}
+        la type = tekst(d["type"])
+        la eid  = tekst(d["ekstern_id"])
+        la tittel = tekst(d["tittel"])
+        la innhald = tekst(d["innhald"])
+        indekser(conn, type, eid, tittel, innhald, meta)
+        n = n + 1
+        i = i + 1
+    }
+    returner n
+}
+
+funksjon slett_frå_indeks(conn: tekst, type: tekst, ekstern_id: tekst) -> heltall {
+    la sql = "DELETE FROM _søk_indeks WHERE type='" + orm._escape(type) +
+             "' AND ekstern_id='" + orm._escape(ekstern_id) + "';"
+    returner db.execute(conn, sql)
+}
+
+funksjon tøm_indeks(conn: tekst, type: tekst) -> heltall {
+    la sql = "DELETE FROM _søk_indeks WHERE type='" + orm._escape(type) + "';"
+    returner db.execute(conn, sql)
+}
+
+# ─── Søk ──────────────────────────────────────────────────────────────────────
+
+funksjon finn(conn: tekst, spørjing: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    returner finn_i_type(conn, spørjing, "", maks)
+}
+
+funksjon finn_i_type(conn: tekst, spørjing: tekst, type: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    // Prøv FTS5 fyrst
+    prøv {
+        la treff = _fts_søk(conn, spørjing, type, maks)
+        hvis lengde(treff) > 0 { returner treff }
+    } fang (e) { }
+    // Fallback til LIKE
+    returner _like_søk(conn, spørjing, type, maks)
+}
+
+funksjon finn_relatert(conn: tekst, type: tekst, ekstern_id: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    la sql = "SELECT nøkkelord FROM _søk_indeks WHERE type='" + orm._escape(type) +
+             "' AND ekstern_id='" + orm._escape(ekstern_id) + "' LIMIT 1;"
+    la rad = orm.spør_én(conn, sql)
+    hvis ikkje har_nokkel(rad, "nøkkelord") { returner [] }
+    la nk_liste = builtin.split(tekst(rad["nøkkelord"]), " ")
+    // Bruk dei tre fyrste nøkkelorda som spørjing
+    la søk_ord: liste<tekst> = []
+    la i: heltall = 0
+    mens i < 3 og i < lengde(nk_liste) {
+        la ord: tekst = nk_liste[i]
+        hvis lengde(ord) > 3 { legg_til(søk_ord, ord) }
+        i = i + 1
+    }
+    hvis lengde(søk_ord) == 0 { returner [] }
+    la spørjing = tekst_saman(søk_ord, " ")
+    returner finn_i_type(conn, spørjing, type, maks + 1)
+}
+
+# ─── FTS5-søk ─────────────────────────────────────────────────────────────────
+
+funksjon _fts_søk(conn: tekst, spørjing: tekst, type: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    la escaped_q = orm._escape(spørjing)
+    la type_filter = hvis type != "" { " AND i.type='" + orm._escape(type) + "'" } ellers { "" }
+    la sql = "SELECT i.id, i.type, i.ekstern_id, i.tittel, i.innhald, i.metadata, " +
+             "rank AS score FROM _søk_fts f " +
+             "JOIN _søk_indeks i ON f.rowid = i.id " +
+             "WHERE _søk_fts MATCH '" + escaped_q + "'" + type_filter +
+             " ORDER BY rank LIMIT " + tekst_fra_heltall(maks) + ";"
+    la rader = orm.spør(conn, sql)
+    returner _format_treff(rader)
+}
+
+funksjon _like_søk(conn: tekst, spørjing: tekst, type: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    la ord = builtin.split(spørjing, " ")
+    la betingelse_delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(ord) {
+        la o: tekst = builtin.trim(ord[i])
+        hvis lengde(o) > 1 {
+            la e = orm._escape(o)
+            legg_til(betingelse_delar,
+                "(tittel LIKE '%" + e + "%' OR innhald LIKE '%" + e + "%' OR nøkkelord LIKE '%" + e + "%')")
+        }
+        i = i + 1
+    }
+    hvis lengde(betingelse_delar) == 0 { returner [] }
+
+    la where = tekst_saman(betingelse_delar, " AND ")
+    la type_filter = hvis type != "" { " AND type='" + orm._escape(type) + "'" } ellers { "" }
+    la sql = "SELECT *, 1.0 AS score FROM _søk_indeks WHERE " + where + type_filter +
+             " ORDER BY oppdatert DESC LIMIT " + tekst_fra_heltall(maks) + ";"
+    la rader = orm.spør(conn, sql)
+    returner _format_treff(rader)
+}
+
+funksjon _format_treff(rader: liste<ordbok_tekst>) -> liste<ordbok_tekst> {
+    la resultat: liste<ordbok_tekst> = []
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        la r: ordbok_tekst = rader[i]
+        la t: ordbok_tekst = {}
+        t["id"]         = r["id"]
+        t["type"]       = r["type"]
+        t["ekstern_id"] = r["ekstern_id"]
+        t["tittel"]     = r["tittel"]
+        t["snippet"]    = _snippet(r["innhald"], 150)
+        t["score"]      = hvis har_nokkel(r, "score") { tekst(r["score"]) } ellers { "1" }
+        t["metadata"]   = r["metadata"]
+        legg_til(resultat, t)
+        i = i + 1
+    }
+    returner resultat
+}
+
+# ─── Statistikk ───────────────────────────────────────────────────────────────
+
+funksjon tal_indekserte(conn: tekst) -> heltall {
+    returner orm.tell(conn, "_søk_indeks")
+}
+
+funksjon tal_per_type(conn: tekst) -> liste<ordbok_tekst> {
+    returner orm.spør(conn, "SELECT type, COUNT(*) AS tal FROM _søk_indeks GROUP BY type ORDER BY tal DESC;")
+}
+
+funksjon siste_oppdaterte(conn: tekst, n: heltall) -> liste<ordbok_tekst> {
+    returner orm.spør(conn, "SELECT type, ekstern_id, tittel, oppdatert FROM _søk_indeks ORDER BY oppdatert DESC LIMIT " + tekst_fra_heltall(n) + ";")
+}
+
+# ─── Web-hjelpar ──────────────────────────────────────────────────────────────
+
+// Bruk direkte frå ein web-rute
+funksjon web_søk(conn: tekst, ctx: ordbok_tekst, type: tekst, maks: heltall) -> liste<ordbok_tekst> {
+    prøv {
+        la q = builtin.ncb_call_fn("web.request_query_param", {"ctx": ctx, "param": "q"})
+        la q_s = tekst(q)
+        hvis q_s == "" { returner [] }
+        returner finn_i_type(conn, q_s, type, maks)
+    } fang (e) { returner [] }
+    returner []
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+// Hent dei viktigaste nøkkelorda frå tekst (stoppordsfiltrering)
+funksjon _hent_nøkkelord(tekst_inn: tekst) -> tekst {
+    la stoppord = ["og","eller","i","på","til","frå","av","er","det","ein","ei","eit","dei","dem","den","seg","som","med","at","ha","har","var","for","men","om","kan","vil","skal","ikke","ikkje","en","et","er","de","da","til","fra","med","som","han","hun","vi","de"]
+    la ord = builtin.split(tekst_til_liten(tekst_inn), " ")
+    la nk: liste<tekst> = []
+    la sett: ordbok_tekst = {}
+    la i: heltall = 0
+    mens i < lengde(ord) {
+        la o: tekst = builtin.trim(ord[i])
+        // Fjern tegn
+        o = tekst_erstatt(o, ",", "")
+        o = tekst_erstatt(o, ".", "")
+        o = tekst_erstatt(o, "!", "")
+        o = tekst_erstatt(o, "?", "")
+        la er_stopp: boolsk = usann
+        la j: heltall = 0
+        mens j < lengde(stoppord) {
+            hvis o == stoppord[j] { er_stopp = sann }
+            j = j + 1
+        }
+        hvis lengde(o) > 2 og ikkje er_stopp og ikkje har_nokkel(sett, o) {
+            legg_til(nk, o)
+            sett[o] = "1"
+        }
+        i = i + 1
+    }
+    // Avgrens til 50 nøkkelord
+    la resultat: liste<tekst> = []
+    i = 0
+    mens i < 50 og i < lengde(nk) {
+        legg_til(resultat, nk[i])
+        i = i + 1
+    }
+    returner tekst_saman(resultat, " ")
+}
+
+funksjon _snippet(innhald: tekst, maks_len: heltall) -> tekst {
+    hvis lengde(innhald) <= maks_len { returner innhald }
+    returner builtin.slice(innhald, 0, maks_len) + "…"
+}
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}

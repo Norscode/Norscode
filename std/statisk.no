@@ -1,0 +1,196 @@
+# statisk.no — Static file serving for Norscode
+# Django staticfiles / WhiteNoise-ekvivalent
+#
+# Bruk:
+#   bruk std.statisk som statisk
+#   bruk std.web som web
+#
+#   // I serve-funksjonen din:
+#   funksjon handle_request(ctx) -> ordbok_tekst {
+#       la statisk_resp = statisk.serve(ctx, "static/", "/static/")
+#       hvis statisk.er_statisk_respons(statisk_resp) { returner statisk_resp }
+#       // ... resten av rutene
+#   }
+
+bruk std.web som web
+
+# ─── Konfigurasjon ────────────────────────────────────────────────────────────
+
+funksjon cfg(mappe: tekst, url_prefiks: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["mappe"]      = mappe
+    c["prefiks"]    = url_prefiks
+    c["cache_sek"]  = "86400"
+    c["komprimert"] = "sann"
+    c["etag"]       = "sann"
+    returner c
+}
+
+funksjon cfg_full(mappe: tekst, url_prefiks: tekst, cache_sek: heltall, komprimert: boolsk) -> ordbok_tekst {
+    la c = cfg(mappe, url_prefiks)
+    c["cache_sek"]  = tekst_fra_heltall(cache_sek)
+    c["komprimert"] = hvis komprimert { "sann" } ellers { "usann" }
+    returner c
+}
+
+# ─── Hovud-serving ────────────────────────────────────────────────────────────
+
+funksjon serve(ctx: ordbok_tekst, mappe: tekst, url_prefiks: tekst) -> ordbok_tekst {
+    la c = cfg(mappe, url_prefiks)
+    returner serve_cfg(ctx, c)
+}
+
+funksjon serve_cfg(ctx: ordbok_tekst, c: ordbok_tekst) -> ordbok_tekst {
+    la sti = web.request_path(ctx)
+    la prefiks = c["prefiks"]
+
+    // Ikkje ein statisk fil-request
+    hvis ikkje tekst_starter_med(sti, prefiks) { returner _ikkje_statisk() }
+
+    // Hent relativ filsti
+    la rel_sti = builtin.slice(sti, lengde(prefiks), lengde(sti))
+    // Sikkerheit: ikkje tillat path traversal
+    hvis tekst_inneholder(rel_sti, "..") {
+        returner web.response_error(403, "Forbudt")
+    }
+
+    la fil_sti = c["mappe"] + rel_sti
+    la mime = _mime_type(rel_sti)
+
+    // Les filen
+    prøv {
+        la innhald = fil_les_bytes(fil_sti)
+        la cache_sek = heltall_fra_tekst(c["cache_sek"])
+        la h: ordbok_tekst = {}
+        h["content-type"]  = mime
+        h["cache-control"] = "public, max-age=" + tekst_fra_heltall(cache_sek)
+        h["x-content-type-options"] = "nosniff"
+
+        // ETag basert på filnamn + storleik
+        hvis c["etag"] == "sann" {
+            la etag = _generer_etag(fil_sti, lengde(innhald))
+            h["etag"] = etag
+            // Sjekk If-None-Match
+            la if_none_match = web.request_header(ctx, "if-none-match")
+            hvis if_none_match == etag {
+                returner web.response_builder(304, h, "")
+            }
+        }
+
+        returner web.response_builder(200, h, innhald)
+    } fang (e) {
+        returner web.response_error(404, "Fil ikkje funne: " + rel_sti)
+    }
+    returner _ikkje_statisk()
+}
+
+funksjon er_statisk_respons(resp: ordbok_tekst) -> boolsk {
+    returner har_nokkel(resp, "__statisk__") og tekst(resp["__statisk__"]) == "nei"
+        || (har_nokkel(resp, "status") og tekst(resp["status"]) != "__ikkje_statisk__")
+}
+
+# ─── Filsamling (collect static) ──────────────────────────────────────────────
+
+funksjon samle(kjelder: liste<tekst>, mål: tekst) -> heltall {
+    la kopiert: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(kjelder) {
+        la kjelde: tekst = kjelder[i]
+        prøv {
+            la filer = builtin.list_files_recursive(kjelde)
+            la j: heltall = 0
+            mens j < lengde(filer) {
+                la f: tekst = filer[j]
+                la rel = builtin.slice(f, lengde(kjelde), lengde(f))
+                la mål_sti = mål + rel
+                la innhald = fil_les_bytes(f)
+                _lag_mappe_for(mål_sti)
+                fil_skriv_bytes(mål_sti, innhald)
+                kopiert = kopiert + 1
+                j = j + 1
+            }
+        } fang (e) {
+            skriv("[statisk] Advarsel: kunne ikkje samle frå " + kjelde + ": " + tekst(e))
+        }
+        i = i + 1
+    }
+    skriv("[statisk] Samla " + tekst_fra_heltall(kopiert) + " filer til " + mål)
+    returner kopiert
+}
+
+# ─── URL-generering ───────────────────────────────────────────────────────────
+
+funksjon url(prefiks: tekst, filnamn: tekst) -> tekst {
+    la p = hvis tekst_slutter_med(prefiks, "/") { prefiks } ellers { prefiks + "/" }
+    la f = hvis tekst_starter_med(filnamn, "/") { builtin.slice(filnamn, 1, lengde(filnamn)) } ellers { filnamn }
+    returner p + f
+}
+
+// Versjonert URL med cache-busting
+funksjon url_versjonert(prefiks: tekst, filnamn: tekst, versjon: tekst) -> tekst {
+    returner url(prefiks, filnamn) + "?v=" + versjon
+}
+
+# ─── MIME-typar ───────────────────────────────────────────────────────────────
+
+funksjon _mime_type(filnamn: tekst) -> tekst {
+    la f = tekst_til_liten(filnamn)
+    // JavaScript
+    hvis tekst_slutter_med(f, ".js")   { returner "application/javascript; charset=utf-8" }
+    hvis tekst_slutter_med(f, ".mjs")  { returner "application/javascript; charset=utf-8" }
+    // CSS
+    hvis tekst_slutter_med(f, ".css")  { returner "text/css; charset=utf-8" }
+    // HTML
+    hvis tekst_slutter_med(f, ".html") { returner "text/html; charset=utf-8" }
+    hvis tekst_slutter_med(f, ".htm")  { returner "text/html; charset=utf-8" }
+    // Bilete
+    hvis tekst_slutter_med(f, ".png")  { returner "image/png" }
+    hvis tekst_slutter_med(f, ".jpg")  { returner "image/jpeg" }
+    hvis tekst_slutter_med(f, ".jpeg") { returner "image/jpeg" }
+    hvis tekst_slutter_med(f, ".gif")  { returner "image/gif" }
+    hvis tekst_slutter_med(f, ".svg")  { returner "image/svg+xml" }
+    hvis tekst_slutter_med(f, ".ico")  { returner "image/x-icon" }
+    hvis tekst_slutter_med(f, ".webp") { returner "image/webp" }
+    hvis tekst_slutter_med(f, ".avif") { returner "image/avif" }
+    // Font
+    hvis tekst_slutter_med(f, ".woff")  { returner "font/woff" }
+    hvis tekst_slutter_med(f, ".woff2") { returner "font/woff2" }
+    hvis tekst_slutter_med(f, ".ttf")   { returner "font/ttf" }
+    hvis tekst_slutter_med(f, ".otf")   { returner "font/otf" }
+    // Data
+    hvis tekst_slutter_med(f, ".json")  { returner "application/json" }
+    hvis tekst_slutter_med(f, ".xml")   { returner "application/xml" }
+    hvis tekst_slutter_med(f, ".csv")   { returner "text/csv" }
+    hvis tekst_slutter_med(f, ".txt")   { returner "text/plain; charset=utf-8" }
+    hvis tekst_slutter_med(f, ".pdf")   { returner "application/pdf" }
+    hvis tekst_slutter_med(f, ".zip")   { returner "application/zip" }
+    hvis tekst_slutter_med(f, ".gz")    { returner "application/gzip" }
+    hvis tekst_slutter_med(f, ".map")   { returner "application/json" }
+    // Manifest
+    hvis tekst_slutter_med(f, ".webmanifest") { returner "application/manifest+json" }
+    returner "application/octet-stream"
+}
+
+funksjon _generer_etag(sti: tekst, storleik: heltall) -> tekst {
+    returner "\"" + tekst_fra_heltall(storleik) + "-" + tekst_fra_heltall(lengde(sti)) + "\""
+}
+
+funksjon _ikkje_statisk() -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = "__ikkje_statisk__"
+    r["__statisk__"] = "nei"
+    returner r
+}
+
+funksjon _lag_mappe_for(sti: tekst) -> heltall {
+    la delar = builtin.split(sti, "/")
+    hvis lengde(delar) <= 1 { returner 0 }
+    la mappe_delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(delar) - 1 {
+        legg_til(mappe_delar, delar[i])
+        i = i + 1
+    }
+    prøv { builtin.mkdir(tekst_saman(mappe_delar, "/")) } fang (e) { }
+    returner 0
+}

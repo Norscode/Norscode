@@ -1,0 +1,255 @@
+# migrasjon.no — Versjonert databasemigrasjon for Norscode
+# Django-inspirert migrate-system
+#
+# Bruk:
+#   bruk std.migrasjon som mig
+#   bruk std.db som db
+#
+#   la conn = db.open("app.db")
+#   mig.init(conn)
+#
+#   la migrasjoner = [
+#       mig.lag("0001_opprett_brukar",
+#           "CREATE TABLE brukar (id INTEGER PRIMARY KEY, namn TEXT);",
+#           "DROP TABLE brukar;"
+#       ),
+#       mig.lag("0002_legg_til_epost",
+#           "ALTER TABLE brukar ADD COLUMN epost TEXT;",
+#           "-- ikkje støtta i SQLite"
+#       ),
+#   ]
+#   mig.køyr(conn, migrasjoner)       // Køyr alle ubehandla
+#   mig.vis_status(conn, migrasjoner) // Vis kva er køyrt
+#   mig.tilbake(conn, migrasjoner, 1) // Rull tilbake N steg
+
+bruk std.db som db
+bruk std.orm som orm
+
+# ─── Init ─────────────────────────────────────────────────────────────────────
+
+funksjon init(conn: tekst) -> heltall {
+    returner db.execute(conn,
+        "CREATE TABLE IF NOT EXISTS _migrasjonar (" +
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT," +
+        "  namn TEXT NOT NULL UNIQUE," +
+        "  køyrt TEXT DEFAULT (datetime('now'))," +
+        "  kontrollsum TEXT" +
+        ");"
+    )
+}
+
+# ─── Migrasjonsobjekt ─────────────────────────────────────────────────────────
+
+funksjon lag(namn: tekst, opp_sql: tekst, ned_sql: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["namn"]     = namn
+    m["opp_sql"]  = opp_sql
+    m["ned_sql"]  = ned_sql
+    m["kontrollsum"] = _kontrollsum(opp_sql)
+    returner m
+}
+
+funksjon lag_fleire(definisjonar: liste<liste<tekst>>) -> liste<ordbok_tekst> {
+    la migrasjoner: liste<ordbok_tekst> = []
+    la i: heltall = 0
+    mens i < lengde(definisjonar) {
+        la def = definisjonar[i]
+        hvis lengde(def) >= 3 {
+            legg_til(migrasjoner, lag(def[0], def[1], def[2]))
+        } ellers hvis lengde(def) == 2 {
+            legg_til(migrasjoner, lag(def[0], def[1], "-- ingen ned-migrasjon"))
+        }
+        i = i + 1
+    }
+    returner migrasjoner
+}
+
+# ─── Status ───────────────────────────────────────────────────────────────────
+
+funksjon er_køyrt(conn: tekst, namn: tekst) -> boolsk {
+    la teller = db.query_int(conn, "SELECT COUNT(*) FROM _migrasjonar WHERE namn = '" + orm._escape(namn) + "';")
+    returner teller > 0
+}
+
+funksjon alle_køyrte(conn: tekst) -> liste<ordbok_tekst> {
+    la rå = db.query_text(conn, "SELECT namn, køyrt FROM _migrasjonar ORDER BY id ASC;")
+    returner orm._parse_rader(rå)
+}
+
+funksjon siste_køyrte(conn: tekst) -> tekst {
+    la rader = alle_køyrte(conn)
+    hvis lengde(rader) == 0 { returner "" }
+    la siste = rader[lengde(rader) - 1]
+    returner siste["namn"]
+}
+
+funksjon ventande(conn: tekst, migrasjoner: liste<ordbok_tekst>) -> liste<ordbok_tekst> {
+    la resultat: liste<ordbok_tekst> = []
+    la i: heltall = 0
+    mens i < lengde(migrasjoner) {
+        la m = migrasjoner[i]
+        hvis ikkje er_køyrt(conn, m["namn"]) {
+            legg_til(resultat, m)
+        }
+        i = i + 1
+    }
+    returner resultat
+}
+
+# ─── Køyring ──────────────────────────────────────────────────────────────────
+
+funksjon køyr(conn: tekst, migrasjoner: liste<ordbok_tekst>) -> heltall {
+    init(conn)
+    la køyrte: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(migrasjoner) {
+        la m = migrasjoner[i]
+        la namn: tekst = m["namn"]
+        hvis ikkje er_køyrt(conn, namn) {
+            skriv("[migrate] Køyrer: " + namn)
+            prøv {
+                db.begin(conn)
+                _køyr_sql(conn, m["opp_sql"])
+                db.execute(conn, "INSERT INTO _migrasjonar (namn, kontrollsum) VALUES ('" +
+                    orm._escape(namn) + "', '" + orm._escape(m["kontrollsum"]) + "');")
+                db.commit(conn)
+                skriv("[migrate] OK: " + namn)
+                køyrte = køyrte + 1
+            } fang (e) {
+                db.rollback(conn)
+                skriv("[migrate] FEIL i " + namn + ": " + e)
+                returner -1
+            }
+        }
+        i = i + 1
+    }
+    hvis køyrte == 0 {
+        skriv("[migrate] Alt er à jour — ingen nye migrasjoner.")
+    } ellers {
+        skriv("[migrate] " + tekst_fra_heltall(køyrte) + " migrasjon(ar) køyrt.")
+    }
+    returner køyrte
+}
+
+funksjon køyr_til(conn: tekst, migrasjoner: liste<ordbok_tekst>, mål_namn: tekst) -> heltall {
+    init(conn)
+    la køyrte: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(migrasjoner) {
+        la m = migrasjoner[i]
+        la namn: tekst = m["namn"]
+        hvis ikkje er_køyrt(conn, namn) {
+            skriv("[migrate] Køyrer: " + namn)
+            prøv {
+                db.begin(conn)
+                _køyr_sql(conn, m["opp_sql"])
+                db.execute(conn, "INSERT INTO _migrasjonar (namn, kontrollsum) VALUES ('" +
+                    orm._escape(namn) + "', '" + orm._escape(m["kontrollsum"]) + "');")
+                db.commit(conn)
+                køyrte = køyrte + 1
+            } fang (e) {
+                db.rollback(conn)
+                skriv("[migrate] FEIL: " + e)
+                returner -1
+            }
+        }
+        hvis namn == mål_namn { returner køyrte }
+        i = i + 1
+    }
+    returner køyrte
+}
+
+funksjon tilbake(conn: tekst, migrasjoner: liste<ordbok_tekst>, steg: heltall) -> heltall {
+    init(conn)
+    la køyrte_namn = alle_køyrte(conn)
+    la tilbake_køyrte: heltall = 0
+    la j: heltall = lengde(køyrte_namn) - 1
+
+    mens j >= 0 og tilbake_køyrte < steg {
+        la køyrt_namn: tekst = køyrte_navn[j]["namn"]
+        // Finn tilsvarende migrasjonsobjekt
+        la k: heltall = 0
+        mens k < lengde(migrasjoner) {
+            la m = migrasjoner[k]
+            hvis m["namn"] == køyrt_namn {
+                skriv("[migrate] Ruller tilbake: " + køyrt_namn)
+                prøv {
+                    db.begin(conn)
+                    _køyr_sql(conn, m["ned_sql"])
+                    db.execute(conn, "DELETE FROM _migrasjonar WHERE namn = '" + orm._escape(køyrt_namn) + "';")
+                    db.commit(conn)
+                    tilbake_køyrte = tilbake_køyrte + 1
+                    skriv("[migrate] Tilbake OK: " + køyrt_namn)
+                } fang (e) {
+                    db.rollback(conn)
+                    skriv("[migrate] FEIL ved tilbakerulling av " + køyrt_namn + ": " + e)
+                    returner -1
+                }
+            }
+            k = k + 1
+        }
+        j = j - 1
+    }
+    returner tilbake_køyrte
+}
+
+# ─── Status-visning ───────────────────────────────────────────────────────────
+
+funksjon vis_status(conn: tekst, migrasjoner: liste<ordbok_tekst>) -> heltall {
+    init(conn)
+    skriv("\nMigrasjons-status:")
+    skriv("--------------------------------------------------")
+    la i: heltall = 0
+    mens i < lengde(migrasjoner) {
+        la m = migrasjoner[i]
+        la namn: tekst = m["namn"]
+        la status_tekst = hvis er_køyrt(conn, namn) { "[X] " } ellers { "[ ] " }
+        skriv(status_tekst + namn)
+        i = i + 1
+    }
+    skriv("--------------------------------------------------")
+    la totalt = lengde(migrasjoner)
+    la køyrte = totalt - lengde(ventande(conn, migrasjoner))
+    skriv(tekst_fra_heltall(køyrte) + "/" + tekst_fra_heltall(totalt) + " migrasjoner køyrt")
+    returner 0
+}
+
+funksjon status_json(conn: tekst, migrasjoner: liste<ordbok_tekst>) -> tekst {
+    init(conn)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(migrasjoner) {
+        la m = migrasjoner[i]
+        la namn: tekst = m["namn"]
+        la køyrt = hvis er_køyrt(conn, namn) { "true" } ellers { "false" }
+        legg_til(delar, "{\"namn\":\"" + namn + "\",\"køyrt\":" + køyrt + "}")
+        i = i + 1
+    }
+    returner "[" + tekst_saman(delar, ",") + "]"
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+# Køyr SQL som kan innehalda fleire setningar separert med ;
+funksjon _køyr_sql(conn: tekst, sql: tekst) -> heltall {
+    la setningar = builtin.split(sql, ";")
+    la i: heltall = 0
+    mens i < lengde(setningar) {
+        la s = builtin.trim(setningar[i])
+        hvis s != "" og s != "--" og ikkje tekst_starter_med(s, "--") {
+            db.execute(conn, s + ";")
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _kontrollsum(sql: tekst) -> tekst {
+    prøv {
+        returner builtin.sha256(sql)
+    } fang (e) {
+        // Naiv lengde-basert kontrollsum som fallback
+        returner tekst_fra_heltall(lengde(sql)) + "_" + tekst_fra_heltall(lengde(sql) mod 9973)
+    }
+    returner ""
+}

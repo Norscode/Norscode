@@ -8,6 +8,8 @@ Registry is HTTP-based, compatible with semantic versioning and distributed cach
 
 Default registry: `https://registry.norscode.dev`
 
+Denne protokollen samsvarar med [REGISTRY_API.md](REGISTRY_API.md) og brukar same base-URL og responskontrakt, men med eit meir eksplisitt v1-path-skjema for implementasjonsdetaljar.
+
 ## API Endpoints
 
 ### GET /v1/packages/{name}

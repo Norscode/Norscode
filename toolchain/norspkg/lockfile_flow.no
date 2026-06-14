@@ -1,0 +1,290 @@
+# Fase 4: Lockfile-flyt
+# Genererer lockfile frå resolver. Verifiserer ved installasjon/bygg.
+# Lockfila er maskinell (JSON) og menneskelesbar.
+
+import toolchain.norspkg.resolver
+
+# =========================
+# Lockfile-format (v2)
+# =========================
+#
+# {
+#   "lock_version": 2,
+#   "project": { "name": "...", "version": "...", "entry": "..." },
+#   "generated_at": "ISO-8601",
+#   "packages": [
+#     {
+#       "name": "...",
+#       "version": "...",
+#       "source": { "kind": "registry|path|git|url", "url": "..." },
+#       "checksum": "sha256:...",
+#       "dependencies": ["pakke_a", "pakke_b"]
+#     }
+#   ]
+# }
+
+# =========================
+# Lag lockfile-oppføring
+# =========================
+
+funksjon lockfile_oppforing_lag(namn, versjon, kjelde_type, kjelde_url, checksum, avhengigheiter)
+    returner {
+        namn: namn,
+        versjon: versjon,
+        kjelde: {
+            type: kjelde_type,
+            url: kjelde_url
+        },
+        checksum: checksum,
+        avhengigheiter: avhengigheiter
+    }
+slutt
+
+# =========================
+# Generer lockfile frå resolver-resultat
+# =========================
+
+funksjon generer_lockfile(manifest, resolver_resultat)
+    viss ikkje resolver_resultat.ok
+        returner {
+            ok: usann,
+            feil: resolver_resultat.feil,
+            lock: null
+        }
+    slutt
+
+    pakkar = topo_sorter(resolver_resultat.losa)
+    oppforingar = []
+
+    i = 0
+    mens i < lengde(pakkar)
+        p = pakkar[i]
+
+        kjelde_type = "registry"
+        kjelde_url = ""
+
+        viss p.kjelde != null
+            kjelde_type = p.kjelde
+        slutt
+
+        viss kjelde_type == "path"
+            kjelde_url = p.spesifikator
+        slutt
+
+        viss kjelde_type == "git"
+            kjelde_url = p.spesifikator
+        slutt
+
+        viss kjelde_type == "url"
+            kjelde_url = p.spesifikator
+        slutt
+
+        # Samle dep-namna for denne pakka
+        dep_namnar = []
+        viss p.avhengigheiter != null
+            dep_namnar = ordbok_nyklar(p.avhengigheiter)
+        slutt
+
+        oppforing = lockfile_oppforing_lag(
+            p.namn,
+            p.versjon,
+            kjelde_type,
+            kjelde_url,
+            p.checksum,
+            dep_namnar
+        )
+
+        legg_til(oppforingar, oppforing)
+        i = i + 1
+    slutt
+
+    lock = {
+        lock_version: 2,
+        project: {
+            namn: manifest.namn,
+            versjon: manifest.versjon,
+            entry: manifest.entry
+        },
+        generert: tidspunkt_no(),
+        pakkar: oppforingar
+    }
+
+    returner {
+        ok: sann,
+        feil: [],
+        lock: lock
+    }
+slutt
+
+# =========================
+# Verifiser lockfile mot faktiske filer/checksums
+# =========================
+
+funksjon verifiser_lockfile(lock, hent_checksum_fn)
+    feil = []
+
+    i = 0
+    mens i < lengde(lock.pakkar)
+        oppforing = lock.pakkar[i]
+
+        viss lengde(oppforing.checksum) == 0
+            # path-kjelder kan mangle checksum (lokal utvikling)
+            viss oppforing.kjelde.type != "path"
+                legg_til(feil, "Manglande checksum for " + oppforing.namn + " @ " + oppforing.versjon)
+            slutt
+        ellers
+            faktisk = hent_checksum_fn(oppforing.namn, oppforing.versjon)
+            viss faktisk != oppforing.checksum
+                legg_til(feil, "Checksum-mismatch for " + oppforing.namn + ": "
+                    + "forventa " + oppforing.checksum
+                    + " men fekk " + faktisk)
+            slutt
+        slutt
+
+        i = i + 1
+    slutt
+
+    returner {
+        ok: lengde(feil) == 0,
+        feil: feil
+    }
+slutt
+
+# =========================
+# Sjekk om lock er utdatert mot manifest
+# =========================
+
+funksjon lock_er_fersk(manifest, lock)
+    viss lock == null
+        returner usann
+    slutt
+
+    viss lock.project.namn != manifest.namn
+        returner usann
+    slutt
+
+    viss lock.project.versjon != manifest.versjon
+        returner usann
+    slutt
+
+    # Sjekk at alle avhengigheiter i manifest er i lock
+    deps = manifest_til_deps(manifest)
+    i = 0
+    mens i < lengde(deps)
+        dep = deps[i]
+        funnen = usann
+        j = 0
+        mens j < lengde(lock.pakkar)
+            viss lock.pakkar[j].namn == dep.namn
+                funnen = sann
+            slutt
+            j = j + 1
+        slutt
+        viss ikkje funnen
+            returner usann
+        slutt
+        i = i + 1
+    slutt
+
+    returner sann
+slutt
+
+# =========================
+# Oppdater lockfile (legg til eller erstatt pakke)
+# =========================
+
+funksjon lockfile_oppdater(lock, ny_oppforing)
+    i = 0
+    mens i < lengde(lock.pakkar)
+        viss lock.pakkar[i].namn == ny_oppforing.namn
+            lock.pakkar[i] = ny_oppforing
+            returner lock
+        slutt
+        i = i + 1
+    slutt
+    legg_til(lock.pakkar, ny_oppforing)
+    returner lock
+slutt
+
+# =========================
+# Serialisering (for skriving til fil)
+# =========================
+
+funksjon lockfile_til_json(lock)
+    returner til_json(lock)
+slutt
+
+funksjon lockfile_frå_json(tekst)
+    returner frå_json(tekst)
+slutt
+
+# =========================
+# Sjølvtest
+# =========================
+
+funksjon test_lockfile_flyt()
+    registry = norspkg_registry()
+
+    core_pkg = norspkg_package("core", "1.0.0")
+    core_pkg.checksum = "sha256:aaa111"
+    core_pkg.avhengigheiter = { io: "^1.0.0" }
+    norspkg_publish(registry, core_pkg)
+
+    io_pkg = norspkg_package("io", "1.2.0")
+    io_pkg.checksum = "sha256:bbb222"
+    io_pkg.avhengigheiter = {}
+    norspkg_publish(registry, io_pkg)
+
+    manifest = manifest_lag("test_app", "0.1.0", "main.no")
+    manifest_legg_avhengigheit(manifest, "core", "^1.0.0")
+
+    resultat = resolver_kjoyr(registry, manifest)
+    lock_resultat = generer_lockfile(manifest, resultat)
+
+    viss lock_resultat.ok
+        skriv("Lockfile generert OK")
+        lock = lock_resultat.lock
+        skriv("  Pakkar: " + til_tekst(lengde(lock.pakkar)))
+        i = 0
+        mens i < lengde(lock.pakkar)
+            p = lock.pakkar[i]
+            skriv("  " + p.namn + " @ " + p.versjon + " [" + p.kjelde.type + "] " + p.checksum)
+            i = i + 1
+        slutt
+
+        # Verifisering: simuler hentingsfunksjon
+        verifisering = verifiser_lockfile(lock, funksjon(namn, versjon)
+            viss namn == "core"
+                returner "sha256:aaa111"
+            slutt
+            viss namn == "io"
+                returner "sha256:bbb222"
+            slutt
+            returner ""
+        slutt)
+
+        viss verifisering.ok
+            skriv("Lockfile-verifisering OK")
+        ellers
+            skriv("Verifiseringsfeil:")
+            j = 0
+            mens j < lengde(verifisering.feil)
+                skriv("  - " + verifisering.feil[j])
+                j = j + 1
+            slutt
+        slutt
+
+        # Fersk-sjekk
+        er_fersk = lock_er_fersk(manifest, lock)
+        skriv("Lock er fersk: " + til_tekst(er_fersk))
+    ellers
+        skriv("Lockfile-feil:")
+        i = 0
+        mens i < lengde(lock_resultat.feil)
+            skriv("  - " + lock_resultat.feil[i])
+            i = i + 1
+        slutt
+    slutt
+
+    returner lock_resultat.ok
+slutt

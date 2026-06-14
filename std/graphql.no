@@ -1,0 +1,405 @@
+# graphql.no — GraphQL-server for Norscode
+# Graphene / Strawberry-ekvivalent
+#
+# Bruk:
+#   bruk std.graphql som gql
+#
+#   la schema = gql.ny_schema()
+#   gql.type(schema, "Brukar", [
+#       gql.felt("id", "Int!"),
+#       gql.felt("namn", "String!"),
+#       gql.felt("epost", "String")
+#   ])
+#   gql.query(schema, "brukar(id: Int!): Brukar", "resolver_brukar")
+#   gql.query(schema, "brukarar: [Brukar!]!", "resolver_brukarar")
+#   gql.mutation(schema, "opprettBrukar(namn: String!, epost: String!): Brukar", "resolver_opprett")
+#
+#   // Web-integrasjon (handterer GET og POST /graphql)
+#   funksjon graphql_endpoint(ctx) -> ordbok_tekst {
+#       returner gql.handle(schema, ctx)
+#   }
+
+bruk std.web som web
+
+# ─── Schema-bygging ───────────────────────────────────────────────────────────
+
+funksjon ny_schema() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["__typar__"]        = "[]"
+    s["__queries__"]      = "[]"
+    s["__mutations__"]    = "[]"
+    s["__subscriptions__"] = "[]"
+    s["__resolvers__"]    = "{}"
+    returner s
+}
+
+funksjon felt(namn: tekst, type: tekst) -> ordbok_tekst {
+    la f: ordbok_tekst = {}
+    f["namn"]    = namn
+    f["type"]    = type
+    f["standard"] = ""
+    returner f
+}
+
+funksjon felt_med_standard(namn: tekst, type: tekst, standard: tekst) -> ordbok_tekst {
+    la f = felt(namn, type)
+    f["standard"] = standard
+    returner f
+}
+
+funksjon type(schema: ordbok_tekst, namn: tekst, felt_liste: liste<ordbok_tekst>) -> heltall {
+    la typar = _les_liste(schema, "__typar__")
+    la t: ordbok_tekst = {}
+    t["namn"] = namn
+    la felt_json_delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(felt_liste) {
+        la f: ordbok_tekst = felt_liste[i]
+        legg_til(felt_json_delar, "{\"namn\":\"" + f["namn"] + "\",\"type\":\"" + f["type"] + "\"}")
+        i = i + 1
+    }
+    t["felt"] = "[" + tekst_saman(felt_json_delar, ",") + "]"
+    legg_til(typar, t)
+    _skriv_liste(schema, "__typar__", typar)
+    returner lengde(typar)
+}
+
+funksjon enum_type(schema: ordbok_tekst, namn: tekst, verdiar: liste<tekst>) -> heltall {
+    la typar = _les_liste(schema, "__typar__")
+    la t: ordbok_tekst = {}
+    t["namn"] = namn
+    t["er_enum"] = "sann"
+    la v_delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(verdiar) {
+        legg_til(v_delar, "\"" + verdiar[i] + "\"")
+        i = i + 1
+    }
+    t["felt"] = "[" + tekst_saman(v_delar, ",") + "]"
+    legg_til(typar, t)
+    _skriv_liste(schema, "__typar__", typar)
+    returner 0
+}
+
+funksjon query(schema: ordbok_tekst, signatur: tekst, resolver_fn: tekst) -> heltall {
+    la q = _parse_signatur(signatur)
+    q["resolver"] = resolver_fn
+    la queries = _les_liste(schema, "__queries__")
+    legg_til(queries, q)
+    _skriv_liste(schema, "__queries__", queries)
+    returner lengde(queries)
+}
+
+funksjon mutation(schema: ordbok_tekst, signatur: tekst, resolver_fn: tekst) -> heltall {
+    la m = _parse_signatur(signatur)
+    m["resolver"] = resolver_fn
+    la mutations = _les_liste(schema, "__mutations__")
+    legg_til(mutations, m)
+    _skriv_liste(schema, "__mutations__", mutations)
+    returner lengde(mutations)
+}
+
+# ─── Request-handtering ───────────────────────────────────────────────────────
+
+funksjon handle(schema: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    la metode = web.request_method(ctx)
+    la sti     = web.request_path(ctx)
+
+    // GraphiQL UI (GET utan query)
+    la accept = web.request_header(ctx, "accept")
+    hvis metode == "GET" og tekst_inneholder(accept, "text/html") {
+        la h: ordbok_tekst = {}
+        h["content-type"] = "text/html; charset=utf-8"
+        returner web.response_builder(200, h, _graphiql_html(sti))
+    }
+
+    // Hent query frå body (POST) eller query string (GET)
+    la gql_query = ""
+    la variablar: ordbok_tekst = {}
+    la operasjon = ""
+
+    hvis metode == "POST" {
+        la body_data = web.request_json(ctx)
+        gql_query  = tekst(body_data["query"])
+        operasjon  = tekst(body_data["operationName"])
+        prøv {
+            la vars_parsed = builtin.json_parse_raw(tekst(body_data["variables"]))
+            variablar = vars_parsed
+        } fang (e) { }
+    } ellers {
+        gql_query = web.request_query_param(ctx, "query")
+        operasjon = web.request_query_param(ctx, "operationName")
+    }
+
+    hvis gql_query == "" {
+        returner _gql_feil("Ingen query angitt")
+    }
+
+    // Køyr spørjinga
+    la resultat = utfør(schema, gql_query, variablar, operasjon, ctx)
+    la h: ordbok_tekst = {}
+    h["content-type"] = "application/json; charset=utf-8"
+    returner web.response_builder(200, h, resultat)
+}
+
+# ─── Utføring ─────────────────────────────────────────────────────────────────
+
+funksjon utfør(schema: ordbok_tekst, query_str: tekst, variablar: ordbok_tekst, operasjon: tekst, ctx: ordbok_tekst) -> tekst {
+    prøv {
+        la parsed = _parse_query(query_str)
+        la op_type = parsed["type"]
+        la felt_liste = parsed["felt"]
+
+        la resolvers = hvis op_type == "mutation" { _les_liste(schema, "__mutations__") }
+                       ellers { _les_liste(schema, "__queries__") }
+
+        la data_delar: liste<tekst> = []
+        la feil_liste: liste<tekst> = []
+
+        la i: heltall = 0
+        mens i < lengde(felt_liste) {
+            la felt_namn: tekst = felt_liste[i]
+            la resolver = _finn_resolver(resolvers, felt_namn)
+
+            hvis resolver == "" {
+                legg_til(feil_liste, "{\"message\":\"Ukjend felt: " + felt_namn + "\",\"path\":[\"" + felt_namn + "\"]}")
+            } ellers {
+                prøv {
+                    la args: ordbok_tekst = {}
+                    la nk = nøkler(variablar)
+                    la j: heltall = 0
+                    mens j < lengde(nk) {
+                        la k: tekst = nk[j]
+                        args[k] = variablar[k]
+                        j = j + 1
+                    }
+                    args["__ctx__"] = "{}"
+                    la resultat = builtin.ncb_call_fn(resolver, args)
+                    la resultat_json = _verdi_til_json(resultat)
+                    legg_til(data_delar, "\"" + felt_namn + "\":" + resultat_json)
+                } fang (e) {
+                    legg_til(feil_liste, "{\"message\":\"" + tekst(e) + "\",\"path\":[\"" + felt_namn + "\"]}")
+                }
+            }
+            i = i + 1
+        }
+
+        la data_json = "{" + tekst_saman(data_delar, ",") + "}"
+        la feil_json = "[" + tekst_saman(feil_liste, ",") + "]"
+
+        hvis lengde(feil_liste) > 0 {
+            returner "{\"data\":" + data_json + ",\"errors\":" + feil_json + "}"
+        }
+        returner "{\"data\":" + data_json + "}"
+    } fang (e) {
+        returner _gql_feil(tekst(e))
+    }
+    returner _gql_feil("Ukjend feil")
+}
+
+# ─── Introspeksjon ────────────────────────────────────────────────────────────
+
+funksjon introspeksjon_schema(schema: ordbok_tekst) -> tekst {
+    la typar_json: liste<tekst> = []
+    la typar = _les_liste(schema, "__typar__")
+    la i: heltall = 0
+    mens i < lengde(typar) {
+        la t: ordbok_tekst = typar[i]
+        legg_til(typar_json, "{\"kind\":\"OBJECT\",\"name\":\"" + t["namn"] + "\",\"fields\":" + t["felt"] + "}")
+        i = i + 1
+    }
+    // Legg til Query og Mutation
+    la queries = _les_liste(schema, "__queries__")
+    la q_felt_json: liste<tekst> = []
+    i = 0
+    mens i < lengde(queries) {
+        la q: ordbok_tekst = queries[i]
+        legg_til(q_felt_json, "{\"name\":\"" + q["namn"] + "\",\"type\":{\"name\":\"" + q["return_type"] + "\"}}")
+        i = i + 1
+    }
+    legg_til(typar_json, "{\"kind\":\"OBJECT\",\"name\":\"Query\",\"fields\":[" + tekst_saman(q_felt_json, ",") + "]}")
+    returner "{\"__schema\":{\"types\":[" + tekst_saman(typar_json, ",") + "]}}"
+}
+
+# ─── SDL-generering ───────────────────────────────────────────────────────────
+
+funksjon til_sdl(schema: ordbok_tekst) -> tekst {
+    la linjer: liste<tekst> = []
+    la typar = _les_liste(schema, "__typar__")
+    la i: heltall = 0
+    mens i < lengde(typar) {
+        la t: ordbok_tekst = typar[i]
+        legg_til(linjer, "type " + t["namn"] + " {")
+        prøv {
+            la felt_lista = builtin.json_parse_raw(t["felt"])
+            la j: heltall = 0
+            mens j < lengde(felt_lista) {
+                la f: ordbok_tekst = felt_lista[j]
+                legg_til(linjer, "  " + f["namn"] + ": " + f["type"])
+                j = j + 1
+            }
+        } fang (e) { }
+        legg_til(linjer, "}")
+        legg_til(linjer, "")
+        i = i + 1
+    }
+    // Queries
+    la queries = _les_liste(schema, "__queries__")
+    la mutations = _les_liste(schema, "__mutations__")
+    legg_til(linjer, "type Query {")
+    i = 0
+    mens i < lengde(queries) {
+        la q: ordbok_tekst = queries[i]
+        legg_til(linjer, "  " + q["signatur"])
+        i = i + 1
+    }
+    legg_til(linjer, "}")
+    hvis lengde(mutations) > 0 {
+        legg_til(linjer, "")
+        legg_til(linjer, "type Mutation {")
+        i = 0
+        mens i < lengde(mutations) {
+            la m: ordbok_tekst = mutations[i]
+            legg_til(linjer, "  " + m["signatur"])
+            i = i + 1
+        }
+        legg_til(linjer, "}")
+    }
+    returner tekst_saman(linjer, "\n")
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _parse_query(q: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    la s = builtin.trim(q)
+    // Finn operation type
+    la op_type = "query"
+    hvis tekst_starter_med(s, "mutation")     { op_type = "mutation" }
+    ellers hvis tekst_starter_med(s, "subscription") { op_type = "subscription" }
+    r["type"] = op_type
+
+    // Hent felt frå { ... }
+    la opning = builtin.index_of(s, "{")
+    la slutt  = builtin.index_of(s, "}")
+    la felt_tekst = hvis opning >= 0 og slutt > opning {
+        builtin.trim(builtin.slice(s, opning + 1, slutt))
+    } ellers { s }
+
+    // Split på mellomrom/newline
+    la ord = builtin.split(felt_tekst, "\n")
+    la felt: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(ord) {
+        la o = builtin.trim(ord[i])
+        // Fjern argument-parentesar for enkelt oppslag
+        la paren = builtin.index_of(o, "(")
+        la felt_namn = hvis paren >= 0 { builtin.trim(builtin.slice(o, 0, paren)) } ellers { o }
+        hvis felt_namn != "" og ikkje tekst_starter_med(felt_namn, "#") {
+            legg_til(felt, felt_namn)
+        }
+        i = i + 1
+    }
+    // Prøv komma-split viss ingen linjeskift
+    hvis lengde(felt) == 1 {
+        la komma_delt = builtin.split(felt[0], " ")
+        la ny_felt: liste<tekst> = []
+        la j: heltall = 0
+        mens j < lengde(komma_delt) {
+            la o = builtin.trim(komma_delt[j])
+            hvis o != "" { legg_til(ny_felt, o) }
+            j = j + 1
+        }
+        r["felt"] = ny_felt
+    } ellers {
+        r["felt"] = felt
+    }
+    returner r
+}
+
+funksjon _parse_signatur(sig: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["signatur"] = sig
+    la colon = builtin.index_of(sig, ":")
+    la namn_del = hvis colon >= 0 { builtin.trim(builtin.slice(sig, 0, colon)) } ellers { sig }
+    la return_type = hvis colon >= 0 { builtin.trim(builtin.slice(sig, colon + 1, lengde(sig))) } ellers { "String" }
+    la paren = builtin.index_of(namn_del, "(")
+    la namn = hvis paren >= 0 { builtin.trim(builtin.slice(namn_del, 0, paren)) } ellers { builtin.trim(namn_del) }
+    r["namn"] = namn
+    r["return_type"] = builtin.trim(return_type)
+    returner r
+}
+
+funksjon _finn_resolver(resolvers: liste<ordbok_tekst>, felt_namn: tekst) -> tekst {
+    la i: heltall = 0
+    mens i < lengde(resolvers) {
+        la r: ordbok_tekst = resolvers[i]
+        hvis r["namn"] == felt_namn { returner tekst(r["resolver"]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _verdi_til_json(v: tekst) -> tekst {
+    la s = tekst(v)
+    // Null
+    hvis s == "" eller s == "null" { returner "null" }
+    // Boolsk
+    hvis s == "sann" eller s == "true" { returner "true" }
+    hvis s == "usann" eller s == "false" { returner "false" }
+    // Tal
+    prøv {
+        heltall_fra_tekst(s)
+        returner s
+    } fang (e) { }
+    // Array eller objekt
+    hvis tekst_starter_med(s, "[") eller tekst_starter_med(s, "{") { returner s }
+    // Streng
+    returner "\"" + tekst_erstatt(tekst_erstatt(s, "\\", "\\\\"), "\"", "\\\"") + "\""
+}
+
+funksjon _gql_feil(melding: tekst) -> tekst {
+    returner "{\"errors\":[{\"message\":\"" + tekst_erstatt(melding, "\"", "\\\"") + "\"}]}"
+}
+
+funksjon _les_liste(schema: ordbok_tekst, nøkkel: tekst) -> liste<ordbok_tekst> {
+    prøv {
+        la raw = tekst(schema[nøkkel])
+        la parsed = builtin.json_parse_raw(raw)
+        returner parsed
+    } fang (e) { returner [] }
+    returner []
+}
+
+funksjon _skriv_liste(schema: ordbok_tekst, nøkkel: tekst, lst: liste<ordbok_tekst>) -> heltall {
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(lst) {
+        la el: ordbok_tekst = lst[i]
+        la nk = nøkler(el)
+        la felt_delar: liste<tekst> = []
+        la j: heltall = 0
+        mens j < lengde(nk) {
+            la k: tekst = nk[j]
+            la vv = tekst_erstatt(tekst(el[k]), "\"", "\\\"")
+            legg_til(felt_delar, "\"" + k + "\":\"" + vv + "\"")
+            j = j + 1
+        }
+        legg_til(delar, "{" + tekst_saman(felt_delar, ",") + "}")
+        i = i + 1
+    }
+    schema[nøkkel] = "[" + tekst_saman(delar, ",") + "]"
+    returner 0
+}
+
+funksjon _graphiql_html(endpoint: tekst) -> tekst {
+    returner "<!DOCTYPE html><html><head><title>GraphiQL</title>" +
+             "<link rel='stylesheet' href='https://unpkg.com/graphiql/graphiql.min.css'/></head>" +
+             "<body style='margin:0'><div id='graphiql' style='height:100vh'></div>" +
+             "<script src='https://unpkg.com/react/umd/react.production.min.js'></script>" +
+             "<script src='https://unpkg.com/react-dom/umd/react-dom.production.min.js'></script>" +
+             "<script src='https://unpkg.com/graphiql/graphiql.min.js'></script>" +
+             "<script>const fetcher = GraphiQL.createFetcher({url:'" + endpoint + "'});" +
+             "ReactDOM.render(React.createElement(GraphiQL,{fetcher}),document.getElementById('graphiql'));" +
+             "</script></body></html>"
+}

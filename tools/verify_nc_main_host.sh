@@ -12,6 +12,7 @@ VERIFY_ROOT="$ROOT/build/verify_nc_main_host"
 NCB="$VERIFY_ROOT/kompiler.ncb.json"
 
 printf '=== nc_main host-verifikasjon (maintainer / opt-in) ===\n\n'
+printf 'Merk: denne løypa verifiserer maintainer-brua, ikkje normal dagleg bruk.\n\n'
 
 rm -rf "$VERIFY_ROOT"
 mkdir -p "$VERIFY_ROOT"

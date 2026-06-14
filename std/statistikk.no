@@ -1,0 +1,209 @@
+# statistikk.no — Teljarar og analytikk for Norscode
+# Django-Prometheus / StatsD-ekvivalent
+#
+# Bruk:
+#   bruk std.statistikk som stats
+#
+#   la conn = db.open("app.db")
+#   stats.migrer(conn)
+#
+#   stats.tel(conn, "sidevisningar")
+#   stats.tel_med_etikett(conn, "sidevisningar", "/om-oss")
+#   stats.mål(conn, "responstid_ms", 142)
+#
+#   la v = stats.hent_teljar(conn, "sidevisningar")
+#   la rapport = stats.dagleg_rapport(conn, "sidevisningar", 7)
+
+bruk std.db som db
+bruk std.orm som orm
+
+# ─── Schema ───────────────────────────────────────────────────────────────────
+
+funksjon migrer(conn: tekst) -> heltall {
+    orm.migrer(conn, "_stats_teljar", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "namn TEXT NOT NULL",
+        "etikett TEXT NOT NULL DEFAULT ''",
+        "verdi INTEGER NOT NULL DEFAULT 0",
+        "dato TEXT NOT NULL DEFAULT (date('now'))",
+        "time INTEGER NOT NULL DEFAULT (strftime('%H', 'now'))",
+        "UNIQUE(namn, etikett, dato, time)"
+    ])
+    orm.migrer(conn, "_stats_måling", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "namn TEXT NOT NULL",
+        "etikett TEXT NOT NULL DEFAULT ''",
+        "verdi REAL NOT NULL",
+        "ts TEXT NOT NULL DEFAULT (datetime('now'))"
+    ])
+    orm.migrer(conn, "_stats_hending", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "type TEXT NOT NULL",
+        "eigenskapar TEXT NOT NULL DEFAULT '{}'",
+        "ts TEXT NOT NULL DEFAULT (datetime('now'))",
+        "sesjon_id TEXT DEFAULT ''",
+        "brukar_id TEXT DEFAULT ''"
+    ])
+    returner 1
+}
+
+# ─── Teljarar ─────────────────────────────────────────────────────────────────
+
+funksjon tel(conn: tekst, namn: tekst) -> heltall {
+    returner tel_med_steg(conn, namn, "", 1)
+}
+
+funksjon tel_med_etikett(conn: tekst, namn: tekst, etikett: tekst) -> heltall {
+    returner tel_med_steg(conn, namn, etikett, 1)
+}
+
+funksjon tel_med_steg(conn: tekst, namn: tekst, etikett: tekst, steg: heltall) -> heltall {
+    la en = orm._escape(namn)
+    la ee = orm._escape(etikett)
+    la sql = "INSERT INTO _stats_teljar (namn, etikett, verdi) VALUES ('" + en + "','" + ee + "'," + tekst_fra_heltall(steg) + ") " +
+             "ON CONFLICT(namn, etikett, dato, time) DO UPDATE SET verdi = verdi + " + tekst_fra_heltall(steg) + ";"
+    returner db.execute(conn, sql)
+}
+
+funksjon hent_teljar(conn: tekst, namn: tekst) -> heltall {
+    la sql = "SELECT COALESCE(SUM(verdi),0) AS total FROM _stats_teljar WHERE namn='" + orm._escape(namn) + "';"
+    returner db.query_int(conn, sql)
+}
+
+funksjon hent_teljar_dato(conn: tekst, namn: tekst, dato: tekst) -> heltall {
+    la sql = "SELECT COALESCE(SUM(verdi),0) AS total FROM _stats_teljar WHERE namn='" +
+             orm._escape(namn) + "' AND dato='" + orm._escape(dato) + "';"
+    returner db.query_int(conn, sql)
+}
+
+funksjon topp_etikettar(conn: tekst, namn: tekst, n: heltall) -> liste<ordbok_tekst> {
+    la sql = "SELECT etikett, SUM(verdi) AS total FROM _stats_teljar WHERE namn='" +
+             orm._escape(namn) + "' GROUP BY etikett ORDER BY total DESC LIMIT " + tekst_fra_heltall(n) + ";"
+    returner orm.spør(conn, sql)
+}
+
+# ─── Målingar (histogram/gauge) ───────────────────────────────────────────────
+
+funksjon mål(conn: tekst, namn: tekst, verdi: heltall) -> heltall {
+    returner mål_med_etikett(conn, namn, "", verdi)
+}
+
+funksjon mål_med_etikett(conn: tekst, namn: tekst, etikett: tekst, verdi: heltall) -> heltall {
+    la sql = "INSERT INTO _stats_måling (namn, etikett, verdi) VALUES ('" +
+             orm._escape(namn) + "','" + orm._escape(etikett) + "'," + tekst_fra_heltall(verdi) + ");"
+    returner db.execute(conn, sql)
+}
+
+funksjon aggregat(conn: tekst, namn: tekst, sidan: tekst) -> ordbok_tekst {
+    la sql = "SELECT COUNT(*) AS tal, AVG(verdi) AS snitt, MIN(verdi) AS min, MAX(verdi) AS maks, " +
+             "SUM(verdi) AS sum FROM _stats_måling WHERE namn='" + orm._escape(namn) +
+             "' AND ts >= '" + orm._escape(sidan) + "';"
+    la rad = orm.spør_én(conn, sql)
+    returner rad
+}
+
+funksjon persentil(conn: tekst, namn: tekst, p: heltall) -> heltall {
+    // Approksimasjon av Pxx via sortering
+    la sql = "SELECT verdi FROM _stats_måling WHERE namn='" + orm._escape(namn) +
+             "' ORDER BY verdi ASC;"
+    la rader = orm.spør(conn, sql)
+    la n = lengde(rader)
+    hvis n == 0 { returner 0 }
+    la idx = (n * p) / 100
+    la rad: ordbok_tekst = rader[idx]
+    returner heltall_fra_tekst(tekst(rad["verdi"]))
+}
+
+# ─── Hendingar (event tracking) ───────────────────────────────────────────────
+
+funksjon registrer_hending(conn: tekst, type: tekst, eigenskapar: ordbok_tekst) -> heltall {
+    returner registrer_hending_med_brukar(conn, type, eigenskapar, "", "")
+}
+
+funksjon registrer_hending_med_brukar(conn: tekst, type: tekst, eigenskapar: ordbok_tekst, sesjon_id: tekst, brukar_id: tekst) -> heltall {
+    la props_json = _til_json(eigenskapar)
+    la sql = "INSERT INTO _stats_hendingn (type, eigenskapar, sesjon_id, brukar_id) VALUES ('" +
+             orm._escape(type) + "','" + orm._escape(props_json) + "','" +
+             orm._escape(sesjon_id) + "','" + orm._escape(brukar_id) + "');"
+    // Bruk riktig tabellnamn
+    la sql2 = "INSERT INTO _stats_hendingN (type, eigenskapar, sesjon_id, brukar_id) VALUES ('" +
+              orm._escape(type) + "','" + orm._escape(props_json) + "','" +
+              orm._escape(sesjon_id) + "','" + orm._escape(brukar_id) + "');"
+    prøv { returner db.execute(conn, "INSERT INTO _stats_hendingn (type, eigenskapar, sesjon_id, brukar_id) VALUES ('" + orm._escape(type) + "','" + orm._escape(props_json) + "','" + orm._escape(sesjon_id) + "','" + orm._escape(brukar_id) + "');") } fang (e) { }
+    returner db.execute(conn, "INSERT INTO _stats_hendingN (type, eigenskapar, sesjon_id, brukar_id) VALUES ('" + orm._escape(type) + "','" + orm._escape(props_json) + "','" + orm._escape(sesjon_id) + "','" + orm._escape(brukar_id) + "');")
+}
+
+funksjon tel_hendingar(conn: tekst, type: tekst, sidan: tekst) -> heltall {
+    la sql = "SELECT COUNT(*) FROM _stats_hendingN WHERE type='" + orm._escape(type) +
+             "' AND ts >= '" + orm._escape(sidan) + "';"
+    returner db.query_int(conn, sql)
+}
+
+# ─── Rapportar ────────────────────────────────────────────────────────────────
+
+funksjon dagleg_rapport(conn: tekst, namn: tekst, dagar: heltall) -> liste<ordbok_tekst> {
+    la sql = "SELECT dato, SUM(verdi) AS total FROM _stats_teljar WHERE namn='" +
+             orm._escape(namn) + "' AND dato >= date('now', '-" + tekst_fra_heltall(dagar) +
+             " days') GROUP BY dato ORDER BY dato ASC;"
+    returner orm.spør(conn, sql)
+}
+
+funksjon timleg_rapport(conn: tekst, namn: tekst, dato: tekst) -> liste<ordbok_tekst> {
+    la sql = "SELECT time, SUM(verdi) AS total FROM _stats_teljar WHERE namn='" +
+             orm._escape(namn) + "' AND dato='" + orm._escape(dato) +
+             "' GROUP BY time ORDER BY time ASC;"
+    returner orm.spør(conn, sql)
+}
+
+funksjon oversikt(conn: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["teljarar"]  = tekst_fra_heltall(db.query_int(conn, "SELECT COUNT(DISTINCT namn) FROM _stats_teljar;"))
+    r["målingar"]  = tekst_fra_heltall(db.query_int(conn, "SELECT COUNT(*) FROM _stats_måling;"))
+    r["hendingar"] = tekst_fra_heltall(db.query_int(conn, "SELECT COUNT(*) FROM _stats_hendingN;"))
+    returner r
+}
+
+funksjon vis_oversikt(conn: tekst) -> heltall {
+    la o = oversikt(conn)
+    skriv("=== Statistikk-oversikt ===")
+    skriv("  Teljarar:  " + o["teljarar"])
+    skriv("  Målingar:  " + o["målingar"])
+    skriv("  Hendingar: " + o["hendingar"])
+    returner 0
+}
+
+# ─── Web-middleware-hjelpar ───────────────────────────────────────────────────
+
+funksjon tel_request(conn: tekst, metode: tekst, sti: tekst, status: heltall, ms: heltall) -> heltall {
+    tel_med_etikett(conn, "http_requests", metode + " " + sti)
+    tel_med_etikett(conn, "http_status_" + tekst_fra_heltall(status / 100) + "xx", sti)
+    mål_med_etikett(conn, "responstid_ms", sti, ms)
+    returner 1
+}
+
+# ─── Rydding ─────────────────────────────────────────────────────────────────
+
+funksjon rydd_gamle_målingar(conn: tekst, dagar: heltall) -> heltall {
+    la sql = "DELETE FROM _stats_måling WHERE ts < datetime('now', '-" + tekst_fra_heltall(dagar) + " days');"
+    returner db.execute(conn, sql)
+}
+
+funksjon rydd_gamle_teljarar(conn: tekst, dagar: heltall) -> heltall {
+    la sql = "DELETE FROM _stats_teljar WHERE dato < date('now', '-" + tekst_fra_heltall(dagar) + " days');"
+    returner db.execute(conn, sql)
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}

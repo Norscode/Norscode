@@ -1,0 +1,706 @@
+# regex.no — Backtracking regex-motor (utvida)
+# Python: re
+#
+# Støttar:
+#   .          kva som helst teikn
+#   *  +  ?    grådige kvantifikatorar
+#   *? +?      late (non-greedy) kvantifikatorar
+#   ^  $        ankerpunkt
+#   [abc] [^a] [a-z]   teiknklassar
+#   |           alternering
+#   \d \w \s   spesialteiknklassar  (\D \W \S = negasjonar)
+#   (...)       fangande gruppe
+#   (?:...)     ikkje-fangande gruppe
+#   (?P<name>...) namngitt gruppe
+#   (?i)        case-insensitiv flagg
+#   (?m)        multiline flagg (^ og $ samsvarar linjeskift)
+#
+# Bruk:
+#   bruk std.regex som re
+#   la tok = re.kompiler("(\d+)-(\w+)")
+#   la m = re.finn_samsvar(tok, "abc 42-hei xyz")
+#   skriv(re.gruppe(m, 0))   # => "42-hei"
+#   skriv(re.gruppe(m, 1))   # => "42"
+#   skriv(re.gruppe(m, 2))   # => "hei"
+
+# ─── Teiknhjelparar ───────────────────────────────────────────────────────────
+
+funksjon _er_siffer(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner k >= 48 og k <= 57
+}
+
+funksjon _er_ordteikn(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner (k >= 48 og k <= 57) eller (k >= 65 og k <= 90) eller
+             (k >= 97 og k <= 122) eller k == 95
+}
+
+funksjon _er_mellomrom(c: tekst) -> bool {
+    la k: heltall = builtin.char_code(c)
+    returner k == 32 eller k == 9 eller k == 10 eller k == 13
+}
+
+funksjon _til_liten(c: tekst) -> tekst {
+    la k: heltall = builtin.char_code(c)
+    hvis (k >= 65 og k <= 90) {
+        la map: ordbok_tekst = {}
+        map["A"]="a" map["B"]="b" map["C"]="c" map["D"]="d" map["E"]="e"
+        map["F"]="f" map["G"]="g" map["H"]="h" map["I"]="i" map["J"]="j"
+        map["K"]="k" map["L"]="l" map["M"]="m" map["N"]="n" map["O"]="o"
+        map["P"]="p" map["Q"]="q" map["R"]="r" map["S"]="s" map["T"]="t"
+        map["U"]="u" map["V"]="v" map["W"]="w" map["X"]="x" map["Y"]="y"
+        map["Z"]="z"
+        hvis (har_nokkel(map, c)) { returner map[c] }
+    }
+    returner c
+}
+
+funksjon _klasse_samsvar(c: tekst, klasse: tekst, case_i: bool) -> bool {
+    la kc: tekst = c
+    hvis (case_i) { kc = _til_liten(c) }
+    la k_teikn = builtin.split(klasse, "")
+    la n: heltall = lengde(k_teikn)
+    la negert: bool = usann
+    la start: heltall = 0
+    hvis (n > 0 og k_teikn[0] == "^") { negert = sann  start = 1 }
+    la treff: bool = usann
+    la i: heltall = start
+    mens (i < n) {
+        hvis (i + 2 < n og k_teikn[i + 1] == "-") {
+            la fa: heltall = builtin.char_code(k_teikn[i])
+            la ti: heltall = builtin.char_code(k_teikn[i + 2])
+            la ck: heltall = builtin.char_code(kc)
+            hvis (case_i) {
+                fa = builtin.char_code(_til_liten(k_teikn[i]))
+                ti = builtin.char_code(_til_liten(k_teikn[i + 2]))
+            }
+            hvis (ck >= fa og ck <= ti) { treff = sann }
+            i = i + 3
+        } ellers {
+            la kv: tekst = k_teikn[i]
+            hvis (case_i) { kv = _til_liten(kv) }
+            hvis (kv == kc) { treff = sann }
+            i = i + 1
+        }
+    }
+    hvis (negert) { returner ikkje treff }
+    returner treff
+}
+
+# ─── Kompilering ──────────────────────────────────────────────────────────────
+# Token-format: "type:verdi:kvant"
+# Typar: L(literal) D(dot) C(klasse) X(spesialklasse) S(start) E(slutt)
+#        A(alternering) G(gruppe-opne) GE(gruppe-lukk) NC(non-capture opne)
+#        NCE(non-capture lukk) GN(namngitt-opne) GNE(namngitt-lukk) FL(flagg)
+
+funksjon kompiler(mønster: tekst) -> liste_tekst {
+    la teikn = builtin.split(mønster, "")
+    la n: heltall = lengde(teikn)
+    la token: liste_tekst = []
+    la i: heltall = 0
+    la gruppe_tel: heltall = 0
+    # Simulert stabel for gruppe-nesting (ordbok med indeks)
+    la stabel: ordbok_heltall = {}
+    la stabel_topp: heltall = 0
+
+    mens (i < n) {
+        la c: tekst = teikn[i]
+        la type: tekst = ""
+        la verdi: tekst = ""
+
+        hvis (c == "^") {
+            type = "S"  verdi = "^"  i = i + 1
+        } ellers hvis (c == "$") {
+            type = "E"  verdi = "$"  i = i + 1
+        } ellers hvis (c == ".") {
+            type = "D"  verdi = "."  i = i + 1
+        } ellers hvis (c == "|") {
+            type = "A"  verdi = "|"  i = i + 1
+        } ellers hvis (c == "(") {
+            # Sjekk for spesialgruppe: (?:...) (?P<name>...) (?i) (?m)
+            hvis (i + 1 < n og teikn[i + 1] == "?") {
+                hvis (i + 2 < n og teikn[i + 2] == ":") {
+                    # Non-capturing group
+                    type = "NC"  verdi = ""
+                    stabel[tekst_fra_heltall(stabel_topp)] = -1  # marker for NC
+                    stabel_topp = stabel_topp + 1
+                    i = i + 3
+                } ellers hvis (i + 2 < n og teikn[i + 2] == "P" og
+                               i + 3 < n og teikn[i + 3] == "<") {
+                    # Named group (?P<name>...)
+                    i = i + 4
+                    la namn: tekst = ""
+                    mens (i < n og teikn[i] != ">") {
+                        namn = namn + teikn[i]  i = i + 1
+                    }
+                    hvis (i < n) { i = i + 1 }  # hopp over ">"
+                    gruppe_tel = gruppe_tel + 1
+                    stabel[tekst_fra_heltall(stabel_topp)] = gruppe_tel
+                    stabel_topp = stabel_topp + 1
+                    type = "GN"  verdi = namn + ":" + tekst_fra_heltall(gruppe_tel)
+                } ellers hvis (i + 2 < n og (teikn[i + 2] == "i" eller teikn[i + 2] == "m")) {
+                    # Inline flagg (?i) (?m)
+                    type = "FL"  verdi = teikn[i + 2]
+                    i = i + 4  # hopp over (?x)
+                } ellers {
+                    # Vanleg gruppe
+                    gruppe_tel = gruppe_tel + 1
+                    stabel[tekst_fra_heltall(stabel_topp)] = gruppe_tel
+                    stabel_topp = stabel_topp + 1
+                    type = "G"  verdi = tekst_fra_heltall(gruppe_tel)
+                    i = i + 1
+                }
+            } ellers {
+                gruppe_tel = gruppe_tel + 1
+                stabel[tekst_fra_heltall(stabel_topp)] = gruppe_tel
+                stabel_topp = stabel_topp + 1
+                type = "G"  verdi = tekst_fra_heltall(gruppe_tel)
+                i = i + 1
+            }
+        } ellers hvis (c == ")") {
+            stabel_topp = stabel_topp - 1
+            la gid: heltall = 0
+            hvis (stabel_topp >= 0 og har_nokkel(stabel, tekst_fra_heltall(stabel_topp))) {
+                gid = stabel[tekst_fra_heltall(stabel_topp)]
+            }
+            hvis (gid == -1) {
+                type = "NCE"  verdi = ""
+            } ellers {
+                type = "GE"  verdi = tekst_fra_heltall(gid)
+            }
+            i = i + 1
+        } ellers hvis (c == "[") {
+            i = i + 1
+            la kl: tekst = ""
+            mens (i < n og teikn[i] != "]") {
+                kl = kl + teikn[i]  i = i + 1
+            }
+            hvis (i < n) { i = i + 1 }
+            type = "C"  verdi = kl
+        } ellers hvis (c == "\\") {
+            i = i + 1
+            hvis (i < n) { type = "X"  verdi = teikn[i]  i = i + 1 }
+        } ellers {
+            type = "L"  verdi = c  i = i + 1
+        }
+
+        # Hent kvantifikator (berre for atomar, ikkje for strukturelle token)
+        la kvant: tekst = "1"
+        la strukturell: bool = (type == "S" eller type == "E" eller type == "A" eller
+                                type == "G" eller type == "GE" eller type == "GN" eller
+                                type == "GNE" eller type == "NC" eller type == "NCE" eller
+                                type == "FL")
+        hvis (ikkje strukturell og i < n) {
+            la neste: tekst = teikn[i]
+            hvis (neste == "*") {
+                i = i + 1
+                hvis (i < n og teikn[i] == "?") { kvant = "*L"  i = i + 1 }
+                ellers { kvant = "*" }
+            } ellers hvis (neste == "+") {
+                i = i + 1
+                hvis (i < n og teikn[i] == "?") { kvant = "+L"  i = i + 1 }
+                ellers { kvant = "+" }
+            } ellers hvis (neste == "?") {
+                i = i + 1
+                hvis (i < n og teikn[i] == "?") { kvant = "?L"  i = i + 1 }
+                ellers { kvant = "?" }
+            }
+        }
+
+        hvis (type != "") {
+            legg_til(token, type + ":" + verdi + ":" + kvant)
+        }
+    }
+    returner token
+}
+
+# ─── Flagg-utpakking frå token-liste ─────────────────────────────────────────
+
+funksjon _hent_flaggar(token: liste_tekst) -> ordbok_heltall {
+    la fl: ordbok_heltall = {}
+    fl["i"] = 0  fl["m"] = 0
+    la i: heltall = 0
+    mens (i < lengde(token)) {
+        la td = builtin.split(token[i], ":")
+        hvis (td[0] == "FL") {
+            hvis (td[1] == "i") { fl["i"] = 1 }
+            hvis (td[1] == "m") { fl["m"] = 1 }
+        }
+        i = i + 1
+    }
+    returner fl
+}
+
+# ─── Atom-samsvar ─────────────────────────────────────────────────────────────
+
+funksjon _atom_samsvar(c: tekst, tok: tekst, case_i: bool) -> bool {
+    la delar = builtin.split(tok, ":")
+    la type: tekst = delar[0]
+    la verdi: tekst = delar[1]
+    la ck: tekst = c
+    hvis (case_i) { ck = _til_liten(c) }
+
+    hvis (type == "L") {
+        la vk: tekst = verdi
+        hvis (case_i) { vk = _til_liten(verdi) }
+        returner ck == vk
+    }
+    hvis (type == "D") { returner sann }
+    hvis (type == "C") { returner _klasse_samsvar(c, verdi, case_i) }
+    hvis (type == "X") {
+        hvis (verdi == "d") { returner _er_siffer(c) }
+        hvis (verdi == "D") { returner ikkje _er_siffer(c) }
+        hvis (verdi == "w") { returner _er_ordteikn(c) }
+        hvis (verdi == "W") { returner ikkje _er_ordteikn(c) }
+        hvis (verdi == "s") { returner _er_mellomrom(c) }
+        hvis (verdi == "S") { returner ikkje _er_mellomrom(c) }
+    }
+    returner usann
+}
+
+# ─── Hovud-matchemaskin ───────────────────────────────────────────────────────
+# fangstar: ordbok_tekst som samlar gruppe-fangstin
+# Nøklar: "g1_s", "g1_e" = start/slutt-posisjon for gruppe 1
+#          "nname_s", "nname_e" = namngitt gruppe
+
+funksjon _match(token: liste_tekst, t: heltall,
+                teikn: liste_tekst, s: heltall,
+                fangstar: ordbok_tekst, fl: ordbok_heltall) -> heltall {
+    la n_tok: heltall = lengde(token)
+    la n_str: heltall = lengde(teikn)
+    la case_i: bool = fl["i"] == 1
+    la multiline: bool = fl["m"] == 1
+
+    mens (t < n_tok) {
+        la tok: tekst = token[t]
+        la td = builtin.split(tok, ":")
+        la type: tekst = td[0]
+        la verdi: tekst = td[1]
+        la kvant: tekst = td[2]
+
+        # Hopp over flagg-token
+        hvis (type == "FL") { t = t + 1 }
+
+        # Anker: start
+        ellers hvis (type == "S") {
+            hvis (multiline) {
+                hvis (s != 0 og teikn[s - 1] != "\n") { returner -1 }
+            } ellers {
+                hvis (s != 0) { returner -1 }
+            }
+            t = t + 1
+        }
+
+        # Anker: slutt
+        ellers hvis (type == "E") {
+            hvis (multiline) {
+                hvis (s < n_str og teikn[s] != "\n") { returner -1 }
+            } ellers {
+                hvis (s != n_str) { returner -1 }
+            }
+            t = t + 1
+        }
+
+        # Alternering: prøv venstre side, deretter høgre
+        ellers hvis (type == "A") {
+            t = t + 1
+            # Alt til høgre for | held fram frå t
+            returner _match(token, t, teikn, s, fangstar, fl)
+        }
+
+        # Gruppe-opne: lagre startposisjon
+        ellers hvis (type == "G") {
+            fangstar["g" + verdi + "_s"] = tekst_fra_heltall(s)
+            t = t + 1
+        }
+
+        # Gruppe-lukk: lagre sluttposisjon
+        ellers hvis (type == "GE") {
+            fangstar["g" + verdi + "_e"] = tekst_fra_heltall(s)
+            t = t + 1
+        }
+
+        # Namngitt gruppe: lagre start
+        ellers hvis (type == "GN") {
+            la deler = builtin.split(verdi, ":")
+            la namn: tekst = deler[0]
+            la gid: tekst = deler[1]
+            fangstar["n" + namn + "_s"] = tekst_fra_heltall(s)
+            fangstar["g" + gid + "_s"] = tekst_fra_heltall(s)
+            t = t + 1
+        }
+
+        # Namngitt gruppe lukk
+        ellers hvis (type == "GNE") {
+            la deler = builtin.split(verdi, ":")
+            la namn: tekst = deler[0]
+            la gid: tekst = deler[1]
+            fangstar["n" + namn + "_e"] = tekst_fra_heltall(s)
+            fangstar["g" + gid + "_e"] = tekst_fra_heltall(s)
+            t = t + 1
+        }
+
+        # Non-capturing group: strukturelt, bare gå vidare
+        ellers hvis (type == "NC" eller type == "NCE") {
+            t = t + 1
+        }
+
+        # Atom med kvantifikator
+        ellers {
+            hvis (kvant == "1") {
+                hvis (s >= n_str) { returner -1 }
+                hvis (ikkje _atom_samsvar(teikn[s], tok, case_i)) { returner -1 }
+                s = s + 1  t = t + 1
+
+            } ellers hvis (kvant == "?") {
+                # Prøv med, så utan
+                hvis (s < n_str og _atom_samsvar(teikn[s], tok, case_i)) {
+                    la res: heltall = _match(token, t + 1, teikn, s + 1, fangstar, fl)
+                    hvis (res >= 0) { returner res }
+                }
+                t = t + 1
+
+            } ellers hvis (kvant == "?L") {
+                # Lat: prøv utan fyrst, så med
+                la res: heltall = _match(token, t + 1, teikn, s, fangstar, fl)
+                hvis (res >= 0) { returner res }
+                hvis (s < n_str og _atom_samsvar(teikn[s], tok, case_i)) {
+                    returner _match(token, t + 1, teikn, s + 1, fangstar, fl)
+                }
+                returner -1
+
+            } ellers hvis (kvant == "+") {
+                # Greedy +: krev minst eitt
+                hvis (s >= n_str eller ikkje _atom_samsvar(teikn[s], tok, case_i)) { returner -1 }
+                la slutt: heltall = s + 1
+                mens (slutt < n_str og _atom_samsvar(teikn[slutt], tok, case_i)) {
+                    slutt = slutt + 1
+                }
+                mens (slutt > s) {
+                    la res: heltall = _match(token, t + 1, teikn, slutt, fangstar, fl)
+                    hvis (res >= 0) { returner res }
+                    slutt = slutt - 1
+                }
+                returner -1
+
+            } ellers hvis (kvant == "+L") {
+                # Lat +: krev minst eitt, prøv kortaste fyrst
+                hvis (s >= n_str eller ikkje _atom_samsvar(teikn[s], tok, case_i)) { returner -1 }
+                la pos: heltall = s + 1
+                mens (pos <= n_str) {
+                    la res: heltall = _match(token, t + 1, teikn, pos, fangstar, fl)
+                    hvis (res >= 0) { returner res }
+                    hvis (pos < n_str og _atom_samsvar(teikn[pos], tok, case_i)) {
+                        pos = pos + 1
+                    } ellers {
+                        returner -1
+                    }
+                }
+                returner -1
+
+            } ellers hvis (kvant == "*") {
+                # Greedy *
+                la slutt: heltall = s
+                mens (slutt < n_str og _atom_samsvar(teikn[slutt], tok, case_i)) {
+                    slutt = slutt + 1
+                }
+                mens (slutt >= s) {
+                    la res: heltall = _match(token, t + 1, teikn, slutt, fangstar, fl)
+                    hvis (res >= 0) { returner res }
+                    slutt = slutt - 1
+                }
+                returner -1
+
+            } ellers hvis (kvant == "*L") {
+                # Lat *: prøv kortaste fyrst
+                la pos: heltall = s
+                mens (pos <= n_str) {
+                    la res: heltall = _match(token, t + 1, teikn, pos, fangstar, fl)
+                    hvis (res >= 0) { returner res }
+                    hvis (pos < n_str og _atom_samsvar(teikn[pos], tok, case_i)) {
+                        pos = pos + 1
+                    } ellers {
+                        returner -1
+                    }
+                }
+                returner -1
+
+            } ellers {
+                t = t + 1
+            }
+        }
+    }
+    returner s
+}
+
+# ─── Alternering på toppnivå ──────────────────────────────────────────────────
+# Del token på |-separator og prøv kvar alternativ
+
+funksjon _finn_alt_deling(token: liste_tekst) -> liste_heltall {
+    # Returnerer liste av start-indeksar for kvart alternativ
+    la starts: liste_heltall = []
+    legg_til(starts, 0)
+    la djup: heltall = 0  # gruppe-nesting-djupne
+    la i: heltall = 0
+    mens (i < lengde(token)) {
+        la td = builtin.split(token[i], ":")
+        la type: tekst = td[0]
+        hvis (type == "G" eller type == "GN" eller type == "NC") { djup = djup + 1 }
+        ellers hvis (type == "GE" eller type == "GNE" eller type == "NCE") { djup = djup - 1 }
+        ellers hvis (type == "A" og djup == 0) {
+            legg_til(starts, i + 1)
+        }
+        i = i + 1
+    }
+    returner starts
+}
+
+funksjon _match_alternering(token: liste_tekst, teikn: liste_tekst,
+                             s: heltall, fangstar: ordbok_tekst, fl: ordbok_heltall) -> heltall {
+    la starts = _finn_alt_deling(token)
+    la n: heltall = lengde(starts)
+    la i: heltall = 0
+    mens (i < n) {
+        la start: heltall = starts[i]
+        la slutt: heltall = lengde(token)
+        # Finn slutten av dette alternativet (neste |-separator eller slutt)
+        hvis (i + 1 < n) {
+            slutt = starts[i + 1] - 1  # pek til |-tokenet
+        }
+        # Bygg sub-token-liste for dette alternativet
+        la sub: liste_tekst = builtin.slice(token, start, slutt)
+        la res: heltall = _match(sub, 0, teikn, s, fangstar, fl)
+        hvis (res >= 0) { returner res }
+        i = i + 1
+    }
+    returner -1
+}
+
+# ─── Match-resultat ───────────────────────────────────────────────────────────
+
+funksjon _nytt_samsvar(start: heltall, slutt: heltall,
+                        teikn: liste_tekst, fangstar: ordbok_tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["ok"] = "1"
+    m["start"] = tekst_fra_heltall(start)
+    m["slutt"] = tekst_fra_heltall(slutt)
+    la tekst_del = builtin.slice(teikn, start, slutt)
+    m["g0"] = builtin.join(tekst_del, "")
+    # Kopier gruppar frå fangstar
+    la nøklar = builtin.nøkler(fangstar)
+    la i: heltall = 0
+    mens (i < lengde(nøklar)) {
+        la k: tekst = nøklar[i]
+        m[k] = fangstar[k]
+        i = i + 1
+    }
+    returner m
+}
+
+funksjon _tomt_samsvar() -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["ok"] = "0"
+    m["start"] = "-1"
+    m["slutt"] = "-1"
+    m["g0"] = ""
+    returner m
+}
+
+# ─── Offentleg API ────────────────────────────────────────────────────────────
+
+# Finn første samsvar, returnerer match-objekt
+funksjon finn_samsvar(tok: liste_tekst, inndata: tekst) -> ordbok_tekst {
+    la teikn = builtin.split(inndata, "")
+    la n: heltall = lengde(teikn)
+    la fl = _hent_flaggar(tok)
+
+    la har_start: bool = usann
+    hvis (lengde(tok) > 0) {
+        la td = builtin.split(tok[0], ":")
+        hvis (td[0] == "S") { har_start = sann }
+    }
+
+    la har_alt: bool = usann
+    la i: heltall = 0
+    mens (i < lengde(tok)) {
+        la td = builtin.split(tok[i], ":")
+        hvis (td[0] == "A") { har_alt = sann }
+        i = i + 1
+    }
+
+    la start_pos: heltall = 0
+    la maks_start: heltall = n
+    hvis (har_start) { maks_start = 0 }
+
+    mens (start_pos <= maks_start) {
+        la fangstar: ordbok_tekst = {}
+        la slutt: heltall = -1
+        hvis (har_alt) {
+            slutt = _match_alternering(tok, teikn, start_pos, fangstar, fl)
+        } ellers {
+            slutt = _match(tok, 0, teikn, start_pos, fangstar, fl)
+        }
+        hvis (slutt >= 0) {
+            returner _nytt_samsvar(start_pos, slutt, teikn, fangstar)
+        }
+        start_pos = start_pos + 1
+    }
+    returner _tomt_samsvar()
+}
+
+# Fullsamsvar: heile teksten
+funksjon fullsamsvar(tok: liste_tekst, inndata: tekst) -> ordbok_tekst {
+    la teikn = builtin.split(inndata, "")
+    la fl = _hent_flaggar(tok)
+    la fangstar: ordbok_tekst = {}
+    la slutt: heltall = _match(tok, 0, teikn, 0, fangstar, fl)
+    hvis (slutt == lengde(teikn)) {
+        returner _nytt_samsvar(0, slutt, teikn, fangstar)
+    }
+    returner _tomt_samsvar()
+}
+
+# Hent alle samsvar
+funksjon finn_alle_samsvar(tok: liste_tekst, inndata: tekst) -> liste_tekst {
+    la teikn = builtin.split(inndata, "")
+    la n: heltall = lengde(teikn)
+    la fl = _hent_flaggar(tok)
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i <= n) {
+        la fangstar: ordbok_tekst = {}
+        la slutt: heltall = _match(tok, 0, teikn, i, fangstar, fl)
+        hvis (slutt >= 0) {
+            legg_til(resultat, builtin.join(builtin.slice(teikn, i, slutt), ""))
+            hvis (slutt > i) { i = slutt }
+            ellers { i = i + 1 }
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner resultat
+}
+
+# ─── Match-objekt-tilgang ─────────────────────────────────────────────────────
+
+funksjon er_samsvar(m: ordbok_tekst) -> bool { returner m["ok"] == "1" }
+funksjon samsvar_start(m: ordbok_tekst) -> heltall { returner builtin.heltall_fra_tekst(m["start"]) }
+funksjon samsvar_slutt(m: ordbok_tekst) -> heltall { returner builtin.heltall_fra_tekst(m["slutt"]) }
+
+# Hent gruppe n (0 = heile samsvaret, 1+ = fangsgruppe)
+funksjon gruppe(m: ordbok_tekst, n: heltall) -> tekst {
+    hvis (n == 0) { returner m["g0"] }
+    la s_key: tekst = "g" + tekst_fra_heltall(n) + "_s"
+    la e_key: tekst = "g" + tekst_fra_heltall(n) + "_e"
+    hvis (ikkje har_nokkel(m, s_key)) { returner "" }
+    la start: heltall = builtin.heltall_fra_tekst(m[s_key])
+    la slutt: heltall = builtin.heltall_fra_tekst(m[e_key])
+    la tekst_heilt: tekst = m["g0"]
+    la heil_start: heltall = builtin.heltall_fra_tekst(m["start"])
+    la teikn = builtin.split(m["g0"], "")  # ikkje riktig — treng original
+    # Bruk offset relativt til match-start
+    la orig = builtin.split(m["g0"], "")
+    la rel_s: heltall = start - heil_start
+    la rel_e: heltall = slutt - heil_start
+    hvis (rel_s < 0) { rel_s = 0 }
+    hvis (rel_e > lengde(orig)) { rel_e = lengde(orig) }
+    returner builtin.join(builtin.slice(orig, rel_s, rel_e), "")
+}
+
+# Hent namngitt gruppe
+funksjon named_gruppe(m: ordbok_tekst, namn: tekst) -> tekst {
+    la s_key: tekst = "n" + namn + "_s"
+    la e_key: tekst = "n" + namn + "_e"
+    hvis (ikkje har_nokkel(m, s_key)) { returner "" }
+    la start: heltall = builtin.heltall_fra_tekst(m[s_key])
+    la slutt: heltall = builtin.heltall_fra_tekst(m[e_key])
+    la heil_start: heltall = builtin.heltall_fra_tekst(m["start"])
+    la orig = builtin.split(m["g0"], "")
+    la rel_s: heltall = start - heil_start
+    la rel_e: heltall = slutt - heil_start
+    hvis (rel_s < 0) { rel_s = 0 }
+    hvis (rel_e > lengde(orig)) { rel_e = lengde(orig) }
+    returner builtin.join(builtin.slice(orig, rel_s, rel_e), "")
+}
+
+# ─── Erstatt med tilbakereferansar ────────────────────────────────────────────
+
+funksjon erstatt(tok: liste_tekst, inndata: tekst, ny_val: tekst) -> tekst {
+    la m = finn_samsvar(tok, inndata)
+    hvis (ikkje er_samsvar(m)) { returner inndata }
+    la teikn = builtin.split(inndata, "")
+    la start: heltall = samsvar_start(m)
+    la slutt: heltall = samsvar_slutt(m)
+    la n: heltall = lengde(teikn)
+    returner builtin.join(builtin.slice(teikn, 0, start), "") + ny_val +
+             builtin.join(builtin.slice(teikn, slutt, n), "")
+}
+
+funksjon erstatt_alle(tok: liste_tekst, inndata: tekst, ny_val: tekst) -> tekst {
+    la teikn = builtin.split(inndata, "")
+    la n: heltall = lengde(teikn)
+    la fl = _hent_flaggar(tok)
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i <= n) {
+        la fangstar: ordbok_tekst = {}
+        la slutt: heltall = _match(tok, 0, teikn, i, fangstar, fl)
+        hvis (slutt >= 0) {
+            ut = ut + ny_val
+            hvis (slutt > i) { i = slutt }
+            ellers { hvis (i < n) { ut = ut + teikn[i] }  i = i + 1 }
+        } ellers {
+            hvis (i < n) { ut = ut + teikn[i] }
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon del_på(tok: liste_tekst, inndata: tekst) -> liste_tekst {
+    la teikn = builtin.split(inndata, "")
+    la n: heltall = lengde(teikn)
+    la fl = _hent_flaggar(tok)
+    la delar: liste_tekst = []
+    la siste: heltall = 0
+    la i: heltall = 0
+    mens (i <= n) {
+        la fangstar: ordbok_tekst = {}
+        la slutt: heltall = _match(tok, 0, teikn, i, fangstar, fl)
+        hvis (slutt >= 0 og slutt > i) {
+            legg_til(delar, builtin.join(builtin.slice(teikn, siste, i), ""))
+            siste = slutt
+            i = slutt
+        } ellers {
+            i = i + 1
+        }
+    }
+    legg_til(delar, builtin.join(builtin.slice(teikn, siste, n), ""))
+    returner delar
+}
+
+# ─── Direktebruk (einlinjesAPI) ───────────────────────────────────────────────
+
+funksjon samsvar(inndata: tekst, mønster: tekst) -> bool {
+    la m = finn_samsvar(kompiler(mønster), inndata)
+    returner er_samsvar(m)
+}
+
+funksjon finn(inndata: tekst, mønster: tekst) -> tekst {
+    la m = finn_samsvar(kompiler(mønster), inndata)
+    hvis (er_samsvar(m)) { returner m["g0"] }
+    returner ""
+}
+
+funksjon finn_alle(inndata: tekst, mønster: tekst) -> liste_tekst {
+    returner finn_alle_samsvar(kompiler(mønster), inndata)
+}
+
+funksjon erstatt_tekst(inndata: tekst, mønster: tekst, ny_val: tekst) -> tekst {
+    returner erstatt(kompiler(mønster), inndata, ny_val)
+}
+
+funksjon erstatt_alle_tekst(inndata: tekst, mønster: tekst, ny_val: tekst) -> tekst {
+    returner erstatt_alle(kompiler(mønster), inndata, ny_val)
+}

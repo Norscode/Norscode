@@ -1,62 +1,317 @@
-# Cacheadapter for små in-memory verdier
+# cache.no — Cache-rammeverk for Norscode
+# django.core.cache-ekvivalent
+#
+# Bruk:
+#   bruk std.cache som cache
+#
+#   la c = cache.ny_minne()          // in-memory cache
+#   la c = cache.ny_fil("cache/")    // fil-basert cache
+#
+#   cache.sett(c, "nøkkel", "verdi", 300)   // TTL 5 min
+#   la v = cache.hent(c, "nøkkel", "")      // "" = standard
+#   cache.slett(c, "nøkkel")
+#   cache.tøm(c)
+#
+#   // Web-hjelpar: cache heile respons
+#   la resp = cache.hent_eller_hent(c, "side_" + id, 60, funksjon() {
+#       returner bygg_side(id)
+#   })
 
-funksjon opprett() -> ordbok_tekst {
+# ─── Cache-typar ──────────────────────────────────────────────────────────────
+
+funksjon ny_minne() -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["__type__"] = "minne"
+    c["__data__"] = "{}"
+    c["__ttl__"]  = "{}"
+    returner c
+}
+
+funksjon ny_fil(mappe: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["__type__"] = "fil"
+    c["__mappe__"] = mappe
+    prøv { builtin.mkdir(mappe) } fang (e) { }
+    returner c
+}
+
+funksjon frå_innstillingar(s: ordbok_tekst) -> ordbok_tekst {
+    la backend = "minne"
+    hvis har_nokkel(s, "CACHE_BACKEND") { backend = tekst(s["CACHE_BACKEND"]) }
+    hvis backend == "fil" {
+        la mappe = "cache/"
+        hvis har_nokkel(s, "CACHE_DIR") { mappe = tekst(s["CACHE_DIR"]) }
+        returner ny_fil(mappe)
+    }
+    returner ny_minne()
+}
+
+# ─── Grunnoperasjonar ─────────────────────────────────────────────────────────
+
+funksjon sett(c: ordbok_tekst, nøkkel: tekst, verdi: tekst, ttl_sek: heltall) -> heltall {
+    la type = c["__type__"]
+    la utløp = _no_ms() + (ttl_sek * 1000)
+    la utløp_s = tekst_fra_heltall(utløp)
+    la sikker_nøkkel = _sikkert_namn(nøkkel)
+
+    hvis type == "fil" {
+        la innhald = utløp_s + "\n" + verdi
+        prøv { fil_skriv(c["__mappe__"] + sikker_nøkkel + ".cache", innhald) } fang (e) { }
+        returner 1
+    }
+
+    // minne-cache: bruk intern ordbok
+    la data = _les_data(c)
+    la ttls = _les_ttl(c)
+    data[nøkkel] = verdi
+    ttls[nøkkel] = utløp_s
+    _skriv_data(c, data)
+    _skriv_ttl(c, ttls)
+    returner 1
+}
+
+funksjon sett_alltid(c: ordbok_tekst, nøkkel: tekst, verdi: tekst) -> heltall {
+    returner sett(c, nøkkel, verdi, 86400 * 365)
+}
+
+funksjon hent(c: ordbok_tekst, nøkkel: tekst, standard: tekst) -> tekst {
+    la type = c["__type__"]
+    la no_ms = _no_ms()
+    la sikker_nøkkel = _sikkert_namn(nøkkel)
+
+    hvis type == "fil" {
+        prøv {
+            la innhald = fil_les(c["__mappe__"] + sikker_nøkkel + ".cache")
+            la linjer = builtin.split(innhald, "\n")
+            hvis lengde(linjer) < 2 { returner standard }
+            la utløp = heltall_fra_tekst(linjer[0])
+            hvis no_ms > utløp {
+                slett(c, nøkkel)
+                returner standard
+            }
+            // Sett saman resten etter første linje
+            la i: heltall = 1
+            la v = ""
+            mens i < lengde(linjer) {
+                hvis i > 1 { v = v + "\n" }
+                v = v + linjer[i]
+                i = i + 1
+            }
+            returner v
+        } fang (e) { returner standard }
+        returner standard
+    }
+
+    la data = _les_data(c)
+    la ttls = _les_ttl(c)
+    hvis ikkje har_nokkel(data, nøkkel) { returner standard }
+    la utløp = heltall_fra_tekst(ttls[nøkkel])
+    hvis no_ms > utløp {
+        fjern_nokkel(data, nøkkel)
+        fjern_nokkel(ttls, nøkkel)
+        _skriv_data(c, data)
+        _skriv_ttl(c, ttls)
+        returner standard
+    }
+    returner data[nøkkel]
+}
+
+funksjon har(c: ordbok_tekst, nøkkel: tekst) -> boolsk {
+    returner hent(c, nøkkel, "__CACHE_MISS__") != "__CACHE_MISS__"
+}
+
+funksjon slett(c: ordbok_tekst, nøkkel: tekst) -> heltall {
+    la type = c["__type__"]
+    la sikker_nøkkel = _sikkert_namn(nøkkel)
+
+    hvis type == "fil" {
+        prøv { fil_slett(c["__mappe__"] + sikker_nøkkel + ".cache") } fang (e) { }
+        returner 1
+    }
+
+    la data = _les_data(c)
+    la ttls = _les_ttl(c)
+    fjern_nokkel(data, nøkkel)
+    fjern_nokkel(ttls, nøkkel)
+    _skriv_data(c, data)
+    _skriv_ttl(c, ttls)
+    returner 1
+}
+
+funksjon tøm(c: ordbok_tekst) -> heltall {
+    la type = c["__type__"]
+    hvis type == "fil" {
+        prøv {
+            la filer = builtin.list_files(c["__mappe__"])
+            la i: heltall = 0
+            mens i < lengde(filer) {
+                la f: tekst = filer[i]
+                hvis tekst_slutter_med(f, ".cache") {
+                    prøv { fil_slett(f) } fang (e) { }
+                }
+                i = i + 1
+            }
+        } fang (e) { }
+        returner 1
+    }
+    la tom: ordbok_tekst = {}
+    _skriv_data(c, tom)
+    _skriv_ttl(c, tom)
+    returner 1
+}
+
+# ─── Avanserte operasjonar ────────────────────────────────────────────────────
+
+// Hent verdi eller set han via fn_namn + arg
+funksjon hent_eller_set(c: ordbok_tekst, nøkkel: tekst, ttl_sek: heltall, fn_namn: tekst, arg: tekst) -> tekst {
+    la cachet = hent(c, nøkkel, "__MISS__")
+    hvis cachet != "__MISS__" { returner cachet }
+    la ny_v = builtin.ncb_call_fn(fn_namn, {"arg": arg})
+    la ny_s = tekst(ny_v)
+    sett(c, nøkkel, ny_s, ttl_sek)
+    returner ny_s
+}
+
+// Tel og inkrementer ein teljar
+funksjon inkrementer(c: ordbok_tekst, nøkkel: tekst, steg: heltall) -> heltall {
+    la gjeldande = hent(c, nøkkel, "0")
+    la ny_v = heltall_fra_tekst(gjeldande) + steg
+    sett_alltid(c, nøkkel, tekst_fra_heltall(ny_v))
+    returner ny_v
+}
+
+funksjon dekrementer(c: ordbok_tekst, nøkkel: tekst, steg: heltall) -> heltall {
+    returner inkrementer(c, nøkkel, 0 - steg)
+}
+
+// Tagging — slett alle nøklar med eit tag
+funksjon sett_med_tag(c: ordbok_tekst, nøkkel: tekst, verdi: tekst, ttl_sek: heltall, tag: tekst) -> heltall {
+    sett(c, nøkkel, verdi, ttl_sek)
+    la tag_nøkkel = "__tag__" + tag
+    la gjeldande_tags = hent(c, tag_nøkkel, "")
+    la ny_tags = hvis gjeldande_tags == "" { nøkkel } ellers { gjeldande_tags + "|" + nøkkel }
+    sett_alltid(c, tag_nøkkel, ny_tags)
+    returner 1
+}
+
+funksjon slett_tag(c: ordbok_tekst, tag: tekst) -> heltall {
+    la tag_nøkkel = "__tag__" + tag
+    la nøklar_s = hent(c, tag_nøkkel, "")
+    hvis nøklar_s == "" { returner 0 }
+    la nøklar = builtin.split(nøklar_s, "|")
+    la slettet: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(nøklar) {
+        la nk: tekst = nøklar[i]
+        hvis nk != "" {
+            slett(c, nk)
+            slettet = slettet + 1
+        }
+        i = i + 1
+    }
+    slett(c, tag_nøkkel)
+    returner slettet
+}
+
+# ─── Rate-begrensing via cache ────────────────────────────────────────────────
+
+funksjon rate_check(c: ordbok_tekst, nøkkel: tekst, maks: heltall, vindauge_sek: heltall) -> boolsk {
+    la teller = inkrementer(c, "__rate__" + nøkkel, 1)
+    // Set TTL berre første gong (når teller == 1)
+    hvis teller == 1 { sett(c, "__rate__" + nøkkel, "1", vindauge_sek) }
+    returner teller <= maks
+}
+
+# ─── Web-respons-cache ────────────────────────────────────────────────────────
+
+funksjon cache_respons(c: ordbok_tekst, cache_nøkkel: tekst, resp: ordbok_tekst, ttl_sek: heltall) -> heltall {
+    la status = tekst(resp["status"])
+    la body   = tekst(resp["body"])
+    la v = status + "|||" + body
+    returner sett(c, "__resp__" + cache_nøkkel, v, ttl_sek)
+}
+
+funksjon hent_respons(c: ordbok_tekst, cache_nøkkel: tekst) -> ordbok_tekst {
+    la v = hent(c, "__resp__" + cache_nøkkel, "")
+    hvis v == "" { returner {} }
+    la delar = builtin.split(v, "|||")
+    hvis lengde(delar) < 2 { returner {} }
+    la r: ordbok_tekst = {}
+    r["status"] = delar[0]
+    r["body"]   = delar[1]
+    returner r
+}
+
+# ─── Statistikk ───────────────────────────────────────────────────────────────
+
+funksjon statistikk(c: ordbok_tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["type"] = c["__type__"]
+    hvis c["__type__"] == "minne" {
+        la data = _les_data(c)
+        s["tal_nøklar"] = tekst_fra_heltall(lengde(nøkler(data)))
+    } ellers {
+        s["mappe"] = c["__mappe__"]
+    }
+    returner s
+}
+
+# ─── Interne hjelpefunksjonar ─────────────────────────────────────────────────
+
+funksjon _no_ms() -> heltall {
+    prøv { returner builtin.now_ms() } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon _sikkert_namn(nøkkel: tekst) -> tekst {
+    la r = tekst_erstatt(nøkkel, "/", "_")
+    r = tekst_erstatt(r, ":", "_")
+    r = tekst_erstatt(r, " ", "_")
+    r = tekst_erstatt(r, ".", "_")
+    returner r
+}
+
+funksjon _les_data(c: ordbok_tekst) -> ordbok_tekst {
+    prøv {
+        la raw = c["__data__"]
+        la parsed = builtin.json_parse_raw(raw)
+        returner parsed
+    } fang (e) { returner {} }
     returner {}
 }
 
-funksjon antall(cache: ordbok_tekst) -> heltall {
-    returner lengde(cache)
+funksjon _les_ttl(c: ordbok_tekst) -> ordbok_tekst {
+    prøv {
+        la raw = c["__ttl__"]
+        la parsed = builtin.json_parse_raw(raw)
+        returner parsed
+    } fang (e) { returner {} }
+    returner {}
 }
 
-funksjon har(cache: ordbok_tekst, nøkkel: tekst) -> bool {
-    returner har_nokkel(cache, nøkkel)
-}
-
-funksjon sett(cache: ordbok_tekst, nøkkel: tekst, verdi: tekst) -> heltall {
-    cache[nøkkel] = verdi
-    returner lengde(cache)
-}
-
-funksjon sett_tall(cache: ordbok_tekst, nøkkel: tekst, verdi: heltall) -> heltall {
-    cache[nøkkel] = tekst_fra_heltall(verdi)
-    returner lengde(cache)
-}
-
-funksjon sett_bool(cache: ordbok_tekst, nøkkel: tekst, verdi: bool) -> heltall {
-    hvis (verdi) {
-        cache[nøkkel] = "true"
-    } ellers {
-        cache[nøkkel] = "false"
+funksjon _skriv_data(c: ordbok_tekst, data: ordbok_tekst) -> heltall {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
     }
-    returner lengde(cache)
+    c["__data__"] = "{" + tekst_saman(delar, ",") + "}"
+    returner 0
 }
 
-funksjon hent(cache: ordbok_tekst, nøkkel: tekst) -> tekst {
-    returner cache[nøkkel]
-}
-
-funksjon hent_eller(cache: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> tekst {
-    hvis (har_nokkel(cache, nøkkel)) {
-        returner cache[nøkkel]
+funksjon _skriv_ttl(c: ordbok_tekst, ttls: ordbok_tekst) -> heltall {
+    la nk = nøkler(ttls)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        legg_til(delar, "\"" + k + "\":" + tekst(ttls[k]))
+        i = i + 1
     }
-    returner fallback
-}
-
-funksjon hent_tall(cache: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner heltall_fra_tekst(cache[nøkkel])
-}
-
-funksjon hent_bool(cache: ordbok_tekst, nøkkel: tekst) -> bool {
-    la verdi = cache[nøkkel]
-    hvis (verdi == "true") {
-        returner sann
-    }
-    hvis (verdi == "false") {
-        returner usann
-    }
-    returner usann
-}
-
-funksjon fjern(cache: ordbok_tekst, nøkkel: tekst) -> heltall {
-    returner fjern_nokkel(cache, nøkkel)
+    c["__ttl__"] = "{" + tekst_saman(delar, ",") + "}"
+    returner 0
 }

@@ -1,0 +1,334 @@
+# rest.no — REST API-rammeverk for Norscode
+# Django REST Framework-inspirert
+#
+# Bruk:
+#   bruk std.rest som rest
+#   bruk std.orm som orm
+#   bruk std.web som web
+#
+#   # Definér serialisering
+#   la felt = ["id", "namn", "epost", "oppretta"]
+#   la skrivbart = ["namn", "epost"]
+#
+#   # Viewset — handterer GET/POST/PUT/DELETE automatisk
+#   funksjon brukarar(ctx) -> ordbok_tekst {
+#       returner rest.viewset(conn, ctx, "brukar", felt, skrivbart)
+#   }
+#
+#   web.route("GET /api/brukarar")
+#   web.route("POST /api/brukarar")
+#   web.route("GET /api/brukarar/{id:int}")
+#   web.route("PUT /api/brukarar/{id:int}")
+#   web.route("DELETE /api/brukarar/{id:int}")
+
+bruk std.orm som orm
+bruk std.web som web
+bruk std.skjema som skjema
+
+# ─── Serialisering ────────────────────────────────────────────────────────────
+
+funksjon serialiser(rad: ordbok_tekst, felt: liste<tekst>) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    la i: heltall = 0
+    mens i < lengde(felt) {
+        la f: tekst = felt[i]
+        hvis har_nokkel(rad, f) { r[f] = rad[f] }
+        ellers { r[f] = "" }
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon serialiser_mange(rader: liste<ordbok_tekst>, felt: liste<tekst>) -> liste<ordbok_tekst> {
+    la resultat: liste<ordbok_tekst> = []
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        legg_til(resultat, serialiser(rader[i], felt))
+        i = i + 1
+    }
+    returner resultat
+}
+
+funksjon til_json(rad: ordbok_tekst) -> tekst {
+    la nk = nøkler(rad)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst(rad[k])
+        // Naiv type-gjetting: heltall og boolsk utan sitat
+        la er_tal: boolsk = lengde(v) > 0
+        la j: heltall = 0
+        la v_tegn = builtin.split(v, "")
+        mens j < lengde(v_tegn) og er_tal {
+            la c: tekst = v_tegn[j]
+            la code = builtin.char_code(c)
+            hvis ikkje (code >= 48 og code <= 57) og ikkje (c == "-" og j == 0) { er_tal = usann }
+            j = j + 1
+        }
+        la er_bool = v == "true" eller v == "false" eller v == "sann" eller v == "usann"
+        la er_null = v == "" eller v == "null"
+        hvis er_null {
+            legg_til(delar, "\"" + k + "\":null")
+        } ellers hvis er_bool {
+            la bool_v = hvis v == "sann" { "true" } ellers hvis v == "usann" { "false" } ellers { v }
+            legg_til(delar, "\"" + k + "\":" + bool_v)
+        } ellers hvis er_tal og k == "id" eller (er_tal og tekst_slutter_med(k, "_id") ) eller (er_tal og k == "tal") {
+            legg_til(delar, "\"" + k + "\":" + v)
+        } ellers {
+            legg_til(delar, "\"" + k + "\":\"" + _escape_json(v) + "\"")
+        }
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}
+
+funksjon liste_til_json(rader: liste<ordbok_tekst>) -> tekst {
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(rader) {
+        legg_til(delar, til_json(rader[i]))
+        i = i + 1
+    }
+    returner "[" + tekst_saman(delar, ",") + "]"
+}
+
+# ─── Paginering ───────────────────────────────────────────────────────────────
+
+funksjon paginert_svar(rader: liste<ordbok_tekst>, felt: liste<tekst>, ctx: ordbok_tekst, totalt: heltall) -> ordbok_tekst {
+    la side_nr  = _query_int(ctx, "side",     1)
+    la per_side = _query_int(ctx, "per_side", 20)
+    la sider    = (totalt + per_side - 1) / per_side
+
+    la serialisert = serialiser_mange(rader, felt)
+    la data_json   = liste_til_json(serialisert)
+
+    la body = "{\"totalt\":" + tekst_fra_heltall(totalt) +
+              ",\"side\":"    + tekst_fra_heltall(side_nr) +
+              ",\"per_side\":" + tekst_fra_heltall(per_side) +
+              ",\"sider\":"   + tekst_fra_heltall(sider) +
+              ",\"data\":"    + data_json + "}"
+    returner web.response_builder(200, _json_headers(), body)
+}
+
+funksjon enkel_side(conn: tekst, ctx: ordbok_tekst, tabell: tekst, felt: liste<tekst>) -> ordbok_tekst {
+    la side_nr  = _query_int(ctx, "side",     1)
+    la per_side = _query_int(ctx, "per_side", 20)
+    la totalt   = orm.tell(conn, tabell)
+    la rader    = orm.side(conn, tabell, side_nr, per_side)
+    returner paginert_svar(rader, felt, ctx, totalt)
+}
+
+# ─── Filtrering ───────────────────────────────────────────────────────────────
+
+funksjon bygg_filter(ctx: ordbok_tekst, tillatte_felt: liste<tekst>) -> tekst {
+    la betingelse = ""
+    la i: heltall = 0
+    mens i < lengde(tillatte_felt) {
+        la f: tekst = tillatte_felt[i]
+        la v = web.request_query_param(ctx, f)
+        hvis v != "" {
+            la escaped = orm._escape(v)
+            la del = f + " = '" + escaped + "'"
+            hvis betingelse == "" { betingelse = del }
+            ellers { betingelse = betingelse + " AND " + del }
+        }
+        i = i + 1
+    }
+    returner betingelse
+}
+
+funksjon søk_filter(ctx: ordbok_tekst, søk_felt: liste<tekst>) -> tekst {
+    la q = web.request_query_param(ctx, "q")
+    hvis q == "" { returner "" }
+    la delar: liste<tekst> = []
+    la escaped = orm._escape(q)
+    la i: heltall = 0
+    mens i < lengde(søk_felt) {
+        la f: tekst = søk_felt[i]
+        legg_til(delar, f + " LIKE '%" + escaped + "%'")
+        i = i + 1
+    }
+    hvis lengde(delar) == 0 { returner "" }
+    returner "(" + tekst_saman(delar, " OR ") + ")"
+}
+
+# ─── Viewset ──────────────────────────────────────────────────────────────────
+
+# Handterer heile REST CRUD for ein ressurs automatisk
+funksjon viewset(conn: tekst, ctx: ordbok_tekst, tabell: tekst, felt: liste<tekst>, skrivbart: liste<tekst>) -> ordbok_tekst {
+    la metode = web.request_method(ctx)
+    la id_param = web.request_param(ctx, "id")
+    la id: heltall = 0
+    la har_id: boolsk = id_param != ""
+    hvis har_id { id = heltall_fra_tekst(id_param) }
+
+    // Liste: GET /ressurs
+    hvis metode == "GET" og ikkje har_id {
+        la totalt = orm.tell(conn, tabell)
+        la side_nr  = _query_int(ctx, "side",     1)
+        la per_side = _query_int(ctx, "per_side", 20)
+        la rader = orm.side(conn, tabell, side_nr, per_side)
+        returner paginert_svar(rader, felt, ctx, totalt)
+    }
+
+    // Detalj: GET /ressurs/{id}
+    hvis metode == "GET" og har_id {
+        la rad = orm.finn(conn, tabell, id)
+        hvis ikkje har_nokkel(rad, "id") {
+            returner ikkje_funne(tabell, id)
+        }
+        la s = serialiser(rad, felt)
+        returner web.response_builder(200, _json_headers(), til_json(s))
+    }
+
+    // Opprett: POST /ressurs
+    hvis metode == "POST" {
+        la data = _hent_skrivbar_data(ctx, skrivbart)
+        hvis lengde(nøkler(data)) == 0 {
+            returner bad_request("Ingen data i body")
+        }
+        la ny_id = orm.lagre(conn, tabell, data)
+        la ny_rad = orm.finn(conn, tabell, ny_id)
+        la s = serialiser(ny_rad, felt)
+        returner web.response_builder(201, _json_headers(), til_json(s))
+    }
+
+    // Oppdater: PUT /ressurs/{id}
+    hvis metode == "PUT" og har_id {
+        hvis ikkje orm.finnes(conn, tabell, id) {
+            returner ikkje_funne(tabell, id)
+        }
+        la data = _hent_skrivbar_data(ctx, skrivbart)
+        orm.oppdater(conn, tabell, id, data)
+        la oppdatert = orm.finn(conn, tabell, id)
+        la s = serialiser(oppdatert, felt)
+        returner web.response_builder(200, _json_headers(), til_json(s))
+    }
+
+    // Delvis oppdatering: PATCH /ressurs/{id}
+    hvis metode == "PATCH" og har_id {
+        hvis ikkje orm.finnes(conn, tabell, id) {
+            returner ikkje_funne(tabell, id)
+        }
+        la data = _hent_skrivbar_data(ctx, skrivbart)
+        orm.oppdater(conn, tabell, id, data)
+        la oppdatert = orm.finn(conn, tabell, id)
+        la s = serialiser(oppdatert, felt)
+        returner web.response_builder(200, _json_headers(), til_json(s))
+    }
+
+    // Slett: DELETE /ressurs/{id}
+    hvis metode == "DELETE" og har_id {
+        hvis ikkje orm.finnes(conn, tabell, id) {
+            returner ikkje_funne(tabell, id)
+        }
+        orm.slett(conn, tabell, id)
+        returner web.response_builder(204, _json_headers(), "")
+    }
+
+    returner web.response_error(405, "Metode ikkje tillatt: " + metode)
+}
+
+# ─── Standardsvar ─────────────────────────────────────────────────────────────
+
+funksjon ok(data: tekst) -> ordbok_tekst {
+    returner web.response_builder(200, _json_headers(), data)
+}
+
+funksjon oppretta(data: tekst) -> ordbok_tekst {
+    returner web.response_builder(201, _json_headers(), data)
+}
+
+funksjon ingen_innhald() -> ordbok_tekst {
+    returner web.response_builder(204, _json_headers(), "")
+}
+
+funksjon ikkje_funne(ressurs: tekst, id: heltall) -> ordbok_tekst {
+    la body = "{\"feil\":\"" + ressurs + " med id " + tekst_fra_heltall(id) + " finst ikkje\"}"
+    returner web.response_builder(404, _json_headers(), body)
+}
+
+funksjon bad_request(melding: tekst) -> ordbok_tekst {
+    la body = "{\"feil\":\"" + _escape_json(melding) + "\"}"
+    returner web.response_builder(400, _json_headers(), body)
+}
+
+funksjon uautorisert() -> ordbok_tekst {
+    returner web.response_builder(401, _json_headers(), "{\"feil\":\"Ikkje autorisert\"}")
+}
+
+funksjon forbudt() -> ordbok_tekst {
+    returner web.response_builder(403, _json_headers(), "{\"feil\":\"Forbudt\"}")
+}
+
+funksjon validerings_feil(feil: ordbok_tekst) -> ordbok_tekst {
+    la nk = nøkler(feil)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        legg_til(delar, "\"" + k + "\":\"" + _escape_json(feil[k]) + "\"")
+        i = i + 1
+    }
+    la body = "{\"feil\":\"Valideringsfeil\",\"detaljar\":{" + tekst_saman(delar, ",") + "}}"
+    returner web.response_builder(422, _json_headers(), body)
+}
+
+funksjon server_feil(melding: tekst) -> ordbok_tekst {
+    la body = "{\"feil\":\"Intern serverfeil\",\"detaljar\":\"" + _escape_json(melding) + "\"}"
+    returner web.response_builder(500, _json_headers(), body)
+}
+
+# ─── OpenAPI-metadata ─────────────────────────────────────────────────────────
+
+funksjon openapi_ressurs(tabell: tekst, felt: liste<tekst>, prefiks: tekst) -> tekst {
+    la felt_schema = ""
+    la i: heltall = 0
+    mens i < lengde(felt) {
+        la f: tekst = felt[i]
+        hvis i > 0 { felt_schema = felt_schema + "," }
+        la type_val = hvis f == "id" { "integer" } ellers { "string" }
+        felt_schema = felt_schema + "\"" + f + "\":{\"type\":\"" + type_val + "\"}"
+        i = i + 1
+    }
+    la list_path = prefiks + "/" + tabell
+    la detail_path = list_path + "/{id}"
+    returner "\"" + list_path + "\":{\"get\":{\"summary\":\"Liste " + tabell + "\",\"responses\":{\"200\":{\"description\":\"OK\"}}},\"post\":{\"summary\":\"Opprett " + tabell + "\",\"responses\":{\"201\":{\"description\":\"Oppretta\"}}}},\"" + detail_path + "\":{\"get\":{\"summary\":\"Hent " + tabell + "\",\"responses\":{\"200\":{\"description\":\"OK\"},\"404\":{\"description\":\"Ikkje funne\"}}},\"put\":{\"summary\":\"Oppdater " + tabell + "\",\"responses\":{\"200\":{\"description\":\"OK\"}}},\"delete\":{\"summary\":\"Slett " + tabell + "\",\"responses\":{\"204\":{\"description\":\"Sletta\"}}}}"
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon _json_headers() -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["content-type"] = "application/json; charset=utf-8"
+    returner h
+}
+
+funksjon _escape_json(s: tekst) -> tekst {
+    la r = tekst_erstatt(s, "\\", "\\\\")
+    r = tekst_erstatt(r, "\"", "\\\"")
+    r = tekst_erstatt(r, "\n", "\\n")
+    r = tekst_erstatt(r, "\r", "\\r")
+    r = tekst_erstatt(r, "\t", "\\t")
+    returner r
+}
+
+funksjon _query_int(ctx: ordbok_tekst, param: tekst, standard: heltall) -> heltall {
+    la v = web.request_query_param(ctx, param)
+    hvis v == "" { returner standard }
+    prøv { returner heltall_fra_tekst(v) } fang (e) { returner standard }
+    returner standard
+}
+
+funksjon _hent_skrivbar_data(ctx: ordbok_tekst, skrivbart: liste<tekst>) -> ordbok_tekst {
+    la all_data = web.request_json(ctx)
+    la r: ordbok_tekst = {}
+    la i: heltall = 0
+    mens i < lengde(skrivbart) {
+        la f: tekst = skrivbart[i]
+        hvis har_nokkel(all_data, f) { r[f] = tekst(all_data[f]) }
+        i = i + 1
+    }
+    returner r
+}

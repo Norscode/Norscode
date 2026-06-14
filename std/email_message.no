@@ -1,0 +1,558 @@
+# email_message.no — E-postmelding-parsing og -bygging
+# Python: email.message
+#
+# Parsering av RFC 2822 e-postmeldingar (headers + kropp).
+# Støttar MIME multipart-meldingar (walk over delar).
+#
+# Meldings-objekt: ordbok_tekst
+#   "_type"    → "epost_melding"
+#   "_headers" → JSON-liste av [namn, verdi]-par (bevar rekkjefølgje og duplikatar)
+#   "_kropp"   → tekst-innhald (for enkle meldingar)
+#   "_delar"   → JSON-liste av meldings-JSON (for multipart)
+#   "_er_multi"→ "sann"/"usann"
+#
+# Bruk:
+#   bruk std.email_message som em
+#
+#   # Parse ei melding
+#   la msg = em.parse(rå_melding)
+#   skriv em.get_header(msg, "From")
+#   skriv em.get_body(msg)
+#
+#   # Bygg ei melding
+#   la msg2 = em.ny()
+#   em.set_header(msg2, "From", "ola@example.no")
+#   em.set_header(msg2, "To", "kari@example.no")
+#   em.set_header(msg2, "Subject", "Hei!")
+#   em.set_body(msg2, "Hei Kari!\n")
+#   skriv em.format(msg2)
+
+# ─── Konstruktørar ────────────────────────────────────────────────────────────
+
+funksjon ny() -> ordbok_tekst {
+    la msg: ordbok_tekst = {}
+    msg["_type"]    = "epost_melding"
+    msg["_headers"] = "[]"
+    msg["_kropp"]   = ""
+    msg["_delar"]   = "[]"
+    msg["_er_multi"] = "usann"
+    msg["_charset"] = "utf-8"
+    msg["_content_type"] = "text/plain"
+    returner msg
+}
+
+funksjon ny_multipart(subtype: tekst) -> ordbok_tekst {
+    la msg = ny()
+    msg["_er_multi"] = "sann"
+    msg["_content_type"] = "multipart/" + subtype
+    msg["_boundary"] = "NORSCODE_" + tekst_fra_heltall(builtin.tid_ms())
+    returner msg
+}
+
+# ─── Parsering (RFC 2822) ─────────────────────────────────────────────────────
+
+funksjon parse(rå: tekst) -> ordbok_tekst {
+    la msg = ny()
+    la linjer = builtin.split(rå, "\n")
+    la n: heltall = lengde(linjer)
+
+    # Del 1: Parse headers (fram til første tomme linje)
+    la i: heltall = 0
+    la sist_header_namn: tekst = ""
+    mens (i < n) {
+        la linje: tekst = linjer[i]
+        la linje_teikn = builtin.split(linje, "")
+        la ll: heltall = lengde(linje_teikn)
+
+        # Fjern carriage return
+        la ll_trim: heltall = ll
+        mens (ll_trim > 0 og linje_teikn[ll_trim - 1] == "\r") {
+            ll_trim = ll_trim - 1
+        }
+        la linje_r: tekst = builtin.join(builtin.slice(linje_teikn, 0, ll_trim), "")
+
+        # Tom linje = skiljet mellom headers og kropp
+        hvis (linje_r == "") {
+            i = i + 1
+            # Resten er kropp
+            la kropp_linjer = builtin.slice(linjer, i, n)
+            msg["_kropp"] = builtin.join(kropp_linjer, "\n")
+            # Sjekk om multipart
+            la ct: tekst = get_header(msg, "Content-Type")
+            la ct_delar = builtin.split(ct, ";")
+            la ct_type: tekst = _trim(ct_delar[0])
+            msg["_content_type"] = ct_type
+
+            # Sjekk Content-Transfer-Encoding
+            la cte: tekst = get_header(msg, "Content-Transfer-Encoding")
+            msg["_encoding"] = cte
+
+            hvis (tekst_starter_med(ct_type, "multipart/")) {
+                msg["_er_multi"] = "sann"
+                # Finn boundary
+                la boundary: tekst = _finn_param(ct, "boundary")
+                hvis (boundary != "") {
+                    msg["_boundary"] = boundary
+                    _parse_delar(msg, msg["_kropp"], boundary)
+                }
+            }
+            returner msg
+        }
+
+        # Folding (linje som startar med whitespace er hald-fram av forrige header)
+        la er_fold: bool = usann
+        hvis (ll_trim > 0 og (linje_teikn[0] == " " eller linje_teikn[0] == "\t")) {
+            er_fold = sann
+        }
+
+        hvis (er_fold og sist_header_namn != "") {
+            # Legg til-verdi på forrige header
+            la headers = builtin.json_parse(msg["_headers"])
+            la hn: heltall = lengde(headers)
+            hvis (hn > 0) {
+                la siste = builtin.json_parse(headers[hn - 1])
+                siste[1] = siste[1] + " " + _trim(linje_r)
+                headers[hn - 1] = builtin.json_stringify(siste)
+                msg["_headers"] = builtin.json_stringify(headers)
+            }
+        } ellers {
+            # Ny header: "Namn: verdi"
+            la kolon_idx: heltall = _finn_kolon(linje_r)
+            hvis (kolon_idx > 0) {
+                la lt = builtin.split(linje_r, "")
+                la namn: tekst = builtin.join(builtin.slice(lt, 0, kolon_idx), "")
+                la verdi_raw: tekst = ""
+                hvis (kolon_idx + 1 < lengde(lt)) {
+                    verdi_raw = builtin.join(builtin.slice(lt, kolon_idx + 1, lengde(lt)), "")
+                }
+                la verdi: tekst = _trim(verdi_raw)
+                la par: liste_tekst = [namn, verdi]
+                la headers = builtin.json_parse(msg["_headers"])
+                legg_til(headers, builtin.json_stringify(par))
+                msg["_headers"] = builtin.json_stringify(headers)
+                sist_header_namn = namn
+            }
+        }
+        i = i + 1
+    }
+    returner msg
+}
+
+funksjon _parse_delar(msg: ordbok_tekst, kropp: tekst, boundary: tekst) {
+    la separator: tekst = "--" + boundary
+    la delar = builtin.split(kropp, separator)
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(delar)) {
+        la del_tekst: tekst = delar[i]
+        la dt = builtin.split(del_tekst, "")
+        la dl: heltall = lengde(dt)
+        # Hopp over tomme og avslutting-marker (--)
+        hvis (dl > 2) {
+            la trimma: tekst = _trim(del_tekst)
+            la tt = builtin.split(trimma, "")
+            la tl: heltall = lengde(tt)
+            # Sjekk ikkje er "--" (avslutting)
+            la er_slutt: bool = usann
+            hvis (tl >= 2 og tt[0] == "-" og tt[1] == "-") { er_slutt = sann }
+            hvis (ikkje er_slutt og tl > 0) {
+                la del_msg = parse(del_tekst)
+                legg_til(resultat, builtin.json_stringify(del_msg))
+            }
+        }
+        i = i + 1
+    }
+    msg["_delar"] = builtin.json_stringify(resultat)
+}
+
+# ─── Header-tilgang ───────────────────────────────────────────────────────────
+
+# Hent første header med dette namnet (case-insensitive)
+funksjon get_header(msg: ordbok_tekst, namn: tekst) -> tekst {
+    la headers = builtin.json_parse(msg["_headers"])
+    la namn_lower: tekst = _lower(namn)
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        la header_namn: tekst = _lower(par[0])
+        hvis (header_namn == namn_lower) {
+            returner par[1]
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Hent alle headers med dette namnet
+funksjon get_all_headers(msg: ordbok_tekst, namn: tekst) -> liste_tekst {
+    la headers = builtin.json_parse(msg["_headers"])
+    la namn_lower: tekst = _lower(namn)
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        la header_namn: tekst = _lower(par[0])
+        hvis (header_namn == namn_lower) {
+            legg_til(resultat, par[1])
+        }
+        i = i + 1
+    }
+    returner resultat
+}
+
+# Set ein header (erstattar første førekomst, eller legg til)
+funksjon set_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
+    la headers = builtin.json_parse(msg["_headers"])
+    la namn_lower: tekst = _lower(namn)
+    la funne: bool = usann
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        la header_namn: tekst = _lower(par[0])
+        hvis (header_namn == namn_lower og ikkje funne) {
+            la ny_par: liste_tekst = [namn, verdi]
+            headers[i] = builtin.json_stringify(ny_par)
+            funne = sann
+        }
+        i = i + 1
+    }
+    hvis (ikkje funne) {
+        la ny_par: liste_tekst = [namn, verdi]
+        legg_til(headers, builtin.json_stringify(ny_par))
+    }
+    msg["_headers"] = builtin.json_stringify(headers)
+}
+
+# Legg til ein header (utan å erstatte eksisterande)
+funksjon add_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
+    la headers = builtin.json_parse(msg["_headers"])
+    la ny_par: liste_tekst = [namn, verdi]
+    legg_til(headers, builtin.json_stringify(ny_par))
+    msg["_headers"] = builtin.json_stringify(headers)
+}
+
+# Slett alle headers med dette namnet
+funksjon del_header(msg: ordbok_tekst, namn: tekst) {
+    la headers = builtin.json_parse(msg["_headers"])
+    la namn_lower: tekst = _lower(namn)
+    la ny_headers: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        la header_namn: tekst = _lower(par[0])
+        hvis (header_namn != namn_lower) {
+            legg_til(ny_headers, headers[i])
+        }
+        i = i + 1
+    }
+    msg["_headers"] = builtin.json_stringify(ny_headers)
+}
+
+# Hent alle header-namn
+funksjon header_nøklar(msg: ordbok_tekst) -> liste_tekst {
+    la headers = builtin.json_parse(msg["_headers"])
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        legg_til(resultat, par[0])
+        i = i + 1
+    }
+    returner resultat
+}
+
+# ─── Kropp-tilgang ────────────────────────────────────────────────────────────
+
+funksjon get_body(msg: ordbok_tekst) -> tekst {
+    returner msg["_kropp"]
+}
+
+funksjon set_body(msg: ordbok_tekst, innhald: tekst) {
+    msg["_kropp"] = innhald
+}
+
+funksjon get_content_type(msg: ordbok_tekst) -> tekst {
+    la ct: tekst = msg["_content_type"]
+    hvis (ct == "") {
+        returner get_header(msg, "Content-Type")
+    }
+    returner ct
+}
+
+funksjon er_multipart(msg: ordbok_tekst) -> bool {
+    returner msg["_er_multi"] == "sann"
+}
+
+# ─── MIME-delar (multipart) ───────────────────────────────────────────────────
+
+funksjon get_delar(msg: ordbok_tekst) -> liste_tekst {
+    returner builtin.json_parse(msg["_delar"])
+}
+
+funksjon add_del(msg: ordbok_tekst, del_msg: ordbok_tekst) {
+    la delar = builtin.json_parse(msg["_delar"])
+    legg_til(delar, builtin.json_stringify(del_msg))
+    msg["_delar"] = builtin.json_stringify(delar)
+    msg["_er_multi"] = "sann"
+}
+
+# walk: iterer over alle delar (inkl. sjølve meldinga)
+funksjon walk(msg: ordbok_tekst) -> liste_tekst {
+    la resultat: liste_tekst = []
+    _walk_rekursiv(msg, resultat)
+    returner resultat
+}
+
+funksjon _walk_rekursiv(msg: ordbok_tekst, resultat: liste_tekst) {
+    legg_til(resultat, builtin.json_stringify(msg))
+    hvis (er_multipart(msg)) {
+        la delar = builtin.json_parse(msg["_delar"])
+        la i: heltall = 0
+        mens (i < lengde(delar)) {
+            la del_msg = builtin.json_parse(delar[i])
+            _walk_rekursiv(del_msg, resultat)
+            i = i + 1
+        }
+    }
+}
+
+# Finn første del med gitt content-type
+funksjon finn_del(msg: ordbok_tekst, content_type: tekst) -> ordbok_tekst {
+    la alle = walk(msg)
+    la i: heltall = 0
+    mens (i < lengde(alle)) {
+        la del_msg = builtin.json_parse(alle[i])
+        la ct: tekst = get_content_type(del_msg)
+        la ct_delar = builtin.split(ct, ";")
+        la ct_base: tekst = _trim(ct_delar[0])
+        hvis (ct_base == content_type) {
+            returner del_msg
+        }
+        i = i + 1
+    }
+    returner ny()
+}
+
+# ─── Formatering (RFC 2822) ───────────────────────────────────────────────────
+
+funksjon format(msg: ordbok_tekst) -> tekst {
+    la ut: tekst = ""
+
+    # Content-Type
+    la ct: tekst = get_content_type(msg)
+    la har_ct: bool = get_header(msg, "Content-Type") != ""
+
+    # Skriv headers
+    la headers = builtin.json_parse(msg["_headers"])
+    la i: heltall = 0
+    mens (i < lengde(headers)) {
+        la par = builtin.json_parse(headers[i])
+        ut = ut + par[0] + ": " + par[1] + "\n"
+        i = i + 1
+    }
+
+    # Legg til Content-Type viss manglar
+    hvis (ikkje har_ct og ct != "" og ct != "text/plain") {
+        hvis (er_multipart(msg)) {
+            la boundary: tekst = msg["_boundary"]
+            ut = ut + "Content-Type: " + ct + "; boundary=\"" + boundary + "\"\n"
+        } ellers {
+            ut = ut + "Content-Type: " + ct + "; charset=" + msg["_charset"] + "\n"
+        }
+    }
+
+    ut = ut + "\n"  # Tom linje mellom headers og kropp
+
+    # Kropp
+    hvis (er_multipart(msg)) {
+        la boundary: tekst = msg["_boundary"]
+        la delar = builtin.json_parse(msg["_delar"])
+        la j: heltall = 0
+        mens (j < lengde(delar)) {
+            ut = ut + "--" + boundary + "\n"
+            la del_msg = builtin.json_parse(delar[j])
+            ut = ut + format(del_msg)
+            j = j + 1
+        }
+        ut = ut + "--" + boundary + "--\n"
+    } ellers {
+        ut = ut + msg["_kropp"]
+    }
+
+    returner ut
+}
+
+# ─── Konvenienshjelperar ──────────────────────────────────────────────────────
+
+# Vanleg felt-tilgang
+funksjon get_from(msg: ordbok_tekst) -> tekst { returner get_header(msg, "From") }
+funksjon get_to(msg: ordbok_tekst) -> tekst { returner get_header(msg, "To") }
+funksjon get_cc(msg: ordbok_tekst) -> tekst { returner get_header(msg, "Cc") }
+funksjon get_subject(msg: ordbok_tekst) -> tekst { returner get_header(msg, "Subject") }
+funksjon get_date(msg: ordbok_tekst) -> tekst { returner get_header(msg, "Date") }
+funksjon get_message_id(msg: ordbok_tekst) -> tekst { returner get_header(msg, "Message-Id") }
+funksjon get_reply_to(msg: ordbok_tekst) -> tekst { returner get_header(msg, "Reply-To") }
+
+funksjon set_from(msg: ordbok_tekst, verdi: tekst)    { set_header(msg, "From", verdi) }
+funksjon set_to(msg: ordbok_tekst, verdi: tekst)      { set_header(msg, "To", verdi) }
+funksjon set_subject(msg: ordbok_tekst, verdi: tekst) { set_header(msg, "Subject", verdi) }
+funksjon set_date(msg: ordbok_tekst, verdi: tekst)    { set_header(msg, "Date", verdi) }
+
+# Bygg ein enkel tekst-melding
+funksjon ny_tekst_melding(frå: tekst, til: tekst, emne: tekst, kropp: tekst) -> ordbok_tekst {
+    la msg = ny()
+    set_header(msg, "From", frå)
+    set_header(msg, "To", til)
+    set_header(msg, "Subject", emne)
+    set_header(msg, "MIME-Version", "1.0")
+    set_header(msg, "Content-Type", "text/plain; charset=utf-8")
+    set_body(msg, kropp)
+    returner msg
+}
+
+# Bygg ein HTML-melding med tekstfallback
+funksjon ny_html_melding(frå: tekst, til: tekst, emne: tekst,
+                          tekst_kropp: tekst, html_kropp: tekst) -> ordbok_tekst {
+    la msg = ny_multipart("alternative")
+    set_header(msg, "From", frå)
+    set_header(msg, "To", til)
+    set_header(msg, "Subject", emne)
+    set_header(msg, "MIME-Version", "1.0")
+
+    la tekst_del = ny()
+    tekst_del["_content_type"] = "text/plain"
+    set_header(tekst_del, "Content-Type", "text/plain; charset=utf-8")
+    set_body(tekst_del, tekst_kropp)
+    add_del(msg, tekst_del)
+
+    la html_del = ny()
+    html_del["_content_type"] = "text/html"
+    set_header(html_del, "Content-Type", "text/html; charset=utf-8")
+    set_body(html_del, html_kropp)
+    add_del(msg, html_del)
+
+    returner msg
+}
+
+# Les melding frå fil
+funksjon les_frå_fil(sti: tekst) -> ordbok_tekst {
+    prøv {
+        la innhald: tekst = builtin.fil_les(sti)
+        returner parse(innhald)
+    } fang (e) {
+        returner ny()
+    }
+    returner ny()
+}
+
+# Skriv melding til fil
+funksjon skriv_til_fil(msg: ordbok_tekst, sti: tekst) -> bool {
+    prøv {
+        la innhald: tekst = format(msg)
+        builtin.fil_skriv(sti, innhald)
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+# ─── Interne hjelpefunksjonar ─────────────────────────────────────────────────
+
+funksjon _trim(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la n: heltall = lengde(teikn)
+    la start: heltall = 0
+    la slutt: heltall = n
+    mens (start < slutt og (teikn[start] == " " eller teikn[start] == "\t" eller teikn[start] == "\r" eller teikn[start] == "\n")) {
+        start = start + 1
+    }
+    mens (slutt > start og (teikn[slutt-1] == " " eller teikn[slutt-1] == "\t" eller teikn[slutt-1] == "\r" eller teikn[slutt-1] == "\n")) {
+        slutt = slutt - 1
+    }
+    returner builtin.join(builtin.slice(teikn, start, slutt), "")
+}
+
+funksjon _finn_kolon(s: tekst) -> heltall {
+    la teikn = builtin.split(s, "")
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        hvis (teikn[i] == ":") { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+# Hent parameter frå Content-Type-streng (t.d. boundary="...")
+funksjon _finn_param(header_verdi: tekst, param_namn: tekst) -> tekst {
+    la delar = builtin.split(header_verdi, ";")
+    la i: heltall = 1  # hopp over hovud-typen
+    mens (i < lengde(delar)) {
+        la del_tekst: tekst = _trim(delar[i])
+        la eq_idx: heltall = _finn_lik(del_tekst)
+        hvis (eq_idx > 0) {
+            la dt = builtin.split(del_tekst, "")
+            la key: tekst = _trim(builtin.join(builtin.slice(dt, 0, eq_idx), ""))
+            la val: tekst = _trim(builtin.join(builtin.slice(dt, eq_idx + 1, lengde(dt)), ""))
+            la val_teikn = builtin.split(val, "")
+            # Fjern eventuelle hermeteikn
+            la vn: heltall = lengde(val_teikn)
+            hvis (vn >= 2 og val_teikn[0] == "\"" og val_teikn[vn-1] == "\"") {
+                val = builtin.join(builtin.slice(val_teikn, 1, vn-1), "")
+            }
+            hvis (_lower(key) == _lower(param_namn)) {
+                returner val
+            }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _finn_lik(s: tekst) -> heltall {
+    la teikn = builtin.split(s, "")
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        hvis (teikn[i] == "=") { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon _lower(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        la c: tekst = teikn[i]
+        hvis (c == "A") { legg_til(resultat, "a") }
+        ellers hvis (c == "B") { legg_til(resultat, "b") }
+        ellers hvis (c == "C") { legg_til(resultat, "c") }
+        ellers hvis (c == "D") { legg_til(resultat, "d") }
+        ellers hvis (c == "E") { legg_til(resultat, "e") }
+        ellers hvis (c == "F") { legg_til(resultat, "f") }
+        ellers hvis (c == "G") { legg_til(resultat, "g") }
+        ellers hvis (c == "H") { legg_til(resultat, "h") }
+        ellers hvis (c == "I") { legg_til(resultat, "i") }
+        ellers hvis (c == "J") { legg_til(resultat, "j") }
+        ellers hvis (c == "K") { legg_til(resultat, "k") }
+        ellers hvis (c == "L") { legg_til(resultat, "l") }
+        ellers hvis (c == "M") { legg_til(resultat, "m") }
+        ellers hvis (c == "N") { legg_til(resultat, "n") }
+        ellers hvis (c == "O") { legg_til(resultat, "o") }
+        ellers hvis (c == "P") { legg_til(resultat, "p") }
+        ellers hvis (c == "Q") { legg_til(resultat, "q") }
+        ellers hvis (c == "R") { legg_til(resultat, "r") }
+        ellers hvis (c == "S") { legg_til(resultat, "s") }
+        ellers hvis (c == "T") { legg_til(resultat, "t") }
+        ellers hvis (c == "U") { legg_til(resultat, "u") }
+        ellers hvis (c == "V") { legg_til(resultat, "v") }
+        ellers hvis (c == "W") { legg_til(resultat, "w") }
+        ellers hvis (c == "X") { legg_til(resultat, "x") }
+        ellers hvis (c == "Y") { legg_til(resultat, "y") }
+        ellers hvis (c == "Z") { legg_til(resultat, "z") }
+        ellers { legg_til(resultat, c) }
+        i = i + 1
+    }
+    returner builtin.join(resultat, "")
+}

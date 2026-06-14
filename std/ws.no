@@ -1,0 +1,714 @@
+# ws.no — WebSocket-støtte for Norscode
+# Django Channels-ekvivalent
+#
+# Bruk:
+#   bruk std.ws som ws
+#
+#   // Registrer ein WS-handterar
+#   ws.route("/ws/chat/{rom}", "ws_chat")
+#
+#   funksjon ws_chat(conn: ordbok_tekst) -> heltall {
+#       la rom = ws.param(conn, "rom")
+#       ws.send(conn, "Velkomen til " + rom)
+#       mens ws.er_open(conn) {
+#           la melding = ws.motta(conn)
+#           hvis melding != "" {
+#               ws.broadcast(rom, ws.brukar_id(conn) + ": " + melding)
+#           }
+#       }
+#       returner 0
+#   }
+
+# ─── Handshake ────────────────────────────────────────────────────────────────
+
+funksjon er_ws_request(ctx: ordbok_tekst) -> boolsk {
+    prøv {
+        la upgrade = tekst_til_liten(hent_header(ctx, "upgrade"))
+        la connection = tekst_til_liten(hent_header(ctx, "connection"))
+        returner upgrade == "websocket" og tekst_inneholder(connection, "upgrade")
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon handshake_respons(ctx: ordbok_tekst) -> ordbok_tekst {
+    la nøkkel = hent_header(ctx, "sec-websocket-key")
+    la aksept = _ws_aksept_nøkkel(nøkkel)
+    la h: ordbok_tekst = {}
+    h["upgrade"]               = "websocket"
+    h["connection"]            = "Upgrade"
+    h["sec-websocket-accept"]  = aksept
+    h["sec-websocket-version"] = "13"
+    // 101 Switching Protocols
+    la r: ordbok_tekst = {}
+    r["status"]  = "101"
+    r["headers"] = h
+    r["body"]    = ""
+    returner r
+}
+
+funksjon _ws_aksept_nøkkel(nøkkel: tekst) -> tekst {
+    la magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+    la kombinert = nøkkel + magic
+    prøv {
+        la sha = builtin.sha1(kombinert)
+        returner builtin.base64_encode(sha)
+    } fang (e) {
+        // Fallback
+        returner builtin.base64_encode(kombinert)
+    }
+    returner ""
+}
+
+# ─── Tilkoplingshandsaming ────────────────────────────────────────────────────
+
+funksjon ny_tilkopling(conn_id: tekst, params: ordbok_tekst) -> ordbok_tekst {
+    la conn: ordbok_tekst = {}
+    conn["id"]       = conn_id
+    conn["open"]     = "sann"
+    conn["params"]   = "{}"
+    conn["grupper"]  = "[]"
+    conn["brukar_id"] = ""
+    la nk = nøkler(params)
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        conn["__param_" + k + "__"] = tekst(params[k])
+        i = i + 1
+    }
+    returner conn
+}
+
+funksjon er_open(conn: ordbok_tekst) -> boolsk {
+    returner conn["open"] == "sann"
+}
+
+funksjon lukk(conn: ordbok_tekst) -> heltall {
+    conn["open"] = "usann"
+    prøv { builtin.ws_close(conn["id"]) } fang (e) { }
+    returner 0
+}
+
+funksjon param(conn: ordbok_tekst, namn: tekst) -> tekst {
+    la nøkkel = "__param_" + namn + "__"
+    hvis har_nokkel(conn, nøkkel) { returner tekst(conn[nøkkel]) }
+    returner ""
+}
+
+funksjon brukar_id(conn: ordbok_tekst) -> tekst {
+    returner conn["brukar_id"]
+}
+
+funksjon sett_brukar(conn: ordbok_tekst, brukar_id: tekst) -> ordbok_tekst {
+    conn["brukar_id"] = brukar_id
+    returner conn
+}
+
+# ─── Meldingssending ──────────────────────────────────────────────────────────
+
+funksjon send(conn: ordbok_tekst, melding: tekst) -> heltall {
+    hvis ikkje er_open(conn) { returner 0 }
+    prøv {
+        returner builtin.ws_send(conn["id"], melding)
+    } fang (e) {
+        conn["open"] = "usann"
+        returner 0
+    }
+    returner 0
+}
+
+funksjon send_json(conn: ordbok_tekst, data: ordbok_tekst) -> heltall {
+    la json = _til_json(data)
+    returner send(conn, json)
+}
+
+funksjon send_binar(conn: ordbok_tekst, data: tekst) -> heltall {
+    prøv { returner builtin.ws_send_binary(conn["id"], data) } fang (e) { returner 0 }
+    returner 0
+}
+
+# ─── Mottak ───────────────────────────────────────────────────────────────────
+
+funksjon motta(conn: ordbok_tekst) -> tekst {
+    prøv {
+        la m = builtin.ws_recv(conn["id"])
+        returner tekst(m)
+    } fang (e) {
+        conn["open"] = "usann"
+        returner ""
+    }
+    returner ""
+}
+
+funksjon motta_json(conn: ordbok_tekst) -> ordbok_tekst {
+    la m = motta(conn)
+    hvis m == "" { returner {} }
+    prøv {
+        la parsed = builtin.json_parse_raw(m)
+        returner parsed
+    } fang (e) { returner {} }
+    returner {}
+}
+
+funksjon motta_med_timeout(conn: ordbok_tekst, timeout_ms: heltall) -> tekst {
+    prøv {
+        la m = builtin.ws_recv_timeout(conn["id"], timeout_ms)
+        returner tekst(m)
+    } fang (e) {
+        returner ""
+    }
+    returner ""
+}
+
+# ─── Grupper / broadcast ──────────────────────────────────────────────────────
+
+// Gruppehandtering bruker ein delt global tilstand via builtin.ws_group_*
+funksjon bli_med_gruppe(conn: ordbok_tekst, gruppe: tekst) -> heltall {
+    prøv { builtin.ws_group_join(conn["id"], gruppe) } fang (e) { }
+    returner 0
+}
+
+funksjon forlat_gruppe(conn: ordbok_tekst, gruppe: tekst) -> heltall {
+    prøv { builtin.ws_group_leave(conn["id"], gruppe) } fang (e) { }
+    returner 0
+}
+
+funksjon broadcast(gruppe: tekst, melding: tekst) -> heltall {
+    prøv { returner builtin.ws_group_send(gruppe, melding) } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon broadcast_json(gruppe: tekst, data: ordbok_tekst) -> heltall {
+    returner broadcast(gruppe, _til_json(data))
+}
+
+funksjon broadcast_unntatt(gruppe: tekst, melding: tekst, unntatt_id: tekst) -> heltall {
+    prøv { returner builtin.ws_group_send_except(gruppe, melding, unntatt_id) } fang (e) { }
+    returner 0
+}
+
+funksjon tal_i_gruppe(gruppe: tekst) -> heltall {
+    prøv { returner builtin.ws_group_count(gruppe) } fang (e) { returner 0 }
+    returner 0
+}
+
+# ─── WebSocket-server-loop ────────────────────────────────────────────────────
+
+// Køyr ein WS-handterar-funksjon via builtin.ws_serve
+funksjon serve(port: heltall, handler_fn: tekst) -> heltall {
+    skriv("[ws] WebSocket-server startar på port " + tekst_fra_heltall(port))
+    prøv {
+        returner builtin.ws_serve(port, handler_fn)
+    } fang (e) {
+        skriv("[ws] Feil: " + tekst(e))
+        returner 1
+    }
+    returner 0
+}
+
+# ─── Frame-parsarar (for lågnivå-bruk) ───────────────────────────────────────
+
+// RFC 6455 WebSocket frame header
+funksjon parse_frame_header(bytes: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    prøv {
+        la b = builtin.bytes_to_ints(bytes)
+        la byte0 = heltall_fra_tekst(tekst(b[0]))
+        la byte1 = heltall_fra_tekst(tekst(b[1]))
+        r["fin"]    = tekst_fra_heltall((byte0 / 128) - ((byte0 / 128 / 2) * 2))
+        r["opcode"] = tekst_fra_heltall(byte0 - ((byte0 / 16) * 16))
+        r["mask"]   = tekst_fra_heltall((byte1 / 128) - ((byte1 / 128 / 2) * 2))
+        r["len"]    = tekst_fra_heltall(byte1 - ((byte1 / 128) * 128))
+    } fang (e) { }
+    returner r
+}
+
+funksjon opcode_tekst(opcode: heltall) -> tekst {
+    hvis opcode == 0 { returner "fortsetting" }
+    hvis opcode == 1 { returner "tekst" }
+    hvis opcode == 2 { returner "binar" }
+    hvis opcode == 8 { returner "lukk" }
+    hvis opcode == 9 { returner "ping" }
+    hvis opcode == 10 { returner "pong" }
+    returner "ukjend"
+}
+
+# ─── Ping/pong ────────────────────────────────────────────────────────────────
+
+funksjon ping(conn: ordbok_tekst) -> heltall {
+    prøv { returner builtin.ws_ping(conn["id"]) } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon pong(conn: ordbok_tekst) -> heltall {
+    prøv { returner builtin.ws_pong(conn["id"]) } fang (e) { returner 0 }
+    returner 0
+}
+
+# ─── Hjelpefunksjonar ─────────────────────────────────────────────────────────
+
+funksjon hent_header(ctx: ordbok_tekst, namn: tekst) -> tekst {
+    prøv {
+        la h = builtin.ncb_call_fn("web.request_header", {"ctx": ctx, "namn": namn})
+        returner tekst(h)
+    } fang (e) { }
+    hvis har_nokkel(ctx, namn) { returner tekst(ctx[namn]) }
+    returner ""
+}
+
+funksjon _til_json(data: ordbok_tekst) -> tekst {
+    la nk = nøkler(data)
+    la delar: liste<tekst> = []
+    la i: heltall = 0
+    mens i < lengde(nk) {
+        la k: tekst = nk[i]
+        la v = tekst_erstatt(tekst(data[k]), "\"", "\\\"")
+        legg_til(delar, "\"" + k + "\":\"" + v + "\"")
+        i = i + 1
+    }
+    returner "{" + tekst_saman(delar, ",") + "}"
+}
+
+# ─── RFC 6455 Frame-koding (pure Norscode) ────────────────────────────────────
+# Bygg og parse WebSocket-frames som liste_heltall (byte-verdiar 0-255).
+# Nyttig for lågnivå-testing, proxy-implementasjonar og frame-inspeksjon.
+#
+# Frame-format:
+#   Byte 0: FIN(1) + RSV(3) + Opcode(4)
+#   Byte 1: Mask(1) + Payload len(7)  [+ 2 eller 8 bytes ekstra lengd]
+#   [4 bytes maskeringsnøkkel viss mask=1]
+#   Payload
+
+funksjon OPCODE_TEKST()    -> heltall { returner 1 }
+funksjon OPCODE_BINAR()    -> heltall { returner 2 }
+funksjon OPCODE_LUKK()     -> heltall { returner 8 }
+funksjon OPCODE_PING()     -> heltall { returner 9 }
+funksjon OPCODE_PONG()     -> heltall { returner 10 }
+
+# Bygg ein ferdig frame (liste_heltall med byte-verdiar)
+# maskert=sann for klient→server, usann for server→klient
+funksjon bygg_frame(payload_bytes: liste_heltall, opcode: heltall, maskert: bool) -> liste_heltall {
+    la n: heltall = lengde(payload_bytes)
+    la frame: liste_heltall = []
+
+    # Byte 0: FIN=1, RSV=0, opcode
+    legg_til(frame, 128 + opcode)  # 128 = 0x80 = FIN-bit
+
+    # Byte 1: mask-bit + payload-lengd
+    la mask_bit: heltall = 0
+    hvis (maskert) { mask_bit = 128 }
+
+    hvis (n < 126) {
+        legg_til(frame, mask_bit + n)
+    } ellers hvis (n < 65536) {
+        legg_til(frame, mask_bit + 126)
+        legg_til(frame, n / 256)
+        legg_til(frame, n % 256)
+    } ellers {
+        # 8-byte extended length (forenkla: maks 2^31)
+        legg_til(frame, mask_bit + 127)
+        legg_til(frame, 0)  legg_til(frame, 0)  legg_til(frame, 0)  legg_til(frame, 0)
+        legg_til(frame, (n / 16777216) % 256)
+        legg_til(frame, (n / 65536) % 256)
+        legg_til(frame, (n / 256) % 256)
+        legg_til(frame, n % 256)
+    }
+
+    # Maskeringsnøkkel (4 tilfeldig-liknande bytes basert på lengd)
+    la maske: liste_heltall = []
+    hvis (maskert) {
+        legg_til(maske, (n * 37 + 11) % 256)
+        legg_til(maske, (n * 53 + 7) % 256)
+        legg_til(maske, (n * 71 + 13) % 256)
+        legg_til(maske, (n * 97 + 3) % 256)
+        la i: heltall = 0
+        mens (i < 4) { legg_til(frame, maske[i])  i = i + 1 }
+    }
+
+    # Payload (XOR med maske viss maskert)
+    la i: heltall = 0
+    mens (i < n) {
+        hvis (maskert) {
+            la maskert_byte: heltall = (payload_bytes[i] + maske[i % 4]) % 256
+            # Eigentleg XOR: forenkla via bit.no
+            la xb: heltall = 0
+            la b1: heltall = payload_bytes[i]
+            la b2: heltall = maske[i % 4]
+            la bit_val: heltall = 1
+            la j: heltall = 0
+            mens (j < 8) {
+                la d1: heltall = (b1 / bit_val) % 2
+                la d2: heltall = (b2 / bit_val) % 2
+                hvis ((d1 + d2) % 2 == 1) { xb = xb + bit_val }
+                bit_val = bit_val * 2
+                j = j + 1
+            }
+            legg_til(frame, xb)
+        } ellers {
+            legg_til(frame, payload_bytes[i])
+        }
+        i = i + 1
+    }
+    returner frame
+}
+
+# Bygg tekst-frame frå streng
+funksjon bygg_tekst_frame(melding: tekst, maskert: bool) -> liste_heltall {
+    la teikn = builtin.split(melding, "")
+    la bytes: liste_heltall = []
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        legg_til(bytes, builtin.char_code(teikn[i]))
+        i = i + 1
+    }
+    returner bygg_frame(bytes, OPCODE_TEKST(), maskert)
+}
+
+# Parse ein frame frå byte-liste → ordbok_tekst med felt
+funksjon parse_frame(frame: liste_heltall) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    la n: heltall = lengde(frame)
+    hvis (n < 2) { r["feil"] = "for kort"  returner r }
+
+    la byte0: heltall = frame[0]
+    la byte1: heltall = frame[1]
+
+    r["fin"]    = tekst_fra_heltall((byte0 / 128) % 2)
+    r["opcode"] = tekst_fra_heltall(byte0 % 16)
+    r["maskert"] = tekst_fra_heltall((byte1 / 128) % 2)
+
+    la payload_len: heltall = byte1 % 128
+    la header_slutt: heltall = 2
+
+    hvis (payload_len == 126) {
+        hvis (n < 4) { r["feil"] = "for kort (126)"  returner r }
+        payload_len = frame[2] * 256 + frame[3]
+        header_slutt = 4
+    } ellers hvis (payload_len == 127) {
+        hvis (n < 10) { r["feil"] = "for kort (127)"  returner r }
+        payload_len = frame[6] * 16777216 + frame[7] * 65536 + frame[8] * 256 + frame[9]
+        header_slutt = 10
+    }
+
+    r["payload_len"] = tekst_fra_heltall(payload_len)
+
+    la maske: liste_heltall = []
+    la er_maskert: bool = (byte1 / 128) % 2 == 1
+    hvis (er_maskert) {
+        la i: heltall = 0
+        mens (i < 4) {
+            legg_til(maske, frame[header_slutt + i])
+            i = i + 1
+        }
+        header_slutt = header_slutt + 4
+    }
+
+    # Dekod payload
+    la payload: liste_tekst = []
+    la i: heltall = 0
+    mens (i < payload_len og header_slutt + i < n) {
+        la byte: heltall = frame[header_slutt + i]
+        hvis (er_maskert) {
+            la m: heltall = maske[i % 4]
+            la xb: heltall = 0
+            la bit_val: heltall = 1
+            la j: heltall = 0
+            mens (j < 8) {
+                la d1: heltall = (byte / bit_val) % 2
+                la d2: heltall = (m / bit_val) % 2
+                hvis ((d1 + d2) % 2 == 1) { xb = xb + bit_val }
+                bit_val = bit_val * 2
+                j = j + 1
+            }
+            byte = xb
+        }
+        legg_til(payload, tekst_fra_heltall(byte))
+        i = i + 1
+    }
+    r["payload_bytes"] = builtin.join(payload, ",")
+    returner r
+}
+
+# Hent tekst-payload frå parsed frame
+funksjon frame_til_tekst(r: ordbok_tekst) -> tekst {
+    hvis (ikkje har_nokkel(r, "payload_bytes")) { returner "" }
+    la byte_delar = builtin.split(r["payload_bytes"], ",")
+    la ut: liste_tekst = []
+    # Konverter ASCII-kodar til teikn via ordbok (berre printbare 32-126)
+    la ascii: ordbok_tekst = {}
+    la printable: tekst = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    la pc = builtin.split(printable, "")
+    la j: heltall = 0
+    mens (j < lengde(pc)) { ascii[tekst_fra_heltall(32 + j)] = pc[j]  j = j + 1 }
+    la i: heltall = 0
+    mens (i < lengde(byte_delar)) {
+        la kode: tekst = byte_delar[i]
+        hvis (har_nokkel(ascii, kode)) { legg_til(ut, ascii[kode]) }
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+# Reconnect-logikk med eksponentiell backoff
+# Returnerer ventetid i ms for forsøk nr. n (0-indeksert)
+funksjon backoff_ms(forsøk: heltall, base_ms: heltall, maks_ms: heltall) -> heltall {
+    la ventetid: heltall = base_ms
+    la i: heltall = 0
+    mens (i < forsøk) {
+        ventetid = ventetid * 2
+        i = i + 1
+    }
+    hvis (ventetid > maks_ms) { returner maks_ms }
+    returner ventetid
+}
+
+# Standard reconnect-mønster: base=1000ms, maks=30000ms (30s)
+funksjon reconnect_ventetid(forsøk: heltall) -> heltall {
+    returner backoff_ms(forsøk, 1000, 30000)
+}
+
+# ─── Ping/Pong-frames (RFC 6455 §5.5.2 / §5.5.3) ─────────────────────────────
+
+# Lag ein ping-frame med valfri payload (maks 125 bytes)
+# Opcode 0x9, FIN=1, mask=0 (server→klient)
+funksjon lag_ping_frame(payload: tekst) -> liste_heltall {
+    la pc = builtin.split(payload, "")
+    la plen: heltall = lengde(pc)
+    la ut: liste_heltall = []
+    # FIN + opcode 9 = 0x89
+    legg_til(ut, 137)
+    # Payload length (maks 125 utan maske)
+    la faktisk_len: heltall = plen
+    hvis (faktisk_len > 125) { faktisk_len = 125 }
+    legg_til(ut, faktisk_len)
+    # Payload: ASCII bytes
+    la i: heltall = 0
+    mens (i < faktisk_len) {
+        legg_til(ut, builtin.char_code(pc[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+# Lag ein pong-frame som svar på ping (same payload)
+# Opcode 0xA, FIN=1
+funksjon lag_pong_frame(payload: tekst) -> liste_heltall {
+    la pc = builtin.split(payload, "")
+    la plen: heltall = lengde(pc)
+    la ut: liste_heltall = []
+    # FIN + opcode 10 = 0x8A
+    legg_til(ut, 138)
+    la faktisk_len: heltall = plen
+    hvis (faktisk_len > 125) { faktisk_len = 125 }
+    legg_til(ut, faktisk_len)
+    la i: heltall = 0
+    mens (i < faktisk_len) {
+        legg_til(ut, builtin.char_code(pc[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+# Sjekk om ein frame er ein ping (opcode 0x9)
+funksjon er_ping_frame(frame_bytes: liste_heltall) -> bool {
+    hvis (lengde(frame_bytes) < 2) { returner usann }
+    returner (frame_bytes[0] % 16) == 9
+}
+
+# Sjekk om ein frame er ein pong (opcode 0xA)
+funksjon er_pong_frame(frame_bytes: liste_heltall) -> bool {
+    hvis (lengde(frame_bytes) < 2) { returner usann }
+    returner (frame_bytes[0] % 16) == 10
+}
+
+# Hent payload-tekst frå ping/pong-frame
+funksjon ping_pong_payload(frame_bytes: liste_heltall) -> tekst {
+    hvis (lengde(frame_bytes) < 2) { returner "" }
+    la plen: heltall = frame_bytes[1] % 128
+    la ascii: ordbok_tekst = {}
+    la printable: tekst = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    la pc = builtin.split(printable, "")
+    la j: heltall = 0
+    mens (j < lengde(pc)) { ascii[tekst_fra_heltall(32 + j)] = pc[j]  j = j + 1 }
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i < plen og 2 + i < lengde(frame_bytes)) {
+        la k: heltall = frame_bytes[2 + i]
+        la ks: tekst = tekst_fra_heltall(k)
+        hvis (har_nokkel(ascii, ks)) { ut = ut + ascii[ks] }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Autosvar på ping: lag tilsvarande pong-frame
+funksjon auto_pong(ping_frame: liste_heltall) -> liste_heltall {
+    la payload = ping_pong_payload(ping_frame)
+    returner lag_pong_frame(payload)
+}
+
+# ─── Close-frame (RFC 6455 §5.5.1) ───────────────────────────────────────────
+
+# Statuskodas for lukking
+# 1000 = Normal Closure, 1001 = Going Away, 1002 = Protocol Error
+# 1003 = Unsupported Data, 1008 = Policy Violation, 1011 = Internal Error
+
+funksjon lag_close_frame(statuskode: heltall, melding: tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    # FIN + opcode 8 = 0x88
+    legg_til(ut, 136)
+    # Payload: 2 bytes statuskode + melding (maks 123 bytes = 125 total)
+    la mc = builtin.split(melding, "")
+    la mlen: heltall = lengde(mc)
+    hvis (mlen > 123) { mlen = 123 }
+    la total_len: heltall = 2 + mlen
+    legg_til(ut, total_len)
+    # Statuskode big-endian
+    legg_til(ut, statuskode / 256)
+    legg_til(ut, statuskode % 256)
+    # Melding-bytes
+    la i: heltall = 0
+    mens (i < mlen) {
+        legg_til(ut, builtin.char_code(mc[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+# Sjekk om ein frame er ein close-frame (opcode 0x8)
+funksjon er_close_frame(frame_bytes: liste_heltall) -> bool {
+    hvis (lengde(frame_bytes) < 2) { returner usann }
+    returner (frame_bytes[0] % 16) == 8
+}
+
+# Hent statuskode frå close-frame (standard 1000 viss ikkje opgjeve)
+funksjon close_statuskode(frame_bytes: liste_heltall) -> heltall {
+    viss (lengde(frame_bytes) < 4) { returner 1000 }
+    returner frame_bytes[2] * 256 + frame_bytes[3]
+}
+
+# Hent lukkingsmelding frå close-frame
+funksjon close_melding(frame_bytes: liste_heltall) -> tekst {
+    hvis (lengde(frame_bytes) < 5) { returner "" }
+    la ascii: ordbok_tekst = {}
+    la printable: tekst = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    la pc = builtin.split(printable, "")
+    la j: heltall = 0
+    mens (j < lengde(pc)) { ascii[tekst_fra_heltall(32 + j)] = pc[j]  j = j + 1 }
+    la ut: tekst = ""
+    la i: heltall = 4
+    mens (i < lengde(frame_bytes)) {
+        la k: heltall = frame_bytes[i]
+        la ks: tekst = tekst_fra_heltall(k)
+        hvis (har_nokkel(ascii, ks)) { ut = ut + ascii[ks] }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Full close-handshake frå server-sida: send close, forvent echo
+funksjon initier_lukking(conn: ordbok_tekst, kode: heltall, grunn: tekst) -> ordbok_tekst {
+    la frame = lag_close_frame(kode, grunn)
+    la ut: ordbok_tekst = {}
+    prøv {
+        la res = builtin.ws_send_bytes(conn["fd"], frame)
+        ut["sendt"] = "sann"
+        ut["kode"] = tekst_fra_heltall(kode)
+        ut["grunn"] = grunn
+    } fang (e) {
+        ut["sendt"] = "usann"
+        ut["feil"] = e
+    }
+    returner ut
+}
+
+# ─── Subprotokoll-forhandling ─────────────────────────────────────────────────
+# Støtte for Sec-WebSocket-Protocol header
+
+# Hent lista over forespurde subprotokkollar frå handshake
+funksjon hent_subprotokkollar(handshake_headers: ordbok_tekst) -> liste_tekst {
+    la header_nøkkel: tekst = "Sec-WebSocket-Protocol"
+    la liten_nøkkel: tekst = "sec-websocket-protocol"
+    la verdi: tekst = ""
+    hvis (har_nokkel(handshake_headers, header_nøkkel)) {
+        verdi = handshake_headers[header_nøkkel]
+    } ellers hvis (har_nokkel(handshake_headers, liten_nøkkel)) {
+        verdi = handshake_headers[liten_nøkkel]
+    }
+    hvis (lengde(builtin.split(verdi, "")) == 0) { returner [] }
+    # Del på komma og trim mellomrom
+    la delar = builtin.split(verdi, ",")
+    la resultat: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(delar)) {
+        la s: tekst = delar[i]
+        # Trim leiande/trilande mellomrom
+        la teikn = builtin.split(s, "")
+        la start: heltall = 0
+        la slutt: heltall = lengde(teikn) - 1
+        mens (start <= slutt og (teikn[start] == " " eller teikn[start] == "\t")) {
+            start = start + 1
+        }
+        mens (slutt >= start og (teikn[slutt] == " " eller teikn[slutt] == "\t")) {
+            slutt = slutt - 1
+        }
+        la trimma: tekst = builtin.join(builtin.slice(teikn, start, slutt + 1), "")
+        hvis (lengde(builtin.split(trimma, "")) > 0) {
+            legg_til(resultat, trimma)
+        }
+        i = i + 1
+    }
+    returner resultat
+}
+
+# Forhandl subprotokoll: returner første støtta protokoll, eller tom streng
+funksjon forhandl_subprotokoll(forespurde: liste_tekst, støtta: liste_tekst) -> tekst {
+    la i: heltall = 0
+    mens (i < lengde(forespurde)) {
+        la j: heltall = 0
+        mens (j < lengde(støtta)) {
+            hvis (forespurde[i] == støtta[j]) { returner forespurde[i] }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# Lag Sec-WebSocket-Protocol svar-header
+funksjon subprotokoll_svar_header(protokoll: tekst) -> tekst {
+    hvis (lengde(builtin.split(protokoll, "")) == 0) { returner "" }
+    returner "Sec-WebSocket-Protocol: " + protokoll
+}
+
+# ─── Frame-type helpers ───────────────────────────────────────────────────────
+
+# Returner type-streng for ein frame basert på opcode
+funksjon frame_type(frame_bytes: liste_heltall) -> tekst {
+    hvis (lengde(frame_bytes) < 1) { returner "ukjend" }
+    la opcode: heltall = frame_bytes[0] % 16
+    hvis (opcode == 0) { returner "fortsetting" }
+    hvis (opcode == 1) { returner "tekst" }
+    hvis (opcode == 2) { returner "binær" }
+    hvis (opcode == 8) { returner "lukk" }
+    hvis (opcode == 9) { returner "ping" }
+    hvis (opcode == 10) { returner "pong" }
+    returner "reservert"
+}
+
+# Sjekk om FIN-biten er sett (siste fragment)
+funksjon er_fin_sett(frame_bytes: liste_heltall) -> bool {
+    hvis (lengde(frame_bytes) < 1) { returner usann }
+    returner frame_bytes[0] >= 128
+}
+
+# Sett saman fragmenterte meldingar (continuation frames)
+# Tek inn liste_tekst med kvar frame sin payload
+funksjon saml_fragmenter(fragment_payloads: liste_tekst) -> tekst {
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i < lengde(fragment_payloads)) {
+        ut = ut + fragment_payloads[i]
+        i = i + 1
+    }
+    returner ut
+}

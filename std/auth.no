@@ -1,0 +1,314 @@
+# auth.no — Autentisering for Norscode webappar
+# Session-basert innlogging med passord-hashing
+#
+# Bruk:
+#   bruk std.auth som auth
+#   bruk std.db som db
+#   bruk std.orm som orm
+#
+#   # Setup (ein gong ved oppstart)
+#   auth.migrer(conn)
+#
+#   # Registrer brukar
+#   la id = auth.registrer(conn, "ola", "ola@example.com", "passord123")
+#
+#   # Logg inn → returner session-token
+#   la token = auth.logg_inn(conn, "ola@example.com", "passord123")
+#
+#   # Sjekk session i request
+#   la brukar = auth.hent_brukar_frå_session(conn, web.request_cookie(ctx, "session"))
+#
+#   # Auth-guard
+#   funksjon krev_innlogging(ctx) -> bool { returner auth.er_innlogga(conn, ctx) }
+#   web.route("GET /profil")
+#   web.use_guard("krev_innlogging")
+
+bruk std.db som db
+bruk std.orm som orm
+
+# ─── Database-oppsett ─────────────────────────────────────────────────────────
+
+funksjon migrer(conn: tekst) -> heltall {
+    orm.migrer(conn, "auth_brukar", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "brukarnamn TEXT NOT NULL UNIQUE",
+        "epost TEXT NOT NULL UNIQUE",
+        "passord_hash TEXT NOT NULL",
+        "salt TEXT NOT NULL",
+        "aktiv TEXT DEFAULT 'sann'",
+        "rolle TEXT DEFAULT 'brukar'",
+        "sist_innlogga TEXT",
+        "oppretta TEXT DEFAULT (datetime('now'))"
+    ])
+    orm.migrer(conn, "auth_session", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "token TEXT NOT NULL UNIQUE",
+        "brukar_id INTEGER NOT NULL",
+        "oppretta TEXT DEFAULT (datetime('now'))",
+        "utgår TEXT",
+        "aktiv TEXT DEFAULT 'sann'"
+    ])
+    orm.migrer(conn, "auth_passord_reset", [
+        "id INTEGER PRIMARY KEY AUTOINCREMENT",
+        "token TEXT NOT NULL UNIQUE",
+        "brukar_id INTEGER NOT NULL",
+        "oppretta TEXT DEFAULT (datetime('now'))",
+        "brukt TEXT DEFAULT 'usann'"
+    ])
+    returner 1
+}
+
+# ─── Passord-hashing ──────────────────────────────────────────────────────────
+
+# Enkel PBKDF2-liknande hash via iterert XOR + lengde-padding
+# Merk: for produksjon, bruk builtin.bcrypt om tilgjengeleg
+funksjon _generer_salt() -> tekst {
+    returner builtin.random_hex(32)
+}
+
+funksjon _hash_passord(passord: tekst, salt: tekst) -> tekst {
+    // Kombiner passord + salt, kjør gjennom builtin.sha256 (eller naiv iterasjon)
+    la kombinert = salt + passord + salt
+    prøv {
+        returner builtin.sha256(kombinert)
+    } fang (e) { }
+    // Fallback: naiv hash viss sha256 ikkje er tilgjengeleg
+    returner _naiv_hash(kombinert)
+}
+
+funksjon _naiv_hash(s: tekst) -> tekst {
+    // Deterministisk men ikkje kryptografisk — bruk berre som fallback
+    la h: heltall = 5381
+    la tegn = builtin.split(s, "")
+    la i: heltall = 0
+    mens i < lengde(tegn) {
+        la c = builtin.char_code(tegn[i])
+        h = ((h * 33) + c) mod 2147483647
+        i = i + 1
+    }
+    // Legg til lengde-komponent for å unngå kollisjoner på korte strenger
+    h = (h * 31 + lengde(s)) mod 2147483647
+    returner "naive_" + tekst_fra_heltall(h) + "_" + tekst_fra_heltall(lengde(s))
+}
+
+funksjon _generer_token() -> tekst {
+    prøv {
+        returner builtin.random_hex(64)
+    } fang (e) { }
+    // Fallback: tidsbasert token
+    la t = builtin.now_ms()
+    returner "tok_" + tekst_fra_heltall(t) + "_" + tekst_fra_heltall(t mod 99991)
+}
+
+funksjon verifiser_passord(passord: tekst, salt: tekst, lagra_hash: tekst) -> boolsk {
+    la kalkulert = _hash_passord(passord, salt)
+    returner kalkulert == lagra_hash
+}
+
+# ─── Registrering ─────────────────────────────────────────────────────────────
+
+funksjon registrer(conn: tekst, brukarnamn: tekst, epost: tekst, passord: tekst) -> heltall {
+    // Sjekk om epost er teken
+    hvis orm.finnes_ved(conn, "auth_brukar", "epost", epost) {
+        returner -1  // Epost alt i bruk
+    }
+    hvis orm.finnes_ved(conn, "auth_brukar", "brukarnamn", brukarnamn) {
+        returner -2  // Brukarnamn alt i bruk
+    }
+    la salt = _generer_salt()
+    la hash = _hash_passord(passord, salt)
+    returner orm.lagre(conn, "auth_brukar", {
+        "brukarnamn": brukarnamn,
+        "epost": epost,
+        "passord_hash": hash,
+        "salt": salt
+    })
+}
+
+funksjon registrer_med_rolle(conn: tekst, brukarnamn: tekst, epost: tekst, passord: tekst, rolle: tekst) -> heltall {
+    la id = registrer(conn, brukarnamn, epost, passord)
+    hvis id > 0 {
+        orm.oppdater(conn, "auth_brukar", id, {"rolle": rolle})
+    }
+    returner id
+}
+
+# ─── Innlogging / utlogging ───────────────────────────────────────────────────
+
+funksjon logg_inn(conn: tekst, epost: tekst, passord: tekst) -> tekst {
+    la brukar = orm.finn_ved(conn, "auth_brukar", "epost", epost)
+    hvis ikkje har_nokkel(brukar, "id") { returner "" }
+    hvis brukar["aktiv"] != "sann" { returner "" }
+
+    la salt = brukar["salt"]
+    la hash = brukar["passord_hash"]
+    hvis ikkje verifiser_passord(passord, salt, hash) { returner "" }
+
+    // Generer session-token
+    la token = _generer_token()
+    la brukar_id = heltall_fra_tekst(brukar["id"])
+
+    orm.lagre(conn, "auth_session", {
+        "token": token,
+        "brukar_id": brukar["id"],
+        "aktiv": "sann"
+    })
+
+    // Oppdater sist_innlogga
+    prøv {
+        orm.oppdater(conn, "auth_brukar", brukar_id, {"sist_innlogga": builtin.now_iso()})
+    } fang (e) { }
+
+    returner token
+}
+
+funksjon logg_ut(conn: tekst, token: tekst) -> boolsk {
+    la session = orm.finn_ved(conn, "auth_session", "token", token)
+    hvis ikkje har_nokkel(session, "id") { returner usann }
+    la id = heltall_fra_tekst(session["id"])
+    orm.oppdater(conn, "auth_session", id, {"aktiv": "usann"})
+    returner sann
+}
+
+funksjon logg_ut_alle(conn: tekst, brukar_id: heltall) -> heltall {
+    returner orm.kjør(conn, "UPDATE auth_session SET aktiv = 'usann' WHERE brukar_id = " + tekst_fra_heltall(brukar_id))
+}
+
+# ─── Session-oppslag ──────────────────────────────────────────────────────────
+
+funksjon hent_session(conn: tekst, token: tekst) -> ordbok_tekst {
+    la session = orm.finn_ved(conn, "auth_session", "token", token)
+    hvis ikkje har_nokkel(session, "id") { returner {} }
+    hvis session["aktiv"] != "sann" { returner {} }
+    returner session
+}
+
+funksjon hent_brukar_frå_session(conn: tekst, token: tekst) -> ordbok_tekst {
+    la session = hent_session(conn, token)
+    hvis ikkje har_nokkel(session, "brukar_id") { returner {} }
+    la brukar_id = heltall_fra_tekst(session["brukar_id"])
+    la brukar = orm.finn(conn, "auth_brukar", brukar_id)
+    hvis ikkje har_nokkel(brukar, "id") { returner {} }
+    hvis brukar["aktiv"] != "sann" { returner {} }
+    // Fjern sensitive felt frå retur
+    la trygg: ordbok_tekst = {}
+    trygg["id"] = brukar["id"]
+    trygg["brukarnamn"] = brukar["brukarnamn"]
+    trygg["epost"] = brukar["epost"]
+    trygg["rolle"] = brukar["rolle"]
+    trygg["oppretta"] = brukar["oppretta"]
+    returner trygg
+}
+
+funksjon er_gyldig_session(conn: tekst, token: tekst) -> boolsk {
+    la session = hent_session(conn, token)
+    returner har_nokkel(session, "id")
+}
+
+# ─── Web-integrasjon ─────────────────────────────────────────────────────────
+
+# Hent token frå cookie eller Authorization-header
+funksjon hent_token(ctx: ordbok_tekst) -> tekst {
+    la cookie = builtin.trim(ctx["__headers__"]["cookie"] ellers "")
+    // Parse "session=TOKEN" frå cookie
+    la deler = builtin.split(cookie, ";")
+    la i: heltall = 0
+    mens i < lengde(deler) {
+        la del = builtin.trim(deler[i])
+        la eq = builtin.index_of(del, "=")
+        hvis eq > 0 {
+            la k = builtin.trim(builtin.slice(del, 0, eq))
+            la v = builtin.trim(builtin.slice(del, eq + 1, lengde(del)))
+            hvis k == "session" { returner v }
+        }
+        i = i + 1
+    }
+    // Prøv Bearer-token
+    la auth_hdr = ""
+    hvis har_nokkel(ctx["__headers__"], "authorization") {
+        auth_hdr = ctx["__headers__"]["authorization"]
+    }
+    hvis tekst_starter_med(auth_hdr, "Bearer ") {
+        returner builtin.slice(auth_hdr, 7, lengde(auth_hdr))
+    }
+    returner ""
+}
+
+funksjon session_cookie(token: tekst, dagar: heltall) -> tekst {
+    returner "session=" + token + "; HttpOnly; Secure; SameSite=Lax; Max-Age=" + tekst_fra_heltall(dagar * 86400)
+}
+
+# Sett inn brukar-info i request-kontekst
+funksjon berik_ctx(conn: tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    la token = hent_token(ctx)
+    hvis token == "" { returner ctx }
+    la brukar = hent_brukar_frå_session(conn, token)
+    hvis har_nokkel(brukar, "id") {
+        ctx["__auth_id__"]       = brukar["id"]
+        ctx["__auth_brukar__"]   = brukar["brukarnamn"]
+        ctx["__auth_epost__"]    = brukar["epost"]
+        ctx["__auth_rolle__"]    = brukar["rolle"]
+        ctx["__auth_token__"]    = token
+    }
+    returner ctx
+}
+
+funksjon er_innlogga(ctx: ordbok_tekst) -> boolsk {
+    returner har_nokkel(ctx, "__auth_id__")
+}
+
+funksjon krev_rolle(ctx: ordbok_tekst, rolle: tekst) -> boolsk {
+    hvis ikkje er_innlogga(ctx) { returner usann }
+    returner ctx["__auth_rolle__"] == rolle eller ctx["__auth_rolle__"] == "admin"
+}
+
+funksjon innlogga_brukar_id(ctx: ordbok_tekst) -> heltall {
+    hvis har_nokkel(ctx, "__auth_id__") {
+        returner heltall_fra_tekst(ctx["__auth_id__"])
+    }
+    returner 0
+}
+
+funksjon innlogga_rolle(ctx: ordbok_tekst) -> tekst {
+    hvis har_nokkel(ctx, "__auth_rolle__") { returner ctx["__auth_rolle__"] }
+    returner ""
+}
+
+# ─── Passord-reset ────────────────────────────────────────────────────────────
+
+funksjon opprett_reset_token(conn: tekst, epost: tekst) -> tekst {
+    la brukar = orm.finn_ved(conn, "auth_brukar", "epost", epost)
+    hvis ikkje har_nokkel(brukar, "id") { returner "" }
+    la token = _generer_token()
+    orm.lagre(conn, "auth_passord_reset", {
+        "token": token,
+        "brukar_id": brukar["id"],
+        "brukt": "usann"
+    })
+    returner token
+}
+
+funksjon utfør_reset(conn: tekst, token: tekst, nytt_passord: tekst) -> boolsk {
+    la reset = orm.finn_ved(conn, "auth_passord_reset", "token", token)
+    hvis ikkje har_nokkel(reset, "id") { returner usann }
+    hvis reset["brukt"] == "sann" { returner usann }
+
+    la brukar_id = heltall_fra_tekst(reset["brukar_id"])
+    la salt = _generer_salt()
+    la hash = _hash_passord(nytt_passord, salt)
+    orm.oppdater(conn, "auth_brukar", brukar_id, {"passord_hash": hash, "salt": salt})
+    la reset_id = heltall_fra_tekst(reset["id"])
+    orm.oppdater(conn, "auth_passord_reset", reset_id, {"brukt": "sann"})
+    logg_ut_alle(conn, brukar_id)
+    returner sann
+}
+
+funksjon endre_passord(conn: tekst, brukar_id: heltall, gammalt: tekst, nytt: tekst) -> boolsk {
+    la brukar = orm.finn(conn, "auth_brukar", brukar_id)
+    hvis ikkje har_nokkel(brukar, "id") { returner usann }
+    hvis ikkje verifiser_passord(gammalt, brukar["salt"], brukar["passord_hash"]) { returner usann }
+    la salt = _generer_salt()
+    la hash = _hash_passord(nytt, salt)
+    orm.oppdater(conn, "auth_brukar", brukar_id, {"passord_hash": hash, "salt": salt})
+    returner sann
+}

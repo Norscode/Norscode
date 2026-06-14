@@ -18,6 +18,7 @@ slutt
 struktur HttpRequest
     method
     path
+    query
     headers
     body
 slutt
@@ -39,6 +40,7 @@ struktur HttpServer
     port
     socket
     routes
+    app_ncb
     running
 slutt
 
@@ -59,6 +61,7 @@ funksjon ny_request(method, path)
 
     req.method = method
     req.path = path
+    req.query = {}
     req.headers = ny_map(init_runtime())
     req.body = ""
 
@@ -69,7 +72,7 @@ funksjon ny_response(status, body)
     res = HttpResponse()
 
     res.status = status
-    res.headers = []
+    res.headers = {}
     res.body = body
 
     returner res
@@ -92,9 +95,27 @@ funksjon ny_server(host, port)
     server.port = port
     server.socket = ny_socket("TCP")
     server.routes = []
+    server.app_ncb = ""
     server.running = usann
 
     returner server
+slutt
+
+funksjon sanitize_header(nøkkel: tekst) -> tekst
+    la i = 0
+    la ut = ""
+
+    mens i < lengde(nøkkel) {
+        la tegn = builtin.slice(nøkkel, i, i + 1)
+        hvis tegn == "_" {
+            ut = ut + "-"
+        } ellers {
+            ut = ut + tekst_til_liten(tegn)
+        }
+        i = i + 1
+    }
+
+    returner ut
 slutt
 
 // =========================
@@ -134,13 +155,17 @@ funksjon socket_accept(sock)
 slutt
 
 funksjon socket_read(sock)
-    skriv_linje("[SOCKET] read")
+    la env_request = miljo_hent("NORSCODE_FAKE_HTTP_REQUEST")
+    hvis env_request != "" {
+        returner env_request
+    }
 
-    returner "GET / HTTP/1.1"
+    returner ""
 slutt
 
 funksjon socket_write(sock, data)
     skriv_linje("[SOCKET] write response")
+    skriv_linje("[HTTP_RESPONSE] " + data)
 
     returner sann
 slutt
@@ -154,13 +179,99 @@ funksjon socket_close(sock)
 slutt
 
 // =========================
-// HTTP RUNTIME
+// HTTP PARSING
 // =========================
 
-funksjon parse_http_request(raw)
-    skriv_linje("[HTTP] parse request")
+funksjon split_query(raw_query: tekst) -> ordbok<tekst, tekst>
+    la query = {}
 
-    returner ny_request("GET", "/")
+    hvis raw_query == "" {
+        returner query
+    }
+
+    la par = builtin.split(raw_query, "&")
+    la i = 0
+
+    mens i < lengde(par) {
+        la p = builtin.trim(par[i])
+        hvis p != "" {
+            la eq = builtin.index_of(p, "=")
+            hvis eq == -1 {
+                query[p] = ""
+            } ellers {
+                query[builtin.trim(builtin.slice(p, 0, eq))] = builtin.trim(builtin.slice(p, eq + 1, lengde(p)))
+            }
+        }
+        i = i + 1
+    }
+
+    returner query
+slutt
+
+funksjon parse_http_request(raw)
+    la lines = builtin.split(raw, "\r\n")
+    hvis lengde(lines) == 0 {
+        returner ny_request("GET", "/")
+    }
+
+    la first = builtin.trim(lines[0])
+    hvis first == "" {
+        returner ny_request("GET", "/")
+    }
+
+    la parts = builtin.split(first, " ")
+    la method = "GET"
+    la path = "/"
+
+    hvis lengde(parts) > 0 {
+        method = tekst_til_liten(parts[0])
+    }
+    hvis lengde(parts) > 1 {
+        path = parts[1]
+    }
+
+    la query_text = ""
+    la qi = builtin.index_of(path, "?")
+    hvis qi >= 0 {
+        query_text = builtin.slice(path, qi + 1, lengde(path))
+        path = builtin.slice(path, 0, qi)
+    }
+
+    la headers = {}
+    la body = ""
+    la i = 1
+
+    mens i < lengde(lines) {
+        la line = builtin.trim(lines[i])
+        hvis line == "" {
+            la body_start = i + 1
+            mens body_start < lengde(lines) {
+                hvis body != "" {
+                    body = body + "\n"
+                }
+                body = body + lines[body_start]
+                body_start = body_start + 1
+            }
+            slutt
+            break
+        }
+
+        la colon = builtin.index_of(line, ":")
+        hvis colon > 0 {
+            la key = sanitize_header(builtin.trim(builtin.slice(line, 0, colon)))
+            la value = builtin.trim(builtin.slice(line, colon + 1, lengde(line)))
+            headers[key] = value
+        }
+
+        i = i + 1
+    }
+
+    la req = ny_request(method, path)
+    req.query = split_query(query_text)
+    req.headers = headers
+    req.body = body
+
+    returner req
 slutt
 
 funksjon response_to_http(res)
@@ -168,10 +279,18 @@ funksjon response_to_http(res)
 
     output = output + tekst_fra_heltall(res.status)
     output = output + " OK\\r\\n"
+
+    la body = ""
+    hvis res.body != null {
+        body = res.body
+    }
+
     output = output + "Content-Length: "
-    output = output + tekst_fra_heltall(lengde(res.body))
-    output = output + "\\r\\n\\r\\n"
-    output = output + res.body
+    output = output + tekst_fra_heltall(lengde(body))
+    output = output + "\\r\\n"
+
+    output = output + "\\r\\n"
+    output = output + body
 
     returner output
 slutt
@@ -181,12 +300,7 @@ funksjon add_route(server, method, path, handler)
 
     legg_til(server.routes, route)
 
-    skriv_linje(
-        "[HTTP] route " +
-        method +
-        " " +
-        path
-    )
+    skriv_linje("[HTTP] route " + method + " " + path)
 slutt
 
 funksjon match_route(server, req)
@@ -209,21 +323,38 @@ slutt
 
 funksjon handle_request(server, raw)
     req = parse_http_request(raw)
+    skriv_linje("[HTTP] handle " + req.method + " " + req.path)
 
-    route = match_route(server, req)
+    hvis server.app_ncb == "" {
+        returner ny_response(500, "Serveren er ikkje initialisert")
+    }
 
-    hvis route == ingen
-        returner ny_response(404, "Not Found")
-    slutt
-
-    skriv_linje(
-        "[HTTP] handle " +
-        req.method +
-        " " +
-        req.path
+    la ctx = builtin.web.request_context(
+        req.method,
+        req.path,
+        req.query,
+        req.headers,
+        req.body
     )
 
-    returner ny_response(200, "Hei fra Norscode HTTP Runtime")
+    la raw_res = builtin.web.handle_request(ctx)
+
+    la status = builtin.web.response_status(raw_res)
+    la body = builtin.web.response_body(raw_res)
+    la res = ny_response(status, body)
+
+    hvis finnes_nøkkel(raw_res, "headers") {
+        la h = raw_res["headers"]
+        hvis h != null {
+            res.headers = h
+        }
+    }
+
+    hvis req.method == "head" {
+        res.body = ""
+    }
+
+    returner res
 slutt
 
 // =========================
@@ -233,117 +364,33 @@ slutt
 funksjon server_start(server)
     skriv_linje("=== HTTP Server Start ===")
 
-    socket_bind(
-        server.socket,
-        server.host,
-        server.port
-    )
-
+    socket_bind(server.socket, server.host, server.port)
     socket_listen(server.socket)
-
     server.running = sann
 
     returner sann
 slutt
 
+funksjon server_stop(server)
+    socket_close(server.socket)
+    server.running = usann
+
+    returner sann
+slutt
+
 funksjon server_poll(server)
-    client = socket_accept(server.socket)
+    la client = socket_accept(server.socket)
+    la raw = socket_read(client)
 
-    raw = socket_read(client)
+    hvis raw == "" {
+        returner usann
+    }
 
-    res = handle_request(server, raw)
-
-    encoded = response_to_http(res)
+    la res = handle_request(server, raw)
+    la encoded = response_to_http(res)
 
     socket_write(client, encoded)
-
     socket_close(client)
-
-    returner sann
-slutt
-
-funksjon run_http_server(server, sched)
-    server_start(server)
-
-    ticks = 0
-
-    mens server.running
-        server_poll(server)
-
-        scheduler_tick(sched)
-
-        ticks = ticks + 1
-
-        hvis ticks > 3
-            server.running = usann
-        slutt
-    slutt
-
-    skriv_linje("=== HTTP Server Stop ===")
-
-    returner sann
-slutt
-
-funksjon verify_http_runtime(server)
-    skriv_linje("=== HTTP Runtime Verification ===")
-
-    skriv_linje(
-        "Routes: " +
-        tekst_fra_heltall(lengde(server.routes))
-    )
-
-    skriv_linje(
-        "Host: " +
-        server.host
-    )
-
-    skriv_linje(
-        "Port: " +
-        tekst_fra_heltall(server.port)
-    )
-
-    returner sann
-slutt
-
-funksjon main()
-    core = init_runtime()
-
-    lib = init_stdlib(core)
-
-    sched = ny_scheduler()
-
-    server = ny_server(
-        "0.0.0.0",
-        8080
-    )
-
-    add_route(
-        server,
-        "GET",
-        "/",
-        "index_handler"
-    )
-
-    add_route(
-        server,
-        "GET",
-        "/health",
-        "health_handler"
-    )
-
-    spawn_task(
-        sched,
-        "http_runtime",
-        "server_task"
-    )
-
-    run_http_server(server, sched)
-
-    verify_http_runtime(server)
-
-    runtime_leak_check(core)
-
-    stdout("HTTP Runtime OK")
 
     returner sann
 slutt

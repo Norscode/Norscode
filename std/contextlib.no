@@ -1,0 +1,293 @@
+# contextlib.no — Konteksthandteringsutilitets
+# Python: contextlib
+#
+# Sidan Norscode støttar `bruk ... som` for ressursstyring,
+# dette modulet tilbyr:
+#   - suppress(kode):   ignorerer unntak med gitt melding-prefiks
+#   - ExitStack:        dynamsik stabla kontekstar
+#   - closing():        wrapper som kallar .lukk() på exit
+#   - nullcontext():    no-op kontekst
+#   - redirect_output() kontekst for å fange skriv-output
+#   - contextmanager(): hjelpefunksjon for å lage kontekstar
+#
+# Merk: Norscode har ikkje ekte kontekst-protokoll, so
+# vi simulerer med ordbok_tekst-tilstandsmaskinar og
+# eksplisitt enter/exit-kall.
+#
+# Bruk:
+#   bruk std.contextlib som ctx
+#
+#   la stk = ctx.ny_exitstack()
+#   ctx.stk_enter(stk, ressurs)
+#   # ... bruk ressurs ...
+#   ctx.stk_exit(stk)
+
+# ─── suppress ─────────────────────────────────────────────────────────────────
+# Returnerer ein kontekstobjekt som kan brukast rundt kode
+# som kan kaste unntak med prefiks-melding.
+# Sidan vi ikkje har ekte try/catch-kontekstar, tilbyr vi
+# ein wrapper-funksjon: suppressed(fn_namn, args)
+
+funksjon ny_suppress(meldingsprefiks: tekst) -> ordbok_tekst {
+    la ctx: ordbok_tekst = {}
+    ctx["type"] = "suppress"
+    ctx["prefiks"] = meldingsprefiks
+    ctx["fanga"] = "usann"
+    ctx["siste_feil"] = ""
+    returner ctx
+}
+
+# Køyr ein funksjon og ignorer unntak som startar med prefikset
+funksjon suppress_kall(ctx: ordbok_tekst, fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    prøv {
+        la resultat = builtin.ncb_call_fn(fn_namn, args)
+        ctx["fanga"] = "usann"
+        returner resultat
+    } fang (e) {
+        la feil_melding: tekst = tekst_fra_heltall(0)  # fallback
+        prøv { feil_melding = e["melding"] } fang (e2) { feil_melding = "" }
+        la prefiks: tekst = ctx["prefiks"]
+        hvis (prefiks == "" eller tekst_starter_med(feil_melding, prefiks)) {
+            ctx["fanga"] = "sann"
+            ctx["siste_feil"] = feil_melding
+            returner ""
+        }
+        kast e
+    }
+    returner ""
+}
+
+funksjon suppress_fanga(ctx: ordbok_tekst) -> bool {
+    returner ctx["fanga"] == "sann"
+}
+
+funksjon suppress_siste_feil(ctx: ordbok_tekst) -> tekst {
+    returner ctx["siste_feil"]
+}
+
+# ─── nullcontext ──────────────────────────────────────────────────────────────
+# Ein kontekst som ikkje gjer noko
+
+funksjon ny_nullcontext() -> ordbok_tekst {
+    la ctx: ordbok_tekst = {}
+    ctx["type"] = "null"
+    returner ctx
+}
+
+funksjon nullcontext_enter(ctx: ordbok_tekst) {
+    # noop
+}
+
+funksjon nullcontext_exit(ctx: ordbok_tekst) {
+    # noop
+}
+
+# ─── closing ──────────────────────────────────────────────────────────────────
+# Wrapper som kallar fn_lukk(ressurs) på exit
+
+funksjon ny_closing(ressurs: ordbok_tekst, fn_lukk: tekst) -> ordbok_tekst {
+    la ctx: ordbok_tekst = {}
+    ctx["type"] = "closing"
+    ctx["ressurs"] = builtin.json_stringify(ressurs)
+    ctx["fn_lukk"] = fn_lukk
+    returner ctx
+}
+
+funksjon closing_enter(ctx: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.json_parse(ctx["ressurs"])
+}
+
+funksjon closing_exit(ctx: ordbok_tekst) {
+    la ressurs = builtin.json_parse(ctx["ressurs"])
+    la fn_lukk: tekst = ctx["fn_lukk"]
+    la args: ordbok_tekst = {}
+    args["buf"] = builtin.json_stringify(ressurs)
+    prøv {
+        builtin.ncb_call_fn(fn_lukk, args)
+    } fang (e) {
+        # ignorer feil under lukking
+    }
+}
+
+# ─── ExitStack ────────────────────────────────────────────────────────────────
+# Dynamsik stabla kontekstar; registrer cleanup-funksjonar og køyr alle på exit
+#
+# Stabelen lagrar JSON-serialiserte kontekstobjekt
+
+funksjon ny_exitstack() -> ordbok_tekst {
+    la stk: ordbok_tekst = {}
+    stk["type"] = "exitstack"
+    stk["stabel"] = "[]"   # JSON-liste av {fn, args}-objekt
+    stk["lukka"] = "usann"
+    returner stk
+}
+
+# Registrer ein cleanup-funksjon med args
+funksjon stk_registrer(stk: ordbok_tekst, fn_namn: tekst, args: ordbok_tekst) {
+    la stabel = builtin.json_parse(stk["stabel"])
+    la oppgåve: ordbok_tekst = {}
+    oppgåve["fn"] = fn_namn
+    oppgåve["args"] = builtin.json_stringify(args)
+    legg_til(stabel, builtin.json_stringify(oppgåve))
+    stk["stabel"] = builtin.json_stringify(stabel)
+}
+
+# Registrer ein closing-kontekst
+funksjon stk_enter_closing(stk: ordbok_tekst, ressurs: ordbok_tekst, fn_lukk: tekst) {
+    la args: ordbok_tekst = {}
+    args["ressurs"] = builtin.json_stringify(ressurs)
+    stk_registrer(stk, fn_lukk, args)
+}
+
+# Køyr alle cleanup-funksjonar i omvendt rekkefølgje (LIFO)
+funksjon stk_exit(stk: ordbok_tekst) {
+    la stabel = builtin.json_parse(stk["stabel"])
+    la n: heltall = lengde(stabel)
+    la i: heltall = n - 1
+    mens (i >= 0) {
+        la oppgåve = builtin.json_parse(stabel[i])
+        la fn_namn: tekst = oppgåve["fn"]
+        la args = builtin.json_parse(oppgåve["args"])
+        prøv {
+            builtin.ncb_call_fn(fn_namn, args)
+        } fang (e) {
+            # Cleanup-feil ignorerast (som i Python ExitStack)
+        }
+        i = i - 1
+    }
+    stk["stabel"] = "[]"
+    stk["lukka"] = "sann"
+}
+
+# Fjern siste registrerte cleanup (pop)
+funksjon stk_pop(stk: ordbok_tekst) {
+    la stabel = builtin.json_parse(stk["stabel"])
+    la n: heltall = lengde(stabel)
+    hvis (n > 0) {
+        la ny_stabel = builtin.slice(stabel, 0, n - 1)
+        stk["stabel"] = builtin.json_stringify(ny_stabel)
+    }
+}
+
+funksjon stk_tal_oppgåver(stk: ordbok_tekst) -> heltall {
+    la stabel = builtin.json_parse(stk["stabel"])
+    returner lengde(stabel)
+}
+
+funksjon stk_er_lukka(stk: ordbok_tekst) -> bool {
+    returner stk["lukka"] == "sann"
+}
+
+# Tøm stabelen utan å køyre cleanup (abandon)
+funksjon stk_tøm(stk: ordbok_tekst) {
+    stk["stabel"] = "[]"
+}
+
+# ─── redirect_output ──────────────────────────────────────────────────────────
+# Fangar skriv-output til ein StringIO-buffer
+# Merk: Norscode sin `skriv` går til stdout og kan ikkje
+# lett omdirigerast; dette er ein programmatisk buffer-wrapper
+# for å bygge output-tekstar utan å gå til stdout.
+
+funksjon ny_output_fangar() -> ordbok_tekst {
+    la ctx: ordbok_tekst = {}
+    ctx["type"] = "output_fangar"
+    ctx["buffer"] = ""
+    ctx["aktiv"] = "sann"
+    returner ctx
+}
+
+# Legg til linje i fangaren (bruk i staden for `skriv`)
+funksjon fang_skriv(ctx: ordbok_tekst, linje: tekst) {
+    ctx["buffer"] = ctx["buffer"] + linje + "\n"
+}
+
+funksjon fang_hent(ctx: ordbok_tekst) -> tekst {
+    returner ctx["buffer"]
+}
+
+funksjon fang_tøm(ctx: ordbok_tekst) {
+    ctx["buffer"] = ""
+}
+
+# ─── contextmanager-mønster ───────────────────────────────────────────────────
+# Sidan Norscode ikkje har generator-funksjonar, tilbyr vi
+# eit setup/teardown-mønster via funksjonsnavn
+
+funksjon ny_kontekst(setup_fn: tekst, teardown_fn: tekst, tilstand: ordbok_tekst) -> ordbok_tekst {
+    la ctx: ordbok_tekst = {}
+    ctx["type"] = "custom"
+    ctx["setup"] = setup_fn
+    ctx["teardown"] = teardown_fn
+    ctx["tilstand"] = builtin.json_stringify(tilstand)
+    returner ctx
+}
+
+funksjon kontekst_enter(ctx: ordbok_tekst) -> ordbok_tekst {
+    la tilstand = builtin.json_parse(ctx["tilstand"])
+    la args: ordbok_tekst = {}
+    args["tilstand"] = builtin.json_stringify(tilstand)
+    prøv {
+        la resultat = builtin.ncb_call_fn(ctx["setup"], args)
+        ctx["tilstand"] = builtin.json_stringify(builtin.json_parse(resultat))
+    } fang (e) {
+        # setup feil → kast vidare
+        kast e
+    }
+    returner builtin.json_parse(ctx["tilstand"])
+}
+
+funksjon kontekst_exit(ctx: ordbok_tekst) {
+    la tilstand = builtin.json_parse(ctx["tilstand"])
+    la args: ordbok_tekst = {}
+    args["tilstand"] = builtin.json_stringify(tilstand)
+    prøv {
+        builtin.ncb_call_fn(ctx["teardown"], args)
+    } fang (e) {
+        # teardown feil
+        kast e
+    }
+}
+
+# ─── chained_suppress ─────────────────────────────────────────────────────────
+# Køyr fleire funksjonar der kvar kan feile, samlar feil
+
+funksjon ny_feilsamlar() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["feil"] = "[]"
+    s["ok"] = "[]"
+    returner s
+}
+
+funksjon feilsamlar_kall(s: ordbok_tekst, fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    prøv {
+        la res = builtin.ncb_call_fn(fn_namn, args)
+        la ok_liste = builtin.json_parse(s["ok"])
+        legg_til(ok_liste, fn_namn)
+        s["ok"] = builtin.json_stringify(ok_liste)
+        returner res
+    } fang (e) {
+        la feil_liste = builtin.json_parse(s["feil"])
+        la feil_info: ordbok_tekst = {}
+        feil_info["fn"] = fn_namn
+        prøv { feil_info["melding"] = e["melding"] } fang (e2) { feil_info["melding"] = "ukjend feil" }
+        legg_til(feil_liste, builtin.json_stringify(feil_info))
+        s["feil"] = builtin.json_stringify(feil_liste)
+        returner ""
+    }
+    returner ""
+}
+
+funksjon feilsamlar_har_feil(s: ordbok_tekst) -> bool {
+    la feil = builtin.json_parse(s["feil"])
+    returner lengde(feil) > 0
+}
+
+funksjon feilsamlar_feil(s: ordbok_tekst) -> liste_tekst {
+    returner builtin.json_parse(s["feil"])
+}
+
+funksjon feilsamlar_tal_ok(s: ordbok_tekst) -> heltall {
+    la ok = builtin.json_parse(s["ok"])
+    returner lengde(ok)
+}
