@@ -1447,31 +1447,10 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_whitespace(NcVal **args, int nargs) {
-  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
-  NcVal **vars = calloc(128,sizeof(NcVal*)); char **varnames = calloc(128,sizeof(char*)); int nvars=0;
-  nc_store(vars,varnames,&nvars,"tegn",nargs>0?args[0]:nc_nil());
-
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
-  nc_push(&sp, stack, nc_str(" "));
-  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L16__;
-  nc_push(&sp, stack, nc_bool(1));
-  goto lbl_nc_fn___L17__;
-lbl_nc_fn___L16__:;
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
-  nc_push(&sp, stack, nc_str("\n"));
-  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-lbl_nc_fn___L17__:;
-  if (!nc_truthy(nc_pop(&sp, stack))) goto lbl_nc_fn___L14__;
-  nc_push(&sp, stack, nc_bool(1));
-  goto lbl_nc_fn___L15__;
-lbl_nc_fn___L14__:;
-  nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tegn"));
-  nc_push(&sp, stack, nc_str("\t"));
-  { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_bool(nc_eq(a,b))); }
-lbl_nc_fn___L15__:;
-  { NcVal *_ret=nc_pop(&sp,stack); int _i; for(_i=0;_i<nvars;_i++) free(varnames[_i]); free(varnames); free(vars); free(stack); return _ret; }
-  { int _i; for(_i=0;_i<nvars;_i++) free(varnames[_i]); free(varnames); free(vars); free(stack); return nc_nil(); }
+  /* Patched: include \r so CRLF-checked-out files work on Windows */
+  if (nargs < 1 || !args[0] || args[0]->type != NC_STR) return nc_bool(0);
+  const char *t = args[0]->s;
+  return nc_bool(t[0] == ' ' || t[0] == '\n' || t[0] == '\t' || t[0] == '\r');
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_keyword_type_for(NcVal **args, int nargs) {
