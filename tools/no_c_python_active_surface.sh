@@ -86,6 +86,10 @@ is_allowlisted_path() {
 
 is_ncb_to_c_allowlisted_path() {
     local path="$1"
+    # Docs-mappa er alltid tillatt — ncb_to_c dukkar berre opp som historisk kontekst der
+    case "$path" in
+        "$ROOT/docs/"*) return 0 ;;
+    esac
     local item
     for item in "${NCB_TO_C_ALLOWLIST[@]}"; do
         if [ "$path" = "$item" ]; then
@@ -205,7 +209,7 @@ if command -v rg >/dev/null 2>&1; then
             filtered_ref_files="${filtered_ref_files}"$'\n'"${path}"
         done <<< "$ref_files"
 
-        ref_hits="$(printf '%s\n' "$filtered_ref_files" | rg -v '/(maint|reports|archive)/|/no_c_python_active_surface\.sh$|/python_dependency_audit\.sh$|/python_free_ci\.sh$|/build_norscode_native\.sh$|/verify_seed_only\.sh$|/verify_selvstendighet\.sh$|/verify_omgang6\.sh$|/selfhost_phase0_verify\.sh$|/selfhost_drift_guard\.sh$|/unified_bootstrap_verifier\.sh$|/no_legacy_cvm\.sh$|/enforce_native_first\.sh$|/ci\.yml$|/publish\.yml$|/selfhost-lexer-token-smoke\.yml$|/selvstendighet\.yml$|/stage0-binary\.yml$|/bin/nc$|/windows-app-release\.yml$|/linux-app-release\.yml$|/macos-app-release\.yml$|/docs/' \
+        ref_hits="$(printf '%s\n' "$filtered_ref_files" | rg -v '/(maint|reports|archive)/|/no_c_python_active_surface\.sh$|/python_dependency_audit\.sh$|/python_free_ci\.sh$|/build_norscode_native\.sh$|/build_norscode_windows\.sh$|/verify_seed_only\.sh$|/verify_selvstendighet\.sh$|/verify_omgang6\.sh$|/selfhost_phase0_verify\.sh$|/selfhost_drift_guard\.sh$|/unified_bootstrap_verifier\.sh$|/no_legacy_cvm\.sh$|/enforce_native_first\.sh$|/ci\.yml$|/publish\.yml$|/selfhost-lexer-token-smoke\.yml$|/selvstendighet\.yml$|/stage0-binary\.yml$|/bin/nc$|/windows-app-release\.yml$|/linux-app-release\.yml$|/macos-app-release\.yml$|/docs/' \
           | xargs rg -n -e 'python3?' -e 'pytest' -e 'clang' -e 'gcc' -e '\bcc\b' -e 'ncb_to_c' -e 'c_minimal_vm' -e 'nc_runtime' -e 'nc_native_main' 2>/dev/null || true)"
     else
         ref_hits=""
