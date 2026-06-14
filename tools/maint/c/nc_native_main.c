@@ -10,6 +10,20 @@
  *         norscode_generated.c tools/nc_native_main.c -o dist/norscode_native
  */
 
+/* ── Windows-compat for POSIX env-funksjonar ── */
+#ifdef _WIN32
+#include <stdlib.h>
+static int nc_setenv(const char *k, const char *v, int ov) {
+    (void)ov; return _putenv_s(k, v);
+}
+static int nc_unsetenv(const char *k) {
+    return _putenv_s(k, "");
+}
+#else
+#define nc_setenv  setenv
+#define nc_unsetenv(k) unsetenv(k)
+#endif
+
 /* Forhandsdeklarasjonar — brukar nc_dispatch_call for dynamisk oppslag */
 struct NcVal; typedef struct NcVal NcVal;
 NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na);
@@ -19,16 +33,30 @@ NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
 static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
 
 /* ── TCP socket builtins — implementasjon ── */
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  typedef int ssize_t;
+  #define NC_SOCK_CLOSE(fd) closesocket(fd)
+  static void nc_winsock_ensure(void) {
+      static int done = 0;
+      if (!done) { WSADATA w; WSAStartup(MAKEWORD(2,2),&w); done=1; }
+  }
+#else
+  #include <sys/socket.h>
+  #include <netinet/in.h>
+  #include <arpa/inet.h>
+  #include <unistd.h>
+  #define NC_SOCK_CLOSE(fd) close(fd)
+  #define nc_winsock_ensure() ((void)0)
+#endif
 #define NC_SOCK_MAX 256
 typedef struct { int fd; int active; } NcSockSlot;
 static NcSockSlot nc_sock_pool[NC_SOCK_MAX];
 static int nc_sock_inited = 0;
 static void nc_sock_init(void) {
     if (nc_sock_inited) return;
+    nc_winsock_ensure();
     for (int i = 0; i < NC_SOCK_MAX; i++) nc_sock_pool[i].active = 0;
     nc_sock_inited = 1;
 }
@@ -51,9 +79,9 @@ static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v) {
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
     if (strcmp(host,"0.0.0.0")==0 || strcmp(host,"")==0) addr.sin_addr.s_addr = INADDR_ANY;
     else inet_pton(AF_INET, host, &addr.sin_addr);
-    if (bind(fd,(struct sockaddr*)&addr,sizeof(addr))<0||listen(fd,128)<0) { close(fd); return nc_int(-1); }
+    if (bind(fd,(struct sockaddr*)&addr,sizeof(addr))<0||listen(fd,128)<0) { NC_SOCK_CLOSE(fd); return nc_int(-1); }
     int id = nc_sock_alloc(fd);
-    if (id < 0) { close(fd); return nc_int(-1); }
+    if (id < 0) { NC_SOCK_CLOSE(fd); return nc_int(-1); }
     return nc_int(id);
 }
 static NcVal *nc_builtin_socket_accept(NcVal *srv_v) {
@@ -64,7 +92,7 @@ static NcVal *nc_builtin_socket_accept(NcVal *srv_v) {
     int cfd = accept(fd,(struct sockaddr*)&ca,&cl);
     if (cfd < 0) return nc_int(-1);
     int id = nc_sock_alloc(cfd);
-    if (id < 0) { close(cfd); return nc_int(-1); }
+    if (id < 0) { NC_SOCK_CLOSE(cfd); return nc_int(-1); }
     return nc_int(id);
 }
 static NcVal *nc_builtin_socket_read(NcVal *conn_v, NcVal *max_v) {
@@ -91,7 +119,7 @@ static NcVal *nc_builtin_socket_close(NcVal *conn_v) {
     int id = conn_v&&conn_v->type==NC_INT?(int)conn_v->i:-1;
     if (id<0||id>=NC_SOCK_MAX) return nc_int(-1);
     int fd = nc_sock_pool[id].fd; nc_sock_pool[id].active=0; nc_sock_pool[id].fd=-1;
-    return fd>=0 ? (close(fd), nc_int(0)) : nc_int(-1);
+    return fd>=0 ? (NC_SOCK_CLOSE(fd), nc_int(0)) : nc_int(-1);
 }
 NcVal *nc_fn_builtin_neste_token(NcVal **a, int na);
 static NcVal *g_current_route_handlers = NULL;
@@ -2314,7 +2342,7 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
         const char *v = getenv(env_keys[i]);
         saved[nsaved] = v ? strdup(v) : NULL;
         nsaved++;
-        unsetenv(env_keys[i]);
+        nc_unsetenv(env_keys[i]);
     }
     // TODO: Steg C - skip runtime-compilation av selfhost/common.no (infinite loop på stor fil)
     // Forutsetter at common-funksjonar allereie er i kompilert NCB
@@ -2325,10 +2353,10 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     g_current_functions = NULL;
     for (int i = 0; i < nsaved; i++) {
         if (saved[i]) {
-            setenv(env_keys[i], saved[i], 1);
+            nc_setenv(env_keys[i], saved[i], 1);
             free(saved[i]);
         } else {
-            unsetenv(env_keys[i]);
+            nc_unsetenv(env_keys[i]);
         }
     }
     free(entry);
