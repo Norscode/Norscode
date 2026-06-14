@@ -17,6 +17,82 @@ NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
 NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
 static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
+
+/* ── TCP socket builtins — implementasjon ── */
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#define NC_SOCK_MAX 256
+typedef struct { int fd; int active; } NcSockSlot;
+static NcSockSlot nc_sock_pool[NC_SOCK_MAX];
+static int nc_sock_inited = 0;
+static void nc_sock_init(void) {
+    if (nc_sock_inited) return;
+    for (int i = 0; i < NC_SOCK_MAX; i++) nc_sock_pool[i].active = 0;
+    nc_sock_inited = 1;
+}
+static int nc_sock_alloc(int fd) {
+    for (int i = 0; i < NC_SOCK_MAX; i++)
+        if (!nc_sock_pool[i].active) { nc_sock_pool[i].fd = fd; nc_sock_pool[i].active = 1; return i; }
+    return -1;
+}
+static int nc_sock_fd(int id) {
+    return (id >= 0 && id < NC_SOCK_MAX && nc_sock_pool[id].active) ? nc_sock_pool[id].fd : -1;
+}
+static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v) {
+    nc_sock_init();
+    const char *host = (host_v && host_v->type==NC_STR) ? host_v->s : "0.0.0.0";
+    int port = (port_v && port_v->type==NC_INT) ? (int)port_v->i : 8000;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return nc_int(-1);
+    int opt = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET; addr.sin_port = htons(port);
+    if (strcmp(host,"0.0.0.0")==0 || strcmp(host,"")==0) addr.sin_addr.s_addr = INADDR_ANY;
+    else inet_pton(AF_INET, host, &addr.sin_addr);
+    if (bind(fd,(struct sockaddr*)&addr,sizeof(addr))<0||listen(fd,128)<0) { close(fd); return nc_int(-1); }
+    int id = nc_sock_alloc(fd);
+    if (id < 0) { close(fd); return nc_int(-1); }
+    return nc_int(id);
+}
+static NcVal *nc_builtin_socket_accept(NcVal *srv_v) {
+    nc_sock_init();
+    int fd = nc_sock_fd(srv_v&&srv_v->type==NC_INT?(int)srv_v->i:-1);
+    if (fd < 0) return nc_int(-1);
+    struct sockaddr_in ca; socklen_t cl = sizeof(ca);
+    int cfd = accept(fd,(struct sockaddr*)&ca,&cl);
+    if (cfd < 0) return nc_int(-1);
+    int id = nc_sock_alloc(cfd);
+    if (id < 0) { close(cfd); return nc_int(-1); }
+    return nc_int(id);
+}
+static NcVal *nc_builtin_socket_read(NcVal *conn_v, NcVal *max_v) {
+    nc_sock_init();
+    int fd = nc_sock_fd(conn_v&&conn_v->type==NC_INT?(int)conn_v->i:-1);
+    if (fd < 0) return nc_str("");
+    int maxb = (max_v&&max_v->type==NC_INT&&max_v->i>0&&max_v->i<=65536)?(int)max_v->i:4096;
+    char *buf = (char*)malloc(maxb+1); if (!buf) return nc_str("");
+    ssize_t n = recv(fd, buf, maxb, 0);
+    if (n <= 0) { free(buf); return nc_str(""); }
+    buf[n] = '\0'; NcVal *r = nc_str(buf); free(buf); return r;
+}
+static NcVal *nc_builtin_socket_write(NcVal *conn_v, NcVal *data_v) {
+    nc_sock_init();
+    int fd = nc_sock_fd(conn_v&&conn_v->type==NC_INT?(int)conn_v->i:-1);
+    if (fd < 0) return nc_int(-1);
+    const char *data = (data_v&&data_v->type==NC_STR) ? data_v->s : "";
+    size_t len = strlen(data); ssize_t total = 0, sent;
+    while ((size_t)total < len) { sent = send(fd, data+total, len-total, 0); if (sent<=0) break; total+=sent; }
+    return nc_int((long long)total);
+}
+static NcVal *nc_builtin_socket_close(NcVal *conn_v) {
+    nc_sock_init();
+    int id = conn_v&&conn_v->type==NC_INT?(int)conn_v->i:-1;
+    if (id<0||id>=NC_SOCK_MAX) return nc_int(-1);
+    int fd = nc_sock_pool[id].fd; nc_sock_pool[id].active=0; nc_sock_pool[id].fd=-1;
+    return fd>=0 ? (close(fd), nc_int(0)) : nc_int(-1);
+}
 NcVal *nc_fn_builtin_neste_token(NcVal **a, int na);
 static NcVal *g_current_route_handlers = NULL;
 static NcVal *g_current_functions = NULL;
@@ -731,6 +807,22 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     nc_throw(_async_exc);
                 }
                 fn_r = v;
+            }
+            /* ── TCP socket-builtins ── */
+            else if (!strcmp(cn,"socket_listen") || !strcmp(cn,"socket.listen")) {
+                fn_r = nc_builtin_socket_listen(narg>0?cargs[0]:nc_nil(), narg>1?cargs[1]:nc_nil());
+            }
+            else if (!strcmp(cn,"socket_accept") || !strcmp(cn,"socket.accept")) {
+                fn_r = nc_builtin_socket_accept(narg>0?cargs[0]:nc_nil());
+            }
+            else if (!strcmp(cn,"socket_read") || !strcmp(cn,"socket.read")) {
+                fn_r = nc_builtin_socket_read(narg>0?cargs[0]:nc_nil(), narg>1?cargs[1]:nc_nil());
+            }
+            else if (!strcmp(cn,"socket_write") || !strcmp(cn,"socket.write")) {
+                fn_r = nc_builtin_socket_write(narg>0?cargs[0]:nc_nil(), narg>1?cargs[1]:nc_nil());
+            }
+            else if (!strcmp(cn,"socket_close") || !strcmp(cn,"socket.close")) {
+                fn_r = nc_builtin_socket_close(narg>0?cargs[0]:nc_nil());
             }
             else if (!strcmp(cn,"vent.sov") || !strcmp(cn,"builtin.vent.sov")) { /* noop — sync runtime */ }
             else if (!strcmp(cn,"vent.timeout") || !strcmp(cn,"builtin.vent.timeout")) {

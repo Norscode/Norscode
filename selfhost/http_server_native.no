@@ -1,0 +1,386 @@
+# http_server_native.no — Pure Norscode HTTP Server v4.0
+# Full CRUD + filtrering + 405 + request-teljar + sikkerheit
+#
+# Kjør:
+#   NORSCODE_CMD=run NORSCODE_FILE=selfhost/http_server_native.no ./dist/norscode_native
+#
+# Endepunkter:
+#   GET    /                    → API-info
+#   GET    /helse               → Helsesjekk + request-teljar
+#   GET    /brukere             → List alle (støttar ?rolle=...)
+#   GET    /brukere/{id}        → Hent ein brukar
+#   POST   /brukere             → Opprett brukar
+#   PUT    /brukere/{id}        → Oppdater brukar
+#   DELETE /brukere/{id}        → Slett brukar
+#   GET    /__stopp__           → Stopp server
+
+# ─── HTTP-hjelpar ────────────────────────────────────────────────────────────
+
+funksjon http_svar(status: heltall, content_type: tekst, body: tekst) -> tekst {
+    la status_text: tekst = "OK"
+    hvis status == 201 { status_text = "Created" }
+    hvis status == 204 { status_text = "No Content" }
+    hvis status == 400 { status_text = "Bad Request" }
+    hvis status == 404 { status_text = "Not Found" }
+    hvis status == 405 { status_text = "Method Not Allowed" }
+    hvis status == 500 { status_text = "Internal Server Error" }
+    la resp: tekst = "HTTP/1.1 " + tekst(status) + " " + status_text + "\r\n"
+    resp = resp + "Content-Type: " + content_type + "\r\n"
+    resp = resp + "Content-Length: " + tekst(lengde(body)) + "\r\n"
+    resp = resp + "Access-Control-Allow-Origin: *\r\n"
+    resp = resp + "Connection: close\r\n"
+    resp = resp + "\r\n"
+    resp = resp + body
+    returner resp
+}
+
+funksjon http_json(body: tekst) -> tekst {
+    returner http_svar(200, "application/json; charset=utf-8", body)
+}
+
+funksjon http_json_201(body: tekst) -> tekst {
+    returner http_svar(201, "application/json; charset=utf-8", body)
+}
+
+funksjon http_404(sti: tekst) -> tekst {
+    returner http_svar(404, "application/json", "{\"feil\":\"Ikke funnet\",\"sti\":\"" + sti + "\"}")
+}
+
+funksjon http_400(melding: tekst) -> tekst {
+    returner http_svar(400, "application/json", "{\"feil\":\"" + melding + "\"}")
+}
+
+funksjon http_405(metode: tekst, sti: tekst) -> tekst {
+    returner http_svar(405, "application/json", "{\"feil\":\"Metode ikke tillatt\",\"metode\":\"" + metode + "\",\"sti\":\"" + sti + "\"}")
+}
+
+funksjon http_204() -> tekst {
+    returner http_svar(204, "application/json", "")
+}
+
+# Hent statuskode frå ferdig HTTP-svar (for logging)
+funksjon hent_statuskode(resp: tekst) -> tekst {
+    la deler = builtin.split(resp, " ")
+    hvis lengde(deler) >= 2 {
+        returner deler[1]
+    }
+    returner "???"
+}
+
+# ─── Request-parsing ─────────────────────────────────────────────────────────
+
+funksjon parse_full_request(raw: tekst) -> ordbok_tekst {
+    la req: ordbok_tekst = {}
+    la linjer = builtin.split(raw, "\n")
+    hvis lengde(linjer) < 1 { returner req }
+
+    la første = builtin.trim(linjer[0])
+    la deler = builtin.split(første, " ")
+    hvis lengde(deler) < 2 { returner req }
+
+    req["metode"] = deler[0]
+    la full_sti = deler[1]
+    la q = builtin.index_of(full_sti, "?")
+    hvis q >= 0 {
+        req["sti"]   = builtin.slice(full_sti, 0, q)
+        req["query"] = builtin.slice(full_sti, q + 1, lengde(full_sti))
+    } ellers {
+        req["sti"]   = full_sti
+        req["query"] = ""
+    }
+
+    # Finn body etter blank linje
+    la i: heltall = 1
+    la body_start: heltall = -1
+    mens i < lengde(linjer) {
+        la linje = builtin.trim(linjer[i])
+        hvis linje == "" {
+            body_start = i + 1
+            i = lengde(linjer)
+        }
+        i = i + 1
+    }
+
+    la body: tekst = ""
+    hvis body_start >= 0 {
+        la j: heltall = body_start
+        mens j < lengde(linjer) {
+            body = body + builtin.trim(linjer[j])
+            j = j + 1
+        }
+    }
+    req["body"] = body
+    returner req
+}
+
+# ─── Mini JSON-hjelpar ────────────────────────────────────────────────────────
+
+funksjon json_hent(json: tekst, nokkel: tekst) -> tekst {
+    la søk = "\"" + nokkel + "\":"
+    la pos = builtin.index_of(json, søk)
+    hvis pos < 0 { returner "" }
+    la etter  = builtin.slice(json, pos + lengde(søk), lengde(json))
+    la etter2 = builtin.trim(etter)
+    la første = builtin.slice(etter2, 0, 1)
+    hvis første != "\"" { returner "" }
+    la inner = builtin.slice(etter2, 1, lengde(etter2))
+    la slutt = builtin.index_of(inner, "\"")
+    hvis slutt < 0 { returner "" }
+    returner builtin.slice(inner, 0, slutt)
+}
+
+funksjon er_gyldig_json_objekt(s: tekst) -> boolsk {
+    la s2 = builtin.trim(s)
+    hvis lengde(s2) < 2 { returner usant }
+    la start = builtin.slice(s2, 0, 1)
+    la slutt  = builtin.slice(s2, lengde(s2) - 1, lengde(s2))
+    returner start == "{" og slutt == "}"
+}
+
+# ─── Query-streng-hjelpar ─────────────────────────────────────────────────────
+
+funksjon query_hent(query: tekst, nokkel: tekst) -> tekst {
+    hvis query == "" { returner "" }
+    la deler = builtin.split(query, "&")
+    la i: heltall = 0
+    mens i < lengde(deler) {
+        la par = deler[i]
+        la eq  = builtin.index_of(par, "=")
+        hvis eq >= 0 {
+            la k = builtin.slice(par, 0, eq)
+            la v = builtin.slice(par, eq + 1, lengde(par))
+            hvis k == nokkel { returner v }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+# ─── In-memory database ───────────────────────────────────────────────────────
+
+funksjon init_db() -> ordbok_tekst {
+    la db: ordbok_tekst = {}
+    db["1"] = "{\"id\":\"1\",\"namn\":\"Jan Steinar\",\"epost\":\"jan@norscode.no\",\"rolle\":\"admin\"}"
+    db["2"] = "{\"id\":\"2\",\"namn\":\"Alice\",\"epost\":\"alice@norscode.no\",\"rolle\":\"utvikler\"}"
+    db["3"] = "{\"id\":\"3\",\"namn\":\"Bob\",\"epost\":\"bob@norscode.no\",\"rolle\":\"utvikler\"}"
+    db["__neste__"] = "4"
+    returner db
+}
+
+funksjon er_intern_nokkel(id: tekst) -> boolsk {
+    returner builtin.index_of(id, "__") == 0
+}
+
+funksjon db_liste_json(db: ordbok_tekst, rolle_filter: tekst) -> tekst {
+    la ids  = nøkler(db)
+    la json: tekst = "["
+    la first: boolsk = sant
+    la i: heltall = 0
+    mens i < lengde(ids) {
+        la k = ids[i]
+        hvis ikkje er_intern_nokkel(k) {
+            la brukar = db[k]
+            la ta_med: boolsk = sant
+            hvis rolle_filter != "" {
+                la brukar_rolle = json_hent(brukar, "rolle")
+                ta_med = brukar_rolle == rolle_filter
+            }
+            hvis ta_med {
+                hvis ikkje first { json = json + "," }
+                json = json + brukar
+                first = usant
+            }
+        }
+        i = i + 1
+    }
+    returner json + "]"
+}
+
+# ─── Handlers ─────────────────────────────────────────────────────────────────
+
+funksjon handle_rot() -> tekst {
+    returner http_json("{\"api\":\"Norscode HTTP Server\",\"versjon\":\"4.0\",\"crud\":true,\"filtrering\":true}")
+}
+
+funksjon handle_helse(teljar: heltall) -> tekst {
+    returner http_json("{\"status\":\"ok\",\"requests\":" + tekst(teljar) + ",\"motor\":\"native-socket\",\"python\":false}")
+}
+
+funksjon handle_get_brukere(req: ordbok_tekst, db: ordbok_tekst) -> tekst {
+    la query       = hvis (har_nokkel(req, "query")) da req["query"] ellers ""
+    la rolle_filter = query_hent(query, "rolle")
+    returner http_json(db_liste_json(db, rolle_filter))
+}
+
+funksjon handle_get_brukar(id: tekst, db: ordbok_tekst) -> tekst {
+    hvis er_intern_nokkel(id) eller ikkje har_nokkel(db, id) {
+        returner http_404("/brukere/" + id)
+    }
+    returner http_json(db[id])
+}
+
+funksjon handle_post_brukar(req: ordbok_tekst, db: ordbok_tekst) -> tekst {
+    la body = hvis (har_nokkel(req, "body")) da req["body"] ellers ""
+    hvis ikkje er_gyldig_json_objekt(body) {
+        returner http_400("Ugyldig JSON i body")
+    }
+    la namn  = json_hent(body, "namn")
+    la epost = json_hent(body, "epost")
+    la rolle = json_hent(body, "rolle")
+    hvis namn == "" {
+        returner http_400("Mangler felt: namn")
+    }
+    la id = db["__neste__"]
+    la ny = "{\"id\":\"" + id + "\",\"namn\":\"" + namn + "\",\"epost\":\"" + epost + "\",\"rolle\":\"" + rolle + "\"}"
+    db[id] = ny
+    la neste: heltall = builtin.heltall_fra_tekst(id) + 1
+    db["__neste__"] = tekst(neste)
+    returner http_json_201(ny)
+}
+
+funksjon handle_put_brukar(id: tekst, req: ordbok_tekst, db: ordbok_tekst) -> tekst {
+    hvis er_intern_nokkel(id) eller ikkje har_nokkel(db, id) {
+        returner http_404("/brukere/" + id)
+    }
+    la body = hvis (har_nokkel(req, "body")) da req["body"] ellers ""
+    hvis ikkje er_gyldig_json_objekt(body) {
+        returner http_400("Ugyldig JSON i body")
+    }
+    # Les eksisterande felt, overskriv det som er sendt inn
+    la gamal = db[id]
+    la namn  = json_hent(body, "namn")
+    la epost = json_hent(body, "epost")
+    la rolle = json_hent(body, "rolle")
+    hvis namn  == "" { namn  = json_hent(gamal, "namn") }
+    hvis epost == "" { epost = json_hent(gamal, "epost") }
+    hvis rolle == "" { rolle = json_hent(gamal, "rolle") }
+    la oppdatert = "{\"id\":\"" + id + "\",\"namn\":\"" + namn + "\",\"epost\":\"" + epost + "\",\"rolle\":\"" + rolle + "\"}"
+    db[id] = oppdatert
+    returner http_json(oppdatert)
+}
+
+funksjon handle_delete_brukar(id: tekst, db: ordbok_tekst) -> tekst {
+    hvis er_intern_nokkel(id) {
+        returner http_400("Ugyldig id")
+    }
+    hvis ikkje har_nokkel(db, id) {
+        returner http_404("/brukere/" + id)
+    }
+    fjern_nokkel(db, id)
+    returner http_204()
+}
+
+# ─── Router ───────────────────────────────────────────────────────────────────
+
+funksjon hent_id_fra_sti(sti: tekst) -> tekst {
+    la deler = builtin.split(sti, "/")
+    hvis lengde(deler) > 0 {
+        returner deler[lengde(deler) - 1]
+    }
+    returner ""
+}
+
+funksjon rut_request(req: ordbok_tekst, db: ordbok_tekst, teljar: heltall) -> tekst {
+    la sti    = hvis (har_nokkel(req, "sti"))    da req["sti"]    ellers "/"
+    la metode = hvis (har_nokkel(req, "metode")) da req["metode"] ellers "GET"
+
+    # ── Rot
+    hvis sti == "/" {
+        hvis metode == "GET" { returner handle_rot() }
+        returner http_405(metode, sti)
+    }
+
+    # ── Helse
+    hvis sti == "/helse" {
+        hvis metode == "GET" { returner handle_helse(teljar) }
+        returner http_405(metode, sti)
+    }
+
+    # ── Brukere (samling)
+    hvis sti == "/brukere" {
+        hvis metode == "GET"  { returner handle_get_brukere(req, db) }
+        hvis metode == "POST" { returner handle_post_brukar(req, db) }
+        returner http_405(metode, sti)
+    }
+
+    # ── Brukere (enkelt element)
+    hvis builtin.index_of(sti, "/brukere/") == 0 {
+        la id = hent_id_fra_sti(sti)
+        hvis metode == "GET"    { returner handle_get_brukar(id, db) }
+        hvis metode == "PUT"    { returner handle_put_brukar(id, req, db) }
+        hvis metode == "DELETE" { returner handle_delete_brukar(id, db) }
+        returner http_405(metode, sti)
+    }
+
+    returner http_404(sti)
+}
+
+# ─── Server-løkke ────────────────────────────────────────────────────────────
+
+funksjon start() {
+    la host = "127.0.0.1"
+    la port: heltall = 8000
+
+    la srv = builtin.socket_listen(host, port)
+    hvis srv < 0 {
+        skriv("FEIL: Kunne ikke lytte på " + host + ":" + tekst(port))
+        returner
+    }
+
+    la db     = init_db()
+    la teljar: heltall = 0
+
+    skriv("")
+    skriv("═══════════════════════════════════════════════════════")
+    skriv("  Norscode Pure Native HTTP Server  v4.0")
+    skriv("═══════════════════════════════════════════════════════")
+    skriv("  📍 http://" + host + ":" + tekst(port))
+    skriv("  🗄️  Full CRUD  |  filtrering  |  ingen Python")
+    skriv("")
+    skriv("  GET    /brukere?rolle=...  → filtrert liste")
+    skriv("  POST   /brukere            → opprett")
+    skriv("  PUT    /brukere/{id}       → oppdater")
+    skriv("  DELETE /brukere/{id}       → slett")
+    skriv("═══════════════════════════════════════════════════════")
+    skriv("")
+
+    la running: boolsk = sant
+    mens running {
+        la conn = builtin.socket_accept(srv)
+        hvis conn < 0 {
+            skriv("Accept feil, avslutter")
+            running = usant
+        } ellers {
+            la raw = builtin.socket_read(conn, 8192)
+            la resp: tekst = ""
+
+            hvis lengde(raw) > 0 {
+                la req    = parse_full_request(raw)
+                la sti    = hvis (har_nokkel(req, "sti"))    da req["sti"]    ellers "/"
+                la metode = hvis (har_nokkel(req, "metode")) da req["metode"] ellers "GET"
+
+                hvis sti == "/__stopp__" {
+                    resp = http_json("{\"status\":\"stopper\",\"total_requests\":" + tekst(teljar) + "}")
+                    running = usant
+                    skriv("  → stopp  (total: " + tekst(teljar) + " requests)")
+                } ellers {
+                    teljar = teljar + 1
+                    resp = rut_request(req, db, teljar)
+                    la kode = hent_statuskode(resp)
+                    skriv("  " + metode + " " + sti + " → " + kode)
+                }
+            } ellers {
+                resp = http_svar(400, "application/json", "{\"feil\":\"tom request\"}")
+            }
+
+            builtin.socket_write(conn, resp)
+            builtin.socket_close(conn)
+        }
+    }
+
+    builtin.socket_close(srv)
+    skriv("")
+    skriv("Server stoppet.")
+}
+
+start()
