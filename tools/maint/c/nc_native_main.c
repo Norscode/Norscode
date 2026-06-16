@@ -137,6 +137,8 @@ static NcVal *nc_builtin_json_stringify_smart(NcVal *v);
 static void nc_merge_fns(NcVal *dst, NcVal *src);
 static void nc_merge_imports_from_source(NcVal *bundle, const char *src_text);
 static void nc_list_append_raw(NcVal *lst, NcVal *v);
+NcVal *nc_fn_builtin_ast_normaliser_type(NcVal **args, int na);
+NcVal *nc_fn_builtin_analyser_program(NcVal **args, int na);
 
 /* Stdlib dispatch handlers */
 NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na);
@@ -411,6 +413,109 @@ static NcVal *nc_call_ir_contract_api(const char *cn, NcVal **args, int nargs) {
     return nc_exec_call(g_sh_ir_contract_fns, full, args, nargs, 0);
 }
 static NcVal *nc_stub_t_hilsen(NcVal *navn) { char *n=nc_to_str_raw(navn); char r[256]; snprintf(r,sizeof(r),"Hei %s",n); free(n); return nc_str(r); }
+static NcVal *nc_semantic_new_scope(const char *name, NcVal *parent) {
+    NcVal *scope = nc_map_new();
+    nc_index_set(scope, nc_str("navn"), nc_str(name ? name : ""));
+    nc_index_set(scope, nc_str("forelder"), parent && parent->type != NC_NIL ? parent : nc_nil());
+    nc_index_set(scope, nc_str("symboler"), nc_list_new());
+    nc_index_set(scope, nc_str("barn"), nc_list_new());
+    if (parent && parent->type == NC_MAP) {
+        NcVal *barn = nc_index_get(parent, nc_str("barn"));
+        if (barn && barn->type == NC_LIST) nc_builtin_legg_til(barn, scope);
+    }
+    return scope;
+}
+static NcVal *nc_semantic_new_symbol(const char *name, const char *type, const char *kategori, NcVal *node) {
+    NcVal *symbol = nc_map_new();
+    nc_index_set(symbol, nc_str("navn"), nc_str(name ? name : ""));
+    nc_index_set(symbol, nc_str("type"), nc_str(type ? type : ""));
+    nc_index_set(symbol, nc_str("kategori"), nc_str(kategori ? kategori : ""));
+    nc_index_set(symbol, nc_str("node"), node && node->type != NC_NIL ? node : nc_nil());
+    return symbol;
+}
+static int nc_scope_has(NcVal *scope, const char *name) {
+    if (!scope || scope->type != NC_MAP) return 0;
+    NcVal *symbols = nc_index_get(scope, nc_str("symboler"));
+    if (!symbols || symbols->type != NC_LIST) return 0;
+    for (int i = 0; i < symbols->list->len; i++) {
+        NcVal *sym = symbols->list->items[i];
+        if (sym && sym->type == NC_MAP) {
+            NcVal *n = nc_index_get(sym, nc_str("navn"));
+            if (n && n->type == NC_STR && !strcmp(n->s, name ? name : "")) return 1;
+        }
+    }
+    return 0;
+}
+static NcVal *nc_scope_find(NcVal *scope, const char *name) {
+    while (scope && scope->type == NC_MAP) {
+        NcVal *symbols = nc_index_get(scope, nc_str("symboler"));
+        if (symbols && symbols->type == NC_LIST) {
+            for (int i = 0; i < symbols->list->len; i++) {
+                NcVal *sym = symbols->list->items[i];
+                if (sym && sym->type == NC_MAP) {
+                    NcVal *n = nc_index_get(sym, nc_str("navn"));
+                    if (n && n->type == NC_STR && !strcmp(n->s, name ? name : "")) return sym;
+                }
+            }
+        }
+        scope = nc_index_get(scope, nc_str("forelder"));
+        if (scope && scope->type == NC_NIL) return nc_nil();
+    }
+    return nc_nil();
+}
+static NcVal *nc_semantic_new_state(void) {
+    NcVal *state = nc_map_new();
+    NcVal *g = nc_semantic_new_scope("global", NULL);
+    nc_index_set(state, nc_str("global_scope"), g);
+    nc_index_set(state, nc_str("scope"), g);
+    nc_index_set(state, nc_str("feil"), nc_list_new());
+    nc_index_set(state, nc_str("funksjon_returer"), nc_list_new());
+    return state;
+}
+static int nc_semantic_state_ok(NcVal *state) {
+    if (!state || state->type != NC_MAP) return 0;
+    NcVal *feil = nc_index_get(state, nc_str("feil"));
+    return feil && feil->type == NC_LIST && feil->list->len == 0;
+}
+static NcVal *nc_semantic_state_report(NcVal *state) {
+    if (nc_semantic_state_ok(state)) return nc_str("Semantic OK");
+    NcVal *feil = (!state || state->type != NC_MAP) ? nc_nil() : nc_index_get(state, nc_str("feil"));
+    if (!feil || feil->type != NC_LIST) return nc_str("Semantic feil:\n");
+    size_t cap = 64;
+    char *buf = malloc(cap);
+    strcpy(buf, "Semantic feil:\n");
+    size_t len = strlen(buf);
+    for (int i = 0; i < feil->list->len; i++) {
+        NcVal *e = feil->list->items[i];
+        if (!e || e->type != NC_MAP) continue;
+        char *line = nc_to_str_raw(nc_index_get(e, nc_str("linje")));
+        char *col = nc_to_str_raw(nc_index_get(e, nc_str("kolonne")));
+        char *msg = nc_to_str_raw(nc_index_get(e, nc_str("melding")));
+        size_t need = len + strlen("- ") + strlen(line) + strlen(":") + strlen(col) + strlen(" ") + strlen(msg) + strlen("\n") + 1;
+        if (need > cap) { cap = need * 2; buf = realloc(buf, cap); }
+        snprintf(buf + len, cap - len, "- %s:%s %s\n", line, col, msg);
+        len = strlen(buf);
+        free(line); free(col); free(msg);
+    }
+    NcVal *r = nc_str(buf);
+    free(buf);
+    return r;
+}
+NcVal *nc_fn_builtin_ast_normaliser_type(NcVal **args, int na) {
+    NcVal *v = na > 0 ? args[0] : nc_nil();
+    if (!v || v->type != NC_STR) return nc_str("ukjent");
+    const char *t = v->s ? v->s : "";
+    if (!strcmp(t, "PROGRAM")) return nc_str("Program");
+    if (!strcmp(t, "IDENT")) return nc_str("Ident");
+    if (!strcmp(t, "NUMBER") || !strcmp(t, "TALL")) return nc_str("Heltall");
+    if (!strcmp(t, "STRING") || !strcmp(t, "TEKST_LITERAL")) return nc_str("Tekst");
+    if (!strcmp(t, "BINOP")) return nc_str("Binop");
+    if (!strcmp(t, "RETURNER")) return nc_str("Returner");
+    return nc_str(t);
+}
+NcVal *nc_fn_builtin_analyser_program(NcVal **args, int na) {
+    return nc_dispatch_call("selfhost.compiler.semantic.semantic_analyser", args, na);
+}
 static NcVal *nc_stub_t_starter_med(NcVal *s, NcVal *p) { return nc_builtin_starts_with(s, p); }
 static NcVal *nc_stub_assert_slutter_med(NcVal *s, NcVal *p) {
     if (!nc_truthy(nc_builtin_ends_with(s, p))) {
@@ -729,6 +834,26 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"std.json.parse") || !strcmp(cn,"builtin.json.parse"))
                 fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"json_parse"))       fn_r=nc_builtin_json_parse_norscode(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"ast_normaliser_type") || !strcmp(cn,"builtin.ast_normaliser_type"))
+                fn_r = nc_fn_builtin_ast_normaliser_type(cargs, narg);
+            else if (!strcmp(cn,"analyser_program") || !strcmp(cn,"builtin.analyser_program"))
+                fn_r = nc_fn_builtin_analyser_program(cargs, narg);
+            else if (!strcmp(cn,"semantic_analyser") || !strcmp(cn,"builtin.semantic_analyser"))
+                fn_r=nc_dispatch_call("selfhost.semantic.semantic_analyser", cargs, narg);
+            else if (!strcmp(cn,"semantic_validate_program") || !strcmp(cn,"builtin.semantic_validate_program"))
+                fn_r=nc_dispatch_call("semantic_validate_program", cargs, narg);
+            else if (!strcmp(cn,"semantic_has_errors") || !strcmp(cn,"builtin.semantic_has_errors"))
+                fn_r=nc_dispatch_call("semantic_has_errors", cargs, narg);
+            else if (!strcmp(cn,"semantic_ok") || !strcmp(cn,"builtin.semantic_ok"))
+                fn_r=nc_semantic_state_ok(narg>0?cargs[0]:nc_nil()) ? nc_bool(1) : nc_bool(0);
+            else if (!strcmp(cn,"semantic_rapport") || !strcmp(cn,"builtin.semantic_rapport"))
+                fn_r=nc_semantic_state_report(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"ny_semantic_state") || !strcmp(cn,"builtin.ny_semantic_state"))
+                fn_r=nc_semantic_new_state();
+            else if (!strcmp(cn,"ny_scope") || !strcmp(cn,"builtin.ny_scope"))
+                fn_r=nc_semantic_new_scope(narg>0?nc_to_str_raw(cargs[0]):"", narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"ny_symbol") || !strcmp(cn,"builtin.ny_symbol"))
+                fn_r=nc_semantic_new_symbol(narg>0?nc_to_str_raw(cargs[0]):"", narg>1?nc_to_str_raw(cargs[1]):"", narg>2?nc_to_str_raw(cargs[2]):"", narg>3?cargs[3]:nc_nil());
             else if (!strcmp(cn,"kompiler_fil"))     fn_r=nc_dispatch_call("selfhost.kompiler.kompiler_fil", cargs, narg);
             else if (!strcmp(cn,"fil_les")||!strcmp(cn,"fil_skriv")) {
                 /* fil_les og fil_skriv kan kaste IOFeil — bruk setjmp */
@@ -2409,4 +2534,3 @@ int main(int argc, char **argv) {
     fprintf(stderr, "norscode: ukjend kommando: %s\n", cmd);
     return 1;
 }
-
