@@ -29,7 +29,7 @@
 
 ## Fase 0 — Rydding og CI-stabilisering (blokkerer alt)
 
-Ingenting kan gå framover med CI-feil. De kjente blokkeringene er ryddet ut av workflowene, og det finnes nå en egen `phase0-verify`-gate. Resten er å bekrefte grønn CI i GitHub Actions og fullføre siste opprydding i fase 0.
+Fase 0 er no i praksis lukka: dei kjente blokkeringene er ryddet ut av workflowene, `phase0-verify`-gaten finst, og CI er bekrefta grøn. Denne delen står berre att som historisk referanse for kva som vart rydda først.
 
 Verifiser sluttstatus med `bash tools/selfhost_phase0_verify.sh`.
 For en samlet plan for full selvstendighet, se [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md).
@@ -53,7 +53,7 @@ For arbeidet med å fjerne dei siste legacy-/maintainer-beslaga, sjå [docs/05-d
 - `tools/export_ncbb_as_bin.py`, `export_ncbb_as_c.py`, `tools/json_ncb_to_ncbb.py`, `generate_linux_bootstrap_artifacts.py`, `v42_trace_probe.py` (fjerna; normal flyt bruker NCB JSON + selfhost VM)
 - `build/norcode-native-stage0.py`
 
-**Leveranse:** Lokal verifikasjon er på plass; neste milepæl er bekreftet grønn CI i GitHub Actions.
+**Leveranse:** Lokal verifikasjon og grønn CI er på plass; resten er historisk opprydding og dokumentasjon.
 
 ---
 

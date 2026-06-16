@@ -35,7 +35,7 @@ check_sh_syntax() {
 
 check_active_surface() {
   grep -rn \
-    "python3 main\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\." \
+    "main\.py\|compile\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\." \
     "${ACTIVE_ROOTS[@]}" \
     --exclude="selfhost_phase0_verify.sh" \
     --exclude-dir=".git" \
@@ -45,13 +45,13 @@ check_active_surface() {
 main() {
   check_sh_syntax
   if check_active_surface >/dev/null; then
-    printf 'Fase 0-verifisering feila: gamle blokkere finst framleis i aktiv flate.\n' >&2
+    printf 'Fase 0-verifisering feila: historiske blokkere finst framleis i aktiv flate.\n' >&2
     check_active_surface >&2 || true
     exit 1
   fi
 
   printf 'Fase 0-verifisering: OK\n'
-  printf 'Aktiv flate er fri for kjente fase-0-blokkere.\n'
+  printf 'Aktiv flate er fri for kjente historiske fase-0-blokkere.\n'
 }
 
 main "$@"

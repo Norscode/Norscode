@@ -134,7 +134,7 @@ bash tools/build_norscode_native.sh
   - Full normalflate er no verifisert grøn også etter siste `std.json`-/runtime-kompatfikser
 
 **For seed-vedlikehald (historisk, eksplisitt):**
-- `clang` eller `gcc` er berre nødvendig når ein vedlikehaldar eksplisitt fornyar stage-0-seedet
+- `clang` eller `gcc` er berre nødvendig når ein eksplisitt fornyar stage-0-seedet
 - Normal bruk hentar seed frå `bootstrap/stage0/` eller GitHub Release og treng ikkje denne flata
 - Denne brua er isolert til vedlikehald og verifisert via `bash tools/verify_nc_main_host.sh`, `bash tools/maint/regen_verify.sh` og `bash tools/maint/verify_l6.sh`
 
