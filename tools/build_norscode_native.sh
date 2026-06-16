@@ -221,6 +221,8 @@ build_from_bootstrap_c() {
         printf 'typedef struct NcVal NcVal;\n'
         printf 'NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na);\n'
         printf 'NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na);\n\n'
+        printf 'NcVal *nc_fn_builtin_ast_normaliser_type(NcVal **args, int na);\n'
+        printf 'NcVal *nc_fn_builtin_analyser_program(NcVal **args, int na);\n\n'
         grep -v '#include.*nc_runtime' "$gen" | sed 's/^int main/static int nc_gen_main/'
     } >> "$tmp"
     cat "$main" >> "$tmp"
@@ -248,7 +250,7 @@ build_from_bootstrap_c() {
             rm -f "$_sqlite_test"
             ;;
     esac
-    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_static_flag $_sqlite_flag $_static_extra_libs; then
+    if ! "$CC" -O2 -Wno-everything -DNORSCODE_NATIVE_MAIN -o "$OUT" "$tmp" $_static_flag $_sqlite_flag $_static_extra_libs; then
         _clang_ec=$?
         rm -f "$tmp"
         tmp=""
