@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/maint/regen_native.sh — regenerer isolert maintainer-output frå Norscode (utan Python)
+# tools/maint/regen_native.sh — regenerer isolert historisk output frå Norscode (utan Python)
 #
 # Krever: dist/norscode_native (seed), clang, selfhost/*.no
 #
@@ -26,7 +26,7 @@ if [ ! -x "$ROOT/dist/norscode_native" ]; then
     exit 1
 fi
 
-printf '=== Regenerer isolert maintainer-output (utan Python) ===\n\n'
+printf '=== Regenerer isolert historisk output (utan Python) ===\n\n'
 printf 'Merk: dette er vedlikehaldsmodus for seed-fornying, ikkje normal utviklingsflyt.\n\n'
 
 printf '[1/4] Bundle kompilator-modular...\n'
@@ -68,4 +68,4 @@ fi
 
 printf '\n=== Regen ferdig ===\n'
 printf 'Køyr: bash tools/verify_selvstendighet.sh\n'
-printf 'L6: maintainer-output og kompiler.ncb.json er generert lokalt i %s (ikkje commit).\n' "$REGEN_ROOT"
+printf 'L6: historisk output og kompiler.ncb.json er generert lokalt i %s (ikkje commit).\n' "$REGEN_ROOT"

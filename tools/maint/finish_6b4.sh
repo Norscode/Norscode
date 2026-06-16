@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/maint/finish_6b4.sh — avslutt Omgang 6b.4: fjern committed bootstrap/maint/c/norscode_generated.c
+# tools/maint/finish_6b4.sh — avslutt Omgang 6b.4: fjern historisk bootstrap/maint/c/norscode_generated.c
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -24,15 +24,15 @@ if [ "$missing" -eq 1 ]; then
     exit 1
 fi
 
-printf '=== Omgang 6b.4: fjern bootstrap/maint/c/norscode_generated.c ===\n\n'
+printf '=== Omgang 6b.4: fjern historisk bootstrap/maint/c/norscode_generated.c ===\n\n'
 
 if git ls-files --error-unmatch bootstrap/maint/c/norscode_generated.c >/dev/null 2>&1; then
     git rm -f bootstrap/maint/c/norscode_generated.c
     printf '  git rm bootstrap/maint/c/norscode_generated.c\n'
 else
-    printf '  bootstrap/maint/c/norscode_generated.c er ikkje i git (OK)\n'
+    printf '  bootstrap/maint/c/norscode_generated.c er ikkje i git (historisk OK)\n'
 fi
 
 printf '\nVerifiser seed-only (macOS):\n'
 CC=__clang_not_allowed__ REGEN=0 bash "$ROOT/tools/build_norscode_native.sh"
-printf '\n=== Klar — commit og push. CI skal ikkje trenge clang for ensure (berre regen-lane). ===\n'
+printf '\n=== Klar — commit og push. CI skal ikkje trenge clang for normal ensure (berre historisk regen-lane). ===\n'

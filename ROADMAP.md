@@ -1,7 +1,9 @@
 # Norscode — Vegkart
 
-> Sist oppdatert: mai 2026  
-> Status: selfhost-pipeline under ferdigstilling; fase 0 er lokalt verifisert, men GitHub Actions-bekreftelse gjenstår
+> Sist oppdatert: juni 2026  
+> Status: **Fase 1 fullført lokalt** — L5 og L5b bestått, bootstrap-kjeden lukket, og CI er bekrefta grøn.
+
+> Arbeidsliste: se [`IMPLEMENTATION_CHECKLIST.md`](/Users/jansteinar/Projects/Norscode1/IMPLEMENTATION_CHECKLIST.md)
 
 ---
 
@@ -15,7 +17,12 @@
 | IR → Bytecode (`selfhost/compiler/ir_to_bytecode.no`) | ✅ Aktiv, kjørbar |
 | VM (`selfhost/vm.no`) | ✅ Aktiv, kjørbar |
 | CLI (`selfhost/main.no`) | ✅ Aktiv, kjørbar |
-| Legacy bootstrap/runtime | 🔄 Arkivert/utfases fra normalflyt |
+| L5: kompilator-bundle deterministisk (Gen1==Gen2) | ✅ Bestått |
+| L5b: Gen1-NCB VM kjører Gen2, byte-paritet | ✅ Bestått |
+| Bootstrap steg C: Norscode kjører Norscode | ✅ Bestått |
+| `bootstrap/precompiled/json.ncb.json` | ✅ Fikset (spuriøs `json_les_ch` etter løkke fjernet) |
+| `dist/norscode_native` | ✅ Gjenopprettet til stage0-seed |
+| Legacy bootstrap/runtime | ✅ Arkivert og isolert frå normalflyt |
 | CI (GitHub Actions) | 🟡 `phase0-verify` er på plass; ekstern grønn-bekreftelse gjenstår |
 
 ---
@@ -26,6 +33,7 @@ Ingenting kan gå framover med CI-feil. De kjente blokkeringene er ryddet ut av 
 
 Verifiser sluttstatus med `bash tools/selfhost_phase0_verify.sh`.
 For en samlet plan for full selvstendighet, se [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md).
+For arbeidet med å fjerne dei siste legacy-/maintainer-beslaga, sjå [docs/05-development/FULL_INDEPENDENCE_CHECKLIST.md](docs/05-development/FULL_INDEPENDENCE_CHECKLIST.md).
 
 **CI-endringer som ble gjort:**
 

@@ -7,10 +7,10 @@
 #   1. Eksisterande, fungerande dist/norscode_native
 #   2. bootstrap/stage0/norscode-<plattform> (seed)
 #   3. GitHub Release (seed)
-#   4. NORSCODE_BOOTSTRAP_C=1 + isolert maintainer-output + clang (berre maintainer / regen)
+#   4. NORSCODE_BOOTSTRAP_C=1 + isolert historisk output + clang (berre historisk vedlikehald / regen)
 # Den gjenværende C-hostgrensa er bootstrap, ikkje normal kjede.
 #
-# Ved REGEN=1 (maintainer): seed → tools/maint/regen_native.sh → valfri BOOTSTRAP_C_ROOT → clang
+# Ved REGEN=1 (historisk vedlikehald): seed → tools/maint/regen_native.sh → valfri BOOTSTRAP_C_ROOT → clang
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${ROOT}/dist/norscode_native"
@@ -181,7 +181,7 @@ regen_bootstrap_c() {
         printf 'Feil: trenger seed (dist/norscode_native) for regen\n' >&2
         return 1
     fi
-    printf 'Maintainer-modus: regenererer maintainer-output frå .no i %s/maint/c/ (L6)...\n' "$BOOTSTRAP_C_ROOT" >&2
+    printf 'Historisk vedlikehaldsmodus: regenererer output frå .no i %s/maint/c/ (L6)...\n' "$BOOTSTRAP_C_ROOT" >&2
     REGEN_ROOT="${BOOTSTRAP_C_ROOT}" bash "${ROOT}/tools/maint/regen_native.sh" || return 1
     bootstrap_c_present
 }
@@ -206,7 +206,7 @@ build_from_bootstrap_c() {
     CC="${CC:-clang}"
     command -v "$CC" >/dev/null 2>&1 || CC=cc
     command -v "$CC" >/dev/null 2>&1 || {
-        printf 'Feil: maintainer-regenerering krev clang eller gcc for stage-0-bygg\n' >&2
+        printf 'Feil: historisk regenerering krev clang eller gcc for stage-0-bygg\n' >&2
         return 1
     }
 
@@ -227,7 +227,7 @@ build_from_bootstrap_c() {
     } >> "$tmp"
     cat "$main" >> "$tmp"
 
-    printf 'Maintainer-modus: kompilerer norscode_native frå %s/maint/c (stage-0, %s)...\n' "$BOOTSTRAP_C_ROOT" "$CC" >&2
+    printf 'Historisk vedlikehaldsmodus: kompilerer norscode_native frå %s/maint/c (stage-0, %s)...\n' "$BOOTSTRAP_C_ROOT" "$CC" >&2
     # Detect sqlite3 linkage
     # On macOS, sqlite3 ships with Xcode/CommandLineTools → always use -lsqlite3.
     # On Linux, prefer -lsqlite3 (libsqlite3-dev); fall back to direct .so path.
@@ -266,7 +266,7 @@ build_from_bootstrap_c() {
         printf 'Feil: bygget binær feila NORSCODE_CMD-røyktest\n' >&2
         return 1
     }
-    printf "✓ dist/norscode_native bygget i maintainer-modus frå %s/maint/c (%d bytes)\n" "$BOOTSTRAP_C_ROOT" "$(wc -c < "$OUT" | tr -d ' ')"
+    printf "✓ dist/norscode_native bygget i historisk vedlikehaldsmodus frå %s/maint/c (%d bytes)\n" "$BOOTSTRAP_C_ROOT" "$(wc -c < "$OUT" | tr -d ' ')"
     return 0
 }
 
@@ -292,7 +292,7 @@ fi
 
 if [ "$REGEN" = "1" ]; then
     if [ "${NORSCODE_BOOTSTRAP_C:-0}" != "1" ]; then
-        printf 'Feil: REGEN=1 er maintainer-modus og krev NORSCODE_BOOTSTRAP_C=1\n' >&2
+        printf 'Feil: REGEN=1 er historisk vedlikehaldsmodus og krev NORSCODE_BOOTSTRAP_C=1\n' >&2
         exit 1
     fi
 
@@ -300,12 +300,12 @@ if [ "$REGEN" = "1" ]; then
     if regen_bootstrap_c && build_from_bootstrap_c; then exit 0; fi
     platform="$(platform_name 2>/dev/null || printf '?')"
     printf '\n=== Kunne ikkje byggje norscode_native etter regen ===\n' >&2
-    printf 'Sjekk maintainer-føresetnader og køyr: bash tools/maint/regen_native.sh --rebuild\n' >&2
+    printf 'Sjekk historiske vedlikehaldsføresetnader og køyr: bash tools/maint/regen_native.sh --rebuild\n' >&2
     exit 1
 fi
 
 if smoke_check "$OUT"; then
-    printf 'ℹ︎ Klar (ingen regen). Set berre REGEN=1 i eksplisitt maintainer-modus for stage-0 regen + clang.\n'
+    printf 'ℹ︎ Klar (ingen regen). Set berre REGEN=1 i eksplisitt historisk vedlikehaldsmodus for stage-0 regen + clang.\n'
     exit 0
 fi
 

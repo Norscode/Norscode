@@ -133,17 +133,17 @@ bash tools/build_norscode_native.sh
 - Verifiser med `bash tools/verify_selvstendighet.sh` (L1–L6, utan Python)
   - Full normalflate er no verifisert grøn også etter siste `std.json`-/runtime-kompatfikser
 
-**For maintainer-regen (stage-0 seed):**
-- `clang` eller `gcc` (berre for eksplisitt maintainer-regen: `NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash tools/build_norscode_native.sh`)
-- Normal bruk: seed hentes frå `bootstrap/stage0/` eller GitHub Release
-- Maintainer-brua er verifisert via `bash tools/verify_nc_main_host.sh`, `bash tools/maint/regen_verify.sh` og `bash tools/maint/verify_l6.sh`
+**For seed-vedlikehald (historisk, eksplisitt):**
+- `clang` eller `gcc` er berre nødvendig når ein vedlikehaldar eksplisitt fornyar stage-0-seedet
+- Normal bruk hentar seed frå `bootstrap/stage0/` eller GitHub Release og treng ikkje denne flata
+- Denne brua er isolert til vedlikehald og verifisert via `bash tools/verify_nc_main_host.sh`, `bash tools/maint/regen_verify.sh` og `bash tools/maint/verify_l6.sh`
 
 ## Selfhost-status
 
 Norscode er sjølv-kompilerande i normalvegen:
 - `.no -> NCB JSON -> selfhost/vm.no / native ELF` er den aktive brukarvegen
 - `dist/norscode_native` og `./bin/nc` er normal entrypoint
-- attverande C-bruk er avgrensa til ein eksplisitt maintainer-bru for seed-fornying
+- C-bruk er berre ein isolert vedlikehaldsbru for seed-fornying, ikkje ein del av normal drift
 
 Se [docs/SELFHOST_STATUS.md](docs/SELFHOST_STATUS.md), [docs/SELVSTENDIGHET_PLAN.md](docs/SELVSTENDIGHET_PLAN.md) og [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) for detaljar.
 
