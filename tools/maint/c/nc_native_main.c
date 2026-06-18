@@ -30,6 +30,11 @@ NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na);
 NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
 NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
+static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v);
+static NcVal *nc_builtin_socket_accept(NcVal *srv_v);
+static NcVal *nc_builtin_socket_read(NcVal *conn_v, NcVal *max_v);
+static NcVal *nc_builtin_socket_write(NcVal *conn_v, NcVal *data_v);
+static NcVal *nc_builtin_socket_close(NcVal *conn_v);
 static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
 
 /* ── TCP socket builtins — implementasjon ── */
@@ -45,10 +50,12 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
       if (!done) { WSADATA w; WSAStartup(MAKEWORD(2,2),&w); done=1; }
   }
 #else
+  #include <errno.h>
   #include <sys/socket.h>
   #include <netinet/in.h>
   #include <arpa/inet.h>
   #include <unistd.h>
+  #include <stdio.h>
   #define NC_SOCK_CLOSE(fd) close(fd)
   #define nc_winsock_ensure() ((void)0)
 #endif
@@ -75,13 +82,33 @@ static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v) {
     const char *host = (host_v && host_v->type==NC_STR) ? host_v->s : "0.0.0.0";
     int port = (port_v && port_v->type==NC_INT) ? (int)port_v->i : 8000;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return nc_int(-1);
-    int opt = 1; setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
+    if (fd < 0) {
+        fprintf(stderr, "[nc_native] socket() feilet for %s:%d: errno=%d\n", host, port, errno);
+        return nc_int(-1);
+    }
+    int opt = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt)) < 0) {
+        fprintf(stderr, "[nc_native] setsockopt(SO_REUSEADDR) feilet for %s:%d: errno=%d\n", host, port, errno);
+    }
     struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET; addr.sin_port = htons(port);
-    if (strcmp(host,"0.0.0.0")==0 || strcmp(host,"")==0) addr.sin_addr.s_addr = INADDR_ANY;
-    else inet_pton(AF_INET, host, &addr.sin_addr);
-    if (bind(fd,(struct sockaddr*)&addr,sizeof(addr))<0||listen(fd,128)<0) { NC_SOCK_CLOSE(fd); return nc_int(-1); }
+    if (strcmp(host,"0.0.0.0")==0 || strcmp(host,"")==0) {
+        addr.sin_addr.s_addr = INADDR_ANY;
+    } else if (inet_pton(AF_INET, host, &addr.sin_addr) != 1) {
+        fprintf(stderr, "[nc_native] inet_pton feilet for host=%s port=%d: errno=%d\n", host, port, errno);
+        NC_SOCK_CLOSE(fd);
+        return nc_int(-1);
+    }
+    if (bind(fd,(struct sockaddr*)&addr,sizeof(addr))<0) {
+        fprintf(stderr, "[nc_native] bind feilet for %s:%d: errno=%d\n", host, port, errno);
+        NC_SOCK_CLOSE(fd);
+        return nc_int(-1);
+    }
+    if (listen(fd,128)<0) {
+        fprintf(stderr, "[nc_native] listen feilet for %s:%d: errno=%d\n", host, port, errno);
+        NC_SOCK_CLOSE(fd);
+        return nc_int(-1);
+    }
     int id = nc_sock_alloc(fd);
     if (id < 0) { NC_SOCK_CLOSE(fd); return nc_int(-1); }
     return nc_int(id);
@@ -124,9 +151,9 @@ static NcVal *nc_builtin_socket_close(NcVal *conn_v) {
     return fd>=0 ? (NC_SOCK_CLOSE(fd), nc_int(0)) : nc_int(-1);
 }
 NcVal *nc_fn_builtin_neste_token(NcVal **a, int na);
-static NcVal *g_current_route_handlers = NULL;
-static NcVal *g_current_functions = NULL;
-static NcVal *g_current_ncb = NULL;
+NcVal *g_current_route_handlers = NULL;
+NcVal *g_current_functions = NULL;
+NcVal *g_current_ncb = NULL;
 static int g_request_counter = 0;
 static NcVal *nc_builtin_json_parse_raw(NcVal *v);
 static NcVal *nc_builtin_json_parse_str(NcVal *v);
@@ -758,7 +785,6 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             const char *cn = callee;
             if (strncmp(cn,"builtin.",8)==0) cn+=8;
             if (strncmp(cn,"builtin.",8)==0) cn+=8; /* strip dobbelt prefiks */
-            if (strstr(cn, "web")) fprintf(stderr, "[web-call] %s\n", cn);
             /* Variabel-kall: sjekk om cn er ein variabel som held eit fn-namn */
             NcVal *var_fn = nc_nil();
             for (int _vi=0; _vi<nvars; _vi++) {
@@ -964,6 +990,12 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 fn_r = v;
             }
             /* ── TCP socket-builtins ── */
+            else if (!strcmp(cn,"std.tcp.ny_server") || !strcmp(cn,"tcp.ny_server")) {
+                fn_r = nc_builtin_socket_listen(narg>0?cargs[0]:nc_nil(), narg>1?cargs[1]:nc_nil());
+            }
+            else if (!strcmp(cn,"std.tcp.lytt") || !strcmp(cn,"tcp.lytt")) {
+                fn_r = nc_builtin_socket_accept(narg>0?cargs[0]:nc_nil());
+            }
             else if (!strcmp(cn,"socket_listen") || !strcmp(cn,"socket.listen")) {
                 fn_r = nc_builtin_socket_listen(narg>0?cargs[0]:nc_nil(), narg>1?cargs[1]:nc_nil());
             }
@@ -1006,6 +1038,40 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"db.open") || !strcmp(cn,"builtin.db.open")) {
                 char *p = nc_to_str_raw(narg>0?cargs[0]:nc_nil()); sqlite3 *db=NULL;
                 fn_r = (sqlite3_open(p,&db)==SQLITE_OK) ? nc_db_make_handle(db,-1) : nc_nil(); free(p);
+            }
+            else if (!strcmp(cn,"db.create") || !strcmp(cn,"builtin.db.create") || !strcmp(cn,"db_create") || !strcmp(cn,"builtin.db_create")) {
+                NcVal *path_v = narg>0 ? cargs[0] : nc_nil();
+                char *path = nc_to_str_raw(path_v);
+                NcVal *res = nc_map_new();
+                if (!path || path[0]=='\0') {
+                    nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                    nc_index_set(res, nc_str("melding"), nc_str("Mangler databasefil."));
+                    fn_r = res;
+                }
+                else {
+                    NcVal *ex = nc_builtin_fil_finnes(path_v);
+                    if (nc_truthy(ex)) {
+                        char msg[512];
+                        snprintf(msg, sizeof(msg), "Databasefil finnes allerede: %s", path);
+                        nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                        nc_index_set(res, nc_str("melding"), nc_str(msg));
+                        fn_r = res;
+                    } else {
+                        NcVal *wr = nc_builtin_fil_skriv(path_v, nc_str("{}"));
+                        if (!wr || wr->type == NC_NIL) {
+                            char msg[512];
+                            snprintf(msg, sizeof(msg), "Database opprettet: %s", path);
+                            nc_index_set(res, nc_str("feilet"), nc_bool(0));
+                            nc_index_set(res, nc_str("verdi"), nc_str(msg));
+                            fn_r = res;
+                        } else {
+                            nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                            nc_index_set(res, nc_str("melding"), nc_str("Kunne ikke opprette database."));
+                            fn_r = res;
+                        }
+                    }
+                }
+                free(path);
             }
             else if (!strcmp(cn,"db.close") || !strcmp(cn,"builtin.db.close")) {
                 NcVal *h=narg>0?cargs[0]:nc_nil();
@@ -1202,6 +1268,39 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"std.lagring.sett_tall")||!strcmp(cn,"builtin.std.lagring.sett_tall")) { if(narg>=3) nc_index_set(cargs[0],cargs[1],nc_to_str(cargs[2])); fn_r=nc_int(0); }
             else if (!strcmp(cn,"std.fil.skriv_fil")||!strcmp(cn,"builtin.std.fil.skriv_fil")) { if(narg>=2) nc_builtin_fil_skriv(cargs[0],cargs[1]); fn_r=nc_nil(); }
             else if (!strcmp(cn,"std.db.open")||!strcmp(cn,"builtin.std.db.open")) { char *p=nc_to_str_raw(narg>0?cargs[0]:nc_nil()); sqlite3 *db=NULL; fn_r=(sqlite3_open(p,&db)==SQLITE_OK)?nc_db_make_handle(db,-1):nc_nil(); free(p); }
+            else if (!strcmp(cn,"std.db.create")||!strcmp(cn,"builtin.std.db.create")) {
+                NcVal *path_v = narg>0 ? cargs[0] : nc_nil();
+                char *path = nc_to_str_raw(path_v);
+                NcVal *res = nc_map_new();
+                if (!path || path[0]=='\0') {
+                    nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                    nc_index_set(res, nc_str("melding"), nc_str("Mangler databasefil."));
+                    fn_r = res;
+                } else {
+                    NcVal *ex = nc_builtin_fil_finnes(path_v);
+                    if (nc_truthy(ex)) {
+                        char msg[512];
+                        snprintf(msg, sizeof(msg), "Databasefil finnes allerede: %s", path);
+                        nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                        nc_index_set(res, nc_str("melding"), nc_str(msg));
+                        fn_r = res;
+                    } else {
+                        NcVal *wr = nc_builtin_fil_skriv(path_v, nc_str("{}"));
+                        if (!wr || wr->type == NC_NIL) {
+                            char msg[512];
+                            snprintf(msg, sizeof(msg), "Database opprettet: %s", path);
+                            nc_index_set(res, nc_str("feilet"), nc_bool(0));
+                            nc_index_set(res, nc_str("verdi"), nc_str(msg));
+                            fn_r = res;
+                        } else {
+                            nc_index_set(res, nc_str("feilet"), nc_bool(1));
+                            nc_index_set(res, nc_str("melding"), nc_str("Kunne ikke opprette database."));
+                            fn_r = res;
+                        }
+                    }
+                }
+                free(path);
+            }
             /* ── std.db.* (alias for db.*) ── */
             else if (!strcmp(cn,"std.db.ping")) fn_r=nc_bool(nc_db_handle_ptr(narg>0?cargs[0]:nc_nil())!=NULL);
             else if (!strcmp(cn,"std.db.close")) { NcVal *h=narg>0?cargs[0]:nc_nil(); sqlite3 *db=nc_db_handle_ptr(h); if (!db) { fn_r=nc_bool(0); } else { NcVal *pv=nc_index_get(h,nc_str("__pool")); if (pv&&pv->type==NC_INT&&pv->i>=0&&(int)pv->i<g_nc_db_pool_count) { int _idx2=(int)pv->i; if (g_nc_db_pools[_idx2].avail<NC_DB_MAX_POOL_CONNS) g_nc_db_pools[_idx2].conns[g_nc_db_pools[_idx2].avail++]=db; else sqlite3_close(db); } else sqlite3_close(db); fn_r=nc_bool(1); } }
@@ -1563,14 +1662,6 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     int matched_verb = 0;
                     int matched_allow = 0;
                     int i = 0;
-                    fprintf(stderr, "[web-route] handlers=%d\n", (g_current_route_handlers && g_current_route_handlers->type == NC_LIST) ? g_current_route_handlers->list->len : -1);
-                    if (g_current_route_handlers && g_current_route_handlers->type == NC_LIST && g_current_route_handlers->list->len > 0) {
-                        NcVal *h0 = g_current_route_handlers->list->items[0];
-                        if (h0 && h0->type == NC_MAP) {
-                            NcVal *s0 = nc_index_get(h0, nc_str("spec"));
-                            if (s0 && s0->type == NC_STR) fprintf(stderr, "[web-route] first=%s\n", s0->s);
-                        }
-                    }
                     if (!g_current_route_handlers || g_current_route_handlers->type != NC_LIST) {
                         fn_r = nc_nil();
                         free(method); free(path); free(method_up);
@@ -1684,7 +1775,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *resp = narg > 0 ? cargs[0] : nc_nil();
                     if (resp && resp->type == NC_MAP) {
                         NcVal *v = nc_index_get(resp, nc_str("__status__"));
-                        if (!v) v = nc_index_get(resp, nc_str("status"));
+                        if (!v || v->type == NC_NIL) v = nc_index_get(resp, nc_str("status"));
                         fn_r = (v && v->type == NC_INT) ? nc_int((int)v->i) : nc_nil();
                     } else {
                         fn_r = nc_nil();
@@ -1694,8 +1785,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *resp = narg > 0 ? cargs[0] : nc_nil();
                     if (resp && resp->type == NC_MAP) {
                         NcVal *v = nc_index_get(resp, nc_str("__body__"));
-                        if (!v) v = nc_index_get(resp, nc_str("body"));
-                        fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                        if (!v || v->type == NC_NIL) v = nc_index_get(resp, nc_str("body"));
+                        fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                     } else {
                         fn_r = nc_str("");
                     }
@@ -1704,7 +1795,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *resp = narg > 0 ? cargs[0] : nc_nil();
                     if (resp && resp->type == NC_MAP) {
                         NcVal *v = nc_index_get(resp, nc_str("__headers__"));
-                        if (!v) v = nc_index_get(resp, nc_str("headers"));
+                        if (!v || v->type == NC_NIL) v = nc_index_get(resp, nc_str("headers"));
                         fn_r = (v && v->type != NC_NIL) ? v : nc_map_new();
                     } else {
                         fn_r = nc_map_new();
@@ -1733,7 +1824,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                         NcVal *params = nc_index_get(ctx, nc_str("__params__"));
                         if (params && params->type == NC_MAP) {
                             NcVal *v = nc_index_get(params, key);
-                            if (v && v->type == NC_STR) { fn_r = nc_str(v->s); }
+                            if (v && v->type == NC_STR) { fn_r = v; }
                             else if (v) { char *s = nc_to_str_raw(v); fn_r = nc_str(s); free(s); }
                         }
                     }
@@ -1742,8 +1833,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *ctx = narg > 0 ? cargs[0] : nc_nil();
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *v = nc_index_get(ctx, nc_str("__body__"));
-                        if (!v) v = nc_index_get(ctx, nc_str("body"));
-                        fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                        if (!v || v->type == NC_NIL) v = nc_index_get(ctx, nc_str("body"));
+                        fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                     } else {
                         fn_r = nc_str("");
                     }
@@ -1753,7 +1844,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *key = narg > 1 ? cargs[1] : nc_str("");
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *headers = nc_index_get(ctx, nc_str("__headers__"));
-                        if (!headers || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
+                        if (!headers || headers->type == NC_NIL || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
                         if (headers && headers->type == NC_MAP) {
                             NcVal *v = nc_index_get(headers, nc_str(key && key->type == NC_STR ? key->s : ""));
                             if (!v && key && key->type == NC_STR) {
@@ -1762,7 +1853,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                                 v = nc_index_get(headers, nc_str(low ? low : ""));
                                 free(low);
                             }
-                            fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                            fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                         } else {
                             fn_r = nc_str("");
                         }
@@ -1775,10 +1866,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *key = narg > 1 ? cargs[1] : nc_str("");
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *q = nc_index_get(ctx, nc_str("__query__"));
-                        if (!q) q = nc_index_get(ctx, nc_str("query"));
+                        if (!q || q->type == NC_NIL) q = nc_index_get(ctx, nc_str("query"));
                         if (q && q->type == NC_MAP && key && key->type == NC_STR) {
                             NcVal *v = nc_index_get(q, key);
-                            fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                            fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                         } else {
                             fn_r = nc_str("");
                         }
@@ -1790,8 +1881,8 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *ctx = narg > 0 ? cargs[0] : nc_nil();
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *v = nc_index_get(ctx, nc_str("__method__"));
-                        if (!v) v = nc_index_get(ctx, nc_str("method"));
-                        fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                        if (!v || v->type == NC_NIL) v = nc_index_get(ctx, nc_str("method"));
+                        fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                     } else {
                         fn_r = nc_str("");
                     }
@@ -1802,11 +1893,11 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     int ok = 0;
                     if (ctx && ctx->type == NC_MAP && rolle && rolle->type == NC_STR) {
                         NcVal *headers = nc_index_get(ctx, nc_str("__headers__"));
-                        if (!headers || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
+                        if (!headers || headers->type == NC_NIL || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
                         if (headers && headers->type == NC_MAP) {
                             char *want = nc_to_str_raw(rolle);
                             NcVal *v = nc_index_get(headers, nc_str("x-role"));
-                            if (!v) v = nc_index_get(headers, nc_str("x-roles"));
+                            if (!v || v->type == NC_NIL) v = nc_index_get(headers, nc_str("x-roles"));
                             if (v && v->type == NC_STR) {
                                 char *roles = nc_to_str_raw(v);
                                 char *save = NULL;
@@ -1827,7 +1918,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     int ok = 0;
                     if (ctx && ctx->type == NC_MAP && perm && perm->type == NC_STR) {
                         NcVal *headers = nc_index_get(ctx, nc_str("__headers__"));
-                        if (!headers || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
+                        if (!headers || headers->type == NC_NIL || headers->type != NC_MAP) headers = nc_index_get(ctx, nc_str("headers"));
                         if (headers && headers->type == NC_MAP) {
                             char *want = nc_to_str_raw(perm);
                             NcVal *v = nc_index_get(headers, nc_str("x-permissions"));
@@ -1875,13 +1966,13 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *key = narg > 1 ? cargs[1] : nc_str("");
                     if (resp && resp->type == NC_MAP) {
                         NcVal *headers = nc_index_get(resp, nc_str("__headers__"));
-                        if (!headers || headers->type != NC_MAP) headers = nc_index_get(resp, nc_str("headers"));
+                        if (!headers || headers->type == NC_NIL || headers->type != NC_MAP) headers = nc_index_get(resp, nc_str("headers"));
                         if (headers && headers->type == NC_MAP) {
                             NcVal *low_v = nc_builtin_lower(key);
                             char *low = low_v ? nc_to_str_raw(low_v) : NULL;
                             NcVal *v = nc_index_get(headers, nc_str(low ? low : ""));
-                            if (!v) v = nc_index_get(headers, key);
-                            fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                            if (!v || v->type == NC_NIL) v = nc_index_get(headers, key);
+                            fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                             free(low);
                         } else {
                             fn_r = nc_str("");
@@ -1907,7 +1998,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *resp = narg > 0 ? cargs[0] : nc_nil();
                     if (resp && resp->type == NC_MAP) {
                         NcVal *v = nc_index_get(resp, nc_str("__body__"));
-                        if (!v) v = nc_index_get(resp, nc_str("body"));
+                        if (!v || v->type == NC_NIL) v = nc_index_get(resp, nc_str("body"));
                         if (v && v->type == NC_STR) {
                             NcVal *parsed = nc_builtin_json_parse_raw(v);
                             fn_r = (parsed && parsed->type == NC_MAP) ? parsed : nc_map_new();
@@ -1942,15 +2033,15 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                     NcVal *ctx = narg > 0 ? cargs[0] : nc_nil();
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *v = nc_index_get(ctx, nc_str("__request_id__"));
-                        fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("req-0");
+                        fn_r = (v && v->type == NC_STR) ? v : nc_str("req-0");
                     } else { fn_r = nc_str("req-0"); }
                 }
                 else if (strstr(cn, "request_path")) {
                     NcVal *ctx = narg > 0 ? cargs[0] : nc_nil();
                     if (ctx && ctx->type == NC_MAP) {
                         NcVal *v = nc_index_get(ctx, nc_str("__path__"));
-                        if (!v) v = nc_index_get(ctx, nc_str("path"));
-                        fn_r = (v && v->type == NC_STR) ? nc_str(v->s) : nc_str("");
+                        if (!v || v->type == NC_NIL) v = nc_index_get(ctx, nc_str("path"));
+                        fn_r = (v && v->type == NC_STR) ? v : nc_str("");
                     } else { fn_r = nc_str(""); }
                 }
                 /* std.trace.* handlers */
@@ -2498,6 +2589,12 @@ static int nc_val_til_exit(NcVal *v) {
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
+    if (cmd && !strcmp(cmd, "serve")) {
+        /* Serve skal alltid gå vidare til selfhost.nc_main.start utan å bruke run-løypa. */
+        NcVal *r = nc_dispatch_call("selfhost.nc_main.start", NULL, 0);
+        if (!r) return -1;
+        return nc_val_til_exit(r);
+    }
     if (cmd && !strcmp(cmd, "run")) {
         const char *src = getenv("NORSCODE_FILE");
         const char *mod = getenv("NORSCODE_MODULE");

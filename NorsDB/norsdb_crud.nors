@@ -1,0 +1,525 @@
+## NorsDB - CRUD-operasjoner
+## Fil: norsdb_crud.nors
+## Versjon: 1.0
+## Dekker: insert, select, update, delete
+
+importer norsdb_core
+importer norsdb_schema
+importer norsdb_index
+
+## ─────────────────────────────────────────
+## INSERT - Sett inn ny rad
+## ─────────────────────────────────────────
+
+funksjon insert(tabell_navn: tekst, data: ordbok) -> resultat:
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    ## Valider data mot skjema
+    la val = _valider_rad(tabell_navn, data)
+    hvis val.feilet:
+        returner val
+
+    la tabell = _tabeller[tabell_navn]
+
+    ## Generer primærnøkkel automatisk hvis ikke oppgitt
+    la primær_kol = _finn_primær(tabell)
+    hvis primær_kol != ingen og primær_kol.navn ikke i data:
+        data[primær_kol.navn] = _neste_id(tabell_navn)
+
+    ## Sjekk unikhet
+    for kol i tabell.kolonner:
+        hvis (kol.er_unik eller kol.er_primær) og kol.navn i data:
+            la eksisterer = _indeks_søk(tabell_navn, kol.navn, data[kol.navn])
+            hvis eksisterer:
+                returner feil("Duplikat verdi for '" + kol.navn + "': " + data[kol.navn])
+
+    ## Skriv rad til disk
+    la rad_id = _skriv_rad(tabell_navn, data)
+
+    ## Oppdater indekser
+    _indeks_legg_til(tabell_navn, rad_id, data)
+    _tx_registrer_insert(tabell_navn, rad_id, data)
+
+    ## Øk radteller
+    tabell.rad_antall += 1
+    _oppdater_tabell_på_disk(tabell_navn, tabell)
+
+    returner ok({ "id": rad_id, "rader_påvirket": 1 })
+
+## ─────────────────────────────────────────
+## SELECT - Hent rader
+## ─────────────────────────────────────────
+
+##  Grunnleggende:   select("brukere")
+##  Med filter:      select("brukere", hvor={ "navn": "Jan" })
+##  Kolonner:        select("brukere", kolonner=["navn", "epost"])
+##  Sortering:       select("brukere", sorter_etter="navn", stigende=sann)
+##  Begrensning:     select("brukere", grense=10, hopp_over=0)
+
+funksjon select(
+    tabell_navn : tekst,
+    kolonner    : liste[tekst] = [],
+    hvor        : ordbok       = {},
+    sorter_etter: tekst        = "",
+    stigende    : bool         = sann,
+    grense      : int          = 0,
+    hopp_over   : int          = 0
+) -> resultat:
+
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    la tabell = _tabeller[tabell_navn]
+
+    ## Bestem hvilke kolonner som skal returneres
+    la valgte_kolonner = kolonner
+    hvis lengde(valgte_kolonner) == 0:
+        valgte_kolonner = _kolonne_navn_liste(tabell)
+
+    ## Valider kolonnenavn
+    for kol_navn i valgte_kolonner:
+        hvis ikke _tabell_har_kolonne(tabell, kol_navn):
+            returner feil("Kolonne finnes ikke: " + kol_navn)
+
+    ## Bruk indeks hvis mulig for rask oppslag
+    la kandidater = []
+    hvis lengde(hvor) == 1:
+        la [felt, verdi] = første(hvor)
+        la indeks_treff = _indeks_søk(tabell_navn, felt, verdi)
+        hvis indeks_treff != ingen:
+            kandidater = indeks_treff
+        annet:
+            kandidater = _les_alle_rader(tabell_navn)
+    annet:
+        kandidater = _les_alle_rader(tabell_navn)
+
+    ## Filtrer etter where-betingelser
+    la resultater = []
+    for rad i kandidater:
+        hvis _rad_matcher(rad, hvor):
+            ## Projiser kolonner
+            la projisert = {}
+            for kol_navn i valgte_kolonner:
+                projisert[kol_navn] = rad[kol_navn]
+            resultater.legg_til(projisert)
+
+    ## Sorter
+    hvis sorter_etter != "":
+        hvis ikke _tabell_har_kolonne(tabell, sorter_etter):
+            returner feil("Sorteringskolonne finnes ikke: " + sorter_etter)
+        resultater = _sorter_liste(resultater, sorter_etter, stigende)
+
+    ## Hopp over og begrens
+    la total = lengde(resultater)
+    hvis hopp_over > 0:
+        resultater = resultater[hopp_over:]
+    hvis grense > 0:
+        resultater = resultater[:grense]
+
+    returner ok({
+        "rader"  : resultater,
+        "antall" : lengde(resultater),
+        "totalt" : total
+    })
+
+## ─────────────────────────────────────────
+## SELECT med avanserte WHERE-betingelser
+## ─────────────────────────────────────────
+
+## Støttede operatorer i where:
+##   =    lik
+##   !=   ikke lik
+##   >    større enn
+##   <    mindre enn
+##   >=   større enn eller lik
+##   <=   mindre enn eller lik
+##   ~    inneholder (tekst)
+##   ^    starter med (tekst)
+##   $    slutter med (tekst)
+##   i    finnes i liste
+##   !i   finnes ikke i liste
+
+funksjon select_der(
+    tabell_navn: tekst,
+    betingelse : tekst,
+    kolonner   : liste[tekst] = [],
+    sorter_etter: tekst       = "",
+    stigende   : bool         = sann,
+    grense     : int          = 0
+) -> resultat:
+
+    _krev_åpen()
+
+    ## Parse betingelsesstreng til intern representasjon
+    la parsert = _parse_betingelse(betingelse)
+    hvis parsert.feilet:
+        returner feil("Ugyldig betingelse: " + betingelse)
+
+    ## Konverter til ordbok-format og bruk vanlig select
+    returner select(
+        tabell_navn,
+        kolonner     = kolonner,
+        hvor         = parsert.verdi,
+        sorter_etter = sorter_etter,
+        stigende     = stigende,
+        grense       = grense
+    )
+
+## ─────────────────────────────────────────
+## UPDATE - Oppdater rader
+## ─────────────────────────────────────────
+
+funksjon update(
+    tabell_navn: tekst,
+    data       : ordbok,
+    hvor       : ordbok = {}
+) -> resultat:
+
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    ## Sikkerhetsvern: update uten where oppdaterer ALT
+    ## Bruk update_alle() for å oppdatere alle rader med vilje
+    hvis lengde(hvor) == 0:
+        returner feil(
+            "update() krever where-betingelse. " +
+            "Bruk update_alle() for å oppdatere alle rader."
+        )
+
+    ## Valider nye data (kun de feltene som oppdateres)
+    la tabell = _tabeller[tabell_navn]
+    for felt, verdi i data:
+        la kol = _finn_kolonne(tabell, felt)
+        hvis kol == ingen:
+            returner feil("Kolonne finnes ikke: " + felt)
+        hvis kol.er_primær:
+            returner feil("Kan ikke oppdatere primærnøkkel: " + felt)
+        hvis ikke _riktig_type(verdi, kol.type):
+            returner feil("Feil type for '" + felt + "'")
+
+    ## Finn rader som matcher
+    la rader = _les_rader_som_matcher(tabell_navn, hvor)
+    la antall_oppdatert = 0
+
+    for rad i rader:
+        la gammel_rad = _kopier_ordbok(rad)
+
+        ## Oppdater feltene
+        for felt, verdi i data:
+            ## Sjekk unikhet
+            la kol = _finn_kolonne(tabell, felt)
+            hvis kol.er_unik:
+                la eksisterer = _indeks_søk(tabell_navn, felt, verdi)
+                hvis eksisterer og eksisterer != [] og _rad_id(rad) != 0:
+                    returner feil("Duplikat verdi for '" + felt + "': " + verdi)
+            rad[felt] = verdi
+
+        ## Skriv oppdatert rad
+        _oppdater_rad(tabell_navn, _rad_id(rad), rad)
+
+        ## Oppdater indekser
+        _indeks_fjern(tabell_navn, _rad_id(rad), gammel_rad)
+        _indeks_legg_til(tabell_navn, _rad_id(rad), rad)
+        _tx_registrer_update(tabell_navn, _rad_id(rad), gammel_rad, rad)
+
+        antall_oppdatert += 1
+
+    returner ok({ "rader_påvirket": antall_oppdatert })
+
+## ─────────────────────────────────────────
+## UPDATE ALLE - Oppdater alle rader (bevisst)
+## ─────────────────────────────────────────
+
+funksjon update_alle(tabell_navn: tekst, data: ordbok) -> resultat:
+    returner update(tabell_navn, data, hvor=_alle_rader_flagg)
+
+## ─────────────────────────────────────────
+## DELETE - Slett rader
+## ─────────────────────────────────────────
+
+funksjon delete(
+    tabell_navn: tekst,
+    hvor       : ordbok = {}
+) -> resultat:
+
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    ## Sikkerhetsvern: delete uten where sletter ALT
+    hvis lengde(hvor) == 0:
+        returner feil(
+            "delete() krever where-betingelse. " +
+            "Bruk delete_alle() eller table_tøm() for å slette alle rader."
+        )
+
+    la rader = _les_rader_som_matcher(tabell_navn, hvor)
+    la antall_slettet = 0
+    la tabell = _tabeller[tabell_navn]
+
+    for rad i rader:
+        ## Fjern rad fra disk (merker som slettet, kompakter ikke umiddelbart)
+        _merk_rad_slettet(tabell_navn, _rad_id(rad))
+
+        ## Oppdater indekser
+        _indeks_fjern(tabell_navn, _rad_id(rad), rad)
+        _tx_registrer_delete(tabell_navn, _rad_id(rad), rad)
+
+        tabell.rad_antall -= 1
+        antall_slettet += 1
+
+    _oppdater_tabell_på_disk(tabell_navn, tabell)
+    returner ok({ "rader_påvirket": antall_slettet })
+
+## ─────────────────────────────────────────
+## TABLE_TØM - Fjern alle rader fra tabell
+## ─────────────────────────────────────────
+
+funksjon table_tøm(tabell_navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    la tabell = _tabeller[tabell_navn]
+    la antall = tabell.rad_antall
+
+    _slett_alle_rader(tabell_navn)
+    _indeks_nullstill(tabell_navn)
+
+    tabell.rad_antall = 0
+    _oppdater_tabell_på_disk(tabell_navn, tabell)
+
+    returner ok({ "rader_påvirket": antall })
+
+funksjon delete_alle(tabell_navn: tekst) -> resultat:
+    returner table_tøm(tabell_navn)
+
+## ─────────────────────────────────────────
+## COUNT - Tell rader
+## ─────────────────────────────────────────
+
+funksjon count(tabell_navn: tekst, hvor: ordbok = {}) -> resultat:
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    hvis lengde(hvor) == 0:
+        ## Raskt svar fra katalog
+        returner ok(_tabeller[tabell_navn].rad_antall)
+
+    la rader = _les_rader_som_matcher(tabell_navn, hvor)
+    returner ok(lengde(rader))
+
+## ─────────────────────────────────────────
+## EXISTS - Sjekk om rad eksisterer
+## ─────────────────────────────────────────
+
+funksjon exists(tabell_navn: tekst, hvor: ordbok) -> resultat:
+    la antall = count(tabell_navn, hvor)
+    returner ok(antall.verdi > 0)
+
+## ─────────────────────────────────────────
+## INTERNE HJELPEFUNKSJONER
+## ─────────────────────────────────────────
+
+privat funksjon _rad_matcher(rad: ordbok, betingelser: ordbok) -> bool:
+    for felt, betingelse i betingelser:
+        la rad_verdi = rad.hent(felt)
+
+        ## Støtte for operator-objekter
+        hvis er_ordbok(betingelse):
+            la op = betingelse["op"]
+            la b  = betingelse["verdi"]
+            velg op:
+                "="  : hvis rad_verdi != b      : returner usann
+                "!=" : hvis rad_verdi == b      : returner usann
+                ">"  : hvis rad_verdi <= b      : returner usann
+                "<"  : hvis rad_verdi >= b      : returner usann
+                ">=" : hvis rad_verdi < b       : returner usann
+                "<=" : hvis rad_verdi > b       : returner usann
+                "~"  : hvis b ikke i rad_verdi  : returner usann
+                "^"  : hvis ikke starter_med(rad_verdi, b) : returner usann
+                "$"  : hvis ikke slutter_med(rad_verdi, b) : returner usann
+                "i"  : hvis rad_verdi ikke i b  : returner usann
+                "!i" : hvis rad_verdi i b       : returner usann
+        annet:
+            ## Enkel likhet
+            hvis rad_verdi != betingelse:
+                returner usann
+
+    returner sann
+
+privat funksjon _parse_betingelse(tekst: tekst) -> resultat:
+    ## Parser "alder > 18" til { "alder": { "op": ">", "verdi": 18 } }
+    la deler = del_tekst(tekst, " ")
+    hvis lengde(deler) < 3:
+        returner feil("For kort betingelse")
+
+    la felt    = deler[0]
+    la op      = deler[1]
+    la verdi   = konverter_verdi(deler[2])
+
+    la gyldige_op = ["=", "!=", ">", "<", ">=", "<=", "~", "^", "$", "i", "!i"]
+    hvis op ikke i gyldige_op:
+        returner feil("Ukjent operator: " + op)
+
+    returner ok({ felt: { "op": op, "verdi": verdi } })
+
+privat funksjon _finn_primær(tabell: Tabell) -> Kolonne | ingen:
+    for kol i tabell.kolonner:
+        hvis kol.er_primær:
+            returner kol
+    returner ingen
+
+privat funksjon _neste_id(tabell_navn: tekst) -> int:
+    ## Økt sekvensnummer per tabell
+    la seq = _sekvens.hent(tabell_navn, 0) + 1
+    _sekvens[tabell_navn] = seq
+    returner seq
+
+privat funksjon _tabell_har_kolonne(tabell: Tabell, navn: tekst) -> bool:
+    for kol i tabell.kolonner:
+        hvis kol.navn == navn:
+            returner sann
+    returner usann
+
+privat funksjon _finn_kolonne(tabell: Tabell, navn: tekst) -> Kolonne | ingen:
+    for kol i tabell.kolonner:
+        hvis kol.navn == navn:
+            returner kol
+    returner ingen
+
+la _sekvens: ordbok[tekst, int] = {}
+la _alle_rader_flagg = { "__alle__": sann }
+la _rader: ordbok[tekst, liste[ordbok]] = {}
+
+privat funksjon _kolonne_navn_liste(tabell: Tabell) -> liste[tekst]:
+    la navn = []
+    for kol i tabell.kolonner:
+        navn.legg_til(kol.navn)
+    returner navn
+
+privat funksjon _les_rader_som_matcher(tabell_navn: tekst, hvor: ordbok) -> liste[ordbok]:
+    la alle = _les_alle_rader(tabell_navn)
+    la ut = []
+    for rad i alle:
+        hvis _rad_matcher(rad, hvor):
+            ut.legg_til(rad)
+    returner ut
+
+privat funksjon _les_alle_rader(tabell_navn: tekst) -> liste[ordbok]:
+    hvis tabell_navn ikke i _rader:
+        returner []
+    returner _rader[tabell_navn]
+
+privat funksjon _skriv_rad(tabell_navn: tekst, data: ordbok) -> int:
+    hvis tabell_navn ikke i _rader:
+        _rader[tabell_navn] = []
+    la ny = _kopier_ordbok(data)
+    la rad_id = lengde(_rader[tabell_navn]) + 1
+    ny["_id"] = rad_id
+    _rader[tabell_navn].legg_til(ny)
+    returner rad_id
+
+privat funksjon _oppdater_rad(tabell_navn: tekst, rad_id: int, data: ordbok):
+    hvis tabell_navn ikke i _rader:
+        returner
+    for i, rad i enumerate(_rader[tabell_navn]):
+        hvis rad["_id"] == rad_id:
+            la ny = _kopier_ordbok(data)
+            ny["_id"] = rad_id
+            _rader[tabell_navn][i] = ny
+            returner
+
+privat funksjon _merk_rad_slettet(tabell_navn: tekst, rad_id: int):
+    hvis tabell_navn ikke i _rader:
+        returner
+    la ny_liste = []
+    for rad i _rader[tabell_navn]:
+        hvis rad["_id"] != rad_id:
+            ny_liste.legg_til(rad)
+    _rader[tabell_navn] = ny_liste
+
+privat funksjon _slett_alle_rader(tabell_navn: tekst):
+    _rader[tabell_navn] = []
+
+privat funksjon _skriv_rad_med_id(tabell_navn: tekst, rad_id: int, data: ordbok):
+    hvis tabell_navn ikke i _rader:
+        _rader[tabell_navn] = []
+    la ny = _kopier_ordbok(data)
+    ny["_id"] = rad_id
+    _rader[tabell_navn].legg_til(ny)
+
+privat funksjon _kopier_ordbok(data: ordbok) -> ordbok:
+    la ut = {}
+    for nøkkel, verdi i data:
+        ut[nøkkel] = verdi
+    returner ut
+
+privat funksjon _rad_id(rad: ordbok) -> int:
+    hvis "_id" i rad:
+        returner rad["_id"]
+    returner 0
+
+privat funksjon _sorter_liste(rader: liste[ordbok], felt: tekst, stigende: bool) -> liste[ordbok]:
+    ## Enkel boblesortering for MVP.
+    la ut = _kopier_liste(rader)
+    la n = lengde(ut)
+    la i = 0
+    mens i < n:
+        la j = 0
+        mens j < n - 1:
+            la a = ut[j][felt]
+            la b = ut[j + 1][felt]
+            hvis (stigende og a > b) eller (ikke stigende og a < b):
+                la tmp = ut[j]
+                ut[j] = ut[j + 1]
+                ut[j + 1] = tmp
+            j += 1
+        i += 1
+    returner ut
+
+privat funksjon _kopier_liste(rader: liste[ordbok]) -> liste[ordbok]:
+    la ut = []
+    for rad i rader:
+        ut.legg_til(_kopier_ordbok(rad))
+    returner ut
+
+funksjon snapshot_hent() -> ordbok:
+    la snapshot = {}
+    for tabell_navn, tabell i _tabeller:
+        snapshot[tabell_navn] = {
+            "rad_antall": tabell.rad_antall,
+            "rader"     : _kopier_liste(_les_alle_rader(tabell_navn))
+        }
+    returner snapshot
+
+funksjon snapshot_last(data: ordbok):
+    for tabell_navn, innhold i data:
+        hvis tabell_navn ikke i _tabeller:
+            fortsett
+        hvis tabell_navn ikke i _rader:
+            _rader[tabell_navn] = []
+        hvis "rader" i innhold:
+            for rad i innhold["rader"]:
+                _rader[tabell_navn].legg_til(rad)
+                hvis "_id" i rad og rad["_id"] > _sekvens.hent(tabell_navn, 0):
+                    _sekvens[tabell_navn] = rad["_id"]
+        hvis "rad_antall" i innhold:
+            _tabeller[tabell_navn].rad_antall = innhold["rad_antall"]
+
+funksjon snapshot_tøm():
+    fjern _rader
+    _rader = {}
+    fjern _sekvens
+    _sekvens = {}

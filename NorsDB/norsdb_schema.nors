@@ -1,0 +1,375 @@
+## NorsDB - Skjema-system
+## Fil: norsdb_schema.nors
+## Versjon: 1.0
+
+importer norsdb_core
+
+## ─────────────────────────────────────────
+## DATATYPER
+## ─────────────────────────────────────────
+
+## Støttede kolonnetyper i NorsDB:
+##
+##   int       - Heltall (64-bit)
+##   desimal   - Desimaltall (64-bit flyt)
+##   tekst     - UTF-8 tekst (variabel lengde)
+##   bool      - Sann/usann
+##   tid       - Dato og klokkeslett (ISO 8601)
+##   dato      - Kun dato
+##   blob      - Rå binærdata
+##   uuid      - Universalt unik identifikator
+
+type Kolonnetype = int | desimal | tekst | bool | tid | dato | blob | uuid
+
+## ─────────────────────────────────────────
+## STRUKTURER
+## ─────────────────────────────────────────
+
+struktur Kolonne:
+    navn        : tekst
+    type        : Kolonnetype
+    er_primær   : bool  = usann
+    er_unik     : bool  = usann
+    er_påkrevd  : bool  = usann
+    standard    : verdi = ingen
+    maks_lengde : int   = 0       ## 0 = ubegrenset
+
+struktur Tabell:
+    navn      : tekst
+    kolonner  : liste[Kolonne]
+    rad_antall: int = 0
+    opprettet : tid = nå()
+
+## Intern katalog over alle tabeller i åpen database
+la _tabeller: ordbok[tekst, Tabell] = {}
+
+funksjon schema_snapshot_hent() -> liste[ordbok]:
+    la ut = []
+    for navn, tabell i _tabeller:
+        la kolonner = []
+        for kol i tabell.kolonner:
+            kolonner.legg_til({
+                "navn"        : kol.navn,
+                "type"        : _kolonnetype_til_tekst(kol.type),
+                "er_primær"   : kol.er_primær,
+                "er_unik"     : kol.er_unik,
+                "er_påkrevd"  : kol.er_påkrevd,
+                "standard"    : kol.standard,
+                "maks_lengde" : kol.maks_lengde
+            })
+        ut.legg_til({
+            "navn"      : navn,
+            "rad_antall": tabell.rad_antall,
+            "opprettet" : tabell.opprettet,
+            "kolonner"  : kolonner
+        })
+    returner ut
+
+funksjon schema_snapshot_last(data: liste[ordbok]):
+    for oppføring i data:
+        hvis "navn" ikke i oppføring:
+            fortsett
+        la kolonner_data = []
+        hvis "kolonner" i oppføring:
+            for kol in oppføring["kolonner"]:
+                kolonner_data.legg_til(Kolonne(
+                    navn        = kol["navn"],
+                    type        = _kolonnetype_fra_tekst(kol["type"]),
+                    er_primær   = hvis "er_primær" i kol da kol["er_primær"] ellers usann,
+                    er_unik     = hvis "er_unik" i kol da kol["er_unik"] ellers usann,
+                    er_påkrevd  = hvis "er_påkrevd" i kol da kol["er_påkrevd"] ellers usann,
+                    standard    = hvis "standard" i kol da kol["standard"] ellers ingen,
+                    maks_lengde = hvis "maks_lengde" i kol da kol["maks_lengde"] ellers 0
+                ))
+        hvis oppføring["navn"] i _tabeller:
+            _tabeller[oppføring["navn"]].navn = oppføring["navn"]
+            _tabeller[oppføring["navn"]].kolonner = kolonner_data
+            _tabeller[oppføring["navn"]].rad_antall = hvis "rad_antall" i oppføring da oppføring["rad_antall"] ellers 0
+            _tabeller[oppføring["navn"]].opprettet = hvis "opprettet" i oppføring da _tid_fra_tekst(oppføring["opprettet"]) ellers nå()
+        ellers:
+            _tabeller[oppføring["navn"]] = Tabell(
+                navn       = oppføring["navn"],
+                kolonner   = kolonner_data,
+                rad_antall = hvis "rad_antall" i oppføring da oppføring["rad_antall"] ellers 0,
+                opprettet  = hvis "opprettet" i oppføring da _tid_fra_tekst(oppføring["opprettet"]) ellers nå()
+            )
+
+funksjon schema_snapshot_tøm():
+    fjern _tabeller
+    _tabeller = {}
+
+privat funksjon _kolonnetype_fra_tekst(navn: tekst) -> Kolonnetype:
+    velg navn:
+        "int"     : returner int
+        "desimal" : returner desimal
+        "tekst"   : returner tekst
+        "bool"    : returner bool
+        "tid"     : returner tid
+        "dato"    : returner dato
+        "blob"    : returner blob
+        "uuid"    : returner uuid
+        annet     : returner tekst
+
+privat funksjon _kolonnetype_til_tekst(type_verdi: Kolonnetype) -> tekst:
+    velg type_verdi:
+        int     : returner "int"
+        desimal : returner "desimal"
+        tekst   : returner "tekst"
+        bool    : returner "bool"
+        tid     : returner "tid"
+        dato    : returner "dato"
+        blob    : returner "blob"
+        uuid    : returner "uuid"
+        annet   : returner "tekst"
+
+privat funksjon _tid_fra_tekst(rå: tekst) -> tid:
+    returner rå
+
+## ─────────────────────────────────────────
+## table_create - Opprett ny tabell
+## ─────────────────────────────────────────
+
+funksjon table_create(navn: tekst, kolonner: liste[Kolonne]) -> resultat:
+    _krev_åpen()
+
+    ## Valider tabellnavn
+    hvis ikke _gyldig_navn(navn):
+        returner feil("Ugyldig tabellnavn: '" + navn + "'. Bruk kun bokstaver, tall og _")
+
+    hvis navn i _tabeller:
+        returner feil("Tabell finnes allerede: " + navn)
+
+    hvis lengde(kolonner) == 0:
+        returner feil("En tabell må ha minst én kolonne")
+
+    hvis lengde(kolonner) > MAKS_KOLONNER:
+        returner feil("For mange kolonner. Maks: " + MAKS_KOLONNER)
+
+    ## Valider kolonner
+    la kolonnenavn_sett: sett[tekst] = {}
+    la har_primær = usann
+
+    for kol i kolonner:
+        hvis ikke _gyldig_navn(kol.navn):
+            returner feil("Ugyldig kolonnenavn: '" + kol.navn + "'")
+
+        hvis kol.navn i kolonnenavn_sett:
+            returner feil("Duplikat kolonnenavn: " + kol.navn)
+
+        kolonnenavn_sett.legg_til(kol.navn)
+
+        hvis kol.er_primær:
+            hvis har_primær:
+                returner feil("En tabell kan kun ha én primærnøkkel")
+            har_primær = sann
+
+    ## Lagre tabell i katalog og til disk
+    la tabell = Tabell(navn=navn, kolonner=kolonner)
+    _tabeller[navn] = tabell
+    _skriv_tabell_til_disk(tabell)
+
+    returner ok("Tabell opprettet: " + navn)
+
+## ─────────────────────────────────────────
+## table_drop - Slett tabell
+## ─────────────────────────────────────────
+
+funksjon table_drop(navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + navn)
+
+    fjern _tabeller[navn]
+    _slett_tabell_fra_disk(navn)
+
+    returner ok("Tabell slettet: " + navn)
+
+## ─────────────────────────────────────────
+## table_info - Vis tabellstruktur
+## ─────────────────────────────────────────
+
+funksjon table_info(navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + navn)
+
+    la tabell = _tabeller[navn]
+
+    skriv "Tabell: " + tabell.navn
+    skriv "Rader:  " + tabell.rad_antall
+    skriv "─────────────────────────────────"
+    skriv "KOLONNE          TYPE       FLAGG"
+    skriv "─────────────────────────────────"
+
+    for kol i tabell.kolonner:
+        la flagg = ""
+        hvis kol.er_primær  : flagg += " PK"
+        hvis kol.er_unik    : flagg += " UQ"
+        hvis kol.er_påkrevd : flagg += " NN"
+        hvis kol.standard != ingen: flagg += " D=" + kol.standard
+
+        skriv pad(kol.navn, 16) + pad(kol.type, 10) + flagg
+
+    returner ok()
+
+## ─────────────────────────────────────────
+## table_list - List alle tabeller
+## ─────────────────────────────────────────
+
+funksjon table_list() -> resultat:
+    _krev_åpen()
+
+    hvis lengde(_tabeller) == 0:
+        returner ok([])
+
+    la liste_ut = []
+    for navn, tabell i _tabeller:
+        liste_ut.legg_til({
+            "navn"      : navn,
+            "kolonner"  : lengde(tabell.kolonner),
+            "rader"     : tabell.rad_antall,
+            "opprettet" : tabell.opprettet
+        })
+
+    returner ok(liste_ut)
+
+## ─────────────────────────────────────────
+## table_rename - Gi tabell nytt navn
+## ─────────────────────────────────────────
+
+funksjon table_rename(gammelt_navn: tekst, nytt_navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis gammelt_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + gammelt_navn)
+
+    hvis nytt_navn i _tabeller:
+        returner feil("Tabell finnes allerede: " + nytt_navn)
+
+    la tabell = _tabeller[gammelt_navn]
+    tabell.navn = nytt_navn
+    _tabeller[nytt_navn] = tabell
+    fjern _tabeller[gammelt_navn]
+    _oppdater_tabell_på_disk(gammelt_navn, tabell)
+
+    returner ok("Tabell omdøpt: " + gammelt_navn + " → " + nytt_navn)
+
+## ─────────────────────────────────────────
+## column_add - Legg til kolonne i tabell
+## ─────────────────────────────────────────
+
+funksjon column_add(tabell_navn: tekst, kolonne: Kolonne) -> resultat:
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    la tabell = _tabeller[tabell_navn]
+
+    for eksisterende i tabell.kolonner:
+        hvis eksisterende.navn == kolonne.navn:
+            returner feil("Kolonne finnes allerede: " + kolonne.navn)
+
+    ## Ny kolonne krever standardverdi hvis tabellen har rader
+    hvis tabell.rad_antall > 0 og kolonne.standard == ingen og kolonne.er_påkrevd:
+        returner feil("Ny påkrevd kolonne trenger standardverdi når tabellen har rader")
+
+    tabell.kolonner.legg_til(kolonne)
+    _oppdater_tabell_på_disk(tabell_navn, tabell)
+
+    returner ok("Kolonne lagt til: " + kolonne.navn)
+
+## ─────────────────────────────────────────
+## column_drop - Fjern kolonne fra tabell
+## ─────────────────────────────────────────
+
+funksjon column_drop(tabell_navn: tekst, kolonne_navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    la tabell = _tabeller[tabell_navn]
+
+    la funnet = usann
+    for kol i tabell.kolonner:
+        hvis kol.navn == kolonne_navn:
+            hvis kol.er_primær:
+                returner feil("Kan ikke fjerne primærnøkkelkolonne")
+            funnet = sann
+            tabell.kolonner.fjern(kol)
+            stopp
+
+    hvis ikke funnet:
+        returner feil("Kolonne finnes ikke: " + kolonne_navn)
+
+    _oppdater_tabell_på_disk(tabell_navn, tabell)
+    returner ok("Kolonne fjernet: " + kolonne_navn)
+
+## ─────────────────────────────────────────
+## VALIDERING AV DATA MOT SKJEMA
+## ─────────────────────────────────────────
+
+funksjon _valider_rad(tabell_navn: tekst, rad: ordbok) -> resultat:
+    la tabell = _tabeller[tabell_navn]
+
+    for kol i tabell.kolonner:
+        la verdi = rad.hent(kol.navn, standard=kol.standard)
+
+        ## Sjekk påkrevd
+        hvis verdi == ingen og kol.er_påkrevd:
+            returner feil("Kolonne '" + kol.navn + "' er påkrevd")
+
+        hvis verdi != ingen:
+            ## Sjekk type
+            hvis ikke _riktig_type(verdi, kol.type):
+                returner feil("Feil type for '" + kol.navn + "'. Forventet: " + kol.type)
+
+            ## Sjekk lengde for tekst
+            hvis kol.type == tekst og kol.maks_lengde > 0:
+                hvis lengde(verdi) > kol.maks_lengde:
+                    returner feil("'" + kol.navn + "' er for lang. Maks: " + kol.maks_lengde)
+
+    returner ok()
+
+## ─────────────────────────────────────────
+## INTERNE HJELPEFUNKSJONER
+## ─────────────────────────────────────────
+
+privat funksjon _gyldig_navn(navn: tekst) -> bool:
+    ## Navn kan kun inneholde a-z, A-Z, 0-9, _
+    ## og kan ikke starte med tall
+    returner navn samsvarer_med /^[a-zA-ZæøåÆØÅ_][a-zA-ZæøåÆØÅ0-9_]*$/
+
+privat funksjon _riktig_type(verdi: verdi, type: Kolonnetype) -> bool:
+    velg type:
+        int     : returner er_heltall(verdi)
+        desimal : returner er_tall(verdi)
+        tekst   : returner er_tekst(verdi)
+        bool    : returner er_bool(verdi)
+        tid     : returner er_tid(verdi)
+        dato    : returner er_dato(verdi)
+        blob    : returner er_bytes(verdi)
+        uuid    : returner er_uuid(verdi)
+        annet   : returner usann
+
+privat funksjon _skriv_tabell_til_disk(tabell: Tabell):
+    ## Serialiser tabell-definisjon og skriv til katalog-seksjon
+    la data = serialiser(tabell)
+    la offset = _finn_ledig_katalog_plass()
+    fil_søk(_db.fil_peker, offset)
+    fil_skriv(_db.fil_peker, data)
+
+privat funksjon _slett_tabell_fra_disk(navn: tekst):
+    ## Merk tabell-oppføring som slettet i katalogen
+    la offset = _finn_tabell_offset(navn)
+    fil_søk(_db.fil_peker, offset)
+    fil_skriv_nuller(_db.fil_peker, 64)
+
+privat funksjon _oppdater_tabell_på_disk(navn: tekst, tabell: Tabell):
+    la offset = _finn_tabell_offset(navn)
+    la data = serialiser(tabell)
+    fil_søk(_db.fil_peker, offset)
+    fil_skriv(_db.fil_peker, data)

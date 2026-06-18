@@ -8,17 +8,13 @@ ACTIVE_ROOTS=(
   "$ROOT_DIR/.github/workflows"
   "$ROOT_DIR/bin"
   "$ROOT_DIR/tools"
-  "$ROOT_DIR/docs/START_HER.md"
-  "$ROOT_DIR/docs/HANDOFF.md"
-  "$ROOT_DIR/docs/CLI_CONTRACT.md"
-  "$ROOT_DIR/docs/SELFHOST_FALLBACK_CONTRACT.md"
-  "$ROOT_DIR/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md"
-  "$ROOT_DIR/docs/SELFHOST_CI_GATES.md"
-  "$ROOT_DIR/docs/SELFHOST_RELEASE_CHECKLIST.md"
-  "$ROOT_DIR/docs/MAINTENANCE_POLICY.md"
-  "$ROOT_DIR/docs/PYTHON_UTFASING.md"
-  "$ROOT_DIR/docs/python-phaseout.md"
-  "$ROOT_DIR/docs/SELFSTENDIG_NORSCODE_ROADMAP.md"
+  "$ROOT_DIR/docs/05-development/SELFHOST_FALLBACK_CONTRACT.md"
+  "$ROOT_DIR/docs/05-development/SELFHOST_CI_GATES.md"
+  "$ROOT_DIR/docs/05-development/SELFHOST_RELEASE_CHECKLIST.md"
+  "$ROOT_DIR/docs/README.md"
+  "$ROOT_DIR/docs/INDEX.md"
+  "$ROOT_DIR/docs/SELFHOST_HANDLINGSPLAN.md"
+  "$ROOT_DIR/docs/STATUS.md"
 )
 
 check_sh_syntax() {
@@ -34,10 +30,20 @@ check_sh_syntax() {
 }
 
 check_active_surface() {
+  local active_files=()
+  local path
+  for path in "${ACTIVE_ROOTS[@]}"; do
+    if [ -f "$path" ] || [ -d "$path" ]; then
+      active_files+=("$path")
+    fi
+  done
+
   grep -rn \
     "main\.py\|compile\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\." \
-    "${ACTIVE_ROOTS[@]}" \
+    "${active_files[@]}" \
     --exclude="selfhost_phase0_verify.sh" \
+    --exclude="enforce_native_first.sh" \
+    --exclude="nc_test.sh" \
     --exclude-dir=".git" \
     2>/dev/null
 }

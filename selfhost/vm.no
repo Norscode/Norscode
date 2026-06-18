@@ -1,6 +1,7 @@
 // selfhost/vm.no — Norscode Bytecode VM
 
 bruk selfhost.json
+bruk selfhost.semantic_validation_real
 // Køyrer NCB JSON produsert av bytecode_backend.py / bytecode_backend.no
 // Opcode-sett: norscode-bytecode-v1
 //
@@ -76,6 +77,10 @@ funksjon stack_topp(ramme: ordbok<tekst, tekst>) -> tekst {
 la vm_active_functions: ordbok<tekst, tekst> = {}
 la vm_active_ncb: ordbok<tekst, tekst> = {}
 la vm_request_counter: heiltall = 1
+la vm_db_store: ordbok<tekst, ordbok_tekst> = {}
+la vm_pool_store: ordbok<tekst, ordbok_tekst> = {}
+la vm_db_counter: heiltall = 1
+la vm_pool_counter: heiltall = 1
 
 funksjon vm_next_request_id() -> tekst {
     la current = vm_request_counter
@@ -175,6 +180,1148 @@ funksjon json_stringify(v) -> tekst {
 // json_parse_raw: parser JSON og returner verdiar som ordbok (ikkje strings)
 funksjon json_parse_raw(input: tekst) {
     returner json_les(input)
+}
+
+funksjon _vm_ny_id(prefix: tekst) -> tekst {
+    hvis prefix == "db" {
+        la id = "db_" + tekst_fra_heltall(vm_db_counter)
+        vm_db_counter = vm_db_counter + 1
+        returner id
+    }
+    la id = "pool_" + tekst_fra_heltall(vm_pool_counter)
+    vm_pool_counter = vm_pool_counter + 1
+    returner id
+}
+
+funksjon _vm_db_set(handle: tekst, db: ordbok_tekst) {
+    vm_db_store[handle] = db
+}
+
+funksjon _vm_db_get(handle: tekst) -> ordbok_tekst {
+    hvis ikkje finnes_nøkkel(vm_db_store, handle) {
+        kast "Ukjend db-handle: " + handle
+    }
+    returner vm_db_store[handle]
+}
+
+funksjon _vm_pool_get(handle: tekst) -> ordbok_tekst {
+    hvis ikkje finnes_nøkkel(vm_pool_store, handle) {
+        kast "Ukjend pool-handle: " + handle
+    }
+    returner vm_pool_store[handle]
+}
+
+funksjon _vm_db_ny() -> ordbok_tekst {
+    la db: ordbok_tekst = {}
+    db["_tables"] = {}
+    db["_path"] = ""
+    db["_in_tx"] = usann
+    db["_snapshot"] = {}
+    db["_pool"] = ""
+    returner db
+}
+
+funksjon _vm_db_clone(db: ordbok_tekst) -> ordbok_tekst {
+    returner json_parse_raw(json_stringify(db))
+}
+
+funksjon _vm_db_load(path: tekst) -> ordbok_tekst {
+    hvis path == "" eller path == ":memory:" {
+        returner _vm_db_ny()
+    }
+    hvis builtin.fil_finnes(path) {
+        prøv {
+            la raw = builtin.fil_les(path)
+            hvis builtin.trim(raw) != "" {
+                la parsed = json_parse_raw(raw)
+                hvis parsed != null {
+                    returner parsed
+                }
+            }
+        } fang (e) {
+        }
+    }
+    la db = _vm_db_ny()
+    db["_path"] = path
+    returner db
+}
+
+funksjon _vm_db_save(db: ordbok_tekst) {
+    la path = db["_path"]
+    hvis path == "" eller path == ":memory:" {
+        returner
+    }
+    builtin.fil_skriv(path, json_stringify(db))
+}
+
+funksjon _vm_sql_upper(sql: tekst) -> tekst {
+    returner builtin.upper(sql)
+}
+
+funksjon _vm_sql_trim_semi(sql: tekst) -> tekst {
+    la s = builtin.trim(sql)
+    mens lengde(s) > 0 og builtin.slice(s, lengde(s) - 1, lengde(s)) == ";" {
+        s = builtin.trim(builtin.slice(s, 0, lengde(s) - 1))
+    }
+    returner s
+}
+
+funksjon _vm_sql_is_ws(c: tekst) -> boolsk {
+    returner c == " " eller c == "\t" eller c == "\n" eller c == "\r"
+}
+
+funksjon _vm_sql_is_digit(c: tekst) -> boolsk {
+    la k = builtin.char_code(c)
+    returner k >= 48 og k <= 57
+}
+
+funksjon _vm_sql_is_ident_char(c: tekst) -> boolsk {
+    la k = builtin.char_code(c)
+    returner (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller (k >= 48 og k <= 57) eller c == "_" eller c == "."
+}
+
+funksjon _vm_sql_split_csv(s: tekst) -> liste<tekst> {
+    la ut: liste<tekst> = []
+    la cur: tekst = ""
+    la i: heltall = 0
+    la in_str: boolsk = usann
+    mens i < lengde(s) {
+        la ch = builtin.slice(s, i, i + 1)
+        hvis ch == "'" {
+            in_str = ikkje in_str
+            cur = cur + ch
+        } ellers hvis ch == "," og ikkje in_str {
+            legg_til(ut, builtin.trim(cur))
+            cur = ""
+        } ellers {
+            cur = cur + ch
+        }
+        i = i + 1
+    }
+    hvis builtin.trim(cur) != "" {
+        legg_til(ut, builtin.trim(cur))
+    }
+    returner ut
+}
+
+funksjon _vm_sql_tokeniser(sql: tekst) -> liste<tekst> {
+    la chars = builtin.split(sql, "")
+    la i: heltall = 0
+    la n: heltall = lengde(chars)
+    la out: liste<tekst> = []
+
+    mens i < n {
+        la c = chars[i]
+        hvis _vm_sql_is_ws(c) {
+            i = i + 1
+            fortsett
+        }
+
+        hvis c == "'" {
+            la start: heltall = i + 1
+            i = i + 1
+            mens i < n og chars[i] != "'" {
+                i = i + 1
+            }
+            legg_til(out, "'" + builtin.slice(sql, start, i) + "'")
+            hvis i < n {
+                i = i + 1
+            }
+            fortsett
+        }
+
+        hvis _vm_sql_is_digit(c) eller (c == "-" og i + 1 < n og _vm_sql_is_digit(chars[i + 1])) {
+            la start = i
+            i = i + 1
+            mens i < n {
+                hvis _vm_sql_is_digit(chars[i]) eller chars[i] == "." {
+                    i = i + 1
+                    fortsett
+                }
+                break
+            }
+            legg_til(out, builtin.slice(sql, start, i))
+            fortsett
+        }
+
+        hvis c == "(" eller c == ")" eller c == "," eller c == ";" eller c == "=" eller c == ">" eller c == "<" eller c == "!" eller c == "*" {
+            hvis (c == ">" eller c == "<" eller c == "!") og i + 1 < n og chars[i + 1] == "=" {
+                legg_til(out, c + "=")
+                i = i + 2
+                fortsett
+            }
+            hvis c == "<" og i + 1 < n og chars[i + 1] == ">" {
+                legg_til(out, "<>")
+                i = i + 2
+                fortsett
+            }
+            legg_til(out, c)
+            i = i + 1
+            fortsett
+        }
+
+        hvis _vm_sql_is_ident_char(c) {
+            la start: heltall = i
+            i = i + 1
+            mens i < n og _vm_sql_is_ident_char(chars[i]) {
+                i = i + 1
+            }
+            legg_til(out, builtin.slice(sql, start, i))
+            fortsett
+        }
+
+        i = i + 1
+    }
+
+    returner out
+}
+
+funksjon _vm_sql_unquote(v: tekst) -> tekst {
+    la s = builtin.trim(v)
+    hvis lengde(s) >= 2 og builtin.slice(s, 0, 1) == "'" og builtin.slice(s, lengde(s) - 1, lengde(s)) == "'" {
+        returner builtin.slice(s, 1, lengde(s) - 1)
+    }
+    returner s
+}
+
+funksjon _vm_db_tbl(db: ordbok_tekst, namn: tekst) -> ordbok_tekst {
+    hvis ikkje finnes_nøkkel(db["_tables"], namn) {
+        kast "Ukjend tabell: " + namn
+    }
+    returner db["_tables"][namn]
+}
+
+funksjon _vm_db_col_from_token(token: tekst) -> tekst {
+    la key = builtin.trim(_vm_sql_unquote(token))
+    hvis builtin.index_of(key, ".") >= 0 {
+        la last = builtin.index_of(key, ".") + 1
+        returner builtin.slice(key, last, lengde(key))
+    }
+    returner key
+}
+
+funksjon _vm_db_row_val(row: ordbok_tekst, kol: tekst) -> tekst {
+    la k = _vm_db_col_from_token(kol)
+    hvis finnes_nøkkel(row, k) {
+        returner row[k]
+    }
+    la k_upper = _vm_sql_upper(k)
+    hvis finnes_nøkkel(row, k_upper) {
+        returner row[k_upper]
+    }
+    returner ""
+}
+
+funksjon _vm_db_is_number(v: tekst) -> boolsk {
+    hvis lengde(v) == 0 { returner usann }
+    la chars = builtin.split(v, "")
+    la i: heltall = 0
+    hvis chars[0] == "-" {
+        hvis lengde(chars) == 1 { returner usann }
+        i = i + 1
+    }
+    mens i < lengde(chars) {
+        hvis ikkje _vm_sql_is_digit(chars[i]) og chars[i] != "." {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _vm_db_compare(a: tekst, op: tekst, b: tekst) -> boolsk {
+    la lhs = _vm_sql_unquote(a)
+    la rhs = _vm_sql_unquote(b)
+    la operator = _vm_sql_upper(op)
+    hvis _vm_db_is_number(lhs) og _vm_db_is_number(rhs) {
+        la x = builtin.heltall_fra_tekst(lhs)
+        la y = builtin.heltall_fra_tekst(rhs)
+        hvis operator == "=" { returner x == y }
+        hvis operator == "==" { returner x == y }
+        hvis operator == "!=" eller operator == "<>" { returner x != y }
+        hvis operator == ">" { returner x > y }
+        hvis operator == ">=" { returner x >= y }
+        hvis operator == "<" { returner x < y }
+        hvis operator == "<=" { returner x <= y }
+        returner usann
+    }
+
+    hvis operator == "=" { returner lhs == rhs }
+    hvis operator == "==" { returner lhs == rhs }
+    hvis operator == "!=" eller operator == "<>" { returner lhs != rhs }
+    hvis operator == ">" { returner lhs > rhs }
+    hvis operator == ">=" { returner lhs >= rhs }
+    hvis operator == "<" { returner lhs < rhs }
+    hvis operator == "<=" { returner lhs <= rhs }
+    returner usann
+}
+
+funksjon _vm_db_condition(row: ordbok_tekst, parts: liste<tekst>, start: heltall) -> boolsk {
+    hvis start + 2 >= lengde(parts) {
+        returner usann
+    }
+    la kn = _vm_db_col_from_token(parts[start])
+    la op = parts[start + 1]
+    la rhs = _vm_db_col_from_token(parts[start + 2])
+    la lhs = _vm_db_row_val(row, kn)
+    returner _vm_db_compare(lhs, op, rhs)
+}
+
+funksjon _vm_db_where(row: ordbok_tekst, tokens: liste<tekst>) -> boolsk {
+    hvis lengde(tokens) == 0 {
+        returner sann
+    }
+    la i: heltall = 0
+    la result: boolsk = sann
+    la use_and: boolsk = sann
+
+    mens i + 2 < lengde(tokens) {
+        la cond = _vm_db_condition(row, tokens, i)
+        hvis i == 0 {
+            result = cond
+        } ellers hvis use_and {
+            result = result og cond
+        } ellers {
+            result = result eller cond
+        }
+        i = i + 3
+        hvis i >= lengde(tokens) {
+            break
+        }
+        la connector = _vm_sql_upper(tokens[i])
+        hvis connector == "AND" {
+            use_and = sann
+            i = i + 1
+            fortsett
+        }
+        hvis connector == "OR" {
+            use_and = usann
+            i = i + 1
+            fortsett
+        }
+        break
+    }
+    returner result
+}
+
+funksjon _vm_db_collect_select_rows(db: ordbok_tekst, table: ordbok_tekst, where_tokens: liste<tekst>) -> liste<ordbok_tekst> {
+    la rows: liste<ordbok_tekst> = []
+    la i: heltall = 0
+    la list_rows = table["rows"]
+    mens i < lengde(list_rows) {
+        la row = list_rows[i]
+        hvis _vm_db_where(row, where_tokens) {
+            legg_til(rows, row)
+        }
+        i = i + 1
+    }
+    returner rows
+}
+
+funksjon _vm_db_sort_rows(rows: liste<ordbok_tekst>, ord_kol: tekst, asc: boolsk) -> liste<ordbok_tekst> {
+    hvis ord_kol == "" { returner rows }
+    la i: heltall = 0
+    mens i < lengde(rows) {
+        la j: heltall = i + 1
+        mens j < lengde(rows) {
+            la a = _vm_db_row_val(rows[i], ord_kol)
+            la b = _vm_db_row_val(rows[j], ord_kol)
+            hvis _vm_db_is_number(a) og _vm_db_is_number(b) {
+                la av = builtin.heltall_fra_tekst(a)
+                la bv = builtin.heltall_fra_tekst(b)
+                hvis asc {
+                    hvis av > bv {
+                        la tmp = rows[i]
+                        rows[i] = rows[j]
+                        rows[j] = tmp
+                    }
+                } ellers {
+                    hvis av < bv {
+                        la tmp = rows[i]
+                        rows[i] = rows[j]
+                        rows[j] = tmp
+                    }
+                }
+            } ellers {
+                hvis asc {
+                    hvis a > b {
+                        la tmp = rows[i]
+                        rows[i] = rows[j]
+                        rows[j] = tmp
+                    }
+                } ellers {
+                    hvis a < b {
+                        la tmp = rows[i]
+                        rows[i] = rows[j]
+                        rows[j] = tmp
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner rows
+}
+
+funksjon _vm_db_parse_select(sql: tekst) -> ordbok_tekst {
+    la out: ordbok_tekst = {}
+    la tokens = _vm_sql_tokeniser(sql)
+    out["raw"] = sql
+    out["tokens"] = tokens
+
+    hvis lengde(tokens) == 0 eller _vm_sql_upper(tokens[0]) != "SELECT" {
+        returner out
+    }
+
+    la distinct: boolsk = usann
+    la i: heltall = 1
+    hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "DISTINCT" {
+        distinct = sann
+        i = i + 1
+    }
+
+    la select_tokens: liste<tekst> = []
+    mens i < lengde(tokens) og _vm_sql_upper(tokens[i]) != "FROM" {
+        hvis tokens[i] == "," {
+            i = i + 1
+            fortsett
+        }
+        hvis _vm_sql_upper(tokens[i]) == "AS" {
+            i = i + 2
+            fortsett
+        }
+        legg_til(select_tokens, tokens[i])
+        i = i + 1
+    }
+    hvis distinct {
+        out["distinct"] = "DISTINCT"
+    } ellers {
+        out["distinct"] = ""
+    }
+    out["select"] = select_tokens
+
+    hvis i >= lengde(tokens) eller _vm_sql_upper(tokens[i]) != "FROM" {
+        returner out
+    }
+    i = i + 1
+    hvis i >= lengde(tokens) {
+        returner out
+    }
+
+    la table_name = _vm_db_col_from_token(tokens[i])
+    out["table"] = table_name
+    i = i + 1
+
+    la where_tokens: liste<tekst> = []
+    la order_col: tekst = ""
+    la order_asc: boolsk = sann
+    la limit_n: heltall = -1
+    la offset_n: heltall = 0
+
+    mens i < lengde(tokens) {
+        la tok = _vm_sql_upper(tokens[i])
+        hvis tok == "WHERE" {
+            i = i + 1
+            mens i < lengde(tokens) og _vm_sql_upper(tokens[i]) != "ORDER" og _vm_sql_upper(tokens[i]) != "LIMIT" og _vm_sql_upper(tokens[i]) != "OFFSET" {
+                legg_til(where_tokens, tokens[i])
+                i = i + 1
+            }
+            fortsett
+        }
+
+        hvis tok == "ORDER" {
+            i = i + 1
+            hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "BY" {
+                i = i + 1
+            }
+            hvis i < lengde(tokens) {
+                order_col = _vm_db_col_from_token(tokens[i])
+                i = i + 1
+            }
+            hvis i < lengde(tokens) {
+                la dir = _vm_sql_upper(tokens[i])
+                hvis dir == "DESC" {
+                    order_asc = usann
+                    i = i + 1
+                } ellers hvis dir == "ASC" {
+                    i = i + 1
+                }
+            }
+            fortsett
+        }
+
+        hvis tok == "LIMIT" {
+            i = i + 1
+            hvis i < lengde(tokens) {
+                limit_n = builtin.heltall_fra_tekst(tokens[i])
+                i = i + 1
+            }
+            fortsett
+        }
+
+        hvis tok == "OFFSET" {
+            i = i + 1
+            hvis i < lengde(tokens) {
+                offset_n = builtin.heltall_fra_tekst(tokens[i])
+                i = i + 1
+            }
+            fortsett
+        }
+
+        i = i + 1
+    }
+
+    out["where"] = where_tokens
+    out["order_col"] = order_col
+    out["order_asc"] = order_asc
+    out["limit"] = limit_n
+    out["offset"] = offset_n
+    returner out
+}
+
+funksjon _vm_db_select_mode(parsed: ordbok_tekst) -> tekst {
+    la select_tokens = parsed["select"]
+    hvis lengde(select_tokens) == 0 { returner "empty" }
+    la first = _vm_sql_upper(select_tokens[0])
+    hvis first != "COUNT" og first != "SUM" og first != "AVG" og first != "MIN" og first != "MAX" {
+        returner "rows"
+    }
+    returner "agg"
+}
+
+funksjon _vm_db_parse_aggregate(tokens: liste<tekst>) -> ordbok_tekst {
+    la out: ordbok_tekst = {}
+    la n = lengde(tokens)
+    hvis n < 4 {
+        returner out
+    }
+    la fn = _vm_sql_upper(tokens[0])
+    hvis fn != "COUNT" og fn != "SUM" og fn != "AVG" og fn != "MIN" og fn != "MAX" {
+        returner out
+    }
+    hvis tokens[1] != "(" eller tokens[n - 1] != ")" {
+        returner out
+    }
+    la args = builtin.slice(tokens, 2, n - 1)
+    hvis lengde(args) == 0 {
+        returner out
+    }
+    la distinct: boolsk = usann
+    la arg = ""
+    hvis lengde(args) == 1 {
+        arg = args[0]
+    } ellers hvis lengde(args) == 2 og _vm_sql_upper(args[0]) == "DISTINCT" {
+        distinct = sann
+        arg = args[1]
+    } ellers {
+        returner out
+    }
+    out["fn"] = fn
+    out["arg"] = arg
+    out["distinct"] = distinct
+    returner out
+}
+
+funksjon _vm_db_contains_text(values: liste<tekst>, value: tekst) -> boolsk {
+    la i: heltall = 0
+    mens i < lengde(values) {
+        hvis values[i] == value {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _vm_db_find_matching_row(rows: liste<ordbok_tekst>, probe: ordbok_tekst, keys: liste<tekst>) -> boolsk {
+    la i: heltall = 0
+    mens i < lengde(rows) {
+        la row = rows[i]
+        la matches: boolsk = sann
+        la k: heltall = 0
+        mens k < lengde(keys) {
+            la key = _vm_db_col_from_token(keys[k])
+            hvis _vm_db_row_val(row, key) != _vm_db_row_val(probe, key) {
+                matches = usann
+                bryt
+            }
+            k = k + 1
+        }
+        hvis matches {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _vm_db_parse_insert(sql: tekst) -> ordbok_tekst {
+    la out: ordbok_tekst = {}
+    out["ok"] = usann
+    la tokens = _vm_sql_tokeniser(sql)
+    hvis lengde(tokens) < 4 {
+        returner out
+    }
+    la table_name = _vm_db_col_from_token(tokens[2])
+    la cols: liste<tekst> = []
+    la values_start = -1
+    la i: heltall = 3
+
+    hvis i < lengde(tokens) og tokens[i] == "(" {
+        i = i + 1
+        mens i < lengde(tokens) og tokens[i] != ")" {
+            hvis tokens[i] != "," {
+                legg_til(cols, _vm_db_col_from_token(tokens[i]))
+            }
+            i = i + 1
+        }
+        i = i + 1
+    }
+
+    mens i < lengde(tokens) {
+        hvis _vm_sql_upper(tokens[i]) == "VALUES" {
+            values_start = i
+            bryt
+        }
+        i = i + 1
+    }
+
+    hvis values_start < 0 eller values_start + 1 >= lengde(tokens) {
+        returner out
+    }
+
+    i = values_start + 1
+    hvis i < lengde(tokens) og tokens[i] == "(" {
+        i = i + 1
+    }
+    la vals: liste<tekst> = []
+    mens i < lengde(tokens) {
+        hvis tokens[i] == ")" {
+            bryt
+        }
+        hvis tokens[i] != "," {
+            legg_til(vals, _vm_sql_unquote(tokens[i]))
+        }
+        i = i + 1
+    }
+
+    la row: ordbok_tekst = {}
+    hvis lengde(cols) > 0 {
+        la c: heltall = 0
+        mens c < lengde(cols) og c < lengde(vals) {
+            row[cols[c]] = vals[c]
+            c = c + 1
+        }
+    }
+
+    out["ok"] = sann
+    out["table"] = table_name
+    out["row"] = row
+    out["cols"] = cols
+    out["vals"] = vals
+    returner out
+}
+
+funksjon _vm_db_create_table(db: ordbok_tekst, sql: tekst) -> heltall {
+    la tokens = _vm_sql_tokeniser(sql)
+    hvis lengde(tokens) < 3 {
+        returner 0
+    }
+
+    la i: heltall = 2
+    la if_not_exists: boolsk = usann
+    hvis _vm_sql_upper(tokens[i]) == "IF" {
+        hvis lengde(tokens) >= 5 og _vm_sql_upper(tokens[i + 1]) == "NOT" og _vm_sql_upper(tokens[i + 2]) == "EXISTS" {
+            if_not_exists = sann
+            i = i + 3
+        }
+    }
+    hvis i >= lengde(tokens) {
+        returner 0
+    }
+
+    la tabellnamn = _vm_db_col_from_token(tokens[i])
+    hvis finnes_nøkkel(db["_tables"], tabellnamn) {
+        hvis if_not_exists {
+            returner 0
+        }
+        // I denne enkle runtimeen overskriv vi tabell med same namn ved vanleg CREATE
+    }
+
+    i = i + 1
+    mens i < lengde(tokens) og tokens[i] != "(" {
+        i = i + 1
+    }
+    hvis i >= lengde(tokens) eller tokens[i] != "(" {
+        returner 0
+    }
+
+    la close: heltall = i + 1
+    mens close < lengde(tokens) og tokens[close] != ")" {
+        close = close + 1
+    }
+    hvis close >= lengde(tokens) {
+        returner 0
+    }
+
+    la schema: liste<ordbok_tekst> = []
+    la j: heltall = i + 1
+    mens j < close {
+        hvis tokens[j] == "," {
+            j = j + 1
+            fortsett
+        }
+        la col: ordbok_tekst = {}
+        la namn = _vm_db_col_from_token(tokens[j])
+        hvis namn == "" {
+            j = j + 1
+            fortsett
+        }
+        col["namn"] = namn
+        la type_token = "TEXT"
+        hvis j + 1 < close og tokens[j + 1] != "," {
+            type_token = _vm_sql_upper(tokens[j + 1])
+            j = j + 1
+        }
+        col["type"] = type_token
+        legg_til(schema, col)
+        j = j + 1
+    }
+
+    la table: ordbok_tekst = {}
+    table["schema"] = schema
+    table["rows"] = []
+    table["next_id"] = 1
+    db["_tables"][tabellnamn] = table
+    returner 0
+}
+
+funksjon _vm_db_insert_core(db: ordbok_tekst, sql: tekst, dedupe: boolsk) -> heltall {
+    la parsed = _vm_db_parse_insert(sql)
+    hvis parsed["ok"] != sann {
+        returner 0
+    }
+    la table_name = parsed["table"]
+    la table = _vm_db_tbl(db, table_name)
+    la row = parsed["row"]
+    la vals = parsed["vals"]
+
+    hvis lengde(parsed["cols"]) == 0 {
+        la schema = table["schema"]
+        la start_idx: heltall = 0
+        hvis lengde(schema) > 0 og lengde(vals) == lengde(schema) - 1 og schema[0]["namn"] == "id" {
+            start_idx = 1
+        }
+        la i: heltall = 0
+        la s: heltall = start_idx
+        mens s < lengde(schema) og i < lengde(vals) {
+            la col_name = schema[s]["namn"]
+            hvis col_name == "id" {
+                s = s + 1
+                fortsett
+            }
+            hvis col_name != "" {
+                row[col_name] = vals[i]
+            }
+            i = i + 1
+            s = s + 1
+        }
+    }
+
+    hvis finnes_nøkkel(row, "id") {
+        la sid = _vm_db_row_val(row, "id")
+        la i = builtin.heltall_fra_tekst(table["next_id"])
+        hvis _vm_db_is_number(sid) og builtin.heltall_fra_tekst(sid) >= i {
+            table["next_id"] = builtin.heltall_fra_tekst(sid) + 1
+        }
+    }
+    hvis ikkje finnes_nøkkel(row, "id") {
+        row["id"] = tekst_fra_heltall(table["next_id"])
+        table["next_id"] = table["next_id"] + 1
+    }
+
+    hvis dedupe {
+        la keys: liste<tekst> = parsed["cols"]
+        hvis lengde(keys) == 0 {
+            keys = []
+            la schema = table["schema"]
+            la k: heltall = 0
+            mens k < lengde(schema) {
+                la navn = schema[k]["namn"]
+                hvis navn != "id" {
+                    legg_til(keys, navn)
+                }
+                k = k + 1
+            }
+        }
+        hvis lengde(keys) > 0 og _vm_db_find_matching_row(table["rows"], row, keys) {
+            returner 0
+        }
+    }
+
+    legg_til(table["rows"], row)
+    returner 1
+}
+
+funksjon _vm_db_insert(db: ordbok_tekst, sql: tekst) -> heiltall {
+    returner _vm_db_insert_core(db, sql, usann)
+}
+
+funksjon _vm_db_update(db: ordbok_tekst, sql: tekst) -> heltall {
+    la tokens = _vm_sql_tokeniser(sql)
+    hvis lengde(tokens) < 6 {
+        returner 0
+    }
+    la table_name = _vm_db_col_from_token(tokens[1])
+    la table = _vm_db_tbl(db, table_name)
+    la set_pos: heltall = -1
+    la i: heltall = 2
+    mens i < lengde(tokens) {
+        hvis _vm_sql_upper(tokens[i]) == "SET" {
+            set_pos = i
+            bryt
+        }
+        i = i + 1
+    }
+    hvis set_pos < 0 {
+        returner 0
+    }
+
+    la set_cols: ordbok_tekst = {}
+    i = set_pos + 1
+    mens i < lengde(tokens) {
+        hvis _vm_sql_upper(tokens[i]) == "WHERE" {
+            break
+        }
+        hvis tokens[i] == "," {
+            i = i + 1
+            fortsett
+        }
+        hvis i + 2 < lengde(tokens) og tokens[i + 1] == "=" {
+            set_cols[_vm_db_col_from_token(tokens[i])] = _vm_sql_unquote(tokens[i + 2])
+            i = i + 3
+        } ellers {
+            i = i + 1
+        }
+    }
+
+    la where_tokens: liste<tekst> = []
+    hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "WHERE" {
+        i = i + 1
+        mens i < lengde(tokens) {
+            legg_til(where_tokens, tokens[i])
+            i = i + 1
+        }
+    }
+
+    la rows = table["rows"]
+    la count: heltall = 0
+    la r: heltall = 0
+    mens r < lengde(rows) {
+        la row = rows[r]
+        hvis _vm_db_where(row, where_tokens) {
+            la k: heltall = 0
+            la keys = nøkler(set_cols)
+            mens k < lengde(keys) {
+                la key = keys[k]
+                row[key] = set_cols[key]
+                k = k + 1
+            }
+            count = count + 1
+        }
+        r = r + 1
+    }
+    returner count
+}
+
+funksjon _vm_db_delete(db: ordbok_tekst, sql: tekst) -> heltall {
+    la tokens = _vm_sql_tokeniser(sql)
+    hvis lengde(tokens) < 3 {
+        returner 0
+    }
+    la i: heltall = 2
+    la table_name = ""
+    hvis _vm_sql_upper(tokens[1]) == "FROM" {
+        table_name = _vm_db_col_from_token(tokens[2])
+        i = 3
+    } ellers {
+        table_name = _vm_db_col_from_token(tokens[1])
+    }
+    la table = _vm_db_tbl(db, table_name)
+
+    la where_tokens: liste<tekst> = []
+    mens i < lengde(tokens) {
+        hvis _vm_sql_upper(tokens[i]) == "WHERE" {
+            i = i + 1
+            mens i < lengde(tokens) {
+                legg_til(where_tokens, tokens[i])
+                i = i + 1
+            }
+        }
+        i = i + 1
+    }
+
+    la rows = table["rows"]
+    la kept: liste<ordbok_tekst> = []
+    la count: heltall = 0
+    la r: heltall = 0
+    mens r < lengde(rows) {
+        la row = rows[r]
+        hvis _vm_db_where(row, where_tokens) {
+            count = count + 1
+        } ellers {
+            legg_til(kept, row)
+        }
+        r = r + 1
+    }
+    table["rows"] = kept
+    returner count
+}
+
+funksjon _vm_db_drop_table(db: ordbok_tekst, sql: tekst) -> heltall {
+    la tokens = _vm_sql_tokeniser(sql)
+    hvis lengde(tokens) < 3 {
+        returner 0
+    }
+    la i: heltall = 2
+    hvis _vm_sql_upper(tokens[2]) == "IF" {
+        hvis lengde(tokens) >= 5 og _vm_sql_upper(tokens[3]) == "NOT" og _vm_sql_upper(tokens[4]) == "EXISTS" {
+            i = 5
+        }
+    }
+    hvis i >= lengde(tokens) {
+        returner 0
+    }
+    la table_name = _vm_db_col_from_token(tokens[i])
+    hvis finnes_nøkkel(db["_tables"], table_name) {
+        fjern_nokkel(db["_tables"], table_name)
+    }
+    returner 0
+}
+
+funksjon _vm_db_select_rows_with_meta(db: ordbok_tekst, parsed: ordbok_tekst) -> liste<ordbok_tekst> {
+    la table = _vm_db_tbl(db, parsed["table"])
+    la rows = _vm_db_collect_select_rows(db, table, parsed["where"])
+    rows = _vm_db_sort_rows(rows, parsed["order_col"], parsed["order_asc"])
+    la offset_n = parsed["offset"]
+    hvis offset_n > 0 {
+        hvis offset_n < lengde(rows) {
+            rows = builtin.slice(rows, offset_n, lengde(rows))
+        } ellers {
+            rows = []
+        }
+    }
+    hvis parsed["limit"] >= 0 og parsed["limit"] < lengde(rows) {
+        rows = builtin.slice(rows, 0, parsed["limit"])
+    }
+    returner rows
+}
+
+funksjon _vm_db_select_count(db: ordbok_tekst, sql: tekst) -> heltall {
+    la parsed = _vm_db_parse_select(sql)
+    hvis lengde(nøkler(parsed)) == 0 {
+        returner 0
+    }
+    hvis _vm_db_select_mode(parsed) != "agg" {
+        la rows = _vm_db_select_rows_with_meta(db, parsed)
+        returner lengde(rows)
+    }
+
+    la rows = _vm_db_select_rows_with_meta(db, parsed)
+    la agg = _vm_db_parse_aggregate(parsed["select"])
+    hvis lengde(agg) == 0 {
+        returner lengde(rows)
+    }
+
+    la fn = agg["fn"]
+    la arg = agg["arg"]
+    la distinct = agg["distinct"]
+
+    hvis fn == "COUNT" {
+        hvis _vm_sql_upper(arg) == "*" {
+            returner lengde(rows)
+        }
+        hvis distinct {
+            la seen: liste<tekst> = []
+            la c: heltall = 0
+            mens c < lengde(rows) {
+                la v = _vm_db_row_val(rows[c], arg)
+                hvis ikke _vm_db_contains_text(seen, v) {
+                    legg_til(seen, v)
+                }
+                c = c + 1
+            }
+            returner lengde(seen)
+        }
+        la c = 0
+        mens c < lengde(rows) {
+            la v = _vm_db_row_val(rows[c], arg)
+            hvis v == "" {
+                // tel same as SQL COUNT på kolonne med null verdi
+            }
+            c = c + 1
+        }
+        returner lengde(rows)
+    }
+
+    hvis fn == "SUM" eller fn == "AVG" eller fn == "MIN" eller fn == "MAX" {
+        la total: heiltall = 0
+        la count: heltall = 0
+        hvis fn == "MIN" eller fn == "MAX" {
+            la first_num: boolsk = sann
+            la best: heltall = 0
+            la c: heltall = 0
+            mens c < lengde(rows) {
+                la raw = _vm_db_row_val(rows[c], arg)
+                hvis _vm_db_is_number(raw) {
+                    la v = builtin.heltall_fra_tekst(raw)
+                    hvis first_num {
+                        best = v
+                        first_num = usann
+                    } ellers hvis fn == "MIN" og v < best {
+                        best = v
+                    } ellers hvis fn == "MAX" og v > best {
+                        best = v
+                    }
+                }
+                c = c + 1
+            }
+            hvis first_num {
+                returner 0
+            }
+            returner best
+        }
+
+        la c: heltall = 0
+        mens c < lengde(rows) {
+            la raw = _vm_db_row_val(rows[c], arg)
+            hvis _vm_db_is_number(raw) {
+                total = total + builtin.heltall_fra_tekst(raw)
+                count = count + 1
+            }
+            c = c + 1
+        }
+        hvis fn == "SUM" {
+            returner total
+        }
+        hvis count == 0 {
+            returner 0
+        }
+        hvis fn == "AVG" {
+            returner total / count
+        }
+    }
+
+    returner 0
+}
+
+funksjon _vm_db_select_text(db: ordbok_tekst, sql: tekst) -> tekst {
+    la parsed = _vm_db_parse_select(sql)
+    hvis lengde(nøkler(parsed)) == 0 {
+        returner ""
+    }
+    hvis _vm_db_select_mode(parsed) == "agg" {
+        returner tekst_fra_heltall(_vm_db_select_count(db, sql))
+    }
+
+    la rows = _vm_db_select_rows_with_meta(db, parsed)
+    la select_tokens = parsed["select"]
+    la all_cols = lengde(select_tokens) == 1 og _vm_db_col_from_token(select_tokens[0]) == "*"
+
+    la er_distinct = parsed["distinct"] == sann eller parsed["distinct"] == "DISTINCT"
+    hvis lengde(select_tokens) == 1 og ikke all_cols og er_distinct != sann {
+        hvis lengde(rows) == 0 {
+            returner ""
+        }
+        la col = _vm_db_col_from_token(select_tokens[0])
+        returner _vm_db_row_val(rows[0], col)
+    }
+
+    la out: liste<ordbok_tekst> = []
+    la seen: liste<tekst> = []
+    la r: heltall = 0
+    mens r < lengde(rows) {
+        la row = rows[r]
+        la item: ordbok_tekst = {}
+        hvis all_cols {
+            la schema = db["_tables"][parsed["table"]]["schema"]
+            la c: heltall = 0
+            mens c < lengde(schema) {
+                la kn = schema[c]["namn"]
+                item[kn] = _vm_db_row_val(row, kn)
+                c = c + 1
+            }
+        } ellers {
+            la c: heltall = 0
+            mens c < lengde(select_tokens) {
+                la kn = _vm_db_col_from_token(select_tokens[c])
+                item[kn] = _vm_db_row_val(row, kn)
+                c = c + 1
+            }
+        }
+
+        hvis parsed["distinct"] {
+            la marker = json_stringify(item)
+            hvis ikkje _vm_db_contains_text(seen, marker) {
+                legg_til(seen, marker)
+                legg_til(out, item)
+            }
+        } ellers {
+            legg_til(out, item)
+        }
+        r = r + 1
+    }
+    returner json_stringify(out)
+}
+
+funksjon _vm_db_exec(db: ordbok_tekst, sql: tekst) -> heltall {
+    la s = _vm_sql_trim_semi(sql)
+    hvis s == "" { returner 0 }
+    la upper = _vm_sql_upper(s)
+    hvis builtin.starts_with(upper, "CREATE TABLE ") {
+        returner _vm_db_create_table(db, s)
+    }
+    hvis builtin.starts_with(upper, "INSERT INTO ") {
+        returner _vm_db_insert(db, s)
+    }
+    hvis builtin.starts_with(upper, "UPDATE ") {
+        returner _vm_db_update(db, s)
+    }
+    hvis builtin.starts_with(upper, "DELETE FROM ") {
+        returner _vm_db_delete(db, s)
+    }
+    hvis builtin.starts_with(upper, "DROP TABLE ") {
+        returner _vm_db_drop_table(db, s)
+    }
+    returner 0
+}
+
+funksjon _vm_db_migrate(db: ordbok_tekst, skript: tekst) -> heltall {
+    la stmts = builtin.split(skript, ";")
+    la count: heltall = 0
+    la snapshot = _vm_db_clone(db)
+    la i: heltall = 0
+    mens i < lengde(stmts) {
+        la stmt = builtin.trim(stmts[i])
+        hvis stmt != "" {
+            la upper = _vm_sql_upper(stmt)
+            la res: heiltall = 0
+            hvis builtin.starts_with(upper, "INSERT INTO ") {
+                res = _vm_db_insert_core(db, stmt, sann)
+            } ellers {
+                res = _vm_db_exec(db, stmt)
+            }
+            hvis res < 0 {
+                returner 0
+            }
+            hvis builtin.starts_with(upper, "INSERT INTO ") og res > 0 {
+                count = count + 1
+            }
+        }
+        i = i + 1
+    }
+    returner count
 }
 
 // ─── Intern hjelpefunksjon for ordboksoperasjonar ────────────────────────────
@@ -557,6 +1704,15 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     }
     hvis namn == "builtin.køyr_funksjon" {
         returner køyr_funksjon(args[0], args[1], args[2], args[3])
+    }
+    hvis namn == "builtin.vm_sett_kontekst" {
+        returner vm_sett_kontekst(args[0])
+    }
+    hvis namn == "builtin.køyr_med_kontekst" {
+        returner køyr_med_kontekst(args[0], args[1])
+    }
+    hvis namn == "builtin.køyr_ncb" {
+        returner køyr_ncb(args[0])
     }
 
     // Selfhost-web metadata + runtime helpers
@@ -962,6 +2118,42 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
         returner miljo_finnes(args[0])
     }
 
+    // Socket-builtins
+    hvis namn == "socket_new" eller namn == "builtin.socket_new" {
+        returner builtin.socket_new(args[0], args[1])
+    }
+    hvis namn == "socket_connect" eller namn == "builtin.socket_connect" {
+        returner builtin.socket_connect(args[0], args[1], args[2])
+    }
+    hvis namn == "socket_bind" eller namn == "builtin.socket_bind" {
+        returner builtin.socket_bind(args[0], args[1], args[2])
+    }
+    hvis namn == "socket_listen" eller namn == "builtin.socket_listen" {
+        returner builtin.socket_listen(args[0], args[1])
+    }
+    hvis namn == "socket_accept" eller namn == "builtin.socket_accept" {
+        returner builtin.socket_accept(args[0])
+    }
+    hvis namn == "socket_send" eller namn == "builtin.socket_send" {
+        returner builtin.socket_send(args[0], args[1])
+    }
+    hvis namn == "socket_send_bytes" eller namn == "builtin.socket_send_bytes" {
+        returner builtin.socket_send_bytes(args[0], args[1])
+    }
+    hvis namn == "socket_recv" eller namn == "builtin.socket_recv" {
+        returner builtin.socket_recv(args[0], args[1])
+    }
+    hvis namn == "socket_recv_bytes" eller namn == "builtin.socket_recv_bytes" {
+        returner builtin.socket_recv_bytes(args[0], args[1])
+    }
+    hvis namn == "socket_close" eller namn == "builtin.socket_close" {
+        builtin.socket_close(args[0])
+        returner 0
+    }
+    hvis namn == "socket_settimeout" eller namn == "builtin.socket_settimeout" {
+        returner builtin.socket_settimeout(args[0], args[1])
+    }
+
     // builtin.feil
     hvis namn == "builtin.feil" {
         kast tekst(args[0])
@@ -1043,6 +2235,27 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     }
     hvis namn == "builtin.index_of" eller namn == "builtin.tekst_indeks" {
         returner builtin.index_of(args[0], args[1])
+    }
+    hvis namn == "builtin.semantic_analyser" {
+        returner semantic_analyser(args[0])
+    }
+    hvis namn == "builtin.semantic_analyser_rent" {
+        returner semantic_analyser_rent(args[0])
+    }
+    hvis namn == "builtin.semantic_ok" {
+        returner semantic_ok(args[0])
+    }
+    hvis namn == "builtin.wasm_selftest" {
+        returner wasm_selftest()
+    }
+    hvis namn == "builtin.semantic_rapport" {
+        returner semantic_rapport(args[0])
+    }
+    hvis namn == "builtin.semantic_validate_program" {
+        returner semantic_validate_program(args[0])
+    }
+    hvis namn == "builtin.semantic_has_errors" {
+        returner semantic_has_errors(args[0])
     }
     hvis namn == "builtin.char_code" {
         returner builtin.char_code(args[0])
@@ -1325,50 +2538,147 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>) -> tekst {
     }
 
     // db aliases (skal vere støtta av runtime, men krev ekspandert host-bindingar i sjølvhost)
+    hvis kortnavn == "db.create" eller kortnavn == "builtin.db.create" eller kortnavn == "db_create" eller kortnavn == "builtin.db_create" {
+        hvis fil_finnes(args[0]) {
+            la out = {}
+            out["feilet"] = sann
+            out["melding"] = "Databasefil finnes allerede: " + args[0]
+            returner out
+        }
+        prøv {
+            la db = _vm_db_ny()
+            db["_path"] = args[0]
+            _vm_db_save(db)
+            la out = {}
+            out["feilet"] = usann
+            out["verdi"] = "Database opprettet: " + args[0]
+            returner out
+        } fang (e) {
+            la out = {}
+            out["feilet"] = sann
+            out["melding"] = "Kunne ikke opprette database: " + e.melding
+            returner out
+        }
+    }
     hvis kortnavn == "db.open" eller kortnavn == "builtin.db.open" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.open"
+        la db = _vm_db_load(args[0])
+        la handle = _vm_ny_id("db")
+        db["_path"] = args[0]
+        db["_pool"] = ""
+        _vm_db_set(handle, db)
+        returner handle
     }
     hvis kortnavn == "db.close" eller kortnavn == "builtin.db.close" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.close"
+        la db = _vm_db_get(args[0])
+        _vm_db_save(db)
+        hvis db["_pool"] != "" og finnes_nøkkel(vm_pool_store, db["_pool"]) {
+            la pool = vm_pool_store[db["_pool"]]
+            legg_til(pool["idle"], args[0])
+        } ellers {
+            fjern_nokkel(vm_db_store, args[0])
+        }
+        returner sann
     }
     hvis kortnavn == "db.execute" eller kortnavn == "builtin.db.execute" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.execute"
+        la db = _vm_db_get(args[0])
+        returner _vm_db_exec(db, args[1])
     }
     hvis kortnavn == "db.query_text" eller kortnavn == "builtin.db.query_text" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.query_text"
+        la db = _vm_db_get(args[0])
+        returner _vm_db_select_text(db, args[1])
     }
     hvis kortnavn == "db.query_int" eller kortnavn == "builtin.db.query_int" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.query_int"
+        la db = _vm_db_get(args[0])
+        returner _vm_db_select_count(db, args[1])
     }
     hvis kortnavn == "db.migrate" eller kortnavn == "builtin.db.migrate" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.migrate"
+        la db = _vm_db_get(args[0])
+        returner _vm_db_migrate(db, args[1])
     }
     hvis kortnavn == "db.transaction" eller kortnavn == "builtin.db.transaction" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.transaction"
+        la db = _vm_db_get(args[0])
+        la snap = _vm_db_clone(db)
+        la res = _vm_db_migrate(db, args[1])
+        hvis res > 0 {
+            _vm_db_save(db)
+            returner 1
+        }
+        vm_db_store[args[0]] = snap
+        returner 0
     }
     hvis kortnavn == "db.begin" eller kortnavn == "builtin.db.begin" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.begin"
+        la db = _vm_db_get(args[0])
+        hvis db["_in_tx"] { returner usann }
+        db["_snapshot"] = _vm_db_clone(db)
+        db["_in_tx"] = sann
+        returner sann
     }
     hvis kortnavn == "db.commit" eller kortnavn == "builtin.db.commit" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.commit"
+        la db = _vm_db_get(args[0])
+        hvis ikkje db["_in_tx"] { returner usann }
+        db["_snapshot"] = {}
+        db["_in_tx"] = usann
+        _vm_db_save(db)
+        returner sann
     }
     hvis kortnavn == "db.rollback" eller kortnavn == "builtin.db.rollback" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.rollback"
+        la db = _vm_db_get(args[0])
+        hvis ikkje db["_in_tx"] { returner usann }
+        vm_db_store[args[0]] = db["_snapshot"]
+        vm_db_store[args[0]]["_path"] = db["_path"]
+        vm_db_store[args[0]]["_in_tx"] = usann
+        returner sann
     }
     hvis kortnavn == "db.ping" eller kortnavn == "builtin.db.ping" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.ping"
+        hvis finnes_nøkkel(vm_db_store, args[0]) { returner sann }
+        returner usann
     }
     hvis kortnavn == "db.pool" eller kortnavn == "builtin.db.pool" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.pool"
+        la pool = {}
+        pool["path"] = args[0]
+        pool["max"] = args[1]
+        pool["idle"] = []
+        la handle = _vm_ny_id("pool")
+        la conn = _vm_ny_id("db")
+        la db = _vm_db_load(args[0])
+        db["_path"] = args[0]
+        db["_pool"] = handle
+        _vm_db_set(conn, db)
+        legg_til(pool["idle"], conn)
+        vm_pool_store[handle] = pool
+        returner handle
     }
     hvis kortnavn == "db.pool_acquire" eller kortnavn == "builtin.db.pool_acquire" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.pool_acquire"
+        la pool = _vm_pool_get(args[0])
+        hvis lengde(pool["idle"]) > 0 {
+            la conn = pool["idle"][lengde(pool["idle"]) - 1]
+            fjern_siste(pool["idle"])
+            returner conn
+        }
+        la conn = _vm_ny_id("db")
+        la db = _vm_db_load(pool["path"])
+        db["_path"] = pool["path"]
+        db["_pool"] = args[0]
+        _vm_db_set(conn, db)
+        returner conn
     }
     hvis kortnavn == "db.pool_size" eller kortnavn == "builtin.db.pool_size" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.pool_size"
+        la pool = _vm_pool_get(args[0])
+        returner lengde(pool["idle"])
     }
     hvis kortnavn == "db.pool_close" eller kortnavn == "builtin.db.pool_close" {
-        kast "DB-runtime er ikkje implementert i selfhost-vm enno: db.pool_close"
+        la pool = _vm_pool_get(args[0])
+        la i: heltall = 0
+        mens i < lengde(pool["idle"]) {
+            la conn = pool["idle"][i]
+            hvis finnes_nøkkel(vm_db_store, conn) {
+                _vm_db_save(vm_db_store[conn])
+                fjern_nokkel(vm_db_store, conn)
+            }
+            i = i + 1
+        }
+        fjern_nokkel(vm_pool_store, args[0])
+        returner sann
     }
 
     // Struktur-konstruktørar: stor forbokstav → tom ordbok (same som nc_vm.c)
@@ -1757,6 +3067,9 @@ funksjon køyr_funksjon(
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
             obj[indeks] = verdi
+            // Compiler expects assignment to leave the mutated object on the stack
+            // so statement-form assignments can clean it up with POP.
+            stack_push(ramme, obj)
             ip = ip + 1
             fortsett
         }

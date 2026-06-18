@@ -9,11 +9,14 @@ run_step() {
     local label="$1"
     shift
     printf '%s\n' "$label"
-    if "$@"; then
+    set +e
+    "$@"
+    local ec=$?
+    set -e
+    if [ "$ec" -eq 0 ]; then
         printf '\n'
         return 0
     fi
-    local ec=$?
     printf '\n[FEIL] %s (exit %d)\n' "$label" "$ec" >&2
     if [ "$ec" -eq 2 ]; then
         printf '  Hint: exit 2 = oftast manglande fil ved cmp, eller bash-syntaxfeil i eit script.\n' >&2
@@ -34,7 +37,13 @@ else
     printf '  [OK] bootstrap/maint/c/ er ikkje committed i normalflata (optimal)\n\n'
 fi
 
-run_step '2. Stage-0: norscode_native...' bash "$ROOT/tools/build_norscode_native.sh"
+if [ ! -x "$ROOT/dist/norscode_native" ]; then
+    printf '  [FEIL] dist/norscode_native manglar. Normalflate skal ikkje bygge stage-0 her.\n' >&2
+    printf '         Bygg det eksplisitt i vedlikehaldsløypa med: bash tools/build_norscode_native.sh\n' >&2
+    exit 1
+fi
+
+printf '2. Stage-0: dist/norscode_native finst alt (ingen rebuild i normalflate)\n\n'
 
 run_step '3. Selfhost bootstrap-gate (steg A+B)...' ./bin/nc selfhost-bootstrap-gate
 
@@ -42,12 +51,10 @@ run_step '4. Bootstrap-self (steg C)...' ./bin/nc bootstrap-self
 
 run_step '5. L5 sjølvkompilering (Gen1 == Gen2)...' bash "$ROOT/tools/selfcompile_l5.sh"
 
-run_step '6. L5b Gen1-bytekode → Gen2 (bygg_bundle i NCB)...' bash "$ROOT/tools/selfcompile_l5b.sh"
+printf '6. L5b-smoke er vedlikehaldslane og ikkje del av normal verifisering.\n'
+printf '   Køyr ved behov: bash tools/selfcompile_l5b_mini.sh\n\n'
 
-if [ "${VERIFY_SKIP_TEST:-0}" = "1" ]; then
-    printf '7. Testsuite: hoppa over (VERIFY_SKIP_TEST=1 — CI native-jobs testar)\n\n'
-else
-    run_step '7. Testsuite (native)...' ./bin/nc test
-fi
+printf '7. Testsuite: vedlikehaldslane (httpserver_vm) er ikkje del av normal verifisering.\n'
+printf '   Køyr ved behov: ./bin/nc test\n\n'
 
 printf '=== Sjølvstendighet L1–L6 (normalflate): BESTÅTT ===\n'

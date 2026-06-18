@@ -1,0 +1,656 @@
+## Norscode Tolk — Evaluator (Kjøretid)
+## Fil: tolk/evaluator.nors
+## Traverser AST og kjører programmet
+
+importer tolk.parser
+
+## ─────────────────────────────────────────
+## KJØRETIDS-VERDIER
+## ─────────────────────────────────────────
+
+type Verdi =
+    | Heltall      { v: int }
+    | Desimal      { v: desimal }
+    | Tekst        { v: tekst }
+    | Boolsk       { v: bool }
+    | Ingen        {}
+    | Liste        { elementer: liste[Verdi] }
+    | Ordbok       { par: ordbok[tekst, Verdi] }
+    | Funksjon     { parametere: liste[Parameter], kropp: Blokk, omfang: Omfang }
+    | InnebygdFunksjon { navn: tekst, fn: funksjon }
+    | Struktur     { type_navn: tekst, felt: ordbok[tekst, Verdi] }
+    | Retur        { verdi: Verdi }    ## Intern: bærer return-verdi
+    | Kast         { verdi: Verdi }    ## Intern: bærer unntak
+    | Stopp        {}                  ## Intern: break
+    | Fortsett     {}                  ## Intern: continue
+
+## ─────────────────────────────────────────
+## OMFANG (Scope / Environment)
+## ─────────────────────────────────────────
+
+struktur Omfang:
+    variabler : ordbok[tekst, Verdi]
+    forelder  : Omfang | ingen
+
+funksjon omfang_opprett(forelder: Omfang | ingen = ingen) -> Omfang:
+    returner Omfang(variabler={}, forelder=forelder)
+
+funksjon omfang_les(omfang: Omfang, navn: tekst) -> Verdi:
+    hvis navn i omfang.variabler:
+        returner omfang.variabler[navn]
+    hvis omfang.forelder != ingen:
+        returner omfang_les(omfang.forelder, navn)
+    kast KjøretidsFeil("Udefinert variabel: '" + navn + "'")
+
+funksjon omfang_sett(omfang: Omfang, navn: tekst, verdi: Verdi):
+    omfang.variabler[navn] = verdi
+
+funksjon omfang_oppdater(omfang: Omfang, navn: tekst, verdi: Verdi):
+    ## Oppdater eksisterende variabel (søk oppover i omfangschain)
+    hvis navn i omfang.variabler:
+        omfang.variabler[navn] = verdi
+        returner
+    hvis omfang.forelder != ingen:
+        omfang_oppdater(omfang.forelder, navn, verdi)
+        returner
+    kast KjøretidsFeil("Kan ikke tilordne udefinert variabel: '" + navn + "'")
+
+## ─────────────────────────────────────────
+## KJØRETIDS-TILSTAND
+## ─────────────────────────────────────────
+
+struktur KjøringsTilstand:
+    globalt_omfang: Omfang
+    anrop_dybde   : int = 0
+    maks_dybde    : int = 500   ## Hindrer stack overflow
+
+la _aktive_importer: liste[tekst] = []
+
+## ─────────────────────────────────────────
+## kjør - Hovedfunksjon
+## ─────────────────────────────────────────
+
+funksjon kjør(program: Program, stdlib: Omfang | ingen = ingen, målomfang: Omfang | ingen = ingen) -> Verdi:
+    la globalt = hvis målomfang != ingen da målomfang ellers omfang_opprett()
+
+    ## Last inn standardbibliotek bare når vi lager et nytt topp-omfang
+    hvis målomfang == ingen:
+        la bibliotek = hvis stdlib != ingen da stdlib ellers _stdlib()
+        hvis bibliotek != ingen:
+            for navn, verdi i bibliotek.variabler:
+                omfang_sett(globalt, navn, verdi)
+
+    la tilstand = KjøringsTilstand(globalt_omfang=globalt)
+
+    la resultat = kjør_blokk(Blokk(setninger=program.setninger), globalt, tilstand)
+
+    velg resultat:
+        Retur(v) : returner v
+        Kast(v)  : kast KjøretidsFeil("Ubehandlet unntak: " + verdi_til_tekst(v))
+        annet    : returner resultat
+
+## ─────────────────────────────────────────
+## SETNINGS-KJØRING
+## ─────────────────────────────────────────
+
+funksjon kjør_blokk(blokk: Blokk, omfang: Omfang, t: KjøringsTilstand) -> Verdi:
+    la siste = Ingen()
+
+    for setning i blokk.setninger:
+        siste = kjør_setning(setning, omfang, t)
+
+        ## Propagér kontrollflyt-signaler
+        velg siste:
+            Retur(_) : returner siste
+            Kast(_)  : returner siste
+            Stopp()  : returner siste
+            Fortsett(): returner siste
+            annet    : fortsett
+
+    returner siste
+
+funksjon kjør_setning(setning: Setning, omfang: Omfang, t: KjøringsTilstand) -> Verdi:
+    velg setning:
+        Uttrykkssetning(uttrykk):
+            returner evaluer(uttrykk, omfang, t)
+
+        LaDeklarasjon(navn, _, verdi_uttrykk):
+            la verdi = evaluer(verdi_uttrykk, omfang, t)
+            omfang_sett(omfang, navn, verdi)
+            returner Ingen()
+
+        KonstantDekl(navn, _, verdi_uttrykk):
+            la verdi = evaluer(verdi_uttrykk, omfang, t)
+            omfang_sett(omfang, navn, verdi)
+            returner Ingen()
+
+        Tilordning(mål, operator, verdi_uttrykk):
+            la verdi = evaluer(verdi_uttrykk, omfang, t)
+            _kjør_tilordning(mål, operator, verdi, omfang, t)
+            returner Ingen()
+
+        Retursetning(verdi_uttrykk):
+            hvis verdi_uttrykk == ingen:
+                returner Retur(Ingen())
+            la verdi = evaluer(verdi_uttrykk, omfang, t)
+            returner Retur(verdi)
+
+        HvisSetning(betingelse, da, eller_hvis, ellers):
+            returner _kjør_hvis(betingelse, da, eller_hvis, ellers, omfang, t)
+
+        VelgSetning(uttrykk, grener, annet):
+            returner _kjør_velg(uttrykk, grener, annet, omfang, t)
+
+        ForSløyfe(variabel, iterable, kropp):
+            returner _kjør_for(variabel, iterable, kropp, omfang, t)
+
+        MensSløyfe(betingelse, kropp):
+            returner _kjør_mens(betingelse, kropp, omfang, t)
+
+        GjentaSløyfe(antall, kropp):
+            returner _kjør_gjenta(antall, kropp, omfang, t)
+
+        StoppSetning():
+            returner Stopp()
+
+        FortsettSetning():
+            returner Fortsett()
+
+        KastSetning(uttrykk):
+            la verdi = evaluer(uttrykk, omfang, t)
+            returner Kast(verdi)
+
+        PrøvSetning(kropp, fang):
+            returner _kjør_prøv(kropp, fang, omfang, t)
+
+        FunksjonsDekl(navn, parametere, _, kropp, _):
+            la fn = Funksjon(parametere=parametere, kropp=kropp, omfang=omfang)
+            omfang_sett(omfang, navn, fn)
+            returner Ingen()
+
+        StrukturDekl(navn, felt):
+            ## Registrer struktur-konstruktør
+            la konstruktør = InnebygdFunksjon(
+                navn = navn,
+                fn   = funksjon(args):
+                    la struct_felt = {}
+                    for i, f i enumerate(felt):
+                        la verdi = hvis i < lengde(args) da args[i] ellers hvis f.standard != ingen da evaluer(f.standard, omfang, t) ellers Ingen()
+                        struct_felt[f.navn] = verdi
+                    returner Struktur(type_navn=navn, felt=struct_felt)
+            )
+            omfang_sett(omfang, navn, konstruktør)
+            returner Ingen()
+
+        ImportSetning(sti):
+            _håndter_import(sti, omfang, t)
+            returner Ingen()
+
+        annet:
+            kast KjøretidsFeil("Ukjent setning: " + tekst(setning))
+
+## ─────────────────────────────────────────
+## UTTRYKKS-EVALUERING
+## ─────────────────────────────────────────
+
+funksjon evaluer(uttrykk: Uttrykk, omfang: Omfang, t: KjøringsTilstand) -> Verdi:
+    velg uttrykk:
+        HeltallLiteral(v)    : returner Heltall(v)
+        DesimalLiteral(v)    : returner Desimal(v)
+        TekstLiteral(v)      : returner Tekst(v)
+        BoolskLiteral(v)     : returner Boolsk(v)
+        IngenLiteral()       : returner Ingen()
+
+        Identifikator(navn):
+            returner omfang_les(omfang, navn)
+
+        BinærOperasjon(venstre, op, høyre):
+            returner _evaluer_binær(venstre, op, høyre, omfang, t)
+
+        UnærOperasjon(op, operand):
+            returner _evaluer_unær(op, operand, omfang, t)
+
+        Funksjonskall(fn_uttrykk, argumenter):
+            returner _evaluer_kall(fn_uttrykk, argumenter, omfang, t)
+
+        Indeksering(objekt, indeks):
+            la obj = evaluer(objekt, omfang, t)
+            la idx = evaluer(indeks, omfang, t)
+            returner _evaluer_indeksering(obj, idx)
+
+        Feltaksess(objekt, felt):
+            la obj = evaluer(objekt, omfang, t)
+            returner _evaluer_feltaksess(obj, felt)
+
+        ListeLiteral(elementer):
+            la liste_ut = []
+            for el i elementer:
+                liste_ut.legg_til(evaluer(el, omfang, t))
+            returner Liste(liste_ut)
+
+        OrdbokLiteral(nøkkel_verdi):
+            la ord = {}
+            for (nøkkel, verdi) i nøkkel_verdi:
+                la k = verdi_til_tekst(evaluer(nøkkel, omfang, t))
+                la v = evaluer(verdi, omfang, t)
+                ord[k] = v
+            returner Ordbok(ord)
+
+        BetingetUttrykk(betingelse, da_verdi, ellers_verdi):
+            la b = evaluer(betingelse, omfang, t)
+            hvis er_sann(b):
+                returner evaluer(da_verdi, omfang, t)
+            returner evaluer(ellers_verdi, omfang, t)
+
+        annet:
+            kast KjøretidsFeil("Ukjent uttrykk: " + tekst(uttrykk))
+
+## ─────────────────────────────────────────
+## OPERATORER
+## ─────────────────────────────────────────
+
+privat funksjon _evaluer_binær(v_uttr, op, h_uttr, omfang, t) -> Verdi:
+    ## Kortslutning for og/eller
+    hvis op == "og":
+        la venstre = evaluer(v_uttr, omfang, t)
+        hvis ikke er_sann(venstre): returner Boolsk(usann)
+        returner Boolsk(er_sann(evaluer(h_uttr, omfang, t)))
+
+    hvis op == "eller":
+        la venstre = evaluer(v_uttr, omfang, t)
+        hvis er_sann(venstre): returner Boolsk(sann)
+        returner Boolsk(er_sann(evaluer(h_uttr, omfang, t)))
+
+    la v = evaluer(v_uttr, omfang, t)
+    la h = evaluer(h_uttr, omfang, t)
+
+    velg op:
+        "+"  : returner _legg_til(v, h)
+        "-"  : returner _trekk_fra(v, h)
+        "*"  : returner _ganger(v, h)
+        "/"  : returner _del(v, h)
+        "%"  : returner _modulo(v, h)
+        "==" : returner Boolsk(_er_like(v, h))
+        "!=" : returner Boolsk(ikke _er_like(v, h))
+        ">"  : returner Boolsk(_sammenlign(v, h) > 0)
+        "<"  : returner Boolsk(_sammenlign(v, h) < 0)
+        ">=" : returner Boolsk(_sammenlign(v, h) >= 0)
+        "<=" : returner Boolsk(_sammenlign(v, h) <= 0)
+        "i"  : returner Boolsk(_inneholder(h, v))
+        "~"  : returner Boolsk(_tekst_inneholder(v, h))
+        "^"  : returner Boolsk(_tekst_starter_med(v, h))
+        "$"  : returner Boolsk(_tekst_slutter_med(v, h))
+        annet: kast KjøretidsFeil("Ukjent operator: " + op)
+
+privat funksjon _evaluer_unær(op: tekst, operand_uttr: Uttrykk, omfang, t) -> Verdi:
+    la v = evaluer(operand_uttr, omfang, t)
+    velg op:
+        "-":
+            velg v:
+                Heltall(n) : returner Heltall(-n)
+                Desimal(n) : returner Desimal(-n)
+                annet      : kast KjøretidsFeil("Kan ikke negere: " + tekst(v))
+        "ikke":
+            returner Boolsk(ikke er_sann(v))
+        annet:
+            kast KjøretidsFeil("Ukjent unær operator: " + op)
+
+privat funksjon _evaluer_kall(fn_uttr, arg_uttrykk, omfang, t) -> Verdi:
+    la fn = evaluer(fn_uttr, omfang, t)
+    la args = []
+    for arg i arg_uttrykk:
+        args.legg_til(evaluer(arg, omfang, t))
+
+    velg fn:
+        InnebygdFunksjon(_, f):
+            returner f(args)
+
+        Funksjon(parametere, kropp, lukke_omfang):
+            t.anrop_dybde += 1
+            hvis t.anrop_dybde > t.maks_dybde:
+                t.anrop_dybde -= 1
+                kast KjøretidsFeil("Stack overflow — rekursjon for dyp")
+
+            hvis lengde(args) > lengde(parametere):
+                t.anrop_dybde -= 1
+                kast KjøretidsFeil("For mange argumenter i kall til funksjon")
+
+            for i, param i enumerate(parametere):
+                hvis i >= lengde(args) og param.standard == ingen:
+                    t.anrop_dybde -= 1
+                    kast KjøretidsFeil("Manglende påkrevd argument: " + param.navn)
+
+            la kall_omfang = omfang_opprett(forelder=lukke_omfang)
+
+            for i, param i enumerate(parametere):
+                la verdi = hvis i < lengde(args) da args[i] ellers hvis param.standard != ingen da evaluer(param.standard, lukke_omfang, t) ellers Ingen()
+                omfang_sett(kall_omfang, param.navn, verdi)
+
+            la resultat = ingen
+            prøv:
+                resultat = kjør_blokk(kropp, kall_omfang, t)
+            fang e:
+                t.anrop_dybde -= 1
+                kast e
+            t.anrop_dybde -= 1
+
+            velg resultat:
+                Retur(v) : returner v
+                Kast(_)  : returner resultat   ## Propagér
+                annet    : returner resultat
+
+        annet:
+            kast KjøretidsFeil("Kan ikke kalle: " + tekst(fn))
+
+privat funksjon _evaluer_indeksering(obj: Verdi, idx: Verdi) -> Verdi:
+    velg obj:
+        Liste(elementer):
+            velg idx:
+                Heltall(n):
+                    la faktisk = hvis n < 0 da lengde(elementer) + n ellers n
+                    hvis faktisk < 0 eller faktisk >= lengde(elementer):
+                        kast KjøretidsFeil("Indeks utenfor område: " + n)
+                    returner elementer[faktisk]
+                annet: kast KjøretidsFeil("Liste-indeks må være heltall")
+
+        Ordbok(par):
+            la nøkkel = verdi_til_tekst(idx)
+            hvis nøkkel ikke i par:
+                returner Ingen()
+            returner par[nøkkel]
+
+        Tekst(s):
+            velg idx:
+                Heltall(n):
+                    la faktisk = hvis n < 0 da lengde(s) + n ellers n
+                    hvis faktisk < 0 eller faktisk >= lengde(s):
+                        kast KjøretidsFeil("Tekst-indeks utenfor område: " + tekst(n))
+                    returner Tekst(tekst(s[faktisk]))
+                annet: kast KjøretidsFeil("Tekst-indeks må være heltall")
+
+        annet: kast KjøretidsFeil("Kan ikke indeksere: " + tekst(obj))
+
+privat funksjon _evaluer_feltaksess(obj: Verdi, felt: tekst) -> Verdi:
+    velg obj:
+        Struktur(_, felt_map):
+            hvis felt i felt_map:
+                returner felt_map[felt]
+            kast KjøretidsFeil("Felt finnes ikke: " + felt)
+
+        Ordbok(par):
+            hvis felt i par:
+                returner par[felt]
+            returner Ingen()
+
+        annet: kast KjøretidsFeil("Kan ikke aksessere felt på: " + tekst(obj))
+
+## ─────────────────────────────────────────
+## KONTROLLFLYT
+## ─────────────────────────────────────────
+
+privat funksjon _kjør_hvis(betingelse, da, eller_hvis, ellers, omfang, t) -> Verdi:
+    hvis er_sann(evaluer(betingelse, omfang, t)):
+        returner kjør_blokk(da, omfang_opprett(omfang), t)
+
+    for (eb, eb_blokk) i eller_hvis:
+        hvis er_sann(evaluer(eb, omfang, t)):
+            returner kjør_blokk(eb_blokk, omfang_opprett(omfang), t)
+
+    hvis ellers != ingen:
+        returner kjør_blokk(ellers, omfang_opprett(omfang), t)
+
+    returner Ingen()
+
+privat funksjon _kjør_velg(uttrykk, grener, annet_blokk, omfang, t) -> Verdi:
+    la v = evaluer(uttrykk, omfang, t)
+    for gren i grener:
+        for mønster i gren.mønster:
+            la m = evaluer(mønster, omfang, t)
+            hvis _er_like(v, m):
+                returner kjør_blokk(gren.kropp, omfang_opprett(omfang), t)
+    hvis annet_blokk != ingen:
+        returner kjør_blokk(annet_blokk, omfang_opprett(omfang), t)
+    returner Ingen()
+
+privat funksjon _kjør_for(variabel, iterable_uttrykk, kropp, omfang, t) -> Verdi:
+    la iter = evaluer(iterable_uttrykk, omfang, t)
+    la elementer = _til_iterable(iter)
+
+    for el i elementer:
+        la løkke_omfang = omfang_opprett(omfang)
+        omfang_sett(løkke_omfang, variabel, el)
+        la res = kjør_blokk(kropp, løkke_omfang, t)
+        velg res:
+            Stopp()    : stopp
+            Retur(_)   : returner res
+            Kast(_)    : returner res
+            annet      : fortsett
+
+    returner Ingen()
+
+privat funksjon _kjør_mens(betingelse, kropp, omfang, t) -> Verdi:
+    mens er_sann(evaluer(betingelse, omfang, t)):
+        la res = kjør_blokk(kropp, omfang_opprett(omfang), t)
+        velg res:
+            Stopp()    : stopp
+            Retur(_)   : returner res
+            Kast(_)    : returner res
+            annet      : fortsett
+    returner Ingen()
+
+privat funksjon _kjør_gjenta(antall_uttrykk, kropp, omfang, t) -> Verdi:
+    la antall = _til_int(evaluer(antall_uttrykk, omfang, t))
+    hvis antall < 0:
+        kast KjøretidsFeil("gjenta krever et ikke-negativt antall")
+    la i = 0
+    mens i < antall:
+        la res = kjør_blokk(kropp, omfang_opprett(omfang), t)
+        velg res:
+            Stopp()  : stopp
+            Retur(_) : returner res
+            Kast(_)  : returner res
+            annet    : i += 1
+    returner Ingen()
+
+privat funksjon _kjør_prøv(kropp, fang_gren, omfang, t) -> Verdi:
+    la res = kjør_blokk(kropp, omfang_opprett(omfang), t)
+    velg res:
+        Kast(v):
+            hvis fang_gren != ingen:
+                la fang_omfang = omfang_opprett(omfang)
+                hvis fang_gren.variabel != ingen:
+                    omfang_sett(fang_omfang, fang_gren.variabel, v)
+                returner kjør_blokk(fang_gren.kropp, fang_omfang, t)
+            returner res   ## Re-kast
+        annet: returner res
+
+privat funksjon _kjør_tilordning(mål, operator, verdi, omfang, t):
+    velg mål:
+        Identifikator(navn):
+            la ny_verdi = velg operator:
+                "="  : verdi
+                "+=" : _legg_til(omfang_les(omfang, navn), verdi)
+                "-=" : _trekk_fra(omfang_les(omfang, navn), verdi)
+                annet: kast KjøretidsFeil("Ukjent tilordningsoperator: " + operator)
+            omfang_oppdater(omfang, navn, ny_verdi)
+
+        Indeksering(objekt, indeks):
+            la obj = evaluer(objekt, omfang, t)
+            la idx = evaluer(indeks, omfang, t)
+            velg obj:
+                Liste(elementer) :
+                    la i = _til_int(idx)
+                    hvis i < 0 eller i >= lengde(elementer):
+                        kast KjøretidsFeil("Indeks utenfor område ved tilordning: " + tekst(i))
+                    elementer[i] = verdi
+                Ordbok(par)      :
+                    la nøkkel = verdi_til_tekst(idx)
+                    par[nøkkel] = verdi
+                annet: kast KjøretidsFeil("Kan ikke tilordne til: " + tekst(obj))
+
+        Feltaksess(objekt, felt):
+            la obj = evaluer(objekt, omfang, t)
+            velg obj:
+                Struktur(_, felt_map) :
+                    hvis felt ikke i felt_map:
+                        kast KjøretidsFeil("Kan ikke sette ukjent felt på struktur: " + felt)
+                    felt_map[felt] = verdi
+                annet: kast KjøretidsFeil("Kan ikke sette felt på: " + tekst(obj))
+
+        annet: kast KjøretidsFeil("Ugyldig mål for tilordning")
+
+privat funksjon _håndter_import(sti: tekst, omfang: Omfang, t: KjøringsTilstand):
+    hvis sti == "":
+        kast KjøretidsFeil("Import-sti kan ikke være tom")
+
+    la fil_sti = hvis slutter_med(sti, ".nors") da sti ellers erstatt(sti, ".", "/") + ".nors"
+    hvis ikke fil_finnes(fil_sti):
+        kast KjøretidsFeil("Fant ikke importfil: " + fil_sti)
+    hvis fil_sti i _aktive_importer:
+        kast KjøretidsFeil("Sirkulær import oppdaget: " + fil_sti)
+
+    _aktive_importer.legg_til(fil_sti)
+    prøv:
+        la kilde = fil_les_tekst(fil_sti)
+        la tokens = tokeniser(kilde)
+        la program = parse(tokens, fil_sti)
+        kjør(program, ingen, omfang)
+    fang e:
+        _aktive_importer.fjern(fil_sti)
+        kast e
+    _aktive_importer.fjern(fil_sti)
+
+## ─────────────────────────────────────────
+## HJELPE-KONVERTERINGER
+## ─────────────────────────────────────────
+
+funksjon er_sann(v: Verdi) -> bool:
+    velg v:
+        Boolsk(b)    : returner b
+        Heltall(n)   : returner n != 0
+        Desimal(n)   : returner n != 0.0
+        Tekst(s)     : returner lengde(s) > 0
+        Ingen()      : returner usann
+        Liste(el)    : returner lengde(el) > 0
+        Ordbok(par)  : returner lengde(par) > 0
+        annet        : returner sann
+
+funksjon verdi_til_tekst(v: Verdi) -> tekst:
+    velg v:
+        Heltall(n)   : returner tekst(n)
+        Desimal(n)   : returner tekst(n)
+        Tekst(s)     : returner s
+        Boolsk(b)    : returner hvis b da "sann" ellers "usann"
+        Ingen()      : returner "ingen"
+        Liste(el)    : returner "[" + join(kart(el, verdi_til_tekst), ", ") + "]"
+        Ordbok(par)  :
+            la deler = []
+            for k, v i par: deler.legg_til(k + ": " + verdi_til_tekst(v))
+            returner "{" + join(deler, ", ") + "}"
+        Struktur(t, felt):
+            returner t + "(" + join(kart(felt.verdier(), verdi_til_tekst), ", ") + ")"
+        Funksjon(params, _, _): returner "<funksjon(" + lengde(params) + ")>"
+        InnebygdFunksjon(navn, _): returner "<innebygd:" + navn + ">"
+        annet: returner "<" + tekst(v) + ">"
+
+privat funksjon _er_like(a: Verdi, b: Verdi) -> bool:
+    velg (a, b):
+        (Heltall(x), Heltall(y))     : returner x == y
+        (Desimal(x), Desimal(y))     : returner x == y
+        (Heltall(x), Desimal(y))     : returner desimal(x) == y
+        (Desimal(x), Heltall(y))     : returner x == desimal(y)
+        (Tekst(x), Tekst(y))         : returner x == y
+        (Boolsk(x), Boolsk(y))       : returner x == y
+        (Ingen(), Ingen())           : returner sann
+        annet                        : returner usann
+
+privat funksjon _sammenlign(a: Verdi, b: Verdi) -> int:
+    velg (a, b):
+        (Heltall(x), Heltall(y))     : returner x - y
+        (Desimal(x), Desimal(y))     : returner sign(x - y)
+        (Heltall(x), Desimal(y))     : returner sign(desimal(x) - y)
+        (Tekst(x), Tekst(y))         : returner tekst_sammenlign(x, y)
+        annet: kast KjøretidsFeil("Kan ikke sammenligne: " + tekst(a) + " og " + tekst(b))
+
+privat funksjon _legg_til(a: Verdi, b: Verdi) -> Verdi:
+    velg (a, b):
+        (Heltall(x), Heltall(y))  : returner Heltall(x + y)
+        (Desimal(x), Desimal(y))  : returner Desimal(x + y)
+        (Heltall(x), Desimal(y))  : returner Desimal(desimal(x) + y)
+        (Tekst(x), Tekst(y))      : returner Tekst(x + y)
+        (Tekst(x), _)             : returner Tekst(x + verdi_til_tekst(b))
+        (Liste(x), Liste(y))      : returner Liste(x + y)
+        annet: kast KjøretidsFeil("Kan ikke addere: " + tekst(a) + " + " + tekst(b))
+
+privat funksjon _trekk_fra(a: Verdi, b: Verdi) -> Verdi:
+    velg (a, b):
+        (Heltall(x), Heltall(y)) : returner Heltall(x - y)
+        (Desimal(x), Desimal(y)) : returner Desimal(x - y)
+        annet: kast KjøretidsFeil("Kan ikke subtrahere")
+
+privat funksjon _ganger(a: Verdi, b: Verdi) -> Verdi:
+    velg (a, b):
+        (Heltall(x), Heltall(y)) : returner Heltall(x * y)
+        (Desimal(x), Desimal(y)) : returner Desimal(x * y)
+        annet: kast KjøretidsFeil("Kan ikke multiplisere")
+
+privat funksjon _del(a: Verdi, b: Verdi) -> Verdi:
+    velg b:
+        Heltall(0)  : kast KjøretidsFeil("Divisjon med null")
+        Desimal(0.0): kast KjøretidsFeil("Divisjon med null")
+        annet: fortsett
+    velg (a, b):
+        (Heltall(x), Heltall(y)) : returner Heltall(x / y)
+        (Desimal(x), Desimal(y)) : returner Desimal(x / y)
+        annet: kast KjøretidsFeil("Kan ikke dividere")
+
+privat funksjon _modulo(a: Verdi, b: Verdi) -> Verdi:
+    velg (a, b):
+        (Heltall(x), Heltall(y)) : returner Heltall(x % y)
+        annet: kast KjøretidsFeil("Modulo krever heltall")
+
+privat funksjon _inneholder(samling: Verdi, element: Verdi) -> bool:
+    velg samling:
+        Liste(el)   : for e i el: hvis _er_like(e, element): returner sann; returner usann
+        Ordbok(par) : returner verdi_til_tekst(element) i par
+        Tekst(s)    : returner verdi_til_tekst(element) i s
+        annet: kast KjøretidsFeil("Kan ikke sjekke innhold i: " + tekst(samling))
+
+privat funksjon _tekst_inneholder(a: Verdi, b: Verdi) -> bool:
+    returner verdi_til_tekst(b) i verdi_til_tekst(a)
+
+privat funksjon _tekst_starter_med(a: Verdi, b: Verdi) -> bool:
+    returner starter_med(verdi_til_tekst(a), verdi_til_tekst(b))
+
+privat funksjon _tekst_slutter_med(a: Verdi, b: Verdi) -> bool:
+    returner slutter_med(verdi_til_tekst(a), verdi_til_tekst(b))
+
+privat funksjon _til_int(v: Verdi) -> int:
+    velg v:
+        Heltall(n) : returner n
+        Desimal(n) : returner int(n)
+        annet: kast KjøretidsFeil("Forventet heltall, fant: " + verdi_til_tekst(v))
+
+privat funksjon _til_iterable(v: Verdi) -> liste[Verdi]:
+    velg v:
+        Liste(el)   : returner el
+        Tekst(s)    : returner kart(s, funksjon(tegn): Tekst(tegn))
+        Ordbok(par) : returner kart(par.nøkler(), funksjon(k): Tekst(k))
+        Heltall(n)  : returner kart(rekkevidde(n), funksjon(i): Heltall(i))
+        annet: kast KjøretidsFeil("Kan ikke iterere over: " + tekst(v))
+
+funksjon _stdlib() -> Omfang:
+    la o = omfang_opprett()
+    omfang_sett(o, "sann", Boolsk(sann))
+    omfang_sett(o, "usann", Boolsk(usann))
+    omfang_sett(o, "ingen", Ingen())
+    returner o
+
+## ─────────────────────────────────────────
+## FEILTYPE
+## ─────────────────────────────────────────
+
+struktur KjøretidsFeil:
+    melding: tekst
+    funksjon til_tekst() -> tekst:
+        returner "Kjøretidsfeil: " + melding

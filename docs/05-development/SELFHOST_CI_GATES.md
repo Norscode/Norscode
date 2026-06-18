@@ -1,74 +1,73 @@
-# Selfhost CI gates
+# Selfhost CI Gates
 
-Mål:
-Gjøre native- og distribusjonsregresjoner synlige før de når brukere, medan eventuelle historiske vedlikehaldsvegar er tydeleg isolerte.
+Målet er å fange regresjonar før dei når brukarar, utan å blande inn legacy-vegar i normal CI.
 
-## Hvorfor denne gateflaten finnes
+## Kva som gjeld
 
-Norscode bruker i praksis ein normal kontrollflate og ein historisk vedlikehaldsflate:
+- Normal CI skal bruke native CLI og native verifisering
+- Normal release og installasjon skal ikkje krevje C-verktøykjede
+- Vedlikehaldsløypa skal vere eksplisitt og tydeleg markert
+- `bin/bootstrap` og generert C er berre for historisk vedlikehald
 
-1. En native bootstrap-lane som verifiserer den ferdige binaryen.
-2. Ein eksplisitt historisk vedlikehaldslane som berre skal brukast når det faktisk krevst.
+## Normal gate
 
-Berre den første er normal produktflyt.
-Normal CI for release/install skal ikkje krevje C-verktøykjede, og `bin/bootstrap` skal ikkje vere naudsynt i normal release-/install-flyt.
-
-## Standard CI-gates
-
-### 1. Bootstrap-lane
-
-Kjør:
+Køyr:
 
 ```bash
-./bin/nc ci --bootstrap-lane
+./bin/nc selfhost-bootstrap-gate
 ```
 
-Denne veien skal:
+Denne kontrollen skal:
 
-- bruke native bootstrap-binary
+- bruke native bootstrap-binær
 - verifisere selfhost bootstrap-gaten
-- sjekke workflow-policy
-- vere fri for skjult fallback i normalflyten
+- sjå til at policyen held
+- ikkje vere avhengig av skjulte fallback-steg
 
-### 2. Historisk vedlikehaldslane
+## Vedlikehaldsløype
 
-Kjør:
+Køyr:
 
 ```bash
-    bash tools/selfhost_maintenance_verify.sh
+bash tools/selfhost_maintenance_verify.sh
 ```
 
-Denne veien skal:
+Denne løypa skal:
 
-    - vere tydeleg merkt som vedlikehald og historikk
-    - verifisere seed-/generated-C-brua isolert frå normalflyten
-    - aldri framstå som naudsynleg for vanleg release, installasjon eller dagleg utvikling
-    - berre brukast når nokon faktisk jobbar med seed-fornying eller historisk parity
+- vere tydeleg merkt som vedlikehald og historikk
+- verifisere seed-/generert-C-brua isolert frå normalflyten
+- aldri framstå som nødvendig for vanleg release, installasjon eller dagleg utvikling
 
-## Representative smoke tests
+## Rask kontroll
 
-CI bør også ha små, raske tester for:
+CI bør òg ha små, raske testar for:
 
 - installasjon og release
 - `--version`
-- ELF self-compile parity på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
-- samlet driftsvakt via `tools/selfhost_drift_guard.sh`
+- ELF self-compile-paritet på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
+- samla driftsvakt via `tools/selfhost_drift_guard.sh`
 
-## Failure policy
+For full CI-sjekk:
 
-CI skal feile hvis:
+```bash
+./bin/nc ci
+```
 
-- bootstrap-lane feiler
-- historisk maintainer-lane feiler når ein vedlikehaldsworkflow køyrer
-- release-/install-smoke feiler
-- workflow-policy eller parity-sjekker viser avvik
-- ELF self-compile parity viser avvik
+## Feilreglar
+
+CI skal feile dersom:
+
+- normal bootstrap-gate feiler
+- vedlikehaldsløypa feiler når vedlikehald køyrer
+- release-/installasjonstest feiler
+- workflow-policy eller paritetsjekkar viser avvik
+- ELF self-compile-paritet viser avvik
 
 ## Verifikasjon
 
-Praktiske regresjonstester skal dekke:
+Praktiske regresjonstestar skal dekke at:
 
-- bootstrap-lane er native
+- bootstrap-løypa er native
 - vedlikehaldsbrua er eksplisitt og isolert
-- installasjon/release er mekanisk verifiserbar
-- driftsregresjoner blir fanget av en liten, eksplisitt guard
+- installasjon og release er mekanisk verifiserbare
+- driftsregresjonar blir fanga av ei lita, eksplisitt vakt

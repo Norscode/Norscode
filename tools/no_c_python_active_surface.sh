@@ -44,15 +44,10 @@ MAINTENANCE_WORKFLOWS=(
 
 NCB_TO_C_ALLOWLIST=(
   "$ROOT/tools/no_c_python_active_surface.sh"
-  "$ROOT/docs/BYTECODE_VM_PRIMARY_PATH.md"
-  "$ROOT/docs/ARCHIVE_INDEX.md"
-  "$ROOT/docs/FJERN_PYTHON_C_PLAN.md"
-  "$ROOT/docs/NATIVE_CODEGEN_V2_ABI.md"
+  "$ROOT/docs/05-development/NATIVE_CODEGEN_V2_ABI.md"
   "$ROOT/docs/SELFHOST_HANDLINGSPLAN.md"
-  "$ROOT/docs/SELVSTENDIGHET_PLAN.md"
-  "$ROOT/docs/SELFHOST_STATUS.md"
+  "$ROOT/docs/STATUS.md"
   "$ROOT/archive/legacy_c_backend/ncb_to_c.no"
-  "$ROOT/docs/PARSER_SHORT_SYNTAX_PLAN.md"
   "$ROOT/tools/maint/regen_native.sh"
   "$ROOT/tools/maint/verify_l6.sh"
   "$ROOT/tools/verify_selvstendighet.sh"

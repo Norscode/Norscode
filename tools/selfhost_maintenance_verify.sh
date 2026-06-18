@@ -21,16 +21,15 @@ require_absent() {
   fi
 }
 
-require_match "$ROOT_DIR/docs/START_HER.md" "docs/ARCHIVE_INDEX.md"
-require_match "$ROOT_DIR/docs/HANDOFF.md" "ARCHIVE_INDEX.md"
-require_match "$ROOT_DIR/docs/MAINTENANCE_POLICY.md" "docs/ARCHIVE_INDEX.md"
-require_match "$ROOT_DIR/docs/SELFHOST_MIGRATION_AND_DEPRECATIONS.md" "ARCHIVE_INDEX"
-require_match "$ROOT_DIR/docs/SELFHOST_STATUS.md" "docs/ARCHIVE_INDEX.md"
+require_match "$ROOT_DIR/docs/INDEX.md" "docs/_archive/ARCHIVE_INDEX.md"
+require_match "$ROOT_DIR/docs/README.md" "docs/SELFHOST_HANDLINGSPLAN.md"
+require_match "$ROOT_DIR/docs/05-development/SELFHOST_MIGRATION_AND_DEPRECATIONS.md" "ARCHIVE_INDEX"
+require_match "$ROOT_DIR/docs/STATUS.md" "docs/_archive/"
 
-require_match "$ROOT_DIR/docs/SELFHOST_CI_GATES.md" "Normal CI for release/install skal ikke kreve C-verktøykjede."
-require_match "$ROOT_DIR/docs/SELFHOST_RELEASE_CHECKLIST.md" "release/install-flaten krever ikke C-verktøykjede"
-require_match "$ROOT_DIR/docs/SELFHOST_HANDLINGSPLAN.md" "release/install-flaten krever ikke C-verktøykjede"
+require_match "$ROOT_DIR/docs/05-development/SELFHOST_CI_GATES.md" "Normal CI for release/install skal ikkje krevje C-verktøykjede"
+require_match "$ROOT_DIR/docs/05-development/SELFHOST_RELEASE_CHECKLIST.md" "release/install-flaten krever ikke C-verktøykjede"
+require_match "$ROOT_DIR/docs/SELFHOST_HANDLINGSPLAN.md" "C-regen skal berre finnast i eksplisitt vedlikehaldslane"
 
-require_absent "$ROOT_DIR/docs/SELFHOST_STATUS.md" "Neste konkrete patch"
+require_absent "$ROOT_DIR/docs/STATUS.md" "Neste konkrete patch"
 
 printf 'Vedlikeholdsverifikasjon: OK\n'

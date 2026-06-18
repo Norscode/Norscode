@@ -1,75 +1,79 @@
-# Norscode — Gjeldande status
+# Dokumentasjonsstatus
 
-> Sist oppdatert: juni 2026  
-> Kanonisk sannheitsdokument. Erstattar SELFHOST_HANDLINGSPLAN.md, MODENHETSPLAN.md og SELFHOST_STATUS.md der desse er i konflikt.
+Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
----
+## Gjeldande struktur
 
-## Kjernetilstand
+- `docs/05-development/`
+- `docs/_archive/`
+- `docs/assets/`
 
-Norscode er sjølvhosta. Kompilatoren og kjøretida er skrivne i ren Norscode utan C eller Python i normalflata.
+## Aktiv inngang
 
-```
-bash tools/verify_selvstendighet.sh
-→ 120/120 testar bestått
-→ L1–L6 sjølvstendighetsportar: BESTÅTT
-```
+- [docs/INDEX.md](INDEX.md)
 
-| Komponent | Tilstand |
-|---|---|
-| Lexer (`selfhost/lexer/lexer_m1.no`) | ✅ Stabil |
-| Parser (`selfhost/parser.no`) | ✅ Stabil |
-| Semantikk (`selfhost/compiler/semantic.no`) | ✅ Stabil |
-| IR → Bytecode (`selfhost/compiler/ir_to_bytecode.no`) | ✅ Stabil |
-| VM (`selfhost/vm.no`) | ✅ Stabil |
-| CLI (`selfhost/main.no`) | ✅ Stabil |
-| Maintainer-regen (`tools/maint/regen_native.sh`) | ✅ Grøn |
-| Testsuite (native) | ✅ 120/120 |
-| Standardbibliotek (`std/`) | 🟡 Breitt, ikkje fullstendig standardisert |
-| Typesystem (statisk inferens) | ❌ Ikkje implementert |
-| Pakkebehandlar | ❌ Ikkje implementert |
-| LSP / editor-støtte | ❌ Ikkje implementert |
-| CI (GitHub Actions) | 🟡 Lokal grøn; ekstern CI ikkje bekrefta |
+## Vedlikehald
 
----
+- Normal løype: `./bin/nc run`, `./bin/nc check`, `./bin/nc test`
+- Vedlikehald: `./bin/nc maintenance`
+- Legacy: `tools/maint/*` berre for vedlikehald
+- `docs/SELFHOST_HANDLINGSPLAN.md` er aktiv plan for normalflata
+- `./bin/nc maintenance status|lane|seed|seed-status|verify|report|report-json` er statusflate i Norscode
+- `stage0_seed_ok` er hovudindikatoren for stage-0 seed i `maintenance`-rapportane
+- historiske filer skal liggje i `docs/_archive/`
 
-## Kva som er avklart
+## Merknad
 
-**Resolverfeil i maintainer-regen** — Dette var ein open feil per ein tidlegare versjon av SELFHOST_HANDLINGSPLAN.md. Han er løyst. `bash tools/maint/regen_native.sh --rebuild` køyrer grønt og produserer ein verifisert `dist/norscode_native`.
+Gamle status-tal og gamle faser vart skrivne for ein eldre struktur. Dei er no tona ned for å unngå å påstå meir enn det dokumentasjonen faktisk viser.
 
-**Bootstrap og legacy-C** — Bootstrap/C-flata er avvikla frå normalvegen. Ho eksisterer berre som seed-fornyings- og historikklane under `build/maintainer_regen_fixed/`. Ingen aktiv utvikling skjer der.
+## Status for FastAPI-paritet i scaffold (fase 1)
 
-**54 hoppa testar** — `test_web_*.no` og slow-testar krev live HTTP-server eller lang køyretid. Dei er hoppa over i normal CI-køyring, ikkje feila.
+- **Dato:** 2026-06-18
+- **Omfang:** `tools/startproject.sh` og `tools/startapp.sh`
 
----
+### Fullført
 
-## Prioritert veg framover
+- Leggja til responsskjema-validering (`response_shape_validate_or_error`) i scaffolds for testbare API-rykter.
+- Lagt inn ny prosjekt-endepunkt:
+  - `GET /api/v1/response-model`
+- Lagt inn tilsvarande app-endepunkt:
+  - `GET /api/v1/${APP_NAME}/response-model`
+- Ruteopplisting oppdatert i begge malane (alle `startproject`-variantar med/utan auth/admin).
+- Leggje til testdekning for response-model i begge malane:
+  - positivt svar (`200`)
+  - negativt svar (`500`, `ResponseValidationError`)
+- Dokumentasjon i malar:
+  - `startproject` README-liste oppdaterte API-ruter
+  - `startapp` README-liste oppdaterte API-ruter
+- OpenAPI-sjekk i testane oppdatert til å forvente `response-model` i spec.
+- Nytt eksempelsett i payload-filer:
+  - prosjekt: `tests/payloads/api_payload.json`, `tests/payloads/api_nested.json`
+  - app: `apps/<app>/tests/payloads/${APP_NAME}_payload.json`, `apps/<app>/tests/payloads/${APP_NAME}_nested.json`
+- Dependency-injeksjon i app-skal:
+  - Lagt til `GET /api/v1/${APP_NAME}/dependency` i `startapp` med `app_meta`-dependency.
+  - Oppdatert app-ruteopplisting, testdekning og app-README.
+- Feilhåndtering i app-skal:
+  - Lagt til `GET /api/v1/${APP_NAME}/error` i `startapp`.
+  - Demonstrerer standardisert `400` (`response_error`) og `500` (`response_error`), pluss suksess-tilfelle.
+  - Oppdatert route-opplisting, testdekning og app-README.
+  - Lagt til feilmønster for app-rot med:
+    - 404-test for ukjende rute (`GET /api/v1/${APP_NAME}/ikkje-finst`)
+    - 405-test for metodemismatch (`POST /api/v1/${APP_NAME}/query`)
+- Standardisert request/response-kontrakt i begge skal:
+  - Lagt til `POST /api/v1/${APP_NAME}/request-model` i `startapp` med request-validering + response-shape-validering.
+  - Lagt til tilsvarande `POST /api/v1/request-model` i `startproject` med tilsvarande valideringsflyt.
+  - Oppdatert både app- og stack-route-opplisting, testdekning (suksess + valideringsfeil) og README-rutelister.
+- Auth-mønster i app-skal:
+  - Lagt til genererte auth-endepunkt i `startapp` (login/register/logout/profile):
+    - `GET /api/v1/${APP_NAME}/auth/login`
+    - `POST /api/v1/${APP_NAME}/auth/login`
+    - `GET /api/v1/${APP_NAME}/auth/register`
+    - `POST /api/v1/${APP_NAME}/auth/register`
+    - `POST /api/v1/${APP_NAME}/auth/logout`
+    - `GET /api/v1/${APP_NAME}/profile`
+  - Oppdatert app-ruteopplisting og testdekning for autentiseringsflyt (suksess, ugyldig pålogging, utlogging, profil-metadata, token-mangel).
 
-### 1. Web-testar (54 hoppa)
-Startpunkt: legg til ein test-server-wrapper i `tools/nc_test.sh` som startar `norscode_native serve` i bakgrunnen, køyrer web-testane, og stoppar serveren. Ville løfte frå 120/174 til nærare 174/174.
+### Under arbeid / neste steg
 
-### 2. Standardbibliotek (`std/`)
-`std/` er breitt men ikkje standardisert som heilskap:
-- Manglande testdekning for fleire modular
-- Overlapp og duplikat mellom nokre modular
-- Ingen per-modul-dokumentasjon
-
-### 3. CI (GitHub Actions)
-Workflow-filene (`ci.yml`) må oppdaterast til å bruke `dist/norscode_native` og `tools/verify_selvstendighet.sh` som einaste port. Ekstern grøn CI er ikkje bekrefta.
-
-### 4. Typesystem
-Statisk typesjekking og typeinferens. Blokkerer LSP, betre feilmeldingar og fleire optimeringar.
-
-### 5. LSP
-Language Server Protocol for `vscode-norscode/`. Blokkeres av typesystem.
-
----
-
-## Kva ein skal ignorere
-
-Desse dokumenta inneheld utdatert eller motstridande informasjon og bør ikkje brukast som kjelde:
-
-- `docs/SELFHOST_HANDLINGSPLAN.md` — omtalar ein resolverfeil som er løyst
-- `docs/MODENHETSPLAN.md` — delvis utdatert faseinndeling
-- `docs/SELFHOST_STATUS.md` — erstatta av dette dokumentet
-- `RELEASE_v1.0_SELFHOST.md`, `RELEASE_v1.0_SELFHOST_FINAL.md` — historikk, ikkje status
+- Neste steg i FastAPI-paritet:
+  - Oppdatere dokumentasjonen med kvar gjenværande manglande del i FastAPI-liknande standardflow (dependency, middleware, autentiseringsflow med header/session, openapi-schema).

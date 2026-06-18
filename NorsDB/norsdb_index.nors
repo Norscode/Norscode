@@ -1,0 +1,510 @@
+## NorsDB - Indeks-system
+## Fil: norsdb_index.nors
+## Versjon: 1.0
+## Bruker B-tre for effektiv oppslag
+
+importer norsdb_core
+importer norsdb_schema
+
+## ─────────────────────────────────────────
+## OM INDEKSER I NORSDB
+## ─────────────────────────────────────────
+##
+## NorsDB bruker B-tre indekser for rask søk.
+##
+## B-tre egenskaper:
+##   - O(log n) oppslag, innsetting og sletting
+##   - Støtter rekkevidde-søk (>, <, MELLOM)
+##   - Sortert rekkefølge naturlig
+##   - Effektiv for store datasett
+##
+## Indeks-filer lagres som: <databasenavn>.idx
+## Én fil inneholder alle indekser for databasen.
+##
+## Automatiske indekser opprettes for:
+##   - Primærnøkler
+##   - Unike kolonner
+##
+## Manuelle indekser opprettes med index_create()
+
+## ─────────────────────────────────────────
+## STRUKTURER
+## ─────────────────────────────────────────
+
+struktur IndeksNøkkel:
+    verdi  : verdi    ## Kolonneverdien
+    rad_id : int      ## Peker til rad i datafilen
+
+struktur BtreNode:
+    nøkler  : liste[IndeksNøkkel]
+    barn    : liste[BtreNode]
+    er_blad : bool
+    antall  : int
+
+struktur Indeks:
+    tabell  : tekst
+    kolonne : tekst
+    unik    : bool
+    rot     : BtreNode
+    grad    : int = 3   ## B-tre grad (maks 2*grad-1 nøkler per node)
+
+## Alle aktive indekser
+la _indekser: ordbok[tekst, Indeks] = {}
+la _indeks_data: ordbok[tekst, ordbok] = {}
+
+funksjon indeks_snapshot_hent() -> liste[ordbok]:
+    la ut = []
+    for nøkkel, indeks i _indekser:
+        ut.legg_til({
+            "nøkkel" : nøkkel,
+            "tabell" : indeks.tabell,
+            "kolonne": indeks.kolonne,
+            "unik"   : indeks.unik
+        })
+    returner ut
+
+funksjon indeks_snapshot_last(data: liste[ordbok]):
+    for oppføring i data:
+        hvis "tabell" ikke i oppføring eller "kolonne" ikke i oppføring:
+            fortsett
+        la tabell_navn = oppføring["tabell"]
+        la kolonne_navn = oppføring["kolonne"]
+        la unik = hvis "unik" i oppføring da oppføring["unik"] ellers usann
+        la nøkkel = tabell_navn + "." + kolonne_navn
+        hvis nøkkel ikke i _indekser:
+            index_create(tabell_navn, kolonne_navn, unik)
+
+funksjon indeks_snapshot_tøm():
+    fjern _indekser
+    _indekser = {}
+    fjern _indeks_data
+    _indeks_data = {}
+
+## ─────────────────────────────────────────
+## index_create - Opprett indeks
+## ─────────────────────────────────────────
+
+funksjon index_create(
+    tabell_navn  : tekst,
+    kolonne_navn : tekst,
+    unik         : bool = usann
+) -> resultat:
+
+    _krev_åpen()
+
+    hvis tabell_navn ikke i _tabeller:
+        returner feil("Tabell finnes ikke: " + tabell_navn)
+
+    la nøkkel = tabell_navn + "." + kolonne_navn
+
+    hvis nøkkel i _indekser:
+        returner ok("Indeks finnes allerede: " + nøkkel)
+
+    ## Verifiser at kolonne eksisterer
+    la tabell = _tabeller[tabell_navn]
+    la kol = _finn_kolonne(tabell, kolonne_navn)
+    hvis kol == ingen:
+        returner feil("Kolonne finnes ikke: " + kolonne_navn)
+
+    la indeks = Indeks(
+        tabell  = tabell_navn,
+        kolonne = kolonne_navn,
+        unik    = unik,
+        rot     = BtreNode(nøkler=[], barn=[], er_blad=sann, antall=0)
+    )
+
+    la data = {}
+    for rad i _les_alle_rader(tabell_navn):
+        la verdi = rad.hent(kolonne_navn)
+        hvis verdi != ingen:
+            hvis verdi ikke i data:
+                data[verdi] = []
+            data[verdi].legg_til(_rad_id(rad))
+
+    _indekser[nøkkel] = indeks
+    _indeks_data[nøkkel] = data
+    _indeks_skriv_til_disk(indeks)
+
+    returner ok("Indeks opprettet: " + nøkkel)
+
+## ─────────────────────────────────────────
+## index_drop - Fjern indeks
+## ─────────────────────────────────────────
+
+funksjon index_drop(tabell_navn: tekst, kolonne_navn: tekst) -> resultat:
+    _krev_åpen()
+
+    la nøkkel = tabell_navn + "." + kolonne_navn
+
+    hvis nøkkel ikke i _indekser:
+        returner feil("Indeks finnes ikke: " + nøkkel)
+
+    ## Kan ikke fjerne automatisk indeks for primærnøkkel
+    la tabell = _tabeller[tabell_navn]
+    la kol = _finn_kolonne(tabell, kolonne_navn)
+    hvis kol != ingen og kol.er_primær:
+        returner feil("Kan ikke fjerne primærnøkkel-indeks")
+
+    fjern _indekser[nøkkel]
+    hvis nøkkel i _indeks_data:
+        fjern _indeks_data[nøkkel]
+    _indeks_slett_fra_disk(nøkkel)
+
+    returner ok("Indeks fjernet: " + nøkkel)
+
+## ─────────────────────────────────────────
+## index_list - List alle indekser
+## ─────────────────────────────────────────
+
+funksjon index_list(tabell_navn: tekst = "") -> resultat:
+    _krev_åpen()
+
+    la liste_ut = []
+    for nøkkel, indeks i _indekser:
+        hvis tabell_navn == "" eller indeks.tabell == tabell_navn:
+            liste_ut.legg_til({
+                "nøkkel" : nøkkel,
+                "tabell" : indeks.tabell,
+                "kolonne": indeks.kolonne,
+                "unik"   : indeks.unik,
+                "noder"  : 1
+            })
+
+    returner ok(liste_ut)
+
+## ─────────────────────────────────────────
+## B-TRE ALGORITMER (intern implementasjon)
+## ─────────────────────────────────────────
+
+privat funksjon _btre_søk(indeks: Indeks, verdi: verdi) -> liste[int] | ingen:
+    la nøkkel = indeks.tabell + "." + indeks.kolonne
+    hvis nøkkel ikke i _indeks_data:
+        returner ingen
+    hvis verdi i _indeks_data[nøkkel]:
+        returner _indeks_data[nøkkel][verdi]
+    returner ingen
+
+privat funksjon _btre_søk_node(node: BtreNode, verdi: verdi) -> liste[int] | ingen:
+    la i = 0
+
+    ## Finn posisjonen der verdi passer
+    mens i < node.antall og verdi > node.nøkler[i].verdi:
+        i += 1
+
+    ## Eksakt treff
+    hvis i < node.antall og verdi == node.nøkler[i].verdi:
+        ## Samle alle rad_id for denne verdien (støtte for ikke-unike indekser)
+        la rad_ider = [node.nøkler[i].rad_id]
+        ## Sjekk duplikater i neste nøkler
+        la j = i + 1
+        mens j < node.antall og node.nøkler[j].verdi == verdi:
+            rad_ider.legg_til(node.nøkler[j].rad_id)
+            j += 1
+        returner rad_ider
+
+    ## Ikke funnet i blad
+    hvis node.er_blad:
+        returner ingen
+
+    ## Søk i riktig barn
+    returner _btre_søk_node(node.barn[i], verdi)
+
+privat funksjon _btre_sett_inn(indeks: Indeks, verdi: verdi, rad_id: int):
+    la rot = indeks.rot
+
+    ## Hvis roten er full, del den
+    hvis rot.antall == (2 * indeks.grad - 1):
+        la ny_rot = BtreNode(nøkler=[], barn=[rot], er_blad=usann, antall=0)
+        _btre_del_barn(ny_rot, 0, indeks.grad)
+        _btre_sett_inn_ikke_full(ny_rot, verdi, rad_id, indeks.grad)
+        indeks.rot = ny_rot
+    annet:
+        _btre_sett_inn_ikke_full(rot, verdi, rad_id, indeks.grad)
+
+privat funksjon _btre_sett_inn_ikke_full(node: BtreNode, verdi: verdi, rad_id: int, grad: int):
+    la i = node.antall - 1
+
+    hvis node.er_blad:
+        ## Flytt nøkler for å gjøre plass
+        mens i >= 0 og verdi < node.nøkler[i].verdi:
+            node.nøkler[i + 1] = node.nøkler[i]
+            i -= 1
+        node.nøkler[i + 1] = IndeksNøkkel(verdi=verdi, rad_id=rad_id)
+        node.antall += 1
+    annet:
+        ## Finn riktig barn
+        mens i >= 0 og verdi < node.nøkler[i].verdi:
+            i -= 1
+        i += 1
+
+        ## Del barn hvis fullt
+        hvis node.barn[i].antall == (2 * grad - 1):
+            _btre_del_barn(node, i, grad)
+            hvis verdi > node.nøkler[i].verdi:
+                i += 1
+
+        _btre_sett_inn_ikke_full(node.barn[i], verdi, rad_id, grad)
+
+privat funksjon _btre_del_barn(forelder: BtreNode, i: int, grad: int):
+    la barn = forelder.barn[i]
+    la ny   = BtreNode(nøkler=[], barn=[], er_blad=barn.er_blad, antall=grad - 1)
+
+    ## Kopier siste halvdel av barn til ny node
+    la j = 0
+    mens j < grad - 1:
+        ny.nøkler[j] = barn.nøkler[j + grad]
+        j += 1
+
+    hvis ikke barn.er_blad:
+        j = 0
+        mens j < grad:
+            ny.barn[j] = barn.barn[j + grad]
+            j += 1
+
+    barn.antall = grad - 1
+
+    ## Flytt foreldre-nøkler og -barn
+    forelder.barn.sett_inn(i + 1, ny)
+    forelder.nøkler.sett_inn(i, barn.nøkler[grad - 1])
+    forelder.antall += 1
+
+privat funksjon _btre_del_barn_uten_forskyvning(forelder: BtreNode, i: int, grad: int):
+    _btre_del_barn(forelder, i, grad)
+
+privat funksjon _btre_fjern(indeks: Indeks, verdi: verdi, rad_id: int):
+    _btre_fjern_fra_node(indeks.rot, verdi, rad_id, indeks.grad)
+
+    ## Hvis roten er tom og har barn, bruk barnet som ny rot
+    hvis indeks.rot.antall == 0 og ikke indeks.rot.er_blad:
+        indeks.rot = indeks.rot.barn[0]
+
+privat funksjon _btre_fjern_fra_node(node: BtreNode, verdi: verdi, rad_id: int, grad: int):
+    la i = _btre_finn_nøkkel(node, verdi)
+
+    hvis i < node.antall og node.nøkler[i].verdi == verdi:
+        hvis node.er_blad:
+            ## Fjern direkte fra blad
+            node.nøkler.fjern(i)
+            node.antall -= 1
+        annet:
+            _btre_fjern_intern(node, i, grad)
+    annet:
+        hvis node.er_blad:
+            returner   ## Ikke funnet
+
+        la siste = (i == node.antall)
+        hvis node.barn[i].antall < grad:
+            _btre_fyll(node, i, grad)
+
+        hvis siste og i > node.antall:
+            _btre_fjern_fra_node(node.barn[i - 1], verdi, rad_id, grad)
+        annet:
+            _btre_fjern_fra_node(node.barn[i], verdi, rad_id, grad)
+
+privat funksjon _btre_finn_nøkkel(node: BtreNode, verdi: verdi) -> int:
+    la i = 0
+    mens i < node.antall og node.nøkler[i].verdi < verdi:
+        i += 1
+    returner i
+
+privat funksjon _btre_fjern_intern(node: BtreNode, i: int, grad: int):
+    la verdi = node.nøkler[i].verdi
+    hvis node.barn[i].antall >= grad:
+        la forgjenger = _btre_hent_forgjenger(node.barn[i])
+        node.nøkler[i] = forgjenger
+        _btre_fjern_fra_node(node.barn[i], forgjenger.verdi, forgjenger.rad_id, grad)
+    eller hvis node.barn[i + 1].antall >= grad:
+        la etterfølger = _btre_hent_etterfølger(node.barn[i + 1])
+        node.nøkler[i] = etterfølger
+        _btre_fjern_fra_node(node.barn[i + 1], etterfølger.verdi, etterfølger.rad_id, grad)
+    annet:
+        _btre_slå_sammen(node, i, grad)
+        _btre_fjern_fra_node(node.barn[i], verdi, 0, grad)
+
+privat funksjon _btre_hent_forgjenger(node: BtreNode) -> IndeksNøkkel:
+    mens ikke node.er_blad:
+        node = node.barn[node.antall]
+    returner node.nøkler[node.antall - 1]
+
+privat funksjon _btre_hent_etterfølger(node: BtreNode) -> IndeksNøkkel:
+    mens ikke node.er_blad:
+        node = node.barn[0]
+    returner node.nøkler[0]
+
+privat funksjon _btre_fyll(forelder: BtreNode, i: int, grad: int):
+    hvis i != 0 og forelder.barn[i - 1].antall >= grad:
+        _btre_lån_fra_forrige(forelder, i)
+    eller hvis i != forelder.antall og forelder.barn[i + 1].antall >= grad:
+        _btre_lån_fra_neste(forelder, i)
+    annet:
+        hvis i != forelder.antall:
+            _btre_slå_sammen(forelder, i, grad)
+        annet:
+            _btre_slå_sammen(forelder, i - 1, grad)
+
+privat funksjon _btre_lån_fra_forrige(forelder: BtreNode, i: int):
+    la barn    = forelder.barn[i]
+    la søsken  = forelder.barn[i - 1]
+
+    barn.nøkler.sett_inn(0, forelder.nøkler[i - 1])
+    hvis ikke barn.er_blad:
+        barn.barn.sett_inn(0, søsken.barn[søsken.antall])
+
+    forelder.nøkler[i - 1] = søsken.nøkler[søsken.antall - 1]
+    barn.antall   += 1
+    søsken.antall -= 1
+
+privat funksjon _btre_lån_fra_forrige_uten_forskyvning(forelder: BtreNode, i: int):
+    _btre_lån_fra_forrige(forelder, i)
+
+privat funksjon _btre_lån_fra_neste(forelder: BtreNode, i: int):
+    la barn   = forelder.barn[i]
+    la søsken = forelder.barn[i + 1]
+
+    barn.nøkler[barn.antall] = forelder.nøkler[i]
+    hvis ikke barn.er_blad:
+        barn.barn[barn.antall + 1] = søsken.barn[0]
+
+    forelder.nøkler[i] = søsken.nøkler[0]
+    søsken.nøkler.fjern(0)
+    hvis ikke søsken.er_blad:
+        søsken.barn.fjern(0)
+
+    barn.antall   += 1
+    søsken.antall -= 1
+
+privat funksjon _btre_lån_fra_neste_uten_forskyvning(forelder: BtreNode, i: int):
+    _btre_lån_fra_neste(forelder, i)
+
+privat funksjon _btre_slå_sammen(forelder: BtreNode, i: int, grad: int):
+    la barn   = forelder.barn[i]
+    la søsken = forelder.barn[i + 1]
+
+    barn.nøkler[grad - 1] = forelder.nøkler[i]
+
+    la j = 0
+    mens j < søsken.antall:
+        barn.nøkler[j + grad] = søsken.nøkler[j]
+        j += 1
+
+    hvis ikke barn.er_blad:
+        j = 0
+        mens j <= søsken.antall:
+            barn.barn[j + grad] = søsken.barn[j]
+            j += 1
+
+    forelder.nøkler.fjern(i)
+    forelder.barn.fjern(i + 1)
+    barn.antall += søsken.antall + 1
+    forelder.antall -= 1
+
+privat funksjon _btre_slå_sammen_uten_forskyvning(forelder: BtreNode, i: int, grad: int):
+    _btre_slå_sammen(forelder, i, grad)
+
+privat funksjon _btre_tell_noder(node: BtreNode) -> int:
+    hvis node.er_blad:
+        returner 1
+    la antall = 1
+    for barn i node.barn:
+        antall += _btre_tell_noder(barn)
+    returner antall
+
+funksjon _les_alle_rader(tabell_navn: tekst) -> liste[ordbok]:
+    hvis tabell_navn i _rader:
+        returner _rader[tabell_navn]
+    returner []
+
+funksjon _skriv_rad(tabell_navn: tekst, data: ordbok) -> int:
+    hvis tabell_navn ikke i _rader:
+        _rader[tabell_navn] = []
+    la ny = {}
+    for nøkkel, verdi i data:
+        ny[nøkkel] = verdi
+    la rad_id = lengde(_rader[tabell_navn]) + 1
+    ny["_id"] = rad_id
+    _rader[tabell_navn].legg_til(ny)
+    returner rad_id
+
+funksjon _skriv_rad_med_id(tabell_navn: tekst, rad_id: int, data: ordbok):
+    hvis tabell_navn ikke i _rader:
+        _rader[tabell_navn] = []
+    la ny = {}
+    for nøkkel, verdi i data:
+        ny[nøkkel] = verdi
+    ny["_id"] = rad_id
+    _rader[tabell_navn].legg_til(ny)
+
+funksjon _oppdater_rad(tabell_navn: tekst, rad_id: int, data: ordbok):
+    hvis tabell_navn ikke i _rader:
+        returner
+    for i, rad i enumerate(_rader[tabell_navn]):
+        hvis rad["_id"] == rad_id:
+            la ny = {}
+            for nøkkel, verdi i data:
+                ny[nøkkel] = verdi
+            ny["_id"] = rad_id
+            _rader[tabell_navn][i] = ny
+            returner
+
+funksjon _merk_rad_slettet(tabell_navn: tekst, rad_id: int):
+    hvis tabell_navn ikke i _rader:
+        returner
+    la ny_liste = []
+    for rad i _rader[tabell_navn]:
+        hvis rad["_id"] != rad_id:
+            ny_liste.legg_til(rad)
+    _rader[tabell_navn] = ny_liste
+
+funksjon _slett_alle_rader(tabell_navn: tekst):
+    _rader[tabell_navn] = []
+
+privat funksjon _rad_id(rad: ordbok) -> int:
+    hvis "_id" i rad:
+        returner rad["_id"]
+    returner 0
+
+## ─────────────────────────────────────────
+## INTERNE OPPDATERINGSFUNKSJONER
+## (kalles fra norsdb_crud.nors)
+## ─────────────────────────────────────────
+
+funksjon _indeks_søk(tabell_navn: tekst, kolonne: tekst, verdi: verdi) -> liste[int] | ingen:
+    la nøkkel = tabell_navn + "." + kolonne
+    hvis nøkkel ikke i _indekser:
+        returner ingen
+    hvis nøkkel i _indeks_data og verdi i _indeks_data[nøkkel]:
+        returner _indeks_data[nøkkel][verdi]
+    returner ingen
+
+funksjon _indeks_legg_til(tabell_navn: tekst, rad_id: int, rad: ordbok):
+    for nøkkel, indeks i _indekser:
+        hvis indeks.tabell == tabell_navn:
+            la verdi = rad.hent(indeks.kolonne)
+            hvis verdi != ingen:
+                hvis nøkkel ikke i _indeks_data:
+                    _indeks_data[nøkkel] = {}
+                hvis verdi ikke i _indeks_data[nøkkel]:
+                    _indeks_data[nøkkel][verdi] = []
+                hvis rad_id ikke i _indeks_data[nøkkel][verdi]:
+                    _indeks_data[nøkkel][verdi].legg_til(rad_id)
+
+funksjon _indeks_fjern(tabell_navn: tekst, rad_id: int, rad: ordbok):
+    for nøkkel, indeks i _indekser:
+        hvis indeks.tabell == tabell_navn:
+            la verdi = rad.hent(indeks.kolonne)
+            hvis verdi != ingen:
+                hvis nøkkel i _indeks_data og verdi i _indeks_data[nøkkel]:
+                    _indeks_data[nøkkel][verdi] = filtrer(_indeks_data[nøkkel][verdi], funksjon(x): returner x != rad_id)
+
+funksjon _indeks_nullstill(tabell_navn: tekst):
+    for nøkkel, indeks i _indekser:
+        hvis indeks.tabell == tabell_navn:
+            indeks.rot = BtreNode(nøkler=[], barn=[], er_blad=sann, antall=0)
+            hvis nøkkel i _indeks_data:
+                _indeks_data[nøkkel] = {}
+
+privat funksjon _indeks_skriv_til_disk(indeks: Indeks):
+    returner
+
+privat funksjon _indeks_slett_fra_disk(nøkkel: tekst):
+    returner

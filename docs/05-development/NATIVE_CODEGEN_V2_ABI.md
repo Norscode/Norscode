@@ -1,26 +1,26 @@
 # native_codegen_v2 ABI-kontrakt
 
 Formålet er å dokumentere kva `selfhost/native_execution/native_codegen_v2.no` krev av
-runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging/bootstrapping.
+runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging og oppstart.
 
-## Runtime-seksjoner
+## Runtime-seksjonar
 
-- `TEXT_VA()` – tekst-segmentbase: `4198400`.
-- `DATA_VA()` – konstant-data base (string-litteraler): `5242880`.
+- `TEXT_VA()` – tekstsegmentbase: `4198400`.
+- `DATA_VA()` – konstantdatabase (string-litteraler): `5242880`.
 - `HEAP_VA()` – heapbase: `6291456`.
-- `HEAP_SZ()` – reserves 64MiB heap.
+- `HEAP_SZ()` – reserverer 64 MiB heap.
 
-Kompilerte ELF-plattformer plasserer runtime-kode på `TEXT_VA` og data/heap i faste områder
-for deterministic bygging.
+Kompilerte ELF-binarar legg runtime-kode på `TEXT_VA` og data/heap i faste område
+for deterministisk bygging.
 
-## Skilje mot historisk C-runtime
+## Skilnad mot historisk C-runtime
 
 Det finst no to ulike runtime-kontraktar i repoet:
 
 - Aktiv native kontrakt:
   - `selfhost/native_execution/native_codegen_v2.no`
-  - brukar fast `RT_*`-tabell, ELF-segment og `NcVal*`-basert kallkonvensjon direkte i native output
-- Historisk / vedlikehalds-only C-kontrakt:
+  - brukar fast `RT_*`-tabell, ELF-segment og `NcVal*`-basert kallkonvensjon direkte i native utdata
+- Historisk vedlikehaldskontrakt:
   - `archive/legacy_c_backend/ncb_to_c.no`
   - embedder `archive/legacy_c_backend/nc_runtime_mini.c` i generert `bootstrap/maint/c/norscode_generated.c`
   - blir berre brukt i den historiske vedlikehaldsflata for seed-regenerering
@@ -38,7 +38,7 @@ og ikkje del av seed-first bygg i dagleg flyt.
 4. Kallar entryfunksjon (`start_fn`) frå NCB-entryfeltet.
 5. Utfører `exit(0)` på return.
 
-I debugging-løp blir det skrive `A/B/C` som korte sys_write-markørar før/under desse fasane.
+I debugging-løp blir det skrive `A/B/C` som korte `sys_write`-markørar før og under desse fasane.
 `S` vert skrive ved fatal invalid-entry og før eksplisitt avslutning.
 
 ## Funksjons- og kallkontekst
@@ -52,10 +52,10 @@ I debugging-løp blir det skrive `A/B/C` som korte sys_write-markørar før/unde
 
 ## Kjernekonvensjonar
 
-- ABI mellom native koden og runtime bruker i hovudsak:
+- ABI mellom native koden og runtime brukar i hovudsak:
   - `rdi`, `rsi`, `rdx`, `rcx` for brukarfunksjonar (inntil 4 argument).
   - `rax` som returnverdi for runtime.
-  - stack-baserte `NcVal*`-peikarar.
+  - stackbaserte `NcVal*`-peikarar.
 - Alle runtime-API-er eksponert via VA-konstanter `RT_*()` i same fil.
 
 ## Inngangspunkt og determinisme
@@ -65,13 +65,13 @@ I debugging-løp blir det skrive `A/B/C` som korte sys_write-markørar før/unde
   2. fallback til `__main__.start`/`*.start` dersom `entry` manglar.
 - Funksjonar er ikkje sortert globalt alfabetisk; ordninga kjem frå NCB-parse/rekkjefølgje.
   Runtime-innkjøring må difor alltid stole på eksplisitt `entry` når determinisme krev det.
-- For bootstrap/elf-steg vart `start` sett via `NORSCODE_BUNDLE_ENTRY` i bundleren.
+- For bootstrap-/elf-steg vart `start` sett via `NORSCODE_BUNDLE_ENTRY` i bundleren.
   Den same mekanismen vart brukt både når host bygde stage-0 NCB og når Gen1 ELF
   bygde Gen2 NCB i 6b-løypa.
 
 ## Relokasjon og output
 
-- `ncb_to_elf` bygger frå JSON-format med:
+- `ncb_to_elf` byggjer frå JSON-format med:
   - `functions` som namn→`code`/`constants`.
-  - `entry` som funnbar nøkkel i denne kartstrukturen.
-- Genererte binærar er forventa deterministiske på same input + same byggereglane.
+  - `entry` som søkjbar nøkkel i denne kartstrukturen.
+- Genererte binærar er forventa deterministiske på same input og same byggereglar.
