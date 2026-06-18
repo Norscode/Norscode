@@ -221,6 +221,32 @@ static int nc_exec_prefer_local(const char *name) {
     return 0;
 }
 
+static NcVal *nc_stdlib_precompiled_ncb(const char *modul) {
+    if (!modul || strncmp(modul, "std.", 4)) return nc_nil();
+    const char *leaf = modul + 4;
+    char path[512];
+    size_t pos = 0;
+    const char *prefix = "bootstrap/stdlib/std_";
+    size_t prefix_len = strlen(prefix);
+    if (prefix_len + strlen(leaf) + 9 >= sizeof(path)) return nc_nil();
+    memcpy(path, prefix, prefix_len);
+    pos = prefix_len;
+    for (const char *p = leaf; *p && pos + 9 < sizeof(path); p++) {
+        path[pos++] = (*p == '.') ? '_' : *p;
+    }
+    strcpy(path + pos, ".ncb.json");
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return nc_nil();
+    }
+    fclose(f);
+    NcVal *ncb_file = nc_builtin_fil_les(nc_str(path));
+    if (!ncb_file || ncb_file->type != NC_STR || !ncb_file->s || !ncb_file->s[0]) {
+        return nc_nil();
+    }
+    return ncb_file;
+}
+
 /* Finn funksjon med fuzzy matching */
 static NcVal *nc_exec_find_fn(NcVal *functions, const char *name) {
     /* Direkte treff */
@@ -2294,6 +2320,10 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
 
 /* ── Wrap kompiler_fil via bootstrap-host dispatcher ── */
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul) {
+    NcVal *precompiled = nc_stdlib_precompiled_ncb(modul);
+    if (precompiled && precompiled->type == NC_STR && precompiled->s && precompiled->s[0]) {
+        return precompiled;
+    }
     NcVal *src = nc_builtin_fil_les(nc_str(src_path));
     if (!src || src->type != NC_STR) return nc_nil();
     NcVal *src_v = nc_str(src->s);
@@ -2352,7 +2382,18 @@ static void nc_merge_fns(NcVal *dst, NcVal *src) {
 }
 
 static int nc_is_builtin_import(const char *modul) {
-    return !modul || !modul[0] || !strncmp(modul, "std.", 4) || !strncmp(modul, "builtin.", 8) || !strncmp(modul, "selfhost.", 9);
+    if (!modul || !modul[0]) return 1;
+    if (!strncmp(modul, "builtin.", 8)) return 1;
+    if (!strncmp(modul, "selfhost.", 9)) return 1;
+    /* Berre dei std-modulane som har eigne native dispatch-handlarar skal
+     * behandlast som builtin. Resten skal bundlast frå kjelde, elles fell
+     * funksjonar som std.log.* ut av run-løypa. */
+    if (!strncmp(modul, "std.path.", 9)) return 1;
+    if (!strncmp(modul, "std.env.", 8)) return 1;
+    if (!strncmp(modul, "std.web.", 8)) return 1;
+    if (!strncmp(modul, "std.csrf.", 9)) return 1;
+    if (!strncmp(modul, "std.security.", 13)) return 1;
+    return 0;
 }
 
 static char *nc_module_to_path(const char *modul) {
