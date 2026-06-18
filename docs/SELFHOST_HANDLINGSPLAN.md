@@ -211,6 +211,7 @@ Statusblokk for neste fase:
 Målet for aktiv flate er at utvikling, testing, release og nye funksjonar kan køyrast utan Python eller C som arbeidsveg.
 
 - C-regen skal ikkje finnast i aktiv `tools/`- eller CI-flate
+- C-regen skal berre finnast i eksplisitt vedlikehaldslane
 - stage-0 seed skal vere committed eller lastast ned som ferdig native artefakt
 - historisk C skal berre liggje under `archive/`
 - normal verifisering skal bruke den eksisterande native CLI-en, ikkje byggje han opp på nytt

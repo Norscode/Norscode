@@ -81,6 +81,10 @@ is_server_test() {
         test_file_object_storage.no|test_http_helpers.no|\
         test_ir_debug.no|\
         test_nc_main_both.no|\
+        test_selfhost_phase2_ffi_smoke.no|\
+        test_selfhost_phase2_regression.no|\
+        test_selfhost_phase2_smoke.no|\
+        test_selfhost_phase2_stdlib_usecases.no|\
         test_frontend.no|\
         test_html.no|\
         test_html_components.no|test_html_components_v2.no|\
