@@ -16,11 +16,11 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
 - Normal løype: `./bin/nc run`, `./bin/nc check`, `./bin/nc test`
 - Vedlikehald: `./bin/nc maintenance`
-- Legacy: `tools/maint/*` berre for vedlikehald
+- Utvikling av nye funksjonar: `./bin/nc feature-check [fil.no ...]`
 - `docs/SELFHOST_HANDLINGSPLAN.md` er aktiv plan for normalflata
 - `./bin/nc maintenance status|lane|seed|seed-status|verify|report|report-json` er statusflate i Norscode
 - `stage0_seed_ok` er hovudindikatoren for stage-0 seed i `maintenance`-rapportane
-- historiske filer skal liggje i `docs/_archive/`
+- historiske filer skal liggje i `docs/_archive/` eller `archive/`
 
 ## Merknad
 

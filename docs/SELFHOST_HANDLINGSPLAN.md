@@ -92,7 +92,7 @@ Status: [x] (leveranse 1–4 er i orden)
 - [x] Eksisterande felt skal ikkje skifte tyding.
 - [x] Parser og semantic-lag skal feile deterministisk.
 - [x] Bootstrap-løypa skal vere kort og tydeleg markert.
-- [x] C-regen skal berre finnast i eksplisitt vedlikehaldslane.
+- [x] C-regen er fjerna frå aktiv verktøyflate og ligg berre som historisk arkiv.
 
 ## Avgrensning
 
@@ -208,17 +208,18 @@ Statusblokk for neste fase:
 
 ## Sjølvstendigheitsmål
 
-Målet for normalflata er at utvikling, testing og CI kan køyrast utan Python eller C som arbeidsveg.
+Målet for aktiv flate er at utvikling, testing, release og nye funksjonar kan køyrast utan Python eller C som arbeidsveg.
 
-- C-regen skal berre finnast i eksplisitt vedlikehaldsløype
-- stage-0 bootstrap skal berre brukast når seed må fornyast
-- legacy-løypa skal vere tydeleg markert som historisk vedlikehald
+- C-regen skal ikkje finnast i aktiv `tools/`- eller CI-flate
+- stage-0 seed skal vere committed eller lastast ned som ferdig native artefakt
+- historisk C skal berre liggje under `archive/`
 - normal verifisering skal bruke den eksisterande native CLI-en, ikkje byggje han opp på nytt
+- nye funksjonar skal verifiserast med `./bin/nc feature-check [fil.no ...]`
 
 ---
 
 ## Sjølvstendigheitsmålsnitt (operativt)
 
-- [x] Utvikling, testing og CI kan køyrast utan Python/C i normal løp.
-- [x] Stage-0 bootstrap er unntak, ikkje normaldag.
+- [x] Utvikling, testing, release og feature-gate kan køyrast utan Python/C i aktiv flate.
+- [x] Stage-0 seed er ferdig native artefakt, ikkje C/Python-bygg i repoet.
 - [x] Normal verifisering er rein og kort.

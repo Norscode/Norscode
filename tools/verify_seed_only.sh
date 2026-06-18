@@ -20,9 +20,14 @@ platform_name() {
 platform="$(platform_name 2>/dev/null || printf '?')"
 stage0="${ROOT}/bootstrap/stage0/norscode-${platform}"
 if [ ! -f "$stage0" ]; then
-    printf '=== Seed-only: hoppa over (ingen stage0-seed for %s) ===\n' "$platform"
+    if [ "${VERIFY_SEED_ALLOW_MISSING:-0}" = "1" ]; then
+        printf '=== Seed-only: hoppa over (ingen stage0-seed for %s) ===\n' "$platform"
+        printf 'Seed-only lane krev bootstrap/stage0/norscode-<plattform> (eller bash tools/fetch_stage0_seed.sh).\n'
+        exit 0
+    fi
+    printf '=== Seed-only: FEIL (ingen stage0-seed for %s) ===\n' "$platform" >&2
     printf 'Seed-only lane krev bootstrap/stage0/norscode-<plattform> (eller bash tools/fetch_stage0_seed.sh).\n'
-    exit 0
+    exit 1
 fi
 
 printf '=== Seed-only verifikasjon (utan clang/regen) ===\n'

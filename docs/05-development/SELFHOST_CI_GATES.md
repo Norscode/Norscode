@@ -7,8 +7,8 @@ Målet er å fange regresjonar før dei når brukarar, utan å blande inn legacy
 - Normal CI skal bruke native CLI og native verifisering
 - Normal release og installasjon skal ikkje krevje C-verktøykjede
 - Normal CI for release/install skal ikkje krevje C-verktøykjede
-- Vedlikehaldsløypa skal vere eksplisitt og tydeleg markert
-- `bin/bootstrap` og generert C er berre for historisk vedlikehald
+- Aktiv verktøyflate skal ikkje ha C/Python-løype
+- Historisk C skal berre liggje under `archive/`
 
 ## Normal gate
 
@@ -25,19 +25,20 @@ Denne kontrollen skal:
 - sjå til at policyen held
 - ikkje vere avhengig av skjulte fallback-steg
 
-## Vedlikehaldsløype
+## Feature-gate
 
 Køyr:
 
 ```bash
-bash tools/selfhost_maintenance_verify.sh
+./bin/nc feature-check [fil.no ...]
 ```
 
 Denne løypa skal:
 
-- vere tydeleg merkt som vedlikehald og historikk
-- verifisere seed-/generert-C-brua isolert frå normalflyten
-- aldri framstå som nødvendig for vanleg release, installasjon eller dagleg utvikling
+- bruke `dist/norscode_native`
+- sjekke aktiv flate utan C/Python
+- kompilere/sjekke nye `.no`-filer direkte med Norscode
+- falle tilbake til testflata når ingen filer er oppgitt
 
 ## Rask kontroll
 

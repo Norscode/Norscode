@@ -2,9 +2,8 @@
 # tools/selfcompile_stage0_elf.sh — Omgang 6b.3: Gen1 stage-0 ELF → Gen2 ELF
 #
 # Gen1: host byggjer stage-0 NCB + ELF.
-# Gen2: prøver først ekte preset-bundle via elf_compile_driver.
-# Ved Linux-krasj fell vi tilbake til transitional chunked source-NCB via elf_compile_driver → NCB → host ncb_to_elf.
-# Full stage-0 bestått krev ekte intern ELF-bundle; fallback skriv berre eigen markør.
+# Gen2: krev ekte preset-bundle via elf_compile_driver.
+# Full stage-0 bestått krev at Gen1 ELF sjølv skriv Gen2 NCB.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,11 +28,9 @@ GEN1_ELF_CHUNK_LOG="$ROOT/build/6b/selfcompile/gen1_elf_chunked_source_ncb.log"
 GEN1_ELF_DIAG="$ROOT/build/6b/selfcompile/gen1_elf_diagnose.txt"
 GEN1_ELF_ATTEMPTS="$ROOT/build/6b/selfcompile/gen1_elf_attempts.txt"
 PASS_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_passed.marker"
-TRANSITIONAL_MARKER="$ROOT/build/6b/selfcompile/stage0_elf_transitional.marker"
 
 mkdir -p "$ROOT/build/6b/selfcompile"
 rm -f "$PASS_MARKER"
-rm -f "$TRANSITIONAL_MARKER"
 rm -f "$GEN1_ELF_LOG"
 rm -f "$GEN1_ELF_PRESET_LOG"
 rm -f "$GEN1_ELF_SOURCE_LOG"
@@ -137,13 +134,11 @@ if [ "${NC_OM6B_RUN_STAGE0:-0}" != "1" ]; then
     exit 0
 fi
 
-printf '[2/4] Gen2 NCB frå Gen1 ELF (prøv bundle-args, elles direkte source-ncb, elles chunked source-ncb)...\n'
+printf '[2/4] Gen2 NCB frå Gen1 ELF (bundle-args)...\n'
 rm -f "$GEN2_NCB"
 GEN2_CHUNK_DIR="$ROOT/build/6b/selfcompile"
 GEN2_CHUNK_ENV="build/6b/selfcompile"
 rm -f "$GEN2_CHUNK_DIR"/part_*.json
-brukte_transitional=0
-transitional_mode=""
 GEN2_ENTRY="selfhost.elf_compile_driver.start"
 GEN2_BUNDLE_ARGS="__omgang6b__"
 
@@ -195,10 +190,9 @@ else
         printf '  [MERK] Bundle-args krasja med exit %d, men chunk-output vart skrive; brukar artifactet\n' "$_gen2_rc"
     else
         skriv_gen1_elf_diagnose "bundle_args" "$_gen2_rc" "env -i PATH=$PATH NORSCODE_CMD=run NORSCODE_BUNDLE_ARGS=\"$GEN2_BUNDLE_ARGS\" NORSCODE_BUNDLE_OUTPUT=$GEN2_NCB NORSCODE_BUNDLE_ENTRY=$GEN2_ENTRY $GEN1_ELF" "$GEN1_ELF_PRESET_LOG"
-        printf '  [MERK] Bundle-args feila med exit %d; brukar transitional host-kopi av Gen1 NCB\n' "$_gen2_rc"
-        cp "$GEN1_NCB" "$GEN2_NCB"
-        brukte_transitional=1
-        transitional_mode="host-copy-source-ncb"
+        printf '  [FEIL] Bundle-args feila med exit %d og Gen1 ELF skreiv ikkje Gen2 NCB\n' "$_gen2_rc" >&2
+        printf '        Sjå diagnose: %s\n' "$GEN1_ELF_DIAG" >&2
+        exit 1
     fi
 fi
 
@@ -211,38 +205,21 @@ N1="$(wc -c < "$GEN1_NCB" | tr -d ' ')"
 N2="$(wc -c < "$GEN2_NCB" | tr -d ' ')"
 printf '  [OK] Gen2 NCB %s bytes (Gen1 NCB %s bytes)\n' "$N2" "$N1"
 if cmp -s "$GEN1_NCB" "$GEN2_NCB"; then
-    if [ "$brukte_transitional" -eq 1 ]; then
-        printf '  [OK] NCB byte-paritet Gen1 == Gen2 (%s)\n\n' "$transitional_mode"
-    else
-        printf '  [OK] NCB byte-paritet Gen1 == Gen2 (bundle-args)\n\n'
-    fi
+    printf '  [OK] NCB byte-paritet Gen1 == Gen2 (bundle-args)\n\n'
 else
-    if [ "$brukte_transitional" -eq 1 ]; then
-        printf '  [MERK] NCB differ i %s-modus — sjekkar ELF-paritet likevel\n\n' "$transitional_mode"
-    else
-        printf '  [MERK] NCB differ i bundle-args-modus — sjekkar ELF-paritet likevel\n\n'
-    fi
+    printf '  [MERK] NCB differ i bundle-args-modus — sjekkar ELF-paritet likevel\n\n'
 fi
 
-printf '[3/4] Gen2 ELF frå Gen2 NCB (host codegen)...\n'
+printf '[3/4] Gen2 ELF frå Gen2 NCB (native codegen)...\n'
 bash "$ROOT/tools/ncb_to_elf.sh" "$GEN2_NCB" "$GEN2_ELF"
 B2="$(wc -c < "$GEN2_ELF" | tr -d ' ')"
 printf '  [OK] Gen2 ELF %s bytes\n\n' "$B2"
 
-if [ "$brukte_transitional" -eq 1 ]; then
-    printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (%s)...\n' "$transitional_mode"
-else
-    printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (bundle-args)...\n'
-fi
+printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (bundle-args)...\n'
 if cmp -s "$GEN1_ELF" "$GEN2_ELF"; then
     printf '  [OK] %s bytes identiske\n\n' "$B1"
-    if [ "$brukte_transitional" -eq 1 ]; then
-        printf '%s\n' "$transitional_mode" > "$TRANSITIONAL_MARKER"
-        printf '=== Omgang 6b.3: TRANSITIONAL BESTÅTT (Gen1 ELF skreiv Gen2 NCB via %s) ===\n' "$transitional_mode"
-    else
-        printf 'bundle-args\n' > "$PASS_MARKER"
-        printf '=== Omgang 6b.3: BESTÅTT (Gen1 ELF skreiv Gen2 NCB via bundle-args) ===\n'
-    fi
+    printf 'bundle-args\n' > "$PASS_MARKER"
+    printf '=== Omgang 6b.3: BESTÅTT (Gen1 ELF skreiv Gen2 NCB via bundle-args) ===\n'
     exit 0
 fi
 

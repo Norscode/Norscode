@@ -1,6 +1,6 @@
 # Norscode
 
-Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-løype og ei tydeleg normalflate utan Python eller C i vanleg bruk.
+Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-løype og ei aktiv flate utan Python eller C.
 
 ![Norscode overview](docs/assets/norscode-overview.svg)
 
@@ -26,12 +26,14 @@ Snarvegar:
 ./bin/nc --help
 ./bin/nc run app.no
 ./bin/nc check app.no
+./bin/nc feature-check app.no
 ./bin/nc test
 ```
 
 ## Normal bruk
 
 - `./bin/nc` og `dist/norscode_native` er normal CLI og runtime
+- `./bin/nc feature-check [fil.no ...]` er standard gate for å byggje nye funksjonar direkte i Norscode
 - `./bin/nc maintenance verify` gir vedlikehaldssamandrag
 - `./bin/nc maintenance status`, `lane`, `seed`, `seed-status` viser Norscode-vedlikehald og stage-0-status
 - `./bin/nc maintenance report-json` gir maskinlesbar statusrapport (inkl. `stage0_seed_ok`)
@@ -47,7 +49,7 @@ Snarvegar:
 
 - `./bin/nc test` går grønt
 - normal verifisering går grønt via `bash tools/verify_selvstendighet.sh`
-- legacy C-løype er markert som vedlikehald, ikkje normal drift
+- aktiv verktøyflate er fri for Python og C; historisk C ligg berre under `archive/`
 
 ## Lisens
 

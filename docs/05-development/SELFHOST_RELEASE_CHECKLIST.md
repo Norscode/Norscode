@@ -10,7 +10,7 @@ Målet er å gjere release, installasjon og rollback føreseieleg utan å dra in
 - [ ] release- og installasjonsflata krev ikkje C-verktøykjede i normal drift
 - [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
 - [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
-- [ ] inga release-instruks peikar brukaren mot `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype som normal bruk
+- [ ] inga release-instruks peikar brukaren mot C/Python, `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype
 
 ## Bygg release
 
@@ -25,6 +25,7 @@ Verifiser:
 - [ ] sjekksum stemmer med arkivet
 - [ ] release-arkivet inneheld ikkje C som normal produktavhengigheit
 - [ ] release-dokumentasjonen peikar på `bin/nc` / `dist/norscode_native`, ikkje historiske vedlikehaldsløyper
+- [ ] nye funksjonar er sjekka med `./bin/nc feature-check [fil.no ...]`
 - [ ] release/install-flaten krever ikke C-verktøykjede
 
 ## Installer release

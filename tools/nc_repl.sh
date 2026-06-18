@@ -1,6 +1,6 @@
 #!/bin/sh
 # tools/nc_repl.sh — Python-fri REPL for Norscode
-# Brukar norscode_native (eller nc-vm som fallback)
+# Brukar norscode_native.
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 NC_NATIVE="$ROOT/dist/norscode_native"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/verify_selvstendighet.sh — verifiser normal L1–L6-sjølvstendighet (utan Python)
+# tools/verify_selvstendighet.sh — verifiser normal L1–L6-sjølvstendighet utan C/Python
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,18 +28,21 @@ printf '=== Norscode sjølvstendighet (normalflate, L1–L6) ===\n\n'
 
 run_step '0. Python-gate i tools/...' bash "$ROOT/tools/python_dependency_audit.sh"
 
-run_step '0b. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
+run_step '0b. Ingen aktiv C/Python-flate...' bash "$ROOT/tools/no_c_python_active_surface.sh"
 
-printf '1. L6 maintainer-lane: eventuell bootstrap/maint/c/ er generert frå .no (ikkje handskrive C)...\n'
-if [ -f "$ROOT/bootstrap/maint/c/norscode_generated.c" ]; then
-    printf '  [OK] bootstrap/maint/c/ er berre eksplisitt maintainer-output, ikkje normalflate\n\n'
+run_step '0c. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
+
+printf '1. Aktiv tools-flate har ingen C/Python-kjelder...\n'
+if find "$ROOT/tools" -type f \( -name '*.c' -o -name '*.h' -o -name '*.py' \) | grep . >/dev/null 2>&1; then
+    printf '  [FEIL] C/Python funne under tools/\n' >&2
+    exit 1
 else
-    printf '  [OK] bootstrap/maint/c/ er ikkje committed i normalflata (optimal)\n\n'
+    printf '  [OK] tools/ er C/Python-fri\n\n'
 fi
 
 if [ ! -x "$ROOT/dist/norscode_native" ]; then
     printf '  [FEIL] dist/norscode_native manglar. Normalflate skal ikkje bygge stage-0 her.\n' >&2
-    printf '         Bygg det eksplisitt i vedlikehaldsløypa med: bash tools/build_norscode_native.sh\n' >&2
+    printf '         Materialiser frå seed/release med: bash tools/build_norscode_native.sh\n' >&2
     exit 1
 fi
 
@@ -51,10 +54,10 @@ run_step '4. Bootstrap-self (steg C)...' ./bin/nc bootstrap-self
 
 run_step '5. L5 sjølvkompilering (Gen1 == Gen2)...' bash "$ROOT/tools/selfcompile_l5.sh"
 
-printf '6. L5b-smoke er vedlikehaldslane og ikkje del av normal verifisering.\n'
+printf '6. L5b-smoke er djupare paritet og ikkje del av kort normal verifisering.\n'
 printf '   Køyr ved behov: bash tools/selfcompile_l5b_mini.sh\n\n'
 
-printf '7. Testsuite: vedlikehaldslane (httpserver_vm) er ikkje del av normal verifisering.\n'
+printf '7. Testsuite: full testflate kan køyrast separat.\n'
 printf '   Køyr ved behov: ./bin/nc test\n\n'
 
 printf '=== Sjølvstendighet L1–L6 (normalflate): BESTÅTT ===\n'
