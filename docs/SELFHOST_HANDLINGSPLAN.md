@@ -92,6 +92,7 @@ Status: [x] (leveranse 1–4 er i orden)
 - [x] Eksisterande felt skal ikkje skifte tyding.
 - [x] Parser og semantic-lag skal feile deterministisk.
 - [x] Bootstrap-løypa skal vere kort og tydeleg markert.
+- [x] C-regen skal berre finnast i eksplisitt vedlikehaldslane.
 
 ## Avgrensning
 

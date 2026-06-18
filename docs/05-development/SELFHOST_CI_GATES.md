@@ -6,6 +6,7 @@ Målet er å fange regresjonar før dei når brukarar, utan å blande inn legacy
 
 - Normal CI skal bruke native CLI og native verifisering
 - Normal release og installasjon skal ikkje krevje C-verktøykjede
+- Normal CI for release/install skal ikkje krevje C-verktøykjede
 - Vedlikehaldsløypa skal vere eksplisitt og tydeleg markert
 - `bin/bootstrap` og generert C er berre for historisk vedlikehald
 

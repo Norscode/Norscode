@@ -25,6 +25,7 @@ Verifiser:
 - [ ] sjekksum stemmer med arkivet
 - [ ] release-arkivet inneheld ikkje C som normal produktavhengigheit
 - [ ] release-dokumentasjonen peikar på `bin/nc` / `dist/norscode_native`, ikkje historiske vedlikehaldsløyper
+- [ ] release/install-flaten krever ikke C-verktøykjede
 
 ## Installer release
 
