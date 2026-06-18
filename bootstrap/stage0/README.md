@@ -45,9 +45,9 @@ gh release upload v0.1.0 bootstrap/stage0/norscode-macos-arm64 --clobber
 
 Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.sh` fungere utan nettverk.
 
-## Maintainer-unntak: Linux-migrering frå `bootstrap/maint/c`
+## Historisk unntak: Linux-migrering frå `bootstrap/maint/c`
 
-Dette er ikkje normal utviklingsflyt. Bruk det berre ved éin-gong migrering eller seed-redning når vanleg `stage0`/release-veg ikkje strekk til.
+Dette er ikkje normal utviklingsflyt. Bruk det berre ved éin-gong historisk migrering eller seed-redning når vanleg `stage0`/release-veg ikkje strekk til.
 
 ```sh
 # På Linux, eller GitHub Actions → «Export stage0 Linux seed»
@@ -69,10 +69,10 @@ Ny `bootstrap/stage0/norscode-<plattform>` produseres frå same normale pipeline
 
 Når ny seed er verifisert, legg vi berre inn fila i git og køyrer evt. `bash tools/update_stage0_manifest.sh`.
 
-## Maintainer / regen
+## Historisk vedlikehald / regen
 
-`REGEN=1 bash tools/build_norscode_native.sh` er eksplisitt vedlikehaldsmodus.
-Den køyrer `tools/maint/regen_native.sh` for å lage isolert maintainer-output under `build/maintainer_regen/` som standard, og kompilerer med clang.
+`REGEN=1 bash tools/build_norscode_native.sh` er eksplisitt historisk vedlikehaldsmodus.
+Den køyrer `tools/maint/regen_native.sh` for å lage isolert historisk output under `build/maintainer_regen/` som standard, og kompilerer med clang.
 Dette er ikkje del av normal bygg/test/CI, og ingen `.c` herifrå skal vere del av dagleg flyt.
 
 **Opt-in .no-host:** `NORSCODE_USE_NC_MAIN=1` delegerer `run`/`compile`/`selftest` til

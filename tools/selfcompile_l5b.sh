@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/selfcompile_l5b.sh — L5b: Gen1-NCB køyrer Gen2 via VM (byte-paritet)
+# tools/selfcompile_l5b.sh — L5b maintenance: full Gen1-NCB → Gen2 via VM (byte-paritet)
 #
 # Gen1: stage-0 byggjer kompilator-bundle (bootstrap-host med C-dispatch).
 # Gen2: nc_exec køyrer selfhost.bundler.bygg_bundle-bytekode frå Gen1-NCB
@@ -46,12 +46,15 @@ printf '  ✓ %s bytes\n\n' "$V1_BYTES"
 
 printf '[2/3] Gen2: bundle via Gen1-bytekode (bygg_bundle)...\n'
 _gen2_ec=0
-if ! env NORSCODE_CMD=l5b-gen2 \
+set +e
+env NORSCODE_CMD=l5b-gen2 \
     NORSCODE_L5B_V1="$V1" \
     NORSCODE_L5B_V2="$V2" \
     NORSCODE_BUNDLE_ARGS="$BUNDLE_ARGS_STR" \
-    "$NATIVE"; then
-    _gen2_ec=$?
+    "$NATIVE"
+_gen2_ec=$?
+set -e
+if [ "$_gen2_ec" -ne 0 ]; then
     printf '  [FEIL] l5b-gen2 feila med exit %d\n' "$_gen2_ec" >&2
     exit 1
 fi

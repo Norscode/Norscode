@@ -1,19 +1,11 @@
 #!/usr/bin/env bash
 # tools/no_c_python_active_surface.sh
-# Gate for aktiv repository-surface medan C/Python vert avgrensa til eksplisitt maintainer-lane.
+# Gate for aktiv repository-surface utan C/Python.
 #
 # Current policy:
 # - No .py files anywhere in repository outside archive/
-# - No new .c/.h files outside the current bootstrap allowlist
+# - No .c/.h files anywhere in repository outside archive/
 # - No references to Python/C bootstrap i normal flyt utanfor gjeldande allowlist
-#
-# Vedlikeholdsunntak:
-# - REGEN/MIGRATION-workflows som framleis bruker maintainer-bootstrap er markerte i
-#   MAINTENANCE_WORKFLOWS.
-# - Desse får avvik for `python`, `clang`, `gcc`, `cc`, `ncb_to_c` og C-filer
-#   når og berre når dei køyrer i uttrykkeleg vedlikeholdsmodus.
-# - For `.c/.h` er tillatt aktiv flate avgrensa til `archive/`; lokal maintainer-output
-#   under build/ eller eksplisitt peika `bootstrap/maint/c/` er ikkje normalflate.
 
 set -euo pipefail
 
@@ -37,25 +29,11 @@ REF_CHECK_GLOBS=(
   "$ROOT/tools/*.sh"
 )
 
-MAINTENANCE_WORKFLOWS=(
-  "$ROOT/.github/workflows/regen_bootstrap.yml"
-  "$ROOT/.github/workflows/export-stage0-linux.yml"
-)
-
 NCB_TO_C_ALLOWLIST=(
   "$ROOT/tools/no_c_python_active_surface.sh"
-  "$ROOT/docs/BYTECODE_VM_PRIMARY_PATH.md"
-  "$ROOT/docs/ARCHIVE_INDEX.md"
-  "$ROOT/docs/FJERN_PYTHON_C_PLAN.md"
-  "$ROOT/docs/NATIVE_CODEGEN_V2_ABI.md"
+  "$ROOT/docs/05-development/NATIVE_CODEGEN_V2_ABI.md"
   "$ROOT/docs/SELFHOST_HANDLINGSPLAN.md"
-  "$ROOT/docs/SELVSTENDIGHET_PLAN.md"
-  "$ROOT/docs/SELFHOST_STATUS.md"
-  "$ROOT/archive/legacy_c_backend/ncb_to_c.no"
-  "$ROOT/docs/PARSER_SHORT_SYNTAX_PLAN.md"
-  "$ROOT/tools/maint/regen_native.sh"
-  "$ROOT/tools/maint/verify_l6.sh"
-  "$ROOT/tools/verify_selvstendighet.sh"
+  "$ROOT/docs/STATUS.md"
 )
 
 ALLOWLIST_FILES=(
@@ -63,7 +41,6 @@ ALLOWLIST_FILES=(
 
 ALLOWLIST_PATTERNS=(
   "$ROOT/archive/"
-  "$ROOT/tools/maint/c/"
 )
 
 is_allowlisted_path() {
@@ -99,26 +76,16 @@ is_ncb_to_c_allowlisted_path() {
     return 1
 }
 
-is_maintenance_workflow() {
-    local path="$1"
-    local wf
-    for wf in "${MAINTENANCE_WORKFLOWS[@]}"; do
-        if [ "$path" = "$wf" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 collect_repo_c_hits() {
     {
         if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-            git -C "$ROOT" ls-files '*.c' '*.h' 2>/dev/null | sed "s|^|$ROOT/|"
+            git -C "$ROOT" ls-files '*.c' '*.h' 2>/dev/null | while IFS= read -r rel; do
+                [ -f "$ROOT/$rel" ] && printf '%s/%s\n' "$ROOT" "$rel"
+            done || true
         fi
         find "$ROOT" \
             -path "$ROOT/.git" -prune -o \
             -path "$ROOT/build" -prune -o \
-            -path "$ROOT/bootstrap/maint/c" -prune -o \
             -type f \( -name '*.c' -o -name '*.h' \) -print 2>/dev/null
     } | sort -u
 }
@@ -149,9 +116,8 @@ collect_ref_files() {
 print_policy() {
     printf '\nPolicy (no-c/python active surface):\n'
     printf '  - Aktiv flyt: sjølvstendig .no/NCB/Native-ELF, utan Python/C i kjede.\n'
-    printf '  - Vedlikeholdsmodus: berre desse workflowene kan innehalde maintainer-bootstrap med C/Python/clang/gcc:\n'
-    printf '    - %s\n' "${MAINTENANCE_WORKFLOWS[@]}"
-    printf '  - Vedlikeholdsmodus må vere eksplisitt dokumentert i bootstrap-policy/CI-plan, og brukar isolert output som standard.\n\n'
+    printf '  - C/Python-kode er berre historisk arkiv under archive/.\n'
+    printf '  - Nye funksjonar skal byggjast som .no og verifiserast med ./bin/nc feature-check.\n\n'
 }
 
 fail=0
@@ -203,13 +169,10 @@ if command -v rg >/dev/null 2>&1; then
         filtered_ref_files=""
         while IFS= read -r path; do
             [ -n "$path" ] || continue
-            if is_maintenance_workflow "$path"; then
-                continue
-            fi
             filtered_ref_files="${filtered_ref_files}"$'\n'"${path}"
         done <<< "$ref_files"
 
-        ref_hits="$(printf '%s\n' "$filtered_ref_files" | rg -v '/(maint|reports|archive)/|/no_c_python_active_surface\.sh$|/python_dependency_audit\.sh$|/python_free_ci\.sh$|/build_norscode_native\.sh$|/build_norscode_windows\.sh$|/verify_seed_only\.sh$|/verify_selvstendighet\.sh$|/verify_omgang6\.sh$|/selfhost_phase0_verify\.sh$|/selfhost_drift_guard\.sh$|/unified_bootstrap_verifier\.sh$|/no_legacy_cvm\.sh$|/enforce_native_first\.sh$|/ci\.yml$|/publish\.yml$|/selfhost-lexer-token-smoke\.yml$|/selvstendighet\.yml$|/stage0-binary\.yml$|/bin/nc$|/windows-app-release\.yml$|/linux-app-release\.yml$|/macos-app-release\.yml$|/docs/' \
+        ref_hits="$(printf '%s\n' "$filtered_ref_files" | rg -v '/(reports|archive)/|/no_c_python_active_surface\.sh$|/norscode_feature_gate\.sh$|/python_dependency_audit\.sh$|/python_free_ci\.sh$|/build_norscode_native\.sh$|/verify_seed_only\.sh$|/verify_selvstendighet\.sh$|/verify_omgang6\.sh$|/selfhost_phase0_verify\.sh$|/selfhost_drift_guard\.sh$|/unified_bootstrap_verifier\.sh$|/no_legacy_cvm\.sh$|/enforce_native_first\.sh$|/ci\.yml$|/publish\.yml$|/selfhost-lexer-token-smoke\.yml$|/selvstendighet\.yml$|/stage0-binary\.yml$|/bin/nc$|/windows-app-release\.yml$|/linux-app-release\.yml$|/macos-app-release\.yml$|/docs/' \
           | xargs rg -n -e 'python3?' -e 'pytest' -e 'clang' -e 'gcc' -e '\bcc\b' -e 'ncb_to_c' -e 'c_minimal_vm' -e 'nc_runtime' -e 'nc_native_main' 2>/dev/null || true)"
     else
         ref_hits=""

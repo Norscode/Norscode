@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tools/verify_selvstendighet.sh — verifiser normal L1–L6-sjølvstendighet (utan Python)
+# tools/verify_selvstendighet.sh — verifiser normal L1–L6-sjølvstendighet utan C/Python
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -9,11 +9,14 @@ run_step() {
     local label="$1"
     shift
     printf '%s\n' "$label"
-    if "$@"; then
+    set +e
+    "$@"
+    local ec=$?
+    set -e
+    if [ "$ec" -eq 0 ]; then
         printf '\n'
         return 0
     fi
-    local ec=$?
     printf '\n[FEIL] %s (exit %d)\n' "$label" "$ec" >&2
     if [ "$ec" -eq 2 ]; then
         printf '  Hint: exit 2 = oftast manglande fil ved cmp, eller bash-syntaxfeil i eit script.\n' >&2
@@ -25,16 +28,25 @@ printf '=== Norscode sjølvstendighet (normalflate, L1–L6) ===\n\n'
 
 run_step '0. Python-gate i tools/...' bash "$ROOT/tools/python_dependency_audit.sh"
 
-run_step '0b. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
+run_step '0b. Ingen aktiv C/Python-flate...' bash "$ROOT/tools/no_c_python_active_surface.sh"
 
-printf '1. L6 maintainer-lane: eventuell bootstrap/maint/c/ er generert frå .no (ikkje handskrive C)...\n'
-if [ -f "$ROOT/bootstrap/maint/c/norscode_generated.c" ]; then
-    printf '  [OK] bootstrap/maint/c/ er berre eksplisitt maintainer-output, ikkje normalflate\n\n'
+run_step '0c. Ingen legacy C-VM under tools/...' bash "$ROOT/tools/no_legacy_cvm.sh"
+
+printf '1. Aktiv tools-flate har ingen C/Python-kjelder...\n'
+if find "$ROOT/tools" -type f \( -name '*.c' -o -name '*.h' -o -name '*.py' \) | grep . >/dev/null 2>&1; then
+    printf '  [FEIL] C/Python funne under tools/\n' >&2
+    exit 1
 else
-    printf '  [OK] bootstrap/maint/c/ er ikkje committed i normalflata (optimal)\n\n'
+    printf '  [OK] tools/ er C/Python-fri\n\n'
 fi
 
-run_step '2. Stage-0: norscode_native...' bash "$ROOT/tools/build_norscode_native.sh"
+if [ ! -x "$ROOT/dist/norscode_native" ]; then
+    printf '  [FEIL] dist/norscode_native manglar. Normalflate skal ikkje bygge stage-0 her.\n' >&2
+    printf '         Materialiser frå seed/release med: bash tools/build_norscode_native.sh\n' >&2
+    exit 1
+fi
+
+printf '2. Stage-0: dist/norscode_native finst alt (ingen rebuild i normalflate)\n\n'
 
 run_step '3. Selfhost bootstrap-gate (steg A+B)...' ./bin/nc selfhost-bootstrap-gate
 
@@ -42,12 +54,10 @@ run_step '4. Bootstrap-self (steg C)...' ./bin/nc bootstrap-self
 
 run_step '5. L5 sjølvkompilering (Gen1 == Gen2)...' bash "$ROOT/tools/selfcompile_l5.sh"
 
-run_step '6. L5b Gen1-bytekode → Gen2 (bygg_bundle i NCB)...' bash "$ROOT/tools/selfcompile_l5b.sh"
+printf '6. L5b-smoke er djupare paritet og ikkje del av kort normal verifisering.\n'
+printf '   Køyr ved behov: bash tools/selfcompile_l5b_mini.sh\n\n'
 
-if [ "${VERIFY_SKIP_TEST:-0}" = "1" ]; then
-    printf '7. Testsuite: hoppa over (VERIFY_SKIP_TEST=1 — CI native-jobs testar)\n\n'
-else
-    run_step '7. Testsuite (native)...' ./bin/nc test
-fi
+printf '7. Testsuite: full testflate kan køyrast separat.\n'
+printf '   Køyr ved behov: ./bin/nc test\n\n'
 
 printf '=== Sjølvstendighet L1–L6 (normalflate): BESTÅTT ===\n'

@@ -1,0 +1,374 @@
+## NorsDB - Sikkerhets-system
+## Fil: norsdb_security.nors
+## Versjon: 1.0
+## Dekker: tilgang, kryptering, validering, backup
+
+importer norsdb_core
+
+## ─────────────────────────────────────────
+## TILGANGSKONTROLL
+## ─────────────────────────────────────────
+
+type Tillatelse = LES | SKRIV | SLETT | ADMINISTRER
+
+struktur Bruker:
+    brukernavn: tekst
+    passord_hash: tekst     ## bcrypt-hash, aldri klartekst
+    salt      : tekst
+    tillatelser: sett[Tillatelse]
+    er_aktiv  : bool = sann
+    opprettet : tid  = nå()
+    siste_innlogging: tid = ingen
+
+struktur Rolle:
+    navn       : tekst
+    tillatelser: sett[Tillatelse]
+    tabeller   : liste[tekst]   ## Tom = tilgang til alle
+
+## Innebygde roller
+la ROLLE_ADMIN = Rolle(
+    navn        = "admin",
+    tillatelser = { LES, SKRIV, SLETT, ADMINISTRER },
+    tabeller    = []   ## Alt
+)
+
+la ROLLE_LESER = Rolle(
+    navn        = "leser",
+    tillatelser = { LES },
+    tabeller    = []
+)
+
+la ROLLE_SKRIVER = Rolle(
+    navn        = "skriver",
+    tillatelser = { LES, SKRIV },
+    tabeller    = []
+)
+
+## Aktiv bruker-sesjon
+la _aktiv_bruker: Bruker | ingen = ingen
+la _brukere: ordbok[tekst, Bruker] = {}
+la _roller: ordbok[tekst, Rolle] = {}
+
+## ─────────────────────────────────────────
+## bruker_opprett - Opprett ny bruker
+## ─────────────────────────────────────────
+
+funksjon bruker_opprett(
+    brukernavn : tekst,
+    passord    : tekst,
+    tillatelser: sett[Tillatelse] = { LES }
+) -> resultat:
+
+    _krev_admin()
+
+    hvis brukernavn i _brukere:
+        returner feil("Bruker finnes allerede: " + brukernavn)
+
+    ## Valider passord-styrke
+    la val = _valider_passord(passord)
+    hvis val.feilet:
+        returner val
+
+    la salt = generer_salt(32)
+    la hash = bcrypt(passord + salt)
+
+    la bruker = Bruker(
+        brukernavn   = brukernavn,
+        passord_hash = hash,
+        salt         = salt,
+        tillatelser  = tillatelser
+    )
+
+    _brukere[brukernavn] = bruker
+    _skriv_brukere_til_disk()
+
+    returner ok("Bruker opprettet: " + brukernavn)
+
+## ─────────────────────────────────────────
+## innlogging - Logg inn som bruker
+## ─────────────────────────────────────────
+
+funksjon innlogging(brukernavn: tekst, passord: tekst) -> resultat:
+    hvis brukernavn ikke i _brukere:
+        ## Bevisst vag feilmelding (hindrer brukeropplisting)
+        vente(100ms)  ## Hindrer brute-force timing-angrep
+        returner feil("Feil brukernavn eller passord")
+
+    la bruker = _brukere[brukernavn]
+
+    hvis ikke bruker.er_aktiv:
+        returner feil("Brukerkontoen er deaktivert")
+
+    ## Verifiser passord
+    la hash_sjekk = bcrypt(passord + bruker.salt)
+    hvis ikke konstant_tidssammenligning(hash_sjekk, bruker.passord_hash):
+        _logg_mislykket_innlogging(brukernavn)
+        vente(100ms)
+        returner feil("Feil brukernavn eller passord")
+
+    bruker.siste_innlogging = nå()
+    _aktiv_bruker = bruker
+    _skriv_brukere_til_disk()
+
+    returner ok("Logget inn som: " + brukernavn)
+
+## ─────────────────────────────────────────
+## utlogging - Logg ut gjeldende bruker
+## ─────────────────────────────────────────
+
+funksjon utlogging() -> resultat:
+    hvis _aktiv_bruker == ingen:
+        returner ok("Ingen bruker innlogget")
+
+    la navn = _aktiv_bruker.brukernavn
+    _aktiv_bruker = ingen
+    returner ok("Logget ut: " + navn)
+
+## ─────────────────────────────────────────
+## KRYPTERING
+## ─────────────────────────────────────────
+
+struktur KrypteringKonfig:
+    algoritme  : tekst = "AES-256-GCM"
+    nøkkel     : bytes          ## 256-bit nøkkel
+    salt       : bytes          ## Tilfeldig salt
+    iterasjoner: int   = 100000 ## PBKDF2-iterasjoner
+
+funksjon db_krypter(passord: tekst) -> resultat:
+    _krev_åpen()
+    _krev_admin()
+
+    ## Generer krypteringsnøkkel fra passord
+    la salt   = generer_sikre_bytes(32)
+    la nøkkel = pbkdf2_hmac_sha256(passord, salt, 100000, 32)
+    la iv     = generer_sikre_bytes(12)   ## AES-GCM IV
+
+    ## Les all databasedata
+    la data = fil_les_alt(_db.filsti)
+
+    ## Krypter med AES-256-GCM
+    la (kryptert, tag) = aes_gcm_krypter(data, nøkkel, iv)
+
+    ## Skriv kryptert fil: [salt(32)][iv(12)][tag(16)][kryptert data]
+    la f = fil_åpne(_db.filsti + ".enc", modus="skriv_binær")
+    fil_skriv(f, "NORSDB1ENC")   ## Magic for kryptert fil
+    fil_skriv(f, salt)
+    fil_skriv(f, iv)
+    fil_skriv(f, tag)
+    fil_skriv(f, kryptert)
+    fil_lukk(f)
+
+    ## Slett ukryptert fil
+    fil_slett(_db.filsti)
+    fil_gi_nytt_navn(_db.filsti + ".enc", _db.filsti)
+
+    returner ok("Database kryptert med AES-256-GCM")
+
+funksjon db_dekrypter(passord: tekst) -> resultat:
+    _krev_åpen()
+
+    la f = fil_åpne(_db.filsti, modus="les_binær")
+
+    ## Valider magic
+    la magic = fil_les_bytes(f, 10)
+    hvis magic != "NORSDB1ENC":
+        fil_lukk(f)
+        returner feil("Databasen er ikke kryptert")
+
+    ## Les krypteringsparametere
+    la salt    = fil_les_bytes(f, 32)
+    la iv      = fil_les_bytes(f, 12)
+    la tag     = fil_les_bytes(f, 16)
+    la kryptert = fil_les_resten(f)
+    fil_lukk(f)
+
+    ## Utled nøkkel
+    la nøkkel = pbkdf2_hmac_sha256(passord, salt, 100000, 32)
+
+    ## Dekrypter
+    prøv:
+        la data = aes_gcm_dekrypter(kryptert, nøkkel, iv, tag)
+        la f2 = fil_åpne(_db.filsti, modus="skriv_binær")
+        fil_skriv(f2, data)
+        fil_lukk(f2)
+        returner ok("Database dekryptert")
+    fang feil:
+        returner feil("Feil passord eller korrupt fil")
+
+## ─────────────────────────────────────────
+## INNDATAVALIDERING
+## ─────────────────────────────────────────
+
+funksjon _valider_mot_injeksjon(data: ordbok) -> resultat:
+    ## NorsDB bruker parameteriserte spørringer internt,
+    ## men ekstern input bør fortsatt valideres
+
+    for felt, verdi i data:
+        hvis er_tekst(verdi):
+            ## Sjekk for vanlige injeksjonsangrep
+            la farlige_mønstre = [
+                "'; DROP",
+                "OR 1=1",
+                "../",
+                "\0",
+                "<script"
+            ]
+            for mønster i farlige_mønstre:
+                hvis mønster i øvre(verdi):
+                    logg_advarsel("Mulig injeksjonsforsøk i felt '" + felt + "'")
+                    ## Ikke kast feil - logg og la parameterisering håndtere det
+
+    returner ok()
+
+funksjon _valider_passord(passord: tekst) -> resultat:
+    hvis lengde(passord) < 8:
+        returner feil("Passord må være minst 8 tegn")
+    hvis ikke inneholder_stor_bokstav(passord):
+        returner feil("Passord må inneholde minst én stor bokstav")
+    hvis ikke inneholder_tall(passord):
+        returner feil("Passord må inneholde minst ett tall")
+    returner ok()
+
+## ─────────────────────────────────────────
+## BACKUP
+## ─────────────────────────────────────────
+
+funksjon backup_opprett(
+    destinasjon: tekst = "",
+    komprimér  : bool  = sann
+) -> resultat:
+
+    _krev_åpen()
+
+    ## Generer standard filnavn hvis ikke oppgitt
+    la sti = destinasjon
+    hvis sti == "":
+        la dato_str = formater_dato(nå(), "ÅÅÅÅ-MM-DD_HH-MM-SS")
+        sti = _db.filsti + ".backup." + dato_str
+
+    ## Flush alle buffere til disk
+    _cache_tøm()
+
+    ## Kopier databasefil
+    fil_kopier(_db.filsti, sti)
+
+    ## Kopier indeks-fil hvis den finnes
+    hvis fil_finnes(_db.filsti + ".idx"):
+        fil_kopier(_db.filsti + ".idx", sti + ".idx")
+
+    ## Komprimer med zstd
+    hvis komprimér:
+        zstd_komprimer(sti, sti + ".zst")
+        fil_slett(sti)
+        sti = sti + ".zst"
+
+    la størrelse = fil_størrelse(sti)
+
+    returner ok({
+        "sti"      : sti,
+        "størrelse": størrelse,
+        "tid"      : nå()
+    })
+
+funksjon sikkerhetskopier(destinasjon: tekst = "", komprimér: bool = sann) -> resultat:
+    returner backup_opprett(destinasjon, komprimér)
+
+funksjon backup_gjenopprett(sti: tekst) -> resultat:
+    hvis _db.er_åpen:
+        returner feil("Lukk databasen før gjenoppretting. Bruk db_close() først.")
+
+    hvis ikke fil_finnes(sti):
+        returner feil("Backup-fil finnes ikke: " + sti)
+
+    ## Decomprimer hvis nødvendig
+    la kilde = sti
+    hvis slutter_med(sti, ".zst"):
+        la midlertidig = sti[:-4]
+        zstd_dekomprimer(sti, midlertidig)
+        kilde = midlertidig
+
+    ## Valider at det er en gyldig NorsDB-fil
+    la f = fil_åpne(kilde, modus="les_binær")
+    la magic = fil_les_tekst(f, 7)
+    fil_lukk(f)
+
+    hvis magic != NORSDB_MAGIC og magic != "NORSDB1E":
+        returner feil("Ugyldig backup-fil: " + sti)
+
+    ## Gjenopprett
+    la mål = fjern_utvidelse(kilde, ".backup.*")
+    fil_kopier(kilde, mål)
+
+    returner ok("Backup gjenopprettet til: " + mål)
+
+## ─────────────────────────────────────────
+## REVISJONLOGG
+## ─────────────────────────────────────────
+
+struktur Revisjonsoppføring:
+    tidsstempel: tid
+    bruker     : tekst
+    operasjon  : tekst
+    tabell     : tekst
+    rad_id     : int
+    detaljer   : tekst
+
+funksjon _logg_operasjon(operasjon: tekst, tabell: tekst, rad_id: int, detaljer: tekst):
+    la bruker = hvis _aktiv_bruker != ingen da _aktiv_bruker.brukernavn ellers "system"
+
+    la oppføring = Revisjonsoppføring(
+        tidsstempel = nå(),
+        bruker      = bruker,
+        operasjon   = operasjon,
+        tabell      = tabell,
+        rad_id      = rad_id,
+        detaljer    = detaljer
+    )
+
+    ## Skriv til revisjonlogg-tabell (hvis den finnes)
+    hvis "_norsdb_revisjon" i _tabeller:
+        _skriv_rad("_norsdb_revisjon", ordbok(oppføring))
+
+funksjon _logg_mislykket_innlogging(brukernavn: tekst):
+    logg_advarsel("Mislykket innlogging for: " + brukernavn + " fra " + gjeldende_ip())
+    ## Etter 5 forsøk, lås kontoen midlertidig
+    la forsøk = _innloggings_forsøk.hent(brukernavn, 0) + 1
+    _innloggings_forsøk[brukernavn] = forsøk
+    hvis forsøk >= 5:
+        _brukere[brukernavn].er_aktiv = usann
+        _skriv_brukere_til_disk()
+        logg_advarsel("Konto låst etter for mange mislykkede forsøk: " + brukernavn)
+
+## ─────────────────────────────────────────
+## INTERNE HJELPEFUNKSJONER
+## ─────────────────────────────────────────
+
+privat la _innloggings_forsøk: ordbok[tekst, int] = {}
+
+privat funksjon _krev_admin():
+    hvis _aktiv_bruker == ingen:
+        kast feil("Du må være logget inn")
+    hvis ADMINISTRER ikke i _aktiv_bruker.tillatelser:
+        kast feil("Administrator-tilgang kreves")
+
+funksjon _krev_tillatelse(tillatelse: Tillatelse):
+    hvis _aktiv_bruker == ingen:
+        ## Tillat intern systembruk uten innlogging
+        returner
+
+    hvis tillatelse ikke i _aktiv_bruker.tillatelser:
+        kast feil("Mangler tillatelse: " + tillatelse)
+
+privat funksjon _skriv_brukere_til_disk():
+    la sti = _db.filsti + ".users"
+    la data = krypter_lett(serialiser(_brukere), _db.nøkkel)
+    fil_skriv_alt(sti, data)
+
+funksjon _les_brukere_fra_disk():
+    returner
+
+funksjon _les_roller_fra_disk():
+    returner
+
+funksjon _skriv_roller_til_disk():
+    returner

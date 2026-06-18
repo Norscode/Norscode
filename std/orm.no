@@ -199,6 +199,564 @@ funksjon transaksjon_angre(conn: tekst) -> boolsk {
     returner db.rollback(conn)
 }
 
+funksjon _safe_savepoint_namn(namn: tekst) -> tekst {
+    la r = builtin.replace(namn, "\"", "")
+    r = builtin.replace(r, "'", "")
+    r = builtin.replace(r, ";", "")
+    r = builtin.replace(r, "-", "_")
+    r = builtin.replace(r, " ", "_")
+    hvis r == "" { returner "auto_savepoint" }
+    returner r
+}
+
+funksjon transaksjon_start_savepoint(conn: tekst, namn: tekst) -> boolsk {
+    la n = _safe_savepoint_namn(namn)
+    prøv {
+        la _ = db.execute(conn, "SAVEPOINT " + n + ";")
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+funksjon transaksjon_rull_til_savepoint(conn: tekst, namn: tekst) -> boolsk {
+    la n = _safe_savepoint_namn(namn)
+    prøv {
+        la _ = db.execute(conn, "ROLLBACK TO SAVEPOINT " + n + ";")
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+funksjon transaksjon_release_savepoint(conn: tekst, namn: tekst) -> boolsk {
+    la n = _safe_savepoint_namn(namn)
+    prøv {
+        la _ = db.execute(conn, "RELEASE SAVEPOINT " + n + ";")
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+// ─── Constraints og indeksar ────────────────────────────────────────────────
+
+funksjon _safe_ident(namn: tekst) -> tekst {
+    la r = builtin.replace(namn, "\"", "")
+    r = builtin.replace(r, ";", "")
+    r = builtin.replace(r, "-", "_")
+    r = builtin.replace(r, " ", "_")
+    hvis r == "" { returner "x" }
+    returner r
+}
+
+funksjon _indeks_felter_sql(felt: tekst) -> tekst {
+    la rå_felter = builtin.split(felt, ",")
+    la normalisert: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(rå_felter) {
+        la f = builtin.trim(rå_felter[i])
+        hvis f != "" {
+            la f = _safe_ident(f)
+            legg_til(normalisert, f)
+        }
+        i = i + 1
+    }
+    hvis lengde(normalisert) == 0 { returner "" }
+    returner builtin.join(normalisert, ", ")
+}
+
+funksjon indeks_namn(tabell: tekst, felt: tekst, unik: boolsk) -> tekst {
+    la prefix = hvis unik { "ux_" } elles { "ix_" }
+    la ren = _safe_ident(tabell)
+    la felt_sql = _indeks_felter_sql(felt)
+    hvis felt_sql == "" { returner prefix + ren }
+    la felter = _indeks_felter_identer(felt_sql)
+    hvis lengde(felter) == 0 { returner prefix + ren }
+    la del = _join_felter_identer(felter)
+    hvis del == "" { returner prefix + ren }
+    returner prefix + ren + "_" + del
+}
+
+funksjon _indeks_felter_identer(felt_sql: tekst) -> liste_tekst {
+    la deler = builtin.split(felt_sql, ",")
+    la identer: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la f = builtin.trim(deler[i])
+        hvis f != "" { legg_til(identer, _safe_ident(f)) }
+        i = i + 1
+    }
+    returner identer
+}
+
+funksjon _join_felter_identer(felter: liste_tekst) -> tekst {
+    hvis lengde(felter) == 0 { returner "" }
+    la i: heiltall = 0
+    la del: tekst = ""
+    mens i < lengde(felter) {
+        hvis i > 0 { del = del + "_" }
+        del = del + felter[i]
+        i = i + 1
+    }
+    returner del
+}
+
+funksjon legg_indeks(
+    conn: tekst,
+    tabell: tekst,
+    felt: tekst,
+    unik: boolsk,
+    namn: tekst
+) -> boolsk {
+    la kolonner = _indeks_felter_identer(_indeks_felter_sql(felt))
+    hvis lengde(kolonner) == 0 { returner usann }
+    la idx_namn: tekst
+    hvis namn == "" {
+        la idx = indeks_namn(tabell, felt, unik)
+        idx_namn = idx
+    } elles {
+        idx_namn = _safe_ident(namn)
+    }
+    la prefix = hvis unik { "CREATE UNIQUE INDEX IF NOT EXISTS " } elles { "CREATE INDEX IF NOT EXISTS " }
+    la sql = prefix + idx_namn + " ON " + _safe_ident(tabell) + " (" + builtin.join(kolonner, ", ") + ");"
+    prøv {
+        la _ = db.execute(conn, sql)
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+funksjon slett_indeks(conn: tekst, namn: tekst) -> boolsk {
+    la i = _safe_ident(namn)
+    prøv {
+        la _ = db.execute(conn, "DROP INDEX IF EXISTS " + i + ";")
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+funksjon indeks_finnes(conn: tekst, namn: tekst) -> boolsk {
+    la r = spør(conn, "SELECT name FROM sqlite_master WHERE type='index' AND name='" + _escape(namn) + "';")
+    returner lengde(r) > 0
+}
+
+funksjon indeks_for_tabell(conn: tekst, tabell: tekst) -> liste<ordbok_tekst> {
+    la t = _safe_ident(tabell)
+    returner spør(conn, "PRAGMA index_list(" + t + ");")
+}
+
+funksjon constraint_fk_sql(felt: tekst, referanse_tabell: tekst, referanse_felt: tekst) -> tekst {
+    returner "FOREIGN KEY(" + _safe_ident(felt) + ") REFERENCES " + _safe_ident(referanse_tabell) + " (" + _safe_ident(referanse_felt) + ")"
+}
+
+funksjon constraint_unique_sql(felter: tekst) -> tekst {
+    la kolonner = _indeks_felter_sql(felt)
+    hvis kolonner == "" { returner "" }
+    returner "UNIQUE(" + kolonner + ")"
+}
+
+funksjon constraint_check_sql(uttrykk: tekst) -> tekst {
+    hvis builtin.trim(uttrykk) == "" { returner "" }
+    returner "CHECK(" + uttrykk + ")"
+}
+
+# ─── Query-set API (chainbar) ────────────────────────────────────────────────
+
+funksjon query_set(conn: tekst, tabell: tekst) -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    q["conn"] = conn
+    q["tabell"] = tabell
+    q["alias"] = tabell
+    q["where"] = "[]"
+    q["joins"] = "[]"
+    q["group_by"] = "[]"
+    q["select"] = "*"
+    q["order"] = ""
+    q["order_dir"] = "ASC"
+    q["limit"] = ""
+    q["offset"] = ""
+    q["page"] = ""
+    q["per_side"] = ""
+    returner q
+}
+
+funksjon _query_liste(where: tekst) -> liste<tekst> {
+    hvis where == "" eller where == "[]" { returner [] }
+    la parsed = builtin.json_parse(where)
+    hvis builtin.type(parsed) == "liste" { returner parsed }
+    returner []
+}
+
+// ─── Relasjonar og joins ──────────────────────────────────────────────────
+
+funksjon relasjon_felt(namn: tekst, referanse: tekst, nøkkel: tekst) -> tekst {
+    hvis namn == "" eller referanse == "" eller nøkkel == "" {
+        returner namn + " INTEGER"
+    }
+    returner namn + " INTEGER REFERENCES " + referanse + " (" + nøkkel + ")"
+}
+
+funksjon join(q: ordbok_tekst, tabell: tekst, lokal_felt: tekst, referanse_felt: tekst, alias: tekst) -> ordbok_tekst {
+    la a = hvis alias == "" { tabell } ellers { alias }
+    la spec = tabell + "|" + lokal_felt + "|" + referanse_felt + "|" + a
+    returner _query_sette_liste(q, "joins", spec)
+}
+
+funksjon join_raw(q: ordbok_tekst, sql: tekst) -> ordbok_tekst {
+    returner _query_sette_liste(q, "joins", "RAW|" + sql)
+}
+
+funksjon select(q: ordbok_tekst, felt: tekst) -> ordbok_tekst {
+    hvis builtin.trim(felt) != "" {
+        q["select"] = felt
+    }
+    returner q
+}
+
+funksjon many_to_many_tabell(tabell_a: tekst, tabell_b: tekst) -> tekst {
+    hvis tabell_a < tabell_b {
+        returner "m2m_" + tabell_a + "_" + tabell_b
+    }
+    hvis tabell_b < tabell_a {
+        returner "m2m_" + tabell_b + "_" + tabell_a
+    }
+    returner "m2m_" + tabell_a
+}
+
+funksjon join_many_to_many(
+    q: ordbok_tekst,
+    gjennom_tabell: tekst,
+    this_fk: tekst,
+    other_fk: tekst,
+    mål_tabell: tekst,
+    mål_fk: tekst,
+    mål_alias: tekst,
+    base_alias: tekst
+) -> ordbok_tekst {
+    la root_alias = hvis base_alias == "" { q["alias"] } ellers { base_alias }
+    la alias_join = "j_" + gjennom_tabell
+    la alias_mål = hvis mål_alias == "" { mål_tabell } ellers { mål_alias }
+    la venstre = "LEFT JOIN " + gjennom_tabell + " AS " + alias_join + " ON (" + root_alias + ".id = " + alias_join + "." + this_fk + ")"
+    la høgre = "LEFT JOIN " + mål_tabell + " AS " + alias_mål + " ON (" + alias_join + "." + other_fk + " = " + alias_mål + "." + mål_fk + ")"
+    la temp = join_raw(q, venstre)
+    returner join_raw(temp, høgre)
+}
+
+funksjon _join_sql(q: ordbok_tekst) -> tekst {
+    la joins = _query_liste(q["joins"])
+    hvis lengde(joins) == 0 { returner "" }
+    la t = q["tabell"]
+    la i: heiltall = 0
+    la sql = ""
+    mens i < lengde(joins) {
+        la spec = joins[i]
+        la deler = builtin.split(spec, "|")
+        hvis lengde(deler) > 0 {
+            la type = builtin.trim(deler[0])
+            hvis type == "RAW" {
+                la rå = ""
+                la j: heiltall = 1
+                mens j < lengde(deler) {
+                    hvis j > 1 { rå = rå + "|" }
+                    rå = rå + deler[j]
+                    j = j + 1
+                }
+                sql = sql + " " + rå
+            } ellers {
+                hvis lengde(deler) == 4 {
+                    la join_tabell = builtin.trim(deler[0])
+                    la local_col = builtin.trim(deler[1])
+                    la remote_col = builtin.trim(deler[2])
+                    la alias = builtin.trim(deler[3])
+                    la ali = hvis alias == "" { join_tabell } ellers { alias }
+                    sql = sql + " LEFT JOIN " + join_tabell + " AS " + ali + " ON (" + t + "." + local_col + " = " + ali + "." + remote_col + ")"
+                }
+            }
+        }
+        i = i + 1
+    }
+    hvis sql == "" {
+        returner ""
+    }
+    returner " " + sql
+}
+
+// ─── Reverse- og FK-hjelparar ─────────────────────────────────────────────
+
+funksjon hent_fk_objekt(conn: tekst, tabell: tekst, id: heltall, fk_felt: tekst, referanse_tabell: tekst, referanse_felt: tekst) -> ordbok_tekst {
+    la prim = finn(conn, tabell, id)
+    hvis ikkje har_nokkel(prim, fk_felt) { returner {} }
+    la fk_verdi = prim[fk_felt]
+    returner finn_ved(conn, referanse_tabell, referanse_felt, fk_verdi)
+}
+
+funksjon hent_knytteobjekt(conn: tekst, tabell: tekst, id: heiltall, fk_felt: tekst, referanse_tabell: tekst) -> ordbok_tekst {
+    returner hent_fk_objekt(conn, tabell, id, fk_felt, referanse_tabell, "id")
+}
+
+funksjon reverser_knyting(conn: tekst, barn_tabell: tekst, fk_felt: tekst, forelder_tabell: tekst, forelder_id: heiltall) -> liste<ordbok_tekst> {
+    la sql = "SELECT * FROM " + barn_tabell + " WHERE " + fk_felt + " = " + tekst_fra_heltall(forelder_id) + ";"
+    la _ = forelder_tabell
+    returner spør(sql)
+}
+
+funksjon reverser_many_to_many(
+    conn: tekst,
+    gjennom_tabell: tekst,
+    mål_tabell: tekst,
+    this_fk: tekst,
+    this_id: heiltall,
+    gjennom_fk_til_mål: tekst,
+    mål_fk: tekst,
+    mål_alias: tekst
+) -> liste<ordbok_tekst> {
+    la alias = hvis mål_alias == "" { mål_tabell } ellers { mål_alias }
+    la sql = "SELECT " + alias + ".* FROM " + mål_tabell + " AS " + alias + " INNER JOIN " + gjennom_tabell + " AS j ON " + alias + "." + mål_fk + " = j." + gjennom_fk_til_mål + " WHERE j." + this_fk + " = " + tekst_fra_heltall(this_id) + ";"
+    returner spør(sql)
+}
+
+funksjon _query_sette_liste(q: ordbok_tekst, nøkkel: tekst, verdi: tekst) -> ordbok_tekst {
+    la liste = _query_liste(q[nøkkel])
+    legg_til(liste, verdi)
+    q[nøkkel] = builtin.json_stringify(liste)
+    returner q
+}
+
+funksjon filter(q: ordbok_tekst, betingelse: tekst) -> ordbok_tekst {
+    hvis betingelse == "" { returner q }
+    returner _query_sette_liste(q, "where", betingelse)
+}
+
+funksjon exclude(q: ordbok_tekst, betingelse: tekst) -> ordbok_tekst {
+    hvis betingelse == "" { returner q }
+    la k0 = "NOT (" + betingelse + ")"
+    returner _query_sette_liste(q, "where", k0)
+}
+
+funksjon filter_eq(q: ordbok_tekst, felt: tekst, verdi: tekst) -> ordbok_tekst {
+    la escaped = _escape(verdi)
+    la cond = felt + " = '" + escaped + "'"
+    returner filter(q, cond)
+}
+
+funksjon sort(q: ordbok_tekst, felt: tekst, retning: tekst) -> ordbok_tekst {
+    hvis retning != "ASC" og retning != "DESC" { retning = "ASC" }
+    q["order"] = felt
+    q["order_dir"] = retning
+    returner q
+}
+
+funksjon order_by(q: ordbok_tekst, felt: tekst, retning: tekst) -> ordbok_tekst {
+    returner sort(q, felt, retning)
+}
+
+funksjon limit(q: ordbok_tekst, verdi: heiltall) -> ordbok_tekst {
+    la v = verdi
+    hvis v < 0 { v = 0 }
+    q["limit"] = tekst_fra_heltall(v)
+    returner q
+}
+
+funksjon offset(q: ordbok_tekst, verdi: heiltall) -> ordbok_tekst {
+    la v = verdi
+    hvis v < 0 { v = 0 }
+    q["offset"] = tekst_fra_heltall(v)
+    returner q
+}
+
+funksjon page(q: ordbok_tekst, side: heiltall, per_side: heiltall) -> ordbok_tekst {
+    la s = side
+    la p = per_side
+    hvis s < 1 { s = 1 }
+    hvis p < 1 { p = 20 }
+    q["page"] = tekst_fra_heltall(s)
+    q["per_side"] = tekst_fra_heltall(p)
+    q["offset"] = tekst_fra_heltall((s - 1) * p)
+    q["limit"] = tekst_fra_heltall(p)
+    returner q
+}
+
+funksjon _where_sql(q: ordbok_tekst) -> tekst {
+    la w = _query_liste(q["where"])
+    hvis lengde(w) == 0 { returner "" }
+    la i: heiltall = 0
+    la deler: liste_tekst = []
+    mens i < lengde(w) {
+        legg_til(deler, w[i])
+        i = i + 1
+    }
+    returner " WHERE " + tekst_saman(deler, " AND ")
+}
+
+funksjon _group_by_sql(q: ordbok_tekst) -> tekst {
+    la grupper = _query_liste(q["group_by"])
+    hvis lengde(grupper) == 0 { returner "" }
+    la i: heiltall = 0
+    la deler: liste_tekst = []
+    mens i < lengde(grupper) {
+        legg_til(deler, grupper[i])
+        i = i + 1
+    }
+    returner " GROUP BY " + tekst_saman(deler, ", ")
+}
+
+funksjon _aggregat_alias(operasjon: tekst) -> tekst {
+    hvis operasjon == "COUNT" { returner "count" }
+    hvis operasjon == "SUM" { returner "sum" }
+    hvis operasjon == "AVG" { returner "avg" }
+    hvis operasjon == "MIN" { returner "min" }
+    hvis operasjon == "MAX" { returner "max" }
+    returner "verdi"
+}
+
+funksjon _normaliser_aggregat(operasjon: tekst) -> tekst {
+    la op = builtin.trim(operasjon)
+    hvis op == "COUNT" eller op == "count" { returner "COUNT" }
+    hvis op == "SUM" eller op == "sum" { returner "SUM" }
+    hvis op == "AVG" eller op == "avg" { returner "AVG" }
+    hvis op == "MIN" eller op == "min" { returner "MIN" }
+    hvis op == "MAX" eller op == "max" { returner "MAX" }
+    returner ""
+}
+
+funksjon annotate(q: ordbok_tekst, uttrykk: tekst, alias: tekst) -> ordbok_tekst {
+    la e = builtin.trim(uttrykk)
+    hvis e == "" { returner q }
+    la a = builtin.trim(alias)
+    la del: tekst = e
+    hvis a != "" { del = e + " AS " + a }
+    hvis q["select"] == "*" {
+        q["select"] = del
+    } ellers {
+        q["select"] = q["select"] + ", " + del
+    }
+    returner q
+}
+
+funksjon group_by(q: ordbok_tekst, felt: tekst) -> ordbok_tekst {
+    hvis builtin.trim(felt) == "" { returner q }
+    returner _query_sette_liste(q, "group_by", felt)
+}
+
+funksjon aggregate(
+    q: ordbok_tekst,
+    operasjon: tekst,
+    felt: tekst,
+    alias: tekst,
+) -> liste<ordbok_tekst> {
+    la op = _normaliser_aggregat(operasjon)
+    hvis op == "" { returner [] }
+    la agg_felt = felt
+    hvis builtin.trim(agg_felt) == "" { agg_felt = "*" }
+    la t = q["tabell"]
+    la alias_namn = builtin.trim(alias)
+    hvis alias_namn == "" { alias_namn = _aggregat_alias(op) }
+    la grunnselect = q["select"]
+    hvis grunnselect == "*" { grunnselect = "" }
+    la sql = "SELECT "
+    hvis grunnselect != "" {
+        la mellom = ", " + op + "(" + agg_felt + ") AS " + alias_namn
+        sql = sql + grunnselect + mellom
+    } ellers {
+        sql = sql + op + "(" + agg_felt + ") AS " + alias_namn
+    }
+    la sql_med = sql + " FROM " + t + _join_sql(q) + _where_sql(q) + _group_by_sql(q)
+    returner spør(sql_med)
+}
+
+funksjon aggregate_scalar(
+    q: ordbok_tekst,
+    operasjon: tekst,
+    felt: tekst,
+    alias: tekst,
+) -> tekst {
+    la alias_namn = builtin.trim(alias)
+    la rader = aggregate(q, operasjon, felt, alias_namn)
+    hvis lengde(rader) == 0 { returner "" }
+    la rad = rader[0]
+    hvis alias_namn == "" { alias_namn = _aggregat_alias(_normaliser_aggregat(operasjon)) }
+    hvis har_nokkel(rad, alias_namn) { returner rad[alias_namn] }
+    la nøklar = nøkler(rad)
+    hvis lengde(nøklar) > 0 { returner rad[nøklar[0]] }
+    returner ""
+}
+
+funksjon count_expr(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "COUNT", felt, "count")
+}
+
+funksjon aggregate_count(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "COUNT", felt, "count")
+}
+
+funksjon aggregate_sum(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "SUM", felt, "sum")
+}
+
+funksjon aggregate_avg(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "AVG", felt, "avg")
+}
+
+funksjon aggregate_min(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "MIN", felt, "min")
+}
+
+funksjon aggregate_max(q: ordbok_tekst, felt: tekst) -> tekst {
+    returner aggregate_scalar(q, "MAX", felt, "max")
+}
+
+funksjon _order_sql(q: ordbok_tekst) -> tekst {
+    hvis q["order"] == "" { returner "" }
+    returner " ORDER BY " + q["order"] + " " + q["order_dir"]
+}
+
+funksjon _limit_sql(q: ordbok_tekst) -> tekst {
+    la lim = q["limit"]
+    la off = q["offset"]
+    hvis lim == "" { returner "" }
+    hvis off == "" { returner " LIMIT " + lim }
+    returner " LIMIT " + lim + " OFFSET " + off
+}
+
+funksjon all(q: ordbok_tekst) -> liste<ordbok_tekst> {
+    la c = q["conn"]
+    la t = q["tabell"]
+    la sql = "SELECT " + q["select"] + " FROM " + t + _join_sql(q) + _where_sql(q) + _group_by_sql(q) + _order_sql(q)
+    la sql_med_limit = sql + _limit_sql(q)
+    returner spør(sql_med_limit)
+}
+
+funksjon page_result(q: ordbok_tekst) -> liste<ordbok_tekst> {
+    returner all(q)
+}
+
+funksjon forside(q: ordbok_tekst) -> liste<ordbok_tekst> {
+    returner page_result(q)
+}
+
+funksjon first(q: ordbok_tekst) -> ordbok_tekst {
+    la temp = limit(q, 1)
+    la res = all(temp)
+    hvis lengde(res) > 0 { returner res[0] }
+    returner {}
+}
+
+funksjon count(q: ordbok_tekst) -> heiltall {
+    la c = q["conn"]
+    la t = q["tabell"]
+    la sql = "SELECT COUNT(*) FROM " + t + _where_sql(q) + ";"
+    returner db.query_int(c, sql)
+}
+
+funksjon get(q: ordbok_tekst) -> ordbok_tekst {
+    la temp = limit(q, 1)
+    la res = all(temp)
+    hvis lengde(res) > 0 { returner res[0] }
+    returner {}
+}
 # ─── Interne hjelpere ─────────────────────────────────────────────────────────
 
 funksjon _escape(v: tekst) -> tekst {

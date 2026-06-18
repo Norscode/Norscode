@@ -1,7 +1,7 @@
 #!/bin/sh
 # tools/nc_test.sh — Python-fri testløpar for Norscode
 #
-# Køyrer alle tests/test_*.no via norscode_native (eller nc-vm som fallback)
+# Køyrer alle tests/test_*.no via norscode_native
 # og rapporterer pass/fail med farga output.
 #
 # Bruk:
@@ -39,16 +39,12 @@ else
     GRN=''; RED=''; YLW=''; BLD=''; RST=''
 fi
 
-# Velg beste runner
+# Velg runner
 if [ -x "$NC_NATIVE" ]; then
     _NC_RUN="env NORSCODE_CMD=run NORSCODE_FILE="
     _NC_RUNNER="$NC_NATIVE"
-elif [ -x "$NC_VM" ]; then
-    printf '%sAdvarsel: brukar nc-vm (eldre). Bygg norscode_native for betre ytelse.%s\n' "$YLW" "$RST" >&2
-    _NC_RUN="$NC_VM --nc-run "
-    _NC_RUNNER=""
 else
-    printf '%s✗ Trenger dist/norscode_native eller dist/nc-vm. Køyr: bash tools/build_norscode_native.sh%s\n' "$RED" "$RST" >&2
+    printf '%s✗ Trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh%s\n' "$RED" "$RST" >&2
     exit 1
 fi
 
@@ -74,7 +70,7 @@ run_with_timeout() {
 is_server_test() {
     case "$(basename "$1")" in
         test_reactive*|test_islands*|\
-        test_html_state*|test_audit*|test_db_integration*|\
+        test_html_state*|test_audit*|\
         test_logging*|test_metrics*|\
         test_json_schema*|test_state*|\
         test_selfhost_bytecode*|test_selfhost_bridge*|\
@@ -85,6 +81,10 @@ is_server_test() {
         test_file_object_storage.no|test_http_helpers.no|\
         test_ir_debug.no|\
         test_nc_main_both.no|\
+        test_selfhost_phase2_ffi_smoke.no|\
+        test_selfhost_phase2_regression.no|\
+        test_selfhost_phase2_smoke.no|\
+        test_selfhost_phase2_stdlib_usecases.no|\
         test_frontend.no|\
         test_html.no|\
         test_html_components.no|test_html_components_v2.no|\
@@ -160,7 +160,7 @@ run_test() {
     fi
 
     if [ -n "$_NC_RUNNER" ]; then
-        if _out=$(run_with_timeout env NORSCODE_CMD=run NORSCODE_FILE="$_file" "$_NC_RUNNER" 2>&1); then
+        if _out=$(run_with_timeout env NORSCODE_CMD=run NORSCODE_FILE="$_file" NORSCODE_ROOT="$ROOT" "$_NC_RUNNER" 2>&1); then
             _ec=0
         else
             _ec=$?

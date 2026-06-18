@@ -1,11 +1,11 @@
-# Lokal maintainer-output (historisk vedlikehaldsbane)
+# Lokal historisk output (vedlikehaldsbane)
 
 `bootstrap/maint/c/` er ikkje brukt som aktiv normalflate, og bør normalt vere tomt.
 Vedlikehald/regen-output går i staden til `build/maintainer_regen/` som standard.
 `norscode_generated.c` er no normalt skrive til `REGEN_ROOT/maint/c/norscode_generated.c`.
 
 ```bash
-# Maintainer (krev seed i bootstrap/stage0/ eller release):
+# Historisk vedlikehald (krev seed i bootstrap/stage0/ eller release):
 NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash tools/build_norscode_native.sh
 
 # eller

@@ -1,23 +1,17 @@
 #!/usr/bin/env bash
 # tools/build_norscode_native.sh
 #
-# Sikrar at dist/norscode_native finst (bootstrap-/stage-0 runtime).
+# Sikrar at dist/norscode_native finst utan C eller Python.
 #
-# Rekkefølge (default / normal flyt):
+# Rekkefølge:
 #   1. Eksisterande, fungerande dist/norscode_native
-#   2. bootstrap/stage0/norscode-<plattform> (seed)
-#   3. GitHub Release (seed)
-#   4. NORSCODE_BOOTSTRAP_C=1 + isolert maintainer-output + clang (berre maintainer / regen)
-# Den gjenværende C-hostgrensa er bootstrap, ikkje normal kjede.
-#
-# Ved REGEN=1 (maintainer): seed → tools/maint/regen_native.sh → valfri BOOTSTRAP_C_ROOT → clang
+#   2. bootstrap/stage0/norscode-<plattform> (committed seed)
+#   3. GitHub Release (ferdig native seed)
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${ROOT}/dist/norscode_native"
-REGEN="${REGEN:-0}"
 SMOKE_ENABLED="${NORSCODE_REQUIRE_SMOKE:-1}"
-BOOTSTRAP_C_ROOT="${BOOTSTRAP_C_ROOT:-${ROOT}/build/maintainer_regen}"
-STATIC_STAGE0="${NORSCODE_STATIC_STAGE0:-0}"
 
 platform_name() {
     OS="$(uname -s)"
@@ -90,21 +84,23 @@ smoke_ok() {
 
 smoke_check() {
     if [ "$SMOKE_ENABLED" != "1" ]; then
-        printf '⚠️  Dist-smoke er slått av (NORSCODE_REQUIRE_SMOKE=0)\n'
+        printf 'Dist-smoke er slått av (NORSCODE_REQUIRE_SMOKE=0)\n'
         return 0
     fi
     if smoke_ok "$1"; then
         return 0
     fi
     if [ "${CI:-0}" != "1" ] && same_bytes_as_stage0_seed "$1"; then
-        printf '⚠️  Dist-smoke feila lokalt, men binæren matcher committed stage-0-seed byte for byte.\n'
-        printf '⚠️  Held fram lokalt; CI krev framleis full smoke.\n'
+        printf 'Dist-smoke feila lokalt, men binæren matcher committed stage-0-seed byte for byte.\n'
+        printf 'Held fram lokalt; CI krev framleis full smoke.\n'
         return 0
     fi
     return 1
 }
 
 copy_stage0_binary() {
+    local platform
+    local stage0
     platform="$(platform_name)" || return 1
     stage0="${ROOT}/bootstrap/stage0/norscode-${platform}"
     [ -f "$stage0" ] || return 1
@@ -114,17 +110,24 @@ copy_stage0_binary() {
     chmod +x "$OUT"
     case "$(uname -s)" in
         Darwin)
-            # Materialiser ein rein lokal kopi på macOS.
-            # Direkte stage-0-symlink kan bli drepen av vertsmetadata/provenance sjølv når binæren er byte-lik.
             xattr -c "$OUT" 2>/dev/null || true
             ;;
     esac
-    printf "✓ dist/norscode_native ← bootstrap/stage0/norscode-%s (%d bytes)\n" \
+    printf "dist/norscode_native <- bootstrap/stage0/norscode-%s (%d bytes)\n" \
         "$platform" "$(wc -c < "$OUT" | tr -d ' ')"
     return 0
 }
 
 download_release_binary() {
+    local repo
+    local platform
+    local asset_name
+    local releases_url
+    local token
+    local release_json
+    local download_url
+    local tmp_file
+
     repo="${NORSCODE_RELEASE_REPO:-${GITHUB_REPOSITORY:-Norscode/Norscode}}"
     platform="$(platform_name)" || return 1
     asset_name="norscode-${platform}"
@@ -133,25 +136,19 @@ download_release_binary() {
 
     if command -v curl >/dev/null 2>&1; then
         if [ -n "$token" ]; then
-            fetch_json=(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json")
-            fetch_file=(curl -fsSL -L -H "Authorization: Bearer $token" -H "Accept: application/octet-stream")
+            release_json="$(curl -fsSL -H "Authorization: Bearer $token" -H "Accept: application/vnd.github+json" "$releases_url" 2>/dev/null)" || return 1
         else
-            fetch_json=(curl -fsSL)
-            fetch_file=(curl -fsSL -L)
+            release_json="$(curl -fsSL "$releases_url" 2>/dev/null)" || return 1
         fi
     elif command -v wget >/dev/null 2>&1; then
         if [ -n "$token" ]; then
-            fetch_json=(wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/vnd.github+json")
-            fetch_file=(wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/octet-stream")
+            release_json="$(wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/vnd.github+json" "$releases_url" 2>/dev/null)" || return 1
         else
-            fetch_json=(wget -qO-)
-            fetch_file=(wget -qO-)
+            release_json="$(wget -qO- "$releases_url" 2>/dev/null)" || return 1
         fi
     else
         return 1
     fi
-
-    release_json="$("${fetch_json[@]}" "$releases_url" 2>/dev/null)" || return 1
 
     if command -v jq >/dev/null 2>&1; then
         download_url="$(printf '%s' "$release_json" | jq -r --arg n "$asset_name" \
@@ -164,7 +161,19 @@ download_release_binary() {
 
     tmp_file="$(mktemp)"
     trap 'rm -f "$tmp_file"' EXIT
-    "${fetch_file[@]}" "$download_url" > "$tmp_file" || { rm -f "$tmp_file"; trap - EXIT; return 1; }
+    if command -v curl >/dev/null 2>&1; then
+        if [ -n "$token" ]; then
+            curl -fsSL -L -H "Authorization: Bearer $token" -H "Accept: application/octet-stream" "$download_url" > "$tmp_file" || return 1
+        else
+            curl -fsSL -L "$download_url" > "$tmp_file" || return 1
+        fi
+    else
+        if [ -n "$token" ]; then
+            wget -qO- --header="Authorization: Bearer $token" --header="Accept: application/octet-stream" "$download_url" > "$tmp_file" || return 1
+        else
+            wget -qO- "$download_url" > "$tmp_file" || return 1
+        fi
+    fi
     mkdir -p "$(dirname "$OUT")"
     mv "$tmp_file" "$OUT"
     chmod +x "$OUT"
@@ -172,138 +181,26 @@ download_release_binary() {
     return 0
 }
 
-bootstrap_c_present() {
-    [ -f "${BOOTSTRAP_C_ROOT}/maint/c/norscode_generated.c" ]
-}
-
-regen_bootstrap_c() {
-    if ! [ -x "${ROOT}/dist/norscode_native" ]; then
-        printf 'Feil: trenger seed (dist/norscode_native) for regen\n' >&2
-        return 1
-    fi
-    printf 'Maintainer-modus: regenererer maintainer-output frå .no i %s/maint/c/ (L6)...\n' "$BOOTSTRAP_C_ROOT" >&2
-    REGEN_ROOT="${BOOTSTRAP_C_ROOT}" bash "${ROOT}/tools/maint/regen_native.sh" || return 1
-    bootstrap_c_present
-}
-
-build_from_bootstrap_c() {
-    local gen="${BOOTSTRAP_C_ROOT}/maint/c/norscode_generated.c"
-    local main
-    if [ -f "${ROOT}/tools/maint/c/nc_native_main.c" ]; then
-        main="${ROOT}/tools/maint/c/nc_native_main.c"
-    else
-        main="${ROOT}/archive/legacy_c_backend/nc_native_main.c"
-    fi
-    local tmp=""
-
-    for f in "$gen" "$main"; do
-        if [ ! -f "$f" ]; then
-            printf 'Feil: manglar %s (stage-0 C-kjelde)\n' "$f" >&2
-            return 1
-        fi
-    done
-
-    CC="${CC:-clang}"
-    command -v "$CC" >/dev/null 2>&1 || CC=cc
-    command -v "$CC" >/dev/null 2>&1 || {
-        printf 'Feil: maintainer-regenerering krev clang eller gcc for stage-0-bygg\n' >&2
-        return 1
-    }
-
-    mkdir -p "$(dirname "$OUT")"
-    tmp="$(mktemp "${TMPDIR:-/tmp}/nc_native_XXXXXX.c" 2>/dev/null || echo "${TMPDIR:-/tmp}/nc_native_$$.c")"
-    trap 'test -n "${tmp:-}" && rm -f "$tmp"' EXIT
-
-    # norscode_generated.c har runtime innebygd; ikkje legg til tools/maint/ runtime-filer eksplisitt
-    {
-        printf '/* Host FFI forward decl (Omgang 4) */\n'
-        printf 'struct NcVal;\n'
-        printf 'typedef struct NcVal NcVal;\n'
-        printf 'NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na);\n'
-        printf 'NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na);\n\n'
-        grep -v '#include.*nc_runtime' "$gen" | sed 's/^int main/static int nc_gen_main/'
-    } >> "$tmp"
-    cat "$main" >> "$tmp"
-
-    printf 'Maintainer-modus: kompilerer norscode_native frå %s/maint/c (stage-0, %s)...\n' "$BOOTSTRAP_C_ROOT" "$CC" >&2
-    # Detect sqlite3 linkage
-    # On macOS, sqlite3 ships with Xcode/CommandLineTools → always use -lsqlite3.
-    # On Linux, prefer -lsqlite3 (libsqlite3-dev); fall back to direct .so path.
-    _sqlite_flag="-lsqlite3"
-    _static_flag=""
-    _static_extra_libs=""
-    case "$(uname -s)" in
-        Linux)
-            if [ "$STATIC_STAGE0" = "1" ]; then
-                _static_flag="-static"
-                _static_extra_libs="-lm"
-            fi
-            # Test with a trivial source to confirm -lsqlite3 links
-            _sqlite_test=$(mktemp /tmp/nc_sq_XXXXXX.c)
-            printf 'int sqlite3_open(const char*,void**); int main(){return 0;}\n' > "$_sqlite_test"
-            if ! "$CC" -o /dev/null "$_sqlite_test" -lsqlite3 2>/dev/null; then
-                _found=$(find /usr/lib /usr/local/lib 2>/dev/null -name "libsqlite3.so*" | sort | head -1)
-                [ -n "$_found" ] && _sqlite_flag="-Wl,$_found" || _sqlite_flag=""
-            fi
-            rm -f "$_sqlite_test"
-            ;;
-    esac
-    if ! "$CC" -O2 -Wno-everything -o "$OUT" "$tmp" $_static_flag $_sqlite_flag $_static_extra_libs; then
-        _clang_ec=$?
-        rm -f "$tmp"
-        tmp=""
-        printf 'Feil: clang kompilering feila (exit %d)\n' "$_clang_ec" >&2
-        return 1
-    fi
-    rm -f "$tmp"
-    tmp=""
-    trap - EXIT
-    chmod +x "$OUT"
-
-    smoke_ok "$OUT" || {
-        printf 'Feil: bygget binær feila NORSCODE_CMD-røyktest\n' >&2
-        return 1
-    }
-    printf "✓ dist/norscode_native bygget i maintainer-modus frå %s/maint/c (%d bytes)\n" "$BOOTSTRAP_C_ROOT" "$(wc -c < "$OUT" | tr -d ' ')"
-    return 0
-}
-
-if [ "$REGEN" != "1" ] && [ -x "$OUT" ] && smoke_check "$OUT"; then
-    :
-    printf "✓ dist/norscode_native er allereie bygget (%d KB)\n" "$(( $(wc -c < "$OUT") / 1024 ))"
+if [ -x "$OUT" ] && smoke_check "$OUT"; then
+    printf "dist/norscode_native er allereie bygget (%d KB)\n" "$(( $(wc -c < "$OUT") / 1024 ))"
     exit 0
 fi
 
 mkdir -p "$(dirname "$OUT")"
 
-if copy_stage0_binary; then :
+if copy_stage0_binary; then
+    :
 elif download_release_binary; then
-    printf "✓ dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
+    printf "dist/norscode_native lasta ned frå release (%d bytes)\n" "$(wc -c < "$OUT" | tr -d ' ')"
 else
     platform="$(platform_name 2>/dev/null || printf '?')"
-    printf '\n=== Kunne ikkje skaffe norscode_native ===\n' >&2
-    printf 'Køyr: bash tools/fetch_stage0_seed.sh\n' >&2
-    printf 'Eller legg norscode-%s i bootstrap/stage0/,\n' "$platform" >&2
-    printf 'eller last ned frå release i workflow via ensure_stage0_seed / fetch_stage0_seed.\n' >&2
-    exit 1
-fi
-
-if [ "$REGEN" = "1" ]; then
-    if [ "${NORSCODE_BOOTSTRAP_C:-0}" != "1" ]; then
-        printf 'Feil: REGEN=1 er maintainer-modus og krev NORSCODE_BOOTSTRAP_C=1\n' >&2
-        exit 1
-    fi
-
-    if bootstrap_c_present && build_from_bootstrap_c; then exit 0; fi
-    if regen_bootstrap_c && build_from_bootstrap_c; then exit 0; fi
-    platform="$(platform_name 2>/dev/null || printf '?')"
-    printf '\n=== Kunne ikkje byggje norscode_native etter regen ===\n' >&2
-    printf 'Sjekk maintainer-føresetnader og køyr: bash tools/maint/regen_native.sh --rebuild\n' >&2
+    printf '\n=== Kunne ikkje skaffe norscode_native utan C/Python ===\n' >&2
+    printf 'Legg norscode-%s i bootstrap/stage0/ eller publiser ein release med ferdig native seed.\n' "$platform" >&2
     exit 1
 fi
 
 if smoke_check "$OUT"; then
-    printf 'ℹ︎ Klar (ingen regen). Set berre REGEN=1 i eksplisitt maintainer-modus for stage-0 regen + clang.\n'
+    printf 'Klar: native runtime er materialisert utan C/Python.\n'
     exit 0
 fi
 

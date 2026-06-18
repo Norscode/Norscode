@@ -1,0 +1,457 @@
+## NorsDB - Kjerne-motor
+## Fil: norsdb_core.nors
+## Versjon: 1.0
+## Del av Norscode-språket
+
+## ─────────────────────────────────────────
+## FILFORMAT
+## ─────────────────────────────────────────
+## En NorsDB-databasefil (.norsdb) har denne strukturen:
+##
+## [HEADER]
+##   magic     : "NORSDB1"   (7 bytes)
+##   versjon   : int         (2 bytes)
+##   opprettet : tidsstempel (8 bytes)
+##   tabeller  : int         (antall tabeller)
+##
+## [TABELL-KATALOG]
+##   for hver tabell:
+##     navn      : tekst
+##     rad_antall: int
+##     indeks    : peker til tabell-blokk
+##
+## [DATA-BLOKKER]
+##   rader lagres side for side i den virkelige filen
+##
+## [INDEKS-BLOKKER]
+##   indeksstruktur holdes i minne og lagres som metadata i .state
+##
+## [TRANSAKSJONS-LOGG]
+##   enkel WAL-/transaksjonslogg brukes i MVP-en
+
+## ─────────────────────────────────────────
+## INTERNE KONSTANTER
+## ─────────────────────────────────────────
+
+konstant NORSDB_MAGIC    = "NORSDB1"
+konstant NORSDB_VERSJON  = 1
+konstant SIDE_STØRRELSE  = 4096
+konstant MAKS_TABELLER   = 256
+konstant MAKS_KOLONNER   = 64
+konstant MAKS_RAD_STØRRELSE = 8192
+
+## ─────────────────────────────────────────
+## FEILKODER
+## ─────────────────────────────────────────
+
+feil DB_IKKE_FUNNET      = 100  ## Databasefil finnes ikke
+feil DB_ALLEREDE_ÅPEN   = 101  ## Databasen er allerede åpen
+feil DB_UGYLDIG_FORMAT  = 102  ## Filen er ikke en gyldig NorsDB-fil
+feil DB_FULL            = 103  ## Databasen er full
+feil DB_LÅST            = 104  ## Databasen er låst av annen prosess
+feil DB_KORRUPT         = 105  ## Databasefilen er skadet
+feil DB_VERSJON_FEIL    = 106  ## Feil databaseversjon
+
+## ─────────────────────────────────────────
+## TILSTAND
+## ─────────────────────────────────────────
+
+struktur DatabaseTilstand:
+    er_åpen        : bool   = usann
+    filsti         : tekst  = ""
+    fil_peker      : fil    = ingen
+    transaksjons_id: int    = 0
+    er_låst        : bool   = usann
+    siste_feil     : tekst  = ""
+    cache          : minne  = ingen
+    nøkkel         : bytes  = ingen
+
+## Global tilstand (én database om gangen i fase 1)
+la _db = DatabaseTilstand()
+privat la _katalog: liste[ordbok] = []
+
+## ─────────────────────────────────────────
+## db_create - Opprett ny database
+## ─────────────────────────────────────────
+
+funksjon db_create(sti: tekst) -> resultat:
+    ## Sjekk om filen allerede finnes
+    hvis fil_finnes(sti):
+        returner feil("Databasefil finnes allerede: " + sti)
+
+    ## Opprett filen
+    prøv:
+        la f = fil_åpne(sti, modus="skriv_binær")
+
+        ## Skriv header
+        fil_skriv(f, NORSDB_MAGIC)
+        fil_skriv_int(f, NORSDB_VERSJON)
+        fil_skriv_tid(f, nå())
+        fil_skriv_int(f, 0)   ## 0 tabeller
+
+        ## Skriv tom tabell-katalog (reservert plass)
+        gjenta MAKS_TABELLER:
+            fil_skriv_nuller(f, 64)   ## 64 bytes per tabell-oppføring
+
+        fil_lukk(f)
+        returner ok("Database opprettet: " + sti)
+
+    fang feil som e:
+        returner feil("Kunne ikke opprette database: " + e.melding)
+
+## ─────────────────────────────────────────
+## db_open - Åpne eksisterende database
+## ─────────────────────────────────────────
+
+funksjon db_open(sti: tekst, passord: tekst = "") -> resultat:
+    hvis _db.er_åpen:
+        returner feil(DB_ALLEREDE_ÅPEN, "En database er allerede åpen")
+
+    hvis ikke fil_finnes(sti):
+        returner feil(DB_IKKE_FUNNET, "Finner ikke: " + sti)
+
+    prøv:
+        la f = fil_åpne(sti, modus="les_skriv_binær")
+
+        ## Valider header
+        la magic = fil_les_tekst(f, 7)
+        hvis magic != NORSDB_MAGIC:
+            fil_lukk(f)
+            returner feil(DB_UGYLDIG_FORMAT, "Ikke en NorsDB-fil")
+
+        la versjon = fil_les_int(f)
+        hvis versjon > NORSDB_VERSJON:
+            fil_lukk(f)
+            returner feil(DB_VERSJON_FEIL, "For ny databaseversjon: " + versjon)
+
+        ## Lås filen (hindrer samtidig tilgang)
+        fil_lås(f)
+
+        ## Oppdater tilstand
+        _db.er_åpen    = sann
+        _db.filsti     = sti
+        _db.fil_peker  = f
+        _db.er_låst    = sann
+        _db.cache      = minne_allokér(SIDE_STØRRELSE * 16)  ## 16-sides cache
+
+        ## Last inn katalog
+        schema_snapshot_tøm()
+        snapshot_tøm()
+        indeks_snapshot_tøm()
+        _katalog_last_inn()
+        _minne_last()
+
+        ## Kjør gjenoppretting hvis WAL-logg finnes
+        hvis fil_finnes(sti + ".wal"):
+            _wal_gjenopprett()
+
+        returner ok("Database åpnet: " + sti)
+
+    fang feil som e:
+        returner feil("Kunne ikke åpne database: " + e.melding)
+
+## ─────────────────────────────────────────
+## db_close - Lukk database
+## ─────────────────────────────────────────
+
+funksjon db_close() -> resultat:
+    hvis ikke _db.er_åpen:
+        returner ok("Ingen åpen database")
+
+    prøv:
+        ## Skriv eventuell cache til disk
+        _cache_tøm()
+
+        ## Frigjør lås
+        fil_lås_frigjør(_db.fil_peker)
+
+        ## Lukk filen
+        _minne_lagre()
+        fil_lukk(_db.fil_peker)
+
+        ## Nullstill tilstand
+        _db.er_åpen   = usann
+        _db.filsti    = ""
+        _db.fil_peker = ingen
+        _db.er_låst   = usann
+        minne_frigjør(_db.cache)
+        _db.cache     = ingen
+
+        returner ok("Database lukket")
+
+    fang feil som e:
+        returner feil("Feil ved lukking: " + e.melding)
+
+## ─────────────────────────────────────────
+## db_slett - Slett databasefil permanent
+## ─────────────────────────────────────────
+
+funksjon db_slett(sti: tekst) -> resultat:
+    hvis _db.er_åpen og _db.filsti == sti:
+        returner feil("Kan ikke slette åpen database. Lukk den først.")
+
+    hvis ikke fil_finnes(sti):
+        returner feil("Finner ikke: " + sti)
+
+    fil_slett(sti)
+    hvis fil_finnes(sti + ".wal"):
+        fil_slett(sti + ".wal")
+    hvis fil_finnes(sti + ".idx"):
+        fil_slett(sti + ".idx")
+
+    returner ok("Database slettet: " + sti)
+
+## ─────────────────────────────────────────
+## db_info - Vis informasjon om database
+## ─────────────────────────────────────────
+
+funksjon db_info() -> resultat:
+    _krev_åpen()
+
+    la info = {
+        "fil"         : _db.filsti,
+        "versjon"     : NORSDB_VERSJON,
+        "tabeller"    : _katalog_antall(),
+        "fil_størrelse": fil_størrelse(_db.filsti),
+        "er_låst"     : _db.er_låst
+    }
+
+    returner ok(info)
+
+## ─────────────────────────────────────────
+## INTERNE HJELPEFUNKSJONER
+## ─────────────────────────────────────────
+
+privat funksjon _krev_åpen():
+    hvis ikke _db.er_åpen:
+        kast feil("Ingen database er åpen. Bruk db_open() først.")
+
+privat funksjon _katalog_last_inn():
+    ## Les tabell-katalog fra fil inn i minnet
+    fil_søk(_db.fil_peker, 21)   ## Hopp over header (7+2+8+4 bytes)
+    la antall = fil_les_int(_db.fil_peker)
+    _katalog = []
+    gjenta antall:
+        la navn = fil_les_tekst(_db.fil_peker, 32)
+        la rader = fil_les_int(_db.fil_peker)
+        la peker = fil_les_lang_int(_db.fil_peker)
+        _katalog_legg_til(navn, rader, peker)
+
+privat funksjon _katalog_antall() -> int:
+    returner lengde(_katalog)
+
+privat funksjon _katalog_legg_til(navn: tekst, rader: int, peker: int):
+    _katalog.legg_til({
+        "navn" : navn,
+        "rader": rader,
+        "peker": peker
+    })
+
+privat funksjon _finn_ledig_katalog_plass() -> int:
+    returner 21 + 4 + (lengde(_katalog) * 64)
+
+privat funksjon _finn_tabell_offset(navn: tekst) -> int:
+    for oppføring i _katalog:
+        hvis oppføring["navn"] == navn:
+            returner oppføring["peker"]
+    returner 0
+
+privat funksjon _cache_tøm():
+    ## Skriv alle skitne cache-sider til disk
+    for side i _db.cache:
+        hvis side.skitten:
+            fil_søk(_db.fil_peker, side.offset)
+            fil_skriv(_db.fil_peker, side.data)
+            side.skitten = usann
+
+privat funksjon _wal_gjenopprett():
+    ## Les WAL-logg og gjenbruk uferdige transaksjoner
+    la wal_fil = fil_åpne(_db.filsti + ".wal", modus="les_binær")
+    for oppføring i wal_les_alle(wal_fil):
+        hvis oppføring.type == "commit":
+            _wal_bruk_oppføring(oppføring)
+    fil_lukk(wal_fil)
+    fil_slett(_db.filsti + ".wal")
+
+privat funksjon _wal_bruk_oppføring(oppføring):
+    ## Fase 1: replay kommer senere.
+    returner
+
+privat funksjon _minne_lagre():
+    la sti = _db.filsti + ".state"
+    la linjer = []
+    linjer.legg_til("tx_id=" + tekst(_db.transaksjons_id))
+    la schema_snapshot = schema_snapshot_hent()
+    la snapshot = snapshot_hent()
+    la indeks_snapshot = indeks_snapshot_hent()
+    for oppføring i schema_snapshot:
+        la kolonner = []
+        for kol i oppføring["kolonner"]:
+            kolonner.legg_til(
+                _esc(tekst(kol["navn"])) + "," +
+                _esc(tekst(kol["type"])) + "," +
+                _bool_til_tekst(kol["er_primær"]) + "," +
+                _bool_til_tekst(kol["er_unik"]) + "," +
+                _bool_til_tekst(kol["er_påkrevd"]) + "," +
+                _esc(hvis kol["standard"] == ingen da "" ellers tekst(kol["standard"])) + "," +
+                tekst(kol["maks_lengde"])
+            )
+        linjer.legg_til(
+            "schema=" + _esc(oppføring["navn"]) + "|" +
+            tekst(oppføring["rad_antall"]) + "|" +
+            tekst(oppføring["opprettet"]) + "|" +
+            join(kolonner, ";")
+        )
+    for oppføring i _katalog:
+        linjer.legg_til(
+            _esc(oppføring["navn"]) + "|" +
+            tekst(oppføring["rader"]) + "|" +
+            tekst(oppføring["peker"])
+        )
+    for oppføring i indeks_snapshot:
+        linjer.legg_til(
+            "index=" + _esc(oppføring["tabell"]) + "|" +
+            _esc(oppføring["kolonne"]) + "|" +
+            _bool_til_tekst(oppføring["unik"])
+        )
+    for tabell_navn, info i snapshot:
+        linjer.legg_til("table=" + _esc(tabell_navn) + "|" + tekst(info["rad_antall"]))
+        for rad i info["rader"]:
+            linjer.legg_til("row=" + _esc(tabell_navn) + "|" + _rad_til_linje(rad))
+    fil_skriv_alt(sti, join(linjer, "\n"))
+
+privat funksjon _minne_last():
+    la sti = _db.filsti + ".state"
+    hvis ikke fil_finnes(sti):
+        returner
+
+    la f = fil_åpne(sti, modus="les_binær")
+    la innhold = fil_les_resten(f)
+    fil_lukk(f)
+    la linjer = del_tekst(innhold, "\n")
+    _katalog = []
+    la schema_linjer = []
+    la rad_linjer = []
+    la indeks_linjer = []
+
+    for linje i linjer:
+        hvis linje == "":
+            fortsett
+        hvis starter_med(linje, "tx_id="):
+            _db.transaksjons_id = int(erstatt(linje, "tx_id=", ""))
+            fortsett
+        hvis starter_med(linje, "table="):
+            fortsett
+        hvis starter_med(linje, "schema="):
+            schema_linjer.legg_til(erstatt(linje, "schema=", ""))
+            fortsett
+        hvis starter_med(linje, "row="):
+            rad_linjer.legg_til(erstatt(linje, "row=", ""))
+            fortsett
+        hvis starter_med(linje, "index="):
+            indeks_linjer.legg_til(erstatt(linje, "index=", ""))
+            fortsett
+
+        la deler = del_tekst(linje, "|")
+        hvis lengde(deler) == 3:
+            _katalog_legg_til(_unesc(deler[0]), int(deler[1]), int(deler[2]))
+
+    hvis lengde(schema_linjer) > 0:
+        la schema_data = []
+        for linje i schema_linjer:
+            la deler2 = del_tekst(linje, "|")
+            hvis lengde(deler2) == 4:
+                la kolonner = []
+                hvis deler2[3] != "":
+                    for kol_str i del_tekst(deler2[3], ";"):
+                        la kol_deler = del_tekst(kol_str, ",")
+                        hvis lengde(kol_deler) == 7:
+                            kolonner.legg_til({
+                                "navn": _unesc(kol_deler[0]),
+                                "type": _unesc(kol_deler[1]),
+                                "er_primær": kol_deler[2] == "1",
+                                "er_unik": kol_deler[3] == "1",
+                                "er_påkrevd": kol_deler[4] == "1",
+                                "standard": hvis kol_deler[5] == "" da ingen ellers _tolk_verdi(_unesc(kol_deler[5])),
+                                "maks_lengde": int(kol_deler[6])
+                            })
+                schema_data.legg_til({
+                    "navn": _unesc(deler2[0]),
+                    "rad_antall": int(deler2[1]),
+                    "opprettet": deler2[2],
+                    "kolonner": kolonner
+                })
+        schema_snapshot_last(schema_data)
+
+    hvis lengde(rad_linjer) > 0:
+        la rad_data = {}
+        for linje i rad_linjer:
+            la deler2 = del_tekst(linje, "|")
+            hvis lengde(deler2) == 2:
+                la tabell_navn = _unesc(deler2[0])
+                la rad = _linje_til_rad(deler2[1])
+                hvis tabell_navn ikke i rad_data:
+                    rad_data[tabell_navn] = { "rad_antall": 0, "rader": [] }
+                rad_data[tabell_navn]["rader"].legg_til(rad)
+                rad_data[tabell_navn]["rad_antall"] += 1
+        snapshot_last(rad_data)
+
+    hvis lengde(indeks_linjer) > 0:
+        la indeks_data = []
+        for linje i indeks_linjer:
+            la deler2 = del_tekst(linje, "|")
+            hvis lengde(deler2) == 3:
+                indeks_data.legg_til({
+                    "tabell": _unesc(deler2[0]),
+                    "kolonne": _unesc(deler2[1]),
+                    "unik": deler2[2] == "1"
+                })
+        indeks_snapshot_last(indeks_data)
+
+privat funksjon _rad_til_linje(rad: ordbok) -> tekst:
+    la deler = []
+    for nøkkel, verdi i rad:
+        hvis nøkkel == "_id":
+            fortsett
+        deler.legg_til(_esc(nøkkel) + "=" + _esc(tekst(verdi)))
+    returner join(deler, ";")
+
+privat funksjon _bool_til_tekst(verdi: bool) -> tekst:
+    returner hvis verdi da "1" ellers "0"
+
+privat funksjon _linje_til_rad(linje: tekst) -> ordbok:
+    la rad = {}
+    for del i del_tekst(linje, ";"):
+        hvis del == "":
+            fortsett
+        la kv = del_tekst(del, "=")
+        hvis lengde(kv) == 2:
+            rad[_unesc(kv[0])] = _tolk_verdi(_unesc(kv[1]))
+    returner rad
+
+privat funksjon _tolk_verdi(rå: tekst) -> verdi:
+    hvis rå == "sann":
+        returner sann
+    hvis rå == "usann":
+        returner usann
+    hvis rå samsvarer_med /^-?[0-9]+$/
+:
+        returner int(rå)
+    hvis rå samsvarer_med /^-?[0-9]+\.[0-9]+$/
+:
+        returner desimal(rå)
+    returner rå
+
+privat funksjon _esc(tekst_inn: tekst) -> tekst:
+    la ut = erstatt(tekst_inn, "\\", "\\\\")
+    ut = erstatt(ut, "|", "\\|")
+    ut = erstatt(ut, ";", "\\;")
+    ut = erstatt(ut, "=", "\\=")
+    returner ut
+
+privat funksjon _unesc(tekst_inn: tekst) -> tekst:
+    la ut = erstatt(tekst_inn, "\\=", "=")
+    ut = erstatt(ut, "\\;", ";")
+    ut = erstatt(ut, "\\|", "|")
+    ut = erstatt(ut, "\\\\", "\\")
+    returner ut

@@ -76,6 +76,34 @@ static NcVal *nc_map_new(void) {
     v->map = calloc(1, sizeof(NcMap)); return v;
 }
 
+/* ── Forward-deklarasjonar for wrappers brukt av generert C ── */
+static NcVal *nc_builtin_desimaltall(NcVal *v);
+static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v);
+static NcVal *nc_builtin_socket_accept(NcVal *srv_v);
+static NcVal *nc_builtin_socket_read(NcVal *conn_v, NcVal *max_v);
+static NcVal *nc_builtin_socket_write(NcVal *conn_v, NcVal *data_v);
+static NcVal *nc_builtin_socket_close(NcVal *conn_v);
+
+/* ── Wrappers brukt av generert C-dispatch ── */
+static NcVal *nc_fn_builtin_desimaltall(NcVal **args, int na) {
+    return nc_builtin_desimaltall(na > 0 ? args[0] : nc_nil());
+}
+static NcVal *nc_fn_builtin_socket_listen(NcVal **args, int na) {
+    return nc_builtin_socket_listen(na > 0 ? args[0] : nc_nil(), na > 1 ? args[1] : nc_nil());
+}
+static NcVal *nc_fn_builtin_socket_accept(NcVal **args, int na) {
+    return nc_builtin_socket_accept(na > 0 ? args[0] : nc_nil());
+}
+static NcVal *nc_fn_builtin_socket_read(NcVal **args, int na) {
+    return nc_builtin_socket_read(na > 0 ? args[0] : nc_nil(), na > 1 ? args[1] : nc_nil());
+}
+static NcVal *nc_fn_builtin_socket_write(NcVal **args, int na) {
+    return nc_builtin_socket_write(na > 0 ? args[0] : nc_nil(), na > 1 ? args[1] : nc_nil());
+}
+static NcVal *nc_fn_builtin_socket_close(NcVal **args, int na) {
+    return nc_builtin_socket_close(na > 0 ? args[0] : nc_nil());
+}
+
 /* ── Stage0-kjerne: stack ── */
 static void nc_push(int *sp, NcVal **stack, NcVal *v) {
     if (*sp >= 512) nc_panic("Stack overflow");
@@ -118,7 +146,15 @@ static int nc_truthy(NcVal *v) {
 
 static char *nc_to_str_raw(NcVal *v) {
     if (!v || v->type == NC_NIL) return strdup("ingenting");
-    if (v->type == NC_STR)  return strdup(v->s);
+    if (v->type == NC_STR)  {
+        size_t len = v->slen;
+        if (!len && v->s) len = strlen(v->s);
+        char *out = malloc(len + 1);
+        if (!out) return strdup("");
+        if (v->s && len > 0) memcpy(out, v->s, len);
+        out[len] = '\0';
+        return out;
+    }
     if (v->type == NC_BOOL) return strdup(v->b ? "sann" : "usann");
     if (v->type == NC_INT)  {
         char buf[32]; snprintf(buf, sizeof(buf), "%lld", v->i);
@@ -659,6 +695,12 @@ static NcVal *nc_builtin_tekst_fra_heltall(NcVal *v) {
     if (v->type == NC_INT) snprintf(buf, sizeof(buf), "%lld", v->i);
     else snprintf(buf, sizeof(buf), "%s", nc_to_str_raw(v));
     return nc_str(buf);
+}
+static NcVal *nc_builtin_tekst(NcVal *v) {
+    char *s = nc_to_str_raw(v);
+    NcVal *r = nc_str(s);
+    free(s);
+    return r;
 }
 static NcVal *nc_builtin_heltall(NcVal *v) {
     if (v->type == NC_INT) return v;

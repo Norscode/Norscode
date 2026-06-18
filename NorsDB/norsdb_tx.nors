@@ -1,0 +1,355 @@
+## NorsDB - Transaksjons-system
+## Fil: norsdb_tx.nors
+## Versjon: 1.0
+## Implementerer ACID-transaksjoner med en enkel WAL-/transaksjonslogg i MVP-en
+
+importer norsdb_core
+importer norsdb_crud
+
+## ─────────────────────────────────────────
+## OM TRANSAKSJONER I NORSDB
+## ─────────────────────────────────────────
+##
+## NorsDB bruker en enkel WAL-/transaksjonslogg i fase 1:
+##
+##   1. Alle endringer skrives til logg mens transaksjonen er aktiv
+##   2. Ved commit: operasjoner skrives permanent til databasen
+##   3. Ved rollback: operasjoner angres i minne og loggen ryddes
+##   4. Ved krasj: loggen leses ved neste åpning, men replay er fortsatt forenklet
+##
+## ACID-garantier i denne MVP-en:
+##   A - Atomicity  : Enten alle eller ingen endringer gjennomføres
+##   C - Consistency: Databasen forblir gyldig etter transaksjonen
+##   I - Isolation  : Transaksjoner ser ikke hverandres uavsluttede endringer
+##   D - Durability : Delvis, via sidecar og logg
+
+## ─────────────────────────────────────────
+## STRUKTURER
+## ─────────────────────────────────────────
+
+type TxOperasjonType = INSERT | UPDATE | DELETE | TABLE_CREATE | TABLE_DROP
+
+struktur TxOperasjon:
+    type       : TxOperasjonType
+    tabell     : tekst
+    rad_id     : int    = 0
+    gammel_data: ordbok = {}
+    ny_data    : ordbok = {}
+    tidsstempel: tid    = nå()
+
+struktur Transaksjon:
+    id         : int
+    operasjoner: liste[TxOperasjon]
+    er_aktiv   : bool
+    startet    : tid
+    isolasjon  : TxIsolasjonsNivå
+    lagringspunkter: ordbok[tekst, ordbok] = {}
+
+type TxIsolasjonsNivå = LES_COMMITTED | REPETERBAR_LES | SERIALISERBAR
+
+## Gjeldende aktive transaksjon
+privat la _aktiv_tx: Transaksjon | ingen = ingen
+la _tx_logg: ordbok[int, liste[TxOperasjon]] = {}
+
+## ─────────────────────────────────────────
+## begin - Start transaksjon
+## ─────────────────────────────────────────
+
+funksjon begin(isolasjon: TxIsolasjonsNivå = LES_COMMITTED) -> resultat:
+    _krev_åpen()
+
+    hvis _aktiv_tx != ingen:
+        returner feil("En transaksjon er allerede aktiv. Commit eller rollback først.")
+
+    _db.transaksjons_id += 1
+
+    _aktiv_tx = Transaksjon(
+        id             = _db.transaksjons_id,
+        operasjoner    = [],
+        er_aktiv       = sann,
+        startet        = nå(),
+        isolasjon      = isolasjon,
+        lagringspunkter = {}
+    )
+
+    ## Opprett WAL-fil for denne transaksjonen
+    _wal_start(_aktiv_tx.id)
+
+    returner ok("Transaksjon startet: #" + tekst(_aktiv_tx.id))
+
+funksjon begynn(isolasjon: TxIsolasjonsNivå = LES_COMMITTED) -> resultat:
+    returner begin(isolasjon)
+
+## ─────────────────────────────────────────
+## commit - Bekreft og lagre transaksjonen
+## ─────────────────────────────────────────
+
+funksjon commit() -> resultat:
+    _krev_åpen()
+
+    hvis _aktiv_tx == ingen:
+        returner feil("Ingen aktiv transaksjon. Bruk begin() først.")
+
+    prøv:
+        ## Merk WAL som committed
+        _wal_merk_committed(_aktiv_tx.id)
+
+        ## Skriv alle bufrede endringer til databasen
+        for op i _aktiv_tx.operasjoner:
+            _bruk_operasjon_permanent(op)
+
+        ## Fjern WAL-logg
+        _wal_slett(_aktiv_tx.id)
+
+        la tx_id = _aktiv_tx.id
+        la antall_ops = lengde(_aktiv_tx.operasjoner)
+        hvis tx_id i _tx_logg:
+            fjern _tx_logg[tx_id]
+        _aktiv_tx.lagringspunkter = {}
+        _aktiv_tx = ingen
+
+        returner ok({
+            "transaksjon": tx_id,
+            "operasjoner": antall_ops,
+            "melding"    : "Transaksjon fullført"
+        })
+
+    fang feil som e:
+        ## Commit feilet - prøv automatisk rollback
+        _nød_rollback()
+        returner feil("Commit feilet, rollback utført: " + e.melding)
+
+funksjon bekreft() -> resultat:
+    returner commit()
+
+## ─────────────────────────────────────────
+## rollback - Angre transaksjonen
+## ─────────────────────────────────────────
+
+funksjon rollback() -> resultat:
+    _krev_åpen()
+
+    hvis _aktiv_tx == ingen:
+        returner feil("Ingen aktiv transaksjon.")
+
+    prøv:
+        ## Angre operasjoner i omvendt rekkefølge
+        for op i omvendt(_aktiv_tx.operasjoner):
+            _angre_operasjon(op)
+
+        ## Slett WAL-logg
+        _wal_slett(_aktiv_tx.id)
+
+        la tx_id = _aktiv_tx.id
+        hvis tx_id i _tx_logg:
+            fjern _tx_logg[tx_id]
+        _aktiv_tx.lagringspunkter = {}
+        _aktiv_tx = ingen
+
+        returner ok("Transaksjon #" + tx_id + " rullet tilbake")
+
+    fang feil som e:
+        returner feil("Rollback feilet: " + e.melding)
+
+funksjon rull_tilbake() -> resultat:
+    returner rollback()
+
+## ─────────────────────────────────────────
+## savepoint - Lag et lagringspunkt
+## ─────────────────────────────────────────
+
+funksjon savepoint(navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis _aktiv_tx == ingen:
+        returner feil("Ingen aktiv transaksjon")
+
+    la punkt = {
+        "navn"    : navn,
+        "indeks"  : lengde(_aktiv_tx.operasjoner),
+        "tidspunkt": nå()
+    }
+
+    _aktiv_tx.lagringspunkter[navn] = punkt
+    _wal_skriv_savepoint(_aktiv_tx.id, navn, punkt.indeks)
+
+    returner ok("Lagringspunkt opprettet: " + navn)
+
+## ─────────────────────────────────────────
+## rollback_to - Angre til lagringspunkt
+## ─────────────────────────────────────────
+
+funksjon rollback_to(navn: tekst) -> resultat:
+    _krev_åpen()
+
+    hvis _aktiv_tx == ingen:
+        returner feil("Ingen aktiv transaksjon")
+
+    hvis navn ikke i _aktiv_tx.lagringspunkter:
+        returner feil("Lagringspunkt finnes ikke: " + navn)
+
+    la punkt = _aktiv_tx.lagringspunkter[navn]
+    la antall_angret = 0
+
+    ## Angre alle operasjoner etter lagringspunktet
+    mens lengde(_aktiv_tx.operasjoner) > punkt.indeks:
+        la op = _aktiv_tx.operasjoner.pop()
+        _angre_operasjon(op)
+        antall_angret += 1
+
+    la gjenværende = {}
+    for sp_navn, sp i _aktiv_tx.lagringspunkter:
+        hvis sp.indeks <= punkt.indeks:
+            gjenværende[sp_navn] = sp
+    _aktiv_tx.lagringspunkter = gjenværende
+
+    returner ok({
+        "lagringspunkt": navn,
+        "angret"       : antall_angret
+    })
+
+## ─────────────────────────────────────────
+## tx - Kjør kodeblokk som transaksjon
+## ─────────────────────────────────────────
+##
+## Bruk:
+##   tx:
+##       insert brukere:
+##           navn = "Jan"
+##       insert logg:
+##           hendelse = "ny bruker"
+##
+## Hvis noe feiler inni blokken, ruller NorsDB automatisk tilbake.
+
+funksjon tx(blokk: kode) -> resultat:
+    la start = begin()
+    hvis start.feilet:
+        returner start
+
+    prøv:
+        la resultat = kjør(blokk)
+        la slutt = commit()
+        hvis slutt.feilet:
+            returner slutt
+        returner resultat
+
+    fang feil som e:
+        rollback()
+        returner feil("Transaksjon avbrutt: " + e.melding)
+
+## ─────────────────────────────────────────
+## TX-BUFRING (hvert CRUD-kall bufres i tx)
+## ─────────────────────────────────────────
+
+## Overstyrer CRUD-funksjoner slik at de bufres i aktiv transaksjon
+
+funksjon _tx_registrer_insert(tabell: tekst, rad_id: int, data: ordbok):
+    hvis _aktiv_tx != ingen:
+        _tx_register_operasjon(TxOperasjon(
+            type    = INSERT,
+            tabell  = tabell,
+            rad_id  = rad_id,
+            ny_data = data
+        ))
+        _wal_skriv_operasjon(_aktiv_tx.id, INSERT, tabell, rad_id, {}, data)
+
+funksjon _tx_registrer_update(tabell: tekst, rad_id: int, gammel: ordbok, ny: ordbok):
+    hvis _aktiv_tx != ingen:
+        _tx_register_operasjon(TxOperasjon(
+            type       = UPDATE,
+            tabell     = tabell,
+            rad_id     = rad_id,
+            gammel_data= gammel,
+            ny_data    = ny
+        ))
+        _wal_skriv_operasjon(_aktiv_tx.id, UPDATE, tabell, rad_id, gammel, ny)
+
+funksjon _tx_registrer_delete(tabell: tekst, rad_id: int, data: ordbok):
+    hvis _aktiv_tx != ingen:
+        _tx_register_operasjon(TxOperasjon(
+            type       = DELETE,
+            tabell     = tabell,
+            rad_id     = rad_id,
+            gammel_data= data
+        ))
+        _wal_skriv_operasjon(_aktiv_tx.id, DELETE, tabell, rad_id, data, {})
+
+## ─────────────────────────────────────────
+## INTERNE WAL-FUNKSJONER
+## ─────────────────────────────────────────
+
+privat funksjon _wal_start(tx_id: int):
+    la sti = _db.filsti + ".wal"
+    la f = fil_åpne(sti, modus="legg_til_binær")
+    fil_skriv(f, {
+        "type"   : "begin",
+        "tx_id"  : tx_id,
+        "tid"    : nå()
+    })
+    fil_lukk(f)
+
+privat funksjon _wal_skriv_operasjon(
+    tx_id: int, type: TxOperasjonType,
+    tabell: tekst, rad_id: int,
+    gammel: ordbok, ny: ordbok
+):
+    la sti = _db.filsti + ".wal"
+    la f = fil_åpne(sti, modus="legg_til_binær")
+    fil_skriv(f, serialiser({
+        "type"   : type,
+        "tx_id"  : tx_id,
+        "tabell" : tabell,
+        "rad_id" : rad_id,
+        "gammel" : gammel,
+        "ny"     : ny,
+        "tid"    : nå()
+    }))
+    fil_lukk(f)
+
+privat funksjon _wal_merk_committed(tx_id: int):
+    la sti = _db.filsti + ".wal"
+    la f = fil_åpne(sti, modus="legg_til_binær")
+    fil_skriv(f, { "type": "commit", "tx_id": tx_id, "tid": nå() })
+    fil_lukk(f)
+
+privat funksjon _wal_slett(tx_id: int):
+    la sti = _db.filsti + ".wal"
+    ## Fjern kun oppføringer for denne tx, behold andre
+    _wal_rens_tx(sti, tx_id)
+
+privat funksjon _wal_skriv_savepoint(tx_id: int, navn: tekst, indeks: int):
+    la sti = _db.filsti + ".wal"
+    la f = fil_åpne(sti, modus="legg_til_binær")
+    fil_skriv(f, { "type": "savepoint", "tx_id": tx_id, "navn": navn, "indeks": indeks })
+    fil_lukk(f)
+
+privat funksjon _bruk_operasjon_permanent(op: TxOperasjon):
+    velg op.type:
+        INSERT : _skriv_rad(op.tabell, op.ny_data)
+        UPDATE : _oppdater_rad(op.tabell, op.rad_id, op.ny_data)
+        DELETE : _merk_rad_slettet(op.tabell, op.rad_id)
+
+privat funksjon _angre_operasjon(op: TxOperasjon):
+    velg op.type:
+        INSERT : _merk_rad_slettet(op.tabell, op.rad_id)
+        UPDATE : _oppdater_rad(op.tabell, op.rad_id, op.gammel_data)
+        DELETE : _skriv_rad_med_id(op.tabell, op.rad_id, op.gammel_data)
+
+privat funksjon _nød_rollback():
+    hvis _aktiv_tx != ingen:
+        for op i omvendt(_aktiv_tx.operasjoner):
+            prøv:
+                _angre_operasjon(op)
+            fang: fortsett
+        _aktiv_tx = ingen
+
+privat funksjon _wal_rens_tx(sti: tekst, tx_id: int):
+    returner
+
+funksjon _tx_register_operasjon(op: TxOperasjon):
+    hvis _aktiv_tx == ingen:
+        returner
+    _aktiv_tx.operasjoner.legg_til(op)
+    hvis _aktiv_tx.id ikke i _tx_logg:
+        _tx_logg[_aktiv_tx.id] = []
+    _tx_logg[_aktiv_tx.id].legg_til(op)
