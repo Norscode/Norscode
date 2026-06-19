@@ -1,0 +1,115 @@
+bruk std.web som web
+bruk std.mw som mw
+import src.config
+
+funksjon _host_ein() -> liste<tekst> {
+    la cfg = src.config.hent()
+    hvis ikkje har_nokkel(cfg, "ALLOWED_HOSTS") { returner [] }
+    returner builtin.split(cfg["ALLOWED_HOSTS"], ",")
+}
+
+funksjon _trim_host(host: tekst) -> tekst {
+    la i: heiltall = builtin.index_of(host, ":")
+    hvis i > 0 { returner builtin.trim(builtin.slice(host, 0, i)) }
+    returner builtin.trim(host)
+}
+
+funksjon _require_host_venleg(cfg: ordbok_tekst) -> boolsk {
+    hvis ikkje har_nokkel(cfg, "REQUIRE_ALLOWED_HOSTS") { returner sann }
+    la r = tekst_til_liten(cfg["REQUIRE_ALLOWED_HOSTS"])
+    hvis r == "usann" eller r == "false" eller r == "0" eller r == "nei" { returner usann }
+    returner sann
+}
+
+funksjon _security_header_on(cfg: ordbok_tekst) -> boolsk {
+    hvis ikkje har_nokkel(cfg, "SECURE_HEADERS") { returner sann }
+    la v = tekst_til_liten(cfg["SECURE_HEADERS"])
+    returner v != "usann" og v != "false" og v != "0" og v != "nei"
+}
+
+funksjon host_tillatt(ctx: ordbok_tekst) -> boolsk {
+    la cfg = src.config.hent()
+    hvis ikkje _require_host_venleg(cfg) { returner sann }
+    la host = web.request_header(ctx, "host")
+    hvis host == "" { returner sann }
+    la tillat = _host_ein()
+    hvis lengde(tillat) == 0 { returner sann }
+    la norm = _trim_host(host)
+    la i: heiltall = 0
+    mens i < lengde(tillat) {
+        hvis builtin.trim(tillat[i]) == norm { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon ikkke_tillatt_host(ctx: ordbok_tekst) -> ordbok_tekst {
+    la _ = ctx
+    returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"Host er ikkje tillate\"}")
+}
+
+funksjon _ikkje_tillatt_host(ctx: ordbok_tekst) -> ordbok_tekst {
+    returner ikkke_tillatt_host(ctx)
+}
+
+funksjon sikre(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje host_tillatt(ctx) { returner ikkke_tillatt_host(ctx) }
+    la cfg = src.config.hent()
+    hvis ikkje _security_header_on(cfg) { returner svar }
+    returner mw.legg_til_sikkerhets_headers(svar, mw.sikkerhets_standard())
+}
+
+cat > "$OUTPUT_DIR/src/middleware.no" <<'EOF_MW'
+bruk std.web som web
+bruk std.mw som mw
+import src.config
+import src.security
+
+funksjon _er_sann(cfg: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> boolsk {
+    hvis ikkje har_nokkel(cfg, nøkkel) { returner tekst_til_liten(fallback) == "sann" }
+    la verdi = tekst_til_liten(cfg[nøkkel])
+    returner verdi != "usann" og verdi != "false" og verdi != "0" og verdi != "nei"
+}
+
+funksjon bygg_stack() -> liste<ordbok_tekst> {
+    la cfg = src.config.hent()
+    la stack: liste<ordbok_tekst> = []
+
+    hvis _er_sann(cfg, "REQUEST_LOG", "usann") {
+        la nivå = hvis har_nokkel(cfg, "LOG_LEVEL") { cfg["LOG_LEVEL"] } elles { "INFO" }
+        la inkluder_body = _er_sann(cfg, "REQUEST_LOG_INCLUDE_BODY", "usann")
+        legg_til(stack, mw.logging_cfg(nivå, inkluder_body))
+    }
+
+    hvis _er_sann(cfg, "RATE_LIMIT_ENABLED", "usann") {
+        la maks = "120"
+        hvis har_nokkel(cfg, "RATE_LIMIT_MAX") { maks = cfg["RATE_LIMIT_MAX"] }
+        la nøkkel = hvis har_nokkel(cfg, "RATE_LIMIT_KEY") { cfg["RATE_LIMIT_KEY"] } elles { "ip" }
+        legg_til(stack, mw.rate_cfg(heltall_fra_tekst(maks), nøkkel))
+    }
+
+    hvis _er_sann(cfg, "SECURITY_MIDDLEWARE", "sann") {
+        la sk = mw.sikkerhets_standard()
+        sk["type"] = "sikkerheit"
+        legg_til(stack, sk)
+    }
+
+    returner stack
+}
+
+funksjon køyr(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje src.security.host_tillatt(ctx) {
+        returner src.security.ikkke_tillatt_host(ctx)
+    }
+    la stack = bygg_stack()
+    la ctx_med_mw = mw.pipeline_request(ctx, stack)
+
+    hvis mw.er_rate_limited(ctx_med_mw) {
+        la rate_svar = mw.rate_limit_response()
+        returner mw.pipeline_response(rate_svar, ctx_med_mw, stack)
+    }
+
+    la svar_med_tryggleikar = src.security.sikre(ctx_med_mw, svar)
+    returner mw.pipeline_response(svar_med_tryggleikar, ctx_med_mw, stack)
+}
+EOF_MW

@@ -83,8 +83,8 @@ Server og prosjekt:
 
 ```bash
 ./bin/nc serve app.no --port 8080
-./bin/nc startproject mittprosjekt
-./bin/nc startapp minapp
+nc startproject mittprosjekt
+nc startapp minapp
 ```
 
 ## Køyre, Sjekke Og Teste Kode
@@ -219,20 +219,20 @@ funksjon start() -> heiltall {
 Opprett prosjekt:
 
 ```bash
-./bin/nc startproject mittprosjekt
+nc startproject mittprosjekt
 ```
 
 Opprett app-modul:
 
 ```bash
-./bin/nc startapp minapp
+nc startapp minapp
 ```
 
 Etter generering:
 
 ```bash
 ./bin/nc check app.no
-./bin/nc run app.no
+./bin/nc serve app.no --port 8080
 ./bin/nc feature-check app.no
 ```
 
