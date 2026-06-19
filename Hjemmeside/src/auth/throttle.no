@@ -1,0 +1,2033 @@
+bruk std.web som web
+bruk std.mw som mw
+import src.config
+
+funksjon _er_sann(cfg: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> boolsk {
+    hvis ikkje har_nokkel(cfg, nøkkel) { returner tekst_til_liten(fallback) == "sann" }
+    la verdi = tekst_til_liten(cfg[nøkkel])
+    returner verdi != "usann" og verdi != "false" og verdi != "0" og verdi != "nei"
+}
+
+funksjon _ip(ctx: ordbok_tekst) -> tekst {
+    la ip = web.request_header(ctx, "x-forwarded-for")
+    hvis ip == "" { ip = web.request_header(ctx, "x-real-ip") }
+    hvis ip == "" { returner "ukjend" }
+    la komma = builtin.index_of(ip, ",")
+    hvis komma > 0 { returner builtin.trim(builtin.slice(ip, 0, komma)) }
+    returner builtin.trim(ip)
+}
+
+funksjon _cfg() -> ordbok_tekst {
+    la cfg = src.config.hent()
+    la c: ordbok_tekst = {}
+    c["aktiv"] = _er_sann(cfg, "BRUTEFORCE_LOGIN_ENABLED", "usann")
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_MAX") { c["maks"] = cfg["BRUTEFORCE_LOGIN_MAX"] } elles { c["maks"] = "3" }
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_WINDOW_SEK") { c["window"] = cfg["BRUTEFORCE_LOGIN_WINDOW_SEK"] } elles { c["window"] = "120" }
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_KEY") { c["nøkkel"] = cfg["BRUTEFORCE_LOGIN_KEY"] } elles { c["nøkkel"] = "ip" }
+    returner c
+}
+
+funksjon _nøkkel(ctx: ordbok_tekst, epost: tekst) -> tekst {
+    la cfg = _cfg()
+    hvis cfg["nøkkel"] == "brukar" eller cfg["nøkkel"] == "brukarnamn" {
+        hvis epost != "" { returner "brukar:" + epost }
+        returner "ip:" + _ip(ctx)
+    }
+    returner "ip:" + _ip(ctx)
+}
+
+funksjon _rate_cfg(maks: tekst, vindauge: tekst) -> ordbok_tekst {
+    returner mw.rate_cfg(heltall_fra_tekst(maks), "auth_login")
+}
+
+funksjon kan_logge_inn(ctx: ordbok_tekst, epost: tekst) -> boolsk {
+    la cfg = _cfg()
+    hvis ikkje cfg["aktiv"] { returner sann }
+    la nøkkel = _nøkkel(ctx, epost)
+    la ok = mw.sjekk_rate(_rate_cfg(cfg["maks"], cfg["window"]), nøkkel)
+    returner ok
+}
+
+funksjon melding_blokkert(ctx: ordbok_tekst) -> tekst {
+    la cfg = _cfg()
+    la maks = cfg["maks"]
+    la vind = cfg["window"]
+    returner "For mange mislykka innloggingsforsøk. Prøv igjen etter " + vind + " sekund (maks " + maks + " forsøk)."
+}
+
+cat > "$OUTPUT_DIR/src/auth/register.no" <<'EOF_AUTH_REGISTER'
+bruk std.web som web
+bruk std.web_app_stack som stack
+bruk std.auth som auth
+bruk std.sesjon som sesjon
+bruk std.skjema som form_lib
+import src.forms
+import src.template
+import src.messages
+
+funksjon _felt() -> liste<ordbok_tekst> {
+    la felte: liste<ordbok_tekst> = []
+    legg_til(felte, form_lib.tekst_felt("brukarnamn", "Brukarnamn", sann, 2, 80))
+    legg_til(felte, form_lib.epost_felt("epost", "E-post", sann))
+    legg_til(felte, form_lib.passord_felt("passord", "Passord", 8))
+    returner felte
+}
+
+funksjon _første_feil(resultat: ordbok_tekst) -> tekst {
+    la feil = resultat["feil"]
+    la nøkkel = nøkler(feil)
+    hvis lengde(nøkkel) == 0 { returner "" }
+    returner feil[nøkkel[0]]
+}
+
+funksjon _med_sesjon_kjeks(resp: ordbok_tekst, csrf_ctx: ordbok_tekst) -> ordbok_tekst {
+    hvis csrf_ctx["set_cookie"] == "sann" {
+        returner sesjon.set_cookie(resp, csrf_ctx["session_token"], 86400, usann)
+    }
+    returner resp
+}
+
+funksjon _skjema_html(ctx: ordbok_tekst, conn: tekst, resultat: ordbok_tekst) -> tekst {
+    la base = form_lib.til_html(_felt(), resultat, "/auth/register", "POST")
+    returner forms.form_with_csrf(ctx, conn, base)
+}
+
+funksjon skjema(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la tomt = form_lib.valider(_felt(), {})
+    la csrf_ctx = forms.csrf_context(ctx, conn)
+    la meldingar = src.messages.hent(ctx, conn)
+    la html = template.render("auth/register.html", {
+        "tittel": "Registrer ny brukar",
+        "feilmelding": "",
+        "meldingar": meldingar,
+        "innhald": _skjema_html(ctx, conn, tomt)
+    })
+    la response = web.response_builder(200, {"content-type": "text/html; charset=utf-8"}, html)
+    returner _med_sesjon_kjeks(response, csrf_ctx)
+}
+
+funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la data = forms.parse(ctx)
+    la csrf_ctx = forms.csrf_context(ctx, conn)
+    hvis ikkje forms.csrf_ok(ctx, conn, data) {
+        la html = template.render("auth/register.html", {
+            "tittel": "Registrer ny brukar",
+            "feilmelding": "Ugyldig CSRF-token",
+            "meldingar": src.messages.hent(ctx, conn),
+            "innhald": _skjema_html(ctx, conn, form_lib.valider(_felt(), data))
+        })
+        la response = web.response_builder(403, {"content-type": "text/html; charset=utf-8"}, html)
+        returner _med_sesjon_kjeks(response, csrf_ctx)
+    }
+    la validert = form_lib.valider(_felt(), data)
+    hvis validert["gyldig"] == "usann" {
+        la html = template.render("auth/register.html", {
+            "tittel": "Registrer ny brukar",
+            "feilmelding": _første_feil(validert),
+            "meldingar": src.messages.hent(ctx, conn),
+            "innhald": _skjema_html(ctx, conn, validert)
+        })
+        returner web.response_builder(400, {"content-type": "text/html; charset=utf-8"}, html)
+    }
+    la verdiar = form_lib.hent_verdiar(validert)
+    la brukarnamn = verdiar["brukarnamn"]
+    la epost = verdiar["epost"]
+    la passord = verdiar["passord"]
+    la id = auth.registrer(conn, brukarnamn, epost, passord)
+    hvis id < 0 {
+        la html = template.render("auth/register.html", {
+            "tittel": "Registrer ny brukar",
+            "feilmelding": "Brukar eller e-post er allereie i bruk",
+            "meldingar": src.messages.hent(ctx, conn),
+            "innhald": _skjema_html(ctx, conn, validert)
+        })
+        returner web.response_builder(409, {"content-type": "text/html; charset=utf-8"}, html)
+    }
+    la _ = sesjon.flash_sett(conn, csrf_ctx["session_token"], "suksess", "Brukar oppretta. Logg inn no.")
+    la response = web.response_builder(302, {"content-type": "text/html; charset=utf-8", "location": "/auth/login"}, "")
+    returner _med_sesjon_kjeks(response, csrf_ctx)
+}
+EOF_AUTH_REGISTER
+
+cat > "$OUTPUT_DIR/src/auth/logout.no" <<'EOF_AUTH_LOGOUT'
+bruk std.web som web
+bruk std.sesjon som sesjon
+
+funksjon utfør(ctx: ordbok_tekst) -> ordbok_tekst {
+    la _ = ctx
+    returner web.response_builder(200, {"content-type": "text/plain; charset=utf-8", "set-cookie": "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"}, "logout")
+}
+EOF_AUTH_LOGOUT
+
+cat > "$OUTPUT_DIR/src/auth/routes.no" <<'EOF_AUTH_ROUTES'
+funksjon index() -> ordbok_tekst {
+    returner {
+        "GET /auth/login": "auth.login.skjema",
+        "POST /auth/login": "auth.login.utfør",
+        "GET /auth/register": "auth.register.skjema",
+        "POST /auth/register": "auth.register.utfør",
+        "POST /auth/logout": "auth.logout.utfør"
+    }
+}
+EOF_AUTH_ROUTES
+cat > "$OUTPUT_DIR/src/auth/index.no" <<'EOF_AUTH_INDEX'
+import src.auth.routes
+
+funksjon routes() -> ordbok_tekst {
+    returner src.auth.routes.index()
+}
+EOF_AUTH_INDEX
+
+cat > "$OUTPUT_DIR/src/auth/guards.no" <<'EOF_AUTH_GUARDS'
+bruk std.web_app_stack som stack
+
+funksjon krev_innlogging(ap_ctx: ordbok_tekst, conn: tekst) -> boolsk {
+    la _ = conn
+    returner stack.krev_innlogging(conn, ap_ctx)
+}
+
+funksjon krev_rolle(ap_ctx: ordbok_tekst, conn: tekst, rolle: tekst) -> boolsk {
+    la _ = conn
+    returner stack.krev_rolle(conn, ap_ctx, rolle)
+}
+
+funksjon _standard_rettar() -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["admin"] = ["*"]
+    m["redaktør"] = ["admin.overview", "admin.edit", "admin.view"]
+    m["brukar"] = ["admin.view"]
+    returner m
+}
+
+funksjon krev_permission(ap_ctx: ordbok_tekst, conn: tekst, rett: tekst) -> boolsk {
+    la _ = conn
+    la rolle = hvis stack.bruker_rolle(ap_ctx) != "" { stack.bruker_rolle(ap_ctx) } elles { "usynleg" }
+    hvis rolle == "admin" { returner sann }
+    la rettar = _standard_rettar()
+    hvis ikkje har_nokkel(rettar, rolle) { returner usann }
+    la l = rettar[rolle]
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis l[i] == rett {
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon har_permission(ap_ctx: ordbok_tekst, conn: tekst, rett: tekst) -> boolsk {
+    la _ = conn
+    la rolle = hvis stack.bruker_rolle(ap_ctx) != "" { stack.bruker_rolle(ap_ctx) } elles { "usynleg" }
+    hvis rolle == "admin" { returner sann }
+    la rettar = _standard_rettar()
+    hvis ikkje har_nokkel(rettar, rolle) { returner usann }
+    la l = rettar[rolle]
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis l[i] == rett { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+EOF_AUTH_GUARDS
+
+cat > "$OUTPUT_DIR/src/forms.no" <<'EOF_FORMS'
+bruk std.skjema som skjema
+bruk std.web som web
+bruk std.sesjon som sesjon
+
+funksjon parse(ctx: ordbok_tekst) -> ordbok_tekst {
+    la body = web.request_body(ctx)
+    prøv {
+        la parsed = builtin.json_parse_raw(body)
+        la type_verdi = builtin.type(parsed)
+        hvis type_verdi == "ordbok" {
+            returner parsed
+        }
+    } fang (e) {
+    }
+    la data = parse_form(body)
+    returner data
+}
+
+funksjon parse_form(body: tekst) -> ordbok_tekst {
+    la data: ordbok_tekst = {}
+    hvis body == "" { returner data }
+    la par = builtin.split(body, "&")
+    la i: heiltall = 0
+    mens i < lengde(par) {
+        la del = builtin.trim(par[i])
+        la eq = builtin.index_of(del, "=")
+        hvis eq > 0 {
+            la nøkkel = _url_decode(builtin.slice(del, 0, eq))
+            la verdi = _url_decode(builtin.slice(del, eq + 1, lengde(del)))
+            data[nøkkel] = verdi
+        }
+        i = i + 1
+    }
+    returner data
+}
+
+funksjon _url_decode(s: tekst) -> tekst {
+    la r = tekst_erstatt(s, "+", " ")
+    r = tekst_erstatt(r, "%40", "@")
+    r = tekst_erstatt(r, "%20", " ")
+    r = tekst_erstatt(r, "%2F", "/")
+    r = tekst_erstatt(r, "%3A", ":")
+    r = tekst_erstatt(r, "%3F", "?")
+    r = tekst_erstatt(r, "%3D", "=")
+    r = tekst_erstatt(r, "%26", "&")
+    r = tekst_erstatt(r, "%2B", "+")
+    r = tekst_erstatt(r, "%25", "%")
+    returner r
+}
+
+funksjon _sesjon_token(ctx: ordbok_tekst, conn: tekst) -> tekst {
+    la token = hvis har_nokkel(ctx, "__sesjon_token__") { ctx["__sesjon_token__"] } ellers { web.request_cookie(ctx, "session") }
+    hvis token == "" { returner "" }
+    hvis sesjon.er_gyldig(conn, token) { returner token }
+    returner ""
+}
+
+funksjon _csrf_nokkel() -> tekst {
+    returner "__csrf_token__"
+}
+
+funksjon csrf_context(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la token = _sesjon_token(ctx, conn)
+    la set_cookie = "usann"
+    hvis token == "" {
+        la token = sesjon.start_med_ttl(conn, ctx, 86400)
+        set_cookie = "sann"
+    }
+    la csrf_token = sesjon.hent(conn, token, _csrf_nokkel(), "")
+    hvis csrf_token == "" {
+        la csrf_token = builtin.random_hex(64)
+        la _ = sesjon.sett(conn, token, _csrf_nokkel(), csrf_token)
+    }
+    returner {
+        "session_token": token,
+        "csrf_token": csrf_token,
+        "set_cookie": set_cookie
+    }
+}
+
+funksjon csrf_context_existing(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la token = _sesjon_token(ctx, conn)
+    hvis token == "" { returner {} }
+    la csrf = sesjon.hent(conn, token, _csrf_nokkel(), "")
+    hvis csrf == "" { returner {} }
+    returner {
+        "session_token": token,
+        "csrf_token": csrf
+    }
+}
+
+funksjon csrf_input(ctx: ordbok_tekst, conn: tekst) -> tekst {
+    la c = csrf_context(ctx, conn)
+    returner "    <input type=\"hidden\" name=\"__csrf_token__\" value=\"" + c["csrf_token"] + "\">"
+}
+
+funksjon form_with_csrf(ctx: ordbok_tekst, conn: tekst, base_form: tekst) -> tekst {
+    la pos = builtin.index_of(base_form, ">")
+    hvis pos < 0 { returner base_form + "\n" + csrf_input(ctx, conn) }
+    la start = builtin.slice(base_form, 0, pos + 1)
+    la rest = builtin.slice(base_form, pos + 1, lengde(base_form))
+    returner start + "\n" + csrf_input(ctx, conn) + "\n" + rest
+}
+
+funksjon csrf_ok(ctx: ordbok_tekst, conn: tekst, data: ordbok_tekst) -> boolsk {
+    la c = csrf_context_existing(ctx, conn)
+    hvis ikkje har_nokkel(c, "csrf_token") { returner usann }
+    hvis ikkje har_nokkel(data, "__csrf_token__") { returner usann }
+    returner c["csrf_token"] == tekst(data["__csrf_token__"])
+}
+
+funksjon parse_verdiar(ctx: ordbok_tekst, felt: liste<ordbok_tekst>) -> ordbok_tekst {
+    la data = parse(ctx)
+    returner skjema.valider(felt, data)
+}
+EOF_FORMS
+
+cat > "$OUTPUT_DIR/src/messages.no" <<'EOF_MESSAGES_MODULE'
+bruk std.sesjon som sesjon
+
+funksjon _ctx_token(ctx: ordbok_tekst, conn: tekst) -> tekst {
+    la token = sesjon.hent_token(ctx)
+    hvis token == "" { returner "" }
+    hvis sesjon.er_gyldig(conn, token) { returner token }
+    returner ""
+}
+
+funksjon set_med_token(conn: tekst, token: tekst, type: tekst, melding: tekst) -> boolsk {
+    hvis token == "" { returner usann }
+    la r = sesjon.flash_sett(conn, token, type, melding)
+    returner r > 0
+}
+
+funksjon set(ctx: ordbok_tekst, conn: tekst, type: tekst, melding: tekst) -> boolsk {
+    la token = _ctx_token(ctx, conn)
+    hvis token == "" { returner usann }
+    returner set_med_token(conn, token, type, melding)
+}
+
+funksjon hent_med_token(conn: tekst, token: tekst) -> ordbok_tekst {
+    hvis token == "" { returner {} }
+    returner sesjon.flash_hent_alle(conn, token)
+}
+
+funksjon hent(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la token = _ctx_token(ctx, conn)
+    hvis token == "" { returner {} }
+    returner hent_med_token(conn, token)
+}
+
+funksjon kontekst(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la flash = hent(ctx, conn)
+    hvis lengde(nøkler(flash)) == 0 { returner {} }
+    returner {"meldingar": flash}
+}
+EOF_MESSAGES_MODULE
+
+cat > "$OUTPUT_DIR/src/cache.no" <<'EOF_CACHE_MODULE'
+bruk std.cache som cache
+import src.config
+
+la _globale_cache: ordbok_tekst = cache.fra_innstillingar(src.config.hent())
+
+funksjon instans() -> ordbok_tekst {
+    returner _globale_cache
+}
+
+funksjon ny() -> ordbok_tekst {
+    returner cache.fra_innstillingar(src.config.hent())
+}
+
+funksjon ny_minne() -> ordbok_tekst {
+    returner cache.ny_minne()
+}
+
+funksjon ny_fil(mappe: tekst) -> ordbok_tekst {
+    returner cache.ny_fil(mappe)
+}
+
+funksjon sett(c: ordbok_tekst, nøkkel: tekst, verdi: tekst, ttl_sek: heiltall) -> heiltall {
+    returner cache.sett(c, nøkkel, verdi, ttl_sek)
+}
+
+funksjon hent(c: ordbok_tekst, nøkkel: tekst, standard: tekst) -> tekst {
+    returner cache.hent(c, nøkkel, standard)
+}
+
+funksjon slett(c: ordbok_tekst, nøkkel: tekst) -> heiltall {
+    returner cache.slett(c, nøkkel)
+}
+
+funksjon tøm(c: ordbok_tekst) -> heiltall {
+    returner cache.tøm(c)
+}
+
+funksjon sett_med_tag(c: ordbok_tekst, nøkkel: tekst, verdi: tekst, ttl_sek: heiltall, tag: tekst) -> heiltall {
+    returner cache.sett_med_tag(c, nøkkel, verdi, ttl_sek, tag)
+}
+
+funksjon slett_tag(c: ordbok_tekst, tag: tekst) -> heiltall {
+    returner cache.slett_tag(c, tag)
+}
+
+funksjon set_response(c: ordbok_tekst, nøkkel: tekst, respons: ordbok_tekst, ttl_sek: heiltall) -> heiltall {
+    returner cache.cache_respons(c, nøkkel, respons, ttl_sek)
+}
+
+funksjon hent_response(c: ordbok_tekst, nøkkel: tekst) -> ordbok_tekst {
+    returner cache.hent_respons(c, nøkkel)
+}
+
+funksjon hent_eller_set(c: ordbok_tekst, nøkkel: tekst, ttl_sek: heiltall, fn_namn: tekst, arg: tekst) -> tekst {
+    returner cache.hent_eller_set(c, nøkkel, ttl_sek, fn_namn, arg)
+}
+EOF_CACHE_MODULE
+
+cat > "$OUTPUT_DIR/src/template.no" <<'EOF_TEMPLATE'
+bruk std.mal som mal
+bruk std.web som web
+
+funksjon render(sti: tekst, kontekst: ordbok_tekst) -> tekst {
+    returner mal.gjengi_arv("src/templates/" + sti, kontekst, "src/templates/")
+}
+
+funksjon render_html(sti: tekst, kontekst: ordbok_tekst) -> ordbok_tekst {
+    la innhald = render(sti, kontekst)
+    returner web.response_builder(200, {"content-type": "text/html; charset=utf-8"}, innhald)
+}
+
+funksjon render_feil(sti: tekst, status: heiltall, tittel: tekst, feilmelding: tekst) -> ordbok_tekst {
+    la innhald = render(sti, {
+        "tittel": tittel,
+        "feilmelding": feilmelding,
+        "kode": tekst_fra_heltall(status),
+        "innhald": "<p>" + feilmelding + "</p>"
+    })
+    returner web.response_builder(status, {"content-type": "text/html; charset=utf-8"}, innhald)
+}
+EOF_TEMPLATE
+
+cat > "$OUTPUT_DIR/src/static.no" <<'EOF_STATIC'
+bruk std.web som web
+bruk std.mimetypes som mimetype
+
+funksjon _har_triks(sti: tekst) -> boolsk {
+    la deler = builtin.split(sti, "/")
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        hvis deler[i] == ".." { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _normaliser_sti(sti: tekst) -> tekst {
+    hvis ikkje tekst_starter_med(sti, "/static/") {
+        hvis sti == "/static" { returner "" }
+        returner ""
+    }
+
+    la rel = builtin.slice(sti, 8, lengde(sti))
+    hvis rel == "" { returner "" }
+    hvis _har_triks(rel) { returner "" }
+
+    la deler = builtin.split(rel, "/")
+    la rensa: liste<tekst> = []
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la bit = deler[i]
+        hvis bit == "" eller bit == "." {
+            i = i + 1
+            fortsett
+        }
+        legg_til(rensa, bit)
+        i = i + 1
+    }
+
+    hvis lengde(rensa) == 0 { returner "" }
+    returner "static/" + tekst_saman(rensa, "/")
+}
+
+funksjon svar(sti: tekst) -> ordbok_tekst {
+    la fil_sti = _normaliser_sti(sti)
+    hvis fil_sti == "" {
+        returner web.response_error(400, "Ugyldig static-sti")
+    }
+    la ct = mimetype.content_type_header(fil_sti)
+    hvis ct == "" { la ct = "application/octet-stream" }
+    returner web.response_file(fil_sti, ct)
+}
+EOF_STATIC
+
+if [ "$WITH_AUTH" = "usann" ]; then
+cat > "$OUTPUT_DIR/src/auth/routes.no" <<'EOF_AUTH_ROUTES_EMPTY'
+funksjon index() -> ordbok_tekst {
+    returner {}
+}
+EOF_AUTH_ROUTES_EMPTY
+fi
+
+if [ "$WITH_ADMIN" = "sann" ]; then
+cat > "$OUTPUT_DIR/src/admin_bootstrap.no" <<'EOF_ADMINBOOT'
+bruk std.web_app_stack som stack
+
+funksjon registrer_modellar(register: ordbok_tekst, conn: tekst) -> ordbok_tekst {
+    la _ = conn
+    returner stack.registrer_adminmodell(register, "produkt", ["id", "namn", "pris", "lager", "oppretta"], "Produkt")
+}
+
+funksjon oversikt(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_oversikt(conn, register, ctx)
+}
+
+funksjon liste(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_liste(conn, register, ctx)
+}
+
+funksjon ny(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_ny(conn, register, ctx)
+}
+
+funksjon rediger(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_rediger(conn, register, ctx)
+}
+
+funksjon lagre(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_lagre(conn, register, ctx)
+}
+
+funksjon slett(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok_tekst {
+    returner stack.admin_slett(conn, register, ctx)
+}
+EOF_ADMINBOOT
+cat > "$OUTPUT_DIR/src/admin/index.no" <<'EOF_ADMIN_INDEX'
+import src.admin_bootstrap
+
+funksjon routes() -> ordbok_tekst {
+    returner {
+        "GET /admin": "admin_bootstrap.oversikt",
+        "GET /admin/{tabell}": "admin_bootstrap.liste",
+        "GET /admin/{tabell}/ny": "admin_bootstrap.ny",
+        "GET /admin/{tabell}/{id}/rediger": "admin_bootstrap.rediger",
+        "POST /admin/{tabell}/lagre": "admin_bootstrap.lagre",
+        "POST /admin/{tabell}/{id}/lagre": "admin_bootstrap.lagre",
+        "POST /admin/{tabell}/{id}/slett": "admin_bootstrap.slett"
+    }
+}
+EOF_ADMIN_INDEX
+fi
+
+cat > "$OUTPUT_DIR/src/templates/base.html" <<'EOF_TPL'
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="utf-8">
+    <title>{{tittel|standard:Norscode}}</title>
+    <style>
+      body { font-family: Inter, ui-sans-serif, "Segoe UI", Arial, sans-serif; margin: 0; background: #f5f7fb; color: #101828; }
+      header, footer { background: #111827; color: #ffffff; padding: 12px 18px; }
+      main { max-width: 880px; margin: 18px auto; padding: 0 14px; }
+      .kort { background: #ffffff; border-radius: 8px; padding: 16px; box-shadow: 0 6px 20px rgba(16,24,40,.08); }
+      .feil { background: #fee4e2; border-left: 3px solid #b42318; padding: 10px; margin-bottom: 10px; border-radius: 6px; }
+      form { display: block; }
+      form div { margin-bottom: 10px; }
+      label { display: block; font-size: .85rem; margin-bottom: 4px; color: #344054; }
+      input { width: 100%; padding: 8px 10px; box-sizing: border-box; }
+      button { margin-top: 8px; padding: 8px 12px; border: 0; background: #1d2939; color: #fff; border-radius: 6px; }
+      nav a { color: #d0d5dd; margin-right: 10px; text-decoration: none; }
+    </style>
+  </head>
+  <body>
+    {{inkluder "src/templates/partials/header.html"}}
+    <main>
+      <div class="kort">
+        {{@blokk innhald}}
+          <h1>{{tittel|standard:Norskode}}</h1>
+          <div>{{innhald|html}}</div>
+        {{@slutt_blokk}}
+      </div>
+    </main>
+    {{inkluder "src/templates/partials/footer.html"}}
+  </body>
+</html>
+EOF_TPL
+
+cat > "$OUTPUT_DIR/src/templates/partials/header.html" <<'EOF_HEADER'
+<header>
+  <nav>
+    <a href="/">Hovudside</a>
+    <a href="/cache-demo">Cache-demo</a>
+    <a href="/i18n-demo">I18n-demo</a>
+    <a href="/auth/login">Logg inn</a>
+    <a href="/auth/register">Registrer</a>
+  </nav>
+</header>
+EOF_HEADER
+
+cat > "$OUTPUT_DIR/src/templates/partials/footer.html" <<'EOF_FOOTER'
+<footer>
+  <p>Bygd for Norscode web-stack</p>
+</footer>
+EOF_FOOTER
+
+cat > "$OUTPUT_DIR/src/templates/partials/messages.html" <<'EOF_MESSAGES'
+{{@hvis feilmelding}}
+<div class="feil">{{feilmelding}}</div>
+{{@slutt}}
+{{@hvis meldingar.suksess}}
+<div class="melding suksess">{{meldingar.suksess}}</div>
+{{@slutt}}
+{{@hvis meldingar.info}}
+<div class="melding info">{{meldingar.info}}</div>
+{{@slutt}}
+{{@hvis meldingar.feil}}
+<div class="melding feil">{{meldingar.feil}}</div>
+{{@slutt}}
+{{@hvis meldingar.åtvaring}}
+<div class="melding åtvaring">{{meldingar.åtvaring}}</div>
+{{@slutt}}
+EOF_MESSAGES
+
+cat > "$OUTPUT_DIR/src/templates/pages/home.html" <<'EOF_HOME'
+{{@utvid "base.html"}}
+{{@blokk innhald}}
+  <h1>Hovudside</h1>
+  <p>Hei {{brukar|standard:venn}}, velkomen til Norscode.</p>
+  {{@hvis bruker}}
+    <p>Innlogga brukar: {{brukar}}</p>
+  {{@slutt}}
+  {{innhald|html}}
+{{@slutt_blokk}}
+EOF_HOME
+
+cat > "$OUTPUT_DIR/src/templates/auth/login.html" <<'EOF_LOGIN_TPL'
+{{@utvid "base.html"}}
+{{@blokk innhald}}
+  <h1>Logg inn</h1>
+  {{inkluder "src/templates/partials/messages.html"}}
+  {{innhald|html}}
+  <p>Har du ingen konto? <a href="/auth/register">Lag ein konto</a></p>
+{{@slutt_blokk}}
+EOF_LOGIN_TPL
+
+cat > "$OUTPUT_DIR/src/templates/auth/register.html" <<'EOF_REGISTER_TPL'
+{{@utvid "base.html"}}
+{{@blokk innhald}}
+  <h1>Registrer ny brukar</h1>
+  {{inkluder "src/templates/partials/messages.html"}}
+  {{innhald|html}}
+  <p>Allereie brukar? <a href="/auth/login">Logg inn</a></p>
+{{@slutt_blokk}}
+EOF_REGISTER_TPL
+
+cat > "$OUTPUT_DIR/src/templates/pages/error.html" <<'EOF_ERROR_TPL'
+{{@utvid "base.html"}}
+{{@blokk innhald}}
+  <h1>Feil {{kode}}</h1>
+  <p>{{feilmelding}}</p>
+  <a href="/">Tilbake til hovudsida</a>
+{{@slutt_blokk}}
+EOF_ERROR_TPL
+
+cat > "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+bruk std.web som web
+
+funksjon index() -> ordbok_tekst {
+    returner {
+EOF_ROUTES
+ if [ "$WITH_ADMIN" = "sann" ] && [ "$WITH_AUTH" = "sann" ]; then
+cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+        "GET /": "route_index",
+        "GET /cache-demo": "route_cache_demo",
+        "GET /i18n-demo": "route_i18n_demo",
+        "GET /api/v1/health": "route_api_health",
+        "POST /api/v1/echo": "route_api_echo",
+        "GET /api/v1/dependency": "route_api_dependency",
+        "GET /openapi.json": "route_api_openapi",
+        "GET /docs": "route_api_docs",
+        "GET /api/v1/query": "route_api_query",
+        "POST /api/v1/validate": "route_api_validate",
+        "GET /api/v1/items/{id}": "route_api_item",
+        "POST /api/v1/payload": "route_api_payload",
+        "POST /api/v1/nested": "route_api_nested",
+        "GET /api/v1/headers": "route_api_headers",
+        "GET /api/v1/response-model": "route_api_response_model",
+        "POST /api/v1/request-model": "route_api_request_model",
+        "GET /admin": "route_admin_overview",
+        "GET /admin/{tabell}": "route_admin_liste",
+        "GET /admin/{tabell}/ny": "route_admin_ny",
+        "GET /admin/{tabell}/{id}/rediger": "route_admin_rediger",
+        "POST /admin/{tabell}/lagre": "route_admin_lagre",
+        "POST /admin/{tabell}/{id}/lagre": "route_admin_lagre",
+        "POST /admin/{tabell}/{id}/slett": "route_admin_slett",
+        "GET /auth/login": "route_login_skjemat",
+        "POST /auth/login": "route_login",
+        "GET /auth/register": "route_register_skjemat",
+        "POST /auth/register": "route_register",
+        "POST /auth/logout": "route_logout",
+        "GET /profile": "route_profile",
+        "GET /static/{sti}": "route_static"
+EOF_ROUTES
+ elif [ "$WITH_ADMIN" = "sann" ]; then
+cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+        "GET /": "route_index",
+        "GET /cache-demo": "route_cache_demo",
+        "GET /i18n-demo": "route_i18n_demo",
+        "GET /api/v1/health": "route_api_health",
+        "POST /api/v1/echo": "route_api_echo",
+        "GET /api/v1/dependency": "route_api_dependency",
+        "GET /openapi.json": "route_api_openapi",
+        "GET /docs": "route_api_docs",
+        "GET /api/v1/query": "route_api_query",
+        "POST /api/v1/validate": "route_api_validate",
+        "GET /api/v1/items/{id}": "route_api_item",
+        "POST /api/v1/payload": "route_api_payload",
+        "POST /api/v1/nested": "route_api_nested",
+        "GET /api/v1/headers": "route_api_headers",
+        "GET /api/v1/response-model": "route_api_response_model",
+        "POST /api/v1/request-model": "route_api_request_model",
+        "GET /admin": "route_admin_overview",
+        "GET /admin/{tabell}": "route_admin_liste",
+        "GET /admin/{tabell}/ny": "route_admin_ny",
+        "GET /admin/{tabell}/{id}/rediger": "route_admin_rediger",
+        "POST /admin/{tabell}/lagre": "route_admin_lagre",
+        "POST /admin/{tabell}/{id}/lagre": "route_admin_lagre",
+        "POST /admin/{tabell}/{id}/slett": "route_admin_slett",
+        "GET /static/{sti}": "route_static"
+EOF_ROUTES
+ elif [ "$WITH_AUTH" = "sann" ]; then
+cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+        "GET /": "route_index",
+        "GET /cache-demo": "route_cache_demo",
+        "GET /i18n-demo": "route_i18n_demo",
+        "GET /api/v1/health": "route_api_health",
+        "POST /api/v1/echo": "route_api_echo",
+        "GET /api/v1/dependency": "route_api_dependency",
+        "GET /openapi.json": "route_api_openapi",
+        "GET /docs": "route_api_docs",
+        "GET /api/v1/query": "route_api_query",
+        "POST /api/v1/validate": "route_api_validate",
+        "GET /api/v1/items/{id}": "route_api_item",
+        "POST /api/v1/payload": "route_api_payload",
+        "POST /api/v1/nested": "route_api_nested",
+        "GET /api/v1/headers": "route_api_headers",
+        "GET /api/v1/response-model": "route_api_response_model",
+        "POST /api/v1/request-model": "route_api_request_model",
+        "GET /auth/login": "route_login_skjemat",
+        "POST /auth/login": "route_login",
+        "GET /auth/register": "route_register_skjemat",
+        "POST /auth/register": "route_register",
+        "POST /auth/logout": "route_logout",
+        "GET /profile": "route_profile",
+        "GET /static/{sti}": "route_static"
+EOF_ROUTES
+ else
+cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+        "GET /": "route_index",
+        "GET /cache-demo": "route_cache_demo",
+        "GET /i18n-demo": "route_i18n_demo",
+        "GET /api/v1/health": "route_api_health",
+        "POST /api/v1/echo": "route_api_echo",
+        "GET /api/v1/dependency": "route_api_dependency",
+        "GET /openapi.json": "route_api_openapi",
+        "GET /docs": "route_api_docs",
+        "GET /api/v1/query": "route_api_query",
+        "POST /api/v1/validate": "route_api_validate",
+        "GET /api/v1/items/{id}": "route_api_item",
+        "POST /api/v1/payload": "route_api_payload",
+        "POST /api/v1/nested": "route_api_nested",
+        "GET /api/v1/headers": "route_api_headers",
+        "GET /api/v1/response-model": "route_api_response_model",
+        "POST /api/v1/request-model": "route_api_request_model",
+        "GET /static/{sti}": "route_static"
+EOF_ROUTES
+fi
+cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
+    }
+}
+EOF_ROUTES
+
+cat > "$OUTPUT_DIR/src/route_registry.no" <<'EOF_ROUTE_REG'
+import src.routes
+
+funksjon _prefiks(funksjon_namn: tekst) -> tekst {
+    hvis tekst_inneholder(funksjon_namn, ".") {
+        returner "src." + funksjon_namn
+    }
+    returner "app." + funksjon_namn
+}
+
+funksjon index() -> ordbok_tekst {
+    la grunnruter = src.routes.index()
+    la resultat: ordbok_tekst = {}
+    la nøklar = nøkler(grunnruter)
+    la i: heiltall = 0
+    mens i < lengde(nøklar) {
+        la nøkkel = nøklar[i]
+        la funksjon_namn = tekst(grunnruter[nøkkel])
+        resultat[nøkkel] = _prefiks(funksjon_namn)
+        i = i + 1
+    }
+    returner resultat
+}
+EOF_ROUTE_REG
+
+cat > "$OUTPUT_DIR/apps/core/core.no" <<'EOF_CORE'
+funksjon start() -> heiltall {
+    returner 0
+}
+EOF_CORE
+
+cat > "$OUTPUT_DIR/apps/core/README.md" <<'EOF_CORE_README'
+# core
+
+Appmodul oppretta av `nc startproject`.
+EOF_CORE_README
+
+cat > "$OUTPUT_DIR/apps/core/tests/test_core.no" <<'EOF_CORE_TEST'
+import core
+
+funksjon test_start() {
+    la r = core.start()
+    assert_eq(r, 0)
+}
+EOF_CORE_TEST
+
+cat > "$OUTPUT_DIR/tests/test_app.no" <<'EOF_TEST'
+bruk std.test som test
+import app
+
+funksjon test_start() {
+    la r = app.start()
+    assert_eq(r, 0)
+}
+
+funksjon start() -> heiltall {
+    la testar = ["test_start"]
+    returner test.køyr(testar)
+}
+EOF_TEST
+
+cat > "$OUTPUT_DIR/tests/test_stack_migrasjon.no" <<'EOF_TEST_MIG'
+bruk std.test som test
+import src.models
+
+funksjon test_migrasjon_antal() {
+    la migrasjonar = src.models.migrasjonar()
+    assert(lengde(migrasjonar) >= 1)
+}
+
+funksjon test_modell_manifest() {
+    la modellar = src.models.modeller()
+    assert(lengde(modellar) >= 1)
+}
+
+funksjon start() -> heiltall {
+    la testar = ["test_migrasjon_antal", "test_modell_manifest"]
+    returner test.køyr(testar)
+}
+EOF_TEST_MIG
+
+cat > "$OUTPUT_DIR/tests/test_stack_auth.no" <<'EOF_TEST_AUTH'
+bruk std.test som test
+bruk std.db som db
+bruk std.sesjon som sesjon
+import src.config
+import src.messages
+import src.auth.throttle
+bruk std.web som web
+
+funksjon test_innstillingar_lastes() {
+    la cfg = src.config.hent()
+    la _ = cfg["DATABASE_URL"]
+    assert(sann)
+}
+
+funksjon test_profil_støtte() {
+    la cfg = src.config.hent_for_profil("testing")
+    la db = cfg["DATABASE_URL"]
+    assert(db == ":memory:")
+}
+
+funksjon test_profilteljing() {
+    la aktiv = src.config.profil()
+    assert(aktiv == "development")
+}
+
+funksjon test_meldings_flash() {
+    la conn = db.open(":memory:")
+    la _ = sesjon.migrer(conn)
+    la token = sesjon.start_med_ttl(conn, {}, 3600)
+    la _ = src.messages.set_med_token(conn, token, "info", "Velkomen")
+    la ved_ctx: ordbok_tekst = {"__sesjon_token__": token}
+    la frå_kontekst = src.messages.hent(ved_ctx, conn)
+    assert_eq(frå_kontekst["info"], "Velkomen")
+    la _ = sesjon.flash_sett(conn, token, "feil", "Sakna")
+    la alt = src.messages.hent_med_token(conn, token)
+    assert(har_nokkel(alt, "feil"))
+    la _ = db.close(conn)
+}
+
+funksjon test_bruteforce_tvinger_rate_limit() {
+    la ctx = web.request_context("POST", "/auth/login", {}, {
+        "host": "localhost",
+        "x-forwarded-for": "203.0.113.15"
+    }, "")
+    la ok1 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok2 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok3 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok4 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
+    assert(ok1)
+    assert(ok2)
+    assert(ok3)
+    assert(!ok4)
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_innstillingar_lastes",
+        "test_profil_støtte",
+        "test_profilteljing",
+        "test_meldings_flash",
+        "test_bruteforce_tvinger_rate_limit"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_AUTH
+
+cat > "$OUTPUT_DIR/tests/test_stack_security.no" <<'EOF_TEST_SECURITY'
+bruk std.test som test
+bruk std.web som web
+import app
+import src.middleware
+import src.security
+
+funksjon test_blockert_host() {
+    la blokkert = src.security.host_tillatt(web.request_context("GET", "/auth/login", {}, {"host": "evil.test"}, ""))
+    assert(!blokkert)
+}
+
+funksjon test_security_headers() {
+    la svar = app.dispatcher(web.request_context("GET", "/", {}, {"host": "localhost"}, ""))
+    la h = web.response_header(svar, "x-content-type-options")
+    assert(h == "nosniff")
+}
+
+funksjon test_middleware_blockerer_evil_host() {
+    la blokkerte_svar = src.middleware.køyr(web.request_context("GET", "/cache-demo", {}, {"host": "evil.test"}, ""), web.response_builder(200, {"content-type":"text/plain"}, "hei"))
+    assert_eq(web.response_status(blokkerte_svar), 403)
+}
+
+funksjon test_middleware_stack() {
+    la stack = src.middleware.bygg_stack()
+    la funne = usann
+    la i: heiltall = 0
+    mens i < lengde(stack) {
+        la mw = stack[i]
+        hvis har_nokkel(mw, "type") og mw["type"] == "sikkerheit" { funne = sann }
+        i = i + 1
+    }
+    assert(funne)
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_blockert_host",
+        "test_security_headers",
+        "test_middleware_blockerer_evil_host",
+        "test_middleware_stack"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_SECURITY
+
+cat > "$OUTPUT_DIR/tests/test_stack_web.no" <<'EOF_TEST_WEB'
+bruk std.test som test
+bruk std.web som web
+import app
+import src.route_registry
+
+funksjon test_route_index_finst() {
+    la _ = app.route_index
+    assert(sann)
+}
+
+funksjon test_route_registry_har_stotte() {
+    la ruter = src.route_registry.index()
+    assert(har_nokkel(ruter, "GET /"))
+    assert(har_nokkel(ruter, "GET /cache-demo"))
+    assert(har_nokkel(ruter, "GET /api/v1/health"))
+    assert(har_nokkel(ruter, "POST /api/v1/echo"))
+    assert(har_nokkel(ruter, "GET /api/v1/dependency"))
+    assert(har_nokkel(ruter, "GET /openapi.json"))
+    assert(har_nokkel(ruter, "GET /docs"))
+    assert(har_nokkel(ruter, "GET /api/v1/query"))
+    assert(har_nokkel(ruter, "POST /api/v1/validate"))
+    assert(har_nokkel(ruter, "POST /api/v1/request-model"))
+    assert(sann)
+}
+
+funksjon test_route_cache_demo() {
+    la ctx = web.request_context("GET", "/cache-demo", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(web.response_body(svar), "Cache-demo"))
+}
+
+funksjon test_route_i18n_demo() {
+    la ctx = web.request_context("GET", "/i18n-demo", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(web.response_body(svar), "Hei, venn!"))
+}
+
+funksjon test_route_api_health() {
+    la ctx = web.request_context("GET", "/api/v1/health", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "\"ok\":\"sann\""))
+}
+
+funksjon test_route_api_echo() {
+    la body = builtin.json_stringify({"melding": "hei", "kontekst": "norscode"})
+    la ctx = web.request_context("POST", "/api/v1/echo", {"content-type": "application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_ut = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_ut, "\"melding\":\"hei\""))
+}
+
+funksjon test_route_api_echo_feil() {
+    la ctx = web.request_context("POST", "/api/v1/echo", {"content-type": "application/json"}, {"host": "localhost"}, "ikkje json")
+    la svar = app.dispatcher(ctx)
+    la body_ut = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_ut, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_ut, "\"body må vere gyldig JSON-objekt\""))
+}
+
+funksjon test_route_api_dependency() {
+    la ctx = web.request_context("GET", "/api/v1/dependency", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "\"path\":\"/api/v1/dependency\""))
+    assert(tekst_inneholder(body, "\"method\":\"GET\""))
+}
+
+funksjon test_route_api_openapi() {
+    la ctx = web.request_context("GET", "/openapi.json", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "\"openapi\":\"3.0.3\""))
+    assert(tekst_inneholder(body, "\"/api/v1/health\""))
+    assert(tekst_inneholder(body, "\"/api/v1/response-model\""))
+    assert(tekst_inneholder(body, "\"/api/v1/request-model\""))
+}
+
+funksjon test_route_api_docs() {
+    la ctx = web.request_context("GET", "/docs", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "<h1>"))
+    assert(tekst_inneholder(body, "\"openapi\":\"3.0.3\""))
+}
+
+funksjon test_route_api_query() {
+    la ctx = web.request_context("GET", "/api/v1/query", {"name":"hei"}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "\"name\":\"hei\""))
+}
+
+funksjon test_route_api_query_feil() {
+    la ctx = web.request_context("GET", "/api/v1/query", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body, "\"name er påkravd\""))
+}
+
+funksjon test_route_api_validate() {
+    la body = builtin.json_stringify({"name":"norscode","age":"22"})
+    la ctx = web.request_context("POST", "/api/v1/validate", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"name\":\"norscode\""))
+    assert(tekst_inneholder(body_res, "\"age\":22"))
+}
+
+funksjon test_route_api_validate_feil() {
+    la body = builtin.json_stringify({"age":"ikkje_tal"})
+    la ctx = web.request_context("POST", "/api/v1/validate", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_res, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_res, "\"age må vere heiltal\""))
+}
+
+funksjon test_route_api_payload() {
+    la body = builtin.json_stringify({"title":"demo","count":3,"active":sann,"tags":["api","stack"]})
+    la ctx = web.request_context("POST", "/api/v1/payload", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"title\":\"demo\""))
+    assert(tekst_inneholder(body_res, "\"count\":3"))
+    assert(tekst_inneholder(body_res, "\"active\":true"))
+    assert(tekst_inneholder(body_res, "\"tags\":[\"api\",\"stack\"]"))
+}
+
+funksjon test_route_api_payload_feil() {
+    la body = builtin.json_stringify({"count":"abc","active":"ja","tags":{}})
+    la ctx = web.request_context("POST", "/api/v1/payload", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_res, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_res, "\"title er påkravd\""))
+    assert(tekst_inneholder(body_res, "\"count må vere heiltal\""))
+    assert(tekst_inneholder(body_res, "\"active må vere boolsk\""))
+    assert(tekst_inneholder(body_res, "\"tags må vere liste\""))
+}
+
+funksjon test_route_api_nested() {
+    la body = "{\"user\":{\"name\":\"Ola\",\"age\":33},\"meta\":{\"source\":\"cli\",\"ref\":\"v1\"}}"
+    la ctx = web.request_context("POST", "/api/v1/nested", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"name\":\"Ola\""))
+    assert(tekst_inneholder(body_res, "\"age\":33"))
+    assert(tekst_inneholder(body_res, "\"source\":\"cli\""))
+    assert(tekst_inneholder(body_res, "\"ref\":\"v1\""))
+}
+
+funksjon test_route_api_nested_feil() {
+    la body = "{\"user\":{\"age\":\"bad\"},\"meta\":{\"source\":false}}"
+    la ctx = web.request_context("POST", "/api/v1/nested", {"content-type":"application/json"}, {"host": "localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_res, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_res, "\"name er påkravd\""))
+    assert(tekst_inneholder(body_res, "\"age må vere heiltal\""))
+    assert(tekst_inneholder(body_res, "\"source må vere tekst\""))
+}
+
+funksjon test_route_api_headers() {
+    la ctx = web.request_context("GET", "/api/v1/headers", {}, {"host": "localhost", "x-request-id":"abc", "x-count":"3", "x-active":"true"}, "")
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"request_id\":\"abc\""))
+    assert(tekst_inneholder(body_res, "\"count\":3"))
+    assert(tekst_inneholder(body_res, "\"active\":true"))
+}
+
+funksjon test_route_api_headers_feil() {
+    la ctx = web.request_context("GET", "/api/v1/headers", {}, {"host": "localhost", "x-request-id":"", "x-count":"tjueto", "x-active":"ja"}, "")
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_res, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_res, "\"x-request-id er påkravd\""))
+    assert(tekst_inneholder(body_res, "\"x-count må vere heiltal\""))
+    assert(tekst_inneholder(body_res, "\"x-active må vere boolsk\""))
+}
+
+funksjon test_route_api_response_model() {
+    la ctx = web.request_context("GET", "/api/v1/response-model?mode=good", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"count\":2"))
+    assert(tekst_inneholder(body_res, "\"active\":true"))
+}
+
+funksjon test_route_api_response_model_feil() {
+    la ctx = web.request_context("GET", "/api/v1/response-model?mode=bad", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 500)
+    assert(tekst_inneholder(body_res, "\"error\":\"ResponseValidationError\""))
+    assert(tekst_inneholder(body_res, "\"count må vere heiltall\""))
+}
+
+funksjon test_route_api_request_model() {
+    la body = "{\"title\":\"demo\",\"count\":9,\"active\":true,\"tags\":[\"stack\",\"request\"]}"
+    la ctx = web.request_context("POST", "/api/v1/request-model", {"content-type":"application/json"}, {"host":"localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body_res, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body_res, "\"title\":\"demo\""))
+    assert(tekst_inneholder(body_res, "\"count\":9"))
+    assert(tekst_inneholder(body_res, "\"active\":true"))
+    assert(tekst_inneholder(body_res, "\"tags\":[\"stack\",\"request\"]"))
+}
+
+funksjon test_route_api_request_model_feil() {
+    la body = "{\"title\":\"\",\"count\":\"na\",\"active\":\"ja\",\"tags\":\"ikkje-liste\"}"
+    la ctx = web.request_context("POST", "/api/v1/request-model", {"content-type":"application/json"}, {"host":"localhost"}, body)
+    la svar = app.dispatcher(ctx)
+    la body_res = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body_res, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body_res, "\"title er påkravd\""))
+    assert(tekst_inneholder(body_res, "\"count må vere heiltal\""))
+    assert(tekst_inneholder(body_res, "\"active må vere boolsk\""))
+    assert(tekst_inneholder(body_res, "\"tags må vere liste\""))
+}
+
+funksjon test_route_api_item() {
+    la ctx = web.request_context("GET", "/api/v1/items/42", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 200)
+    assert(tekst_inneholder(body, "\"ok\":\"sann\""))
+    assert(tekst_inneholder(body, "\"id\":42"))
+}
+
+funksjon test_route_api_item_feil() {
+    la ctx = web.request_context("GET", "/api/v1/items/abc", {}, {"host": "localhost"}, "")
+    la svar = app.dispatcher(ctx)
+    la body = web.response_body(svar)
+    assert_eq(web.response_status(svar), 422)
+    assert(tekst_inneholder(body, "\"error\":\"ValidationError\""))
+    assert(tekst_inneholder(body, "\"id må vere heiltal\""))
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_route_index_finst",
+        "test_route_registry_har_stotte",
+        "test_route_cache_demo",
+        "test_route_i18n_demo",
+        "test_route_api_health",
+        "test_route_api_echo",
+        "test_route_api_echo_feil",
+        "test_route_api_dependency",
+        "test_route_api_openapi",
+        "test_route_api_docs",
+        "test_route_api_query",
+        "test_route_api_query_feil",
+        "test_route_api_validate",
+        "test_route_api_validate_feil",
+        "test_route_api_item",
+        "test_route_api_item_feil",
+        "test_route_api_payload",
+        "test_route_api_payload_feil",
+        "test_route_api_nested",
+        "test_route_api_nested_feil",
+        "test_route_api_headers",
+        "test_route_api_headers_feil",
+        "test_route_api_response_model",
+        "test_route_api_response_model_feil",
+        "test_route_api_request_model",
+        "test_route_api_request_model_feil"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_WEB
+
+cat > "$OUTPUT_DIR/tests/test_stack_cache.no" <<'EOF_TEST_CACHE'
+bruk std.test som test
+bruk std.web som web
+import src.cache
+import src.config
+
+funksjon test_cache_config() {
+    la cfg = src.config.hent()
+    assert_eq(cfg["CACHE_BACKEND"], "minne")
+    assert_eq(cfg["CACHE_DIR"], "cache/")
+}
+
+funksjon test_cache_skriv_og_les() {
+    la c = src.cache.ny_minne()
+    la _ = src.cache.slett(c, "stack_cache_testr")
+    la satt = src.cache.sett(c, "stack_cache_testr", "hei", 60)
+    assert(satt >= 0)
+    la lese = src.cache.hent(c, "stack_cache_testr", "")
+    assert_eq(lese, "hei")
+}
+
+funksjon test_cache_svar_cache() {
+    la c = src.cache.ny_minne()
+    la respons = web.response_builder(200, {"content-type": "text/plain; charset=utf-8"}, "Hallo cache")
+    la _ = src.cache.set_response(c, "cache_test_svar", respons, 60)
+    la henta = src.cache.hent_response(c, "cache_test_svar")
+    assert_eq(web.response_status(henta), 200)
+    assert_eq(web.response_body(henta), "Hallo cache")
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_cache_config",
+        "test_cache_skriv_og_les",
+        "test_cache_svar_cache"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_CACHE
+
+cat > "$OUTPUT_DIR/tests/test_stack_email.no" <<'EOF_TEST_EMAIL'
+bruk std.test som test
+import src.email
+import src.i18n
+
+funksjon test_i18n_tolkning_nn() {
+    la vising = src.i18n.t("Welcome")
+    assert_eq(vising, "Velkomen")
+}
+
+funksjon test_i18n_tolkning_med_kontekst() {
+    la vising = src.i18n.t_ctx("Hello, %(name)s!", {"name": "Ola"})
+    assert_eq(vising, "Hei, Ola!")
+}
+
+funksjon test_email_send_i_konsollmodus() {
+    la vart_sendt = src.email.send("test@example.com", "Hei frå test", "Dette er ein test")
+    assert(vart_sendt)
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_i18n_tolkning_nn",
+        "test_i18n_tolkning_med_kontekst",
+        "test_email_send_i_konsollmodus"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_EMAIL
+
+cat > "$OUTPUT_DIR/tests/test_stack_static.no" <<'EOF_TEST_STATIC'
+bruk std.test som test
+bruk std.web som web
+import src.static
+
+funksjon test_static_style_finst() {
+    la res = src.static.svar("/static/style.css")
+    assert_eq(web.response_status(res), 200)
+    assert(tekst_inneholder(web.response_body(res), "Norscode"))
+}
+
+funksjon test_static_ikkje_finst() {
+    la res = src.static.svar("/static/ikkje-finst.css")
+    assert_eq(web.response_status(res), 404)
+}
+
+funksjon test_static_triks_blokker() {
+    la res = src.static.svar("/static/../seier")
+    assert(web.response_status(res) != 200)
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_static_style_finst",
+        "test_static_ikkje_finst",
+        "test_static_triks_blokker"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_STATIC
+
+cat > "$OUTPUT_DIR/tests/test_stack_orm_query.no" <<'EOF_TEST_STACK_ORM_QUERY'
+bruk std.db som db
+bruk std.orm som orm
+bruk std.test som test
+import src.models
+
+funksjon _lag_test_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "CREATE TABLE produkt (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT, pris INTEGER, kategori TEXT)")
+    la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, kategori) VALUES ('alpha', 10, 'A');")
+    la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, kategori) VALUES ('beta', 20, 'B');")
+    la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, kategori) VALUES ('gamma', 30, 'A');")
+    la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, kategori) VALUES ('delta', 40, 'A');")
+    returner conn
+}
+
+funksjon test_query_filter_order_limit() {
+    la conn = _lag_test_data()
+    la q = orm.query_set(conn, "produkt")
+    la filtrert = orm.filter(q, "kategori = 'A'")
+    la sortert = orm.order_by(filtrert, "pris", "DESC")
+    la avgrensa = orm.limit(sortert, 2)
+    la r = orm.all(avgrensa)
+    assert_eq(lengde(r), 2)
+    assert_eq(r[0]["namn"], "delta")
+    assert_eq(r[1]["namn"], "gamma")
+    la _ = db.close(conn)
+}
+
+funksjon _lag_relasjon_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "PRAGMA foreign_keys = ON;")
+    la _ = db.execute(conn, "CREATE TABLE kategori (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT)")
+    la _ = db.execute(conn, "INSERT INTO kategori (namn) VALUES ('Elektronikk');")
+    la _ = db.execute(conn, "INSERT INTO kategori (namn) VALUES ('Kontor');")
+    la _ = db.execute(conn, "CREATE TABLE produkt_fk (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT, kategori_id INTEGER, FOREIGN KEY(kategori_id) REFERENCES kategori(id))")
+    la _ = db.execute(conn, "INSERT INTO produkt_fk (namn, kategori_id) VALUES ('mus', 1);")
+    la _ = db.execute(conn, "INSERT INTO produkt_fk (namn, kategori_id) VALUES ('stol', 2);")
+    returner conn
+}
+
+funksjon test_query_join_fk() {
+    la conn = _lag_relasjon_data()
+    la q = orm.select(orm.query_set(conn, "produkt_fk"), "produkt_fk.namn, k.namn AS kategori_namn")
+    la q2 = orm.join(q, "kategori", "kategori_id", "id", "k")
+    la r = orm.all(q2)
+    assert_eq(lengde(r), 2)
+    assert_eq(r[0]["kategori_namn"], "Elektronikk")
+    la _ = db.close(conn)
+}
+
+funksjon _lag_many_to_many_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "PRAGMA foreign_keys = ON;")
+    la _ = db.execute(conn, "CREATE TABLE rolle (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT)")
+    la _ = db.execute(conn, "CREATE TABLE bruker (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT)")
+    la _ = db.execute(conn, "CREATE TABLE bruker_rolle (id INTEGER PRIMARY KEY AUTOINCREMENT, bruker_id INTEGER, rolle_id INTEGER, FOREIGN KEY(bruker_id) REFERENCES bruker(id), FOREIGN KEY(rolle_id) REFERENCES rolle(id))")
+    la _ = db.execute(conn, "INSERT INTO rolle (namn) VALUES ('admin');")
+    la _ = db.execute(conn, "INSERT INTO rolle (namn) VALUES ('editor');")
+    la _ = db.execute(conn, "INSERT INTO bruker (namn) VALUES ('Ola');")
+    la _ = db.execute(conn, "INSERT INTO bruker_rolle (bruker_id, rolle_id) VALUES (1,1);")
+    la _ = db.execute(conn, "INSERT INTO bruker_rolle (bruker_id, rolle_id) VALUES (1,2);")
+    la _ = db.execute(conn, "INSERT INTO bruker_rolle (bruker_id, rolle_id) VALUES (2,2);")
+    returner conn
+}
+
+funksjon test_scaffold_many_to_many_manifest() {
+    la m2m = src.models.many_to_many_tabellar()
+    assert_eq(lengde(m2m), 1)
+    assert_eq(m2m[0]["table"], "produkt_tag")
+    la modellar = src.models.modeller()
+    la funne = usann
+    la i: heiltall = 0
+    mens i < lengde(modellar) {
+        hvis modellar[i]["table"] == "produkt_tag" {
+            funne = sann
+        }
+        i = i + 1
+    }
+    assert(funne)
+}
+
+funksjon test_scaffold_many_to_many_hjelpar() {
+    la conn = db.open(":memory:")
+    la _ = src.models.ensure_schema(conn)
+    la _ = db.execute(conn, "INSERT INTO kategori (namn) VALUES ('Demo');")
+    la _ = db.execute(conn, "INSERT INTO tag (namn) VALUES ('ny');")
+    la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, lager, kategori_id) VALUES ('produkt-1', 10, 1, 1);")
+    la _ = db.execute(conn, "INSERT INTO produkt_tag (produkt_id, tag_id) VALUES (1, 1);")
+    la tag = src.models.tags_for_produkt(conn, 1)
+    assert_eq(lengde(tag), 1)
+    assert_eq(tag[0]["namn"], "ny")
+    la produkter = src.models.produkt_for_tag(conn, 1)
+    assert_eq(lengde(produkter), 1)
+    assert_eq(produkter[0]["namn"], "produkt-1")
+    la _ = db.close(conn)
+}
+
+funksjon _lag_aggregate_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "CREATE TABLE salg (id INTEGER PRIMARY KEY AUTOINCREMENT, brukarkategori TEXT, belop INTEGER)")
+    la _ = db.execute(conn, "INSERT INTO salg (brukarkategori, belop) VALUES ('bronse', 100);")
+    la _ = db.execute(conn, "INSERT INTO salg (brukarkategori, belop) VALUES ('bronse', 50);")
+    la _ = db.execute(conn, "INSERT INTO salg (brukarkategori, belop) VALUES ('sølv', 75);")
+    la _ = db.execute(conn, "INSERT INTO salg (brukarkategori, belop) VALUES ('sølv', 25);")
+    la _ = db.execute(conn, "INSERT INTO salg (brukarkategori, belop) VALUES ('gull', 300);")
+    returner conn
+}
+
+funksjon test_query_many_to_many_join() {
+    la conn = _lag_many_to_many_data()
+    la q = orm.select(orm.query_set(conn, "bruker"), "bruker.namn AS bruker_namn, r.namn AS rolle_namn")
+    la q2 = orm.join_many_to_many(q, "bruker_rolle", "bruker_id", "rolle_id", "rolle", "id", "r", "")
+    la rader = orm.all(q2)
+    assert_eq(lengde(rader), 3)
+    la funnet_admin = usann
+    la i: heiltall = 0
+    mens i < lengde(rader) {
+        hvis rader[i]["rolle_namn"] == "admin" {
+            funnet_admin = sann
+        }
+        i = i + 1
+    }
+    assert(funnet_admin)
+    la _ = db.close(conn)
+}
+
+funksjon test_many_to_many_reverser() {
+    la conn = _lag_many_to_many_data()
+    la roles = orm.reverser_many_to_many(conn, "bruker_rolle", "rolle", "bruker_id", 1, "rolle_id", "id", "r")
+    assert_eq(lengde(roles), 2)
+    la _ = db.close(conn)
+}
+
+funksjon test_query_aggregate_scalar() {
+    la conn = _lag_aggregate_data()
+    la totalt = orm.aggregate_count(orm.query_set(conn, "salg"), "id")
+    la summering = orm.aggregate_sum(orm.query_set(conn, "salg"), "belop")
+    assert_eq(totalt, "5")
+    assert_eq(summering, "550")
+    la _ = db.close(conn)
+}
+
+funksjon test_query_group_by_annotering() {
+    la conn = _lag_aggregate_data()
+    la q = orm.select(orm.query_set(conn, "salg"), "brukarkategori")
+    la q2 = orm.group_by(q, "brukarkategori")
+    la q3 = orm.annotate(q2, "SUM(belop)", "total")
+    la grupper = orm.all(q3)
+    assert_eq(lengde(grupper), 3)
+    la funnet_bronse = usann
+    la i: heiltall = 0
+    mens i < lengde(grupper) {
+        hvis grupper[i]["brukarkategori"] == "bronse" {
+            assert_eq(grupper[i]["total"], "150")
+            funnet_bronse = sann
+        }
+        i = i + 1
+    }
+    assert(funnet_bronse)
+    la _ = db.close(conn)
+}
+
+funksjon _lag_savepoint_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "CREATE TABLE konto (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT);")
+    la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('start');")
+    returner conn
+}
+
+funksjon _lag_index_data() -> tekst {
+    la conn = db.open(":memory:")
+    la _ = db.execute(conn, "CREATE TABLE produkt_meta (id INTEGER PRIMARY KEY AUTOINCREMENT, namn TEXT, verdi INTEGER);")
+    la _ = db.execute(conn, "INSERT INTO produkt_meta (namn, verdi) VALUES ('a', 1);")
+    la _ = db.execute(conn, "INSERT INTO produkt_meta (namn, verdi) VALUES ('b', 2);")
+    returner conn
+}
+
+funksjon test_transaksjon_savepoints() {
+    la conn = _lag_savepoint_data()
+    assert_eq(orm.tell(conn, "konto"), 1)
+    la _ = orm.transaksjon_start(conn)
+    la _ = orm.transaksjon_start_savepoint(conn, "punkt_a")
+    la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('midlertidig');")
+    la _ = orm.transaksjon_rull_til_savepoint(conn, "punkt_a")
+    assert_eq(orm.tell(conn, "konto"), 1)
+    la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('ny');")
+    la _ = orm.transaksjon_release_savepoint(conn, "punkt_a")
+    la _ = orm.transaksjon_bekreft(conn)
+    assert_eq(orm.tell(conn, "konto"), 2)
+    la _ = db.close(conn)
+}
+
+funksjon test_orm_indekser() {
+    la conn = _lag_index_data()
+    la idx_namn = orm.indeks_namn("produkt_meta", "namn", usann)
+    assert(orm.legg_indeks(conn, "produkt_meta", "namn", usann, ""))
+    assert(orm.indeks_finnes(conn, idx_namn))
+    la indeks_liste = orm.indeks_for_tabell(conn, "produkt_meta")
+    assert(lengde(indeks_liste) >= 1)
+    assert(orm.slett_indeks(conn, idx_namn))
+    assert(!orm.indeks_finnes(conn, idx_namn))
+    la _ = db.close(conn)
+}
+
+funksjon test_orm_constraint_help() {
+    la fk = orm.constraint_fk_sql("kategori_id", "kategori", "id")
+    la uniq = orm.constraint_unique_sql("kategori_id, namn")
+    la check = orm.constraint_check_sql("pris >= 0")
+    assert_eq(fk, "FOREIGN KEY(kategori_id) REFERENCES kategori(id)")
+    assert_eq(uniq, "UNIQUE(kategori_id, namn)")
+    assert_eq(check, "CHECK(pris >= 0)")
+    assert_eq(orm.constraint_check_sql("   "), "")
+}
+
+funksjon test_fk_hjelp() {
+    la conn = _lag_relasjon_data()
+    la rel = orm.hent_knytteobjekt(conn, "produkt_fk", 1, "kategori_id", "kategori")
+    assert(har_nokkel(rel, "namn"))
+    la rel2 = orm.reverser_knyting(conn, "produkt_fk", "kategori_id", "kategori", 2)
+    la _ = db.close(conn)
+    assert(lengde(rel2) > 0)
+}
+
+funksjon test_query_exclude_offset() {
+    la conn = _lag_test_data()
+    la q = orm.exclude(orm.filter_eq(orm.query_set(conn, "produkt"), "namn", "alpha"), "pris = 10")
+    la q2 = orm.offset(orm.order_by(q, "pris", "ASC"), 1)
+    la q3 = orm.limit(q2, 2)
+    la r = orm.all(q3)
+    assert_eq(lengde(r), 2)
+    assert_eq(r[0]["namn"], "beta")
+    assert_eq(r[1]["namn"], "gamma")
+    la _ = db.close(conn)
+}
+
+funksjon test_query_first_page_count_get() {
+    la conn = _lag_test_data()
+    la q = orm.order_by(orm.query_set(conn, "produkt"), "pris", "ASC")
+    la første = orm.first(q)
+    assert_eq(første["namn"], "alpha")
+    la page = orm.page(orm.query_set(conn, "produkt"), 2, 2)
+    la sider = orm.page_result(page)
+    assert_eq(lengde(sider), 2)
+    assert_eq(sider[0]["namn"], "gamma")
+    assert_eq(orm.count(orm.query_set(conn, "produkt")), 4)
+    la delta = orm.get(orm.filter_eq(orm.query_set(conn, "produkt"), "namn", "delta"))
+    assert_eq(delta["pris"], "40")
+    la tom = orm.get(orm.filter_eq(orm.query_set(conn, "produkt"), "namn", "manglar"))
+    assert(ikke har_nokkel(tom, "id"))
+    la _ = db.close(conn)
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_query_filter_order_limit",
+        "test_query_exclude_offset",
+        "test_query_join_fk",
+        "test_fk_hjelp",
+        "test_scaffold_many_to_many_manifest",
+        "test_scaffold_many_to_many_hjelpar",
+        "test_query_many_to_many_join",
+        "test_many_to_many_reverser",
+        "test_query_aggregate_scalar",
+        "test_query_group_by_annotering",
+        "test_transaksjon_savepoints",
+        "test_orm_indekser",
+        "test_orm_constraint_help",
+        "test_query_first_page_count_get"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_STACK_ORM_QUERY
+if [ "$WITH_ADMIN" = "sann" ]; then
+cat > "$OUTPUT_DIR/tests/test_stack_admin.no" <<'EOF_TEST_ADMIN'
+bruk std.test som test
+import src.admin_bootstrap
+import src.admin.index
+
+funksjon test_registrering() {
+    la register = {}
+    la _ = src.admin_bootstrap.registrer_modellar(register, "dummy")
+    assert(har_nokkel(register, "produkt"))
+}
+
+funksjon test_admin_ruter() {
+    la ruter = src.admin.index.routes()
+    assert(har_nokkel(ruter, "GET /admin"))
+    assert(har_nokkel(ruter, "GET /admin/{tabell}"))
+    assert(har_nokkel(ruter, "POST /admin/{tabell}/lagre"))
+    assert(har_nokkel(ruter, "POST /admin/{tabell}/{id}/slett"))
+}
+
+funksjon start() -> heiltall {
+    la testar = [
+        "test_registrering",
+        "test_admin_ruter"
+    ]
+    returner test.køyr(testar)
+}
+EOF_TEST_ADMIN
+fi
+
+cat > "$OUTPUT_DIR/tests/payloads/login.json" <<'EOF_PAY_LOGIN'
+{
+  "epost": "admin@eksempel.no",
+  "passord": "hemmelig"
+}
+EOF_PAY_LOGIN
+
+cat > "$OUTPUT_DIR/tests/payloads/register.json" <<'EOF_PAY_REGISTER'
+{
+  "brukarnamn": "admin",
+  "epost": "admin@eksempel.no",
+  "passord": "hemmelig"
+}
+EOF_PAY_REGISTER
+
+cat > "$OUTPUT_DIR/tests/payloads/api_echo.json" <<'EOF_PAY_API_ECHO'
+{
+  "melding": "Hei frå prosjekt"
+}
+EOF_PAY_API_ECHO
+
+cat > "$OUTPUT_DIR/tests/payloads/api_payload.json" <<'EOF_PAY_API_PAYLOAD'
+{
+  "title": "Demo",
+  "count": 10,
+  "active": true,
+  "tags": ["project", "api"]
+}
+EOF_PAY_API_PAYLOAD
+
+cat > "$OUTPUT_DIR/tests/payloads/api_nested.json" <<'EOF_PAY_API_NESTED'
+{
+  "user": {
+    "name": "Ola",
+    "age": 33
+  },
+  "meta": {
+    "source": "stack",
+    "ref": "v1"
+  }
+}
+EOF_PAY_API_NESTED
+
+cat > "$OUTPUT_DIR/tests/payloads/create_product.json" <<'EOF_PAY_PRODUCT'
+{
+  "model": "produkt",
+  "fields": {
+  "namn": "Starter",
+  "pris": 199,
+  "lager": 10
+  }
+}
+EOF_PAY_PRODUCT
+
+cat > "$OUTPUT_DIR/tests/payloads/create_kategori.json" <<'EOF_PAY_KATEGORI'
+{
+  "model": "kategori",
+  "fields": {
+    "namn": "Demo-kategori"
+  }
+}
+EOF_PAY_KATEGORI
+
+cat > "$OUTPUT_DIR/tests/payloads/create_tag.json" <<'EOF_PAY_TAG'
+{
+  "model": "tag",
+  "fields": {
+    "namn": "Kampanje"
+  }
+}
+EOF_PAY_TAG
+
+cat > "$OUTPUT_DIR/tests/payloads/create_produkt_tag.json" <<'EOF_PAY_PRODUKT_TAG'
+{
+  "model": "produkt_tag",
+  "fields": {
+    "produkt_id": 1,
+    "tag_id": 1
+  }
+}
+EOF_PAY_PRODUKT_TAG
+
+cat > "$OUTPUT_DIR/static/style.css" <<'EOF_STATIC_STYLE'
+:root {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+body {
+  margin: 0;
+}
+EOF_STATIC_STYLE
+
+cat > "$OUTPUT_DIR/static/media/example.txt" <<'EOF_STATIC_MEDIA'
+Norscode-static-eksempel.
+Denne fila er ei demo av media-katalogen i prosjektet.
+EOF_STATIC_MEDIA
+
+cat > "$OUTPUT_DIR/locale/nn.lang" <<'EOF_LOCALE_NN'
+"Welcome" = "Velkomen"
+"Home page" = "Hovudside"
+"Hello, %(name)s!" = "Hei, %(name)s!"
+EOF_LOCALE_NN
+
+cat > "$OUTPUT_DIR/locale/en.lang" <<'EOF_LOCALE_EN'
+"Welcome" = "Welcome"
+"Home page" = "Home page"
+"Hello, %(name)s!" = "Hello, %(name)s!"
+EOF_LOCALE_EN
+
+cat > "$OUTPUT_DIR/examples/ping.no" <<'EOF_EX'
+bruk std.web som web
+
+funksjon ping(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /ping")
+    returner web.response_builder(200, {"content-type": "text/plain"}, "pong")
+}
+EOF_EX
+
+cat > "$OUTPUT_DIR/deploy/norscode.service" <<EOF_SERVICE
+[Unit]
+Description=Norscode app service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=${OUTPUT_DIR}
+ExecStart=/usr/local/bin/nc run ${OUTPUT_DIR}/app.no
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+
+cat > "$OUTPUT_DIR/docs/lifecycle.md" <<'EOF_LIFECYCLE'
+# Deploy lifecycle og drift i dette prosjektet
+
+Dette dokumentet beskriv ein enkel deploy-flyt du kan bruke frå dagleg utvikling til produksjon.
+
+## 1) Klargjering før release
+
+- Oppdater avhengigheiter i `innstillingar.toml` ved behov.
+- Køyre validering:
+  - `./bin/nc check app.no`
+  - `./bin/nc check manage.no`
+  - `./bin/nc run manage.no migrate`
+- Køyre testar:
+  - `./bin/nc run manage.no test`
+- Valider at migrasjonane er rydda:
+  - `./bin/nc run manage.no status`
+
+## 2) Build/prepare
+
+- Vel produksjonsprofil: `NORSCODE_PROFILE=production`.
+- Sikre at `deploy/norscode.service` har rett `WorkingDirectory` og `ExecStart`.
+- Bygg artefakt i din CI/CD eller pakk repo-state etter ønskjeleg praksis.
+
+## 3) Deploy
+
+- Last opp/oppdater prosjektet på målmiljø.
+- Køyre migrasjonar på målmiljø før appstart om nødvendig.
+- Start tenesta og sjekk helsestatus.
+
+Standard startkommando:
+
+```sh
+./bin/nc run app.no
+```
+
+Med systemd:
+
+```sh
+systemctl start norscode
+systemctl status norscode
+```
+
+## 4) Overvaking etter deploy
+
+- Følg loggar frå tjeneste eller runtime.
+- Ver observant på autentiserings- og rate-limit-statistikk.
+- Sjekk `docs/deploy-log.md` etter kvar deploy med versjons- og rollback-notat.
+
+## 5) Rollback
+
+- Dersom deploy gir regresjon:
+  - steng ny versjon,
+  - reverter kode eller bytt tilbake siste kjente gode revisjon,
+  - køyr migrasjonar som trengst for å rulle tilbake eller justere datastrukturar.
+- Logg hendinga i `docs/deploy-log.md` som `rollback`.
+
+## 6) Vedlikehald
+
+- Oppdater `docs/deploy-log.md` ved kvart publiseringssteg.
+- Rydd eventuelle `cache`- og temp-filer.
+- Gjenta testløpet før neste deploy.
+
+## 7) Oppgåver før neste release
+
+- Fullfør nye migrasjonar i `migrations/`.
+- Oppdater `tests/payloads/` og `tests/` ved API-endringar.
+- Oppdater denne livssyklusen om flyten endrar seg.
+EOF_LIFECYCLE
+
+cat > "$OUTPUT_DIR/docs/deploy-log.md" <<'EOF_DEPLOY_LOG'
+# Deploy-logg (manuell)
+
+Bruk denne fila som ei enkel historikk over utgjevingar og deploy-hendingar.
+
+| Dato | Versjon | Kva | Status | Utført av | Kommentar |
+| --- | --- | --- | --- | --- | --- |
+| 2026-01-01 | 0.1.0 | Initial scaffold | fullført | team | Oppretta prosjekt frå `startproject`. |
+
+## Ny loggrad
+
+- `Dato`: ISO-dato (til dømes `2026-01-01`)
+- `Versjon`: prosjektversjon eller commit/tag
+- `Kva`: kort omtale (`deploy`, `rollback`, `hotfix`)
+- `Status`: `fullført`, `feila`, `rullback`
+- `Utført av`: namn/e-post
+- `Kommentar`: kva som vart gjort
+
+Legg til ei ny rad for kvar deploy.
+EOF_DEPLOY_LOG
+
+cat > "$OUTPUT_DIR/README.md" <<EOF_README
+# ${PROJECT_NAME}
+
+Dette er eit Django-inspirert Norscode prosjektoppsett med auth, migrations, admin og testmalar.
+
+Struktur:
+
+- `app.no` — hovud app-innsalg.
+- `manage.no` — management-kommandoar (`migrate`, `status`).
+- `src/` — eigenlogikk (modellar, ruter, visingar og auth).
+- `src/route_registry.no` — samlen app-route registry for dispatch.
+- `tests/` — testmalar for stack.
+- `tests/payloads/` — eksempel JSON-payloadar.
+- `apps/` — app-modularisering.
+- `docs/` — deploy-historikk og lifecycle-dokumentasjon.
+- `innstillingar.toml` — innstillingar.
+
+Kommandoar:
+
+- `cd ${PROJECT_DIR}`
+- `./bin/nc check app.no`
+- `./bin/nc check manage.no`
+- `./bin/nc run manage.no migrate`
+- `./bin/nc run manage.no status`
+- `./bin/nc run manage.no test`
+- `./bin/nc run app.no`
+- `./bin/nc startapp users`
+
+Dokumentasjon i prosjektet:
+
+- `docs/lifecycle.md` — deploy-livssyklus frå prep og rollback.
+- `docs/deploy-log.md` — manuell deploy-historikk.
+- `deploy/norscode.service` — eksempel systemd-service for produksjonskøyring.
+- `deploy/` — mappestruktur for operasjonelle deployment-filer.
+
+Test-kommandoar:
+
+- `./bin/nc run manage.no test --db :memory: --fixtures create_product`
+  - Laster `tests/payloads/create_product.json` som fixture før test.
+  - Testane køyrer via `start()`-metodar i kvar `test_*.no`.
+
+Profil/handsaming av innstillingar:
+
+- Standardprofil blir henta frå `PROFILE` i `innstillingar.toml` (globalt sett `development`).
+- Miljøvariabel `NORSCODE_PROFILE` (`development`, `testing`, `production`) kan overstyre profilen ved køyring.
+- Spesifikk profil i kode: `src.config.hent_for_profil("testing")`.
+- Overstyring av database for testmiljø: set `DATABASE_URL = ":memory:"` i `[testing]`.
+- Køyre med produksjonsprofil:
+  - `NORSCODE_PROFILE=production ./bin/nc run app.no`
+
+Auth-API:
+
+- `GET /auth/login`
+- `POST /auth/login`
+- `GET /auth/register`
+- `POST /auth/register`
+- `POST /auth/logout`
+- `GET /profile`
+- `GET /openapi.json`
+- `GET /docs`
+- `GET /api/v1/health`
+- `POST /api/v1/echo`
+- `GET /api/v1/dependency`
+- `GET /api/v1/query`
+- `POST /api/v1/validate`
+- `GET /api/v1/items/{id}`
+- `POST /api/v1/payload`
+- `POST /api/v1/nested`
+- `GET /api/v1/headers`
+- `GET /api/v1/response-model`
+- `POST /api/v1/request-model`
+- `GET /static/{sti}` (filer frå `static/`)
+
+Sikkerheit:
+
+- `src/middleware.no` køyrer standard pipeline for security/request-logg-rate-limit.
+- `src/security.no` legg til standard security headers på alle svar:
+  - `X-Content-Type-Options`
+  - `X-XSS-Protection`
+  - `Strict-Transport-Security`
+  - `X-Frame-Options`
+  - `Content-Security-Policy`
+- Host-kontroll er aktivert mot `ALLOWED_HOSTS` i `innstillingar.toml`.
+- Brute-force-vern på login:
+  - `src/auth/throttle.no` tek maks forsøk per IP/brukar innan eit vindauge.
+  - Ved for mange feil blir `/auth/login` blokkert med `HTTP 429`.
+- Konfigurer med:
+  - `BRUTEFORCE_LOGIN_ENABLED`
+  - `BRUTEFORCE_LOGIN_MAX`
+  - `BRUTEFORCE_LOGIN_WINDOW_SEK`
+  - `BRUTEFORCE_LOGIN_KEY` (`ip` eller `brukar`)
+EOF_README
+
+printf 'Oppretta nytt prosjekt: %s\n' "$OUTPUT_DIR"
+printf 'Prosjektnamn: %s\n' "$PROJECT_NAME"
+printf 'Neste steg: cd %s && ./bin/nc check app.no\n' "$OUTPUT_DIR"

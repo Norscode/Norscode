@@ -232,7 +232,7 @@ Etter generering:
 
 ```bash
 ./bin/nc check app.no
-./bin/nc run app.no
+./bin/nc serve app.no --port 8080
 ./bin/nc feature-check app.no
 ```
 

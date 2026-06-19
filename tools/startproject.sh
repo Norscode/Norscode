@@ -5,8 +5,10 @@ PROJECT_DIR=""
 OUTPUT_DIR=""
 PROJECT_NAME=""
 DB_FILE="app.db"
-WITH_AUTH="sann"
-WITH_ADMIN="sann"
+WITH_AUTH="usann"
+WITH_ADMIN="usann"
+WITH_EMAIL="usann"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 usage() {
   printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2
@@ -101,6 +103,11 @@ mkdir -p \
   "$OUTPUT_DIR/deploy" \
   "$OUTPUT_DIR/docs"
 
+ln -sfn "$ROOT_DIR/std" "$OUTPUT_DIR/std"
+ln -sfn "$ROOT_DIR/selfhost" "$OUTPUT_DIR/selfhost"
+ln -sfn "$ROOT_DIR/runtime" "$OUTPUT_DIR/runtime"
+ln -sfn "$ROOT_DIR/compiler" "$OUTPUT_DIR/compiler"
+
 cat > "$OUTPUT_DIR/norcode.toml" <<EOF_TOML
 [project]
 name = "${PROJECT_NAME}"
@@ -158,39 +165,39 @@ EOF_CFG
 cat > "$OUTPUT_DIR/app.no" <<'EOF_APP'
 bruk std.web_app_stack som stack
 bruk std.web som web
-import src.config
-import src.models
-import src.views
-import src.cache
-import src.i18n
-import src.routes
-import src.route_registry
-import src.static
-import src.security
-import src.middleware
+bruk src.config som config
+bruk src.models som models
+bruk src.views som views
+bruk src.cache som cache_mod
+bruk src.i18n som i18n
+bruk src.routes som routes
+bruk src.route_registry som route_registry
+bruk src.static som static_mod
+bruk src.security som security
+bruk src.middleware som middleware
 EOF_APP
 if [ "$WITH_ADMIN" = "sann" ]; then
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP_ADMIN_IMPORT'
-import src.admin_bootstrap
+bruk src.admin_bootstrap som admin_bootstrap
 EOF_APP_ADMIN_IMPORT
 fi
 if [ "$WITH_AUTH" = "sann" ]; then
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP_AUTH_IMPORT'
-import src.auth.login
-import src.auth.register
-import src.auth.logout
-import src.auth.guards
+bruk src.auth.login som auth_login
+bruk src.auth.register som auth_register
+bruk src.auth.logout som auth_logout
+bruk src.auth.guards som auth_guards
 EOF_APP_AUTH_IMPORT
 fi
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP'
 
 funksjon _init_app() -> ordbok_tekst {
-    la app = stack.bootstrap(src.config.INNSTILLINGAR_STI, src.config.DATABASE_STI)
-    src.models.ensure_schema(app["conn"])
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, config.DATABASE_STI)
+    models.ensure_schema(app["conn"])
 EOF_APP
 if [ "$WITH_ADMIN" = "sann" ]; then
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP_ADMIN_BOOT'
-    src.admin_bootstrap.registrer_modellar(app["register"], app["conn"])
+    admin_bootstrap.registrer_modellar(app["register"], app["conn"])
 EOF_APP_ADMIN_BOOT
 fi
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP'
@@ -200,7 +207,7 @@ cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP'
 funksjon dep_app_config(ctx: ordbok_tekst) -> ordbok_tekst {
     la _ = web.dependency("app_config")
     la _ = ctx
-    returner src.config.hent()
+    returner config.hent()
 }
 
 funksjon dep_request_meta(ctx: ordbok_tekst) -> ordbok_tekst {
@@ -212,22 +219,16 @@ funksjon dep_request_meta(ctx: ordbok_tekst) -> ordbok_tekst {
     }
 }
 
-funksjon route_index(ctx: ordbok_tekst, app_config: ordbok_tekst, req_meta: ordbok_tekst) -> ordbok_tekst {
+funksjon route_index(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /")
-    web.use_dependency("app_config")
-    web.use_dependency("request_meta")
-    la app = _init_app()
-    la _ = app_config
-    la _ = req_meta
-    la svar = src.views.index(stack.app_ctx(app, ctx), app["conn"], app["register"])
-    la _ = stack.lukk(app)
-    returner svar
+    la _ctx = ctx
+    returner web.response_builder(200, {"content-type": "text/html; charset=utf-8"}, "<!doctype html><html><body><h1>Norscode app OK</h1></body></html>")
 }
 
 funksjon route_cache_demo(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /cache-demo")
     la app = _init_app()
-    la svar = src.views.cache_demo(ctx)
+    la svar = views.cache_demo(ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -235,26 +236,26 @@ funksjon route_cache_demo(ctx: ordbok_tekst) -> ordbok_tekst {
 funksjon route_i18n_demo(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /i18n-demo")
     la app = _init_app()
-    la svar = src.views.i18n_demo(ctx)
+    la svar = views.i18n_demo(ctx)
     la _ = stack.lukk(app)
     returner svar
 }
 
 funksjon route_api_health(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /api/v1/health")
-    la svar = src.views.api_health(ctx)
+    la svar = views.api_health(ctx)
     returner svar
 }
 
 funksjon route_api_echo(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /api/v1/echo")
-    la svar = src.views.api_echo(ctx)
+    la svar = views.api_echo(ctx)
     returner svar
 }
 
 funksjon route_api_openapi(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /openapi.json")
-    la svar = src.views.api_openapi(ctx)
+    la svar = views.api_openapi(ctx)
     returner svar
 }
 
@@ -270,54 +271,54 @@ funksjon route_api_dependency(ctx: ordbok_tekst, app_config: ordbok_tekst, req_m
 
 funksjon route_api_docs(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /docs")
-    la svar = src.views.api_docs(ctx)
+    la svar = views.api_docs(ctx)
     returner svar
 }
 
 funksjon route_api_query(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_query(ctx)
+    la svar = views.api_query(ctx)
     returner svar
 }
 
 funksjon route_api_validate(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_validate(ctx)
+    la svar = views.api_validate(ctx)
     returner svar
 }
 
 funksjon route_api_item(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_item(ctx)
+    la svar = views.api_item(ctx)
     returner svar
 }
 
 funksjon route_api_payload(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_payload(ctx)
+    la svar = views.api_payload(ctx)
     returner svar
 }
 
 funksjon route_api_nested(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_nested(ctx)
+    la svar = views.api_nested(ctx)
     returner svar
 }
 
 funksjon route_api_headers(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_headers(ctx)
+    la svar = views.api_headers(ctx)
     returner svar
 }
 
 funksjon route_api_response_model(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_response_model(ctx)
+    la svar = views.api_response_model(ctx)
     returner svar
 }
 
 funksjon route_api_request_model(ctx: ordbok_tekst) -> ordbok_tekst {
-    la svar = src.views.api_request_model(ctx)
+    la svar = views.api_request_model(ctx)
     returner svar
 }
 
 funksjon route_static(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /static")
     la _ = ctx
-    returner src.static.svar(web.request_path(ctx))
+    returner static_mod.svar(web.request_path(ctx))
 }
 EOF_APP
 if [ "$WITH_ADMIN" = "sann" ]; then
@@ -327,11 +328,11 @@ funksjon route_admin_overview(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /admin")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.oversikt(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.oversikt(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -340,11 +341,11 @@ funksjon route_admin_liste(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /admin/{tabell}")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.liste(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.liste(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -353,11 +354,11 @@ funksjon route_admin_ny(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /admin/{tabell}/ny")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.ny(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.ny(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -366,11 +367,11 @@ funksjon route_admin_rediger(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /admin/{tabell}/{id}/rediger")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.rediger(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.rediger(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -380,11 +381,11 @@ funksjon route_admin_lagre(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /admin/{tabell}/lagre")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.lagre(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.lagre(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -393,11 +394,11 @@ funksjon route_admin_slett(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /admin/{tabell}/{id}/slett")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_rolle(ap_ctx, app["conn"], "admin") {
+    hvis ikkje auth_guards.krev_rolle(ap_ctx, app["conn"], "admin") {
         la _ = stack.lukk(app)
         returner web.response_builder(403, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"ikkje tilgjengeleg: krev admin\"}")
     }
-    la svar = src.admin_bootstrap.slett(app["conn"], app["register"], ap_ctx)
+    la svar = admin_bootstrap.slett(app["conn"], app["register"], ap_ctx)
     la _ = stack.lukk(app)
     returner svar
 }
@@ -417,7 +418,7 @@ cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP_AUTH_ROUTE'
 funksjon route_login(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /auth/login")
     la app = _init_app()
-    la svar = src.auth.login.utfør(stack.app_ctx(app, ctx), app["conn"])
+    la svar = auth_login.utfør(stack.app_ctx(app, ctx), app["conn"])
     la _ = stack.lukk(app)
     returner svar
 }
@@ -425,14 +426,14 @@ funksjon route_login_skjemat(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /auth/login")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    la svar = src.auth.login.skjema(ap_ctx, app["conn"])
+    la svar = auth_login.skjema(ap_ctx, app["conn"])
     la _ = stack.lukk(app)
     returner svar
 }
 funksjon route_register(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /auth/register")
     la app = _init_app()
-    la svar = src.auth.register.utfør(stack.app_ctx(app, ctx), app["conn"])
+    la svar = auth_register.utfør(stack.app_ctx(app, ctx), app["conn"])
     la _ = stack.lukk(app)
     returner svar
 }
@@ -440,14 +441,14 @@ funksjon route_register_skjemat(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /auth/register")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    la svar = src.auth.register.skjema(ap_ctx, app["conn"])
+    la svar = auth_register.skjema(ap_ctx, app["conn"])
     la _ = stack.lukk(app)
     returner svar
 }
 funksjon route_logout(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("POST /auth/logout")
     la app = _init_app()
-    la svar = src.auth.logout.utfør(stack.app_ctx(app, ctx), app["conn"])
+    la svar = auth_logout.utfør(stack.app_ctx(app, ctx), app["conn"])
     la _ = stack.lukk(app)
     returner svar
 }
@@ -455,7 +456,7 @@ funksjon route_profile(ctx: ordbok_tekst) -> ordbok_tekst {
     web.route("GET /profile")
     la app = _init_app()
     la ap_ctx = stack.app_ctx(app, ctx)
-    hvis ikkje src.auth.guards.krev_innlogging(ap_ctx, app["conn"]) {
+    hvis ikkje auth_guards.krev_innlogging(ap_ctx, app["conn"]) {
         la _ = stack.lukk(app)
         returner web.response_builder(401, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"logg inn på nytt\"}")
     }
@@ -467,18 +468,41 @@ EOF_APP_AUTH_ROUTE
 else
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP_AUTH_ROUTE_DISABLED'
 
-funksjon route_login(ctx: ordbok_tekst) -> ordbok_tekst { web.route("POST /auth/login"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
-funksjon route_login_skjemat(ctx: ordbok_tekst) -> ordbok_tekst { web.route("GET /auth/login"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
-funksjon route_register(ctx: ordbok_tekst) -> ordbok_tekst { web.route("POST /auth/register"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
-funksjon route_register_skjemat(ctx: ordbok_tekst) -> ordbok_tekst { web.route("GET /auth/register"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
-funksjon route_logout(ctx: ordbok_tekst) -> ordbok_tekst { web.route("POST /auth/logout"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
-funksjon route_profile(ctx: ordbok_tekst) -> ordbok_tekst { web.route("GET /profile"); returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}") }
+funksjon route_login(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /auth/login")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
+
+funksjon route_login_skjemat(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /auth/login")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
+
+funksjon route_register(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /auth/register")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
+
+funksjon route_register_skjemat(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /auth/register")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
+
+funksjon route_logout(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("POST /auth/logout")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
+
+funksjon route_profile(ctx: ordbok_tekst) -> ordbok_tekst {
+    web.route("GET /profile")
+    returner web.response_builder(404, {"content-type": "application/json; charset=utf-8"}, "{\"ok\":false,\"feil\":\"auth er deaktivert\"}")
+}
 EOF_APP_AUTH_ROUTE_DISABLED
 fi
 cat >> "$OUTPUT_DIR/app.no" <<'EOF_APP'
 
 funksjon _svar_med_security(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
-    returner src.middleware.køyr(ctx, svar)
+    returner middleware.køyr(ctx, svar)
 }
 
 funksjon dispatcher(ctx: ordbok_tekst) -> ordbok_tekst {
@@ -495,6 +519,12 @@ funksjon start() -> heiltall {
     skriv("\\n")
     returner 0
 }
+
+funksjon main() -> heiltall {
+    skriv("Norscode app OK")
+    skriv("\\n")
+    returner 0
+}
 EOF_APP
 
 cat > "$OUTPUT_DIR/manage.no" <<'EOF_MANAGE'
@@ -504,8 +534,8 @@ bruk std.pathlib som pl
 bruk std.fil som fil
 bruk std.orm som orm
 bruk std.test som test
-import src.config
-import src.models
+bruk src.config som config
+bruk src.models som models
 
 funksjon _migrasjon_state_fil() -> tekst {
     returner "migrations/schema_state.json"
@@ -839,7 +869,7 @@ funksjon _last_fixture_fil(conn: tekst, sti_fil: tekst) -> heiltall {
 
 funksjon makemigrations(args: ordbok_tekst) -> heiltall {
     la _ = args
-    la now = src.models.modeller()
+    la now = models.modeller()
     la before = _les_snapshot()
 
     hvis lengde(before) == 0 {
@@ -874,9 +904,9 @@ funksjon makemigrations(args: ordbok_tekst) -> heiltall {
 funksjon test(args: ordbok_tekst) -> heiltall {
     la db_sti = cli.flagg(args, "db", test.test_db())
     la fixtures_arg = cli.flagg(args, "fixtures", "")
-    la app = stack.bootstrap(src.config.INNSTILLINGAR_STI, db_sti)
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
 
-    la migrasjon_status = stack.køyr_migrasjonar(app["conn"], src.models.migrasjonar())
+    la migrasjon_status = stack.køyr_migrasjonar(app["conn"], models.migrasjonar())
     hvis migrasjon_status < 0 {
         la _ = stack.lukk(app)
         returner 1
@@ -946,17 +976,17 @@ funksjon test(args: ordbok_tekst) -> heiltall {
 }
 
 funksjon migrate(args: ordbok_tekst) -> heiltall {
-    la db_sti = cli.flagg(args, "db", src.config.DATABASE_STI)
-    la app = stack.bootstrap(src.config.INNSTILLINGAR_STI, db_sti)
-    la r = stack.køyr_migrasjonar(app["conn"], src.models.migrasjonar())
+    la db_sti = cli.flagg(args, "db", config.DATABASE_STI)
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
+    la r = stack.køyr_migrasjonar(app["conn"], models.migrasjonar())
     la _ = stack.lukk(app)
     returner r
 }
 
 funksjon status(args: ordbok_tekst) -> heiltall {
-    la db_sti = cli.flagg(args, "db", src.config.DATABASE_STI)
-    la app = stack.bootstrap(src.config.INNSTILLINGAR_STI, db_sti)
-    la r = stack.status_migrasjonar(app["conn"], src.models.migrasjonar())
+    la db_sti = cli.flagg(args, "db", config.DATABASE_STI)
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
+    la r = stack.status_migrasjonar(app["conn"], models.migrasjonar())
     la _ = stack.lukk(app)
     returner r
 }
@@ -1069,10 +1099,10 @@ EOF_CONFIG
 cat > "$OUTPUT_DIR/src/security.no" <<'EOF_SECURITY'
 bruk std.web som web
 bruk std.mw som mw
-import src.config
+bruk src.config som config
 
 funksjon _host_ein() -> liste<tekst> {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     hvis ikkje har_nokkel(cfg, "ALLOWED_HOSTS") { returner [] }
     returner builtin.split(cfg["ALLOWED_HOSTS"], ",")
 }
@@ -1097,7 +1127,7 @@ funksjon _security_header_on(cfg: ordbok_tekst) -> boolsk {
 }
 
 funksjon host_tillatt(ctx: ordbok_tekst) -> boolsk {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     hvis ikkje _require_host_venleg(cfg) { returner sann }
     la host = web.request_header(ctx, "host")
     hvis host == "" { returner sann }
@@ -1123,16 +1153,17 @@ funksjon _ikkje_tillatt_host(ctx: ordbok_tekst) -> ordbok_tekst {
 
 funksjon sikre(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
     hvis ikkje host_tillatt(ctx) { returner ikkke_tillatt_host(ctx) }
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     hvis ikkje _security_header_on(cfg) { returner svar }
     returner mw.legg_til_sikkerhets_headers(svar, mw.sikkerhets_standard())
 }
+EOF_SECURITY
 
 cat > "$OUTPUT_DIR/src/middleware.no" <<'EOF_MW'
 bruk std.web som web
 bruk std.mw som mw
-import src.config
-import src.security
+bruk src.config som config
+bruk src.security som security
 
 funksjon _er_sann(cfg: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> boolsk {
     hvis ikkje har_nokkel(cfg, nøkkel) { returner tekst_til_liten(fallback) == "sann" }
@@ -1141,11 +1172,14 @@ funksjon _er_sann(cfg: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> boolsk 
 }
 
 funksjon bygg_stack() -> liste<ordbok_tekst> {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     la stack: liste<ordbok_tekst> = []
 
     hvis _er_sann(cfg, "REQUEST_LOG", "usann") {
-        la nivå = hvis har_nokkel(cfg, "LOG_LEVEL") { cfg["LOG_LEVEL"] } elles { "INFO" }
+        la nivå = "INFO"
+        hvis har_nokkel(cfg, "LOG_LEVEL") {
+            nivå = cfg["LOG_LEVEL"]
+        }
         la inkluder_body = _er_sann(cfg, "REQUEST_LOG_INCLUDE_BODY", "usann")
         legg_til(stack, mw.logging_cfg(nivå, inkluder_body))
     }
@@ -1153,7 +1187,10 @@ funksjon bygg_stack() -> liste<ordbok_tekst> {
     hvis _er_sann(cfg, "RATE_LIMIT_ENABLED", "usann") {
         la maks = "120"
         hvis har_nokkel(cfg, "RATE_LIMIT_MAX") { maks = cfg["RATE_LIMIT_MAX"] }
-        la nøkkel = hvis har_nokkel(cfg, "RATE_LIMIT_KEY") { cfg["RATE_LIMIT_KEY"] } elles { "ip" }
+        la nøkkel = "ip"
+        hvis har_nokkel(cfg, "RATE_LIMIT_KEY") {
+            nøkkel = cfg["RATE_LIMIT_KEY"]
+        }
         legg_til(stack, mw.rate_cfg(heltall_fra_tekst(maks), nøkkel))
     }
 
@@ -1167,8 +1204,8 @@ funksjon bygg_stack() -> liste<ordbok_tekst> {
 }
 
 funksjon køyr(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
-    hvis ikkje src.security.host_tillatt(ctx) {
-        returner src.security.ikkke_tillatt_host(ctx)
+    hvis ikkje security.host_tillatt(ctx) {
+        returner security.ikkke_tillatt_host(ctx)
     }
     la stack = bygg_stack()
     la ctx_med_mw = mw.pipeline_request(ctx, stack)
@@ -1178,11 +1215,10 @@ funksjon køyr(ctx: ordbok_tekst, svar: ordbok_tekst) -> ordbok_tekst {
         returner mw.pipeline_response(rate_svar, ctx_med_mw, stack)
     }
 
-    la svar_med_tryggleikar = src.security.sikre(ctx_med_mw, svar)
+    la svar_med_tryggleikar = security.sikre(ctx_med_mw, svar)
     returner mw.pipeline_response(svar_med_tryggleikar, ctx_med_mw, stack)
 }
 EOF_MW
-EOF_SECURITY
 
 cat > "$OUTPUT_DIR/src/models.no" <<'EOF_MODELS'
 bruk std.fil som fil
@@ -1322,7 +1358,10 @@ funksjon _auto_migrasjonar() -> liste<ordbok_tekst> {
     la i: heiltall = 0
     mens i < lengde(item) {
         la m = item[i]
-        hvis builtin.type(m) != "ordbok" { i = i + 1; fortsett }
+        hvis builtin.type(m) != "ordbok" {
+            i = i + 1
+            fortsett
+        }
         hvis har_nokkel(m, "name") og har_nokkel(m, "opp_sql") og har_nokkel(m, "ned_sql") {
             legg_til(opp, migrasjon.lag(m["name"], m["opp_sql"], m["ned_sql"]))
         }
@@ -1372,23 +1411,23 @@ cat > "$OUTPUT_DIR/src/views.no" <<'EOF_VIEWS'
 bruk std.web_app_stack som stack
 bruk std.web som web
 bruk std.cache som cache_lib
-import src.template
-import src.routes
-import src.messages
-import src.cache
-import src.i18n
+bruk src.template som template
+bruk src.routes som routes
+bruk src.messages som messages
+bruk src.cache som cache_mod
+bruk src.i18n som i18n
 
 funksjon index(ctx: ordbok_tekst, conn: tekst, register: ordbok_tekst) -> ordbok_tekst {
     la _ = conn
     la _ = register
     la brukar = ""
     hvis har_nokkel(ctx, "__auth_brukar__") { brukar = ctx["__auth_brukar__"] }
-    la innhald = "<p>" + src.i18n.t("Welcome") + "</p>"
-    la rute_map = src.routes.index()
-    la meldingar = src.messages.hent(ctx, conn)
+    la innhald = "<p>" + i18n.t("Welcome") + "</p>"
+    la rute_map = routes.index()
+    la meldingar = messages.hent(ctx, conn)
     innhald = innhald + "<p>Tilgjengelege ruter: " + tekst_fra_heltall(lengde(nøkler(rute_map))) + "</p>"
     la html = template.render("pages/home.html", {
-        "tittel": src.i18n.t("Home page"),
+        "tittel": i18n.t("Home page"),
         "brukar": brukar,
         "meldingar": meldingar,
         "innhald": innhald
@@ -1398,7 +1437,7 @@ funksjon index(ctx: ordbok_tekst, conn: tekst, register: ordbok_tekst) -> ordbok
 
 funksjon cache_demo(ctx: ordbok_tekst) -> ordbok_tekst {
     la _ = ctx
-    la cache = src.cache.instans()
+    la cache = cache_mod.instans()
     la cache_key = "cache_demo_homepage"
     la cached = cache_lib.hent(cache, cache_key, "")
     hvis cached != "" {
@@ -1412,7 +1451,7 @@ funksjon cache_demo(ctx: ordbok_tekst) -> ordbok_tekst {
 
 funksjon i18n_demo(ctx: ordbok_tekst) -> ordbok_tekst {
     la _ = ctx
-    la melding = src.i18n.t_ctx("Hello, %(name)s!", {"name": "venn"})
+    la melding = i18n.t_ctx("Hello, %(name)s!", {"name": "venn"})
     returner web.response_builder(200, {"content-type": "text/html; charset=utf-8"}, "<h1>" + melding + "</h1>")
 }
 
@@ -1434,7 +1473,7 @@ funksjon api_echo(ctx: ordbok_tekst) -> ordbok_tekst {
 
 funksjon api_openapi(ctx: ordbok_tekst) -> ordbok_tekst {
     la _ = ctx
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     la prosjekt_namn: tekst = "Norscode API"
     hvis har_nokkel(cfg, "name") {
         prosjekt_namn = cfg["name"]
@@ -1445,7 +1484,7 @@ funksjon api_openapi(ctx: ordbok_tekst) -> ordbok_tekst {
 
 funksjon api_docs(ctx: ordbok_tekst) -> ordbok_tekst {
     la _ = ctx
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     la prosjekt_namn: tekst = "Norscode API"
     hvis har_nokkel(cfg, "name") {
         prosjekt_namn = cfg["name"]
@@ -1662,12 +1701,13 @@ funksjon api_request_model(ctx: ordbok_tekst) -> ordbok_tekst {
 }
 EOF_VIEWS
 
+if [ "$WITH_EMAIL" = "sann" ]; then
 cat > "$OUTPUT_DIR/src/email.no" <<'EOF_EMAIL'
 bruk std.epost som epost_lib
-import src.config
+bruk src.config som config
 
 funksjon _konfig() -> ordbok_tekst {
-    la s = src.config.hent()
+    la s = config.hent()
     la backend = "konsoll"
     hvis har_nokkel(s, "EMAIL_BACKEND") { backend = s["EMAIL_BACKEND"] }
     hvis backend == "smtp" {
@@ -1706,13 +1746,14 @@ funksjon send_many(mottakarar: liste<tekst>, emne: tekst, melding: tekst) -> hei
     returner svar
 }
 EOF_EMAIL
+fi
 
 cat > "$OUTPUT_DIR/src/i18n.no" <<'EOF_I18N'
 bruk std.i18n som i18n_lib
-import src.config
+bruk src.config som config
 
 funksjon _konfig() -> ordbok_tekst {
-    returner src.config.hent()
+    returner config.hent()
 }
 
 funksjon sprak() -> tekst {
@@ -1753,10 +1794,10 @@ bruk std.web_app_stack som stack
 bruk std.auth som auth
 bruk std.sesjon som sesjon
 bruk std.skjema som form_lib
-import src.forms
-import src.template
-import src.auth.throttle
-import src.messages
+bruk src.forms som forms
+bruk src.template som template
+bruk src.auth.throttle som auth_throttle
+bruk src.messages som messages
 
 funksjon _felt() -> liste<ordbok_tekst> {
     la felte: liste<ordbok_tekst> = []
@@ -1787,7 +1828,7 @@ funksjon _skjema_html(ctx: ordbok_tekst, conn: tekst, resultat: ordbok_tekst) ->
 funksjon skjema(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
     la tomt = form_lib.valider(_felt(), {})
     la csrf_ctx = forms.csrf_context(ctx, conn)
-    la meldingar = src.messages.hent(ctx, conn)
+    la meldingar = messages.hent(ctx, conn)
     la html = template.render("auth/login.html", {
         "tittel": "Logg inn",
         "feilmelding": "",
@@ -1805,7 +1846,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/login.html", {
             "tittel": "Logg inn",
             "feilmelding": "Ugyldig CSRF-token",
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, form_lib.valider(_felt(), data))
         })
         la response = web.response_builder(403, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1816,7 +1857,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/login.html", {
             "tittel": "Logg inn",
             "feilmelding": _første_feil(validert),
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, validert)
         })
         returner web.response_builder(400, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1824,11 +1865,11 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
     la verdiar = form_lib.hent_verdiar(validert)
     la epost = verdiar["epost"]
     la passord = verdiar["passord"]
-    hvis ikkje src.auth.throttle.kan_logge_inn(ctx, epost) {
+    hvis ikkje auth_throttle.kan_logge_inn(ctx, epost) {
         la html = template.render("auth/login.html", {
             "tittel": "Logg inn",
-            "feilmelding": src.auth.throttle.melding_blokkert(ctx),
-            "meldingar": src.messages.hent(ctx, conn),
+            "feilmelding": auth_throttle.melding_blokkert(ctx),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, validert)
         })
         returner web.response_builder(429, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1838,7 +1879,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/login.html", {
             "tittel": "Logg inn",
             "feilmelding": "Ugyldig e-post eller passord",
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, validert)
         })
         returner web.response_builder(401, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1856,7 +1897,7 @@ EOF_AUTH_LOGIN
 cat > "$OUTPUT_DIR/src/auth/throttle.no" <<'EOF_AUTH_THROTTLE'
 bruk std.web som web
 bruk std.mw som mw
-import src.config
+bruk src.config som config
 
 funksjon _er_sann(cfg: ordbok_tekst, nøkkel: tekst, fallback: tekst) -> boolsk {
     hvis ikkje har_nokkel(cfg, nøkkel) { returner tekst_til_liten(fallback) == "sann" }
@@ -1874,12 +1915,21 @@ funksjon _ip(ctx: ordbok_tekst) -> tekst {
 }
 
 funksjon _cfg() -> ordbok_tekst {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     la c: ordbok_tekst = {}
     c["aktiv"] = _er_sann(cfg, "BRUTEFORCE_LOGIN_ENABLED", "usann")
-    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_MAX") { c["maks"] = cfg["BRUTEFORCE_LOGIN_MAX"] } elles { c["maks"] = "3" }
-    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_WINDOW_SEK") { c["window"] = cfg["BRUTEFORCE_LOGIN_WINDOW_SEK"] } elles { c["window"] = "120" }
-    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_KEY") { c["nøkkel"] = cfg["BRUTEFORCE_LOGIN_KEY"] } elles { c["nøkkel"] = "ip" }
+    c["maks"] = "3"
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_MAX") {
+        c["maks"] = cfg["BRUTEFORCE_LOGIN_MAX"]
+    }
+    c["window"] = "120"
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_WINDOW_SEK") {
+        c["window"] = cfg["BRUTEFORCE_LOGIN_WINDOW_SEK"]
+    }
+    c["nøkkel"] = "ip"
+    hvis har_nokkel(cfg, "BRUTEFORCE_LOGIN_KEY") {
+        c["nøkkel"] = cfg["BRUTEFORCE_LOGIN_KEY"]
+    }
     returner c
 }
 
@@ -1911,15 +1961,17 @@ funksjon melding_blokkert(ctx: ordbok_tekst) -> tekst {
     returner "For mange mislykka innloggingsforsøk. Prøv igjen etter " + vind + " sekund (maks " + maks + " forsøk)."
 }
 
+EOF_AUTH_THROTTLE
+
 cat > "$OUTPUT_DIR/src/auth/register.no" <<'EOF_AUTH_REGISTER'
 bruk std.web som web
 bruk std.web_app_stack som stack
 bruk std.auth som auth
 bruk std.sesjon som sesjon
 bruk std.skjema som form_lib
-import src.forms
-import src.template
-import src.messages
+bruk src.forms som forms
+bruk src.template som template
+bruk src.messages som messages
 
 funksjon _felt() -> liste<ordbok_tekst> {
     la felte: liste<ordbok_tekst> = []
@@ -1951,7 +2003,7 @@ funksjon _skjema_html(ctx: ordbok_tekst, conn: tekst, resultat: ordbok_tekst) ->
 funksjon skjema(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
     la tomt = form_lib.valider(_felt(), {})
     la csrf_ctx = forms.csrf_context(ctx, conn)
-    la meldingar = src.messages.hent(ctx, conn)
+    la meldingar = messages.hent(ctx, conn)
     la html = template.render("auth/register.html", {
         "tittel": "Registrer ny brukar",
         "feilmelding": "",
@@ -1969,7 +2021,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/register.html", {
             "tittel": "Registrer ny brukar",
             "feilmelding": "Ugyldig CSRF-token",
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, form_lib.valider(_felt(), data))
         })
         la response = web.response_builder(403, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1980,7 +2032,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/register.html", {
             "tittel": "Registrer ny brukar",
             "feilmelding": _første_feil(validert),
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, validert)
         })
         returner web.response_builder(400, {"content-type": "text/html; charset=utf-8"}, html)
@@ -1994,7 +2046,7 @@ funksjon utfør(ctx: ordbok_tekst, conn: tekst) -> ordbok_tekst {
         la html = template.render("auth/register.html", {
             "tittel": "Registrer ny brukar",
             "feilmelding": "Brukar eller e-post er allereie i bruk",
-            "meldingar": src.messages.hent(ctx, conn),
+            "meldingar": messages.hent(ctx, conn),
             "innhald": _skjema_html(ctx, conn, validert)
         })
         returner web.response_builder(409, {"content-type": "text/html; charset=utf-8"}, html)
@@ -2027,10 +2079,10 @@ funksjon index() -> ordbok_tekst {
 }
 EOF_AUTH_ROUTES
 cat > "$OUTPUT_DIR/src/auth/index.no" <<'EOF_AUTH_INDEX'
-import src.auth.routes
+bruk src.auth.routes som auth_routes
 
 funksjon routes() -> ordbok_tekst {
-    returner src.auth.routes.index()
+    returner auth_routes.index()
 }
 EOF_AUTH_INDEX
 
@@ -2057,7 +2109,10 @@ funksjon _standard_rettar() -> ordbok_tekst {
 
 funksjon krev_permission(ap_ctx: ordbok_tekst, conn: tekst, rett: tekst) -> boolsk {
     la _ = conn
-    la rolle = hvis stack.bruker_rolle(ap_ctx) != "" { stack.bruker_rolle(ap_ctx) } elles { "usynleg" }
+    la rolle = "usynleg"
+    hvis stack.bruker_rolle(ap_ctx) != "" {
+        rolle = stack.bruker_rolle(ap_ctx)
+    }
     hvis rolle == "admin" { returner sann }
     la rettar = _standard_rettar()
     hvis ikkje har_nokkel(rettar, rolle) { returner usann }
@@ -2074,7 +2129,10 @@ funksjon krev_permission(ap_ctx: ordbok_tekst, conn: tekst, rett: tekst) -> bool
 
 funksjon har_permission(ap_ctx: ordbok_tekst, conn: tekst, rett: tekst) -> boolsk {
     la _ = conn
-    la rolle = hvis stack.bruker_rolle(ap_ctx) != "" { stack.bruker_rolle(ap_ctx) } elles { "usynleg" }
+    la rolle = "usynleg"
+    hvis stack.bruker_rolle(ap_ctx) != "" {
+        rolle = stack.bruker_rolle(ap_ctx)
+    }
     hvis rolle == "admin" { returner sann }
     la rettar = _standard_rettar()
     hvis ikkje har_nokkel(rettar, rolle) { returner usann }
@@ -2140,7 +2198,10 @@ funksjon _url_decode(s: tekst) -> tekst {
 }
 
 funksjon _sesjon_token(ctx: ordbok_tekst, conn: tekst) -> tekst {
-    la token = hvis har_nokkel(ctx, "__sesjon_token__") { ctx["__sesjon_token__"] } ellers { web.request_cookie(ctx, "session") }
+    la token = web.request_cookie(ctx, "session")
+    hvis har_nokkel(ctx, "__sesjon_token__") {
+        token = ctx["__sesjon_token__"]
+    }
     hvis token == "" { returner "" }
     hvis sesjon.er_gyldig(conn, token) { returner token }
     returner ""
@@ -2248,16 +2309,16 @@ EOF_MESSAGES_MODULE
 
 cat > "$OUTPUT_DIR/src/cache.no" <<'EOF_CACHE_MODULE'
 bruk std.cache som cache
-import src.config
+bruk src.config som config
 
-la _globale_cache: ordbok_tekst = cache.fra_innstillingar(src.config.hent())
+la _globale_cache: ordbok_tekst = cache.fra_innstillingar(config.hent())
 
 funksjon instans() -> ordbok_tekst {
     returner _globale_cache
 }
 
 funksjon ny() -> ordbok_tekst {
-    returner cache.fra_innstillingar(src.config.hent())
+    returner cache.fra_innstillingar(config.hent())
 }
 
 funksjon ny_minne() -> ordbok_tekst {
@@ -2423,7 +2484,7 @@ funksjon slett(conn: tekst, register: ordbok_tekst, ctx: ordbok_tekst) -> ordbok
 }
 EOF_ADMINBOOT
 cat > "$OUTPUT_DIR/src/admin/index.no" <<'EOF_ADMIN_INDEX'
-import src.admin_bootstrap
+bruk src.admin_bootstrap som admin_bootstrap
 
 funksjon routes() -> ordbok_tekst {
     returner {
@@ -2670,7 +2731,7 @@ cat >> "$OUTPUT_DIR/src/routes.no" <<'EOF_ROUTES'
 EOF_ROUTES
 
 cat > "$OUTPUT_DIR/src/route_registry.no" <<'EOF_ROUTE_REG'
-import src.routes
+bruk src.routes som routes
 
 funksjon _prefiks(funksjon_namn: tekst) -> tekst {
     hvis tekst_inneholder(funksjon_namn, ".") {
@@ -2680,7 +2741,7 @@ funksjon _prefiks(funksjon_namn: tekst) -> tekst {
 }
 
 funksjon index() -> ordbok_tekst {
-    la grunnruter = src.routes.index()
+    la grunnruter = routes.index()
     la resultat: ordbok_tekst = {}
     la nøklar = nøkler(grunnruter)
     la i: heiltall = 0
@@ -2732,15 +2793,15 @@ EOF_TEST
 
 cat > "$OUTPUT_DIR/tests/test_stack_migrasjon.no" <<'EOF_TEST_MIG'
 bruk std.test som test
-import src.models
+bruk src.models som models
 
 funksjon test_migrasjon_antal() {
-    la migrasjonar = src.models.migrasjonar()
+    la migrasjonar = models.migrasjonar()
     assert(lengde(migrasjonar) >= 1)
 }
 
 funksjon test_modell_manifest() {
-    la modellar = src.models.modeller()
+    la modellar = models.modeller()
     assert(lengde(modellar) >= 1)
 }
 
@@ -2754,25 +2815,25 @@ cat > "$OUTPUT_DIR/tests/test_stack_auth.no" <<'EOF_TEST_AUTH'
 bruk std.test som test
 bruk std.db som db
 bruk std.sesjon som sesjon
-import src.config
-import src.messages
-import src.auth.throttle
+bruk src.config som config
+bruk src.messages som messages
+bruk src.auth.throttle som auth_throttle
 bruk std.web som web
 
 funksjon test_innstillingar_lastes() {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     la _ = cfg["DATABASE_URL"]
     assert(sann)
 }
 
 funksjon test_profil_støtte() {
-    la cfg = src.config.hent_for_profil("testing")
+    la cfg = config.hent_for_profil("testing")
     la db = cfg["DATABASE_URL"]
     assert(db == ":memory:")
 }
 
 funksjon test_profilteljing() {
-    la aktiv = src.config.profil()
+    la aktiv = config.profil()
     assert(aktiv == "development")
 }
 
@@ -2780,12 +2841,12 @@ funksjon test_meldings_flash() {
     la conn = db.open(":memory:")
     la _ = sesjon.migrer(conn)
     la token = sesjon.start_med_ttl(conn, {}, 3600)
-    la _ = src.messages.set_med_token(conn, token, "info", "Velkomen")
+    la _ = messages.set_med_token(conn, token, "info", "Velkomen")
     la ved_ctx: ordbok_tekst = {"__sesjon_token__": token}
-    la frå_kontekst = src.messages.hent(ved_ctx, conn)
+    la frå_kontekst = messages.hent(ved_ctx, conn)
     assert_eq(frå_kontekst["info"], "Velkomen")
     la _ = sesjon.flash_sett(conn, token, "feil", "Sakna")
-    la alt = src.messages.hent_med_token(conn, token)
+    la alt = messages.hent_med_token(conn, token)
     assert(har_nokkel(alt, "feil"))
     la _ = db.close(conn)
 }
@@ -2795,10 +2856,10 @@ funksjon test_bruteforce_tvinger_rate_limit() {
         "host": "localhost",
         "x-forwarded-for": "203.0.113.15"
     }, "")
-    la ok1 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
-    la ok2 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
-    la ok3 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
-    la ok4 = src.auth.throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok1 = auth_throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok2 = auth_throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok3 = auth_throttle.kan_logge_inn(ctx, "bruker@example.com")
+    la ok4 = auth_throttle.kan_logge_inn(ctx, "bruker@example.com")
     assert(ok1)
     assert(ok2)
     assert(ok3)
@@ -2821,11 +2882,11 @@ cat > "$OUTPUT_DIR/tests/test_stack_security.no" <<'EOF_TEST_SECURITY'
 bruk std.test som test
 bruk std.web som web
 import app
-import src.middleware
-import src.security
+bruk src.middleware som middleware
+bruk src.security som security
 
 funksjon test_blockert_host() {
-    la blokkert = src.security.host_tillatt(web.request_context("GET", "/auth/login", {}, {"host": "evil.test"}, ""))
+    la blokkert = security.host_tillatt(web.request_context("GET", "/auth/login", {}, {"host": "evil.test"}, ""))
     assert(!blokkert)
 }
 
@@ -2836,12 +2897,12 @@ funksjon test_security_headers() {
 }
 
 funksjon test_middleware_blockerer_evil_host() {
-    la blokkerte_svar = src.middleware.køyr(web.request_context("GET", "/cache-demo", {}, {"host": "evil.test"}, ""), web.response_builder(200, {"content-type":"text/plain"}, "hei"))
+    la blokkerte_svar = middleware.køyr(web.request_context("GET", "/cache-demo", {}, {"host": "evil.test"}, ""), web.response_builder(200, {"content-type":"text/plain"}, "hei"))
     assert_eq(web.response_status(blokkerte_svar), 403)
 }
 
 funksjon test_middleware_stack() {
-    la stack = src.middleware.bygg_stack()
+    la stack = middleware.bygg_stack()
     la funne = usann
     la i: heiltall = 0
     mens i < lengde(stack) {
@@ -2867,7 +2928,7 @@ cat > "$OUTPUT_DIR/tests/test_stack_web.no" <<'EOF_TEST_WEB'
 bruk std.test som test
 bruk std.web som web
 import app
-import src.route_registry
+bruk src.route_registry som route_registry
 
 funksjon test_route_index_finst() {
     la _ = app.route_index
@@ -2875,7 +2936,7 @@ funksjon test_route_index_finst() {
 }
 
 funksjon test_route_registry_har_stotte() {
-    la ruter = src.route_registry.index()
+    la ruter = route_registry.index()
     assert(har_nokkel(ruter, "GET /"))
     assert(har_nokkel(ruter, "GET /cache-demo"))
     assert(har_nokkel(ruter, "GET /api/v1/health"))
@@ -3168,29 +3229,29 @@ EOF_TEST_WEB
 cat > "$OUTPUT_DIR/tests/test_stack_cache.no" <<'EOF_TEST_CACHE'
 bruk std.test som test
 bruk std.web som web
-import src.cache
-import src.config
+bruk src.cache som cache_mod
+bruk src.config som config
 
 funksjon test_cache_config() {
-    la cfg = src.config.hent()
+    la cfg = config.hent()
     assert_eq(cfg["CACHE_BACKEND"], "minne")
     assert_eq(cfg["CACHE_DIR"], "cache/")
 }
 
 funksjon test_cache_skriv_og_les() {
-    la c = src.cache.ny_minne()
-    la _ = src.cache.slett(c, "stack_cache_testr")
-    la satt = src.cache.sett(c, "stack_cache_testr", "hei", 60)
+    la c = cache_mod.ny_minne()
+    la _ = cache_mod.slett(c, "stack_cache_testr")
+    la satt = cache_mod.sett(c, "stack_cache_testr", "hei", 60)
     assert(satt >= 0)
-    la lese = src.cache.hent(c, "stack_cache_testr", "")
+    la lese = cache_mod.hent(c, "stack_cache_testr", "")
     assert_eq(lese, "hei")
 }
 
 funksjon test_cache_svar_cache() {
-    la c = src.cache.ny_minne()
+    la c = cache_mod.ny_minne()
     la respons = web.response_builder(200, {"content-type": "text/plain; charset=utf-8"}, "Hallo cache")
-    la _ = src.cache.set_response(c, "cache_test_svar", respons, 60)
-    la henta = src.cache.hent_response(c, "cache_test_svar")
+    la _ = cache_mod.set_response(c, "cache_test_svar", respons, 60)
+    la henta = cache_mod.hent_response(c, "cache_test_svar")
     assert_eq(web.response_status(henta), 200)
     assert_eq(web.response_body(henta), "Hallo cache")
 }
@@ -3205,23 +3266,24 @@ funksjon start() -> heiltall {
 }
 EOF_TEST_CACHE
 
+if [ "$WITH_EMAIL" = "sann" ]; then
 cat > "$OUTPUT_DIR/tests/test_stack_email.no" <<'EOF_TEST_EMAIL'
 bruk std.test som test
-import src.email
-import src.i18n
+bruk src.email som email_mod
+bruk src.i18n som i18n
 
 funksjon test_i18n_tolkning_nn() {
-    la vising = src.i18n.t("Welcome")
+    la vising = i18n.t("Welcome")
     assert_eq(vising, "Velkomen")
 }
 
 funksjon test_i18n_tolkning_med_kontekst() {
-    la vising = src.i18n.t_ctx("Hello, %(name)s!", {"name": "Ola"})
+    la vising = i18n.t_ctx("Hello, %(name)s!", {"name": "Ola"})
     assert_eq(vising, "Hei, Ola!")
 }
 
 funksjon test_email_send_i_konsollmodus() {
-    la vart_sendt = src.email.send("test@example.com", "Hei frå test", "Dette er ein test")
+    la vart_sendt = email_mod.send("test@example.com", "Hei frå test", "Dette er ein test")
     assert(vart_sendt)
 }
 
@@ -3234,25 +3296,26 @@ funksjon start() -> heiltall {
     returner test.køyr(testar)
 }
 EOF_TEST_EMAIL
+fi
 
 cat > "$OUTPUT_DIR/tests/test_stack_static.no" <<'EOF_TEST_STATIC'
 bruk std.test som test
 bruk std.web som web
-import src.static
+bruk src.static som static_mod
 
 funksjon test_static_style_finst() {
-    la res = src.static.svar("/static/style.css")
+    la res = static_mod.svar("/static/style.css")
     assert_eq(web.response_status(res), 200)
     assert(tekst_inneholder(web.response_body(res), "Norscode"))
 }
 
 funksjon test_static_ikkje_finst() {
-    la res = src.static.svar("/static/ikkje-finst.css")
+    la res = static_mod.svar("/static/ikkje-finst.css")
     assert_eq(web.response_status(res), 404)
 }
 
 funksjon test_static_triks_blokker() {
-    la res = src.static.svar("/static/../seier")
+    la res = static_mod.svar("/static/../seier")
     assert(web.response_status(res) != 200)
 }
 
@@ -3270,7 +3333,7 @@ cat > "$OUTPUT_DIR/tests/test_stack_orm_query.no" <<'EOF_TEST_STACK_ORM_QUERY'
 bruk std.db som db
 bruk std.orm som orm
 bruk std.test som test
-import src.models
+bruk src.models som models
 
 funksjon _lag_test_data() -> tekst {
     la conn = db.open(":memory:")
@@ -3333,10 +3396,10 @@ funksjon _lag_many_to_many_data() -> tekst {
 }
 
 funksjon test_scaffold_many_to_many_manifest() {
-    la m2m = src.models.many_to_many_tabellar()
+    la m2m = models.many_to_many_tabellar()
     assert_eq(lengde(m2m), 1)
     assert_eq(m2m[0]["table"], "produkt_tag")
-    la modellar = src.models.modeller()
+    la modellar = models.modeller()
     la funne = usann
     la i: heiltall = 0
     mens i < lengde(modellar) {
@@ -3350,15 +3413,15 @@ funksjon test_scaffold_many_to_many_manifest() {
 
 funksjon test_scaffold_many_to_many_hjelpar() {
     la conn = db.open(":memory:")
-    la _ = src.models.ensure_schema(conn)
+    la _ = models.ensure_schema(conn)
     la _ = db.execute(conn, "INSERT INTO kategori (namn) VALUES ('Demo');")
     la _ = db.execute(conn, "INSERT INTO tag (namn) VALUES ('ny');")
     la _ = db.execute(conn, "INSERT INTO produkt (namn, pris, lager, kategori_id) VALUES ('produkt-1', 10, 1, 1);")
     la _ = db.execute(conn, "INSERT INTO produkt_tag (produkt_id, tag_id) VALUES (1, 1);")
-    la tag = src.models.tags_for_produkt(conn, 1)
+    la tag = models.tags_for_produkt(conn, 1)
     assert_eq(lengde(tag), 1)
     assert_eq(tag[0]["namn"], "ny")
-    la produkter = src.models.produkt_for_tag(conn, 1)
+    la produkter = models.produkt_for_tag(conn, 1)
     assert_eq(lengde(produkter), 1)
     assert_eq(produkter[0]["namn"], "produkt-1")
     la _ = db.close(conn)
@@ -3542,17 +3605,17 @@ EOF_TEST_STACK_ORM_QUERY
 if [ "$WITH_ADMIN" = "sann" ]; then
 cat > "$OUTPUT_DIR/tests/test_stack_admin.no" <<'EOF_TEST_ADMIN'
 bruk std.test som test
-import src.admin_bootstrap
-import src.admin.index
+bruk src.admin_bootstrap som admin_bootstrap
+bruk src.admin.index som admin_index
 
 funksjon test_registrering() {
     la register = {}
-    la _ = src.admin_bootstrap.registrer_modellar(register, "dummy")
+    la _ = admin_bootstrap.registrer_modellar(register, "dummy")
     assert(har_nokkel(register, "produkt"))
 }
 
 funksjon test_admin_ruter() {
-    la ruter = src.admin.index.routes()
+    la ruter = admin_index.routes()
     assert(har_nokkel(ruter, "GET /admin"))
     assert(har_nokkel(ruter, "GET /admin/{tabell}"))
     assert(har_nokkel(ruter, "POST /admin/{tabell}/lagre"))
@@ -3791,9 +3854,9 @@ Bruk denne fila som ei enkel historikk over utgjevingar og deploy-hendingar.
 Legg til ei ny rad for kvar deploy.
 EOF_DEPLOY_LOG
 
-cat > "$OUTPUT_DIR/README.md" <<EOF_README
-# ${PROJECT_NAME}
-
+{
+printf '# %s\n\n' "$PROJECT_NAME"
+cat <<'EOF_README'
 Dette er eit Django-inspirert Norscode prosjektoppsett med auth, migrations, admin og testmalar.
 
 Struktur:
@@ -3816,7 +3879,7 @@ Kommandoar:
 - `./bin/nc run manage.no migrate`
 - `./bin/nc run manage.no status`
 - `./bin/nc run manage.no test`
-- `./bin/nc run app.no`
+- `./bin/nc serve app.no --port 8080`
 - `./bin/nc startapp users`
 
 Dokumentasjon i prosjektet:
@@ -3836,7 +3899,7 @@ Profil/handsaming av innstillingar:
 
 - Standardprofil blir henta frå `PROFILE` i `innstillingar.toml` (globalt sett `development`).
 - Miljøvariabel `NORSCODE_PROFILE` (`development`, `testing`, `production`) kan overstyre profilen ved køyring.
-- Spesifikk profil i kode: `src.config.hent_for_profil("testing")`.
+- Spesifikk profil i kode: `config.hent_for_profil("testing")`.
 - Overstyring av database for testmiljø: set `DATABASE_URL = ":memory:"` i `[testing]`.
 - Køyre med produksjonsprofil:
   - `NORSCODE_PROFILE=production ./bin/nc run app.no`
@@ -3883,6 +3946,7 @@ Sikkerheit:
   - `BRUTEFORCE_LOGIN_WINDOW_SEK`
   - `BRUTEFORCE_LOGIN_KEY` (`ip` eller `brukar`)
 EOF_README
+} > "$OUTPUT_DIR/README.md"
 
 printf 'Oppretta nytt prosjekt: %s\n' "$OUTPUT_DIR"
 printf 'Prosjektnamn: %s\n' "$PROJECT_NAME"

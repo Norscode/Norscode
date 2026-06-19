@@ -14,7 +14,35 @@ REPO="Norscode/Norscode"
 INSTALL_PREFIX="${1:-$HOME/.local}"
 BIN_DIR="$INSTALL_PREFIX/bin"
 RUNTIME_PREFIX="$INSTALL_PREFIX/share/norscode"
+LEGACY_PREFIX="$HOME/.norscode"
 STAGE0_FALLBACK_TAG="${NORSCODE_STAGE0_RELEASE_TAG:-stage0-bootstrap-20260604}"
+
+install_wrappers() {
+    mkdir -p "$BIN_DIR"
+    cat > "$BIN_DIR/norscode" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    cat > "$BIN_DIR/nc" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
+}
+
+install_legacy_wrappers() {
+    legacy_bin_dir="$LEGACY_PREFIX/bin"
+    mkdir -p "$legacy_bin_dir"
+    cat > "$legacy_bin_dir/norscode" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    cat > "$legacy_bin_dir/nc" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    chmod +x "$legacy_bin_dir/norscode" "$legacy_bin_dir/nc"
+}
 
 # ─── Oppdag plattform ────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -50,13 +78,14 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 # Bruk norscode_native om tilgjengeleg lokalt
 if [ -x "$ROOT_DIR/dist/norscode_native" ]; then
     printf 'Pre-bygd norscode_native funnet lokalt.\n'
-    mkdir -p "$BIN_DIR"
-    cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/norscode"
-    cp "$ROOT_DIR/dist/norscode_native" "$BIN_DIR/nc"
-    chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
+    mkdir -p "$RUNTIME_PREFIX/releases"
+    ln -sfn "$ROOT_DIR" "$RUNTIME_PREFIX/current"
+    install_wrappers
+    install_legacy_wrappers
     if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/tools/install-macos-file-icons.sh" ]; then
         bash "$ROOT_DIR/tools/install-macos-file-icons.sh" || true
     fi
+    printf 'Installert: %s/current\n' "$RUNTIME_PREFIX"
     printf 'Installert: %s/norscode\n' "$BIN_DIR"
     printf 'Legg til PATH: export PATH="%s:$PATH"\n' "$BIN_DIR"
     exit 0
@@ -103,6 +132,20 @@ EOF
     chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
 }
 
+install_legacy_wrappers() {
+    local legacy_bin_dir="$LEGACY_PREFIX/bin"
+    mkdir -p "$legacy_bin_dir"
+    cat > "$legacy_bin_dir/norscode" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    cat > "$legacy_bin_dir/nc" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    chmod +x "$legacy_bin_dir/norscode" "$legacy_bin_dir/nc"
+}
+
 install_language_package() {
     archive_url="$1"
     archive_name="$(basename "$archive_url")"
@@ -122,6 +165,7 @@ install_language_package() {
     rm -f "$target_dir/$archive_name"
     ln -sfn "$target_dir" "$RUNTIME_PREFIX/current"
     install_wrappers
+    install_legacy_wrappers
 
     if [ "$OS" = "Darwin" ] && [ -x "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" ]; then
         bash "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" || true
