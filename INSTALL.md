@@ -83,6 +83,7 @@ bash tools/package-windows-app.sh build/windows/norscode.exe
 ```bash
 nc run app.no
 nc check app.no
+nc startproject mittprosjekt
 nc test
 nc feature-check app.no
 ```

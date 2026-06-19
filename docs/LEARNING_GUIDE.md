@@ -284,15 +284,15 @@ Dette er den normale utviklingsrytmen:
 Opprett prosjekt:
 
 ```bash
-./bin/nc startproject kursprosjekt
+nc startproject kursprosjekt
 ```
 
 Gå inn i prosjektet og sjekk fila som vart laga:
 
 ```bash
 cd kursprosjekt
-../bin/nc check app.no
-../bin/nc run app.no
+nc check app.no
+nc run app.no
 ```
 
 Tilbake i repo-rota kan du òg starte server frå ei Norscode-fil:
