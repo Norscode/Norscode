@@ -13,6 +13,7 @@ set -eu
 REPO="Norscode/Norscode"
 INSTALL_PREFIX="${1:-$HOME/.local}"
 BIN_DIR="$INSTALL_PREFIX/bin"
+RUNTIME_PREFIX="$INSTALL_PREFIX/share/norscode"
 STAGE0_FALLBACK_TAG="${NORSCODE_STAGE0_RELEASE_TAG:-stage0-bootstrap-20260604}"
 
 # ─── Oppdag plattform ────────────────────────────────────────────────────────
@@ -77,6 +78,10 @@ find_asset_url() {
     printf '%s' "$1" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*$BINARY_NAME[^\"]*\"" | head -1 | cut -d'"' -f4
 }
 
+find_language_package_url() {
+    printf '%s' "$1" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*norscode-language-[^\"]*\\.tar\\.gz\"" | head -1 | cut -d'"' -f4
+}
+
 fetch_release_json() {
     if [ "$1" = "latest" ]; then
         $DOWNLOAD "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null
@@ -85,12 +90,67 @@ fetch_release_json() {
     fi
 }
 
+install_wrappers() {
+    mkdir -p "$BIN_DIR"
+    cat > "$BIN_DIR/norscode" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    cat > "$BIN_DIR/nc" <<EOF
+#!/usr/bin/env sh
+exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
+EOF
+    chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
+}
+
+install_language_package() {
+    archive_url="$1"
+    archive_name="$(basename "$archive_url")"
+    version_name="$(basename "$archive_name" .tar.gz)"
+    tmp_dir="$(mktemp -d)"
+    trap 'rm -rf "$tmp_dir"' EXIT
+
+    printf 'Laster ned full Norscode-pakke %s...\n' "$archive_name"
+    $DOWNLOAD "$archive_url" > "$tmp_dir/$archive_name"
+    mkdir -p "$RUNTIME_PREFIX/releases"
+    tar -xzf "$tmp_dir/$archive_name" -C "$tmp_dir"
+
+    target_dir="$RUNTIME_PREFIX/releases/$version_name"
+    rm -rf "$target_dir"
+    mkdir -p "$target_dir"
+    cp -R "$tmp_dir"/. "$target_dir"/
+    rm -f "$target_dir/$archive_name"
+    ln -sfn "$target_dir" "$RUNTIME_PREFIX/current"
+    install_wrappers
+
+    if [ "$OS" = "Darwin" ] && [ -x "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" ]; then
+        bash "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" || true
+    fi
+
+    trap - EXIT
+    rm -rf "$tmp_dir"
+    printf '\nNorscode installert!\n'
+    printf '  Runtime: %s/current\n' "$RUNTIME_PREFIX"
+    printf '  Binary:  %s/norscode\n' "$BIN_DIR"
+    printf '  Alias:   %s/nc\n' "$BIN_DIR"
+    printf '\nLegg til PATH (bash/zsh):\n'
+    printf '  export PATH="%s:$PATH"\n' "$BIN_DIR"
+    printf '\nTest:\n'
+    printf '  norscode --help\n'
+    exit 0
+}
+
 printf 'Henter siste release...\n'
 RELEASE_JSON="$(fetch_release_json latest)" || {
     printf 'Feil: Kunne ikke hente release-info fra GitHub.\n' >&2
     printf 'Prøv lokal installasjon fra repo: bash tools/install.sh\n' >&2
     exit 1
 }
+
+PACKAGE_URL="$(find_language_package_url "$RELEASE_JSON")"
+if [ -n "$PACKAGE_URL" ]; then
+    install_language_package "$PACKAGE_URL"
+fi
 
 DOWNLOAD_URL="$(find_asset_url "$RELEASE_JSON")"
 
