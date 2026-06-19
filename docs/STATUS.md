@@ -15,6 +15,7 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - [docs/LEARNING_GUIDE.md](LEARNING_GUIDE.md)
 - [docs/DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)
 - [docs/LANE_MAP.md](LANE_MAP.md)
+- [docs/_archive/ARCHIVE_INDEX.md](_archive/ARCHIVE_INDEX.md)
 
 ## Vedlikehald
 

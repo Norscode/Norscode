@@ -74,7 +74,7 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 Historiske notat ligg i arkivet. Dei er nyttige for bakgrunn, men dei er ikkje normal brukerveg.
 
-- [Arkivindeks](./_archive/ARCHIVE_INDEX.md)
+- [docs/_archive/ARCHIVE_INDEX.md](./_archive/ARCHIVE_INDEX.md)
 
 ## Normal Kjede
 
