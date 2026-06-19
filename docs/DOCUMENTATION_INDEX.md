@@ -7,6 +7,7 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [Full brukermanual](USER_MANUAL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
 - [Status](STATUS.md)
+- [Brand og ikoner](BRAND.md)
 
 ## Normal Arbeidsflyt
 

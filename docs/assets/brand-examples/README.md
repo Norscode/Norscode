@@ -1,6 +1,6 @@
 # Norscode Brand Examples
 
-Dette er uforpliktande logo- og ikoneksempel. Dei er laga som reine SVG-er slik at dei kan testast i dokumentasjon, VS Code, nettside eller release-pakker utan ekstra verktøy.
+Dette er historiske og utforskande logo- og ikoneksempel. Gjeldande standardpakke ligg i [`frontend/assets/icons`](../../../frontend/assets/icons/README.md), og bruksreglane ligg i [`docs/BRAND.md`](../../BRAND.md).
 
 ## Forslag
 
@@ -12,13 +12,12 @@ Dette er uforpliktande logo- og ikoneksempel. Dei er laga som reine SVG-er slik 
 
 ## Anbefaling
 
-Start med `norscode-homepage-dark-direction.svg` som hovudretning og `norscode-file-no-neon.svg` som filikon dersom Norscode skal ha ein mørk, teknisk og meir produktretta identitet. Dei eldre `norscode-mark-native.svg` og `norscode-file-no.svg` er rolegare fallback-retningar.
+Den mørke/neon-baserte retninga er valt som aktiv retning. Bruk standardfilene i `frontend/assets/icons` for produkt, nettside, editor og release-pakker. Filene i denne mappa kan framleis brukast som referanse når nye variantar skal lagast.
 
 ## Neste Steg
 
 Når ein retning er valt:
 
-1. Lag ferdig logo-pakke med SVG, PNG, ICNS og favicon.
-2. Legg hovudlogo under `docs/assets/` eller `frontend/assets/icons/`.
-3. Koble VS Code-utvidelsen til ferdig filikon.
-4. Dokumenter fargar og bruksreglar i ein kort brand-guide.
+1. Koble nettside og app-pakker til `frontend/assets/icons`.
+2. Koble VS Code-utvidelsen til ferdig filikon når extension-endringane skal inn.
+3. Generer PNG/ICNS frå SVG ved release dersom plattforma krev rasterformat.

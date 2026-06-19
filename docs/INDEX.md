@@ -16,6 +16,7 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [Dokumentasjonsindeks for vedlikehald](DOCUMENTATION_INDEX.md)
 - [Lane map](LANE_MAP.md)
 - [Status](STATUS.md)
+- [Brand og ikoner](BRAND.md)
 - [Selfhost handlingsplan](SELFHOST_HANDLINGSPLAN.md)
 
 ## Brukermanual
@@ -56,6 +57,7 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [CI-gates](05-development/SELFHOST_CI_GATES.md)
 - [Release-sjekkliste](05-development/SELFHOST_RELEASE_CHECKLIST.md)
 - [Lane map](LANE_MAP.md)
+- [Brand og ikoner](BRAND.md)
 - [Dokumentasjonsindeks](DOCUMENTATION_INDEX.md)
 - [Migrasjon og deprecations](05-development/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
 - [Fase 2 verktøyindeks](SELFHOST_PHASE2_TOOLING_INDEX.md)

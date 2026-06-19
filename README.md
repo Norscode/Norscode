@@ -4,6 +4,8 @@ Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-lø
 
 ![Norscode overview](docs/assets/norscode-overview.svg)
 
+![Norscode logo](frontend/assets/icons/norscode-logo-dark.svg)
+
 ## Kort fortalt
 
 - Norsk syntaks for funksjonar, kontrollflyt og uttrykk
@@ -49,6 +51,7 @@ Snarvegar:
 - [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md)
 - [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)
 - [docs/LANE_MAP.md](docs/LANE_MAP.md)
+- [docs/BRAND.md](docs/BRAND.md)
 - [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md)
 - [docs/STATUS.md](docs/STATUS.md)
 
