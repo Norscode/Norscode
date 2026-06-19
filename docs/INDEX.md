@@ -12,6 +12,7 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 ## Start Her
 
 - [Full brukermanual](USER_MANUAL.md)
+- [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
 - [Dokumentasjonsindeks for vedlikehald](DOCUMENTATION_INDEX.md)
 - [Lane map](LANE_MAP.md)

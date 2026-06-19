@@ -5,6 +5,7 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 ## Brukarar
 
 - [Full brukermanual](USER_MANUAL.md)
+- [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
 - [Status](STATUS.md)
 - [Brand og ikoner](BRAND.md)

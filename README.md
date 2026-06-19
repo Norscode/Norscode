@@ -18,12 +18,13 @@ Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-lø
 ## Kom i gang
 
 1. Les [docs/INDEX.md](docs/INDEX.md)
-2. Bruk [docs/USER_MANUAL.md](docs/USER_MANUAL.md) som praktisk manual
-3. Følg [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md) for opplæring
-4. Bruk [docs/LANE_MAP.md](docs/LANE_MAP.md) for riktig arbeidsløype
-5. Les [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) for selfhost-løypa
-6. Sjekk [docs/STATUS.md](docs/STATUS.md)
-7. Vedlikehald: `./bin/nc maintenance verify`
+2. Installer med [INSTALL.md](INSTALL.md)
+3. Bruk [docs/USER_MANUAL.md](docs/USER_MANUAL.md) som praktisk manual
+4. Følg [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md) for opplæring
+5. Bruk [docs/LANE_MAP.md](docs/LANE_MAP.md) for riktig arbeidsløype
+6. Les [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) for selfhost-løypa
+7. Sjekk [docs/STATUS.md](docs/STATUS.md)
+8. Vedlikehald: `./bin/nc maintenance verify`
 
 Snarvegar:
 
@@ -46,6 +47,7 @@ Snarvegar:
 
 ## Dokumentasjon
 
+- [INSTALL.md](INSTALL.md)
 - [docs/INDEX.md](docs/INDEX.md)
 - [docs/USER_MANUAL.md](docs/USER_MANUAL.md)
 - [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md)

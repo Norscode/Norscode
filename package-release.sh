@@ -38,40 +38,52 @@ fi
 
 rm -f "$ARCHIVE_PATH" "${ARCHIVE_PATH}.sha256"
 
-tar -czf "$ARCHIVE_PATH" -C "$ROOT_DIR" \
-  backend \
-  bin \
-  cli \
-  compiler \
-  deploy \
-  dist \
-  docs \
-  examples \
-  frontend \
-  main.py \
-  nc \
-  nl \
-  nor \
-  norcode \
-  norcode.toml \
-  norsklang \
-  package-release.sh \
-  packages \
-  pyproject.toml \
-  runtime \
-  scripts \
-  selfhost \
-  std \
-  stdlib \
-  tests \
-  toolchain \
-  tools \
-  vscode-norscode \
-  README.md \
-  LICENSE \
-  CHANGELOG.md \
-  Makefile \
+RELEASE_ENTRIES=(
+  AGENTS.md
+  CHANGELOG.md
+  INSTALL.md
+  LICENSE
+  Makefile
+  README.md
+  ROADMAP.md
+  NorsDB
   app.no
+  backend
+  bin
+  bootstrap
+  cli
+  compiler
+  deploy
+  dist
+  docs
+  examples
+  frontend
+  nc
+  nl
+  nor
+  norcode.lock
+  norcode.toml
+  packages
+  runtime
+  scripts
+  selfhost
+  server
+  std
+  stdlib
+  tests
+  toolchain
+  tools
+  vscode-norscode
+)
+
+PACKAGE_ENTRIES=()
+for entry in "${RELEASE_ENTRIES[@]}"; do
+  if [ -e "$ROOT_DIR/$entry" ]; then
+    PACKAGE_ENTRIES+=("$entry")
+  fi
+done
+
+tar -czf "$ARCHIVE_PATH" -C "$ROOT_DIR" "${PACKAGE_ENTRIES[@]}"
 
 if command -v shasum >/dev/null 2>&1; then
   shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}' > "${ARCHIVE_PATH}.sha256"
