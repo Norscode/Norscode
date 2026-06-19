@@ -16,6 +16,6 @@ Dette dokumentet definerer den første minimumssmoken for fase 3.
 
 ## Referansefiler
 
-- [docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md)
-- [docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md)
-- [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md)
+- [docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md](./SELFHOST_PHASE3_AST_CONTRACT_V1.md)
+- [docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md](./SELFHOST_PHASE3_SEMANTIC_CORE_V1.md)
+- [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](./SELFHOST_PHASE3_IR_BYTECODE_V1.md)

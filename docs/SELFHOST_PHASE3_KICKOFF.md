@@ -22,19 +22,19 @@ Fase 3 byggjer vidare på den ferdige fase 2-flata og flyttar fokuset frå stabi
 
 ## Første dokumenterte leveranse
 
-- [x] AST-kontrakt v1 er dokumentert i [docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md)
-- [x] Semantic-kjerne v1 er dokumentert i [docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md)
-- [x] IR-til-bytecode v1 er dokumentert i [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md)
-- [x] Smoke er dokumentert i [docs/SELFHOST_PHASE3_SMOKE.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_SMOKE.md)
-- [x] Regresjon er dokumentert i [docs/SELFHOST_PHASE3_REGRESSION.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_REGRESSION.md)
-- [x] IR-smoke er dokumentert i [docs/SELFHOST_PHASE3_IR_SMOKE.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_SMOKE.md)
-- [x] IR-regresjon er dokumentert i [docs/SELFHOST_PHASE3_IR_REGRESSION.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_REGRESSION.md)
-- [x] ABI og FFI er dokumentert i [docs/SELFHOST_PHASE3_ABI_FFI_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_ABI_FFI_V1.md)
-- [x] ABI og FFI-status er dokumentert i [docs/SELFHOST_PHASE3_ABI_FFI_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_ABI_FFI_STATUS.md)
-- [x] Verktøy og feilsøkingsstøtte er dokumentert i [docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_V1.md)
-- [x] Verktøy og feilsøkingsstatus er dokumentert i [docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_STATUS.md)
-- [x] Breiare standardbibliotek er dokumentert i [docs/SELFHOST_PHASE3_STDLIB_BREADTH_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_STDLIB_BREADTH_V1.md)
-- [x] Breiare standardbibliotek-status er dokumentert i [docs/SELFHOST_PHASE3_STDLIB_BREADTH_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_STDLIB_BREADTH_STATUS.md)
+- [x] AST-kontrakt v1 er dokumentert i [docs/SELFHOST_PHASE3_AST_CONTRACT_V1.md](./SELFHOST_PHASE3_AST_CONTRACT_V1.md)
+- [x] Semantic-kjerne v1 er dokumentert i [docs/SELFHOST_PHASE3_SEMANTIC_CORE_V1.md](./SELFHOST_PHASE3_SEMANTIC_CORE_V1.md)
+- [x] IR-til-bytecode v1 er dokumentert i [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](./SELFHOST_PHASE3_IR_BYTECODE_V1.md)
+- [x] Smoke er dokumentert i [docs/SELFHOST_PHASE3_SMOKE.md](./SELFHOST_PHASE3_SMOKE.md)
+- [x] Regresjon er dokumentert i [docs/SELFHOST_PHASE3_REGRESSION.md](./SELFHOST_PHASE3_REGRESSION.md)
+- [x] IR-smoke er dokumentert i [docs/SELFHOST_PHASE3_IR_SMOKE.md](./SELFHOST_PHASE3_IR_SMOKE.md)
+- [x] IR-regresjon er dokumentert i [docs/SELFHOST_PHASE3_IR_REGRESSION.md](./SELFHOST_PHASE3_IR_REGRESSION.md)
+- [x] ABI og FFI er dokumentert i [docs/SELFHOST_PHASE3_ABI_FFI_V1.md](./SELFHOST_PHASE3_ABI_FFI_V1.md)
+- [x] ABI og FFI-status er dokumentert i [docs/SELFHOST_PHASE3_ABI_FFI_STATUS.md](./SELFHOST_PHASE3_ABI_FFI_STATUS.md)
+- [x] Verktøy og feilsøkingsstøtte er dokumentert i [docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_V1.md](./SELFHOST_PHASE3_TOOLING_DEBUGGING_V1.md)
+- [x] Verktøy og feilsøkingsstatus er dokumentert i [docs/SELFHOST_PHASE3_TOOLING_DEBUGGING_STATUS.md](./SELFHOST_PHASE3_TOOLING_DEBUGGING_STATUS.md)
+- [x] Breiare standardbibliotek er dokumentert i [docs/SELFHOST_PHASE3_STDLIB_BREADTH_V1.md](./SELFHOST_PHASE3_STDLIB_BREADTH_V1.md)
+- [x] Breiare standardbibliotek-status er dokumentert i [docs/SELFHOST_PHASE3_STDLIB_BREADTH_STATUS.md](./SELFHOST_PHASE3_STDLIB_BREADTH_STATUS.md)
 
 ## Kva som er ferdig frå fase 2
 

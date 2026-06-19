@@ -11,9 +11,9 @@ Dette dokumentet samlar dei viktigaste regresjonstestane for fase 2.
 
 ## Testar
 
-- [x] [tests/test_selfhost_phase2_smoke.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_smoke.no)
-- [x] [tests/test_selfhost_phase2_ffi_smoke.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_ffi_smoke.no)
-- [x] [tests/test_selfhost_phase2_regression.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_regression.no)
+- [x] [tests/test_selfhost_phase2_smoke.no](../tests/test_selfhost_phase2_smoke.no)
+- [x] [tests/test_selfhost_phase2_ffi_smoke.no](../tests/test_selfhost_phase2_ffi_smoke.no)
+- [x] [tests/test_selfhost_phase2_regression.no](../tests/test_selfhost_phase2_regression.no)
 
 ## Minimumskrav for kvar regresjonstest
 

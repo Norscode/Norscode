@@ -14,7 +14,7 @@ Dette dokumentet samlar den første fase-4-flata for modulsystem og importflyt.
 - `selfhost/nc_main.no`
 - `selfhost/compiler/ir_to_bytecode.no`
 - `selfhost/std_compat.no`
-- [docs/SELFHOST_PHASE3_INTEGRATION_MAP.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_INTEGRATION_MAP.md)
+- [docs/SELFHOST_PHASE3_INTEGRATION_MAP.md](./SELFHOST_PHASE3_INTEGRATION_MAP.md)
 
 ## Eksisterande flyt
 

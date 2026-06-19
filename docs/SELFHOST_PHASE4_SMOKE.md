@@ -16,6 +16,6 @@ Dette er den minste operasjonelle smoke-løypa for fase 4.
 
 ## Referansar
 
-- [docs/SELFHOST_PHASE4_MODULE_SYSTEM_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE4_MODULE_SYSTEM_V1.md)
-- [docs/SELFHOST_PHASE4_STDLIB_BREADTH_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE4_STDLIB_BREADTH_V1.md)
-- [docs/SELFHOST_PHASE4_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE4_STATUS.md)
+- [docs/SELFHOST_PHASE4_MODULE_SYSTEM_V1.md](./SELFHOST_PHASE4_MODULE_SYSTEM_V1.md)
+- [docs/SELFHOST_PHASE4_STDLIB_BREADTH_V1.md](./SELFHOST_PHASE4_STDLIB_BREADTH_V1.md)
+- [docs/SELFHOST_PHASE4_STATUS.md](./SELFHOST_PHASE4_STATUS.md)

@@ -10,5 +10,5 @@ Dette dokumentet definerer minimumssmoken for IR-til-bytecode-løypa.
 
 ## Referanse
 
-- [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md)
-- [docs/SELFHOST_PHASE3_IR_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_IR_STATUS.md)
+- [docs/SELFHOST_PHASE3_IR_BYTECODE_V1.md](./SELFHOST_PHASE3_IR_BYTECODE_V1.md)
+- [docs/SELFHOST_PHASE3_IR_STATUS.md](./SELFHOST_PHASE3_IR_STATUS.md)

@@ -10,9 +10,9 @@ Denne sprinten byggjer vidare på backloggen med to konkrete arbeidspakker som k
 
 Støttedokument:
 
-- [x] [ABI-minimum v1](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_ABI_MINIMUM_V1.md)
-- [x] [Runtime-mål](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_RUNTIME_TARGETS.md)
-- [x] [Standardbibliotek-løype v1](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
+- [x] [ABI-minimum v1](./SELFHOST_PHASE2_ABI_MINIMUM_V1.md)
+- [x] [Runtime-mål](./SELFHOST_PHASE2_RUNTIME_TARGETS.md)
+- [x] [Standardbibliotek-løype v1](./SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
 
 ## Arbeidspakke 1: ABI-minimum v1
 
@@ -59,7 +59,7 @@ Status:
 ## Ferdig når
 
 - [x] Dei to arbeidspakkene har eigne oppgåver og akseptkriterium
-- [x] Status er oppdatert i [docs/SELFHOST_HANDLINGSPLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_HANDLINGSPLAN.md)
+- [x] Status er oppdatert i [docs/SELFHOST_HANDLINGSPLAN.md](./SELFHOST_HANDLINGSPLAN.md)
 - [x] Sprinten kan visast som ein enkel arbeidsflate utan ekstra forklaring
 
 Status:

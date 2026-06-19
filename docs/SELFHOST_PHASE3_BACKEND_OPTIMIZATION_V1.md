@@ -11,7 +11,7 @@ Dette dokumentet bind fase 3 til den eksisterande backend-løypa og gjer vidare 
 
 ## Byggjer på
 
-- [docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md)
+- [docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md](./SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md)
 - `selfhost/compiler/production_backend.no`
 - `selfhost/native_execution/x86_64_backend.no`
 - `selfhost/native_execution/elf_layout.no`

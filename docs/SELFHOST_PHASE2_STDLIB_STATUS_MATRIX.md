@@ -11,7 +11,7 @@ Dette er ei rask oversikt over kva som er klart for bruk i fase 2, kva som er p�
 - `std/innstillingar.no` - miljønøkkeloversikt og status
 - `std/sched.no` - køstatus og neste hending
 - `std/tråd.no` - manager- og trådstatus
-- praktisk brukscase-dekning ligg i [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_USECASES.md)
+- praktisk brukscase-dekning ligg i [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](./SELFHOST_PHASE2_STDLIB_USECASES.md)
 
 ## Under arbeid
 
