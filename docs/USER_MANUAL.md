@@ -25,6 +25,8 @@ Historisk C og gamle migreringsspor skal ikkje brukast som normal arbeidsveg.
 
 ## Installasjon Og Kontroll
 
+Kort installasjonsguide ligg i [`INSTALL.md`](../INSTALL.md).
+
 Køyr frå repo-rota:
 
 ```bash
