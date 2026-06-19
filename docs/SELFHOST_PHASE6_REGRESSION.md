@@ -16,6 +16,6 @@ Dette er regresjonsreferansen for fase 6.
 
 ## Referansar
 
-- [docs/SELFHOST_PHASE6_KICKOFF.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE6_KICKOFF.md)
-- [docs/SELFHOST_PHASE6_BACKLOG.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE6_BACKLOG.md)
-- [docs/SELFHOST_PHASE6_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE6_STATUS.md)
+- [docs/SELFHOST_PHASE6_KICKOFF.md](./SELFHOST_PHASE6_KICKOFF.md)
+- [docs/SELFHOST_PHASE6_BACKLOG.md](./SELFHOST_PHASE6_BACKLOG.md)
+- [docs/SELFHOST_PHASE6_STATUS.md](./SELFHOST_PHASE6_STATUS.md)

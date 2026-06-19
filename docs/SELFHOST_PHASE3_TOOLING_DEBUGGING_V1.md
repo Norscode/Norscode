@@ -30,9 +30,9 @@ Dette dokumentet samlar den første fase-3-flata for verktøy og feilsøkingsst�
 
 ## Byggjer på
 
-- [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
-- [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_TOOLING_INDEX.md)
-- [docs/SELFHOST_PHASE3_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE3_STATUS.md)
+- [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](./SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
+- [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](./SELFHOST_PHASE2_TOOLING_INDEX.md)
+- [docs/SELFHOST_PHASE3_STATUS.md](./SELFHOST_PHASE3_STATUS.md)
 
 ## Kva som er klart
 

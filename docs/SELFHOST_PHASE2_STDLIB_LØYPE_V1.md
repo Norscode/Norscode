@@ -21,7 +21,7 @@ Dette dokumentet peikar no til den samla statusmatrisa for standardbiblioteket.
 
 ## Første status
 
-- Statusmatrisa ligg i [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
+- Statusmatrisa ligg i [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](./SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
 - `std/log.no` er styrkt med betre validitet, fleire felt, tidsstempel, filtrering og statusflate
 - `std/fil.no` er styrkt med tryggare inputkontroll og statusflate
 - `std/cache.no` er styrkt med betre gyldigheitskontroll, opprydding av utløpte nøklar og enkel statusflate
@@ -29,7 +29,7 @@ Dette dokumentet peikar no til den samla statusmatrisa for standardbiblioteket.
 - `std/innstillingar.no` er styrkt med statusflate og miljønøkkeloversikt
 - `std/sched.no` er styrkt med statusflate for kø og neste hending
 - `std/tråd.no` er styrkt med statusoversikt for manager og trådstatus
-- Minimumstest for fase 2 er lagt inn i [tests/test_selfhost_phase2_smoke.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_smoke.no)
+- Minimumstest for fase 2 er lagt inn i [tests/test_selfhost_phase2_smoke.no](../tests/test_selfhost_phase2_smoke.no)
 
 ## Ferdig når
 

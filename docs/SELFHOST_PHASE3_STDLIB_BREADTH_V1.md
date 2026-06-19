@@ -10,9 +10,9 @@ Dette dokumentet samlar fase-3-planen for å utvide standardbiblioteket utover d
 
 ## Byggjer på
 
-- [docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
-- [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
-- [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_USECASES.md)
+- [docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md](./SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
+- [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](./SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
+- [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](./SELFHOST_PHASE2_STDLIB_USECASES.md)
 
 ## Utvidingsretning
 

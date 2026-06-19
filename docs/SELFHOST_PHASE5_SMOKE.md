@@ -16,6 +16,6 @@ Dette er den minste operasjonelle smoke-løypa for fase 5.
 
 ## Referansar
 
-- [docs/SELFHOST_PHASE5_KICKOFF.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE5_KICKOFF.md)
-- [docs/SELFHOST_PHASE5_BACKLOG.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE5_BACKLOG.md)
-- [docs/SELFHOST_PHASE5_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE5_STATUS.md)
+- [docs/SELFHOST_PHASE5_KICKOFF.md](./SELFHOST_PHASE5_KICKOFF.md)
+- [docs/SELFHOST_PHASE5_BACKLOG.md](./SELFHOST_PHASE5_BACKLOG.md)
+- [docs/SELFHOST_PHASE5_STATUS.md](./SELFHOST_PHASE5_STATUS.md)

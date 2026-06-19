@@ -24,29 +24,29 @@ Dette dokumentet samlar den noverande fase-2-statusen i ei kort oversikt.
 
 - [x] Runtime-målskisse
 - [x] `selfhost/runtime/production_runtime.no` er styrkt med betre kontraktar
-- [x] Production-runtime-mål er samla i [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
+- [x] Production-runtime-mål er samla i [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](./SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
 - [x] `selfhost/runtime/production_runtime.no` har samla runtime-konstruktør og statusflate
 - [x] Runtime-kjernas forward-ref placeholderar er samla i ein liten hjelpefunksjon
 - [x] Baseline benchmark er definert og køyrbar i CI
-- [x] Diagnostikkplan for parser/semantic/IR er dokumentert i [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
-- [x] Verktøy og feilsøkingsindeks er samla i [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_TOOLING_INDEX.md)
+- [x] Diagnostikkplan for parser/semantic/IR er dokumentert i [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](./SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
+- [x] Verktøy og feilsøkingsindeks er samla i [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](./SELFHOST_PHASE2_TOOLING_INDEX.md)
 
 ### Backend og optimalisering
 
-- [x] Backend-optimalisering er planlagt i [docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md)
-- [x] Første konkrete filter i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) er lagt inn for å fjerne tomme og `nop`-instruksjonar
-- [x] Reproduserbarheitssjekken i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) toler no manglande input utan å feile
-- [x] Serialiseringsvegen i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) handterer no tomme namn og manglande executable meir defensivt
+- [x] Backend-optimalisering er planlagt i [docs/SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md](./SELFHOST_PHASE2_BACKEND_OPTIMIZATION_PLAN.md)
+- [x] Første konkrete filter i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) er lagt inn for å fjerne tomme og `nop`-instruksjonar
+- [x] Reproduserbarheitssjekken i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) toler no manglande input utan å feile
+- [x] Serialiseringsvegen i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) handterer no tomme namn og manglande executable meir defensivt
 - [x] `serialize_section(...)` normaliserer no manglande data til ei tom liste
-- [x] Assembler- og linker-vegen i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) toler no manglande input og initierer interne lister ved behov
-- [x] Instruksjonskodaren i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) registrerer no manglande opcode som feil i staden for å skrive ugyldig bytecode
-- [x] Relocation-patcharen i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) initierer no interne lister og markerer manglande relocation som uhandtert
+- [x] Assembler- og linker-vegen i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) toler no manglande input og initierer interne lister ved behov
+- [x] Instruksjonskodaren i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) registrerer no manglande opcode som feil i staden for å skrive ugyldig bytecode
+- [x] Relocation-patcharen i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) initierer no interne lister og markerer manglande relocation som uhandtert
 - [x] Relocation-patcharen lagrar no ei lita feildetalj når relocation manglar
 - [x] Relocation-patcharen skil no ut manglande symbol frå andre formfeil
 - [x] Relocation-patcharen skil no ut manglande offset frå andre formfeil
 - [x] Relocation-patcharen skil no ut manglande relocation_type frå andre formfeil
 - [x] Relocation-patcharen brukar no berre presise feilkategoriar for relocation-forma
-- [x] Executable-emitteren i [selfhost/compiler/production_backend.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/production_backend.no) initierer no interne lister og toler manglande executable
+- [x] Executable-emitteren i [selfhost/compiler/production_backend.no](../selfhost/compiler/production_backend.no) initierer no interne lister og toler manglande executable
 - [x] Serialiserings- og emitter-feil legg no igjen små feildetaljar i eksisterande lister
 - [x] Executable-emitteren normaliserer no manglande format til første støtta format
 - [x] Reproduserbarheitssjekken legg no igjen presise feildetaljar når `binary_a` eller `binary_b` manglar
@@ -99,12 +99,12 @@ Dette dokumentet samlar den noverande fase-2-statusen i ei kort oversikt.
 - [x] `std/tråd.no`
 - [x] Fem modulstatusar er formelt låst
 - [x] Minimumstest per modul er på plass
-- [x] Standardbibliotek-statusmatrise er lagt inn i [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
-- [x] Praktiske brukscase er dokumenterte i [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_USECASES.md)
-- [x] CI-statusflata er definert i [docs/SELFHOST_PHASE2_CI_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_CI_STATUS.md)
-- [x] DoD er definert i [docs/SELFHOST_PHASE2_DOD.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_DOD.md)
-- [x] Regresjonstestar er samla i [docs/SELFHOST_PHASE2_REGRESSION_TESTS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_REGRESSION_TESTS.md)
-- [x] Milepælar er kopla til konkrete testreferansar i [docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md)
+- [x] Standardbibliotek-statusmatrise er lagt inn i [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](./SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
+- [x] Praktiske brukscase er dokumenterte i [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](./SELFHOST_PHASE2_STDLIB_USECASES.md)
+- [x] CI-statusflata er definert i [docs/SELFHOST_PHASE2_CI_STATUS.md](./SELFHOST_PHASE2_CI_STATUS.md)
+- [x] DoD er definert i [docs/SELFHOST_PHASE2_DOD.md](./SELFHOST_PHASE2_DOD.md)
+- [x] Regresjonstestar er samla i [docs/SELFHOST_PHASE2_REGRESSION_TESTS.md](./SELFHOST_PHASE2_REGRESSION_TESTS.md)
+- [x] Milepælar er kopla til konkrete testreferansar i [docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md](./SELFHOST_PHASE2_MILESTONE_TEST_MAP.md)
 
 ## Kva som står att først
 

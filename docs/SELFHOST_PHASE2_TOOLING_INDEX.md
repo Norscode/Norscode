@@ -6,37 +6,37 @@ Dette dokumentet peikar til dei konkrete inngangane som gjer fase 2 lettare å b
 
 ### Status og gate
 
-- [docs/SELFHOST_PHASE2_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STATUS.md)
-- [docs/SELFHOST_PHASE2_CI_STATUS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_CI_STATUS.md)
-- [docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md)
+- [docs/SELFHOST_PHASE2_STATUS.md](./SELFHOST_PHASE2_STATUS.md)
+- [docs/SELFHOST_PHASE2_CI_STATUS.md](./SELFHOST_PHASE2_CI_STATUS.md)
+- [docs/SELFHOST_PHASE2_MILESTONE_TEST_MAP.md](./SELFHOST_PHASE2_MILESTONE_TEST_MAP.md)
 
 ### Runtime
 
-- [docs/SELFHOST_PHASE2_RUNTIME_TARGETS.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_RUNTIME_TARGETS.md)
-- [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
-- [selfhost/runtime/production_runtime.no](/Users/jansteinar/Projects/Norscode1/selfhost/runtime/production_runtime.no)
+- [docs/SELFHOST_PHASE2_RUNTIME_TARGETS.md](./SELFHOST_PHASE2_RUNTIME_TARGETS.md)
+- [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](./SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
+- [selfhost/runtime/production_runtime.no](../selfhost/runtime/production_runtime.no)
 
 ### Diagnostikk
 
-- [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
-- [selfhost/compiler/runtime_sync.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/runtime_sync.no)
-- [selfhost/compiler/compiler_pipeline.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/compiler_pipeline.no)
-- [selfhost/compiler/semantic_correctness.no](/Users/jansteinar/Projects/Norscode1/selfhost/compiler/semantic_correctness.no)
+- [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](./SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
+- [selfhost/compiler/runtime_sync.no](../selfhost/compiler/runtime_sync.no)
+- [selfhost/compiler/compiler_pipeline.no](../selfhost/compiler/compiler_pipeline.no)
+- [selfhost/compiler/semantic_correctness.no](../selfhost/compiler/semantic_correctness.no)
 
 ### Standardbibliotek
 
-- [docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
-- [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
-- [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](/Users/jansteinar/Projects/Norscode1/docs/SELFHOST_PHASE2_STDLIB_USECASES.md)
+- [docs/SELFHOST_PHASE2_STDLIB_LØYPE_V1.md](./SELFHOST_PHASE2_STDLIB_LØYPE_V1.md)
+- [docs/SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md](./SELFHOST_PHASE2_STDLIB_STATUS_MATRIX.md)
+- [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](./SELFHOST_PHASE2_STDLIB_USECASES.md)
 
 ### Test og benchmark
 
-- [tests/test_selfhost_phase2_smoke.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_smoke.no)
-- [tests/test_selfhost_phase2_ffi_smoke.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_ffi_smoke.no)
-- [tests/test_selfhost_phase2_regression.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_regression.no)
-- [tests/test_selfhost_phase2_stdlib_usecases.no](/Users/jansteinar/Projects/Norscode1/tests/test_selfhost_phase2_stdlib_usecases.no)
-- [selfhost/phase2_ci.no](/Users/jansteinar/Projects/Norscode1/selfhost/phase2_ci.no)
-- [selfhost/phase2_benchmark.no](/Users/jansteinar/Projects/Norscode1/selfhost/phase2_benchmark.no)
+- [tests/test_selfhost_phase2_smoke.no](../tests/test_selfhost_phase2_smoke.no)
+- [tests/test_selfhost_phase2_ffi_smoke.no](../tests/test_selfhost_phase2_ffi_smoke.no)
+- [tests/test_selfhost_phase2_regression.no](../tests/test_selfhost_phase2_regression.no)
+- [tests/test_selfhost_phase2_stdlib_usecases.no](../tests/test_selfhost_phase2_stdlib_usecases.no)
+- [selfhost/phase2_ci.no](../selfhost/phase2_ci.no)
+- [selfhost/phase2_benchmark.no](../selfhost/phase2_benchmark.no)
 
 ## Praktisk bruk
 
