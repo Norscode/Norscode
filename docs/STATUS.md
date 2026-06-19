@@ -11,6 +11,10 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 ## Aktiv inngang
 
 - [docs/INDEX.md](INDEX.md)
+- [docs/USER_MANUAL.md](USER_MANUAL.md)
+- [docs/LEARNING_GUIDE.md](LEARNING_GUIDE.md)
+- [docs/DOCUMENTATION_INDEX.md](DOCUMENTATION_INDEX.md)
+- [docs/LANE_MAP.md](LANE_MAP.md)
 
 ## Vedlikehald
 

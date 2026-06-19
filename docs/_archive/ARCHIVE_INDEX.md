@@ -16,5 +16,5 @@ Dette er inngangen for historikk og utfasing.
 ## Legacy
 
 - [archive/c_minimal_vm/README.md](../../archive/c_minimal_vm/README.md)
-- [archive/legacy_c_backend/ncb_to_c.no](../archive/legacy_c_backend/ncb_to_c.no)
+- [archive/legacy_c_backend/ncb_to_c.no](../../archive/legacy_c_backend/ncb_to_c.no)
 - [archive/README.md](../../archive/README.md)

@@ -16,9 +16,12 @@ Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-lø
 ## Kom i gang
 
 1. Les [docs/INDEX.md](docs/INDEX.md)
-2. Les [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md)
-3. Sjekk [docs/STATUS.md](docs/STATUS.md)
-4. Vedlikehald: `./bin/nc maintenance verify`
+2. Bruk [docs/USER_MANUAL.md](docs/USER_MANUAL.md) som praktisk manual
+3. Følg [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md) for opplæring
+4. Bruk [docs/LANE_MAP.md](docs/LANE_MAP.md) for riktig arbeidsløype
+5. Les [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) for selfhost-løypa
+6. Sjekk [docs/STATUS.md](docs/STATUS.md)
+7. Vedlikehald: `./bin/nc maintenance verify`
 
 Snarvegar:
 
@@ -42,6 +45,10 @@ Snarvegar:
 ## Dokumentasjon
 
 - [docs/INDEX.md](docs/INDEX.md)
+- [docs/USER_MANUAL.md](docs/USER_MANUAL.md)
+- [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md)
+- [docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)
+- [docs/LANE_MAP.md](docs/LANE_MAP.md)
 - [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md)
 - [docs/STATUS.md](docs/STATUS.md)
 
