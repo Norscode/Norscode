@@ -31,6 +31,8 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
 Gamle status-tal og gamle faser vart skrivne for ein eldre struktur. Dei er no tona ned for å unngå å påstå meir enn det dokumentasjonen faktisk viser.
 
+Historiske release-notat under `.github/releases/` kan framleis vise tal som `27/35` og `30-40%`, men dei er arkivtekst frå publiseringstidspunktet og skal ikkje lesast som dagens status.
+
 ## Status for FastAPI-paritet i scaffold (fase 1)
 
 - **Dato:** 2026-06-18
