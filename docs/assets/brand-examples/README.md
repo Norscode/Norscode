@@ -4,13 +4,15 @@ Dette er uforpliktande logo- og ikoneksempel. Dei er laga som reine SVG-er slik 
 
 ## Forslag
 
+- [norscode-homepage-dark-direction.svg](norscode-homepage-dark-direction.svg): mørk homepage-logo med neon, teknisk wordmark og selfhost/native undertittel.
+- [norscode-file-no-neon.svg](norscode-file-no-neon.svg): matchende mørkt `.no`-filikon.
 - [norscode-mark-native.svg](norscode-mark-native.svg): hovudmerke med `N`, native/selfhost-flyt og mørk teknisk flate.
 - [norscode-file-no.svg](norscode-file-no.svg): filikon for `.no`, laga for små størrelsar og editorbruk.
 - [norscode-compass.svg](norscode-compass.svg): meir nordisk/retning-basert merke med kompassform.
 
 ## Anbefaling
 
-Start med `norscode-mark-native.svg` som hovudretning og `norscode-file-no.svg` som filikon. `norscode-compass.svg` er meir særprega, men kan bli litt meir dekorativt enn praktisk i små flater.
+Start med `norscode-homepage-dark-direction.svg` som hovudretning og `norscode-file-no-neon.svg` som filikon dersom Norscode skal ha ein mørk, teknisk og meir produktretta identitet. Dei eldre `norscode-mark-native.svg` og `norscode-file-no.svg` er rolegare fallback-retningar.
 
 ## Neste Steg
 
