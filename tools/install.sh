@@ -13,6 +13,7 @@ set -eu
 REPO="Norscode/Norscode"
 INSTALL_PREFIX="${1:-$HOME/.local}"
 BIN_DIR="$INSTALL_PREFIX/bin"
+STAGE0_FALLBACK_TAG="${NORSCODE_STAGE0_RELEASE_TAG:-stage0-bootstrap-20260604}"
 
 # ─── Oppdag plattform ────────────────────────────────────────────────────────
 OS="$(uname -s)"
@@ -60,7 +61,7 @@ if [ -x "$ROOT_DIR/dist/norscode_native" ]; then
     exit 0
 fi
 
-# ─── Hent siste release fra GitHub ──────────────────────────────────────────
+# ─── Hent release fra GitHub ────────────────────────────────────────────────
 if command -v curl >/dev/null 2>&1; then
     DOWNLOAD="curl -fsSL"
 elif command -v wget >/dev/null 2>&1; then
@@ -70,23 +71,41 @@ else
     exit 1
 fi
 
-RELEASES_URL="https://api.github.com/repos/$REPO/releases/latest"
-printf 'Henter siste release...\n'
+BINARY_NAME="norscode-$PLATFORM"
 
-RELEASE_JSON="$($DOWNLOAD "$RELEASES_URL" 2>/dev/null)" || {
+find_asset_url() {
+    printf '%s' "$1" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*$BINARY_NAME[^\"]*\"" | head -1 | cut -d'"' -f4
+}
+
+fetch_release_json() {
+    if [ "$1" = "latest" ]; then
+        $DOWNLOAD "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null
+    else
+        $DOWNLOAD "https://api.github.com/repos/$REPO/releases/tags/$1" 2>/dev/null
+    fi
+}
+
+printf 'Henter siste release...\n'
+RELEASE_JSON="$(fetch_release_json latest)" || {
     printf 'Feil: Kunne ikke hente release-info fra GitHub.\n' >&2
-    printf 'Prøv å bygge lokalt: bash tools/build-bootstrap-binary.sh\n' >&2
+    printf 'Prøv lokal installasjon fra repo: bash tools/install.sh\n' >&2
     exit 1
 }
 
-# Finn riktig binary-URL for denne plattformen
-BINARY_NAME="norscode-$PLATFORM"
-DOWNLOAD_URL="$(printf '%s' "$RELEASE_JSON" | grep -o "\"browser_download_url\": \"[^\"]*$BINARY_NAME[^\"]*\"" | head -1 | cut -d'"' -f4)"
+DOWNLOAD_URL="$(find_asset_url "$RELEASE_JSON")"
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    printf 'Advarsel: Ingen pre-bygd binary for %s i siste release.\n' "$PLATFORM" >&2
+    printf 'Fant ingen %s i siste release; prøver stage0-release %s...\n' "$BINARY_NAME" "$STAGE0_FALLBACK_TAG"
+    RELEASE_JSON="$(fetch_release_json "$STAGE0_FALLBACK_TAG")" || RELEASE_JSON=""
+    if [ -n "$RELEASE_JSON" ]; then
+        DOWNLOAD_URL="$(find_asset_url "$RELEASE_JSON")"
+    fi
+fi
+
+if [ -z "$DOWNLOAD_URL" ]; then
+    printf 'Advarsel: Ingen pre-bygd binary for %s i GitHub Releases.\n' "$PLATFORM" >&2
     printf 'Feil: Kunne ikke installere Norscode for %s.\n' "$PLATFORM" >&2
-    printf 'Bygg lokalt med: bash tools/build-bootstrap-binary.sh\n' >&2
+    printf 'Alternativ: klon repoet og kjør: bash tools/install.sh\n' >&2
     exit 1
 fi
 
