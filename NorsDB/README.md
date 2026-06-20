@@ -13,11 +13,11 @@ NorsDB er et databaseprosjekt skrevet i Norscode.
 - `norsdb.nors`: samlet inngangspunkt med en kort `hoved()`-intro
 - `example.nors`: demo av vanlig API-bruk, med `eksempel_kjor_alle()` og `hoved()`
 - `snapshot_demo.nors`: liten demo for lagre/laste-flyten, med `hoved()` som inngang
-- `norsdb_smoke.nors`: enkel smoke-test for toppnivå-flyten, snapshot-roundtrip og livssyklus
+- `norsdb_smoke.nors`: enkel smoke-test for toppnivå-flyten og aktiv `std.db`-runtime
 
 ## Status
 
-Repoet er organisert som en Norscode-databaseplattform. `example.nors` viser vanlig API-bruk, `snapshot_demo.nors` viser lagre/laste-flyten via `hoved()`, og `norsdb_smoke.nors` gir en enkel toppnivå-sjekk med en liten snapshot-roundtrip og livssyklusflyt. Flere interne hjelpefunksjoner og runtime-avhengigheter må fortsatt fullføres før alt blir fullt kjørbart i en ekte Norscode-runtime.
+Repoet er organisert som en Norscode-databaseplattform. `example.nors` viser vanlig API-bruk, `snapshot_demo.nors` viser lagre/laste-flyten via `hoved()`, og `norsdb_smoke.nors` gir en enkel toppnivå-sjekk av NorsDB-modulene og aktiv `std.db`-runtime.
 
 ## Ferdigstatus
 
@@ -30,7 +30,7 @@ Det betyr at:
 - `example.nors` viser vanlig API-bruk
 - `snapshot_demo.nors` viser lagre/laste-flyten via `hoved()`
 
-Den eneste kjente resten er at en ekte runtime-kjøring ikke ble verifisert i dette miljøet.
+Runtime-smoke er verifiserbar med `./bin/nc run NorsDB/norsdb_smoke.nors`.
 
 Se også [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) for en kort oppsummering av hva som ble ferdig.
 
@@ -38,7 +38,7 @@ Se også [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) for en kort oppsummering av hv
 
 - Kjør `example.nors` for å se vanlig API-bruk via `hoved()`.
 - Kjør `snapshot_demo.nors` for å teste lagre/laste-flyten.
-- Kjør `norsdb_smoke.nors` for å verifisere importene, en enkel snapshot-roundtrip og livssyklusflyt.
+- Kjør `./bin/nc run NorsDB/norsdb_smoke.nors` for å verifisere importene og aktiv database-runtime.
 - Se etter at tabeller, rader og indekser fortsatt finnes etter gjenåpning.
 
 ## Kom i Gang
@@ -46,4 +46,4 @@ Se også [`RELEASE_NOTES.md`](./RELEASE_NOTES.md) for en kort oppsummering av hv
 1. Åpne `norsdb.nors` for å se hovedinngangspunktet og introen.
 2. Kjør `example.nors` for vanlig bruk via `hoved()`.
 3. Kjør `snapshot_demo.nors` for persistensflyten via `hoved()`.
-4. Kjør `norsdb_smoke.nors` for en rask helsesjekk, snapshot-roundtrip og livssyklusflyt.
+4. Kjør `./bin/nc run NorsDB/norsdb_smoke.nors` for en rask helsesjekk.
