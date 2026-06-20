@@ -249,6 +249,56 @@ funksjon response_text(response: ordbok_tekst) -> tekst {
     returner response["__body__"]
 }
 
+funksjon _header_finnes(headers: ordbok_tekst, nøkkel: tekst) -> boolsk {
+    la low = tekst_til_liten(nøkkel)
+    hvis finnes_nøkkel(headers, low) { returner sann }
+    hvis finnes_nøkkel(headers, nøkkel) { returner sann }
+    la ks = nøkler(headers)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        hvis tekst_til_liten(tekst(ks[i])) == low { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _header_sett_mangler(headers: ordbok_tekst, nøkkel: tekst, verdi: tekst) -> ordbok_tekst {
+    hvis ikkje _header_finnes(headers, nøkkel) {
+        headers[nøkkel] = verdi
+    }
+    returner headers
+}
+
+funksjon _body_ser_json_ut(body: tekst) -> boolsk {
+    la trimmed = builtin.trim(body)
+    returner tekst_starter_med(trimmed, "{") eller tekst_starter_med(trimmed, "[")
+}
+
+funksjon response_finalize(ctx: ordbok_tekst, response: ordbok_tekst) -> ordbok_tekst {
+    la headers = response["__headers__"]
+    hvis headers == null { headers = {} }
+    la body = response_text(response)
+    hvis _body_ser_json_ut(body) {
+        headers = _header_sett_mangler(headers, "content-type", "application/json; charset=utf-8")
+    } ellers hvis body != "" {
+        headers = _header_sett_mangler(headers, "content-type", "text/plain; charset=utf-8")
+    }
+    headers = _header_sett_mangler(headers, "x-content-type-options", "nosniff")
+    headers = _header_sett_mangler(headers, "referrer-policy", "no-referrer")
+    headers = _header_sett_mangler(headers, "x-frame-options", "DENY")
+    headers = _header_sett_mangler(headers, "cache-control", "no-store")
+    headers = _header_sett_mangler(headers, "server", "Norscode")
+    headers = _header_sett_mangler(headers, "x-request-id", request_id(ctx))
+    la origin = request_header(ctx, "origin")
+    hvis origin != "" {
+        headers = _header_sett_mangler(headers, "access-control-allow-origin", origin)
+        headers = _header_sett_mangler(headers, "access-control-allow-credentials", "true")
+        headers = _header_sett_mangler(headers, "vary", "Origin")
+    }
+    response["__headers__"] = headers
+    returner response
+}
+
 funksjon _json_stringify_vals(d: ordbok_tekst) -> ordbok_tekst {
     // Konverter boolske verdiar til "true"/"false" for konsistens med JSON-forventningar
     la r: ordbok_tekst = {}
@@ -483,7 +533,7 @@ funksjon request_param_int_or_error(params: ordbok_tekst, nøkkel: tekst, errors
 }
 
 funksjon response_error(status: heltall, melding: tekst) -> ordbok_tekst {
-    returner response_builder(status, {"content-type": "application/json"}, "{\"error\":\"" + melding + "\"}")
+    returner response_builder(status, {"content-type": "application/json"}, "{\"ok\":false,\"error\":\"" + melding + "\"}")
 }
 
 funksjon response_file(sti: tekst, content_type: tekst) -> ordbok_tekst {
@@ -756,7 +806,11 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
             allowed = allowed + ", HEAD"
         }
         allowed = allowed + ", OPTIONS"
-        returner response_builder(204, {"allow": allowed}, "")
+        returner response_finalize(ctx, response_builder(204, {
+            "allow": allowed,
+            "access-control-allow-methods": allowed,
+            "access-control-allow-headers": "authorization, content-type, x-api-key, x-request-id"
+        }, ""))
     }
 
     la sti_match: boolsk = usann
@@ -784,7 +838,7 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
                         hvis ikkje g_result { guard_ok = usann }
                         gi = gi + 1
                     }
-                    hvis ikkje guard_ok { returner response_error(403, "Forbudt") }
+                    hvis ikkje guard_ok { returner response_finalize(ctx, response_error(403, "Forbudt")) }
                     // Dependency injection
                     la deps = handler["deps"]
                     la dep_providers = ncb_metadata("dependency_providers")
@@ -822,7 +876,7 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
                             resp = builtin.ncb_call_fn(fn_namn, ctx)
                         }
                         hvis er_head { resp["__body__"] = "" }
-                        returner _apply_response_middlewares(resp)
+                        returner response_finalize(ctx, _apply_response_middlewares(resp))
                     } fang (err) {
                         hvis builtin.type(err) == "tekst" {
                             hvis tekst_starter_med(err, "ValideringsFeil:") {
@@ -837,13 +891,13 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
                                     }
                                 }
                                 la val_err = validation_error_response([detalj], 422)
-                                returner _apply_error_middlewares(val_err)
+                                returner response_finalize(ctx, _apply_error_middlewares(val_err))
                             }
                         }
                         la err_resp = response_error(500, "Intern feil: " + err)
-                        returner _apply_error_middlewares(err_resp)
+                        returner response_finalize(ctx, _apply_error_middlewares(err_resp))
                     }
-                    returner _apply_response_middlewares(resp)
+                    returner response_finalize(ctx, _apply_response_middlewares(resp))
                 }
             }
         }
@@ -864,9 +918,9 @@ funksjon handle_request(ctx: ordbok_tekst) -> ordbok_tekst {
         }
         la r405 = response_error(405, "Metode ikkje tillatt: " + metode)
         r405["__headers__"]["allow"] = allowed_405
-        returner _apply_error_middlewares(r405)
+        returner response_finalize(ctx, _apply_error_middlewares(r405))
     }
-    returner _apply_error_middlewares(response_error(404, "Ikkje funne: " + metode + " " + sti))
+    returner response_finalize(ctx, _apply_error_middlewares(response_error(404, "Ikkje funne: " + metode + " " + sti)))
 }
 
 # ─── Sanitering ────────────────────────────────────────────────────────────────

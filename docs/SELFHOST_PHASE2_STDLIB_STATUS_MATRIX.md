@@ -11,17 +11,18 @@ Dette er ei rask oversikt over kva som er klart for bruk i fase 2, kva som er p�
 - `std/innstillingar.no` - miljønøkkeloversikt og status
 - `std/sched.no` - køstatus og neste hending
 - `std/tråd.no` - manager- og trådstatus
+- `std/asynk.no` - worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming-respons
+- `std/stdlib_status.no` - maskinlesbar statusmatrise for stabil/eksperimentell/stub
+- Python-liknande standardmodular kan brukast som ergonomisk inspirasjon, men aktiv stdlib skal ikkje starte `python3`
 - praktisk brukscase-dekning ligg i [docs/SELFHOST_PHASE2_STDLIB_USECASES.md](./SELFHOST_PHASE2_STDLIB_USECASES.md)
 
 ## Under arbeid
 
-- breiare standardbibliotek utover fase-2-løypa
 - lengre regresjonssett per modulområde
 
 ## Manglar
 
-- ei full standardbibliotek-paritet mot Python
-- samla dokumentasjon for alle ikkje-prioriterte modular
+- full økosystem-paritet med Python-pakkar og tredjepartsbibliotek
 - eit endå breiare testnett for moduler som ikkje er i fase-2-løypa
 
 ## Praktisk leseregel
@@ -39,6 +40,8 @@ Dette er ei rask oversikt over kva som er klart for bruk i fase 2, kva som er p�
 - `std/innstillingar.no`
 - `std/sched.no`
 - `std/tråd.no`
+- `std/asynk.no`
+- `std/stdlib_status.no`
 
 ## Kva er neste dersom standardbiblioteket skal utvidast
 
