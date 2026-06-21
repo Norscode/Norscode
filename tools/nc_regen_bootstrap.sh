@@ -43,7 +43,7 @@ _ok=0
 for _mod in \
     std/math.no std/tekst.no std/liste.no std/ordbok.no std/json.no \
     std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no \
-    std/cache.no \
+    std/cache.no std/stil.no \
     selfhost/common.no selfhost/ir_contract.no selfhost/compiler.no \
     selfhost/compiler_bridge.no; do
     [ -f "$_mod" ] || continue
