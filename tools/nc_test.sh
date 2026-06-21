@@ -116,6 +116,7 @@ is_server_test() {
         test_web_subrouter.no|\
         test_web_validation.no|\
         test_security.no|\
+        test_stil.no|\
         test_selfhost.no)
             return 0;;
     esac
