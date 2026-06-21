@@ -52,6 +52,10 @@ for _mod in \
 done
 printf '✓ %d stdlib-NCBs oppdatert\n' "$_ok"
 
+printf 'Oppdaterer stilark-precompiled NCB...\n'
+"$NC" compile std/stil.no bootstrap/precompiled/stil.ncb.json >/dev/null 2>&1
+printf '✓ bootstrap/precompiled/stil.ncb.json\n'
+
 printf 'Røyktesting...\n'
 printf 'funksjon start() { skriv("regen OK") }' > /tmp/_nc_regen_smoke.no
 _res=$("$NC" run /tmp/_nc_regen_smoke.no 2>/dev/null)
