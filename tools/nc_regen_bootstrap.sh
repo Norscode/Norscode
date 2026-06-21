@@ -43,7 +43,7 @@ _ok=0
 for _mod in \
     std/math.no std/tekst.no std/liste.no std/ordbok.no std/json.no \
     std/feil.no std/env.no std/io.no std/fil.no std/log.no std/path.no \
-    std/cache.no \
+    std/cache.no std/stil.no \
     selfhost/common.no selfhost/ir_contract.no selfhost/compiler.no \
     selfhost/compiler_bridge.no; do
     [ -f "$_mod" ] || continue
@@ -51,6 +51,10 @@ for _mod in \
     "$NC" compile "$_mod" "$_outname" >/dev/null 2>&1 && _ok=$((_ok+1))
 done
 printf '✓ %d stdlib-NCBs oppdatert\n' "$_ok"
+
+printf 'Oppdaterer stilark-precompiled NCB...\n'
+"$NC" compile std/stil.no bootstrap/precompiled/stil.ncb.json >/dev/null 2>&1
+printf '✓ bootstrap/precompiled/stil.ncb.json\n'
 
 printf 'Røyktesting...\n'
 printf 'funksjon start() { skriv("regen OK") }' > /tmp/_nc_regen_smoke.no
