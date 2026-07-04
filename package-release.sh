@@ -18,6 +18,12 @@ DIST_DIR="$ROOT_DIR/dist"
 RELEASE_DIR="$ROOT_DIR/release-artifacts"
 ARCHIVE_NAME="norscode-language-${VERSION}.tar.gz"
 ARCHIVE_PATH="${RELEASE_DIR}/${ARCHIVE_NAME}"
+STAGING_DIR="$(mktemp -d)"
+
+cleanup() {
+  rm -rf "$STAGING_DIR"
+}
+trap cleanup EXIT
 
 mkdir -p "$RELEASE_DIR"
 
@@ -83,7 +89,35 @@ for entry in "${RELEASE_ENTRIES[@]}"; do
   fi
 done
 
-tar -czf "$ARCHIVE_PATH" -C "$ROOT_DIR" "${PACKAGE_ENTRIES[@]}"
+copy_entry() {
+  src="$1"
+  dest="$2"
+  mkdir -p "$(dirname "$dest")"
+  cp -R "$src" "$dest"
+}
+
+for entry in "${PACKAGE_ENTRIES[@]}"; do
+  copy_entry "$ROOT_DIR/$entry" "$STAGING_DIR/$entry"
+done
+
+# Aktiv compile-sti brukar den hybride v9400-bundlen. Ta med berre denne
+# minimale build-artefakten, ikkje heile lokale build/. Release skal feile
+# tydeleg dersom artefakten manglar, elles blir installert `nc check` broten.
+if [ ! -f "$ROOT_DIR/build/v9400/hybrid_compiler_bundle_v9400.ncb.json" ]; then
+  printf 'Manglar release-artefakt: build/v9400/hybrid_compiler_bundle_v9400.ncb.json\n' >&2
+  printf 'Køyr v9400 bundle-bygg før release, eller legg den spora artefakten tilbake.\n' >&2
+  exit 1
+fi
+copy_entry "$ROOT_DIR/build/v9400" "$STAGING_DIR/build/v9400"
+PACKAGE_ENTRIES+=(build)
+
+# Den aktive precompiled importstien prioriterer .nors for std-modular. Release
+# må difor vere sjølvforsynt sjølv om kjelda framleis bur som std/socket.no.
+if [ -f "$STAGING_DIR/std/socket.no" ] && [ ! -f "$STAGING_DIR/std/socket.nors" ]; then
+  cp "$STAGING_DIR/std/socket.no" "$STAGING_DIR/std/socket.nors"
+fi
+
+tar -czf "$ARCHIVE_PATH" -C "$STAGING_DIR" "${PACKAGE_ENTRIES[@]}"
 
 if command -v shasum >/dev/null 2>&1; then
   shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}' > "${ARCHIVE_PATH}.sha256"
