@@ -1,10 +1,4 @@
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-
-bash "$ROOT_DIR/tools/selfhost_phase0_verify.sh"
-bash "$ROOT_DIR/tools/no_c_python_active_surface.sh"
-bash "$ROOT_DIR/tools/selfhost_maintenance_verify.sh"
-
-printf 'Driftsvakt: OK\n'
+#!/usr/bin/env sh
+set -eu
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/selfhost_drift_guard.no"
