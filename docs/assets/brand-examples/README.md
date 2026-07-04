@@ -10,14 +10,14 @@ Dette er historiske og utforskande logo- og ikoneksempel. Gjeldande standardpakk
 - [norscode-file-no.svg](norscode-file-no.svg): filikon for `.no`, laga for små størrelsar og editorbruk.
 - [norscode-compass.svg](norscode-compass.svg): meir nordisk/retning-basert merke med kompassform.
 
-## Anbefaling
+## Status
 
-Den mørke/neon-baserte retninga er valt som aktiv retning. Bruk standardfilene i `frontend/assets/icons` for produkt, nettside, editor og release-pakker. Filene i denne mappa kan framleis brukast som referanse når nye variantar skal lagast.
+Desse filene er historiske eksempel. Den aktive retninga er den innebygde N-logoen i `frontend/assets/icons`, og dei same standardfilene skal brukast for produkt, nettside, editor og release-pakker. Filene i denne mappa kan framleis brukast som referanse når nye variantar skal lagast.
 
 ## Neste Steg
 
-Når ein retning er valt:
+Når nye variantar trengst:
 
-1. Koble nettside og app-pakker til `frontend/assets/icons`.
-2. Koble VS Code-utvidelsen til ferdig filikon når extension-endringane skal inn.
+1. Start frå aktiv kjelde i `frontend/assets/icons`.
+2. Hald VS Code-utvidelsen og app-pakkene kobla til standardfilene.
 3. Generer PNG/ICNS frå SVG ved release dersom plattforma krev rasterformat.
