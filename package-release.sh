@@ -45,6 +45,7 @@ fi
 rm -f "$ARCHIVE_PATH" "${ARCHIVE_PATH}.sha256"
 
 RELEASE_ENTRIES=(
+  .github
   AGENTS.md
   CHANGELOG.md
   INSTALL.md
@@ -111,10 +112,17 @@ fi
 copy_entry "$ROOT_DIR/build/v9400" "$STAGING_DIR/build/v9400"
 PACKAGE_ENTRIES+=(build)
 
-# Den aktive precompiled importstien prioriterer .nors for std-modular. Release
-# må difor vere sjølvforsynt sjølv om kjelda framleis bur som std/socket.no.
-if [ -f "$STAGING_DIR/std/socket.no" ] && [ ! -f "$STAGING_DIR/std/socket.nors" ]; then
-  cp "$STAGING_DIR/std/socket.no" "$STAGING_DIR/std/socket.nors"
+# Den aktive precompiled importstien prioriterer .nors for std-modular.
+# Release må difor vere sjølvforsynt sjølv om std-kjeldene framleis bur som
+# .no-filer i repoet.
+if [ -d "$STAGING_DIR/std" ]; then
+  for std_src in "$STAGING_DIR"/std/*.no; do
+    [ -f "$std_src" ] || continue
+    std_alias="${std_src%.no}.nors"
+    if [ ! -f "$std_alias" ]; then
+      cp "$std_src" "$std_alias"
+    fi
+  done
 fi
 
 tar -czf "$ARCHIVE_PATH" -C "$STAGING_DIR" "${PACKAGE_ENTRIES[@]}"
