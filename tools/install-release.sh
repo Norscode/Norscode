@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+set -eu
 
 usage() {
   printf 'Bruk: bash tools/install-release.sh <release.tar.gz> [--prefix DIR]\n' >&2
@@ -31,87 +31,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ ! -f "$ARCHIVE_PATH" ]; then
-  printf 'Fant ikke releasepakke: %s\n' "$ARCHIVE_PATH" >&2
-  exit 1
-fi
-
-if [ -f "${ARCHIVE_PATH}.sha256" ]; then
-  EXPECTED_SHA256="$(cat "${ARCHIVE_PATH}.sha256")"
-  if command -v shasum >/dev/null 2>&1; then
-    ACTUAL_SHA256="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    ACTUAL_SHA256="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
-  else
-    printf 'Fant ikke verktøy for SHA256-verifisering\n' >&2
-    exit 1
-  fi
-  if [ "$EXPECTED_SHA256" != "$ACTUAL_SHA256" ]; then
-    printf 'SHA256-avvik for releasepakken\n' >&2
-    exit 1
-  fi
-fi
-
-INSTALL_ROOT="${PREFIX}/releases"
-CURRENT_LINK="${PREFIX}/current"
-STAGING_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGING_DIR"' EXIT
-
-mkdir -p "$INSTALL_ROOT"
-tar -xzf "$ARCHIVE_PATH" -C "$STAGING_DIR"
-
-if [ ! -x "$STAGING_DIR/bin/nc" ]; then
-  printf 'Releasepakken mangler bin/nc\n' >&2
-  exit 1
-fi
-
-if [ ! -x "$STAGING_DIR/dist/norscode" ]; then
-  printf 'Releasepakken mangler dist/norscode\n' >&2
-  exit 1
-fi
-
-VERSION_NAME="$(basename "$ARCHIVE_PATH" .tar.gz)"
-TARGET_DIR="${INSTALL_ROOT}/${VERSION_NAME}"
-
-rm -rf "$TARGET_DIR"
-mkdir -p "$TARGET_DIR"
-cp -R "$STAGING_DIR"/. "$TARGET_DIR"/
-
-ln -sfn "$TARGET_DIR" "$CURRENT_LINK"
-mkdir -p "${PREFIX}/bin"
-ln -sfn "${CURRENT_LINK}/bin/nc" "${PREFIX}/bin/nc"
-ln -sfn "${CURRENT_LINK}/bin/nor" "${PREFIX}/bin/nor"
-ln -sfn "${CURRENT_LINK}/bin/nl" "${PREFIX}/bin/nl"
-ln -sfn "${CURRENT_LINK}/bin/bootstrap" "${PREFIX}/bin/bootstrap"
-
-# Mirror the release root at the install prefix so wrapper scripts that derive
-# ROOT_DIR from their own location can still resolve dist/ and modules.
-for _entry in \
-  compiler \
-  dist \
-  docs \
-  examples \
-  norcode \
-  norcode.toml \
-  selfhost \
-  scripts \
-  std \
-  tests \
-  tools \
-  README.md \
-  LICENSE \
-  CHANGELOG.md \
-  Makefile \
-  app.no
-do
-  if [ -e "${CURRENT_LINK}/${_entry}" ]; then
-    ln -sfn "${CURRENT_LINK}/${_entry}" "${PREFIX}/${_entry}"
-  fi
-done
-
-if [ "$(uname -s)" = "Darwin" ] && [ -x "${CURRENT_LINK}/tools/install-macos-file-icons.sh" ]; then
-  bash "${CURRENT_LINK}/tools/install-macos-file-icons.sh" || true
-fi
-
-printf 'Installert release: %s\n' "$TARGET_DIR"
-printf 'Aktiv versjon: %s\n' "$CURRENT_LINK"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+exec env \
+  NORSCODE_ENABLE_EXEC_PROSESS=1 \
+  NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
+  NORSCODE_INSTALL_PREFIX="$PREFIX" \
+  NORSCODE_ROOT="$ROOT_DIR" \
+  "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no"
