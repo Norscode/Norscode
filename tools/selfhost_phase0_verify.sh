@@ -38,7 +38,7 @@ sh -n \
   "$ROOT_DIR/tools/docker-build-linux.sh" \
   "$ROOT_DIR/tools/selfhost_phase0_verify.sh"
 
-_pattern='main\.py\|compile\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\.'
+_pattern='main\.py\|compile\.py\|docker buildx build\|Dockerfile\.linux-build\|setup\.py\|test_web_dependency\.no\|Bygg dist/norscode for normal bruk, eller bruk \./bin/bootstrap\.\|dist/norcode-bootstrap-compile'
 _hits="$(grep -rn "$_pattern" \
   "$ROOT_DIR/README.md" \
   "$ROOT_DIR/.github/workflows" \
