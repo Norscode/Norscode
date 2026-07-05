@@ -4,6 +4,7 @@
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 NC_NATIVE="$ROOT/dist/norscode_native"
+NC="$ROOT/bin/nc"
 
 # Velg runner
 if [ -x "$NC_NATIVE" ]; then
@@ -21,36 +22,7 @@ while IFS= read -r line; do
     [ -z "$line" ] && continue
     
     # Wrap expression in start() function and run
-    tmpfile="$(mktemp /tmp/nc_repl_XXXXXX.no)"
-    cat > "$tmpfile" << EOF
-funksjon start() {
-    la _res = $line
-    skriv(tekst_fra_heltall(_res))
-}
-EOF
-    result=$(_run_file "$tmpfile")
-    ec=$?
-    rm -f "$tmpfile"
-    
-    if [ $ec -eq 0 ]; then
-        printf '=> %s\n' "$result"
-    else
-        # Try as string expression
-        tmpfile2="$(mktemp /tmp/nc_repl_XXXXXX.no)"
-        cat > "$tmpfile2" << EOF
-funksjon start() {
-    skriv($line)
-}
-EOF
-        result2=$(_run_file "$tmpfile2")
-        ec2=$?
-        rm -f "$tmpfile2"
-        if [ $ec2 -eq 0 ]; then
-            printf '=> %s\n' "$result2"
-        else
-            printf 'Feil: %s\n' "$result2"
-        fi
-    fi
+    NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT" NORSCODE_REPL_LINE="$line" "$NC" run "$ROOT/tools/nc_repl.no" || true
 done
 
 printf 'Takk for no!\n'
