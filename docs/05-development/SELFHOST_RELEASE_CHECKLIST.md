@@ -9,8 +9,11 @@ Målet er å gjere release, installasjon og rollback føreseieleg utan å dra in
 - [ ] release-pakke kan byggast med `bash package-release.sh <versjon>`
 - [ ] release- og installasjonsflata krev ikkje C-verktøykjede i normal drift
 - [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
-- [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
+- [ ] Linux Gen1 stage-0-ELF-kandidat blir bygd grønt i GitHub CI
+- [ ] Full Linux ELF self-compile-paritet med `NC_OM6B_RUN_STAGE0=1` er anten grøn eller
+      eksplisitt vurdert som ikkje-releaseblokkerande for denne releasen
 - [ ] inga release-instruks peikar brukaren mot C/Python, `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype
+- [ ] CI-wrapperar under `tools/*.sh` køyrer reelle kontrollar og skjuler ikkje manglande stage0-evner som grøne hopp-over-steg
 
 ## Bygg release
 

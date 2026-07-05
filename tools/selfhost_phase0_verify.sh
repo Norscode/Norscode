@@ -21,7 +21,7 @@ if [ "$_rc" -eq 0 ]; then
   rm -f "$_out"
   exit 0
 fi
-if ! grep -q 'builtin\.builtin\.exec_prosess' "$_out"; then
+if [ -s "$_out" ] && ! grep -Eq 'Ukjent funksjon: builtin(\.builtin)?\.exec_prosess' "$_out"; then
   cat "$_out"
   rm -f "$_out"
   exit "$_rc"
