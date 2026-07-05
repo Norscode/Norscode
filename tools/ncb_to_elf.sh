@@ -1,31 +1,18 @@
 #!/usr/bin/env bash
-# tools/ncb_to_elf.sh — NCB JSON → Linux ELF64 via native_codegen_v2 (Omgang 6/6b)
-set -euo pipefail
+# Tynn wrapper: NCB→ELF-logikken ligg i tools/ncb_to_elf.no.
+set -eu
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NCB="${1:?bruk: ncb_to_elf.sh fil.ncb.json ut.elf}"
-OUT="${2:?}"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
 
-if [ ! -x "$ROOT/dist/norscode_native" ]; then
-    bash "$ROOT/tools/build_norscode_native.sh"
+if [ "$#" -lt 2 ]; then
+    printf 'bruk: ncb_to_elf.sh fil.ncb.json ut.elf\n' >&2
+    exit 2
 fi
 
-# Relative stiar frå repo-root (fil_les i codegen)
-case "$NCB" in
-    /*) NCB_REL="$NCB" ;;
-    *)  NCB_REL="$NCB" ;;
-esac
-case "$OUT" in
-    /*) OUT_ABS="$OUT" ;;
-    *)  OUT_ABS="$ROOT/$OUT" ;;
-esac
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT"
+export NORSCODE_NCB_TO_ELF_INPUT="$1"
+export NORSCODE_NCB_TO_ELF_OUTPUT="$2"
 
-mkdir -p "$(dirname "$OUT_ABS")"
-
-NC_INPUT="$NCB_REL" NC_OUTPUT="$OUT_ABS" \
-    NORSCODE_CMD=run \
-    NORSCODE_FILE="$ROOT/selfhost/native_execution/native_codegen_v2.no" \
-    "$ROOT/dist/norscode_native"
-
-chmod +x "$OUT_ABS" 2>/dev/null || true
-printf '✓ ELF: %s (%d bytes)\n' "$OUT_ABS" "$(wc -c < "$OUT_ABS" | tr -d ' ')"
+exec "$ROOT/bin/nc" run "$ROOT/tools/ncb_to_elf.no"
