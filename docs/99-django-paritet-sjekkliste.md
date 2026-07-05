@@ -13,8 +13,8 @@ Denne lista viser kva som allereie finst, kva som berre er delvis på plass, og 
 - [x] Session-lag i `std/sesjon.no`
 - [x] Admin-CRUD i `std/admin.no`
 - [x] Samla web-stack i `std/web_app_stack.no`
-- [x] Prosjektgenerator i `tools/startproject.sh`
-- [x] Appgenerator i `tools/startapp.sh`
+- [x] Prosjektgenerator via `nc startproject` / `tools/startproject.no`
+- [x] Appgenerator via `nc startapp` / `tools/startapp.no`
 - [x] Template-start i `src/templates/base.html` i scaffolden
 
 ## Delvis på plass
