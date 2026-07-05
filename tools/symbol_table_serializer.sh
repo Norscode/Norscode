@@ -1,30 +1,18 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
+# Tynn wrapper: symbolserialisering ligg i tools/symbol_table_serializer.no.
+set -eu
 
-set -e
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
 
 if [ $# -lt 2 ]; then
     echo "Usage: symbol_table_serializer.sh <input_symbols> <output_symbols>"
     exit 1
 fi
 
-INPUT_FILE="$1"
-OUTPUT_FILE="$2"
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT"
+export NORSCODE_SYMBOL_INPUT="$1"
+export NORSCODE_SYMBOL_OUTPUT="$2"
 
-if [ ! -f "$INPUT_FILE" ]; then
-    echo "Missing symbol dump: $INPUT_FILE"
-    exit 1
-fi
-
-mkdir -p "$(dirname "$OUTPUT_FILE")"
-
-# Normalize symbol ordering and whitespace
-cat "$INPUT_FILE" \
-    | sed 's/[[:space:]]\+/ /g' \
-    | sed 's/[[:space:]]*$//' \
-    | LC_ALL=C sort \
-    > "$OUTPUT_FILE"
-
-HASH=$(shasum -a 256 "$OUTPUT_FILE" | awk '{print $1}')
-
-echo "Deterministic symbol table written to: $OUTPUT_FILE"
-echo "Deterministic symbol hash: $HASH"
+exec "$ROOT/bin/nc" run "$ROOT/tools/symbol_table_serializer.no"

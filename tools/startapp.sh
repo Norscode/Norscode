@@ -4,6 +4,7 @@ set -eu
 PROJECT_ROOT="."
 APP_NAME=""
 APP_PATH=""
+FROM_NO=0
 
 usage() {
   printf 'bruk: nc startapp <app_namn> [--path <prosjektrot>]\n' >&2
@@ -11,6 +12,9 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --from-no)
+      FROM_NO=1
+      ;;
     --path)
       shift
       [ "$#" -gt 0 ] || { usage; exit 2; }
@@ -41,6 +45,16 @@ done
 [ -n "$APP_NAME" ] || { usage; exit 2; }
 
 APP_PATH="$PROJECT_ROOT/apps/$APP_NAME"
+
+if [ "$FROM_NO" != "1" ]; then
+  ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+  exec env \
+    NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_ROOT="$ROOT_DIR" \
+    NORSCODE_STARTAPP_NAME="$APP_NAME" \
+    NORSCODE_STARTAPP_PROJECT_ROOT="$PROJECT_ROOT" \
+    "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/startapp.no"
+fi
 
 if [ ! -f "$PROJECT_ROOT/norcode.toml" ]; then
   printf 'klarte ikkje finne norcode.toml i: %s\n' "$PROJECT_ROOT" >&2

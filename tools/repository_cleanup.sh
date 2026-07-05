@@ -1,13 +1,11 @@
-#!/usr/bin/env bash
-set -e
+#!/usr/bin/env sh
+# Tynn wrapper: repo-opprydding ligg i tools/repository_cleanup.no.
+set -eu
 
-echo "Cleaning repository artifacts..."
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
 
-find . -name "__pycache__" -type d -exec rm -rf {} + || true
-find . -name "*.pyc" -delete || true
-find . -name "*.tmp" -delete || true
-find . -name ".DS_Store" -delete || true
-find . -name "debug_*" -delete || true
-find . -name "tmp_*" -delete || true
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT"
 
-echo "Cleanup complete"
+exec "$ROOT/bin/nc" run "$ROOT/tools/repository_cleanup.no"

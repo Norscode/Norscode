@@ -77,18 +77,11 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # Bruk norscode_native om tilgjengeleg lokalt
 if [ -x "$ROOT_DIR/dist/norscode_native" ]; then
-    printf 'Pre-bygd norscode_native funnet lokalt.\n'
-    mkdir -p "$RUNTIME_PREFIX/releases"
-    ln -sfn "$ROOT_DIR" "$RUNTIME_PREFIX/current"
-    install_wrappers
-    install_legacy_wrappers
-    if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/tools/install-macos-file-icons.sh" ]; then
-        bash "$ROOT_DIR/tools/install-macos-file-icons.sh" || true
-    fi
-    printf 'Installert: %s/current\n' "$RUNTIME_PREFIX"
-    printf 'Installert: %s/norscode\n' "$BIN_DIR"
-    printf 'Legg til PATH: export PATH="%s:$PATH"\n' "$BIN_DIR"
-    exit 0
+    exec env \
+        NORSCODE_ENABLE_EXEC_PROSESS=1 \
+        NORSCODE_ROOT="$ROOT_DIR" \
+        NORSCODE_INSTALL_PREFIX="$INSTALL_PREFIX" \
+        "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install.no"
 fi
 
 # ─── Hent release fra GitHub ────────────────────────────────────────────────

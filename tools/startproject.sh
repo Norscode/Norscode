@@ -8,6 +8,7 @@ DB_FILE="app.db"
 WITH_AUTH="usann"
 WITH_ADMIN="usann"
 WITH_EMAIL="usann"
+FROM_NO=0
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 usage() {
@@ -16,6 +17,9 @@ usage() {
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --from-no)
+      FROM_NO=1
+      ;;
     --name)
       shift
       [ "$#" -gt 0 ] || { usage; exit 2; }
@@ -81,6 +85,20 @@ if [ -z "$OUTPUT_DIR" ]; then
   OUTPUT_DIR="$PROJECT_DIR"
 fi
 
+if [ "$FROM_NO" != "1" ]; then
+  exec env \
+    NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_ROOT="$ROOT_DIR" \
+    NORSCODE_STARTPROJECT_DIR="$PROJECT_DIR" \
+    NORSCODE_STARTPROJECT_OUTPUT_DIR="$OUTPUT_DIR" \
+    NORSCODE_STARTPROJECT_NAME="$PROJECT_NAME" \
+    NORSCODE_STARTPROJECT_DB="$DB_FILE" \
+    NORSCODE_STARTPROJECT_WITH_AUTH="$WITH_AUTH" \
+    NORSCODE_STARTPROJECT_WITH_ADMIN="$WITH_ADMIN" \
+    NORSCODE_STARTPROJECT_WITH_EMAIL="$WITH_EMAIL" \
+    "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/startproject.no"
+fi
+
 if [ -e "$OUTPUT_DIR" ] && [ -n "$(ls -A "$OUTPUT_DIR" 2>/dev/null)" ]; then
   printf 'feil: "%s" er ikkje tom\n' "$OUTPUT_DIR" >&2
   exit 2
@@ -92,6 +110,7 @@ mkdir -p \
   "$OUTPUT_DIR/src/templates/pages" \
   "$OUTPUT_DIR/src/templates/partials" \
   "$OUTPUT_DIR/src/auth" \
+  "$OUTPUT_DIR/src/admin" \
   "$OUTPUT_DIR/apps/core/tests" \
   "$OUTPUT_DIR/migrations" \
   "$OUTPUT_DIR/locale" \
@@ -101,12 +120,19 @@ mkdir -p \
   "$OUTPUT_DIR/tests" \
   "$OUTPUT_DIR/examples" \
   "$OUTPUT_DIR/deploy" \
-  "$OUTPUT_DIR/docs"
+  "$OUTPUT_DIR/docs" \
+  "$OUTPUT_DIR/bin"
 
 ln -sfn "$ROOT_DIR/std" "$OUTPUT_DIR/std"
 ln -sfn "$ROOT_DIR/selfhost" "$OUTPUT_DIR/selfhost"
 ln -sfn "$ROOT_DIR/runtime" "$OUTPUT_DIR/runtime"
 ln -sfn "$ROOT_DIR/compiler" "$OUTPUT_DIR/compiler"
+
+cat > "$OUTPUT_DIR/bin/nc" <<EOF_BIN_NC
+#!/usr/bin/env sh
+exec "$ROOT_DIR/bin/nc" "\$@"
+EOF_BIN_NC
+chmod +x "$OUTPUT_DIR/bin/nc"
 
 cat > "$OUTPUT_DIR/norcode.toml" <<EOF_TOML
 [project]

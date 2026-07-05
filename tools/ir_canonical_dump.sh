@@ -1,30 +1,18 @@
-#!/usr/bin/env bash
+#!/usr/bin/env sh
+# Tynn wrapper: IR-normalisering ligg i tools/ir_canonical_dump.no.
+set -eu
 
-set -e
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+cd "$ROOT"
 
 if [ $# -lt 2 ]; then
     echo "Usage: ir_canonical_dump.sh <input_ir_dump> <output_ir_dump>"
     exit 1
 fi
 
-INPUT_FILE="$1"
-OUTPUT_FILE="$2"
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT"
+export NORSCODE_IR_INPUT="$1"
+export NORSCODE_IR_OUTPUT="$2"
 
-if [ ! -f "$INPUT_FILE" ]; then
-    echo "Missing IR dump: $INPUT_FILE"
-    exit 1
-fi
-
-mkdir -p "$(dirname "$OUTPUT_FILE")"
-
-# Normalize IR formatting and ordering
-cat "$INPUT_FILE" \
-    | sed 's/[[:space:]]\+/ /g' \
-    | sed 's/[[:space:]]*$//' \
-    | LC_ALL=C sort \
-    > "$OUTPUT_FILE"
-
-HASH=$(shasum -a 256 "$OUTPUT_FILE" | awk '{print $1}')
-
-echo "Canonical IR dump written to: $OUTPUT_FILE"
-echo "Canonical IR hash: $HASH"
+exec "$ROOT/bin/nc" run "$ROOT/tools/ir_canonical_dump.no"

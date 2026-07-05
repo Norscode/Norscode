@@ -1,5 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+# Tynn wrapper: macOS app-signering ligg i tools/sign-macos-app.no.
+set -eu
 
 usage() {
   cat >&2 <<'EOF'
@@ -13,7 +14,7 @@ Signerer ein lokal macOS-appbundle.
 EOF
 }
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 APP_PATH="$ROOT_DIR/build/macos-app/Norscode.app"
 IDENTITY="-"
 VERIFY=0
@@ -61,48 +62,11 @@ case "$ENTITLEMENTS" in
   *) ENTITLEMENTS="$ROOT_DIR/$ENTITLEMENTS" ;;
 esac
 
-if [ "$(uname -s)" != "Darwin" ]; then
-  printf 'Feil: sign-macos-app krev macOS.\n' >&2
-  exit 1
-fi
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT_DIR"
+export NORSCODE_MACOS_SIGN_APP="$APP_PATH"
+export NORSCODE_MACOS_SIGN_IDENTITY="$IDENTITY"
+export NORSCODE_MACOS_SIGN_ENTITLEMENTS="$ENTITLEMENTS"
+export NORSCODE_MACOS_SIGN_VERIFY="$VERIFY"
 
-for cmd in codesign plutil; do
-  if ! command -v "$cmd" >/dev/null 2>&1; then
-    printf 'Feil: manglar macOS-verktøyet %s\n' "$cmd" >&2
-    exit 1
-  fi
-done
-
-if [ ! -d "$APP_PATH" ]; then
-  printf 'Feil: manglar app-bundle: %s\n' "$APP_PATH" >&2
-  exit 1
-fi
-
-if [ ! -f "$APP_PATH/Contents/Info.plist" ]; then
-  printf 'Feil: ugyldig app-bundle, manglar Info.plist: %s\n' "$APP_PATH" >&2
-  exit 1
-fi
-
-plutil -lint "$APP_PATH/Contents/Info.plist" >/dev/null
-
-if [ ! -f "$ENTITLEMENTS" ]; then
-  printf 'Feil: manglar entitlements-fil: %s\n' "$ENTITLEMENTS" >&2
-  exit 1
-fi
-
-printf 'Signerer macOS-app: %s\n' "$APP_PATH"
-printf 'Identity: %s\n' "$IDENTITY"
-
-codesign \
-  --force \
-  --deep \
-  --sign "$IDENTITY" \
-  --timestamp=none \
-  --entitlements "$ENTITLEMENTS" \
-  "$APP_PATH"
-
-printf 'Signering ferdig.\n'
-
-if [ "$VERIFY" -eq 1 ]; then
-  bash "$ROOT_DIR/tools/verify-macos-app.sh" "$APP_PATH"
-fi
+exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/sign-macos-app.no"
