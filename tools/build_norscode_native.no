@@ -1,0 +1,315 @@
+// tools/build_norscode_native.no — materialiser dist/norscode_native utan C/Python
+
+funksjon linje(melding: tekst) -> heiltall {
+    skriv(melding + "\n")
+    returner 0
+}
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner builtin.miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon shell(sti: tekst) -> tekst {
+    returner "'" + sti + "'"
+}
+
+funksjon kommando(cmd: tekst) -> liste_tekst {
+    prøv { returner builtin.exec_prosess(cmd) } fang (e) {
+        la r: liste_tekst = []
+        legg_til(r, "1")
+        legg_til(r, "")
+        legg_til(r, tekst(e))
+        returner r
+    }
+}
+
+funksjon ok(res: liste_tekst) -> bool {
+    returner res[0] == "0"
+}
+
+funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
+    hvis lengde(res) > idx { returner res[idx] }
+    returner ""
+}
+
+funksjon trim(t: tekst) -> tekst {
+    returner builtin.trim(t)
+}
+
+funksjon run(cmd: tekst) -> bool {
+    la res = kommando(cmd)
+    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
+    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
+    returner ok(res)
+}
+
+funksjon executable(sti: tekst) -> bool {
+    returner ok(kommando("test -x " + shell(sti)))
+}
+
+funksjon fil_finst(sti: tekst) -> bool {
+    returner ok(kommando("test -f " + shell(sti)))
+}
+
+funksjon kommando_finst(namn: tekst) -> bool {
+    returner ok(kommando("command -v " + shell(namn) + " >/dev/null 2>&1"))
+}
+
+funksjon bytes(sti: tekst) -> tekst {
+    returner trim(res_felt(kommando("wc -c < " + shell(sti) + " | tr -d ' '"), 1))
+}
+
+funksjon sha256(sti: tekst) -> tekst {
+    hvis kommando_finst("shasum") {
+        returner trim(res_felt(kommando("shasum -a 256 " + shell(sti) + " | awk '{print $1}'"), 1))
+    }
+    hvis kommando_finst("sha256sum") {
+        returner trim(res_felt(kommando("sha256sum " + shell(sti) + " | awk '{print $1}'"), 1))
+    }
+    returner ""
+}
+
+funksjon os_namn() -> tekst {
+    returner trim(res_felt(kommando("uname -s"), 1))
+}
+
+funksjon arch_namn() -> tekst {
+    returner trim(res_felt(kommando("uname -m"), 1))
+}
+
+funksjon platform_name() -> tekst {
+    la os = os_namn()
+    la arch = arch_namn()
+    hvis os == "Darwin" {
+        hvis arch == "arm64" { returner "macos-arm64" }
+        hvis arch == "x86_64" { returner "macos-x86_64" }
+        returner ""
+    }
+    hvis os == "Linux" {
+        hvis arch == "x86_64" { returner "linux-x86_64" }
+        hvis arch == "aarch64" eller arch == "arm64" { returner "linux-arm64" }
+        returner ""
+    }
+    returner ""
+}
+
+funksjon stage0_seed_path(root: tekst) -> tekst {
+    la platform = platform_name()
+    hvis platform == "" { returner "" }
+    returner root + "/bootstrap/stage0/norscode-" + platform
+}
+
+funksjon same_bytes_as_stage0_seed(root: tekst, candidate: tekst) -> bool {
+    la seed = stage0_seed_path(root)
+    hvis seed == "" eller ikkje fil_finst(seed) { returner falsk }
+    la cand_sha = sha256(candidate)
+    la seed_sha = sha256(seed)
+    hvis cand_sha == "" eller seed_sha == "" { returner falsk }
+    returner cand_sha == seed_sha
+}
+
+funksjon smoke_enabled() -> bool {
+    la v = env("NORSCODE_REQUIRE_SMOKE")
+    hvis v == "" { v = "1" }
+    returner v == "1"
+}
+
+funksjon runtime_gap_enabled() -> bool {
+    la v = env("NORSCODE_REQUIRE_RUNTIME_GAP")
+    hvis v == "" { v = "0" }
+    returner v == "1"
+}
+
+funksjon smoke_ok(candidate: tekst) -> bool {
+    hvis ikkje executable(candidate) { returner falsk }
+    la tmp = trim(res_felt(kommando("mktemp ${TMPDIR:-/tmp}/nc_smoke_XXXXXX.no 2>/dev/null || true"), 1))
+    hvis tmp == "" { tmp = "/tmp/nc_smoke_" + trim(res_felt(kommando("printf '%s' $$"), 1)) + ".no" }
+    run("rm -f " + shell(tmp))
+    hvis ikkje run("printf 'funksjon start() { returner 0 }\\n' > " + shell(tmp)) { returner falsk }
+    la res = kommando("NORSCODE_CMD=run NORSCODE_FILE=" + shell(tmp) + " " + shell(candidate) + " >/dev/null 2>&1")
+    run("rm -f " + shell(tmp))
+    returner ok(res)
+}
+
+funksjon smoke_check(root: tekst, candidate: tekst) -> bool {
+    hvis ikkje smoke_enabled() {
+        linje("Dist-smoke er slått av (NORSCODE_REQUIRE_SMOKE=0)")
+        returner sann
+    }
+    hvis smoke_ok(candidate) { returner sann }
+    hvis env("CI") != "1" og same_bytes_as_stage0_seed(root, candidate) {
+        linje("Dist-smoke feila lokalt, men binæren matcher committed stage-0-seed byte for byte.")
+        linje("Held fram lokalt; CI krev framleis full smoke.")
+        returner sann
+    }
+    returner falsk
+}
+
+funksjon runtime_gap_check(root: tekst, candidate: tekst) -> bool {
+    hvis ikkje runtime_gap_enabled() { returner sann }
+    la gate = root + "/tools/native_runtime_gap_gate_v3001.sh"
+    hvis ikkje executable(gate) {
+        linje("Feil: manglar runtime-gap-gate tools/native_runtime_gap_gate_v3001.sh")
+        returner falsk
+    }
+    returner run(shell(gate) + " " + shell(candidate))
+}
+
+funksjon copy_stage0_binary(root: tekst, out: tekst) -> bool {
+    la platform = platform_name()
+    hvis platform == "" { returner falsk }
+    la stage0 = root + "/bootstrap/stage0/norscode-" + platform
+    hvis ikkje fil_finst(stage0) { returner falsk }
+    hvis ikkje run("mkdir -p " + shell(root + "/dist")) { returner falsk }
+    hvis ikkje run("rm -f " + shell(out)) { returner falsk }
+    hvis ikkje run("cp " + shell(stage0) + " " + shell(out)) { returner falsk }
+    hvis ikkje run("chmod +x " + shell(out)) { returner falsk }
+    hvis os_namn() == "Darwin" {
+        run("xattr -c " + shell(out) + " 2>/dev/null || true")
+    }
+    linje("dist/norscode_native <- bootstrap/stage0/norscode-" + platform + " (" + bytes(out) + " bytes)")
+    returner sann
+}
+
+funksjon release_repo() -> tekst {
+    la repo = env("NORSCODE_RELEASE_REPO")
+    hvis repo != "" { returner repo }
+    repo = env("GITHUB_REPOSITORY")
+    hvis repo != "" { returner repo }
+    returner "Norscode/Norscode"
+}
+
+funksjon auth_header() -> tekst {
+    la token = env("GITHUB_TOKEN")
+    hvis token == "" { token = env("GH_TOKEN") }
+    hvis token == "" { returner "" }
+    returner " -H " + shell("Authorization: Bearer " + token)
+}
+
+funksjon download_text(url: tekst) -> tekst {
+    la headers = auth_header()
+    hvis kommando_finst("curl") {
+        returner trim(res_felt(kommando("curl -fsSL" + headers + " -H 'Accept: application/vnd.github+json' " + shell(url) + " 2>/dev/null"), 1))
+    }
+    hvis kommando_finst("wget") {
+        hvis headers != "" {
+            la token = env("GITHUB_TOKEN")
+            hvis token == "" { token = env("GH_TOKEN") }
+            returner trim(res_felt(kommando("wget -qO- --header=" + shell("Authorization: Bearer " + token) + " --header='Accept: application/vnd.github+json' " + shell(url) + " 2>/dev/null"), 1))
+        }
+        returner trim(res_felt(kommando("wget -qO- " + shell(url) + " 2>/dev/null"), 1))
+    }
+    returner ""
+}
+
+funksjon finn_download_url(json: tekst, asset: tekst) -> tekst {
+    hvis json == "" { returner "" }
+    la tmp = trim(res_felt(kommando("mktemp ${TMPDIR:-/tmp}/nc_release_XXXXXX.json 2>/dev/null || true"), 1))
+    hvis tmp == "" { tmp = "/tmp/nc_release.json" }
+    hvis ikkje run("printf '%s' " + shell(json) + " > " + shell(tmp)) { returner "" }
+    la url = ""
+    hvis kommando_finst("jq") {
+        url = trim(res_felt(kommando("jq -r --arg n " + shell(asset) + " '.assets[] | select(.name == $n or (.name | startswith($n))) | .browser_download_url' " + shell(tmp) + " | head -1"), 1))
+    } ellers {
+        url = trim(res_felt(kommando("grep -o '\"browser_download_url\":[[:space:]]*\"[^\"]*" + asset + "[^\"]*\"' " + shell(tmp) + " | head -1 | cut -d'\"' -f4"), 1))
+    }
+    run("rm -f " + shell(tmp))
+    hvis url == "null" { returner "" }
+    returner url
+}
+
+funksjon download_binary(url: tekst, out: tekst) -> bool {
+    la tmp = trim(res_felt(kommando("mktemp ${TMPDIR:-/tmp}/nc_native_XXXXXX 2>/dev/null || true"), 1))
+    hvis tmp == "" { tmp = "/tmp/nc_native_download" }
+    la token = env("GITHUB_TOKEN")
+    hvis token == "" { token = env("GH_TOKEN") }
+    hvis kommando_finst("curl") {
+        la cmd = "curl -fsSL -L"
+        hvis token != "" { cmd = cmd + " -H " + shell("Authorization: Bearer " + token) + " -H 'Accept: application/octet-stream'" }
+        cmd = cmd + " " + shell(url) + " > " + shell(tmp)
+        hvis ikkje run(cmd) {
+            run("rm -f " + shell(tmp))
+            returner falsk
+        }
+    } ellers hvis kommando_finst("wget") {
+        la cmd2 = "wget -qO-"
+        hvis token != "" { cmd2 = cmd2 + " --header=" + shell("Authorization: Bearer " + token) + " --header='Accept: application/octet-stream'" }
+        cmd2 = cmd2 + " " + shell(url) + " > " + shell(tmp)
+        hvis ikkje run(cmd2) {
+            run("rm -f " + shell(tmp))
+            returner falsk
+        }
+    } ellers {
+        returner falsk
+    }
+    hvis ikkje run("mkdir -p $(dirname " + shell(out) + ")") {
+        run("rm -f " + shell(tmp))
+        returner falsk
+    }
+    hvis ikkje run("mv " + shell(tmp) + " " + shell(out)) {
+        run("rm -f " + shell(tmp))
+        returner falsk
+    }
+    hvis ikkje run("chmod +x " + shell(out)) { returner falsk }
+    returner sann
+}
+
+funksjon download_release_binary(root: tekst, out: tekst) -> bool {
+    la platform = platform_name()
+    hvis platform == "" { returner falsk }
+    la asset = "norscode-" + platform
+    la url = "https://api.github.com/repos/" + release_repo() + "/releases/latest"
+    la json = download_text(url)
+    hvis json == "" { returner falsk }
+    la download_url = finn_download_url(json, asset)
+    hvis download_url == "" { returner falsk }
+    hvis download_binary(download_url, out) {
+        linje("dist/norscode_native lasta ned frå release (" + bytes(out) + " bytes)")
+        returner sann
+    }
+    returner falsk
+}
+
+funksjon main() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
+    la out = root + "/dist/norscode_native"
+
+    hvis executable(out) og smoke_check(root, out) og runtime_gap_check(root, out) {
+        la kb = trim(res_felt(kommando("printf '%s' $(( $(wc -c < " + shell(out) + ") / 1024 ))"), 1))
+        linje("dist/norscode_native er allereie bygget (" + kb + " KB)")
+        returner 0
+    }
+
+    hvis ikkje run("mkdir -p " + shell(root + "/dist")) { returner 1 }
+
+    hvis copy_stage0_binary(root, out) {
+        la _ = 0
+    } ellers hvis download_release_binary(root, out) {
+        la _ = 0
+    } ellers {
+        la platform = platform_name()
+        hvis platform == "" { platform = "?" }
+        linje("")
+        linje("=== Kunne ikkje skaffe norscode_native utan C/Python ===")
+        linje("Legg norscode-" + platform + " i bootstrap/stage0/ eller publiser ein release med ferdig native seed.")
+        returner 1
+    }
+
+    hvis smoke_check(root, out) og runtime_gap_check(root, out) {
+        linje("Klar: native runtime er materialisert utan C/Python.")
+        returner 0
+    }
+
+    hvis runtime_gap_enabled() {
+        linje("Feil: norscode_native feila runtime-gap-gate")
+    } ellers {
+        linje("Feil: norscode_native feila røyktest")
+    }
+    returner 1
+}
+
+funksjon start() -> heiltall {
+    returner main()
+}
