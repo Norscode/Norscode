@@ -14,10 +14,18 @@ if [ "${NC_CI:-0}" = "1" ] && [ "${NC_VERBOSE:-0}" = "0" ]; then
     export NC_VERBOSE
 fi
 
+NC_NATIVE_PATH="${NC_NATIVE:-$ROOT/dist/norscode_native}"
+if [ -x "$NC_NATIVE_PATH" ]; then
+    NC_NATIVE_OK=1
+else
+    NC_NATIVE_OK=0
+fi
+
 exec env \
   NORSCODE_ENABLE_EXEC_PROSESS=1 \
   NORSCODE_ROOT="$ROOT" \
-  NC_NATIVE="${NC_NATIVE:-$ROOT/dist/norscode_native}" \
+  NC_NATIVE="$NC_NATIVE_PATH" \
+  NC_NATIVE_OK="$NC_NATIVE_OK" \
   HYBRID_COMPILE="${HYBRID_COMPILE:-$ROOT/tools/compile_with_hybrid_bundle_v9400.sh}" \
   TESTS_DIR="${TESTS_DIR:-$ROOT/tests}" \
   NC_TEST_TMPDIR="${NC_TEST_TMPDIR:-$ROOT/build/nc-test-tmp}" \
