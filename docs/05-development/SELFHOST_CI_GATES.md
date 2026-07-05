@@ -49,6 +49,14 @@ CI bør òg ha små, raske testar for:
 - ELF self-compile-paritet på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
 - samla driftsvakt via `tools/selfhost_drift_guard.sh`
 
+## Wrapper-policy
+
+Norscode eig verktøylogikken i `.no`-filene. Shell-filene under `tools/` skal vere tynne
+kompatibilitetslag for CI, plattformdeteksjon og kommandoar som stage0-seeden enno ikkje
+kan utføre sjølv, særleg prosesskøyring. Dei skal ikkje gjere portar grøne ved å hoppe over
+arbeid; når dei fell tilbake frå `.no`, skal dei køyre den same konkrete verifikasjonen i
+shell og feile på reelle avvik.
+
 For full CI-sjekk:
 
 ```bash

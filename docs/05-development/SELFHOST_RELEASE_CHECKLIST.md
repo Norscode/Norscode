@@ -11,6 +11,7 @@ Målet er å gjere release, installasjon og rollback føreseieleg utan å dra in
 - [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
 - [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
 - [ ] inga release-instruks peikar brukaren mot C/Python, `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype
+- [ ] CI-wrapperar under `tools/*.sh` køyrer reelle kontrollar og skjuler ikkje manglande stage0-evner som grøne hopp-over-steg
 
 ## Bygg release
 
