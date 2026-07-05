@@ -21,7 +21,6 @@ EOF
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 ICON_DIR="$ROOT_DIR/frontend/assets/icons"
-MARK_RENDERER="$ROOT_DIR/tools/render-norscode-mark.swift"
 BUNDLE_DIR="$HOME/Applications/Norscode File Types.app"
 SKIP_REGISTER=usann
 
