@@ -1,5 +1,6 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+# Tynn wrapper: Windows app-layout ligg i tools/build-windows-app-layout.no.
+set -eu
 
 usage() {
   cat >&2 <<'EOF'
@@ -10,7 +11,7 @@ Standard output: build/windows-app/Norscode/
 EOF
 }
 
-ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT_ROOT="$ROOT_DIR/build/windows-app"
 APP_NAME="Norscode"
 EXE_PATH=""
@@ -43,69 +44,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-if [ -z "$EXE_PATH" ]; then
-  printf 'Feil: manglar path til Windows-native .exe\n' >&2
-  exit 1
-fi
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT_DIR"
+export NORSCODE_WINDOWS_LAYOUT_OUT="$OUT_ROOT"
+export NORSCODE_WINDOWS_LAYOUT_NAME="$APP_NAME"
+export NORSCODE_WINDOWS_EXE_PATH="$EXE_PATH"
 
-case "$OUT_ROOT" in
-  /*) ;;
-  *) OUT_ROOT="$ROOT_DIR/$OUT_ROOT" ;;
-esac
-
-case "$EXE_PATH" in
-  /*) ;;
-  *) EXE_PATH="$ROOT_DIR/$EXE_PATH" ;;
-esac
-
-if [ ! -f "$EXE_PATH" ]; then
-  printf 'Feil: fann ikkje .exe-artefakt: %s\n' "$EXE_PATH" >&2
-  exit 1
-fi
-
-APP_DIR="$OUT_ROOT/$APP_NAME"
-BIN_DIR="$APP_DIR/bin"
-DOC_DIR="$APP_DIR/docs"
-
-rm -rf "$APP_DIR"
-mkdir -p "$BIN_DIR" "$DOC_DIR"
-
-cp "$EXE_PATH" "$BIN_DIR/norscode.exe"
-cp "$EXE_PATH" "$BIN_DIR/nc.exe"
-
-cat > "$BIN_DIR/nc.cmd" <<'EOF'
-@echo off
-set SCRIPT_DIR=%~dp0
-"%SCRIPT_DIR%norscode.exe" %*
-EOF
-
-cat > "$BIN_DIR/nc.ps1" <<'EOF'
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-& (Join-Path $ScriptDir "norscode.exe") @args
-EOF
-
-cat > "$APP_DIR/README.txt" <<EOF
-Norscode for Windows
-====================
-
-App-layout:
-- bin\\norscode.exe
-- bin\\nc.exe
-- bin\\nc.cmd
-- bin\\nc.ps1
-
-Køyring:
-- PowerShell: .\\bin\\nc.ps1 --help
-- CMD: .\\bin\\nc.cmd --help
-- Direkte: .\\bin\\norscode.exe --help
-EOF
-
-cat > "$DOC_DIR/LAYOUT.txt" <<EOF
-Windows app-layout for Norscode
-===============================
-
-Denne katalogen er den første app-layouten for Windows-sporet.
-Han gjer ZIP-distribusjonen meir stabil enn ein laus .exe, og er grunnlaget for seinare installasjon og oppgradering.
-EOF
-
-printf 'Bygde Windows app-layout: %s\n' "$APP_DIR"
+exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/build-windows-app-layout.no"
