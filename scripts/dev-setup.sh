@@ -1,19 +1,11 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/usr/bin/env sh
+# Tynn wrapper: utvikleroppsett ligg i scripts/dev-setup.no.
+set -eu
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Standard installasjon: native bootstrap-kompilator
-bash tools/build-bootstrap-binary.sh
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT_DIR"
 
-echo
-echo "Norscode er klar."
-echo "Kjør CLI med: ./bin/nc run app.no"
-echo ""
-echo "Tips:"
-echo "  ./bin/nc run app.no          # kjør en Norscode-fil"
-echo "  ./bin/nc build app.no ut.elf # bygg til native binary"
-echo "  ./bin/nc test                # kjør tester"
-echo ""
-echo "For å jobbe på kompilatoren selv: bruk native bootstrap-verktøyene i tools/"
+exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/scripts/dev-setup.no"
