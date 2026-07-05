@@ -5,6 +5,15 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
+if [ -x "$ROOT/dist/norscode_native" ]; then
+  _tmp="$(mktemp "${TMPDIR:-/tmp}/nc_dist_smoke_XXXXXX.no")"
+  printf 'funksjon start() { returner 0 }\n' > "$_tmp"
+  NORSCODE_CMD=run NORSCODE_FILE="$_tmp" "$ROOT/dist/norscode_native" >/dev/null
+  rm -f "$_tmp"
+  printf 'dist/norscode_native er allereie bygget (%s KB)\n' "$(( $(wc -c < "$ROOT/dist/norscode_native") / 1024 ))"
+  exit 0
+fi
+
 if [ -n "${NORSCODE_NATIVE_BIN:-}" ] && [ ! -x "$ROOT/dist/norscode_native" ] && [ -x "$NORSCODE_NATIVE_BIN" ]; then
   mkdir -p "$ROOT/dist"
   rm -f "$ROOT/dist/norscode_native"
