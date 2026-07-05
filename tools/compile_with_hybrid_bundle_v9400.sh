@@ -237,7 +237,11 @@ if [ "$NC_IMPORT_BUNDLE_DEPTH" -lt "$NC_IMPORT_BUNDLE_MAX_DEPTH" ] && [ -f "$OUT
       fi
       [ -f "$import_abs" ] || continue
       import_out="$TMP_IMPORT_DIR/${import_mod//./_}.ncb.json"
-      NC_IMPORT_BUNDLE_DEPTH=$((NC_IMPORT_BUNDLE_DEPTH + 1)) NC_IMPORT_BUNDLE_MAX_DEPTH="$NC_IMPORT_BUNDLE_MAX_DEPTH" "$0" "$ROOT" "$import_abs" "$import_out" "$import_mod" "$PROJECT_ROOT" >/dev/null
+      recursive_args=()
+      if [ "$FROM_NO" = "1" ]; then
+        recursive_args+=(--from-no)
+      fi
+      NC_IMPORT_BUNDLE_DEPTH=$((NC_IMPORT_BUNDLE_DEPTH + 1)) NC_IMPORT_BUNDLE_MAX_DEPTH="$NC_IMPORT_BUNDLE_MAX_DEPTH" "$0" "${recursive_args[@]}" "$ROOT" "$import_abs" "$import_out" "$import_mod" "$PROJECT_ROOT" >/dev/null
       if [ -f "$import_out" ]; then
         import_jsons+=("$import_out")
       fi

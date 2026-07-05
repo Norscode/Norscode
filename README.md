@@ -59,9 +59,16 @@ Snarvegar:
 
 ## Verifisering
 
-- `./bin/nc test` går grønt
+- `./bin/nc test` går grønt med reelle tal for bestått/hoppa/feila testar
 - normal verifisering går grønt via `bash tools/verify_selvstendighet.sh`
 - aktiv verktøyflate er fri for Python og C; historisk C ligg berre under `archive/`
+- aktiv ikkje-Norscode plattformkode er avgrensa til dokumenterte OS-bruer under `platform/`
+
+## Selvstendighet akkurat no
+
+Per siste grøne `main` er normalflata sjølvstendig: utvikling, test, releasepakke og selfhost-gater køyrer utan Python/C som aktiv arbeidsveg. Shell-wrapperar finst framleis for operativsystemgrensene og for fallback når native runtime manglar `exec_prosess`, men eigarlogikken ligg i `.no`-filer.
+
+Den einaste aktive kjeldebrua utanfor Norscode er macOS AppKit/WebKit-hosten i `platform/macos/window-host/Main.swift`, med `Main.no` og Norscode-byggar ved sida av.
 
 ## Lisens
 
