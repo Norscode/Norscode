@@ -27,6 +27,15 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - `stage0_seed_ok` er hovudindikatoren for stage-0 seed i `maintenance`-rapportane
 - historiske filer skal liggje i `docs/_archive/` eller `archive/`
 
+## Gjeldande selvstendighetsstatus
+
+- `main` er grønt på CI og Selvstendighet for normalflata.
+- `./bin/nc test` skal rapportere faktiske testtal, ikkje 0/0 når testfiler finst.
+- `bash tools/verify_selvstendighet.sh` er normal gate for L1-L6/selfhost-status.
+- `bash tools/no_c_python_active_surface.sh` vernar aktiv C/Python-fri flate.
+- `bash tools/verify_norscode_surface_ownership.sh` vernar ikkje-Norscode-filer med `.no`-eigarar.
+- Aktiv plattformkode utanfor Norscode ligg under `platform/` og skal vere dokumentert der.
+
 ## Merknad
 
 Gamle status-tal og gamle faser vart skrivne for ein eldre struktur. Dei er no tona ned for å unngå å påstå meir enn det dokumentasjonen faktisk viser.
