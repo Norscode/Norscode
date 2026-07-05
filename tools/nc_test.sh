@@ -67,7 +67,7 @@ _is_slow() {
 
 _is_native_unsupported() {
     case "$1" in
-        test_reactive*|test_islands*|test_html_state*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_selfhost_bytecode*|test_selfhost_bridge*|test_snapshot*) return 0 ;;
+        test_reactive*|test_islands*|test_html_state*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
         test_advanced_example.no|test_ai.no|test_api_advanced.no|test_api_server.no|test_api_simple_native.no|test_async_http.no|test_struct_example.no|test_wasm.no) return 0 ;;
         test_cache.no|test_chunk_2000.no|test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|test_dependency_import.no|test_http_helpers.no|test_ir_debug.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
         test_selfhost_phase2_ffi_smoke.no|test_selfhost_phase2_regression.no|test_selfhost_phase2_smoke.no|test_selfhost_phase2_stdlib_usecases.no|test_stdlib_status_matrix.no) return 0 ;;
