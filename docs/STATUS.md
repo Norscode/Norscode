@@ -36,7 +36,7 @@ Historiske release-notat under `.github/releases/` kan framleis vise tal som `27
 ## Status for FastAPI-paritet i scaffold (fase 1)
 
 - **Dato:** 2026-06-18
-- **Omfang:** `tools/startproject.sh` og `tools/startapp.sh`
+- **Omfang:** `nc startproject` / `tools/startproject.no` og `nc startapp` / `tools/startapp.no`
 
 ### Fullført
 
