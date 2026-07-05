@@ -46,7 +46,7 @@ CI bør òg ha små, raske testar for:
 
 - installasjon og release
 - `--version`
-- ELF self-compile-paritet på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
+- ELF stage-0-kandidat på Linux x86_64, som byggjer Gen1-ELF og lastar han opp som artifact
 - samla driftsvakt via `tools/selfhost_drift_guard.sh`
 
 ## Wrapper-policy
@@ -56,6 +56,13 @@ kompatibilitetslag for CI, plattformdeteksjon og kommandoar som stage0-seeden en
 kan utføre sjølv, særleg prosesskøyring. Dei skal ikkje gjere portar grøne ved å hoppe over
 arbeid; når dei fell tilbake frå `.no`, skal dei køyre den same konkrete verifikasjonen i
 shell og feile på reelle avvik.
+
+`tools/selfcompile_stage0_elf.sh` har to nivå:
+
+- Standard CI-nivå byggjer og verifiserer Gen1 stage-0-ELF-kandidaten.
+- Djupt ELF-til-ELF-løp kan køyrast manuelt med `NC_OM6B_RUN_STAGE0=1`, men er ikkje ein
+  obligatorisk grøn gate før den native ELF-runtimeflata kan køyre kall, miljø og filskriving
+  for `selfhost.elf_compile_driver.start`.
 
 For full CI-sjekk:
 
@@ -71,7 +78,7 @@ CI skal feile dersom:
 - vedlikehaldsløypa feiler når vedlikehald køyrer
 - release-/installasjonstest feiler
 - workflow-policy eller paritetsjekkar viser avvik
-- ELF self-compile-paritet viser avvik
+- ELF stage-0-kandidaten ikkje kan byggjast
 
 ## Verifikasjon
 
