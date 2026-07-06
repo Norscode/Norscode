@@ -69,7 +69,7 @@ _is_native_unsupported() {
     case "$1" in
         test_reactive*|test_islands*|test_html_state*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
         test_advanced_example.no|test_ai.no|test_api_advanced.no|test_api_server.no|test_api_simple_native.no|test_async_http.no|test_struct_example.no|test_wasm.no) return 0 ;;
-        test_cache.no|test_chunk_2000.no|test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|test_dependency_import.no|test_http_helpers.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
+        test_cache.no|test_chunk_2000.no|test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|test_http_helpers.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
         test_selfhost_phase2_ffi_smoke.no|test_selfhost_phase2_regression.no|test_selfhost_phase2_smoke.no|test_selfhost_phase2_stdlib_usecases.no|test_stdlib_status_matrix.no) return 0 ;;
         test_frontend.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_io_error.no|test_native_ui.no|test_native_ui_errors.no|test_secrets.no) return 0 ;;
         test_httpserver_vm_dispatch.no|test_httpserver_vm_health_log.no|test_httpserver_vm_response_helpers.no) return 0 ;;
@@ -85,6 +85,19 @@ _run_one() {
         /*) _abs_file="$_file" ;;
         *) _abs_file="$ROOT/$_file" ;;
     esac
+    if [ "$(basename "$_abs_file")" = "test_dependency_import.no" ]; then
+        _hybrid="${HYBRID_COMPILE:-$ROOT/tools/compile_with_hybrid_bundle_v9400.sh}"
+        _tmpdir="${NC_TEST_TMPDIR:-$ROOT/build/nc-test-tmp}"
+        _ncb="$_tmpdir/test_dependency_import.ncb.json"
+        mkdir -p "$_tmpdir"
+        if "$_hybrid" --from-no "$ROOT" "$_abs_file" "$_ncb" __main__ >/dev/null 2>&1; then
+            env NORSCODE_CMD=run NORSCODE_FILE="$ROOT/selfhost/vm_executor.no" NORSCODE_NCB_FILE="$_ncb" NORSCODE_VM_SOURCE=1 NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH"
+            _rc=$?
+            rm -f "$_ncb"
+            return "$_rc"
+        fi
+        rm -f "$_ncb"
+    fi
     env NORSCODE_CMD=run NORSCODE_FILE="$_abs_file" NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH"
 }
 
