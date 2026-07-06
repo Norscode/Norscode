@@ -15,4 +15,6 @@ export NORSCODE_ROOT="$ROOT"
 export NORSCODE_NCB_NORMALIZE_IN="$1"
 export NORSCODE_NCB_NORMALIZE_OUT="$2"
 
+mkdir -p "$(dirname -- "$2")"
+
 exec "$ROOT/bin/nc" run "$ROOT/tools/ncb_normalize_builtin_aliases_v802.no"
