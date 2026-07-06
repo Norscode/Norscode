@@ -138,6 +138,9 @@ else
         total=$((total + 1))
         if _is_native_unsupported "$_name"; then
             skip=$((skip + 1))
+            if [ "${NC_VERBOSE:-0}" = "1" ]; then
+                printf '  SKIP %s (native-unsupported)\n' "${_name%.no}"
+            fi
             continue
         fi
         if _run_one "$_file" >/dev/null 2>&1; then
