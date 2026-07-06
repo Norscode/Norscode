@@ -15,4 +15,5 @@ export NORSCODE_ROOT="$ROOT"
 export NORSCODE_BACKEND_OUTPUT_A="$1"
 export NORSCODE_BACKEND_OUTPUT_B="$2"
 
+mkdir -p "$ROOT/reports"
 exec "$ROOT/bin/nc" run "$ROOT/tools/backend_ordering_validator.no"
