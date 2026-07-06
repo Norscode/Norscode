@@ -15,4 +15,5 @@ export NORSCODE_ROOT="$ROOT"
 export NORSCODE_SEMANTIC_A="$1"
 export NORSCODE_SEMANTIC_B="$2"
 
+mkdir -p "$ROOT/reports"
 exec "$ROOT/bin/nc" run "$ROOT/tools/semantic_diff_analyzer.no"
