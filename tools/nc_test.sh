@@ -60,7 +60,7 @@ fi
 
 _is_slow() {
     case "$1" in
-        test_chunk_*|test_file_io_large.no|test_selfhost.no) return 0 ;;
+        test_chunk_2000.no|test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|test_selfhost.no) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -136,6 +136,13 @@ else
             continue
         fi
         total=$((total + 1))
+        if [ "${NC_SLOW_TESTS:-0}" != "1" ] && _is_slow "$_name"; then
+            skip=$((skip + 1))
+            if [ "${NC_VERBOSE:-0}" = "1" ]; then
+                printf '  SKIP %s (slow)\n' "${_name%.no}"
+            fi
+            continue
+        fi
         if _is_native_unsupported "$_name"; then
             skip=$((skip + 1))
             if [ "${NC_VERBOSE:-0}" = "1" ]; then
