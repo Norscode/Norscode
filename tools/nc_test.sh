@@ -81,7 +81,11 @@ _is_native_unsupported() {
 
 _run_one() {
     _file="$1"
-    env NORSCODE_CMD=run NORSCODE_FILE="$_file" NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH"
+    case "$_file" in
+        /*) _abs_file="$_file" ;;
+        *) _abs_file="$ROOT/$_file" ;;
+    esac
+    env NORSCODE_CMD=run NORSCODE_FILE="$_abs_file" NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH"
 }
 
 pass=0

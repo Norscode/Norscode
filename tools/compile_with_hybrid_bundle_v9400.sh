@@ -235,6 +235,30 @@ if [ "$NC_IMPORT_BUNDLE_DEPTH" -lt "$NC_IMPORT_BUNDLE_MAX_DEPTH" ] && [ -f "$OUT
       if [ ! -f "$import_abs" ]; then
         import_abs="$ROOT/$import_path"
       fi
+      if [ ! -f "$import_abs" ]; then
+        package_dir="$PROJECT_ROOT/packages/${import_mod//.//}"
+        package_manifest="$package_dir/norsklang.toml"
+        if [ -f "$package_manifest" ]; then
+          package_entry="$(
+            sed -n "s/^[[:space:]]*entry[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$package_manifest" | head -n 1
+          )"
+          if [ -n "$package_entry" ] && [ -f "$package_dir/$package_entry" ]; then
+            import_abs="$package_dir/$package_entry"
+          fi
+        fi
+      fi
+      if [ ! -f "$import_abs" ]; then
+        package_dir="$ROOT/packages/${import_mod//.//}"
+        package_manifest="$package_dir/norsklang.toml"
+        if [ -f "$package_manifest" ]; then
+          package_entry="$(
+            sed -n "s/^[[:space:]]*entry[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$package_manifest" | head -n 1
+          )"
+          if [ -n "$package_entry" ] && [ -f "$package_dir/$package_entry" ]; then
+            import_abs="$package_dir/$package_entry"
+          fi
+        fi
+      fi
       [ -f "$import_abs" ] || continue
       import_out="$TMP_IMPORT_DIR/${import_mod//./_}.ncb.json"
       recursive_args=()
