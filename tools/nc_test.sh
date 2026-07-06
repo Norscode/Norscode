@@ -71,7 +71,7 @@ _is_native_unsupported() {
         test_advanced_example.no|test_ai.no|test_api_advanced.no|test_api_server.no|test_api_simple_native.no|test_async_http.no|test_struct_example.no|test_wasm.no) return 0 ;;
         test_cache.no|test_chunk_2000.no|test_chunk_end.no|test_chunk_full.no|test_chunk_tail.no|test_http_helpers.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
         test_selfhost_phase2_ffi_smoke.no|test_selfhost_phase2_regression.no|test_selfhost_phase2_smoke.no|test_selfhost_phase2_stdlib_usecases.no) return 0 ;;
-        test_frontend.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_io_error.no|test_native_ui.no|test_native_ui_errors.no|test_secrets.no) return 0 ;;
+        test_frontend.no|test_io_error.no|test_native_ui.no|test_native_ui_errors.no|test_secrets.no) return 0 ;;
         test_httpserver_vm_dispatch.no|test_httpserver_vm_health_log.no|test_httpserver_vm_response_helpers.no) return 0 ;;
         test_web_api_versioning.no|test_web_api_versioning_example.no|test_web_auth.no|test_csrf.no|test_web_cookies.no|test_web_openapi.no|test_web_openapi_auth.no|test_web_openapi_errors.no|test_web_openapi_schema.no|test_web_request_response.no|test_web_path.no|test_web_roles.no|test_web_sanitize.no|test_web_dependency_example.no|test_web_example.no|test_web_handle_request_fallback.no|test_web_roles_example.no|test_web_validation.no|test_web_validation_example.no) return 0 ;;
         test_security.no|test_stil.no|test_selfhost.no) return 0 ;;
@@ -81,7 +81,7 @@ _is_native_unsupported() {
 
 _uses_source_vm() {
     case "$1" in
-        test_dependency_import.no|test_stdlib_status_matrix.no) return 0 ;;
+        test_dependency_import.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_stdlib_status_matrix.no) return 0 ;;
         *) return 1 ;;
     esac
 }
