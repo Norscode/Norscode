@@ -15,4 +15,6 @@ export NORSCODE_ROOT="$ROOT"
 export NORSCODE_AST_INPUT="$1"
 export NORSCODE_AST_OUTPUT="$2"
 
+mkdir -p "$(dirname -- "$2")"
+
 exec "$ROOT/bin/nc" run "$ROOT/tools/ast_canonical_dump.no"
