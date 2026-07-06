@@ -15,4 +15,6 @@ export NORSCODE_ROOT="$ROOT"
 export NORSCODE_SYMBOL_INPUT="$1"
 export NORSCODE_SYMBOL_OUTPUT="$2"
 
+mkdir -p "$(dirname -- "$2")"
+
 exec "$ROOT/bin/nc" run "$ROOT/tools/symbol_table_serializer.no"
