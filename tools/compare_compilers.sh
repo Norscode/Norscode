@@ -14,5 +14,9 @@ export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
 export NORSCODE_ROOT="$ROOT"
 export NORSCODE_COMPILER_A="$1"
 export NORSCODE_COMPILER_B="$2"
+set -- $(shasum -a 256 "$1")
+export NORSCODE_COMPILER_SHA_A="$1"
+set -- $(shasum -a 256 "$NORSCODE_COMPILER_B")
+export NORSCODE_COMPILER_SHA_B="$1"
 
 exec "$ROOT/bin/nc" run "$ROOT/tools/compare_compilers.no"
