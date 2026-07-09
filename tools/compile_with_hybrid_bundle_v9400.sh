@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Norscode-first wrapper: hybrid compile-entry ligg i tools/compile_with_hybrid_bundle_v9400.no.
+# Bash-delen under er avgrensa reserveveg for Node-basert import-bundling.
 set -euo pipefail
 FROM_NO=0
 if [ "${1:-}" = "--from-no" ]; then
@@ -13,7 +15,7 @@ PROJECT_ROOT="${5:-$ROOT}"
 NODE_BIN="${NODE_BIN:-}"
 NC_NATIVE_BIN="${NORSCODE_NATIVE_BIN:-$ROOT/dist/norscode_native}"
 if [ -z "$SRC" ] || [ -z "$OUT" ]; then
-  echo "bruk: compile_with_hybrid_bundle_v9400.sh <repo-root> <src.no> <out.ncb.json> [modul]" >&2
+  echo "Bruk: NORSCODE_HYBRID_ROOT=<repo-root> NORSCODE_HYBRID_SRC=<src.no> NORSCODE_HYBRID_OUT=<out.ncb.json> ./bin/nc run tools/compile_with_hybrid_bundle_v9400.no" >&2
   exit 1
 fi
 
@@ -37,8 +39,8 @@ fi
 if [ -z "$NODE_BIN" ]; then
   if command -v node >/dev/null 2>&1; then
     NODE_BIN="$(command -v node)"
-  elif [ -x "/Users/jansteinar/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]; then
-    NODE_BIN="/Users/jansteinar/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]; then
+    NODE_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
   else
     echo "feil: fann ikkje node. Sett NODE_BIN eller installer node i PATH." >&2
     exit 1
@@ -48,7 +50,54 @@ cd "$PROJECT_ROOT"
 NC_IMPORT_BUNDLE_DEPTH="${NC_IMPORT_BUNDLE_DEPTH:-0}"
 NC_IMPORT_BUNDLE_MAX_DEPTH="${NC_IMPORT_BUNDLE_MAX_DEPTH:-4}"
 mkdir -p "$(dirname "$OUT")"
+
+collect_import_specs() {
+  _file="$1"
+  _seen="
+"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    if [[ "$_line" =~ ^[[:space:]]*(bruk|import)[[:space:]]+([^[:space:]]+) ]]; then
+      _mod="${BASH_REMATCH[2]}"
+      case "$_seen" in
+        *"
+$_mod
+"*) ;;
+        *)
+          printf '%s\n' "$_mod"
+          _seen="${_seen}${_mod}
+"
+          ;;
+      esac
+    fi
+  done < "$_file"
+}
+
+package_entry_from_manifest() {
+  _manifest="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      [[:space:]]*entry[[:space:]]*=*|entry[[:space:]]*=*)
+        _value="${_line#*=}"
+        while :; do
+          case "$_value" in
+            " "*) _value="${_value# }" ;;
+            "	"*) _value="${_value#	}" ;;
+            *) break ;;
+          esac
+        done
+        _quote="${_value:0:1}"
+        if [ "$_quote" = '"' ] || [ "$_quote" = "'" ]; then
+          _value="${_value:1}"
+          printf '%s\n' "${_value%%"$_quote"*}"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$_manifest"
+}
+
 env NORSCODE_CMD=compile \
+  NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" \
   NORSCODE_FILE="$SRC" \
   NORSCODE_OUTPUT="$OUT" \
   NORSCODE_MODULE="$MODUL" \
@@ -212,12 +261,7 @@ if [ "$NC_IMPORT_BUNDLE_DEPTH" -lt "$NC_IMPORT_BUNDLE_MAX_DEPTH" ] && [ -f "$OUT
   }
   trap cleanup_imports EXIT
 
-  import_specs="$(
-    sed -n \
-      -e 's/^[[:space:]]*bruk[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' \
-      -e 's/^[[:space:]]*import[[:space:]][[:space:]]*\([^[:space:]]*\).*/\1/p' \
-      "$SRC" | sort -u
-  )"
+  import_specs="$(collect_import_specs "$SRC")"
 
   import_jsons=()
   if [ -n "$import_specs" ]; then
@@ -239,9 +283,7 @@ if [ "$NC_IMPORT_BUNDLE_DEPTH" -lt "$NC_IMPORT_BUNDLE_MAX_DEPTH" ] && [ -f "$OUT
         package_dir="$PROJECT_ROOT/packages/${import_mod//.//}"
         package_manifest="$package_dir/norsklang.toml"
         if [ -f "$package_manifest" ]; then
-          package_entry="$(
-            sed -n "s/^[[:space:]]*entry[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$package_manifest" | head -n 1
-          )"
+          package_entry="$(package_entry_from_manifest "$package_manifest")"
           if [ -n "$package_entry" ] && [ -f "$package_dir/$package_entry" ]; then
             import_abs="$package_dir/$package_entry"
           fi
@@ -251,9 +293,7 @@ if [ "$NC_IMPORT_BUNDLE_DEPTH" -lt "$NC_IMPORT_BUNDLE_MAX_DEPTH" ] && [ -f "$OUT
         package_dir="$ROOT/packages/${import_mod//.//}"
         package_manifest="$package_dir/norsklang.toml"
         if [ -f "$package_manifest" ]; then
-          package_entry="$(
-            sed -n "s/^[[:space:]]*entry[[:space:]]*=[[:space:]]*[\"']\\([^\"']*\\)[\"'].*/\\1/p" "$package_manifest" | head -n 1
-          )"
+          package_entry="$(package_entry_from_manifest "$package_manifest")"
           if [ -n "$package_entry" ] && [ -f "$package_dir/$package_entry" ]; then
             import_abs="$package_dir/$package_entry"
           fi

@@ -1,8 +1,8 @@
-# Norscode Lane Map
+# Norscode løypekart
 
 Dette dokumentet forklarer kva løype du skal bruke for ulike typar arbeid.
 
-## Normal Brukerløype
+## Normal brukarløype
 
 Bruk denne når du skriv eller køyrer Norscode:
 
@@ -14,7 +14,7 @@ Bruk denne når du skriv eller køyrer Norscode:
 
 Denne løypa skal vere fri for Python og C.
 
-## Ny Funksjonalitet
+## Ny funksjonalitet
 
 Bruk denne når du legg til eller endrar Norscode-funksjonar:
 
@@ -27,7 +27,7 @@ Ved større endringar:
 
 ```bash
 ./bin/nc selfhost-bootstrap-gate
-./bin/nc verify-selvstendighet
+./bin/nc selvstendighet
 ```
 
 ## Server
@@ -64,7 +64,7 @@ Bruk denne for status og rapport:
 ./bin/nc maintenance report-json
 ```
 
-## Release Og CI
+## Release og CI
 
 Bruk desse dokumenta:
 
@@ -74,9 +74,13 @@ Bruk desse dokumenta:
 Vanleg CI-gate:
 
 ```bash
+./bin/nc release-preflight
+./bin/nc release-preflight --strict
+./bin/nc local-green
+./bin/nc local-green --strict
 ./bin/nc ci
 ```
 
-## Legacy
+## Historikk
 
 Historiske C- og Python-spor høyrer til i `archive/`. Dei skal ikkje brukast som normal utviklings-, bygg-, release- eller CI-løype.

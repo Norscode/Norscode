@@ -1,14 +1,19 @@
-# Selfhost Release Checklist
+# Selfhost release-sjekkliste
 
-Målet er å gjere release, installasjon og rollback føreseieleg utan å dra inn vedlikehald eller bootstrap i normalflyten.
+Målet er å gjere release, installasjon og tilbakerulling føreseieleg utan å dra inn vedlikehald eller bootstrap i normalflyten.
 
 ## Før release
 
 - [ ] `./bin/nc --version` viser rett versjon
+- [ ] lokal preflight går grønt: `./bin/nc release-preflight`
+- [ ] streng GitHub/release-preflight går grønt: `./bin/nc release-preflight --strict`
+- [ ] samla lokal grønnliste går grønt: `./bin/nc local-green`
+- [ ] samla streng grønnliste går grønt: `./bin/nc local-green --strict`
 - [ ] relevant release- og installasjonstest går grønt
-- [ ] release-pakke kan byggast med `bash package-release.sh <versjon>`
+- [ ] release-pakke kan byggast med `./bin/nc package-release <versjon>`
+- [ ] stage-0 release-artefaktar kan byggast med `./bin/nc stage0-release-assets --platform <plattform>`
 - [ ] release- og installasjonsflata krev ikkje C-verktøykjede i normal drift
-- [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
+- [ ] `./bin/nc selfhost-drift-guard` går grønt før release
 - [ ] Linux Gen1 stage-0-ELF-kandidat blir bygd grønt i GitHub CI
 - [ ] Full Linux ELF self-compile-paritet med `NC_OM6B_RUN_STAGE0=1` er anten grøn eller
       eksplisitt vurdert som ikkje-releaseblokkerande for denne releasen
@@ -18,23 +23,25 @@ Målet er å gjere release, installasjon og rollback føreseieleg utan å dra in
 ## Bygg release
 
 ```bash
-bash package-release.sh <versjon>
+./bin/nc package-release <versjon>
 ```
 
 Verifiser:
 
 - [ ] `.tar.gz`-arkivet er oppretta
 - [ ] tilsvarande `.sha256` er oppretta
+- [ ] eventuelle stage-0-artefaktar ligg under `release-artifacts/stage0/` eller valt `--out-dir`, ikkje i repo-rota
+- [ ] stage-0 `.sha256` er flyttbar og viser berre filnamnet, ikkje lokal absolutt sti
 - [ ] sjekksum stemmer med arkivet
 - [ ] release-arkivet inneheld ikkje C som normal produktavhengigheit
 - [ ] release-dokumentasjonen peikar på `bin/nc` / `dist/norscode_native`, ikkje historiske vedlikehaldsløyper
 - [ ] nye funksjonar er sjekka med `./bin/nc feature-check [fil.no ...]`
-- [ ] release/install-flaten krever ikke C-verktøykjede
+- [ ] release/install-flaten krev ikkje C-verktøykjede
 
 ## Installer release
 
 ```bash
-bash tools/install-release.sh release-artifacts/norscode-language-<versjon>.tar.gz --prefix /srv/norscode
+./bin/nc install-release release-artifacts/norscode-language-<versjon>.tar.gz --prefix /srv/norscode
 ```
 
 Verifiser:
@@ -44,17 +51,17 @@ Verifiser:
 - [ ] installert `bin/nc` kan køyre normal kommando i installert miljø
 - [ ] installert release krev ikkje C-verktøykjede for normal bruk
 
-## Rollback
+## Tilbakerulling
 
 Viss ei release må rullast tilbake:
 
-1. Pek `current` tilbake til forrige stabile release.
+1. Peik `current` tilbake til førre stabile release.
 2. Køyr installert `nc --version`.
 3. Køyr installert `nc doctor`.
-4. Bekreft at tenesta eller brukarflyten er tilbake på forrige stabile versjon.
+4. Stadfest at tenesta eller brukarflyten er tilbake på førre stabile versjon.
 
 ## Ferdig når
 
 - [ ] Release kan byggjast, verifiserast og installerast mekanisk utan å referere til vedlikehaldsløyper i normal bruksdokumentasjon
-- [ ] Rollback er dokumentert og repeterbar
+- [ ] Tilbakerulling er dokumentert og repeterbar
 - [ ] Brukaren treng ikkje utviklarhjelp for normal installasjon

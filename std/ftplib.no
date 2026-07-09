@@ -1,7 +1,8 @@
 # ftplib.no — FTP-klient
 # Python: ftplib
 #
-# FTP-operasjonar via exec_prosess (curl eller ftp-kommando).
+# FTP-operasjonar med Norscode socket først for kontrollkanalen, og curl som
+# reserveveg for datakanal/filer til runtime får komplett FTP-dataflyt.
 # Støttar opplasting, nedlasting, listning og katalogoperasjonar.
 #
 # FTP-tilstand: ordbok_tekst
@@ -20,6 +21,12 @@
 #   ftp.retrbinary(f, "fil.txt", "/lokal/fil.txt")
 #   ftp.quit(f)
 
+bruk std.socket som sok
+
+funksjon _shell(verdi: tekst) -> tekst {
+    returner "'" + builtin.replace(verdi, "'", "'\"'\"'") + "'"
+}
+
 funksjon connect(vert: tekst, port: heltall) -> ordbok_tekst {
     la f: ordbok_tekst = {}
     f["vert"]     = vert
@@ -29,8 +36,13 @@ funksjon connect(vert: tekst, port: heltall) -> ordbok_tekst {
     f["passiv"]   = "sann"
     f["tilkopla"] = "usann"
     f["gjeldande_katalog"] = "/"
+    hvis _ftp_socket_kan_kople(f) {
+        f["tilkopla"] = "sann"
+        returner f
+    }
     prøv {
-        la res = builtin.exec_prosess("curl --connect-timeout 5 -s ftp://" + vert + ":" + tekst_fra_heltall(port) + "/ 2>&1 | head -1")
+        la url: tekst = "ftp://" + vert + ":" + tekst_fra_heltall(port) + "/"
+        la res = builtin.exec_prosess("curl --connect-timeout 5 -s " + _shell(url) + " 2>&1")
         f["tilkopla"] = "sann"
     } fang (e) {}
     returner f
@@ -43,9 +55,11 @@ funksjon connect_standard(vert: tekst) -> ordbok_tekst {
 funksjon login(f: ordbok_tekst, brukar: tekst, passord: tekst) -> bool {
     f["brukar"]  = brukar
     f["passord"] = passord
+    la svar = _ftp_kommando(f, "")
+    hvis svar != "" { returner _ftp_ok(svar) }
     prøv {
         la url: tekst = "ftp://" + brukar + ":" + passord + "@" + f["vert"] + ":" + f["port"] + "/"
-        la res = builtin.exec_prosess("curl --connect-timeout 5 -s " + url + " 2>&1 | head -1")
+        la res = builtin.exec_prosess("curl --connect-timeout 5 -s " + _shell(url) + " 2>&1")
         returner sann
     } fang (e) {
         returner usann
@@ -65,11 +79,58 @@ funksjon _ftp_url(f: ordbok_tekst, sti: tekst) -> tekst {
     returner "ftp://" + brukar + ":" + passord + "@" + vert + ":" + port + sti
 }
 
+funksjon _ftp_socket_kan_kople(f: ordbok_tekst) -> bool {
+    la s = sok.ny_tcp()
+    prøv {
+        sok.set_timeout(s, 5000)
+        hvis ikkje sok.tilkoble(s, f["vert"], builtin.heltall_fra_tekst(f["port"])) {
+            sok.lukk(s)
+            returner usann
+        }
+        sok.lukk(s)
+        returner sann
+    } fang (e) {
+        sok.lukk(s)
+        returner usann
+    }
+    returner usann
+}
+
+funksjon _ftp_kommando(f: ordbok_tekst, kommando: tekst) -> tekst {
+    la s = sok.ny_tcp()
+    prøv {
+        sok.set_timeout(s, 5000)
+        hvis ikkje sok.tilkoble(s, f["vert"], builtin.heltall_fra_tekst(f["port"])) {
+            sok.lukk(s)
+            returner ""
+        }
+        la svar = sok.motta(s, 4096)
+        la innhald = "USER " + f["brukar"] + "\r\nPASS " + f["passord"] + "\r\n"
+        hvis kommando != "" { innhald = innhald + kommando + "\r\n" }
+        innhald = innhald + "QUIT\r\n"
+        hvis sok.send(s, innhald) < 0 {
+            sok.lukk(s)
+            returner svar
+        }
+        svar = svar + sok.motta(s, 65535)
+        sok.lukk(s)
+        returner svar
+    } fang (e) {
+        sok.lukk(s)
+        returner ""
+    }
+    returner ""
+}
+
+funksjon _ftp_ok(svar: tekst) -> bool {
+    returner _inneheld(svar, "\n230") eller _inneheld(svar, "\n250") eller _inneheld(svar, "\n257") eller _inneheld(svar, "\n213") eller _starter_med(svar, "230") eller _starter_med(svar, "250") eller _starter_med(svar, "257") eller _starter_med(svar, "213")
+}
+
 # List filer i katalog
 funksjon nlst(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
     prøv {
         la url: tekst = _ftp_url(f, katalog)
-        la res = builtin.exec_prosess("curl -s --list-only " + url + " 2>/dev/null")
+        la res = builtin.exec_prosess("curl -s --list-only " + _shell(url) + " 2>/dev/null")
         la linjer = builtin.split(res, "\n")
         la resultat: liste_tekst = []
         la i: heltall = 0
@@ -89,7 +150,7 @@ funksjon nlst(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
 funksjon dir(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
     prøv {
         la url: tekst = _ftp_url(f, katalog)
-        la res = builtin.exec_prosess("curl -s " + url + " 2>/dev/null")
+        la res = builtin.exec_prosess("curl -s " + _shell(url) + " 2>/dev/null")
         la linjer = builtin.split(res, "\n")
         la resultat: liste_tekst = []
         la i: heltall = 0
@@ -109,7 +170,7 @@ funksjon dir(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
 funksjon retrbinary(f: ordbok_tekst, fjern_fil: tekst, lokal_sti: tekst) -> bool {
     prøv {
         la url: tekst = _ftp_url(f, fjern_fil)
-        builtin.exec_prosess("curl -s -o " + lokal_sti + " " + url + " 2>&1")
+        builtin.exec_prosess("curl -s -o " + _shell(lokal_sti) + " " + _shell(url) + " 2>&1")
         returner sann
     } fang (e) {
         returner usann
@@ -121,7 +182,7 @@ funksjon retrbinary(f: ordbok_tekst, fjern_fil: tekst, lokal_sti: tekst) -> bool
 funksjon retrlines(f: ordbok_tekst, fjern_fil: tekst) -> tekst {
     prøv {
         la url: tekst = _ftp_url(f, fjern_fil)
-        la res = builtin.exec_prosess("curl -s " + url + " 2>/dev/null")
+        la res = builtin.exec_prosess("curl -s " + _shell(url) + " 2>/dev/null")
         returner res
     } fang (e) {
         returner ""
@@ -133,7 +194,7 @@ funksjon retrlines(f: ordbok_tekst, fjern_fil: tekst) -> tekst {
 funksjon storbinary(f: ordbok_tekst, lokal_sti: tekst, fjern_fil: tekst) -> bool {
     prøv {
         la url: tekst = _ftp_url(f, fjern_fil)
-        builtin.exec_prosess("curl -s -T " + lokal_sti + " " + url + " 2>&1")
+        builtin.exec_prosess("curl -s -T " + _shell(lokal_sti) + " " + _shell(url) + " 2>&1")
         returner sann
     } fang (e) {
         returner usann
@@ -143,20 +204,29 @@ funksjon storbinary(f: ordbok_tekst, lokal_sti: tekst, fjern_fil: tekst) -> bool
 
 # Endre katalog
 funksjon cwd(f: ordbok_tekst, katalog: tekst) -> bool {
+    la svar = _ftp_kommando(f, "CWD " + katalog)
+    hvis svar != "" og ikkje _ftp_ok(svar) { returner usann }
     f["gjeldande_katalog"] = katalog
     returner sann
 }
 
 # Gjeldande katalog
 funksjon pwd(f: ordbok_tekst) -> tekst {
+    la svar = _ftp_kommando(f, "PWD")
+    hvis svar != "" {
+        la parsed = _ftp_257_tekst(svar)
+        hvis parsed != "" { returner parsed }
+    }
     returner f["gjeldande_katalog"]
 }
 
 # Lag katalog
 funksjon mkd(f: ordbok_tekst, katalog: tekst) -> bool {
+    la svar = _ftp_kommando(f, "MKD " + katalog)
+    hvis svar != "" { returner _ftp_ok(svar) }
     prøv {
         la url: tekst = _ftp_url(f, katalog)
-        builtin.exec_prosess("curl -s -X MKD " + url + " 2>&1")
+        builtin.exec_prosess("curl -s -X MKD " + _shell(url) + " 2>&1")
         returner sann
     } fang (e) { returner usann }
     returner usann
@@ -164,9 +234,11 @@ funksjon mkd(f: ordbok_tekst, katalog: tekst) -> bool {
 
 # Slett fil
 funksjon delete(f: ordbok_tekst, fjern_fil: tekst) -> bool {
+    la svar = _ftp_kommando(f, "DELE " + fjern_fil)
+    hvis svar != "" { returner _ftp_ok(svar) }
     prøv {
         la url: tekst = _ftp_url(f, fjern_fil)
-        builtin.exec_prosess("curl -s -X DELE " + url + " 2>&1")
+        builtin.exec_prosess("curl -s -X DELE " + _shell(url) + " 2>&1")
         returner sann
     } fang (e) { returner usann }
     returner usann
@@ -174,11 +246,15 @@ funksjon delete(f: ordbok_tekst, fjern_fil: tekst) -> bool {
 
 # Filstorleik
 funksjon size(f: ordbok_tekst, fjern_fil: tekst) -> heltall {
+    la svar = _ftp_kommando(f, "SIZE " + fjern_fil)
+    hvis svar != "" {
+        la n = _ftp_213_tal(svar)
+        hvis n >= 0 { returner n }
+    }
     prøv {
         la url: tekst = _ftp_url(f, fjern_fil)
-        la res = builtin.exec_prosess("curl -sI " + url + " 2>/dev/null | grep -i Content-Length | awk '{print $2}'")
-        la delar = builtin.split(res, "\n")
-        returner builtin.heltall_fra_tekst(_trim(delar[0]))
+        la res = builtin.exec_prosess("curl -sI " + _shell(url) + " 2>/dev/null")
+        returner _content_length(res)
     } fang (e) { returner -1 }
     returner -1
 }
@@ -194,4 +270,93 @@ funksjon _trim(s: tekst) -> tekst {
     mens (a < b og (t[a]==" " eller t[a]=="\t" eller t[a]=="\n" eller t[a]=="\r")) { a=a+1 }
     mens (b > a og (t[b-1]==" " eller t[b-1]=="\t" eller t[b-1]=="\n" eller t[b-1]=="\r")) { b=b-1 }
     returner builtin.join(builtin.slice(t, a, b), "")
+}
+
+funksjon _lower_ascii(s: tekst) -> tekst {
+    la teikn = builtin.split(s, "")
+    la ut: tekst = ""
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        la k: heltall = builtin.char_code(teikn[i])
+        hvis (k >= 65 og k <= 90) {
+            ut = ut + builtin.char_from_code(k + 32)
+        } ellers {
+            ut = ut + teikn[i]
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _starter_med(s: tekst, prefiks: tekst) -> bool {
+    la st = builtin.split(s, "")
+    la pt = builtin.split(prefiks, "")
+    hvis (lengde(st) < lengde(pt)) { returner usann }
+    la i: heltall = 0
+    mens (i < lengde(pt)) {
+        hvis (st[i] != pt[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _etter_kolon(linje: tekst) -> tekst {
+    la teikn = builtin.split(linje, "")
+    la i: heltall = 0
+    mens (i < lengde(teikn)) {
+        hvis (teikn[i] == ":") {
+            returner _trim(builtin.join(builtin.slice(teikn, i + 1, lengde(teikn)), ""))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _inneheld(s: tekst, nål: tekst) -> bool {
+    la delar = builtin.split(s, nål)
+    returner lengde(delar) > 1
+}
+
+funksjon _ftp_213_tal(svar: tekst) -> heltall {
+    la linjer = builtin.split(svar, "\n")
+    la i: heltall = 0
+    mens (i < lengde(linjer)) {
+        la s = _trim(linjer[i])
+        hvis (_starter_med(s, "213 ")) {
+            returner builtin.heltall_fra_tekst(_trim(builtin.join(builtin.slice(builtin.split(s, ""), 4, lengde(builtin.split(s, ""))), "")))
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon _ftp_257_tekst(svar: tekst) -> tekst {
+    la linjer = builtin.split(svar, "\n")
+    la i: heltall = 0
+    mens (i < lengde(linjer)) {
+        la s = _trim(linjer[i])
+        hvis (_starter_med(s, "257 ")) {
+            la teikn = builtin.split(s, "")
+            la start: heltall = 4
+            hvis (lengde(teikn) > 4 og teikn[4] == "\"") { start = 5 }
+            la slutt: heltall = lengde(teikn)
+            hvis (slutt > start og teikn[slutt - 1] == "\"") { slutt = slutt - 1 }
+            returner builtin.join(builtin.slice(teikn, start, slutt), "")
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _content_length(headers: tekst) -> heltall {
+    la linjer = builtin.split(headers, "\n")
+    la i: heltall = 0
+    mens (i < lengde(linjer)) {
+        la linje: tekst = _trim(linjer[i])
+        hvis (_starter_med(_lower_ascii(linje), "content-length:")) {
+            returner builtin.heltall_fra_tekst(_etter_kolon(linje))
+        }
+        i = i + 1
+    }
+    returner -1
 }

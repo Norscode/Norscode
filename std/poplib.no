@@ -1,7 +1,8 @@
 # poplib.no — POP3 e-postklient
 # Python: poplib
 #
-# Les e-post via POP3 (curl-basert).
+# Les e-post via POP3. Vanleg POP3 brukar Norscode socket først; POP3S/TLS
+# brukar curl som reserveveg til runtime får TLS-socket.
 #
 # Bruk:
 #   bruk std.poplib som pop
@@ -10,6 +11,12 @@
 #   la n = pop.stat(c)
 #   la msg = pop.retr(c, 1)
 #   pop.quit(c)
+
+bruk std.socket som sok
+
+funksjon _shell(verdi: tekst) -> tekst {
+    returner "'" + builtin.replace(verdi, "'", "'\"'\"'") + "'"
+}
 
 funksjon connect(vert: tekst, port: heltall, ssl: bool) -> ordbok_tekst {
     la c: ordbok_tekst = {}
@@ -21,8 +28,22 @@ funksjon connect(vert: tekst, port: heltall, ssl: bool) -> ordbok_tekst {
     la protokoll: tekst = "pop3"
     hvis (ssl) { protokoll = "pop3s" }
     c["protokoll"] = protokoll
+    hvis ikkje ssl {
+        la s = sok.ny_tcp()
+        prøv {
+            sok.set_timeout(s, 5000)
+            hvis sok.tilkoble(s, vert, port) {
+                c["tilkopla"] = "sann"
+            }
+            sok.lukk(s)
+        } fang (e0) {
+            sok.lukk(s)
+        }
+        returner c
+    }
     prøv {
-        la test_cmd: tekst = "curl -s --connect-timeout 5 --max-time 5 " + protokoll + "://" + vert + ":" + tekst_fra_heltall(port) + " 2>&1 | head -1"
+        la url: tekst = protokoll + "://" + vert + ":" + tekst_fra_heltall(port)
+        la test_cmd: tekst = "curl -s --connect-timeout 5 --max-time 5 " + _shell(url) + " 2>&1"
         la res = builtin.exec_prosess(test_cmd)
         c["tilkopla"] = "sann"
     } fang (e) {}
@@ -36,9 +57,14 @@ funksjon connect_standard(vert: tekst) -> ordbok_tekst {
 funksjon login(c: ordbok_tekst, brukar: tekst, passord: tekst) -> bool {
     c["brukar"]  = brukar
     c["passord"] = passord
+    hvis c["protokoll"] == "pop3" {
+        la svar = _socket_pop(c, "")
+        hvis svar != "" { returner sann }
+    }
     prøv {
         la url: tekst = _pop_url(c, "")
-        la cmd: tekst = "curl -s --connect-timeout 10 -u \"" + brukar + ":" + passord + "\" " + url + " 2>&1 | head -1"
+        la auth: tekst = brukar + ":" + passord
+        la cmd: tekst = "curl -s --connect-timeout 10 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
         la res = builtin.exec_prosess(cmd)
         returner sann
     } fang (e) { returner usann }
@@ -58,10 +84,40 @@ funksjon _curl_pop(c: ordbok_tekst, kommando: tekst) -> tekst {
     la passord: tekst = c["passord"]
     prøv {
         la url: tekst = _pop_url(c, "/")
-        la cmd: tekst = "curl -s --connect-timeout 15 --max-time 30 -u \"" + brukar + ":" + passord + "\" --request \"" + kommando + "\" " + url + " 2>&1"
+        la auth: tekst = brukar + ":" + passord
+        la cmd: tekst = "curl -s --connect-timeout 15 --max-time 30 -u " + _shell(auth) + " --request " + _shell(kommando) + " " + _shell(url) + " 2>&1"
         la res = builtin.exec_prosess(cmd)
         returner res
     } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon _socket_pop(c: ordbok_tekst, kommando: tekst) -> tekst {
+    hvis c["protokoll"] != "pop3" { returner "" }
+    la s = sok.ny_tcp()
+    prøv {
+        sok.set_timeout(s, 5000)
+        hvis ikkje sok.tilkoble(s, c["vert"], heltall_fra_tekst(c["port"])) {
+            sok.lukk(s)
+            returner ""
+        }
+        la svar = sok.motta(s, 4096)
+        la innhald: tekst = "USER " + c["brukar"] + "\r\nPASS " + c["passord"] + "\r\n"
+        hvis kommando != "" {
+            innhald = innhald + kommando + "\r\n"
+        }
+        innhald = innhald + "QUIT\r\n"
+        hvis sok.send(s, innhald) < 0 {
+            sok.lukk(s)
+            returner svar
+        }
+        svar = svar + sok.motta(s, 65535)
+        sok.lukk(s)
+        returner svar
+    } fang (e) {
+        sok.lukk(s)
+        returner ""
+    }
     returner ""
 }
 
@@ -71,17 +127,24 @@ funksjon stat(c: ordbok_tekst) -> ordbok_tekst {
     res["tal"]      = "0"
     res["storleik"] = "0"
     prøv {
-        la brukar: tekst = c["brukar"]
-        la passord: tekst = c["passord"]
-        la url: tekst = _pop_url(c, "/")
-        la cmd: tekst = "curl -s --connect-timeout 15 -u \"" + brukar + ":" + passord + "\" " + url + " 2>&1"
-        la ut = builtin.exec_prosess(cmd)
+        la ut = _socket_pop(c, "STAT")
+        hvis ut == "" {
+            la brukar: tekst = c["brukar"]
+            la passord: tekst = c["passord"]
+            la url: tekst = _pop_url(c, "/")
+            la auth: tekst = brukar + ":" + passord
+            la cmd: tekst = "curl -s --connect-timeout 15 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
+            ut = builtin.exec_prosess(cmd)
+        }
         la linjer = builtin.split(ut, "\n")
         la i: heltall = 0
         mens (i < lengde(linjer)) {
             la linje: tekst = _trim(linjer[i])
             la delar = builtin.split(linje, " ")
-            hvis (lengde(delar) >= 2) {
+            hvis (lengde(delar) >= 3 og delar[0] == "+OK") {
+                res["tal"]      = _trim(delar[1])
+                res["storleik"] = _trim(delar[2])
+            } ellers hvis (lengde(delar) >= 2 og delar[0] != "+OK") {
                 res["tal"]      = _trim(delar[0])
                 res["storleik"] = _trim(delar[1])
             }
@@ -95,16 +158,22 @@ funksjon stat(c: ordbok_tekst) -> ordbok_tekst {
 funksjon list(c: ordbok_tekst, nummer: heltall) -> liste_tekst {
     la resultat: liste_tekst = []
     prøv {
-        la brukar: tekst = c["brukar"]
-        la passord: tekst = c["passord"]
-        la url: tekst = _pop_url(c, "/")
-        la cmd: tekst = "curl -s --connect-timeout 15 -u \"" + brukar + ":" + passord + "\" " + url + " 2>&1"
-        la ut = builtin.exec_prosess(cmd)
+        la ut = _socket_pop(c, "LIST")
+        hvis ut == "" {
+            la brukar: tekst = c["brukar"]
+            la passord: tekst = c["passord"]
+            la url: tekst = _pop_url(c, "/")
+            la auth: tekst = brukar + ":" + passord
+            la cmd: tekst = "curl -s --connect-timeout 15 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
+            ut = builtin.exec_prosess(cmd)
+        }
         la linjer = builtin.split(ut, "\n")
         la i: heltall = 0
         mens (i < lengde(linjer)) {
             la s: tekst = _trim(linjer[i])
-            hvis (s != "") { legg_til(resultat, s) }
+            hvis (s != "" og s != "." og s != "+OK" og ikkje _startar_med(s, "+OK ")) {
+                legg_til(resultat, s)
+            }
             i = i + 1
         }
     } fang (e) {}
@@ -118,11 +187,15 @@ funksjon retr(c: ordbok_tekst, nummer: heltall) -> ordbok_tekst {
     msg["num"]   = tekst_fra_heltall(nummer)
     msg["rå"]    = ""
     prøv {
-        la brukar: tekst = c["brukar"]
-        la passord: tekst = c["passord"]
-        la url: tekst = _pop_url(c, "/" + tekst_fra_heltall(nummer))
-        la cmd: tekst = "curl -s --connect-timeout 15 --max-time 60 -u \"" + brukar + ":" + passord + "\" \"" + url + "\" 2>&1"
-        la rå = builtin.exec_prosess(cmd)
+        la rå = _socket_pop(c, "RETR " + tekst_fra_heltall(nummer))
+        hvis rå == "" {
+            la brukar: tekst = c["brukar"]
+            la passord: tekst = c["passord"]
+            la url: tekst = _pop_url(c, "/" + tekst_fra_heltall(nummer))
+            la auth: tekst = brukar + ":" + passord
+            la cmd: tekst = "curl -s --connect-timeout 15 --max-time 60 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
+            rå = builtin.exec_prosess(cmd)
+        }
         msg["rå"] = rå
         la linjer = builtin.split(rå, "\n")
         la i: heltall = 0
@@ -148,8 +221,11 @@ funksjon retr(c: ordbok_tekst, nummer: heltall) -> ordbok_tekst {
 funksjon top(c: ordbok_tekst, nummer: heltall, linjer: heltall) -> liste_tekst {
     la resultat: liste_tekst = []
     prøv {
-        la msg = retr(c, nummer)
-        la rå: tekst = msg["rå"]
+        la rå = _socket_pop(c, "TOP " + tekst_fra_heltall(nummer) + " " + tekst_fra_heltall(linjer))
+        hvis rå == "" {
+            la msg = retr(c, nummer)
+            rå = msg["rå"]
+        }
         la alle_linjer = builtin.split(rå, "\n")
         la i: heltall = 0
         mens (i < linjer og i < lengde(alle_linjer)) {
@@ -162,12 +238,27 @@ funksjon top(c: ordbok_tekst, nummer: heltall, linjer: heltall) -> liste_tekst {
 
 # Slett melding
 funksjon dele(c: ordbok_tekst, nummer: heltall) -> bool {
-    # POP3 DELE via curl — ikkje direkte støtta av curl, returner sann symbolsk
+    la svar = _socket_pop(c, "DELE " + tekst_fra_heltall(nummer))
+    hvis svar != "" { returner _startar_med(_trim(svar), "+OK") }
+    # Curl-reservevegen kan ikkje slette direkte, så eldre kall får kompatibel sann-retur.
     returner sann
 }
 
 # Returner unik-ID for melding
 funksjon uidl(c: ordbok_tekst, nummer: heltall) -> tekst {
+    la svar = _socket_pop(c, "UIDL " + tekst_fra_heltall(nummer))
+    hvis svar != "" {
+        la linjer = builtin.split(svar, "\n")
+        la i: heltall = 0
+        mens (i < lengde(linjer)) {
+            la s = _trim(linjer[i])
+            hvis _startar_med(s, "+OK ") {
+                la delar = builtin.split(s, " ")
+                hvis lengde(delar) >= 3 { returner delar[2] }
+            }
+            i = i + 1
+        }
+    }
     returner "msg-" + tekst_fra_heltall(nummer)
 }
 
@@ -238,4 +329,16 @@ funksjon _trim(s: tekst) -> tekst {
     mens (a < b og (t[a]==" " eller t[a]=="\t" eller t[a]=="\n" eller t[a]=="\r")) { a=a+1 }
     mens (b > a og (t[b-1]==" " eller t[b-1]=="\t" eller t[b-1]=="\n" eller t[b-1]=="\r")) { b=b-1 }
     returner builtin.join(builtin.slice(t, a, b), "")
+}
+
+funksjon _startar_med(s: tekst, prefiks: tekst) -> bool {
+    la st = builtin.split(s, "")
+    la pt = builtin.split(prefiks, "")
+    hvis lengde(st) < lengde(pt) { returner usann }
+    la i: heltall = 0
+    mens (i < lengde(pt)) {
+        hvis st[i] != pt[i] { returner usann }
+        i = i + 1
+    }
+    returner sann
 }

@@ -1,10 +1,12 @@
 #!/usr/bin/env sh
+# Norscode-first wrapper: macOS filikon-installasjon ligg i tools/install-macos-file-icons.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 # Register Norscode file type icons with macOS LaunchServices.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/install-macos-file-icons.sh [--bundle-dir DIR] [--skip-register]
+bruk: nc install-macos-file-icons [--bundle-dir DIR] [--skip-register]
 
 Installerer macOS filtype-ikoner for Norscode:
   .no   Norscode source

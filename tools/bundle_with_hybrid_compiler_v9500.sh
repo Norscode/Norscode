@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Norscode-first wrapper: hybrid bundle-entry ligg i tools/bundle_with_hybrid_compiler_v9500.no.
+# Bash-delen under er avgrensa reserveveg for Node-basert bundle-samansying.
 set -euo pipefail
 
 FROM_NO=0
@@ -13,7 +15,7 @@ NODE_BIN="${NODE_BIN:-}"
 shift 3 || true
 
 if [ -z "$ROOT" ] || [ -z "$OUT" ]; then
-  echo "bruk: bundle_with_hybrid_compiler_v9500.sh <repo-root> <out.ncb.json> <entry> <alias=fil.no>..." >&2
+  echo "Bruk: NORSCODE_HYBRID_ROOT=<repo-root> NORSCODE_HYBRID_OUT=<out.ncb.json> NORSCODE_HYBRID_ENTRY=<entry> NORSCODE_HYBRID_SPECS='<alias=fil.no>...' ./bin/nc run tools/bundle_with_hybrid_compiler_v9500.no" >&2
   exit 2
 fi
 
@@ -38,8 +40,8 @@ fi
 if [ -z "$NODE_BIN" ]; then
   if command -v node >/dev/null 2>&1; then
     NODE_BIN="$(command -v node)"
-  elif [ -x "/Users/jansteinar/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]; then
-    NODE_BIN="/Users/jansteinar/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+  elif [ -n "${HOME:-}" ] && [ -x "$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]; then
+    NODE_BIN="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
   else
     echo "feil: fann ikkje node. Sett NODE_BIN eller installer node i PATH." >&2
     exit 1

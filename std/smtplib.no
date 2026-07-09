@@ -1,9 +1,8 @@
 # smtplib.no — SMTP e-postsending
 # Python: smtplib
 #
-# Bygger e-postmeldingar og sender via sendmail-kommando
-# (tryggare enn rå socket i Norscode-miljø).
-# Støttar òg SMTP via exec_prosess med curl/swaks.
+# Bygger e-postmeldingar og støttar enkel SMTP-dialog via Norscode socket.
+# Sendmail og curl finst som eksplisitte OS-/TLS-reservevegar når miljøet krev det.
 #
 # Bruk:
 #   bruk std.smtplib som smtp
@@ -12,12 +11,28 @@
 #   la msg = smtp.ny_melding("Emne", "Hei verda!", "avs@dom.no", ["mott@dom.no"])
 #   smtp.legg_til_header(msg, "X-Priority", "1")
 #
-#   # Send via sendmail
+#   # Send via lokal sendmail-reserveveg
 #   smtp.send_sendmail(msg)
 #
-#   # Send via curl/SMTP
+#   # Send via curl/SMTP-reserveveg
 #   la srv = smtp.ny_server("smtp.gmail.com", 587)
 #   smtp.send_curl(srv, msg, "brukar@gmail.com", "apppassord")
+
+bruk std.socket som sok
+
+funksjon _shell(sti: tekst) -> tekst {
+    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+}
+
+funksjon _shell_liste(verdiar: liste_tekst) -> tekst {
+    la delar: liste_tekst = []
+    la i: heltall = 0
+    mens (i < lengde(verdiar)) {
+        legg_til(delar, _shell(verdiar[i]))
+        i = i + 1
+    }
+    returner builtin.join(delar, " ")
+}
 
 # ─── Meldingsstruktur ─────────────────────────────────────────────────────────
 
@@ -103,15 +118,15 @@ funksjon format_melding(msg: ordbok_tekst) -> tekst {
 funksjon send_sendmail(msg: ordbok_tekst) -> bool {
     la mottakarar = builtin.json_parse(msg["mottakarar"])
     la melding_tekst: tekst = format_melding(msg)
-    la mott_str: tekst = builtin.join(mottakarar, " ")
+    la mott_str: tekst = _shell_liste(mottakarar)
 
     prøv {
-        # Lag midlertidig fil med meldinga
+        # Lag kortlevd meldingsfil for sendmail-reservevegen
         la tmp_fil: tekst = "/tmp/norscode_smtp_" + tekst_fra_heltall(builtin.tid_ms()) + ".eml"
         builtin.fil_skriv(tmp_fil, melding_tekst)
-        la cmd: tekst = "sendmail -f " + msg["avsender"] + " " + mott_str + " < " + tmp_fil
+        la cmd: tekst = "sendmail -f " + _shell(msg["avsender"]) + " " + mott_str + " < " + _shell(tmp_fil)
         builtin.exec_prosess(cmd)
-        builtin.exec_prosess("rm -f " + tmp_fil)
+        builtin.exec_prosess("rm -f " + _shell(tmp_fil))
         returner sann
     } fang (e) {
         returner usann
@@ -159,41 +174,52 @@ funksjon send_curl(srv: ordbok_tekst, msg: ordbok_tekst,
         la mott_arg: tekst = ""
         la i: heltall = 0
         mens (i < lengde(mottakarar)) {
-            mott_arg = mott_arg + " --mail-rcpt " + mottakarar[i]
+            mott_arg = mott_arg + " --mail-rcpt " + _shell(mottakarar[i])
             i = i + 1
         }
 
         la tls_arg: tekst = ""
         hvis (srv["tls"] == "sann") { tls_arg = " --ssl-reqd" }
 
-        la cmd: tekst = "curl " + protokoll + "://" + srv["vert"] + ":" + srv["port"] +
-                         " --mail-from " + msg["avsender"] + mott_arg +
-                         " -u " + brukarnamn + ":" + passord +
+        la url: tekst = protokoll + "://" + srv["vert"] + ":" + srv["port"]
+        la cmd: tekst = "curl " + _shell(url) +
+                         " --mail-from " + _shell(msg["avsender"]) + mott_arg +
+                         " -u " + _shell(brukarnamn + ":" + passord) +
                          tls_arg +
-                         " --upload-file " + tmp_fil +
+                         " --upload-file " + _shell(tmp_fil) +
                          " 2>&1"
 
         la res = builtin.exec_prosess(cmd)
-        builtin.exec_prosess("rm -f " + tmp_fil)
+        builtin.exec_prosess("rm -f " + _shell(tmp_fil))
         returner sann
     } fang (e) {
-        prøv { builtin.exec_prosess("rm -f " + tmp_fil) } fang (e2) {}
+        prøv { builtin.exec_prosess("rm -f " + _shell(tmp_fil)) } fang (e2) {}
         returner usann
     }
     returner usann
 }
 
-# ─── Enkel SMTP-dialog (via nc/netcat) ───────────────────────────────────────
+# ─── Enkel SMTP-dialog (via Norscode socket) ─────────────────────────────────
 
 funksjon smtp_kommando(vert: tekst, port: heltall, kommandoar: liste_tekst) -> tekst {
-    la cmd_fil: tekst = "/tmp/smtp_cmd_" + tekst_fra_heltall(builtin.tid_ms()) + ".txt"
     la innhald: tekst = builtin.join(kommandoar, "\r\n") + "\r\n"
+    la s = sok.ny_tcp()
     prøv {
-        builtin.fil_skriv(cmd_fil, innhald)
-        la res = builtin.exec_prosess("nc -q 1 " + vert + " " + tekst_fra_heltall(port) + " < " + cmd_fil + " 2>&1")
-        builtin.exec_prosess("rm -f " + cmd_fil)
-        returner res
+        sok.set_timeout(s, 2000)
+        hvis ikkje sok.tilkoble(s, vert, port) {
+            sok.lukk(s)
+            returner ""
+        }
+        la helsing = sok.motta(s, 4096)
+        hvis sok.send(s, innhald) < 0 {
+            sok.lukk(s)
+            returner helsing
+        }
+        la svar = sok.motta(s, 8192)
+        sok.lukk(s)
+        returner helsing + svar
     } fang (e) {
+        sok.lukk(s)
         returner ""
     }
     returner ""

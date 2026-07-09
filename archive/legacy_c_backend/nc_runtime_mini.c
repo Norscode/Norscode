@@ -12,6 +12,7 @@
 #include <ctype.h>
 #include <setjmp.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 /* ── Stage0-kjerne: verdi-layout og grunnstrukturar ── */
 #define NC_NIL   0
@@ -527,6 +528,60 @@ static NcVal *nc_builtin_miljo_finnes(NcVal *k_v) {
     NcVal *r = nc_env_exists(k);
     free(k);
     return r;
+}
+static NcVal *nc_builtin_exec_prosess(NcVal *cmd_v) {
+    char *cmd = nc_to_str_raw(cmd_v);
+    NcVal *lst = nc_list_new();
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        nc_builtin_legg_til(lst, nc_str("1"));
+        nc_builtin_legg_til(lst, nc_str(""));
+        nc_builtin_legg_til(lst, nc_str(strerror(errno)));
+        free(cmd);
+        return lst;
+    }
+    size_t cap = 4096, len = 0;
+    char *out = malloc(cap);
+    if (!out) {
+        pclose(fp);
+        nc_builtin_legg_til(lst, nc_str("1"));
+        nc_builtin_legg_til(lst, nc_str(""));
+        nc_builtin_legg_til(lst, nc_str("out of memory"));
+        free(cmd);
+        return lst;
+    }
+    out[0] = 0;
+    char buf[1024];
+    while (fgets(buf, sizeof(buf), fp)) {
+        size_t n = strlen(buf);
+        if (len + n + 1 > cap) {
+            while (len + n + 1 > cap) cap *= 2;
+            char *next = realloc(out, cap);
+            if (!next) {
+                free(out);
+                pclose(fp);
+                nc_builtin_legg_til(lst, nc_str("1"));
+                nc_builtin_legg_til(lst, nc_str(""));
+                nc_builtin_legg_til(lst, nc_str("out of memory"));
+                free(cmd);
+                return lst;
+            }
+            out = next;
+        }
+        memcpy(out + len, buf, n);
+        len += n;
+        out[len] = 0;
+    }
+    int rc_raw = pclose(fp);
+    int rc = rc_raw;
+    if (rc_raw != -1 && WIFEXITED(rc_raw)) rc = WEXITSTATUS(rc_raw);
+    char rc_buf[32];
+    snprintf(rc_buf, sizeof(rc_buf), "%d", rc < 0 ? 1 : rc);
+    nc_builtin_legg_til(lst, nc_str(rc_buf));
+    nc_builtin_legg_til(lst, nc_str_own(out));
+    nc_builtin_legg_til(lst, nc_str(""));
+    free(cmd);
+    return lst;
 }
 /* ── Hjelpelag: samlingshjelparar over liste/map-kjerna ── */
 static int nc_coll_find_key_index(NcVal *m, const char *k) {

@@ -1,4 +1,6 @@
 # tools/omgang6b_compiler_bundle_args.inc.sh — delt modulliste for Omgang 6b stage-0
+# Norscode-first include: eigarlista ligg i tools/omgang6b_compiler_bundle_args.inc.no.
+# Shell-lista under er berre kompatibilitetsflate for eldre Bash-reservevegar.
 # Source frå build_omgang6b_compiler_ncb.sh og selfcompile_stage0_elf.sh
 OMGANG6B_BUNDLE_ARGS=(
     selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no

@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: Windows-pakking ligg i tools/package-windows-app.no.
+# Norscode-first wrapper: Windows-pakking ligg i tools/package-windows-app.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/package-windows-app.sh [--version VER] [EXE_PATH]
+bruk: nc package-windows-app [--version VER] <EXE_PATH>
 
 Pakkar ein Windows-native norscode.exe til release-artifacts/ med ZIP og SHA256.
 Skriptet byggjer ikkje .exe-en sjølv; det standardiserer release-kontrakten rundt ein eksisterande artefakt og legg han inn i ein enkel app-layout.
@@ -43,4 +44,4 @@ export NORSCODE_ROOT="$ROOT_DIR"
 export NORSCODE_WINDOWS_PACKAGE_VERSION="$VERSION"
 export NORSCODE_WINDOWS_PACKAGE_EXE="$EXE_PATH"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/package-windows-app.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/package-windows-app.no"

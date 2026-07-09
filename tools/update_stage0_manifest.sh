@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Tynn wrapper: manifestlogikken ligg i tools/update_stage0_manifest.no.
+# Norscode-first wrapper: stage0-manifest ligg i tools/update_stage0_manifest.no.
+# Shell-delen under set berre rot/prosessmiljø og manifestinput før Norscode-eigarfil.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -22,4 +23,4 @@ done
 export NORSCODE_STAGE0_MANIFEST_INPUT="$_manifest_input"
 export NORSCODE_STAGE0_MANIFEST_ALLOW_EMPTY=1
 
-exec "$ROOT/bin/nc" run "$ROOT/tools/update_stage0_manifest.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/update_stage0_manifest.no"

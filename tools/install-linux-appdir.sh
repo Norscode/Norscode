@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: Linux AppDir-installasjon ligg i tools/install-linux-appdir.no.
+# Norscode-first wrapper: Linux AppDir-installasjon ligg i tools/install-linux-appdir.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/install-linux-appdir.sh <Norscode-linux-*-AppDir.tar.gz> [--prefix DIR]
+bruk: nc install-linux-appdir <Norscode-linux-*-AppDir.tar.gz> [--prefix DIR]
 
 Installerer eller oppgraderer Linux AppDir-artefakt lokalt.
 Standard prefix: ~/.local/opt/norscode-app
@@ -40,4 +41,4 @@ export NORSCODE_ROOT="$ROOT_DIR"
 export NORSCODE_LINUX_APPDIR_ARCHIVE="$ARCHIVE_PATH"
 export NORSCODE_LINUX_APPDIR_PREFIX="$PREFIX"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-linux-appdir.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-linux-appdir.no"

@@ -47,7 +47,7 @@ Første ABI-versjon bruker eit enkelt namnrom for eksportar:
 ## Public vs intern
 
 - Offentleg: det som står i namnrommet over
-- Intern: hjelpefunksjonar, placeholderar, og eigne runtime-kontrollar som berre støttar den offentlege flata
+- Intern: hjelpefunksjonar, minimale runtime-kontraktar, patchpunkt og eigne runtime-kontrollar som berre støttar den offentlege flata
 
 ## Mini-døme
 

@@ -16,6 +16,8 @@ NcVal *nc_builtin_ncb_route_handlers(NcVal **args, int na);
 NcVal *nc_builtin_ncb_metadata(NcVal **args, int na);
 NcVal *nc_builtin_ncb_next_request_id(NcVal **args, int na);
 NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na);
+NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **args, int na);
+NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na);
 static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na);
 NcVal *nc_fn_builtin_neste_token(NcVal **a, int na);
 static NcVal *g_current_route_handlers = NULL;
@@ -642,6 +644,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"fil_finnes"))       fn_r=nc_builtin_fil_finnes(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_hent"))       fn_r=nc_builtin_miljo_hent(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"miljo_finnes"))     fn_r=nc_builtin_miljo_finnes(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"exec_prosess"))     fn_r=nc_builtin_exec_prosess(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"bool"))             fn_r=nc_builtin_bool(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"feil"))             fn_r=nc_builtin_feil(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"type")||!strcmp(cn,"type_av")) fn_r=nc_builtin_type(narg>0?cargs[0]:nc_nil());
@@ -1614,7 +1617,13 @@ static void nc_merge_fns(NcVal *dst, NcVal *src) {
 }
 
 static int nc_is_builtin_import(const char *modul) {
-    return !modul || !modul[0] || !strncmp(modul, "std.", 4) || !strncmp(modul, "builtin.", 8) || !strncmp(modul, "selfhost.", 9);
+    if (!modul || !modul[0]) return 1;
+    if (!strncmp(modul, "builtin.", 8)) return 1;
+    if (!strcmp(modul, "selfhost.vm") || !strcmp(modul, "selfhost.json") || !strcmp(modul, "selfhost.bundler")) return 0;
+    if (!strncmp(modul, "selfhost.", 9)) return 1;
+    if (!strcmp(modul, "std.path") || !strcmp(modul, "std.env") || !strcmp(modul, "std.web")) return 1;
+    if (!strcmp(modul, "std.csrf") || !strcmp(modul, "std.security")) return 1;
+    return 0;
 }
 
 static char *nc_module_to_path(const char *modul) {
@@ -1851,12 +1860,37 @@ static int nc_val_til_exit(NcVal *v) {
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
+    if (cmd && !strcmp(cmd, "compile")) {
+        const char *src = getenv("NORSCODE_FILE");
+        const char *out = getenv("NORSCODE_OUTPUT");
+        const char *mod = getenv("NORSCODE_MODULE");
+        if (!mod || !mod[0]) mod = "__main__";
+        if (!src || !src[0]) return -1;
+        NcVal *ncb_json = nc_native_kompiler(src, mod);
+        if (!ncb_json || ncb_json->type != NC_STR) return -1;
+        if (out && out[0]) {
+            nc_builtin_fil_skriv(nc_str(out), ncb_json);
+        } else {
+            printf("%s\n", ncb_json->s);
+        }
+        return 0;
+    }
     if (cmd && !strcmp(cmd, "run")) {
         const char *src = getenv("NORSCODE_FILE");
         const char *mod = getenv("NORSCODE_MODULE");
         if (!mod || !mod[0]) mod = "__main__";
         if (!src || !src[0]) return -1;
         NcVal *ncb_json = nc_native_kompiler(src, mod);
+        if (!ncb_json || ncb_json->type != NC_STR) return -1;
+        NcVal *args[] = { ncb_json };
+        NcVal *r = nc_fn_builtin_host_exec_ncb_json(args, 1);
+        return nc_val_til_exit(r);
+    }
+    if (cmd && !strcmp(cmd, "run-ncb-host")) {
+        const char *ncb = getenv("NORSCODE_HOST_NCB_FILE");
+        if (!ncb || !ncb[0]) ncb = getenv("NORSCODE_NCB_FILE");
+        if (!ncb || !ncb[0]) return -1;
+        NcVal *ncb_json = nc_builtin_fil_les(nc_str(ncb));
         if (!ncb_json || ncb_json->type != NC_STR) return -1;
         NcVal *args[] = { ncb_json };
         NcVal *r = nc_fn_builtin_host_exec_ncb_json(args, 1);

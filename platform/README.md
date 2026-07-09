@@ -8,8 +8,8 @@ Aktive filer her skal ha ein Norscode-eigar ved sida av seg eller ein Norscode-b
 
 - Ny funksjonalitet skal skrivast i `.no` når det er mogleg.
 - Plattformkode skal liggje under `platform/<os>/...`, ikkje blandast inn i `tools/`.
-- Kvar aktiv `.swift`, `.js` eller `.sh`-bru skal ha ein colocated `.no`-eigar eller ein dokumentert Norscode-byggar.
-- `tools/verify_norscode_surface_ownership.sh` skal halde denne regelen grøn.
+- Kvar aktiv `.sh`, `.ps1`, `.js` eller `.swift`-bru skal ha ein colocated `.no`-eigar eller ein dokumentert Norscode-byggar.
+- `./bin/nc surface-ownership` skal halde denne regelen grøn.
 
 ## Aktiv plattformbru
 
