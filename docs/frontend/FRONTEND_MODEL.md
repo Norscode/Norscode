@@ -68,6 +68,7 @@ Det gir ferdige komponentar for:
 - tetthetswrapper og kompakt visning
 - status-badges
 - tabellhandlingar for kompakte radknappar
+- responsive tabellceller med mobillabels
 - dashboard-statistikk
 - oppsummeringsboks og nøkkelrader
 - statusboard med kolonnar og sakskort
