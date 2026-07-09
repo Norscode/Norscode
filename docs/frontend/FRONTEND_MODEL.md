@@ -94,10 +94,11 @@ Det gir ferdige komponentar for:
 - side-skuff for hurtigvisning
 - toast-region
 - UI-script for modal, kopiering, live-filter og toast
+- skjemafelt med required, disabled, readonly, autocomplete og feilmeldingstilstandar
 
 Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
 Bruk `frontend.ui_script()` ved slutten av `<body>` når sida treng standard handlingar for knappar, filter, dialogar og små varsel.
-For lågnivå markup kan komponentane blandast med `std.html`.
+For lågnivå markup kan komponentane blandast med `std.html` og `std.html_forms`.
 
 ## Praktisk konsekvens
 
