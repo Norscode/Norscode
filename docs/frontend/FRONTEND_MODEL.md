@@ -54,11 +54,13 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 Det gir ferdige komponentar for:
 
 - sidehode med handlingar
+- brødsmulesti og varsel
 - primær- og sekundærknappar
 - verktøylinje
 - tabs, segmentert kontroll og filterbar
 - status-badges
 - dashboard-statistikk
+- fremdrift/SLA-visning
 - sidebar-shell
 - filterfelt
 - datatabell
