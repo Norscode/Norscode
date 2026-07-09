@@ -58,6 +58,7 @@ Det gir ferdige komponentar for:
 - tilstandspanel med handlingar
 - primær- og sekundærknappar
 - verktøylinje
+- kommandohint og tastaturmerker
 - handlingsmeny og menyelement
 - tabs, segmentert kontroll og filterbar
 - bulkbar for massehandlingar
