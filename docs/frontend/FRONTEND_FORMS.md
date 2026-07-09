@@ -12,8 +12,21 @@ Pakken bør brukes når en app trenger vanlige felt med label, hjelpetekst, feil
 - `velg(...)`
 - `avkryssing(...)`
 - `søkefelt(...)`
+- `feltgruppe(...)`
 
 Felt med feilmelding får `aria-invalid="true"` og kobler både hjelp og feil til samme kontroll via `aria-describedby`.
+
+## Feil Og Handlinger
+
+- `feilsammendrag_rad(...)`
+- `feilsammendrag(...)`
+- `submit_knapp(...)`
+- `submit_knapp_busy(...)`
+- `avbryt_lenke(...)`
+- `handlinger_standard(...)`
+
+`feilsammendrag(...)` returnerer tom tekst når listen er tom, og ellers en tilgjengelig `error-summary` med `role="alert"`.
+`feltgruppe(...)` pakker relaterte felt i `fieldset` og `legend`.
 
 ## Tilstander
 
@@ -41,3 +54,11 @@ forms.epostfelt_med_attrs(
 )
 ```
 
+Eksempel med feilsammendrag:
+
+```norscode
+forms.feilsammendrag(
+    "Rett feilene før du fortsetter",
+    forms.feilsammendrag_rad("#felt-epost", "E-post mangler")
+)
+```
