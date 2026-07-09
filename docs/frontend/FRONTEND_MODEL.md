@@ -59,6 +59,7 @@ Det gir ferdige komponentar for:
 - primær- og sekundærknappar
 - verktøylinje
 - kommandohint og tastaturmerker
+- avatar, brukerchip og brukerlinje
 - handlingsmeny og menyelement
 - tabs, segmentert kontroll og filterbar
 - bulkbar for massehandlingar
