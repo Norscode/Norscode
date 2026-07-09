@@ -67,6 +67,7 @@ Det gir ferdige komponentar for:
 - bulkbar for massehandlingar
 - tetthetswrapper og kompakt visning
 - status-badges
+- tabellhandlingar for kompakte radknappar
 - dashboard-statistikk
 - oppsummeringsboks og nøkkelrader
 - statusboard med kolonnar og sakskort
