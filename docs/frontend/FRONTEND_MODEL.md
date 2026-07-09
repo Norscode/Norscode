@@ -113,9 +113,11 @@ Frontend-roadmapens første etappe er å etablere:
 - statiske assets
 - enkel dev-flyt for frontend-ressurser
 - en gradvis vei fra HTML mode til template, component, native UI og reactive mode
+- reactive bindinger for tekst, verdi, checked, klasse, synlighet, events og statusfelt
 
 Native UI er en ekte Norscode-modul i [`std/nativeui.no`](../std/nativeui.no) og brukes av `ui-render` som den kanoniske renderer-veien.
 For komponent- og slot-modell er [`std/frontend.no`](../std/frontend.no) den anbefalte inngangen, [`std/reactive.no`](../std/reactive.no) er kontraktflaten for state, bindings og events, [`std/islands.no`](../std/islands.no) er kontraktflaten for server/client-splitt, og [`std/html.no`](../std/html.no) er fortsatt lavnivåflaten.
+Se også [`FRONTEND_REACTIVE.md`](./FRONTEND_REACTIVE.md) for den konkrete attributtflaten.
 
 ## Videre lesing
 
