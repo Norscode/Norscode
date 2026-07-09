@@ -60,6 +60,7 @@ Det gir ferdige komponentar for:
 - verktøylinje
 - handlingsmeny og menyelement
 - tabs, segmentert kontroll og filterbar
+- bulkbar for massehandlingar
 - status-badges
 - dashboard-statistikk
 - oppsummeringsboks og nøkkelrader
