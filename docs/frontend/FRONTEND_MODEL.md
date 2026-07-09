@@ -74,6 +74,7 @@ Det gir ferdige komponentar for:
 - filterfelt
 - datatabell
 - feltgruppe, tekstfelt og valg
+- validerte felt, feltfeil og feilsammendrag
 - status- og prioritetvelger
 - sorteringsvelger
 - tom-tabellrad og paginering
