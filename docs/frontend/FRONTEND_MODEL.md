@@ -61,6 +61,10 @@ Det gir ferdige komponentar for:
 - sidebar-shell
 - filterfelt
 - datatabell
+- feltgruppe, tekstfelt og valg
+- status- og prioritetvelger
+- tom-tabellrad og paginering
+- ticket-rad for helpdesk-lister
 - modal
 - toast-region
 - UI-script for modal, kopiering, live-filter og toast
