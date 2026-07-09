@@ -54,6 +54,7 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 Det gir ferdige komponentar for:
 
 - sidehode med handlingar
+- aktiv navigasjonslenke med aria-current
 - brødsmulesti og varsel
 - skip-lenke og tydelige fokusstiler
 - skjelettvisning for innlasting
