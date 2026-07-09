@@ -78,6 +78,7 @@ Det gir ferdige komponentar for:
 - sammenleggbare disclosure-seksjonar
 - kommentarboks og tomt panel
 - modal
+- side-skuff for hurtigvisning
 - toast-region
 - UI-script for modal, kopiering, live-filter og toast
 
