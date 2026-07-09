@@ -44,7 +44,7 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 
 - Bruk [`std.html`](../std/html.no) når du vil bygge HTML eksplisitt eller jobbe lavnivå med semantiske tagger, skjemaer, lister og tabeller.
 - Bruk [`std.frontend`](../std/frontend.no) når du vil bygge gjenbrukbare komponenter, layouts og partials.
-- Bruk [`std.stil`](../std/stil.no) når du vil bygge norske stilark med funksjonar som `regel(...)`, `variabel(...)`, `tema_lys(...)` og `media(...)`.
+- Bruk [`std.stil`](../std/stil.no) når du vil bygge norske stilark med funksjonar som `regel(...)`, `variabel(...)`, `tema_lys(...)`, `media(...)`, `grid_kolonner(...)` og `flex_rad(...)`.
 - Bruk [`std.islands`](../std/islands.no) når du vil skille mellom full side og fragment, eller modellere server/client-splitt.
 - Bruk [`std.web`](../std/web.no) når du trenger request-, route- og response-hjelpere på HTTP-nivå.
 
