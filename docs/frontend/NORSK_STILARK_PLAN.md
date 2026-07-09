@@ -114,6 +114,18 @@ Klar når:
 
 - stilmodulen kan uttrykkje meir av moderne CSS utan å falle tilbake til rå strengar
 
+## Omgang 8: Layout-hjelparar
+
+Mål: gjere vanlege app-layoutar enklare å skrive frå Norscode utan rå CSS-verdiar.
+
+- [x] Leggje til grid-verdiar for `repeat(...)`, `minmax(...)`, `fit-content(...)` og kolonne-spor
+- [x] Leggje til små flex-hjelparar for rad og kolonne
+- [x] Teste layout-hjelparane i `tests/test_stil.no`
+
+Klar når:
+
+- dashboard, helpdesk og adminflater kan skrive vanlege grid/flex-layoutar med norske hjelparar
+
 ## Arbeidsregel
 
 Vi tek éi omgang om gongen.
