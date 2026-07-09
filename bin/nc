@@ -140,6 +140,84 @@ _nc_run_vm_cache_stale() {
     return 1
 }
 
+_nc_run_ncb_host_status() {
+    _cache="$1"
+    if [ -s "$_cache" ] && { [ ! -e "$NC_NATIVE" ] || [ ! "$NC_NATIVE" -nt "$_cache" ]; }; then
+        IFS= read -r _line < "$_cache" || _line=""
+        case "$_line" in
+            supported|unsupported) printf '%s\n' "$_line"; return 0 ;;
+        esac
+    fi
+    printf 'unknown\n'
+}
+
+_nc_write_run_ncb_host_status() {
+    _cache="$1"
+    _status="$2"
+    mkdir -p "$(dirname "$_cache")"
+    _tmp="$_cache.$$"
+    printf '%s\n' "$_status" > "$_tmp"
+    mv "$_tmp" "$_cache"
+}
+
+_nc_module_file_for_import() {
+    _mod="$1"
+    _path=""
+    while :; do
+        case "$_mod" in
+            *.*)
+                _part=${_mod%%.*}
+                _path="$_path$_part/"
+                _mod=${_mod#*.}
+                ;;
+            *)
+                printf '%s/%s%s.no\n' "$ROOT_DIR" "$_path" "$_mod"
+                return 0
+                ;;
+        esac
+    done
+}
+
+_nc_run_target_cache_stale() {
+    _cache="$1"
+    _src="$2"
+    if [ ! -s "$_cache" ]; then
+        return 0
+    fi
+    for _dep in "$_src" "$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.sh" "$NC_NATIVE"; do
+        if [ -e "$_dep" ] && [ "$_dep" -nt "$_cache" ]; then
+            return 0
+        fi
+    done
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        set -f
+        set -- $_line
+        set +f
+        case "${1:-}" in
+            bruk|importer)
+                _dep="$(_nc_module_file_for_import "${2:-}")"
+                if [ -e "$_dep" ] && [ "$_dep" -nt "$_cache" ]; then
+                    return 0
+                fi
+                ;;
+        esac
+    done < "$_src"
+    return 1
+}
+
+_nc_run_target_cache_path() {
+    _src="$1"
+    case "$_src" in
+        /*) _src_abs="$_src" ;;
+        *) _src_abs="$(pwd)/$_src" ;;
+    esac
+    case "$_src_abs" in
+        "$ROOT_DIR"/*) _rel=${_src_abs#"$ROOT_DIR"/} ;;
+        *) _rel="external/$(basename "$_src_abs")" ;;
+    esac
+    printf '%s/build/cache/nc/run-targets/%s.ncb.json\n' "$ROOT_DIR" "$_rel"
+}
+
 if [ $# -eq 0 ]; then
     printf 'Norscode %s  —  køyr: nc help\n' "$(_nc_version)"
     exit 0
@@ -177,6 +255,12 @@ case "$CMD" in
             fi
             if [ "$_run_bundle_imports" = "1" ] && [ -x "$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.sh" ]; then
                 _ncb_tmp="${TMPDIR:-/tmp}/norscode_run_$$.ncb.json"
+                _ncb_is_cache=0
+                _ncb_build_tmp=""
+                if [ "${NORSCODE_RUN_CACHE:-1}" != "0" ]; then
+                    _ncb_tmp="$(_nc_run_target_cache_path "$SRC")"
+                    _ncb_is_cache=1
+                fi
                 _vm_tmp="${TMPDIR:-/tmp}/norscode_vmexec_$$.ncb.json"
                 _vm_is_cache=0
                 _vm_build_tmp=""
@@ -184,10 +268,17 @@ case "$CMD" in
                     _vm_tmp="${NORSCODE_RUN_VM_CACHE:-$ROOT_DIR/build/cache/nc/vm_executor.ncb.json}"
                     _vm_is_cache=1
                 fi
+                _host_support_cache="${NORSCODE_RUN_NCB_HOST_CACHE:-$ROOT_DIR/build/cache/nc/run_ncb_host.status}"
                 _out_tmp="${TMPDIR:-/tmp}/norscode_run_$$.out"
                 _direct_tmp="${TMPDIR:-/tmp}/norscode_run_$$.direct.out"
                 _cleanup_run_tmp() {
-                    rm -f "$_ncb_tmp" "$_out_tmp" "$_direct_tmp"
+                    rm -f "$_out_tmp" "$_direct_tmp"
+                    if [ -n "$_ncb_build_tmp" ]; then
+                        rm -f "$_ncb_build_tmp"
+                    fi
+                    if [ "$_ncb_is_cache" != "1" ]; then
+                        rm -f "$_ncb_tmp"
+                    fi
                     if [ -n "$_vm_build_tmp" ]; then
                         rm -f "$_vm_build_tmp"
                     fi
@@ -196,7 +287,17 @@ case "$CMD" in
                     fi
                 }
                 trap _cleanup_run_tmp EXIT HUP INT TERM
-                "$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.sh" --from-no "$ROOT_DIR" "$SRC" "$_ncb_tmp" "__main__" "$ROOT_DIR"
+                if [ "$_ncb_is_cache" = "1" ]; then
+                    mkdir -p "$(dirname "$_ncb_tmp")"
+                    if _nc_run_target_cache_stale "$_ncb_tmp" "$SRC"; then
+                        _ncb_build_tmp="$_ncb_tmp.$$"
+                        "$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.sh" --from-no "$ROOT_DIR" "$SRC" "$_ncb_build_tmp" "__main__" "$ROOT_DIR"
+                        mv "$_ncb_build_tmp" "$_ncb_tmp"
+                        _ncb_build_tmp=""
+                    fi
+                else
+                    "$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.sh" --from-no "$ROOT_DIR" "$SRC" "$_ncb_tmp" "__main__" "$ROOT_DIR"
+                fi
                 if [ "$_vm_is_cache" = "1" ]; then
                     mkdir -p "$(dirname "$_vm_tmp")"
                     if _nc_run_vm_cache_stale "$_vm_tmp"; then
@@ -210,13 +311,29 @@ case "$CMD" in
                 fi
                 _rc=0
                 if [ "${NORSCODE_VM_TRACE:-0}" = "1" ]; then
-                    env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run-ncb-host NORSCODE_HOST_NCB_FILE="$_vm_tmp" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" || _rc=$?
+                    _host_status="$(_nc_run_ncb_host_status "$_host_support_cache")"
+                    if [ "$_host_status" != "unsupported" ]; then
+                        env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run-ncb-host NORSCODE_HOST_NCB_FILE="$_vm_tmp" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" || _rc=$?
+                    else
+                        _rc=1
+                    fi
                     if [ "$_rc" -ne 0 ]; then
                         env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/vm_executor.no" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" || _rc=$?
                     fi
                 else
-                    env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run-ncb-host NORSCODE_HOST_NCB_FILE="$_vm_tmp" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" >"$_out_tmp" 2>&1 || _rc=$?
-                    if [ "$_rc" -ne 0 ] && _nc_file_contains "$_out_tmp" "Ukjend NORSCODE_CMD: run-ncb-host"; then
+                    _host_status="$(_nc_run_ncb_host_status "$_host_support_cache")"
+                    if [ "$_host_status" != "unsupported" ]; then
+                        env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run-ncb-host NORSCODE_HOST_NCB_FILE="$_vm_tmp" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" >"$_out_tmp" 2>&1 || _rc=$?
+                        if [ "$_rc" -eq 0 ]; then
+                            _nc_write_run_ncb_host_status "$_host_support_cache" "supported"
+                        fi
+                    else
+                        _rc=1
+                    fi
+                    if [ "$_rc" -ne 0 ] && { [ "$_host_status" = "unsupported" ] || _nc_file_contains "$_out_tmp" "Ukjend NORSCODE_CMD: run-ncb-host"; }; then
+                        if [ "$_host_status" != "unsupported" ]; then
+                            _nc_write_run_ncb_host_status "$_host_support_cache" "unsupported"
+                        fi
                         _rc=0
                         env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/vm_executor.no" NORSCODE_NCB_FILE="$_ncb_tmp" NORSCODE_VM_SOURCE=1 NORSCODE_VM_QUIET=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE" >"$_out_tmp" 2>&1 || _rc=$?
                     fi
