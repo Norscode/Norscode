@@ -79,6 +79,7 @@ Det gir ferdige komponentar for:
 - sorteringsvelger
 - tom-tabellrad og paginering
 - ticket-rad for helpdesk-lister
+- split-view for liste og detalj
 - detalj-layout, metadata og aktivitetslogg
 - sammenleggbare disclosure-seksjonar
 - kommentarboks og tomt panel
