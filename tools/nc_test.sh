@@ -110,7 +110,7 @@ _is_native_unsupported() {
 
 _uses_source_vm() {
     case "$1" in
-        test_dependency_import.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_html_state.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
+        test_dependency_import.no|test_frontend_panel_helpers.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_html_state.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
         *) return 1 ;;
     esac
 }
