@@ -12,6 +12,7 @@ Pakken passer når en side fortsatt skal virke som vanlig HTML, men trenger litt
 - `dropdown(...)`
 - `live_search(...)`
 - `live_filter(...)`
+- `autoresize_tekstområde(...)`
 - `autosubmit_search(...)`
 - `json_form(...)`
 
@@ -19,13 +20,16 @@ Pakken passer når en side fortsatt skal virke som vanlig HTML, men trenger litt
 
 - `island_action(...)`
 - `island_submit(...)`
+- `confirm_action(...)`
+- `confirm_submit(...)`
+- `copy_knapp(...)`
 - `modal_open_knapp(...)`
 - `modal_close_knapp(...)`
 
 ## Standard Script
 
 Komponentene bruker samme `data-nc-*` kontrakt som `std.html`.
-Legg `html.script_standard()` nederst på siden når du bruker dropdown, modal, autosubmit, JSON-skjema eller live-filter.
+Legg `html.script_standard()` nederst på siden når du bruker dropdown, modal, kopiering, confirm, autoresize, autosubmit, JSON-skjema eller live-filter.
 
 Eksempel:
 
@@ -41,4 +45,10 @@ islands.dropdown(
 )
 
 html.script_standard()
+```
+
+Eksempel med kopiering:
+
+```norscode
+islands.copy_knapp("Kopier", "kode", "Kopiert")
 ```
