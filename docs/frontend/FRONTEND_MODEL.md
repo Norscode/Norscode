@@ -71,6 +71,7 @@ Det gir ferdige komponentar for:
 - tom-tabellrad og paginering
 - ticket-rad for helpdesk-lister
 - detalj-layout, metadata og aktivitetslogg
+- sammenleggbare disclosure-seksjonar
 - kommentarboks og tomt panel
 - modal
 - toast-region
