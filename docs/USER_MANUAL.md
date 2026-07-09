@@ -261,7 +261,7 @@ Bruk mønsteret som finst i mappa du arbeider i. Standardbibliotek brukar normal
 Viktige standardmodular:
 
 - `std.json`: JSON parse/stringify.
-- `std.web`: enkel web/server-hjelp.
+- `std.web`: web/server-hjelp for request, routing, standard responsar, cookies og produksjonsheaders.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
 - `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
 - `std.stdlib_status`: maskinlesbar status for kva som er `stabil`, `eksperimentell` eller `stub`.
@@ -371,6 +371,8 @@ Serverlaget har same standardflyt som moderne web-rammeverk:
 
 - `GET`, `HEAD` og `OPTIONS` blir handtert gjennom same rute-kontrakt.
 - JSON- og tekstsvar får trygg `content-type` når appen ikkje set han sjølv.
+- Vanlege svar kan lagast direkte med `response_html`, `response_text_plain`, `response_redirect_found`, `response_redirect_see_other` og `response_no_content`.
+- Ekstra responsheaderar kan leggjast på med `response_with_header`.
 - Feilsvar frå serverruta er JSON (`{"error": ...}`) og passar API-klientar.
 - Produksjonsheaders blir lagt på av servermotoren: `x-content-type-options`, `referrer-policy`, `x-frame-options`, `cache-control` og `server`.
 - `x-request-id` blir ført vidare når klienten sender han, elles blir han generert.
