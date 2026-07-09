@@ -97,10 +97,11 @@ Det gir ferdige komponentar for:
 - skjemafelt med required, disabled, readonly, autocomplete og feilmeldingstilstandar
 - HTML islands for modal-knappar, dropdown, live-filter og JSON-skjema
 - HTML router med aktive lenker, brødsmuler og canonical metadata
+- HTML templates for sidehode, artikkel, seksjon og liste-side
 
 Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
 Bruk `frontend.ui_script()` ved slutten av `<body>` når sida treng standard handlingar for knappar, filter, dialogar og små varsel.
-For lågnivå markup kan komponentane blandast med `std.html`, `std.html_forms`, `std.html_islands` og `std.html_router`.
+For lågnivå markup kan komponentane blandast med `std.html`, `std.html_forms`, `std.html_islands`, `std.html_router` og `std.html_templates`.
 
 ## Praktisk konsekvens
 
