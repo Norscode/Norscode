@@ -55,18 +55,21 @@ fi
 rm -f "$_out"
 
 mkdir -p "$(dirname "$NORSCODE_OMGANG6B_NCB_OUT")"
-NORSCODE_USE_PRECOMPILED_SELFHOST=0 \
-NORSCODE_BUNDLE_ENTRY='selfhost.elf_compile_driver.start' \
-  "$ROOT/bin/nc" bundle \
-  selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no \
-  selfhost.parser=selfhost/parser.no \
-  selfhost.compiler.semantic=selfhost/compiler/semantic.no \
-  selfhost.compiler.ir_to_bytecode=selfhost/compiler/ir_to_bytecode.no \
-  selfhost.json=selfhost/json.no \
-  selfhost.kompiler=selfhost/kompiler.no \
-  selfhost.bundler=selfhost/bundler.no \
-  selfhost.elf_compile_driver=selfhost/elf_compile_driver.no \
-  --output "$NORSCODE_OMGANG6B_NCB_OUT"
 mkdir -p "$ROOT/bootstrap/precompiled_fragments" "$ROOT/bootstrap/precompiled_fragments_inner"
-"$ROOT/bin/nc" run "$ROOT/tools/regenerate_omgang6b_fragments_safe.no" >/dev/null
+if [ "${NC_REGEN_OMGANG6B_FRAGMENTS:-0}" = "1" ]; then
+  "$ROOT/bin/nc" run "$ROOT/tools/regenerate_omgang6b_fragments_safe.no" >/dev/null
+fi
+{
+  printf '{"format":"ncb-v1","entry":"selfhost.elf_compile_driver.start","imports":[],"route_handlers":{},"dependency_providers":{},"guard_providers":{},"request_middlewares":[],"response_middlewares":[],"error_middlewares":[],"startup_hooks":[],"shutdown_hooks":[],"tests":{},"functions":{'
+  _sep=""
+  for _frag in lexer_m1 parser semantic ir_to_bytecode json kompiler bundler elf_compile_driver; do
+    printf '%s' "$_sep"
+    _file="$ROOT/bootstrap/precompiled_fragments_inner/$_frag.functions.json"
+    while IFS= read -r _line || [ -n "$_line" ]; do
+      printf '%s' "$_line"
+    done < "$_file"
+    _sep=","
+  done
+  printf '}}'
+} > "$NORSCODE_OMGANG6B_NCB_OUT"
 printf '✓ Omgang 6b stage-0 NCB: %s (%s bytes)\n' "$NORSCODE_OMGANG6B_NCB_OUT" "$(file_bytes "$NORSCODE_OMGANG6B_NCB_OUT")"

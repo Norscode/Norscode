@@ -20,6 +20,6 @@ Start her:
 - [macOS app-signering](MAC_APP_SIGNING.md)
 - [Windows app-release](WINDOWS_APP_RELEASE.md)
 - [Windows app-installasjon](WINDOWS_APP_INSTALL.md)
-- [Selfhost-handlingsplan](SELFHOST_HANDLINGSPLAN.md)
+- [Selfhost-handlingsplan](SELFHOST_HANDLINGSPLAN.md) (`docs/SELFHOST_HANDLINGSPLAN.md`)
 
 Brukarmanualen forklarer praktisk bruk av CLI, server, NorsDB, prosjekt, pakkar og feilsøking. Opplæringsguiden lærer språket steg for steg. Historiske og arkiverte notat ligg under [arkivindeksen](_archive/ARCHIVE_INDEX.md), og release-notat i `.github/releases/` er historiske snapshots, ikkje gjeldande status.

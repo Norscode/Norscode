@@ -85,7 +85,7 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 ## Arkiv
 
-Historiske notat ligg i arkivet. Dei er nyttige for bakgrunn, men dei er ikkje normal brukarveg.
+Historiske notat ligg i arkivet under `docs/_archive/ARCHIVE_INDEX.md`. Dei er nyttige for bakgrunn, men dei er ikkje normal brukarveg.
 
 - [Arkivindeks](./_archive/ARCHIVE_INDEX.md)
 
