@@ -97,7 +97,7 @@ Det gir ferdige komponentar for:
 - UI-script for modal, kopiering, live-filter og toast
 - skjemafelt med required, disabled, readonly, autocomplete og feilmeldingstilstandar
 - feilsammendrag, feltgrupper og standard skjemahandlinger
-- HTML islands for modal-knappar, dropdown, live-filter og JSON-skjema
+- HTML islands for modal-knappar, dropdown, kopiering, confirm, autoresize, live-filter og JSON-skjema
 - HTML router med aktive lenker, brødsmuler og canonical metadata
 - HTML templates for sidehode, artikkel, seksjon, liste-side, detaljside og dashboard
 
