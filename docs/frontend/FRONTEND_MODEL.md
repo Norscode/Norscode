@@ -48,6 +48,25 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 - Bruk [`std.islands`](../std/islands.no) når du vil skille mellom full side og fragment, eller modellere server/client-splitt.
 - Bruk [`std.web`](../std/web.no) når du trenger request-, route- og response-hjelpere på HTTP-nivå.
 
+## UI-kit
+
+`std.frontend` har eit lite standard UI-kit for arbeidsflater som helpdesk, admin og dashboard.
+Det gir ferdige komponentar for:
+
+- sidehode med handlingar
+- primær- og sekundærknappar
+- verktøylinje
+- status-badges
+- dashboard-statistikk
+- sidebar-shell
+- filterfelt
+- datatabell
+- modal
+- toast-region
+
+Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
+For lågnivå markup kan komponentane blandast med `std.html`.
+
 ## Praktisk konsekvens
 
 Frontend-roadmapens første etappe er å etablere:
