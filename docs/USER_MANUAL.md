@@ -268,7 +268,7 @@ Viktige standardmodular:
 - `std.statisk`: statiske filer med MIME, cache, ETag og trygg "ikkje statisk"-flyt vidare til app-ruter.
 - `std.deploy`: produksjonsoppsett for systemd, supervisor, nginx, helsesjekk og rollback.
 - `std.rest`: REST-hjelpere for JSON-svar, CRUD-viewset, paginering, feilsvar og API-responsar som `svar`, `ok_objekt`, `ok_liste`, `akseptert` og `oppretta_med_location`.
-- `std.admin`: CRUD-admin for registrerte modellar, med escaped HTML-output, no-store admin-headers, oversiktsstatistikk, tom-tilstand, statusmeldingar og CSRF-sikre admin-POST-hjelparar.
+- `std.admin`: CRUD-admin for registrerte modellar, med escaped HTML-output, no-store admin-headers, oversiktsstatistikk, tom-tilstand, kontrollerte statusmeldingar og CSRF-sikre admin-POST-hjelparar.
 - `std.mw`: middleware for CORS, rate limiting, tryggleiksheaders, logging, komprimering og cache, med pipeline-klare konfigurasjonar.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
 - `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
