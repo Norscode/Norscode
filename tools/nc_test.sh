@@ -96,7 +96,7 @@ _is_native_unsupported() {
         return 0
     fi
     case "$1" in
-        test_islands*|test_html_state*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
+        test_islands*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
         test_advanced_example.no|test_ai.no|test_api_advanced.no|test_api_server.no|test_api_simple_native.no|test_async_http.no|test_struct_example.no|test_wasm.no) return 0 ;;
         test_cache.no|test_http_helpers.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
         test_selfhost_phase2_ffi_smoke.no|test_selfhost_phase2_regression.no|test_selfhost_phase2_smoke.no|test_selfhost_phase2_stdlib_usecases.no) return 0 ;;
@@ -110,7 +110,7 @@ _is_native_unsupported() {
 
 _uses_source_vm() {
     case "$1" in
-        test_dependency_import.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
+        test_dependency_import.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_html_state.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
         *) return 1 ;;
     esac
 }
