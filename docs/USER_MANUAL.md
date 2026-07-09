@@ -263,12 +263,12 @@ Viktige standardmodular:
 - `std.json`: JSON parse/stringify.
 - `std.web`: web/server-hjelp for request, routing, standard responsar, cookies og produksjonsheaders.
 - `std.auth`: innlogging, session-token, roller og ferdige 401/403/login/logout-responsar med session-cookie.
-- `std.security`: samla sikkerheitsgate for auth, session, CSRF, headers, cookies, secrets, random, audit og deploy-health.
+- `std.security`: samla sikkerheitsgate for auth, session, CSRF, headers, cookies, secrets, random, audit, admin-panel og deploy-health.
 - `std.web_app_stack`: samla webflyt for innstillingar, migrasjon, auth/session, admin og standard JSON-responsar.
 - `std.statisk`: statiske filer med MIME, cache, ETag og trygg "ikkje statisk"-flyt vidare til app-ruter.
 - `std.deploy`: produksjonsoppsett for systemd, supervisor, nginx, helsesjekk og rollback.
 - `std.rest`: REST-hjelpere for JSON-svar, CRUD-viewset, paginering, feilsvar og API-responsar som `svar`, `ok_objekt`, `ok_liste`, `akseptert` og `oppretta_med_location`.
-- `std.admin`: CRUD-admin for registrerte modellar, med escaped HTML-output, no-store admin-headers, oversiktsstatistikk og tom-tilstand.
+- `std.admin`: CRUD-admin for registrerte modellar, med escaped HTML-output, no-store admin-headers, oversiktsstatistikk, tom-tilstand og CSRF-sikre admin-POST-hjelparar.
 - `std.mw`: middleware for CORS, rate limiting, tryggleiksheaders, logging, komprimering og cache, med pipeline-klare konfigurasjonar.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
 - `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
