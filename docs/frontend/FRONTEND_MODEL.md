@@ -46,7 +46,7 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 - Bruk [`std.frontend`](../std/frontend.no) når du vil bygge gjenbrukbare komponenter, layouts og partials.
 - Bruk [`std.stil`](../std/stil.no) når du vil bygge norske stilark med funksjonar som `regel(...)`, `variabel(...)`, `tema_lys(...)`, `media(...)`, `grid_kolonner(...)` og `flex_rad(...)`.
 - Bruk [`std.islands`](../std/islands.no) når du vil skille mellom full side og fragment, eller modellere server/client-splitt.
-- Bruk [`std.web`](../std/web.no) når du trenger request-, route- og response-hjelpere på HTTP-nivå.
+- Bruk [`std.web`](../std/web.no) når du trenger request-, route- og response-hjelpere på HTTP-nivå, inkludert standard HTML-, tekst-, redirect- og tomme responsar.
 
 ## UI-kit
 
