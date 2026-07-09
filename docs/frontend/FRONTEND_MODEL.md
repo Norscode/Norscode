@@ -57,6 +57,7 @@ Det gir ferdige komponentar for:
 - brødsmulesti og varsel
 - primær- og sekundærknappar
 - verktøylinje
+- handlingsmeny og menyelement
 - tabs, segmentert kontroll og filterbar
 - status-badges
 - dashboard-statistikk
