@@ -326,7 +326,7 @@ NC_SERVE_STATIC_DIR=frontend/assets/icons ./bin/nc serve examples/web_cors.no --
 
 Upload, sessions og deploy har eigne produksjonskontraktar:
 
-- `std.opplasting.produksjonsstatus()` dekker multipart, JSON-upload, raw body, storleiksgrense, typevalidering, trygt filnamn og lagring.
+- `std.opplasting.produksjonsstatus()` dekker multipart, JSON-upload, raw body, storleiksgrense, typevalidering, trygt filnamn, standard JSON-responsar og lagring.
 - `std.sesjon.sikkerheitsstatus()` dekker serverside session, `HttpOnly`, `SameSite=Lax`, valfri `Secure`, TTL, flash, opprydding og cookie-headerar på standard `std.web`-responsar.
 - `std.deploy.produksjonsmønster(cfg)` samlar workers, helse, statics, env-fil, rollback og graceful shutdown.
 - `std.multiprocessing.produksjonsstatus()` samlar prosess, pool, queue, pipe, event, lock og value som aktiv runtime-kontrakt.
