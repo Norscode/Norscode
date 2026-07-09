@@ -58,6 +58,8 @@ env \
   NC_TEST_TMPDIR="${NC_TEST_TMPDIR:-$ROOT/build/nc-test-tmp}" \
   NC_TEST_FILE="$NC_TEST_FILE" \
   NC_TEST_FILES="$NC_TEST_FILES" \
+  NC_TEST_SHARD="${NC_TEST_SHARD:-}" \
+  NC_TEST_SHARDS="${NC_TEST_SHARDS:-}" \
   "$ROOT/bin/nc" run "$ROOT/tools/nc_test.no" >"$_out" 2>&1 || _rc=$?
 
 if [ "$_rc" -eq 0 ]; then
@@ -113,6 +115,17 @@ _uses_source_vm() {
     esac
 }
 
+_is_uint() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+_use_shard() {
+    _is_uint "${NC_TEST_SHARD:-}" && _is_uint "${NC_TEST_SHARDS:-}" && [ "${NC_TEST_SHARDS:-0}" -gt 1 ]
+}
+
 _run_one() {
     _file="$1"
     case "$_file" in
@@ -163,8 +176,19 @@ else
         printf 'FEIL: Ingen testfiler funne i %s\n' "${TESTS_DIR:-$ROOT/tests}" >&2
         exit 1
     fi
+    if _use_shard; then
+        printf 'Shard: %s/%s\n' "$NC_TEST_SHARD" "$NC_TEST_SHARDS"
+    fi
+    _idx=0
     for _file in $NC_TEST_FILES; do
         [ -n "$_file" ] || continue
+        if _use_shard; then
+            if [ $((_idx % NC_TEST_SHARDS)) -ne "$NC_TEST_SHARD" ]; then
+                _idx=$((_idx + 1))
+                continue
+            fi
+            _idx=$((_idx + 1))
+        fi
         _name="$(basename "$_file")"
         if [ "${NC_SLOW_TESTS:-0}" = "1" ] && ! _is_slow "$_name"; then
             continue
