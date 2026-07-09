@@ -56,6 +56,7 @@ Det gir ferdige komponentar for:
 - sidehode med handlingar
 - primær- og sekundærknappar
 - verktøylinje
+- tabs, segmentert kontroll og filterbar
 - status-badges
 - dashboard-statistikk
 - sidebar-shell
@@ -63,6 +64,7 @@ Det gir ferdige komponentar for:
 - datatabell
 - feltgruppe, tekstfelt og valg
 - status- og prioritetvelger
+- sorteringsvelger
 - tom-tabellrad og paginering
 - ticket-rad for helpdesk-lister
 - detalj-layout, metadata og aktivitetslogg
