@@ -70,6 +70,7 @@ Det gir ferdige komponentar for:
 - dashboard-statistikk
 - oppsummeringsboks og nøkkelrader
 - statusboard med kolonnar og sakskort
+- listepanel og kompakte listerader
 - fremdrift/SLA-visning
 - stegindikator for saksgang
 - sidebar-shell
