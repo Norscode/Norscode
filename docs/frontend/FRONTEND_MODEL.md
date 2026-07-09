@@ -63,8 +63,10 @@ Det gir ferdige komponentar for:
 - datatabell
 - modal
 - toast-region
+- UI-script for modal, kopiering, live-filter og toast
 
 Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
+Bruk `frontend.ui_script()` ved slutten av `<body>` når sida treng standard handlingar for knappar, filter, dialogar og små varsel.
 For lågnivå markup kan komponentane blandast med `std.html`.
 
 ## Praktisk konsekvens
