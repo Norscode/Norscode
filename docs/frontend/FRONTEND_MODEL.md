@@ -61,6 +61,7 @@ Det gir ferdige komponentar for:
 - handlingsmeny og menyelement
 - tabs, segmentert kontroll og filterbar
 - bulkbar for massehandlingar
+- tetthetswrapper og kompakt visning
 - status-badges
 - dashboard-statistikk
 - oppsummeringsboks og nøkkelrader
