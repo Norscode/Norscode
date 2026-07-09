@@ -9,12 +9,19 @@ Pakken passer når flere sider skal dele samme struktur uten å bygge et større
 - `innholdsseksjon(...)`
 - `artikkel(...)`
 - `liste_side(...)`
+- `detalj_side(...)`
+- `dashboard_side(...)`
+- `admin_side(...)`
 
 ## Ferdigsider
 
 - `dokumentasjon_side(...)`
 - `blogg_side(...)`
 - `produkt_side(...)`
+
+`detalj_side(...)` passer for ticket-, bruker- og admin-detaljer med metadata og hovedinnhold.
+`dashboard_side(...)` passer for sider med metrikkrad og arbeidsinnhold.
+`admin_side(...)` gir en enkel administrasjonsside med navigasjon og body.
 
 Eksempel:
 
@@ -30,3 +37,14 @@ tmpl.liste_side(
 )
 ```
 
+Eksempel med dashboard:
+
+```norscode
+tmpl.dashboard_side(
+    "Dashboard",
+    "Oversikt",
+    "<p>12 åpne saker</p>",
+    "<p>Siste aktivitet</p>",
+    "/app.css"
+)
+```

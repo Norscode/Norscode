@@ -99,7 +99,7 @@ Det gir ferdige komponentar for:
 - feilsammendrag, feltgrupper og standard skjemahandlinger
 - HTML islands for modal-knappar, dropdown, live-filter og JSON-skjema
 - HTML router med aktive lenker, brødsmuler og canonical metadata
-- HTML templates for sidehode, artikkel, seksjon og liste-side
+- HTML templates for sidehode, artikkel, seksjon, liste-side, detaljside og dashboard
 
 Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
 Bruk `frontend.ui_script()` ved slutten av `<body>` når sida treng standard handlingar for knappar, filter, dialogar og små varsel.
