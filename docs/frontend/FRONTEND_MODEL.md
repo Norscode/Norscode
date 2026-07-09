@@ -65,6 +65,8 @@ Det gir ferdige komponentar for:
 - status- og prioritetvelger
 - tom-tabellrad og paginering
 - ticket-rad for helpdesk-lister
+- detalj-layout, metadata og aktivitetslogg
+- kommentarboks og tomt panel
 - modal
 - toast-region
 - UI-script for modal, kopiering, live-filter og toast
