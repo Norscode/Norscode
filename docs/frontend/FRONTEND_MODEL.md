@@ -42,7 +42,7 @@ Når grunnmuren er på plass, kan vi senere utvide med client-side routing, stat
 
 ## Når du bruker hva
 
-- Bruk [`std.html`](../std/html.no) når du vil bygge HTML eksplisitt eller jobbe lavnivå med tagger, skjemaer, lister og tabeller.
+- Bruk [`std.html`](../std/html.no) når du vil bygge HTML eksplisitt eller jobbe lavnivå med semantiske tagger, skjemaer, lister og tabeller.
 - Bruk [`std.frontend`](../std/frontend.no) når du vil bygge gjenbrukbare komponenter, layouts og partials.
 - Bruk [`std.stil`](../std/stil.no) når du vil bygge norske stilark med funksjonar som `regel(...)`, `variabel(...)`, `tema_lys(...)` og `media(...)`.
 - Bruk [`std.islands`](../std/islands.no) når du vil skille mellom full side og fragment, eller modellere server/client-splitt.
@@ -97,6 +97,7 @@ Det gir ferdige komponentar for:
 - UI-script for modal, kopiering, live-filter og toast
 - skjemafelt med required, disabled, readonly, autocomplete og feilmeldingstilstandar
 - feilsammendrag, feltgrupper og standard skjemahandlinger
+- HTML-lavnivå for semantiske taggar som aside, figure, figcaption, dialog, small, strong og time
 - HTML islands for modal-knappar, dropdown, kopiering, confirm, autoresize, live-filter og JSON-skjema
 - HTML state for statusfelt, state-panel og tom/lasting/feil-visningar
 - HTML router med aktive lenker, brødsmuler og canonical metadata
