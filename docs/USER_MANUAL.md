@@ -383,6 +383,7 @@ Serverlaget har same standardflyt som moderne web-rammeverk:
 - Ekstra responsheaderar kan leggjast på med `response_with_header`.
 - Feilsvar frå serverruta er JSON (`{"error": ...}`) og passar API-klientar.
 - Produksjonsheaders blir lagt på av servermotoren: `x-content-type-options`, `referrer-policy`, `x-frame-options`, `cache-control` og `server`.
+- Streng web-finalisering kan brukast med `response_finalize_strict` og `response_finalize_strict_cors`, som i tillegg legg på HSTS, CSP, Permissions-Policy, cross-origin-isolering og `x-permitted-cross-domain-policies`.
 - `x-request-id` blir ført vidare når klienten sender han, elles blir han generert.
 - CORS/preflight svarer med `allow`, `access-control-allow-methods` og `access-control-allow-headers`.
 
