@@ -59,6 +59,7 @@ Det gir ferdige komponentar for:
 - tilstandspanel med handlingar
 - primær- og sekundærknappar
 - verktøylinje
+- ikonknappar og tooltip
 - kommandohint og tastaturmerker
 - avatar, brukerchip og brukerlinje
 - handlingsmeny og menyelement
