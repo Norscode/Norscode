@@ -55,6 +55,7 @@ Det gir ferdige komponentar for:
 
 - sidehode med handlingar
 - brødsmulesti og varsel
+- skjelettvisning for innlasting
 - tilstandspanel med handlingar
 - primær- og sekundærknappar
 - verktøylinje
