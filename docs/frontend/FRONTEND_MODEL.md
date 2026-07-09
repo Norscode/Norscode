@@ -61,6 +61,7 @@ Det gir ferdige komponentar for:
 - tabs, segmentert kontroll og filterbar
 - status-badges
 - dashboard-statistikk
+- oppsummeringsboks og nøkkelrader
 - fremdrift/SLA-visning
 - stegindikator for saksgang
 - sidebar-shell
