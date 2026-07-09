@@ -262,6 +262,7 @@ Viktige standardmodular:
 
 - `std.json`: JSON parse/stringify.
 - `std.web`: web/server-hjelp for request, routing, standard responsar, cookies og produksjonsheaders.
+- `std.auth`: innlogging, session-token, roller og ferdige 401/403/login/logout-responsar med session-cookie.
 - `std.rest`: REST-hjelpere for JSON-svar, CRUD-viewset, paginering, feilsvar og API-responsar som `svar`, `ok_objekt`, `ok_liste`, `akseptert` og `oppretta_med_location`.
 - `std.admin`: CRUD-admin for registrerte modellar, med escaped HTML-output for tabellar, skjema og admin-titlar.
 - `std.mw`: middleware for CORS, rate limiting, tryggleiksheaders, logging, komprimering og cache, med pipeline-klare konfigurasjonar.
