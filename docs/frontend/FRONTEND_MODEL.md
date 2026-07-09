@@ -95,10 +95,11 @@ Det gir ferdige komponentar for:
 - toast-region
 - UI-script for modal, kopiering, live-filter og toast
 - skjemafelt med required, disabled, readonly, autocomplete og feilmeldingstilstandar
+- HTML islands for modal-knappar, dropdown, live-filter og JSON-skjema
 
 Bruk `frontend.ui_stilark()` saman med komponentane når du vil ha eit komplett, responsivt standarduttrykk utan å skrive alt stilarket sjølv.
 Bruk `frontend.ui_script()` ved slutten av `<body>` når sida treng standard handlingar for knappar, filter, dialogar og små varsel.
-For lågnivå markup kan komponentane blandast med `std.html` og `std.html_forms`.
+For lågnivå markup kan komponentane blandast med `std.html`, `std.html_forms` og `std.html_islands`.
 
 ## Praktisk konsekvens
 
