@@ -262,6 +262,7 @@ Viktige standardmodular:
 
 - `std.json`: JSON parse/stringify.
 - `std.web`: web/server-hjelp for request, routing, standard responsar, cookies og produksjonsheaders.
+- `std.rest`: REST-hjelpere for JSON-svar, CRUD-viewset, paginering, feilsvar og API-responsar som `svar`, `ok_objekt`, `ok_liste`, `akseptert` og `oppretta_med_location`.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
 - `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
 - `std.stdlib_status`: maskinlesbar status for kva som er `stabil`, `eksperimentell` eller `stub`.
