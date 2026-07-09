@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Tynn wrapper: Omgang 6b.3-orkestrering ligg i tools/selfcompile_stage0_elf.no.
+# Norscode-first wrapper: Omgang 6b.3-orkestrering ligg i tools/selfcompile_stage0_elf.no.
+# Shell-delen under er avgrensa Linux/native reserveveg medan runtime manglar exec_prosess.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -7,6 +8,17 @@ cd "$ROOT"
 
 export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
 export NORSCODE_ROOT="$ROOT"
+
+first_word() {
+  _text="$1"
+  set -- $_text
+  printf '%s' "${1:-}"
+}
+
+file_bytes() {
+  _file="$1"
+  first_word "$(wc -c "$_file")"
+}
 
 run_shell_gate() {
   base="$ROOT/build/6b/selfcompile"
@@ -25,10 +37,10 @@ run_shell_gate() {
 
   printf '=== Omgang 6b.3: stage-0 ELF sjølvkompilering ===\n\n'
   printf '[1/4] Gen1: stage-0 NCB + ELF (host)...\n'
-  bash "$ROOT/tools/build_omgang6b_compiler_ncb.sh" "$gen1_ncb"
-  bash "$ROOT/tools/ncb_to_elf.sh" "$gen1_ncb" "$gen1_elf"
+  "$ROOT/bin/nc" build-omgang6b-ncb "$gen1_ncb"
+  "$ROOT/bin/nc" ncb-to-elf "$gen1_ncb" "$gen1_elf"
   chmod +x "$gen1_elf"
-  b1="$(wc -c < "$gen1_elf" | tr -d ' ')"
+  b1="$(file_bytes "$gen1_elf")"
   printf '  [OK] Gen1 ELF %s bytes\n\n' "$b1"
 
   case "$(uname -s):$(uname -m)" in
@@ -77,12 +89,12 @@ run_shell_gate() {
   fi
   test -f "$gen2_ncb"
   printf '  [OK] Gen2 NCB %s bytes (Gen1 NCB %s bytes)\n\n' \
-    "$(wc -c < "$gen2_ncb" | tr -d ' ')" "$(wc -c < "$gen1_ncb" | tr -d ' ')"
+    "$(file_bytes "$gen2_ncb")" "$(file_bytes "$gen1_ncb")"
 
   printf '[3/4] Gen2 ELF frå Gen2 NCB (native codegen)...\n'
-  bash "$ROOT/tools/ncb_to_elf.sh" "$gen2_ncb" "$gen2_elf"
+  "$ROOT/bin/nc" ncb-to-elf "$gen2_ncb" "$gen2_elf"
   chmod +x "$gen2_elf"
-  b2="$(wc -c < "$gen2_elf" | tr -d ' ')"
+  b2="$(file_bytes "$gen2_elf")"
   printf '  [OK] Gen2 ELF %s bytes\n\n' "$b2"
 
   printf '[4/4] Byte-paritet Gen1 ELF == Gen2 ELF (bundle-args)...\n'
@@ -94,17 +106,35 @@ run_shell_gate() {
 
 _out="${TMPDIR:-/tmp}/selfcompile_stage0_elf_$$.log"
 _rc=0
+
+print_file() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\n' "$_line"
+  done < "$_file"
+}
+
+has_exec_gap() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      *"Ukjent funksjon: exec_prosess"*|*"Ukjent funksjon: builtin.exec_prosess"*|*"Ukjent funksjon: builtin.builtin.exec_prosess"*) return 0 ;;
+    esac
+  done < "$_file"
+  return 1
+}
+
 "$ROOT/bin/nc" run "$ROOT/tools/selfcompile_stage0_elf.no" >"$_out" 2>&1 || _rc=$?
 if [ "$_rc" -eq 0 ]; then
-  cat "$_out"
+  print_file "$_out"
   rm -f "$_out"
   exit 0
 fi
-if [ ! -s "$_out" ] || grep -Eq 'Ukjent funksjon: builtin(\.builtin)?\.exec_prosess' "$_out"; then
+if [ ! -s "$_out" ] || has_exec_gap "$_out"; then
   rm -f "$_out"
   run_shell_gate
   exit 0
 fi
-cat "$_out"
+print_file "$_out"
 rm -f "$_out"
 exit "$_rc"

@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: macOS app-verifikasjon ligg i tools/verify-macos-app.no.
+# Norscode-first wrapper: macOS app-verifikasjon ligg i tools/verify-macos-app.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/verify-macos-app.sh [APP_PATH]
+bruk: nc verify-macos-app [APP_PATH]
 
 Verifiserer structure, plist og codesign-status for ein macOS-appbundle.
 EOF
@@ -31,4 +32,4 @@ export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
 export NORSCODE_ROOT="$ROOT_DIR"
 export NORSCODE_MACOS_VERIFY_APP="$APP_PATH"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/verify-macos-app.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/verify-macos-app.no"

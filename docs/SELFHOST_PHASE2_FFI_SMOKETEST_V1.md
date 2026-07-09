@@ -12,7 +12,7 @@ Dette dokumentet definerer det første enkle smoketestløpet for ABI og modulkal
 
 1. Opprett ein loggobjekt og verifiser felt
 2. Opprett ein konfigurasjon og les status
-3. Skriv og les ein midlertidig fil
+3. Skriv og les ei kortlevd, deterministisk røykfil
 4. Lagre og les eit lite datamateriale
 5. Verifiser cache-, scheduler- og trådstatus
 

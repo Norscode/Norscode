@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # tools/docker-build-linux.sh
-# Tynn wrapper: Linux bootstrap-pakking ligg i tools/docker-build-linux.no.
+# Norscode-first wrapper: Linux bootstrap-pakking ligg i tools/docker-build-linux.no.
+# Shell-delen under mappar output-argument til rot/miljø og startar Norscode-eigarfil.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -16,4 +17,4 @@ export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
 export NORSCODE_ROOT="$ROOT"
 export NORSCODE_DOCKER_BUILD_LINUX_OUTPUT="$OUTPUT"
 
-exec "$ROOT/bin/nc" run "$ROOT/tools/docker-build-linux.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/docker-build-linux.no"

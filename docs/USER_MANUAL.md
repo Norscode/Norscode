@@ -1,8 +1,8 @@
-# Norscode Brukermanual
+# Norscode Brukarmanual
 
-Dette er den praktiske manualen for å bruke Norscode lokalt. Målet er at du skal kunne installere, kontrollere, køyre, teste, bygge og feilsøkje utan å gå inn i gamle Python- eller C-løyper.
+Dette er den praktiske manualen for å bruke Norscode lokalt. Målet er at du skal kunne installere, kontrollere, køyre, teste, byggje og feilsøkje utan å gå inn i gamle Python- eller C-løyper.
 
-## Kort Fortalt
+## Kort fortalt
 
 Norscode er eit norsk programmeringsspråk og verktøysett med native CLI og selfhost-runtime.
 
@@ -23,9 +23,9 @@ Normal verktøyflate:
 
 Historisk C og gamle migreringsspor skal ikkje brukast som normal arbeidsveg.
 
-## Installasjon Og Kontroll
+## Installasjon og kontroll
 
-Kort installasjonsguide ligg i [`INSTALL.md`](../INSTALL.md).
+Kort installasjonsguide ligg i [installasjonsguiden](../INSTALL.md).
 
 Køyr frå repo-rota:
 
@@ -45,7 +45,7 @@ nc verify-seed
 
 Når installasjonen er frisk, skal `nc --help` vise at CLI-en er C/Python-fri, og `nc doctor` skal gi systemsjekk utan å krevje C-kompilator eller Python-pipeline.
 
-## CLI-Kommandoar
+## CLI-kommandoar
 
 Dei viktigaste kommandoane:
 
@@ -58,6 +58,18 @@ Dei viktigaste kommandoane:
 ./bin/nc lint app.no --check
 ./bin/nc test
 ./bin/nc feature-check app.no
+./bin/nc repl '1 + 2'
+./bin/nc release-preflight
+./bin/nc release-preflight --strict
+./bin/nc local-green
+./bin/nc local-green --strict
+./bin/nc local-green --strict --list
+./bin/nc local-green --strict -l
+./bin/nc local-green --list
+./bin/nc local-green -l
+./bin/nc local-green --help
+./bin/nc local-green -h
+./bin/nc stage0-release-assets --platform macos-arm64
 ```
 
 Vedlikehald:
@@ -74,8 +86,19 @@ Selfhost og verifikasjon:
 ```bash
 ./bin/nc selfhost-bootstrap-gate
 ./bin/nc bootstrap-self
-./bin/nc verify-selvstendighet
+./bin/nc selvstendighet
 ./bin/nc verify-seed
+./bin/nc release-preflight
+./bin/nc release-preflight --strict
+./bin/nc local-green
+./bin/nc local-green --strict
+./bin/nc local-green --strict --list
+./bin/nc local-green --strict -l
+./bin/nc local-green --list
+./bin/nc local-green -l
+./bin/nc local-green --help
+./bin/nc local-green -h
+./bin/nc stage0-release-assets --platform macos-arm64
 ./bin/nc ci
 ```
 
@@ -87,7 +110,7 @@ nc startproject mittprosjekt
 nc startapp minapp
 ```
 
-## Køyre, Sjekke Og Teste Kode
+## Køyre, sjekke og teste kode
 
 Køyr eit program:
 
@@ -115,7 +138,49 @@ Sjekk nye funksjonar utan C/Python:
 
 `feature-check` er den viktigaste kommandoen når du legg til ny Norscode-funksjonalitet. Han sjekkar aktiv flate og køyrer relevante kontroller utan å bruke gamle C- eller Python-steg.
 
-## Første Program
+`./bin/nc run <fil.no>` køyrer også vanlege `bruk`/`importer`-program med bundla imports. Selfhost-kjerneimportar held fram på normal runtime-veg.
+
+Evaluer eit lite uttrykk direkte, eller start interaktiv REPL utan argument:
+
+```bash
+./bin/nc repl '1 + 2'
+./bin/nc repl
+```
+
+Sjekk lokal release-/GitHub-klargjering utan å publisere:
+
+```bash
+./bin/nc release-preflight
+./bin/nc release-preflight --strict
+```
+
+Køyr samla lokal grønnliste utan å publisere:
+
+Ho køyrer release-preflight, aktiv flate, fase-0, L1-L6-sjølvstendighet og full testflate.
+
+```bash
+./bin/nc local-green
+./bin/nc local-green --strict
+./bin/nc local-green --strict --list
+./bin/nc local-green --strict -l
+./bin/nc local-green --list
+./bin/nc local-green -l
+./bin/nc local-green --help
+./bin/nc local-green -h
+```
+
+`--list` og `-l` viser grønnliste-stega med kommandoar utan å køyre dei.
+
+Bygg stage-0 release-artefaktar utan å skrive i repo-rota:
+
+```bash
+./bin/nc stage0-release-assets --platform macos-arm64
+./bin/nc stage0-release-assets --platform linux-x86_64 --out-dir release-artifacts/stage0
+```
+
+Kommandoen skriv ELF og flyttbar `.sha256` til `release-artifacts/stage0/` eller vald `--out-dir`.
+
+## Første program
 
 Lag ei fil, til dømes `hei.no`:
 
@@ -132,7 +197,7 @@ Køyr:
 ./bin/nc run hei.no
 ```
 
-Nokre eldre filer bruker `heltall`. Ny dokumentasjon bruker `heiltall` der det er naturleg, men runtime toler framleis fleire etablerte variantar i eksisterande kode.
+Nokre eldre filer brukar `heltall`. Ny dokumentasjon brukar `heiltall` der det er naturleg, men runtime toler framleis fleire etablerte variantar i eksisterande kode.
 
 ## Språkgrunnlag
 
@@ -182,16 +247,16 @@ funksjon start() -> heiltall {
 }
 ```
 
-Nokre prosjektfiler bruker `importer` for lokale modular:
+Nokre prosjektfiler brukar `importer` for lokale modular:
 
 ```norscode
 importer norsdb_core
 importer norsdb_schema
 ```
 
-Bruk mønsteret som finst i mappa du arbeider i. Standardbibliotek bruker normalt `bruk std.modul som alias`.
+Bruk mønsteret som finst i mappa du arbeider i. Standardbibliotek brukar normalt `bruk std.modul som alias`.
 
-## Pakker Og Standardbibliotek
+## Pakkar og standardbibliotek
 
 Viktige standardmodular:
 
@@ -203,9 +268,9 @@ Viktige standardmodular:
 - `std.db`: databaseflate brukt av NorsDB og smoke-testar.
 - `std.tekst`: tekstoperasjonar.
 - Python-liknande modular som `std.sys`, `std.errno`, `std.multiprocessing`, `std.wsgiref`, `std.socketserver` og `std.plistlib` skal halde aktiv flate fri for `python3` og testast av `tests/test_python_independence_std.no`.
-- `std_liste`, `std_ordbok`, `std_math`, `std_io`: installerte runtime-pakker i lokal distribusjon.
+- `std_liste`, `std_ordbok`, `std_math`, `std_io`: installerte runtime-pakkar i lokal distribusjon.
 
-Eksempel med JSON:
+Døme med JSON:
 
 ```norscode
 bruk std.json som json
@@ -264,9 +329,9 @@ Upload, sessions og deploy har eigne produksjonskontraktar:
 - `std.deploy.produksjonsmønster(cfg)` samlar workers, helse, statics, env-fil, rollback og graceful shutdown.
 - `std.multiprocessing.produksjonsstatus()` samlar prosess, pool, queue, pipe, event, lock og value som aktiv runtime-kontrakt.
 
-LSP-serveren i [selfhost/lsp/server.no](/Users/jansteinar/Projects/Norscode1/selfhost/lsp/server.no) annonserer no hover, completion, definition, document symbols og document formatting i same aktive Norscode-flate.
+LSP-serveren i [selfhost/lsp/server.no](../selfhost/lsp/server.no) annonserer no hover, completion, definition, document symbols og document formatting i same aktive Norscode-flate.
 
-## Prosjekt Og Apper
+## Prosjekt og appar
 
 Opprett prosjekt:
 
@@ -296,13 +361,13 @@ Start server:
 ./bin/nc serve app.no --port 8080
 ```
 
-Typisk serverfil bruker `std.web`:
+Typisk serverfil brukar `std.web`:
 
 ```norscode
 bruk std.web som web
 ```
 
-Serverlaget har same standardflyt som moderne Python-rammeverk:
+Serverlaget har same standardflyt som moderne web-rammeverk:
 
 - `GET`, `HEAD` og `OPTIONS` blir handtert gjennom same rute-kontrakt.
 - JSON- og tekstsvar får trygg `content-type` når appen ikkje set han sjølv.
@@ -314,9 +379,40 @@ Serverlaget har same standardflyt som moderne Python-rammeverk:
 Når serveren ikkje startar:
 
 - køyr `./bin/nc check app.no`
-- sjekk at porten ikkje er opptatt
+- sjekk at porten ikkje er oppteken
 - køyr `./bin/nc doctor`
-- sjekk at fila ikkje bruker gamle Python/C-baserte verktøy
+- sjekk at fila ikkje brukar gamle Python/C-baserte verktøy
+
+## Nettsidekomponentar
+
+`std.html` og `std.frontend` kan byggje server-rendert HTML frå Norscode. For vanlege nettsidehandlingar kan sida bruke Norscode-genererte `data-nc-*`-attributt og `html.script_standard()`:
+
+```norscode
+bruk std.html som html
+
+funksjon side() -> tekst {
+    returner html.div(
+        "",
+        html.toggle_knapp("Vis", "panel", "is-open")
+            + html.div(html.id_attr("panel"), html.p("", html.escape("Innhald")))
+            + html.script_standard()
+    )
+}
+```
+
+Standardhjelparane dekkjer knappar og små interaksjonar som toggle, faner, autosubmit, JSON-skjema, stadfesting, deaktivering av submit, modal/dialog, nedtrekksmeny, kopiering, auto-resize av tekstfelt og livefilter.
+
+JSON-skjema kan også få status- og resultatfelt:
+
+```norscode
+html.form(
+    html.attr("method", "post")
+        + html.json_form_attrs("/api/tickets", "resultat")
+        + html.form_status_attrs("status", "Sender", "Lagret", "Feil"),
+    html.input(html.attr("name", "tittel"))
+        + html.submit("", "Send")
+)
+```
 
 ## NorsDB
 
@@ -349,9 +445,9 @@ Støtta kontraktar:
 - verktøykall med `ai.verktøy(...)` og `ai.verktøy_kall(...)`
 - enkel agent-plan med `ai.agent_plan(...)`
 
-Provider-backends kan koblast på seinare bak same kontrakt. Standardflata er med vilje lokal og deterministisk slik at CI og release framleis er sjølvstendig.
+Provider-backends kan koplast på seinare bak same kontrakt. Standardflata er med vilje lokal og deterministisk slik at CI og release framleis er sjølvstendig.
 
-## Bygg Og Bytecode
+## Bygg og bytecode
 
 Kompiler til NCB JSON:
 
@@ -367,7 +463,7 @@ Alias:
 
 Den normale selfhost-vegen er at NCB JSON køyrer via `selfhost/vm.no`.
 
-## Native Bygg
+## Native bygg
 
 Native bygg er del av Norscode-verktøyflata:
 
@@ -404,12 +500,12 @@ Start alltid med:
 Vanlege symptom:
 
 - **Filen køyrer ikkje**: sjekk syntaks med `check`.
-- **Import feiler**: sjekk modulnamn, alias og om modulen finst i `std/`, `selfhost/` eller prosjektmappa.
+- **Import feilar**: sjekk modulnamn, alias og om modulen finst i `std/`, `selfhost/` eller prosjektmappa.
 - **Server startar ikkje**: sjekk port, `serve`-kommando og `std.web`-bruk.
-- **Test feiler lokalt**: køyr `./bin/nc test` og deretter relevant enkeltfil med `run`.
+- **Test feilar lokalt**: køyr `./bin/nc test` og deretter relevant enkeltfil med `run`.
 - **Selfhost-status er uklar**: køyr `./bin/nc maintenance verify`.
 
-## Kva Du Ikkje Skal Bruke Som Normalveg
+## Kva du ikkje skal bruke som normalveg
 
 I normal utvikling skal du ikkje innføre:
 
@@ -420,7 +516,7 @@ I normal utvikling skal du ikkje innføre:
 
 Historiske spor høyrer heime i `archive/`.
 
-## Rask Sjekkliste
+## Rask sjekkliste
 
 Før du sender endringar:
 

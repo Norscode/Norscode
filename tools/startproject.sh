@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# Norscode-first wrapper: prosjektgeneratoren har eigarlogikk i tools/startproject.no.
+# Shell-delen under er avgrensa mal-/reserveveg medan store scaffold-malane blir flytta inn i Norscode.
 set -eu
 
 PROJECT_DIR=""
@@ -12,7 +14,7 @@ FROM_NO=0
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 usage() {
-  printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2
+  printf 'bruk: nc startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -3538,7 +3540,7 @@ funksjon test_transaksjon_savepoints() {
     assert_eq(orm.tell(conn, "konto"), 1)
     la _ = orm.transaksjon_start(conn)
     la _ = orm.transaksjon_start_savepoint(conn, "punkt_a")
-    la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('midlertidig');")
+    la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('rulles_tilbake');")
     la _ = orm.transaksjon_rull_til_savepoint(conn, "punkt_a")
     assert_eq(orm.tell(conn, "konto"), 1)
     la _ = db.execute(conn, "INSERT INTO konto (namn) VALUES ('ny');")
@@ -3636,7 +3638,7 @@ bruk src.admin.index som admin_index
 
 funksjon test_registrering() {
     la register = {}
-    la _ = admin_bootstrap.registrer_modellar(register, "dummy")
+    la _ = admin_bootstrap.registrer_modellar(register, "scaffold_test_conn")
     assert(har_nokkel(register, "produkt"))
 }
 

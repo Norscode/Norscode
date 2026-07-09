@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: macOS app-signering ligg i tools/sign-macos-app.no.
+# Norscode-first wrapper: macOS app-signering ligg i tools/sign-macos-app.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/sign-macos-app.sh [APP_PATH] [--identity NAME] [--entitlements FILE] [--verify]
+bruk: nc sign-macos-app [APP_PATH] [--identity NAME] [--entitlements FILE] [--verify]
 
 Signerer ein lokal macOS-appbundle.
 
@@ -69,4 +70,4 @@ export NORSCODE_MACOS_SIGN_IDENTITY="$IDENTITY"
 export NORSCODE_MACOS_SIGN_ENTITLEMENTS="$ENTITLEMENTS"
 export NORSCODE_MACOS_SIGN_VERIFY="$VERIFY"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/sign-macos-app.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/sign-macos-app.no"

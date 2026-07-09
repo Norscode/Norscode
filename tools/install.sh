@@ -1,17 +1,37 @@
 #!/usr/bin/env sh
-# tools/install.sh - Installer Norscode native binary
+# tools/install.sh - installer Norscode native-binær
 #
-# Oppdager plattform, laster ned riktig pre-bygd binary fra GitHub Releases
-# og legger den på PATH.
+# Oppdagar plattform, lastar ned rett prebygd binær frå GitHub Releases
+# og legg han på PATH.
+#
+# Bootstrap POSIX-installer: denne fila må kunne køyrast med curl | sh før
+# Norscode-runtime finst. Når lokal runtime finst, delegerer ho til tools/install.no.
 #
 # Bruk:
 #   curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
-#   bash tools/install.sh               # fra lokal kildekode
-#   bash tools/install.sh --prefix /usr/local
+#   sh tools/install.sh                 # frå lokal kjeldekode
+#   sh tools/install.sh --prefix /usr/local
 set -eu
 
 REPO="Norscode/Norscode"
-INSTALL_PREFIX="${1:-$HOME/.local}"
+INSTALL_PREFIX="$HOME/.local"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --prefix)
+            [ "$#" -ge 2 ] || { printf 'Bruk: sh tools/install.sh [--prefix MAPPE]\n' >&2; exit 2; }
+            INSTALL_PREFIX="$2"
+            shift 2
+            ;;
+        --help|-h)
+            printf 'Bruk: sh tools/install.sh [--prefix MAPPE]\n'
+            exit 0
+            ;;
+        *)
+            INSTALL_PREFIX="$1"
+            shift
+            ;;
+    esac
+done
 BIN_DIR="$INSTALL_PREFIX/bin"
 RUNTIME_PREFIX="$INSTALL_PREFIX/share/norscode"
 LEGACY_PREFIX="$HOME/.norscode"
@@ -72,7 +92,7 @@ esac
 
 printf 'Plattform oppdaget: %s\n' "$PLATFORM"
 
-# ─── Sjekk om pre-bygd binary allerede finnes lokalt ────────────────────────
+# ─── Sjekk om prebygd binær alt finst lokalt ────────────────────────────────
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # Bruk norscode_native om tilgjengeleg lokalt
@@ -96,12 +116,47 @@ fi
 
 BINARY_NAME="norscode-$PLATFORM"
 
+download_url_from_line() {
+    _line="$1"
+    _rest="${_line#*\"browser_download_url\"}"
+    [ "$_rest" != "$_line" ] || return 1
+    _rest="${_rest#*:}"
+    while :; do
+        case "$_rest" in
+            " "*) _rest="${_rest# }" ;;
+            "	"*) _rest="${_rest#	}" ;;
+            *) break ;;
+        esac
+    done
+    [ "${_rest#\"}" != "$_rest" ] || return 1
+    _rest="${_rest#\"}"
+    printf '%s\n' "${_rest%%\"*}"
+}
+
 find_asset_url() {
-    printf '%s' "$1" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*$BINARY_NAME[^\"]*\"" | head -1 | cut -d'"' -f4
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            *'"browser_download_url"'*"$BINARY_NAME"*)
+                download_url_from_line "$_line"
+                return 0
+                ;;
+        esac
+    done <<EOF
+$1
+EOF
 }
 
 find_language_package_url() {
-    printf '%s' "$1" | grep -o "\"browser_download_url\":[[:space:]]*\"[^\"]*norscode-language-[^\"]*\\.tar\\.gz\"" | head -1 | cut -d'"' -f4
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            *'"browser_download_url"'*norscode-language-*'.tar.gz'*)
+                download_url_from_line "$_line"
+                return 0
+                ;;
+        esac
+    done <<EOF
+$1
+EOF
 }
 
 fetch_release_json() {
@@ -110,33 +165,6 @@ fetch_release_json() {
     else
         $DOWNLOAD "https://api.github.com/repos/$REPO/releases/tags/$1" 2>/dev/null
     fi
-}
-
-install_wrappers() {
-    mkdir -p "$BIN_DIR"
-    cat > "$BIN_DIR/norscode" <<EOF
-#!/usr/bin/env sh
-exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
-EOF
-    cat > "$BIN_DIR/nc" <<EOF
-#!/usr/bin/env sh
-exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
-EOF
-    chmod +x "$BIN_DIR/norscode" "$BIN_DIR/nc"
-}
-
-install_legacy_wrappers() {
-    local legacy_bin_dir="$LEGACY_PREFIX/bin"
-    mkdir -p "$legacy_bin_dir"
-    cat > "$legacy_bin_dir/norscode" <<EOF
-#!/usr/bin/env sh
-exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
-EOF
-    cat > "$legacy_bin_dir/nc" <<EOF
-#!/usr/bin/env sh
-exec "$RUNTIME_PREFIX/current/bin/nc" "\$@"
-EOF
-    chmod +x "$legacy_bin_dir/norscode" "$legacy_bin_dir/nc"
 }
 
 install_language_package() {
@@ -160,8 +188,8 @@ install_language_package() {
     install_wrappers
     install_legacy_wrappers
 
-    if [ "$OS" = "Darwin" ] && [ -x "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" ]; then
-        bash "$RUNTIME_PREFIX/current/tools/install-macos-file-icons.sh" || true
+    if [ "$OS" = "Darwin" ] && [ -x "$RUNTIME_PREFIX/current/bin/nc" ]; then
+        (cd "$RUNTIME_PREFIX/current" && "$RUNTIME_PREFIX/current/bin/nc" install-macos-file-icons) || true
     fi
 
     trap - EXIT
@@ -179,8 +207,8 @@ install_language_package() {
 
 printf 'Henter siste release...\n'
 RELEASE_JSON="$(fetch_release_json latest)" || {
-    printf 'Feil: Kunne ikke hente release-info fra GitHub.\n' >&2
-    printf 'Prøv lokal installasjon fra repo: bash tools/install.sh\n' >&2
+    printf 'Feil: Kunne ikkje hente release-info frå GitHub.\n' >&2
+    printf 'Prøv førsteinstallasjon frå lokal repo: sh tools/install.sh\n' >&2
     exit 1
 }
 
@@ -200,9 +228,9 @@ if [ -z "$DOWNLOAD_URL" ]; then
 fi
 
 if [ -z "$DOWNLOAD_URL" ]; then
-    printf 'Advarsel: Ingen pre-bygd binary for %s i GitHub Releases.\n' "$PLATFORM" >&2
-    printf 'Feil: Kunne ikke installere Norscode for %s.\n' "$PLATFORM" >&2
-    printf 'Alternativ: klon repoet og kjør: bash tools/install.sh\n' >&2
+    printf 'Advarsel: Ingen prebygd binær for %s i GitHub Releases.\n' "$PLATFORM" >&2
+    printf 'Feil: Kunne ikkje installere Norscode for %s.\n' "$PLATFORM" >&2
+    printf 'Alternativ: klon repoet og køyr: sh tools/install.sh\n' >&2
     exit 1
 fi
 
@@ -217,8 +245,8 @@ chmod +x "$BIN_DIR/norscode"
 # Lag nc-alias
 ln -sf "$BIN_DIR/norscode" "$BIN_DIR/nc" 2>/dev/null || cp "$BIN_DIR/norscode" "$BIN_DIR/nc"
 
-if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/tools/install-macos-file-icons.sh" ]; then
-    bash "$ROOT_DIR/tools/install-macos-file-icons.sh" || true
+if [ "$OS" = "Darwin" ] && [ -x "$ROOT_DIR/bin/nc" ]; then
+    "$ROOT_DIR/bin/nc" install-macos-file-icons || true
 fi
 
 printf '\nNorscode installert!\n'

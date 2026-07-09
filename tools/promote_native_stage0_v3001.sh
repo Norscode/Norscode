@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# Tynn wrapper: native/stage0-promotering ligg i tools/promote_native_stage0_v3001.no.
+# Norscode-first wrapper: native/stage0-promotering ligg i tools/promote_native_stage0_v3001.no.
+# Shell-delen under mappar CLI-argument til miljø og startar Norscode-eigarfil.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"

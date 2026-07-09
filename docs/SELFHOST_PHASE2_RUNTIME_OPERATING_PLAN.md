@@ -5,7 +5,7 @@ Dette dokumentet samlar den operative planen for runtime-arbeidet i fase 2.
 ## Mål
 
 - få ein meir tydeleg produksjonsflate for runtime
-- redusere plass for placeholder- og mock-path
+- redusere plass for uavklarte kontraktar og historiske mock-stiar
 - gjere det lett å sjå kva som er stabilt, kva som er på veg, og kva som er intern støtte
 
 ## Område
@@ -67,7 +67,7 @@ Minimum:
 1. Minnekontraktar
 2. I/O-kø og prosessering
 3. Scheduler-syklus
-4. Sandbox-avgrensingar og rydding av placeholderar
+4. Sandbox-avgrensingar og rydding av uavklart kontrakttekst
 
 ## Akseptkriterium
 

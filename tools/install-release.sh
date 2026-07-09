@@ -1,8 +1,10 @@
 #!/usr/bin/env sh
+# Norscode-first wrapper: releaseinstallasjonen ligg i tools/install_release.no.
+# Shell-delen under er avgrensa reserveveg for arkivutpakking og sjekksum.
 set -eu
 
 usage() {
-  printf 'Bruk: bash tools/install-release.sh <release.tar.gz> [--prefix DIR]\n' >&2
+  printf 'bruk: nc install-release <release.tar.gz> [--prefix <mappe>]\n' >&2
 }
 
 if [ "$#" -lt 1 ]; then
@@ -34,6 +36,48 @@ done
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 out="${TMPDIR:-/tmp}/norscode_install_release_$$.log"
 rc=0
+
+print_file() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\n' "$_line"
+  done < "$_file"
+}
+
+has_install_reserve_reason() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      *"Ukjent funksjon: exec_prosess"*|*"Ukjent funksjon: builtin.exec_prosess"*|*"Ukjent funksjon: builtin.builtin.exec_prosess"*|*"Fant ikke releasepakke:"*) return 0 ;;
+    esac
+  done < "$_file"
+  return 1
+}
+
+first_word() {
+  _text="$1"
+  set -- $_text
+  printf '%s' "${1:-}"
+}
+
+first_word_from_file() {
+  _file="$1"
+  IFS= read -r _line < "$_file" || _line=""
+  first_word "$_line"
+}
+
+sha256_for_file() {
+  _file="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    _line="$(shasum -a 256 "$_file")"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    _line="$(sha256sum "$_file")"
+  else
+    return 1
+  fi
+  first_word "$_line"
+}
+
 env \
   NORSCODE_ENABLE_EXEC_PROSESS=1 \
   NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
@@ -41,12 +85,12 @@ env \
   NORSCODE_ROOT="$ROOT_DIR" \
   "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no" >"$out" 2>&1 || rc=$?
 if [ "$rc" -eq 0 ]; then
-  cat "$out"
+  print_file "$out"
   rm -f "$out"
   exit 0
 fi
-if [ -s "$out" ] && ! grep -Eq 'Ukjent funksjon: builtin(\.builtin)?\.exec_prosess|Fant ikke releasepakke:' "$out"; then
-  cat "$out"
+if [ -s "$out" ] && ! has_install_reserve_reason "$out"; then
+  print_file "$out"
   rm -f "$out"
   exit "$rc"
 fi
@@ -60,12 +104,8 @@ fi
   exit 1
 }
 if [ -f "$ARCHIVE_PATH.sha256" ]; then
-  expected="$(cat "$ARCHIVE_PATH.sha256" | awk '{print $1}')"
-  if command -v shasum >/dev/null 2>&1; then
-    actual="$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')"
-  elif command -v sha256sum >/dev/null 2>&1; then
-    actual="$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')"
-  else
+  expected="$(first_word_from_file "$ARCHIVE_PATH.sha256")"
+  if ! actual="$(sha256_for_file "$ARCHIVE_PATH")"; then
     printf 'Fant ikke verktøy for SHA256-verifisering\n' >&2
     exit 1
   fi
@@ -110,8 +150,8 @@ for entry in compiler dist docs examples norcode norcode.toml selfhost scripts s
   fi
 done
 
-if [ "$(uname -s)" = "Darwin" ] && [ -x "$current_link/tools/install-macos-file-icons.sh" ]; then
-  bash "$current_link/tools/install-macos-file-icons.sh" || true
+if [ "$(uname -s)" = "Darwin" ] && [ -x "$current_link/bin/nc" ]; then
+  (cd "$current_link" && "$current_link/bin/nc" install-macos-file-icons) || true
 fi
 
 printf 'Installert release: %s\n' "$target_dir"

@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Wrapper: Norscode eig byggereglane; shell gjer macOS-plattformutføring når native runtime manglar exec_prosess.
+# Norscode-first wrapper: macOS window-host bygg ligg i tools/build-macos-window-host.no.
+# Shell-delen under er berre macOS-plattformutføring når runtime manglar exec_prosess.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/build-macos-window-host.sh [--out DIR] [--name NAMN] [--bundle-id ID] [--version VER]
+bruk: nc build-macos-window-host [--out DIR] [--name NAMN] [--bundle-id ID] [--version VER]
 
 Byggjer ein minimal macOS GUI-host for Norscode med ekte vindauge.
 Standard output: build/macos-window-host/NorscodeWindowHost.app
@@ -93,15 +94,33 @@ export NORSCODE_MACOS_WINDOW_QUERY="$INITIAL_QUERY"
 
 _out="$(mktemp "${TMPDIR:-/tmp}/norscode_macos_window_host.XXXXXX")"
 _rc=0
+
+print_file() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\n' "$_line"
+  done < "$_file"
+}
+
+has_window_host_reserve_reason() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      *"Ukjent funksjon: exec_prosess"*|*"Ukjent funksjon: builtin.exec_prosess"*|*"Ukjent funksjon: builtin.builtin.exec_prosess"*|*"Feil: manglar app-mal:"*|*"Feil: manglar Swift-kjelde:"*|*"Feil: manglar nc-køyrbar fil:"*) return 0 ;;
+    esac
+  done < "$_file"
+  return 1
+}
+
 "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/build-macos-window-host.no" >"$_out" 2>&1 || _rc=$?
 if [ "$_rc" -eq 0 ]; then
-  cat "$_out"
+  print_file "$_out"
   rm -f "$_out"
   exit 0
 fi
 
-if ! grep -Eq 'Ukjent funksjon: builtin(\.builtin)?\.exec_prosess|Feil: manglar app-mal:|Feil: manglar Swift-kjelde:|Feil: manglar nc-køyrbar fil:' "$_out"; then
-  cat "$_out" >&2
+if ! has_window_host_reserve_reason "$_out"; then
+  print_file "$_out" >&2
   rm -f "$_out"
   exit "$_rc"
 fi

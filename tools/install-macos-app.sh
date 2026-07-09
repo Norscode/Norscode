@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: macOS app-installasjon ligg i tools/install-macos-app.no.
+# Norscode-first wrapper: macOS app-installasjon ligg i tools/install-macos-app.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/install-macos-app.sh [APP_PATH] [--dest DIR] [--name NAMN]
+bruk: nc install-macos-app [APP_PATH] [--dest DIR] [--name NAMN]
 
 Installerer eller oppdaterer ein lokal Norscode.app til ~/Applications som standard.
 Dersom APP_PATH ikkje er gitt, blir build/macos-app/Norscode.app brukt.
@@ -64,4 +65,4 @@ export NORSCODE_MACOS_INSTALL_APP="$APP_PATH"
 export NORSCODE_MACOS_INSTALL_DEST="$DEST_DIR"
 export NORSCODE_MACOS_INSTALL_NAME="$APP_NAME"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-macos-app.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-macos-app.no"

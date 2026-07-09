@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: Linux desktop-entry installasjon ligg i tools/install-linux-desktop-entry.no.
+# Norscode-first wrapper: Linux desktop-entry installasjon ligg i tools/install-linux-desktop-entry.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/install-linux-desktop-entry.sh [APPDIR] [--prefix DIR]
+bruk: nc install-linux-desktop-entry [APPDIR] [--prefix DIR]
 
 Installerer Linux desktop entry og ikon for Norscode frå ein bygd AppDir.
 Standard prefix: ~/.local/share
@@ -43,4 +44,4 @@ export NORSCODE_ROOT="$ROOT_DIR"
 export NORSCODE_LINUX_DESKTOP_APPDIR="$APPDIR"
 export NORSCODE_LINUX_DESKTOP_PREFIX="$PREFIX"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-linux-desktop-entry.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install-linux-desktop-entry.no"

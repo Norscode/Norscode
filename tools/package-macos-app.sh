@@ -1,10 +1,11 @@
 #!/usr/bin/env sh
-# Tynn wrapper: macOS app-pakking ligg i tools/package-macos-app.no.
+# Norscode-first wrapper: macOS app-pakking ligg i tools/package-macos-app.no.
+# Shell-delen under set berre rot/prosessmiljø/argument og startar Norscode-eigarfil.
 set -eu
 
 usage() {
   cat >&2 <<'EOF'
-Bruk: bash tools/package-macos-app.sh [--version VER] [--format dmg|zip|pkg|all] [APP_PATH]
+bruk: nc package-macos-app [--version VER] [--format dmg|zip|pkg|all] [APP_PATH]
 
 Pakkar den lokale Norscode.app til release-artifacts/ som macOS-artefakt.
 - default format: all
@@ -58,4 +59,4 @@ export NORSCODE_MACOS_PACKAGE_FORMAT="$FORMAT"
 export NORSCODE_MACOS_PACKAGE_VERSION="$VERSION"
 export NORSCODE_MACOS_PACKAGE_RELEASE_DIR="${NORSCODE_MACOS_PACKAGE_RELEASE_DIR:-$ROOT_DIR/release-artifacts}"
 
-exec "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/package-macos-app.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT_DIR" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/package-macos-app.no"

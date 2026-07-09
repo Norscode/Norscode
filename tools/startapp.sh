@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# Norscode-first wrapper: appgeneratoren har eigarlogikk i tools/startapp.no.
+# Shell-delen under er avgrensa mal-/reserveveg medan store scaffold-malane blir flytta inn i Norscode.
 set -eu
 
 PROJECT_ROOT="."

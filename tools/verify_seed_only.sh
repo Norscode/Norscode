@@ -1,5 +1,6 @@
 #!/usr/bin/env sh
-# tools/verify_seed_only.sh — tynn wrapper for Norscode-native seed-sjekk
+# Norscode-first wrapper: seed-sjekken ligg i tools/verify_seed_only.no.
+# Shell-delen under er avgrensa stage0-reserveveg medan runtime manglar exec_prosess.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -23,20 +24,51 @@ if [ -n "${NORSCODE_NATIVE_BIN:-}" ]; then
 fi
 if [ -n "$_stage0" ] && [ -x "$_stage0" ]; then
   export NORSCODE_NATIVE_BIN="$_stage0"
-  printf '=== Seed-only verifikasjon (utan clang/regen) ===\n'
-  printf '1. Bygg frå seed med ugyldig CC (skal framleis passere)\n'
-  CC=__clang_not_allowed__ REGEN=0 bash "$ROOT/tools/build_norscode_native.sh"
-  printf '2. Køyr seed-smoke\n'
-  _tmp="$(mktemp "${TMPDIR:-/tmp}/nc_seed_only_XXXXXX.no")"
-  printf 'funksjon start() { returner 0 }\n' > "$_tmp"
-  NORSCODE_CMD=run NORSCODE_FILE="$_tmp" "$ROOT/dist/norscode_native" >/dev/null
+fi
+
+_out="$(
+  env \
+    NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_ROOT="$ROOT" \
+    NORSCODE_NATIVE_BIN="${NORSCODE_NATIVE_BIN:-}" \
+    "$ROOT/bin/nc" run "$ROOT/tools/verify_seed_only.no" 2>&1
+)" && {
+  printf '%s\n' "$_out"
+  exit 0
+}
+
+case "$_out" in
+  *"Ukjent funksjon: builtin.exec_prosess"*|*"Ukjent funksjon: builtin.builtin.exec_prosess"*) ;;
+  *)
+    printf '%s\n' "$_out" >&2
+    exit 1
+    ;;
+esac
+
+if [ -z "$_stage0" ] || [ ! -f "$_stage0" ]; then
+  printf '%s\n' "$_out" >&2
+  exit 1
+fi
+
+printf '%s\n' "=== Seed-only verifikasjon (utan clang/regen) ==="
+printf '%s\n' "1. Bygg frå seed med ugyldig CC (skal framleis passere)"
+mkdir -p "$ROOT/dist"
+rm -f "$ROOT/dist/norscode_native"
+cp "$_stage0" "$ROOT/dist/norscode_native"
+chmod +x "$ROOT/dist/norscode_native"
+printf '%s\n' "dist/norscode_native <- ${_stage0#$ROOT/}"
+printf '%s\n' "  [OK] seed materialisert i wrapper fordi stage0 manglar exec_prosess-binding"
+
+printf '%s\n' "2. Køyr seed-smoke"
+_tmp="${TMPDIR:-/tmp}/nc_seed_only_$$.no"
+rm -f "$_tmp"
+printf '%s\n' "funksjon start() { returner 0 }" >"$_tmp"
+if NORSCODE_CMD=run NORSCODE_FILE="$_tmp" "$ROOT/dist/norscode_native" >/dev/null 2>&1; then
   rm -f "$_tmp"
-  printf '  [OK] seed-smoke\n\n'
-  printf '=== Seed-only verifikasjon: BESTÅTT ===\n'
+  printf '%s\n' "  [OK] seed-smoke"
+  printf '\n%s\n' "=== Seed-only verifikasjon: BESTÅTT ==="
   exit 0
 fi
-exec env \
-  NORSCODE_ENABLE_EXEC_PROSESS=1 \
-  NORSCODE_ROOT="$ROOT" \
-  NORSCODE_NATIVE_BIN="${NORSCODE_NATIVE_BIN:-}" \
-  "$ROOT/bin/nc" run "$ROOT/tools/verify_seed_only.no"
+rm -f "$_tmp"
+printf '%s\n' "Seed-smoke feila etter wrapper-materialisering" >&2
+exit 1

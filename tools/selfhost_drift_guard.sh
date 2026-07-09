@@ -1,4 +1,6 @@
 #!/usr/bin/env sh
+# Norscode-first wrapper: driftsvaktlogikken ligg i tools/selfhost_drift_guard.no.
+# Shell-delen under er avgrensa reserveveg medan runtime manglar exec_prosess.
 set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 if [ -z "${NORSCODE_NATIVE_BIN:-}" ] && [ ! -x "$ROOT_DIR/dist/norscode_native" ]; then
@@ -15,20 +17,38 @@ if [ -z "${NORSCODE_NATIVE_BIN:-}" ] && [ ! -x "$ROOT_DIR/dist/norscode_native" 
 fi
 _out="${TMPDIR:-/tmp}/selfhost_drift_guard_$$.log"
 _rc=0
+
+print_file() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    printf '%s\n' "$_line"
+  done < "$_file"
+}
+
+has_exec_gap() {
+  _file="$1"
+  while IFS= read -r _line || [ -n "$_line" ]; do
+    case "$_line" in
+      *"Ukjent funksjon: builtin.exec_prosess"*|*"Ukjent funksjon: builtin.builtin.exec_prosess"*) return 0 ;;
+    esac
+  done < "$_file"
+  return 1
+}
+
 env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" NORSCODE_NATIVE_BIN="${NORSCODE_NATIVE_BIN:-}" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/selfhost_drift_guard.no" >"$_out" 2>&1 || _rc=$?
 if [ "$_rc" -eq 0 ]; then
-  cat "$_out"
+  print_file "$_out"
   rm -f "$_out"
   exit 0
 fi
-if ! grep -q 'builtin\.builtin\.exec_prosess' "$_out"; then
-  cat "$_out"
+if ! has_exec_gap "$_out"; then
+  print_file "$_out"
   rm -f "$_out"
   exit "$_rc"
 fi
 rm -f "$_out"
 
-bash "$ROOT_DIR/tools/selfhost_phase0_verify.sh"
-bash "$ROOT_DIR/tools/no_c_python_active_surface.sh"
-bash "$ROOT_DIR/tools/selfhost_maintenance_verify.sh"
+"$ROOT_DIR/bin/nc" phase0-verify
+"$ROOT_DIR/bin/nc" active-surface
+"$ROOT_DIR/bin/nc" selfhost-maintenance-verify
 printf 'Driftsvakt: OK\n'

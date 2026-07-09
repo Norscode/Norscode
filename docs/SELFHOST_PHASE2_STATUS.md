@@ -26,7 +26,7 @@ Dette dokumentet samlar den noverande fase-2-statusen i ei kort oversikt.
 - [x] `selfhost/runtime/production_runtime.no` er styrkt med betre kontraktar
 - [x] Production-runtime-mål er samla i [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](./SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
 - [x] `selfhost/runtime/production_runtime.no` har samla runtime-konstruktør og statusflate
-- [x] Runtime-kjernas forward-ref placeholderar er samla i ein liten hjelpefunksjon
+- [x] Runtime-kjernas forward-ref patchpunkt er samla i ein liten hjelpefunksjon
 - [x] Baseline benchmark er definert og køyrbar i CI
 - [x] Diagnostikkplan for parser/semantic/IR er dokumentert i [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](./SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
 - [x] Verktøy og feilsøkingsindeks er samla i [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](./SELFHOST_PHASE2_TOOLING_INDEX.md)

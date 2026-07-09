@@ -1,17 +1,20 @@
 #!/usr/bin/env sh
-# Tynn wrapper: patch guard ligg i .no-fila.
+# Norscode-first wrapper: AI patch-vakta ligg i tools/ai_patch_guard_v3021.no.
+# Shell-delen under mappar CLI-argument til rot/miljø og startar Norscode-eigarfil.
 set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 cd "$ROOT"
 
 export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ROOT="$ROOT"
 export NORSCODE_PATCH_GUARD_ALLOW_ARCHIVE=usann
 export NORSCODE_PATCH_GUARD_MANIFEST=""
 export NORSCODE_PATCH_GUARD_PATCH=""
 
 usage() {
-  printf 'Bruk: %s [--allow-archive] [--manifest PATH] PATCHFILE\n' "$0" >&2
+  printf 'Bruk: NORSCODE_PATCH_GUARD_PATCH=PATCHFILE ./bin/nc run tools/ai_patch_guard_v3021.no\n' >&2
+  printf 'Valfritt: set NORSCODE_PATCH_GUARD_ALLOW_ARCHIVE=sann og NORSCODE_PATCH_GUARD_MANIFEST=PATH\n' >&2
 }
 
 while [ "$#" -gt 0 ]; do
@@ -40,4 +43,4 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-exec "$ROOT/bin/nc" run "$ROOT/tools/ai_patch_guard_v3021.no"
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/ai_patch_guard_v3021.no"
