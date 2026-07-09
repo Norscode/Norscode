@@ -62,6 +62,7 @@ Det gir ferdige komponentar for:
 - status-badges
 - dashboard-statistikk
 - fremdrift/SLA-visning
+- stegindikator for saksgang
 - sidebar-shell
 - filterfelt
 - datatabell
