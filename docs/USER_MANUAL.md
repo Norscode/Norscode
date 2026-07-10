@@ -330,6 +330,8 @@ funksjon start() -> heiltall {
 NC_SERVE_STATIC_DIR=frontend/assets/icons ./bin/nc serve examples/web_cors.no --port 8080
 ```
 
+`std.web.response_static_file(root, rel_sti, content_type)` bruker `safe_relative_path(...)` og avviser `..`, absolutte stiar, backslash, prosent-enkoding og kontrollteikn før fila blir lesen. `std.statisk` bruker same validering for `/static/`-servering.
+
 Upload, sessions og deploy har eigne produksjonskontraktar:
 
 - `std.opplasting.produksjonsstatus()` dekker multipart, JSON-upload, raw body, storleiksgrense, typevalidering, trygt filnamn, standard JSON-responsar og lagring.
