@@ -339,6 +339,7 @@ Upload, sessions og deploy har eigne produksjonskontraktar:
 - `std.deploy.produksjonsmønster(cfg)` samlar workers, helse, statics, env-fil, rollback og graceful shutdown.
 - `std.multiprocessing.produksjonsstatus()` samlar prosess, pool, queue, pipe, event, lock og value som aktiv runtime-kontrakt.
 - `std.eksport` vaskar nedlastingsfilnamn før `Content-Disposition`, med fallback for tomme eller farlege namn.
+- `std.prosess.køyr_med_policy(...)` er trygg standard for produksjonsnær prosesskøyring: av som standard, allowlist-basert og utan shell-metateikn.
 
 LSP-serveren i [selfhost/lsp/server.no](../selfhost/lsp/server.no) annonserer no hover, completion, definition, document symbols og document formatting i same aktive Norscode-flate.
 
