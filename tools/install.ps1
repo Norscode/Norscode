@@ -87,8 +87,10 @@ if ($Asset) {
     Write-Host "Aktiv bin-mappe: $BinDir" -ForegroundColor Green
     Write-Host "Aktiv versjon: $Version" -ForegroundColor Green
 } else {
-    Write-Error "Ingen Windows native binary tilgjengelig i siste release."
-    Write-Host "Bygg lokalt med .\\bin\\nc run tools\\build-bootstrap-binary.no eller publiser en Windows release." -ForegroundColor Yellow
+    # Norscode-first installer contract: nc build-windows-app-layout
+    # Ingen Windows app-pakke tilgjengeleg i siste release.
+    Write-Error "Ingen Windows app-pakke tilgjengeleg i siste release."
+    Write-Host "Bygg lokalt med .\\bin\\nc build-windows-app-layout eller publiser ein Windows release." -ForegroundColor Yellow
     exit 1
 }
 
