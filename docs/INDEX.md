@@ -1,4 +1,5 @@
 # Norscode Dokumentasjon
+docs/_archive/ARCHIVE_INDEX.md
 
 Dette er hovudingangen til dokumentasjonen. Dokumentasjonen er delt i fire nivå:
 
@@ -94,6 +95,7 @@ Historiske notat ligg i arkivet under `docs/_archive/ARCHIVE_INDEX.md`. Dei er n
 
 - [Arkivindeks](./_archive/ARCHIVE_INDEX.md)
 - Arkivfil: `docs/_archive/ARCHIVE_INDEX.md`
+docs/_archive/ARCHIVE_INDEX.md
 
 ## Normal kjede
 
