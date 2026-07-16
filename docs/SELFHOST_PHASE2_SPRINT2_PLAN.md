@@ -6,7 +6,7 @@ Denne sprinten byggjer vidare på backloggen med to konkrete arbeidspakker som k
 
 - [x] Lage første stabile ABI-skisse for offentlege runtime-eksportar
 - [x] Gjere standardbibliotek-status meir synleg og testbar
-- [x] Velg konkrete runtime-stubbar som skal bli ekte implementasjonar
+- [x] Velg konkrete minimale runtime-kontraktar som skal få sterkare implementasjonar
 
 Støttedokument:
 
@@ -50,7 +50,7 @@ Status:
 
 - [x] Denne arbeidspakka er ferdig
 
-## Runtime-stubbar som kandidatar
+## Runtime-kontraktar som kandidatar
 
 - [x] Velg to funksjonar frå `selfhost/runtime/production_runtime.no`
 - [x] Skriv ned kvifor dei er prioriterte

@@ -2,9 +2,9 @@
 
 Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-løype og ei aktiv flate utan Python eller C.
 
-![Norscode overview](docs/assets/norscode-overview.svg)
+![Norscode-oversikt](docs/assets/norscode-overview.svg)
 
-![Norscode logo](frontend/assets/icons/norscode-logo-dark.svg)
+![Norscode-logo](frontend/assets/icons/norscode-logo-dark.svg)
 
 ## Kort fortalt
 
@@ -19,13 +19,13 @@ Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-lø
 
 ## Kom i gang
 
-1. Les [docs/INDEX.md](docs/INDEX.md)
-2. Installer med [INSTALL.md](INSTALL.md)
-3. Bruk [docs/USER_MANUAL.md](docs/USER_MANUAL.md) som praktisk manual
-4. Følg [docs/LEARNING_GUIDE.md](docs/LEARNING_GUIDE.md) for opplæring
-5. Bruk [docs/LANE_MAP.md](docs/LANE_MAP.md) for riktig arbeidsløype
-6. Les [docs/SELFHOST_HANDLINGSPLAN.md](docs/SELFHOST_HANDLINGSPLAN.md) for selfhost-løypa
-7. Sjekk [docs/STATUS.md](docs/STATUS.md)
+1. Les [dokumentasjonsinngangen](docs/INDEX.md)
+2. Installer med [installasjonsguiden](INSTALL.md)
+3. Bruk [brukarmanualen](docs/USER_MANUAL.md) som praktisk manual
+4. Følg [opplæringsguiden](docs/LEARNING_GUIDE.md) for opplæring
+5. Bruk [løypekartet](docs/LANE_MAP.md) for rett arbeidsløype
+6. Les [selfhost-handlingsplanen](docs/SELFHOST_HANDLINGSPLAN.md) for selfhost-løypa
+7. Sjekk [statussida](docs/STATUS.md)
 8. Vedlikehald: `./bin/nc maintenance verify`
 
 Snarvegar:
@@ -42,7 +42,19 @@ Snarvegar:
 ## Normal bruk
 
 - `./bin/nc` og `dist/norscode_native` er normal CLI og runtime
+- `./bin/nc run <fil.no>` køyrer også vanlege `bruk`/`importer`-program med bundla imports
 - `./bin/nc feature-check [fil.no ...]` er standard gate for å byggje nye funksjonar direkte i Norscode
+- `./bin/nc repl [uttrykk]` evaluerer små uttrykk direkte eller startar interaktiv REPL
+- `./bin/nc release-preflight` sjekkar release-/GitHub-klargjering lokalt utan å publisere
+- `./bin/nc release-preflight --strict` er siste lokale port før GitHub/release og feilar på uspora nøkkelfiler
+- `./bin/nc local-green` køyrer lokal release-preflight, aktiv-flate-sjekk, fase-0, L1-L6-sjølvstendighet og full testflate utan å publisere
+- `./bin/nc local-green --strict` køyrer same grønnliste med streng release-preflight som fyrste steg
+- `./bin/nc local-green --strict --list` eller `./bin/nc local-green --strict -l` viser streng grønnliste med steg og kommandoar utan å køyre henne
+- `./bin/nc local-green --list` viser grønnliste-stega med kommandoar utan å køyre dei
+- `./bin/nc local-green -l` er kortform for `--list`
+- `./bin/nc local-green --help` viser kort brukshjelp utan å køyre grønnlista
+- `./bin/nc local-green -h` er kortform for `--help`
+- `./bin/nc stage0-release-assets --platform <plattform>` byggjer stage-0 release-ELF og flyttbar `.sha256` under `release-artifacts/stage0/`
 - `./bin/nc maintenance verify` gir vedlikehaldssamandrag
 - `./bin/nc maintenance maturity` sjekkar 10/10-bevisflata
 - `./bin/nc maintenance status`, `lane`, `seed`, `seed-status` viser Norscode-vedlikehald og stage-0-status

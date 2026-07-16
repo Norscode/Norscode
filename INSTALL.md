@@ -2,7 +2,7 @@
 
 Dette er kortversjonen for å installere Norscode lokalt utan Python- eller C-basert byggeløype.
 
-## Rask Installering
+## Rask installering
 
 På macOS og Linux:
 
@@ -24,7 +24,7 @@ nc doctor
 nc verify-seed
 ```
 
-## Installere Frå Lokal Kildekode
+## Installere frå lokal kjeldekode
 
 Frå repo-rota:
 
@@ -38,14 +38,16 @@ Når Norscode-runtime allerede finnes i checkouten, bruk den Norscode-native ins
 NORSCODE_INSTALL_PREFIX="$HOME/.local" ./bin/nc run tools/install.no
 ```
 
-Dette brukar `dist/norscode_native` dersom han finst lokalt. Installert kommando blir:
+Dette brukar `dist/norscode_native` lokalt og installerer via Norscode-eigarlogikken.
+POSIX-bootstrapen `sh tools/install.sh` finst framleis som førsteinstallasjonsveg
+før Norscode-runtime er materialisert på maskina. Installert kommando blir:
 
 ```bash
 ~/.local/bin/nc
 ~/.local/bin/norscode
 ```
 
-## Installere Ferdig Releasepakke
+## Installere ferdig releasepakke
 
 Norscode kan også distribuerast som éi enkel releasefil.
 
@@ -56,14 +58,14 @@ NORSCODE_RELEASE_VERSION=0.1.0 NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools
 NORSCODE_INSTALL_ARCHIVE=release-artifacts/norscode-language-0.1.0.tar.gz ./bin/nc run tools/install-release.no
 ```
 
-Plattformpakker blir lagt i `release-artifacts/` når dei blir bygde:
+Plattformpakkar blir lagt i `release-artifacts/` når dei blir bygde:
 
 - `Norscode-macos-<versjon>.pkg`
 - `Norscode-linux-<versjon>-AppDir.tar.gz`
 - `Norscode-linux-<versjon>.AppImage`, dersom AppImage-verktøy er installert
 - `norscode-windows-<versjon>.zip`, når Windows-artefakt finst
 
-## Bygge Lokale Pakker
+## Byggje lokale pakkar
 
 macOS:
 
@@ -84,7 +86,7 @@ Windows-pakke rundt eksisterande `.exe`:
 NORSCODE_WINDOWS_PACKAGE_EXE=build/windows/norscode.exe ./bin/nc run tools/package-windows-app.no
 ```
 
-## Normal Bruk Etter Installering
+## Normal bruk etter installering
 
 ```bash
 nc run app.no

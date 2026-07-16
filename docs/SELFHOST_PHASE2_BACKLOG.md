@@ -18,8 +18,8 @@ Målet med denne lista er å gjere første Fase-2-arbeid målbart og startbart.
   - [x] Marker kvar modul som `kan-brukast`, `under-arbeid`, `mangler`
   - [x] Lag 5 minimale regresjonstestar per kritisk modul
 
-- [x] S1-04: Runtime-stubstatus
-  - [x] Registrer alle placeholder/mangler i runtime-filer
+- [x] S1-04: Runtime-kontraktstatus
+  - [x] Registrer alle uavklarte kontraktar og manglar i runtime-filer
   - [x] Velg 2 runtime-komponentar for konkrete implementasjonar
   - [x] Lag eigne issue-liknande oppgåver med akseptkriterium
 
@@ -45,12 +45,12 @@ Målet med denne lista er å gjere første Fase-2-arbeid målbart og startbart.
   - [x] Dokumenter praktiske brukscase per modul
 
 - [x] S2-03: Runtime-stabiliseringsmål
-  - [x] Velg to placeholder-funksjonar som skal bytast ut med ekte implementasjon
+  - [x] Velg to minimale runtime-kontraktar som skal bytast ut med sterkare implementasjon
   - [x] Definer feilmeldingar og grenser for kvar funksjon
   - [x] Dokumenter avgrensingar som må vere synlege i CI
   - [x] Eit første end-to-end FFI-smoketestløp er på plass
   - [x] Dokumenter diagnostikk for parser, semantic og IR
-  - [x] Stram inn placeholder-patching i runtime-kjernen
+  - [x] Stram inn patchpunkt og kontrakttekst i runtime-kjernen
 
 - [x] S2-04: CI-status v1
   - [x] Lag ei kort og maskinlesbar vennleg statusflate for fase 2

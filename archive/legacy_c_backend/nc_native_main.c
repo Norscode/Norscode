@@ -6141,7 +6141,13 @@ static void nc_merge_fns(NcVal *dst, NcVal *src) {
 }
 
 static int nc_is_builtin_import(const char *modul) {
-    return !modul || !modul[0] || !strncmp(modul, "std.", 4) || !strncmp(modul, "builtin.", 8) || !strncmp(modul, "selfhost.", 9);
+    if (!modul || !modul[0]) return 1;
+    if (!strncmp(modul, "builtin.", 8)) return 1;
+    if (!strcmp(modul, "selfhost.vm") || !strcmp(modul, "selfhost.json") || !strcmp(modul, "selfhost.bundler")) return 0;
+    if (!strncmp(modul, "selfhost.", 9)) return 1;
+    if (!strcmp(modul, "std.path") || !strcmp(modul, "std.env") || !strcmp(modul, "std.web")) return 1;
+    if (!strcmp(modul, "std.csrf") || !strcmp(modul, "std.security")) return 1;
+    return 0;
 }
 
 static char *nc_module_to_path(const char *modul) {

@@ -153,7 +153,7 @@ Fase 4 er starta med oppstartsplan, backlog og første statusområde.
 
 - [x] Første runtime-mål er dokumentert i [docs/SELFHOST_PHASE2_RUNTIME_TARGETS.md](./SELFHOST_PHASE2_RUNTIME_TARGETS.md)
 - [x] Skriv plan for production-runtime-mål (minne, sandbox, IO, scheduler) i [docs/SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md](./SELFHOST_PHASE2_RUNTIME_OPERATING_PLAN.md)
-- [x] Reduser placeholder- og mock-path innan runtime-kjerne
+- [x] Reduser uavklarte runtime-kontraktar og historiske mock-stiar innan runtime-kjerne
 - [x] Gjennomfør baseline benchmark med reproduksjon i CI
 - [x] Forbetre diagnoser for parser/semantic/IR-feil i [docs/SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md](./SELFHOST_PHASE2_DIAGNOSTICS_PLAN.md)
 - [x] Verktøy og feilsøkingsindeks i [docs/SELFHOST_PHASE2_TOOLING_INDEX.md](./SELFHOST_PHASE2_TOOLING_INDEX.md)

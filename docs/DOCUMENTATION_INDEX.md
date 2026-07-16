@@ -1,10 +1,10 @@
 # Dokumentasjonsindeks
 
-Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den menneskelege hovudinngangen er [docs/INDEX.md](INDEX.md).
+Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den menneskelege hovudinngangen er [Dokumentasjonsinngang](INDEX.md).
 
 ## Brukarar
 
-- [Full brukermanual](USER_MANUAL.md)
+- [Full brukarmanual](USER_MANUAL.md)
 - [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
 - [Treningsguide](TRAINING_GUIDE.md)
@@ -12,16 +12,16 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [10/10 modenhetsplan](MODENHET_10_10.md)
 - [Brand og ikoner](BRAND.md)
 
-## Normal Arbeidsflyt
+## Normal arbeidsflyt
 
-- [Selfhost handlingsplan](SELFHOST_HANDLINGSPLAN.md)
+- [Selfhost-handlingsplan](SELFHOST_HANDLINGSPLAN.md)
 - [CI-gates](05-development/SELFHOST_CI_GATES.md)
 - [Release-sjekkliste](05-development/SELFHOST_RELEASE_CHECKLIST.md)
 - [10/10 modenhetsplan](MODENHET_10_10.md)
 - [CLI-kontrakt](05-development/CLI_CONTRACT.md)
 - [Kompilatorpipeline](05-development/COMPILER_PIPELINE.md)
 
-## Språk Og Runtime
+## Språk og runtime
 
 - [AST-kontrakt](SELFHOST_PHASE3_AST_CONTRACT_V1.md)
 - [Semantisk kjerne](SELFHOST_PHASE3_SEMANTIC_CORE_V1.md)
@@ -38,7 +38,7 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [LSP og IDE](04-how-to-guides/IDE_AND_LSP.md)
 - [API Explorer](api-explorer/index.html)
 
-## Fase- Og Statusdokument
+## Fase- og statusdokument
 
 - [Fase 2 status](SELFHOST_PHASE2_STATUS.md)
 - [Fase 3 status](SELFHOST_PHASE3_STATUS.md)
@@ -52,4 +52,4 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 
 ## Dokumentasjonsregel
 
-Aktiv dokumentasjon skal peike brukaren mot `./bin/nc`, `dist/norscode_native`, selfhost-runtime og Norscode-baserte verktøy. Historiske C/Python-spor skal merkast som arkiv eller legacy.
+Aktiv dokumentasjon skal peike brukaren mot `./bin/nc`, `dist/norscode_native`, selfhost-runtime og Norscode-baserte verktøy. Release-dokumentasjon skal ha lokal preflight før publisering og streng preflight før GitHub/release, og større rydding skal kunne bevisast med `./bin/nc local-green`; før push/tag skal samla grønnliste kunne køyrast som `./bin/nc local-green --strict`. Historiske C/Python-spor skal merkast som arkiv eller historikk.

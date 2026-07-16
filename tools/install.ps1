@@ -1,11 +1,13 @@
-# tools/install.ps1 - Installer Norscode på Windows
+# tools/install.ps1 - installer Norscode på Windows
+# Norscode-first bridge: eigaren ligg i tools/install.no.
+# PowerShell-delen er avgrensa Windows-bootstrap medan runtime manglar Windows-native exec_prosess.
 #
 # Bruk:
 #   irm https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.ps1 | iex
 #   .\tools\install.ps1
 #   .\tools\install.ps1 -Prefix C:\Tools
 #
-# Krever PowerShell 5.1+ eller PowerShell 7+
+# Krev PowerShell 5.1+ eller PowerShell 7+
 
 param(
     [string]$Prefix = "$env:LOCALAPPDATA\Norscode"
@@ -17,7 +19,7 @@ $BinDir = Join-Path $Prefix "bin"
 $VersionsDir = Join-Path $Prefix "versions"
 $CurrentVersionFile = Join-Path $Prefix "CURRENT_VERSION.txt"
 
-Write-Host "Norscode installasjon for Windows" -ForegroundColor Cyan
+Write-Host "Norscode-installasjon for Windows" -ForegroundColor Cyan
 Write-Host "Installasjonsrot: $Prefix"
 
 # ─── Lag installasjonskatalog ────────────────────────────────────────────────
@@ -32,7 +34,7 @@ try {
     $Release = Invoke-RestMethod -Uri $ReleasesUrl -UseBasicParsing
     $Asset = $Release.assets | Where-Object { $_.name -like "norscode-windows*" } | Select-Object -First 1
 } catch {
-    Write-Warning "Kunne ikke hente release fra GitHub: $_"
+    Write-Warning "Kunne ikkje hente release frå GitHub: $_"
     $Asset = $null
 }
 
@@ -96,7 +98,7 @@ if ($CurrentPath -notlike "*$BinDir*") {
     [Environment]::SetEnvironmentVariable("PATH", "$BinDir;$CurrentPath", "User")
     Write-Host "Lagt til PATH (gjelder nye terminaler): $BinDir" -ForegroundColor Green
 } else {
-    Write-Host "PATH allerede konfigurert."
+    Write-Host "PATH er alt konfigurert."
 }
 
 Write-Host ""
@@ -105,4 +107,4 @@ Write-Host "  nc.ps1 --help"
 Write-Host "  nc.cmd --help"
 Write-Host "  norscode.exe --help"
 Write-Host ""
-Write-Host "Start en ny terminal for at PATH-endringen skal tre i kraft."
+Write-Host "Start ein ny terminal for at PATH-endringa skal tre i kraft."

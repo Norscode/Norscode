@@ -29,7 +29,7 @@ Dette er ei rask oversikt over kva som er klart for bruk i fase 2, kva som er p�
 
 - Om modulen står under "Kan brukast i prosjekt no", kan han brukast i normal fase-2-utvikling
 - Om modulen står under "Under arbeid", er han relevant, men ikkje ein del av den smalaste fase-2-løypa
-- Om modulen står under "Manglar", er han ikkje del av denne byggfasen enno
+- Om modulen står under "Manglar", er han utanfor denne byggfasen
 
 ## Kva er ferdig i dag
 

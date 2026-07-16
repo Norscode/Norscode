@@ -24,6 +24,7 @@ Design tokens er den grunnleggende visuelle kontrakten for frontend.
 - skill mellom funksjonelle og dekorative tokens
 - la `std.stil` modellere tokens som CSS-variabler med norske hjelparar som `token_farge(...)`, `token_spacing(...)` og `token_radius(...)`
 - la komponentar lese verdiar via `token_ref(...)` i staden for å gjenta rå verdiar
+- bruk layout-hjelparar som `repeat(...)`, `minmax_spor(...)`, `grid_kolonner(...)`, `flex_rad(...)` og `flex_kolonne(...)` når tokens skal inn i grid/flex-layoutar
 
 ## Eksempel
 
