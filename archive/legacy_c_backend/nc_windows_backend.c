@@ -80,6 +80,15 @@ static void ncw_trim_separator(wchar_t *path) {
         path[--length] = 0;
 }
 
+static void ncw_normalize_long_path(wchar_t *path) {
+    wchar_t normalized[NCW_PATH_CAP];
+    DWORD length = GetLongPathNameW(path, normalized, NCW_PATH_CAP);
+    if (length && length < NCW_PATH_CAP) {
+        wcsncpy(path, normalized, NCW_PATH_CAP - 1);
+        path[NCW_PATH_CAP - 1] = 0;
+    }
+}
+
 static int ncw_path_beneath(const wchar_t *root, const wchar_t *candidate) {
     size_t root_length = wcslen(root);
     if (_wcsnicmp(root, candidate, root_length)) return 0;
@@ -102,7 +111,7 @@ static int ncw_resolve(const char *root_utf8, const char *relative_utf8,
         ncw_error(error, error_cap, "root resolution", GetLastError());
         return 0;
     }
-    ncw_strip_namespace(root); ncw_trim_separator(root);
+    ncw_strip_namespace(root); ncw_normalize_long_path(root); ncw_trim_separator(root);
     wchar_t combined[NCW_PATH_CAP];
     int combined_length = _snwprintf(combined, NCW_PATH_CAP, L"%ls\\%ls", root, relative);
     if (combined_length < 0 || combined_length >= NCW_PATH_CAP) {
@@ -114,7 +123,7 @@ static int ncw_resolve(const char *root_utf8, const char *relative_utf8,
         ncw_error(error, error_cap, "path resolution", GetLastError());
         return 0;
     }
-    ncw_strip_namespace(candidate); ncw_trim_separator(candidate);
+    ncw_strip_namespace(candidate); ncw_normalize_long_path(candidate); ncw_trim_separator(candidate);
     if (!ncw_path_beneath(root, candidate)) {
         ncw_error(error, error_cap, "path scope", ERROR_ACCESS_DENIED);
         return 0;
@@ -140,7 +149,7 @@ static int ncw_verify_open_handle(HANDLE handle, const wchar_t *root,
         ncw_error(error, error_cap, "final path query", GetLastError());
         return 0;
     }
-    ncw_strip_namespace(final_path); ncw_trim_separator(final_path);
+    ncw_strip_namespace(final_path); ncw_normalize_long_path(final_path); ncw_trim_separator(final_path);
     if (!ncw_path_beneath(root, final_path)) {
         ncw_error(error, error_cap, "final path scope", ERROR_ACCESS_DENIED);
         return 0;
