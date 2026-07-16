@@ -6,16 +6,17 @@ Målet er å gjere release, installasjon og rollback føreseieleg utan å dra in
 
 - [ ] `./bin/nc --version` viser rett versjon
 - [ ] relevant release- og installasjonstest går grønt
-- [ ] release-pakke kan byggast med `bash package-release.sh <versjon>`
+- [ ] relevante punkt i [10/10 modenhetsplan](../MODENHET_10_10.md) har kodebevis, bruksbevis og gatebevis
+- [ ] release-pakke kan byggast med `NORSCODE_RELEASE_VERSION=<versjon> NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/package_release.no`
 - [ ] release- og installasjonsflata krev ikkje C-verktøykjede i normal drift
-- [ ] `bash tools/selfhost_drift_guard.sh` går grønt før release
+- [ ] `./bin/nc run tools/selfhost_drift_guard.no` går grønt før release
 - [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
 - [ ] inga release-instruks peikar brukaren mot C/Python, `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype
 
 ## Bygg release
 
 ```bash
-bash package-release.sh <versjon>
+NORSCODE_RELEASE_VERSION=<versjon> NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/package_release.no
 ```
 
 Verifiser:
@@ -31,7 +32,7 @@ Verifiser:
 ## Installer release
 
 ```bash
-bash tools/install-release.sh release-artifacts/norscode-language-<versjon>.tar.gz --prefix /srv/norscode
+NORSCODE_INSTALL_ARCHIVE=release-artifacts/norscode-language-<versjon>.tar.gz NORSCODE_INSTALL_PREFIX=/srv/norscode ./bin/nc run tools/install-release.no
 ```
 
 Verifiser:

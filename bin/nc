@@ -3,11 +3,32 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
-NC_NATIVE="${NORSCODE_NATIVE_BIN:-$ROOT_DIR/dist/norscode_native}"
+NC_TMP_ROOT="${TMPDIR:-/tmp}"
+NC_TMP_ROOT="${NC_TMP_ROOT%/}"
+NC_NATIVE="${NORSCODE_NATIVE_BIN:-${NC_NATIVE:-$ROOT_DIR/dist/norscode_native}}"
+HYBRID_COMPILE="$ROOT_DIR/tools/compile_with_hybrid_bundle_v9400.no"
 # Windows (Git Bash / MSYS2 / Cygwin): bruk .exe-suffiks
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*) NC_NATIVE="${NC_NATIVE}.exe" ;;
+    MINGW*|MSYS*|CYGWIN*)
+        case "$NC_NATIVE" in
+            *.exe) ;;
+            *) NC_NATIVE="${NC_NATIVE}.exe" ;;
+        esac
+        ;;
 esac
+
+if [ -z "${NORSCODE_NATIVE_BIN:-}" ] && [ ! -x "$NC_NATIVE" ]; then
+    case "$(uname -s 2>/dev/null):$(uname -m 2>/dev/null)" in
+        Darwin:arm64) _nc_stage0="$ROOT_DIR/bootstrap/stage0/norscode-macos-arm64" ;;
+        Darwin:x86_64) _nc_stage0="$ROOT_DIR/bootstrap/stage0/norscode-macos-x86_64" ;;
+        Linux:x86_64) _nc_stage0="$ROOT_DIR/bootstrap/stage0/norscode-linux-x86_64" ;;
+        Linux:aarch64|Linux:arm64) _nc_stage0="$ROOT_DIR/bootstrap/stage0/norscode-linux-arm64" ;;
+        *) _nc_stage0="" ;;
+    esac
+    if [ -n "$_nc_stage0" ] && [ -x "$_nc_stage0" ]; then
+        NC_NATIVE="$_nc_stage0"
+    fi
+fi
 
 _nc_version() {
     _toml="$ROOT_DIR/norcode.toml"
@@ -20,7 +41,7 @@ _nc_version() {
 
 _require_native() {
     if [ ! -x "$NC_NATIVE" ]; then
-        printf 'nc: norscode_native ikkje funnen. Køyr: bash tools/build_norscode_native.sh\n' >&2
+        printf 'nc: norscode_native ikkje funnen. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2
         exit 1
     fi
 }
@@ -44,6 +65,28 @@ _find_project_root() {
     printf '%s\n' "$ROOT_DIR"
 }
 
+_hybrid_compile() {
+    _hy_src="$1"
+    _hy_out="$2"
+    _hy_mod="${3:-__main__}"
+    _hy_project_root="${4:-$ROOT_DIR}"
+    env \
+        NORSCODE_CMD=run \
+        NORSCODE_FILE="$HYBRID_COMPILE" \
+        NORSCODE_ENABLE_EXEC_PROSESS=1 \
+        NORSCODE_HYBRID_ROOT="$ROOT_DIR" \
+        NORSCODE_HYBRID_SRC="$_hy_src" \
+        NORSCODE_HYBRID_OUT="$_hy_out" \
+        NORSCODE_HYBRID_MODULE="$_hy_mod" \
+        NORSCODE_HYBRID_PROJECT_ROOT="$_hy_project_root" \
+        NORSCODE_ROOT="$ROOT_DIR" \
+        NORSCODE_NATIVE_BIN="$NC_NATIVE" \
+        NORSCODE_NATIVE_MAX_DEPTH="${NORSCODE_NATIVE_MAX_DEPTH:-4096}" \
+        NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+        NORSCODE_VM_DISK_ROOT="$ROOT_DIR,$NC_TMP_ROOT,/tmp,/private/tmp" \
+        "$NC_NATIVE"
+}
+
 if [ $# -eq 0 ]; then
     printf 'Norscode %s  —  køyr: nc help\n' "$(_nc_version)"
     exit 0
@@ -53,41 +96,135 @@ CMD="$1"; shift
 
 case "$CMD" in
 
-    run)
-        SRC="${1:-app.no}"
-        # Prioriter norscode_native (native binary, raskare)
-        if [ -x "$NC_NATIVE" ]; then
+	    run)
+	        SRC="${1:-app.no}"
+	        if [ -x "$NC_NATIVE" ]; then
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _run_src_dir="$(CDPATH= cd -- "$(dirname "$SRC")" 2>/dev/null && pwd || pwd)"
+	                _run_project_root="$(_find_project_root "$_run_src_dir")"
+	                _run_ncb="${TMPDIR:-/tmp}/nc_run_${$}.ncb.json"
+	                _hybrid_compile "$SRC" "$_run_ncb" "__main__" "$_run_project_root" >/dev/null
+                cd "$ROOT_DIR" || exit 1
+                _run_out="${TMPDIR:-/tmp}/nc_run_${$}.out"
+                _run_rc=0
+                env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_host_run_entry.no" NORSCODE_NCB_FILE="$_run_ncb" NORSCODE_ROOT="$ROOT_DIR" NORSCODE_PROJECT_ROOT="$_run_project_root" NORSCODE_IMPORT_BASE="$_run_project_root" NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_VM_CAPABILITIES="${NORSCODE_VM_CAPABILITIES:-env.read,process.exec,disk.read,disk.write,net.tcp,net.dns}" "$NC_NATIVE" >"$_run_out" 2>&1 || _run_rc=$?
+                if [ "${NORSCODE_DISABLE_MAPPE_FALLBACK:-0}" != "1" ] && grep -q 'Ukjent funksjon: builtin\.mappe_opprett' "$_run_out"; then
+                    _pure_target_ncb="${TMPDIR:-/tmp}/nc_run_mappe_fallback_${$}.ncb.json"
+                    cp "$_run_ncb" "$_pure_target_ncb"
+                    rm -f "$_run_out" "$_run_ncb"
+                    _fallback_rc=0
+                    env NORSCODE_PURE_NCB_FILE="$_pure_target_ncb" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/selfhost/tooling/ncb_pure_run_entry.no" || _fallback_rc=$?
+                    rm -f "$_pure_target_ncb"
+                    exit "$_fallback_rc"
+                fi
+                if [ "$_run_rc" -eq 0 ]; then
+                    cat "$_run_out"
+                    rm -f "$_run_out" "$_run_ncb"
+                    exit 0
+                fi
+                cat "$_run_out"
+                rm -f "$_run_out" "$_run_ncb"
+                exit "$_run_rc"
+            fi
+            cd "$ROOT_DIR" || exit 1
             exec env NORSCODE_CMD=run NORSCODE_FILE="$SRC" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         fi
-        printf 'nc: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2; exit 1
+        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
         ;;
 
-    compile)
+	    run-ncb)
+	        NCB_FILE="${1:-}"
+	        if [ -z "$NCB_FILE" ]; then
+	            printf 'bruk: nc run-ncb <fil.ncb.json>\n' >&2; exit 2
+	        fi
+	        if [ -x "$NC_NATIVE" ]; then
+	            cd "$ROOT_DIR" || exit 1
+	            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_host_run_entry.no" NORSCODE_NCB_FILE="$NCB_FILE" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+	        fi
+	        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
+	        ;;
+	    run-pure)
+	        SRC="${1:-app.no}"
+	        if [ -x "$NC_NATIVE" ]; then
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _run_ncb="${TMPDIR:-/tmp}/nc_run_pure_${$}.ncb.json"
+	                _hybrid_compile "$SRC" "$_run_ncb" "__main__" "$ROOT_DIR" >/dev/null
+	                _pure_cache_dir="$ROOT_DIR/build/runtime-cache"
+	                _pure_runner="$_pure_cache_dir/ncb_pure_run_entry.ncb.json"
+	                if [ ! -f "$_pure_runner" ] || \
+	                   [ "$ROOT_DIR/selfhost/tooling/ncb_pure_run_entry.no" -nt "$_pure_runner" ] || \
+	                   [ "$ROOT_DIR/selfhost/vm.no" -nt "$_pure_runner" ] || \
+	                   [ "$HYBRID_COMPILE" -nt "$_pure_runner" ]; then
+	                    mkdir -p "$_pure_cache_dir"
+	                    _pure_runner_tmp="$_pure_runner.${$}.tmp"
+	                    _hybrid_compile "$ROOT_DIR/selfhost/tooling/ncb_pure_run_entry.no" "$_pure_runner_tmp" "__main__" "$ROOT_DIR" >/dev/null
+	                    mv "$_pure_runner_tmp" "$_pure_runner"
+	                fi
+	                _pure_rc=0
+	                env NORSCODE_PURE_NCB_FILE="$_run_ncb" \
+	                    NORSCODE_NCB_FILE="$_pure_runner" \
+	                    NORSCODE_ROOT="$ROOT_DIR" \
+	                    NORSCODE_CMD=run \
+	                    NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_host_run_entry.no" \
+	                    "$NC_NATIVE" || _pure_rc=$?
+	                rm -f "$_run_ncb"
+	                exit "$_pure_rc"
+	            fi
+	            printf 'nc: run-pure krev hybrid compile-sti\n' >&2; exit 1
+	        fi
+	        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
+	        ;;
+
+	    run-ncb-pure)
+	        NCB_FILE="${1:-}"
+	        if [ -z "$NCB_FILE" ]; then
+	            printf 'bruk: nc run-ncb-pure <fil.ncb.json>\n' >&2; exit 2
+	        fi
+	        if [ -x "$NC_NATIVE" ]; then
+	            exec env NORSCODE_PURE_NCB_FILE="$NCB_FILE" "$ROOT_DIR/bin/nc" run "$ROOT_DIR/selfhost/tooling/ncb_pure_run_entry.no"
+	        fi
+	        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
+	        ;;
+		    compile)
         SRC="${1:-}"
         OUT="${2:-}"
         if [ -z "$SRC" ]; then
             printf 'bruk: nc compile <kilde.no> [utdata.ncb.json]\n' >&2; exit 2
         fi
-        if [ -x "$NC_NATIVE" ]; then
+	        if [ -x "$NC_NATIVE" ]; then
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                if [ -n "$OUT" ]; then
+	                    _hybrid_compile "$SRC" "$OUT" "__main__" "$ROOT_DIR"
+	                    exit $?
+	                else
+	                    _default_out="${SRC%.no}.ncb.json"
+	                    _hybrid_compile "$SRC" "$_default_out" "__main__" "$ROOT_DIR"
+	                    exit $?
+	                fi
+	            fi
             if [ -n "$OUT" ]; then
-                exec env NORSCODE_CMD=compile NORSCODE_FILE="$SRC" NORSCODE_OUTPUT="$OUT" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_compile_entry.no" NORSCODE_TARGET_FILE="$SRC" NORSCODE_TARGET_OUTPUT="$OUT" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
             else
-                exec env NORSCODE_CMD=compile NORSCODE_FILE="$SRC" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_compile_entry.no" NORSCODE_TARGET_FILE="$SRC" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
             fi
         fi
-        printf 'nc: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2; exit 1
+        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
         ;;
 
-    build)
+	    build)
         SRC="${1:-}"
         OUT="${2:-}"
         if [ -z "$SRC" ] || [ -z "$OUT" ]; then
             printf 'bruk: nc build <kilde.no> <utdata.ncb.json>\n' >&2; exit 2
         fi
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=compile NORSCODE_FILE="$SRC" NORSCODE_OUTPUT="$OUT" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+	        if [ -x "$NC_NATIVE" ]; then
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _hybrid_compile "$SRC" "$OUT" "__main__" "$ROOT_DIR"
+	                exit $?
+	            fi
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_compile_entry.no" NORSCODE_TARGET_FILE="$SRC" NORSCODE_TARGET_OUTPUT="$OUT" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         fi
-        printf 'nc: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2; exit 1
+        printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
         ;;
 
     bygg)
@@ -118,7 +255,11 @@ case "$CMD" in
             fi
             if [ -z "$_out" ]; then _out="${_src%.no}"; fi
             _tmpncb="$(mktemp "${TMPDIR:-/tmp}/nc_bygg_XXXXXX.ncb.json" 2>/dev/null || printf '%s/nc_bygg_%s.ncb.json' "${TMPDIR:-/tmp}" "$$")"
-            env NORSCODE_CMD=compile NORSCODE_FILE="$_src" "$NC_NATIVE" > "$_tmpncb"
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _hybrid_compile "$_src" "$_tmpncb" "__main__" "$ROOT_DIR" >/dev/null
+            else
+                env NORSCODE_CMD=compile NORSCODE_FILE="$_src" "$NC_NATIVE" > "$_tmpncb"
+            fi
             NC_INPUT="$_tmpncb" NC_OUTPUT="$_out" \
                 env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/native_execution/native_codegen.no" "$NC_NATIVE"
             rm -f "$_tmpncb"
@@ -131,7 +272,11 @@ case "$CMD" in
         elif [ "$_maal" = "elf64" ]; then
             if [ -z "$_out" ]; then _out="${_src%.no}"; fi
             _tmpncb="$(mktemp "${TMPDIR:-/tmp}/nc_bygg_XXXXXX.ncb.json" 2>/dev/null || printf '%s/nc_bygg_%s.ncb.json' "${TMPDIR:-/tmp}" "$$")"
-            env NORSCODE_CMD=compile NORSCODE_FILE="$_src" "$NC_NATIVE" > "$_tmpncb"
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _hybrid_compile "$_src" "$_tmpncb" "__main__" "$ROOT_DIR" >/dev/null
+            else
+                env NORSCODE_CMD=compile NORSCODE_FILE="$_src" "$NC_NATIVE" > "$_tmpncb"
+            fi
             NC_INPUT="$_tmpncb" NC_OUTPUT="$_out" \
                 env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/native_execution/ncb_to_elf.no" "$NC_NATIVE"
             rm -f "$_tmpncb"
@@ -139,7 +284,11 @@ case "$CMD" in
             printf 'bygg: %s → %s (ELF64 x86-64)\n' "$_src" "$_out"
         else
             if [ -z "$_out" ]; then _out="${_src%.no}.ncb.json"; fi
-            env NORSCODE_CMD=compile NORSCODE_FILE="$_src" "$NC_NATIVE" > "$_out"
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _hybrid_compile "$_src" "$_out" "__main__" "$ROOT_DIR" >/dev/null
+            else
+                env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_compile_entry.no" NORSCODE_TARGET_FILE="$_src" NORSCODE_TARGET_OUTPUT="$_out" "$NC_NATIVE" >/dev/null
+            fi
             printf 'bygg: %s → %s (NCB)\n' "$_src" "$_out"
         fi
         ;;
@@ -149,223 +298,123 @@ case "$CMD" in
         if [ -z "$SRC" ]; then
             printf 'bruk: nc check <kilde.no>\n' >&2; exit 2
         fi
+        if [ ! -f "$SRC" ]; then
+            printf 'feil: finn ikkje fil %s\n' "$SRC" >&2
+            exit 2
+        fi
+        case "$SRC" in
+            /*) : ;;
+            *) SRC="$(pwd)/$SRC" ;;
+        esac
+        _check_source_dir="$(dirname "$SRC")"
+        _check_project_root="$(_find_project_root "$_check_source_dir")"
         _tmpdir="$(mktemp -d)"
         _rc=0
         if [ -x "$NC_NATIVE" ]; then
-            env NORSCODE_CMD=compile NORSCODE_FILE="$SRC" NORSCODE_OUTPUT="$_tmpdir/_check.ncb.json" \
-                "$NC_NATIVE" >/dev/null && printf '%s: OK\n' "$SRC" || _rc=$?
+	            if [ -f "$HYBRID_COMPILE" ]; then
+	                _hybrid_compile "$SRC" "$_tmpdir/_check.ncb.json" "__main__" "$_check_project_root" >/dev/null && printf '%s: OK\n' "$SRC" || _rc=$?
+            else
+                env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_compile_entry.no" NORSCODE_TARGET_FILE="$SRC" NORSCODE_TARGET_OUTPUT="$_tmpdir/_check.ncb.json" NORSCODE_ROOT="$ROOT_DIR" NORSCODE_IMPORT_BASE="$_check_project_root" PWD="$_check_project_root"                     "$NC_NATIVE" >/dev/null && printf '%s: OK\n' "$SRC" || _rc=$?
+            fi
         else
-            printf 'nc: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2; exit 1
+            printf 'nc: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
         fi
         rm -rf "$_tmpdir"
         exit "$_rc"
         ;;
 
     bundle)
-        if [ -x "$NC_NATIVE" ]; then
-            _bundle_out="bootstrap/kompiler.ncb.json"
-            _bundle_args=""
-            _skip=0
-            for _barg in "$@"; do
-                if [ "$_barg" = "--output" ]; then _skip=1; continue; fi
-                if [ "$_skip" = "1" ]; then _bundle_out="$_barg"; _skip=0; continue; fi
-                _bundle_args="${_bundle_args:+$_bundle_args }$_barg"
-            done
-            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/bundler.no" \
-                NORSCODE_BUNDLE_ARGS="$_bundle_args" \
-                NORSCODE_BUNDLE_OUTPUT="$_bundle_out" \
+        _bundle_out="bootstrap/kompiler.ncb.json"
+        _bundle_specs=""
+        _skip=0
+        for _barg in "$@"; do
+            if [ "$_barg" = "--output" ]; then _skip=1; continue; fi
+            if [ "$_skip" = "1" ]; then _bundle_out="$_barg"; _skip=0; continue; fi
+            _bundle_specs="${_bundle_specs:+$_bundle_specs
+}$_barg"
+        done
+        _bundle_entry="${NORSCODE_BUNDLE_ENTRY:-__main__.start}"
+        _bundle_runner="$ROOT_DIR/tools/bundle_with_hybrid_compiler_v9500.no"
+        if [ -f "$_bundle_runner" ]; then
+            exec env \
+                NORSCODE_CMD=run \
+                NORSCODE_FILE="$_bundle_runner" \
+                NORSCODE_ENABLE_EXEC_PROSESS=1 \
+                NORSCODE_HYBRID_ROOT="$ROOT_DIR" \
+                NORSCODE_HYBRID_OUT="$_bundle_out" \
+                NORSCODE_HYBRID_ENTRY="$_bundle_entry" \
+                NORSCODE_HYBRID_SPECS="$(printf '%s' "$_bundle_specs" | tr '\n' ' ' | sed 's/ $//')" \
+                NORSCODE_PROJECT_ROOT="${NORSCODE_PROJECT_ROOT:-${NORSCODE_IMPORT_BASE:-$(pwd)}}" \
+                NORSCODE_IMPORT_BASE="${NORSCODE_IMPORT_BASE:-${NORSCODE_PROJECT_ROOT:-$(pwd)}}" \
+                NORSCODE_ROOT="$ROOT_DIR" \
+                NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+                NORSCODE_VM_DISK_ROOT="$ROOT_DIR,$NC_TMP_ROOT,/tmp,/private/tmp" \
                 "$NC_NATIVE"
         fi
-        printf 'nc bundle: trenger dist/norscode_native. Køyr: bash tools/build_norscode_native.sh\n' >&2; exit 1
+        if [ -x "$NC_NATIVE" ]; then
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/safe_bundle_entry.no" \
+                NORSCODE_BUNDLE_ARGS="$(printf '%s' "$_bundle_specs" | tr '\n' ' ' | sed 's/ $//')" \
+                NORSCODE_BUNDLE_OUTPUT="$_bundle_out" \
+                NORSCODE_ROOT="$ROOT_DIR" \
+                "$NC_NATIVE"
+        fi
+        printf 'nc bundle: trenger dist/norscode_native. Køyr: ./bin/nc run tools/build_norscode_native.no\n' >&2; exit 1
         ;;
 
     format)
-        _require_nc_vm
+        _require_native
         _fmt_src="${1:-}"
         if [ -z "$_fmt_src" ]; then
-            printf 'bruk: nc format <kilde.no> [--write] [--check]\n' >&2; exit 2
+            printf 'bruk: nc format <kilde.no> [--write|--check]\n' >&2
+            exit 2
         fi
-        _fmt_write=0; _fmt_check=0
+        _fmt_abs="$(cd "$(dirname "$_fmt_src")" && pwd)/$(basename "$_fmt_src")"
+        _fmt_write=0
+        _fmt_check=0
         for _a in "$@"; do
             [ "$_a" = "--write" ] && _fmt_write=1
             [ "$_a" = "--check" ] && _fmt_check=1
         done
-        _fmt_abs="$(cd "$(dirname "$_fmt_src")" && pwd)/$(basename "$_fmt_src")"
         if [ "$_fmt_write" = "1" ]; then
-            if [ -x "$NC_NATIVE" ]; then
-                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" NC_FORMAT_WRITE="1" "$NC_NATIVE"
-            fi
-            printf 'nc format: trenger dist/norscode_native\n' >&2; exit 1
-        elif [ "$_fmt_check" = "1" ]; then
-            if [ -x "$NC_NATIVE" ]; then
-                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" NC_FORMAT_CHECK="1" "$NC_NATIVE"
-            fi
-            printf 'nc format: trenger dist/norscode_native\n' >&2; exit 1
-        else
-            if [ -x "$NC_NATIVE" ]; then
-                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" "$NC_NATIVE"
-            fi
-            printf 'nc format: trenger dist/norscode_native\n' >&2; exit 1
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" NC_FORMAT_WRITE=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         fi
+        if [ "$_fmt_check" = "1" ]; then
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" NC_FORMAT_CHECK=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        fi
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/formatter.no" NC_FORMAT_FILE="$_fmt_abs" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         ;;
 
     lint)
-        _require_nc_vm
+        _require_native
         _lint_src="${1:-}"
         if [ -z "$_lint_src" ]; then
-            printf 'bruk: nc lint <kilde.no> [--check]\n' >&2; exit 2
+            printf 'bruk: nc lint <kilde.no> [--check]\n' >&2
+            exit 2
         fi
-        _lint_check=0
-        for _a in "$@"; do [ "$_a" = "--check" ] && _lint_check=1; done
         _lint_abs="$(cd "$(dirname "$_lint_src")" && pwd)/$(basename "$_lint_src")"
+        _lint_check=0
+        for _a in "$@"; do
+            [ "$_a" = "--check" ] && _lint_check=1
+        done
         if [ "$_lint_check" = "1" ]; then
-            if [ -x "$NC_NATIVE" ]; then
-                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/linter.no" NC_LINT_FILE="$_lint_abs" NC_LINT_CHECK="1" "$NC_NATIVE"
-            fi
-            printf 'nc lint: trenger dist/norscode_native\n' >&2; exit 1
-        else
-            if [ -x "$NC_NATIVE" ]; then
-                exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/linter.no" NC_LINT_FILE="$_lint_abs" "$NC_NATIVE"
-            fi
-            printf 'nc lint: trenger dist/norscode_native\n' >&2; exit 1
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/linter.no" NC_LINT_FILE="$_lint_abs" NC_LINT_CHECK=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         fi
-        ;;
-
-    doctor)
-        _require_nc_vm
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/doctor.no" "$NC_NATIVE"
-        fi
-        printf 'nc doctor: trenger dist/norscode_native\n' >&2; exit 1
-        ;;
-
-    maintenance)
-        _require_nc_vm
-        _task="${1:-${NORSCODE_TASK:-status}}"
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/maintenance.no" NORSCODE_TASK="$_task" "$NC_NATIVE"
-        fi
-        printf 'nc maintenance: trenger dist/norscode_native\n' >&2; exit 1
-        ;;
-
-    lsp)
-        _require_nc_vm
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/lsp/server.no" "$NC_NATIVE"
-        fi
-        printf 'nc lsp: trenger dist/norscode_native\n' >&2; exit 1
-        ;;
-
-    repl)
-        _require_nc_vm
-        exec sh "$ROOT_DIR/tools/nc_repl.sh" "$@"
-        ;;
-
-    test)
-        _require_nc_vm
-        exec sh "$ROOT_DIR/tools/nc_test.sh" "$@"
-        ;;
-
-    selftest)
-        _require_nc_vm
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=selftest "$NC_NATIVE"
-        fi
-        printf 'nc selftest: trenger dist/norscode_native\n' >&2; exit 1
-        ;;
-
-    selfcheck)
-        _require_nc_vm
-        exec sh "$ROOT_DIR/tools/nc_test.sh" "$@"
-        ;;
-
-    selfhost-bootstrap-gate)
-        _require_nc_vm
-        if [ -x "$NC_NATIVE" ]; then
-            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/bootstrap_gate.no" "$NC_NATIVE"
-        fi
-        printf 'nc selfhost-bootstrap-gate: trenger dist/norscode_native\n' >&2; exit 1
-        ;;
-
-    bootstrap-self)
-        _require_native
-        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/bootstrap_self_pure.no" "$NC_NATIVE"
-        ;;
-
-    bootstrap-self-vm|run-ncb)
-        _require_native
-        if [ -z "${1:-}" ]; then
-            printf 'bruk: nc run-ncb <program.ncb.json>\n' >&2; exit 1
-        fi
-        _ncb_file="$1"
-        if [ ! -f "$_ncb_file" ]; then
-            printf 'ERROR: %s finst ikkje\n' "$_ncb_file" >&2; exit 1
-        fi
-        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/vm_executor.no" NORSCODE_NCB_FILE="$_ncb_file" "$NC_NATIVE"
-        ;;
-
-    selfcompile-l5|l5)
-        _require_native
-        exec sh "$ROOT_DIR/tools/selfcompile_l5.sh" "$@"
-        ;;
-
-    selfcompile-l5b|l5b)
-        _require_native
-        exec sh "$ROOT_DIR/tools/selfcompile_l5b.sh" "$@"
-        ;;
-
-    verify-selvstendighet|selvstendighet)
-        exec sh "$ROOT_DIR/tools/verify_selvstendighet.sh" "$@"
-        ;;
-
-    verify-omgang6|omgang6)
-        exec bash "$ROOT_DIR/tools/verify_omgang6.sh" "$@"
-        ;;
-
-    selfcompile-native-elf|native-elf-selfcompile)
-        exec bash "$ROOT_DIR/tools/selfcompile_native_elf.sh" "$@"
-        ;;
-
-    selfcompile-stage0-elf|stage0-elf-selfcompile)
-        exec bash "$ROOT_DIR/tools/selfcompile_stage0_elf.sh" "$@"
-        ;;
-
-    verify-omgang6)
-        exec bash "$ROOT_DIR/tools/verify_omgang6.sh" "$@"
-        ;;
-
-    verify-omgang6b|omgang6b)
-        exec bash "$ROOT_DIR/tools/verify_omgang6b.sh" "$@"
-        ;;
-
-    verify-seed|seed-only)
-        exec bash "$ROOT_DIR/tools/verify_seed_only.sh" "$@"
-        ;;
-
-    fetch-stage0-seed)
-        exec bash "$ROOT_DIR/tools/fetch_stage0_seed.sh" "$@"
-        ;;
-
-    ncb-to-elf)
-        _require_native
-        exec bash "$ROOT_DIR/tools/ncb_to_elf.sh" "$@"
-        ;;
-
-    regen-fraser)
-        _require_native
-        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/scripts/regen_fraser.no" "$NC_NATIVE"
-        ;;
-
-    feature-check|feature)
-        _require_native
-        exec sh "$ROOT_DIR/tools/norscode_feature_gate.sh" "$@"
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/linter.no" NC_LINT_FILE="$_lint_abs" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         ;;
 
     bygg-native|bygg-native-v2)
         # Omgang 6: kompiler NCB til native ELF via native_codegen_v2.no (full NcVal-runtime)
         _require_native
         if [ "${1:-}" = "--ncb" ]; then
-            exec bash "$ROOT_DIR/tools/ncb_to_elf.sh" "${2:?bruk: nc bygg-native --ncb fil.ncb.json ut.elf}" "${3:-a.out}"
+            _ncb_input="${2:?bruk: nc bygg-native --ncb fil.ncb.json ut.elf}"
+            _ncb_output="${3:-a.out}"
+            exec env NORSCODE_CMD=run \
+                NORSCODE_FILE="$ROOT_DIR/tools/ncb_to_elf.no" \
+                NORSCODE_ENABLE_EXEC_PROSESS=1 \
+                NORSCODE_ROOT="$ROOT_DIR" \
+                NORSCODE_NCB_TO_ELF_INPUT="$_ncb_input" \
+                NORSCODE_NCB_TO_ELF_OUTPUT="$_ncb_output" \
+                "$NC_NATIVE"
         fi
         _src="${1:-}"
         _out="${2:-a.out}"
@@ -379,7 +428,11 @@ case "$CMD" in
         else
             _tmpncb="$(mktemp "${TMPDIR:-/tmp}/nc_bygg_native_XXXXXX.ncb.json" 2>/dev/null || printf '%s/nc_bygg_native_%s.ncb.json' "${TMPDIR:-/tmp}" "$$")"
             trap 'rm -f "$_tmpncb"' EXIT
-            env NORSCODE_CMD=compile NORSCODE_FILE="$_src" NORSCODE_OUTPUT="$_tmpncb" "$NC_NATIVE" >/dev/null
+            if [ -f "$HYBRID_COMPILE" ]; then
+                _hybrid_compile "$_src" "$_tmpncb" "__main__" "$ROOT_DIR" >/dev/null
+            else
+                env NORSCODE_CMD=compile NORSCODE_FILE="$_src" NORSCODE_OUTPUT="$_tmpncb" "$NC_NATIVE" >/dev/null
+            fi
             exec env NORSCODE_CMD=run \
                 NORSCODE_FILE="$_codegen" \
                 NC_INPUT="$_tmpncb" \
@@ -388,13 +441,207 @@ case "$CMD" in
         fi
         ;;
 
+    test)
+        _require_native
+        exec env \
+            NORSCODE_CMD=run \
+            NORSCODE_FILE="$ROOT_DIR/tools/nc_test.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,thread.spawn,net.tcp,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,/tmp,/private/tmp" \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NC_NATIVE="$NC_NATIVE" \
+            "$NC_NATIVE" || exit $?
+        ;;
+
+    feature-check)
+        _require_native
+        env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/no_c_python_active_surface.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE" || exit $?
+        env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/verify_norscode_surface_ownership.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE" || exit $?
+        _fc_rc=0
+        if [ "$#" -eq 0 ]; then
+            set -- app.no
+        fi
+        for _fc_file in "$@"; do
+            "$0" check "$_fc_file" || _fc_rc=$?
+        done
+        TEST_TIMEOUT="${TEST_TIMEOUT:-10}" NC_TEST_FILE="$ROOT_DIR/tests/test_ai.no" \
+            env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/nc_test.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" NC_NATIVE="$NC_NATIVE" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,thread.spawn,net.tcp,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE" || _fc_rc=$?
+        exit "$_fc_rc"
+        ;;
+
+    maintenance)
+        _require_native
+        _task="${1:-${NORSCODE_TASK:-status}}"
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/maintenance.no" \
+            NORSCODE_TASK="$_task" NORSCODE_ROOT="$ROOT_DIR" NORSCODE_ENABLE_EXEC_PROSESS=1 \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE"
+        ;;
+
+    doctor)
+        _require_native
+        if [ -f "$ROOT_DIR/selfhost/doctor.no" ]; then
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/doctor.no" \
+                NORSCODE_ROOT="$ROOT_DIR" NORSCODE_ENABLE_EXEC_PROSESS=1 \
+                NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+                NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+                "$NC_NATIVE"
+        fi
+        exec "$0" maintenance verify
+        ;;
+
+    lsp)
+        _require_native
+        _lsp_file="$ROOT_DIR/selfhost/lsp/server.no"
+        if [ ! -f "$_lsp_file" ]; then
+            printf 'lsp: manglar %s\n' "$_lsp_file" >&2
+            exit 1
+        fi
+        for _sym in lsp_selftest lsp_document_symbols lsp_format_document lsp_stdio_main; do
+            if ! grep -q "funksjon $_sym" "$_lsp_file"; then
+                printf 'lsp: manglar %s i %s\n' "$_sym" "$_lsp_file" >&2
+                exit 1
+            fi
+        done
+        printf 'lsp: OK\n'
+        ;;
+
+    repl)
+        _require_native
+        printf 'Norscode REPL (Python-fri)\n'
+        printf 'Skriv Norscode-uttrykk. Enter for å evaluere. "exit" for å avslutte.\n\n'
+        while IFS= read -r line; do
+            [ "$line" = "exit" ] || [ "$line" = "avslutt" ] || [ "$line" = "quit" ] && break
+            [ -z "$line" ] && continue
+            NORSCODE_ENABLE_EXEC_PROSESS=1 \
+                NORSCODE_ROOT="$ROOT_DIR" \
+                NORSCODE_REPL_LINE="$line" \
+                "$0" run "$ROOT_DIR/tools/nc_repl.no" || true
+        done
+        printf 'Takk for no!\n'
+        exit 0
+        ;;
+
+    selftest)
+        _require_native
+        _selftest_ncb="${TMPDIR:-/tmp}/nc_selftest_${$}.ncb.json"
+        _hybrid_compile "$ROOT_DIR/selfhost/nc_main.no" "$_selftest_ncb" "__main__" "$ROOT_DIR" >/dev/null
+        _selftest_rc=0
+        env NORSCODE_CMD=run NORSCODE_RUN_CMD=selftest \
+            NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_host_run_entry.no" \
+            NORSCODE_NCB_FILE="$_selftest_ncb" \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="env.read,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE" || _selftest_rc=$?
+        rm -f "$_selftest_ncb"
+        exit "$_selftest_rc"
+        ;;
+
+    selfcheck)
+        _require_native
+        "$0" check "$ROOT_DIR/selfhost/nc_main.no"
+        "$0" selfhost-bootstrap-gate
+        ;;
+
+    selfhost-bootstrap-gate)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/bootstrap_gate.no" \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="disk.read" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,." \
+            "$NC_NATIVE"
+        ;;
+
+    bootstrap-self)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/bootstrap_self.no" \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="disk.read" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,." \
+            "$NC_NATIVE"
+        ;;
+
+    selfcompile-l5)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/selfcompile_l5.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    selfcompile-l5b)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/selfcompile_l5b.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    verify-selvstendighet)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/verify_selvstendighet.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$NC_NATIVE"
+        ;;
+
+    verify-omgang6)
+        _require_native
+        _om6_mode="${1:-all}"
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/verify_omgang6.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" NC_OM6_MODE="$_om6_mode" "$NC_NATIVE"
+        ;;
+
+    selfcompile-native-elf)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/selfcompile_stage0_elf.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    selfcompile-stage0-elf)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/selfcompile_stage0_elf.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    verify-omgang6b)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/verify_omgang6b.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    verify-seed)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/verify_seed_only.no" \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 \
+            NORSCODE_VM_CAPABILITIES="${NORSCODE_VM_CAPABILITIES:-env.read,process.exec,disk.read,disk.write}" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,.,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    fetch-stage0-seed)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/fetch_stage0_seed.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
+    regen-fraser)
+        _require_native
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/regenerate_omgang6b_fragments.no" NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
+        ;;
+
     ci)
         _require_nc_vm
         if [ -x "$NC_NATIVE" ]; then
             env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/phase2_ci.no" "$NC_NATIVE"
             env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/phase2_benchmark.no" "$NC_NATIVE"
         fi
-        exec env NC_CI=1 sh "$ROOT_DIR/tools/nc_test.sh" "$@"
+        exec env NC_CI=1 NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/tools/nc_test.no" NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT="$ROOT_DIR" "$NC_NATIVE"
         ;;
 
     identity|release|release-targets)
@@ -413,8 +660,10 @@ case "$CMD" in
     commands|help|--help|-h)
         printf 'Norscode %s — C/Python-fri CLI (norscode_native)\n\n' "$(_nc_version)"
         printf 'Normal bruk:\n'
-        printf '  run <fil.no>                     Kompiler og køyr\n'
-        printf '  compile <fil.no> [ut.ncb.json]   Kompiler til bytekode\n'
+	        printf '  run <fil.no>                     Kompiler og køyr\n'
+	        printf '  run-pure <fil.no>                Kompiler og køyr via Norscode VM-kandidat\n'
+	        printf '  run-ncb-pure <fil.ncb.json>      Køyr NCB via Norscode VM-kandidat\n'
+	        printf '  compile <fil.no> [ut.ncb.json]   Kompiler til bytekode\n'
         printf '  build <fil.no> <ut.ncb.json>     Kompiler (alias for compile)\n'
         printf '  check <fil.no>                   Syntaks- og semantikksjekk\n'
         printf '  bundle [mod=fil.no ...]          Bundle modular\n'
@@ -432,7 +681,7 @@ case "$CMD" in
         printf '  bootstrap-self                   Bootstrap steg C (Norscode-VM køyrer Norscode)\n'
         printf '  selfcompile-l5                   L5: kompilator-bundle Gen1==Gen2 (byte-paritet)\n'
         printf '  selfcompile-l5b                  L5b: Gen1-NCB VM køyrer Gen2 (byte-paritet)\n'
-        printf '  verify-selvstendighet            L1–L6 gate + bootstrap-self + test\n'
+        printf '  verify-selvstendighet            Full gate: eigarskap + bootstrap + L5/L5b + test\n'
         printf '  feature-check [fil.no ...]       Sjekk nye Norscode-funksjoner utan C/Python\n'
         printf '  verify-omgang6                   Omgang 6: bygg-native ELF-gate\n'
         printf '  selfcompile-native-elf           Omgang 6: ELF byte-paritet (Gen1==Gen2)\n'
@@ -465,16 +714,143 @@ case "$CMD" in
         ;;
 
     startproject)
-        exec sh "$ROOT_DIR/tools/startproject.sh" "$@"
+        _startproject_dir=""
+        _startproject_output_dir=""
+        _startproject_name=""
+        _startproject_db="app.db"
+        _startproject_with_auth="usann"
+        _startproject_with_admin="usann"
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --name)
+                    shift
+                    if [ "$#" -eq 0 ]; then printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2; exit 2; fi
+                    _startproject_name="$1"
+                    ;;
+                --path)
+                    shift
+                    if [ "$#" -eq 0 ]; then printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2; exit 2; fi
+                    _startproject_output_dir="$1"
+                    ;;
+                --db)
+                    shift
+                    if [ "$#" -eq 0 ]; then printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2; exit 2; fi
+                    _startproject_db="$1"
+                    ;;
+                --with-auth)
+                    _startproject_with_auth="sann"
+                    ;;
+                --without-auth)
+                    _startproject_with_auth="usann"
+                    ;;
+                --with-admin)
+                    _startproject_with_admin="sann"
+                    ;;
+                --without-admin)
+                    _startproject_with_admin="usann"
+                    ;;
+                --help|-h)
+                    printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n'
+                    printf '  <målmappe>   Målkatalog for prosjektet\n'
+                    printf '  --name       Prosjektnamn i norcode.toml\n'
+                    printf '  --path       Alternativt utmatingsområde\n'
+                    printf '  --db         Databasesti (standard: app.db)\n'
+                    printf '  --with-auth / --without-auth   Slå auth-malen av/på\n'
+                    printf '  --with-admin / --without-admin Slå admin-malen av/på\n'
+                    exit 0
+                    ;;
+                --*)
+                    printf 'ukjend flagg: %s\n' "$1" >&2
+                    exit 2
+                    ;;
+                *)
+                    if [ -z "$_startproject_dir" ]; then
+                        _startproject_dir="$1"
+                    elif [ -z "$_startproject_name" ]; then
+                        _startproject_name="$1"
+                    else
+                        printf 'for mange argument: %s\n' "$1" >&2
+                        exit 2
+                    fi
+                    ;;
+            esac
+            shift
+        done
+        if [ -z "$_startproject_dir" ]; then
+            printf 'bruk: startproject <målmappe> [--name <prosjektnamn>] [--path <sti>] [--db <db-fil>]\n' >&2
+            exit 2
+        fi
+        if [ -z "$_startproject_name" ]; then
+            _startproject_name="$(basename "$_startproject_dir")"
+        fi
+        if [ -z "$_startproject_output_dir" ]; then
+            _startproject_output_dir="$_startproject_dir"
+        fi
+        exec env \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_STARTPROJECT_DIR="$_startproject_dir" \
+            NORSCODE_STARTPROJECT_OUTPUT_DIR="$_startproject_output_dir" \
+            NORSCODE_STARTPROJECT_NAME="$_startproject_name" \
+            NORSCODE_STARTPROJECT_DB="$_startproject_db" \
+            NORSCODE_STARTPROJECT_WITH_AUTH="$_startproject_with_auth" \
+            NORSCODE_STARTPROJECT_WITH_ADMIN="$_startproject_with_admin" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,$_startproject_output_dir,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/startproject.no"
         ;;
 
     scaffold-api)
         printf 'Scaffold-api er bytt til startproject, køyr: nc startproject "$@"\n'
-        exec sh "$ROOT_DIR/tools/startproject.sh" "$@"
+        exec "$ROOT_DIR/bin/nc" startproject "$@"
         ;;
 
     startapp)
-        exec sh "$ROOT_DIR/tools/startapp.sh" "$@"
+        _startapp_project_root="."
+        _startapp_name=""
+        while [ "$#" -gt 0 ]; do
+            case "$1" in
+                --path)
+                    shift
+                    if [ "$#" -eq 0 ]; then
+                        printf 'bruk: nc startapp <app_namn> [--path <prosjektrot>]\n' >&2
+                        exit 2
+                    fi
+                    _startapp_project_root="$1"
+                    ;;
+                --help|-h)
+                    printf 'bruk: nc startapp <app_namn> [--path <prosjektrot>]\n'
+                    printf '  <app_namn>      Namn på ny app (obligatorisk)\n'
+                    printf '  --path          Katalogen med norcode.toml (standard: .)\n'
+                    exit 0
+                    ;;
+                --*)
+                    printf 'ukjend flagg: %s\n' "$1" >&2
+                    exit 2
+                    ;;
+                *)
+                    if [ -z "$_startapp_name" ]; then
+                        _startapp_name="$1"
+                    else
+                        printf 'for mange argument: %s\n' "$1" >&2
+                        exit 2
+                    fi
+                    ;;
+            esac
+            shift
+        done
+        if [ -z "$_startapp_name" ]; then
+            printf 'bruk: nc startapp <app_namn> [--path <prosjektrot>]\n' >&2
+            exit 2
+        fi
+        exec env \
+            NORSCODE_ENABLE_EXEC_PROSESS=1 \
+            NORSCODE_ROOT="$ROOT_DIR" \
+            NORSCODE_STARTAPP_NAME="$_startapp_name" \
+            NORSCODE_STARTAPP_PROJECT_ROOT="$_startapp_project_root" \
+            NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+            NORSCODE_VM_DISK_ROOT="$ROOT_DIR,$_startapp_project_root,$NC_TMP_ROOT,/tmp,/private/tmp" \
+            "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/startapp.no"
         ;;
 
     serve)
@@ -483,6 +859,7 @@ case "$CMD" in
         _workers="${NORSCODE_WORKERS:-4}"
         _host="${NORSCODE_HOST:-127.0.0.1}"
         _bind_host="${NC_SERVE_BIND_HOST:-127.0.0.1}"
+        _serve_ncb=""
         while [ "$#" -gt 0 ]; do
             case "$1" in
                 --port|-p)
@@ -534,18 +911,22 @@ case "$CMD" in
         _require_native
         _source_dir="$(dirname "$_file")"
         _project_root="$(_find_project_root "$_source_dir")"
+        _serve_runner_ncb=""
+        if [ -f "$HYBRID_COMPILE" ]; then
+            _serve_cache_dir="$_source_dir/build/runtime-tmp"
+            mkdir -p "$_serve_cache_dir"
+            _serve_ncb_abs="$_serve_cache_dir/nc_serve_${$}.ncb.json"
+            _serve_runner_ncb_abs="$_serve_cache_dir/nc_serve_runner_${$}.ncb.json"
+            _hybrid_compile "$_file" "$_serve_ncb_abs" "__main__" "$_project_root" >/dev/null
+            NC_IMPORT_BUNDLE_MAX_DEPTH=0 _hybrid_compile "$ROOT_DIR/selfhost/serve_runner.no" "$_serve_runner_ncb_abs" "__main__" "$ROOT_DIR" >/dev/null
+            _serve_ncb="${_serve_ncb_abs#$_project_root/}"
+            _serve_runner_ncb="${_serve_runner_ncb_abs#$_project_root/}"
+        fi
         cd "$_project_root"
-        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/serve_runner.no" \
-            NC_SERVE_FILE="$_file" NORSCODE_ROOT="$ROOT_DIR" \
-            NC_SERVE_SOURCE_DIR="$_source_dir" \
-            NC_SERVE_WORKDIR="$_source_dir" \
-            PWD="$_project_root" \
-            NC_SERVE_PORT="$_port" \
-            NORSCODE_WORKERS="$_workers" \
-            NC_SERVE_HOST="$_host" \
-            NC_SERVE_BIND_HOST="$_bind_host" \
-            NORSCODE_IMPORT_BASE="$_project_root" \
-            "$NC_NATIVE"
+        if [ -n "$_serve_runner_ncb" ]; then
+            exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/tooling/ncb_host_run_entry.no" NORSCODE_NCB_FILE="$_serve_runner_ncb"                 NC_SERVE_FILE="$_file" NORSCODE_ROOT="$ROOT_DIR"                 NC_SERVE_NCB_FILE="$_serve_ncb"                 NC_SERVE_SOURCE_DIR="$_source_dir"                 NC_SERVE_WORKDIR="$_source_dir"                 PWD="$_project_root"                 NC_SERVE_PORT="$_port"                 NORSCODE_WORKERS="$_workers"                 NC_SERVE_HOST="$_host"                 NC_SERVE_BIND_HOST="$_bind_host"                 NORSCODE_IMPORT_BASE="$_project_root"                 "$NC_NATIVE"
+        fi
+        exec env NORSCODE_CMD=run NORSCODE_FILE="$ROOT_DIR/selfhost/serve_runner.no"             NC_SERVE_FILE="$_file" NORSCODE_ROOT="$ROOT_DIR"             NC_SERVE_NCB_FILE="$_serve_ncb"             NC_SERVE_SOURCE_DIR="$_source_dir"             NC_SERVE_WORKDIR="$_source_dir"             PWD="$_project_root"             NC_SERVE_PORT="$_port"             NORSCODE_WORKERS="$_workers"             NC_SERVE_HOST="$_host"             NC_SERVE_BIND_HOST="$_bind_host"             NORSCODE_IMPORT_BASE="$_project_root"             "$NC_NATIVE"
         ;;
 
     pakke|pkg)

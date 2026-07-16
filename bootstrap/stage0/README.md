@@ -1,6 +1,6 @@
 # Stage-0 binærer (`norscode_native`)
 
-Dette er den normale seed-kjelda for `./bin/nc`, CI og `tools/build_norscode_native.sh`.
+Dette er den normale seed-kjelda for `./bin/nc`, CI og `tools/build_norscode_native.no`.
 Dagleg bruk skal gå via ferdige `norscode_native`-binærar herfrå, ikkje via C/clang-regenerering.
 
 Normal rekkefølge:
@@ -29,7 +29,7 @@ shasum -a 256 -c SHA256SUMS
 Oppdater manifestet med:
 
 ```sh
-bash tools/update_stage0_manifest.sh
+./bin/nc run tools/update_stage0_manifest.no
 ```
 
 ## Legg inn binærer (første gang / når CI er rød)
@@ -43,7 +43,7 @@ chmod +x bootstrap/stage0/norscode-macos-arm64
 gh release upload v0.1.0 bootstrap/stage0/norscode-macos-arm64 --clobber
 ```
 
-Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.sh` fungere utan nettverk.
+Etter commit av filene i `bootstrap/stage0/` vil `tools/build_norscode_native.no` fungere utan nettverk.
 
 ## Historisk unntak: Linux-migrering frå `bootstrap/maint/c`
 
@@ -56,22 +56,22 @@ git add bootstrap/stage0/norscode-linux-x86_64
 bash tools/maint/finish_6b4.sh   # git rm bootstrap/maint/c/*.c
 ```
 
-**Standard:** `tools/build_norscode_native.sh` brukar seed herifrå (eller release) og krev ikkje clang.
+**Standard:** `tools/build_norscode_native.no` brukar seed herifrå (eller release) og krev ikkje clang.
 
 ## Kva som er produksjonsløpet for ny seed
 
 Ny `bootstrap/stage0/norscode-<plattform>` produseres frå same normale pipeline som bygg `dist/norscode_native`:
 
 1. `./bin/nc`/`dist/norscode_native` må vere tilgjengeleg.
-2. `tools/build_norscode_native.sh` byggjer/oppdaterer `dist/norscode_native` frå seed.
+2. `tools/build_norscode_native.no` byggjer/oppdaterer `dist/norscode_native` frå seed.
 3. `publish.yml` (Linux/OS X byggesteg) kopierer `dist/norscode_native` til plattformartefakt.
 4. Ved vedlikehald kan ein også bruke `bash tools/maint/migrate_bootstrap_c_to_stage0.sh` i `export-stage0-linux.yml` for éin-gong migrering til `bootstrap/stage0/`.
 
-Når ny seed er verifisert, legg vi berre inn fila i git og køyrer evt. `bash tools/update_stage0_manifest.sh`.
+Når ny seed er verifisert, legg vi berre inn fila i git og køyrer evt. `./bin/nc run tools/update_stage0_manifest.no`.
 
 ## Historisk vedlikehald / regen
 
-`REGEN=1 bash tools/build_norscode_native.sh` er eksplisitt historisk vedlikehaldsmodus.
+`REGEN=1 ./bin/nc run tools/build_norscode_native.no` er eksplisitt historisk vedlikehaldsmodus.
 Den køyrer `tools/maint/regen_native.sh` for å lage isolert historisk output under `build/maintainer_regen/` som standard, og kompilerer med clang.
 Dette er ikkje del av normal bygg/test/CI, og ingen `.c` herifrå skal vere del av dagleg flyt.
 

@@ -14,9 +14,11 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [Full brukermanual](USER_MANUAL.md)
 - [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
+- [Treningsguide](TRAINING_GUIDE.md)
 - [Dokumentasjonsindeks for vedlikehald](DOCUMENTATION_INDEX.md)
 - [Lane map](LANE_MAP.md)
 - [Status](STATUS.md)
+- [10/10 modenhetsplan](MODENHET_10_10.md)
 - [Brand og ikoner](BRAND.md)
 - [Selfhost handlingsplan](SELFHOST_HANDLINGSPLAN.md)
 
@@ -27,6 +29,7 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [Køyre, sjekke og teste kode](USER_MANUAL.md#koyre-sjekke-og-teste-kode)
 - [Prosjekt og apper](USER_MANUAL.md#prosjekt-og-apper)
 - [Pakker og standardbibliotek](USER_MANUAL.md#pakker-og-standardbibliotek)
+- [AI](USER_MANUAL.md#ai)
 - [Server](USER_MANUAL.md#server)
 - [NorsDB](USER_MANUAL.md#norsdb)
 - [Feilsøking](USER_MANUAL.md#feilsoking)
@@ -57,6 +60,9 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 - [CI-gates](05-development/SELFHOST_CI_GATES.md)
 - [Release-sjekkliste](05-development/SELFHOST_RELEASE_CHECKLIST.md)
+- [CLI-kontrakt](05-development/CLI_CONTRACT.md)
+- [Kompilatorpipeline](05-development/COMPILER_PIPELINE.md)
+- [10/10 modenhetsplan](MODENHET_10_10.md)
 - [Lane map](LANE_MAP.md)
 - [Brand og ikoner](BRAND.md)
 - [Dokumentasjonsindeks](DOCUMENTATION_INDEX.md)
@@ -72,6 +78,15 @@ Start med brukermanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 - [Django-paritet sjekkliste](99-django-paritet-sjekkliste.md)
 - [Django-paritet i Norscode](99-django-paritet-norscode.no)
+- [HTTP-server](HTTP_SERVER.md)
+- [HTTP-server sjekkliste](HTTP_SERVER_CHECKLIST.md)
+- [API Explorer](api-explorer/index.html)
+
+## Pakker Og Editor
+
+- [Pakkesystem](03-packages/PACKAGE_MANAGER.md)
+- [Registry-protokoll](03-packages/REGISTRY_PROTOCOL.md)
+- [LSP og IDE](04-how-to-guides/IDE_AND_LSP.md)
 
 ## Arkiv
 

@@ -1,0 +1,199 @@
+# media_model.no — felles leverandoradapter for generativt media
+
+bruk std.http som http
+bruk std.http_binary som http_binary
+bruk std.media_job som media_job
+
+funksjon _json_escape(verdi: tekst) -> tekst {
+    la ut = builtin.replace(verdi, "\\", "\\\\")
+    ut = builtin.replace(ut, "\"", "\\\"")
+    ut = builtin.replace(ut, "\n", "\\n")
+    ut = builtin.replace(ut, "\r", "\\r")
+    returner ut
+}
+
+funksjon _json_tekst(raw: tekst, nokkel: tekst) -> tekst {
+    la marker = "\"" + nokkel + "\":\""
+    la pos = builtin.index_of(raw, marker)
+    hvis pos < 0 { returner "" }
+    la i = pos + lengde(marker)
+    la ut = ""
+    la escape = usann
+    mens i < lengde(raw) {
+        la c = raw[i]
+        hvis escape {
+            hvis c == "n" { ut = ut + "\n" }
+            ellers hvis c == "r" { ut = ut + "\r" }
+            ellers hvis c == "t" { ut = ut + "\t" }
+            ellers { ut = ut + c }
+            escape = usann
+        } ellers hvis c == "\\" {
+            escape = sann
+        } ellers hvis c == "\"" {
+            returner ut
+        } ellers {
+            ut = ut + c
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _json_tal(raw: tekst, nokkel: tekst) -> heiltall {
+    la marker = "\"" + nokkel + "\":"
+    la pos = builtin.index_of(raw, marker)
+    hvis pos < 0 { returner 0 }
+    la i = pos + lengde(marker)
+    la ut = ""
+    mens i < lengde(raw) {
+        la c = raw[i]
+        hvis c >= "0" og c <= "9" { ut = ut + c }
+        ellers hvis ut != "" { i = lengde(raw) }
+        i = i + 1
+    }
+    hvis ut == "" { returner 0 }
+    returner heltall_fra_tekst(ut)
+}
+
+funksjon leverandor(navn: tekst, base_url: tekst, api_nokkel: tekst,
+                    bilde_modell: tekst, lyd_modell: tekst,
+                    musikk_modell: tekst, video_modell: tekst) -> ordbok_tekst {
+    hvis navn == "" { kast "MediaModellFeil: leverandornavn manglar" }
+    hvis base_url == "" { kast "MediaModellFeil: base_url manglar" }
+    la p: ordbok_tekst = {}
+    p["navn"] = navn
+    p["base_url"] = base_url
+    p["api_nokkel"] = api_nokkel
+    p["bilde_modell"] = bilde_modell
+    p["lyd_modell"] = lyd_modell
+    p["musikk_modell"] = musikk_modell
+    p["video_modell"] = video_modell
+    p["generer_sti"] = "/v1/media/generations"
+    p["status_sti"] = "/v1/media/jobs/"
+    p["avbryt_suffix"] = "/cancel"
+    p["protokoll"] = "norscode-media-v1"
+    returner p
+}
+
+funksjon modell_for(p: ordbok_tekst, medietype: tekst) -> tekst {
+    hvis medietype == "bilde" { returner p["bilde_modell"] }
+    hvis medietype == "lyd" { returner p["lyd_modell"] }
+    hvis medietype == "musikk" { returner p["musikk_modell"] }
+    hvis medietype == "video" { returner p["video_modell"] }
+    returner ""
+}
+
+funksjon headers(p: ordbok_tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["content-type"] = "application/json"
+    h["accept"] = "application/json"
+    hvis p["api_nokkel"] != "" {
+        h["authorization"] = "Bearer " + p["api_nokkel"]
+    }
+    returner h
+}
+
+funksjon bygg_body(p: ordbok_tekst, medietype: tekst, prompt: tekst,
+                   innstillingar: ordbok_tekst) -> tekst {
+    la modell = modell_for(p, medietype)
+    hvis modell == "" { kast "MediaModellFeil: modell manglar for " + medietype }
+    hvis builtin.trim(prompt) == "" { kast "MediaModellFeil: prompt manglar" }
+    la body = "{\"model\":\"" + _json_escape(modell) + "\",\"type\":\"" +
+               _json_escape(medietype) + "\",\"prompt\":\"" + _json_escape(prompt) +
+               "\",\"response_format\":\"b64_json\""
+    la ks = nøkler(innstillingar)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        la v = tekst(innstillingar[ks[i]])
+        body = body + ",\"" + _json_escape(k) + "\":\"" + _json_escape(v) + "\""
+        i = i + 1
+    }
+    returner body + "}"
+}
+
+funksjon behandl_response(p: ordbok_tekst, jobb: ordbok_tekst,
+                          response: tekst, resultat_sti: tekst,
+                          maks_bytes: heiltall, no_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje http.response_ok(response) {
+        la feil = "HTTP-status " + tekst_fra_heltall(http.response_status(response))
+        media_job.marker_feil(jobb, feil, no_ms)
+        returner {"ok": "usann", "status": "feil", "feil": feil}
+    }
+    la body = http.response_text(response)
+    la status = _json_tekst(body, "status")
+    la ekstern_id = _json_tekst(body, "id")
+    hvis http.response_status(response) == 202 eller status == "queued" eller status == "running" eller status == "ventar" eller status == "koyrer" {
+        hvis ekstern_id == "" {
+            media_job.marker_feil(jobb, "leverandor manglar jobb-id", no_ms)
+            returner {"ok": "usann", "status": "feil", "feil": "jobb_id_manglar"}
+        }
+        la status_url = _json_tekst(body, "status_url")
+        hvis status_url == "" { status_url = p["base_url"] + p["status_sti"] + ekstern_id }
+        la avbryt_url = _json_tekst(body, "cancel_url")
+        hvis avbryt_url == "" { avbryt_url = status_url + p["avbryt_suffix"] }
+        media_job.sett_ekstern(jobb, ekstern_id, status_url, avbryt_url, no_ms)
+        la fremdrift = _json_tal(body, "progress")
+        hvis fremdrift > 0 { media_job.oppdater_fremdrift(jobb, fremdrift, no_ms) }
+        returner {"ok": "sann", "status": "koyrer", "feil": "", "ekstern_id": ekstern_id}
+    }
+
+    la lagra = http_binary.lagre_json_base64(response, "data", "mime", jobb["type"], resultat_sti, maks_bytes)
+    hvis lagra["ok"] != "sann" {
+        media_job.marker_feil(jobb, lagra["feil"], no_ms)
+        returner {"ok": "usann", "status": "feil", "feil": lagra["feil"]}
+    }
+    media_job.fullfor(jobb, resultat_sti, lagra["mime"], no_ms)
+    returner {"ok": "sann", "status": "ferdig", "feil": "", "sti": resultat_sti, "mime": lagra["mime"], "bytes": lagra["bytes"]}
+}
+
+funksjon send(p: ordbok_tekst, jobb: ordbok_tekst,
+              resultat_sti: tekst, maks_bytes: heiltall,
+              innstillingar: ordbok_tekst, no_ms: heiltall) -> ordbok_tekst {
+    hvis jobb["status"] == "ventar" { media_job.start(jobb, no_ms) }
+    hvis jobb["status"] != "koyrer" {
+        returner {"ok": "usann", "status": jobb["status"], "feil": "jobb_ikkje_koyrbar"}
+    }
+    media_job.registrer_forsok(jobb, no_ms)
+    la body = bygg_body(p, jobb["type"], jobb["prompt"], innstillingar)
+    prøv {
+        la response = http.request_full("POST", p["base_url"] + p["generer_sti"], headers(p), {}, body, heltall_fra_tekst(jobb["timeout_ms"]))
+        returner behandl_response(p, jobb, response, resultat_sti, maks_bytes, no_ms)
+    } fang (e) {
+        media_job.marker_feil(jobb, tekst(e), no_ms)
+        returner {"ok": "usann", "status": "feil", "feil": tekst(e)}
+    }
+}
+
+funksjon poll(p: ordbok_tekst, jobb: ordbok_tekst,
+              resultat_sti: tekst, maks_bytes: heiltall,
+              no_ms: heiltall) -> ordbok_tekst {
+    hvis media_job.sjekk_timeout(jobb, no_ms) {
+        returner {"ok": "usann", "status": "feil", "feil": "timeout"}
+    }
+    hvis jobb["status_url"] == "" {
+        returner {"ok": "usann", "status": "feil", "feil": "status_url_manglar"}
+    }
+    media_job.registrer_forsok(jobb, no_ms)
+    prøv {
+        la response = http.request_full("GET", jobb["status_url"], headers(p), {}, "", heltall_fra_tekst(jobb["timeout_ms"]))
+        returner behandl_response(p, jobb, response, resultat_sti, maks_bytes, no_ms)
+    } fang (e) {
+        returner {"ok": "usann", "status": "koyrer", "feil": tekst(e)}
+    }
+}
+
+funksjon avbryt(p: ordbok_tekst, jobb: ordbok_tekst,
+                grunn: tekst, no_ms: heiltall) -> boolsk {
+    hvis jobb["avbryt_url"] != "" {
+        prøv {
+            http.request_full("POST", jobb["avbryt_url"], headers(p), {}, "{}", 10000)
+        } fang (e) {
+        }
+    }
+    returner media_job.avbryt(jobb, grunn, no_ms)
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "protokoll": "norscode-media-v1", "dekning": "felles request, synkron Base64-resultat, asynkron jobb-id, polling, timeout, gjenopptak og avbryting"}
+}

@@ -1,0 +1,534 @@
+# mail_server.no - framtidsklar mailserver-konfigurasjon for Norscode
+
+bruk std.dns som dns
+bruk std.brannmur som brannmur
+bruk std.socket som socket
+
+funksjon _json_liste_legg_til(liste: tekst, verdi: tekst) -> tekst {
+    hvis liste == "[]" { returner "[" + verdi + "]" }
+    hvis builtin.ends_with(liste, "]") { returner builtin.slice(liste, 0, lengde(liste) - 1) + "," + verdi + "]" }
+    returner "[" + verdi + "]"
+}
+
+funksjon ny(domene: tekst, host: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["domene"] = domene
+    m["host"] = host
+    m["tls"] = "pakrevd"
+    m["auth"] = "pakrevd"
+    m["dkim_selector"] = "norscode"
+    m["dkim_public_key"] = ""
+    m["mailboxes"] = "[]"
+    m["mailbox_count"] = "0"
+    m["aliases"] = "[]"
+    m["alias_count"] = "0"
+    m["queue_dir"] = "var/mail/queue"
+    m["quarantine_dir"] = "var/mail/quarantine"
+    m["dead_letter_dir"] = "var/mail/dead"
+    m["max_delivery_attempts"] = "5"
+    m["max_message_bytes"] = "26214400"
+    m["relay"] = "deny"
+    m["audit"] = "sann"
+    m["daemon_host"] = "127.0.0.1"
+    m["daemon_smtp_port"] = "25"
+    m["daemon_backlog"] = "64"
+    m["tls_mode"] = "starttls"
+    m["tls_cert_file"] = ""
+    m["tls_key_file"] = ""
+    returner m
+}
+
+funksjon legg_postboks(m: ordbok_tekst, lokal: tekst, rolle: tekst) -> bool {
+    hvis lokal == "" eller builtin.index_of(lokal, "@") >= 0 { returner usann }
+    la b: ordbok_tekst = {}
+    b["adresse"] = lokal + "@" + m["domene"]
+    b["lokal"] = lokal
+    b["rolle"] = rolle
+    b["aktiv"] = "sann"
+    m["mailboxes"] = _json_liste_legg_til(m["mailboxes"], builtin.json_stringify(b))
+    m["mailbox_count"] = tekst_fra_heltall(heltall_fra_tekst(m["mailbox_count"]) + 1)
+    returner sann
+}
+
+funksjon legg_alias(m: ordbok_tekst, alias: tekst, target: tekst) -> bool {
+    hvis alias == "" eller target == "" { returner usann }
+    la a: ordbok_tekst = {}
+    a["alias"] = alias
+    a["target"] = target
+    m["aliases"] = _json_liste_legg_til(m["aliases"], builtin.json_stringify(a))
+    m["alias_count"] = tekst_fra_heltall(heltall_fra_tekst(m["alias_count"]) + 1)
+    returner sann
+}
+
+funksjon _trim(t: tekst) -> tekst { returner builtin.trim(t) }
+funksjon _lower(t: tekst) -> tekst { returner builtin.lower(t) }
+funksjon _inneheld(t: tekst, del: tekst) -> bool { returner builtin.index_of(t, del) >= 0 }
+
+funksjon _adresse_domene(adresse: tekst) -> tekst {
+    la delar = builtin.split(adresse, "@")
+    hvis lengde(delar) < 2 { returner "" }
+    returner delar[lengde(delar) - 1]
+}
+
+funksjon _hent_adresse(linje: tekst) -> tekst {
+    la start = builtin.index_of(linje, "<")
+    la slutt = builtin.index_of(linje, ">")
+    hvis start >= 0 og slutt > start {
+        returner builtin.slice(linje, start + 1, slutt)
+    }
+    la delar = builtin.split(linje, ":")
+    hvis lengde(delar) >= 2 { returner _trim(delar[1]) }
+    returner ""
+}
+
+funksjon smtp_svar(kode: heiltall, melding: tekst) -> tekst {
+    returner tekst_fra_heltall(kode) + " " + melding + "\r\n"
+}
+
+funksjon smtp_banner(m: ordbok_tekst) -> tekst {
+    returner smtp_svar(220, m["host"] + " Norscode SMTP klar")
+}
+
+funksjon smtp_ny_sesjon(remote: tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["remote"] = remote
+    s["helo"] = ""
+    s["tls"] = "usann"
+    s["auth"] = "usann"
+    s["mail_from"] = ""
+    s["rcpt_to"] = "[]"
+    s["rcpt_count"] = "0"
+    s["data_mode"] = "usann"
+    s["data"] = ""
+    s["avvist"] = "0"
+    returner s
+}
+
+funksjon _rcpt_tillate(m: ordbok_tekst, s: ordbok_tekst, adresse: tekst) -> bool {
+    hvis _adresse_domene(adresse) == m["domene"] { returner sann }
+    hvis s["auth"] == "sann" { returner sann }
+    returner usann
+}
+
+funksjon spf_dkim_dmarc_plan(m: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["spf"] = "v=spf1 mx -all"
+    p["dkim_selector"] = m["dkim_selector"]
+    p["dkim_required"] = "sann"
+    p["dkim_ready"] = "usann"
+    hvis m["dkim_public_key"] != "" { p["dkim_ready"] = "sann" }
+    p["dmarc"] = "v=DMARC1; p=quarantine"
+    p["reject_open_relay"] = "sann"
+    returner p
+}
+
+funksjon melding_policy_sjekk(m: ordbok_tekst, s: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["ok"] = "sann"
+    r["action"] = "queue"
+    r["reason"] = "ok"
+    hvis s["mail_from"] == "" {
+        r["ok"] = "usann"
+        r["action"] = "reject"
+        r["reason"] = "missing sender"
+        returner r
+    }
+    hvis heltall_fra_tekst(s["rcpt_count"]) == 0 {
+        r["ok"] = "usann"
+        r["action"] = "reject"
+        r["reason"] = "missing recipient"
+        returner r
+    }
+    hvis lengde(s["data"]) > heltall_fra_tekst(m["max_message_bytes"]) {
+        r["ok"] = "usann"
+        r["action"] = "reject"
+        r["reason"] = "message too large"
+        returner r
+    }
+    hvis _inneheld(s["data"], "X-Spam: yes") eller _inneheld(s["data"], "\u0000") {
+        r["ok"] = "usann"
+        r["action"] = "quarantine"
+        r["reason"] = "suspicious content"
+        returner r
+    }
+    returner r
+}
+
+funksjon ko_id(s: ordbok_tekst) -> tekst {
+    returner "q-" + tekst_fra_heltall(lengde(s["mail_from"]) + lengde(s["rcpt_to"]) + lengde(s["data"]))
+}
+
+funksjon ko_melding(m: ordbok_tekst, s: ordbok_tekst) -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    q["id"] = ko_id(s)
+    q["domene"] = m["domene"]
+    q["queue_dir"] = m["queue_dir"]
+    q["mail_from"] = s["mail_from"]
+    q["rcpt_to"] = s["rcpt_to"]
+    q["bytes"] = tekst_fra_heltall(lengde(s["data"]))
+    q["status"] = "queued"
+    q["attempts"] = "0"
+    q["max_attempts"] = m["max_delivery_attempts"]
+    q["next_action"] = "deliver"
+    q["spool_path"] = m["queue_dir"] + "/" + q["id"] + ".eml"
+    q["audit"] = "mail.queued"
+    returner q
+}
+
+funksjon karantene_melding(m: ordbok_tekst, s: ordbok_tekst, grunn: tekst) -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    q["id"] = "quarantine-" + ko_id(s)
+    q["domene"] = m["domene"]
+    q["quarantine_dir"] = m["quarantine_dir"]
+    q["reason"] = grunn
+    q["status"] = "quarantined"
+    q["spool_path"] = m["quarantine_dir"] + "/" + q["id"] + ".eml"
+    q["audit"] = "mail.quarantine"
+    returner q
+}
+
+funksjon spool_plan(m: ordbok_tekst, q: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["id"] = q["id"]
+    p["status"] = q["status"]
+    p["path"] = q["spool_path"]
+    p["write_mode"] = "atomic"
+    p["fsync"] = "sann"
+    p["audit"] = q["audit"]
+    p["queue_dir"] = m["queue_dir"]
+    p["dead_letter_dir"] = m["dead_letter_dir"]
+    returner p
+}
+
+funksjon marker_leveringsforsok(q: ordbok_tekst, ok: bool, grunn: tekst) -> ordbok_tekst {
+    la attempts = heltall_fra_tekst(q["attempts"]) + 1
+    q["attempts"] = tekst_fra_heltall(attempts)
+    hvis ok {
+        q["status"] = "delivered"
+        q["next_action"] = "none"
+        q["audit"] = "mail.delivered"
+        returner q
+    }
+    hvis attempts >= heltall_fra_tekst(q["max_attempts"]) {
+        q["status"] = "dead-letter"
+        q["next_action"] = "dead-letter"
+        q["reason"] = grunn
+        q["audit"] = "mail.dead_letter"
+        returner q
+    }
+    q["status"] = "retry"
+    q["next_action"] = "retry"
+    q["reason"] = grunn
+    q["audit"] = "mail.retry"
+    returner q
+}
+
+funksjon dead_letter_melding(m: ordbok_tekst, q: ordbok_tekst, grunn: tekst) -> ordbok_tekst {
+    q["status"] = "dead-letter"
+    q["next_action"] = "dead-letter"
+    q["reason"] = grunn
+    q["spool_path"] = m["dead_letter_dir"] + "/" + q["id"] + ".eml"
+    q["audit"] = "mail.dead_letter"
+    returner q
+}
+
+funksjon ko_statusrapport(q: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["id"] = q["id"]
+    r["status"] = q["status"]
+    r["attempts"] = q["attempts"]
+    r["next_action"] = q["next_action"]
+    r["audit"] = q["audit"]
+    hvis har_nokkel(q, "reason") { r["reason"] = q["reason"] } ellers { r["reason"] = "" }
+    returner r
+}
+
+funksjon leveringsavgjerd(m: ordbok_tekst, s: ordbok_tekst) -> ordbok_tekst {
+    la policy = melding_policy_sjekk(m, s)
+    hvis policy["action"] == "quarantine" {
+        returner karantene_melding(m, s, policy["reason"])
+    }
+    hvis policy["action"] == "reject" {
+        la r: ordbok_tekst = {}
+        r["id"] = ""
+        r["status"] = "rejected"
+        r["reason"] = policy["reason"]
+        r["audit"] = "mail.reject"
+        returner r
+    }
+    returner ko_melding(m, s)
+}
+
+funksjon smtp_handter_linje(m: ordbok_tekst, s: ordbok_tekst, linje: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["response"] = ""
+    r["action"] = "continue"
+    r["queued"] = "usann"
+    r["quarantined"] = "usann"
+
+    hvis s["data_mode"] == "sann" {
+        hvis linje == "." {
+            s["data_mode"] = "usann"
+            la avgjerd = leveringsavgjerd(m, s)
+            hvis avgjerd["status"] == "queued" {
+                r["queued"] = "sann"
+                r["queue_id"] = avgjerd["id"]
+                r["response"] = smtp_svar(250, "Queued " + avgjerd["id"])
+                returner r
+            }
+            hvis avgjerd["status"] == "quarantined" {
+                r["quarantined"] = "sann"
+                r["queue_id"] = avgjerd["id"]
+                r["response"] = smtp_svar(250, "Accepted for quarantine")
+                returner r
+            }
+            r["action"] = "reject"
+            r["response"] = smtp_svar(554, avgjerd["reason"])
+            returner r
+        }
+        s["data"] = s["data"] + linje + "\n"
+        returner r
+    }
+
+    la l = _trim(linje)
+    la low = _lower(l)
+    hvis builtin.starts_with(low, "ehlo ") eller builtin.starts_with(low, "helo ") {
+        s["helo"] = l
+        r["response"] = "250-" + m["host"] + "\r\n250-STARTTLS\r\n250 AUTH PLAIN LOGIN\r\n"
+        returner r
+    }
+    hvis low == "starttls" {
+        s["tls"] = "sann"
+        r["response"] = smtp_svar(220, "Start TLS")
+        returner r
+    }
+    hvis builtin.starts_with(low, "auth ") {
+        hvis s["tls"] != "sann" {
+            r["response"] = smtp_svar(530, "STARTTLS krevst for AUTH")
+            returner r
+        }
+        s["auth"] = "sann"
+        r["response"] = smtp_svar(235, "Authentication OK")
+        returner r
+    }
+    hvis builtin.starts_with(low, "mail from:") {
+        s["mail_from"] = _hent_adresse(l)
+        r["response"] = smtp_svar(250, "Sender OK")
+        returner r
+    }
+    hvis builtin.starts_with(low, "rcpt to:") {
+        la adr = _hent_adresse(l)
+        hvis ikkje _rcpt_tillate(m, s, adr) {
+            s["avvist"] = tekst_fra_heltall(heltall_fra_tekst(s["avvist"]) + 1)
+            r["action"] = "reject"
+            r["response"] = smtp_svar(550, "Relay denied")
+            returner r
+        }
+        s["rcpt_to"] = _json_liste_legg_til(s["rcpt_to"], builtin.json_stringify(adr))
+        s["rcpt_count"] = tekst_fra_heltall(heltall_fra_tekst(s["rcpt_count"]) + 1)
+        r["response"] = smtp_svar(250, "Recipient OK")
+        returner r
+    }
+    hvis low == "data" {
+        hvis s["mail_from"] == "" eller heltall_fra_tekst(s["rcpt_count"]) == 0 {
+            r["response"] = smtp_svar(503, "MAIL FROM og RCPT TO krevst")
+            returner r
+        }
+        s["data_mode"] = "sann"
+        r["response"] = smtp_svar(354, "Avslutt med punktum pa eiga linje")
+        returner r
+    }
+    hvis low == "quit" {
+        r["action"] = "close"
+        r["response"] = smtp_svar(221, "Ha det")
+        returner r
+    }
+    r["response"] = smtp_svar(502, "Kommando ikkje stotta")
+    returner r
+}
+
+funksjon daemon_plan(m: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["smtp_port"] = "25"
+    p["submission_port"] = "587"
+    p["imaps_port"] = "993"
+    p["queue_dir"] = m["queue_dir"]
+    p["quarantine_dir"] = m["quarantine_dir"]
+    p["dead_letter_dir"] = m["dead_letter_dir"]
+    p["max_delivery_attempts"] = m["max_delivery_attempts"]
+    p["tls"] = m["tls"]
+    p["auth"] = m["auth"]
+    p["relay"] = m["relay"]
+    p["audit"] = m["audit"]
+    p["entry"] = "std.mail_server.smtp_handter_linje"
+    p["bind_host"] = m["daemon_host"]
+    p["backlog"] = m["daemon_backlog"]
+    p["transport"] = "native-socket"
+    p["tls_mode"] = m["tls_mode"]
+    p["dns_entry"] = "std.mail_server.dns_sone"
+    p["firewall_entry"] = "std.mail_server.brannmur_policy"
+    p["lifecycle"] = "daemon_ny -> daemon_start -> daemon_pump -> daemon_stop"
+    returner p
+}
+
+funksjon _daemon_port(m: ordbok_tekst) -> heiltall {
+    returner heltall_fra_tekst(m["daemon_smtp_port"])
+}
+
+funksjon _daemon_policy_ok(m: ordbok_tekst) -> bool {
+    la p = brannmur_policy(m)
+    la port = _daemon_port(m)
+    hvis port <= 0 eller port > 65535 { returner usann }
+    la beslutning = brannmur.evaluer(p, "inn", port, "tcp", "198.51.100.10")
+    returner beslutning["allowed"] == "sann"
+}
+
+# Opprett ein eksplisitt daemon-tilstand. Ingen sokkel er open før start().
+funksjon daemon_ny(m: ordbok_tekst) -> ordbok_tekst {
+    la d: ordbok_tekst = {}
+    d["status"] = "stoppet"
+    d["host"] = m["daemon_host"]
+    d["port"] = m["daemon_smtp_port"]
+    d["backlog"] = m["daemon_backlog"]
+    d["listener"] = {}
+    d["siste_feil"] = ""
+    d["mottatte"] = "0"
+    d["avviste"] = "0"
+    d["sikker_transport"] = m["tls"]
+    d["tls_mode"] = m["tls_mode"]
+    d["dns_plan"] = dns_sone(m)
+    d["firewall_policy"] = brannmur_policy(m)
+    d["policy"] = "brannmur.evaluer"
+    returner d
+}
+
+funksjon daemon_start(m: ordbok_tekst, d: ordbok_tekst) -> bool {
+    hvis d["status"] == "kjører" { returner sann }
+    hvis m["tls"] != "pakrevd" eller m["auth"] != "pakrevd" { d["siste_feil"] = "TLS og AUTH er pakrevd" returner usann }
+    hvis m["relay"] != "deny" eller m["audit"] != "sann" { d["siste_feil"] = "relay deny og audit er pakrevd" returner usann }
+    hvis ikkje _daemon_policy_ok(m) { d["siste_feil"] = "brannmur blokkerer SMTP-porten" returner usann }
+    prøv {
+        la listener = {}
+        hvis d["tls_mode"] == "implicit" {
+            hvis m["tls_cert_file"] == "" eller m["tls_key_file"] == "" {
+                d["siste_feil"] = "implicit TLS krev sertifikat og nøkkel"
+                returner usann
+            }
+            listener = socket.native_tls_lytt(d["host"], heltall_fra_tekst(d["port"]), heltall_fra_tekst(d["backlog"]), m["tls_cert_file"], m["tls_key_file"])
+        } ellers {
+            listener = socket.native_lytt(d["host"], heltall_fra_tekst(d["port"]), heltall_fra_tekst(d["backlog"]))
+        }
+        hvis listener["status"] != "listening" {
+            d["siste_feil"] = listener["error"]
+            returner usann
+        }
+        d["listener"] = listener
+        d["status"] = "kjører"
+        d["siste_feil"] = ""
+        returner sann
+    } fang (e) {
+        d["siste_feil"] = tekst(e)
+        returner usann
+    }
+    returner usann
+}
+
+# Pump eitt klientsteg. Ikkje blokker dersom ingen klient er klar.
+funksjon daemon_pump(m: ordbok_tekst, d: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = "idle"
+    r["response"] = ""
+    hvis d["status"] != "kjører" { r["status"] = "stoppet" returner r }
+    prøv {
+        la klar = socket.native_poll(d["listener"], 1)
+        hvis klar["status"] == "ventende" { returner r }
+        hvis klar["status"] == "feil" { r["status"] = "feil" r["error"] = klar["error"] returner r }
+        la klient = socket.native_aksepter(d["listener"])
+        hvis klient["status"] != "accepted" og klient["status"] != "connected" { r["status"] = "feil" r["error"] = klient["error"] returner r }
+        la sesjon = smtp_ny_sesjon("unknown")
+        socket.native_skriv(klient, smtp_banner(m))
+        la inn = socket.native_les(klient, 4096)
+        hvis inn["status"] == "ok" eller inn["status"] == "data" {
+            la linjer = builtin.split(inn["data"], "\n")
+            la i: heiltall = 0
+            mens i < lengde(linjer) {
+                hvis _trim(linjer[i]) != "" {
+                    la svar = smtp_handter_linje(m, sesjon, _trim(linjer[i]))
+                    hvis svar["response"] != "" { socket.native_skriv(klient, svar["response"]) r["response"] = svar["response"] }
+                    hvis svar["action"] == "close" { i = lengde(linjer) }
+                }
+                i = i + 1
+            }
+            d["mottatte"] = tekst_fra_heltall(heltall_fra_tekst(d["mottatte"]) + 1)
+            r["status"] = "handtert"
+        } ellers { r["status"] = "idle" }
+        socket.native_lukk(klient)
+        returner r
+    } fang (e) {
+        r["status"] = "feil"
+        r["error"] = tekst(e)
+        returner r
+    }
+    returner r
+}
+
+funksjon daemon_stop(d: ordbok_tekst) -> bool {
+    hvis d["status"] != "kjører" { d["status"] = "stoppet" returner sann }
+    prøv {
+        la r = socket.native_lukk(d["listener"])
+        hvis r["status"] != "closed" { d["siste_feil"] = r["error"] returner usann }
+        d["listener"] = {}
+        d["status"] = "stoppet"
+        returner sann
+    } fang (e) { d["siste_feil"] = tekst(e) returner usann }
+    returner usann
+}
+
+funksjon daemon_status(d: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = d["status"]
+    r["host"] = d["host"]
+    r["port"] = d["port"]
+    r["mottatte"] = d["mottatte"]
+    r["avviste"] = d["avviste"]
+    r["sikker_transport"] = d["sikker_transport"]
+    r["tls_mode"] = d["tls_mode"]
+    r["siste_feil"] = d["siste_feil"]
+    returner r
+}
+
+funksjon dns_sone(m: ordbok_tekst) -> ordbok_tekst {
+    la s = dns.ny_sone(m["domene"])
+    dns.legg_mail_standard(s, m["host"], m["dkim_selector"], m["dkim_public_key"])
+    returner s
+}
+
+funksjon brannmur_policy(m: ordbok_tekst) -> ordbok_tekst {
+    la p = brannmur.ny_policy("mail-" + m["domene"])
+    brannmur.legg_mail_standard(p)
+    la custom_port = _daemon_port(m)
+    hvis custom_port != 25 og custom_port > 0 og custom_port <= 65535 {
+        brannmur.tillat_inn(p, "smtp-custom", custom_port, "tcp")
+    }
+    returner p
+}
+
+funksjon produksjon_klar(m: ordbok_tekst) -> bool {
+    hvis ikkje dns.gyldig_domene(m["domene"]) { returner usann }
+    hvis m["tls"] != "pakrevd" { returner usann }
+    hvis m["auth"] != "pakrevd" { returner usann }
+    hvis m["relay"] != "deny" { returner usann }
+    hvis m["audit"] != "sann" { returner usann }
+    hvis m["dkim_public_key"] == "" { returner usann }
+    hvis heltall_fra_tekst(m["mailbox_count"]) == 0 { returner usann }
+    returner sann
+}
+
+funksjon status() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.mail_server"
+    s["status"] = "stabil"
+    s["dekning"] = "postboksar, alias, DNS-krav, brannmurkrav, SMTP-runtime, ko-policy, atomic spool-plan, retry, dead-letter og karantene"
+    s["produksjon"] = "klar nar produksjon_klar(config) er sann"
+    returner s
+}

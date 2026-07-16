@@ -1,0 +1,354 @@
+# brannmur.no - brannmur- og nettverkspolicy for Norscode
+
+funksjon _regel(namn: tekst, retning: tekst, handling: tekst, protokoll: tekst, port: heiltall, kjelde: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["namn"] = namn
+    r["retning"] = retning
+    r["handling"] = handling
+    r["protokoll"] = protokoll
+    r["port"] = tekst_fra_heltall(port)
+    r["kjelde"] = kjelde
+    returner r
+}
+
+funksjon ny_policy(namn: tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["namn"] = namn
+    p["default_inn"] = "drop"
+    p["default_ut"] = "allow"
+    p["egress_restricted"] = "usann"
+    p["reglar"] = "[]"
+    p["reglar_eval"] = ""
+    p["reglar_text"] = ""
+    p["rate_limits_text"] = ""
+    p["regel_count"] = "0"
+    p["rate_limits"] = "[]"
+    p["rate_limit_count"] = "0"
+    p["admin_kjelder"] = "[]"
+    p["admin_kjelde_count"] = "0"
+    p["audit"] = "sann"
+    returner p
+}
+
+funksjon _nft_handling(handling: tekst) -> tekst {
+    hvis handling == "allow" { returner "accept" }
+    returner handling
+}
+
+funksjon _json_liste_legg_til(liste: tekst, verdi: tekst) -> tekst {
+    hvis liste == "[]" { returner "[" + verdi + "]" }
+    hvis builtin.ends_with(liste, "]") { returner builtin.slice(liste, 0, lengde(liste) - 1) + "," + verdi + "]" }
+    returner "[" + verdi + "]"
+}
+
+funksjon _nft_regel(r: ordbok_tekst) -> tekst {
+    la linje = "    " + r["protokoll"] + " dport " + r["port"]
+    hvis r["kjelde"] != "" og r["kjelde"] != "0.0.0.0/0" {
+        linje = "    ip saddr " + r["kjelde"] + " " + r["protokoll"] + " dport " + r["port"]
+    }
+    returner linje + " " + _nft_handling(r["handling"]) + " comment \"" + r["namn"] + "\""
+}
+
+funksjon legg_regel(p: ordbok_tekst, r: ordbok_tekst) -> bool {
+    hvis r["handling"] != "allow" og r["handling"] != "deny" og r["handling"] != "drop" { returner usann }
+    hvis r["retning"] != "inn" og r["retning"] != "ut" { returner usann }
+    p["reglar"] = _json_liste_legg_til(p["reglar"], builtin.json_stringify(r))
+    hvis p["reglar_eval"] != "" { p["reglar_eval"] = p["reglar_eval"] + "\n" }
+    p["reglar_eval"] = p["reglar_eval"] + r["retning"] + "|" + r["handling"] + "|" + r["protokoll"] + "|" + r["port"] + "|" + r["kjelde"] + "|" + r["namn"]
+    hvis p["reglar_text"] != "" { p["reglar_text"] = p["reglar_text"] + "\n" }
+    p["reglar_text"] = p["reglar_text"] + r["retning"] + "|" + _nft_regel(r)
+    p["regel_count"] = tekst_fra_heltall(heltall_fra_tekst(p["regel_count"]) + 1)
+    returner sann
+}
+
+funksjon tillat_inn(p: ordbok_tekst, namn: tekst, port: heiltall, protokoll: tekst) -> bool {
+    returner legg_regel(p, _regel(namn, "inn", "allow", protokoll, port, "0.0.0.0/0"))
+}
+
+funksjon tillat_ut(p: ordbok_tekst, namn: tekst, port: heiltall, protokoll: tekst) -> bool {
+    returner legg_regel(p, _regel(namn, "ut", "allow", protokoll, port, "0.0.0.0/0"))
+}
+
+funksjon tillat_admin(p: ordbok_tekst, namn: tekst, port: heiltall, kjelde: tekst) -> bool {
+    p["admin_kjelder"] = _json_liste_legg_til(p["admin_kjelder"], builtin.json_stringify(kjelde))
+    p["admin_kjelde_count"] = tekst_fra_heltall(heltall_fra_tekst(p["admin_kjelde_count"]) + 1)
+    returner legg_regel(p, _regel(namn, "inn", "allow", "tcp", port, kjelde))
+}
+
+funksjon blokker_inn(p: ordbok_tekst, namn: tekst, port: heiltall, protokoll: tekst) -> bool {
+    returner legg_regel(p, _regel(namn, "inn", "drop", protokoll, port, "0.0.0.0/0"))
+}
+
+funksjon _kjelde_match(regel: tekst, kjelde: tekst) -> boolsk {
+    hvis regel == "0.0.0.0/0" eller regel == kjelde { returner sann }
+    la delar = builtin.split(regel, "/")
+    hvis lengde(delar) != 2 { returner usann }
+    la maske = heltall_fra_tekst(delar[1])
+    la rp = builtin.split(delar[0], ".")
+    la kp = builtin.split(kjelde, ".")
+    hvis lengde(rp) != 4 eller lengde(kp) != 4 { returner usann }
+    hvis maske == 8 { returner rp[0] == kp[0] }
+    hvis maske == 16 { returner rp[0] == kp[0] og rp[1] == kp[1] }
+    hvis maske == 24 { returner rp[0] == kp[0] og rp[1] == kp[1] og rp[2] == kp[2] }
+    returner usann
+}
+
+funksjon _regel_match(r: ordbok_tekst, retning: tekst, port: heiltall,
+                      protokoll: tekst, kjelde: tekst) -> bool {
+    hvis r["retning"] != retning { returner usann }
+    hvis heltall_fra_tekst(r["port"]) != port { returner usann }
+    hvis r["protokoll"] != protokoll { returner usann }
+    hvis ikkje _kjelde_match(r["kjelde"], kjelde) { returner usann }
+    returner sann
+}
+
+funksjon evaluer(p: ordbok_tekst, retning: tekst, port: heiltall,
+                 protokoll: tekst, kjelde: tekst) -> ordbok_tekst {
+    la svar: ordbok_tekst = {}
+    svar["allowed"] = "usann"
+    svar["handling"] = "drop"
+    svar["regel"] = "default-drop"
+    svar["audit"] = p["audit"]
+    hvis retning != "inn" og retning != "ut" { svar["grunn"] = "ugyldig retning" returner svar }
+    hvis port <= 0 eller port > 65535 { svar["grunn"] = "ugyldig port" returner svar }
+    la reglar = builtin.split(p["reglar_eval"], "\n")
+    la i: heiltall = 0
+    mens i < lengde(reglar) {
+        la delar = builtin.split(reglar[i], "|")
+        hvis lengde(delar) < 6 { i = i + 1 fortsett }
+        la r: ordbok_tekst = {}
+        r["retning"] = delar[0]
+        r["handling"] = delar[1]
+        r["protokoll"] = delar[2]
+        r["port"] = delar[3]
+        r["kjelde"] = delar[4]
+        r["namn"] = delar[5]
+        hvis _regel_match(r, retning, port, protokoll, kjelde) {
+            svar["handling"] = r["handling"]
+            svar["regel"] = r["namn"]
+            svar["grunn"] = "regel"
+            hvis r["handling"] == "allow" { svar["allowed"] = "sann" svar["handling"] = "accept" }
+            ellers { svar["handling"] = "drop" }
+            returner svar
+        }
+        i = i + 1
+    }
+    hvis retning == "ut" og p["default_ut"] == "allow" {
+        svar["allowed"] = "sann"
+        svar["handling"] = "accept"
+        svar["regel"] = "default-output"
+        svar["grunn"] = "default-ut"
+    } ellers {
+        svar["grunn"] = "default-drop"
+    }
+    returner svar
+}
+
+funksjon rate_limit(p: ordbok_tekst, namn: tekst, port: heiltall, maks_per_minutt: heiltall) -> bool {
+    hvis maks_per_minutt <= 0 { returner usann }
+    la r: ordbok_tekst = {}
+    r["namn"] = namn
+    r["port"] = tekst_fra_heltall(port)
+    r["maks_per_minutt"] = tekst_fra_heltall(maks_per_minutt)
+    p["rate_limits"] = _json_liste_legg_til(p["rate_limits"], builtin.json_stringify(r))
+    hvis p["rate_limits_text"] != "" { p["rate_limits_text"] = p["rate_limits_text"] + "\n" }
+    p["rate_limits_text"] = p["rate_limits_text"] + "    meta l4proto { tcp, udp } th dport " + tekst_fra_heltall(port) + " limit rate over " + tekst_fra_heltall(maks_per_minutt) + "/minute drop comment \"rate-" + namn + "\""
+    p["rate_limit_count"] = tekst_fra_heltall(heltall_fra_tekst(p["rate_limit_count"]) + 1)
+    returner sann
+}
+
+funksjon legg_web_standard(p: ordbok_tekst) -> bool {
+    tillat_inn(p, "http", 80, "tcp")
+    tillat_inn(p, "https", 443, "tcp")
+    rate_limit(p, "http", 80, 600)
+    rate_limit(p, "https", 443, 1200)
+    returner sann
+}
+
+funksjon legg_dns_standard(p: ordbok_tekst) -> bool {
+    tillat_inn(p, "dns-udp", 53, "udp")
+    tillat_inn(p, "dns-tcp", 53, "tcp")
+    rate_limit(p, "dns", 53, 3000)
+    returner sann
+}
+
+funksjon legg_mail_standard(p: ordbok_tekst) -> bool {
+    tillat_inn(p, "smtp", 25, "tcp")
+    tillat_inn(p, "submission", 587, "tcp")
+    tillat_inn(p, "submissions", 465, "tcp")
+    tillat_inn(p, "imap", 143, "tcp")
+    tillat_inn(p, "imaps", 993, "tcp")
+    rate_limit(p, "smtp", 25, 120)
+    rate_limit(p, "submission", 587, 240)
+    rate_limit(p, "imap", 993, 600)
+    returner sann
+}
+
+funksjon avgrens_ut(p: ordbok_tekst) -> bool {
+    p["default_ut"] = "drop"
+    p["egress_restricted"] = "sann"
+    returner sann
+}
+
+funksjon legg_ut_standard(p: ordbok_tekst) -> bool {
+    tillat_ut(p, "dns-ut-udp", 53, "udp")
+    tillat_ut(p, "dns-ut-tcp", 53, "tcp")
+    tillat_ut(p, "http-ut", 80, "tcp")
+    tillat_ut(p, "https-ut", 443, "tcp")
+    tillat_ut(p, "smtp-ut", 25, "tcp")
+    tillat_ut(p, "submission-ut", 587, "tcp")
+    returner sann
+}
+
+funksjon hog_sikkerheit_standard(p: ordbok_tekst, admin_cidr: tekst) -> bool {
+    avgrens_ut(p)
+    legg_web_standard(p)
+    legg_dns_standard(p)
+    legg_mail_standard(p)
+    legg_ut_standard(p)
+    hvis admin_cidr != "" {
+        tillat_admin(p, "admin-ssh", 22, admin_cidr)
+        rate_limit(p, "ssh", 22, 30)
+    }
+    blokker_inn(p, "telnet", 23, "tcp")
+    blokker_inn(p, "ftp", 21, "tcp")
+    returner sann
+}
+
+funksjon lockdown(p: ordbok_tekst, grunn: tekst) -> bool {
+    p["default_inn"] = "drop"
+    p["default_ut"] = "drop"
+    p["egress_restricted"] = "sann"
+    p["lockdown"] = "sann"
+    p["lockdown_reason"] = grunn
+    p["audit"] = "sann"
+    blokker_inn(p, "lockdown-telnet", 23, "tcp")
+    blokker_inn(p, "lockdown-ftp", 21, "tcp")
+    blokker_inn(p, "lockdown-smb", 445, "tcp")
+    returner sann
+}
+
+funksjon produksjon_trygg(p: ordbok_tekst) -> bool {
+    hvis p["default_inn"] != "drop" { returner usann }
+    hvis p["audit"] != "sann" { returner usann }
+    hvis heltall_fra_tekst(p["regel_count"]) == 0 { returner usann }
+    hvis heltall_fra_tekst(p["rate_limit_count"]) == 0 { returner usann }
+    returner sann
+}
+
+funksjon sikkerheitsrapport(p: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["default_drop"] = "usann"
+    hvis p["default_inn"] == "drop" { r["default_drop"] = "sann" }
+    r["audit"] = p["audit"]
+    r["rate_limit"] = "usann"
+    hvis heltall_fra_tekst(p["rate_limit_count"]) > 0 { r["rate_limit"] = "sann" }
+    r["admin_allowlist"] = "usann"
+    hvis heltall_fra_tekst(p["admin_kjelde_count"]) > 0 { r["admin_allowlist"] = "sann" }
+    r["egress_restricted"] = p["egress_restricted"]
+    r["lockdown"] = "usann"
+    hvis har_nokkel(p, "lockdown") { r["lockdown"] = p["lockdown"] }
+    r["handhevbar"] = "usann"
+    hvis handhevbar(p) { r["handhevbar"] = "sann" }
+    r["risiko"] = risiko_nivaa(p)
+    la tiltak = ""
+    hvis r["default_drop"] != "sann" { tiltak = tiltak + "sett default_inn=drop;" }
+    hvis r["audit"] != "sann" { tiltak = tiltak + "sla pa audit;" }
+    hvis r["rate_limit"] != "sann" { tiltak = tiltak + "legg til rate-limit;" }
+    hvis r["admin_allowlist"] != "sann" { tiltak = tiltak + "legg til admin-allowlist;" }
+    hvis r["egress_restricted"] != "sann" { tiltak = tiltak + "avgrens utgaande trafikk;" }
+    hvis r["risiko"] != "lav" { tiltak = tiltak + "reduser brannmur-risiko;" }
+    hvis tiltak == "" { tiltak = "ingen kritiske tiltak" }
+    r["tiltak"] = tiltak
+    returner r
+}
+
+funksjon risiko_nivaa(p: ordbok_tekst) -> tekst {
+    la score: heiltall = 0
+    hvis p["default_inn"] != "drop" { score = score + 4 }
+    hvis p["audit"] != "sann" { score = score + 3 }
+    hvis heltall_fra_tekst(p["rate_limit_count"]) <= 0 { score = score + 2 }
+    hvis heltall_fra_tekst(p["admin_kjelde_count"]) <= 0 { score = score + 2 }
+    hvis p["egress_restricted"] != "sann" { score = score + 2 }
+    hvis score <= 0 { returner "lav" }
+    hvis score <= 3 { returner "medium" }
+    returner "hoy"
+}
+
+funksjon produksjonsrapport(p: ordbok_tekst) -> ordbok_tekst {
+    la r = sikkerheitsrapport(p)
+    r["policy"] = p["namn"]
+    r["regel_count"] = p["regel_count"]
+    r["rate_limit_count"] = p["rate_limit_count"]
+    r["admin_kjelde_count"] = p["admin_kjelde_count"]
+    r["produksjon_trygg"] = "usann"
+    hvis produksjon_trygg(p) og r["risiko"] == "lav" { r["produksjon_trygg"] = "sann" }
+    returner r
+}
+
+funksjon nftables_plan(p: ordbok_tekst) -> tekst {
+    la input_rules = ""
+    la output_rules = ""
+    la reglar = builtin.split(p["reglar_text"], "\n")
+    la i: heiltall = 0
+    mens i < lengde(reglar) {
+        hvis builtin.starts_with(reglar[i], "inn|") {
+            input_rules = input_rules + builtin.slice(reglar[i], 4, lengde(reglar[i])) + "\n"
+        } ellers hvis builtin.starts_with(reglar[i], "ut|") {
+            output_rules = output_rules + builtin.slice(reglar[i], 3, lengde(reglar[i])) + "\n"
+        }
+        i = i + 1
+    }
+    la input_policy = p["default_inn"]
+    hvis input_policy == "allow" { input_policy = "accept" }
+    la output_policy = p["default_ut"]
+    hvis output_policy == "allow" { output_policy = "accept" }
+    la ut = "table inet norscode {\n"
+    ut = ut + "  chain input {\n"
+    ut = ut + "    type filter hook input priority 0; policy " + input_policy + ";\n"
+    ut = ut + "    iifname lo accept\n"
+    ut = ut + "    ct state established,related accept\n"
+    hvis p["rate_limits_text"] != "" { ut = ut + p["rate_limits_text"] + "\n" }
+    ut = ut + input_rules
+    ut = ut + "  }\n"
+    ut = ut + "  chain output {\n"
+    ut = ut + "    type filter hook output priority 0; policy " + output_policy + ";\n"
+    ut = ut + "    oifname lo accept\n"
+    ut = ut + "    ct state established,related accept\n"
+    ut = ut + output_rules
+    ut = ut + "  }\n"
+    ut = ut + "}\n"
+    returner ut
+}
+
+funksjon applier_plan(p: ordbok_tekst, torrkoyring: bool) -> ordbok_tekst {
+    la a: ordbok_tekst = {}
+    a["policy"] = p["namn"]
+    a["backend"] = "nftables"
+    a["dry_run"] = "usann"
+    hvis torrkoyring { a["dry_run"] = "sann" }
+    a["requires_root"] = "sann"
+    a["audit"] = p["audit"]
+    a["ruleset"] = nftables_plan(p)
+    a["check_command"] = "nft --check -f -"
+    a["apply_command"] = "nft -f -"
+    a["backup_command"] = "nft list ruleset"
+    a["rollback_command"] = "nft -f /var/lib/norscode-firewall/last-known-good.nft"
+    returner a
+}
+
+funksjon handhevbar(p: ordbok_tekst) -> bool {
+    hvis ikkje produksjon_trygg(p) { returner usann }
+    hvis p["reglar_text"] == "" { returner usann }
+    hvis p["audit"] != "sann" { returner usann }
+    returner sann
+}
+
+funksjon status() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.brannmur"
+    s["status"] = "stabil"
+    s["dekning"] = "default-drop, deterministisk regel-evaluering, web, dns, mail, admin-allowlist, rate-limit, egress, lockdown, risiko, nftables-plan og applier-plan"
+    s["sikkerheit"] = "deny-by-default med audit, dry-run, avgrensa utgaande trafikk, lockdown og handhevbarhetskontroll"
+    returner s
+}

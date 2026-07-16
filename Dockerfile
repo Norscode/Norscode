@@ -9,7 +9,7 @@ RUN apt-get update \
 
 COPY . .
 
-RUN ./tools/build-bootstrap-binary.sh
+RUN ./bin/nc run tools/build-bootstrap-binary.no
 
 FROM python:3.12-slim AS runtime
 

@@ -7,7 +7,7 @@ Dette er kortversjonen for å installere Norscode lokalt utan Python- eller C-ba
 På macOS og Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install | sh
 ```
 
 Legg deretter installasjonsmappa på `PATH` dersom ho ikkje alt ligg der:
@@ -29,7 +29,13 @@ nc verify-seed
 Frå repo-rota:
 
 ```bash
-bash tools/install.sh
+sh tools/install
+```
+
+Når Norscode-runtime allerede finnes i checkouten, bruk den Norscode-native installasjonsflaten:
+
+```bash
+NORSCODE_INSTALL_PREFIX="$HOME/.local" ./bin/nc run tools/install.no
 ```
 
 Dette brukar `dist/norscode_native` dersom han finst lokalt. Installert kommando blir:
@@ -46,8 +52,8 @@ Norscode kan også distribuerast som éi enkel releasefil.
 Språk-/repo-pakke:
 
 ```bash
-bash package-release.sh 0.1.0
-bash tools/install-release.sh release-artifacts/norscode-language-0.1.0.tar.gz
+NORSCODE_RELEASE_VERSION=0.1.0 NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/package_release.no
+NORSCODE_INSTALL_ARCHIVE=release-artifacts/norscode-language-0.1.0.tar.gz ./bin/nc run tools/install-release.no
 ```
 
 Plattformpakker blir lagt i `release-artifacts/` når dei blir bygde:
@@ -62,20 +68,20 @@ Plattformpakker blir lagt i `release-artifacts/` når dei blir bygde:
 macOS:
 
 ```bash
-bash tools/build-macos-app.sh
-bash tools/package-macos-app.sh --format all
+./bin/nc run tools/build-macos-app.no
+NORSCODE_MACOS_PACKAGE_FORMAT=all ./bin/nc run tools/package-macos-app.no
 ```
 
 Linux:
 
 ```bash
-bash tools/package-linux-app.sh --format all
+NORSCODE_LINUX_PACKAGE_FORMAT=all ./bin/nc run tools/package-linux-app.no
 ```
 
 Windows-pakke rundt eksisterande `.exe`:
 
 ```bash
-bash tools/package-windows-app.sh build/windows/norscode.exe
+NORSCODE_WINDOWS_PACKAGE_EXE=build/windows/norscode.exe ./bin/nc run tools/package-windows-app.no
 ```
 
 ## Normal Bruk Etter Installering

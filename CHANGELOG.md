@@ -129,7 +129,7 @@ All stages run in pure Norscode without C-backend dependencies.
 
 #### Building from Source
 ```bash
-bash tools/build_norscode_native.sh    # Build C-host binary
+./bin/nc run tools/build_norscode_native.no    # Build native runtime
 ./bin/nc test                           # Run tests
 ./bin/nc bootstrap-self                 # Verify self-hosting
 ```

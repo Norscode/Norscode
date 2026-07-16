@@ -47,7 +47,7 @@ CI bør òg ha små, raske testar for:
 - installasjon og release
 - `--version`
 - ELF self-compile-paritet på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
-- samla driftsvakt via `tools/selfhost_drift_guard.sh`
+- samla driftsvakt via `./bin/nc run tools/selfhost_drift_guard.no`
 
 For full CI-sjekk:
 

@@ -1,7 +1,5 @@
-// tools/compile_with_hybrid_bundle_v9400.no — Norscode-entrypoint for hybrid compile-løypa
-//
-// Merk: sjølve v9400-transformasjonen er framleis Node-basert overgangskode.
-// Denne fila eig Norscode-sida av kontrakten: argument, preflight og logging.
+// Aktiv Norscode-kompilering: kjelde -> NCB med heile importgrafen.
+// Ingen Node-, JavaScript-, Python- eller C-transformasjon er del av denne bana.
 
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
@@ -13,9 +11,7 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(s: tekst) -> tekst {
-    returner "'" + s + "'"
-}
+funksjon shell(verdi: tekst) -> tekst { returner "'" + verdi + "'" }
 
 funksjon kommando(cmd: tekst) -> liste_tekst {
     prøv { returner builtin.exec_prosess(cmd) } fang (e) {
@@ -28,7 +24,7 @@ funksjon kommando(cmd: tekst) -> liste_tekst {
 }
 
 funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
+    returner lengde(res) > 0 og res[0] == "0"
 }
 
 funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
@@ -36,8 +32,756 @@ funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
     returner ""
 }
 
-funksjon trim(t: tekst) -> tekst {
-    returner builtin.trim(t)
+funksjon trim(t: tekst) -> tekst { returner builtin.trim(t) }
+
+funksjon dirname(sti: tekst) -> tekst {
+    la siste: heiltall = -1
+    la i: heiltall = 0
+    mens i < lengde(sti) {
+        hvis builtin.slice(sti, i, i + 1) == "/" { siste = i }
+        i = i + 1
+    }
+    hvis siste <= 0 { returner "." }
+    returner builtin.slice(sti, 0, siste)
+}
+
+funksjon import_sti(modul: tekst) -> tekst {
+    returner builtin.replace(modul, ".", "/")
+}
+
+funksjon import_out_namn(modul: tekst) -> tekst {
+    returner builtin.replace(modul, ".", "_") + ".ncb.json"
+}
+
+funksjon liste_har(verdiar: liste_tekst, verdi: tekst) -> bool {
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        hvis verdiar[i] == verdi { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon fyrste_ord(t: tekst) -> tekst {
+    la delar = builtin.split(trim(t), " ")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la del = trim(delar[i])
+        hvis del != "" { returner del }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon importer_fraa(src: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la linjer = builtin.split(builtin.fil_les(src), "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = trim(linjer[i])
+        la modul = ""
+        hvis builtin.starts_with(l, "bruk ") {
+            modul = fyrste_ord(builtin.slice(l, 5, -1))
+        } ellers hvis builtin.starts_with(l, "import ") {
+            modul = fyrste_ord(builtin.slice(l, 7, -1))
+        }
+        hvis modul != "" og ikkje liste_har(ut, modul) { legg_til(ut, modul) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon finn_import_abs(root: tekst, project_root: tekst, modul: tekst) -> tekst {
+    la base = import_sti(modul)
+    la kandidatar: liste_tekst = [
+        project_root + "/" + base + ".no",
+        root + "/" + base + ".no",
+        project_root + "/" + base + ".nors",
+        root + "/" + base + ".nors"
+    ]
+    la i: heiltall = 0
+    mens i < lengde(kandidatar) {
+        hvis ok(kommando("test -f " + shell(kandidatar[i]))) { returner kandidatar[i] }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon er_talstekst(verdi: tekst) -> bool {
+    hvis verdi == "" { returner usann }
+    la i: heiltall = 0
+    hvis builtin.slice(verdi, 0, 1) == "-" eller builtin.slice(verdi, 0, 1) == "+" {
+        i = 1
+    }
+    hvis i >= lengde(verdi) { returner usann }
+    la har_siffer = usann
+    la har_punkt = usann
+    mens i < lengde(verdi) {
+        la ch = builtin.slice(verdi, i, i + 1)
+        hvis ch == "." og ikkje har_punkt {
+            har_punkt = sann
+        } ellers hvis ch >= "0" og ch <= "9" {
+            har_siffer = sann
+        } ellers {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner har_siffer
+}
+
+funksjon er_risikostreng(raw: tekst) -> bool {
+    la verdi = trim(raw)
+    hvis er_talstekst(verdi) { returner sann }
+    hvis verdi == "true" eller verdi == "false" eller verdi == "null" { returner sann }
+    hvis lengde(verdi) >= 2 {
+        la fyrste = builtin.slice(verdi, 0, 1)
+        la siste = builtin.slice(verdi, lengde(verdi) - 1, lengde(verdi))
+        hvis fyrste == "[" og siste == "]" { returner sann }
+        hvis fyrste == "{" og siste == "}" { returner sann }
+    }
+    returner usann
+}
+
+// Stage-0 behandlar newline som setningsskilje og kan feiltolke tekst som ser
+// ut som tal/JSON. Normaliser begge delar utan Node-basert etterprosessering.
+funksjon normaliser_literal_og_semikolon(kjelde: tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(kjelde) {
+        la ch = builtin.slice(kjelde, i, i + 1)
+        la neste = ""
+        hvis i + 1 < lengde(kjelde) { neste = builtin.slice(kjelde, i + 1, i + 2) }
+        hvis ch == "#" eller (ch == "/" og neste == "/") {
+            mens i < lengde(kjelde) og builtin.slice(kjelde, i, i + 1) != "\n" {
+                ut = ut + builtin.slice(kjelde, i, i + 1)
+                i = i + 1
+            }
+        } ellers hvis ch == "\"" {
+            la raw = ""
+            i = i + 1
+            la ferdig = usann
+            mens i < lengde(kjelde) og ikkje ferdig {
+                la s = builtin.slice(kjelde, i, i + 1)
+                hvis s == "\\" og i + 1 < lengde(kjelde) {
+                    raw = raw + s + builtin.slice(kjelde, i + 1, i + 2)
+                    i = i + 2
+                } ellers hvis s == "\n" {
+                    // Stage-0 avsluttar elles teksttokenet ved fysisk linjeskift.
+                    // Bevar multiline-verdien som eit eksplisitt escape i kjelda.
+                    raw = raw + "\\n"
+                    i = i + 1
+                } ellers hvis s == "\"" {
+                    ferdig = sann
+                    i = i + 1
+                } ellers {
+                    raw = raw + s
+                    i = i + 1
+                }
+            }
+            hvis er_risikostreng(raw) {
+                ut = ut + "builtin.slice(\"__nclit__" + raw + "\", 9, -1)"
+            } ellers {
+                ut = ut + "\"" + raw + "\""
+            }
+        } ellers {
+            hvis ch == ";" { ut = ut + "\n" } ellers { ut = ut + ch }
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon finn_fraa(verdi: tekst, del: tekst, start: heiltall) -> heiltall {
+    hvis start < 0 eller start >= lengde(verdi) { returner -1 }
+    la relativ = builtin.index_of(builtin.slice(verdi, start, -1), del)
+    hvis relativ < 0 { returner -1 }
+    returner start + relativ
+}
+
+funksjon er_ident_teikn(ch: tekst) -> bool {
+    hvis ch == "_" { returner sann }
+    hvis ch == "æ" eller ch == "ø" eller ch == "å" eller ch == "Æ" eller ch == "Ø" eller ch == "Å" { returner sann }
+    hvis ch >= "a" og ch <= "z" { returner sann }
+    hvis ch >= "A" og ch <= "Z" { returner sann }
+    hvis ch >= "0" og ch <= "9" { returner sann }
+    returner usann
+}
+
+funksjon hopp_mellomrom(verdi: tekst, start: heiltall) -> heiltall {
+    la i = start
+    mens i < lengde(verdi) {
+        la ch = builtin.slice(verdi, i, i + 1)
+        hvis ch != " " og ch != "\t" { returner i }
+        i = i + 1
+    }
+    returner i
+}
+
+funksjon er_felt_slutt(ch: tekst) -> bool {
+    hvis ch == "" eller ch == " " eller ch == "\t" { returner sann }
+    hvis ch == ")" eller ch == "]" eller ch == "[" eller ch == "}" eller ch == "." eller ch == "," { returner sann }
+    hvis ch == "+" eller ch == "-" eller ch == "*" eller ch == "/" eller ch == "=" eller ch == "!" eller ch == "<" eller ch == ">" { returner sann }
+    returner usann
+}
+
+funksjon er_kvalifisert_kall(linjeverdi: tekst, dot_pos: heiltall) -> bool {
+    la i = dot_pos + 1
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis er_ident_teikn(ch) eller ch == "." {
+            i = i + 1
+        } ellers hvis ch == " " eller ch == "\t" {
+            i = hopp_mellomrom(linjeverdi, i)
+            hvis i < lengde(linjeverdi) og builtin.slice(linjeverdi, i, i + 1) == "(" { returner sann }
+            returner usann
+        } ellers {
+            returner ch == "("
+        }
+    }
+    returner usann
+}
+
+funksjon finn_utanfor_streng(verdi: tekst, del: tekst, start: heiltall) -> heiltall {
+    la i = start
+    la i_streng = usann
+    mens i + lengde(del) <= lengde(verdi) {
+        la ch = builtin.slice(verdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(verdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+        }
+        hvis ikkje i_streng og builtin.slice(verdi, i, i + lengde(del)) == del { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon innrykk_fraa(linjeverdi: tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis ch != " " og ch != "\t" { returner ut }
+        ut = ut + ch
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon er_kommentar_linje(linjeverdi: tekst) -> bool {
+    la reinska = trim(linjeverdi)
+    returner builtin.starts_with(reinska, "#") eller builtin.starts_with(reinska, "//")
+}
+
+funksjon ifexpr_delar(uttrykk: tekst) -> ordbok_tekst {
+    la svar: ordbok_tekst = {"ok": "usann", "vilkår": "", "sann": "", "usann": ""}
+    la reinska = trim(uttrykk)
+    hvis ikkje builtin.starts_with(reinska, "hvis ") { returner svar }
+    la da_pos = finn_utanfor_streng(reinska, " da ", 5)
+    hvis da_pos < 0 { returner svar }
+    la elles_pos = finn_utanfor_streng(reinska, " ellers ", da_pos + 4)
+    hvis elles_pos < 0 { returner svar }
+    svar["ok"] = "sann"
+    svar["vilkår"] = trim(builtin.slice(reinska, 5, da_pos))
+    svar["sann"] = trim(builtin.slice(reinska, da_pos + 4, elles_pos))
+    svar["usann"] = trim(builtin.slice(reinska, elles_pos + 8, -1))
+    returner svar
+}
+
+funksjon bygg_if_tildeling(mål: tekst, uttrykk: tekst, innrykk: tekst) -> tekst {
+    la delar = ifexpr_delar(uttrykk)
+    hvis delar["ok"] != "sann" { returner innrykk + mål + " = " + uttrykk }
+    la sann_del = innrykk + "    " + mål + " = " + delar["sann"]
+    la usann_if = ifexpr_delar(delar["usann"])
+    la usann_del = ""
+    hvis usann_if["ok"] == "sann" {
+        usann_del = bygg_if_tildeling(mål, delar["usann"], innrykk)
+    } ellers {
+        usann_del = innrykk + "    " + mål + " = " + delar["usann"]
+    }
+    hvis usann_if["ok"] == "sann" {
+        returner innrykk + "hvis " + delar["vilkår"] + " {\n" + sann_del + "\n" + innrykk + "} ellers " + trim(usann_del)
+    }
+    returner innrykk + "hvis " + delar["vilkår"] + " {\n" + sann_del + "\n" + innrykk + "} ellers {\n" + usann_del + "\n" + innrykk + "}"
+}
+
+funksjon bygg_if_return(uttrykk: tekst, innrykk: tekst) -> tekst {
+    la delar = ifexpr_delar(uttrykk)
+    hvis delar["ok"] != "sann" { returner innrykk + "returner " + uttrykk }
+    la sann_del = innrykk + "    returner " + delar["sann"]
+    la usann_if = ifexpr_delar(delar["usann"])
+    la usann_del = ""
+    hvis usann_if["ok"] == "sann" {
+        usann_del = bygg_if_return(delar["usann"], innrykk)
+        returner innrykk + "hvis " + delar["vilkår"] + " {\n" + sann_del + "\n" + innrykk + "} ellers " + trim(usann_del)
+    }
+    usann_del = innrykk + "    returner " + delar["usann"]
+    returner innrykk + "hvis " + delar["vilkår"] + " {\n" + sann_del + "\n" + innrykk + "} ellers {\n" + usann_del + "\n" + innrykk + "}"
+}
+
+// If-uttrykk er representert i AST-en, men den gamle stage-0-generatoren
+// legg ikkje grenverdien på stakken. Senk uttrykket til vanleg if-kontrollflyt.
+funksjon finn_lukk_paren(verdi: tekst, opning: heiltall) -> heiltall {
+    la djupn: heiltall = 0
+    la i = opning
+    la i_streng = usann
+    mens i < lengde(verdi) {
+        la ch = builtin.slice(verdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(verdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+        } ellers hvis ikkje i_streng og ch == "(" {
+            djupn = djupn + 1
+        } ellers hvis ikkje i_streng og ch == ")" {
+            djupn = djupn - 1
+            hvis djupn == 0 { returner i }
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon normaliser_if_uttrykk(linjeverdi: tekst, nummer: heiltall) -> tekst {
+    hvis er_kommentar_linje(linjeverdi) { returner linjeverdi }
+    la innrykk = innrykk_fraa(linjeverdi)
+    la reinska = trim(linjeverdi)
+    hvis builtin.starts_with(reinska, "returner hvis ") {
+        returner bygg_if_return(builtin.slice(reinska, 9, -1), innrykk)
+    }
+    la lik = finn_utanfor_streng(linjeverdi, "= hvis ", 0)
+    hvis lik >= 0 {
+        la venstre = trim(builtin.slice(linjeverdi, 0, lik))
+        la uttrykk = trim(builtin.slice(linjeverdi, lik + 2, -1))
+        la mål = venstre
+        la deklarasjon = ""
+        hvis builtin.starts_with(venstre, "la ") {
+            mål = trim(builtin.slice(venstre, 3, -1))
+            la kolon = builtin.index_of(mål, ":")
+            hvis kolon >= 0 { mål = trim(builtin.slice(mål, 0, kolon)) }
+            deklarasjon = innrykk + venstre + " = \"\"\n"
+        }
+        returner deklarasjon + bygg_if_tildeling(mål, uttrykk, innrykk)
+    }
+
+    la inline_pos = finn_utanfor_streng(linjeverdi, "(hvis ", 0)
+    hvis inline_pos < 0 { returner linjeverdi }
+    la inline_slutt = finn_lukk_paren(linjeverdi, inline_pos)
+    hvis inline_slutt < 0 { returner linjeverdi }
+    la inline_uttrykk = builtin.slice(linjeverdi, inline_pos + 1, inline_slutt)
+    la temp = "__nc_ifexpr_" + tekst_fra_heltall(nummer)
+    la erstatta = builtin.slice(linjeverdi, 0, inline_pos) + temp + builtin.slice(linjeverdi, inline_slutt + 1, -1)
+    returner innrykk + "la " + temp + " = \"\"\n" + bygg_if_tildeling(temp, inline_uttrykk, innrykk) + "\n" + erstatta
+}
+
+// Stage-0 har await i syntaksen, men den aktive bytekodebana manglar enno
+// korrekt stakkhandtering. Gjer semantikken eksplisitt med runtime-builtin.
+funksjon normaliser_await(linjeverdi: tekst) -> tekst {
+    hvis er_kommentar_linje(linjeverdi) { returner linjeverdi }
+    la marker = "await "
+    la pos = finn_utanfor_streng(linjeverdi, marker, 0)
+    hvis pos < 0 { returner linjeverdi }
+    la før = builtin.slice(linjeverdi, 0, pos)
+    la uttrykk = trim(builtin.slice(linjeverdi, pos + lengde(marker), -1))
+    hvis uttrykk == "" { returner linjeverdi }
+    returner før + "builtin.await_value(" + uttrykk + ")"
+}
+
+// Norscode tillèt korte struct/map-nøklar (`{ namn: verdi }`). Den innebygde
+// stage-0-generatoren mistar framleis desse verdiane; sitert map-syntaks har
+// komplett BUILD_MAP-støtte og er semantisk identisk for denne forma.
+funksjon normaliser_bare_nøklar(linjeverdi: tekst, i_map: bool) -> tekst {
+    hvis er_kommentar_linje(linjeverdi) { returner linjeverdi }
+    la ut = ""
+    la i: heiltall = 0
+    la i_streng = usann
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(linjeverdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+            ut = ut + ch
+            i = i + 1
+        } ellers hvis ikkje i_streng og (ch == "_" eller (ch >= "a" og ch <= "z") eller (ch >= "A" og ch <= "Z")) {
+            la start = i
+            mens i < lengde(linjeverdi) og er_ident_teikn(builtin.slice(linjeverdi, i, i + 1)) { i = i + 1 }
+            la etter = hopp_mellomrom(linjeverdi, i)
+            la før = start - 1
+            mens før >= 0 og (builtin.slice(linjeverdi, før, før + 1) == " " eller builtin.slice(linjeverdi, før, før + 1) == "\t") { før = før - 1 }
+            la kan_nøkkel = i_map og trim(builtin.slice(linjeverdi, 0, start)) == ""
+            hvis før >= 0 og builtin.slice(linjeverdi, før, før + 1) == "{" { kan_nøkkel = sann }
+            hvis før >= 0 og builtin.slice(linjeverdi, før, før + 1) == "," og builtin.index_of(builtin.slice(linjeverdi, 0, før), "{") >= 0 { kan_nøkkel = sann }
+            hvis kan_nøkkel og etter < lengde(linjeverdi) og builtin.slice(linjeverdi, etter, etter + 1) == ":" {
+                ut = ut + "\"" + builtin.slice(linjeverdi, start, i) + "\""
+            } ellers {
+                ut = ut + builtin.slice(linjeverdi, start, i)
+            }
+        } ellers {
+            ut = ut + ch
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon klammebalanse_fraa(linjeverdi: tekst, start: heiltall) -> heiltall {
+    la balanse: heiltall = 0
+    la i = start
+    la i_streng = usann
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(linjeverdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+        } ellers hvis ikkje i_streng og ch == "{" {
+            balanse = balanse + 1
+        } ellers hvis ikkje i_streng og ch == "}" {
+            balanse = balanse - 1
+        }
+        i = i + 1
+    }
+    returner balanse
+}
+
+funksjon map_start(linjeverdi: tekst) -> heiltall {
+    la kandidatar: liste_tekst = ["returner {", "= {", "({"]
+    la i: heiltall = 0
+    mens i < lengde(kandidatar) {
+        la pos = finn_utanfor_streng(linjeverdi, kandidatar[i], 0)
+        hvis pos >= 0 { returner finn_fraa(linjeverdi, "{", pos) }
+        i = i + 1
+    }
+    returner -1
+}
+
+// Senk enkle utsnitt (verdi[start:slutt]) til runtime-operasjonen som alt er
+// implementert og testa i stage-0. Vanleg indeksering blir urørt.
+funksjon normaliser_slice(linjeverdi: tekst) -> tekst {
+    hvis er_kommentar_linje(linjeverdi) { returner linjeverdi }
+    la ut = ""
+    la i: heiltall = 0
+    la i_streng = usann
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(linjeverdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+        }
+        hvis ikkje i_streng og er_ident_teikn(ch) {
+            la start = i
+            mens i < lengde(linjeverdi) og er_ident_teikn(builtin.slice(linjeverdi, i, i + 1)) { i = i + 1 }
+            la namn = builtin.slice(linjeverdi, start, i)
+            hvis i < lengde(linjeverdi) og builtin.slice(linjeverdi, i, i + 1) == "[" {
+                la slutt = finn_fraa(linjeverdi, "]", i + 1)
+                hvis slutt > i {
+                    la innhald = builtin.slice(linjeverdi, i + 1, slutt)
+                    la kolon = finn_utanfor_streng(innhald, ":", 0)
+                    hvis kolon >= 0 {
+                        la frå = trim(builtin.slice(innhald, 0, kolon))
+                        la sluttverdi = trim(builtin.slice(innhald, kolon + 1, -1))
+                        hvis frå == "" { frå = "0" }
+                        hvis sluttverdi == "" { sluttverdi = "-1" }
+                        ut = ut + "builtin.slice(" + namn + ", " + frå + ", " + sluttverdi + ")"
+                        i = slutt + 1
+                    } ellers {
+                        ut = ut + namn
+                    }
+                } ellers {
+                    ut = ut + namn
+                }
+            } ellers {
+                ut = ut + namn
+            }
+        } ellers {
+            ut = ut + ch
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+// Modulfunksjonar endar i kall og blir ståande som alias.funksjon(...).
+// Datafelt blir senka til kartoppslag, også for kjeder som team.leder.poeng.
+funksjon normaliser_felt(linjeverdi: tekst) -> tekst {
+    la reinska = trim(linjeverdi)
+    hvis builtin.starts_with(reinska, "bruk ") eller builtin.starts_with(reinska, "import ") eller builtin.starts_with(reinska, "#") eller builtin.starts_with(reinska, "//") {
+        returner linjeverdi
+    }
+    la ut = ""
+    la i: heiltall = 0
+    la i_streng = usann
+    mens i < lengde(linjeverdi) {
+        la ch = builtin.slice(linjeverdi, i, i + 1)
+        hvis ch == "\"" og (i == 0 eller builtin.slice(linjeverdi, i - 1, i) != "\\") {
+            i_streng = ikkje i_streng
+            ut = ut + ch
+            i = i + 1
+        } ellers hvis ikkje i_streng og ch == "." og i > 0 og (er_ident_teikn(builtin.slice(linjeverdi, i - 1, i)) eller builtin.slice(linjeverdi, i - 1, i) == "]" eller builtin.slice(linjeverdi, i - 1, i) == ")") og i + 1 < lengde(linjeverdi) og (builtin.slice(linjeverdi, i + 1, i + 2) == "_" eller (builtin.slice(linjeverdi, i + 1, i + 2) >= "a" og builtin.slice(linjeverdi, i + 1, i + 2) <= "z") eller (builtin.slice(linjeverdi, i + 1, i + 2) >= "A" og builtin.slice(linjeverdi, i + 1, i + 2) <= "Z")) {
+            hvis er_kvalifisert_kall(linjeverdi, i) {
+                ut = ut + ch
+                i = i + 1
+            } ellers {
+            la j = i + 1
+            mens j < lengde(linjeverdi) og er_ident_teikn(builtin.slice(linjeverdi, j, j + 1)) { j = j + 1 }
+            hvis j > i + 1 {
+                la etter = hopp_mellomrom(linjeverdi, j)
+                la rett_etter = ""
+                hvis j < lengde(linjeverdi) { rett_etter = builtin.slice(linjeverdi, j, j + 1) }
+                hvis (etter >= lengde(linjeverdi) eller builtin.slice(linjeverdi, etter, etter + 1) != "(") og er_felt_slutt(rett_etter) {
+                    ut = ut + "[\"" + builtin.slice(linjeverdi, i + 1, j) + "\"]"
+                    i = j
+                } ellers {
+                    ut = ut + ch
+                    i = i + 1
+                }
+            } ellers {
+                ut = ut + ch
+                i = i + 1
+            }
+            }
+        } ellers {
+            ut = ut + ch
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon normaliser_listeforståing(linjeverdi: tekst, nummer: heiltall) -> ordbok_tekst {
+    la svar: ordbok_tekst = {"linje": linjeverdi, "hjelpar": ""}
+    la lik = builtin.index_of(linjeverdi, "= [")
+    hvis lik < 0 { returner svar }
+    la opning = lik + 2
+    la for_pos = finn_fraa(linjeverdi, " for ", opning + 1)
+    la i_pos = finn_fraa(linjeverdi, " i ", for_pos + 5)
+    la hvis_pos = finn_fraa(linjeverdi, " hvis ", i_pos + 3)
+    la lukking = finn_fraa(linjeverdi, "]", hvis_pos + 6)
+    hvis for_pos < 0 eller i_pos < 0 eller hvis_pos < 0 eller lukking < 0 { returner svar }
+
+    la uttrykk = trim(builtin.slice(linjeverdi, opning + 1, for_pos))
+    la variabel = trim(builtin.slice(linjeverdi, for_pos + 5, i_pos))
+    la kjelde = trim(builtin.slice(linjeverdi, i_pos + 3, hvis_pos))
+    la vilkår = trim(builtin.slice(linjeverdi, hvis_pos + 6, lukking))
+    hvis uttrykk == "" eller variabel == "" eller kjelde == "" eller vilkår == "" { returner svar }
+
+    la namn = "__nc_listeforståing_" + tekst_fra_heltall(nummer)
+    svar["linje"] = builtin.slice(linjeverdi, 0, opning) + namn + "(" + kjelde + ")" + builtin.slice(linjeverdi, lukking + 1, -1)
+    svar["hjelpar"] = "\nfunksjon " + namn + "(__kjelde) {\n" +
+        "    la __resultat = []\n" +
+        "    la __indeks = 0\n" +
+        "    mens __indeks < lengde(__kjelde) {\n" +
+        "        la " + variabel + " = __kjelde[__indeks]\n" +
+        "        hvis " + vilkår + " { legg_til(__resultat, " + uttrykk + ") }\n" +
+        "        __indeks = __indeks + 1\n" +
+        "    }\n" +
+        "    returner __resultat\n" +
+        "}\n"
+    returner svar
+}
+
+funksjon lokal_deklarasjon_namn(linjeverdi: tekst) -> tekst {
+    la reinska = trim(linjeverdi)
+    hvis ikkje builtin.starts_with(reinska, "la ") { returner "" }
+    la rest = builtin.slice(reinska, 3, -1)
+    la i: heiltall = 0
+    mens i < lengde(rest) {
+        la ch = builtin.slice(rest, i, i + 1)
+        hvis ch == " " eller ch == "\t" eller ch == ":" eller ch == "=" { returner builtin.slice(rest, 0, i) }
+        i = i + 1
+    }
+    returner rest
+}
+
+funksjon normaliser_lambda_deklarasjon(linjeverdi: tekst, nummer: heiltall, lokale: liste_tekst) -> ordbok_tekst {
+    la svar: ordbok_tekst = {"ok": "usann", "namn": "", "linje": linjeverdi, "kall": "", "hjelpar": ""}
+    hvis er_kommentar_linje(linjeverdi) { returner svar }
+    la marker = finn_utanfor_streng(linjeverdi, " = fun(", 0)
+    hvis marker < 0 { returner svar }
+    la pil = finn_utanfor_streng(linjeverdi, ") -> ", marker + 7)
+    hvis pil < 0 { returner svar }
+    la namn = lokal_deklarasjon_namn(builtin.slice(linjeverdi, 0, marker))
+    hvis namn == "" { returner svar }
+    la params = trim(builtin.slice(linjeverdi, marker + 7, pil))
+    la uttrykk = trim(builtin.slice(linjeverdi, pil + 5, -1))
+    hvis uttrykk == "" { returner svar }
+
+    la hjelpar_namn = "__nc_lambda_" + tekst_fra_heltall(nummer)
+    la fangst = builtin.join(lokale, ", ")
+    la alle_params = params
+    hvis fangst != "" og params != "" { alle_params = fangst + ", " + params }
+    ellers hvis fangst != "" { alle_params = fangst }
+    la kall = hjelpar_namn + "("
+    hvis fangst != "" { kall = kall + fangst + ", " }
+
+    svar["ok"] = "sann"
+    svar["namn"] = namn
+    svar["linje"] = ""
+    svar["kall"] = kall
+    svar["hjelpar"] = "\nfunksjon " + hjelpar_namn + "(" + alle_params + ") {\n    returner " + uttrykk + "\n}\n"
+    returner svar
+}
+
+funksjon normaliser_lambda_kall(linjeverdi: tekst, namn: liste_tekst, kall: liste_tekst) -> tekst {
+    la ut = linjeverdi
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        ut = builtin.replace(ut, namn[i] + "(", kall[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon normaliser_kjelde(kjelde: tekst) -> tekst {
+    la grunnlag = normaliser_literal_og_semikolon(kjelde)
+    la linjer = builtin.split(grunnlag, "\n")
+    la ut = ""
+    la hjelparar = ""
+    la lokale: liste_tekst = []
+    la lambda_namn: liste_tekst = []
+    la lambda_kall: liste_tekst = []
+    la map_djupn: heiltall = 0
+    la nummer: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(trim(linjer[i]), "funksjon ") eller builtin.starts_with(trim(linjer[i]), "async funksjon ") {
+            lokale = []
+            lambda_namn = []
+            lambda_kall = []
+        }
+        la lambda = normaliser_lambda_deklarasjon(linjer[i], nummer, lokale)
+        la grunnlinje = linjer[i]
+        hvis lambda["ok"] == "sann" {
+            grunnlinje = lambda["linje"]
+            legg_til(lambda_namn, lambda["namn"])
+            legg_til(lambda_kall, lambda["kall"])
+            hjelparar = hjelparar + lambda["hjelpar"]
+            nummer = nummer + 1
+        } ellers {
+            grunnlinje = normaliser_lambda_kall(grunnlinje, lambda_namn, lambda_kall)
+            la lokal = lokal_deklarasjon_namn(grunnlinje)
+            hvis lokal != "" og ikkje liste_har(lokale, lokal) { legg_til(lokale, lokal) }
+        }
+        la komp = normaliser_listeforståing(grunnlinje, nummer)
+        la linjeverdi = komp["linje"]
+        hvis komp["hjelpar"] != "" {
+            hjelparar = hjelparar + komp["hjelpar"]
+            nummer = nummer + 1
+        }
+        linjeverdi = normaliser_bare_nøklar(linjeverdi, map_djupn > 0)
+        linjeverdi = normaliser_if_uttrykk(linjeverdi, i)
+        linjeverdi = normaliser_await(linjeverdi)
+        linjeverdi = normaliser_slice(linjeverdi)
+        linjeverdi = normaliser_felt(linjeverdi)
+        ut = ut + linjeverdi + "\n"
+        hvis map_djupn > 0 {
+            map_djupn = map_djupn + klammebalanse_fraa(grunnlinje, 0)
+        } ellers {
+            la map_pos = map_start(grunnlinje)
+            hvis map_pos >= 0 { map_djupn = klammebalanse_fraa(grunnlinje, map_pos) }
+        }
+        hvis map_djupn < 0 { map_djupn = 0 }
+        i = i + 1
+    }
+    returner ut + hjelparar
+}
+
+funksjon merge_listefelt(merged, fragment, namn: tekst) -> heiltall {
+    hvis ikkje har_nokkel(fragment, namn) { returner 0 }
+    la verdiar = fragment[namn]
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        legg_til(merged[namn], verdiar[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon merge_kartfelt(merged, fragment, namn: tekst) -> heiltall {
+    hvis ikkje har_nokkel(fragment, namn) { returner 0 }
+    la kart = fragment[namn]
+    la n = builtin.nøkler(kart)
+    la i: heiltall = 0
+    mens i < lengde(n) {
+        merged[namn][n[i]] = kart[n[i]]
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon merge_fragment(merged, fragment) -> heiltall {
+    merge_kartfelt(merged, fragment, "functions")
+    merge_kartfelt(merged, fragment, "dependency_providers")
+    merge_kartfelt(merged, fragment, "guard_providers")
+    merge_listefelt(merged, fragment, "imports")
+    merge_listefelt(merged, fragment, "route_handlers")
+    merge_listefelt(merged, fragment, "request_middlewares")
+    merge_listefelt(merged, fragment, "response_middlewares")
+    merge_listefelt(merged, fragment, "error_middlewares")
+    merge_listefelt(merged, fragment, "startup_hooks")
+    merge_listefelt(merged, fragment, "shutdown_hooks")
+    merge_listefelt(merged, fragment, "tests")
+    returner 0
+}
+
+funksjon vel_entry(bundle, modul: tekst) -> heiltall {
+    la kandidatar: liste_tekst = [modul + ".start", modul + ".test", modul + ".main"]
+    la i: heiltall = 0
+    mens i < lengde(kandidatar) {
+        hvis har_nokkel(bundle["functions"], kandidatar[i]) {
+            bundle["entry"] = kandidatar[i]
+            returner 0
+        }
+        i = i + 1
+    }
+    la namn = builtin.nøkler(bundle["functions"])
+    i = 0
+    mens i < lengde(namn) {
+        hvis builtin.starts_with(namn[i], modul + ".") {
+            bundle["entry"] = namn[i]
+            returner 0
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src: tekst, modul: tekst, out: tekst, tmpdir: tekst) -> bool {
+    la cache_dir = root + "/build/nc-module-cache"
+    la cache_key_cmd = "{ " +
+        "if command -v shasum >/dev/null 2>&1; then shasum -a 256 " + shell(src) + " " + shell(root + "/tools/compile_with_hybrid_bundle_v9400.no") + "; " +
+        "else sha256sum " + shell(src) + " " + shell(root + "/tools/compile_with_hybrid_bundle_v9400.no") + "; fi; " +
+        "if stat -f '%m:%z' " + shell(native_bin) + " >/dev/null 2>&1; then stat -f '%m:%z' " + shell(native_bin) + "; " +
+        "else stat -c '%Y:%s' " + shell(native_bin) + "; fi; } | " +
+        "if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi | awk '{print $1}'"
+    la cache_key_res = kommando(cache_key_cmd)
+    la cache_fil = ""
+    hvis ok(cache_key_res) {
+        cache_fil = cache_dir + "/" + import_out_namn(modul) + "." + trim(felt(cache_key_res, 1))
+        hvis ok(kommando("test -f " + shell(cache_fil))) {
+            returner ok(kommando("cp " + shell(cache_fil) + " " + shell(out)))
+        }
+    }
+    la transformed = tmpdir + "/" + import_out_namn(modul) + ".no"
+    builtin.fil_skriv(transformed, normaliser_kjelde(builtin.fil_les(src)))
+    la cmd = "cd " + shell(project_root) + " && env NORSCODE_CMD=compile NORSCODE_FILE=" + shell(transformed) + " NORSCODE_OUTPUT=" + shell(out) + " NORSCODE_MODULE=" + shell(modul) + " NORSCODE_ROOT=" + shell(root) + " NORSCODE_IMPORT_BASE=" + shell(project_root) + " " + shell(native_bin)
+    la res = kommando(cmd)
+    hvis ikkje ok(res) {
+        hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
+        hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
+        returner usann
+    }
+    hvis cache_fil != "" {
+        kommando("mkdir -p " + shell(cache_dir))
+        la cache_tmp = cache_fil + "." + import_out_namn(modul) + ".tmp"
+        hvis ok(kommando("cp " + shell(out) + " " + shell(cache_tmp))) {
+            kommando("mv " + shell(cache_tmp) + " " + shell(cache_fil))
+        }
+    }
+    returner sann
+}
+
+funksjon rydd_temp(tmpdir: tekst) -> heiltall {
+    hvis env("NORSCODE_KEEP_COMPILE_TMP") == "1" {
+        linje("Norscode compile temp: " + tmpdir)
+        returner 0
+    }
+    kommando("rm -rf " + shell(tmpdir))
+    returner 0
 }
 
 funksjon start() -> heiltall {
@@ -49,12 +793,14 @@ funksjon start() -> heiltall {
     hvis modul == "" { modul = "__main__" }
     la project_root = env("NORSCODE_HYBRID_PROJECT_ROOT")
     hvis project_root == "" { project_root = root }
+    hvis ikkje builtin.starts_with(src, "/") { src = project_root + "/" + src }
+    hvis out != "" og ikkje builtin.starts_with(out, "/") { out = project_root + "/" + out }
     la native_bin = env("NORSCODE_NATIVE_BIN")
     hvis native_bin == "" { native_bin = root + "/dist/norscode_native" }
 
     hvis src == "" eller out == "" {
-        linje("bruk: compile_with_hybrid_bundle_v9400.sh <repo-root> <src.no> <out.ncb.json> [modul]")
-        returner 1
+        linje("feil: NORSCODE_HYBRID_SRC/OUT manglar")
+        returner 2
     }
     hvis ikkje ok(kommando("test -f " + shell(src))) {
         linje("feil: manglar kjelde: " + src)
@@ -64,22 +810,51 @@ funksjon start() -> heiltall {
         linje("feil: manglar native runtime: " + native_bin)
         returner 1
     }
-    hvis ikkje ok(kommando("command -v node >/dev/null 2>&1 || test -x " + shell("/Users/jansteinar/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"))) {
-        linje("feil: fann ikkje node. Sett NODE_BIN eller installer node i PATH.")
+
+    la tmp_root = root + "/build/nc-import-tmp"
+    hvis ikkje ok(kommando("mkdir -p " + shell(tmp_root) + " " + shell(dirname(out)))) { returner 1 }
+    la tmp_res = kommando("mktemp -d " + shell(tmp_root + "/norscode_native_bundle.XXXXXX"))
+    hvis ikkje ok(tmp_res) { returner 1 }
+    la tmpdir = trim(felt(tmp_res, 1))
+    la root_ncb = tmpdir + "/root.ncb.json"
+    hvis ikkje kompiler_modul(root, project_root, native_bin, src, modul, root_ncb, tmpdir) {
+        rydd_temp(tmpdir)
         returner 1
     }
 
-    la cmd = shell(root + "/tools/compile_with_hybrid_bundle_v9400.sh") + " --from-no " + shell(root) + " " + shell(src) + " " + shell(out) + " " + shell(modul) + " " + shell(project_root)
-    la res = kommando(cmd)
-    hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
-    hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
-    hvis ok(res) {
-        hvis ok(kommando("test -f " + shell(out))) {
-            linje("Hybrid compile: " + out)
-            returner 0
+    la merged = builtin.json_parse_raw(builtin.fil_les(root_ncb))
+    la queue = importer_fraa(src)
+    la ferdige: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(queue) {
+        la import_mod = queue[i]
+        hvis ikkje liste_har(ferdige, import_mod) {
+            legg_til(ferdige, import_mod)
+            la import_abs = finn_import_abs(root, project_root, import_mod)
+            hvis import_abs != "" {
+                la import_out = tmpdir + "/" + import_out_namn(import_mod)
+                hvis ikkje kompiler_modul(root, project_root, native_bin, import_abs, import_mod, import_out, tmpdir) {
+                    rydd_temp(tmpdir)
+                    returner 1
+                }
+                la fragment = builtin.json_parse_raw(builtin.fil_les(import_out))
+                merge_fragment(merged, fragment)
+                la vidare = importer_fraa(import_abs)
+                la j: heiltall = 0
+                mens j < lengde(vidare) {
+                    hvis ikkje liste_har(ferdige, vidare[j]) og ikkje liste_har(queue, vidare[j]) {
+                        legg_til(queue, vidare[j])
+                    }
+                    j = j + 1
+                }
+            }
         }
-        linje("feil: kompilering skreiv ikkje " + out)
-        returner 1
+        i = i + 1
     }
-    returner 1
+
+    vel_entry(merged, modul)
+    builtin.fil_skriv(out, builtin.json_stringify(merged))
+    rydd_temp(tmpdir)
+    linje("Norscode compile: " + out)
+    returner 0
 }

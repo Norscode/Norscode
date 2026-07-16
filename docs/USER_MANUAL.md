@@ -198,7 +198,7 @@ Viktige standardmodular:
 - `std.json`: JSON parse/stringify.
 - `std.web`: enkel web/server-hjelp.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
-- `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
+- `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C, med native argv-backend via `std.prosess` for OS-program.
 - `std.stdlib_status`: maskinlesbar status for kva som er `stabil`, `eksperimentell` eller `stub`.
 - `std.db`: databaseflate brukt av NorsDB og smoke-testar.
 - `std.tekst`: tekstoperasjonar.
@@ -263,6 +263,8 @@ Upload, sessions og deploy har eigne produksjonskontraktar:
 - `std.sesjon.sikkerheitsstatus()` dekker serverside session, `HttpOnly`, `SameSite=Lax`, valfri `Secure`, TTL, flash og opprydding.
 - `std.deploy.produksjonsmønster(cfg)` samlar workers, helse, statics, env-fil, rollback og graceful shutdown.
 - `std.multiprocessing.produksjonsstatus()` samlar prosess, pool, queue, pipe, event, lock og value som aktiv runtime-kontrakt.
+- `std.multiprocessing.ny_native_prosess()` og `start_native()` brukar eksisterande shell-fri, synkrone argv-runtime med allowlist og no-network-sandbox.
+- `std.wsgiref.serve_one()` og `app_kan_køyrast()` brukar den native Norscode-serveren for ein HTTP-forespørsel; langkøyrande serverlivssyklus startast med `nc serve`.
 
 LSP-serveren i [selfhost/lsp/server.no](/Users/jansteinar/Projects/Norscode1/selfhost/lsp/server.no) annonserer no hover, completion, definition, document symbols og document formatting i same aktive Norscode-flate.
 
@@ -301,6 +303,18 @@ Typisk serverfil bruker `std.web`:
 ```norscode
 bruk std.web som web
 ```
+
+## Mailserver, domenehost og brannmur
+
+Norscode har ei framtidsklar standardflate for eigen hosting:
+
+- `std.dns` byggjer DNS-soner og mail-DNS med MX, SPF, DKIM, DMARC, DNS-resolver-plan og DNSSEC-plan.
+- `std.tls_acme` byggjer sertifikatplan for ACME, http-01, dns-01, SAN, auto-renew, HSTS, OCSP og trygg rotasjon.
+- `std.mail_server` samlar mailserverkonfig for domene, postboksar, alias, SMTP-runtime, ko-policy, TLS, SMTP AUTH, open-relay-blokkering, karantene og audit.
+- `std.domenehost` bind saman DNS, web, mail, TLS/ACME, DNSSEC, WAF, backup/restore og brannmur i ein samla infrastrukturplan.
+- `std.brannmur` lagar default-drop policy med ekte nftables-reglar for web-, DNS- og mailportar, loopback og etablert trafikk, admin-allowlist med kjelde-CIDR, rate-limit-drop, egress-begrensing, sikkerheitsrapport, `nft --check` og rollback-plan.
+
+Dette er grunnmur for vidare daemon/runtime-arbeid. Modulane er ikkje meint som full SMTP-, IMAP- eller DNS-daemon enno, men nye serverdelar kan byggjast på same Norscode-kontrakt og testast utan å starte med shellskript.
 
 Serverlaget har same standardflyt som moderne Python-rammeverk:
 

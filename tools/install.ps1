@@ -86,7 +86,7 @@ if ($Asset) {
     Write-Host "Aktiv versjon: $Version" -ForegroundColor Green
 } else {
     Write-Error "Ingen Windows native binary tilgjengelig i siste release."
-    Write-Host "Bygg lokalt med tools\\build-bootstrap-binary.sh eller publiser en Windows release." -ForegroundColor Yellow
+    Write-Host "Bygg lokalt med .\\bin\\nc run tools\\build-bootstrap-binary.no eller publiser en Windows release." -ForegroundColor Yellow
     exit 1
 }
 

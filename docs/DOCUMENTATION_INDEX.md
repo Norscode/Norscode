@@ -7,7 +7,9 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [Full brukermanual](USER_MANUAL.md)
 - [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
+- [Treningsguide](TRAINING_GUIDE.md)
 - [Status](STATUS.md)
+- [10/10 modenhetsplan](MODENHET_10_10.md)
 - [Brand og ikoner](BRAND.md)
 
 ## Normal Arbeidsflyt
@@ -15,6 +17,9 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [Selfhost handlingsplan](SELFHOST_HANDLINGSPLAN.md)
 - [CI-gates](05-development/SELFHOST_CI_GATES.md)
 - [Release-sjekkliste](05-development/SELFHOST_RELEASE_CHECKLIST.md)
+- [10/10 modenhetsplan](MODENHET_10_10.md)
+- [CLI-kontrakt](05-development/CLI_CONTRACT.md)
+- [Kompilatorpipeline](05-development/COMPILER_PIPELINE.md)
 
 ## Språk Og Runtime
 
@@ -23,6 +28,15 @@ Dette er ein kort, stabil indeks for vedlikehald og dokumentkontroll. Den mennes
 - [IR og bytecode](SELFHOST_PHASE3_IR_BYTECODE_V1.md)
 - [Modulsystem](SELFHOST_PHASE4_MODULE_SYSTEM_V1.md)
 - [Native ABI](05-development/NATIVE_CODEGEN_V2_ABI.md)
+- [HTTP-server](HTTP_SERVER.md)
+- [HTTP-server sjekkliste](HTTP_SERVER_CHECKLIST.md)
+
+## Pakker Og Verktøy
+
+- [Pakkesystem](03-packages/PACKAGE_MANAGER.md)
+- [Registry-protokoll](03-packages/REGISTRY_PROTOCOL.md)
+- [LSP og IDE](04-how-to-guides/IDE_AND_LSP.md)
+- [API Explorer](api-explorer/index.html)
 
 ## Fase- Og Statusdokument
 
