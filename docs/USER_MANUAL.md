@@ -272,6 +272,7 @@ Viktige standardmodular:
 - `std.mw`: middleware for CORS, rate limiting, tryggleiksheaders, logging, komprimering og cache, med pipeline-klare konfigurasjonar.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
 - `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C, med native argv-backend via `std.prosess` for OS-program.
+- `std.prosess.køyr_med_policy(...)`: policykontrollert prosesskøyring med shell-metateikn blokkert.
 - `std.stdlib_status`: maskinlesbar status for kva som er `stabil`, `eksperimentell` eller `stub`.
 - `std.db`: databaseflate brukt av NorsDB og smoke-testar.
 - `std.tekst`: tekstoperasjonar.
