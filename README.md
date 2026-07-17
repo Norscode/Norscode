@@ -54,6 +54,7 @@ Snarvegar:
 - `./bin/nc local-green -l` er kortform for `--list`
 - `./bin/nc local-green --help` viser kort brukshjelp utan å køyre grønnlista
 - `./bin/nc local-green -h` er kortform for `--help`
+- samla lokal grønnliste: release-preflight, aktiv flate, fase-0, L1-L6-sjølvstendighet og full testflate
 - `./bin/nc stage0-release-assets --platform <plattform>` byggjer stage-0 release-ELF og flyttbar `.sha256` under `release-artifacts/stage0/`
 - `./bin/nc maintenance verify` gir vedlikehaldssamandrag
 - `./bin/nc maintenance maturity` sjekkar 10/10-bevisflata
