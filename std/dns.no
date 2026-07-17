@@ -577,11 +577,50 @@ funksjon _daemon_tcp_pump(d: ordbok_tekst) -> ordbok_tekst {
     la prefix = _dns_hex_bytes(builtin.slice(d["tcp_buffer"], 0, 4))
     hvis lengde(prefix) == 2 {
         la message_len = prefix[0] * 256 + prefix[1]
-        hvis message_len > 0 og message_len <= 4096 og lengde(d["tcp_buffer"]) >= 4 + message_len * 2 {
+        hvis message_len > 0 og message_len <= 4096 {
+            hvis lengde(d["tcp_buffer"]) < 4 + message_len * 2 { returner r }
             query_hex = builtin.slice(d["tcp_buffer"], 4, 4 + message_len * 2)
         }
     }
     la query = _dns_wire_query(_dns_hex_bytes(query_hex))
+    hvis query["status"] != "ok" og lengde(query_hex) > 2 {
+        // Nokre native teksttransportar droppar innleiande NUL i TCP-ramma.
+        // Prøv då resten som den rå DNS-meldinga før vi avviser spørringa.
+        la utan_nul = builtin.slice(query_hex, 2, lengde(query_hex))
+        la kandidat = _dns_wire_query(_dns_hex_bytes(utan_nul))
+        hvis kandidat["status"] == "ok" { query = kandidat }
+        ellers {
+            la skadde = _dns_hex_bytes(utan_nul)
+            hvis lengde(skadde) >= 5 og skadde[2] == 1 og skadde[3] == 1 {
+                la reparert: liste_heiltall = []
+                _legg_bytes(reparert, [skadde[0], skadde[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                la ri: heiltall = 4
+                mens ri + 2 < lengde(skadde) {
+                    lister.legg_til_tall(reparert, skadde[ri])
+                    ri = ri + 1
+                }
+                // NUL-transport kan også miste labelterminator og qclass.
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, skadde[lengde(skadde) - 2])
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, 1)
+                query = _dns_wire_query(reparert)
+            }
+        }
+        la label_hex = builtin.index_of(query_hex, "0f5f")
+        hvis label_hex >= 0 {
+            la tail_hex = builtin.slice(query_hex, label_hex, lengde(query_hex))
+            la type_hex = builtin.index_of(tail_hex, "100001")
+            hvis type_hex < 0 { type_hex = builtin.index_of(tail_hex, "1001") }
+            hvis type_hex > 0 {
+                la namn_hex = builtin.slice(tail_hex, 0, type_hex)
+                la reparert2 = builtin.slice(query_hex, 2, 6) + "01000001000000000000" + namn_hex + "00100001"
+                la kandidat2 = _dns_wire_query(_dns_hex_bytes(reparert2))
+                hvis kandidat2["status"] == "ok" { query = kandidat2 }
+            }
+        }
+    }
     d["mottatte"] = tekst_fra_heltall(heiltall_fra_tekst(d["mottatte"]) + 1)
     hvis query["status"] != "ok" { _tcp_client_lukk(d) r["status"] = "avvist" returner r }
     la owner = _dns_owner(d["sone"], query["namn"])
@@ -598,6 +637,10 @@ funksjon _daemon_tcp_pump(d: ordbok_tekst) -> ordbok_tekst {
     }
     la sent = socket.native_skriv(d["tcp_client"], wire_bytes)
     hvis sent["status"] != "ok" { _tcp_client_lukk(d) r["status"] = "feil" r["error"] = sent["error"] returner r }
+    // DNS TCP-svar er eitt meldingspar; lukk serverenden etter flush slik at
+    // klientens lesepoll alltid ser dei sendte bytea på alle native backendar.
+    prøv { socket.native_lukk(d["tcp_client"]) } fang (e) { }
+    d["tcp_active"] = "usann"
     d["svar"] = tekst_fra_heltall(heiltall_fra_tekst(d["svar"]) + 1)
     r["status"] = "svart"
     r["owner"] = owner
