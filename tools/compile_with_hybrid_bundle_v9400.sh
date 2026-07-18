@@ -22,6 +22,12 @@ if [ -z "$SRC" ] || [ -z "$OUT" ]; then
   exit 1
 fi
 
+# Ein eksplisitt ugyldig Node-sti er modenheitsprovet for Norscode-eigarløypa.
+# Gå då gjennom .no-entryen i staden for den historiske Node-reserven.
+if [ -n "$NODE_BIN" ] && [ ! -x "$NODE_BIN" ]; then
+  FROM_NO=0
+fi
+
 case "$SRC" in
   "$ROOT/tools/compile_with_hybrid_bundle_v9400.no"|tools/compile_with_hybrid_bundle_v9400.no|"$ROOT/tools/bundle_with_hybrid_compiler_v9500.no"|tools/bundle_with_hybrid_compiler_v9500.no)
     FROM_NO=1

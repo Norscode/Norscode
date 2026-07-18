@@ -1,5 +1,4 @@
 # Norscode Dokumentasjon
-docs/_archive/ARCHIVE_INDEX.md
 
 Dette er hovudingangen til dokumentasjonen. Dokumentasjonen er delt i fire nivå:
 
@@ -15,22 +14,19 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [Full brukarmanual](USER_MANUAL.md)
 - [Installasjon](../INSTALL.md)
 - [Opplæringsguide](LEARNING_GUIDE.md)
-- [Treningsguide](TRAINING_GUIDE.md)
 - [Dokumentasjonsindeks for vedlikehald](DOCUMENTATION_INDEX.md)
 - [Løypekart](LANE_MAP.md)
 - [Status](STATUS.md)
-- [10/10 modenhetsplan](MODENHET_10_10.md)
-- [Brand og ikoner](BRAND.md)
-- [Selfhost handlingsplan](SELFHOST_HANDLINGSPLAN.md)
+- [Merkevare og ikon](BRAND.md)
+- [Selfhost-handlingsplan](SELFHOST_HANDLINGSPLAN.md)
 
 ## Brukarmanual
 
 - [Installere og kontrollere Norscode](USER_MANUAL.md#installasjon-og-kontroll)
 - [CLI-kommandoar](USER_MANUAL.md#cli-kommandoar)
-- [Køyre, sjekke og teste kode](USER_MANUAL.md#koyre-sjekke-og-teste-kode)
-- [Prosjekt og apper](USER_MANUAL.md#prosjekt-og-apper)
-- [Pakker og standardbibliotek](USER_MANUAL.md#pakker-og-standardbibliotek)
-- [AI](USER_MANUAL.md#ai)
+- [Køyre, sjekke og teste kode](USER_MANUAL.md#køyre-sjekke-og-teste-kode)
+- [Prosjekt og appar](USER_MANUAL.md#prosjekt-og-appar)
+- [Pakkar og standardbibliotek](USER_MANUAL.md#pakkar-og-standardbibliotek)
 - [Server](USER_MANUAL.md#server)
 - [NorsDB](USER_MANUAL.md#norsdb)
 - [Feilsøking](USER_MANUAL.md#feilsøking)
@@ -61,11 +57,18 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 - [CI-gates](05-development/SELFHOST_CI_GATES.md)
 - [Release-sjekkliste](05-development/SELFHOST_RELEASE_CHECKLIST.md)
-- [CLI-kontrakt](05-development/CLI_CONTRACT.md)
-- [Kompilatorpipeline](05-development/COMPILER_PIPELINE.md)
-- [10/10 modenhetsplan](MODENHET_10_10.md)
-- [Lane map](LANE_MAP.md)
-- [Brand og ikoner](BRAND.md)
+- Lokal release-preflight: `./bin/nc release-preflight`
+- Streng release-preflight: `./bin/nc release-preflight --strict`
+- Lokal grønnliste: `./bin/nc local-green`
+- Streng lokal grønnliste: `./bin/nc local-green --strict`
+- [Linux app-release](LINUX_APP_RELEASE.md)
+- [Linux app-installasjon](LINUX_APP_INSTALL.md)
+- [macOS app-release](MAC_APP_RELEASE.md)
+- [macOS app-signering](MAC_APP_SIGNING.md)
+- [Windows app-release](WINDOWS_APP_RELEASE.md)
+- [Windows app-installasjon](WINDOWS_APP_INSTALL.md)
+- [Løypekart](LANE_MAP.md)
+- [Merkevare og ikon](BRAND.md)
 - [Dokumentasjonsindeks](DOCUMENTATION_INDEX.md)
 - [Migrasjon og deprecations](05-development/SELFHOST_MIGRATION_AND_DEPRECATIONS.md)
 - [Fase 2 verktøyindeks](SELFHOST_PHASE2_TOOLING_INDEX.md)
@@ -79,23 +82,12 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 
 - [Django-paritet sjekkliste](99-django-paritet-sjekkliste.md)
 - [Django-paritet i Norscode](99-django-paritet-norscode.no)
-- [HTTP-server](HTTP_SERVER.md)
-- [HTTP-server sjekkliste](HTTP_SERVER_CHECKLIST.md)
-- [API Explorer](api-explorer/index.html)
-
-## Pakker Og Editor
-
-- [Pakkesystem](03-packages/PACKAGE_MANAGER.md)
-- [Registry-protokoll](03-packages/REGISTRY_PROTOCOL.md)
-- [LSP og IDE](04-how-to-guides/IDE_AND_LSP.md)
 
 ## Arkiv
 
 Historiske notat ligg i arkivet under `docs/_archive/ARCHIVE_INDEX.md`. Dei er nyttige for bakgrunn, men dei er ikkje normal brukarveg.
 
 - [Arkivindeks](./_archive/ARCHIVE_INDEX.md)
-- Arkivfil: `docs/_archive/ARCHIVE_INDEX.md`
-docs/_archive/ARCHIVE_INDEX.md
 
 ## Normal kjede
 

@@ -10,18 +10,20 @@ Målet er å gjere release, installasjon og tilbakerulling føreseieleg utan å 
 - [ ] samla lokal grønnliste går grønt: `./bin/nc local-green`
 - [ ] samla streng grønnliste går grønt: `./bin/nc local-green --strict`
 - [ ] relevant release- og installasjonstest går grønt
-- [ ] relevante punkt i [10/10 modenhetsplan](../MODENHET_10_10.md) har kodebevis, bruksbevis og gatebevis
-- [ ] release-pakke kan byggast med `NORSCODE_RELEASE_VERSION=<versjon> NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/package_release.no`
+- [ ] release-pakke kan byggast med `./bin/nc package-release <versjon>`
+- [ ] stage-0 release-artefaktar kan byggast med `./bin/nc stage0-release-assets --platform <plattform>`
 - [ ] release- og installasjonsflata krev ikkje C-verktøykjede i normal drift
-- [ ] `./bin/nc run tools/selfhost_drift_guard.no` går grønt før release
-- [ ] Linux ELF self-compile-paritet er grøn i GitHub CI eller eksplisitt vurdert for releasen
+- [ ] `./bin/nc selfhost-drift-guard` går grønt før release
+- [ ] Linux Gen1 stage-0-ELF-kandidat blir bygd grønt i GitHub CI
+- [ ] Full Linux ELF self-compile-paritet med `NC_OM6B_RUN_STAGE0=1` er anten grøn eller
+      eksplisitt vurdert som ikkje-releaseblokkerande for denne releasen
 - [ ] inga release-instruks peikar brukaren mot C/Python, `tools/maint/*`, `NORSCODE_BOOTSTRAP_C=1` eller generert C-løype
 - [ ] CI-wrapperar under `tools/*.sh` køyrer reelle kontrollar og skjuler ikkje manglande stage0-evner som grøne hopp-over-steg
 
 ## Bygg release
 
 ```bash
-NORSCODE_RELEASE_VERSION=<versjon> NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/package_release.no
+./bin/nc package-release <versjon>
 ```
 
 Verifiser:
@@ -39,7 +41,7 @@ Verifiser:
 ## Installer release
 
 ```bash
-NORSCODE_INSTALL_ARCHIVE=release-artifacts/norscode-language-<versjon>.tar.gz NORSCODE_INSTALL_PREFIX=/srv/norscode ./bin/nc run tools/install-release.no
+./bin/nc install-release release-artifacts/norscode-language-<versjon>.tar.gz --prefix /srv/norscode
 ```
 
 Verifiser:

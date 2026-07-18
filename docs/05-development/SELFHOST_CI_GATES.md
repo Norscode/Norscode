@@ -46,8 +46,28 @@ CI bør òg ha små, raske testar for:
 
 - installasjon og release
 - `--version`
-- ELF self-compile-paritet på Linux x86_64 som hard gate med `NC_OM6B_RUN_STAGE0=1`
-- samla driftsvakt via `./bin/nc run tools/selfhost_drift_guard.no`
+- ELF stage-0-kandidat på Linux x86_64, som byggjer Gen1-ELF og lastar han opp som artifact
+- samla driftsvakt via `./bin/nc selfhost-drift-guard`
+
+## Bru-policy
+
+Norscode eig verktøylogikken i `.no`-filene. Shell-filene under `tools/` skal vere avgrensa
+kompatibilitetslag for CI, plattformdeteksjon og kommandoar der stage0-seeden manglar
+direkte binding, særleg prosesskøyring. Dei skal ikkje gjere portar grøne ved å hoppe over
+arbeid; når dei fell tilbake frå `.no`, skal dei køyre den same konkrete verifikasjonen i
+shell og feile på reelle avvik.
+
+Alle aktive `.sh`- og `.ps1`-bruer skal anten ha ein `Norscode-first`-markør/bridge som
+peikar på `.no`-eigaren, eller vere eit eksplisitt dokumentert unntak. `./bin/nc
+surface-ownership` handhevar dette saman med kravet om same-namn `.no`-eigar for
+aktive `.sh`, `.ps1`, `.js` og `.swift`-filer.
+
+`./bin/nc selfcompile-stage0-elf` har to nivå:
+
+- Standard CI-nivå byggjer og verifiserer Gen1 stage-0-ELF-kandidaten.
+- Djupt ELF-til-ELF-løp kan køyrast manuelt med `NC_OM6B_RUN_STAGE0=1`, men er ikkje ein
+  obligatorisk grøn gate før den native ELF-runtimeflata kan køyre kall, miljø og filskriving
+  for `selfhost.elf_compile_driver.start`.
 
 For full CI-sjekk:
 

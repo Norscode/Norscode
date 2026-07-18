@@ -11,10 +11,11 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
-export NORSCODE_ENABLE_EXEC_PROSESS="\${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
+export NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}"
 export NORSCODE_ROOT="$ROOT"
 export NORSCODE_IR_INPUT="$1"
 export NORSCODE_IR_OUTPUT="$2"
 
 mkdir -p "$(dirname -- "$2")"
-NORSCODE_ENABLE_EXEC_PROSESS="\${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/ir_canonical_dump.no"
+
+exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/ir_canonical_dump.no"

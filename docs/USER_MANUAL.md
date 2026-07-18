@@ -392,7 +392,7 @@ Norscode har ei framtidsklar standardflate for eigen hosting:
 
 Dette er grunnmur for vidare daemon/runtime-arbeid. Modulane er ikkje meint som full SMTP-, IMAP- eller DNS-daemon enno, men nye serverdelar kan byggjast på same Norscode-kontrakt og testast utan å starte med shellskript.
 
-Serverlaget har same standardflyt som moderne Python-rammeverk:
+Serverlaget har same standardflyt som moderne web-rammeverk:
 
 - `GET`, `HEAD` og `OPTIONS` blir handtert gjennom same rute-kontrakt.
 - JSON- og tekstsvar får trygg `content-type` når appen ikkje set han sjølv.
