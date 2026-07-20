@@ -61,6 +61,9 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - Streng release-preflight: `./bin/nc release-preflight --strict`
 - Lokal grønnliste: `./bin/nc local-green`
 - Streng lokal grønnliste: `./bin/nc local-green --strict`
+- Lokal Norscode 1.0-sluttport: `./bin/nc completion-gate --local`
+- Autoritativ release-sluttport: `./bin/nc completion-gate --release`
+- Aktiv funksjonsfrys: [NORSCODE_1_0_FREEZE.md](NORSCODE_1_0_FREEZE.md)
 - [Linux app-release](LINUX_APP_RELEASE.md)
 - [Linux app-installasjon](LINUX_APP_INSTALL.md)
 - [macOS app-release](MAC_APP_RELEASE.md)

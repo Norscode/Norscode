@@ -2,6 +2,19 @@
 
 Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
+## Norscode 1.0-sluttport
+
+`./bin/nc completion-gate --release` er no den autoritative ferdigporten.
+Statusprosa kan ikkje gjere Norscode produksjonsklar; berre den versjonerte
+`norscode-completion-gate-v1`-rapporten frå ein rein commit kan gi
+`overall=green`.
+
+Baselinen ved innføring av porten er med vilje raud: aktiv macOS dist/stage0
+manglar innebygd NCB-image i den faktiske plattformkontrollen, runtimeflata er
+19/22 stabil, standardbiblioteket er 57/61 stabilt, og signert ekte
+Windows-attestasjon står att. Eldre grøne plattformpåstandar lenger nede er
+historiske bevis og skal ikkje lesast som gjeldande sluttstatus.
+
 ## Sjølvstendigheitsstatus 2026-07-20
 
 - Legacy compiler-seeding via ekstern shell er fjerna frå native backend.
