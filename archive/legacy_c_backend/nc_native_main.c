@@ -16,6 +16,7 @@
 #include "nc_windows_backend.h"
 #else
 #include <pthread.h>
+#include <dirent.h>
 #include <poll.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -30,6 +31,7 @@
 #include <libproc.h>
 #include <sys/event.h>
 #include <CommonCrypto/CommonKeyDerivation.h>
+#include <CommonCrypto/CommonDigest.h>
 #endif
 #if defined(__linux__)
 #include <sys/prctl.h>
@@ -77,6 +79,8 @@ static NcVal *nc_builtin_thread_sync(NcVal *request);
 static NcVal *nc_builtin_thread_pool(NcVal *request);
 static NcVal *nc_builtin_pbkdf2_sha256(NcVal *password_v, NcVal *salt_v,
                                        NcVal *iterations_v, NcVal *length_v);
+static NcVal *nc_builtin_sha256(NcVal *data_v);
+static NcVal *nc_builtin_sha256_bytes(NcVal *data_v);
 static NcVal *nc_builtin_argon2id(NcVal *password_v, NcVal *salt_v,
                                   NcVal *memory_kib_v, NcVal *iterations_v,
                                   NcVal *parallelism_v, NcVal *length_v);
@@ -907,6 +911,38 @@ static int nc_apply_process_sandbox(const char *profile,long long timeout_ms,lon
 static unsigned long long nc_process_resident_bytes(pid_t pid);
 #endif
 
+#if defined(_WIN32)
+static char *nc_process_environment_block(NcVal *environment, int inherit_env, int *valid) {
+    *valid = 1;
+    if (!environment || environment->type != NC_MAP || environment->map->len == 0) {
+        if (inherit_env) return NULL;
+        return calloc(1, 1); /* explicit empty environment */
+    }
+    size_t total = 1;
+    for (int i = 0; i < environment->map->len; i++) {
+        const char *key = environment->map->keys[i];
+        NcVal *value = environment->map->vals[i];
+        if (!key || !*key || strchr(key, '=') || strchr(key, '\n') || strchr(key, '\r') ||
+            !value || value->type != NC_STR || strchr(value->s ? value->s : "", '\n') || strchr(value->s ? value->s : "", '\r')) {
+            *valid = 0; return NULL;
+        }
+        total += strlen(key) + 1 + strlen(value->s ? value->s : "") + 1;
+    }
+    char *block = calloc(total, 1);
+    if (!block) { *valid = 0; return NULL; }
+    size_t off = 0;
+    for (int i = 0; i < environment->map->len; i++) {
+        const char *key = environment->map->keys[i];
+        const char *value = environment->map->vals[i]->s ? environment->map->vals[i]->s : "";
+        size_t kl = strlen(key), vl = strlen(value);
+        memcpy(block + off, key, kl); off += kl; block[off++] = '=';
+        memcpy(block + off, value, vl); off += vl; block[off++] = '\n';
+    }
+    if (off) block[off - 1] = '\0';
+    return block;
+}
+#endif
+
 static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     if (!request || request->type != NC_MAP)
         return nc_process_result("feil", -1, -1, "", "", "invalid request");
@@ -920,6 +956,7 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", 536870912);
     long long max_files = nc_atomic_int_field(request, "max_open_files", 64);
     int inherit_env = nc_atomic_int_field(request, "inherit_env", 1) != 0;
+    NcVal *environment = nc_index_get(request, nc_str("environment"));
     NcVal *args = nc_index_get(request, nc_str("args"));
     if (strcmp(abi, "norscode-process-spawn-v1") || !*executable ||
         timeout_ms <= 0 || max_output <= 0 || !args || args->type != NC_LIST)
@@ -943,16 +980,23 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     }
 
 #if defined(_WIN32)
-    (void)max_files; (void)inherit_env;
+    int environment_valid = 1;
+    char *environment_block = nc_process_environment_block(environment, inherit_env, &environment_valid);
+    if (!environment_valid) {
+        for (int i = 0; i < argc; i++) free(argv[i]); free(argv); free(environment_block);
+        return nc_process_result("feil", -1, -1, "", "", "invalid environment");
+    }
+    (void)max_files;
     NcwProcess process; char backend_error[NCW_ERROR_CAP] = "";
     if (!ncw_process_spawn(&process, executable, (const char *const *)argv, (size_t)argc,
                            cwd, stdin_text, strlen(stdin_text), (uint64_t)timeout_ms,
                            (uint64_t)(max_memory > 0 ? max_memory : 0),
-                           sandbox_profile,
+                           sandbox_profile, environment_block,
                            backend_error, sizeof(backend_error))) {
-        for (int i = 0; i < argc; i++) free(argv[i]); free(argv);
+        for (int i = 0; i < argc; i++) free(argv[i]); free(argv); free(environment_block);
         return nc_process_result("feil", -1, -1, "", "", backend_error);
     }
+    free(environment_block);
     for (int i = 0; i < argc; i++) free(argv[i]); free(argv);
     char *out = calloc((size_t)max_output + 1, 1), *err = calloc((size_t)max_output + 1, 1);
     if (!out || !err) { free(out); free(err); ncw_process_terminate(&process, 126, backend_error, sizeof(backend_error)); ncw_process_close(&process, backend_error, sizeof(backend_error)); return nc_process_result("feil", process.pid, 126, "", "", "out of memory"); }
@@ -1001,6 +1045,19 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
             _exit(126);
         }
         if (!nc_apply_process_sandbox(sandbox_profile,timeout_ms,max_memory,max_files,inherit_env)) { dprintf(STDERR_FILENO,"sandbox setup failed"); _exit(126); }
+        if (environment && environment->type == NC_MAP && environment->map->len > 0) {
+            // ABI-environmentet blir sett etter sandbox-opprydding og før
+            // execv. Det gjer inherit_env=0 + PATH=/nonexistent reelt.
+            if (!inherit_env) { unsetenv("PATH"); unsetenv("LANG"); }
+            for (int ei = 0; ei < environment->map->len; ei++) {
+                const char *ek = environment->map->keys[ei];
+                NcVal *ev = environment->map->vals[ei];
+                if (!ek || !*ek || strchr(ek, '=') || strchr(ek, '\n') || strchr(ek, '\r') || !ev || ev->type != NC_STR ||
+                    setenv(ek, ev->s ? ev->s : "", 1) != 0) {
+                    dprintf(STDERR_FILENO, "invalid environment"); _exit(126);
+                }
+            }
+        }
         execv(executable, argv);
         dprintf(STDERR_FILENO, "execv failed: %s", strerror(errno));
         _exit(127);
@@ -1349,7 +1406,7 @@ static const char *nc_native_capability_for(const char *name) {
     if (!strcmp(name, "miljo_sett")) return "env.write";
     if (!strcmp(name, "fil_les") || !strcmp(name, "fil_les_binary") || !strcmp(name, "fil_les_binær") ||
         !strcmp(name, "fil_finnes") || !strcmp(name, "filesystem_read_operation")) return "disk.read";
-    if (!strcmp(name, "fil_skriv") || !strcmp(name, "fil_slett") || !strcmp(name, "fil_append") ||
+    if (!strcmp(name, "fil_skriv") || !strcmp(name, "fil_slett") || !strcmp(name, "fil_sett_kjorbar") || !strcmp(name, "fil_append") || !strcmp(name, "fil_append_binary") || !strcmp(name, "fil_append_binær") ||
         !strcmp(name, "fil_skriv_binary") || !strcmp(name, "fil_skriv_binær") ||
         !strcmp(name, "mappe_opprett") || !strcmp(name, "mkdir") || !strcmp(name, "mkdir_p") ||
         !strcmp(name, "filesystem_write_operation")) return "disk.write";
@@ -1879,7 +1936,11 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
     if (!strcmp(builtin, "bytes_new")) return nc_builtin_bytes_new(na > 0 ? a[0] : nc_int(0), na > 1 ? a[1] : nc_int(0));
     if (!strcmp(builtin, "bytes_from_list")) return nc_builtin_bytes_from_list(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "bytes_to_list")) return nc_builtin_bytes_to_list(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "bytes_to_text")) return nc_builtin_bytes_to_text(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "bytes_slice_to_text")) return nc_builtin_bytes_slice_to_text(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_int(0), na > 2 ? a[2] : nc_int(0));
     if (!strcmp(builtin, "fil_les_binary") || !strcmp(builtin, "fil_les_binær")) return nc_builtin_fil_les_binary(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "fil_append_binary") || !strcmp(builtin, "fil_append_binær")) return nc_builtin_fil_append_binary(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_nil());
+    if (!strcmp(builtin, "fil_sett_kjorbar")) return nc_builtin_fil_sett_kjorbar(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "process_spawn_argv")) return nc_builtin_process_spawn_argv(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "process_operation")) return nc_builtin_process_operation(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "filesystem_read_operation")) return nc_builtin_filesystem_read_operation(na > 0 ? a[0] : nc_nil());
@@ -1893,6 +1954,8 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
     if (!strcmp(builtin, "thread_sync")) return nc_builtin_thread_sync(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "thread_pool")) return nc_builtin_thread_pool(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "thread_current_id")) return nc_builtin_thread_current_id();
+    if (!strcmp(builtin, "sha256")) return nc_builtin_sha256(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "sha256_bytes")) return nc_builtin_sha256_bytes(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "pbkdf2_sha256")) return nc_builtin_pbkdf2_sha256(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_nil(), na > 2 ? a[2] : nc_int(0), na > 3 ? a[3] : nc_int(0));
     if (!strcmp(builtin, "argon2id")) return nc_builtin_argon2id(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_nil(), na > 2 ? a[2] : nc_int(0), na > 3 ? a[3] : nc_int(0), na > 4 ? a[4] : nc_int(0), na > 5 ? a[5] : nc_int(0));
     if (!strcmp(builtin, "acme_sign")) return nc_builtin_acme_sign(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_nil(), na > 2 ? a[2] : nc_nil());
@@ -2499,6 +2562,45 @@ static int nc_unlink_beneath(const char *root, const char *relative) {
 static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
     if (!request || request->type != NC_MAP || strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-native-filesystem-v1")) return nc_filesystem_result("feil", NULL, "", -1, "invalid request");
     const char *operation = nc_atomic_text_field(request, "operation", "");
+    /* Stateless, native directory enumeration used by the pure release tools.
+       The returned data is newline-delimited relative entry names so the ABI
+       remains text-only and can be consumed by every stage0 VM. */
+    if (!strcmp(operation, "list")) {
+        const char *root = nc_atomic_text_field(request, "root", "");
+        const char *relative = nc_atomic_text_field(request, "relative", "");
+        if (!*root || (relative[0] == '/' || strstr(relative, "..")))
+            return nc_filesystem_result("feil", NULL, "", -1, "invalid directory path");
+#if defined(_WIN32)
+        char pattern[MAX_PATH * 4];
+        snprintf(pattern, sizeof(pattern), "%s/%s/*", root, relative);
+        WIN32_FIND_DATAA entry; HANDLE h = FindFirstFileA(pattern, &entry);
+        if (h == INVALID_HANDLE_VALUE) return nc_filesystem_result("feil", NULL, "", -1, "directory open failed");
+        size_t cap = 4096, len = 0, count = 0; char *data = calloc(cap, 1);
+        if (!data) { FindClose(h); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); }
+        do {
+            if (!strcmp(entry.cFileName, ".") || !strcmp(entry.cFileName, "..")) continue;
+            size_t n = strlen(entry.cFileName);
+            if (len + n + 2 > cap) { while (len + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); FindClose(h); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; }
+            memcpy(data + len, entry.cFileName, n); len += n; data[len++] = '\n'; count++;
+        } while (FindNextFileA(h, &entry));
+        FindClose(h); data[len] = '\0'; NcVal *r = nc_filesystem_result("ok", NULL, data, (long long)count, ""); free(data); return r;
+#else
+        int dirfd = root[0] == '/' ? open(root, O_RDONLY | O_DIRECTORY) : (!strcmp(root, ".") ? open(".", O_RDONLY | O_DIRECTORY) : nc_open_root_dir(root));
+        if (dirfd < 0) return nc_filesystem_result("feil", NULL, "", -1, strerror(errno));
+        if (*relative) {
+            char *copy = strdup(relative), *save = NULL, *part = strtok_r(copy, "/", &save);
+            while (dirfd >= 0 && part) { if (!nc_safe_component(part)) { close(dirfd); dirfd = -1; errno = EINVAL; break; } int next = openat(dirfd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW); close(dirfd); dirfd = next; part = strtok_r(NULL, "/", &save); }
+            free(copy);
+        }
+        if (dirfd < 0) return nc_filesystem_result("feil", NULL, "", -1, strerror(errno));
+        DIR *dir = fdopendir(dirfd); if (!dir) { close(dirfd); return nc_filesystem_result("feil", NULL, "", -1, strerror(errno)); }
+        size_t cap = 4096, len = 0, count = 0; char *data = calloc(cap, 1);
+        if (!data) { closedir(dir); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); }
+        struct dirent *entry;
+        while ((entry = readdir(dir))) { if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue; size_t n = strlen(entry->d_name); if (len + n + 2 > cap) { while (len + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); closedir(dir); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; } memcpy(data + len, entry->d_name, n); len += n; data[len++] = '\n'; count++; }
+        closedir(dir); data[len] = '\0'; NcVal *r = nc_filesystem_result("ok", NULL, data, (long long)count, ""); free(data); return r;
+#endif
+    }
     if (!strcmp(operation, "mkdir_p")) {
         const char *root = nc_atomic_text_field(request, "root", ".");
         const char *relative = nc_atomic_text_field(request, "relative", "");
@@ -2614,7 +2716,7 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
 static NcVal *nc_builtin_filesystem_read_operation(NcVal *request) {
     const char *operation=nc_atomic_text_field(request,"operation","");
     if (!strcmp(operation,"open") && strcmp(nc_atomic_text_field(request,"mode",""),"read")) return nc_filesystem_result("feil",NULL,"",-1,"write mode requires disk.write");
-    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
+    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"list") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
     return nc_builtin_filesystem_operation(request);
 }
 
@@ -2907,20 +3009,33 @@ static int nc_install_seccomp(const char *profile) {
 #endif
 
 static int nc_apply_process_sandbox(const char *profile,long long timeout_ms,long long max_memory,long long max_files,int inherit_env){
+    if(!inherit_env){extern char **environ;static char *empty_environment[]={NULL};environ=empty_environment;setenv("PATH","/usr/bin:/bin",1);setenv("LANG","C",1);}
     if(!profile||!*profile||!strcmp(profile,"none"))return 1;
     struct rlimit lim;lim.rlim_cur=lim.rlim_max=0;if(setrlimit(RLIMIT_CORE,&lim)!=0){dprintf(2,"rlimit core: %s",strerror(errno));return 0;}
     rlim_t cpu=(rlim_t)(timeout_ms/1000+2);lim.rlim_cur=lim.rlim_max=cpu;if(setrlimit(RLIMIT_CPU,&lim)!=0){dprintf(2,"rlimit cpu: %s",strerror(errno));return 0;}
     if(max_memory>0){lim.rlim_cur=lim.rlim_max=(rlim_t)max_memory;
 #if defined(__APPLE__)
-        /* Darwin exposes RLIMIT_RSS but rejects practical per-child limits; Seatbelt and the other hard limits remain active. */
-        (void)lim;
+        /* Darwin has no useful RLIMIT_AS contract for children. Prefer the
+           kernel RSS limit and fail closed to DATA when the platform rejects
+           RSS; the parent-side proc_pid_rusage watchdog remains a second
+           barrier for mmap/native allocations. */
+        if(setrlimit(RLIMIT_RSS,&lim)!=0) {
+#ifdef RLIMIT_DATA
+            /* Very small limits (used by the watchdog contract tests) are
+               rejected by Darwin's rlimit implementation.  Keep the
+               parent-side proc_pid_rusage watchdog authoritative in that
+               case instead of failing the child before it starts. */
+            (void)setrlimit(RLIMIT_DATA,&lim);
+#else
+            (void)lim;
+#endif
+        }
 #else
         if(setrlimit(RLIMIT_AS,&lim)!=0){dprintf(2,"rlimit memory: %s",strerror(errno));return 0;}
 #endif
     }
     if(max_files>0){lim.rlim_cur=lim.rlim_max=(rlim_t)max_files;if(setrlimit(RLIMIT_NOFILE,&lim)!=0){dprintf(2,"rlimit files: %s",strerror(errno));return 0;}}
     umask(077);
-    if(!inherit_env){extern char **environ;static char *empty_environment[]={NULL};environ=empty_environment;setenv("PATH","/usr/bin:/bin",1);setenv("LANG","C",1);}
 #if defined(__linux__)
     if(prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)!=0)return 0;
     if(strcmp(profile,"restricted")&&strcmp(profile,"no-network")&&strcmp(profile,"no-write")&&strcmp(profile,"pure"))return 0;
@@ -3139,7 +3254,9 @@ static NcVal *nc_process_windows_spawn(NcVal *request){
     pthread_mutex_lock(&g_process_registry_lock);int id=0;for(int i=1;i<NC_PROCESS_MAX;i++)if(!g_process_slots[i].active){id=i;g_process_slots[i].generation++;if(!g_process_slots[i].generation)g_process_slots[i].generation=1;g_process_slots[i].active=2;break;}pthread_mutex_unlock(&g_process_registry_lock);
     if(!id){for(int i=0;i<argc;i++)free(argv[i]);free(argv);return nc_process_windows_result(NULL,"process capacity");}
     NcProcessSlot *slot=&g_process_slots[id];unsigned long long generation=slot->generation;memset(slot,0,sizeof(*slot));slot->generation=generation;slot->active=2;slot->id=id;slot->max_output=(size_t)max_output;slot->stdout_data=strdup("");slot->stderr_data=strdup("");snprintf(slot->sandbox_profile,sizeof(slot->sandbox_profile),"%s",sandbox);pthread_mutex_init(&slot->mutex,NULL);
-    char backend_error[NCW_ERROR_CAP]="";int ok=ncw_process_spawn(&slot->process,executable,(const char *const *)argv,(size_t)argc,cwd,stdin_text,strlen(stdin_text),(uint64_t)timeout_ms,(uint64_t)(max_memory>0?max_memory:0),sandbox,backend_error,sizeof(backend_error));for(int i=0;i<argc;i++)free(argv[i]);free(argv);
+    int environment_valid=1;int inherit_env=nc_atomic_int_field(request,"inherit_env",1)!=0;char *environment_block=nc_process_environment_block(nc_index_get(request,nc_str("environment")),inherit_env,&environment_valid);
+    if(!environment_valid){for(int i=0;i<argc;i++)free(argv[i]);free(argv);free(environment_block);pthread_mutex_destroy(&slot->mutex);pthread_mutex_lock(&g_process_registry_lock);slot->active=0;pthread_mutex_unlock(&g_process_registry_lock);return nc_process_windows_result(NULL,"invalid environment");}
+    char backend_error[NCW_ERROR_CAP]="";int ok=ncw_process_spawn(&slot->process,executable,(const char *const *)argv,(size_t)argc,cwd,stdin_text,strlen(stdin_text),(uint64_t)timeout_ms,(uint64_t)(max_memory>0?max_memory:0),sandbox,environment_block,backend_error,sizeof(backend_error));for(int i=0;i<argc;i++)free(argv[i]);free(argv);free(environment_block);
     if(!ok){free(slot->stdout_data);free(slot->stderr_data);pthread_mutex_destroy(&slot->mutex);pthread_mutex_lock(&g_process_registry_lock);slot->active=0;pthread_mutex_unlock(&g_process_registry_lock);return nc_process_windows_result(NULL,backend_error);}
     pthread_mutex_lock(&g_process_registry_lock);slot->active=1;pthread_mutex_unlock(&g_process_registry_lock);return nc_process_windows_result(slot,"");
 }
@@ -3678,7 +3795,6 @@ static NcVal *nc_builtin_thread_sync(NcVal *request) {
 static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal **args, int nargs, NcVal *closure, int depth);
 static int nc_val_til_exit(NcVal *v);
 static NcVal *nc_native_kompiler(const char *src_path, const char *modul);
-static char *nc_shell_quote(const char *s);
 static NcVal *nc_seed_kompiler(const char *src_path, const char *modul);
 static NcVal *nc_builtin_koyr_funksjon_host(NcVal **args, int na);
 static NcVal *nc_builtin_vm_sett_kontekst_host(NcVal **args, int na);
@@ -4053,6 +4169,77 @@ static NcVal *nc_stub_web_escape_html(NcVal *v) {
     }
     *wp=0; free(s);
     return nc_str_own(r);
+}
+
+static NcVal *nc_sha256_hex(const unsigned char *data, size_t length) {
+    unsigned char digest[32];
+    int ok = 0;
+#if defined(__APPLE__)
+    if (length <= UINT32_MAX) {
+        ok = CC_SHA256(data, (CC_LONG)length, digest) != NULL;
+    }
+#elif defined(NC_ENABLE_OPENSSL)
+    unsigned int digest_length = 0;
+    ok = EVP_Digest(data, length, digest, &digest_length, EVP_sha256(), NULL) == 1 && digest_length == 32;
+#else
+    (void)data; (void)length; (void)digest;
+#endif
+    if (!ok) {
+        nc_throw("SHA-256 native backend er ikkje tilgjengeleg");
+        return nc_nil();
+    }
+    static const char digits[] = "0123456789abcdef";
+    char *hex = malloc(65);
+    if (!hex) {
+        nc_throw("SHA-256 kunne ikkje allokere resultat");
+        return nc_nil();
+    }
+    for (int i = 0; i < 32; i++) {
+        hex[i * 2] = digits[(digest[i] >> 4) & 0xf];
+        hex[i * 2 + 1] = digits[digest[i] & 0xf];
+    }
+    hex[64] = '\0';
+    return nc_str_own(hex);
+}
+
+static NcVal *nc_builtin_sha256(NcVal *data_v) {
+    char *data = nc_to_str_raw(data_v);
+    if (!data) {
+        nc_throw("sha256 krev tekst");
+        return nc_nil();
+    }
+    NcVal *result = nc_sha256_hex((const unsigned char *)data, strlen(data));
+    free(data);
+    return result;
+}
+
+static NcVal *nc_builtin_sha256_bytes(NcVal *data_v) {
+    if (!data_v || (data_v->type != NC_LIST && data_v->type != NC_BYTES)) {
+        nc_throw("sha256_bytes krev liste eller bytes");
+        return nc_nil();
+    }
+    size_t length = data_v->type == NC_BYTES ? data_v->bytes->len : (size_t)data_v->list->len;
+    unsigned char *data = malloc(length ? length : 1);
+    if (!data) {
+        nc_throw("sha256_bytes kunne ikkje allokere input");
+        return nc_nil();
+    }
+    if (data_v->type == NC_BYTES) {
+        memcpy(data, data_v->bytes->data, length);
+    } else {
+        for (size_t i = 0; i < length; i++) {
+            NcVal *item = data_v->list->items[i];
+            if (!item || item->type != NC_INT || item->i < 0 || item->i > 255) {
+                free(data);
+                nc_throw("sha256_bytes krev byteverdiar i området 0..255");
+                return nc_nil();
+            }
+            data[i] = (unsigned char)item->i;
+        }
+    }
+    NcVal *result = nc_sha256_hex(data, length);
+    free(data);
+    return result;
 }
 
 static NcVal *nc_builtin_pbkdf2_sha256(NcVal *password_v, NcVal *salt_v,
@@ -4493,7 +4680,10 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         if (!strcmp(builtin_name, "bytes_new")) return nc_builtin_bytes_new(nargs > 0 ? args[0] : nc_int(0), nargs > 1 ? args[1] : nc_int(0));
         if (!strcmp(builtin_name, "bytes_from_list")) return nc_builtin_bytes_from_list(nargs > 0 ? args[0] : nc_nil());
         if (!strcmp(builtin_name, "bytes_to_list")) return nc_builtin_bytes_to_list(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "bytes_to_text")) return nc_builtin_bytes_to_text(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "bytes_slice_to_text")) return nc_builtin_bytes_slice_to_text(nargs > 0 ? args[0] : nc_nil(), nargs > 1 ? args[1] : nc_int(0), nargs > 2 ? args[2] : nc_int(0));
         if (!strcmp(builtin_name, "fil_les_binary") || !strcmp(builtin_name, "fil_les_binær")) return nc_builtin_fil_les_binary(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "fil_sett_kjorbar")) return nc_builtin_fil_sett_kjorbar(nargs > 0 ? args[0] : nc_nil());
         if (!strcmp(builtin_name, "process_spawn_argv")) {
             return nc_builtin_process_spawn_argv(nargs > 0 ? args[0] : nc_nil());
         }
@@ -4952,6 +5142,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 if (control->caught) { free(cargs); free(callee); continue; }
             }
             else if (!strcmp(cn,"fil_skriv_bin\xc3\xa6r")||!strcmp(cn,"fil_skriv_binary")) { if(narg>=2) nc_builtin_fil_skriv_binary(cargs[0],cargs[1]); }
+            else if (!strcmp(cn,"fil_sett_kjorbar")) fn_r=nc_builtin_fil_sett_kjorbar(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"mkdir")||!strcmp(cn,"mkdir_p")||!strcmp(cn,"mappe_opprett")||!strcmp(cn,"builtin.mkdir")||!strcmp(cn,"builtin.mkdir_p")||!strcmp(cn,"builtin.mappe_opprett")) fn_r=nc_builtin_mkdir_p(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"char_code")) fn_r=nc_builtin_char_code(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"chr")) fn_r=nc_builtin_chr(narg>0?cargs[0]:nc_nil());
@@ -5025,6 +5216,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"n"))                fn_r=nc_builtin_n(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"fil_slett") || !strcmp(cn,"builtin.fil_slett")) fn_r=nc_fn_builtin_fil_slett(cargs, narg);
             else if (!strcmp(cn,"fil_append"))       { if(narg>=2) nc_builtin_fil_append(cargs[0],cargs[1]); }
+            else if (!strcmp(cn,"fil_append_binary")||!strcmp(cn,"fil_append_binær")) { if(narg>=2) fn_r=nc_builtin_fil_append_binary(cargs[0],cargs[1]); }
             /* ── async/await — synchronous implementation ── */
             else if (!strcmp(cn,"await_value") || !strcmp(cn,"builtin.await_value")) {
                 NcVal *v = narg>0 ? cargs[0] : nc_nil();
@@ -5938,66 +6130,15 @@ static NcVal *nc_exec_call_closure(NcVal *functions, const char *fn_name, NcVal 
     return r;
 }
 
-static char *nc_shell_quote(const char *s) {
-    size_t len = 2;
-    for (const char *p = s; *p; ++p) len += (*p == '\'') ? 4 : 1;
-    char *out = malloc(len + 1);
-    char *w = out;
-    *w++ = '\'';
-    for (const char *p = s; *p; ++p) {
-        if (*p == '\'') {
-            *w++ = '\'';
-            *w++ = '\\';
-            *w++ = '\'';
-            *w++ = '\'';
-        } else {
-            *w++ = *p;
-        }
-    }
-    *w++ = '\'';
-    *w = 0;
-    return out;
-}
-
 static NcVal *nc_seed_kompiler(const char *src_path, const char *modul) {
-    const char *seed = getenv("NORSCODE_SEED_COMPILER_BIN");
-    if (!seed || !seed[0]) seed = "build/v3002/bootstrap_compiler_seed_v3002";
-    char rooted_seed[4096];
-    FILE *probe = fopen(seed, "r");
-    if (!probe) {
-        const char *root = getenv("NORSCODE_ROOT");
-        if (root && root[0] && seed[0] != '/') {
-            snprintf(rooted_seed, sizeof(rooted_seed), "%s/%s", root, seed);
-            seed = rooted_seed;
-            probe = fopen(seed, "r");
-        }
-    }
-    if (!probe) return nc_nil();
-    fclose(probe);
-
-    char tmp_tpl[] = "/tmp/nc_seed_compile_XXXXXX";
-    int fd = mkstemp(tmp_tpl);
-    if (fd < 0) return nc_nil();
-    close(fd);
-
-    char *q_seed = nc_shell_quote(seed);
-    char *q_src = nc_shell_quote(src_path);
-    char *q_mod = nc_shell_quote(modul);
-    char *q_out = nc_shell_quote(tmp_tpl);
-    size_t need = strlen(q_seed) + strlen(q_src) + strlen(q_mod) + strlen(q_out) + 256;
-    char *cmd = malloc(need);
-    snprintf(cmd, need,
-             "NORSCODE_CMD=compile NORSCODE_FILE=%s NORSCODE_MODULE=%s NORSCODE_OUTPUT=%s %s >/dev/null 2>&1",
-             q_src, q_mod, q_out, q_seed);
-    int rc = system(cmd);
-    free(q_seed); free(q_src); free(q_mod); free(q_out); free(cmd);
-    if (rc != 0) {
-        remove(tmp_tpl);
-        return nc_nil();
-    }
-    NcVal *ncb_json = nc_builtin_fil_les(nc_str(tmp_tpl));
-    remove(tmp_tpl);
-    return ncb_json;
+    /*
+     * Den gamle seedaren brukte ein ekstern shell og binær. Det er ikkje
+     * ein del av Norscode sin normative compile-path og er derfor med vilje
+     * deaktivert. Stage0-bundlen eller selfhost-dispatchen under tek over.
+     */
+    (void)src_path;
+    (void)modul;
+    return nc_nil();
 }
 
 /* ── Wrap kompiler_fil via bootstrap-host dispatcher ── */
@@ -6482,6 +6623,14 @@ static NcVal *nc_builtin_koyr_med_kontekst_host(NcVal **args, int na) {
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
+    /* Når den genererte selfhost-flaten er embedda, skal run/compile gå
+     * gjennom Norscode-VM-en og ikkje starte host-exec-ncb-json på nytt. */
+    const char *selfhost_mode = getenv("NORSCODE_NATIVE_SELFHOST");
+    if (selfhost_mode && !strcmp(selfhost_mode, "1")) {
+        NcVal *r = nc_dispatch_call("selfhost.nc_main.start", NULL, 0);
+        if (!r) return -1;
+        return nc_val_til_exit(r);
+    }
     if (cmd && !strcmp(cmd, "compile")) {
         const char *src = getenv("NORSCODE_FILE");
         const char *mod = getenv("NORSCODE_MODULE");

@@ -1,112 +1,53 @@
-#!/usr/bin/env bash
-set -euo pipefail
-# Norscode-first wrapper: hybrid bundle-entry ligg i tools/bundle_with_hybrid_compiler_v9500.no.
-# Bash-delen under er avgrensa reserveveg for Node-basert bundle-samansying.
+#!/usr/bin/env sh
+set -eu
+
+# Norscode-first wrapper: eigarlogikken ligg i bundle_with_hybrid_compiler_v9500.no.
+# Kompatibilitetsinngang. All bundlelogikk ligg i Norscode-fila
+# tools/bundle_with_hybrid_compiler_v9500.no; denne fila mappar berre eldre
+# posisjonelle argument til den Norscode-eigde miljøkontrakten.
 # NORSCODE_HYBRID_ROOT=<repo-root> NORSCODE_HYBRID_OUT=<out.ncb.json> NORSCODE_HYBRID_ENTRY=<entry> NORSCODE_HYBRID_SPECS='<alias=fil.no>...' ./bin/nc run tools/bundle_with_hybrid_compiler_v9500.no
 
-FROM_NO=0
 if [ "${1:-}" = "--from-no" ]; then
-  FROM_NO=1
+  # Behald eldre kallflate, men aldri vel ein alternativ implementasjon.
   shift
 fi
+
 ROOT="${1:-}"
 OUT="${2:-}"
 ENTRY="${3:-}"
-NODE_BIN="${NODE_BIN:-}"
-shift 3 || true
+shift 3 2>/dev/null || true
 
 if [ -z "$ROOT" ] || [ -z "$OUT" ]; then
-  echo "argument manglar for hybrid-bundling" >&2
+  printf 'argument manglar for Norscode hybrid-bundling\n' >&2
   exit 2
 fi
 
-if [ "$FROM_NO" != "1" ]; then
-  SPECS=""
-  for spec in "$@"; do
-    if [ -z "$SPECS" ]; then
-      SPECS="$spec"
-    else
-      SPECS="$SPECS $spec"
-    fi
-  done
-  exec env \
-    NORSCODE_ENABLE_EXEC_PROSESS=1 \
-    NORSCODE_HYBRID_ROOT="$ROOT" \
-    NORSCODE_HYBRID_OUT="$OUT" \
-    NORSCODE_HYBRID_ENTRY="$ENTRY" \
-    NORSCODE_HYBRID_SPECS="$SPECS" \
-    "$ROOT/bin/nc" run "$ROOT/tools/bundle_with_hybrid_compiler_v9500.no"
-fi
-
-if [ -z "$NODE_BIN" ]; then
-  if command -v node >/dev/null 2>&1; then
-    NODE_BIN="$(command -v node)"
-  elif [ -x "\${HOME:-}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node" ]; then
-    NODE_BIN="\${HOME}/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
-  else
-    echo "feil: fann ikkje node. Sett NODE_BIN eller installer node i PATH." >&2
-    exit 1
-  fi
-fi
-
-TMPDIR_BUNDLE="$(mktemp -d /tmp/norscode_hybrid_bundle_v9500.XXXXXX)"
-cleanup() {
-  rm -rf "$TMPDIR_BUNDLE"
-}
-trap cleanup EXIT
-
-compiled_jsons=()
+SPECS=""
 for spec in "$@"; do
-  alias="${spec%%=*}"
-  src="${spec#*=}"
-  if [ -z "$alias" ] || [ -z "$src" ] || [ "$alias" = "$src" ]; then
-    echo "ugyldig bundle-spesifikasjon: $spec" >&2
-    exit 2
+  if [ -z "$SPECS" ]; then
+    SPECS="$spec"
+  else
+    SPECS="$SPECS
+$spec"
   fi
-  out_json="$TMPDIR_BUNDLE/${alias//./_}.ncb.json"
-  "$ROOT/tools/compile_with_hybrid_bundle_v9400.sh" "$ROOT" "$src" "$out_json" "$alias" >/dev/null
-  compiled_jsons+=("$out_json")
 done
 
-env ROOT="$ROOT" OUT="$OUT" ENTRY="$ENTRY" TMPDIR_BUNDLE="$TMPDIR_BUNDLE" "$NODE_BIN" <<'NODE'
-const fs = require('fs');
-const path = require('path');
+NC_NATIVE_BIN="${NORSCODE_NATIVE_BIN:-$ROOT/dist/norscode_native}"
+if [ ! -x "$NC_NATIVE_BIN" ]; then
+  printf 'manglar native Norscode-runtime: %s\n' "$NC_NATIVE_BIN" >&2
+  exit 1
+fi
 
-const dir = process.env.TMPDIR_BUNDLE;
-const out = process.env.OUT;
-const entry = process.env.ENTRY || '';
-const files = fs.readdirSync(dir).filter((f) => f.endsWith('.ncb.json')).sort();
-if (!files.length) {
-  console.error('ingen bundle-fragment vart bygde');
-  process.exit(1);
-}
-
-const merged = {
-  format: 'norscode-bytecode-v1',
-  entry: entry || '__main__.start',
-  imports: [],
-  route_handlers: [],
-  dependency_providers: {},
-  guard_providers: {},
-  request_middlewares: [],
-  response_middlewares: [],
-  error_middlewares: [],
-  startup_hooks: [],
-  shutdown_hooks: [],
-  tests: [],
-  functions: {}
-};
-
-for (const file of files) {
-  const j = JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-  for (const [name, fn] of Object.entries(j.functions || {})) {
-    merged.functions[name] = fn;
-  }
-  for (const rh of (j.route_handlers || [])) merged.route_handlers.push(rh);
-}
-
-fs.mkdirSync(path.dirname(out), { recursive: true });
-fs.writeFileSync(out, JSON.stringify(merged));
-console.log(`Bundle: ${out} (${fs.statSync(out).size} bytes)`);
-NODE
-
+OUT_DIR=$(dirname "$OUT")
+exec env \
+  NORSCODE_ENABLE_EXEC_PROSESS=1 \
+  NORSCODE_HYBRID_ROOT="$ROOT" \
+  NORSCODE_HYBRID_OUT="$OUT" \
+  NORSCODE_HYBRID_ENTRY="$ENTRY" \
+  NORSCODE_HYBRID_SPECS="$SPECS" \
+  NORSCODE_NATIVE_BIN="$NC_NATIVE_BIN" \
+  NORSCODE_VM_CAPABILITIES="${NORSCODE_VM_CAPABILITIES:-env.read,process.exec,disk.read,disk.write}" \
+  NORSCODE_VM_DISK_ROOT="${NORSCODE_VM_DISK_ROOT:-$ROOT,$OUT_DIR,.,${TMPDIR:-/tmp},/tmp,/private/tmp}" \
+  NORSCODE_CMD=run \
+  NORSCODE_FILE="$ROOT/tools/bundle_with_hybrid_compiler_v9500.no" \
+  "$NC_NATIVE_BIN"

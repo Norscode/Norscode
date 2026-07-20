@@ -16,6 +16,10 @@ Norscode er eit norsk språk- og verktøysett med native-first CLI, selfhost-lø
 - `std.runtime_status` for testbar runtime v1-status og prioriterte sjølvstendigheitsblokkerar
 - Feilhandtering med `kast`, `prøv` og `fang`
 - Normal kjede: `.no` -> NCB JSON -> `selfhost/vm.no`
+- NCB JSON er Norscode-bytecode, ikkje ein separat runtime: release-binæren
+  byggjer/bruker bytekoden gjennom Norscode og har den aktive NCB-image-en
+  innebygd. `bootstrap/**/*.ncb.json` er berre sporbare bootstrap-/seed-
+  artefaktar for kompilering og reproduksjon.
 
 ## Kom i gang
 

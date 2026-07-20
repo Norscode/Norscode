@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
     NcwProcess process;
     if (!ncw_process_spawn(&process, executable, child_argv, 2, "", NULL, 0,
                            5000, 128ULL * 1024ULL * 1024ULL, "no-network",
-                           error, sizeof(error))) {
+                           NULL, error, sizeof(error))) {
         fprintf(stderr, "%s\n", error);
         return 3;
     }

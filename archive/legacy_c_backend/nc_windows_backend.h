@@ -61,6 +61,7 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
                       const char *cwd_utf8, const void *stdin_data, size_t stdin_size,
                       uint64_t timeout_ms, uint64_t max_memory_bytes,
                       const char *sandbox_profile,
+                      const char *environment_block_utf8,
                       char *error, size_t error_cap);
 int64_t ncw_process_read(NcwProcess *process, int stderr_stream,
                          void *buffer, size_t size, char *error, size_t error_cap);

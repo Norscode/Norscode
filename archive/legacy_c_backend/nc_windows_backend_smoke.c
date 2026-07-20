@@ -59,7 +59,7 @@ int main(int argc, char **argv) {
     if (!ncw_process_spawn(&process, command, child_argv, 3, root, NULL, 0,
                            5000, 128ULL * 1024ULL * 1024ULL,
                            "restricted",
-                           error, sizeof(error))) return fail("process spawn", error);
+                           NULL, error, sizeof(error))) return fail("process spawn", error);
     if (ncw_process_wait(&process, 5000, error, sizeof(error)) != 1)
         return fail("process wait", error);
     char process_output[64] = "";
@@ -83,7 +83,7 @@ int main(int argc, char **argv) {
     if (!ncw_process_spawn(&timeout_process, command, sleep_argv, 2, root, NULL, 0,
                            50, 128ULL * 1024ULL * 1024ULL,
                            "restricted",
-                           error, sizeof(error))) return fail("timeout spawn", error);
+                           NULL, error, sizeof(error))) return fail("timeout spawn", error);
     int timeout_status = 0;
     for (int i = 0; i < 100 && timeout_status == 0; i++) {
         timeout_status = ncw_process_wait(&timeout_process, 100, error, sizeof(error));

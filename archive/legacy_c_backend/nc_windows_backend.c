@@ -333,6 +333,7 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
                       const char *cwd_utf8, const void *stdin_data, size_t stdin_size,
                       uint64_t timeout_ms, uint64_t max_memory_bytes,
                       const char *sandbox_profile,
+                      const char *environment_block_utf8,
                       char *error, size_t error_cap) {
     if (!process || !executable_utf8 || !*executable_utf8 || !argv_utf8 || argc == 0 ||
         timeout_ms == 0 || stdin_size > 0xffffffffU) {
@@ -346,6 +347,33 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
     if (cwd_utf8 && *cwd_utf8) {
         if (!ncw_utf8(cwd_utf8, cwd, NCW_PATH_CAP, error, error_cap)) return 0;
         cwd_pointer = cwd;
+    }
+
+    // ABI-et sender miljø som newline-separerte KEY=VALUE-parar. Windows
+    // krev ein dobbelt-NUL-terminert UTF-16-blokk til CreateProcessW.
+    wchar_t *environment_block = NULL;
+    if (environment_block_utf8) {
+        size_t utf8_len = strlen(environment_block_utf8);
+        size_t wide_cap = (utf8_len + 2) * 2;
+        environment_block = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, wide_cap * sizeof(wchar_t));
+        if (!environment_block) { ncw_error(error, error_cap, "environment block", ERROR_NOT_ENOUGH_MEMORY); return 0; }
+        size_t out = 0, pos = 0;
+        while (pos < utf8_len) {
+            size_t end = pos;
+            while (end < utf8_len && environment_block_utf8[end] != '\n') end++;
+            int bytes = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                             environment_block_utf8 + pos, (int)(end - pos),
+                                             environment_block + out, (int)(wide_cap - out - 2));
+            if (bytes <= 0 || out + (size_t)bytes + 2 >= wide_cap) {
+                HeapFree(GetProcessHeap(), 0, environment_block);
+                ncw_error(error, error_cap, "environment block encoding", ERROR_NO_UNICODE_TRANSLATION);
+                return 0;
+            }
+            out += (size_t)bytes;
+            environment_block[out++] = L'\0';
+            pos = end < utf8_len ? end + 1 : end;
+        }
+        environment_block[out] = L'\0';
     }
 
     HANDLE child_stdin = NULL, child_stdout = NULL, child_stderr = NULL;
@@ -383,8 +411,10 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
     startup.lpAttributeList = attributes;
     PROCESS_INFORMATION info; memset(&info, 0, sizeof(info));
     DWORD flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NO_WINDOW;
-    int created = CreateProcessW(executable, command, NULL, NULL, TRUE, flags, NULL,
+    if (environment_block) flags |= CREATE_UNICODE_ENVIRONMENT;
+    int created = CreateProcessW(executable, command, NULL, NULL, TRUE, flags, environment_block,
                                  cwd_pointer, &startup.StartupInfo, &info) != 0;
+    if (environment_block) HeapFree(GetProcessHeap(), 0, environment_block);
     DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
     DeleteProcThreadAttributeList(attributes); HeapFree(GetProcessHeap(), 0, attributes);
     if(appcontainer_sid)FreeSid(appcontainer_sid);

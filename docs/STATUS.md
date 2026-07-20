@@ -2,19 +2,118 @@
 
 Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 
-## Sjølvstendigheitsstatus 2026-07-16
+## Sjølvstendigheitsstatus 2026-07-20
 
+- Legacy compiler-seeding via ekstern shell er fjerna frå native backend.
+  Stage0-bundlen eller Norscode sin selfhost-dispatch er einaste compile-veg.
+- Releasepakkinga verifiserer no NCB-sluttmarkøren i den endelege
+  `dist/norscode_native` før arkivet blir godkjent.
+- `std.zip` har no reine Norscode TAR- og gzip-stored-block-skrivarar over
+  `std.bytes` som fallback når native arkiv-ABI manglar; `tests/test_tar_pure.no`
+  verifiserer header, ustar-markør, blokkpadding, gzip-magic og binær payload-
+  roundtrip. Katalogvandring
+  blir no enumerert av releaseeigaren og binærarkivet blir bygd i Norscode.
+  Pure gzip/TAR-dekomprimering med traversalvern er også kopla inn i
+  `tools/install_release.no`; katalogenumerering, kopiering og sletting i
+  kjernebanen brukar no native filesystem-listing utan `find` eller symlink.
+  Treopprydding brukar depth-first Norscode-byte-I/O med
+  `builtin.fil_slett`, utan `rm -rf`; aktiv release og binæralias blir
+  materialiserte kopiar, utan `ln -s`. Målversjonen materialiseres no direkte
+  frå arkivet i Norscode utan `cp -R`.
+- Pure gzip har no ein blokkvis binær-append-ABI (`fil_append_binary`) i
+  selfhost-VM/native-dispatch, slik at store arkiv ikkje treng å samle heile
+  komprimertestrømmen i éi mellomliste når kandidaten er regenerert. ABI-en er
+  med vilje ikkje promotert til dist/stage0 før ein separat kandidat har
+  passert runtime-gap og gzip-smoke.
+- `tests/test_native_filesystem_list.no` er lagt til som eksplisitt ABI-smoke;
+  dagens aktive dist/stage0 svarer framleis `operation requires disk.write`,
+  så ny native kandidat må byggjast før `filesystem.list` kan promoterast.
+  Kandidatmodus bruker no `build/norscode_native_filesystem_list_candidate` og
+  kan ikkje overskrive validert `dist/norscode_native` før smoken passerer.
+- Ein midlertidig macOS ARM64 kandidat bygd frå `build/v3009/native_candidate_combined.c`
+  har no passert både `native filesystem.list OK`, innebygd
+  `NORSCODE_NCB_TEXT_V1`-trailer og `native runtime gap gate v3001`. Kandidaten er
+  ikkje promotert: sjølve kompileringa må flyttast inn i den Norscode-eigde
+  build-pathen før dist/stage0 kan erstattast.
+- Kandidatens separate BPE-smoke feilar med `assert feilet`, medan same test er
+  grøn i aktiv `./bin/nc`. Det viser at den genererte native selfhost-flata er
+  eldre enn dagens `std.tokenizer_bpe`; kandidatbygging må derfor regenerere
+  selfhost-koden frå aktuell bootstrap før promotering.
+- `archive/legacy_c_backend/ncb_to_c.no` har no stream-skriving av header,
+  deklarasjonar og funksjonsblokker. Dette reduserer toppminnet, men dagens
+  992-funksjons bootstrap stoppar framleis før funksjonsblokkene er ferdig
+  materialiserte; full funksjonsinstruksjons-streaming står att. Pure VM-en
+  unngår no heap-traversering for store NCB-tabellar og funksjonskart ved
+  `INDEX_GET`, men kandidatgenereringa må framleis gå heilt gjennom alle
+  funksjonar før binær kan validerast. Pure runtime-memory har samstundes
+  standard GC-terskel 16 (overstyrbar med `NORSCODE_VM_GC_THRESHOLD`) for å
+  halde store AOT-materialiseringar under minnetopp.
+- Releasepakka kopierer no katalogtre og `.nors`-alias med Norscode-byte-I/O
+  og native `mkdir_p`; `cp` er ikkje lenger reserve for normal katalogkopi.
+- `std.pathlib.lag_katalog` og `std.pathlib.slett_fil` brukar no native
+  `mkdir_p`/`fil_slett` i staden for shell; release-preflight krev desse
+  eigarskapspunkta direkte.
+- `std.pathlib.storleik` brukar no native binær-lesing og `lengde` i staden
+  for `stat -c`, med same bytepresise resultat for releasefiler.
+- `std.pathlib.les_bytes` og `skriv_bytes` brukar no `std.bytes` og native
+  binær-I/O; vilkårlege byteverdier blir dermed bevarte utan tekstkonvertering.
+- macOS ARM64 `dist/norscode_native` og stage0 er no bygde frå shell-fri
+  native backend, identiske med kvarandre, og `platform_readiness_v3600` viser
+  `production_ready_macos=true` med innebygd NCB.
+- Compiler-NCB-en har fått bundler-cacheforbetringa fletta inn som ein
+  målretta Norscode-NCB-oppdatering; full kjeldebundle-regenerering er framleis
+  skild frå denne verifiserte kandidaten.
+- Pure selfhost-VM har kontrollert bootstrap-tilgang til `env.read` og
+  `disk.read` innanfor `NORSCODE_VM_DISK_ROOT`; andre capabilities blir ikkje
+  opna av bootstrap-flagget.
+
+- AOT-integrasjon er no verifisert for macOS ARM64, Linux x86_64 og Linux
+  ARM64: kontrollflyt, funksjonskall, importert stdlib og vanlege
+  heiltalsoperasjonar køyrer native. Linux ARM64-gaten er no også grøn lokalt
+  under QEMU/Docker.
+- Linux x86_64 `bygg-native --target linux-x86_64` brukar no
+  `native_codegen_v2.no` med innebygd NCB. Docker-attestasjonen køyrer også
+  felles AOT-runtime for liste, tekstfunksjonar og kartoppslag (exit 25).
+  ASCII `lower`/`upper` er emitterte runtime-funksjonar i same Norscode-bytebuffer;
+  dei gamle faste legacy-peikarane blir ikkje brukte.
+- `platform_readiness_v3600` er køyrd med `NORSCODE_VERIFY_LINUX_DOCKER=1`:
+  `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`
+  og `production_ready_unix=true` etter runtime-gap-attestasjon i Docker.
+- Samla `./bin/nc selvstendighet` er no køyrd ende til ende og rapporterer
+  `Sjølvstendighet L1-L6 (normalflate): BESTÅTT`: bootstrap A+B/C, L5
+  Gen1/Gen2-byteparitet og den separate L5b-VM-pariteten er alle verifiserte.
 - Aktiv compile-, bundle-, test- og scaffold-flyt er eigd av Norscode `.no` og
   køyrer med `NODE_BIN=/nonexistent`. Node/JavaScript, Python og C er ikkje del
   av den aktive kjeda; eigarskaps- og C/Python-gatene er grøne.
 - `dist/norscode_native` er byte-identisk med committed macOS ARM64-stage0.
   Committed Linux x86_64- og ARM64-seedar har same hash som dei køyrde
   Zig/Argon2-kandidatane. Begge Linux-arkitekturar har grøn runtime-gap-gate i
-  Docker.
+  Docker. `tools/single_binary_gate.no` køyrer i tillegg macOS-binæren åleine
+  frå tom runtime-rot med `PATH=/nonexistent`, utan repo eller NCB-sidefiler.
+- Stream-embedderen setter no executable-bit på `dist/norscode_native_embedded`,
+  og single-binary-gaten er køyrd mot dette innebygde artefaktet med tom
+  runtime-rot og utan side-NCB.
+- `nc selfhost-bootstrap-gate` sender no eksplisitt capability- og disk-scope
+  til både NCB-host og fallback-runtime; bootstrap A+B passerer utan manuell
+  miljøjustering.
+- Embedded runtime-entry-testen er verifisert med `NORSCODE_VERIFY_EMBEDDED_PROCESS=1`;
+  child-kallet nullstiller flagget og unngår rekursiv prosesskjøring.
+- NCB→ELF-releasebanen er no native-only: `tools/ncb_to_elf.no` brukar
+  `std.runtime.process_abi`, eksplisitt miljøkart, native mappe-/filmodus-ABI og
+  fail-closed runtime-mangel. `nc ncb-to-elf` og `nc bygg-native --ncb` brukar
+  ikkje shell-reserve i releaseflata; shell-wrapperen står berre som avgrensa
+  vedlikehaldsreserve.
 - Windows x86_64 runtime, IOCP/SChannel, AppContainer og Argon2 krysskompilerer
-  og lenkar. Dette er ikkje ekte Windows-attestasjon:
+  og lenkar. Cross-gaten legg no også compiler/VM/executor-NCB inn i PE-fila
+  og verifiserer PE32+ direkte i Norscode utan avhengigheit til `file`. Dette
+  er ikkje ekte Windows-attestasjon:
   `production_ready_windows=false` og `production_ready_all_platforms=false`
   står ved lag fram til køyring på ein faktisk Windows-vert.
+- Tracked `bootstrap/stage0/norscode-windows-x86_64.exe` er no regenerert frå
+  same innebygd-NCB PE-kandidat som Windows-kryssgaten verifiserer, og blir brukt
+  som Git Bash/MSYS-fallback for `bin/nc`; han er statisk PE-verifisert, men er
+  ikkje rekna som produksjonsklar før den signerte Windows-køyringa er
+  gjennomført.
 - `tools/windows_runtime_attestation.no` gir no éi fail-closed Windows-port som
   sjølv køyrer backend/filsystem/prosess, ekte AppContainer, nettverk,
   SChannel TLS 1.3, IOCP og Argon2id før ho skriv ein commit- og
@@ -22,7 +121,8 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   GitHub build provenance. `tools/platform_readiness_v3600.no` godtek berre
   rapporten når `gh attestation verify`, commit, rein spora kjelde og runtime-
   SHA-256 alle samsvarer; krysskompilering eller ein laus JSON-fil kan derfor
-  ikkje gjere Windows grøn.
+  ikkje gjere Windows grøn. CI set no `NORSCODE_REQUIRE_WINDOWS_ATTESTATION=1`
+  slik at jobben feilar dersom samla Windows-readiness ikkje er grøn.
 - `std.runtime_status` rapporterer 19 av 22 runtimeområde som stabile (86 %).
   `network_runtime`, `process_api` og `runtime_security` er
   framleis `delvis` på grunn av reelle plattform-/backendbevis som står att.
@@ -85,6 +185,7 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - Aktiv macOS ARM64-runtime har native PBKDF2-HMAC-SHA256 via CommonCrypto, Argon2id via OpenSSL og rein Norscode scrypt, med fallback der backend manglar. Linux-stage0 har OpenSSL PBKDF2/ACME og Zig Argon2id. Kjent PBKDF2-, scrypt- og Argon2id-vektorar og `tests/test_security.no` er grøne; ekte Windows står framleis att.
 
 - Lokal macOS ARM64-runtime er promotert til `dist/norscode_native` med OpenSSL 3.6.2 for Argon2id og ACME/DNSSEC-signering. Committed macOS ARM64- og Linux x86_64/ARM64-stage0 er oppdaterte og hashfesta i `bootstrap/stage0/SHA256SUMS`.
+- Den promoterte macOS ARM64-runtime-en er statisk lenka mot OpenSSL (ingen OpenSSL-dylib i `otool -L`) og passerer `tests/test_acme_sign_native.no`, `tests/test_acme_verify_native.no`, `tests/test_pbkdf2_vector.no`, `tests/test_argon2_native.no` og `tests/test_security.no`.
 - Native runtime-gap, JIT for heltall/desimal/tekst, native tråd- og tensorflate, `builtin.process_spawn_argv` og `tests/test_runtime_v1_contract.no` er verifisert grønne etter promoteringen.
 - Adaptive JIT har no ein eigen Norscode-optimaliseringspass med iterert konstantfolding, identitetsreduksjon, SSA-livstidsanalyse og register-/spillplan; dette er verifisert i `tests/test_runtime_jit_optimizer.no`.
 - Windows x86_64 native ABI blir no reproducerbart kompilert og lenka gjennom `tools/windows_runtime_cross_compile_gate.no`, inkludert hovudruntime, IOCP/SChannel-backend, Zig Argon2id-objekt, fil/prosess/IOCP-backend-smoke, dynamisk `winsqlite3.dll`/`sqlite3.dll`-laster og AppContainer-smoke-`.exe`; ekte Windows TLS/AppContainer-handshake er framleis ekstern plattformverifisering.
@@ -115,12 +216,12 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - `tools/hosting_runtime_gate_v3610.no` samlar no DNSSEC, ACME/JWS/keyring, domenehost, mailserver og brannmur i same release-runtime-gate. Gaten brukar hybrid kompilering frå aktiv kjelde og køyrer NCB-artefaktet med vald runtime, slik at stage0/precompiled-modulstatus ikkje blir forveksla med aktiv standardbibliotek-kjelde.
 - Brannmur, mailserver og domenehost lagrar no reglar, rate-limits, admin-kjelder, postboksar, aliasar, SMTP-mottakarar og admin-allowlist som ekte JSON-lister også i pure VM; dette er verifisert i `test_brannmur_policy`, `test_mail_server_contract`, `test_domenehost_security_contract` og `test_future_hosting_foundation`.
 - Runtime v1-manglane er samla i `std.runtime_status` og testa med `tests/test_runtime_v1_contract.no`. Bytecode VM, minnehåndtering, heap, call-stack, type-runtime, exception-runtime, runtime-bibliotek, dynamic loader, refleksjon, debugger og profiler er no stabile; dei andre runtime-v1-radene har minst ei delvis Norscode-standardflate. Dette betyr ikkje at aktiv runtime er 100% ferdig. `norscode-runtime-library-abi-v1` verifiserer symbol og atferd for tekst, liste, kart, JSON, tid, fil og sikkerheit direkte i pure VM. Eksplisitte `builtin.*`-kall har prioritet over fuzzy funksjonsoppslag og kan ikkje skyggast av brukar-/modulfunksjonar. VM-en dekkjer heile compiler-opcodeflata og verifiserer opcode, operandantall, labels og ikkje-negative bygg/kall før køyring. `norscode-memory-abi-v1` bind runtime-allocator og native codegen til same 64 MiB RW-segment med eit 64-byte kontrollområde og er verifisert mot ein faktisk ELF-programheader. Fysiske 32-byte `NCG1`-objektheaderar lagrar flags, generation, age, type, payloadstørrelse, `first_edge` og `ref_count`. Kvar referanse er eit unbounded edge-objekt i same arena med `from/to/next`; add/remove, sweep og compaction held kjedene synkroniserte. Registeruavhengig root-walk markerer sykliske grafar, og native sweep frigjer utilgjengelege objekt og edge-blokker direkte i allocatoren. Heapmutasjonar og native mark/sweep eig same atomiske eiertoken/depth-lås; refs, røter, payload og compaction er serialiserte med collector utan delt kartmutasjon. Native `NcVal` ligg no i runtime-eigde arenasider; major-GC returnerer tomme sider og kan fysisk flytte levande objekt til tette sider. Relokering omskriv registrerte frame-røter, liste-/kartreferansar, edge-graf, host-kontekst og cache-epoke, medan native compiler-regionar med rå C-peikarar blir eksplisitt pinna. Safepunkt-entry køyrer collector automatisk ved terskel. `std.runtime_stack` brukar iterative tail/continuation-rammer med kryssramme-unwind og reell nested suspend/resume utan vertsrekursjon. Exception-runtime har typed catch og `endeleg`/`utsett` gjennom aktiv selfhost-kjede. `std.runtime_type` dekkjer generics, union/nullability, arv, metodeoppslag og capability-isolerte host-handtak. `std.inspect` les no VM-symboltabellen og arva type-/dispatchmetadata direkte. `std.runtime_filesystem` har no native rotfesta descriptor-handtak med `openat` gjennom kvart segment, `O_NOFOLLOW`, read/write/append/readwrite, seek, `fstat`, `fsync`, close og sikker `unlinkat`; traversal og slutt-/mellomliggande symlink-angrep er verifiserte i normal og pure VM. Descriptor-readiness er kopla til scheduler-futures med timeout, cancellation og feilpropagering; Windows HANDLE-backend står att. `norscode-native-network-v1` gir nonblocking POSIX listen/connect/accept/read/write/close, `poll(2)`-readiness og scheduler-futures for connect/accept/read/write, verifisert med loopback ping/pong i normal og pure VM. Valfri OpenSSL 3-backend gir ekte TLS 1.3 klient/server-handshake, trust store, SNI, hostname-verifisering, cipher/peer-metadata og kryptert scheduler-I/O; bygg utan backend feilar lukka. TLS-ping og feil-hostname er verifiserte i normal og pure VM; OCSP/CRL/mTLS og Windows SChannel står att. `std.prosess` skil shell- og argv-planar, bevarer argumentgrenser og krev eksplisitt shell-samtykke. `norscode-process-spawn-v1` definerer request/result med cwd, stdin, timeout, outputgrense, PID og exitstatus; VM-en handhevar `process.exec` før `process_spawn_argv`. Shell-fri native `fork`/`execv` med argv-grenser, cwd, stdin, separate ikkje-blokkerande stdout/stderr-piper, timeout, outputgrense, PID og exitstatus er verifisert i normal og pure VM. `norscode-native-process-v1` legg i tillegg til levande PID-handle, poll, inkrementell read, wait, TERM/INT/KILL/HUP, deadline, close og slot-gjenbruk. Sandboxprofil gir lukka miljø, CPU/core/fd-grenser, Linux `no_new_privs` og macOS Seatbelt no-network/no-write; scope, miljø og forbod er verifiserte i normal og pure VM. Windows CreateProcess/Job Object, Linux seccomp-filter og hard Darwin-minnegrense står att. `std.tråd` brukar direkte runtimeobjekt og har idempotent start, recursive mutex-depth, FIFO-overlevering, streng eierkontroll, kansellering, events/barrierar/delt minne og join med deadlock/timeout-status. `norscode-native-thread-v1` definerer spawn/join/cancel/mutex/condition, medan `norscode-atomic-v1` gir load/store/exchange/CAS/fetch-add og memory-order-validering; delte atomic-celler og full livssyklus er grøne i normal og pure VM. Pthread-backend og C11-maskinvareatomics/fences er implementerte; Windows-thread-backend, køyrt Linux-ELF og freestanding ARM64/Windows-atomics står att. Sikkerheit blir handheva i pure-VM, og native filhandtak er symlink-sikre; full OS-sandbox står att. `await` kan no suspendere ei nested VM-ramme med heile continuation-kjeda og gjenoppta henne når `std.sched` fullfører, avviser eller kansellerer den typebevarande future-en. Scheduler-køa er kooperativ og har native OS-pollere/trådpool for macOS, Linux og Windows; eksplisitte runtime-trådar kan køyre som pthread-workers. GUI-runtime har stabil HTML/headless-backend; OS-vindu er adapterarbeid utanfor runtime-kontrakten.
-- Pure-VM-sikkerheit er no handheva før builtin-dispatch: fil, mappe, lagring, database, miljø, prosess og socket/nettverk krev eksplisitte capabilities. Standard er deny, native filhandtak avviser traversal og symlink-folging, read/write-builtins kan ikkje kryssbrukast, og auditmåling viser tillatne og avviste kall. Nye listen/connect/TLS-handtak må samsvare med network scope, og executable må samsvare med process scope. Prosess-ABI-et avviser no ukjende sandboxprofilar, ugyldige miljøflagg og minne-/fd-grenser før dispatch. Prosessar kan bruke lukka miljø, rlimits, Linux seccomp no-network/no-write/pure og macOS Seatbelt; Windows AppContainer/Job Object og hard Darwin-minnegrense står att.
+- Pure-VM-sikkerheit er no handheva før builtin-dispatch: fil, mappe, lagring, database, miljø, prosess og socket/nettverk krev eksplisitte capabilities. Standard er deny, native filhandtak avviser traversal og symlink-folging, read/write-builtins kan ikkje kryssbrukast, og auditmåling viser tillatne og avviste kall. Nye listen/connect/TLS-handtak må samsvare med network scope, og executable må samsvare med process scope. Prosess-ABI-et avviser no ukjende sandboxprofilar, ugyldige miljøflagg og minne-/fd-grenser før dispatch. Prosessar kan bruke lukka miljø, rlimits, Linux seccomp no-network/no-write/pure og macOS Seatbelt med RLIMIT_RSS/RLIMIT_DATA og forelder-watchdog; Windows AppContainer/Job Object og faktisk Windows-attestasjon står att.
 - `NORSCODE_VM_DISK_ROOT` er ei komma-separert katalog-allowlist; `disk.read` eller `disk.write` gir ikkje tilgang utanfor dette scopet. Tom verdi blir avgrensa til relative stiar under gjeldande prosjektrot.
 - Runtime-allocator er ikkje lenger ein ugyldig placeholder: `std.runtime.allocator` køyrer med 64 MB avgrensa bytearena, 8-byte alignment, bounds-kontrollert byte-I/O, nullstilling ved allokering/gjenbruk, first-fit-gjenbruk, double-free/OOM-vern og statistikk. Flyttande komprimering tek overlappssikre snapshots og bevarer faktisk blokkinnhald ved relokasjon. `std.runtime_memory` tildeler header/payload-adresse per objekt, eksponerer bounds-kontrollert payload-I/O, bevarer payload gjennom GC-komprimering og returnerer sweep-blokker til allocatoren. Native ELF-backend har allereie eit fysisk 64 MB RW-segment; direkte ABI-binding mellom dette segmentet og GC-bytearenaen står att.
 - `std.sched` brukar ei runtime-uavhengig, flat hendingskø med tid, prioritet, deterministisk ID-rekkefølgje, cancel, forfall, stopp/start og avgrensa run-loop. Native readiness brukar ein vedvarande trådlokal kqueue på macOS, EPOLLONESHOT på Linux og aktiv IOCP på Windows. IOCP-banen dekkjer AcceptEx, ConnectEx, WSARecv, WSASend og overlapped ReadFile/WriteFile med generasjonsbundne, filtrerte completion-handtak. Timeout, kansellering, drenerande cleanup og VM-`await` er kopla til same future-modell og er køyrde under Windows/Wine. Preemptiv scheduler står att; eksplisitt parallellitet går gjennom den native arbeidspoolen.
 - Scheduler-futures eig no status, resultat, feil og kansellering i same event-loop-tilstand og er grøne i normal og pure VM. Den pure reentry-låsen vart spora til nyleg JSON-parsa argument ved callback-grensa; køa held no det opphavlege, rotfesta argumentkartet utan unødvendig serialisering. Pure VM nullstiller dessutan ventande argument-heap-ID-ar ved dynamiske kall, har konfigurerbar GC-terskel og opt-in kallsporing.
-- `std.prosess` har levande POSIX-prosesshandtak med shell-fri `fork`/`execv`, PID, ikkje-blokkerande stdin/stdout/stderr, poll, timeout/deadline, TERM/INT/KILL/HUP, exit-kode, inkrementell streaming og slot-gjenbruk. Prosesshandtak kan fullføre scheduler-futures som vekkjer suspendert VM-`await`. Sandboxprofil gir lukka miljø, rlimits, Linux seccomp no-network/no-write/pure og macOS Seatbelt no-network/no-write. Windows CreateProcess/Job Object og hard Darwin-minnegrense står att.
+- `std.prosess` har levande POSIX-prosesshandtak med shell-fri `fork`/`execv`, PID, ikkje-blokkerande stdin/stdout/stderr, poll, timeout/deadline, TERM/INT/KILL/HUP, exit-kode, inkrementell streaming og slot-gjenbruk. Prosesshandtak kan fullføre scheduler-futures som vekkjer suspendert VM-`await`. Sandboxprofil gir lukka miljø, rlimits, Linux seccomp no-network/no-write/pure og macOS Seatbelt no-network/no-write med Darwin RSS/DATA-grense og forelder-watchdog. Windows CreateProcess/Job Object og faktisk Windows-attestasjon står att.
 - Pure VM-profilaren måler CPU-instruksjonar/rate, veggtid, heap/allokering, GC-samlingar/safe-points/pause, builtin-kall og fil/nett/prosess-I/O. Konfigurerbar statistisk sampling fangar funksjon, IP, opcode, kjeldelinje/-kolonne og full call-stack med avgrensa buffer og dropteljar. Per-funksjon histogram dekkjer kall, instruksjonar og veggtid, og funksjonsintervall blir eksporterte som standard Chrome Trace Event JSON. Integrasjonstestane utløyser faktisk heap, GC, fil-I/O, stack-samples og trace-eksport; profilerflata er stabil.
 - `norscode-jit-v1` kompilerer verifiserte heiltalls- og booluttrykk med samanlikning, negasjon, labels og betinga/ubetinga kontrollflyt til ekte ARM64/x86-64-maskinkode. Runtime-registeret brukar generasjonshandtak, typed retur, avgrensa kode/register, RW-til-RX W^X-overgang og eksplisitt `munmap`; pure VM lower automatisk kompatible NCB-funksjonar ved varme callsite-kall, konstantfoldar, innliner reine ikkje-rekursive kall og fell tilbake ved feil. VM-en krev den auditpliktige `jit.execute`-capability-en før host-dispatch. Desimaltal, tekst/objekt, fleirfunksjons-/rekursiv inlining og avanserte optimaliseringar står att.
 - `std.runtime_debugger` er kopla direkte inn før kvar pure-VM-instruksjon. Runtime-en eig breakpoint add/remove/clear, watch-register med verdi/undefined-snapshot, funksjon, kjeldelinje/-kolonne, IP, opcode, stack-/framedjupn og lokale variablar. Han kan reelt suspendere og gjenoppta nested continuation-frames med continue, instruction-step eller line-step. Selfhost-kompilatoren skriv `source_lines` og `source_columns` per NCB-funksjon, og både serialiserings- og runtime-test verifiserer kartet.

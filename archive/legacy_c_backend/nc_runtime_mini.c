@@ -26,7 +26,9 @@
 #include <ctype.h>
 #include <setjmp.h>
 #include <errno.h>
+#include <limits.h>
 #include <time.h>
+#include <sys/stat.h>
 #if !defined(_WIN32)
 #include <unistd.h>
 #include <sys/wait.h>
@@ -1287,6 +1289,21 @@ static int nc_host_append_text_path(const char *path, const char *data) {
     fclose(f);
     return 1;
 }
+static int nc_host_append_binary_path(const char *path, NcVal *data_v) {
+    FILE *f = nc_host_fopen(path, "ab");
+    if (!f) return 0;
+    if (data_v && data_v->type == NC_BYTES && data_v->bytes && data_v->bytes->len > 0) {
+        fwrite(data_v->bytes->data, 1, data_v->bytes->len, f);
+    } else if (data_v && data_v->type == NC_LIST) {
+        for (int i = 0; i < data_v->list->len; i++) {
+            NcVal *item = data_v->list->items[i];
+            unsigned char byte = (unsigned char)(item && item->type == NC_INT ? item->i : 0);
+            fwrite(&byte, 1, 1, f);
+        }
+    }
+    fclose(f);
+    return 1;
+}
 static const char *nc_host_getenv_raw(const char *key, int *exists) {
     const char *v = getenv(key);
     if (exists) *exists = v != NULL;
@@ -1403,6 +1420,17 @@ static NcVal *nc_builtin_fil_finnes(NcVal *path_v) {
     NcVal *r = nc_file_exists_value(path);
     free(path);
     return r;
+}
+static NcVal *nc_builtin_fil_sett_kjorbar(NcVal *path_v) {
+    char *path = nc_to_str_raw(path_v);
+#if defined(_WIN32)
+    /* Windows PE-køyrbarheit ligg i filformatet; fjern berre read-only. */
+    int rc = _chmod(path, _S_IREAD | _S_IWRITE);
+#else
+    int rc = chmod(path, 0755);
+#endif
+    free(path);
+    return nc_bool(rc == 0);
 }
 static NcVal *nc_builtin_miljo_hent(NcVal *k_v) {
     char *k = nc_to_str_raw(k_v);
@@ -1924,6 +1952,34 @@ static NcVal *nc_builtin_bytes_to_list(NcVal *bytes_v) {
     for (size_t i = 0; i < bytes_v->bytes->len; i++) nc_builtin_legg_til(out, nc_int(bytes_v->bytes->data[i]));
     return out;
 }
+static NcVal *nc_builtin_bytes_to_text(NcVal *bytes_v) {
+    if (!bytes_v || bytes_v->type != NC_BYTES) nc_throw("bytes_to_text krev bytes");
+    char *text = (char *)malloc(bytes_v->bytes->len + 1);
+    if (!text) nc_throw("bytes_to_text tom for minne");
+    memcpy(text, bytes_v->bytes->data, bytes_v->bytes->len);
+    text[bytes_v->bytes->len] = '\0';
+    NcVal *out = nc_str(text);
+    free(text);
+    return out;
+}
+// Fast, bounds-checked conversion for binary-backed text payloads. Unlike a
+// whole-buffer conversion this can select the JSON slice after a Mach-O/ELF
+// prefix without ever copying embedded NUL bytes.
+static NcVal *nc_builtin_bytes_slice_to_text(NcVal *bytes_v, NcVal *start_v, NcVal *len_v) {
+    if (!bytes_v || bytes_v->type != NC_BYTES) nc_throw("bytes_slice_to_text krev bytes");
+    long long start = start_v && start_v->type == NC_INT ? start_v->i : -1;
+    long long len = len_v && len_v->type == NC_INT ? len_v->i : -1;
+    if (start < 0 || len < 0 || (size_t)start > bytes_v->bytes->len || (size_t)len > bytes_v->bytes->len - (size_t)start) {
+        nc_throw("bytes_slice_to_text utanfor buffer");
+    }
+    char *text = (char *)malloc((size_t)len + 1);
+    if (!text) nc_throw("bytes_slice_to_text tom for minne");
+    memcpy(text, bytes_v->bytes->data + (size_t)start, (size_t)len);
+    text[len] = '\0';
+    NcVal *out = nc_str(text);
+    free(text);
+    return out;
+}
 static NcVal *nc_builtin_feil(NcVal *v) { char *s = nc_to_str_raw(v); nc_throw(s); free(s); return nc_nil(); }
 static NcVal *nc_builtin_n(NcVal *v) { return v ? v : nc_nil(); }
 static NcVal *nc_builtin_desimaltall(NcVal *v) {
@@ -1987,6 +2043,11 @@ static NcVal *nc_builtin_fil_append(NcVal *path_v, NcVal *data_v) {
     NcVal *r = nc_file_append_text(path, data);
     free(path);
     free(data); return r;
+}
+static NcVal *nc_builtin_fil_append_binary(NcVal *path_v, NcVal *data_v) {
+    char *path = nc_to_str_raw(path_v);
+    NcVal *r = nc_host_file_write_result(nc_host_append_binary_path(path, data_v), "append til", path);
+    free(path); return r;
 }
 static NcVal *nc_builtin_exit(NcVal *code_v) {
     exit(code_v && code_v->type==NC_INT ? (int)code_v->i : 0);
@@ -2136,6 +2197,19 @@ static NcVal *nc_json_parse_number(JP2 *j) {
     if (*cursor == '-') cursor++;
     if (*cursor == '+') return NULL;
     if (!isdigit((unsigned char)*cursor)) return NULL;
+    // Norscode-kjelde kan ha 0xNN-literalar i eldre bundle-cache. Dei må
+    // normaliserast til eit ekte heiltal før JSON-serialisering; elles kan
+    // ein multi-modul bundle ende med ugyldig JSON-token som 0x7F.
+    if (*cursor == '0' && (cursor[1] == 'x' || cursor[1] == 'X')) {
+        const char *hex = cursor + 2;
+        if (!isxdigit((unsigned char)*hex)) return NULL;
+        while (isxdigit((unsigned char)*hex)) hex++;
+        if (!nc_json_is_token_boundary(*hex)) return NULL;
+        errno = 0; unsigned long long raw = strtoull(cursor + 2, NULL, 16);
+        if (errno == ERANGE || raw > (unsigned long long)LLONG_MAX) return NULL;
+        j->p = hex;
+        return nc_int((long long)raw);
+    }
     if (*cursor == '0' && isdigit((unsigned char)cursor[1])) return NULL;
 
     int floating = 0;
@@ -2199,18 +2273,40 @@ static int nc_json_looks_like_nonstring(const char *s) {
     if (*end==0 && end!=s) return 1;
     return 0;
 }
+static void nc_json_append(char **buf, size_t *length, size_t *capacity,
+                            const char *part, size_t part_length) {
+    size_t need = *length + part_length + 1;
+    if (need > *capacity) {
+        size_t next = *capacity ? *capacity : 64;
+        while (next < need) next *= 2;
+        char *grown = realloc(*buf, next);
+        if (!grown) abort();
+        *buf = grown;
+        *capacity = next;
+    }
+    memcpy(*buf + *length, part, part_length);
+    *length += part_length;
+    (*buf)[*length] = '\0';
+}
+
+static void nc_json_append_cstr(char **buf, size_t *length, size_t *capacity,
+                                const char *part) {
+    nc_json_append(buf, length, capacity, part, strlen(part));
+}
+
 static NcVal *nc_json_stringify_list(NcVal *v, int smart) {
-    char *r = strdup("["); int first = 1;
+    size_t length = 0, capacity = 64;
+    char *r = malloc(capacity); if (!r) abort(); r[0] = '\0';
+    nc_json_append_cstr(&r, &length, &capacity, "[");
+    int first = 1;
     for (int i = 0; i < v->list->len; i++) {
         NcVal *item_json = smart
             ? nc_json_stringify_any(v->list->items[i], 1)
             : nc_json_stringify_any(v->list->items[i], 0);
-        size_t rl = strlen(r), jl = strlen(item_json->s);
-        r = realloc(r, rl + jl + 3);
-        if (!first) strcat(r, ",");
-        strcat(r, item_json->s); first = 0;
+        if (!first) nc_json_append_cstr(&r, &length, &capacity, ",");
+        nc_json_append_cstr(&r, &length, &capacity, item_json->s); first = 0;
     }
-    r = realloc(r, strlen(r)+2); strcat(r, "]");
+    nc_json_append_cstr(&r, &length, &capacity, "]");
     return nc_str_own(r);
 }
 static int nc_json_map_is_dense_array_keys(NcVal *v) {
@@ -2224,7 +2320,10 @@ static int nc_json_map_is_dense_array_keys(NcVal *v) {
 }
 static NcVal *nc_json_stringify_map(NcVal *v, int smart) {
     int arrayish = nc_json_map_is_dense_array_keys(v);
-    char *r = strdup("{"); int first = 1;
+    size_t length = 0, capacity = 64;
+    char *r = malloc(capacity); if (!r) abort(); r[0] = '\0';
+    nc_json_append_cstr(&r, &length, &capacity, "{");
+    int first = 1;
     for (int i = 0; i < v->map->len; i++) {
         NcVal *kj = nc_json_stringify_any(nc_str(v->map->keys[i]), 0);
         int value_smart = smart;
@@ -2234,12 +2333,12 @@ static NcVal *nc_json_stringify_map(NcVal *v, int smart) {
         NcVal *vj = value_smart
             ? nc_json_stringify_any(v->map->vals[i], 1)
             : nc_json_stringify_any(v->map->vals[i], 0);
-        size_t rl = strlen(r), kl = strlen(kj->s), vl = strlen(vj->s);
-        r = realloc(r, rl + kl + vl + 4);
-        if (!first) strcat(r, ",");
-        strcat(r, kj->s); strcat(r, ":"); strcat(r, vj->s); first = 0;
+        if (!first) nc_json_append_cstr(&r, &length, &capacity, ",");
+        nc_json_append_cstr(&r, &length, &capacity, kj->s);
+        nc_json_append_cstr(&r, &length, &capacity, ":");
+        nc_json_append_cstr(&r, &length, &capacity, vj->s); first = 0;
     }
-    r = realloc(r, strlen(r)+2); strcat(r, "}");
+    nc_json_append_cstr(&r, &length, &capacity, "}");
     return nc_str_own(r);
 }
 static char *nc_json_escape_string_copy(const char *s) {
@@ -2312,7 +2411,6 @@ static NcVal *nc_builtin_json_stringify_smart(NcVal *v) {
 }
 
 /* ─── Sti-hjelpere ─────────────────────────────────────────────────────────── */
-#include <sys/stat.h>
 static char *nc_path_join_copy(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
     char *r = malloc(la + lb + 2);
@@ -2417,6 +2515,19 @@ static NcVal *nc_builtin_miljo_sett(NcVal *key, NcVal *val) {
 
 /* Små compat-restar frå eldre generated namn. */
 /* ─── Compat-wrapperar for eldre builtin-symbol ─────────────────────────────── */
+/* Desse symbola kan liggje i eldre bootstrap-NCB-ar som eksplisitte
+ * `builtin.*`-kall. Dei må finnast i den sjølvstendige C-runtimen sjølv om
+ * den aktuelle plattforma ikkje eksporterer ein separat host-dispatch. */
+NcVal *nc_fn_builtin_native_mkdir_p(NcVal **a, int na) {
+    return nc_builtin_mkdir_p(na > 0 ? a[0] : nc_nil());
+}
+NcVal *nc_fn_builtin_tensor_operation(NcVal **a, int na) {
+    (void)a; (void)na;
+    return nc_nil();
+}
+NcVal *nc_fn_builtin_heiltall(NcVal **a, int na) {
+    return nc_builtin_heltall(na > 0 ? a[0] : nc_nil());
+}
 NcVal *nc_fn_builtin_tekst_erstatt(NcVal **a, int na) { return nc_builtin_replace(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil(),na>2?a[2]:nc_nil()); }
 NcVal *nc_fn_builtin_tekst_starter_med(NcVal **a, int na) { return nc_builtin_starts_with(na>0?a[0]:nc_nil(),na>1?a[1]:nc_nil()); }
 NcVal *nc_fn_builtin_tekst_til_liten(NcVal **a, int na) { return nc_builtin_lower(na>0?a[0]:nc_nil()); }

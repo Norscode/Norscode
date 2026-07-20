@@ -88,7 +88,9 @@ funksjon stack_pop(ramme) {
     la stk = ramme["stack"]
     la n: heltall = lengde(stk)
     hvis n == 0 {
-        kast "Stack underflow"
+        // Ta med aktiv funksjon og instruksjonspeikar; utan dette blir
+        // selfhost-feil i import/bundling umoglege å lokalisere.
+        kast "Stack underflow i " + tekst(ramme["namn"]) + " ip=" + tekst_fra_heiltall(ramme["ip"])
     }
     la v = stk[n - 1]
     fjern_siste(stk)
@@ -812,6 +814,9 @@ funksjon vm_security_policy(arv_miljo: boolsk, målpolicy: boolsk) -> ordbok_tek
 }
 
 funksjon vm_capability_for(namn: tekst) -> tekst {
+    // Reine språk-/terminalbuiltins skal aldri arve ei capability frå seinare
+    // mønstertestar. Dette er òg ei fail-closed grense for AOT-dispatchen.
+    hvis namn == "builtin.skriv" eller namn == "skriv" { returner "" }
     hvis namn == "builtin.exec_prosess" eller namn == "builtin.process_spawn_argv" eller namn == "builtin.process_operation" eller namn == "builtin.kompiler_fil" { returner "process.exec" }
     hvis builtin.starts_with(namn, "builtin.thread_") { returner "thread.spawn" }
     hvis namn == "builtin.atomic_operation" { returner "thread.spawn" }
@@ -820,7 +825,7 @@ funksjon vm_capability_for(namn: tekst) -> tekst {
     hvis namn == "builtin.miljo_sett" eller namn == "miljo_sett" eller namn == "env.sett" eller namn == "std.env.sett" eller namn == "builtin.env.sett" { returner "env.write" }
     hvis namn == "fil_les" eller namn == "builtin.fil_les" eller namn == "builtin.fil_les_binær" eller namn == "builtin.fil_les_binary" eller namn == "builtin.fil_finnes" eller namn == "builtin.web.response_file" eller namn == "builtin.vm_module_load" eller namn == "builtin.vm_module_reload" eller builtin.ends_with(namn, "path.exists") eller builtin.ends_with(namn, "lagring.finnes") eller builtin.ends_with(namn, "lagring.last") { returner "disk.read" }
     hvis namn == "builtin.filesystem_read_operation" { returner "disk.read" }
-    hvis namn == "fil_skriv" eller namn == "builtin.fil_skriv" eller namn == "fil_slett" eller namn == "builtin.fil_slett" eller namn == "builtin.fil_append" eller namn == "builtin.fil_skriv_binær" eller namn == "builtin.fil_skriv_binary" eller namn == "builtin.mappe_opprett" eller namn == "builtin.mkdir_p" eller namn == "builtin.mkdir" eller namn == "mappe_opprett" eller namn == "mkdir_p" eller namn == "mkdir" eller builtin.ends_with(namn, "lagring.lagre") { returner "disk.write" }
+    hvis namn == "fil_skriv" eller namn == "builtin.fil_skriv" eller namn == "fil_slett" eller namn == "builtin.fil_slett" eller namn == "builtin.fil_append" eller namn == "builtin.fil_append_binary" eller namn == "builtin.fil_append_binær" eller namn == "builtin.fil_skriv_binær" eller namn == "builtin.fil_skriv_binary" eller namn == "builtin.mappe_opprett" eller namn == "builtin.mkdir_p" eller namn == "builtin.mkdir" eller namn == "mappe_opprett" eller namn == "mkdir_p" eller namn == "mkdir" eller builtin.ends_with(namn, "lagring.lagre") { returner "disk.write" }
     hvis namn == "builtin.filesystem_write_operation" eller namn == "builtin.native_mkdir_p" { returner "disk.write" }
     hvis namn == "db_open" eller namn == "builtin.db_open" eller builtin.ends_with(namn, "db.open") eller builtin.ends_with(namn, "db.query_text") eller builtin.ends_with(namn, "db.query_int") eller builtin.ends_with(namn, "db.ping") { returner "disk.read" }
     hvis builtin.index_of(namn, "db.") >= 0 eller namn == "db_create" eller namn == "builtin.db_create" eller namn == "db_close" eller namn == "builtin.db_close" { returner "disk.write" }
@@ -911,6 +916,27 @@ funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
     hvis cap == "" { returner 0 }
     la policy = functions["__vm_security_policy__"]
     la decision = runtime_security.krev(policy, cap)
+    // Den eksplisitte selfhost-inngangen blir kalla før eit NCB-kontekstkart
+    // er aktivert. Han må kunne lese kjelde og miljø for å materialisere
+    // første NCB, men skal ikkje få prosess-, nettverks-, skrive- eller JIT-
+    // capabilities. Bruk same diskrot som den vanlege VM-policyen.
+    la bootstrap = miljo_hent("NORSCODE_NATIVE_SELFHOST") == "1"
+    hvis bootstrap og (cap == "env.read" eller cap == "disk.read") og decision["allowed"] != "sann" {
+        hvis cap == "disk.read" og lengde(args) > 0 {
+            la sti = tekst(args[0])
+            la scope = miljo_hent("NORSCODE_VM_DISK_ROOT")
+            hvis scope == "" { scope = "." }
+            hvis ikkje vm_disk_scope_tillat({"scope.disk": scope}, sti) {
+                decision["reason"] = "path outside disk scope: " + sti
+            } ellers {
+                decision["allowed"] = "sann"
+                decision["reason"] = "bootstrap read"
+            }
+        } ellers {
+            decision["allowed"] = "sann"
+            decision["reason"] = "bootstrap environment read"
+        }
+    }
     la denied = decision["allowed"] != "sann"
     hvis ikkje denied og (cap == "disk.read" eller cap == "disk.write") og vm_disk_scope_krev_sti(namn) {
         hvis lengde(args) == 0 eller ikkje vm_disk_scope_tillat(policy, tekst(args[0])) {
@@ -1596,6 +1622,20 @@ funksjon json_parse(input: tekst) {
 
 funksjon json_stringify(v) -> tekst {
     returner json_skriv(v)
+}
+
+// Stabil Norscode-API for bytes -> tekst. Native runtime kan seinare
+// overstyre builtin.bytes_to_text med ein buffer-fast-path utan å endre
+// embedded NCB- eller parserkontrakten.
+funksjon vm_bytes_to_text(buffer) -> tekst {
+    hvis builtin.type(buffer) != "bytes" { kast "bytes_to_text krev bytes" }
+    la ut = ""
+    la i = 0
+    mens i < lengde(buffer) {
+        ut = ut + builtin.chr(buffer[i])
+        i = i + 1
+    }
+    returner ut
 }
 
 // json_parse_raw: parser JSON og returner verdiar som ordbok (ikkje strings)
@@ -3975,6 +4015,10 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner builtin.fil_les_binær(args[0])
     }
 
+    hvis namn == "builtin.fil_sett_kjorbar" {
+        returner builtin.fil_sett_kjorbar(args[0])
+    }
+
     hvis namn == "builtin.bytes_new" {
         returner builtin.bytes_new(args[0], args[1])
     }
@@ -3985,6 +4029,10 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.bytes_to_list" {
         returner builtin.bytes_to_list(args[0])
+    }
+
+    hvis namn == "builtin.bytes_to_text" {
+        returner vm_bytes_to_text(args[0])
     }
 
     hvis namn == "fil_skriv" eller namn == "builtin.fil_skriv" {
@@ -4198,6 +4246,9 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     hvis namn == "builtin.fil_append" {
         builtin.fil_append(args[0], args[1])
         returner 0
+    }
+    hvis namn == "builtin.fil_append_binary" eller namn == "builtin.fil_append_binær" {
+        returner builtin.fil_append_binary(args[0], args[1])
     }
 
     // Type og konvertering
@@ -5760,7 +5811,17 @@ funksjon køyr_funksjon(
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
             la indeks_verdi = obj[indeks]
-            la index_heap_id = vm_heap_track(functions, indeks_verdi)
+            // Store NCB-funksjonar direkte når vi indekserer det store,
+            // langliva funksjonskartet. Å registrere kvar funksjonsordbok i
+            // heap-tracking her tvingar fram ein dyr traversering av heile
+            // bootstrap-tabellen før codegen får skrive første funksjon.
+            la index_heap_id: tekst = ""
+            la er_ncb_tabell = builtin.type(obj) == "ordbok" og lengde(obj) > 500
+            la er_ncb_funksjon = builtin.type(obj) == "ordbok" og vm_map_har_nokkel(obj, "code") og vm_map_har_nokkel(obj, "params")
+            la er_lita_liste = builtin.type(obj) == "liste" og lengde(obj) <= 4
+            hvis ikkje (er_ncb_tabell eller er_ncb_funksjon eller er_lita_liste) {
+                index_heap_id = vm_heap_track(functions, indeks_verdi)
+            }
             stack_push_heap(ramme, indeks_verdi, index_heap_id)
             hvis index_heap_id != "" { vm_gc_safe_point(functions, usann) }
             ip = ip + 1
@@ -5938,6 +5999,10 @@ funksjon køyr_funksjon(
             // Generell continuation-frame. Forelderen blir verande på
             // VM-stacken, også når han eig ein aktiv try-handler.
             hvis løyst_namn != "" {
+                // Grensa gjeld ei samanhengande tail-kjede, ikkje summen av
+                // alle tail-kall i eit langt VM-køyr. Eit vanleg CALL bryt
+                // derfor kjeda og skal starte teljaren på nytt.
+                tail_chain_count = 0
                 hvis lengde(functions["__vm_active_frames__"]) >= max_vm_frames {
                     la frame_feil = "Sikkerheitsfeil: maks VM-frame-djupn overskreden"
                     hvis lengde(try_stack) > 0 {

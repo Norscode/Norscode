@@ -17,6 +17,7 @@ Normal rekkefølge:
 | macOS x86_64 | `norscode-macos-x86_64` |
 | Linux x86_64 | `norscode-linux-x86_64` |
 | Linux arm64 | `norscode-linux-arm64` |
+| Windows x86_64 | `norscode-windows-x86_64.exe` |
 
 ## Kontrollpanel
 
