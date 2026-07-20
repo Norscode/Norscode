@@ -148,7 +148,7 @@ ln -sfn "$current_link/bin/nor" "$PREFIX/bin/nor"
 ln -sfn "$current_link/bin/nl" "$PREFIX/bin/nl"
 ln -sfn "$current_link/bin/bootstrap" "$PREFIX/bin/bootstrap"
 
-for entry in compiler dist docs examples norcode norcode.toml selfhost scripts std tests tools README.md LICENSE CHANGELOG.md Makefile app.no; do
+for entry in bootstrap compiler dist docs examples norcode norcode.toml selfhost scripts std tests tools README.md LICENSE CHANGELOG.md Makefile app.no; do
   if [ -e "$current_link/$entry" ]; then
     ln -sfn "$current_link/$entry" "$PREFIX/$entry"
   fi
