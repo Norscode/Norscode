@@ -32,4 +32,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/controlled_runtime_promotion_v3005.no"
+if [ "$NORSCODE_PROMOTION_DRY_RUN" = "sann" ]; then
+  exec env NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/controlled_runtime_promotion_v3005.no"
+fi
+
+# Tung preflight og lett apply/post-gate køyrer i kvar sin Norscode-prosess,
+# slik at VM-minnet frå mediaflata er returnert før aktiv runtime blir prøvd.
+env NORSCODE_PROMOTION_DRY_RUN=sann NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/controlled_runtime_promotion_v3005.no"
+exec env NORSCODE_PROMOTION_PHASE=apply NORSCODE_PROMOTION_DRY_RUN=usann NORSCODE_ENABLE_EXEC_PROSESS="${NORSCODE_ENABLE_EXEC_PROSESS:-1}" NORSCODE_ROOT="$ROOT" "$ROOT/bin/nc" run "$ROOT/tools/controlled_runtime_promotion_v3005.no"
