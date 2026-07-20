@@ -78,12 +78,16 @@ sha256_for_file() {
   first_word "$_line"
 }
 
-env \
-  NORSCODE_ENABLE_EXEC_PROSESS=1 \
-  NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
-  NORSCODE_INSTALL_PREFIX="$PREFIX" \
-  NORSCODE_ROOT="$ROOT_DIR" \
-  "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no" >"$out" 2>&1 || rc=$?
+if [ "${NORSCODE_INSTALL_FORCE_RESERVE:-0}" != "1" ]; then
+  env \
+    NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
+    NORSCODE_INSTALL_PREFIX="$PREFIX" \
+    NORSCODE_ROOT="$ROOT_DIR" \
+    "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no" >"$out" 2>&1 || rc=$?
+else
+  rc=1
+fi
 if [ "$rc" -eq 0 ]; then
   print_file "$out"
   rm -f "$out"
