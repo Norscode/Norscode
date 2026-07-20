@@ -26,6 +26,7 @@ has_release_fallback_reason() {
       *"Ukjent funksjon: exec_prosess"*|\
       *"Ukjent funksjon: builtin.exec_prosess"*|\
       *"Ukjent funksjon: builtin.builtin.exec_prosess"*|\
+      *"Ufullstendig binær fillesing"*|\
       *"Manglar distribusjonsbinary: "*/dist/norscode_native*|\
       *"Klarte ikkje byggje release-runtime med innebygd NCB"*) return 0 ;;
     esac
