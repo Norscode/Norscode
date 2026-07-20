@@ -29,6 +29,8 @@
 
 # ─── Konstruktørar ────────────────────────────────────────────────────────────
 
+bruk std.base64 som base64
+
 funksjon ny() -> ordbok_tekst {
     la msg: ordbok_tekst = {}
     msg["_type"]    = "epost_melding"
@@ -53,6 +55,7 @@ funksjon ny_multipart(subtype: tekst) -> ordbok_tekst {
 
 funksjon parse(rå: tekst) -> ordbok_tekst {
     la msg = ny()
+    hvis lengde(rå) > 10485760 { kast "EpostFeil: melding er for stor" }
     la linjer = builtin.split(rå, "\n")
     la n: heltall = lengde(linjer)
 
@@ -77,6 +80,7 @@ funksjon parse(rå: tekst) -> ordbok_tekst {
             # Resten er kropp
             la kropp_linjer = builtin.slice(linjer, i, n)
             msg["_kropp"] = builtin.join(kropp_linjer, "\n")
+            msg["_raw_kropp"] = msg["_kropp"]
             # Sjekk om multipart
             la ct: tekst = get_header(msg, "Content-Type")
             la ct_delar = builtin.split(ct, ";")
@@ -86,6 +90,7 @@ funksjon parse(rå: tekst) -> ordbok_tekst {
             # Sjekk Content-Transfer-Encoding
             la cte: tekst = get_header(msg, "Content-Transfer-Encoding")
             msg["_encoding"] = cte
+            _dekod_transfer(msg)
 
             hvis (tekst_starter_med(ct_type, "multipart/")) {
                 msg["_er_multi"] = "sann"
@@ -107,10 +112,10 @@ funksjon parse(rå: tekst) -> ordbok_tekst {
 
         hvis (er_fold og sist_header_namn != "") {
             # Legg mottakar-verdi på forrige header
-            la headers = builtin.json_parse(msg["_headers"])
+            la headers = builtin.json_parse_raw(msg["_headers"])
             la hn: heltall = lengde(headers)
             hvis (hn > 0) {
-                la siste = builtin.json_parse(headers[hn - 1])
+                la siste = headers[hn - 1]
                 siste[1] = siste[1] + " " + _trim(linje_r)
                 headers[hn - 1] = builtin.json_stringify(siste)
                 msg["_headers"] = builtin.json_stringify(headers)
@@ -127,7 +132,7 @@ funksjon parse(rå: tekst) -> ordbok_tekst {
                 }
                 la verdi: tekst = _trim(verdi_raw)
                 la par: liste_tekst = [namn, verdi]
-                la headers = builtin.json_parse(msg["_headers"])
+                la headers = builtin.json_parse_raw(msg["_headers"])
                 legg_til(headers, builtin.json_stringify(par))
                 msg["_headers"] = builtin.json_stringify(headers)
                 sist_header_namn = namn
@@ -136,6 +141,65 @@ funksjon parse(rå: tekst) -> ordbok_tekst {
         i = i + 1
     }
     returner msg
+}
+
+funksjon _dekod_transfer(msg: ordbok_tekst) {
+    la encoding = _lower(_trim(msg["_encoding"]))
+    hvis encoding == "" eller encoding == "7bit" eller encoding == "8bit" eller encoding == "binary" { returner }
+    prøv {
+        hvis encoding == "base64" {
+            la bytes = base64.dekod_bytes(msg["_kropp"])
+            msg["_kropp"] = _bytes_til_tekst(bytes)
+            returner
+        }
+        hvis encoding == "quoted-printable" {
+            msg["_kropp"] = _dekod_quoted_printable(msg["_kropp"])
+            returner
+        }
+        msg["_decode_error"] = "ukjend transfer-encoding"
+    } fang (e) {
+        msg["_decode_error"] = tekst(e)
+    }
+}
+
+funksjon _bytes_til_tekst(bytes) -> tekst {
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(bytes) {
+        legg_til(ut, builtin.chr(bytes[i]))
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
+}
+
+funksjon _hex_verdi(c: tekst) -> heiltall {
+    la k = builtin.char_code(c)
+    hvis k >= 48 og k <= 57 { returner k - 48 }
+    hvis k >= 65 og k <= 70 { returner k - 55 }
+    hvis k >= 97 og k <= 102 { returner k - 87 }
+    returner -1
+}
+
+funksjon _dekod_quoted_printable(koda: tekst) -> tekst {
+    la t = builtin.split(koda, "")
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        hvis t[i] == "=" og i + 2 < lengde(t) {
+            hvis t[i + 1] == "\r" og t[i + 2] == "\n" { i = i + 3 fortsett }
+            hvis t[i + 1] == "\n" { i = i + 2 fortsett }
+            la hi = _hex_verdi(t[i + 1])
+            la lo = _hex_verdi(t[i + 2])
+            hvis hi >= 0 og lo >= 0 {
+                legg_til(ut, builtin.chr(hi * 16 + lo))
+                i = i + 3
+                fortsett
+            }
+        }
+        legg_til(ut, t[i])
+        i = i + 1
+    }
+    returner builtin.join(ut, "")
 }
 
 funksjon _parse_delar(msg: ordbok_tekst, kropp: tekst, boundary: tekst) {
@@ -156,7 +220,8 @@ funksjon _parse_delar(msg: ordbok_tekst, kropp: tekst, boundary: tekst) {
             la er_slutt: bool = usann
             hvis (tl >= 2 og tt[0] == "-" og tt[1] == "-") { er_slutt = sann }
             hvis (ikkje er_slutt og tl > 0) {
-                la del_msg = parse(del_tekst)
+                # Boundary-linja etterfølges normalt av CRLF; fjern den før headerparse.
+                la del_msg = parse(_trim(del_tekst))
                 legg_til(resultat, builtin.json_stringify(del_msg))
             }
         }
@@ -169,11 +234,11 @@ funksjon _parse_delar(msg: ordbok_tekst, kropp: tekst, boundary: tekst) {
 
 # Hent første header med dette namnet (case-insensitive)
 funksjon get_header(msg: ordbok_tekst, namn: tekst) -> tekst {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la namn_lower: tekst = _lower(namn)
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         la header_namn: tekst = _lower(par[0])
         hvis (header_namn == namn_lower) {
             returner par[1]
@@ -185,12 +250,12 @@ funksjon get_header(msg: ordbok_tekst, namn: tekst) -> tekst {
 
 # Hent alle headers med dette namnet
 funksjon get_all_headers(msg: ordbok_tekst, namn: tekst) -> liste_tekst {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la namn_lower: tekst = _lower(namn)
     la resultat: liste_tekst = []
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         la header_namn: tekst = _lower(par[0])
         hvis (header_namn == namn_lower) {
             legg_til(resultat, par[1])
@@ -202,12 +267,12 @@ funksjon get_all_headers(msg: ordbok_tekst, namn: tekst) -> liste_tekst {
 
 # Set ein header (erstattar første førekomst, eller legg mottakar)
 funksjon set_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la namn_lower: tekst = _lower(namn)
     la funne: bool = usann
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         la header_namn: tekst = _lower(par[0])
         hvis (header_namn == namn_lower og ikkje funne) {
             la ny_par: liste_tekst = [namn, verdi]
@@ -225,7 +290,7 @@ funksjon set_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
 
 # Legg mottakar ein header (utan å erstatte eksisterande)
 funksjon add_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la ny_par: liste_tekst = [namn, verdi]
     legg_til(headers, builtin.json_stringify(ny_par))
     msg["_headers"] = builtin.json_stringify(headers)
@@ -233,12 +298,12 @@ funksjon add_header(msg: ordbok_tekst, namn: tekst, verdi: tekst) {
 
 # Slett alle headers med dette namnet
 funksjon del_header(msg: ordbok_tekst, namn: tekst) {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la namn_lower: tekst = _lower(namn)
     la ny_headers: liste_tekst = []
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         la header_namn: tekst = _lower(par[0])
         hvis (header_namn != namn_lower) {
             legg_til(ny_headers, headers[i])
@@ -250,11 +315,11 @@ funksjon del_header(msg: ordbok_tekst, namn: tekst) {
 
 # Hent alle header-namn
 funksjon header_nøklar(msg: ordbok_tekst) -> liste_tekst {
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la resultat: liste_tekst = []
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         legg_til(resultat, par[0])
         i = i + 1
     }
@@ -286,11 +351,11 @@ funksjon er_multipart(msg: ordbok_tekst) -> bool {
 # ─── MIME-delar (multipart) ───────────────────────────────────────────────────
 
 funksjon get_delar(msg: ordbok_tekst) -> liste_tekst {
-    returner builtin.json_parse(msg["_delar"])
+    returner builtin.json_parse_raw(msg["_delar"])
 }
 
 funksjon add_del(msg: ordbok_tekst, del_msg: ordbok_tekst) {
-    la delar = builtin.json_parse(msg["_delar"])
+    la delar = builtin.json_parse_raw(msg["_delar"])
     legg_til(delar, builtin.json_stringify(del_msg))
     msg["_delar"] = builtin.json_stringify(delar)
     msg["_er_multi"] = "sann"
@@ -306,10 +371,10 @@ funksjon walk(msg: ordbok_tekst) -> liste_tekst {
 funksjon _walk_rekursiv(msg: ordbok_tekst, resultat: liste_tekst) {
     legg_til(resultat, builtin.json_stringify(msg))
     hvis (er_multipart(msg)) {
-        la delar = builtin.json_parse(msg["_delar"])
+        la delar = builtin.json_parse_raw(msg["_delar"])
         la i: heltall = 0
         mens (i < lengde(delar)) {
-            la del_msg = builtin.json_parse(delar[i])
+            la del_msg = delar[i]
             _walk_rekursiv(del_msg, resultat)
             i = i + 1
         }
@@ -321,7 +386,7 @@ funksjon finn_del(msg: ordbok_tekst, content_type: tekst) -> ordbok_tekst {
     la alle = walk(msg)
     la i: heltall = 0
     mens (i < lengde(alle)) {
-        la del_msg = builtin.json_parse(alle[i])
+        la del_msg = builtin.json_parse_raw(alle[i])
         la ct: tekst = get_content_type(del_msg)
         la ct_delar = builtin.split(ct, ";")
         la ct_base: tekst = _trim(ct_delar[0])
@@ -343,10 +408,10 @@ funksjon format(msg: ordbok_tekst) -> tekst {
     la har_ct: bool = get_header(msg, "Content-Type") != ""
 
     # Skriv headers
-    la headers = builtin.json_parse(msg["_headers"])
+    la headers = builtin.json_parse_raw(msg["_headers"])
     la i: heltall = 0
     mens (i < lengde(headers)) {
-        la par = builtin.json_parse(headers[i])
+        la par = headers[i]
         ut = ut + par[0] + ": " + par[1] + "\n"
         i = i + 1
     }
@@ -366,11 +431,11 @@ funksjon format(msg: ordbok_tekst) -> tekst {
     # Kropp
     hvis (er_multipart(msg)) {
         la boundary: tekst = msg["_boundary"]
-        la delar = builtin.json_parse(msg["_delar"])
+        la delar = builtin.json_parse_raw(msg["_delar"])
         la j: heltall = 0
         mens (j < lengde(delar)) {
             ut = ut + "--" + boundary + "\n"
-            la del_msg = builtin.json_parse(delar[j])
+            la del_msg = builtin.json_parse_raw(delar[j])
             ut = ut + format(del_msg)
             j = j + 1
         }

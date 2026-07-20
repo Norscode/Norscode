@@ -1,0 +1,474 @@
+bruk std.cli som cli
+bruk std.web_app_stack som stack
+bruk std.pathlib som pl
+bruk std.fil som fil
+bruk std.orm som orm
+bruk std.test som test
+bruk src.config som config
+bruk src.models som models
+
+funksjon _migrasjon_state_fil() -> tekst {
+    returner "migrations/schema_state.json"
+}
+
+funksjon _auto_migrasjon_fil() -> tekst {
+    returner "migrations/migrations.json"
+}
+
+funksjon _null_til_4(n: heiltall) -> tekst {
+    hvis n < 10 { returner "000" + tekst_fra_heltall(n) }
+    hvis n < 100 { returner "00" + tekst_fra_heltall(n) }
+    hvis n < 1000 { returner "0" + tekst_fra_heltall(n) }
+    returner tekst_fra_heltall(n)
+}
+
+funksjon _hent_tilfeldig_data(sti: tekst) -> ordbok_tekst {
+    hvis ikkje fil.finnes(sti) { returner {} }
+    la rå = fil.les_eller_tom(sti)
+    hvis rå == "" { returner {} }
+    prøv {
+        la parsed = builtin.json_parse_raw(rå)
+        hvis builtin.type(parsed) == "ordbok" { returner parsed }
+        hvis builtin.type(parsed) == "liste" {
+            la wrapper: ordbok_tekst = {}
+            wrapper["items"] = parsed
+            returner wrapper
+        }
+    } fang (e) {
+        returner {}
+    }
+    returner {}
+}
+
+funksjon _tabell_felt(snapshot: liste<ordbok_tekst>, tabell: tekst) -> liste<tekst> {
+    la i: heiltall = 0
+    mens i < lengde(snapshot) {
+        la e = snapshot[i]
+        hvis e["table"] == tabell {
+            hvis har_nokkel(e, "fields") og builtin.type(e["fields"]) == "liste" {
+                returner e["fields"]
+            }
+            returner []
+        }
+        i = i + 1
+    }
+    returner []
+}
+
+funksjon _felt_finnes(liste_felter: liste<tekst>, felt: tekst) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(liste_felter) {
+        hvis liste_felter[i] == felt { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _siste_auto_namn() -> tekst {
+    la state = _hent_tilfeldig_data(_auto_migrasjon_fil())
+    hvis ikkje har_nokkel(state, "items") {
+        returner "0000"
+    }
+
+    la migrasjonar = state["items"]
+    hvis builtin.type(migrasjonar) != "liste" {
+        returner "0000"
+    }
+
+    la hoygast = 0
+    la i: heiltall = 0
+    mens i < lengde(migrasjonar) {
+        la m = migrasjonar[i]
+        hvis builtin.type(m) == "ordbok" {
+            la namn = m["name"]
+            la del = builtin.split(namn, "_")
+            hvis lengde(del) > 0 {
+                la pref = del[0]
+                hvis pref != "" {
+                    prøv {
+                        la tal = builtin.heltall_fra_tekst(pref)
+                        hvis tal > hoygast { hoygast = tal }
+                    } fang (e) {
+                        // ignorerar ugyldige prefiksar
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner _null_til_4(hoygast)
+}
+
+funksjon _les_snapshot() -> liste<ordbok_tekst> {
+    la raw = _hent_tilfeldig_data(_migrasjon_state_fil())
+    hvis har_nokkel(raw, "models") og builtin.type(raw["models"]) == "liste" {
+        returner raw["models"]
+    }
+    returner []
+}
+
+funksjon _skriv_snapshot(snapshot: liste<ordbok_tekst>) {
+    fil.skriv_fil(_migrasjon_state_fil(), builtin.json_stringify({"models": snapshot}))
+}
+
+funksjon _hent_auto_migrasjonar() -> liste<ordbok_tekst> {
+    la raw = _hent_tilfeldig_data(_auto_migrasjon_fil())
+    hvis har_nokkel(raw, "items") og builtin.type(raw["items"]) == "liste" {
+        returner raw["items"]
+    }
+    returner []
+}
+
+funksjon _lagre_auto_migrasjonar(migrasjonar: liste<ordbok_tekst>) {
+    fil.skriv_fil(_auto_migrasjon_fil(), builtin.json_stringify({"items": migrasjonar}))
+}
+
+funksjon _bygg_migrasjonstekst(forrige: liste<ordbok_tekst>, no: liste<ordbok_tekst>) -> ordbok_tekst {
+    la up: liste<tekst> = []
+    la down: liste<tekst> = []
+
+    la i: heiltall = 0
+    mens i < lengde(no) {
+        la e = no[i]
+        la tabell = e["table"]
+        la felt = e["fields"]
+        hvis builtin.type(felt) != "liste" { felt = [] }
+        la tidlegare = _tabell_felt(forrige, tabell)
+        hvis lengde(tidlegare) == 0 {
+            legg_til(up, "CREATE TABLE " + tabell + " (" + tekst_saman(felt, ",") + ");")
+            legg_til(down, "DROP TABLE IF EXISTS " + tabell + ";")
+        } ellers {
+            la j: heiltall = 0
+            mens j < lengde(felt) {
+                la felt_def = felt[j]
+                hvis ikkje _felt_finnes(tidlegare, felt_def) {
+                    legg_til(up, "ALTER TABLE " + tabell + " ADD COLUMN " + felt_def + ";")
+                    legg_til(down, "-- automatisk migrasjon manglar reversering: " + felt_def + " i " + tabell)
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    la k: heiltall = 0
+    mens k < lengde(forrige) {
+        la e_prev = forrige[k]
+        la tabell = e_prev["table"]
+        hvis tabell == "" { k = k + 1; fortsett }
+        la tabell_felt = e_prev["fields"]
+        hvis builtin.type(tabell_felt) != "liste" { tabell_felt = [] }
+        la nye_felt = _tabell_felt(no, tabell)
+        hvis lengde(nye_felt) == 0 {
+            legg_til(up, "DROP TABLE IF EXISTS " + tabell + ";")
+            legg_til(down, "CREATE TABLE " + tabell + " (" + tekst_saman(tabell_felt, ",") + ");")
+        }
+        k = k + 1
+    }
+
+    hvis lengde(up) == 0 {
+        la svar: ordbok_tekst = {}
+        svar["up"] = ""
+        svar["down"] = ""
+        returner svar
+    }
+
+    la svar: ordbok_tekst = {}
+    svar["up"] = tekst_saman(up, "\n")
+    svar["down"] = tekst_saman(down, "\n")
+    returner svar
+}
+
+funksjon _normaliser_tekst(sti: tekst) -> tekst {
+    hvis lengde(sti) >= 3 {
+        hvis builtin.slice(sti, lengde(sti) - 3, lengde(sti)) == ".no" {
+            returner builtin.slice(sti, 0, lengde(sti) - 3)
+        }
+    }
+    returner sti
+}
+
+funksjon _sti_til_modul(sti_full: tekst, base_sti: tekst) -> tekst {
+    la s = sti_full
+    hvis tekst_starter_med(s, base_sti) {
+        s = builtin.slice(s, lengde(base_sti), lengde(s))
+        hvis lengde(s) > 0 og builtin.slice(s, 0, 1) == "/" {
+            s = builtin.slice(s, 1, lengde(s))
+        }
+    }
+
+    s = _normaliser_tekst(s)
+
+    la deler = builtin.split(s, "/")
+    la modul: tekst = ""
+    la i: heiltall = 0
+    mens i < lengde(deler) {
+        la bit = deler[i]
+        hvis bit != "" og bit != "." {
+            hvis modul == "" { modul = bit } ellers { modul = modul + "." + bit }
+        }
+        i = i + 1
+    }
+    returner modul
+}
+
+funksjon _legg_til_unik(modular: liste<tekst>, namn: tekst) {
+    la i: heiltall = 0
+    mens i < lengde(modular) {
+        hvis modular[i] == namn { returner }
+        i = i + 1
+    }
+    legg_til(modular, namn)
+}
+
+funksjon _finn_tester() -> liste<tekst> {
+    la base = pl.sti_tekst(pl.gjeldande_katalog())
+    la modular: liste<tekst> = []
+    la test_dir = pl.ny(base + "/tests")
+    hvis pl.er_katalog(test_dir) {
+        la rå_t = pl.rglob(test_dir, "test_*.no")
+        la i: heiltall = 0
+        mens i < lengde(rå_t) {
+            la p = builtin.json_parse(rå_t[i])
+            la namn = _sti_til_modul(p["sti"], base)
+            _legg_til_unik(modular, namn)
+            i = i + 1
+        }
+    }
+
+    la apps_dir = pl.ny(base + "/apps")
+    hvis pl.er_katalog(apps_dir) {
+        la app_kat = pl.iterer_katalog(apps_dir)
+        la ai: heiltall = 0
+        mens ai < lengde(app_kat) {
+            la app_p = builtin.json_parse(app_kat[ai])
+            hvis pl.er_katalog(pl.ny(app_p["sti"])) {
+                la test_kat = pl.koble(pl.ny(app_p["sti"]), "tests")
+                hvis pl.er_katalog(test_kat) {
+                    la raw = pl.rglob(test_kat, "test_*.no")
+                    la i: heiltall = 0
+                    mens i < lengde(raw) {
+                        la p = builtin.json_parse(raw[i])
+                        la namn = _sti_til_modul(p["sti"], base)
+                        _legg_til_unik(modular, namn)
+                        i = i + 1
+                    }
+                }
+            }
+            ai = ai + 1
+        }
+    }
+
+    returner modular
+}
+
+funksjon _køyr_test_modul(modul: tekst) -> ordbok_tekst {
+    la resultat: ordbok_tekst = {}
+    resultat["namn"] = modul
+    prøv {
+        la _ = builtin.ncb_call_fn(modul + ".start", {})
+        resultat["bestått"] = "sann"
+        resultat["feil"] = ""
+        skriv("  ✓ " + modul)
+    } fang (e) {
+        resultat["bestått"] = "usann"
+        resultat["feil"] = tekst(e)
+        skriv("  ✗ " + modul)
+        skriv("    " + tekst(e))
+    }
+    returner resultat
+}
+
+funksjon _fixture_element_for_lagring(item: ordbok_tekst) -> ordbok_tekst {
+    la row: ordbok_tekst = {}
+    la modell: tekst = ""
+    hvis har_nokkel(item, "model") { modell = tekst(item["model"]) }
+    ellers hvis har_nokkel(item, "table") { modell = tekst(item["table"]) }
+    hvis modell == "" { returner {} }
+
+    hvis har_nokkel(item, "fields") {
+        la fields_raw = item["fields"]
+        row = {}
+        la keys = nøkler(fields_raw)
+        la fi: heiltall = 0
+        mens fi < lengde(keys) {
+            la key = keys[fi]
+            row[key] = tekst(fields_raw[key])
+            fi = fi + 1
+        }
+    } ellers {
+        row = {}
+        la keys = nøkler(item)
+        la i: heiltall = 0
+        mens i < lengde(keys) {
+            la key = keys[i]
+            hvis key != "model" og key != "table" og key != "pk" {
+                row[key] = tekst(item[key])
+            }
+            i = i + 1
+        }
+    }
+
+    returner {"model": modell, "rad": row}
+}
+
+funksjon _last_fixture_fil(conn: tekst, sti_fil: tekst) -> heiltall {
+    prøv {
+        la innhald = pl.les_tekst(pl.ny(sti_fil))
+        la parsed = builtin.json_parse_raw(innhald)
+        la element: liste<ordbok_tekst> = []
+        hvis builtin.type(parsed) == "liste" { element = parsed } ellers hvis builtin.type(parsed) == "ordbok" { legg_til(element, parsed) }
+
+        la i: heiltall = 0
+        mens i < lengde(element) {
+            la norm = _fixture_element_for_lagring(element[i])
+            hvis har_nokkel(norm, "model") {
+                la modell = tekst(norm["model"])
+                la rad = norm["rad"]
+                la _ = orm.lagre(conn, modell, rad)
+            }
+            i = i + 1
+        }
+        returner 0
+    } fang (e) {
+        skriv("Feil ved lasting av fixture " + sti_fil + ": " + tekst(e))
+        returner 1
+    }
+    returner 0
+}
+
+funksjon makemigrations(args: ordbok_tekst) -> heiltall {
+    la _ = args
+    la now = models.modeller()
+    la before = _les_snapshot()
+
+    hvis lengde(before) == 0 {
+        _skriv_snapshot(now)
+        skriv("Ingen autogenererte migrasjonar enda. Startsnapshot lagra.")
+        returner 0
+    }
+
+    la diff = _bygg_migrasjonstekst(before, now)
+    la up = diff["up"]
+    hvis up == "" {
+        skriv("Ingen modellendringar. Ingenting å gjere.")
+        returner 0
+    }
+
+    la siste = _null_til_4(heltall_fra_tekst(_siste_auto_namn()) + 1)
+    la auto_namn = siste + "_auto"
+
+    la auto = _hent_auto_migrasjonar()
+    la ny: ordbok_tekst = {}
+    ny["name"] = auto_namn
+    ny["opp_sql"] = up
+    ny["ned_sql"] = diff["down"]
+    legg_til(auto, ny)
+
+    _lagre_auto_migrasjonar(auto)
+    _skriv_snapshot(now)
+    skriv("Laga migrasjon: " + auto_namn)
+    returner 0
+}
+
+funksjon test(args: ordbok_tekst) -> heiltall {
+    la db_sti = cli.flagg(args, "db", test.test_db())
+    la fixtures_arg = cli.flagg(args, "fixtures", "")
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
+
+    la migrasjon_status = stack.køyr_migrasjonar(app["conn"], models.migrasjonar())
+    hvis migrasjon_status < 0 {
+        la _ = stack.lukk(app)
+        returner 1
+    }
+
+    hvis fixtures_arg != "" {
+        la base = pl.sti_tekst(pl.gjeldande_katalog()) + "/tests/payloads"
+        la payload_dir = pl.ny(base)
+        hvis tekst_starter_med(fixtures_arg, "all") {
+            hvis pl.er_katalog(payload_dir) {
+                la filer = pl.rglob(payload_dir, "*.json")
+                la i: heiltall = 0
+                mens i < lengde(filer) {
+                    la f = builtin.json_parse(filer[i])
+                    la kod = _last_fixture_fil(app["conn"], f["sti"])
+                    hvis kod > 0 { 
+                        la _ = stack.lukk(app)
+                        returner 1
+                    }
+                    i = i + 1
+                }
+            }
+        } ellers {
+            la liste = builtin.split(fixtures_arg, ",")
+            la i: heiltall = 0
+            mens i < lengde(liste) {
+                la namn = builtin.trim(liste[i])
+                hvis namn == "" { i = i + 1; fortsett }
+
+                la sti = base + "/" + namn
+                hvis tekst_starter_med(namn, "/") { sti = namn }
+                hvis builtin.index_of(sti, ".json") == -1 { sti = sti + ".json" }
+                la kod = _last_fixture_fil(app["conn"], sti)
+                hvis kod > 0 {
+                    la _ = stack.lukk(app)
+                    returner 1
+                }
+                i = i + 1
+            }
+        }
+    }
+
+    la modular = _finn_tester()
+    la total = lengde(modular)
+    la bestått: heiltall = 0
+    la feila: heiltall = 0
+
+    skriv("\n=== Norscode testkøyrar ===")
+    skriv("Køyrer " + tekst_fra_heltall(total) + " testmodularer...")
+
+    la i: heiltall = 0
+    mens i < total {
+        la r = _køyr_test_modul(modular[i])
+        hvis r["bestått"] == "sann" { bestått = bestått + 1 } ellers { feila = feila + 1 }
+        i = i + 1
+    }
+
+    la _ = stack.lukk(app)
+    skriv("")
+    skriv("Bestått: " + tekst_fra_heltall(bestått) + "/" + tekst_fra_heltall(total))
+    hvis feila > 0 {
+        skriv("Feila:   " + tekst_fra_heltall(feila))
+        returner 1
+    }
+    skriv("Alle testar bestått!")
+    returner 0
+}
+
+funksjon migrate(args: ordbok_tekst) -> heiltall {
+    la db_sti = cli.flagg(args, "db", config.DATABASE_STI)
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
+    la r = stack.køyr_migrasjonar(app["conn"], models.migrasjonar())
+    la _ = stack.lukk(app)
+    returner r
+}
+
+funksjon status(args: ordbok_tekst) -> heiltall {
+    la db_sti = cli.flagg(args, "db", config.DATABASE_STI)
+    la app = stack.bootstrap(config.INNSTILLINGAR_STI, db_sti)
+    la r = stack.status_migrasjonar(app["conn"], models.migrasjonar())
+    la _ = stack.lukk(app)
+    returner r
+}
+
+funksjon main() -> heiltall {
+    la app = cli.ny("manage")
+    cli.kommando_med_flagg(app, "makemigrations", "Opprett autogenerert migrasjon frå modelldefinisjon", "makemigrations", [])
+    cli.kommando_med_flagg(app, "migrate", "Køyr migrasjonar", "migrate", ["db"])
+    cli.kommando_med_flagg(app, "status", "Vis migrasjonsstatus", "status", ["db"])
+    cli.kommando_med_flagg(app, "test", "Køyr testpakke med testdatabase og fixture-lasting", "test", ["db", "fixtures"])
+    la _ = cli.køyr(app)
+    returner 0
+}
+
+main()

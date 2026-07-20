@@ -1,0 +1,148 @@
+bruk std.tråd som trd
+bruk std.runtime_memory som memory
+
+funksjon generell_worker(args: ordbok_tekst) -> tekst {
+    la i: heiltall = 0
+    mens i < args["iterations"] {
+        builtin.atomic_operation({"operation": "fetch_add", "handle": args["handle"], "delta": 1, "order": "seq_cst"})
+        i = i + 1
+    }
+    returner "generell-ferdig"
+}
+
+funksjon feil_worker(args: ordbok_tekst) -> tekst {
+    kast "worker-feil"
+    returner "skal-ikkje-returnerast"
+}
+
+funksjon heap_worker(args: ordbok_tekst) -> tekst {
+    la i: heiltall = 0
+    mens i < args["iterations"] {
+        hvis memory.alloker(args["heap"], "liste", 8) == "" { returner "allocation-error" }
+        i = i + 1
+    }
+    returner "allocated:" + tekst_fra_heltall(i)
+}
+
+funksjon heap_mutation_worker(args: ordbok_tekst) -> tekst {
+    la iterations = heltall_fra_tekst(args["iterations"])
+    la i: heiltall = 0
+    mens i < iterations {
+        hvis ikkje memory.legg_rot(args["heap"], args["from"]) { returner "root-add-error" }
+        hvis ikkje memory.legg_ref(args["heap"], args["from"], args["to"]) { returner "ref-add-error" }
+        hvis ikkje memory.objekt_skriv_byte(args["heap"], args["from"], 0, i) { returner "write-error" }
+        hvis ikkje memory.fjern_ref(args["heap"], args["from"], args["to"]) { returner "ref-remove-error" }
+        hvis ikkje memory.fjern_rot(args["heap"], args["from"]) { returner "root-remove-error" }
+        i = i + 1
+    }
+    returner "mutated:" + tekst_fra_heltall(i)
+}
+
+funksjon heap_gc_worker(args: ordbok_tekst) -> tekst {
+    la iterations = heltall_fra_tekst(args["iterations"])
+    la i: heiltall = 0
+    mens i < iterations {
+        hvis memory.collect(args["heap"])["alive"] != args["expected_alive"] { returner "collect-error" }
+        hvis memory.compact(args["heap"])["status"] != "ferdig" { returner "compact-error" }
+        i = i + 1
+    }
+    returner "collected:" + tekst_fra_heltall(i)
+}
+
+funksjon signal_worker(args: ordbok_tekst) -> tekst {
+    la svar = builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": "signal_query", "handle": "signal-mask", "thread_id": "current", "timeout_ms": "0", "signals": ["USR1"]})
+    returner svar["value"]
+}
+
+funksjon start() -> heiltall {
+    la manager = trd.ny_manager()
+    assert(trd.ny_atomisk(manager, "counter", 0))
+    la handle = manager["_delt"]["counter"]["handle"]
+    assert(handle != "")
+
+    la a = trd.ny_tråd_med_args(manager, "thread.atomic_increment", {"handle": handle, "iterations": 5000})
+    la b = trd.ny_tråd_med_args(manager, "thread.atomic_increment", {"handle": handle, "iterations": 5000})
+    assert(trd.start_native(manager, a, 65536))
+    assert(trd.start_native(manager, b, 65536))
+    assert_eq(trd.tal_aktive(manager), 2)
+    assert_eq(trd.join_native(manager, a, 5000)["status"], "finished")
+    assert_eq(trd.join_native(manager, b, 5000)["status"], "finished")
+    assert_eq(trd.atomisk_hent(manager, "counter", "seq_cst"), 10000)
+    assert_eq(trd.tal_aktive(manager), 0)
+
+    la c = trd.ny_tråd_med_args(manager, "thread.atomic_increment", {"handle": handle, "iterations": 100000000})
+    assert(trd.start_native(manager, c, 65536))
+    assert_eq(trd.join_native(manager, c, 0)["status"], "timeout")
+    assert(trd.kanseller_native(manager, c))
+    assert_eq(trd.join_native(manager, c, 5000)["status"], "finished")
+    assert_eq(manager[c]["status"], "ferdig")
+
+    la mutex = trd.ny_native_mutex()
+    la condition = trd.ny_native_condition()
+    assert(mutex != "")
+    assert(condition != "")
+    assert_eq(trd.native_mutex_lock(mutex, -1), "ready")
+    la signaler = trd.ny_tråd_med_args(manager, "thread.condition_signal", {"condition_handle": condition, "mutex_handle": mutex, "delay_ms": 10})
+    assert(trd.start_native(manager, signaler, 65536))
+    assert_eq(trd.native_condition_wait(condition, mutex, 5000), "ready")
+    assert(trd.native_mutex_unlock(mutex))
+    assert_eq(trd.join_native(manager, signaler, 5000)["status"], "finished")
+    assert(trd.destroy_native_condition(condition))
+    assert(trd.destroy_native_mutex(mutex))
+
+    la før = trd.atomisk_hent(manager, "counter", "seq_cst")
+    la generell_a = trd.ny_tråd_med_args(manager, "__main__.generell_worker", {"handle": handle, "iterations": 2500})
+    la generell_b = trd.ny_tråd_med_args(manager, "__main__.generell_worker", {"handle": handle, "iterations": 2500})
+    assert(trd.start_native(manager, generell_a, 65536))
+    assert(trd.start_native(manager, generell_b, 65536))
+    assert_eq(trd.join_native(manager, generell_a, 10000)["value"], "generell-ferdig")
+    assert_eq(trd.join_native(manager, generell_b, 10000)["value"], "generell-ferdig")
+    assert_eq(trd.atomisk_hent(manager, "counter", "seq_cst") - før, 5000)
+    la feil_id = trd.ny_tråd_med_args(manager, "__main__.feil_worker", {})
+    assert(trd.start_native(manager, feil_id, 65536))
+    la feil_svar = trd.join_native(manager, feil_id, 5000)
+    assert_eq(feil_svar["status"], "error")
+    assert(builtin.contains(feil_svar["error"], "worker-feil"))
+
+    la heap = memory.ny_heap()
+    la heap_a = trd.ny_tråd_med_args(manager, "__main__.heap_worker", {"heap": heap, "iterations": 100})
+    la heap_b = trd.ny_tråd_med_args(manager, "__main__.heap_worker", {"heap": heap, "iterations": 100})
+    assert(trd.start_native(manager, heap_a, 65536))
+    assert(trd.start_native(manager, heap_b, 65536))
+    assert_eq(trd.join_native(manager, heap_a, 10000)["value"], "allocated:100")
+    assert_eq(trd.join_native(manager, heap_b, 10000)["value"], "allocated:100")
+    assert_eq(memory.samandrag(heap)["alive"], "200")
+
+    la delt_heap = memory.ny_heap()
+    la hub = memory.alloker(delt_heap, "kart", 8)
+    la mut_a = memory.alloker(delt_heap, "liste", 8)
+    la mut_b = memory.alloker(delt_heap, "tekst", 8)
+    la mut_c = memory.alloker(delt_heap, "liste", 8)
+    la mut_d = memory.alloker(delt_heap, "tekst", 8)
+    assert(memory.legg_rot(delt_heap, hub))
+    assert(memory.legg_ref(delt_heap, hub, mut_a))
+    assert(memory.legg_ref(delt_heap, hub, mut_b))
+    assert(memory.legg_ref(delt_heap, hub, mut_c))
+    assert(memory.legg_ref(delt_heap, hub, mut_d))
+    la mutator_a = trd.ny_tråd_med_args(manager, "__main__.heap_mutation_worker", {"heap": delt_heap, "from": mut_a, "to": mut_b, "iterations": 5})
+    la mutator_b = trd.ny_tråd_med_args(manager, "__main__.heap_mutation_worker", {"heap": delt_heap, "from": mut_c, "to": mut_d, "iterations": 5})
+    la collector = trd.ny_tråd_med_args(manager, "__main__.heap_gc_worker", {"heap": delt_heap, "iterations": 2, "expected_alive": "5"})
+    assert(trd.start_native(manager, mutator_a, 65536))
+    assert(trd.start_native(manager, mutator_b, 65536))
+    assert(trd.start_native(manager, collector, 65536))
+    assert_eq(trd.join_native(manager, mutator_a, 20000)["value"], "mutated:5")
+    assert_eq(trd.join_native(manager, mutator_b, 20000)["value"], "mutated:5")
+    assert_eq(trd.join_native(manager, collector, 20000)["value"], "collected:2")
+    assert_eq(memory.samandrag(delt_heap)["alive"], "5")
+    assert_eq(memory.objekt_les_byte(delt_heap, mut_a, 0), 4)
+    assert_eq(memory.objekt_les_byte(delt_heap, mut_c, 0), 4)
+
+    assert(trd.native_signal_block(["USR1"]))
+    assert(trd.native_signals_blocked(["USR1"]))
+    la signal_id = trd.ny_tråd_med_args(manager, "__main__.signal_worker", {})
+    assert(trd.start_native(manager, signal_id, 65536))
+    assert_eq(trd.join_native(manager, signal_id, 5000)["value"], "sann")
+    assert(trd.native_signal_unblock(["USR1"]))
+    assert(ikkje trd.native_signals_blocked(["USR1"]))
+    returner 0
+}

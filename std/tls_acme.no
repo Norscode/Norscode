@@ -1,0 +1,636 @@
+# tls_acme.no - TLS/ACME-plan for Norscode-hosting
+
+bruk std.base64 som base64
+bruk std.http som http
+bruk std.krypto som krypto
+
+funksjon _b64url(data: tekst) -> tekst {
+    la encoded = base64.kod(data)
+    encoded = tekst_erstatt(encoded, "+", "-")
+    encoded = tekst_erstatt(encoded, "/", "_")
+    mens builtin.ends_with(encoded, "=") {
+        encoded = builtin.slice(encoded, 0, lengde(encoded) - 1)
+    }
+    returner encoded
+}
+
+funksjon _hex_bytes(hex: tekst) -> liste_heiltall {
+    hvis lengde(hex) % 2 != 0 { returner [] }
+    la ut: liste_heiltall = []
+    la digits = "0123456789abcdef"
+    la i: heiltall = 0
+    mens i < lengde(hex) {
+        la hi = builtin.index_of(digits, builtin.lower(builtin.slice(hex, i, i + 1)))
+        la lo = builtin.index_of(digits, builtin.lower(builtin.slice(hex, i + 1, i + 2)))
+        hvis hi < 0 eller lo < 0 { returner [] }
+        legg_til(ut, hi * 16 + lo)
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _b64url_bytes(data: liste_heiltall) -> tekst {
+    la encoded = base64.kod_bytes(data)
+    encoded = tekst_erstatt(encoded, "+", "-")
+    encoded = tekst_erstatt(encoded, "/", "_")
+    mens builtin.ends_with(encoded, "=") { encoded = builtin.slice(encoded, 0, lengde(encoded) - 1) }
+    returner encoded
+}
+
+funksjon jwk_thumbprint(jwk_kanonisk_json: tekst) -> tekst {
+    hvis jwk_kanonisk_json == "" { returner "" }
+    la digest = _hex_bytes(krypto.sha256(jwk_kanonisk_json))
+    hvis lengde(digest) != 32 { returner "" }
+    returner _b64url_bytes(digest)
+}
+
+funksjon key_authorization(token: tekst, jwk_kanonisk_json: tekst) -> tekst {
+    hvis token == "" eller builtin.index_of(token, "\n") >= 0 eller
+       builtin.index_of(token, "\r") >= 0 { returner "" }
+    la thumbprint = jwk_thumbprint(jwk_kanonisk_json)
+    hvis thumbprint == "" { returner "" }
+    returner token + "." + thumbprint
+}
+
+funksjon dns01_verdi(token: tekst, jwk_kanonisk_json: tekst) -> tekst {
+    la auth = key_authorization(token, jwk_kanonisk_json)
+    hvis auth == "" { returner "" }
+    la digest = _hex_bytes(krypto.sha256(auth))
+    hvis lengde(digest) != 32 { returner "" }
+    returner _b64url_bytes(digest)
+}
+
+funksjon _trygg_jws_alg(alg: tekst) -> boolsk {
+    returner alg == "RS256" eller alg == "ES256" eller alg == "EdDSA"
+}
+
+funksjon _trygg_nonce(nonce: tekst) -> boolsk {
+    returner nonce != "" og builtin.index_of(nonce, "\n") < 0 og builtin.index_of(nonce, "\r") < 0
+}
+
+funksjon _manglar(verdi: tekst) -> boolsk {
+    returner verdi == "" eller verdi == "ingenting" eller verdi == "null"
+}
+
+funksjon ny(domene: tekst, kontakt: tekst) -> ordbok_tekst {
+    la c: ordbok_tekst = {}
+    c["domene"] = domene
+    c["kontakt"] = kontakt
+    c["provider"] = "acme"
+    c["challenge"] = "http-01,dns-01"
+    c["key_type"] = "ed25519"
+    c["cert_dir"] = "var/tls/" + domene
+    c["renew_before_days"] = "30"
+    c["auto_renew"] = "sann"
+    c["hsts"] = "sann"
+    c["ocsp_stapling"] = "sann"
+    c["san"] = "[]"
+    returner c
+}
+
+funksjon legg_san(c: ordbok_tekst, namn: tekst) -> bool {
+    hvis ikkje _trygg_hostnamn(namn) { returner usann }
+    hvis c["san"] == "[]" {
+        c["san"] = "[\"" + namn + "\"]"
+    } ellers {
+        la eksisterande = c["san"]
+        hvis ikkje builtin.ends_with(eksisterande, "]") { returner usann }
+        c["san"] = builtin.slice(eksisterande, 0, lengde(eksisterande) - 1) + ",\"" + namn + "\"]"
+    }
+    returner sann
+}
+
+funksjon _trygg_hostnamn(namn: tekst) -> boolsk {
+    hvis namn == "" eller builtin.index_of(namn, "/") >= 0 eller
+       builtin.index_of(namn, "..") >= 0 eller builtin.index_of(namn, "\\") >= 0 {
+        returner usann
+    }
+    returner builtin.index_of(namn, " ") < 0 og builtin.index_of(namn, "\n") < 0 og
+        builtin.index_of(namn, "\r") < 0 og builtin.index_of(namn, "\t") < 0 og
+        builtin.index_of(namn, "\"") < 0 og builtin.index_of(namn, "'") < 0
+}
+
+funksjon keyring_path(c: ordbok_tekst) -> tekst {
+    hvis ikkje _trygg_hostnamn(c["domene"]) { returner "" }
+    returner c["cert_dir"] + "/acme/account.key"
+}
+
+funksjon keyring_plan(c: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["status"] = "feil"
+    p["path"] = keyring_path(c)
+    p["mode"] = "0600"
+    p["write_mode"] = "atomic"
+    p["fsync"] = "sann"
+    p["replace"] = "rename"
+    p["audit"] = "tls.keyring.write"
+    hvis p["path"] == "" { p["error"] = "ugyldig domene for keyring" returner p }
+    p["status"] = "klar"
+    returner p
+}
+
+funksjon keyring_request(c: ordbok_tekst, privat_nokkel_pem: tekst) -> ordbok_tekst {
+    la p = keyring_plan(c)
+    hvis p["status"] != "klar" { returner p }
+    hvis ikkje builtin.starts_with(privat_nokkel_pem, "-----BEGIN") eller
+       builtin.index_of(privat_nokkel_pem, "PRIVATE KEY-----") < 0 {
+        p["status"] = "feil"
+        p["error"] = "keyring krev PEM private key"
+        returner p
+    }
+    hvis builtin.index_of(privat_nokkel_pem, "\n") < 0 {
+        p["status"] = "feil"
+        p["error"] = "private key manglar PEM-linjeskift"
+        returner p
+    }
+    p["status"] = "klar"
+    p["bytes"] = tekst_fra_heltall(lengde(privat_nokkel_pem))
+    p["material"] = "account-key"
+    returner p
+}
+
+funksjon sertifikat_rotasjon_request(c: ordbok_tekst, cert_pem: tekst,
+                                     chain_pem: tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["status"] = "feil"
+    p["cert_path"] = c["cert_dir"] + "/current/cert.pem"
+    p["chain_path"] = c["cert_dir"] + "/current/chain.pem"
+    p["write_mode"] = "atomic"
+    p["replace"] = "rename"
+    p["fsync"] = "sann"
+    p["reload_services"] = "web,smtp,imap"
+    p["audit"] = "tls.certificate.rotate"
+    hvis ikkje _trygg_hostnamn(c["domene"]) { p["error"] = "ugyldig domene for sertifikat" returner p }
+    hvis builtin.index_of(cert_pem, "-----BEGIN CERTIFICATE-----") < 0 eller
+       builtin.index_of(chain_pem, "-----BEGIN CERTIFICATE-----") < 0 {
+        p["error"] = "sertifikatrotasjon krev PEM certificate og chain"
+        returner p
+    }
+    p["status"] = "klar"
+    p["cert_bytes"] = tekst_fra_heltall(lengde(cert_pem))
+    p["chain_bytes"] = tekst_fra_heltall(lengde(chain_pem))
+    returner p
+}
+
+funksjon _https_url(url: tekst) -> boolsk {
+    hvis ikkje builtin.starts_with(url, "https://") { returner usann }
+    hvis builtin.index_of(url, "\n") >= 0 eller builtin.index_of(url, "\r") >= 0 { returner usann }
+    hvis builtin.index_of(url, "@") >= 0 { returner usann }
+    returner lengde(url) > lengde("https://")
+}
+
+# RFC 8555 directory discovery/request metadata. Transporten skal bruke
+# std.http/std.tls med same URL og capability-gate; denne funksjonen gjer
+# endpoint- og HTTPS-krava maskinlesbare før nettverkskall blir sendt.
+funksjon directory_request(url: tekst) -> ordbok_tekst {
+    hvis ikkje _https_url(url) { returner {"status": "feil", "error": "ACME directory krev HTTPS"} }
+    returner {"status": "klar", "method": "GET", "url": url,
+              "capability": "net.tls", "accept": "application/json"}
+}
+
+funksjon directory_response(data: tekst) -> ordbok_tekst {
+    prøv {
+        la d = builtin.json_parse(data)
+        hvis _manglar(tekst(d["newNonce"])) eller _manglar(tekst(d["newAccount"])) eller
+           _manglar(tekst(d["newOrder"])) eller _manglar(tekst(d["revokeCert"])) eller
+           _manglar(tekst(d["keyChange"])) {
+            returner {"status": "feil", "error": "ACME directory manglar obligatorisk endpoint"}
+        }
+        returner {"status": "klar", "newNonce": tekst(d["newNonce"]), "newAccount": tekst(d["newAccount"]),
+                  "newOrder": tekst(d["newOrder"]), "revokeCert": tekst(d["revokeCert"]), "keyChange": tekst(d["keyChange"])}
+    } fang (e) { returner {"status": "feil", "error": "ugyldig ACME directory JSON"} }
+    returner {"status": "feil", "error": "ugyldig ACME directory JSON"}
+}
+
+funksjon directory_fetch(url: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la meta = directory_request(url)
+    hvis meta["status"] != "klar" { returner meta }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    prøv {
+        la response = http.request_full("GET", url,
+            {"accept": "application/json"}, {}, "", timeout_ms)
+        la code = http.response_status(response)
+        hvis code < 200 eller code >= 300 {
+            returner {"status": "feil", "error": "ACME directory HTTP-feil",
+                      "http_status": tekst_fra_heltall(code),
+                      "body": http.response_text(response)}
+        }
+        la content_type = http.response_header_or(response, "content-type", "")
+        hvis builtin.index_of(content_type, "json") < 0 {
+            returner {"status": "feil", "error": "ACME directory krev JSON-respons"}
+        }
+        la response_body = http.response_text(response)
+        la parsed = directory_response(response_body)
+        parsed["http_status"] = tekst_fra_heltall(code)
+        hvis parsed["status"] != "klar" { parsed["body"] = response_body }
+        returner parsed
+    } fang (e) {
+        returner {"status": "feil", "error": "ACME directory transport feila: " + tekst(e)}
+    }
+    returner {"status": "feil", "error": "ACME directory transport feila"}
+}
+
+funksjon directory_fetch_ca(url: tekst, timeout_ms: heiltall,
+                            ca_file: tekst) -> ordbok_tekst {
+    la meta = directory_request(url)
+    hvis meta["status"] != "klar" { returner meta }
+    hvis ca_file == "" eller timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME CA/timeout ugyldig"}
+    }
+    prøv {
+        la response = http.request_full_ca("GET", url,
+            {"accept": "application/json"}, {}, "", timeout_ms, ca_file)
+        la code = http.response_status(response)
+        hvis code < 200 eller code >= 300 {
+            returner {"status": "feil", "error": "ACME directory HTTP-feil",
+                      "http_status": tekst_fra_heltall(code)}
+        }
+        la parsed = directory_response(http.response_text(response))
+        parsed["http_status"] = tekst_fra_heltall(code)
+        returner parsed
+    } fang (e) { returner {"status": "transportfeil", "error": "ACME directory transport feila"} }
+    returner {"status": "transportfeil", "error": "ACME directory transport feila"}
+}
+
+funksjon nonce_fetch(url: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _https_url(url) { returner {"status": "feil", "error": "ACME nonce krev HTTPS"} }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    prøv {
+        la response = http.request_full("HEAD", url, {"accept": "*/*"}, {}, "", timeout_ms)
+        la code = http.response_status(response)
+        hvis code < 200 eller code >= 300 {
+            returner {"status": "feil", "error": "ACME nonce HTTP-feil",
+                      "http_status": tekst_fra_heltall(code)}
+        }
+        la nonce = http.response_header_or(response, "replay-nonce", "")
+        hvis ikkje _trygg_nonce(nonce) {
+            returner {"status": "feil", "error": "ACME provider manglar trygg Replay-Nonce"}
+        }
+        returner {"status": "klar", "nonce": nonce,
+                  "http_status": tekst_fra_heltall(code)}
+    } fang (e) { returner {"status": "transportfeil", "error": "ACME nonce transport feila"} }
+    returner {"status": "transportfeil", "error": "ACME nonce transport feila"}
+}
+
+funksjon nonce_fetch_ca(url: tekst, timeout_ms: heiltall,
+                        ca_file: tekst) -> ordbok_tekst {
+    hvis ikkje _https_url(url) eller ca_file == "" {
+        returner {"status": "feil", "error": "ACME nonce krev HTTPS og CA"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    prøv {
+        la response = http.request_full_ca("HEAD", url, {"accept": "*/*"}, {}, "",
+            timeout_ms, ca_file)
+        la code = http.response_status(response)
+        la nonce = http.response_header_or(response, "replay-nonce", "")
+        hvis code < 200 eller code >= 300 eller ikkje _trygg_nonce(nonce) {
+            returner {"status": "feil", "error": "ACME provider gav ikkje Replay-Nonce",
+                      "http_status": tekst_fra_heltall(code)}
+        }
+        returner {"status": "klar", "nonce": nonce,
+                  "http_status": tekst_fra_heltall(code)}
+    } fang (e) { returner {"status": "transportfeil", "error": "ACME nonce transport feila"} }
+    returner {"status": "transportfeil", "error": "ACME nonce transport feila"}
+}
+
+funksjon account_request(c: ordbok_tekst, terms_agreed: boolsk) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["kind"] = "newAccount"
+    p["contact"] = "mailto:" + c["kontakt"]
+    p["termsOfServiceAgreed"] = "usann"
+    hvis terms_agreed { p["termsOfServiceAgreed"] = "sann" }
+    p["url"] = ""
+    returner p
+}
+
+funksjon order_request(c: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje _trygg_hostnamn(c["domene"]) { returner {"status": "feil", "error": "ugyldig ACME-domene"} }
+    la domains = builtin.json_parse(c["san"])
+    la identifiers = "[{\"type\":\"dns\",\"value\":\"" + c["domene"] + "\"}"
+    la i: heiltall = 0
+    mens i < lengde(domains) {
+        hvis ikkje _trygg_hostnamn(tekst(domains[i])) { returner {"status": "feil", "error": "ugyldig ACME SAN"} }
+        identifiers = identifiers + ",{\"type\":\"dns\",\"value\":\"" + tekst(domains[i]) + "\"}"
+        i = i + 1
+    }
+    identifiers = identifiers + "]"
+    returner {"kind": "newOrder", "identifiers": identifiers, "notBefore": "", "notAfter": ""}
+}
+
+funksjon authorization_request(url: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _https_url(url) {
+        returner {"status": "feil", "error": "ACME authorization krev HTTPS"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    returner {"status": "klar", "method": "GET", "url": url,
+              "timeout_ms": tekst_fra_heltall(timeout_ms),
+              "capability": "net.tls", "accept": "application/json"}
+}
+
+funksjon challenge_request(url: tekst, type: tekst, token: tekst,
+                           timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _https_url(url) eller (type != "http-01" og type != "dns-01") {
+        returner {"status": "feil", "error": "ugyldig ACME challenge"}
+    }
+    hvis token == "" eller builtin.index_of(token, "\n") >= 0 eller builtin.index_of(token, "\r") >= 0 {
+        returner {"status": "feil", "error": "ACME challenge token manglar"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    returner {"status": "klar", "method": "POST", "url": url,
+              "type": type, "token": token,
+              "timeout_ms": tekst_fra_heltall(timeout_ms),
+              "capability": "net.tls", "content_type": "application/jose+json"}
+}
+
+funksjon finalize_request(url: tekst, csr_b64url: tekst,
+                          timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _https_url(url) {
+        returner {"status": "feil", "error": "ACME finalize krev HTTPS"}
+    }
+    hvis csr_b64url == "" eller builtin.index_of(csr_b64url, "=") >= 0 eller
+       builtin.index_of(csr_b64url, "+") >= 0 eller builtin.index_of(csr_b64url, "/") >= 0 {
+        returner {"status": "feil", "error": "ACME finalize krev base64url CSR"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    returner {"status": "klar", "method": "POST", "url": url,
+              "payload": "{\"csr\":\"" + csr_b64url + "\"}",
+              "timeout_ms": tekst_fra_heltall(timeout_ms),
+              "capability": "net.tls", "content_type": "application/jose+json"}
+}
+
+funksjon certificate_request(url: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _https_url(url) {
+        returner {"status": "feil", "error": "ACME certificate krev HTTPS"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    returner {"status": "klar", "method": "GET", "url": url,
+              "timeout_ms": tekst_fra_heltall(timeout_ms),
+              "capability": "net.tls", "accept": "application/pem-certificate-chain"}
+}
+
+funksjon fornying_due(no_seconds: heiltall, utlop_seconds: heiltall,
+                      for_days: heiltall) -> boolsk {
+    hvis no_seconds < 0 eller utlop_seconds < 0 eller for_days <= 0 eller for_days > 3650 {
+        returner usann
+    }
+    hvis utlop_seconds <= no_seconds { returner sann }
+    returner utlop_seconds - no_seconds <= for_days * 86400
+}
+
+# Bygg RFC 8555 JWS-delane deterministisk. Signaturen blir med vilje levert
+# av den valde nøkkelbackenden; runtime-en skal aldri late som HMAC er ein
+# RSA/EC/EdDSA-signatur.
+funksjon jws_signing_input(nonce: tekst, url: tekst, alg: tekst,
+                           jwk_json: tekst, payload_json: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    hvis ikkje _https_url(url) eller ikkje _trygg_nonce(nonce) eller
+       ikkje _trygg_jws_alg(alg) eller jwk_json == "" { 
+        r["status"] = "feil"
+        r["error"] = "ugyldig JWS-metadata"
+        returner r
+    }
+    la protected = "{\"alg\":\"" + alg + "\",\"nonce\":\"" + nonce +
+                   "\",\"url\":\"" + url + "\",\"jwk\":" + jwk_json + "}"
+    la encoded_protected = _b64url(protected)
+    la encoded_payload = _b64url(payload_json)
+    r["status"] = "klar"
+    r["protected"] = encoded_protected
+    r["payload"] = encoded_payload
+    r["signing_input"] = encoded_protected + "." + encoded_payload
+    r["algorithm"] = alg
+    returner r
+}
+
+funksjon jws_request(nonce: tekst, url: tekst, alg: tekst, jwk_json: tekst,
+                    payload_json: tekst, signature_b64url: tekst) -> ordbok_tekst {
+    la input = jws_signing_input(nonce, url, alg, jwk_json, payload_json)
+    hvis input["status"] != "klar" { returner input }
+    hvis signature_b64url == "" {
+        returner {"status": "feil", "error": "JWS-signatur manglar", "signing_input": input["signing_input"]}
+    }
+    input["signature"] = signature_b64url
+    input["body"] = "{\"protected\":\"" + input["protected"] + "\",\"payload\":\"" +
+                    input["payload"] + "\",\"signature\":\"" + signature_b64url + "\"}"
+    input["content_type"] = "application/jose+json"
+    returner input
+}
+
+funksjon jws_request_med_nokkel(nonce: tekst, url: tekst, alg: tekst,
+                                jwk_json: tekst, payload_json: tekst,
+                                privat_nokkel_pem: tekst) -> ordbok_tekst {
+    la input = jws_signing_input(nonce, url, alg, jwk_json, payload_json)
+    hvis input["status"] != "klar" { returner input }
+    prøv {
+        la sig_hex = builtin.acme_sign(alg, privat_nokkel_pem, input["signing_input"])
+        la sig_bytes = _hex_bytes(sig_hex)
+        hvis lengde(sig_bytes) == 0 { returner {"status": "feil", "error": "ACME-signatur er tom"} }
+        returner jws_request(nonce, url, alg, jwk_json, payload_json, _b64url_bytes(sig_bytes))
+    } fang (e) { returner {"status": "feil", "error": "ACME native signering feila"} }
+    returner {"status": "feil", "error": "ACME native signering feila"}
+}
+
+funksjon jws_signing_input_kid(nonce: tekst, url: tekst, alg: tekst,
+                               kid: tekst, payload_json: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    hvis ikkje _https_url(url) eller ikkje _trygg_nonce(nonce) eller
+       ikkje _trygg_jws_alg(alg) eller ikkje _https_url(kid) {
+        r["status"] = "feil"
+        r["error"] = "ugyldig JWS kid-metadata"
+        returner r
+    }
+    la protected = "{\"alg\":\"" + alg + "\",\"nonce\":\"" + nonce +
+                   "\",\"url\":\"" + url + "\",\"kid\":\"" + kid + "\"}"
+    la encoded_protected = _b64url(protected)
+    la encoded_payload = _b64url(payload_json)
+    r["status"] = "klar"
+    r["protected"] = encoded_protected
+    r["payload"] = encoded_payload
+    r["signing_input"] = encoded_protected + "." + encoded_payload
+    r["algorithm"] = alg
+    r["kid"] = kid
+    returner r
+}
+
+funksjon jws_request_med_kid_nokkel(nonce: tekst, url: tekst, alg: tekst,
+                                    kid: tekst, payload_json: tekst,
+                                    privat_nokkel_pem: tekst) -> ordbok_tekst {
+    la input = jws_signing_input_kid(nonce, url, alg, kid, payload_json)
+    hvis input["status"] != "klar" { returner input }
+    prøv {
+        la sig_hex = builtin.acme_sign(alg, privat_nokkel_pem, input["signing_input"])
+        la sig_bytes = _hex_bytes(sig_hex)
+        hvis lengde(sig_bytes) == 0 { returner {"status": "feil", "error": "ACME-signatur er tom"} }
+        input["signature"] = _b64url_bytes(sig_bytes)
+        input["body"] = "{\"protected\":\"" + input["protected"] + "\",\"payload\":\"" +
+                        input["payload"] + "\",\"signature\":\"" + input["signature"] + "\"}"
+        input["content_type"] = "application/jose+json"
+        returner input
+    } fang (e) { returner {"status": "feil", "error": "ACME native signering feila"} }
+    returner {"status": "feil", "error": "ACME native signering feila"}
+}
+
+funksjon jws_post(signed: ordbok_tekst, url: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    hvis signed["status"] != "klar" { returner signed }
+    hvis ikkje _https_url(url) {
+        returner {"status": "feil", "error": "ACME POST krev HTTPS"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    prøv {
+        la response = http.request_full("POST", url,
+            {"content-type": "application/jose+json", "accept": "application/json"},
+            {}, signed["body"], timeout_ms)
+        la code = http.response_status(response)
+        la out: ordbok_tekst = {}
+        out["status"] = response_status(code)
+        out["http_status"] = tekst_fra_heltall(code)
+        out["body"] = http.response_text(response)
+        out["retry_after"] = http.response_header_or(response, "retry-after", "")
+        out["replay_nonce"] = http.response_header_or(response, "replay-nonce", "")
+        out["location"] = http.response_header_or(response, "location", "")
+        out["content_type"] = http.response_header_or(response, "content-type", "")
+        returner out
+    } fang (e) {
+        returner {"status": "transportfeil", "error": "ACME POST transport feila"}
+    }
+    returner {"status": "transportfeil", "error": "ACME POST transport feila"}
+}
+
+funksjon jws_post_ca(signed: ordbok_tekst, url: tekst, timeout_ms: heiltall,
+                     ca_file: tekst) -> ordbok_tekst {
+    hvis signed["status"] != "klar" { returner signed }
+    hvis ikkje _https_url(url) eller ca_file == "" {
+        returner {"status": "feil", "error": "ACME POST krev HTTPS og CA"}
+    }
+    hvis timeout_ms <= 0 eller timeout_ms > 120000 {
+        returner {"status": "feil", "error": "ACME timeout utanfor grense"}
+    }
+    prøv {
+        la response = http.request_full_ca("POST", url,
+            {"content-type": "application/jose+json", "accept": "application/json, application/pem-certificate-chain"},
+            {}, signed["body"], timeout_ms, ca_file)
+        la code = http.response_status(response)
+        la out: ordbok_tekst = {}
+        out["status"] = response_status(code)
+        out["http_status"] = tekst_fra_heltall(code)
+        out["body"] = http.response_text(response)
+        out["retry_after"] = http.response_header_or(response, "retry-after", "")
+        out["replay_nonce"] = http.response_header_or(response, "replay-nonce", "")
+        out["location"] = http.response_header_or(response, "location", "")
+        out["content_type"] = http.response_header_or(response, "content-type", "")
+        returner out
+    } fang (e) { returner {"status": "transportfeil", "error": "ACME POST transport feila"} }
+    returner {"status": "transportfeil", "error": "ACME POST transport feila"}
+}
+
+funksjon response_status(status: heiltall) -> tekst {
+    hvis status >= 200 og status < 300 { returner "ok" }
+    hvis status == 400 eller status == 401 eller status == 403 { returner "klientfeil" }
+    hvis status == 429 { returner "rate_limit" }
+    hvis status >= 500 { returner "serverfeil" }
+    returner "ukjent"
+}
+
+funksjon valider_http01(c: ordbok_tekst, utfordring: ordbok_tekst) -> boolsk {
+    hvis utfordring["type"] != "http-01" eller utfordring["domene"] != c["domene"] { returner usann }
+    hvis utfordring["port"] != "80" eller utfordring["body"] == "" { returner usann }
+    hvis ikkje builtin.starts_with(utfordring["path"], "/.well-known/acme-challenge/") { returner usann }
+    hvis builtin.index_of(utfordring["path"], "..") >= 0 { returner usann }
+    returner lengde(utfordring["path"]) > lengde("/.well-known/acme-challenge/")
+}
+
+funksjon valider_dns01(c: ordbok_tekst, utfordring: ordbok_tekst) -> boolsk {
+    hvis utfordring["type"] != "dns-01" eller utfordring["domene"] != c["domene"] { returner usann }
+    hvis utfordring["record_name"] != "_acme-challenge" eller utfordring["record_type"] != "TXT" { returner usann }
+    returner utfordring["record_value"] != "" og builtin.index_of(utfordring["record_value"], "\n") < 0
+}
+
+funksjon http01_utfordring(c: ordbok_tekst, token: tekst, key_auth: tekst) -> ordbok_tekst {
+    la u: ordbok_tekst = {}
+    u["type"] = "http-01"
+    u["domene"] = c["domene"]
+    u["path"] = "/.well-known/acme-challenge/" + token
+    u["body"] = key_auth
+    u["port"] = "80"
+    returner u
+}
+
+funksjon dns01_utfordring(c: ordbok_tekst, token: tekst) -> ordbok_tekst {
+    la u: ordbok_tekst = {}
+    u["type"] = "dns-01"
+    u["domene"] = c["domene"]
+    u["record_name"] = "_acme-challenge"
+    u["record_type"] = "TXT"
+    u["record_value"] = token
+    returner u
+}
+
+funksjon sertifikat_plan(c: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["domene"] = c["domene"]
+    p["provider"] = c["provider"]
+    p["contact"] = c["kontakt"]
+    p["challenge"] = c["challenge"]
+    p["key_type"] = c["key_type"]
+    p["cert_dir"] = c["cert_dir"]
+    p["san"] = c["san"]
+    p["auto_renew"] = c["auto_renew"]
+    p["renew_before_days"] = c["renew_before_days"]
+    p["hsts"] = c["hsts"]
+    p["ocsp_stapling"] = c["ocsp_stapling"]
+    p["reload_services"] = "web,smtp,imap"
+    p["dry_run_command"] = "acme issue --dry-run"
+    returner p
+}
+
+funksjon rotasjon_plan(c: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["domene"] = c["domene"]
+    r["renew_before_days"] = c["renew_before_days"]
+    r["auto_renew"] = c["auto_renew"]
+    r["backup_old_cert"] = "sann"
+    r["atomic_swap"] = "sann"
+    r["reload_services"] = "web,smtp,imap"
+    r["audit"] = "tls.renew"
+    returner r
+}
+
+funksjon rotasjon_klar(c: ordbok_tekst) -> boolsk {
+    hvis c["auto_renew"] != "sann" { returner usann }
+    hvis heltall_fra_tekst(c["renew_before_days"]) < 7 { returner usann }
+    returner c["cert_dir"] != ""
+}
+
+funksjon produksjon_klar(c: ordbok_tekst) -> bool {
+    hvis c["domene"] == "" { returner usann }
+    hvis c["kontakt"] == "" { returner usann }
+    hvis c["provider"] != "acme" { returner usann }
+    hvis ikkje rotasjon_klar(c) { returner usann }
+    hvis c["hsts"] != "sann" { returner usann }
+    hvis c["ocsp_stapling"] != "sann" { returner usann }
+    returner sann
+}
+
+funksjon status() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.tls_acme"
+    s["status"] = "framtidsklar"
+    s["dekning"] = "ACME, http-01, dns-01, SAN, native RSA/ES256/EdDSA signering/verifisering, auto-renew, HSTS, OCSP og rotasjonsplan"
+    s["sikkerheit"] = "dry-run fyrst, atomisk bytte, audit og eksplisitt reload av web/smtp/imap"
+    returner s
+}

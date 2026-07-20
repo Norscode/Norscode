@@ -1,0 +1,299 @@
+# runtime_filesystem.no - sikre filhandtak og kooperativ fil-I/O
+
+bruk std.sched som sched
+
+funksjon native_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
+
+funksjon _native_request(operation: tekst, handle: tekst) -> ordbok_tekst {
+    returner {"abi": native_versjon(), "operation": operation, "handle": handle}
+}
+
+funksjon opne_native(root: tekst, relativ: tekst, mode: tekst) -> ordbok_tekst {
+    la req = {"abi": native_versjon(), "operation": "open", "root": root, "relative": relativ, "mode": mode}
+    la r: ordbok_tekst = {}
+    hvis mode == "read" { r = builtin.filesystem_read_operation(req) }
+    ellers { r = builtin.filesystem_write_operation(req) }
+    r["mode"] = mode
+    returner r
+}
+
+funksjon native_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    la req = _native_request("read", h["handle"])
+    req["max"] = tekst_fra_heltall(maks)
+    returner builtin.filesystem_read_operation(req)
+}
+
+funksjon native_skriv(h: ordbok_tekst, data: tekst) -> ordbok_tekst {
+    la req = _native_request("write", h["handle"])
+    req["data"] = data
+    returner builtin.filesystem_write_operation(req)
+}
+
+funksjon native_les_iocp(h: ordbok_tekst, offset: heiltall, maks: heiltall) -> ordbok_tekst {
+    la req = _native_request("read_async", h["handle"])
+    req["offset"] = tekst_fra_heltall(offset)
+    req["max"] = tekst_fra_heltall(maks)
+    returner builtin.filesystem_read_operation(req)
+}
+
+funksjon native_skriv_iocp(h: ordbok_tekst, offset: heiltall, data: tekst) -> ordbok_tekst {
+    la req = _native_request("write_async", h["handle"])
+    req["offset"] = tekst_fra_heltall(offset)
+    req["data"] = data
+    returner builtin.filesystem_write_operation(req)
+}
+
+funksjon native_iocp_vent(h: ordbok_tekst, operation_handle: tekst,
+                          timeout_ms: heiltall) -> ordbok_tekst {
+    la req = _native_request("wait_async", h["handle"])
+    req["operation_handle"] = operation_handle
+    req["timeout_ms"] = tekst_fra_heltall(timeout_ms)
+    hvis h["mode"] == "read" { returner builtin.filesystem_read_operation(req) }
+    returner builtin.filesystem_write_operation(req)
+}
+
+funksjon _native_poll_iocp(args: ordbok_tekst) -> ordbok_tekst {
+    la result = native_iocp_vent(args["handle"], args["operation_handle"], 0)
+    hvis result["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis result["status"] == "feil" eller result["status"] == "kansellert" {
+        returner {"status": "feil", "resultat": "", "feil": result["error"]}
+    }
+    returner {"status": "ferdig", "resultat": result, "feil": ""}
+}
+
+funksjon _native_cleanup_iocp(args: ordbok_tekst) -> boolsk {
+    la req = _native_request("cancel_async", args["handle"]["handle"])
+    req["operation_handle"] = args["operation_handle"]
+    hvis args["handle"]["mode"] == "read" { builtin.filesystem_read_operation(req) }
+    ellers { builtin.filesystem_write_operation(req) }
+    la result = native_iocp_vent(args["handle"], args["operation_handle"], 10)
+    la i: heiltall = 0
+    mens result["status"] == "ventende" og i < 100 {
+        result = native_iocp_vent(args["handle"], args["operation_handle"], 10)
+        i = i + 1
+    }
+    returner result["status"] != "ventende"
+}
+
+funksjon native_iocp_async(scheduler: ordbok_tekst, h: ordbok_tekst,
+                            pending: ordbok_tekst, timeout_ms: heiltall) -> tekst {
+    hvis pending["status"] != "ventende" eller pending["operation_handle"] == "" { returner "" }
+    la args = {"handle": h, "operation_handle": pending["operation_handle"]}
+    returner sched.io_registrer_med_cleanup(scheduler, "file-iocp", "std.runtime_filesystem._native_poll_iocp", args,
+                                             timeout_ms, "std.runtime_filesystem._native_cleanup_iocp", args)
+}
+
+funksjon native_seek(h: ordbok_tekst, position: heiltall) -> ordbok_tekst {
+    la req = _native_request("seek", h["handle"])
+    req["position"] = tekst_fra_heltall(position)
+    hvis h["mode"] == "read" { returner builtin.filesystem_read_operation(req) }
+    returner builtin.filesystem_write_operation(req)
+}
+
+funksjon native_stat(h: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.filesystem_read_operation(_native_request("stat", h["handle"]))
+}
+
+# Native kataloglisting. `data` er newline-separerte direkte barnenamn;
+# listinga går aldri utanfor root og har ikkje følgande av shell-verktøy.
+funksjon native_list(root: tekst, relativ: tekst) -> ordbok_tekst {
+    returner builtin.filesystem_read_operation({"abi": native_versjon(), "operation": "list", "root": root, "relative": relativ})
+}
+
+funksjon native_flush(h: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.filesystem_write_operation(_native_request("flush", h["handle"]))
+}
+
+funksjon native_lukk(h: ordbok_tekst) -> ordbok_tekst {
+    la req = _native_request("close", h["handle"])
+    hvis h["mode"] == "read" { returner builtin.filesystem_read_operation(req) }
+    returner builtin.filesystem_write_operation(req)
+}
+
+funksjon native_slett(root: tekst, relativ: tekst) -> ordbok_tekst {
+    returner builtin.filesystem_write_operation({"abi": native_versjon(), "operation": "delete", "root": root, "relative": relativ})
+}
+
+funksjon _native_poll_les(args: ordbok_tekst) -> ordbok_tekst {
+    la ready = _native_request("ready", args["handle"]["handle"])
+    ready["events"] = "read"
+    la readiness = builtin.filesystem_read_operation(ready)
+    hvis readiness["status"] != "ok" { returner {"status": "feil", "resultat": "", "feil": readiness["error"]} }
+    hvis heltall_fra_tekst(readiness["value"]) == 0 { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    la result = native_les(args["handle"], heltall_fra_tekst(args["max"]))
+    hvis result["status"] != "ok" { returner {"status": "feil", "resultat": "", "feil": result["error"]} }
+    returner {"status": "ferdig", "resultat": result["data"], "feil": ""}
+}
+
+funksjon _native_poll_skriv(args: ordbok_tekst) -> ordbok_tekst {
+    la ready = _native_request("ready", args["handle"]["handle"])
+    ready["events"] = "write"
+    la readiness = builtin.filesystem_write_operation(ready)
+    hvis readiness["status"] != "ok" { returner {"status": "feil", "resultat": "", "feil": readiness["error"]} }
+    hvis heltall_fra_tekst(readiness["value"]) == 0 { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    la result = native_skriv(args["handle"], args["data"])
+    hvis result["status"] != "ok" { returner {"status": "feil", "resultat": "", "feil": result["error"]} }
+    returner {"status": "ferdig", "resultat": tekst_fra_heltall(result["value"]), "feil": ""}
+}
+
+funksjon _native_io_cleanup(args: ordbok_tekst) -> boolsk {
+    # Operasjonen eig ikkje descriptoren; caller kan bruke eller lukke han etter cancel/timeout.
+    returner sann
+}
+
+funksjon native_les_async(scheduler: ordbok_tekst, h: ordbok_tekst,
+                          maks: heiltall, timeout_ms: heiltall) -> tekst {
+    la args = {"handle": h, "max": tekst_fra_heltall(maks)}
+    returner sched.io_registrer_med_cleanup(scheduler, "native-file-read", "std.runtime_filesystem._native_poll_les", args, timeout_ms, "std.runtime_filesystem._native_io_cleanup", args)
+}
+
+funksjon native_skriv_async(scheduler: ordbok_tekst, h: ordbok_tekst,
+                            data: tekst, timeout_ms: heiltall) -> tekst {
+    la args = {"handle": h, "data": data}
+    returner sched.io_registrer_med_cleanup(scheduler, "native-file-write", "std.runtime_filesystem._native_poll_skriv", args, timeout_ms, "std.runtime_filesystem._native_io_cleanup", args)
+}
+
+funksjon _normaliser_relativ(sti: tekst) -> tekst {
+    hvis sti == "" eller tekst_starter_med(sti, "/") { returner "" }
+    hvis builtin.index_of(sti, "\\") >= 0 eller builtin.index_of(sti, "\u0000") >= 0 eller builtin.index_of(sti, "\n") >= 0 eller builtin.index_of(sti, "\r") >= 0 eller builtin.index_of(sti, "\t") >= 0 { returner "" }
+    la delar = builtin.split(sti, "/")
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la del = delar[i]
+        hvis del == ".." { returner "" }
+        hvis del != "" og del != "." {
+            hvis ut != "" { ut = ut + "/" }
+            ut = ut + del
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon trygg_sti(root: tekst, relativ: tekst) -> tekst {
+    la r = _normaliser_relativ(root)
+    la p = _normaliser_relativ(relativ)
+    hvis r == "" eller p == "" { returner "" }
+    returner r + "/" + p
+}
+
+funksjon _handtak_sti(h: ordbok_tekst) -> tekst {
+    hvis h["sealed_root"] != h["root"] eller h["sealed_relative"] != h["relative"] { returner "" }
+    la sti = trygg_sti(h["sealed_root"], h["sealed_relative"])
+    hvis sti == "" eller sti != h["path"] { returner "" }
+    returner sti
+}
+
+funksjon opne(root: tekst, relativ: tekst, mode: tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["status"] = "feil"
+    h["closed"] = "sann"
+    h["error"] = ""
+    hvis mode != "read" og mode != "write" og mode != "append" og mode != "readwrite" {
+        h["error"] = "ugyldig mode"
+        returner h
+    }
+    la sti = trygg_sti(root, relativ)
+    hvis sti == "" { h["error"] = "sti utanfor root"  returner h }
+    la data = ""
+    hvis mode == "read" eller mode == "readwrite" eller mode == "append" { data = builtin.fil_les(sti) }
+    hvis mode == "write" { data = "" }
+    h["status"] = "open"
+    h["closed"] = "usann"
+    h["root"] = _normaliser_relativ(root)
+    h["relative"] = _normaliser_relativ(relativ)
+    h["sealed_root"] = h["root"]
+    h["sealed_relative"] = h["relative"]
+    h["path"] = sti
+    h["mode"] = mode
+    h["data"] = data
+    h["offset"] = "0"
+    hvis mode == "append" { h["offset"] = tekst_fra_heltall(lengde(data)) }
+    h["dirty"] = tekst(mode == "write")
+    returner h
+}
+
+funksjon er_open(h: ordbok_tekst) -> bool { returner h["closed"] == "usann" og h["status"] == "open" og _handtak_sti(h) != "" }
+
+funksjon les_chunk(h: ordbok_tekst, maks: heiltall) -> tekst {
+    hvis ikkje er_open(h) eller maks <= 0 { returner "" }
+    hvis h["mode"] == "write" { returner "" }
+    la pos = heltall_fra_tekst(h["offset"])
+    la slutt = pos + maks
+    hvis slutt > lengde(h["data"]) { slutt = lengde(h["data"]) }
+    hvis pos >= slutt { returner "" }
+    la ut = builtin.slice(h["data"], pos, slutt)
+    h["offset"] = tekst_fra_heltall(slutt)
+    returner ut
+}
+
+funksjon seek(h: ordbok_tekst, pos: heiltall) -> bool {
+    hvis ikkje er_open(h) eller pos < 0 eller pos > lengde(h["data"]) { returner usann }
+    h["offset"] = tekst_fra_heltall(pos)
+    returner sann
+}
+
+funksjon tell(h: ordbok_tekst) -> heiltall { returner heltall_fra_tekst(h["offset"]) }
+
+funksjon skriv_chunk(h: ordbok_tekst, data: tekst) -> heiltall {
+    hvis ikkje er_open(h) eller h["mode"] == "read" { returner 0 }
+    la pos = heltall_fra_tekst(h["offset"])
+    hvis h["mode"] == "append" { pos = lengde(h["data"]) }
+    la før = builtin.slice(h["data"], 0, pos)
+    la etter_pos = pos + lengde(data)
+    la etter = ""
+    hvis etter_pos < lengde(h["data"]) { etter = builtin.slice(h["data"], etter_pos, lengde(h["data"])) }
+    h["data"] = før + data + etter
+    h["offset"] = tekst_fra_heltall(pos + lengde(data))
+    h["dirty"] = "sann"
+    returner lengde(data)
+}
+
+funksjon flush(h: ordbok_tekst) -> bool {
+    hvis ikkje er_open(h) { returner usann }
+    hvis h["dirty"] != "sann" { returner sann }
+    la sti = _handtak_sti(h)
+    hvis sti == "" { returner usann }
+    builtin.fil_skriv(sti, h["data"])
+    h["dirty"] = "usann"
+    returner sann
+}
+
+funksjon lukk(h: ordbok_tekst) -> bool {
+    hvis ikkje er_open(h) { returner usann }
+    hvis h["dirty"] == "sann" og ikkje flush(h) { returner usann }
+    h["closed"] = "sann"
+    h["status"] = "closed"
+    returner sann
+}
+
+funksjon _async_les(args: ordbok_tekst) -> tekst {
+    returner les_chunk(args["handle"], heltall_fra_tekst(args["max"]))
+}
+
+funksjon _async_skriv(args: ordbok_tekst) -> tekst {
+    returner tekst_fra_heltall(skriv_chunk(args["handle"], args["data"]))
+}
+
+funksjon les_async(scheduler: ordbok_tekst, h: ordbok_tekst, maks: heiltall) -> tekst {
+    la args: ordbok_tekst = {}
+    args["handle"] = h
+    args["max"] = tekst_fra_heltall(maks)
+    returner sched.opprett_oppgave(scheduler, 0, 1, "std.runtime_filesystem._async_les", args)
+}
+
+funksjon skriv_async(scheduler: ordbok_tekst, h: ordbok_tekst, data: tekst) -> tekst {
+    la args: ordbok_tekst = {}
+    args["handle"] = h
+    args["data"] = data
+    returner sched.opprett_oppgave(scheduler, 0, 1, "std.runtime_filesystem._async_skriv", args)
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["status"] = "stabil"
+    s["dekning"] = "generasjonsbundne segmentnormaliserte handtak og norscode-native-filesystem-v1 med openat/O_NOFOLLOW paa POSIX og UTF-16 HANDLE/reparse-vern paa Windows; read/write/append/readwrite, chunk-I/O, seek, stat, flush, close og delete; Windows overlapped ReadFile/WriteFile er kopla til filtrerte IOCP-completions, scheduler-futures, cancellation og vern mot close med utestaaande operasjonar"
+    s["mangler"] = ""
+    returner s
+}

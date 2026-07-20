@@ -1,0 +1,113 @@
+bruk std.dns som dns
+bruk std.brannmur som brannmur
+bruk std.tls_acme som tls
+bruk std.mail_server som mail
+bruk std.domenehost som host
+bruk std.tekst som t
+
+funksjon sjekk(namn: tekst, ok: bool) {
+    hvis ikkje ok {
+        skriv("FEIL future_hosting: " + namn + "\n")
+        assert(ok)
+    }
+}
+
+funksjon start() -> heiltall {
+    la sone = dns.ny_sone("example.no")
+    sjekk("dns legg A", dns.legg_a(sone, "@", "203.0.113.10"))
+    sjekk("dns legg mail", dns.legg_mail_standard(sone, "mail.example.no", "norscode", "PUBLICKEY"))
+    la zone = dns.eksporter_zonefile(sone)
+    sjekk("dns MX", t.inneholder(zone, "IN MX 10 mail.example.no."))
+    sjekk("dns SPF", t.inneholder(zone, "v=spf1 mx -all"))
+    sjekk("dns DMARC", t.inneholder(zone, "v=DMARC1; p=quarantine"))
+    sjekk("dns DKIM", t.inneholder(zone, "v=DKIM1; k=rsa; p=PUBLICKEY"))
+    sjekk("dns avviser farleg domene", ikkje dns.gyldig_domene("../example"))
+    la mxsvar = dns.svar_query(sone, "@", "MX")
+    sjekk("dns query MX", mxsvar["rcode"] == "NOERROR")
+    sjekk("dnssec signer", dns.registrer_dnssec(sone, "DS-EXAMPLE-KEY", "ECDSAP256SHA256"))
+    la dnssec = dns.dnssec_plan(sone)
+    sjekk("dnssec klar", dnssec["status"] == "klar")
+    sjekk("dnssec resign", dnssec["auto_resign"] == "sann")
+
+    la cert = tls.ny("example.no", "admin@example.no")
+    tls.legg_san(cert, "www.example.no")
+    la certplan = tls.sertifikat_plan(cert)
+    sjekk("tls acme", certplan["provider"] == "acme")
+    sjekk("tls renew", certplan["auto_renew"] == "sann")
+    sjekk("tls produksjon", tls.produksjon_klar(cert))
+
+    la fw = brannmur.ny_policy("edge")
+    brannmur.hog_sikkerheit_standard(fw, "198.51.100.0/24")
+    sjekk("brannmur produksjon", brannmur.produksjon_trygg(fw))
+    sjekk("brannmur egress", fw["egress_restricted"] == "sann")
+    la rapport = brannmur.sikkerheitsrapport(fw)
+    sjekk("brannmur rapport", rapport["tiltak"] == "ingen kritiske tiltak")
+    sjekk("brannmur risiko", rapport["risiko"] == "lav")
+    la prodrapport = brannmur.produksjonsrapport(fw)
+    sjekk("brannmur prodrapport", prodrapport["produksjon_trygg"] == "sann")
+    la apply = brannmur.applier_plan(fw, sann)
+    sjekk("brannmur dry-run", apply["dry_run"] == "sann")
+    sjekk("brannmur nft accept", t.inneholder(apply["ruleset"], "tcp dport 443 accept"))
+    sjekk("brannmur nft rate drop", t.inneholder(apply["ruleset"], "limit rate over 1200/minute drop"))
+    sjekk("brannmur nft admin cidr", t.inneholder(apply["ruleset"], "ip saddr 198.51.100.0/24 tcp dport 22 accept"))
+    sjekk("brannmur nft established", t.inneholder(apply["ruleset"], "ct state established,related accept"))
+    sjekk("brannmur nft check", apply["check_command"] == "nft --check -f -")
+    la lock = brannmur.ny_policy("edge-lock")
+    brannmur.lockdown(lock, "incident")
+    sjekk("brannmur lockdown", brannmur.sikkerheitsrapport(lock)["lockdown"] == "sann")
+
+    la m = mail.ny("example.no", "mail.example.no")
+    mail.legg_postboks(m, "postmaster", "drift")
+    m["dkim_public_key"] = "PUBLICKEY"
+    sjekk("mail produksjon", mail.produksjon_klar(m))
+    sjekk("mail banner", t.inneholder(mail.smtp_banner(m), "220 mail.example.no"))
+    la sess = mail.smtp_ny_sesjon("198.51.100.20")
+    mail.smtp_handter_linje(m, sess, "EHLO klient.example")
+    mail.smtp_handter_linje(m, sess, "MAIL FROM:<ola@example.no>")
+    la relay = mail.smtp_handter_linje(m, sess, "RCPT TO:<kunde@annan.no>")
+    sjekk("smtp blokker relay", relay["action"] == "reject")
+    mail.smtp_handter_linje(m, sess, "RCPT TO:<postmaster@example.no>")
+    mail.smtp_handter_linje(m, sess, "DATA")
+    mail.smtp_handter_linje(m, sess, "Subject: Test")
+    mail.smtp_handter_linje(m, sess, "")
+    mail.smtp_handter_linje(m, sess, "Hei")
+    la queued = mail.smtp_handter_linje(m, sess, ".")
+    sjekk("smtp queue", queued["queued"] == "sann")
+    la q = mail.ko_melding(m, sess)
+    la spool = mail.spool_plan(m, q)
+    sjekk("mail spool atomic", spool["write_mode"] == "atomic")
+    sjekk("mail spool fsync", spool["fsync"] == "sann")
+    mail.marker_leveringsforsok(q, usann, "temporary failure")
+    sjekk("mail retry", mail.ko_statusrapport(q)["next_action"] == "retry")
+    mail.dead_letter_melding(m, q, "permanent failure")
+    sjekk("mail dead letter", mail.ko_statusrapport(q)["status"] == "dead-letter")
+
+    la spam = mail.smtp_ny_sesjon("198.51.100.20")
+    spam["mail_from"] = "ola@example.no"
+    spam["rcpt_to"] = "[\"postmaster@example.no\"]"
+    spam["rcpt_count"] = "1"
+    spam["data"] = "X-Spam: yes\n"
+    la kar = mail.leveringsavgjerd(m, spam)
+    sjekk("mail karantene", kar["status"] == "quarantined")
+
+    la h = host.ny("example.no")
+    h["dnssec_signed"] = "sann"
+    h["dnssec_ds"] = "DS-EXAMPLE-KEY"
+    host.legg_admin_kjelde(h, "198.51.100.0/24")
+    sjekk("host produksjon", host.produksjon_klar(h, "PUBLICKEY"))
+    la hplan = host.infrastruktur_plan(h, "203.0.113.10", "PUBLICKEY")
+    sjekk("host plan dns", t.inneholder(hplan["zonefile"], "IN MX"))
+    sjekk("host dnssec", hplan["dnssec_status"] == "klar")
+    sjekk("host plan tls", hplan["tls_provider"] == "acme")
+    sjekk("host plan firewall", hplan["firewall_dry_run"] == "sann")
+    sjekk("host runtime security", hplan["runtime_security_ok"] == "sann")
+    sjekk("host runtime scope", t.inneholder(hplan["runtime_security_scope"], "mail"))
+    sjekk("host backup", hplan["backup_status"] == "klar")
+    sjekk("host backup encrypt", hplan["backup_encrypt"] == "sann")
+    sjekk("host restore dry-run", hplan["restore_dry_run"] == "sann")
+    sjekk("host plan sikker", hplan["security_ok"] == "sann")
+    sjekk("host plan produksjon", hplan["production_ready"] == "sann")
+
+    skriv("test_future_hosting_foundation OK")
+    returner 0
+}

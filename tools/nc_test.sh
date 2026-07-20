@@ -50,10 +50,12 @@ has_exec_gap() {
 }
 env \
   NORSCODE_ENABLE_EXEC_PROSESS=1 \
+  NORSCODE_RUN_DIRECT_HOST=1 \
+  NORSCODE_NATIVE_BIN="$NC_NATIVE_PATH" \
   NORSCODE_ROOT="$ROOT" \
   NC_NATIVE="$NC_NATIVE_PATH" \
   NC_NATIVE_OK="$NC_NATIVE_OK" \
-  HYBRID_COMPILE="${HYBRID_COMPILE:-$ROOT/tools/compile_with_hybrid_bundle_v9400.sh}" \
+  HYBRID_COMPILE="${HYBRID_COMPILE:-$ROOT/tools/compile_with_hybrid_bundle_v9400.no}" \
   TESTS_DIR="${TESTS_DIR:-$ROOT/tests}" \
   NC_TEST_TMPDIR="${NC_TEST_TMPDIR:-$ROOT/build/nc-test-tmp}" \
   NC_TEST_FILE="$NC_TEST_FILE" \
@@ -96,21 +98,20 @@ _is_native_unsupported() {
         return 0
     fi
     case "$1" in
-        test_islands*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
+        test_islands*|test_html_state*|test_audit*|test_logging*|test_metrics*|test_json_schema*|test_state*|test_snapshot*) return 0 ;;
         test_advanced_example.no|test_ai.no|test_api_advanced.no|test_api_server.no|test_api_simple_native.no|test_async_http.no|test_struct_example.no|test_wasm.no) return 0 ;;
         test_cache.no|test_http_helpers.no|test_nc_main_both.no|test_runtime_async_process_maturity.no) return 0 ;;
         test_selfhost_phase2_ffi_smoke.no|test_selfhost_phase2_regression.no|test_selfhost_phase2_smoke.no|test_selfhost_phase2_stdlib_usecases.no) return 0 ;;
         test_frontend.no|test_io_error.no|test_native_ui.no|test_native_ui_errors.no|test_secrets.no) return 0 ;;
         test_httpserver_vm_dispatch.no|test_httpserver_vm_health_log.no|test_httpserver_vm_response_helpers.no) return 0 ;;
         test_web_api_versioning.no|test_web_api_versioning_example.no|test_web_auth.no|test_csrf.no|test_web_cookies.no|test_web_openapi.no|test_web_openapi_auth.no|test_web_openapi_errors.no|test_web_openapi_schema.no|test_web_request_response.no|test_web_path.no|test_web_roles.no|test_web_sanitize.no|test_web_dependency_example.no|test_web_example.no|test_web_handle_request_fallback.no|test_web_roles_example.no|test_web_validation.no|test_web_validation_example.no) return 0 ;;
-        test_security.no|test_stil.no) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 _uses_source_vm() {
     case "$1" in
-        test_dependency_import.no|test_frontend_panel_helpers.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_html_state.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
+        test_dependency_import.no|test_html.no|test_html_components.no|test_html_components_v2.no|test_reactive.no|test_stdlib_status_matrix.no) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -135,12 +136,15 @@ _run_one() {
     _name="$(basename "$_abs_file")"
     if _uses_source_vm "$_name"; then
         _hybrid="${HYBRID_COMPILE:-$ROOT/tools/compile_with_hybrid_bundle_v9400.sh}"
+        case "$_hybrid" in
+            *.no) _hybrid="$ROOT/tools/compile_with_hybrid_bundle_v9400.sh" ;;
+        esac
         _tmpdir="${NC_TEST_TMPDIR:-$ROOT/build/nc-test-tmp}"
         _ncb="$_tmpdir/${_name%.no}.ncb.json"
         _vm_ncb="$_tmpdir/vm_executor_${_name%.no}.ncb.json"
         mkdir -p "$_tmpdir"
-        if NORSCODE_NATIVE_BIN= "$_hybrid" --from-no "$ROOT" "$_abs_file" "$_ncb" __main__ >/dev/null 2>&1; then
-            NORSCODE_NATIVE_BIN= "$_hybrid" --from-no "$ROOT" "$ROOT/selfhost/vm_executor.no" "$_vm_ncb" __main__ "$ROOT" >/dev/null 2>&1 || true
+        if NORSCODE_NATIVE_BIN= "$_hybrid" "$ROOT" "$_abs_file" "$_ncb" __main__ >/dev/null 2>&1; then
+            NORSCODE_NATIVE_BIN= "$_hybrid" "$ROOT" "$ROOT/selfhost/vm_executor.no" "$_vm_ncb" __main__ "$ROOT" >/dev/null 2>&1 || true
             if [ -f "$_vm_ncb" ]; then
                 env NORSCODE_CMD=run-ncb-host NORSCODE_HOST_NCB_FILE="$_vm_ncb" NORSCODE_NCB_FILE="$_ncb" NORSCODE_VM_SOURCE=1 NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH" || \
                 env NORSCODE_CMD=run NORSCODE_FILE="$ROOT/selfhost/vm_executor.no" NORSCODE_NCB_FILE="$_ncb" NORSCODE_VM_SOURCE=1 NORSCODE_ROOT="$ROOT" "$NC_NATIVE_PATH"

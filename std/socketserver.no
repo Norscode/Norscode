@@ -1,8 +1,10 @@
 # socketserver.no — generisk nettverkstenjar
 # Python: socketserver
 #
-# Simulerer TCPServer/UDPServer-mønsteret. Klientfunksjonane brukar std.socket,
-# medan bakgrunnstenarar framleis brukar avgrensa prosessbindingar.
+# TCP-serverdelen brukar Norscode sin native socket-ABI direkte. Det finst
+# ingen shell-, netcat- eller ekstern prosessavhengig serverlivssyklus.
+
+bruk std.socket som socket
 #
 # Tenar-objekt: ordbok_tekst
 #   "_type"       → "tcp_tenar" / "udp_tenar"
@@ -35,6 +37,10 @@ funksjon ny_tcp_tenar(vert: tekst, port: heltall) -> ordbok_tekst {
     t["pid_fil"]    = "/tmp/norscode_tcp_" + tekst_fra_heltall(port) + ".pid"
     t["logg_fil"]   = "/tmp/norscode_tcp_" + tekst_fra_heltall(port) + ".logg"
     t["prosess_id"] = ""
+    t["native_listener"] = {}
+    t["legacy_socket"] = []
+    t["logg_data"] = ""
+    t["transport"] = "native"
     returner t
 }
 
@@ -47,33 +53,31 @@ funksjon ny_udp_tenar(vert: tekst, port: heltall) -> ordbok_tekst {
     t["pid_fil"]    = "/tmp/norscode_udp_" + tekst_fra_heltall(port) + ".pid"
     t["logg_fil"]   = "/tmp/norscode_udp_" + tekst_fra_heltall(port) + ".logg"
     t["prosess_id"] = ""
+    t["native_listener"] = {}
+    t["legacy_socket"] = []
+    t["logg_data"] = ""
+    t["transport"] = "native"
     returner t
 }
 
-# Start bakgrunnstenar ved OS-grensa når runtime manglar direkte serverbinding.
-# PID/logg blir lesne og filtrerte i Norscode.
+# Start native tenar. `logg_fil` er kompatibilitetsmetadata; data blir halde
+# i tenartilstanden til ein eksplisitt handler les dei.
 funksjon start(tenar: ordbok_tekst, logg_fil: tekst) -> bool {
     tenar["logg_fil"] = logg_fil
-    la port: tekst = tenar["port"]
-    la pid_fil: tekst = tenar["pid_fil"]
     prøv {
         la type: tekst = tenar["_type"]
-        la cmd: tekst = ""
-        hvis (type == "tcp_tenar") {
-            # Prøv socat fyrst, fell tilbake til nc
-            la har_socat = builtin.exec_prosess("which socat 2>/dev/null")
-            la trim_socat = _trim(har_socat)
-            hvis (trim_socat != "") {
-                cmd = "socat -v TCP-LISTEN:" + port + ",reuseaddr,fork - >> " + _shell(logg_fil) + " 2>&1 & echo $! > " + _shell(pid_fil)
-            } ellers {
-                cmd = "nc -l " + port + " >> " + _shell(logg_fil) + " 2>&1 & echo $! > " + _shell(pid_fil)
-            }
-        } ellers {
-            cmd = "nc -u -l " + port + " >> " + _shell(logg_fil) + " 2>&1 & echo $! > " + _shell(pid_fil)
+        hvis type == "udp_tenar" {
+            la datagram = socket.native_udp_lytt(tenar["vert"], heltall_fra_tekst(tenar["port"]))
+            hvis datagram["status"] != "listening" { tenar["feil"] = datagram["error"] returner usann }
+            tenar["native_listener"] = datagram
+            tenar["port"] = datagram["port"]
+            tenar["aktiv"] = "sann"
+            returner sann
         }
-        builtin.exec_prosess("sh -c " + _shell(cmd))
-        la pid_tekst = builtin.fil_les(pid_fil)
-        tenar["prosess_id"] = _trim(pid_tekst)
+        la listener = socket.native_lytt(tenar["vert"], heltall_fra_tekst(tenar["port"]), 64)
+        hvis listener["status"] != "listening" { tenar["feil"] = listener["error"] returner usann }
+        tenar["native_listener"] = listener
+        tenar["port"] = listener["port"]
         tenar["aktiv"] = "sann"
         returner sann
     } fang (e) {
@@ -85,12 +89,15 @@ funksjon start(tenar: ordbok_tekst, logg_fil: tekst) -> bool {
 # Stopp tenar
 funksjon stopp(tenar: ordbok_tekst) -> bool {
     prøv {
-        la pid: tekst = tenar["prosess_id"]
-        hvis (pid != "") {
-            builtin.exec_prosess("kill " + _shell(pid) + " 2>/dev/null")
+        hvis har_nokkel(tenar, "native_listener") og har_nokkel(tenar["native_listener"], "handle") {
+            la closed = socket.native_lukk(tenar["native_listener"])
+            hvis closed["status"] != "closed" og closed["status"] != "feil" {
+                tenar["feil"] = "native listener kunne ikkje lukkast"
+                returner usann
+            }
         }
-        la pid_fil: tekst = tenar["pid_fil"]
-        builtin.exec_prosess("rm -f " + _shell(pid_fil))
+        tenar["legacy_socket"] = []
+        tenar["native_listener"] = {}
         tenar["aktiv"] = "usann"
         tenar["prosess_id"] = ""
         returner sann
@@ -100,34 +107,21 @@ funksjon stopp(tenar: ordbok_tekst) -> bool {
 
 # Er tenaren aktiv?
 funksjon er_aktiv(tenar: ordbok_tekst) -> bool {
-    la pid: tekst = tenar["prosess_id"]
-    hvis (pid == "") { returner usann }
-    prøv {
-        la res = builtin.exec_prosess("kill -0 " + _shell(pid) + " 2>/dev/null")
-        returner res[0] == "0"
-    } fang (e) { returner usann }
-    returner usann
+    hvis tenar["aktiv"] != "sann" { returner usann }
+    hvis ikkje har_nokkel(tenar, "native_listener") { returner usann }
+    returner har_nokkel(tenar["native_listener"], "handle")
 }
 
 # Les siste N linjer frå logg
 funksjon les_siste(tenar: ordbok_tekst, n: heltall) -> liste_tekst {
     prøv {
-        la logg: tekst = tenar["logg_fil"]
-        hvis (n < 1) { returner [] }
-        la linjer = builtin.split(builtin.fil_les(logg), "\n")
-        la ikkje_tomme: liste_tekst = []
-        la j: heltall = 0
-        mens (j < lengde(linjer)) {
-            la s0: tekst = _trim(linjer[j])
-            hvis (s0 != "") { legg_til(ikkje_tomme, s0) }
-            j = j + 1
-        }
+        la linjer = builtin.split(tenar["logg_data"], "\n")
         la resultat: liste_tekst = []
-        la start: heltall = lengde(ikkje_tomme) - n
-        hvis (start < 0) { start = 0 }
+        la start: heltall = lengde(linjer) - n
+        hvis start < 0 { start = 0 }
         la i: heltall = start
-        mens (i < lengde(ikkje_tomme)) {
-            legg_til(resultat, ikkje_tomme[i])
+        mens i < lengde(linjer) {
+            hvis _trim(linjer[i]) != "" { legg_til(resultat, _trim(linjer[i])) }
             i = i + 1
         }
         returner resultat
@@ -137,12 +131,29 @@ funksjon les_siste(tenar: ordbok_tekst, n: heltall) -> liste_tekst {
 
 # Tøm logg
 funksjon tøm_logg(tenar: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("> " + _shell(tenar["logg_fil"]))
-    } fang (e) {}
+    tenar["logg_data"] = ""
 }
 
 # Send data til ein tenar (som klient)
+funksjon _send_tcp_native(vert: tekst, port: heltall, data: tekst) -> tekst {
+    la h = socket.native_tilkoble(vert, port)
+    hvis h["status"] == "feil" { returner "" }
+    la i: heiltall = 0
+    mens h["status"] == "connecting" og i < 1000 {
+        la ready = socket.native_poll(h, 2)
+        hvis ready["status"] == "feil" { socket.native_lukk(h) returner "" }
+        hvis ready["status"] == "klar" eller ready["status"] == "connected" { h["status"] = "connected" }
+        i = i + 1
+    }
+    hvis h["status"] != "connected" { socket.native_lukk(h) returner "" }
+    la written = socket.native_skriv(h, data)
+    hvis written["status"] == "feil" { socket.native_lukk(h) returner "" }
+    la response = socket.native_les(h, 65536)
+    socket.native_lukk(h)
+    hvis response["status"] == "ok" eller response["status"] == "data" { returner response["data"] }
+    returner ""
+}
+
 funksjon send_tcp(vert: tekst, port: heltall, data: tekst) -> tekst {
     la s = sok.ny_tcp()
     prøv {
@@ -154,12 +165,12 @@ funksjon send_tcp(vert: tekst, port: heltall, data: tekst) -> tekst {
             sok.lukk(s)
             returner ""
         }
-        la res = sok.motta(s, 4096)
+        la res = sok.motta(s, 65536)
         sok.lukk(s)
-        returner _trim(res)
+        returner res
     } fang (e) {
         sok.lukk(s)
-        returner ""
+        returner _send_tcp_native(vert, port, data)
     }
     returner ""
 }
@@ -167,20 +178,12 @@ funksjon send_tcp(vert: tekst, port: heltall, data: tekst) -> tekst {
 funksjon send_udp(vert: tekst, port: heltall, data: tekst) -> bool {
     la s = sok.ny_udp()
     prøv {
-        hvis ikkje sok.tilkoble(s, vert, port) {
-            sok.lukk(s)
-            returner usann
-        }
-        hvis sok.send(s, data) < 0 {
-            sok.lukk(s)
-            returner usann
-        }
-        sok.lukk(s)
-        returner sann
-    } fang (e) {
-        sok.lukk(s)
-        returner usann
-    }
+        la s = socket.native_udp_tilkoble(vert, port)
+        hvis s["status"] != "connected" { returner usann }
+        la sendt = socket.native_skriv(s, data)
+        socket.native_lukk(s)
+        returner sendt["status"] == "ok"
+    } fang (e) { returner usann }
     returner usann
 }
 
@@ -194,37 +197,23 @@ funksjon ny_http_tenar(vert: tekst, port: heltall) -> ordbok_tekst {
 
 funksjon start_http(tenar: ordbok_tekst, rot_sti: tekst) -> bool {
     tenar["rot_sti"] = rot_sti
-    tenar["aktiv"] = "usann"
-    tenar["feil"] = "HTTP-tenar skal startast med ./bin/nc serve i aktiv Norscode-løype."
-    returner usann
+    returner start(tenar, tenar["logg_fil"])
 }
 
 # Port ledig?
 funksjon port_ledig(port: heltall) -> bool {
     prøv {
-        la res = builtin.exec_prosess("lsof -i :" + tekst_fra_heltall(port) + " 2>/dev/null")
-        la n: heltall = _tel_ikkje_tomme_liner(res)
-        returner n == 0
-    } fang (e) { returner sann }
-    returner sann
+        la probe = socket.native_lytt("127.0.0.1", port, 1)
+        hvis probe["status"] != "listening" { returner usann }
+        socket.native_lukk(probe)
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
 }
 
-# List aktive tenarar (lsof)
-funksjon aktive_tenarar() -> liste_tekst {
-    prøv {
-        la res = builtin.exec_prosess("lsof -i -P -n 2>/dev/null")
-        la linjer = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(linjer)) {
-            la s: tekst = _trim(linjer[i])
-            hvis (s != "" og _inneheld(s, "LISTEN")) { legg_til(resultat, s) }
-            i = i + 1
-        }
-        returner resultat
-    } fang (e) { returner [] }
-    returner []
-}
+# Native-tenarar er eigde av den som opprettar tenarobjektet. Det finst ingen
+# global OS-liste som kan lesast utan ein ekstern prosess.
+funksjon aktive_tenarar() -> liste_tekst { returner [] }
 
 funksjon tenar_repr(tenar: ordbok_tekst) -> tekst {
     returner tenar["_type"] + "(" + tenar["vert"] + ":" + tenar["port"] + ", aktiv=" + tenar["aktiv"] + ")"

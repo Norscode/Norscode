@@ -1,0 +1,207 @@
+# model_runtime.no — lokal kvantisert modellgraf og varig modellformat
+
+bruk std.tensor som tensor
+
+funksjon ny(navn: tekst, input_dim: heiltall) {
+    hvis navn == "" eller input_dim <= 0 { kast "ModellFeil: ugyldig modell" }
+    la m: ordbok = {}
+    m["schema"] = "norscode.qmodel.v1"
+    m["navn"] = navn
+    m["input_dim"] = input_dim
+    m["output_dim"] = input_dim
+    m["lag"] = []
+    m["parametre"] = 0
+    returner m
+}
+
+funksjon dense(input_dim: heiltall, output_dim: heiltall,
+               vekter: liste_heltall, bias: liste_heltall,
+               divisor: heiltall, aktivering: tekst) {
+    hvis input_dim <= 0 eller output_dim <= 0 { kast "ModellFeil: ugyldig dense-form" }
+    hvis lengde(vekter) != input_dim * output_dim { kast "ModellFeil: feil vektmengde" }
+    hvis lengde(bias) != output_dim { kast "ModellFeil: feil biasmengde" }
+    hvis divisor <= 0 { kast "ModellFeil: divisor må vere positiv" }
+    hvis aktivering != "ingen" og aktivering != "relu" og aktivering != "hard_tanh" {
+        kast "ModellFeil: ukjent aktivering"
+    }
+    la lag: ordbok = {}
+    lag["type"] = "dense"
+    lag["input_dim"] = input_dim
+    lag["output_dim"] = output_dim
+    lag["vekter"] = vekter
+    lag["bias"] = bias
+    lag["divisor"] = divisor
+    lag["aktivering"] = aktivering
+    returner lag
+}
+
+funksjon legg_til_lag(modell, lag) -> boolsk {
+    hvis lag["input_dim"] != modell["output_dim"] { returner usann }
+    legg_til(modell["lag"], lag)
+    modell["output_dim"] = lag["output_dim"]
+    modell["parametre"] = modell["parametre"] + lengde(lag["vekter"]) + lengde(lag["bias"])
+    returner sann
+}
+
+funksjon kjor_med_backend(modell, input: liste_heltall) {
+    hvis lengde(input) != modell["input_dim"] { kast "ModellFeil: feil inputdimensjon" }
+    la aktiv = tensor.fra_liste(input, 1, modell["input_dim"])
+    la backend = "cpu-fallback"
+    la fallback: boolsk = sann
+    la i: heiltall = 0
+    mens i < lengde(modell["lag"]) {
+        la lag = modell["lag"][i]
+        la w = tensor.fra_liste(lag["vekter"], lag["input_dim"], lag["output_dim"])
+        la resultat = tensor.matmul_med_backend(aktiv, w)
+        la steg_tensor = resultat["tensor"]
+        aktiv = steg_tensor
+        hvis resultat["fallback"] == usann {
+            hvis i == 0 eller backend == "cpu-fallback" { backend = resultat["backend"] }
+            fallback = usann
+        }
+        aktiv = tensor.legg_bias(aktiv, lag["bias"])
+        aktiv = tensor.divider(aktiv, lag["divisor"])
+        hvis lag["aktivering"] == "relu" { aktiv = tensor.relu(aktiv) }
+        ellers hvis lag["aktivering"] == "hard_tanh" { aktiv = tensor.hard_tanh(aktiv, 127) }
+        i = i + 1
+    }
+    hvis lengde(modell["lag"]) == 0 {
+        backend = "ingen"
+        fallback = usann
+    }
+    returner {"data": aktiv["data"], "backend": backend, "fallback": fallback,
+              "lag": lengde(modell["lag"])}
+}
+
+funksjon kjor(modell, input: liste_heltall) -> liste_heltall {
+    returner kjor_med_backend(modell, input)["data"]
+}
+
+funksjon valider(modell, maks_parametre: heiltall, maks_lag: heiltall) -> boolsk {
+    hvis maks_parametre <= 0 eller maks_lag <= 0 { returner usann }
+    hvis modell["schema"] != "norscode.qmodel.v1" { returner usann }
+    hvis modell["input_dim"] <= 0 eller lengde(modell["lag"]) > maks_lag { returner usann }
+    hvis modell["parametre"] < 0 eller modell["parametre"] > maks_parametre { returner usann }
+    returner sann
+}
+
+funksjon batch_kjor(modell, batch: liste<liste_heltall>, maks_batch: heiltall) -> liste<liste_heltall> {
+    hvis maks_batch <= 0 eller maks_batch > 1024 { kast "ModellFeil: ugyldig batchgrense" }
+    hvis ikkje valider(modell, 1048576, 128) { kast "ModellFeil: modellen bryt ressursgrensa" }
+    hvis lengde(batch) > maks_batch { kast "ModellFeil: batchgrense overskriden" }
+    la resultat: liste<liste_heltall> = []
+    la i: heiltall = 0
+    mens i < lengde(batch) {
+        legg_til(resultat, kjor(modell, batch[i]))
+        i = i + 1
+    }
+    returner resultat
+}
+
+funksjon _escape(v: tekst) -> tekst {
+    la ut = builtin.replace(v, "%", "%25")
+    ut = builtin.replace(ut, "\n", "%0A")
+    ut = builtin.replace(ut, "\r", "%0D")
+    returner ut
+}
+
+funksjon _unescape(v: tekst) -> tekst {
+    la ut = builtin.replace(v, "%0A", "\n")
+    ut = builtin.replace(ut, "%0D", "\r")
+    ut = builtin.replace(ut, "%25", "%")
+    returner ut
+}
+
+funksjon _felt(raw: tekst, nokkel: tekst) -> tekst {
+    la marker = nokkel + "="
+    la pos = builtin.index_of(raw, marker)
+    hvis pos < 0 { returner "" }
+    la rest = builtin.slice(raw, pos + lengde(marker), lengde(raw))
+    la slutt = builtin.index_of(rest, "\n")
+    hvis slutt < 0 { returner _unescape(rest) }
+    returner _unescape(builtin.slice(rest, 0, slutt))
+}
+
+funksjon _int_liste(data: liste_heltall) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(data) {
+        hvis i > 0 { ut = ut + "," }
+        ut = ut + tekst_fra_heltall(data[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _parse_int_liste(raw: tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    hvis raw == "" { returner ut }
+    la delar = builtin.split(raw, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        legg_til(ut, heltall_fra_tekst(delar[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon serialiser(modell) -> tekst {
+    la ut = "schema=norscode.qmodel.v1\n"
+    ut = ut + "navn=" + _escape(modell["navn"]) + "\n"
+    ut = ut + "input_dim=" + tekst_fra_heltall(modell["input_dim"]) + "\n"
+    ut = ut + "layer_count=" + tekst_fra_heltall(lengde(modell["lag"])) + "\n"
+    la i: heiltall = 0
+    mens i < lengde(modell["lag"]) {
+        la lag = modell["lag"][i]
+        la p = "layer." + tekst_fra_heltall(i) + "."
+        ut = ut + p + "type=" + lag["type"] + "\n"
+        ut = ut + p + "input_dim=" + tekst_fra_heltall(lag["input_dim"]) + "\n"
+        ut = ut + p + "output_dim=" + tekst_fra_heltall(lag["output_dim"]) + "\n"
+        ut = ut + p + "divisor=" + tekst_fra_heltall(lag["divisor"]) + "\n"
+        ut = ut + p + "activation=" + lag["aktivering"] + "\n"
+        ut = ut + p + "weights=" + _int_liste(lag["vekter"]) + "\n"
+        ut = ut + p + "bias=" + _int_liste(lag["bias"]) + "\n"
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon lagre(modell, sti: tekst) -> boolsk {
+    prøv {
+        builtin.fil_skriv(sti, serialiser(modell))
+        returner sann
+    } fang (e) {
+        returner usann
+    }
+}
+
+funksjon last(sti: tekst, maks_parametre: heiltall) {
+    hvis maks_parametre <= 0 { kast "ModellFeil: ugyldig parametergrense" }
+    la raw = builtin.fil_les(sti)
+    hvis _felt(raw, "schema") != "norscode.qmodel.v1" { kast "ModellFeil: ugyldig modellformat" }
+    la modell = ny(_felt(raw, "navn"), heltall_fra_tekst(_felt(raw, "input_dim")))
+    la antal = heltall_fra_tekst(_felt(raw, "layer_count"))
+    hvis antal < 0 eller antal > 128 { kast "ModellFeil: for mange lag" }
+    la i: heiltall = 0
+    mens i < antal {
+        la p = "layer." + tekst_fra_heltall(i) + "."
+        hvis _felt(raw, p + "type") != "dense" { kast "ModellFeil: ukjent lagtype" }
+        la vekter = _parse_int_liste(_felt(raw, p + "weights"))
+        la bias = _parse_int_liste(_felt(raw, p + "bias"))
+        hvis modell["parametre"] + lengde(vekter) + lengde(bias) > maks_parametre {
+            kast "ModellFeil: parametergrense overskriden"
+        }
+        la lag = dense(heltall_fra_tekst(_felt(raw, p + "input_dim")),
+                        heltall_fra_tekst(_felt(raw, p + "output_dim")),
+                        vekter, bias,
+                        heltall_fra_tekst(_felt(raw, p + "divisor")),
+                        _felt(raw, p + "activation"))
+        hvis ikkje legg_til_lag(modell, lag) { kast "ModellFeil: broten modellgraf" }
+        i = i + 1
+    }
+    returner modell
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "format": "norscode.qmodel.v1", "dekning": "trygg modellasting, parameter- og laggrense, avgrensa batch-inferens, fleirlags int-kvantisert dense inferens og aktiveringar", "maks_batch": "1024", "maks_parametre": "1048576"}
+}

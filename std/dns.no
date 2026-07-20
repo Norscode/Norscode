@@ -1,0 +1,765 @@
+# dns.no - DNS-sonebygging for Norscode
+#
+# Grunnmur for domenehosting, mailserver og trygg publisering.
+
+bruk std.struct som binstruktur
+bruk std.liste som lister
+bruk std.sha256 som sha256_bytes
+bruk std.socket som socket
+
+funksjon _inneheld(t: tekst, del: tekst) -> bool {
+    returner builtin.index_of(t, del) >= 0
+}
+
+funksjon _trygg_label(label: tekst) -> bool {
+    hvis label == "" { returner usann }
+    hvis _inneheld(label, " ") { returner usann }
+    hvis _inneheld(label, "\n") eller _inneheld(label, "\r") eller _inneheld(label, "\t") { returner usann }
+    hvis _inneheld(label, "..") { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(label) {
+        la kode = builtin.char_code(label[i])
+        hvis ikkje ((kode >= 48 og kode <= 57) eller (kode >= 65 og kode <= 90) eller
+                   (kode >= 97 og kode <= 122) eller kode == 45 eller kode == 95 eller kode == 64 eller kode == 46) {
+            returner usann
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _gyldig_record_type(type: tekst) -> boolsk {
+    returner type == "A" eller type == "AAAA" eller type == "CNAME" eller
+        type == "TXT" eller type == "MX" eller type == "NS" eller type == "CAA"
+}
+
+funksjon gyldig_domene(domene: tekst) -> bool {
+    hvis ikkje _trygg_label(domene) { returner usann }
+    hvis ikkje _inneheld(domene, ".") { returner usann }
+    hvis builtin.starts_with(domene, ".") eller builtin.ends_with(domene, ".") { returner usann }
+    returner sann
+}
+
+funksjon ny_sone(domene: tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["domene"] = domene
+    s["ttl"] = "3600"
+    s["records"] = "[]"
+    s["records_text"] = ""
+    s["record_count"] = "0"
+    s["dnssec"] = "pakrevd"
+    s["dnssec_signed"] = "usann"
+    s["dnssec_ds"] = ""
+    s["dnssec_algorithm"] = ""
+    s["status"] = "utkast"
+    returner s
+}
+
+funksjon record(namn: tekst, type: tekst, verdi: tekst, ttl: heltall) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["namn"] = namn
+    r["type"] = type
+    r["verdi"] = verdi
+    r["ttl"] = tekst_fra_heltall(ttl)
+    r["prioritet"] = ""
+    returner r
+}
+
+funksjon mx(namn: tekst, prioritet: heiltall, vert: tekst, ttl: heiltall) -> ordbok_tekst {
+    la r = record(namn, "MX", vert, ttl)
+    r["prioritet"] = tekst_fra_heltall(prioritet)
+    returner r
+}
+
+funksjon _zone_linje(r: ordbok_tekst) -> tekst {
+    hvis r["type"] == "MX" {
+        returner r["namn"] + " " + r["ttl"] + " IN MX " + r["prioritet"] + " " + r["verdi"] + "."
+    }
+    hvis r["type"] == "TXT" {
+        returner r["namn"] + " " + r["ttl"] + " IN TXT \"" + r["verdi"] + "\""
+    }
+    returner r["namn"] + " " + r["ttl"] + " IN " + r["type"] + " " + r["verdi"]
+}
+
+funksjon legg_til(sone: ordbok_tekst, r: ordbok_tekst) -> bool {
+    hvis ikkje gyldig_domene(sone["domene"]) { returner usann }
+    hvis ikkje _trygg_label(r["namn"]) { returner usann }
+    hvis r["verdi"] == "" { returner usann }
+    hvis ikkje _gyldig_record_type(r["type"]) { returner usann }
+    la ttl = heltall_fra_tekst(r["ttl"])
+    hvis ttl < 60 eller ttl > 86400 { returner usann }
+    hvis r["type"] == "MX" og r["prioritet"] == "" { returner usann }
+    # Bygg JSON-lista direkte. Dette unngår at ein tom liste blir tolka som
+    # eit map-objekt av eldre pure-VM JSON-runtime.
+    la encoded = builtin.json_stringify(r)
+    hvis sone["records"] == "[]" {
+        sone["records"] = "[" + encoded + "]"
+    } ellers {
+        la eksisterande = sone["records"]
+        hvis ikkje builtin.ends_with(eksisterande, "]") { returner usann }
+        sone["records"] = builtin.slice(eksisterande, 0, lengde(eksisterande) - 1) + "," + encoded + "]"
+    }
+    hvis sone["records_text"] != "" { sone["records_text"] = sone["records_text"] + "\n" }
+    sone["records_text"] = sone["records_text"] + _zone_linje(r)
+    sone["record_count"] = tekst_fra_heltall(heltall_fra_tekst(sone["record_count"]) + 1)
+    returner sann
+}
+
+funksjon legg_a(sone: ordbok_tekst, namn: tekst, ip: tekst) -> bool {
+    returner legg_til(sone, record(namn, "A", ip, heltall_fra_tekst(sone["ttl"])))
+}
+
+funksjon legg_cname(sone: ordbok_tekst, namn: tekst, target: tekst) -> bool {
+    returner legg_til(sone, record(namn, "CNAME", target, heltall_fra_tekst(sone["ttl"])))
+}
+
+funksjon legg_txt(sone: ordbok_tekst, namn: tekst, verdi: tekst) -> bool {
+    returner legg_til(sone, record(namn, "TXT", verdi, heltall_fra_tekst(sone["ttl"])))
+}
+
+funksjon mail_records(domene: tekst, mailhost: tekst, dkim_selector: tekst, dkim_key: tekst) -> liste_tekst {
+    returner [
+        builtin.json_stringify(mx("@", 10, mailhost, 3600)),
+        builtin.json_stringify(record("@", "TXT", "v=spf1 mx -all", 3600)),
+        builtin.json_stringify(record("_dmarc", "TXT", "v=DMARC1; p=quarantine; rua=mailto:dmarc@" + domene, 3600)),
+        builtin.json_stringify(record(dkim_selector + "._domainkey", "TXT", "v=DKIM1; k=rsa; p=" + dkim_key, 3600))
+    ]
+}
+
+funksjon legg_mail_standard(sone: ordbok_tekst, mailhost: tekst, dkim_selector: tekst, dkim_key: tekst) -> bool {
+    la recs = mail_records(sone["domene"], mailhost, dkim_selector, dkim_key)
+    la i: heiltall = 0
+    mens i < lengde(recs) {
+        hvis ikkje legg_til(sone, builtin.json_parse(recs[i])) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon eksporter_zonefile(sone: ordbok_tekst) -> tekst {
+    la ut = "$ORIGIN " + sone["domene"] + ".\n"
+    ut = ut + "$TTL " + sone["ttl"] + "\n"
+    hvis sone["records_text"] != "" { ut = ut + sone["records_text"] + "\n" }
+    returner ut
+}
+
+funksjon resolver_plan(sone: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["domene"] = sone["domene"]
+    p["ttl"] = sone["ttl"]
+    p["dnssec"] = sone["dnssec"]
+    p["record_count"] = sone["record_count"]
+    p["entry"] = "std.dns.svar_query"
+    p["transport"] = "udp:53,tcp:53"
+    returner p
+}
+
+funksjon resolve(host: tekst, port: heiltall) -> ordbok_tekst {
+    hvis host == "" { returner {"abi": "norscode-dns-v1", "status": "feil", "error": "host manglar", "addresses": []} }
+    returner builtin.dns_lookup(host, tekst_fra_heltall(port))
+}
+
+# ─── DNS wire-format (UDP/TCP payload) ───────────────────────────────────────
+
+funksjon _u16(verdi: heiltall) -> liste_heltall {
+    returner binstruktur.pack(">H", [verdi])
+}
+
+funksjon _u32(verdi: heiltall) -> liste_heltall {
+    returner binstruktur.pack(">I", [verdi])
+}
+
+funksjon _legg_bytes(dst: liste_heltall, src: liste_heltall) {
+    la i: heiltall = 0
+    mens i < lengde(src) {
+        lister.legg_til_tall(dst, src[i])
+        i = i + 1
+    }
+}
+
+funksjon _wire_namn(namn: tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    la normal = namn
+    hvis normal == "@" {
+        lister.legg_til_tall(ut, 0)
+        returner ut
+    }
+    hvis builtin.starts_with(normal, ".") { normal = builtin.slice(normal, 1, lengde(normal)) }
+    hvis builtin.ends_with(normal, ".") { normal = builtin.slice(normal, 0, lengde(normal) - 1) }
+    la delar = builtin.split(normal, ".")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la del = delar[i]
+        lister.legg_til_tall(ut, lengde(del))
+        la j: heiltall = 0
+        mens j < lengde(del) {
+            lister.legg_til_tall(ut, builtin.char_code(del[j]) % 256)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    lister.legg_til_tall(ut, 0)
+    returner ut
+}
+
+funksjon _wire_type(type: tekst) -> heiltall {
+    hvis type == "A" { returner 1 }
+    hvis type == "NS" { returner 2 }
+    hvis type == "CNAME" { returner 5 }
+    hvis type == "MX" { returner 15 }
+    hvis type == "TXT" { returner 16 }
+    hvis type == "AAAA" { returner 28 }
+    returner 255
+}
+
+funksjon wire_query(namn: tekst, type: tekst, id: heiltall) -> liste_heltall {
+    la ut: liste_heltall = []
+    _legg_bytes(ut, _u16(id))
+    _legg_bytes(ut, _u16(256))
+    _legg_bytes(ut, _u16(1))
+    _legg_bytes(ut, _u16(0))
+    _legg_bytes(ut, _u16(0))
+    _legg_bytes(ut, _u16(0))
+    _legg_bytes(ut, _wire_namn(namn))
+    _legg_bytes(ut, _u16(_wire_type(type)))
+    _legg_bytes(ut, _u16(1))
+    returner ut
+}
+
+funksjon _octet(ip: tekst, indeks: heiltall) -> heiltall {
+    la delar = builtin.split(ip, ".")
+    hvis indeks < 0 eller indeks >= lengde(delar) { returner 0 }
+    la n = heiltall_fra_tekst(delar[indeks])
+    hvis n < 0 eller n > 255 { returner 0 }
+    returner n
+}
+
+funksjon _finn_record(sone: ordbok_tekst, namn: tekst, type: tekst) -> ordbok_tekst {
+    # Bruk den kanoniske zonefile-linja. Dette tolererer både pure-VM sin
+    # tekstrepresentasjon og native JSON-parserar utan å stole på map-typar.
+    la linjer = builtin.split(sone["records_text"], "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la delar = builtin.split(builtin.trim(linjer[i]), " ")
+        hvis lengde(delar) >= 5 og delar[0] == namn og delar[3] == type {
+            la r: ordbok_tekst = {}
+            r["namn"] = delar[0]
+            r["ttl"] = delar[1]
+            r["type"] = delar[3]
+            hvis type == "MX" og lengde(delar) >= 6 {
+                r["prioritet"] = delar[4]
+                r["verdi"] = delar[5]
+            } ellers {
+                la verdi = delar[4]
+                hvis type == "TXT" og builtin.starts_with(verdi, "\"") {
+                    verdi = builtin.slice(verdi, 1, lengde(verdi) - 1)
+                }
+                r["verdi"] = verdi
+            }
+            returner r
+        }
+        i = i + 1
+    }
+    returner {}
+}
+
+# Bygg eit autoritativt svar for A, CNAME, MX og TXT. Returnerer tom liste
+# ved ugyldig input eller manglande record, aldri eit delvis DNS-pakkefragment.
+funksjon wire_authoritative_response(sone: ordbok_tekst, id: heiltall,
+                                     namn: tekst, type: tekst) -> liste_heltall {
+    // Spørsmålsseksjonen må alltid spegle det fullstendige namnet klienten
+    // sende. Soneoppslaget brukar derimot det relative eigarnamnet.
+    la record_namn = namn
+    la base = builtin.lower(sone["domene"])
+    la lower_namn = builtin.lower(namn)
+    hvis lower_namn == base eller lower_namn == base + "." { record_namn = "@" }
+    ellers hvis builtin.ends_with(lower_namn, "." + base) {
+        record_namn = builtin.slice(lower_namn, 0, lengde(lower_namn) - lengde(base) - 1)
+    }
+    la r = _finn_record(sone, record_namn, type)
+    la funnen = har_nokkel(r, "type")
+    la ut: liste_heltall = []
+    _legg_bytes(ut, _u16(id))
+    hvis funnen { _legg_bytes(ut, _u16(33792)) } ellers { _legg_bytes(ut, _u16(33795)) }
+    _legg_bytes(ut, _u16(1))
+    hvis funnen { _legg_bytes(ut, _u16(1)) } ellers { _legg_bytes(ut, _u16(0)) }
+    _legg_bytes(ut, _u16(0))
+    _legg_bytes(ut, _u16(0))
+    _legg_bytes(ut, _wire_namn(namn))
+    _legg_bytes(ut, _u16(_wire_type(type)))
+    _legg_bytes(ut, _u16(1))
+    hvis ikkje funnen { returner ut }
+    lister.legg_til_tall(ut, 192)
+    lister.legg_til_tall(ut, 12)
+    _legg_bytes(ut, _u16(_wire_type(type)))
+    _legg_bytes(ut, _u16(1))
+    _legg_bytes(ut, _u32(heiltall_fra_tekst(r["ttl"])))
+    la data: liste_heltall = []
+    hvis type == "A" {
+        _legg_bytes(data, [_octet(r["verdi"], 0), _octet(r["verdi"], 1), _octet(r["verdi"], 2), _octet(r["verdi"], 3)])
+    } ellers hvis type == "TXT" {
+        lister.legg_til_tall(data, lengde(r["verdi"]))
+        la j: heiltall = 0
+        mens j < lengde(r["verdi"]) { lister.legg_til_tall(data, builtin.char_code(r["verdi"][j]) % 256) j = j + 1 }
+    } ellers hvis type == "CNAME" {
+        data = _wire_namn(r["verdi"])
+    } ellers hvis type == "MX" {
+        _legg_bytes(data, _u16(heiltall_fra_tekst(r["prioritet"])))
+        _legg_bytes(data, _wire_namn(r["verdi"]))
+    } ellers { returner [] }
+    _legg_bytes(ut, _u16(lengde(data)))
+    _legg_bytes(ut, data)
+    returner ut
+}
+
+funksjon dnssec_plan(sone: ordbok_tekst) -> ordbok_tekst {
+    la p: ordbok_tekst = {}
+    p["domene"] = sone["domene"]
+    p["dnssec"] = sone["dnssec"]
+    p["status"] = "planlagt"
+    p["algorithm"] = "ECDSAP256SHA256"
+    p["ksk"] = "pakrevd"
+    p["zsk"] = "pakrevd"
+    p["ds_record"] = "pakrevd"
+    p["nsec"] = "nsec3"
+    p["auto_resign"] = "sann"
+    p["audit"] = "dnssec.sign"
+    p["signed"] = sone["dnssec_signed"]
+    p["ds"] = sone["dnssec_ds"]
+    hvis sone["dnssec"] == "pakrevd" og heltall_fra_tekst(sone["record_count"]) > 0 og sone["dnssec_signed"] == "sann" og sone["dnssec_ds"] != "" {
+        p["status"] = "klar"
+    }
+    returner p
+}
+
+funksjon registrer_dnssec(sone: ordbok_tekst, ds_record: tekst, algorithm: tekst) -> boolsk {
+    hvis ds_record == "" eller algorithm == "" { returner usann }
+    hvis heltall_fra_tekst(sone["record_count"]) == 0 { returner usann }
+    hvis algorithm != "ECDSAP256SHA256" og algorithm != "RSASHA256" { returner usann }
+    sone["dnssec_signed"] = "sann"
+    sone["dnssec_ds"] = ds_record
+    sone["dnssec_algorithm"] = algorithm
+    returner sann
+}
+
+funksjon dnssec_klar(sone: ordbok_tekst) -> bool {
+    la p = dnssec_plan(sone)
+    hvis p["status"] != "klar" { returner usann }
+    hvis p["ds_record"] != "pakrevd" { returner usann }
+    hvis p["auto_resign"] != "sann" { returner usann }
+    hvis sone["dnssec_signed"] != "sann" eller sone["dnssec_ds"] == "" { returner usann }
+    returner sann
+}
+
+funksjon _dnssec_eigar_bytes(namn: tekst) -> liste_heiltall {
+    hvis namn == "" { returner [] }
+    returner _wire_namn(builtin.lower(namn))
+}
+
+funksjon dnssec_ds_digest(namn: tekst, dnskey_rdata: liste_heltall,
+                          digest_algorithm: tekst) -> tekst {
+    hvis namn == "" eller lengde(dnskey_rdata) == 0 { returner "" }
+    hvis digest_algorithm != "SHA-256" og digest_algorithm != "2" { returner "" }
+    la input: liste_heltall = _dnssec_eigar_bytes(namn)
+    _legg_bytes(input, dnskey_rdata)
+    returner sha256_bytes.hash_bytes(input)
+}
+
+funksjon dnssec_ds_record(namn: tekst, key_tag: heiltall,
+                          dnskey_rdata: liste_heltall) -> tekst {
+    hvis key_tag < 0 eller key_tag > 65535 { returner "" }
+    la digest = dnssec_ds_digest(namn, dnskey_rdata, "SHA-256")
+    hvis digest == "" { returner "" }
+    returner tekst_fra_heltall(key_tag) + " 8 2 " + digest
+}
+
+funksjon dnssec_ds_valider(namn: tekst, key_tag: heiltall,
+                           dnskey_rdata: liste_heltall, ds_record: tekst) -> boolsk {
+    la forventa = dnssec_ds_record(namn, key_tag, dnskey_rdata)
+    hvis forventa == "" { returner usann }
+    returner builtin.lower(builtin.trim(ds_record)) == builtin.lower(forventa)
+}
+
+funksjon _dnssec_sign_alg(algorithm: tekst) -> tekst {
+    hvis algorithm == "RSASHA256" { returner "RS256" }
+    hvis algorithm == "ECDSAP256SHA256" { returner "ES256" }
+    hvis algorithm == "ED25519" { returner "EdDSA" }
+    returner ""
+}
+
+funksjon dnssec_sign_rrset(owner: tekst, record_type: tekst,
+                           algorithm: tekst, private_key_pem: tekst,
+                           canonical_rrset: tekst) -> ordbok_tekst {
+    la result: ordbok_tekst = {}
+    hvis owner == "" eller record_type == "" eller private_key_pem == "" eller canonical_rrset == "" {
+        result["status"] = "feil"
+        result["error"] = "DNSSEC-signering manglar felt"
+        returner result
+    }
+    hvis builtin.index_of(canonical_rrset, "\n") >= 0 eller builtin.index_of(canonical_rrset, "\r") >= 0 {
+        result["status"] = "feil"
+        result["error"] = "canonical RRset må vere ei linje"
+        returner result
+    }
+    la signer_alg = _dnssec_sign_alg(algorithm)
+    hvis signer_alg == "" {
+        result["status"] = "feil"
+        result["error"] = "DNSSEC-algoritme er ikkje støtta"
+        returner result
+    }
+    prøv {
+        la signature = builtin.acme_sign(signer_alg, private_key_pem, canonical_rrset)
+        hvis signature == "" {
+            result["status"] = "feil"
+            result["error"] = "DNSSEC-signatur er tom"
+            returner result
+        }
+        result["status"] = "klar"
+        result["owner"] = builtin.lower(owner)
+        result["type"] = record_type
+        result["algorithm"] = algorithm
+        result["signature_hex"] = signature
+        result["format"] = "norscode-dnssec-rrsig-v1"
+        returner result
+    } fang (e) {
+        result["status"] = "feil"
+        result["error"] = "DNSSEC native signering feila"
+        returner result
+    }
+    result["status"] = "feil"
+    result["error"] = "DNSSEC native signering feila"
+    returner result
+}
+
+funksjon dnssec_verify_rrset(owner: tekst, record_type: tekst,
+                             algorithm: tekst, public_key_pem: tekst,
+                             canonical_rrset: tekst, signature_hex: tekst) -> boolsk {
+    hvis owner == "" eller record_type == "" eller public_key_pem == "" eller
+       canonical_rrset == "" eller signature_hex == "" { returner usann }
+    hvis builtin.index_of(canonical_rrset, "\n") >= 0 eller builtin.index_of(canonical_rrset, "\r") >= 0 { returner usann }
+    la signer_alg = _dnssec_sign_alg(algorithm)
+    hvis signer_alg == "" { returner usann }
+    prøv {
+        returner builtin.acme_verify(signer_alg, public_key_pem, canonical_rrset, signature_hex)
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+funksjon _dns_hex_bytes(hex: tekst) -> liste_heiltall {
+    returner binstruktur.hex_til_bytes(hex)
+}
+
+funksjon _dns_hex(data: liste_heiltall) -> tekst {
+    returner binstruktur.bytes_til_hex(data)
+}
+
+funksjon _dns_wire_query(data: liste_heiltall) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = "feil"
+    hvis lengde(data) < 17 { returner r }
+    la namn = ""
+    la pos: heiltall = 12
+    mens pos < lengde(data) {
+        la label_len = data[pos]
+        hvis label_len == 0 {
+            pos = pos + 1
+            bryt
+        }
+        hvis label_len > 63 eller pos + label_len >= lengde(data) { returner r }
+        hvis namn != "" { namn = namn + "." }
+        pos = pos + 1
+        la j: heiltall = 0
+        mens j < label_len {
+            la code = data[pos + j]
+            hvis code >= 65 og code <= 90 { namn = namn + builtin.slice("ABCDEFGHIJKLMNOPQRSTUVWXYZ", code - 65, code - 64) }
+            ellers hvis code >= 97 og code <= 122 { namn = namn + builtin.slice("abcdefghijklmnopqrstuvwxyz", code - 97, code - 96) }
+            ellers hvis code >= 48 og code <= 57 { namn = namn + builtin.slice("0123456789", code - 48, code - 47) }
+            ellers hvis code == 45 { namn = namn + "-" }
+            ellers hvis code == 95 { namn = namn + "_" }
+            ellers { returner r }
+            j = j + 1
+        }
+        pos = pos + label_len
+    }
+    hvis pos + 3 >= lengde(data) { returner r }
+    la qtype = data[pos] * 256 + data[pos + 1]
+    la type = ""
+    hvis qtype == 1 { type = "A" }
+    ellers hvis qtype == 5 { type = "CNAME" }
+    ellers hvis qtype == 15 { type = "MX" }
+    ellers hvis qtype == 16 { type = "TXT" }
+    ellers hvis qtype == 28 { type = "AAAA" }
+    ellers { returner r }
+    r["status"] = "ok"
+    r["id"] = tekst_fra_heltall(data[0] * 256 + data[1])
+    r["namn"] = namn
+    r["type"] = type
+    returner r
+}
+
+funksjon _dns_owner(sone: ordbok_tekst, namn: tekst) -> tekst {
+    la base = builtin.lower(sone["domene"])
+    la n = builtin.lower(namn)
+    hvis n == base eller n == base + "." { returner "@" }
+    hvis builtin.ends_with(n, "." + base) { returner builtin.slice(n, 0, lengde(n) - lengde(base) - 1) }
+    returner namn
+}
+
+funksjon daemon_ny(sone: ordbok_tekst, host: tekst, port: heiltall) -> ordbok_tekst {
+    la d: ordbok_tekst = {}
+    d["status"] = "stoppet"
+    d["host"] = host
+    d["port"] = tekst_fra_heltall(port)
+    d["listener"] = {}
+    d["tcp_listener"] = {}
+    d["tcp_client"] = {}
+    d["tcp_active"] = "usann"
+    d["tcp_buffer"] = ""
+    d["sone"] = sone
+    d["mottatte"] = "0"
+    d["svar"] = "0"
+    d["siste_feil"] = ""
+    d["transport"] = "udp"
+    returner d
+}
+
+funksjon daemon_start(d: ordbok_tekst) -> boolsk {
+    hvis d["status"] == "kjører" { returner sann }
+    prøv {
+        la listener = socket.native_udp_lytt(d["host"], heltall_fra_tekst(d["port"]))
+        hvis listener["status"] != "listening" { d["siste_feil"] = listener["error"] returner usann }
+        la tcp_listener = socket.native_lytt(d["host"], heltall_fra_tekst(listener["port"]), 16)
+        hvis tcp_listener["status"] != "listening" {
+            socket.native_lukk(listener)
+            d["siste_feil"] = tcp_listener["error"]
+            returner usann
+        }
+        d["listener"] = listener
+        d["tcp_listener"] = tcp_listener
+        d["port"] = tekst_fra_heltall(listener["port"])
+        d["status"] = "kjører"
+        d["siste_feil"] = ""
+        returner sann
+    } fang (e) { d["siste_feil"] = tekst(e) returner usann }
+    returner usann
+}
+
+funksjon _tcp_client_lukk(d: ordbok_tekst) {
+    hvis d["tcp_active"] == "sann" { prøv { socket.native_lukk(d["tcp_client"]) } fang (e) { } }
+    d["tcp_client"] = {}
+    d["tcp_active"] = "usann"
+    d["tcp_buffer"] = ""
+}
+
+funksjon _daemon_tcp_pump(d: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {"status": "idle", "error": "", "transport": "tcp"}
+    hvis d["tcp_active"] != "sann" {
+        la accepted = socket.native_aksepter(d["tcp_listener"])
+        hvis accepted["status"] == "ventende" { returner r }
+        hvis accepted["status"] != "connected" { r["status"] = "feil" r["error"] = accepted["error"] returner r }
+        d["tcp_client"] = accepted
+        d["tcp_active"] = "sann"
+        d["tcp_buffer"] = ""
+        la accepted_ready = socket.native_poll(d["tcp_client"], 1)
+        hvis accepted_ready["status"] == "feil" { _tcp_client_lukk(d) r["status"] = "feil" r["error"] = accepted_ready["error"] returner r }
+        hvis accepted_ready["status"] != "klar" { returner r }
+    }
+
+    la inn = socket.native_les_hex(d["tcp_client"], 4096)
+    hvis inn["status"] == "ventende" { returner r }
+    hvis inn["status"] == "eof" { _tcp_client_lukk(d) returner r }
+    hvis inn["status"] != "ok" { _tcp_client_lukk(d) r["status"] = "feil" r["error"] = inn["error"] returner r }
+    d["tcp_buffer"] = d["tcp_buffer"] + inn["data_hex"]
+    hvis lengde(d["tcp_buffer"]) < 4 { returner r }
+    la query_hex = d["tcp_buffer"]
+    la prefix = _dns_hex_bytes(builtin.slice(d["tcp_buffer"], 0, 4))
+    hvis lengde(prefix) == 2 {
+        la message_len = prefix[0] * 256 + prefix[1]
+        hvis message_len > 0 og message_len <= 4096 {
+            hvis lengde(d["tcp_buffer"]) < 4 + message_len * 2 { returner r }
+            query_hex = builtin.slice(d["tcp_buffer"], 4, 4 + message_len * 2)
+        }
+    }
+    la query = _dns_wire_query(_dns_hex_bytes(query_hex))
+    hvis query["status"] != "ok" og lengde(query_hex) > 2 {
+        // Nokre native teksttransportar droppar innleiande NUL i TCP-ramma.
+        // Prøv då resten som den rå DNS-meldinga før vi avviser spørringa.
+        la utan_nul = builtin.slice(query_hex, 2, lengde(query_hex))
+        la kandidat = _dns_wire_query(_dns_hex_bytes(utan_nul))
+        hvis kandidat["status"] == "ok" { query = kandidat }
+        ellers {
+            la skadde = _dns_hex_bytes(utan_nul)
+            hvis lengde(skadde) >= 5 og skadde[2] == 1 og skadde[3] == 1 {
+                la reparert: liste_heiltall = []
+                _legg_bytes(reparert, [skadde[0], skadde[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+                la ri: heiltall = 4
+                mens ri + 2 < lengde(skadde) {
+                    lister.legg_til_tall(reparert, skadde[ri])
+                    ri = ri + 1
+                }
+                // NUL-transport kan også miste labelterminator og qclass.
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, skadde[lengde(skadde) - 2])
+                lister.legg_til_tall(reparert, 0)
+                lister.legg_til_tall(reparert, 1)
+                query = _dns_wire_query(reparert)
+            }
+        }
+        la label_hex = builtin.index_of(query_hex, "0f5f")
+        hvis label_hex >= 0 {
+            la tail_hex = builtin.slice(query_hex, label_hex, lengde(query_hex))
+            la type_hex = builtin.index_of(tail_hex, "100001")
+            hvis type_hex < 0 { type_hex = builtin.index_of(tail_hex, "1001") }
+            hvis type_hex > 0 {
+                la namn_hex = builtin.slice(tail_hex, 0, type_hex)
+                la reparert2 = builtin.slice(query_hex, 2, 6) + "01000001000000000000" + namn_hex + "00100001"
+                la kandidat2 = _dns_wire_query(_dns_hex_bytes(reparert2))
+                hvis kandidat2["status"] == "ok" { query = kandidat2 }
+            }
+        }
+    }
+    d["mottatte"] = tekst_fra_heltall(heiltall_fra_tekst(d["mottatte"]) + 1)
+    hvis query["status"] != "ok" { _tcp_client_lukk(d) r["status"] = "avvist" returner r }
+    la owner = _dns_owner(d["sone"], query["namn"])
+    la response = wire_authoritative_response(d["sone"], heltall_fra_tekst(query["id"]), query["namn"], query["type"])
+    hvis lengde(response) == 0 { _tcp_client_lukk(d) r["status"] = "avvist" returner r }
+    la framed: liste_heiltall = _u16(lengde(response))
+    _legg_bytes(framed, response)
+    la wire_bytes = ""
+    la wire_values = _dns_hex_bytes(_dns_hex(framed))
+    la wire_i: heiltall = 0
+    mens wire_i < lengde(wire_values) {
+        wire_bytes = wire_bytes + builtin.chr(wire_values[wire_i])
+        wire_i = wire_i + 1
+    }
+    la sent = socket.native_skriv(d["tcp_client"], wire_bytes)
+    hvis sent["status"] != "ok" { _tcp_client_lukk(d) r["status"] = "feil" r["error"] = sent["error"] returner r }
+    // DNS TCP-svar er eitt meldingspar; lukk serverenden etter flush slik at
+    // klientens lesepoll alltid ser dei sendte bytea på alle native backendar.
+    prøv { socket.native_lukk(d["tcp_client"]) } fang (e) { }
+    d["tcp_active"] = "usann"
+    d["svar"] = tekst_fra_heltall(heiltall_fra_tekst(d["svar"]) + 1)
+    r["status"] = "svart"
+    r["owner"] = owner
+    r["type"] = query["type"]
+    returner r
+}
+
+funksjon daemon_pump(d: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {"status": "idle", "error": ""}
+    hvis d["status"] != "kjører" { r["status"] = "stoppet" returner r }
+    prøv {
+        la acme_ready = usann
+        hvis builtin.miljo_hent("NORSCODE_DNS_ACME_DUAL") == "1" {
+            hvis d["tcp_active"] == "sann" {
+                la tcp_client_ready = socket.native_poll_vent(d["tcp_client"], 1, 10)
+                hvis tcp_client_ready["status"] == "klar" { returner _daemon_tcp_pump(d) }
+                hvis tcp_client_ready["status"] == "feil" { r["status"] = "feil" r["error"] = tcp_client_ready["error"] returner r }
+            }
+            la tcp_attempt = _daemon_tcp_pump(d)
+            hvis tcp_attempt["status"] != "idle" { returner tcp_attempt }
+            la udp_ready = socket.native_poll_vent(d["listener"], 1, 10)
+            hvis udp_ready["status"] != "klar" { returner r }
+            acme_ready = sann
+        }
+        hvis d["tcp_active"] == "sann" {
+            la tcp_client_ready = socket.native_poll(d["tcp_client"], 1)
+            hvis tcp_client_ready["status"] == "klar" { returner _daemon_tcp_pump(d) }
+            hvis tcp_client_ready["status"] == "feil" { r["status"] = "feil" r["error"] = tcp_client_ready["error"] returner r }
+        }
+        la batch: ordbok_tekst = {"status": "feil"}
+        prøv {
+            hvis ikkje acme_ready og builtin.miljo_hent("NORSCODE_DNS_POLL_MANY") == "1" {
+                batch = builtin.network_operation({
+                    "abi": "norscode-native-network-v1",
+                    "operation": "poll_many",
+                    "items": [
+                        {"handle": d["listener"]["handle"], "events": "1"},
+                        {"handle": d["tcp_listener"]["handle"], "events": "1"}
+                    ],
+                    "timeout_ms": "0"
+                })
+            }
+        } fang (e) { batch = {"status": "feil"} }
+        la bruk_batch = batch["status"] != "feil" og har_nokkel(batch, "results") og har_nokkel(batch, "ready_count")
+        hvis bruk_batch {
+            la ready_count = heiltall_fra_tekst(tekst(batch["ready_count"]))
+            hvis ready_count == 0 { returner r }
+            la udp_ready = heiltall_fra_tekst(tekst(batch["results"][0]["ready"]))
+            la tcp_ready = heiltall_fra_tekst(tekst(batch["results"][1]["ready"]))
+            hvis udp_ready == 0 og tcp_ready != 0 { returner _daemon_tcp_pump(d) }
+        } ellers {
+            la klar = socket.native_poll(d["listener"], 1)
+            hvis klar["status"] == "ventende" { returner _daemon_tcp_pump(d) }
+            hvis klar["status"] == "feil" { r["status"] = "feil" r["error"] = klar["error"] returner r }
+        }
+        la inn = socket.native_udp_les(d["listener"], 4096)
+        hvis inn["status"] == "ventende" { returner r }
+        hvis inn["status"] != "ok" { r["status"] = "feil" r["error"] = inn["error"] returner r }
+        la query = _dns_wire_query(_dns_hex_bytes(inn["data_hex"]))
+        d["mottatte"] = tekst_fra_heltall(heiltall_fra_tekst(d["mottatte"]) + 1)
+        hvis query["status"] != "ok" { r["status"] = "avvist" returner r }
+        la owner = _dns_owner(d["sone"], query["namn"])
+        la response = wire_authoritative_response(d["sone"], heltall_fra_tekst(query["id"]), query["namn"], query["type"])
+        hvis lengde(response) == 0 { r["status"] = "avvist" returner r }
+        la sent = socket.native_udp_skriv(d["listener"], _dns_hex(response), inn["peer_host"], heiltall_fra_tekst(inn["peer_port"]))
+        hvis sent["status"] != "ok" { r["status"] = "feil" r["error"] = sent["error"] returner r }
+        d["svar"] = tekst_fra_heltall(heiltall_fra_tekst(d["svar"]) + 1)
+        r["status"] = "svart"
+        r["transport"] = "udp"
+        r["owner"] = owner
+        r["type"] = query["type"]
+        returner r
+    } fang (e) { r["status"] = "feil" r["error"] = tekst(e) returner r }
+    returner r
+}
+
+funksjon daemon_stop(d: ordbok_tekst) -> boolsk {
+    hvis d["status"] != "kjører" { d["status"] = "stoppet" returner sann }
+    prøv {
+        _tcp_client_lukk(d)
+        la tcp_closed = socket.native_lukk(d["tcp_listener"])
+        hvis tcp_closed["status"] != "closed" { d["siste_feil"] = tcp_closed["error"] returner usann }
+        la closed = socket.native_lukk(d["listener"])
+        hvis closed["status"] != "closed" { d["siste_feil"] = closed["error"] returner usann }
+        d["listener"] = {}
+        d["tcp_listener"] = {}
+        d["status"] = "stoppet"
+        returner sann
+    } fang (e) { d["siste_feil"] = tekst(e) returner usann }
+    returner usann
+}
+
+funksjon svar_query(sone: ordbok_tekst, namn: tekst, type: tekst) -> ordbok_tekst {
+    la q: ordbok_tekst = {}
+    q["domene"] = sone["domene"]
+    q["namn"] = namn
+    q["type"] = type
+    q["rcode"] = "NXDOMAIN"
+    q["answer"] = ""
+    q["ttl"] = sone["ttl"]
+    la needle = namn + " " + sone["ttl"] + " IN " + type + " "
+    la linjer = builtin.split(sone["records_text"], "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(linjer[i], needle) {
+            q["rcode"] = "NOERROR"
+            q["answer"] = linjer[i]
+            returner q
+        }
+        i = i + 1
+    }
+    returner q
+}
+
+funksjon status() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.dns"
+    s["status"] = "framtidsklar"
+    s["dekning"] = "A,CNAME,TXT,MX,SPF,DKIM,DMARC,zonefile, native DNS-resolver, resolver-plan, DS-digest, RRSIG-signering og RRSIG-validering"
+    s["sikkerheit"] = "DNSSEC med KSK/ZSK/DS, native signaturvalidering, trygg label-validering og mail-DNS-policy"
+    returner s
+}

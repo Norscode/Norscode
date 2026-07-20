@@ -3,7 +3,7 @@
 // Handterar NORSCODE_CMD og NORSCODE_FILE miljøvariablar.
 // Kompilerer via selfhost-pipeline; køyring går via selfhost.vm (utan C-host).
 
-bruk selfhost.kompiler
+bruk selfhost.kompiler som komp
 bruk selfhost.json
 bruk selfhost.bundler
 bruk selfhost.vm
@@ -13,7 +13,7 @@ bruk std.socket som sok
 
 funksjon nc_kompiler_fil(src_sti: tekst, modul: tekst) -> tekst {
     la kjelde = fil_les(src_sti)
-    returner kompiler_fil(kjelde, modul)
+    returner komp.kompiler_fil(kjelde, modul)
 }
 
 // ─── Køyr NCB via selfhost/vm.no (utan C-host) ────────────────────────────────
@@ -135,7 +135,21 @@ funksjon parse_query(raw_query: tekst) -> ordbok<tekst, tekst> {
 }
 
 funksjon parse_http_request(raw: tekst) -> ordbok<tekst, tekst> {
-    la normalisert = builtin.replace(raw, "\r", "")
+    // Del hovud og kropp før headernormalisering. Dette bevarer CR- og
+    // linjeskiftbyte i multipartfiler og andre binære request-kroppar.
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    la separator_bytes = 4
+    hvis header_end < 0 {
+        header_end = builtin.index_of(raw, "\n\n")
+        separator_bytes = 2
+    }
+    la header_raw = raw
+    la body = ""
+    hvis header_end >= 0 {
+        header_raw = builtin.slice(raw, 0, header_end)
+        body = builtin.slice(raw, header_end + separator_bytes, lengde(raw))
+    }
+    la normalisert = builtin.replace(header_raw, "\r", "")
     la lines = builtin.split(normalisert, "\n")
     hvis lengde(lines) == 0 {
         returner {
@@ -172,24 +186,9 @@ funksjon parse_http_request(raw: tekst) -> ordbok<tekst, tekst> {
     }
 
     la headers: ordbok<tekst, tekst> = {}
-    la body = ""
-    la body_start = -1
     la i = 1
     mens i < lengde(lines) {
         la line = builtin.trim(lines[i])
-        hvis body_start >= 0 {
-            hvis body != "" {
-                body = body + "\n"
-            }
-            body = body + lines[i]
-            i = i + 1
-            fortsett
-        }
-        hvis line == "" {
-            body_start = i + 1
-            i = i + 1
-            fortsett
-        }
         la colon = builtin.index_of(line, ":")
         hvis colon > 0 {
             la key = builtin.trim(builtin.slice(line, 0, colon))
@@ -206,6 +205,94 @@ funksjon parse_http_request(raw: tekst) -> ordbok<tekst, tekst> {
         "headers": headers,
         "body": body
     }
+}
+
+funksjon serve_request_content_length(raw: tekst) -> heiltall {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    hvis header_end < 0 { header_end = builtin.index_of(raw, "\n\n") }
+    hvis header_end < 0 { returner -1 }
+    la header_raw = builtin.replace(builtin.slice(raw, 0, header_end), "\r", "")
+    la lines = builtin.split(header_raw, "\n")
+    la i: heiltall = 1
+    mens i < lengde(lines) {
+        la line = lines[i]
+        la colon = builtin.index_of(line, ":")
+        hvis colon > 0 {
+            la key = builtin.lower(builtin.trim(builtin.slice(line, 0, colon)))
+            hvis key == "content-length" {
+                la value = builtin.trim(builtin.slice(line, colon + 1, lengde(line)))
+                hvis is_int_text(value) { returner heiltall_fra_tekst(value) }
+                returner -2
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon serve_request_total_length(raw: tekst, content_length: heiltall) -> heiltall {
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    la separator_bytes = 4
+    hvis header_end < 0 {
+        header_end = builtin.index_of(raw, "\n\n")
+        separator_bytes = 2
+    }
+    hvis header_end < 0 { returner -1 }
+    returner header_end + separator_bytes + content_length
+}
+
+funksjon serve_max_request_bytes() -> heiltall {
+    // Standardgrensa rommar ein 20 MiB fil og multipart-headerar.
+    la configured = miljo_hent("NC_SERVE_MAX_REQUEST_BYTES")
+    hvis configured != "" og is_int_text(configured) {
+        la value = heiltall_fra_tekst(configured)
+        hvis value >= 65536 { returner value }
+    }
+    returner 22020096
+}
+
+funksjon serve_receive_request(conn) -> ordbok<tekst, tekst> {
+    la max_bytes = serve_max_request_bytes()
+    la raw = sok.motta(conn, 65536)
+    hvis lengde(raw) == 0 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Tom request"}
+    }
+
+    la content_length = serve_request_content_length(raw)
+    hvis content_length == -2 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Ugyldig Content-Length"}
+    }
+    hvis content_length < 0 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig HTTP-header"}
+    }
+    la total_length = serve_request_total_length(raw, content_length)
+    hvis total_length < 0 {
+        returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig HTTP-header"}
+    }
+    hvis total_length > max_bytes {
+        returner {"ok": usann, "status": 413, "raw": "", "error": "Request er for stor"}
+    }
+
+    mens lengde(raw) < total_length {
+        la remaining = total_length - lengde(raw)
+        la chunk_size = 65536
+        hvis remaining < chunk_size { chunk_size = remaining }
+        la chunk = sok.motta(conn, chunk_size)
+        hvis lengde(chunk) == 0 {
+            returner {"ok": usann, "status": 400, "raw": "", "error": "Ufullstendig request-kropp"}
+        }
+        raw = raw + chunk
+    }
+    returner {"ok": sann, "status": 200, "raw": raw, "error": ""}
+}
+
+funksjon serve_receive_error(status: heiltall, message: tekst) -> tekst {
+    la status_text = "Bad Request"
+    hvis status == 413 { status_text = "Content Too Large" }
+    la body = message
+    returner "HTTP/1.1 " + tekst_fra_heltall(status) + " " + status_text +
+        "\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: " +
+        tekst_fra_heltall(lengde(body)) + "\r\nConnection: close\r\n\r\n" + body
 }
 
 funksjon response_to_http(res) -> tekst {
@@ -270,14 +357,15 @@ funksjon response_to_http(res) -> tekst {
             }
         }
     }
-    hvis status == 201 { status_text = "Created" }
-    hvis status == 304 { status_text = "Not Modified" }
-    hvis status == 204 { status_text = "No Content" }
-    hvis status == 400 { status_text = "Bad Request" }
-    hvis status == 403 { status_text = "Forbidden" }
-    hvis status == 404 { status_text = "Not Found" }
-    hvis status == 405 { status_text = "Method Not Allowed" }
-    hvis status == 500 { status_text = "Internal Server Error" }
+    la status_kode = tekst(status)
+    hvis status_kode == "201" { status_text = "Created" }
+    hvis status_kode == "304" { status_text = "Not Modified" }
+    hvis status_kode == "204" { status_text = "No Content" }
+    hvis status_kode == "400" { status_text = "Bad Request" }
+    hvis status_kode == "403" { status_text = "Forbidden" }
+    hvis status_kode == "404" { status_text = "Not Found" }
+    hvis status_kode == "405" { status_text = "Method Not Allowed" }
+    hvis status_kode == "500" { status_text = "Internal Server Error" }
 
     hvis har_nokkel(res, "body") {
         la raw = res["body"]
@@ -1114,7 +1202,10 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
     la reload_status = nc_reload_bundle(src_sti, modul)
     hvis ikkje reload_status["ok"] {
         skriv("Feil: reload/bundle feila: " + tekst(reload_status["error"]) + "\n")
-        hvis srv >= 0 { sok.lukk([srv, 0, 1, 0]) }
+        hvis srv >= 0 {
+            la close_args = builtin.split(tekst(srv) + " 0 1 0", " ")
+            sok.lukk(close_args)
+        }
         returner 1
     }
     la ncb_json = tekst(reload_status["ncb_json"])
@@ -1123,13 +1214,19 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
     la ncb = json_parse_raw(ncb_json)
     hvis ncb == null {
         skriv("Feil: ugyldig NCB-json ved serve\n")
-        hvis srv >= 0 { sok.lukk([srv, 0, 1, 0]) }
+        hvis srv >= 0 {
+            la close_args = builtin.split(tekst(srv) + " 0 1 0", " ")
+            sok.lukk(close_args)
+        }
         returner 1
     }
     la startup_status = køyre_livssyklus_hooks_trygt(ncb, "startup_hooks")
     hvis ikkje startup_status["ok"] {
         skriv("Feil: startup_hooks feila: " + tekst(startup_status["error"]) + "\n")
-        hvis srv >= 0 { sok.lukk([srv, 0, 1, 0]) }
+        hvis srv >= 0 {
+            la close_args = builtin.split(tekst(srv) + " 0 1 0", " ")
+            sok.lukk(close_args)
+        }
         returner 1
     }
     skriv("[serve] Klar for NCB-app på " + host + ":" + port + ".\n")
@@ -1171,12 +1268,12 @@ funksjon nc_serve(src_sti: tekst) -> heltall {
             skriv("[serve] Accept-feil, stoppar.\n")
             running = usann
         } ellers {
-            la raw = sok.motta(conn, 65536)
+            la received = serve_receive_request(conn)
             la resp: tekst = ""
-            hvis lengde(raw) > 0 {
-                resp = serve_handle_one(ncb, raw)
+            hvis received["ok"] {
+                resp = serve_handle_one(ncb, received["raw"])
             } ellers {
-                resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 11\r\n\r\nTom request"
+                resp = serve_receive_error(received["status"], received["error"])
             }
             sok.send(conn, resp)
             sok.lukk(conn)
@@ -1202,7 +1299,7 @@ funksjon nc_reload_bundle(src_sti: tekst, modul: tekst) -> ordbok<tekst, tekst> 
             ncb_json = nc_bundle_ncb(src_sti, modul, imports)
             bundled = sann
         } ellers {
-            ncb_json = kompiler_fil(kjelde, modul)
+            ncb_json = komp.kompiler_fil(kjelde, modul)
         }
         returner {
             "ok": sann,
@@ -1284,7 +1381,7 @@ funksjon _modul_filsti_fra_namn(namn: tekst) -> tekst {
 }
 
 funksjon finn_bruk_imports(kjelde: tekst) -> liste<tekst> {
-    la imports: liste<tekst> = []
+    la imports_str = ""
     la linjer = builtin.split(kjelde, "\n")
     la bruk_prekompilert_selfhost = miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST")
     hvis bruk_prekompilert_selfhost == "" {
@@ -1316,11 +1413,17 @@ funksjon finn_bruk_imports(kjelde: tekst) -> liste<tekst> {
                 alias = segs[lengde(segs) - 1]
             }
             la fil = _modul_filsti_fra_namn(modul)
-            legg_til(imports, modul + "=" + fil)
+            hvis lengde(imports_str) > 0 {
+                imports_str = imports_str + "\n"
+            }
+            imports_str = imports_str + modul + "=" + fil
         }
         i = i + 1
     }
-    returner imports
+    hvis lengde(imports_str) == 0 {
+        returner json_parse_raw("[]")
+    }
+    returner builtin.split(imports_str, "\n")
 }
 
 funksjon fjern_bruk_linjer(kjelde: tekst) -> tekst {
@@ -1352,9 +1455,11 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     }
     miljo_sett("NORSCODE_IMPORT_BASE", import_base)
     la alle_fns: ordbok<tekst, tekst> = {}
-    la alle_rh: liste = []  // Samla route_handlers frå alle importerte modular
-    // BFS-kø for transitive imports
-    la kø: liste<tekst> = []
+    la alle_rh_json = ""  // Samla route_handlers frå alle importerte modular
+    // BFS-kø for transitive imports.
+    // Unngå [] + legg_til(...) som initial materialisering, sidan aktiv compile-path
+    // framleis er sårbar der.
+    la kø_str = ""
     la besøkt: ordbok<tekst, boolsk> = {}
 
     la j: heltall = 0
@@ -1363,13 +1468,20 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
         la eq0 = builtin.index_of(arg0, "=")
         la alias0 = builtin.slice(arg0, 0, eq0)
         la fil0 = builtin.slice(arg0, eq0 + 1, lengde(arg0))
-        legg_til(kø, alias0 + "=" + _resolve_import_sti(src_sti, fil0))
+        hvis lengde(kø_str) > 0 {
+            kø_str = kø_str + "\n"
+        }
+        kø_str = kø_str + alias0 + "=" + _resolve_import_sti(src_sti, fil0)
         j = j + 1
     }
+    la kø = builtin.split(kø_str, "\n")
+    la kø_i: heiltall = 0
 
-    mens lengde(kø) > 0 {
-        la arg: tekst = kø[0]
-        fjern(kø, 0)
+    // Konsumer køa med indeks i staden for fjern(kø, 0). Det unngår
+    // O(n)-flytting og held VM-stakken balansert i generert selfhost-kode.
+    mens kø_i < lengde(kø) {
+        la arg: tekst = kø[kø_i]
+        kø_i = kø_i + 1
 
         la eq = builtin.index_of(arg, "=")
         la alias = builtin.slice(arg, 0, eq)
@@ -1382,7 +1494,7 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
         prøv {
             la kjelde = fil_les(fil)
             la rein_kjelde = fjern_bruk_linjer(kjelde)
-            la ncb_json = kompiler_fil(rein_kjelde, "__main__")
+            la ncb_json = komp.kompiler_fil(rein_kjelde, "__main__")
             // Rename __main__. → alias. i CALL-mål (internt modul-kall) — på JSON-streng
             la fiksa_json = tekst_erstatt(ncb_json, "\"__main__.", "\"" + alias + ".")
             la mod_ncb = omdøyp_funksjonar(fiksa_json, alias)
@@ -1419,7 +1531,10 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                     la fn_nam: tekst = tekst(rh_item["function"])
                     la new_fn: tekst = tekst_erstatt(fn_nam, "__main__.", alias + ".")
                     rh_item["function"] = new_fn
-                    legg_til(alle_rh, rh_item)
+                    hvis lengde(alle_rh_json) > 0 {
+                        alle_rh_json = alle_rh_json + "\n---RH---\n"
+                    }
+                    alle_rh_json = alle_rh_json + json_skriv(rh_item)
                     ri = ri + 1
                 }
             }
@@ -1446,7 +1561,7 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     // Kompiler hovudfila som __main__
     la hoved_kjelde = fil_les(src_sti)
     la hoved_rein_kjelde = fjern_bruk_linjer(hoved_kjelde)
-    la hoved_ncb_json = kompiler_fil(hoved_rein_kjelde, modul)
+    la hoved_ncb_json = komp.kompiler_fil(hoved_rein_kjelde, modul)
     la hoved_ncb = json_parse_raw(hoved_ncb_json)
     slå_saman_funksjonar(alle_fns, hoved_ncb["functions"])
 
@@ -1458,19 +1573,28 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     bundle["functions"] = alle_fns
     // Slå saman route_handlers frå importerte modular + hovudfila
     la rh = hoved_ncb["route_handlers"]
-    la alle_rh_merged: liste = []
-    // Legg til route_handlers frå importerte modular (med alias-prefix fixup)
-    la ai: heltall = 0
-    mens ai < lengde(alle_rh) {
-        legg_til(alle_rh_merged, alle_rh[ai])
-        ai = ai + 1
-    }
+    la alle_rh_merged_json = alle_rh_json
     // Legg til route_handlers frå hovudfila
     hvis rh != null {
         la ri2: heltall = 0
         mens ri2 < lengde(rh) {
-            legg_til(alle_rh_merged, rh[ri2])
+            hvis lengde(alle_rh_merged_json) > 0 {
+                alle_rh_merged_json = alle_rh_merged_json + "\n---RH---\n"
+            }
+            alle_rh_merged_json = alle_rh_merged_json + json_skriv(rh[ri2])
             ri2 = ri2 + 1
+        }
+    }
+    la alle_rh_merged = json_parse_raw("[]")
+    hvis lengde(alle_rh_merged_json) > 0 {
+        la rh_parts = builtin.split(alle_rh_merged_json, "\n---RH---\n")
+        la ai: heiltall = 0
+        mens ai < lengde(rh_parts) {
+            la rh_part = builtin.trim(rh_parts[ai])
+            hvis lengde(rh_part) > 0 {
+                legg_til(alle_rh_merged, json_parse_raw(rh_part))
+            }
+            ai = ai + 1
         }
     }
     hvis lengde(alle_rh_merged) > 0 { bundle["route_handlers"] = alle_rh_merged }
@@ -1507,7 +1631,7 @@ funksjon nc_run(src_sti: tekst) -> heltall {
     hvis lengde(imports) > 0 {
         ncb_json = nc_bundle_ncb(src_sti, modul, imports)
     } ellers {
-        ncb_json = kompiler_fil(kjelde, modul)
+        ncb_json = komp.kompiler_fil(kjelde, modul)
     }
     returner nc_køyr_ncb_json(ncb_json)
 }
@@ -1535,7 +1659,7 @@ funksjon nc_compile(src_sti: tekst, ut_sti: tekst) -> heltall {
 
 // ─── NORSCODE_CMD=l5b-gen2 ──────────────────────────────────────────────────
 // Køyr Gen1-NCB sin bygg_bundle via selfhost/vm (utan host-FFI).
-// Tilsvarar l5b steg 2 i selfcompile_l5b.sh.
+// Tilsvarar l5b steg 2 via ./bin/nc selfcompile-l5b.
 
 funksjon nc_l5b_gen2() -> heltall {
     la v1 = miljo_hent("NORSCODE_L5B_V1")
@@ -1547,16 +1671,24 @@ funksjon nc_l5b_gen2() -> heltall {
     }
     la ncb_json = fil_les(v1)
     la deler = builtin.split(args_str, " ")
-    la modular = []
+    la modular_str = ""
     la i: heltall = 0
     mens i < lengde(deler) {
         la del = builtin.trim(deler[i])
         hvis del != "" {
-            legg_til(modular, del)
+            hvis lengde(modular_str) > 0 {
+                modular_str = modular_str + "\n"
+            }
+            modular_str = modular_str + del
         }
         i = i + 1
     }
+    la modular = json_parse_raw("[]")
+    hvis lengde(modular_str) > 0 {
+        modular = builtin.split(modular_str, "\n")
+    }
     skriv("[L5b-2] Bundle via Gen1-bytekode (bygg_bundle i NCB) → " + v2 + "\n")
+    skriv("[L5b-2] Leser Gen1-NCB...\n")
     la ncb = json_parse_raw(ncb_json)
     hvis ncb == null {
         skriv("Feil: ugyldig v1 NCB\n")
@@ -1568,10 +1700,19 @@ funksjon nc_l5b_gen2() -> heltall {
         skriv("Feil: manglar functions i v1 NCB\n")
         returner 1
     }
+    // Gen1-bundleren køyrer som ein eksplisitt vedlikehaldsjobb og skal arve
+    // dei avgrensa capability-/disk-scope-verdiane frå CLI-prosessen.
+    skriv("[L5b-2] Initialiserer VM...\n")
+    fns["__vm_inherit_env__"] = "sann"
+    vm_runtime_init(fns, sann)
 
-    la args: liste = [modular, v2]
+    la args: liste = json_parse_raw("[]")
+    legg_til(args, modular)
+    legg_til(args, v2)
+    skriv("[L5b-2] Kaller selfhost.bundler.bygg_bundle...\n")
     prøv {
         køyr_funksjon("selfhost.bundler.bygg_bundle", args, fns, 0)
+        skriv("[L5b-2] bygg_bundle returnerte.\n")
     } fang melding {
         skriv("Feil i l5b-gen2: " + melding + "\n")
         returner 1
@@ -1596,8 +1737,6 @@ funksjon start() -> heltall {
     }
 
     hvis cmd == "" { cmd = "selftest" }
-    fil_skriv("/tmp/nc_main_trace.txt", "cmd=" + cmd + " src=" + src + "\n")
-
     hvis cmd == "run" {
         hvis src == "" {
             skriv("Feil: NORSCODE_FILE ikkje sett\n")
@@ -1616,7 +1755,7 @@ funksjon start() -> heltall {
 
     hvis cmd == "selftest" {
         skriv("=== nc_main.no selftest ===\n")
-        la ncb = kompiler_fil("funksjon start() { skriv(\"test OK\\n\") }\n", "__main__")
+        la ncb = komp.kompiler_fil("funksjon start() { skriv(\"test OK\\n\") }\n", "__main__")
         la d = json_parse_raw(ncb)
         la fns = d["functions"]
         skriv("✓ Kompilering: " + tekst_fra_heltall(lengde(nøkler(fns))) + " funksjonar\n")

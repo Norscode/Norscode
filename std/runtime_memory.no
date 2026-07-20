@@ -1,0 +1,699 @@
+# runtime_memory.no - Norscode-native heap/GC-kontrakt for runtime v1
+#
+# Denne modulen brukar enkle ordbok-felt og tekstindeksar i staden for nestede
+# JSON-lister. Det gjer kontrakten robust i dagens native runtime.
+
+bruk std.runtime.allocator som allocator
+bruk std.runtime.memory_abi som memory_abi
+
+funksjon ny_heap() -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["next_id"] = "1"
+    h["ids"] = "|"
+    h["roots"] = "|"
+    h["freed_ids"] = "|"
+    h["allocated_count"] = "0"
+    h["alive_count"] = "0"
+    h["freed_count"] = "0"
+    h["allocated_bytes"] = "0"
+    h["alive_bytes"] = "0"
+    h["freed_bytes"] = "0"
+    h["mark_count"] = "0"
+    h["collection_count"] = "0"
+    h["minor_collection_count"] = "0"
+    h["major_collection_count"] = "0"
+    h["minor_since_major"] = "0"
+    h["compact_count"] = "0"
+    h["promoted_count"] = "0"
+    // Låg terskel held pure-VM-toppar under kontroll under store AOT/NCB-
+    // materialiseringar. Kan framleis overstyrast med
+    // NORSCODE_VM_GC_THRESHOLD for profilerings- og produksjonsprofilar.
+    h["gc_threshold"] = "16"
+    h["gc_min_threshold"] = "16"
+    h["memory_abi"] = memory_abi.versjon()
+    h["allocator"] = allocator.ny_allocator(memory_abi.payload_base(), memory_abi.payload_capacity())
+    h["allocator_lock"] = allocator.ny_allocator_lock()
+    returner h
+}
+
+funksjon _arena_owner() -> tekst {
+    prøv { returner "runtime-memory:" + tekst_fra_heltall(builtin.thread_current_id()) } fang (e) { returner "runtime-memory:0" }
+    returner "runtime-memory:0"
+}
+
+funksjon _heap_lock(h: ordbok_tekst) -> boolsk {
+    returner allocator.allocator_lock_wait(h["allocator_lock"], _arena_owner(), 100000)
+}
+
+funksjon _heap_unlock(h: ordbok_tekst) -> boolsk {
+    returner allocator.allocator_unlock(h["allocator_lock"], _arena_owner())
+}
+
+funksjon _arena_alloker(h: ordbok_tekst, bytes: heiltall) -> heiltall {
+    returner allocator.alloker_locked(h["allocator"], h["allocator_lock"], _arena_owner(), bytes)
+}
+
+funksjon _arena_frigjor(h: ordbok_tekst, adresse: heiltall) -> boolsk {
+    returner allocator.frigjor_locked(h["allocator"], h["allocator_lock"], _arena_owner(), adresse)
+}
+
+funksjon _arena_kompakter(h: ordbok_tekst) -> ordbok_tekst {
+    returner allocator.kompakter_locked(h["allocator"], h["allocator_lock"], _arena_owner())
+}
+
+funksjon _key(id: tekst, felt: tekst) -> tekst {
+    returner "object." + id + "." + felt
+}
+
+funksjon _har_token(liste: tekst, verdi: tekst) -> bool {
+    returner builtin.index_of(liste, "|" + verdi + "|") >= 0
+}
+
+funksjon _legg_token(liste: tekst, verdi: tekst) -> tekst {
+    hvis verdi == "" { returner liste }
+    hvis _har_token(liste, verdi) { returner liste }
+    returner liste + verdi + "|"
+}
+
+funksjon _fjern_token(liste: tekst, verdi: tekst) -> tekst {
+    la delar = builtin.split(liste, "|")
+    la ut = "|"
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        hvis delar[i] != "" og delar[i] != verdi {
+            ut = _legg_token(ut, delar[i])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _finnes(h: ordbok_tekst, id: tekst) -> bool {
+    returner _har_token(h["ids"], id)
+}
+
+funksjon _type_tag(type_namn: tekst) -> heiltall {
+    hvis type_namn == "tekst" { returner 1 }
+    hvis type_namn == "liste" { returner 2 }
+    hvis type_namn == "kart" { returner 3 }
+    returner 4
+}
+
+funksjon _skriv_u64le(a, adresse: heiltall, verdi: heiltall) -> bool {
+    returner allocator.skriv_u64le(a, adresse, verdi)
+}
+
+funksjon _skriv_header(h: ordbok_tekst, id: tekst) -> bool {
+    la a = h["allocator"]
+    la adresse = heltall_fra_tekst(h[_key(id, "address")])
+    la prefix: liste_heiltall = [memory_abi.header_magic_0(), memory_abi.header_magic_1(), memory_abi.header_magic_2(), memory_abi.header_magic_3(), memory_abi.flag_active(), 0, 0, _type_tag(h[_key(id, "type")])]
+    hvis ikkje allocator.skriv_bytes(a, adresse, prefix) { returner usann }
+    hvis ikkje _skriv_u64le(a, adresse + memory_abi.header_size_offset(), heltall_fra_tekst(h[_key(id, "bytes")])) { returner usann }
+    hvis ikkje _skriv_u64le(a, adresse + memory_abi.header_first_edge_offset(), 0) { returner usann }
+    returner _skriv_u64le(a, adresse + memory_abi.header_ref_count_offset(), 0)
+}
+
+funksjon _header_byte(h: ordbok_tekst, id: tekst, offset: heiltall, verdi: heiltall) -> bool {
+    returner allocator.skriv_byte(h["allocator"], heltall_fra_tekst(h[_key(id, "address")]) + offset, verdi)
+}
+
+funksjon _edge_key(frå_id: tekst, til_id: tekst) -> tekst { returner "edge." + frå_id + "." + til_id }
+
+funksjon _skriv_edge_header(a, adresse: heiltall, frå_adresse: heiltall,
+                            til_adresse: heiltall, neste: heiltall) -> bool {
+    la prefix: liste_heiltall = [memory_abi.header_magic_0(), memory_abi.header_magic_1(), memory_abi.header_magic_2(), memory_abi.header_magic_3(), memory_abi.flag_active(), 0, 0, memory_abi.edge_type_tag()]
+    hvis ikkje allocator.skriv_bytes(a, adresse, prefix) { returner usann }
+    hvis ikkje _skriv_u64le(a, adresse + memory_abi.header_size_offset(), memory_abi.edge_payload_bytes()) { returner usann }
+    hvis ikkje _skriv_u64le(a, adresse + memory_abi.header_first_edge_offset(), 0) { returner usann }
+    hvis ikkje _skriv_u64le(a, adresse + memory_abi.header_ref_count_offset(), 0) { returner usann }
+    la payload = adresse + memory_abi.object_header_bytes()
+    hvis ikkje _skriv_u64le(a, payload + memory_abi.edge_from_offset(), frå_adresse) { returner usann }
+    hvis ikkje _skriv_u64le(a, payload + memory_abi.edge_to_offset(), til_adresse) { returner usann }
+    la ok = _skriv_u64le(a, payload + memory_abi.edge_next_offset(), neste)
+    returner ok
+}
+
+funksjon _sett_ref_header(h: ordbok_tekst, id: tekst, first_edge: heiltall, count: heiltall) -> bool {
+    la adresse = objekt_adresse(h, id)
+    hvis adresse < 0 { returner usann }
+    hvis ikkje _skriv_u64le(h["allocator"], adresse + memory_abi.header_first_edge_offset(), first_edge) { returner usann }
+    returner _skriv_u64le(h["allocator"], adresse + memory_abi.header_ref_count_offset(), count)
+}
+
+funksjon _legg_ref_fysisk(h: ordbok_tekst, frå_id: tekst, til_id: tekst) -> bool {
+    la frå_adresse = objekt_adresse(h, frå_id)
+    la til_adresse = objekt_adresse(h, til_id)
+    hvis frå_adresse < 0 eller til_adresse < 0 { returner usann }
+    la head = 0
+    hvis har_nokkel(h, _key(frå_id, "edge_head")) { head = heltall_fra_tekst(h[_key(frå_id, "edge_head")]) }
+    la bytes = memory_abi.object_header_bytes() + memory_abi.edge_payload_bytes()
+    la edge_adresse = _arena_alloker(h, bytes)
+    hvis edge_adresse < 0 { returner usann }
+    hvis ikkje _skriv_edge_header(h["allocator"], edge_adresse, frå_adresse, til_adresse, head) {
+        _arena_frigjor(h, edge_adresse)
+        returner usann
+    }
+    h[_edge_key(frå_id, til_id)] = tekst_fra_heltall(edge_adresse)
+    h[_key(frå_id, "edge_head")] = tekst_fra_heltall(edge_adresse)
+    la count = heltall_fra_tekst(h[_key(frå_id, "edge_count")]) + 1
+    h[_key(frå_id, "edge_count")] = tekst_fra_heltall(count)
+    returner _sett_ref_header(h, frå_id, edge_adresse, count)
+}
+
+funksjon _frigjor_fysiske_refs(h: ordbok_tekst, frå_id: tekst) -> heiltall {
+    hvis ikkje har_nokkel(h, _key(frå_id, "refs")) { returner 0 }
+    la refs = builtin.split(h[_key(frå_id, "refs")], "|")
+    la tal: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(refs) {
+        la til_id = refs[i]
+        la key = _edge_key(frå_id, til_id)
+        hvis til_id != "" og har_nokkel(h, key) {
+            hvis _arena_frigjor(h, heltall_fra_tekst(h[key])) { tal = tal + 1 }
+            fjern_nokkel(h, key)
+        }
+        i = i + 1
+    }
+    h[_key(frå_id, "edge_head")] = "0"
+    h[_key(frå_id, "edge_count")] = "0"
+    _sett_ref_header(h, frå_id, 0, 0)
+    returner tal
+}
+
+funksjon alloker(h: ordbok_tekst, type_namn: tekst, bytes: heiltall) -> tekst {
+    hvis type_namn == "" { type_namn = "objekt" }
+    hvis bytes < 0 { bytes = 0 }
+    la owner = _arena_owner()
+    // A foreign owner must fail promptly; a very large spin budget can make
+    // the deterministic lock-denial contract exceed the CI test timeout.
+    hvis ikkje allocator.allocator_lock_wait(h["allocator_lock"], owner, 1000) { returner "" }
+    la adresse = allocator.alloker(h["allocator"], bytes + memory_abi.object_header_bytes())
+    hvis adresse < 0 {
+        allocator.allocator_unlock(h["allocator_lock"], owner)
+        returner ""
+    }
+    la id = "obj-" + h["next_id"]
+    h["next_id"] = tekst_fra_heltall(heltall_fra_tekst(h["next_id"]) + 1)
+    h["ids"] = _legg_token(h["ids"], id)
+    h[_key(id, "type")] = type_namn
+    h[_key(id, "bytes")] = tekst_fra_heltall(bytes)
+    h[_key(id, "address")] = tekst_fra_heltall(adresse)
+    h[_key(id, "refs")] = "|"
+    h[_key(id, "edge_head")] = "0"
+    h[_key(id, "edge_count")] = "0"
+    h[_key(id, "marked")] = "usann"
+    h[_key(id, "alive")] = "sann"
+    h[_key(id, "generation")] = "young"
+    h[_key(id, "age")] = "0"
+    h["allocated_count"] = tekst_fra_heltall(heltall_fra_tekst(h["allocated_count"]) + 1)
+    h["alive_count"] = tekst_fra_heltall(heltall_fra_tekst(h["alive_count"]) + 1)
+    h["allocated_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["allocated_bytes"]) + bytes)
+    h["alive_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["alive_bytes"]) + bytes)
+    hvis ikkje _skriv_header(h, id) {
+        allocator.frigjor(h["allocator"], adresse)
+        h[_key(id, "alive")] = "usann"
+        allocator.allocator_unlock(h["allocator_lock"], owner)
+        returner ""
+    }
+    allocator.allocator_unlock(h["allocator_lock"], owner)
+    returner id
+}
+
+funksjon objekt_adresse(h: ordbok_tekst, id: tekst) -> heiltall {
+    hvis ikkje objekt_levande(h, id) { returner -1 }
+    returner heltall_fra_tekst(h[_key(id, "address")])
+}
+
+funksjon _objekt_skriv_byte_unlocked(h: ordbok_tekst, id: tekst, offset: heiltall, verdi: heiltall) -> bool {
+    hvis ikkje objekt_levande(h, id) { returner usann }
+    hvis offset < 0 eller offset >= heltall_fra_tekst(h[_key(id, "bytes")]) { returner usann }
+    returner allocator.skriv_byte(h["allocator"], objekt_adresse(h, id) + memory_abi.object_header_bytes() + offset, verdi)
+}
+
+funksjon objekt_skriv_byte(h: ordbok_tekst, id: tekst, offset: heiltall, verdi: heiltall) -> bool {
+    hvis ikkje _heap_lock(h) { returner usann }
+    la ok = _objekt_skriv_byte_unlocked(h, id, offset, verdi)
+    _heap_unlock(h)
+    returner ok
+}
+
+funksjon objekt_les_byte(h: ordbok_tekst, id: tekst, offset: heiltall) -> heiltall {
+    hvis ikkje objekt_levande(h, id) { returner -1 }
+    hvis offset < 0 eller offset >= heltall_fra_tekst(h[_key(id, "bytes")]) { returner -1 }
+    returner allocator.les_byte(h["allocator"], objekt_adresse(h, id) + memory_abi.object_header_bytes() + offset)
+}
+
+funksjon _legg_ref_unlocked(h: ordbok_tekst, frå_id: tekst, til_id: tekst) -> bool {
+    hvis ikkje _finnes(h, frå_id) { returner usann }
+    hvis ikkje _finnes(h, til_id) { returner usann }
+    hvis _har_token(h[_key(frå_id, "refs")], til_id) { returner sann }
+    hvis ikkje _legg_ref_fysisk(h, frå_id, til_id) { returner usann }
+    h[_key(frå_id, "refs")] = _legg_token(h[_key(frå_id, "refs")], til_id)
+    returner sann
+}
+
+funksjon legg_ref(h: ordbok_tekst, frå_id: tekst, til_id: tekst) -> bool {
+    hvis ikkje _heap_lock(h) { returner usann }
+    la ok = _legg_ref_unlocked(h, frå_id, til_id)
+    _heap_unlock(h)
+    returner ok
+}
+
+funksjon _fjern_ref_unlocked(h: ordbok_tekst, frå_id: tekst, til_id: tekst) -> bool {
+    hvis ikkje _finnes(h, frå_id) { returner usann }
+    hvis ikkje _har_token(h[_key(frå_id, "refs")], til_id) { returner usann }
+    la nye = _fjern_token(h[_key(frå_id, "refs")], til_id)
+    _frigjor_fysiske_refs(h, frå_id)
+    h[_key(frå_id, "refs")] = nye
+    la refs = builtin.split(nye, "|")
+    la i: heiltall = 0
+    mens i < lengde(refs) {
+        hvis refs[i] != "" og ikkje _legg_ref_fysisk(h, frå_id, refs[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon fjern_ref(h: ordbok_tekst, frå_id: tekst, til_id: tekst) -> bool {
+    hvis ikkje _heap_lock(h) { returner usann }
+    la ok = _fjern_ref_unlocked(h, frå_id, til_id)
+    _heap_unlock(h)
+    returner ok
+}
+
+funksjon _legg_rot_unlocked(h: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje _finnes(h, id) { returner usann }
+    h["roots"] = _legg_token(h["roots"], id)
+    returner sann
+}
+
+funksjon legg_rot(h: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje _heap_lock(h) { returner usann }
+    la ok = _legg_rot_unlocked(h, id)
+    _heap_unlock(h)
+    returner ok
+}
+
+funksjon _fjern_rot_unlocked(h: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje _har_token(h["roots"], id) { returner usann }
+    h["roots"] = _fjern_token(h["roots"], id)
+    returner sann
+}
+
+funksjon fjern_rot(h: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje _heap_lock(h) { returner usann }
+    la ok = _fjern_rot_unlocked(h, id)
+    _heap_unlock(h)
+    returner ok
+}
+
+funksjon _nullstill_roter_unlocked(h: ordbok_tekst) -> heiltall {
+    la gamle = builtin.split(h["roots"], "|")
+    la tal: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(gamle) {
+        hvis gamle[i] != "" { tal = tal + 1 }
+        i = i + 1
+    }
+    h["roots"] = "|"
+    returner tal
+}
+
+funksjon nullstill_roter(h: ordbok_tekst) -> heiltall {
+    hvis ikkje _heap_lock(h) { returner -1 }
+    la tal = _nullstill_roter_unlocked(h)
+    _heap_unlock(h)
+    returner tal
+}
+
+funksjon objekt_levande(h: ordbok_tekst, id: tekst) -> bool {
+    returner _finnes(h, id) og h[_key(id, "alive")] == "sann"
+}
+
+funksjon objekt_generasjon(h: ordbok_tekst, id: tekst) -> tekst {
+    hvis ikkje objekt_levande(h, id) { returner "frigjort" }
+    returner h[_key(id, "generation")]
+}
+
+funksjon _mark_id(h: ordbok_tekst, id: tekst) -> heiltall {
+    hvis ikkje _finnes(h, id) { returner 0 }
+    hvis h[_key(id, "marked")] == "sann" { returner 0 }
+    h[_key(id, "marked")] = "sann"
+    _header_byte(h, id, memory_abi.header_flags_offset(), memory_abi.flag_active() + memory_abi.flag_marked())
+    la tal: heiltall = 1
+    la refs = builtin.split(h[_key(id, "refs")], "|")
+    la i: heiltall = 0
+    mens i < lengde(refs) {
+        hvis refs[i] != "" {
+            tal = tal + _mark_id(h, refs[i])
+        }
+        i = i + 1
+    }
+    returner tal
+}
+
+funksjon _mark_unlocked(h: ordbok_tekst) -> heiltall {
+    la roots = builtin.split(h["roots"], "|")
+    la tal: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(roots) {
+        hvis roots[i] != "" {
+            tal = tal + _mark_id(h, roots[i])
+        }
+        i = i + 1
+    }
+    h["mark_count"] = tekst_fra_heltall(heltall_fra_tekst(h["mark_count"]) + 1)
+    returner tal
+}
+
+funksjon mark(h: ordbok_tekst) -> heiltall {
+    hvis ikkje _heap_lock(h) { returner -1 }
+    la tal = _mark_unlocked(h)
+    _heap_unlock(h)
+    returner tal
+}
+
+funksjon _mark_minor_unlocked(h: ordbok_tekst) -> heiltall {
+    la tal: heiltall = 0
+    la roots = builtin.split(h["roots"], "|")
+    la i: heiltall = 0
+    mens i < lengde(roots) {
+        hvis roots[i] != "" { tal = tal + _mark_id(h, roots[i]) }
+        i = i + 1
+    }
+
+    # Gamle objekt er konservative røter i minor-GC. Dermed overlever unge
+    # objekt som berre er nådde gjennom ein gammal generasjon.
+    la ids = builtin.split(h["ids"], "|")
+    i = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" og h[_key(id, "generation")] == "old" {
+            tal = tal + _mark_id(h, id)
+        }
+        i = i + 1
+    }
+    h["mark_count"] = tekst_fra_heltall(heltall_fra_tekst(h["mark_count"]) + 1)
+    returner tal
+}
+
+funksjon mark_minor(h: ordbok_tekst) -> heiltall {
+    hvis ikkje _heap_lock(h) { returner -1 }
+    la tal = _mark_minor_unlocked(h)
+    _heap_unlock(h)
+    returner tal
+}
+
+funksjon _sweep_unlocked(h: ordbok_tekst) -> heiltall {
+    la ids = builtin.split(h["ids"], "|")
+    la survivors = "|"
+    la frigjort: heiltall = 0
+    la alive: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" {
+            hvis h[_key(id, "marked")] == "sann" {
+                h[_key(id, "marked")] = "usann"
+                _header_byte(h, id, memory_abi.header_flags_offset(), memory_abi.flag_active())
+                survivors = _legg_token(survivors, id)
+                alive = alive + 1
+            } ellers {
+                la bytes = heltall_fra_tekst(h[_key(id, "bytes")])
+                _header_byte(h, id, memory_abi.header_flags_offset(), 0)
+                _frigjor_fysiske_refs(h, id)
+                _arena_frigjor(h, heltall_fra_tekst(h[_key(id, "address")]))
+                h[_key(id, "alive")] = "usann"
+                h["freed_ids"] = _legg_token(h["freed_ids"], id)
+                frigjort = frigjort + 1
+                h["freed_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["freed_bytes"]) + bytes)
+                h["alive_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["alive_bytes"]) - bytes)
+            }
+        }
+        i = i + 1
+    }
+    h["ids"] = survivors
+    h["alive_count"] = tekst_fra_heltall(alive)
+    h["freed_count"] = tekst_fra_heltall(heltall_fra_tekst(h["freed_count"]) + frigjort)
+    returner frigjort
+}
+
+funksjon sweep(h: ordbok_tekst) -> heiltall {
+    hvis ikkje _heap_lock(h) { returner -1 }
+    la tal = _sweep_unlocked(h)
+    _heap_unlock(h)
+    returner tal
+}
+
+funksjon _sweep_minor_unlocked(h: ordbok_tekst) -> heiltall {
+    la ids = builtin.split(h["ids"], "|")
+    la survivors = "|"
+    la frigjort: heiltall = 0
+    la alive: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" {
+            la old = h[_key(id, "generation")] == "old"
+            hvis old eller h[_key(id, "marked")] == "sann" {
+                h[_key(id, "marked")] = "usann"
+                _header_byte(h, id, memory_abi.header_flags_offset(), memory_abi.flag_active())
+                survivors = _legg_token(survivors, id)
+                alive = alive + 1
+            } ellers {
+                la bytes = heltall_fra_tekst(h[_key(id, "bytes")])
+                _header_byte(h, id, memory_abi.header_flags_offset(), 0)
+                _frigjor_fysiske_refs(h, id)
+                _arena_frigjor(h, heltall_fra_tekst(h[_key(id, "address")]))
+                h[_key(id, "alive")] = "usann"
+                h["freed_ids"] = _legg_token(h["freed_ids"], id)
+                frigjort = frigjort + 1
+                h["freed_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["freed_bytes"]) + bytes)
+                h["alive_bytes"] = tekst_fra_heltall(heltall_fra_tekst(h["alive_bytes"]) - bytes)
+            }
+        }
+        i = i + 1
+    }
+    h["ids"] = survivors
+    h["alive_count"] = tekst_fra_heltall(alive)
+    h["freed_count"] = tekst_fra_heltall(heltall_fra_tekst(h["freed_count"]) + frigjort)
+    returner frigjort
+}
+
+funksjon sweep_minor(h: ordbok_tekst) -> heiltall {
+    hvis ikkje _heap_lock(h) { returner -1 }
+    la tal = _sweep_minor_unlocked(h)
+    _heap_unlock(h)
+    returner tal
+}
+
+funksjon _aldr_overlevande(h: ordbok_tekst) -> heiltall {
+    la ids = builtin.split(h["ids"], "|")
+    la promoted: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" {
+            la alder = heltall_fra_tekst(h[_key(id, "age")]) + 1
+            h[_key(id, "age")] = tekst_fra_heltall(alder)
+            _header_byte(h, id, memory_abi.header_age_offset(), alder)
+            hvis alder >= 2 og h[_key(id, "generation")] == "young" {
+                h[_key(id, "generation")] = "old"
+                _header_byte(h, id, memory_abi.header_generation_offset(), 1)
+                promoted = promoted + 1
+            }
+        }
+        i = i + 1
+    }
+    h["promoted_count"] = tekst_fra_heltall(heltall_fra_tekst(h["promoted_count"]) + promoted)
+    returner promoted
+}
+
+funksjon _oppdater_gc_threshold(h: ordbok_tekst) -> tekst {
+    la neste = heltall_fra_tekst(h["alive_count"]) * 2 + 16
+    la minimum = heltall_fra_tekst(h["gc_min_threshold"])
+    hvis neste < minimum { neste = minimum }
+    h["gc_threshold"] = tekst_fra_heltall(neste)
+    returner h["gc_threshold"]
+}
+
+funksjon _collect_major_unlocked(h: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["kind"] = "major"
+    r["marked"] = tekst_fra_heltall(_mark_unlocked(h))
+    r["freed"] = tekst_fra_heltall(_sweep_unlocked(h))
+    r["promoted"] = tekst_fra_heltall(_aldr_overlevande(h))
+    r["alive"] = h["alive_count"]
+    r["alive_bytes"] = h["alive_bytes"]
+    h["collection_count"] = tekst_fra_heltall(heltall_fra_tekst(h["collection_count"]) + 1)
+    h["major_collection_count"] = tekst_fra_heltall(heltall_fra_tekst(h["major_collection_count"]) + 1)
+    h["minor_since_major"] = "0"
+    r["next_threshold"] = _oppdater_gc_threshold(h)
+    returner r
+}
+
+funksjon collect_major(h: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje _heap_lock(h) { returner {"kind": "major", "status": "opptatt"} }
+    la r = _collect_major_unlocked(h)
+    _heap_unlock(h)
+    returner r
+}
+
+funksjon _collect_minor_unlocked(h: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["kind"] = "minor"
+    r["marked"] = tekst_fra_heltall(_mark_minor_unlocked(h))
+    r["freed"] = tekst_fra_heltall(_sweep_minor_unlocked(h))
+    r["promoted"] = tekst_fra_heltall(_aldr_overlevande(h))
+    r["alive"] = h["alive_count"]
+    r["alive_bytes"] = h["alive_bytes"]
+    h["collection_count"] = tekst_fra_heltall(heltall_fra_tekst(h["collection_count"]) + 1)
+    h["minor_collection_count"] = tekst_fra_heltall(heltall_fra_tekst(h["minor_collection_count"]) + 1)
+    h["minor_since_major"] = tekst_fra_heltall(heltall_fra_tekst(h["minor_since_major"]) + 1)
+    r["next_threshold"] = _oppdater_gc_threshold(h)
+    returner r
+}
+
+funksjon collect_minor(h: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje _heap_lock(h) { returner {"kind": "minor", "status": "opptatt"} }
+    la r = _collect_minor_unlocked(h)
+    _heap_unlock(h)
+    returner r
+}
+
+funksjon collect_auto(h: ordbok_tekst, force: bool) -> ordbok_tekst {
+    hvis ikkje _heap_lock(h) { returner {"kind": "auto", "status": "opptatt"} }
+    la r: ordbok_tekst = {}
+    hvis force eller heltall_fra_tekst(h["minor_since_major"]) >= 7 {
+        r = _collect_major_unlocked(h)
+    } ellers {
+        r = _collect_minor_unlocked(h)
+    }
+    _heap_unlock(h)
+    returner r
+}
+
+funksjon collect(h: ordbok_tekst) -> ordbok_tekst {
+    returner collect_major(h)
+}
+
+funksjon sett_gc_threshold(h: ordbok_tekst, tal: heiltall) -> bool {
+    hvis tal < 1 { returner usann }
+    h["gc_min_threshold"] = tekst_fra_heltall(tal)
+    h["gc_threshold"] = tekst_fra_heltall(tal)
+    returner sann
+}
+
+funksjon gc_trengs(h: ordbok_tekst) -> bool {
+    returner heltall_fra_tekst(h["alive_count"]) >= heltall_fra_tekst(h["gc_threshold"])
+}
+
+funksjon _sync_fysiske_refs_etter_compact(h: ordbok_tekst) -> bool {
+    la ids = builtin.split(h["ids"], "|")
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la frå_id = ids[i]
+        hvis frå_id != "" {
+            la refs = builtin.split(h[_key(frå_id, "refs")], "|")
+            la j: heiltall = 0
+            mens j < lengde(refs) {
+                la til_id = refs[j]
+                la key = _edge_key(frå_id, til_id)
+                hvis til_id != "" og har_nokkel(h, key) {
+                    la old_edge = heltall_fra_tekst(h[key])
+                    h[key] = tekst_fra_heltall(allocator.relokert_adresse(h["allocator"], old_edge))
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+
+    i = 0
+    mens i < lengde(ids) {
+        la frå_id = ids[i]
+        hvis frå_id != "" {
+            la head: heiltall = 0
+            la count: heiltall = 0
+            la refs = builtin.split(h[_key(frå_id, "refs")], "|")
+            la j: heiltall = 0
+            mens j < lengde(refs) {
+                la til_id = refs[j]
+                la key = _edge_key(frå_id, til_id)
+                hvis til_id != "" og har_nokkel(h, key) {
+                    la edge_adresse = heltall_fra_tekst(h[key])
+                    hvis ikkje _skriv_edge_header(h["allocator"], edge_adresse, objekt_adresse(h, frå_id), objekt_adresse(h, til_id), head) { returner usann }
+                    head = edge_adresse
+                    count = count + 1
+                }
+                j = j + 1
+            }
+            h[_key(frå_id, "edge_head")] = tekst_fra_heltall(head)
+            h[_key(frå_id, "edge_count")] = tekst_fra_heltall(count)
+            hvis ikkje _sett_ref_header(h, frå_id, head, count) { returner usann }
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _compact_unlocked(h: ordbok_tekst) -> ordbok_tekst {
+    la arena_result = _arena_kompakter(h)
+    la ids = builtin.split(h["ids"], "|")
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" {
+            la old = heltall_fra_tekst(h[_key(id, "address")])
+            h[_key(id, "address")] = tekst_fra_heltall(allocator.relokert_adresse(h["allocator"], old))
+        }
+        i = i + 1
+    }
+    _sync_fysiske_refs_etter_compact(h)
+    h["compact_count"] = tekst_fra_heltall(heltall_fra_tekst(h["compact_count"]) + 1)
+    la r: ordbok_tekst = {}
+    r["status"] = arena_result["status"]
+    r["alive"] = h["alive_count"]
+    r["moved"] = arena_result["moved"]
+    r["reclaimed_bytes"] = arena_result["reclaimed_bytes"]
+    returner r
+}
+
+funksjon compact(h: ordbok_tekst) -> ordbok_tekst {
+    hvis ikkje _heap_lock(h) { returner {"status": "opptatt", "alive": h["alive_count"], "moved": "0", "reclaimed_bytes": "0"} }
+    la r = _compact_unlocked(h)
+    _heap_unlock(h)
+    returner r
+}
+
+funksjon samandrag(h: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["allocated"] = h["allocated_count"]
+    r["alive"] = h["alive_count"]
+    r["freed"] = h["freed_count"]
+    r["allocated_bytes"] = h["allocated_bytes"]
+    r["alive_bytes"] = h["alive_bytes"]
+    r["freed_bytes"] = h["freed_bytes"]
+    r["marks"] = h["mark_count"]
+    r["collections"] = h["collection_count"]
+    r["minor_collections"] = h["minor_collection_count"]
+    r["major_collections"] = h["major_collection_count"]
+    r["compactions"] = h["compact_count"]
+    r["promoted"] = h["promoted_count"]
+    la arena = allocator.statistikk(h["allocator"])
+    r["arena_reserved_bytes"] = arena["reserved_bytes"]
+    r["arena_active_bytes"] = arena["active_bytes"]
+    r["arena_peak_bytes"] = arena["peak_bytes"]
+    r["arena_reused"] = arena["reused_count"]
+    r["arena_failed"] = arena["failed_count"]
+    returner r
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.runtime_memory"
+    s["status"] = "stabil"
+    s["dekning"] = "norscode-memory-abi-v1, heap-register med 64 MiB bytearena og reserverte native kontrollslotter, objekt-header/payload-adresser, bounds-kontrollert payload-I/O, 8-byte allocator, first-fit gjenbruk, atomisk eiertoken/depth-laast allocate/free/refs/roots/payload/mark/sweep/compact, contention utan delt kartmutasjon, byte-regnskap, VM-stack-scan og young/old-generasjonar; parallell mutasjon og fysisk GC er verifisert i normal og pure VM"
+    s["mangler"] = ""
+    returner s
+}

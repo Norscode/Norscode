@@ -1,0 +1,105 @@
+# text_generation.no — lokal autoregressiv q8-tekstgenerering i rein Norscode
+
+bruk std.neural_ops som ops
+bruk std.transformer som transformer
+bruk std.sampling som sampling
+bruk std.tokenizer som tokenizer_modul
+
+funksjon ny(navn: tekst, vocab: heiltall, dimensjon: heiltall,
+            embedding: liste_heiltall, lm_vekt: liste_heiltall,
+            lm_bias: liste_heiltall, divisor: heiltall,
+            maks_sekvens: heiltall) {
+    hvis navn == "" eller vocab <= 1 eller dimensjon <= 0 eller divisor <= 0 {
+        kast "TekstGenereringFeil: ugyldig modell"
+    }
+    hvis maks_sekvens <= 0 eller maks_sekvens > 65536 { kast "TekstGenereringFeil: ugyldig sekvensgrense" }
+    hvis lengde(embedding) != vocab * dimensjon { kast "TekstGenereringFeil: feil embeddingform" }
+    hvis lengde(lm_vekt) != dimensjon * vocab eller lengde(lm_bias) != vocab { kast "TekstGenereringFeil: feil språkhovud" }
+    returner {
+        "schema": "norscode.text-generation.q8.v1", "navn": navn,
+        "vocab": vocab, "dimensjon": dimensjon, "embedding": embedding,
+        "lm_vekt": lm_vekt, "lm_bias": lm_bias, "divisor": divisor,
+        "maks_sekvens": maks_sekvens, "blokker": []
+    }
+}
+
+funksjon legg_til_blokk(modell, blokk) -> boolsk {
+    hvis blokk["dimensjon"] != modell["dimensjon"] { returner usann }
+    hvis lengde(modell["blokker"]) >= 128 { returner usann }
+    legg_til(modell["blokker"], blokk)
+    returner sann
+}
+
+funksjon _logit(modell, skjult: liste_heiltall,
+                sekvens: heiltall) -> liste_heiltall {
+    la dim = modell["dimensjon"]
+    la vocab = modell["vocab"]
+    la start = (sekvens - 1) * dim
+    la ut: liste_heiltall = []
+    la token: heiltall = 0
+    mens token < vocab {
+        la sum = modell["lm_bias"][token]
+        la d: heiltall = 0
+        mens d < dim {
+            sum = sum + skjult[start + d] * modell["lm_vekt"][d * vocab + token]
+            d = d + 1
+        }
+        legg_til(ut, sum / modell["divisor"])
+        token = token + 1
+    }
+    returner ut
+}
+
+funksjon neste_logit(modell, token: liste_heiltall) -> liste_heiltall {
+    hvis lengde(token) == 0 eller lengde(token) > modell["maks_sekvens"] {
+        kast "TekstGenereringFeil: ugyldig tokenkontekst"
+    }
+    la aktiv = ops.embedding(modell["embedding"], modell["vocab"], modell["dimensjon"], token)
+    la i: heiltall = 0
+    mens i < lengde(modell["blokker"]) {
+        aktiv = transformer.kjor(modell["blokker"][i], aktiv["data"], lengde(token))
+        i = i + 1
+    }
+    returner _logit(modell, aktiv["data"], lengde(token))
+}
+
+funksjon generer(modell, prompt_token: liste_heiltall,
+                 sampler, maks_nye: heiltall) {
+    hvis lengde(prompt_token) == 0 { kast "TekstGenereringFeil: tom prompt" }
+    hvis maks_nye < 0 eller maks_nye > sampler["maks_token"] { kast "TekstGenereringFeil: ugyldig genereringsgrense" }
+    la alle: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(prompt_token) {
+        legg_til(alle, prompt_token[i])
+        i = i + 1
+    }
+    la nye: liste_heiltall = []
+    la stoppa = usann
+    mens lengde(nye) < maks_nye og lengde(alle) < modell["maks_sekvens"] og ikkje stoppa {
+        la logit = neste_logit(modell, alle)
+        la neste = sampling.velg(sampler, logit, alle)
+        legg_til(alle, neste)
+        legg_til(nye, neste)
+        hvis sampler["stopp_token"] >= 0 og neste == sampler["stopp_token"] { stoppa = sann }
+    }
+    returner {
+        "schema": "norscode.text-generation-result.v1", "modell": modell["navn"],
+        "token": alle, "nye_token": nye, "stoppa": stoppa,
+        "kontekst_full": lengde(alle) >= modell["maks_sekvens"]
+    }
+}
+
+funksjon generer_tekst(modell, tokenizer, prompt: tekst,
+                       sampler, maks_nye: heiltall) {
+    hvis tokenizer_modul.storleik(tokenizer) != modell["vocab"] {
+        kast "TekstGenereringFeil: tokenizer og modell har ulikt vokabular"
+    }
+    la prompt_token = tokenizer_modul.kod(tokenizer, prompt, usann, usann)
+    la resultat = generer(modell, prompt_token, sampler, maks_nye)
+    resultat["tekst"] = tokenizer_modul.dekod(tokenizer, resultat["nye_token"], sann)
+    returner resultat
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "eksperimentell", "abi": "norscode.text-generation.q8.v1", "dekning": "tokenembedding, opptil 128 kausale transformerblokker, språkhovud og avgrensa autoregressiv sampling"}
+}

@@ -1,0 +1,165 @@
+bruk std.socket som socket
+bruk std.sched som sched
+bruk std.tls_http som tls
+
+funksjon handshake_pair(listener: ordbok_tekst, client: ordbok_tekst) -> ordbok_tekst {
+    la accept_loop = sched.ny()
+    la accept_future = socket.native_accept_async(accept_loop, listener, 30000)
+    assert(sched.run(accept_loop, 30000) >= 1)
+    la server = sched.future_resultat(accept_loop, accept_future)
+    la hs = sched.ny()
+    la client_future = socket.native_tls_handshake_async(hs, client, 30000)
+    la server_future = socket.native_tls_handshake_async(hs, server, 30000)
+    la progressed = sched.run(hs, 30000)
+    hvis progressed < 2 {
+        skriv("TLS pair stalled: progressed=" + tekst_fra_heiltall(progressed) + " client=" + sched.future_status(hs, client_future) + ":" + sched.future_feil(hs, client_future) + " server=" + sched.future_status(hs, server_future) + ":" + sched.future_feil(hs, server_future) + "\n")
+    }
+    assert(progressed >= 2)
+    returner {"server": server, "client_future": client_future, "server_future": server_future, "scheduler": hs}
+}
+
+funksjon start() -> heiltall {
+    la cert = "tests/fixtures/tls/localhost.crt"
+    la key = "tests/fixtures/tls/localhost.key"
+    la secure_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
+    la listen_rc = tls.lytt_secure(secure_server)
+    hvis listen_rc != 0 og builtin.contains(secure_server["error"], "unavailable") {
+        skriv("test_native_tls_event_loop SKIP backend unavailable")
+        returner 0
+    }
+    assert_eq(listen_rc, 0)
+    la listener = secure_server["listener"]
+    assert_eq(listener["status"], "listening")
+    la port = heltall_fra_tekst(listener["port"])
+    la client = socket.native_tls_tilkoble("127.0.0.1", port, "localhost", cert)
+    assert(client["status"] != "feil")
+    la pair = handshake_pair(listener, client)
+    la hs = pair["scheduler"]
+    hvis sched.future_status(hs, pair["client_future"]) != "ferdig" { skriv("client TLS error: " + sched.future_feil(hs, pair["client_future"]) + "\n") }
+    hvis sched.future_status(hs, pair["server_future"]) != "ferdig" { skriv("server TLS error: " + sched.future_feil(hs, pair["server_future"]) + "\n") }
+    assert_eq(sched.future_status(hs, pair["client_future"]), "ferdig")
+    assert_eq(sched.future_status(hs, pair["server_future"]), "ferdig")
+    la client_tls = sched.future_resultat(hs, pair["client_future"])
+    la server_tls = sched.future_resultat(hs, pair["server_future"])
+    assert_eq(client_tls["tls_version"], "TLSv1.3")
+    assert_eq(client_tls["peer_verified"], sann)
+    assert(client_tls["cipher"] != "")
+    assert_eq(server_tls["tls_version"], "TLSv1.3")
+
+    la io = sched.ny()
+    la wf = socket.native_skriv_async(io, client, "tls-ping", 5000)
+    la rf = socket.native_les_async(io, pair["server"], 32, 5000)
+    assert(sched.run(io, 5000) >= 2)
+    assert_eq(sched.future_resultat(io, rf), "tls-ping")
+    assert_eq(heltall_fra_tekst(sched.future_resultat(io, wf)), 8)
+
+    la bad_client = socket.native_tls_tilkoble("127.0.0.1", port, "wrong.example", cert)
+    assert(bad_client["status"] != "feil")
+    la bad_pair = handshake_pair(listener, bad_client)
+    la bad_hs = bad_pair["scheduler"]
+    assert_eq(sched.future_status(bad_hs, bad_pair["client_future"]), "feil")
+    assert(sched.future_feil(bad_hs, bad_pair["client_future"]) != "")
+    socket.native_lukk(bad_client)
+    socket.native_lukk(bad_pair["server"])
+
+    la mtls_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
+    tls.krev_klientsertifikat(mtls_server, cert)
+    assert_eq(tls.lytt_secure(mtls_server), 0)
+    la mtls_listener = mtls_server["listener"]
+    la mtls_port = heltall_fra_tekst(mtls_listener["port"])
+    la mtls_client = socket.native_tls_tilkoble_med_klientsertifikat("127.0.0.1", mtls_port, "localhost", cert, cert, key)
+    assert(mtls_client["status"] != "feil")
+    la mtls_pair = handshake_pair(mtls_listener, mtls_client)
+    la mtls_hs = mtls_pair["scheduler"]
+    assert_eq(sched.future_status(mtls_hs, mtls_pair["client_future"]), "ferdig")
+    assert_eq(sched.future_status(mtls_hs, mtls_pair["server_future"]), "ferdig")
+    la mtls_server_tls = sched.future_resultat(mtls_hs, mtls_pair["server_future"])
+    assert_eq(mtls_server_tls["peer_cert_present"], sann)
+    assert_eq(mtls_server_tls["peer_verified"], sann)
+    assert_inneholder(mtls_server_tls["peer_subject"], "CN=localhost")
+
+    la revoked_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
+    tls.krev_klientsertifikat_med_crl(revoked_server, cert, "tests/fixtures/tls/revoked-client.crl.pem")
+    assert_eq(tls.lytt_secure(revoked_server), 0)
+    la revoked_listener = revoked_server["listener"]
+    la revoked_client = socket.native_tls_tilkoble_med_klientsertifikat("127.0.0.1", heltall_fra_tekst(revoked_listener["port"]), "localhost", cert, "tests/fixtures/tls/revoked-client.crt", "tests/fixtures/tls/revoked-client.key")
+    la revoked_pair = handshake_pair(revoked_listener, revoked_client)
+    la revoked_hs = revoked_pair["scheduler"]
+    hvis sched.future_status(revoked_hs, revoked_pair["client_future"]) != "feil" og sched.future_status(revoked_hs, revoked_pair["server_future"]) != "feil" {
+        skriv("revoked TLS unexpectedly accepted: client=" + sched.future_status(revoked_hs, revoked_pair["client_future"]) + " server=" + sched.future_status(revoked_hs, revoked_pair["server_future"]) + "\n")
+    }
+    assert(sched.future_status(revoked_hs, revoked_pair["client_future"]) == "feil" eller sched.future_status(revoked_hs, revoked_pair["server_future"]) == "feil")
+    skriv("CRL avvisning OK\n")
+    socket.native_lukk(revoked_client)
+    socket.native_lukk(revoked_pair["server"])
+    assert(tls.lukk_secure(revoked_server))
+    skriv("CRL opprydding OK\n")
+
+    la ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server.key"))
+    tls.bruk_ocsp_stapling(ocsp_server, "tests/fixtures/tls/ocsp-good.der")
+    la ocsp_listen_rc = tls.lytt_secure(ocsp_server)
+    hvis ocsp_listen_rc != 0 { skriv("OCSP listen error: " + ocsp_server["error"] + "\n") }
+    assert_eq(ocsp_listen_rc, 0)
+    la ocsp_listener = ocsp_server["listener"]
+    la ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", heltall_fra_tekst(ocsp_listener["port"]), "localhost", cert)
+    hvis ocsp_client["status"] == "feil" { skriv("OCSP connect error: " + ocsp_client["error"] + "\n") }
+    la ocsp_pair = handshake_pair(ocsp_listener, ocsp_client)
+    la ocsp_hs = ocsp_pair["scheduler"]
+    hvis sched.future_status(ocsp_hs, ocsp_pair["client_future"]) != "ferdig" { skriv("OCSP client error: " + sched.future_feil(ocsp_hs, ocsp_pair["client_future"]) + "\n") }
+    skriv("OCSP statuses: client=" + sched.future_status(ocsp_hs, ocsp_pair["client_future"]) + " server=" + sched.future_status(ocsp_hs, ocsp_pair["server_future"]) + "\n")
+    hvis sched.future_status(ocsp_hs, ocsp_pair["server_future"]) == "feil" { skriv("OCSP server error: " + sched.future_feil(ocsp_hs, ocsp_pair["server_future"]) + "\n") }
+    assert_eq(sched.future_status(ocsp_hs, ocsp_pair["client_future"]), "ferdig")
+    assert_eq(sched.future_status(ocsp_hs, ocsp_pair["server_future"]), "ferdig")
+    la ocsp_tls = sched.future_resultat(ocsp_hs, ocsp_pair["client_future"])
+    skriv("OCSP metadata: stapled=" + tekst(ocsp_tls["ocsp_stapled"]) + " status=" + ocsp_tls["ocsp_status"] + "\n")
+    assert_eq(ocsp_tls["ocsp_stapled"], sann)
+    assert_eq(ocsp_tls["ocsp_status"], "good")
+    socket.native_lukk(ocsp_client)
+    socket.native_lukk(ocsp_pair["server"])
+    assert(tls.lukk_secure(ocsp_server))
+
+    la revoked_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/revoked-client.crt"), tls.load_key_file("tests/fixtures/tls/revoked-client.key"))
+    tls.bruk_ocsp_stapling(revoked_ocsp_server, "tests/fixtures/tls/ocsp-revoked.der")
+    assert_eq(tls.lytt_secure(revoked_ocsp_server), 0)
+    la revoked_ocsp_listener = revoked_ocsp_server["listener"]
+    la revoked_ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", heltall_fra_tekst(revoked_ocsp_listener["port"]), "norscode-client", cert)
+    la revoked_ocsp_pair = handshake_pair(revoked_ocsp_listener, revoked_ocsp_client)
+    la revoked_ocsp_hs = revoked_ocsp_pair["scheduler"]
+    assert_eq(sched.future_status(revoked_ocsp_hs, revoked_ocsp_pair["client_future"]), "feil")
+    assert_inneholder(sched.future_feil(revoked_ocsp_hs, revoked_ocsp_pair["client_future"]), "OCSP certificate status not good")
+    socket.native_lukk(revoked_ocsp_client)
+    socket.native_lukk(revoked_ocsp_pair["server"])
+    assert(tls.lukk_secure(revoked_ocsp_server))
+
+    la no_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server.key"))
+    assert_eq(tls.lytt_secure(no_ocsp_server), 0)
+    la no_ocsp_listener = no_ocsp_server["listener"]
+    la no_ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", heltall_fra_tekst(no_ocsp_listener["port"]), "localhost", cert)
+    la no_ocsp_pair = handshake_pair(no_ocsp_listener, no_ocsp_client)
+    la no_ocsp_hs = no_ocsp_pair["scheduler"]
+    assert_eq(sched.future_status(no_ocsp_hs, no_ocsp_pair["client_future"]), "feil")
+    assert_inneholder(sched.future_feil(no_ocsp_hs, no_ocsp_pair["client_future"]), "OCSP staple required")
+    socket.native_lukk(no_ocsp_client)
+    socket.native_lukk(no_ocsp_pair["server"])
+    assert(tls.lukk_secure(no_ocsp_server))
+
+    la no_cert_client = socket.native_tls_tilkoble("127.0.0.1", mtls_port, "localhost", cert)
+    la no_cert_pair = handshake_pair(mtls_listener, no_cert_client)
+    la no_cert_hs = no_cert_pair["scheduler"]
+    hvis sched.future_status(no_cert_hs, no_cert_pair["client_future"]) != "feil" og sched.future_status(no_cert_hs, no_cert_pair["server_future"]) != "feil" {
+        skriv("mTLS without certificate unexpectedly accepted: client=" + sched.future_status(no_cert_hs, no_cert_pair["client_future"]) + " server=" + sched.future_status(no_cert_hs, no_cert_pair["server_future"]) + "\n")
+    }
+    assert(sched.future_status(no_cert_hs, no_cert_pair["client_future"]) == "feil" eller sched.future_status(no_cert_hs, no_cert_pair["server_future"]) == "feil")
+    skriv("mTLS utan sertifikat avvist OK\n")
+    socket.native_lukk(no_cert_client)
+    socket.native_lukk(no_cert_pair["server"])
+    socket.native_lukk(mtls_client)
+    socket.native_lukk(mtls_pair["server"])
+    assert(tls.lukk_secure(mtls_server))
+
+    assert_eq(socket.native_lukk(client)["status"], "closed")
+    assert_eq(socket.native_lukk(pair["server"])["status"], "closed")
+    assert(tls.lukk_secure(secure_server))
+    skriv("test_native_tls_event_loop OK")
+    returner 0
+}

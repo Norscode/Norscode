@@ -11,6 +11,8 @@
 
 bruk selfhost.json som json
 
+// Cache for den store, Norscode-genererte compiler-bundlen. Han skal lesast
+// éin gong per bundlekøyring, ikkje éin gong per native_execution-modul.
 // ─── Omdøyp funksjonar frå __main__. til modul. ─────────────────────────────
 
 funksjon omdøyp_kall_i_kode(fn, modul_namn: tekst) {
@@ -30,7 +32,10 @@ funksjon omdøyp_kall_i_kode(fn, modul_namn: tekst) {
 funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) {
     // Strukturell omdøyping (ikkje berre tekst-replace — unngår feil i "module":"__main__" osv.)
     // Returnerer parsed object directly to avoid serialize-parse cycle
-    la ncb = json.json_les(ncb_json)
+    // Bruk den innebygde Norscode-JSON-parseren her. Den custom parseren i
+    // selfhost.json er korrekt for kjelde-JSON, men blir unødvendig treg når
+    // L5b skal traversere store, allereie serialiserte NCB-bundlar i pure VM.
+    la ncb = builtin.json_parse_raw(ncb_json)
     la fns = ncb["functions"]
     la nk = nøkler(fns)
     la ny_fns: ordbok<tekst, tekst> = {}
@@ -59,8 +64,76 @@ funksjon slå_saman_funksjonar(dest: ordbok<tekst, tekst>, src: ordbok<tekst, te
     slutt
 }
 
-funksjon legg_modul_til_bundle(alle_fns: ordbok<tekst, tekst>, modul_namn: tekst, fil_sti: tekst) -> heltall {
+// Native json_stringify kan møte heiltalsverdiar som framleis ber med seg
+// kjeldeforma 0xNN frå eldre NCB-cache. Normaliser berre slike token utanfor
+// JSON-strengar, slik at bundle-output alltid er gyldig JSON.
+funksjon normaliser_json_heks(data: tekst) -> tekst {
+    // Nye NCB-ar frå json_skriv er allereie gyldig JSON. Den gamle
+    // teikn-for-teikn-normaliseringa er berre nødvendig for eldre cachefiler
+    // med 0x-literal; utan denne fastvegen blir stor bundle-serialisering
+    // kvadratisk og kan sjå ut som ein heng i sluttfasen.
+    hvis builtin.index_of(data, "0x") < 0 og builtin.index_of(data, "0X") < 0 {
+        returner data
+    }
+    la ut = ""
+    la i: heiltall = 0
+    la i_streng = usann
+    la escape = usann
+    mens i < lengde(data)
+        la c = data[i]
+        hvis i_streng {
+            ut = ut + c
+            hvis escape { escape = usann }
+            ellers hvis c == "\\" { escape = sann }
+            ellers hvis c == "\"" { i_streng = usann }
+            i = i + 1
+        } ellers hvis c == "\"" {
+            ut = ut + c
+            i_streng = sann
+            i = i + 1
+        } ellers hvis c == "0" og i + 1 < lengde(data) og (data[i + 1] == "x" eller data[i + 1] == "X") {
+            la verdi: heiltall = 0
+            la j: heiltall = i + 2
+            la gyldig = sann
+            hvis j >= lengde(data) { gyldig = usann }
+            mens gyldig og j < lengde(data)
+                la d = data[j]
+                la siffer: heiltall = -1
+                hvis d >= "0" og d <= "9" { siffer = builtin.char_code(d) - builtin.char_code("0") }
+                ellers hvis d >= "a" og d <= "f" { siffer = builtin.char_code(d) - builtin.char_code("a") + 10 }
+                ellers hvis d >= "A" og d <= "F" { siffer = builtin.char_code(d) - builtin.char_code("A") + 10 }
+                ellers { bryt }
+                verdi = verdi * 16 + siffer
+                j = j + 1
+            slutt
+            hvis j == i + 2 { gyldig = usann }
+            hvis gyldig {
+                ut = ut + tekst_fra_heiltall(verdi)
+                i = j
+            } ellers {
+                ut = ut + c
+                i = i + 1
+            }
+        } ellers {
+            ut = ut + c
+            i = i + 1
+        }
+    slutt
+    returner ut
+}
+
+funksjon legg_modul_til_bundle(alle_fns: ordbok<tekst, tekst>, modul_namn: tekst, fil_sti: tekst, cached_bootstrap_fns: ordbok<tekst, tekst>) -> heiltall {
     skriv("  Lesar/kompilerer " + fil_sti + " → " + modul_namn + "...\n")
+    la bruk_cached_bootstrap = (modul_namn == "selfhost.nc_main" og miljo_hent("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED") == "1") eller (builtin.starts_with(modul_namn, "selfhost.native_execution.") og miljo_hent("NORSCODE_BUNDLE_NATIVE_PRECOMPILED") == "1")
+    hvis bruk_cached_bootstrap og lengde(nøkler(cached_bootstrap_fns)) > 0 {
+        prøv {
+            slå_saman_funksjonar(alle_fns, cached_bootstrap_fns)
+            skriv("  [Cached] Gjenbrukar Norscode-generert compiler-bundle\n")
+            returner 1
+        } fang (e) {
+            skriv("  [Cached] Klarte ikkje lese compiler-bundle; prøver kjelde\n")
+        }
+    }
     la ncb_json = les_ncb_eller_kompiler(fil_sti)
     la mod_ncb = omdøyp_funksjonar(ncb_json, modul_namn)
     la mod_fns = mod_ncb["functions"]
@@ -80,20 +153,35 @@ funksjon les_precompiled_ncb(kildef: tekst) -> tekst {
         utan_no = builtin.slice(basename, 0, lengde(basename) - 3)
     }
     la precompiled_path = "bootstrap/precompiled/" + utan_no + ".ncb.json"
+    la stdlib_path = "bootstrap/stdlib/" + utan_no + ".ncb.json"
+    la stdlib_flat_path = "bootstrap/stdlib/" + builtin.replace(kildef, "/", "_")
+    hvis builtin.ends_with(stdlib_flat_path, ".no") {
+        stdlib_flat_path = builtin.slice(stdlib_flat_path, 0, lengde(stdlib_flat_path) - 3)
+    }
+    stdlib_flat_path = stdlib_flat_path + ".ncb.json"
 
     prøv {
         returner fil_les(precompiled_path)
     } fang (e) {
-        returner ""
+        prøv {
+            returner fil_les(stdlib_path)
+        } fang (e2) {
+            prøv { returner fil_les(stdlib_flat_path) } fang (e3) { returner "" }
+        }
     }
 }
 
 funksjon les_ncb_eller_kompiler(kildef: tekst) -> tekst {
     la bruk_prekompilert_selfhost = miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST")
+    // VM-modulen er med vilje ein stor, validerte NCB-payload i bootstrap.
+    // Ved full compiler-bundle-regenerering kan han hentast derfrå når
+    // NORSCODE_BUNDLE_VM_PRECOMPILED=1; dette unngår parser-stack overflow
+    // utan å introdusere ein ekstern compiler eller shell-reserveveg.
+    la vm_precompiled = kildef == "selfhost/vm.no" og miljo_hent("NORSCODE_BUNDLE_VM_PRECOMPILED") == "1"
     hvis bruk_prekompilert_selfhost == "" {
         bruk_prekompilert_selfhost = "1"
     }
-    hvis bruk_prekompilert_selfhost == "0" {
+    hvis bruk_prekompilert_selfhost == "0" og ikkje vm_precompiled {
         skriv("  [Source] Hoppar over pre-compiled bytecode per NORSCODE_USE_PRECOMPILED_SELFHOST=0\n")
     } ellers {
     // Prøv å laste pre-compiled NCB først
@@ -117,12 +205,19 @@ funksjon les_ncb_eller_kompiler(kildef: tekst) -> tekst {
 
 funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
     skriv("=== Norscode Bundle ===\n")
-
     la alle_fns: ordbok<tekst, tekst> = {}
     la ok_teller: heltall = 0
     la entry_namn = miljo_hent("NORSCODE_BUNDLE_ENTRY")
     hvis entry_namn == "" {
         entry_namn = "selfhost.bundler.start"
+    }
+
+    la cached_bootstrap_fns: ordbok<tekst, tekst> = {}
+    hvis miljo_hent("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED") == "1" eller miljo_hent("NORSCODE_BUNDLE_NATIVE_PRECOMPILED") == "1" {
+        prøv {
+            la cached = builtin.json_parse_raw(fil_les("bootstrap/kompiler.ncb.json"))
+            cached_bootstrap_fns = cached["functions"]
+        } fang (e) {}
     }
 
     hvis lengde(modular) == 1 {
@@ -135,11 +230,10 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
             fil_sti_0 = arg_0
         }
 
-        la kjelde_0 = fil_les(fil_sti_0)
-        la ncb_json_0 = kompiler_fil(kjelde_0, "__main__")
+        la ncb_json_0 = les_ncb_eller_kompiler(fil_sti_0)
         fil_skriv(utfil, ncb_json_0)
         skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(ncb_json_0)) + " bytes)\n")
-        returner
+        returner null
     }
 
     la i: heltall = 0
@@ -168,7 +262,7 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
             fil_sti = arg
         }
 
-        ok_teller = ok_teller + legg_modul_til_bundle(alle_fns, modul_namn, fil_sti)
+        ok_teller = ok_teller + legg_modul_til_bundle(alle_fns, modul_namn, fil_sti, cached_bootstrap_fns)
         i = i + 1
     }
     la bundle_ncb: ordbok<tekst, tekst> = {}
@@ -186,7 +280,10 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
     bundle_ncb["tests"] = {}
     bundle_ncb["functions"] = alle_fns
 
-    la bundle = json_skriv(bundle_ncb)
+    // Native JSON-stringify er lineær for store bundle-mappar. Den reine
+    // selfhost-serializeraren blir brukt av kjeldekompilatoren, men her ville
+    // han gjere sluttfasen kvadratisk på compiler/VM-bundlen.
+    la bundle = normaliser_json_heks(builtin.json_stringify(bundle_ncb))
     fil_skriv(utfil, bundle)
     skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(bundle)) + " bytes)\n")
 }
@@ -208,17 +305,23 @@ funksjon start() {
     // Splitt args på mellomrom
     la modular = builtin.split(args_str, " ")
 
-    // Filtrer vekk tomme strings
-    la reine_modular: liste<tekst> = []
+    // Filtrer vekk tomme strings utan [] + legg_til(...)-mønster,
+    // sidan aktiv compile-path framleis er sårbar der.
+    la reine_args = ""
     la i: heltall = 0
     mens i < lengde(modular) {
         la m: tekst = modular[i]
-        hvis lengde(builtin.trim(m)) > 0 {
-            legg_til(reine_modular, builtin.trim(m))
+        la trimma = builtin.trim(m)
+        hvis lengde(trimma) > 0 {
+            hvis lengde(reine_args) > 0 {
+                reine_args = reine_args + " "
+            }
+            reine_args = reine_args + trimma
         }
         i = i + 1
     }
 
+    la reine_modular = builtin.split(reine_args, " ")
     bygg_bundle(reine_modular, utfil)
     returner 0
 }
