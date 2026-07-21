@@ -134,7 +134,10 @@ while IFS= read -r _ncb; do
   case "$_ncb" in
     "$staging/bootstrap/kompiler.ncb.json"|\
     "$staging/bootstrap/precompiled/"*|\
-    "$staging/bootstrap/stdlib/"*) : ;;
+    "$staging/bootstrap/stdlib/"*|\
+    "$staging/selfhost/vm_executor.ncb.json"|\
+    "$staging/selfhost/compiler/ir_to_bytecode.ncb.json"|\
+    "$staging/selfhost/lexer/lexer_m1.ncb.json"*) : ;;
     *) rm -f "$_ncb" ;;
   esac
 done <"$_ncb_manifest"
