@@ -135,6 +135,7 @@ while IFS= read -r _ncb; do
     "$staging/bootstrap/kompiler.ncb.json"|\
     "$staging/bootstrap/precompiled/"*|\
     "$staging/bootstrap/stdlib/"*|\
+    "$staging/compiler/selfhost_main.ncb.json"|\
     "$staging/selfhost/"*.ncb.json) : ;;
     *) rm -f "$_ncb" ;;
   esac
