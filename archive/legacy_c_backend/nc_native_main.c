@@ -3300,6 +3300,10 @@ typedef struct {
 } NcThreadSlot;
 static NcThreadSlot g_thread_slots[NC_THREAD_MAX];
 static pthread_mutex_t g_thread_registry_lock=PTHREAD_MUTEX_INITIALIZER;
+/* Generic callbacks execute against process-global interpreter/GC state.
+ * Keep native worker threads concurrent, but serialize that shared callback
+ * section so worker results remain deterministic on every platform. */
+static pthread_mutex_t g_generic_thread_exec_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int g_native_thread_id = 0;
 static NcVal *nc_builtin_thread_current_id(void) { return nc_int(g_native_thread_id); }
 static NcVal *nc_thread_result(const char *status, NcThreadSlot *slot,
@@ -3433,10 +3437,13 @@ static void *nc_thread_worker(void *raw) {
                     slot->id, (void *)functions, (void *)fn_def);
         if (!fn_def) {
             snprintf(slot->error, sizeof(slot->error), "unknown thread function: %.190s", slot->fn);
-        } else if (setjmp(g_err_jmp)) {
+        } else {
+            pthread_mutex_lock(&g_generic_thread_exec_lock);
+            if (setjmp(g_err_jmp)) {
+                pthread_mutex_unlock(&g_generic_thread_exec_lock);
             snprintf(slot->error, sizeof(slot->error), "%.250s", g_err_msg[0] ? g_err_msg : "worker exception");
             g_err_msg[0] = 0;
-        } else {
+            } else {
             NcVal *worker_args[1] = {slot->args ? slot->args : nc_map_new()};
             if (getenv("NORSCODE_THREAD_TRACE"))
                 fprintf(stderr, "[nc-thread] generic id=%d execute\n", slot->id);
@@ -3444,6 +3451,8 @@ static void *nc_thread_worker(void *raw) {
             char *text = nc_to_str_raw(result);
             snprintf(slot->value, sizeof(slot->value), "%.127s", text ? text : "");
             free(text);
+                pthread_mutex_unlock(&g_generic_thread_exec_lock);
+            }
         }
     }
 
