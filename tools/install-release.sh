@@ -155,7 +155,7 @@ for entry in bootstrap compiler dist docs examples norcode norcode.toml selfhost
 done
 
 if [ "$(uname -s)" = "Darwin" ] && [ -x "$current_link/bin/nc" ]; then
-  (cd "$current_link" && "$current_link/bin/nc" install-macos-file-icons) || true
+  (cd "$current_link" && "$current_link/bin/nc" install-macos-file-icons) >/dev/null 2>&1 || true
 fi
 
 printf 'Installert release: %s\n' "$target_dir"
