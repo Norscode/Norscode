@@ -4538,11 +4538,44 @@ static int ncw_rsa_public_from_cert(const char *pem, BCRYPT_KEY_HANDLE *key) {
     unsigned char *der = NULL; DWORD der_len = 0;
     if (!ncw_pem_der(pem, &der, &der_len)) return 0;
     PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, der, der_len);
-    free(der);
-    if (!cert) return 0;
+    if (!cert) { free(der); return 0; }
     NTSTATUS status = CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,
         &cert->pCertInfo->SubjectPublicKeyInfo, 0, NULL, key);
     CertFreeCertificateContext(cert);
+    if (status == 0) { free(der); return 1; }
+    // MinGW's CryptImportPublicKeyInfoEx2 can reject a certificate whose
+    // provider metadata is newer than the runner's CNG shim.  Extract the
+    // RSA SubjectPublicKeyInfo directly as a standards-compliant fallback.
+    NcDerSlice bit_string, rsa, modulus, exponent;
+    size_t used = 0;
+    int found = 0;
+    for (size_t i = 0; i + 2 < der_len && !found; i++) {
+        if (der[i] != 0x03 || !ncw_der_tlv(der + i, der_len - i, 0x03, &bit_string, &used) || bit_string.length < 2 || bit_string.data[0] != 0) continue;
+        if (ncw_der_tlv(bit_string.data + 1, bit_string.length - 1, 0x30, &rsa, &used)) {
+            size_t p = 0, u1 = 0, u2 = 0;
+            if (ncw_der_tlv(rsa.data + p, rsa.length - p, 0x02, &modulus, &u1)) {
+                p += u1;
+                if (ncw_der_tlv(rsa.data + p, rsa.length - p, 0x02, &exponent, &u2)) found = 1;
+            }
+        }
+    }
+    if (!found) { free(der); return 0; }
+    while (modulus.length > 1 && modulus.data[0] == 0) { modulus.data++; modulus.length--; }
+    while (exponent.length > 1 && exponent.data[0] == 0) { exponent.data++; exponent.length--; }
+    BCRYPT_RSAKEY_BLOB header = { BCRYPT_RSAPUBLIC_MAGIC, (ULONG)(modulus.length * 8),
+        (ULONG)exponent.length, (ULONG)modulus.length, 0, 0 };
+    size_t blob_len = sizeof(header) + exponent.length + modulus.length;
+    unsigned char *blob = malloc(blob_len);
+    if (!blob) { free(der); return 0; }
+    memcpy(blob, &header, sizeof(header)); size_t out = sizeof(header);
+    memcpy(blob + out, exponent.data, exponent.length); out += exponent.length;
+    memcpy(blob + out, modulus.data, modulus.length);
+    BCRYPT_ALG_HANDLE alg = NULL;
+    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_RSA_ALGORITHM, NULL, 0);
+    if (status == 0) status = BCryptImportKeyPair(alg, NULL, BCRYPT_RSAPUBLIC_BLOB,
+        key, blob, (ULONG)blob_len, 0);
+    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
+    free(blob); free(der);
     return status == 0;
 }
 
