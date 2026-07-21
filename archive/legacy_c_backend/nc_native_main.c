@@ -3430,6 +3430,14 @@ static void *nc_thread_worker(void *raw) {
             snprintf(slot->value, sizeof(slot->value), "signalled");
         }
     } else {
+        /* A generic worker may wait for another worker while the collector is
+         * stopping the world. Mark this thread as blocked until it owns the
+         * serialized VM section, otherwise GC waits forever for a thread that
+         * is asleep on this mutex. Resolve the function after acquiring the
+         * lock because GC may relocate the NCB while this worker waits. */
+        nc_gc_blocking_enter();
+        pthread_mutex_lock(&g_generic_thread_exec_lock);
+        nc_gc_blocking_leave();
         NcVal *functions = slot->functions ? slot->functions : g_current_functions;
         NcVal *fn_def = functions ? nc_exec_find_fn(functions, slot->fn) : NULL;
         if (getenv("NORSCODE_THREAD_TRACE"))
@@ -3437,8 +3445,8 @@ static void *nc_thread_worker(void *raw) {
                     slot->id, (void *)functions, (void *)fn_def);
         if (!fn_def) {
             snprintf(slot->error, sizeof(slot->error), "unknown thread function: %.190s", slot->fn);
+            pthread_mutex_unlock(&g_generic_thread_exec_lock);
         } else {
-            pthread_mutex_lock(&g_generic_thread_exec_lock);
             if (setjmp(g_err_jmp)) {
                 pthread_mutex_unlock(&g_generic_thread_exec_lock);
             snprintf(slot->error, sizeof(slot->error), "%.250s", g_err_msg[0] ? g_err_msg : "worker exception");
