@@ -14,6 +14,8 @@
 #include "nc_metal_tensor.c"
 #if defined(_WIN32)
 #include "nc_windows_backend.h"
+#include <bcrypt.h>
+#include <wincrypt.h>
 #else
 #include <pthread.h>
 #include <dirent.h>
@@ -4446,6 +4448,119 @@ static NcVal *nc_builtin_argon2id(NcVal *password_v, NcVal *salt_v,
 #endif
 }
 
+#if defined(_WIN32) && !defined(NC_ENABLE_OPENSSL)
+typedef struct {
+    const unsigned char *data;
+    size_t length;
+} NcDerSlice;
+
+static int ncw_der_tlv(const unsigned char *data, size_t length,
+                       unsigned char tag, NcDerSlice *value, size_t *used) {
+    if (!data || length < 2 || data[0] != tag) return 0;
+    size_t pos = 1, count = data[pos++];
+    if (count & 0x80) {
+        size_t octets = count & 0x7f;
+        if (octets == 0 || octets > sizeof(size_t) || pos + octets > length) return 0;
+        count = 0;
+        for (size_t i = 0; i < octets; i++) count = (count << 8) | data[pos++];
+    }
+    if (pos > length || count > length - pos) return 0;
+    if (value) { value->data = data + pos; value->length = count; }
+    if (used) *used = pos + count;
+    return 1;
+}
+
+static int ncw_pem_der(const char *pem, unsigned char **der, DWORD *length) {
+    if (!pem || !der || !length) return 0;
+    DWORD needed = 0, flags = CRYPT_STRING_BASE64_ANY;
+    if (!CryptStringToBinaryA(pem, 0, flags, NULL, &needed, NULL, NULL)) return 0;
+    unsigned char *out = malloc(needed ? needed : 1);
+    if (!out || !CryptStringToBinaryA(pem, 0, flags, out, &needed, NULL, NULL)) {
+        free(out); return 0;
+    }
+    *der = out; *length = needed; return 1;
+}
+
+static int ncw_rsa_private_key(const char *pem, BCRYPT_KEY_HANDLE *key) {
+    unsigned char *der = NULL; DWORD der_len = 0;
+    if (!ncw_pem_der(pem, &der, &der_len)) return 0;
+    NcDerSlice outer, version, algorithm, private_octet, rsa;
+    size_t used = 0, pos = 0;
+    int ok = ncw_der_tlv(der, der_len, 0x30, &outer, &used) &&
+             ncw_der_tlv(outer.data, outer.length, 0x02, &version, &used);
+    pos += used;
+    if (ok && pos < outer.length) { ok = ncw_der_tlv(outer.data + pos, outer.length - pos, 0x30, &algorithm, &used); pos += used; }
+    if (ok && pos < outer.length) { ok = ncw_der_tlv(outer.data + pos, outer.length - pos, 0x04, &private_octet, &used); }
+    if (ok) ok = ncw_der_tlv(private_octet.data, private_octet.length, 0x30, &rsa, &used);
+    NcDerSlice parts[9];
+    if (ok) {
+        pos = 0;
+        for (int i = 0; i < 9 && ok; i++) {
+            size_t part_used = 0;
+            ok = ncw_der_tlv(rsa.data + pos, rsa.length - pos, 0x02, &parts[i], &part_used);
+            pos += part_used;
+        }
+    }
+    if (!ok) { free(der); return 0; }
+    size_t trim[9];
+    for (int i = 0; i < 9; i++) {
+        size_t skip = 0;
+        while (skip + 1 < parts[i].length && parts[i].data[skip] == 0) skip++;
+        trim[i] = parts[i].length - skip;
+        parts[i].data += skip; parts[i].length = trim[i];
+    }
+    BCRYPT_ALG_HANDLE alg = NULL;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_RSA_ALGORITHM, NULL, 0) != 0) { free(der); return 0; }
+    size_t modulus = parts[1].length, prime = (modulus + 1) / 2;
+    if (modulus == 0 || parts[2].length == 0 || parts[3].length == 0 ||
+        parts[4].length > prime || parts[5].length > prime) {
+        BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0;
+    }
+    BCRYPT_RSAKEY_BLOB header = { BCRYPT_RSAPRIVATE_MAGIC, (ULONG)(modulus * 8),
+        (ULONG)parts[2].length, (ULONG)modulus, (ULONG)prime, (ULONG)prime };
+    size_t blob_len = sizeof(header) + parts[2].length + modulus + prime * 6;
+    unsigned char *blob = calloc(blob_len, 1);
+    if (!blob) { BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0; }
+    memcpy(blob, &header, sizeof(header)); size_t out = sizeof(header);
+    memcpy(blob + out, parts[2].data, parts[2].length); out += parts[2].length;
+    memcpy(blob + out + modulus - parts[1].length, parts[1].data, parts[1].length); out += modulus;
+    for (int i = 4; i <= 8; i++) {
+        if (parts[i].length > prime) { free(blob); BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0; }
+        memcpy(blob + out + prime - parts[i].length, parts[i].data, parts[i].length); out += prime;
+    }
+    NTSTATUS status = BCryptImportKeyPair(alg, NULL, BCRYPT_RSAPRIVATE_BLOB,
+        key, blob, (ULONG)blob_len, 0);
+    free(blob); BCryptCloseAlgorithmProvider(alg, 0); free(der);
+    return status == 0;
+}
+
+static int ncw_rsa_public_from_cert(const char *pem, BCRYPT_KEY_HANDLE *key) {
+    unsigned char *der = NULL; DWORD der_len = 0;
+    if (!ncw_pem_der(pem, &der, &der_len)) return 0;
+    PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, der, der_len);
+    free(der);
+    if (!cert) return 0;
+    NTSTATUS status = CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,
+        &cert->pCertInfo->SubjectPublicKeyInfo, 0, NULL, key);
+    CertFreeCertificateContext(cert);
+    return status == 0;
+}
+
+static int ncw_rsa_sign(const char *pem, const char *input, unsigned char *signature, ULONG *length) {
+    BCRYPT_KEY_HANDLE key = NULL;
+    if (!ncw_rsa_private_key(pem, &key)) return 0;
+    BCRYPT_PKCS1_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM };
+    unsigned char digest[32]; BCRYPT_HASH_HANDLE hash = NULL; BCRYPT_ALG_HANDLE sha = NULL;
+    int ok = BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 &&
+        BCryptCreateHash(sha, &hash, NULL, 0, NULL, 0, 0) == 0 &&
+        BCryptHashData(hash, (PUCHAR)input, (ULONG)strlen(input), 0) == 0 &&
+        BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0 &&
+        BCryptSignHash(key, &padding, digest, sizeof(digest), signature, *length, length, BCRYPT_PAD_PKCS1) == 0;
+    if (hash) BCryptDestroyHash(hash); if (sha) BCryptCloseAlgorithmProvider(sha, 0); BCryptDestroyKey(key);
+    return ok;
+}
+#endif
+
 static NcVal *nc_builtin_acme_sign(NcVal *algorithm_v, NcVal *private_key_v,
                                    NcVal *input_v) {
 #if defined(NC_ENABLE_OPENSSL)
@@ -4508,6 +4623,19 @@ static NcVal *nc_builtin_acme_sign(NcVal *algorithm_v, NcVal *private_key_v,
     }
     hex[rawlen * 2] = '\0';
     return nc_str_own(hex);
+#elif defined(_WIN32)
+    char *algorithm = nc_to_str_raw(algorithm_v), *private_key = nc_to_str_raw(private_key_v), *input = nc_to_str_raw(input_v);
+    if (strcmp(algorithm, "RS256") || !private_key[0] || !input[0]) {
+        free(algorithm); free(private_key); free(input); nc_throw("ACME signering: ugyldig algoritme eller nøkkel"); return nc_nil();
+    }
+    unsigned char signature[512]; ULONG signature_len = sizeof(signature);
+    int ok = ncw_rsa_sign(private_key, input, signature, &signature_len);
+    free(algorithm); free(private_key); free(input);
+    if (!ok) { nc_throw("ACME signering feila"); return nc_nil(); }
+    char *hex = malloc((size_t)signature_len * 2 + 1); if (!hex) { nc_throw("ACME signering: minnefeil"); return nc_nil(); }
+    static const char digits[] = "0123456789abcdef";
+    for (ULONG i = 0; i < signature_len; i++) { hex[i * 2] = digits[(signature[i] >> 4) & 15]; hex[i * 2 + 1] = digits[signature[i] & 15]; }
+    hex[signature_len * 2] = 0; return nc_str_own(hex);
 #else
     (void)algorithm_v; (void)private_key_v; (void)input_v;
     nc_throw("ACME signering native backend er ikkje bygd på denne plattforma");
@@ -4611,6 +4739,31 @@ static NcVal *nc_builtin_acme_verify(NcVal *algorithm_v, NcVal *public_key_v,
     free(der_signature); free(signature);
     free(algorithm); free(public_key); free(input); free(signature_hex);
     return nc_bool(ok ? 1 : 0);
+#elif defined(_WIN32)
+    char *algorithm = nc_to_str_raw(algorithm_v), *public_key = nc_to_str_raw(public_key_v);
+    char *input = nc_to_str_raw(input_v), *signature_hex = nc_to_str_raw(signature_hex_v);
+    size_t hex_len = strlen(signature_hex);
+    if (strcmp(algorithm, "RS256") || !public_key[0] || !input[0] || hex_len == 0 || (hex_len & 1) != 0) {
+        free(algorithm); free(public_key); free(input); free(signature_hex); return nc_bool(0);
+    }
+    size_t signature_len = hex_len / 2;
+    unsigned char *signature = malloc(signature_len ? signature_len : 1);
+    int parsed = signature != NULL;
+    for (size_t i = 0; parsed && i < signature_len; i++) {
+        char a = signature_hex[i * 2], b = signature_hex[i * 2 + 1];
+        int hi = (a >= '0' && a <= '9') ? a - '0' : (a >= 'a' && a <= 'f') ? a - 'a' + 10 : (a >= 'A' && a <= 'F') ? a - 'A' + 10 : -1;
+        int lo = (b >= '0' && b <= '9') ? b - '0' : (b >= 'a' && b <= 'f') ? b - 'a' + 10 : (b >= 'A' && b <= 'F') ? b - 'a' + 10 : -1;
+        if (hi < 0 || lo < 0) parsed = 0; else signature[i] = (unsigned char)((hi << 4) | lo);
+    }
+    BCRYPT_KEY_HANDLE key = NULL; unsigned char digest[32]; BCRYPT_HASH_HANDLE hash = NULL; BCRYPT_ALG_HANDLE sha = NULL;
+    int ok = parsed && signature_len <= ULONG_MAX && ncw_rsa_public_from_cert(public_key, &key) &&
+        BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 &&
+        BCryptCreateHash(sha, &hash, NULL, 0, NULL, 0, 0) == 0 &&
+        BCryptHashData(hash, (PUCHAR)input, (ULONG)strlen(input), 0) == 0 &&
+        BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
+    if (ok) { BCRYPT_PKCS1_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM }; ok = BCryptVerifySignature(key, &padding, digest, sizeof(digest), signature, (ULONG)signature_len, BCRYPT_PAD_PKCS1) == 0; }
+    if (hash) BCryptDestroyHash(hash); if (sha) BCryptCloseAlgorithmProvider(sha, 0); if (key) BCryptDestroyKey(key);
+    free(signature); free(algorithm); free(public_key); free(input); free(signature_hex); return nc_bool(ok);
 #else
     (void)algorithm_v; (void)public_key_v; (void)input_v; (void)signature_hex_v;
     nc_throw("ACME verifisering native backend er ikkje bygd på denne plattforma");
