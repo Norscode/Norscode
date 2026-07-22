@@ -913,6 +913,20 @@ static int nc_apply_process_sandbox(const char *profile,long long timeout_ms,lon
 static unsigned long long nc_process_resident_bytes(pid_t pid);
 #endif
 
+/* Keep the secure 512 MiB default, but allow an explicitly opted-in
+ * maintainer gate to raise the cap for the large stage-0 compiler. */
+static long long nc_process_default_max_memory(void) {
+    const long long fallback = 536870912LL;
+    const unsigned long long ceiling = 8589934592ULL;
+    const char *raw = getenv("NORSCODE_PROCESS_MAX_MEMORY_BYTES");
+    if (!raw || !*raw) return fallback;
+    errno = 0;
+    char *end = NULL;
+    unsigned long long value = strtoull(raw, &end, 10);
+    if (errno || end == raw || *end != '\0' || value == 0 || value > ceiling) return fallback;
+    return (long long)value;
+}
+
 #if defined(_WIN32)
 static char *nc_process_environment_block(NcVal *environment, int inherit_env, int *valid) {
     *valid = 1;
@@ -955,7 +969,7 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     long long timeout_ms = nc_atomic_int_field(request, "timeout_ms", 0);
     long long max_output = nc_atomic_int_field(request, "max_output_bytes", 0);
     const char *sandbox_profile = nc_atomic_text_field(request, "sandbox", "none");
-    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", 536870912);
+    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", nc_process_default_max_memory());
     long long max_files = nc_atomic_int_field(request, "max_open_files", 64);
     int inherit_env = nc_atomic_int_field(request, "inherit_env", 1) != 0;
     NcVal *environment = nc_index_get(request, nc_str("environment"));
@@ -3128,7 +3142,7 @@ static NcVal *nc_process_async_spawn(NcVal *request) {
     long long timeout_ms = nc_atomic_int_field(request, "timeout_ms", 0);
     long long max_output = nc_atomic_int_field(request, "max_output_bytes", 0);
     const char *sandbox_profile = nc_atomic_text_field(request, "sandbox", "none");
-    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", 536870912);
+    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", nc_process_default_max_memory());
     long long max_files = nc_atomic_int_field(request, "max_open_files", 64);
     int inherit_env = nc_atomic_int_field(request, "inherit_env", 1) != 0;
     NcVal *args = nc_index_get(request, nc_str("args"));
@@ -3249,7 +3263,7 @@ static void nc_process_windows_refresh(NcProcessSlot *slot,uint64_t wait_ms,char
 
 static NcVal *nc_process_windows_spawn(NcVal *request){
     const char *executable=nc_atomic_text_field(request,"executable",""),*cwd=nc_atomic_text_field(request,"cwd",""),*stdin_text=nc_atomic_text_field(request,"stdin",""),*sandbox=nc_atomic_text_field(request,"sandbox","none");
-    long long timeout_ms=nc_atomic_int_field(request,"timeout_ms",0),max_output=nc_atomic_int_field(request,"max_output_bytes",0),max_memory=nc_atomic_int_field(request,"max_memory_bytes",536870912);NcVal *args=nc_index_get(request,nc_str("args"));
+    long long timeout_ms=nc_atomic_int_field(request,"timeout_ms",0),max_output=nc_atomic_int_field(request,"max_output_bytes",0),max_memory=nc_atomic_int_field(request,"max_memory_bytes",nc_process_default_max_memory());NcVal *args=nc_index_get(request,nc_str("args"));
     if(!*executable||timeout_ms<=0||max_output<=0||!args||args->type!=NC_LIST)return nc_process_windows_result(NULL,"invalid spawn request");if(max_output>64LL*1024LL*1024LL)max_output=64LL*1024LL*1024LL;
     int argc=args->list->len+1;char **argv=calloc((size_t)argc+1,sizeof(char *));if(!argv)return nc_process_windows_result(NULL,"out of memory");argv[0]=strdup(executable);
     for(int i=1;i<argc;i++){NcVal *value=args->list->items[i-1];if(!value||value->type!=NC_STR){for(int j=0;j<argc;j++)free(argv[j]);free(argv);return nc_process_windows_result(NULL,"argv must contain text");}argv[i]=strdup(value->s?value->s:"");}
