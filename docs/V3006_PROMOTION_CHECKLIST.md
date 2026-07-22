@@ -81,7 +81,11 @@ Reell stage0-promotering krev eksplisitt ja:
 NORSCODE_PROMOTE_CANDIDATE=build/v3002/norscode_native_v3002 NORSCODE_PROMOTE_STAGE0=1 ./bin/nc run tools/promote_native_stage0_v3001.no
 ```
 
-## Produksjonsstatus
+## Historisk produksjonsstatus
+
+Blokka under er eit eldre kontrollpunkt frå før promoteringa og sluttporten.
+Ho skal ikkje lesast som aktuell status. Gjeldande status kjem berre frå den
+signerte `norscode-completion-gate-v1`-rapporten på same commit.
 
 Før reell promotering:
 

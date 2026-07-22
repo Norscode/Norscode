@@ -119,9 +119,8 @@ løfta til 22/22 runtime og 61/61 standardbibliotek. Den endelege
 - Windows x86_64 runtime, IOCP/SChannel, AppContainer og Argon2 krysskompilerer
   og lenkar. Cross-gaten legg no også compiler/VM/executor-NCB inn i PE-fila
   og verifiserer PE32+ direkte i Norscode utan avhengigheit til `file`. Dette
-  er ikkje ekte Windows-attestasjon:
-  `production_ready_windows=false` og `production_ready_all_platforms=false`
-  står ved lag fram til køyring på ein faktisk Windows-vert.
+  Denne teksten er eit historisk kontrollpunkt frå før ekte Windows-attestasjon.
+  Aktuell status skal lesast frå sluttportrapporten på same commit.
 - Tracked `bootstrap/stage0/norscode-windows-x86_64.exe` er no regenerert frå
   same innebygd-NCB PE-kandidat som Windows-kryssgaten verifiserer, og blir brukt
   som Git Bash/MSYS-fallback for `bin/nc`; han er statisk PE-verifisert, men er

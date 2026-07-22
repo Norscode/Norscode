@@ -1,4 +1,8 @@
-# Norscode HTTP Server — Production Ready Status
+# Norscode HTTP Server — Historical Production Ready Snapshot
+
+> Dette er eit historisk HTTP-server-snapshot, ikkje Norscode 1.0 sin
+> autoritative release-status. Den gjeldande statusen kjem frå den signerte
+> `norscode-completion-gate-v1`-rapporten på same commit.
 
 **Date:** 2026-06-14  
 **Status:** ✅ 100% PRODUCTION READY

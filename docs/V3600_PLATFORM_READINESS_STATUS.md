@@ -1,4 +1,9 @@
-# v3600 Platform readiness status
+# v3600 Platform readiness status (historisk snapshot)
+
+Dette dokumentet er eit eldre v3600-snapshot med kandidathashar. Det er ikkje
+releasebevis for Norscode 1.0. Bruk den signerte
+`reports/norscode-completion-v1.json` frå same commit som kjelda for aktuell
+plattformstatus og `production_ready_all_platforms`.
 
 Status: macOS runtime-gap er verifisert lokalt. Linux x86_64-kandidat er krysskompilert og full runtime-gap er verifisert i Ubuntu 24.04 Docker. Portable Zig Argon2id og OpenSSL PBKDF2/ACME er i tillegg verifisert i Linux-releasekandidaten.
 
