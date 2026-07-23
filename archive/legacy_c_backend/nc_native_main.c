@@ -4944,9 +4944,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
     NcVal *params_v = nc_index_get(fn_def, nc_str("params"));
     NcVal *code_v   = nc_index_get(fn_def, nc_str("code"));
 
-    // Operand slots are written before they are read; avoid zeroing the full
-    // reserve for every nested VM call during large L5b bundles.
-    NcVal **stack_arr = malloc(65536 * sizeof(NcVal*));
+    NcVal **stack_arr = calloc(65536, sizeof(NcVal*));
     NcExecControl *control = calloc(1, sizeof(NcExecControl));
     NcVal **vars_arr  = calloc(2048, sizeof(NcVal*));
     char **varnames   = calloc(2048, sizeof(char*)); int nvars = 0;
