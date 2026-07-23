@@ -4944,7 +4944,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
     NcVal *params_v = nc_index_get(fn_def, nc_str("params"));
     NcVal *code_v   = nc_index_get(fn_def, nc_str("code"));
 
-    NcVal **stack_arr = calloc(65536, sizeof(NcVal*));
+    NcVal **stack_arr = calloc(8192, sizeof(NcVal*));
     NcExecControl *control = calloc(1, sizeof(NcExecControl));
     NcVal **vars_arr  = calloc(2048, sizeof(NcVal*));
     char **varnames   = calloc(2048, sizeof(char*)); int nvars = 0;
