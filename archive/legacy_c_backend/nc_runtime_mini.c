@@ -855,7 +855,7 @@ static NcVal *nc_fn_builtin_now_iso(NcVal **args, int na) {
 
 /* ── Stage0-kjerne: stack ── */
 static void nc_push(int *sp, NcVal **stack, NcVal *v) {
-    if (*sp >= 512) nc_panic("Stack overflow");
+    if (*sp >= 65536) nc_panic("Stack overflow");
     stack[(*sp)++] = v ? v : nc_nil();
 }
 static NcVal *nc_pop(int *sp, NcVal **stack) {
