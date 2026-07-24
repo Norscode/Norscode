@@ -1,0 +1,197 @@
+// Ekte Windows-køyring og kildebunden attestasjon.
+//
+// Denne gaten skal berre køyrast etter kryss-/nativebygg på ein faktisk
+// Windows-host. Ho køyrer sjølv alle Windows-kritiske testar og skriv først
+// attestasjonen når kvar test er grøn. Krysskompilering eller Wine er ikkje
+// tilstrekkeleg.
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner builtin.miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon shell(sti: tekst) -> tekst {
+    // Git Bash on windows-latest exposes Windows paths with backslashes;
+    // normalize them before passing commands through the POSIX shell.
+    returner "'" + builtin.replace(sti, "\\", "/") + "'"
+}
+
+funksjon kommando(cmd: tekst) -> liste_tekst {
+    prøv {
+        la comspec = env("ComSpec")
+        hvis comspec != "" {
+            // `exec_prosess` uses cmd.exe on Windows.  Use outer double
+            // quotes so the POSIX single-quoted path fragments remain
+            // arguments to Git Bash instead of being parsed by cmd.exe.
+            la escaped = builtin.replace(cmd, "\"", "\\\"")
+            returner builtin.exec_prosess("bash.exe -lc \"" + escaped + "\"")
+        }
+        returner builtin.exec_prosess(cmd)
+    } fang (e) { returner ["1", "", tekst(e)] }
+}
+
+funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
+    hvis lengde(res) > idx { returner res[idx] }
+    returner ""
+}
+
+funksjon ok(res: liste_tekst) -> boolsk { returner felt(res, 0) == "0" }
+
+funksjon trim(t: tekst) -> tekst { returner builtin.trim(t) }
+
+funksjon er_windows() -> boolsk {
+    la system = trim(felt(kommando("uname -s 2>/dev/null"), 1))
+    returner builtin.starts_with(system, "MINGW") eller builtin.starts_with(system, "MSYS") eller
+        builtin.starts_with(system, "CYGWIN") eller builtin.starts_with(system, "Windows")
+}
+
+funksjon er_windows_x64() -> boolsk {
+    la arch = env("PROCESSOR_ARCHITEW6432")
+    hvis arch == "" { arch = env("PROCESSOR_ARCHITECTURE") }
+    returner arch == "AMD64" eller arch == "x86_64"
+}
+
+funksjon sha256(sti: tekst) -> tekst {
+    hvis ok(kommando("command -v sha256sum >/dev/null 2>&1")) {
+        returner trim(felt(kommando("sha256sum " + shell(sti) + " | awk '{print $1}'"), 1))
+    }
+    hvis ok(kommando("command -v shasum >/dev/null 2>&1")) {
+        returner trim(felt(kommando("shasum -a 256 " + shell(sti) + " | awk '{print $1}'"), 1))
+    }
+    returner ""
+}
+
+funksjon har_embedded_ncb(sti: tekst) -> boolsk {
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        la n = lengde(bytes)
+        la image = "NORSCODE_NCB_IMAGE_V1"
+        la stream = "NORSCODE_NCB_TEXT_V1"
+        hvis n >= lengde(image) {
+            la start = n - lengde(image)
+            la ok_image = sann
+            la i = 0
+            mens i < lengde(image) {
+                hvis builtin.chr(bytes[start + i]) != image[i] { ok_image = usann }
+                i = i + 1
+            }
+            hvis ok_image { returner sann }
+        }
+        hvis n >= lengde(stream) {
+            la start2 = n - lengde(stream)
+            la ok_stream = sann
+            la j = 0
+            mens j < lengde(stream) {
+                hvis builtin.chr(bytes[start2 + j]) != stream[j] { ok_stream = usann }
+                j = j + 1
+            }
+            hvis ok_stream { returner sann }
+        }
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon køyr(root: tekst, cmd: tekst, namn: tekst) -> boolsk {
+    la res = kommando("cd " + shell(root) + " && " + cmd)
+    hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
+    hvis ikkje ok(res) {
+        skriv("[FAIL] Windows-attestasjon " + namn + ": " + felt(res, 2) + "\n")
+        returner usann
+    }
+    skriv("[OK] Windows-attestasjon " + namn + "\n")
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje er_windows() {
+        skriv("[FAIL] Windows-attestasjon krev faktisk Windows-host\n")
+        returner 2
+    }
+    hvis ikkje er_windows_x64() {
+        skriv("[FAIL] Windows-attestasjon krev Windows x86_64/AMD64-host\n")
+        returner 2
+    }
+
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/build/windows/norscode_native_windows_x86_64.exe" }
+    la backend = env("NORSCODE_WINDOWS_BACKEND_SMOKE")
+    hvis backend == "" { backend = root + "/build/windows/nc_windows_backend_smoke_x86_64.exe" }
+    la app = env("NORSCODE_WINDOWS_APPCONTAINER_SMOKE")
+    hvis app == "" { app = root + "/build/windows/nc_windows_appcontainer_smoke_x86_64.exe" }
+
+    hvis sha256(native) == "" eller sha256(backend) == "" eller sha256(app) == "" {
+        skriv("[FAIL] Windows-attestasjon manglar runtime/smoke eller SHA-256-verktøy\n")
+        returner 1
+    }
+    hvis ikkje har_embedded_ncb(native) {
+        skriv("[FAIL] Windows-attestasjon nektar runtime utan innebygd NCB-image\n")
+        returner 1
+    }
+
+    la caps = "NORSCODE_ENABLE_EXEC_PROSESS=1 " +
+        "NORSCODE_VM_CAPABILITIES='env.read,process.exec,disk.read,disk.write' " +
+        "NORSCODE_VM_DISK_ROOT=" + shell(root) + " "
+    hvis ikkje køyr(root, caps + "NORSCODE_ROOT=" + shell(root) +
+        " NORSCODE_WINDOWS_BACKEND_SMOKE=" + shell(backend) +
+        " NORSCODE_WINDOWS_APPCONTAINER_SMOKE=" + shell(app) +
+        " ./bin/nc run tools/windows_runtime_execution_gate.no", "backend og AppContainer") {
+        returner 1
+    }
+
+    la testar: liste_tekst = [
+        "tests/test_windows_native_network.no",
+        "tests/test_windows_schannel_client.no",
+        "tests/test_windows_iocp_scheduler.no",
+        "tests/test_windows_filesystem_iocp.no",
+        "tests/test_argon2_native.no",
+        "tests/test_acme_sign_native.no",
+        "tests/test_acme_verify_native.no"
+    ]
+    la i: heiltall = 0
+    mens i < lengde(testar) {
+        la cmd = "NORSCODE_NATIVE_BIN=" + shell(native) + " NC_TEST_FILE=" + shell(testar[i]) +
+            " NC_VERBOSE=1 ./bin/nc test"
+        hvis ikkje køyr(root, cmd, testar[i]) { returner 1 }
+        i = i + 1
+    }
+
+    la commit = trim(felt(kommando("cd " + shell(root) + " && git rev-parse HEAD"), 1))
+    hvis commit == "" { skriv("[FAIL] Windows-attestasjon manglar git commit\n") returner 1 }
+    hvis ikkje ok(kommando("cd " + shell(root) + " && git diff --quiet && git diff --cached --quiet")) {
+        skriv("[FAIL] Windows-attestasjon nektar endra spora kjelder\n")
+        returner 1
+    }
+    la workflow_sha = env("GITHUB_SHA")
+    hvis workflow_sha != "" og workflow_sha != commit {
+        skriv("[FAIL] Windows-attestasjon GITHUB_SHA samsvarer ikkje med HEAD\n")
+        returner 1
+    }
+
+    la rapport: ordbok_tekst = {}
+    rapport["schema"] = "norscode-windows-runtime-attestation-v1"
+    rapport["status"] = "verified"
+    rapport["platform"] = "windows"
+    rapport["architecture"] = trim(felt(kommando("uname -m"), 1))
+    rapport["source_commit"] = commit
+    rapport["runtime_sha256"] = sha256(native)
+    rapport["backend_smoke_sha256"] = sha256(backend)
+    rapport["appcontainer_smoke_sha256"] = sha256(app)
+    rapport["tests"] = "backend,appcontainer,network,schannel_tls13,iocp,filesystem,argon2id,acme_sign,acme_verify"
+    rapport["repository"] = env("GITHUB_REPOSITORY")
+    rapport["workflow"] = env("GITHUB_WORKFLOW")
+    rapport["run_id"] = env("GITHUB_RUN_ID")
+    rapport["run_attempt"] = env("GITHUB_RUN_ATTEMPT")
+    rapport["runner_name"] = env("RUNNER_NAME")
+
+    la output = env("NORSCODE_WINDOWS_ATTESTATION_OUTPUT")
+    hvis output == "" { output = root + "/reports/windows-runtime-attestation.json" }
+    hvis ikkje ok(kommando("mkdir -p " + shell(root + "/reports"))) { returner 1 }
+    prøv { builtin.fil_skriv(output, builtin.json_stringify(rapport) + "\n") } fang (e) {
+        skriv("[FAIL] Windows-attestasjon kunne ikkje skrive rapport: " + tekst(e) + "\n")
+        returner 1
+    }
+    skriv("[OK] Ekte Windows runtime-attestasjon: " + output + "\n")
+    returner 0
+}

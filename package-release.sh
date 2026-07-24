@@ -26,7 +26,9 @@ has_release_fallback_reason() {
       *"Ukjent funksjon: exec_prosess"*|\
       *"Ukjent funksjon: builtin.exec_prosess"*|\
       *"Ukjent funksjon: builtin.builtin.exec_prosess"*|\
-      *"Manglar distribusjonsbinary: "*/dist/norscode_native*) return 0 ;;
+      *"Ufullstendig binær fillesing"*|\
+      *"Manglar distribusjonsbinary: "*/dist/norscode_native*|\
+      *"Klarte ikkje byggje release-runtime med innebygd NCB"*) return 0 ;;
     esac
   done < "$_file"
   return 1
@@ -77,6 +79,11 @@ archive_path="$release_dir/$archive_name"
   printf 'Manglar distribusjonsbinary: %s\n' "$dist/norscode_native" >&2
   exit 1
 }
+[ -x "$dist/norscode_native_embedded" ] || {
+  printf 'Manglar innebygd release-runtime: %s\n' "$dist/norscode_native_embedded" >&2
+  printf 'Bygg release-runtime med Norscode før shell-reservevegen blir brukt.\n' >&2
+  exit 1
+}
 [ -x "$ROOT_DIR/bin/nc" ] || {
   printf 'Manglar CLI-wrapper: %s\n' "$ROOT_DIR/bin/nc" >&2
   exit 1
@@ -93,11 +100,6 @@ archive_path="$release_dir/$archive_name"
   printf 'Manglar norcode.toml\n' >&2
   exit 1
 }
-[ -f "$ROOT_DIR/build/v9400/hybrid_compiler_bundle_v9400.ncb.json" ] || {
-  printf 'Manglar release-artefakt: build/v9400/hybrid_compiler_bundle_v9400.ncb.json\n' >&2
-  exit 1
-}
-
 mkdir -p "$release_dir"
 rm -f "$archive_path" "$archive_path.sha256"
 staging="$(mktemp -d)"
@@ -113,10 +115,6 @@ for entry in $entries; do
   fi
 done
 
-mkdir -p "$staging/build"
-cp -R "$ROOT_DIR/build/v9400" "$staging/build/v9400"
-package_entries="$package_entries build"
-
 if [ -d "$staging/std" ]; then
   for f in "$staging"/std/*.no; do
     [ -f "$f" ] || continue
@@ -124,6 +122,27 @@ if [ -d "$staging/std" ]; then
     [ -f "$alias_path" ] || cp "$f" "$alias_path"
   done
 fi
+
+# Shell-reservevegen skal aldri pakke den eksterne runtime-kandidaten.  Bruk
+# same innebygde image som Norscode-pakkaren brukar, og fjern prototypealiaset
+# før arkivet blir skrive.
+cp "$staging/dist/norscode_native_embedded" "$staging/dist/norscode_native"
+rm -f "$staging/dist/norscode_native_embedded"
+_ncb_manifest="$staging/.ncb-files"
+find "$staging" -type f -name '*.ncb.json*' -print >"$_ncb_manifest"
+while IFS= read -r _ncb; do
+  case "$_ncb" in
+    "$staging/bootstrap/kompiler.ncb.json"|\
+    "$staging/bootstrap/precompiled/"*|\
+    "$staging/bootstrap/stdlib/"*|\
+    "$staging/compiler/selfhost_main.ncb.json"|\
+    "$staging/tests/test_web_routes.ncb.json"|\
+    "$staging/tests/test_db.ncb.json"|\
+    "$staging/selfhost/"*.ncb.json) : ;;
+    *) rm -f "$_ncb" ;;
+  esac
+done <"$_ncb_manifest"
+rm -f "$_ncb_manifest"
 
 tar -czf "$archive_path" -C "$staging" $package_entries
 if ! sha256_for_file "$archive_path" > "$archive_path.sha256"; then

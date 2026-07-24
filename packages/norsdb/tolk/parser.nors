@@ -1,0 +1,654 @@
+## Norscode Tolk — Parser (AST-bygger)
+## Fil: tolk/parser.nors
+## Tar en liste med tokens og bygger et abstrakt syntakstre (AST)
+
+importer tolk.lexer
+
+## ─────────────────────────────────────────
+## AST-NODETYPER
+## ─────────────────────────────────────────
+
+## Uttrykk (har en verdi)
+type Uttrykk =
+    | HeltallLiteral    { verdi: int }
+    | DesimalLiteral    { verdi: desimal }
+    | TekstLiteral      { verdi: tekst }
+    | BoolskLiteral     { verdi: bool }
+    | IngenLiteral      {}
+    | Identifikator     { navn: tekst }
+    | BinærOperasjon    { venstre: Uttrykk, operator: tekst, høyre: Uttrykk }
+    | UnærOperasjon     { operator: tekst, operand: Uttrykk }
+    | Funksjonskall     { funksjon: Uttrykk, argumenter: liste[Uttrykk] }
+    | Indeksering       { objekt: Uttrykk, indeks: Uttrykk }
+    | Feltaksess        { objekt: Uttrykk, felt: tekst }
+    | ListeLiteral      { elementer: liste[Uttrykk] }
+    | OrdbokLiteral     { nøkkel_verdi: liste[(Uttrykk, Uttrykk)] }
+    | BetingetUttrykk   { betingelse: Uttrykk, da_verdi: Uttrykk, ellers_verdi: Uttrykk }
+    | Lambda            { parametere: liste[Parameter], kropp: Uttrykk }
+
+## Setninger (gjør noe)
+type Setning =
+    | Uttrykkssetning   { uttrykk: Uttrykk }
+    | LaDeklarasjon     { navn: tekst, type_merknad: tekst | ingen, verdi: Uttrykk }
+    | KonstantDekl      { navn: tekst, type_merknad: tekst | ingen, verdi: Uttrykk }
+    | Tilordning        { mål: Uttrykk, operator: tekst, verdi: Uttrykk }
+    | Retursetning      { verdi: Uttrykk | ingen }
+    | HvisSetning       { betingelse: Uttrykk, da: Blokk, eller_hvis: liste[(Uttrykk, Blokk)], ellers: Blokk | ingen }
+    | VelgSetning       { uttrykk: Uttrykk, grener: liste[VelgGren], annet: Blokk | ingen }
+    | ForSløyfe         { variabel: tekst, iterable: Uttrykk, kropp: Blokk }
+    | MensSløyfe        { betingelse: Uttrykk, kropp: Blokk }
+    | GjentaSløyfe      { antall: Uttrykk, kropp: Blokk }
+    | StoppSetning      {}
+    | FortsettSetning   {}
+    | KastSetning       { uttrykk: Uttrykk }
+    | PrøvSetning       { kropp: Blokk, fang: FangGren | ingen }
+    | ImportSetning     { sti: tekst }
+    | FunksjonsDekl     { navn: tekst, parametere: liste[Parameter], returtype: tekst | ingen, kropp: Blokk, er_privat: bool }
+    | StrukturDekl      { navn: tekst, felt: liste[StrukturFelt] }
+    | TypeDekl          { navn: tekst, varianter: liste[tekst] }
+
+struktur Blokk:
+    setninger: liste[Setning]
+
+struktur Parameter:
+    navn        : tekst
+    type_merknad: tekst | ingen
+    standard    : Uttrykk | ingen
+
+struktur StrukturFelt:
+    navn        : tekst
+    type_merknad: tekst
+    standard    : Uttrykk | ingen
+
+struktur VelgGren:
+    mønster: liste[Uttrykk]
+    kropp  : Blokk
+
+struktur FangGren:
+    variabel: tekst | ingen
+    kropp   : Blokk
+
+## Rot-node for hele programmet
+struktur Program:
+    setninger: liste[Setning]
+    fil       : tekst
+
+## ─────────────────────────────────────────
+## PARSER-TILSTAND
+## ─────────────────────────────────────────
+
+struktur ParserTilstand:
+    tokens : liste[Token]
+    pos    : int = 0
+
+## ─────────────────────────────────────────
+## parse - Hovedfunksjon
+## ─────────────────────────────────────────
+
+funksjon parse(tokens: liste[Token], fil: tekst = "<ukjent>") -> Program:
+    la p = ParserTilstand(tokens=tokens)
+    la setninger = []
+
+    mens ikke _er_slutt(p):
+        _hopp_over_linjeskift(p)
+        hvis ikke _er_slutt(p):
+            setninger.legg_til(_parse_setning(p))
+
+    returner Program(setninger=setninger, fil=fil)
+
+## ─────────────────────────────────────────
+## SETNINGS-PARSING
+## ─────────────────────────────────────────
+
+privat funksjon _parse_setning(p: ParserTilstand) -> Setning:
+    la tok = _gjeldende(p)
+
+    velg tok.type:
+        IMPORTER  : returner _parse_import(p)
+        LA        : returner _parse_la(p)
+        KONSTANT  : returner _parse_konstant(p)
+        FUNKSJON  : returner _parse_funksjon(p, er_privat=usann)
+        PRIVAT    :
+            _forbruk(p, PRIVAT)
+            _forbruk(p, FUNKSJON)
+            returner _parse_funksjon(p, er_privat=sann)
+        STRUKTUR  : returner _parse_struktur(p)
+        TYPE      : returner _parse_type(p)
+        HVIS      : returner _parse_hvis(p)
+        VELG      : returner _parse_velg(p)
+        FOR       : returner _parse_for(p)
+        MENS      : returner _parse_mens(p)
+        GJENTA    : returner _parse_gjenta(p)
+        STOPP     :
+            _forbruk(p, STOPP)
+            returner StoppSetning()
+        FORTSETT  :
+            _forbruk(p, FORTSETT)
+            returner FortsettSetning()
+        RETURNER  : returner _parse_returner(p)
+        KAST      : returner _parse_kast(p)
+        PRØV      : returner _parse_prøv(p)
+        annet     :
+            ## Kan være tilordning eller uttrykk
+            la uttr = _parse_uttrykk(p)
+            ## Sjekk om neste er tilordningsoperator
+            hvis _gjeldende(p).type i [TILORDNING, PLUSS_TILORDNING, MINUS_TILORDNING]:
+                la op = _forbruk_gjeldende(p).verdi
+                la verdi = _parse_uttrykk(p)
+                returner Tilordning(mål=uttr, operator=op, verdi=verdi)
+            returner Uttrykkssetning(uttrykk=uttr)
+
+privat funksjon _parse_import(p: ParserTilstand) -> Setning:
+    _forbruk(p, IMPORTER)
+    hvis _gjeldende(p).type != IDENTIFIKATOR:
+        kast ParserFeil("Forventet modulnavn etter importer", _gjeldende(p).linje, _gjeldende(p).kolonne)
+
+    la deler = [_forbruk(p, IDENTIFIKATOR).verdi]
+    mens _gjeldende(p).type == PUNKTUM:
+        _forbruk(p, PUNKTUM)
+        deler.legg_til(_forbruk(p, IDENTIFIKATOR).verdi)
+    returner ImportSetning(sti=join(deler, "."))
+
+privat funksjon _parse_la(p: ParserTilstand) -> Setning:
+    _forbruk(p, LA)
+    la navn = _forbruk(p, IDENTIFIKATOR).verdi
+    la type_merknad = ingen
+    hvis _gjeldende(p).type == KOLON:
+        _forbruk(p, KOLON)
+        type_merknad = _parse_type_merknad(p)
+    _forbruk(p, TILORDNING)
+    la verdi = _parse_uttrykk(p)
+    returner LaDeklarasjon(navn=navn, type_merknad=type_merknad, verdi=verdi)
+
+privat funksjon _parse_konstant(p: ParserTilstand) -> Setning:
+    _forbruk(p, KONSTANT)
+    la navn = _forbruk(p, IDENTIFIKATOR).verdi
+    la type_merknad = ingen
+    hvis _gjeldende(p).type == KOLON:
+        _forbruk(p, KOLON)
+        type_merknad = _parse_type_merknad(p)
+    _forbruk(p, TILORDNING)
+    la verdi = _parse_uttrykk(p)
+    returner KonstantDekl(navn=navn, type_merknad=type_merknad, verdi=verdi)
+
+privat funksjon _parse_funksjon(p: ParserTilstand, er_privat: bool) -> Setning:
+    la navn = _forbruk(p, IDENTIFIKATOR).verdi
+    _forbruk(p, VENSTRE_PARENTES)
+    la parametere = _parse_parametre(p)
+    hvis _er_slutt(p):
+        kast ParserFeil("Mangler avsluttende ')' i parameterliste", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    _forbruk(p, HØYRE_PARENTES)
+
+    la returtype = ingen
+    hvis _gjeldende(p).type == PEKER:
+        _forbruk(p, PEKER)
+        hvis _er_slutt(p):
+            kast ParserFeil("Forventet returtype etter '->'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+        returtype = _parse_type_merknad(p)
+
+    _forbruk(p, KOLON)
+    la kropp = _parse_blokk(p)
+
+    returner FunksjonsDekl(
+        navn       = navn,
+        parametere = parametere,
+        returtype  = returtype,
+        kropp      = kropp,
+        er_privat  = er_privat
+    )
+
+privat funksjon _parse_parametre(p: ParserTilstand) -> liste[Parameter]:
+    la params = []
+    la navn_satt = []
+    mens _gjeldende(p).type != HØYRE_PARENTES og ikke _er_slutt(p):
+        hvis _gjeldende(p).type == KOMMA:
+            _forbruk(p, KOMMA)
+            fortsett
+
+        la param_navn = _forbruk(p, IDENTIFIKATOR).verdi
+        hvis param_navn i navn_satt:
+            kast ParserFeil("Duplikat parameternavn: " + param_navn, _gjeldende(p).linje, _gjeldende(p).kolonne)
+        navn_satt.legg_til(param_navn)
+        la type_merknad = ingen
+        la standard = ingen
+
+        hvis _gjeldende(p).type == KOLON:
+            _forbruk(p, KOLON)
+            type_merknad = _parse_type_merknad(p)
+
+        hvis _gjeldende(p).type == TILORDNING:
+            _forbruk(p, TILORDNING)
+            standard = _parse_uttrykk(p)
+
+        params.legg_til(Parameter(navn=param_navn, type_merknad=type_merknad, standard=standard))
+
+        hvis _gjeldende(p).type == KOMMA:
+            _forbruk(p, KOMMA)
+
+    hvis _er_slutt(p) og _gjeldende(p).type != HØYRE_PARENTES:
+        kast ParserFeil("Mangler avsluttende ')' i parameterliste", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+
+    returner params
+
+privat funksjon _parse_blokk(p: ParserTilstand) -> Blokk:
+    _hopp_over_linjeskift(p)
+    la setninger = []
+
+    hvis _gjeldende(p).type != INNRYKK:
+        hvis _gjeldende(p).type == UTINNRYKK eller _gjeldende(p).type == SLUTT:
+            returner Blokk(setninger=setninger)
+        kast ParserFeil("Forventet innrykket blokk", _gjeldende(p).linje, _gjeldende(p).kolonne)
+
+    _forbruk(p, INNRYKK)
+
+    mens _gjeldende(p).type != UTINNRYKK og ikke _er_slutt(p):
+        _hopp_over_linjeskift(p)
+        hvis _gjeldende(p).type != UTINNRYKK:
+            setninger.legg_til(_parse_setning(p))
+
+    _forbruk(p, UTINNRYKK)
+    returner Blokk(setninger=setninger)
+
+privat funksjon _parse_struktur(p: ParserTilstand) -> Setning:
+    _forbruk(p, STRUKTUR)
+    la navn = _forbruk(p, IDENTIFIKATOR).verdi
+    _forbruk(p, KOLON)
+    _hopp_over_linjeskift(p)
+
+    la felt = []
+    la felt_navn_satt = []
+    hvis _gjeldende(p).type == UTINNRYKK eller _gjeldende(p).type == SLUTT:
+        hvis _gjeldende(p).type == UTINNRYKK:
+            _forbruk(p, UTINNRYKK)
+        returner StrukturDekl(navn=navn, felt=felt)
+
+    _forbruk(p, INNRYKK)
+
+    mens ikke _er_slutt(p) og _gjeldende(p).type != UTINNRYKK:
+        _hopp_over_linjeskift(p)
+        hvis _er_slutt(p) eller _gjeldende(p).type == UTINNRYKK:
+            stopp
+
+        la felt_navn = _forbruk(p, IDENTIFIKATOR).verdi
+        hvis felt_navn i felt_navn_satt:
+            kast ParserFeil("Duplikat feltnavn i struktur: " + felt_navn, _gjeldende(p).linje, _gjeldende(p).kolonne)
+        felt_navn_satt.legg_til(felt_navn)
+        _forbruk(p, KOLON)
+        la type_merknad = _parse_type_merknad(p)
+        la standard = ingen
+        hvis _gjeldende(p).type == TILORDNING:
+            _forbruk(p, TILORDNING)
+            standard = _parse_uttrykk(p)
+
+        felt.legg_til(StrukturFelt(navn=felt_navn, type_merknad=type_merknad, standard=standard))
+
+    _forbruk(p, UTINNRYKK)
+    returner StrukturDekl(navn=navn, felt=felt)
+
+privat funksjon _parse_type(p: ParserTilstand) -> Setning:
+    _forbruk(p, TYPE)
+    la navn = _forbruk(p, IDENTIFIKATOR).verdi
+    _forbruk(p, TILORDNING)
+
+    la varianter = []
+    ## Støtte for: type T = A | B | C
+    hvis _gjeldende(p).type != IDENTIFIKATOR:
+        kast ParserFeil("Forventet minst én variant etter type-deklarasjon", _gjeldende(p).linje, _gjeldende(p).kolonne)
+
+    varianter.legg_til(_forbruk(p, IDENTIFIKATOR).verdi)
+    mens _gjeldende(p).type == PIPE:
+        _forbruk(p, PIPE)
+        hvis _gjeldende(p).type != IDENTIFIKATOR:
+            kast ParserFeil("Forventet variantnavn etter '|'", _gjeldende(p).linje, _gjeldende(p).kolonne)
+        varianter.legg_til(_forbruk(p, IDENTIFIKATOR).verdi)
+
+    returner TypeDekl(navn=navn, varianter=varianter)
+
+privat funksjon _parse_hvis(p: ParserTilstand) -> Setning:
+    _forbruk(p, HVIS)
+    la betingelse = _parse_uttrykk(p)
+    _forbruk(p, KOLON)
+    la da_blokk = _parse_blokk(p)
+
+    la eller_hvis = []
+    la ellers_blokk = ingen
+
+    mens _gjeldende(p).type == ELLER_HVIS:
+        _forbruk(p, ELLER_HVIS)
+        la eb = _parse_uttrykk(p)
+        _forbruk(p, KOLON)
+        la eb_blokk = _parse_blokk(p)
+        eller_hvis.legg_til((eb, eb_blokk))
+
+    hvis _gjeldende(p).type == ELLERS:
+        _forbruk(p, ELLERS)
+        _forbruk(p, KOLON)
+        ellers_blokk = _parse_blokk(p)
+
+    hvis _er_slutt(p) og ellers_blokk == ingen og lengde(eller_hvis) == 0 og lengde(da_blokk.setninger) == 0:
+        kast ParserFeil("Ufullstendig hvis-blokk", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+
+    returner HvisSetning(
+        betingelse = betingelse,
+        da         = da_blokk,
+        eller_hvis = eller_hvis,
+        ellers     = ellers_blokk
+    )
+
+privat funksjon _parse_velg(p: ParserTilstand) -> Setning:
+    _forbruk(p, VELG)
+    la uttrykk = _parse_uttrykk(p)
+    _forbruk(p, KOLON)
+    _hopp_over_linjeskift(p)
+    _forbruk(p, INNRYKK)
+
+    la grener = []
+    la annet_blokk = ingen
+
+    mens ikke _er_slutt(p) og _gjeldende(p).type != UTINNRYKK:
+        _hopp_over_linjeskift(p)
+        hvis _er_slutt(p) eller _gjeldende(p).type == UTINNRYKK:
+            stopp
+        hvis _gjeldende(p).type == ANNET:
+            _forbruk(p, ANNET)
+            _forbruk(p, KOLON)
+            annet_blokk = _parse_blokk(p)
+        annet:
+            la mønstre = [_parse_uttrykk(p)]
+            mens _gjeldende(p).type == KOMMA:
+                _forbruk(p, KOMMA)
+                mønstre.legg_til(_parse_uttrykk(p))
+            _forbruk(p, KOLON)
+            la gren_blokk = _parse_blokk(p)
+            grener.legg_til(VelgGren(mønster=mønstre, kropp=gren_blokk))
+
+    hvis lengde(grener) == 0 og annet_blokk == ingen:
+        kast ParserFeil("velg må ha minst én gren eller et 'annet'-felt", _gjeldende(p).linje, _gjeldende(p).kolonne)
+
+    _forbruk(p, UTINNRYKK)
+    returner VelgSetning(uttrykk=uttrykk, grener=grener, annet=annet_blokk)
+
+privat funksjon _parse_for(p: ParserTilstand) -> Setning:
+    _forbruk(p, FOR)
+    la variabel = _forbruk(p, IDENTIFIKATOR).verdi
+    hvis _er_slutt(p):
+        kast ParserFeil("Forventet 'i' etter for-variabel", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    _forbruk(p, I)
+    hvis _er_slutt(p):
+        kast ParserFeil("Forventet iterable uttrykk etter 'i'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    la iterable = _parse_uttrykk(p)
+    _forbruk(p, KOLON)
+    la kropp = _parse_blokk(p)
+    returner ForSløyfe(variabel=variabel, iterable=iterable, kropp=kropp)
+
+privat funksjon _parse_mens(p: ParserTilstand) -> Setning:
+    _forbruk(p, MENS)
+    hvis _er_slutt(p):
+        kast ParserFeil("Forventet betingelse etter 'mens'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    la betingelse = _parse_uttrykk(p)
+    _forbruk(p, KOLON)
+    la kropp = _parse_blokk(p)
+    returner MensSløyfe(betingelse=betingelse, kropp=kropp)
+
+privat funksjon _parse_gjenta(p: ParserTilstand) -> Setning:
+    _forbruk(p, GJENTA)
+    hvis _er_slutt(p):
+        kast ParserFeil("Forventet antall etter 'gjenta'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    la antall = _parse_uttrykk(p)
+    _forbruk(p, KOLON)
+    la kropp = _parse_blokk(p)
+    returner GjentaSløyfe(antall=antall, kropp=kropp)
+
+privat funksjon _parse_returner(p: ParserTilstand) -> Setning:
+    _forbruk(p, RETURNER)
+    hvis _gjeldende(p).type == LINJESKIFT eller _gjeldende(p).type == UTINNRYKK eller _er_slutt(p):
+        returner Retursetning(verdi=ingen)
+    la verdi = _parse_uttrykk(p)
+    returner Retursetning(verdi=verdi)
+
+privat funksjon _parse_kast(p: ParserTilstand) -> Setning:
+    _forbruk(p, KAST)
+    la uttrykk = _parse_uttrykk(p)
+    returner KastSetning(uttrykk=uttrykk)
+
+privat funksjon _parse_prøv(p: ParserTilstand) -> Setning:
+    _forbruk(p, PRØV)
+    _forbruk(p, KOLON)
+    la kropp = _parse_blokk(p)
+    la fang_gren = ingen
+
+    hvis _gjeldende(p).type == FANG:
+        _forbruk(p, FANG)
+        la fang_var = ingen
+        hvis _gjeldende(p).type == SOM:
+            _forbruk(p, SOM)
+            fang_var = _forbruk(p, IDENTIFIKATOR).verdi
+        ellers hvis _gjeldende(p).type == IDENTIFIKATOR:
+            fang_var = _forbruk(p, IDENTIFIKATOR).verdi
+        ellers hvis _gjeldende(p).type != KOLON:
+            kast ParserFeil("Forventet 'som' eller variabelnavn etter fang", _gjeldende(p).linje, _gjeldende(p).kolonne)
+        _forbruk(p, KOLON)
+        la fang_blokk = _parse_blokk(p)
+        fang_gren = FangGren(variabel=fang_var, kropp=fang_blokk)
+
+    returner PrøvSetning(kropp=kropp, fang=fang_gren)
+
+## ─────────────────────────────────────────
+## UTTRYKKS-PARSING (Pratt-parser)
+## ─────────────────────────────────────────
+##
+## Bruker Pratt-parsing (top-down operator precedence)
+## for å håndtere operatorprioritet riktig.
+##
+## Prioritetsnivåer (høyere = bindes sterkere):
+##   1  - eller (logisk)
+##   2  - og (logisk)
+##   3  - ikke (unær)
+##   4  - sammenligning: ==, !=, <, >, <=, >=, i, ~
+##   5  - addisjon: +, -
+##   6  - multiplikasjon: *, /, %
+##   7  - unær minus, unær ikke
+##   8  - funksjonskall, indeksering, feltaksess
+
+privat funksjon _parse_uttrykk(p: ParserTilstand, min_prioritet: int = 0) -> Uttrykk:
+    la venstre = _parse_primær(p)
+
+    mens sann:
+        la tok = _gjeldende(p)
+        la prioritet = _operator_prioritet(tok.type)
+
+        hvis prioritet <= min_prioritet:
+            stopp
+
+        la op = _forbruk_gjeldende(p).verdi
+
+        ## Høyreassosiative operatorer (ingen i Norscode for nå)
+        la neste_prioritet = prioritet
+
+        la høyre = _parse_uttrykk(p, neste_prioritet)
+        venstre = BinærOperasjon(venstre=venstre, operator=op, høyre=høyre)
+
+    returner venstre
+
+privat funksjon _parse_primær(p: ParserTilstand) -> Uttrykk:
+    la tok = _gjeldende(p)
+
+    la kjerne = velg tok.type:
+        HELTALL:
+            _forbruk_gjeldende(p)
+            HeltallLiteral(verdi=int(tok.verdi))
+
+        DESIMALTALL:
+            _forbruk_gjeldende(p)
+            DesimalLiteral(verdi=desimal(tok.verdi))
+
+        TEKST_LITERAL:
+            _forbruk_gjeldende(p)
+            TekstLiteral(verdi=tok.verdi)
+
+        BOOLSK:
+            _forbruk_gjeldende(p)
+            BoolskLiteral(verdi=tok.verdi == "sann")
+
+        INGEN_LITERAL:
+            _forbruk_gjeldende(p)
+            IngenLiteral()
+
+        IDENTIFIKATOR:
+            _forbruk_gjeldende(p)
+            Identifikator(navn=tok.verdi)
+
+        MINUS:
+            _forbruk(p, MINUS)
+            la operand = _parse_primær(p)
+            UnærOperasjon(operator="-", operand=operand)
+
+        IKKE:
+            _forbruk(p, IKKE)
+            la operand = _parse_primær(p)
+            UnærOperasjon(operator="ikke", operand=operand)
+
+        VENSTRE_PARENTES:
+            _forbruk(p, VENSTRE_PARENTES)
+            la uttr = _parse_uttrykk(p)
+            _forbruk(p, HØYRE_PARENTES)
+            uttr
+
+        VENSTRE_KLAMMER:
+            _parse_liste_literal(p)
+
+        VENSTRE_KROKODILLE:
+            _parse_ordbok_literal(p)
+
+        annet:
+            kast ParserFeil("Forventet uttrykk, fant: " + tok.verdi, tok.linje, tok.kolonne)
+
+    ## Postfiks: funksjonskall, indeksering, feltaksess
+    returner _parse_postfiks(p, kjerne)
+
+privat funksjon _parse_postfiks(p: ParserTilstand, venstre: Uttrykk) -> Uttrykk:
+    mens sann:
+        la tok = _gjeldende(p)
+        velg tok.type:
+            VENSTRE_PARENTES:
+                ## Funksjonskall
+                _forbruk(p, VENSTRE_PARENTES)
+                la args = []
+                mens ikke _er_slutt(p) og _gjeldende(p).type != HØYRE_PARENTES:
+                    args.legg_til(_parse_uttrykk(p))
+                    hvis _gjeldende(p).type == KOMMA:
+                        _forbruk(p, KOMMA)
+                hvis _er_slutt(p):
+                    kast ParserFeil("Mangler avsluttende ')'", tok.linje, tok.kolonne)
+                _forbruk(p, HØYRE_PARENTES)
+                venstre = Funksjonskall(funksjon=venstre, argumenter=args)
+
+            VENSTRE_KLAMMER:
+                ## Indeksering
+                _forbruk(p, VENSTRE_KLAMMER)
+                la indeks = _parse_uttrykk(p)
+                hvis _er_slutt(p):
+                    kast ParserFeil("Mangler avsluttende ']'", tok.linje, tok.kolonne)
+                _forbruk(p, HØYRE_KLAMMER)
+                venstre = Indeksering(objekt=venstre, indeks=indeks)
+
+            PUNKTUM:
+                ## Feltaksess
+                _forbruk(p, PUNKTUM)
+                la felt = _forbruk(p, IDENTIFIKATOR).verdi
+                venstre = Feltaksess(objekt=venstre, felt=felt)
+
+            annet: stopp
+
+    returner venstre
+
+privat funksjon _parse_liste_literal(p: ParserTilstand) -> Uttrykk:
+    _forbruk(p, VENSTRE_KLAMMER)
+    la elementer = []
+    mens ikke _er_slutt(p) og _gjeldende(p).type != HØYRE_KLAMMER:
+        elementer.legg_til(_parse_uttrykk(p))
+        hvis _gjeldende(p).type == KOMMA:
+            _forbruk(p, KOMMA)
+    hvis _er_slutt(p):
+        kast ParserFeil("Mangler avsluttende ']'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    _forbruk(p, HØYRE_KLAMMER)
+    returner ListeLiteral(elementer=elementer)
+
+privat funksjon _parse_ordbok_literal(p: ParserTilstand) -> Uttrykk:
+    _forbruk(p, VENSTRE_KROKODILLE)
+    la par = []
+    mens ikke _er_slutt(p) og _gjeldende(p).type != HØYRE_KROKODILLE:
+        la nøkkel = _parse_uttrykk(p)
+        _forbruk(p, KOLON)
+        la verdi = _parse_uttrykk(p)
+        par.legg_til((nøkkel, verdi))
+        hvis _gjeldende(p).type == KOMMA:
+            _forbruk(p, KOMMA)
+    hvis _er_slutt(p):
+        kast ParserFeil("Mangler avsluttende '}'", p.tokens[p.pos - 1].linje, p.tokens[p.pos - 1].kolonne)
+    _forbruk(p, HØYRE_KROKODILLE)
+    returner OrdbokLiteral(nøkkel_verdi=par)
+
+privat funksjon _parse_type_merknad(p: ParserTilstand) -> tekst:
+    la deler = [_forbruk(p, IDENTIFIKATOR).verdi]
+    mens _gjeldende(p).type == PUNKTUM:
+        _forbruk(p, PUNKTUM)
+        deler.legg_til(_forbruk(p, IDENTIFIKATOR).verdi)
+    returner join(deler, ".")
+
+privat funksjon _operator_prioritet(type: TokenType) -> int:
+    velg type:
+        ELLER            : returner 1
+        OG               : returner 2
+        LIK_LIK,
+        UTROP_LIK        : returner 4
+        STØRRE, MINDRE,
+        STØRRE_LIK,
+        MINDRE_LIK,
+        I, TILDE         : returner 4
+        PLUSS, MINUS     : returner 5
+        STJERNE,
+        SKRÅSTREK,
+        PROSENT          : returner 6
+        annet            : returner 0
+
+## ─────────────────────────────────────────
+## HJELPEFUNKSJONER
+## ─────────────────────────────────────────
+
+privat funksjon _gjeldende(p: ParserTilstand) -> Token:
+    returner p.tokens[p.pos]
+
+privat funksjon _er_slutt(p: ParserTilstand) -> bool:
+    returner p.pos >= lengde(p.tokens) eller p.tokens[p.pos].type == SLUTT
+
+privat funksjon _forbruk(p: ParserTilstand, forventet: TokenType) -> Token:
+    la tok = p.tokens[p.pos]
+    hvis tok.type != forventet:
+        kast ParserFeil(
+            "Forventet " + tekst(forventet) + ", fant " + tekst(tok.type) + " ('" + tok.verdi + "')",
+            tok.linje, tok.kolonne
+        )
+    p.pos += 1
+    returner tok
+
+privat funksjon _forbruk_gjeldende(p: ParserTilstand) -> Token:
+    la tok = p.tokens[p.pos]
+    p.pos += 1
+    returner tok
+
+privat funksjon _hopp_over_linjeskift(p: ParserTilstand):
+    mens ikke _er_slutt(p) og _gjeldende(p).type == LINJESKIFT:
+        p.pos += 1
+
+## ─────────────────────────────────────────
+## FEILTYPE
+## ─────────────────────────────────────────
+
+struktur ParserFeil:
+    melding : tekst
+    linje   : int
+    kolonne : int
+
+    funksjon til_tekst() -> tekst:
+        returner "Parser-feil på linje " + linje + ":" + kolonne + ": " + melding

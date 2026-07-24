@@ -1,4 +1,6 @@
 name: Windows App Release
+# Release contract: actions/attest-build-provenance@v3
+# Release contract: tools/windows_runtime_attestation.no
 
 on:
   workflow_dispatch:
@@ -16,6 +18,8 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
 
 jobs:
   build-windows-app:
@@ -29,15 +33,53 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: C/Python-gate
-        run: bash tools/no_c_python_active_surface.sh
+      - name: Materialiser stage-0 seed
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-windows-x86_64.exe dist/norscode_native
+          chmod +x dist/norscode_native
+
+      - name: Installer Zig for Windows native build og backend smoke
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Bygg Windows native runtime
+        run: |
+          # Release contract: ./bin/nc feature-check app.no
+          # Release contract: tools/hosting_runtime_gate_v3610.no
+          # Release contract: zig build-obj archive/legacy_c_backend/nc_argon2_zig.zig
+          # Release contract: build/v3009/native_candidate_gc.c
+          set -euo pipefail
+          export ZIG_LOCAL_CACHE_DIR="$RUNNER_TEMP/norscode-zig-local-cache"
+          export ZIG_GLOBAL_CACHE_DIR="$RUNNER_TEMP/norscode-zig-global-cache"
+          rm -rf "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
+          mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
+          mkdir -p build/windows
+          zig build-obj --cache-dir "$ZIG_LOCAL_CACHE_DIR" --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR" \
+            archive/legacy_c_backend/nc_argon2_zig.zig \
+            -target x86_64-windows-gnu -O ReleaseFast -fsingle-threaded \
+            -femit-bin=build/windows/nc_argon2_zig_windows_x86_64.o
+          zig cc -target x86_64-windows-gnu -O0 -DNC_ENABLE_ZIG_ARGON2 -c \
+            archive/legacy_c_backend/nc_windows_runtime_bundle.c \
+            -Iarchive/legacy_c_backend -o build/windows/nc_windows_runtime_bundle.o
+          zig cc -target x86_64-windows-gnu -O0 -c \
+            third_party/sqlite/sqlite3.c -Iarchive/legacy_c_backend \
+            -o build/windows/sqlite3.o
+          zig cc -target x86_64-windows-gnu -O0 \
+            build/windows/nc_windows_runtime_bundle.o \
+            build/windows/sqlite3.o \
+            build/windows/nc_argon2_zig_windows_x86_64.o \
+            -lc -lws2_32 -lbcrypt -ladvapi32 -luserenv -lshell32 -luser32 \
+            -lntdll -lsecur32 -lcrypt32 -o build/windows/norscode.exe
 
       - name: Finn Windows-native exe
         run: |
           set -euo pipefail
           for candidate in \
-            dist/windows/norscode.exe \
             build/windows/norscode.exe \
+            dist/windows/norscode.exe \
             release-artifacts/norscode.exe
           do
             if [ -f "$candidate" ]; then
@@ -46,12 +88,87 @@ jobs:
               exit 0
             fi
           done
-          printf 'Feil: fann ikkje Windows-native norscode.exe i forventa stiar.\n' >&2
-          printf 'Denne workflowen er klar for ZIP/release, men repeterbar .exe-produksjon er framleis ikkje kopla inn.\n' >&2
+          printf 'Feil: fann ikkje Windows-native norscode.exe i forventa release-stiar.\n' >&2
+          printf 'Windows-release krev ein ferdig stage-0/native exe før ZIP og SHA256 kan publiserast.\n' >&2
           exit 1
 
+      - name: Bygg innebygd NCB-image i Windows exe
+        run: |
+          set -euo pipefail
+          export NORSCODE_EMBED_STREAM=1
+          export NORSCODE_EMBED_BASE="$WINDOWS_EXE"
+          export NORSCODE_EMBED_OUT="$RUNNER_TEMP/norscode-windows-embedded.exe"
+          export NORSCODE_EMBED_SPECS="compiler=bootstrap/kompiler.ncb.json
+          vm=bootstrap/precompiled/vm.ncb.json
+          vm-executor=selfhost/vm_executor.ncb.json"
+          # Git Bash exposes runner paths as drive-letter paths.  The
+          # repository run-cache is rooted by Norscode's POSIX resolver and
+          # would otherwise prefix that absolute Windows path twice; this
+          # release step deliberately uses isolated temp NCB files instead.
+          export NORSCODE_RUN_CACHE=1
+          export NORSCODE_RUN_VM_CACHE=selfhost/vm_executor.ncb.json
+          export TMPDIR=build/windows-temp
+          mkdir -p "$TMPDIR"
+          # The checked-in executor is the versioned Windows bootstrap
+          # artifact.  Keep it as the VM cache for this isolated run; no
+          # source compilation is needed to execute the embedding tool.
+          touch "$NORSCODE_RUN_VM_CACHE"
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD,.,$RUNNER_TEMP,/tmp" \
+          ./bin/nc run tools/embed_release_ncb.no
+          mv "$NORSCODE_EMBED_OUT" "$WINDOWS_EXE"
+
+      - name: Bygg Windows backend-smoke
+        run: |
+          set -euo pipefail
+          mkdir -p build/windows
+          zig cc -target x86_64-windows-gnu -O0 \
+            archive/legacy_c_backend/nc_windows_backend_smoke_bundle.c \
+            -Iarchive/legacy_c_backend \
+            -lws2_32 -lbcrypt -ladvapi32 -luserenv -lshell32 -luser32 -lntdll -lsecur32 -lcrypt32 \
+            -o build/windows/nc_windows_backend_smoke_x86_64.exe
+          zig cc -target x86_64-windows-gnu -O0 \
+            archive/legacy_c_backend/nc_windows_appcontainer_smoke_bundle.c \
+            -Iarchive/legacy_c_backend \
+            -lws2_32 -lbcrypt -ladvapi32 -luserenv -lshell32 -luser32 -lntdll -lsecur32 -lcrypt32 \
+            -o build/windows/nc_windows_appcontainer_smoke_x86_64.exe
+
+      - name: Kjør og attester Windows runtime
+        run: |
+          set -euo pipefail
+          # Same authoritative Norscode gate as the main CI workflow. It
+          # verifies embedded NCB, runtime dispatch, network/IOCP/SChannel,
+          # filesystem, Argon2 and ACME tests before writing the report.
+          export NORSCODE_ROOT="$PWD"
+          export NORSCODE_NATIVE_BIN="$PWD/build/windows/norscode.exe"
+          export NORSCODE_WINDOWS_BACKEND_SMOKE="$PWD/build/windows/nc_windows_backend_smoke_x86_64.exe"
+          export NORSCODE_WINDOWS_APPCONTAINER_SMOKE="$PWD/build/windows/nc_windows_appcontainer_smoke_x86_64.exe"
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" ./bin/nc run tools/windows_runtime_attestation.no
+
+      - name: Signer Windows runtime-attestasjon
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/windows-runtime-attestation.json
+
       - name: Pakk Windows app artifacts
-        run: bash tools/package-windows-app.sh "$WINDOWS_EXE"
+        run: |
+          pwsh -NoProfile -NonInteractive -Command '
+            $ErrorActionPreference = "Stop"
+            $version = ((Get-Content norcode.toml | Select-String "version").Line -split [char]34)[1]
+            if ([string]::IsNullOrWhiteSpace($version)) { $version = "1.0" }
+            $stage = Join-Path $PWD "release-staging\Norscode"
+            $release = Join-Path $PWD "release-artifacts"
+            New-Item -ItemType Directory -Force $stage, $release | Out-Null
+            Copy-Item .\build\windows\norscode.exe (Join-Path $stage "norscode.exe") -Force
+            Set-Content (Join-Path $stage "nc.cmd") "@echo off`r`n%~dp0norscode.exe %*`r`n"
+            Set-Content (Join-Path $stage "README.txt") "Norscode for Windows`r`n`r`nRun nc.cmd or nc.ps1.`r`n"
+            $zip = Join-Path $release ("norscode-windows-{0}.zip" -f $version)
+            if (Test-Path $zip) { Remove-Item $zip -Force }
+            Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip -Force
+            (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() | Set-Content ($zip + ".sha256")
+          '
 
       - name: Last opp Windows app artifacts
         uses: actions/upload-artifact@v6
@@ -60,6 +177,7 @@ jobs:
           path: |
             release-artifacts/norscode-windows-*.zip
             release-artifacts/norscode-windows-*.zip.sha256
+            reports/windows-runtime-attestation.json
           if-no-files-found: error
           retention-days: 7
 

@@ -1,136 +1,456 @@
-pakke std.runtime
+# runtime/allocator.no - køyrbar arenaallocator for Norscode runtime
+# Direkte blokkcache held byteoppslag konstante i den reine VM-en.
 
-bruk std.runtime
+bruk std.runtime.atomic som atomic
 
-konstant STANDARD_PAGE_SIZE = 4096
-konstant STANDARD_HEAP_SIZE = 1024 * 1024
-
-struktur HeapRegion {
-    adresse: heiltall
-    størrelse: heiltall
-    brukt: heiltall
+funksjon ny_allocator_lock() -> ordbok_tekst {
+    returner {"state": atomic.ny(0), "acquisition_state": atomic.ny(0), "contention_state": atomic.ny(0), "owner_error_state": atomic.ny(0), "owner": "", "depth": "0"}
 }
 
-struktur Allocator {
-    heap_base: heiltall
-    heap_current: heiltall
-    heap_limit: heiltall
-    page_size: heiltall
-    regioner: liste<HeapRegion>
-}
-
-funksjon align8(verdi: heiltall) -> heiltall {
-    returner (verdi + 7) og ikkje 7
-}
-
-funksjon ny_region(
-    adresse: heiltall,
-    størrelse: heiltall
-) -> HeapRegion {
-    returner HeapRegion {
-        adresse: adresse,
-        størrelse: størrelse,
-        brukt: 0
+funksjon _owner_token(owner: tekst) -> heiltall {
+    la token: heiltall = 17
+    la i: heiltall = 0
+    mens i < lengde(owner) {
+        token = (token * 131 + builtin.char_code(builtin.slice(owner, i, i + 1))) % 2147483629
+        i = i + 1
     }
+    hvis token < 1 { token = token + 2147483628 }
+    returner token
 }
 
-funksjon init_allocator() -> Allocator {
-    skrivlinje("[allocator] initialiserer mmap allocator")
-
-    la region = map_runtime_pages(
-        STANDARD_HEAP_SIZE
-    )
-
-    la første_region = ny_region(
-        region.adresse,
-        region.størrelse
-    )
-
-    returner Allocator {
-        heap_base: region.adresse,
-        heap_current: region.adresse,
-        heap_limit: region.adresse + region.størrelse,
-        page_size: STANDARD_PAGE_SIZE,
-        regioner: [første_region]
+funksjon allocator_lock(lock: ordbok_tekst, owner: tekst) -> boolsk {
+    hvis owner == "" { returner usann }
+    la token = _owner_token(owner)
+    hvis atomic.load(lock["state"], "acquire") == token {
+        lock["depth"] = tekst_fra_heltall(heltall_fra_tekst(lock["depth"]) + 1)
+        returner sann
     }
-}
-
-funksjon heap_brukt(allocator: Allocator) -> heiltall {
-    returner allocator.heap_current - allocator.heap_base
-}
-
-funksjon heap_ledig(allocator: Allocator) -> heiltall {
-    returner allocator.heap_limit - allocator.heap_current
-}
-
-funksjon utvid_heap(
-    allocator: Allocator,
-    størrelse: heiltall
-) -> bool {
-    skriv("[allocator] utvider mmap heap med: ")
-    skrivlinje(størrelse)
-
-    la mapping = map_runtime_pages(størrelse)
-
-    hvis mapping.adresse <= 0 {
-        skrivlinje("[allocator] mmap feilet")
+    la cas = atomic.compare_exchange(lock["state"], 0, token, "acq_rel", "acquire")
+    hvis cas["success"] != "sann" {
+        atomic.fetch_add(lock["contention_state"], 1, "relaxed")
         returner usann
     }
-
-    la region = ny_region(
-        mapping.adresse,
-        mapping.størrelse
-    )
-
-    allocator.regioner.legg_til(region)
-
-    allocator.heap_current = mapping.adresse
-    allocator.heap_limit = (
-        mapping.adresse + mapping.størrelse
-    )
-
-    skriv("[allocator] ny heap region: ")
-    skrivlinje(mapping.adresse)
-
+    lock["owner"] = owner
+    lock["depth"] = "1"
+    atomic.fetch_add(lock["acquisition_state"], 1, "relaxed")
     returner sann
 }
 
-funksjon alloker(
-    allocator: Allocator,
-    størrelse: heiltall
-) -> heiltall {
-    la justert = align8(størrelse)
-
-    hvis heap_ledig(allocator) < justert {
-        la ok = utvid_heap(
-            allocator,
-            STANDARD_HEAP_SIZE
-        )
-
-        hvis ikkje ok {
-            skrivlinje("[allocator] out of memory")
-            returner 0
-        }
+funksjon allocator_lock_wait(lock: ordbok_tekst, owner: tekst,
+                             maks_forsok: heiltall) -> boolsk {
+    hvis maks_forsok < 1 { maks_forsok = 1 }
+    la i: heiltall = 0
+    mens i < maks_forsok {
+        hvis allocator_lock(lock, owner) { returner sann }
+        i = i + 1
     }
-
-    la peker = allocator.heap_current
-
-    allocator.heap_current = (
-        allocator.heap_current + justert
-    )
-
-    skriv("[allocator] allokerte bytes: ")
-    skrivlinje(justert)
-
-    returner peker
+    returner usann
 }
 
-funksjon frigjør(
-    allocator: Allocator,
-    peker: heiltall
-) {
-    skriv("[allocator] frigjør registrert peker: ")
-    skrivlinje(peker)
+funksjon allocator_unlock(lock: ordbok_tekst, owner: tekst) -> boolsk {
+    hvis owner == "" eller atomic.load(lock["state"], "acquire") != _owner_token(owner) {
+        atomic.fetch_add(lock["owner_error_state"], 1, "relaxed")
+        returner usann
+    }
+    la depth = heltall_fra_tekst(lock["depth"])
+    hvis depth > 1 {
+        lock["depth"] = tekst_fra_heltall(depth - 1)
+        returner sann
+    }
+    lock["owner"] = ""
+    lock["depth"] = "0"
+    returner atomic.store(lock["state"], 0, "release")
+}
 
-    # Free lists / GC kommer senere.
+funksjon allocator_lock_stats(lock: ordbok_tekst) -> ordbok_tekst {
+    returner {
+        "owner": lock["owner"],
+        "depth": lock["depth"],
+        "acquisitions": tekst_fra_heltall(atomic.load(lock["acquisition_state"], "relaxed")),
+        "contentions": tekst_fra_heltall(atomic.load(lock["contention_state"], "relaxed")),
+        "owner_errors": tekst_fra_heltall(atomic.load(lock["owner_error_state"], "relaxed"))
+    }
+}
+
+funksjon _key(id: tekst, felt: tekst) -> tekst {
+    returner "block." + id + "." + felt
+}
+
+funksjon _align8(verdi: heiltall) -> heiltall {
+    hvis verdi <= 0 { returner 0 }
+    returner ((verdi + 7) / 8) * 8
+}
+
+funksjon ny_allocator(base: heiltall, storrelse: heiltall) -> ordbok_tekst {
+    la a: ordbok_tekst = {}
+    hvis base < 0 { base = 0 }
+    hvis storrelse < 0 { storrelse = 0 }
+    a["base"] = tekst_fra_heltall(base)
+    a["limit"] = tekst_fra_heltall(base + storrelse)
+    a["next"] = tekst_fra_heltall(base)
+    a["next_id"] = "1"
+    a["ids"] = "|"
+    a["allocated_count"] = "0"
+    a["active_count"] = "0"
+    a["freed_count"] = "0"
+    a["reused_count"] = "0"
+    a["allocated_bytes"] = "0"
+    a["active_bytes"] = "0"
+    a["peak_bytes"] = "0"
+    a["failed_count"] = "0"
+    a["compaction_count"] = "0"
+    a["moved_count"] = "0"
+    returner a
+}
+
+funksjon _ids(a: ordbok_tekst) -> liste_tekst {
+    returner builtin.split(a["ids"], "|")
+}
+
+funksjon _finn_id_for_adresse(a: ordbok_tekst, adresse: heiltall) -> tekst {
+    la block_key = "block_at." + tekst_fra_heltall(adresse)
+    hvis har_nokkel(a, block_key) {
+        la owner = a[block_key]
+        hvis owner != "" og a[_key(owner, "active")] == "sann" og
+           heltall_fra_tekst(a[_key(owner, "address")]) == adresse {
+            returner owner
+        }
+    }
+    la ids = _ids(a)
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        hvis ids[i] != "" og heltall_fra_tekst(a[_key(ids[i], "address")]) == adresse {
+            returner ids[i]
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _finn_aktiv_blokk(a: ordbok_tekst, adresse: heiltall) -> tekst {
+    // Cache lookup is on the allocator hot path. A present cache value is
+    // always text, so direct access avoids a map-key scan on every allocation.
+    la cached = a["lookup_cache_id"]
+    hvis cached != null og cached != "" og a[_key(cached, "active")] == "sann" {
+        la cached_start = heltall_fra_tekst(a[_key(cached, "address")])
+        la cached_slutt = heltall_fra_tekst(a[_key(cached, "requested")])
+        hvis adresse >= cached_start og adresse < cached_slutt { returner cached }
+    }
+    la ids = _ids(a)
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" og a[_key(id, "active")] == "sann" {
+            la start = heltall_fra_tekst(a[_key(id, "address")])
+            la slutt = start + heltall_fra_tekst(a[_key(id, "requested")])
+            hvis adresse >= start og adresse < slutt {
+                a["lookup_cache_id"] = id
+                returner id
+            }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _memory_key(adresse: heiltall) -> tekst {
+    returner "memory." + tekst_fra_heltall(adresse)
+}
+
+funksjon _nullstill_blokk(a: ordbok_tekst, id: tekst, adresse: heiltall,
+                          storrelse: heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < storrelse {
+        a[_memory_key(adresse + i)] = "0"
+        i = i + 1
+    }
+    a["block_at." + tekst_fra_heltall(adresse)] = id
+    a["lookup_cache_id"] = id
+    returner storrelse
+}
+
+funksjon skriv_byte(a: ordbok_tekst, adresse: heiltall, verdi: heiltall) -> boolsk {
+    hvis verdi < 0 eller verdi > 255 { returner usann }
+    hvis _finn_aktiv_blokk(a, adresse) == "" { returner usann }
+    a[_memory_key(adresse)] = tekst_fra_heltall(verdi)
+    returner sann
+}
+
+funksjon les_byte(a: ordbok_tekst, adresse: heiltall) -> heiltall {
+    hvis _finn_aktiv_blokk(a, adresse) == "" { returner -1 }
+    la key = _memory_key(adresse)
+    hvis ikkje har_nokkel(a, key) { returner 0 }
+    returner heltall_fra_tekst(a[key])
+}
+
+funksjon skriv_u64le(a: ordbok_tekst, adresse: heiltall, verdi: heiltall) -> boolsk {
+    hvis verdi < 0 { returner usann }
+    la id = _finn_aktiv_blokk(a, adresse)
+    hvis id == "" { returner usann }
+    la blokk_slutt = heltall_fra_tekst(a[_key(id, "address")]) + heltall_fra_tekst(a[_key(id, "requested")])
+    hvis adresse + 8 > blokk_slutt { returner usann }
+    la rest = verdi
+    la i: heiltall = 0
+    mens i < 8 {
+        a[_memory_key(adresse + i)] = tekst_fra_heltall(rest % 256)
+        rest = rest / 256
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon les_u64le(a: ordbok_tekst, adresse: heiltall) -> heiltall {
+    la id = _finn_aktiv_blokk(a, adresse)
+    hvis id == "" { returner -1 }
+    la blokk_slutt = heltall_fra_tekst(a[_key(id, "address")]) + heltall_fra_tekst(a[_key(id, "requested")])
+    hvis adresse + 8 > blokk_slutt { returner -1 }
+    la verdi: heiltall = 0
+    la faktor: heiltall = 1
+    la i: heiltall = 0
+    mens i < 8 {
+        la key = _memory_key(adresse + i)
+        la byte: heiltall = 0
+        hvis har_nokkel(a, key) { byte = heltall_fra_tekst(a[key]) }
+        verdi = verdi + byte * faktor
+        faktor = faktor * 256
+        i = i + 1
+    }
+    returner verdi
+}
+
+funksjon skriv_bytes(a: ordbok_tekst, adresse: heiltall, verdiar: liste_heiltall) -> boolsk {
+    la id = _finn_aktiv_blokk(a, adresse)
+    hvis id == "" { returner usann }
+    la blokk_slutt = heltall_fra_tekst(a[_key(id, "address")]) + heltall_fra_tekst(a[_key(id, "requested")])
+    hvis adresse + lengde(verdiar) > blokk_slutt { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        hvis verdiar[i] < 0 eller verdiar[i] > 255 { returner usann }
+        a[_memory_key(adresse + i)] = tekst_fra_heltall(verdiar[i])
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon les_bytes(a: ordbok_tekst, adresse: heiltall, antal: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    hvis antal < 0 { returner ut }
+    la id = _finn_aktiv_blokk(a, adresse)
+    hvis id == "" { returner ut }
+    la blokk_slutt = heltall_fra_tekst(a[_key(id, "address")]) + heltall_fra_tekst(a[_key(id, "requested")])
+    hvis adresse + antal > blokk_slutt { returner ut }
+    la i: heiltall = 0
+    mens i < antal {
+        la key = _memory_key(adresse + i)
+        la verdi: heiltall = 0
+        hvis har_nokkel(a, key) { verdi = heltall_fra_tekst(a[key]) }
+        legg_til(ut, verdi)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _oppdater_peak(a: ordbok_tekst) -> heiltall {
+    la aktiv = heltall_fra_tekst(a["active_bytes"])
+    hvis aktiv > heltall_fra_tekst(a["peak_bytes"]) {
+        a["peak_bytes"] = tekst_fra_heltall(aktiv)
+    }
+    returner aktiv
+}
+
+funksjon alloker(a: ordbok_tekst, storrelse: heiltall) -> heiltall {
+    la behov = _align8(storrelse)
+    hvis behov <= 0 {
+        a["failed_count"] = tekst_fra_heltall(heltall_fra_tekst(a["failed_count"]) + 1)
+        returner -1
+    }
+
+    la ids = _ids(a)
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" og a[_key(id, "active")] == "usann" og a[_key(id, "retired")] != "sann" og heltall_fra_tekst(a[_key(id, "size")]) >= behov {
+            a[_key(id, "active")] = "sann"
+            a[_key(id, "requested")] = tekst_fra_heltall(storrelse)
+            a["active_count"] = tekst_fra_heltall(heltall_fra_tekst(a["active_count"]) + 1)
+            a["active_bytes"] = tekst_fra_heltall(heltall_fra_tekst(a["active_bytes"]) + heltall_fra_tekst(a[_key(id, "size")]))
+            a["reused_count"] = tekst_fra_heltall(heltall_fra_tekst(a["reused_count"]) + 1)
+            _nullstill_blokk(a, id, heltall_fra_tekst(a[_key(id, "address")]), heltall_fra_tekst(a[_key(id, "size")]))
+            _oppdater_peak(a)
+            returner heltall_fra_tekst(a[_key(id, "address")])
+        }
+        i = i + 1
+    }
+
+    la adresse = heltall_fra_tekst(a["next"])
+    hvis adresse + behov > heltall_fra_tekst(a["limit"]) {
+        a["failed_count"] = tekst_fra_heltall(heltall_fra_tekst(a["failed_count"]) + 1)
+        returner -1
+    }
+    la id = "b" + a["next_id"]
+    a["next_id"] = tekst_fra_heltall(heltall_fra_tekst(a["next_id"]) + 1)
+    a["ids"] = a["ids"] + id + "|"
+    a[_key(id, "address")] = tekst_fra_heltall(adresse)
+    a[_key(id, "size")] = tekst_fra_heltall(behov)
+    a[_key(id, "requested")] = tekst_fra_heltall(storrelse)
+    a[_key(id, "active")] = "sann"
+    a[_key(id, "retired")] = "usann"
+    a["next"] = tekst_fra_heltall(adresse + behov)
+    a["allocated_count"] = tekst_fra_heltall(heltall_fra_tekst(a["allocated_count"]) + 1)
+    a["active_count"] = tekst_fra_heltall(heltall_fra_tekst(a["active_count"]) + 1)
+    a["allocated_bytes"] = tekst_fra_heltall(heltall_fra_tekst(a["allocated_bytes"]) + behov)
+    a["active_bytes"] = tekst_fra_heltall(heltall_fra_tekst(a["active_bytes"]) + behov)
+    _nullstill_blokk(a, id, adresse, behov)
+    _oppdater_peak(a)
+    returner adresse
+}
+
+funksjon kompakter(a: ordbok_tekst) -> ordbok_tekst {
+    la cursor = heltall_fra_tekst(a["base"])
+    la moved: heiltall = 0
+    la reclaimed: heiltall = 0
+    la ids = _ids(a)
+    la i: heiltall = 0
+    # Ta kopi av alle aktive blokker før nokon adresse blir overskriven. Det
+    # gjer flytting korrekt også når kjelde- og målområda overlappar.
+    mens i < lengde(ids) {
+        la snapshot_id = ids[i]
+        hvis snapshot_id != "" og a[_key(snapshot_id, "active")] == "sann" {
+            la snapshot_old = heltall_fra_tekst(a[_key(snapshot_id, "address")])
+            la snapshot_size = heltall_fra_tekst(a[_key(snapshot_id, "size")])
+            la j: heiltall = 0
+            mens j < snapshot_size {
+                a["snapshot." + snapshot_id + "." + tekst_fra_heltall(j)] = a[_memory_key(snapshot_old + j)]
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" {
+            la size = heltall_fra_tekst(a[_key(id, "size")])
+            la old = heltall_fra_tekst(a[_key(id, "address")])
+            hvis a[_key(id, "active")] == "sann" {
+                a["relocation." + tekst_fra_heltall(old)] = tekst_fra_heltall(cursor)
+                hvis old != cursor { moved = moved + 1 }
+                a[_key(id, "address")] = tekst_fra_heltall(cursor)
+                cursor = cursor + size
+            } ellers {
+                a[_key(id, "retired")] = "sann"
+                reclaimed = reclaimed + size
+            }
+        }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(ids) {
+        la restore_id = ids[i]
+        hvis restore_id != "" og a[_key(restore_id, "active")] == "sann" {
+            la restore_address = heltall_fra_tekst(a[_key(restore_id, "address")])
+            la restore_size = heltall_fra_tekst(a[_key(restore_id, "size")])
+            a["block_at." + tekst_fra_heltall(restore_address)] = restore_id
+            a["lookup_cache_id"] = restore_id
+            la j: heiltall = 0
+            mens j < restore_size {
+                a[_memory_key(restore_address + j)] = a["snapshot." + restore_id + "." + tekst_fra_heltall(j)]
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    a["next"] = tekst_fra_heltall(cursor)
+    a["compaction_count"] = tekst_fra_heltall(heltall_fra_tekst(a["compaction_count"]) + 1)
+    a["moved_count"] = tekst_fra_heltall(heltall_fra_tekst(a["moved_count"]) + moved)
+    la r: ordbok_tekst = {}
+    r["status"] = "ferdig"
+    r["moved"] = tekst_fra_heltall(moved)
+    r["reclaimed_bytes"] = tekst_fra_heltall(reclaimed)
+    r["next"] = a["next"]
+    returner r
+}
+
+funksjon alloker_locked(a: ordbok_tekst, lock: ordbok_tekst,
+                        owner: tekst, storrelse: heiltall) -> heiltall {
+    hvis ikkje allocator_lock(lock, owner) { returner -1 }
+    la adresse = alloker(a, storrelse)
+    allocator_unlock(lock, owner)
+    returner adresse
+}
+
+funksjon kompakter_locked(a: ordbok_tekst, lock: ordbok_tekst,
+                          owner: tekst) -> ordbok_tekst {
+    hvis ikkje allocator_lock(lock, owner) { returner {"status": "opptatt", "moved": "0", "reclaimed_bytes": "0", "next": a["next"]} }
+    la resultat = kompakter(a)
+    allocator_unlock(lock, owner)
+    returner resultat
+}
+
+funksjon relokert_adresse(a: ordbok_tekst, gammel: heiltall) -> heiltall {
+    la key = "relocation." + tekst_fra_heltall(gammel)
+    hvis ikkje har_nokkel(a, key) { returner gammel }
+    returner heltall_fra_tekst(a[key])
+}
+
+funksjon frigjor(a: ordbok_tekst, adresse: heiltall) -> boolsk {
+    la id = _finn_id_for_adresse(a, adresse)
+    hvis id == "" eller a[_key(id, "active")] != "sann" { returner usann }
+    a[_key(id, "active")] = "usann"
+    a["active_count"] = tekst_fra_heltall(heltall_fra_tekst(a["active_count"]) - 1)
+    a["active_bytes"] = tekst_fra_heltall(heltall_fra_tekst(a["active_bytes"]) - heltall_fra_tekst(a[_key(id, "size")]))
+    a["freed_count"] = tekst_fra_heltall(heltall_fra_tekst(a["freed_count"]) + 1)
+    returner sann
+}
+
+funksjon frigjor_locked(a: ordbok_tekst, lock: ordbok_tekst,
+                        owner: tekst, adresse: heiltall) -> boolsk {
+    hvis ikkje allocator_lock(lock, owner) { returner usann }
+    la ok = frigjor(a, adresse)
+    allocator_unlock(lock, owner)
+    returner ok
+}
+
+funksjon aktiv(a: ordbok_tekst, adresse: heiltall) -> boolsk {
+    la id = _finn_id_for_adresse(a, adresse)
+    returner id != "" og a[_key(id, "active")] == "sann"
+}
+
+funksjon aktive_adresser(a: ordbok_tekst) -> liste_heiltall {
+    la adresser: liste_heiltall = []
+    la ids = _ids(a)
+    la i: heiltall = 0
+    mens i < lengde(ids) {
+        la id = ids[i]
+        hvis id != "" og a[_key(id, "active")] == "sann" {
+            legg_til(adresser, heltall_fra_tekst(a[_key(id, "address")]))
+        }
+        i = i + 1
+    }
+    returner adresser
+}
+
+funksjon statistikk(a: ordbok_tekst) -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["capacity"] = tekst_fra_heltall(heltall_fra_tekst(a["limit"]) - heltall_fra_tekst(a["base"]))
+    s["reserved_bytes"] = tekst_fra_heltall(heltall_fra_tekst(a["next"]) - heltall_fra_tekst(a["base"]))
+    s["allocated_count"] = a["allocated_count"]
+    s["active_count"] = a["active_count"]
+    s["freed_count"] = a["freed_count"]
+    s["reused_count"] = a["reused_count"]
+    s["allocated_bytes"] = a["allocated_bytes"]
+    s["active_bytes"] = a["active_bytes"]
+    s["peak_bytes"] = a["peak_bytes"]
+    s["failed_count"] = a["failed_count"]
+    s["compaction_count"] = a["compaction_count"]
+    s["moved_count"] = a["moved_count"]
+    returner s
+}
+funksjon produksjonsstatus() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.runtime.allocator"
+    s["status"] = "stabil"
+    s["dekning"] = "norscode-memory-abi-v1, 8-byte alignment, avgrensa bytearena, bounds-kontrollert byte-I/O, nullstilling ved allokering/gjenbruk, first-fit gjenbruk, free/dobbel-free vern, OOM, overlappssikker fysisk memmove-komprimering, relokasjonstabell, statistikk og valfri CAS/eier/depth-låst allocate/free/compact-flate"
+    s["mangler"] = ""
+    returner s
 }

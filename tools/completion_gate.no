@@ -1,0 +1,182 @@
+// tools/completion_gate.no — autoritativ Norscode 1.0-sluttport
+
+bruk std.runtime_status som runtime_status
+bruk std.stdlib_status som stdlib_status
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon shell(sti: tekst) -> tekst {
+    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+}
+
+funksjon kommando(cmd: tekst) -> liste_tekst {
+    prøv { returner exec_prosess(cmd) } fang (e) { returner ["1", "", tekst(e)] }
+}
+
+funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
+    hvis lengde(res) > idx { returner tekst(res[idx]) }
+    returner ""
+}
+
+funksjon ok(res: liste_tekst) -> bool { returner felt(res, 0) == "0" }
+
+funksjon inneheld(data: tekst, needle: tekst) -> bool {
+    returner builtin.index_of(data, needle) >= 0
+}
+
+funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: tekst, cmd: tekst) -> bool {
+    skriv("\n=== " + namn + " ===\n")
+    la res = kommando("cd " + shell(root) + " && " + cmd)
+    hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
+    hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
+    hvis ok(res) {
+        rapport[nøkkel] = "green"
+        returner sann
+    }
+    rapport[nøkkel] = "red"
+    skriv("[FAIL] " + namn + "\n")
+    returner usann
+}
+
+funksjon sha256(sti: tekst) -> tekst {
+    la res = kommando("shasum -a 256 " + shell(sti))
+    hvis ikkje ok(res) { returner "" }
+    la delar = builtin.split(trim(felt(res, 1)), " ")
+    hvis lengde(delar) == 0 { returner "" }
+    returner delar[0]
+}
+
+funksjon git_rein(root: tekst) -> bool {
+    la res = kommando("cd " + shell(root) + " && git status --porcelain --untracked-files=all")
+    hvis ikkje ok(res) { returner usann }
+    returner trim(felt(res, 1)) == ""
+}
+
+funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, commit: tekst) -> bool {
+    hvis sti == "" { returner usann }
+    prøv {
+        la data = builtin.json_parse_raw(builtin.fil_les(sti))
+        hvis tekst(data["status"]) != "verified" { returner usann }
+        hvis tekst(data["platform"]) != platform { returner usann }
+        hvis arch != "" og tekst(data["architecture"]) != arch { returner usann }
+        hvis tekst(data["source_commit"]) != commit { returner usann }
+        la expected_hash = tekst(data["runtime_sha256"])
+        hvis expected_hash == "" { returner usann }
+        la candidate = attestasjon_runtime_path(root, platform, arch)
+        hvis candidate == "" eller ikkje fil_finnes(candidate) { returner usann }
+        hvis sha256(candidate) != expected_hash { returner usann }
+        la repo = env("GITHUB_REPOSITORY")
+        hvis repo == "" { returner usann }
+        returner ok(kommando("cd " + shell(root) + " && gh attestation verify " + shell(sti) + " --repo " + shell(repo)))
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon attestasjon_runtime_path(root: tekst, platform: tekst, arch: tekst) -> tekst {
+    la override = env("NORSCODE_" + builtin.tekst_til_store(platform) + "_" + builtin.tekst_til_store(arch) + "_RUNTIME")
+    hvis override != "" { returner override }
+    hvis platform == "macos" og arch == "arm64" { returner root + "/bootstrap/stage0/norscode-macos-arm64" }
+    hvis platform == "linux" og arch == "x86_64" { returner root + "/dist/norscode_native" }
+    hvis platform == "linux" og arch == "arm64" { returner root + "/bootstrap/stage0/norscode-linux-arm64" }
+    hvis platform == "windows" { returner root + "/build/windows/norscode_native_windows_x86_64.exe" }
+    returner ""
+}
+
+funksjon skriv_rapport(sti: tekst, rapport: ordbok_tekst) -> bool {
+    prøv {
+        builtin.mkdir_p("reports")
+        builtin.fil_skriv(sti, builtin.json_stringify(rapport) + "\n")
+        returner sann
+    } fang (e) {
+        skriv("[FAIL] kunne ikkje skrive sluttportrapport: " + tekst(e) + "\n")
+        returner usann
+    }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = trim(felt(kommando("pwd"), 1)) }
+    la modus = env("NORSCODE_COMPLETION_MODE")
+    hvis modus != "local" og modus != "release" {
+        skriv("bruk: ./bin/nc completion-gate --local|--release\n")
+        returner 2
+    }
+
+    la rapport: ordbok_tekst = {}
+    rapport["schema"] = "norscode-completion-gate-v1"
+    rapport["mode"] = modus
+    rapport["source_commit"] = trim(felt(kommando("cd " + shell(root) + " && git rev-parse HEAD"), 1))
+    rapport["runtime_sha256"] = sha256(root + "/dist/norscode_native")
+    rapport["stage0_macos_sha256"] = sha256(root + "/bootstrap/stage0/norscode-macos-arm64")
+    rapport["working_tree_clean"] = "false"
+    hvis git_rein(root) { rapport["working_tree_clean"] = "true" }
+
+    la alle_ok = sann
+    hvis ikkje køyr_steg(root, rapport, "local_green", "Streng lokal grønnliste", "./bin/nc local-green --strict") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "normal_tests", "Normal testsuite", "./bin/nc test") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "release_preflight", "Release-preflight", "./bin/nc release-preflight --strict") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "active_surface", "Aktiv flate", "./bin/nc active-surface") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "phase0", "Fase-0", "./bin/nc phase0-verify") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "selvstendighet", "L1-L6 sjølvstendighet", "./bin/nc selvstendighet") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "bootstrap", "Bootstrap-gate", "./bin/nc selfhost-bootstrap-gate") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5_parity", "L5 byte-paritet", "./bin/nc selfcompile-l5") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5b_parity", "L5b byte-paritet", "TEST_TIMEOUT=600 ./bin/nc selfcompile-l5b") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5b_mini_parity", "L5b-mini byte-paritet", "TEST_TIMEOUT=600 ./bin/nc selfcompile-l5b-mini") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "slow_tests", "Langtidsflate", "NC_SLOW_TESTS=1 SLOW_TEST_TIMEOUT=600 ./bin/nc test") { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "user_journey", "Pakka brukarferd", "./bin/nc run tools/release_user_journey.no") { alle_ok = usann }
+
+    la rt = runtime_status.samandrag()
+    la std = stdlib_status.samandrag()
+    rapport["runtime_stable"] = rt["stabil"]
+    rapport["runtime_total"] = rt["total"]
+    rapport["stdlib_stable"] = std["stabil"]
+    rapport["stdlib_total"] = std["total"]
+    rapport["runtime_status"] = "red"
+    rapport["stdlib_status"] = "red"
+    hvis rt["stabil"] == "22" og rt["total"] == "22" { rapport["runtime_status"] = "green" }
+    hvis std["stabil"] == "61" og std["total"] == "61" { rapport["stdlib_status"] = "green" }
+
+    rapport["platform_status"] = "not_required_local"
+    hvis modus == "release" {
+        hvis rapport["working_tree_clean"] != "true" {
+            skriv("[FAIL] release-sluttport krev rein spora kjelde\n")
+            alle_ok = usann
+        }
+        hvis rapport["runtime_status"] != "green" eller rapport["stdlib_status"] != "green" {
+            skriv("[FAIL] release-sluttport krev runtime 22/22 og stdlib 61/61\n")
+            alle_ok = usann
+        }
+        la commit = rapport["source_commit"]
+        la mac_ok = attestasjon_ok(root, env("NORSCODE_MACOS_ATTESTATION"), "macos", "arm64", commit)
+        la linux_x64_ok = attestasjon_ok(root, env("NORSCODE_LINUX_X86_64_ATTESTATION"), "linux", "x86_64", commit)
+        la linux_arm_ok = attestasjon_ok(root, env("NORSCODE_LINUX_ARM64_ATTESTATION"), "linux", "arm64", commit)
+        la windows_ok = attestasjon_ok(root, env("NORSCODE_WINDOWS_ATTESTATION"), "windows", "", commit)
+        rapport["production_ready_macos"] = tekst(mac_ok)
+        rapport["production_ready_linux_x86_64"] = tekst(linux_x64_ok)
+        rapport["production_ready_linux_arm64"] = tekst(linux_arm_ok)
+        rapport["production_ready_windows"] = tekst(windows_ok)
+        hvis mac_ok og linux_x64_ok og linux_arm_ok og windows_ok {
+            rapport["platform_status"] = "green"
+            rapport["production_ready_all_platforms"] = "true"
+        } ellers {
+            rapport["platform_status"] = "red"
+            rapport["production_ready_all_platforms"] = "false"
+            alle_ok = usann
+        }
+    }
+
+    rapport["overall"] = "red"
+    hvis alle_ok { rapport["overall"] = "green" }
+    la rapportsti = env("NORSCODE_COMPLETION_REPORT")
+    hvis rapportsti == "" { rapportsti = root + "/reports/norscode-completion-v1.json" }
+    hvis ikkje skriv_rapport(rapportsti, rapport) { returner 1 }
+    skriv("\nSluttportrapport: " + rapportsti + "\n")
+    skriv(builtin.json_stringify(rapport) + "\n")
+    hvis ikkje alle_ok { returner 1 }
+    skriv("=== Norscode completion gate: GREEN ===\n")
+    returner 0
+}

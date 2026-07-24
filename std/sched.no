@@ -1,260 +1,253 @@
-# sched.no — Hendingsplanlegging
-# Python: sched
-#
-# Planleggar hendingar etter tid (ms) eller prioritet.
-# Brukar builtin.now_ms() for gjeldande tid der det finst.
-#
-# Hendingskø: min-heap sortert etter (tid_ms, prioritet)
-# Kvar hending: ordbok_tekst
-#   "tid"      → planlagt køyringstid (ms)
-#   "prioritet"→ prioritet (lågare = tidlegare)
-#   "fn"       → funksjonsnamn (for ncb_call_fn)
-#   "args"     → JSON-serialisert args-ordbok
-#   "id"       → unik hending-ID
-#
-# Bruk:
-#   bruk std.sched som sc
-#   la planleggar = sc.ny()
-#   sc.enter(planleggar, 1000, 1, "min.funksjon", {})  # om 1000ms
-#   sc.run(planleggar)
+# sched.no - kooperativ hendingsplanleggar
+# Hendelser ligg direkte i scheduler-kartet som event:<id> -> JSON.
+# Dette fungerer likt i normal runtime og pure VM og krev ikkje JSON-lister.
 
-# ─── Planleggar-tilstand ──────────────────────────────────────────────────────
-
-funksjon _sched_kø_gyldig(s: ordbok_tekst) -> bool {
-    hvis (ikkje har_nokkel(s, "kø")) {
-        returner usann
-    }
-    hvis (ikkje har_nokkel(s, "aktiv")) {
-        returner usann
-    }
-    returner sann
+funksjon _gyldig(s: ordbok_tekst) -> bool {
+    returner har_nokkel(s, "aktiv") og har_nokkel(s, "_neste_id")
 }
 
 funksjon ny() -> ordbok_tekst {
     la s: ordbok_tekst = {}
-    s["kø"] = "[]"       # JSON-liste av hending-spec
     s["aktiv"] = "sann"
     s["_neste_id"] = "0"
+    s["_neste_future_id"] = "0"
+    s["_neste_io_id"] = "0"
     s["_tal_ventande"] = "0"
+    s["_last_io_batch_count"] = "0"
+    s["_last_io_batch_backend"] = "none"
+    s["_max_io_batch_count"] = "0"
     returner s
 }
 
+funksjon _no_ms() -> heltall {
+    prøv { returner builtin.now_ms() } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon _event_nokkel(id: tekst) -> tekst { returner "event:" + id }
+funksjon _felt_nokkel(id: tekst, felt: tekst) -> tekst { returner "eventfelt:" + id + ":" + felt }
+
 funksjon _ny_id(s: ordbok_tekst) -> tekst {
-    la neste = builtin.heltall_fra_tekst(s["_neste_id"]) + 1
+    la neste = heltall_fra_tekst(s["_neste_id"]) + 1
     s["_neste_id"] = tekst_fra_heltall(neste)
     returner "hend_" + tekst_fra_heltall(neste)
 }
 
-# ─── Legg til hendingar ───────────────────────────────────────────────────────
-
-# enter: forsinka innlegging (delay_ms etter no)
-funksjon enter(s: ordbok_tekst, delay_ms: heltall, prioritet: heltall,
-               fn_namn: tekst, args: ordbok_tekst) -> tekst {
-    la tid_ms: heltall = _no_ms() + delay_ms
-    returner enterabs(s, tid_ms, prioritet, fn_namn, args)
+funksjon _er_event_nokkel(nokkel: tekst) -> bool {
+    returner tekst_starter_med(nokkel, "event:")
 }
 
-# enterabs: absolutt tid
+funksjon enter(s: ordbok_tekst, delay_ms: heltall, prioritet: heltall,
+               fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    hvis delay_ms < 0 { delay_ms = 0 }
+    returner enterabs(s, _no_ms() + delay_ms, prioritet, fn_namn, args)
+}
+
 funksjon enterabs(s: ordbok_tekst, tid_ms: heltall, prioritet: heltall,
-                   fn_namn: tekst, args: ordbok_tekst) -> tekst {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner ""
-    }
-
-    la hend: ordbok_tekst = {}
-    la id: tekst = _ny_id(s)
-    hend["id"] = id
-    hend["tid"] = tekst_fra_heltall(tid_ms)
-    hend["prioritet"] = tekst_fra_heltall(prioritet)
-    hend["fn"] = fn_namn
-    hend["args"] = builtin.json_stringify(args)
-
-    la kø = builtin.json_parse(s["kø"])
-    legg_til(kø, builtin.json_stringify(hend))
-    _heap_push_sched(kø, lengde(kø) - 1)
-    s["kø"] = builtin.json_stringify(kø)
-    s["_tal_ventande"] = tekst_fra_heltall(builtin.heltall_fra_tekst(s["_tal_ventande"]) + 1)
+                  fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    hvis ikkje _gyldig(s) eller fn_namn == "" { returner "" }
+    la id = _ny_id(s)
+    s[_event_nokkel(id)] = "aktiv"
+    s[_felt_nokkel(id, "tid")] = tekst_fra_heltall(tid_ms)
+    s[_felt_nokkel(id, "prioritet")] = tekst_fra_heltall(prioritet)
+    s[_felt_nokkel(id, "fn")] = fn_namn
+    s[_felt_nokkel(id, "args")] = args
+    s[_felt_nokkel(id, "future")] = ""
+    s["_tal_ventande"] = tekst_fra_heltall(tal_ventande(s))
     returner id
 }
 
-# Snarveg: enter med 0 delay
 funksjon call_soon(s: ordbok_tekst, fn_namn: tekst, args: ordbok_tekst) -> tekst {
     returner enter(s, 0, 1, fn_namn, args)
 }
 
-# ─── Avbryt hending ──────────────────────────────────────────────────────────
-
-funksjon cancel(s: ordbok_tekst, hend_id: tekst) -> bool {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner usann
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    la ny_kø: liste_tekst = []
-    la funne: bool = usann
-    la i: heltall = 0
-    mens (i < lengde(kø)) {
-        la hend = builtin.json_parse(kø[i])
-        hvis (hend["id"] == hend_id) {
-            funne = sann
-        } ellers {
-            legg_til(ny_kø, kø[i])
-        }
-        i = i + 1
-    }
-    # Bygg heap på nytt etter fjerning
-    _heapify_sched(ny_kø)
-    s["kø"] = builtin.json_stringify(ny_kø)
-    returner funne
+funksjon _for_event(a: ordbok_tekst, b: ordbok_tekst) -> bool {
+    la at = heltall_fra_tekst(a["tid"])
+    la bt = heltall_fra_tekst(b["tid"])
+    hvis at < bt { returner sann }
+    hvis at > bt { returner usann }
+    la ap = heltall_fra_tekst(a["prioritet"])
+    la bp = heltall_fra_tekst(b["prioritet"])
+    hvis ap < bp { returner sann }
+    hvis ap > bp { returner usann }
+    returner a["id"] < b["id"]
 }
 
-# ─── Køyr hendingar ───────────────────────────────────────────────────────────
-
-# Køyr alle hendingar som er forfalne no
-funksjon run_ferdig(s: ordbok_tekst) -> heltall {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner 0
-    }
-
-    la køyrt: heltall = 0
-    la kont: bool = sann
-    mens (kont) {
-        la kø = builtin.json_parse(s["kø"])
-        la n: heltall = lengde(kø)
-        hvis (n == 0) { kont = usann }
-        ellers {
-            la neste = builtin.json_parse(kø[0])
-            la hend_tid: heltall = builtin.heltall_fra_tekst(neste["tid"])
-            la no: heltall = _no_ms()
-            hvis (hend_tid <= no) {
-                # Pop frå heap
-                la siste: tekst = kø[n - 1]
-                la ny_kø = builtin.slice(kø, 0, n - 1)
-                hvis (n > 1) {
-                    ny_kø[0] = siste
-                    _sil_ned_sched(ny_kø, 0, n - 1)
-                }
-                s["kø"] = builtin.json_stringify(ny_kø)
-
-                # Køyr hendinga
-                la fn_namn: tekst = neste["fn"]
-                la args = builtin.json_parse(neste["args"])
-                prøv {
-                    builtin.ncb_call_fn(fn_namn, args)
-                } fang (e) {
-                    # Hending-feil vert logga men ikkje stoppar planleggaren
-                }
-                køyrt = køyrt + 1
-            } ellers {
-                kont = usann
-            }
-        }
-    }
-    returner køyrt
-}
-
-# Køyr éi hending (vent til neste er klar)
-funksjon run_neste(s: ordbok_tekst) -> bool {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner usann
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    la n: heltall = lengde(kø)
-    hvis (n == 0) { returner usann }
-
-    la neste = builtin.json_parse(kø[0])
-    la hend_tid: heltall = builtin.heltall_fra_tekst(neste["tid"])
-    la no: heltall = _no_ms()
-    la ventetid: heltall = hend_tid - no
-    hvis (ventetid > 0) {
-        # Vi kan ikkje faktisk vente i Norscode, men vi rapporterer
-        returner usann
-    }
-
-    la siste: tekst = kø[n - 1]
-    la ny_kø = builtin.slice(kø, 0, n - 1)
-    hvis (n > 1) {
-        ny_kø[0] = siste
-        _sil_ned_sched(ny_kø, 0, n - 1)
-    }
-    s["kø"] = builtin.json_stringify(ny_kø)
-
-    la fn_namn: tekst = neste["fn"]
-    la args = builtin.json_parse(neste["args"])
-    prøv {
-        builtin.ncb_call_fn(fn_namn, args)
-    } fang (e) {}
-    returner sann
-}
-
-# Kor mange ms til neste hending?
-funksjon tid_til_neste(s: ordbok_tekst) -> heltall {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner -1
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    hvis (builtin.heltall_fra_tekst(s["_tal_ventande"]) <= 0) { returner -1 }
-    returner 0
-}
-
-# ─── Tilstandssjekkar ─────────────────────────────────────────────────────────
-
-funksjon er_tom(s: ordbok_tekst) -> bool {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner sann
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    returner lengde(kø) == 0
-}
-
-funksjon tal_ventande(s: ordbok_tekst) -> heltall {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner 0
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    returner lengde(kø)
-}
-
-funksjon hent_kø(s: ordbok_tekst) -> liste_tekst {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        returner []
-    }
-
-    returner builtin.json_parse(s["kø"])
+funksjon _les_event(s: ordbok_tekst, id: tekst) -> ordbok_tekst {
+    la event: ordbok_tekst = {}
+    event["id"] = id
+    event["tid"] = s[_felt_nokkel(id, "tid")]
+    event["prioritet"] = s[_felt_nokkel(id, "prioritet")]
+    event["fn"] = s[_felt_nokkel(id, "fn")]
+    event["args"] = s[_felt_nokkel(id, "args")]
+    event["future"] = s[_felt_nokkel(id, "future")]
+    returner event
 }
 
 funksjon neste_hending(s: ordbok_tekst) -> ordbok_tekst {
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        la tom: ordbok_tekst = {}
-        returner tom
-    }
-
-    la kø = builtin.json_parse(s["kø"])
     la tom: ordbok_tekst = {}
-    hvis (lengde(kø) == 0) { returner tom }
-    returner builtin.json_parse(kø[0])
+    hvis ikkje _gyldig(s) { returner tom }
+    la ks = nøkler(s)
+    la funne = usann
+    la beste: ordbok_tekst = {}
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        la k: tekst = ks[i]
+        hvis _er_event_nokkel(k) {
+            la id = builtin.slice(k, 6, lengde(k))
+            la event = _les_event(s, id)
+            hvis ikkje funne {
+                beste = event
+                funne = sann
+            } ellers hvis _for_event(event, beste) {
+                beste = event
+            }
+        }
+        i = i + 1
+    }
+    returner beste
+}
+
+funksjon cancel(s: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje _gyldig(s) { returner usann }
+    la k = _event_nokkel(id)
+    hvis ikkje har_nokkel(s, k) { returner usann }
+    fjern_nokkel(s, k)
+    fjern_nokkel(s, _felt_nokkel(id, "tid"))
+    fjern_nokkel(s, _felt_nokkel(id, "prioritet"))
+    fjern_nokkel(s, _felt_nokkel(id, "fn"))
+    fjern_nokkel(s, _felt_nokkel(id, "args"))
+    fjern_nokkel(s, _felt_nokkel(id, "future"))
+    s["_tal_ventande"] = tekst_fra_heltall(tal_ventande(s))
+    returner sann
+}
+
+funksjon tal_ventande(s: ordbok_tekst) -> heltall {
+    hvis ikkje _gyldig(s) { returner 0 }
+    la ks = nøkler(s)
+    la tal: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        hvis _er_event_nokkel(ks[i]) { tal = tal + 1 }
+        i = i + 1
+    }
+    returner tal
+}
+
+funksjon er_tom(s: ordbok_tekst) -> bool { returner tal_ventande(s) == 0 }
+
+funksjon tid_til_neste(s: ordbok_tekst) -> heltall {
+    hvis er_tom(s) { returner -1 }
+    la event = neste_hending(s)
+    la rest = heltall_fra_tekst(event["tid"]) - _no_ms()
+    hvis rest < 0 { returner 0 }
+    returner rest
+}
+
+funksjon _kall_trygt(fn_namn: tekst, args: ordbok_tekst) -> ordbok_tekst {
+    prøv {
+        la resultat = builtin.ncb_call_fn(fn_namn, args)
+        la svar: ordbok_tekst = {}
+        svar["status"] = "ferdig"
+        svar["resultat"] = resultat
+        svar["feil"] = ""
+        returner svar
+    } fang (e) {
+        la feil_svar: ordbok_tekst = {}
+        feil_svar["status"] = "feil"
+        feil_svar["resultat"] = ""
+        feil_svar["feil"] = tekst(e)
+        returner feil_svar
+    }
+    la ukjent: ordbok_tekst = {}
+    ukjent["status"] = "feil"
+    ukjent["resultat"] = ""
+    ukjent["feil"] = "ukjent callback-feil"
+    returner ukjent
+}
+
+funksjon _koyr_event(s: ordbok_tekst, event: ordbok_tekst) -> bool {
+    la id = event["id"]
+    hvis ikkje har_nokkel(s, _event_nokkel(id)) { returner usann }
+    la svar = _kall_trygt(event["fn"], event["args"])
+    hvis ikkje cancel(s, id) { returner usann }
+    hvis event["future"] != "" {
+        hvis svar["status"] == "ferdig" { future_fullfor(s, event["future"], svar["resultat"]) }
+        ellers { future_avvis(s, event["future"], svar["feil"]) }
+    }
+    returner sann
+}
+
+funksjon run_neste(s: ordbok_tekst) -> bool {
+    hvis er_tom(s) eller tid_til_neste(s) > 0 { returner usann }
+    returner _koyr_event(s, neste_hending(s))
+}
+
+funksjon run_ferdig(s: ordbok_tekst) -> heltall {
+    la tal: heltall = 0
+    tal = tal + io_poll(s)
+    mens ikkje er_tom(s) og tid_til_neste(s) <= 0 {
+        hvis run_neste(s) { tal = tal + 1 }
+        ellers { returner tal }
+    }
+    returner tal
+}
+
+funksjon hent_ko(s: ordbok_tekst) -> liste_tekst {
+    la resultat: liste_tekst = []
+    la kopi = builtin.json_parse(builtin.json_stringify(s))
+    mens ikkje er_tom(kopi) {
+        la event = neste_hending(kopi)
+        legg_til(resultat, builtin.json_stringify(event))
+        cancel(kopi, event["id"])
+    }
+    returner resultat
+}
+
+# Bakoverkompatibelt namn.
+funksjon hent_kø(s: ordbok_tekst) -> liste_tekst { returner hent_ko(s) }
+
+funksjon stopp(s: ordbok_tekst) -> bool {
+    hvis ikkje _gyldig(s) { returner usann }
+    s["aktiv"] = "usann"
+    returner sann
+}
+
+funksjon start(s: ordbok_tekst) -> bool {
+    hvis ikkje _gyldig(s) { returner usann }
+    s["aktiv"] = "sann"
+    returner sann
+}
+
+funksjon run(s: ordbok_tekst, maks_vent_ms: heltall) -> heltall {
+    hvis ikkje _gyldig(s) { returner 0 }
+    la start_tid = _no_ms()
+    la tal: heltall = 0
+    mens s["aktiv"] == "sann" og har_arbeid(s) {
+        tal = tal + run_ferdig(s)
+        hvis ikkje har_arbeid(s) { returner tal }
+        hvis maks_vent_ms >= 0 og _no_ms() - start_tid >= maks_vent_ms { returner tal }
+        # Kooperativ idle. Host kan vente; pure VM gir straks kontroll tilbake.
+        prøv { builtin.vent.sov(1) } fang (e) { }
+    }
+    returner tal
 }
 
 funksjon status(s: ordbok_tekst) -> ordbok_tekst {
     la r: ordbok_tekst = {}
-    hvis (ikkje _sched_kø_gyldig(s)) {
-        r["gyldig"] = "usann"
-        r["tal_ventande"] = "0"
-        returner r
-    }
-
-    la kø = builtin.json_parse(s["kø"])
-    r["gyldig"] = "sann"
-    r["tal_ventande"] = s["_tal_ventande"]
-    hvis (lengde(kø) > 0) {
-        la neste = builtin.json_parse(kø[0])
-        r["neste_id"] = neste["id"]
-        r["neste_tid"] = neste["tid"]
-        r["neste_fn"] = neste["fn"]
+    r["gyldig"] = tekst(_gyldig(s))
+    r["tal_ventande"] = tekst_fra_heltall(tal_ventande(s))
+    r["tal_io_ventande"] = tekst_fra_heltall(io_tal_ventande(s))
+    r["last_io_batch_count"] = s["_last_io_batch_count"]
+    r["last_io_batch_backend"] = s["_last_io_batch_backend"]
+    r["max_io_batch_count"] = s["_max_io_batch_count"]
+    r["aktiv"] = "usann"
+    hvis _gyldig(s) { r["aktiv"] = s["aktiv"] }
+    hvis ikkje er_tom(s) {
+        la event = neste_hending(s)
+        r["neste_id"] = event["id"]
+        r["neste_tid"] = event["tid"]
+        r["neste_fn"] = event["fn"]
         r["ventetid_ms"] = tekst_fra_heltall(tid_til_neste(s))
     } ellers {
         r["neste_id"] = ""
@@ -265,75 +258,326 @@ funksjon status(s: ordbok_tekst) -> ordbok_tekst {
     returner r
 }
 
-funksjon _no_ms() -> heltall {
-    prøv { returner builtin.now_ms() } fang (e) { returner 0 }
-    returner 0
-}
-
-# ─── Gjentak-mønster ──────────────────────────────────────────────────────────
-# Neste køyring av ein gjentak-hending vert registrert etter at fn køyrar
-
 funksjon enter_gjentak(s: ordbok_tekst, intervall_ms: heltall, prioritet: heltall,
-                        fn_namn: tekst, args: ordbok_tekst) -> tekst {
-    # Legg til hending-ID i args slik at fn kan re-registrere seg
+                       fn_namn: tekst, args: ordbok_tekst) -> tekst {
     la nye_args = builtin.json_parse(builtin.json_stringify(args))
-    nye_args["_planleggar"] = builtin.json_stringify(s)
     nye_args["_intervall"] = tekst_fra_heltall(intervall_ms)
     nye_args["_prioritet"] = tekst_fra_heltall(prioritet)
     nye_args["_fn"] = fn_namn
     returner enter(s, intervall_ms, prioritet, fn_namn, nye_args)
 }
 
-# ─── Heap-operasjonar for scheduler ──────────────────────────────────────────
+# Futures er eigde av same event-loop-tilstand som hendingskøa.
+funksjon _future_nokkel(id: tekst) -> tekst { returner "future:" + id }
+funksjon _future_felt(id: tekst, felt: tekst) -> tekst { returner "futurefelt:" + id + ":" + felt }
 
-funksjon _sched_prioritet(kø: liste_tekst, i: heltall) -> heltall {
-    la hend = builtin.json_parse(kø[i])
-    la tid: heltall = builtin.heltall_fra_tekst(hend["tid"])
-    la pri: heltall = builtin.heltall_fra_tekst(hend["prioritet"])
-    # Kombiner: tid * 1000 + prioritet (tid dominerer)
-    returner tid * 1000 + pri
+funksjon _future_synkroniser(s: ordbok_tekst, id: tekst) -> bool {
+    la handtak_nokkel = _future_felt(id, "handtak")
+    hvis ikkje har_nokkel(s, handtak_nokkel) { returner usann }
+    la handtak = s[handtak_nokkel]
+    handtak["status"] = s[_future_felt(id, "status")]
+    handtak["verdi"] = s[_future_felt(id, "resultat")]
+    handtak["feil"] = s[_future_felt(id, "feil")]
+    returner sann
 }
 
-funksjon _heap_push_sched(kø: liste_tekst, i: heltall) {
-    mens (i > 0) {
-        la forelder: heltall = (i - 1) / 2
-        hvis (_sched_prioritet(kø, i) < _sched_prioritet(kø, forelder)) {
-            la tmp: tekst = kø[i]
-            kø[i] = kø[forelder]
-            kø[forelder] = tmp
-            i = forelder
-        } ellers {
-            i = 0
-        }
-    }
+funksjon future_ny(s: ordbok_tekst) -> tekst {
+    hvis ikkje _gyldig(s) { returner "" }
+    la n = heltall_fra_tekst(s["_neste_future_id"]) + 1
+    s["_neste_future_id"] = tekst_fra_heltall(n)
+    la id = "future_" + tekst_fra_heltall(n)
+    s[_future_nokkel(id)] = "aktiv"
+    s[_future_felt(id, "status")] = "ventende"
+    s[_future_felt(id, "resultat")] = ""
+    s[_future_felt(id, "feil")] = ""
+    la handtak = {"__future__": "sann", "id": id, "status": "ventende", "verdi": "", "feil": ""}
+    s[_future_felt(id, "handtak")] = handtak
+    returner id
 }
 
-funksjon _sil_ned_sched(kø: liste_tekst, i: heltall, n: heltall) {
-    la kont: bool = sann
-    mens (kont) {
-        la venstre: heltall = 2 * i + 1
-        la høgre: heltall = 2 * i + 2
-        la minst: heltall = i
-        hvis (venstre < n og _sched_prioritet(kø, venstre) < _sched_prioritet(kø, minst)) {
-            minst = venstre
-        }
-        hvis (høgre < n og _sched_prioritet(kø, høgre) < _sched_prioritet(kø, minst)) {
-            minst = høgre
-        }
-        hvis (minst != i) {
-            la tmp: tekst = kø[i]
-            kø[i] = kø[minst]
-            kø[minst] = tmp
-            i = minst
-        } ellers { kont = usann }
-    }
+funksjon future_handtak(s: ordbok_tekst, id: tekst) {
+    hvis ikkje future_finnes(s, id) { returner null }
+    returner s[_future_felt(id, "handtak")]
 }
 
-funksjon _heapify_sched(kø: liste_tekst) {
-    la n: heltall = lengde(kø)
-    la i: heltall = n / 2 - 1
-    mens (i >= 0) {
-        _sil_ned_sched(kø, i, n)
-        i = i - 1
+funksjon future_finnes(s: ordbok_tekst, id: tekst) -> bool {
+    returner _gyldig(s) og har_nokkel(s, _future_nokkel(id))
+}
+
+funksjon future_status(s: ordbok_tekst, id: tekst) -> tekst {
+    hvis ikkje future_finnes(s, id) { returner "ukjent" }
+    returner s[_future_felt(id, "status")]
+}
+
+funksjon future_kjorer(s: ordbok_tekst, id: tekst) -> bool {
+    hvis future_status(s, id) != "ventende" { returner usann }
+    s[_future_felt(id, "status")] = "kjorer"
+    _future_synkroniser(s, id)
+    returner sann
+}
+
+funksjon future_fullfor(s: ordbok_tekst, id: tekst, resultat) -> bool {
+    la st = future_status(s, id)
+    hvis st != "ventende" og st != "kjorer" { returner usann }
+    s[_future_felt(id, "resultat")] = resultat
+    s[_future_felt(id, "status")] = "ferdig"
+    _future_synkroniser(s, id)
+    returner sann
+}
+
+funksjon future_avvis(s: ordbok_tekst, id: tekst, feil: tekst) -> bool {
+    la st = future_status(s, id)
+    hvis st != "ventende" og st != "kjorer" { returner usann }
+    s[_future_felt(id, "feil")] = feil
+    s[_future_felt(id, "status")] = "feil"
+    _future_synkroniser(s, id)
+    returner sann
+}
+
+funksjon future_kanseller(s: ordbok_tekst, id: tekst) -> bool {
+    hvis future_status(s, id) != "ventende" { returner usann }
+    s[_future_felt(id, "status")] = "kansellert"
+    _future_synkroniser(s, id)
+    la ks = nøkler(s)
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        la k: tekst = ks[i]
+        hvis _er_event_nokkel(k) {
+            la event_id = builtin.slice(k, 6, lengde(k))
+            hvis s[_felt_nokkel(event_id, "future")] == id { cancel(s, event_id) }
+        }
+        hvis _er_io_nokkel(k) {
+            la io_id = builtin.slice(k, 3, lengde(k))
+            hvis s[_io_felt(io_id, "future")] == id { io_kanseller(s, io_id, "kansellert") }
+        }
+        i = i + 1
     }
+    returner sann
+}
+
+funksjon future_er_ferdig(s: ordbok_tekst, id: tekst) -> bool {
+    la st = future_status(s, id)
+    returner st == "ferdig" eller st == "feil" eller st == "kansellert"
+}
+
+funksjon future_resultat(s: ordbok_tekst, id: tekst) {
+    hvis future_status(s, id) != "ferdig" { returner "" }
+    returner s[_future_felt(id, "resultat")]
+}
+
+funksjon future_feil(s: ordbok_tekst, id: tekst) -> tekst {
+    hvis future_status(s, id) != "feil" { returner "" }
+    returner s[_future_felt(id, "feil")]
+}
+
+funksjon opprett_oppgave(s: ordbok_tekst, delay_ms: heltall, prioritet: heltall,
+                        fn_namn: tekst, args: ordbok_tekst) -> tekst {
+    la future_id = future_ny(s)
+    hvis future_id == "" { returner "" }
+    la event_id = enter(s, delay_ms, prioritet, fn_namn, args)
+    hvis event_id == "" {
+        future_avvis(s, future_id, "kunne ikkje planlegge oppgave")
+        returner future_id
+    }
+    s[_felt_nokkel(event_id, "future")] = future_id
+    returner future_id
+}
+
+funksjon vent_future(s: ordbok_tekst, id: tekst, timeout_ms: heltall) {
+    la start_tid = _no_ms()
+    mens ikkje future_er_ferdig(s, id) {
+        run_ferdig(s)
+        hvis timeout_ms >= 0 og _no_ms() - start_tid >= timeout_ms {
+            future_avvis(s, id, "timeout")
+        }
+        hvis ikkje future_er_ferdig(s, id) {
+            prøv { builtin.vent.sov(1) } fang (e) { }
+        }
+    }
+    returner future_resultat(s, id)
+}
+
+# Felles readiness-poller. Poll-callback returnerer eit kart med status
+# ventende, ferdig eller feil og valfrie resultat/feil-felt.
+funksjon _io_nokkel(id: tekst) -> tekst { returner "io:" + id }
+funksjon _io_felt(id: tekst, felt: tekst) -> tekst { returner "iofelt:" + id + ":" + felt }
+funksjon _er_io_nokkel(nokkel: tekst) -> bool { returner tekst_starter_med(nokkel, "io:") }
+
+funksjon io_tal_ventande(s: ordbok_tekst) -> heltall {
+    hvis ikkje _gyldig(s) { returner 0 }
+    la ks = nøkler(s)
+    la tal: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        hvis _er_io_nokkel(ks[i]) { tal = tal + 1 }
+        i = i + 1
+    }
+    returner tal
+}
+
+funksjon har_arbeid(s: ordbok_tekst) -> bool {
+    returner tal_ventande(s) > 0 eller io_tal_ventande(s) > 0
+}
+
+funksjon io_registrer(s: ordbok_tekst, kind: tekst, poll_fn: tekst,
+                      args: ordbok_tekst, timeout_ms: heltall) -> tekst {
+    returner io_registrer_med_cleanup(s, kind, poll_fn, args, timeout_ms, "", {})
+}
+
+funksjon io_registrer_med_cleanup(s: ordbok_tekst, kind: tekst, poll_fn: tekst,
+                                  args: ordbok_tekst, timeout_ms: heiltall,
+                                  cleanup_fn: tekst, cleanup_args: ordbok_tekst) -> tekst {
+    hvis ikkje _gyldig(s) eller poll_fn == "" { returner "" }
+    la n = heltall_fra_tekst(s["_neste_io_id"]) + 1
+    s["_neste_io_id"] = tekst_fra_heltall(n)
+    la id = "io_" + tekst_fra_heltall(n)
+    la future_id = future_ny(s)
+    s[_io_nokkel(id)] = "aktiv"
+    s[_io_felt(id, "kind")] = kind
+    s[_io_felt(id, "poll_fn")] = poll_fn
+    s[_io_felt(id, "args")] = args
+    s[_io_felt(id, "future")] = future_id
+    s[_io_felt(id, "start_ms")] = tekst_fra_heltall(_no_ms())
+    s[_io_felt(id, "timeout_ms")] = tekst_fra_heltall(timeout_ms)
+    s[_io_felt(id, "cleanup_fn")] = cleanup_fn
+    s[_io_felt(id, "cleanup_args")] = cleanup_args
+    s[_io_felt(id, "batch_ready")] = "-1"
+    returner future_id
+}
+
+funksjon _io_cleanup(s: ordbok_tekst, id: tekst, reason: tekst) -> bool {
+    hvis ikkje har_nokkel(s, _io_nokkel(id)) { returner usann }
+    la cleanup_fn = s[_io_felt(id, "cleanup_fn")]
+    hvis cleanup_fn == "" { returner sann }
+    la cleanup_args = s[_io_felt(id, "cleanup_args")]
+    cleanup_args["cleanup_reason"] = reason
+    prøv {
+        builtin.ncb_call_fn(cleanup_fn, cleanup_args)
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon io_kanseller(s: ordbok_tekst, id: tekst, reason: tekst) -> bool {
+    hvis ikkje har_nokkel(s, _io_nokkel(id)) { returner usann }
+    _io_cleanup(s, id, reason)
+    returner io_fjern(s, id)
+}
+
+funksjon io_fjern(s: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje har_nokkel(s, _io_nokkel(id)) { returner usann }
+    fjern_nokkel(s, _io_nokkel(id))
+    fjern_nokkel(s, _io_felt(id, "kind"))
+    fjern_nokkel(s, _io_felt(id, "poll_fn"))
+    fjern_nokkel(s, _io_felt(id, "args"))
+    fjern_nokkel(s, _io_felt(id, "future"))
+    fjern_nokkel(s, _io_felt(id, "start_ms"))
+    fjern_nokkel(s, _io_felt(id, "timeout_ms"))
+    fjern_nokkel(s, _io_felt(id, "cleanup_fn"))
+    fjern_nokkel(s, _io_felt(id, "cleanup_args"))
+    fjern_nokkel(s, _io_felt(id, "batch_ready"))
+    returner sann
+}
+
+funksjon _io_native_events(kind: tekst) -> heiltall {
+    hvis kind == "tcp-connect" eller kind == "tcp-write" { returner 2 }
+    hvis kind == "tcp-accept" eller kind == "tcp-read" { returner 1 }
+    # OpenSSL kan ha intern handshake-progresjon utan ny OS-readiness.
+    # TLS-callbacken må derfor pumpast kvar scheduler-runde.
+    returner 0
+}
+
+funksjon _io_poll_batch(s: ordbok_tekst, ks: liste_tekst) -> heiltall {
+    la ids: liste_tekst = []
+    la items: liste<ordbok_tekst> = []
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = ks[i]
+        hvis _er_io_nokkel(k) {
+            la id = builtin.slice(k, 3, lengde(k))
+            s[_io_felt(id, "batch_ready")] = "-1"
+            la events = _io_native_events(s[_io_felt(id, "kind")])
+            la args = s[_io_felt(id, "args")]
+            hvis events > 0 og har_nokkel(args, "handle") og har_nokkel(args["handle"], "handle") {
+                legg_til(ids, id)
+                legg_til(items, {"handle": args["handle"]["handle"], "events": tekst_fra_heiltall(events)})
+            }
+        }
+        i = i + 1
+    }
+    s["_last_io_batch_count"] = tekst_fra_heiltall(lengde(items))
+    hvis lengde(items) > heltall_fra_tekst(s["_max_io_batch_count"]) {
+        s["_max_io_batch_count"] = tekst_fra_heiltall(lengde(items))
+    }
+    s["_last_io_batch_backend"] = "none"
+    hvis lengde(items) == 0 { returner 0 }
+    prøv {
+        la batch = builtin.network_operation({"abi": "norscode-native-network-v1", "operation": "poll_many", "items": items, "timeout_ms": "0"})
+        hvis batch["status"] == "feil" eller lengde(batch["results"]) != lengde(ids) { returner 0 }
+        s["_last_io_batch_backend"] = batch["batch_backend"]
+        i = 0
+        mens i < lengde(ids) {
+            s[_io_felt(ids[i], "batch_ready")] = tekst(batch["results"][i]["ready"])
+            i = i + 1
+        }
+        returner heltall_fra_tekst(batch["ready_count"])
+    } fang (e) { returner 0 }
+    returner 0
+}
+
+funksjon _io_poll_ein(s: ordbok_tekst, id: tekst) -> bool {
+    hvis ikkje har_nokkel(s, _io_nokkel(id)) { returner usann }
+    la future_id = s[_io_felt(id, "future")]
+    hvis future_er_ferdig(s, future_id) { io_fjern(s, id)  returner sann }
+    la timeout_ms = heltall_fra_tekst(s[_io_felt(id, "timeout_ms")])
+    hvis timeout_ms >= 0 og _no_ms() - heltall_fra_tekst(s[_io_felt(id, "start_ms")]) >= timeout_ms {
+        _io_cleanup(s, id, "timeout")
+        future_avvis(s, future_id, "TimeoutFeil: I/O " + s[_io_felt(id, "kind")])
+        io_fjern(s, id)
+        returner sann
+    }
+    hvis s[_io_felt(id, "batch_ready")] == "0" { returner usann }
+    prøv {
+        la svar = builtin.ncb_call_fn(s[_io_felt(id, "poll_fn")], s[_io_felt(id, "args")])
+        hvis svar["status"] == "ferdig" eller svar["status"] == "klar" {
+            future_fullfor(s, future_id, svar["resultat"])
+            io_fjern(s, id)
+            returner sann
+        }
+        hvis svar["status"] == "feil" {
+            future_avvis(s, future_id, tekst(svar["feil"]))
+            io_fjern(s, id)
+            returner sann
+        }
+    } fang (e) {
+        future_avvis(s, future_id, tekst(e))
+        io_fjern(s, id)
+        returner sann
+    }
+    returner usann
+}
+
+funksjon io_poll(s: ordbok_tekst) -> heltall {
+    hvis ikkje _gyldig(s) { returner 0 }
+    la ks = nøkler(s)
+    _io_poll_batch(s, ks)
+    la tal: heltall = 0
+    la i: heltall = 0
+    mens i < lengde(ks) {
+        la k: tekst = ks[i]
+        hvis _er_io_nokkel(k) {
+            la id = builtin.slice(k, 3, lengde(k))
+            hvis _io_poll_ein(s, id) { tal = tal + 1 }
+        }
+        i = i + 1
+    }
+    returner tal
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["status"] = "stabil"
+    r["dekning"] = "stabil kooperativ tidsko, prioritet, cancel, typebevarande futures, felles readiness-poller med timeout/cancel/fleire kjelder, batchet native poll-registrering, macOS kqueue, Linux epoll og Windows IOCP for socket og overlapped fil-I/O, cleanup-callback som kansellerer og drenerer eigde OS-operasjonar, og await suspend/resume av VM-continuations"
+    r["mangler"] = ""
+    returner r
 }

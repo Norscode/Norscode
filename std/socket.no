@@ -17,6 +17,379 @@
 #   la data = sok.motta(s, 1024)
 #   sok.lukk(s)
 
+bruk std.sched som sched
+
+funksjon native_versjon() -> tekst { returner "norscode-native-network-v1" }
+funksjon _native_req(operation: tekst, handle: tekst) -> ordbok_tekst { returner {"abi": native_versjon(), "operation": operation, "handle": handle} }
+
+funksjon _reparer_dns_hex_transport(data_hex: tekst) -> tekst {
+    // Stage-0 teksttransport kan fjerne NUL-byte frå TCP-resultat. Gjenopprett
+    // berre den kjende DNS-ramma; andre protokollar blir urørte.
+    hvis lengde(data_hex) < 16 { returner "" }
+    la mark = builtin.index_of(data_hex, "840101")
+    hvis mark < 2 { returner "" }
+    la label_start = mark + 6
+    la qpos = builtin.index_of(builtin.slice(data_hex, label_start, lengde(data_hex)), "1001")
+    hvis qpos < 0 { returner "" }
+    qpos = label_start + qpos
+    la frame = builtin.slice(data_hex, 0, 2)
+    la id = builtin.slice(data_hex, 2, 6)
+    la namn = builtin.slice(data_hex, label_start, qpos)
+    returner "00" + frame + id + "84000001000000000000" + namn + "0000100001"
+}
+
+funksjon native_lytt(host: tekst, port: heiltall, backlog: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "listen", "host": host, "port": tekst_fra_heltall(port), "backlog": tekst_fra_heltall(backlog)})
+}
+
+funksjon native_tilkoble(host: tekst, port: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "connect", "host": host, "port": tekst_fra_heltall(port)})
+}
+
+funksjon native_udp_lytt(host: tekst, port: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "udp_listen", "host": host, "port": tekst_fra_heltall(port)})
+}
+
+funksjon native_udp_tilkoble(host: tekst, port: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "udp_connect", "host": host, "port": tekst_fra_heltall(port)})
+}
+
+funksjon native_udp_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    la req = _native_req("recvfrom", h["handle"])
+    req["max"] = tekst_fra_heltall(maks)
+    returner builtin.network_operation(req)
+}
+
+funksjon native_udp_skriv(h: ordbok_tekst, data_hex: tekst,
+                          peer_host: tekst, peer_port: heiltall) -> ordbok_tekst {
+    la req = _native_req("sendto", h["handle"])
+    req["data_hex"] = data_hex
+    req["peer_host"] = peer_host
+    req["peer_port"] = tekst_fra_heltall(peer_port)
+    returner builtin.network_operation(req)
+}
+
+funksjon native_poll(h: ordbok_tekst, events: heiltall) -> ordbok_tekst {
+    la req = _native_req("poll", h["handle"])
+    req["events"] = tekst_fra_heltall(events)
+    returner builtin.network_operation(req)
+}
+
+funksjon native_poll_vent(h: ordbok_tekst, events: heiltall, timeout_ms: heiltall) -> ordbok_tekst {
+    la req = _native_req("poll", h["handle"])
+    req["events"] = tekst_fra_heltall(events)
+    req["timeout_ms"] = tekst_fra_heltall(timeout_ms)
+    returner builtin.network_operation(req)
+}
+
+funksjon native_aksepter(h: ordbok_tekst) -> ordbok_tekst { returner builtin.network_operation(_native_req("accept", h["handle"])) }
+funksjon native_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    la req = _native_req("read", h["handle"])
+    req["max"] = tekst_fra_heltall(maks)
+    returner builtin.network_operation(req)
+}
+funksjon native_les_hex(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    // Hex-lesing må prøvast først for TCP: teksttransport kan miste NUL-byte
+    // i DNS-lengdeprefixet før recvfrom-fallbacken får sjansen.
+    la native_hex_first = _native_req("read_hex", h["handle"])
+    native_hex_first["max"] = tekst_fra_heiltall(maks)
+    la native_hex_result = builtin.network_operation(native_hex_first)
+    hvis native_hex_result["status"] != "feil" eller native_hex_result["error"] != "invalid operation" {
+        hvis native_hex_result["status"] == "ok" {
+            la dns_fixed_first = _reparer_dns_hex_transport(native_hex_result["data_hex"])
+            hvis dns_fixed_first != "" { native_hex_result["data_hex"] = dns_fixed_first }
+        }
+        returner native_hex_result
+    }
+    la req = _native_req("recvfrom", h["handle"])
+    req["max"] = tekst_fra_heltall(maks)
+    la r = builtin.network_operation(req)
+    hvis r["status"] == "ok" og lengde(r["data_hex"]) > 0 {
+        la dns_fixed = _reparer_dns_hex_transport(r["data_hex"])
+        hvis dns_fixed != "" { r["data_hex"] = dns_fixed }
+    }
+    hvis r["status"] == "ok" og lengde(r["data_hex"]) == 0 og lengde(r["data"]) > 0 {
+        la recv_hex = ""
+        la recv_i: heiltall = 0
+        mens recv_i < lengde(r["data"]) {
+            la recv_code = builtin.char_code(builtin.slice(r["data"], recv_i, recv_i + 1))
+            recv_hex = recv_hex + _hex_digit((recv_code >> 4) & 15) + _hex_digit(recv_code & 15)
+            recv_i = recv_i + 1
+        }
+        r["data_hex"] = recv_hex
+        returner r
+    }
+    hvis r["status"] == "ok" og lengde(r["data_hex"]) == 0 {
+        la tcp_read = builtin.network_operation({"abi": native_versjon(), "operation": "read", "handle": h["handle"], "max": tekst_fra_heiltall(maks)})
+        hvis tcp_read["status"] == "ok" og lengde(tcp_read["data"]) > 0 {
+            la tcp_data = tcp_read["data"]
+            la tcp_hex_value = ""
+            la tcp_i: heiltall = 0
+            mens tcp_i < lengde(tcp_data) {
+                la tcp_code = builtin.char_code(builtin.slice(tcp_data, tcp_i, tcp_i + 1))
+                tcp_hex_value = tcp_hex_value + _hex_digit((tcp_code >> 4) & 15) + _hex_digit(tcp_code & 15)
+                tcp_i = tcp_i + 1
+            }
+            tcp_read["data_hex"] = tcp_hex_value
+            returner tcp_read
+        }
+    }
+    hvis r["status"] != "feil" eller r["error"] != "invalid operation" { returner r }
+    la native_hex = _native_req("read_hex", h["handle"])
+    native_hex["max"] = tekst_fra_heltall(maks)
+    la native_result = builtin.network_operation(native_hex)
+    hvis native_result["status"] != "feil" eller native_result["error"] != "invalid operation" { returner native_result }
+    la fallback = builtin.network_operation({"abi": native_versjon(), "operation": "read", "handle": h["handle"], "max": tekst_fra_heltall(maks)})
+    hvis fallback["status"] != "ok" { returner fallback }
+    la data = fallback["data"]
+    la hex = ""
+    la i: heiltall = 0
+    mens i < lengde(data) {
+        la code = builtin.char_code(builtin.slice(data, i, i + 1))
+        hex = hex + _hex_digit((code >> 4) & 15) + _hex_digit(code & 15)
+        i = i + 1
+    }
+    fallback["data_hex"] = hex
+    returner fallback
+}
+funksjon native_skriv(h: ordbok_tekst, data: tekst) -> ordbok_tekst {
+    la req = _native_req("write", h["handle"])
+    req["data"] = data
+    returner builtin.network_operation(req)
+}
+funksjon native_skriv_hex(h: ordbok_tekst, data_hex: tekst) -> ordbok_tekst {
+    la req = _native_req("write_hex", h["handle"])
+    req["data_hex"] = data_hex
+    la r = builtin.network_operation(req)
+    hvis r["status"] != "feil" eller r["error"] != "invalid operation" { returner r }
+    la data = ""
+    la i: heiltall = 0
+    mens i + 1 < lengde(data_hex) {
+        la hi = _hex_value(builtin.slice(data_hex, i, i + 1))
+        la lo = _hex_value(builtin.slice(data_hex, i + 1, i + 2))
+        data = data + builtin.chr((hi << 4) + lo)
+        i = i + 2
+    }
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "write", "handle": h["handle"], "data": data})
+}
+
+funksjon _hex_digit(v: heiltall) -> tekst {
+    hvis v < 10 { returner builtin.chr(48 + v) }
+    returner builtin.chr(87 + v)
+}
+
+funksjon _hex_value(c: tekst) -> heiltall {
+    la k = builtin.char_code(c)
+    hvis k >= 48 og k <= 57 { returner k - 48 }
+    hvis k >= 65 og k <= 70 { returner k - 55 }
+    hvis k >= 97 og k <= 102 { returner k - 87 }
+    returner 0
+}
+funksjon native_lukk(h: ordbok_tekst) -> ordbok_tekst { returner builtin.network_operation(_native_req("close", h["handle"])) }
+
+funksjon native_iocp_lytt(host: tekst, port: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "iocp_listen", "host": host, "port": tekst_fra_heiltall(port)})
+}
+
+funksjon native_iocp_tilkoble(host: tekst, port: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "iocp_connect", "host": host, "port": tekst_fra_heiltall(port)})
+}
+
+funksjon native_iocp_aksepter(listener: ordbok_tekst) -> ordbok_tekst {
+    la req = _native_req("iocp_accept", listener["handle"])
+    returner builtin.network_operation(req)
+}
+
+funksjon native_iocp_les(h: ordbok_tekst, maks: heiltall) -> ordbok_tekst {
+    la req = _native_req("iocp_read", h["handle"])
+    req["max"] = tekst_fra_heiltall(maks)
+    returner builtin.network_operation(req)
+}
+
+funksjon native_iocp_skriv(h: ordbok_tekst, data: tekst) -> ordbok_tekst {
+    la req = _native_req("iocp_write", h["handle"])
+    req["data"] = data
+    returner builtin.network_operation(req)
+}
+
+funksjon native_iocp_vent(operation_handle: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "iocp_wait", "operation_handle": operation_handle, "timeout_ms": tekst_fra_heiltall(timeout_ms)})
+}
+
+funksjon _native_poll_iocp(args: ordbok_tekst) -> ordbok_tekst {
+    la result = native_iocp_vent(args["operation_handle"], 0)
+    hvis result["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis result["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": result["error"]} }
+    returner {"status": "ferdig", "resultat": result, "feil": ""}
+}
+
+funksjon _native_cleanup_iocp(args: ordbok_tekst) -> boolsk {
+    la result = builtin.network_operation({"abi": native_versjon(), "operation": "iocp_cancel", "operation_handle": args["operation_handle"]})
+    hvis result["status"] == "feil" { returner sann }
+    result = native_iocp_vent(args["operation_handle"], 10)
+    la i: heiltall = 0
+    mens result["status"] == "ventende" og i < 100 {
+        result = native_iocp_vent(args["operation_handle"], 10)
+        i = i + 1
+    }
+    returner result["status"] != "ventende"
+}
+
+funksjon native_iocp_async(scheduler: ordbok_tekst, pending: ordbok_tekst,
+                            timeout_ms: heiltall) -> tekst {
+    hvis pending["status"] != "ventende" eller pending["operation_handle"] == "" { returner "" }
+    la args = {"operation_handle": pending["operation_handle"]}
+    returner sched.io_registrer_med_cleanup(scheduler, "iocp", "std.socket._native_poll_iocp", args,
+                                             timeout_ms, "std.socket._native_cleanup_iocp", args)
+}
+
+funksjon native_tls_lytt(host: tekst, port: heiltall, backlog: heiltall,
+                         cert_file: tekst, key_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_listen", "host": host, "port": tekst_fra_heltall(port), "backlog": tekst_fra_heltall(backlog), "cert_file": cert_file, "key_file": key_file})
+}
+
+funksjon native_tls_lytt_schannel(host: tekst, port: heiltall, backlog: heiltall,
+                                   certificate_subject: tekst,
+                                   krev_klientsertifikat: boolsk) -> ordbok_tekst {
+    returner builtin.network_operation({
+        "abi": native_versjon(), "operation": "tls_listen", "host": host,
+        "port": tekst_fra_heiltall(port), "backlog": tekst_fra_heiltall(backlog),
+        "certificate_subject": certificate_subject,
+        "require_client_cert": hvis krev_klientsertifikat da "1" ellers "0"
+    })
+}
+
+funksjon native_tls_tilkoble_systemlager(host: tekst, port: heiltall,
+                                          hostname: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({
+        "abi": native_versjon(), "operation": "tls_connect", "host": host,
+        "port": tekst_fra_heiltall(port), "hostname": hostname, "ca_file": ""
+    })
+}
+
+funksjon native_tls_tilkoble_schannel_mtls(host: tekst, port: heiltall,
+                                            hostname: tekst,
+                                            client_certificate_subject: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({
+        "abi": native_versjon(), "operation": "tls_connect", "host": host,
+        "port": tekst_fra_heiltall(port), "hostname": hostname, "ca_file": "",
+        "client_certificate_subject": client_certificate_subject
+    })
+}
+
+funksjon native_tls_lytt_med_klientsertifikat(host: tekst, port: heiltall,
+                                               backlog: heiltall, cert_file: tekst,
+                                               key_file: tekst, client_ca_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_listen", "host": host, "port": tekst_fra_heltall(port), "backlog": tekst_fra_heltall(backlog), "cert_file": cert_file, "key_file": key_file, "client_ca_file": client_ca_file, "require_client_cert": "1"})
+}
+
+funksjon native_tls_lytt_med_klientsertifikat_og_crl(host: tekst, port: heiltall,
+                                                      backlog: heiltall, cert_file: tekst,
+                                                      key_file: tekst, client_ca_file: tekst,
+                                                      client_crl_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_listen", "host": host, "port": tekst_fra_heiltall(port), "backlog": tekst_fra_heiltall(backlog), "cert_file": cert_file, "key_file": key_file, "client_ca_file": client_ca_file, "client_crl_file": client_crl_file, "require_client_cert": "1"})
+}
+
+funksjon native_tls_lytt_med_ocsp(host: tekst, port: heiltall, backlog: heiltall,
+                                  cert_file: tekst, key_file: tekst,
+                                  ocsp_response_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_listen", "host": host, "port": tekst_fra_heiltall(port), "backlog": tekst_fra_heiltall(backlog), "cert_file": cert_file, "key_file": key_file, "ocsp_response_file": ocsp_response_file})
+}
+
+funksjon native_tls_tilkoble(host: tekst, port: heiltall, hostname: tekst,
+                             ca_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_connect", "host": host, "port": tekst_fra_heltall(port), "hostname": hostname, "ca_file": ca_file})
+}
+
+funksjon native_tls_tilkoble_med_klientsertifikat(host: tekst, port: heiltall,
+                                                   hostname: tekst, ca_file: tekst,
+                                                   client_cert_file: tekst,
+                                                   client_key_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_connect", "host": host, "port": tekst_fra_heltall(port), "hostname": hostname, "ca_file": ca_file, "client_cert_file": client_cert_file, "client_key_file": client_key_file})
+}
+
+funksjon native_tls_tilkoble_med_crl(host: tekst, port: heiltall, hostname: tekst,
+                                      ca_file: tekst, crl_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_connect", "host": host, "port": tekst_fra_heiltall(port), "hostname": hostname, "ca_file": ca_file, "crl_file": crl_file})
+}
+
+funksjon native_tls_tilkoble_krev_ocsp(host: tekst, port: heiltall,
+                                        hostname: tekst, ca_file: tekst) -> ordbok_tekst {
+    returner builtin.network_operation({"abi": native_versjon(), "operation": "tls_connect", "host": host, "port": tekst_fra_heiltall(port), "hostname": hostname, "ca_file": ca_file, "require_ocsp": "1"})
+}
+
+funksjon native_tls_handshake(h: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.network_operation(_native_req("tls_handshake", h["handle"]))
+}
+
+funksjon _native_poll_tls_handshake(args: ordbok_tekst) -> ordbok_tekst {
+    la r = native_tls_handshake(args["handle"])
+    hvis r["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis r["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": r["error"]} }
+    returner {"status": "ferdig", "resultat": r, "feil": ""}
+}
+
+funksjon native_tls_handshake_async(scheduler: ordbok_tekst, h: ordbok_tekst,
+                                    timeout_ms: heiltall) -> tekst {
+    returner sched.io_registrer(scheduler, "tls-handshake", "std.socket._native_poll_tls_handshake", {"handle": h}, timeout_ms)
+}
+
+funksjon _native_poll_connect(args: ordbok_tekst) -> ordbok_tekst {
+    la p = native_poll(args["handle"], 2)
+    hvis p["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis p["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": p["error"]} }
+    returner {"status": "ferdig", "resultat": args["handle"], "feil": ""}
+}
+
+funksjon _native_poll_accept(args: ordbok_tekst) -> ordbok_tekst {
+    la p = native_poll(args["handle"], 1)
+    hvis p["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis p["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": p["error"]} }
+    la child = native_aksepter(args["handle"])
+    hvis child["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis child["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": child["error"]} }
+    returner {"status": "ferdig", "resultat": child, "feil": ""}
+}
+
+funksjon _native_poll_read(args: ordbok_tekst) -> ordbok_tekst {
+    la p = native_poll(args["handle"], 1)
+    hvis p["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis p["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": p["error"]} }
+    la r = native_les(args["handle"], heltall_fra_tekst(args["max"]))
+    hvis r["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis r["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": r["error"]} }
+    returner {"status": "ferdig", "resultat": r["data"], "feil": ""}
+}
+
+funksjon _native_poll_write(args: ordbok_tekst) -> ordbok_tekst {
+    la p = native_poll(args["handle"], 2)
+    hvis p["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis p["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": p["error"]} }
+    la offset = heltall_fra_tekst(args["offset"])
+    la r = native_skriv(args["handle"], builtin.slice(args["data"], offset, lengde(args["data"])))
+    hvis r["status"] == "ventende" { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    hvis r["status"] == "feil" { returner {"status": "feil", "resultat": "", "feil": r["error"]} }
+    offset = offset + heltall_fra_tekst(r["value"])
+    args["offset"] = tekst_fra_heltall(offset)
+    hvis offset < lengde(args["data"]) { returner {"status": "ventende", "resultat": "", "feil": ""} }
+    returner {"status": "ferdig", "resultat": tekst_fra_heltall(offset), "feil": ""}
+}
+
+funksjon native_connect_async(scheduler: ordbok_tekst, host: tekst, port: heiltall, timeout_ms: heiltall) -> tekst {
+    la h = native_tilkoble(host, port)
+    hvis h["status"] == "feil" { returner "" }
+    returner sched.io_registrer(scheduler, "tcp-connect", "std.socket._native_poll_connect", {"handle": h}, timeout_ms)
+}
+funksjon native_accept_async(scheduler: ordbok_tekst, h: ordbok_tekst, timeout_ms: heiltall) -> tekst {
+    returner sched.io_registrer(scheduler, "tcp-accept", "std.socket._native_poll_accept", {"handle": h}, timeout_ms)
+}
+funksjon native_les_async(scheduler: ordbok_tekst, h: ordbok_tekst, maks: heiltall, timeout_ms: heiltall) -> tekst {
+    returner sched.io_registrer(scheduler, "tcp-read", "std.socket._native_poll_read", {"handle": h, "max": tekst_fra_heltall(maks)}, timeout_ms)
+}
+funksjon native_skriv_async(scheduler: ordbok_tekst, h: ordbok_tekst, data: tekst, timeout_ms: heiltall) -> tekst {
+    returner sched.io_registrer(scheduler, "tcp-write", "std.socket._native_poll_write", {"handle": h, "data": data, "offset": "0"}, timeout_ms)
+}
+
 # ─── Konstantar ───────────────────────────────────────────────────────────────
 
 funksjon AF_INET() -> heltall  {
@@ -157,7 +530,7 @@ funksjon motta(s: liste_heltall, maks_bytes: heltall) -> tekst {
 
 funksjon motta_bytes(s: liste_heltall, maks_bytes: heltall) -> liste_heltall {
     prøv {
-        returner builtin.socket_recv_bytes(s[0], maks_bytes)
+        returner builtin.bytes_to_list(builtin.socket_recv_bytes(s[0], maks_bytes))
     } fang (e) {
         s[3] = FEIL_MOTTA()
         returner []

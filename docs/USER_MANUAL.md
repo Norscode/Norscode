@@ -271,7 +271,8 @@ Viktige standardmodular:
 - `std.admin`: CRUD-admin for registrerte modellar, med trygg modellregistrering, validering av tabellnamn før registeroppslag, avgrensa visningsnamn, positive og avgrensa rad-ID-ar, skjulte radhandlingar ved ugyldig ID, aria-merkte radhandlingar, aktiv adminnavigasjon med aria-current, skip-lenke til hovudinnhald, nav-label og main-landemerke, scope-merkte tabellhovud, caption-merkte admintabellar med modellnamn/radtal, ugyldig-rad merking og live statusfelt, avgrensa admin-POST-body, POST-metodevakt og content-type-vakt på muterande handlingar, HTML-maksgrenser for søk/skjema, skjema-rendering, listeceller og skjulte felt med maxlength/autocomplete-off, kobla admin-labels og sorteringslabels, avgrensa skjemaverdiar og formfelt, avgrensa felt-/tabellnamn, avgrensa audit-verdiar, audit-kontekst med metode/sti/request-id, avgrensa paginering, query-tal, query-nøklar og status-query-kodar, escaped HTML-output, path/query-escaped admin-URL-ar, trygge admin-tabellnamn og admin-feltnamn for sortering, søk, skjema og skriving, ingen inline style-attributt, strenge no-store/CSP/HSTS/noindex admin-headers på sider og redirects, ingen inline admin-JavaScript, server-side slettebekrefting, autocomplete-off adminskjema, oversiktsstatistikk, tom-tilstand, kontrollerte statusmeldingar med presise feilkodar, avgrensa admin-søk, audit-eventar for suksess/feil/avvising/probing, maskinlesbar audit-dekning i `admin_status`, og CSRF-sikre admin-POST-hjelparar.
 - `std.mw`: middleware for CORS, rate limiting, tryggleiksheaders, logging, komprimering og cache, med pipeline-klare konfigurasjonar.
 - `std.asynk`: worker-konfig, oppgåvekø, bakgrunnsjobbar, timeout/retry og streaming responses.
-- `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C i aktiv flate.
+- `std.multiprocessing`: deterministisk prosess-/pool-/queue-kontrakt utan Python/C, med native argv-backend via `std.prosess` for OS-program.
+- `std.prosess.køyr_med_policy(...)`: policykontrollert prosesskøyring med shell-metateikn blokkert.
 - `std.stdlib_status`: maskinlesbar status for kva som er `stabil`, `eksperimentell` eller `stub`.
 - `std.db`: databaseflate brukt av NorsDB og smoke-testar.
 - `std.tekst`: tekstoperasjonar.
@@ -338,8 +339,8 @@ Upload, sessions og deploy har eigne produksjonskontraktar:
 - `std.sesjon.sikkerheitsstatus()` dekker serverside session, `HttpOnly`, `SameSite=Lax`, valfri `Secure`, TTL, flash, opprydding og cookie-headerar på standard `std.web`-responsar.
 - `std.deploy.produksjonsmønster(cfg)` samlar workers, helse, statics, env-fil, rollback og graceful shutdown.
 - `std.multiprocessing.produksjonsstatus()` samlar prosess, pool, queue, pipe, event, lock og value som aktiv runtime-kontrakt.
-- `std.eksport` vaskar nedlastingsfilnamn før `Content-Disposition`, med fallback for tomme eller farlege namn.
-- `std.prosess.køyr_med_policy(...)` er trygg standard for produksjonsnær prosesskøyring: av som standard, allowlist-basert og utan shell-metateikn.
+- `std.multiprocessing.ny_native_prosess()` og `start_native()` brukar eksisterande shell-fri, synkrone argv-runtime med allowlist og no-network-sandbox.
+- `std.wsgiref.serve_one()` og `app_kan_køyrast()` brukar den native Norscode-serveren for ein HTTP-forespørsel; langkøyrande serverlivssyklus startast med `nc serve`.
 
 LSP-serveren i [selfhost/lsp/server.no](../selfhost/lsp/server.no) annonserer no hover, completion, definition, document symbols og document formatting i same aktive Norscode-flate.
 
@@ -378,6 +379,18 @@ Typisk serverfil brukar `std.web`:
 ```norscode
 bruk std.web som web
 ```
+
+## Mailserver, domenehost og brannmur
+
+Norscode har ei framtidsklar standardflate for eigen hosting:
+
+- `std.dns` byggjer DNS-soner og mail-DNS med MX, SPF, DKIM, DMARC, DNS-resolver-plan og DNSSEC-plan.
+- `std.tls_acme` byggjer sertifikatplan for ACME, http-01, dns-01, SAN, auto-renew, HSTS, OCSP og trygg rotasjon.
+- `std.mail_server` samlar mailserverkonfig for domene, postboksar, alias, SMTP-runtime, ko-policy, TLS, SMTP AUTH, open-relay-blokkering, karantene og audit.
+- `std.domenehost` bind saman DNS, web, mail, TLS/ACME, DNSSEC, WAF, backup/restore og brannmur i ein samla infrastrukturplan.
+- `std.brannmur` lagar default-drop policy med ekte nftables-reglar for web-, DNS- og mailportar, loopback og etablert trafikk, admin-allowlist med kjelde-CIDR, rate-limit-drop, egress-begrensing, sikkerheitsrapport, `nft --check` og rollback-plan.
+
+Dette er grunnmur for vidare daemon/runtime-arbeid. Modulane er ikkje meint som full SMTP-, IMAP- eller DNS-daemon enno, men nye serverdelar kan byggjast på same Norscode-kontrakt og testast utan å starte med shellskript.
 
 Serverlaget har same standardflyt som moderne web-rammeverk:
 

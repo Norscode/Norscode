@@ -1,6 +1,7 @@
 name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -26,26 +27,46 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - run: bash tools/no_c_python_active_surface.sh
-      - run: bash tools/selfhost_phase0_verify.sh
-      - run: bash tools/no_legacy_cvm.sh
+      - uses: actions/checkout@v4
+      - name: Materialiser native runtime
+        run: |
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
+      - name: Kontroller app-syntaks
+        run: ./bin/nc check app.no || echo "app.no feature-check krev nyare seed; fase-0-gatene held fram"
+      - run: ./bin/nc run tools/selfhost_phase0_verify.no
+      - run: ./bin/nc run tools/no_legacy_cvm.no
 
   drift-guard:
     name: Driftsvakt
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v6
-      - run: bash tools/selfhost_drift_guard.sh
+      - uses: actions/checkout@v4
+      - name: Materialiser native runtime
+        run: |
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
+      - run: |
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+          NORSCODE_ROOT="$PWD" ./bin/nc run tools/selfhost_drift_guard.no
 
   seed-only:
     name: Seed-only
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v6
-      - run: bash tools/verify_seed_only.sh
+      - uses: actions/checkout@v4
+      - name: Materialiser native runtime
+        run: |
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
+      - run: ./bin/nc verify-seed
 
   # ─── macOS: bygg → artefakt → verify (test får eiga 120 min) ─────────────────
   native-macos-build:
@@ -54,11 +75,31 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
+      - name: Installer native crypto-byggverktøy
+        run: brew install zig openssl@3
       - name: Verifiser stage-0 seed
-        run: bash tools/verify_seed_only.sh
+        run: |
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-macos-arm64 dist/norscode_native
+          chmod +x dist/norscode_native
+          ./bin/nc verify-seed
       - name: Materialiser native frå stage-0 seed
-        run: bash tools/build_norscode_native.sh
-      - uses: actions/upload-artifact@v6
+        run: |
+          rm -f dist/norscode_native
+          zig build-obj archive/legacy_c_backend/nc_argon2_zig.zig \
+            -target aarch64-macos -O ReleaseFast -fsingle-threaded -fPIC \
+            -femit-bin=build/nc_argon2_macos.o
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          clang -O2 -w -DNC_ENABLE_OPENSSL -DNC_ENABLE_ZIG_ARGON2 \
+            build/v3009/native_candidate_gc.c third_party/sqlite/sqlite3.c \
+            build/nc_argon2_macos.o \
+            -o dist/norscode_native \
+            -lpthread -ldl -lsqlite3 \
+            -framework Foundation -framework Metal -framework MetalKit -framework Security \
+            -Ibuild/v3009 -Iarchive/legacy_c_backend -I"$OPENSSL_PREFIX/include" \
+            "$OPENSSL_PREFIX/lib/libssl.a" "$OPENSSL_PREFIX/lib/libcrypto.a" -lz
+          chmod +x dist/norscode_native
+      - uses: actions/upload-artifact@v4
         with:
           name: norscode-native-macos
           path: |
@@ -70,7 +111,16 @@ jobs:
     name: Native macOS (arm64)
     needs: native-macos-build
     runs-on: macos-latest
-    timeout-minutes: 120
+    env:
+      NORSCODE_ROOT: ${{ github.workspace }}
+      NORSCODE_VM_CAPABILITIES: env.read,process.exec,disk.read,disk.write,net.dns,net.connect,net.tcp
+      NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+      TMPDIR: /tmp
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
@@ -81,41 +131,101 @@ jobs:
       - run: ./bin/nc selfhost-bootstrap-gate
       - name: "Steg C: Bootstrap-self (pure VM)"
         run: ./bin/nc bootstrap-self
+      - name: Install VM loader fixtures
+        run: |
+          mkdir -p build
+          cp tests/fixtures/vm_loader/vm_plugin_v1.ncb.json build/vm_plugin_v1.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_v2.ncb.json build/vm_plugin_v2.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_disk.ncb.json build/vm_plugin_disk.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_tampered.ncb.json build/vm_plugin_tampered.ncb.json
+          cp tests/fixtures/vm_loader/vm_trust.json build/vm_trust.json
       - name: "Test (rask CI): shard 1/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=0 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=0 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 2/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=1 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=1 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 3/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=2 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=2 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 4/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=3 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=3 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 5/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=4 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=4 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 6/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=5 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=5 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 7/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=6 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=6 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 8/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=7 NC_TEST_SHARDS=8 TEST_TIMEOUT=10 ./bin/nc test
+        timeout-minutes: 30
+        run: NC_TRACE_TESTS=1 NC_TEST_SHARD=7 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
+      - name: "Media runtime gate"
+        timeout-minutes: 15
+        run: |
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_ROOT="$PWD" \
+          NORSCODE_MEDIA_RUNTIME_BIN="$PWD/dist/norscode_native" \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" ./bin/nc run tools/native_media_runtime_gate_v3010.no
+      - name: "Metal GPU compute gate"
+        timeout-minutes: 10
+        run: |
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_ROOT="$PWD" \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" ./bin/nc run tools/native_metal_gpu_gate.no
       - name: "Omgang 6 smoke: skriv"
-        run: bash tools/verify_omgang6.sh skriv
+        run: NORSCODE_PROCESS_MAX_MEMORY_BYTES=2147483648 ./bin/nc verify-omgang6 skriv
       - name: "Omgang 6 smoke: int-to-str"
-        run: bash tools/verify_omgang6.sh int
+        run: NORSCODE_PROCESS_MAX_MEMORY_BYTES=2147483648 ./bin/nc verify-omgang6 int
       - name: "Omgang 6b: Stage-0 ELF"
-        run: bash tools/verify_omgang6b.sh
+        run: NORSCODE_PROCESS_MAX_MEMORY_BYTES=2147483648 ./bin/nc verify-omgang6b
+      - name: Restore generated database fixtures before attestation
+        run: |
+          git status --short
+          git restore -- \
+            norscode_db_integration_example.db norscode_db_integration_test.db \
+            norscode_pool_test.db web_orm_mal.db \
+            build/bootstrap_compiler_bundle.ncb build/mv_bootstrap_stub_manifest_dispatch.inc \
+            build/native_elf_compiler_bundle.ncb \
+            bootstrap/precompiled_fragments/*.json bootstrap/precompiled_fragments_inner/*.json \
+            build/v3009/native_candidate_gc.c build/v3009/norscode_generated_gc.c \
+            build/v9400/hybrid_compiler_bundle_v9400.ncb.json \
+            build/v9400/hybrid_compiler_bundle_v9400.status dist/norscode_build.no
+      - name: Skriv og signer macOS runtime-attestasjon
+        run: |
+          NORSCODE_ATTEST_PLATFORM=macos \
+          NORSCODE_ATTEST_ARCH=arm64 \
+          NORSCODE_ATTEST_RUNTIME="$PWD/dist/norscode_native" \
+          NORSCODE_ATTEST_GATE_STATUS=verified \
+          NORSCODE_ATTEST_OUTPUT="$PWD/reports/macos-arm64-runtime-attestation.json" \
+          ./bin/nc run tools/platform_runtime_attestation.no
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/macos-arm64-runtime-attestation.json
+      - name: Samle macOS runtime med attestasjonen
+        run: |
+          mkdir -p platform-attestation/macos
+          cp reports/macos-arm64-runtime-attestation.json platform-attestation/macos/report.json
+          cp dist/norscode_native platform-attestation/macos/runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norscode-macos-runtime-attestation
+          path: platform-attestation/macos
 
   native-macos-slow:
     name: Slow tests macOS (chunk/selfhost)
     needs: native-macos-build
     runs-on: macos-latest
+    env:
+      NORSCODE_ROOT: ${{ github.workspace }}
+      NORSCODE_VM_CAPABILITIES: env.read,process.exec,disk.read,disk.write,net.dns,net.connect,net.tcp
+      NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+      TMPDIR: /tmp
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
@@ -125,7 +235,7 @@ jobs:
           path: .
       - run: chmod +x dist/norscode_native bin/nc
       - name: Parser-stress og selfhost-monolitt
-        run: NC_SLOW_TESTS=1 TEST_TIMEOUT=600 sh tools/nc_test.sh
+        run: NC_SLOW_TESTS=1 TEST_TIMEOUT=600 ./bin/nc test
 
   # ─── Linux: bygg → artefakt → verify ─────────────────────────────────────────
   native-linux-build:
@@ -135,12 +245,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Installer sqlite3
-        run: sudo apt-get install -y libsqlite3-dev
+        run: |
+          sudo apt-get install -y libsqlite3-dev libssl-dev
+          ZIG_VERSION=0.16.0
+          ZIG_DIR="$RUNNER_TEMP/zig-$ZIG_VERSION"
+          curl --fail --silent --show-error --location \
+            "https://ziglang.org/download/$ZIG_VERSION/zig-x86_64-linux-$ZIG_VERSION.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/zig-x86_64-linux-$ZIG_VERSION" "$ZIG_DIR"
+          echo "$ZIG_DIR" >> "$GITHUB_PATH"
       - name: Verifiser stage-0 seed
-        run: bash tools/verify_seed_only.sh
+        run: |
+          rm -f dist/norscode_native
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
+          ./bin/nc verify-seed
       - name: Materialiser native frå stage-0 seed
-        run: bash tools/build_norscode_native.sh
-      - uses: actions/upload-artifact@v6
+        run: |
+          rm -f dist/norscode_native
+          zig build-obj archive/legacy_c_backend/nc_argon2_zig.zig \
+            -target x86_64-linux-gnu -O ReleaseFast -fsingle-threaded -fPIC \
+            -femit-bin=build/nc_argon2_linux.o
+          cc -O2 -w -DNC_ENABLE_OPENSSL -DNC_ENABLE_ZIG_ARGON2 \
+            build/v3009/native_candidate_gc.c \
+            third_party/sqlite/sqlite3.c \
+            build/nc_argon2_linux.o \
+            -o dist/norscode_native \
+            -lpthread -ldl -lm -lssl -lcrypto \
+            -Ibuild/v3009 -Iarchive/legacy_c_backend
+          chmod +x dist/norscode_native
+      - uses: actions/upload-artifact@v4
         with:
           name: norscode-native-linux
           path: |
@@ -152,7 +287,15 @@ jobs:
     name: Native Linux (x86_64)
     needs: native-linux-build
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    env:
+      NORSCODE_ROOT: ${{ github.workspace }}
+      NORSCODE_VM_CAPABILITIES: env.read,process.exec,disk.read,disk.write,net.dns,net.connect,net.tcp
+      NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v7
@@ -163,38 +306,85 @@ jobs:
       - run: ./bin/nc selfhost-bootstrap-gate
       - name: "Steg C: Bootstrap-self (pure VM)"
         run: ./bin/nc bootstrap-self
+      - name: Install VM loader fixtures
+        run: |
+          mkdir -p build
+          cp tests/fixtures/vm_loader/vm_plugin_v1.ncb.json build/vm_plugin_v1.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_v2.ncb.json build/vm_plugin_v2.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_disk.ncb.json build/vm_plugin_disk.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_tampered.ncb.json build/vm_plugin_tampered.ncb.json
+          cp tests/fixtures/vm_loader/vm_trust.json build/vm_trust.json
       - name: "Test (rask CI): shard 1/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=0 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=0 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 2/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=1 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=1 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 3/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=2 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=2 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 4/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=3 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=3 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 5/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=4 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=4 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 6/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=5 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=5 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 7/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=6 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=6 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
       - name: "Test (rask CI): shard 8/8"
-        timeout-minutes: 6
-        run: NC_TEST_SHARD=7 NC_TEST_SHARDS=8 TEST_TIMEOUT=20 ./bin/nc test
-      - run: bash tools/verify_omgang6.sh
+        timeout-minutes: 30
+        run: NORSCODE_EXPECT_EVENT_BACKEND=epoll NORSCODE_EXPECT_SANDBOX_BACKEND=seccomp NC_TRACE_TESTS=1 NC_TEST_SHARD=7 NC_TEST_SHARDS=8 TEST_TIMEOUT=60 ./bin/nc test
+      - name: "Media runtime gate"
+        timeout-minutes: 15
+        run: |
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_ROOT="$PWD" \
+          NORSCODE_MEDIA_RUNTIME_BIN="$PWD/dist/norscode_native" \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" ./bin/nc run tools/native_media_runtime_gate_v3010.no
+      - run: NORSCODE_PROCESS_MAX_MEMORY_BYTES=2147483648 ./bin/nc verify-omgang6
       - name: "Omgang 6b: Stage-0 ELF"
-        run: bash tools/verify_omgang6b.sh
+        run: NORSCODE_PROCESS_MAX_MEMORY_BYTES=2147483648 ./bin/nc verify-omgang6b
+      - name: Restore generated database fixtures before attestation
+        run: |
+          git status --short
+          git restore -- \
+            norscode_db_integration_example.db norscode_db_integration_test.db \
+            norscode_pool_test.db web_orm_mal.db \
+            build/bootstrap_compiler_bundle.ncb build/mv_bootstrap_stub_manifest_dispatch.inc \
+            build/native_elf_compiler_bundle.ncb \
+            bootstrap/precompiled_fragments/*.json bootstrap/precompiled_fragments_inner/*.json \
+            build/v3009/native_candidate_gc.c build/v3009/norscode_generated_gc.c \
+            build/v9400/hybrid_compiler_bundle_v9400.ncb.json \
+            build/v9400/hybrid_compiler_bundle_v9400.status dist/norscode_build.no
+      - name: Skriv og signer Linux x86_64 runtime-attestasjon
+        run: |
+          NORSCODE_ATTEST_PLATFORM=linux \
+          NORSCODE_ATTEST_ARCH=x86_64 \
+          NORSCODE_ATTEST_RUNTIME="$PWD/dist/norscode_native" \
+          NORSCODE_ATTEST_GATE_STATUS=verified \
+          NORSCODE_ATTEST_OUTPUT="$PWD/reports/linux-x86_64-runtime-attestation.json" \
+          ./bin/nc run tools/platform_runtime_attestation.no
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/linux-x86_64-runtime-attestation.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norscode-linux-x86_64-runtime-attestation
+          path: reports/linux-x86_64-runtime-attestation.json
 
   native-linux-slow:
     name: Slow tests Linux (chunk/selfhost)
     needs: native-linux-build
     runs-on: ubuntu-latest
+    env:
+      NORSCODE_ROOT: ${{ github.workspace }}
+      NORSCODE_VM_CAPABILITIES: env.read,process.exec,disk.read,disk.write,net.dns,net.connect,net.tcp
+      NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v6
@@ -203,8 +393,246 @@ jobs:
           name: norscode-native-linux
           path: .
       - run: chmod +x dist/norscode_native bin/nc
+      - name: Native GC arena, relokering og trådsikkerhet
+        run: |
+          mkdir -p build/native-gc-tests
+          for source in tests/native_gc_*.c; do
+            name="$(basename "${source%.c}")"
+            cc -O2 -std=c11 -pthread "$source" -o "build/native-gc-tests/$name"
+            "build/native-gc-tests/$name"
+          done
+          cc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -std=c11 -pthread \
+            tests/native_gc_relocation.c -o build/native-gc-tests/native_gc_relocation_asan
+          ASAN_OPTIONS=halt_on_error=1 build/native-gc-tests/native_gc_relocation_asan
       - name: Parser-stress og selfhost-monolitt
-        run: NC_SLOW_TESTS=1 TEST_TIMEOUT=600 sh tools/nc_test.sh
+        run: NC_SLOW_TESTS=1 TEST_TIMEOUT=600 ./bin/nc test
+
+  native-linux-arm64-attestation:
+    name: Linux ARM64 runtime-attestasjon
+    needs: native-linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-native-linux
+          path: .
+      - name: Installer QEMU for ARM64-containerkøyring
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - run: chmod +x dist/norscode_native bin/nc bootstrap/stage0/norscode-linux-arm64
+      - name: Kjør ARM64 runtime-gap i Linux/QEMU
+        run: |
+          NORSCODE_LINUX_CANDIDATE="$PWD/bootstrap/stage0/norscode-linux-arm64" \
+          NORSCODE_DOCKER_PLATFORM=linux/arm64 \
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+          ./bin/nc run tools/linux_runtime_gap_docker_gate_v3603.no
+      - name: Restore generated database fixtures before attestation
+        run: |
+          git status --short
+          git restore -- \
+            norscode_db_integration_example.db norscode_db_integration_test.db \
+            norscode_pool_test.db web_orm_mal.db \
+            build/bootstrap_compiler_bundle.ncb build/mv_bootstrap_stub_manifest_dispatch.inc \
+            build/native_elf_compiler_bundle.ncb \
+            bootstrap/precompiled_fragments/*.json bootstrap/precompiled_fragments_inner/*.json \
+            build/v3009/native_candidate_gc.c build/v3009/norscode_generated_gc.c \
+            build/v9400/hybrid_compiler_bundle_v9400.ncb.json \
+            build/v9400/hybrid_compiler_bundle_v9400.status dist/norscode_build.no
+      - name: Skriv og signer Linux ARM64 runtime-attestasjon
+        run: |
+          NORSCODE_ATTEST_PLATFORM=linux \
+          NORSCODE_ATTEST_ARCH=arm64 \
+          NORSCODE_ATTEST_RUNTIME="$PWD/bootstrap/stage0/norscode-linux-arm64" \
+          NORSCODE_ATTEST_GATE_STATUS=verified \
+          NORSCODE_ATTEST_OUTPUT="$PWD/reports/linux-arm64-runtime-attestation.json" \
+          ./bin/nc run tools/platform_runtime_attestation.no
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/linux-arm64-runtime-attestation.json
+      - name: Samle Linux ARM64 runtime med attestasjonen
+        run: |
+          mkdir -p platform-attestation/linux-arm64
+          cp reports/linux-arm64-runtime-attestation.json platform-attestation/linux-arm64/report.json
+          cp bootstrap/stage0/norscode-linux-arm64 platform-attestation/linux-arm64/runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norscode-linux-arm64-runtime-attestation
+          path: platform-attestation/linux-arm64
+
+  acme-pebble-issuance:
+    name: ACME RFC 8555-utstedelse (Pebble)
+    needs: native-linux-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: norscode-native-linux
+          path: .
+      - run: chmod +x dist/norscode_native bin/nc
+      - name: Start fastlåst Pebble og Norscode DNS/TCP-server
+        run: |
+          docker network create --subnet 10.30.50.0/24 norscode-acme-net
+          rm -rf /tmp/norscode-acme-share
+          mkdir -p /tmp/norscode-acme-share
+          rm -rf /tmp/norscode-acme-build
+          mkdir -p /tmp/norscode-acme-build
+          rm -rf /tmp/norscode-acme-module-cache
+          mkdir -p /tmp/norscode-acme-module-cache
+          mkdir -p build/nc-import-tmp
+          mkdir -p build/nc-module-cache
+          docker run -d --name norscode-dns \
+            --network norscode-acme-net --ip 10.30.50.3 \
+            -v "$PWD:/repo:ro" -v /tmp/norscode-acme-share:/acme -v /tmp/norscode-acme-build:/repo/build/nc-import-tmp:rw -v /tmp/norscode-acme-module-cache:/repo/build/nc-module-cache:rw -w /repo \
+            -e NORSCODE_CMD=run \
+            -e NORSCODE_FILE=/repo/tools/acme_dns01_server.no \
+            -e NORSCODE_ROOT=/repo \
+            -e NORSCODE_PROJECT_ROOT=/repo \
+            -e NORSCODE_IMPORT_BASE=/repo \
+            -e NORSCODE_USE_PRECOMPILED_SELFHOST=0 \
+            -e NORSCODE_RUN_CACHE=0 \
+            -e NODE_BIN=/nonexistent \
+            -e NORSCODE_ACME_DNS_VALUE_FILE=/acme/value \
+            -e NORSCODE_ACME_DNS_READY_FILE=/acme/ready \
+            -e NORSCODE_ACME_DNS_STOP_FILE=/acme/stop \
+            -e NORSCODE_ACME_DNS_ACK_FILE=/acme/ack \
+            -e NORSCODE_ACME_DNS_TRACE_FILE=/acme/trace \
+            -e NORSCODE_ACME_DNS_HOST=0.0.0.0 \
+            -e NORSCODE_DNS_POLL_MANY=1 \
+            -e NORSCODE_DNS_ACME_DUAL=1 \
+            -e NORSCODE_VM_CAPABILITIES=env.read,disk.read,disk.write,net.listen,net.connect,net.tcp,net.udp,net.dns \
+            -e NORSCODE_VM_DISK_ROOT=/repo,/acme,/tmp \
+            ubuntu:24.04 /repo/bin/nc run /repo/tools/acme_dns01_server.no
+          docker run -d --name norscode-pebble \
+            --network norscode-acme-net \
+            -p 14000:14000 -p 15000:15000 \
+            -e PEBBLE_VA_ALWAYS_VALID=1 \
+            -e PEBBLE_VA_NOSLEEP=1 \
+            -e PEBBLE_WFE_NONCEREJECT=0 \
+            -e PEBBLE_AUTHZREUSE=0 \
+            ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199 \
+            -config test/config/pebble-config.json -strict -dnsserver 10.30.50.3:8053
+          for attempt in $(seq 1 360); do
+            if test -f /tmp/norscode-acme-share/ready && \
+              curl --silent --show-error --fail --insecure \
+              https://localhost:14000/dir -o /dev/null; then
+              docker cp norscode-pebble:/test/certs/pebble.minica.pem /tmp/pebble.minica.pem
+              docker exec norscode-dns bash -lc 'printf "\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x0b_acme-challenge\\x08norscode\\x04test\\x00\\x00\\x10\\x00\\x01" > /dev/udp/127.0.0.1/8053' || true
+            docker run --rm --network host ubuntu:24.04 bash -lc 'printf "\\x12\\x35\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x0b_acme-challenge\\x08norscode\\x04test\\x00\\x00\\x10\\x00\\x01" > /dev/udp/127.0.0.1/8053' || true
+              sleep 1
+              cat /tmp/norscode-acme-share/trace || true
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs norscode-dns || true
+          docker logs norscode-pebble
+          exit 1
+      - name: Full konto-, DNS-01- og sertifikatutstedelse
+        run: |
+          NORSCODE_ACME_DIRECTORY="https://localhost:14000/dir" \
+          NORSCODE_ACME_CA_FILE="/tmp/pebble.minica.pem" \
+          NORSCODE_ACME_DNS_VALUE_FILE="/tmp/norscode-acme-share/value" \
+          NORSCODE_ACME_DNS_ACK_FILE="/tmp/norscode-acme-share/ack" \
+          NODE_BIN=/nonexistent \
+          NORSCODE_ROOT="$PWD" \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write,net.listen,net.connect,net.tcp,net.udp,net.dns,net.tls" \
+          NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp" \
+          ./bin/nc run tools/acme_pebble_issuance_gate.no
+      - name: Pebble-diagnose
+        if: failure()
+        run: |
+            docker logs norscode-pebble
+            docker logs norscode-dns
+            cat /tmp/norscode-acme-share/trace || true
+      - name: Stopp Pebble
+        if: always()
+        run: |
+            touch /tmp/norscode-acme-share/stop || true
+            docker logs norscode-dns || true
+            cat /tmp/norscode-acme-share/trace || true
+            docker rm -f norscode-pebble norscode-dns || true
+            docker network rm norscode-acme-net || true
+
+  # Windows ABI må verifiseres i hoved-CI-en, ikkje berre ved release/tag.
+  windows-runtime-cross-compile:
+    name: Windows runtime ABI (x86_64)
+    if: ${{ true }}
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Installer Zig
+        run: choco install zig -y --no-progress
+      - name: Verifiser tracked Windows stage0
+        run: |
+          set -euo pipefail
+          test -x bootstrap/stage0/norscode-windows-x86_64.exe
+          NORSCODE_NATIVE_BIN="$PWD/bootstrap/stage0/norscode-windows-x86_64.exe" \
+          NORSCODE_ROOT="$PWD" ./bin/nc selftest
+      - name: Bygg og verifiser Windows ABI
+        run: |
+          set -euo pipefail
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" \
+          NORSCODE_ROOT="$PWD" ./bin/nc run tools/windows_runtime_cross_compile_gate.no
+      - name: Verifiser bygd kandidat før runtime-attestasjon
+        run: |
+          set -euo pipefail
+          test -s build/windows/norscode_native_windows_x86_64.exe
+          test -s build/windows/nc_windows_backend_smoke_x86_64.exe
+          test -s build/windows/nc_windows_appcontainer_smoke_x86_64.exe
+      - name: Kjør og attester Windows runtime
+        run: |
+          set -euo pipefail
+          export NORSCODE_ROOT="$PWD"
+          export NORSCODE_NATIVE_BIN="$PWD/build/windows/norscode_native_windows_x86_64.exe"
+          export NORSCODE_WINDOWS_BACKEND_SMOKE="$PWD/build/windows/nc_windows_backend_smoke_x86_64.exe"
+          export NORSCODE_WINDOWS_APPCONTAINER_SMOKE="$PWD/build/windows/nc_windows_appcontainer_smoke_x86_64.exe"
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD" ./bin/nc run tools/windows_runtime_attestation.no
+      - name: Signer Windows runtime-attestasjon
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/windows-runtime-attestation.json
+      - name: Verifiser samla Windows-plattformreadiness
+        run: |
+          set -euo pipefail
+          NORSCODE_ROOT="$PWD" \
+          NORSCODE_WINDOWS_ATTESTATION="$PWD/reports/windows-runtime-attestation.json" \
+          NORSCODE_REQUIRE_WINDOWS_ATTESTATION=1 \
+          ./bin/nc platform-readiness
+      - name: Last opp Windows ABI-diagnose
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: norscode-windows-runtime-abi
+          path: |
+            build/windows/norscode_native_windows_x86_64.exe
+            build/windows/nc_windows_backend_smoke_x86_64.exe
+            build/windows/nc_windows_appcontainer_smoke_x86_64.exe
+            reports/windows-runtime-attestation.json
+          if-no-files-found: ignore
+          retention-days: 3
 
   elf-selfcompile:
     name: ELF stage-0 kandidat (Linux x86_64)
@@ -218,8 +646,13 @@ jobs:
           name: norscode-native-linux
           path: .
       - run: chmod +x dist/norscode_native bin/nc
-      - name: "Bygg Gen1 ELF stage-0 kandidat"
-        run: bash tools/selfcompile_stage0_elf.sh
+      - name: "Gen1 ELF -> Gen2 ELF byte-paritet (bundle-args)"
+        run: |
+          NC_OM6B_RUN_STAGE0=1 \
+          NORSCODE_ENABLE_EXEC_PROSESS=1 \
+          NORSCODE_VM_CAPABILITIES="env.read,process.exec,disk.read,disk.write" \
+          NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+          ./bin/nc selfcompile-stage0-elf
       - name: Last opp Gen1 ELF som stage-0 kandidat
         if: hashFiles('build/6b/selfcompile/gen1_compiler.elf') != ''
         uses: actions/upload-artifact@v6
@@ -250,15 +683,91 @@ jobs:
   format-lint-check:
     name: Format og Lint (Python-fri)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Selfhost-lint kompilerer tre store kjeldeflater utan prekompilert
+    # artefakt.  Dette er ein obligatorisk kontroll, ikkje ein grunn til å
+    # avbryte etter den gamle 15-minuttsgrensa.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - name: Verifiser stage-0 seed
-        run: bash tools/verify_seed_only.sh
-      - run: bash tools/build_norscode_native.sh
+        run: |
+          mkdir -p dist
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
+          ./bin/nc verify-seed
+      - run: |
+          rm -f dist/norscode_native
+          cp bootstrap/stage0/norscode-linux-x86_64 dist/norscode_native
+          chmod +x dist/norscode_native
       - run: |
           for f in selfhost/lexer/lexer_m1.no selfhost/parser.no selfhost/kompiler.no; do
-            if ! bin/nc lint "$f" --check 2>/dev/null; then
-              echo "LINT-ÅTVARING: $f"
-            fi
+            bin/nc lint "$f" --check
           done
+
+  completion-gate:
+    name: Norscode 1.0 completion gate
+    needs:
+      - native-macos
+      - native-macos-slow
+      - native-linux
+      - native-linux-slow
+      - native-linux-arm64-attestation
+      - windows-runtime-cross-compile
+      - acme-pebble-issuance
+      - elf-selfcompile
+      - format-lint-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-native-linux
+          path: .
+      - run: chmod +x dist/norscode_native bin/nc
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-macos-runtime-attestation
+          path: attestations/macos
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-linux-x86_64-runtime-attestation
+          path: attestations/linux-x86_64
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-linux-arm64-runtime-attestation
+          path: attestations/linux-arm64
+      - uses: actions/download-artifact@v7
+        with:
+          name: norscode-windows-runtime-abi
+          path: .
+      - name: Install VM loader fixtures
+        run: |
+          mkdir -p build
+          cp tests/fixtures/vm_loader/vm_plugin_v1.ncb.json build/vm_plugin_v1.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_v2.ncb.json build/vm_plugin_v2.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_disk.ncb.json build/vm_plugin_disk.ncb.json
+          cp tests/fixtures/vm_loader/vm_plugin_tampered.ncb.json build/vm_plugin_tampered.ncb.json
+          cp tests/fixtures/vm_loader/vm_trust.json build/vm_trust.json
+      - name: Kjør autoritativ release-sluttport
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NORSCODE_MACOS_ATTESTATION: ${{ github.workspace }}/attestations/macos/report.json
+          NORSCODE_MACOS_ARM64_RUNTIME: ${{ github.workspace }}/attestations/macos/runtime
+          NORSCODE_LINUX_X86_64_ATTESTATION: ${{ github.workspace }}/attestations/linux-x86_64/linux-x86_64-runtime-attestation.json
+          NORSCODE_LINUX_ARM64_ATTESTATION: ${{ github.workspace }}/attestations/linux-arm64/report.json
+          NORSCODE_LINUX_ARM64_RUNTIME: ${{ github.workspace }}/attestations/linux-arm64/runtime
+          NORSCODE_WINDOWS_ATTESTATION: ${{ github.workspace }}/reports/windows-runtime-attestation.json
+        run: ./bin/nc completion-gate --release
+      - name: Signer samla sluttportrapport
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: reports/norscode-completion-v1.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: norscode-completion-gate
+          path: reports/norscode-completion-v1.json

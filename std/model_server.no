@@ -1,0 +1,167 @@
+# model_server.no - bounded modellserver-kjerne i rein Norscode
+
+bruk std.model_registry som register
+
+funksjon ny(modellregister, maks_ko: heiltall,
+            maks_per_klient: heiltall, standard_timeout: heiltall) {
+    hvis maks_ko <= 0 eller maks_per_klient <= 0 eller standard_timeout <= 0 {
+        kast "ModellServerFeil: ugyldige grenser"
+    }
+    returner {
+        "schema": "norscode.model-server.v1",
+        "register": modellregister,
+        "maks_ko": maks_ko,
+        "maks_per_klient": maks_per_klient,
+        "standard_timeout": standard_timeout,
+        "ko": [],
+        "ferdige": {},
+        "avbrotne": {},
+        "klientar": {},
+        "sekvens": 0,
+        "aktive": 0,
+        "fullfort": 0,
+        "feila": 0
+    }
+}
+
+funksjon _klient_nok(server, klient: tekst) -> boolsk {
+    hvis klient == "" { returner usann }
+    hvis ikkje har_nokkel(server["klientar"], klient) { returner sann }
+    returner server["klientar"][klient] < server["maks_per_klient"]
+}
+
+funksjon _id(server, klient: tekst) -> tekst {
+    server["sekvens"] = server["sekvens"] + 1
+    returner klient + "-" + tekst_fra_heltall(server["sekvens"])
+}
+
+funksjon send_inferens(server, klient: tekst, modellnamn: tekst,
+                       input: liste_heltall, no_ms: heiltall,
+                       timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje register.finnes(server["register"], modellnamn) {
+        kast "ModellServerFeil: ukjent modell"
+    }
+    hvis ikkje _klient_nok(server, klient) {
+        kast "ModellServerFeil: klientkvote overskriden"
+    }
+    hvis lengde(server["ko"]) >= server["maks_ko"] {
+        kast "ModellServerFeil: kø full"
+    }
+    hvis lengde(input) == 0 { kast "ModellServerFeil: input manglar" }
+    la grense = timeout_ms
+    hvis grense <= 0 { grense = server["standard_timeout"] }
+    la id = _id(server, klient)
+    la oppgåve = {
+        "id": id,
+        "klient": klient,
+        "modell": modellnamn,
+        "input": input,
+        "oppretta_ms": no_ms,
+        "deadline_ms": no_ms + grense,
+        "status": "ventar",
+        "resultat": [],
+        "feil": ""
+    }
+    legg_til(server["ko"], oppgåve)
+    hvis ikkje har_nokkel(server["klientar"], klient) { server["klientar"][klient] = 0 }
+    server["klientar"][klient] = server["klientar"][klient] + 1
+    returner oppgåve
+}
+
+funksjon _fjern_klient(server, klient: tekst) {
+    hvis har_nokkel(server["klientar"], klient) {
+        server["klientar"][klient] = server["klientar"][klient] - 1
+        hvis server["klientar"][klient] <= 0 { fjern_nokkel(server["klientar"], klient) }
+    }
+}
+
+funksjon _ta_forste(ko) {
+    la rest = []
+    la i: heiltall = 1
+    mens i < lengde(ko) {
+        legg_til(rest, ko[i])
+        i = i + 1
+    }
+    returner {"oppgåve": ko[0], "rest": rest}
+}
+
+funksjon _fjern_indeks(ko, indeks: heiltall) {
+    la rest = []
+    la i: heiltall = 0
+    mens i < lengde(ko) {
+        hvis i != indeks { legg_til(rest, ko[i]) }
+        i = i + 1
+    }
+    returner rest
+}
+
+funksjon pump(server, no_ms: heiltall) -> ordbok_tekst {
+    hvis lengde(server["ko"]) == 0 { returner {"status": "tom", "id": ""} }
+    la teke = _ta_forste(server["ko"])
+    la oppgåve = teke["oppgåve"]
+    server["ko"] = teke["rest"]
+    _fjern_klient(server, oppgåve["klient"])
+    hvis no_ms > oppgåve["deadline_ms"] {
+        oppgåve["status"] = "timeout"
+        oppgåve["feil"] = "timeout"
+        server["feila"] = server["feila"] + 1
+        server["ferdige"][oppgåve["id"]] = oppgåve
+        returner oppgåve
+    }
+    oppgåve["status"] = "koyrer"
+    server["aktive"] = server["aktive"] + 1
+    prøv {
+        oppgåve["resultat"] = register.inferer(server["register"], oppgåve["modell"], oppgåve["input"])
+        oppgåve["status"] = "ferdig"
+        server["fullfort"] = server["fullfort"] + 1
+    } fang (e) {
+        oppgåve["status"] = "feil"
+        oppgåve["feil"] = tekst(e)
+        server["feila"] = server["feila"] + 1
+    }
+    server["aktive"] = server["aktive"] - 1
+    server["ferdige"][oppgåve["id"]] = oppgåve
+    returner oppgåve
+}
+
+funksjon avbryt(server, id: tekst) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(server["ko"]) {
+        hvis server["ko"][i]["id"] == id {
+            la oppgåve = server["ko"][i]
+            server["ko"] = _fjern_indeks(server["ko"], i)
+            _fjern_klient(server, oppgåve["klient"])
+            oppgåve["status"] = "avbroten"
+            server["avbrotne"][id] = oppgåve
+            returner sann
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon hent(server, id: tekst) -> ordbok_tekst {
+    hvis har_nokkel(server["ferdige"], id) { returner server["ferdige"][id] }
+    hvis har_nokkel(server["avbrotne"], id) { returner server["avbrotne"][id] }
+    la i: heiltall = 0
+    mens i < lengde(server["ko"]) {
+        hvis server["ko"][i]["id"] == id { returner server["ko"][i] }
+        i = i + 1
+    }
+    returner {"id": id, "status": "ukjent", "feil": ""}
+}
+
+funksjon statistikk(server) -> ordbok_tekst {
+    returner {
+        "schema": server["schema"],
+        "ventar": tekst_fra_heltall(lengde(server["ko"])),
+        "aktive": tekst_fra_heltall(server["aktive"]),
+        "fullfort": tekst_fra_heltall(server["fullfort"]),
+        "feila": tekst_fra_heltall(server["feila"]),
+        "maks_ko": tekst_fra_heltall(server["maks_ko"])
+    }
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "schema": "norscode.model-server.v1", "dekning": "bounded kø, klientkvoter, timeout, avbryting, modellregister og deterministisk inferens"}
+}

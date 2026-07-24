@@ -11,9 +11,7 @@ export NORSCODE_ROOT="$ROOT"
 
 OUT="${TMPDIR:-/tmp}/python_free_ci_$$.log"
 RC=0
-cleanup() {
-  rm -f "$OUT"
-}
+cleanup() { rm -f "$OUT"; }
 print_file() {
   _file="$1"
   while IFS= read -r _line || [ -n "$_line" ]; do

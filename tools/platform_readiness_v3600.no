@@ -1,4 +1,5 @@
 // tools/platform_readiness_v3600.no — vis plattformstatus utan å endre filer
+// Linux-kandidaten kan materialiserast med: ./bin/nc build-linux-stage0-docker
 
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
@@ -11,11 +12,21 @@ funksjon env(namn: tekst) -> tekst {
 }
 
 funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+    la normal = builtin.replace(sti, "\\", "/")
+    la quoted = builtin.replace(sti, "'", "'\"'\"'")
+    la normalized_quoted = builtin.replace(quoted, "\\", "/")
+    returner "'" + normalized_quoted + "'"
 }
 
 funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
+    prøv {
+        la comspec = env("ComSpec")
+        hvis comspec != "" {
+            la escaped = builtin.replace(cmd, "\"", "\\\"")
+            returner exec_prosess("bash.exe -lc \"" + escaped + "\"")
+        }
+        returner exec_prosess(cmd)
+    } fang (e) {
         la r: liste_tekst = []
         legg_til(r, "1")
         legg_til(r, "")
@@ -52,9 +63,50 @@ funksjon første_ord(linje_inn: tekst) -> tekst {
     returner out
 }
 
+// Runtime-gaten må kunne lese kandidater også på verten som ikke kan kjøre ELF-en.
 funksjon executable(sti: tekst) -> bool {
-    prøv { returner builtin.fil_finnes(sti) } fang (e) { returner usann }
+    prøv { returner builtin.fil_finnes(sti) }
+    fang (e) { returner usann }
     returner usann
+}
+
+// Ein release-kandidat er ikkje sjølvstendig berre fordi OS-lastaren kan
+// starte han. NCB-image-traileren må vere fysisk innebygd i same binær.
+funksjon har_embedded_ncb(sti: tekst) -> boolsk {
+    hvis ikkje executable(sti) { returner usann }
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        la n = lengde(bytes)
+        hvis n >= lengde("NORSCODE_NCB_IMAGE_V1") {
+            la tail = ""
+            la i = n - lengde("NORSCODE_NCB_IMAGE_V1")
+            mens i < n {
+                tail = tail + builtin.chr(bytes[i])
+                i = i + 1
+            }
+            hvis tail == "NORSCODE_NCB_IMAGE_V1" { returner sann }
+        }
+        hvis n >= lengde("NORSCODE_NCB_TEXT_V1") {
+            la tail_text = ""
+            la j = n - lengde("NORSCODE_NCB_TEXT_V1")
+            mens j < n {
+                tail_text = tail_text + builtin.chr(bytes[j])
+                j = j + 1
+            }
+            hvis tail_text == "NORSCODE_NCB_TEXT_V1" { returner sann }
+        }
+        returner usann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon runtime_smoke(sti: tekst) -> bool {
+    hvis ikkje executable(sti) { returner usann }
+    la tmp = "/tmp/norscode_platform_smoke.no"
+    hvis ikkje ok(kommando("printf 'funksjon start() { returner 0 }\\n' > " + shell(tmp))) { returner usann }
+    la res = kommando("NORSCODE_CMD=run NORSCODE_FILE=" + shell(tmp) + " " + shell(sti))
+    la rydd = kommando("rm -f " + shell(tmp))
+    returner ok(res) og ok(rydd)
 }
 
 funksjon sha256(sti: tekst) -> tekst {
@@ -65,6 +117,35 @@ funksjon sha256(sti: tekst) -> tekst {
         returner første_ord(res_felt(kommando("sha256sum " + shell(sti)), 1))
     }
     returner ""
+}
+
+funksjon windows_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst) -> boolsk {
+    hvis attestasjon == "" eller ikkje builtin.fil_finnes(attestasjon) eller ikkje executable(kandidat) {
+        returner usann
+    }
+    hvis ikkje ok(kommando("command -v gh >/dev/null 2>&1")) { returner usann }
+    // GitHub sin Sigstore-baserte provenance må verifiserast før innhaldet i
+    // rapporten blir brukt. Ei lokalt kopiert eller redigert JSON-fil held ikkje.
+    hvis ikkje ok(kommando("gh attestation verify " + shell(attestasjon) +
+        " --repo Norscode/Norscode >/dev/null 2>&1")) { returner usann }
+    prøv {
+        la data = builtin.json_parse(builtin.fil_les(attestasjon))
+        hvis tekst(data["schema"]) != "norscode-windows-runtime-attestation-v1" eller
+           tekst(data["status"]) != "verified" eller tekst(data["platform"]) != "windows" eller
+           tekst(data["repository"]) != "Norscode/Norscode" eller tekst(data["run_id"]) == "" {
+            returner usann
+        }
+        hvis tekst(data["tests"]) != "backend,appcontainer,network,schannel_tls13,iocp,filesystem,argon2id,acme_sign,acme_verify" {
+            returner usann
+        }
+        la head = trim(res_felt(kommando("cd " + shell(root) + " && git rev-parse HEAD"), 1))
+        hvis head == "" eller tekst(data["source_commit"]) != head { returner usann }
+        hvis ikkje ok(kommando("cd " + shell(root) + " && git diff --quiet && git diff --cached --quiet")) {
+            returner usann
+        }
+        returner tekst(data["runtime_sha256"]) == sha256(kandidat)
+    } fang (e) { returner usann }
+    returner usann
 }
 
 funksjon rapporter(sti: tekst, ok_melding: tekst, warn_melding: tekst, sha_label: tekst) -> heiltall {
@@ -83,30 +164,180 @@ funksjon start() -> heiltall {
     hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
     la macos_dist = root + "/dist/norscode_native"
     la macos_stage0 = root + "/bootstrap/stage0/norscode-macos-arm64"
-    la linux_candidate = root + "/build/v3600/linux/norscode_native_linux_x86_64_v3600"
+    la linux_candidate = env("NORSCODE_LINUX_CANDIDATE")
+    hvis linux_candidate == "" {
+        la v9646_embedded = root + "/build/v9646/norscode_native_linux_x86_64_embedded_payload"
+        hvis executable(v9646_embedded) {
+            linux_candidate = v9646_embedded
+        } ellers {
+            la v9630_embedded = root + "/build/v9630/norscode_native_linux_x86_64_embedded"
+            hvis executable(v9630_embedded) { linux_candidate = v9630_embedded }
+        }
+    }
+    hvis linux_candidate == "" {
+        la portable_candidate = root + "/build/v3600/linux/norscode_native_linux_x86_64_v3605_zigargon"
+        hvis executable(portable_candidate) {
+            linux_candidate = portable_candidate
+        } ellers {
+            linux_candidate = root + "/build/v3600/linux/norscode_native_linux_x86_64_v3602"
+        }
+    }
+    la linux_arm64_candidate = root + "/build/v9646/norscode_native_linux_aarch64_embedded_payload"
+    hvis ikkje executable(linux_arm64_candidate) {
+        la linux_arm64_candidate = root + "/build/v9630/norscode_native_linux_aarch64_embedded"
+        hvis ikkje executable(linux_arm64_candidate) {
+            la linux_arm64_candidate = root + "/build/v3600/linux/norscode_native_linux_aarch64_v3608_zigargon"
+        }
+    }
     la linux_stage0 = root + "/bootstrap/stage0/norscode-linux-x86_64"
+    la linux_arm64_stage0 = root + "/bootstrap/stage0/norscode-linux-arm64"
+    la windows_stage0 = root + "/bootstrap/stage0/norscode-windows-x86_64.exe"
+    la windows_candidate = root + "/build/v9646/norscode_native_windows_x86_64_embedded_payload.exe"
+    hvis ikkje executable(windows_candidate) {
+        la windows_candidate = root + "/build/v9630/norscode_native_windows_x86_64_embedded.exe"
+        hvis ikkje executable(windows_candidate) {
+            la windows_candidate = root + "/build/windows/norscode_native_windows_x86_64.exe"
+        }
+    }
+    la windows_attestasjon = env("NORSCODE_WINDOWS_ATTESTATION")
+    la krev_windows_attestasjon = env("NORSCODE_REQUIRE_WINDOWS_ATTESTATION") == "1"
+    la host_os = trim(res_felt(kommando("uname -s"), 1))
+    la macos_ready = "false"
+    hvis runtime_smoke(macos_dist) og har_embedded_ncb(macos_dist) { macos_ready = "true" }
+    la linux_docker_ready = "false"
+    la linux_arm64_docker_ready = "false"
+    la windows_ready = "false"
+    hvis env("NORSCODE_VERIFY_LINUX_DOCKER") == "1" og executable(linux_candidate) {
+        la verify = kommando("NORSCODE_ROOT=" + shell(root) +
+            " NORSCODE_ENABLE_EXEC_PROSESS=1" +
+            " NORSCODE_VM_CAPABILITIES='env.read,process.exec,disk.read,disk.write'" +
+            " NORSCODE_VM_DISK_ROOT=" + shell(root + ",.,/tmp,/private/tmp") +
+            " " + shell(root + "/bin/nc") + " run " +
+            shell(root + "/tools/linux_runtime_gap_docker_gate_v3603.no"))
+        hvis ok(verify) { linux_docker_ready = "true" }
+    }
+    hvis env("NORSCODE_VERIFY_LINUX_DOCKER") == "1" og executable(linux_arm64_candidate) {
+        la arm_verify = kommando("NORSCODE_ROOT=" + shell(root) +
+            " NORSCODE_LINUX_CANDIDATE=" + shell(linux_arm64_candidate) +
+            " NORSCODE_DOCKER_PLATFORM=linux/arm64" +
+            " NORSCODE_ENABLE_EXEC_PROSESS=1" +
+            " NORSCODE_VM_CAPABILITIES='env.read,process.exec,disk.read,disk.write'" +
+            " NORSCODE_VM_DISK_ROOT=" + shell(root + ",.,/tmp,/private/tmp") +
+            " " + shell(root + "/bin/nc") + " run " +
+            shell(root + "/tools/linux_runtime_gap_docker_gate_v3603.no"))
+        hvis ok(arm_verify) { linux_arm64_docker_ready = "true" }
+    }
+    hvis windows_attestasjon_ok(root, windows_candidate, windows_attestasjon) {
+        windows_ready = "true"
+    }
 
     linje("== v3600 platform readiness ==")
 
     rapporter(macos_dist, "[OK] macOS dist finst: dist/norscode_native", "[WARN] macOS dist manglar eller er ikkje køyrbar", "macOS dist sha256")
+    hvis har_embedded_ncb(macos_dist) {
+        linje("[OK] macOS dist har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] macOS dist manglar innebygd NCB-image")
+    }
     rapporter(macos_stage0, "[OK] macOS stage0 finst: bootstrap/stage0/norscode-macos-arm64", "[WARN] macOS stage0 manglar eller er ikkje køyrbar", "macOS stage0 sha256")
+    hvis har_embedded_ncb(macos_stage0) {
+        linje("[OK] macOS stage0 har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] macOS stage0 manglar innebygd NCB-image")
+    }
 
     hvis executable(linux_candidate) {
-        linje("[OK] Linux x86_64-kandidat finst: build/v3600/linux/norscode_native_linux_x86_64_v3600")
+        linje("[OK] Linux x86_64-kandidat finst: " + linux_candidate)
+        hvis har_embedded_ncb(linux_candidate) {
+            linje("[OK] Linux x86_64-kandidat har innebygd NCB-image")
+        } ellers {
+            linje("[PENDING] Linux x86_64-kandidat manglar innebygd NCB-image")
+        }
         la h = sha256(linux_candidate)
         hvis h != "" { linje("[INFO] Linux candidate sha256=" + h) }
     } ellers {
         linje("[PENDING] Linux x86_64-kandidat manglar.")
-        linje("[INFO] Køyr: ./bin/nc build-linux-stage0-docker")
+        linje("[INFO] Køyr: ./bin/nc run tools/build_linux_cross_candidate_v3602.no eller tools/build_linux_zig_argon_candidate_v3606.no")
+    }
+
+    hvis executable(linux_arm64_candidate) {
+        linje("[OK] Linux ARM64-kandidat finst: " + linux_arm64_candidate)
+        hvis har_embedded_ncb(linux_arm64_candidate) {
+            linje("[OK] Linux ARM64-kandidat har innebygd NCB-image")
+        } ellers {
+            linje("[PENDING] Linux ARM64-kandidat manglar innebygd NCB-image")
+        }
+        la h = sha256(linux_arm64_candidate)
+        hvis h != "" { linje("[INFO] Linux ARM64 candidate sha256=" + h) }
+        hvis linux_arm64_docker_ready == "true" { linje("[OK] Linux ARM64 runtime-gap køyrd i Docker") }
+    } ellers {
+        linje("[PENDING] Linux ARM64-kandidat manglar.")
     }
 
     rapporter(linux_stage0, "[OK] Linux x86_64 stage0 finst: bootstrap/stage0/norscode-linux-x86_64", "[PENDING] Linux x86_64 stage0 manglar.", "Linux stage0 sha256")
+    hvis har_embedded_ncb(linux_stage0) {
+        linje("[OK] Linux x86_64 stage0 har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] Linux x86_64 stage0 manglar innebygd NCB-image")
+    }
+    rapporter(linux_arm64_stage0, "[OK] Linux ARM64 stage0 finst: bootstrap/stage0/norscode-linux-arm64", "[PENDING] Linux ARM64 stage0 manglar.", "Linux ARM64 stage0 sha256")
+    hvis har_embedded_ncb(linux_arm64_stage0) {
+        linje("[OK] Linux ARM64 stage0 har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] Linux ARM64 stage0 manglar innebygd NCB-image")
+    }
+    rapporter(windows_stage0, "[OK] Windows x86_64 stage0 finst: bootstrap/stage0/norscode-windows-x86_64.exe", "[PENDING] Windows x86_64 stage0 manglar.", "Windows stage0 sha256")
+    hvis har_embedded_ncb(windows_stage0) {
+        linje("[OK] Windows stage0 har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] Windows stage0 manglar innebygd NCB-image")
+    }
+    rapporter(windows_candidate, "[OK] Windows x86_64 cross-linka kandidat finst", "[PENDING] Windows x86_64-kandidat manglar.", "Windows candidate sha256")
+    hvis har_embedded_ncb(windows_candidate) {
+        linje("[OK] Windows-kandidat har innebygd NCB-image")
+    } ellers {
+        linje("[PENDING] Windows-kandidat manglar innebygd NCB-image")
+    }
 
     linje("")
-    linje("production_ready_macos=true")
-    linje("production_ready_linux_x86_64=true")
-    linje("production_ready_all_platforms=true")
-    linje("reason=macos_and_linux_x86_64_runtime_gap_green")
+    linje("production_ready_macos=" + macos_ready)
+    hvis linux_docker_ready == "true" {
+        linje("production_ready_linux_x86_64=true")
+        linje("reason=linux_docker_runtime_gap_verified")
+    } ellers hvis host_os == "Linux" og runtime_smoke(linux_candidate) {
+        linje("production_ready_linux_x86_64=true")
+        linje("reason=linux_host_execution_verified")
+    } ellers {
+        linje("production_ready_linux_x86_64=false")
+        hvis host_os == "Linux" {
+            linje("reason=linux_candidate_selftest_failed")
+        } ellers {
+            linje("reason=linux_candidate_cross_compiled_but_execution_requires_linux_host")
+        }
+    }
+    linje("production_ready_linux_arm64=" + linux_arm64_docker_ready)
+    hvis macos_ready == "true" og linux_docker_ready == "true" og linux_arm64_docker_ready == "true" {
+        linje("production_ready_unix=true")
+    } ellers {
+        linje("production_ready_unix=false")
+    }
+    // Cross-link er nyttig bevis, men er ikkje det same som ekte Windows-køyring.
+    linje("production_ready_windows=" + windows_ready)
+    hvis windows_ready == "true" {
+        linje("windows_reason=github_signed_real_windows_execution_attestation")
+    } ellers {
+        linje("windows_reason=requires_real_windows_execution_attestation")
+    }
+    hvis macos_ready == "true" og linux_docker_ready == "true" og
+       linux_arm64_docker_ready == "true" og windows_ready == "true" {
+        linje("production_ready_all_platforms=true")
+    } ellers {
+        linje("production_ready_all_platforms=false")
+    }
     linje("[SAFE] Ingen filer vart endra.")
+    hvis krev_windows_attestasjon og windows_ready != "true" {
+        linje("[FAIL] Windows-attestasjon er påkravd, men ikkje verifisert.")
+        returner 2
+    }
     returner 0
 }

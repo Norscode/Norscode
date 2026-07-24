@@ -78,12 +78,16 @@ sha256_for_file() {
   first_word "$_line"
 }
 
-env \
-  NORSCODE_ENABLE_EXEC_PROSESS=1 \
-  NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
-  NORSCODE_INSTALL_PREFIX="$PREFIX" \
-  NORSCODE_ROOT="$ROOT_DIR" \
-  "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no" >"$out" 2>&1 || rc=$?
+if [ "${NORSCODE_INSTALL_FORCE_RESERVE:-0}" != "1" ]; then
+  env \
+    NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_INSTALL_ARCHIVE="$ARCHIVE_PATH" \
+    NORSCODE_INSTALL_PREFIX="$PREFIX" \
+    NORSCODE_ROOT="$ROOT_DIR" \
+    "$ROOT_DIR/bin/nc" run "$ROOT_DIR/tools/install_release.no" >"$out" 2>&1 || rc=$?
+else
+  rc=1
+fi
 if [ "$rc" -eq 0 ]; then
   print_file "$out"
   rm -f "$out"
@@ -144,14 +148,14 @@ ln -sfn "$current_link/bin/nor" "$PREFIX/bin/nor"
 ln -sfn "$current_link/bin/nl" "$PREFIX/bin/nl"
 ln -sfn "$current_link/bin/bootstrap" "$PREFIX/bin/bootstrap"
 
-for entry in compiler dist docs examples norcode norcode.toml selfhost scripts std tests tools README.md LICENSE CHANGELOG.md Makefile app.no; do
+for entry in bootstrap compiler dist docs examples norcode norcode.toml selfhost scripts std tests tools README.md LICENSE CHANGELOG.md Makefile app.no; do
   if [ -e "$current_link/$entry" ]; then
     ln -sfn "$current_link/$entry" "$PREFIX/$entry"
   fi
 done
 
 if [ "$(uname -s)" = "Darwin" ] && [ -x "$current_link/bin/nc" ]; then
-  (cd "$current_link" && "$current_link/bin/nc" install-macos-file-icons) || true
+  (cd "$current_link" && "$current_link/bin/nc" install-macos-file-icons) >/dev/null 2>&1 || true
 fi
 
 printf 'Installert release: %s\n' "$target_dir"
