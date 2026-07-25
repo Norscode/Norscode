@@ -29,13 +29,42 @@ funksjon omdøyp_kall_i_kode(fn, modul_namn: tekst) {
     slutt
 }
 
+funksjon bundler_er_heiltallstekst(v: tekst) -> boolsk {
+    hvis v == "" { returner usann }
+    la start = 0
+    hvis v[0] == "-" {
+        hvis lengde(v) == 1 { returner usann }
+        start = 1
+    }
+    la i = start
+    mens i < lengde(v) {
+        hvis v[i] < "0" eller v[i] > "9" { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
 funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) {
     // Strukturell omdøyping (ikkje berre tekst-replace — unngår feil i "module":"__main__" osv.)
     // Returnerer parsed object directly to avoid serialize-parse cycle
     // Bruk den innebygde Norscode-JSON-parseren her. Den custom parseren i
     // selfhost.json er korrekt for kjelde-JSON, men blir unødvendig treg når
     // L5b skal traversere store, allereie serialiserte NCB-bundlar i pure VM.
-    la ncb = builtin.json_parse_raw(ncb_json)
+    // CALL-operandar er den einaste store, repeterte strukturen som må
+    // moduliserast. Gjer den avgrensa rewrite-en før parsing, slik at Gen2
+    // ikkje må traversere millionar av instruksjonar i Norscode-VM-en.
+    // Markøren finst berre som opcode-operander i NCB-json frå kompilatoren.
+    la call_prefix = "\"CALL\",\"__main__."
+    la rewritten = builtin.replace(ncb_json, call_prefix, "\"CALL\",\"" + modul_namn + ".")
+    // Older nested VM hosts materialise JSON null operands as the text
+    // "null".  Compiler NCBs use null only as opcode operands here; restore
+    // the typed representation before the structural parse so Gen1/Gen2
+    // bundles remain byte-identical.
+    rewritten = builtin.replace(rewritten, "[\"LOAD_NAME\",\"null\"]", "[\"LOAD_NAME\",null]")
+    rewritten = builtin.replace(rewritten, "[\"PUSH_CONST\",\"null\"]", "[\"PUSH_CONST\",null]")
+    rewritten = builtin.replace(rewritten, "\"LOAD_NAME\",\n          \"null\"", "\"LOAD_NAME\",\n          null")
+    rewritten = builtin.replace(rewritten, "\"PUSH_CONST\",\n          \"null\"", "\"PUSH_CONST\",\n          null")
+    la ncb = builtin.json_parse_raw(rewritten)
     la fns = ncb["functions"]
     la nk = nøkler(fns)
     la ny_fns: ordbok<tekst, tekst> = {}
@@ -45,12 +74,45 @@ funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) {
         la namn = fn["name"]
         la ny_nøkkel = modul_namn + "." + namn
         fn["module"] = modul_namn
-        omdøyp_kall_i_kode(fn, modul_namn)
         ny_fns[ny_nøkkel] = fn
         i = i + 1
     slutt
     ncb["functions"] = ny_fns
     returner ncb
+}
+
+funksjon normaliser_l5b_bundle_literals(bundle: tekst) -> tekst {
+    la out = bundle
+    la tal = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "16", "64", "200"]
+    la i = 0
+    mens i < lengde(tal) {
+        la t = tal[i]
+        out = builtin.replace(out, "[\"PUSH_CONST\",\"" + t + "\"]", "[\"PUSH_CONST\"," + t + "]")
+        out = builtin.replace(out, "[\"LOAD_NAME\",\"" + t + "\"]", "[\"LOAD_NAME\"," + t + "]")
+        i = i + 1
+    }
+    la negative = ["-1"]
+    la ni = 0
+    mens ni < lengde(negative) {
+        la t = negative[ni]
+        out = builtin.replace(out, "[\"PUSH_CONST\",\"" + t + "\"]", "[\"PUSH_CONST\"," + t + "]")
+        out = builtin.replace(out, "[\"LOAD_NAME\",\"" + t + "\"]", "[\"LOAD_NAME\"," + t + "]")
+        ni = ni + 1
+    }
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"true\"]", "[\"PUSH_CONST\",true]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"false\"]", "[\"PUSH_CONST\",false]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"null\"]", "[\"PUSH_CONST\",null]")
+    out = builtin.replace(out, "[\"LOAD_NAME\",\"null\"]", "[\"LOAD_NAME\",null]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"[]\"]", "[\"PUSH_CONST\",[]]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"{}\"]", "[\"PUSH_CONST\",{}]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"[\\\"RETURN\\\"]\"]", "[\"PUSH_CONST\",[\"RETURN\"]]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"[\\\"POP\\\"]\"]", "[\"PUSH_CONST\",[\"POP\"]]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"[1]\"]", "[\"PUSH_CONST\",[1]]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"[\\\"eksempel\\\"]\"]", "[\"PUSH_CONST\",[\"eksempel\"]]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"{\\\"type\\\":\\\"integer\\\"}\"]", "[\"PUSH_CONST\",{\"type\":\"integer\"}]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"{\\\"type\\\":\\\"boolean\\\"}\"]", "[\"PUSH_CONST\",{\"type\":\"boolean\"}]")
+    out = builtin.replace(out, "[\"PUSH_CONST\",\"{\\\"type\\\":\\\"string\\\"}\"]", "[\"PUSH_CONST\",{\"type\":\"string\"}]")
+    returner out
 }
 
 // ─── Slå saman funksjonsordbøker ─────────────────────────────────────────────
@@ -285,6 +347,9 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
     //-forekomstar. Den gamle normaliseringsløypa gjekk teikn-for-teikn med
     // streng-konkatenering og blei kvadratisk på compiler-bundlen.
     la bundle = builtin.json_stringify(bundle_ncb)
+    hvis miljo_hent("NORSCODE_L5B_LITERAL_NORMALIZE") == "1" {
+        bundle = normaliser_l5b_bundle_literals(bundle)
+    }
     fil_skriv(utfil, bundle)
     skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(bundle)) + " bytes)\n")
 }
