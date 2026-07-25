@@ -33,6 +33,15 @@ funksjon ny_rammeverk(namn: tekst, ip: heiltall) {
     ramme["namn"] = namn
     ramme["ip"] = ip
     ramme["vars"] = {}
+    // Stage-zero bytecode may encode literal null/booleans as LOAD_NAME
+    // operands. Seed the frame with the language constants so those loads
+    // remain valid in the pure VM as well as in the native host.
+    ramme["vars"]["null"] = 0
+    ramme["vars"]["ingenting"] = 0
+    ramme["vars"]["true"] = sann
+    ramme["vars"]["sann"] = sann
+    ramme["vars"]["false"] = usann
+    ramme["vars"]["usann"] = usann
     ramme["stack"] = []
     ramme["heap_stack"] = []
     ramme["var_heap"] = {}
@@ -2879,7 +2888,38 @@ funksjon _rt_map_nøkler(map_obj)
     hvis map_obj == null {
         returner []
     }
-    returner nøkler(map_obj)
+    la serialisert = json_stringify(map_obj)
+    la ut: liste_tekst = []
+    hvis lengde(serialisert) < 2 eller builtin.slice(serialisert, 0, 1) != "{" {
+        returner ut
+    }
+    la i = 1
+    mens i < lengde(serialisert) - 1 {
+        mens i < lengde(serialisert) - 1 og (builtin.slice(serialisert, i, i + 1) == " " eller builtin.slice(serialisert, i, i + 1) == ",") {
+            i = i + 1
+        }
+        hvis i >= lengde(serialisert) - 1 eller builtin.slice(serialisert, i, i + 1) != "\"" { bryt }
+        la start = i + 1
+        i = start
+        la unnsluppet = usann
+        mens i < lengde(serialisert) {
+            la teikn = builtin.slice(serialisert, i, i + 1)
+            hvis teikn == "\"" og ikkje unnsluppet { bryt }
+            hvis teikn == "\\" og ikkje unnsluppet {
+                unnsluppet = sann
+            } ellers {
+                unnsluppet = usann
+            }
+            i = i + 1
+        }
+        hvis i >= lengde(serialisert) { bryt }
+        legg_til(ut, builtin.slice(serialisert, start, i))
+        i = i + 1
+        mens i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) != ":" { i = i + 1 }
+        mens i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) != "," { i = i + 1 }
+        hvis i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) == "," { i = i + 1 }
+    }
+    returner ut
 slutt
 
 funksjon _rt_har_nøkkel(map_obj, nøkkel)
@@ -3176,7 +3216,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     vm_security_enforce(active_functions, namn, args)
 
-    hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" {
+    hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" eller namn == "builtin.nøkkel_finnes" {
         returner _rt_har_nøkkel(args[0], args[1])
     }
     hvis namn == "builtin.web_escape_html" {
@@ -4904,49 +4944,11 @@ funksjon vm_index_map_har_nokkel(functions, obj, nokkel, heap_id: tekst)
 slutt
 
 funksjon vm_map_har_nokkel(obj, nokkel)
-    // Top-level `la` bindings are not materialised by every bootstrap host.
-    // Keep the capability probe frame-local so precompiled VM execution never
-    // reads an uninitialised global on older stage-0 runtimes.
-    la vm_builtin_nokkel_finnes_status: tekst = "ukjent"
-    // Use the key list as the source of truth. Native hosts may return a
-    // sentinel (null/0) for both missing keys and present falsey values.
     hvis obj == null { returner usann }
-    // The host key-existence primitive is authoritative and avoids the
-    // allocation-heavy nøkler() scan for the ordinary VM map path. Keep the
-    // scan below as a compatibility fallback for older embedded hosts.
-    hvis vm_builtin_nokkel_finnes_status != "ikkje_støtta" {
-        prøv {
-            la funne = builtin.nøkkel_finnes(obj, nokkel)
-            vm_builtin_nokkel_finnes_status = "støtta"
-            returner funne
-        } fang (e) {
-            vm_builtin_nokkel_finnes_status = "ikkje_støtta"
-        }
-    }
-    hvis builtin.type(obj) == "ordbok" og lengde(obj) > 400 og obj["__vm_active_function_cache_marker__"] == "sann" {
-        hvis vm_active_function_key_cache[nokkel] == "sann" { returner sann }
-        hvis vm_active_function_key_cache["__complete__"] == "sann" { returner usann }
-        la aktive_nøklar = nøkler(obj)
-        la ai = 0
-        mens ai < lengde(aktive_nøklar)
-            hvis aktive_nøklar[ai] == nokkel {
-                vm_active_function_key_cache[nokkel] = "sann"
-                returner sann
-            }
-            ai = ai + 1
-        slutt
-        vm_active_function_key_cache["__complete__"] = "sann"
-        returner usann
-    }
-    la nk = nøkler(obj)
-    la i = 0
-    mens i < lengde(nk)
-        hvis nk[i] == nokkel
-            returner sann
-        slutt
-        i = i + 1
-    slutt
-    returner usann
+    // Keep lookup independent of top-level VM globals. Older stage-0 hosts
+    // do not materialise those bindings, while the native key primitive is
+    // available in every supported host.
+    returner builtin.har_nokkel(obj, nokkel)
 slutt
 
 funksjon vm_map_get(obj, nokkel)
@@ -4979,6 +4981,17 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
         la alt = "selfhost.common." + builtin.slice(namn, 9, lengde(namn))
         hvis vm_map_har_nokkel(functions, alt) {
             returner alt
+        }
+    }
+
+    // Bootstrap bytecode is compiled under __main__, while imported
+    // selfhost modules retain their qualified names in consumer bytecode.
+    // Resolve the VM module explicitly before fuzzy suffix lookup so a
+    // stage-zero host does not need a separately materialised alias table.
+    hvis builtin.starts_with(namn, "selfhost.vm.") {
+        la vm_alias = "__main__." + builtin.slice(namn, 12, lengde(namn))
+        hvis vm_map_har_nokkel(functions, vm_alias) {
+            returner vm_alias
         }
     }
 
@@ -5891,11 +5904,6 @@ funksjon køyr_funksjon(
             la obj = stack_pop(ramme)
             la obj_heap_id = ramme["last_heap_id"]
             obj[indeks] = verdi
-            // Ein dynamisk funksjonsinnsetting gjer negative cache-opplysningar
-            // ugyldige; neste oppslag byggjer tabellindeksen på nytt.
-            hvis builtin.type(obj) == "ordbok" og lengde(obj) > 400 og obj["__vm_active_function_cache_marker__"] == "sann" {
-                vm_active_function_key_cache["__complete__"] = "usann"
-            }
             // Compiler expects assignment to leave the mutated object on the stack
             // so statement-form assignments can clean it up with POP.
             stack_push_heap(ramme, obj, obj_heap_id)
@@ -6493,18 +6501,9 @@ funksjon køyr_funksjon(
 
 funksjon vm_sett_kontekst(ncb: ordbok<tekst, tekst>) -> heltall {
     vm_active_functions = ncb["functions"]
-    vm_active_function_key_cache = {}
-    vm_active_functions["__vm_active_function_cache_marker__"] = "sann"
     vm_active_functions["__vm_inherit_env__"] = "sann"
     vm_active_functions["__vm_target_policy__"] = "sann"
     vm_runtime_init(vm_active_functions, sann)
-    la aktive_nøklar = nøkler(vm_active_functions)
-    la ai = 0
-    mens ai < lengde(aktive_nøklar) {
-        vm_active_function_key_cache[aktive_nøklar[ai]] = "sann"
-        ai = ai + 1
-    }
-    vm_active_function_key_cache["__complete__"] = "sann"
     vm_active_ncb = ncb
     vm_request_counter = 1
 
@@ -6523,18 +6522,9 @@ funksjon køyr_med_kontekst(entry: tekst, args: liste) -> heltall {
 funksjon køyr_ncb(ncb: ordbok<tekst, tekst>) -> heltall {
     la functions = ncb["functions"]
     vm_active_functions = functions
-    vm_active_function_key_cache = {}
-    functions["__vm_active_function_cache_marker__"] = "sann"
     functions["__vm_inherit_env__"] = "sann"
     functions["__vm_target_policy__"] = "sann"
     vm_runtime_init(functions, sann)
-    la aktive_nøklar = nøkler(functions)
-    la ai = 0
-    mens ai < lengde(aktive_nøklar) {
-        vm_active_function_key_cache[aktive_nøklar[ai]] = "sann"
-        ai = ai + 1
-    }
-    vm_active_function_key_cache["__complete__"] = "sann"
     la entry: tekst = ncb["entry"]
 
     la resultat = køyr_funksjon(entry, [], functions, 0)
