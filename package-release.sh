@@ -110,7 +110,13 @@ entries=".github AGENTS.md CHANGELOG.md INSTALL.md LICENSE Makefile README.md RO
 package_entries=""
 for entry in $entries; do
   if [ -e "$ROOT_DIR/$entry" ]; then
-    cp -R "$ROOT_DIR/$entry" "$staging/$entry"
+    if [ "$entry" = "dist" ]; then
+      mkdir -p "$staging/dist"
+      cp "$ROOT_DIR/dist/norscode_native" "$staging/dist/norscode_native"
+      cp "$ROOT_DIR/dist/norscode_native_embedded" "$staging/dist/norscode_native_embedded"
+    else
+      cp -R "$ROOT_DIR/$entry" "$staging/$entry"
+    fi
     package_entries="$package_entries $entry"
   fi
 done
