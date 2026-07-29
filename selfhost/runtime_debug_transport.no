@@ -1,0 +1,146 @@
+# debug_transport.no - autentisert ekstern transport for pure VM-debugger
+
+bruk selfhost.vm som vm
+
+funksjon _trygg_del(verdi: tekst) -> boolsk {
+    hvis verdi == "" eller builtin.starts_with(verdi, "/") { returner usann }
+    hvis builtin.index_of(verdi, "..") >= 0 { returner usann }
+    hvis builtin.index_of(verdi, "\n") >= 0 eller builtin.index_of(verdi, "\u0000") >= 0 { returner usann }
+    returner sann
+}
+
+funksjon ny_transport(root: tekst, token: tekst) -> ordbok_tekst {
+    la t: ordbok_tekst = {"status": "feil", "error": "", "last_sequence": "0", "auth_failures": "0", "replay_rejections": "0", "events": "0"}
+    hvis ikkje _trygg_del(root) { t["error"] = "ugyldig root"  returner t }
+    hvis lengde(token) < 16 eller builtin.index_of(token, "|") >= 0 eller builtin.index_of(token, "\n") >= 0 {
+        t["error"] = "token må vere minst 16 teikn utan skiljeteikn"
+        returner t
+    }
+    t["status"] = "ready"
+    t["root"] = root
+    t["token"] = token
+    t["command_path"] = root + "/commands.log"
+    t["event_path"] = root + "/event.json"
+    t["event_log_path"] = root + "/events.log"
+    returner t
+}
+
+funksjon _kommando_fra_linje(t: ordbok_tekst, line: tekst) -> ordbok_tekst {
+    la tom: ordbok_tekst = {"status": "skip"}
+    la parts = builtin.split(builtin.trim(line), "|")
+    hvis lengde(parts) < 3 { returner tom }
+    hvis parts[0] != t["token"] {
+        t["auth_failures"] = tekst_fra_heltall(heltall_fra_tekst(t["auth_failures"]) + 1)
+        returner tom
+    }
+    la seq: heiltall = 0
+    prøv { seq = heltall_fra_tekst(parts[1]) } fang (e) { returner tom }
+    hvis seq <= heltall_fra_tekst(t["last_sequence"]) {
+        t["replay_rejections"] = tekst_fra_heltall(heltall_fra_tekst(t["replay_rejections"]) + 1)
+        returner tom
+    }
+    la c: ordbok_tekst = {"status": "ok", "sequence": tekst_fra_heltall(seq), "action": parts[2], "arg1": "", "arg2": ""}
+    hvis lengde(parts) > 3 { c["arg1"] = parts[3] }
+    hvis lengde(parts) > 4 { c["arg2"] = parts[4] }
+    returner c
+}
+
+funksjon les_kommando(t: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la start_ms = builtin.tid_ms()
+    mens builtin.tid_ms() - start_ms <= timeout_ms {
+        hvis builtin.fil_finnes(t["command_path"]) {
+            la lines = builtin.split(builtin.fil_les(t["command_path"]), "\n")
+            la i: heiltall = 0
+            mens i < lengde(lines) {
+                hvis builtin.trim(lines[i]) != "" {
+                    la c = _kommando_fra_linje(t, lines[i])
+                    hvis c["status"] == "ok" {
+                        t["last_sequence"] = c["sequence"]
+                        returner c
+                    }
+                }
+                i = i + 1
+            }
+        }
+    }
+    returner {"status": "timeout", "action": "", "sequence": t["last_sequence"], "arg1": "", "arg2": ""}
+}
+
+funksjon skriv_event(t: ordbok_tekst, kind: tekst, data) -> boolsk {
+    la event = {"protocol": "norscode-debug-v1", "kind": kind, "sequence": t["last_sequence"], "timestamp_ms": tekst_fra_heltall(builtin.tid_ms()), "data": data}
+    la encoded = builtin.json_stringify(event)
+    builtin.fil_skriv(t["event_path"], encoded)
+    la log = ""
+    hvis builtin.fil_finnes(t["event_log_path"]) { log = builtin.fil_les(t["event_log_path"]) }
+    builtin.fil_skriv(t["event_log_path"], log + encoded + "\n")
+    t["events"] = tekst_fra_heltall(heltall_fra_tekst(t["events"]) + 1)
+    returner sann
+}
+
+funksjon _tal(t: tekst) -> heiltall {
+    prøv { returner heltall_fra_tekst(t) } fang (e) { returner -1 }
+    returner -1
+}
+
+funksjon bruk_kommando(functions, t: ordbok_tekst, c: ordbok_tekst) -> ordbok_tekst {
+    la action = c["action"]
+    la arg1 = c["arg1"]
+    la arg2 = c["arg2"]
+    hvis action == "continue" eller action == "step" eller action == "step_line" {
+        returner {"status": "resume", "mode": action}
+    }
+    hvis action == "breakpoint_add" {
+        la ok = vm.vm_debug_breakpoint_add(functions, arg1, _tal(arg2))
+        returner {"status": tekst(ok)}
+    }
+    hvis action == "breakpoint_remove" {
+        la ok = vm.vm_debug_breakpoint_remove(functions, arg1, _tal(arg2))
+        returner {"status": tekst(ok)}
+    }
+    hvis action == "watch_add" {
+        la ok = vm.vm_debug_watch_add(functions, arg1)
+        returner {"status": tekst(ok)}
+    }
+    hvis action == "watch_remove" {
+        la ok = vm.vm_debug_watch_remove(functions, arg1)
+        returner {"status": tekst(ok)}
+    }
+    hvis action == "snapshot" { returner {"status": "snapshot"} }
+    hvis action == "stop" {
+        vm.vm_debug_abort(functions)
+        returner {"status": "stopped"}
+    }
+    returner {"status": "error", "error": "ukjent debuggerkommando"}
+}
+
+funksjon køyr(functions, entry: tekst, args: liste, t: ordbok_tekst, timeout_ms: heiltall) {
+    hvis t["status"] != "ready" { kast "Debuggertransport er ikkje klar: " + t["error"] }
+    vm.vm_runtime_init(functions, usann)
+    functions["__vm_debug__"]["enabled"] = "sann"
+    vm.vm_debug_suspend_on_hit(functions, sann)
+    functions["__vm_debug__"]["suspend_on_hit"] = "sann"
+    la result = vm.køyr_funksjon(entry, args, functions, 0)
+    mens builtin.type(result) == "ordbok" og result["status"] == "paused" {
+        skriv_event(t, "paused", functions["__vm_debug__"])
+        la resumed = usann
+        mens ikkje resumed {
+            la command = les_kommando(t, timeout_ms)
+            hvis command["status"] == "timeout" {
+                skriv_event(t, "timeout", functions["__vm_debug__"])
+                returner command
+            }
+            la applied = bruk_kommando(functions, t, command)
+            hvis applied["status"] == "resume" {
+                result = vm.vm_debug_resume(functions, applied["mode"])
+                resumed = sann
+            } ellers hvis applied["status"] == "stopped" {
+                skriv_event(t, "stopped", functions["__vm_debug__"])
+                returner applied
+            } ellers {
+                skriv_event(t, applied["status"], functions["__vm_debug__"])
+            }
+        }
+    }
+    skriv_event(t, "completed", {"result": result})
+    returner result
+}

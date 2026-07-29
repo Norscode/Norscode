@@ -8,7 +8,14 @@ RUN apt-get update \
 
 COPY . .
 
-RUN bash tools/build_norscode_native.sh
+RUN ./bin/nc run tools/build-bootstrap-binary.no
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1
+WORKDIR /opt/norscode
+
+COPY --from=build /opt/norscode /opt/norscode
 
 VOLUME ["/work"]
 EXPOSE 8000

@@ -18,6 +18,48 @@
 #   trd.start_alle(manager)
 #   trd.join_alle(manager)
 
+bruk std.runtime.thread_abi som thread_abi
+bruk std.runtime.atomic som atomic
+
+funksjon ny_native_pool(workers: heiltall) -> ordbok_tekst {
+    prøv { returner builtin.thread_pool(thread_abi.pool_create_request(workers)) }
+    fang (e) { returner {"status": "error", "error": tekst(e), "pool_handle": ""} }
+}
+
+funksjon native_pool_submit(pool_handle: tekst, fn_namn: tekst,
+                            args: ordbok_tekst) -> ordbok_tekst {
+    prøv { returner builtin.thread_pool(thread_abi.pool_submit_request(pool_handle, fn_namn, args)) }
+    fang (e) { returner {"status": "error", "error": tekst(e), "task_handle": ""} }
+}
+
+funksjon native_pool_wait(pool_handle: tekst, task_handle: tekst,
+                          timeout_ms: heiltall) -> ordbok_tekst {
+    prøv { returner builtin.thread_pool(thread_abi.pool_task_request("wait", pool_handle, task_handle, timeout_ms)) }
+    fang (e) { returner {"status": "error", "error": tekst(e)} }
+}
+
+funksjon native_pool_status(pool_handle: tekst, task_handle: tekst) -> ordbok_tekst {
+    prøv { returner builtin.thread_pool(thread_abi.pool_task_request("status", pool_handle, task_handle, 0)) }
+    fang (e) { returner {"status": "error", "error": tekst(e)} }
+}
+
+funksjon native_pool_cancel(pool_handle: tekst, task_handle: tekst) -> ordbok_tekst {
+    prøv { returner builtin.thread_pool(thread_abi.pool_task_request("cancel", pool_handle, task_handle, 0)) }
+    fang (e) { returner {"status": "error", "error": tekst(e)} }
+}
+
+funksjon native_pool_release(pool_handle: tekst, task_handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_pool(thread_abi.pool_task_request("release", pool_handle, task_handle, 0))["status"] == "finished" }
+    fang (e) { returner usann }
+    returner usann
+}
+
+funksjon native_pool_shutdown(pool_handle: tekst, cancel_pending: boolsk) -> boolsk {
+    prøv { returner builtin.thread_pool(thread_abi.pool_shutdown_request(pool_handle, cancel_pending))["status"] == "finished" }
+    fang (e) { returner usann }
+    returner usann
+}
+
 # ─── Tråd-manager ─────────────────────────────────────────────────────────────
 
 funksjon _manager_gyldig(manager: ordbok_tekst) -> bool {
@@ -25,6 +67,8 @@ funksjon _manager_gyldig(manager: ordbok_tekst) -> bool {
     hvis (ikkje har_nokkel(manager, "_neste_id")) { returner usann }
     hvis (ikkje har_nokkel(manager, "_aktive")) { returner usann }
     hvis (ikkje har_nokkel(manager, "_mutex_eigar")) { returner usann }
+    hvis (ikkje har_nokkel(manager, "_mutex_depth")) { returner usann }
+    hvis (ikkje har_nokkel(manager, "_mutex_waiters")) { returner usann }
     hvis (ikkje har_nokkel(manager, "_delt")) { returner usann }
     hvis (ikkje har_nokkel(manager, "_barrierer")) { returner usann }
     hvis (ikkje har_nokkel(manager, "_hendingar")) { returner usann }
@@ -36,9 +80,11 @@ funksjon ny_manager() -> ordbok_tekst {
     m["_neste_id"] = "0"
     m["_aktive"] = "0"
     m["_mutex_eigar"] = ""       # ID av tråd som held mutex (tom = ledig)
-    m["_delt"] = "{}"            # Delt minne som JSON
-    m["_barrierer"] = "{}"
-    m["_hendingar"] = "{}"
+    m["_mutex_depth"] = "0"
+    m["_mutex_waiters"] = "|"
+    m["_delt"] = {}
+    m["_barrierer"] = {}
+    m["_hendingar"] = {}
     returner m
 }
 
@@ -59,8 +105,9 @@ funksjon ny_tråd(manager: ordbok_tekst, fn_namn: tekst) -> tekst {
     tråd["feil"] = ""
     tråd["prioritet"] = "5"
     tråd["steg"] = "0"
-    tråd["args"] = "{}"
-    manager[id] = builtin.json_stringify(tråd)
+    tråd["started"] = "usann"
+    tråd["args"] = {}
+    manager[id] = tråd
     returner id
 }
 
@@ -68,9 +115,9 @@ funksjon ny_tråd_med_args(manager: ordbok_tekst, fn_namn: tekst, args: ordbok_t
     hvis (ikkje _manager_gyldig(manager)) { returner "" }
 
     la id: tekst = ny_tråd(manager, fn_namn)
-    la tråd = builtin.json_parse(manager[id])
-    tråd["args"] = builtin.json_stringify(args)
-    manager[id] = builtin.json_stringify(tråd)
+    la tråd = manager[id]
+    tråd["args"] = args
+    manager[id] = tråd
     returner id
 }
 
@@ -79,12 +126,160 @@ funksjon ny_tråd_med_args(manager: ordbok_tekst, fn_namn: tekst, args: ordbok_t
 funksjon start(manager: ordbok_tekst, id: tekst) -> bool {
     hvis (ikkje _manager_gyldig(manager)) { returner usann }
     hvis (ikkje har_nokkel(manager, id)) { returner usann }
-    la tråd = builtin.json_parse(manager[id])
+    la tråd = manager[id]
+    hvis tråd["status"] != "klar" eller tråd["started"] == "sann" { returner usann }
     tråd["status"] = "kjørar"
-    manager[id] = builtin.json_stringify(tråd)
+    tråd["started"] = "sann"
+    manager[id] = tråd
     la aktive: heltall = builtin.heltall_fra_tekst(manager["_aktive"])
     manager["_aktive"] = tekst_fra_heltall(aktive + 1)
     returner sann
+}
+
+funksjon start_native(manager: ordbok_tekst, id: tekst, stack_bytes: heiltall) -> boolsk {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager, id) { returner usann }
+    la tråd = manager[id]
+    hvis tråd["status"] != "klar" eller tråd["started"] == "sann" { returner usann }
+    la req = thread_abi.spawn_request(tråd["funksjon"], tråd["args"], id, stack_bytes)
+    hvis ikkje thread_abi.gyldig_request(req) { tråd["native_error"] = "ugyldig native thread request"  manager[id] = tråd  returner usann }
+    prøv {
+        la svar = builtin.thread_spawn(req)
+        hvis ikkje thread_abi.gyldig_resultat(svar) eller svar["status"] != "started" {
+            tråd["native_error"] = "ugyldig native thread resultat"
+            manager[id] = tråd
+            returner usann
+        }
+        tråd["status"] = "kjørar"
+        tråd["started"] = "sann"
+        tråd["native_handle"] = svar["handle"]
+        tråd["native_thread_id"] = svar["thread_id"]
+        manager[id] = tråd
+        manager["_aktive"] = tekst_fra_heltall(builtin.heltall_fra_tekst(manager["_aktive"]) + 1)
+        returner sann
+    } fang (e) {
+        tråd["native_error"] = tekst(e)
+        manager[id] = tråd
+        returner usann
+    }
+    returner usann
+}
+
+funksjon join_native(manager: ordbok_tekst, id: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager, id) {
+        returner thread_abi.resultat("error", "", "", "", "ukjent tråd")
+    }
+    la tråd = manager[id]
+    hvis ikkje har_nokkel(tråd, "native_handle") eller tråd["native_handle"] == "" {
+        returner thread_abi.resultat("error", "", "", "", "ikkje native tråd")
+    }
+    la req = thread_abi.sync_request("join", tråd["native_handle"], tråd["native_thread_id"], timeout_ms)
+    prøv {
+        la svar = builtin.thread_join(req)
+        hvis ikkje thread_abi.gyldig_resultat(svar) { returner thread_abi.resultat("error", tråd["native_handle"], tråd["native_thread_id"], "", "ugyldig native join-resultat") }
+        hvis svar["status"] == "finished" {
+            tråd["status"] = "ferdig"
+            tråd["resultat"] = svar["value"]
+            hvis tråd["started"] == "sann" {
+                la aktive = heltall_fra_tekst(manager["_aktive"])
+                hvis aktive > 0 { manager["_aktive"] = tekst_fra_heltall(aktive - 1) }
+                tråd["started"] = "usann"
+            }
+        } ellers hvis svar["status"] == "error" {
+            tråd["status"] = "feil"
+            tråd["feil"] = svar["error"]
+        }
+        manager[id] = tråd
+        returner svar
+    } fang (e) {
+        returner thread_abi.resultat("error", tråd["native_handle"], tråd["native_thread_id"], "", tekst(e))
+    }
+    returner thread_abi.resultat("error", tråd["native_handle"], tråd["native_thread_id"], "", "ukjent join-feil")
+}
+
+funksjon kanseller_native(manager: ordbok_tekst, id: tekst) -> boolsk {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager, id) { returner usann }
+    la tråd = manager[id]
+    hvis ikkje har_nokkel(tråd, "native_handle") eller tråd["native_handle"] == "" { returner usann }
+    la req = thread_abi.sync_request("cancel", tråd["native_handle"], tråd["native_thread_id"], 0)
+    prøv {
+        la svar = builtin.thread_sync(req)
+        hvis svar["status"] != "cancelled" { returner usann }
+        tråd["status"] = "kansellerer"
+        manager[id] = tråd
+        returner sann
+    } fang (e) {
+        tråd["native_error"] = tekst(e)
+        manager[id] = tråd
+        returner usann
+    }
+    returner usann
+}
+
+funksjon ny_native_mutex() -> tekst {
+    prøv {
+        la svar = builtin.thread_sync(thread_abi.resource_request("mutex_create", "", "", 0))
+        hvis thread_abi.gyldig_resultat(svar) og svar["status"] == "ready" { returner svar["handle"] }
+    } fang (e) {}
+    returner ""
+}
+
+funksjon native_mutex_lock(handle: tekst, timeout_ms: heiltall) -> tekst {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("mutex_lock", handle, "", timeout_ms))["status"] } fang (e) { returner "error" }
+    returner "error"
+}
+
+funksjon native_mutex_unlock(handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("mutex_unlock", handle, "", 0))["status"] == "ready" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon destroy_native_mutex(handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("mutex_destroy", handle, "", 0))["status"] == "finished" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon ny_native_condition() -> tekst {
+    prøv {
+        la svar = builtin.thread_sync(thread_abi.resource_request("condition_create", "", "", 0))
+        hvis thread_abi.gyldig_resultat(svar) og svar["status"] == "ready" { returner svar["handle"] }
+    } fang (e) {}
+    returner ""
+}
+
+funksjon native_condition_wait(condition_handle: tekst, mutex_handle: tekst,
+                               timeout_ms: heiltall) -> tekst {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("condition_wait", condition_handle, mutex_handle, timeout_ms))["status"] } fang (e) { returner "error" }
+    returner "error"
+}
+
+funksjon native_condition_signal(handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("condition_signal", handle, "", 0))["status"] == "ready" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon native_condition_broadcast(handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("condition_broadcast", handle, "", 0))["status"] == "ready" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon destroy_native_condition(handle: tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.resource_request("condition_destroy", handle, "", 0))["status"] == "finished" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon native_signal_block(signals: liste_tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.signal_request("signal_block", signals))["status"] == "ready" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon native_signal_unblock(signals: liste_tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.signal_request("signal_unblock", signals))["status"] == "ready" } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon native_signals_blocked(signals: liste_tekst) -> boolsk {
+    prøv { returner builtin.thread_sync(thread_abi.signal_request("signal_query", signals))["value"] == "sann" } fang (e) { returner usann }
+    returner usann
 }
 
 funksjon start_alle(manager: ordbok_tekst) -> heltall {
@@ -95,7 +290,7 @@ funksjon start_alle(manager: ordbok_tekst) -> heltall {
     mens (i < lengde(nøklar)) {
         la k: tekst = nøklar[i]
         hvis (tekst_starter_med(k, "trd")) {
-            la tråd = builtin.json_parse(manager[k])
+            la tråd = manager[k]
             hvis (tråd["status"] == "klar") {
                 start(manager, k)
                 startede = startede + 1
@@ -116,10 +311,10 @@ funksjon steg_alle(manager: ordbok_tekst) -> heltall {
     mens (i < lengde(nøklar)) {
         la k: tekst = nøklar[i]
         hvis (tekst_starter_med(k, "trd")) {
-            la tråd = builtin.json_parse(manager[k])
+            la tråd = manager[k]
             hvis (tråd["status"] == "kjørar") {
                 la fn: tekst = tråd["funksjon"]
-                la args = builtin.json_parse(tråd["args"])
+                la args = tråd["args"]
                 prøv {
                     la res: tekst = builtin.ncb_call_fn(fn, args)
                     tråd["resultat"] = res
@@ -138,7 +333,7 @@ funksjon steg_alle(manager: ordbok_tekst) -> heltall {
                 }
                 la steg_n: heltall = builtin.heltall_fra_tekst(tråd["steg"])
                 tråd["steg"] = tekst_fra_heltall(steg_n + 1)
-                manager[k] = builtin.json_stringify(tråd)
+                manager[k] = tråd
                 utført = utført + 1
             }
         }
@@ -152,8 +347,8 @@ funksjon steg_alle(manager: ordbok_tekst) -> heltall {
 funksjon er_ferdig(manager: ordbok_tekst, id: tekst) -> bool {
     hvis (ikkje _manager_gyldig(manager)) { returner usann }
     hvis (ikkje har_nokkel(manager, id)) { returner usann }
-    la tråd = builtin.json_parse(manager[id])
-    returner tråd["status"] == "ferdig" eller tråd["status"] == "feil"
+    la tråd = manager[id]
+    returner tråd["status"] == "ferdig" eller tråd["status"] == "feil" eller tråd["status"] == "kansellert"
 }
 
 funksjon alle_ferdige(manager: ordbok_tekst) -> bool {
@@ -184,24 +379,45 @@ funksjon join(manager: ordbok_tekst, id: tekst) -> heltall {
     returner i
 }
 
+funksjon join_med_grense(manager: ordbok_tekst, id: tekst, maks_steg: heiltall) -> ordbok_tekst {
+    la r: ordbok_tekst = {"status": "feil", "steg": "0", "thread_status": "ukjent"}
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager, id) eller maks_steg < 0 { returner r }
+    la i: heiltall = 0
+    mens i < maks_steg og ikkje er_ferdig(manager, id) {
+        la framdrift = steg_alle(manager)
+        i = i + 1
+        hvis framdrift == 0 og ikkje er_ferdig(manager, id) {
+            r["status"] = "deadlock"
+            r["steg"] = tekst_fra_heltall(i)
+            r["thread_status"] = status(manager, id)
+            returner r
+        }
+    }
+    r["steg"] = tekst_fra_heltall(i)
+    r["thread_status"] = status(manager, id)
+    hvis er_ferdig(manager, id) { r["status"] = "ferdig" }
+    ellers { r["status"] = "timeout" }
+    returner r
+}
+
 # ─── Hent resultat ────────────────────────────────────────────────────────────
 
 funksjon resultat(manager: ordbok_tekst, id: tekst) -> tekst {
     hvis (ikkje _manager_gyldig(manager)) { returner "" }
     hvis (ikkje har_nokkel(manager, id)) { returner "" }
-    returner builtin.json_parse(manager[id])["resultat"]
+    returner manager[id]["resultat"]
 }
 
 funksjon feilmelding(manager: ordbok_tekst, id: tekst) -> tekst {
     hvis (ikkje _manager_gyldig(manager)) { returner "" }
     hvis (ikkje har_nokkel(manager, id)) { returner "" }
-    returner builtin.json_parse(manager[id])["feil"]
+    returner manager[id]["feil"]
 }
 
 funksjon status(manager: ordbok_tekst, id: tekst) -> tekst {
     hvis (ikkje _manager_gyldig(manager)) { returner "ukjent" }
     hvis (ikkje har_nokkel(manager, id)) { returner "ukjent" }
-    returner builtin.json_parse(manager[id])["status"]
+    returner manager[id]["status"]
 }
 
 funksjon status_oversikt(manager: ordbok_tekst) -> ordbok_tekst {
@@ -222,7 +438,7 @@ funksjon status_oversikt(manager: ordbok_tekst) -> ordbok_tekst {
     mens (i < lengde(nøklar)) {
         la k: tekst = nøklar[i]
         hvis (tekst_starter_med(k, "trd")) {
-            la tråd = builtin.json_parse(manager[k])
+            la tråd = manager[k]
             hvis (tråd["status"] == "klar") { klar = klar + 1 }
             ellers hvis (tråd["status"] == "kjørar") { kjørar = kjørar + 1 }
             ellers hvis (tråd["status"] == "blokkert") { blokkert = blokkert + 1 }
@@ -246,101 +462,166 @@ funksjon status_oversikt(manager: ordbok_tekst) -> ordbok_tekst {
 
 funksjon lock(manager: ordbok_tekst, id: tekst) -> bool {
     hvis (ikkje _manager_gyldig(manager)) { returner usann }
+    hvis ikkje har_nokkel(manager, id) { returner usann }
     la eigar: tekst = manager["_mutex_eigar"]
-    hvis (eigar == "" eller eigar == id) {
+    hvis eigar == "" {
         manager["_mutex_eigar"] = id
+        manager["_mutex_depth"] = "1"
+        returner sann
+    }
+    hvis eigar == id {
+        manager["_mutex_depth"] = tekst_fra_heltall(builtin.heltall_fra_tekst(manager["_mutex_depth"]) + 1)
         returner sann
     }
     # Mutex er oppteken — blokker tråden
-    la tråd = builtin.json_parse(manager[id])
+    la tråd = manager[id]
+    hvis tråd["status"] == "ferdig" eller tråd["status"] == "feil" eller tråd["status"] == "kansellert" { returner usann }
     tråd["status"] = "blokkert"
-    manager[id] = builtin.json_stringify(tråd)
+    manager[id] = tråd
+    hvis builtin.index_of(manager["_mutex_waiters"], "|" + id + "|") < 0 {
+        manager["_mutex_waiters"] = manager["_mutex_waiters"] + id + "|"
+    }
     returner usann
 }
 
 funksjon unlock(manager: ordbok_tekst, id: tekst) -> heltall {
-    hvis (ikkje _manager_gyldig(manager)) { returner 0 }
+    hvis (ikkje _manager_gyldig(manager)) { returner -1 }
     la eigar: tekst = manager["_mutex_eigar"]
-    hvis (eigar == id) {
-        manager["_mutex_eigar"] = ""
-        # Frigjort — aktiver den første blokkerte tråden
-        la nøklar = builtin.nøkler(manager)
-        la i: heltall = 0
-        mens (i < lengde(nøklar)) {
-            la k: tekst = nøklar[i]
-            hvis (tekst_starter_med(k, "trd")) {
-                la tråd = builtin.json_parse(manager[k])
-                hvis (tråd["status"] == "blokkert") {
-                    tråd["status"] = "kjørar"
-                    manager[k] = builtin.json_stringify(tråd)
-                    manager["_mutex_eigar"] = k
-                    i = lengde(nøklar)  # bryt
-                }
+    hvis eigar != id { returner -1 }
+    la depth = builtin.heltall_fra_tekst(manager["_mutex_depth"])
+    hvis depth > 1 {
+        manager["_mutex_depth"] = tekst_fra_heltall(depth - 1)
+        returner depth - 1
+    }
+    manager["_mutex_eigar"] = ""
+    manager["_mutex_depth"] = "0"
+    la waiters = builtin.split(manager["_mutex_waiters"], "|")
+    la neste = ""
+    la rest = "|"
+    la i: heiltall = 0
+    mens i < lengde(waiters) {
+        hvis waiters[i] != "" {
+            hvis neste == "" { neste = waiters[i] }
+            ellers { rest = rest + waiters[i] + "|" }
+        }
+        i = i + 1
+    }
+    manager["_mutex_waiters"] = rest
+    hvis neste != "" {
+        hvis har_nokkel(manager, neste) {
+            la tråd = manager[neste]
+            hvis tråd["status"] == "blokkert" {
+                tråd["status"] = "kjørar"
+                manager[neste] = tråd
+                manager["_mutex_eigar"] = neste
+                manager["_mutex_depth"] = "1"
             }
-            i = i + 1
         }
     }
     returner 0
+}
+
+funksjon kanseller(manager: ordbok_tekst, id: tekst) -> boolsk {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager, id) { returner usann }
+    la tråd = manager[id]
+    hvis tråd["status"] == "ferdig" eller tråd["status"] == "feil" eller tråd["status"] == "kansellert" { returner usann }
+    manager["_mutex_waiters"] = builtin.replace(manager["_mutex_waiters"], "|" + id + "|", "|")
+    hvis manager["_mutex_eigar"] == id {
+        manager["_mutex_depth"] = "1"
+        unlock(manager, id)
+    }
+    tråd["status"] = "kansellert"
+    tråd["feil"] = "kansellert"
+    manager[id] = tråd
+    hvis tråd["started"] == "sann" {
+        la aktive = builtin.heltall_fra_tekst(manager["_aktive"])
+        hvis aktive > 0 { manager["_aktive"] = tekst_fra_heltall(aktive - 1) }
+    }
+    returner sann
 }
 
 # ─── Delt minne ───────────────────────────────────────────────────────────────
 
 funksjon set_delt(manager: ordbok_tekst, nøkkel: tekst, verdi: tekst) -> heltall {
     hvis (ikkje _manager_gyldig(manager)) { returner 0 }
-    la delt = builtin.json_parse(manager["_delt"])
+    la delt = manager["_delt"]
     delt[nøkkel] = verdi
-    manager["_delt"] = builtin.json_stringify(delt)
+    manager["_delt"] = delt
     returner 0
 }
 
 funksjon hent_delt(manager: ordbok_tekst, nøkkel: tekst) -> tekst {
     hvis (ikkje _manager_gyldig(manager)) { returner "" }
-    la delt = builtin.json_parse(manager["_delt"])
+    la delt = manager["_delt"]
     hvis (har_nokkel(delt, nøkkel)) { returner delt[nøkkel] }
     returner ""
 }
 
 funksjon har_delt(manager: ordbok_tekst, nøkkel: tekst) -> bool {
     hvis (ikkje _manager_gyldig(manager)) { returner usann }
-    la delt = builtin.json_parse(manager["_delt"])
+    la delt = manager["_delt"]
     returner har_nokkel(delt, nøkkel)
 }
 
 funksjon slett_delt(manager: ordbok_tekst, nøkkel: tekst) -> heltall {
     hvis (ikkje _manager_gyldig(manager)) { returner 0 }
-    la delt = builtin.json_parse(manager["_delt"])
+    la delt = manager["_delt"]
     fjern_nokkel(delt, nøkkel)
-    manager["_delt"] = builtin.json_stringify(delt)
+    manager["_delt"] = delt
     returner 0
+}
+
+funksjon ny_atomisk(manager: ordbok_tekst, nøkkel: tekst, verdi: heiltall) -> boolsk {
+    hvis ikkje _manager_gyldig(manager) eller nøkkel == "" { returner usann }
+    la delt = manager["_delt"]
+    delt[nøkkel] = atomic.ny(verdi)
+    manager["_delt"] = delt
+    returner sann
+}
+
+funksjon atomisk_hent(manager: ordbok_tekst, nøkkel: tekst, order: tekst) -> heiltall {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager["_delt"], nøkkel) { returner 0 }
+    returner atomic.load(manager["_delt"][nøkkel], order)
+}
+
+funksjon atomisk_cas(manager: ordbok_tekst, nøkkel: tekst, expected: heiltall,
+                     replacement: heiltall) -> boolsk {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager["_delt"], nøkkel) { returner usann }
+    returner atomic.compare_exchange(manager["_delt"][nøkkel], expected, replacement, "seq_cst", "seq_cst")["success"] == "sann"
+}
+
+funksjon atomisk_fetch_add(manager: ordbok_tekst, nøkkel: tekst, delta: heiltall) -> heiltall {
+    hvis ikkje _manager_gyldig(manager) eller ikkje har_nokkel(manager["_delt"], nøkkel) { returner 0 }
+    returner atomic.fetch_add(manager["_delt"][nøkkel], delta, "seq_cst")
 }
 
 # ─── Event (tilsvarar threading.Event) ───────────────────────────────────────
 
 funksjon ny_event(manager: ordbok_tekst, namn: tekst) -> heltall {
     hvis (ikkje _manager_gyldig(manager)) { returner 0 }
-    la hendingar = builtin.json_parse(manager["_hendingar"])
+    la hendingar = manager["_hendingar"]
     hendingar[namn] = "0"  # 0 = ikkje sett, 1 = sett
-    manager["_hendingar"] = builtin.json_stringify(hendingar)
+    manager["_hendingar"] = hendingar
     returner 0
 }
 
 funksjon set_event(manager: ordbok_tekst, namn: tekst) -> heltall {
     hvis (ikkje _manager_gyldig(manager)) { returner 0 }
-    la hendingar = builtin.json_parse(manager["_hendingar"])
+    la hendingar = manager["_hendingar"]
     hendingar[namn] = "1"
-    manager["_hendingar"] = builtin.json_stringify(hendingar)
+    manager["_hendingar"] = hendingar
     returner 0
 }
 
 funksjon clear_event(manager: ordbok_tekst, namn: tekst) -> heltall {
-    la hendingar = builtin.json_parse(manager["_hendingar"])
+    la hendingar = manager["_hendingar"]
     hendingar[namn] = "0"
-    manager["_hendingar"] = builtin.json_stringify(hendingar)
+    manager["_hendingar"] = hendingar
     returner 0
 }
 
 funksjon event_er_sett(manager: ordbok_tekst, namn: tekst) -> bool {
-    la hendingar = builtin.json_parse(manager["_hendingar"])
+    la hendingar = manager["_hendingar"]
     hvis (har_nokkel(hendingar, namn)) { returner hendingar[namn] == "1" }
     returner usann
 }
@@ -348,20 +629,20 @@ funksjon event_er_sett(manager: ordbok_tekst, namn: tekst) -> bool {
 # ─── Barrier ──────────────────────────────────────────────────────────────────
 
 funksjon ny_barrier(manager: ordbok_tekst, namn: tekst, partar: heltall) -> heltall {
-    la barrierer = builtin.json_parse(manager["_barrierer"])
+    la barrierer = manager["_barrierer"]
     la b: ordbok_tekst = {}
     b["partar"] = tekst_fra_heltall(partar)
     b["venter"] = "0"
     b["frigjort"] = "0"
-    barrierer[namn] = builtin.json_stringify(b)
-    manager["_barrierer"] = builtin.json_stringify(barrierer)
+    barrierer[namn] = b
+    manager["_barrierer"] = barrierer
     returner 0
 }
 
 funksjon barrier_vent(manager: ordbok_tekst, namn: tekst) -> bool {
-    la barrierer = builtin.json_parse(manager["_barrierer"])
+    la barrierer = manager["_barrierer"]
     hvis (ikkje har_nokkel(barrierer, namn)) { returner usann }
-    la b = builtin.json_parse(barrierer[namn])
+    la b = barrierer[namn]
     la venter: heltall = builtin.heltall_fra_tekst(b["venter"]) + 1
     la partar: heltall = builtin.heltall_fra_tekst(b["partar"])
     b["venter"] = tekst_fra_heltall(venter)
@@ -369,8 +650,8 @@ funksjon barrier_vent(manager: ordbok_tekst, namn: tekst) -> bool {
         b["frigjort"] = "1"
         b["venter"] = "0"
     }
-    barrierer[namn] = builtin.json_stringify(b)
-    manager["_barrierer"] = builtin.json_stringify(barrierer)
+    barrierer[namn] = b
+    manager["_barrierer"] = barrierer
     returner b["frigjort"] == "1"
 }
 
@@ -390,4 +671,12 @@ funksjon alle_trådar(manager: ordbok_tekst) -> liste_tekst {
 
 funksjon tal_aktive(manager: ordbok_tekst) -> heltall {
     returner builtin.heltall_fra_tekst(manager["_aktive"])
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {
+        "status": "stabil",
+        "dekning": "kooperativ FIFO og native pthread/CreateThread start/join/timeout/cancel med generasjonsbundne handtak, stackgrense, fast arbeidspool, delte native atomic-celler og ekte mutex/condition/SRW create-lock-wait-signal-broadcast-destroy; runtime-heap, NcMap og stop-the-world GC er traadsikre; recursive kooperativ mutex-depth, barrierar og events",
+        "mangler": ""
+    }
 }

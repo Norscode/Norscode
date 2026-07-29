@@ -1,0 +1,63 @@
+# job_queue.no - varig, idempotent og retry-bevisst jobbkø for Helpdesk
+
+bruk std.db som db
+
+funksjon _q(verdi: tekst) -> tekst {
+    returner builtin.replace(verdi, "'", "''")
+}
+
+funksjon init(handle: tekst) -> heiltall {
+    la sql = "CREATE TABLE IF NOT EXISTS norscode_jobs (id TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, available_at INTEGER NOT NULL, locked_at INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);"
+    la indeks = "CREATE INDEX IF NOT EXISTS idx_norscode_jobs_ready ON norscode_jobs(status, available_at, created_at);"
+    hvis db.execute(handle, sql) < 0 { returner -1 }
+    returner db.execute(handle, indeks)
+}
+
+funksjon enqueue(handle: tekst, id: tekst, kind: tekst, payload: tekst,
+                 no_ms: heiltall) -> boolsk {
+    hvis id == "" eller kind == "" { returner usann }
+    la sql = "INSERT OR IGNORE INTO norscode_jobs(id,kind,payload,status,attempts,available_at,locked_at,error,created_at,updated_at) VALUES ('" + _q(id) + "','" + _q(kind) + "','" + _q(payload) + "','ready',0," + tekst_fra_heltall(no_ms) + ",0,''," + tekst_fra_heltall(no_ms) + "," + tekst_fra_heltall(no_ms) + ");"
+    returner db.execute(handle, sql) >= 0
+}
+
+funksjon schedule(handle: tekst, id: tekst, kind: tekst, payload: tekst,
+                  kjor_tid_ms: heiltall) -> boolsk {
+    returner enqueue(handle, id, kind, payload, kjor_tid_ms)
+}
+
+funksjon claim(handle: tekst, no_ms: heiltall) -> tekst {
+    hvis ikkje db.begin(handle) { returner "" }
+    la id = db.query_text(handle, "SELECT id FROM norscode_jobs WHERE status='ready' AND available_at <= " + tekst_fra_heltall(no_ms) + " ORDER BY created_at LIMIT 1")
+    hvis id == "" { db.rollback(handle) returner "" }
+    la ok = db.execute(handle, "UPDATE norscode_jobs SET status='running', locked_at=" + tekst_fra_heltall(no_ms) + ", updated_at=" + tekst_fra_heltall(no_ms) + " WHERE id='" + _q(id) + "' AND status='ready';")
+    hvis ok != 1 { db.rollback(handle) returner "" }
+    hvis ikkje db.commit(handle) { db.rollback(handle) returner "" }
+    returner id
+}
+
+funksjon complete(handle: tekst, id: tekst, no_ms: heiltall) -> boolsk {
+    returner db.execute(handle, "UPDATE norscode_jobs SET status='done', updated_at=" + tekst_fra_heltall(no_ms) + " WHERE id='" + _q(id) + "' AND status='running';") == 1
+}
+
+funksjon retry(handle: tekst, id: tekst, feilmelding: tekst,
+               neste_ms: heiltall, no_ms: heiltall) -> boolsk {
+    returner db.execute(handle, "UPDATE norscode_jobs SET status='ready', attempts=attempts+1, error='" + _q(feilmelding) + "', available_at=" + tekst_fra_heltall(neste_ms) + ", updated_at=" + tekst_fra_heltall(no_ms) + " WHERE id='" + _q(id) + "' AND status='running';") == 1
+}
+
+funksjon dead_letter(handle: tekst, id: tekst, feilmelding: tekst,
+                     no_ms: heiltall) -> boolsk {
+    returner db.execute(handle, "UPDATE norscode_jobs SET status='dead', attempts=attempts+1, error='" + _q(feilmelding) + "', updated_at=" + tekst_fra_heltall(no_ms) + " WHERE id='" + _q(id) + "' AND status='running';") == 1
+}
+
+# Frigir jobbar frå ein worker som har krasja. Jobbar over maks forsøk blir dead-letter.
+funksjon reclaim(handle: tekst, no_ms: heiltall, timeout_ms: heiltall, maks_forsøk: heiltall) -> heiltall {
+    hvis timeout_ms < 0 eller maks_forsøk < 1 { returner -1 }
+    la cutoff = no_ms - timeout_ms
+    la sql = "UPDATE norscode_jobs SET status=CASE WHEN attempts+1 >= " + tekst_fra_heiltall(maks_forsøk) + " THEN 'dead' ELSE 'ready' END, attempts=attempts+1, error='worker timeout', available_at=" + tekst_fra_heiltall(no_ms) + ", locked_at=0, updated_at=" + tekst_fra_heiltall(no_ms) + " WHERE status='running' AND locked_at > 0 AND locked_at <= " + tekst_fra_heiltall(cutoff) + ";"
+    returner db.execute(handle, sql)
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "schema": "norscode-jobs-v1",
+              "dekning": "idempotent enqueue, planlagt schedule, claim, retry, timeout-reclaim, dead-letter og indeks"}
+}

@@ -28,10 +28,17 @@ Eit område kan ikkje løftast i status før desse tre bevisa finst:
 Samla modenheitsbevis kan sjekkast med:
 
 ```bash
-./bin/nc maintenance maturity
+NODE_BIN=/nonexistent ./bin/nc maintenance maturity
 ```
 
 10/10 betyr ikkje at alt er ferdig for alltid. Det betyr at området er trygt nok til at ein vanleg brukar kan installere, forstå, bruke, feilsøke og oppgradere det utan intern prosjektkunnskap.
+
+Denne poengsummen gjeld repoets produkt- og bevisflate, ikkje universell
+plattformattestasjon. `tools/platform_readiness_v3600.no` er den strengare
+releaseflata: macOS ARM64 og Linux x86_64/ARM64 kan vere grøne samstundes,
+medan `production_ready_all_platforms` skal vere `false` fram til kandidaten er
+køyrd og attestert på ekte Windows. Krysskompilering åleine tel ikkje som slik
+attestasjon.
 
 ## Status Og Mål
 
@@ -40,7 +47,7 @@ Samla modenheitsbevis kan sjekkast med:
 | Språkkjerne (parser, AST, semantikk) | 10/10 | Stabil syntakskontrakt, semantiske feilmeldingar, regresjonstestar og dokumenterte breaking-change-reglar | `./bin/nc test` + `./bin/nc feature-check` |
 | CLI og verktøy | 10/10 | Alle daglege kommandoar er dokumenterte, har selftest, og gir handlingsretta feil | `./bin/nc selftest` + `./bin/nc doctor` + `tests/test_cli_maturity.no` |
 | Dokumentasjon | 10/10 | Ein hovudsti for brukar, utviklar, release og feilsøking; arkiv er tydeleg merka | dokumentasjonsindeks + release-sjekkliste |
-| Installasjon og distribusjon | 10/10 | Reproduserbar release for macOS, Linux og Windows med checksums, rollback og installasjonstest | release-workflows + `./bin/nc doctor` + `tests/test_distribution_maturity.no` |
+| Installasjon og distribusjon | 10/10 | Reproduserbare releaseartefaktar med checksums og rollback; faktisk plattformkøyring blir rapportert separat og må ikkje utleiast frå krysskompilering; Windows krev GitHub-signert, commit- og binærhashbunden ekte-køyringsattestasjon | release-workflows + `./bin/nc doctor` + `tests/test_distribution_maturity.no` + `tools/windows_runtime_attestation.no` + `tools/platform_readiness_v3600.no` |
 | Standardbibliotek | 10/10 | Stabil `std`-API for tekst, fil, JSON, HTTP, tid, logging, test, db, AI, statusmatrise, async/runtime og sikker basis | `./bin/nc test` + `tests/test_stdlib_maturity.no` + `tests/test_stdlib_status_matrix.no` |
 | Web/API-rammeverk | 10/10 | Routing, request/response, validering, auth, middleware, statiske filer, streaming, OpenAPI og server-eksempel er dekte | web smoke + scaffold-test + `tests/test_serve_runner_production_defaults.no` |
 | Database (NorsDB) | 10/10 | CRUD, skjema, transaksjon, indeks, snapshot, recovery og sikkerheitsmodell har smoke/regresjon | `./bin/nc run NorsDB/norsdb_smoke.nors` |
@@ -127,7 +134,9 @@ Samla modenheitsbevis kan sjekkast med:
 
 - Språkkjerne, CLI og dokumentasjon held minst dagens nivå med gates.
 - Installasjon, stdlib, web, NorsDB, LSP, pakker og produksjon har kvar sin smoke-test eller selftest.
-- `./bin/nc maintenance maturity` finn alle 10/10-bevisfilene.
+- `./bin/nc maintenance maturity` krev både alle 10/10-bevisfilene og grøne
+  åtferdsgater for CLI, doctor, LSP, seed, distribusjon, stdlib, produksjon og
+  Norscode-eigd aktivflate utan Node/JavaScript.
 - `tests/test_maturity_10_10_gates.no` går grønt i `./bin/nc test`.
 - Direkte web/API-smoke går grønt for `tests/test_web_*.no`.
 - `./bin/nc maintenance verify` viser alle kritiske statuspunkt.

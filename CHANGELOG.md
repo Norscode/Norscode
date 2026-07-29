@@ -7,6 +7,7 @@ Alle merkbare endringar i Norscode blir dokumenterte i denne fila.
 ### Release-klargjering
 
 - Lagt til `./bin/nc local-green` som lokal release-preflight, aktiv flate, fase-0, L1-L6-sjølvhosting og full testport utan publisering.
+- Køyr lokal release-preflight, aktiv flate, fase-0, L1-L6 og full testport med `./bin/nc local-green`.
 - Lagt til strenge lokale portar med `./bin/nc release-preflight --strict` og `./bin/nc local-green --strict`.
 - Lagt til `local-green --list`/`-l` for å vise kvart portsteg og kommando utan å køyre dei.
 - Stramma inn streng git-sporing for release-verktøy, testar, dokumentasjon, plattformdokumentasjon for appar og `CHANGELOG.md`.
@@ -139,9 +140,9 @@ Alle stega går gjennom Norscode selfhost-løypa utan den historiske C-backenden
 
 #### Bygging frå kjelde
 ```bash
-./bin/nc bygg-native                    # Bygg native runtime
-./bin/nc local-green                    # Køyr lokal release-preflight, aktiv flate, fase-0, L1-L6 og full testport
-./bin/nc bootstrap-self                 # Verifiser selfhosting steg C
+./bin/nc run tools/build_norscode_native.no    # Build native runtime
+./bin/nc test                           # Run tests
+./bin/nc bootstrap-self                 # Verify self-hosting
 ```
 
 #### Verifisering av selfhosting

@@ -76,6 +76,8 @@ For full CI-sjekk:
 ./bin/nc release-preflight --strict
 ./bin/nc local-green
 ./bin/nc local-green --strict
+./bin/nc completion-gate --local
+./bin/nc completion-gate --release
 ./bin/nc ci
 ```
 
@@ -90,6 +92,12 @@ spora i git.
 aktiv C/Python-fri flate, fase-0-policy, L1-L6-sjølvstendighet og full testflate
 som ei samla grønnliste før tag eller større rydding. Bruk
 `./bin/nc local-green --strict` når grønnlista skal vere siste port før push/tag.
+
+`completion-gate --local` legg langtidsflata og den pakka brukarferda oppå den
+strenge grønnlista. `completion-gate --release` er den einaste globale
+ferdigporten og krev rein commit, 22/22 runtime, 61/61 standardbibliotek og
+GitHub-signerte, commit- og runtimehashbundne attestasjonar frå macOS ARM64,
+Linux x86_64, Linux ARM64 og Windows x86_64.
 Bruk `./bin/nc local-green --list` eller `./bin/nc local-green --strict --list`
 for å sjå stega med kommandoar utan å køyre dei.
 

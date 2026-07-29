@@ -6,7 +6,7 @@ Vedlikehald/regen-output går i staden til `build/maintainer_regen/` som standar
 
 ```bash
 # Historisk vedlikehald (krev seed i bootstrap/stage0/ eller release):
-NORSCODE_BOOTSTRAP_C=1 REGEN=1 bash tools/build_norscode_native.sh
+NORSCODE_BOOTSTRAP_C=1 REGEN=1 ./bin/nc run tools/build_norscode_native.no
 
 # eller
 bash tools/maint/regen_native.sh --rebuild

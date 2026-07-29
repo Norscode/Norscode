@@ -1,0 +1,127 @@
+bruk std.db som db
+bruk std.deployment_config som config
+bruk std.observability som obs
+bruk std.job_queue som jobs
+bruk std.quick3 som quick3
+bruk std.inbound_email som inbound
+bruk std.email_message som email
+bruk std.krypto som krypto
+bruk std.vedlegg som vedlegg
+bruk std.transactional_storage som storage
+bruk std.mock_http som mock
+
+funksjon start() -> heiltall {
+    la cfg = config.valider()
+    assert_eq(cfg["schema"], "norscode-deployment-config-v1")
+    la profil = config.capability_profil("helpdesk-web")
+    assert(builtin.contains(profil["capabilities"], "disk.read"))
+    prøv {
+        config.capability_profil("ukjent")
+        assert(usann)
+    } fang (e) { assert(builtin.contains(tekst(e), "ukjent capability-profil")) }
+
+    la o = obs.ny()
+    obs.event(o, "test", "value=hidden\nline")
+    obs.quick3_sync(o, 100, 12, 1)
+    obs.epost_kø(o, 2)
+    obs.epost_mottatt(o, 3)
+    obs.epost_leveringsfeil(o, 1)
+    obs.retry(o, 4)
+    assert_eq(o["quick3_synced"], "12")
+    assert_eq(o["email_queued"], "2")
+    assert_eq(o["email_received"], "3")
+    assert_eq(o["email_delivery_errors"], "1")
+    assert_eq(o["retry_attempts"], "4")
+    assert(builtin.contains(o["events"], "quick3.sync"))
+
+    la handle = db.open(":memory:")
+    assert(jobs.init(handle) >= 0)
+    assert(jobs.enqueue(handle, "job-1", "quick3.sync", "O'la", 100))
+    assert(jobs.enqueue(handle, "job-1", "quick3.sync", "duplicate", 100))
+    la claimed = jobs.claim(handle, 100)
+    assert_eq(claimed, "job-1")
+    assert(jobs.retry(handle, claimed, "temporary", 200, 110))
+    assert_eq(jobs.claim(handle, 150), "")
+    assert_eq(jobs.claim(handle, 200), "job-1")
+    assert(jobs.dead_letter(handle, "job-1", "permanent", 210))
+    assert(jobs.enqueue(handle, "job-timeout", "mail.send", "payload", 100))
+    assert_eq(jobs.claim(handle, 100), "job-timeout")
+    assert_eq(jobs.reclaim(handle, 500, 100, 3), 1)
+    assert_eq(db.query_text(handle, "SELECT status FROM norscode_jobs WHERE id='job-timeout'"), "ready")
+    assert(jobs.schedule(handle, "job-scheduled", "quick3.sync", "payload", 9999))
+    assert_eq(jobs.claim(handle, 500), "job-timeout")
+    assert_eq(jobs.complete(handle, "job-timeout", 501), sann)
+    assert_eq(jobs.claim(handle, 500), "")
+    assert_eq(db.query_text(handle, "SELECT status FROM norscode_jobs WHERE id='job-1'"), "dead")
+    assert(storage.indeks(handle, "idx_jobs_status", "norscode_jobs", "status"))
+    assert(ikkje storage.indeks(handle, "bad;drop", "norscode_jobs", "status"))
+    assert(storage.transaksjon(handle, "INSERT INTO norscode_jobs (id, kind, payload, status, run_at, attempts, created_at, updated_at) VALUES ('job-2','email.send','x','queued',1,0,1,1);"))
+    assert(db.close(handle))
+
+    la storage_db = "/tmp/norscode-helpdesk-storage.sqlite"
+    prøv { builtin.fil_slett(storage_db) } fang (e) {}
+    prøv { builtin.fil_slett("/tmp/norscode-helpdesk-storage.backup.sqlite") } fang (e) {}
+    la storage_backup = "/tmp/norscode-helpdesk-storage.backup.sqlite"
+    la storage_handle = storage.opne(storage_db)
+    assert(db.query_text(storage_handle, "PRAGMA busy_timeout" ) == "5000")
+    assert(storage.migrer(storage_handle, "CREATE TABLE IF NOT EXISTS probe (id INTEGER PRIMARY KEY, value TEXT);"))
+    assert(db.execute(storage_handle, "INSERT INTO probe (value) VALUES ('before-backup');") >= 0)
+    assert(storage.backup(storage_handle, storage_backup))
+    assert(db.close(storage_handle))
+    la restored = storage.restore(storage_backup, storage_db)
+    assert_eq(db.query_text(restored, "SELECT value FROM probe LIMIT 1"), "before-backup")
+    assert(db.close(restored))
+
+    la c = quick3.ny("https://quick3.example/api", "token")
+    la http_avvist = usann
+    prøv { quick3.ny("http://quick3.example/api", "token") } fang (e) { http_avvist = sann }
+    assert(http_avvist)
+    la vehicle = quick3.kartlegg_koyreto({"id": "v1", "vin": "VIN1", "model": "ID.4", "make": "VW"})
+    assert_eq(vehicle["schema"], "norscode-helpdesk-vehicle-v1")
+    la ticket = quick3.kartlegg_ticket({"id": "t1", "title": "Lading", "status": "open", "priority": "high", "vehicle_id": "v1"})
+    assert_eq(ticket["schema"], "norscode-helpdesk-ticket-v1")
+    assert_eq(c["schema"], "norscode-quick3-v1")
+    assert(quick3.retrybar(503))
+    assert(ikkje quick3.retrybar(401))
+    assert_eq(quick3.retry_plan(408, 2, 1000)["schema"], "norscode-quick3-retry-plan-v1")
+    la safe_log = quick3.trygg_responslogg({"status": "200", "attempts": "1", "ok": "sann", "body": "secret", "response": "Bearer token"})
+    assert_eq(safe_log["schema"], "norscode-quick3-safe-log-v1")
+    assert(ikkje har_nokkel(safe_log, "body"))
+    la manglar_ticket = usann
+    prøv { quick3.kartlegg_ticket({"id": "t1"}) } fang (e) { manglar_ticket = sann }
+    assert(manglar_ticket)
+    la hm = mock.ny()
+    mock.svar(hm, "GET", "/vehicles", 200, "{\"items\":[]}")
+    mock.kø(hm, "POST", "/tickets", [503, 201])
+    assert_eq(mock.request(hm, "GET", "/vehicles", "")["status"], "200")
+    assert_eq(mock.request(hm, "POST", "/tickets", "{}")["status"], "503")
+    assert_eq(mock.request(hm, "POST", "/tickets", "{}")["status"], "201")
+    assert(mock.har_kall(hm, "POST", "/tickets"))
+    la secret_names = config.secret_nøkler()
+    assert_eq(secret_names[0], "QUICK3_API_TOKEN")
+    assert_eq(secret_names[1], "SMTP_PASSWORD")
+    assert_eq(secret_names[2], "INBOUND_WEBHOOK_SECRET")
+
+    la raw = "From: ola@example.no\nTo: help@example.no\nSubject: Hjelp\nMessage-ID: <m-1@example.no>\nIn-Reply-To: <m-0@example.no>\nReferences: <m-0@example.no>\nContent-Type: text/plain; charset=utf-8\n\nHei helpdesk"
+    la msg = inbound.parse(raw)
+    assert_eq(msg["message_id"], "<m-1@example.no>")
+    assert_eq(msg["in_reply_to"], "<m-0@example.no>")
+    assert_eq(msg["text"], "Hei helpdesk")
+    la multipart = "From: ola@example.no\nContent-Type: multipart/mixed; boundary=\"b\"\n\n--b\nContent-Type: text/html\nContent-Transfer-Encoding: quoted-printable\n\n<p>Hei=20Helpdesk</p>\n--b\nContent-Type: application/pdf\nContent-Disposition: attachment; filename=rapport.pdf\nContent-Transfer-Encoding: base64\n\nJVBERi0x\n--b--"
+    la multipart_msg = inbound.parse(multipart)
+    assert_eq(multipart_msg["html"], "<p>Hei Helpdesk</p>")
+    assert_eq(multipart_msg["attachment_count"], "1")
+    assert(builtin.contains(multipart_msg["attachments"], "rapport.pdf"))
+    la webhook_sig = krypto.hmac_sha256("secret", "body")
+    assert(inbound.verifiser_webhook("secret", "body", webhook_sig))
+    assert(ikkje inbound.verifiser_webhook("secret", "body", msg["message_id"]))
+
+    la ok_file = vedlegg.valider("rapport.pdf", "application/pdf", 12, 100, ["application/pdf"])
+    assert_eq(ok_file["ok"], "sann")
+    la bad_file = vedlegg.valider("../passwd", "text/plain", 12, 100, ["text/plain"])
+    assert_eq(bad_file["error"], "unsafe_filename")
+    assert_eq(vedlegg.trygg_sti("data/uploads", "rapport.pdf"), "data/uploads/rapport.pdf")
+
+    skriv("test_helpdesk_deployment_contract OK\n")
+    returner 0
+}

@@ -1,0 +1,229 @@
+# domenehost.no - samla domenehosting-plan for Norscode
+
+bruk std.dns som dns
+bruk std.brannmur som brannmur
+bruk std.mail_server som mail
+bruk std.runtime_security som runtime_security
+bruk std.tls_acme som tls
+
+funksjon _json_liste_legg_til(liste: tekst, verdi: tekst) -> tekst {
+    hvis liste == "[]" { returner "[" + verdi + "]" }
+    hvis builtin.ends_with(liste, "]") { returner builtin.slice(liste, 0, lengde(liste) - 1) + "," + verdi + "]" }
+    returner "[" + verdi + "]"
+}
+
+funksjon ny(domene: tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["domene"] = domene
+    h["web_host"] = "www." + domene
+    h["mail_host"] = "mail." + domene
+    h["tls"] = "acme-pakrevd"
+    h["dnssec"] = "pakrevd"
+    h["dnssec_signed"] = "usann"
+    h["dnssec_ds"] = ""
+    h["waf"] = "pakrevd"
+    h["backup"] = "pakrevd"
+    h["acme_contact"] = "admin@" + domene
+    h["admin_allowlist"] = "[]"
+    h["admin_allowlist_count"] = "0"
+    returner h
+}
+
+funksjon legg_admin_kjelde(h: ordbok_tekst, cidr: tekst) -> bool {
+    hvis cidr == "" { returner usann }
+    h["admin_allowlist"] = _json_liste_legg_til(h["admin_allowlist"], builtin.json_stringify(cidr))
+    h["admin_allowlist_count"] = tekst_fra_heltall(heltall_fra_tekst(h["admin_allowlist_count"]) + 1)
+    returner sann
+}
+
+funksjon dns_sone(h: ordbok_tekst, ipv4: tekst, dkim_key: tekst) -> ordbok_tekst {
+    la s = dns.ny_sone(h["domene"])
+    dns.legg_a(s, "@", ipv4)
+    dns.legg_cname(s, "www", h["domene"])
+    dns.legg_mail_standard(s, h["mail_host"], "norscode", dkim_key)
+    hvis h["dnssec_signed"] == "sann" og h["dnssec_ds"] != "" {
+        dns.registrer_dnssec(s, h["dnssec_ds"], "ECDSAP256SHA256")
+    }
+    returner s
+}
+
+funksjon brannmur_policy(h: ordbok_tekst) -> ordbok_tekst {
+    la p = brannmur.ny_policy("domenehost-" + h["domene"])
+    brannmur.avgrens_ut(p)
+    brannmur.legg_web_standard(p)
+    brannmur.legg_dns_standard(p)
+    brannmur.legg_mail_standard(p)
+    brannmur.legg_ut_standard(p)
+    la admins = builtin.json_parse(h["admin_allowlist"])
+    la i: heiltall = 0
+    mens i < lengde(admins) {
+        brannmur.tillat_admin(p, "admin-ssh", 22, admins[i])
+        i = i + 1
+    }
+    returner p
+}
+
+funksjon mail_config(h: ordbok_tekst, dkim_key: tekst) -> ordbok_tekst {
+    la m = mail.ny(h["domene"], h["mail_host"])
+    m["dkim_public_key"] = dkim_key
+    mail.legg_postboks(m, "postmaster", "drift")
+    mail.legg_postboks(m, "abuse", "sikkerheit")
+    mail.legg_alias(m, "admin@" + h["domene"], "postmaster@" + h["domene"])
+    returner m
+}
+
+funksjon tls_config(h: ordbok_tekst) -> ordbok_tekst {
+    la c = tls.ny(h["domene"], h["acme_contact"])
+    tls.legg_san(c, h["web_host"])
+    tls.legg_san(c, h["mail_host"])
+    returner c
+}
+
+funksjon backup_plan(h: ordbok_tekst) -> ordbok_tekst {
+    la b: ordbok_tekst = {}
+    b["domene"] = h["domene"]
+    b["status"] = "klar"
+    b["schedule"] = "daily"
+    b["retention_days"] = "30"
+    b["encrypt"] = "sann"
+    b["verify_restore"] = "sann"
+    b["include"] = "dns,web,mail,tls,config"
+    b["target"] = "backup/" + h["domene"]
+    b["audit"] = "backup.snapshot"
+    hvis h["backup"] != "pakrevd" { b["status"] = "av" }
+    returner b
+}
+
+funksjon restore_plan(h: ordbok_tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["domene"] = h["domene"]
+    r["source"] = "backup/" + h["domene"]
+    r["dry_run"] = "sann"
+    r["verify_dns"] = "sann"
+    r["verify_mail"] = "sann"
+    r["verify_tls"] = "sann"
+    r["audit"] = "backup.restore"
+    returner r
+}
+
+funksjon runtime_security_policy(h: ordbok_tekst) -> ordbok_tekst {
+    la admin_cidr = ""
+    hvis heltall_fra_tekst(h["admin_allowlist_count"]) > 0 {
+        la admins = builtin.json_parse(h["admin_allowlist"])
+        hvis lengde(admins) > 0 { admin_cidr = admins[0] }
+    }
+    returner runtime_security.hosting_policy("domenehost-" + h["domene"], admin_cidr)
+}
+
+funksjon produksjon_klar(h: ordbok_tekst, dkim_key: tekst) -> bool {
+    hvis ikkje dns.gyldig_domene(h["domene"]) { returner usann }
+    hvis h["tls"] != "acme-pakrevd" { returner usann }
+    hvis h["dnssec"] != "pakrevd" { returner usann }
+    hvis h["waf"] != "pakrevd" { returner usann }
+    hvis h["backup"] != "pakrevd" { returner usann }
+    hvis dkim_key == "" { returner usann }
+    hvis ikkje dns.dnssec_klar(dns_sone(h, "127.0.0.1", dkim_key)) { returner usann }
+    hvis backup_plan(h)["status"] != "klar" { returner usann }
+    hvis ikkje tls.produksjon_klar(tls_config(h)) { returner usann }
+    hvis ikkje brannmur.produksjon_trygg(brannmur_policy(h)) { returner usann }
+    hvis ikkje runtime_security.brannmur_policy_ok(runtime_security_policy(h)) { returner usann }
+    returner sann
+}
+
+funksjon produksjon_konfig(h: ordbok_tekst, dkim_key: tekst) -> ordbok_tekst {
+    la p = brannmur_policy(h)
+    la k: ordbok_tekst = {}
+    k["dnssec"] = "usann"
+    hvis h["dnssec"] == "pakrevd" { k["dnssec"] = "sann" }
+    k["tls_acme"] = "usann"
+    hvis h["tls"] == "acme-pakrevd" og tls.produksjon_klar(tls_config(h)) { k["tls_acme"] = "sann" }
+    k["waf"] = "usann"
+    hvis h["waf"] == "pakrevd" { k["waf"] = "sann" }
+    k["backup"] = "usann"
+    hvis h["backup"] == "pakrevd" { k["backup"] = "sann" }
+    k["default_drop_firewall"] = "usann"
+    hvis p["default_inn"] == "drop" { k["default_drop_firewall"] = "sann" }
+    k["admin_allowlist"] = "usann"
+    hvis heltall_fra_tekst(h["admin_allowlist_count"]) > 0 { k["admin_allowlist"] = "sann" }
+    k["rate_limit"] = "usann"
+    hvis heltall_fra_tekst(p["rate_limit_count"]) > 0 { k["rate_limit"] = "sann" }
+    k["egress_restricted"] = p["egress_restricted"]
+    k["mail_spf"] = "sann"
+    k["mail_dkim"] = "usann"
+    hvis dkim_key != "" { k["mail_dkim"] = "sann" }
+    k["mail_dmarc"] = "sann"
+    k["open_relay_blocked"] = "sann"
+    k["audit"] = p["audit"]
+    k["runtime_security"] = "usann"
+    hvis runtime_security.brannmur_policy_ok(runtime_security_policy(h)) { k["runtime_security"] = "sann" }
+    returner k
+}
+
+funksjon _hosting_konfig_ok(k: ordbok_tekst) -> bool {
+    hvis k["dnssec"] != "sann" { returner usann }
+    hvis k["tls_acme"] != "sann" { returner usann }
+    hvis k["waf"] != "sann" { returner usann }
+    hvis k["backup"] != "sann" { returner usann }
+    hvis k["default_drop_firewall"] != "sann" { returner usann }
+    hvis k["admin_allowlist"] != "sann" { returner usann }
+    hvis k["rate_limit"] != "sann" { returner usann }
+    hvis k["egress_restricted"] != "sann" { returner usann }
+    hvis k["mail_spf"] != "sann" { returner usann }
+    hvis k["mail_dkim"] != "sann" { returner usann }
+    hvis k["mail_dmarc"] != "sann" { returner usann }
+    hvis k["open_relay_blocked"] != "sann" { returner usann }
+    hvis k["audit"] != "sann" { returner usann }
+    hvis k["runtime_security"] != "sann" { returner usann }
+    returner sann
+}
+
+funksjon infrastruktur_plan(h: ordbok_tekst, ipv4: tekst, dkim_key: tekst) -> ordbok_tekst {
+    la s = dns_sone(h, ipv4, dkim_key)
+    la p = brannmur_policy(h)
+    la m = mail_config(h, dkim_key)
+    la cfg = produksjon_konfig(h, dkim_key)
+    la apply = brannmur.applier_plan(p, sann)
+    la rp = dns.resolver_plan(s)
+    la dp = mail.daemon_plan(m)
+    la cert = tls.sertifikat_plan(tls_config(h))
+    la runtime_sec = runtime_security_policy(h)
+    la runtime_sec_status = runtime_security.produksjonsstatus()
+    la dnssec = dns.dnssec_plan(s)
+    la backup = backup_plan(h)
+    la restore = restore_plan(h)
+    la plan: ordbok_tekst = {}
+    plan["domene"] = h["domene"]
+    plan["zonefile"] = dns.eksporter_zonefile(s)
+    plan["resolver_entry"] = rp["entry"]
+    plan["dnssec_status"] = dnssec["status"]
+    plan["dnssec_algorithm"] = dnssec["algorithm"]
+    plan["dnssec_auto_resign"] = dnssec["auto_resign"]
+    plan["smtp_entry"] = dp["entry"]
+    plan["tls_provider"] = cert["provider"]
+    plan["tls_auto_renew"] = cert["auto_renew"]
+    plan["nftables"] = brannmur.nftables_plan(p)
+    plan["firewall_apply_command"] = apply["apply_command"]
+    plan["firewall_dry_run"] = apply["dry_run"]
+    plan["runtime_security_module"] = runtime_sec_status["modul"]
+    plan["runtime_security_ok"] = "usann"
+    hvis runtime_security.brannmur_policy_ok(runtime_sec) { plan["runtime_security_ok"] = "sann" }
+    plan["runtime_security_scope"] = runtime_sec["scope.net"]
+    plan["backup_status"] = backup["status"]
+    plan["backup_retention_days"] = backup["retention_days"]
+    plan["backup_encrypt"] = backup["encrypt"]
+    plan["restore_dry_run"] = restore["dry_run"]
+    plan["security_ok"] = "usann"
+    hvis _hosting_konfig_ok(cfg) { plan["security_ok"] = "sann" }
+    plan["production_ready"] = "usann"
+    hvis produksjon_klar(h, dkim_key) og _hosting_konfig_ok(cfg) { plan["production_ready"] = "sann" }
+    returner plan
+}
+
+funksjon status() -> ordbok_tekst {
+    la s: ordbok_tekst = {}
+    s["modul"] = "std.domenehost"
+    s["status"] = "framtidsklar"
+    s["dekning"] = "DNS, web, mail, TLS/ACME, DNSSEC, WAF, backup, brannmur og infrastruktur-plan"
+    s["produksjon"] = "krev DKIM, DNSSEC, ACME-auto-renew, WAF, backup, egress og default-drop brannmur"
+    returner s
+}

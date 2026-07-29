@@ -1,0 +1,488 @@
+// Versjonert fleir-payloadbilete for NCB inne i ein køyrbar binær.
+bruk std.bytes som bytes
+//
+// Format:
+//   [vertbinær]
+//   ([NCB-data][namn][u64 data-lengd][u32 namn-lengd][record-magic])*
+//   [u32 tal payloadar][image-magic]
+//
+// Oppslaget går baklengs frå slutten. OS-lastaren ignorerer traileren, medan
+// Norscode-runtime kan finne compiler, VM og executor utan sidefiler.
+
+funksjon image_magic() -> tekst { returner "NORSCODE_NCB_IMAGE_V1" }
+funksjon record_magic() -> tekst { returner "NCB_RECORD_V1" }
+funksjon stream_magic() -> tekst { returner "NORSCODE_NCB_TEXT_V1" }
+funksjon stream_len_digits() -> heiltall { returner 20 }
+
+funksjon stream_desimal(verdi: tekst) -> heiltall {
+    la ut = 0
+    la i = 0
+    mens i < lengde(verdi) {
+        la c = builtin.char_code(verdi[i])
+        hvis c >= 48 og c <= 57 { ut = ut * 10 + (c - 48) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon tekst_til_bytes(verdi: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(verdi) {
+        legg_til(ut, builtin.char_code(verdi[i]) & 255)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon bytes_til_tekst(bytes: liste_heiltall, start: heiltall, tal: heiltall) -> tekst {
+    la ut = ""
+    la i = 0
+    mens i < tal {
+        la del = ""
+        la j = 0
+        mens j < 4096 og i + j < tal {
+            del = del + builtin.chr(bytes[start + i + j])
+            j = j + 1
+        }
+        ut = ut + del
+        i = i + j
+    }
+    returner ut
+}
+
+funksjon kopier(ut: liste_heiltall, inn: liste_heiltall) -> heiltall {
+    la i = 0
+    mens i < lengde(inn) {
+        legg_til(ut, inn[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon skriv_u32_le(ut: liste_heiltall, verdi: heiltall) -> heiltall {
+    legg_til(ut, verdi & 255)
+    legg_til(ut, (verdi >> 8) & 255)
+    legg_til(ut, (verdi >> 16) & 255)
+    legg_til(ut, (verdi >> 24) & 255)
+    returner 0
+}
+
+funksjon skriv_u64_le(ut: liste_heiltall, verdi: heiltall) -> heiltall {
+    la i = 0
+    mens i < 8 {
+        legg_til(ut, (verdi >> (i * 8)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon les_u32_le(bytes: liste_heiltall, start: heiltall) -> heiltall {
+    returner bytes[start] | (bytes[start + 1] << 8) | (bytes[start + 2] << 16) | (bytes[start + 3] << 24)
+}
+
+funksjon les_u64_le(bytes: liste_heiltall, start: heiltall) -> heiltall {
+    la verdi: heiltall = 0
+    la i = 7
+    mens i >= 0 {
+        verdi = (verdi << 8) | bytes[start + i]
+        i = i - 1
+    }
+    returner verdi
+}
+
+funksjon bytes_matchar_tekst(bytes: liste_heiltall, start: heiltall, verdi: tekst) -> boolsk {
+    hvis start < 0 eller start + lengde(verdi) > lengde(bytes) { returner usann }
+    la i = 0
+    mens i < lengde(verdi) {
+        hvis bytes[start + i] != (builtin.char_code(verdi[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Native AOT-runtime les den køyrbare fila som ein bytebevarande tekstbuffer.
+// Desse funksjonane gjer traileroppslag direkte i bufferen utan å materialisere
+// heile binæren som ei liste med ein NcVal per byte.
+funksjon tekst_byte(bytes: tekst, pos: heiltall) -> heiltall {
+    returner builtin.char_code(bytes[pos]) & 255
+}
+
+funksjon tekst_les_u32_le(bytes: tekst, start: heiltall) -> heiltall {
+    returner tekst_byte(bytes, start) |
+        (tekst_byte(bytes, start + 1) << 8) |
+        (tekst_byte(bytes, start + 2) << 16) |
+        (tekst_byte(bytes, start + 3) << 24)
+}
+
+funksjon tekst_les_u64_le(bytes: tekst, start: heiltall) -> heiltall {
+    la verdi: heiltall = 0
+    la i = 7
+    mens i >= 0 {
+        verdi = (verdi << 8) | tekst_byte(bytes, start + i)
+        i = i - 1
+    }
+    returner verdi
+}
+
+funksjon tekst_matchar(bytes: tekst, start: heiltall, verdi: tekst) -> boolsk {
+    hvis start < 0 eller start + lengde(verdi) > lengde(bytes) { returner usann }
+    la i = 0
+    mens i < lengde(verdi) {
+        hvis tekst_byte(bytes, start + i) != (builtin.char_code(verdi[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon har_image_tekst(bytes: tekst) -> boolsk {
+    la magic = image_magic()
+    hvis lengde(bytes) < lengde(magic) + 4 { returner usann }
+    returner tekst_matchar(bytes, lengde(bytes) - lengde(magic), magic)
+}
+
+funksjon hent_tekst(bytes: tekst, søkt_namn: tekst) -> tekst {
+    hvis ikkje har_image_tekst(bytes) { kast "Binæren manglar innebygd NCB-image" }
+    la cursor = lengde(bytes) - lengde(image_magic()) - 4
+    la tal = tekst_les_u32_le(bytes, cursor)
+    la i = 0
+    mens i < tal {
+        la magic_start = cursor - lengde(record_magic())
+        hvis ikkje tekst_matchar(bytes, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+        la namn_lengd = tekst_les_u32_le(bytes, magic_start - 4)
+        la data_lengd = tekst_les_u64_le(bytes, magic_start - 12)
+        la namn_start = magic_start - 12 - namn_lengd
+        la data_start = namn_start - data_lengd
+        hvis data_start < 0 { kast "Ugyldig innebygd NCB-lengd" }
+        la namn = builtin.slice(bytes, namn_start, namn_start + namn_lengd)
+        hvis namn == søkt_namn {
+            returner builtin.slice(bytes, data_start, data_start + data_lengd)
+        }
+        cursor = data_start
+        i = i + 1
+    }
+    kast "Ukjent innebygd NCB-payload: " + søkt_namn
+}
+
+funksjon har_image(bytes: liste_heiltall) -> boolsk {
+    la magic = image_magic()
+    hvis lengde(bytes) < lengde(magic) + 4 { returner usann }
+    returner bytes_matchar_tekst(bytes, lengde(bytes) - lengde(magic), magic)
+}
+
+funksjon har_image_bytes(bytes) -> boolsk {
+    la magic = image_magic()
+    hvis lengde(bytes) < lengde(magic) + 4 { returner usann }
+    prøv {
+        returner builtin.bytes_slice_to_text(bytes, lengde(bytes) - lengde(magic), lengde(magic)) == magic
+    } fang (e) {
+        returner bytes_matchar_tekst(bytes, lengde(bytes) - lengde(magic), magic)
+    }
+}
+
+funksjon payload_tal(bytes: liste_heiltall) -> heiltall {
+    hvis ikkje har_image(bytes) { returner 0 }
+    returner les_u32_le(bytes, lengde(bytes) - lengde(image_magic()) - 4)
+}
+
+funksjon utan_gammalt_image(bytes: liste_heiltall) -> liste_heiltall {
+    hvis ikkje har_image(bytes) {
+        la kopi: liste_heiltall = []
+        kopier(kopi, bytes)
+        returner kopi
+    }
+    la cursor = lengde(bytes) - lengde(image_magic()) - 4
+    la tal = les_u32_le(bytes, cursor)
+    la i = 0
+    mens i < tal {
+        la record_slutt = cursor
+        la magic_start = record_slutt - lengde(record_magic())
+        hvis ikkje bytes_matchar_tekst(bytes, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+        la namn_lengd = les_u32_le(bytes, magic_start - 4)
+        la data_lengd = les_u64_le(bytes, magic_start - 12)
+        cursor = magic_start - 12 - namn_lengd - data_lengd
+        hvis cursor < 0 { kast "Ugyldig innebygd NCB-lengd" }
+        i = i + 1
+    }
+    la ut: liste_heiltall = []
+    i = 0
+    mens i < cursor {
+        legg_til(ut, bytes[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon bygg(base: liste_heiltall, namn: liste_tekst, payloadar: liste_tekst) -> liste_heiltall {
+    hvis lengde(namn) != lengde(payloadar) { kast "NCB-image krev eitt namn per payload" }
+    la ut = utan_gammalt_image(base)
+    la i = 0
+    mens i < lengde(namn) {
+        hvis namn[i] == "" { kast "NCB-image godtek ikkje tomt payloadnamn" }
+        la data = tekst_til_bytes(payloadar[i])
+        la namn_bytes = tekst_til_bytes(namn[i])
+        kopier(ut, data)
+        kopier(ut, namn_bytes)
+        skriv_u64_le(ut, lengde(data))
+        skriv_u32_le(ut, lengde(namn_bytes))
+        kopier(ut, tekst_til_bytes(record_magic()))
+        i = i + 1
+    }
+    skriv_u32_le(ut, lengde(namn))
+    kopier(ut, tekst_til_bytes(image_magic()))
+    returner ut
+}
+
+// Releasebyggaren eig den nylesne base-lista og kan utvide henne direkte.
+// Dette unngår ein full kopi av millionar av byte-NcValar. Dersom lista alt
+// har eit image, brukar vi den trygge erstatningsvegen i bygg().
+funksjon bygg_direkte(base: liste_heiltall, namn: liste_tekst, payloadar: liste_tekst) -> liste_heiltall {
+    hvis har_image(base) { returner bygg(base, namn, payloadar) }
+    hvis lengde(namn) != lengde(payloadar) { kast "NCB-image krev eitt namn per payload" }
+    la i = 0
+    mens i < lengde(namn) {
+        hvis namn[i] == "" { kast "NCB-image godtek ikkje tomt payloadnamn" }
+        la data = tekst_til_bytes(payloadar[i])
+        la namn_bytes = tekst_til_bytes(namn[i])
+        kopier(base, data)
+        kopier(base, namn_bytes)
+        skriv_u64_le(base, lengde(data))
+        skriv_u32_le(base, lengde(namn_bytes))
+        kopier(base, tekst_til_bytes(record_magic()))
+        i = i + 1
+    }
+    skriv_u32_le(base, lengde(namn))
+    kopier(base, tekst_til_bytes(image_magic()))
+    returner base
+}
+
+// Bytes-basert variant for releasebygging. Han allokerer éin råbuffer med
+// sluttstorleiken og skriv kvar byte direkte; den materialiserer ikkje ein
+// NcVal per byte av Mach-O/ELF-fila.
+funksjon bygg_direkte_bytes(base, namn: liste_tekst, payloadar: liste_tekst) {
+    hvis lengde(namn) != lengde(payloadar) { kast "NCB-image krev eitt namn per payload" }
+    // Fjern eit tidlegare image utan å materialisere heile binæren som ei
+    // Norscode-liste. Dette held releasebygginga single-binary og bounded på
+    // store Mach-O/ELF-filer.
+    la base_len = lengde(base)
+    hvis har_image_bytes(base) {
+        la cursor = base_len - lengde(image_magic()) - 4
+        la tal = les_u32_le(base, cursor)
+        la k = 0
+        mens k < tal {
+            la magic_start = cursor - lengde(record_magic())
+            hvis ikkje bytes_matchar_tekst(base, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+            la namn_lengd = les_u32_le(base, magic_start - 4)
+            la data_lengd = les_u64_le(base, magic_start - 12)
+            cursor = magic_start - 12 - namn_lengd - data_lengd
+            hvis cursor < 0 { kast "Ugyldig innebygd NCB-lengd" }
+            k = k + 1
+        }
+        base_len = cursor
+    }
+    la total = base_len + lengde(image_magic()) + 4
+    la i = 0
+    mens i < lengde(namn) {
+        hvis namn[i] == "" { kast "NCB-image godtek ikkje tomt payloadnamn" }
+        total = total + lengde(payloadar[i]) + lengde(namn[i]) + 12 + lengde(record_magic())
+        i = i + 1
+    }
+    la out = bytes.ny(total, 0)
+    la pos = 0
+    mens pos < base_len {
+        out[pos] = base[pos]
+        pos = pos + 1
+    }
+    i = 0
+    mens i < lengde(namn) {
+        la data = payloadar[i]
+        la namn_tekst = namn[i]
+        la j = 0
+        mens j < lengde(data) {
+            out[pos] = builtin.char_code(data[j]) & 255
+            pos = pos + 1
+            j = j + 1
+        }
+        j = 0
+        mens j < lengde(namn_tekst) {
+            out[pos] = builtin.char_code(namn_tekst[j]) & 255
+            pos = pos + 1
+            j = j + 1
+        }
+        la v = lengde(data)
+        j = 0
+        mens j < 8 {
+            out[pos] = (v >> (j * 8)) & 255
+            pos = pos + 1
+            j = j + 1
+        }
+        v = lengde(namn_tekst)
+        j = 0
+        mens j < 4 {
+            out[pos] = (v >> (j * 8)) & 255
+            pos = pos + 1
+            j = j + 1
+        }
+        j = 0
+        mens j < lengde(record_magic()) {
+            out[pos] = builtin.char_code(record_magic()[j]) & 255
+            pos = pos + 1
+            j = j + 1
+        }
+        i = i + 1
+    }
+    la count = lengde(namn)
+    i = 0
+    mens i < 4 {
+        out[pos] = (count >> (i * 8)) & 255
+        pos = pos + 1
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(image_magic()) {
+        out[pos] = builtin.char_code(image_magic()[i]) & 255
+        pos = pos + 1
+        i = i + 1
+    }
+    returner out
+}
+
+funksjon stream_har_image(bytes) -> boolsk {
+    la magic = stream_magic()
+    hvis lengde(bytes) < lengde(magic) + stream_len_digits() { returner usann }
+    prøv {
+        returner builtin.bytes_slice_to_text(bytes, lengde(bytes) - lengde(magic), lengde(magic)) == magic
+    } fang (e) {
+        returner bytes_matchar_tekst(bytes, lengde(bytes) - lengde(magic), magic)
+    }
+}
+
+funksjon hent_stream_tekst(bytes, søkt_namn: tekst) -> tekst {
+    hvis ikkje stream_har_image(bytes) { kast "Binæren manglar innebygd NCB-text-image" }
+    la magic_start = lengde(bytes) - lengde(stream_magic())
+    la len_start = magic_start - stream_len_digits()
+    la manifest_len = stream_desimal(bytes_til_tekst(bytes, len_start, stream_len_digits()))
+    la manifest_start = len_start - manifest_len
+    hvis manifest_start < 0 { kast "Ugyldig NCB-text-manifest-lengd" }
+    la manifest = builtin.json_parse_raw(bytes_til_tekst(bytes, manifest_start, manifest_len))
+    la payloadar = manifest["payloads"]
+    hvis payloadar == null eller payloadar[søkt_namn] == null { kast "Ukjent innebygd NCB-payload: " + søkt_namn }
+    la info = payloadar[søkt_namn]
+    returner bytes_til_tekst(bytes, heltall(info["start"]), heltall(info["length"]))
+}
+
+// Bytes-variant for den innebygde runtime-en. `builtin.bytes_to_text` gjer
+// éin råbuffer-konvertering i VM-en; han skal ikkje gå via liste_heiltall.
+funksjon hent_stream_bytes(bytes, søkt_namn: tekst) -> tekst {
+    hvis ikkje stream_har_image(bytes) { kast "Binæren manglar innebygd NCB-text-image" }
+    la magic_start = lengde(bytes) - lengde(stream_magic())
+    la len_start = magic_start - stream_len_digits()
+    la manifest_len = stream_desimal(builtin.bytes_slice_to_text(bytes, len_start, stream_len_digits()))
+    la manifest_start = len_start - manifest_len
+    hvis manifest_start < 0 { kast "Ugyldig NCB-text-manifest-lengd" }
+    la manifest = builtin.json_parse_raw(builtin.bytes_slice_to_text(bytes, manifest_start, manifest_len))
+    la payloadar = manifest["payloads"]
+    hvis payloadar == null eller payloadar[søkt_namn] == null { kast "Ukjent innebygd NCB-payload: " + søkt_namn }
+    la info = payloadar[søkt_namn]
+    returner builtin.bytes_slice_to_text(bytes, heiltall(info["start"]), heiltall(info["length"]))
+}
+
+// Tekstlesing er den raske vegen for stream-image: fil_les held den binære
+// fila som ein bytebevarande tekst og slepp å materialisere ein NcVal-liste.
+// Den same inngangen toler det eldre trailerformatet.
+funksjon hent_tekst_auto(bytes: tekst, søkt_namn: tekst) -> tekst {
+    hvis tekst_matchar(bytes, lengde(bytes) - lengde(stream_magic()), stream_magic()) {
+        la magic_start = lengde(bytes) - lengde(stream_magic())
+        hvis magic_start >= stream_len_digits() {
+            returner hent_stream_tekst(bytes, søkt_namn)
+        }
+    }
+    returner hent_tekst(bytes, søkt_namn)
+}
+
+funksjon hent(bytes: liste_heiltall, søkt_namn: tekst) -> tekst {
+    hvis ikkje har_image(bytes) { kast "Binæren manglar innebygd NCB-image" }
+    la cursor = lengde(bytes) - lengde(image_magic()) - 4
+    la tal = les_u32_le(bytes, cursor)
+    la i = 0
+    mens i < tal {
+        la magic_start = cursor - lengde(record_magic())
+        hvis ikkje bytes_matchar_tekst(bytes, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+        la namn_lengd = les_u32_le(bytes, magic_start - 4)
+        la data_lengd = les_u64_le(bytes, magic_start - 12)
+        la namn_start = magic_start - 12 - namn_lengd
+        la data_start = namn_start - data_lengd
+        hvis data_start < 0 { kast "Ugyldig innebygd NCB-lengd" }
+        la namn = bytes_til_tekst(bytes, namn_start, namn_lengd)
+        hvis namn == søkt_namn {
+            returner bytes_til_tekst(bytes, data_start, data_lengd)
+        }
+        cursor = data_start
+        i = i + 1
+    }
+    kast "Ukjent innebygd NCB-payload: " + søkt_namn
+}
+
+funksjon payload_posisjon(bytes: liste_heiltall, søkt_namn: tekst) -> liste_heiltall {
+    hvis ikkje har_image(bytes) { kast "Binæren manglar innebygd NCB-image" }
+    la cursor = lengde(bytes) - lengde(image_magic()) - 4
+    la tal = les_u32_le(bytes, cursor)
+    la i = 0
+    mens i < tal {
+        la magic_start = cursor - lengde(record_magic())
+        hvis ikkje bytes_matchar_tekst(bytes, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+        la namn_lengd = les_u32_le(bytes, magic_start - 4)
+        la data_lengd = les_u64_le(bytes, magic_start - 12)
+        la namn_start = magic_start - 12 - namn_lengd
+        la data_start = namn_start - data_lengd
+        hvis data_start < 0 { kast "Ugyldig innebygd NCB-lengd" }
+        hvis bytes_til_tekst(bytes, namn_start, namn_lengd) == søkt_namn {
+            returner [data_start, data_lengd]
+        }
+        cursor = data_start
+        i = i + 1
+    }
+    kast "Ukjent innebygd NCB-payload: " + søkt_namn
+}
+
+funksjon tekst_checksum(verdi: tekst) -> heiltall {
+    la hash: heiltall = 216613626
+    la i = 0
+    mens i < lengde(verdi) {
+        hash = ((hash * 16777619) + (builtin.char_code(verdi[i]) & 255)) % 2147483647
+        i = i + 1
+    }
+    returner hash
+}
+
+funksjon payload_checksum(bytes: liste_heiltall, søkt_namn: tekst) -> heiltall {
+    la pos = payload_posisjon(bytes, søkt_namn)
+    la hash: heiltall = 216613626
+    la i = 0
+    mens i < pos[1] {
+        hash = ((hash * 16777619) + bytes[pos[0] + i]) % 2147483647
+        i = i + 1
+    }
+    returner hash
+}
+
+funksjon namn(bytes: liste_heiltall) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis ikkje har_image(bytes) { returner ut }
+    la cursor = lengde(bytes) - lengde(image_magic()) - 4
+    la tal = les_u32_le(bytes, cursor)
+    la i = 0
+    mens i < tal {
+        la magic_start = cursor - lengde(record_magic())
+        hvis ikkje bytes_matchar_tekst(bytes, magic_start, record_magic()) { kast "Skadd innebygd NCB-record" }
+        la namn_lengd = les_u32_le(bytes, magic_start - 4)
+        la data_lengd = les_u64_le(bytes, magic_start - 12)
+        la namn_start = magic_start - 12 - namn_lengd
+        la data_start = namn_start - data_lengd
+        hvis data_start < 0 { kast "Ugyldig innebygd NCB-lengd" }
+        legg_til(ut, bytes_til_tekst(bytes, namn_start, namn_lengd))
+        cursor = data_start
+        i = i + 1
+    }
+    returner ut
+}

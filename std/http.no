@@ -1,33 +1,379 @@
 # HTTP standardbibliotek
 
+bruk std.socket som socket
+bruk std.dns som dns
+
+funksjon _json_tekst(verdi: tekst) -> tekst {
+    la ut = "\""
+    la i: heiltall = 0
+    mens i < lengde(verdi) {
+        la c = verdi[i]
+        hvis c == "\\" { ut = ut + "\\\\" }
+        ellers hvis c == "\"" { ut = ut + "\\\"" }
+        ellers hvis c == "\n" { ut = ut + "\\n" }
+        ellers hvis c == "\r" { ut = ut + "\\r" }
+        ellers hvis c == "\t" { ut = ut + "\\t" }
+        ellers { ut = ut + c }
+        i = i + 1
+    }
+    returner ut + "\""
+}
+
+funksjon _http_url(url: tekst) -> ordbok_tekst {
+    la secure: boolsk = builtin.starts_with(url, "https://")
+    la prefix = "http://"
+    hvis secure { prefix = "https://" }
+    hvis ikkje builtin.starts_with(url, prefix) { returner {"status": "feil"} }
+    la rest = builtin.slice(url, lengde(prefix), lengde(url))
+    la slash = builtin.index_of(rest, "/")
+    la authority = rest
+    la path = "/"
+    hvis slash >= 0 {
+        authority = builtin.slice(rest, 0, slash)
+        path = builtin.slice(rest, slash, lengde(rest))
+    }
+    la colon = builtin.index_of(authority, ":")
+    la host = authority
+    la port = "80"
+    hvis secure { port = "443" }
+    hvis colon >= 0 {
+        host = builtin.slice(authority, 0, colon)
+        port = builtin.slice(authority, colon + 1, lengde(authority))
+    }
+    hvis host == "" eller port == "" { returner {"status": "feil"} }
+    returner {"status": "klar", "secure": tekst(secure), "host": host, "port": port, "path": path}
+}
+
+funksjon _http_wait(h: ordbok_tekst, events: heiltall, timeout_ms: heiltall) -> boolsk {
+    la start = builtin.tid_ms()
+    la p = socket.native_poll(h, events)
+    mens p["status"] == "ventende" og builtin.tid_ms() - start < timeout_ms {
+        prøv { builtin.vent.sov(1) } fang (e) { }
+        p = socket.native_poll(h, events)
+    }
+    returner p["status"] != "ventende" og p["status"] != "feil"
+}
+
+funksjon _http_response(raw: tekst) -> tekst {
+    la line_end = builtin.index_of(raw, "\r\n")
+    la header_end = builtin.index_of(raw, "\r\n\r\n")
+    hvis line_end < 0 eller header_end < 0 { returner "" }
+    la line = builtin.slice(raw, 0, line_end)
+    la space = builtin.index_of(line, " ")
+    la code = heltall_fra_tekst(builtin.slice(line, space + 1, space + 4))
+    la headers: ordbok_tekst = {}
+    la lines = builtin.split(builtin.slice(raw, line_end + 2, header_end), "\r\n")
+    la i: heiltall = 0
+    mens i < lengde(lines) {
+        la colon = builtin.index_of(lines[i], ":")
+        hvis colon > 0 { headers[tekst_til_liten(builtin.slice(lines[i], 0, colon))] = builtin.trim(builtin.slice(lines[i], colon + 1, lengde(lines[i]))) }
+        i = i + 1
+    }
+    // Ikkje send ein heterogen literal direkte til json_stringify. Eldre
+    // native runtime kan då redusere tekst-/mapverdiar til "[verdi]". Bygg
+    // responskontrakten eksplisitt med kvar del serialisert i rett type.
+    la body = builtin.slice(raw, header_end + 4, lengde(raw))
+    returner "{\"status\":" + tekst_fra_heltall(code) +
+        ",\"headers\":" + builtin.json_stringify(headers) +
+        ",\"body\":" + _json_tekst(body) + "}"
+}
+
+funksjon _http_ipv4(host: tekst, port: heiltall) -> tekst {
+    hvis builtin.contains(host, ".") og heltall_fra_tekst(port) >= 0 {
+        prøv {
+            la d = dns.resolve(host, port)
+            hvis d["status"] == "ok" {
+                la addresses = d["addresses"]
+                la i: heiltall = 0
+                mens i < lengde(addresses) {
+                    la candidate = tekst(addresses[i])
+                    hvis builtin.contains(candidate, ".") { returner candidate }
+                    i = i + 1
+                }
+            }
+        } fang (e) { }
+    }
+    returner host
+}
+
+funksjon _http_request_native_ca(metode: tekst, url: tekst, headers: ordbok_tekst,
+                                 body: tekst, timeout_ms: heiltall,
+                                 ca_file: tekst) -> tekst {
+    la d = _http_url(url)
+    hvis d["status"] != "klar" { returner "" }
+    la port_num = heltall_fra_tekst(d["port"])
+    la connect_host = _http_ipv4(d["host"], port_num)
+    la h: ordbok_tekst = {}
+    hvis d["secure"] == "sann" {
+        h = socket.native_tls_tilkoble(connect_host, port_num, d["host"], ca_file)
+    } ellers {
+        h = socket.native_tilkoble(connect_host, port_num)
+    }
+    hvis h["status"] == "feil" { returner "" }
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje _http_wait(h, 2, timeout_ms) {
+            socket.native_lukk(h)
+            returner ""
+        }
+    }
+    hvis d["secure"] == "sann" {
+        la tls = socket.native_tls_handshake(h)
+        mens tls["status"] == "ventende" og _http_wait(h, 1, timeout_ms) { tls = socket.native_tls_handshake(h) }
+        hvis tls["status"] != "connected" {
+            socket.native_lukk(h)
+            returner ""
+        }
+    }
+    la host_header = d["host"]
+    hvis (d["secure"] == "sann" og d["port"] != "443") eller
+       (d["secure"] != "sann" og d["port"] != "80") {
+        host_header = host_header + ":" + d["port"]
+    }
+    la request = metode + " " + d["path"] + " HTTP/1.1\r\nHost: " + host_header + "\r\n"
+    la keys = nøkler(headers)
+    la i: heiltall = 0
+    mens i < lengde(keys) {
+        request = request + tekst(keys[i]) + ": " + tekst(headers[keys[i]]) + "\r\n"
+        i = i + 1
+    }
+    request = request + "User-Agent: Norscode/1.0\r\nAccept: */*\r\nConnection: close\r\n"
+    hvis body != "" { request = request + "Content-Length: " + tekst_fra_heltall(lengde(body)) + "\r\n" }
+    request = request + "\r\n" + body
+    la offset: heiltall = 0
+    mens offset < lengde(request) {
+        la w = socket.native_skriv(h, builtin.slice(request, offset, lengde(request)))
+        hvis w["status"] == "ventende" {
+            hvis ikkje _http_wait(h, 2, timeout_ms) {
+                socket.native_lukk(h)
+                returner ""
+            }
+        } ellers {
+            la count = heltall_fra_tekst(tekst(w["value"]))
+            hvis count <= 0 {
+                socket.native_lukk(h)
+                returner ""
+            }
+            offset = offset + count
+        }
+    }
+    la raw = ""
+    la round: heiltall = 0
+    la read_start = builtin.tid_ms()
+    mens round < 256 og builtin.tid_ms() - read_start < timeout_ms {
+        la r = socket.native_les(h, 16384)
+        hvis r["status"] == "ventende" {
+            hvis ikkje _http_wait(h, 1, timeout_ms) {
+                socket.native_lukk(h)
+                returner ""
+            }
+        } ellers {
+            la data = tekst(r["data"])
+            hvis data == "" {
+                round = 256
+            } ellers {
+                raw = raw + data
+                hvis lengde(raw) > 8388608 {
+                    raw = ""
+                    round = 256
+                }
+            }
+            round = round + 1
+        }
+    }
+    socket.native_lukk(h)
+    returner _http_response(raw)
+}
+
+funksjon _http_request_native(metode: tekst, url: tekst, headers: ordbok_tekst,
+                              body: tekst, timeout_ms: heiltall) -> tekst {
+    returner _http_request_native_ca(metode, url, headers, body, timeout_ms, "")
+}
+
+funksjon _finn_json_tal(response: tekst, nøkkel: tekst) -> heiltall {
+    la marker = "\"" + nøkkel + "\":"
+    la start = builtin.index_of(response, marker)
+    hvis start < 0 { returner 0 }
+    la i = start + lengde(marker)
+    la ut = ""
+    mens i < lengde(response) {
+        la c = response[i]
+        hvis c == "0" eller c == "1" eller c == "2" eller c == "3" eller c == "4" eller c == "5" eller c == "6" eller c == "7" eller c == "8" eller c == "9" {
+            ut = ut + c
+        } ellers hvis ut != "" {
+            i = lengde(response)
+        }
+        i = i + 1
+    }
+    hvis ut == "" { returner 0 }
+    returner heltall_fra_tekst(ut)
+}
+
+funksjon _finn_json_tekst(response: tekst, nøkkel: tekst) -> tekst {
+    la marker = "\"" + nøkkel + "\":\""
+    la start = builtin.index_of(response, marker)
+    hvis start < 0 { returner "" }
+    la i = start + lengde(marker)
+    la ut = ""
+    la escape = usann
+    mens i < lengde(response) {
+        la c = response[i]
+        hvis escape {
+            hvis c == "\"" { ut = ut + "\"" }
+            ellers hvis c == "\\" { ut = ut + "\\" }
+            ellers hvis c == "n" { ut = ut + "\n" }
+            ellers hvis c == "r" { ut = ut + "\r" }
+            ellers hvis c == "t" { ut = ut + "\t" }
+            ellers { ut = ut + c }
+            escape = usann
+        } ellers hvis c == "\\" {
+            escape = sann
+        } ellers hvis c == "\"" {
+            returner ut
+        } ellers {
+            ut = ut + c
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _finn_header_tekst(response: tekst, nøkkel: tekst) -> tekst {
+    la headers_start = builtin.index_of(response, "\"headers\":")
+    hvis headers_start < 0 { returner "" }
+    la rest = builtin.slice(response, headers_start, lengde(response))
+    returner _finn_json_tekst(rest, nøkkel)
+}
+
 funksjon request(metode: tekst, url: tekst, headers: ordbok_tekst, query: ordbok_tekst, body: tekst, timeout_ms: heltall) -> tekst {
-    returner http.request(metode, url, headers, query, body, timeout_ms)
+    returner _http_request_native(metode, url, headers, body, timeout_ms)
 }
 
 funksjon request_full(metode: tekst, url: tekst, headers: ordbok_tekst, query: ordbok_tekst, body: tekst, timeout_ms: heltall) -> tekst {
-    returner http.request_full(metode, url, headers, query, body, timeout_ms)
+    returner _http_request_native(metode, url, headers, body, timeout_ms)
+}
+
+funksjon request_full_ca(metode: tekst, url: tekst, headers: ordbok_tekst,
+                         query: ordbok_tekst, body: tekst, timeout_ms: heltall,
+                         ca_file: tekst) -> tekst {
+    hvis ikkje builtin.starts_with(url, "https://") eller ca_file == "" { returner "" }
+    returner _http_request_native_ca(metode, url, headers, body, timeout_ms, ca_file)
 }
 
 funksjon response_status(response: tekst) -> heltall {
-    returner http.response_status(response)
+    hvis builtin.contains(response, "\"status\":200") { returner 200 }
+    hvis builtin.contains(response, "\"status\":201") { returner 201 }
+    hvis builtin.contains(response, "\"status\":202") { returner 202 }
+    hvis builtin.contains(response, "\"status\":204") { returner 204 }
+    hvis builtin.contains(response, "\"status\":400") { returner 400 }
+    hvis builtin.contains(response, "\"status\":401") { returner 401 }
+    hvis builtin.contains(response, "\"status\":403") { returner 403 }
+    hvis builtin.contains(response, "\"status\":404") { returner 404 }
+    hvis builtin.contains(response, "\"status\":409") { returner 409 }
+    hvis builtin.contains(response, "\"status\":422") { returner 422 }
+    hvis builtin.contains(response, "\"status\":429") { returner 429 }
+    hvis builtin.contains(response, "\"status\":500") { returner 500 }
+    hvis builtin.contains(response, "\"status\":502") { returner 502 }
+    hvis builtin.contains(response, "\"status\":503") { returner 503 }
+    hvis builtin.contains(response, "\"status\":504") { returner 504 }
+    prøv {
+        la parsed = builtin.json_parse_raw(response)
+        hvis finnes_nøkkel(parsed, "status") {
+            returner parsed["status"]
+        }
+    } fang (e) {
+    }
+    la fallback = _finn_json_tal(response, "status")
+    hvis fallback != 0 {
+        returner fallback
+    }
+    la d = builtin.json_parse_raw(response)
+    la ks = nøkler(d)
+    la i: heiltall = 0
+    la funnet: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis k == "status" {
+            la v = d[ks[i]]
+            funnet = heltall_fra_tekst(tekst(v))
+        }
+        i = i + 1
+    }
+    returner funnet
 }
 
 funksjon response_text(response: tekst) -> tekst {
-    returner http.response_text(response)
+    la fallback = _finn_json_tekst(response, "body")
+    hvis fallback != "" {
+        returner fallback
+    }
+    la d = builtin.json_parse_raw(response)
+    la ks = nøkler(d)
+    la i: heiltall = 0
+    la body = ""
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis k == "body" {
+            body = tekst(d[ks[i]])
+        }
+        i = i + 1
+    }
+    returner body
 }
 
 funksjon response_json(response: tekst) -> ordbok_tekst {
-    returner http.response_json(response)
+    la raw = builtin.json_parse_raw(response_text(response))
+    la out: ordbok_tekst = {}
+    la ks = nøkler(raw)
+    la i: heiltall = 0
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        la v = raw[ks[i]]
+        hvis v == sann {
+            out[k] = "tr" + "ue"
+        } ellers hvis v == usann {
+            out[k] = "fa" + "lse"
+        } ellers {
+            out[k] = tekst(v)
+        }
+        i = i + 1
+    }
+    returner out
 }
 
 funksjon response_header(response: tekst, nøkkel: tekst) -> tekst {
-    returner http.response_header(response, nøkkel)
+    la fallback = _finn_header_tekst(response, nøkkel)
+    hvis fallback != "" {
+        returner fallback
+    }
+    la d = builtin.json_parse_raw(response)
+    la headers: ordbok_tekst = {}
+    la dks = nøkler(d)
+    la di: heiltall = 0
+    mens di < lengde(dks) {
+        la dk = tekst(dks[di])
+        hvis dk == "headers" {
+            headers = d[dks[di]]
+        }
+        di = di + 1
+    }
+    la low = tekst_til_liten(nøkkel)
+    la ks = nøkler(headers)
+    la i: heiltall = 0
+    la funnet = ""
+    mens i < lengde(ks) {
+        la k = tekst(ks[i])
+        hvis tekst_til_liten(k) == low {
+            funnet = tekst(headers[ks[i]])
+        }
+        i = i + 1
+    }
+    returner funnet
 }
 
-funksjon response_header_or(response: tekst, nøkkel: tekst, fallback: tekst) -> tekst {
+funksjon response_header_or(response: tekst, nøkkel: tekst, standard: tekst) -> tekst {
     la verdi = response_header(response, nøkkel)
     hvis (verdi == "") {
-        returner fallback
+        returner standard
     }
     returner verdi
 }

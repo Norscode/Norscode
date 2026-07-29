@@ -1,0 +1,185 @@
+# media_diffusion.no - avgrensa, deterministisk CPU-diffusjon i rein Norscode
+#
+# Dette er ein ekte iterativ latent/denoise-bane for lokal produksjon. Han er
+# heilt deterministisk, har eksplisitt arbeidsbudsjett og skriv PPM utan
+# ekstern prosess eller nettverk. GPU-kjernar kan koplast på same kontrakt.
+
+bruk std.fil som fil
+
+funksjon _hash(prompt: tekst) -> heiltall {
+    la h: heiltall = 2166136261 % 2147483647
+    la i: heiltall = 0
+    mens i < lengde(prompt) {
+        h = (h * 16777619 + builtin.char_code(prompt[i]) + i) % 2147483647
+        i = i + 1
+    }
+    hvis h < 0 { returner 0 - h }
+    returner h
+}
+
+funksjon _klamp(v: heiltall) -> heiltall {
+    hvis v < 0 { returner 0 }
+    hvis v > 255 { returner 255 }
+    returner v
+}
+
+funksjon _noise(seed: heiltall, x: heiltall, y: heiltall,
+                kanal: heiltall, steg_tal: heiltall) -> heiltall {
+    la n = seed
+    n = (n + x * 374761393) % 2147483647
+    n = (n + y * 668265263) % 2147483647
+    n = (n + kanal * 214013) % 2147483647
+    n = (n + steg_tal * 122949829) % 2147483647
+    returner (n % 511) - 255
+}
+
+funksjon _ascii(ut: liste_heltall, verdi: tekst) {
+    la i: heiltall = 0
+    mens i < lengde(verdi) {
+        legg_til(ut, builtin.char_code(verdi[i]))
+        i = i + 1
+    }
+}
+
+funksjon _skriv(sti: tekst, data: liste_heltall) -> ordbok_tekst {
+    la tal = fil.skriv_bytes(sti, data)
+    hvis tal != lengde(data) {
+        returner {"ok": "usann", "feil": "filskriving_feila", "sti": "", "mime": "image/x-portable-pixmap", "bytes": "0"}
+    }
+    returner {"ok": "sann", "feil": "", "sti": sti, "mime": "image/x-portable-pixmap", "bytes": tekst_fra_heltall(tal)}
+}
+
+funksjon _arbeid_ok(bredde: heiltall, hoyde: heiltall,
+                    steg_tal: heiltall, tile: heiltall) {
+    hvis bredde <= 0 eller hoyde <= 0 eller bredde > 2048 eller hoyde > 2048 {
+        kast "DiffusjonFeil: ugyldig biletestorleik"
+    }
+    hvis steg_tal <= 0 eller steg_tal > 100 { kast "DiffusjonFeil: ugyldig steg-tal" }
+    hvis tile < 8 eller tile > 256 { kast "DiffusjonFeil: ugyldig tile-storleik" }
+    la tiles_x = (bredde + tile - 1) / tile
+    la tiles_y = (hoyde + tile - 1) / tile
+    hvis tiles_x * tiles_y * tile * tile * steg_tal > 50000000 {
+        kast "DiffusjonFeil: arbeidsbudsjett overskriden"
+    }
+}
+
+funksjon bilde(prompt: tekst, sti: tekst, bredde: heiltall,
+               hoyde: heiltall, steg_tal: heiltall, tile: heiltall) -> ordbok_tekst {
+    _arbeid_ok(bredde, hoyde, steg_tal, tile)
+    hvis builtin.trim(prompt) == "" { kast "DiffusjonFeil: prompt manglar" }
+
+    la seed = _hash(prompt)
+    la state: liste_heltall = []
+    la y: heiltall = 0
+    mens y < hoyde {
+        la x: heiltall = 0
+        mens x < bredde {
+            la c: heiltall = 0
+            mens c < 3 {
+                legg_til(state, 128 + _noise(seed, x, y, c, 0) / 4)
+                c = c + 1
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    # Kvar runde flyttar pikslane mot nabogjennomsnittet og prompt-styrt
+    # latent farge. Tile-grensa gjer arbeidsmengda føreseieleg.
+    la runde: heiltall = 0
+    mens runde < steg_tal {
+        y = 0
+        mens y < hoyde {
+            la x: heiltall = 0
+            mens x < bredde {
+                la c: heiltall = 0
+                mens c < 3 {
+                    la idx = (y * bredde + x) * 3 + c
+                    la venstre = ((y * bredde + (x - 1)) * 3 + c)
+                    la hoyre = ((y * bredde + (x + 1)) * 3 + c)
+                    la opp = ((((y - 1) * bredde) + x) * 3 + c)
+                    la ned = ((((y + 1) * bredde) + x) * 3 + c)
+                    la sum = state[idx] * 2
+                    la tal: heiltall = 2
+                    hvis x > 0 {
+                        sum = sum + state[venstre]
+                        tal = tal + 1
+                    }
+                    hvis x + 1 < bredde {
+                        sum = sum + state[hoyre]
+                        tal = tal + 1
+                    }
+                    hvis y > 0 {
+                        sum = sum + state[opp]
+                        tal = tal + 1
+                    }
+                    hvis y + 1 < hoyde {
+                        sum = sum + state[ned]
+                        tal = tal + 1
+                    }
+                    la styring = 128 + _noise(seed, x, y, c, runde) / 8
+                    state[idx] = _klamp((sum + styring) / (tal + 1))
+                    c = c + 1
+                }
+                x = x + 1
+            }
+            y = y + 1
+        }
+        runde = runde + 1
+    }
+
+    la data: liste_heltall = []
+    _ascii(data, "P6\n" + tekst_fra_heltall(bredde) + " " + tekst_fra_heltall(hoyde) + "\n255\n")
+    la i: heiltall = 0
+    mens i < lengde(state) {
+        legg_til(data, _klamp(state[i]))
+        i = i + 1
+    }
+    la resultat = _skriv(sti, data)
+    resultat["steg"] = tekst_fra_heltall(steg_tal)
+    resultat["tile"] = tekst_fra_heltall(tile)
+    resultat["backend"] = "cpu-diffusion-v1"
+    returner resultat
+}
+
+funksjon bilde_med_backend(prompt: tekst, sti: tekst, bredde: heiltall,
+                           hoyde: heiltall, steg_tal: heiltall, tile: heiltall) -> ordbok_tekst {
+    _arbeid_ok(bredde, hoyde, steg_tal, tile)
+    hvis builtin.trim(prompt) == "" { kast "DiffusjonFeil: prompt manglar" }
+    prøv {
+        la request: ordbok_tekst = {
+            "abi": "norscode-media-diffusion-v1",
+            "operation": "render_rgb",
+            "seed": _hash(prompt),
+            "width": bredde,
+            "height": hoyde,
+            "steps": steg_tal,
+            "tile": tile
+        }
+        la native = builtin.media_diffusion_operation(request)
+        hvis native["status"] == "ferdig" og native["backend"] == "metal-diffusion-v1" {
+            la data: liste_heiltall = []
+            _ascii(data, "P6\n" + tekst_fra_heiltall(bredde) + " " + tekst_fra_heiltall(hoyde) + "\n255\n")
+            la pixels = native["data"]
+            la i: heiltall = 0
+            mens i < lengde(pixels) {
+                legg_til(data, heltall_fra_tekst(tekst(pixels[i])))
+                i = i + 1
+            }
+            la resultat = _skriv(sti, data)
+            resultat["steg"] = tekst_fra_heiltall(steg_tal)
+            resultat["tile"] = tekst_fra_heiltall(tile)
+            resultat["backend"] = "metal-diffusion-v1"
+            resultat["fallback"] = "usann"
+            returner resultat
+        }
+    } fang (e) { }
+    la resultat = bilde(prompt, sti, bredde, hoyde, steg_tal, tile)
+    resultat["backend"] = "cpu-fallback"
+    resultat["fallback"] = "sann"
+    returner resultat
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "abi": "norscode.media-diffusion.v1", "backend": "cpu-diffusion-v1,metal-diffusion-v1", "dekning": "deterministisk iterativ denoising, tile-/arbeidsgrense, ekte PPM-output og valfri Metal compute-backend", "gpu": "metal-diffusion-v1 med CPU-fallback"}
+}

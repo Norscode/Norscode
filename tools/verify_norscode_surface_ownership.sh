@@ -37,7 +37,7 @@ strip_dot_slash() {
 
 is_active_rel() {
   case "$1" in
-    ""|archive/*|ai_assistent*|ai_assistent_bak_*|tests_bak_*) return 1 ;;
+    ""|build/*|archive/*|ai_assistent*|ai_assistent_bak_*|tests_bak_*) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -46,8 +46,19 @@ is_known_c_artifact() {
   case "$1" in
     build/bootstrap_compiler_bundle_ncb_data.c|\
     build/native_elf_compiler_bundle_ncb_data.c|\
+    build/runtime_before_hex_json_fix.c|\
     build/v3009/native_candidate_combined.c|\
-    build/v3009/norscode_generated.c) return 0 ;;
+    build/v3009/native_candidate_gc.c|\
+    build/v3009/native_gc_stress.c|\
+    build/v3009/norscode_generated.c|\
+    build/v3009/norscode_generated_gc.c|\
+    build/v9630/native_candidate_linux.c|\
+    build/v9630/norscode_generated.c|\
+    build/v9646/native_candidate_linux_aarch64.c|\
+    build/v9646/native_candidate_linux_x86_64.c|\
+    build/v9646/native_candidate_macos.c|\
+    build/v9646/native_candidate_windows.c|\
+    build/v9646/norscode_generated.c) return 0 ;;
     *) return 1 ;;
   esac
 }

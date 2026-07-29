@@ -13,8 +13,8 @@ Denne lista viser kva som allereie finst, kva som berre er delvis på plass, og 
 - [x] Session-lag i `std/sesjon.no`
 - [x] Admin-CRUD i `std/admin.no`
 - [x] Samla web-stack i `std/web_app_stack.no`
-- [x] Prosjektgenerator via `nc startproject` / `tools/startproject.no`
-- [x] Appgenerator via `nc startapp` / `tools/startapp.no`
+- [x] Prosjektgenerator via `nc startproject`
+- [x] Appgenerator via `nc startapp`
 - [x] Template-start i `src/templates/base.html` i scaffolden
 
 ## Delvis på plass
@@ -25,7 +25,7 @@ Denne lista viser kva som allereie finst, kva som berre er delvis på plass, og 
 - [x] CSRF som standard i form-flyten
 - [x] Ferdige login/logout/register-flows med brukaroppleving i scaffolden
 - [x] Roller og permissions som meir komplette standardmodular
-- [x] Admin med søk, filter, sortering og paginering
+- [x] Admin med ModelAdmin-konfig, `list_display`, `search_fields`, `list_filter`, `readonly_fields`, widgets, permissions, CSRF, actions, historikk, søk, sortering og paginering
 - [x] Query builder med chainable queryset-liknande API
 - [x] Migrasjonar med autogenerering frå modellendringar
 - [x] Test-runner med testdatabase og fixtures
@@ -69,6 +69,6 @@ Denne lista viser kva som allereie finst, kva som berre er delvis på plass, og 
 - [x] 1. Fullføre routing og app registry
 - [x] 2. Lage forms + template-arv
 - [x] 3. Gjere ORM-relasjonar og migrations meir Django-like
-- [x] 4. Utvide admin med filter og søk
+- [x] 4. Utvide admin med Django-liknande ModelAdmin, filter, søk, actions, audit og sikker formflyt
 - [x] 5. Leggje inn test-runner og fixtures
 - [x] 6. Leggje til static/media og security middleware

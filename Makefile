@@ -1,10 +1,10 @@
 NORSCODE ?= ./bin/nc
 
-.PHONY: install test run check build feature-check ci version commands release-package
+.PHONY: install test run check build feature-check maturity ci version commands release-package
 
 # Installer native bootstrap-kompilator (Python-fri etter første bygging)
 install:
-	bash tools/build-bootstrap-binary.sh
+	$(NORSCODE) run tools/build-bootstrap-binary.no
 
 # ─── Vanlige daglige kommandoer (native, ingen Python) ──────────────────────
 
@@ -23,6 +23,9 @@ build:
 feature-check:
 	$(NORSCODE) feature-check app.no
 
+maturity:
+	$(NORSCODE) maintenance maturity
+
 version:
 	$(NORSCODE) --version
 
@@ -34,4 +37,4 @@ ci:
 	$(NORSCODE) ci --bootstrap-lane
 
 release-package:
-	./package-release.sh
+	NORSCODE_ENABLE_EXEC_PROSESS=1 $(NORSCODE) run tools/package_release.no

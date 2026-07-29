@@ -1,0 +1,550 @@
+// NCB -> køyrbar macOS arm64 Mach-O.
+// AOT-flate for heiltalsuttrykk: konstantar og vanleg aritmetikk blir ekte
+// arm64-instruksjonar. Resultatet frå RETURN blir native main-retur.
+
+bruk selfhost.native_execution.macho_arm64_emitter som macho
+
+funksjon opcode(instruksjon) -> tekst {
+    hvis builtin.type(instruksjon) != "liste" eller lengde(instruksjon) == 0 { returner "" }
+    returner tekst(instruksjon[0])
+}
+
+funksjon legg_u32(kode: liste_heiltall, verdi: heiltall) -> heiltall {
+    legg_til(kode, verdi & 255)
+    legg_til(kode, (verdi >> 8) & 255)
+    legg_til(kode, (verdi >> 16) & 255)
+    legg_til(kode, (verdi >> 24) & 255)
+    returner 0
+}
+
+funksjon skriv_u32(kode: liste_heiltall, posisjon: heiltall, verdi: heiltall) -> heiltall {
+    kode[posisjon] = verdi & 255
+    kode[posisjon + 1] = (verdi >> 8) & 255
+    kode[posisjon + 2] = (verdi >> 16) & 255
+    kode[posisjon + 3] = (verdi >> 24) & 255
+    returner 0
+}
+
+funksjon last_heiltall(kode: liste_heiltall, register: heiltall, verdi: heiltall) -> heiltall {
+    hvis verdi < -2147483648 eller verdi > 2147483647 { kast "macOS AOT-heiltall må vere 32-bit" }
+    la bits = verdi & 0xFFFFFFFF
+    legg_u32(kode, 0x52800000 | ((bits & 0xFFFF) << 5) | register) // movz wN, low16
+    hvis ((bits >> 16) & 0xFFFF) != 0 {
+        legg_u32(kode, 0x72A00000 | (((bits >> 16) & 0xFFFF) << 5) | register) // movk wN, high16, lsl 16
+    }
+    returner 0
+}
+
+funksjon variabel_register(indeks: heiltall) -> heiltall {
+    hvis indeks < 6 { returner 12 + indeks }
+    returner 1 + (indeks - 6)
+}
+
+funksjon kompiler_arm64(kode) -> ordbok_tekst {
+    hvis builtin.type(kode) != "liste" {
+        returner {"ok": "usann", "error": "macOS kodegen krev instruksjonsliste", "image": []}
+    }
+    la native: liste_heiltall = []
+    la djupn = 0
+    la variablar = {}
+    la variabel_antal = 0
+    la etikettar = {}
+    la grein_patchar = []
+    la ferdig = usann
+    la i = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        la op = opcode(instr)
+        hvis op == "PUSH_CONST" {
+            hvis lengde(instr) != 2 eller (builtin.type(instr[1]) != "heltall" og builtin.type(instr[1]) != "boolsk") {
+                returner {"ok": "usann", "error": "macOS AOT PUSH_CONST krev heiltall", "image": []}
+            }
+            hvis djupn >= 4 { returner {"ok": "usann", "error": "macOS AOT-stakk støttar høgst 4 verdiar", "image": []} }
+            la konstant = instr[1]
+            hvis builtin.type(konstant) == "boolsk" {
+                hvis konstant { konstant = 1 } ellers { konstant = 0 }
+            }
+            prøv { last_heiltall(native, 8 + djupn, konstant) } fang melding {
+                returner {"ok": "usann", "error": tekst(melding), "image": []}
+            }
+            djupn = djupn + 1
+        } ellers hvis op == "POP" {
+            hvis djupn < 1 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved POP", "image": []} }
+            djupn = djupn - 1
+        } ellers hvis op == "BINARY_ADD" eller op == "ADD" eller op == "BINARY_SUB" eller op == "SUB" eller op == "BINARY_MUL" eller op == "MUL" eller op == "BINARY_DIV" eller op == "DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" {
+            hvis djupn < 2 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved " + op, "image": []} }
+            la venstre = 8 + djupn - 2
+            la høgre = 8 + djupn - 1
+            hvis op == "BINARY_ADD" eller op == "ADD" {
+                legg_u32(native, 0x0B000000 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_SUB" eller op == "SUB" {
+                legg_u32(native, 0x4B000000 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_MUL" eller op == "MUL" {
+                legg_u32(native, 0x1B007C00 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_DIV" eller op == "DIV" {
+                legg_u32(native, 0x1AC00C00 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_MOD" {
+                legg_u32(native, 0x1AC00C00 | (høgre << 16) | (venstre << 5)) // sdiv w0, wVenstre, wHøgre
+                legg_u32(native, 0x1B008000 | (høgre << 16) | (venstre << 10) | venstre) // msub wVenstre, w0, wHøgre, wVenstre
+            } ellers hvis op == "BINARY_AND" {
+                legg_u32(native, 0x0A000000 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_OR" {
+                legg_u32(native, 0x2A000000 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_XOR" {
+                legg_u32(native, 0x4A000000 | (høgre << 16) | (venstre << 5) | venstre)
+            } ellers hvis op == "BINARY_LSHIFT" {
+                legg_u32(native, 0x1AC02000 | (høgre << 16) | (venstre << 5) | venstre) // lslv
+            } ellers {
+                legg_u32(native, 0x1AC02800 | (høgre << 16) | (venstre << 5) | venstre) // asrv
+            }
+            djupn = djupn - 1
+        } ellers hvis op == "UNARY_NEG" {
+            hvis djupn < 1 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved UNARY_NEG", "image": []} }
+            la register = 8 + djupn - 1
+            legg_u32(native, 0x4B0003E0 | (register << 16) | register) // neg wN, wN
+        } ellers hvis op == "UNARY_NOT" {
+            hvis djupn < 1 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved UNARY_NOT", "image": []} }
+            la register = 8 + djupn - 1
+            legg_u32(native, 0x7100001F | (register << 5)) // cmp wN, #0
+            legg_u32(native, 0x1A9F17E0 | register) // cset wN, eq
+        } ellers hvis op == "UNARY_BNOT" {
+            hvis djupn < 1 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved UNARY_BNOT", "image": []} }
+            la register = 8 + djupn - 1
+            legg_u32(native, 0x2A2003E0 | (register << 16) | register) // mvn wN, wN
+        } ellers hvis op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_LE" eller op == "COMPARE_GT" eller op == "COMPARE_GE" {
+            hvis djupn < 2 { returner {"ok": "usann", "error": "macOS AOT-stakk underflyt ved " + op, "image": []} }
+            la venstre = 8 + djupn - 2
+            la høgre = 8 + djupn - 1
+            legg_u32(native, 0x6B00001F | (høgre << 16) | (venstre << 5)) // cmp wVenstre, wHøgre
+            la cset = 0
+            hvis op == "COMPARE_EQ" { cset = 0x1A9F17E0 }
+            hvis op == "COMPARE_NE" { cset = 0x1A9F07E0 }
+            hvis op == "COMPARE_LT" { cset = 0x1A9FA7E0 }
+            hvis op == "COMPARE_GE" { cset = 0x1A9FB7E0 }
+            hvis op == "COMPARE_LE" { cset = 0x1A9FC7E0 }
+            hvis op == "COMPARE_GT" { cset = 0x1A9FD7E0 }
+            legg_u32(native, cset | venstre)
+            djupn = djupn - 1
+        } ellers hvis op == "STORE_NAME" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
+                returner {"ok": "usann", "error": "macOS AOT STORE_NAME krev namn og stakkverdi", "image": []}
+            }
+            la namn = instr[1]
+            la mål = variablar[namn]
+            hvis mål == null {
+                hvis variabel_antal >= 13 { returner {"ok": "usann", "error": "macOS AOT støttar høgst 13 lokale variablar", "image": []} }
+                mål = variabel_register(variabel_antal)
+                variablar[namn] = mål
+                variabel_antal = variabel_antal + 1
+            }
+            la kjelde = 8 + djupn - 1
+            legg_u32(native, 0x2A0003E0 | (kjelde << 16) | mål) // mov wMål, wKjelde
+            djupn = djupn - 1
+        } ellers hvis op == "LOAD_NAME" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "macOS AOT LOAD_NAME krev namn", "image": []}
+            }
+            la kjelde = variablar[instr[1]]
+            hvis kjelde == null { returner {"ok": "usann", "error": "macOS AOT ukjend lokal variabel: " + instr[1], "image": []} }
+            hvis djupn >= 4 { returner {"ok": "usann", "error": "macOS AOT-stakk støttar høgst 4 verdiar", "image": []} }
+            la mål = 8 + djupn
+            legg_u32(native, 0x2A0003E0 | (kjelde << 16) | mål) // mov wMål, wKjelde
+            djupn = djupn + 1
+        } ellers hvis op == "LABEL" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "macOS AOT LABEL krev namn", "image": []}
+            }
+            hvis etikettar[instr[1]] != null { returner {"ok": "usann", "error": "macOS AOT duplikatetikett: " + instr[1], "image": []} }
+            etikettar[instr[1]] = lengde(native)
+        } ellers hvis op == "JUMP" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "macOS AOT JUMP krev namn", "image": []}
+            }
+            la posisjon = lengde(native)
+            legg_u32(native, 0x14000000)
+            legg_til(grein_patchar, [posisjon, instr[1], "b", 0])
+        } ellers hvis op == "JUMP_IF_FALSE" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
+                returner {"ok": "usann", "error": "macOS AOT JUMP_IF_FALSE krev namn og stakkverdi", "image": []}
+            }
+            djupn = djupn - 1
+            la register = 8 + djupn
+            la posisjon = lengde(native)
+            legg_u32(native, 0x34000000 | register)
+            legg_til(grein_patchar, [posisjon, instr[1], "cbz", register])
+        } ellers hvis op == "RETURN" {
+            hvis djupn != 1 eller i != lengde(kode) - 1 {
+                returner {"ok": "usann", "error": "macOS AOT RETURN krev éin stakkverdi og må vere sist", "image": []}
+            }
+            la resultat = 8 + djupn - 1
+            legg_u32(native, 0x2A0003E0 | (resultat << 16)) // mov w0, wN
+            legg_u32(native, 0xD65F03C0) // ret
+            ferdig = sann
+        } ellers {
+            returner {"ok": "usann", "error": "macOS AOT støttar ikkje opcode: " + op, "image": []}
+        }
+        i = i + 1
+    }
+    hvis ikkje ferdig { returner {"ok": "usann", "error": "macOS AOT-program manglar RETURN", "image": []} }
+    la p = 0
+    mens p < lengde(grein_patchar) {
+        la patch = grein_patchar[p]
+        la mål = etikettar[patch[1]]
+        hvis mål == null { returner {"ok": "usann", "error": "macOS AOT manglar etikett: " + patch[1], "image": []} }
+        la ord_delta = (mål - patch[0]) / 4
+        hvis patch[2] == "b" {
+            hvis ord_delta < -33554432 eller ord_delta > 33554431 { returner {"ok": "usann", "error": "macOS AOT JUMP utanfor rekkevidde", "image": []} }
+            skriv_u32(native, patch[0], 0x14000000 | (ord_delta & 0x03FFFFFF))
+        } ellers {
+            hvis ord_delta < -262144 eller ord_delta > 262143 { returner {"ok": "usann", "error": "macOS AOT JUMP_IF_FALSE utanfor rekkevidde", "image": []} }
+            skriv_u32(native, patch[0], 0x34000000 | ((ord_delta & 0x7FFFF) << 5) | patch[3])
+        }
+        p = p + 1
+    }
+    returner {"ok": "sann", "error": "", "image": native}
+}
+
+funksjon kompiler_instruksjoner(kode) -> ordbok_tekst {
+    la kontroll = kompiler_arm64(kode)
+    hvis kontroll["ok"] != "sann" {
+        returner {"ok": "usann", "error": kontroll["error"], "format": "Mach-O arm64", "image": []}
+    }
+    returner {
+        "ok": "sann",
+        "error": "",
+        "format": "Mach-O arm64",
+        "image": macho.bygg_program(kontroll["image"])
+    }
+}
+
+// Fyrste funksjons-AOT brukar statisk inlining. Det fjernar VM-kallet heilt,
+// held argument/retursemantikken og gir resten av kodegeneratoren eitt samla
+// kontrollflytgraf. Rekursjon og tidlege returar blir avviste eksplisitt.
+funksjon inline_kall(kode, funksjonar, prefiks: tekst, behald_return: boolsk, djupn: heiltall) -> ordbok_tekst {
+    hvis djupn > 16 { returner {"ok": "usann", "error": "macOS AOT funksjonskall er for djupt eller rekursivt", "code": []} }
+    hvis builtin.type(kode) != "liste" { returner {"ok": "usann", "error": "macOS AOT funksjon manglar kode", "code": []} }
+    la ut = []
+    la retur_namn = prefiks + "__returverdi"
+    la retur_etikett = prefiks + "__returslutt"
+    la har_inline_return = usann
+    la i = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        la op = opcode(instr)
+        hvis op == "CALL" {
+            hvis lengde(instr) != 3 eller builtin.type(instr[1]) != "tekst" eller builtin.type(instr[2]) != "heltall" {
+                returner {"ok": "usann", "error": "macOS AOT CALL har ugyldig format", "code": []}
+            }
+            la mål = funksjonar[instr[1]]
+            hvis mål == null { returner {"ok": "usann", "error": "macOS AOT støttar ikkje eksternt kall: " + instr[1], "code": []} }
+            la params = mål["params"]
+            hvis params == null { params = [] }
+            hvis instr[2] != lengde(params) { returner {"ok": "usann", "error": "macOS AOT argumenttal stemmer ikkje for " + instr[1], "code": []} }
+            la barneprefiks = prefiks + "k" + tekst_fra_heiltall(i) + "_"
+            la p = lengde(params) - 1
+            mens p >= 0 {
+                legg_til(ut, ["STORE_NAME", barneprefiks + params[p]])
+                p = p - 1
+            }
+            la kropp = mål["code"]
+            hvis lengde(kropp) == 0 eller opcode(kropp[lengde(kropp) - 1]) != "RETURN" {
+                returner {"ok": "usann", "error": "macOS AOT inline-funksjon må ende med RETURN: " + instr[1], "code": []}
+            }
+            la utvida = inline_kall(kropp, funksjonar, barneprefiks, usann, djupn + 1)
+            hvis utvida["ok"] != "sann" { returner utvida }
+            la j = 0
+            mens j < lengde(utvida["code"]) { legg_til(ut, utvida["code"][j]) j = j + 1 }
+        } ellers hvis op == "RETURN" {
+            hvis behald_return {
+                hvis i != lengde(kode) - 1 { returner {"ok": "usann", "error": "macOS AOT entry støttar ikkje tidleg RETURN", "code": []} }
+                legg_til(ut, instr)
+            } ellers {
+                legg_til(ut, ["STORE_NAME", retur_namn])
+                har_inline_return = sann
+                hvis i != lengde(kode) - 1 { legg_til(ut, ["JUMP", retur_etikett]) }
+            }
+        } ellers hvis op == "LOAD_NAME" eller op == "STORE_NAME" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "macOS AOT ugyldig lokalnamn", "code": []}
+            }
+            legg_til(ut, [op, prefiks + instr[1]])
+        } ellers hvis op == "LABEL" eller op == "JUMP" eller op == "JUMP_IF_FALSE" {
+            hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "macOS AOT ugyldig etikettnamn", "code": []}
+            }
+            legg_til(ut, [op, prefiks + instr[1]])
+        } ellers {
+            legg_til(ut, instr)
+        }
+        i = i + 1
+    }
+    hvis ikkje behald_return og har_inline_return {
+        legg_til(ut, ["LABEL", retur_etikett])
+        legg_til(ut, ["LOAD_NAME", retur_namn])
+    }
+    returner {"ok": "sann", "error": "", "code": ut}
+}
+
+// Konstante liste-/tekstoperasjonar kan foldast før den smale arm64-emitteren.
+// Det held AOT-binæren fri for ein skjult VM-runtime, men gjer vanlege
+// lengde/contains-kall på compile-time-konstantar reelle native operasjonar.
+funksjon fold_konstant_runtime(kode) {
+    hvis builtin.type(kode) != "liste" { returner kode }
+    la ut = []
+    la stakk = []
+    la kjend_type = {}
+    la kjend_verdi = {}
+    la i: heiltall = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        la op = opcode(instr)
+        hvis op == "PUSH_CONST" {
+            hvis builtin.type(instr[1]) == "tekst" {
+                // Placeholderen er berre registerinnhald; strengverdien blir
+                // halden i den abstrakte stakken for vidare constant folding.
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": instr[1]})
+            } ellers {
+                legg_til(ut, instr)
+                legg_til(stakk, {"type": "tal", "verdi": instr[1]})
+            }
+        } ellers hvis op == "BUILD_LIST" {
+            la antal = heiltall(instr[1])
+            la element = []
+            la kan_bevare = sann
+            la j: heiltall = 0
+            mens j < antal og lengde(stakk) > 0 {
+                la topp = fjern_siste(stakk)
+                legg_til(element, topp)
+                hvis topp["type"] == "ukjent" { kan_bevare = usann }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                j = j + 1
+            }
+            la i_element = lengde(element) - 1
+            la liste_verdi = []
+            mens i_element >= 0 {
+                legg_til(liste_verdi, element[i_element]["verdi"])
+                i_element = i_element - 1
+            }
+            legg_til(ut, ["PUSH_CONST", antal])
+            hvis kan_bevare og lengde(element) == antal {
+                legg_til(stakk, {"type": "liste", "verdi": liste_verdi})
+            } ellers {
+                legg_til(stakk, {"type": "liste_lengd", "verdi": antal})
+            }
+        } ellers hvis op == "BUILD_MAP" {
+            la antal_par = heiltall(instr[1])
+            la element = []
+            la kan_bevare = sann
+            la j_map: heiltall = 0
+            mens j_map < antal_par * 2 og lengde(stakk) > 0 {
+                la topp_map = fjern_siste(stakk)
+                legg_til(element, topp_map)
+                hvis topp_map["type"] == "ukjent" { kan_bevare = usann }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                j_map = j_map + 1
+            }
+            la kart_verdi = {}
+            la par: heiltall = 0
+            mens par < antal_par {
+                la key_pos = antal_par * 2 - 1 - par * 2
+                la val_pos = key_pos - 1
+                hvis key_pos >= 0 og val_pos >= 0 og key_pos < lengde(element) og val_pos < lengde(element) {
+                    kart_verdi[element[key_pos]["verdi"]] = element[val_pos]["verdi"]
+                }
+                par = par + 1
+            }
+            legg_til(ut, ["PUSH_CONST", 0])
+            hvis kan_bevare og lengde(element) == antal_par * 2 {
+                legg_til(stakk, {"type": "kart", "verdi": kart_verdi})
+            } ellers {
+                legg_til(stakk, {"type": "ukjent", "verdi": null})
+            }
+        } ellers hvis op == "STORE_NAME" {
+            la verdi = null
+            hvis lengde(stakk) > 0 { verdi = fjern_siste(stakk) }
+            legg_til(ut, instr)
+            hvis verdi != null {
+                kjend_type[instr[1]] = verdi["type"]
+                kjend_verdi[instr[1]] = verdi["verdi"]
+            }
+        } ellers hvis op == "LOAD_NAME" {
+            legg_til(ut, instr)
+            hvis kjend_type[instr[1]] != null {
+                legg_til(stakk, {"type": kjend_type[instr[1]], "verdi": kjend_verdi[instr[1]]})
+            } ellers {
+                legg_til(stakk, {"type": "ukjent", "verdi": null})
+            }
+        } ellers hvis op == "INDEX_GET" {
+            la indeks = null
+            la behaldar = null
+            hvis lengde(stakk) > 0 { indeks = fjern_siste(stakk) }
+            hvis lengde(stakk) > 0 { behaldar = fjern_siste(stakk) }
+            la kan_liste = behaldar != null og indeks != null og behaldar["type"] == "liste" og indeks["type"] == "tal" og
+                indeks["verdi"] >= 0 og indeks["verdi"] < lengde(behaldar["verdi"])
+            la kan_kart = behaldar != null og indeks != null og behaldar["type"] == "kart" og indeks["type"] == "tekst" og
+                finnes_nøkkel(behaldar["verdi"], indeks["verdi"])
+            hvis kan_liste eller kan_kart {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = null
+                hvis kan_liste { verdi = behaldar["verdi"][indeks["verdi"]] }
+                ellers { verdi = behaldar["verdi"][indeks["verdi"]] }
+                hvis builtin.type(verdi) == "tekst" {
+                    legg_til(ut, ["PUSH_CONST", 0])
+                    legg_til(stakk, {"type": "tekst", "verdi": verdi})
+                } ellers {
+                    legg_til(ut, ["PUSH_CONST", verdi])
+                    legg_til(stakk, {"type": "tal", "verdi": verdi})
+                }
+            } ellers {
+                legg_til(ut, instr)
+                legg_til(stakk, {"type": "ukjent", "verdi": null})
+            }
+        } ellers hvis op == "CALL" {
+            la nargs = heiltall(instr[2])
+            la argument = []
+            la j2: heiltall = 0
+            mens j2 < nargs og lengde(stakk) > 0 {
+                legg_til(argument, fjern_siste(stakk))
+                j2 = j2 + 1
+            }
+            la namn = tekst(instr[1])
+            hvis (namn == "builtin.lengde" eller namn == "lengde") og lengde(argument) == 1 og
+               (argument[0]["type"] == "liste_lengd" eller argument[0]["type"] == "liste" eller argument[0]["type"] == "tekst") {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la lengd = 0
+                hvis argument[0]["type"] == "liste_lengd" { lengd = argument[0]["verdi"] }
+                ellers hvis argument[0]["type"] == "liste" { lengd = lengde(argument[0]["verdi"]) }
+                ellers { lengd = lengde(argument[0]["verdi"]) }
+                legg_til(ut, ["PUSH_CONST", lengd])
+                legg_til(stakk, {"type": "tal", "verdi": lengd})
+            } ellers hvis (namn == "builtin.lower" eller namn == "lower") og lengde(argument) == 1 og argument[0]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.lower(argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": verdi})
+            } ellers hvis (namn == "builtin.upper" eller namn == "upper") og lengde(argument) == 1 og argument[0]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.upper(argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": verdi})
+            } ellers hvis (namn == "builtin.trim" eller namn == "trim") og lengde(argument) == 1 og argument[0]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.trim(argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": verdi})
+            } ellers hvis (namn == "builtin.replace" eller namn == "replace") og lengde(argument) == 3 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "tekst" og argument[2]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.replace(argument[2]["verdi"], argument[1]["verdi"], argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": verdi})
+            } ellers hvis (namn == "builtin.slice" eller namn == "slice") og lengde(argument) == 3 og
+                       argument[0]["type"] == "tal" og argument[1]["type"] == "tal" og argument[2]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.slice(argument[2]["verdi"], argument[1]["verdi"], argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", 0])
+                legg_til(stakk, {"type": "tekst", "verdi": verdi})
+            } ellers hvis (namn == "builtin.char_code" eller namn == "char_code") og lengde(argument) == 1 og argument[0]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la verdi = builtin.char_code(argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", verdi])
+                legg_til(stakk, {"type": "tal", "verdi": verdi})
+            } ellers hvis (namn == "builtin.finnes_nøkkel" eller namn == "finnes_nøkkel" eller namn == "builtin.har_nokkel" eller namn == "har_nokkel") og lengde(argument) == 2 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "kart" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la funnen = finnes_nøkkel(argument[1]["verdi"], argument[0]["verdi"])
+                hvis funnen { legg_til(ut, ["PUSH_CONST", 1]) } ellers { legg_til(ut, ["PUSH_CONST", 0]) }
+                legg_til(stakk, {"type": "tal", "verdi": funnen})
+            } ellers hvis (namn == "builtin.contains" eller namn == "contains") og lengde(argument) == 2 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la funnen = builtin.index_of(argument[1]["verdi"], argument[0]["verdi"]) >= 0
+                hvis funnen { legg_til(ut, ["PUSH_CONST", 1]) } ellers { legg_til(ut, ["PUSH_CONST", 0]) }
+                legg_til(stakk, {"type": "tal", "verdi": funnen})
+            } ellers hvis (namn == "builtin.starts_with" eller namn == "starts_with") og lengde(argument) == 2 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la funnen = builtin.starts_with(argument[1]["verdi"], argument[0]["verdi"])
+                hvis funnen { legg_til(ut, ["PUSH_CONST", 1]) } ellers { legg_til(ut, ["PUSH_CONST", 0]) }
+                legg_til(stakk, {"type": "tal", "verdi": funnen})
+            } ellers hvis (namn == "builtin.ends_with" eller namn == "ends_with") og lengde(argument) == 2 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la funnen = builtin.ends_with(argument[1]["verdi"], argument[0]["verdi"])
+                hvis funnen { legg_til(ut, ["PUSH_CONST", 1]) } ellers { legg_til(ut, ["PUSH_CONST", 0]) }
+                legg_til(stakk, {"type": "tal", "verdi": funnen})
+            } ellers hvis (namn == "builtin.index_of" eller namn == "index_of") og lengde(argument) == 2 og
+                       argument[0]["type"] == "tekst" og argument[1]["type"] == "tekst" {
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                hvis lengde(ut) > 0 { fjern_siste(ut) }
+                la posisjon = builtin.index_of(argument[1]["verdi"], argument[0]["verdi"])
+                legg_til(ut, ["PUSH_CONST", posisjon])
+                legg_til(stakk, {"type": "tal", "verdi": posisjon})
+            } ellers {
+                legg_til(ut, instr)
+                legg_til(stakk, {"type": "ukjent", "verdi": null})
+            }
+        } ellers {
+            legg_til(ut, instr)
+            hvis op == "POP" eller op == "JUMP_IF_FALSE" eller op == "RETURN" {
+                hvis lengde(stakk) > 0 { fjern_siste(stakk) }
+            } ellers hvis op == "BINARY_ADD" eller op == "ADD" eller op == "BINARY_SUB" eller op == "SUB" eller
+                      op == "BINARY_MUL" eller op == "MUL" eller op == "BINARY_DIV" eller op == "DIV" eller
+                      op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" {
+                hvis lengde(stakk) > 0 { fjern_siste(stakk) }
+                hvis lengde(stakk) > 0 { fjern_siste(stakk) }
+                legg_til(stakk, {"type": "tal", "verdi": null})
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon kompiler_ncb(ncb, output: tekst) -> ordbok_tekst {
+    la entry = ncb["entry"]
+    la funksjonar = ncb["functions"]
+    hvis entry == null eller funksjonar == null eller funksjonar[entry] == null {
+        returner {"ok": "usann", "error": "NCB manglar gyldig entry", "format": "Mach-O arm64", "image": []}
+    }
+    la folda = fold_konstant_runtime(funksjonar[entry]["code"])
+    la utvida = inline_kall(folda, funksjonar, "entry_", sann, 0)
+    hvis utvida["ok"] != "sann" {
+        returner {"ok": "usann", "error": utvida["error"], "format": "Mach-O arm64", "image": []}
+    }
+    la resultat = kompiler_instruksjoner(utvida["code"])
+    hvis resultat["ok"] != "sann" { returner resultat }
+    builtin.fil_skriv_binær(output, resultat["image"])
+    resultat["output"] = output
+    returner resultat
+}
+
+funksjon shell(sti: tekst) -> tekst {
+    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+}
+
+funksjon start() -> heiltall {
+    la input = miljo_hent("NC_INPUT")
+    la output = miljo_hent("NC_OUTPUT")
+    hvis input == "" eller output == "" {
+        skriv("macho_arm64_codegen: NC_INPUT og NC_OUTPUT er påkravde\n")
+        returner 2
+    }
+    la ncb = builtin.json_parse_raw(builtin.fil_les(input))
+    la resultat = kompiler_ncb(ncb, output)
+    hvis resultat["ok"] != "sann" { kast resultat["error"] }
+    la chmod = exec_prosess("chmod +x " + shell(output))
+    hvis chmod[0] != "0" { returner 1 }
+    skriv("macho_arm64_codegen: Mach-O arm64 skrive til " + output + "\n")
+    returner 0
+}

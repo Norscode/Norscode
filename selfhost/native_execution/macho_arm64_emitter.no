@@ -1,0 +1,423 @@
+// Minimal Norscode-eigd Mach-O/arm64-emitter.
+// Dette er første native macOS-grunnlag for same AOT-kjede som ELF/PE.
+
+bruk std.sha256 som sha256
+
+funksjon u8(buf: liste_heiltall, verdi: heiltall) -> heiltall {
+    legg_til(buf, verdi & 255)
+    returner 0
+}
+
+funksjon u32(buf: liste_heiltall, verdi: heiltall) -> heiltall {
+    la i = 0
+    mens i < 4 {
+        u8(buf, verdi >> (i * 8))
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon u64(buf: liste_heiltall, verdi: heiltall) -> heiltall {
+    la i = 0
+    mens i < 8 {
+        u8(buf, verdi >> (i * 8))
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon be32(buf: liste_heiltall, verdi: heiltall) -> heiltall {
+    u8(buf, verdi >> 24)
+    u8(buf, verdi >> 16)
+    u8(buf, verdi >> 8)
+    u8(buf, verdi)
+    returner 0
+}
+
+funksjon be64(buf: liste_heiltall, verdi: heiltall) -> heiltall {
+    la i = 7
+    mens i >= 0 {
+        u8(buf, verdi >> (i * 8))
+        i = i - 1
+    }
+    returner 0
+}
+
+funksjon hex_verdi(tegn: tekst) -> heiltall {
+    // Samanlikn kodepunkt, ikkje tekst mot numeriske strengliteralar.
+    // Det gjer bootstrap-/AOT-kompilering stabil også når eldre compiler
+    // normaliserer "0" til heiltalsliteralen 0 i samanlikningsuttrykk.
+    la kode = builtin.char_code(tegn)
+    hvis kode >= 48 og kode <= 57 { returner kode - 48 }
+    hvis kode >= 97 og kode <= 102 { returner kode - 97 + 10 }
+    hvis kode >= 65 og kode <= 70 { returner kode - 65 + 10 }
+    kast "Ugyldig hextegn"
+}
+
+funksjon hex_til_bytes(hex: tekst) -> liste_heiltall {
+    hvis lengde(hex) % 2 != 0 { kast "Ugyldig hexlengd" }
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(hex) {
+        legg_til(ut, (hex_verdi(hex[i]) << 4) | hex_verdi(hex[i + 1]))
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon fast_namn(buf: liste_heiltall, namn: tekst) -> heiltall {
+    la i = 0
+    mens i < 16 {
+        hvis i < lengde(namn) { u8(buf, builtin.char_code(namn[i])) } ellers { u8(buf, 0) }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon fast_tekst(buf: liste_heiltall, verdi: tekst, storleik: heiltall) -> heiltall {
+    la i = 0
+    mens i < storleik {
+        hvis i < lengde(verdi) { u8(buf, builtin.char_code(verdi[i])) } ellers { u8(buf, 0) }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon pad(buf: liste_heiltall, storleik: heiltall) -> heiltall {
+    mens lengde(buf) < storleik { u8(buf, 0) }
+    returner 0
+}
+
+funksjon arm64_exit_kode(exitkode: heiltall) -> liste_heiltall {
+    la kode: liste_heiltall = []
+    // LC_MAIN blir kalla av dyld som ein vanleg main-funksjon. Returner
+    // exitkoden i w0 og bruk lr i staden for direkte Darwin-syscall.
+    u32(kode, 0x52800000 | ((exitkode & 0xFFFF) << 5)) // movz w0, #imm
+    u32(kode, 0xD65F03C0) // ret
+    returner kode
+}
+
+funksjon code_directory(code_hashar: liste_heiltall, code_limit: heiltall, code_slots: heiltall, exec_lengd: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la ident = "norscode.aot"
+    la fast_lengd = 88
+    la ident_offset = fast_lengd
+    la hash_offset = ident_offset + lengde(ident) + 1
+    la total_lengd = hash_offset + (32 * code_slots)
+    be32(ut, 0xFADE0C02)
+    be32(ut, total_lengd)
+    be32(ut, 0x00020400)
+    be32(ut, 0x00020002) // CS_ADHOC | CS_LINKER_SIGNED
+    be32(ut, hash_offset)
+    be32(ut, ident_offset)
+    be32(ut, 0) // nSpecialSlots
+    be32(ut, code_slots)
+    be32(ut, code_limit)
+    u8(ut, 32) // SHA-256 hashstorleik
+    u8(ut, 2)  // CS_HASHTYPE_SHA256
+    u8(ut, 0)  // platform
+    u8(ut, 12) // 4096-byte side
+    be32(ut, 0) // spare2
+    be32(ut, 0) // scatterOffset
+    be32(ut, 0) // teamOffset
+    be32(ut, 0) // spare3
+    be64(ut, 0)    // codeLimit64, 32-bit codeLimit er brukt
+    be64(ut, 0)    // execSegBase
+    be64(ut, exec_lengd) // execSegLimit for generert AOT-kode
+    be64(ut, 1)    // CS_EXECSEG_MAIN_BINARY
+    la i = 0
+    mens i < lengde(ident) { u8(ut, builtin.char_code(ident[i])) i = i + 1 }
+    u8(ut, 0)
+    i = 0
+    mens i < lengde(code_hashar) { u8(ut, code_hashar[i]) i = i + 1 }
+    hvis lengde(ut) != total_lengd { kast "CodeDirectory-lengd er inkonsistent" }
+    returner ut
+}
+
+funksjon signatur_blob(code_hashar: liste_heiltall, code_limit: heiltall, code_slots: heiltall, exec_lengd: heiltall) -> liste_heiltall {
+    la directory = code_directory(code_hashar, code_limit, code_slots, exec_lengd)
+    la ut: liste_heiltall = []
+    be32(ut, 0xFADE0CC0) // CSMAGIC_EMBEDDED_SIGNATURE
+    be32(ut, 20 + lengde(directory))
+    be32(ut, 1)
+    be32(ut, 0)  // CSSLOT_CODEDIRECTORY
+    be32(ut, 20)
+    la i = 0
+    mens i < lengde(directory) { u8(ut, directory[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon byte_omraade(bytes: liste_heiltall, start: heiltall, slutt: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = start
+    mens i < slutt { u8(ut, bytes[i]) i = i + 1 }
+    returner ut
+}
+
+// Bruk native SHA-256 når runtime-ABI-en har den, men behold rein Norscode
+// som bootstrap-/pure-VM-fallback. Bytes-vegen er bytebevarande også for NUL.
+funksjon hash_bytes_rask(bytes: liste_heiltall) -> tekst {
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { }
+    returner sha256.hash_bytes(bytes)
+}
+
+funksjon chained_fixups_tom() -> liste_heiltall {
+    la ut: liste_heiltall = []
+    u32(ut, 0)  // fixups_version
+    u32(ut, 32) // starts_offset
+    u32(ut, 48) // imports_offset
+    u32(ut, 48) // symbols_offset
+    u32(ut, 0)  // imports_count
+    u32(ut, 1)  // imports_format
+    u32(ut, 0)  // symbols_format
+    u32(ut, 0)  // reserve til starts_offset
+    u32(ut, 3)  // seg_count
+    u32(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0)
+    pad(ut, 56)
+    returner ut
+}
+
+funksjon exports_trie_exit() -> liste_heiltall {
+    // Eksporter _main ved file-offset 696 og __mh_execute_header ved 0.
+    returner [
+        0x00, 0x01, 0x5F, 0x00, 0x12, 0x00, 0x00, 0x00,
+        0x00, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0xB8,
+        0x05, 0x00, 0x00, 0x02, 0x5F, 0x6D, 0x68, 0x5F,
+        0x65, 0x78, 0x65, 0x63, 0x75, 0x74, 0x65, 0x5F, 0x68,
+        0x65, 0x61, 0x64, 0x65, 0x72, 0x00, 0x09, 0x6D, 0x61,
+        0x69, 0x6E, 0x00, 0x0D, 0x00, 0x00
+    ]
+}
+
+funksjon bygg_program(kode: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la base: heiltall = 0x100000000
+    la header_lengd = 32
+    la pagezero_lengd = 72
+    la segment_lengd = 152
+    la linkedit_lengd = 72
+    la dylinker_lengd = 32
+    la byggversjon_lengd = 32
+    la kjeldeversjon_lengd = 16
+    la libsystem_lengd = 56
+    la linkedit_data_cmd_lengd = 16
+    la symtab_lengd = 24
+    la dysymtab_lengd = 80
+    la uuid_lengd = 24
+    la funksjonsstart_lengd = 16
+    la data_i_kode_lengd = 16
+    la main_lengd = 24
+    la signatur_cmd_lengd = 16
+    la signatur_offset = 20480
+    la signatur_lengd = 20 + 88 + lengde("norscode.aot") + 1 + 160
+    la kommando_lengd = pagezero_lengd + segment_lengd + linkedit_lengd + (2 * linkedit_data_cmd_lengd) + symtab_lengd + dysymtab_lengd + dylinker_lengd + uuid_lengd + byggversjon_lengd + kjeldeversjon_lengd + libsystem_lengd + main_lengd + funksjonsstart_lengd + data_i_kode_lengd + signatur_cmd_lengd
+    la kode_offset = header_lengd + kommando_lengd
+    hvis lengde(kode) == 0 eller lengde(kode) > 15000 { kast "Ugyldig Mach-O AOT-kodelengd" }
+
+    // mach_header_64
+    u32(ut, 0xFEEDFACF)
+    u32(ut, 0x0100000C) // CPU_TYPE_ARM64
+    u32(ut, 0)          // CPU_SUBTYPE_ARM64_ALL
+    u32(ut, 2)          // MH_EXECUTE
+    u32(ut, 16)         // seksten load commands
+    u32(ut, kommando_lengd)
+    u32(ut, 0x200085)   // MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL | MH_PIE
+    u32(ut, 0)
+
+    // __PAGEZERO vernar nullpeikaren og gir standard 4 GiB image-base.
+    u32(ut, 0x19)
+    u32(ut, pagezero_lengd)
+    fast_namn(ut, "__PAGEZERO")
+    u64(ut, 0)
+    u64(ut, base)
+    u64(ut, 0)
+    u64(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0)
+
+    // LC_SEGMENT_64 med ein __text-section.
+    u32(ut, 0x19)
+    u32(ut, segment_lengd)
+    fast_namn(ut, "__TEXT")
+    u64(ut, base)
+    u64(ut, 16384)
+    u64(ut, 0)
+    u64(ut, 16384)
+    u32(ut, 5) // maxprot r-x
+    u32(ut, 5) // initprot r-x
+    u32(ut, 1)
+    u32(ut, 0)
+
+    fast_namn(ut, "__text")
+    fast_namn(ut, "__TEXT")
+    u64(ut, base + kode_offset)
+    u64(ut, lengde(kode))
+    u32(ut, kode_offset)
+    u32(ut, 2)
+    u32(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0x80000400)
+    u32(ut, 0)
+    u32(ut, 0)
+    u32(ut, 0)
+
+    // __LINKEDIT inneheld den innebygde ad-hoc-signaturen.
+    u32(ut, 0x19)
+    u32(ut, linkedit_lengd)
+    fast_namn(ut, "__LINKEDIT")
+    u64(ut, base + 16384)
+    u64(ut, 16384)
+    u64(ut, 16384)
+    u64(ut, 4096 + signatur_lengd)
+    u32(ut, 1)
+    u32(ut, 1)
+    u32(ut, 0)
+    u32(ut, 0)
+
+    u32(ut, 0x80000034) // LC_DYLD_CHAINED_FIXUPS
+    u32(ut, linkedit_data_cmd_lengd)
+    u32(ut, 16384)
+    u32(ut, 56)
+
+    u32(ut, 0x80000033) // LC_DYLD_EXPORTS_TRIE
+    u32(ut, linkedit_data_cmd_lengd)
+    u32(ut, 16440)
+    u32(ut, 48)
+
+    u32(ut, 0x02) // LC_SYMTAB, tom symboltabell
+    u32(ut, symtab_lengd)
+    u32(ut, 16488)
+    u32(ut, 2)
+    u32(ut, 16520)
+    u32(ut, 32)
+
+    u32(ut, 0x0B) // LC_DYSYMTAB
+    u32(ut, dysymtab_lengd)
+    u32(ut, 0) // ilocalsym
+    u32(ut, 0) // nlocalsym
+    u32(ut, 0) // iextdefsym
+    u32(ut, 2) // nextdefsym
+    u32(ut, 2) // iundefsym
+    u32(ut, 0) // nundefsym
+    la dysym_i = 0
+    mens dysym_i < 12 { u32(ut, 0) dysym_i = dysym_i + 1 }
+
+    // Moderne arm64 macOS startar executable gjennom dyld og LC_MAIN.
+    u32(ut, 0x0E) // LC_LOAD_DYLINKER
+    u32(ut, dylinker_lengd)
+    u32(ut, 12)   // lc_str-offset
+    fast_tekst(ut, "/usr/lib/dyld", dylinker_lengd - 12)
+
+    u32(ut, 0x1B) // LC_UUID
+    u32(ut, uuid_lengd)
+    fast_tekst(ut, "NORSCODE-AOT-V1", 16)
+
+    u32(ut, 0x32) // LC_BUILD_VERSION
+    u32(ut, byggversjon_lengd)
+    u32(ut, 1)          // PLATFORM_MACOS
+    u32(ut, 0x000B0000) // macOS 11.0
+    u32(ut, 0x000B0000)
+    u32(ut, 1)
+    u32(ut, 3) // TOOL_LD
+    u32(ut, 0)
+
+    u32(ut, 0x2A) // LC_SOURCE_VERSION
+    u32(ut, kjeldeversjon_lengd)
+    u64(ut, 0)
+
+    u32(ut, 0x80000028) // LC_MAIN
+    u32(ut, main_lengd)
+    u64(ut, kode_offset)
+    u64(ut, 0)
+
+    u32(ut, 0x0C) // LC_LOAD_DYLIB
+    u32(ut, libsystem_lengd)
+    u32(ut, 24)
+    u32(ut, 2)
+    u32(ut, 0x054C0000)
+    u32(ut, 0x00010000)
+    fast_tekst(ut, "/usr/lib/libSystem.B.dylib", libsystem_lengd - 24)
+
+    u32(ut, 0x26) // LC_FUNCTION_STARTS
+    u32(ut, funksjonsstart_lengd)
+    u32(ut, 16552)
+    u32(ut, 8)
+
+    u32(ut, 0x29) // LC_DATA_IN_CODE
+    u32(ut, data_i_kode_lengd)
+    u32(ut, 16560)
+    u32(ut, 0)
+
+    // LC_CODE_SIGNATURE peikar på SuperBlob i __LINKEDIT.
+    u32(ut, 0x1D)
+    u32(ut, signatur_cmd_lengd)
+    u32(ut, signatur_offset)
+    u32(ut, signatur_lengd)
+
+    hvis lengde(ut) != kode_offset { kast "Mach-O header/load-command-lengd er inkonsistent" }
+    la i = 0
+    mens i < lengde(kode) { u8(ut, kode[i]) i = i + 1 }
+    pad(ut, 16384)
+    la fixups = chained_fixups_tom()
+    i = 0
+    mens i < lengde(fixups) { u8(ut, fixups[i]) i = i + 1 }
+    la exports = exports_trie_exit()
+    i = 0
+    mens i < lengde(exports) { u8(ut, exports[i]) i = i + 1 }
+    pad(ut, 16488)
+    // To eksternt definerte symbol: __mh_execute_header og _main.
+    u32(ut, 2)
+    u8(ut, 0x0F)
+    u8(ut, 1)
+    u8(ut, 0x10)
+    u8(ut, 0)
+    u64(ut, base)
+    u32(ut, 22)
+    u8(ut, 0x0F)
+    u8(ut, 1)
+    u8(ut, 0)
+    u8(ut, 0)
+    u64(ut, base + kode_offset)
+    // 32-byte stringtabell, same indeksar som nlist_64 over.
+    la strtab: liste_heiltall = [
+        0x20, 0x00, 0x5F, 0x5F, 0x6D, 0x68, 0x5F, 0x65,
+        0x78, 0x65, 0x63, 0x75, 0x74, 0x65, 0x5F, 0x68,
+        0x65, 0x61, 0x64, 0x65, 0x72, 0x00, 0x5F, 0x6D,
+        0x61, 0x69, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00
+    ]
+    i = 0
+    mens i < lengde(strtab) { u8(ut, strtab[i]) i = i + 1 }
+    // ULEB128-delta 696 til _main, deretter sluttmarkør.
+    u8(ut, 0xB8)
+    u8(ut, 0x05)
+    u8(ut, 0)
+    pad(ut, 16560)
+    pad(ut, signatur_offset)
+    la hashar: liste_heiltall = []
+    la side = 0
+    mens side < 5 {
+        la side_hash = hex_til_bytes(hash_bytes_rask(byte_omraade(ut, side * 4096, (side + 1) * 4096)))
+        i = 0
+        mens i < lengde(side_hash) { u8(hashar, side_hash[i]) i = i + 1 }
+        side = side + 1
+    }
+    la signatur = signatur_blob(hashar, signatur_offset, 5, lengde(kode))
+    hvis lengde(signatur) != signatur_lengd { kast "Mach-O signaturlengd er inkonsistent" }
+    i = 0
+    mens i < lengde(signatur) { u8(ut, signatur[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon bygg_exit(exitkode: heiltall) -> liste_heiltall {
+    returner bygg_program(arm64_exit_kode(exitkode))
+}
+
+funksjon skriv_exit(sti: tekst, exitkode: heiltall) -> heiltall {
+    la bytes = bygg_exit(exitkode)
+    builtin.fil_skriv_binær(sti, bytes)
+    returner lengde(bytes)
+}

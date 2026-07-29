@@ -20,4 +20,4 @@ Dette er den valde standardpakken for Norscode-logo og ikoner. Pakken brukar den
 
 Bruk `norscode-logo-dark.svg` som hovudlogo. Bruk `norscode-mark.svg` der logoen skal opptre som app-ikon, små nav-element og release-pakker.
 
-Filtypeikon for macOS blir henta frå denne mappa av `tools/install-macos-file-icons.sh`.
+Filtypeikon for macOS blir henta frå denne mappa av `tools/install-macos-file-icons.no`.
