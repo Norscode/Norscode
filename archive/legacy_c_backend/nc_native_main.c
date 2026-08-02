@@ -6290,7 +6290,22 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")||!strcmp(cn,"builtin.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
             else if (!strcmp(cn,"assert") || !strcmp(cn,"builtin.assert")) {
                 if (narg>0 && !nc_truthy(cargs[0])) {
-                    char *msg = narg>1 ? nc_to_str_raw(cargs[1]) : strdup("assert feilet");
+                    char *msg = NULL;
+                    if (narg > 1) msg = nc_to_str_raw(cargs[1]);
+                    else {
+                        long source_line = 0;
+                        NcVal *source_lines = fn_def && fn_def->type == NC_MAP
+                            ? nc_index_get(fn_def, nc_str("source_lines")) : NULL;
+                        if (source_lines && source_lines->type == NC_LIST && ip >= 0 &&
+                            ip < source_lines->list->len &&
+                            source_lines->list->items[ip]->type == NC_INT)
+                            source_line = source_lines->list->items[ip]->i;
+                        char diagnostic[256];
+                        snprintf(diagnostic, sizeof(diagnostic),
+                                 "assert feilet: funksjon=%s linje=%ld ip=%d",
+                                 fn_name ? fn_name : "<ukjent>", source_line, ip);
+                        msg = strdup(diagnostic);
+                    }
                     nc_throw(msg); free(msg);
                 }
             }
