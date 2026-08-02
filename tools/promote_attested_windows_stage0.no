@@ -1,0 +1,146 @@
+// Kontrollert, shellfri promotering av ein ekte Windows-attestert PE-kandidat.
+
+bruk std.filops som filops
+bruk std.sha256 som sha256
+bruk tools.platform_readiness_v3600 som readiness
+bruk tools.runtime_promotion_core som promotion
+bruk tools.update_stage0_manifest som stage0_manifest
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon linje(melding: tekst) -> heiltall { skriv(melding + "\n") returner 0 }
+
+funksjon hash_fil(sti: tekst) -> tekst {
+    hvis ikkje filops.fil_finnes(sti) { returner "" }
+    la bytes = builtin.fil_les_binær(sti)
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { }
+    prøv { returner sha256.hash_bytes(bytes) } fang (e2) { returner "" }
+    returner ""
+}
+
+funksjon gyldig_hash(verdi: tekst) -> boolsk {
+    hvis lengde(verdi) != 64 { returner usann }
+    la heks = "0123456789abcdef"
+    la i = 0
+    mens i < lengde(verdi) {
+        hvis builtin.index_of(heks, builtin.lower(verdi[i])) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon fullfør_artefaktar(root: tekst, kandidat: tekst, kandidat_hash: tekst,
+                            rollback_rel: tekst, rollback_hash: tekst) -> boolsk {
+    hvis hash_fil(root + "/bootstrap/stage0/norscode-windows-x86_64.exe") != kandidat_hash {
+        returner usann
+    }
+    hvis ikkje filops.lag_katalogar(root + "/build/windows") eller
+       ikkje filops.kopier2(kandidat, root + "/build/windows/norscode_native_windows_x86_64.exe") eller
+       hash_fil(root + "/build/windows/norscode_native_windows_x86_64.exe") != kandidat_hash {
+        returner usann
+    }
+    hvis rollback_hash != "" {
+        hvis ikkje gyldig_hash(rollback_hash) eller hash_fil(root + "/" + rollback_rel) != rollback_hash {
+            returner usann
+        }
+        la permanent_dir = root + "/bootstrap/stage0/rollback"
+        la permanent = permanent_dir + "/norscode-windows-x86_64." + rollback_hash + ".exe"
+        hvis ikkje filops.lag_katalogar(permanent_dir) eller
+           ikkje filops.kopier2(root + "/" + rollback_rel, permanent) eller
+           hash_fil(permanent) != rollback_hash {
+            returner usann
+        }
+    }
+    returner stage0_manifest.skriv_manifest(root)
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la kandidat = env("NORSCODE_WINDOWS_CANDIDATE")
+    la attestasjon = env("NORSCODE_WINDOWS_ATTESTATION")
+    la commit = env("NORSCODE_SOURCE_COMMIT")
+    hvis kandidat == "" eller attestasjon == "" eller commit == "" {
+        linje("Feil: krev NORSCODE_WINDOWS_CANDIDATE, NORSCODE_WINDOWS_ATTESTATION og NORSCODE_SOURCE_COMMIT")
+        returner 2
+    }
+    hvis env("NORSCODE_PROMOTION_CONFIRM") != "godkjenn kritisk runtime-promotering" {
+        linje("Feil: manglar eksplisitt NORSCODE_PROMOTION_CONFIRM")
+        returner 2
+    }
+
+    la data
+    prøv { data = builtin.json_parse_raw(builtin.fil_les(attestasjon)) } fang (e) {
+        linje("Feil: kunne ikkje lese Windows-attestasjonen")
+        returner 1
+    }
+    la rapport_hash = tekst(data["runtime_sha256"])
+    hvis tekst(data["schema"]) != "norscode-windows-runtime-attestation-v1" eller
+       tekst(data["status"]) != "verified" eller tekst(data["platform"]) != "windows" eller
+       tekst(data["source_commit"]) != commit eller ikkje gyldig_hash(rapport_hash) {
+        linje("Feil: Windows-attestasjonen har ugyldig kontrakt eller kjeldecommit")
+        returner 1
+    }
+    hvis hash_fil(kandidat) != rapport_hash {
+        linje("Feil: kandidatens SHA-256 samsvarer ikkje med attestasjonen")
+        returner 1
+    }
+    hvis ikkje readiness.windows_attestasjon_ok(root, kandidat, attestasjon) {
+        linje("Feil: signatur- eller Windows-readinesskontrollen feila")
+        returner 1
+    }
+    hvis env("NORSCODE_PROMOTION_FINALIZE") == "1" {
+        la rollback_hash = env("NORSCODE_EXPECTED_ROLLBACK_SHA")
+        la rollback_rel = "build/verified-rollback/runtime-promotion/stage0-windows-x86_64." + rollback_hash + ".rollback"
+        hvis ikkje fullfør_artefaktar(root, kandidat, rapport_hash, rollback_rel, rollback_hash) {
+            linje("Feil: sluttføring av attestert Windows-stage0 feila")
+            returner 1
+        }
+        linje("[OK] Attestert Windows-stage0, kanonisk kandidat, manifest og permanent rollback er verifiserte")
+        returner 0
+    }
+    hvis env("NORSCODE_PROMOTE_DRY_RUN") == "1" {
+        linje("[DRY-RUN] signert Windows-attestasjon og kandidathash er grøne")
+        linje("[DRY-RUN] committed stage0 og manifest er uendra")
+        returner 0
+    }
+
+    la kandidat_dir = root + "/build/windows-attested"
+    hvis ikkje filops.lag_katalogar(kandidat_dir) {
+        linje("Feil: kunne ikkje lage kontrollert kandidatområde")
+        returner 1
+    }
+    la kandidat_rel = "build/windows-attested/norscode-windows-x86_64." + rapport_hash + ".exe"
+    hvis ikkje filops.kopier2(kandidat, root + "/" + kandidat_rel) eller
+       hash_fil(root + "/" + kandidat_rel) != rapport_hash {
+        linje("Feil: import av attestert kandidat feila hashkontrollen")
+        returner 1
+    }
+
+    la target_rel = "bootstrap/stage0/norscode-windows-x86_64.exe"
+    la resultat = promotion.promoter(root, kandidat_rel, target_rel,
+        "build/verified-rollback/runtime-promotion", "stage0-windows-x86_64")
+    hvis tekst(resultat["status"]) != "promoted" {
+        linje("Feil: atomisk Windows-stage0-promotering feila: " + tekst(resultat["error"]))
+        returner 1
+    }
+    hvis ikkje fullfør_artefaktar(root, kandidat, rapport_hash,
+        tekst(resultat["rollback_relative"]), tekst(resultat["rollback_sha256"])) {
+        la rollback = promotion.gjenopprett(root, target_rel,
+            tekst(resultat["rollback_relative"]), tekst(resultat["rollback_sha256"]))
+        hvis tekst(rollback["status"]) == "restored" {
+            linje("Feil: manifestoppdatering feila; Windows-stage0 vart rulla tilbake")
+        } ellers {
+            linje("KRITISK: manifestoppdatering og automatisk rollback feila")
+        }
+        returner 1
+    }
+    linje("[OK] Windows-stage0 er atomisk promotert frå signert attestasjon")
+    linje("[OK] stage0_sha256=" + hash_fil(root + "/" + target_rel))
+    linje("[OK] rollback=" + tekst(resultat["rollback_relative"]))
+    linje("[OK] rollback_sha256=" + tekst(resultat["rollback_sha256"]))
+    returner 0
+}
