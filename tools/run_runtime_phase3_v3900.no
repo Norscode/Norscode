@@ -1,73 +1,88 @@
-// tools/run_runtime_phase3_v3900.no — fase-3 runtime-probar
+// tools/run_runtime_phase3_v3900.no — shellfrie fase-3 runtime-probar
 
-funksjon linje(melding: tekst) -> heiltall {
-    skriv(melding + "\n")
-    returner 0
-}
+bruk std.filops som filops
+bruk std.prosess som system_prosess
+bruk std.tid som tid
+bruk tools.docker_runner som docker_runner
+bruk tools.process_runner som prosess
+
+funksjon linje(melding: tekst) -> heiltall { skriv(melding + "\n") returner 0 }
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
+funksjon runtime_miljø(root: tekst, fil: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write,net.tcp",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_CMD": "run",
+        "NORSCODE_FILE": fil,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1"
     }
 }
 
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
+funksjon køyr_runtime(bin_path: tekst, root: tekst, fil: tekst,
+                       ekstra: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la miljø = runtime_miljø(root, fil)
+    hvis finnes_nøkkel(ekstra, "NORSCODE_NATIVE_GAP_BIN") {
+        miljø["NORSCODE_NATIVE_GAP_BIN"] = tekst(ekstra["NORSCODE_NATIVE_GAP_BIN"])
+    }
+    returner prosess.køyr(bin_path, [], root, miljø, timeout_ms)
 }
 
-funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
+funksjon start_async(executable: tekst, args: liste_tekst, cwd: tekst,
+                      miljø: ordbok_tekst, timeout_sek: heiltall) -> ordbok_tekst {
+    la policy = system_prosess.ny_policy("runtime-phase3-async")
+    system_prosess.tillat_alle(policy)
+    system_prosess.aktiver_køyring(policy)
+    la plan = system_prosess.start_argv_plan(executable, args)
+    system_prosess.med_cwd(plan, cwd)
+    system_prosess.med_miljø(plan, miljø)
+    system_prosess.med_timeout(plan, timeout_sek)
+    system_prosess.med_maks_output(plan, 16777216)
+    system_prosess.med_sandbox(plan, "none", 4294967296, 256, sann)
+    returner system_prosess.start_argv_async_trygt(policy, plan)
 }
 
-funksjon trim(t: tekst) -> tekst {
-    returner builtin.trim(t)
+funksjon skriv_async_og_lukk(handle: ordbok_tekst, wait_ms: heiltall) -> boolsk {
+    la ferdig = system_prosess.native_async_vent(handle, wait_ms)
+    la output = system_prosess.native_async_les(handle)
+    hvis finnes_nøkkel(output, "stdout") og tekst(output["stdout"]) != "" { skriv(tekst(output["stdout"])) }
+    hvis finnes_nøkkel(output, "stderr") og tekst(output["stderr"]) != "" { skriv(tekst(output["stderr"])) }
+    system_prosess.native_async_lukk(handle)
+    returner tekst(ferdig["status"]) == "ferdig" og heiltall_fra_tekst(tekst(ferdig["exit_code"])) == 0
 }
 
-funksjon docker_finst() -> bool {
-    returner ok(kommando("docker info >/dev/null 2>&1"))
+funksjon stans_async(handle: ordbok_tekst) -> heiltall {
+    hvis finnes_nøkkel(handle, "handle") {
+        system_prosess.native_async_signal(handle, 15)
+        system_prosess.native_async_vent(handle, 5000)
+        system_prosess.native_async_lukk(handle)
+    }
+    returner 0
 }
 
-funksjon les_fil_trygt(sti: tekst) -> tekst {
-    prøv { returner builtin.fil_les(sti) } fang (e) { returner "" }
-    returner ""
-}
-
-funksjon run_socket_probe_host(root: tekst, bin_path: tekst, label: tekst) -> bool {
+funksjon run_socket_probe_host(root: tekst, bin_path: tekst, label: tekst) -> boolsk {
     la probe = root + "/tests/socket_runtime_probe_v3900.no"
-    la log = "/tmp/norscode_" + label + "_socket_v3900.log"
-    la server_cmd = "env NORSCODE_CMD=run NORSCODE_FILE=" + shell(probe) +
-        " NORSCODE_ENABLE_EXEC_PROSESS=1 " + shell(bin_path) + " > " + shell(log) + " 2>&1 & echo $!"
-    la pid = trim(res_felt(kommando(server_cmd), 1))
-    kommando("sleep 1")
-
-    la client = kommando("cd " + shell(root) + " && " + shell(root + "/bin/nc") + " run " + shell(root + "/tools/socket_ping_v3900.no"))
-    hvis ikkje ok(client) {
-        linje("[FAIL] " + label + ": Norscode socket-klient feila")
-        hvis res_felt(client, 1) != "" { skriv(res_felt(client, 1)) }
-        hvis res_felt(client, 2) != "" { skriv(res_felt(client, 2)) }
-        hvis pid != "" { kommando("kill " + shell(pid) + " >/dev/null 2>&1 || true") }
+    la klient = root + "/tools/socket_ping_v3900.no"
+    la server = start_async(bin_path, [], root, runtime_miljø(root, probe), 20)
+    hvis tekst(server["status"]) != "kjorer" {
+        linje("[FAIL] " + label + ": kunne ikkje starte socket-server")
         returner usann
     }
-    la reply = trim(res_felt(client, 1))
-
-    hvis pid != "" { kommando("wait " + shell(pid) + " 2>/dev/null || true") }
-    la logg = les_fil_trygt(log)
-    hvis logg != "" { skriv(logg) }
-
+    tid.sov(1000)
+    la client = køyr_runtime(bin_path, root, klient, {}, 10000)
+    hvis ikkje prosess.ok(client) {
+        linje("[FAIL] " + label + ": Norscode socket-klient feila")
+        prosess.skriv_resultat(client)
+        stans_async(server)
+        returner usann
+    }
+    la reply = builtin.trim(tekst(client["stdout"]))
+    hvis ikkje skriv_async_og_lukk(server, 10000) { returner usann }
     hvis reply != "pong:ping" {
         linje("[FAIL] " + label + ": venta pong:ping, fekk " + reply)
         returner usann
@@ -76,29 +91,56 @@ funksjon run_socket_probe_host(root: tekst, bin_path: tekst, label: tekst) -> bo
     returner sann
 }
 
-funksjon run_linux_runtime_gap(root: tekst) -> bool {
-    la script = "apt-get update >/dev/null && apt-get install -y file perl libsqlite3-0 >/dev/null && NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_NATIVE_GAP_BIN=/work/bootstrap/stage0/norscode-linux-x86_64 NORSCODE_ROOT=/work NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write NORSCODE_VM_DISK_ROOT=/work,.,/tmp NORSCODE_CMD=run NORSCODE_FILE=/work/tools/native_runtime_gap_gate_v3001.no /work/bootstrap/stage0/norscode-linux-x86_64"
-    la cmd = "docker run --rm --platform linux/amd64 -v " + shell(root + ":/work") +
-        " -w /work ubuntu:24.04 bash -lc " + shell(script)
-    la res = kommando(cmd)
-    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
-    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
-    returner ok(res)
+funksjon container_env_args(root: tekst, fil: tekst) -> liste_tekst {
+    returner [
+        "env",
+        "NORSCODE_ROOT=/work",
+        "NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write,net.tcp",
+        "NORSCODE_VM_DISK_ROOT=/work,.,/tmp",
+        "NORSCODE_CMD=run",
+        "NORSCODE_FILE=" + fil,
+        "NORSCODE_ENABLE_EXEC_PROSESS=1",
+        "/work/bootstrap/stage0/norscode-linux-x86_64"
+    ]
 }
 
-funksjon run_linux_socket(root: tekst) -> bool {
-    la log = root + "/build/v3900/linux_stage0_socket_probe.log"
-    la reply_file = root + "/build/v3900/linux_stage0_socket_reply.txt"
-    la script = "set -euo pipefail\nmkdir -p /work/build/v3900\napt-get update >/dev/null\napt-get install -y libsqlite3-0 >/dev/null\nenv NORSCODE_ROOT=/work NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write,net.tcp NORSCODE_VM_DISK_ROOT=/work,.,/tmp NORSCODE_CMD=run NORSCODE_FILE=/work/tests/socket_runtime_probe_v3900.no NORSCODE_ENABLE_EXEC_PROSESS=1 /work/bootstrap/stage0/norscode-linux-x86_64 >/work/build/v3900/linux_stage0_socket_probe.log 2>&1 &\npid=$!\nsleep 1\nenv NORSCODE_ROOT=/work NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write,net.tcp NORSCODE_VM_DISK_ROOT=/work,.,/tmp NORSCODE_CMD=run NORSCODE_FILE=/work/tools/socket_ping_v3900.no NORSCODE_ENABLE_EXEC_PROSESS=1 /work/bootstrap/stage0/norscode-linux-x86_64 >/work/build/v3900/linux_stage0_socket_reply.txt\nwait \"$pid\""
-    la cmd = "docker run --rm --platform linux/amd64 -v " + shell(root + ":/work") +
-        " -w /work ubuntu:24.04 bash -lc " + shell(script)
-    la res = kommando(cmd)
-    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
-    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
-    la logg = les_fil_trygt(log)
-    hvis logg != "" { skriv(logg) }
-    hvis ikkje ok(res) { returner usann }
-    la reply = trim(les_fil_trygt(reply_file))
+funksjon run_linux_runtime_gap(docker: tekst, root: tekst, container: tekst) -> boolsk {
+    la args: liste_tekst = [
+        "env",
+        "NORSCODE_ROOT=/work",
+        "NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write,net.tcp",
+        "NORSCODE_VM_DISK_ROOT=/work,.,/tmp",
+        "NORSCODE_CMD=run",
+        "NORSCODE_FILE=/work/tools/native_runtime_gap_gate_v3001.no",
+        "NORSCODE_ENABLE_EXEC_PROSESS=1",
+        "NORSCODE_NATIVE_GAP_BIN=/work/bootstrap/stage0/norscode-linux-x86_64",
+        "/work/bootstrap/stage0/norscode-linux-x86_64"
+    ]
+    la resultat = docker_runner.køyr_i(docker, root, container, args, 300000)
+    prosess.skriv_resultat(resultat)
+    returner prosess.ok(resultat)
+}
+
+funksjon run_linux_socket(docker: tekst, root: tekst, container: tekst) -> boolsk {
+    la server_args: liste_tekst = ["exec", container]
+    la server_inner = container_env_args(root, "/work/tests/socket_runtime_probe_v3900.no")
+    la i = 0
+    mens i < lengde(server_inner) { legg_til(server_args, server_inner[i]) i = i + 1 }
+    la server = start_async(docker, server_args, root, {}, 30)
+    hvis tekst(server["status"]) != "kjorer" {
+        linje("[FAIL] linux_stage0: kunne ikkje starte socket-server")
+        returner usann
+    }
+    tid.sov(1000)
+    la client = docker_runner.køyr_i(docker, root, container,
+        container_env_args(root, "/work/tools/socket_ping_v3900.no"), 15000)
+    hvis ikkje prosess.ok(client) {
+        prosess.skriv_resultat(client)
+        stans_async(server)
+        returner usann
+    }
+    la reply = builtin.trim(tekst(client["stdout"]))
+    hvis ikkje skriv_async_og_lukk(server, 15000) { returner usann }
     hvis reply != "pong:ping" {
         linje("[FAIL] linux_stage0: venta pong:ping, fekk " + reply)
         returner usann
@@ -107,45 +149,58 @@ funksjon run_linux_socket(root: tekst) -> bool {
     returner sann
 }
 
+funksjon run_linux_probes(root: tekst) -> tekst {
+    la docker = docker_runner.finn()
+    hvis ikkje docker_runner.tilgjengeleg(docker, root) {
+        linje("[SKIP] Docker er ikkje tilgjengeleg, så Linux-probar vart ikkje køyrde.")
+        returner "skip"
+    }
+    la container = docker_runner.opprett_ubuntu(docker, root, root, "linux/amd64", "runtime-phase3-v3900")
+    hvis container == "" eller ikkje docker_runner.start(docker, root, container) { returner "fail" }
+    hvis ikkje docker_runner.installer_pakkar(docker, root, container, ["file", "perl", "libsqlite3-0"]) {
+        docker_runner.fjern(docker, root, container)
+        returner "fail"
+    }
+    linje("")
+    linje("[3/4] Linux x86_64 stage0 runtime-gap (Docker)")
+    hvis ikkje run_linux_runtime_gap(docker, root, container) {
+        docker_runner.fjern(docker, root, container)
+        returner "fail"
+    }
+    linje("")
+    linje("[4/4] Linux x86_64 stage0 socket probe (Docker)")
+    la socket_ok = run_linux_socket(docker, root, container)
+    docker_runner.fjern(docker, root, container)
+    hvis socket_ok { returner "green" }
+    linje("[WARN] Linux socket probe feila.")
+    returner "pending"
+}
+
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
-    hvis ikkje ok(kommando("mkdir -p " + shell(root + "/build/v3900"))) { returner 1 }
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    hvis ikkje filops.lag_katalogar(root + "/build/v3900") { returner 1 }
+    la bin_path = root + "/dist/norscode_native"
     la socket_status = "green"
 
     linje("== v3900 runtime phase 3 ==")
     linje("")
     linje("[1/4] macOS active dist runtime-gap")
-    la gap_res = kommando("cd " + shell(root) + " && NORSCODE_NATIVE_GAP_BIN=" + shell(root + "/dist/norscode_native") + " " + shell(root + "/bin/nc") + " run " + shell(root + "/tools/native_runtime_gap_gate_v3001.no"))
-    hvis res_felt(gap_res, 1) != "" { skriv(res_felt(gap_res, 1)) }
-    hvis res_felt(gap_res, 2) != "" { skriv(res_felt(gap_res, 2)) }
-    hvis ikkje ok(gap_res) {
-        returner 1
-    }
+    la gap = køyr_runtime(bin_path, root, root + "/tools/native_runtime_gap_gate_v3001.no",
+        {"NORSCODE_NATIVE_GAP_BIN": bin_path}, 180000)
+    prosess.skriv_resultat(gap)
+    hvis ikkje prosess.ok(gap) { returner 1 }
 
     linje("")
     linje("[2/4] macOS active dist socket probe")
-    hvis ikkje run_socket_probe_host(root, root + "/dist/norscode_native", "macos_dist") {
+    hvis ikkje run_socket_probe_host(root, bin_path, "macos_dist") {
         socket_status = "pending"
         linje("[WARN] macOS socket probe feila.")
     }
 
-    hvis docker_finst() {
-        linje("")
-        linje("[3/4] Linux x86_64 stage0 runtime-gap (Docker)")
-        hvis ikkje run_linux_runtime_gap(root) { returner 1 }
-
-        linje("")
-        linje("[4/4] Linux x86_64 stage0 socket probe (Docker)")
-        hvis ikkje run_linux_socket(root) {
-            socket_status = "pending"
-            linje("[WARN] Linux socket probe feila.")
-        }
-    } ellers {
-        linje("")
-        linje("[SKIP] Docker er ikkje tilgjengeleg, så Linux-probar vart ikkje køyrde.")
-    }
-
+    la linux_status = run_linux_probes(root)
+    hvis linux_status == "fail" { returner 1 }
+    hvis linux_status == "pending" { socket_status = "pending" }
     linje("")
     linje("[INFO] socket_status=" + socket_status)
     linje("")
