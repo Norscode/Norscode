@@ -19,11 +19,9 @@ Hvis du ikke har bygget binary ennå, les først:
 
 ## Installer
 
-På macOS og Linux bruker du vanligvis:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install | sh
-```
+På macOS og Linux lastar du ned den signerte runtimebinæren og
+provenance-attestasjonen frå GitHub Releases. Følg [INSTALL.md](../../INSTALL.md);
+repoet køyrer ikkje eit nedlasta shellskript som installasjonsveg.
 
 På Windows:
 

@@ -20,7 +20,7 @@ Repoet har allereie mykje av fundamentet:
 
 - Linux native binary og CI er paa plass
 - ELF/selfcompile-paritet er hardt verifisert i CI
-- generell Linux-installasjon finst i `tools/install`
+- generell Linux-installasjon er eigd av `tools/install.no` og releaseinstallasjonen av `tools/install_release.no`
 - driftsspor finst i `docs/SYSTEMD.md` og `deploy/norscode.service`
 
 Det som manglar er derfor mest app-/pakke-/desktop-laget.
