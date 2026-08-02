@@ -14,6 +14,7 @@
 #include "nc_metal_tensor.c"
 #if defined(_WIN32)
 #include "nc_windows_backend.h"
+#include <bcrypt.h>
 #else
 #include <pthread.h>
 #include <dlfcn.h>
@@ -5260,6 +5261,27 @@ static NcVal *nc_sha256_hex(const unsigned char *data, size_t length) {
     if (length <= UINT32_MAX) {
         ok = CC_SHA256(data, (CC_LONG)length, digest) != NULL;
     }
+#elif defined(_WIN32)
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                                   NULL, 0);
+    if (BCRYPT_SUCCESS(status)) {
+        status = BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0);
+    }
+    size_t offset = 0;
+    while (BCRYPT_SUCCESS(status) && offset < length) {
+        size_t remaining = length - offset;
+        ULONG chunk = remaining > ULONG_MAX ? ULONG_MAX : (ULONG)remaining;
+        status = BCryptHashData(hash, (PUCHAR)(data + offset), chunk, 0);
+        offset += chunk;
+    }
+    if (BCRYPT_SUCCESS(status)) {
+        status = BCryptFinishHash(hash, digest, (ULONG)sizeof(digest), 0);
+    }
+    ok = BCRYPT_SUCCESS(status);
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
 #elif defined(NC_ENABLE_OPENSSL)
     unsigned int digest_length = 0;
     ok = EVP_Digest(data, length, digest, &digest_length, EVP_sha256(), NULL) == 1 && digest_length == 32;
