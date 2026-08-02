@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 54 av 75 punkt er verifiserte, 21 står opne.**
+**Avhukingsstatus 2026-08-02: 55 av 75 punkt er verifiserte, 20 står opne.**
 
 ## Mål og reglar
 
@@ -257,7 +257,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] Fullfør filesystem-, prosess-, nettverk-, tråd- og sikkerheits-ABI-ar.
 - [ ] Køyr native Linux x86-64 og ARM64 utan Docker-byggeverktøy i normalflyten.
 - [x] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
-- [ ] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
+- [x] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
 - [ ] Set `production_ready_all_platforms=true` berre når alle tre er attesterte.
 
 ### Fase 5-evidens
@@ -271,6 +271,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - CI-køyring `30749220401` produserte og signerte ei ekte Windows x86-64-attestasjon for den kanoniske PE-kandidaten med SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Rapporten bind SChannel TLS 1.3, AppContainer, IOCP, filesystem, prosess, Argon2id og ACME-signering/verifisering til kjeldecommit `42641f778c0a053816670079410015cdaedf7a81`.
 - LLD `/Brepro` åleine var ikkje stabil fordi PE-tidsstempel, CodeView-GUID og PDB-sti varierte mellom ellers identiske køyringar. `tools/normalize_pe_reproducible.no` kanoniserer desse ikkje-funksjonelle felta strukturert i Norscode. To komplette lokale bygg gav byte-identisk hovudruntime `d1917398...98298`, backend-smoke `43bfbdd7...c939a` og AppContainer-smoke `ed247179...5e7264`; CI gav dei same tre hashane.
 - Etter promotering av den kanoniske kandidaten bygde CI-køyring `30749456344` ein ny kandidat med same SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Heile køyringa er grøn, og Windows-jobben stadfesta tracked stage0, ekte runtime-attestasjon, signert provenance, samla plattformreadiness og byte-identisk stage0/kandidat.
+- CI-køyring `30750405335`, jobb `91503362573`, køyrde kandidaten på ein ekte GitHub-hosted Darwin ARM64-runner. Han bestod native selftest, Norscode-generert og ad-hoc-signert Mach-O AOT, Seatbelt-sandbox og TLS 1.3 med CRL, OCSP og mTLS. GitHub signerte rapporten med build provenance, og fail-closed plattformreadiness verifiserte både signaturen, kjeldecommit `06dcff51fe8902a7b08c7ea3e692e4653ffa50ee` og kandidat-SHA-256 `933003b594d8ed4adf0f6ae2116ec9c3bc1986cf919af3c295f8c310d7dff796`.
 
 ## Fase 6 – Yting
 

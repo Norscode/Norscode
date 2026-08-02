@@ -1,0 +1,145 @@
+// Ekte Linux x86-64/ARM64-køyring og kjeldebunden runtime-attestasjon.
+
+bruk std.runtime_filesystem som native_fs
+bruk std.sha256 som sha256
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon uname_felt(root: tekst, flagg: tekst) -> tekst {
+    la resultat = prosess.køyr("/usr/bin/uname", [flagg], root, {}, 30000)
+    hvis ikkje prosess.ok(resultat) { returner "" }
+    prøv { returner builtin.lower(builtin.trim(tekst(resultat["stdout"]))) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon normaliser_arkitektur(ark: tekst) -> tekst {
+    hvis ark == "x86_64" eller ark == "amd64" { returner "x86_64" }
+    hvis ark == "arm64" eller ark == "aarch64" { returner "arm64" }
+    returner ""
+}
+
+funksjon fil_sha256(sti: tekst) -> tekst {
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) {
+        prøv { returner sha256.hash_bytes(builtin.fil_les_binær(sti)) } fang (e2) { returner "" }
+    }
+    returner ""
+}
+
+funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
+    hvis lengde(bytes) < lengde(markør) { returner usann }
+    la start = lengde(bytes) - lengde(markør)
+    la i = 0
+    mens i < lengde(markør) {
+        hvis bytes[start + i] != (builtin.char_code(markør[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon har_embedded_ncb(sti: tekst) -> boolsk {
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon gyldig_commit(verdi: tekst) -> boolsk {
+    hvis lengde(verdi) != 40 og lengde(verdi) != 64 { returner usann }
+    la heks = "0123456789abcdefABCDEF"
+    la i = 0
+    mens i < lengde(verdi) {
+        hvis builtin.index_of(heks, verdi[i]) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon køyr(root: tekst, native: tekst, kjelde: tekst,
+              ekstra: ordbok_tekst, namn: tekst, markør: tekst) -> boolsk {
+    la miljø: ordbok_tekst = {
+        "NORSCODE_CMD": "run",
+        "NORSCODE_FILE": root + "/" + kjelde,
+        "NORSCODE_ROOT": root,
+        "NORSCODE_NATIVE_BIN": native,
+        "NC_NATIVE": native,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write,net.tcp,net.tls",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp"
+    }
+    la nøklar = builtin.nøkler(ekstra)
+    la i = 0
+    mens i < lengde(nøklar) { miljø[nøklar[i]] = tekst(ekstra[nøklar[i]]) i = i + 1 }
+    la resultat = prosess.køyr(native, [], root, miljø, 900000)
+    prosess.skriv_resultat(resultat)
+    hvis ikkje prosess.ok(resultat) eller ikkje builtin.contains(tekst(resultat["stdout"]), markør) {
+        skriv("[FAIL] Linux-attestasjon " + namn + "\n")
+        returner usann
+    }
+    skriv("[OK] Linux-attestasjon " + namn + "\n")
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la system = uname_felt(root, "-s")
+    la arkitektur = normaliser_arkitektur(uname_felt(root, "-m"))
+    skriv("[INFO] Linux-attestasjon host=" + system + " architecture=" + arkitektur + "\n")
+    hvis system != "linux" eller arkitektur == "" {
+        skriv("[FAIL] Linux-attestasjon krev ekte Linux x86_64/ARM64-host\n")
+        returner 2
+    }
+    la forventa_arkitektur = env("NORSCODE_LINUX_ATTESTATION_ARCH")
+    hvis forventa_arkitektur != "" og forventa_arkitektur != arkitektur {
+        skriv("[FAIL] Linux-attestasjon køyrer på feil arkitektur\n")
+        returner 2
+    }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/build/norscode_native_linux_attested" }
+    la native_hash = fil_sha256(native)
+    hvis native_hash == "" eller ikkje har_embedded_ncb(native) {
+        skriv("[FAIL] Linux-attestasjon krev hashbar single-binary runtime\n")
+        returner 1
+    }
+    hvis ikkje køyr(root, native, "tests/test_native_filesystem_management.no", {}, "filesystem ABI", "test_native_filesystem_management OK") { returner 1 }
+    hvis ikkje køyr(root, native, "tests/test_process_os_sandbox.no", {"NORSCODE_EXPECT_SANDBOX_BACKEND": "seccomp"}, "seccomp prosess-sandbox", "test_process_os_sandbox OK") { returner 1 }
+    hvis ikkje køyr(root, native, "tests/test_native_network_event_loop.no", {"NORSCODE_EXPECT_EVENT_BACKEND": "epoll"}, "epoll nettverk", "test_native_network_event_loop OK") { returner 1 }
+    hvis ikkje køyr(root, native, "tests/test_native_thread_backend.no", {}, "native tråd-ABI", "test_native_thread_backend OK") { returner 1 }
+    hvis ikkje køyr(root, native, "tests/test_argon2_native.no", {}, "Argon2id", "test_argon2_native OK") { returner 1 }
+    hvis ikkje køyr(root, native, "tests/test_native_tls_event_loop.no", {}, "TLS 1.3", "test_native_tls_event_loop OK") { returner 1 }
+    la commit = env("NORSCODE_SOURCE_COMMIT")
+    hvis commit == "" { commit = env("GITHUB_SHA") }
+    hvis ikkje gyldig_commit(commit) eller (env("GITHUB_SHA") != "" og env("GITHUB_SHA") != commit) {
+        skriv("[FAIL] Linux-attestasjon krev samsvarande kjeldecommit\n")
+        returner 1
+    }
+    la rapport: ordbok_tekst = {
+        "schema": "norscode-linux-runtime-attestation-v1",
+        "status": "verified",
+        "platform": "linux",
+        "architecture": arkitektur,
+        "source_commit": commit,
+        "runtime_sha256": native_hash,
+        "tests": "filesystem,process_seccomp,network_epoll,threads,argon2id,tls13",
+        "repository": env("GITHUB_REPOSITORY"),
+        "workflow": env("GITHUB_WORKFLOW"),
+        "run_id": env("GITHUB_RUN_ID"),
+        "run_attempt": env("GITHUB_RUN_ATTEMPT"),
+        "runner_name": env("RUNNER_NAME")
+    }
+    la output = env("NORSCODE_LINUX_ATTESTATION_OUTPUT")
+    hvis output == "" { output = root + "/reports/linux-runtime-attestation-" + arkitektur + ".json" }
+    la laga = native_fs.native_lag_mappe(root, "reports")
+    hvis laga["status"] != "created" og laga["status"] != "ok" og laga["status"] != "exists" {
+        skriv("[FAIL] Linux-attestasjon kunne ikkje lage rapportmappe\n")
+        returner 1
+    }
+    builtin.fil_skriv(output, builtin.json_skriv(rapport) + "\n")
+    skriv("[OK] Ekte Linux runtime-attestasjon: " + output + "\n")
+    returner 0
+}
