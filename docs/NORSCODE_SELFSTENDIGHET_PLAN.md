@@ -77,7 +77,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 - Første levande inventar 2026-07-30 var 115 shellfiler, ikkje det eldre estimatet på 112.
 - Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette beviser ikkje fullført fase 3, fordi aktive GitHub Actions-workflowar framleis inneheld shellbaserte `run:`-blokker.
-- Levande CI-inventar 2026-08-02 finn 120 `run:`-blokker og 212 treff på shell-/ekstern orkestrering i `.github/workflows/`. Desse blokkene held fase 3 og toppmålet om Norscode-eigd CI opne til dei er migrerte og låste av active-surface-porten.
+- Den Norscode-eigde porten `tools/ci_shell_surface_inventory.no` finn 120 aktive CI-`run:`-blokker: 32 er direkte Norscode-bootstrap, medan 88 framleis inneheld shellorkestrering. Den maskinlesbare rapporten ligg i `reports/ci-shell-surface-inventory.json`; `NORSCODE_CI_SHELL_STRICT=1` feilar lukka så lenge talet ikkje er null. Desse blokkene held fase 3 og toppmålet om Norscode-eigd CI opne.
 - Alle 115 baselinerte shellfiler er fjerna frå aktiv flate og bevarte under `archive/legacy_shell/` der historikk framleis er relevant.
 - Maskinlesbar rapport: `reports/shell-surface-inventory.json`, generert av `tools/shell_surface_inventory.no` via native filesystem-ABI.
 - `bin/nc` har no 0 utførande kall til aktive `.sh`-verktøy; dei tre attverande `.sh`-treffa er berre filnamn i release-sporingslista.
