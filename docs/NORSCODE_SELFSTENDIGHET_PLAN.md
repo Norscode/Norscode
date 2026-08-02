@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 55 av 75 punkt er verifiserte, 20 står opne.**
+**Avhukingsstatus 2026-08-02: 56 av 76 punkt er verifiserte, 20 står opne.**
 
 ## Mål og reglar
 
@@ -71,11 +71,13 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
 - [x] Arkiver eller slett alle erstatta aktive shellwrapperar.
 - [x] La active-surface feile på kvar ny aktiv `.sh`-fil.
+- [ ] Flytt aktive CI-`run:`-blokker som orkestrerer `mkdir`, `cp`, `chmod`, `rm`, løkker, C/Zig-kompilering, Docker eller shellskript til Norscode-eigde `.no`-jobbar; berre direkte oppstart av Norscode og smale plattform-/signeringsgrenser kan stå att.
 
 ### Fase 3-evidens
 
 - Første levande inventar 2026-07-30 var 115 shellfiler, ikkje det eldre estimatet på 112.
-- Ferskt inventar etter full shellmigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien.
+- Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette beviser ikkje fullført fase 3, fordi aktive GitHub Actions-workflowar framleis inneheld shellbaserte `run:`-blokker.
+- Levande CI-inventar 2026-08-02 finn 120 `run:`-blokker og 212 treff på shell-/ekstern orkestrering i `.github/workflows/`. Desse blokkene held fase 3 og toppmålet om Norscode-eigd CI opne til dei er migrerte og låste av active-surface-porten.
 - Alle 115 baselinerte shellfiler er fjerna frå aktiv flate og bevarte under `archive/legacy_shell/` der historikk framleis er relevant.
 - Maskinlesbar rapport: `reports/shell-surface-inventory.json`, generert av `tools/shell_surface_inventory.no` via native filesystem-ABI.
 - `bin/nc` har no 0 utførande kall til aktive `.sh`-verktøy; dei tre attverande `.sh`-treffa er berre filnamn i release-sporingslista.
