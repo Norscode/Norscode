@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 53 av 75 punkt er verifiserte, 22 står opne.**
+**Avhukingsstatus 2026-08-02: 54 av 75 punkt er verifiserte, 21 står opne.**
 
 ## Mål og reglar
 
@@ -270,6 +270,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - V95 legg levande `selfhost/vm.no` over hostgrafen og materialiserer 1 689 funksjonar. Kryptokandidaten har hash `47e9c48f7d6d5130328b5c20ca4423a58a02a0dd76c44124f11014939180e580`, storleik 11 519 384 byte, og køyrer Argon2id-vektoren, VM-sikkerheitsforwarding og executable-root-kontrakten grønt. Materialisatoren har samstundes fått eigen desimalparser, slik at v95 sjølv kan lese funksjonsintervall utan den tidlegare `heiltall_fra_tekst`-feilen.
 - CI-køyring `30749220401` produserte og signerte ei ekte Windows x86-64-attestasjon for den kanoniske PE-kandidaten med SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Rapporten bind SChannel TLS 1.3, AppContainer, IOCP, filesystem, prosess, Argon2id og ACME-signering/verifisering til kjeldecommit `42641f778c0a053816670079410015cdaedf7a81`.
 - LLD `/Brepro` åleine var ikkje stabil fordi PE-tidsstempel, CodeView-GUID og PDB-sti varierte mellom ellers identiske køyringar. `tools/normalize_pe_reproducible.no` kanoniserer desse ikkje-funksjonelle felta strukturert i Norscode. To komplette lokale bygg gav byte-identisk hovudruntime `d1917398...98298`, backend-smoke `43bfbdd7...c939a` og AppContainer-smoke `ed247179...5e7264`; CI gav dei same tre hashane.
+- Etter promotering av den kanoniske kandidaten bygde CI-køyring `30749456344` ein ny kandidat med same SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Heile køyringa er grøn, og Windows-jobben stadfesta tracked stage0, ekte runtime-attestasjon, signert provenance, samla plattformreadiness og byte-identisk stage0/kandidat.
 
 ## Fase 6 – Yting
 
@@ -341,7 +342,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] `./bin/nc selvstendighet --strict`
 - [x] `./bin/nc selfcompile-l5b` med og utan cache
 - [ ] `./bin/nc local-green --strict`
-- [ ] `./bin/nc release-preflight`
+- [x] `./bin/nc release-preflight`
 - [x] Alle testar og slow-lane-testar utan uklassifiserte hopp
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
 - [ ] Ingen aktive `.sh`, `.py`, `.c`, `.h` eller Zig-kjelder i normal bygg-/release-/CI-flate
