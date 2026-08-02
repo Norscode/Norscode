@@ -1,0 +1,122 @@
+// Strukturert CI-orkestrering for den eksplisitte Pebble/Docker-overgangslana.
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner builtin.miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst,
+              timeout_ms: heiltall, krev_ok: boolsk) -> boolsk {
+    la resultat = prosess.køyr(executable, argv, root, {}, timeout_ms)
+    prosess.skriv_resultat(resultat)
+    hvis krev_ok { returner prosess.ok(resultat) }
+    returner sann
+}
+
+funksjon docker(argv: liste_tekst, root: tekst, krev_ok: boolsk) -> boolsk {
+    returner køyr("/usr/bin/docker", argv, root, 300000, krev_ok)
+}
+
+funksjon rydd(root: tekst) -> heiltall {
+    prøv { builtin.fil_skriv("/tmp/norscode-acme-share/stop", "stop\n") } fang (e) {}
+    docker(["logs", "norscode-dns"], root, usann)
+    docker(["logs", "norscode-pebble"], root, usann)
+    prøv {
+        hvis filops.fil_finnes("/tmp/norscode-acme-share/trace") {
+            skriv(builtin.fil_les("/tmp/norscode-acme-share/trace"))
+        }
+    } fang (e) {}
+    docker(["rm", "-f", "norscode-pebble", "norscode-dns"], root, usann)
+    docker(["network", "rm", "norscode-acme-net"], root, usann)
+    returner 0
+}
+
+funksjon start_tenester(root: tekst) -> heiltall {
+    rydd(root)
+    la share = "/tmp/norscode-acme-share"
+    la build = "/tmp/norscode-acme-build"
+    la cache = "/tmp/norscode-acme-module-cache"
+    filops.slett_tre(share)
+    filops.slett_tre(build)
+    filops.slett_tre(cache)
+    hvis ikkje filops.lag_katalogar(share) eller ikkje filops.lag_katalogar(build) eller
+       ikkje filops.lag_katalogar(cache) eller
+       ikkje filops.lag_katalogar(root + "/build/nc-import-tmp") eller
+       ikkje filops.lag_katalogar(root + "/build/nc-module-cache") { returner 1 }
+
+    hvis ikkje docker(["network", "create", "--subnet", "10.30.50.0/24", "norscode-acme-net"], root, sann) {
+        returner 1
+    }
+    la dns_args = [
+        "run", "-d", "--name", "norscode-dns",
+        "--network", "norscode-acme-net", "--ip", "10.30.50.3",
+        "-v", root + ":/repo:ro",
+        "-v", share + ":/acme",
+        "-v", build + ":/repo/build/nc-import-tmp:rw",
+        "-v", cache + ":/repo/build/nc-module-cache:rw",
+        "-w", "/repo",
+        "-e", "NORSCODE_CMD=run",
+        "-e", "NORSCODE_FILE=/repo/tools/acme_dns01_server.no",
+        "-e", "NORSCODE_ROOT=/repo",
+        "-e", "NORSCODE_PROJECT_ROOT=/repo",
+        "-e", "NORSCODE_IMPORT_BASE=/repo",
+        "-e", "NORSCODE_USE_PRECOMPILED_SELFHOST=0",
+        "-e", "NORSCODE_RUN_CACHE=0",
+        "-e", "NODE_BIN=/nonexistent",
+        "-e", "NORSCODE_ACME_DNS_VALUE_FILE=/acme/value",
+        "-e", "NORSCODE_ACME_DNS_READY_FILE=/acme/ready",
+        "-e", "NORSCODE_ACME_DNS_STOP_FILE=/acme/stop",
+        "-e", "NORSCODE_ACME_DNS_ACK_FILE=/acme/ack",
+        "-e", "NORSCODE_ACME_DNS_TRACE_FILE=/acme/trace",
+        "-e", "NORSCODE_ACME_DNS_HOST=0.0.0.0",
+        "-e", "NORSCODE_DNS_POLL_MANY=1",
+        "-e", "NORSCODE_DNS_ACME_DUAL=1",
+        "-e", "NORSCODE_VM_CAPABILITIES=env.read,disk.read,disk.write,net.listen,net.connect,net.tcp,net.udp,net.dns",
+        "-e", "NORSCODE_VM_DISK_ROOT=/repo,/acme,/tmp",
+        "ubuntu:24.04", "/repo/bin/nc", "run", "/repo/tools/acme_dns01_server.no"
+    ]
+    hvis ikkje docker(dns_args, root, sann) { returner 1 }
+
+    la pebble_args = [
+        "run", "-d", "--name", "norscode-pebble",
+        "--network", "norscode-acme-net",
+        "-p", "14000:14000", "-p", "15000:15000",
+        "-e", "PEBBLE_VA_ALWAYS_VALID=1",
+        "-e", "PEBBLE_VA_NOSLEEP=1",
+        "-e", "PEBBLE_WFE_NONCEREJECT=0",
+        "-e", "PEBBLE_AUTHZREUSE=0",
+        "ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199",
+        "-config", "test/config/pebble-config.json", "-strict", "-dnsserver", "10.30.50.3:8053"
+    ]
+    hvis ikkje docker(pebble_args, root, sann) { returner 1 }
+
+    la forsøk: heiltall = 0
+    mens forsøk < 360 {
+        hvis filops.fil_finnes(share + "/ready") {
+            la curl = prosess.køyr("/usr/bin/curl", ["--silent", "--show-error", "--fail",
+                "--insecure", "https://localhost:14000/dir", "-o", "/dev/null"], root, {}, 10000)
+            hvis prosess.ok(curl) {
+                hvis ikkje docker(["cp", "norscode-pebble:/test/certs/pebble.minica.pem",
+                    "/tmp/pebble.minica.pem"], root, sann) { returner 1 }
+                skriv("Pebble og Norscode DNS er klare\n")
+                returner 0
+            }
+        }
+        prøv { builtin.vent.sov(1000) } fang (e) {}
+        forsøk = forsøk + 1
+    }
+    docker(["logs", "norscode-dns"], root, usann)
+    docker(["logs", "norscode-pebble"], root, usann)
+    returner 1
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    hvis env("NORSCODE_ACME_CI_ACTION") == "cleanup" { returner rydd(root) }
+    returner start_tenester(root)
+}
+

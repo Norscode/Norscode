@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 56 av 76 punkt er verifiserte, 20 står opne.**
+**Avhukingsstatus 2026-08-02: 57 av 76 punkt er verifiserte, 19 står opne.**
 
 ## Mål og reglar
 
@@ -71,13 +71,13 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
 - [x] Arkiver eller slett alle erstatta aktive shellwrapperar.
 - [x] La active-surface feile på kvar ny aktiv `.sh`-fil.
-- [ ] Flytt aktive CI-`run:`-blokker som orkestrerer `mkdir`, `cp`, `chmod`, `rm`, løkker, C/Zig-kompilering, Docker eller shellskript til Norscode-eigde `.no`-jobbar; berre direkte oppstart av Norscode og smale plattform-/signeringsgrenser kan stå att.
+- [x] Flytt aktive CI-`run:`-blokker som orkestrerer `mkdir`, `cp`, `chmod`, `rm`, løkker, C/Zig-kompilering, Docker eller shellskript til Norscode-eigde `.no`-jobbar; berre direkte oppstart av Norscode og smale plattform-/signeringsgrenser kan stå att.
 
 ### Fase 3-evidens
 
 - Første levande inventar 2026-07-30 var 115 shellfiler, ikkje det eldre estimatet på 112.
-- Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette beviser ikkje fullført fase 3, fordi aktive GitHub Actions-workflowar framleis inneheld shellbaserte `run:`-blokker.
-- Den Norscode-eigde porten `tools/ci_shell_surface_inventory.no` finn 117 aktive CI-`run:`-blokker: 90 er direkte Norscode-bootstrap, medan 27 framleis inneheld shellorkestrering. Miljøprefiks er flytta til strukturerte YAML-`env`-kart; Linux/macOS-stage0-materialisering, Windows-attestasjon og byteidentitet, macOS-notarisering og stage0-smoke er flytta til `.no`-eigarar. `tools/ci_runtime_fileops.no` bruker native filmodus når ABI-en finst og ein eksplisitt strukturert `/bin/chmod`-reserve for eldre committed stage0, etterfølgt av selftest; denne eksterne plattformreserven held den siste delen av fase 3 open til ny stage0 er promotert. Den maskinlesbare rapporten ligg i `reports/ci-shell-surface-inventory.json`; `active-surface` avviser kvar auke over den committed baselinen, og `NORSCODE_CI_SHELL_STRICT=1` feilar lukka så lenge talet ikkje er null.
+- Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette var åleine ikkje fullført fase 3; den innebygde workflow-shellflata måtte òg migrerast.
+- Den levande Norscode-eigde strict-porten `tools/ci_shell_surface_inventory.no` finn 113 aktive CI-`run:`-blokker: alle 113 er direkte Norscode-bootstrap og 0 inneheld shellorkestrering. Stage0-/artefaktmaterialisering, fixturekopiering, testmiljø, notariseringslisting, hashing/pakking, Windows bygg/attestasjon, native GC-overgang, pakkeinstallasjon og Pebble/Docker-orkestrering har `.no`-eigarar med strukturert argv. `tools/ci_runtime_fileops.no` bruker native filmodus når ABI-en finst og ein eksplisitt strukturert `/bin/chmod`-plattformreserve for eldre committed stage0, etterfølgt av selftest; dette er ein smal, versjonert plattformgrense og ikkje shelltekst. Den maskinlesbare rapporten ligg i `reports/ci-shell-surface-inventory.json`; `active-surface` låser baselinen til 0, og `NORSCODE_CI_SHELL_STRICT=1` er grøn.
 - Alle 115 baselinerte shellfiler er fjerna frå aktiv flate og bevarte under `archive/legacy_shell/` der historikk framleis er relevant.
 - Maskinlesbar rapport: `reports/shell-surface-inventory.json`, generert av `tools/shell_surface_inventory.no` via native filesystem-ABI.
 - `bin/nc` har no 0 utførande kall til aktive `.sh`-verktøy; dei tre attverande `.sh`-treffa er berre filnamn i release-sporingslista.
