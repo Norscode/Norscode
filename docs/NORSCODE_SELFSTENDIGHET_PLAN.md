@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 49 av 75 punkt er verifiserte, 26 står opne.**
+**Avhukingsstatus 2026-08-02: 53 av 75 punkt er verifiserte, 22 står opne.**
 
 ## Mål og reglar
 
@@ -226,8 +226,8 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Embed compiler-, VM- og runtime-NCB i éin sjølvstendig binær.
 - [x] Køyr kandidaten frå tom runtime-rot med `PATH=/nonexistent`.
 - [x] Køyr runtime-gap, bootstrap, L5, L5b, full test og single-binary mot kandidaten.
-- [ ] Promoter kandidaten atomisk først etter grøn kontrollert promoteringsport.
-- [ ] Behald førre stage0 som verifisert rollback-artefakt.
+- [x] Promoter kandidaten atomisk først etter grøn kontrollert promoteringsport.
+- [x] Behald førre stage0 som verifisert rollback-artefakt.
 
 ### Pågåande kandidatverifikasjon etter modulglobal-reparasjon
 
@@ -247,15 +247,16 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - `tools/runtime_promotion_core.no` bevarer eksisterande mål som innhaldsadressert rollback-artefakt, verifiserer kandidat- og rollback-SHA-256, set køyrbar modus gjennom filesystem-ABI og publiserer med atomisk `file_replace`. Ei levande binær fixture promoterer, gjenopprettar og avviser manipulert rollback utan å endre målet. `promote_native_stage0_v3001.no` køyrer runtime-gap-porten med executable/argv og har ein grøn kontrollert dry-run for både dist og macOS-stage0. Begge tillitsankera har framleis uendra SHA-256 `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284`; rollback- og promoteringspunkta står opne til ei lovleg kandidatpromotering faktisk blir gjennomført.
 - Kontrollert v3005-dry-run er grøn mot `build/norscode_native_canonical_alias_candidate_v107`: kandidat-gap, filesystem-list, alle 20 media-/modellprøver, pure-VM-gap, CLI-gap, readiness og separate dist/stage0-promoteringsprøver består. Rapporten viser `dry_run_green_no_promotion`; dist og macOS-stage0 har uendra hash `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284`. Native `sha256_bytes` blir brukt for store binærar med rein Norscode-fallback, slik at kontrollen ikkje fastnar i fleire minutt per 11,5 MB-fil.
 - Native `bygg-native` er no eigd av `selfhost/nc_main.no` med eksplisitt target/argv-dispatch, direkte Norscode-NCB-hostkøyring og filesystem-ABI for køyrbar modus; dei migrerte AOT-testane brukar ikkje `bin/nc`, shelltekst eller `exec_prosess`. Kandidat v110, `build/norscode_native_temp_mode_candidate_v110`, er 11 789 480 byte med SHA-256 `d19bb853fc06ac30c95d92eb1baf2eb2a979333d73a5a52db4b099205b125c88`. På denne kandidaten er signert og faktisk køyrd Mach-O arm64, Mach-O-funksjonskall/import/kontrollflyt/liste-/tekstoperasjonar, ELF64 x86-64, ELF64 AArch64 og PE32+-emitteren grøne. Darwin `/tmp` blir normalisert til den kjende `/private/tmp`-rota før `O_NOFOLLOW`-vandringa; vilkårlege symlenker er framleis fail-closed. Tillitsankera er urørte med SHA-256 `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284`.
+- Windows-stage0 er no promotert gjennom `tools/promote_attested_windows_stage0.no` etter signert GitHub-attestasjon, kjeldecommitkontroll og kandidat-SHA-256. Promoteringskjernen publiserte atomisk, oppdaterte stage0-manifestet og bevarte både den opphavlege stage0-en `4e30aef1...b4bed` og den fyrste attesterte generasjonen `789ba729...b23f0d` som permanente, hashverifiserte rollback-artefaktar under `bootstrap/stage0/rollback/`.
 
 ## Fase 5 – Native Linux-, macOS- og Windows-bygg
 
 - [ ] Fjern aktiv GCC/Zig-orkestrering frå Linux-bygg.
 - [ ] Fjern aktive C-bundlarar frå Windows PE/runtime-bygg.
-- [ ] Reparer Windows stage0/kandidat-avviket og krev identisk hash.
+- [x] Reparer Windows stage0/kandidat-avviket og krev identisk hash.
 - [ ] Fullfør filesystem-, prosess-, nettverk-, tråd- og sikkerheits-ABI-ar.
 - [ ] Køyr native Linux x86-64 og ARM64 utan Docker-byggeverktøy i normalflyten.
-- [ ] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
+- [x] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
 - [ ] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
 - [ ] Set `production_ready_all_platforms=true` berre når alle tre er attesterte.
 
@@ -267,6 +268,8 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Kildekontroll og den direkte shellfrie Windows-attestasjonskontrakten er grøne på macOS. Sjølve SChannel/AppContainer/IOCP/Argon2id-attestasjonen står framleis open fordi planen krev faktisk Windows x86_64-host; kryssbygg eller Wine skal ikkje reknast som bevis.
 - Ikkje-promotert v94-kandidat, hash `28d3d5dc3bfde74bd2348478a2974738ade224be3baaa6a130b499f23056e1e2` og storleik 11 486 392 byte, er materialisert frå ein komplett 1 688-funksjons host-graf. Frå `tests/` og utan `NORSCODE_ROOT` normaliserer kandidaten relativ executable-sti mot `cwd`, finn repo-rota og køyrer `active-surface` grønt. Importerande fokustestar køyrer òg grønt etter at dei `decoded-v1`-merkte funksjonane vart materialiserte i korrekt rå-parsermodus. Dette beviser native dispatch og rotfinning i kandidaten, men `bin/nc`-avhukinga står open fordi v94 framleis har den eksplisitte Zig-Argon2/OpenSSL-overgangsbackend-en og ikkje er lovleg promotert.
 - V95 legg levande `selfhost/vm.no` over hostgrafen og materialiserer 1 689 funksjonar. Kryptokandidaten har hash `47e9c48f7d6d5130328b5c20ca4423a58a02a0dd76c44124f11014939180e580`, storleik 11 519 384 byte, og køyrer Argon2id-vektoren, VM-sikkerheitsforwarding og executable-root-kontrakten grønt. Materialisatoren har samstundes fått eigen desimalparser, slik at v95 sjølv kan lese funksjonsintervall utan den tidlegare `heiltall_fra_tekst`-feilen.
+- CI-køyring `30749220401` produserte og signerte ei ekte Windows x86-64-attestasjon for den kanoniske PE-kandidaten med SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Rapporten bind SChannel TLS 1.3, AppContainer, IOCP, filesystem, prosess, Argon2id og ACME-signering/verifisering til kjeldecommit `42641f778c0a053816670079410015cdaedf7a81`.
+- LLD `/Brepro` åleine var ikkje stabil fordi PE-tidsstempel, CodeView-GUID og PDB-sti varierte mellom ellers identiske køyringar. `tools/normalize_pe_reproducible.no` kanoniserer desse ikkje-funksjonelle felta strukturert i Norscode. To komplette lokale bygg gav byte-identisk hovudruntime `d1917398...98298`, backend-smoke `43bfbdd7...c939a` og AppContainer-smoke `ed247179...5e7264`; CI gav dei same tre hashane.
 
 ## Fase 6 – Yting
 
