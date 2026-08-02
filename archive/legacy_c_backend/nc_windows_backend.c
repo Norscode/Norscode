@@ -577,9 +577,14 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
     process->job = CreateJobObjectW(NULL, NULL);
     if (!process->job) { ncw_error(error, error_cap, "CreateJobObjectW", GetLastError()); TerminateProcess(info.hProcess, 126); CloseHandle(info.hThread); CloseHandle(info.hProcess); goto failure; }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; memset(&limits, 0, sizeof(limits));
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-                                              JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    /* Ein eksplisitt usandboxa verktøyprosess må kunne starte legitime
+       underprosessar (til dømes compiler-driver -> linker). Avgrensa profiler
+       held fram med éin-prosessgrensa og AppContainer der det er kravd. */
+    if (sandbox_profile && strcmp(sandbox_profile, "none")) {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    }
     if (max_memory_bytes) {
         limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         limits.ProcessMemoryLimit = (SIZE_T)max_memory_bytes;
