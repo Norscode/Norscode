@@ -1,8 +1,7 @@
 # imaplib.no — IMAP e-postklient
 # Python: imaplib
 #
-# Les og handterer e-post via IMAP. Vanleg IMAP brukar Norscode socket først;
-# IMAPS/TLS brukar curl som reserveveg til runtime får TLS-socket.
+# Les og handterer e-post via IMAP/IMAPS gjennom Norscode native TCP/TLS.
 # Returnerer meldingar som ordbok_tekst-objekt.
 #
 # Bruk:
@@ -15,11 +14,7 @@
 #   la msg = imap.fetch(c, ids[0])
 #   imap.logout(c)
 
-bruk std.socket som sok
-
-funksjon _shell(verdi: tekst) -> tekst {
-    returner "'" + builtin.replace(verdi, "'", "'\"'\"'") + "'"
-}
+bruk std.protocol_stream som stream
 
 funksjon connect(vert: tekst, port: heltall, ssl: bool) -> ordbok_tekst {
     la c: ordbok_tekst = {}
@@ -35,26 +30,9 @@ funksjon connect(vert: tekst, port: heltall, ssl: bool) -> ordbok_tekst {
     hvis (ssl) { protokoll = "imaps" }
     c["protokoll"] = protokoll
 
-    hvis ikkje ssl {
-        la s = sok.ny_tcp()
-        prøv {
-            sok.set_timeout(s, 5000)
-            hvis sok.tilkoble(s, vert, port) {
-                c["tilkopla"] = "sann"
-            }
-            sok.lukk(s)
-        } fang (e0) {
-            sok.lukk(s)
-        }
-        returner c
-    }
-
-    prøv {
-        la url: tekst = protokoll + "://" + vert + ":" + tekst_fra_heltall(port)
-        la test_cmd: tekst = "curl -s --connect-timeout 5 --max-time 5 " + _shell(url) + " 2>&1"
-        la res = builtin.exec_prosess(test_cmd)
+    hvis stream.dialog(vert, port, ssl, "a001 LOGOUT\r\n", 5000, 8192) != "" {
         c["tilkopla"] = "sann"
-    } fang (e) {}
+    }
     returner c
 }
 
@@ -65,17 +43,7 @@ funksjon connect_standard(vert: tekst) -> ordbok_tekst {
 funksjon login(c: ordbok_tekst, brukar: tekst, passord: tekst) -> bool {
     c["brukar"]  = brukar
     c["passord"] = passord
-    hvis c["protokoll"] == "imap" {
-        la svar = _socket_imap(c, "")
-        hvis svar != "" { returner sann }
-    }
-    prøv {
-        la url: tekst = _imap_url(c, "")
-        la auth: tekst = brukar + ":" + passord
-        la res = builtin.exec_prosess("curl -s --connect-timeout 10 -u " + _shell(auth) + " " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
+    returner _socket_imap(c, "") != ""
 }
 
 funksjon logout(c: ordbok_tekst) {
@@ -86,65 +54,21 @@ funksjon _imap_url(c: ordbok_tekst, sti: tekst) -> tekst {
     returner c["protokoll"] + "://" + c["vert"] + ":" + c["port"] + sti
 }
 
-funksjon _curl_imap(c: ordbok_tekst, kommando: tekst) -> tekst {
-    la brukar: tekst = c["brukar"]
-    la passord: tekst = c["passord"]
-    prøv {
-        la url: tekst = _imap_url(c, "/" + c["postboks"])
-        la auth: tekst = brukar + ":" + passord
-        la cmd: tekst = "curl -s --connect-timeout 15 --max-time 30 -u " + _shell(auth) + " --request " + _shell(kommando) + " " + _shell(url) + " 2>&1"
-        la res = builtin.exec_prosess(cmd)
-        returner res
-    } fang (e) {
-        returner ""
-    }
-    returner ""
-}
-
 funksjon _socket_imap(c: ordbok_tekst, kommando: tekst) -> tekst {
-    hvis c["protokoll"] != "imap" { returner "" }
-    la s = sok.ny_tcp()
-    prøv {
-        sok.set_timeout(s, 5000)
-        hvis ikkje sok.tilkoble(s, c["vert"], heltall_fra_tekst(c["port"])) {
-            sok.lukk(s)
-            returner ""
-        }
-        la svar = sok.motta(s, 4096)
-        la innhald: tekst = "a001 LOGIN " + c["brukar"] + " " + c["passord"] + "\r\n"
-        hvis kommando != "" {
-            hvis c["postboks"] != "" {
-                innhald = innhald + "a002 SELECT " + c["postboks"] + "\r\n"
-            }
-            innhald = innhald + "a003 " + kommando + "\r\n"
-        }
-        innhald = innhald + "a004 LOGOUT\r\n"
-        hvis sok.send(s, innhald) < 0 {
-            sok.lukk(s)
-            returner svar
-        }
-        svar = svar + sok.motta(s, 65535)
-        sok.lukk(s)
-        returner svar
-    } fang (e) {
-        sok.lukk(s)
-        returner ""
+    la innhald: tekst = "a001 LOGIN " + c["brukar"] + " " + c["passord"] + "\r\n"
+    hvis kommando != "" {
+        hvis c["postboks"] != "" { innhald = innhald + "a002 SELECT " + c["postboks"] + "\r\n" }
+        innhald = innhald + "a003 " + kommando + "\r\n"
     }
-    returner ""
+    innhald = innhald + "a004 LOGOUT\r\n"
+    returner stream.dialog(c["vert"], heltall_fra_tekst(c["port"]),
+                           c["protokoll"] == "imaps", innhald, 30000, 1048576)
 }
 
 # List alle postboksar
 funksjon list(c: ordbok_tekst) -> liste_tekst {
     prøv {
         la res = _socket_imap(c, "LIST \"\" \"*\"")
-        hvis res == "" {
-            la brukar: tekst = c["brukar"]
-            la passord: tekst = c["passord"]
-            la url: tekst = _imap_url(c, "/")
-            la auth: tekst = brukar + ":" + passord
-            la cmd: tekst = "curl -s --connect-timeout 15 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
-            res = builtin.exec_prosess(cmd)
-        }
         la linjer = builtin.split(res, "\n")
         la resultat: liste_tekst = []
         la i: heltall = 0
@@ -170,14 +94,6 @@ funksjon select(c: ordbok_tekst, postboks: tekst) -> bool {
 funksjon search(c: ordbok_tekst, kriterie: tekst) -> liste_tekst {
     prøv {
         la res = _socket_imap(c, "SEARCH " + kriterie)
-        hvis res == "" {
-            la brukar: tekst = c["brukar"]
-            la passord: tekst = c["passord"]
-            la url: tekst = _imap_url(c, "/" + c["postboks"] + ";SEARCH=" + kriterie)
-            la auth: tekst = brukar + ":" + passord
-            la cmd: tekst = "curl -s --connect-timeout 15 --max-time 30 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
-            res = builtin.exec_prosess(cmd)
-        }
         la delar = builtin.split(res, " ")
         la resultat: liste_tekst = []
         la i: heltall = 0
@@ -203,14 +119,6 @@ funksjon search(c: ordbok_tekst, kriterie: tekst) -> liste_tekst {
 funksjon fetch(c: ordbok_tekst, melding_id: tekst) -> ordbok_tekst {
     prøv {
         la rå = _socket_imap(c, "UID FETCH " + melding_id + " BODY[]")
-        hvis rå == "" {
-            la brukar: tekst = c["brukar"]
-            la passord: tekst = c["passord"]
-            la url: tekst = _imap_url(c, "/" + c["postboks"] + "/;UID=" + melding_id)
-            la auth: tekst = brukar + ":" + passord
-            la cmd: tekst = "curl -s --connect-timeout 15 --max-time 60 -u " + _shell(auth) + " " + _shell(url) + " 2>&1"
-            rå = builtin.exec_prosess(cmd)
-        }
         la msg: ordbok_tekst = {}
         msg["_type"] = "imap_melding"
         msg["id"]    = melding_id
@@ -247,14 +155,14 @@ funksjon fetch(c: ordbok_tekst, melding_id: tekst) -> ordbok_tekst {
 funksjon store_seen(c: ordbok_tekst, melding_id: tekst) -> bool {
     la svar = _socket_imap(c, "UID STORE " + melding_id + " +FLAGS (\\Seen)")
     hvis svar != "" { returner _inneheld(svar, "a003 OK") }
-    returner sann  # Curl IMAP støttar ikkje FLAG-kommandoar enkelt
+    returner usann
 }
 
 # Slett melding (merk for sletting)
 funksjon store_deleted(c: ordbok_tekst, melding_id: tekst) -> bool {
     la svar = _socket_imap(c, "UID STORE " + melding_id + " +FLAGS (\\Deleted)")
     hvis svar != "" { returner _inneheld(svar, "a003 OK") }
-    returner sann
+    returner usann
 }
 
 funksjon tekst_fra_bool(b: bool) -> tekst {

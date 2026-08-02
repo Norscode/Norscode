@@ -1,285 +1,179 @@
-// tools/controlled_runtime_promotion_v3005.no — kontrollert runtime-promotering
-
-bruk std.path som path
-
-funksjon linje(melding: tekst) -> heiltall {
-    skriv(melding + "\n")
-    returner 0
-}
+// Shellfri, kontrollert runtime-promotering med eksplisitt godkjenning.
+bruk std.filops som filops
+bruk std.platform som platform
+bruk std.sha256 som sha256
+bruk tools.process_runner som prosess
+bruk tools.runtime_promotion_core som promotion
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(s: tekst) -> tekst {
-    returner "'" + builtin.replace(s, "'", "'\"'\"'") + "'"
+funksjon rot() -> tekst {
+    la r = env("NORSCODE_ROOT")
+    hvis r != "" { returner r }
+    prøv { returner tekst(builtin.system_info()["cwd"]) } fang (e) { returner "." }
+    returner "."
 }
 
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
+funksjon abs_sti(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner root + "/" + sti
 }
 
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
+funksjon relativ_sti(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner filops.relativ_sti(root, sti) }
+    returner filops.normaliser_sti(sti)
 }
 
-funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
+funksjon stage0_relativ() -> tekst {
+    la os = platform.system()
+    la arch = builtin.lower(platform.maskin())
+    hvis os == "Darwin" og arch == "arm64" { returner "bootstrap/stage0/norscode-macos-arm64" }
+    hvis os == "Darwin" og (arch == "x86_64" eller arch == "amd64") { returner "bootstrap/stage0/norscode-macos-x86_64" }
+    hvis os == "Linux" og (arch == "x86_64" eller arch == "amd64") { returner "bootstrap/stage0/norscode-linux-x86_64" }
+    hvis os == "Linux" og (arch == "aarch64" eller arch == "arm64") { returner "bootstrap/stage0/norscode-linux-arm64" }
+    hvis platform.er_windows() { returner "bootstrap/stage0/norscode-windows-x86_64.exe" }
     returner ""
 }
 
-funksjon trim(t: tekst) -> tekst {
-    returner builtin.trim(t)
+funksjon hash_fil(sti: tekst) -> tekst {
+    hvis sti == "" eller ikkje filops.fil_finnes(sti) { returner "missing" }
+    la bytes = builtin.fil_les_binær(sti)
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { }
+    prøv { returner sha256.hash_bytes(bytes) } fang (e2) { returner "error" }
+    returner "error"
 }
 
-funksjon første_felt(t: tekst) -> tekst {
-    la delar = builtin.split(trim(t), " ")
-    la i = 0
-    mens i < lengde(delar) {
-        la d = trim(delar[i])
-        hvis d != "" { returner d }
-        i = i + 1
-    }
-    returner ""
-}
-
-funksjon run_capture(cmd: tekst, out: tekst) -> heiltall {
-    la res = kommando(cmd + " > " + shell(out) + " 2>&1")
-    hvis ok(res) { returner 0 }
-    returner 1
-}
-
-funksjon nc_run(root: tekst, tool: tekst) -> tekst {
-    returner "NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_ROOT=" + shell(root) + " " + shell(root + "/bin/nc") + " run " + shell(root + "/" + tool)
-}
-
-funksjon gap_gate_cmd(root: tekst, bin_path: tekst) -> tekst {
-    returner "cd " + shell(root) + " && NORSCODE_NATIVE_GAP_BIN=" + shell(bin_path) + " " + nc_run(root, "tools/native_runtime_gap_gate_v3001.no")
-}
-
-funksjon filesystem_list_cmd(root: tekst, bin_path: tekst) -> tekst {
-    returner "cd " + shell(root) + " && NORSCODE_CMD=run NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write NORSCODE_VM_DISK_ROOT=" + shell(root + ",/tmp,/private/tmp") + " NORSCODE_ROOT=" + shell(root) + " NORSCODE_FILE=" + shell(root + "/tests/test_native_filesystem_list.no") + " " + shell(bin_path)
-}
-
-funksjon readiness_cmd(root: tekst) -> tekst {
-    returner "cd " + shell(root) + " && " + nc_run(root, "tools/native_runtime_gap_promotion_readiness_v3003.no")
-}
-
-funksjon promote_cmd(root: tekst, candidate_rel: tekst, dist: bool, stage0: bool, dry_run: bool) -> tekst {
-    la dist_flag = "0"
-    la stage0_flag = "0"
-    la dry_flag = "0"
-    hvis dist { dist_flag = "1" }
-    hvis stage0 { stage0_flag = "1" }
-    hvis dry_run { dry_flag = "1" }
-    returner "cd " + shell(root) +
-        " && NORSCODE_PROMOTE_CANDIDATE=" + shell(candidate_rel) +
-        " NORSCODE_PROMOTE_DIST=" + shell(dist_flag) +
-        " NORSCODE_PROMOTE_STAGE0=" + shell(stage0_flag) +
-        " NORSCODE_PROMOTE_DRY_RUN=" + shell(dry_flag) +
-        " " + nc_run(root, "tools/promote_native_stage0_v3001.no")
-}
-
-funksjon file_contains(path: tekst, needle: tekst) -> bool {
-    prøv {
-        returner builtin.index_of(builtin.fil_les(path), needle) >= 0
-    } fang (e) {
-        returner usann
+funksjon miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.",
+        "PATH": "/nonexistent"
     }
 }
 
-funksjon sha_file(path: tekst) -> tekst {
-    prøv {
-        hvis ikkje builtin.fil_finnes(path) { returner "missing" }
-    } fang (e) {
-        returner "missing"
-    }
-    returner første_felt(felt(kommando("shasum -a 256 " + shell(path)), 1))
+funksjon køyr(host: tekst, root: tekst, fil: tekst,
+              ekstra: ordbok_tekst, timeout: heiltall) -> ordbok_tekst {
+    la m = miljø(root)
+    la keys = builtin.nøkler(ekstra)
+    la i: heiltall = 0
+    mens i < lengde(keys) { la k = tekst(keys[i]); m[k] = tekst(ekstra[k]); i = i + 1 }
+    returner prosess.køyr(host, ["run", root + "/" + fil], root, m, timeout)
 }
 
-funksjon read_file(path: tekst) -> tekst {
-    prøv {
-        returner builtin.fil_les(path)
-    } fang (e) {
-        returner ""
-    }
+funksjon har(r: ordbok_tekst, markør: tekst) -> boolsk {
+    returner builtin.index_of(tekst(r["stdout"]) + tekst(r["stderr"]), markør) >= 0
 }
 
-funksjon stage0_path(root: tekst) -> tekst {
-    la os = trim(felt(kommando("uname -s"), 1))
-    la arch = trim(felt(kommando("uname -m"), 1))
-    hvis os == "Darwin" og arch == "arm64" { returner root + "/bootstrap/stage0/norscode-macos-arm64" }
-    hvis os == "Darwin" og arch == "x86_64" { returner root + "/bootstrap/stage0/norscode-macos-x86_64" }
-    hvis os == "Linux" og arch == "x86_64" { returner root + "/bootstrap/stage0/norscode-linux-x86_64" }
-    hvis os == "Linux" og arch == "amd64" { returner root + "/bootstrap/stage0/norscode-linux-x86_64" }
-    hvis os == "Linux" og arch == "aarch64" { returner root + "/bootstrap/stage0/norscode-linux-arm64" }
-    hvis os == "Linux" og arch == "arm64" { returner root + "/bootstrap/stage0/norscode-linux-arm64" }
-    returner ""
-}
-
-funksjon escape_value(v: tekst) -> tekst {
-    la s = builtin.replace(v, "\\", "\\\\")
-    s = builtin.replace(s, "\"", "\\\"")
-    s = builtin.replace(s, "\t", "\\t")
-    s = builtin.replace(s, "\n", " ")
-    returner trim(s)
+funksjon grønn(r: ordbok_tekst, markør: tekst) -> boolsk {
+    returner prosess.ok(r) og har(r, markør)
 }
 
 funksjon no_line(key: tekst, value: tekst) -> tekst {
-    la safe_key = escape_value(key)
-    la safe_value = escape_value(value)
-    returner "controlled_runtime_promotion(\"" + safe_key + "\", \"" + safe_value + "\")\n"
+    la v = builtin.replace(value, "\n", " ")
+    v = builtin.replace(v, "\"", "'")
+    returner "controlled_runtime_promotion(\"" + key + "\", \"" + v + "\")\n"
 }
 
-funksjon bool_text(verdi: bool) -> tekst {
-    hvis verdi { returner "sann" }
-    returner "usann"
-}
-
-funksjon write_report(report: tekst, root: tekst, candidate: tekst, dist: tekst, stage0: tekst, confirm_text: tekst, dry_run: bool, status: tekst, decision: tekst, candidate_status: tekst, active_before_status: tekst, active_after_status: tekst, active_before_out: tekst, active_after_out: tekst, dist_before: tekst, dist_after: tekst, stage0_before: tekst, stage0_after: tekst, backup_dir: tekst) -> bool {
-    hvis ikkje ok(kommando("mkdir -p " + shell(root + "/docs"))) { returner usann }
-    la body = ""
-    body = body + no_line("schema", "norscode.controlled_runtime_promotion.v3005")
-    body = body + no_line("status", status)
-    body = body + no_line("decision", decision)
-    body = body + no_line("candidate", candidate)
-    body = body + no_line("candidate_gate_status", candidate_status)
-    body = body + no_line("active_runtime", dist)
-    body = body + no_line("active_runtime_gate_before", active_before_status)
-    body = body + no_line("active_runtime_gate_after", active_after_status)
-    body = body + no_line("active_runtime_output_before", active_before_out)
-    body = body + no_line("active_runtime_output_after", active_after_out)
-    body = body + no_line("dist_sha256_before", dist_before)
-    body = body + no_line("dist_sha256_after", dist_after)
-    body = body + no_line("stage0", stage0)
-    body = body + no_line("stage0_sha256_before", stage0_before)
-    body = body + no_line("stage0_sha256_after", stage0_after)
-    body = body + no_line("backup_dir", backup_dir)
-    body = body + no_line("confirm_required", confirm_text)
+funksjon rapport(root: tekst, candidate: tekst, stage0: tekst, status: tekst,
+                 decision: tekst, before_dist: tekst, after_dist: tekst,
+                 before_stage0: tekst, after_stage0: tekst,
+                 candidate_status: tekst, active_before: tekst,
+                 active_after: tekst, dry_run: boolsk) -> boolsk {
+    la body = no_line("schema", "norscode.controlled_runtime_promotion.v3005")
+    body = body + no_line("status", status) + no_line("decision", decision)
+    body = body + no_line("candidate", candidate) + no_line("candidate_gate_status", candidate_status)
+    body = body + no_line("active_runtime_gate_before", active_before)
+    body = body + no_line("active_runtime_gate_after", active_after)
+    body = body + no_line("dist_sha256_before", before_dist) + no_line("dist_sha256_after", after_dist)
+    body = body + no_line("stage0", stage0) + no_line("stage0_sha256_before", before_stage0)
+    body = body + no_line("stage0_sha256_after", after_stage0)
+    body = body + no_line("confirm_required", "godkjenn kritisk runtime-promotering")
     hvis dry_run { body = body + no_line("dry_run", "1") } ellers { body = body + no_line("dry_run", "0") }
-    body = body + no_line("active_runtime_changed", bool_text(dist_before != dist_after))
-    body = body + no_line("stage0_changed", bool_text(stage0_before != stage0_after))
-    body = body + no_line("updated_at", trim(felt(kommando("date -u '+%Y-%m-%dT%H:%M:%SZ'"), 1)))
-    prøv {
-        builtin.fil_skriv(report, body)
-    } fang (e) {
-        returner usann
-    }
-    skriv(read_file(report))
+    body = body + no_line("updated_at_ms", tekst_fra_heltall(builtin.now_ms()))
+    prøv { fil_skriv(root + "/docs/controlled_runtime_promotion_v3005.no", body) } fang (e) { returner usann }
+    skriv(body)
     returner sann
 }
 
+funksjon gjenopprett(root: tekst, target: tekst, r: ordbok_tekst) -> boolsk {
+    la rollback = tekst(r["rollback_relative"])
+    la hash = tekst(r["rollback_sha256"])
+    hvis rollback == "" eller hash == "" { returner usann }
+    returner promotion.gjenopprett(root, target, rollback, hash)["status"] == "restored"
+}
+
 funksjon start() -> heiltall {
-    la root = trim(felt(kommando("pwd"), 1))
-    la candidate_rel = env("NORSCODE_PROMOTION_CANDIDATE")
-    hvis candidate_rel == "" { candidate_rel = "build/v3010/norscode_native_macos_arm64_v3010" }
-    la candidate = candidate_rel
-    hvis ikkje builtin.starts_with(candidate_rel, "/") { candidate = root + "/" + candidate_rel }
-    la dist = root + "/dist/norscode_native"
-    la promote = root + "/tools/promote_native_stage0_v3001.no"
-    la gate = root + "/tools/native_runtime_gap_gate_v3001.no"
-    la readiness = root + "/tools/native_runtime_gap_promotion_readiness_v3003.no"
-    la media_gate = root + "/tools/native_media_runtime_gate_v3010.no"
-    la report = root + "/docs/controlled_runtime_promotion_v3005.no"
-    la confirm_text = "godkjenn kritisk runtime-promotering"
-    la dry_flag = env("NORSCODE_PROMOTION_DRY_RUN")
-    la confirm = env("NORSCODE_PROMOTION_CONFIRM")
-    la dry_run = dry_flag == "sann"
-    la stage0 = stage0_path(root)
-    la native_run = "NORSCODE_CMD=run NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write NORSCODE_VM_DISK_ROOT=" + shell(root + ",/tmp,/private/tmp") + " NORSCODE_ROOT=" + shell(root) + " NORSCODE_FILE="
+    la root = rot()
+    la candidate_input = env("NORSCODE_PROMOTION_CANDIDATE")
+    hvis candidate_input == "" { candidate_input = "build/v3010/norscode_native_macos_arm64_v3010" }
+    la candidate = abs_sti(root, candidate_input)
+    la candidate_rel = relativ_sti(root, candidate_input)
+    la dist_rel = "dist/norscode_native"
+    la dist = root + "/" + dist_rel
+    la stage_rel = stage0_relativ()
+    la stage = abs_sti(root, stage_rel)
+    la dry_run = builtin.lower(env("NORSCODE_PROMOTION_DRY_RUN")) == "sann" eller env("NORSCODE_PROMOTION_DRY_RUN") == "1"
+    la before_dist = hash_fil(dist)
+    la before_stage = hash_fil(stage)
+    hvis candidate_rel == "" eller builtin.starts_with(candidate_rel, "../") eller
+       ikkje filops.fil_finnes(candidate) eller stage_rel == "" { returner 2 }
 
-    la tmpdir = trim(felt(kommando("mktemp -d /tmp/norscode_controlled_promotion.XXXXXX"), 1))
-    la candidate_out = tmpdir + "/candidate.out"
-    la filesystem_out = tmpdir + "/filesystem.out"
-    la media_out = tmpdir + "/media.out"
-    la active_before_out = tmpdir + "/active_before.out"
-    la active_after_out = tmpdir + "/active_after.out"
-    la readiness_out = tmpdir + "/readiness.out"
-    la dist_dry_out = tmpdir + "/dist_dry.out"
-    la stage0_dry_out = tmpdir + "/stage0_dry.out"
+    la gap_env: ordbok_tekst = {"NORSCODE_NATIVE_GAP_BIN": candidate}
+    la candidate_gate = køyr(candidate, root, "tools/native_runtime_gap_gate_v3001.no", gap_env, 600000)
+    la fs_gate = køyr(candidate, root, "tests/test_native_filesystem_list.no", {}, 300000)
+    la media_env: ordbok_tekst = {"NORSCODE_MEDIA_RUNTIME_BIN": candidate}
+    la media_gate = køyr(candidate, root, "tools/native_media_runtime_gate_v3010.no", media_env, 1200000)
+    la active_env: ordbok_tekst = {"NORSCODE_NATIVE_GAP_BIN": dist}
+    la active_gate = køyr(candidate, root, "tools/native_runtime_gap_gate_v3001.no", active_env, 600000)
+    la readiness_env: ordbok_tekst = {"NORSCODE_PROMOTION_CANDIDATE": candidate}
+    la readiness = køyr(candidate, root, "tools/native_runtime_gap_promotion_readiness_v3003.no", readiness_env, 1200000)
+    la dry_dist_env: ordbok_tekst = {"NORSCODE_PROMOTE_CANDIDATE": candidate_rel, "NORSCODE_PROMOTE_DIST": "1", "NORSCODE_PROMOTE_STAGE0": "0", "NORSCODE_PROMOTE_DRY_RUN": "1"}
+    la dry_stage_env: ordbok_tekst = {"NORSCODE_PROMOTE_CANDIDATE": candidate_rel, "NORSCODE_PROMOTE_DIST": "0", "NORSCODE_PROMOTE_STAGE0": "1", "NORSCODE_PROMOTE_DRY_RUN": "1"}
+    la dry_dist = køyr(candidate, root, "tools/promote_native_stage0_v3001.no", dry_dist_env, 600000)
+    la dry_stage = køyr(candidate, root, "tools/promote_native_stage0_v3001.no", dry_stage_env, 600000)
 
-    la dist_before = sha_file(dist)
-    la stage0_before = sha_file(stage0)
-
-    la candidate_code = run_capture("NORSCODE_NATIVE_GAP_BIN=" + shell(candidate) + " " + native_run + shell(gate) + " " + shell(candidate), candidate_out)
-    la filesystem_code = run_capture(filesystem_list_cmd(root, candidate), filesystem_out)
-    la media_code = run_capture("NORSCODE_MEDIA_RUNTIME_BIN=" + shell(candidate) + " " + native_run + shell(media_gate) + " " + shell(candidate), media_out)
-    la active_before_code = run_capture("NORSCODE_NATIVE_GAP_BIN=" + shell(dist) + " " + native_run + shell(gate) + " " + shell(candidate), active_before_out)
-    la readiness_code = run_capture(native_run + shell(readiness) + " " + shell(candidate), readiness_out)
-    la dist_dry_code = run_capture("NORSCODE_PROMOTE_CANDIDATE=" + shell(candidate_rel) + " NORSCODE_PROMOTE_DIST=1 NORSCODE_PROMOTE_STAGE0=0 NORSCODE_PROMOTE_DRY_RUN=1 " + native_run + shell(promote) + " " + shell(candidate), dist_dry_out)
-    la stage0_dry_code = run_capture("NORSCODE_PROMOTE_CANDIDATE=" + shell(candidate_rel) + " NORSCODE_PROMOTE_DIST=0 NORSCODE_PROMOTE_STAGE0=1 NORSCODE_PROMOTE_DRY_RUN=1 " + native_run + shell(promote) + " " + shell(candidate), stage0_dry_out)
-
-    la candidate_status = "red"
-    hvis candidate_code == 0 og file_contains(candidate_out, "[OK] runtime-gap gate er grønn") og filesystem_code == 0 og file_contains(filesystem_out, "native filesystem.list OK") og media_code == 0 og file_contains(media_out, "[OK] native media runtime gate v3010 er grønn") { candidate_status = "green" }
-    la active_before_status = "red_unknown"
-    hvis active_before_code == 0 og file_contains(active_before_out, "[OK] runtime-gap gate er grønn") {
-        active_before_status = "green"
-    } ellers hvis file_contains(active_before_out, "runtime-gap står att") {
-        active_before_status = "red_detected"
-    } ellers hvis file_contains(active_before_out, "mappe_opprett FEIL") {
-        active_before_status = "red_detected"
-    } ellers hvis file_contains(active_before_out, "[FAIL]") {
-        active_before_status = "red_detected"
-    }
-    la readiness_status = "red"
-    hvis readiness_code == 0 og (file_contains(readiness_out, "promotion_readiness(\"decision\", \"ready_for_controlled_promotion\")") eller file_contains(readiness_out, "promotion_readiness(\"decision\", \"already_promoted_or_active_green\")")) { readiness_status = "green" }
-    la dist_dry_status = "red"
-    hvis dist_dry_code == 0 og file_contains(dist_dry_out, "[DRY-RUN] ingen filer vart endra") { dist_dry_status = "green" }
-    la stage0_dry_status = "red"
-    hvis stage0_dry_code == 0 og file_contains(stage0_dry_out, "[DRY-RUN] ingen filer vart endra") { stage0_dry_status = "green" }
-
-    hvis candidate_status != "green" eller readiness_status != "green" eller dist_dry_status != "green" eller stage0_dry_status != "green" {
-        la dist_after_fail = sha_file(dist)
-        la stage0_after_fail = sha_file(stage0)
-        write_report(report, root, candidate, dist, stage0, confirm_text, dry_run, "red", "preflight_failed_no_promotion", candidate_status, active_before_status, "not_run", read_file(active_before_out), "", dist_before, dist_after_fail, stage0_before, stage0_after_fail, "")
-        kommando("rm -rf " + shell(tmpdir))
+    la candidate_ok = grønn(candidate_gate, "runtime-gap gate er grønn") og
+        grønn(fs_gate, "native filesystem.list OK") og
+        grønn(media_gate, "native media runtime gate v3010 er grønn")
+    // Process-ABI-en kan bevare JSON-escape rundt sitatteikn i nøsta stdout.
+    // Beslutningsverdiane er eintydige og blir derfor matcha direkte.
+    la readiness_ok = grønn(readiness, "ready_for_controlled_promotion") eller
+        grønn(readiness, "already_promoted_or_active_green")
+    la dry_ok = grønn(dry_dist, "[DRY-RUN] ingen filer vart endra") og
+        grønn(dry_stage, "[DRY-RUN] ingen filer vart endra")
+    la active_before = "red_detected"
+    hvis grønn(active_gate, "runtime-gap gate er grønn") { active_before = "green" }
+    hvis ikkje candidate_ok eller ikkje readiness_ok eller ikkje dry_ok {
+        la kandidatstatus = "red"
+        hvis candidate_ok { kandidatstatus = "green" }
+        rapport(root, candidate, stage, "red", "preflight_failed_no_promotion", before_dist, hash_fil(dist), before_stage, hash_fil(stage), kandidatstatus, active_before, "not_run", dry_run)
+        prosess.skriv_resultat(candidate_gate); prosess.skriv_resultat(fs_gate); prosess.skriv_resultat(media_gate); prosess.skriv_resultat(readiness)
         returner 1
     }
-
     hvis dry_run {
-        la dist_after_dry = sha_file(dist)
-        la stage0_after_dry = sha_file(stage0)
-        write_report(report, root, candidate, dist, stage0, confirm_text, dry_run, "green", "dry_run_green_no_promotion", candidate_status, active_before_status, "not_run", read_file(active_before_out), "", dist_before, dist_after_dry, stage0_before, stage0_after_dry, "")
-        kommando("rm -rf " + shell(tmpdir))
+        rapport(root, candidate, stage, "green", "dry_run_green_no_promotion", before_dist, hash_fil(dist), before_stage, hash_fil(stage), "green", active_before, "not_run", sann)
         returner 0
     }
-
-    hvis confirm != confirm_text {
-        la dist_after_block = sha_file(dist)
-        la stage0_after_block = sha_file(stage0)
-        write_report(report, root, candidate, dist, stage0, confirm_text, dry_run, "blocked", "missing_exact_confirmation", candidate_status, active_before_status, "not_run", read_file(active_before_out), "", dist_before, dist_after_block, stage0_before, stage0_after_block, "")
-        kommando("rm -rf " + shell(tmpdir))
+    hvis env("NORSCODE_PROMOTION_CONFIRM") != "godkjenn kritisk runtime-promotering" {
+        rapport(root, candidate, stage, "blocked", "missing_exact_confirmation", before_dist, hash_fil(dist), before_stage, hash_fil(stage), "green", active_before, "not_run", usann)
         returner 2
     }
 
-    la backup_dir = root + "/build/runtime_promotion_backups/" + trim(felt(kommando("date -u '+%Y%m%dT%H%M%SZ'"), 1))
-    hvis ikkje ok(kommando("mkdir -p " + shell(backup_dir))) { returner 1 }
-    la stage0_backup = backup_dir + "/" + path.basename(stage0) + ".before"
-    hvis ikkje ok(kommando("cp " + shell(dist) + " " + shell(backup_dir + "/norscode_native.before"))) { returner 1 }
-    hvis ikkje ok(kommando("cp " + shell(stage0) + " " + shell(stage0_backup))) { returner 1 }
-
-    hvis ikkje ok(kommando("NORSCODE_PROMOTE_CANDIDATE=" + shell(candidate_rel) + " NORSCODE_PROMOTE_DIST=1 NORSCODE_PROMOTE_STAGE0=1 NORSCODE_PROMOTE_DRY_RUN=0 " + native_run + shell(promote) + " " + shell(candidate))) { returner 1 }
-    la active_after_code = run_capture("NORSCODE_NATIVE_GAP_BIN=" + shell(dist) + " " + native_run + shell(gate) + " " + shell(candidate), active_after_out)
-    la active_after_status = "red_unknown"
-    hvis active_after_code == 0 og file_contains(active_after_out, "[OK] runtime-gap gate er grønn") { active_after_status = "green" }
-
-    hvis active_after_status != "green" {
-        kommando("cp " + shell(backup_dir + "/norscode_native.before") + " " + shell(dist))
-        kommando("cp " + shell(stage0_backup) + " " + shell(stage0))
-        kommando("chmod +x " + shell(dist) + " " + shell(stage0))
-        write_report(report, root, candidate, dist, stage0, confirm_text, dry_run, "red", "post_gate_failed_rolled_back", candidate_status, active_before_status, active_after_status, read_file(active_before_out), read_file(active_after_out), dist_before, sha_file(dist), stage0_before, sha_file(stage0), backup_dir)
-        kommando("rm -rf " + shell(tmpdir))
+    la dist_result = promotion.promoter(root, candidate_rel, dist_rel, "build/verified-rollback/runtime-promotion", "controlled-dist")
+    hvis dist_result["status"] != "promoted" { returner 1 }
+    la stage_result = promotion.promoter(root, candidate_rel, stage_rel, "build/verified-rollback/runtime-promotion", "controlled-stage0")
+    hvis stage_result["status"] != "promoted" { gjenopprett(root, dist_rel, dist_result); returner 1 }
+    la after_gate = køyr(candidate, root, "tools/native_runtime_gap_gate_v3001.no", {"NORSCODE_NATIVE_GAP_BIN": dist}, 600000)
+    hvis ikkje grønn(after_gate, "runtime-gap gate er grønn") {
+        gjenopprett(root, dist_rel, dist_result)
+        gjenopprett(root, stage_rel, stage_result)
+        rapport(root, candidate, stage, "red", "post_gate_failed_rolled_back", before_dist, hash_fil(dist), before_stage, hash_fil(stage), "green", active_before, "red", usann)
         returner 1
     }
-
-    write_report(report, root, candidate, dist, stage0, confirm_text, dry_run, "green", "controlled_promotion_complete", candidate_status, active_before_status, active_after_status, read_file(active_before_out), read_file(active_after_out), dist_before, sha_file(dist), stage0_before, sha_file(stage0), backup_dir)
-    kommando("rm -rf " + shell(tmpdir))
+    rapport(root, candidate, stage, "green", "controlled_promotion_complete", before_dist, hash_fil(dist), before_stage, hash_fil(stage), "green", active_before, "green", usann)
     returner 0
 }

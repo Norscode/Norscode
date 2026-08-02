@@ -10,6 +10,23 @@
 // Funksjonar vert omdøypte frå __main__.X → modul.X
 
 bruk selfhost.json som json
+bruk selfhost.kompiler som komp
+bruk std.runtime_filesystem som native_fs
+bruk tools.process_runner som prosess
+bruk selfhost.ncb_stream som ncb_stream
+
+funksjon miljo_flagg(namn: tekst) -> boolsk {
+    la rå = miljo_hent(namn)
+    hvis rå == null eller rå == "" { returner usann }
+    returner tekst(rå) == "1"
+}
+
+funksjon skriv_fremdrift(fase: tekst) -> heiltall {
+    la sti = miljo_hent("NORSCODE_BUNDLE_PROGRESS_FILE")
+    hvis sti == "" { returner 0 }
+    prøv { fil_skriv(sti, fase + "\n") } fang (e) {}
+    returner 0
+}
 
 // Cache for den store, Norscode-genererte compiler-bundlen. Han skal lesast
 // éin gong per bundlekøyring, ikkje éin gong per native_execution-modul.
@@ -29,28 +46,76 @@ funksjon omdøyp_kall_i_kode(fn, modul_namn: tekst) {
     slutt
 }
 
-funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) {
-    // Strukturell omdøyping (ikkje berre tekst-replace — unngår feil i "module":"__main__" osv.)
-    // Returnerer parsed object directly to avoid serialize-parse cycle
-    // Bruk den innebygde Norscode-JSON-parseren her. Den custom parseren i
-    // selfhost.json er korrekt for kjelde-JSON, men blir unødvendig treg når
-    // L5b skal traversere store, allereie serialiserte NCB-bundlar i pure VM.
-    la ncb = builtin.json_parse_raw(ncb_json)
+funksjon omdøyp_ncb_objekt(ncb, modul_namn: tekst) {
     la fns = ncb["functions"]
     la nk = nøkler(fns)
+    // Modulnamngitte cacheartefaktar er kompilerte direkte med rett modul.
+    // Då er både funksjonsnøklar og interne CALL-mål allereie korrekte, og
+    // den dyre bytekodegjennomgangen kan hoppast over.
+    la namngitt_modul = usann
+    la har_hovudmodul = usann
+    la sjekk_idx: heiltall = 0
+    mens sjekk_idx < lengde(nk) {
+        la kandidat = fns[nk[sjekk_idx]]
+        hvis kandidat["module"] == modul_namn { namngitt_modul = sann }
+        hvis kandidat["module"] == "__main__" { har_hovudmodul = sann }
+        sjekk_idx = sjekk_idx + 1
+    }
+    hvis namngitt_modul og ikkje har_hovudmodul {
+        returner ncb
+    }
     la ny_fns: ordbok<tekst, tekst> = {}
     la i: heltall = 0
     mens i < lengde(nk)
         la fn = fns[nk[i]]
-        la namn = fn["name"]
-        la ny_nøkkel = modul_namn + "." + namn
-        fn["module"] = modul_namn
-        omdøyp_kall_i_kode(fn, modul_namn)
-        ny_fns[ny_nøkkel] = fn
+        hvis fn["module"] == "__main__" {
+            la namn = fn["name"]
+            la ny_nøkkel = modul_namn + "." + namn
+            fn["module"] = modul_namn
+            omdøyp_kall_i_kode(fn, modul_namn)
+            ny_fns[ny_nøkkel] = fn
+        } ellers {
+            // Importkompilering kan levere eit blanda NCB med ferdig
+            // namngitte transitive modular og __main__ for sjølve modulen.
+            // Bevar dei transitive nøklane, og omdøyp berre __main__.
+            ny_fns[nk[i]] = fn
+        }
         i = i + 1
     slutt
     ncb["functions"] = ny_fns
+    // Metadata må følgje same modulomdøyping som funksjonane. Elles peikar
+    // initialisatoren framleis på __main__ og modulglobale verdiar blir lagra
+    // under eit anna namn enn LOAD_GLOBAL/STORE_GLOBAL brukar.
+    hvis har_nokkel(ncb, "module_initializers") {
+        la init = ncb["module_initializers"]
+        la ii: heiltall = 0
+        mens ii < lengde(init) {
+            hvis init[ii] == "__main__.__module_init__" {
+                init[ii] = modul_namn + ".__module_init__"
+            }
+            ii = ii + 1
+        }
+    }
+    hvis har_nokkel(ncb, "global_names") og har_nokkel(ncb["global_names"], "__main__") {
+        la gamle_globalar = ncb["global_names"]
+        la nye_globalar = {}
+        la modular = nøkler(gamle_globalar)
+        la gi: heiltall = 0
+        mens gi < lengde(modular) {
+            la namn = modular[gi]
+            hvis namn == "__main__" { nye_globalar[modul_namn] = gamle_globalar[namn] }
+            ellers { nye_globalar[namn] = gamle_globalar[namn] }
+            gi = gi + 1
+        }
+        ncb["global_names"] = nye_globalar
+    }
     returner ncb
+}
+
+funksjon omdøyp_funksjonar(ncb_json: tekst, modul_namn: tekst) {
+    // Strukturell omdøyping (ikkje berre tekst-replace — unngår feil i
+    // "module":"__main__" osv.).
+    returner omdøyp_ncb_objekt(builtin.json_parse_raw(ncb_json), modul_namn)
 }
 
 // ─── Slå saman funksjonsordbøker ─────────────────────────────────────────────
@@ -64,15 +129,86 @@ funksjon slå_saman_funksjonar(dest: ordbok<tekst, tekst>, src: ordbok<tekst, te
     slutt
 }
 
+funksjon funksjonar_utan_strengformat_markør(fns: ordbok<tekst, tekst>) {
+    la reine = {}
+    la namn = nøkler(fns)
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la fn = fns[namn[i]]
+        hvis har_nokkel(fn, "string_encoding") {
+            la rein_fn = {}
+            la felt = nøkler(fn)
+            la j: heiltall = 0
+            mens j < lengde(felt) {
+                hvis felt[j] != "string_encoding" { rein_fn[felt[j]] = fn[felt[j]] }
+                j = j + 1
+            }
+            reine[namn[i]] = rein_fn
+        } ellers {
+            reine[namn[i]] = fn
+        }
+        i = i + 1
+    }
+    returner reine
+}
+
+funksjon slå_saman_modulmetadata(alle_initializers, alle_global_names, ncb) -> heiltall {
+    hvis har_nokkel(ncb, "module_initializers") {
+        la init = ncb["module_initializers"]
+        la i: heiltall = 0
+        mens i < lengde(init) {
+            la finst = usann
+            la j: heiltall = 0
+            mens j < lengde(alle_initializers) {
+                hvis alle_initializers[j] == init[i] { finst = sann }
+                j = j + 1
+            }
+            hvis ikkje finst { legg_til(alle_initializers, init[i]) }
+            i = i + 1
+        }
+    }
+    hvis har_nokkel(ncb, "global_names") {
+        la modular = nøkler(ncb["global_names"])
+        la kjelde_globalar = ncb["global_names"]
+        la i: heiltall = 0
+        mens i < lengde(modular) {
+            alle_global_names[modular[i]] = kjelde_globalar[modular[i]]
+            i = i + 1
+        }
+    }
+    returner 0
+}
+
 // Native json_stringify kan møte heiltalsverdiar som framleis ber med seg
 // kjeldeforma 0xNN frå eldre NCB-cache. Normaliser berre slike token utanfor
 // JSON-strengar, slik at bundle-output alltid er gyldig JSON.
+funksjon har_heks_utanfor_streng(data: tekst) -> boolsk {
+    la i: heiltall = 0
+    la i_streng = usann
+    la escape = usann
+    mens i < lengde(data) {
+        la c = data[i]
+        hvis i_streng {
+            hvis escape { escape = usann }
+            ellers hvis c == "\\" { escape = sann }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers hvis c == "\"" {
+            i_streng = sann
+        } ellers hvis builtin.char_code(c) == 48 og i + 1 < lengde(data) {
+            la neste = builtin.char_code(data[i + 1])
+            hvis neste == 120 eller neste == 88 { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
 funksjon normaliser_json_heks(data: tekst) -> tekst {
     // Nye NCB-ar frå json_skriv er allereie gyldig JSON. Den gamle
     // teikn-for-teikn-normaliseringa er berre nødvendig for eldre cachefiler
     // med 0x-literal; utan denne fastvegen blir stor bundle-serialisering
     // kvadratisk og kan sjå ut som ein heng i sluttfasen.
-    hvis builtin.index_of(data, "0x") < 0 og builtin.index_of(data, "0X") < 0 {
+    hvis ikkje har_heks_utanfor_streng(data) {
         returner data
     }
     la ut = ""
@@ -122,22 +258,162 @@ funksjon normaliser_json_heks(data: tekst) -> tekst {
     returner ut
 }
 
-funksjon legg_modul_til_bundle(alle_fns: ordbok<tekst, tekst>, modul_namn: tekst, fil_sti: tekst, cached_bootstrap_fns: ordbok<tekst, tekst>) -> heiltall {
+funksjon modulcache_aktiv() -> boolsk {
+    returner miljo_flagg("NORSCODE_INCREMENTAL_MODULE_CACHE")
+}
+
+funksjon modulcache_trace(melding: tekst) -> heiltall {
+    la sti = miljo_hent("NORSCODE_MODULE_CACHE_TRACE_FILE")
+    hvis sti == null eller sti == "" { returner 0 }
+    prøv { builtin.fil_append(sti, melding + "\n") } fang (e) { }
+    returner 0
+}
+
+funksjon modulcache_abi() -> tekst {
+    returner "norscode-incremental-module-cache-v1|ncb-v1|module-globals-v1"
+}
+
+funksjon modulcache_rot() -> tekst {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root != null og root != "" { returner root }
+    prøv { returner tekst(builtin.system_info()["cwd"]) } fang (e) { returner "." }
+    returner "."
+}
+
+funksjon modulcache_compiler_fingerprint(root: tekst) -> tekst {
+    la filer = [
+        "selfhost/kompiler.no", "selfhost/parser.no", "selfhost/lexer/lexer_m1.no",
+        "selfhost/compiler/semantic.no", "selfhost/compiler/ir_to_bytecode.no"
+    ]
+    la materiale = modulcache_abi() + "\n"
+    la i: heiltall = 0
+    mens i < lengde(filer) {
+        la sti = root + "/" + filer[i]
+        hvis builtin.fil_finnes(sti) {
+            materiale = materiale + filer[i] + " " +
+                builtin.sha256_bytes(builtin.fil_les_binær(sti)) + "\n"
+        } ellers {
+            materiale = materiale + filer[i] + " missing\n"
+        }
+        i = i + 1
+    }
+    returner builtin.sha256(materiale)
+}
+
+funksjon modulcache_relativ(modul_namn: tekst, fil_sti: tekst,
+                            compiler_fingerprint: tekst) -> tekst {
+    la kjelde_hash = builtin.sha256_bytes(builtin.fil_les_binær(fil_sti))
+    la nøkkel = builtin.sha256(modulcache_abi() + "\n" + compiler_fingerprint +
+        "\n" + modul_namn + "\n" + kjelde_hash + "\n")
+    returner "build/cache/nc/modules/" + nøkkel + ".ncb.json"
+}
+
+funksjon modulcache_les(root: tekst, relativ: tekst, modul_namn: tekst) {
+    la sti = root + "/" + relativ
+    hvis ikkje builtin.fil_finnes(sti) { returner null }
+    prøv {
+        la ncb = builtin.json_parse_raw(fil_les(sti))
+        hvis ncb == null eller ncb["functions"] == null { returner null }
+        la namn = nøkler(ncb["functions"])
+        hvis lengde(namn) == 0 { returner null }
+        hvis ncb["functions"][namn[0]]["module"] != modul_namn { returner null }
+        returner ncb
+    } fang (e) { returner null }
+    returner null
+}
+
+funksjon modulcache_skriv(root: tekst, relativ: tekst, ncb) -> boolsk {
+    la mappe = "build/cache/nc/modules"
+    la laga = native_fs.native_lag_mappe(root, mappe)
+    hvis laga["status"] != "ok" { returner usann }
+    la tmp = mappe + "/.tmp-" + tekst_fra_heiltall(builtin.tid_ms()) + ".ncb.json"
+    prøv { fil_skriv(root + "/" + tmp, builtin.json_stringify(ncb)) }
+    fang (e) { returner usann }
+    la publisert = native_fs.native_erstatt_fil_atomisk(root, tmp, relativ)
+    returner publisert["status"] == "ok"
+}
+
+funksjon modulcache_kompiler(root: tekst, fil_sti: tekst, modul_namn: tekst) {
+    la laga = native_fs.native_lag_mappe(root, "build/cache/nc/modules")
+    hvis laga["status"] != "ok" { kast "modulcache: kunne ikkje lage cachemappe" }
+    la runtime = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis runtime == null eller runtime == "" {
+        runtime = tekst(builtin.system_info()["executable"])
+    }
+    hvis runtime == "" { kast "modulcache: manglar native Norscode-runtime" }
+    la tmp_rel = "build/cache/nc/modules/.compile-" +
+        builtin.sha256(modul_namn + "\n" + fil_sti) + ".ncb.json"
+    la miljø: ordbok_tekst = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la plan = prosess.køyr(runtime, ["compile", fil_sti, root + "/" + tmp_rel],
+                            root, miljø, 600000)
+    hvis ikkje prosess.ok(plan) {
+        prosess.skriv_resultat(plan)
+        kast "modulcache: Norscode-kompilering feila for " + fil_sti
+    }
+    la ncb = builtin.json_parse_raw(fil_les(root + "/" + tmp_rel))
+    prøv { builtin.fil_slett(root + "/" + tmp_rel) } fang (e) { }
+    returner omdøyp_ncb_objekt(ncb, modul_namn)
+}
+
+funksjon legg_modul_til_bundle(alle_fns: ordbok<tekst, tekst>, alle_initializers,
+                              alle_global_names, modul_namn: tekst, fil_sti: tekst,
+                              cached_bootstrap, compiler_fingerprint: tekst) -> heiltall {
     skriv("  Lesar/kompilerer " + fil_sti + " → " + modul_namn + "...\n")
-    la bruk_cached_bootstrap = (modul_namn == "selfhost.nc_main" og miljo_hent("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED") == "1") eller (builtin.starts_with(modul_namn, "selfhost.native_execution.") og miljo_hent("NORSCODE_BUNDLE_NATIVE_PRECOMPILED") == "1")
-    hvis bruk_cached_bootstrap og lengde(nøkler(cached_bootstrap_fns)) > 0 {
+    la bruk_cached_bootstrap = (modul_namn == "selfhost.nc_main" og miljo_flagg("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED")) eller (builtin.starts_with(modul_namn, "selfhost.native_execution.") og miljo_flagg("NORSCODE_BUNDLE_NATIVE_PRECOMPILED"))
+    hvis bruk_cached_bootstrap og har_nokkel(cached_bootstrap, "functions") og lengde(nøkler(cached_bootstrap["functions"])) > 0 {
         prøv {
-            slå_saman_funksjonar(alle_fns, cached_bootstrap_fns)
+            slå_saman_funksjonar(alle_fns, cached_bootstrap["functions"])
+            slå_saman_modulmetadata(alle_initializers, alle_global_names, cached_bootstrap)
             skriv("  [Cached] Gjenbrukar Norscode-generert compiler-bundle\n")
             returner 1
         } fang (e) {
             skriv("  [Cached] Klarte ikkje lese compiler-bundle; prøver kjelde\n")
         }
     }
-    la ncb_json = les_ncb_eller_kompiler(fil_sti)
-    la mod_ncb = omdøyp_funksjonar(ncb_json, modul_namn)
+    la mod_ncb = null
+    la cache_relativ = ""
+    hvis modulcache_aktiv() {
+        cache_relativ = modulcache_relativ(modul_namn, fil_sti, compiler_fingerprint)
+        mod_ncb = modulcache_les(modulcache_rot(), cache_relativ, modul_namn)
+        hvis mod_ncb != null {
+            skriv("  [Module cache hit] " + modul_namn + "\n")
+            modulcache_trace("hit " + modul_namn)
+        }
+    }
+    la source_raw = miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST")
+    la source_aktiv = source_raw != null og tekst(source_raw) == "0" og
+        miljo_flagg("NORSCODE_L5B_ACTIVE_GEN1_COMPILER")
+    hvis mod_ncb == null og modulcache_aktiv() {
+        modulcache_trace("compile " + modul_namn)
+        mod_ncb = modulcache_kompiler(modulcache_rot(), fil_sti, modul_namn)
+    } ellers hvis mod_ncb == null og source_aktiv {
+        la kjelde = fil_les(fil_sti)
+        skriv("  [Source] Hoppar over pre-compiled bytecode per NORSCODE_USE_PRECOMPILED_SELFHOST=0\n")
+        skriv("  [Active Gen1] Kompilerer og parser kjelda via verifisert Gen1-NCB\n")
+        // Kompiler direkte med endeleg modulnamn. Då er CALL-mål og
+        // funksjonsnøklar korrekte frå starten, og den indre VM-en slepp å
+        // traversere kvar bytecodeinstruksjon berre for omdøyping.
+        mod_ncb = omdøyp_ncb_objekt(
+            builtin.json_parse_raw(builtin.kompiler_fil_aktiv(kjelde, modul_namn)),
+            modul_namn
+        )
+    } ellers hvis mod_ncb == null {
+        la ncb_json = les_ncb_eller_kompiler(fil_sti)
+        mod_ncb = omdøyp_funksjonar(ncb_json, modul_namn)
+    }
+    hvis modulcache_aktiv() og cache_relativ != "" og
+       ikkje builtin.fil_finnes(modulcache_rot() + "/" + cache_relativ) {
+        hvis modulcache_skriv(modulcache_rot(), cache_relativ, mod_ncb) {
+            skriv("  [Module cache publish] " + modul_namn + "\n")
+        }
+    }
     la mod_fns = mod_ncb["functions"]
     slå_saman_funksjonar(alle_fns, mod_fns)
+    slå_saman_modulmetadata(alle_initializers, alle_global_names, mod_ncb)
     la fn_teller = lengde(nøkler(mod_fns))
     skriv("  [OK] " + fil_sti + " → " + modul_namn + " (" + tekst_fra_heltall(fn_teller) + " funcs)\n")
     returner 1
@@ -171,17 +447,40 @@ funksjon les_precompiled_ncb(kildef: tekst) -> tekst {
     }
 }
 
+funksjon les_l5b_source_kandidat(kildef: tekst) -> tekst {
+    la kandidat_dir = miljo_hent("NORSCODE_L5B_SOURCE_CANDIDATE_DIR")
+    hvis kandidat_dir == "" { returner "" }
+    la delar = builtin.split(kildef, "/")
+    la basename = delar[lengde(delar) - 1]
+    hvis builtin.ends_with(basename, ".no") {
+        basename = builtin.slice(basename, 0, lengde(basename) - 3)
+    }
+    la kandidat = kandidat_dir + "/" + basename + ".ncb.json"
+    prøv { returner fil_les(kandidat) } fang (e) {
+        kast "bundler: manglar fersk L5b-kjeldekandidat " + kandidat
+    }
+}
+
 funksjon les_ncb_eller_kompiler(kildef: tekst) -> tekst {
     la bruk_prekompilert_selfhost = miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST")
     // VM-modulen er med vilje ein stor, validerte NCB-payload i bootstrap.
     // Ved full compiler-bundle-regenerering kan han hentast derfrå når
     // NORSCODE_BUNDLE_VM_PRECOMPILED=1; dette unngår parser-stack overflow
     // utan å introdusere ein ekstern compiler eller shell-reserveveg.
-    la vm_precompiled = kildef == "selfhost/vm.no" og miljo_hent("NORSCODE_BUNDLE_VM_PRECOMPILED") == "1"
-    hvis bruk_prekompilert_selfhost == "" {
+    la vm_precompiled = kildef == "selfhost/vm.no" og miljo_flagg("NORSCODE_BUNDLE_VM_PRECOMPILED")
+    hvis bruk_prekompilert_selfhost == null eller bruk_prekompilert_selfhost == "" {
         bruk_prekompilert_selfhost = "1"
     }
-    hvis bruk_prekompilert_selfhost == "0" og ikkje vm_precompiled {
+    la kjelde_only = tekst(bruk_prekompilert_selfhost) == "0"
+    // Ein eksplisitt kandidatdir er ein kontrollert, fersk modulcache frå den
+    // aktive Gen1-kandidaten. Han har høgare prioritet enn committed cache,
+    // også når porten testar cache-på-semantikk.
+    la eksplisitt_kandidat = les_l5b_source_kandidat(kildef)
+    hvis eksplisitt_kandidat != "" {
+        skriv("  [Candidate cache] Brukar fersk NCB frå aktiv Gen1\n")
+        returner eksplisitt_kandidat
+    }
+    hvis kjelde_only og ikkje vm_precompiled {
         skriv("  [Source] Hoppar over pre-compiled bytecode per NORSCODE_USE_PRECOMPILED_SELFHOST=0\n")
     } ellers {
     // Prøv å laste pre-compiled NCB først
@@ -195,7 +494,22 @@ funksjon les_ncb_eller_kompiler(kildef: tekst) -> tekst {
     // Fallback: kompiler frå kjelda
     prøv {
         la kjelde = fil_les(kildef)
-        returner kompiler_fil(kjelde, "__main__")
+        // Source-only L5b må ikkje hente ein eldre hybrid/precompiled
+        // kompilator. Den eksplisitte aktive Gen1-brua køyrer
+        // selfhost.kompiler.kompiler_fil frå functions-kartet som allereie
+        // er lasta og verifisert av l5b_host.
+        hvis kjelde_only og miljo_flagg("NORSCODE_L5B_ACTIVE_GEN1_COMPILER") {
+            skriv("  [Active Gen1] Kompilerer kjelda via verifisert Gen1-NCB\n")
+            returner builtin.kompiler_fil_aktiv(kjelde, "__main__")
+        }
+        // Gå gjennom den bundla Norscode-kompilatoren. Eit ukvalifisert
+        // builtin.kompiler_fil kan falle tilbake til stage0 sin statiske
+        // host-dispatch i VM-i-VM-banen og maskere kjeldeendringar.
+        // I VM-i-VM må bundler-continuationen overleve compilerkallet.
+        // Eit direkte `returner CALL(...)` blir tail-call-optimalisert og kan
+        // avslutte den ytre bundlerkjeda før resultatet er slått saman.
+        la kompilert = komp.kompiler_fil(kjelde, "__main__")
+        returner kompilert
     } fang (e) {
         kast "bundler: kunne ikkje lesa/kompilera '" + kildef + "': " + e
     }
@@ -205,18 +519,25 @@ funksjon les_ncb_eller_kompiler(kildef: tekst) -> tekst {
 
 funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
     skriv("=== Norscode Bundle ===\n")
+    skriv_fremdrift("bundle-start")
     la alle_fns: ordbok<tekst, tekst> = {}
+    la alle_initializers = []
+    la alle_global_names = {}
     la ok_teller: heltall = 0
+    la compiler_fingerprint = ""
+    hvis modulcache_aktiv() {
+        compiler_fingerprint = modulcache_compiler_fingerprint(modulcache_rot())
+    }
     la entry_namn = miljo_hent("NORSCODE_BUNDLE_ENTRY")
     hvis entry_namn == "" {
         entry_namn = "selfhost.bundler.start"
     }
 
-    la cached_bootstrap_fns: ordbok<tekst, tekst> = {}
-    hvis miljo_hent("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED") == "1" eller miljo_hent("NORSCODE_BUNDLE_NATIVE_PRECOMPILED") == "1" {
+    la cached_bootstrap: ordbok<tekst, tekst> = {}
+    hvis miljo_flagg("NORSCODE_BUNDLE_NC_MAIN_PRECOMPILED") eller miljo_flagg("NORSCODE_BUNDLE_NATIVE_PRECOMPILED") {
         prøv {
             la cached = builtin.json_parse_raw(fil_les("bootstrap/kompiler.ncb.json"))
-            cached_bootstrap_fns = cached["functions"]
+            cached_bootstrap = cached
         } fang (e) {}
     }
 
@@ -233,7 +554,7 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
         la ncb_json_0 = les_ncb_eller_kompiler(fil_sti_0)
         fil_skriv(utfil, ncb_json_0)
         skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(ncb_json_0)) + " bytes)\n")
-        returner null
+        returner 0
     }
 
     la i: heltall = 0
@@ -262,12 +583,16 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
             fil_sti = arg
         }
 
-        ok_teller = ok_teller + legg_modul_til_bundle(alle_fns, modul_namn, fil_sti, cached_bootstrap_fns)
+        skriv_fremdrift("module-start " + tekst_fra_heiltall(i + 1) + "/" + tekst_fra_heiltall(lengde(modular)) + " " + modul_namn)
+        ok_teller = ok_teller + legg_modul_til_bundle(alle_fns, alle_initializers, alle_global_names, modul_namn, fil_sti, cached_bootstrap, compiler_fingerprint)
+        skriv_fremdrift("module-done " + tekst_fra_heiltall(i + 1) + "/" + tekst_fra_heiltall(lengde(modular)) + " " + modul_namn)
         i = i + 1
     }
     la bundle_ncb: ordbok<tekst, tekst> = {}
     bundle_ncb["format"] = "ncb-v1"
     bundle_ncb["entry"] = entry_namn
+    bundle_ncb["module_initializers"] = alle_initializers
+    bundle_ncb["global_names"] = alle_global_names
     bundle_ncb["imports"] = []
     bundle_ncb["route_handlers"] = {}
     bundle_ncb["dependency_providers"] = {}
@@ -278,13 +603,34 @@ funksjon bygg_bundle(modular: liste<tekst>, utfil: tekst) {
     bundle_ncb["startup_hooks"] = []
     bundle_ncb["shutdown_hooks"] = []
     bundle_ncb["tests"] = {}
-    bundle_ncb["functions"] = alle_fns
+    // Cachemarkøren er transportmetadata. Han må vere med medan NCB-verdiar
+    // kryssar VM/AOT-grensa, men er ikkje del av den kanoniske bundleforma.
+    bundle_ncb["functions"] = funksjonar_utan_strengformat_markør(alle_fns)
+
+    hvis miljo_flagg("NORSCODE_NCB_STREAM_FORMAT") {
+        skriv_fremdrift("stream-write-start functions=" + tekst_fra_heltall(lengde(nøkler(alle_fns))))
+        la stream_resultat = ncb_stream.skriv_fil(utfil, bundle_ncb)
+        skriv_fremdrift("stream-write-done bytes=" + stream_resultat["bytes"])
+        skriv("Bundle stream: " + utfil + " (" + stream_resultat["bytes"] + " bytes, " + stream_resultat["records"] + " postar)\n")
+        returner 0
+    }
 
     // Native JSON-stringify er lineær for store bundle-mappar. Den reine
     // selfhost-serializeraren blir brukt av kjeldekompilatoren, men her ville
     // han gjere sluttfasen kvadratisk på compiler/VM-bundlen.
-    la bundle = normaliser_json_heks(builtin.json_stringify(bundle_ncb))
+    skriv_fremdrift("serialize-start functions=" + tekst_fra_heiltall(lengde(nøkler(alle_fns))))
+    la rå_bundle = builtin.json_skriv(bundle_ncb)
+    skriv_fremdrift("stringify-done bytes=" + tekst_fra_heiltall(lengde(rå_bundle)))
+    la bundle = rå_bundle
+    // Berre eksplisitt legacy-import får den gamle heksnormaliseringa.
+    // Fersk kjelde/cache er parsea og deretter serialisert av json_stringify,
+    // og er dermed allereie gyldig JSON. Dette held normalbanen lineær.
+    hvis miljo_flagg("NORSCODE_BUNDLE_LEGACY_HEX") {
+        bundle = normaliser_json_heks(rå_bundle)
+    }
+    skriv_fremdrift("serialize-done bytes=" + tekst_fra_heiltall(lengde(bundle)))
     fil_skriv(utfil, bundle)
+    skriv_fremdrift("write-done " + utfil)
     skriv("Bundle: " + utfil + " (" + tekst_fra_heltall(lengde(bundle)) + " bytes)\n")
 }
 

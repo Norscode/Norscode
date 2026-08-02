@@ -1,0 +1,212 @@
+// Shellfri, importerbar kjerne for atomisk runtime-promotering og rollback.
+//
+// Kjernen startar ingen prosessar. Kallaren må ha køyrt alle kandidatportar
+// før `promoter` blir kalla. Alle stiar er relative til ei eksplisitt rot.
+
+bruk std.filops som filops
+bruk std.runtime_filesystem som native_fs
+bruk std.sha256 som sha256
+
+funksjon _resultat(status: tekst, feil: tekst) -> ordbok_tekst {
+    returner {
+        "status": status,
+        "error": feil,
+        "candidate_sha256": "",
+        "target_before_sha256": "",
+        "target_after_sha256": "",
+        "rollback_relative": "",
+        "rollback_sha256": "",
+        "manifest_relative": ""
+    }
+}
+
+funksjon _trygg_relativ(sti: tekst) -> boolsk {
+    hvis sti == "" eller builtin.starts_with(sti, "/") { returner usann }
+    hvis lengde(sti) >= 2 og builtin.slice(sti, 1, 2) == ":" { returner usann }
+    la normal = filops.normaliser_sti(sti)
+    returner normal == sti og normal != "." og normal != ".." og
+        ikkje builtin.starts_with(normal, "../")
+}
+
+funksjon _hash(sti: tekst) -> tekst {
+    hvis ikkje filops.fil_finnes(sti) { returner "" }
+    la bytes = builtin.fil_les_binær(sti)
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { }
+    prøv { returner sha256.hash_bytes(bytes) } fang (e2) { returner "" }
+    returner ""
+}
+
+funksjon _skriv_atomisk(root: tekst, relativ: tekst, innhald: tekst) -> boolsk {
+    la mappe = filops.katalog(relativ)
+    hvis mappe != "." og ikkje filops.lag_katalogar(root + "/" + mappe) { returner usann }
+    la tmp = mappe + "/.promotion-manifest-" + builtin.random_hex(12) + ".tmp"
+    hvis mappe == "." { tmp = ".promotion-manifest-" + builtin.random_hex(12) + ".tmp" }
+    prøv { builtin.fil_skriv(root + "/" + tmp, innhald) }
+    fang (e) { returner usann }
+    la publisert = native_fs.native_erstatt_fil_atomisk(root, tmp, relativ)
+    hvis publisert["status"] != "replaced" {
+        native_fs.native_slett(root, tmp)
+        returner usann
+    }
+    returner sann
+}
+
+funksjon _manifest(status: tekst, candidate_rel: tekst, target_rel: tekst,
+                   candidate_hash: tekst, before_hash: tekst, after_hash: tekst,
+                   rollback_rel: tekst, rollback_hash: tekst) -> tekst {
+    la body = "schema=norscode.runtime-promotion.v1\n"
+    body = body + "status=" + status + "\n"
+    body = body + "candidate=" + candidate_rel + "\n"
+    body = body + "target=" + target_rel + "\n"
+    body = body + "candidate_sha256=" + candidate_hash + "\n"
+    body = body + "target_before_sha256=" + before_hash + "\n"
+    body = body + "target_after_sha256=" + after_hash + "\n"
+    body = body + "rollback=" + rollback_rel + "\n"
+    body = body + "rollback_sha256=" + rollback_hash + "\n"
+    returner body
+}
+
+funksjon promoter(root: tekst, candidate_rel: tekst, target_rel: tekst,
+                  rollback_dir_rel: tekst, identitet: tekst) -> ordbok_tekst {
+    la r = _resultat("feil", "")
+    hvis root == "" eller ikkje _trygg_relativ(candidate_rel) eller
+       ikkje _trygg_relativ(target_rel) eller ikkje _trygg_relativ(rollback_dir_rel) {
+        r["error"] = "ugyldig promoteringssti"
+        returner r
+    }
+    hvis identitet == "" eller builtin.index_of(identitet, "/") >= 0 eller
+       builtin.index_of(identitet, "\\") >= 0 eller builtin.index_of(identitet, "..") >= 0 {
+        r["error"] = "ugyldig promoteringsidentitet"
+        returner r
+    }
+    la candidate = root + "/" + candidate_rel
+    la target = root + "/" + target_rel
+    hvis ikkje filops.fil_finnes(candidate) {
+        r["error"] = "kandidat manglar"
+        returner r
+    }
+    hvis ikkje filops.lag_katalogar(root + "/" + rollback_dir_rel) {
+        r["error"] = "kunne ikkje lage rollback-katalog"
+        returner r
+    }
+    la target_mappe = filops.katalog(target_rel)
+    hvis target_mappe != "." og ikkje filops.lag_katalogar(root + "/" + target_mappe) {
+        r["error"] = "kunne ikkje lage målkatalog"
+        returner r
+    }
+
+    la candidate_hash = _hash(candidate)
+    hvis candidate_hash == "" {
+        r["error"] = "kunne ikkje hashe kandidat"
+        returner r
+    }
+    la before_hash = _hash(target)
+    la rollback_rel = ""
+    la rollback_hash = ""
+    hvis before_hash != "" {
+        rollback_rel = rollback_dir_rel + "/" + identitet + "." + before_hash + ".rollback"
+        hvis ikkje filops.kopier2(target, root + "/" + rollback_rel) {
+            r["error"] = "rollback-kopi feila"
+            returner r
+        }
+        rollback_hash = _hash(root + "/" + rollback_rel)
+        hvis rollback_hash != before_hash {
+            filops.slett_fil(root + "/" + rollback_rel)
+            r["error"] = "rollback-hash avvik"
+            returner r
+        }
+    }
+
+    la tmp_rel = target_mappe + "/.promotion-" + builtin.random_hex(16) + ".tmp"
+    hvis target_mappe == "." { tmp_rel = ".promotion-" + builtin.random_hex(16) + ".tmp" }
+    hvis ikkje filops.kopier2(candidate, root + "/" + tmp_rel) {
+        r["error"] = "kandidatkopi feila"
+        returner r
+    }
+    hvis _hash(root + "/" + tmp_rel) != candidate_hash {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "kandidatkopi-hash avvik"
+        returner r
+    }
+    la modus = native_fs.native_sett_modus(root, tmp_rel, 493)
+    hvis modus["status"] != "ok" {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "kunne ikkje setje køyrbar modus"
+        returner r
+    }
+    la publisert = native_fs.native_erstatt_fil_atomisk(root, tmp_rel, target_rel)
+    hvis publisert["status"] != "replaced" {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "atomisk publisering feila: " + tekst(publisert["error"])
+        returner r
+    }
+    la after_hash = _hash(target)
+    hvis after_hash != candidate_hash {
+        r["error"] = "publisert hash avvik"
+        returner r
+    }
+
+    la manifest_rel = rollback_dir_rel + "/" + identitet + ".promotion.manifest"
+    hvis ikkje _skriv_atomisk(root, manifest_rel,
+        _manifest("promoted", candidate_rel, target_rel, candidate_hash,
+                  before_hash, after_hash, rollback_rel, rollback_hash)) {
+        r["error"] = "manifestpublisering feila"
+        returner r
+    }
+    r["status"] = "promoted"
+    r["candidate_sha256"] = candidate_hash
+    r["target_before_sha256"] = before_hash
+    r["target_after_sha256"] = after_hash
+    r["rollback_relative"] = rollback_rel
+    r["rollback_sha256"] = rollback_hash
+    r["manifest_relative"] = manifest_rel
+    returner r
+}
+
+funksjon gjenopprett(root: tekst, target_rel: tekst, rollback_rel: tekst,
+                     forventa_hash: tekst) -> ordbok_tekst {
+    la r = _resultat("feil", "")
+    hvis root == "" eller ikkje _trygg_relativ(target_rel) eller
+       ikkje _trygg_relativ(rollback_rel) eller lengde(forventa_hash) != 64 {
+        r["error"] = "ugyldig rollback-kontrakt"
+        returner r
+    }
+    la rollback = root + "/" + rollback_rel
+    hvis _hash(rollback) != forventa_hash {
+        r["error"] = "rollback-artefakt er ikkje verifisert"
+        returner r
+    }
+    la mappe = filops.katalog(target_rel)
+    la tmp_rel = mappe + "/.rollback-" + builtin.random_hex(16) + ".tmp"
+    hvis mappe == "." { tmp_rel = ".rollback-" + builtin.random_hex(16) + ".tmp" }
+    hvis ikkje filops.kopier2(rollback, root + "/" + tmp_rel) {
+        r["error"] = "rollback-kopi feila"
+        returner r
+    }
+    hvis _hash(root + "/" + tmp_rel) != forventa_hash {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "rollback-kopi-hash avvik"
+        returner r
+    }
+    hvis native_fs.native_sett_modus(root, tmp_rel, 493)["status"] != "ok" {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "kunne ikkje setje rollback-modus"
+        returner r
+    }
+    la publisert = native_fs.native_erstatt_fil_atomisk(root, tmp_rel, target_rel)
+    hvis publisert["status"] != "replaced" {
+        filops.slett_fil(root + "/" + tmp_rel)
+        r["error"] = "atomisk rollback feila"
+        returner r
+    }
+    la after_hash = _hash(root + "/" + target_rel)
+    hvis after_hash != forventa_hash {
+        r["error"] = "rollback-resultat avvik"
+        returner r
+    }
+    r["status"] = "restored"
+    r["target_after_sha256"] = after_hash
+    r["rollback_relative"] = rollback_rel
+    r["rollback_sha256"] = forventa_hash
+    returner r
+}

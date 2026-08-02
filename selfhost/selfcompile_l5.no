@@ -7,20 +7,26 @@
 //   ./bin/nc selfcompile-l5
 //   ./bin/nc run selfhost/selfcompile_l5.no
 
-funksjon standard_kompilator_modular(root: tekst) -> liste<tekst> {
-    returner builtin.split("selfhost.lexer.lexer_m1=" + root + "/selfhost/lexer/lexer_m1.no\nselfhost.parser=" + root + "/selfhost/parser.no\nselfhost.compiler.semantic=" + root + "/selfhost/compiler/semantic.no\nselfhost.compiler.ir_to_bytecode=" + root + "/selfhost/compiler/ir_to_bytecode.no\nselfhost.kompiler=" + root + "/selfhost/kompiler.no\nselfhost.json=" + root + "/selfhost/json.no\nselfhost.vm=" + root + "/selfhost/vm.no\nselfhost.bundler=" + root + "/selfhost/bundler.no", "\n")
-}
+bruk std.runtime.process_abi som process_abi
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+funksjon standard_kompilator_modular(root: tekst) -> liste<tekst> {
+    returner builtin.split("selfhost.lexer.lexer_m1=" + root + "/selfhost/lexer/lexer_m1.no\nselfhost.parser=" + root + "/selfhost/parser.no\nselfhost.compiler.semantic=" + root + "/selfhost/compiler/semantic.no\nselfhost.compiler.ir_to_bytecode=" + root + "/selfhost/compiler/ir_to_bytecode.no\nselfhost.kompiler=" + root + "/selfhost/kompiler.no\nselfhost.json=" + root + "/selfhost/json.no\nselfhost.vm=" + root + "/selfhost/vm.no\nselfhost.bundler=" + root + "/selfhost/bundler.no\nselfhost.l5b_host=" + root + "/selfhost/l5b_host.no", "\n")
 }
 
 funksjon kompiler_modul(modul: tekst, sti: tekst, utfil: tekst) -> tekst {
-    la res = exec_prosess("NORSCODE_MODULE=" + shell(modul) + " ./bin/nc compile " + shell(sti) + " " + shell(utfil))
-    hvis tekst(res[0]) != builtin.chr(48) {
-        la melding = "L5: kompilering feila for " + modul
-        hvis lengde(res) > 2 og tekst(res[2]) != "" { melding = melding + ": " + tekst(res[2]) }
-        kast melding
+    la executable = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis executable == "" { executable = "./dist/norscode_native" }
+    la req = process_abi.request(executable, [], ".", "", 120000, 1048576)
+    process_abi.sett_environment(req, {
+        "NORSCODE_CMD": "compile",
+        "NORSCODE_FILE": sti,
+        "NORSCODE_OUTPUT": utfil,
+        "NORSCODE_MODULE": modul,
+        "NORSCODE_ROOT": "."
+    })
+    la res = builtin.process_spawn_argv(req)
+    hvis ikkje process_abi.gyldig_resultat(res) eller tekst(res["exit_code"]) != "0" {
+        kast "L5: kompilering feila for " + modul + ": " + tekst(res["stderr"]) + tekst(res["error"])
     }
     returner fil_les(utfil)
 }
@@ -35,8 +41,37 @@ funksjon slå_saman_funksjonar(dest, src) -> heltall {
     returner lengde(keys)
 }
 
+funksjon slå_saman_modulmetadata(alle_initializers, alle_global_names, ncb) -> heltall {
+    hvis har_nokkel(ncb, "module_initializers") {
+        la initializers = ncb["module_initializers"]
+        la i: heltall = 0
+        mens i < lengde(initializers) {
+            la finst = usann
+            la j: heltall = 0
+            mens j < lengde(alle_initializers) {
+                hvis alle_initializers[j] == initializers[i] { finst = sann }
+                j = j + 1
+            }
+            hvis ikkje finst { legg_til(alle_initializers, initializers[i]) }
+            i = i + 1
+        }
+    }
+    hvis har_nokkel(ncb, "global_names") {
+        la kjelde_globalar = ncb["global_names"]
+        la modular = nøkler(kjelde_globalar)
+        la i: heltall = 0
+        mens i < lengde(modular) {
+            alle_global_names[modular[i]] = kjelde_globalar[modular[i]]
+            i = i + 1
+        }
+    }
+    returner 0
+}
+
 funksjon bygg_generasjon(modular: liste<tekst>, utfil: tekst) -> tekst {
     la alle_fns = {}
+    la alle_initializers = []
+    la alle_global_names = {}
     la i: heltall = 0
     mens i < lengde(modular) {
         la spec = modular[i]
@@ -50,15 +85,21 @@ funksjon bygg_generasjon(modular: liste<tekst>, utfil: tekst) -> tekst {
         la ncb = builtin.json_parse_raw(ncb_json)
         la fns = ncb["functions"]
         la tal = slå_saman_funksjonar(alle_fns, fns)
+        slå_saman_modulmetadata(alle_initializers, alle_global_names, ncb)
         skriv("  [OK] " + modul + " (" + tekst_fra_heltall(tal) + " funksjonar)\n")
         i = i + 1
     }
 
     la bundle = {}
-    bundle["format"] = "norscode-bytecode-v1"
-    bundle["entry"] = "selfhost.bundler.start"
+    bundle["format"] = "ncb-v1"
+    // Kandidaten skal kunne brukast som komplett Norscode-host i L5b, ikkje
+    // berre som oppslagstabell for stage0 sin compiler-dispatch.
+    bundle["entry"] = "selfhost.l5b_host.start"
+    // Same kanoniske toppnivårekkefølgje som selfhost.bundler.
+    bundle["module_initializers"] = alle_initializers
+    bundle["global_names"] = alle_global_names
     bundle["imports"] = []
-    bundle["route_handlers"] = []
+    bundle["route_handlers"] = {}
     bundle["dependency_providers"] = {}
     bundle["guard_providers"] = {}
     bundle["request_middlewares"] = []
@@ -66,10 +107,14 @@ funksjon bygg_generasjon(modular: liste<tekst>, utfil: tekst) -> tekst {
     bundle["error_middlewares"] = []
     bundle["startup_hooks"] = []
     bundle["shutdown_hooks"] = []
-    bundle["tests"] = []
+    bundle["tests"] = {}
     bundle["functions"] = alle_fns
 
-    la resultat = builtin.json_stringify(bundle)
+    // Native NCB-verdiar kan bere historiske tekstkodar som "0", "null"
+    // eller rå JSON gjennom den første samanslåinga. Éin eksplisitt
+    // parse/serialize-kanonisering gjer representasjonen typa og stabil før
+    // både cachematerialisering og byteparitet samanliknar artefaktet.
+    la resultat = builtin.json_stringify(builtin.json_parse_raw(builtin.json_stringify(bundle)))
     fil_skriv(utfil, resultat)
     prøv { fil_slett(utfil + ".part.ncb.json") } fang (e) {}
     returner resultat
@@ -84,6 +129,7 @@ funksjon start() -> heltall {
     la v1_sti = root + "/build/l5/compiler_v1.ncb.json"
     la v2_sti = root + "/build/l5/compiler_v2.ncb.json"
     la modular = standard_kompilator_modular(root)
+    builtin.mkdir_p(root + "/build/l5")
 
     skriv("[1/2] Gen1 frå selfhost-kjelder...\n")
     la v1 = bygg_generasjon(modular, v1_sti)

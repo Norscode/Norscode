@@ -17,6 +17,7 @@
 #   la t = pl.les_tekst(p)
 
 bruk std.bytes som bytebuf
+bruk std.runtime_filesystem som native_fs
 
 # ─── Konstruktørar ────────────────────────────────────────────────────────────
 
@@ -39,12 +40,11 @@ funksjon ny_heimekatalog() -> ordbok_tekst {
 
 funksjon gjeldande_katalog() -> ordbok_tekst {
     prøv {
-        la res = builtin.exec_prosess("pwd")
-        la delar = builtin.split(res, "\n")
-        returner ny(delar[0])
+        la cwd = builtin.miljo_hent("PWD")
+        hvis cwd != "" { returner ny(cwd) }
     } fang (e) {
-        returner ny(".")
     }
+    returner ny(".")
 }
 
 # ─── Normalisering ────────────────────────────────────────────────────────────
@@ -67,10 +67,6 @@ funksjon _normaliser(sti: tekst) -> tekst {
         s = builtin.join(builtin.slice(teikn, 0, n - 1), "")
     }
     returner s
-}
-
-funksjon _shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
 }
 
 # ─── Eigenskapar ──────────────────────────────────────────────────────────────
@@ -270,32 +266,18 @@ funksjon eksisterer(p: ordbok_tekst) -> bool {
 }
 
 funksjon er_fil(p: ordbok_tekst) -> bool {
-    prøv {
-        la res = builtin.exec_prosess("find -H " + _shell(p["sti"]) + " -maxdepth 0 -type f -print 2>/dev/null")
-        la delar = builtin.split(res, "\n")
-        returner delar[0] != ""
-    } fang (e) {
-        returner usann
-    }
+    returner eksisterer(p) og ikkje er_katalog(p)
 }
 
 funksjon er_katalog(p: ordbok_tekst) -> bool {
-    prøv {
-        la res = builtin.exec_prosess("find -H " + _shell(p["sti"]) + " -maxdepth 0 -type d -print 2>/dev/null")
-        la delar = builtin.split(res, "\n")
-        returner delar[0] != ""
-    } fang (e) {
-        returner usann
-    }
+    prøv { returner native_fs.native_list(p["sti"], "")["status"] == "ok" }
+    fang (e) { returner usann }
+    returner usann
 }
 
 funksjon er_symlink(p: ordbok_tekst) -> bool {
-    prøv {
-        la res = builtin.exec_prosess("test -L " + _shell(p["sti"]))
-        returner res[0] == "0"
-    } fang (e) {
-        returner usann
-    }
+    # Fail-closed til lstat/reparse-point er del av filesystem-ABI-en.
+    returner usann
 }
 
 # Opprett katalog (inkl. foreldre)
@@ -321,29 +303,33 @@ funksjon slett_fil(p: ordbok_tekst) {
 
 # Slett katalog (tom)
 funksjon slett_katalog(p: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("rmdir " + _shell(p["sti"]))
-    } fang (e) {
-        kast e
-    }
+    la rot = forelder(p)["sti"]
+    la resultat = native_fs.native_slett_mappe(rot, namn(p))
+    hvis resultat["status"] != "deleted" { kast "pathlib: katalogsletting krev rmdir-ABI" }
 }
 
 # Slett katalog rekursivt
 funksjon slett_rekursivt(p: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("rm -rf " + _shell(p["sti"]))
-    } fang (e) {
-        kast e
+    hvis ikkje eksisterer(p) { returner 0 }
+    hvis er_katalog(p) {
+        la barn = iterer_katalog(p)
+        la i = 0
+        mens i < lengde(barn) {
+            slett_rekursivt(builtin.json_parse(barn[i]))
+            i = i + 1
+        }
+        slett_katalog(p)
+    } ellers {
+        slett_fil(p)
     }
+    returner 0
 }
 
 # Omdøyp / flytt
 funksjon omdøyp(p: ordbok_tekst, ny_sti: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("mv " + _shell(p["sti"]) + " " + _shell(ny_sti["sti"]))
-    } fang (e) {
-        kast e
-    }
+    hvis er_katalog(p) { kast "pathlib: katalogflytting krev rename-ABI" }
+    builtin.fil_skriv_binær(ny_sti["sti"], builtin.fil_les_binær(p["sti"]))
+    builtin.fil_slett(p["sti"])
 }
 
 # Filstorleik i byte
@@ -418,62 +404,64 @@ funksjon legg_til_tekst(p: ordbok_tekst, innhald: tekst) {
 
 # List innhald (berre direkte born)
 funksjon iterer_katalog(p: ordbok_tekst) -> liste_tekst {
+    la resultat: liste_tekst = []
     prøv {
-        la res = builtin.exec_prosess("find " + _shell(p["sti"]) + " -mindepth 1 -maxdepth 1 -print 2>/dev/null")
-        la oppføringar = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(oppføringar)) {
-            la sti_str: tekst = oppføringar[i]
-            hvis (lengde(builtin.split(sti_str, "")) > 0) {
-                legg_til(resultat, builtin.json_stringify(ny(sti_str)))
-            }
+        la listing = native_fs.native_list(p["sti"], "")
+        hvis listing["status"] != "ok" { returner resultat }
+        la oppføringar = builtin.split(listing["data"], "\n")
+        la i = 0
+        mens i < lengde(oppføringar) {
+            la barn = builtin.trim(oppføringar[i])
+            hvis barn != "" { legg_til(resultat, builtin.json_stringify(koble(p, barn))) }
             i = i + 1
         }
         returner resultat
-    } fang (e) {
-        returner []
-    }
+    } fang (e) { returner resultat }
+}
+
+funksjon _mønster_treff(namn_verdi: tekst, mønster: tekst) -> bool {
+    hvis mønster == "*" { returner sann }
+    la stjerne = builtin.index_of(mønster, "*")
+    hvis stjerne < 0 { returner namn_verdi == mønster }
+    la prefiks = builtin.slice(mønster, 0, stjerne)
+    la suffiks = builtin.slice(mønster, stjerne + 1, lengde(mønster))
+    hvis prefiks != "" og ikkje builtin.starts_with(namn_verdi, prefiks) { returner usann }
+    hvis suffiks != "" og ikkje builtin.ends_with(namn_verdi, suffiks) { returner usann }
+    returner lengde(namn_verdi) >= lengde(prefiks) + lengde(suffiks)
 }
 
 # Glob frå denne katalogen
 funksjon glob(p: ordbok_tekst, mønster: tekst) -> liste_tekst {
-    prøv {
-        la res = builtin.exec_prosess("find " + _shell(p["sti"]) + " -mindepth 1 -maxdepth 1 -name " + _shell(mønster) + " -print 2>/dev/null")
-        la stiar = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(stiar)) {
-            la s: tekst = stiar[i]
-            hvis (lengde(builtin.split(s, "")) > 0) {
-                legg_til(resultat, builtin.json_stringify(ny(s)))
-            }
-            i = i + 1
+    la resultat: liste_tekst = []
+    la barn = iterer_katalog(p)
+    la i = 0
+    mens i < lengde(barn) {
+        la kandidat = builtin.json_parse(barn[i])
+        hvis _mønster_treff(namn(kandidat), mønster) {
+            legg_til(resultat, barn[i])
         }
-        returner resultat
-    } fang (e) {
-        returner []
+        i = i + 1
     }
+    returner resultat
+}
+
+funksjon _rglob_fyll(p: ordbok_tekst, mønster: tekst, resultat) -> heiltall {
+    la barn = iterer_katalog(p)
+    la i = 0
+    mens i < lengde(barn) {
+        la kandidat = builtin.json_parse(barn[i])
+        hvis _mønster_treff(namn(kandidat), mønster) { legg_til(resultat, barn[i]) }
+        hvis er_katalog(kandidat) { _rglob_fyll(kandidat, mønster, resultat) }
+        i = i + 1
+    }
+    returner 0
 }
 
 # Rekursiv glob
 funksjon rglob(p: ordbok_tekst, mønster: tekst) -> liste_tekst {
-    prøv {
-        la res = builtin.exec_prosess("find " + _shell(p["sti"]) + " -mindepth 1 -name " + _shell(mønster) + " -print 2>/dev/null")
-        la stiar = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(stiar)) {
-            la s: tekst = stiar[i]
-            hvis (lengde(builtin.split(s, "")) > 0) {
-                legg_til(resultat, builtin.json_stringify(ny(s)))
-            }
-            i = i + 1
-        }
-        returner resultat
-    } fang (e) {
-        returner []
-    }
+    la resultat: liste_tekst = []
+    prøv { _rglob_fyll(p, mønster, resultat) } fang (e) {}
+    returner resultat
 }
 
 # ─── Samanlikning ─────────────────────────────────────────────────────────────

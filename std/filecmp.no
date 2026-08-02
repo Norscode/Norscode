@@ -2,8 +2,8 @@
 # Python: filecmp
 #
 # Samanliknar innhald og metadata for filer og katalogar.
-# Brukar Norscode-filkontroll og intern parsing der det finst, med trygt quota
-# OS-verktøy for diff, md5/md5sum, stat og find.
+# Brukar berre Norscode-filkontroll, rein Norscode MD5 og den versjonerte
+# filesystem-ABI-en. Modulen startar ingen eksterne prosessar.
 #
 # Bruk:
 #   bruk std.filecmp som fc
@@ -12,11 +12,10 @@
 #   la dc = fc.dircmp("mappe1/", "mappe2/")
 #   skriv fc.dircmp_rapport(dc)
 
-# ─── Fil-samanlikning ─────────────────────────────────────────────────────────
+bruk std.md5 som md5_hash
+bruk std.runtime_filesystem som native_fs
 
-funksjon _shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
+# ─── Fil-samanlikning ─────────────────────────────────────────────────────────
 
 # Samanlikn to filer byte-for-byte (eller berre metadata)
 # shallow=sann → berre størrelse og tidsstempel
@@ -33,10 +32,13 @@ funksjon cmp(fil1: tekst, fil2: tekst, shallow: bool) -> bool {
         }
         returner usann
     } ellers {
-        # Full byte-samanlikning via diff
+        # Full innhaldssamanlikning i Norscode. Storleik blir kontrollert først
+        # for å unngå hashing når filene openbert er ulike.
         prøv {
-            la res = builtin.exec_prosess("diff -q " + _shell(fil1) + " " + _shell(fil2) + " >/dev/null 2>&1")
-            returner res[0] == "0"
+            la stat1 = _fil_stat(fil1)
+            la stat2 = _fil_stat(fil2)
+            hvis stat1["storleik"] != stat2["storleik"] { returner usann }
+            returner md5(fil1) == md5(fil2)
         } fang (e) {
             returner usann
         }
@@ -59,14 +61,7 @@ funksjon cmp_md5(fil1: tekst, fil2: tekst) -> bool {
 # Hent MD5-sjekksum for ei fil
 funksjon md5(filsti: tekst) -> tekst {
     prøv {
-        la res = builtin.exec_prosess("md5sum " + _shell(filsti) + " 2>/dev/null")
-        la delar = builtin.split(res, "\n")
-        la s: tekst = _fyrste_ord(delar[0])
-        hvis (s != "") { returner s }
-        # macOS fallback
-        la res2 = builtin.exec_prosess("md5 -q " + _shell(filsti) + " 2>/dev/null")
-        la delar2 = builtin.split(res2, "\n")
-        returner _trim(delar2[0])
+        returner md5_hash.hash_bytes(builtin.fil_les_binær(filsti))
     } fang (e) {
         returner ""
     }
@@ -263,8 +258,24 @@ funksjon dircmp_rapport(dc: ordbok_tekst) -> tekst {
 # Detaljert diff-rapport for ulike filer
 funksjon diff_filer(fil1: tekst, fil2: tekst) -> tekst {
     prøv {
-        la res = builtin.exec_prosess("diff " + _shell(fil1) + " " + _shell(fil2) + " 2>&1")
-        returner res
+        la venstre = builtin.split(builtin.fil_les(fil1), "\n")
+        la høgre = builtin.split(builtin.fil_les(fil2), "\n")
+        la ut = "--- " + fil1 + "\n+++ " + fil2 + "\n"
+        la maks = lengde(venstre)
+        hvis lengde(høgre) > maks { maks = lengde(høgre) }
+        la i = 0
+        mens i < maks {
+            la a = ""
+            la b = ""
+            hvis i < lengde(venstre) { a = venstre[i] }
+            hvis i < lengde(høgre) { b = høgre[i] }
+            hvis a != b {
+                hvis i < lengde(venstre) { ut = ut + "-" + a + "\n" }
+                hvis i < lengde(høgre) { ut = ut + "+" + b + "\n" }
+            }
+            i = i + 1
+        }
+        returner ut
     } fang (e) {
         returner ""
     }
@@ -282,9 +293,8 @@ funksjon _fil_finst(sti: tekst) -> bool {
 
 funksjon _er_katalog(sti: tekst) -> bool {
     prøv {
-        la res = builtin.exec_prosess("find -H " + _shell(sti) + " -maxdepth 0 -type d -print 2>/dev/null")
-        la delar = builtin.split(res, "\n")
-        returner _trim(delar[0]) != ""
+        la info = native_fs.native_stat_sti(sti)
+        returner info["status"] == "ok" og info["kind"] == "directory"
     } fang (e) { returner usann }
     returner usann
 }
@@ -292,18 +302,10 @@ funksjon _er_katalog(sti: tekst) -> bool {
 funksjon _fil_stat(sti: tekst) -> ordbok_tekst {
     la res: ordbok_tekst = {}
     prøv {
-        la ut = builtin.exec_prosess("stat -c '%s %Y' " + _shell(sti) + " 2>/dev/null || stat -f '%z %m' " + _shell(sti) + " 2>/dev/null")
-        la delar = builtin.split(_trim(builtin.split(ut, "\n")[0]), " ")
-        la kols: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(delar)) {
-            la s: tekst = _trim(delar[i])
-            hvis (s != "") { legg_til(kols, s) }
-            i = i + 1
-        }
-        hvis (lengde(kols) >= 2) {
-            res["storleik"] = kols[0]
-            res["mtime"]    = kols[1]
+        la info = native_fs.native_stat_sti(sti)
+        hvis info["status"] == "ok" {
+            res["storleik"] = tekst(info["value"])
+            res["mtime"] = tekst(info["mtime"])
         }
     } fang (e) {}
     returner res
@@ -311,14 +313,15 @@ funksjon _fil_stat(sti: tekst) -> ordbok_tekst {
 
 funksjon _list_katalog(sti: tekst) -> liste_tekst {
     prøv {
-        la res = builtin.exec_prosess("find " + _shell(sti) + " -mindepth 1 -maxdepth 1 ! -name '.*' -print 2>/dev/null")
-        la linjer = builtin.split(res, "\n")
+        la listing = native_fs.native_list(sti, "")
+        hvis listing["status"] != "ok" { returner [] }
+        la linjer = builtin.split(listing["data"], "\n")
         la resultat: liste_tekst = []
         la i: heltall = 0
         mens (i < lengde(linjer)) {
             la s: tekst = _trim(linjer[i])
-            hvis (s != "") {
-                legg_til(resultat, _basename(s))
+            hvis (s != "" og ikkje builtin.starts_with(s, ".")) {
+                legg_til(resultat, s)
             }
             i = i + 1
         }
@@ -327,23 +330,6 @@ funksjon _list_katalog(sti: tekst) -> liste_tekst {
         returner []
     }
     returner []
-}
-
-funksjon _basename(sti: tekst) -> tekst {
-    la delar = builtin.split(sti, "/")
-    hvis (lengde(delar) == 0) { returner sti }
-    returner delar[lengde(delar) - 1]
-}
-
-funksjon _fyrste_ord(linje: tekst) -> tekst {
-    la delar = builtin.split(_trim(linje), " ")
-    la i: heltall = 0
-    mens (i < lengde(delar)) {
-        la s: tekst = _trim(delar[i])
-        hvis (s != "") { returner s }
-        i = i + 1
-    }
-    returner ""
 }
 
 funksjon _join_sti(katalog: tekst, namn: tekst) -> tekst {

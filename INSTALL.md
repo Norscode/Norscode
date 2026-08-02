@@ -4,11 +4,10 @@ Dette er kortversjonen for å installere Norscode lokalt utan Python- eller C-ba
 
 ## Rask installering
 
-På macOS og Linux:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Norscode/Norscode/main/tools/install.sh | sh
-```
+På macOS og Linux lastar du ned den signerte runtimebinæren og tilhøyrande
+SHA-256-/provenance-attestasjon frå GitHub Releases.
+Den prebygde runtimebinæren er bootstrapgrensa; ingen installasjonsskript frå
+repositoryet blir køyrt.
 
 Legg deretter installasjonsmappa på `PATH` dersom ho ikkje alt ligg der:
 
@@ -33,8 +32,8 @@ Frå repo-rota:
 ```
 
 Dette brukar `dist/norscode_native` lokalt og installerer via Norscode-eigarlogikken.
-POSIX-bootstrapen `sh tools/install.sh` finst framleis som førsteinstallasjonsveg
-før Norscode-runtime er materialisert på maskina. Installert kommando blir:
+På ei ny maskin må den attesterte, prebygde runtimebinæren materialiserast først.
+Installert kommando blir:
 
 ```bash
 ~/.local/bin/nc

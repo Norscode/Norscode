@@ -21,6 +21,11 @@ funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
 
 funksjon ok(res: liste_tekst) -> boolsk { returner felt(res, 0) == "0" }
 
+// LLD COFF skriv elles eit varierande tidsstempel og ein varierande CodeView
+// GUID i PE-fila. /Brepro avleier begge frå innhaldet og gjer to like bygg
+// byte-identiske.
+funksjon deterministiske_linkflagg() -> tekst { returner " -Wl,/Brepro" }
+
 // Verifiser PE32+ direkte i Norscode. Windows-gaten skal ikkje vere avhengig
 // av at Git Bash tilfeldigvis har unix-verktøyet `file` installert.
 funksjon er_pe64(sti: tekst) -> boolsk {
@@ -44,21 +49,35 @@ funksjon start() -> heiltall {
     hvis root == "" { root = "." }
     la zig = env("NORSCODE_ZIG")
     hvis zig == "" { zig = "zig" }
+    // Windows-checkout kan ikkje stole på at Git materialiserer bin/nc-lenkja.
+    // Bruk den eksplisitte, attesterbare stage0-/kandidatbinæren som starta
+    // verktøyet, og bruk bin/nc berre som lokal reserve.
+    la nc_bin = env("NORSCODE_NATIVE_BIN")
+    hvis nc_bin == "" { nc_bin = root + "/bin/nc" }
     la source = root + "/build/v3009/native_candidate_gc.c"
     la argon_source = root + "/archive/legacy_c_backend/nc_argon2_zig.zig"
     la backend = root + "/archive/legacy_c_backend/nc_windows_backend.c"
     la smoke = root + "/archive/legacy_c_backend/nc_windows_appcontainer_smoke.c"
     la backend_smoke = root + "/archive/legacy_c_backend/nc_windows_backend_smoke.c"
-    la out = root + "/build/windows/norscode_native_windows_x86_64.o"
-    la backend_out = root + "/build/windows/nc_windows_backend_x86_64.o"
-    la smoke_out = root + "/build/windows/nc_windows_appcontainer_smoke_x86_64.o"
-    la backend_smoke_out = root + "/build/windows/nc_windows_backend_smoke_x86_64.o"
-    la exe = root + "/build/windows/norscode_native_windows_x86_64.exe"
-    la argon_obj = root + "/build/windows/nc_argon2_zig_windows_x86_64.o"
-    la smoke_exe = root + "/build/windows/nc_windows_appcontainer_smoke_x86_64.exe"
-    la backend_smoke_exe = root + "/build/windows/nc_windows_backend_smoke_x86_64.exe"
-    la prep = kommando("mkdir -p " + shell(root + "/build/windows"))
-    hvis ikkje ok(prep) { skriv(felt(prep, 2) + "\n") returner 1 }
+    la standard_dir = root + "/build/windows"
+    la publish_dir = env("NORSCODE_WINDOWS_OUT_DIR")
+    hvis publish_dir == "" { publish_dir = standard_dir }
+    // /Brepro avleier PE-identiteten frå linkerinput. Bruk derfor den same
+    // kanoniske arbeidsstien også når to kandidatar blir publiserte til kvar
+    // si mappe; elles ville objektstien åleine endre CodeView-identiteten.
+    la work_dir = root + "/build/windows-repro-work"
+    la out = work_dir + "/norscode_native_windows_x86_64.o"
+    la backend_out = work_dir + "/nc_windows_backend_x86_64.o"
+    la smoke_out = work_dir + "/nc_windows_appcontainer_smoke_x86_64.o"
+    la backend_smoke_out = work_dir + "/nc_windows_backend_smoke_x86_64.o"
+    la exe = work_dir + "/norscode_native_windows_x86_64.exe"
+    la argon_obj = work_dir + "/nc_argon2_zig_windows_x86_64.o"
+    la smoke_exe = work_dir + "/nc_windows_appcontainer_smoke_x86_64.exe"
+    la backend_smoke_exe = work_dir + "/nc_windows_backend_smoke_x86_64.exe"
+    hvis ikkje builtin.mappe_opprett(work_dir) eller ikkje builtin.mappe_opprett(publish_dir) {
+        skriv("Windows-utmappe kunne ikkje opprettast: " + publish_dir + "\n")
+        returner 1
+    }
     la build_argon = kommando(shell(zig) + " build-obj " + shell(argon_source) +
         " -target x86_64-windows-gnu -O ReleaseFast -fsingle-threaded -femit-bin=" + shell(argon_obj))
     hvis ikkje ok(build_argon) {
@@ -89,7 +108,8 @@ funksjon start() -> heiltall {
         skriv("Windows backend-smoke cross-compile feilet: " + felt(build_backend_smoke, 2) + "\n")
         returner 1
     }
-    la link_flags = " -lws2_32 -lbcrypt -ladvapi32 -luserenv -lshell32 -luser32 -lntdll -lsecur32 -lcrypt32"
+    la link_flags = " -lws2_32 -lbcrypt -ladvapi32 -luserenv -lshell32 -luser32 -lntdll -lsecur32 -lcrypt32" +
+        deterministiske_linkflagg()
     la link = kommando(shell(zig) + " cc -target x86_64-windows-gnu -O2 -DNC_ENABLE_ZIG_ARGON2 " + shell(source) + " " + shell(backend) + " " + shell(argon_obj) +
         " -I" + shell(root + "/archive/legacy_c_backend") + link_flags + " -o " + shell(exe))
     hvis ikkje ok(link) {
@@ -120,7 +140,7 @@ funksjon start() -> heiltall {
         " NORSCODE_EMBED_BASE=" + shell(exe) +
         " NORSCODE_EMBED_OUT=" + shell(embedded) +
         " NORSCODE_EMBED_SPECS=" + shell(specs) +
-        " " + shell(root + "/bin/nc") + " run " + shell(root + "/tools/embed_release_ncb.no"))
+        " " + shell(nc_bin) + " run " + shell(root + "/tools/embed_release_ncb.no"))
     hvis ikkje ok(embed) {
         skriv("Windows single-binary NCB-embedding feilet: " + felt(embed, 2) + "\n")
         returner 1
@@ -138,6 +158,31 @@ funksjon start() -> heiltall {
         skriv("Windows PE32+ x86_64-verifikasjon feilet\n")
         returner 1
     }
-    skriv("[OK] Windows x86_64 native ABI compile/link (runtime, IOCP/SChannel, AppContainer): " + exe + "\n")
+    la final_exe = exe
+    hvis publish_dir != work_dir {
+        prøv {
+            builtin.fil_skriv_binær(
+                publish_dir + "/norscode_native_windows_x86_64.exe",
+                builtin.fil_les_binær(exe)
+            )
+            builtin.fil_skriv_binær(
+                publish_dir + "/norscode_native_windows_x86_64.exe.embedded.exe",
+                builtin.fil_les_binær(embedded)
+            )
+            builtin.fil_skriv_binær(
+                publish_dir + "/nc_windows_appcontainer_smoke_x86_64.exe",
+                builtin.fil_les_binær(smoke_exe)
+            )
+            builtin.fil_skriv_binær(
+                publish_dir + "/nc_windows_backend_smoke_x86_64.exe",
+                builtin.fil_les_binær(backend_smoke_exe)
+            )
+            final_exe = publish_dir + "/norscode_native_windows_x86_64.exe"
+        } fang (e) {
+            skriv("Windows-kandidat kunne ikkje publiserast: " + tekst(e) + "\n")
+            returner 1
+        }
+    }
+    skriv("[OK] Windows x86_64 native ABI compile/link (runtime, IOCP/SChannel, AppContainer): " + final_exe + "\n")
     returner 0
 }

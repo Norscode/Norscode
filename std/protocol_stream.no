@@ -1,0 +1,99 @@
+# protocol_stream.no - shell-fri tekstprotokoll over native TCP/TLS
+
+bruk std.dns som dns
+bruk std.socket som socket
+
+funksjon _ipv4(host: tekst, port: heiltall) -> tekst {
+    prøv {
+        la d = dns.resolve(host, port)
+        hvis d["status"] == "ok" {
+            la addresses = d["addresses"]
+            la i = 0
+            mens i < lengde(addresses) {
+                la candidate = tekst(addresses[i])
+                hvis builtin.contains(candidate, ".") { returner candidate }
+                i = i + 1
+            }
+        }
+    } fang (e) { }
+    returner host
+}
+
+funksjon _wait(h: ordbok_tekst, events: heiltall, timeout_ms: heiltall) -> bool {
+    la result = socket.native_poll_vent(h, events, timeout_ms)
+    returner result["status"] == "klar"
+}
+
+funksjon _read_once(h: ordbok_tekst, timeout_ms: heiltall) -> tekst {
+    la r = socket.native_les(h, 16384)
+    hvis r["status"] == "ventende" {
+        hvis ikkje _wait(h, 1, timeout_ms) { returner "" }
+        r = socket.native_les(h, 16384)
+    }
+    hvis r["status"] == "feil" { returner "" }
+    returner tekst(r["data"])
+}
+
+funksjon dialog(host: tekst, port: heiltall, secure: bool, payload: tekst,
+                timeout_ms: heiltall, max_output: heiltall) -> tekst {
+    hvis host == "" eller port <= 0 eller timeout_ms <= 0 eller max_output <= 0 { returner "" }
+    la address = _ipv4(host, port)
+    la h: ordbok_tekst = {}
+    hvis secure {
+        h = socket.native_tls_tilkoble_systemlager(address, port, host)
+    } ellers {
+        h = socket.native_tilkoble(address, port)
+    }
+    hvis h["status"] == "feil" { returner "" }
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje _wait(h, 2, timeout_ms) {
+            socket.native_lukk(h)
+            returner ""
+        }
+    }
+    hvis secure {
+        la tls = socket.native_tls_handshake(h)
+        mens tls["status"] == "ventende" og _wait(h, 1, timeout_ms) {
+            tls = socket.native_tls_handshake(h)
+        }
+        hvis tls["status"] != "connected" {
+            socket.native_lukk(h)
+            returner ""
+        }
+    }
+
+    # POP3/IMAP/SMTP sender ei helsing før klientkommandoane.
+    la output = _read_once(h, timeout_ms)
+    la offset = 0
+    mens offset < lengde(payload) {
+        la w = socket.native_skriv(h, builtin.slice(payload, offset, lengde(payload)))
+        hvis w["status"] == "ventende" {
+            hvis ikkje _wait(h, 2, timeout_ms) {
+                socket.native_lukk(h)
+                returner ""
+            }
+        } ellers {
+            la count = heltall_fra_tekst(tekst(w["value"]))
+            hvis count <= 0 {
+                socket.native_lukk(h)
+                returner ""
+            }
+            offset = offset + count
+        }
+    }
+
+    la started = builtin.tid_ms()
+    la rounds = 0
+    mens rounds < 256 og builtin.tid_ms() - started < timeout_ms og lengde(output) < max_output {
+        la chunk = _read_once(h, timeout_ms)
+        hvis chunk == "" {
+            rounds = 256
+        } ellers {
+            output = output + chunk
+            rounds = rounds + 1
+        }
+    }
+    socket.native_lukk(h)
+    hvis lengde(output) > max_output { returner builtin.slice(output, 0, max_output) }
+    returner output
+}

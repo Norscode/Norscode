@@ -109,11 +109,12 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   er ikkje ekte Windows-attestasjon:
   `production_ready_windows=false` og `production_ready_all_platforms=false`
   står ved lag fram til køyring på ein faktisk Windows-vert.
-- Tracked `bootstrap/stage0/norscode-windows-x86_64.exe` er no regenerert frå
-  same innebygd-NCB PE-kandidat som Windows-kryssgaten verifiserer, og blir brukt
-  som Git Bash/MSYS-fallback for `bin/nc`; han er statisk PE-verifisert, men er
-  ikkje rekna som produksjonsklar før den signerte Windows-køyringa er
-  gjennomført.
+- Tracked `bootstrap/stage0/norscode-windows-x86_64.exe` er framleis det gamle
+  tillitsankeret. Ein fersk, reproducerbar innebygd-NCB PE-kandidat er bygd to
+  gonger byte-identisk, men blir ikkje promotert før den er køyrd og attestert
+  på ein ekte Windows-vert. Windows-CI startar derfor verktøya direkte med
+  committed Windows-stage0, attesterer kandidaten og legg byteidentitet mot
+  stage0 som avsluttande promoteringssperre.
 - `tools/windows_runtime_attestation.no` gir no éi fail-closed Windows-port som
   sjølv køyrer backend/filsystem/prosess, ekte AppContainer, nettverk,
   SChannel TLS 1.3, IOCP og Argon2id før ho skriv ein commit- og
@@ -165,7 +166,7 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - Deployment-kontrakten er implementert i `std.deployment_config`, `std.transactional_storage`, `std.job_queue`, `std.quick3`, `std.inbound_email`, `std.vedlegg` og `std.observability`.
 - `tests/test_helpdesk_deployment_contract.no` køyrer grønt med database-transaksjon, idempotent jobbkø, Quick3-mapping, MIME-korrelasjon, webhook-signatur og vedleggspolicy.
 - Kontrakttesten dekker òg faktisk SQLite-backup/restore, Quick3 retry-plan, deterministisk HTTP-mock med 503/201-statuskø og samlet secrets-navnerom for `QUICK3_API_TOKEN`, `SMTP_PASSWORD` og `INBOUND_WEBHOOK_SECRET`.
-- `tests/test_pbkdf2_vector.no` verifiserer standard PBKDF2-HMAC-SHA256 mot kjent testvektor. Passordløypa brukar 120 000 iterasjonar og har native CommonCrypto på macOS og OpenSSL i Linux-releasekandidaten, med Norscode-fallback. `std.scrypt` er rein Norscode med RFC 7914-vektor. Argon2id er verifisert i committed macOS ARM64- og Linux x86_64/ARM64-stage0; ekte Windows-køyring står framleis att før sikkerheit kan kallast produksjonsklar.
+- `tests/test_pbkdf2_vector.no` verifiserer standard PBKDF2-HMAC-SHA256 mot kjent testvektor. Passordløypa brukar 120 000 iterasjonar og har native CommonCrypto på macOS og OpenSSL i Linux-releasekandidaten, med Norscode-fallback. `std.scrypt` er rein Norscode med RFC 7914-vektor. Argon2id-standarden er no rein Norscode og verifisert mot RFC 9106; native adapterattestasjon på ekte Windows står framleis separat.
 - Jobbkøen har no timeout-reclaim: krasja workers blir frigitt til retry, medan jobbar som har nådd maks forsøk går til dead-letter. Indeks-API-et avviser ugyldige SQL-identifikatorar før SQL blir bygd.
 - SQLite-lagringa set no `busy_timeout` og WAL-journal ved opning, i tillegg til foreign keys, transaksjonar, migrering, backup og restore.
 - MIME-parseren dekodar no `base64` og `quoted-printable`, bevarer rå kropp ved feilsøking, avviser råmeldingar over 10 MiB og har grønn integrasjonstest for HTML, tekst og base64-vedlegg.
@@ -176,15 +177,15 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - `bin/nc run` finn no prosjektroten frå kildefila, slik at prosjekt med eigne `norcode.toml` og `src.*`-modular køyrer med riktig importbase og datamappe.
 - Modenheitsgaten for standardbiblioteket er løfta til 57/61 stabile etter grøne roundtrip-, inferens-, tokeniserings-, native socketserver-, modellregister-, native multiprocessing- og lokal q8-media-tester. Fire modulstatusar står framleis eksperimentelle fordi dei krev reell plattform-/leverandørverifisering eller større end-to-end-gater.
 - DNS-flata har no også deterministisk wire-query og autoritativt svar for A, CNAME, MX og TXT, native UDP daemon lifecycle med bind/mottak/svar/stop, korrekt JSON-liste for sone-records, verifiserbar SHA-256 DS-digest/validering, native RRSIG-signering og native RRSIG-validering for RSASHA256/ES256/Ed25519; release-/providergate og ekstern multi-plattform-verifisering står framleis att.
-- Kryptografi-fallbacken brukar no den reine Norscode SHA-256/HMAC-implementasjonen i staden for ein svak concatenation-hash. `std.scrypt` implementerer RFC 7914 scrypt med testvektor og harde pure-VM-parametergrenser; Argon2id er verifisert mot RFC 9106 med OpenSSL-native backend i lokal macOS `dist`.
+- Kryptografiflatene brukar reine Norscode-implementasjonar av SHA-256/HMAC, scrypt, BLAKE2b og Argon2id. `std.scrypt` har RFC 7914-vektor og harde pure-VM-parametergrenser; `std.argon2id` har RFC 9106-vektor og OpenSSL/Zig er berre eksplisitte differential-/plattformadapterar.
 - `tests/test_scrypt.no` verifiserer scrypt mot RFC 7914-vektoren for N=16, r=1, p=1, med feil-passord og parametergrenser; implementasjonen ligg i `std/scrypt.no` og bruker berre Norscode SHA-256/HMAC i pure VM.
-- `std/argon2id.no` og `tests/test_argon2_native.no` verifiserer RFC 9106 Argon2id med grenser for minne, iterasjonar, parallellitet og lengder. Lokal macOS `dist/norscode_native` og committed macOS/Linux-stage0 har grøn backend-verifisering; Windows x86_64 ABI-kandidaten krysskompilerer, men ekte Windows-køyring står framleis att.
+- `std/argon2id_pure.no`, `std/blake2b.no` og `tests/test_argon2id_rfc9106_pure.no` verifiserer prehash og endeleg RFC 9106-tag utan eksternt kryptobibliotek. `std.argon2id` brukar denne banen som standard med konstanttidskontroll; `hash_native_adapter` er valfri og blir differentialtesta separat.
 - `std.tls_acme` har no full RFC 8555-flyt med HTTPS directory og Replay-Nonce, ny konto med `jwk`, vidare kall med `kid`, ordre, autorisasjon, challenge, CSR-finalisering og sertifikatnedlasting. Linux CI brukar ein fastlåst Pebble-digest, vel `dns-01`, publiserer korrekt JWK-bunde TXT-svar og lar Pebble validere mot Norscode sin eigen autoritative DNS-daemon over RFC-frama DNS/TCP. `PEBBLE_VA_ALWAYS_VALID` og den eksterne challenge-serveren er fjerna. Windows-attestasjonen køyrer i tillegg native ACME-signering/verifisering; signert resultat frå ekte Windows-runner står att før modulen kan løftast frå eksperimentell til stabil.
 - `std.sikkerheit` samlar no passordkrypto og capability-policy gjennom ein eksplisitt Norscode-native fasade; algoritmegrenser, pure-VM fallback, committed macOS/Linux-stage0 og deny-by-default er testa, medan ekte Windows og ekstern sikkerheitsattestasjon framleis står att.
 - `std.dns.resolve` bruker no native `dns_lookup` med `net.dns`-capability, numeriske IPv4/IPv6-adresser og eksplisitt feilstatus. Testløparen gir `net.dns` til nettverkstestar utan å opne andre capabilities.
-- Aktiv macOS ARM64-runtime har native PBKDF2-HMAC-SHA256 via CommonCrypto, Argon2id via OpenSSL og rein Norscode scrypt, med fallback der backend manglar. Linux-stage0 har OpenSSL PBKDF2/ACME og Zig Argon2id. Kjent PBKDF2-, scrypt- og Argon2id-vektorar og `tests/test_security.no` er grøne; ekte Windows står framleis att.
+- Aktiv macOS ARM64-runtime har native PBKDF2-HMAC-SHA256 via CommonCrypto og valfri Argon2id-adapter via OpenSSL; standard Argon2id og scrypt er reine Norscode-implementasjonar. Linux-stage0 har framleis OpenSSL/Zig-adapterar som migreringsflate. Kjende PBKDF2-, scrypt-, BLAKE2b- og Argon2id-vektorar er grøne; ekte Windows-attestasjon står framleis att.
 
-- Lokal macOS ARM64-runtime er promotert til `dist/norscode_native` med OpenSSL 3.6.2 for Argon2id og ACME/DNSSEC-signering. Committed macOS ARM64- og Linux x86_64/ARM64-stage0 er oppdaterte og hashfesta i `bootstrap/stage0/SHA256SUMS`.
+- Lokal macOS ARM64-runtime vart tidlegare promotert med OpenSSL 3.6.2 for den valfrie Argon2id-adapteren og ACME/DNSSEC-signering. Committed macOS ARM64- og Linux x86_64/ARM64-stage0 er hashfesta i `bootstrap/stage0/SHA256SUMS`; dei blir ikkje endra før den nye kandidaten består full promoteringsport.
 - Den promoterte macOS ARM64-runtime-en er statisk lenka mot OpenSSL (ingen OpenSSL-dylib i `otool -L`) og passerer `tests/test_acme_sign_native.no`, `tests/test_acme_verify_native.no`, `tests/test_pbkdf2_vector.no`, `tests/test_argon2_native.no` og `tests/test_security.no`.
 - Native runtime-gap, JIT for heltall/desimal/tekst, native tråd- og tensorflate, `builtin.process_spawn_argv` og `tests/test_runtime_v1_contract.no` er verifisert grønne etter promoteringen.
 - Adaptive JIT har no ein eigen Norscode-optimaliseringspass med iterert konstantfolding, identitetsreduksjon, SSA-livstidsanalyse og register-/spillplan; dette er verifisert i `tests/test_runtime_jit_optimizer.no`.

@@ -1,0 +1,165 @@
+// Deterministisk parallell testorkestrering gjennom native prosess-ABI.
+//
+// Kvar shard køyrer den same sorterte testlista i tools/nc_test.no. Shard i
+// eig testane der den stabile listeindeksen modulo shard-talet er i. Ingen
+// shelltekst eller ekstern prosessmanager blir brukt.
+
+bruk std.runtime.process_abi som process_abi
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner builtin.miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon tal_env(namn: tekst, standard: heiltall) -> heiltall {
+    la verdi = env(namn)
+    hvis verdi == "" { returner standard }
+    prøv { returner builtin.heltall_fra_tekst(verdi) } fang (e) { returner standard }
+    returner standard
+}
+
+funksjon native_bin(root: tekst) -> tekst {
+    la kandidat = env("NORSCODE_NATIVE_BIN")
+    hvis kandidat != "" { returner kandidat }
+    la direkte = env("NC_NATIVE")
+    hvis direkte != "" { returner direkte }
+    returner root + "/dist/norscode_native"
+}
+
+funksjon start_shard(native: tekst, root: tekst, miljø: ordbok_tekst,
+                     timeout: heiltall) -> ordbok_tekst {
+    la req = process_abi.async_spawn_request(
+        native, ["test"], root, "", timeout * 1000, 33554432
+    )
+    // Ein full testshard kan kompilere store selfhost-bundlar. Grensa er
+    // eksplisitt og per prosess; lågare grenser gav falsk exit 126 under
+    // åtte samtidige, instrumenterte selfhost-shards.
+    process_abi.sett_sandbox(req, "none", 4294967296, 64, sann)
+    process_abi.sett_environment(req, miljø)
+    returner builtin.process_operation(req)
+}
+
+funksjon vent_shard(handle: ordbok_tekst, wait_ms: heiltall) -> ordbok_tekst {
+    returner builtin.process_operation(process_abi.async_wait_request(handle["handle"], wait_ms))
+}
+
+funksjon les_shard(handle: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.process_operation(process_abi.async_operation("read", handle["handle"]))
+}
+
+funksjon lukk_shard(handle: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.process_operation(process_abi.async_operation("close", handle["handle"]))
+}
+
+funksjon shard_miljø(root: tekst, native: tekst, indeks: heiltall,
+                     shard_tal: heiltall, run_id: tekst) -> ordbok_tekst {
+    la miljø: ordbok_tekst = {}
+    miljø["NORSCODE_ROOT"] = root
+    miljø["NORSCODE_NATIVE_BIN"] = native
+    miljø["NC_NATIVE"] = native
+    miljø["HYBRID_COMPILE"] = root + "/tools/compile_with_hybrid_bundle_v9400.no"
+    miljø["TESTS_DIR"] = root + "/tests"
+    miljø["NC_TEST_SHARD"] = tekst_fra_heltall(indeks)
+    miljø["NC_TEST_SHARDS"] = tekst_fra_heltall(shard_tal)
+    miljø["NC_TEST_RUN_ID"] = run_id
+    miljø["NC_TEST_CACHE_DIR"] = root + "/build/nc-test-cache"
+    miljø["NORSCODE_ENABLE_EXEC_PROSESS"] = "1"
+    miljø["NORSCODE_VM_CAPABILITIES"] = "env.read,process.exec,thread.spawn,net.tcp,net.dns,disk.read,disk.write,jit.execute"
+    miljø["NORSCODE_VM_DISK_ROOT"] = root + ",.,/tmp,/private/tmp"
+
+    la vidare = [
+        "NC_SLOW_TESTS", "NC_TEST_FILE", "NC_TEST_FILES", "NC_TEST_CACHE",
+        "TEST_TIMEOUT", "SLOW_TEST_TIMEOUT", "PURE_TEST_TIMEOUT",
+        "NC_VERBOSE", "NC_TRACE_TESTS", "NC_TRACE_TEST_COMMANDS",
+        "NC_TEST_SKIP_OPTIONAL_NATIVE_CRYPTO", "NORSCODE_NATIVE_TOOL_CACHE",
+        "NORSCODE_NATIVE_TOOL_CACHE_TRACE", "NORSCODE_BUNDLE_TRACE"
+    ]
+    la i: heiltall = 0
+    mens i < lengde(vidare) {
+        la verdi = env(vidare[i])
+        hvis verdi != "" { miljø[vidare[i]] = verdi }
+        i = i + 1
+    }
+    returner miljø
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" {
+        skriv("FEIL: NORSCODE_ROOT må vere sett for parallell test\n")
+        returner 1
+    }
+    la native = native_bin(root)
+    hvis ikkje builtin.fil_finnes(native) {
+        skriv("FEIL: native testbinær manglar: " + native + "\n")
+        returner 1
+    }
+
+    la shard_tal = tal_env("NC_PARALLEL_TEST_SHARDS", 8)
+    hvis shard_tal < 1 eller shard_tal > 32 {
+        skriv("FEIL: NC_PARALLEL_TEST_SHARDS må vere 1..32\n")
+        returner 1
+    }
+    la timeout = tal_env("NC_PARALLEL_TEST_TIMEOUT", 3600)
+    la run_id = "parallel-" + tekst_fra_heltall(builtin.tid_ms())
+    la handles = []
+    la i: heiltall = 0
+    mens i < shard_tal {
+        // Direkte `native test` går gjennom nc_main sin innhaldsadresserte
+        // verktøy-NCB-cache. Den gamle genererte `native run shard_N.no`-vegen
+        // kompilerte den store nc_test-eigaren åtte gonger per fulltest.
+        la handle = start_shard(native, root, shard_miljø(root, native, i, shard_tal, run_id), timeout)
+        hvis handle["status"] != "kjorer" {
+            skriv("FEIL: kunne ikkje starte test-shard " + tekst_fra_heltall(i) + ": " + tekst(handle["error"]) + "\n")
+            returner 1
+        }
+        legg_til(handles, handle)
+        i = i + 1
+    }
+
+    skriv("Norscode parallell test: " + tekst_fra_heltall(shard_tal) + " deterministiske shards\n")
+    la feil: heiltall = 0
+    la shard_wall_ms_max: heiltall = 0
+    la shard_peak_rss_sum_bytes: heiltall = 0
+    i = 0
+    mens i < lengde(handles) {
+        la ferdig = vent_shard(handles[i], timeout * 1000)
+        la output = les_shard(handles[i])
+        hvis output["stdout"] != "" { skriv(output["stdout"]) }
+        hvis output["stderr"] != "" { skriv(output["stderr"]) }
+        la status = tekst(ferdig["status"])
+        la exit_code = -1
+        hvis finnes_nøkkel(ferdig, "exit_code") {
+            exit_code = heltall_fra_tekst(tekst(ferdig["exit_code"]))
+        }
+        hvis finnes_nøkkel(ferdig, "wall_ms") {
+            la shard_wall = heltall_fra_tekst(tekst(ferdig["wall_ms"]))
+            hvis shard_wall > shard_wall_ms_max { shard_wall_ms_max = shard_wall }
+        }
+        hvis finnes_nøkkel(ferdig, "peak_rss_bytes") {
+            shard_peak_rss_sum_bytes = shard_peak_rss_sum_bytes +
+                heltall_fra_tekst(tekst(ferdig["peak_rss_bytes"]))
+        }
+        hvis status != "ferdig" eller exit_code != 0 {
+            skriv("[FEIL] shard " + tekst_fra_heltall(i) + " status=" + status +
+                  " exit=" + tekst_fra_heltall(exit_code) + "\n")
+            hvis finnes_nøkkel(ferdig, "error") og tekst(ferdig["error"]) != "" {
+                skriv("  error=" + tekst(ferdig["error"]) + "\n")
+            }
+            feil = feil + 1
+        } ellers {
+            skriv("[OK] shard " + tekst_fra_heltall(i) + "\n")
+        }
+        lukk_shard(handles[i])
+        i = i + 1
+    }
+
+    hvis feil > 0 {
+        skriv("FEIL: " + tekst_fra_heltall(feil) + " test-shards feila\n")
+        returner 1
+    }
+    skriv("__NORSCODE_TEST_SHARD_WALL_MS_MAX__=" + tekst_fra_heltall(shard_wall_ms_max) + "\n")
+    skriv("__NORSCODE_TEST_SHARD_PEAK_RSS_SUM_BYTES__=" + tekst_fra_heltall(shard_peak_rss_sum_bytes) + "\n")
+    skriv("OK: alle parallelle test-shards bestod\n")
+    returner 0
+}
