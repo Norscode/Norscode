@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 57 av 78 punkt er verifiserte, 21 står opne.**
+**Avhukingsstatus 2026-08-03: 58 av 78 punkt er verifiserte, 20 står opne.**
 
 ## Mål og reglar
 
@@ -80,7 +80,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
 - [x] Arkiver eller slett alle erstatta aktive shellwrapperar.
 - [x] La active-surface feile på kvar aktiv `.sh`-fil og kvart extensionlaust shellscript.
-- [ ] Fjern shell som eksekveringslag frå aktive CI-`run:`-blokker; Norscode-eigde jobbar skal startast utan at runnerens shell er ein del av verktøykjeda, med berre smale plattform-/signeringsgrenser eksplisitt klassifiserte.
+- [x] Fjern shell som eksekveringslag frå aktive CI-`run:`-blokker; Norscode-eigde jobbar skal startast utan at runnerens shell er ein del av verktøykjeda, med berre smale plattform-/signeringsgrenser eksplisitt klassifiserte.
 - [x] Migrer dei attverande aktive `.no`-verktøya bort frå tekstbasert `exec_prosess`; filoperasjonar skal bruke filesystem-ABI og eksterne plattformprogram skal startast med strukturert executable/argv.
 - [x] Utvid active-surface med ein reell null-baseline for shell-eksekvering i normal bygg-, test-, installasjons- og releaseflyt. Direkte Norscode-tekst i ein GitHub Actions-`run:`-blokk tel framleis som shellavhengigheit.
 
@@ -103,6 +103,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Levande bootstrap-regenerering i eit separat engangs-worktree kom gjennom VM-NCB (1 188 136 byte), aliasnormalisering, 18 stdlib-NCB-ar og stil-NCB. Den avsluttande røyktesten er framleis raud med `Ukjent innebygd funksjon: builtin.res_felt` etter at den nygenererte VM-NCB-en er teken i bruk. Dette er ein open materialiserings-/cachefeil; prøven endra ikkje tillitsankeret i arbeidsgrenen.
 - Levande macOS-prøve bygde `NorscodeWindowHost.app`, validerte Info.plist, ad-hoc-signerte og verifiserte Mach-O-bundelen, og produserte ein ZIP med Norscode-ABI-hash `ab5a0d7d28e279e01943530ed4ce639b3042db677cb72fd90a5f11662860f028`. Den fyrste tolka hashprøva vart avbroten etter meir enn fire minutt; normal pakkeflyt brukar derfor den native Norscode SHA-256-ABI-en og fullførte grønt.
 - Feature-check er levande grøn gjennom strukturert `active-surface`, `verify-seed` og filspesifikk `check`. Seed-porten brukar no både gjeldande `system`/`machine` og legacy `os`/`arch`, og eit eksplisitt `/tmp`-scope i staden for ambient macOS `TMPDIR`. Bootstrap-brua er levande prøvd med native `help`-dispatch og status 0.
+- Endeleg Fase 3-bevis 2026-08-03: gjeldande `active-surface` er grøn med 0 aktive shellfiler, 0 runner-shellblokker, 39/39 eksplisitte barne-executable-bindingar og 117/117 deterministisk bundne `run:`-blokker. Strict-run `30808436337` køyrde same active-surface grønt gjennom Norscode-adapteren før han stoppa seinare på ein feilkonstruert L5b cache-samanlikning. Hovud-CI `30808425534` starta og fullførte reelle Norscode-jobbar på Linux og macOS, og Windows-runane fram til `30810983695` starta reelt kandidatbygg, runtime-attestasjon, signering og pakkekjelde gjennom committed Norscode-stage0. Den attverande Windows ZIP-bytefeilen og strict L5b-feilen er eigne runtime/cache-portar; dei brukar ikkje shell som eksekveringslag og held ikkje Fase 3-punktet ope.
 - Begge backupverktøya er levande køyrde og kopierte dist/stage0/kjelde til ignorerte `build/backups/` gjennom `std.filops`, utan `cp`, `mkdir`, `date` eller ekstern prosess. AI patch-vakta finn repositoryroten gjennom systeminfo-ABI og er prosessfri.
 - Kandidatstatus og native readiness er levande køyrde prosessfritt; begge hash-ar binærar gjennom Norscode sin SHA-256-builtin og rapporterer aktiv dist-hash `5f2a626ae1859df81c1adac97aacce3427841a6702c279c471ec1bab8c6c323a` utan `shasum`, `sha256sum`, `uname` eller `pwd`.
 - Den separate macOS-kandidaten med fersk `selfhost.vm` har levande installert checkouten gjennom dei native lenke- og katalog-ABI-ane; den installerte `nc`-lenka bestod selftest. Prøva avdekte og retta at VM-policyen tidlegare validerte eit strukturert filesystem-request som teksten `[verdi]` i staden for requestens eksplisitte `root`. `dist` og committed stage0 vart ikkje endra.
