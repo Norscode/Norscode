@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-02: 57 av 76 punkt er verifiserte, 19 står opne.**
+**Avhukingsstatus 2026-08-03: 61 av 78 punkt er verifiserte, 17 står opne.**
 
 ## Mål og reglar
 
@@ -36,6 +36,8 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 ### Fase 2-evidens
 
+- Plattform-only-kandidat v144, SHA-256 `135e8d2380ae1a1a97ecd995a8d8194575825e42cec9ccee909216ef92d6be79`, har ein komplett grøn `local-green --strict`. L5 Gen1/Gen2 er byte-identiske på 1 949 427 byte. Full L5b med eksplisitt cache på er byte-identisk på 1 949 427 byte; source-only kandidat A/B med cache av er byte-identiske på 1 701 761 byte. Den same strict-køyringa gav 835/835 normaltestar og 13/13 slow-lane-testar, seed-integritet og isolert single-binary utan repo/NCB/PATH.
+- Strict-porten køyrer no full L5b eksplisitt både med `NORSCODE_USE_PRECOMPILED_SELFHOST=1` og `=0`. Porten avdekte sju forelda committed precompiled modular; dei vart regenererte med Norscode-eigaren `tools/materialize_l5_precompiled.no` først etter grøn source-only L5b og er no byte-identiske med den verifiserte L5-bundlen.
 - Kandidat v93: den underliggjande cachefeilen var den dynamiske VM-brua si legacy-serialisering, som tolka tekstoperandane `"null"`, `"0"`, `"true"` og JSON-liknande tekst som andre typar. `selfhost.vm` brukar no typebevarande `json_skriv`; cachemarkøren lever berre over VM/AOT-grensa og blir fjerna før kanonisk bundle-output.
 - Gjeldande L5 er byte-identisk Gen1/Gen2 på 1 716 097 byte. Full L5b er 3/3 grøn med cache på (1 716 097 byte) og 3/3 grøn source-only med cache av (1 662 962 byte). L5b-mini er 3/3 grøn i begge modus.
 - Den samla kandidat-strict-porten er grøn på 3 554,78 s med 4 687 577 088 byte maksimal RSS: bootstrap A+B/C, L5, L5b, shellfri seed, single-binary, 779 normaltestar og 13 slow-lane-testar, 0 feil og 24 klassifiserte normalhopp av 803 testtilfelle.
@@ -54,7 +56,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Normal testflate i strict: 722 bestått, 0 feil, 18 klassifiserte hopp.
 - Slow-lane i strict: 8 bestått, 0 feil, 732 klassifiserte lane-hopp.
 - Release-preflight-baseline: 20,61 s / 316 342 272 byte RSS, éin klassifisert feil på Windows stage0/kandidat-hash.
-- `local-green --strict`: stoppar korrekt i steg 1 på same release-preflight-sperre.
+- Historisk baseline: `local-green --strict` stoppa korrekt i steg 1 på den dåverande release-preflight-sperra. Sperra er no reparert; fersk kandidatport 2026-08-03 er grøn.
 - Windows-hashar: stage0 `4e30aef18e037e2eff20b7307908cc5328e7842e6e1faa6a1340bae48a9b4bed`, kandidat `c36abc7e5477082fdd07acc597a8927b302466062cad65d1f9edc1269881f3b1`.
 - Tillitsankera `dist/norscode_native` og `bootstrap/stage0/norscode-macos-arm64` er ikkje promoterte.
 - Permanent stackmatrise: bundler-normalisering, 600 dynamiske `ncb_call_fn`-kall, native `INDEX_GET`-matrise, GC-root/minor/major/compaction og 64 gjentekne kall gjennom ei ekte indre Norscode-VM er grøne. `tests/test_stack_balance_gate_contract.no` låser delportane.
@@ -95,7 +97,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - `bin/nc` har no 0 utførande kall til aktive `.sh`-verktøy; dei tre attverande `.sh`-treffa er berre filnamn i release-sporingslista.
 - `bin/nc` er no den native Mach-O-dispatchen (lenkje til den promoterte `dist/norscode_native`), medan det gamle shellscriptet ligg under `archive/legacy_shell/bin/nc`. Kandidat v143 og aktiv dist er hash-identiske med SHA-256 `5f2a626ae1859df81c1adac97aacce3427841a6702c279c471ec1bab8c6c323a`; committed stage0 er med vilje uendra på `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284`.
 - Den levande native CLI-porten kontrollerer Mach-O/ELF/PE-signatur, byte-/hash-identitet mot dist og Norscode-eigd argv-/verktøydispatch. Dei fem migrerte CLI-/releasekontrakttestane er grøne, og `active-surface`, fase 0, L5 og L5b med cache på og av er grøne etter promoteringa.
-- Full `release-preflight` er framleis raud med to sannferdige feil utanfor fase 3: Windows stage0/cross-kandidat-avviket i fase 5 og ein utdatert cache-kontrakt i fase 6.
+- Den tidlegare release-preflight-sperra for Windows stage0/cross-kandidat og utdatert cachekontrakt er reparert. Fersk streng release-preflight mot v144-kandidaten er grøn; fase 5 står framleis open på dei breiare native Linux-/ABI-krava.
 - Hybridkompilering, local-green, L5b, sjølvstende, seed, omgang6/6b, stage0-assets, feature-gate, scaffold, bootstrap-regenerering og REPL-uttrykk går no direkte til `.no`-eigarane utan shellreserveveg.
 - `nc repl '1 + 2'` er levande verifisert til `=> 3` gjennom `norscode-process-spawn-v1`.
 - Ein separat, ikkje-promotert macOS-kandidat er bygd frå runtime-kjelda og har levande verifisert `readline`, `chmod`, fil-unlink og tom katalogsletting. Interaktiv `nc repl` gav `=> 3` og avslutta via stdin-linje-ABI-en.
@@ -356,9 +358,9 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 ## Endeleg godkjenning
 
 - [x] `./bin/nc active-surface`
-- [ ] `./bin/nc selvstendighet --strict`
+- [x] `./bin/nc selvstendighet --strict`
 - [x] `./bin/nc selfcompile-l5b` med og utan cache
-- [ ] `./bin/nc local-green --strict`
+- [x] `./bin/nc local-green --strict`
 - [x] `./bin/nc release-preflight`
 - [x] Alle testar og slow-lane-testar utan uklassifiserte hopp
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
