@@ -279,10 +279,9 @@ funksjon bygg_gen1_source_executor(root: tekst, gen1_ncb: tekst,
     returner sann
 }
 
-funksjon materialiser_kjeldefragment(root: tekst, gen1_ncb: tekst,
-                                     ncb_dir: tekst,
-                                     source_rel: tekst, module_name: tekst,
-                                     out_name: tekst) -> boolsk {
+funksjon kjeldefragment_miljø(root: tekst, ncb_dir: tekst,
+                              source_rel: tekst, module_name: tekst,
+                              out_name: tekst) -> ordbok_tekst {
     la out_sti = ncb_dir + "/" + out_name
     la progress_sti = ncb_dir + "/" + out_name + ".progress"
     filops.slett_fil(progress_sti)
@@ -304,26 +303,66 @@ funksjon materialiser_kjeldefragment(root: tekst, gen1_ncb: tekst,
     miljø["NORSCODE_BUNDLE_OUTPUT"] = ""
     miljø["NORSCODE_OM6B_SOURCE_NCB"] = ""
     miljø["NORSCODE_OM6B_SOURCE_NCB_DIR"] = ""
+    returner miljø
+}
+
+funksjon start_kjeldefragment(root: tekst, gen1_ncb: tekst,
+                              ncb_dir: tekst, source_rel: tekst,
+                              module_name: tekst, out_name: tekst) -> ordbok_tekst {
+    la miljø = kjeldefragment_miljø(root, ncb_dir, source_rel, module_name, out_name)
+    // Committed async-stage0 arvar miljøsnapshotet ved fork. Nyare runtime
+    // brukar environment-feltet under. Bind begge vegar eksplisitt.
+    la miljø_nøklar = nøkler(miljø)
+    la mi = 0
+    mens mi < lengde(miljø_nøklar) {
+        builtin.miljo_sett(miljø_nøklar[mi], miljø[miljø_nøklar[mi]])
+        mi = mi + 1
+    }
     // Gen1-NCB-en er kompilatorgenerasjonen. Committed stage0 er berre den
     // deterministiske VM-maskina som køyrer kandidaten direkte; ingen
     // precompiled kjeldeartefaktar eller AOT-importkopiar deltek.
-    la resultat = køyr_lukka(root + "/bin/nc",
-        ["run-ncb-pure", gen1_ncb], root, miljø, 600000)
-    prosess.skriv_resultat(resultat)
-    hvis ikkje prosess.ok(resultat) {
-        linje("  [FEIL] Gen1 NCB source-compile " + source_rel +
+    la req = process_abi.async_spawn_request(root + "/bin/nc",
+        ["run-ncb-pure", gen1_ncb], root, "", 1200000, 33554432)
+    req = process_abi.sett_sandbox(req, "none", 0, 1024, usann)
+    req = process_abi.sett_environment(req, miljø)
+    la handle = builtin.process_operation(req)
+    handle["source_rel"] = source_rel
+    handle["out_name"] = out_name
+    handle["out_sti"] = ncb_dir + "/" + out_name
+    handle["progress_sti"] = ncb_dir + "/" + out_name + ".progress"
+    returner handle
+}
+
+funksjon vent_kjeldefragment(handle: ordbok_tekst) -> boolsk {
+    hvis handle["status"] != "kjorer" {
+        linje("  [FEIL] Kunne ikkje starte Gen1 NCB source-compile " +
+              tekst(handle["source_rel"]) + ": " + tekst(handle["error"]))
+        returner usann
+    }
+    la resultat = builtin.process_operation(
+        process_abi.async_wait_request(handle["handle"], 1200000))
+    la output = builtin.process_operation(
+        process_abi.async_operation("read", handle["handle"]))
+    hvis output["stdout"] != "" { skriv(output["stdout"]) }
+    hvis output["stderr"] != "" { skriv(output["stderr"]) }
+    builtin.process_operation(process_abi.async_operation("close", handle["handle"]))
+    hvis resultat["status"] != "ferdig" eller
+       heltall_fra_tekst(tekst(resultat["exit_code"])) != 0 {
+        linje("  [FEIL] Gen1 NCB source-compile " + tekst(handle["source_rel"]) +
               " status=" + tekst(resultat["status"]) +
               " exit=" + tekst(resultat["exit_code"]))
-        hvis fil_finst(progress_sti) {
-            linje("  [DIAG] Siste compiler-safe-point: " + les_fil_trygt(progress_sti))
+        hvis fil_finst(handle["progress_sti"]) {
+            linje("  [DIAG] Siste compiler-safe-point: " +
+                  les_fil_trygt(handle["progress_sti"]))
         }
         returner usann
     }
-    hvis ikkje fil_finst(out_sti) eller bytes(out_sti) == "0" {
-        linje("  [FEIL] Gen1 NCB skreiv ikkje gyldig " + out_name)
+    hvis ikkje fil_finst(handle["out_sti"]) eller bytes(handle["out_sti"]) == "0" {
+        linje("  [FEIL] Gen1 NCB skreiv ikkje gyldig " + tekst(handle["out_name"]))
         returner usann
     }
-    linje("  [OK] Gen1 NCB source-compile " + source_rel + " -> " + out_name)
+    linje("  [OK] Gen1 NCB source-compile " + tekst(handle["source_rel"]) +
+          " -> " + tekst(handle["out_name"]))
     returner sann
 }
 
@@ -344,14 +383,29 @@ funksjon bygg_source_only_gen2(root: tekst, gen1_ncb: tekst, output: tekst) -> b
         "selfhost/bundler.no|selfhost.bundler|bundler.ncb.json\n" +
         "selfhost/elf_compile_driver.no|selfhost.elf_compile_driver|elf_compile_driver.ncb.json",
         "\n")
+    la handles = []
     la i = 0
     mens i < lengde(specs) {
         la delar = builtin.split(specs[i], "|")
-        hvis lengde(delar) != 3 eller
-           ikkje materialiser_kjeldefragment(root, gen1_ncb, ncb_dir,
-                                             delar[0], delar[1], delar[2]) { returner usann }
+        hvis lengde(delar) != 3 { returner usann }
+        la handle = start_kjeldefragment(root, gen1_ncb, ncb_dir,
+                                         delar[0], delar[1], delar[2])
+        hvis handle["status"] != "kjorer" {
+            linje("  [FEIL] Async Gen1-start feila for " + delar[0])
+            returner usann
+        }
+        legg_til(handles, handle)
         i = i + 1
     }
+    linje("  [INFO] " + tekst_fra_heiltall(lengde(handles)) +
+          " Gen1-kjeldekompileringar køyrer deterministisk parallelt")
+    la alle_ok = sann
+    i = 0
+    mens i < lengde(handles) {
+        hvis ikkje vent_kjeldefragment(handles[i]) { alle_ok = usann }
+        i = i + 1
+    }
+    hvis ikkje alle_ok { returner usann }
 
     la miljø = nc_miljø(root)
     miljø["NORSCODE_FRAGMENT_NCB_DIR"] = ncb_dir
