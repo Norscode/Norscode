@@ -65,6 +65,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Oppfølgjaren `30789046021` stadfesta seed-, L5- og begge L5b-portane grøne, men loggen avslørte at Linux-stage0 tolka argv-kallet `native test` som `nc_main`-selftest. Strict-avhukinga blir derfor halden open. Parallell-eigaren bind no `NORSCODE_CMD=test`, krev ei ikkje-tom `Totalt:`-oppsummering frå kvar shard og minst 100 samla oppdaga testar i fullflata; ein selftest eller tom testliste kan ikkje lenger gi grøn strict.
 - Fail-closed-køyringa `30790807053` avviste alle åtte falske selftest-shards etter at committed Linux-stage0 ignorerte den nyare async `environment`-blokka. Orkestratoren bind no kommando, shardindeks og capability-miljø i foreldreprosessen før kvar fork, slik at den eldre backenden arvar eit eige snapshot. Lokal reproduksjon med `NORSCODE_CMD=run` rundt orkestratoren køyrer den ekte testen og rapporterer `__NORSCODE_TEST_TOTAL__=1`; strict står framleis open til same bevis er grønt i Linux-CI.
 - Køyring `30791877369` stadfesta at miljøsnapshotet blir arva, men avdekte neste versjonsgrense: committed Linux-stage0 avviser den nyare `NORSCODE_CMD=test`. Shardane brukar derfor no den stabile `NORSCODE_CMD=run`-kontrakten med `NORSCODE_FILE=tools/nc_test.no`; strict står open til Linux-CI rapporterer ekte samla testtotal.
+- Fail-closed-køyring `30793296940` starta den ekte normalflata, men alle åtte shards nådde den eksplisitte 3 600-sekunders prosessgrensa på den trege committed Linux-stage0-en. Loggen viste reelle testnamn og avdekte òg at tillitsankeret manglar `builtin.system_info` og `builtin.contains_any`; dette er ein raud port, ikkje testbevis. Strict brukar no fire deterministiske shards utan runner-oversubscription, ei tretimars prosessgrense, miljøfallback for systeminfo-testane og eit eksplisitt klassifisert kompatibilitetshopp for den manglande `contains_any`-builtinen.
 
 ## Fase 3 – Fjern shellavhengigheiter
 
@@ -298,6 +299,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - ARM64-lana bygde kandidaten som eitt ELF-image med innebygde compiler-, VM- og executor-NCB-ar og bevarte executable-modus utan å krevje den nyare `fil_sett_kjorbar`-builtin-en i committed ARM64-stage0. Filesystem/prosess/tråd, rein Norscode Argon2id og TLS/epoll passerte før rapporten vart signert.
 - Linux x86-64-publisering pakkar no den verifiserte committed stage0-en direkte. `setup-zig` og den Docker-/Zig-bygde Argon2-overgangskandidaten er fjerna frå `publish.yml`; rein Norscode Argon2id er allereie standard. Fasepunktet står ope medan ARM64-attestasjon og Windows-kandidatbygg framleis har aktive GCC/Zig/C-overgangar.
 - Publish-køyring `30793908580` avdekte at den spora `bin/nc`-symlenka peikar på ignorert `dist/norscode_native` i ein rein checkout. Begge publiseringsjobbar materialiserer derfor no `dist` gjennom sine committed stage0-ar og `tools/ci_runtime_fileops.no` før fyrste CLI-gate; ingen uverifisert hostkopiering er lagd til.
+- Oppfølgjaren `30794657692` er heilt grøn: macOS arm64 og Linux x86-64 materialiserte runtime frå committed stage0, køyrde seed-/feature-/hosting- og selfcheck-portane, pakka og hasha artefakta gjennom Norscode. Linux-jobben installerte ikkje Zig og køyrde ingen Docker-/C-overgangskandidat; GitHub Release vart korrekt hoppa over på ikkje-tagga gren.
 
 ## Fase 6 – Yting
 
@@ -372,7 +374,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] `./bin/nc selfcompile-l5b` med og utan cache
 - [ ] `./bin/nc local-green --strict`
 - [x] `./bin/nc release-preflight`
-- [x] Alle testar og slow-lane-testar utan uklassifiserte hopp
+- [ ] Alle testar og slow-lane-testar utan uklassifiserte hopp
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
 - [ ] Ingen aktive `.sh`, `.py`, `.c`, `.h` eller Zig-kjelder i normal bygg-/release-/CI-flate
 - [ ] Ingen eksterne prosessar for operasjonar Norscode sjølv støttar
