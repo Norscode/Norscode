@@ -297,6 +297,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Same samla port verifiserte kandidat-SHA-256 `040c20b20d2071d5445d247da5d672a38136aa08748acdd1b911f68fc40c79d3` for Linux x86-64, `2aae1af663f83a8de43e0d533b5f9351eb2eaa2be609bfeb8378a5cafea715f6` for Linux ARM64 og `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0` for Windows. Windows-kandidaten er byte-identisk med committed Windows-stage0 på same hash.
 - ARM64-lana bygde kandidaten som eitt ELF-image med innebygde compiler-, VM- og executor-NCB-ar og bevarte executable-modus utan å krevje den nyare `fil_sett_kjorbar`-builtin-en i committed ARM64-stage0. Filesystem/prosess/tråd, rein Norscode Argon2id og TLS/epoll passerte før rapporten vart signert.
 - Linux x86-64-publisering pakkar no den verifiserte committed stage0-en direkte. `setup-zig` og den Docker-/Zig-bygde Argon2-overgangskandidaten er fjerna frå `publish.yml`; rein Norscode Argon2id er allereie standard. Fasepunktet står ope medan ARM64-attestasjon og Windows-kandidatbygg framleis har aktive GCC/Zig/C-overgangar.
+- Publish-køyring `30793908580` avdekte at den spora `bin/nc`-symlenka peikar på ignorert `dist/norscode_native` i ein rein checkout. Begge publiseringsjobbar materialiserer derfor no `dist` gjennom sine committed stage0-ar og `tools/ci_runtime_fileops.no` før fyrste CLI-gate; ingen uverifisert hostkopiering er lagd til.
 
 ## Fase 6 – Yting
 
