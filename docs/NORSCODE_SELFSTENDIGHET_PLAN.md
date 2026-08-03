@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 61 av 78 punkt er verifiserte, 17 står opne.**
+**Avhukingsstatus 2026-08-03: 57 av 78 punkt er verifiserte, 21 står opne.**
 
 ## Mål og reglar
 
@@ -80,12 +80,13 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
 - [x] Arkiver eller slett alle erstatta aktive shellwrapperar.
 - [x] La active-surface feile på kvar aktiv `.sh`-fil og kvart extensionlaust shellscript.
-- [x] Fjern shell som eksekveringslag frå aktive CI-`run:`-blokker; Norscode-eigde jobbar skal startast utan at runnerens shell er ein del av verktøykjeda, med berre smale plattform-/signeringsgrenser eksplisitt klassifiserte.
+- [ ] Fjern shell som eksekveringslag frå aktive CI-`run:`-blokker; Norscode-eigde jobbar skal startast utan at runnerens shell er ein del av verktøykjeda, med berre smale plattform-/signeringsgrenser eksplisitt klassifiserte.
 - [x] Migrer dei attverande aktive `.no`-verktøya bort frå tekstbasert `exec_prosess`; filoperasjonar skal bruke filesystem-ABI og eksterne plattformprogram skal startast med strukturert executable/argv.
 - [x] Utvid active-surface med ein reell null-baseline for shell-eksekvering i normal bygg-, test-, installasjons- og releaseflyt. Direkte Norscode-tekst i ein GitHub Actions-`run:`-blokk tel framleis som shellavhengigheit.
 
 ### Fase 3-evidens
 
+- Ny kandidatverifikasjon avdekte at steg med `NORSCODE_CMD`/`NORSCODE_FILE` kunne kapre den ytre committed stage0-en før custom-shell-adapteren starta. CI-shellpunktet er derfor opna att til alle slike steg bruker det separate `NORSCODE_CI_CHILD_CMD`/`NORSCODE_CI_CHILD_FILE`-namnerommet og ein ny levande fleirplattformkøyring beviser at den oppgitte kandidaten faktisk blir starta.
 - Første levande inventar 2026-07-30 var 115 shellfiler, ikkje det eldre estimatet på 112.
 - Sanningskontroll 2026-08-03 fann elleve shell-launcherar som det gamle `.sh`-inventaret ikkje kunne sjå: `nc`, `nl`, `nor`, `bin/nl`, `bin/nor`, to `.wrapper`-filer og fire identiske prosjektmalar. Rot- og `bin/`-aliasa er no native symlenker, dei ubrukte wrapperane er sletta, og `startproject` kopierer den native runtimebinæren inn i nye prosjekt. Active-surface brukar no ein hard nullbaseline over heile den aktive repositoryflata og les berre filstarten gjennom filesystem-ABI-en for å oppdage shell-shebang utan filending. Både separat v144-kandidat og aktiv runtime er levande grøne; nullbaselinen kan ikkje lenger omgåast av inventarrapporten.
 - Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette var åleine ikkje fullført fase 3; den innebygde workflow-shellflata måtte òg migrerast.
@@ -278,15 +279,16 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 - [ ] Fjern aktiv GCC/Zig-orkestrering frå Linux-bygg.
 - [ ] Fjern aktive C-bundlarar frå Windows PE/runtime-bygg.
-- [x] Reparer Windows stage0/kandidat-avviket og krev identisk hash.
+- [ ] Reparer Windows stage0/kandidat-avviket og krev identisk hash.
 - [ ] Fullfør filesystem-, prosess-, nettverk-, tråd- og sikkerheits-ABI-ar.
 - [ ] Køyr native Linux x86-64 og ARM64 utan Docker-byggeverktøy i normalflyten.
 - [x] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
 - [x] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
-- [x] Set `production_ready_all_platforms=true` berre når alle tre er attesterte.
+- [ ] Set `production_ready_all_platforms=true` berre når alle tre er attestert på gjeldande kandidatgenerasjon.
 
 ### Fase 5-evidens
 
+- CI-køyring `30803006017` på kjeldecommit `73f1000f99e3f753ed5204cbac9bfd8aa68bbec1` beviser at gjeldande kandidatgenerasjon enno ikkje kan reknast som samla produksjonsklar. Windows-stage0 hadde SHA-256 `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0`, medan kandidaten hadde `65e8d931983c42d665b3877dfb467fa766041d63db969585af62d2b9560b4804`; Linux ARM64-attestasjonen stoppa samstundes med `native TLS backend unavailable`. Dei eldre grøne attestasjonane under er historisk evidens for tidlegare generasjonar, ikkje godkjenning av den gjeldande kandidaten.
 - Windows cross-kandidat A og B er byte-identiske: begge er 11 033 362 byte med SHA-256 `dae19811fdf3c1f0fe1fa4788434538dc8f4998f1b4087f71bc4d36dbc47e20e`. Committed Windows-stage0 er 10 682 803 byte med SHA-256 `4e30aef18e037e2eff20b7307908cc5328e7842e6e1faa6a1340bae48a9b4bed`; avviket er dermed ein reell promoterings-/attestasjonsgrense, ikkje eit nondeterministisk cross-bygg.
 - `tools/windows_runtime_attestation.no` er migrert bort frå `bash.exe`, `awk`, `mkdir -p`, Git-tekstkommandoar og `builtin.exec_prosess`. Ho brukar no systeminfo-ABI, Norscode SHA-256, filesystem-ABI og strukturert executable/argv, og bind rapporten til `GITHUB_SHA` eller eksplisitt `NORSCODE_SOURCE_COMMIT`.
 - `tools/platform_readiness_v3600.no` er òg shellfri: runtime-smoke brukar avgrensa tempområde og direkte argv, binærhash går gjennom native Norscode SHA-256-ABI, og GitHub/Sigstore-verifisering blir starta som strukturert `gh`-prosess. Den levande porten rapporterer `production_ready_all_platforms=false` til signerte attestasjonar faktisk finst.
@@ -382,5 +384,5 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
 - [ ] Ingen aktive `.sh`, `.py`, `.c`, `.h` eller Zig-kjelder i normal bygg-/release-/CI-flate
 - [ ] Ingen eksterne prosessar for operasjonar Norscode sjølv støttar
-- [x] Signert attestasjon frå macOS, Linux og ekte Windows
+- [ ] Signert attestasjon frå macOS, Linux og ekte Windows på gjeldande kandidatgenerasjon
 - [ ] Dokumentasjon og statusmatriser samsvarer med levande portar
