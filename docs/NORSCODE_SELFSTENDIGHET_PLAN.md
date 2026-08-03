@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 58 av 78 punkt er verifiserte, 20 står opne.**
+**Avhukingsstatus 2026-08-03: 57 av 78 punkt er verifiserte, 21 står opne.**
 
 ## Mål og reglar
 
@@ -74,7 +74,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Klassifiser dei aktive `.sh`-filene som wrapper, test, bygg, release eller plattform.
 - [x] Fullfør Norscode-API for kataloglisting, kopiering, flytting, sletting, filmodus og mellombelse område.
 - [x] Fullfør strukturert prosesskøyring med executable, argv, cwd, miljø, stdin, timeout og outputgrenser.
-- [x] Implementer Norscode-eigd TAR, gzip, hashing og binær filflyt.
+- [ ] Implementer Norscode-eigd TAR, gzip, hashing og binær filflyt.
 - [x] Erstatt shellkommandoar i standardbiblioteket før verktøy og CI blir migrerte.
 - [x] Forby `sh -c`, `rm -rf`, `find`, `gzip` og `tar` i aktiv kjerneflate.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
@@ -85,6 +85,8 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Utvid active-surface med ein reell null-baseline for shell-eksekvering i normal bygg-, test-, installasjons- og releaseflyt. Direkte Norscode-tekst i ein GitHub Actions-`run:`-blokk tel framleis som shellavhengigheit.
 
 ### Fase 3-evidens
+
+- Integritetsrevisjon 2026-08-03 opna TAR/gzip/hash/binær-punktet igjen: den reine ZIP-skrivaren brukte feil CRC32-oppslagstabell, og den nye Windows-straumen førte binærdata gjennom tekst i CRC-passet. Ekte `unzip -t` avviste alle seks postar sjølv om den interne strukturtesten var grøn. Punktet står ope til korrekt CRC-vektor, ZIP-rundtur, stor binærstraum og TAR/gzip-regresjonar er levande grøne; eigarskap åleine er ikkje nok.
 
 - Ny kandidatverifikasjon avdekte at steg med `NORSCODE_CMD`/`NORSCODE_FILE` kunne kapre den ytre committed stage0-en før custom-shell-adapteren starta. CI-shellpunktet er derfor opna att til alle slike steg bruker det separate `NORSCODE_VM_CI_CHILD_CMD`/`NORSCODE_VM_CI_CHILD_FILE`-namnerommet og ein ny levande fleirplattformkøyring beviser at den oppgitte kandidaten faktisk blir starta.
 - Oppfølgingskøyringane `30804972797` og `30804972820` avdekte at sekundoppløyst `mtime` ikkje var nok til å velje rett mellombels Actions-fil: steg kunne bli falskt grøne utan å produsere artefakt, og strict-jobben brukte berre ti sekund. Alle 39 miljøstyrte steg bind derfor no `NORSCODE_VM_CI_CHILD_EXECUTABLE` eksplisitt; active-surface feilar dersom ein barnekommando manglar executable-binding. Desse køyringane er diagnostisk evidens og blir ikkje rekna som grøn strict-/plattformverifikasjon.
