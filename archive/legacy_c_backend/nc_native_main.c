@@ -1820,7 +1820,8 @@ static int nc_csv_has_token(const char *csv, const char *token) {
 
 static int nc_native_disk_scope_allows(const char *path) {
     if (!path || !path[0] || strstr(path, "..")) return 0;
-    const char *scope = getenv("NORSCODE_VM_DISK_ROOT");
+    const char *scope = getenv("NORSCODE_VM_DIRECT_DISK_ROOT");
+    if (!scope || !scope[0]) scope = getenv("NORSCODE_VM_DISK_ROOT");
     if (!scope || !scope[0] || !strcmp(scope, ".")) return path[0] != '/';
     const char *cursor = scope;
     while (*cursor) {
@@ -1921,7 +1922,8 @@ static const char *nc_native_security_check(const char *name, NcVal **args, int 
     }
     const char *capability = nc_native_capability_for(name);
     if (!capability) return NULL;
-    const char *caps = getenv("NORSCODE_VM_CAPABILITIES");
+    const char *caps = getenv("NORSCODE_VM_DIRECT_CAPABILITIES");
+    if (!caps || !caps[0]) caps = getenv("NORSCODE_VM_CAPABILITIES");
     if (!nc_csv_has_token(caps, capability)) {
         snprintf(g_native_last_security_denial, sizeof(g_native_last_security_denial),
                  "%s:denied", capability);
