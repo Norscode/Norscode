@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 58 av 78 punkt er verifiserte, 20 står opne.**
+**Avhukingsstatus 2026-08-03: 61 av 78 punkt er verifiserte, 17 står opne.**
 
 ## Mål og reglar
 
@@ -29,10 +29,10 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Instrumenter VM-en med funksjon, opcode, instruction pointer, operandstack, rammedjupn og siste trygge punkt.
 - [x] Fullfør eigne permanente stackbalanseportar for bundler, dynamiske kall, `INDEX_GET`, GC-røter og VM-i-VM-kall.
 - [x] Reparer runtime-/codegen-feilen utan å auke stackgrensa.
-- [ ] Regenerer precompiled kandidatar først etter grøn kjeldebane.
+- [x] Regenerer precompiled kandidatar først etter grøn kjeldebane.
 - [x] Køyr L5b-mini tre gonger med cache på og av.
-- [ ] Køyr full L5b tre gonger med cache på og av.
-- [ ] Stadfest byte-identisk kandidat A/Gen2 og grøn, byte-identisk L5 Gen1/Gen2.
+- [x] Køyr full L5b tre gonger med cache på og av.
+- [x] Stadfest byte-identisk kandidat A/Gen2 og grøn, byte-identisk L5 Gen1/Gen2.
 
 ### Fase 2-evidens
 
@@ -67,6 +67,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Køyring `30791877369` stadfesta at miljøsnapshotet blir arva, men avdekte neste versjonsgrense: committed Linux-stage0 avviser den nyare `NORSCODE_CMD=test`. Shardane brukar derfor no den stabile `NORSCODE_CMD=run`-kontrakten med `NORSCODE_FILE=tools/nc_test.no`; strict står open til Linux-CI rapporterer ekte samla testtotal.
 - Fail-closed-køyring `30793296940` starta den ekte normalflata, men alle åtte shards nådde den eksplisitte 3 600-sekunders prosessgrensa på den trege committed Linux-stage0-en. Loggen viste reelle testnamn og avdekte òg at tillitsankeret manglar `builtin.system_info` og `builtin.contains_any`; dette er ein raud port, ikkje testbevis. Strict brukar no fire deterministiske shards utan runner-oversubscription, ei tretimars prosessgrense, miljøfallback for systeminfo-testane og eit eksplisitt klassifisert kompatibilitetshopp for den manglande `contains_any`-builtinen.
 - Strict-køyring `30799251130` kom gjennom aktiv-flate, bootstrap A+B/C, L5 og L5b-mini, men avviste full L5b med cache på: kjeldekandidaten var 1 951 165 byte og cachekandidaten 1 949 588 byte. Fase 2 sine cache-/full-L5b-avhukingar er derfor opna igjen til precompiled-modulane er regenererte frå grøn kjelde og tre nye rundar er byte-identiske.
+- Sanningsrettinga fjerna den ubrukte, mellombelse `embedded_ncb_image`-kjeldeendringa som hadde gjort kjeldekandidaten større utan å regenerere cache. På endeleg arbeidskopi er full L5b 3/3 grøn med cache på, kandidat A/B byte-identiske på 1 949 588 byte, og 3/3 grøn source-only med cache av, kandidat A/B byte-identiske på 1 703 503 byte. Ingen stackgrense vart endra. Fase 2 er dermed lukka igjen på levande bevis.
 
 ## Fase 3 – Fjern shellavhengigheiter
 
