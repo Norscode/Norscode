@@ -1,0 +1,127 @@
+// Bygg ein eksplisitt ARM64 TLS-overgangskandidat på ekte Linux ARM64-host.
+// Kandidaten blir berre brukt til attestasjon og blir ikkje promotert her.
+
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon er_linux_arm64_elf(sti: tekst) -> boolsk {
+    prøv {
+        la b = builtin.fil_les_binær(sti)
+        returner lengde(b) >= 20 og b[0] == 127 og b[1] == 69 og b[2] == 76 og b[3] == 70 og
+            b[4] == 2 og b[5] == 1 og b[18] == 183 og b[19] == 0
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
+    hvis lengde(bytes) < lengde(markør) { returner usann }
+    la start = lengde(bytes) - lengde(markør)
+    la i = 0
+    mens i < lengde(markør) {
+        hvis bytes[start + i] != (builtin.char_code(markør[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon er_single_binary(sti: tekst) -> boolsk {
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
+            sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon legg_til_payload(payload_map, namn: tekst, sti: tekst, out: tekst, pos: heiltall) -> heiltall {
+    la ncb = builtin.fil_les(sti)
+    la parsed = builtin.json_parse_raw(ncb)
+    la format = parsed["format"]
+    hvis format != null og format != "" og format != "norscode-bytecode-v1" og format != "ncb-v1" {
+        kast "Ugyldig NCB-format: " + sti
+    }
+    hvis parsed["entry"] == null eller parsed["functions"] == null {
+        kast "Ufullstendig NCB: " + sti
+    }
+    builtin.fil_append(out, ncb)
+    payload_map[namn] = {"start": pos, "length": lengde(ncb)}
+    returner pos + lengde(ncb)
+}
+
+funksjon bygg_single_binary(root: tekst, out: tekst) -> boolsk {
+    prøv {
+        // Linkaren har allereie oppretta `out` med executable-modus. Ved å
+        // streame image-traileren på staden bevarer vi modusen også på eldre
+        // stage0-ar som enno ikkje eksponerer fil_sett_kjorbar.
+        la base = builtin.fil_les_binær(out)
+        la payload_map = {}
+        la pos = lengde(base)
+        pos = legg_til_payload(payload_map, "compiler", root + "/bootstrap/kompiler.ncb.json", out, pos)
+        pos = legg_til_payload(payload_map, "vm", root + "/bootstrap/precompiled/vm.ncb.json", out, pos)
+        pos = legg_til_payload(payload_map, "vm-executor", root + "/selfhost/vm_executor.ncb.json", out, pos)
+        la manifest = builtin.json_stringify({"format": "norscode-ncb-text-v1", "payloads": payload_map})
+        builtin.fil_append(out, manifest)
+        la lengdetekst = tekst_fra_heltall(lengde(manifest))
+        la pad = 20 - lengde(lengdetekst)
+        la i = 0
+        mens i < pad {
+            builtin.fil_append(out, "0")
+            i = i + 1
+        }
+        builtin.fil_append(out, lengdetekst)
+        builtin.fil_append(out, "NORSCODE_NCB_TEXT_V1")
+        returner er_single_binary(out)
+    } fang (e) {
+        skriv("[FAIL] ARM64 single-binary-image: " + tekst(e) + "\n")
+        returner usann
+    }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la system = env("RUNNER_OS")
+    la maskin = builtin.lower(env("RUNNER_ARCH"))
+    hvis system != "Linux" eller (maskin != "aarch64" og maskin != "arm64") {
+        skriv("[FAIL] ARM64 TLS-kandidaten krev ekte Linux ARM64-host\n")
+        returner 2
+    }
+
+    la out_dir = root + "/build/linux-arm64-attested"
+    la out = out_dir + "/norscode-linux-arm64-tls"
+    skriv("[ARM64] lagar kontrollert kandidatområde\n")
+    prøv { builtin.mkdir_p(out_dir) } fang (e) {
+        skriv("[FAIL] ARM64-kandidatområdet kunne ikkje opprettast: " + tekst(e) + "\n")
+        returner 1
+    }
+
+    la argv: liste_tekst = [
+        "-O2", "-DNC_ENABLE_OPENSSL", "-DNC_DYNAMIC_SQLITE",
+        "-Iarchive/legacy_c_backend", "build/v3009/native_candidate_gc.c",
+        "-lpthread", "-ldl", "-lm", "-lssl", "-lcrypto", "-o", out
+    ]
+    skriv("[ARM64] byggjer TLS-overgangskandidat med strukturert argv\n")
+    la resultat = prosess.køyr("/usr/bin/gcc", argv, root, {}, 1200000)
+    prosess.skriv_resultat(resultat)
+    hvis ikkje prosess.ok(resultat) eller ikkje er_linux_arm64_elf(out) {
+        skriv("[FAIL] ARM64 TLS-overgangskandidaten kunne ikkje byggjast eller validerast\n")
+        returner 1
+    }
+
+    skriv("[ARM64] byggjer verifisert single-binary-image i Norscode\n")
+    hvis ikkje bygg_single_binary(root, out) eller ikkje er_linux_arm64_elf(out) {
+        skriv("[FAIL] ARM64-kandidaten kunne ikkje byggje eit verifisert single-binary-image\n")
+        returner 1
+    }
+    la data = builtin.fil_les_binær(out)
+    skriv("[OK] ARM64 TLS-overgangskandidat bygd som single-binary på ekte ARM64-host\n")
+    // Den historiske stage0-en manglar sha256_bytes. Den nybygde kandidaten
+    // og den signerte attestasjonsdriveren gjer hashkontrollen i neste steg.
+    skriv("[OK] bytes=" + tekst_fra_heiltall(lengde(data)) + "\n")
+    returner 0
+}
