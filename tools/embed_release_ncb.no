@@ -113,11 +113,25 @@ funksjon eksisterande_text_image_start(sti: tekst, bytes) -> heiltall {
     returner total
 }
 
-funksjon stream_embed_med_lengder(base_sti: tekst, out_sti: tekst,
-                                  payload_namn: liste_tekst, payload_data: liste_tekst,
-                                  payload_lengder: liste_heiltall) -> heiltall {
+funksjon binær_span_lik(base_liste: liste_heiltall, start: heiltall, payload) -> boolsk {
+    la kandidatliste = builtin.bytes_to_list(payload)
+    hvis start < 0 eller start + lengde(kandidatliste) > lengde(base_liste) { returner usann }
+    la i = 0
+    mens i < lengde(kandidatliste) {
+        hvis base_liste[start + i] != kandidatliste[i] { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon stream_embed_med_binær_lengder(base_sti: tekst, out_sti: tekst,
+                                         payload_namn: liste_tekst, payload_data: liste_tekst,
+                                         payload_lengder: liste_heiltall, payload_binær) -> heiltall {
     hvis lengde(payload_namn) != lengde(payload_data) eller
-       lengde(payload_data) != lengde(payload_lengder) { returner 1 }
+       lengde(payload_data) != lengde(payload_lengder) {
+        skriv("[embed] payloadlistene har ulik lengde\n")
+        returner 1
+    }
     la base = builtin.fil_les_binær(base_sti)
     la base_start = eksisterande_text_image_start(base_sti, base)
     la pos = base_start
@@ -142,11 +156,74 @@ funksjon stream_embed_med_lengder(base_sti: tekst, out_sti: tekst,
         // kanonisk. Bevar han byte for byte; eldre runtimeversjonar kan elles
         // serialisere same map i ei anna feltrekkefølgje.
         la manifest_start = eksisterande_manifest_start(base)
-        hvis manifest_start < 0 eller pos != manifest_start { returner 1 }
+        hvis manifest_start < 0 {
+            skriv("[embed] kunne ikkje finne eksisterande manifest\n")
+            returner 1
+        }
+        hvis pos != manifest_start {
+            skriv("[embed] payloadspan avvik: berekna=" + tekst_fra_heiltall(pos) +
+                  " manifest=" + tekst_fra_heiltall(manifest_start) + "\n")
+            returner 1
+        }
+        // Reproduserbarheitskontrollen er den vanlege bana: dersom alle
+        // levande payloadar allereie er byte-identiske med stage0-image-et,
+        // kopierer vi heile den verifiserte basefila. Det fungerer òg på den
+        // historiske macOS-stage0-en som enno ikkje har `readwrite`-modus.
+        la same_payloadar = sann
+        la base_mål = native_fs.native_sti_rot_relativ(base_sti)
+        la inn = native_fs.opne_native(base_mål["root"], base_mål["relative"], "read")
+        hvis inn["status"] != "open" eller native_fs.native_seek(inn, base_start)["status"] != "ok" {
+            // Committed macOS-stage0 manglar seek i filesystem-v1. Der er
+            // tekstindeksen framleis bytebasert, så den eldre listebrua kan
+            // samanlikne payloadspennet eksakt utan å skrive om binæren.
+            la base_liste = builtin.bytes_to_list(base)
+            la liste_pos = base_start
+            i = 0
+            mens same_payloadar og i < lengde(payload_data) {
+                hvis lengde(payload_binær) == lengde(payload_data) {
+                    hvis ikkje binær_span_lik(base_liste, liste_pos, payload_binær[i]) {
+                        same_payloadar = usann
+                    }
+                } ellers hvis ikkje image.bytes_matchar_tekst(base_liste, liste_pos, payload_data[i]) eller
+                          lengde(payload_data[i]) != payload_lengder[i] {
+                    same_payloadar = usann
+                }
+                liste_pos = liste_pos + payload_lengder[i]
+                i = i + 1
+            }
+        } ellers {
+            i = 0
+            mens same_payloadar og i < lengde(payload_data) {
+                la del = native_fs.native_les(inn, payload_lengder[i])
+                hvis del["status"] != "ok" eller del["data"] != payload_data[i] {
+                    skriv("[embed] eksisterande payload avvik for " + payload_namn[i] +
+                          ": status=" + tekst(del["status"]) +
+                          " read_value=" + tekst(del["value"]) +
+                          " read_chars=" + tekst_fra_heiltall(lengde(tekst(del["data"]))) +
+                          " source_chars=" + tekst_fra_heiltall(lengde(payload_data[i])) +
+                          " source_bytes=" + tekst_fra_heiltall(payload_lengder[i]) + "\n")
+                    same_payloadar = usann
+                }
+                i = i + 1
+            }
+        }
+        hvis inn["status"] == "open" { native_fs.native_lukk(inn) }
+        hvis same_payloadar {
+            builtin.fil_skriv_binær(out_sti, base)
+            returner 0
+        }
         la mål = native_fs.native_sti_rot_relativ(out_sti)
         builtin.fil_skriv_binær(out_sti, base)
         la ut = native_fs.opne_native(mål["root"], mål["relative"], "readwrite")
-        hvis ut["status"] != "open" eller native_fs.native_seek(ut, base_start)["status"] != "ok" { returner 1 }
+        hvis ut["status"] != "open" {
+            skriv("[embed] kunne ikkje opne output readwrite\n")
+            returner 1
+        }
+        hvis native_fs.native_seek(ut, base_start)["status"] != "ok" {
+            skriv("[embed] kunne ikkje søkje til payloadstart\n")
+            native_fs.native_lukk(ut)
+            returner 1
+        }
         i = 0
         mens i < lengde(payload_data) {
             la skreve = native_fs.native_skriv(ut, payload_data[i])
@@ -155,12 +232,18 @@ funksjon stream_embed_med_lengder(base_sti: tekst, out_sti: tekst,
             // bland desse einingane. Den ferdige fila blir kontrollert med
             // binær storleik/hash av eigaren etter flush og close.
             hvis skreve["status"] != "ok" {
+                skriv("[embed] payloadskriving feila for " + payload_namn[i] +
+                      ": " + tekst(skreve["error"]) + "\n")
                 native_fs.native_lukk(ut)
                 returner 1
             }
             i = i + 1
         }
-        hvis native_fs.native_flush(ut)["status"] != "ok" { native_fs.native_lukk(ut)  returner 1 }
+        hvis native_fs.native_flush(ut)["status"] != "ok" {
+            skriv("[embed] flush feila\n")
+            native_fs.native_lukk(ut)
+            returner 1
+        }
         native_fs.native_lukk(ut)
         returner 0
     }
@@ -175,6 +258,13 @@ funksjon stream_embed_med_lengder(base_sti: tekst, out_sti: tekst,
     builtin.fil_append(out_sti, lengdetekst)
     builtin.fil_append(out_sti, "NORSCODE_NCB_TEXT_V1")
     returner 0
+}
+
+funksjon stream_embed_med_lengder(base_sti: tekst, out_sti: tekst,
+                                  payload_namn: liste_tekst, payload_data: liste_tekst,
+                                  payload_lengder: liste_heiltall) -> heiltall {
+    returner stream_embed_med_binær_lengder(base_sti, out_sti, payload_namn,
+                                             payload_data, payload_lengder, [])
 }
 
 funksjon stream_embed(base_sti: tekst, out_sti: tekst,
