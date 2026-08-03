@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 59 av 78 punkt er verifiserte, 19 står opne.**
+**Avhukingsstatus 2026-08-03: 60 av 78 punkt er verifiserte, 18 står opne.**
 
 ## Mål og reglar
 
@@ -292,10 +292,11 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] Køyr native Linux x86-64 og ARM64 utan Docker-byggeverktøy i normalflyten.
 - [x] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
 - [x] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
-- [ ] Set `production_ready_all_platforms=true` berre når alle tre er attestert på gjeldande kandidatgenerasjon.
+- [x] Set `production_ready_all_platforms=true` berre når alle tre er attestert på gjeldande kandidatgenerasjon.
 
 ### Fase 5-evidens
 
+- CI-køyring `30830409254` på kjeldecommit `1931506d3b517558a636d04323e036bed742e6f3` samla signerte, kjeldebundne runtime-attestasjonar frå macOS arm64, Linux x86-64, Linux ARM64 og ekte Windows x86-64. Den fail-closed samla porten skreiv `production_ready_macos=true`, `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`, `production_ready_windows=true` og `production_ready_all_platforms=true`. Windows-kandidaten og committed Windows-stage0 var byte-identiske med SHA-256 `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0`.
 - CI-køyring `30828388180` på kjeldecommit `2d93f8d6931888ebed237fc540b8c0eac723361d` bygde Windows-kandidat A/B grønt frå den historiske committed macOS-stage0-en. Kandidat og tracked Windows-stage0 er byte-identiske med SHA-256 `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0`; den etterfølgjande ekte Windows x86-64-jobben verifiserte tracked stage0, runtime-ABI, signert attestasjon og kandidatparitet grønt.
 - CI-køyring `30803006017` på kjeldecommit `73f1000f99e3f753ed5204cbac9bfd8aa68bbec1` beviser at gjeldande kandidatgenerasjon enno ikkje kan reknast som samla produksjonsklar. Windows-stage0 hadde SHA-256 `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0`, medan kandidaten hadde `65e8d931983c42d665b3877dfb467fa766041d63db969585af62d2b9560b4804`; Linux ARM64-attestasjonen stoppa samstundes med `native TLS backend unavailable`. Dei eldre grøne attestasjonane under er historisk evidens for tidlegare generasjonar, ikkje godkjenning av den gjeldande kandidaten.
 - Windows cross-kandidat A og B er byte-identiske: begge er 11 033 362 byte med SHA-256 `dae19811fdf3c1f0fe1fa4788434538dc8f4998f1b4087f71bc4d36dbc47e20e`. Committed Windows-stage0 er 10 682 803 byte med SHA-256 `4e30aef18e037e2eff20b7307908cc5328e7842e6e1faa6a1340bae48a9b4bed`; avviket er dermed ein reell promoterings-/attestasjonsgrense, ikkje eit nondeterministisk cross-bygg.
@@ -394,5 +395,5 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
 - [ ] Ingen aktive `.sh`, `.py`, `.c`, `.h` eller Zig-kjelder i normal bygg-/release-/CI-flate
 - [ ] Ingen eksterne prosessar for operasjonar Norscode sjølv støttar
-- [ ] Signert attestasjon frå macOS, Linux og ekte Windows på gjeldande kandidatgenerasjon
+- [x] Signert attestasjon frå macOS, Linux og ekte Windows på gjeldande kandidatgenerasjon
 - [ ] Dokumentasjon og statusmatriser samsvarer med levande portar
