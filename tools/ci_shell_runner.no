@@ -1,0 +1,141 @@
+// Shellfri GitHub Actions-adapter. Actions startar denne Norscode-fila som
+// custom shell og legg den mellombelse run-fila i siste argv-posisjon.
+// Adapteren godtek berre éi direkte executable/argv-linje og bruker den
+// versjonerte prosess-ABI-en; shellsyntaks og PATH-oppslag er forbode.
+
+bruk std.runtime.process_abi som prosess
+bruk std.runtime_filesystem som native_fs
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon argv() -> liste_tekst {
+    prøv {
+        la svar = builtin.argv_operation({"abi": "norscode-argv-v1", "operation": "get"})
+        hvis svar["status"] == "ok" { returner svar["argv"] }
+    } fang (e) {}
+    returner []
+}
+
+funksjon run_fil() -> tekst {
+    la frå_miljø = env("NORSCODE_CI_RUN_FILE")
+    hvis frå_miljø != "" og builtin.fil_finnes(frå_miljø) { returner frå_miljø }
+    la args = argv()
+    la i = lengde(args) - 1
+    mens i >= 0 {
+        la kandidat = tekst(args[i])
+        hvis kandidat != "tools/ci_shell_runner.no" og builtin.fil_finnes(kandidat) {
+            returner kandidat
+        }
+        i = i - 1
+    }
+    // Eldre committed stage0-ar eksponerer ikkje det ekstra custom-shell-
+    // argumentet inne i den nøsta VM-en. Actions legg den aktive skriptfila i
+    // RUNNER_TEMP; vel den nyaste vanlege fila som kompatibilitetsbru.
+    la temp = env("RUNNER_TEMP")
+    hvis temp != "" {
+        la listing = native_fs.native_list(temp, "")
+        hvis listing["status"] == "ok" {
+            la namn = builtin.split(listing["data"], "\n")
+            la nyaste = ""
+            la nyaste_tid: heiltall = -1
+            i = 0
+            mens i < lengde(namn) {
+                la kandidat_namn = builtin.trim(namn[i])
+                hvis kandidat_namn != "" {
+                    la sti = temp + "/" + kandidat_namn
+                    la tid = i
+                    prøv {
+                        la stat = native_fs.native_stat_sti(sti)
+                        tid = heiltall_fra_tekst(tekst(stat["mtime"]))
+                    } fang (e) {}
+                    hvis tid >= nyaste_tid {
+                        prøv {
+                            la innhald = builtin.trim(builtin.fil_les(sti))
+                            hvis builtin.starts_with(innhald, "./") {
+                                nyaste = sti
+                                nyaste_tid = tid
+                            }
+                        } fang (e) {}
+                    }
+                }
+                i = i + 1
+            }
+            hvis nyaste != "" { returner nyaste }
+        }
+    }
+    returner ""
+}
+
+funksjon forboden_shellsyntaks(line: tekst) -> boolsk {
+    returner builtin.contains(line, "|") eller builtin.contains(line, ";") eller
+        builtin.contains(line, "&&") eller builtin.contains(line, "||") eller
+        builtin.contains(line, ">") eller builtin.contains(line, "<") eller
+        builtin.contains(line, "`") eller builtin.contains(line, "$(") eller
+        builtin.contains(line, "\\") eller builtin.contains(line, "\"") eller
+        builtin.contains(line, "'")
+}
+
+funksjon tokeniser(line: tekst) -> liste_tekst {
+    la rå = builtin.split(builtin.replace(line, "\t", " "), " ")
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(rå) {
+        la token = builtin.trim(rå[i])
+        hvis token != "" { legg_til(ut, token) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la fil = run_fil()
+    hvis fil == "" {
+        skriv("FEIL: CI-adapteren manglar Actions run-fil\n")
+        returner 2
+    }
+    la data = builtin.replace(builtin.fil_les(fil), "\r", "")
+    la linjer = builtin.split(data, "\n")
+    la kommando = ""
+    la i = 0
+    mens i < lengde(linjer) {
+        la line = builtin.trim(linjer[i])
+        hvis line != "" {
+            hvis kommando != "" {
+                skriv("FEIL: CI-adapteren tillèt berre éi direkte kommandolinje\n")
+                returner 2
+            }
+            kommando = line
+        }
+        i = i + 1
+    }
+    hvis kommando == "" eller forboden_shellsyntaks(kommando) {
+        skriv("FEIL: CI-adapteren avviser tom kommando eller shellsyntaks\n")
+        returner 2
+    }
+    la delar = tokeniser(kommando)
+    hvis lengde(delar) == 0 eller ikkje builtin.starts_with(delar[0], "./") {
+        skriv("FEIL: CI-adapteren krev eksplisitt repository-relativ executable\n")
+        returner 2
+    }
+    la argument: liste_tekst = []
+    i = 1
+    mens i < lengde(delar) {
+        legg_til(argument, delar[i])
+        i = i + 1
+    }
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la timeout_ms = 14400000
+    la timeout_env = env("NORSCODE_CI_STEP_TIMEOUT_MS")
+    hvis timeout_env != "" { timeout_ms = heiltall_fra_tekst(timeout_env) }
+    la req = prosess.request(delar[0], argument, root, "", timeout_ms, 67108864)
+    la res = builtin.process_spawn_argv(req)
+    skriv(tekst(res["stdout"]))
+    hvis tekst(res["stderr"]) != "" { skriv(tekst(res["stderr"])) }
+    hvis res["status"] == "timeout" { returner 124 }
+    hvis res["status"] != "ferdig" { returner 1 }
+    returner heiltall_fra_tekst(tekst(res["exit_code"]))
+}

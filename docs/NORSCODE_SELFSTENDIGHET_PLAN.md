@@ -4,7 +4,7 @@ Denne fila er den sannferdige arbeidsloggen for sjølvstendigheitsløypa.
 Ei oppgåve blir berre avhuka når ho er implementert og verifisert av den
 levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
-**Avhukingsstatus 2026-08-03: 61 av 78 punkt er verifiserte, 17 står opne.**
+**Avhukingsstatus 2026-08-03: 56 av 78 punkt er verifiserte, 22 står opne.**
 
 ## Mål og reglar
 
@@ -29,10 +29,10 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Instrumenter VM-en med funksjon, opcode, instruction pointer, operandstack, rammedjupn og siste trygge punkt.
 - [x] Fullfør eigne permanente stackbalanseportar for bundler, dynamiske kall, `INDEX_GET`, GC-røter og VM-i-VM-kall.
 - [x] Reparer runtime-/codegen-feilen utan å auke stackgrensa.
-- [x] Regenerer precompiled kandidatar først etter grøn kjeldebane.
+- [ ] Regenerer precompiled kandidatar først etter grøn kjeldebane.
 - [x] Køyr L5b-mini tre gonger med cache på og av.
-- [x] Køyr full L5b tre gonger med cache på og av.
-- [x] Stadfest byte-identisk kandidat A/Gen2 og grøn, byte-identisk L5 Gen1/Gen2.
+- [ ] Køyr full L5b tre gonger med cache på og av.
+- [ ] Stadfest byte-identisk kandidat A/Gen2 og grøn, byte-identisk L5 Gen1/Gen2.
 
 ### Fase 2-evidens
 
@@ -66,6 +66,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Fail-closed-køyringa `30790807053` avviste alle åtte falske selftest-shards etter at committed Linux-stage0 ignorerte den nyare async `environment`-blokka. Orkestratoren bind no kommando, shardindeks og capability-miljø i foreldreprosessen før kvar fork, slik at den eldre backenden arvar eit eige snapshot. Lokal reproduksjon med `NORSCODE_CMD=run` rundt orkestratoren køyrer den ekte testen og rapporterer `__NORSCODE_TEST_TOTAL__=1`; strict står framleis open til same bevis er grønt i Linux-CI.
 - Køyring `30791877369` stadfesta at miljøsnapshotet blir arva, men avdekte neste versjonsgrense: committed Linux-stage0 avviser den nyare `NORSCODE_CMD=test`. Shardane brukar derfor no den stabile `NORSCODE_CMD=run`-kontrakten med `NORSCODE_FILE=tools/nc_test.no`; strict står open til Linux-CI rapporterer ekte samla testtotal.
 - Fail-closed-køyring `30793296940` starta den ekte normalflata, men alle åtte shards nådde den eksplisitte 3 600-sekunders prosessgrensa på den trege committed Linux-stage0-en. Loggen viste reelle testnamn og avdekte òg at tillitsankeret manglar `builtin.system_info` og `builtin.contains_any`; dette er ein raud port, ikkje testbevis. Strict brukar no fire deterministiske shards utan runner-oversubscription, ei tretimars prosessgrense, miljøfallback for systeminfo-testane og eit eksplisitt klassifisert kompatibilitetshopp for den manglande `contains_any`-builtinen.
+- Strict-køyring `30799251130` kom gjennom aktiv-flate, bootstrap A+B/C, L5 og L5b-mini, men avviste full L5b med cache på: kjeldekandidaten var 1 951 165 byte og cachekandidaten 1 949 588 byte. Fase 2 sine cache-/full-L5b-avhukingar er derfor opna igjen til precompiled-modulane er regenererte frå grøn kjelde og tre nye rundar er byte-identiske.
 
 ## Fase 3 – Fjern shellavhengigheiter
 
@@ -78,16 +79,18 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [x] Erstatt `bin/nc`-shellscriptet med native dispatch gjennom `selfhost/nc_main.no`.
 - [x] Arkiver eller slett alle erstatta aktive shellwrapperar.
 - [x] La active-surface feile på kvar aktiv `.sh`-fil og kvart extensionlaust shellscript.
-- [x] Flytt aktive CI-`run:`-blokker som orkestrerer `mkdir`, `cp`, `chmod`, `rm`, løkker, C/Zig-kompilering, Docker eller shellskript til Norscode-eigde `.no`-jobbar; berre direkte oppstart av Norscode og smale plattform-/signeringsgrenser kan stå att.
+- [ ] Fjern shell som eksekveringslag frå aktive CI-`run:`-blokker; Norscode-eigde jobbar skal startast utan at runnerens shell er ein del av verktøykjeda, med berre smale plattform-/signeringsgrenser eksplisitt klassifiserte.
 - [x] Migrer dei attverande aktive `.no`-verktøya bort frå tekstbasert `exec_prosess`; filoperasjonar skal bruke filesystem-ABI og eksterne plattformprogram skal startast med strukturert executable/argv.
-- [x] Utvid active-surface med ein null-baseline for tekstbasert shellorkestrering i normal bygg-, test-, installasjons- og releaseflyt. Eksplisitte fase-5 overgangslaner skal rapporterast separat og kan ikkje telje som fullført fase 3.
+- [ ] Utvid active-surface med ein reell null-baseline for shell-eksekvering i normal bygg-, test-, installasjons- og releaseflyt. Direkte Norscode-tekst i ein GitHub Actions-`run:`-blokk tel framleis som shellavhengigheit.
 
 ### Fase 3-evidens
 
 - Første levande inventar 2026-07-30 var 115 shellfiler, ikkje det eldre estimatet på 112.
 - Sanningskontroll 2026-08-03 fann elleve shell-launcherar som det gamle `.sh`-inventaret ikkje kunne sjå: `nc`, `nl`, `nor`, `bin/nl`, `bin/nor`, to `.wrapper`-filer og fire identiske prosjektmalar. Rot- og `bin/`-aliasa er no native symlenker, dei ubrukte wrapperane er sletta, og `startproject` kopierer den native runtimebinæren inn i nye prosjekt. Active-surface brukar no ein hard nullbaseline over heile den aktive repositoryflata og les berre filstarten gjennom filesystem-ABI-en for å oppdage shell-shebang utan filending. Både separat v144-kandidat og aktiv runtime er levande grøne; nullbaselinen kan ikkje lenger omgåast av inventarrapporten.
 - Ferskt filinventar etter wrappermigrering: 0 aktive `.sh`-filer i wrapper-, test-, bygg-, release- eller plattformkategorien. Dette var åleine ikkje fullført fase 3; den innebygde workflow-shellflata måtte òg migrerast.
-- Den levande Norscode-eigde strict-porten `tools/ci_shell_surface_inventory.no` finn 116 aktive CI-`run:`-blokker: alle 116 er direkte Norscode-bootstrap og 0 inneheld shellorkestrering. Stage0-/artefaktmaterialisering, fixturekopiering, testmiljø, notariseringslisting, hashing/pakking, Windows bygg/attestasjon, native GC-overgang, pakkeinstallasjon og Pebble/Docker-orkestrering har `.no`-eigarar med strukturert argv. `tools/ci_runtime_fileops.no` bruker native filmodus når ABI-en finst og ein eksplisitt strukturert `/bin/chmod`-plattformreserve for eldre committed stage0, etterfølgt av selftest; dette er ein smal, versjonert plattformgrense og ikkje shelltekst. Den maskinlesbare rapporten ligg i `reports/ci-shell-surface-inventory.json`; `active-surface` låser baselinen til 0, og `NORSCODE_CI_SHELL_STRICT=1` er grøn.
+- Sanningskorrigering 2026-08-03: `tools/ci_shell_surface_inventory.no` rapporterte 116 direkte Norscode-bootstrapar som grøne fordi teksten ikkje inneheldt shellorkestrering. GitHub Actions køyrer likevel kvar `run:`-blokk gjennom runnerens shell. Desse 116 blokkene er derfor aktiv shellavhengigheit etter hovudregelen, og Fase 3 står open til workflowane bruker shellfri action-/container-dispatch eller ei eksplisitt godkjend plattformgrense. Den gamle «0 shellorkestrering»-målinga er ikkje lenger sluttbevis.
+- Den stramma v2-porten er køyrd levande og tel no 117 av 117 aktive `run:`-blokker som shell-eksekverte (113 direkte Norscode og 4 andre). `active-surface` feilar eksplisitt med fase-3-baseline 0, medan filflata framleis er grøn med 0 aktive `.sh`-/extensionlause shellscript og 0 legacy tekstprosess-kall. Dette er den autoritative opne Fase 3-blokkeringa.
+- Norscode-adapteren `tools/ci_shell_runner.no` er no bunden som custom `shell` på kvar jobb som har `run:` i alle åtte aktive workflowfiler. Committed stage0 startar adapteren direkte; adapteren finn Actions si mellombelse run-fil gjennom `RUNNER_TEMP`, avviser fleire linjer, shellmetateikn, quoting og PATH-oppslag, og startar berre eksplisitt repository-relativ executable/argv gjennom `norscode-process-spawn-v1`. Lokal levande rapport er `0 av 117` runner-shell, `117` Norscode custom-shell og `0` shellorkestrering; alle workflow-YAML-filer parser og `active-surface` er grøn. Avhukinga står open til Linux-, macOS- og Windows-jobbar har bevist brua på ekte Actions-runnarar.
 - Den extensionfrie POSIX-webbootstrapen `tools/install` er fjerna frå aktiv flate; historikken ligg under `archive/legacy_shell/tools/install.sh`. Lokal installasjon og releaseinstallasjon er eigd av `tools/install.no` og `tools/install_release.no`, og dokumentasjon/release-notat peikar ikkje lenger på `curl | sh`.
 - Sanningskorrigering 2026-08-02: 0 aktive `.sh`-filer og 0 CI-shellblokker var ikkje det same som 0 shellavhengigheit. Det fyrste kjeldeinventaret fann 57 `.no`-filer under `tools/`/`selfhost/` som kalla legacy tekstprosess; fase 3 vart halden open til desse eigarane var migrerte.
 - Rettelsesløypa har migrert lokal installasjon, releaseinstallasjon, releasepakking og release-preflight, macOS app-bygg/pakking og window-host-bygging, bootstrap-binærmaterialisering, atomisk native runtime-materialisering, bootstrap-regenerering, stage0-releaseartefaktbygging, stage0-seedhenting og bootstrap-refresh, feature-check, bootstrap-kompatibilitetsbrua, hybrid compiler-bundle, bundle-entry/diagnose, codegen-diagnose, runtime-basics, runtime-fase-3 med native async socket-prosess, selfhost-kompileringsfasen, native ELF selfcompile, stage0 ELF-selfcompile, IR-/bytekodefasen og overlay, Omgang6-verifisering, Omgang6b-verifisering og Omgang6b NCB-bygg, kernel-QEMU-monitoren, AI patch-vakt, begge stage0-backupverktøya, kandidat-/readiness-status, Windows execution-eigar, Helpdesk HTTP-smoke, mark-rendering, macOS signering/verifikasjon, Metal-overgangsgata, vedlikehaldsdispatcheren, hosting-releasegata, Linux bootstrap-pakking, Linux native-/cross-/OpenSSL-/Zig-Argon-overgangane for x86-64 og ARM64, Zig-Argon-releasegata, Linux runtime-gap-containeren, Linux stage0/random-hex-proben, stage0-planproben, random-hex rebuild-sjekken og macOS rebuild-diagnosen til native filesystem-/systeminfo-/hash-/HTTP-/nettverks-ABI og strukturert argv. Den foreldede v3601 stage0-Docker-løypa er fail-closed og kan ikkje lenger promotere eit ufullstendig verifisert tillitsanker. Det er 0 aktive prosesseigarar. Råinventaret viser berre `release_preflight.no` sine kontraktstrengar og `selfhost/vm.no` si eksplisitte kompatibilitetsbinding; den tokenmedvitne levande null-porten fjernar strengar/kommentarar og er grøn.
