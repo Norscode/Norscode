@@ -1,6 +1,8 @@
 // Minimal, deterministisk ZIP-skrivar for releaseverktøy. Eige modulnamn
 // hindrar at committed stage0 maskerer kjelda med ein eldre std.zip-cache.
 
+bruk std.runtime_filesystem som fs
+
 funksjon le(data: liste_heiltall, verdi: heiltall, breidde: heiltall) -> heiltall {
     la i = 0
     mens i < breidde {
@@ -50,6 +52,149 @@ funksjon crc32(data: liste_heiltall) -> heiltall {
         i = i + 1
     }
     returner crc ^ 4294967295
+}
+
+funksjon crc32_oppdater(crc_inn: heiltall, data: tekst) -> heiltall {
+    la tabell: liste_heiltall = [0, 1996959894, 3993919788, 2567524794,
+        124634137, 1886057615, 3915621685, 2657392035,
+        249268274, 2044508324, 3772115230, 2547177864,
+        162941995, 2125561021, 3887607047, 2428444049]
+    la crc = crc_inn
+    la i = 0
+    mens i < lengde(data) {
+        crc = crc ^ (builtin.char_code(builtin.slice(data, i, i + 1)) & 255)
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        i = i + 1
+    }
+    returner crc
+}
+
+funksjon byte_tekst(data: liste_heiltall) -> tekst {
+    la ut = ""
+    la del = ""
+    la i = 0
+    mens i < lengde(data) {
+        del = del + builtin.chr(data[i] & 255)
+        hvis lengde(del) >= 1024 { ut = ut + del del = "" }
+        i = i + 1
+    }
+    returner ut + del
+}
+
+funksjon analyser_fil(root: tekst, namn: tekst) -> ordbok_tekst {
+    la h = fs.opne_native(root, namn, "read")
+    hvis h["status"] != "open" { returner {"status": "feil", "crc": "0", "size": "0"} }
+    la crc: heiltall = 4294967295
+    la storleik: heiltall = 0
+    la ferdig = usann
+    mens ikkje ferdig {
+        la del = fs.native_les(h, 65536)
+        hvis del["status"] != "ok" { fs.native_lukk(h) returner {"status": "feil", "crc": "0", "size": "0"} }
+        la tal = heiltall_fra_tekst(tekst(del["value"]))
+        hvis tal == 0 { ferdig = sann }
+        ellers {
+            crc = crc32_oppdater(crc, tekst(del["data"]))
+            storleik = storleik + tal
+        }
+    }
+    fs.native_lukk(h)
+    returner {"status": "ok", "crc": tekst_fra_heiltall(crc ^ 4294967295), "size": tekst_fra_heiltall(storleik)}
+}
+
+funksjon append_liste(sti: tekst, data: liste_heiltall) -> boolsk {
+    prøv {
+        builtin.fil_append_binary(sti, builtin.bytes_from_list(data))
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon append_fil(sti: tekst, kjelde: tekst) -> boolsk {
+    prøv {
+        // Bevar NC_BYTES-bufferen frå fil_les_binær direkte. Kandidat-EXE-en
+        // blir aldri materialisert som millionar av VM-listeelement.
+        builtin.fil_append_binary(sti, builtin.fil_les_binær(kjelde))
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+// To-pass streaming held kandidat-EXE-en ute av operandstacken: pass 1 finn
+// CRC/storleik, pass 2 skriv rå blokker direkte til ZIP-fila.
+funksjon zip_skriv_stream(sti: tekst, root: tekst, filer: liste_tekst) -> boolsk {
+    prøv { builtin.fil_skriv_binær(sti, []) }
+    fang (e) { returner usann }
+    la metadata = []
+    la posisjon: heiltall = 0
+    la i = 0
+    mens i < lengde(filer) {
+        la namn = filer[i]
+        hvis ikkje trygt_namn(namn) { returner usann }
+        la info = analyser_fil(root, namn)
+        hvis info["status"] != "ok" { returner usann }
+        la crc = heltall_fra_tekst(tekst(info["crc"]))
+        la storleik = heltall_fra_tekst(tekst(info["size"]))
+        hvis storleik > 4294967295 { returner usann }
+        la namn_data = namn_bytes(namn)
+        la header: liste_heiltall = []
+        le(header, 67324752, 4)
+        le(header, 20, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, crc, 4)
+        le(header, storleik, 4)
+        le(header, storleik, 4)
+        le(header, lengde(namn_data), 2)
+        le(header, 0, 2)
+        hvis ikkje append_liste(sti, header) eller ikkje append_liste(sti, namn_data) eller
+           ikkje append_fil(sti, root + "/" + namn) { returner usann }
+        legg_til(metadata, {"name": namn, "crc": crc, "size": storleik, "offset": posisjon})
+        posisjon = posisjon + 30 + lengde(namn_data) + storleik
+        i = i + 1
+    }
+
+    la central_start = posisjon
+    i = 0
+    mens i < lengde(metadata) {
+        la namn = tekst(metadata[i]["name"])
+        la namn_data = namn_bytes(namn)
+        la header: liste_heiltall = []
+        le(header, 33639248, 4)
+        le(header, 20, 2)
+        le(header, 20, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, heltall_fra_tekst(tekst(metadata[i]["crc"])), 4)
+        le(header, heltall_fra_tekst(tekst(metadata[i]["size"])), 4)
+        le(header, heltall_fra_tekst(tekst(metadata[i]["size"])), 4)
+        le(header, lengde(namn_data), 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 2)
+        le(header, 0, 4)
+        le(header, heltall_fra_tekst(tekst(metadata[i]["offset"])), 4)
+        hvis ikkje append_liste(sti, header) eller ikkje append_liste(sti, namn_data) { returner usann }
+        posisjon = posisjon + 46 + lengde(namn_data)
+        i = i + 1
+    }
+    la slutt: liste_heiltall = []
+    le(slutt, 101010256, 4)
+    le(slutt, 0, 2)
+    le(slutt, 0, 2)
+    le(slutt, lengde(metadata), 2)
+    le(slutt, lengde(metadata), 2)
+    le(slutt, posisjon - central_start, 4)
+    le(slutt, central_start, 4)
+    le(slutt, 0, 2)
+    la ok = append_liste(sti, slutt)
+    hvis ikkje ok { fs.native_slett(".", sti) }
+    returner ok
 }
 
 funksjon les_byte_liste(sti: tekst) -> liste_heiltall {
