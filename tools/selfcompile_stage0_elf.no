@@ -176,6 +176,42 @@ funksjon bind_gen1_lexer_klassifisering(fns) -> boolsk {
     returner sann
 }
 
+funksjon reparer_gen1_loop_pop(fns) -> boolsk {
+    // Det committed Gen1-fragmentet er éin builtin-generasjon eldre enn
+    // kjelda: pop_loop brukar fjern_indeks(liste, lengde-1). Kjelda brukar no
+    // fjern_siste(liste). Normaliser den eksakte gamle sekvensen før Gen1 blir
+    // køyrd, slik at kandidaten og den levande kjelda har same semantikk.
+    la namn = nøkler(fns)
+    la reparert = 0
+    la ni = 0
+    mens ni < lengde(namn) {
+        hvis builtin.ends_with(namn[ni], ".pop_loop") {
+            la fn = fns[namn[ni]]
+            la gammel = fn["code"]
+            la ny = []
+            la i = 0
+            mens i < lengde(gammel) {
+                hvis i + 3 < lengde(gammel) og gammel[i][0] == "LOAD_NAME" og
+                   gammel[i][1] == "n" og gammel[i + 1][0] == "PUSH_CONST" og
+                   gammel[i + 1][1] == 1 og gammel[i + 2][0] == "BINARY_SUB" og
+                   gammel[i + 3][0] == "CALL" og
+                   gammel[i + 3][1] == "builtin.fjern_indeks" {
+                    legg_til(ny, ["CALL", "builtin.fjern_siste", 1])
+                    reparert = reparert + 1
+                    i = i + 4
+                } ellers {
+                    legg_til(ny, gammel[i])
+                    i = i + 1
+                }
+            }
+            fn["code"] = ny
+            fns[namn[ni]] = fn
+        }
+        ni = ni + 1
+    }
+    returner reparert >= 2
+}
+
 funksjon bygg_gen1_source_executor(root: tekst, gen1_ncb: tekst,
                                    executor_ncb: tekst,
                                    executor_elf: tekst) -> boolsk {
@@ -198,6 +234,10 @@ funksjon bygg_gen1_source_executor(root: tekst, gen1_ncb: tekst,
         returner usann
     }
     hvis ikkje bind_gen1_lexer_klassifisering(fns) { returner usann }
+    hvis ikkje reparer_gen1_loop_pop(fns) {
+        linje("  [FEIL] Gen1 loop-pop kunne ikkje normaliserast")
+        returner usann
+    }
     la entry_bundle = builtin.json_parse_raw(les_fil_trygt(entry_ncb))
     la entry_fns = entry_bundle["functions"]
     la entry_src = entry_bundle["entry"]
@@ -239,7 +279,7 @@ funksjon bygg_gen1_source_executor(root: tekst, gen1_ncb: tekst,
     returner sann
 }
 
-funksjon materialiser_kjeldefragment(root: tekst, gen1_elf: tekst,
+funksjon materialiser_kjeldefragment(root: tekst, gen1_ncb: tekst,
                                      ncb_dir: tekst,
                                      source_rel: tekst, module_name: tekst,
                                      out_name: tekst) -> boolsk {
@@ -252,6 +292,10 @@ funksjon materialiser_kjeldefragment(root: tekst, gen1_elf: tekst,
     miljø["NORSCODE_OUTPUT"] = out_sti
     miljø["NORSCODE_MODULE"] = module_name
     miljø["NORSCODE_RUN_CACHE"] = "0"
+    // Source-only-kompilering lagar svært mange mellombelse lister og kart.
+    // Fast-modus slår berre av VM-en si profilerande skyggeheap; dei faktiske
+    // verdiane er framleis eigde og frigjorde av den native runtimen.
+    miljø["NORSCODE_VM_FAST"] = "1"
     miljø["NORSCODE_COMPILER_PROGRESS_FILE"] = progress_sti
     // Eldre runtimegenerasjonar kan framleis slå saman delar av vertsmiljøet
     // sjølv når inherit_env=0. Overstyr alle verdi-baserte bundleinngangar
@@ -260,13 +304,14 @@ funksjon materialiser_kjeldefragment(root: tekst, gen1_elf: tekst,
     miljø["NORSCODE_BUNDLE_OUTPUT"] = ""
     miljø["NORSCODE_OM6B_SOURCE_NCB"] = ""
     miljø["NORSCODE_OM6B_SOURCE_NCB_DIR"] = ""
-    // Gen1 ELF har kompilator-NCB-en innebygd og kompilerer kjelda direkte.
-    // Kvar modul får ein eigen prosess, slik at minnet blir frigjort mellom
-    // modulane utan VM-i-VM-tolking eller precompiled kjeldeartefaktar.
-    la resultat = køyr_lukka(gen1_elf, [], root, miljø, 600000)
+    // Gen1-NCB-en er kompilatorgenerasjonen. Committed stage0 er berre den
+    // deterministiske VM-maskina som køyrer kandidaten direkte; ingen
+    // precompiled kjeldeartefaktar eller AOT-importkopiar deltek.
+    la resultat = køyr_lukka(root + "/bin/nc",
+        ["run-ncb-pure", gen1_ncb], root, miljø, 600000)
     prosess.skriv_resultat(resultat)
     hvis ikkje prosess.ok(resultat) {
-        linje("  [FEIL] Gen1 ELF source-compile " + source_rel +
+        linje("  [FEIL] Gen1 NCB source-compile " + source_rel +
               " status=" + tekst(resultat["status"]) +
               " exit=" + tekst(resultat["exit_code"]))
         hvis fil_finst(progress_sti) {
@@ -275,14 +320,14 @@ funksjon materialiser_kjeldefragment(root: tekst, gen1_elf: tekst,
         returner usann
     }
     hvis ikkje fil_finst(out_sti) eller bytes(out_sti) == "0" {
-        linje("  [FEIL] Gen1 ELF skreiv ikkje gyldig " + out_name)
+        linje("  [FEIL] Gen1 NCB skreiv ikkje gyldig " + out_name)
         returner usann
     }
-    linje("  [OK] Gen1 ELF source-compile " + source_rel + " -> " + out_name)
+    linje("  [OK] Gen1 NCB source-compile " + source_rel + " -> " + out_name)
     returner sann
 }
 
-funksjon bygg_source_only_gen2(root: tekst, gen1_elf: tekst, output: tekst) -> boolsk {
+funksjon bygg_source_only_gen2(root: tekst, gen1_ncb: tekst, output: tekst) -> boolsk {
     la base = root + "/build/6b/selfcompile/source_only"
     la ncb_dir = base + "/ncb"
     la outer_dir = base + "/fragments"
@@ -303,7 +348,7 @@ funksjon bygg_source_only_gen2(root: tekst, gen1_elf: tekst, output: tekst) -> b
     mens i < lengde(specs) {
         la delar = builtin.split(specs[i], "|")
         hvis lengde(delar) != 3 eller
-           ikkje materialiser_kjeldefragment(root, gen1_elf, ncb_dir,
+           ikkje materialiser_kjeldefragment(root, gen1_ncb, ncb_dir,
                                              delar[0], delar[1], delar[2]) { returner usann }
         i = i + 1
     }
@@ -500,11 +545,11 @@ funksjon main() -> heiltall {
         returner 0
     }
 
-    linje("[2/4] Gen2 NCB frå kjelder kompilerte isolert av Gen1 ELF...")
+    linje("[2/4] Gen2 NCB frå kjelder kompilerte isolert av Gen1 NCB...")
     filops.slett_fil(gen2_ncb)
     slett_chunks(base)
     la source_bundle = base + "/source_only_gen2.ncb.json"
-    hvis ikkje bygg_source_only_gen2(root, source_executor_elf, source_bundle) { returner 1 }
+    hvis ikkje bygg_source_only_gen2(root, source_executor_ncb, source_bundle) { returner 1 }
     la gen2_miljø = {
         "PATH": "/nonexistent",
         "NORSCODE_CMD": "run",
