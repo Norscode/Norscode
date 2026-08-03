@@ -338,7 +338,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 ## Fase 7 – Fjern eksterne runtimebibliotek
 
-- [ ] Gjer NorsDB til standard og SQLite til valfri migreringsadapter.
+- [x] Gjer NorsDB til standard og SQLite til valfri migreringsadapter.
 - [x] Gjer rein Norscode TAR/gzip til standard.
 - [x] Implementer Norscode Argon2id med offisielle testvektorar og konstanttidskontroll.
 - [ ] Implementer Norscode TLS/krypto med differentialtesting.
@@ -348,6 +348,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 ### Fase 7-evidens
 
+- `std.db` peikar no på `std.norsdb`, som brukar den reine SQL-, JSON-lagrings-, transaksjons- og poolmotoren frå den levande `.no`-VM-en med separat modulstate. Standardpoolen er merka `norsdb`; `std.sqlite_adapter` og `pool.ny_sqlite` er dei einaste eksplisitte migreringsinngangane til SQLite-ABI-en. Den levande standardtesten køyrer memory-database, CREATE/INSERT/SELECT, rollback, ping og pool-livssyklus utan `db.*`, SQLite eller ekstern runtime i normalbanen. Kontrakttesten krev `external_runtime=false` og avviser SQLite-kall i `std.norsdb`.
 - `std.shutil` annonserer no berre `tar` og `gztar` som standard arkivformat og køyrer begge direkte gjennom `std.tarfile`/`std.gzip`; ukjende format feilar lukka utan ekstern reserveprosess. Den levande standard-API-porten pakkar og pakkar ut både tekst og binærdata gjennom TAR og TAR.GZ, medan dei separate gzip-, tarfile-, shutil- og shellfridomsportane òg er grøne mot v100-Gen1-kandidaten.
 - POSIX-overgangsruntimen kan no byggjast med `NC_DYNAMIC_SQLITE`, same eksplisitte adaptergrense som Windows allereie hadde. SQLite-symbol blir då lasta ved behov med `dlopen`/`dlsym`, og kandidaten har inga direkte SQLite-linkavhengigheit.
 - Kandidat `build/norscode_native_candidate_v95_no_external`, hash `f8d4d5f83ca0ee81abcb8ed826c45e4f4ca3e9765c21a54787e4e3c75043c755` og storleik 11 495 256 byte, er bygd utan OpenSSL, Zig-objekt og direkte SQLite-link. `otool -L` viser berre macOS-systembibliotek og -rammeverk; importtest og `active-surface` er grøne.
