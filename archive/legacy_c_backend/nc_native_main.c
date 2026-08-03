@@ -7786,6 +7786,12 @@ static NcVal *nc_builtin_koyr_med_kontekst_host(NcVal **args, int na) {
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
+    /* Smal overgangs-ABI for ein kandidat som blir starta av ein historisk
+     * stage0 der process_spawn_argv ikkje kan erstatte miljøet. Desse felta
+     * blir berre sette på den direkte kandidatprosessen i ARM64-attestasjonen. */
+    const char *direct_cmd = getenv("NORSCODE_VM_DIRECT_CMD");
+    const char *direct_file = getenv("NORSCODE_VM_DIRECT_FILE");
+    if (direct_cmd && direct_cmd[0]) cmd = direct_cmd;
     /* Når den genererte selfhost-flaten er embedda, skal run/compile gå
      * gjennom Norscode-VM-en og ikkje starte host-exec-ncb-json på nytt. */
     const char *selfhost_mode = getenv("NORSCODE_NATIVE_SELFHOST");
@@ -7828,7 +7834,7 @@ static int nc_try_nc_main_host(void) {
         return nc_val_til_exit(r);
     }
     if(cmd&&!strcmp(cmd,"run-ncb")){
-        const char *path=getenv("NORSCODE_FILE");if(!path||!*path)return -1;NcVal *ncb_json=nc_builtin_fil_les(nc_str(path));if(!ncb_json||ncb_json->type!=NC_STR)return -1;NcVal *args[]={ncb_json};NcVal *result=nc_fn_builtin_host_exec_ncb_json(args,1);return nc_val_til_exit(result);
+        const char *path=(direct_file&&direct_file[0])?direct_file:getenv("NORSCODE_FILE");if(!path||!*path)return -1;NcVal *ncb_json=nc_builtin_fil_les(nc_str(path));if(!ncb_json||ncb_json->type!=NC_STR)return -1;NcVal *args[]={ncb_json};NcVal *result=nc_fn_builtin_host_exec_ncb_json(args,1);return nc_val_til_exit(result);
     }
     if (cmd && !strcmp(cmd, "l5b-gen2")) {
         unsetenv("NORSCODE_FILE");
