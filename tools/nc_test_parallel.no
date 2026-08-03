@@ -29,7 +29,7 @@ funksjon native_bin(root: tekst) -> tekst {
 funksjon start_shard(native: tekst, root: tekst, miljø: ordbok_tekst,
                      timeout: heiltall) -> ordbok_tekst {
     la req = process_abi.async_spawn_request(
-        native, ["test"], root, "", timeout * 1000, 33554432
+        native, [], root, "", timeout * 1000, 33554432
     )
     // Ein full testshard kan kompilere store selfhost-bundlar. Grensa er
     // eksplisitt og per prosess; lågare grenser gav falsk exit 126 under
@@ -37,6 +37,26 @@ funksjon start_shard(native: tekst, root: tekst, miljø: ordbok_tekst,
     process_abi.sett_sandbox(req, "none", 4294967296, 64, sann)
     process_abi.sett_environment(req, miljø)
     returner builtin.process_operation(req)
+}
+
+funksjon resultat_tal(output: tekst, label: tekst) -> heiltall {
+    // Async process-read leverer tekstfeltet JSON-escapa på eldre stage0.
+    // Normaliser berre linjeskiljet før den fail-closed oppsummeringsparseren.
+    la normalisert = builtin.replace(output, "\\n", "\n")
+    la linjer = builtin.split(normalisert, "\n")
+    la prefix = label + ":"
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la linje = tekst(linjer[i])
+        la pos = builtin.index_of(linje, prefix)
+        hvis pos >= 0 {
+            la start = pos + lengde(prefix)
+            la verdi = builtin.trim(builtin.slice(linje, start, lengde(linje)))
+            prøv { returner builtin.heltall_fra_tekst(verdi) } fang (e) { returner -1 }
+        }
+        i = i + 1
+    }
+    returner -1
 }
 
 funksjon vent_shard(handle: ordbok_tekst, wait_ms: heiltall) -> ordbok_tekst {
@@ -63,8 +83,12 @@ funksjon shard_miljø(root: tekst, native: tekst, indeks: heiltall,
     miljø["NC_TEST_SHARDS"] = tekst_fra_heltall(shard_tal)
     miljø["NC_TEST_RUN_ID"] = run_id
     miljø["NC_TEST_CACHE_DIR"] = root + "/build/nc-test-cache"
+    // Linux-stage0 sin argv-kommandoflate kan vere eldre enn kjelda. Bind den
+    // versjonerte testkommandoen eksplisitt i staden for å la `native test`
+    // falle tilbake til nc_main-selftest.
+    miljø["NORSCODE_CMD"] = "test"
     miljø["NORSCODE_ENABLE_EXEC_PROSESS"] = "1"
-    miljø["NORSCODE_VM_CAPABILITIES"] = "env.read,process.exec,thread.spawn,net.tcp,net.dns,disk.read,disk.write,jit.execute"
+    miljø["NORSCODE_VM_CAPABILITIES"] = "env.read,env.write,process.exec,thread.spawn,net.tcp,net.dns,disk.read,disk.write,jit.execute"
     miljø["NORSCODE_VM_DISK_ROOT"] = root + ",.,/tmp,/private/tmp"
 
     la vidare = [
@@ -119,6 +143,7 @@ funksjon start() -> heiltall {
 
     skriv("Norscode parallell test: " + tekst_fra_heltall(shard_tal) + " deterministiske shards\n")
     la feil: heiltall = 0
+    la test_total: heiltall = 0
     la shard_wall_ms_max: heiltall = 0
     la shard_peak_rss_sum_bytes: heiltall = 0
     i = 0
@@ -140,12 +165,18 @@ funksjon start() -> heiltall {
             shard_peak_rss_sum_bytes = shard_peak_rss_sum_bytes +
                 heltall_fra_tekst(tekst(ferdig["peak_rss_bytes"]))
         }
+        la shard_total = resultat_tal(tekst(output["stdout"]), "Totalt")
+        hvis shard_total > 0 { test_total = test_total + shard_total }
         hvis status != "ferdig" eller exit_code != 0 {
             skriv("[FEIL] shard " + tekst_fra_heltall(i) + " status=" + status +
                   " exit=" + tekst_fra_heltall(exit_code) + "\n")
             hvis finnes_nøkkel(ferdig, "error") og tekst(ferdig["error"]) != "" {
                 skriv("  error=" + tekst(ferdig["error"]) + "\n")
             }
+            feil = feil + 1
+        } ellers hvis shard_total <= 0 {
+            skriv("[FEIL] shard " + tekst_fra_heltall(i) +
+                  " manglar ikkje-tom testoppsummering; nc_main-selftest tel ikkje\n")
             feil = feil + 1
         } ellers {
             skriv("[OK] shard " + tekst_fra_heltall(i) + "\n")
@@ -158,6 +189,14 @@ funksjon start() -> heiltall {
         skriv("FEIL: " + tekst_fra_heltall(feil) + " test-shards feila\n")
         returner 1
     }
+    la minimum = tal_env("NC_PARALLEL_TEST_MIN_TOTAL", 100)
+    hvis env("NC_TEST_FILE") != "" eller env("NC_TEST_FILES") != "" { minimum = 1 }
+    hvis test_total < minimum {
+        skriv("FEIL: testshardane oppdaga berre " + tekst_fra_heltall(test_total) +
+              " testar; minimum er " + tekst_fra_heltall(minimum) + "\n")
+        returner 1
+    }
+    skriv("__NORSCODE_TEST_TOTAL__=" + tekst_fra_heltall(test_total) + "\n")
     skriv("__NORSCODE_TEST_SHARD_WALL_MS_MAX__=" + tekst_fra_heltall(shard_wall_ms_max) + "\n")
     skriv("__NORSCODE_TEST_SHARD_PEAK_RSS_SUM_BYTES__=" + tekst_fra_heltall(shard_peak_rss_sum_bytes) + "\n")
     skriv("OK: alle parallelle test-shards bestod\n")
