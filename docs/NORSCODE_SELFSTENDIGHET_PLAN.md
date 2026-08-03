@@ -61,6 +61,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Tillitsankera `dist/norscode_native` og `bootstrap/stage0/norscode-macos-arm64` er ikkje promoterte.
 - Permanent stackmatrise: bundler-normalisering, 600 dynamiske `ncb_call_fn`-kall, native `INDEX_GET`-matrise, GC-root/minor/major/compaction og 64 gjentekne kall gjennom ei ekte indre Norscode-VM er grøne. `tests/test_stack_balance_gate_contract.no` låser delportane.
 - Plattform-only-kandidat v127 avdekte at cachematerialisatoren brukte prefiksmatching, slik at `std.runtime.process_abi` feilaktig vart gruppert som `std.runtime` og transitive bundlermodular kom i feil byte-rekkjefølgje. Materialisatoren vel no eksakt `module`-felt og bevarer Gen1-rekkjefølgja. Gjeldande L5 er 1 947 287 byte identisk Gen1/Gen2; full L5b er 1 947 287 byte identisk med cache på og 1 699 464 byte identisk mellom separat source-only kandidat A/B med cache av. L5b-mini, cachekontrakt og GC-rotdeduplisering er grøne.
+- Linux strict-køyring `30787528682` stadfesta den reparerte committed VM-cachen: L5 Gen1/Gen2 var byte-identiske på 1 949 588 byte, full L5b med cache på var byte-identisk på 1 949 588 byte og source-only kandidat A/B med cache av var byte-identiske på 1 701 924 byte. Køyringa stoppa seinare i seed-steget fordi eldre stage0 gav tom systeminfo i den nøsta VM-en. Strict-eigaren bind no `NORSCODE_SEED_PLATFORM` før barneprosessen; lokal isolert seed-smoke er grøn, men sluttavhukinga står open til ny full CI-køyring er grøn.
 
 ## Fase 3 – Fjern shellavhengigheiter
 
@@ -274,7 +275,7 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - [ ] Køyr native Linux x86-64 og ARM64 utan Docker-byggeverktøy i normalflyten.
 - [x] Køyr ekte Windows-attestasjon for SChannel, AppContainer, IOCP, prosess og Argon2id.
 - [x] Køyr macOS-attestasjon for signering, sandbox, TLS og native runtime.
-- [ ] Set `production_ready_all_platforms=true` berre når alle tre er attesterte.
+- [x] Set `production_ready_all_platforms=true` berre når alle tre er attesterte.
 
 ### Fase 5-evidens
 
@@ -289,8 +290,9 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 - Etter promotering av den kanoniske kandidaten bygde CI-køyring `30749456344` ein ny kandidat med same SHA-256 `d1917398a0c0b026dc9e3a4d0ae2163fa2e7863d1b428ccc9cb2b4b58cb98298`. Heile køyringa er grøn, og Windows-jobben stadfesta tracked stage0, ekte runtime-attestasjon, signert provenance, samla plattformreadiness og byte-identisk stage0/kandidat.
 - CI-køyring `30780123410` attesterte neste Windows-generasjon på ekte Windows-host mot kjeldecommit `b1ed6e2484d74c276d5a7b92b331d1460c5641c3`. SChannel TLS 1.3, AppContainer, IOCP, filesystem, prosess, Argon2id og ACME-signering/verifisering var grøne; kandidaten hadde SHA-256 `aaed9f4b40d729470f325cdcdf639466bdf4f679cdf4bd4c47b6b7c5646b6de2`. Den signerte kandidaten vart deretter verifisert lokalt gjennom promoteringsportens dry-run og atomisk promotert. `bootstrap/stage0/SHA256SUMS` peikar no på same hash, medan førre stage0 `d1917398...98298` er bevart og hashverifisert som rollback.
 - CI-køyring `30750405335`, jobb `91503362573`, køyrde kandidaten på ein ekte GitHub-hosted Darwin ARM64-runner. Han bestod native selftest, Norscode-generert og ad-hoc-signert Mach-O AOT, Seatbelt-sandbox og TLS 1.3 med CRL, OCSP og mTLS. GitHub signerte rapporten med build provenance, og fail-closed plattformreadiness verifiserte både signaturen, kjeldecommit `06dcff51fe8902a7b08c7ea3e692e4653ffa50ee` og kandidat-SHA-256 `933003b594d8ed4adf0f6ae2116ec9c3bc1986cf919af3c295f8c310d7dff796`.
-- CI har no ein eigen fail-closed `all-platform-runtime-attestation`-jobb. Han lastar ned dei fire signerte macOS-, Linux x86-64-, Linux ARM64- og Windows-artefakta, bind alle rapportane til same kjeldecommit og krev at den levande Norscode-porten faktisk skriv `production_ready_all_platforms=true`. Punktet blir ståande ope til denne samla jobben er grøn.
-- ARM64-lana køyrer den kjeldebygde proben direkte i committed ARM64-stage0 i staden for å starte ein ny VM inne i VM-en. Filesystem/prosess/tråd, Argon2id og TLS/epoll er separate fail-closed steg med treminuttsgrense; rapporten blir berre skriven etter at alle tre er grøne. Dette fjernar den observerte henginga i den eldre ARM-prosessventinga og gjer kvar backend synleg i CI. Attestasjonspunktet står ope til denne nye delte lana er signert grøn.
+- CI-køyring `30788036517`, kjeldecommit `39f0447dcabb22d54ecaa331b933e6593ab438ca`, fullførte den fail-closed samla plattformjobben grønt. Jobben lasta ned og signaturverifiserte macOS-, Linux x86-64-, Linux ARM64- og ekte Windows-rapportane, batt alle til same kjeldecommit og skreiv `production_ready_macos=true`, `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`, `production_ready_windows=true` og `production_ready_all_platforms=true`.
+- Same samla port verifiserte kandidat-SHA-256 `040c20b20d2071d5445d247da5d672a38136aa08748acdd1b911f68fc40c79d3` for Linux x86-64, `2aae1af663f83a8de43e0d533b5f9351eb2eaa2be609bfeb8378a5cafea715f6` for Linux ARM64 og `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0` for Windows. Windows-kandidaten er byte-identisk med committed Windows-stage0 på same hash.
+- ARM64-lana bygde kandidaten som eitt ELF-image med innebygde compiler-, VM- og executor-NCB-ar og bevarte executable-modus utan å krevje den nyare `fil_sett_kjorbar`-builtin-en i committed ARM64-stage0. Filesystem/prosess/tråd, rein Norscode Argon2id og TLS/epoll passerte før rapporten vart signert.
 
 ## Fase 6 – Yting
 
@@ -360,13 +362,13 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 ## Endeleg godkjenning
 
 - [x] `./bin/nc active-surface`
-- [x] `./bin/nc selvstendighet --strict`
+- [ ] `./bin/nc selvstendighet --strict`
 - [x] `./bin/nc selfcompile-l5b` med og utan cache
-- [x] `./bin/nc local-green --strict`
+- [ ] `./bin/nc local-green --strict`
 - [x] `./bin/nc release-preflight`
 - [x] Alle testar og slow-lane-testar utan uklassifiserte hopp
 - [ ] Byte-identisk Gen1/Gen2 på alle støtta plattformer
 - [ ] Ingen aktive `.sh`, `.py`, `.c`, `.h` eller Zig-kjelder i normal bygg-/release-/CI-flate
 - [ ] Ingen eksterne prosessar for operasjonar Norscode sjølv støttar
-- [ ] Signert attestasjon frå macOS, Linux og ekte Windows
+- [x] Signert attestasjon frå macOS, Linux og ekte Windows
 - [ ] Dokumentasjon og statusmatriser samsvarer med levande portar
