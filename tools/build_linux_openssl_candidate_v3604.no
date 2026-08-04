@@ -1,8 +1,8 @@
-// Bygg eksplisitt fase-5 Linux x86_64-kandidat med OpenSSL utan shelltekst.
-// Kandidaten blir ikkje promotert til stage0 eller dist.
+// Bygg ein fersk Linux x86-64 full-host direkte frå levande Norscode-kjelder.
+// Filnamnet er halde stabilt for workflow-kompatibilitet; normalbana brukar
+// ikkje lenger Docker, GCC, Zig eller legacy C-backend.
 
 bruk std.filops som filops
-bruk tools.docker_runner som docker_runner
 bruk tools.process_runner som prosess
 
 funksjon env(namn: tekst) -> tekst {
@@ -19,77 +19,59 @@ funksjon er_linux_x86_64_elf(sti: tekst) -> boolsk {
     returner usann
 }
 
-funksjon er_direkte_linux_x86_64() -> boolsk {
-    la os = env("RUNNER_OS")
-    la arch = builtin.lower(env("RUNNER_ARCH"))
-    hvis os != "" { returner os == "Linux" og (arch == "x64" eller arch == "x86_64" eller arch == "amd64") }
-    prøv {
-        la info = builtin.system_info()
-        la machine = builtin.lower(tekst(info["machine"]))
-        returner tekst(info["system"]) == "Linux" og
-            (machine == "x86_64" eller machine == "amd64")
-    } fang (e) { returner usann }
-    returner usann
+funksjon køyr_norscode_verktøy(root: tekst, runtime: tekst, fil: tekst,
+                               miljø: ordbok_tekst, timeout_ms: heiltall) -> boolsk {
+    miljø["NORSCODE_ROOT"] = root
+    miljø["NORSCODE_ENABLE_EXEC_PROSESS"] = "1"
+    miljø["NORSCODE_VM_CAPABILITIES"] = "env.read,process.exec,disk.read,disk.write"
+    miljø["NORSCODE_VM_DISK_ROOT"] = root + ",.,/tmp,/private/tmp"
+    miljø["NORSCODE_CMD"] = "run"
+    miljø["NORSCODE_FILE"] = root + "/" + fil
+    la resultat = prosess.køyr(runtime, [], root, miljø, timeout_ms)
+    prosess.skriv_resultat(resultat)
+    returner prosess.ok(resultat)
 }
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
     hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
-    la image = env("NORSCODE_DOCKER_IMAGE")
-    hvis image == "" { image = "ubuntu:24.04" }
     la out_dir = root + "/build/v3600/linux"
-    la out_rel = "build/v3600/linux/norscode_native_linux_x86_64_v3603_openssl"
-    la out = root + "/" + out_rel
+    la ncb = out_dir + "/nc_main_current.ncb.json"
+    la out = out_dir + "/norscode_native_linux_x86_64_v3603_openssl"
     hvis ikkje filops.lag_katalogar(out_dir) { returner 1 }
 
-    hvis er_direkte_linux_x86_64() {
-        la argv: liste_tekst = [
-            "-O2", "-DNC_ENABLE_OPENSSL", "-DNC_DYNAMIC_SQLITE",
-            "-Iarchive/legacy_c_backend", "build/v3009/native_candidate_gc.c",
-            "-lpthread", "-ldl", "-lm", "-lssl", "-lcrypto", "-o", out
-        ]
-        la bygg = prosess.køyr("/usr/bin/gcc", argv, root, {}, 1200000)
-        prosess.skriv_resultat(bygg)
-        hvis ikkje prosess.ok(bygg) eller ikkje er_linux_x86_64_elf(out) {
-            skriv("[FAIL] direkte Linux OpenSSL-kandidat kunne ikkje byggjast eller validerast\n")
-            returner 1
-        }
-        la data = builtin.fil_les_binær(out)
-        skriv("[OK] Linux OpenSSL-kandidat bygd direkte på ekte x86_64-host; ikkje promotert\n")
-        skriv("[OK] bytes=" + tekst_fra_heiltall(lengde(data)) + " sha256=" + builtin.sha256_bytes(data) + "\n")
-        returner 0
+    la runtime = env("NC_NATIVE")
+    hvis runtime == "" { runtime = root + "/dist/norscode_native" }
+    la compile_env: ordbok_tekst = {
+        "NORSCODE_HYBRID_ROOT": root,
+        "NORSCODE_HYBRID_SRC": root + "/selfhost/nc_main.no",
+        "NORSCODE_HYBRID_OUT": ncb,
+        "NORSCODE_HYBRID_MODULE": "selfhost.nc_main",
+        "NORSCODE_HYBRID_PROJECT_ROOT": root,
+        "NORSCODE_NATIVE_BIN": runtime
+    }
+    hvis ikkje køyr_norscode_verktøy(root, runtime,
+        "tools/compile_with_hybrid_bundle_v9400.no", compile_env, 900000) {
+        skriv("[FAIL] Norscode kunne ikkje kompilere levande nc_main/importgraf\n")
+        returner 1
     }
 
-    la docker = docker_runner.finn()
-    hvis ikkje docker_runner.tilgjengeleg(docker, root) {
-        skriv("[FAIL] Docker er ikkje tilgjengeleg for fase-5-overgangen\n")
+    la elf_env: ordbok_tekst = {
+        "NORSCODE_NCB_TO_ELF_INPUT": ncb,
+        "NORSCODE_NCB_TO_ELF_OUTPUT": out,
+        "NORSCODE_NATIVE_BIN": runtime
+    }
+    hvis ikkje køyr_norscode_verktøy(root, runtime,
+        "tools/ncb_to_elf.no", elf_env, 1200000) {
+        skriv("[FAIL] Norscode native codegen kunne ikkje byggje Linux full-host\n")
         returner 1
     }
-    la container = docker_runner.opprett(docker, root, root, "linux/amd64", image, "openssl-candidate-v3604")
-    hvis container == "" { returner 1 }
-    hvis ikkje docker_runner.start(docker, root, container) {
-        docker_runner.fjern(docker, root, container)
-        returner 1
-    }
-    hvis ikkje docker_runner.installer_pakkar(docker, root, container,
-        ["build-essential", "libsqlite3-dev", "libssl-dev"]) {
-        docker_runner.fjern(docker, root, container)
-        returner 1
-    }
-    la argv: liste_tekst = [
-        "gcc", "-O2", "-DNC_ENABLE_OPENSSL", "-Iarchive/legacy_c_backend",
-        "build/v3009/native_candidate_gc.c", "third_party/sqlite/sqlite3.c",
-        "-lpthread", "-ldl", "-lm", "-lssl", "-lcrypto", "-o", "/work/" + out_rel
-    ]
-    la bygg = docker_runner.køyr_i(docker, root, container, argv, 1200000)
-    prosess.skriv_resultat(bygg)
-    docker_runner.fjern(docker, root, container)
-    hvis ikkje prosess.ok(bygg) eller ikkje er_linux_x86_64_elf(out) {
-        skriv("[FAIL] Linux OpenSSL-kandidat kunne ikkje byggjast eller validerast\n")
+    hvis ikkje er_linux_x86_64_elf(out) {
+        skriv("[FAIL] native codegen-resultatet er ikkje Linux x86-64 ELF\n")
         returner 1
     }
     la data = builtin.fil_les_binær(out)
-    skriv("[OK] Linux OpenSSL-kandidat bygd; ikkje promotert\n")
+    skriv("[OK] Linux full-host bygd direkte av Norscode native codegen; ikkje promotert\n")
     skriv("[OK] bytes=" + tekst_fra_heiltall(lengde(data)) + " sha256=" + builtin.sha256_bytes(data) + "\n")
     returner 0
 }
