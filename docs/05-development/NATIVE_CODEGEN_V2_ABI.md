@@ -13,7 +13,8 @@ runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging og oppstart.
   `_start` lagrar rå `argv**` og `argc` her; konstantsida held fram read-only og GC-kontrollblokka
   blir ikkje brukt til vertspekeren.
 - `HEAP_VA()` – heapbase: `6291456`.
-- `HEAP_SZ()` – reserverer 256 MiB heap for den breie selfhost-kandidaten.
+- `HEAP_SZ()` – reserverer 1 GiB virtuell heap for den breie, to-passa
+  source-only selfhost-kandidaten; berre rørte sider blir fysisk minne.
 
 Kompilerte ELF-binarar legg runtime-kode på `TEXT_VA` og data/heap i faste område
 for deterministisk bygging.
