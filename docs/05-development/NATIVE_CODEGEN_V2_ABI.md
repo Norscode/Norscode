@@ -10,7 +10,7 @@ runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging og oppstart.
   Basen held full-host-text og konstantdata i separate ELF-segment; kodegeneratoren
   feilar lukka dersom tekst eller data veks inn i neste segment.
 - `HOST_ABI_VA()` – eiga skrivebar vertsside: `6225920` (`0x5f0000`).
-  `_start` lagrar rå `argv**` her; konstantsida held fram read-only og GC-kontrollblokka
+  `_start` lagrar rå `argv**` og `argc` her; konstantsida held fram read-only og GC-kontrollblokka
   blir ikkje brukt til vertspekeren.
 - `HEAP_VA()` – heapbase: `6291456`.
 - `HEAP_SZ()` – reserverer 256 MiB heap for den breie selfhost-kandidaten.
@@ -37,7 +37,7 @@ og ikkje del av seed-first bygg i dagleg flyt.
 
 `_start`:
 
-1. Fangar original stack og legg `argv` i verts-ABI-segmentet og `envp` i runtime-slotten.
+1. Fangar original stack og legg `argv`/`argc` i verts-ABI-segmentet og `envp` i runtime-slotten.
 2. Justerer stack til SysV-aligned tilstand.
 3. Kallar `RT_INIT_HEAP()` før start-funksjon.
 4. Kallar entryfunksjon (`start_fn`) frå NCB-entryfeltet.
