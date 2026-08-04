@@ -6,7 +6,9 @@ runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging og oppstart.
 ## Runtime-seksjonar
 
 - `TEXT_VA()` – tekstsegmentbase: `4198400`.
-- `DATA_VA()` – konstantdatabase (string-litteraler): `5242880`.
+- `DATA_VA()` – konstantdatabase (string-litteraler): `5505024` (`0x540000`).
+  Basen held full-host-text og konstantdata i separate ELF-segment; kodegeneratoren
+  feilar lukka dersom tekst eller data veks inn i neste segment.
 - `HEAP_VA()` – heapbase: `6291456`.
 - `HEAP_SZ()` – reserverer 64 MiB heap.
 
