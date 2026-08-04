@@ -3713,6 +3713,21 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
 #endif
         free(buf); pthread_mutex_unlock(&slot->mutex); return r;
     }
+    if (!strcmp(operation,"read_binary")) {
+        long long max=nc_atomic_int_field(request,"max",65536);
+        if(max<1||max>1048576){pthread_mutex_unlock(&slot->mutex);return nc_filesystem_result("feil",slot,"",-1,"invalid binary read size");}
+        NcVal *bytes=nc_bytes_new((size_t)max,0);
+#if defined(_WIN32)
+        char backend_error[NCW_ERROR_CAP]="";
+        int64_t n=ncw_file_read(&slot->file,bytes->bytes->data,(size_t)max,backend_error,sizeof(backend_error));
+        NcVal *r=n<0?nc_filesystem_result("feil",slot,"",-1,backend_error):nc_filesystem_result("ok",slot,"",n,"");
+#else
+        ssize_t n=read(slot->fd,bytes->bytes->data,(size_t)max);
+        NcVal *r=n<0?nc_filesystem_result("feil",slot,"",-1,strerror(errno)):nc_filesystem_result("ok",slot,"",n,"");
+#endif
+        if(n>=0){bytes->bytes->len=(size_t)n;nc_index_set(r,nc_str("data_bytes"),bytes);}
+        pthread_mutex_unlock(&slot->mutex);return r;
+    }
     if (!strcmp(operation,"write")) {
         const char *data=nc_atomic_text_field(request,"data","");
 #if defined(_WIN32)
@@ -3759,7 +3774,7 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
 static NcVal *nc_builtin_filesystem_read_operation(NcVal *request) {
     const char *operation=nc_atomic_text_field(request,"operation","");
     if (!strcmp(operation,"open") && strcmp(nc_atomic_text_field(request,"mode",""),"read")) return nc_filesystem_result("feil",NULL,"",-1,"write mode requires disk.write");
-    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"list") && strcmp(operation,"list_typed") && strcmp(operation,"walk_files") && strcmp(operation,"path_stat") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
+    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"read_binary") && strcmp(operation,"list") && strcmp(operation,"list_typed") && strcmp(operation,"walk_files") && strcmp(operation,"path_stat") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
     return nc_builtin_filesystem_operation(request);
 }
 

@@ -1,0 +1,183 @@
+// Deterministisk TAR.GZ som held maksimalt éi 64 KiB binærblokk i VM-en.
+
+bruk std.runtime_filesystem som fs
+bruk std.filops som filops
+
+funksjon ascii(data: liste_heiltall, offset: heiltall, verdi: tekst, breidde: heiltall) -> heiltall {
+    la i = 0
+    mens i < breidde {
+        hvis i < lengde(verdi) { data[offset + i] = builtin.char_code(builtin.slice(verdi, i, i + 1)) }
+        ellers { data[offset + i] = 0 }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon oktal(verdi: heiltall, breidde: heiltall) -> tekst {
+    la s = ""
+    la v = verdi
+    hvis v == 0 { s = "0" }
+    mens v > 0 { s = builtin.chr(48 + (v % 8)) + s v = v / 8 }
+    mens lengde(s) < breidde - 1 { s = "0" + s }
+    returner s + " "
+}
+
+funksjon namn_deler(namn: tekst) -> ordbok_tekst {
+    hvis lengde(namn) <= 100 { returner {"status": "ok", "name": namn, "prefix": ""} }
+    la i = lengde(namn) - 1
+    mens i > 0 {
+        hvis builtin.slice(namn, i, i + 1) == "/" {
+            la prefix = builtin.slice(namn, 0, i)
+            la base = builtin.slice(namn, i + 1, lengde(namn))
+            hvis lengde(prefix) <= 155 og lengde(base) <= 100 {
+                returner {"status": "ok", "name": base, "prefix": prefix}
+            }
+        }
+        i = i - 1
+    }
+    returner {"status": "feil", "name": "", "prefix": ""}
+}
+
+funksjon tar_header(namn: tekst, storleik: heiltall, mode: heiltall) -> liste_heiltall {
+    la deler = namn_deler(namn)
+    hvis deler["status"] != "ok" { returner [] }
+    la h: liste_heiltall = []
+    la i = 0
+    mens i < 512 { legg_til(h, 0) i = i + 1 }
+    ascii(h, 0, deler["name"], 100)
+    ascii(h, 100, oktal(mode & 511, 8), 8)
+    ascii(h, 108, "0000000", 8)
+    ascii(h, 116, "0000000", 8)
+    ascii(h, 124, oktal(storleik, 12), 12)
+    ascii(h, 136, "00000000000 ", 12)
+    i = 148
+    mens i < 156 { h[i] = 32 i = i + 1 }
+    h[156] = 48
+    ascii(h, 257, "ustar", 6)
+    ascii(h, 263, "00", 2)
+    ascii(h, 345, deler["prefix"], 155)
+    la sum = 0
+    i = 0
+    mens i < 512 { sum = sum + h[i] i = i + 1 }
+    ascii(h, 148, oktal(sum, 8), 8)
+    returner h
+}
+
+funksjon append_bytes(sti: tekst, data) -> boolsk {
+    prøv { builtin.fil_append_binary(sti, data) returner sann }
+    fang (e) { returner usann }
+    returner usann
+}
+
+funksjon crc_oppdater(crc_inn: heiltall, data) -> heiltall {
+    la tabell: liste_heiltall = [0, 498536548, 997073096, 651767980,
+        1994146192, 1802195444, 1303535960, 1342533948,
+        3988292384, 4027552580, 3604390888, 3412177804,
+        2607071920, 2262029012, 2685067896, 3183342108]
+    la crc = crc_inn
+    la i = 0
+    mens i < lengde(data) {
+        crc = crc ^ (data[i] & 255)
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        i = i + 1
+    }
+    returner crc
+}
+
+funksjon gzip_blokk(sti: tekst, tilstand: ordbok_tekst, data) -> boolsk {
+    la n = lengde(data)
+    hvis n > 65535 { returner usann }
+    la inv = 65535 - n
+    hvis ikkje append_bytes(sti, builtin.bytes_from_list(
+        [0, n & 255, (n >> 8) & 255, inv & 255, (inv >> 8) & 255])) { returner usann }
+    hvis n > 0 og ikkje append_bytes(sti, data) { returner usann }
+    tilstand["crc"] = tekst_fra_heiltall(crc_oppdater(
+        heltall_fra_tekst(tilstand["crc"]), data))
+    tilstand["size"] = tekst_fra_heiltall(heltall_fra_tekst(tilstand["size"]) + n)
+    returner sann
+}
+
+funksjon gzip_liste(sti: tekst, tilstand: ordbok_tekst,
+                    data: liste_heiltall) -> boolsk {
+    returner gzip_blokk(sti, tilstand, builtin.bytes_from_list(data))
+}
+
+funksjon binærstraum_støtta(sti: tekst) -> boolsk {
+    la deler = fs.native_sti_rot_relativ(sti)
+    la h = fs.opne_native(tekst(deler["root"]), tekst(deler["relative"]), "read")
+    hvis h["status"] != "open" { returner usann }
+    la del = fs.native_les_binær(h, 1)
+    fs.native_lukk(h)
+    returner del["status"] == "ok" og har_nokkel(del, "data_bytes")
+}
+
+funksjon lag_tar_gzip(tar_gz_sti: tekst, root: tekst, filer: liste_tekst,
+                      modusar: ordbok_tekst) -> boolsk {
+    filops.slett_fil(tar_gz_sti)
+    prøv {
+        builtin.fil_skriv_binær(tar_gz_sti,
+            builtin.bytes_from_list([31, 139, 8, 0, 0, 0, 0, 0, 0, 255]))
+    } fang (e) { returner usann }
+    la tilstand: ordbok_tekst = {"crc": "4294967295", "size": "0"}
+    la ok = sann
+    la i = 0
+    mens i < lengde(filer) og ok {
+        la namn = filer[i]
+        hvis namn == "" eller builtin.starts_with(namn, "/") eller
+           builtin.index_of(namn, "../") >= 0 { ok = usann }
+        ellers {
+            la filsti = root + "/" + namn
+            la stat = fs.native_stat_sti(filsti)
+            hvis stat["status"] != "ok" { ok = usann }
+            ellers {
+                la storleik = heltall_fra_tekst(tekst(stat["value"]))
+                la mode = heltall_fra_tekst(tekst(stat["mode"])) & 511
+                hvis har_nokkel(modusar, namn) { mode = heltall_fra_tekst(modusar[namn]) & 511 }
+                la header = tar_header(namn, storleik, mode)
+                hvis lengde(header) != 512 eller ikkje gzip_liste(tar_gz_sti, tilstand, header) { ok = usann }
+                la deler = fs.native_sti_rot_relativ(filsti)
+                la h = fs.opne_native(tekst(deler["root"]), tekst(deler["relative"]), "read")
+                hvis ok og h["status"] != "open" { ok = usann }
+                la lest = 0
+                la ferdig = ikkje ok
+                mens ikkje ferdig {
+                    la del = fs.native_les_binær(h, 65535)
+                    hvis del["status"] != "ok" { ok = usann ferdig = sann }
+                    ellers {
+                        la n = heltall_fra_tekst(tekst(del["value"]))
+                        hvis n == 0 { ferdig = sann }
+                        ellers hvis ikkje gzip_blokk(tar_gz_sti, tilstand, del["data_bytes"]) {
+                            ok = usann ferdig = sann
+                        } ellers { lest = lest + n }
+                    }
+                }
+                hvis h["status"] == "open" { fs.native_lukk(h) }
+                hvis lest != storleik { ok = usann }
+                la rest = storleik % 512
+                hvis ok og rest > 0 {
+                    la padding: liste_heiltall = []
+                    la p = 0
+                    mens p < 512 - rest { legg_til(padding, 0) p = p + 1 }
+                    hvis ikkje gzip_liste(tar_gz_sti, tilstand, padding) { ok = usann }
+                }
+            }
+        }
+        i = i + 1
+    }
+    la slutt: liste_heiltall = []
+    i = 0
+    mens i < 1024 { legg_til(slutt, 0) i = i + 1 }
+    hvis ok { ok = gzip_liste(tar_gz_sti, tilstand, slutt) }
+    hvis ok { ok = append_bytes(tar_gz_sti, builtin.bytes_from_list([1, 0, 0, 255, 255])) }
+    hvis ok {
+        la crc = heltall_fra_tekst(tilstand["crc"]) ^ 4294967295
+        la storleik = heltall_fra_tekst(tilstand["size"])
+        ok = append_bytes(tar_gz_sti, builtin.bytes_from_list([
+            crc & 255, (crc >> 8) & 255, (crc >> 16) & 255, (crc >> 24) & 255,
+            storleik & 255, (storleik >> 8) & 255,
+            (storleik >> 16) & 255, (storleik >> 24) & 255]))
+    }
+    hvis ikkje ok { filops.slett_fil(tar_gz_sti) }
+    returner ok
+}
