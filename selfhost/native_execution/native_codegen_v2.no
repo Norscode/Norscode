@@ -13,6 +13,9 @@ funksjon TEXT_VA()   { returner 4198400 }
 // 0x540000 held full nc_main-texten skild frå konstantsegmentet. Den gamle
 // 0x500000-basen overlappa dei siste ~70 KiB av full-host-texten og gav SIGSEGV.
 funksjon DATA_VA()   { returner 5505024 }
+// Eige skrivebart verts-ABI-segment for rå prosesspekere. Konstantsegmentet
+// held fram som read-only, og GC-/heap-kontrollblokka blir ikkje overlagd.
+funksjon HOST_ABI_VA() { returner 6225920 } // 0x5f0000
 // Bootstrap-kodegeneratoren køyrer som éi fil. Baseadresse og kontrollblokk
 // følger std.runtime.memory_abi; den fysiske bootstrap-reserven kan vere større.
 funksjon HEAP_VA()   { returner 6291456 }
@@ -23,7 +26,6 @@ funksjon HEAP_SZ()   { returner 268435456 }
 funksjon HEAP_CONTROLSZ() { returner 64 }
 funksjon GC_SAFEPOINT_OFFSET() { returner 32 }
 funksjon ENVP_OFFSET() { returner 8 }
-funksjon ARGV_OFFSET() { returner 56 }
 
 // ─── Runtime-funksjon VA ─────────────────────────────────────────────────────
 funksjon RT_NIL() { returner 4198400 }
@@ -951,7 +953,7 @@ funksjon emit_text_index_of_raw(bytes) {
     ])
 }
 
-funksjon bygg_runtime_v2() -> liste {
+funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la hex = rt_hex_del0() + rt_hex_del1() + rt_hex_del2() + rt_hex_del3() + rt_hex_del4() + rt_hex_del5() + rt_hex_del6()
     la nop_pad = ""
     la i: heltall = 0
@@ -1220,13 +1222,13 @@ funksjon bygg_runtime_v2() -> liste {
     call_rel32(bytes, atomics["json_bool_case"], TEXT_VA())
     legg_til(bytes, 0xC3)
 
-    // Bygg argv-lista frå den rå argv**-peikaren som _start lagrar i den
-    // siste reserverte kontrollslotten. ABI-wrapperen rundt denne lista blir
-    // emittert ved builtin.argv_operation-kallet.
+    // Bygg argv-lista frå den rå argv**-peikaren som _start lagrar i ein eigen
+    // skrivebar .data-slot. ABI-wrapperen rundt denne lista blir emittert ved
+    // builtin.argv_operation-kallet.
     atomics["argv_list"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])            // save rbx/r12/r13
     copy(bytes, [0x4C, 0x8B, 0x2C, 0x25])                  // r13 = [argv-slot]
-    u32(bytes, HEAP_VA() + ARGV_OFFSET())
+    u32(bytes, argv_store_va)
     copy(bytes, [0x31, 0xDB])                              // ebx = argc/count
     la argv_loop = lengde(bytes)
     copy(bytes, [0x49, 0x8B, 0x7D, 0x00, 0x48, 0x85, 0xFF]) // rdi=*argv; test
@@ -1900,11 +1902,13 @@ funksjon kompiler_v2(ncb_json) {
     la data_res = bygg_data(strenger)
     la data_bytes = data_res[0]
     la rd_offs = data_res[1]
+    // Rå vertspekere skal ikkje dele den 64-byte heap-kontrollblokka med GC.
+    la argv_store_va: heiltall = HOST_ABI_VA()
     // Runtimeen les envp frå kontrollslotten på HEAP_VA+8.
     // _start må lagre til same adresse før første miljo_hent().
     la envp_store_va: heltall = HEAP_VA() + ENVP_OFFSET()
 
-    la rt_package = bygg_runtime_v2()
+    la rt_package = bygg_runtime_v2(argv_store_va)
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
     la rt_size: heltall = lengde(rt)
@@ -2036,10 +2040,10 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x74)
     legg_til(text, 0x24)
     legg_til(text, 0x08)
-    // Store argv i den reserverte kontrollslotten for builtin.argv_operation.
+    // Store argv i den reserverte .data-slotten for builtin.argv_operation.
     legg_til(text, 0x49)
     legg_til(text, 0xBB)
-    u64(text, HEAP_VA() + ARGV_OFFSET())
+    u64(text, argv_store_va)
     legg_til(text, 0x49)
     legg_til(text, 0x89)
     legg_til(text, 0x33)
@@ -2118,14 +2122,21 @@ funksjon kompiler_v2(ncb_json) {
     hvis DATA_VA() + data_size > HEAP_VA() {
         kast "native codegen: .data overlappar .heap"
     }
+    hvis DATA_VA() + data_size > HOST_ABI_VA() {
+        kast "native codegen: .data overlappar verts-ABI-segmentet"
+    }
+    hvis HOST_ABI_VA() + 4096 > HEAP_VA() {
+        kast "native codegen: verts-ABI-segmentet overlappar .heap"
+    }
 
-    // Bygg ELF64 med 3 segment
+    // Bygg ELF64 med fire segment: RX text, R constants, RW host ABI og RW heap.
     la elf: liste = []
     la ph_off: heltall = 64
     la text_file_off: heltall = 4096
     la text_segment_va: heltall = TEXT_VA() - text_file_off
     la data_file_off: heltall = ((text_file_off + text_size + 4095) / 4096) * 4096
-    la heap_file_off: heltall = ((data_file_off + data_size + 4095) / 4096) * 4096
+    la host_file_off: heiltall = ((data_file_off + data_size + 4095) / 4096) * 4096
+    la heap_file_off: heiltall = host_file_off + 4096
     la heap_filesz: heiltall = HEAP_CONTROLSZ()
 
     // ELF header
@@ -2147,7 +2158,7 @@ funksjon kompiler_v2(ncb_json) {
     u32(elf, 0)
     u16(elf, 64)
     u16(elf, 56)
-    u16(elf, 3)
+    u16(elf, 4)
     u16(elf, 64)
     u16(elf, 0)
     u16(elf, 0)
@@ -2172,6 +2183,16 @@ funksjon kompiler_v2(ncb_json) {
     u64(elf, data_size)
     u64(elf, 4096)
 
+    // PH .hostabi (RW — éi side, argv** i første slot)
+    u32(elf, 1)
+    u32(elf, 6)
+    u64(elf, host_file_off)
+    u64(elf, HOST_ABI_VA())
+    u64(elf, HOST_ABI_VA())
+    u64(elf, 8)
+    u64(elf, 4096)
+    u64(elf, 4096)
+
     // PH .heap (RW — 64MB)
     u32(elf, 1)
     u32(elf, 6)
@@ -2186,6 +2207,8 @@ funksjon kompiler_v2(ncb_json) {
     copy(elf, text)
     pad(elf, data_file_off)
     copy(elf, data_bytes)
+    pad(elf, host_file_off)
+    zeros(elf, 8)
     pad(elf, heap_file_off)
     zeros(elf, heap_filesz)
 
