@@ -11,6 +11,47 @@ bruk selfhost.parser
 
 // ─── JSON-hjelparar ──────────────────────────────────────────────────────────
 
+funksjon json_heiltal_tekst(n)
+    // Skriv heiltal utan host-builtin for tekstkonvertering. Native AOT kan
+    // bere resultat frå lengde(...) i ei heiltalsform som fungerer i rekning
+    // og løkker, men som eldre builtin.tekst feilaktig gjer om til tom tekst.
+    hvis builtin.type(n) == "ingenting"
+        returner "0"
+    slutt
+    hvis n == 0
+        returner "0"
+    slutt
+    la negativ = usann
+    hvis n < 0
+        negativ = sann
+        n = 0 - n
+    slutt
+    la ut = ""
+    mens n > 0
+        la siffer = n % 10
+        ut = builtin.chr(48 + siffer) + ut
+        n = (n - siffer) / 10
+    slutt
+    // Literalverdien 0 frå eldre parsergenerasjonar kan vere ein intern
+    // heiltalsnull som ikkje treff n == 0, men heller ikkje produserer sifre.
+    hvis ut == ""
+        returner "0"
+    slutt
+    hvis negativ
+        returner "-" + ut
+    slutt
+    returner ut
+slutt
+
+funksjon ir_fremdrift(melding: tekst) -> heiltall
+    la sti = miljo_hent("NORSCODE_IR_PROGRESS_FILE")
+    hvis sti != ""
+        prøv { builtin.fil_skriv(sti, melding + " heap=" + tekst_fra_heltall(builtin.native_heap_bytes()) + "\n") }
+        fang (e) { la ignorert = e }
+    slutt
+    returner 0
+slutt
+
 funksjon json_escape_tegn(c)
     hvis c == "\""
         returner "\\\""
@@ -36,18 +77,45 @@ funksjon json_escape_tegn(c)
 slutt
 
 funksjon json_escape_tekst(t)
-    deler = []
+    // Funksjonsnamn, opcodes og dei fleste literalane er rein ASCII utan
+    // JSON-kontrollteikn. Unngå då ei teiknliste og eitt VM-kall per teikn;
+    // den generelle ruta under blir berre brukt når escaping faktisk trengst.
+    la må_escape = usann
+    la sjekk_i = 0
+    mens sjekk_i < lengde(t)
+        la sjekk_tegn = t[sjekk_i]
+        la sjekk_kode: heltall = builtin.char_code(sjekk_tegn)
+        hvis sjekk_tegn == "\"" eller sjekk_tegn == "\\" eller sjekk_kode < 32
+            må_escape = sann
+            bryt
+        slutt
+        sjekk_i = sjekk_i + 1
+    slutt
+    hvis ikkje må_escape
+        returner "\"" + t + "\""
+    slutt
+    // Hald lista ikkje-tom også når parseren ber ein eldre native-tagga
+    // tomstreng. Då treng me verken samanlikne den med "" eller køyre join([]).
+    deler = ["\""]
     i = 0
     mens i < lengde(t)
         legg_til(deler, json_escape_tegn(t[i]))
         i = i + 1
     slutt
-    returner "\"" + builtin.join(deler, "") + "\""
+    legg_til(deler, "\"")
+    returner builtin.join(deler, "")
 slutt
 
 funksjon json_liste(element)
-    // element er ein liste med JSON-tekst-strenger
-    returner "[" + builtin.join(element, ",") + "]"
+    // Kjeldekart brukar heiltal. Serialiser verdiane som rå JSON-tal, ikkje
+    // som tekst; den gamle ruta sende heiltal inn i streng-escaparen.
+    deler = []
+    i = 0
+    mens i < lengde(element)
+        legg_til(deler, json_heiltal_tekst(element[i]))
+        i = i + 1
+    slutt
+    returner "[" + builtin.join(deler, ",") + "]"
 slutt
 
 funksjon json_liste_tekst(element)
@@ -78,7 +146,7 @@ funksjon json_instruksjon(instr)
 slutt
 
 funksjon json_instruksjon_med_int(opcode, n)
-    returner "[" + json_escape_tekst(opcode) + "," + tekst(n) + "]"
+    returner "[" + json_escape_tekst(opcode) + "," + json_heiltal_tekst(n) + "]"
 slutt
 
 funksjon json_instruksjon_med_desimal(opcode, n)
@@ -86,7 +154,9 @@ funksjon json_instruksjon_med_desimal(opcode, n)
 slutt
 
 funksjon json_instruksjon_med_tekst(opcode, s)
-    returner "[" + json_escape_tekst(opcode) + "," + json_escape_tekst(s) + "]"
+    la opcode_json = json_escape_tekst(opcode)
+    la verdi_json = json_escape_tekst(s)
+    returner "[" + opcode_json + "," + verdi_json + "]"
 slutt
 
 funksjon json_instruksjon_med_bool(opcode, b)
@@ -113,7 +183,7 @@ funksjon json_kall(fn_navn, arg_antal)
     hvis builtin.starts_with(fn_navn, "builtin.finnes_") eller builtin.starts_with(fn_navn, "builtin.builtin.finnes_")
         fn_navn = "builtin.har_nokkel"
     slutt
-    returner "[\"CALL\"," + json_escape_tekst(normaliser_builtin_kall_namn(fn_navn)) + "," + tekst_fra_heltall(arg_antal) + "]"
+    returner "[\"CALL\"," + json_escape_tekst(normaliser_builtin_kall_namn(fn_navn)) + "," + json_heiltal_tekst(arg_antal) + "]"
 slutt
 
 funksjon json_instruksjon_uten_arg(opcode)
@@ -730,8 +800,17 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
     // modulglobalt feilaktig bli skrive med STORE_GLOBAL.
     la førre_lokale = komp["current_locals"]
     la førre_init = komp["in_module_init"]
+    la førre_source_lines = komp["current_source_lines"]
+    la førre_source_columns = komp["current_source_columns"]
     komp["current_locals"] = {}
+    komp["current_function"] = "__module_init__"
     komp["in_module_init"] = usann
+    komp["source_map_active"] = sann
+    hvis miljo_hent("NORSCODE_COMPILE_SOURCE_MAP") == "0"
+        komp["source_map_active"] = usann
+    slutt
+    komp["current_source_lines"] = []
+    komp["current_source_columns"] = []
     param_node = lambda_node["barn"][0]
     blokk_indeks = 1
 
@@ -784,6 +863,8 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
     legg_til(komp["lambda_funk_par"], fullt_namn + "|SEP|" + fn_json)
     komp["current_locals"] = førre_lokale
     komp["in_module_init"] = førre_init
+    komp["current_source_lines"] = førre_source_lines
+    komp["current_source_columns"] = førre_source_columns
 slutt
 
 // ─── Kompilator-tilstand ──────────────────────────────────────────────────────
@@ -807,6 +888,12 @@ funksjon ny_komp()
     komp["global_namn"] = []
     komp["current_locals"] = {}
     komp["in_module_init"] = usann
+    komp["source_map_active"] = sann
+    hvis miljo_hent("NORSCODE_COMPILE_SOURCE_MAP") == "0"
+        komp["source_map_active"] = usann
+    slutt
+    komp["current_source_lines"] = []
+    komp["current_source_columns"] = []
     returner komp
 slutt
 
@@ -1047,7 +1134,11 @@ funksjon emit_uttrykk(komp, node, kode)
     slutt
 
     hvis t == "Heltall"
-        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", node["verdi"]))
+        // Lexer/parser bevarer kjeldeforma som tekst. Konverter eksplisitt før
+        // den reine heiltalsserialiseringen; elles blir til dømes "42" tolka
+        // som ei ikkje-numerisk nullform i native AOT.
+        la literal_heiltal = heltall_fra_tekst(node["verdi"])
+        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", literal_heiltal))
         returner sann
     slutt
 
@@ -1057,7 +1148,18 @@ funksjon emit_uttrykk(komp, node, kode)
     slutt
 
     hvis t == "Tekst"
-        legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
+        // Semantisk kontrakt: node["verdi"] == "__nclit__empty_text_v1".
+        // Literalane er delte for den eldre stage0-materialiseraren.
+        hvis node["verdi"] == "__nclit__empty_" + "text_v1"
+            // Ikkje legg den ferdige JSON-instruksjonen inn som ein literal.
+            // Eldre NCB-transport kan dekode ein slik tekst til ei faktisk
+            // liste og sluttserialiseringa endar då som den ugyldige opkoden
+            // [null]. Bygg instruksjonen gjennom den kanoniske JSON-skrivaren.
+            la tom_tekst = builtin.slice("x", 0, 0)
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", tom_tekst))
+        ellers
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
+        slutt
         returner sann
     slutt
 
@@ -1067,6 +1169,17 @@ funksjon emit_uttrykk(komp, node, kode)
         ellers
             legg_til(kode, json_instruksjon_med_bool("PUSH_CONST", usann))
         slutt
+        returner sann
+    slutt
+
+    // Parseren representerer null/ingenting som ein eigen Null-node. Utan
+    // denne grenen produserer uttrykket ingen operand, slik at til dømes
+    // `verdi == null` køyrer COMPARE_EQ med berre venstre operand på stakken.
+    hvis t == "Null"
+        // Bygg instruksjonen dynamisk. Eldre bootstrap-transport kan tolke
+        // den komplette JSON-litteralen som ei liste og seinare redusere han
+        // til [null], som fjernar operandverdien før neste opcode.
+        legg_til(kode, "[" + json_escape_tekst("PUSH_CONST") + ",null]")
         returner sann
     slutt
 
@@ -1223,68 +1336,7 @@ funksjon emit_uttrykk(komp, node, kode)
 
     // ─── List comprehension: [expr for var i liste (hvis cond)] ────────────────
     hvis t == "ListeKomprehensjon"
-        n = tekst_fra_heltall(komp["teller"])
-        komp["teller"] = komp["teller"] + 1
-        res_var     = "__comp_res_" + n + "__"
-        lst_var     = "__comp_lst_" + n + "__"
-        idx_var     = "__comp_idx_" + n + "__"
-        lbl_start   = "__comp_start_" + n + "__"
-        lbl_cont    = "__comp_cont_"  + n + "__"
-        lbl_end     = "__comp_end_"   + n + "__"
-        loop_var    = node["verdi"]
-
-        // Bygg tom resultat-liste
-        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", 0))
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", res_var))
-
-        // Evaluer kjelde
-        emit_uttrykk(komp, node["barn"][0], kode)
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", lst_var))
-
-        // Indeks = 0
-        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 0))
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", idx_var))
-
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_start))
-
-        // if idx < lengde(lst): gå inn
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", lst_var))
-        legg_til(kode, json_kall("builtin.lengde", 1))
-        legg_til(kode, json_instruksjon_uten_arg("COMPARE_LT"))
-        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", lbl_end))
-
-        // var = lst[idx]
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", lst_var))
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
-        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", loop_var))
-
-        // Valfri filter
-        hvis lengde(node["barn"]) > 2
-            emit_uttrykk(komp, node["barn"][2], kode)
-            legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", lbl_cont))
-        slutt
-
-        // Legg til expr i resultat
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", res_var))
-        emit_uttrykk(komp, node["barn"][1], kode)
-        legg_til(kode, json_kall("builtin.legg_til", 2))
-        legg_til(kode, json_instruksjon_uten_arg("POP"))
-
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_cont))
-
-        // idx = idx + 1
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", idx_var))
-        legg_til(kode, json_instruksjon_med_int("PUSH_CONST", 1))
-        legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", idx_var))
-
-        legg_til(kode, json_instruksjon_med_tekst("JUMP", lbl_start))
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", lbl_end))
-
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", res_var))
-        returner sann
+        returner emit_listekomprehensjon(komp, node, kode)
     slutt
 
     hvis t == "Map"
@@ -1438,6 +1490,86 @@ funksjon fjern_ubrukte_literal_setning(kode, start_ip: heiltall) -> boolsk
     fjern_siste(kode)
     returner sann
 slutt
+
+funksjon emit_prov_fang(komp, node, kode) -> boolsk {
+    la catch_lbl = ny_etikett(komp)
+    la after_lbl = ny_etikett(komp)
+    la finally_lbl = ny_etikett(komp)
+    la finally_return_lbl = ny_etikett(komp)
+    la finally_throw_lbl = ny_etikett(komp)
+    la catch_type = "*"
+    hvis node["catch_type"] != null og node["catch_type"] != "" {
+        catch_type = node["catch_type"]
+    }
+
+    la har_fang = node["has_catch"] != usann
+    la har_endeleg = node["has_finally"] == sann
+    hvis har_endeleg {
+        legg_til(kode, json_instruksjon_med_tekst("FINALLY_PUSH", finally_lbl))
+    }
+    hvis har_fang { legg_til(kode, json_try_begin(catch_lbl, catch_type)) }
+    emit_blokk(komp, node["barn"][0], kode)
+    hvis har_fang { legg_til(kode, json_instruksjon_uten_arg("TRY_END")) }
+    hvis har_endeleg {
+        legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
+    } ellers {
+        legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
+    }
+    hvis har_fang {
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", catch_lbl))
+        legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
+        legg_til(kode, json_instruksjon_uten_arg("LOAD_EXCEPTION"))
+        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+        emit_blokk(komp, node["barn"][1], kode)
+        hvis har_endeleg {
+            legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
+        } ellers {
+            legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
+        }
+    }
+    hvis har_endeleg {
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_lbl))
+        emit_blokk(komp, node["barn"][2], kode)
+        legg_til(kode, "[\"FINALLY_END\"," + json_escape_tekst(after_lbl) + "," + json_escape_tekst(finally_return_lbl) + "," + json_escape_tekst(finally_throw_lbl) + "]")
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_return_lbl))
+        legg_til(kode, json_instruksjon_uten_arg("LOAD_PENDING"))
+        legg_til(kode, json_instruksjon_uten_arg("CLEAR_PENDING"))
+        legg_til(kode, json_instruksjon_uten_arg("RETURN"))
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_throw_lbl))
+        legg_til(kode, json_instruksjon_uten_arg("LOAD_PENDING"))
+        legg_til(kode, json_instruksjon_uten_arg("CLEAR_PENDING"))
+        legg_til(kode, json_instruksjon_uten_arg("THROW"))
+    }
+    legg_til(kode, json_instruksjon_med_tekst("LABEL", after_lbl))
+    returner sann
+}
+
+funksjon emit_for_range(komp, node, kode) -> boolsk {
+    la loop_n = tekst_fra_heltall(komp["teller"])
+    komp["teller"] = komp["teller"] + 1
+    la loop_start_lbl = "__forr_start_" + loop_n + "__"
+    la loop_end_lbl = "__forr_end_" + loop_n + "__"
+    la loop_cont_lbl = "__forr_cont_" + loop_n + "__"
+
+    emit_uttrykk(komp, node["barn"][0], kode)
+    legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+    push_loop(komp, loop_cont_lbl, loop_end_lbl)
+    legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
+    legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
+    emit_uttrykk(komp, node["barn"][1], kode)
+    legg_til(kode, json_instruksjon_uten_arg("COMPARE_LE"))
+    legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", loop_end_lbl))
+    emit_blokk(komp, node["barn"][3], kode)
+    legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_cont_lbl))
+    legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
+    emit_uttrykk(komp, node["barn"][2], kode)
+    legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
+    legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
+    legg_til(kode, json_instruksjon_med_tekst("JUMP", loop_start_lbl))
+    legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_end_lbl))
+    pop_loop(komp)
+    returner sann
+}
 
 funksjon emit_setning(komp, node, kode)
     t = node["type"]
@@ -1641,60 +1773,7 @@ funksjon emit_setning(komp, node, kode)
     // prøv { } fang (e) { }
     // node["verdi"] = fangst-variabel-namn, barn[0]=prøv-blokk, barn[1]=fang-blokk
     hvis t == "PrøvFang"
-        catch_lbl = ny_etikett(komp)
-        after_lbl  = ny_etikett(komp)
-        finally_lbl = ny_etikett(komp)
-        finally_return_lbl = ny_etikett(komp)
-        finally_throw_lbl = ny_etikett(komp)
-        catch_type = "*"
-        hvis node["catch_type"] != null og node["catch_type"] != ""
-            catch_type = node["catch_type"]
-        slutt
-
-        har_fang = node["has_catch"] != usann
-        har_endeleg = node["has_finally"] == sann
-        hvis har_endeleg
-            legg_til(kode, json_instruksjon_med_tekst("FINALLY_PUSH", finally_lbl))
-        slutt
-        hvis har_fang
-            legg_til(kode, json_try_begin(catch_lbl, catch_type))
-        slutt
-        emit_blokk(komp, node["barn"][0], kode)
-        hvis har_fang
-            legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
-        slutt
-        hvis har_endeleg
-            legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
-        ellers
-            legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
-        slutt
-        hvis har_fang
-            legg_til(kode, json_instruksjon_med_tekst("LABEL", catch_lbl))
-            legg_til(kode, json_instruksjon_uten_arg("TRY_END"))
-            legg_til(kode, json_instruksjon_uten_arg("LOAD_EXCEPTION"))
-            legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
-            emit_blokk(komp, node["barn"][1], kode)
-            hvis har_endeleg
-                legg_til(kode, json_instruksjon_med_tekst("FINALLY_RUN", after_lbl))
-            ellers
-                legg_til(kode, json_instruksjon_med_tekst("JUMP", after_lbl))
-            slutt
-        slutt
-        hvis har_endeleg
-            legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_lbl))
-            emit_blokk(komp, node["barn"][2], kode)
-            legg_til(kode, "[\"FINALLY_END\"," + json_escape_tekst(after_lbl) + "," + json_escape_tekst(finally_return_lbl) + "," + json_escape_tekst(finally_throw_lbl) + "]")
-            legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_return_lbl))
-            legg_til(kode, json_instruksjon_uten_arg("LOAD_PENDING"))
-            legg_til(kode, json_instruksjon_uten_arg("CLEAR_PENDING"))
-            legg_til(kode, json_instruksjon_uten_arg("RETURN"))
-            legg_til(kode, json_instruksjon_med_tekst("LABEL", finally_throw_lbl))
-            legg_til(kode, json_instruksjon_uten_arg("LOAD_PENDING"))
-            legg_til(kode, json_instruksjon_uten_arg("CLEAR_PENDING"))
-            legg_til(kode, json_instruksjon_uten_arg("THROW"))
-        slutt
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", after_lbl))
-        returner sann
+        returner emit_prov_fang(komp, node, kode)
     slutt
 
     // for var i liste { kropp }
@@ -1746,44 +1825,17 @@ funksjon emit_setning(komp, node, kode)
 
     // ForRange: for i = start til end [steg s]
     hvis t == "ForRange"
-        loop_n = tekst_fra_heltall(komp["teller"])
-        komp["teller"] = komp["teller"] + 1
-        loop_start_lbl = "__forr_start_" + loop_n + "__"
-        loop_end_lbl   = "__forr_end_"   + loop_n + "__"
-        loop_cont_lbl  = "__forr_cont_"  + loop_n + "__"
-
-        // Initialiser løkkevariabelen til startverdi
-        emit_uttrykk(komp, node["barn"][0], kode)
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
-
-        push_loop(komp, loop_cont_lbl, loop_end_lbl)
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_start_lbl))
-
-        // if var > end: hopp ut
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
-        emit_uttrykk(komp, node["barn"][1], kode)
-        legg_til(kode, json_instruksjon_uten_arg("COMPARE_LE"))
-        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", loop_end_lbl))
-
-        // Kropp
-        emit_blokk(komp, node["barn"][3], kode)
-
-        // Fortsetjingspunkt (for continue)
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_cont_lbl))
-
-        // var = var + steg
-        legg_til(kode, json_instruksjon_med_tekst("LOAD_NAME", node["verdi"]))
-        emit_uttrykk(komp, node["barn"][2], kode)
-        legg_til(kode, json_instruksjon_uten_arg("BINARY_ADD"))
-        legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", node["verdi"]))
-
-        legg_til(kode, json_instruksjon_med_tekst("JUMP", loop_start_lbl))
-        legg_til(kode, json_instruksjon_med_tekst("LABEL", loop_end_lbl))
-        pop_loop(komp)
-        returner sann
+        returner emit_for_range(komp, node, kode)
     slutt
 
     // Uttrykk-setning (kall osv.)
+    // Reine literalar har ingen observerbar effekt og skal ikkje leggje noko
+    // på operandstacken. Avgjer dette frå AST-typen før kodegenerering; det er
+    // meir robust enn å kjenne att serialisert JSON-bytecode etterpå.
+    hvis t == "Heltall" eller t == "Desimal" eller t == "Tekst" eller
+       t == "Bool" eller t == "Null"
+        returner sann
+    slutt
     la uttrykk_start = lengde(kode)
     emit_uttrykk(komp, node, kode)
     hvis ikkje fjern_ubrukte_literal_setning(kode, uttrykk_start)
@@ -1799,20 +1851,29 @@ funksjon emit_blokk(komp, blokk, kode)
         start_ip = lengde(kode)
         emit_setning(komp, node, kode)
         slutt_ip = lengde(kode)
-        map = komp["current_source_map"]
+        // Parallelle heiltalslister er langt billegare enn eitt hashoppslag og
+        // ein ny "line:column"-tekst per bytekodeinstruksjon. Indeksane blir
+        // fylte direkte, medan indre blokker får behalde den mest presise
+        // posisjonen dei alt har registrert.
+        la source_lines = komp["current_source_lines"]
+        la source_columns = komp["current_source_columns"]
         ip = start_ip
-        mens ip < slutt_ip
-            key = tekst_fra_heltall(ip)
-            hvis har_nokkel(map, key) == usann
+        mens komp["source_map_active"] og ip < slutt_ip
+            mens lengde(source_lines) <= ip
+                legg_til(source_lines, 0)
+                legg_til(source_columns, 0)
+            slutt
+            hvis source_lines[ip] == 0
                 la node_linje = node["linje"]
                 la node_kolonne = node["kolonne"]
-                hvis node_linje == null
+                hvis builtin.type(node_linje) == "ingenting"
                     node_linje = 0
                 slutt
-                hvis node_kolonne == null
+                hvis builtin.type(node_kolonne) == "ingenting"
                     node_kolonne = 0
                 slutt
-                map[key] = tekst_fra_heiltall(node_linje) + ":" + tekst_fra_heiltall(node_kolonne)
+                source_lines[ip] = node_linje
+                source_columns[ip] = node_kolonne
             slutt
             ip = ip + 1
         slutt
@@ -1862,6 +1923,8 @@ slutt
 // ─── Kompiler funksjonar ─────────────────────────────────────────────────────
 
 funksjon kompiler_funksjon(komp, fn_node)
+    ir_fremdrift("compile-function-enter " + fn_node["verdi"])
+    komp["current_function"] = fn_node["verdi"]
     // fn_node["barn"] = [Parametere, Returtype, Blokk]
     fn_barn = fn_node["barn"]
     param_node = fn_barn[0]  // Parametere
@@ -1880,11 +1943,14 @@ funksjon kompiler_funksjon(komp, fn_node)
         lokale[param_namn] = sann
         i = i + 1
     slutt
+    ir_fremdrift("compile-function-params " + fn_node["verdi"])
 
     // Bygg kode-lista
     kode = []
-    komp["current_source_map"] = {}
+    komp["current_source_lines"] = []
+    komp["current_source_columns"] = []
     komp["defer_blocks"] = []
+    ir_fremdrift("compile-function-body " + fn_node["verdi"])
     emit_blokk(komp, blokk, kode)
 
     // Legg til implisitt returner null berre når blokka ikkje alt avsluttar med RETURN
@@ -1909,21 +1975,17 @@ funksjon kompiler_funksjon(komp, fn_node)
         defer_i = defer_i + 1
     slutt
 
-    source_lines = []
-    source_columns = []
-    source_map = komp["current_source_map"]
+    source_lines = komp["current_source_lines"]
+    source_columns = komp["current_source_columns"]
     source_ip = 0
-    mens source_ip < lengde(kode)
-        source_key = tekst_fra_heltall(source_ip)
-        source_line = fn_node["linje"]
-        source_column = fn_node["kolonne"]
-        hvis har_nokkel(source_map, source_key)
-            source_parts = builtin.split(source_map[source_key], ":")
-            source_line = heltall_fra_tekst(source_parts[0])
-            source_column = heltall_fra_tekst(source_parts[1])
+    mens komp["source_map_active"] og source_ip < lengde(kode)
+        hvis source_ip >= lengde(source_lines)
+            legg_til(source_lines, fn_node["linje"])
+            legg_til(source_columns, fn_node["kolonne"])
+        ellers hvis source_lines[source_ip] == 0
+            source_lines[source_ip] = fn_node["linje"]
+            source_columns[source_ip] = fn_node["kolonne"]
         slutt
-        legg_til(source_lines, source_line)
-        legg_til(source_columns, source_column)
         source_ip = source_ip + 1
     slutt
 
@@ -1952,7 +2014,11 @@ funksjon kompiler_funksjon(komp, fn_node)
     fn_json = fn_json + "\"name\":" + json_escape_tekst(fn_namn) + ","
     fn_json = fn_json + "\"module\":" + json_escape_tekst(modul) + ","
     fn_json = fn_json + "\"params\":" + params_json + ","
-    hvis fn_node["is_async"] == sann
+    la er_async = usann
+    hvis har_nokkel(fn_node, "is_async")
+        er_async = fn_node["is_async"] == sann
+    slutt
+    hvis er_async
         fn_json = fn_json + "\"is_async\":true,"
     ellers
         fn_json = fn_json + "\"is_async\":false,"
@@ -1996,6 +2062,8 @@ funksjon kompiler_test(komp, test_node)
     blokk = test_node["barn"][0]
 
     kode = []
+    komp["current_source_lines"] = []
+    komp["current_source_columns"] = []
     emit_blokk(komp, blokk, kode)
 
     legg_til_implisitt_return(kode)
@@ -2036,17 +2104,35 @@ funksjon samla_importar(ast_program) -> liste_tekst {
 }
 
 funksjon kompiler_program(ast_program, modul_namn)
+    ir_fremdrift("program-start " + modul_namn)
     komp = ny_komp()
+    ir_fremdrift("program-state-ready " + modul_namn)
     komp["modul"] = modul_namn
+    ir_fremdrift("program-web-start " + modul_namn)
     web_meta = samla_web_annotasjonar(ast_program, modul_namn)
+    ir_fremdrift("program-web-done " + modul_namn)
 
     // Første pass: registrer alle funksjonar
     // NB: To-nivå indeks-tilordning (komp["funk_kart"][namn] = sann) er ikkje støtta
     // av Python-kompilatoren sin IndexSetNode — bruk temporær variabel i staden.
     fk = komp["funk_kart"]
+    // Inkrementell/source-only kompilering kan dele ein stor modul ved
+    // funksjonsgrenser. Registrer då heile modulens deklarasjonsflate før
+    // delen blir kompilert, slik at krysskall ikkje blir feilklassifiserte
+    // som builtin-kall.
+    la kjende_funksjonar = miljo_hent("NORSCODE_COMPILER_KNOWN_FUNCTIONS")
+    hvis kjende_funksjonar != "" {
+        la kjende = builtin.split(kjende_funksjonar, ",")
+        la kjent_i: heiltall = 0
+        mens kjent_i < lengde(kjende) {
+            hvis kjende[kjent_i] != "" { fk[kjende[kjent_i]] = sann }
+            kjent_i = kjent_i + 1
+        }
+    }
     i = 0
     mens i < lengde(ast_program["barn"])
         node = ast_program["barn"][i]
+        ir_fremdrift("first-pass " + json_heiltal_tekst(i) + " " + node["type"] + " " + node["verdi"])
         hvis node["type"] == "Funksjon"
             fk[node["verdi"]] = sann
         slutt
@@ -2079,7 +2165,9 @@ funksjon kompiler_program(ast_program, modul_namn)
     mens j < lengde(ast_program["barn"])
         node = ast_program["barn"][j]
         hvis node["type"] == "Funksjon"
+            ir_fremdrift("function-start " + json_heiltal_tekst(j) + " " + node["verdi"])
             resultat = kompiler_funksjon(komp, node)
+            ir_fremdrift("function-done " + json_heiltal_tekst(j) + " " + node["verdi"])
             legg_til(funk_json_par, resultat)
         slutt
         hvis node["type"] == "Test"

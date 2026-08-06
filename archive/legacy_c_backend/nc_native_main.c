@@ -43,12 +43,16 @@
 #endif
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
 #include <sys/sysinfo.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <pwd.h>
+#include <grp.h>
 #endif
 #if defined(NC_ENABLE_OPENSSL)
 #include <openssl/ssl.h>
@@ -408,7 +412,113 @@ static NcVal *nc_builtin_system_info(void) {
     return result;
 }
 
+static NcVal *nc_linux_result(const char *status, const char *error) {
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-linux-ops-v1");
+    nc_system_set_text(result, "status", status);
+    nc_system_set_text(result, "error", error ? error : "");
+    return result;
+}
+
+#if defined(__linux__)
+static int nc_linux_safe_text(const char *value, size_t maximum) {
+    return value && value[0] && strlen(value) <= maximum &&
+           !strchr(value, '\n') && !strchr(value, '\r');
+}
+
+static void *nc_linux_systemd_library(void) {
+    static void *library = NULL; static int attempted = 0;
+    if (!attempted) { attempted = 1; library = dlopen("libsystemd.so.0", RTLD_NOW | RTLD_LOCAL); }
+    return library;
+}
+
+static NcVal *nc_linux_systemd(NcVal *request, const char *operation) {
+    const char *unit = nc_atomic_text_field(request, "unit", "");
+    if (!nc_linux_safe_text(unit, 255) || strchr(unit, '/')) return nc_linux_result("feil", "invalid unit");
+    void *library = nc_linux_systemd_library();
+    if (!library) return nc_linux_result("unsupported", "libsystemd unavailable");
+    typedef int (*DefaultBus)(void **); typedef int (*CallMethod)(void *, const char *, const char *, const char *, const char *, void *, void **, const char *, ...);
+    typedef int (*MessageRead)(void *, const char *, ...); typedef int (*GetPropertyString)(void *, const char *, const char *, const char *, const char *, void *, char **);
+    typedef void *(*Unref)(void *);
+    DefaultBus default_bus = (DefaultBus)dlsym(library, "sd_bus_default_system");
+    CallMethod call_method = (CallMethod)dlsym(library, "sd_bus_call_method");
+    MessageRead message_read = (MessageRead)dlsym(library, "sd_bus_message_read");
+    GetPropertyString get_property = (GetPropertyString)dlsym(library, "sd_bus_get_property_string");
+    Unref bus_unref = (Unref)dlsym(library, "sd_bus_unref"), message_unref = (Unref)dlsym(library, "sd_bus_message_unref");
+    if (!default_bus || !call_method || !message_read || !get_property || !bus_unref || !message_unref) return nc_linux_result("unsupported", "incomplete libsystemd ABI");
+    void *bus = NULL, *reply = NULL; int rc = default_bus(&bus);
+    if (rc < 0 || !bus) return nc_linux_result("feil", "system bus unavailable");
+    if (!strcmp(operation, "systemd_status")) {
+        const char *path = NULL;
+        rc = call_method(bus, "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", NULL, &reply, "s", unit);
+        if (rc >= 0) rc = message_read(reply, "o", &path);
+        char *active = NULL, *sub = NULL;
+        if (rc >= 0 && path) rc = get_property(bus, "org.freedesktop.systemd1", path, "org.freedesktop.systemd1.Unit", "ActiveState", NULL, &active);
+        if (rc >= 0 && path) rc = get_property(bus, "org.freedesktop.systemd1", path, "org.freedesktop.systemd1.Unit", "SubState", NULL, &sub);
+        NcVal *result = rc < 0 ? nc_linux_result("feil", "systemd status failed") : nc_linux_result("ok", "");
+        nc_system_set_text(result, "unit", unit); nc_system_set_text(result, "active_state", active ? active : ""); nc_system_set_text(result, "sub_state", sub ? sub : "");
+        free(active); free(sub); if (reply) message_unref(reply); bus_unref(bus); return result;
+    }
+    const char *method = !strcmp(operation, "systemd_start") ? "StartUnit" : !strcmp(operation, "systemd_stop") ? "StopUnit" : !strcmp(operation, "systemd_restart") ? "RestartUnit" : "";
+    if (!method[0]) { bus_unref(bus); return nc_linux_result("feil", "invalid systemd operation"); }
+    rc = call_method(bus, "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", method, NULL, &reply, "ss", unit, "replace");
+    NcVal *result = rc < 0 ? nc_linux_result("feil", "systemd action failed") : nc_linux_result("ok", "");
+    nc_system_set_text(result, "unit", unit); nc_system_set_text(result, "action", method);
+    if (reply) message_unref(reply); bus_unref(bus); return result;
+}
+
+static NcVal *nc_builtin_linux_operation(NcVal *request) {
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    if (!strcmp(operation, "systemd_start") || !strcmp(operation, "systemd_stop") || !strcmp(operation, "systemd_restart") || !strcmp(operation, "systemd_status")) return nc_linux_systemd(request, operation);
+    if (!strcmp(operation, "procfs_metrics")) {
+        long pid = (long)nc_atomic_int_field(request, "pid", (long long)getpid());
+        if (pid != (long)getpid()) return nc_linux_result("feil", "only current process metrics are allowed");
+        struct rusage usage; memset(&usage, 0, sizeof(usage)); if (getrusage(RUSAGE_SELF, &usage) != 0) return nc_linux_result("feil", strerror(errno));
+        long page_size = sysconf(_SC_PAGESIZE), total_pages = 0, resident_pages = 0; FILE *statm = fopen("/proc/self/statm", "r");
+        if (statm) { if (fscanf(statm, "%ld %ld", &total_pages, &resident_pages) != 2) total_pages = resident_pages = 0; fclose(statm); }
+        NcVal *result = nc_linux_result("ok", ""); nc_system_set_int(result, "pid", pid); nc_system_set_int(result, "rss_bytes", resident_pages * page_size); nc_system_set_int(result, "virtual_bytes", total_pages * page_size);
+        nc_system_set_int(result, "minor_faults", usage.ru_minflt); nc_system_set_int(result, "major_faults", usage.ru_majflt); nc_system_set_int(result, "voluntary_context_switches", usage.ru_nvcsw); nc_system_set_int(result, "involuntary_context_switches", usage.ru_nivcsw); return result;
+    }
+    if (!strcmp(operation, "user_lookup")) {
+        const char *name = nc_atomic_text_field(request, "name", ""); if (!nc_linux_safe_text(name, 255)) return nc_linux_result("feil", "invalid user");
+        struct passwd *entry = getpwnam(name); if (!entry) return nc_linux_result("not_found", "user not found"); NcVal *result = nc_linux_result("ok", "");
+        nc_system_set_text(result, "name", entry->pw_name); nc_system_set_int(result, "uid", entry->pw_uid); nc_system_set_int(result, "gid", entry->pw_gid); nc_system_set_text(result, "home", entry->pw_dir); nc_system_set_text(result, "shell", entry->pw_shell); return result;
+    }
+    if (!strcmp(operation, "group_lookup")) {
+        const char *name = nc_atomic_text_field(request, "name", ""); if (!nc_linux_safe_text(name, 255)) return nc_linux_result("feil", "invalid group");
+        struct group *entry = getgrnam(name); if (!entry) return nc_linux_result("not_found", "group not found"); NcVal *result = nc_linux_result("ok", ""); nc_system_set_text(result, "name", entry->gr_name); nc_system_set_int(result, "gid", entry->gr_gid); return result;
+    }
+    if (!strcmp(operation, "chmod") || !strcmp(operation, "chown")) {
+        const char *path = nc_atomic_text_field(request, "path", ""); if (!nc_linux_safe_text(path, 4095) || path[0] != '/') return nc_linux_result("feil", "absolute path required");
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW); if (fd < 0) return nc_linux_result("feil", strerror(errno));
+        int rc;
+        if (!strcmp(operation, "chmod")) { long mode = (long)nc_atomic_int_field(request, "mode", -1); rc = mode < 0 || mode > 07777 ? -1 : fchmod(fd, (mode_t)mode); }
+        else { long uid = (long)nc_atomic_int_field(request, "uid", -1), gid = (long)nc_atomic_int_field(request, "gid", -1); rc = uid < -1 || gid < -1 ? -1 : fchown(fd, (uid_t)uid, (gid_t)gid); }
+        int saved = errno; close(fd); return rc == 0 ? nc_linux_result("ok", "") : nc_linux_result("feil", saved ? strerror(saved) : "invalid ownership or mode");
+    }
+    if (!strcmp(operation, "privilege_drop")) {
+        const char *user = nc_atomic_text_field(request, "user", ""), *group = nc_atomic_text_field(request, "group", "");
+        if (!nc_linux_safe_text(user, 255) || !nc_linux_safe_text(group, 255)) return nc_linux_result("feil", "invalid identity");
+        struct passwd *pw = getpwnam(user); struct group *gr = getgrnam(group); if (!pw || !gr) return nc_linux_result("not_found", "identity not found");
+        if (geteuid() != 0) return nc_linux_result("feil", "privilege drop requires root");
+        if (initgroups(user, gr->gr_gid) != 0 || setgid(gr->gr_gid) != 0 || setuid(pw->pw_uid) != 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return nc_linux_result("feil", "irreversible privilege drop failed");
+        NcVal *result = nc_linux_result("ok", ""); nc_system_set_int(result, "uid", getuid()); nc_system_set_int(result, "gid", getgid()); nc_system_set_text(result, "no_new_privs", "1"); return result;
+    }
+    if (!strcmp(operation, "journald_write")) {
+        const char *message = nc_atomic_text_field(request, "message", ""), *identifier = nc_atomic_text_field(request, "identifier", "norscode");
+        int priority = (int)nc_atomic_int_field(request, "priority", 6); if (!nc_linux_safe_text(message, 65535) || !nc_linux_safe_text(identifier, 64) || priority < 0 || priority > 7) return nc_linux_result("feil", "invalid journal entry");
+        int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0); if (fd < 0) return nc_linux_result("feil", strerror(errno)); struct sockaddr_un address; memset(&address, 0, sizeof(address)); address.sun_family = AF_UNIX; snprintf(address.sun_path, sizeof(address.sun_path), "%s", "/run/systemd/journal/socket");
+        char *payload = malloc(strlen(message) + strlen(identifier) + 64); if (!payload) { close(fd); return nc_linux_result("feil", "out of memory"); } int length = sprintf(payload, "MESSAGE=%s\nSYSLOG_IDENTIFIER=%s\nPRIORITY=%d", message, identifier, priority);
+        int rc = sendto(fd, payload, (size_t)length, MSG_NOSIGNAL, (struct sockaddr *)&address, sizeof(address)); int saved = errno; free(payload); close(fd); return rc >= 0 ? nc_linux_result("ok", "") : nc_linux_result("feil", strerror(saved));
+    }
+    return nc_linux_result("feil", "invalid operation");
+}
+#else
+static NcVal *nc_builtin_linux_operation(NcVal *request) { (void)request; return nc_linux_result("unsupported", "Linux ABI unavailable on this platform"); }
+#endif
+
 static NcVal *nc_builtin_system_operation(NcVal *request) {
+    if (request && request->type == NC_MAP && !strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-linux-ops-v1")) return nc_builtin_linux_operation(request);
     NcVal *result = nc_map_new();
     nc_system_set_text(result, "abi", "norscode-system-v1");
     nc_system_set_text(result, "status", "feil");
@@ -2726,8 +2836,11 @@ static int nc_tls_attach_client(NcNetworkSlot *s,const char *hostname,const char
     s->require_ocsp=require_ocsp;if(require_ocsp)SSL_set_tlsext_status_type(ssl,TLSEXT_STATUSTYPE_ocsp);
     s->ssl_ctx=ctx;s->ssl=ssl;snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",hostname);return 1;
 }
+static int nc_tls_attach_server(NcNetworkSlot *s,const char *cert,const char *key,const char *client_ca,const char *client_crl,const char *ocsp_response,int require_client_cert){
+    SSL_CTX *ctx=nc_tls_server_ctx(cert,key,client_ca,client_crl,ocsp_response,require_client_cert);if(!ctx)return 0;SSL *ssl=SSL_new(ctx);if(!ssl){SSL_CTX_free(ctx);return 0;}if(SSL_set_fd(ssl,(int)s->fd)!=1){SSL_free(ssl);SSL_CTX_free(ctx);return 0;}SSL_set_accept_state(ssl);s->ssl_ctx=ctx;s->ssl=ssl;s->tls_server=1;return 1;
+}
 static int nc_tls_handshake_step(NcNetworkSlot *s,int *want_events,char *error,size_t error_cap){
-    if(s->tls_handshake_done)return 1;int rc=SSL_do_handshake(s->ssl);if(rc==1){if(!s->tls_server&&!nc_tls_verify_ocsp(s,error,error_cap))return -1;s->tls_handshake_done=1;*want_events=0;return 1;}int e=SSL_get_error(s->ssl,rc);
+    if(s->tls_handshake_done)return 1;int rc=SSL_do_handshake(s->ssl);if(rc==1){if(!s->tls_server&&!nc_tls_verify_ocsp(s,error,error_cap))return -1;if(s->tls_server){const char *server_name=SSL_get_servername(s->ssl,TLSEXT_NAMETYPE_host_name);snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",server_name?server_name:"");}s->tls_handshake_done=1;*want_events=0;return 1;}int e=SSL_get_error(s->ssl,rc);
     if(e==SSL_ERROR_WANT_READ){*want_events=1;return 0;}if(e==SSL_ERROR_WANT_WRITE){*want_events=2;return 0;}unsigned long oe=ERR_get_error();snprintf(error,error_cap,"%s",oe?ERR_error_string(oe,NULL):"TLS handshake failed");return -1;
 }
 #endif
@@ -2785,7 +2898,7 @@ static NcVal *nc_builtin_network_operation(NcVal *request){
         return result;
     }
 #if !defined(NC_ENABLE_OPENSSL) && !defined(_WIN32)
-    if(!strcmp(op,"tls_listen")||!strcmp(op,"tls_connect")||!strcmp(op,"tls_handshake"))return nc_network_result("feil",NULL,"",-1,0,"native TLS backend unavailable");
+    if(!strcmp(op,"tls_listen")||!strcmp(op,"tls_connect")||!strcmp(op,"tls_handshake")||!strcmp(op,"tls_upgrade_client")||!strcmp(op,"tls_upgrade_server"))return nc_network_result("feil",NULL,"",-1,0,"native TLS backend unavailable");
 #endif
     if(!strcmp(op,"listen")||!strcmp(op,"tls_listen")){
         const char *host=nc_atomic_text_field(request,"host","127.0.0.1");int port=(int)nc_atomic_int_field(request,"port",0),backlog=(int)nc_atomic_int_field(request,"backlog",128);struct sockaddr_in addr;
@@ -2842,6 +2955,20 @@ static NcVal *nc_builtin_network_operation(NcVal *request){
         return s?nc_network_result(connecting?"connecting":"connected",s,"",0,port,""):nc_network_result("feil",NULL,"",-1,0,"socket capacity");
     }
     NcNetworkSlot *s=nc_network_slot(request);if(!s)return nc_network_result("feil",NULL,"",-1,0,"invalid handle");pthread_mutex_lock(&s->mutex);
+#if defined(NC_ENABLE_OPENSSL)
+    if(!strcmp(op,"tls_upgrade_client")||!strcmp(op,"tls_upgrade_server")){
+        if(s->listener||s->datagram||s->connecting||s->ssl){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"socket cannot be upgraded to TLS");}
+        int ok=!strcmp(op,"tls_upgrade_client")?nc_tls_attach_client(s,nc_atomic_text_field(request,"hostname",""),nc_atomic_text_field(request,"ca_file",""),nc_atomic_text_field(request,"crl_file",""),nc_atomic_text_field(request,"client_cert_file",""),nc_atomic_text_field(request,"client_key_file",""),nc_atomic_int_field(request,"require_ocsp",0)!=0):nc_tls_attach_server(s,nc_atomic_text_field(request,"cert_file",""),nc_atomic_text_field(request,"key_file",""),nc_atomic_text_field(request,"client_ca_file",""),nc_atomic_text_field(request,"client_crl_file",""),nc_atomic_text_field(request,"ocsp_response_file",""),nc_atomic_int_field(request,"require_client_cert",0)!=0);
+        NcVal *r=ok?nc_network_result("tls_ready",s,"",0,0,""):nc_network_result("feil",s,"",-1,0,"TLS upgrade configuration failed");pthread_mutex_unlock(&s->mutex);return r;
+    }
+#elif defined(_WIN32)
+    if(!strcmp(op,"tls_upgrade_client")){
+        if(s->listener||s->datagram||s->connecting||s->schannel||s->schannel_server){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"socket cannot be upgraded to TLS");}
+        if(*nc_atomic_text_field(request,"ca_file","")||*nc_atomic_text_field(request,"crl_file","")||*nc_atomic_text_field(request,"client_cert_file","")||*nc_atomic_text_field(request,"client_key_file","")||nc_atomic_int_field(request,"require_ocsp",0)!=0){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"SChannel custom PEM trust, CRL, OCSP and mTLS are not available");}
+        s->schannel=calloc(1,sizeof(NcwSChannelClient));if(!s->schannel){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"out of memory");}snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",nc_atomic_text_field(request,"hostname",""));snprintf(s->tls_client_certificate_subject,sizeof(s->tls_client_certificate_subject),"%s",nc_atomic_text_field(request,"client_certificate_subject",""));pthread_mutex_unlock(&s->mutex);return nc_network_result("tls_ready",s,"",0,0,"");
+    }
+    if(!strcmp(op,"tls_upgrade_server")){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"SChannel STARTTLS server upgrade unavailable");}
+#endif
 #if defined(NC_ENABLE_OPENSSL)
     if(!strcmp(op,"tls_handshake")){
         if(s->connecting){int ready=0;if(nc_wait_fd(s->fd,2,0,&ready)<=0||!(ready&2)){pthread_mutex_unlock(&s->mutex);return nc_network_result("ventende",s,"",2,0,"");}int err=0;socklen_t n=sizeof(err);getsockopt(s->fd,SOL_SOCKET,SO_ERROR,&err,&n);if(err){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,strerror(err));}s->connecting=0;}
@@ -5015,6 +5142,38 @@ static unsigned long long nc_db_sql_hash(const char *s) {
 /* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
 static NcVal *g_sh_common_fns = NULL;
 
+static int nc_compiler_bundle_supports_module_globals(NcVal *ncb, NcVal *fns) {
+    /*
+     * Build-katalogen kan innehalde eldre, lokalt genererte compiler-bundlar.
+     * Dei må ikkje få høgare tillit enn committed bootstrap når dei manglar
+     * den aktive NCB-ABI-en for modulglobale verdiar. Utan denne kontrollen
+     * blir toppnivå-`la` kompilert som LOAD_NAME/STORE_NAME og feilar først
+     * når ein importert funksjon prøver å lese globalen.
+     */
+    if (!ncb || ncb->type != NC_MAP || !fns || fns->type != NC_MAP) return 0;
+    NcVal *initializers = nc_index_get(ncb, nc_str("module_initializers"));
+    NcVal *global_names = nc_index_get(ncb, nc_str("global_names"));
+    if (!initializers || initializers->type != NC_LIST ||
+        !global_names || global_names->type != NC_MAP) return 0;
+    if (!nc_exec_find_fn(fns, "selfhost.compiler.ir_to_bytecode.emit_load_namn") ||
+        !nc_exec_find_fn(fns, "selfhost.compiler.ir_to_bytecode.kompiler_modul_init")) return 0;
+    NcVal *map_helper = nc_exec_find_fn(fns, "selfhost.vm.vm_map_har_nokkel");
+    if (map_helper && map_helper->type == NC_MAP) {
+        NcVal *code = nc_index_get(map_helper, nc_str("code"));
+        if (!code || code->type != NC_LIST) return 0;
+        for (int i = 0; i < code->list->len; i++) {
+            NcVal *instr = code->list->items[i];
+            if (!instr || instr->type != NC_LIST || instr->list->len < 2) continue;
+            NcVal *op = instr->list->items[0];
+            NcVal *target = instr->list->items[1];
+            if (op && op->type == NC_STR && !strcmp(op->s, "CALL") &&
+                target && target->type == NC_STR &&
+                !strcmp(target->s, "selfhost.vm.vm_map_har_nokkel")) return 0;
+        }
+    }
+    return 1;
+}
+
 static NcVal *nc_load_precompiled_functions(const char *path, const char *label) {
     NcVal *ncb_file = nc_builtin_fil_les(nc_str(path));
     if (!ncb_file || ncb_file->type != NC_STR) {
@@ -5036,7 +5195,9 @@ static NcVal *nc_load_precompiled_functions(const char *path, const char *label)
 
 static NcVal *nc_try_stage0_compiler_bundle(const char *src_text, const char *modul) {
     const char *root = getenv("NORSCODE_ROOT");
+    const char *candidate_override = getenv("NORSCODE_COMPILER_BUNDLE");
     const char *paths[] = {
+        candidate_override && candidate_override[0] ? candidate_override : "build/v9400/hybrid_compiler_bundle_v9400.ncb.json",
         "build/v9400/hybrid_compiler_bundle_v9400.ncb.json",
         "build/v6000/compiler_stage0_v6000.ncb.json",
         "build/nc-regen/selfhost_kompiler.ncb.json",
@@ -5066,6 +5227,7 @@ static NcVal *nc_try_stage0_compiler_bundle(const char *src_text, const char *mo
         NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
         if (!fns_v || fns_v->type != NC_MAP) continue;
         if (!nc_exec_find_fn(fns_v, "selfhost.kompiler.kompiler_fil")) continue;
+        if (!nc_compiler_bundle_supports_module_globals(ncb, fns_v)) continue;
 
         NcVal *saved_functions = g_current_functions;
         NcVal *saved_ncb = g_current_ncb;
@@ -5918,6 +6080,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         NcVal *instr = code_v->list->items[ip];
         if (!instr || instr->type != NC_LIST || instr->list->len < 1) { ip++; continue; }
         NcVal *op_v = instr->list->items[0];
+        /*
+         * Same legacy transport boundary as LOAD_NAME/null below: some old
+         * compiler bundles collapsed the complete instruction text
+         * ["LOAD_NAME","null"] to [null]. It represents the language
+         * literal null, not an opcode that may be skipped.
+         */
+        if ((!op_v || op_v->type == NC_NIL) && instr->list->len == 1) {
+            nc_push(&sp, stack_arr, nc_nil());
+            ip++;
+            continue;
+        }
         if (!op_v || op_v->type != NC_STR) { ip++; continue; }
         const char *op = op_v->s;
         nc_native_debug_observe(fn_name, ip, op, varnames, nvars, depth);
@@ -5933,6 +6106,18 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             ip++;
         } else if (!strcmp(op, "LOAD_NAME")) {
             if (instr->list->len >= 2) {
+                /*
+                 * Eldre compiler-NCB-ar kan ha transportert namnet "null"
+                 * gjennom smart JSON-dekoding og dermed lagra operand 1 som
+                 * JSON null. Semantikken er framleis Norscode-literal null;
+                 * utan denne kompatibilitetsgrensa blir ingen verdi pusha og
+                 * neste binæropcode feilar misvisande med stack-underflow.
+                 */
+                if (!instr->list->items[1] || instr->list->items[1]->type == NC_NIL) {
+                    nc_push(&sp, stack_arr, nc_nil());
+                    ip++;
+                    continue;
+                }
                 char *n = nc_to_str_raw(instr->list->items[1]);
                 /* Sjekk lokale vars fyrst */
                 NcVal *lv = nc_nil();
@@ -5947,6 +6132,38 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 lv = nc_load(vars_arr, varnames, nvars, n); /* kastar for ukjent */
                 _load_done: free(n);
                 nc_push(&sp, stack_arr, lv);
+            }
+            ip++;
+        } else if (!strcmp(op, "STORE_GLOBAL")) {
+            if (instr->list->len >= 2) {
+                NcVal *module_v = nc_index_get(fn_def, nc_str("module"));
+                NcVal *globals = nc_map_get_cstr(functions, "__ncb_globals__");
+                if (!globals || globals->type != NC_MAP || !module_v || module_v->type != NC_STR) {
+                    nc_panic("STORE_GLOBAL utan initialisert modulglobal-kontekst i %s", fn_name);
+                }
+                NcVal *module_globals = nc_index_get(globals, module_v);
+                if (!module_globals || module_globals->type != NC_MAP) {
+                    module_globals = nc_map_new();
+                    nc_index_set(globals, module_v, module_globals);
+                }
+                nc_index_set(module_globals, instr->list->items[1], nc_pop(&sp, stack_arr));
+            }
+            ip++;
+        } else if (!strcmp(op, "LOAD_GLOBAL")) {
+            if (instr->list->len >= 2) {
+                NcVal *module_v = nc_index_get(fn_def, nc_str("module"));
+                NcVal *globals = nc_map_get_cstr(functions, "__ncb_globals__");
+                if (!globals || globals->type != NC_MAP || !module_v || module_v->type != NC_STR) {
+                    nc_panic("LOAD_GLOBAL utan initialisert modulglobal-kontekst i %s", fn_name);
+                }
+                NcVal *module_globals = nc_index_get(globals, module_v);
+                if (!module_globals || module_globals->type != NC_MAP ||
+                    !nc_truthy(nc_builtin_finnes_nokkel(module_globals, instr->list->items[1]))) {
+                    char *global_name = nc_to_str_raw(instr->list->items[1]);
+                    nc_panic("Ukjent global variabel: %s.%s", module_v->s, global_name);
+                    free(global_name);
+                }
+                nc_push(&sp, stack_arr, nc_index_get(module_globals, instr->list->items[1]));
             }
             ip++;
         } else if (!strcmp(op, "POP")) {
@@ -6396,7 +6613,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 }
                 fn_r = v;
             }
-            else if (!strcmp(cn,"vent.sov") || !strcmp(cn,"builtin.vent.sov")) { /* noop — sync runtime */ }
+            else if (!strcmp(cn,"vent.sov") || !strcmp(cn,"builtin.vent.sov")) fn_r=nc_builtin_vent_sov(narg>0?cargs[0]:nc_int(0));
             else if (!strcmp(cn,"vent.timeout") || !strcmp(cn,"builtin.vent.timeout")) {
                 /* vent.timeout(value, ms) — ms=0 → always timed out in sync mode */
                 NcVal *m = nc_map_new();
@@ -7671,6 +7888,10 @@ NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na) {
 /* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
 NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_int(1);
+    const char *debug_ncb_path = getenv("NORSCODE_HOST_NCB_DEBUG_OUTPUT");
+    if (debug_ncb_path && debug_ncb_path[0]) {
+        nc_builtin_fil_skriv(nc_str(debug_ncb_path), args[0]);
+    }
     NcVal *ncb = nc_builtin_json_parse_raw(args[0]);
     if (!ncb || ncb->type != NC_MAP) return nc_int(1);
     NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
@@ -7723,6 +7944,76 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     // if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
     g_current_functions = fns_v;
     g_native_app_security_active = 1;
+    /*
+     * C-executoren køyrer same NCB-format som pure VM og må derfor honorere
+     * modulglobale metadata før entry. Tidlegare vart LOAD_GLOBAL ignorert;
+     * argumentet forsvann frå operandstacken og neste CALL feila misvisande
+     * med Stack underflow.
+     */
+    NcVal *globals = nc_map_new();
+    NcVal *global_names = nc_index_get(ncb, nc_str("global_names"));
+    if (global_names && global_names->type == NC_MAP) {
+        for (int gi = 0; gi < global_names->map->len; gi++) {
+            nc_index_set(globals, nc_str(global_names->map->keys[gi]), nc_map_new());
+        }
+    }
+    NcVal *initializers = nc_index_get(ncb, nc_str("module_initializers"));
+    if (!initializers || initializers->type != NC_LIST) initializers = nc_list_new();
+    /*
+     * Verifiser metadata mot levande kode. Legacy bundletransport kan bevare
+     * __module_init__ og STORE_GLOBAL, men miste dei parallelle metadatafelta.
+     * Gjenopprett berre eksakte initialisatorar og namn som kan provast frå
+     * bytekoden; dette er deterministisk og legg ikkje til gjetta state.
+     */
+    for (int fi = 0; fi < fns_v->map->len; fi++) {
+        const char *candidate_name = fns_v->map->keys[fi];
+        const char *suffix = ".__module_init__";
+        size_t candidate_len = strlen(candidate_name), suffix_len = strlen(suffix);
+        if (candidate_len <= suffix_len || strcmp(candidate_name + candidate_len - suffix_len, suffix)) continue;
+        NcVal *definition = fns_v->map->vals[fi];
+        if (!definition || definition->type != NC_MAP) continue;
+        int initializer_known = 0;
+        for (int ii = 0; ii < initializers->list->len; ii++) {
+            NcVal *known = initializers->list->items[ii];
+            if (known && known->type == NC_STR && !strcmp(known->s, candidate_name)) {
+                initializer_known = 1;
+                break;
+            }
+        }
+        if (!initializer_known) nc_list_append_raw(initializers, nc_str(candidate_name));
+
+        NcVal *module_v = nc_map_get_cstr(definition, "module");
+        if (!module_v || module_v->type != NC_STR) continue;
+        NcVal *module_globals = nc_index_get(globals, module_v);
+        if (!module_globals || module_globals->type != NC_MAP) {
+            module_globals = nc_map_new();
+            nc_index_set(globals, module_v, module_globals);
+        }
+        NcVal *initializer_code = nc_map_get_cstr(definition, "code");
+        if (!initializer_code || initializer_code->type != NC_LIST) continue;
+        for (int ci = 0; ci < initializer_code->list->len; ci++) {
+            NcVal *instruction = initializer_code->list->items[ci];
+            if (!instruction || instruction->type != NC_LIST || instruction->list->len < 2) continue;
+            NcVal *opcode = instruction->list->items[0];
+            NcVal *global_name = instruction->list->items[1];
+            if (opcode && opcode->type == NC_STR && !strcmp(opcode->s, "STORE_GLOBAL") &&
+                global_name && global_name->type == NC_STR &&
+                !nc_truthy(nc_builtin_finnes_nokkel(module_globals, global_name))) {
+                nc_index_set(module_globals, global_name, nc_nil());
+            }
+        }
+    }
+    nc_index_set(fns_v, nc_str("__ncb_globals__"), globals);
+    if (initializers && initializers->type == NC_LIST) {
+        for (int ii = 0; ii < initializers->list->len; ii++) {
+            NcVal *initializer = initializers->list->items[ii];
+            if (!initializer || initializer->type != NC_STR ||
+                !nc_exec_find_fn(fns_v, initializer->s)) {
+                nc_panic("Manglar modulinitialisator i NCB");
+            }
+            (void)nc_exec_call(fns_v, initializer->s, NULL, 0, 0);
+        }
+    }
     NcVal *r = nc_exec_call(fns_v, entry, NULL, 0, 0);
     int exit_code = nc_val_til_exit(r);
     g_current_functions = saved_functions;

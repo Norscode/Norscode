@@ -19,6 +19,7 @@
 
 bruk std.base64 som base64
 bruk std.protocol_stream som stream
+bruk std.tid som tid
 
 funksjon _inneheld(verdi: tekst, del: tekst) -> bool {
     returner builtin.index_of(verdi, del) >= 0
@@ -91,10 +92,10 @@ funksjon _trygg_melding(msg: ordbok_tekst) -> bool {
         i = i + 1
     }
 
-    la vedlegg = builtin.json_parse(msg["vedlegg"])
+    la vedlegg = msg["vedlegg"]
     i = 0
     mens (i < lengde(vedlegg)) {
-        hvis ikkje _trygg_lokal_sti(vedlegg[i]) { returner usann }
+        hvis vedlegg[i] != "" og ikkje _trygg_lokal_sti(vedlegg[i]) { returner usann }
         i = i + 1
     }
     returner sann
@@ -110,9 +111,11 @@ funksjon ny_melding(emne: tekst, innhald: tekst,
     msg["avsender"] = avsender
     msg["mottakarar"] = builtin.json_stringify(mottakarar)
     msg["headers"] = "{}"
-    msg["vedlegg"] = "[]"
+    # Direkte liste bevarer typen gjennom eldre stage0-JSON.
+    msg["vedlegg"] = [""]
     msg["html"] = ""
     msg["charset"] = "utf-8"
+    msg["message_id"] = "<" + builtin.random_hex(16) + "@norscode.local>"
     returner msg
 }
 
@@ -137,9 +140,8 @@ funksjon legg_til_mottakar(msg: ordbok_tekst, adresse: tekst) {
 
 funksjon legg_til_vedlegg(msg: ordbok_tekst, filsti: tekst) {
     hvis ikkje _trygg_lokal_sti(filsti) { returner }
-    la vedlegg = builtin.json_parse(msg["vedlegg"])
+    la vedlegg = msg["vedlegg"]
     legg_til(vedlegg, filsti)
-    msg["vedlegg"] = builtin.json_stringify(vedlegg)
 }
 
 # ─── RFC 2822-formatering ─────────────────────────────────────────────────────
@@ -206,6 +208,11 @@ funksjon ny_server(vert: tekst, port: heltall) -> ordbok_tekst {
     srv["port"] = tekst_fra_heltall(port)
     srv["tls"] = "usann"
     srv["ssl"] = "usann"
+    srv["timeout_ms"] = "30000"
+    srv["max_response"] = "1048576"
+    srv["ca_file"] = ""
+    srv["retry_attempts"] = "1"
+    srv["retry_base_ms"] = "250"
     returner srv
 }
 
@@ -221,6 +228,17 @@ funksjon ny_server_ssl(vert: tekst, port: heltall) -> ordbok_tekst {
     returner srv
 }
 
+funksjon sett_ca_fil(srv: ordbok_tekst, ca_file: tekst) {
+    srv["ca_file"] = ca_file
+}
+
+funksjon sett_retry(srv: ordbok_tekst, attempts: heiltall, base_ms: heiltall) -> boolsk {
+    hvis attempts < 1 eller attempts > 5 eller base_ms < 0 eller base_ms > 30000 { returner usann }
+    srv["retry_attempts"] = tekst_fra_heltall(attempts)
+    srv["retry_base_ms"] = tekst_fra_heltall(base_ms)
+    returner sann
+}
+
 # ─── Native SMTP-sending ──────────────────────────────────────────────────────
 
 funksjon send_curl(srv: ordbok_tekst, msg: ordbok_tekst,
@@ -228,39 +246,206 @@ funksjon send_curl(srv: ordbok_tekst, msg: ordbok_tekst,
     returner send_native(srv, msg, brukarnamn, passord)
 }
 
-funksjon send_native(srv: ordbok_tekst, msg: ordbok_tekst,
-                     brukarnamn: tekst, passord: tekst) -> bool {
-    hvis ikkje _trygg_melding(msg) { returner usann }
-    hvis ikkje _trygg_felt(srv["vert"]) { returner usann }
-    hvis ikkje _trygg_felt(srv["port"]) { returner usann }
-    hvis ikkje _trygg_felt(brukarnamn) { returner usann }
-    hvis _har_kontrollteikn(passord) eller _inneheld(passord, "`") { returner usann }
-    la mottakarar = builtin.json_parse(msg["mottakarar"])
-    # STARTTLS krev ein eksplisitt upgrade-operasjon på det same native
-    # handtaket. Fram til den ABI-en finst feilar 587-modusen lukka.
-    hvis srv["tls"] == "sann" og srv["ssl"] != "sann" { returner usann }
-    la kommandoar: liste_tekst = ["EHLO norscode.local"]
-    hvis brukarnamn != "" eller passord != "" {
-        hvis brukarnamn == "" eller passord == "" { returner usann }
-        legg_til(kommandoar, "AUTH LOGIN")
-        legg_til(kommandoar, base64.kod(brukarnamn))
-        legg_til(kommandoar, base64.kod(passord))
+funksjon _basename(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    returner delar[lengde(delar) - 1]
+}
+
+funksjon _b64_liner(buffer) -> tekst {
+    la raw = base64.kod_bytes(buffer)
+    la out = ""
+    la p = 0
+    mens p < lengde(raw) {
+        la slutt = p + 76
+        hvis slutt > lengde(raw) { slutt = lengde(raw) }
+        out = out + builtin.slice(raw, p, slutt) + "\r\n"
+        p = slutt
     }
-    legg_til(kommandoar, "MAIL FROM:<" + msg["avsender"] + ">")
+    returner out
+}
+
+funksjon format_melding_mime(msg: ordbok_tekst) -> tekst {
+    la mottakarar = _trygg_mottakarar(builtin.json_parse(msg["mottakarar"]))
+    la headers = builtin.json_parse(msg["headers"])
+    la mixed = "norscode-mixed-" + builtin.random_hex(12)
+    la alt = "norscode-alt-" + builtin.random_hex(12)
+    la vedlegg = msg["vedlegg"]
+    la ut = "From: " + msg["avsender"] + "\r\nTo: " + builtin.join(mottakarar, ", ") +
+        "\r\nSubject: " + msg["emne"] + "\r\nMessage-ID: " + msg["message_id"] + "\r\nMIME-Version: 1.0\r\n"
+    la keys = builtin.nøkler(headers)
     la i = 0
-    mens i < lengde(mottakarar) {
-        legg_til(kommandoar, "RCPT TO:<" + mottakarar[i] + ">")
+    mens i < lengde(keys) {
+        hvis _trygg_header_namn(keys[i]) og _trygg_header_verdi(headers[keys[i]]) { ut = ut + keys[i] + ": " + headers[keys[i]] + "\r\n" }
         i = i + 1
     }
-    legg_til(kommandoar, "DATA")
-    legg_til(kommandoar, format_melding(msg) + "\r\n.")
-    legg_til(kommandoar, "QUIT")
-    la svar = stream.dialog(srv["vert"], heltall_fra_tekst(srv["port"]),
-                            srv["ssl"] == "sann",
-                            builtin.join(kommandoar, "\r\n") + "\r\n",
-                            30000, 1048576)
-    hvis svar == "" eller _inneheld(svar, " 5") eller _inneheld(svar, "\n5") { returner usann }
-    returner _inneheld(svar, "250") og (_inneheld(svar, "221") eller _inneheld(svar, "250 2.0.0"))
+    la vedlegg_tal = 0
+    i = 0
+    mens i < lengde(vedlegg) { hvis vedlegg[i] != "" { vedlegg_tal = vedlegg_tal + 1 } i = i + 1 }
+    hvis vedlegg_tal > 0 {
+        ut = ut + "Content-Type: multipart/mixed; boundary=\"" + mixed + "\"\r\n\r\n--" + mixed + "\r\n"
+    }
+    hvis msg["html"] != "" {
+        ut = ut + "Content-Type: multipart/alternative; boundary=\"" + alt + "\"\r\n\r\n"
+        ut = ut + "--" + alt + "\r\nContent-Type: text/plain; charset=" + msg["charset"] + "\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + msg["innhald"] + "\r\n"
+        ut = ut + "--" + alt + "\r\nContent-Type: text/html; charset=" + msg["charset"] + "\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + msg["html"] + "\r\n--" + alt + "--\r\n"
+    } ellers {
+        ut = ut + "Content-Type: text/plain; charset=" + msg["charset"] + "\r\nContent-Transfer-Encoding: 8bit\r\n\r\n" + msg["innhald"] + "\r\n"
+    }
+    i = 0
+    mens i < lengde(vedlegg) {
+        hvis vedlegg[i] != "" {
+            la namn = _basename(vedlegg[i])
+            hvis ikkje _trygg_felt(namn) eller ikkje builtin.fil_finnes(vedlegg[i]) { kast "SMTPMIMEFeil: ugyldig vedlegg" }
+            ut = ut + "--" + mixed + "\r\nContent-Type: application/octet-stream; name=\"" + namn + "\"\r\n" +
+                "Content-Disposition: attachment; filename=\"" + namn + "\"\r\nContent-Transfer-Encoding: base64\r\n\r\n" +
+                _b64_liner(builtin.fil_les_binær(vedlegg[i]))
+        }
+        i = i + 1
+    }
+    hvis vedlegg_tal > 0 { ut = ut + "--" + mixed + "--\r\n" }
+    returner ut
+}
+
+funksjon _smtp_kode(svar: tekst) -> heiltall {
+    la linjer = builtin.split(svar, "\n")
+    la kode = -1
+    la i = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis lengde(l) >= 3 {
+            la a = builtin.char_code(builtin.slice(l, 0, 1))
+            la b = builtin.char_code(builtin.slice(l, 1, 2))
+            la c = builtin.char_code(builtin.slice(l, 2, 3))
+            hvis a >= 48 og a <= 57 og b >= 48 og b <= 57 og c >= 48 og c <= 57 {
+                hvis lengde(l) == 3 eller builtin.slice(l, 3, 4) == " " { kode = (a - 48) * 100 + (b - 48) * 10 + c - 48 }
+            }
+        }
+        i = i + 1
+    }
+    returner kode
+}
+
+funksjon _smtp_les(session: ordbok, maks: heiltall) -> tekst {
+    la out = ""
+    la rundar = 0
+    mens rundar < 64 og lengde(out) < maks {
+        la r = stream.les_chunk(session, maks - lengde(out))
+        hvis r["status"] != "ok" { returner "" }
+        out = out + r["data"]
+        hvis _smtp_kode(out) >= 0 { returner out }
+        rundar = rundar + 1
+    }
+    returner ""
+}
+
+funksjon _smtp_cmd(session: ordbok, kommando: tekst, maks: heiltall) -> tekst {
+    hvis ikkje stream.skriv_alt(session, kommando + "\r\n") { returner "" }
+    returner _smtp_les(session, maks)
+}
+
+funksjon _smtp_resultat(status: tekst, kategori: tekst, melding: tekst,
+                        kode: heiltall, retry: boolsk, provider_id: tekst) -> ordbok_tekst {
+    returner {"status": status, "category": kategori, "error": melding,
+             "code": tekst_fra_heltall(kode), "retryable": hvis retry da "sann" ellers "usann",
+             "provider_id": provider_id, "attempts": "1"}
+}
+
+funksjon _smtp_feil(svar: tekst, fase_namn: tekst) -> ordbok_tekst {
+    la kode = _smtp_kode(svar)
+    la detalj = fase_namn + ": " + svar
+    hvis kode >= 400 og kode < 500 { returner _smtp_resultat("feil", "transient", detalj, kode, sann, "") }
+    hvis kode == 535 eller kode == 534 { returner _smtp_resultat("feil", "auth", detalj, kode, usann, "") }
+    hvis kode >= 500 { returner _smtp_resultat("feil", "permanent", detalj, kode, usann, "") }
+    returner _smtp_resultat("feil", "protocol", fase_namn + ": ugyldig SMTP-svar", kode, usann, "")
+}
+
+funksjon _provider_id(svar: tekst) -> tekst {
+    la rein = builtin.trim(svar)
+    la delar = builtin.split(rein, " ")
+    hvis lengde(delar) < 2 { returner "" }
+    la id = delar[lengde(delar) - 1]
+    hvis lengde(id) > 200 eller _har_kontrollteikn(id) { returner "" }
+    returner id
+}
+
+funksjon _smtp_eitt_forsøk(srv: ordbok_tekst, msg: ordbok_tekst,
+                          brukarnamn: tekst, passord: tekst) -> ordbok_tekst {
+    la timeout = heltall_fra_tekst(srv["timeout_ms"])
+    la maks = heltall_fra_tekst(srv["max_response"])
+    la session = stream.opne_session_ca(srv["vert"], heltall_fra_tekst(srv["port"]), srv["ssl"] == "sann", timeout, srv["ca_file"])
+    hvis session["status"] != "open" { returner _smtp_resultat("feil", "network", session["error"], -1, sann, "") }
+    la svar = _smtp_les(session, maks)
+    hvis _smtp_kode(svar) != 220 { stream.lukk_session(session) returner _smtp_feil(svar, "greeting") }
+    svar = _smtp_cmd(session, "EHLO norscode.local", maks)
+    hvis _smtp_kode(svar) != 250 { stream.lukk_session(session) returner _smtp_feil(svar, "EHLO") }
+    hvis srv["tls"] == "sann" og srv["ssl"] != "sann" {
+        hvis builtin.index_of(builtin.upper(svar), "STARTTLS") < 0 { stream.lukk_session(session) returner _smtp_resultat("feil", "tls", "server annonserer ikkje STARTTLS", 0, usann, "") }
+        svar = _smtp_cmd(session, "STARTTLS", maks)
+        hvis _smtp_kode(svar) != 220 { stream.lukk_session(session) returner _smtp_feil(svar, "STARTTLS") }
+        hvis ikkje stream.oppgrader_tls(session, srv["vert"], srv["ca_file"]) { stream.lukk_session(session) returner _smtp_resultat("feil", "tls", "TLS-oppgradering feila", 0, usann, "") }
+        svar = _smtp_cmd(session, "EHLO norscode.local", maks)
+        hvis _smtp_kode(svar) != 250 { stream.lukk_session(session) returner _smtp_feil(svar, "EHLO etter TLS") }
+    }
+    hvis brukarnamn != "" eller passord != "" {
+        hvis brukarnamn == "" eller passord == "" { stream.lukk_session(session) returner _smtp_resultat("feil", "auth", "ufullstendig legitimasjon", 0, usann, "") }
+        la caps = builtin.upper(svar)
+        hvis builtin.index_of(caps, "AUTH") < 0 { stream.lukk_session(session) returner _smtp_resultat("feil", "auth", "server annonserer ikkje AUTH", 0, usann, "") }
+        hvis builtin.index_of(caps, "PLAIN") >= 0 {
+            svar = _smtp_cmd(session, "AUTH PLAIN " + base64.kod(builtin.chr(0) + brukarnamn + builtin.chr(0) + passord), maks)
+        } ellers hvis builtin.index_of(caps, "LOGIN") >= 0 {
+            svar = _smtp_cmd(session, "AUTH LOGIN", maks)
+            hvis _smtp_kode(svar) == 334 { svar = _smtp_cmd(session, base64.kod(brukarnamn), maks) }
+            hvis _smtp_kode(svar) == 334 { svar = _smtp_cmd(session, base64.kod(passord), maks) }
+        } ellers { stream.lukk_session(session) returner _smtp_resultat("feil", "auth", "ingen støtta AUTH-mekanisme", 0, usann, "") }
+        hvis _smtp_kode(svar) != 235 { stream.lukk_session(session) returner _smtp_feil(svar, "AUTH") }
+    }
+    svar = _smtp_cmd(session, "MAIL FROM:<" + msg["avsender"] + ">", maks)
+    hvis _smtp_kode(svar) != 250 { stream.lukk_session(session) returner _smtp_feil(svar, "MAIL FROM") }
+    la mottakarar = builtin.json_parse(msg["mottakarar"])
+    la i = 0
+    mens i < lengde(mottakarar) {
+        svar = _smtp_cmd(session, "RCPT TO:<" + mottakarar[i] + ">", maks)
+        hvis _smtp_kode(svar) != 250 og _smtp_kode(svar) != 251 { stream.lukk_session(session) returner _smtp_feil(svar, "RCPT TO") }
+        i = i + 1
+    }
+    svar = _smtp_cmd(session, "DATA", maks)
+    hvis _smtp_kode(svar) != 354 { stream.lukk_session(session) returner _smtp_feil(svar, "DATA") }
+    la body = builtin.replace(builtin.replace(format_melding_mime(msg), "\r\n", "\n"), "\r", "\n")
+    la linjer = builtin.split(body, "\n")
+    i = 0
+    mens i < lengde(linjer) { hvis builtin.starts_with(linjer[i], ".") { linjer[i] = "." + linjer[i] } i = i + 1 }
+    hvis ikkje stream.skriv_alt(session, builtin.join(linjer, "\r\n") + "\r\n.\r\n") { stream.lukk_session(session) returner _smtp_resultat("feil", "delivery_unknown", "tilkopling brot under DATA", -1, usann, "") }
+    svar = _smtp_les(session, maks)
+    hvis _smtp_kode(svar) != 250 { stream.lukk_session(session) returner _smtp_feil(svar, "levering") }
+    la provider = _provider_id(svar)
+    la _ = _smtp_cmd(session, "QUIT", maks)
+    stream.lukk_session(session)
+    returner _smtp_resultat("sent", "ok", "", 250, usann, provider)
+}
+
+funksjon send_resultat(srv: ordbok_tekst, msg: ordbok_tekst,
+                       brukarnamn: tekst, passord: tekst) -> ordbok_tekst {
+    hvis ikkje _trygg_melding(msg) eller ikkje _trygg_felt(srv["vert"]) eller ikkje _trygg_felt(srv["port"]) {
+        returner _smtp_resultat("feil", "validation", "ugyldig melding eller server", 0, usann, "")
+    }
+    hvis (brukarnamn != "" og ikkje _trygg_felt(brukarnamn)) eller _har_kontrollteikn(passord) { returner _smtp_resultat("feil", "validation", "ugyldig legitimasjon", 0, usann, "") }
+    la attempts = heltall_fra_tekst(srv["retry_attempts"])
+    la base_ms = heltall_fra_tekst(srv["retry_base_ms"])
+    la i = 0
+    la result = _smtp_resultat("feil", "network", "ikkje forsøkt", -1, sann, "")
+    mens i < attempts {
+        result = _smtp_eitt_forsøk(srv, msg, brukarnamn, passord)
+        result["attempts"] = tekst_fra_heltall(i + 1)
+        hvis result["status"] == "sent" eller result["retryable"] != "sann" { returner result }
+        i = i + 1
+        hvis i < attempts og base_ms > 0 { tid.sov(base_ms * i) }
+    }
+    returner result
+}
+
+funksjon send_native(srv: ordbok_tekst, msg: ordbok_tekst,
+                     brukarnamn: tekst, passord: tekst) -> bool {
+    returner send_resultat(srv, msg, brukarnamn, passord)["status"] == "sent"
 }
 
 # ─── Enkel SMTP-dialog (via Norscode socket) ─────────────────────────────────

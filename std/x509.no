@@ -1,0 +1,208 @@
+# Avgrensa, prosessfri X.509-lesar for sertifikatmetadata.
+# Lesaren tolkar DER-strukturen sjølv og returnerer aldri privat nøkkelmateriale.
+
+bruk std.base64 som base64
+bruk std.bytes som bytes
+bruk std.sha256 som sha256
+
+funksjon _hex_byte(v: heiltall) -> tekst {
+    la h = "0123456789ABCDEF"
+    returner builtin.slice(h, (v >> 4) & 15, ((v >> 4) & 15) + 1) + builtin.slice(h, v & 15, (v & 15) + 1)
+}
+
+funksjon _hex(data: liste_heiltall, start: heiltall, slutt: heiltall, kolon: boolsk) -> tekst {
+    la ut = ""
+    la i = start
+    mens i < slutt {
+        hvis kolon og ut != "" { ut = ut + ":" }
+        ut = ut + _hex_byte(data[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _ascii(data: liste_heiltall, start: heiltall, slutt: heiltall) -> tekst {
+    la ut = ""
+    la i = start
+    mens i < slutt { ut = ut + builtin.chr(data[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _tlv(data: liste_heiltall, pos: heiltall, grense: heiltall) -> ordbok {
+    hvis pos < 0 eller pos + 2 > grense { returner {"ok": usann} }
+    la tag = data[pos]
+    la første = data[pos + 1]
+    la header = 2
+    la n = 0
+    hvis første < 128 { n = første }
+    ellers {
+        la tal = første & 127
+        hvis tal < 1 eller tal > 4 eller pos + 2 + tal > grense { returner {"ok": usann} }
+        la i = 0
+        mens i < tal {
+            hvis n > 16777215 { returner {"ok": usann} }
+            n = n * 256 + data[pos + 2 + i]
+            i = i + 1
+        }
+        header = 2 + tal
+        hvis n < 128 { returner {"ok": usann} }
+    }
+    la innhald = pos + header
+    hvis n < 0 eller innhald + n > grense { returner {"ok": usann} }
+    returner {"ok": sann, "tag": tag, "start": innhald, "end": innhald + n, "next": innhald + n}
+}
+
+funksjon _oid(data: liste_heiltall, node: ordbok) -> tekst {
+    returner _hex(data, node["start"], node["end"], usann)
+}
+
+funksjon _oid_namn(oid: tekst) -> tekst {
+    hvis oid == "550403" { returner "CN" }
+    hvis oid == "55040A" { returner "O" }
+    hvis oid == "55040B" { returner "OU" }
+    hvis oid == "550406" { returner "C" }
+    hvis oid == "550407" { returner "L" }
+    hvis oid == "550408" { returner "ST" }
+    hvis oid == "2A864886F70D010901" { returner "emailAddress" }
+    returner oid
+}
+
+funksjon _name(data: liste_heiltall, node: ordbok) -> tekst {
+    hvis node["tag"] != 48 { returner "" }
+    la delar: liste_tekst = []
+    la p = node["start"]
+    mens p < node["end"] {
+        la sett = _tlv(data, p, node["end"])
+        hvis ikkje sett["ok"] eller sett["tag"] != 49 { returner "" }
+        la seq = _tlv(data, sett["start"], sett["end"])
+        hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner "" }
+        la oid = _tlv(data, seq["start"], seq["end"])
+        hvis ikkje oid["ok"] eller oid["tag"] != 6 { returner "" }
+        la verdi = _tlv(data, oid["next"], seq["end"])
+        hvis ikkje verdi["ok"] { returner "" }
+        legg_til(delar, _oid_namn(_oid(data, oid)) + "=" + _ascii(data, verdi["start"], verdi["end"]))
+        p = sett["next"]
+    }
+    returner builtin.join(delar, ",")
+}
+
+funksjon _tid_iso(raw: tekst) -> tekst {
+    hvis lengde(raw) == 13 {
+        la yy = heltall_fra_tekst(builtin.slice(raw, 0, 2))
+        la år = hvis yy >= 50 da 1900 + yy ellers 2000 + yy
+        returner tekst_fra_heltall(år) + "-" + builtin.slice(raw, 2, 4) + "-" + builtin.slice(raw, 4, 6) + "T" + builtin.slice(raw, 6, 8) + ":" + builtin.slice(raw, 8, 10) + ":" + builtin.slice(raw, 10, 12) + "Z"
+    }
+    hvis lengde(raw) == 15 {
+        returner builtin.slice(raw, 0, 4) + "-" + builtin.slice(raw, 4, 6) + "-" + builtin.slice(raw, 6, 8) + "T" + builtin.slice(raw, 8, 10) + ":" + builtin.slice(raw, 10, 12) + ":" + builtin.slice(raw, 12, 14) + "Z"
+    }
+    returner ""
+}
+
+funksjon _sans(data: liste_heiltall, tbs: ordbok) -> liste_tekst {
+    la ut: liste_tekst = []
+    la p = tbs["start"]
+    mens p < tbs["end"] {
+        la node = _tlv(data, p, tbs["end"])
+        hvis ikkje node["ok"] { returner [] }
+        hvis node["tag"] == 163 {
+            la extseq = _tlv(data, node["start"], node["end"])
+            hvis ikkje extseq["ok"] eller extseq["tag"] != 48 { returner [] }
+            la ep = extseq["start"]
+            mens ep < extseq["end"] {
+                la ext = _tlv(data, ep, extseq["end"])
+                hvis ikkje ext["ok"] eller ext["tag"] != 48 { returner [] }
+                la oid = _tlv(data, ext["start"], ext["end"])
+                hvis ikkje oid["ok"] { returner [] }
+                la vp = oid["next"]
+                la value = _tlv(data, vp, ext["end"])
+                hvis value["ok"] og value["tag"] == 1 { value = _tlv(data, value["next"], ext["end"]) }
+                hvis _oid(data, oid) == "551D11" og value["ok"] og value["tag"] == 4 {
+                    la names = _tlv(data, value["start"], value["end"])
+                    hvis ikkje names["ok"] eller names["tag"] != 48 { returner [] }
+                    la np = names["start"]
+                    mens np < names["end"] {
+                        la gn = _tlv(data, np, names["end"])
+                        hvis ikkje gn["ok"] { returner [] }
+                        hvis gn["tag"] == 130 { legg_til(ut, "DNS:" + _ascii(data, gn["start"], gn["end"])) }
+                        hvis gn["tag"] == 135 og gn["end"] - gn["start"] == 4 {
+                            legg_til(ut, "IP:" + tekst_fra_heltall(data[gn["start"]]) + "." + tekst_fra_heltall(data[gn["start"] + 1]) + "." + tekst_fra_heltall(data[gn["start"] + 2]) + "." + tekst_fra_heltall(data[gn["start"] + 3]))
+                        }
+                        np = gn["next"]
+                    }
+                }
+                ep = ext["next"]
+            }
+        }
+        p = node["next"]
+    }
+    returner ut
+}
+
+funksjon les_der(buffer) -> ordbok {
+    la data = buffer
+    hvis bytes.er_bytes(buffer) { data = bytes.til_liste(buffer) }
+    hvis lengde(data) < 64 eller lengde(data) > 16777216 { returner {"status": "feil", "error": "ugyldig sertifikatstorleik"} }
+    la cert = _tlv(data, 0, lengde(data))
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 eller cert["next"] != lengde(data) { returner {"status": "feil", "error": "ugyldig DER-sertifikat"} }
+    la tbs = _tlv(data, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner {"status": "feil", "error": "manglar TBS"} }
+    la p = tbs["start"]
+    la first = _tlv(data, p, tbs["end"])
+    hvis ikkje first["ok"] { returner {"status": "feil", "error": "ugyldig TBS"} }
+    hvis first["tag"] == 160 { p = first["next"] }
+    la serial = _tlv(data, p, tbs["end"])
+    hvis ikkje serial["ok"] eller serial["tag"] != 2 { returner {"status": "feil", "error": "manglar serial"} }
+    p = serial["next"]
+    la signatur = _tlv(data, p, tbs["end"])
+    hvis ikkje signatur["ok"] { returner {"status": "feil", "error": "manglar signaturalgoritme"} }
+    p = signatur["next"]
+    la issuer = _tlv(data, p, tbs["end"])
+    hvis ikkje issuer["ok"] { returner {"status": "feil", "error": "manglar issuer"} }
+    p = issuer["next"]
+    la validity = _tlv(data, p, tbs["end"])
+    hvis ikkje validity["ok"] eller validity["tag"] != 48 { returner {"status": "feil", "error": "manglar gyldigheit"} }
+    la før = _tlv(data, validity["start"], validity["end"])
+    la etter = _tlv(data, før["next"], validity["end"])
+    hvis ikkje før["ok"] eller ikkje etter["ok"] { returner {"status": "feil", "error": "ugyldig tidsrom"} }
+    p = validity["next"]
+    la subject = _tlv(data, p, tbs["end"])
+    hvis ikkje subject["ok"] { returner {"status": "feil", "error": "manglar subject"} }
+    la serial_start = serial["start"]
+    hvis serial["end"] - serial_start > 1 og data[serial_start] == 0 { serial_start = serial_start + 1 }
+    returner {
+        "status": "ok", "error": "", "issuer": _name(data, issuer), "subject": _name(data, subject),
+        "serial": _hex(data, serial_start, serial["end"], usann),
+        "fingerprint_sha256": sha256.hash_bytes(data),
+        "not_before": _tid_iso(_ascii(data, før["start"], før["end"])),
+        "not_after": _tid_iso(_ascii(data, etter["start"], etter["end"])),
+        "sans": _sans(data, tbs)
+    }
+}
+
+funksjon les_pem(pem: tekst) -> ordbok {
+    la delar = builtin.split(pem, "-----BEGIN CERTIFICATE-----")
+    hvis lengde(delar) < 2 { returner {"status": "feil", "error": "manglar PEM certificate"} }
+    la slutt = builtin.split(delar[1], "-----END CERTIFICATE-----")
+    hvis lengde(slutt) < 2 { returner {"status": "feil", "error": "uavslutta PEM certificate"} }
+    la body = builtin.replace(builtin.replace(builtin.replace(builtin.replace(slutt[0], "\n", ""), "\r", ""), " ", ""), "\t", "")
+    prøv { returner les_der(base64.dekod_bytes(body)) }
+    fang (e) { returner {"status": "feil", "error": "ugyldig PEM/DER: " + tekst(e)} }
+    returner {"status": "feil", "error": "ugyldig PEM"}
+}
+
+funksjon les_kjede_pem(pem: tekst, maks_sertifikat: heiltall) -> liste {
+    la ut: liste = []
+    hvis maks_sertifikat < 1 eller maks_sertifikat > 32 { returner ut }
+    la delar = builtin.split(pem, "-----BEGIN CERTIFICATE-----")
+    la i = 1
+    mens i < lengde(delar) og lengde(ut) < maks_sertifikat {
+        la slutt = builtin.split(delar[i], "-----END CERTIFICATE-----")
+        hvis lengde(slutt) < 2 { returner [] }
+        la cert = les_pem("-----BEGIN CERTIFICATE-----" + slutt[0] + "-----END CERTIFICATE-----")
+        hvis cert["status"] != "ok" { returner [] }
+        legg_til(ut, cert)
+        i = i + 1
+    }
+    hvis i < lengde(delar) { returner [] }
+    returner ut
+}

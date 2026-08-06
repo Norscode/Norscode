@@ -6,6 +6,7 @@ bruk std.sha256 som sha256
 bruk std.runtime_filesystem som runtime_fs
 bruk std.filops som filops
 bruk tools.process_runner som process_runner
+bruk selfhost.json som canonical_json
 
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
@@ -57,6 +58,64 @@ funksjon liste_har(verdiar: liste_tekst, verdi: tekst) -> bool {
         i = i + 1
     }
     returner usann
+}
+
+// Skriv store NCB-kart utan å materialisere ein ny JSON-tekst på storleik med
+// heile importgrafen. Den allereie samanslåtte grafen blir traversert éin gong,
+// medan ein avgrensa tekstbuffer blir tømd til filesystem-ABI-en fortløpande.
+funksjon json_stream_flush(sti: tekst, buffer: tekst) -> tekst {
+    hvis buffer != "" {
+        builtin.fil_append(sti, buffer)
+    }
+    returner ""
+}
+
+funksjon json_stream_put(sti: tekst, buffer: tekst, del: tekst) -> tekst {
+    la etter = buffer + del
+    hvis lengde(etter) >= 65536 {
+        returner json_stream_flush(sti, etter)
+    }
+    returner etter
+}
+
+funksjon json_stream_verdi(sti: tekst, verdi, buffer: tekst) -> tekst {
+    hvis verdi == null {
+        returner json_stream_put(sti, buffer, "null")
+    }
+    la type_namn = builtin.type(verdi)
+    hvis type_namn == "liste" {
+        buffer = json_stream_put(sti, buffer, "[")
+        la i: heiltall = 0
+        mens i < lengde(verdi) {
+            hvis i > 0 { buffer = json_stream_put(sti, buffer, ",") }
+            buffer = json_stream_verdi(sti, verdi[i], buffer)
+            i = i + 1
+        }
+        returner json_stream_put(sti, buffer, "]")
+    }
+    hvis type_namn == "ordbok" {
+        buffer = json_stream_put(sti, buffer, "{")
+        la keys = nøkler(verdi)
+        la i: heiltall = 0
+        mens i < lengde(keys) {
+            hvis i > 0 { buffer = json_stream_put(sti, buffer, ",") }
+            la key = tekst(keys[i])
+            la encoded_key = canonical_json.json_skriv(key)
+            buffer = json_stream_put(sti, buffer, encoded_key)
+            buffer = json_stream_put(sti, buffer, ":")
+            buffer = json_stream_verdi(sti, verdi[key], buffer)
+            i = i + 1
+        }
+        returner json_stream_put(sti, buffer, "}")
+    }
+    la encoded = canonical_json.json_skriv(verdi)
+    returner json_stream_put(sti, buffer, encoded)
+}
+
+funksjon json_stream_skriv_fil(sti: tekst, verdi) {
+    builtin.fil_skriv(sti, "")
+    la buffer = json_stream_verdi(sti, verdi, "")
+    json_stream_flush(sti, buffer)
 }
 
 funksjon fyrste_ord(t: tekst) -> tekst {
@@ -784,8 +843,29 @@ funksjon merge_kartfelt(merged, fragment, namn: tekst) -> heiltall {
     returner 0
 }
 
-funksjon merge_fragment(merged, fragment) -> heiltall {
-    merge_kartfelt(merged, fragment, "functions")
+funksjon merge_modulfunksjonar(merged, fragment, modul: tekst) -> heiltall {
+    hvis ikkje har_nokkel(fragment, "functions") { returner 0 }
+    la kjelde = fragment["functions"]
+    la mål = merged["functions"]
+    la namn = nøkler(kjelde)
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la fn = kjelde[namn[i]]
+        la fn_modul = ""
+        hvis har_nokkel(fn, "module") { fn_modul = tekst(fn["module"]) }
+        hvis fn_modul == modul eller builtin.starts_with(tekst(namn[i]), modul + ".") {
+            mål[namn[i]] = fn
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon merge_fragment(merged, fragment, modul: tekst) -> heiltall {
+    // Kvar modulkompilering kan innehalde heile den transitive importgrafen.
+    // Berre modulens eigne funksjonar får overskrive root-grafen; elles kan ein
+    // sein fragment-cache maskere ei nyare, eksplisitt kompilert kjeldefil.
+    merge_modulfunksjonar(merged, fragment, modul)
     merge_kartfelt(merged, fragment, "dependency_providers")
     merge_kartfelt(merged, fragment, "guard_providers")
     merge_listefelt(merged, fragment, "imports")
@@ -988,7 +1068,7 @@ funksjon start() -> heiltall {
                     returner 1
                 }
                 la fragment = builtin.json_parse_raw(builtin.fil_les(import_out))
-                merge_fragment(merged, fragment)
+                merge_fragment(merged, fragment, import_mod)
                 la vidare = importer_fraa(import_abs)
                 la j: heiltall = 0
                 mens j < lengde(vidare) {
@@ -997,13 +1077,19 @@ funksjon start() -> heiltall {
                     }
                     j = j + 1
                 }
+                // Fragmentet kan innehalde ein heil transitiv graf. Slepp den
+                // store mellombelse rota straks modulens eigne funksjonar er
+                // kopierte, og be den versjonerte runtime-GC-en samle mellom
+                // modulane i staden for å vente på neste globale terskel.
+                fragment = {}
+                hvis i % 8 == 0 { prøv { builtin.gc_collect() } fang (e) { } }
             }
         }
         i = i + 1
     }
 
     vel_entry(merged, modul)
-    builtin.fil_skriv(out, builtin.json_stringify(merged))
+    json_stream_skriv_fil(out, merged)
     rydd_temp(tmpdir)
     linje("Norscode compile: " + out)
     returner 0

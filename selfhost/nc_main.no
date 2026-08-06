@@ -20,9 +20,30 @@ funksjon nc_kompiler_fil(src_sti: tekst, modul: tekst) -> tekst {
 
 // ─── Køyr NCB via selfhost/vm.no (utan C-host) ────────────────────────────────
 
+funksjon nc_runtime_trace(melding: tekst) -> heiltall {
+    hvis miljo_hent("NORSCODE_RUNTIME_TRACE") == "1" {
+        skriv("[NC-RUNTIME] " + melding + "\n")
+    }
+    returner 0
+}
+
 funksjon nc_køyr_ncb_json_modus(ncb_json: tekst, rask_verktøymodus: boolsk) -> tekst {
-    ncb_json = normaliser_json_kontrollteikn(ncb_json)
-    la ncb = json_parse_raw(ncb_json)
+    nc_runtime_trace("json parse start")
+    la ncb = null
+    prøv {
+        // Moderne compiler-NCB er allereie streng JSON. Parse han direkte;
+        // den eldre kontrollteiknnormaliseringa er berre ein kompatibilitets-
+        // fallback og skal ikkje kopiere kvar gyldige fleirmegabyte-NCB.
+        ncb = json_parse_raw(ncb_json)
+    } fang (første_parsefeil) {
+        nc_runtime_trace("raw parse feila; normalize fallback start bytes=" +
+                         tekst_fra_heltall(lengde(ncb_json)))
+        ncb_json = normaliser_json_kontrollteikn(ncb_json)
+        nc_runtime_trace("normalize fallback done bytes=" +
+                         tekst_fra_heltall(lengde(ncb_json)))
+        ncb = json_parse_raw(ncb_json)
+    }
+    nc_runtime_trace("json parse done")
     hvis ncb == null {
         skriv("Feil: ugyldig NCB-json\n")
         returner 1
@@ -37,6 +58,8 @@ funksjon nc_køyr_ncb_json_modus(ncb_json: tekst, rask_verktøymodus: boolsk) ->
     hvis rask_verktøymodus { fns["__vm_force_fast__"] = "sann" }
 
     prøv {
+        nc_runtime_trace("vm start entry=" + tekst(entry) +
+                         " functions=" + tekst_fra_heltall(lengde(nøkler(fns))))
         returner køyr_ncb(ncb)
     } fang melding {
         skriv("ERROR: " + melding + "\n")
@@ -1022,6 +1045,14 @@ funksjon fjern_bruk_linjer(kjelde: tekst) -> tekst {
 
 // ─── Bundle fleire modular til NCB utan diskskriving ─────────────────────────
 
+funksjon nc_bundle_fremdrift(fase: tekst) -> heiltall {
+    la sti = builtin.trim(miljo_hent("NORSCODE_BUNDLE_PROGRESS_FILE"))
+    hvis sti != "" {
+        prøv { fil_skriv(sti, fase + "\n") } fang (e) { la ignorert = e }
+    }
+    returner 0
+}
+
 funksjon modulnamn_fra_importfil(import_fil: tekst) -> tekst {
     la sti = builtin.replace(import_fil, "\\", "/")
     mens builtin.starts_with(sti, "./") {
@@ -1062,9 +1093,12 @@ funksjon normaliser_json_kontrollteikn(data: tekst) -> tekst {
     // berre desse byteverdiane JSON-lovlege før den strenge råparseren;
     // eksisterande escapes og whitespace utanfor streng blir urørte.
     la heks = "0123456789abcdef"
-    // Gjenteken strengkonkatenering gjorde løypa kvadratisk for store bundle.
-    // Samle avgrensa tekstbitar og materialiser resultatet éin gong.
-    la delar: liste<tekst> = []
+    // Ein listepost per teikn pressa AOT-heapen hardt sjølv for mellomstore
+    // verktøybundle. Bygg avgrensa tekstblokker og materialiser berre nokre
+    // få blokker til slutt. Den tomme fyrste posten gjer lista stabil også i
+    // eldre runtime-generasjonar som er sårbare for legg_til på [].
+    la delar: liste<tekst> = [""]
+    la bit = ""
     la i: heiltall = 0
     la i_streng = usann
     la escape = usann
@@ -1072,37 +1106,42 @@ funksjon normaliser_json_kontrollteikn(data: tekst) -> tekst {
         la c = data[i]
         hvis i_streng {
             hvis escape {
-                legg_til(delar, c)
+                bit = bit + c
                 escape = usann
             } ellers hvis c == "\\" {
-                legg_til(delar, c)
+                bit = bit + c
                 escape = sann
             } ellers hvis c == "\"" {
-                legg_til(delar, c)
+                bit = bit + c
                 i_streng = usann
             } ellers {
                 la kode = builtin.char_code(c)
                 hvis kode >= 0 og kode < 32 {
-                    hvis kode == 10 { legg_til(delar, "\\n") }
-                    ellers hvis kode == 13 { legg_til(delar, "\\r") }
-                    ellers hvis kode == 9 { legg_til(delar, "\\t") }
-                    ellers hvis kode == 8 { legg_til(delar, "\\b") }
-                    ellers hvis kode == 12 { legg_til(delar, "\\f") }
+                    hvis kode == 10 { bit = bit + "\\n" }
+                    ellers hvis kode == 13 { bit = bit + "\\r" }
+                    ellers hvis kode == 9 { bit = bit + "\\t" }
+                    ellers hvis kode == 8 { bit = bit + "\\b" }
+                    ellers hvis kode == 12 { bit = bit + "\\f" }
                     ellers {
                         la høg = 0
                         la låg = kode
                         hvis kode >= 16 { høg = 1 låg = kode - 16 }
-                        legg_til(delar, "\\u00" + builtin.slice(heks, høg, høg + 1) +
-                            builtin.slice(heks, låg, låg + 1))
+                        bit = bit + "\\u00" + builtin.slice(heks, høg, høg + 1) +
+                            builtin.slice(heks, låg, låg + 1)
                     }
-                } ellers { legg_til(delar, c) }
+                } ellers { bit = bit + c }
             }
         } ellers {
-            legg_til(delar, c)
+            bit = bit + c
             hvis c == "\"" { i_streng = sann }
+        }
+        hvis lengde(bit) >= 4096 {
+            legg_til(delar, bit)
+            bit = ""
         }
         i = i + 1
     }
+    hvis bit != "" { legg_til(delar, bit) }
     returner builtin.join(delar, "")
 }
 
@@ -1169,6 +1208,44 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
     returner ""
 }
 
+funksjon nc_sikre_modulmetadata(alle_initializers, alle_global_names, ncb, modul: tekst) -> heiltall {
+    bundler.slå_saman_modulmetadata(alle_initializers, alle_global_names, ncb)
+    la fns = ncb["functions"]
+    hvis fns == null { returner 0 }
+    la init_namn = modul + ".__module_init__"
+    hvis ikkje finnes_nøkkel(fns, init_namn) { returner 0 }
+
+    la har_init = usann
+    la ii: heiltall = 0
+    mens ii < lengde(alle_initializers) {
+        hvis alle_initializers[ii] == init_namn { har_init = sann }
+        ii = ii + 1
+    }
+    hvis ikkje har_init { legg_til(alle_initializers, init_namn) }
+    hvis ikkje finnes_nøkkel(alle_global_names, modul) { alle_global_names[modul] = [] }
+
+    // STORE_GLOBAL er den kanoniske kjelda når eldre cache-/JSON-transport har
+    // mista metadatafelta, men framleis bevart levande initialisatorkode.
+    la mål = alle_global_names[modul]
+    la kode = fns[init_namn]["code"]
+    la i: heiltall = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        hvis lengde(instr) >= 2 og instr[0] == "STORE_GLOBAL" {
+            la namn = tekst(instr[1])
+            la finst = usann
+            la j: heiltall = 0
+            mens j < lengde(mål) {
+                hvis mål[j] == namn { finst = sann }
+                j = j + 1
+            }
+            hvis ikkje finst { legg_til(mål, namn) }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
 funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> tekst {
     la import_base = builtin.trim(miljo_hent("NORSCODE_IMPORT_BASE"))
     hvis import_base == "" {
@@ -1218,17 +1295,32 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
 
         prøv {
             la kjelde = fil_les(fil)
-            la rein_kjelde = fjern_bruk_linjer(kjelde)
             la trans = finn_bruk_imports(kjelde)
             la ncb_json = nc_stdlib_fragment(fil, alias, cache_root)
             hvis ncb_json == "" {
-                ncb_json = komp.kompiler_fil(rein_kjelde, "__main__")
+                // Behald bruk-linjene også for importerte modular. Då kan
+                // kompilatoren binde transitive alias direkte til kanoniske
+                // CALL-mål, utan ei ustabil fulltekst-omskriving etterpå.
+                ncb_json = komp.kompiler_fil(kjelde, alias)
+            } ellers {
+                // Eldre cachefragment kan framleis ha korte importalias.
+                // Berre cache-kompatibilitetsbana får tekstnormalisering.
                 ncb_json = normaliser_importalias_kall(ncb_json, trans)
             }
-            // Rename __main__. → alias. i CALL-mål (internt modul-kall) — på JSON-streng
-            la fiksa_json = tekst_erstatt(ncb_json, "\"__main__.", "\"" + alias + ".")
+            nc_bundle_fremdrift("bundle-import-compiled " + alias)
+            // Eldre cacheartefaktar kan framleis vere __main__-namngitte.
+            // Berre dei går gjennom kompatibilitetsomskrivinga; kjeldebana
+            // over er allereie modulnamngitt og tek fastvegen.
+            la fiksa_json = ncb_json
+            hvis builtin.contains(ncb_json, "\"__main__.") {
+                fiksa_json = tekst_erstatt(ncb_json, "\"__main__.", "\"" + alias + ".")
+            }
+            nc_bundle_fremdrift("bundle-import-normalized " + alias)
             fiksa_json = normaliser_json_kontrollteikn(fiksa_json)
-            la mod_ncb = bundler.omdøyp_ncb_objekt(json_parse_raw(fiksa_json), alias)
+            la parsed_mod_ncb = json_parse_raw(fiksa_json)
+            nc_bundle_fremdrift("bundle-import-parsed " + alias)
+            la mod_ncb = bundler.omdøyp_ncb_objekt(parsed_mod_ncb, alias)
+            nc_bundle_fremdrift("bundle-import-renamed " + alias)
             hvis builtin.contains(alias, ".") {
                 la alias_deler = builtin.split(alias, ".")
                 la kort_alias = alias_deler[lengde(alias_deler) - 1]
@@ -1251,7 +1343,8 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                 }
             }
             slå_saman_funksjonar(alle_fns, mod_ncb["functions"])
-            bundler.slå_saman_modulmetadata(alle_initializers, alle_global_names, mod_ncb)
+            nc_sikre_modulmetadata(alle_initializers, alle_global_names, mod_ncb, alias)
+            nc_bundle_fremdrift("bundle-import-merged " + alias)
             // Samle route_handlers frå importerte modular — fix opp function-namn til alias
             la mod_rh_raw_ncb = json_parse_raw(fiksa_json)
             la mod_rh_raw = mod_rh_raw_ncb["route_handlers"]
@@ -1295,13 +1388,18 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
 
     // Kompiler hovudfila som __main__
     la hoved_kjelde = fil_les(src_sti)
-    la hoved_rein_kjelde = fjern_bruk_linjer(hoved_kjelde)
-    la hoved_ncb_json = komp.kompiler_fil(hoved_rein_kjelde, modul)
-    hoved_ncb_json = normaliser_importalias_kall(hoved_ncb_json, imports)
+    // Behald bruk-linjene slik at IR-kompilatoren registrerer importalias og
+    // skriv kanoniske CALL-mål direkte. Då treng ikkje heile NCB-teksten ein
+    // ustabil alias-replace etter kompilering.
+    la hoved_ncb_json = komp.kompiler_fil(hoved_kjelde, modul)
+    nc_bundle_fremdrift("bundle-main-compiled")
     hoved_ncb_json = normaliser_json_kontrollteikn(hoved_ncb_json)
+    nc_bundle_fremdrift("bundle-main-normalized")
     la hoved_ncb = json_parse_raw(hoved_ncb_json)
+    nc_bundle_fremdrift("bundle-main-parsed")
     slå_saman_funksjonar(alle_fns, hoved_ncb["functions"])
-    bundler.slå_saman_modulmetadata(alle_initializers, alle_global_names, hoved_ncb)
+    nc_sikre_modulmetadata(alle_initializers, alle_global_names, hoved_ncb, modul)
+    nc_bundle_fremdrift("bundle-main-merged")
 
     // Bygg bundle-NCB med riktig entry
     la bundle: ordbok<tekst, tekst> = {}
@@ -1309,8 +1407,6 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     bundle["entry"] = modul + ".start"
     bundle["imports"] = []
     bundle["functions"] = alle_fns
-    bundle["module_initializers"] = alle_initializers
-    bundle["global_names"] = alle_global_names
     // Slå saman route_handlers frå importerte modular + hovudfila
     la rh = hoved_ncb["route_handlers"]
     la alle_rh_merged_json = alle_rh_json
@@ -1349,14 +1445,23 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
         hvis mv != null { bundle[mk] = mv }
         mi = mi + 1
     }
-    // Bygg bundle-JSON manuelt: legg route_handlers som siste felt for å unngå
-    // at json_skriv mister data i komplekse nøsta lister
+    // Bygg dei djupe metadatafelta separat. Den eldre bootstrap-JSON-skrivaren
+    // kan miste nøsta module_initializers/global_names når heile bundle-objektet
+    // blir serialisert i eitt pass, sjølv om funksjonane er med. Då finst
+    // __module_init__ i NCB-en utan at runtimen veit at han skal køyrast.
+    la initializers_json = json_skriv(alle_initializers)
+    la global_names_json = json_skriv(alle_global_names)
+    // Bygg bundle-JSON manuelt: legg metadata og route_handlers som siste felt
+    // for å bevare dei gjennom både stage0- og kandidattransporten.
     la rh_json = json_skriv(alle_rh_merged)
+    nc_bundle_fremdrift("bundle-routes-serialized")
     la bundle_json_inner = json_skriv(bundle)
-    // Fjern avsluttande } og legg til route_handlers-feltet
+    nc_bundle_fremdrift("bundle-object-serialized")
+    // Fjern avsluttande } og legg til dei separat serialiserte metadatafelta.
     la bundle_len = lengde(bundle_json_inner)
     la bundle_without_end = builtin.slice(bundle_json_inner, 0, bundle_len - 1)
-    la bundle_json_final = bundle_without_end + ",\"route_handlers\":" + rh_json + "}"
+    la bundle_json_final = bundle_without_end + ",\"module_initializers\":" + initializers_json + ",\"global_names\":" + global_names_json + ",\"route_handlers\":" + rh_json + "}"
+    nc_bundle_fremdrift("bundle-finalized")
     la debug_bundle = builtin.trim(miljo_hent("NORSCODE_DEBUG_BUNDLE_OUTPUT"))
     hvis debug_bundle != "" {
         fil_skriv(debug_bundle, bundle_json_final)

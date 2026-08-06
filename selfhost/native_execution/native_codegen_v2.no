@@ -22,11 +22,24 @@ funksjon HEAP_VA()   { returner 6291456 }
 // Den breie sjølvhost-VM-en held framleis alle AOT-objekt levande mellom
 // safepoint-ar. Full source-only nc_main har 938 funksjonar og to deterministiske
 // emitterpass; målt bootstrap kom forbi 890 funksjonar etter at traceallokering
-// vart fjerna, før den monotone prototyperuntimen nådde 256 MiB. Segmentet er
-// derfor 1 GiB virtuelt (berre rørte sider blir fysiske) fram til komprimerande
-// native GC kan gjenvinne målebufferane mellom passa.
-funksjon HEAP_SZ()   { returner 1073741824 }
+// vart fjerna, før den monotone prototyperuntimen nådde 256 MiB. Med korrekt
+// starts_with/ends_with-semantikk (og dermed full CALL-emittering) nådde den
+// levande 938-funksjonsgrafen den tidlegare 1-GiB-grensa deterministisk ved
+// emit-indeks 687. Segmentet er derfor 2 GiB virtuelt (berre rørte sider blir
+// fysiske) fram til komprimerande native GC kan gjenvinne målebufferane mellom
+// passa; fase-6-minneporten står framleis open.
+funksjon HEAP_SZ()   { returner 2147483648 }
 funksjon HEAP_CONTROLSZ() { returner 64 }
+// VM-i-VM gjenbruker svært mange små heiltal og boolverdiar. Desse er
+// immutable og kan derfor bu i ein kanonisk cache i starten av heap-segmentet
+// i staden for å fylle den monotone prototypheapen. Området dekkjer
+// -32768..32767 (65536 * 16 byte) og to boolverdiar.
+funksjon SMALL_INT_CACHE_BASE() { returner HEAP_VA() + HEAP_CONTROLSZ() }
+funksjon SMALL_INT_CACHE_COUNT() { returner 65536 }
+funksjon BOOL_CACHE_BASE() { returner SMALL_INT_CACHE_BASE() + SMALL_INT_CACHE_COUNT() * 16 }
+funksjon CHAR_CACHE_BASE() { returner BOOL_CACHE_BASE() + 32 }
+funksjon CHAR_CACHE_COUNT() { returner 256 }
+funksjon HEAP_ALLOC_START() { returner CHAR_CACHE_BASE() + CHAR_CACHE_COUNT() * 32 }
 funksjon GC_SAFEPOINT_OFFSET() { returner 32 }
 funksjon ENVP_OFFSET() { returner 8 }
 
@@ -85,7 +98,7 @@ funksjon RT_FIL_SKRIV() { returner 4203136 }
 funksjon RT_FIL_SKRIV_BINAR() { returner 4203280 }
 funksjon RT_MILJO_HENT() { returner 4203488 }
 funksjon RT_MILJO_FINNES() { returner 4203664 }
-funksjon RT_FIL_FINNES() { returner 4203392 }
+funksjon RT_FIL_FINNES() { returner 4203712 } // 0x4024c0, faktisk funksjonsstart
 funksjon RT_EQ() { returner 4203856 }
 // Legacy-peikar: vanleg dynamisk `+` går no via inline type-sjekk i kodegen.
 funksjon RT_ADD() { returner 4203648 }
@@ -190,6 +203,138 @@ funksjon copy(dst, src) { la i: heltall = 0
 mens i < lengde(src) { legg_til(dst, src[i])
 i = i + 1 } }
 funksjon pad(buf, target) { mens lengde(buf) < target { legg_til(buf, 0) } }
+
+funksjon patch_abs_jump(bytes, start: heiltall, slutt: heiltall, target: heiltall) {
+    // movabs rax,target; jmp rax; NOP fram til neste faste runtime-entry.
+    bytes[start] = 0x48
+    bytes[start + 1] = 0xB8
+    la encoded: liste = []
+    u64(encoded, target)
+    la i: heiltall = 0
+    mens i < 8 {
+        bytes[start + 2 + i] = encoded[i]
+        i = i + 1
+    }
+    bytes[start + 10] = 0xFF
+    bytes[start + 11] = 0xE0
+    i = start + 12
+    mens i < slutt {
+        bytes[i] = 0x90
+        i = i + 1
+    }
+}
+
+funksjon emit_cached_int_runtime(bytes) -> heiltall {
+    la va = TEXT_VA() + lengde(bytes)
+    // rdi = rå i64. Cache berre det trygge, tett brukte intervallet.
+    copy(bytes, [0x48, 0x81, 0xFF])              // cmp rdi,-32768
+    u32(bytes, 4294934528)
+    copy(bytes, [0x0F, 0x8C])                    // jl fallback
+    la jl_fallback = lengde(bytes)
+    u32(bytes, 0)
+    copy(bytes, [0x48, 0x81, 0xFF])              // cmp rdi,32767
+    u32(bytes, 32767)
+    copy(bytes, [0x0F, 0x8F])                    // jg fallback
+    la jg_fallback = lengde(bytes)
+    u32(bytes, 0)
+    copy(bytes, [0x48, 0x89, 0xF8])              // mov rax,rdi
+    copy(bytes, [0x48, 0x05])                    // add rax,32768
+    u32(bytes, 32768)
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x04])        // shl rax,4
+    copy(bytes, [0x48, 0xB9])
+    u64(bytes, SMALL_INT_CACHE_BASE())            // movabs rcx,cache
+    copy(bytes, [0x48, 0x01, 0xC8])              // add rax,rcx
+    copy(bytes, [0x48, 0xC7, 0x00])
+    u32(bytes, 1)                                 // type=int
+    copy(bytes, [0x48, 0x89, 0x78, 0x08, 0xC3])  // payload; ret
+
+    la fallback = lengde(bytes)
+    copy(bytes, [0x48, 0xB9])
+    u64(bytes, HEAP_VA())                         // rcx=&bump
+    copy(bytes, [0x48, 0x8B, 0x01])              // rax=[rcx]
+    copy(bytes, [0x48, 0x8D, 0x50, 0x10])        // rdx=rax+16
+    copy(bytes, [0x48, 0x89, 0x11])              // [rcx]=rdx
+    copy(bytes, [0x48, 0xC7, 0x00])
+    u32(bytes, 1)
+    copy(bytes, [0x48, 0x89, 0x78, 0x08, 0xC3])
+    patch_jump(bytes, jl_fallback, fallback)
+    patch_jump(bytes, jg_fallback, fallback)
+    returner va
+}
+
+funksjon emit_cached_bool_runtime(bytes) -> heiltall {
+    la va = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])              // test rdi,rdi
+    copy(bytes, [0x40, 0x0F, 0x95, 0xC7])        // setne dil
+    copy(bytes, [0x48, 0x0F, 0xB6, 0xFF])        // movzx rdi,dil
+    copy(bytes, [0x48, 0x89, 0xF8])              // mov rax,rdi
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x04])        // shl rax,4
+    copy(bytes, [0x48, 0xB9])
+    u64(bytes, BOOL_CACHE_BASE())
+    copy(bytes, [0x48, 0x01, 0xC8])
+    copy(bytes, [0x48, 0xC7, 0x00])
+    u32(bytes, 5)                                 // type=bool
+    copy(bytes, [0x48, 0x89, 0x78, 0x08, 0xC3])
+    returner va
+}
+
+funksjon emit_cached_str_raw_runtime(bytes) -> heiltall {
+    la va = TEXT_VA() + lengde(bytes)
+    // rdi=rå bytes, rsi=lengd. Tekstindeksering produserer alltid eitt byte;
+    // returner då ein kanonisk, immutable NcVal frå 256-postars cache.
+    copy(bytes, [0x48, 0x83, 0xFE, 0x01])                 // cmp rsi,1
+    copy(bytes, [0x0F, 0x85])                             // jne fallback
+    la jne_fallback = lengde(bytes)
+    u32(bytes, 0)
+    copy(bytes, [0x0F, 0xB6, 0x07])                       // movzx eax,byte [rdi]
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x05])                 // shl rax,5
+    copy(bytes, [0x48, 0xB9])
+    u64(bytes, CHAR_CACHE_BASE())
+    copy(bytes, [0x48, 0x01, 0xC8])                       // add rax,rcx
+    copy(bytes, [0x48, 0xC7, 0x00])
+    u32(bytes, 2)                                          // NcVal type=str
+    copy(bytes, [0x48, 0x8D, 0x50, 0x10])                 // rdx=rax+16
+    copy(bytes, [0x48, 0x89, 0x50, 0x08])                 // payload=rdx
+    copy(bytes, [0x48, 0xC7, 0x02])
+    u32(bytes, 1)                                          // string len=1
+    copy(bytes, [0x8A, 0x0F, 0x88, 0x4A, 0x08])           // byte payload
+    copy(bytes, [0xC6, 0x42, 0x09, 0x00, 0xC3])           // NUL; ret
+
+    la fallback = lengde(bytes)
+    // Generell dynamisk streng: alloker [len,bytes,NUL] og NcVal.
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])            // save
+    copy(bytes, [0x49, 0x89, 0xFC, 0x49, 0x89, 0xF5])      // r12=src;r13=len
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
+    u32(bytes, HEAP_VA())                                  // rax=bump
+    copy(bytes, [0x48, 0x89, 0xC3])                        // rbx=obj
+    copy(bytes, [0x4A, 0x8D, 0x4C, 0x28, 0x09])            // rcx=rax+r13+9
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25])
+    u32(bytes, HEAP_VA())
+    copy(bytes, [0x4C, 0x89, 0x2B, 0x48, 0x31, 0xC9])      // len; i=0
+    la copy_loop = lengde(bytes)
+    copy(bytes, [0x4C, 0x39, 0xE9])                        // cmp rcx,r13
+    la je_copied = emit_je_placeholder(bytes)
+    copy(bytes, [0x41, 0x8A, 0x14, 0x0C])                 // dl=[r12+rcx]
+    copy(bytes, [0x88, 0x54, 0x0B, 0x08])                 // [rbx+rcx+8]=dl
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0xE9])
+    la loop_jump = lengde(bytes)
+    u32(bytes, 0)
+    la copied = lengde(bytes)
+    copy(bytes, [0x42, 0xC6, 0x44, 0x2B, 0x08, 0x00])      // trailing NUL
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
+    u32(bytes, HEAP_VA())
+    copy(bytes, [0x48, 0x8D, 0x48, 0x10, 0x48, 0x89, 0x0C, 0x25])
+    u32(bytes, HEAP_VA())
+    copy(bytes, [0x48, 0xC7, 0x00])
+    u32(bytes, 2)
+    copy(bytes, [0x48, 0x89, 0x58, 0x08])
+    copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3])
+    patch_jump(bytes, jne_fallback, fallback)
+    patch_jump(bytes, loop_jump, copy_loop)
+    patch_jump(bytes, je_copied, copied)
+    returner va
+}
 
 // ─── Innebygd NCB-format ────────────────────────────────────────────────────
 //
@@ -513,6 +658,12 @@ funksjon emit_je_placeholder(buf) {
     u32(buf, 0)  // je rel32
     returner lengde(buf) - 4
 }
+funksjon emit_jne_placeholder(buf) {
+    legg_til(buf, 0x0F)
+    legg_til(buf, 0x85)
+    u32(buf, 0)  // jne rel32
+    returner lengde(buf) - 4
+}
 funksjon patch_jump(buf, patch_pos, target_pos) {
     la rel = (target_pos - (patch_pos + 4)) & 0xFFFFFFFF
     buf[patch_pos]     = rel & 255
@@ -556,6 +707,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".heltall_fra_tekst") eller fn_nm == "heltall_fra_tekst" eller fn_nm == "heltall" eller builtin.ends_with(fn_nm, ".heltall") { returner "int" }
     hvis builtin.ends_with(fn_nm, ".lengde") eller fn_nm == "lengde" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".char_code") eller fn_nm == "char_code" { returner "int" }
+    hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".atomic_load_ptr") eller builtin.ends_with(fn_nm, ".atomic_store_ptr") eller builtin.ends_with(fn_nm, ".atomic_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_compare_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_fetch_add_ptr") eller builtin.ends_with(fn_nm, ".atomic_fence") { returner "int" }
     hvis builtin.ends_with(fn_nm, ".fil_les") eller fn_nm == "fil_les" { returner "str" }
     hvis builtin.ends_with(fn_nm, ".fil_skriv") eller fn_nm == "fil_skriv" { returner "null" }
@@ -615,24 +767,14 @@ funksjon emit_push_const(buf, v, rd_offs, code_va) {
         legg_til(buf, 0x50)
         returner
     }
-    // Streng: nc_str_raw(src=DATA_VA+off+8, len)
+    // Strengliteralane er immutable, ferdige NcVal-ar i read-only data.
     la s: tekst = tekst(v)
     la rd_off: heltall = 0
     hvis finnes_nøkkel(rd_offs, s) { rd_off = rd_offs[s] }
     la data_ptr: heltall = DATA_VA() + rd_off
-    // r11 = data_ptr; esi = [r11] (len); rdi = r11+8 (src bytes)
-    legg_til(buf, 0x49)
-    legg_til(buf, 0xBB)  // mov r11, imm64
+    copy(buf, [0x49, 0xBB])  // mov r11, &NcVal
     u64(buf, data_ptr)
-    legg_til(buf, 0x41)
-    legg_til(buf, 0x8B)
-    legg_til(buf, 0x33)  // mov esi, [r11]
-    legg_til(buf, 0x49)
-    legg_til(buf, 0x8D)
-    legg_til(buf, 0x7B)
-    legg_til(buf, 0x08)  // lea rdi, [r11+8]
-    call_rel32(buf, RT_STR_RAW(), code_va)
-    legg_til(buf, 0x50)
+    copy(buf, [0x41, 0x53])   // push r11
 }
 
 funksjon emit_type_of_inline(buf, rd_offs, code_va) {
@@ -938,7 +1080,17 @@ funksjon char_to_byte(ch) {
 funksjon samle_strenger(fns) {
     la strenger: liste = []
     la sett: ordbok = {}
-    la standard: liste_tekst = ["ingenting", "heltall", "boolsk", "tekst", "liste", "ordbok"]
+    // Emittergenererte literalar finst ikkje nødvendigvis i input-NCB-en.
+    // Hald alle slike runtime-ABI-strengar i den faste dataseksjonen, elles
+    // ville manglande oppslag peike på offset 0 ("ingenting").
+    la standard: liste_tekst = [
+        "ingenting", "heltall", "boolsk", "tekst", "liste", "ordbok", "",
+        "norscode-process-spawn-v1", "executable", "args", "cwd", "stdin",
+        "timeout_ms", "max_output_bytes", "environment", "inherit_env",
+        "abi", "status", "ferdig", "timeout", "feil", "signal", "pid",
+        "exit_code", "stdout", "stderr", "error", "output limit",
+        "process spawn failed", "wall_ms", "peak_rss_bytes"
+    ]
     la std_i: heiltall = 0
     mens std_i < lengde(standard) {
         sett[standard[std_i]] = sann
@@ -973,6 +1125,7 @@ funksjon bygg_data(strenger) {
     la i: heltall = 0
     mens i < lengde(strenger) {
         la s = strenger[i]
+        mens lengde(bytes) % 16 != 0 { legg_til(bytes, 0) }
         offs[s] = lengde(bytes)
         la sbytes: liste = []
         la j: heltall = 0
@@ -980,6 +1133,11 @@ funksjon bygg_data(strenger) {
             legg_til(sbytes, char_to_byte(s[j]))
             j = j + 1
         }
+        // Immutable NcVal direkte i read-only datasegmentet:
+        // {type=2, payload=&[len,bytes...]}. PUSH_CONST kan dermed gjenbruke
+        // same literal utan ei heapallokering per løkkeiterasjon.
+        u64(bytes, 2)
+        u64(bytes, DATA_VA() + lengde(bytes) + 8)
         u64(bytes, lengde(sbytes))
         copy(bytes, sbytes)
         i = i + 1
@@ -1013,6 +1171,11 @@ funksjon rt_hex_del3() { returner "25f8ff5f0449bde0104000000000004885db746a4c8b7
 funksjon rt_hex_del4() { returner "0000000000e903fcffff48837f0800740f48bf2810400000000000e9e3fbffff48bf2d10400000000000e9d4fbffff904883ec18488b4708488d480848890c2448c744240800000000488b00488944241048b8002b4000000000004889e7ffd04883c418c366662e0f1f84000000000055415741564155415453504889fb488b4f08488b47104839c1734b488b134889c648f7de48ffc148bf00260000010000006666666666662e0f1f840000000000440fb6440aff4983f820771a4c0fa3c7731448894b084c8d040e49ffc048ffc14983f80175da488b73084839c60f8309050000488b130fb60c328d79a583ff200f87cf01000049b8d01140000000000041ff24f848ffc64889730848b8b018400000000000ffd04989c6488b4b08488b43104839c1733f488b134889c648f7de48ffc148bf00260000010000000f1f00440fb6440aff4983f820771a4c0fa3c7731448894b084c8d040e49ffc048ffc14983f80175da488b4b084839c1730d488b03803c085d0f84ac030000488b4308488b4b104839c80f83ce00000049bf002b40000000000049bc001940000000000049bd00260000010000000f1f440000488b1348f7d948ffc00f1f80000000000fb67402ff4883fe20771a490fa3f5731448894308488d340148ffc648ffc04883fe0175db4889df41ffd74c89f74889c641ffd4488b4308488b4b104839c87334488b134889ce48f7de48ffc00f1f000fb67c02ff4883ff20771a490fa3fd731448894308488d3c0648ffc748ffc04883ff0175db488b43084839c8731d488b0b803c012c751448ffc048894308488b4b104839c80f8255ffffff488b4b08488b43104839c1733e488b134889c648f7de48ffc148bf00260000010000006690440fb6440aff4983f820771a4c0fa3c7731448894b084c8d040e49ffc048ffc14983f80175da488b4b084839c10f837c020000488b03803c085d0f8468020000e96a02000083f9220f85a502000048b8e0374000000000004889dfe90b04000048ffc64889730848b8601c400000000000ffd04989c6488b4b08488b43104839c17343488b134889c648f7de48ffc148bf00260000010000000f1f8000000000440fb6440aff4983f820771a4c0fa3c7731448894b084c8d040e49ffc048ffc14983f80175da488b4b084839c1730d488b03803c087d0f84cc010000488b4308488b4b104839c80f835e01000049bd002600000100000048bd002b40000000000049bc501d4000000000000f1f440000488b1348f7d948ffc00f1f80000000000fb67402ff4883fe20771a490fa3f5731448894308488d340148ffc648ffc04883fe0175db488b03488b4b08803c08220f85f50000004889df48b8e037400000000000ffd04989c7488b4b08488b43104839c17340488b134889c648f7de48ffc16666666666662e0f1f8400000000000fb67c0aff4883ff20771a490fa3fd731448894b08488d3c0e48ffc748ffc14883ff0175db488b4b084839c17310488b03803c083a750748ffc148894b084889dfffd54c89f74c89fe4889c241ffd4488b4308488b4b104839c87339488b134889ce48f7de48ffc00f1f8400000000000fb67c02ff4883ff20771a490fa3fd731448894308488d3c0648ffc748ffc04883ff0175db488b43084839c8731d488b0b803c012c751448ffc048894308488b4b104839c80f82c5feffff488b4b08488b43104839c1733e488b134889c648f7de48ffc148bf00260000010000006690440fb6440aff4983f820771a4c0fa3c7731448894b084c8d040e49ffc048ffc14983f80175da488b4b084839c17310488b03803c087d750748ffc148894b084c89f04883c4085b415c415d415e415f5dc3488d7e044839c70f86d100000083f96e741783f966751b488d7e054839c70f86a500000083f96e7509488d7e044839c7767583f92d400f95c7448d41d04180f80a410f93c04484c7756183f92d750748ffc648897308488b7b084839c7736648ffc74989c049f7d831f60f1f440000440fb64c3aff458d51d04180fa097777488d34b648897b08440fb64c3aff498d34714883c6d04d8d0c3849ffc148ffc74983f90175caeb7048897b0848b800104000000000004883c4085b415c415d415e415f5dffe031f6eb4e48897b0848b8401040000000000031ffe9cc00000048897b0848b84010400000000000bf01000000e9b40000004180f92e751b48897b084839c77312440fb6043a4180c0d048ffc74180f80a72e5488b7b084839c77373440fb6043a4183c8204183f86575644c8d47014c8943084939c07319460fb604024183f82d74064183f82b75084883c70248897b08488b7b084839c7733548ffc748f7" }
 funksjon rt_hex_del5() { returner "d866662e0f1f840000000000440fb6443aff4180c0d04180f809771448897b084c8d043849ffc048ffc74983f80175dc4889f748f7df83f92d480f45fe48b820104000000000004883c4085b415c415d415e415f5dffe00f1f440000488b074883f805775048b9d812400000000000ff24c148bf461040000000000048b8e010400000000000ffe04889f8c348b81016400000000000ffe048837f0800742248bf3b1040000000000048b8e010400000000000ffe048b86026400000000000ffe048bf401040000000000048b8e010400000000000ffe00f1f440000488b074883f80174284883f80574124883f802752048b8b016400000000000ffe0488b7f0848b82010400000000000ffe04889f8c348b8201040000000000031ffffe0666666662e0f1f840000000000415741565348b89031400000000000ffd04889c348bf501040000000000049bee01040000000000041ffd649bf20214000000000004889c741ffd74889df41ffd748bf571040000000000041ffd64889c741ffd7b83c000000bf010000000f0548b800104000000000005b415e415fffe06666666666662e0f1f840000000000488b074883f80274184883f80474124883f803751f48b8c019400000000000ffe0488b4708488b3848b82010400000000000ffe048b8201040000000000031ffffe066666666662e0f1f840000000000415741565348b89031400000000000ffd04889c348bf591040000000000049bee01040000000000041ffd649bf20214000000000004889c741ffd74889df41ffd748bf571040000000000041ffd64889c741ffd7b83c000000bf010000000f055b415e415fc3662e0f1f840000000000b809000000bf00006000be00000004ba0300000041ba2200000049c7c0ffffffff4531c90f0548c704250000600008006000c3666666662e0f1f8400000000004885ff741f488b0f4883f905772b31c048ba0813400000000000ff24ca48837f0800eb0e31c00fb6c0c3488b4708488338000f95c00fb6c0c3b0010fb6c0c3905048b8e033400000000000ffd04883f00148b940104000000000004889c758ffe16666666666662e0f1f8400000000005048b85025400000000000ffd048b9e0334000000000004889c7ffd14883f00148b940104000000000004889c758ffe1488b074883f802741f4883f801755848833e01750d488b4708483b46080f9cc0eb474883f802753f48833e027539488b4f08488b39488b5608488b324839f70f92c0480f42f74885f6741e31ff0f1f00440fb6443a084438443908751b48ffc74839fe75ebeb0231c00fb6f848b84010400000000000ffe00f92c0ebec0f1f004889f848b980344000000000004889f74889c6ffe166662e0f1f84000000000041574156534889f34989fe48b88034400000000000ffd049bfe0334000000000004889c741ffd7bf010000004885c0751b48b850254000000000004c89f74889deffd04889c741ffd74889c748b840104000000000005b415e415fffe00f1f0041574156534889f34989fe48b80035400000000000ffd049bfe0334000000000004889c741ffd7bf010000004885c0751b48b850254000000000004c89f74889deffd04889c741ffd74889c748b840104000000000005b415e415fffe00f1f00488b7f08482b7e0848b82010400000000000ffe06666662e0f1f840000000000488b4608480faf470848b920104000000000004889c7ffe10f1f840000000000488b4e084885c97418488b4708489948f7f94889c748b82010400000000000ffe031ff48b82010400000000000ffe090488b4e084885c97418488b4708489948f7f94889d748b82010400000000000ffe031ff48b82010400000000000ffe09031c0482b470848b920104000000000004889c7ffe166662e0f1f84000000000048837f080048b8401040000000000048bf3b10400000000000480f44f848b8e010400000000000ffe00f1f800000000041574156415453504889f34989fe48b8b018400000000000ffd04989c74885db7e2248ffc349bc001940000000000090498b74def04c89ff41ffd448ffcb4883fb017fec4c89f84883c4085b415c415e415fc3666666662e0f1f84000000000041574156415453504889f34989fe48b8601c400000000000ffd04989c74885db74244983c60849bc501d400000000000498b56f8498b364c89ff41ffd44983c61048ffcb75ea4c89f84883c4085b415c415e415fc366662e0f1f8400000000005048b89031400000000000ffd0488b7008488b164883c608b801000000bf020000000f0548be5710400000000000b801000000ba010000000f05b83c000000bf010000000f0558c3" }
 funksjon rt_hex_del6() { returner "0f1f84000000000048ff4708488b042508000000488b10488b042500006000488d0c104881c10800010048890c25000060004c8b47084c8b4f104d39c8732a4c8b1731f6eb10669049ffc049ffc048ffc64d39c87315470fb61c024183fb5c74e74183fb2275e4eb0231f64801ce4883c60948893425000060004c8b47084c3b47100f83bd0000004801d048051000010031d248be381340000000000066662e0f1f8400000000004c8b0f4d8d500143803c01224c8957080f8489000000470fb614014180fa5c752f4d8d50024c895708470fb6440101450fb6c8458d51a44183fa18772642ff24d6c604105ceb0d660f1f8400000000004488141048ffc24c8b47084c3b4710729feb3c4183f922742e4183f92f7506c604102febdfc64411085c44884411094883c202ebd2c6041009ebc9c604100aebc3c604100debbdc6041022ebb731d2488911c644110800488b042500006000488d5010488914250000600048c7000200000048894808c3" }
+// Linux x86-64 freestanding process-ABI. Denne rutinen er posisjonsuavhengig
+// bortsett frå dei versjonerte runtime-ABI-adressene for map_get/map_keys og
+// den dokumenterte envp-slotten. Han brukar berre Linux-systemkall og returnerer
+// eit rått resultatområde som Norscode-emitteren pakkar til eit ABI-kart.
+funksjon rt_hex_process_spawn_linux_x86_64() { returner "554889e55341544155415641574883ec084989ff498b7f28e8160700004885c0750748c7c0001000004889c348c7c1000000044839cb480f47d9488d345d020004004831ff48c7c00900000048c7c20300000049c7c22200000049c7c0ffffffff4d31c90f054885c00f88b20600004989c449899c2498000000498b7f20e8b00600004885c0750748c7c0881300004989842458010000498d8424000004004989442418488d441801498944242849c7442408ffffffff49c74424107f00000049c70424040000004d8dac2400100000498b07488b4008488d400849894500498b4708488b4008488b08488b50104d31c04939c8731f4981f8fe01000073164a8b04c2488b4008488d40084b8944c50849ffc0ebdc4bc744c508000000004d8dac24004000004d8db424008000004831db498b7f304885ff0f84be00000048b8e01e400000000000ffd04885c00f84a9000000488b4008488b08488b50104d31c04939c80f83920000004881fbfe0300000f83cd0000004a8b34c25152415056498b7f3048b8c01c400000000000ffd05e41585a594885c0745a4d8974dd004c8b4e084d8b114d8d4908504d85d27411418a0141880649ffc149ffc649ffcaebea41c6063d49ffc6584c8b48084d8b114d8d49084d85d27411418a0141880649ffc149ffc649ffcaebea41c6060049ffc648ffc349ffc0e965ffffff498b47384885c0743f488b400848833800743580780831752f488b0425080060004885c074224831c94881fbfe0300007316488b14c84885d2740d498954dd0048ffc348ffc1ebe149c744dd0000000000498d7c24604831f648c7c0250100000f054885c00f8892040000498d7c24684831f648c7c0250100000f054885c00f8878040000498d7c24704831f648c7c0250100000f054885c00f885e04000048c7c0390000000f054885c00f884c040000740a4989442408e9af000000418b7c24604831f648c7c0210000000f05418b7c246c48c7c60100000048c7c0210000000f05418b7c247448c7c60200000048c7c0210000000f0548c7c3600000004883fb787313418b3c1c48c7c0030000000f054883c304ebe7498b47104885c07417488b400848833800740d488d780848c7c0500000000f05498b07488b4008488d7808498db42400100000498d94240040000048c7c03b0000000f0548c7c77f00000048c7c03c0000000f05418b7c2460e836040000418b7c246ce82c040000418b7c2474e822040000498b47184885c0742b488b7008488b16488d7608418b7c24644885d2741648c7c0010000000f054885c07e084801c64829c2ebe5418b7c2464e8e4030000458b6c2468458b74247049c78424800000000100000049c7842488000000010000004489efe8c90300004489f7e8c1030000e874030000498984245001000048c7c03d000000498b7c2408498d74245048c7c2010000004d8d9424c00000000f05493b442408750949c744247801000000e835030000492b842450010000493b842458010000720d49c7042401000000e9bb0100004589ac24a00000006641c78424a400000001006641c78424a600000000004589b424a80000006641c78424ac00000001006641c78424ae00000000004983bc248000000000750c41c78424a0000000ffffffff4983bc248800000000750c41c78424a8000000ffffffff48c7c007000000498dbc24a000000048c7c60200000048c7c20a0000000f054983bc248000000000747a498b942498000000492b94249000000048ffc2498b74241849037424204489ef4831c00f054885c07850743a498b8c2498000000492b8c24900000004839c8760b4889c849c70424020000004901442420490184249000000049833c24020f84c3000000eb144489efe84d02000049c7842480000000000000004983bc2488000000007476498b942498000000492b94249000000048ffc2498b74242849037424304489f74831c00f054885c0784c7436498b8c2498000000492b8c24900000004839c8760b4889c849c70424020000004901442430490184249000000049833c24027442eb144489f7e8cc01000049c78424880000000000000049837c2478000f840ffeffff4983bc2480000000000f8500feffff4983bc2488000000000f85f1fdffffeb5948c7c03e000000498b7c240848c7c6090000000f0548c7c03d000000498b7c2408498d7424504831d24d8d9424c00000000f0549833c2401750b49c74424107c000000eb5249c74424100100000049c744243801000000eb3e498b4424504889c14883e17f4885c9751948c1e8084825ff000000498944241049c7042400000000eb144881c18000000049894c241049c70424030000004983bc24800000000074084489efe8ea0000004983bc24880000000074084489f7e8d7000000e899000000492b8424500100004989442440498b8424e000000048c1e00a49894424484c89e0eb2b49c704240400000049c7442408ffffffff49c74424107f00000049c7442438020000004c89e0eb034831c04883c408415f415e415d415c5b5dc34831c04885ff7433488b7f084885ff742a488b0f488d7f084831d24839ca731b440fb604174183e8304183f809770c486bc00a4c01c048ffc2ebe0c34883ec1848c7c0e400000048c7c7010000004889e60f0548693c24e8030000488b4424084831d248c7c140420f0048f7f14801f84883c418c383ff007c0948c7c0030000000f05c348c7c04800000048c7c60400000048c7c2000800000f05c3" }
 
 // Rå byte-søk for NcVal-tekstar. Resultatet blir lagt i rdi som indeks eller
 // -1. Dermed kan både index_of og contains bruke ei gyldig Norscode-emittert
@@ -1066,17 +1229,50 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         "48bf271040000000000048b89010400000000000ffe0",
         "488d3d61efffff31f648b89010400000000000ffe090"
     )
+    // miljo_hent sin ikkje-funnen-epilog sette berre ein peikar til tomtekst,
+    // men lét rsi innehalde siste samanlikningslengd. RT_STR_RAW kopierte då
+    // vilkårlege runtimebytes. Nullstill både peikar og lengd i same bytebudsjett.
+    hex = builtin.replace(
+        hex,
+        "48bf27104000000000004c89e85b415c415d415e415fffe0",
+        "31ff31f69090909090904c89e85b415c415d415e415fffe0"
+    )
+    // Legacy RT_JOIN kalla den gamle concat-adressa 0x401110, som no ligg i
+    // runtime-tabellen. Peik begge join-kalla til den aktive, bytebevarande
+    // concat-rutinen på 0x403947. Tom liste må dessutan sende lengd 0 til
+    // RT_STR_RAW; elles blir siste separatorlengd brukt som kopilengd.
+    hex = builtin.replace(hex, "49bd1011400000000000", "49bd4739400000000000")
+    hex = builtin.replace(
+        hex,
+        "48bf271040000000000048b890104000000000005b415c415d415e415fffe0",
+        "488d3de4f3ffff31f648b890104000000000005b415c415d415e415fffe090"
+    )
     // Fiks: fil_skriv-rutinane hoppa til 0x401000 etter close; returner rått 0 i staden.
     hex = builtin.replace(hex, "48b80010400000000000ffd04881c408100000c3", "4831c09090909090909090904881c408100000c3")
     hex = builtin.replace(
         hex,
         "b809000000bf00006000be00000004ba0300000041ba2200000049c7c0ffffffff4531c90f0548c704250000600008006000c3",
-        "48c704250000600040006000c39090909090909090909090909090909090909090909090909090909090909090909090909090"
+        "48c704250000600060207000c39090909090909090909090909090909090909090909090909090909090909090909090909090"
     )
     hex = hex + "4c8b47084c8b4e08498b08498b114989ca4901d248b800006000000000004c8b184d8913498d7b08498d70084885c9740f8a06880748ffc648ffc748ffc975f1498d71084889d14885c9740f8a06880748ffc648ffc748ffc975f1c607004b8d4c130948b800006000000000004889084889c8488d481048be000060000000000048890e48c700020000004c895808c3"
     hex = hex + "4883ec28c6042400488b47084885c07d0748f7d8c60424014c8d44242741c600004d31d249c7c10a0000004885c0750c49ffc841c6003049ffc2eb174831d249f7f180c23049ffc841881049ffc24885c075e9803c2400740a49ffc841c6002d49ffc248b800006000000000004c8b184d8913498d7b084c89c64c89d14885c9740f8a16881748ffc648ffc748ffc975f1c607004b8d4c130948b800006000000000004889084889c8488d481048be000060000000000048890e48c700020000004c8958084883c428c3"
     la bytes = hex_to_bytes(hex)
     la atomics: ordbok = {}
+    atomics["process_spawn_argv"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, hex_to_bytes(rt_hex_process_spawn_linux_x86_64()))
+
+    // Heiltal og boolverdiar er immutable. VM-i-VM-kompilering lagar millionar
+    // av dei same indeks-, lengde- og samanlikningsverdiane; la dei peike på
+    // eit kanonisk område i staden for å tømme den monotone prototypeheapen.
+    // Legacy-inngangane blir bevarte som ABI-stabile trampolinar, slik at alle
+    // eksisterande runtime- og emitterkall får same eigde implementasjon.
+    la cached_int_va = emit_cached_int_runtime(bytes)
+    la cached_bool_va = emit_cached_bool_runtime(bytes)
+    la cached_str_raw_va = emit_cached_str_raw_runtime(bytes)
+    patch_abs_jump(bytes, RT_INT() - TEXT_VA(), RT_BOOL() - TEXT_VA(), cached_int_va)
+    patch_abs_jump(bytes, RT_BOOL() - TEXT_VA(), RT_STR_RAW() - TEXT_VA(), cached_bool_va)
+    patch_abs_jump(bytes, RT_STR_RAW() - TEXT_VA(), RT_STR_RAW() - TEXT_VA() + 12, cached_str_raw_va)
+
     atomics["load"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08, 0x48, 0x8B, 0x3F])
     call_rel32(bytes, RT_INT(), TEXT_VA())
@@ -1142,6 +1338,20 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     call_rel32(bytes, RT_INT(), TEXT_VA())
     legg_til(bytes, 0xC3)
 
+    // chr(int): legacy-peikaren RT_CHR landar ikkje lenger på ein stabil
+    // funksjonsstart i den utvida runtimeblobben. Bygg éin rå byte direkte og
+    // send han gjennom den versjonerte strengkonstruktøren.
+    atomics["chr"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x48, 0x8B, 0x47, 0x08,       // mov rax,[rdi+8]
+        0x48, 0x83, 0xEC, 0x08,       // sub rsp,8
+        0x88, 0x04, 0x24,             // mov [rsp],al
+        0x48, 0x89, 0xE7,             // mov rdi,rsp
+        0xBE, 0x01, 0x00, 0x00, 0x00  // mov esi,1
+    ])
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+
     atomics["trim"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
         0x48, 0x8B, 0x47, 0x08,             // rax = stringobj
@@ -1197,11 +1407,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         0x48, 0x8B, 0x56, 0x08,
         0x48, 0x8B, 0x0A,
         0x48, 0x39, 0x08,
-        0x72, 0x10,
+        0x72, 0x14,
         0x48, 0x8D, 0x72, 0x08,
         0x48, 0x8D, 0x78, 0x08,
         0xF3, 0xA6,
         0x40, 0x0F, 0x94, 0xC7,
+        0x48, 0x0F, 0xB6, 0xFF,             // nullstill øvre bitar i rdi
         0xEB, 0x02,
         0x31, 0xFF
     ])
@@ -1215,12 +1426,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         0x48, 0x8B, 0x0A,
         0x4C, 0x8B, 0x00,
         0x49, 0x39, 0xC8,
-        0x72, 0x14,
+        0x72, 0x18,
         0x49, 0x29, 0xC8,
         0x4A, 0x8D, 0x7C, 0x00, 0x08,
         0x48, 0x8D, 0x72, 0x08,
         0xF3, 0xA6,
         0x40, 0x0F, 0x94, 0xC7,
+        0x48, 0x0F, 0xB6, 0xFF,             // nullstill øvre bitar i rdi
         0xEB, 0x02,
         0x31, 0xFF
     ])
@@ -1266,11 +1478,28 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     jump_rel32(bytes, 4204205, TEXT_VA()) // 0x4026ad
 
     atomics["json_bool_case"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x7F, 0x08, 0x00]) // cmp qword [rdi+8],0
+    la json_bool_false = emit_je_placeholder(bytes)
     copy(bytes, [
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-        0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x18
+        0x48, 0x83, 0xEC, 0x08,
+        0x48, 0xB8, 0x74, 0x72, 0x75, 0x65, 0x00, 0x00, 0x00, 0x00,
+        0x48, 0x89, 0x04, 0x24,
+        0x48, 0x89, 0xE7,
+        0xBE, 0x04, 0x00, 0x00, 0x00
     ])
-    jump_rel32(bytes, 4205210, TEXT_VA()) // 0x402a9a
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+    la json_bool_false_target = lengde(bytes)
+    copy(bytes, [
+        0x48, 0x83, 0xEC, 0x08,
+        0x48, 0xB8, 0x66, 0x61, 0x6C, 0x73, 0x65, 0x00, 0x00, 0x00,
+        0x48, 0x89, 0x04, 0x24,
+        0x48, 0x89, 0xE7,
+        0xBE, 0x05, 0x00, 0x00, 0x00
+    ])
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+    patch_jump(bytes, json_bool_false, json_bool_false_target)
 
     // Den historiske JSON-dispatchen på 0x402660 hoppa via data som ikkje var
     // funksjonsadresser. Vel gyldig typeinngang direkte frå NcVal.type.
@@ -1734,7 +1963,10 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     la er_miljo_finnes = fn_nm == "miljo_finnes" eller builtin.ends_with(fn_nm, ".miljo_finnes")
     // JSON
     la er_json_parse   = fn_nm == "json_parse_raw" eller fn_nm == "json_parse" eller builtin.ends_with(fn_nm, ".json_parse_raw") eller builtin.ends_with(fn_nm, ".json_parse")
-    la er_json_str     = fn_nm == "json_stringify" eller fn_nm == "json_skriv" eller builtin.ends_with(fn_nm, ".json_stringify") eller builtin.ends_with(fn_nm, ".json_skriv")
+    // Brukardefinerte funksjonar som selfhost.json.json_skriv må relokerast
+    // som ordinære Norscode-kall. Berre eksplisitte builtin-/ukvalifiserte
+    // JSON-intrinsics skal gå til den native skalarrutinen.
+    la er_json_str     = fn_nm == "json_stringify" eller fn_nm == "json_skriv" eller fn_nm == "builtin.json_stringify" eller fn_nm == "builtin.json_skriv"
     // List
     la er_legg_til     = fn_nm == "legg_til" eller builtin.ends_with(fn_nm, ".legg_til")
     la er_lengde       = fn_nm == "lengde" eller builtin.ends_with(fn_nm, ".lengde")
@@ -1764,7 +1996,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_lower       { returner atomic_vas["lower"] }
     hvis er_upper       { returner atomic_vas["upper"] }
     hvis er_char_code   { returner atomic_vas["char_code"] }
-    hvis er_chr         { returner RT_CHR() }
+    hvis er_chr         { returner atomic_vas["chr"] }
     hvis er_type        { returner RT_TYPE_OF() }
     hvis er_atomic_load  { returner atomic_vas["load"] }
     hvis er_atomic_store { returner atomic_vas["store"] }
@@ -1798,6 +2030,27 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_feil        { returner RT_FEIL() }
     hvis er_exit        { returner 0 }
     returner 0
+}
+
+funksjon emit_process_request_field(buf, nøkkel: tekst, offset: heiltall, rd_offs, code_va) {
+    emit_push_const(buf, nøkkel, rd_offs, code_va)
+    copy(buf, [0x5E, 0x4C, 0x89, 0xE7])
+    call_rel32(buf, RT_MAP_GET(), code_va)
+    copy(buf, [0x48, 0x89, 0x44, 0x24, offset])
+}
+
+funksjon emit_process_result_set(buf, nøkkel: tekst, rd_offs, code_va) {
+    copy(buf, [0x48, 0x89, 0xC2])
+    emit_push_const(buf, nøkkel, rd_offs, code_va)
+    copy(buf, [0x5E, 0x4C, 0x89, 0xF7])
+    call_rel32(buf, RT_MAP_SET(), code_va)
+}
+
+funksjon emit_process_raw_number_text(buf, offset: heiltall, code_va) {
+    copy(buf, [0x49, 0x8B, 0x7D, offset])
+    call_rel32(buf, RT_INT(), code_va)
+    copy(buf, [0x48, 0x89, 0xC7])
+    call_rel32(buf, RT_INT_TO_STR(), code_va)
 }
 
 funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd_offs, code_va, atomic_vas) {
@@ -1840,6 +2093,20 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         emit_type_of_inline(buf, rd_offs, code_va)
         returner
     }
+    hvis fn_nm == "builtin.native_heap_bytes" {
+        la heap_arg_i: heiltall = 0
+        mens heap_arg_i < nargs {
+            legg_til(buf, 0x58)
+            heap_arg_i = heap_arg_i + 1
+        }
+        copy(buf, [0x48, 0x8B, 0x3C, 0x25])
+        u32(buf, HEAP_VA())
+        copy(buf, [0x48, 0x81, 0xEF])
+        u32(buf, HEAP_ALLOC_START())
+        call_rel32(buf, RT_INT(), code_va)
+        legg_til(buf, 0x50)
+        returner
+    }
     hvis fn_nm == "builtin.tid_ms" eller fn_nm == "tid_ms" {
         la tid_i: heltall = 0
         mens tid_i < nargs {
@@ -1872,6 +2139,107 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         legg_til(buf, 0xFF)
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)
+        returner
+    }
+    hvis fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv" {
+        // Materialiser det versjonerte request-kartet som eit smalt rå-ABI-
+        // område. Sjølve prosessarbeidet ligg i Norscode-emittert Linux-kode;
+        // resultatet blir pakka tilbake til vanlege Norscode-verdiar her.
+        legg_til(buf, 0x5F)                           // rdi=request
+        la process_drop_i: heiltall = 1
+        mens process_drop_i < nargs {
+            legg_til(buf, 0x58)
+            process_drop_i = process_drop_i + 1
+        }
+        copy(buf, [0x41, 0x54, 0x41, 0x55, 0x41, 0x56])
+        copy(buf, [0x49, 0x89, 0xFC, 0x48, 0x83, 0xEC, 0x40])
+        emit_process_request_field(buf, "executable", 0, rd_offs, code_va)
+        emit_process_request_field(buf, "args", 8, rd_offs, code_va)
+        emit_process_request_field(buf, "cwd", 16, rd_offs, code_va)
+        emit_process_request_field(buf, "stdin", 24, rd_offs, code_va)
+        emit_process_request_field(buf, "timeout_ms", 32, rd_offs, code_va)
+        emit_process_request_field(buf, "max_output_bytes", 40, rd_offs, code_va)
+        emit_process_request_field(buf, "environment", 48, rd_offs, code_va)
+        emit_process_request_field(buf, "inherit_env", 56, rd_offs, code_va)
+        copy(buf, [0x48, 0x89, 0xE7])
+        call_rel32(buf, atomic_vas["process_spawn_argv"], code_va)
+        copy(buf, [0x49, 0x89, 0xC5, 0x48, 0x83, 0xC4, 0x40])
+        call_rel32(buf, RT_MAP_NEW(), code_va)
+        copy(buf, [0x49, 0x89, 0xC6])
+
+        emit_push_const(buf, "norscode-process-spawn-v1", rd_offs, code_va)
+        legg_til(buf, 0x58)
+        emit_process_result_set(buf, "abi", rd_offs, code_va)
+
+        // statuskode: 0 ferdig, 1 timeout, 2 output-limit, 3 signal, 4 feil.
+        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x00])
+        la process_status_timeout = emit_jne_placeholder(buf)
+        emit_push_const(buf, "ferdig", rd_offs, code_va)
+        la process_status_done = emit_jmp_placeholder(buf)
+        la process_status_timeout_label = lengde(buf)
+        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x01])
+        la process_status_limit = emit_jne_placeholder(buf)
+        emit_push_const(buf, "timeout", rd_offs, code_va)
+        la process_status_done_2 = emit_jmp_placeholder(buf)
+        la process_status_limit_label = lengde(buf)
+        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x02])
+        la process_status_signal = emit_jne_placeholder(buf)
+        emit_push_const(buf, "feil", rd_offs, code_va)
+        la process_status_done_3 = emit_jmp_placeholder(buf)
+        la process_status_signal_label = lengde(buf)
+        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x03])
+        la process_status_error = emit_jne_placeholder(buf)
+        emit_push_const(buf, "signal", rd_offs, code_va)
+        la process_status_done_4 = emit_jmp_placeholder(buf)
+        la process_status_error_label = lengde(buf)
+        emit_push_const(buf, "feil", rd_offs, code_va)
+        la process_status_selected = lengde(buf)
+        patch_jump(buf, process_status_timeout, process_status_timeout_label)
+        patch_jump(buf, process_status_limit, process_status_limit_label)
+        patch_jump(buf, process_status_signal, process_status_signal_label)
+        patch_jump(buf, process_status_error, process_status_error_label)
+        patch_jump(buf, process_status_done, process_status_selected)
+        patch_jump(buf, process_status_done_2, process_status_selected)
+        patch_jump(buf, process_status_done_3, process_status_selected)
+        patch_jump(buf, process_status_done_4, process_status_selected)
+        legg_til(buf, 0x58)
+        emit_process_result_set(buf, "status", rd_offs, code_va)
+
+        emit_process_raw_number_text(buf, 8, code_va)
+        emit_process_result_set(buf, "pid", rd_offs, code_va)
+        emit_process_raw_number_text(buf, 16, code_va)
+        emit_process_result_set(buf, "exit_code", rd_offs, code_va)
+        copy(buf, [0x49, 0x8B, 0x7D, 0x18, 0x49, 0x8B, 0x75, 0x20])
+        call_rel32(buf, RT_STR_RAW(), code_va)
+        emit_process_result_set(buf, "stdout", rd_offs, code_va)
+        copy(buf, [0x49, 0x8B, 0x7D, 0x28, 0x49, 0x8B, 0x75, 0x30])
+        call_rel32(buf, RT_STR_RAW(), code_va)
+        emit_process_result_set(buf, "stderr", rd_offs, code_va)
+
+        copy(buf, [0x49, 0x83, 0x7D, 0x38, 0x01])
+        la process_error_spawn = emit_jne_placeholder(buf)
+        emit_push_const(buf, "output limit", rd_offs, code_va)
+        la process_error_done = emit_jmp_placeholder(buf)
+        la process_error_spawn_label = lengde(buf)
+        copy(buf, [0x49, 0x83, 0x7D, 0x38, 0x02])
+        la process_error_empty = emit_jne_placeholder(buf)
+        emit_push_const(buf, "process spawn failed", rd_offs, code_va)
+        la process_error_done_2 = emit_jmp_placeholder(buf)
+        la process_error_empty_label = lengde(buf)
+        emit_push_const(buf, "", rd_offs, code_va)
+        la process_error_selected = lengde(buf)
+        patch_jump(buf, process_error_spawn, process_error_spawn_label)
+        patch_jump(buf, process_error_empty, process_error_empty_label)
+        patch_jump(buf, process_error_done, process_error_selected)
+        patch_jump(buf, process_error_done_2, process_error_selected)
+        legg_til(buf, 0x58)
+        emit_process_result_set(buf, "error", rd_offs, code_va)
+
+        emit_process_raw_number_text(buf, 64, code_va)
+        emit_process_result_set(buf, "wall_ms", rd_offs, code_va)
+        emit_process_raw_number_text(buf, 72, code_va)
+        emit_process_result_set(buf, "peak_rss_bytes", rd_offs, code_va)
+        copy(buf, [0x4C, 0x89, 0xF0, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x50])
         returner
     }
     hvis fn_nm == "builtin.atomic_operation" {
