@@ -55,7 +55,8 @@ Plattformpakkar blir lagt i `release-artifacts/` når dei blir bygde:
 
 - `Norscode-macos-<versjon>.pkg`
 - `Norscode-linux-<versjon>-AppDir.tar.gz`
-- `Norscode-linux-<versjon>.AppImage`, dersom AppImage-verktøy er installert
+- `Norscode-linux-<versjon>.AppImage` berre når den valfrie
+  `--format appimage-adapter`-vegen blir vald eksplisitt
 - `norscode-windows-<versjon>.zip`, når Windows-artefakt finst
 
 ## Byggje lokale pakkar
@@ -72,6 +73,10 @@ Linux:
 ```bash
 ./bin/nc package-linux-app --format all
 ```
+
+`all` byggjer berre den Norscode-eigde AppDir-/TAR.GZ-normalflyten. Eit
+eksplisitt `--format appimage-adapter` kan bruke plattformverktøyet
+`appimagetool`, men dette er aldri ein skjult normalavhengigheit.
 
 Windows-pakke rundt eksisterande `.exe`:
 

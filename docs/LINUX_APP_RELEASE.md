@@ -1,6 +1,7 @@
 # Linux app-release
 
-Linux app-release byggjer AppDir-arkiv og AppImage-artefakt når miljøet støttar det.
+Linux app-release byggjer AppDir-arkivet gjennom Norscode. AppImage er ein
+eksplisitt valfri adapter, ikkje ein del av normalflyten.
 
 Køyr alltid lokal preflight før tag eller publisering:
 
@@ -14,7 +15,7 @@ Arbeidsflyten publiserer berre frå `v*`-taggar og lastar opp:
 
 - `Norscode-linux-<versjon>-AppDir.tar.gz`
 - `Norscode-linux-<versjon>-AppDir.tar.gz.sha256`
-- `Norscode-linux-<versjon>.AppImage`
-- `Norscode-linux-<versjon>.AppImage.sha256`
+- valfritt `Norscode-linux-<versjon>.AppImage` og sidecar berre etter
+  `./bin/nc package-linux-app --format appimage-adapter`
 
 Normal release skal ikkje krevje C/Python som aktiv arbeidsveg.
