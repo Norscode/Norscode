@@ -117,6 +117,49 @@ funksjon køyr_fersk_codegen_elf(root: tekst, codegen_elf: tekst,
     returner sann
 }
 
+// Reserve for ein ikkje-Linux-vert når hosted Linux-runnar ikkje er
+// tilgjengeleg. Den same ferske codegen-NCB-en blir då tolka av aktiv
+// Norscode-runtime. Resultatet er framleis den same Linux x86-64 ELF-en;
+// levande selftest må køyrast på Linux før kandidaten kan promoterast.
+funksjon køyr_fersk_codegen_ncb(root: tekst, runtime: tekst, codegen_ncb: tekst,
+                                input_ncb: tekst, out: tekst,
+                                detaljsporing: boolsk) -> boolsk {
+    la trace_instr = "0"
+    hvis detaljsporing { trace_instr = "1" }
+    la miljø: ordbok_tekst = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_CMD": "run-ncb",
+        "NORSCODE_FILE": codegen_ncb,
+        "NC_INPUT": input_ncb,
+        "NC_OUTPUT": out,
+        "NC_NATIVE_SYMBOL_MAP": out + ".symbols",
+        "NC_NATIVE_CODEGEN_TRACE": "1",
+        "NC_NATIVE_CODEGEN_TRACE_INSTR": trace_instr,
+        "NC_NATIVE_EXTERNAL_EMBED_NCB": "1",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la resultat = prosess.køyr(runtime, [], root, miljø, 3600000)
+    skriv("[PROBE] tolka codegen-NCB status=" + tekst(resultat["status"]) +
+          " exit=" + tekst(resultat["exit_code"]) +
+          " peak_rss=" + tekst(resultat["peak_rss_bytes"]) +
+          " error=" + tekst(resultat["error"]) + "\n")
+    prosess.skriv_resultat(resultat)
+    hvis ikkje prosess.ok(resultat) {
+        github_feil("tolka codegen-NCB status=" + tekst(resultat["status"]) +
+            " exit=" + tekst(resultat["exit_code"]) + " error=" + tekst(resultat["error"]))
+        returner usann
+    }
+    hvis ikkje fullfør_innebygd_ncb(out, input_ncb) { returner usann }
+    hvis ikkje builtin.fil_sett_kjorbar(out) {
+        github_feil("klarte ikkje setje VM-crossbygd full-host køyrbar via filmodus-ABI")
+        skriv("[FAIL] klarte ikkje setje VM-crossbygd full-host køyrbar via filmodus-ABI\n")
+        returner usann
+    }
+    returner sann
+}
+
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
     hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
@@ -139,6 +182,13 @@ funksjon start() -> heiltall {
 
     la runtime = env("NC_NATIVE")
     hvis runtime == "" { runtime = root + "/dist/norscode_native" }
+    la linux_vert = er_linux_host()
+    la vm_codegen_fallback = ikkje linux_vert og
+        env("NORSCODE_ALLOW_VM_CODEGEN_FALLBACK") == "1"
+    hvis ikkje linux_vert og ikkje vm_codegen_fallback {
+        skriv("[FAIL] Linux full-host krev Linux-vert eller eksplisitt NORSCODE_ALLOW_VM_CODEGEN_FALLBACK=1\n")
+        returner 2
+    }
     la codegen_compile_env: ordbok_tekst = {
         "NORSCODE_HYBRID_ROOT": root,
         "NORSCODE_HYBRID_SRC": root + "/selfhost/native_execution/native_codegen_v2.no",
@@ -171,35 +221,57 @@ funksjon start() -> heiltall {
     // Køyr den minste kjende regresjonen før den dyre nc_main-importgrafen.
     // Denne miniporten gjer codegen-feil synlege på minutt i staden for etter
     // eit heilt full-host-bygg.
-    hvis ikkje køyr_fersk_codegen_elf(root, codegen_elf,
-        codegen_probe_ncb, codegen_probe_elf, sann) {
+    la codegen_probe_ok = usann
+    hvis vm_codegen_fallback {
+        codegen_probe_ok = køyr_fersk_codegen_ncb(root, runtime, codegen_ncb,
+            codegen_probe_ncb, codegen_probe_elf, sann)
+    } ellers {
+        codegen_probe_ok = køyr_fersk_codegen_elf(root, codegen_elf,
+            codegen_probe_ncb, codegen_probe_elf, sann)
+    }
+    hvis ikkje codegen_probe_ok {
         skriv("[FAIL] fersk native codegen feila den raske instruksjonsminiporten\n")
         returner 1
     }
-    la mini = prosess.køyr(codegen_probe_elf, [], root, {}, 30000)
-    prosess.skriv_resultat(mini)
-    hvis ikkje prosess.ok(mini) eller
-       ikkje builtin.contains(tekst(mini["stdout"]), "NATIVE_CODEGEN_PROBE_OK") {
-        github_feil("fersk codegen-mini manglar levande outputmarkør; exit=" +
-                    tekst(mini["exit_code"]) + " error=" + tekst(mini["error"]))
-        skriv("[FAIL] fersk native codegen produserte ikkje køyrbar skriv-semantikk\n")
-        returner 1
+    hvis linux_vert {
+        la mini = prosess.køyr(codegen_probe_elf, [], root, {}, 30000)
+        prosess.skriv_resultat(mini)
+        hvis ikkje prosess.ok(mini) eller
+           ikkje builtin.contains(tekst(mini["stdout"]), "NATIVE_CODEGEN_PROBE_OK") {
+            github_feil("fersk codegen-mini manglar levande outputmarkør; exit=" +
+                        tekst(mini["exit_code"]) + " error=" + tekst(mini["error"]))
+            skriv("[FAIL] fersk native codegen produserte ikkje køyrbar skriv-semantikk\n")
+            returner 1
+        }
+        skriv("[OK] fersk native codegen bestod rask instruksjonsminiport\n")
+    } ellers {
+        skriv("[OK] instruksjonsmini er crossbygd; levande outputport ventar på Linux\n")
     }
-    skriv("[OK] fersk native codegen bestod rask instruksjonsminiport\n")
-    hvis ikkje køyr_fersk_codegen_elf(root, codegen_elf,
-        chr_probe_ncb, chr_probe_elf, usann) {
+    la chr_probe_ok = usann
+    hvis vm_codegen_fallback {
+        chr_probe_ok = køyr_fersk_codegen_ncb(root, runtime, codegen_ncb,
+            chr_probe_ncb, chr_probe_elf, usann)
+    } ellers {
+        chr_probe_ok = køyr_fersk_codegen_elf(root, codegen_elf,
+            chr_probe_ncb, chr_probe_elf, usann)
+    }
+    hvis ikkje chr_probe_ok {
         skriv("[FAIL] fersk native codegen feila chr-miniporten\n")
         returner 1
     }
-    la chr_mini = prosess.køyr(chr_probe_elf, [], root, {}, 30000)
-    prosess.skriv_resultat(chr_mini)
-    hvis ikkje prosess.ok(chr_mini) eller
-       ikkje builtin.contains(tekst(chr_mini["stdout"]), "NATIVE_CHR_PROBE_OK") {
-        github_feil("fersk codegen chr-mini manglar levande outputmarkør")
-        skriv("[FAIL] fersk native codegen produserte ikkje stabil chr-semantikk\n")
-        returner 1
+    hvis linux_vert {
+        la chr_mini = prosess.køyr(chr_probe_elf, [], root, {}, 30000)
+        prosess.skriv_resultat(chr_mini)
+        hvis ikkje prosess.ok(chr_mini) eller
+           ikkje builtin.contains(tekst(chr_mini["stdout"]), "NATIVE_CHR_PROBE_OK") {
+            github_feil("fersk codegen chr-mini manglar levande outputmarkør")
+            skriv("[FAIL] fersk native codegen produserte ikkje stabil chr-semantikk\n")
+            returner 1
+        }
+        skriv("[OK] fersk native codegen bestod chr-miniport\n")
+    } ellers {
+        skriv("[OK] chr-mini er crossbygd; levande outputport ventar på Linux\n")
     }
-    skriv("[OK] fersk native codegen bestod chr-miniport\n")
 
     la compile_env: ordbok_tekst = {
         "NORSCODE_HYBRID_ROOT": root,
@@ -219,7 +291,13 @@ funksjon start() -> heiltall {
         skriv("[FAIL] Norscode kunne ikkje kompilere levande nc_main/importgraf\n")
         returner 1
     }
-    hvis ikkje køyr_fersk_codegen_elf(root, codegen_elf, ncb, out, usann) {
+    la fullhost_ok = usann
+    hvis vm_codegen_fallback {
+        fullhost_ok = køyr_fersk_codegen_ncb(root, runtime, codegen_ncb, ncb, out, usann)
+    } ellers {
+        fullhost_ok = køyr_fersk_codegen_elf(root, codegen_elf, ncb, out, usann)
+    }
+    hvis ikkje fullhost_ok {
         skriv("[FAIL] Norscode native codegen kunne ikkje byggje Linux full-host\n")
         returner 1
     }
@@ -227,7 +305,7 @@ funksjon start() -> heiltall {
         skriv("[FAIL] native codegen-resultatet er ikkje Linux x86-64 ELF\n")
         returner 1
     }
-    hvis er_linux_host() {
+    hvis linux_vert {
         la smoke = prosess.køyr(out, ["selftest"], root, {}, 120000)
         // Den committed Linux-stage0-en sender i nøsta spawn args-lista som
         // komplett OS-argv. Prøv berre den eksplisitte argv[0]-forma når den
@@ -253,7 +331,11 @@ funksjon start() -> heiltall {
         }
     }
     la data = builtin.fil_les_binær(out)
-    skriv("[OK] Linux full-host bygd direkte av Norscode native codegen; ikkje promotert\n")
+    hvis vm_codegen_fallback {
+        skriv("[OK] Linux full-host crossbygd av tolka Norscode-codegen; Linux-selftest står att; ikkje promotert\n")
+    } ellers {
+        skriv("[OK] Linux full-host bygd direkte av Norscode native codegen; ikkje promotert\n")
+    }
     skriv("[OK] bytes=" + tekst_fra_heiltall(lengde(data)) + " sha256=" + builtin.sha256_bytes(data) + "\n")
     returner 0
 }
