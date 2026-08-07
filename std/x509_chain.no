@@ -1,0 +1,304 @@
+# x509_chain.no - X.509-kjedevalidering i rein Norscode (RFC 5280) over std.x509.
+# Signaturkjede via Ed25519 (RFC 8410, id-Ed25519 = 1.3.101.112). Metadata (issuer,
+# subject, gyldigheit, SAN, fingerprint) kjem frå den strukturerte std.x509-lesaren.
+# RSA/ECDSA-signaturverifikasjon og CRL/OCSP er dokumenterte oppfølgingspunkt.
+bruk std.x509 som x509
+bruk std.ed25519 som eddsa
+bruk std.sha256 som sha
+
+# ================= DER-hjelparar =================
+funksjon _legg(dst: liste_heiltall, src: liste_heiltall) {
+    la i = 0 mens i < lengde(src) { legg_til(dst, src[i]) i = i + 1 }
+}
+funksjon _der_len(n: heiltall) -> liste_heiltall {
+    hvis n < 128 { returner [n] }
+    la b: liste_heiltall = []
+    la v = n
+    mens v > 0 { la nb: liste_heiltall = [v & 255] _legg(nb, b) b = nb v = v >> 8 }
+    la ut: liste_heiltall = [128 | lengde(b)]
+    _legg(ut, b)
+    returner ut
+}
+funksjon _tlv(tag: heiltall, innhald: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [tag]
+    _legg(ut, _der_len(lengde(innhald)))
+    _legg(ut, innhald)
+    returner ut
+}
+funksjon _oid_ed25519() -> liste_heiltall { returner [43, 101, 112] }   # 2B 65 70
+
+# INTEGER (positivt). Legg til 0x00 om høgste bit er sett.
+funksjon _int(bytes_liste: liste_heiltall) -> liste_heiltall {
+    la b = bytes_liste
+    hvis lengde(b) == 0 { b = [0] }
+    hvis (b[0] & 128) != 0 { la nb: liste_heiltall = [0] _legg(nb, b) b = nb }
+    returner _tlv(2, b)
+}
+funksjon _bit_string(innhald: liste_heiltall) -> liste_heiltall {
+    la b: liste_heiltall = [0]                       # 0 ubrukte bitar
+    _legg(b, innhald)
+    returner _tlv(3, b)
+}
+funksjon _cn_name(cn: tekst) -> liste_heiltall {
+    la verdi: liste_heiltall = []
+    la i = 0
+    mens i < lengde(cn) { legg_til(verdi, builtin.char_code(builtin.slice(cn, i, i+1)) & 255) i = i + 1 }
+    la atv: liste_heiltall = []
+    _legg(atv, _tlv(6, [85, 4, 3]))                  # OID 2.5.4.3 (CN)
+    _legg(atv, _tlv(19, verdi))                      # PrintableString
+    returner _tlv(48, _tlv(49, _tlv(48, atv)))       # SEQ{ SET{ SEQ{ atv } } }
+}
+funksjon _utctime(yymmddhhmmssZ: tekst) -> liste_heiltall {
+    la b: liste_heiltall = []
+    la i = 0
+    mens i < lengde(yymmddhhmmssZ) { legg_til(b, builtin.char_code(builtin.slice(yymmddhhmmssZ, i, i+1)) & 255) i = i + 1 }
+    returner _tlv(23, b)
+}
+funksjon _spki_ed25519(pub: liste_heiltall) -> liste_heiltall {
+    la algid = _tlv(48, _tlv(6, _oid_ed25519()))
+    la ut: liste_heiltall = []
+    _legg(ut, algid)
+    _legg(ut, _bit_string(pub))
+    returner _tlv(48, ut)
+}
+# SAN-utviding med dNSName-oppføringar (GeneralName [2]).
+funksjon _san_ext(dns_navn: liste_tekst) -> liste_heiltall {
+    la gnl: liste_heiltall = []
+    la i = 0
+    mens i < lengde(dns_navn) {
+        la nb: liste_heiltall = []
+        la n = dns_navn[i]
+        la j = 0
+        mens j < lengde(n) { legg_til(nb, builtin.char_code(builtin.slice(n, j, j+1)) & 255) j = j + 1 }
+        _legg(gnl, _tlv(130, nb))                     # [2] dNSName
+        i = i + 1
+    }
+    la seq = _tlv(48, gnl)
+    la ext: liste_heiltall = []
+    _legg(ext, _tlv(6, [85, 29, 17]))                # OID 2.5.29.17 (SAN)
+    _legg(ext, _tlv(4, seq))                          # extnValue OCTET STRING
+    returner _tlv(48, ext)
+}
+
+# ================= Ed25519-sertifikatbyggjar =================
+# opts: {"serial": liste, "issuer_cn": tekst, "subject_cn": tekst,
+#        "not_before": "YYMMDDHHMMSSZ", "not_after": "...", "subject_pub": 32b,
+#        "dns": liste_tekst, "issuer_seed": 32b}
+funksjon bygg_ed25519_cert(opts: ordbok) -> liste_heiltall {
+    la tbs_innhald: liste_heiltall = []
+    _legg(tbs_innhald, _tlv(160, _tlv(2, [2])))       # [0] EXPLICIT INTEGER 2 (v3)
+    _legg(tbs_innhald, _int(opts["serial"]))
+    _legg(tbs_innhald, _tlv(48, _tlv(6, _oid_ed25519())))   # signature AlgId
+    _legg(tbs_innhald, _cn_name(opts["issuer_cn"]))
+    la validity: liste_heiltall = []
+    _legg(validity, _utctime(opts["not_before"]))
+    _legg(validity, _utctime(opts["not_after"]))
+    _legg(tbs_innhald, _tlv(48, validity))
+    _legg(tbs_innhald, _cn_name(opts["subject_cn"]))
+    _legg(tbs_innhald, _spki_ed25519(opts["subject_pub"]))
+    hvis lengde(opts["dns"]) > 0 {
+        _legg(tbs_innhald, _tlv(163, _tlv(48, _san_ext(opts["dns"]))))   # [3] EXPLICIT extensions
+    }
+    la tbs = _tlv(48, tbs_innhald)
+    la sig = eddsa.sign(opts["issuer_seed"], tbs)
+    la cert_innhald: liste_heiltall = []
+    _legg(cert_innhald, tbs)
+    _legg(cert_innhald, _tlv(48, _tlv(6, _oid_ed25519())))   # signatureAlgorithm
+    _legg(cert_innhald, _bit_string(sig))
+    returner _tlv(48, cert_innhald)
+}
+
+# ================= DER-uttrekk for validering =================
+funksjon _walk(data: liste_heiltall, pos: heiltall, grense: heiltall) -> ordbok {
+    hvis pos + 2 > grense { returner {"ok": usann} }
+    la tag = data[pos]
+    la f = data[pos + 1]
+    la header = 2
+    la n = 0
+    hvis f < 128 { n = f }
+    ellers {
+        la tal = f & 127
+        hvis tal < 1 eller tal > 4 { returner {"ok": usann} }
+        la i = 0
+        mens i < tal { n = n * 256 + data[pos + 2 + i] i = i + 1 }
+        header = 2 + tal
+    }
+    la start = pos + header
+    hvis start + n > grense { returner {"ok": usann} }
+    returner {"ok": sann, "tag": tag, "tag_pos": pos, "start": start, "end": start + n, "next": start + n}
+}
+
+# Hent {ok, tbs, sig, sig_alg_oid, spki_pub} frå eit Ed25519-sertifikat (DER).
+funksjon hent_felt(der: liste_heiltall) -> ordbok {
+    la n = lengde(der)
+    la cert = _walk(der, 0, n)
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 { returner {"ok": usann, "grunn": "ikkje SEQUENCE"} }
+    la tbs = _walk(der, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner {"ok": usann, "grunn": "manglar TBS"} }
+    # TBS-bytane inkl. tag+lengde er det signerte materialet.
+    la tbs_bytes: liste_heiltall = []
+    la i = tbs["tag_pos"]
+    mens i < tbs["end"] { legg_til(tbs_bytes, der[i]) i = i + 1 }
+    # sigAlg og signatur
+    la sigalg = _walk(der, tbs["next"], cert["end"])
+    hvis ikkje sigalg["ok"] { returner {"ok": usann, "grunn": "manglar sigAlg"} }
+    la alg_oid = _walk(der, sigalg["start"], sigalg["end"])
+    la oid_hex = ""
+    hvis alg_oid["ok"] {
+        la h = "0123456789ABCDEF"
+        la k = alg_oid["start"]
+        mens k < alg_oid["end"] { oid_hex = oid_hex + builtin.slice(h,(der[k]>>4)&15,((der[k]>>4)&15)+1) + builtin.slice(h,der[k]&15,(der[k]&15)+1) k = k + 1 }
+    }
+    la sigbit = _walk(der, sigalg["next"], cert["end"])
+    hvis ikkje sigbit["ok"] eller sigbit["tag"] != 3 { returner {"ok": usann, "grunn": "manglar signatur"} }
+    la sig: liste_heiltall = []
+    i = sigbit["start"] + 1                            # hopp over ubrukte-bitar-byten
+    mens i < sigbit["end"] { legg_til(sig, der[i]) i = i + 1 }
+    # SPKI-offentleg nøkkel: gå gjennom TBS-felta i rekkjefølgje.
+    la spki_pub = _hent_spki_pub(der, tbs["start"], tbs["end"])
+    returner {"ok": sann, "tbs": tbs_bytes, "sig": sig, "sig_alg_oid": oid_hex, "spki_pub": spki_pub}
+}
+
+funksjon _hent_spki_pub(der: liste_heiltall, start: heiltall, slutt: heiltall) -> liste_heiltall {
+    la p = start
+    la felt = 0
+    mens p < slutt {
+        la node = _walk(der, p, slutt)
+        hvis ikkje node["ok"] { returner [] }
+        # rekkjefølgje: [0]version?, serial, sigAlg, issuer, validity, subject, SPKI
+        hvis node["tag"] == 160 { p = node["next"] fortsett }   # hopp [0] version, tel ikkje
+        felt = felt + 1
+        # felt: 1=serial 2=sigAlg 3=issuer 4=validity 5=subject 6=SPKI
+        hvis felt == 6 og node["tag"] == 48 {
+            # SPKI = SEQ { AlgId, BIT STRING pub }
+            la alg = _walk(der, node["start"], node["end"])
+            la bit = _walk(der, alg["next"], node["end"])
+            hvis bit["ok"] og bit["tag"] == 3 {
+                la ut: liste_heiltall = []
+                la i = bit["start"] + 1
+                mens i < bit["end"] { legg_til(ut, der[i]) i = i + 1 }
+                returner ut
+            }
+            returner []
+        }
+        p = node["next"]
+    }
+    returner []
+}
+
+# ================= Hostname-matching (RFC 6125, forenkla) =================
+funksjon _lower(s: tekst) -> tekst { returner builtin.lower(s) }
+funksjon host_matcher(host: tekst, mønster: tekst) -> boolsk {
+    la h = _lower(host)
+    la m = _lower(mønster)
+    hvis builtin.index_of(m, "*") < 0 { returner h == m }
+    # Wildcard berre i venstre etikett: "*.d.e" matchar "a.d.e" men ikkje "d.e" eller "a.b.d.e".
+    hvis ikkje builtin.starts_with(m, "*.") { returner usann }
+    la m_rest = builtin.slice(m, 1, lengde(m))        # ".d.e"
+    la punkt = builtin.index_of(h, ".")
+    hvis punkt < 0 { returner usann }
+    la h_rest = builtin.slice(h, punkt, lengde(h))    # ".d.e"
+    la venstre = builtin.slice(h, 0, punkt)
+    hvis lengde(venstre) == 0 { returner usann }
+    returner h_rest == m_rest
+}
+funksjon host_i_sans(host: tekst, sans: liste_tekst) -> boolsk {
+    la i = 0
+    mens i < lengde(sans) {
+        la e = sans[i]
+        hvis builtin.starts_with(e, "DNS:") {
+            hvis host_matcher(host, builtin.slice(e, 4, lengde(e))) { returner sann }
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+# ISO-tid "YYYY-MM-DDTHH:MM:SSZ" samanlikning (leksikografisk = kronologisk).
+funksjon _iso_leq(a: tekst, b: tekst) -> boolsk {
+    la n = lengde(a) hvis lengde(b) < n { n = lengde(b) }
+    la i = 0
+    mens i < n {
+        la ca = builtin.char_code(builtin.slice(a,i,i+1))
+        la cb = builtin.char_code(builtin.slice(b,i,i+1))
+        hvis ca < cb { returner sann }
+        hvis ca > cb { returner usann }
+        i = i + 1
+    }
+    returner lengde(a) <= lengde(b)
+}
+
+# ================= Kjedevalidering =================
+# kjede: liste av DER-sertifikat (leaf først, ... anker sist).
+# trust_fp: liste av godkjende SHA-256-fingeravtrykk (hex, uppercase, utan kolon).
+# host: forventa vertsnamn. tid_iso: referansetid "YYYY-MM-DDTHH:MM:SSZ".
+funksjon valider_kjede(kjede: liste, trust_fp: liste_tekst, host: tekst, tid_iso: tekst) -> ordbok {
+    la n = lengde(kjede)
+    hvis n < 1 { returner {"gyldig": usann, "grunn": "tom kjede"} }
+    # Metadata + felt for kvart sertifikat.
+    la meta: liste = []
+    la felt: liste = []
+    la i = 0
+    mens i < n {
+        la m = x509.les_der(kjede[i])
+        hvis m["status"] != "ok" { returner {"gyldig": usann, "grunn": "kunne ikkje lese sertifikat " + tekst(i)} }
+        la f = hent_felt(kjede[i])
+        hvis ikkje f["ok"] { returner {"gyldig": usann, "grunn": "feltuttrekk feila for " + tekst(i)} }
+        legg_til(meta, m)
+        legg_til(felt, f)
+        i = i + 1
+    }
+    # Gyldigheitsperiode for kvart sertifikat.
+    i = 0
+    mens i < n {
+        la m = meta[i]
+        hvis ikkje _iso_leq(m["not_before"], tid_iso) { returner {"gyldig": usann, "grunn": "ikkje gyldig enno: " + tekst(i)} }
+        hvis ikkje _iso_leq(tid_iso, m["not_after"]) { returner {"gyldig": usann, "grunn": "utløpt: " + tekst(i)} }
+        i = i + 1
+    }
+    # Hostname mot leaf (SAN, fallback CN).
+    la leaf = meta[0]
+    la host_ok = host_i_sans(host, leaf["sans"])
+    hvis ikkje host_ok {
+        # fallback: CN i subject
+        la cn = _cn_fra_subject(leaf["subject"])
+        hvis cn != "" og host_matcher(host, cn) { host_ok = sann }
+    }
+    hvis ikkje host_ok { returner {"gyldig": usann, "grunn": "vertsnamn matchar ikkje"} }
+    # Signaturkjede: kvart sertifikat signert av neste sitt SPKI (Ed25519).
+    i = 0
+    mens i < n - 1 {
+        la sub = felt[i]
+        la iss = felt[i + 1]
+        hvis sub["sig_alg_oid"] != "2B6570" { returner {"gyldig": usann, "grunn": "ikkje-Ed25519 signatur (RSA/ECDSA er oppfølgingspunkt) i " + tekst(i)} }
+        hvis meta[i]["issuer"] != meta[i+1]["subject"] { returner {"gyldig": usann, "grunn": "issuer/subject-brot mellom " + tekst(i) + " og " + tekst(i+1)} }
+        hvis ikkje eddsa.verify(iss["spki_pub"], sub["tbs"], sub["sig"]) { returner {"gyldig": usann, "grunn": "signatur feila i " + tekst(i)} }
+        i = i + 1
+    }
+    # Ankeret (siste) må vere sjølvsignert og i trust store.
+    la anker = felt[n - 1]
+    la anker_meta = meta[n - 1]
+    hvis anker["sig_alg_oid"] != "2B6570" { returner {"gyldig": usann, "grunn": "anker ikkje Ed25519"} }
+    hvis anker_meta["issuer"] != anker_meta["subject"] { returner {"gyldig": usann, "grunn": "anker ikkje sjølvsignert"} }
+    hvis ikkje eddsa.verify(anker["spki_pub"], anker["tbs"], anker["sig"]) { returner {"gyldig": usann, "grunn": "anker-signatur feila"} }
+    hvis ikkje _fp_i_liste(anker_meta["fingerprint_sha256"], trust_fp) { returner {"gyldig": usann, "grunn": "anker ikkje i trust store"} }
+    returner {"gyldig": sann, "grunn": "ok"}
+}
+
+funksjon _cn_fra_subject(subject: tekst) -> tekst {
+    la delar = builtin.split(subject, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], "CN=") { returner builtin.slice(delar[i], 3, lengde(delar[i])) }
+        i = i + 1
+    }
+    returner ""
+}
+funksjon _fp_i_liste(fp: tekst, liste_fp: liste_tekst) -> boolsk {
+    la mål = builtin.upper(fp)
+    la i = 0
+    mens i < lengde(liste_fp) { hvis builtin.upper(liste_fp[i]) == mål { returner sann } i = i + 1 }
+    returner usann
+}
+
+funksjon status() { returner { "abi": "norscode-x509-chain-v1", "sig": "ed25519", "oppfølging": "rsa/ecdsa,crl,ocsp" } }

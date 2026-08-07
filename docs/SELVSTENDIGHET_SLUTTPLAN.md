@@ -53,17 +53,43 @@ dette er selvstendighet et vedlikeholdsregime, ikke et prosjekt.
 Kritisk sti: **A → B → F**, med D som lengste enkeltløp. C og E kan gå
 parallelt. Resten av dokumentet er arbeidsplanen i repo-stil.
 
-> **Framdrift 2026-08-07 (verifisert på native macOS-runtime):**
+> **Framdrift 2026-08-07 (verifisert på tre uavhengige runtimar):**
 > Milepæl D er godt i gang — fem reine krypto-modular er inne og RFC-verifiserte:
 > `std/sha512.no` (NIST), `std/hkdf.no` (RFC 5869), `std/x25519.no` (RFC 7748
 > inkl. §6.1 DH), `std/ed25519.no` (RFC 8032) og `std/tls13_keyschedule.no`
-> (RFC 8448). **Alle fem grøne på Jan sin MacBook Air (`nc test` 1/1 kvar) og
-> `nc feature-check BESTÅTT`** — D1-primitiva er difor `[x]`. Til saman gjev dei
+> (RFC 8448). **Alle fem grøne på (1) ARM64-stage0, (2) native macOS (`nc test`
+> 1/1 kvar + `nc feature-check BESTÅTT`) og (3) Linux-CI (Krypto-smoke-workflowen
+> grøn på grein `krypto-tls-primitiver`)** — D1-primitiva er difor `[x]`. Til saman gjev dei
 > — med den alt verifiserte `std.chacha20_poly1305` — heile suiten
 > TLS_CHACHA20_POLY1305_SHA256 i rein Norscode. Att står handshake-tilstandsmaskina
 > (D2), differentialtesting og ekstern revisjon (D3). Milepæl A er ikkje køyrbar
 > frå sky-økta (krev Mac + Windows-host + GitHub CI); sjå
 > [MILEPÆL_A_RUNBOK.md](MILEPÆL_A_RUNBOK.md).
+>
+> **Framdrift 2026-08-07 (D2-kjerne, verifisert på Linux ARM64-stage0):**
+> Tre nye reine Norscode-modular utgjer kjernen i TLS 1.3-tilstandsmaskina:
+> `std/tls13_record.no` (record-lag, RFC 8446 §5, ChaCha20-Poly1305),
+> `std/tls13_handshake.no` (meldingskodek, RFC 8446 §4) og
+> `std/tls13_handshake_flow.no` (1-RTT handtrykk, loopback klient↔tenar).
+> Tre nye testar er grøne på committed ARM64-stage0 (via miljøkontrakt
+> `NORSCODE_CMD`/`NORSCODE_FILE`/`NORSCODE_ROOT`): `test_tls13_record_chacha`
+> (RFC 8439 §2.8.2 keystream/nonce-anker + RFC 8448 IV-utleiing + rundtur +
+> tukla-tag-avvising), `test_tls13_handshake_codec` (parsar RFC 8448
+> ClientHello/ServerHello eksakt + rundtur på alle byggjarar) og
+> `test_tls13_handshake_flow` (ECDHE-løyndom lik begge sider, Ed25519
+> CertificateVerify verifisert, server+client Finished-MAC verifisert,
+> applikasjonsdata over record-laget, fail-closed på tukla signatur).
+> **Utvida same dag:** X.509-kjedevalidering (`std/x509_chain.no`, med
+> Ed25519-sertifikatbyggjar) + `test_x509_chain_ed25519` (8 kontrollar,
+> fail-closed); fuzzing av alle parserane (`test_tls13_fuzz_parsers`, ingen
+> krasj — parserane herda mot indeks-utanfor-grensa); og eit differensial-KAT
+> (`test_tls13_differential_kat`) som reproduserer heile RFC 8448-løyndomstreet
+> frå rå meldingsbytes. Til saman **11 grøne kryptotestar** på ARM64-stage0.
+> Att i D2: (1) integrasjon over den native socket-ABI-en (ikkje berre
+> loopback), (2) RSA/ECDSA-signaturkjede + CRL/OCSP for web-PKI-interop,
+> (3) live differensial-interop mot OpenSSL-adapteren. Difor `[~]` på dei
+> attståande D2-punkta. Ikkje attestert på macOS/Windows og ikkje køyrt
+> gjennom `nc test`/`feature-check` i denne økta (krev Mac-runtime).
 
 ---
 
@@ -201,13 +227,16 @@ enkeltløpet; start så tidleg som råd og køyr parallelt med B/C/E.
 
 #### D1-evidens 2026-08-07
 
-- **Native macOS-verifisering (Jan sin MacBook Air, promotert `./bin/nc`):**
-  `nc test` gav `1/1 bestått, 0 feila` for kvar av dei fem testane
-  (`test_sha512_nist`, `test_hkdf_rfc5869`, `test_x25519_rfc7748`,
-  `test_ed25519_rfc8032`, `test_tls13_keyschedule_rfc8448`), og
-  `nc feature-check std/sha512.no std/hkdf.no std/x25519.no std/ed25519.no
-  std/tls13_keyschedule.no` gav `BESTÅTT` med `[OK] ingen aktiv C/Python-flate`.
-  Dette er gatebeviset som løftar dei fem D1-primitiva til `[x]`.
+- **Trippel runtime-verifisering (gatebevis som løftar D1-primitiva til `[x]`):**
+  (1) ARM64-stage0 via miljøkontrakt; (2) native macOS — `nc test` gav
+  `1/1 bestått, 0 feila` for kvar av dei fem testane (`test_sha512_nist`,
+  `test_hkdf_rfc5869`, `test_x25519_rfc7748`, `test_ed25519_rfc8032`,
+  `test_tls13_keyschedule_rfc8448`), og `nc feature-check` gav `BESTÅTT` med
+  `[OK] ingen aktiv C/Python-flate`; (3) Linux-CI — den dedikerte
+  `.github/workflows/krypto-smoke.yml` køyrde alle fem via `./bin/nc run` på
+  Linux x86_64-stage0 og var **grøn** på grein `krypto-tls-primitiver`.
+  Krypto-smoke er isolert frå `vm_active_functions`-gapet (aktiv dist vs.
+  kandidat) og Windows-pariteten, så det grøne krysset gjeld reint kryptoen.
 - `std/sha512.no` (`norscode-sha512-v1`) og `tests/test_sha512_nist.no`: rein
   Norscode SHA-512 med 64-bit ord som `[hi32, lo32]`-par. NIST-vektorar (tom,
   `abc`, 56-byte multiblokk). Trengst av Ed25519 og TLS-transkript.
@@ -240,17 +269,30 @@ enkeltløpet; start så tidleg som råd og køyr parallelt med B/C/E.
 
 ### D2 TLS 1.3-tilstandsmaskin
 
-- [ ] Klient- og tenarhandshake (RFC 8446) over eksisterande native
-      socket-ABI: ClientHello/ServerHello, nøkkelplan, certificate verify,
-      finished, application data, alerts og session-avslutning.
-- [ ] X.509-kjedevalidering på den strukturerte `std.x509`-lesaren: signatur
-      i kjeda, gyldigheitsperiode, SAN/hostname, trust store; CRL/OCSP-plan
-      dokumentert eksplisitt.
-- [ ] Differentialtesting mot OpenSSL-adapteren som planen krev: same
-      handshake-transkript, same avvisingar, interop klient↔tenar begge
-      vegar, feilinjeksjon (avkorta meldingar, feil MAC, nedgraderingsforsøk).
-- [ ] Fuzzing av parserane (handshake-meldingar, sertifikat, alerts) med
-      avgrensa ressursbruk, fail-closed.
+- [~] Klient- og tenarhandshake (RFC 8446): ClientHello/ServerHello,
+      nøkkelplan, certificate verify, finished og application data er
+      implementert og verifisert som loopback i minnet
+      (`std/tls13_handshake_flow.no`, `test_tls13_handshake_flow`).
+      Att: køyring over den eksisterande native socket-ABI-en, alerts og
+      eksplisitt session-avslutning.
+- [~] X.509-kjedevalidering på den strukturerte `std.x509`-lesaren:
+      `std/x509_chain.no` gjer gyldigheitsperiode, SAN/hostname (RFC 6125,
+      wildcard), Ed25519-signaturkjede og trust-anchor-kontroll, verifisert i
+      `test_x509_chain_ed25519` (gyldig kjede, wildcard-SAN, feil vertsnamn,
+      utløpt, ikkje-gyldig-enno, tomt trust store, tukla signatur, feil
+      utstedar — alle fail-closed). Att: RSA/ECDSA-signaturverifikasjon for
+      interop med web-PKI, og eksplisitt CRL/OCSP-plan.
+- [~] Differentialtesting: `test_tls13_differential_kat` reproduserer HEILE
+      RFC 8448-løyndomstreet (early→handshake→c/s hs traffic→master→c/s ap
+      traffic + IV) frå rå ClientHello/ServerHello-bytes og ECDHE-løyndom, med
+      steg-for-steg samanlikning mot RFC-vektorane. Feilinjeksjon (tukla tag,
+      feil seq, avkorta meldingar) er dekt i record- og fuzz-testane. Att:
+      live interop klient↔tenar mot OpenSSL-adapteren (krev adapteren/host).
+- [x] Fuzzing av parserane (handshake-meldingar, record, sertifikat) med
+      avgrensa ressursbruk, fail-closed: `test_tls13_fuzz_parsers` køyrer
+      deterministisk LCG-fuzzing (vilkårlege + bit-muterte meldingar) gjennom
+      alle handshake-, record- og X.509-parserane utan krasj; parserane er
+      herda til å returnere feil i staden for å indeksere utanfor grensa.
 
 ### D3 Revisjon og adapterisering
 

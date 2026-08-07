@@ -14,10 +14,16 @@ byggje/verifisere reine `.no`-modular, men ikkje kryssplattform-attestasjon.
 
 ## Verifisert utgangstilstand 2026-08-07 (frå maskina di)
 
+Komplett, integritetskontrollert hash-manifest for alle fem artefaktar (dist +
+fire stage0) ligg no i [GENERATION_G-A_MANIFEST.md](GENERATION_G-A_MANIFEST.md);
+alle fire stage0-hashane er byte-for-byte like med `bootstrap/stage0/SHA256SUMS`.
+
 | Artefakt | Storleik | SHA-256 |
 |---|---|---|
-| `dist/norscode_native` (macOS tillitsanker) | — | `5f2a626ae1859df81c1adac97aacce3427841a6702c279c471ec1bab8c6c323a` |
-| `bootstrap/stage0/norscode-macos-arm64` | — | `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284` |
+| `dist/norscode_native` (macOS tillitsanker) | 6 307 632 | `5f2a626ae1859df81c1adac97aacce3427841a6702c279c471ec1bab8c6c323a` |
+| `bootstrap/stage0/norscode-macos-arm64` | 11 707 440 | `97483d04c3a433297d152b2788176828e04d4e98c4d7f9b41a6b3597fa269284` |
+| `bootstrap/stage0/norscode-linux-arm64` | 36 021 952 | `4ce15d11dc61b993e0f1c7d2553dcb46a7addb4612cffb9951ad4f706c30dabe` |
+| `bootstrap/stage0/norscode-linux-x86_64` | 10 257 339 | `040c20b20d2071d5445d247da5d672a38136aa08748acdd1b911f68fc40c79d3` |
 | `bootstrap/stage0/norscode-windows-x86_64.exe` | 11 604 280 | `534917fff7781c1c55c4aca322edb5f30295618683766a771205470ea20c00b0` |
 
 Blokkeringa iflg. arbeidsloggen: siste generasjonsskifte (fixed15, kandidat
@@ -25,6 +31,23 @@ Blokkeringa iflg. arbeidsloggen: siste generasjonsskifte (fixed15, kandidat
 stage0/kandidat-avvik. Windows-stage0 over vart byte-identisk med kandidaten i
 CI-køyring `30830409254` for ein *tidlegare* generasjon; Milepæl A re-attesterer
 **gjeldande** generasjon.
+
+**Presisert 2026-08-07 (frå sky-økta):** avviket er no lokalisert til payload-
+nivå. `tools/build_windows_stage0_candidate.no` sin kanoniske fast-path krev at
+tre NCB-payloadar matchar innebygde konstantar; ein direkte hash-samanlikning
+viser at `selfhost/vm_executor.ncb.json` framleis matchar, medan
+`bootstrap/kompiler.ncb.json` (`912afec…`) og `bootstrap/precompiled/vm.ncb.json`
+(`c99500e…`) har **drifta** frå konstantane (`183c413…`/`f7d9258…`). Difor blir
+Windows-kandidaten ikkje byte-identisk med committed stage0
+(`windows_stage0_parity=false`) før A2→A3 re-attesterer/promoterer ein ny
+Windows-stage0 frå gjeldande payloadar. Detaljar i manifestet.
+
+> **NB — sky-økta kan ikkje køyre sjølv A1-verktøyet:** den committede
+> `bootstrap/stage0/norscode-linux-arm64` støttar ikkje `0x`-heksliteralar (dei
+> gjev `ingenting`), så `build_windows_stage0_candidate.no` feilar falskt på
+> PE-magic-kontrollen (`magic == 0x20B`). PE-en er uavhengig verifisert gyldig
+> (`e_lfanew=120`, `machine=0x8664`, `magic=0x20B`). A1 må difor køyrast på
+> macOS-tillitsankeret, som runbok-en allereie føreskriv.
 
 ## Steg A0 – Frys kjeldegenerasjonen
 
