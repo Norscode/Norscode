@@ -182,16 +182,16 @@ normalflyten.
 
 ### B2 Linux ARM64
 
-- [~] Erstatt den historiske GCC/C/OpenSSL-TLS-overgangen med native seed.
-      **GCC + C-backend fjerna frå ARM64-byggveien (2026-08-08, kode + sandkasse-
-      verifisert):** `tools/build_linux_arm64_tls_attestation_candidate.no`
-      materialiserer no den native ARM64-seeden (utan `/usr/bin/gcc`, utan
-      `build/v3009/native_candidate_gc.c`) og byggjer single-binary-image.
-      Verifisert på Linux aarch64 i sky-økta: gyldig AArch64-ELF (machine 0xb7)
-      + NCB-trailer, og kandidaten køyrer eit `.no`-program. **Att:** ARM64
-      CI-jobben (`ubuntu-24.04-arm`) må stadfeste at TLS-attestasjonsprøva
-      (`net.tls`) består på seeden; er socket-TLS enno OpenSSL-avhengig, viser
-      `tls`-seksjonen at D2 socket-integrasjon (og D3 OpenSSL-fjerning) står att.
+- [ ] Erstatt den historiske GCC/C/OpenSSL-TLS-overgangen med native codegen.
+      **Prøvd og avkrefta 2026-08-08:** seed-materialisering (bruke committed
+      ARM64-seed i staden for gcc) bygde kandidaten, men ARM64-CI gav **exit 127**
+      på runtime-prøva — den committede seeden er ikkje ein kjørbar current-ABI-
+      kandidat og er for gammal for prøva. Reverterte til den verifiserte
+      GCC/C-overgangen for å halde ARM64-jobben fungerande. **Rett B2-veg:** den
+      native codegen-flyten (ikkje gcc, ikkje seed) må byggje ein FERSK ARM64-
+      binær frå gjeldande kjelde på ekte ARM64-host, med current filesystem/
+      prosess/tråd-ABI og (via D2 socket-integrasjon) rein TLS. Dette er host-/
+      toolchain-arbeid; kan ikkje byggjast eller verifiserast i sky-økta.
 - [ ] Løys 8,7 GiB-RSS-toppen frå kjeldeekte bygging ved å materialisere
       modulane isolert/strøymt (same fragmentmønster som L5b brukar i dag),
       slik at ARM64-kandidaten kan byggjast utan precompiled maskering.
