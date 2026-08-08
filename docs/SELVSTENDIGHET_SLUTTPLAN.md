@@ -90,6 +90,12 @@ parallelt. Resten av dokumentet er arbeidsplanen i repo-stil.
 > (3) live differensial-interop mot OpenSSL-adapteren. Difor `[~]` på dei
 > attståande D2-punkta. Ikkje attestert på macOS/Windows og ikkje køyrt
 > gjennom `nc test`/`feature-check` i denne økta (krev Mac-runtime).
+>
+> **CI-attestert 2026-08-08:** heile D2 + web-PKI-suiten er grøn i
+> **Krypto-smoke run 31245505530** (16/16 steg) på linux-x86_64, grein
+> `krypto-tls-primitiver` (commit `5d4ca84`), PR #181 mot `main`: TLS 1.3
+> record/handshake/flow, differensial-KAT, parser-fuzzing, bigint, RSA, ECDSA og
+> X.509-kjede for Ed25519/RSA/ECDSA mot ekte openssl-genererte kjeder.
 
 ---
 
