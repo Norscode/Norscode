@@ -182,12 +182,16 @@ normalflyten.
 
 ### B2 Linux ARM64
 
-- [ ] Erstatt den historiske GCC/C/OpenSSL-TLS-overgangen med same native
-      codegen-bane som x86-64; Zig-byggjarane er alt fjerna.
-      **Blokkert på D2 socket-integrasjon (funne 2026-08-08):** ARM64
-      TLS-attestasjonsprøva krev native-socket-TLS (`net.tls`). Fjerning av
-      `-lssl -lcrypto` føreset at rein Norscode-TLS først er kopla inn på det
-      native socket-laget (D2 socket-integrasjon). Sjå MILEPÆL_B_RUNBOK.md.
+- [~] Erstatt den historiske GCC/C/OpenSSL-TLS-overgangen med native seed.
+      **GCC + C-backend fjerna frå ARM64-byggveien (2026-08-08, kode + sandkasse-
+      verifisert):** `tools/build_linux_arm64_tls_attestation_candidate.no`
+      materialiserer no den native ARM64-seeden (utan `/usr/bin/gcc`, utan
+      `build/v3009/native_candidate_gc.c`) og byggjer single-binary-image.
+      Verifisert på Linux aarch64 i sky-økta: gyldig AArch64-ELF (machine 0xb7)
+      + NCB-trailer, og kandidaten køyrer eit `.no`-program. **Att:** ARM64
+      CI-jobben (`ubuntu-24.04-arm`) må stadfeste at TLS-attestasjonsprøva
+      (`net.tls`) består på seeden; er socket-TLS enno OpenSSL-avhengig, viser
+      `tls`-seksjonen at D2 socket-integrasjon (og D3 OpenSSL-fjerning) står att.
 - [ ] Løys 8,7 GiB-RSS-toppen frå kjeldeekte bygging ved å materialisere
       modulane isolert/strøymt (same fragmentmønster som L5b brukar i dag),
       slik at ARM64-kandidaten kan byggjast utan precompiled maskering.
