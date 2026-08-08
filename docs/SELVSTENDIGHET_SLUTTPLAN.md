@@ -99,27 +99,47 @@ Mål: éin frosen, fullt verifisert kandidatgenerasjon som alle seinare
 milepælar målast mot. Lukkar release-preflight- og strict-punkta i
 «Endeleg godkjenning».
 
-- [ ] Bygg Windows-kandidat A/B byte-identisk frå gjeldande kjeldegenerasjon
-      (siste målte paritetsbrot: kandidat 9 547 062 byte mot stage0
-      11 604 280 byte er eit reelt generasjonsavvik, ikkje nondeterminisme).
-- [ ] Køyr `tools/windows_runtime_attestation.no` på ekte Windows-host i CI
+- [x] Bygg Windows-kandidat A/B byte-identisk frå gjeldande kjeldegenerasjon.
+      Grønt på host per operatør 2026-08-07.
+- [x] Køyr `tools/windows_runtime_attestation.no` på ekte Windows-host i CI
       med SChannel, AppContainer, IOCP, filesystem, prosess og Argon2id, og
       GitHub-signert provenance bunde til kjeldecommit og kandidat-SHA-256.
-- [ ] Promoter Windows-stage0 kontrollert gjennom
+      **Attestasjon mottatt og verifisert commit-bunden:** GitHub-run
+      31219997969, artefakt `windows-runtime-attestation.json`
+      (`8200cfe3…`), Fulcio/GitHub-OIDC-sertifikat bind commit
+      `52593ad9…` (arkivert i `docs/attestations/`; sjå G-A-manifestet).
+- [x] Promoter Windows-stage0 kontrollert gjennom
       `tools/promote_attested_windows_stage0.no`; bevar førre generasjon som
-      hashverifisert rollback under `bootstrap/stage0/rollback/`.
-- [ ] Køyr `./bin/nc release-preflight --strict` og krev 0 feil (ikkje éin).
-- [ ] Køyr komplett `./bin/nc local-green --strict` på same commit innanfor
-      dei nye tidsgrensene (fire timar ytre L5b-kaldbygg, seks timar CI).
-- [ ] Køyr full strict i Linux-CI med ekte samla testtotal (ikkje selftest,
-      ikkje tom testliste — fail-closed-krava frå køyring `30790807053` og
-      `30791877369` står).
-- [ ] Frys generasjonen: noter kjeldecommit, dist-hash og alle fire
+      hashverifisert rollback under `bootstrap/stage0/rollback/`. Grønt per
+      operatør 2026-08-07.
+- [x] Køyr `./bin/nc release-preflight --strict` = 0 feil. Grønt per operatør.
+- [x] Køyr komplett `./bin/nc local-green --strict` på same commit. Grønt per
+      operatør.
+- [x] Køyr full strict i Linux-CI med ekte samla testtotal. Grønt per operatør.
+- [x] Frys generasjonen: noter kjeldecommit, dist-hash og alle fire
       stage0-hashar i arbeidsloggen som «generasjon G-A».
 
 Port: `local-green --strict` grøn lokalt **og** i CI på same commit, med
 release-preflight på 0 feil. Ingen seinare milepæl får målast mot ein annan
 generasjon utan å oppdatere G-A eksplisitt.
+
+> **Milepæl A stengt 2026-08-07 — generasjon G-A frosen på commit
+> `52593ad9a366ea9c6f9d2c7061a6aa94b1d85386` (grein `main`).** Operatøren
+> stadfestar alle A-portane grøne på host/CI; Windows-attestasjonen (GitHub-run
+> 31219997969) er mottatt, dekoda og verifisert commit-bunden i sjølve Fulcio-
+> signeringsidentiteten (arkivert i `docs/attestations/`).
+>
+> **CI-bevis (registrert i [GENERATION_G-A_MANIFEST.md](GENERATION_G-A_MANIFEST.md)):**
+> A2 = Windows App Release #107 (run 31219997969); A6 full strict = CI #1312
+> (run 31219995817, 5h 44m). Begge grøne på `main@52593ad9`. Att for full
+> sjølv-verifisering: utdata frå `gh attestation verify`. **Merk:** dersom A3
+> promoterte ein ny Windows-stage0, er stage0-hashen i manifestet frå før
+> promotering — regenerer med `shasum -a 256 dist/norscode_native
+> bootstrap/stage0/*` og oppdater både manifestet og `bootstrap/stage0/SHA256SUMS`.
+>
+> **D2 er ikkje i G-A:** kryptoen ligg på grein `krypto-tls-primitiver`
+> (commit `d942c58`, Krypto-smoke #2 run 31219986381 grøn) og høyrer til ein
+> seinare generasjon; sjå manifestet.
 
 ## Milepæl B – Rene native bygg på alle plattformer
 
@@ -127,6 +147,21 @@ Mål: lukkar fase 5. Byte-identisk Gen1/Gen2 og signert attestasjon på
 macOS ARM64, Linux x86-64, Linux ARM64 og Windows x86-64 for same
 generasjon, utan GCC, Zig, C-bundlarar eller Docker-byggeverktøy i
 normalflyten.
+
+> **Køyrerunbok:** [MILEPÆL_B_RUNBOK.md](MILEPÆL_B_RUNBOK.md) (host/CI-steg B0–B4).
+> **Sandkasse-verifisert 2026-08-07:** active-surface-porten
+> (`tools/no_c_python_active_surface.no`) er grøn (0 Python, ingen C/Zig i aktiv
+> kjeldeflate, 0 shell i aktiv CI), og normal Linux x86-64-byggbane er GCC-fri
+> (handheva av release-preflight). **Docker klassifisert:** `Dockerfile.linux-build`
+> er RETIRED (`exit 1`), og `Dockerfile` byggjer via `./bin/nc run` (ikkje
+> GCC/Zig) — Docker er ikkje eit byggkrav. **B2-restanse lokalisert:**
+> `tools/build_linux_arm64_tls_attestation_candidate.no` gcc-kompilerer
+> `build/v3009/native_candidate_gc.c` med `-DNC_ENABLE_OPENSSL … -lssl -lcrypto`
+> (C+OpenSSL-overgangen; `build/*.c` er denne backenden). **Empirisk stadfesta at
+> B1–B4 ikkje kan køyrast i sky-økta:** native gap-/readiness-portane krev
+> `process.exec` + den native host-binæren (`dist/norscode_native` er Mach-O, køyrer
+> ikkje på Linux). Fire-plattform native bygg + byte-identisk Gen1/Gen2 + signert
+> attestasjon må difor gå på host/CI.
 
 ### B1 Linux x86-64
 
@@ -277,11 +312,20 @@ enkeltløpet; start så tidleg som råd og køyr parallelt med B/C/E.
       eksplisitt session-avslutning.
 - [~] X.509-kjedevalidering på den strukturerte `std.x509`-lesaren:
       `std/x509_chain.no` gjer gyldigheitsperiode, SAN/hostname (RFC 6125,
-      wildcard), Ed25519-signaturkjede og trust-anchor-kontroll, verifisert i
-      `test_x509_chain_ed25519` (gyldig kjede, wildcard-SAN, feil vertsnamn,
-      utløpt, ikkje-gyldig-enno, tomt trust store, tukla signatur, feil
-      utstedar — alle fail-closed). Att: RSA/ECDSA-signaturverifikasjon for
-      interop med web-PKI, og eksplisitt CRL/OCSP-plan.
+      wildcard), signaturkjede og trust-anchor-kontroll.
+      **Signaturalgoritmar: Ed25519, sha256WithRSAEncryption (RSA PKCS#1 v1.5)
+      og ecdsa-with-SHA256 (NIST P-256)** — full dekning av dei vanlege
+      web-PKI-signaturane. RSA og ECDSA byggjer på ein rein Norscode bigint
+      (`std/bigint.no`, Knuth-D divmod + modexp, verifisert mot Python-vektorar
+      inkl. 2048-bit modexp); `std/rsa.no` (RFC 8017 §8.2.2, verifisert mot ekte
+      2048-bit openssl-nøkkel) og `std/ecdsa_p256.no` (Jacobian-projektiv
+      EC-aritmetikk, verifisert mot ekte openssl P-256-signatur). Kjedetestar med
+      **ekte openssl-genererte sertifikatkjeder**: `test_x509_chain_ed25519`,
+      `test_x509_chain_rsa` og `test_x509_chain_ecdsa` (gyldig kjede + fail-closed
+      på feil vertsnamn/tukla signatur). Att: eksplisitt CRL/OCSP-plan.
+      **Ytingsmerknad:** RSA/ECDSA-verifikasjon er tung på den fortolka stage0
+      (~12–50 s/verifikasjon) og bør køyrast på det native tillitsankeret i
+      produksjon.
 - [~] Differentialtesting: `test_tls13_differential_kat` reproduserer HEILE
       RFC 8448-løyndomstreet (early→handshake→c/s hs traffic→master→c/s ap
       traffic + IV) frå rå ClientHello/ServerHello-bytes og ECDHE-løyndom, med

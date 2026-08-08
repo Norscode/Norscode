@@ -4,7 +4,15 @@
 # RSA/ECDSA-signaturverifikasjon og CRL/OCSP er dokumenterte oppfølgingspunkt.
 bruk std.x509 som x509
 bruk std.ed25519 som eddsa
+bruk std.rsa som rsa
+bruk std.ecdsa_p256 som ecdsa
+bruk std.bigint som bn
 bruk std.sha256 som sha
+
+# Signaturalgoritme-OID-ar (hex, uppercase).
+funksjon OID_ED25519() -> tekst { returner "2B6570" }
+funksjon OID_RSA_SHA256() -> tekst { returner "2A864886F70D01010B" }
+funksjon OID_ECDSA_SHA256() -> tekst { returner "2A8648CE3D040302" }
 
 # ================= DER-hjelparar =================
 funksjon _legg(dst: liste_heiltall, src: liste_heiltall) {
@@ -186,6 +194,85 @@ funksjon _hent_spki_pub(der: liste_heiltall, start: heiltall, slutt: heiltall) -
     returner []
 }
 
+# Parse RSA-offentleg nøkkel frå SPKI-BIT STRING-innhaldet: SEQUENCE{INTEGER n, INTEGER e}.
+funksjon _parse_rsa_pubkey(spki: liste_heiltall) -> ordbok {
+    la seq = _walk(spki, 0, lengde(spki))
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"ok": usann} }
+    la ni = _walk(spki, seq["start"], seq["end"])
+    hvis ikkje ni["ok"] eller ni["tag"] != 2 { returner {"ok": usann} }
+    la ei = _walk(spki, ni["next"], seq["end"])
+    hvis ikkje ei["ok"] eller ei["tag"] != 2 { returner {"ok": usann} }
+    returner {"ok": sann,
+              "n": _strip_int(spki, ni["start"], ni["end"]),
+              "e": _strip_int(spki, ei["start"], ei["end"])}
+}
+funksjon _strip_int(d: liste_heiltall, start: heiltall, slutt: heiltall) -> liste_heiltall {
+    la s = start
+    mens s < slutt - 1 og d[s] == 0 { s = s + 1 }        # fjern leiande 0x00
+    la ut: liste_heiltall = []
+    la i = s
+    mens i < slutt { legg_til(ut, d[i]) i = i + 1 }
+    returner ut
+}
+
+# Verifiser at `sub` er signert av `iss` sin offentlege nøkkel, ut frå sub sin sig-alg.
+# Returnerer {ok, grunn}.
+funksjon _verifiser_sig(iss: ordbok, sub: ordbok) -> ordbok {
+    la oid = sub["sig_alg_oid"]
+    hvis oid == OID_ED25519() {
+        hvis eddsa.verify(iss["spki_pub"], sub["tbs"], sub["sig"]) { returner {"ok": sann} }
+        returner {"ok": usann, "grunn": "Ed25519-signatur feila"}
+    }
+    hvis oid == OID_RSA_SHA256() {
+        la pk = _parse_rsa_pubkey(iss["spki_pub"])
+        hvis ikkje pk["ok"] { returner {"ok": usann, "grunn": "kunne ikkje lese RSA-nøkkel"} }
+        hvis rsa.rsa_verify(pk["n"], pk["e"], sub["tbs"], sub["sig"]) { returner {"ok": sann} }
+        returner {"ok": usann, "grunn": "RSA-SHA256-signatur feila"}
+    }
+    hvis oid == OID_ECDSA_SHA256() {
+        la ek = _parse_ec_pubkey(iss["spki_pub"])
+        hvis ikkje ek["ok"] { returner {"ok": usann, "grunn": "kunne ikkje lese EC-nøkkel"} }
+        la rs = _parse_ecdsa_sig(sub["sig"])
+        hvis ikkje rs["ok"] { returner {"ok": usann, "grunn": "kunne ikkje lese ECDSA-signatur"} }
+        la h = bn.fra_bytes(_sha256_bytes(sub["tbs"]))
+        hvis ecdsa.ecdsa_verify(ek["qx"], ek["qy"], h, rs["r"], rs["s"]) { returner {"ok": sann} }
+        returner {"ok": usann, "grunn": "ECDSA-P256-SHA256-signatur feila"}
+    }
+    returner {"ok": usann, "grunn": "ustøtta signaturalgoritme " + oid + " (Ed25519 + RSA-SHA256 + ECDSA-P256; CRL/OCSP er oppfølgingspunkt)"}
+}
+
+# EC-offentleg nøkkel frå SPKI-BIT STRING (ukomprimert punkt 04||X||Y for P-256).
+funksjon _parse_ec_pubkey(spki: liste_heiltall) -> ordbok {
+    hvis lengde(spki) != 65 eller spki[0] != 4 { returner {"ok": usann} }
+    la qx: liste_heiltall = [] la qy: liste_heiltall = []
+    la i = 1
+    mens i < 33 { legg_til(qx, spki[i]) i = i + 1 }
+    mens i < 65 { legg_til(qy, spki[i]) i = i + 1 }
+    returner {"ok": sann, "qx": bn.fra_bytes(qx), "qy": bn.fra_bytes(qy)}
+}
+# ECDSA-Sig-Value DER: SEQUENCE { INTEGER r, INTEGER s }.
+funksjon _parse_ecdsa_sig(sig: liste_heiltall) -> ordbok {
+    la seq = _walk(sig, 0, lengde(sig))
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"ok": usann} }
+    la ri = _walk(sig, seq["start"], seq["end"])
+    hvis ikkje ri["ok"] eller ri["tag"] != 2 { returner {"ok": usann} }
+    la si = _walk(sig, ri["next"], seq["end"])
+    hvis ikkje si["ok"] eller si["tag"] != 2 { returner {"ok": usann} }
+    returner {"ok": sann,
+              "r": bn.fra_bytes(_strip_int(sig, ri["start"], ri["end"])),
+              "s": bn.fra_bytes(_strip_int(sig, si["start"], si["end"]))}
+}
+funksjon _sha256_bytes(data: liste_heiltall) -> liste_heiltall {
+    la hexs = sha.hash_bytes(data)
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < 32 {
+        legg_til(ut, builtin.index_of("0123456789abcdef", builtin.slice(hexs, i*2, i*2+1))*16 + builtin.index_of("0123456789abcdef", builtin.slice(hexs, i*2+1, i*2+2)))
+        i = i + 1
+    }
+    returner ut
+}
+
 # ================= Hostname-matching (RFC 6125, forenkla) =================
 funksjon _lower(s: tekst) -> tekst { returner builtin.lower(s) }
 funksjon host_matcher(host: tekst, mønster: tekst) -> boolsk {
@@ -270,17 +357,17 @@ funksjon valider_kjede(kjede: liste, trust_fp: liste_tekst, host: tekst, tid_iso
     mens i < n - 1 {
         la sub = felt[i]
         la iss = felt[i + 1]
-        hvis sub["sig_alg_oid"] != "2B6570" { returner {"gyldig": usann, "grunn": "ikkje-Ed25519 signatur (RSA/ECDSA er oppfølgingspunkt) i " + tekst(i)} }
         hvis meta[i]["issuer"] != meta[i+1]["subject"] { returner {"gyldig": usann, "grunn": "issuer/subject-brot mellom " + tekst(i) + " og " + tekst(i+1)} }
-        hvis ikkje eddsa.verify(iss["spki_pub"], sub["tbs"], sub["sig"]) { returner {"gyldig": usann, "grunn": "signatur feila i " + tekst(i)} }
+        la vr = _verifiser_sig(iss, sub)
+        hvis ikkje vr["ok"] { returner {"gyldig": usann, "grunn": vr["grunn"] + " i " + tekst(i)} }
         i = i + 1
     }
     # Ankeret (siste) må vere sjølvsignert og i trust store.
     la anker = felt[n - 1]
     la anker_meta = meta[n - 1]
-    hvis anker["sig_alg_oid"] != "2B6570" { returner {"gyldig": usann, "grunn": "anker ikkje Ed25519"} }
     hvis anker_meta["issuer"] != anker_meta["subject"] { returner {"gyldig": usann, "grunn": "anker ikkje sjølvsignert"} }
-    hvis ikkje eddsa.verify(anker["spki_pub"], anker["tbs"], anker["sig"]) { returner {"gyldig": usann, "grunn": "anker-signatur feila"} }
+    la avr = _verifiser_sig(anker, anker)
+    hvis ikkje avr["ok"] { returner {"gyldig": usann, "grunn": "anker: " + avr["grunn"]} }
     hvis ikkje _fp_i_liste(anker_meta["fingerprint_sha256"], trust_fp) { returner {"gyldig": usann, "grunn": "anker ikkje i trust store"} }
     returner {"gyldig": sann, "grunn": "ok"}
 }
@@ -301,4 +388,4 @@ funksjon _fp_i_liste(fp: tekst, liste_fp: liste_tekst) -> boolsk {
     returner usann
 }
 
-funksjon status() { returner { "abi": "norscode-x509-chain-v1", "sig": "ed25519", "oppfølging": "rsa/ecdsa,crl,ocsp" } }
+funksjon status() { returner { "abi": "norscode-x509-chain-v1", "sig": "ed25519+rsa-sha256+ecdsa-p256", "oppfølging": "crl,ocsp" } }

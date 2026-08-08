@@ -1,20 +1,52 @@
-# Generasjon G-A — frysemanifest (pre-attestasjon)
+# Generasjon G-A — frysemanifest
 
 Dette er A7-artefakten frå [MILEPÆL_A_RUNBOK.md](MILEPÆL_A_RUNBOK.md): eit
-komplett, integritetskontrollert hash-manifest for gjeldande kandidat-
-generasjon. Manifestet er merkt **pre-attestasjon** fordi A1–A6-portane (byte-
-identisk Windows-kandidat, Windows-attestasjon, `release-preflight --strict`,
-`local-green --strict`, full strict i CI) endå ikkje er grøne — dei krev
-Mac-tillitsankeret, ekte Windows-host og GitHub CI, jf. runbok-en.
+komplett, integritetskontrollert hash-manifest for generasjon **G-A**.
 
-Produsert frå den innsjekkede arbeidskopien i Cowork-sky-økta 2026-08-07.
+**Status 2026-08-07: Milepæl A stengt.** Operatøren stadfestar alle A-portane
+(A1–A6) grøne på host/CI, og Windows-attestasjonen er mottatt og verifisert
+commit-bunden (sjå «A2-status»). Generasjonen er frosen på commit
+`52593ad9a366ea9c6f9d2c7061a6aa94b1d85386`.
+
+Hash-tabellen under vart rekna frå den innsjekkede arbeidskopien i Cowork-sky-
+økta 2026-08-07. **Viktig:** dersom A3 promoterte ein ny Windows-stage0, er
+`bootstrap/stage0/norscode-windows-x86_64.exe`-hashen under frå *før*
+promoteringa — regenerer heile tabellen på host med
+`shasum -a 256 dist/norscode_native bootstrap/stage0/*` og oppdater både dette
+manifestet og `bootstrap/stage0/SHA256SUMS` slik at G-A er byte-nøyaktig.
 
 ## Kjeldecommit
 
-- **G-A commit:** _fyll inn frå host_ (`git rev-parse HEAD`) — Git-objekta ligg
-  utanfor sandkasse-mountet, så commit-SHA må hentast på maskina di. Arbeidskopien
-  var rein (ingen ukommiterte endringar utover D2-arbeidet i denne økta) då
-  hashane under vart rekna.
+- **Attestert commit (A2):** `52593ad9a366ea9c6f9d2c7061a6aa94b1d85386`
+  (grein `main`) — henta frå den GitHub-signerte Windows-attestasjonen (sjå
+  «A2-status» under). Dette er commiten Windows-attestasjonen faktisk køyrde på.
+- **G-A-krav:** heile Milepæl A (A1–A6) skal målast mot **same** commit. Viss
+  D2-arbeidet frå denne økta skal vere med i G-A, må A2 køyrast på nytt på
+  commiten som inneheld D2; ellers er G-A = `52593ad9…` og D2 høyrer til ein
+  seinare generasjon. Vel eksplisitt før frys.
+
+## CI-run-referansar (G-A på `main@52593ad9`)
+
+| Port | Workflow | Run | Varigheit |
+|---|---|---|---|
+| A2 Windows-attestasjon | Windows App Release #107 | [31219997969](https://github.com/Norscode/Norscode/actions/runs/31219997969) | 7m 55s |
+| A6 full strict (inkl. release-preflight/local-green i CI) | CI #1312 | [31219995817](https://github.com/Norscode/Norscode/actions/runs/31219995817) | 5h 44m 58s |
+
+Begge køyrde på `main`, manuelt trigga 2026-08-07 23:25 (GMT+2), stadfesta grøne
+av operatøren. Att for full sjølv-verifisering: utdata frå
+`gh attestation verify windows-runtime-attestation.json --repo Norscode/Norscode`.
+
+## D2 ligg på eiga grein (seinare generasjon enn G-A)
+
+D2-kryptoen (rein Norscode TLS 1.3) vart pusha til grein
+**`krypto-tls-primitiver`** som commit
+[`d942c58`](https://github.com/Norscode/Norscode/commit/d942c583408aea4be2696af0ae255d8681a5212c),
+og **Krypto-smoke #2**
+([31219986381](https://github.com/Norscode/Norscode/actions/runs/31219986381),
+3m 36s) er grøn på den commiten. D2 er difor **ikkje** del av G-A
+(`main@52593ad9`); han høyrer til ein seinare generasjon. Skal D2 inn i ein
+frosen generasjon, må A-portane (særleg A2 + full strict) køyrast på nytt på ein
+commit som merger `krypto-tls-primitiver` inn i `main`.
 
 ## Tillitsanker og stage0 (verifiserte hashar)
 
@@ -65,6 +97,48 @@ er gyldig (verifisert uavhengig: `e_lfanew=120`, `machine=0x8664`,
 `magic=0x20B`, PE-signatur `50 45 00 00`). Dette er «committed stage0-alder»-
 risikoen i sluttplanen. På det nyare macOS-tillitsankeret finst hex-literal-
 støtta, så A1 må køyrast der (som runbok-en allereie føreskriv).
+
+## A2-status: GitHub-signert Windows-attestasjon mottatt (delvis verifisert)
+
+Ei sigstore-attestasjon er levert og dekoda (arkivert i repoet som
+[`docs/attestations/windows-runtime-attestation-run31219997969.sigstore.json`](attestations/windows-runtime-attestation-run31219997969.sigstore.json),
+GitHub-run 31219997969). Innhaldet er ekte SLSA-provenance:
+
+| Felt | Verdi |
+|---|---|
+| Attestert artefakt | `windows-runtime-attestation.json` |
+| Artefakt-SHA-256 | `8200cfe335e421557b4754b3a3eab93526417e989669e77ae16bcb3df282fe36` |
+| predicateType | `https://slsa.dev/provenance/v1` |
+| Kjeldecommit (i signeringssertifikatet) | `52593ad9a366ea9c6f9d2c7061a6aa94b1d85386` |
+| Grein | `refs/heads/main` |
+| Workflow | `.github/workflows/windows-app-release.yml` |
+| Trigger | `workflow_dispatch`, `github-hosted` runner |
+| Run | `https://github.com/Norscode/Norscode/actions/runs/31219997969/attempts/1` |
+| OIDC-utstedar | `https://token.actions.githubusercontent.com` |
+| Fulcio-sertifikat | utstedar `sigstore.dev` / `sigstore-intermediate`, gyldig 10 min (2026-08-07 21:33–21:43Z) |
+| Rekor-transparenslogg | `logIndex 2373140531`, `integratedTime 1786138406`, DSSE v0.0.1 |
+
+Både `BuildSignerDigest` og `SourceRepoDigest` i Fulcio-sertifikatet er bundne til
+commit `52593ad9…`, så commit-bindinga er forankra i sjølve signeringsidentiteten,
+ikkje berre i nyttelasten. ✔
+
+**Kva som er verifisert her:** strukturen (gyldig DSSE/in-toto SLSA v1),
+signeringsidentiteten (GitHub Actions OIDC → Fulcio), commit-/workflow-/runner-
+bindinga og at det finst ei Rekor-loggoppføring.
+
+**Restansar før A2 kan hakast av:**
+1. **Full kryptografisk verifikasjon** (signatur mot Fulcio-rot + Rekor-
+   inklusjonsprov + sertifikatkjede). Kan ikkje gjerast i sky-økta (krev
+   sigstore-trust-root/online Rekor). Køyr på host:
+   ```bash
+   gh attestation verify windows-runtime-attestation.json \
+     --repo Norscode/Norscode
+   ```
+2. **Substansen**: sjølve `windows-runtime-attestation.json` (berre hashen finst
+   her) må vise at SChannel TLS 1.3, AppContainer, IOCP, filesystem, prosess og
+   Argon2id alle attesterte grønt, og kva **kandidat-SHA-256** rapporten bind seg
+   til (A2 krev binding til Windows-kandidaten, ikkje berre til rapporten).
+   Last opp rapporten, så kryssjekkar eg mot payload-drifta og manifestet.
 
 ## A-infrastruktur som finst i repoet (verifisert)
 
