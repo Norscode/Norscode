@@ -102,6 +102,30 @@ Linux x86-64-runner utan Docker som byggverktøy**; `builtin.process_spawn_argv`
 og heile prosess-ABI-en grøn på L5/L5b (ikkje berre testfila); byte-identisk
 Gen1/Gen2 med cache på og av.
 
+## B2-avhengigheit oppdaga 2026-08-08 (viktig rekkefølgje)
+
+Nærare analyse i sky-økta viser at B2 **ikkje** kan lukkast ved berre å fjerne
+GCC/OpenSSL frå `build_linux_arm64_tls_attestation_candidate.no`:
+
+- Den normale native-binæren byggjast utan kompilator — `build_norscode_native.no`
+  materialiserer den committede stage0-seeden og røyktestar (ingen GCC). Dei
+  arkiverte `v3005`/`v3002`-verktøya returnerer `exit 2`.
+- Den committede ARM64-stage0 **støttar** `run-ncb` (bekrefta i binæren og i
+  `selfhost/nc_main.no` §3229), så seed-materialisering er teknisk mogleg.
+- **Men** ARM64 TLS-attestasjonsprøva (`NORSCODE_ARM64_PROBE_SECTION: tls`) køyrer
+  med `net.tls`-capability — native-socket-TLS. Det var OpenSSL-drive. Fjernar ein
+  `-lssl -lcrypto`, må prøva tilfredsstillast av **rein Norscode-TLS over det
+  native socket-laget**.
+- Rein Norscode-TLS er ferdig og CI-grøn som std-modular i minnet (D2-kjernen,
+  Krypto-smoke run 31245505530), men er **ikkje kopla inn i det native socket-
+  laget** — det er D2 «socket-integrasjon», som framleis står open.
+
+**Konklusjon:** B2 er blokkert på D2 socket-integrasjon. Rett rekkefølgje er:
+(1) kople rein Norscode-TLS inn på native socket-ABI (D2 socket-integrasjon,
+verifisert på host), deretter (2) bytt ARM64-attestasjonskandidaten frå
+GCC/OpenSSL til den native seed-en + rein TLS. Å fjerne OpenSSL før (1) gjer
+TLS-prøva raud.
+
 ## Steg B2 – Linux ARM64 utan GCC-overgang
 
 1. Erstatt `/usr/bin/gcc`-kallet i `tools/build_linux_arm64_tls_attestation_candidate.no`
