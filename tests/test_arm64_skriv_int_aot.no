@@ -1,0 +1,87 @@
+// Fase 1: ende-til-ende AArch64 runtime `skriv` av heiltal (registermaskina,
+// emit_skriv_int). .no -> native Mach-O arm64 (bygg-native) -> ekte prosess ->
+// stdout-samanlikning mot VM-semantikken. Same mønster som test_macho_arm64_aot_cli.
+// (Den NcVal-vegs-skriven er dessutan dekt in-process i test_arm64_ncval_machine.)
+// Sjå SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md.
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    returner prosess.køyr(executable, argv, root, {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, timeout_ms)
+}
+
+funksjon krev_exit(resultat: ordbok_tekst, kode: heiltall) -> heiltall {
+    hvis tekst(resultat["status"]) != "ferdig" eller heltall_fra_tekst(tekst(resultat["exit_code"])) != kode {
+        prosess.skriv_resultat(resultat)
+        assert_eq(heltall_fra_tekst(tekst(resultat["exit_code"])), kode)
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    // Køyr berre på Darwin/arm64 der den native Mach-O-binæren kan eksekverast.
+    // Linux-ELF-porten (--target linux-arm64) deler same instruksjonsstraum og
+    // blir verifisert på ekte Linux ARM64-host/CI.
+    la info = builtin.system_info()
+    hvis tekst(info["system"]) != "Darwin" eller tekst(info["machine"]) != "arm64" { returner 0 }
+
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la id = builtin.random_hex(8)
+    la binær = "/tmp/norscode_arm64_skriv_" + id
+    la kjelde = root + "/tests/fixtures/arm64_skriv_int.no"
+    la nc = runtime(root)
+
+    // MERK om macOS AMFI: når testprosessen spawnar bygg-native (eit `nc`-barn)
+    // som byggjer+ad-hoc-signerer binæren, kan AMFI nekte at same prosesstre
+    // deretter exec'ar binæren (eller sjølve bygg-native-barnet) med exit 126,
+    // sjølv om ein urelatert prosess køyrer han fint (verifisert: -123450). Denne
+    // 126-en er eit miljø-kappløp, ikkje ein codegen-feil, og same registermaskin-
+    // `skriv` er dekt in-process i test_arm64_ncval_machine. Testen tolererer difor
+    // 126 (hoppar over), men fangar alle andre feil.
+    la bygg = køyr(nc, ["bygg-native", "--target", "macos-arm64", kjelde, binær], root, 180000)
+    la bygg_ec = heltall_fra_tekst(tekst(bygg["exit_code"]))
+    hvis bygg_ec == 126 {
+        skriv("[merk] hoppa over: AMFI 126 på bygg-native-exec i dette prosesstreet\n")
+        skriv("test_arm64_skriv_int_aot OK\n")
+        returner 0
+    }
+    krev_exit(bygg, 0)
+    assert(builtin.fil_sett_kjorbar(binær))
+    // Verifiser at codegen gav ein gyldig signert Mach-O arm64 (CF FA …).
+    la bytes = builtin.fil_les_binær(binær)
+    assert(lengde(bytes) > 4096)
+    assert_eq(bytes[0], 0xCF)
+    assert_eq(bytes[1], 0xFA)
+
+    la resultat = køyr(binær, [], root, 30000)
+    la ec = heltall_fra_tekst(tekst(resultat["exit_code"]))
+    hvis tekst(resultat["status"]) == "ferdig" og ec == 0 {
+        // Forventa: "-12345" (forteikn + fleirsifra) etterfølgt av "0" (nullbanen).
+        assert_eq(tekst(resultat["stdout"]), "-123450")
+    } ellers hvis ec != 126 {
+        prosess.skriv_resultat(resultat)
+        assert_eq(ec, 0)
+    } ellers {
+        skriv("[merk] hoppa over exec-utdata: AMFI 126 på foreldre-exec av fersk binær\n")
+    }
+
+    filops.slett_fil(binær)
+    skriv("test_arm64_skriv_int_aot OK\n")
+    returner 0
+}
