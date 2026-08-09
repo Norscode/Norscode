@@ -298,10 +298,26 @@ builtins (random_hex, split, system_info, …) som må portast. Att i Fase 8:
   `tekst_fra_heiltall`/`til_tekst` (→ emit_tekst_ncval), `heltall_fra_tekst`/
   `heiltall_fra_tekst` (→ emit_heltall_str), `builtin.type` (køyretids typenamn;
   kart heiter **"ordbok"**, ikkje "kart"; liste er generisk "liste"), `nøkler`
-  (kart→liste). Dette er dei mest brukte (≈44k+28k+7k+4.5k treff). Att: split,
-  join, fjern_siste, fjern_nokkel, verdier, miljo_sett, tid_ms, json_parse_raw,
-  random_hex, sha256, system_info, process_spawn_argv, network_operation m.fl. —
-  same metode (køyr NCB gjennom codegen, lukk ein-og-ein).
+  (kart→liste). Dette er dei mest brukte (≈44k+28k+7k+4.5k treff). Batch 2
+  (2026-08-08): `verdier` (kart→verdiar) + `fjern_siste` (pop siste, muter lista)
+  — litmus `arm64_builtins_tail2` = 96 (VM = AOT). Att: split, join, fjern_nokkel,
+  miljo_sett, tid_ms, json_parse_raw, random_hex, sha256, system_info,
+  process_spawn_argv, network_operation m.fl. **`split` FERDIG** (2026-08-09):
+  runtime-rutine `__split` (bl-kalla; x19–x24 for løkke-tilstand, delstreng-
+  peikarar på 512-byte maskinstakk-buffer, generell fleirteikns-delim via
+  byte-samanlikning; kopiert til heap-listdata) — litmus `arm64_split` = 12
+  (VM = AOT), både éin- og fleirteikns-delim. **`join` FERDIG** (2026-08-09): runtime-rutine `__join` (akkumulator x19 +
+  `emit_str_concat` i løkke) — litmus `arm64_join` = 13 (VM = AOT). **`fjern_nokkel`/`json_parse_raw` FERDIG** (2026-08-09,
+  arm64_fjern_nokkel=30): fjern_nokkel = skann+skyv par ned+dekrementer count;
+  json_parse_raw = alias til `__json_parse`. `miljo_sett`/`tid_ms` m.fl. står att.
+
+  **STOR ARKITEKTUR-GRENSE (funne 2026-08-09):** operand-stakken er REGISTER-basert
+  (x19–x24, maks djupn 6 sidan x25 er globals-base). Difor feilar **kart-literalar
+  >3 par (treng 8 operandar) og liste-literalar >6 element** å kompilere
+  («operand-stakk full»). Full `nc_main` brukar store literalar, så dette treng
+  **operand-spilling til minne** (spill til stakk-/heap-slot når djupn>N) — eit
+  substansielt eige steg, truleg den største attståande blokkeringa (større enn
+  einskild-builtins). NB: mislukka bygg-native gjev ingen binær → bash exit 127.
 - **Køyr full `nc_main` gjennom codegen** for å avdekkje restgap (LOAD_FIELD/
   STORE_FIELD, SWAP/DUP/OVER, fleire builtins nc_main brukar). NB: å kompilere
   heile `nc_main` (3458 liner) til NCB på denne verten blei SIGKILL-a (compile=137,

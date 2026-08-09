@@ -53,13 +53,14 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "ends_with" eller n == "index_of" eller n == "tekst" eller n == "heltall" eller
        n == "har_nokkel" eller n == "finnes_nøkkel" eller
        n == "fil_skriv" eller n == "fil_les" eller n == "fil_finnes" eller n == "miljo_hent" eller
-       n == "json_stringify" eller n == "json_parse" eller
+       n == "json_stringify" eller n == "json_parse" eller n == "json_parse_raw" eller
+       n == "fjern_nokkel" eller
        n == "socket_new" eller n == "socket_bind" eller n == "socket_connect" eller
        n == "socket_listen" eller n == "socket_accept" eller n == "socket_send" eller
        n == "socket_recv" eller n == "socket_close" eller n == "legg_til" eller
        n == "tekst_fra_heltall" eller n == "tekst_fra_heiltall" eller n == "til_tekst" eller
        n == "heltall_fra_tekst" eller n == "heiltall_fra_tekst" eller n == "type" eller
-       n == "nøkler" {
+       n == "nøkler" eller n == "verdier" eller n == "fjern_siste" eller n == "split" eller n == "join" {
         returner sann
     }
     returner usann
@@ -646,6 +647,124 @@ funksjon emit_noekler(native: liste_heiltall, map_reg: heiltall, dst_reg: heilta
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)       // boks som liste
     skriv_u32(native, p_ge,   0x5400000A | ((((lbl_done - p_ge)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_loop, 0x14000000 |  (((lbl_loop - p_loop) / 4) & 0x03FFFFFF))
+    returner 0
+}
+
+// Fase 8: verdier(kart) → liste av verdiane (kvar andre slot frå og med val0).
+funksjon emit_verdier(native: liste_heiltall, map_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8] (mapdata)
+    legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
+    legg_u32(native, 0x91004129)                       // add x9, x9, #16 (&val[0])
+    legg_u32(native, 0xAA1C03EE)                       // mov x14, x28
+    legg_u32(native, 0xF90001CA)                       // str x10, [x14] (count)
+    legg_u32(native, 0x910021CF)                       // add x15, x14, #8
+    legg_u32(native, 0xD280000B)                       // movz x11, #0
+    la lbl_loop = lengde(native)
+    legg_u32(native, 0xEB0A017F)                       // cmp x11, x10
+    la p_ge = lengde(native)
+    legg_u32(native, 0)                                // b.ge done
+    legg_u32(native, 0xF940012C)                       // ldr x12, [x9]  (verdi)
+    legg_u32(native, 0xF90001EC)                       // str x12, [x15]
+    legg_u32(native, 0x91004129)                       // add x9, x9, #16 (neste par)
+    legg_u32(native, 0x910021EF)                       // add x15, x15, #8
+    legg_u32(native, 0x9100056B)                       // add x11, x11, #1
+    la p_loop = lengde(native)
+    legg_u32(native, 0)                                // b loop
+    la lbl_done = lengde(native)
+    legg_u32(native, 0xAA0F03FC)                       // mov x28, x15
+    emit_ncval_alloc_ptr(native, 14, dst_reg, 4)       // boks som liste
+    skriv_u32(native, p_ge,   0x5400000A | ((((lbl_done - p_ge)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_loop, 0x14000000 |  (((lbl_loop - p_loop) / 4) & 0x03FFFFFF))
+    returner 0
+}
+
+// Fase 8: fjern_siste(liste) → fjern og returner siste element (dekrementer count).
+// Muterer lista på plass (count-1); resultat = det poppa elementet i Xdst.
+funksjon emit_fjern_siste(native: liste_heiltall, list_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400400 | (list_reg << 5) | 9) // ldr x9, [Xliste, #8] (listdata)
+    legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
+    legg_u32(native, 0xD100054B)                       // sub x11, x10, #1 (count-1)
+    legg_u32(native, 0xF900012B)                       // str x11, [x9]  (dekrementer count)
+    legg_u32(native, 0x9100212C)                       // add x12, x9, #8 (&elem[0])
+    legg_u32(native, 0x8B0B0D8C)                       // add x12, x12, x11, lsl #3 (&elem[count-1])
+    legg_u32(native, 0xF9400180 | dst_reg)             // ldr Xdst, [x12]  (siste element)
+    returner 0
+}
+
+// Fase 8: fjern_nokkel(kart, nøkkel) — finn nøkkelen og fjern paret (skyv
+// resterande par ned 16 byte, dekrementer count). Muterer kartet på plass.
+// Scratch x0–x6, x9–x17.
+funksjon emit_fjern_nokkel(native: liste_heiltall, map_reg: heiltall, key_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8] (mapdata)
+    legg_u32(native, 0xF940012A)                       // ldr x10, [x9]  (count)
+    legg_u32(native, 0x91002129)                       // add x9, x9, #8 (&par[0])
+    legg_u32(native, 0xF9400400 | (key_reg << 5) | 11) // ldr x11, [Xkey, #8] (nøkkel-strdata)
+    legg_u32(native, 0xF940016C)                       // ldr x12, [x11] (nøkkel-len)
+    legg_u32(native, 0x9100216B)                       // add x11, x11, #8 (nøkkel-bytes)
+    legg_u32(native, 0xD280000E)                       // movz x14, #0 (i)
+    la lbl_scan = lengde(native)
+    legg_u32(native, 0xEB0A01DF)                       // cmp x14, x10
+    la p_ge = lengde(native)
+    legg_u32(native, 0)                                // b.ge done
+    legg_u32(native, 0x8B0E112F)                       // add x15, x9, x14, lsl #4 (&par[i])
+    legg_u32(native, 0xF94001E0)                       // ldr x0, [x15] (lagra nøkkel)
+    legg_u32(native, 0xF9400401)                       // ldr x1, [x0, #8]
+    legg_u32(native, 0xF9400022)                       // ldr x2, [x1] (len)
+    legg_u32(native, 0xEB0C005F)                       // cmp x2, x12
+    la p_bne = lengde(native)
+    legg_u32(native, 0)                                // b.ne next
+    legg_u32(native, 0x91002021)                       // add x1, x1, #8
+    legg_u32(native, 0xAA0B03E3)                       // mov x3, x11
+    legg_u32(native, 0xAA0C03E4)                       // mov x4, x12
+    la p_cbz_match = lengde(native)
+    legg_u32(native, 0)                                // cbz x4, matched
+    la lbl_byte = lengde(native)
+    legg_u32(native, 0x39400025)                       // ldrb w5, [x1]
+    legg_u32(native, 0x39400066)                       // ldrb w6, [x3]
+    legg_u32(native, 0x6B0600BF)                       // cmp w5, w6
+    la p_bne2 = lengde(native)
+    legg_u32(native, 0)                                // b.ne next
+    legg_u32(native, 0x91000421)                       // add x1, x1, #1
+    legg_u32(native, 0x91000463)                       // add x3, x3, #1
+    legg_u32(native, 0xD1000484)                       // sub x4, x4, #1
+    la p_cbnz = lengde(native)
+    legg_u32(native, 0)                                // cbnz x4, byte
+    la lbl_matched = lengde(native)
+    legg_u32(native, 0x910041F0)                       // add x16, x15, #16 (src = &par[i+1])
+    legg_u32(native, 0xAA0F03F1)                       // mov x17, x15 (dst = &par[i])
+    legg_u32(native, 0xCB0E0140)                       // sub x0, x10, x14 (count-i)
+    legg_u32(native, 0xD1000400)                       // sub x0, x0, #1 (par å skyve)
+    legg_u32(native, 0x8B000000)                       // add x0, x0, x0 (*2 = slots)
+    la lbl_shift = lengde(native)
+    la p_cbz_shift = lengde(native)
+    legg_u32(native, 0)                                // cbz x0, shiftdone
+    legg_u32(native, 0xF9400201)                       // ldr x1, [x16]
+    legg_u32(native, 0xF9000221)                       // str x1, [x17]
+    legg_u32(native, 0x91002210)                       // add x16, x16, #8
+    legg_u32(native, 0x91002231)                       // add x17, x17, #8
+    legg_u32(native, 0xD1000400)                       // sub x0, x0, #1
+    la p_b_shift = lengde(native)
+    legg_u32(native, 0)                                // b shift
+    la lbl_shiftdone = lengde(native)
+    legg_u32(native, 0xD100054A)                       // sub x10, x10, #1 (ny count)
+    legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)  // ldr x9, [Xmap, #8]
+    legg_u32(native, 0xF900012A)                       // str x10, [x9]
+    la p_b_done = lengde(native)
+    legg_u32(native, 0)                                // b done
+    la lbl_next = lengde(native)
+    legg_u32(native, 0x910005CE)                       // add x14, x14, #1
+    la p_b_scan = lengde(native)
+    legg_u32(native, 0)                                // b scan
+    la lbl_done = lengde(native)
+    skriv_u32(native, p_ge,        0x5400000A | ((((lbl_done     - p_ge)        / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_bne,       0x54000001 | ((((lbl_next     - p_bne)       / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_cbz_match, 0xB4000004 | ((((lbl_matched  - p_cbz_match) / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_bne2,      0x54000001 | ((((lbl_next     - p_bne2)      / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_cbnz,      0xB5000004 | ((((lbl_byte     - p_cbnz)      / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_cbz_shift, 0xB4000000 | ((((lbl_shiftdone - p_cbz_shift)/ 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_b_shift,   0x14000000 |  (((lbl_shift    - p_b_shift)   / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_b_done,    0x14000000 |  (((lbl_done     - p_b_done)    / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_b_scan,    0x14000000 |  (((lbl_scan     - p_b_scan)    / 4) & 0x03FFFFFF))
     returner 0
 }
 
@@ -2110,6 +2229,180 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     returner r
 }
 
+// Fase 8: byggjer ein NcVal-streng frå bytes [Xsreg..Xereg) og legg peikaren i x0.
+// Scratch x0, x10, x14–x17, x28. Rører ikkje Xsreg/Xereg (utanom å lese dei).
+funksjon emit_substr(r: liste_heiltall, sreg: heiltall, ereg: heiltall) -> heiltall {
+    legg_u32(r, 0xCB000000 | (sreg << 16) | (ereg << 5) | 10) // sub x10, Xereg, Xsreg (lengd)
+    legg_u32(r, 0xAA1C03EE)                          // mov x14, x28 (strdata-base)
+    legg_u32(r, 0xF90001CA)                          // str x10, [x14]
+    legg_u32(r, 0x910021CF)                          // add x15, x14, #8 (dst)
+    legg_u32(r, 0xAA0003F0 | (sreg << 16))           // mov x16, Xsreg (src)
+    legg_u32(r, 0xAA0A03F1)                          // mov x17, x10 (count)
+    la p_cbz = lengde(r)
+    legg_u32(r, 0)                                   // cbz x17, after
+    la lbl_loop = lengde(r)
+    legg_u32(r, 0x39400200)                          // ldrb w0, [x16]
+    legg_u32(r, 0x390001E0)                          // strb w0, [x15]
+    legg_u32(r, 0x91000610)                          // add x16, x16, #1
+    legg_u32(r, 0x910005EF)                          // add x15, x15, #1
+    legg_u32(r, 0xD1000631)                          // sub x17, x17, #1
+    la p_cbnz = lengde(r)
+    legg_u32(r, 0)                                   // cbnz x17, loop
+    la lbl_after = lengde(r)
+    legg_u32(r, 0xAA0F03FC)                          // mov x28, x15
+    emit_ncval_alloc_ptr(r, 14, 0, 3)               // boks streng → x0
+    skriv_u32(r, p_cbz,  0xB4000011 | ((((lbl_after - p_cbz)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_cbnz, 0xB5000011 | ((((lbl_loop  - p_cbnz) / 4) & 0x7FFFF) << 5))
+    returner 0
+}
+
+// Fase 8: rekursiv-fri runtime-rutine __split(x0=streng, x1=delim) → x0=liste av
+// delstrengar. x19=segmentstart, x20=skann-pos, x21=input-end, x22=delim-bytes,
+// x23=delim-len, x24=buffer-skrivepeikar; buffer-basen er sp (etter sub sp,#512).
+// Generell (fleirteikns) delim via byte-samanlikning.
+funksjon emit_split_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD10103FF)                          // sub sp, sp, #64
+    legg_u32(r, 0xA90053F3)                          // stp x19, x20, [sp]
+    legg_u32(r, 0xA9015BF5)                          // stp x21, x22, [sp, #16]
+    legg_u32(r, 0xA90263F7)                          // stp x23, x24, [sp, #32]
+    legg_u32(r, 0xF9001BFE)                          // str x30, [sp, #48]
+    legg_u32(r, 0xF9400409)                          // ldr x9, [x0, #8] (streng strdata)
+    legg_u32(r, 0xF940012A)                          // ldr x10, [x9]   (len)
+    legg_u32(r, 0x91002133)                          // add x19, x9, #8 (seg_start = bytes)
+    legg_u32(r, 0x8B0A0275)                          // add x21, x19, x10 (input_end)
+    legg_u32(r, 0xAA1303F4)                          // mov x20, x19    (scan_pos)
+    legg_u32(r, 0xF9400429)                          // ldr x9, [x1, #8] (delim strdata)
+    legg_u32(r, 0xF9400137)                          // ldr x23, [x9]   (delim_len)
+    legg_u32(r, 0x91002136)                          // add x22, x9, #8 (delim_bytes)
+    legg_u32(r, 0xD10803FF)                          // sub sp, sp, #512 (buffer)
+    legg_u32(r, 0x910003F8)                          // add x24, sp, #0  (write ptr)
+    la lbl_scan = lengde(r)
+    legg_u32(r, 0x8B170289)                          // add x9, x20, x23 (pos+dlen)
+    legg_u32(r, 0xEB15013F)                          // cmp x9, x21
+    la p_scan_gt = lengde(r)
+    legg_u32(r, 0)                                   // b.gt final
+    legg_u32(r, 0xAA1403E0)                          // mov x0, x20 (input ptr)
+    legg_u32(r, 0xAA1603E1)                          // mov x1, x22 (delim ptr)
+    legg_u32(r, 0xAA1703E2)                          // mov x2, x23 (count)
+    la lbl_cmp = lengde(r)
+    la p_cbz_match = lengde(r)
+    legg_u32(r, 0)                                   // cbz x2, matched
+    legg_u32(r, 0x39400009)                          // ldrb w9, [x0]
+    legg_u32(r, 0x3940002A)                          // ldrb w10, [x1]
+    legg_u32(r, 0x6B0A013F)                          // cmp w9, w10
+    la p_bne_nm = lengde(r)
+    legg_u32(r, 0)                                   // b.ne notmatch
+    legg_u32(r, 0x91000400)                          // add x0, x0, #1
+    legg_u32(r, 0x91000421)                          // add x1, x1, #1
+    legg_u32(r, 0xD1000442)                          // sub x2, x2, #1
+    la p_b_cmp = lengde(r)
+    legg_u32(r, 0)                                   // b cmp
+    la lbl_matched = lengde(r)
+    emit_substr(r, 19, 20)                           // delstreng [seg_start, scan_pos) → x0
+    legg_u32(r, 0xF9000300)                          // str x0, [x24]
+    legg_u32(r, 0x91002318)                          // add x24, x24, #8
+    legg_u32(r, 0x8B170293)                          // add x19, x20, x23 (seg_start = pos+dlen)
+    legg_u32(r, 0xAA1303F4)                          // mov x20, x19
+    la p_b_scan1 = lengde(r)
+    legg_u32(r, 0)                                   // b scan
+    la lbl_notmatch = lengde(r)
+    legg_u32(r, 0x91000694)                          // add x20, x20, #1
+    la p_b_scan2 = lengde(r)
+    legg_u32(r, 0)                                   // b scan
+    la lbl_final = lengde(r)
+    emit_substr(r, 19, 21)                           // siste delstreng [seg_start, input_end)
+    legg_u32(r, 0xF9000300)                          // str x0, [x24]
+    legg_u32(r, 0x91002318)                          // add x24, x24, #8
+    // bygg listdata frå [sp..x24)
+    legg_u32(r, 0x910003E9)                          // mov x9, sp (buffer-base)
+    legg_u32(r, 0xCB09030A)                          // sub x10, x24, x9 (byte)
+    legg_u32(r, 0xD343FD4A)                          // lsr x10, x10, #3 (count)
+    legg_u32(r, 0xAA1C03EE)                          // mov x14, x28
+    legg_u32(r, 0xF90001CA)                          // str x10, [x14] (count)
+    legg_u32(r, 0x910021CF)                          // add x15, x14, #8
+    legg_u32(r, 0xD280000B)                          // movz x11, #0
+    la lbl_copy = lengde(r)
+    legg_u32(r, 0xEB0A017F)                          // cmp x11, x10
+    la p_copy_ge = lengde(r)
+    legg_u32(r, 0)                                   // b.ge copydone
+    legg_u32(r, 0xF940012C)                          // ldr x12, [x9]
+    legg_u32(r, 0xF90001EC)                          // str x12, [x15]
+    legg_u32(r, 0x91002129)                          // add x9, x9, #8
+    legg_u32(r, 0x910021EF)                          // add x15, x15, #8
+    legg_u32(r, 0x9100056B)                          // add x11, x11, #1
+    la p_b_copy = lengde(r)
+    legg_u32(r, 0)                                   // b copy
+    la lbl_copydone = lengde(r)
+    legg_u32(r, 0xAA0F03FC)                          // mov x28, x15
+    emit_ncval_alloc_ptr(r, 14, 0, 4)               // boks liste → x0
+    legg_u32(r, 0x910803FF)                          // add sp, sp, #512 (frigi buffer)
+    legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
+    legg_u32(r, 0xA94263F7)                          // ldp x23, x24, [sp, #32]
+    legg_u32(r, 0xA9415BF5)                          // ldp x21, x22, [sp, #16]
+    legg_u32(r, 0xA94053F3)                          // ldp x19, x20, [sp]
+    legg_u32(r, 0x910103FF)                          // add sp, sp, #64
+    legg_u32(r, 0xD65F03C0)                          // ret
+    skriv_u32(r, p_scan_gt,  0x5400000C | ((((lbl_final    - p_scan_gt)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_cbz_match, 0xB4000002 | ((((lbl_matched - p_cbz_match) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_bne_nm,   0x54000001 | ((((lbl_notmatch - p_bne_nm)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_cmp,    0x14000000 |  (((lbl_cmp      - p_b_cmp)    / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_b_scan1,  0x14000000 |  (((lbl_scan     - p_b_scan1)  / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_b_scan2,  0x14000000 |  (((lbl_scan     - p_b_scan2)  / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_copy_ge,  0x5400000A | ((((lbl_copydone - p_copy_ge)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_copy,   0x14000000 |  (((lbl_copy     - p_b_copy)   / 4) & 0x03FFFFFF))
+    returner r
+}
+
+// Fase 8: runtime-rutine __join(x0=liste, x1=sep) → x0=streng. Konkatenerer
+// element med separator. x19=akkumulator, x20=sep, x21=&element[0], x22=count,
+// x23=indeks; emit_str_concat rører berre x9–x16/x0/x28, så tilstanden overlever.
+funksjon emit_join_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD10103FF)                          // sub sp, sp, #64
+    legg_u32(r, 0xA90053F3)                          // stp x19, x20, [sp]
+    legg_u32(r, 0xA9015BF5)                          // stp x21, x22, [sp, #16]
+    legg_u32(r, 0xA90263F7)                          // stp x23, x24, [sp, #32]
+    legg_u32(r, 0xF9001BFE)                          // str x30, [sp, #48]
+    legg_u32(r, 0xAA0103F4)                          // mov x20, x1 (sep)
+    legg_u32(r, 0xF9400409)                          // ldr x9, [x0, #8] (listdata)
+    legg_u32(r, 0xF9400136)                          // ldr x22, [x9]   (count)
+    legg_u32(r, 0x91002135)                          // add x21, x9, #8 (&elem[0])
+    // akkumulator = tom streng
+    legg_u32(r, 0xAA1C03EE)                          // mov x14, x28
+    legg_u32(r, 0xD280000B)                          // movz x11, #0
+    legg_u32(r, 0xF90001CB)                          // str x11, [x14] (len 0)
+    legg_u32(r, 0x910021DC)                          // add x28, x14, #8
+    emit_ncval_alloc_ptr(r, 14, 19, 3)              // acc = "" i x19
+    legg_u32(r, 0xD2800017)                          // movz x23, #0 (i)
+    la lbl_loop = lengde(r)
+    legg_u32(r, 0xEB1602FF)                          // cmp x23, x22
+    la p_ge = lengde(r)
+    legg_u32(r, 0)                                   // b.ge done
+    la p_cbz = lengde(r)
+    legg_u32(r, 0)                                   // cbz x23, skip_sep
+    emit_str_concat(r, 19, 20, 19)                   // acc += sep
+    la lbl_skip = lengde(r)
+    legg_u32(r, 0x8B170EA9)                          // add x9, x21, x23, lsl #3 (&elem[i])
+    legg_u32(r, 0xF9400120)                          // ldr x0, [x9] (elem[i])
+    emit_str_concat(r, 19, 0, 19)                    // acc += elem[i]
+    legg_u32(r, 0x910006F7)                          // add x23, x23, #1
+    la p_bloop = lengde(r)
+    legg_u32(r, 0)                                   // b loop
+    la lbl_done = lengde(r)
+    legg_u32(r, 0xAA1303E0)                          // mov x0, x19 (resultat)
+    legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
+    legg_u32(r, 0xA94263F7)                          // ldp x23, x24, [sp, #32]
+    legg_u32(r, 0xA9415BF5)                          // ldp x21, x22, [sp, #16]
+    legg_u32(r, 0xA94053F3)                          // ldp x19, x20, [sp]
+    legg_u32(r, 0x910103FF)                          // add sp, sp, #64
+    legg_u32(r, 0xD65F03C0)                          // ret
+    skriv_u32(r, p_ge,    0x5400000A | ((((lbl_done - p_ge)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_cbz,   0xB4000017 | ((((lbl_skip - p_cbz)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
+    returner r
+}
+
 // `skriv` av ein NcVal-peikar i Xptr_reg (les val, formater desimal, write).
 // Til skilnad frå emit_skriv_int rører han berre scratch x9–x15 + x0/x1/x2 og
 // syscall-registeret, så operand-stakken (x19–x25), locals-basen (x26) og heap-
@@ -2771,6 +3064,38 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             } ellers hvis (kallnamn == "nøkler" eller kallnamn == "builtin.nøkler") og lengde(instr) == 3 og instr[2] == 1 {
                 hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal nøkler krev 1 arg", "image": []} }
                 emit_noekler(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
+            } ellers hvis (kallnamn == "verdier" eller kallnamn == "builtin.verdier") og lengde(instr) == 3 og instr[2] == 1 {
+                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal verdier krev 1 arg", "image": []} }
+                emit_verdier(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
+            } ellers hvis (kallnamn == "fjern_siste" eller kallnamn == "builtin.fjern_siste") og lengde(instr) == 3 og instr[2] == 1 {
+                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fjern_siste krev 1 arg", "image": []} }
+                emit_fjern_siste(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
+            } ellers hvis (kallnamn == "split" eller kallnamn == "builtin.split") og lengde(instr) == 3 og instr[2] == 2 {
+                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal split krev 2 arg", "image": []} }
+                la s_sp = ncval_opreg(djupn - 2)
+                la d_sp = ncval_opreg(djupn - 1)
+                legg_u32(native, 0xAA0003E0 | (s_sp << 16))     // mov x0, Xstr
+                legg_u32(native, 0xAA0003E1 | (d_sp << 16))     // mov x1, Xdelim
+                la p_bl_split = lengde(native)
+                legg_u32(native, 0x94000000)                    // bl __split
+                legg_til(bl_patchar, [p_bl_split, "__split"])
+                legg_u32(native, 0xAA0003E0 | s_sp)             // mov Xstr, x0
+                djupn = djupn - 1
+            } ellers hvis (kallnamn == "fjern_nokkel" eller kallnamn == "builtin.fjern_nokkel") og lengde(instr) == 3 og instr[2] == 2 {
+                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fjern_nokkel krev 2 arg", "image": []} }
+                emit_fjern_nokkel(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1))
+                djupn = djupn - 1
+            } ellers hvis (kallnamn == "join" eller kallnamn == "builtin.join") og lengde(instr) == 3 og instr[2] == 2 {
+                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal join krev 2 arg", "image": []} }
+                la l_jn = ncval_opreg(djupn - 2)
+                la sep_jn = ncval_opreg(djupn - 1)
+                legg_u32(native, 0xAA0003E0 | (l_jn << 16))     // mov x0, Xliste
+                legg_u32(native, 0xAA0003E1 | (sep_jn << 16))   // mov x1, Xsep
+                la p_bl_join = lengde(native)
+                legg_u32(native, 0x94000000)                    // bl __join
+                legg_til(bl_patchar, [p_bl_join, "__join"])
+                legg_u32(native, 0xAA0003E0 | l_jn)             // mov Xliste, x0
+                djupn = djupn - 1
             } ellers hvis (kallnamn == "replace" eller kallnamn == "builtin.replace") og lengde(instr) == 3 og instr[2] == 3 {
                 hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal replace krev 3 arg", "image": []} }
                 emit_replace(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 3))
@@ -2802,7 +3127,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0x94000000)                    // bl __json_stringify
                 legg_til(bl_patchar, [p_bl_js, "__json_stringify"])
                 legg_u32(native, 0xAA0003E0 | topp_js)          // mov Xtopp, x0
-            } ellers hvis (kallnamn == "json_parse" eller kallnamn == "builtin.json_parse") og lengde(instr) == 3 og instr[2] == 1 {
+            } ellers hvis (kallnamn == "json_parse" eller kallnamn == "builtin.json_parse" eller kallnamn == "json_parse_raw" eller kallnamn == "builtin.json_parse_raw") og lengde(instr) == 3 og instr[2] == 1 {
                 hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_parse krev 1 arg", "image": []} }
                 la topp_jp = ncval_opreg(djupn - 1)
                 legg_u32(native, 0xAA0003E0 | (topp_jp << 16))  // mov x0, Xtopp  (arg-streng)
@@ -3477,6 +3802,30 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         fn_start["__json_parse"] = lengde(image)
         la jp = 0
         mens jp < lengde(rutp) { legg_til(image, rutp[jp]) jp = jp + 1 }
+    }
+    la treng_split = usann
+    la ps0 = 0
+    mens ps0 < lengde(all_patchar) {
+        hvis all_patchar[ps0][1] == "__split" { treng_split = sann }
+        ps0 = ps0 + 1
+    }
+    hvis treng_split {
+        la ruts = emit_split_routine()
+        fn_start["__split"] = lengde(image)
+        la sp2 = 0
+        mens sp2 < lengde(ruts) { legg_til(image, ruts[sp2]) sp2 = sp2 + 1 }
+    }
+    la treng_join = usann
+    la pjn0 = 0
+    mens pjn0 < lengde(all_patchar) {
+        hvis all_patchar[pjn0][1] == "__join" { treng_join = sann }
+        pjn0 = pjn0 + 1
+    }
+    hvis treng_join {
+        la rutj = emit_join_routine()
+        fn_start["__join"] = lengde(image)
+        la jn2 = 0
+        mens jn2 < lengde(rutj) { legg_til(image, rutj[jn2]) jn2 = jn2 + 1 }
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
