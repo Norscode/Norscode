@@ -63,7 +63,7 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "nøkler" eller n == "verdier" eller n == "fjern_siste" eller n == "split" eller n == "join" eller
        n == "tid_ms" eller n == "now_ms" eller
        n == "tekst_erstatt" eller n == "tekst_starter_med" eller n == "nøkkel_finnes" eller
-       n == "json_skriv" eller n == "exit" {
+       n == "json_skriv" eller n == "exit" eller n == "miljo_sett" {
         returner sann
     }
     returner usann
@@ -1331,6 +1331,10 @@ funksjon emit_miljo_hent(native: liste_heiltall, name_reg: heiltall, dst_reg: he
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (namn-len)
     legg_u32(native, 0x91002129)                        // add x9, x9, #8 (namn-bytes)
     legg_u32(native, 0xAA1B03EB)                        // mov x11, x27  (envp-walker)
+    // Linux _start gjev ikkje envp i x2 → x27 = 0. Vakt mot null-deref (ldr [0]):
+    // tom envp → hopp til notfound (returner "").
+    la p_cbz_nullenvp = lengde(native)
+    legg_u32(native, 0)                                 // cbz x11, notfound
     la lbl_envloop = lengde(native)
     legg_u32(native, 0xF940016C)                        // ldr x12, [x11]  (entry char*)
     la p_cbz_notfound = lengde(native)
@@ -1398,6 +1402,7 @@ funksjon emit_miljo_hent(native: liste_heiltall, name_reg: heiltall, dst_reg: he
     la lbl_builddone = lengde(native)
     legg_u32(native, 0xAA0503FC)                        // mov x28, x5  (bump)
     emit_ncval_alloc_ptr(native, 4, dst_reg, 3)
+    skriv_u32(native, p_cbz_nullenvp,   0xB400000B | ((((lbl_notfound   - p_cbz_nullenvp)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_notfound,   0xB400000C | ((((lbl_notfound   - p_cbz_notfound)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_checkeq,    0xB400000E | ((((lbl_checkeq    - p_cbz_checkeq)    / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_next1,      0xB4000000 | ((((lbl_nextenv    - p_cbz_next1)      / 4) & 0x7FFFF) << 5))
@@ -2431,6 +2436,48 @@ funksjon emit_join_routine() -> liste_heiltall {
     returner r
 }
 
+// ─── Miljø-overlay (miljo_sett/miljo_hent) ──────────────────────────────────
+// AOT har ingen setenv-syscall, så miljo_sett skriv til eit heap-overlay-kart i
+// den skjulte globalen __env_overlay__ (eit NcVal-kart), og miljo_hent sjekkar
+// overlayet FØR han skannar envp. Begge er bl-kalla rutiner som gjenbrukar
+// emit_index_set/emit_map_get (som bevarer x19–x26), så vi slepp register-press.
+
+// __env_set(x0=kart, x1=nøkkel, x2=verdi) → x0=kart (kan vere vakse/repointa).
+funksjon emit_env_set_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD10103FF)                          // sub sp, sp, #64
+    legg_u32(r, 0xA90053F3)                          // stp x19, x20, [sp]
+    legg_u32(r, 0xA9015BF5)                          // stp x21, x22, [sp, #16]
+    legg_u32(r, 0xF9001BFE)                          // str x30, [sp, #48]
+    legg_u32(r, 0xAA0003F3)                          // mov x19, x0 (kart)
+    legg_u32(r, 0xAA0103F4)                          // mov x20, x1 (nøkkel)
+    legg_u32(r, 0xAA0203F5)                          // mov x21, x2 (verdi)
+    emit_index_set(r, 19, 20, 21)                    // kart-upsert (grow repointar [x19+8])
+    legg_u32(r, 0xAA1303E0)                          // mov x0, x19 (returner kart)
+    legg_u32(r, 0xA94053F3)                          // ldp x19, x20, [sp]
+    legg_u32(r, 0xA9415BF5)                          // ldp x21, x22, [sp, #16]
+    legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
+    legg_u32(r, 0x910103FF)                          // add sp, sp, #64
+    legg_u32(r, 0xD65F03C0)                          // ret
+    returner r
+}
+
+// __env_get(x0=kart, x1=nøkkel) → x0=verdi-peikar (eller 0 om ikkje funne).
+funksjon emit_env_get_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD10103FF)                          // sub sp, sp, #64
+    legg_u32(r, 0xA90053F3)                          // stp x19, x20, [sp]
+    legg_u32(r, 0xF9000BFE)                          // str x30, [sp, #16]
+    legg_u32(r, 0xAA0003F3)                          // mov x19, x0 (kart)
+    legg_u32(r, 0xAA0103F4)                          // mov x20, x1 (nøkkel)
+    emit_map_get(r, 19, 20, 0, usann)                // x0 = verdi-peikar eller 0
+    legg_u32(r, 0xA94053F3)                          // ldp x19, x20, [sp]
+    legg_u32(r, 0xF9400BFE)                          // ldr x30, [sp, #16]
+    legg_u32(r, 0x910103FF)                          // add sp, sp, #64
+    legg_u32(r, 0xD65F03C0)                          // ret
+    returner r
+}
+
 // `skriv` av ein NcVal-peikar i Xptr_reg (les val, formater desimal, write).
 // Til skilnad frå emit_skriv_int rører han berre scratch x9–x15 + x0/x1/x2 og
 // syscall-registeret, så operand-stakken (x19–x25), locals-basen (x26) og heap-
@@ -2826,6 +2873,16 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF9000320 | (gET0 << 10) | 9) // str x9, [x25, #ET*8]
             legg_u32(native, 0x9140179C)                // add x28, x28, #5, lsl #12 (20480)
         }
+        // Miljø-overlay: initialiser __env_overlay__ til eit tomt kart (type 5).
+        hvis finnes_nøkkel(globals, "__env_overlay__") {
+            la gOV0 = globals["__env_overlay__"]
+            legg_u32(native, 0xAA1C03EE)                // mov x14, x28  (mapdata-base)
+            legg_u32(native, 0xD2800009)                // movz x9, #0
+            legg_u32(native, 0xF90001C9)                // str x9, [x14]  (count 0)
+            legg_u32(native, 0x910021DC)                // add x28, x14, #8
+            emit_ncval_alloc_ptr(native, 14, 9, 5)      // x9 = kart-NcVal (type 5)
+            legg_u32(native, 0xF9000320 | (gOV0 << 10) | 9) // str x9, [x25, #OV*8]
+        }
         la mi = 0
         mens mi < lengde(initializers) {
             legg_u32(native, 0xAA0003E0)                // mov x0, xzr  (0 arg-plassholder)
@@ -3208,6 +3265,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 hvis djupn >= 1 { r1 = opnd_les(native, djupn - 1, 2, memmode, home_off) }
                 hvis djupn >= 2 { r2 = opnd_les(native, djupn - 2, 1, memmode, home_off) }
                 hvis djupn >= 3 { r3 = opnd_les(native, djupn - 3, 0, memmode, home_off) }
+                la env_ov = 0 - 1
+                hvis finnes_nøkkel(globals, "__env_overlay__") { env_ov = globals["__env_overlay__"] }
                 hvis (kallnamn == "skriv" eller kallnamn == "builtin.skriv" eller kallnamn == "print" eller kallnamn == "builtin.print") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal skriv krev éin stakkverdi", "image": []} }
                     emit_skriv_ncval(native, r1, os)
@@ -3346,8 +3405,41 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis (kallnamn == "miljo_hent" eller kallnamn == "builtin.miljo_hent") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal miljo_hent krev 1 arg", "image": []} }
-                    emit_miljo_hent(native, r1, r1)
+                    hvis env_ov >= 0 {
+                        // Sjekk overlayet fyrst (bl __env_get); funne → resultat, elles envp.
+                        legg_u32(native, 0xF9400320 | (env_ov << 10) | 0)   // ldr x0, [x25, #OV*8]
+                        legg_u32(native, 0xAA0003E1 | (r1 << 16))           // mov x1, Xnamn
+                        la p_bl_eg = lengde(native)
+                        legg_u32(native, 0x94000000)                        // bl __env_get
+                        legg_til(bl_patchar, [p_bl_eg, "__env_get"])
+                        la p_cbz_envp = lengde(native)
+                        legg_u32(native, 0xB4000000)                        // cbz x0, envp (patch)
+                        legg_u32(native, 0xAA0003E0 | r1)                   // mov Xres, x0 (funne)
+                        la p_b_hentdone = lengde(native)
+                        legg_u32(native, 0x14000000)                        // b done (patch)
+                        la lbl_envp = lengde(native)
+                        skriv_u32(native, p_cbz_envp, 0xB4000000 | ((((lbl_envp - p_cbz_envp) / 4) & 0x7FFFF) << 5) | 0)
+                        emit_miljo_hent(native, r1, r1)
+                        la lbl_hentdone = lengde(native)
+                        skriv_u32(native, p_b_hentdone, 0x14000000 | (((lbl_hentdone - p_b_hentdone) / 4) & 0x03FFFFFF))
+                    } ellers {
+                        emit_miljo_hent(native, r1, r1)
+                    }
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "miljo_sett" eller kallnamn == "builtin.miljo_sett") og lengde(instr) == 3 og instr[2] == 2 {
+                    // miljo_sett(namn, verdi): skriv til overlay-kartet (bl __env_set),
+                    // lagra (evt. vakse) kart tilbake i globalen. Resultat = verdi.
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal miljo_sett krev 2 arg", "image": []} }
+                    hvis env_ov < 0 { returner {"ok": "usann", "error": "NcVal miljo_sett utan overlay-global", "image": []} }
+                    legg_u32(native, 0xF9400320 | (env_ov << 10) | 0)   // ldr x0, [x25, #OV*8]  (kart)
+                    legg_u32(native, 0xAA0003E1 | (r2 << 16))           // mov x1, Xnamn
+                    legg_u32(native, 0xAA0003E2 | (r1 << 16))           // mov x2, Xverdi
+                    la p_bl_es = lengde(native)
+                    legg_u32(native, 0x94000000)                        // bl __env_set
+                    legg_til(bl_patchar, [p_bl_es, "__env_set"])
+                    legg_u32(native, 0xF9000320 | (env_ov << 10) | 0)   // str x0, [x25, #OV*8]  (oppdatert kart)
+                    opnd_ut(native, djupn - 2, r1, memmode, home_off)   // resultat = verdi
+                    djupn = djupn - 1
                 } ellers hvis (kallnamn == "json_stringify" eller kallnamn == "builtin.json_stringify") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_stringify krev 1 arg", "image": []} }
                     legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp
@@ -4008,6 +4100,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     la globals = {}
     la gcount = 0
     la brukar_try = usann
+    la brukar_env = usann
     la gf = 0
     mens gf < lengde(order) {
         la gcode = funksjonar[order[gf]]["code"]
@@ -4021,6 +4114,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
                 }
             }
             hvis gop == "TRY_BEGIN" { brukar_try = sann }
+            hvis gop == "CALL" og lengde(gcode[gi]) == 3 og (gcode[gi][1] == "miljo_sett" eller gcode[gi][1] == "builtin.miljo_sett") { brukar_env = sann }
             gi = gi + 1
         }
         gf = gf + 1
@@ -4030,6 +4124,11 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         globals["__exc_top__"] = gcount
         globals["__exc_val__"] = gcount + 1
         gcount = gcount + 2
+    }
+    // Miljø-overlay: skjult global for miljo_sett/miljo_hent (in-heap kart).
+    hvis brukar_env {
+        globals["__env_overlay__"] = gcount
+        gcount = gcount + 1
     }
     la image: liste_heiltall = []
     la fn_start = {}
@@ -4106,6 +4205,26 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         fn_start["__join"] = lengde(image)
         la jn2 = 0
         mens jn2 < lengde(rutj) { legg_til(image, rutj[jn2]) jn2 = jn2 + 1 }
+    }
+    la treng_env_set = usann
+    la treng_env_get = usann
+    la pev = 0
+    mens pev < lengde(all_patchar) {
+        hvis all_patchar[pev][1] == "__env_set" { treng_env_set = sann }
+        hvis all_patchar[pev][1] == "__env_get" { treng_env_get = sann }
+        pev = pev + 1
+    }
+    hvis treng_env_set {
+        la rutes = emit_env_set_routine()
+        fn_start["__env_set"] = lengde(image)
+        la es2 = 0
+        mens es2 < lengde(rutes) { legg_til(image, rutes[es2]) es2 = es2 + 1 }
+    }
+    hvis treng_env_get {
+        la ruteg = emit_env_get_routine()
+        fn_start["__env_get"] = lengde(image)
+        la eg2 = 0
+        mens eg2 < lengde(ruteg) { legg_til(image, ruteg[eg2]) eg2 = eg2 + 1 }
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
