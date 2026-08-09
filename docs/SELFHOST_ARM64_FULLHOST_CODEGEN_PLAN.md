@@ -57,8 +57,15 @@ NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
 ```
 
 Verifisert 2026-08-08: fixture over byggjer og køyrer med exit 11 (som forventa).
-Linux-ELF-porten (`--target linux-arm64`) må til slutt køyrast på ekte Linux
-ARM64-host/CI før promotering.
+
+**Linux-ELF verifisert på ekte aarch64-kjerne (2026-08-09):** `--target linux-arm64`
+(kjelde-codegen, `elf_arm64_codegen.kompiler_ncb` → `ncval_compile_program(…, "linux")`)
+byggjer statiske ARM64-ELF-ar som køyrer korrekt i ein **native `linux/arm64`
+Docker-container** (attestasjonssandkasse, tillaten av B-runboka — ikkje byggverktøy):
+`aot_common_integer_ops`=11, `arm64_str_ops`=16, `arm64_operand_spill`=29,
+`arm64_spill_stress`=44 — alle = VM-tolken, inkludert operand-spilling. Dette lukkar
+«ELF-porten berre inferert frå Mach-O»-atterhaldet; den formelle drop-gcc-attestasjonen
+krev framleis GitHub-signert Linux-ARM64-CI (ikkje ein lokal container).
 
 ## Runtime-ABI som skal speglast (frå x86-64)
 
