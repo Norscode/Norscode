@@ -316,7 +316,28 @@ builtins (random_hex, split, system_info, …) som må portast. Att i Fase 8:
   (VM = AOT), både éin- og fleirteikns-delim. **`join` FERDIG** (2026-08-09): runtime-rutine `__join` (akkumulator x19 +
   `emit_str_concat` i løkke) — litmus `arm64_join` = 13 (VM = AOT). **`fjern_nokkel`/`json_parse_raw` FERDIG** (2026-08-09,
   arm64_fjern_nokkel=30): fjern_nokkel = skann+skyv par ned+dekrementer count;
-  json_parse_raw = alias til `__json_parse`. `miljo_sett`/`tid_ms` m.fl. står att.
+  json_parse_raw = alias til `__json_parse`. **Batch 3 FERDIG (2026-08-09,
+  VM=native på ekte Linux ARM64):** `tekst_erstatt`→replace, `tekst_starter_med`→
+  starts_with, `nøkkel_finnes`→map_get, `json_skriv`→__json_stringify, og `exit`
+  (exit-syscall macOS x16=1 / Linux x8=93). Litmus `arm64_builtins_tail3`=28,
+  `arm64_exit`=42.
+
+  **MÅLT BUILTIN-GAP FOR FULL nc_main (2026-08-09):** BFS frå `nc_main.start` i ein
+  full-host-NCB (build/v142_full_host.ncb.json) → 574 brukarfunksjonar + 78 uimplementerte
+  kall. Klassifisert mot vm.no: ~52 er ekte VM-builtins, resten er u-bundla
+  brukar/std-funksjonar (kjem gratis med ein komplett bundle). Att av ekte builtins:
+  - **Traktable** (rutar til eksisterande emitterar / enkle syscalls): miljo_sett
+    (+miljo_finnes/_rt_env_finnes, krev env-overlay-map), fil_slett/fil_append/
+    fil_sett_kjorbar/mkdir_p (syscalls), fjern/fjern_indeks (liste-ops), feil (throw).
+  - **Tunge (eigne fasar, ikkje ei økt)**: sha256/sha256_bytes/pbkdf2_sha256/argon2id/
+    acme_sign/acme_verify (krypto i asm — ELLER rebundl nc_main til å bruke reine
+    std-krypto-moduler som brukarfunksjonar), dns_lookup, thread_spawn/join/sync,
+    tensor_operation, jit_operation, process_spawn_argv/exec_prosess/system_operation,
+    network_operation, køyr_ncb/host_exec_ncb_json/ncb_call_fn (NCB-tolk i AOT),
+    semantic_analyser_rent/semantic_ok/semantic_rapport, wasm_selftest, og nye
+    runtime-typar: **bytes** (bytes_new/bytes_from_list/fil_les_binær/socket_*_bytes)
+    og **flyttal** (desimaltall). Full B2-codegen krev alle desse + ekstern
+    Linux-ARM64-CI for drop-gcc-attestasjonen.
 
   **STOR ARKITEKTUR-GRENSE (funne 2026-08-09):** operand-stakken var REGISTER-basert
   (x19–x24, maks djupn 6 sidan x25 er globals-base). Difor feila **kart-literalar
