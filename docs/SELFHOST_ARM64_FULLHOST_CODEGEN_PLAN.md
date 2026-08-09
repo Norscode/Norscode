@@ -266,6 +266,28 @@ AArch64-ELF; køyr `selftest` på ekte Linux ARM64. Koplar mot D2 socket-
 integrasjon for rein TLS. Port: byte-identisk Gen1/Gen2 + selftest grøn på ekte
 ARM64-host. **Dette lukkar B2.**
 
+**🎉 REIN KRYPTO/TLS-STAKK NATIVE PÅ EKTE LINUX ARM64 (2026-08-09, null OpenSSL).**
+Heile TLS_CHACHA20_POLY1305_SHA256-suiten byggjer via `elf_arm64_codegen` frå levande
+kjelde og køyrer korrekt på ein native `linux/arm64`-kjerne (Docker attestasjons-
+sandkasse): `test_sha512_nist`, `test_x25519_rfc7748`, `test_ed25519_rfc8032`,
+`test_chacha20_poly1305_rfc8439` og **`test_tls13_handshake_flow`** (X25519 ECDHE +
+Ed25519 CertificateVerify + HKDF-nøkkelplan + ChaCha20-Poly1305 record-lag + begge
+Finished-MAC + applikasjonsdata + fail-closed på tukla signatur) — alle grøne, VM =
+native. Fem codegen-feil funne og retta undervegs (kvar med regresjonsfixture i
+`test_arm64_ncval_machine`): operand-spilling, 64-bit-aritmetikk (SHA-carry),
+kontrollflyt-merge-djupn (kortslutta og/eller), type-dispatch `slice` (liste), og
+type-dispatch `COMPARE_NE` (streng). Dette viser at den native ARM64-codegen no kan
+byggje den reine TLS-flata som B2/D2 krev **utan OpenSSL**.
+
+Att for å formelt lukke B2: (1) full `nc_main` gjennom codegen (builtin-hale — dei
+fleste er u-bundla brukar/std-funksjonar som kjem gratis med komplett bundle);
+(2) rekk-inn attestasjonskandidaten (`build_linux_arm64_tls_attestation_candidate.no`)
+til å byggje native ELF i staden for gcc/OpenSSL; (3) den eksterne GitHub-signerte
+Linux-ARM64-CI-attestasjonen (kan ikkje køyrast på macOS-verten). Kjende restfeil i
+codegen: `COMPARE_LT/LE/GT/GE` på strengar samanliknar framleis peikarar (sjeldan;
+ikkje i krypto-vegen); Mach-O-emitteren har eit 16 KB `__TEXT`-tak (berre macOS —
+ELF er storleik-dynamisk).
+
 [PÅGÅR — måld gap-analyse 2026-08-08] Fase 8 er eit fleir-inkrement-steg: full
 `nc_main` treng fleire opcodes utover Fase 0–7, og den endelege drop-gcc-
 attestasjonen krev ekte Linux-ARM64-CI (denne verten er macOS-ARM64). Måld gap
