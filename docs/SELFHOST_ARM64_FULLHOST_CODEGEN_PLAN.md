@@ -311,13 +311,32 @@ builtins (random_hex, split, system_info, …) som må portast. Att i Fase 8:
   arm64_fjern_nokkel=30): fjern_nokkel = skann+skyv par ned+dekrementer count;
   json_parse_raw = alias til `__json_parse`. `miljo_sett`/`tid_ms` m.fl. står att.
 
-  **STOR ARKITEKTUR-GRENSE (funne 2026-08-09):** operand-stakken er REGISTER-basert
-  (x19–x24, maks djupn 6 sidan x25 er globals-base). Difor feilar **kart-literalar
+  **STOR ARKITEKTUR-GRENSE (funne 2026-08-09):** operand-stakken var REGISTER-basert
+  (x19–x24, maks djupn 6 sidan x25 er globals-base). Difor feila **kart-literalar
   >3 par (treng 8 operandar) og liste-literalar >6 element** å kompilere
-  («operand-stakk full»). Full `nc_main` brukar store literalar, så dette treng
-  **operand-spilling til minne** (spill til stakk-/heap-slot når djupn>N) — eit
-  substansielt eige steg, truleg den største attståande blokkeringa (større enn
-  einskild-builtins). NB: mislukka bygg-native gjev ingen binær → bash exit 127.
+  («operand-stakk full»). Empirisk måling over 386 ekte NCB-ar: **22 % av alle
+  funksjonar** (28 506 av 126 957) går djupare enn 6, maks djupn **254**, og ved
+  djupn > 6 opptrer *alle* opcodes (CALL, INDEX_GET/SET, COMPARE, STORE_NAME, THROW,
+  binær-aritmetikk …), ikkje berre literal-akkumulering. Dette var difor den største
+  attståande blokkeringa for full `nc_main`.
+
+  **OPERAND-SPILLING FERDIG (2026-08-09) — verifisert på ekte macOS-ARM64.** Løysinga
+  er per-funksjon: `ncval_compile_program` prøver fyrst rask REG-MODUS (x19–x24,
+  byte-identisk med før), og dersom funksjonen sprekk stakken (retur-flagg
+  `overflow`), rekompilerer han funksjonen i **MEM-MODUS** der operandane bur i
+  minne-«heimar» rett etter lokalvariablane: `home(i) = [x26 + (home_off + i)*8]`,
+  `home_off = tal lokalvariablar`. Prologen reserverer `maxdjupn + 4` ekstra slots
+  (eksakt djupn-pre-pass; kvart CALL er netto `1 - nargs`), og handterer ramme > 4095
+  byte med `movz+add` i staden for add-immediat. x19/x20/x21 er reine scratch-slots
+  som operandane lastast inn i (`opnd_les`) og resultatet skrivast tilbake frå
+  (`opnd_ut`); BUILD_LIST/BUILD_MAP samlar element frå heimane
+  (`emit_build_list_mem`/`emit_build_map_mem`), og brukarkall lastar argument frå
+  heimane. Sidan reg-modus er uendra, er alle 27 eksisterande fixturane framleis
+  grøne (byte-identiske). Nye litmus: `arm64_operand_spill` (7-elem liste + 4-par
+  kart) = **29**, og `arm64_spill_stress` (djup aritmetikk + samanlikning + indeksering
+  på spilla container + 7-arg kall, alt på djupn > 6) = **44 = VM-tolken**. Ingen
+  regresjon (alle 27 fixturane grøne). NB: mislukka bygg-native gjev ingen binær →
+  bash exit 127.
 - **Køyr full `nc_main` gjennom codegen** for å avdekkje restgap (LOAD_FIELD/
   STORE_FIELD, SWAP/DUP/OVER, fleire builtins nc_main brukar). NB: å kompilere
   heile `nc_main` (3458 liner) til NCB på denne verten blei SIGKILL-a (compile=137,

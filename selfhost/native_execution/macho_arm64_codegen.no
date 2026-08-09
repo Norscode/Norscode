@@ -60,7 +60,8 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "socket_recv" eller n == "socket_close" eller n == "legg_til" eller
        n == "tekst_fra_heltall" eller n == "tekst_fra_heiltall" eller n == "til_tekst" eller
        n == "heltall_fra_tekst" eller n == "heiltall_fra_tekst" eller n == "type" eller
-       n == "nøkler" eller n == "verdier" eller n == "fjern_siste" eller n == "split" eller n == "join" {
+       n == "nøkler" eller n == "verdier" eller n == "fjern_siste" eller n == "split" eller n == "join" eller
+       n == "tid_ms" eller n == "now_ms" {
         returner sann
     }
     returner usann
@@ -1613,6 +1614,31 @@ funksjon emit_socket_close(native: liste_heiltall, fd_reg: heiltall, dst_reg: he
     returner 0
 }
 
+// Fase 8: tid_ms() → millisekund sidan epoke via gettimeofday. timeval på stakken;
+// ms = tv_sec*1000 + tv_usec/1000. tv_usec er 4 byte på macOS, 8 på Linux.
+funksjon emit_tid_ms(native: liste_heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    legg_u32(native, 0xD10043FF)                        // sub sp, sp, #16 (timeval)
+    legg_u32(native, 0x910003E0)                        // mov x0, sp (&tv)
+    legg_u32(native, 0xD2800001)                        // movz x1, #0 (tzp)
+    hvis os == "linux" { emit_syscall(native, 169, os) } ellers { emit_syscall(native, 116, os) }
+    legg_u32(native, 0xF94003E9)                        // ldr x9, [sp] (tv_sec)
+    hvis os == "linux" {
+        legg_u32(native, 0xF94007EA)                    // ldr x10, [sp, #8] (tv_usec 64-bit)
+    } ellers {
+        legg_u32(native, 0xB9400BEA)                    // ldr w10, [sp, #8] (tv_usec 32-bit)
+    }
+    legg_u32(native, 0xD2807D0B)                        // movz x11, #1000
+    legg_u32(native, 0x9B0B7D29)                        // mul x9, x9, x11 (sec*1000)
+    legg_u32(native, 0xD2807D0C)                        // movz x12, #1000
+    legg_u32(native, 0x9ACC094A)                        // udiv x10, x10, x12 (usec/1000)
+    legg_u32(native, 0x8B0A0129)                        // add x9, x9, x10 (ms)
+    legg_u32(native, 0x910043FF)                        // add sp, sp, #16
+    // ms er ein ekte 64-bit-verdi (~1.7e12) — box heile registeret utan sxtw
+    // (emit_ncval_alloc trunkerer til 32-bit via sxtw, som gjer ms negativ).
+    emit_ncval_alloc_ptr(native, 9, dst_reg, 1)
+    returner 0
+}
+
 // Fase 6-JSON (skalarar): json_stringify(v) → JSON-streng. int→desimal,
 // bool→"true"/"false", streng→"…" (sitatpakka), elles (liste/kart/nil)→"" som
 // trygg reserve inntil rekursiv container-JSON kjem. Runtime type-dispatch.
@@ -2558,7 +2584,14 @@ funksjon emit_fn_prologue(native: liste_heiltall, is_entry: boolsk, nlocals: hei
     legg_u32(native, 0xAA1C03FA)                    // mov x26, x28  (ny locals-base)
     hvis nlocals > 0 {
         la localsize = ((nlocals * 8 + 15) / 16) * 16
-        legg_u32(native, 0x91000000 | (localsize << 10) | (28 << 5) | 28) // add x28,x28,#localsize
+        hvis localsize <= 4095 {
+            legg_u32(native, 0x91000000 | (localsize << 10) | (28 << 5) | 28) // add x28,x28,#localsize
+        } ellers {
+            // Mem-modus-ramma kan vere større enn add-immediatet (4095 byte); last
+            // storleiken i x9 og bruk register-add.
+            last_heiltall(native, 9, localsize)
+            legg_u32(native, 0x8B09039C)                                     // add x28, x28, x9
+        }
     }
     la i = 0
     mens i < nparams {
@@ -2576,6 +2609,116 @@ funksjon emit_fn_epilogue(native: liste_heiltall) -> heiltall {
     legg_u32(native, 0xF94023FE)                    // ldr x30, [sp, #64]
     legg_u32(native, 0x910143FF)                    // add sp, sp, #80
     legg_u32(native, 0xD65F03C0)                    // ret
+    returner 0
+}
+
+// ─── Operand-spilling (mem-modus) ───────────────────────────────────────────
+// Den register-baserte operand-stakken (x19–x24, maks djupn 6) sprekk for store
+// literalar og djup uttrykksnøsting (målt: 22 % av funksjonane i ekte nc_main-NCB
+// går djupare enn 6, maks djupn 254). Løysinga: når reg-modus feilar med
+// «operand-stakk full», rekompilerer ncval_compile_program funksjonen i MEM-MODUS
+// der operandane bur i minne-«heimar» rett etter lokalvariablane:
+//   home(i) = [x26 + (home_off + i)*8],  home_off = tal lokalvariablar.
+// x19/x20/x21 blir reine scratch (slot 0/1/2) som operandane blir lasta inn i før
+// ein emitter kjører, og resultatet blir skrive tilbake til heimen. I reg-modus
+// er desse hjelparane bit-identiske med før (returner x(19+idx), emitter ingenting).
+
+// Les operand ved logisk indeks `idx` inn i scratch-slot `slot` (0/1/2 → x19/x20/x21
+// i mem-modus). Returnerer registeret koden skal bruke som operanden.
+funksjon opnd_les(native: liste_heiltall, idx: heiltall, slot: heiltall, memmode: boolsk, home_off: heiltall) -> heiltall {
+    hvis ikkje memmode { returner 19 + idx }
+    la r = 19 + slot
+    legg_u32(native, 0xF9400340 | ((home_off + idx) << 10) | r)  // ldr Xr, [x26, #(home_off+idx)*8]
+    returner r
+}
+
+// Skriv resultatet i register `rr` tilbake til operand-heimen ved logisk indeks `idx`.
+// reg-modus: sørg for at verdien er i x(19+idx) (mov om rr avvik — normalt ikkje).
+// mem-modus: str Xrr → home(idx).
+funksjon opnd_ut(native: liste_heiltall, idx: heiltall, rr: heiltall, memmode: boolsk, home_off: heiltall) -> heiltall {
+    hvis ikkje memmode {
+        hvis rr != 19 + idx { legg_u32(native, 0xAA0003E0 | (rr << 16) | (19 + idx)) }  // mov X(19+idx), Xrr
+        returner 0
+    }
+    legg_u32(native, 0xF9000340 | ((home_off + idx) << 10) | rr)  // str Xrr, [x26, #(home_off+idx)*8]
+    returner 0
+}
+
+// Målregisteret for ein push-operasjon ved djupn `d`: x(19+d) i reg-modus, x19 i
+// mem-modus (slot 0; opnd_ut lagrar det til home(d) etterpå).
+funksjon opnd_push_reg(d: heiltall, memmode: boolsk) -> heiltall {
+    hvis memmode { returner 19 }
+    returner 19 + d
+}
+
+// Eksakt maks operand-djupn for ein funksjonskropp (same djupn-aritmetikk som
+// kompileringssløyfa: kvart CALL forbruker instr[2] og pusher 1 → netto 1-nargs).
+funksjon ncval_maxdjupn(kode) -> heiltall {
+    la d = 0
+    la maks = 0
+    la i = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        la op = opcode(instr)
+        hvis op == "PUSH_CONST" eller op == "LOAD_NAME" eller op == "LOAD_GLOBAL" eller op == "LOAD_EXCEPTION" {
+            d = d + 1
+        } ellers hvis op == "POP" eller op == "STORE_NAME" eller op == "STORE_GLOBAL" eller op == "JUMP_IF_FALSE" eller op == "RETURN" eller op == "THROW" eller op == "INDEX_GET" {
+            d = d - 1
+        } ellers hvis op == "INDEX_SET" {
+            d = d - 2
+        } ellers hvis op == "BINARY_ADD" eller op == "ADD" eller op == "BINARY_SUB" eller op == "SUB" eller op == "BINARY_MUL" eller op == "MUL" eller op == "BINARY_DIV" eller op == "DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" {
+            d = d - 1
+        } ellers hvis op == "COMPARE_EQ" eller op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_LE" eller op == "COMPARE_GT" eller op == "COMPARE_GE" {
+            d = d - 1
+        } ellers hvis op == "BUILD_LIST" og lengde(instr) == 2 {
+            d = d - instr[1] + 1
+        } ellers hvis op == "BUILD_MAP" og lengde(instr) == 2 {
+            d = d - instr[1] * 2 + 1
+        } ellers hvis op == "CALL" og lengde(instr) == 3 {
+            d = d - instr[2] + 1
+        }
+        // (UNARY_*, LABEL, JUMP, TRY_BEGIN, TRY_END = netto 0)
+        hvis d > maks { maks = d }
+        i = i + 1
+    }
+    returner maks
+}
+
+// mem-modus BUILD_LIST: element-operandane ligg i heimar [base_idx .. base_idx+n-1];
+// samlar dei i ei fersk listdata på heapen og boksar resultatet i `dst_reg`.
+funksjon emit_build_list_mem(native: liste_heiltall, n: heiltall, base_idx: heiltall, home_off: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xAA1C03EE)                        // mov x14, x28  (listdata-base)
+    prøv { last_heiltall(native, 9, n) } fang (e) { kast "NcVal liste for lang" }
+    legg_u32(native, 0xF90001C9)                        // str x9, [x14]  (count)
+    la i = 0
+    mens i < n {
+        legg_u32(native, 0xF9400340 | ((home_off + base_idx + i) << 10) | 9)  // ldr x9, [x26, #home]
+        legg_u32(native, 0xF9000000 | ((1 + i) << 10) | (14 << 5) | 9)        // str x9, [x14, #8+i*8]
+        i = i + 1
+    }
+    la total = 8 + n * 8
+    hvis total > 4095 { kast "NcVal liste for stor for eitt add-steg" }
+    legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)             // add x28, x14, #total
+    emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
+    returner 0
+}
+
+// mem-modus BUILD_MAP: key/val-operandane ligg i heimar [base_idx .. base_idx+2*np-1].
+funksjon emit_build_map_mem(native: liste_heiltall, npairs: heiltall, base_idx: heiltall, home_off: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xAA1C03EE)                        // mov x14, x28
+    prøv { last_heiltall(native, 9, npairs) } fang (e) { kast "NcVal kart for stort" }
+    legg_u32(native, 0xF90001C9)                        // str x9, [x14]  (count)
+    la m = npairs * 2
+    la i = 0
+    mens i < m {
+        legg_u32(native, 0xF9400340 | ((home_off + base_idx + i) << 10) | 9)  // ldr x9, [x26, #home]
+        legg_u32(native, 0xF9000000 | ((1 + i) << 10) | (14 << 5) | 9)        // str x9, [x14, #8+i*8]
+        i = i + 1
+    }
+    la total = 8 + m * 8
+    hvis total > 4095 { kast "NcVal kart for stort for eitt add-steg" }
+    legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)             // add x28, x14, #total
+    emit_ncval_alloc_ptr(native, 14, dst_reg, 5)
     returner 0
 }
 
@@ -2624,7 +2767,8 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst 
 // bl-kall. funksjonar = heile NCB-funksjonstabellen (for å kjenne att brukarkall);
 // params = parameternamn (locals 0..n-1); is_entry avgjer heap-init + w0-exit;
 // bl_patchar samlar [pos_i_native, mål-namn] for bl-lenking av multi-drivaren.
-funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers) -> ordbok_tekst {
+funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk) -> ordbok_tekst {
+    hvis memmode == null { memmode = usann }
     hvis builtin.type(kode) != "liste" {
         returner {"ok": "usann", "error": "AArch64 NcVal krev instruksjonsliste", "image": []}
     }
@@ -2655,8 +2799,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         }
         s = s + 1
     }
+    // Mem-modus: operandane bur i minne-heimar rett etter lokalvariablane.
+    // home_off = tal lokalvariablar; reserver maks operand-djupn (+margin) ekstra slots.
+    la home_off = variabel_antal
+    la maxdjupn = 0
+    la prolog_locals = variabel_antal
+    hvis memmode {
+        maxdjupn = ncval_maxdjupn(kode)
+        prolog_locals = variabel_antal + maxdjupn + 4
+        hvis (home_off + maxdjupn + 4) > 4000 {
+            returner {"ok": "usann", "error": "NcVal mem-modus ramme for stor (lokalar+djupn > 4000)", "image": []}
+        }
+    }
     la native: liste_heiltall = []
-    emit_fn_prologue(native, is_entry, variabel_antal, lengde(params), os, lengde(nøkler(globals)))
+    emit_fn_prologue(native, is_entry, prolog_locals, lengde(params), os, lengde(nøkler(globals)))
     // Fase 8: køyr modul-initialisatorane (STORE_GLOBAL av toppnivå-verdiar) før
     // entry-kroppen. x25/x28 er alt sett opp av entry-prologen.
     hvis is_entry {
@@ -2687,11 +2843,12 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         la op = opcode(instr)
         hvis op == "PUSH_CONST" {
             hvis lengde(instr) != 2 { returner {"ok": "usann", "error": "NcVal PUSH_CONST krev verdi", "image": []} }
-            hvis djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "image": []} }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+            la mål_pc = opnd_push_reg(djupn, memmode)
             la konstant = instr[1]
             la kt = builtin.type(konstant)
             hvis kt == "tekst" {
-                prøv { emit_ncval_str_const(native, konstant, ncval_opreg(djupn)) } fang melding {
+                prøv { emit_ncval_str_const(native, konstant, mål_pc) } fang melding {
                     returner {"ok": "usann", "error": tekst(melding), "image": []}
                 }
             } ellers hvis kt == "heltall" eller kt == "boolsk" {
@@ -2703,17 +2860,18 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 prøv { last_heiltall(native, 9, konstant) } fang melding {
                     returner {"ok": "usann", "error": tekst(melding), "image": []}
                 }
-                emit_ncval_alloc(native, 9, ncval_opreg(djupn), tag)
+                emit_ncval_alloc(native, 9, mål_pc, tag)
             } ellers hvis kt == "ingenting" {
                 // null → int 0 (same null-representasjon som json_parse). Modul-init
                 // returnerer ofte PUSH_CONST null; RETURN treng ein verdi på stakken.
                 prøv { last_heiltall(native, 9, 0) } fang melding {
                     returner {"ok": "usann", "error": tekst(melding), "image": []}
                 }
-                emit_ncval_alloc(native, 9, ncval_opreg(djupn), 1)
+                emit_ncval_alloc(native, 9, mål_pc, 1)
             } ellers {
                 returner {"ok": "usann", "error": "NcVal PUSH_CONST ustøtta type: " + kt, "image": []}
             }
+            opnd_ut(native, djupn, mål_pc, memmode, home_off)
             djupn = djupn + 1
         } ellers hvis op == "POP" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved POP", "image": []} }
@@ -2723,8 +2881,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             // venstre er ein streng (type=3), elles heiltalsaddisjon. Kjelda er
             // typekonsistent, så venstre-taggen avgjer.
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
-            la venstre = ncval_opreg(djupn - 2)
-            la høgre = ncval_opreg(djupn - 1)
+            la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
+            la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
             legg_u32(native, 0xF9400000 | (venstre << 5) | 9)   // ldr x9, [Xvenstre]  (type)
             legg_u32(native, 0xF1000D3F)                        // cmp x9, #3
             la p_bne_int = lengde(native)
@@ -2740,11 +2898,12 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la lbl_end = lengde(native)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
+            opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "BINARY_SUB" eller op == "SUB" eller op == "BINARY_MUL" eller op == "MUL" eller op == "BINARY_DIV" eller op == "DIV" eller op == "BINARY_MOD" eller op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT" {
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
-            la venstre = ncval_opreg(djupn - 2)
-            la høgre = ncval_opreg(djupn - 1)
+            la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
+            la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
             legg_u32(native, 0xB9400800 | (venstre << 5) | 9)   // ldr w9, [Xvenstre, #8]
             legg_u32(native, 0xB9400800 | (høgre << 5) | 10)    // ldr w10, [Xhøgre, #8]
             hvis op == "BINARY_ADD" eller op == "ADD" {
@@ -2770,32 +2929,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0x1ACA2929)                    // asrv w9, w9, w10
             }
             emit_ncval_alloc(native, 9, venstre, 1)
+            opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "UNARY_NEG" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NEG", "image": []} }
-            la topp = ncval_opreg(djupn - 1)
+            la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
             legg_u32(native, 0x4B0903E9)                        // neg w9, w9
             emit_ncval_alloc(native, 9, topp, 1)
+            opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "UNARY_NOT" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NOT", "image": []} }
-            la topp = ncval_opreg(djupn - 1)
+            la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
             legg_u32(native, 0x7100013F)                        // cmp w9, #0
             legg_u32(native, 0x1A9F17E9)                        // cset w9, eq
             emit_ncval_alloc(native, 9, topp, 2)
+            opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "UNARY_BNOT" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_BNOT", "image": []} }
-            la topp = ncval_opreg(djupn - 1)
+            la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
             legg_u32(native, 0x2A2903E9)                        // mvn w9, w9
             emit_ncval_alloc(native, 9, topp, 1)
+            opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "COMPARE_EQ" {
             // Fase 3: type-dispatch på `==`. Streng-byte-likskap når venstre er
             // streng (type=3), elles heiltalslikskap.
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved COMPARE_EQ", "image": []} }
-            la venstre = ncval_opreg(djupn - 2)
-            la høgre = ncval_opreg(djupn - 1)
+            la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
+            la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
             legg_u32(native, 0xF9400000 | (venstre << 5) | 9)   // ldr x9, [Xvenstre]  (type)
             legg_u32(native, 0xF1000D3F)                        // cmp x9, #3
             la p_bne_int = lengde(native)
@@ -2804,22 +2967,23 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_b_end = lengde(native)
             legg_u32(native, 0)                                 // b eq_end
             la lbl_int = lengde(native)
-            legg_u32(native, 0xB9400800 | (venstre << 5) | 9)   // ldr w9, [Xvenstre, #8]
-            legg_u32(native, 0xB9400800 | (høgre << 5) | 10)    // ldr w10, [Xhøgre, #8]
-            legg_u32(native, 0x6B0A013F)                        // cmp w9, w10
+            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
+            legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
+            legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
             legg_u32(native, 0x1A9F17E9)                        // cset w9, eq
             emit_ncval_alloc(native, 9, venstre, 2)
             la lbl_end = lengde(native)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
+            opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "COMPARE_NE" eller op == "COMPARE_LT" eller op == "COMPARE_LE" eller op == "COMPARE_GT" eller op == "COMPARE_GE" {
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
-            la venstre = ncval_opreg(djupn - 2)
-            la høgre = ncval_opreg(djupn - 1)
-            legg_u32(native, 0xB9400800 | (venstre << 5) | 9)   // ldr w9, [Xvenstre, #8]
-            legg_u32(native, 0xB9400800 | (høgre << 5) | 10)    // ldr w10, [Xhøgre, #8]
-            legg_u32(native, 0x6B0A013F)                        // cmp w9, w10
+            la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
+            la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
+            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
+            legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
+            legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
             la cset = 0x1A9F07E9
             hvis op == "COMPARE_NE" { cset = 0x1A9F07E9 }
             hvis op == "COMPARE_LT" { cset = 0x1A9FA7E9 }
@@ -2828,6 +2992,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis op == "COMPARE_GT" { cset = 0x1A9FD7E9 }
             legg_u32(native, cset)                              // cset w9, cond
             emit_ncval_alloc(native, 9, venstre, 2)
+            opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "BUILD_LIST" {
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "heltall" {
@@ -2835,8 +3000,13 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
             la n = instr[1]
             hvis djupn < n { returner {"ok": "usann", "error": "NcVal BUILD_LIST stakk underflyt", "image": []} }
-            hvis (djupn - n + 1) > 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full etter BUILD_LIST", "image": []} }
-            emit_build_list(native, n, ncval_opreg(djupn - n), ncval_opreg(djupn - n))
+            hvis memmode {
+                emit_build_list_mem(native, n, djupn - n, home_off, 19)
+                opnd_ut(native, djupn - n, 19, memmode, home_off)
+            } ellers {
+                hvis (djupn - n + 1) > 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full etter BUILD_LIST", "overflow": "sann", "image": []} }
+                emit_build_list(native, n, ncval_opreg(djupn - n), ncval_opreg(djupn - n))
+            }
             djupn = djupn - n + 1
         } ellers hvis op == "BUILD_MAP" {
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "heltall" {
@@ -2844,24 +3014,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
             la npairs = instr[1]
             hvis djupn < npairs * 2 { returner {"ok": "usann", "error": "NcVal BUILD_MAP stakk underflyt", "image": []} }
-            hvis (djupn - npairs * 2 + 1) > 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full etter BUILD_MAP", "image": []} }
-            emit_build_map(native, npairs, ncval_opreg(djupn - npairs * 2), ncval_opreg(djupn - npairs * 2))
+            hvis memmode {
+                emit_build_map_mem(native, npairs, djupn - npairs * 2, home_off, 19)
+                opnd_ut(native, djupn - npairs * 2, 19, memmode, home_off)
+            } ellers {
+                hvis (djupn - npairs * 2 + 1) > 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full etter BUILD_MAP", "overflow": "sann", "image": []} }
+                emit_build_map(native, npairs, ncval_opreg(djupn - npairs * 2), ncval_opreg(djupn - npairs * 2))
+            }
             djupn = djupn - npairs * 2 + 1
         } ellers hvis op == "INDEX_GET" {
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal INDEX_GET krev container og indeks", "image": []} }
-            emit_index_get(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2))
+            la ig_c = opnd_les(native, djupn - 2, 0, memmode, home_off)
+            la ig_i = opnd_les(native, djupn - 1, 1, memmode, home_off)
+            emit_index_get(native, ig_c, ig_i, ig_c)
+            opnd_ut(native, djupn - 2, ig_c, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "INDEX_SET" {
             // [obj, indeks, verdi] → obj[indeks] = verdi; let obj bli att på stakken.
             hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal INDEX_SET krev obj/indeks/verdi", "image": []} }
-            emit_index_set(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1))
+            la is_o = opnd_les(native, djupn - 3, 0, memmode, home_off)
+            la is_i = opnd_les(native, djupn - 2, 1, memmode, home_off)
+            la is_v = opnd_les(native, djupn - 1, 2, memmode, home_off)
+            emit_index_set(native, is_o, is_i, is_v)
+            opnd_ut(native, djupn - 3, is_o, memmode, home_off)
             djupn = djupn - 2
         } ellers hvis op == "STORE_NAME" {
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
                 returner {"ok": "usann", "error": "NcVal STORE_NAME krev namn og stakkverdi", "image": []}
             }
             la idx = variablar[instr[1]]
-            la topp = ncval_opreg(djupn - 1)
+            la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000000 | (idx << 10) | (26 << 5) | topp) // str Xtopp, [x26, #idx*8]
             djupn = djupn - 1
         } ellers hvis op == "LOAD_NAME" {
@@ -2869,10 +3051,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 returner {"ok": "usann", "error": "NcVal LOAD_NAME krev namn", "image": []}
             }
             hvis ikkje finnes_nøkkel(variablar, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend lokal variabel: " + instr[1], "image": []} }
-            hvis djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "image": []} }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
             la idx = variablar[instr[1]]
-            la mål = ncval_opreg(djupn)
+            la mål = opnd_push_reg(djupn, memmode)
             legg_u32(native, 0xF9400000 | (idx << 10) | (26 << 5) | mål) // ldr Xmål, [x26, #idx*8]
+            opnd_ut(native, djupn, mål, memmode, home_off)
             djupn = djupn + 1
         } ellers hvis op == "STORE_GLOBAL" {
             // Fase 8: modul-global = [x25 + slot*8]. slot tildelt i ncval_compile_program.
@@ -2881,7 +3064,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
             hvis ikkje finnes_nøkkel(globals, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend global: " + instr[1], "image": []} }
             la gslot = globals[instr[1]]
-            la gtopp = ncval_opreg(djupn - 1)
+            la gtopp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000320 | (gslot << 10) | gtopp) // str Xtopp, [x25, #slot*8]
             djupn = djupn - 1
         } ellers hvis op == "LOAD_GLOBAL" {
@@ -2889,10 +3072,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 returner {"ok": "usann", "error": "NcVal LOAD_GLOBAL krev namn", "image": []}
             }
             hvis ikkje finnes_nøkkel(globals, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend global: " + instr[1], "image": []} }
-            hvis djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "image": []} }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
             la gslot2 = globals[instr[1]]
-            la gmål = ncval_opreg(djupn)
+            la gmål = opnd_push_reg(djupn, memmode)
             legg_u32(native, 0xF9400320 | (gslot2 << 10) | gmål) // ldr Xmål, [x25, #slot*8]
+            opnd_ut(native, djupn, gmål, memmode, home_off)
             djupn = djupn + 1
         } ellers hvis op == "LABEL" {
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
@@ -2912,7 +3096,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 returner {"ok": "usann", "error": "NcVal JUMP_IF_FALSE krev namn og stakkverdi", "image": []}
             }
             djupn = djupn - 1
-            la topp = ncval_opreg(djupn)
+            la topp = opnd_les(native, djupn, 0, memmode, home_off)
             legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
             la posisjon = lengde(native)
             legg_u32(native, 0x34000009)                        // cbz w9, <patch>
@@ -2921,7 +3105,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             // Fase 5: RETURN kan stå kvar som helst (tidleg retur i greiner). Entry
             // pakkar ut heiltalet til w0 (exit); brukarfunksjon returnerer NcVal* i x0.
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal RETURN krev stakkverdi", "image": []} }
-            la topp = ncval_opreg(djupn - 1)
+            la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             hvis is_entry {
                 legg_u32(native, 0xB9400800 | (topp << 5) | 0)  // ldr w0, [Xtopp, #8]  (utpakka int)
             } ellers {
@@ -2962,7 +3146,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal THROW krev stakkverdi", "image": []} }
             la gET3 = globals["__exc_top__"]
             la gEV3 = globals["__exc_val__"]
-            la etopp = ncval_opreg(djupn - 1)
+            la etopp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000320 | (gEV3 << 10) | etopp) // str Xtopp, [x25, #EV*8] (unnatak)
             legg_u32(native, 0xF9400320 | (gET3 << 10) | 10)    // ldr x10, [x25, #ET*8]
             legg_u32(native, 0xD101414A)                        // sub x10, x10, #80  (gjeldande handler — IKKJE pop; catch-blokka sin TRY_END popper)
@@ -2979,10 +3163,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xD61F0120)                        // br x9  (til catch)
             djupn = djupn - 1
         } ellers hvis op == "LOAD_EXCEPTION" {
-            hvis djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "image": []} }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
             la gEV4 = globals["__exc_val__"]
-            la edst = ncval_opreg(djupn)
+            la edst = opnd_push_reg(djupn, memmode)
             legg_u32(native, 0xF9400320 | (gEV4 << 10) | edst) // ldr Xdst, [x25, #EV*8]
+            opnd_ut(native, djupn, edst, memmode, home_off)
             djupn = djupn + 1
         } ellers hvis op == "CALL" {
             la kallnamn = tekst(instr[1])
@@ -2993,188 +3178,240 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 hvis nargs > 8 { returner {"ok": "usann", "error": "NcVal kall støttar høgst 8 argument: " + kallnamn, "image": []} }
                 la a = 0
                 mens a < nargs {
-                    la src = ncval_opreg(djupn - nargs + a)
-                    legg_u32(native, 0xAA0003E0 | (src << 16) | a)  // mov x_a, Xsrc
+                    hvis memmode {
+                        legg_u32(native, 0xF9400340 | ((home_off + djupn - nargs + a) << 10) | a)  // ldr x_a, [x26, #home]
+                    } ellers {
+                        la src = ncval_opreg(djupn - nargs + a)
+                        legg_u32(native, 0xAA0003E0 | (src << 16) | a)  // mov x_a, Xsrc
+                    }
                     a = a + 1
                 }
                 la p_bl = lengde(native)
                 legg_u32(native, 0x94000000)                        // bl <patch>
                 legg_til(bl_patchar, [p_bl, kallnamn])
-                legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs)) // mov Xdst, x0  (resultat)
+                hvis memmode {
+                    legg_u32(native, 0xF9000340 | ((home_off + djupn - nargs) << 10) | 0)  // str x0, [x26, #home(dst)]
+                } ellers {
+                    legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs)) // mov Xdst, x0  (resultat)
+                }
                 djupn = djupn - nargs + 1
-            } ellers hvis (kallnamn == "skriv" eller kallnamn == "builtin.skriv" eller kallnamn == "print" eller kallnamn == "builtin.print") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal skriv krev éin stakkverdi", "image": []} }
-                la topp = ncval_opreg(djupn - 1)
-                emit_skriv_ncval(native, topp, os)
-                // skriv gjev nil→held argumentet som dummy-resultat; djupn uendra.
-            } ellers hvis (kallnamn == "lengde" eller kallnamn == "builtin.lengde") og lengde(instr) == 3 og instr[2] == 1 {
-                // Fase 3: lengde(streng) = byte-lengda i strdata-headeren, boksa som
-                // int. (lengde på lister kjem i Fase 4.) Forbruk 1, push 1: djupn uendra.
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal lengde krev éin stakkverdi", "image": []} }
-                la topp = ncval_opreg(djupn - 1)
-                legg_u32(native, 0xF9400400 | (topp << 5) | 9)  // ldr x9, [Xtopp, #8]  (strdata)
-                legg_u32(native, 0xF940012A)                    // ldr x10, [x9]        (lengd)
-                emit_ncval_alloc(native, 10, topp, 1)           // boks som int → same slot
-            } ellers hvis (kallnamn == "char_code" eller kallnamn == "builtin.char_code") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal char_code krev 1 arg", "image": []} }
-                emit_char_code(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "chr" eller kallnamn == "builtin.chr") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal chr krev 1 arg", "image": []} }
-                emit_chr(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "lower" eller kallnamn == "builtin.lower") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal lower krev 1 arg", "image": []} }
-                emit_case(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), 1)
-            } ellers hvis (kallnamn == "upper" eller kallnamn == "builtin.upper") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal upper krev 1 arg", "image": []} }
-                emit_case(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), 2)
-            } ellers hvis (kallnamn == "slice" eller kallnamn == "builtin.slice") og lengde(instr) == 3 og instr[2] == 3 {
-                hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal slice krev 3 arg", "image": []} }
-                emit_slice(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 3))
-                djupn = djupn - 2
-            } ellers hvis (kallnamn == "index_of" eller kallnamn == "builtin.index_of") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal index_of krev 2 arg", "image": []} }
-                emit_str_find(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), usann)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "contains" eller kallnamn == "builtin.contains") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal contains krev 2 arg", "image": []} }
-                emit_str_find(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), sann)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "starts_with" eller kallnamn == "builtin.starts_with") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal starts_with krev 2 arg", "image": []} }
-                emit_str_matchat(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), usann)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "ends_with" eller kallnamn == "builtin.ends_with") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal ends_with krev 2 arg", "image": []} }
-                emit_str_matchat(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), sann)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "trim" eller kallnamn == "builtin.trim") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal trim krev 1 arg", "image": []} }
-                emit_trim(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis ncval_er_tekst_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
-                // tekst / tekst_fra_heltall / tekst_fra_heiltall / til_tekst → type-bevisst streng
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal tekst krev 1 arg", "image": []} }
-                emit_tekst_ncval(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis ncval_er_heltall_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
-                // heltall / heltall_fra_tekst / heiltall_fra_tekst → parse desimalstreng
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal heltall krev 1 arg", "image": []} }
-                emit_heltall_str(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "type" eller kallnamn == "builtin.type") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal type krev 1 arg", "image": []} }
-                emit_type_ncval(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "nøkler" eller kallnamn == "builtin.nøkler") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal nøkler krev 1 arg", "image": []} }
-                emit_noekler(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "verdier" eller kallnamn == "builtin.verdier") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal verdier krev 1 arg", "image": []} }
-                emit_verdier(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "fjern_siste" eller kallnamn == "builtin.fjern_siste") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fjern_siste krev 1 arg", "image": []} }
-                emit_fjern_siste(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "split" eller kallnamn == "builtin.split") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal split krev 2 arg", "image": []} }
-                la s_sp = ncval_opreg(djupn - 2)
-                la d_sp = ncval_opreg(djupn - 1)
-                legg_u32(native, 0xAA0003E0 | (s_sp << 16))     // mov x0, Xstr
-                legg_u32(native, 0xAA0003E1 | (d_sp << 16))     // mov x1, Xdelim
-                la p_bl_split = lengde(native)
-                legg_u32(native, 0x94000000)                    // bl __split
-                legg_til(bl_patchar, [p_bl_split, "__split"])
-                legg_u32(native, 0xAA0003E0 | s_sp)             // mov Xstr, x0
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "fjern_nokkel" eller kallnamn == "builtin.fjern_nokkel") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fjern_nokkel krev 2 arg", "image": []} }
-                emit_fjern_nokkel(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1))
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "join" eller kallnamn == "builtin.join") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal join krev 2 arg", "image": []} }
-                la l_jn = ncval_opreg(djupn - 2)
-                la sep_jn = ncval_opreg(djupn - 1)
-                legg_u32(native, 0xAA0003E0 | (l_jn << 16))     // mov x0, Xliste
-                legg_u32(native, 0xAA0003E1 | (sep_jn << 16))   // mov x1, Xsep
-                la p_bl_join = lengde(native)
-                legg_u32(native, 0x94000000)                    // bl __join
-                legg_til(bl_patchar, [p_bl_join, "__join"])
-                legg_u32(native, 0xAA0003E0 | l_jn)             // mov Xliste, x0
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "replace" eller kallnamn == "builtin.replace") og lengde(instr) == 3 og instr[2] == 3 {
-                hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal replace krev 3 arg", "image": []} }
-                emit_replace(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 3))
-                djupn = djupn - 2
-            } ellers hvis (kallnamn == "har_nokkel" eller kallnamn == "builtin.har_nokkel" eller kallnamn == "finnes_nøkkel" eller kallnamn == "builtin.finnes_nøkkel") og lengde(instr) == 3 og instr[2] == 2 {
-                // Fase 4: finnes_nøkkel(kart, nøkkel) → bool.
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal har_nokkel krev 2 arg", "image": []} }
-                emit_map_get(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), sann)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "fil_skriv" eller kallnamn == "builtin.fil_skriv") og lengde(instr) == 3 og instr[2] == 2 {
-                // Fase 6: fil_skriv(path, content).
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fil_skriv krev 2 arg", "image": []} }
-                emit_fil_skriv(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), os)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "fil_les" eller kallnamn == "builtin.fil_les") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_les krev 1 arg", "image": []} }
-                emit_fil_les(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), os)
-            } ellers hvis (kallnamn == "fil_finnes" eller kallnamn == "builtin.fil_finnes") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_finnes krev 1 arg", "image": []} }
-                emit_fil_finnes(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), os)
-            } ellers hvis (kallnamn == "miljo_hent" eller kallnamn == "builtin.miljo_hent") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal miljo_hent krev 1 arg", "image": []} }
-                emit_miljo_hent(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1))
-            } ellers hvis (kallnamn == "json_stringify" eller kallnamn == "builtin.json_stringify") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_stringify krev 1 arg", "image": []} }
-                la topp_js = ncval_opreg(djupn - 1)
-                legg_u32(native, 0xAA0003E0 | (topp_js << 16))  // mov x0, Xtopp
-                la p_bl_js = lengde(native)
-                legg_u32(native, 0x94000000)                    // bl __json_stringify
-                legg_til(bl_patchar, [p_bl_js, "__json_stringify"])
-                legg_u32(native, 0xAA0003E0 | topp_js)          // mov Xtopp, x0
-            } ellers hvis (kallnamn == "json_parse" eller kallnamn == "builtin.json_parse" eller kallnamn == "json_parse_raw" eller kallnamn == "builtin.json_parse_raw") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_parse krev 1 arg", "image": []} }
-                la topp_jp = ncval_opreg(djupn - 1)
-                legg_u32(native, 0xAA0003E0 | (topp_jp << 16))  // mov x0, Xtopp  (arg-streng)
-                legg_u32(native, 0xF9400409)                    // ldr x9, [x0, #8]  (strdata)
-                legg_u32(native, 0xF940012A)                    // ldr x10, [x9]     (lengd)
-                legg_u32(native, 0x91002120)                    // add x0, x9, #8    (cur)
-                legg_u32(native, 0x8B0A0001)                    // add x1, x0, x10   (end)
-                la p_bl_jp = lengde(native)
-                legg_u32(native, 0x94000000)                    // bl __json_parse
-                legg_til(bl_patchar, [p_bl_jp, "__json_parse"])
-                legg_u32(native, 0xAA0003E0 | topp_jp)          // mov Xtopp, x0
-            } ellers hvis (kallnamn == "socket_new" eller kallnamn == "builtin.socket_new") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_new krev 2 arg", "image": []} }
-                emit_socket_new(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), os)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "socket_bind" eller kallnamn == "builtin.socket_bind") og lengde(instr) == 3 og instr[2] == 3 {
-                hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_bind krev 3 arg", "image": []} }
-                emit_socket_bind(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 3), os)
-                djupn = djupn - 2
-            } ellers hvis (kallnamn == "socket_connect" eller kallnamn == "builtin.socket_connect") og lengde(instr) == 3 og instr[2] == 3 {
-                hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_connect krev 3 arg", "image": []} }
-                emit_socket_connect(native, ncval_opreg(djupn - 3), ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 3), os)
-                djupn = djupn - 2
-            } ellers hvis (kallnamn == "socket_listen" eller kallnamn == "builtin.socket_listen") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_listen krev 2 arg", "image": []} }
-                emit_socket_listen(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), os)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "socket_accept" eller kallnamn == "builtin.socket_accept") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_accept krev 1 arg", "image": []} }
-                emit_socket_accept(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), os)
-            } ellers hvis (kallnamn == "socket_send" eller kallnamn == "builtin.socket_send") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_send krev 2 arg", "image": []} }
-                emit_socket_send(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), os)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "socket_recv" eller kallnamn == "builtin.socket_recv") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_recv krev 2 arg", "image": []} }
-                emit_socket_recv(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1), ncval_opreg(djupn - 2), os)
-                djupn = djupn - 1
-            } ellers hvis (kallnamn == "socket_close" eller kallnamn == "builtin.socket_close") og lengde(instr) == 3 og instr[2] == 1 {
-                hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_close krev 1 arg", "image": []} }
-                emit_socket_close(native, ncval_opreg(djupn - 1), ncval_opreg(djupn - 1), os)
-            } ellers hvis (kallnamn == "legg_til" eller kallnamn == "builtin.legg_til") og lengde(instr) == 3 og instr[2] == 2 {
-                hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal legg_til krev 2 arg", "image": []} }
-                emit_legg_til(native, ncval_opreg(djupn - 2), ncval_opreg(djupn - 1))
-                djupn = djupn - 1
             } ellers {
-                returner {"ok": "usann", "error": "NcVal støttar ikkje kall: " + kallnamn, "image": []}
+                // Builtin-hale. Last topp-operandane éin gong (r1=djupn-1, r2=djupn-2,
+                // r3=djupn-3) inn i x21/x20/x19 i mem-modus; i reg-modus er dette berre
+                // reg-nummer (opnd_les emitterer ingenting) så bytene er uendra. Kvar
+                // sak skriv resultatet tilbake med opnd_ut før djupn justerast.
+                la r1 = 0
+                la r2 = 0
+                la r3 = 0
+                hvis djupn >= 1 { r1 = opnd_les(native, djupn - 1, 2, memmode, home_off) }
+                hvis djupn >= 2 { r2 = opnd_les(native, djupn - 2, 1, memmode, home_off) }
+                hvis djupn >= 3 { r3 = opnd_les(native, djupn - 3, 0, memmode, home_off) }
+                hvis (kallnamn == "skriv" eller kallnamn == "builtin.skriv" eller kallnamn == "print" eller kallnamn == "builtin.print") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal skriv krev éin stakkverdi", "image": []} }
+                    emit_skriv_ncval(native, r1, os)
+                    // skriv gjev nil→held argumentet som dummy-resultat; djupn uendra.
+                } ellers hvis (kallnamn == "lengde" eller kallnamn == "builtin.lengde") og lengde(instr) == 3 og instr[2] == 1 {
+                    // Fase 3: lengde(streng) = byte-lengda i strdata-headeren, boksa som int.
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal lengde krev éin stakkverdi", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 9)  // ldr x9, [Xtopp, #8]  (strdata)
+                    legg_u32(native, 0xF940012A)                    // ldr x10, [x9]        (lengd)
+                    emit_ncval_alloc(native, 10, r1, 1)             // boks som int → same slot
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "char_code" eller kallnamn == "builtin.char_code") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal char_code krev 1 arg", "image": []} }
+                    emit_char_code(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "chr" eller kallnamn == "builtin.chr") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal chr krev 1 arg", "image": []} }
+                    emit_chr(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "lower" eller kallnamn == "builtin.lower") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal lower krev 1 arg", "image": []} }
+                    emit_case(native, r1, r1, 1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "upper" eller kallnamn == "builtin.upper") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal upper krev 1 arg", "image": []} }
+                    emit_case(native, r1, r1, 2)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "slice" eller kallnamn == "builtin.slice") og lengde(instr) == 3 og instr[2] == 3 {
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal slice krev 3 arg", "image": []} }
+                    emit_slice(native, r3, r2, r1, r3)
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
+                } ellers hvis (kallnamn == "index_of" eller kallnamn == "builtin.index_of") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal index_of krev 2 arg", "image": []} }
+                    emit_str_find(native, r2, r1, r2, usann)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "contains" eller kallnamn == "builtin.contains") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal contains krev 2 arg", "image": []} }
+                    emit_str_find(native, r2, r1, r2, sann)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "starts_with" eller kallnamn == "builtin.starts_with") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal starts_with krev 2 arg", "image": []} }
+                    emit_str_matchat(native, r2, r1, r2, usann)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "ends_with" eller kallnamn == "builtin.ends_with") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal ends_with krev 2 arg", "image": []} }
+                    emit_str_matchat(native, r2, r1, r2, sann)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "trim" eller kallnamn == "builtin.trim") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal trim krev 1 arg", "image": []} }
+                    emit_trim(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis ncval_er_tekst_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal tekst krev 1 arg", "image": []} }
+                    emit_tekst_ncval(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis ncval_er_heltall_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal heltall krev 1 arg", "image": []} }
+                    emit_heltall_str(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "type" eller kallnamn == "builtin.type") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal type krev 1 arg", "image": []} }
+                    emit_type_ncval(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "nøkler" eller kallnamn == "builtin.nøkler") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal nøkler krev 1 arg", "image": []} }
+                    emit_noekler(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "tid_ms" eller kallnamn == "builtin.tid_ms" eller kallnamn == "now_ms" eller kallnamn == "builtin.now_ms") og lengde(instr) == 3 og instr[2] == 0 {
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la td = opnd_push_reg(djupn, memmode)
+                    emit_tid_ms(native, td, os)
+                    opnd_ut(native, djupn, td, memmode, home_off)
+                    djupn = djupn + 1
+                } ellers hvis (kallnamn == "verdier" eller kallnamn == "builtin.verdier") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal verdier krev 1 arg", "image": []} }
+                    emit_verdier(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "fjern_siste" eller kallnamn == "builtin.fjern_siste") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fjern_siste krev 1 arg", "image": []} }
+                    emit_fjern_siste(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "split" eller kallnamn == "builtin.split") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal split krev 2 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r2 << 16))     // mov x0, Xstr
+                    legg_u32(native, 0xAA0003E1 | (r1 << 16))     // mov x1, Xdelim
+                    la p_bl_split = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __split
+                    legg_til(bl_patchar, [p_bl_split, "__split"])
+                    legg_u32(native, 0xAA0003E0 | r2)             // mov Xstr, x0
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "fjern_nokkel" eller kallnamn == "builtin.fjern_nokkel") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fjern_nokkel krev 2 arg", "image": []} }
+                    emit_fjern_nokkel(native, r2, r1)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "join" eller kallnamn == "builtin.join") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal join krev 2 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r2 << 16))     // mov x0, Xliste
+                    legg_u32(native, 0xAA0003E1 | (r1 << 16))   // mov x1, Xsep
+                    la p_bl_join = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __join
+                    legg_til(bl_patchar, [p_bl_join, "__join"])
+                    legg_u32(native, 0xAA0003E0 | r2)             // mov Xliste, x0
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "replace" eller kallnamn == "builtin.replace") og lengde(instr) == 3 og instr[2] == 3 {
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal replace krev 3 arg", "image": []} }
+                    emit_replace(native, r3, r2, r1, r3)
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
+                } ellers hvis (kallnamn == "har_nokkel" eller kallnamn == "builtin.har_nokkel" eller kallnamn == "finnes_nøkkel" eller kallnamn == "builtin.finnes_nøkkel") og lengde(instr) == 3 og instr[2] == 2 {
+                    // Fase 4: finnes_nøkkel(kart, nøkkel) → bool.
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal har_nokkel krev 2 arg", "image": []} }
+                    emit_map_get(native, r2, r1, r2, sann)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "fil_skriv" eller kallnamn == "builtin.fil_skriv") og lengde(instr) == 3 og instr[2] == 2 {
+                    // Fase 6: fil_skriv(path, content).
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fil_skriv krev 2 arg", "image": []} }
+                    emit_fil_skriv(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "fil_les" eller kallnamn == "builtin.fil_les") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_les krev 1 arg", "image": []} }
+                    emit_fil_les(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "fil_finnes" eller kallnamn == "builtin.fil_finnes") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_finnes krev 1 arg", "image": []} }
+                    emit_fil_finnes(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "miljo_hent" eller kallnamn == "builtin.miljo_hent") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal miljo_hent krev 1 arg", "image": []} }
+                    emit_miljo_hent(native, r1, r1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "json_stringify" eller kallnamn == "builtin.json_stringify") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_stringify krev 1 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp
+                    la p_bl_js = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __json_stringify
+                    legg_til(bl_patchar, [p_bl_js, "__json_stringify"])
+                    legg_u32(native, 0xAA0003E0 | r1)          // mov Xtopp, x0
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "json_parse" eller kallnamn == "builtin.json_parse" eller kallnamn == "json_parse_raw" eller kallnamn == "builtin.json_parse_raw") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_parse krev 1 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp  (arg-streng)
+                    legg_u32(native, 0xF9400409)                    // ldr x9, [x0, #8]  (strdata)
+                    legg_u32(native, 0xF940012A)                    // ldr x10, [x9]     (lengd)
+                    legg_u32(native, 0x91002120)                    // add x0, x9, #8    (cur)
+                    legg_u32(native, 0x8B0A0001)                    // add x1, x0, x10   (end)
+                    la p_bl_jp = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __json_parse
+                    legg_til(bl_patchar, [p_bl_jp, "__json_parse"])
+                    legg_u32(native, 0xAA0003E0 | r1)          // mov Xtopp, x0
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "socket_new" eller kallnamn == "builtin.socket_new") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_new krev 2 arg", "image": []} }
+                    emit_socket_new(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_bind" eller kallnamn == "builtin.socket_bind") og lengde(instr) == 3 og instr[2] == 3 {
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_bind krev 3 arg", "image": []} }
+                    emit_socket_bind(native, r3, r2, r1, r3, os)
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
+                } ellers hvis (kallnamn == "socket_connect" eller kallnamn == "builtin.socket_connect") og lengde(instr) == 3 og instr[2] == 3 {
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_connect krev 3 arg", "image": []} }
+                    emit_socket_connect(native, r3, r2, r1, r3, os)
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
+                } ellers hvis (kallnamn == "socket_listen" eller kallnamn == "builtin.socket_listen") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_listen krev 2 arg", "image": []} }
+                    emit_socket_listen(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_accept" eller kallnamn == "builtin.socket_accept") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_accept krev 1 arg", "image": []} }
+                    emit_socket_accept(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "socket_send" eller kallnamn == "builtin.socket_send") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_send krev 2 arg", "image": []} }
+                    emit_socket_send(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_recv" eller kallnamn == "builtin.socket_recv") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_recv krev 2 arg", "image": []} }
+                    emit_socket_recv(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_close" eller kallnamn == "builtin.socket_close") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_close krev 1 arg", "image": []} }
+                    emit_socket_close(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "legg_til" eller kallnamn == "builtin.legg_til") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal legg_til krev 2 arg", "image": []} }
+                    emit_legg_til(native, r2, r1)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers {
+                    returner {"ok": "usann", "error": "NcVal støttar ikkje kall: " + kallnamn, "image": []}
+                }
             }
         } ellers {
             returner {"ok": "usann", "error": "NcVal støttar ikkje opcode: " + op, "image": []}
@@ -3768,7 +4005,14 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         la params = mål["params"]
         hvis params == null { params = [] }
         la bl_patchar = []
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers)
+        // Prøv rask reg-modus (x19–x24, byte-identisk med før). Sprekk operand-
+        // stakken (>6), rekompiler funksjonen i mem-modus der operandane bur i
+        // minne-heimar etter lokalvariablane (operand-spilling).
+        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann)
+        hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
+            bl_patchar = []
+            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann)
+        }
         hvis res["ok"] != "sann" { returner {"ok": "usann", "error": "[" + fname + "] " + tekst(res["error"]), "image": []} }
         la frag = res["image"]
         la base = lengde(image)
