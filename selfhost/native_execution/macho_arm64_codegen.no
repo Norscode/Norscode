@@ -36,6 +36,22 @@ funksjon last_heiltall(kode: liste_heiltall, register: heiltall, verdi: heiltall
     returner 0
 }
 
+// Full 64-bit konstant-last i eit x-register (movz + inntil 3 movk). Brukt for
+// PUSH_CONST utanfor int32 (t.d. usignert 32-bit SHA-konstantar som 0xFFFFFFFF)
+// og for 64-bit-aritmetikk. Negativt handterast som 64-bit tomannskomplement.
+funksjon last_heiltall_64(kode: liste_heiltall, register: heiltall, verdi: heiltall) -> heiltall {
+    la bits = verdi & 0xFFFFFFFFFFFFFFFF
+    la h0 = bits & 0xFFFF
+    la h1 = (bits >> 16) & 0xFFFF
+    la h2 = (bits >> 32) & 0xFFFF
+    la h3 = (bits >> 48) & 0xFFFF
+    legg_u32(kode, 0xD2800000 | (h0 << 5) | register)          // movz xN, #h0
+    hvis h1 != 0 { legg_u32(kode, 0xF2A00000 | (h1 << 5) | register) } // movk xN, #h1, lsl 16
+    hvis h2 != 0 { legg_u32(kode, 0xF2C00000 | (h2 << 5) | register) } // movk xN, #h2, lsl 32
+    hvis h3 != 0 { legg_u32(kode, 0xF2E00000 | (h3 << 5) | register) } // movk xN, #h3, lsl 48
+    returner 0
+}
+
 funksjon variabel_register(indeks: heiltall) -> heiltall {
     hvis indeks < 6 { returner 12 + indeks }
     returner 1 + (indeks - 6)
@@ -63,7 +79,9 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "nøkler" eller n == "verdier" eller n == "fjern_siste" eller n == "split" eller n == "join" eller
        n == "tid_ms" eller n == "now_ms" eller
        n == "tekst_erstatt" eller n == "tekst_starter_med" eller n == "nøkkel_finnes" eller
-       n == "json_skriv" eller n == "exit" eller n == "miljo_sett" {
+       n == "json_skriv" eller n == "exit" eller n == "miljo_sett" eller
+       n == "bytes_new" eller n == "bytes_from_list" eller n == "bytes_to_list" eller
+       n == "assert" eller n == "assert_eq" {
         returner sann
     }
     returner usann
@@ -152,7 +170,7 @@ funksjon emit_skriv_int(native: liste_heiltall, arg: heiltall, os: tekst) -> hei
 funksjon emit_heap_init(native: liste_heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD2800000)                    // movz x0, #0        (addr = NULL)
     legg_u32(native, 0xD2800001)                    // movz x1, #0
-    legg_u32(native, 0xF2A02001)                    // movk x1, #0x0100, lsl #16  (len=16 MiB)
+    legg_u32(native, 0xF2A80001)                    // movk x1, #0x4000, lsl #16  (len=1 GiB; anon mmap er lat)
     legg_u32(native, 0xD2800062)                    // movz x2, #3        (PROT_READ|WRITE)
     hvis os == "linux" {
         legg_u32(native, 0xD2800443)                // movz x3, #0x22     (MAP_PRIVATE|ANONYMOUS)
@@ -2478,6 +2496,94 @@ funksjon emit_env_get_routine() -> liste_heiltall {
     returner r
 }
 
+// ─── bytes-type (representert som NcVal-liste) ───────────────────────────────
+// std.bytes byggjer på ein liste av byte-heiltal (indeksert + lengde), så vi
+// representerer NC_BYTES som ei vanleg NcVal-liste (type 4). bytes_from_list/
+// bytes_to_list er difor identitet, og bytes.er_bytes (som spør builtin.type)
+// gjev "liste" → _liste-hjelparane i krypto-stakken tek rett gren uansett.
+// bytes_new(storleik, fyll) allokerer ei liste med `storleik` element = fyll.
+funksjon emit_bytes_new(native: liste_heiltall, size_reg: heiltall, fill_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400400 | (size_reg << 5) | 9)  // ldr x9, [Xsize, #8]  (count)
+    legg_u32(native, 0xAA1C03EE)                        // mov x14, x28  (listdata-base)
+    legg_u32(native, 0xF90001C9)                        // str x9, [x14]  (count)
+    legg_u32(native, 0x910021CF)                        // add x15, x14, #8  (write-ptr)
+    legg_u32(native, 0xD2800010)                        // movz x16, #0  (i)
+    la lbl_loop = lengde(native)
+    legg_u32(native, 0xEB09021F)                        // cmp x16, x9
+    la p_bge = lengde(native)
+    legg_u32(native, 0)                                 // b.ge done
+    legg_u32(native, 0xF90001E0 | fill_reg)             // str Xfill, [x15]
+    legg_u32(native, 0x910021EF)                        // add x15, x15, #8
+    legg_u32(native, 0x91000610)                        // add x16, x16, #1
+    la p_bloop = lengde(native)
+    legg_u32(native, 0x14000000)                        // b loop
+    la lbl_done = lengde(native)
+    legg_u32(native, 0xAA0F03FC)                        // mov x28, x15  (bump)
+    emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
+    skriv_u32(native, p_bge,   0x5400000A | ((((lbl_done - p_bge)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
+    returner 0
+}
+
+// ─── assert / assert_eq (test-/attestasjonsbuiltins) ────────────────────────
+// __assert(x0=vilkår): terminerer med exit(1) dersom val==0, elles retur.
+funksjon emit_assert_routine(os: tekst) -> liste_heiltall {
+    la exitnum = 1
+    hvis os == "linux" { exitnum = 93 }
+    la r: liste_heiltall = []
+    legg_u32(r, 0xB9400809)                             // ldr w9, [x0, #8]
+    la p_cbnz = lengde(r)
+    legg_u32(r, 0)                                      // cbnz w9, ok
+    legg_u32(r, 0x52800020)                             // movz w0, #1
+    emit_syscall(r, exitnum, os)                        // exit(1)
+    la lbl_ok = lengde(r)
+    legg_u32(r, 0xD65F03C0)                             // ret
+    skriv_u32(r, p_cbnz, 0x35000009 | ((((lbl_ok - p_cbnz) / 4) & 0x7FFFF) << 5))
+    returner r
+}
+
+// __assert_eq(x0=a, x1=b): exit(1) dersom a != b (type-bevisst: streng→byte,
+// elles 64-bit val-samanlikning), elles retur.
+funksjon emit_assert_eq_routine(os: tekst) -> liste_heiltall {
+    la exitnum = 1
+    hvis os == "linux" { exitnum = 93 }
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD10103FF)                             // sub sp, sp, #64
+    legg_u32(r, 0xF9000BFE)                             // str x30, [sp, #16]
+    // type-dispatch: type==3 (streng) → byte-samanlikning, elles 64-bit val
+    legg_u32(r, 0xF9400009)                             // ldr x9, [x0]  (type a)
+    legg_u32(r, 0xF1000D3F)                             // cmp x9, #3
+    la p_bne_int = lengde(r)
+    legg_u32(r, 0)                                      // b.ne intcmp
+    emit_str_eq(r, 0, 1, 2)                             // x2 = bool NcVal (a==b)
+    legg_u32(r, 0xB9400849)                             // ldr w9, [x2, #8]
+    la p_cbz_fail1 = lengde(r)
+    legg_u32(r, 0)                                      // cbz w9, fail
+    la p_b_ok1 = lengde(r)
+    legg_u32(r, 0x14000000)                             // b ok
+    la lbl_int = lengde(r)
+    legg_u32(r, 0xF9400409)                             // ldr x9, [x0, #8]
+    legg_u32(r, 0xF940042A)                             // ldr x10, [x1, #8]
+    legg_u32(r, 0xEB0A013F)                             // cmp x9, x10
+    la p_bne_fail = lengde(r)
+    legg_u32(r, 0)                                      // b.ne fail
+    la p_b_ok2 = lengde(r)
+    legg_u32(r, 0x14000000)                             // b ok
+    la lbl_fail = lengde(r)
+    legg_u32(r, 0x52800020)                             // movz w0, #1
+    emit_syscall(r, exitnum, os)                        // exit(1)
+    la lbl_ok = lengde(r)
+    legg_u32(r, 0xF9400BFE)                             // ldr x30, [sp, #16]
+    legg_u32(r, 0x910103FF)                             // add sp, sp, #64
+    legg_u32(r, 0xD65F03C0)                             // ret
+    skriv_u32(r, p_bne_int,   0x54000001 | ((((lbl_int  - p_bne_int)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_cbz_fail1, 0xB4000009 | ((((lbl_fail - p_cbz_fail1) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_ok1,     0x14000000 |  (((lbl_ok   - p_b_ok1)     / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_bne_fail,  0x54000001 | ((((lbl_fail - p_bne_fail)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_ok2,     0x14000000 |  (((lbl_ok   - p_b_ok2)     / 4) & 0x03FFFFFF))
+    returner r
+}
+
 // `skriv` av ein NcVal-peikar i Xptr_reg (les val, formater desimal, write).
 // Til skilnad frå emit_skriv_int rører han berre scratch x9–x15 + x0/x1/x2 og
 // syscall-registeret, så operand-stakken (x19–x25), locals-basen (x26) og heap-
@@ -2916,10 +3022,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     tag = 2   // bool-tagg (som COMPARE_*), så json_stringify gjev true/false
                     hvis konstant { konstant = 1 } ellers { konstant = 0 }
                 }
-                prøv { last_heiltall(native, 9, konstant) } fang melding {
-                    returner {"ok": "usann", "error": tekst(melding), "image": []}
+                hvis konstant >= -2147483648 og konstant <= 2147483647 {
+                    // 32-bit-veg (byte-identisk med før): sxtw-boksing.
+                    prøv { last_heiltall(native, 9, konstant) } fang melding {
+                        returner {"ok": "usann", "error": tekst(melding), "image": []}
+                    }
+                    emit_ncval_alloc(native, 9, mål_pc, tag)
+                } ellers {
+                    // 64-bit konstant (t.d. usignert 32-bit SHA-konstant): full x-last + 64-bit boks.
+                    last_heiltall_64(native, 9, konstant)
+                    emit_ncval_alloc_ptr(native, 9, mål_pc, tag)
                 }
-                emit_ncval_alloc(native, 9, mål_pc, tag)
             } ellers hvis kt == "ingenting" {
                 // null → int 0 (same null-representasjon som json_parse). Modul-init
                 // returnerer ofte PUSH_CONST null; RETURN treng ein verdi på stakken.
@@ -2950,10 +3063,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_b_end = lengde(native)
             legg_u32(native, 0)                                 // b add_end
             la lbl_int = lengde(native)
-            legg_u32(native, 0xB9400800 | (venstre << 5) | 9)   // ldr w9, [Xvenstre, #8]
-            legg_u32(native, 0xB9400800 | (høgre << 5) | 10)    // ldr w10, [Xhøgre, #8]
-            legg_u32(native, 0x0B0A0129)                        // add w9, w9, w10
-            emit_ncval_alloc(native, 9, venstre, 1)
+            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
+            legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
+            legg_u32(native, 0x8B0A0129)                        // add x9, x9, x10
+            emit_ncval_alloc_ptr(native, 9, venstre, 1)         // 64-bit boks
             la lbl_end = lengde(native)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
@@ -2963,54 +3076,54 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
             la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
             la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
-            legg_u32(native, 0xB9400800 | (venstre << 5) | 9)   // ldr w9, [Xvenstre, #8]
-            legg_u32(native, 0xB9400800 | (høgre << 5) | 10)    // ldr w10, [Xhøgre, #8]
+            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
+            legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             hvis op == "BINARY_ADD" eller op == "ADD" {
-                legg_u32(native, 0x0B0A0129)                    // add w9, w9, w10
+                legg_u32(native, 0x8B0A0129)                    // add x9, x9, x10
             } ellers hvis op == "BINARY_SUB" eller op == "SUB" {
-                legg_u32(native, 0x4B0A0129)                    // sub w9, w9, w10
+                legg_u32(native, 0xCB0A0129)                    // sub x9, x9, x10
             } ellers hvis op == "BINARY_MUL" eller op == "MUL" {
-                legg_u32(native, 0x1B0A7D29)                    // mul w9, w9, w10
+                legg_u32(native, 0x9B0A7D29)                    // mul x9, x9, x10
             } ellers hvis op == "BINARY_DIV" eller op == "DIV" {
-                legg_u32(native, 0x1ACA0D29)                    // sdiv w9, w9, w10
+                legg_u32(native, 0x9ACA0D29)                    // sdiv x9, x9, x10
             } ellers hvis op == "BINARY_MOD" {
-                legg_u32(native, 0x1ACA0D2B)                    // sdiv w11, w9, w10
-                legg_u32(native, 0x1B0AA569)                    // msub w9, w11, w10, w9
+                legg_u32(native, 0x9ACA0D2B)                    // sdiv x11, x9, x10
+                legg_u32(native, 0x9B0AA569)                    // msub x9, x11, x10, x9
             } ellers hvis op == "BINARY_AND" {
-                legg_u32(native, 0x0A0A0129)                    // and w9, w9, w10
+                legg_u32(native, 0x8A0A0129)                    // and x9, x9, x10
             } ellers hvis op == "BINARY_OR" {
-                legg_u32(native, 0x2A0A0129)                    // orr w9, w9, w10
+                legg_u32(native, 0xAA0A0129)                    // orr x9, x9, x10
             } ellers hvis op == "BINARY_XOR" {
-                legg_u32(native, 0x4A0A0129)                    // eor w9, w9, w10
+                legg_u32(native, 0xCA0A0129)                    // eor x9, x9, x10
             } ellers hvis op == "BINARY_LSHIFT" {
-                legg_u32(native, 0x1ACA2129)                    // lslv w9, w9, w10
+                legg_u32(native, 0x9ACA2129)                    // lslv x9, x9, x10
             } ellers {
-                legg_u32(native, 0x1ACA2929)                    // asrv w9, w9, w10
+                legg_u32(native, 0x9ACA2929)                    // asrv x9, x9, x10
             }
-            emit_ncval_alloc(native, 9, venstre, 1)
+            emit_ncval_alloc_ptr(native, 9, venstre, 1)         // 64-bit boks
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "UNARY_NEG" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NEG", "image": []} }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
-            legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
-            legg_u32(native, 0x4B0903E9)                        // neg w9, w9
-            emit_ncval_alloc(native, 9, topp, 1)
+            legg_u32(native, 0xF9400400 | (topp << 5) | 9)      // ldr x9, [Xtopp, #8]
+            legg_u32(native, 0xCB0903E9)                        // neg x9, x9
+            emit_ncval_alloc_ptr(native, 9, topp, 1)
             opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "UNARY_NOT" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NOT", "image": []} }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
-            legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
-            legg_u32(native, 0x7100013F)                        // cmp w9, #0
+            legg_u32(native, 0xF9400400 | (topp << 5) | 9)      // ldr x9, [Xtopp, #8]
+            legg_u32(native, 0xF100013F)                        // cmp x9, #0
             legg_u32(native, 0x1A9F17E9)                        // cset w9, eq
             emit_ncval_alloc(native, 9, topp, 2)
             opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "UNARY_BNOT" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_BNOT", "image": []} }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
-            legg_u32(native, 0xB9400800 | (topp << 5) | 9)      // ldr w9, [Xtopp, #8]
-            legg_u32(native, 0x2A2903E9)                        // mvn w9, w9
-            emit_ncval_alloc(native, 9, topp, 1)
+            legg_u32(native, 0xF9400400 | (topp << 5) | 9)      // ldr x9, [Xtopp, #8]
+            legg_u32(native, 0xAA2903E9)                        // mvn x9, x9
+            emit_ncval_alloc_ptr(native, 9, topp, 1)
             opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "COMPARE_EQ" {
             // Fase 3: type-dispatch på `==`. Streng-byte-likskap når venstre er
@@ -3537,6 +3650,32 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_u32(native, 0xB9400800 | (r1 << 5) | 0)  // ldr w0, [Xkode, #8]
                     hvis os == "linux" { emit_syscall(native, 93, os) } ellers { emit_syscall(native, 1, os) }
                     // djupn uendra (dummy-resultat, aldri nådd)
+                } ellers hvis (kallnamn == "bytes_new" eller kallnamn == "builtin.bytes_new") og lengde(instr) == 3 og instr[2] == 2 {
+                    // bytes som NcVal-liste: bytes_new(storleik, fyll) → liste av fyll.
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal bytes_new krev 2 arg", "image": []} }
+                    emit_bytes_new(native, r2, r1, r2)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "bytes_from_list" eller kallnamn == "builtin.bytes_from_list" eller kallnamn == "bytes_to_list" eller kallnamn == "builtin.bytes_to_list") og lengde(instr) == 3 og instr[2] == 1 {
+                    // bytes ≡ liste → begge er identitet (operanden ligg alt på plass).
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal bytes_from/to_list krev 1 arg", "image": []} }
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "assert" eller kallnamn == "builtin.assert") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal assert krev 1 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r1 << 16))       // mov x0, Xvilkår
+                    la p_bl_as = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __assert
+                    legg_til(bl_patchar, [p_bl_as, "__assert"])
+                    // resultat = vilkåret (uendra); djupn uendra
+                } ellers hvis (kallnamn == "assert_eq" eller kallnamn == "builtin.assert_eq") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal assert_eq krev 2 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r2 << 16))       // mov x0, Xa
+                    legg_u32(native, 0xAA0003E1 | (r1 << 16))       // mov x1, Xb
+                    la p_bl_ae = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __assert_eq
+                    legg_til(bl_patchar, [p_bl_ae, "__assert_eq"])
+                    opnd_ut(native, djupn - 2, r1, memmode, home_off)   // resultat = b (uråkeleg)
+                    djupn = djupn - 1
                 } ellers {
                     returner {"ok": "usann", "error": "NcVal støttar ikkje kall: " + kallnamn, "image": []}
                 }
@@ -4225,6 +4364,26 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         fn_start["__env_get"] = lengde(image)
         la eg2 = 0
         mens eg2 < lengde(ruteg) { legg_til(image, ruteg[eg2]) eg2 = eg2 + 1 }
+    }
+    la treng_assert = usann
+    la treng_assert_eq = usann
+    la pas = 0
+    mens pas < lengde(all_patchar) {
+        hvis all_patchar[pas][1] == "__assert" { treng_assert = sann }
+        hvis all_patchar[pas][1] == "__assert_eq" { treng_assert_eq = sann }
+        pas = pas + 1
+    }
+    hvis treng_assert {
+        la ruta = emit_assert_routine(os)
+        fn_start["__assert"] = lengde(image)
+        la as2 = 0
+        mens as2 < lengde(ruta) { legg_til(image, ruta[as2]) as2 = as2 + 1 }
+    }
+    hvis treng_assert_eq {
+        la rutae = emit_assert_eq_routine(os)
+        fn_start["__assert_eq"] = lengde(image)
+        la ae2 = 0
+        mens ae2 < lengde(rutae) { legg_til(image, rutae[ae2]) ae2 = ae2 + 1 }
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
