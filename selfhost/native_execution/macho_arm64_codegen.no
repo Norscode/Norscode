@@ -386,11 +386,19 @@ funksjon emit_case(native: liste_heiltall, arg_reg: heiltall, dst_reg: heiltall,
 
 // Streng-likskap (byte-samanlikning) → bool NcVal (1 lik, 0 ulik).
 funksjon emit_str_eq(native: liste_heiltall, left_reg: heiltall, right_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    // Typevakt: høgre operand må òg vere streng (type 3). Utan denne deref-a
+    // str_eq [høgre+8] som strdata sjølv når høgre er int/null/bool — der [+8]
+    // er den rå verdien (t.d. 0 for `null`), som gjev `ldr [0]`-krasj på
+    // `streng == null`. VM-en gjer ulike typar → ulike.
+    legg_u32(native, 0xD280000D)                        // movz x13, #0    (resultat = ulik)
+    legg_u32(native, 0xF9400000 | (right_reg << 5) | 9) // ldr x9, [Xright]  (høgre type)
+    legg_u32(native, 0xF1000D3F)                        // cmp x9, #3
+    la p_bne_type = lengde(native)
+    legg_u32(native, 0)                                 // b.ne eqdone  (høgre ikkje streng)
     legg_u32(native, 0xF9400400 | (left_reg << 5) | 9)  // ldr x9,  [Xleft, #8]
     legg_u32(native, 0xF9400400 | (right_reg << 5) | 10) // ldr x10, [Xright, #8]
     legg_u32(native, 0xF940012B)                        // ldr x11, [x9]   (lenL)
     legg_u32(native, 0xF940014C)                        // ldr x12, [x10]  (lenR)
-    legg_u32(native, 0xD280000D)                        // movz x13, #0    (resultat)
     legg_u32(native, 0xEB0C017F)                        // cmp x11, x12
     la p_bne = lengde(native)
     legg_u32(native, 0)                                 // b.ne eqdone
@@ -414,6 +422,7 @@ funksjon emit_str_eq(native: liste_heiltall, left_reg: heiltall, right_reg: heil
     la lbl_done = lengde(native)
     legg_u32(native, 0xAA0D03E9)                        // mov x9, x13  (emit_ncval_alloc klobbar x13)
     emit_ncval_alloc(native, 9, dst_reg, 2)
+    skriv_u32(native, p_bne_type, 0x54000001 | ((((lbl_done  - p_bne_type) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bne,   0x54000001 | ((((lbl_done  - p_bne)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz,   0xB400000B | ((((lbl_match - p_cbz)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bne2,  0x54000001 | ((((lbl_done  - p_bne2)  / 4) & 0x7FFFF) << 5))
@@ -3873,13 +3882,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
                 returner {"ok": "usann", "error": "NcVal LOAD_NAME krev namn", "image": []}
             }
-            hvis ikkje finnes_nøkkel(variablar, instr[1]) { returner {"ok": "usann", "error": "NcVal ukjend lokal variabel: " + instr[1], "image": []} }
-            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
-            la idx = variablar[instr[1]]
-            la mål = opnd_push_reg(djupn, memmode)
-            legg_u32(native, 0xF9400000 | (idx << 10) | (26 << 5) | mål) // ldr Xmål, [x26, #idx*8]
-            opnd_ut(native, djupn, mål, memmode, home_off)
-            djupn = djupn + 1
+            la ln = instr[1]
+            hvis ikkje finnes_nøkkel(variablar, ln) {
+                // null/ingenting/sann/usann/true/false er konstant-namn i VM-en
+                // (ramme_les_var), ikkje lokale. Emitter dei som boksa konstantar
+                // (som PUSH_CONST): null/ingenting → int 0; bool → tag 2.
+                hvis ln == "null" eller ln == "ingenting" eller ln == "sann" eller ln == "usann" eller ln == "true" eller ln == "false" {
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la kdst = opnd_push_reg(djupn, memmode)
+                    hvis ln == "null" eller ln == "ingenting" {
+                        legg_u32(native, 0xD2800009)             // movz x9, #0
+                        emit_ncval_alloc(native, 9, kdst, 1)     // int 0
+                    } ellers {
+                        la bv = 0
+                        hvis ln == "sann" eller ln == "true" { bv = 1 }
+                        legg_u32(native, 0xD2800009 | (bv << 5)) // movz x9, #bv
+                        emit_ncval_alloc(native, 9, kdst, 2)     // bool
+                    }
+                    opnd_ut(native, djupn, kdst, memmode, home_off)
+                    djupn = djupn + 1
+                } ellers {
+                    returner {"ok": "usann", "error": "NcVal ukjend lokal variabel: " + ln, "image": []}
+                }
+            } ellers {
+                hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                la idx = variablar[ln]
+                la mål = opnd_push_reg(djupn, memmode)
+                legg_u32(native, 0xF9400000 | (idx << 10) | (26 << 5) | mål) // ldr Xmål, [x26, #idx*8]
+                opnd_ut(native, djupn, mål, memmode, home_off)
+                djupn = djupn + 1
+            }
         } ellers hvis op == "STORE_GLOBAL" {
             // Fase 8: modul-global = [x25 + slot*8]. slot tildelt i ncval_compile_program.
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
