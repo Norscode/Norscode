@@ -968,10 +968,17 @@ funksjon _modul_filsti_fra_namn(namn: tekst) -> tekst {
     // Prioriter .nors, men støtt eldre .no for bakoverkompatibilitet.
     la nors_filsti = basis + ".nors"
     la no_filsti = basis + ".no"
-    hvis fil_finnes(nors_filsti) {
+    la nors_probe = nors_filsti
+    la no_probe = no_filsti
+    la root = builtin.trim(miljo_hent("NORSCODE_ROOT"))
+    hvis root != "" {
+        nors_probe = root + "/" + nors_filsti
+        no_probe = root + "/" + no_filsti
+    }
+    hvis fil_finnes(nors_probe) {
         returner nors_filsti
     }
-    hvis fil_finnes(no_filsti) {
+    hvis fil_finnes(no_probe) {
         returner no_filsti
     }
     returner nors_filsti
@@ -1048,7 +1055,7 @@ funksjon fjern_bruk_linjer(kjelde: tekst) -> tekst {
 funksjon nc_bundle_fremdrift(fase: tekst) -> heiltall {
     la sti = builtin.trim(miljo_hent("NORSCODE_BUNDLE_PROGRESS_FILE"))
     hvis sti != "" {
-        prøv { fil_skriv(sti, fase + "\n") } fang (e) { la ignorert = e }
+        prøv { builtin.fil_append(sti, fase + "\n") } fang (e) { la ignorert = e }
     }
     returner 0
 }
@@ -1143,6 +1150,88 @@ funksjon normaliser_json_kontrollteikn(data: tekst) -> tekst {
     }
     hvis bit != "" { legg_til(delar, bit) }
     returner builtin.join(delar, "")
+}
+
+// Hald importparse over ei eiga funksjonsgrense. Eldre AOT-generasjonar kan
+// elles binde argumentet i `la parsed = json_parse_raw(ncb_json)` til den nye
+// destinasjonslokalen når den store bundlefunksjonen blir overlay-kompilert.
+funksjon nc_parse_import_ncb(ncb_json: tekst) {
+    returner json_parse_raw(ncb_json)
+}
+
+// Materialiser importen inn i eit caller-eigd map. Den store bundlefunksjonen
+// slepp då å halde compilerens fleirmegabyte-JSON som ein lokal over fleire
+// kontrollflytgreiner; det var kjelda til slot-kollisjonen i eldre AOT.
+funksjon nc_materialiser_import_ncb(dest, kjelde: tekst, alias: tekst, cache_json: tekst) -> heiltall {
+    la data = cache_json
+    hvis data == "" {
+        hvis lengde(kjelde) == 0 { kast "bundle: tom importkjelde " + alias }
+        data = komp.kompiler_fil(kjelde, alias)
+    }
+    hvis data == null eller data == "" { kast "bundle: tom import-NCB " + alias }
+    la parsed = json_parse_raw(data)
+    hvis parsed == null eller parsed["functions"] == null {
+        kast "bundle: ugyldig import-NCB " + alias
+    }
+    la felt = nøkler(parsed)
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        dest[felt[i]] = parsed[felt[i]]
+        i = i + 1
+    }
+    returner lengde(nøkler(parsed["functions"]))
+}
+
+funksjon nc_json_lineær_put(state, del: tekst) {
+    la buffer = state["buffer"] + del
+    hvis lengde(buffer) >= 8192 {
+        legg_til(state["deler"], buffer)
+        state["buffer"] = ""
+    } ellers {
+        state["buffer"] = buffer
+    }
+}
+
+funksjon nc_json_lineær_walk(state, verdi) {
+    la typen = builtin.type(verdi)
+    hvis typen == "ingenting" eller typen == "null" {
+        nc_json_lineær_put(state, "null")
+        returner
+    }
+    hvis typen == "liste" {
+        nc_json_lineær_put(state, "[")
+        la i: heiltall = 0
+        mens i < lengde(verdi) {
+            hvis i > 0 { nc_json_lineær_put(state, ",") }
+            nc_json_lineær_walk(state, verdi[i])
+            i = i + 1
+        }
+        nc_json_lineær_put(state, "]")
+        returner
+    }
+    hvis typen == "ordbok" {
+        nc_json_lineær_put(state, "{")
+        la felt = nøkler(verdi)
+        la i: heiltall = 0
+        mens i < lengde(felt) {
+            hvis i > 0 { nc_json_lineær_put(state, ",") }
+            la namn = tekst(felt[i])
+            nc_json_lineær_put(state, json_skriv(namn))
+            nc_json_lineær_put(state, ":")
+            nc_json_lineær_walk(state, verdi[namn])
+            i = i + 1
+        }
+        nc_json_lineær_put(state, "}")
+        returner
+    }
+    nc_json_lineær_put(state, json_skriv(verdi))
+}
+
+funksjon nc_json_lineær(verdi) -> tekst {
+    la state = {"buffer": "", "deler": []}
+    nc_json_lineær_walk(state, verdi)
+    hvis state["buffer"] != "" { legg_til(state["deler"], state["buffer"]) }
+    returner builtin.join(state["deler"], "")
 }
 
 funksjon nc_stdlib_cache_abi() -> tekst {
@@ -1301,29 +1390,224 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
             la kjelde = fil_les(fil)
             la trans = finn_bruk_imports(kjelde)
             la ncb_json = nc_stdlib_fragment(fil, alias, cache_root)
+            la brukte_selfhost_fragment = usann
+            // Normal server-/verktøyflyt kan bruke det committed, Norscode-eigde
+            // selfhost-fragmentet. Utan denne bana kompilerer til dømes
+            // std.norsdb heile selfhost.vm på nytt og tømmer den monotone AOT-
+            // heapen før applikasjonsbundle er ferdig. Source-only-porten med
+            // NORSCODE_USE_PRECOMPILED_SELFHOST=0 går framleis alltid til
+            // levande kjelde og kan ikkje maskererast av fragmentet.
+            la precompiled_selfhost = builtin.trim(miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST"))
+            hvis ncb_json == "" og precompiled_selfhost != "0" {
+                // Alias blir materialisert frå køposten før filoppslaget og er
+                // den stabile modulidentiteten. Bruk han til klassifisering;
+                // eldre transitive kødata kan ha null i filfeltet, og ein
+                // tekstoperasjon på den nullverdien er ikkje ABI-trygg.
+                hvis builtin.starts_with(alias, "selfhost.") {
+                    ncb_json = bundler.les_precompiled_ncb(fil)
+                    hvis ncb_json != "" {
+                        brukte_selfhost_fragment = sann
+                        hvis alias == "selfhost.vm" {
+                            // vm.ncb.json er ei brei bootstrap-bundle. Filtrer
+                            // funksjonsobjekta som rå JSON før parse; parsing av
+                            // alle 418 funksjonar gjer at forkasta objekt blir
+                            // verande i den monotone AOT-heapen.
+                            la functions_marker = "\"functions\":{"
+                            la raw_pos = builtin.index_of(ncb_json, functions_marker)
+                            hvis raw_pos < 0 { kast "bundle: vm-fragment manglar functions" }
+                            raw_pos = raw_pos + lengde(functions_marker)
+                            la raw_deler: liste<tekst> = ["{\"format\":\"ncb-v1\",\"entry\":\"selfhost.vm.start\",\"module_initializers\":[\"selfhost.vm.__module_init__\"],\"global_names\":{\"selfhost.vm\":[\"vm_active_functions\",\"vm_active_ncb\",\"vm_request_counter\",\"vm_db_store\",\"vm_pool_store\",\"vm_db_counter\",\"vm_pool_counter\",\"vm_norsdb_active_handle\",\"vm_norsdb_indexes\",\"vm_random_counter\"]},\"imports\":[],\"route_handlers\":[],\"functions\":{" ]
+                            // Generert og kontrollert mot
+                            // tests/fixtures/selfhost_vm_globals.no.
+                            la vm_init = {
+                                "name": "__module_init__",
+                                "module": "selfhost.vm",
+                                "params": [],
+                                "is_async": usann,
+                                "module_init": sann,
+                                "string_encoding": "decoded-v1",
+                                "code": [
+                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_active_functions"],
+                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_active_ncb"],
+                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_request_counter"],
+                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_db_store"],
+                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_pool_store"],
+                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_db_counter"],
+                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_pool_counter"],
+                                    ["PUSH_CONST", ""], ["STORE_GLOBAL", "vm_norsdb_active_handle"],
+                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_norsdb_indexes"],
+                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_random_counter"],
+                                    ["PUSH_CONST", null], ["RETURN"]
+                                ],
+                                "source_lines": [],
+                                "source_columns": []
+                            }
+                            legg_til(raw_deler, "\"selfhost.vm.__module_init__\":")
+                            legg_til(raw_deler, json_skriv(vm_init))
+                            la raw_første = usann
+                            mens raw_pos < lengde(ncb_json) {
+                                mens raw_pos < lengde(ncb_json) og
+                                      (ncb_json[raw_pos] == " " eller ncb_json[raw_pos] == "\n" eller
+                                       ncb_json[raw_pos] == "\r" eller ncb_json[raw_pos] == "\t" eller
+                                       ncb_json[raw_pos] == ",") {
+                                    raw_pos = raw_pos + 1
+                                }
+                                hvis raw_pos >= lengde(ncb_json) eller ncb_json[raw_pos] == "}" { bryt }
+                                hvis ncb_json[raw_pos] != "\"" { kast "bundle: ugyldig vm-funksjonsnøkkel" }
+                                la raw_entry_start = raw_pos
+                                raw_pos = raw_pos + 1
+                                la raw_key_start = raw_pos
+                                la raw_escape = usann
+                                mens raw_pos < lengde(ncb_json) {
+                                    la raw_c = ncb_json[raw_pos]
+                                    hvis raw_escape { raw_escape = usann }
+                                    ellers hvis raw_c == "\\" { raw_escape = sann }
+                                    ellers hvis raw_c == "\"" { bryt }
+                                    raw_pos = raw_pos + 1
+                                }
+                                hvis raw_pos >= lengde(ncb_json) { kast "bundle: uavslutta vm-funksjonsnøkkel" }
+                                la raw_key = builtin.slice(ncb_json, raw_key_start, raw_pos)
+                                raw_pos = raw_pos + 1
+                                mens raw_pos < lengde(ncb_json) og
+                                      (ncb_json[raw_pos] == " " eller ncb_json[raw_pos] == ":") {
+                                    raw_pos = raw_pos + 1
+                                }
+                                hvis raw_pos >= lengde(ncb_json) eller ncb_json[raw_pos] != "{" {
+                                    kast "bundle: ugyldig vm-funksjonsobjekt"
+                                }
+                                la raw_depth = 0
+                                la raw_i_streng = usann
+                                raw_escape = usann
+                                mens raw_pos < lengde(ncb_json) {
+                                    la raw_v = ncb_json[raw_pos]
+                                    hvis raw_i_streng {
+                                        hvis raw_escape { raw_escape = usann }
+                                        ellers hvis raw_v == "\\" { raw_escape = sann }
+                                        ellers hvis raw_v == "\"" { raw_i_streng = usann }
+                                    } ellers hvis raw_v == "\"" { raw_i_streng = sann }
+                                    ellers hvis raw_v == "{" { raw_depth = raw_depth + 1 }
+                                    ellers hvis raw_v == "}" {
+                                        raw_depth = raw_depth - 1
+                                        hvis raw_depth == 0 { bryt }
+                                    }
+                                    raw_pos = raw_pos + 1
+                                }
+                                hvis raw_depth != 0 { kast "bundle: uavslutta vm-funksjonsobjekt" }
+                                hvis builtin.starts_with(raw_key, alias + ".") {
+                                    hvis ikkje raw_første { legg_til(raw_deler, ",") }
+                                    legg_til(raw_deler, builtin.slice(ncb_json, raw_entry_start, raw_pos + 1))
+                                    raw_første = usann
+                                }
+                                raw_pos = raw_pos + 1
+                            }
+                            legg_til(raw_deler, "}}")
+                            ncb_json = builtin.join(raw_deler, "")
+                        }
+                        nc_stdlib_cache_trace("selfhost-hit " + alias)
+                    }
+                }
+            }
+            la parsed_mod_ncb: ordbok<tekst, tekst> = {}
             hvis ncb_json == "" {
-                // Behald bruk-linjene også for importerte modular. Då kan
-                // kompilatoren binde transitive alias direkte til kanoniske
-                // CALL-mål, utan ei ustabil fulltekst-omskriving etterpå.
-                ncb_json = komp.kompiler_fil(kjelde, alias)
+                // Compiler og JSON-parse skjer i ei lita hjelpefunksjon som
+                // fyller caller-mapet direkte. Det held den store JSON-teksten
+                // heilt ute av lokal-slotflata i nc_bundle_ncb.
+                la compile_kjelde = fil_les(fil)
+                nc_materialiser_import_ncb(parsed_mod_ncb, compile_kjelde, alias, "")
             } ellers {
+                hvis ikkje brukte_selfhost_fragment {
                 // Eldre cachefragment kan framleis ha korte importalias.
                 // Berre cache-kompatibilitetsbana får tekstnormalisering.
-                ncb_json = normaliser_importalias_kall(ncb_json, trans)
+                    ncb_json = normaliser_importalias_kall(ncb_json, trans)
+                }
+                hvis ncb_json == null eller ncb_json == "" {
+                    kast "bundle: ugyldig cache-NCB for " + alias
+                }
+                nc_materialiser_import_ncb(parsed_mod_ncb, "", alias, ncb_json)
             }
             nc_bundle_fremdrift("bundle-import-compiled " + alias)
-            // Eldre cacheartefaktar kan framleis vere __main__-namngitte.
-            // Berre dei går gjennom kompatibilitetsomskrivinga; kjeldebana
-            // over er allereie modulnamngitt og tek fastvegen.
-            la fiksa_json = ncb_json
-            hvis builtin.contains(ncb_json, "\"__main__.") {
-                fiksa_json = tekst_erstatt(ncb_json, "\"__main__.", "\"" + alias + ".")
-            }
             nc_bundle_fremdrift("bundle-import-normalized " + alias)
-            fiksa_json = normaliser_json_kontrollteikn(fiksa_json)
-            la parsed_mod_ncb = json_parse_raw(fiksa_json)
             nc_bundle_fremdrift("bundle-import-parsed " + alias)
             la mod_ncb = bundler.omdøyp_ncb_objekt(parsed_mod_ncb, alias)
+            hvis brukte_selfhost_fragment {
+                // Committed selfhost-fragment kan vere ei brei bootstrap-
+                // bundle med fleire modular. BFS-køa kompilerer/importerer dei
+                // transitive modulane separat; å slå inn alle her dupliserer
+                // hundrevis av funksjonar og kan tømme AOT-heapen ved den
+                // avsluttande JSON-serialiseringa.
+                la fragment_fns = mod_ncb["functions"]
+                la avgrensa_fns: ordbok<tekst, tekst> = {}
+                hvis fragment_fns != null {
+                    la fragment_keys = nøkler(fragment_fns)
+                    la fki = 0
+                    mens fki < lengde(fragment_keys) {
+                        la fragment_key = tekst(fragment_keys[fki])
+                        hvis builtin.starts_with(fragment_key, alias + ".") {
+                            avgrensa_fns[fragment_key] = fragment_fns[fragment_key]
+                        }
+                        fki = fki + 1
+                    }
+                }
+                mod_ncb["functions"] = avgrensa_fns
+                hvis alias == "selfhost.vm" {
+                    // Det committed VM-fragmentet vart produsert før
+                    // eksplisitte global-opkodar. Avgrens kompatibilitets-
+                    // omskrivinga til den eksakte deklarasjonsflata i vm.no.
+                    la vm_globale = {
+                        "vm_active_functions": sann, "vm_active_ncb": sann,
+                        "vm_request_counter": sann, "vm_db_store": sann,
+                        "vm_pool_store": sann, "vm_db_counter": sann,
+                        "vm_pool_counter": sann, "vm_norsdb_active_handle": sann,
+                        "vm_norsdb_indexes": sann, "vm_random_counter": sann
+                    }
+                    la vm_fn_namn = nøkler(avgrensa_fns)
+                    la vm_fi: heiltall = 0
+                    mens vm_fi < lengde(vm_fn_namn) {
+                        la vm_kode = avgrensa_fns[vm_fn_namn[vm_fi]]["code"]
+                        la vm_ii: heiltall = 0
+                        mens vm_ii < lengde(vm_kode) {
+                            la vm_instr = vm_kode[vm_ii]
+                            hvis lengde(vm_instr) >= 2 og
+                               finnes_nøkkel(vm_globale, tekst(vm_instr[1])) {
+                                hvis vm_instr[0] == "LOAD_NAME" { vm_instr[0] = "LOAD_GLOBAL" }
+                                hvis vm_instr[0] == "STORE_NAME" { vm_instr[0] = "STORE_GLOBAL" }
+                            }
+                            vm_ii = vm_ii + 1
+                        }
+                        vm_fi = vm_fi + 1
+                    }
+                }
+            }
+            // Eldre compilerfragment klassifiserer den norske path-builtinen
+            // som builtin.sti_join, medan VM-kontrakten historisk eksponerte
+            // builtin.path.join. std.db er den reine NorsDB-standardflata og
+            // skal på same måte bindast til den versjonerte builtin.db-ABI-en,
+            // ikkje stå att som eit uløyst modulnamn i den lukka kandidaten.
+            // Normaliser kalla i bundlegrensa; levande selfhost.vm støttar òg
+            // dei eksplisitte std.db-aliasa for eldre NCB-ar.
+            la alias_fns = mod_ncb["functions"]
+            hvis alias_fns != null {
+                la alias_fn_namn = nøkler(alias_fns)
+                la afi: heiltall = 0
+                mens afi < lengde(alias_fn_namn) {
+                    la alias_kode = alias_fns[alias_fn_namn[afi]]["code"]
+                    la aii: heiltall = 0
+                    mens aii < lengde(alias_kode) {
+                        la alias_instr = alias_kode[aii]
+                        hvis lengde(alias_instr) >= 2 og alias_instr[0] == "CALL" og
+                           alias_instr[1] == "builtin.sti_join" {
+                            alias_instr[1] = "builtin.path.join"
+                        }
+                        hvis lengde(alias_instr) >= 2 og alias_instr[0] == "CALL" og
+                           builtin.starts_with(alias_instr[1], "std.db.") {
+                            alias_instr[1] = "builtin.db." + builtin.slice(
+                                alias_instr[1], 7, lengde(alias_instr[1]))
+                        }
+                        aii = aii + 1
+                    }
+                    afi = afi + 1
+                }
+            }
             nc_bundle_fremdrift("bundle-import-renamed " + alias)
             hvis builtin.contains(alias, ".") {
                 la alias_deler = builtin.split(alias, ".")
@@ -1350,8 +1634,7 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
             nc_sikre_modulmetadata(alle_initializers, alle_global_names, mod_ncb, alias)
             nc_bundle_fremdrift("bundle-import-merged " + alias)
             // Samle route_handlers frå importerte modular — fix opp function-namn til alias
-            la mod_rh_raw_ncb = json_parse_raw(fiksa_json)
-            la mod_rh_raw = mod_rh_raw_ncb["route_handlers"]
+            la mod_rh_raw = mod_ncb["route_handlers"]
             hvis mod_rh_raw != null {
                 la ri: heltall = 0
                 mens ri < lengde(mod_rh_raw) {
@@ -1382,11 +1665,12 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                 ti = ti + 1
             }
         } fang (e) {
-            // Manglande valfri import kan hoppast over, men direkte bundlerfeil
-            // må kunne sporast utan å endre normal CLI-utdata.
-            hvis builtin.trim(miljo_hent("NORSCODE_BUNDLE_TRACE")) == "1" {
-                skriv("[bundle] hoppar over " + fil + ": " + tekst(e) + "\n")
-            }
+            nc_bundle_fremdrift("bundle-import-failed " + fil + ": " + tekst(e))
+            // Ei eksplisitt bruk-linje er del av programkontrakten. Å hoppe
+            // vidare produserer ei tilsynelatande gyldig bundle med uløyste
+            // CALL-mål, og flyttar den verkelege feilen til runtime. Feil lukka
+            // her med nøyaktig modulsti og årsak.
+            kast "bundle: import feila " + fil + ": " + tekst(e)
         }
     }
 
@@ -1403,6 +1687,31 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     nc_bundle_fremdrift("bundle-main-parsed")
     slå_saman_funksjonar(alle_fns, hoved_ncb["functions"])
     nc_sikre_modulmetadata(alle_initializers, alle_global_names, hoved_ncb, modul)
+    // Hovudmodulen blir slått inn etter importløkkja. Køyr same ABI-
+    // normalisering over den ferdige funksjonsflata, slik at direkte kall frå
+    // programmet ikkje kan stå att som std.db.* eller builtin.sti_join.
+    la alle_alias_fn_namn = nøkler(alle_fns)
+    la aafi: heiltall = 0
+    mens aafi < lengde(alle_alias_fn_namn) {
+        la alle_alias_kode = alle_fns[alle_alias_fn_namn[aafi]]["code"]
+        la aaii: heiltall = 0
+        mens aaii < lengde(alle_alias_kode) {
+            la alle_alias_instr = alle_alias_kode[aaii]
+            hvis lengde(alle_alias_instr) >= 2 og
+               alle_alias_instr[0] == "CALL" og
+               alle_alias_instr[1] == "builtin.sti_join" {
+                alle_alias_instr[1] = "builtin.path.join"
+            }
+            hvis lengde(alle_alias_instr) >= 2 og
+               alle_alias_instr[0] == "CALL" og
+               builtin.starts_with(alle_alias_instr[1], "std.db.") {
+                alle_alias_instr[1] = "builtin.db." + builtin.slice(
+                    alle_alias_instr[1], 7, lengde(alle_alias_instr[1]))
+            }
+            aaii = aaii + 1
+        }
+        aafi = aafi + 1
+    }
     nc_bundle_fremdrift("bundle-main-merged")
 
     // Bygg bundle-NCB med riktig entry
@@ -1410,7 +1719,10 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     bundle["format"] = "ncb-v1"
     bundle["entry"] = modul + ".start"
     bundle["imports"] = []
-    bundle["functions"] = alle_fns
+    // Funksjonskartet blir serialisert stykkevis nedanfor. Ein monolittisk
+    // json_skriv av heile kartet lagar kvadratisk mange mellomtekstar i den
+    // monotone AOT-heapen for store selfhost-/NorsDB-bundlar.
+    bundle["functions"] = {}
     // Slå saman route_handlers frå importerte modular + hovudfila
     la rh = hoved_ncb["route_handlers"]
     la alle_rh_merged_json = alle_rh_json
@@ -1461,10 +1773,41 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     nc_bundle_fremdrift("bundle-routes-serialized")
     la bundle_json_inner = json_skriv(bundle)
     nc_bundle_fremdrift("bundle-object-serialized")
-    // Fjern avsluttande } og legg til dei separat serialiserte metadatafelta.
+    // Erstatt det tomme funksjonskartet med individuelt serialiserte
+    // funksjonar. builtin.join måler total lengd og gjer éi sluttallokering;
+    // dermed blir store NCB-ar lineære i staden for kvadratiske i heapbruk.
+    la functions_markor = "\"functions\":{}"
+    la functions_pos = builtin.index_of(bundle_json_inner, functions_markor)
+    hvis functions_pos < 0 {
+        kast "bundle: manglar tom functions-markør"
+    }
     la bundle_len = lengde(bundle_json_inner)
-    la bundle_without_end = builtin.slice(bundle_json_inner, 0, bundle_len - 1)
-    la bundle_json_final = bundle_without_end + ",\"module_initializers\":" + initializers_json + ",\"global_names\":" + global_names_json + ",\"route_handlers\":" + rh_json + "}"
+    la functions_prefix_len = lengde("\"functions\":")
+    la bundle_deler: liste<tekst> = [""]
+    legg_til(bundle_deler, builtin.slice(bundle_json_inner, 0,
+        functions_pos + functions_prefix_len))
+    legg_til(bundle_deler, "{")
+    la function_keys = nøkler(alle_fns)
+    la bfi = 0
+    mens bfi < lengde(function_keys) {
+        hvis bfi > 0 { legg_til(bundle_deler, ",") }
+        la function_key = tekst(function_keys[bfi])
+        legg_til(bundle_deler, json_skriv(function_key))
+        legg_til(bundle_deler, ":")
+        legg_til(bundle_deler, nc_json_lineær(alle_fns[function_key]))
+        bfi = bfi + 1
+    }
+    legg_til(bundle_deler, "}")
+    legg_til(bundle_deler, builtin.slice(bundle_json_inner,
+        functions_pos + lengde(functions_markor), bundle_len - 1))
+    legg_til(bundle_deler, ",\"module_initializers\":")
+    legg_til(bundle_deler, initializers_json)
+    legg_til(bundle_deler, ",\"global_names\":")
+    legg_til(bundle_deler, global_names_json)
+    legg_til(bundle_deler, ",\"route_handlers\":")
+    legg_til(bundle_deler, rh_json)
+    legg_til(bundle_deler, "}")
+    la bundle_json_final = builtin.join(bundle_deler, "")
     nc_bundle_fremdrift("bundle-finalized")
     la debug_bundle = builtin.trim(miljo_hent("NORSCODE_DEBUG_BUNDLE_OUTPUT"))
     hvis debug_bundle != "" {
@@ -2876,7 +3219,10 @@ funksjon start() -> heltall {
     }
 
     hvis cmd == "run-pure" {
-        hvis lengde(argv) != 3 eller ikkje builtin.fil_finnes(src) {
+        // Sjekk src (frå argv[2] i direkte modus, NORSCODE_FILE i miljøkontrakt),
+        // ikkje argv-lengda — native ELF har stubba argv, så miljøkontrakt-forma
+        // (NORSCODE_CMD/NORSCODE_FILE) må virke som for `run`.
+        hvis src == "" eller ikkje builtin.fil_finnes(src) {
             skriv("bruk: nc run-pure <fil.no>\n")
             returner 2
         }
@@ -2884,7 +3230,7 @@ funksjon start() -> heltall {
     }
 
     hvis cmd == "run-ncb-pure" eller cmd == "run-ncb" {
-        hvis lengde(argv) != 3 eller ikkje builtin.fil_finnes(src) {
+        hvis src == "" eller ikkje builtin.fil_finnes(src) {
             skriv("bruk: nc run-ncb-pure <fil.ncb.json>\n")
             returner 2
         }
