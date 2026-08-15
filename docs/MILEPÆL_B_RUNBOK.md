@@ -126,6 +126,16 @@ verifisert på host), deretter (2) bytt ARM64-attestasjonskandidaten frå
 GCC/OpenSSL til den native seed-en + rein TLS. Å fjerne OpenSSL før (1) gjer
 TLS-prøva raud.
 
+**Djupare blokkering oppdaga 2026-08-08 (endrar rekkefølgja):** sjølv før
+D2-socket-spørsmålet manglar AArch64-kodegeneratoren ein **full-host runtime**
+heilt. `native_codegen_v2.no` (x86-64) har ein handemittert NcVal-runtime;
+AArch64-sida (`macho_arm64_codegen.no` + `elf_arm64_emitter.no`) er berre ein
+liten heiltals-AOT (ingen heap/strengar/lister/kart/sockets/TLS). Ein rein ARM64
+full-host er difor ikkje produserbar før den runtimen er skriven. Den fasa
+køyreplanen for å byggje han (med lokal Apple Silicon-verifikasjon per fase) ligg
+i [SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md](SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md).
+B2 lukkast i Fase 8 der; D2 socket-integrasjon kjem inn i Fase 7–8.
+
 ## Steg B2 – Linux ARM64 utan GCC-overgang
 
 1. Erstatt `/usr/bin/gcc`-kallet i `tools/build_linux_arm64_tls_attestation_candidate.no`

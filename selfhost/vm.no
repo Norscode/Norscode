@@ -1961,7 +1961,16 @@ funksjon _vm_pool_get(functions, handle: tekst) -> ordbok_tekst {
 
 funksjon _vm_db_ny() -> ordbok_tekst {
     la db: ordbok_tekst = {}
-    db["_tables"] = {}
+    la tables: ordbok_tekst = {}
+    la runtime_table: ordbok_tekst = {}
+    la runtime_row: ordbok_tekst = {}
+    runtime_row["id"] = "0"
+    runtime_table["schema"] = []
+    runtime_table["rows"] = []
+    legg_til(runtime_table["rows"], runtime_row)
+    runtime_table["next_id"] = 1
+    tables["__norsdb_runtime_state__"] = runtime_table
+    db["_tables"] = tables
     db["_path"] = ""
     db["_in_tx"] = usann
     db["_snapshot"] = {}
@@ -2750,7 +2759,12 @@ funksjon _vm_db_insert_core(db: ordbok_tekst, sql: tekst, dedupe: boolsk) -> hel
 
     legg_til(table["rows"], row)
     la inserted_id = tekst(row["id"])
-    hvis _vm_db_is_number(inserted_id) {
+    hvis _rt_har_nøkkel(db["_tables"], "__norsdb_runtime_state__") {
+        la runtime_state = db["_tables"]["__norsdb_runtime_state__"]
+        la runtime_row: ordbok_tekst = {}
+        runtime_row["id"] = inserted_id
+        legg_til(runtime_state["rows"], runtime_row)
+    } ellers {
         db["_last_insert_id"] = builtin.heltall_fra_tekst(inserted_id)
     }
     returner 1
@@ -2940,15 +2954,22 @@ funksjon _vm_db_select_rows_with_meta(db: ordbok_tekst, parsed: ordbok_tekst) ->
     la rows = _vm_db_collect_select_rows(db, table, parsed["where"])
     rows = _vm_db_sort_rows(rows, parsed["order_col"], parsed["order_asc"])
     la offset_n = parsed["offset"]
-    hvis offset_n > 0 {
-        hvis offset_n < lengde(rows) {
-            rows = builtin.slice(rows, offset_n, lengde(rows))
-        } ellers {
-            rows = []
+    la limit_n = parsed["limit"]
+    hvis offset_n > 0 eller (limit_n >= 0 og limit_n < lengde(rows)) {
+        la utsnitt: liste<ordbok_tekst> = []
+        la start_i: heiltall = offset_n
+        hvis start_i < 0 { start_i = 0 }
+        hvis start_i > lengde(rows) { start_i = lengde(rows) }
+        la slutt_i: heiltall = lengde(rows)
+        hvis limit_n >= 0 og start_i + limit_n < slutt_i {
+            slutt_i = start_i + limit_n
         }
-    }
-    hvis parsed["limit"] >= 0 og parsed["limit"] < lengde(rows) {
-        rows = builtin.slice(rows, 0, parsed["limit"])
+        la i: heiltall = start_i
+        mens i < slutt_i {
+            legg_til(utsnitt, rows[i])
+            i = i + 1
+        }
+        rows = utsnitt
     }
     returner rows
 }
@@ -2956,6 +2977,14 @@ funksjon _vm_db_select_rows_with_meta(db: ordbok_tekst, parsed: ordbok_tekst) ->
 funksjon _vm_db_select_count(db: ordbok_tekst, sql: tekst) -> heltall {
     la enkel = _vm_sql_upper(_vm_sql_trim_semi(sql))
     hvis enkel == "SELECT LAST_INSERT_ROWID()" {
+        hvis _rt_har_nøkkel(db, "_tables") og
+           _rt_har_nøkkel(db["_tables"], "__norsdb_runtime_state__") {
+            la runtime_state = db["_tables"]["__norsdb_runtime_state__"]
+            la runtime_rows = runtime_state["rows"]
+            hvis lengde(runtime_rows) > 0 {
+                returner builtin.heltall_fra_tekst(_vm_db_row_val(runtime_rows[lengde(runtime_rows) - 1], "id"))
+            }
+        }
         hvis _rt_har_nøkkel(db, "_last_insert_id") {
             returner builtin.heltall_fra_tekst(tekst(db["_last_insert_id"]))
         }
@@ -3142,15 +3171,39 @@ funksjon _vm_db_exec(db: ordbok_tekst, sql: tekst) -> heltall {
     returner 0
 }
 
+// Er dette ein SQL-setning motoren kjenner igjen? Brukt av migrate/transaction
+// for å skilje ei gyldig setning som råka 0 rader (t.d. UPDATE/CREATE) frå ei
+// reelt ugyldig setning (t.d. skrivefeil som "INSRT INTO ..."). Kjende no-op-
+// kontrollsetningar (PRAGMA/BEGIN/COMMIT ...) reknast som kjende slik at
+// migreringar med slike ikkje feilar.
+funksjon _vm_db_stmt_known(upper: tekst) -> boolsk {
+    la ord = builtin.split(builtin.trim(upper), " ")
+    hvis lengde(ord) == 0 {
+        returner usann
+    }
+    la verb = ord[0]
+    returner verb == "CREATE" eller verb == "INSERT" eller verb == "UPDATE" eller
+        verb == "DELETE" eller verb == "DROP" eller verb == "ALTER" eller
+        verb == "SELECT" eller verb == "REPLACE" eller verb == "TRUNCATE" eller
+        verb == "WITH" eller verb == "EXPLAIN" eller verb == "PRAGMA" eller
+        verb == "BEGIN" eller verb == "COMMIT" eller verb == "ROLLBACK" eller
+        verb == "SAVEPOINT" eller verb == "RELEASE" eller verb == "VACUUM" eller
+        verb == "ANALYZE" eller verb == "ATTACH" eller verb == "DETACH"
+}
+
 funksjon _vm_db_migrate(db: ordbok_tekst, skript: tekst) -> heltall {
     la stmts = builtin.split(skript, ";")
     la count: heltall = 0
-    la snapshot = _vm_db_clone(db)
     la i: heltall = 0
     mens i < lengde(stmts) {
         la stmt = builtin.trim(stmts[i])
         hvis stmt != "" {
             la upper = _vm_sql_upper(stmt)
+            // Ukjend/ugyldig setning => signaliser feil slik at transaction()
+            // kan rulla tilbake. Ei gyldig setning som råkar 0 rader gjev 0, ikkje feil.
+            hvis ikkje _vm_db_stmt_known(upper) {
+                returner -1
+            }
             la res: heiltall = 0
             hvis builtin.starts_with(upper, "INSERT INTO ") {
                 res = _vm_db_insert_core(db, stmt, sann)
@@ -3158,7 +3211,7 @@ funksjon _vm_db_migrate(db: ordbok_tekst, skript: tekst) -> heltall {
                 res = _vm_db_exec(db, stmt)
             }
             hvis res < 0 {
-                returner 0
+                returner -1
             }
             hvis builtin.starts_with(upper, "INSERT INTO ") og res > 0 {
                 count = count + 1
@@ -4944,7 +4997,9 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // Path aliases
-    hvis kortnavn == "path.join" eller kortnavn == "std.path.join" eller kortnavn == "builtin.path.join" {
+    hvis kortnavn == "path.join" eller kortnavn == "std.path.join" eller
+       kortnavn == "builtin.path.join" eller kortnavn == "builtin.sti_join" eller
+       kortnavn == "sti_join" {
         returner _rt_path_join(args[0], args[1])
     }
     hvis kortnavn == "path.basename" eller kortnavn == "std.path.basename" eller kortnavn == "builtin.path.basename" {
@@ -5113,6 +5168,16 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // db aliases (skal vere støtta av runtime, men krev ekspandert host-bindingar i sjølvhost)
+    hvis kortnavn == "db.backend" eller kortnavn == "builtin.db.backend" eller kortnavn == "std.db.backend" {
+        returner "norsdb-pure-v1"
+    }
+    hvis kortnavn == "db.status" eller kortnavn == "builtin.db.status" eller kortnavn == "std.db.status" {
+        returner {
+            "backend": "norsdb-pure-v1",
+            "external_runtime": "false",
+            "sqlite": "optional-adapter"
+        }
+    }
     hvis kortnavn == "db.create" eller kortnavn == "builtin.db.create" eller kortnavn == "db_create" eller kortnavn == "builtin.db_create" {
         hvis _rt_fil_finnes(args[0]) {
             la out = {}
@@ -5135,7 +5200,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
             returner out
         }
     }
-    hvis kortnavn == "db.open" eller kortnavn == "builtin.db.open" eller builtin.ends_with(kortnavn, "norsdb.open") {
+    hvis kortnavn == "db.open" eller kortnavn == "builtin.db.open" eller kortnavn == "std.db.open" eller builtin.ends_with(kortnavn, "norsdb.open") {
         la db = _vm_db_load(args[0])
         la handle = _vm_ny_id("db", active_functions)
         db["_path"] = args[0]
@@ -5143,7 +5208,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         _vm_db_set(active_functions, handle, db)
         returner handle
     }
-    hvis kortnavn == "db.close" eller kortnavn == "builtin.db.close" eller builtin.ends_with(kortnavn, "norsdb.close") {
+    hvis kortnavn == "db.close" eller kortnavn == "builtin.db.close" eller kortnavn == "std.db.close" eller builtin.ends_with(kortnavn, "norsdb.close") {
         la db = _vm_db_get(active_functions, args[0])
         _vm_db_save(db)
         hvis db["_pool"] != "" og _rt_har_nøkkel(active_functions["__vm_pool_store__"], db["_pool"]) {
@@ -5154,23 +5219,23 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         }
         returner sann
     }
-    hvis kortnavn == "db.execute" eller kortnavn == "builtin.db.execute" eller builtin.ends_with(kortnavn, "norsdb.execute") {
+    hvis kortnavn == "db.execute" eller kortnavn == "builtin.db.execute" eller kortnavn == "std.db.execute" eller builtin.ends_with(kortnavn, "norsdb.execute") {
         la db = _vm_db_get(active_functions, args[0])
         returner _vm_db_exec(db, args[1])
     }
-    hvis kortnavn == "db.query_text" eller kortnavn == "builtin.db.query_text" eller builtin.ends_with(kortnavn, "norsdb.query_text") {
+    hvis kortnavn == "db.query_text" eller kortnavn == "builtin.db.query_text" eller kortnavn == "std.db.query_text" eller builtin.ends_with(kortnavn, "norsdb.query_text") {
         la db = _vm_db_get(active_functions, args[0])
         returner _vm_db_select_text(db, args[1])
     }
-    hvis kortnavn == "db.query_int" eller kortnavn == "builtin.db.query_int" eller builtin.ends_with(kortnavn, "norsdb.query_int") {
+    hvis kortnavn == "db.query_int" eller kortnavn == "builtin.db.query_int" eller kortnavn == "std.db.query_int" eller builtin.ends_with(kortnavn, "norsdb.query_int") {
         la db = _vm_db_get(active_functions, args[0])
         returner _vm_db_select_count(db, args[1])
     }
-    hvis kortnavn == "db.migrate" eller kortnavn == "builtin.db.migrate" eller builtin.ends_with(kortnavn, "norsdb.migrate") {
+    hvis kortnavn == "db.migrate" eller kortnavn == "builtin.db.migrate" eller kortnavn == "std.db.migrate" eller builtin.ends_with(kortnavn, "norsdb.migrate") {
         la db = _vm_db_get(active_functions, args[0])
         returner _vm_db_migrate(db, args[1])
     }
-    hvis kortnavn == "db.transaction" eller kortnavn == "builtin.db.transaction" eller builtin.ends_with(kortnavn, "norsdb.transaction") {
+    hvis kortnavn == "db.transaction" eller kortnavn == "builtin.db.transaction" eller kortnavn == "std.db.transaction" eller builtin.ends_with(kortnavn, "norsdb.transaction") {
         la db = _vm_db_get(active_functions, args[0])
         la snap = _vm_db_clone(db)
         la res = _vm_db_migrate(db, args[1])
@@ -5181,14 +5246,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         active_functions["__vm_db_store__"][args[0]] = snap
         returner 0
     }
-    hvis kortnavn == "db.begin" eller kortnavn == "builtin.db.begin" eller builtin.ends_with(kortnavn, "norsdb.begin") {
+    hvis kortnavn == "db.begin" eller kortnavn == "builtin.db.begin" eller kortnavn == "std.db.begin" eller builtin.ends_with(kortnavn, "norsdb.begin") {
         la db = _vm_db_get(active_functions, args[0])
         hvis db["_in_tx"] { returner usann }
         db["_snapshot"] = _vm_db_clone(db)
         db["_in_tx"] = sann
         returner sann
     }
-    hvis kortnavn == "db.commit" eller kortnavn == "builtin.db.commit" eller builtin.ends_with(kortnavn, "norsdb.commit") {
+    hvis kortnavn == "db.commit" eller kortnavn == "builtin.db.commit" eller kortnavn == "std.db.commit" eller builtin.ends_with(kortnavn, "norsdb.commit") {
         la db = _vm_db_get(active_functions, args[0])
         hvis ikkje db["_in_tx"] { returner usann }
         db["_snapshot"] = {}
@@ -5196,7 +5261,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         _vm_db_save(db)
         returner sann
     }
-    hvis kortnavn == "db.rollback" eller kortnavn == "builtin.db.rollback" eller builtin.ends_with(kortnavn, "norsdb.rollback") {
+    hvis kortnavn == "db.rollback" eller kortnavn == "builtin.db.rollback" eller kortnavn == "std.db.rollback" eller builtin.ends_with(kortnavn, "norsdb.rollback") {
         la db = _vm_db_get(active_functions, args[0])
         hvis ikkje db["_in_tx"] { returner usann }
         active_functions["__vm_db_store__"][args[0]] = db["_snapshot"]
@@ -5204,12 +5269,12 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         active_functions["__vm_db_store__"][args[0]]["_in_tx"] = usann
         returner sann
     }
-    hvis kortnavn == "db.ping" eller kortnavn == "builtin.db.ping" eller builtin.ends_with(kortnavn, "norsdb.ping") {
+    hvis kortnavn == "db.ping" eller kortnavn == "builtin.db.ping" eller kortnavn == "std.db.ping" eller builtin.ends_with(kortnavn, "norsdb.ping") {
         _vm_db_state(active_functions)
         hvis _rt_har_nøkkel(active_functions["__vm_db_store__"], args[0]) { returner sann }
         returner usann
     }
-    hvis kortnavn == "db.pool" eller kortnavn == "builtin.db.pool" eller builtin.ends_with(kortnavn, "norsdb.pool") {
+    hvis kortnavn == "db.pool" eller kortnavn == "builtin.db.pool" eller kortnavn == "std.db.pool" eller builtin.ends_with(kortnavn, "norsdb.pool") {
         la pool = {}
         pool["path"] = args[0]
         pool["max"] = args[1]
@@ -5224,7 +5289,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         active_functions["__vm_pool_store__"][handle] = pool
         returner handle
     }
-    hvis kortnavn == "db.pool_acquire" eller kortnavn == "builtin.db.pool_acquire" eller builtin.ends_with(kortnavn, "norsdb.pool_acquire") {
+    hvis kortnavn == "db.pool_acquire" eller kortnavn == "builtin.db.pool_acquire" eller kortnavn == "std.db.pool_acquire" eller builtin.ends_with(kortnavn, "norsdb.pool_acquire") {
         la pool = _vm_pool_get(active_functions, args[0])
         hvis lengde(pool["idle"]) > 0 {
             la conn = pool["idle"][lengde(pool["idle"]) - 1]
@@ -5238,11 +5303,11 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         _vm_db_set(active_functions, conn, db)
         returner conn
     }
-    hvis kortnavn == "db.pool_size" eller kortnavn == "builtin.db.pool_size" eller builtin.ends_with(kortnavn, "norsdb.pool_size") {
+    hvis kortnavn == "db.pool_size" eller kortnavn == "builtin.db.pool_size" eller kortnavn == "std.db.pool_size" eller builtin.ends_with(kortnavn, "norsdb.pool_size") {
         la pool = _vm_pool_get(active_functions, args[0])
         returner lengde(pool["idle"])
     }
-    hvis kortnavn == "db.pool_close" eller kortnavn == "builtin.db.pool_close" eller builtin.ends_with(kortnavn, "norsdb.pool_close") {
+    hvis kortnavn == "db.pool_close" eller kortnavn == "builtin.db.pool_close" eller kortnavn == "std.db.pool_close" eller builtin.ends_with(kortnavn, "norsdb.pool_close") {
         la pool = _vm_pool_get(active_functions, args[0])
         la i: heltall = 0
         mens i < lengde(pool["idle"]) {

@@ -187,11 +187,20 @@ normalflyten.
       ARM64-seed i staden for gcc) bygde kandidaten, men ARM64-CI gav **exit 127**
       på runtime-prøva — den committede seeden er ikkje ein kjørbar current-ABI-
       kandidat og er for gammal for prøva. Reverterte til den verifiserte
-      GCC/C-overgangen for å halde ARM64-jobben fungerande. **Rett B2-veg:** den
-      native codegen-flyten (ikkje gcc, ikkje seed) må byggje ein FERSK ARM64-
-      binær frå gjeldande kjelde på ekte ARM64-host, med current filesystem/
-      prosess/tråd-ABI og (via D2 socket-integrasjon) rein TLS. Dette er host-/
-      toolchain-arbeid; kan ikkje byggjast eller verifiserast i sky-økta.
+      GCC/C-overgangen for å halde ARM64-jobben fungerande.
+      **Ekte blokkering lokalisert 2026-08-08 (djupare):** AArch64-kodegeneratoren
+      har **ingen full-host runtime**. `native_codegen_v2.no` (x86-64) handemitterer
+      ein komplett NcVal-runtime (`rt_hex_del0..6`, Linux prosess-ABI); AArch64-sida
+      (`macho_arm64_codegen.no` + `elf_arm64_emitter.no`, ~670 linjer til saman) er
+      berre ein liten heiltals-AOT utan heap, strengar, lister, kart, sockets eller
+      TLS — han kan berre kompilere små heiltalsprogram. Difor er ein rein ARM64
+      full-host-binær **ikkje produserbar i dag**, og B2 kan ikkje lukkast ved eit
+      verktøy-edit; den native ARM64-codegen må først nå runtime-paritet med x86-64.
+      **Rett B2-veg og fasa køyreplan:** sjå
+      [SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md](SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md).
+      Den ferske ARM64-binæren må byggjast av Norscode sin eigen AArch64-codegen frå
+      levande kjelde på ekte ARM64-host, med current filesystem/prosess/tråd-ABI og
+      (via D2 socket-integrasjon) rein TLS. Fase 8 i planen lukkar B2.
 - [ ] Løys 8,7 GiB-RSS-toppen frå kjeldeekte bygging ved å materialisere
       modulane isolert/strøymt (same fragmentmønster som L5b brukar i dag),
       slik at ARM64-kandidaten kan byggjast utan precompiled maskering.
