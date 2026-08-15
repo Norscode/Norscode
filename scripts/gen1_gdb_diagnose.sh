@@ -15,7 +15,8 @@ file "$SEED"; echo
 export NORSCODE_ROOT="$ROOT" RUNNER_OS=Linux RUNNER_ARCH=X64 NC_OM6B_RUN_STAGE0=1 NORSCODE_ENABLE_EXEC_PROSESS=1
 export NORSCODE_VM_CAPABILITIES=env.read,env.write,process.exec,disk.read,disk.write,net.tcp,net.dns,net.connect
 export NORSCODE_VM_DISK_ROOT="$ROOT,.,/tmp,/private/tmp"
-cp "$SEED" dist/norscode_native 2>/dev/null || true
+mkdir -p dist && cp "$SEED" dist/norscode_native && chmod +x dist/norscode_native
+[ -x dist/norscode_native ] || { echo "kunne ikkje materialisere dist/norscode_native"; exit 1; }
 
 echo "=== [1] byggjer gen1 ELF-ane (native_codegen_v2 frå committa NCB) ==="
 NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/selfcompile_stage0_elf.no" "$SEED" 2>&1 | sed -n '1,40p'
