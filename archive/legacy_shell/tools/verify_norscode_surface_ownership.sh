@@ -37,7 +37,7 @@ strip_dot_slash() {
 
 is_active_rel() {
   case "$1" in
-    ""|archive/*|ai_assistent*|ai_assistent_bak_*|tests_bak_*) return 1 ;;
+    ""|build/*|archive/*|ai_assistent*|ai_assistent_bak_*|tests_bak_*) return 1 ;;
     *) return 0 ;;
   esac
 }
