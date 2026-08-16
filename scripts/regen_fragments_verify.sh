@@ -1,13 +1,7 @@
 #!/usr/bin/env bash
-# regen_fragments_verify.sh — bootstrap-fixpoint: regenererer dei committa
-# omgang6b-precompiled-fragmenta frå current source og verifiserer Gen1==Gen2
-# byte-paritet (ELF stage-0 / selvstendighet-porten). Køyr på NATIV Linux x86_64.
-#
-# Dei committa fragmenta (bootstrap/precompiled_fragments_inner/, frå 16. juli)
-# er stale mot current source → [4/4] byte-paritet feilar (Gen1 2.6MB != Gen2
-# 0.9MB). Dette regenererer dei frå source-only-NCB-ane som Gen1 produserer.
-# Codegen er deterministisk, så éin iterasjon bør konvergere; skriptet køyrer to
-# for å stadfeste fixpoint.
+# regen_fragments_verify.sh — steg 1: DIAGNOSE. Køyrer selfcompile ÉIN gong, viser
+# heile [2/4]+[4/4]-utfallet og kvar source-only-modul-NCB-ane faktisk ligg, så
+# fragment-regenereringa kan drivast korrekt. Native Linux x86_64.
 set -u
 cd "$(dirname "$0")/.." || exit 1
 ROOT="$(pwd)"
@@ -18,31 +12,18 @@ export NORSCODE_ROOT="$ROOT" RUNNER_OS=Linux RUNNER_ARCH=X64 NC_OM6B_RUN_STAGE0=
 export NORSCODE_VM_CAPABILITIES=env.read,env.write,process.exec,disk.read,disk.write,net.tcp,net.dns,net.connect
 export NORSCODE_VM_DISK_ROOT="$ROOT,.,/tmp,/private/tmp"
 
-selfcompile() { NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/selfcompile_stage0_elf.no" "$SEED" 2>&1; }
-NCBDIR="$ROOT/build/6b/selfcompile/source_only/ncb"
-
-for iter in 1 2; do
-  echo "════════ ITERASJON $iter ════════"
-  echo "=== [$iter.1] selfcompile → source_only NCBs + paritet-sjekk ==="
-  selfcompile | grep -iE "source-compile|paritet|FEIL|GROEN|passert|differ|Stage-0 ELF|✓ Omgang|✗|DELVIS" | tail -18
-  [ -f "$NCBDIR/lexer_m1.ncb.json" ] || { echo "[$iter] manglar source_only NCBs — sjå heile utskrifta"; selfcompile | tail -30; exit 1; }
-  echo "=== [$iter.2] regenerer fragment frå source_only NCBs ==="
-  NORSCODE_FRAGMENT_NCB_DIR="$NCBDIR" NORSCODE_FRAGMENT_SOURCE_NATIVE=1 \
-    NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/regenerate_omgang6b_fragments_safe.no" "$SEED" 2>&1 | tail -12
-  echo "=== [$iter.3] fragment-endringar ==="
-  git status --short bootstrap/precompiled_fragments bootstrap/precompiled_fragments_inner | head
-  rm -rf "$ROOT/build/6b"
-done
-
-echo "════════ FINAL byte-paritet-sjekk (ferske fragment) ════════"
-selfcompile | grep -iE "paritet|FEIL|GROEN|passert|differ|Stage-0 ELF|✓ Omgang|✗|marker|DELVIS" | tail -12
+rm -rf "$ROOT/build/6b"
+echo "=== selfcompile-stage0-elf (éin køyring, full logg) ==="
+NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/selfcompile_stage0_elf.no" "$SEED" > /tmp/sc.log 2>&1
+echo "selfcompile exit=$?"
+echo "--- [2/4] source-compile + [4/4] paritet (frå loggen) ---"
+grep -iE "source-compile|Gen2|paritet|byte-iden|FEIL|GROEN|passert|differ|Stage-0 ELF|DELVIS|✓ Omgang|✗|exit=139" /tmp/sc.log | tail -30
 echo ""
-echo "=== oppsummering: passerte porten? ==="
-if [ -f "$ROOT/build/6b/selfcompile/stage0_elf_passed.marker" ]; then
-  echo "✓✓ BYTE-PARITET PASSERT — commit fragment-endringane"
-else
-  echo "✗ ikkje konvergert endå (sjå over). Lim utskrifta tilbake til Claude."
-fi
-echo "=== git diff-stat av fragment (til commit) ==="
-git status --short bootstrap/precompiled_fragments bootstrap/precompiled_fragments_inner | head
+echo "=== kvar ligg source-only modul-NCB-ane? ==="
+find "$ROOT/build/6b" -name "*.ncb.json" 2>/dev/null | grep -iE "source_only|lexer_m1|parser|semantic|ir_to_bytecode|kompiler|bundler|json|elf_compile" | grep -v "executor" | head -20
+echo "--- storleikar (source_only/ncb) ---"
+ls -la "$ROOT/build/6b/selfcompile/source_only/ncb/"*.ncb.json 2>/dev/null | awk '{print $5, $NF}'
+echo ""
+echo "=== gen1 vs gen2 ELF-storleik (paritet-målet) ==="
+ls -la "$ROOT/build/6b/selfcompile/gen1_compiler.elf" "$ROOT/build/6b/selfcompile/gen2_compiler.elf" 2>/dev/null | awk '{print $5, $NF}'
 echo "=== FERDIG — lim heile utskrifta tilbake til Claude ==="
