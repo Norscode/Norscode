@@ -3067,6 +3067,309 @@ funksjon kompiler_v2(ncb_json) {
     returner elf
 }
 
+// ─── Batch-codegen for x86_64 (låg-minne, prosess-isolerte fasar) ─────────────
+// Speglar kompiler_v2 sin 2-pass (mål + emit), men splitta i batchar slik at
+// toppminnet held seg på ~éin batch i staden for ~11 GB for heile programmet i
+// eitt kall. Kvar fase rekomputerer det DETERMINISTISKE oppsettet (global_vas,
+// data, rt, sorted, module_initializers) frå NCB-en; det einaste som kryssar
+// fase-grensa er `sizes` (funksjonsnamn→byte-storleik) frå målebarrieren.
+// Storleik er posisjons-uavhengig (call rel32 er alltid 5 byte), så målepasset
+// kan bruke placeholder-adresser og likevel gje eksakte storleikar — nøyaktig
+// same invariant som kompiler_v2 sitt Pass 1b→Pass 2 alt kviler på.
+
+// Rekomputer alt oppsettet unntatt fn_vas. Returnerer ei ordbok med delane.
+funksjon ncval_x86_setup(ncb) {
+    la fns = ncb["functions"]
+
+    la global_vas: ordbok = {}
+    la global_slot_count: heiltall = 0
+    la global_metadata = ncb["global_names"]
+    hvis global_metadata != null {
+        la global_modules = nøkler(global_metadata)
+        la gmi: heiltall = 0
+        mens gmi < lengde(global_modules) {
+            la global_module: tekst = tekst(global_modules[gmi])
+            la module_globals = global_metadata[global_module]
+            la gni: heiltall = 0
+            mens gni < lengde(module_globals) {
+                la global_key = global_module + "." + tekst(module_globals[gni])
+                hvis ikkje finnes_nøkkel(global_vas, global_key) {
+                    hvis global_slot_count >= 510 {
+                        kast "native codegen: host-ABI globalslotar er fulle"
+                    }
+                    global_vas[global_key] = HOST_ABI_VA() + 16 + global_slot_count * 8
+                    global_slot_count = global_slot_count + 1
+                }
+                gni = gni + 1
+            }
+            gmi = gmi + 1
+        }
+    }
+
+    la strenger = samle_strenger(fns)
+    la data_res = bygg_data(strenger)
+    la data_bytes = data_res[0]
+    la rd_offs = data_res[1]
+    la argv_store_va: heiltall = HOST_ABI_VA()
+    la rt_package = bygg_runtime_v2(argv_store_va)
+    la rt = rt_package[0]
+    la atomic_vas = rt_package[1]
+    la rt_size: heltall = lengde(rt)
+    la gc_safepoint_va: heltall = TEXT_VA() + rt_size - GC_SAFEPOINT_STUB_BYTES()
+
+    la fn_list = nøkler(fns)
+    la sorted: liste = []
+    la start_fn: tekst = ""
+    la entry_felt = ncb["entry"]
+    hvis entry_felt != "" og finnes_nøkkel(fns, entry_felt)
+        start_fn = entry_felt
+    slutt
+    hvis start_fn == ""
+        la si: heltall = 0
+        mens si < lengde(fn_list)
+            la fn: tekst = fn_list[si]
+            la er_start: boolsk = fn == "__main__.start" eller builtin.ends_with(fn, ".start")
+            hvis er_start
+                start_fn = fn
+            slutt
+            hvis fn != start_fn
+                legg_til(sorted, fn)
+            slutt
+            si = si + 1
+        slutt
+    ellers
+        la si: heltall = 0
+        mens si < lengde(fn_list)
+            la fn: tekst = fn_list[si]
+            hvis fn != start_fn
+                legg_til(sorted, fn)
+            slutt
+            si = si + 1
+        slutt
+    slutt
+    hvis start_fn == ""
+        start_fn = "__main__.start"
+    slutt
+    legg_til(sorted, start_fn)
+
+    la module_initializers: liste = []
+    la initializer_metadata = ncb["module_initializers"]
+    hvis initializer_metadata != null {
+        la init_i: heiltall = 0
+        mens init_i < lengde(initializer_metadata) {
+            la init_namn: tekst = tekst(initializer_metadata[init_i])
+            hvis finnes_nøkkel(fns, init_namn) {
+                legg_til(module_initializers, init_namn)
+            }
+            init_i = init_i + 1
+        }
+    }
+
+    returner {
+        "fns": fns, "global_vas": global_vas, "data_bytes": data_bytes,
+        "rd_offs": rd_offs, "rt": rt, "atomic_vas": atomic_vas,
+        "gc_safepoint_va": gc_safepoint_va, "rt_size": rt_size,
+        "sorted": sorted, "start_fn": start_fn,
+        "module_initializers": module_initializers
+    }
+}
+
+// Plan: returner funksjonsrekkja (order) slik orkestratoren kjenner totalen og
+// batch-grensene. Deterministisk og lett å serialisere.
+funksjon ncval_x86_plan(ncb) -> ordbok_tekst {
+    la oppsett = ncval_x86_setup(ncb)
+    returner {"ok": "sann", "error": "", "order": oppsett["sorted"]}
+}
+
+// Eksakt fn_vas-kart frå sizes (namn→storleik). Speglar kompiler_v2 sitt andre
+// VA-oppsett: TEXT_VA + rt_size + kumulativ storleik i sorted-rekkjefølgje.
+funksjon ncval_x86_fn_vas(oppsett, sizes) -> ordbok {
+    la sorted = oppsett["sorted"]
+    la fn_vas: ordbok = {}
+    la off: heltall = oppsett["rt_size"]
+    la i: heltall = 0
+    mens i < lengde(sorted) {
+        la fn: tekst = sorted[i]
+        fn_vas[fn] = TEXT_VA() + off
+        off = off + sizes[fn]
+        i = i + 1
+    }
+    returner fn_vas
+}
+
+// Målepass for utsnittet [start, start+count): kompiler kvar funksjon med
+// placeholder-adresser og returner byte-storleiken. Storleik er uavhengig av
+// adressane, så placeholder er trygt.
+funksjon ncval_x86_measure(ncb, start: heiltall, count: heiltall) -> ordbok_tekst {
+    la oppsett = ncval_x86_setup(ncb)
+    la fns = oppsett["fns"]
+    la sorted = oppsett["sorted"]
+    la rd_offs = oppsett["rd_offs"]
+    la atomic_vas = oppsett["atomic_vas"]
+    la global_vas = oppsett["global_vas"]
+    la gc_safepoint_va = oppsett["gc_safepoint_va"]
+    la placeholder: ordbok = {}
+    la pi: heltall = 0
+    mens pi < lengde(sorted) { placeholder[sorted[pi]] = TEXT_VA() pi = pi + 1 }
+    la sizes: ordbok = {}
+    la slutt = start + count
+    hvis slutt > lengde(sorted) { slutt = lengde(sorted) }
+    la fi: heltall = start
+    mens fi < slutt {
+        la fn: tekst = sorted[fi]
+        la fn_def = fns[fn]
+        la fn_vars = samle_vars(fn_def["code"], fn_def["params"])
+        la fn_code = kompiler_fn_v2(fn_def, fn_vars, placeholder, rd_offs,
+            TEXT_VA(), gc_safepoint_va, atomic_vas, global_vas)
+        sizes[fn] = lengde(fn_code)
+        fi = fi + 1
+    }
+    returner {"ok": "sann", "error": "", "sizes": sizes}
+}
+
+// Emitpass for utsnittet [start, start+count): kompiler kvar funksjon med
+// EKSAKTE adressar (frå sizes) og returner den konkatenerte byte-lista for
+// utsnittet. Byta blir plasserte i order-rekkjefølgje av linkaren.
+funksjon ncval_x86_emit(ncb, sizes, start: heiltall, count: heiltall) -> ordbok_tekst {
+    la oppsett = ncval_x86_setup(ncb)
+    la fns = oppsett["fns"]
+    la sorted = oppsett["sorted"]
+    la rd_offs = oppsett["rd_offs"]
+    la atomic_vas = oppsett["atomic_vas"]
+    la global_vas = oppsett["global_vas"]
+    la gc_safepoint_va = oppsett["gc_safepoint_va"]
+    la fn_vas = ncval_x86_fn_vas(oppsett, sizes)
+    la bytes: liste = []
+    la slutt = start + count
+    hvis slutt > lengde(sorted) { slutt = lengde(sorted) }
+    la fi: heltall = start
+    mens fi < slutt {
+        la fn: tekst = sorted[fi]
+        la fn_def = fns[fn]
+        la fn_vars = samle_vars(fn_def["code"], fn_def["params"])
+        // eiga_va = den endelege VA-en for denne funksjonen (= fn_vas[fn]).
+        la fn_code = kompiler_fn_v2(fn_def, fn_vars, fn_vas, rd_offs,
+            fn_vas[fn], gc_safepoint_va, atomic_vas, global_vas)
+        copy(bytes, fn_code)
+        fi = fi + 1
+    }
+    returner {"ok": "sann", "error": "", "bytes": bytes}
+}
+
+// Link: bygg det ferdige ELF-biletet frå rt + emit-fragmenta (i order) + _start-
+// prologen + datasegmentet, og bygg inn NCB-en. `frag_byte_lists` er emit-utsnitta
+// i rekkjefølgje. Held berre biletet (~få MB) + NCB — lett nok for éin prosess.
+funksjon ncval_x86_link(ncb_json, ncb, sizes, frag_byte_lists) -> ordbok_tekst {
+    la oppsett = ncval_x86_setup(ncb)
+    la data_bytes = oppsett["data_bytes"]
+    la rt = oppsett["rt"]
+    la module_initializers = oppsett["module_initializers"]
+    la start_fn = oppsett["start_fn"]
+    la fn_vas = ncval_x86_fn_vas(oppsett, sizes)
+
+    la argv_store_va: heiltall = HOST_ABI_VA()
+    la envp_store_va: heltall = HEAP_VA() + ENVP_OFFSET()
+
+    la text: liste = []
+    copy(text, rt)
+    la fbi: heltall = 0
+    mens fbi < lengde(frag_byte_lists) {
+        copy(text, frag_byte_lists[fbi])
+        fbi = fbi + 1
+    }
+
+    // _start-prolog — identisk med kompiler_v2 (fanga envp, init heap, køyr
+    // modulinitialisatorar, kall start(), sys_exit med returverdien).
+    la entry_va: heltall = TEXT_VA() + lengde(text)
+    legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0xE4)          // mov r12, rsp
+    legg_til(text, 0x49) legg_til(text, 0x8B) legg_til(text, 0x3C) legg_til(text, 0x24) // mov rdi,[r12]=argc
+    legg_til(text, 0x49) legg_til(text, 0x8D) legg_til(text, 0x74) legg_til(text, 0x24) legg_til(text, 0x08) // lea rsi,[r12+8]
+    legg_til(text, 0x49) legg_til(text, 0xBB) u64(text, argv_store_va)
+    legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0x33)          // mov [r11],rsi
+    legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0x7B) legg_til(text, 0x08) // mov [r11+8],rdi
+    legg_til(text, 0x49) legg_til(text, 0x8D) legg_til(text, 0x14) legg_til(text, 0xFC) // lea rdx,[r12+rdi*8]
+    legg_til(text, 0x48) legg_til(text, 0x83) legg_til(text, 0xC2) legg_til(text, 0x10) // add rdx,16
+    legg_til(text, 0x49) legg_til(text, 0xBB) u64(text, envp_store_va)
+    legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0x13)          // mov [r11],rdx
+    legg_til(text, 0x48) legg_til(text, 0x83) legg_til(text, 0xE4) legg_til(text, 0xF0) // and rsp,-16
+    call_rel32(text, RT_INIT_HEAP(), TEXT_VA())
+
+    la entry_init_i: heiltall = 0
+    mens entry_init_i < lengde(module_initializers) {
+        la entry_init_namn: tekst = module_initializers[entry_init_i]
+        call_rel32(text, fn_vas[entry_init_namn], TEXT_VA())
+        entry_init_i = entry_init_i + 1
+    }
+
+    la main_va: heltall = fn_vas[start_fn]
+    hvis main_va == 0 {
+        legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC0) u32(text, 60)
+        legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC7) u32(text, 4)
+        legg_til(text, 0x0F) legg_til(text, 0x05)
+    }
+    call_rel32(text, main_va, TEXT_VA())
+
+    legg_til(text, 0x31) legg_til(text, 0xFF)                               // xor edi,edi
+    legg_til(text, 0x48) legg_til(text, 0x85) legg_til(text, 0xC0)          // test rax,rax
+    legg_til(text, 0x74) legg_til(text, 0x04)                              // je +4
+    legg_til(text, 0x48) legg_til(text, 0x8B) legg_til(text, 0x78) legg_til(text, 0x08) // mov rdi,[rax+8]
+    legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC0) u32(text, 60)
+    legg_til(text, 0x0F) legg_til(text, 0x05)                              // syscall
+
+    la text_size: heltall = lengde(text)
+    la data_size: heltall = lengde(data_bytes)
+    hvis TEXT_VA() + text_size > DATA_VA() { kast "native codegen: .text overlappar .data" }
+    hvis DATA_VA() + data_size > HEAP_VA() { kast "native codegen: .data overlappar .heap" }
+    hvis DATA_VA() + data_size > HOST_ABI_VA() { kast "native codegen: .data overlappar verts-ABI-segmentet" }
+    hvis HOST_ABI_VA() + 4096 > HEAP_VA() { kast "native codegen: verts-ABI-segmentet overlappar .heap" }
+
+    la elf: liste = []
+    la ph_off: heltall = 64
+    la text_file_off: heltall = 4096
+    la text_segment_va: heltall = TEXT_VA() - text_file_off
+    la data_file_off: heltall = ((text_file_off + text_size + 4095) / 4096) * 4096
+    la host_file_off: heiltall = ((data_file_off + data_size + 4095) / 4096) * 4096
+    la heap_file_off: heiltall = host_file_off + 4096
+    la heap_filesz: heiltall = HEAP_CONTROLSZ()
+
+    u8(elf, 0x7F) u8(elf, 0x45) u8(elf, 0x4C) u8(elf, 0x46)
+    u8(elf, 2) u8(elf, 1) u8(elf, 1) u8(elf, 0)
+    zeros(elf, 8)
+    u16(elf, 2) u16(elf, 62) u32(elf, 1)
+    u64(elf, entry_va) u64(elf, ph_off) u64(elf, 0)
+    u32(elf, 0) u16(elf, 64) u16(elf, 56) u16(elf, 4) u16(elf, 64) u16(elf, 0) u16(elf, 0)
+
+    u32(elf, 1) u32(elf, 5) u64(elf, 0)
+    u64(elf, text_segment_va) u64(elf, text_segment_va)
+    u64(elf, text_file_off + text_size) u64(elf, text_file_off + text_size) u64(elf, 4096)
+
+    u32(elf, 1) u32(elf, 4) u64(elf, data_file_off)
+    u64(elf, DATA_VA()) u64(elf, DATA_VA())
+    u64(elf, data_size) u64(elf, data_size) u64(elf, 4096)
+
+    u32(elf, 1) u32(elf, 6) u64(elf, host_file_off)
+    u64(elf, HOST_ABI_VA()) u64(elf, HOST_ABI_VA())
+    u64(elf, 16) u64(elf, 4096) u64(elf, 4096)
+
+    u32(elf, 1) u32(elf, 6) u64(elf, heap_file_off)
+    u64(elf, HEAP_VA()) u64(elf, HEAP_VA())
+    u64(elf, heap_filesz) u64(elf, HEAP_SZ()) u64(elf, 4096)
+
+    pad(elf, text_file_off)
+    copy(elf, text)
+    pad(elf, data_file_off)
+    copy(elf, data_bytes)
+    pad(elf, host_file_off)
+    zeros(elf, 16)
+    pad(elf, heap_file_off)
+    zeros(elf, heap_filesz)
+
+    hvis miljo_hent("NC_NATIVE_EXTERNAL_EMBED_NCB") != "1" {
+        legg_innebygd_ncb(elf, ncb_json)
+    }
+    returner {"ok": "sann", "error": "", "elf": elf}
+}
+
 // ─── Inngangspunkt ───────────────────────────────────────────────────────────
 funksjon start() {
     la inp = miljo_hent("NC_INPUT")
