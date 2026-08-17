@@ -1,0 +1,271 @@
+# fjern_agent.no — minimal autentisert fjern-eksekvering over socket.
+#
+# Del av M6 (fjern-eksekvering / provisjonering). Ein «agent» køyrer på ein
+# fjern-vert, aksepterer autentiserte exec-forespurnader og køyrer allowlista
+# kommandoar via std.prosess (shell-fri, sandbox-klar). Transporten kan vere
+# plain native socket (test/loopback) eller native TLS (produksjon) — protokollen
+# er den same.
+#
+# Protokoll (over ein etablert, akseptert socket):
+#   1. Agent → klient:  <nonce>\n              (fersk challenge per tilkopling)
+#   2. Klient → agent:  <len>\n<json>          json = {"argv":[...], "hmac": "..."}
+#        hmac = HMAC-SHA256(token, nonce + "|" + join(argv, U+0001))
+#   3. Agent → klient:  <len>\n<json>          json = {"exit": n, "stdout": s, "stderr": s}
+#
+# Sikkerheit: HMAC-challenge-response gir replay-vern (fersk nonce), konstanttids
+# samanlikning, og agenten køyrer berre kommandoar på si eiga allowlist.
+
+bruk std.socket som socket
+bruk std.krypto som krypto
+bruk std.prosess som prosess
+
+# ─── Ramme-I/O over socket (buffra, hex-transport, lengde-prefiks) ────────────
+# TO fallgruver i stage0-socketlaget, begge løyste her:
+#   1) Tekst-transporten (native_les/native_skriv) ESCAPER kontrollteikn på
+#      wire-en (byte 10 → "\n", 9 → "\t", 13 → "\r", 92 → "\\", 34 → "\""). Det
+#      øydelegg "\n"-ramme-avgrensaren. Vi brukar difor HEX-transport
+#      (native_les_hex/native_skriv_hex), som er rå byte utan escaping.
+#   2) To trådar som les samtidig busy-spinnar og svelt ut native-leveringa
+#      (data kom først etter deadline). Vi poll-ventar (native_poll_vent, events=3)
+#      på "ventande"/ingen-data for å gi frå oss CPU — same yield-triks som
+#      std.https_front. Ingen builtin.sov/sleep finst i stage0.
+# I denne runtimen er strengar byte-orienterte (eitt teikn = éin byte), så
+# char_code/chr per teikn er trygt for hex-koding.
+
+funksjon _hex_siffer(v: heltall) -> tekst {
+    returner builtin.slice("0123456789abcdef", v, v + 1)
+}
+
+funksjon _til_hex(s: tekst) -> tekst {
+    la ut = ""
+    la i: heltall = 0
+    mens i < lengde(s) {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        ut = ut + _hex_siffer((c >> 4) & 15) + _hex_siffer(c & 15)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _hex_verdi(c: tekst) -> heltall {
+    la d = builtin.index_of("0123456789abcdef", c)
+    hvis d >= 0 { returner d }
+    returner builtin.index_of("0123456789ABCDEF", c)
+}
+
+funksjon _fra_hex(hex: tekst) -> tekst {
+    la ut = ""
+    la i: heltall = 0
+    mens i + 2 <= lengde(hex) {
+        ut = ut + builtin.chr((_hex_verdi(builtin.slice(hex, i, i + 1)) << 4) + _hex_verdi(builtin.slice(hex, i + 1, i + 2)))
+        i = i + 2
+    }
+    returner ut
+}
+
+# Standard I/O-deadline (ms). Veggtid-bunden så ein daud motpart gir rask feil.
+funksjon _io_timeout_ms() -> heltall { returner 10000 }
+
+# Lesar med eigen buffer (dict → referanse, så bufferen overlever mellom kall).
+funksjon _ny_lesar(sock: ordbok_tekst) -> ordbok_tekst {
+    la l: ordbok_tekst = {}
+    l["sock"] = sock
+    l["buf"] = ""
+    returner l
+}
+
+# Fyll bufferen med eitt chunk (hex → rå byte). Returnerer status.
+# Poll-ventar når ingen data kom (unngår busy-spin-svelting).
+funksjon _fyll(lesar: ordbok_tekst) -> tekst {
+    la r = socket.native_les_hex(lesar["sock"], 65536)
+    la st = tekst(r["status"])
+    hvis st == "ok" {
+        la hex = tekst(r["data_hex"])
+        hvis lengde(hex) > 0 og hex != "ingenting" {
+            lesar["buf"] = lesar["buf"] + _fra_hex(hex)
+            returner st
+        }
+    }
+    hvis st == "ok" eller st == "ventende" {
+        // events=1 (POLLIN, LESBAR) — IKKJE 3: ein nyleg skriven socket er
+        // skrivbar, så events=3 ville returnert straks og busy-spinne (svelt ut
+        // leveringa). Vi ventar spesifikt på lesbar data.
+        socket.native_poll_vent(lesar["sock"], 1, 100)
+    }
+    returner st
+}
+
+# Skriv heile s (hex-koda). Poll-ventar på "ventande"/partielle skriv.
+# native_skriv_hex sitt "value" er tal SENDTE BYTE (2 hex-teikn per byte).
+funksjon _skriv_alt(sock: ordbok_tekst, s: tekst) -> boolsk {
+    la hex = _til_hex(s)
+    la sendt: heltall = 0
+    la total = lengde(s)
+    la deadline = builtin.tid_ms() + _io_timeout_ms()
+    mens sendt < total og builtin.tid_ms() < deadline {
+        la r = socket.native_skriv_hex(sock, builtin.slice(hex, sendt * 2, lengde(hex)))
+        la st = tekst(r["status"])
+        hvis st == "ventende" {
+            socket.native_poll_vent(sock, 3, 100)
+        } ellers hvis st != "ok" {
+            returner usann
+        } ellers {
+            sendt = sendt + heltall_fra_tekst(tekst(r["value"]))
+        }
+    }
+    returner sendt >= total
+}
+
+# Les ei linje (utan "\n") frå bufferen; "" ved eof/timeout utan komplett linje.
+funksjon _les_linje(lesar: ordbok_tekst) -> tekst {
+    la deadline = builtin.tid_ms() + _io_timeout_ms()
+    la avslutt = usann
+    mens ikkje avslutt og builtin.tid_ms() < deadline {
+        la p = builtin.index_of(lesar["buf"], "\n")
+        hvis p >= 0 {
+            la linje = builtin.slice(lesar["buf"], 0, p)
+            lesar["buf"] = builtin.slice(lesar["buf"], p + 1, lengde(lesar["buf"]))
+            returner linje
+        }
+        la st = _fyll(lesar)
+        hvis st == "eof" eller st == "feil" { avslutt = sann }
+    }
+    returner ""
+}
+
+# Les nøyaktig n teikn frå bufferen; "" ved eof/timeout utan nok data.
+funksjon _les_n(lesar: ordbok_tekst, n: heltall) -> tekst {
+    la deadline = builtin.tid_ms() + _io_timeout_ms()
+    la avslutt = usann
+    mens lengde(lesar["buf"]) < n og ikkje avslutt og builtin.tid_ms() < deadline {
+        la st = _fyll(lesar)
+        hvis st == "eof" eller st == "feil" { avslutt = sann }
+    }
+    hvis lengde(lesar["buf"]) < n { returner "" }
+    la ut = builtin.slice(lesar["buf"], 0, n)
+    lesar["buf"] = builtin.slice(lesar["buf"], n, lengde(lesar["buf"]))
+    returner ut
+}
+
+funksjon _send_ramme(sock: ordbok_tekst, payload: tekst) -> boolsk {
+    returner _skriv_alt(sock, tekst_fra_heltall(lengde(payload)) + "\n" + payload)
+}
+
+funksjon _les_ramme(lesar: ordbok_tekst) -> tekst {
+    la hovud = _les_linje(lesar)
+    skriv("LR hovud=[" + hovud + "] hlen=" + tekst(lengde(hovud)) + "\n")
+    hvis hovud == "" { returner "" }
+    la n = heltall_fra_tekst(hovud)
+    hvis n <= 0 { returner "" }
+    returner _les_n(lesar, n)
+}
+
+# ─── Auth ────────────────────────────────────────────────────────────────────
+
+funksjon _auth_melding(nonce: tekst, argv: liste_tekst) -> tekst {
+    returner nonce + "|" + builtin.join(argv, "")
+}
+
+funksjon signer(token: tekst, nonce: tekst, argv: liste_tekst) -> tekst {
+    returner krypto.hmac_sha256(token, _auth_melding(nonce, argv))
+}
+
+# ─── Hjelparar ───────────────────────────────────────────────────────────────
+
+funksjon _basename(sti: tekst) -> tekst {
+    la p = builtin.index_of(sti, "/")
+    la s = sti
+    mens p >= 0 {
+        s = builtin.slice(s, p + 1, lengde(s))
+        p = builtin.index_of(s, "/")
+    }
+    returner s
+}
+
+funksjon _i_liste(liste: liste_tekst, verdi: tekst) -> boolsk {
+    la i: heltall = 0
+    mens i < lengde(liste) {
+        hvis liste[i] == verdi { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _svar(kode: heltall, ut: tekst, feil: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["exit"] = kode
+    m["stdout"] = ut
+    m["stderr"] = feil
+    returner m
+}
+
+# ─── Agent (server-side) ─────────────────────────────────────────────────────
+
+# Handterer éin exec-forespurnad på ein alt akseptert socket `sock`.
+# `token` er delt hemmeleg; `tillatne` er allowlista av kommando-basenamn.
+# Returnerer ein statuskode: "ok" | "auth-avvist" | "avvist" | "protokollfeil".
+funksjon agent_handter_ei(sock: ordbok_tekst, token: tekst, tillatne: liste_tekst) -> tekst {
+    la lesar = _ny_lesar(sock)
+    la nonce = builtin.random_hex(16)
+    hvis ikkje _skriv_alt(sock, nonce + "\n") { returner "protokollfeil" }
+
+    la req_json = _les_ramme(lesar)
+    skriv("A-req=[" + req_json + "] len=" + tekst(lengde(req_json)) + "\n")
+    hvis req_json == "" { returner "protokollfeil" }
+    la req = builtin.json_parse_raw(req_json)
+    hvis ikkje har_nokkel(req, "argv") eller ikkje har_nokkel(req, "hmac") { returner "protokollfeil" }
+    la argv = req["argv"]
+    hvis lengde(argv) == 0 {
+        _send_ramme(sock, builtin.json_stringify(_svar(-1, "", "tom argv")))
+        returner "protokollfeil"
+    }
+
+    // Verifiser HMAC (konstanttid).
+    la forventa = signer(token, nonce, argv)
+    hvis ikkje krypto.konstant_lik(tekst(req["hmac"]), forventa) {
+        _send_ramme(sock, builtin.json_stringify(_svar(-1, "", "auth avvist")))
+        returner "auth-avvist"
+    }
+
+    // Allowlist-sjekk på basenamn.
+    la exe = tekst(argv[0])
+    la namn = _basename(exe)
+    hvis ikkje _i_liste(tillatne, namn) {
+        _send_ramme(sock, builtin.json_stringify(_svar(-1, "", "kommando ikkje tillaten: " + namn)))
+        returner "avvist"
+    }
+
+    // Bygg argv-liste (utan exe) og køyr shell-fritt via std.prosess.
+    la args: liste_tekst = []
+    la i: heltall = 1
+    mens i < lengde(argv) { legg_til(args, tekst(argv[i])) i = i + 1 }
+
+    la policy = prosess.ny_policy("fjern-agent")
+    policy["dry_run_default"] = "usann"
+    prosess.tillat(policy, namn)
+    la plan = prosess.start_argv_plan(exe, args)
+    la res = prosess.start_argv_trygt(policy, plan)   // [exit, stdout, stderr]
+
+    _send_ramme(sock, builtin.json_stringify(_svar(heltall_fra_tekst(res[0]), res[1], res[2])))
+    returner "ok"
+}
+
+# ─── Klient ──────────────────────────────────────────────────────────────────
+
+# Send éin autentisert exec-forespurnad over ein alt tilkopla socket `sock`.
+# Returnerer {"exit","stdout","stderr"} (exit = -1 ved protokoll-/auth-feil).
+funksjon klient_exec(sock: ordbok_tekst, token: tekst, argv: liste_tekst) -> ordbok_tekst {
+    la lesar = _ny_lesar(sock)
+    la nonce = _les_linje(lesar)
+    hvis nonce == "" { returner _svar(-1, "", "ingen challenge") }
+    la hmac = signer(token, nonce, argv)
+    la req: ordbok_tekst = {}
+    req["argv"] = argv
+    req["hmac"] = hmac
+    la _sr = _send_ramme(sock, builtin.json_stringify(req))
+    skriv("C-sent-req=" + tekst(_sr) + " jsonlen=" + tekst(lengde(builtin.json_stringify(req))) + "\n")
+    hvis ikkje _sr { returner _svar(-1, "", "skrivefeil") }
+    la resp_json = _les_ramme(lesar)
+    hvis resp_json == "" { returner _svar(-1, "", "ingen respons") }
+    returner builtin.json_parse_raw(resp_json)
+}
