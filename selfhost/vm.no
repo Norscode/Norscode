@@ -209,6 +209,38 @@ funksjon vm_handler_match(handler, verdi) -> boolsk {
     returner expected == "tekst" og builtin.type(verdi) == "tekst"
 }
 
+// M2: bygg ei feilmelding med kallstack. Meldinga sjølv står fyrst, slik at
+// eksisterande delstreng-sjekkar på feiltekst framleis treffer.
+//
+// Sporet står på éi linje med " | ved "-skilje. Eit linjeskift ville blitt
+// escapa til literal "\n" når unntaksverdien kryssar VM-grensa, og då er
+// eittlinjeforma lettare å lese i loggar.
+// M3: bind fanga lambda-variablar som lokale i callee-ramma, slik at
+// LOAD_NAME i lambda-kroppen finn dei. Blir kalla etter at parametrane er bundne.
+funksjon vm_bind_lambda_capture(ramme, capture) {
+    hvis builtin.type(capture) != "ordbok" { returner 0 }
+    la cap_namn = builtin.nøkler(capture)
+    la i: heiltall = 0
+    mens i < lengde(cap_namn) {
+        ramme["last_heap_id"] = ""
+        ramme_sett_var(ramme, cap_namn[i], capture[cap_namn[i]])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon vm_med_spor(melding, spor: liste_tekst) -> tekst {
+    la ut: tekst = tekst(melding)
+    hvis lengde(spor) == 0 { returner ut }
+    hvis builtin.contains(ut, " | ved ") { returner ut }
+    la i: heltall = 0
+    mens i < lengde(spor) {
+        ut = ut + " | ved " + spor[i]
+        i = i + 1
+    }
+    returner ut
+}
+
 funksjon vm_find_handler(try_stack, verdi) -> heiltall {
     la i: heiltall = lengde(try_stack) - 1
     mens i >= 0 {
@@ -4231,6 +4263,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner nøkler(args[0])
     }
 
+    // M10: normaliser ein for-løkke-verdi til noko som kan indekserast med
+    // heiltal 0..n. Ordbøker gir nøklane sine (som `for k in dict` i Python/JS);
+    // alt anna (liste, tekst) går uendra gjennom.
+    hvis namn == "builtin.for_iterabel" {
+        hvis builtin.type(args[0]) == "ordbok" { returner nøkler(args[0]) }
+        returner args[0]
+    }
+
     // builtin.verdier
     hvis namn == "builtin.verdier" {
         returner verdier(args[0])
@@ -4463,6 +4503,18 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.process_operation" {
         returner builtin.process_operation(args[0])
+    }
+
+    // argv-tilgang for INTERPRETERTE program (t.d. tools/ci_shell_runner.no).
+    // Vidaresend til builtinen slik at native_codegen_v2 kompilerer det inste
+    // kallet til den native argv-rutina (same mønster som process_spawn_argv).
+    // Utan dette kastar dispatchen "Ukjent innebygd funksjon: argv_operation".
+    hvis namn == "builtin.argv_operation" {
+        returner builtin.argv_operation(args[0])
+    }
+
+    hvis namn == "builtin.argv_list_v1" {
+        returner builtin.argv_list_v1()
     }
 
     hvis namn == "builtin.system_info" {
@@ -5560,6 +5612,8 @@ funksjon vm_opcode_fra_instr(instr: liste_tekst) -> tekst {
 funksjon vm_opcode_operandar(op: tekst) -> liste_heiltall {
     hvis op == "PUSH_CONST" eller op == "STORE_NAME" eller op == "LOAD_NAME" eller op == "STORE_GLOBAL" eller op == "LOAD_GLOBAL" eller op == "JUMP" eller op == "JUMP_IF_FALSE" eller op == "LABEL" eller op == "LOAD_FIELD" eller op == "STORE_FIELD" eller op == "FINALLY_PUSH" eller op == "FINALLY_RUN" { returner [1, 1] }
     hvis op == "CALL" { returner [2, 2] }
+    hvis op == "BUILD_LAMBDA" { returner [2, 2] }
+    hvis op == "CALL_VALUE" { returner [1, 1] }
     hvis op == "BUILD_LIST" eller op == "BUILD_MAP" { returner [1, 1] }
     hvis op == "TRY_BEGIN" { returner [1, 2] }
     hvis op == "FINALLY_END" { returner [3, 3] }
@@ -6047,10 +6101,19 @@ funksjon køyr_funksjon(
 
     la ip: heltall = 0
     hvis resuming { ip = resume_state["ip"] }
+    // M2: interne køyretidsfeil (divisjon med null, indeks utanfor) blir sette
+    // her i staden for å kaste rett til verten. Toppen av loopen gjer dei om
+    // til eit vanleg guest-unntak, slik at prøv/fang i brukarkoden fangar dei.
+    la intern_feil: tekst = ""
     mens (ip < lengde(kode)) {
         ramme["ip"] = ip
         la instr = kode[ip]
         la op: tekst = vm_opcode_fra_instr(instr)
+        hvis intern_feil != "" {
+            stack_push(ramme, intern_feil)
+            intern_feil = ""
+            op = "THROW"
+        }
         hvis trace_ops {
             skriv("VM-OP function=" + fn_namn +
                 " ip=" + tekst_fra_heltall(ip) +
@@ -6204,7 +6267,8 @@ funksjon køyr_funksjon(
             la b = stack_pop(ramme)
             la a = stack_pop(ramme)
             hvis b == 0 {
-                kast "Divisjon med null"
+                intern_feil = "DivisjonMedNull: divisjon med null"
+                fortsett
             }
             stack_push(ramme, a / b)
             ip = ip + 1
@@ -6215,7 +6279,8 @@ funksjon køyr_funksjon(
             la b = stack_pop(ramme)
             la a = stack_pop(ramme)
             hvis b == 0 {
-                kast "Modulo med null"
+                intern_feil = "ModuloMedNull: modulo med null"
+                fortsett
             }
             stack_push(ramme, a % b)
             ip = ip + 1
@@ -6431,6 +6496,15 @@ funksjon køyr_funksjon(
         hvis op == "INDEX_GET" {
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
+            // Grensesjekk før den native indekseringa, som elles avbryt
+            // prosessen utan at guest-koden får fange feilen.
+            hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
+                hvis indeks < 0 eller indeks >= lengde(obj) {
+                    intern_feil = "IndeksFeil: indeks " + tekst_fra_heltall(indeks) +
+                        " utanfor lista (lengde " + tekst_fra_heltall(lengde(obj)) + ")"
+                }
+            }
+            hvis intern_feil != "" { fortsett }
             la indeks_verdi = obj[indeks]
             // Store NCB-funksjonar direkte når vi indekserer det store,
             // langliva funksjonskartet. Å registrere kvar funksjonsordbok i
@@ -6454,6 +6528,13 @@ funksjon køyr_funksjon(
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
             la obj_heap_id = ramme["last_heap_id"]
+            hvis builtin.type(obj) == "liste" og builtin.type(indeks) == "heltall" {
+                hvis indeks < 0 eller indeks >= lengde(obj) {
+                    intern_feil = "IndeksFeil: indeks " + tekst_fra_heltall(indeks) +
+                        " utanfor lista (lengde " + tekst_fra_heltall(lengde(obj)) + ")"
+                }
+            }
+            hvis intern_feil != "" { fortsett }
             obj[indeks] = verdi
             // Compiler expects assignment to leave the mutated object on the stack
             // so statement-form assignments can clean it up with POP.
@@ -6484,9 +6565,27 @@ funksjon køyr_funksjon(
         }
 
         // ── Funksjonskall ────────────────────────────────────────────────
-        hvis op == "CALL" {
-            la mål_namn: tekst = instr[1]
-            la arg_n: heltall = instr[2]
+        hvis op == "CALL" eller op == "CALL_VALUE" {
+            // M3: CALL_VALUE deler heile CALL-maskineriet. Skilnaden er at
+            // funksjonsnamnet og eventuelle fanga variablar kjem frå ein
+            // closure-verdi øvst på stacken i staden for frå instruksjonen.
+            la mål_namn: tekst = ""
+            la arg_n: heltall = 0
+            la lambda_capture = {}
+            hvis op == "CALL_VALUE" {
+                arg_n = instr[1]
+                la kallbar = stack_pop(ramme)
+                hvis builtin.type(kallbar) == "ordbok" og vm_map_har_nokkel(kallbar, "__lambda__") {
+                    mål_namn = tekst(kallbar["__lambda__"])
+                    hvis vm_map_har_nokkel(kallbar, "__capture__") { lambda_capture = kallbar["__capture__"] }
+                } ellers {
+                    intern_feil = "TypeFeil: prøvde å kalle ein verdi som ikkje er ein funksjon"
+                    fortsett
+                }
+            } ellers {
+                mål_namn = instr[1]
+                arg_n = instr[2]
+            }
             hvis trace_ops { skriv("VM-CALL phase=begin target=" + mål_namn + " argc=" + tekst_fra_heltall(arg_n) + "\n") }
 
             // Samle argument frå stack i omvend rekkjefølgje. Reverser dei to
@@ -6533,7 +6632,19 @@ funksjon køyr_funksjon(
             // Dynamisk NCB-kall frå bytekode blir normalisert til same
             // continuation-frame som statiske CALL, utan reentrant VM-kall.
             hvis (mål_namn == "builtin.ncb_call_fn" eller mål_namn == "ncb_call_fn") og lengde(call_args) > 0 {
-                la dynamisk_namn = tekst(call_args[0])
+                // M3-follow-on: fyrste argument kan vere eit funksjonsnamn (tekst)
+                // ELLER ein closure-verdi frå ein lambda. Då blir capture bunde
+                // som lokale, slik at std/js_*-modulane kan ta lambdaverdiar
+                // gjennom same ncb_call_fn-konvensjon som funksjonsnamn.
+                la dyn_first = call_args[0]
+                la dynamisk_namn = ""
+                la dyn_capture = {}
+                hvis builtin.type(dyn_first) == "ordbok" og vm_map_har_nokkel(dyn_first, "__lambda__") {
+                    dynamisk_namn = tekst(dyn_first["__lambda__"])
+                    hvis vm_map_har_nokkel(dyn_first, "__capture__") { dyn_capture = dyn_first["__capture__"] }
+                } ellers {
+                    dynamisk_namn = tekst(dyn_first)
+                }
                 la dynamisk_løyst = finn_funksjon(dynamisk_namn, functions)
                 hvis dynamisk_løyst != "" {
                     la dynamiske_args: liste = []
@@ -6546,6 +6657,7 @@ funksjon køyr_funksjon(
                     }
                     mål_namn = dynamisk_namn
                     løyst_namn = dynamisk_løyst
+                    lambda_capture = dyn_capture
                     vm_arg_liste_frigje(functions, call_args, fast_mode)
                     call_args = dynamiske_args
                     call_heap_ids = dynamiske_heap
@@ -6556,7 +6668,9 @@ funksjon køyr_funksjon(
             hvis løyst_namn != "" {
                 la jit_used = usann
                 la jit_value = 0
-                hvis ikkje fast_mode {
+                // M3: JIT-vegen bind ikkje fanga variablar; hopp over han når
+                // closuren har capture. (Ikkje-fangande lambdaer er trygge.)
+                hvis ikkje fast_mode og lengde(lambda_capture) == 0 {
                     la jit_result = vm_jit_try(functions, løyst_namn, vm_map_get(functions, løyst_namn), call_args)
                     jit_used = jit_result["used"] == "sann"
                     hvis jit_used { jit_value = jit_result["value"] }
@@ -6632,6 +6746,7 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, params[tpi], call_args[tpi])
                     tpi = tpi + 1
                 }
+                vm_bind_lambda_capture(ramme, lambda_capture)
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""
@@ -6722,6 +6837,7 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, params[cpi], call_args[cpi])
                     cpi = cpi + 1
                 }
+                vm_bind_lambda_capture(ramme, lambda_capture)
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""
@@ -6949,6 +7065,29 @@ funksjon køyr_funksjon(
             fortsett
         }
 
+        hvis op == "BUILD_LAMBDA" {
+            // M3: bygg ein closure-verdi. instr[1] = fullt lambda-funksjonsnamn,
+            // instr[2] = liste med namn på frie variablar som skal fangast frå
+            // den gjeldande ramma.
+            la lam_namn = instr[1]
+            la cap_namn = instr[2]
+            la capture = {}
+            la lci: heiltall = 0
+            mens lci < lengde(cap_namn) {
+                la cn = cap_namn[lci]
+                capture[cn] = ramme_les_var(ramme, cn)
+                lci = lci + 1
+            }
+            la closure = {}
+            closure["__lambda__"] = lam_namn
+            closure["__capture__"] = capture
+            la closure_heap_id = vm_heap_track(functions, closure)
+            stack_push_heap(ramme, closure, closure_heap_id)
+            hvis closure_heap_id != "" { vm_gc_safe_point(functions, usann) }
+            ip = ip + 1
+            fortsett
+        }
+
         hvis op == "THROW" {
             vm_metric_inc(functions, "throws")
             la unntak_melding = stack_pop(ramme)
@@ -6975,6 +7114,9 @@ funksjon køyr_funksjon(
             hvis lokal_handler_index < 0 {
                 functions["__vm_last_return_heap_id__"] = ""
                 ramme["state"] = "thrown"
+                // M2: samle kallstacken medan rammene blir rulla av, slik at
+                // eit unntak som ingen fangar kan peike på kvar det oppstod.
+                la unwind_spor: liste_tekst = [fn_namn + " (ip " + tekst_fra_heltall(ip) + ")"]
                 fjern_siste(functions["__vm_active_frames__"])
                 vm_function_finish(functions, fn_namn, function_start_ms)
                 la handtert = usann
@@ -7030,6 +7172,7 @@ funksjon køyr_funksjon(
                     }
                     hvis ikkje handtert {
                         forelder["state"] = "unwound"
+                        legg_til(unwind_spor, tekst(forelder["namn"]) + " (ip " + tekst_fra_heltall(forelder["ip"]) + ")")
                         fjern_siste(functions["__vm_active_frames__"])
                         vm_function_finish(functions, forelder["namn"], forelder["started_ms"])
                     }
@@ -7040,7 +7183,7 @@ funksjon køyr_funksjon(
                     fortsett
                 }
                 vm_gc_safe_point(functions, usann)
-                kast unntak_melding
+                kast vm_med_spor(unntak_melding, unwind_spor)
             }
 
             la handler = try_stack[lokal_handler_index]
