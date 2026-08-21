@@ -142,11 +142,14 @@ Fase 1–3. Porten fra `.nors`→`.no` er hovedsakelig syntaks (kolon-blokk → 
       open/close/execute/query_text/query_int/query_rader/ping/siste_feil/begin/commit/
       rollback/transaction/migrate. Auto-id (som JSON-std.db). Test: `test_norsdb_db_adapter.no`.
 - [x] `:memory:` = in-memory motor (ingen fil-I/O).
-- [x] **Flippen gjort:** `std/db.no` rutar no til `std.norsdb_db` (binær motor), ikkje JSON.
-      Reversibelt (JSON-motoren intakt). Format-deteksjon i `open` (JSON→auto-migrer). Adapteren
+- [x] **Flippen gjort OG aktiv i arbeidstreet (2026-08-21, steg 1 av 2):** `std/db.no` rutar
+      no til `std.norsdb_db` (binær motor), ikkje JSON. Den gamle JSON-modulen `std/norsdb.no`
+      er **fjerna**; `_vm_db_*` i `selfhost/vm.no` er daud kode som fjernast i steg 2 (eiga
+      oppgåve, krev stage0-rebuild). Format-deteksjon i `open` (JSON→auto-migrer). Adapteren
       fekk binding/pool/backup + `DROP TABLE` i sql. Handle = ugjennomsiktig db-objekt.
       MERK semantisk skilnad frå JSON: `migrate` dedupliserer ikkje (SQLite-likt) → test_db.no
-      linje 38 (duplikat→0) avvik.
+      linje 38 (duplikat→0) oppdatert til binær-forventning (duplikat→1, COUNT 4→5).
+      Kontrakt-testen `test_norsdb_default_contract.no` skriven om til binær arkitektur.
 - [x] **Migrering JSON→binær** `migrer_json(json_sti, bin_sti)` — les gamalt JSON-format,
       bygg binær motor-db (schema→tags, rader, auto-id-kolonne). Test: `test_norsdb_migrering.no`.
 - [x] Format-deteksjon i `open` (JSON→auto-migrer) — gjort i adapteren.

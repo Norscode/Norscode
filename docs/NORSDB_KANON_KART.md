@@ -1,46 +1,51 @@
 # NorsDB — kanon-kart
 
-> Status: **kartlegging** (2026-08-11). Dette notatet endrer ingen kode — det
-> dokumenterer bare hvilken NorsDB som er den ekte, kjørende motoren, og hva de
-> andre artefaktene er, så vi slipper å forvirre design, eksperiment og runtime.
+> Status: **cutover til binær motor gjort — steg 1 av 2** (2026-08-21). `std.db`
+> rutar no til den binære B-tre/WAL-motoren; den gamle JSON-modulen `std/norsdb.no`
+> er **fjerna**. `_vm_db_*` i `selfhost/vm.no` er no daud kode, planlagt fjerna i
+> steg 2. (Tidlegare kartlegging: 2026-08-11.)
 
 ## Kort svar
 
-Det finnes **tre uavhengige «NorsDB»-artefakter** i repoet. De deler *ikke* kode,
-og de har ulikt filformat, API og modning.
+Kanon er no **den binære motoren** (`std/norsdb_db` → `norsdb_sql` + `norsdb_motor`).
+Utover den finst framleis to urelaterte design-/eksperiment-artefakter.
 
 | # | Sti | Rolle | Status |
 |---|-----|-------|--------|
-| 1 | `std/norsdb.no` + `selfhost/vm.no` (`_vm_db_*`) | **KANON** — den faktisk kjørende databasen | Aktiv |
+| 1 | `std/norsdb_db.no` + `std/norsdb_sql.no` + `std/norsdb_motor.no` | **KANON** — den faktisk kjørende databasen (binær B-tre/WAL) | Aktiv |
+| — | `std/norsdb.no` + `selfhost/vm.no` (`_vm_db_*`) | Gamal JSON-motor | **Fjerna (modul); vm-kode daud, fjernast i steg 2** |
 | 2 | `NorsDB/` | Designskisse / MVP-spesifikasjon | Ikke koblet til runtime |
 | 3 | `packages/norsdb/` | Nedskalert eksperimentbase («parsebar minimalbase») | Uverifisert |
 
-## 1. Kanon: `std/norsdb.no` + `selfhost/vm.no`
+## 1. Kanon: `std/norsdb_db.no` + `std/norsdb_sql.no` + `std/norsdb_motor.no`
 
-Dette er databasen som faktisk brukes fra Norscode-programmer.
+Dette er databasen som faktisk brukes fra Norscode-programmer via `std.db`.
 
-- [std/norsdb.no](../std/norsdb.no) er et tynt API-lag som delegerer til
-  `_vm_db_*`-funksjonene i [selfhost/vm.no](../selfhost/vm.no) (ca. linje 1911–3200).
-- **Backend-identitet:** `backend() = "norsdb-pure-v1"`, `external_runtime = false`,
-  sqlite kun som valgfri adapter — ren Norscode, ingen ekstern avhengighet
-  (passer selvstendighets-/B2-målet).
-- **SQL:** `CREATE TABLE`, `INSERT`, `INSERT OR IGNORE`, `UPDATE`, `DELETE`,
-  `DROP TABLE` ([vm.no:3149](../selfhost/vm.no)), pluss `SELECT` med `WHERE`,
-  `ORDER BY`, paginering og aggregater (`COUNT` m.fl.).
-- **Transaksjoner:** snapshot via `json_stringify`/`json_parse`-kloning
-  (`begin`/`commit`/`rollback`). Korrekt, men O(n) på hele databasen per transaksjon.
+- [std/db.no](../std/db.no) rutar til [std/norsdb_db.no](../std/norsdb_db.no)
+  (adapter), som byggjer på [std/norsdb_sql.no](../std/norsdb_sql.no) (SQL-lag:
+  eigen tokenizer + uttrykks-evaluator) og [std/norsdb_motor.no](../std/norsdb_motor.no)
+  (lagring). **Ingen `vm.no`, ingen JSON.**
+- **Backend-identitet:** `backend() = "norsdb-pure-v1"` (kontrakt-kompat med gamal),
+  `status()["storage"] = "binær-btre-wal"`, `external_runtime = false` — ren Norscode.
+- **SQL:** SQLite-nivå SQL-flate (Fase 7 komplett): CRUD, full WHERE (AND/OR/parentesar/
+  NOT/LIKE/IN/BETWEEN/IS NULL), uttrykk + funksjonar, `ORDER BY`/`LIMIT`/`OFFSET`,
+  `GROUP BY`/`HAVING` + aggregat, subqueries, `UNION`/`INTERSECT`/`EXCEPT`, CTE (+RECURSIVE),
+  vindusfunksjonar, `JOIN` (INNER/LEFT/RIGHT/FULL/CROSS), constraints (PK/UNIQUE/NOT NULL/
+  CHECK/FK/UPSERT), `ALTER`/`VIEW`/`TRIGGER`, prepared statements, `CREATE INDEX`.
+- **Handle:** eit ugjennomsiktig objekt (`ordbok`), ikkje ein streng — per-handle-state
+  ligg i objektet (unngår modul-globalt register, som kodegen ikkje handterer påliteleg).
+- **Transaksjoner:** snapshot via `db_serialiser`/`db_replay` (`begin`/`commit`/`rollback`).
 - **Connection pool:** `pool` / `pool_acquire` / `pool_size` / `pool_close`.
-- **Persistens = JSON**, ikke binærformat. En `.db`-fil er hele DB-objektet serialisert:
-
-  ```json
-  {"_tables":{"cachetest":{"schema":[{"namn":"verdi","type":"TEXT"}],
-   "rows":[{"verdi":"A","id":"1"}],"next_id":2}},"_path":"...","_in_tx":false,...}
-  ```
-
-- **Tester:** [tests/test_norsdb_default.no](../tests/test_norsdb_default.no),
-  `tests/test_norsdb_default_contract.no`, `tests/test_db*.no`.
-  ⚠️ Merk: `./bin/nc run tests/test_norsdb_default.no` tidsavbrøt (>2 min) ved
-  kartleggingen — samsvarer med kjent native-runtime-treghet. Ikke verifisert grønt her.
+- **Persistens = binærformat** (B-tre/WAL + checkpoint), ikkje JSON-blob. `open()` på ei
+  gamal JSON-`.db`-fil auto-migrerer til binær (`migrer_json`).
+- **Åtferdsavvik frå gamal JSON-motor** (SQLite-troskap, golden vs `sqlite3 3.51.0`):
+  `migrate` dedupliserer **ikkje**; `query_rader`/`query_text` gjev **REAL** AVG (t.d. 40.5),
+  medan `query_int(AVG)` framleis trunkerer til heiltal.
+- **Tester:** binær-motor-suita (`tests/test_norsdb_motor_*`, `_sql*`, `_cte`, `_vindu`,
+  `_join_komplett`, `_constraints`, `_typer`, `_setops`, `_skjema`, `_plan`, …), pluss
+  stack-mot-binær (`tests/test_db*.no`, `test_norsdb_default*.no`, auth/admin/domenehost).
+  ⚠️ `./bin/nc run` på db-testar heng/OOM-ar i sandkassen (kjent native-runtime-treghet);
+  runtime-verifisering køyrast på utviklarmaskin.
 
 ## 2. Designskisse: `NorsDB/`
 
