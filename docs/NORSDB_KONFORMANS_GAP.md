@@ -1,43 +1,44 @@
 # NorsDB konformans-gap mot SQLite
 
-> Fasit: `tests/test_norsdb_konformans.no` (golden-verdier fra ekte `sqlite3 3.51.0`).
-> Denne fila sporer der NorsDB **avviker fra** eller **manglar** SQLite-åtferd.
+> Fasit: golden-verdiar frå ekte `sqlite3 3.51.0`.
+> Gjeld den **binære motoren** (`std/norsdb_db → norsdb_sql → norsdb_motor`), som er
+> kanon bak `std.db`. (Den gamle JSON-motoren `_vm_db_*` i `vm.no` er fjerna.)
 > Mål og faser: [NORSDB_SQLITE_PLAN.md](NORSDB_SQLITE_PLAN.md).
 
 ## Bekrefta divergensar (verifisert mot sqlite3)
 
-| # | SQL | SQLite | NorsDB | Fase | Merknad |
-|---|-----|--------|--------|------|---------|
-| G1 | `SELECT AVG(alder) FROM folk` | `40.5` | `40` | 1/2 | Heiltalsdivisjon; manglar REAL/typer. Krev tekst-/desimal-retur. |
-| G2 | `INSERT` utan `id` i tabell `id INTEGER` (ikkje PRIMARY KEY) | `id = NULL` | auto-inkrement | 2 | NorsDB auto-tildeler alltid id; SQLite berre for `INTEGER PRIMARY KEY`. |
+| # | SQL | SQLite | NorsDB | Merknad |
+|---|-----|--------|--------|---------|
+| G2 | `INSERT` utan `id` i tabell `id INTEGER` (ikkje PRIMARY KEY) | `id = NULL` | auto-inkrement | NorsDB auto-tildeler alltid rowid; SQLite berre for `INTEGER PRIMARY KEY`. |
+| NULL | 3-verdi-logikk / NULL vs `''` | eigen NULL-type | `NULL ≈ ""` | Strengbasert lagring; `IS NULL` fungerer, men NULL er ikkje fullt skilt frå tom streng. |
+
+> G1 (AVG → heiltal) er **løyst**: `query_rader`/`query_text` gjev REAL (40.5); heiltals-kontekst
+> (`query_int`) trunkerer som forventa.
 
 ## Manglande funksjonar (parser/motor støttar ikkje)
 
-Verifisert fråverande i `selfhost/vm.no` (`_vm_db_*`). Kvar blir ein testcase i suiten når han er implementert.
-
-| Funksjon | Status | Fase |
+| Funksjon | Status | Merknad |
 |---|---|---|
-| `JOIN` (INNER/LEFT/CROSS) | manglar | 1 |
-| `GROUP BY` / `HAVING` | manglar | 1 |
-| `LIKE` / `GLOB` | manglar | 1 |
-| `IN (...)` / `IN (SELECT ...)` | manglar | 1 |
-| `BETWEEN` | manglar | 1 |
-| `IS [NOT] NULL` / NULL-semantikk | manglar | 1/2 |
-| `AND` / `OR` / `NOT` + parentesar i WHERE | delvis/uklar | 1 |
-| `CASE WHEN` + uttrykk (`\|\|`, aritmetikk) | manglar | 1 |
-| `INSERT ... SELECT`, `INSERT OR REPLACE`, UPSERT | manglar | 1 |
-| Constraints: PK/FK/UNIQUE(håndheva)/NOT NULL/CHECK/DEFAULT | manglar | 2 |
-| Typer / affinity / NULL | strengbasert | 2 |
-| `ALTER TABLE`, `VIEW` | manglar | 2 |
-| Ekte indeks (`CREATE INDEX`) brukt i plan | manglar | 3 |
-| Aggregat på REAL, fleir-kolonne GROUP | manglar | 1/2 |
+| Dato-/tidsfunksjonar (`date/time/datetime/strftime/julianday`) | manglar | Krev sjølv-implementert kalendermatematikk (`builtin.now_iso` finst ikkje i seed). |
+| BLOB-literalar (`x'…'`) | manglar | Strengbasert lagring; blob ikkje distinkt frå TEXT. |
+| Full 3-verdi NULL i lagring/samanlikning | manglar | Krev storage-endring (skilje NULL frå `''`). |
+| Kostnadsbasert join-planleggar | manglar | I dag nested-loop + indeks-guard; ingen statistikk-basert omordning. |
+| `SET DEFAULT` referanseaksjon (full DEFAULT-verdi) | delvis | Handterast som SET NULL. |
 
-## Dekt i dag (grøn konformans)
+## Dekt i dag (grøn konformans, golden mot sqlite3 3.51.0)
 
-CREATE/INSERT/UPDATE/DELETE/DROP, `SELECT` (éin tabell + subquery i FROM),
-`WHERE` med `= != <> < <= > >=`, `ORDER BY ASC/DESC`, `LIMIT`/`OFFSET`,
-`COUNT/SUM/MIN/MAX`, `DISTINCT`, parameter-binding (`?`), transaksjonar
-(`begin/commit/rollback`, `transaction`).
+CREATE/INSERT/UPDATE/DELETE/DROP, `SELECT` med full `WHERE`
+(`= != <> < <= > >=`, `LIKE`, **`GLOB`**, `IN`, `BETWEEN`, `IS [NOT] NULL`,
+`AND/OR/NOT` + parentesar), uttrykk (`+ − * / %`, `||`, `CASE`) og skalarfunksjonar,
+`ORDER BY`/`LIMIT`/`OFFSET`, `GROUP BY`/`HAVING`, aggregat (`COUNT/SUM/AVG/MIN/MAX/
+TOTAL/GROUP_CONCAT`, inkl. `COUNT(DISTINCT)`), `DISTINCT`, subqueries (skalar/`IN`/
+`EXISTS`/korrelert/`FROM`), `UNION/INTERSECT/EXCEPT`, CTE (`WITH`/`WITH RECURSIVE`),
+vindusfunksjonar, `JOIN` (INNER/LEFT/RIGHT/FULL/CROSS), constraints
+(PK/UNIQUE/NOT NULL/CHECK/DEFAULT/FK), **FK `ON DELETE/UPDATE` CASCADE/SET NULL/RESTRICT**,
+`INSERT OR IGNORE/REPLACE` + UPSERT, `ALTER TABLE`, `CREATE VIEW`,
+**`CREATE TRIGGER` BEFORE + AFTER** (INSERT/UPDATE/DELETE, NEW/OLD),
+`CREATE INDEX` (equality + range i planen), prepared statements (`?`), `EXPLAIN`,
+REAL-typar, parameter-binding, transaksjonar (`begin/commit/rollback`, `transaction`).
 
 ## Slik oppdaterer du fasit
 
