@@ -1114,6 +1114,141 @@ funksjon _upsert_verdi(tok: tekst, nyrad) -> tekst {
     returner _unquote(tok)
 }
 
+// ── FOREIGN KEY-referanseaksjonar (ON DELETE/UPDATE) ─────────────────
+// Les referanse-aksjonar etter REFERENCES tab(col), fram til , eller ).
+funksjon _fk_les_actions(toks, start: heltall) -> ordbok {
+    la on_del = "NO ACTION"
+    la on_upd = "NO ACTION"
+    la i = start
+    mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" {
+        hvis _opp(toks[i]) == "ON" og i + 1 < lengde(toks) {
+            la ev = _opp(toks[i + 1])
+            la j = i + 2
+            la act = "NO ACTION"
+            hvis j < lengde(toks) {
+                la a0 = _opp(toks[j])
+                hvis a0 == "SET" og j + 1 < lengde(toks) {
+                    act = "SET " + _opp(toks[j + 1])
+                    j = j + 2
+                } ellers hvis a0 == "NO" og j + 1 < lengde(toks) {
+                    act = "NO ACTION"
+                    j = j + 2
+                } ellers {
+                    act = a0
+                    j = j + 1
+                }
+            }
+            hvis ev == "DELETE" { on_del = act }
+            hvis ev == "UPDATE" { on_upd = act }
+            i = j
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner {"on_delete": on_del, "on_update": on_upd}
+}
+
+funksjon _fk_act(fk, key: tekst) -> tekst {
+    hvis finnes_nøkkel(fk, key) { returner fk[key] }
+    returner "NO ACTION"
+}
+
+funksjon _sql_lit(v: tekst) -> tekst {
+    returner "'" + builtin.join(builtin.split(v, "'"), "''") + "'"
+}
+
+// Alle FK-ar (på tvers av tabellar) som peikar på foreldretabellen `ptab`.
+funksjon _fk_barn(db, ptab: tekst) -> liste {
+    la ut = []
+    la tbls = nøkler(db["tabellar"])
+    la i = 0
+    mens i < lengde(tbls) {
+        la c = _tab_c(db["tabellar"][tbls[i]])
+        la fks = c["fk"]
+        la k = 0
+        mens k < lengde(fks) {
+            hvis fks[k]["tab"] == ptab {
+                legg_til(ut, {"tab": tbls[i], "col": fks[k]["col"], "refcol": fks[k]["refcol"],
+                              "on_delete": _fk_act(fks[k], "on_delete"), "on_update": _fk_act(fks[k], "on_update")})
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Pre-sjekk RESTRICT/NO ACTION FØR forelder-mutasjonen (event = DELETE|UPDATE).
+// usann = brot (blokkér setninga). CASCADE/SET NULL handterast av _apply etterpå.
+funksjon _kaskade_restrict_ok(db, ptab: tekst, oldrad, newrad, event: tekst) -> boolsk {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la act = b["on_delete"]
+        hvis event == "UPDATE" { act = b["on_update"] }
+        hvis act != "CASCADE" og act != "SET NULL" og act != "SET DEFAULT" {
+            la oldv = ""
+            hvis finnes_nøkkel(oldrad, b["refcol"]) { oldv = oldrad[b["refcol"]] }
+            la endra = sann
+            hvis event == "UPDATE" {
+                la newv = ""
+                hvis finnes_nøkkel(newrad, b["refcol"]) { newv = newrad[b["refcol"]] }
+                endra = (oldv != newv)
+            }
+            hvis oldv != "" og endra og _finst_verdi(db, b["tab"], b["col"], oldv) {
+                db["_siste_feil"] = "FOREIGN KEY constraint failed"
+                returner usann
+            }
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Bruk CASCADE/SET NULL på barnrader ETTER at forelderrada er sletta.
+funksjon _kaskade_delete_apply(db, ptab: tekst, rad) {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la val = ""
+        hvis finnes_nøkkel(rad, b["refcol"]) { val = rad[b["refcol"]] }
+        hvis val != "" {
+            hvis b["on_delete"] == "CASCADE" {
+                _exec_t(db, _tok("DELETE FROM " + b["tab"] + " WHERE " + b["col"] + " = " + _sql_lit(val)))
+            } ellers hvis b["on_delete"] == "SET NULL" eller b["on_delete"] == "SET DEFAULT" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(val)))
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// Bruk CASCADE/SET NULL på barnrader ETTER at forelder-nøkkelen er oppdatert
+// (så barnet sin nye FK-verdi finst i forelderen). Berre når refcol endra seg.
+funksjon _kaskade_update_apply(db, ptab: tekst, oldrad, newrad) {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la oldv = ""
+        hvis finnes_nøkkel(oldrad, b["refcol"]) { oldv = oldrad[b["refcol"]] }
+        la newv = ""
+        hvis finnes_nøkkel(newrad, b["refcol"]) { newv = newrad[b["refcol"]] }
+        hvis oldv != "" og oldv != newv {
+            hvis b["on_update"] == "CASCADE" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = " + _sql_lit(newv) + " WHERE " + b["col"] + " = " + _sql_lit(oldv)))
+            } ellers hvis b["on_update"] == "SET NULL" eller b["on_update"] == "SET DEFAULT" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(oldv)))
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
 // Finn ON CONFLICT-klausul i INSERT. Returnerer {har, do: NOTHING|UPDATE, set_kol, set_val}.
 funksjon _finn_on_conflict(toks) -> ordbok {
     la i = 0
@@ -1360,7 +1495,10 @@ funksjon _exec_t(db, toks) -> heltall {
                         hvis lengde(rg["cols"]) > 0 { refcol = rg["cols"][0] }
                         i = rg["etter"]
                     }
-                    hvis lengde(grp["cols"]) > 0 { legg_til(c_fk, {"col": grp["cols"][0], "tab": rtab, "refcol": refcol}) }
+                    hvis lengde(grp["cols"]) > 0 {
+                        la acts = _fk_les_actions(toks, i)
+                        legg_til(c_fk, {"col": grp["cols"][0], "tab": rtab, "refcol": refcol, "on_delete": acts["on_delete"], "on_update": acts["on_update"]})
+                    }
                 }
                 mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" { i = i + 1 }
                 fortsett
@@ -1404,7 +1542,8 @@ funksjon _exec_t(db, toks) -> heltall {
                         hvis lengde(rg["cols"]) > 0 { refcol = rg["cols"][0] }
                         i = rg["etter"]
                     }
-                    legg_til(c_fk, {"col": kol_navn, "tab": rtab, "refcol": refcol})
+                    la acts = _fk_les_actions(toks, i)
+                    legg_til(c_fk, {"col": kol_navn, "tab": rtab, "refcol": refcol, "on_delete": acts["on_delete"], "on_update": acts["on_update"]})
                 } ellers {
                     i = i + 1
                 }
@@ -1686,8 +1825,10 @@ funksjon _exec_t(db, toks) -> heltall {
             la treff = sann
             hvis where_start >= 0 { treff = _match_fra(rad, toks, where_start, _kt_ny(db, {})) }
             hvis treff {
+                hvis ikke _kaskade_restrict_ok(db, navn, rad, {}, "DELETE") { returner 0 - 1 }
                 _fyr_triggers(db, "BEFORE", "DELETE", navn, {}, rad)
                 motor.db_slett(db, navn, rowids[r])
+                _kaskade_delete_apply(db, navn, rad)
                 slettet = slettet + 1
                 _fyr_triggers(db, "AFTER", "DELETE", navn, {}, rad)
             }
@@ -1739,8 +1880,10 @@ funksjon _exec_t(db, toks) -> heltall {
                 la nyrad = _rad_av_verdier(t, verdier)
                 la feil = _sjekk_constraints(db, navn, nyrad, rowids[r])
                 hvis feil != "" { db["_siste_feil"] = feil; returner 0 - 1 }
+                hvis ikke _kaskade_restrict_ok(db, navn, rad, nyrad, "UPDATE") { returner 0 - 1 }
                 _fyr_triggers(db, "BEFORE", "UPDATE", navn, nyrad, rad)
                 motor.db_oppdater(db, navn, rowids[r], verdier)
+                _kaskade_update_apply(db, navn, rad, nyrad)
                 oppdatert = oppdatert + 1
                 _fyr_triggers(db, "AFTER", "UPDATE", navn, nyrad, rad)
             }
