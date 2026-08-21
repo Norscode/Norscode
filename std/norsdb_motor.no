@@ -1,0 +1,710 @@
+// NorsDB ekte lagringsmotor — Fase 1: binært record-format.
+// Ingenting med JSON å gjøre. Rader kodast som type-tagga, lengde-prefikset binær.
+// Sjå docs/NORSDB_EKTE_MOTOR_PLAN.md. Denne modulen er MEDVITE lagt utanfor vm.no
+// for å ikkje tynge kald-kompileringa.
+//
+// Verdi-encoding (bytes = liste<heltall> 0-255):
+//   NULL    : [0]
+//   <ikkje-null> : [tag] [u32 lengde] [payload ...]
+// Type-tag skil INTEGER "37" frå TEXT "37" frå REAL "40.5" — det gjev ekte typar
+// og NULL (fiksar divergensane G1/G3 mot SQLite). Tal lagrast førebels som tekst-
+// payload (eksakt, negativ/bignum-trygt); fast-breidd heiltal er ei seinare optim.
+
+bruk std.bytes som bytes
+
+// ── Type-tags ────────────────────────────────────────────────────────
+funksjon tag_null()  -> heltall { returner 0 }
+funksjon tag_int()   -> heltall { returner 1 }
+funksjon tag_tekst() -> heltall { returner 2 }
+funksjon tag_real()  -> heltall { returner 3 }
+funksjon tag_blob()  -> heltall { returner 4 }
+
+// ── Byte-hjelpere ────────────────────────────────────────────────────
+funksjon _u32(n: heltall) -> liste<heltall> {
+    returner [(n / 16777216) % 256, (n / 65536) % 256, (n / 256) % 256, n % 256]
+}
+
+funksjon _les_u32(b: liste<heltall>, i: heltall) -> heltall {
+    returner b[i] * 16777216 + b[i + 1] * 65536 + b[i + 2] * 256 + b[i + 3]
+}
+
+funksjon _tekst_til_bytes(t: tekst) -> liste<heltall> {
+    la teikn = builtin.split(t, "")
+    la ut: liste<heltall> = []
+    la i: heltall = 0
+    mens i < lengde(teikn) {
+        legg_til(ut, builtin.char_code(teikn[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _bytes_til_tekst(b: liste<heltall>, start: heltall, tal: heltall) -> tekst {
+    la ut = ""
+    la i: heltall = start
+    la slutt: heltall = start + tal
+    mens i < slutt {
+        ut = ut + builtin.chr(b[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _legg_til_alle(mål: liste<heltall>, kjelde: liste<heltall>) {
+    la i: heltall = 0
+    mens i < lengde(kjelde) {
+        legg_til(mål, kjelde[i])
+        i = i + 1
+    }
+}
+
+// ── Verdi-codec ──────────────────────────────────────────────────────
+funksjon enc_verdi(tag: heltall, verdi: tekst) -> liste<heltall> {
+    hvis tag == tag_null() {
+        returner [tag_null()]
+    }
+    la payload = _tekst_til_bytes(verdi)
+    la ut: liste<heltall> = [tag]
+    _legg_til_alle(ut, _u32(lengde(payload)))
+    _legg_til_alle(ut, payload)
+    returner ut
+}
+
+// Returnerer {"tag", "verdi", "neste"} — neste = byte-indeks etter denne verdien.
+funksjon dec_verdi(b: liste<heltall>, i: heltall) -> ordbok_tekst {
+    la tag = b[i]
+    hvis tag == tag_null() {
+        returner {"tag": tag_null(), "verdi": "", "neste": i + 1}
+    }
+    la len = _les_u32(b, i + 1)
+    la start = i + 5
+    la verdi = _bytes_til_tekst(b, start, len)
+    returner {"tag": tag, "verdi": verdi, "neste": start + len}
+}
+
+// ── Rad-codec ────────────────────────────────────────────────────────
+// tags/verdiar i kolonne-rekkefølge. Format: [u16 feltteljing] [verdi ...].
+funksjon enc_rad(tags: liste<heltall>, verdiar: liste<tekst>) -> liste<heltall> {
+    la n = lengde(tags)
+    la ut: liste<heltall> = [(n / 256) % 256, n % 256]
+    la i: heltall = 0
+    mens i < n {
+        _legg_til_alle(ut, enc_verdi(tags[i], verdiar[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+// Returnerer {"verdiar": liste<tekst>, "tags": liste<heltall>, "neste": indeks}.
+funksjon dec_rad(b: liste<heltall>, i: heltall) -> ordbok_tekst {
+    la n = b[i] * 256 + b[i + 1]
+    la pos = i + 2
+    la verdiar: liste<tekst> = []
+    la tags: liste<heltall> = []
+    la k: heltall = 0
+    mens k < n {
+        la v = dec_verdi(b, pos)
+        legg_til(verdiar, v["verdi"])
+        legg_til(tags, v["tag"])
+        pos = v["neste"]
+        k = k + 1
+    }
+    returner {"verdiar": verdiar, "tags": tags, "neste": pos}
+}
+
+// ── B-tre (heltalls-nøkkel → data) ───────────────────────────────────
+// Portert frå NorsDB/norsdb_index.nors (.nors) til .no. Node = ordbok:
+//   {"n": nøklar, "d": data (parallell), "c": barn, "blad": boolsk, "antall": int}
+// Kjerna for radlagring (rowid-tre) og seinare kolonne-indeksar. O(log n).
+// Alle liste-mutasjonar går via reassignment i noden (ordbok = referanse).
+
+funksjon _btre_grad() -> heltall { returner 8 }
+
+funksjon _list_sett_inn(liste, pos: heltall, verdi) {
+    la ut = []
+    la i: heltall = 0
+    mens i < pos { legg_til(ut, liste[i]); i = i + 1 }
+    legg_til(ut, verdi)
+    mens i < lengde(liste) { legg_til(ut, liste[i]); i = i + 1 }
+    returner ut
+}
+
+funksjon _list_prefix(liste, k: heltall) {
+    la ut = []
+    la i: heltall = 0
+    mens i < k { legg_til(ut, liste[i]); i = i + 1 }
+    returner ut
+}
+
+funksjon btre_ny() -> ordbok_tekst {
+    returner {"n": [], "d": [], "c": [], "blad": sann, "antall": 0}
+}
+
+// Søk: returner data for nøkkel, eller -1 om ikkje funne.
+funksjon btre_søk(node, nøkkel: heltall) -> heltall {
+    la i: heltall = 0
+    mens i < node["antall"] og nøkkel > node["n"][i] {
+        i = i + 1
+    }
+    hvis i < node["antall"] og node["n"][i] == nøkkel {
+        returner node["d"][i]
+    }
+    hvis node["blad"] {
+        returner -1
+    }
+    returner btre_søk(node["c"][i], nøkkel)
+}
+
+// Sett inn nøkkel→data. Returnerer (evt. ny) rot.
+funksjon btre_sett_inn(rot, nøkkel: heltall, data: heltall) {
+    la grad = _btre_grad()
+    hvis rot["antall"] == (2 * grad - 1) {
+        la ny_rot: ordbok_tekst = {"n": [], "d": [], "c": [rot], "blad": usann, "antall": 0}
+        _btre_del_barn(ny_rot, 0, grad)
+        _btre_sett_inn_ikke_full(ny_rot, nøkkel, data, grad)
+        returner ny_rot
+    }
+    _btre_sett_inn_ikke_full(rot, nøkkel, data, grad)
+    returner rot
+}
+
+funksjon _btre_sett_inn_ikke_full(node, nøkkel: heltall, data: heltall, grad: heltall) {
+    la i: heltall = node["antall"] - 1
+    hvis node["blad"] {
+        mens i >= 0 og nøkkel < node["n"][i] {
+            i = i - 1
+        }
+        node["n"] = _list_sett_inn(node["n"], i + 1, nøkkel)
+        node["d"] = _list_sett_inn(node["d"], i + 1, data)
+        node["antall"] = node["antall"] + 1
+    } ellers {
+        mens i >= 0 og nøkkel < node["n"][i] {
+            i = i - 1
+        }
+        i = i + 1
+        hvis node["c"][i]["antall"] == (2 * grad - 1) {
+            _btre_del_barn(node, i, grad)
+            hvis nøkkel > node["n"][i] {
+                i = i + 1
+            }
+        }
+        _btre_sett_inn_ikke_full(node["c"][i], nøkkel, data, grad)
+    }
+}
+
+// Del fullt barn i av forelder: øvre halvdel → ny node, median opp i forelder.
+funksjon _btre_del_barn(forelder, i: heltall, grad: heltall) {
+    la barn = forelder["c"][i]
+    la ny: ordbok_tekst = {"n": [], "d": [], "c": [], "blad": barn["blad"], "antall": grad - 1}
+    la j: heltall = 0
+    mens j < grad - 1 {
+        legg_til(ny["n"], barn["n"][j + grad])
+        legg_til(ny["d"], barn["d"][j + grad])
+        j = j + 1
+    }
+    hvis ikke barn["blad"] {
+        j = 0
+        mens j < grad {
+            legg_til(ny["c"], barn["c"][j + grad])
+            j = j + 1
+        }
+    }
+    la med_n = barn["n"][grad - 1]
+    la med_d = barn["d"][grad - 1]
+    barn["n"] = _list_prefix(barn["n"], grad - 1)
+    barn["d"] = _list_prefix(barn["d"], grad - 1)
+    hvis ikke barn["blad"] {
+        barn["c"] = _list_prefix(barn["c"], grad)
+    }
+    barn["antall"] = grad - 1
+    forelder["c"] = _list_sett_inn(forelder["c"], i + 1, ny)
+    forelder["n"] = _list_sett_inn(forelder["n"], i, med_n)
+    forelder["d"] = _list_sett_inn(forelder["d"], i, med_d)
+    forelder["antall"] = forelder["antall"] + 1
+}
+
+// In-order traversering av nøklane (for verifisering/scan).
+funksjon btre_i_orden(node) -> liste<heltall> {
+    la ut: liste<heltall> = []
+    _btre_i_orden(node, ut)
+    returner ut
+}
+
+funksjon _btre_i_orden(node, ut) {
+    la i: heltall = 0
+    mens i < node["antall"] {
+        hvis ikke node["blad"] {
+            _btre_i_orden(node["c"][i], ut)
+        }
+        legg_til(ut, node["n"][i])
+        i = i + 1
+    }
+    hvis ikke node["blad"] {
+        _btre_i_orden(node["c"][node["antall"]], ut)
+    }
+}
+
+// ── Durabilitet: append-WAL + binær checkpoint + recovery ────────────
+// Bruker berre hele-fil skriv/les + append (runtimen har ikkje seek). Append-only
+// WAL gjev raske durable commits; checkpoint bind WAL-storleiken; recovery les
+// checkpoint + replayer WAL. Trunkert WAL-hale (krasj midt i skriving) ignorerast.
+
+funksjon _magic() -> liste<heltall> {
+    returner _tekst_til_bytes("NORSDB1")
+}
+
+// Ramme ein payload med u32 lengde-prefiks (for logg-postar).
+funksjon _ramme(payload) -> liste<heltall> {
+    la ut = _u32(lengde(payload))
+    _legg_til_alle(ut, payload)
+    returner ut
+}
+
+// Legg til éin logg-post (framed) sist i WAL-fila (durable append).
+funksjon logg_legg_til(sti: tekst, payload) {
+    builtin.fil_append_binær(sti, bytes.fra_liste(_ramme(payload)))
+}
+
+// Les alle KOMPLETTE logg-postar. Ein ufullstendig hale (frå krasj midt i skriving)
+// stoppar lesinga og ignorerast — dette er crash-safety-eigenskapen.
+// Parse framed records (u32-lengde) frå ei byte-liste. Ufullstendig hale ignorerast.
+funksjon _les_framed(b) -> liste {
+    la ut = []
+    la n = lengde(b)
+    la i: heltall = 0
+    mens i + 4 <= n {
+        la len = _les_u32(b, i)
+        hvis i + 4 + len > n {
+            bryt
+        }
+        la payload = []
+        la j: heltall = i + 4
+        la slutt: heltall = i + 4 + len
+        mens j < slutt {
+            legg_til(payload, b[j])
+            j = j + 1
+        }
+        legg_til(ut, payload)
+        i = slutt
+    }
+    returner ut
+}
+
+funksjon logg_les_alle(sti: tekst) -> liste {
+    hvis ikke builtin.fil_finnes(sti) {
+        returner []
+    }
+    returner _les_framed(bytes.til_liste(builtin.fil_les_binær(sti)))
+}
+
+funksjon logg_tøm(sti: tekst) {
+    hvis builtin.fil_finnes(sti) {
+        builtin.fil_slett(sti)
+    }
+}
+
+// Skriv checkpoint: [MAGIC][u32 payload-len][payload][MAGIC-trailer]. Trailer-en
+// gjer at eit avbrote skriv kan oppdagast ved lesing.
+funksjon checkpoint_skriv(sti: tekst, payload) {
+    la ut = _magic()
+    _legg_til_alle(ut, _u32(lengde(payload)))
+    _legg_til_alle(ut, payload)
+    _legg_til_alle(ut, _magic())
+    builtin.fil_skriv_binær(sti, bytes.fra_liste(ut))
+}
+
+// Les checkpoint. Returnerer {"gyldig", "payload"}. Ugyldig om header/trailer manglar.
+funksjon checkpoint_les(sti: tekst) -> ordbok_tekst {
+    hvis ikke builtin.fil_finnes(sti) {
+        returner {"gyldig": usann, "payload": []}
+    }
+    la b = bytes.til_liste(builtin.fil_les_binær(sti))
+    la magic = _magic()
+    la ml: heltall = lengde(magic)
+    hvis lengde(b) < ml + 4 + ml {
+        returner {"gyldig": usann, "payload": []}
+    }
+    la i: heltall = 0
+    mens i < ml {
+        hvis b[i] != magic[i] {
+            returner {"gyldig": usann, "payload": []}
+        }
+        i = i + 1
+    }
+    la len = _les_u32(b, ml)
+    la start: heltall = ml + 4
+    la ti: heltall = start + len
+    hvis ti + ml > lengde(b) {
+        returner {"gyldig": usann, "payload": []}
+    }
+    i = 0
+    mens i < ml {
+        hvis b[ti + i] != magic[i] {
+            returner {"gyldig": usann, "payload": []}
+        }
+        i = i + 1
+    }
+    la payload = []
+    la j: heltall = start
+    mens j < ti {
+        legg_til(payload, b[j])
+        j = j + 1
+    }
+    returner {"gyldig": sann, "payload": payload}
+}
+
+// ── Radlag: tabellar oppå B-tre + record-format ──────────────────────
+// db = {"sti", "tabellar": {navn → tabell}}. tabell = {"navn","kolonner","next_rowid",
+// "rader": {rowid-tekst → rad}, "btre": rowid-tre}. Rad = {kolonnenavn → verdi-tekst}.
+// Persistens via WAL/checkpoint: same record-encoding for begge (checkpoint = kompakt logg).
+
+funksjon _enc_u16(n: heltall) -> liste<heltall> {
+    returner [(n / 256) % 256, n % 256]
+}
+
+funksjon _les_u16(b, i: heltall) -> heltall {
+    returner b[i] * 256 + b[i + 1]
+}
+
+funksjon _enc_tekst(t: tekst) -> liste<heltall> {
+    la p = _tekst_til_bytes(t)
+    la ut = _enc_u16(lengde(p))
+    _legg_til_alle(ut, p)
+    returner ut
+}
+
+funksjon _dec_tekst(b, i: heltall) -> ordbok_tekst {
+    la len = _les_u16(b, i)
+    la start = i + 2
+    returner {"t": _bytes_til_tekst(b, start, len), "neste": start + len}
+}
+
+funksjon _tags_av(kolonner) -> liste<heltall> {
+    la ut: liste<heltall> = []
+    la i: heltall = 0
+    mens i < lengde(kolonner) {
+        legg_til(ut, kolonner[i]["tag"])
+        i = i + 1
+    }
+    returner ut
+}
+
+// Record-encodere (op 1=insert, 2=delete, 3=create).
+funksjon _wal_create(navn: tekst, kolonner) -> liste<heltall> {
+    la r: liste<heltall> = [3]
+    _legg_til_alle(r, _enc_tekst(navn))
+    _legg_til_alle(r, _enc_u16(lengde(kolonner)))
+    la i: heltall = 0
+    mens i < lengde(kolonner) {
+        legg_til(r, kolonner[i]["tag"])
+        _legg_til_alle(r, _enc_tekst(kolonner[i]["navn"]))
+        i = i + 1
+    }
+    returner r
+}
+
+funksjon _wal_insert(navn: tekst, rowid: heltall, kolonner, verdier) -> liste<heltall> {
+    la r: liste<heltall> = [1]
+    _legg_til_alle(r, _enc_tekst(navn))
+    _legg_til_alle(r, _u32(rowid))
+    _legg_til_alle(r, enc_rad(_tags_av(kolonner), verdier))
+    returner r
+}
+
+funksjon _wal_delete(navn: tekst, rowid: heltall) -> liste<heltall> {
+    la r: liste<heltall> = [2]
+    _legg_til_alle(r, _enc_tekst(navn))
+    _legg_til_alle(r, _u32(rowid))
+    returner r
+}
+
+// ── Interne mutasjonar (utan WAL-logging; brukt av replay + public ops) ──
+funksjon _opprett_intern(db, navn: tekst, kolonner) {
+    db["tabellar"][navn] = {
+        "navn": navn,
+        "kolonner": kolonner,
+        "next_rowid": 1,
+        "rader": {},
+        "btre": btre_ny()
+    }
+}
+
+funksjon _sett_inn_intern(db, navn: tekst, rowid: heltall, verdier) {
+    la t = db["tabellar"][navn]
+    // Ny rowid → inn i B-treet. Eksisterande (UPDATE/replay-overskriv) → berre
+    // oppdater rad-lagret, unngå duplikat B-tre-nøkkel.
+    la ny = ikke finnes_nøkkel(t["rader"], tekst_fra_heltall(rowid))
+    la rad = {}
+    la i: heltall = 0
+    mens i < lengde(t["kolonner"]) {
+        rad[t["kolonner"][i]["navn"]] = verdier[i]
+        i = i + 1
+    }
+    t["rader"][tekst_fra_heltall(rowid)] = rad
+    hvis ny {
+        t["btre"] = btre_sett_inn(t["btre"], rowid, rowid)
+        // Vedlikehald equality-indeksar for nye rader.
+        hvis finnes_nøkkel(t, "indeksar") {
+            la kols = nøkler(t["indeksar"])
+            la ci = 0
+            mens ci < lengde(kols) {
+                la kol = kols[ci]
+                la v = ""
+                hvis finnes_nøkkel(rad, kol) { v = rad[kol] }
+                hvis ikke finnes_nøkkel(t["indeksar"][kol], v) { t["indeksar"][kol][v] = [] }
+                legg_til(t["indeksar"][kol][v], rowid)
+                ci = ci + 1
+            }
+        }
+    }
+    hvis rowid + 1 > t["next_rowid"] {
+        t["next_rowid"] = rowid + 1
+    }
+}
+
+// Bygg equality-indeks (verdi → liste rowids) på ein kolonne. Ikkje persistert
+// (derivert; byggast på nytt via CREATE INDEX etter open).
+funksjon db_opprett_indeks(db, tabell: tekst, kolonne: tekst) {
+    la t = db["tabellar"][tabell]
+    hvis ikke finnes_nøkkel(t, "indeksar") { t["indeksar"] = {} }
+    la idx = {}
+    la orden = btre_i_orden(t["btre"])
+    la i = 0
+    mens i < lengde(orden) {
+        la nk = tekst_fra_heltall(orden[i])
+        hvis finnes_nøkkel(t["rader"], nk) {
+            la v = ""
+            hvis finnes_nøkkel(t["rader"][nk], kolonne) { v = t["rader"][nk][kolonne] }
+            hvis ikke finnes_nøkkel(idx, v) { idx[v] = [] }
+            legg_til(idx[v], orden[i])
+        }
+        i = i + 1
+    }
+    t["indeksar"][kolonne] = idx
+}
+
+// Er kolonnen indeksert? Spørjaren sjekkar dette før db_indeks_søk (elles full skann).
+funksjon db_har_indeks(db, tabell: tekst, kolonne: tekst) -> boolsk {
+    la t = db["tabellar"][tabell]
+    hvis ikke finnes_nøkkel(t, "indeksar") { returner usann }
+    returner finnes_nøkkel(t["indeksar"], kolonne)
+}
+
+// Indeks-oppslag: liste rowids for verdi (tom liste om ingen treff). Krev at
+// kolonnen er indeksert (sjekk db_har_indeks først).
+funksjon db_indeks_søk(db, tabell: tekst, kolonne: tekst, verdi: tekst) -> liste {
+    la idx = db["tabellar"][tabell]["indeksar"][kolonne]
+    hvis finnes_nøkkel(idx, verdi) { returner idx[verdi] }
+    returner []
+}
+
+// Alle distinkte indekserte verdiar (for range-oppslag: iterer og filtrer).
+funksjon db_indeks_nøkler(db, tabell: tekst, kolonne: tekst) -> liste {
+    returner nøkler(db["tabellar"][tabell]["indeksar"][kolonne])
+}
+
+funksjon _slett_intern(db, navn: tekst, rowid: heltall) {
+    la t = db["tabellar"][navn]
+    la nk = tekst_fra_heltall(rowid)
+    hvis finnes_nøkkel(t["rader"], nk) {
+        fjern_nokkel(t["rader"], nk)
+    }
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+funksjon db_ny(sti: tekst) -> ordbok_tekst {
+    returner {"sti": sti, "tabellar": {}}
+}
+
+funksjon db_opprett_tabell(db, navn: tekst, kolonner) {
+    _opprett_intern(db, navn, kolonner)
+    hvis db["sti"] != "" {
+        logg_legg_til(db["sti"] + ".wal", _wal_create(navn, kolonner))
+    }
+}
+
+funksjon db_sett_inn(db, navn: tekst, verdier) -> heltall {
+    la t = db["tabellar"][navn]
+    la rowid = t["next_rowid"]
+    _sett_inn_intern(db, navn, rowid, verdier)
+    hvis db["sti"] != "" {
+        logg_legg_til(db["sti"] + ".wal", _wal_insert(navn, rowid, t["kolonner"], verdier))
+    }
+    returner rowid
+}
+
+funksjon db_slett(db, navn: tekst, rowid: heltall) -> boolsk {
+    la t = db["tabellar"][navn]
+    hvis ikke finnes_nøkkel(t["rader"], tekst_fra_heltall(rowid)) {
+        returner usann
+    }
+    hvis finnes_nøkkel(t, "indeksar") { fjern_nokkel(t, "indeksar") }
+    _slett_intern(db, navn, rowid)
+    hvis db["sti"] != "" {
+        logg_legg_til(db["sti"] + ".wal", _wal_delete(navn, rowid))
+    }
+    returner sann
+}
+
+funksjon db_hent(db, navn: tekst, rowid: heltall) -> ordbok_tekst {
+    la t = db["tabellar"][navn]
+    la nk = tekst_fra_heltall(rowid)
+    hvis finnes_nøkkel(t["rader"], nk) {
+        returner t["rader"][nk]
+    }
+    returner {}
+}
+
+funksjon db_finst(db, navn: tekst, rowid: heltall) -> boolsk {
+    returner finnes_nøkkel(db["tabellar"][navn]["rader"], tekst_fra_heltall(rowid))
+}
+
+funksjon db_tel(db, navn: tekst) -> heltall {
+    returner lengde(nøkler(db["tabellar"][navn]["rader"]))
+}
+
+// Rowid-ar (til stades) i rowid-orden. For UPDATE/DELETE som treng rad-identitet.
+funksjon db_rowids(db, navn: tekst) -> liste {
+    la t = db["tabellar"][navn]
+    la orden = btre_i_orden(t["btre"])
+    la ut = []
+    la i: heltall = 0
+    mens i < lengde(orden) {
+        hvis finnes_nøkkel(t["rader"], tekst_fra_heltall(orden[i])) {
+            legg_til(ut, orden[i])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Oppdater rad ved gjeve rowid (overskriv). Loggar til WAL som insert-record ved
+// same rowid — replay overskriv.
+funksjon db_oppdater(db, navn: tekst, rowid: heltall, verdier) {
+    // Invalider indeksar (unngå foreldet oppslag) — byggast på nytt via CREATE INDEX.
+    la tt = db["tabellar"][navn]
+    hvis finnes_nøkkel(tt, "indeksar") { fjern_nokkel(tt, "indeksar") }
+    _sett_inn_intern(db, navn, rowid, verdier)
+    hvis db["sti"] != "" {
+        la t = db["tabellar"][navn]
+        logg_legg_til(db["sti"] + ".wal", _wal_insert(navn, rowid, t["kolonner"], verdier))
+    }
+}
+
+// Alle rader i rowid-orden (via B-tre in-order), hopp over sletta.
+funksjon db_alle(db, navn: tekst) -> liste {
+    la t = db["tabellar"][navn]
+    la orden = btre_i_orden(t["btre"])
+    la ut = []
+    la i: heltall = 0
+    mens i < lengde(orden) {
+        la nk = tekst_fra_heltall(orden[i])
+        hvis finnes_nøkkel(t["rader"], nk) {
+            legg_til(ut, t["rader"][nk])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Serialiser / replay (checkpoint-mekanisme; fil-uavhengig) ────────
+// Payload = konkatenerte framed records: per tabell ein CREATE + ein INSERT per rad.
+funksjon db_serialiser(db) -> liste<heltall> {
+    la payload: liste<heltall> = []
+    la navn_liste = nøkler(db["tabellar"])
+    la ti: heltall = 0
+    mens ti < lengde(navn_liste) {
+        la navn = navn_liste[ti]
+        la t = db["tabellar"][navn]
+        _legg_til_alle(payload, _ramme(_wal_create(navn, t["kolonner"])))
+        la orden = btre_i_orden(t["btre"])
+        la ri: heltall = 0
+        mens ri < lengde(orden) {
+            la rowid = orden[ri]
+            la nk = tekst_fra_heltall(rowid)
+            hvis finnes_nøkkel(t["rader"], nk) {
+                la verdier = []
+                la ki: heltall = 0
+                mens ki < lengde(t["kolonner"]) {
+                    legg_til(verdier, t["rader"][nk][t["kolonner"][ki]["navn"]])
+                    ki = ki + 1
+                }
+                _legg_til_alle(payload, _ramme(_wal_insert(navn, rowid, t["kolonner"], verdier)))
+            }
+            ri = ri + 1
+        }
+        ti = ti + 1
+    }
+    returner payload
+}
+
+funksjon _replay_one(db, r) {
+    la op = r[0]
+    hvis op == 3 {
+        la p = _dec_tekst(r, 1)
+        la navn = p["t"]
+        la i = p["neste"]
+        la kc = _les_u16(r, i)
+        i = i + 2
+        la kolonner = []
+        la k: heltall = 0
+        mens k < kc {
+            la tag = r[i]
+            i = i + 1
+            la pn = _dec_tekst(r, i)
+            i = pn["neste"]
+            legg_til(kolonner, {"navn": pn["t"], "tag": tag})
+            k = k + 1
+        }
+        _opprett_intern(db, navn, kolonner)
+    } ellers hvis op == 1 {
+        la p = _dec_tekst(r, 1)
+        la navn = p["t"]
+        la i = p["neste"]
+        la rowid = _les_u32(r, i)
+        i = i + 4
+        la dr = dec_rad(r, i)
+        _sett_inn_intern(db, navn, rowid, dr["verdiar"])
+    } ellers hvis op == 2 {
+        la p = _dec_tekst(r, 1)
+        la navn = p["t"]
+        la rowid = _les_u32(r, p["neste"])
+        _slett_intern(db, navn, rowid)
+    }
+}
+
+funksjon db_replay(db, payload) {
+    la records = _les_framed(payload)
+    la i: heltall = 0
+    mens i < lengde(records) {
+        _replay_one(db, records[i])
+        i = i + 1
+    }
+}
+
+// ── Fil-livssyklus: open (checkpoint + WAL-replay) / checkpoint ──────
+// db_åpne rekonstruerer tilstanden: checkpoint (siste kompakte snapshot) + replay av
+// WAL-en (endringar sidan checkpoint). Ein trunkert WAL-hale frå krasj ignorerast.
+funksjon db_åpne(sti: tekst) -> ordbok_tekst {
+    la db = db_ny(sti)
+    la cp = checkpoint_les(sti + ".cp")
+    hvis cp["gyldig"] {
+        db_replay(db, cp["payload"])
+    }
+    la wal_records = logg_les_alle(sti + ".wal")
+    la i: heltall = 0
+    mens i < lengde(wal_records) {
+        _replay_one(db, wal_records[i])
+        i = i + 1
+    }
+    returner db
+}
+
+// db_checkpoint skriv eit kompakt snapshot og tømmer WAL-en. Bind WAL-storleiken.
+funksjon db_checkpoint(db) {
+    hvis db["sti"] == "" {
+        returner
+    }
+    checkpoint_skriv(db["sti"] + ".cp", db_serialiser(db))
+    logg_tøm(db["sti"] + ".wal")
+}
