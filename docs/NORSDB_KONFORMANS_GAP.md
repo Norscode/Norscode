@@ -10,20 +10,16 @@
 | # | SQL | SQLite | NorsDB | Merknad |
 |---|-----|--------|--------|---------|
 | G2 | `INSERT` utan `id` i tabell `id INTEGER` (ikkje PRIMARY KEY) | `id = NULL` | auto-inkrement | NorsDB auto-tildeler alltid rowid; SQLite berre for `INTEGER PRIMARY KEY`. |
-| NULL | 3-verdi-logikk / NULL vs `''` | eigen NULL-type | `NULL ≈ ""` | Strengbasert lagring; `IS NULL` fungerer, men NULL er ikkje fullt skilt frå tom streng. |
 
-> G1 (AVG → heiltal) er **løyst**: `query_rader`/`query_text` gjev REAL (40.5); heiltals-kontekst
-> (`query_int`) trunkerer som forventa.
+> G1 (AVG → heiltal) og NULL-vs-`''` er **løyste**. Full 3-verdi NULL: sentinel skil no NULL frå tom
+> streng (`IS NULL`, propagering, COUNT/COALESCE, outer-join-utfyll — golden mot sqlite3).
 
 ## Manglande funksjonar (parser/motor støttar ikkje)
 
 | Funksjon | Status | Merknad |
 |---|---|---|
-| `julianday` / `%f` (fraksjons-sekund) / `weekday N`-modifikator | manglar | `julianday` krev IEEE-presisjon. Resten av dato/tid er dekt (sjå under). |
-| BLOB-literalar (`x'…'`) | manglar | Strengbasert lagring; blob ikkje distinkt frå TEXT. |
-| Full 3-verdi NULL i lagring/samanlikning | manglar | Krev storage-endring (skilje NULL frå `''`). |
-| Kostnadsbasert join-planleggar | manglar | I dag nested-loop + indeks-guard; ingen statistikk-basert omordning. |
-| `SET DEFAULT` referanseaksjon (full DEFAULT-verdi) | delvis | Handterast som SET NULL. |
+| `julianday` fraksjons-sekund (`%f` = SS.SSS med ekte ms) | delvis | `%f` gjev SS.000 (heiltals-sekund). Resten av dato/tid dekt. |
+| Kostnadsbasert join-planleggar | manglar | Perf-optimering; gated på native (B2) — tolka runtime dominerer kostnad uansett. `SET DEFAULT` handterast som SET NULL. |
 
 ## Dekt i dag (grøn konformans, golden mot sqlite3 3.51.0)
 
@@ -39,8 +35,10 @@ vindusfunksjonar, `JOIN` (INNER/LEFT/RIGHT/FULL/CROSS), constraints
 **`CREATE TRIGGER` BEFORE + AFTER** (INSERT/UPDATE/DELETE, NEW/OLD),
 `CREATE INDEX` (equality + range i planen), prepared statements (`?`), `EXPLAIN`,
 REAL-typar, parameter-binding, transaksjonar (`begin/commit/rollback`, `transaction`),
-**dato/tid** (`date/time/datetime/strftime/unixepoch` + modifikatorar `±N days/months/years…`,
-`start of …`; skotår-korrekt kalendermatte).
+**dato/tid** (`date/time/datetime/strftime/unixepoch/julianday` + modifikatorar `±N days/months/years…`,
+`start of …`, `weekday N`; skotår-korrekt kalendermatte), **BLOB-literalar** (`x'…'`),
+**full 3-verdi NULL** (NULL distinkt frå `''`; propagering, `IS NULL`, `COUNT(col)`/COALESCE,
+outer-join-utfyll).
 
 ## Slik oppdaterer du fasit
 
