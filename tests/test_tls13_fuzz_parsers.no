@@ -1,0 +1,101 @@
+# Fuzzing (deterministisk, avgrensa ressurs) av TLS/X.509-parserane.
+# Eigenskap: vilkårlege/tuklede input skal aldri krasje prosessen og alltid feile lukka.
+bruk std.tls13_handshake som hs
+bruk std.tls13_record som rec
+bruk std.x509 som x509
+bruk std.x509_chain som chain
+
+# Enkel deterministisk LCG (fail-closed testkjelde, ikkje kryptografisk).
+funksjon _neste(frø: heiltall) -> heiltall { returner (frø * 1103515245 + 12345) & 2147483647 }
+
+funksjon _tilfeldige_bytes(frø_start: heiltall, n: heiltall) -> ordbok {
+    la ut: liste_heiltall = []
+    la f = frø_start
+    la i = 0
+    mens i < n { f = _neste(f) legg_til(ut, (f >> 8) & 255) i = i + 1 }
+    returner {"bytes": ut, "frø": f}
+}
+
+funksjon start() -> heiltall {
+    la f = 987654321
+    la runder = 400
+    la r = 0
+    # (1) Vilkårlege byte-blokker inn i alle handshake-parserane.
+    mens r < runder {
+        la lenres = _neste(f) f = lenres
+        la n = f % 80
+        la gen = _tilfeldige_bytes(f, n)
+        la data = gen["bytes"]
+        f = gen["frø"]
+        # parse_handshake skal aldri krasje; om ok, parse kroppen etter type.
+        la ph = hs.parse_handshake(data, 0)
+        hvis ph["ok"] {
+            la t = ph["type"]
+            hvis t == hs.HT_CLIENT_HELLO() { hs.parse_client_hello(data, ph["start"], ph["end"]) }
+            hvis t == hs.HT_SERVER_HELLO() { hs.parse_server_hello(data, ph["start"], ph["end"]) }
+            hvis t == hs.HT_CERTIFICATE() { hs.parse_certificate(data, ph["start"], ph["end"]) }
+            hvis t == hs.HT_CERTIFICATE_VERIFY() { hs.parse_certificate_verify(data, ph["start"], ph["end"]) }
+            hvis t == hs.HT_FINISHED() { hs.parse_finished(data, ph["start"], ph["end"]) }
+        }
+        # Kall også parserane direkte med vilkårleg start/slutt.
+        hs.parse_client_hello(data, 0, lengde(data))
+        hs.parse_server_hello(data, 0, lengde(data))
+        hs.parse_certificate(data, 0, lengde(data))
+        hs.parse_certificate_verify(data, 0, lengde(data))
+        r = r + 1
+    }
+
+    # (2) Tuklede gyldige meldingar: byt éin byte om gangen i ein ekte ClientHello.
+    la rnd: liste_heiltall = []
+    la i = 0
+    mens i < 32 { legg_til(rnd, i) i = i + 1 }
+    la pub: liste_heiltall = []
+    i = 0
+    mens i < 32 { legg_til(pub, 255 - i) i = i + 1 }
+    la ekte = hs.build_client_hello({"random": rnd, "session_id": [], "key_share_pub": pub, "server_name": "a.example"})
+    i = 0
+    mens i < lengde(ekte) {
+        la muter: liste_heiltall = []
+        la j = 0
+        mens j < lengde(ekte) { legg_til(muter, ekte[j]) j = j + 1 }
+        muter[i] = (muter[i] + 1) & 255
+        la p = hs.parse_handshake(muter, 0)
+        hvis p["ok"] { hs.parse_client_hello(muter, p["start"], p["end"]) }   # skal ikkje krasje
+        i = i + 7   # hopp for å halde runtida nede
+    }
+
+    # (3) Record-parseren mot vilkårlege postar (skal alltid feile lukka).
+    la nøkkel: liste_heiltall = []
+    i = 0
+    mens i < 32 { legg_til(nøkkel, i) i = i + 1 }
+    la iv: liste_heiltall = []
+    i = 0
+    mens i < 12 { legg_til(iv, i) i = i + 1 }
+    r = 0
+    mens r < 200 {
+        la lenres = _neste(f) f = lenres
+        la n = f % 60
+        la gen = _tilfeldige_bytes(f, n)
+        f = gen["frø"]
+        la res = rec.dekrypter_post(nøkkel, iv, 0, gen["bytes"])
+        # Vilkårleg input skal aldri gi status ok (ingen gyldig tag).
+        assert_eq(res["status"], "feil")
+        r = r + 1
+    }
+
+    # (4) X.509-parseren og feltuttrekk mot vilkårlege bytes (skal feile lukka).
+    r = 0
+    mens r < 150 {
+        la lenres = _neste(f) f = lenres
+        la n = 8 + (f % 120)
+        la gen = _tilfeldige_bytes(f, n)
+        f = gen["frø"]
+        la m = x509.les_der(gen["bytes"])
+        assert_eq(m["status"] == "ok", usann)     # vilkårleg input er ikkje gyldig sertifikat
+        chain.hent_felt(gen["bytes"])             # skal ikkje krasje
+        r = r + 1
+    }
+
+    skriv("test_tls13_fuzz_parsers OK")
+    returner 0
+}

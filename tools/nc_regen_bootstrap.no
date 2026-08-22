@@ -1,5 +1,9 @@
 // tools/nc_regen_bootstrap.no — regenerer bootstrap-NCBs med bin/nc
 
+bruk std.filops som filops
+bruk std.tempfile som tempfile
+bruk tools.process_runner som prosess
+
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
     returner 0
@@ -10,49 +14,27 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
-}
-
-funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
 funksjon trim(t: tekst) -> tekst {
     returner builtin.trim(t)
 }
 
-funksjon første_felt(t: tekst) -> tekst {
-    la delar = builtin.split(trim(t), " ")
-    la i = 0
-    mens i < lengde(delar) {
-        la d = trim(delar[i])
-        hvis d != "" { returner d }
-        i = i + 1
-    }
-    returner ""
+funksjon køyr(nc: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst) -> ordbok_tekst {
+    // Dagens VM-kompilering passerer ABI-taket på 8 GiB. Null betyr at OS-et
+    // eig minnegrensa; timeout, fd-tak og outputgrense er framleis eksplisitte.
+    // Minneforbruket er ein målt fase-6-regresjon, ikkje ein shellreserve.
+    returner prosess.køyr_med_grenser(nc, argv, root, miljø, 1200000,
+                                      0, 1024)
 }
 
-funksjon run(cmd: tekst) -> bool {
-    la res = kommando(cmd)
-    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
-    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
-    returner ok(res)
+funksjon run(nc: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst) -> bool {
+    la res = køyr(nc, argv, root, miljø)
+    prosess.skriv_resultat(res)
+    hvis ikkje prosess.ok(res) {
+        la detalj = ""
+        hvis finnes_nøkkel(res, "error") { detalj = " error=" + tekst(res["error"]) }
+        linje("✗ Prosess feilet: status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + detalj)
+    }
+    returner prosess.ok(res)
 }
 
 funksjon fil_finst(sti: tekst) -> bool {
@@ -65,27 +47,20 @@ funksjon executable(sti: tekst) -> bool {
 }
 
 funksjon lag_mappe(sti: tekst) -> bool {
-    prøv {
-        builtin.mkdir_p(sti)
-        returner sann
-    } fang (e) {
-        returner usann
-    }
-    returner usann
+    returner filops.lag_katalogar(sti)
 }
 
 funksjon bytes(sti: tekst) -> tekst {
     prøv {
-        la innhald = builtin.fil_les(sti)
+        la innhald = builtin.fil_les_binær(sti)
         returner tekst_fra_heltall(lengde(innhald))
     } fang (e) {}
-    returner første_felt(res_felt(kommando("wc -c " + shell(sti)), 1))
+    returner ""
 }
 
 funksjon temp_bundle_sti(root: tekst) -> tekst {
-    la tmp = trim(res_felt(kommando("mktemp /tmp/nc_bundle_XXXXXX.ncb.json 2>/dev/null"), 1))
-    hvis tmp != "" { returner tmp }
-    returner root + "/build/nc_bundle_tmp.ncb.json"
+    la obj = tempfile.ny_tempfil("nc_bundle_", ".ncb.json")
+    returner tempfile.sti(obj)
 }
 
 funksjon bundle_args() -> tekst {
@@ -141,16 +116,15 @@ funksjon outnamn(mod: tekst) -> tekst {
 }
 
 funksjon normaliser_ncb(root: tekst, nc: tekst, sti: tekst) -> bool {
-    returner run("cd " + shell(root) +
-        " && NORSCODE_NCB_NORMALIZE_IN=" + shell(sti) +
-        " NORSCODE_NCB_NORMALIZE_OUT=" + shell(sti) +
-        " " + shell(nc) + " run tools/ncb_normalize_builtin_aliases_v802.no >/dev/null 2>&1")
+    la miljø = {"NORSCODE_NCB_NORMALIZE_IN": sti, "NORSCODE_NCB_NORMALIZE_OUT": sti, "NORSCODE_ROOT": root}
+    returner run(nc, ["run", "tools/ncb_normalize_builtin_aliases_v802.no"], root, miljø)
 }
 
 funksjon main() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
     la nc = root + "/bin/nc"
+    la base_env = {"NORSCODE_ROOT": root, "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write", "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"}
 
     hvis ikkje executable(root + "/dist/norscode_native") {
         linje("✗ Trenger dist/norscode_native.")
@@ -162,15 +136,20 @@ funksjon main() -> heiltall {
         linje("Genererer full bootstrap/kompiler.ncb.json...")
         la tmp = temp_bundle_sti(root)
         hvis tmp == "" { returner 1 }
-        hvis ikkje run("cd " + shell(root) + " && NORSCODE_USE_PRECOMPILED_SELFHOST=0 " + shell(nc) + " bundle " + bundle_args() + " --output " + shell(tmp)) { returner 1 }
+        la args = builtin.split(bundle_args(), " ")
+        legg_til(args, "--output")
+        legg_til(args, tmp)
+        la bundle_env = base_env
+        bundle_env["NORSCODE_USE_PRECOMPILED_SELFHOST"] = "0"
+        hvis ikkje run(nc, args, root, bundle_env) { returner 1 }
         hvis ikkje normaliser_ncb(root, nc, tmp) { returner 1 }
-        hvis ikkje run("cp " + shell(tmp) + " " + shell(root + "/bootstrap/kompiler.ncb.json")) { returner 1 }
-        run("rm -f " + shell(tmp))
+        hvis ikkje filops.kopier(tmp, root + "/bootstrap/kompiler.ncb.json") { returner 1 }
+        filops.slett_fil(tmp)
         linje("✓ bootstrap/kompiler.ncb.json: " + bytes(root + "/bootstrap/kompiler.ncb.json") + " bytes")
     }
 
     linje("Oppdaterer VM-precompiled NCB...")
-    hvis ikkje run("cd " + shell(root) + " && " + shell(nc) + " compile selfhost/vm.no bootstrap/precompiled/vm.ncb.json >/dev/null 2>&1") { returner 1 }
+    hvis ikkje run(nc, ["compile", "selfhost/vm.no", "bootstrap/precompiled/vm.ncb.json"], root, base_env) { returner 1 }
     hvis ikkje normaliser_ncb(root, nc, root + "/bootstrap/precompiled/vm.ncb.json") { returner 1 }
     linje("✓ bootstrap/precompiled/vm.ncb.json")
 
@@ -183,7 +162,7 @@ funksjon main() -> heiltall {
     for mod i stdlib_modular() {
         hvis fil_finst(root + "/" + mod) {
             la out = outnamn(mod)
-            hvis ok(kommando("cd " + shell(root) + " && " + shell(nc) + " compile " + shell(mod) + " " + shell(out) + " >/dev/null 2>&1")) {
+            hvis prosess.ok(køyr(nc, ["compile", mod, out], root, base_env)) {
                 ok_tal = ok_tal + 1
             }
         }
@@ -191,14 +170,16 @@ funksjon main() -> heiltall {
     linje("✓ " + tekst(ok_tal) + " stdlib-NCBs oppdatert")
 
     linje("Oppdaterer stilark-precompiled NCB...")
-    hvis ikkje run("cd " + shell(root) + " && " + shell(nc) + " compile std/stil.no bootstrap/precompiled/stil.ncb.json >/dev/null 2>&1") { returner 1 }
+    hvis ikkje run(nc, ["compile", "std/stil.no", "bootstrap/precompiled/stil.ncb.json"], root, base_env) { returner 1 }
     linje("✓ bootstrap/precompiled/stil.ncb.json")
 
     linje("Røyktesting...")
-    la smoke = "/tmp/_nc_regen_smoke.no"
+    la smoke_obj = tempfile.ny_tempfil("nc_regen_smoke_", ".no")
+    la smoke = tempfile.sti(smoke_obj)
     builtin.fil_skriv(smoke, "funksjon start() { skriv(\"regen OK\") }\n")
-    la res = kommando(shell(nc) + " run " + shell(smoke) + " 2>/dev/null")
-    hvis trim(res_felt(res, 1)) == "regen OK" {
+    la res = køyr(nc, ["run", smoke], root, base_env)
+    tempfile.lukk(smoke_obj)
+    hvis prosess.ok(res) og trim(tekst(res["stdout"])) == "regen OK" {
         linje("✓ Røyktest bestått")
         linje("")
         linje("✓ Bootstrap regenerert!")

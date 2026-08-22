@@ -1,77 +1,97 @@
 // Linux x86-64 AOT: kjelde/importar -> statisk ELF. Reell køyring skjer
 // direkte på Linux x86-64 eller i Docker når NORSCODE_VERIFY_LINUX_DOCKER=1.
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
 }
 
-funksjon start() -> heiltall {
-    la root = miljo_hent("NORSCODE_ROOT")
-    hvis root == "" { root = "." }
-    la id = "v2"
-    la namn = "norscode_linux_aot_cli_" + id
-    la binær = "/tmp/" + namn
-    la kjelde = root + "/tests/fixtures/macos_aot_std_math.no"
-    la nc = root + "/bin/nc"
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = miljo_hent("NORSCODE_CI_SYSTEM")
+    la maskin = miljo_hent("NORSCODE_CI_ARCH")
+    hvis system == "" { system = miljo_hent("RUNNER_OS") }
+    hvis maskin == "" { maskin = miljo_hent("RUNNER_ARCH") }
+    hvis system == "" eller maskin == "" {
+        prøv {
+            la info = builtin.system_info()
+            hvis system == "" { system = tekst(info["system"]) }
+            hvis maskin == "" { maskin = tekst(info["machine"]) }
+        } fang (e) {}
+    }
+    la linux = system == "Linux" eller system == "linux"
+    la x64 = maskin == "X64" eller maskin == "x64" eller
+              maskin == "x86_64" eller maskin == "amd64"
+    returner linux og x64
+}
 
-    la bygg = exec_prosess(shell(nc) + " bygg-native --target linux-x86_64 " + shell(kjelde) + " " + shell(binær))
-    assert_eq(bygg[0], "0")
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    returner prosess.køyr(executable, argv, root, {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, timeout_ms)
+}
+
+funksjon krev_exit(resultat: ordbok_tekst, kode: heiltall) -> heiltall {
+    hvis tekst(resultat["status"]) != "ferdig" eller heltall_fra_tekst(tekst(resultat["exit_code"])) != kode {
+        prosess.skriv_resultat(resultat)
+        assert_eq(heltall_fra_tekst(tekst(resultat["exit_code"])), kode)
+    }
+    returner 0
+}
+
+funksjon docker_køyr(root: tekst, plattform: tekst, namn: tekst) -> ordbok_tekst {
+    la docker = miljo_hent("NORSCODE_DOCKER_BIN")
+    hvis docker == "" { docker = "docker" }
+    returner køyr(docker, ["run", "--platform", plattform, "--rm", "-v", "/private/tmp:/work:ro", "alpine:3.20", "/work/" + namn], root, 180000)
+}
+
+funksjon verifiser_køyring(root: tekst, binær: tekst, namn: tekst, kode: heiltall, native: boolsk) -> heiltall {
+    hvis native {
+        krev_exit(køyr(binær, [], root, 30000), kode)
+    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
+        krev_exit(docker_køyr(root, "linux/amd64", namn), kode)
+    }
+    returner 0
+}
+
+funksjon bygg_og_verifiser(root: tekst, nc: tekst, namn: tekst, kjelde: tekst, kode: heiltall, native: boolsk) -> heiltall {
+    la binær = "/tmp/" + namn
+    krev_exit(køyr(nc, ["bygg-native", "--target", "linux-x86_64", kjelde, binær], root, 180000), 0)
     la bytes = builtin.fil_les_binær(binær)
     assert(lengde(bytes) > 4096)
     assert_eq(bytes[0], 0x7F)
     assert_eq(bytes[1], 0x45)
     assert_eq(bytes[2], 0x4C)
     assert_eq(bytes[3], 0x46)
+    assert_eq(bytes[18], 62)
+    verifiser_køyring(root, binær, namn, kode, native)
+    filops.slett_fil(binær)
+    returner 0
+}
 
-    la os = exec_prosess("uname -s")
-    la arch = exec_prosess("uname -m")
-    hvis os[0] == "0" og builtin.trim(os[1]) == "Linux" og arch[0] == "0" og builtin.trim(arch[1]) == "x86_64" {
-        assert_eq(exec_prosess(shell(binær))[0], "49")
-    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
-        assert_eq(exec_prosess("docker info >/dev/null 2>&1")[0], "0")
-        la docker = "docker run --platform linux/amd64 --rm -v /private/tmp:/work:ro alpine:3.20 /work/" + namn
-        assert_eq(exec_prosess(docker)[0], "49")
-    }
+funksjon start() -> heiltall {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = vert_linux_x86_64()
+    la nc = runtime(root)
+    la id = builtin.random_hex(8)
 
-    exec_prosess("rm -f " + shell(binær))
-
-    namn = "norscode_linux_aot_control_" + id
-    binær = "/tmp/" + namn
-    kjelde = root + "/tests/fixtures/macos_aot_std_math_control.no"
-    bygg = exec_prosess(shell(nc) + " bygg-native --target linux-x86_64 " + shell(kjelde) + " " + shell(binær))
-    assert_eq(bygg[0], "0")
-    hvis os[0] == "0" og builtin.trim(os[1]) == "Linux" og arch[0] == "0" og builtin.trim(arch[1]) == "x86_64" {
-        assert_eq(exec_prosess(shell(binær))[0], "10")
-    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
-        la docker_control = "docker run --platform linux/amd64 --rm -v /private/tmp:/work:ro alpine:3.20 /work/" + namn
-        assert_eq(exec_prosess(docker_control)[0], "10")
-    }
-    exec_prosess("rm -f " + shell(binær))
-
-    namn = "norscode_linux_aot_common_ops_" + id
-    binær = "/tmp/" + namn
-    kjelde = root + "/tests/fixtures/aot_common_integer_ops.no"
-    bygg = exec_prosess(shell(nc) + " bygg-native --target linux-x86_64 " + shell(kjelde) + " " + shell(binær))
-    assert_eq(bygg[0], "0")
-    hvis os[0] == "0" og builtin.trim(os[1]) == "Linux" og arch[0] == "0" og builtin.trim(arch[1]) == "x86_64" {
-        assert_eq(exec_prosess(shell(binær))[0], "11")
-    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
-        la docker_common = "docker run --platform linux/amd64 --rm -v /private/tmp:/work:ro alpine:3.20 /work/" + namn
-        assert_eq(exec_prosess(docker_common)[0], "11")
-    }
-    exec_prosess("rm -f " + shell(binær))
-
-    namn = "norscode_linux_aot_common_runtime_" + id
-    binær = "/tmp/" + namn
-    kjelde = root + "/tests/fixtures/macos_aot_common_runtime.no"
-    bygg = exec_prosess(shell(nc) + " bygg-native --target linux-x86_64 " + shell(kjelde) + " " + shell(binær))
-    assert_eq(bygg[0], "0")
-    hvis os[0] == "0" og builtin.trim(os[1]) == "Linux" og arch[0] == "0" og builtin.trim(arch[1]) == "x86_64" {
-        assert_eq(exec_prosess(shell(binær))[0], "25")
-    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
-        la docker_runtime = "docker run --platform linux/amd64 --rm -v /private/tmp:/work:ro alpine:3.20 /work/" + namn
-        assert_eq(exec_prosess(docker_runtime)[0], "25")
-    }
-    exec_prosess("rm -f " + shell(binær))
+    bygg_og_verifiser(root, nc, "norscode_linux_aot_cli_" + id, root + "/tests/fixtures/macos_aot_std_math.no", 49, native)
+    bygg_og_verifiser(root, nc, "norscode_linux_aot_control_" + id, root + "/tests/fixtures/macos_aot_std_math_control.no", 10, native)
+    bygg_og_verifiser(root, nc, "norscode_linux_aot_common_ops_" + id, root + "/tests/fixtures/aot_common_integer_ops.no", 11, native)
+    bygg_og_verifiser(root, nc, "norscode_linux_aot_common_runtime_" + id, root + "/tests/fixtures/macos_aot_common_runtime.no", 25, native)
+    bygg_og_verifiser(root, nc, "norscode_linux_aot_struct_" + id, root + "/tests/fixtures/aot_struct_constructor.no", 77, native)
     returner 0
 }

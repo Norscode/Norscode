@@ -1,0 +1,298 @@
+# tls13_handshake.no - TLS 1.3 handshake-meldingskodek (RFC 8446 §4) i rein Norscode.
+# Byggjer og parsar ClientHello/ServerHello/EncryptedExtensions/Certificate/
+# CertificateVerify/Finished. Suite-fokus: TLS_CHACHA20_POLY1305_SHA256 + X25519 + Ed25519.
+
+# --- Handshake-typar (RFC 8446 §4) ---
+funksjon HT_CLIENT_HELLO() -> heiltall { returner 1 }
+funksjon HT_SERVER_HELLO() -> heiltall { returner 2 }
+funksjon HT_ENCRYPTED_EXTENSIONS() -> heiltall { returner 8 }
+funksjon HT_CERTIFICATE() -> heiltall { returner 11 }
+funksjon HT_CERTIFICATE_VERIFY() -> heiltall { returner 15 }
+funksjon HT_FINISHED() -> heiltall { returner 20 }
+
+# --- Kjende konstantar ---
+funksjon SUITE_CHACHA20() -> heiltall { returner 4867 }   # 0x1303
+funksjon GROUP_X25519() -> heiltall { returner 29 }        # 0x001d
+funksjon SIG_ED25519() -> heiltall { returner 2055 }       # 0x0807
+funksjon EXT_SERVER_NAME() -> heiltall { returner 0 }
+funksjon EXT_SUPPORTED_GROUPS() -> heiltall { returner 10 }
+funksjon EXT_SIG_ALGS() -> heiltall { returner 13 }
+funksjon EXT_KEY_SHARE() -> heiltall { returner 51 }
+funksjon EXT_SUPPORTED_VERSIONS() -> heiltall { returner 43 }
+
+# ============ Byte-hjelparar ============
+funksjon _u16(v: heiltall) -> liste_heiltall { returner [(v >> 8) & 255, v & 255] }
+funksjon _u24(v: heiltall) -> liste_heiltall { returner [(v >> 16) & 255, (v >> 8) & 255, v & 255] }
+funksjon _les16(d: liste_heiltall, p: heiltall) -> heiltall { returner (d[p] << 8) | d[p+1] }
+funksjon _les24(d: liste_heiltall, p: heiltall) -> heiltall { returner (d[p] << 16) | (d[p+1] << 8) | d[p+2] }
+# Fail-closed lesarar: returnerer -1 om lesinga går utanfor [0, slutt).
+funksjon _safe8(d: liste_heiltall, p: heiltall, slutt: heiltall) -> heiltall {
+    hvis p < 0 eller p + 1 > slutt eller p + 1 > lengde(d) { returner -1 }
+    returner d[p]
+}
+funksjon _safe16(d: liste_heiltall, p: heiltall, slutt: heiltall) -> heiltall {
+    hvis p < 0 eller p + 2 > slutt eller p + 2 > lengde(d) { returner -1 }
+    returner (d[p] << 8) | d[p+1]
+}
+
+funksjon _legg(dst: liste_heiltall, src: liste_heiltall) {
+    la i = 0
+    mens i < lengde(src) { legg_til(dst, src[i]) i = i + 1 }
+}
+funksjon _skjer(d: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = a
+    mens i < b { legg_til(ut, d[i]) i = i + 1 }
+    returner ut
+}
+# Vektor med 2-byte lengdeprefiks.
+funksjon _vec16(body: liste_heiltall) -> liste_heiltall {
+    la ut = _u16(lengde(body))
+    _legg(ut, body)
+    returner ut
+}
+funksjon _vec8(body: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [lengde(body) & 255]
+    _legg(ut, body)
+    returner ut
+}
+
+# ============ Handshake-innpakning ============
+funksjon encode_handshake(hs_type: heiltall, body: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [hs_type & 255]
+    _legg(ut, _u24(lengde(body)))
+    _legg(ut, body)
+    returner ut
+}
+# Parse eitt handshake-hovud frå posisjon p. Returnerer {ok,type,start,end,next}.
+funksjon parse_handshake(d: liste_heiltall, p: heiltall) -> ordbok {
+    hvis p + 4 > lengde(d) { returner {"ok": usann} }
+    la t = d[p]
+    la len = _les24(d, p + 1)
+    la start = p + 4
+    la slutt = start + len
+    hvis slutt > lengde(d) { returner {"ok": usann} }
+    returner {"ok": sann, "type": t, "start": start, "end": slutt, "next": slutt}
+}
+
+# ============ Utvidingar ============
+funksjon _ext(ext_type: heiltall, data: liste_heiltall) -> liste_heiltall {
+    la ut = _u16(ext_type)
+    _legg(ut, _u16(lengde(data)))
+    _legg(ut, data)
+    returner ut
+}
+# Finn ei utviding av gitt type i blokka [p, slutt). Returnerer {funne, data}.
+funksjon finn_ext(d: liste_heiltall, p: heiltall, slutt: heiltall, mål: heiltall) -> ordbok {
+    mens p + 4 <= slutt {
+        la et = _les16(d, p)
+        la el = _les16(d, p + 2)
+        la ds = p + 4
+        la de = ds + el
+        hvis de > slutt { returner {"funne": usann, "data": []} }
+        hvis et == mål { returner {"funne": sann, "data": _skjer(d, ds, de)} }
+        p = de
+    }
+    returner {"funne": usann, "data": []}
+}
+
+# ============ ClientHello ============
+# opts: {"random": 32b, "session_id": <=32b, "key_share_pub": 32b, "server_name": tekst}
+funksjon build_client_hello(opts: ordbok) -> liste_heiltall {
+    la body: liste_heiltall = []
+    _legg(body, [3, 3])                          # legacy_version
+    _legg(body, opts["random"])                  # random (32)
+    _legg(body, _vec8(opts["session_id"]))       # legacy_session_id
+    # cipher_suites (berre chacha20)
+    _legg(body, _vec16(_u16(SUITE_CHACHA20())))
+    # legacy_compression_methods = null
+    _legg(body, [1, 0])
+    # extensions
+    la ext: liste_heiltall = []
+    # server_name
+    la sn = opts["server_name"]
+    hvis lengde(sn) > 0 {
+        la host: liste_heiltall = []
+        la i = 0
+        mens i < lengde(sn) { legg_til(host, builtin.char_code(builtin.slice(sn, i, i+1)) & 255) i = i + 1 }
+        la entry: liste_heiltall = [0]           # name_type host_name
+        _legg(entry, _vec16(host))
+        _legg(ext, _ext(EXT_SERVER_NAME(), _vec16(entry)))
+    }
+    # supported_groups = x25519
+    _legg(ext, _ext(EXT_SUPPORTED_GROUPS(), _vec16(_u16(GROUP_X25519()))))
+    # signature_algorithms = ed25519
+    _legg(ext, _ext(EXT_SIG_ALGS(), _vec16(_u16(SIG_ED25519()))))
+    # supported_versions = tls1.3 (0x0304), CH-form: 1-byte listelengde
+    _legg(ext, _ext(EXT_SUPPORTED_VERSIONS(), _vec8(_u16(772))))
+    # key_share: client_shares<>: entry group(2)+key_exchange vec16
+    la ks_entry = _u16(GROUP_X25519())
+    _legg(ks_entry, _vec16(opts["key_share_pub"]))
+    _legg(ext, _ext(EXT_KEY_SHARE(), _vec16(ks_entry)))
+    _legg(body, _vec16(ext))
+    returner encode_handshake(HT_CLIENT_HELLO(), body)
+}
+
+# Parse ein ClientHello-kropp (etter handshake-hovud) frå start..slutt.
+funksjon parse_client_hello(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    hvis slutt > lengde(d) { slutt = lengde(d) }
+    la p = start
+    la ver = _safe16(d, p, slutt) hvis ver < 0 { returner {"ok": usann} } p = p + 2
+    hvis p + 32 > slutt { returner {"ok": usann} }
+    la random = _skjer(d, p, p + 32) p = p + 32
+    la sid_len = _safe8(d, p, slutt) hvis sid_len < 0 { returner {"ok": usann} } p = p + 1
+    hvis p + sid_len > slutt { returner {"ok": usann} }
+    la session_id = _skjer(d, p, p + sid_len) p = p + sid_len
+    la cs_len = _safe16(d, p, slutt) hvis cs_len < 0 { returner {"ok": usann} } p = p + 2
+    la e = p + cs_len
+    hvis e > slutt eller (cs_len % 2) != 0 { returner {"ok": usann} }
+    la suites: liste_heiltall = []
+    mens p < e { la sv = _safe16(d, p, slutt) hvis sv < 0 { returner {"ok": usann} } legg_til(suites, sv) p = p + 2 }
+    la comp_len = _safe8(d, p, slutt) hvis comp_len < 0 { returner {"ok": usann} } p = p + 1 + comp_len
+    la ext_len = _safe16(d, p, slutt) hvis ext_len < 0 { returner {"ok": usann} } p = p + 2
+    la ext_slutt = p + ext_len
+    hvis ext_slutt > slutt { returner {"ok": usann} }
+    # Trekk ut x25519 key_share og server_name
+    la ks_pub: liste_heiltall = []
+    la ks = finn_ext(d, p, ext_slutt, EXT_KEY_SHARE())
+    hvis ks["funne"] {
+        la kd = ks["data"]
+        la kp = 2                                 # hopp over client_shares listelengde
+        mens kp + 4 <= lengde(kd) {
+            la g = _les16(kd, kp)
+            la kl = _les16(kd, kp + 2)
+            hvis g == GROUP_X25519() og kp + 4 + kl <= lengde(kd) { ks_pub = _skjer(kd, kp + 4, kp + 4 + kl) }
+            kp = kp + 4 + kl
+        }
+    }
+    la sni = ""
+    la sn = finn_ext(d, p, ext_slutt, EXT_SERVER_NAME())
+    hvis sn["funne"] {
+        la sd = sn["data"]
+        # list_len(2) + type(1) + name_len(2) + name
+        hvis lengde(sd) >= 5 {
+            la nl = (sd[3] << 8) | sd[4]
+            hvis 5 + nl <= lengde(sd) {
+                la i = 5
+                mens i < 5 + nl { sni = sni + builtin.chr(sd[i]) i = i + 1 }
+            }
+        }
+    }
+    returner {"ok": sann, "version": ver, "random": random, "session_id": session_id, "suites": suites,
+              "key_share_pub": ks_pub, "server_name": sni, "ext_start": p, "ext_end": ext_slutt}
+}
+
+# ============ ServerHello ============
+funksjon build_server_hello(opts: ordbok) -> liste_heiltall {
+    la body: liste_heiltall = []
+    _legg(body, [3, 3])
+    _legg(body, opts["random"])
+    _legg(body, _vec8(opts["session_id"]))       # ekko av klientens session_id
+    _legg(body, _u16(SUITE_CHACHA20()))          # vald suite
+    _legg(body, [0])                             # legacy_compression_method
+    la ext: liste_heiltall = []
+    _legg(ext, _ext(EXT_SUPPORTED_VERSIONS(), _u16(772)))   # SH-form: berre valgt versjon
+    la ks_entry = _u16(GROUP_X25519())
+    _legg(ks_entry, _vec16(opts["key_share_pub"]))
+    _legg(ext, _ext(EXT_KEY_SHARE(), ks_entry))            # SH key_share: server_share direkte
+    _legg(body, _vec16(ext))
+    returner encode_handshake(HT_SERVER_HELLO(), body)
+}
+
+funksjon parse_server_hello(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    hvis slutt > lengde(d) { slutt = lengde(d) }
+    la p = start
+    la ver = _safe16(d, p, slutt) hvis ver < 0 { returner {"ok": usann} } p = p + 2
+    hvis p + 32 > slutt { returner {"ok": usann} }
+    la random = _skjer(d, p, p + 32) p = p + 32
+    la sid_len = _safe8(d, p, slutt) hvis sid_len < 0 { returner {"ok": usann} } p = p + 1
+    hvis p + sid_len > slutt { returner {"ok": usann} }
+    la session_id = _skjer(d, p, p + sid_len) p = p + sid_len
+    la suite = _safe16(d, p, slutt) hvis suite < 0 { returner {"ok": usann} } p = p + 2
+    la comp = _safe8(d, p, slutt) hvis comp < 0 { returner {"ok": usann} } p = p + 1
+    la ext_len = _safe16(d, p, slutt) hvis ext_len < 0 { returner {"ok": usann} } p = p + 2
+    la ext_slutt = p + ext_len
+    hvis ext_slutt > slutt { returner {"ok": usann} }
+    la ks_pub: liste_heiltall = []
+    la valgt_ver = 0
+    la ks = finn_ext(d, p, ext_slutt, EXT_KEY_SHARE())
+    hvis ks["funne"] {
+        la kd = ks["data"]
+        hvis lengde(kd) >= 4 {
+            la g = _les16(kd, 0)
+            la kl = _les16(kd, 2)
+            hvis g == GROUP_X25519() og 4 + kl <= lengde(kd) { ks_pub = _skjer(kd, 4, 4 + kl) }
+        }
+    }
+    la sv = finn_ext(d, p, ext_slutt, EXT_SUPPORTED_VERSIONS())
+    hvis sv["funne"] og lengde(sv["data"]) >= 2 { valgt_ver = _les16(sv["data"], 0) }
+    returner {"ok": sann, "version": ver, "random": random, "session_id": session_id, "suite": suite,
+              "key_share_pub": ks_pub, "valgt_versjon": valgt_ver, "ext_start": p, "ext_end": ext_slutt}
+}
+
+# ============ EncryptedExtensions / Certificate / CertificateVerify / Finished ============
+funksjon build_encrypted_extensions() -> liste_heiltall {
+    returner encode_handshake(HT_ENCRYPTED_EXTENSIONS(), _vec16([]))
+}
+
+# Enkelt sertifikat (rå DER-bytes) utan utvidingar. RFC 8446 §4.4.2.
+funksjon build_certificate(cert_der: liste_heiltall) -> liste_heiltall {
+    la entry: liste_heiltall = []
+    _legg(entry, _u24(lengde(cert_der)))         # cert_data<1..2^24-1>
+    _legg(entry, cert_der)
+    _legg(entry, _u16(0))                         # extensions (tomme)
+    la body: liste_heiltall = [0]                 # certificate_request_context (tom)
+    _legg(body, _u24(lengde(entry)))              # certificate_list
+    _legg(body, entry)
+    returner encode_handshake(HT_CERTIFICATE(), body)
+}
+funksjon parse_certificate(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    hvis slutt > lengde(d) { slutt = lengde(d) }
+    la p = start
+    la ctx_len = _safe8(d, p, slutt) hvis ctx_len < 0 { returner {"ok": usann, "cert_der": []} } p = p + 1 + ctx_len
+    hvis p + 3 > slutt { returner {"ok": usann, "cert_der": []} }
+    la list_len = _les24(d, p) p = p + 3
+    hvis p + 3 > slutt { returner {"ok": usann, "cert_der": []} }
+    la cert_len = _les24(d, p) p = p + 3
+    hvis p + cert_len > slutt { returner {"ok": usann, "cert_der": []} }
+    la cert = _skjer(d, p, p + cert_len)
+    returner {"ok": sann, "cert_der": cert}
+}
+
+# CertificateVerify: algorithm(2) + signature vec16. RFC 8446 §4.4.3.
+funksjon build_certificate_verify(alg: heiltall, sig: liste_heiltall) -> liste_heiltall {
+    la body = _u16(alg)
+    _legg(body, _vec16(sig))
+    returner encode_handshake(HT_CERTIFICATE_VERIFY(), body)
+}
+funksjon parse_certificate_verify(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    hvis slutt > lengde(d) { slutt = lengde(d) }
+    la alg = _safe16(d, start, slutt) hvis alg < 0 { returner {"ok": usann, "alg": 0, "signatur": []} }
+    la sl = _safe16(d, start + 2, slutt) hvis sl < 0 { returner {"ok": usann, "alg": 0, "signatur": []} }
+    hvis start + 4 + sl > slutt { returner {"ok": usann, "alg": 0, "signatur": []} }
+    returner {"ok": sann, "alg": alg, "signatur": _skjer(d, start + 4, start + 4 + sl)}
+}
+
+# CertificateVerify-signaturinnhald (RFC 8446 §4.4.3): 64 mellomrom + kontekststreng +
+# 0x00 + transcript-hash. context = "TLS 1.3, server CertificateVerify".
+funksjon certificate_verify_content(context: tekst, transcript_hash: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < 64 { legg_til(ut, 32) i = i + 1 }
+    i = 0
+    mens i < lengde(context) { legg_til(ut, builtin.char_code(builtin.slice(context, i, i+1)) & 255) i = i + 1 }
+    legg_til(ut, 0)
+    _legg(ut, transcript_hash)
+    returner ut
+}
+
+funksjon build_finished(verify_data: liste_heiltall) -> liste_heiltall {
+    returner encode_handshake(HT_FINISHED(), verify_data)
+}
+funksjon parse_finished(d: liste_heiltall, start: heiltall, slutt: heiltall) -> ordbok {
+    hvis slutt > lengde(d) { slutt = lengde(d) }
+    hvis start > slutt { returner {"ok": usann, "verify_data": []} }
+    returner {"ok": sann, "verify_data": _skjer(d, start, slutt)}
+}
+
+funksjon status() { returner { "abi": "norscode-tls13-handshake-v1", "suite": "TLS_CHACHA20_POLY1305_SHA256" } }

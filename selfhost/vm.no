@@ -10,7 +10,7 @@ bruk std.sha256 som sha256
 // Opcode-sett: norscode-bytecode-v1
 //
 // Støttar:
-//   PUSH_CONST, STORE_NAME, LOAD_NAME, POP
+//   PUSH_CONST, STORE_NAME, LOAD_NAME, STORE_GLOBAL, LOAD_GLOBAL, POP
 //   BINARY_ADD/SUB/MUL/DIV/MOD
 //   UNARY_NEG, UNARY_NOT
 //   COMPARE_EQ/NE/LT/GT/LE/GE
@@ -28,24 +28,16 @@ bruk std.sha256 som sha256
 
 // ─── VM-tilstand ─────────────────────────────────────────────────────────────
 
-funksjon ny_rammeverk(namn: tekst, ip: heiltall) {
+funksjon ny_rammeverk(namn: tekst, ip: heiltall, fast_mode: boolsk) {
     la ramme: ordbok = {}
     ramme["namn"] = namn
     ramme["ip"] = ip
     ramme["vars"] = {}
-    // Stage-zero bytecode may encode literal null/booleans as LOAD_NAME
-    // operands. Seed the frame with the language constants so those loads
-    // remain valid in the pure VM as well as in the native host.
-    ramme["vars"]["null"] = 0
-    ramme["vars"]["ingenting"] = 0
-    ramme["vars"]["true"] = sann
-    ramme["vars"]["sann"] = sann
-    ramme["vars"]["false"] = usann
-    ramme["vars"]["usann"] = usann
     ramme["stack"] = []
     ramme["heap_stack"] = []
     ramme["var_heap"] = {}
     ramme["last_heap_id"] = ""
+    ramme["fast_mode"] = fast_mode
     ramme["code"] = []
     ramme["params"] = []
     ramme["label_map"] = {}
@@ -63,14 +55,91 @@ funksjon ny_rammeverk(namn: tekst, ip: heiltall) {
     returner ramme
 }
 
+funksjon vm_tom_liste(liste) -> heiltall {
+    mens lengde(liste) > 0 { fjern_siste(liste) }
+    returner 0
+}
+
+funksjon vm_tom_kart(kart) -> heiltall {
+    la keys = nøkler(kart)
+    la i: heiltall = 0
+    mens i < lengde(keys) {
+        fjern_nokkel(kart, keys[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon vm_ramme_hent(functions, namn: tekst, ip: heiltall, fast_mode: boolsk) {
+    hvis ikkje fast_mode eller lengde(functions["__vm_frame_pool__"]) == 0 {
+        returner ny_rammeverk(namn, ip, fast_mode)
+    }
+    la pool = functions["__vm_frame_pool__"]
+    la ramme = pool[lengde(pool) - 1]
+    fjern_siste(pool)
+    vm_tom_kart(ramme["vars"])
+    vm_tom_liste(ramme["stack"])
+    vm_tom_liste(ramme["heap_stack"])
+    vm_tom_kart(ramme["var_heap"])
+    vm_tom_liste(ramme["try_stack"])
+    vm_tom_liste(ramme["cleanup_stack"])
+    ramme["namn"] = namn
+    ramme["ip"] = ip
+    ramme["last_heap_id"] = ""
+    ramme["fast_mode"] = fast_mode
+    // Desse tre felta blir alltid erstatta med definisjonen til neste kall
+    // før ramma blir køyrd. Ikkje alloker mellombels tomme containerar her.
+    ramme["code"] = 0
+    ramme["params"] = 0
+    ramme["label_map"] = 0
+    ramme["pending_control"] = ""
+    ramme["pending_value"] = 0
+    ramme["pending_heap_id"] = ""
+    ramme["pending_target"] = ""
+    ramme["last_exception"] = ""
+    ramme["state"] = "ready"
+    ramme["caller_ip"] = -1
+    ramme["return_target"] = ""
+    ramme["started_ms"] = builtin.tid_ms()
+    returner ramme
+}
+
+funksjon vm_ramme_frigje(functions, ramme) -> heiltall {
+    hvis functions["__vm_fast_mode__"] != "sann" { returner 0 }
+    la pool = functions["__vm_frame_pool__"]
+    hvis lengde(pool) < 256 { legg_til(pool, ramme) }
+    returner 0
+}
+
+funksjon vm_arg_liste_hent(functions, fast_mode: boolsk) {
+    hvis ikkje fast_mode eller lengde(functions["__vm_arg_pool__"]) == 0 { returner [] }
+    la pool = functions["__vm_arg_pool__"]
+    la args = pool[lengde(pool) - 1]
+    fjern_siste(pool)
+    returner args
+}
+
+funksjon vm_arg_liste_frigje(functions, args, fast_mode: boolsk) -> heiltall {
+    hvis ikkje fast_mode { returner 0 }
+    vm_tom_liste(args)
+    la pool = functions["__vm_arg_pool__"]
+    hvis lengde(pool) < 256 { legg_til(pool, args) }
+    returner 0
+}
+
 funksjon ramme_les_var(ramme, namn: tekst) {
     // Eldre stage-0-seedar serialiserer LOAD_NAME null som JSON-null. Pure VM
     // skal tolke denne på same måte som dei tekstlege null/ingenting-aliasa.
-    hvis namn == null { returner 0 }
+    // Native JSON representerer den rå JSON-nullverdien som ein nullpeikar;
+    // spør derfor den nullsikre type-ABI-en før kartoppslag eller vanleg
+    // verdilikskap får høve til å dereferere operanden.
+    hvis builtin.type(namn) == "ingenting" { returner 0 }
     la vars = ramme["vars"]
     hvis ikke vm_map_har_nokkel(vars, namn) {
         // nc_vm.c: "null", "true", "false" er globale konstantar
-        hvis namn == "null" eller namn == "ingenting" { returner 0 }
+        // Bygg null-namnet av to literal-delar. Den eldre C-materialiseraren
+        // må ikkje forveksle tekstverdien "null" med sjølve nullkonstanten.
+        hvis namn == "nul" + "l" eller namn == "ingenting" { returner 0 }
         hvis namn == "true" eller namn == "sann" { returner sann }
         hvis namn == "false" eller namn == "usann" { returner usann }
         kast "Ukjent variabel: " + namn
@@ -80,17 +149,19 @@ funksjon ramme_les_var(ramme, namn: tekst) {
 
 funksjon ramme_sett_var(ramme, namn: tekst, verdi) {
     ramme["vars"][namn] = verdi
-    ramme["var_heap"][namn] = ramme["last_heap_id"]
+    hvis ikkje ramme["fast_mode"] {
+        ramme["var_heap"][namn] = ramme["last_heap_id"]
+    }
 }
 
 funksjon stack_push(ramme, verdi) {
     legg_til(ramme["stack"], verdi)
-    legg_til(ramme["heap_stack"], "")
+    hvis ikkje ramme["fast_mode"] { legg_til(ramme["heap_stack"], "") }
 }
 
 funksjon stack_push_heap(ramme, verdi, heap_id: tekst) {
     legg_til(ramme["stack"], verdi)
-    legg_til(ramme["heap_stack"], heap_id)
+    hvis ikkje ramme["fast_mode"] { legg_til(ramme["heap_stack"], heap_id) }
 }
 
 funksjon stack_pop(ramme) {
@@ -103,9 +174,12 @@ funksjon stack_pop(ramme) {
     }
     la v = stk[n - 1]
     fjern_siste(stk)
-    la heap_stk = ramme["heap_stack"]
-    ramme["last_heap_id"] = heap_stk[lengde(heap_stk) - 1]
-    fjern_siste(heap_stk)
+    ramme["last_heap_id"] = ""
+    hvis ikkje ramme["fast_mode"] {
+        la heap_stk = ramme["heap_stack"]
+        ramme["last_heap_id"] = heap_stk[lengde(heap_stk) - 1]
+        fjern_siste(heap_stk)
+    }
     returner v
 }
 
@@ -206,11 +280,6 @@ funksjon vm_unwind_continuations(functions, continuations, current_frame, meldin
 
 // ─── Runtime-global metadata for selfhost-køyring ───────────────────────────
 la vm_active_functions: ordbok<tekst, tekst> = {}
-// Den aktive funksjonstabellen er stor og lesast mange millionar gonger under
-// L5b. Cache berre positive nøkkel-treff for akkurat denne tabellen; ukjende
-// nøklar fell tilbake til den autoritative nøkkel-lista slik at dynamiske
-// INDEX_SET-kall framleis vert observerte korrekt.
-la vm_active_function_key_cache: ordbok_tekst = {}
 la vm_active_ncb: ordbok<tekst, tekst> = {}
 la vm_request_counter: heiltall = 1
 la vm_db_store: ordbok<tekst, ordbok_tekst> = {}
@@ -221,6 +290,12 @@ la vm_norsdb_active_handle: tekst = ""
 la vm_norsdb_indexes: ordbok<tekst, liste_tekst> = {}
 la vm_random_counter: heiltall = 1
 funksjon vm_heap_track(functions, verdi) -> tekst {
+    // Trusted compiler/selfhost-køyringar kan slå av den profilerande
+    // skyggeheapen. Verdiane er framleis eigde av den native Norscode-
+    // runtimen; dette fjernar berre dobbelt bokhald i VM-i-VM-løypa.
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner ""
+    }
     la type_namn = builtin.type(verdi)
     hvis type_namn != "liste" og type_namn != "ordbok" { returner "" }
     la bytes: heiltall = 16 + lengde(verdi) * 16
@@ -230,9 +305,20 @@ funksjon vm_heap_track(functions, verdi) -> tekst {
 funksjon vm_heap_sync_roots(functions) -> heiltall {
     la heap = functions["__vm_runtime_heap__"]
     runtime_memory.nullstill_roter(heap)
+    // Same heapobjekt kan vere synleg frå fleire lokale variablar og
+    // operandstakkar. Dedupliser i VM-en før runtime_memory tek lås og gjer
+    // lineært tokenoppslag for kvar rot.
+    la sett: ordbok<tekst, boolsk> = {}
+    la kandidatar: heiltall = 0
+    la unike: heiltall = 0
     la last_return = functions["__vm_last_return_heap_id__"]
     hvis last_return != "" {
-        runtime_memory.legg_rot(heap, last_return)
+        kandidatar = kandidatar + 1
+        hvis ikkje vm_map_har_nokkel(sett, last_return) {
+            sett[last_return] = sann
+            runtime_memory.legg_rot(heap, last_return)
+            unike = unike + 1
+        }
     }
     la active_frames = functions["__vm_active_frames__"]
     la fi: heiltall = 0
@@ -241,7 +327,14 @@ funksjon vm_heap_sync_roots(functions) -> heiltall {
         la hs = frame["heap_stack"]
         la si: heiltall = 0
         mens si < lengde(hs) {
-            hvis hs[si] != "" { runtime_memory.legg_rot(heap, hs[si]) }
+            hvis hs[si] != "" {
+                kandidatar = kandidatar + 1
+                hvis ikkje vm_map_har_nokkel(sett, hs[si]) {
+                    sett[hs[si]] = sann
+                    runtime_memory.legg_rot(heap, hs[si])
+                    unike = unike + 1
+                }
+            }
             si = si + 1
         }
         la vh = frame["var_heap"]
@@ -249,15 +342,28 @@ funksjon vm_heap_sync_roots(functions) -> heiltall {
         la vi: heiltall = 0
         mens vi < lengde(keys) {
             la id = vh[keys[vi]]
-            hvis id != "" { runtime_memory.legg_rot(heap, id) }
+            hvis id != "" {
+                kandidatar = kandidatar + 1
+                hvis ikkje vm_map_har_nokkel(sett, id) {
+                    sett[id] = sann
+                    runtime_memory.legg_rot(heap, id)
+                    unike = unike + 1
+                }
+            }
             vi = vi + 1
         }
         fi = fi + 1
     }
+    vm_metric_add(functions, "gc_root_candidates", kandidatar)
+    vm_metric_add(functions, "gc_root_unique", unike)
+    vm_metric_add(functions, "gc_root_duplicates_elided", kandidatar - unike)
     returner 0
 }
 
 funksjon vm_gc_safe_point(functions, force: boolsk) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner 0
+    }
     vm_metric_inc(functions, "gc_safe_points")
     la heap = functions["__vm_runtime_heap__"]
     hvis force eller runtime_memory.gc_trengs(heap) {
@@ -266,6 +372,19 @@ funksjon vm_gc_safe_point(functions, force: boolsk) -> heiltall {
         runtime_memory.collect_auto(heap, force)
         vm_metric_add(functions, "gc_pause_ms", builtin.tid_ms() - gc_start)
     }
+    returner 0
+}
+
+funksjon vm_gc_finish(functions) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner 0
+    }
+    // Etter toppnivå-RETURN er både frame-lista og returrota tomme. Ein full
+    // mark/sweep over den store skyggeheapen kan då ikkje bevare noko, og gav
+    // unødvendig lineær token-/karttrafikk i AOT. Nullstill metadataheapen i
+    // konstant kontrollflyt; dei faktiske verdiane er eigde av native runtime.
+    vm_metric_inc(functions, "gc_safe_points")
+    functions["__vm_runtime_heap__"] = runtime_memory.ny_heap()
     returner 0
 }
 
@@ -476,9 +595,16 @@ funksjon vm_metric_inc(functions, key: tekst) -> heiltall {
 }
 
 funksjon vm_metric_add(functions, key: tekst, delta: heiltall) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner 0
+    }
     la metrics = functions["__vm_metrics__"]
     hvis ikkje vm_map_har_nokkel(metrics, key) { metrics[key] = "0" }
-    la verdi = heltall_fra_tekst(metrics[key]) + delta
+    la rå = metrics[key]
+    // Eldre host-serialisering kan materialisere null/0 som tom tekst i
+    // nested VM-kart. Metrikk skal aldri velte ein elles gyldig VM-operasjon.
+    hvis rå == null eller tekst(rå) == "" eller tekst(rå) == "ingenting" { rå = "0" }
+    la verdi = heltall_fra_tekst(tekst(rå)) + delta
     metrics[key] = tekst_fra_heltall(verdi)
     returner verdi
 }
@@ -511,6 +637,9 @@ funksjon vm_runtime_metrics(functions) -> ordbok_tekst {
 }
 
 funksjon vm_function_finish(functions, fn_namn: tekst, start_ms: heiltall) -> heiltall {
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner 0
+    }
     la brukt = builtin.tid_ms() - start_ms
     hvis brukt < 0 { brukt = 0 }
     la event = {"name": fn_namn, "cat": "norscode.vm", "ph": "X", "ts": start_ms * 1000, "dur": brukt * 1000, "pid": 1, "tid": 1}
@@ -529,6 +658,9 @@ funksjon vm_profiler_set_sample_interval(functions, interval: heiltall) -> bools
 }
 
 funksjon vm_profiler_sample(functions, ramme, fn_namn: tekst, ip: heiltall, opcode: tekst) -> boolsk {
+    hvis vm_map_har_nokkel(functions, "__vm_fast_mode__") og functions["__vm_fast_mode__"] == "sann" {
+        returner usann
+    }
     la metrics = functions["__vm_metrics__"]
     la interval = heltall_fra_tekst(functions["__vm_sample_interval__"])
     la instructions = heltall_fra_tekst(metrics["instructions"])
@@ -598,14 +730,16 @@ funksjon vm_type_init(functions) -> heiltall {
     vm_type_register(functions, vm_type_descriptor("tekst", "heap", sann))
     vm_type_register(functions, vm_type_descriptor("liste", "container", sann))
     vm_type_register(functions, vm_type_descriptor("kart", "container", sann))
-    vm_type_register(functions, vm_type_descriptor("null", "special", usann))
+    // Bygg teksten stykkevis slik at eldre bootstrap-materialisering ikkje
+    // forvekslar den siterte teksten med sjølve nullkonstanten.
+    vm_type_register(functions, vm_type_descriptor("nul" + "l", "special", usann))
     vm_type_register(functions, vm_type_descriptor("funksjon", "callable", sann))
     vm_type_register(functions, vm_type_descriptor("modul", "module", sann))
     returner 9
 }
 
 funksjon vm_type_name(verdi) -> tekst {
-    hvis verdi == null { returner "null" }
+    hvis verdi == null { returner "nul" + "l" }
     la raw = builtin.type(verdi)
     hvis raw == "heltall" { returner "heiltall" }
     hvis raw == "boolsk" eller raw == "bool" { returner "bool" }
@@ -633,8 +767,11 @@ funksjon vm_host_register(functions, type_namn: tekst, payload) -> ordbok_tekst 
     hvis descriptor["kategori"] != "host" eller descriptor["isolated"] != "sann" eller descriptor["capability"] == "" {
         kast "HostTypeFeil: type er ikkje isolert host-type"
     }
-    la id = "host_" + tekst_fra_heltall(heltall_fra_tekst(functions["__vm_next_host_id__"]) + 1)
-    functions["__vm_next_host_id__"] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_next_host_id__"]) + 1)
+    la rå_id = functions["__vm_next_host_id__"]
+    hvis rå_id == null eller tekst(rå_id) == "" { rå_id = "0" }
+    la neste_id = heltall_fra_tekst(tekst(rå_id)) + 1
+    la id = "host_" + tekst_fra_heltall(neste_id)
+    functions["__vm_next_host_id__"] = tekst_fra_heltall(neste_id)
     la token = builtin.random_hex(32)
     functions["__vm_host_handles__"][id] = {"id": id, "token": token, "type": type_namn, "payload": payload, "revoked": "usann"}
     returner {"__host_handle__": "sann", "id": id, "token": token, "type": type_namn}
@@ -831,7 +968,7 @@ funksjon vm_capability_for(namn: tekst) -> tekst {
     // Reine språk-/terminalbuiltins skal aldri arve ei capability frå seinare
     // mønstertestar. Dette er òg ei fail-closed grense for AOT-dispatchen.
     hvis namn == "builtin.skriv" eller namn == "skriv" { returner "" }
-    hvis namn == "builtin.exec_prosess" eller namn == "builtin.process_spawn_argv" eller namn == "builtin.process_operation" eller namn == "builtin.kompiler_fil" { returner "process.exec" }
+    hvis namn == "builtin.exec_prosess" eller namn == "builtin.process_spawn_argv" eller namn == "builtin.process_operation" eller namn == "builtin.system_operation" eller namn == "builtin.kompiler_fil" { returner "process.exec" }
     hvis builtin.starts_with(namn, "builtin.thread_") { returner "thread.spawn" }
     hvis namn == "builtin.atomic_operation" { returner "thread.spawn" }
     hvis namn == "builtin.jit_operation" eller namn == "builtin.vm_jit_cleanup" { returner "jit.execute" }
@@ -925,6 +1062,20 @@ funksjon vm_process_scope_tillat(policy, executable: tekst) -> boolsk {
     returner usann
 }
 
+funksjon vm_disk_scope_sti(namn: tekst, args) -> tekst {
+    hvis lengde(args) == 0 { returner "" }
+    hvis (namn == "builtin.filesystem_read_operation" eller
+         namn == "builtin.filesystem_write_operation") og
+       vm_map_har_nokkel(args[0], "root") {
+        // Filesystem-ABI-en bind alle relative kjelde-/målstiar til denne
+        // rota og avviser sjølv traversal og symlink-flukt. VM-policyen skal
+        // derfor godkjenne den eksplisitte rota, ikkje tekstrepresentasjonen
+        // av heile request-mappet (historisk "[verdi]").
+        returner tekst(args[0]["root"])
+    }
+    returner tekst(args[0])
+}
+
 funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
     la cap = vm_capability_for(namn)
     hvis cap == "" { returner 0 }
@@ -934,7 +1085,8 @@ funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
     // er aktivert. Han må kunne lese kjelde og miljø for å materialisere
     // første NCB, men skal ikkje få prosess-, nettverks-, skrive- eller JIT-
     // capabilities. Bruk same diskrot som den vanlege VM-policyen.
-    la bootstrap = miljo_hent("NORSCODE_NATIVE_SELFHOST") == "1"
+    la bootstrap_raw = miljo_hent("NORSCODE_NATIVE_SELFHOST")
+    la bootstrap = bootstrap_raw != "" og heltall_fra_tekst(bootstrap_raw) == 1
     hvis bootstrap og (cap == "env.read" eller cap == "disk.read") og decision["allowed"] != "sann" {
         hvis cap == "disk.read" og lengde(args) > 0 {
             la sti = tekst(args[0])
@@ -953,10 +1105,11 @@ funksjon vm_security_enforce(functions, namn: tekst, args) -> heiltall {
     }
     la denied = decision["allowed"] != "sann"
     hvis ikkje denied og (cap == "disk.read" eller cap == "disk.write") og vm_disk_scope_krev_sti(namn) {
-        hvis lengde(args) == 0 eller ikkje vm_disk_scope_tillat(policy, tekst(args[0])) {
+        la kontroll_sti = vm_disk_scope_sti(namn, args)
+        hvis kontroll_sti == "" eller ikkje vm_disk_scope_tillat(policy, kontroll_sti) {
             denied = sann
             la avvist_sti = "<manglar>"
-            hvis lengde(args) > 0 { avvist_sti = tekst(args[0]) }
+            hvis kontroll_sti != "" { avvist_sti = kontroll_sti }
             decision["reason"] = "path outside disk scope: " + avvist_sti
         }
     }
@@ -1057,15 +1210,39 @@ funksjon vm_runtime_init(functions, reset: boolsk) -> heiltall {
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_active_frames__") {
         functions["__vm_active_frames__"] = []
     }
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_frame_pool__") {
+        functions["__vm_frame_pool__"] = []
+    }
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_arg_pool__") {
+        functions["__vm_arg_pool__"] = []
+    }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_pending_arg_heap_ids__") {
         functions["__vm_pending_arg_heap_ids__"] = []
     }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_last_return_heap_id__") {
         functions["__vm_last_return_heap_id__"] = ""
     }
-    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_metrics__") {
-        functions["__vm_metrics__"] = {"instructions": "0", "calls": "0", "max_depth": "0", "throws": "0", "unwinds": "0", "builtin_calls": "0", "io_calls": "0", "filesystem_calls": "0", "network_calls": "0", "process_calls": "0", "gc_safe_points": "0", "gc_pause_ms": "0", "samples": "0", "samples_dropped": "0", "trace_events_dropped": "0", "started_ms": tekst_fra_heltall(builtin.tid_ms()), "wall_ms": "0", "instructions_per_ms": "0", "security_allowed": "0", "security_denied": "0", "last_security_denial": "", "module_loads": "0", "module_reloads": "0"}
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_fast_mode__") {
+        functions["__vm_fast_mode__"] = "usann"
+        la fast_raw = miljo_hent("NORSCODE_VM_FAST")
+        // Tal-liknande tekstliteralar kan bli kanoniserte som heiltal av eldre
+        // stage0-codegen. Bygg ASCII-teiknet gjennom ABI-en slik at miljøverdien
+        // faktisk blir samanlikna som tekst også i ein ny native kandidat.
+        hvis fast_raw == builtin.chr(49) { functions["__vm_fast_mode__"] = "sann" }
+        hvis vm_map_har_nokkel(functions, "__vm_force_fast__") og functions["__vm_force_fast__"] == "sann" {
+            functions["__vm_fast_mode__"] = "sann"
+        }
     }
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_metrics__") {
+        functions["__vm_metrics__"] = {"instructions": "0", "calls": "0", "max_depth": "0", "throws": "0", "unwinds": "0", "builtin_calls": "0", "io_calls": "0", "filesystem_calls": "0", "network_calls": "0", "process_calls": "0", "gc_safe_points": "0", "gc_pause_ms": "0", "gc_root_candidates": "0", "gc_root_unique": "0", "gc_root_duplicates_elided": "0", "samples": "0", "samples_dropped": "0", "trace_events_dropped": "0", "started_ms": tekst_fra_heltall(builtin.tid_ms()), "wall_ms": "0", "instructions_per_ms": "0", "security_allowed": "0", "security_denied": "0", "last_security_denial": "", "module_loads": "0", "module_reloads": "0"}
+    }
+    // Ein ny VM kan køyre oppå ein eldre embedded host som allereie har laga
+    // metrikkskartet. Migrer nye felt eksplisitt i staden for å krevje at
+    // kandidaten og den lasta VM-NCB-en har identisk metrikkskjema.
+    la vm_metrics = functions["__vm_metrics__"]
+    hvis ikkje vm_map_har_nokkel(vm_metrics, "gc_root_candidates") { vm_metrics["gc_root_candidates"] = "0" }
+    hvis ikkje vm_map_har_nokkel(vm_metrics, "gc_root_unique") { vm_metrics["gc_root_unique"] = "0" }
+    hvis ikkje vm_map_har_nokkel(vm_metrics, "gc_root_duplicates_elided") { vm_metrics["gc_root_duplicates_elided"] = "0" }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_profile_samples__") {
         functions["__vm_profile_samples__"] = []
     }
@@ -1073,7 +1250,10 @@ funksjon vm_runtime_init(functions, reset: boolsk) -> heiltall {
         functions["__vm_trace_events__"] = []
     }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_sample_interval__") {
-        functions["__vm_sample_interval__"] = "64"
+        // Normal CLI-/kompilatorkøyring skal ikkje materialisere eit komplett
+        // profileringssnapshot kvar 64. instruksjon. Profileringsflata kan
+        // framleis velje eit tett intervall eksplisitt.
+        functions["__vm_sample_interval__"] = "4096"
         la sample_raw = miljo_hent("NORSCODE_VM_SAMPLE_INTERVAL")
         hvis sample_raw != "" og vm_er_heltallstekst(sample_raw) {
             la sample_interval = heltall_fra_tekst(sample_raw)
@@ -1099,6 +1279,12 @@ funksjon vm_runtime_init(functions, reset: boolsk) -> heiltall {
     }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_modules__") {
         functions["__vm_modules__"] = {}
+    }
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_globals__") {
+        functions["__vm_globals__"] = {}
+    }
+    hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_initializers_done__") {
+        functions["__vm_initializers_done__"] = {}
     }
     hvis reset eller ikkje vm_map_har_nokkel(functions, "__vm_function_caps__") {
         functions["__vm_function_caps__"] = {}
@@ -1227,14 +1413,29 @@ funksjon vm_module_load(functions, path: tekst, id: tekst, caps_raw: tekst, deps
     la target_tokens = "|"
     i = 0
     mens i < lengde(source_keys) {
-        la fn_def = source_fns[source_keys[i]]
+        // Plugin-bytecode blir omskriven til eige namespace. Klon definisjonen
+        // før omskriving slik at ein seinare load av same NCB aldri arvar CALL-
+        // mål frå ein tidlegare modul eller hot-reload-generasjon.
+        la fn_def = json_parse_raw(json_skriv(source_fns[source_keys[i]]))
         la target = targets[i]
         la code = fn_def["code"]
         la ci: heiltall = 0
         mens ci < lengde(code) {
             la instr = code[ci]
-            hvis lengde(instr) > 1 og instr[0] == "CALL" og builtin.starts_with(instr[1], "__main__.") {
-                instr[1] = id + builtin.slice(instr[1], 8, lengde(instr[1]))
+            hvis lengde(instr) > 1 og instr[0] == "CALL" {
+                la call_parts = builtin.split(tekst(instr[1]), ".")
+                la call_last = call_parts[lengde(call_parts) - 1]
+                la lokal_kall: boolsk = usann
+                la ski: heiltall = 0
+                mens ski < lengde(source_keys) {
+                    la source_parts = builtin.split(tekst(source_keys[ski]), ".")
+                    hvis source_parts[lengde(source_parts) - 1] == call_last {
+                        lokal_kall = sann
+                        bryt
+                    }
+                    ski = ski + 1
+                }
+                hvis lokal_kall { instr[1] = id + "." + call_last }
             }
             ci = ci + 1
         }
@@ -1324,24 +1525,17 @@ funksjon vm_random_hex(n_bytes: heiltall) -> tekst {
     returner out
 }
 
-funksjon vm_shell_quote(s: tekst) -> tekst {
-    la q = builtin.chr(39)
-    hvis builtin.contains(s, q) {
-        kast "mappe_opprett støttar ikkje enkeltsitat i sti enno"
-    }
-    returner q + s + q
-}
-
 funksjon vm_mappe_opprett(sti: tekst) -> boolsk {
     hvis sti == "" {
         kast "mappe_opprett krev sti"
     }
-    la sitert = vm_shell_quote(sti)
-    la resultat = builtin.exec_prosess("mkdir -p " + sitert)
-    hvis tekst(resultat[0]) == "0" {
+    prøv {
+        builtin.mkdir_p(sti)
         returner sann
+    } fang (e) {
+        kast "mappe_opprett feila: " + sti + " " + tekst(e)
     }
-    kast "mappe_opprett feila: " + sti + " " + tekst(resultat)
+    returner usann
 }
 
 funksjon vm_header_finnes(headers: ordbok_tekst, key: tekst) -> boolsk {
@@ -1714,1229 +1908,20 @@ funksjon _vm_http_header_tekst(response: tekst, nokkel: tekst) -> tekst {
     returner _vm_http_json_tekst(rest, nokkel)
 }
 
-funksjon _vm_ny_id(prefix: tekst) -> tekst {
-    hvis prefix == "db" {
-        la id = "db_" + tekst_fra_heltall(vm_db_counter)
-        vm_db_counter = vm_db_counter + 1
-        returner id
-    }
-    la id = "pool_" + tekst_fra_heltall(vm_pool_counter)
-    vm_pool_counter = vm_pool_counter + 1
-    returner id
-}
-
-funksjon _vm_db_set(handle: tekst, db: ordbok_tekst) {
-    vm_db_store[handle] = db
-}
-
-funksjon _vm_db_get(handle: tekst) -> ordbok_tekst {
-    hvis ikkje _rt_har_nøkkel(vm_db_store, handle) {
-        kast "Ukjend db-handle: " + handle
-    }
-    returner vm_db_store[handle]
-}
-
-funksjon _vm_pool_get(handle: tekst) -> ordbok_tekst {
-    hvis ikkje _rt_har_nøkkel(vm_pool_store, handle) {
-        kast "Ukjend pool-handle: " + handle
-    }
-    returner vm_pool_store[handle]
-}
-
-funksjon _vm_db_ny() -> ordbok_tekst {
-    la db: ordbok_tekst = {}
-    db["_tables"] = {}
-    db["_path"] = ""
-    db["_in_tx"] = usann
-    db["_snapshot"] = {}
-    db["_pool"] = ""
-    returner db
-}
-
-funksjon _vm_db_clone(db: ordbok_tekst) -> ordbok_tekst {
-    returner json_parse_raw(json_stringify(db))
-}
-
-funksjon _vm_db_load(path: tekst) -> ordbok_tekst {
-    hvis path == "" eller path == ":memory:" {
-        returner _vm_db_ny()
-    }
-    hvis builtin.fil_finnes(path) {
-        prøv {
-            la raw = builtin.fil_les(path)
-            hvis builtin.trim(raw) != "" {
-                la parsed = json_parse_raw(raw)
-                hvis parsed != null {
-                    returner parsed
-                }
-            }
-        } fang (e) {
-        }
-    }
-    la db = _vm_db_ny()
-    db["_path"] = path
-    returner db
-}
-
-funksjon _vm_db_save(db: ordbok_tekst) {
-    la path = db["_path"]
-    hvis path == "" eller path == ":memory:" {
-        returner
-    }
-    builtin.fil_skriv(path, json_stringify(db))
-}
-
-funksjon _vm_result_ok(verdi) -> ordbok_tekst {
-    la out: ordbok_tekst = {}
-    out["feilet"] = usann
-    out["verdi"] = verdi
-    returner out
-}
-
-funksjon _vm_result_feil(melding: tekst) -> ordbok_tekst {
-    la out: ordbok_tekst = {}
-    out["feilet"] = sann
-    out["melding"] = melding
-    out["verdi"] = 0
-    returner out
-}
-
-funksjon _vm_norsdb_active_db() -> ordbok_tekst {
-    hvis vm_norsdb_active_handle == "" {
-        kast "NorsDB: ingen aktiv database"
-    }
-    returner _vm_db_get(vm_norsdb_active_handle)
-}
-
-funksjon _vm_norsdb_table_key(tabell: tekst, kolonne: tekst) -> tekst {
-    returner tabell + "." + kolonne
-}
-
-funksjon _vm_sql_upper(sql: tekst) -> tekst {
-    returner builtin.upper(sql)
-}
-
-funksjon _vm_sql_trim_semi(sql: tekst) -> tekst {
-    la s = builtin.trim(sql)
-    mens lengde(s) > 0 og builtin.slice(s, lengde(s) - 1, lengde(s)) == ";" {
-        s = builtin.trim(builtin.slice(s, 0, lengde(s) - 1))
-    }
-    returner s
-}
-
-funksjon _vm_sql_is_ws(c: tekst) -> boolsk {
-    returner c == " " eller c == "\t" eller c == "\n" eller c == "\r"
-}
-
-funksjon _vm_sql_is_digit(c: tekst) -> boolsk {
-    la k = builtin.char_code(c)
-    returner k >= 48 og k <= 57
-}
-
-funksjon _vm_sql_is_ident_char(c: tekst) -> boolsk {
-    la k = builtin.char_code(c)
-    returner (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller (k >= 48 og k <= 57) eller c == "_" eller c == "."
-}
-
-funksjon _vm_sql_split_csv(s: tekst) -> liste<tekst> {
-    la ut: liste<tekst> = []
-    la cur: tekst = ""
-    la i: heltall = 0
-    la in_str: boolsk = usann
-    mens i < lengde(s) {
-        la ch = builtin.slice(s, i, i + 1)
-        hvis ch == "'" {
-            in_str = ikkje in_str
-            cur = cur + ch
-        } ellers hvis ch == "," og ikkje in_str {
-            legg_til(ut, builtin.trim(cur))
-            cur = ""
-        } ellers {
-            cur = cur + ch
-        }
-        i = i + 1
-    }
-    hvis builtin.trim(cur) != "" {
-        legg_til(ut, builtin.trim(cur))
-    }
-    returner ut
-}
-
-funksjon _vm_sql_tokeniser(sql: tekst) -> liste<tekst> {
-    la chars = builtin.split(sql, "")
-    la i: heltall = 0
-    la n: heltall = lengde(chars)
-    la out: liste<tekst> = []
-
-    mens i < n {
-        la c = chars[i]
-        hvis _vm_sql_is_ws(c) {
-            i = i + 1
-            fortsett
-        }
-
-        hvis c == "'" {
-            la start: heltall = i + 1
-            i = i + 1
-            mens i < n og chars[i] != "'" {
-                i = i + 1
-            }
-            legg_til(out, "'" + builtin.slice(sql, start, i) + "'")
-            hvis i < n {
-                i = i + 1
-            }
-            fortsett
-        }
-
-        hvis _vm_sql_is_digit(c) eller (c == "-" og i + 1 < n og _vm_sql_is_digit(chars[i + 1])) {
-            la start = i
-            i = i + 1
-            mens i < n {
-                hvis _vm_sql_is_digit(chars[i]) eller chars[i] == "." {
-                    i = i + 1
-                    fortsett
-                }
-                bryt
-            }
-            legg_til(out, builtin.slice(sql, start, i))
-            fortsett
-        }
-
-        hvis c == "(" eller c == ")" eller c == "," eller c == ";" eller c == "=" eller c == ">" eller c == "<" eller c == "!" eller c == "*" {
-            hvis (c == ">" eller c == "<" eller c == "!") og i + 1 < n og chars[i + 1] == "=" {
-                legg_til(out, c + "=")
-                i = i + 2
-                fortsett
-            }
-            hvis c == "<" og i + 1 < n og chars[i + 1] == ">" {
-                legg_til(out, "<>")
-                i = i + 2
-                fortsett
-            }
-            legg_til(out, c)
-            i = i + 1
-            fortsett
-        }
-
-        hvis _vm_sql_is_ident_char(c) {
-            la start: heltall = i
-            i = i + 1
-            mens i < n og _vm_sql_is_ident_char(chars[i]) {
-                i = i + 1
-            }
-            legg_til(out, builtin.slice(sql, start, i))
-            fortsett
-        }
-
-        i = i + 1
-    }
-
-    returner out
-}
-
-funksjon _vm_sql_unquote(v: tekst) -> tekst {
-    la s = builtin.trim(v)
-    hvis lengde(s) >= 2 og builtin.slice(s, 0, 1) == "'" og builtin.slice(s, lengde(s) - 1, lengde(s)) == "'" {
-        returner builtin.slice(s, 1, lengde(s) - 1)
-    }
-    returner s
-}
-
-funksjon _vm_db_tbl(db: ordbok_tekst, namn: tekst) -> ordbok_tekst {
-    hvis ikkje _rt_har_nøkkel(db["_tables"], namn) {
-        kast "Ukjend tabell: " + namn
-    }
-    returner db["_tables"][namn]
-}
-
-funksjon _vm_db_col_from_token(token: tekst) -> tekst {
-    la key = builtin.trim(_vm_sql_unquote(token))
-    hvis builtin.index_of(key, ".") >= 0 {
-        la last = builtin.index_of(key, ".") + 1
-        returner builtin.slice(key, last, lengde(key))
-    }
-    returner key
-}
-
-funksjon _vm_db_row_val(row: ordbok_tekst, kol: tekst) -> tekst {
-    la k = _vm_db_col_from_token(kol)
-    hvis _rt_har_nøkkel(row, k) {
-        returner row[k]
-    }
-    la k_upper = _vm_sql_upper(k)
-    hvis _rt_har_nøkkel(row, k_upper) {
-        returner row[k_upper]
-    }
-    returner ""
-}
-
-funksjon _vm_db_is_number(v: tekst) -> boolsk {
-    hvis lengde(v) == 0 { returner usann }
-    la chars = builtin.split(v, "")
-    la i: heltall = 0
-    hvis chars[0] == "-" {
-        hvis lengde(chars) == 1 { returner usann }
-        i = i + 1
-    }
-    mens i < lengde(chars) {
-        hvis ikkje _vm_sql_is_digit(chars[i]) og chars[i] != "." {
-            returner usann
-        }
-        i = i + 1
-    }
-    returner sann
-}
-
-funksjon _vm_db_compare(a: tekst, op: tekst, b: tekst) -> boolsk {
-    la lhs = _vm_sql_unquote(a)
-    la rhs = _vm_sql_unquote(b)
-    la operator = _vm_sql_upper(op)
-    hvis _vm_db_is_number(lhs) og _vm_db_is_number(rhs) {
-        la x = builtin.heltall_fra_tekst(lhs)
-        la y = builtin.heltall_fra_tekst(rhs)
-        hvis operator == "=" { returner x == y }
-        hvis operator == "==" { returner x == y }
-        hvis operator == "!=" eller operator == "<>" { returner x != y }
-        hvis operator == ">" { returner x > y }
-        hvis operator == ">=" { returner x >= y }
-        hvis operator == "<" { returner x < y }
-        hvis operator == "<=" { returner x <= y }
-        returner usann
-    }
-
-    hvis operator == "=" { returner lhs == rhs }
-    hvis operator == "==" { returner lhs == rhs }
-    hvis operator == "!=" eller operator == "<>" { returner lhs != rhs }
-    hvis operator == ">" { returner lhs > rhs }
-    hvis operator == ">=" { returner lhs >= rhs }
-    hvis operator == "<" { returner lhs < rhs }
-    hvis operator == "<=" { returner lhs <= rhs }
-    returner usann
-}
-
-funksjon _vm_db_condition(row: ordbok_tekst, parts: liste<tekst>, start: heltall) -> boolsk {
-    hvis start + 2 >= lengde(parts) {
-        returner usann
-    }
-    la kn = _vm_db_col_from_token(parts[start])
-    la op = parts[start + 1]
-    la rhs = _vm_db_col_from_token(parts[start + 2])
-    la lhs = _vm_db_row_val(row, kn)
-    returner _vm_db_compare(lhs, op, rhs)
-}
-
-funksjon _vm_db_where(row: ordbok_tekst, tokens: liste<tekst>) -> boolsk {
-    hvis lengde(tokens) == 0 {
-        returner sann
-    }
-    la i: heltall = 0
-    la result: boolsk = sann
-    la use_and: boolsk = sann
-
-    mens i + 2 < lengde(tokens) {
-        la cond = _vm_db_condition(row, tokens, i)
-        hvis i == 0 {
-            result = cond
-        } ellers hvis use_and {
-            result = result og cond
-        } ellers {
-            result = result eller cond
-        }
-        i = i + 3
-        hvis i >= lengde(tokens) {
-            bryt
-        }
-        la connector = _vm_sql_upper(tokens[i])
-        hvis connector == "AND" {
-            use_and = sann
-            i = i + 1
-            fortsett
-        }
-        hvis connector == "OR" {
-            use_and = usann
-            i = i + 1
-            fortsett
-        }
-        bryt
-    }
-    returner result
-}
-
-funksjon _vm_db_collect_select_rows(db: ordbok_tekst, table: ordbok_tekst, where_tokens: liste<tekst>) -> liste<ordbok_tekst> {
-    la rows: liste<ordbok_tekst> = []
-    la i: heltall = 0
-    la list_rows = table["rows"]
-    mens i < lengde(list_rows) {
-        la row = list_rows[i]
-        hvis _vm_db_where(row, where_tokens) {
-            legg_til(rows, row)
-        }
-        i = i + 1
-    }
-    returner rows
-}
-
-funksjon _vm_db_sort_rows(rows: liste<ordbok_tekst>, ord_kol: tekst, asc: boolsk) -> liste<ordbok_tekst> {
-    hvis ord_kol == "" { returner rows }
-    la i: heltall = 0
-    mens i < lengde(rows) {
-        la j: heltall = i + 1
-        mens j < lengde(rows) {
-            la a = _vm_db_row_val(rows[i], ord_kol)
-            la b = _vm_db_row_val(rows[j], ord_kol)
-            hvis _vm_db_is_number(a) og _vm_db_is_number(b) {
-                la av = builtin.heltall_fra_tekst(a)
-                la bv = builtin.heltall_fra_tekst(b)
-                hvis asc {
-                    hvis av > bv {
-                        la tmp = rows[i]
-                        rows[i] = rows[j]
-                        rows[j] = tmp
-                    }
-                } ellers {
-                    hvis av < bv {
-                        la tmp = rows[i]
-                        rows[i] = rows[j]
-                        rows[j] = tmp
-                    }
-                }
-            } ellers {
-                hvis asc {
-                    hvis a > b {
-                        la tmp = rows[i]
-                        rows[i] = rows[j]
-                        rows[j] = tmp
-                    }
-                } ellers {
-                    hvis a < b {
-                        la tmp = rows[i]
-                        rows[i] = rows[j]
-                        rows[j] = tmp
-                    }
-                }
-            }
-            j = j + 1
-        }
-        i = i + 1
-    }
-    returner rows
-}
-
-funksjon _vm_db_parse_select(sql: tekst) -> ordbok_tekst {
-    la out: ordbok_tekst = {}
-    la tokens = _vm_sql_tokeniser(sql)
-    out["raw"] = sql
-    out["tokens"] = tokens
-
-    hvis lengde(tokens) == 0 eller _vm_sql_upper(tokens[0]) != "SELECT" {
-        returner out
-    }
-
-    la distinct: boolsk = usann
-    la i: heltall = 1
-    hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "DISTINCT" {
-        distinct = sann
-        i = i + 1
-    }
-
-    la select_tokens: liste<tekst> = []
-    mens i < lengde(tokens) og _vm_sql_upper(tokens[i]) != "FROM" {
-        hvis tokens[i] == "," {
-            i = i + 1
-            fortsett
-        }
-        hvis _vm_sql_upper(tokens[i]) == "AS" {
-            i = i + 2
-            fortsett
-        }
-        legg_til(select_tokens, tokens[i])
-        i = i + 1
-    }
-    hvis distinct {
-        out["distinct"] = "DISTINCT"
-    } ellers {
-        out["distinct"] = ""
-    }
-    out["select"] = select_tokens
-
-    hvis i >= lengde(tokens) eller _vm_sql_upper(tokens[i]) != "FROM" {
-        returner out
-    }
-    i = i + 1
-    hvis i >= lengde(tokens) {
-        returner out
-    }
-
-    la table_name = _vm_db_col_from_token(tokens[i])
-    out["table"] = table_name
-    i = i + 1
-
-    la where_tokens: liste<tekst> = []
-    la order_col: tekst = ""
-    la order_asc: boolsk = sann
-    la limit_n: heltall = -1
-    la offset_n: heltall = 0
-
-    mens i < lengde(tokens) {
-        la tok = _vm_sql_upper(tokens[i])
-        hvis tok == "WHERE" {
-            i = i + 1
-            mens i < lengde(tokens) og _vm_sql_upper(tokens[i]) != "ORDER" og _vm_sql_upper(tokens[i]) != "LIMIT" og _vm_sql_upper(tokens[i]) != "OFFSET" {
-                legg_til(where_tokens, tokens[i])
-                i = i + 1
-            }
-            fortsett
-        }
-
-        hvis tok == "ORDER" {
-            i = i + 1
-            hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "BY" {
-                i = i + 1
-            }
-            hvis i < lengde(tokens) {
-                order_col = _vm_db_col_from_token(tokens[i])
-                i = i + 1
-            }
-            hvis i < lengde(tokens) {
-                la dir = _vm_sql_upper(tokens[i])
-                hvis dir == "DESC" {
-                    order_asc = usann
-                    i = i + 1
-                } ellers hvis dir == "ASC" {
-                    i = i + 1
-                }
-            }
-            fortsett
-        }
-
-        hvis tok == "LIMIT" {
-            i = i + 1
-            hvis i < lengde(tokens) {
-                limit_n = builtin.heltall_fra_tekst(tokens[i])
-                i = i + 1
-            }
-            fortsett
-        }
-
-        hvis tok == "OFFSET" {
-            i = i + 1
-            hvis i < lengde(tokens) {
-                offset_n = builtin.heltall_fra_tekst(tokens[i])
-                i = i + 1
-            }
-            fortsett
-        }
-
-        i = i + 1
-    }
-
-    out["where"] = where_tokens
-    out["order_col"] = order_col
-    out["order_asc"] = order_asc
-    out["limit"] = limit_n
-    out["offset"] = offset_n
-    returner out
-}
-
-funksjon _vm_db_select_mode(parsed: ordbok_tekst) -> tekst {
-    la select_tokens = parsed["select"]
-    hvis lengde(select_tokens) == 0 { returner "empty" }
-    la first = _vm_sql_upper(select_tokens[0])
-    hvis first != "COUNT" og first != "SUM" og first != "AVG" og first != "MIN" og first != "MAX" {
-        returner "rows"
-    }
-    returner "agg"
-}
-
-funksjon _vm_db_parse_aggregate(tokens: liste<tekst>) -> ordbok_tekst {
-    la out: ordbok_tekst = {}
-    la n = lengde(tokens)
-    hvis n < 4 {
-        returner out
-    }
-    la fn = _vm_sql_upper(tokens[0])
-    hvis fn != "COUNT" og fn != "SUM" og fn != "AVG" og fn != "MIN" og fn != "MAX" {
-        returner out
-    }
-    hvis tokens[1] != "(" eller tokens[n - 1] != ")" {
-        returner out
-    }
-    la args = builtin.slice(tokens, 2, n - 1)
-    hvis lengde(args) == 0 {
-        returner out
-    }
-    la distinct: boolsk = usann
-    la arg = ""
-    hvis lengde(args) == 1 {
-        arg = args[0]
-    } ellers hvis lengde(args) == 2 og _vm_sql_upper(args[0]) == "DISTINCT" {
-        distinct = sann
-        arg = args[1]
-    } ellers {
-        returner out
-    }
-    out["fn"] = fn
-    out["arg"] = arg
-    out["distinct"] = distinct
-    returner out
-}
-
-funksjon _vm_db_contains_text(values: liste<tekst>, value: tekst) -> boolsk {
-    la i: heltall = 0
-    mens i < lengde(values) {
-        hvis values[i] == value {
-            returner sann
-        }
-        i = i + 1
-    }
-    returner usann
-}
-
-funksjon _vm_db_find_matching_row(rows: liste<ordbok_tekst>, probe: ordbok_tekst, keys: liste<tekst>) -> boolsk {
-    la i: heltall = 0
-    mens i < lengde(rows) {
-        la row = rows[i]
-        la matches: boolsk = sann
-        la k: heltall = 0
-        mens k < lengde(keys) {
-            la key = _vm_db_col_from_token(keys[k])
-            hvis _vm_db_row_val(row, key) != _vm_db_row_val(probe, key) {
-                matches = usann
-                bryt
-            }
-            k = k + 1
-        }
-        hvis matches {
-            returner sann
-        }
-        i = i + 1
-    }
-    returner usann
-}
-
-funksjon _vm_db_parse_insert(sql: tekst) -> ordbok_tekst {
-    la out: ordbok_tekst = {}
-    out["ok"] = usann
-    la tokens = _vm_sql_tokeniser(sql)
-    hvis lengde(tokens) < 4 {
-        returner out
-    }
-    la table_name = _vm_db_col_from_token(tokens[2])
-    la cols: liste<tekst> = []
-    la values_start = -1
-    la i: heltall = 3
-
-    hvis i < lengde(tokens) og tokens[i] == "(" {
-        i = i + 1
-        mens i < lengde(tokens) og tokens[i] != ")" {
-            hvis tokens[i] != "," {
-                legg_til(cols, _vm_db_col_from_token(tokens[i]))
-            }
-            i = i + 1
-        }
-        i = i + 1
-    }
-
-    mens i < lengde(tokens) {
-        hvis _vm_sql_upper(tokens[i]) == "VALUES" {
-            values_start = i
-            bryt
-        }
-        i = i + 1
-    }
-
-    hvis values_start < 0 eller values_start + 1 >= lengde(tokens) {
-        returner out
-    }
-
-    i = values_start + 1
-    hvis i < lengde(tokens) og tokens[i] == "(" {
-        i = i + 1
-    }
-    la vals: liste<tekst> = []
-    mens i < lengde(tokens) {
-        hvis tokens[i] == ")" {
-            bryt
-        }
-        hvis tokens[i] != "," {
-            legg_til(vals, _vm_sql_unquote(tokens[i]))
-        }
-        i = i + 1
-    }
-
-    la row: ordbok_tekst = {}
-    hvis lengde(cols) > 0 {
-        la c: heltall = 0
-        mens c < lengde(cols) og c < lengde(vals) {
-            row[cols[c]] = vals[c]
-            c = c + 1
-        }
-    }
-
-    out["ok"] = sann
-    out["table"] = table_name
-    out["row"] = row
-    out["cols"] = cols
-    out["vals"] = vals
-    returner out
-}
-
-funksjon _vm_db_create_table(db: ordbok_tekst, sql: tekst) -> heltall {
-    la tokens = _vm_sql_tokeniser(sql)
-    hvis lengde(tokens) < 3 {
-        returner 0
-    }
-
-    la i: heltall = 2
-    la if_not_exists: boolsk = usann
-    hvis _vm_sql_upper(tokens[i]) == "IF" {
-        hvis lengde(tokens) >= 5 og _vm_sql_upper(tokens[i + 1]) == "NOT" og _vm_sql_upper(tokens[i + 2]) == "EXISTS" {
-            if_not_exists = sann
-            i = i + 3
-        }
-    }
-    hvis i >= lengde(tokens) {
-        returner 0
-    }
-
-    la tabellnamn = _vm_db_col_from_token(tokens[i])
-    hvis _rt_har_nøkkel(db["_tables"], tabellnamn) {
-        hvis if_not_exists {
-            returner 0
-        }
-        // I denne enkle runtimeen overskriv vi tabell med same namn ved vanleg CREATE
-    }
-
-    i = i + 1
-    mens i < lengde(tokens) og tokens[i] != "(" {
-        i = i + 1
-    }
-    hvis i >= lengde(tokens) eller tokens[i] != "(" {
-        returner 0
-    }
-
-    la close: heltall = i + 1
-    mens close < lengde(tokens) og tokens[close] != ")" {
-        close = close + 1
-    }
-    hvis close >= lengde(tokens) {
-        returner 0
-    }
-
-    la schema: liste<ordbok_tekst> = []
-    la j: heltall = i + 1
-    mens j < close {
-        hvis tokens[j] == "," {
-            j = j + 1
-            fortsett
-        }
-        la col: ordbok_tekst = {}
-        la namn = _vm_db_col_from_token(tokens[j])
-        hvis namn == "" {
-            j = j + 1
-            fortsett
-        }
-        col["namn"] = namn
-        la type_token = "TEXT"
-        hvis j + 1 < close og tokens[j + 1] != "," {
-            type_token = _vm_sql_upper(tokens[j + 1])
-            j = j + 1
-        }
-        col["type"] = type_token
-        legg_til(schema, col)
-        j = j + 1
-    }
-
-    la table: ordbok_tekst = {}
-    table["schema"] = schema
-    table["rows"] = []
-    table["next_id"] = 1
-    db["_tables"][tabellnamn] = table
-    returner 0
-}
-
-funksjon _vm_db_insert_core(db: ordbok_tekst, sql: tekst, dedupe: boolsk) -> heltall {
-    la parsed = _vm_db_parse_insert(sql)
-    hvis parsed["ok"] != sann {
-        returner 0
-    }
-    la table_name = parsed["table"]
-    la table = _vm_db_tbl(db, table_name)
-    la row = parsed["row"]
-    la vals = parsed["vals"]
-
-    hvis lengde(parsed["cols"]) == 0 {
-        la schema = table["schema"]
-        la start_idx: heltall = 0
-        hvis lengde(schema) > 0 og lengde(vals) == lengde(schema) - 1 og schema[0]["namn"] == "id" {
-            start_idx = 1
-        }
-        la i: heltall = 0
-        la s: heltall = start_idx
-        mens s < lengde(schema) og i < lengde(vals) {
-            la col_name = schema[s]["namn"]
-            hvis col_name == "id" {
-                s = s + 1
-                fortsett
-            }
-            hvis col_name != "" {
-                row[col_name] = vals[i]
-            }
-            i = i + 1
-            s = s + 1
-        }
-    }
-
-    hvis _rt_har_nøkkel(row, "id") {
-        la sid = _vm_db_row_val(row, "id")
-        la i = builtin.heltall_fra_tekst(table["next_id"])
-        hvis _vm_db_is_number(sid) og builtin.heltall_fra_tekst(sid) >= i {
-            table["next_id"] = builtin.heltall_fra_tekst(sid) + 1
-        }
-    }
-    hvis ikkje _rt_har_nøkkel(row, "id") {
-        row["id"] = tekst_fra_heltall(table["next_id"])
-        table["next_id"] = table["next_id"] + 1
-    }
-
-    hvis dedupe {
-        la keys: liste<tekst> = parsed["cols"]
-        hvis lengde(keys) == 0 {
-            keys = []
-            la schema = table["schema"]
-            la k: heltall = 0
-            mens k < lengde(schema) {
-                la navn = schema[k]["namn"]
-                hvis navn != "id" {
-                    legg_til(keys, navn)
-                }
-                k = k + 1
-            }
-        }
-        hvis lengde(keys) > 0 og _vm_db_find_matching_row(table["rows"], row, keys) {
-            returner 0
-        }
-    }
-
-    legg_til(table["rows"], row)
-    returner 1
-}
-
-funksjon _vm_db_insert(db: ordbok_tekst, sql: tekst) -> heiltall {
-    returner _vm_db_insert_core(db, sql, usann)
-}
-
-funksjon _vm_db_update(db: ordbok_tekst, sql: tekst) -> heltall {
-    la tokens = _vm_sql_tokeniser(sql)
-    hvis lengde(tokens) < 6 {
-        returner 0
-    }
-    la table_name = _vm_db_col_from_token(tokens[1])
-    la table = _vm_db_tbl(db, table_name)
-    la set_pos: heltall = -1
-    la i: heltall = 2
-    mens i < lengde(tokens) {
-        hvis _vm_sql_upper(tokens[i]) == "SET" {
-            set_pos = i
-            bryt
-        }
-        i = i + 1
-    }
-    hvis set_pos < 0 {
-        returner 0
-    }
-
-    la set_cols: ordbok_tekst = {}
-    i = set_pos + 1
-    mens i < lengde(tokens) {
-        hvis _vm_sql_upper(tokens[i]) == "WHERE" {
-            bryt
-        }
-        hvis tokens[i] == "," {
-            i = i + 1
-            fortsett
-        }
-        hvis i + 2 < lengde(tokens) og tokens[i + 1] == "=" {
-            set_cols[_vm_db_col_from_token(tokens[i])] = _vm_sql_unquote(tokens[i + 2])
-            i = i + 3
-        } ellers {
-            i = i + 1
-        }
-    }
-
-    la where_tokens: liste<tekst> = []
-    hvis i < lengde(tokens) og _vm_sql_upper(tokens[i]) == "WHERE" {
-        i = i + 1
-        mens i < lengde(tokens) {
-            legg_til(where_tokens, tokens[i])
-            i = i + 1
-        }
-    }
-
-    la rows = table["rows"]
-    la count: heltall = 0
-    la r: heltall = 0
-    mens r < lengde(rows) {
-        la row = rows[r]
-        hvis _vm_db_where(row, where_tokens) {
-            la k: heltall = 0
-            la keys = nøkler(set_cols)
-            mens k < lengde(keys) {
-                la key = keys[k]
-                row[key] = set_cols[key]
-                k = k + 1
-            }
-            count = count + 1
-        }
-        r = r + 1
-    }
-    returner count
-}
-
-funksjon _vm_db_delete(db: ordbok_tekst, sql: tekst) -> heltall {
-    la tokens = _vm_sql_tokeniser(sql)
-    hvis lengde(tokens) < 3 {
-        returner 0
-    }
-    la i: heltall = 2
-    la table_name = ""
-    hvis _vm_sql_upper(tokens[1]) == "FROM" {
-        table_name = _vm_db_col_from_token(tokens[2])
-        i = 3
-    } ellers {
-        table_name = _vm_db_col_from_token(tokens[1])
-    }
-    la table = _vm_db_tbl(db, table_name)
-
-    la where_tokens: liste<tekst> = []
-    mens i < lengde(tokens) {
-        hvis _vm_sql_upper(tokens[i]) == "WHERE" {
-            i = i + 1
-            mens i < lengde(tokens) {
-                legg_til(where_tokens, tokens[i])
-                i = i + 1
-            }
-        }
-        i = i + 1
-    }
-
-    la rows = table["rows"]
-    la kept: liste<ordbok_tekst> = []
-    la count: heltall = 0
-    la r: heltall = 0
-    mens r < lengde(rows) {
-        la row = rows[r]
-        hvis _vm_db_where(row, where_tokens) {
-            count = count + 1
-        } ellers {
-            legg_til(kept, row)
-        }
-        r = r + 1
-    }
-    table["rows"] = kept
-    returner count
-}
-
-funksjon _vm_db_drop_table(db: ordbok_tekst, sql: tekst) -> heltall {
-    la tokens = _vm_sql_tokeniser(sql)
-    hvis lengde(tokens) < 3 {
-        returner 0
-    }
-    la i: heltall = 2
-    hvis _vm_sql_upper(tokens[2]) == "IF" {
-        hvis lengde(tokens) >= 5 og _vm_sql_upper(tokens[3]) == "NOT" og _vm_sql_upper(tokens[4]) == "EXISTS" {
-            i = 5
-        }
-    }
-    hvis i >= lengde(tokens) {
-        returner 0
-    }
-    la table_name = _vm_db_col_from_token(tokens[i])
-    hvis _rt_har_nøkkel(db["_tables"], table_name) {
-        fjern_nokkel(db["_tables"], table_name)
-    }
-    returner 0
-}
-
-funksjon _vm_db_select_rows_with_meta(db: ordbok_tekst, parsed: ordbok_tekst) -> liste<ordbok_tekst> {
-    la table = _vm_db_tbl(db, parsed["table"])
-    la rows = _vm_db_collect_select_rows(db, table, parsed["where"])
-    rows = _vm_db_sort_rows(rows, parsed["order_col"], parsed["order_asc"])
-    la offset_n = parsed["offset"]
-    hvis offset_n > 0 {
-        hvis offset_n < lengde(rows) {
-            rows = builtin.slice(rows, offset_n, lengde(rows))
-        } ellers {
-            rows = []
-        }
-    }
-    hvis parsed["limit"] >= 0 og parsed["limit"] < lengde(rows) {
-        rows = builtin.slice(rows, 0, parsed["limit"])
-    }
-    returner rows
-}
-
-funksjon _vm_db_select_count(db: ordbok_tekst, sql: tekst) -> heltall {
-    la parsed = _vm_db_parse_select(sql)
-    hvis lengde(nøkler(parsed)) == 0 {
-        returner 0
-    }
-    hvis _vm_db_select_mode(parsed) != "agg" {
-        la rows = _vm_db_select_rows_with_meta(db, parsed)
-        returner lengde(rows)
-    }
-
-    la rows = _vm_db_select_rows_with_meta(db, parsed)
-    la agg = _vm_db_parse_aggregate(parsed["select"])
-    hvis lengde(agg) == 0 {
-        returner lengde(rows)
-    }
-
-    la fn = agg["fn"]
-    la arg = agg["arg"]
-    la distinct = agg["distinct"]
-
-    hvis fn == "COUNT" {
-        hvis _vm_sql_upper(arg) == "*" {
-            returner lengde(rows)
-        }
-        hvis distinct {
-            la seen: liste<tekst> = []
-            la c: heltall = 0
-            mens c < lengde(rows) {
-                la v = _vm_db_row_val(rows[c], arg)
-                hvis ikke _vm_db_contains_text(seen, v) {
-                    legg_til(seen, v)
-                }
-                c = c + 1
-            }
-            returner lengde(seen)
-        }
-        la c = 0
-        mens c < lengde(rows) {
-            la v = _vm_db_row_val(rows[c], arg)
-            hvis v == "" {
-                // tel same as SQL COUNT på kolonne med null verdi
-            }
-            c = c + 1
-        }
-        returner lengde(rows)
-    }
-
-    hvis fn == "SUM" eller fn == "AVG" eller fn == "MIN" eller fn == "MAX" {
-        la total: heiltall = 0
-        la count: heltall = 0
-        hvis fn == "MIN" eller fn == "MAX" {
-            la first_num: boolsk = sann
-            la best: heltall = 0
-            la c: heltall = 0
-            mens c < lengde(rows) {
-                la raw = _vm_db_row_val(rows[c], arg)
-                hvis _vm_db_is_number(raw) {
-                    la v = builtin.heltall_fra_tekst(raw)
-                    hvis first_num {
-                        best = v
-                        first_num = usann
-                    } ellers hvis fn == "MIN" og v < best {
-                        best = v
-                    } ellers hvis fn == "MAX" og v > best {
-                        best = v
-                    }
-                }
-                c = c + 1
-            }
-            hvis first_num {
-                returner 0
-            }
-            returner best
-        }
-
-        la c: heltall = 0
-        mens c < lengde(rows) {
-            la raw = _vm_db_row_val(rows[c], arg)
-            hvis _vm_db_is_number(raw) {
-                total = total + builtin.heltall_fra_tekst(raw)
-                count = count + 1
-            }
-            c = c + 1
-        }
-        hvis fn == "SUM" {
-            returner total
-        }
-        hvis count == 0 {
-            returner 0
-        }
-        hvis fn == "AVG" {
-            returner total / count
-        }
-    }
-
-    returner 0
-}
-
-funksjon _vm_db_select_text(db: ordbok_tekst, sql: tekst) -> tekst {
-    la parsed = _vm_db_parse_select(sql)
-    hvis lengde(nøkler(parsed)) == 0 {
-        returner ""
-    }
-    hvis _vm_db_select_mode(parsed) == "agg" {
-        returner tekst_fra_heltall(_vm_db_select_count(db, sql))
-    }
-
-    la rows = _vm_db_select_rows_with_meta(db, parsed)
-    la select_tokens = parsed["select"]
-    la all_cols = lengde(select_tokens) == 1 og _vm_db_col_from_token(select_tokens[0]) == "*"
-
-    la er_distinct = parsed["distinct"] == sann eller parsed["distinct"] == "DISTINCT"
-    hvis lengde(select_tokens) == 1 og ikke all_cols og er_distinct != sann {
-        hvis lengde(rows) == 0 {
-            returner ""
-        }
-        la col = _vm_db_col_from_token(select_tokens[0])
-        returner _vm_db_row_val(rows[0], col)
-    }
-
-    la out: liste<ordbok_tekst> = []
-    la seen: liste<tekst> = []
-    la r: heltall = 0
-    mens r < lengde(rows) {
-        la row = rows[r]
-        la item: ordbok_tekst = {}
-        hvis all_cols {
-            la schema = db["_tables"][parsed["table"]]["schema"]
-            la c: heltall = 0
-            mens c < lengde(schema) {
-                la kn = schema[c]["namn"]
-                item[kn] = _vm_db_row_val(row, kn)
-                c = c + 1
-            }
-        } ellers {
-            la c: heltall = 0
-            mens c < lengde(select_tokens) {
-                la kn = _vm_db_col_from_token(select_tokens[c])
-                item[kn] = _vm_db_row_val(row, kn)
-                c = c + 1
-            }
-        }
-
-        hvis parsed["distinct"] {
-            la marker = json_stringify(item)
-            hvis ikkje _vm_db_contains_text(seen, marker) {
-                legg_til(seen, marker)
-                legg_til(out, item)
-            }
-        } ellers {
-            legg_til(out, item)
-        }
-        r = r + 1
-    }
-    returner json_stringify(out)
-}
-
-funksjon _vm_db_exec(db: ordbok_tekst, sql: tekst) -> heltall {
-    la s = _vm_sql_trim_semi(sql)
-    hvis s == "" { returner 0 }
-    la upper = _vm_sql_upper(s)
-    hvis builtin.starts_with(upper, "CREATE TABLE ") {
-        returner _vm_db_create_table(db, s)
-    }
-    hvis builtin.starts_with(upper, "INSERT INTO ") {
-        returner _vm_db_insert(db, s)
-    }
-    hvis builtin.starts_with(upper, "UPDATE ") {
-        returner _vm_db_update(db, s)
-    }
-    hvis builtin.starts_with(upper, "DELETE FROM ") {
-        returner _vm_db_delete(db, s)
-    }
-    hvis builtin.starts_with(upper, "DROP TABLE ") {
-        returner _vm_db_drop_table(db, s)
-    }
-    returner 0
-}
-
-funksjon _vm_db_migrate(db: ordbok_tekst, skript: tekst) -> heltall {
-    la stmts = builtin.split(skript, ";")
-    la count: heltall = 0
-    la snapshot = _vm_db_clone(db)
-    la i: heltall = 0
-    mens i < lengde(stmts) {
-        la stmt = builtin.trim(stmts[i])
-        hvis stmt != "" {
-            la upper = _vm_sql_upper(stmt)
-            la res: heiltall = 0
-            hvis builtin.starts_with(upper, "INSERT INTO ") {
-                res = _vm_db_insert_core(db, stmt, sann)
-            } ellers {
-                res = _vm_db_exec(db, stmt)
-            }
-            hvis res < 0 {
-                returner 0
-            }
-            hvis builtin.starts_with(upper, "INSERT INTO ") og res > 0 {
-                count = count + 1
-            }
-        }
-        i = i + 1
-    }
-    returner count
-}
-
 // ─── Intern hjelpefunksjon for ordboksoperasjonar ────────────────────────────
 
 funksjon _rt_map_nøkler(map_obj)
     hvis map_obj == null {
         returner []
     }
-    // The embedded VM receives a precomputed key list from the outer
-    // executor.  Reading it avoids recursively serialising the large
-    // compiler/runtime function table in the pure VM (which can overflow the
-    // VM stack during lint and bootstrap).
-    hvis builtin.har_nokkel(map_obj, "__vm_key_list__") {
-        returner map_obj["__vm_key_list__"]
-    }
-    la serialisert = json_stringify(map_obj)
-    la ut: liste_tekst = []
-    hvis lengde(serialisert) < 2 eller builtin.slice(serialisert, 0, 1) != "{" {
-        returner ut
-    }
-    la i = 1
-    mens i < lengde(serialisert) - 1 {
-        mens i < lengde(serialisert) - 1 og (builtin.slice(serialisert, i, i + 1) == " " eller builtin.slice(serialisert, i, i + 1) == ",") {
-            i = i + 1
-        }
-        hvis i >= lengde(serialisert) - 1 eller builtin.slice(serialisert, i, i + 1) != "\"" { bryt }
-        la start = i + 1
-        i = start
-        la unnsluppet = usann
-        mens i < lengde(serialisert) {
-            la teikn = builtin.slice(serialisert, i, i + 1)
-            hvis teikn == "\"" og ikkje unnsluppet { bryt }
-            hvis teikn == "\\" og ikkje unnsluppet {
-                unnsluppet = sann
-            } ellers {
-                unnsluppet = usann
-            }
-            i = i + 1
-        }
-        hvis i >= lengde(serialisert) { bryt }
-        legg_til(ut, builtin.slice(serialisert, start, i))
-        i = i + 1
-        mens i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) != ":" { i = i + 1 }
-        mens i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) != "," { i = i + 1 }
-        hvis i < lengde(serialisert) og builtin.slice(serialisert, i, i + 1) == "," { i = i + 1 }
-    }
-    returner ut
+    returner nøkler(map_obj)
 slutt
 
 funksjon _rt_har_nøkkel(map_obj, nøkkel)
     hvis map_obj == null {
         returner usann
     }
-    hvis map_obj[nøkkel] != null {
-        returner sann
-    }
-    returner usann
+    returner finnes_nøkkel(map_obj, nøkkel)
 slutt
 
 funksjon _rt_join_tekst(deler: liste<tekst>, start: heltall, slutt: heltall, separator: tekst) -> tekst {
@@ -3202,233 +2187,7 @@ funksjon vm_ascii_upper(verdi: tekst) -> tekst {
     returner ut
 }
 
-funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
-    // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
-    mens builtin.starts_with(namn, "builtin.builtin.")
-        namn = builtin.slice(namn, 8, lengde(namn))
-    slutt
-
-    vm_metric_inc(active_functions, "builtin_calls")
-    la metric_cap = vm_capability_for(namn)
-    hvis builtin.starts_with(metric_cap, "disk.") {
-        vm_metric_inc(active_functions, "filesystem_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "net.") {
-        vm_metric_inc(active_functions, "network_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    } ellers hvis builtin.starts_with(metric_cap, "process.") {
-        vm_metric_inc(active_functions, "process_calls")
-        vm_metric_inc(active_functions, "io_calls")
-    }
-
-    vm_security_enforce(active_functions, namn, args)
-
-    hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" eller namn == "builtin.nøkkel_finnes" {
-        returner _rt_har_nøkkel(args[0], args[1])
-    }
-    hvis namn == "builtin.web_escape_html" {
-        returner vm_web_escape_html(args[0])
-    }
-    hvis namn == "builtin.web_safe_filename" {
-        returner vm_web_safe_filename(args[0])
-    }
-
-    hvis builtin.starts_with(namn, "std.web.") {
-        namn = "builtin.web." + builtin.slice(namn, 8, lengde(namn))
-    }
-    hvis builtin.starts_with(namn, "web.") {
-        namn = "builtin.web." + builtin.slice(namn, 4, lengde(namn))
-    }
-    hvis builtin.starts_with(namn, "std.http.") {
-        namn = "http." + builtin.slice(namn, 9, lengde(namn))
-    }
-
-    // Fil-eksistens må treffast tidleg for precompiled VM under eldre host-VM.
-    hvis namn == "builtin.fil_finnes" eller namn == "fil_finnes" eller namn == "builtin.sti_exists" {
-        returner _rt_fil_finnes(args[0])
-    }
-
-    // builtin.skriv
-    hvis namn == "builtin.skriv" {
-        la s: tekst = args[0]
-        skriv(s)
-        returner 0
-    }
-
-    // builtin.lengde
-    hvis namn == "builtin.lengde" {
-        returner lengde(args[0])
-    }
-
-
-    hvis namn == "builtin.legg_til" eller namn == "legg_til" {
-        legg_til(args[0], args[1])
-        returner 0
-    }
-
-    hvis namn == "builtin.pop_siste" eller namn == "builtin.fjern_siste" eller namn == "pop_siste" eller namn == "fjern_siste" {
-        hvis lengde(args[0]) == 0 { kast "pop_siste frå tom liste" }
-        la siste = args[0][lengde(args[0]) - 1]
-        fjern_siste(args[0])
-        returner siste
-    }
-
-    // builtin.tekst
-    hvis namn == "builtin.tekst" {
-        la s = json_stringify(args[0])
-        hvis builtin.starts_with(s, "\"") og builtin.ends_with(s, "\"") og lengde(s) >= 2 {
-            returner builtin.slice(s, 1, lengde(s) - 1)
-        }
-        returner s
-    }
-
-    // builtin.tekst_fra_heltall
-    hvis namn == "builtin.tekst_fra_heltall" eller namn == "builtin.tekst_fra_heiltall" eller builtin.ends_with(namn, "tekst_fra_heiltall") {
-        returner json_stringify(args[0])
-    }
-
-    // builtin.nøkler
-    hvis namn == "builtin.nøkler" {
-        returner nøkler(args[0])
-    }
-
-    // builtin.verdier
-    hvis namn == "builtin.verdier" {
-        returner verdier(args[0])
-    }
-
-    hvis namn == "builtin.vm_memory_status" {
-        returner vm_memory_status(active_functions)
-    }
-
-    hvis namn == "builtin.vm_call_stack_status" {
-        returner vm_call_stack_status(active_functions)
-    }
-
-    hvis namn == "builtin.vm_runtime_metrics" {
-        returner vm_runtime_metrics(active_functions)
-    }
-
-    hvis namn == "builtin.vm_profiler_set_sample_interval" {
-        returner vm_profiler_set_sample_interval(active_functions, args[0])
-    }
-    hvis namn == "builtin.vm_profiler_samples" { returner active_functions["__vm_profile_samples__"] }
-    hvis namn == "builtin.vm_profiler_trace_events" { returner active_functions["__vm_trace_events__"] }
-    hvis namn == "builtin.vm_profiler_chrome_trace" { returner vm_profiler_chrome_trace(active_functions) }
-    hvis namn == "builtin.vm_profiler_reset" { returner vm_profiler_reset(active_functions) }
-
-    hvis namn == "builtin.vm_debug_enable" {
-        active_functions["__vm_debug__"]["enabled"] = "sann"
-        returner sann
-    }
-    hvis namn == "builtin.vm_debug_disable" {
-        active_functions["__vm_debug__"]["enabled"] = "usann"
-        returner sann
-    }
-    hvis namn == "builtin.vm_debug_breakpoint_add" {
-        returner vm_debug_breakpoint_add(active_functions, tekst(args[0]), args[1])
-    }
-    hvis namn == "builtin.vm_debug_breakpoint_remove" {
-        returner vm_debug_breakpoint_remove(active_functions, tekst(args[0]), args[1])
-    }
-    hvis namn == "builtin.vm_debug_breakpoints_clear" {
-        returner vm_debug_breakpoints_clear(active_functions)
-    }
-    hvis namn == "builtin.vm_debug_watch_add" {
-        returner vm_debug_watch_add(active_functions, tekst(args[0]))
-    }
-    hvis namn == "builtin.vm_debug_watch_remove" {
-        returner vm_debug_watch_remove(active_functions, tekst(args[0]))
-    }
-    hvis namn == "builtin.vm_debug_watches_clear" {
-        returner vm_debug_watches_clear(active_functions)
-    }
-    hvis namn == "builtin.vm_debug_suspend_on_hit" {
-        returner vm_debug_suspend_on_hit(active_functions, args[0])
-    }
-    hvis namn == "builtin.vm_debug_resume" {
-        returner vm_debug_resume(active_functions, tekst(args[0]))
-    }
-    hvis namn == "builtin.vm_debug_step" {
-        active_functions["__vm_debug__"]["enabled"] = "sann"
-        active_functions["__vm_debug__"]["mode"] = "step"
-        active_functions["__vm_debug__"]["paused"] = "usann"
-        returner sann
-    }
-    hvis namn == "builtin.vm_debug_continue" {
-        active_functions["__vm_debug__"]["mode"] = "continue"
-        active_functions["__vm_debug__"]["paused"] = "usann"
-        returner sann
-    }
-    hvis namn == "builtin.vm_debug_snapshot" {
-        returner active_functions["__vm_debug__"]
-    }
-    hvis namn == "builtin.vm_type_of" { returner vm_type_of(active_functions, args[0]) }
-    hvis namn == "builtin.vm_type_get" {
-        hvis vm_map_har_nokkel(active_functions["__vm_types__"], tekst(args[0])) { returner active_functions["__vm_types__"][tekst(args[0])] }
-        returner {}
-    }
-    hvis namn == "builtin.vm_type_register" { returner vm_type_register(active_functions, args[0]) }
-    hvis namn == "builtin.vm_function_info" { returner vm_function_info(active_functions, tekst(args[0])) }
-    hvis namn == "builtin.vm_module_info" { returner vm_module_info(active_functions, tekst(args[0])) }
-    hvis namn == "builtin.vm_type_registry" { returner active_functions["__vm_types__"] }
-    hvis namn == "builtin.vm_type_reflection" { returner vm_type_reflection(active_functions, tekst(args[0])) }
-    hvis namn == "builtin.vm_symbol_table" { returner vm_symbol_table(active_functions) }
-    hvis namn == "builtin.vm_host_register" { returner vm_host_register(active_functions, tekst(args[0]), args[1]) }
-    hvis namn == "builtin.vm_host_call" { returner vm_host_call(active_functions, args[0], tekst(args[1]), args[2]) }
-    hvis namn == "builtin.vm_host_revoke" { returner vm_host_revoke(active_functions, args[0]) }
-
-    hvis namn == "builtin.vm_module_load" {
-        la deps = ""
-        hvis lengde(args) > 3 { deps = args[3] }
-        returner vm_module_load(active_functions, args[0], args[1], args[2], deps, usann)
-    }
-
-    hvis namn == "builtin.vm_module_reload" {
-        la deps = ""
-        hvis lengde(args) > 3 { deps = args[3] }
-        returner vm_module_load(active_functions, args[0], args[1], args[2], deps, sann)
-    }
-
-    // builtin.json_parse (nc-vm kompatibel, MAP-verdiar → strenger)
-    hvis namn == "builtin.json_parse" {
-        returner json_parse(args[0])
-    }
-    // builtin.json_parse_raw (rå C-parsing, MAP-verdiar beheld type)
-    hvis namn == "builtin.json_parse_raw" {
-        prøv {
-            returner json_parse_raw(args[0])
-        } fang (e) {
-            // Sikkerheitsfalle om parse mislykkast, for å unngå hardt krasj i bootstrap.
-            returner {}
-        }
-    }
-    hvis namn == "builtin.json_skriv" {
-        returner json_skriv(args[0])
-    }
-
-    // builtin.json_stringify
-    hvis namn == "builtin.json_stringify" {
-        returner json_stringify(args[0])
-    }
-
-    // Kompilering / host-bridge
-    hvis namn == "builtin.kompiler_fil" {
-        returner builtin.kompiler_fil(args[0], args[1])
-    }
-    hvis namn == "builtin.køyr_funksjon" {
-        returner køyr_funksjon(args[0], args[1], args[2], args[3])
-    }
-    hvis namn == "builtin.vm_sett_kontekst" {
-        returner vm_sett_kontekst(args[0])
-    }
-    hvis namn == "builtin.køyr_med_kontekst" {
-        returner køyr_med_kontekst(args[0], args[1])
-    }
-    hvis namn == "builtin.køyr_ncb" {
-        returner køyr_ncb(args[0])
-    }
-
+funksjon kall_innebygd_web_og_ncb(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
     // Selfhost-web metadata + runtime helpers
     hvis namn == "builtin.ncb_route_handlers" {
         hvis active_functions == null {
@@ -3951,6 +2710,308 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner vm_web_finalize_response(ctx, builtin.web.response_error(404, "Ikkje funne: " + metode + " " + path))
     }
 
+    kast "Ukjent web/NCB-builtin: " + namn
+
+}
+
+funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok<tekst, tekst>) -> tekst {
+    // Normaliser dobbel builtin.-prefiks (kompilator kan emitte builtin.builtin.X)
+    mens builtin.starts_with(namn, "builtin.builtin.")
+        namn = builtin.slice(namn, 8, lengde(namn))
+    slutt
+
+    // Reine, capability-frie intrinsics ligg i den varme compilerløypa.
+    // Handter dei før metrikk-/security-dispatchen: den gamle lineære
+    // dispatchen gjorde kvart lexer-teikn til hundrevis av VM-greiner.
+    hvis namn == "builtin.lengde" { returner lengde(args[0]) }
+    hvis namn == "builtin.slice" { returner builtin.slice(args[0], args[1], args[2]) }
+    hvis namn == "builtin.char_code" { returner builtin.char_code(args[0]) }
+    hvis namn == "builtin.native_heap_bytes" { returner builtin.native_heap_bytes() }
+    hvis namn == "builtin.chr" { returner builtin.chr(args[0]) }
+    hvis namn == "builtin.index_of" eller namn == "builtin.tekst_indeks" { returner builtin.index_of(args[0], args[1]) }
+    hvis namn == "builtin.starts_with" eller namn == "builtin.tekst_starter_med" { returner builtin.starts_with(args[0], args[1]) }
+    hvis namn == "builtin.ends_with" eller namn == "builtin.tekst_slutter_med" { returner builtin.ends_with(args[0], args[1]) }
+    hvis namn == "builtin.sha256" { returner builtin.sha256(args[0]) }
+    hvis namn == "builtin.sha256_bytes" { returner builtin.sha256_bytes(args[0]) }
+    hvis namn == "builtin.miljo_sett" { returner builtin.miljo_sett(args[0], args[1]) }
+    // Sikkerheitsprimitiva blir utførte av den smale, versjonerte
+    // plattform-ABI-en. Pure VM må vidaresende dei eksplisitt; elles blir
+    // gyldige kall feilklassifiserte som ukjende innebygde funksjonar før
+    // native backend og capability-policy får handsame dei.
+    hvis namn == "builtin.pbkdf2_sha256" {
+        returner builtin.pbkdf2_sha256(args[0], args[1], args[2], args[3])
+    }
+    hvis namn == "builtin.argon2id" {
+        returner builtin.argon2id(args[0], args[1], args[2], args[3], args[4], args[5])
+    }
+    hvis namn == "builtin.acme_sign" {
+        returner builtin.acme_sign(args[0], args[1], args[2])
+    }
+    hvis namn == "builtin.acme_verify" {
+        returner builtin.acme_verify(args[0], args[1], args[2], args[3])
+    }
+    hvis namn == "builtin.dns_lookup" eller namn == "builtin.resolve_host" {
+        returner builtin.dns_lookup(args[0], args[1])
+    }
+    // Eldre kompilerte selfhost-modular kan ha ukvalifiserte lexer-kall som
+    // builtin.lex. Bind berre den kjende compilerfunksjonen; ikkje opne eit
+    // generelt builtin-til-brukarfunksjon-fallback.
+    hvis namn == "builtin.lex" og vm_map_har_nokkel(active_functions, "lexer_m1.lex") {
+        returner køyr_funksjon("lexer_m1.lex", args, active_functions, 0)
+    }
+    hvis namn == "builtin.lex" og vm_map_har_nokkel(active_functions, "selfhost.lexer.lexer_m1.lex") {
+        returner køyr_funksjon("selfhost.lexer.lexer_m1.lex", args, active_functions, 0)
+    }
+    hvis namn == "builtin.legg_til" eller namn == "legg_til" {
+        legg_til(args[0], args[1])
+        returner 0
+    }
+
+    vm_metric_inc(active_functions, "builtin_calls")
+    la metric_cap = vm_capability_for(namn)
+    hvis builtin.starts_with(metric_cap, "disk.") {
+        vm_metric_inc(active_functions, "filesystem_calls")
+        vm_metric_inc(active_functions, "io_calls")
+    } ellers hvis builtin.starts_with(metric_cap, "net.") {
+        vm_metric_inc(active_functions, "network_calls")
+        vm_metric_inc(active_functions, "io_calls")
+    } ellers hvis builtin.starts_with(metric_cap, "process.") {
+        vm_metric_inc(active_functions, "process_calls")
+        vm_metric_inc(active_functions, "io_calls")
+    }
+
+    vm_security_enforce(active_functions, namn, args)
+
+    hvis namn == "builtin.har_nokkel" eller namn == "builtin.finnes_nøkkel" {
+        returner _rt_har_nøkkel(args[0], args[1])
+    }
+    hvis namn == "builtin.web_escape_html" {
+        returner vm_web_escape_html(args[0])
+    }
+    hvis namn == "builtin.web_safe_filename" {
+        returner vm_web_safe_filename(args[0])
+    }
+
+    hvis builtin.starts_with(namn, "std.web.") {
+        namn = "builtin.web." + builtin.slice(namn, 8, lengde(namn))
+    }
+    hvis builtin.starts_with(namn, "web.") {
+        namn = "builtin.web." + builtin.slice(namn, 4, lengde(namn))
+    }
+    hvis builtin.starts_with(namn, "std.http.") {
+        namn = "http." + builtin.slice(namn, 9, lengde(namn))
+    }
+
+    // Fil-eksistens må treffast tidleg for precompiled VM under eldre host-VM.
+    hvis namn == "builtin.fil_finnes" eller namn == "fil_finnes" eller namn == "builtin.sti_exists" {
+        returner _rt_fil_finnes(args[0])
+    }
+
+    // builtin.skriv
+    hvis namn == "builtin.skriv" {
+        la s: tekst = args[0]
+        skriv(s)
+        returner 0
+    }
+
+    // builtin.lengde
+    hvis namn == "builtin.lengde" {
+        returner lengde(args[0])
+    }
+
+
+    hvis namn == "builtin.legg_til" eller namn == "legg_til" {
+        legg_til(args[0], args[1])
+        returner 0
+    }
+
+    hvis namn == "builtin.pop_siste" eller namn == "builtin.fjern_siste" eller namn == "pop_siste" eller namn == "fjern_siste" {
+        hvis lengde(args[0]) == 0 { kast "pop_siste frå tom liste" }
+        la siste = args[0][lengde(args[0]) - 1]
+        fjern_siste(args[0])
+        returner siste
+    }
+
+    // builtin.tekst
+    hvis namn == "builtin.tekst" {
+        // Dette er språkets tekstkonvertering, ikkje JSON-serialisering.
+        // Den tidlegare JSON-rundturen trefte dessutan ein historisk native
+        // dispatch-tabell når pure VM køyrde inne i Linux AOT.
+        returner tekst(args[0])
+    }
+
+    // builtin.tekst_fra_heltall
+    hvis namn == "builtin.tekst_fra_heltall" eller namn == "builtin.tekst_fra_heiltall" eller builtin.ends_with(namn, "tekst_fra_heiltall") {
+        returner json_stringify(args[0])
+    }
+
+    // builtin.nøkler
+    hvis namn == "builtin.nøkler" {
+        returner nøkler(args[0])
+    }
+
+    // builtin.verdier
+    hvis namn == "builtin.verdier" {
+        returner verdier(args[0])
+    }
+
+    hvis namn == "builtin.vm_memory_status" {
+        returner vm_memory_status(active_functions)
+    }
+
+    hvis namn == "builtin.vm_call_stack_status" {
+        returner vm_call_stack_status(active_functions)
+    }
+
+    hvis namn == "builtin.vm_runtime_metrics" {
+        returner vm_runtime_metrics(active_functions)
+    }
+
+    hvis namn == "builtin.vm_profiler_set_sample_interval" {
+        returner vm_profiler_set_sample_interval(active_functions, args[0])
+    }
+    hvis namn == "builtin.vm_profiler_samples" { returner active_functions["__vm_profile_samples__"] }
+    hvis namn == "builtin.vm_profiler_trace_events" { returner active_functions["__vm_trace_events__"] }
+    hvis namn == "builtin.vm_profiler_chrome_trace" { returner vm_profiler_chrome_trace(active_functions) }
+    hvis namn == "builtin.vm_profiler_reset" { returner vm_profiler_reset(active_functions) }
+
+    hvis namn == "builtin.vm_debug_enable" {
+        active_functions["__vm_debug__"]["enabled"] = "sann"
+        returner sann
+    }
+    hvis namn == "builtin.vm_debug_disable" {
+        active_functions["__vm_debug__"]["enabled"] = "usann"
+        returner sann
+    }
+    hvis namn == "builtin.vm_debug_breakpoint_add" {
+        returner vm_debug_breakpoint_add(active_functions, tekst(args[0]), args[1])
+    }
+    hvis namn == "builtin.vm_debug_breakpoint_remove" {
+        returner vm_debug_breakpoint_remove(active_functions, tekst(args[0]), args[1])
+    }
+    hvis namn == "builtin.vm_debug_breakpoints_clear" {
+        returner vm_debug_breakpoints_clear(active_functions)
+    }
+    hvis namn == "builtin.vm_debug_watch_add" {
+        returner vm_debug_watch_add(active_functions, tekst(args[0]))
+    }
+    hvis namn == "builtin.vm_debug_watch_remove" {
+        returner vm_debug_watch_remove(active_functions, tekst(args[0]))
+    }
+    hvis namn == "builtin.vm_debug_watches_clear" {
+        returner vm_debug_watches_clear(active_functions)
+    }
+    hvis namn == "builtin.vm_debug_suspend_on_hit" {
+        returner vm_debug_suspend_on_hit(active_functions, args[0])
+    }
+    hvis namn == "builtin.vm_debug_resume" {
+        returner vm_debug_resume(active_functions, tekst(args[0]))
+    }
+    hvis namn == "builtin.vm_debug_step" {
+        active_functions["__vm_debug__"]["enabled"] = "sann"
+        active_functions["__vm_debug__"]["mode"] = "step"
+        active_functions["__vm_debug__"]["paused"] = "usann"
+        returner sann
+    }
+    hvis namn == "builtin.vm_debug_continue" {
+        active_functions["__vm_debug__"]["mode"] = "continue"
+        active_functions["__vm_debug__"]["paused"] = "usann"
+        returner sann
+    }
+    hvis namn == "builtin.vm_debug_snapshot" {
+        returner active_functions["__vm_debug__"]
+    }
+    hvis namn == "builtin.vm_type_of" { returner vm_type_of(active_functions, args[0]) }
+    hvis namn == "builtin.vm_type_get" {
+        hvis vm_map_har_nokkel(active_functions["__vm_types__"], tekst(args[0])) { returner active_functions["__vm_types__"][tekst(args[0])] }
+        returner {}
+    }
+    hvis namn == "builtin.vm_type_register" { returner vm_type_register(active_functions, args[0]) }
+    hvis namn == "builtin.vm_function_info" { returner vm_function_info(active_functions, tekst(args[0])) }
+    hvis namn == "builtin.vm_module_info" { returner vm_module_info(active_functions, tekst(args[0])) }
+    hvis namn == "builtin.vm_type_registry" { returner active_functions["__vm_types__"] }
+    hvis namn == "builtin.vm_type_reflection" { returner vm_type_reflection(active_functions, tekst(args[0])) }
+    hvis namn == "builtin.vm_symbol_table" { returner vm_symbol_table(active_functions) }
+    hvis namn == "builtin.vm_host_register" { returner vm_host_register(active_functions, tekst(args[0]), args[1]) }
+    hvis namn == "builtin.vm_host_call" { returner vm_host_call(active_functions, args[0], tekst(args[1]), args[2]) }
+    hvis namn == "builtin.vm_host_revoke" { returner vm_host_revoke(active_functions, args[0]) }
+
+    hvis namn == "builtin.vm_module_load" {
+        la deps = ""
+        hvis lengde(args) > 3 { deps = args[3] }
+        returner vm_module_load(active_functions, args[0], args[1], args[2], deps, usann)
+    }
+
+    hvis namn == "builtin.vm_module_reload" {
+        la deps = ""
+        hvis lengde(args) > 3 { deps = args[3] }
+        returner vm_module_load(active_functions, args[0], args[1], args[2], deps, sann)
+    }
+
+    // builtin.json_parse (nc-vm kompatibel, MAP-verdiar → strenger)
+    hvis namn == "builtin.json_parse" {
+        returner builtin.json_parse(args[0])
+    }
+    // builtin.json_parse_raw (rå C-parsing, MAP-verdiar beheld type)
+    hvis namn == "builtin.json_parse_raw" {
+        prøv {
+            // Dette kallet blir køyrt av den ytre, aktive Norscode-runtimen.
+            // Den gamle ukvalifiserte varianten gjekk inn i selfhost.json
+            // teikn for teikn for kvar NCB og gjorde source-only L5b
+            // kvadratisk treg i VM-i-VM.
+            returner builtin.json_parse_raw(args[0])
+        } fang (e) {
+            // Sikkerheitsfalle om parse mislykkast, for å unngå hardt krasj i bootstrap.
+            returner {}
+        }
+    }
+    hvis namn == "builtin.json_skriv" {
+        returner json_skriv(args[0])
+    }
+
+    // builtin.json_stringify
+    hvis namn == "builtin.json_stringify" {
+        // Den dynamiske native-dispatchen har historisk brukt ein «smart»
+        // legacy-serializer som tolkar tekst som "null", "0" og JSON-liknande
+        // innhald som typed verdiar. VM-i-VM må bevare faktisk runtime-type.
+        returner json_skriv(args[0])
+    }
+
+    // Kompilering / host-bridge
+    hvis namn == "builtin.kompiler_fil_aktiv" {
+        // Køyr nøyaktig kompilatorfunksjonen frå den aktive Gen1-NCB-en.
+        // Dette er ikkje bootstrap/precompiled-oppslaget i
+        // builtin.kompiler_fil: ncb_call_fn brukar same verifiserte
+        // functions-kart som køyrer den ytre L5b-hosten.
+        returner builtin.ncb_call_fn("selfhost.kompiler.kompiler_fil", args[0], args[1])
+    }
+    hvis namn == "builtin.kompiler_objekt_aktiv" {
+        // Parse resultatet i den ytre runtime-ABI-en før det blir returnert
+        // til den indre VM-en. Dermed slepp VM-i-VM å tolke fleire hundre
+        // kilobyte NCB-JSON teikn for teikn for kvar modul.
+        la aktiv_ncb = builtin.ncb_call_fn("selfhost.kompiler.kompiler_fil", args[0], args[1])
+        returner builtin.json_parse_raw(aktiv_ncb)
+    }
+    hvis namn == "builtin.kompiler_fil" {
+        returner builtin.kompiler_fil(args[0], args[1])
+    }
+    hvis namn == "builtin.køyr_funksjon" {
+        returner køyr_funksjon(args[0], args[1], args[2], args[3])
+    }
+    hvis namn == "builtin.vm_sett_kontekst" {
+        returner vm_sett_kontekst(args[0])
+    }
+    hvis namn == "builtin.køyr_med_kontekst" {
+        returner køyr_med_kontekst(args[0], args[1])
+    }
+    hvis namn == "builtin.køyr_ncb" {
+        returner køyr_ncb(args[0])
+    }
+
+    hvis builtin.starts_with(namn, "builtin.web.") eller builtin.starts_with(namn, "builtin.ncb_") {
+        returner kall_innebygd_web_og_ncb(namn, args, active_functions)
+    }
+
     // builtin.random_hex
     hvis namn == "builtin.random_hex" eller namn == "builtin.builtin.random_hex" {
         prøv {
@@ -3968,7 +3029,8 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner builtin.tid_ms() / 1000
     }
 
-    hvis namn == "builtin.heltall_fra_tekst" eller namn == "heltall_fra_tekst" {
+    hvis namn == "builtin.heltall_fra_tekst" eller namn == "heltall_fra_tekst" eller
+       namn == "builtin.heiltall_fra_tekst" eller namn == "heiltall_fra_tekst" {
         la raw = tekst(args[0])
         hvis ikkje vm_er_heltallstekst(raw) {
             kast "Ugyldig heiltall: " + raw
@@ -4007,11 +3069,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     hvis namn == "builtin.now" {
-        prøv {
-            returner builtin.exec_prosess("date -u '+%Y-%m-%dT%H:%M:%SZ'")
-        } fang (e) {
-            returner tekst(builtin.tid_ms())
-        }
+        returner tekst(builtin.tid_ms())
     }
 
     hvis namn == "builtin.exec_prosess" {
@@ -4024,6 +3082,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.process_operation" {
         returner builtin.process_operation(args[0])
+    }
+
+    hvis namn == "builtin.system_info" {
+        returner builtin.system_info()
+    }
+
+    hvis namn == "builtin.system_operation" {
+        returner builtin.system_operation(args[0])
     }
 
     hvis namn == "builtin.filesystem_read_operation" {
@@ -4193,6 +3259,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner usann
     }
     hvis namn == "builtin.vent.sov" eller namn == "vent.sov" {
+        hvis lengde(args) > 0 { builtin.vent.sov(args[0]) }
         returner 0
     }
 
@@ -4242,6 +3309,15 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     hvis namn == "builtin.contains" eller namn == "builtin.tekst_inneholder" {
         returner builtin.contains(args[0], args[1])
     }
+    hvis namn == "builtin.contains_any" eller namn == "builtin.tekst_inneholder_noen" {
+        la treff: liste_tekst = []
+        la i = 0
+        mens i < lengde(args[1]) {
+            hvis builtin.contains(args[0], args[1][i]) { legg_til(treff, args[1][i]) }
+            i = i + 1
+        }
+        returner treff
+    }
     hvis namn == "builtin.trim" eller namn == "builtin.tekst_trim" {
         returner builtin.trim(args[0])
     }
@@ -4287,6 +3363,9 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     hvis namn == "builtin.char_code" {
         returner builtin.char_code(args[0])
     }
+    hvis namn == "builtin.native_heap_bytes" {
+        returner builtin.native_heap_bytes()
+    }
     hvis namn == "builtin.chr" {
         returner builtin.chr(args[0])
     }
@@ -4296,8 +3375,10 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner _rt_fil_finnes(args[0])
     }
     hvis namn == "builtin.fil_append" {
-        builtin.fil_append(args[0], args[1])
-        returner 0
+        // Append må gå direkte gjennom den bytebevarande host-ABI-en. Den
+        // tidlegare read+rewrite-reserven las binærfiler som NUL-avslutta
+        // tekst og kunne dermed slette executable-prefikset før ein trailer.
+        returner builtin.fil_append(args[0], args[1])
     }
     hvis namn == "builtin.fil_append_binary" eller namn == "builtin.fil_append_binær" {
         returner builtin.fil_append_binary(args[0], args[1])
@@ -4602,7 +3683,9 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // Path aliases
-    hvis kortnavn == "path.join" eller kortnavn == "std.path.join" eller kortnavn == "builtin.path.join" {
+    hvis kortnavn == "path.join" eller kortnavn == "std.path.join" eller
+       kortnavn == "builtin.path.join" eller kortnavn == "builtin.sti_join" eller
+       kortnavn == "sti_join" {
         returner _rt_path_join(args[0], args[1])
     }
     hvis kortnavn == "path.basename" eller kortnavn == "std.path.basename" eller kortnavn == "builtin.path.basename" {
@@ -4677,239 +3760,6 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner lengde(args[1])
     }
 
-    // NorsDB smoke/API aliases
-    hvis kortnavn == "db_open" eller kortnavn == "builtin.db_open" {
-        la db = _vm_db_load(args[0])
-        la handle = _vm_ny_id("db")
-        db["_path"] = args[0]
-        db["_pool"] = ""
-        _vm_db_set(handle, db)
-        vm_norsdb_active_handle = handle
-        returner _vm_result_ok(handle)
-    }
-    hvis kortnavn == "db_close" eller kortnavn == "builtin.db_close" {
-        hvis vm_norsdb_active_handle == "" {
-            returner _vm_result_ok("Ingen åpen database")
-        }
-        la db = _vm_db_get(vm_norsdb_active_handle)
-        _vm_db_save(db)
-        fjern_nokkel(vm_db_store, vm_norsdb_active_handle)
-        vm_norsdb_active_handle = ""
-        returner _vm_result_ok("Database lukket")
-    }
-    hvis kortnavn == "table_create" eller kortnavn == "builtin.table_create" {
-        prøv {
-            la db = _vm_norsdb_active_db()
-            la table: ordbok_tekst = {}
-            table["schema"] = []
-            table["rows"] = []
-            table["next_id"] = 1
-            db["_tables"][args[0]] = table
-            returner _vm_result_ok("Tabell opprettet: " + args[0])
-        } fang (e) {
-            returner _vm_result_feil(tekst(e))
-        }
-    }
-    hvis kortnavn == "table_list" eller kortnavn == "builtin.table_list" {
-        prøv {
-            la db = _vm_norsdb_active_db()
-            returner _vm_result_ok(nøkler(db["_tables"]))
-        } fang (e) {
-            returner _vm_result_feil(tekst(e))
-        }
-    }
-    hvis kortnavn == "insert" eller kortnavn == "builtin.insert" {
-        prøv {
-            la db = _vm_norsdb_active_db()
-            la table = _vm_db_tbl(db, args[0])
-            la row = args[1]
-            hvis ikkje _rt_har_nøkkel(row, "id") {
-                row["id"] = tekst_fra_heltall(table["next_id"])
-                table["next_id"] = table["next_id"] + 1
-            }
-            legg_til(table["rows"], row)
-            returner _vm_result_ok({"id": row["id"], "rader_påvirket": 1})
-        } fang (e) {
-            returner _vm_result_feil(tekst(e))
-        }
-    }
-    hvis kortnavn == "count" eller kortnavn == "builtin.count" {
-        prøv {
-            la db = _vm_norsdb_active_db()
-            la table = _vm_db_tbl(db, args[0])
-            returner _vm_result_ok(lengde(table["rows"]))
-        } fang (e) {
-            returner _vm_result_feil(tekst(e))
-        }
-    }
-    hvis kortnavn == "index_create" eller kortnavn == "builtin.index_create" {
-        prøv {
-            la key = _vm_norsdb_table_key(args[0], args[1])
-            vm_norsdb_indexes[key] = [args[1]]
-            returner _vm_result_ok("Indeks opprettet: " + key)
-        } fang (e) {
-            returner _vm_result_feil(tekst(e))
-        }
-    }
-    hvis kortnavn == "index_list" eller kortnavn == "builtin.index_list" {
-        la out: liste_tekst = []
-        la prefix = args[0] + "."
-        la keys = nøkler(vm_norsdb_indexes)
-        la i: heltall = 0
-        mens i < lengde(keys) {
-            la key = tekst(keys[i])
-            hvis builtin.starts_with(key, prefix) {
-                legg_til(out, key)
-            }
-            i = i + 1
-        }
-        returner _vm_result_ok(out)
-    }
-
-    // db aliases (skal vere støtta av runtime, men krev ekspandert host-bindingar i sjølvhost)
-    hvis kortnavn == "db.create" eller kortnavn == "builtin.db.create" eller kortnavn == "db_create" eller kortnavn == "builtin.db_create" {
-        hvis _rt_fil_finnes(args[0]) {
-            la out = {}
-            out["feilet"] = sann
-            out["melding"] = "Databasefil finnes allerede: " + args[0]
-            returner out
-        }
-        prøv {
-            la db = _vm_db_ny()
-            db["_path"] = args[0]
-            _vm_db_save(db)
-            la out = {}
-            out["feilet"] = usann
-            out["verdi"] = "Database opprettet: " + args[0]
-            returner out
-        } fang (e) {
-            la out = {}
-            out["feilet"] = sann
-            out["melding"] = "Kunne ikke opprette database: " + e.melding
-            returner out
-        }
-    }
-    hvis kortnavn == "db.open" eller kortnavn == "builtin.db.open" {
-        la db = _vm_db_load(args[0])
-        la handle = _vm_ny_id("db")
-        db["_path"] = args[0]
-        db["_pool"] = ""
-        _vm_db_set(handle, db)
-        returner handle
-    }
-    hvis kortnavn == "db.close" eller kortnavn == "builtin.db.close" {
-        la db = _vm_db_get(args[0])
-        _vm_db_save(db)
-        hvis db["_pool"] != "" og _rt_har_nøkkel(vm_pool_store, db["_pool"]) {
-            la pool = vm_pool_store[db["_pool"]]
-            legg_til(pool["idle"], args[0])
-        } ellers {
-            fjern_nokkel(vm_db_store, args[0])
-        }
-        returner sann
-    }
-    hvis kortnavn == "db.execute" eller kortnavn == "builtin.db.execute" {
-        la db = _vm_db_get(args[0])
-        returner _vm_db_exec(db, args[1])
-    }
-    hvis kortnavn == "db.query_text" eller kortnavn == "builtin.db.query_text" {
-        la db = _vm_db_get(args[0])
-        returner _vm_db_select_text(db, args[1])
-    }
-    hvis kortnavn == "db.query_int" eller kortnavn == "builtin.db.query_int" {
-        la db = _vm_db_get(args[0])
-        returner _vm_db_select_count(db, args[1])
-    }
-    hvis kortnavn == "db.migrate" eller kortnavn == "builtin.db.migrate" {
-        la db = _vm_db_get(args[0])
-        returner _vm_db_migrate(db, args[1])
-    }
-    hvis kortnavn == "db.transaction" eller kortnavn == "builtin.db.transaction" {
-        la db = _vm_db_get(args[0])
-        la snap = _vm_db_clone(db)
-        la res = _vm_db_migrate(db, args[1])
-        hvis res > 0 {
-            _vm_db_save(db)
-            returner 1
-        }
-        vm_db_store[args[0]] = snap
-        returner 0
-    }
-    hvis kortnavn == "db.begin" eller kortnavn == "builtin.db.begin" {
-        la db = _vm_db_get(args[0])
-        hvis db["_in_tx"] { returner usann }
-        db["_snapshot"] = _vm_db_clone(db)
-        db["_in_tx"] = sann
-        returner sann
-    }
-    hvis kortnavn == "db.commit" eller kortnavn == "builtin.db.commit" {
-        la db = _vm_db_get(args[0])
-        hvis ikkje db["_in_tx"] { returner usann }
-        db["_snapshot"] = {}
-        db["_in_tx"] = usann
-        _vm_db_save(db)
-        returner sann
-    }
-    hvis kortnavn == "db.rollback" eller kortnavn == "builtin.db.rollback" {
-        la db = _vm_db_get(args[0])
-        hvis ikkje db["_in_tx"] { returner usann }
-        vm_db_store[args[0]] = db["_snapshot"]
-        vm_db_store[args[0]]["_path"] = db["_path"]
-        vm_db_store[args[0]]["_in_tx"] = usann
-        returner sann
-    }
-    hvis kortnavn == "db.ping" eller kortnavn == "builtin.db.ping" {
-        hvis _rt_har_nøkkel(vm_db_store, args[0]) { returner sann }
-        returner usann
-    }
-    hvis kortnavn == "db.pool" eller kortnavn == "builtin.db.pool" {
-        la pool = {}
-        pool["path"] = args[0]
-        pool["max"] = args[1]
-        pool["idle"] = []
-        la handle = _vm_ny_id("pool")
-        la conn = _vm_ny_id("db")
-        la db = _vm_db_load(args[0])
-        db["_path"] = args[0]
-        db["_pool"] = handle
-        _vm_db_set(conn, db)
-        legg_til(pool["idle"], conn)
-        vm_pool_store[handle] = pool
-        returner handle
-    }
-    hvis kortnavn == "db.pool_acquire" eller kortnavn == "builtin.db.pool_acquire" {
-        la pool = _vm_pool_get(args[0])
-        hvis lengde(pool["idle"]) > 0 {
-            la conn = pool["idle"][lengde(pool["idle"]) - 1]
-            fjern_siste(pool["idle"])
-            returner conn
-        }
-        la conn = _vm_ny_id("db")
-        la db = _vm_db_load(pool["path"])
-        db["_path"] = pool["path"]
-        db["_pool"] = args[0]
-        _vm_db_set(conn, db)
-        returner conn
-    }
-    hvis kortnavn == "db.pool_size" eller kortnavn == "builtin.db.pool_size" {
-        la pool = _vm_pool_get(args[0])
-        returner lengde(pool["idle"])
-    }
-    hvis kortnavn == "db.pool_close" eller kortnavn == "builtin.db.pool_close" {
-        la pool = _vm_pool_get(args[0])
-        la i: heltall = 0
-        mens i < lengde(pool["idle"]) {
-            la conn = pool["idle"][i]
-            hvis _rt_har_nøkkel(vm_db_store, conn) {
-                _vm_db_save(vm_db_store[conn])
-                fjern_nokkel(vm_db_store, conn)
-            }
-            i = i + 1
-        }
-        fjern_nokkel(vm_pool_store, args[0])
-        returner sann
-    }
-
     // Struktur-konstruktørar: stor forbokstav → tom ordbok (same som nc_vm.c)
     la første_ch = builtin.slice(namn, 0, 1)
     hvis første_ch >= "A" og første_ch <= "Z" {
@@ -4940,31 +3790,41 @@ funksjon vm_sikker_get(obj, nokkel)
     returner 0
 slutt
 
-funksjon vm_index_map_har_nokkel(functions, obj, nokkel, heap_id: tekst)
-    la nk: liste_tekst = nøkler(obj)
-    la i: heiltall = 0
-    mens i < lengde(nk) {
-        hvis nk[i] == nokkel { returner sann }
-        i = i + 1
-    }
-    returner usann
-slutt
-
 funksjon vm_map_har_nokkel(obj, nokkel)
-    hvis obj == null { returner usann }
-    // Keep lookup independent of top-level VM globals. Older stage-0 hosts
-    // do not materialise those bindings, while the native key primitive is
-    // available in every supported host.
-    returner builtin.har_nokkel(obj, nokkel)
+    // Runtimekartet har eit innhaldsadressert nøkkeloppslag. Den gamle
+    // implementasjonen bygde ei ny nøkkelliste og lineærsøkte henne for kvart
+    // VM-oppslag; i store test-/compilerverktøy dominerte dette både CPU og GC.
+    returner finnes_nøkkel(obj, nokkel)
 slutt
 
 funksjon vm_map_get(obj, nokkel)
+    // Normalvegen skal vere O(1) og allokeringsfri. Store compilerbundlar
+    // gjer tusenvis av funksjonsoppslag; å materialisere nøkler(obj) for kvart
+    // treff tømde den monotone AOT-heapen før lexeren var ferdig.
+    hvis vm_map_har_nokkel(obj, nokkel)
+        la direkte = obj[nokkel]
+        hvis builtin.type(direkte) == "ordbok" og vm_map_har_nokkel(direkte, "__ncb_lazy_json__") {
+            la materialisert = builtin.json_parse_raw(tekst(direkte["__ncb_lazy_json__"]))
+            obj[nokkel] = materialisert
+            returner materialisert
+        }
+        returner direkte
+    slutt
+
+    // Kompatibilitetsfallback for eldre flytta runtimekart som kan mangle den
+    // native innhaldsindeksen. Berre reelle direkte-miss betaler skannekostnaden.
     la nk = nøkler(obj)
     la i = 0
     mens i < lengde(nk)
         la k = nk[i]
         hvis k == nokkel
-            returner obj[k]
+            la verdi = obj[k]
+            hvis builtin.type(verdi) == "ordbok" og vm_map_har_nokkel(verdi, "__ncb_lazy_json__") {
+                la materialisert = builtin.json_parse_raw(tekst(verdi["__ncb_lazy_json__"]))
+                obj[k] = materialisert
+                returner materialisert
+            }
+            returner verdi
         slutt
         i = i + 1
     slutt
@@ -4982,6 +3842,24 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
     hvis vm_map_har_nokkel(functions, namn) {
         returner namn
     }
+    // Eksplisitte builtin-namn kan ikkje løysast som brukarfunksjon eller
+    // suffixalias. Avslutt før kompatibilitetsskanninga av heile funksjonskartet.
+    hvis builtin.starts_with(namn, "builtin.") {
+        returner ""
+    }
+    // Den native innhaldsindeksen kan vere utilgjengeleg eller rapportere eit
+    // falskt negativt treff for svært store, flytta VM-kart. Funksjonsoppslag
+    // skal aldri gå til fuzzy siste-segment før eit eksakt nøkkeloppslag er
+    // kontrollert mot den kanoniske nøkkellista; elles kan til dømes
+    // `std.tokenizer.kod` feilaktig bli `std.text_model_bundle.kod`.
+    la eksakte_nøklar = nøkler(functions)
+    la eksakt_i: heiltall = 0
+    mens eksakt_i < lengde(eksakte_nøklar) {
+        hvis eksakte_nøklar[eksakt_i] == namn {
+            returner namn
+        }
+        eksakt_i = eksakt_i + 1
+    }
 
     // 1b. Intern common-bytecode: __main__.X → selfhost.common.X i function-tabellen
     hvis builtin.starts_with(namn, "__main__.") {
@@ -4991,23 +3869,8 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
         }
     }
 
-    // Bootstrap bytecode is compiled under __main__, while imported
-    // selfhost modules retain their qualified names in consumer bytecode.
-    // Resolve the VM module explicitly before fuzzy suffix lookup so a
-    // stage-zero host does not need a separately materialised alias table.
-    hvis builtin.starts_with(namn, "selfhost.vm.") {
-        la vm_alias = "__main__." + builtin.slice(namn, 12, lengde(namn))
-        hvis vm_map_har_nokkel(functions, vm_alias) {
-            returner vm_alias
-        }
-    }
-
     // 2. Fjern "builtin." prefiks og søk suffix
     la søk: tekst = namn
-    hvis builtin.starts_with(namn, "builtin.") {
-        returner ""
-    }
-
     // 3. Alias sh.* → selfhost.common.* (kompilator emit: builtin.sh.X)
     hvis builtin.starts_with(søk, "sh.") {
         la alt = "selfhost.common." + builtin.slice(søk, 3, lengde(søk))
@@ -5032,7 +3895,7 @@ funksjon finn_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
     }
 
     // Søk i alle funksjonar etter suffix- eller siste-segment-treff
-    la nk = nøkler(functions)
+    la nk = eksakte_nøklar
     la i: heltall = 0
     mens i < lengde(nk) {
         la k: tekst = nk[i]
@@ -5066,7 +3929,7 @@ funksjon vm_opcode_fra_instr(instr: liste_tekst) -> tekst {
 }
 
 funksjon vm_opcode_operandar(op: tekst) -> liste_heiltall {
-    hvis op == "PUSH_CONST" eller op == "STORE_NAME" eller op == "LOAD_NAME" eller op == "JUMP" eller op == "JUMP_IF_FALSE" eller op == "LABEL" eller op == "LOAD_FIELD" eller op == "STORE_FIELD" eller op == "FINALLY_PUSH" eller op == "FINALLY_RUN" { returner [1, 1] }
+    hvis op == "PUSH_CONST" eller op == "STORE_NAME" eller op == "LOAD_NAME" eller op == "STORE_GLOBAL" eller op == "LOAD_GLOBAL" eller op == "JUMP" eller op == "JUMP_IF_FALSE" eller op == "LABEL" eller op == "LOAD_FIELD" eller op == "STORE_FIELD" eller op == "FINALLY_PUSH" eller op == "FINALLY_RUN" { returner [1, 1] }
     hvis op == "CALL" { returner [2, 2] }
     hvis op == "BUILD_LIST" eller op == "BUILD_MAP" { returner [1, 1] }
     hvis op == "TRY_BEGIN" { returner [1, 2] }
@@ -5111,6 +3974,20 @@ funksjon vm_verifiser_kode(fn_namn: tekst, kode, label_kart) -> boolsk {
         ip = ip + 1
     }
     returner sann
+}
+
+funksjon vm_label_kart_for(fn_def, kode, fn_namn: tekst, fast_mode: boolsk) {
+    // Lexer/parser kallar små hjelpefunksjonar fleire gonger per kjeldeteikn.
+    // Å byggje og verifisere same labelkart for kvar ramme gav hundretusenvis
+    // av identiske kart i den monotone AOT-heapen. Fastmodus kan trygt dele
+    // kartet fordi bytekoden er uforanderleg gjennom heile L5b-køyringa.
+    hvis fast_mode og vm_map_har_nokkel(fn_def, "__vm_fast_label_map__") {
+        returner fn_def["__vm_fast_label_map__"]
+    }
+    la label_kart = bygg_label_kart(kode)
+    vm_verifiser_kode(fn_namn, kode, label_kart)
+    hvis fast_mode { fn_def["__vm_fast_label_map__"] = label_kart }
+    returner label_kart
 }
 
 // køyr_funksjon: køyrer éin funksjon med gitte argumentverdiar.
@@ -5455,8 +4332,14 @@ funksjon køyr_funksjon(
     functions: ordbok<tekst, tekst>,
     djupn: heltall
 ) {
-    hvis miljo_hent("NORSCODE_VM_TRACE") == "1" { skriv_linje("ENTER " + fn_namn) }
+    la trace_raw = miljo_hent("NORSCODE_VM_TRACE")
+    hvis trace_raw != "" og heltall_fra_tekst(trace_raw) == 1 { skriv("ENTER " + fn_namn + "\n") }
+    la trace_frames_raw = miljo_hent("NORSCODE_VM_TRACE_FRAMES")
+    la trace_frames = trace_frames_raw != "" og heltall_fra_tekst(trace_frames_raw) == 1
+    la trace_ops_raw = miljo_hent("NORSCODE_VM_TRACE_OPS")
+    la trace_ops = trace_ops_raw != "" og heltall_fra_tekst(trace_ops_raw) == 1
     vm_runtime_init(functions, usann)
+    la fast_mode = functions["__vm_fast_mode__"] == "sann"
     la resume_state = functions["__vm_debug_resume_state__"]
     la resuming = resume_state["active"] == "sann"
     la function_start_ms = builtin.tid_ms()
@@ -5494,7 +4377,7 @@ funksjon køyr_funksjon(
     la fn_def = vm_map_get(functions, fn_namn)
     la kode = fn_def["code"]
     la params = fn_def["params"]
-    la ramme = ny_rammeverk(fn_namn, 0)
+    la ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
     hvis resuming {
         ramme = resume_state["frame"]
         kode = ramme["code"]
@@ -5503,8 +4386,7 @@ funksjon køyr_funksjon(
     } ellers {
         ramme["code"] = kode
         ramme["params"] = params
-        ramme["label_map"] = bygg_label_kart(kode)
-        vm_verifiser_kode(fn_namn, kode, ramme["label_map"])
+        ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
         ramme["state"] = "running"
         ramme["started_ms"] = function_start_ms
         legg_til(functions["__vm_active_frames__"], ramme)
@@ -5538,12 +4420,22 @@ funksjon køyr_funksjon(
     hvis resuming { ip = resume_state["ip"] }
     mens (ip < lengde(kode)) {
         ramme["ip"] = ip
-        functions["__vm_metrics__"]["instructions"] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"]["instructions"]) + 1)
-        functions["__vm_metrics__"][function_instruction_key] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"][function_instruction_key]) + 1)
         la instr = kode[ip]
         la op: tekst = vm_opcode_fra_instr(instr)
-        vm_profiler_sample(functions, ramme, fn_namn, ip, op)
-        la debug_hit = vm_debug_check(functions, ramme, fn_namn, ip, op)
+        hvis trace_ops {
+            skriv("VM-OP function=" + fn_namn +
+                " ip=" + tekst_fra_heltall(ip) +
+                " opcode=" + op +
+                " operandstack=" + tekst_fra_heltall(lengde(ramme["stack"])) +
+                " framedepth=" + tekst_fra_heltall(lengde(functions["__vm_active_frames__"])) + "\n")
+        }
+        la debug_hit = usann
+        hvis ikkje fast_mode {
+            functions["__vm_metrics__"]["instructions"] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"]["instructions"]) + 1)
+            functions["__vm_metrics__"][function_instruction_key] = tekst_fra_heltall(heltall_fra_tekst(functions["__vm_metrics__"][function_instruction_key]) + 1)
+            vm_profiler_sample(functions, ramme, fn_namn, ip, op)
+            debug_hit = vm_debug_check(functions, ramme, fn_namn, ip, op)
+        }
         hvis debug_hit og vm_debug_state(functions)["suspend_on_hit"] == "sann" {
             ramme["state"] = "paused"
             la suspended: ordbok_tekst = {}
@@ -5570,6 +4462,31 @@ funksjon køyr_funksjon(
             fortsett
         }
 
+        hvis op == "STORE_GLOBAL" {
+            la modul_namn = tekst(fn_def["module"])
+            la globale = functions["__vm_globals__"]
+            hvis ikkje vm_map_har_nokkel(globale, modul_namn) {
+                globale[modul_namn] = {}
+            }
+            la modul_globalar = globale[modul_namn]
+            modul_globalar[tekst(instr[1])] = stack_pop(ramme)
+            ip = ip + 1
+            fortsett
+        }
+
+        hvis op == "LOAD_GLOBAL" {
+            la modul_namn = tekst(fn_def["module"])
+            la global_namn = tekst(instr[1])
+            la globale = functions["__vm_globals__"]
+            hvis ikkje vm_map_har_nokkel(globale, modul_namn) eller ikkje vm_map_har_nokkel(globale[modul_namn], global_namn) {
+                kast "Ukjent global variabel: " + modul_namn + "." + global_namn
+            }
+            la modul_globalar = globale[modul_namn]
+            stack_push(ramme, modul_globalar[global_namn])
+            ip = ip + 1
+            fortsett
+        }
+
         hvis op == "STORE_NAME" {
             la v = stack_pop(ramme)
             ramme_sett_var(ramme, instr[1], v)
@@ -5578,10 +4495,12 @@ funksjon køyr_funksjon(
         }
 
         hvis op == "LOAD_NAME" {
-            la v = ramme_les_var(ramme, instr[1])
+            la name_operand = instr[1]
+            la name_is_null = builtin.type(name_operand) == "ingenting"
+            la v = ramme_les_var(ramme, name_operand)
             la heap_id = ""
-            hvis vm_map_har_nokkel(ramme["var_heap"], instr[1]) {
-                heap_id = ramme["var_heap"][instr[1]]
+            hvis ikkje fast_mode og ikkje name_is_null og vm_map_har_nokkel(ramme["var_heap"], name_operand) {
+                heap_id = ramme["var_heap"][name_operand]
             }
             stack_push_heap(ramme, v, heap_id)
             ip = ip + 1
@@ -5597,7 +4516,9 @@ funksjon køyr_funksjon(
         hvis op == "DUP" {
             la n = lengde(ramme["stack"])
             hvis n < 1 { kast "DUP: stack underflow" }
-            stack_push_heap(ramme, ramme["stack"][n - 1], ramme["heap_stack"][n - 1])
+            la dup_heap_id = ""
+            hvis ikkje fast_mode { dup_heap_id = ramme["heap_stack"][n - 1] }
+            stack_push_heap(ramme, ramme["stack"][n - 1], dup_heap_id)
             ip = ip + 1
             fortsett
         }
@@ -5618,7 +4539,9 @@ funksjon køyr_funksjon(
         hvis op == "OVER" {
             la n = lengde(ramme["stack"])
             hvis n < 2 { kast "OVER: stack underflow" }
-            stack_push_heap(ramme, ramme["stack"][n - 2], ramme["heap_stack"][n - 2])
+            la over_heap_id = ""
+            hvis ikkje fast_mode { over_heap_id = ramme["heap_stack"][n - 2] }
+            stack_push_heap(ramme, ramme["stack"][n - 2], over_heap_id)
             ip = ip + 1
             fortsett
         }
@@ -5879,15 +4802,7 @@ funksjon køyr_funksjon(
         hvis op == "INDEX_GET" {
             la indeks = stack_pop(ramme)
             la obj = stack_pop(ramme)
-            la obj_heap_id: tekst = ramme["last_heap_id"]
-            la indeks_verdi = 0
-            hvis builtin.type(obj) == "ordbok" {
-                hvis vm_index_map_har_nokkel(functions, obj, indeks, obj_heap_id) {
-                    indeks_verdi = obj[indeks]
-                }
-            } ellers {
-                indeks_verdi = obj[indeks]
-            }
+            la indeks_verdi = obj[indeks]
             // Store NCB-funksjonar direkte når vi indekserer det store,
             // langliva funksjonskartet. Å registrere kvar funksjonsordbok i
             // heap-tracking her tvingar fram ein dyr traversering av heile
@@ -5933,7 +4848,6 @@ funksjon køyr_funksjon(
         hvis op == "STORE_FIELD" {
             la verdi = stack_pop(ramme)
             la obj = stack_pop(ramme)
-            la obj_heap_id: tekst = ramme["last_heap_id"]
             la felt: tekst = instr[1]
             obj[felt] = verdi
             ip = ip + 1
@@ -5944,25 +4858,36 @@ funksjon køyr_funksjon(
         hvis op == "CALL" {
             la mål_namn: tekst = instr[1]
             la arg_n: heltall = instr[2]
+            hvis trace_ops { skriv("VM-CALL phase=begin target=" + mål_namn + " argc=" + tekst_fra_heltall(arg_n) + "\n") }
 
-            // Samle argumenter frå stack (omvendt)
-            la call_args_rev: liste = []
-            la call_heap_rev: liste_tekst = []
+            // Samle argument frå stack i omvend rekkjefølgje. Reverser dei to
+            // listene på plass etterpå; den gamle vegen allokerte fire lister
+            // for kvart CALL og tømde AOT-heapen under stor selfhost-codegen.
+            la call_args: liste = vm_arg_liste_hent(functions, fast_mode)
+            la call_heap_ids: liste_tekst = functions["__vm_pending_arg_heap_ids__"]
+            hvis ikkje fast_mode { call_heap_ids = [] }
             la ai: heltall = 0
             mens (ai < arg_n) {
-                legg_til(call_args_rev, stack_pop(ramme))
-                legg_til(call_heap_rev, ramme["last_heap_id"])
+                legg_til(call_args, stack_pop(ramme))
+                hvis ikkje fast_mode { legg_til(call_heap_ids, ramme["last_heap_id"]) }
                 ai = ai + 1
             }
-            // Snu til rett rekkefølgje
-            la call_args: liste = []
-            la call_heap_ids: liste_tekst = []
-            la ari: heltall = arg_n - 1
-            mens (ari >= 0) {
-                legg_til(call_args, call_args_rev[ari])
-                legg_til(call_heap_ids, call_heap_rev[ari])
-                ari = ari - 1
+            hvis trace_ops { skriv("VM-CALL phase=popped target=" + mål_namn + "\n") }
+            la venstre: heiltall = 0
+            la høgre: heiltall = arg_n - 1
+            mens venstre < høgre {
+                la arg_tmp = call_args[venstre]
+                call_args[venstre] = call_args[høgre]
+                call_args[høgre] = arg_tmp
+                hvis ikkje fast_mode {
+                    la heap_tmp = call_heap_ids[venstre]
+                    call_heap_ids[venstre] = call_heap_ids[høgre]
+                    call_heap_ids[høgre] = heap_tmp
+                }
+                venstre = venstre + 1
+                høgre = høgre - 1
             }
+            hvis trace_ops { skriv("VM-CALL phase=ordered target=" + mål_namn + "\n") }
 
             la retur_verdi = 0
 
@@ -5970,10 +4895,11 @@ funksjon køyr_funksjon(
             la frames_before: heiltall = lengde(functions["__vm_active_frames__"])
             la call_error = 0
             la call_failed = usann
-            la løyst_namn = finn_funksjon(mål_namn, functions)
-            // Det eksplisitte builtin-navnerommet kan ikkje skyggast av
-            // suffix/fuzzy-oppslag mot brukar- eller modulfunksjonar.
-            hvis builtin.starts_with(mål_namn, "builtin.") { løyst_namn = "" }
+            la løyst_namn = ""
+            hvis ikkje builtin.starts_with(mål_namn, "builtin.") {
+                løyst_namn = finn_funksjon(mål_namn, functions)
+            }
+            hvis trace_ops { skriv("VM-CALL phase=resolved target=" + mål_namn + " resolved=" + løyst_namn + "\n") }
 
             // Dynamisk NCB-kall frå bytekode blir normalisert til same
             // continuation-frame som statiske CALL, utan reentrant VM-kall.
@@ -5991,6 +4917,7 @@ funksjon køyr_funksjon(
                     }
                     mål_namn = dynamisk_namn
                     løyst_namn = dynamisk_løyst
+                    vm_arg_liste_frigje(functions, call_args, fast_mode)
                     call_args = dynamiske_args
                     call_heap_ids = dynamiske_heap
                     vm_metric_inc(functions, "dynamic_calls")
@@ -5998,10 +4925,18 @@ funksjon køyr_funksjon(
             }
 
             hvis løyst_namn != "" {
-                la jit_result = vm_jit_try(functions, løyst_namn, vm_map_get(functions, løyst_namn), call_args)
-                hvis jit_result["used"] == "sann" {
+                la jit_used = usann
+                la jit_value = 0
+                hvis ikkje fast_mode {
+                    la jit_result = vm_jit_try(functions, løyst_namn, vm_map_get(functions, løyst_namn), call_args)
+                    jit_used = jit_result["used"] == "sann"
+                    hvis jit_used { jit_value = jit_result["value"] }
+                }
+                hvis trace_ops { skriv("VM-CALL phase=jit target=" + mål_namn + " used=" + tekst(jit_used) + "\n") }
+                hvis jit_used {
                     vm_metric_inc(functions, "function_calls." + løyst_namn)
-                    stack_push(ramme, jit_result["value"])
+                    stack_push(ramme, jit_value)
+                    vm_arg_liste_frigje(functions, call_args, fast_mode)
                     ip = ip + 1
                     fortsett
                 }
@@ -6049,10 +4984,12 @@ funksjon køyr_funksjon(
                 fn_def = vm_map_get(functions, fn_namn)
                 kode = fn_def["code"]
                 params = fn_def["params"]
-                ramme = ny_rammeverk(fn_namn, 0)
+                la ferdig_tail_ramme = ramme
+                ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
+                vm_ramme_frigje(functions, ferdig_tail_ramme)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = bygg_label_kart(kode)
+                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
                 ramme["started_ms"] = function_start_ms
@@ -6066,7 +5003,8 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, params[tpi], call_args[tpi])
                     tpi = tpi + 1
                 }
-                functions["__vm_pending_arg_heap_ids__"] = []
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""
                 try_stack = ramme["try_stack"]
                 label_kart = ramme["label_map"]
@@ -6113,21 +5051,31 @@ funksjon køyr_funksjon(
                 ramme["state"] = "waiting"
                 ramme["ip"] = ip + 1
                 legg_til(continuations, ramme)
+                hvis trace_ops { skriv("VM-CALL phase=continuation target=" + løyst_namn + "\n") }
+                hvis trace_frames {
+                    skriv("VM-FRAME CALL " + fn_namn + " -> " + løyst_namn +
+                        " ip=" + tekst_fra_heiltall(ip) +
+                        " operandstack=" + tekst_fra_heiltall(lengde(ramme["stack"])) +
+                        " continuations=" + tekst_fra_heiltall(lengde(continuations)) + "\n")
+                }
 
                 fn_namn = løyst_namn
                 function_start_ms = builtin.tid_ms()
+                hvis trace_ops { skriv("VM-CALL phase=switch target=" + fn_namn + "\n") }
                 vm_metric_inc(functions, "function_calls." + fn_namn)
                 function_instruction_key = "function_instructions." + fn_namn
                 hvis ikkje vm_map_har_nokkel(functions["__vm_metrics__"], function_instruction_key) {
                     functions["__vm_metrics__"][function_instruction_key] = "0"
                 }
                 fn_def = vm_map_get(functions, fn_namn)
+                hvis trace_ops { skriv("VM-CALL phase=definition target=" + fn_namn + "\n") }
                 kode = fn_def["code"]
                 params = fn_def["params"]
-                ramme = ny_rammeverk(fn_namn, 0)
+                ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
                 ramme["code"] = kode
                 ramme["params"] = params
-                ramme["label_map"] = bygg_label_kart(kode)
+                ramme["label_map"] = vm_label_kart_for(fn_def, kode, fn_namn, fast_mode)
+                hvis trace_ops { skriv("VM-CALL phase=labels target=" + fn_namn + "\n") }
                 ramme["state"] = "running"
                 ramme["caller_ip"] = ip
                 ramme["started_ms"] = function_start_ms
@@ -6145,7 +5093,8 @@ funksjon køyr_funksjon(
                     ramme_sett_var(ramme, params[cpi], call_args[cpi])
                     cpi = cpi + 1
                 }
-                functions["__vm_pending_arg_heap_ids__"] = []
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""
                 try_stack = ramme["try_stack"]
                 label_kart = ramme["label_map"]
@@ -6188,10 +5137,13 @@ funksjon køyr_funksjon(
                 await_state["tail_chain_count"] = tail_chain_count
                 await_state["function_start_ms"] = function_start_ms
                 functions["__vm_debug_resume_state__"] = await_state
-                returner call_args[0]
+                la await_verdi = call_args[0]
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                returner await_verdi
             }
 
             hvis call_failed {
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
                 vm_metric_inc(functions, "unwinds")
                 functions["__vm_pending_arg_heap_ids__"] = []
                 functions["__vm_last_return_heap_id__"] = ""
@@ -6247,6 +5199,7 @@ funksjon køyr_funksjon(
                 fortsett
             }
 
+            vm_arg_liste_frigje(functions, call_args, fast_mode)
             stack_push_heap(ramme, retur_verdi, functions["__vm_last_return_heap_id__"])
             functions["__vm_last_return_heap_id__"] = ""
             vm_gc_safe_point(functions, usann)
@@ -6273,9 +5226,17 @@ funksjon køyr_funksjon(
             ramme["state"] = "returned"
             fjern_siste(functions["__vm_active_frames__"])
             vm_function_finish(functions, fn_namn, function_start_ms)
+            la ferdig_ramme = ramme
+            hvis trace_frames {
+                skriv("VM-FRAME RETURN " + fn_namn +
+                    " ip=" + tekst_fra_heiltall(ip) +
+                    " operandstack=" + tekst_fra_heiltall(lengde(ramme["stack"])) +
+                    " continuations=" + tekst_fra_heiltall(lengde(continuations)) + "\n")
+            }
             hvis lengde(continuations) > 0 {
                 ramme = continuations[lengde(continuations) - 1]
                 fjern_siste(continuations)
+                vm_ramme_frigje(functions, ferdig_ramme)
                 ramme["state"] = "running"
                 fn_namn = ramme["namn"]
                 kode = ramme["code"]
@@ -6285,11 +5246,17 @@ funksjon køyr_funksjon(
                 function_start_ms = ramme["started_ms"]
                 function_instruction_key = "function_instructions." + fn_namn
                 ip = ramme["ip"]
+                hvis trace_frames {
+                    skriv("VM-FRAME RESUME " + fn_namn +
+                        " ip=" + tekst_fra_heiltall(ip) +
+                        " continuations=" + tekst_fra_heiltall(lengde(continuations)) + "\n")
+                }
                 stack_push_heap(ramme, ret_v, ret_heap_id)
                 functions["__vm_last_return_heap_id__"] = ""
                 vm_gc_safe_point(functions, usann)
                 fortsett
             }
+            vm_ramme_frigje(functions, ferdig_ramme)
             vm_gc_safe_point(functions, usann)
             returner ret_v
         }
@@ -6506,11 +5473,43 @@ funksjon køyr_funksjon(
 
 // ─── Inngangspunkt: køyr NCB-program ─────────────────────────────────────────
 
+funksjon vm_initialiser_modular(ncb, functions) -> heiltall {
+    hvis vm_map_har_nokkel(ncb, "global_names") {
+        la global_modules = nøkler(ncb["global_names"])
+        la globale = functions["__vm_globals__"]
+        la gi: heiltall = 0
+        mens gi < lengde(global_modules) {
+            la modul_namn = global_modules[gi]
+            hvis ikkje vm_map_har_nokkel(globale, modul_namn) {
+                globale[modul_namn] = {}
+            }
+            gi = gi + 1
+        }
+    }
+    hvis ikkje vm_map_har_nokkel(ncb, "module_initializers") { returner 0 }
+    la initializers = ncb["module_initializers"]
+    la ferdige = functions["__vm_initializers_done__"]
+    la ii: heiltall = 0
+    mens ii < lengde(initializers) {
+        la init_namn = tekst(initializers[ii])
+        hvis ikkje vm_map_har_nokkel(ferdige, init_namn) {
+            ferdige[init_namn] = "running"
+            la løyst = finn_funksjon(init_namn, functions)
+            hvis løyst == "" { kast "Manglar modulinitialisator: " + init_namn }
+            køyr_funksjon(løyst, [], functions, 0)
+            ferdige[init_namn] = "done"
+        }
+        ii = ii + 1
+    }
+    returner 0
+}
+
 funksjon vm_sett_kontekst(ncb: ordbok<tekst, tekst>) -> heltall {
     vm_active_functions = ncb["functions"]
     vm_active_functions["__vm_inherit_env__"] = "sann"
     vm_active_functions["__vm_target_policy__"] = "sann"
     vm_runtime_init(vm_active_functions, sann)
+    vm_initialiser_modular(ncb, vm_active_functions)
     vm_active_ncb = ncb
     vm_request_counter = 1
 
@@ -6528,15 +5527,15 @@ funksjon køyr_med_kontekst(entry: tekst, args: liste) -> heltall {
 
 funksjon køyr_ncb(ncb: ordbok<tekst, tekst>) -> heltall {
     la functions = ncb["functions"]
-    vm_active_functions = functions
     functions["__vm_inherit_env__"] = "sann"
     functions["__vm_target_policy__"] = "sann"
     vm_runtime_init(functions, sann)
+    vm_initialiser_modular(ncb, functions)
     la entry: tekst = ncb["entry"]
 
     la resultat = køyr_funksjon(entry, [], functions, 0)
     functions["__vm_last_return_heap_id__"] = ""
-    vm_gc_safe_point(functions, sann)
+    vm_gc_finish(functions)
     skriv("[vm] entry returned\n")
     returner resultat
 }

@@ -1,0 +1,307 @@
+// NorsDB — std.db-kompatibel adapter over den binære motoren (drop-in for cutover).
+// Same API som gamle std.db, men rutar til norsdb_sql + norsdb_motor (B-tre/WAL),
+// ikkje JSON-blob-en. Ingen vm.no, ingen modul-globaler.
+//
+// Handle-en ER db-objektet (ugjennomsiktig for kallaren). Per-handle-state (siste
+// feil, transaksjons-snapshot, lukka-flagg) ligg i objektet. Dette unngår modul-
+// globalt register, som kodegen ikkje handterer påliteleg.
+
+bruk std.norsdb_sql som sql
+bruk std.norsdb_motor som motor
+
+// Same backend-identitet som gamle std.db (begge er pure Norscode). `storage`-nøkkelen
+// skil den binære motoren frå JSON-blob-en.
+funksjon backend() -> tekst { returner "norsdb-pure-v1" }
+
+funksjon status() -> ordbok_tekst {
+    returner {"backend": backend(), "external_runtime": "false", "sqlite": "optional-adapter", "storage": "binær-btre-wal"}
+}
+
+funksjon _er_json(sti: tekst) -> boolsk {
+    la t = builtin.trim(builtin.fil_les(sti))
+    hvis lengde(t) == 0 { returner usann }
+    returner builtin.slice(t, 0, 1) == "{"
+}
+
+// open med format-deteksjon: binær (.cp) → opne; gamal JSON-.db → auto-migrer; elles fersk.
+funksjon open(sti: tekst) -> ordbok_tekst {
+    la h = motor.db_ny("")
+    hvis sti == "" eller sti == ":memory:" {
+        h = motor.db_ny("")
+    } ellers hvis builtin.fil_finnes(sti + ".cp") {
+        h = motor.db_åpne(sti)
+    } ellers hvis builtin.fil_finnes(sti) og _er_json(sti) {
+        migrer_json(sti, sti)
+        h = motor.db_åpne(sti)
+    } ellers {
+        h = motor.db_ny(sti)
+    }
+    h["_feil"] = ""
+    h["_lukka"] = usann
+    returner h
+}
+
+funksjon close(handle) -> bool {
+    sql.lukk(handle)
+    hvis finnes_nøkkel(handle, "_pool") {
+        la p = handle["_pool"]
+        hvis lengde(p["_pool_idle"]) < p["_pool_maks"] {
+            legg_til(p["_pool_idle"], handle)
+        }
+    } ellers {
+        handle["_lukka"] = sann
+    }
+    returner sann
+}
+
+// ── Parameter-binding (?-plassholdarar) ──────────────────────────────
+funksjon _quote_lit(v: tekst) -> tekst {
+    returner "'" + builtin.join(builtin.split(v, "'"), "''") + "'"
+}
+
+funksjon _bind(sql_str: tekst, params) -> tekst {
+    la chars = builtin.split(sql_str, "")
+    la n = lengde(chars)
+    la ut = ""
+    la i = 0
+    la pi = 0
+    la in_str = usann
+    mens i < n {
+        la c = chars[i]
+        hvis in_str {
+            ut = ut + c
+            hvis c == "'" {
+                hvis i + 1 < n og chars[i + 1] == "'" {
+                    ut = ut + chars[i + 1]
+                    i = i + 2
+                    fortsett
+                }
+                in_str = usann
+            }
+            i = i + 1
+            fortsett
+        }
+        hvis c == "'" {
+            in_str = sann
+            ut = ut + c
+            i = i + 1
+            fortsett
+        }
+        hvis c == "?" {
+            hvis pi < lengde(params) {
+                ut = ut + _quote_lit(params[pi])
+                pi = pi + 1
+            } ellers {
+                ut = ut + c
+            }
+            i = i + 1
+            fortsett
+        }
+        ut = ut + c
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon execute_bundet(handle, sql_str: tekst, params) -> heltall {
+    returner execute(handle, _bind(sql_str, params))
+}
+
+funksjon query_text_bundet(handle, sql_str: tekst, params) -> tekst {
+    returner query_text(handle, _bind(sql_str, params))
+}
+
+funksjon query_int_bundet(handle, sql_str: tekst, params) -> heltall {
+    returner query_int(handle, _bind(sql_str, params))
+}
+
+// ── Pool (connection-cache; pool-objektet ER handelen) ───────────────
+funksjon pool(sti: tekst, maks: heltall) -> ordbok_tekst {
+    la p = {"_pool_sti": sti, "_pool_maks": maks, "_pool_idle": []}
+    la c = open(sti)
+    c["_pool"] = p
+    legg_til(p["_pool_idle"], c)
+    returner p
+}
+
+funksjon pool_acquire(p) -> ordbok_tekst {
+    hvis lengde(p["_pool_idle"]) > 0 {
+        la siste = p["_pool_idle"][lengde(p["_pool_idle"]) - 1]
+        fjern_siste(p["_pool_idle"])
+        returner siste
+    }
+    la c = open(p["_pool_sti"])
+    c["_pool"] = p
+    returner c
+}
+
+funksjon pool_size(p) -> heltall {
+    returner lengde(p["_pool_idle"])
+}
+
+funksjon pool_close(p) -> bool {
+    p["_pool_idle"] = []
+    returner sann
+}
+
+// ── Backup: skriv ein kopi av databasen til ny sti (binær) ───────────
+funksjon backup(handle, sti: tekst) -> bool {
+    hvis sti == "" { returner usann }
+    la kopi = motor.db_ny(sti)
+    motor.db_replay(kopi, motor.db_serialiser(handle))
+    motor.db_checkpoint(kopi)
+    returner sann
+}
+
+funksjon ping(handle) -> bool {
+    hvis finnes_nøkkel(handle, "_lukka") og handle["_lukka"] { returner usann }
+    returner sann
+}
+
+funksjon siste_feil(handle) -> tekst {
+    hvis finnes_nøkkel(handle, "_feil") { returner handle["_feil"] }
+    returner ""
+}
+
+funksjon execute(handle, sql_str: tekst) -> heltall {
+    la n = sql.exec(handle, sql_str)
+    hvis n < 0 {
+        handle["_feil"] = "Ukjend eller ugyldig SQL: " + sql_str
+    } ellers {
+        handle["_feil"] = ""
+    }
+    returner n
+}
+
+funksjon query_text(handle, sql_str: tekst) -> tekst {
+    returner sql.query_text(handle, sql_str)
+}
+
+funksjon query_int(handle, sql_str: tekst) -> heltall {
+    returner sql.query_int(handle, sql_str)
+}
+
+funksjon query_rader(handle, sql_str: tekst) -> tekst {
+    returner sql.query_rader(handle, sql_str)
+}
+
+// ── Transaksjonar (snapshot via db_serialiser; in-place replay ved rollback) ──
+funksjon begin(handle) -> bool {
+    handle["_snap"] = motor.db_serialiser(handle)
+    handle["_i_tx"] = sann
+    returner sann
+}
+
+funksjon commit(handle) -> bool {
+    handle["_i_tx"] = usann
+    motor.db_checkpoint(handle)
+    returner sann
+}
+
+funksjon rollback(handle) -> bool {
+    hvis ikke finnes_nøkkel(handle, "_snap") { returner usann }
+    // In-place: tøm tabellane og replay snapshot inn i same objekt (kallaren held ref).
+    handle["tabellar"] = {}
+    motor.db_replay(handle, handle["_snap"])
+    handle["_i_tx"] = usann
+    motor.db_checkpoint(handle)
+    returner sann
+}
+
+// migrate: køyr fleire ;-separerte setningar. Returnerer tal på setningar som råka
+// rader (>0), eller -1 om ei setning var ugyldig.
+funksjon migrate(handle, skript: tekst) -> heltall {
+    la stmts = builtin.split(skript, ";")
+    la count = 0
+    la i = 0
+    mens i < lengde(stmts) {
+        la s = builtin.trim(stmts[i])
+        hvis s != "" {
+            la r = sql.exec(handle, s)
+            hvis r < 0 { returner -1 }
+            hvis r > 0 { count = count + 1 }
+        }
+        i = i + 1
+    }
+    returner count
+}
+
+// transaction: køyr skript atomisk. Commit om alt gyldig, elles rollback.
+funksjon transaction(handle, skript: tekst) -> heltall {
+    begin(handle)
+    la r = migrate(handle, skript)
+    hvis r >= 0 {
+        commit(handle)
+        returner 1
+    }
+    rollback(handle)
+    returner 0
+}
+
+// ── Migrering JSON→binær ─────────────────────────────────────────────
+funksjon _json_tag(t) -> heltall {
+    la u = builtin.upper(tekst(t))
+    hvis u == "INTEGER" eller u == "INT" { returner motor.tag_int() }
+    hvis u == "REAL" eller u == "FLOAT" eller u == "DOUBLE" { returner motor.tag_real() }
+    hvis u == "BLOB" { returner motor.tag_blob() }
+    returner motor.tag_tekst()
+}
+
+// Les ei gamal JSON-.db-fil og skriv ho som binær motor-database på bin_sti.
+// Returnerer tal på migrerte rader, eller -1 ved feil. Rører ikkje JSON-fila.
+funksjon migrer_json(json_sti: tekst, bin_sti: tekst) -> heltall {
+    hvis ikke builtin.fil_finnes(json_sti) { returner -1 }
+    la parsed = builtin.json_parse(builtin.fil_les(json_sti))
+    hvis ikke finnes_nøkkel(parsed, "_tables") { returner -1 }
+    la tables = parsed["_tables"]
+    la db = motor.db_ny(bin_sti)
+    la tnavn = nøkler(tables)
+    la antall = 0
+    la ti = 0
+    mens ti < lengde(tnavn) {
+        la navn = tnavn[ti]
+        hvis navn == "__norsdb_runtime_state__" {
+            ti = ti + 1
+            fortsett
+        }
+        la t = tables[navn]
+        la schema = t["schema"]
+        la rows = t["rows"]
+
+        la har_id = usann
+        la si = 0
+        mens si < lengde(schema) {
+            hvis schema[si]["namn"] == "id" { har_id = sann }
+            si = si + 1
+        }
+        la kolonner = []
+        hvis lengde(rows) > 0 og finnes_nøkkel(rows[0], "id") og ikke har_id {
+            legg_til(kolonner, {"navn": "id", "tag": motor.tag_int()})
+        }
+        si = 0
+        mens si < lengde(schema) {
+            legg_til(kolonner, {"navn": schema[si]["namn"], "tag": _json_tag(schema[si]["type"])})
+            si = si + 1
+        }
+        motor.db_opprett_tabell(db, navn, kolonner)
+
+        la ri = 0
+        mens ri < lengde(rows) {
+            la verdier = []
+            la ki = 0
+            mens ki < lengde(kolonner) {
+                la cn = kolonner[ki]["navn"]
+                la v = ""
+                hvis finnes_nøkkel(rows[ri], cn) { v = tekst(rows[ri][cn]) }
+                legg_til(verdier, v)
+                ki = ki + 1
+            }
+            motor.db_sett_inn(db, navn, verdier)
+            antall = antall + 1
+            ri = ri + 1
+        }
+        ti = ti + 1
+    }
+    motor.db_checkpoint(db)
+    returner antall
+}

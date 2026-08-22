@@ -1,0 +1,3356 @@
+// NorsDB SQL-lag — frittståande, oppå std.norsdb_motor (binær B-tre/WAL-motor).
+// Ingen vom vm.no; dette er ein eigen Norscode-databasemotor: storage + SQL.
+// Fase 4b (start): CREATE TABLE / INSERT / SELECT (m/ enkel WHERE) / COUNT.
+
+bruk std.norsdb_motor som motor
+
+// ── Tokenisering (sitat-bevisst) ─────────────────────────────────────
+funksjon _er_ws(c: tekst) -> boolsk {
+    returner c == " " eller c == "\t" eller c == "\n" eller c == "\r"
+}
+
+funksjon _er_siffer(c: tekst) -> boolsk {
+    la k = builtin.char_code(c)
+    returner k >= 48 og k <= 57
+}
+
+funksjon _er_ident(c: tekst) -> boolsk {
+    la k = builtin.char_code(c)
+    returner (k >= 65 og k <= 90) eller (k >= 97 og k <= 122) eller (k >= 48 og k <= 57) eller c == "_" eller c == "."
+}
+
+funksjon _opp(s: tekst) -> tekst {
+    returner builtin.upper(s)
+}
+
+funksjon _unquote(v: tekst) -> tekst {
+    la s = builtin.trim(v)
+    hvis lengde(s) >= 2 og builtin.slice(s, 0, 1) == "'" og builtin.slice(s, lengde(s) - 1, lengde(s)) == "'" {
+        returner builtin.slice(s, 1, lengde(s) - 1)
+    }
+    returner s
+}
+
+funksjon _tok(sql: tekst) -> liste {
+    la chars = builtin.split(sql, "")
+    la n = lengde(chars)
+    la ut = []
+    la i: heltall = 0
+    mens i < n {
+        la c = chars[i]
+        hvis _er_ws(c) {
+            i = i + 1
+            fortsett
+        }
+        hvis c == "'" {
+            la verdi = ""
+            i = i + 1
+            mens i < n {
+                hvis chars[i] == "'" {
+                    hvis i + 1 < n og chars[i + 1] == "'" {
+                        verdi = verdi + "'"
+                        i = i + 2
+                        fortsett
+                    }
+                    bryt
+                }
+                verdi = verdi + chars[i]
+                i = i + 1
+            }
+            legg_til(ut, "'" + verdi + "'")
+            hvis i < n { i = i + 1 }
+            fortsett
+        }
+        hvis _er_siffer(c) eller (c == "-" og i + 1 < n og _er_siffer(chars[i + 1])) {
+            la start = i
+            i = i + 1
+            mens i < n og (_er_siffer(chars[i]) eller chars[i] == ".") { i = i + 1 }
+            legg_til(ut, builtin.slice(sql, start, i))
+            fortsett
+        }
+        hvis c == "|" {
+            hvis i + 1 < n og chars[i + 1] == "|" {
+                legg_til(ut, "||")
+                i = i + 2
+                fortsett
+            }
+            legg_til(ut, "|")
+            i = i + 1
+            fortsett
+        }
+        hvis c == "?" {
+            legg_til(ut, "?")
+            i = i + 1
+            fortsett
+        }
+        hvis c == "(" eller c == ")" eller c == "," eller c == ";" eller c == "=" eller c == ">" eller c == "<" eller c == "!" eller c == "*" eller c == "+" eller c == "-" eller c == "/" eller c == "%" {
+            hvis (c == ">" eller c == "<" eller c == "!") og i + 1 < n og chars[i + 1] == "=" {
+                legg_til(ut, c + "=")
+                i = i + 2
+                fortsett
+            }
+            hvis c == "<" og i + 1 < n og chars[i + 1] == ">" {
+                legg_til(ut, "<>")
+                i = i + 2
+                fortsett
+            }
+            legg_til(ut, c)
+            i = i + 1
+            fortsett
+        }
+        hvis _er_ident(c) {
+            la start = i
+            i = i + 1
+            mens i < n og _er_ident(chars[i]) { i = i + 1 }
+            legg_til(ut, builtin.slice(sql, start, i))
+            fortsett
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Verdi-samanlikning (tal-bevisst, som SQLite for WHERE) ────────────
+funksjon _er_tal(v: tekst) -> boolsk {
+    hvis lengde(v) == 0 { returner usann }
+    la ch = builtin.split(v, "")
+    la i: heltall = 0
+    hvis ch[0] == "-" {
+        hvis lengde(ch) == 1 { returner usann }
+        i = 1
+    }
+    mens i < lengde(ch) {
+        hvis ikke _er_siffer(ch[i]) og ch[i] != "." { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _cmp(a: tekst, op: tekst, b: tekst) -> boolsk {
+    hvis _er_tal(a) og _er_tal(b) {
+        hvis _er_real(a) eller _er_real(b) {
+            la x = builtin.desimaltall(a)
+            la y = builtin.desimaltall(b)
+            hvis op == "=" eller op == "==" { returner x == y }
+            hvis op == "!=" eller op == "<>" { returner ikke (x == y) }
+            hvis op == ">" { returner x > y }
+            hvis op == ">=" { returner x >= y }
+            hvis op == "<" { returner x < y }
+            hvis op == "<=" { returner x <= y }
+            returner usann
+        }
+        la x = builtin.heltall_fra_tekst(a)
+        la y = builtin.heltall_fra_tekst(b)
+        hvis op == "=" eller op == "==" { returner x == y }
+        hvis op == "!=" eller op == "<>" { returner x != y }
+        hvis op == ">" { returner x > y }
+        hvis op == ">=" { returner x >= y }
+        hvis op == "<" { returner x < y }
+        hvis op == "<=" { returner x <= y }
+        returner usann
+    }
+    hvis op == "=" eller op == "==" { returner a == b }
+    hvis op == "!=" eller op == "<>" { returner a != b }
+    hvis op == ">" { returner a > b }
+    hvis op == ">=" { returner a >= b }
+    hvis op == "<" { returner a < b }
+    hvis op == "<=" { returner a <= b }
+    returner usann
+}
+
+// ── Tal-type-lag (Fase 7j): heiltal vs REAL. REAL = numerisk streng med "." ──
+funksjon _er_real(s: tekst) -> boolsk {
+    returner _er_tal(s) og builtin.index_of(s, ".") >= 0
+}
+
+// Trunkér flyt mot null via tekst (ingen kallbar float→int-builtin; `heltall` er reservert).
+funksjon _flyt_trunk(f) -> heltall {
+    la s = builtin.til_tekst(f)
+    la d = builtin.index_of(s, ".")
+    hvis d >= 0 { s = builtin.slice(s, 0, d) }
+    hvis s == "" eller s == "-" { returner 0 }
+    hvis ikke _er_tal(s) { returner 0 }
+    returner builtin.heltall_fra_tekst(s)
+}
+
+// Formatér flyt som SQLite: minimal, men alltid med desimalteikn ("5" → "5.0").
+funksjon _fmt_real(f) -> tekst {
+    la s = builtin.til_tekst(f)
+    hvis builtin.index_of(s, ".") < 0 og builtin.index_of(s, "e") < 0 og builtin.index_of(s, "E") < 0 { s = s + ".0" }
+    returner s
+}
+
+// Type-bevisst binær aritmetikk. REAL om nokon operand er REAL (utanom % = heiltal).
+// NULL ("") propagerer; divisjon/modulo med 0 → NULL; ikkje-numerisk tekst → 0 (SQLite).
+funksjon _num_bin(a: tekst, op: tekst, b: tekst) -> tekst {
+    hvis a == "" eller b == "" { returner "" }
+    la an = a
+    la bn = b
+    hvis ikke _er_tal(an) { an = "0" }
+    hvis ikke _er_tal(bn) { bn = "0" }
+    hvis op == "%" {
+        la bi = _flyt_trunk(builtin.desimaltall(bn))
+        hvis bi == 0 { returner "" }
+        la ai = _flyt_trunk(builtin.desimaltall(an))
+        returner tekst_fra_heltall(ai - (ai / bi) * bi)
+    }
+    hvis _er_real(an) eller _er_real(bn) {
+        la x = builtin.desimaltall(an)
+        la y = builtin.desimaltall(bn)
+        hvis op == "+" { returner _fmt_real(x + y) }
+        hvis op == "-" { returner _fmt_real(x - y) }
+        hvis op == "*" { returner _fmt_real(x * y) }
+        hvis op == "/" {
+            hvis y == builtin.desimaltall("0") { returner "" }
+            returner _fmt_real(x / y)
+        }
+        returner ""
+    }
+    la ai = builtin.heltall_fra_tekst(an)
+    la bi = builtin.heltall_fra_tekst(bn)
+    hvis op == "+" { returner tekst_fra_heltall(ai + bi) }
+    hvis op == "-" { returner tekst_fra_heltall(ai - bi) }
+    hvis op == "*" { returner tekst_fra_heltall(ai * bi) }
+    hvis op == "/" {
+        hvis bi == 0 { returner "" }
+        returner tekst_fra_heltall(ai / bi)
+    }
+    returner ""
+}
+
+// WHERE-token frå posisjon `start`: liste av (kol, op, verdi) med AND. Returnerer
+// sann om rada matchar. Enkel: berre AND, éin op per vilkår.
+funksjon _slice_fra(toks, start: heltall) -> liste {
+    la ut = []
+    la i = start
+    mens i < lengde(toks) {
+        legg_til(ut, toks[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// SQL LIKE: % = null/fleire teikn, _ = eitt teikn, case-insensitiv (ASCII).
+funksjon _like(verdi: tekst, monster: tekst) -> boolsk {
+    la s = builtin.split(_opp(verdi), "")
+    la p = builtin.split(_opp(monster), "")
+    la n = lengde(s)
+    la m = lengde(p)
+    la i = 0
+    la j = 0
+    la star = -1
+    la match_i = 0
+    mens i < n {
+        hvis j < m og (p[j] == "_" eller p[j] == s[i]) {
+            i = i + 1
+            j = j + 1
+        } ellers hvis j < m og p[j] == "%" {
+            star = j
+            match_i = i
+            j = j + 1
+        } ellers hvis star >= 0 {
+            j = star + 1
+            match_i = match_i + 1
+            i = match_i
+        } ellers {
+            returner usann
+        }
+    }
+    mens j < m og p[j] == "%" { j = j + 1 }
+    returner j == m
+}
+
+// SQL GLOB: * = null/fleire, ? = eitt teikn, [..] teiknklasse ([^..] negert, a-z range),
+// CASE-SENSITIV (i motsetnad til LIKE). Éi pattern-eining = literal / ? / [..].
+// Returnerer {"match": bool, "next": indeks etter eininga}.
+funksjon _glob_unit(p, j: heltall, ch: tekst) -> ordbok {
+    la c = p[j]
+    hvis c == "?" { returner {"match": sann, "next": j + 1} }
+    hvis c == "[" {
+        la k = j + 1
+        la neg = usann
+        hvis k < lengde(p) og p[k] == "^" { neg = sann; k = k + 1 }
+        la treff = usann
+        la forste = sann
+        mens k < lengde(p) og (p[k] != "]" eller forste) {
+            forste = usann
+            hvis k + 2 < lengde(p) og p[k + 1] == "-" og p[k + 2] != "]" {
+                la lo = builtin.char_code(p[k])
+                la hi = builtin.char_code(p[k + 2])
+                la cc = builtin.char_code(ch)
+                hvis cc >= lo og cc <= hi { treff = sann }
+                k = k + 3
+            } ellers {
+                hvis ch == p[k] { treff = sann }
+                k = k + 1
+            }
+        }
+        hvis k < lengde(p) og p[k] == "]" { k = k + 1 }
+        hvis neg { treff = _ikke(treff) }
+        returner {"match": treff, "next": k}
+    }
+    returner {"match": (ch == c), "next": j + 1}
+}
+
+funksjon _glob(verdi: tekst, monster: tekst) -> boolsk {
+    la s = builtin.split(verdi, "")
+    la p = builtin.split(monster, "")
+    la n = lengde(s)
+    la m = lengde(p)
+    la i = 0
+    la j = 0
+    la star = 0 - 1
+    la match_i = 0
+    mens i < n {
+        hvis j < m og p[j] != "*" {
+            la u = _glob_unit(p, j, s[i])
+            hvis u["match"] {
+                i = i + 1
+                j = u["next"]
+            } ellers hvis star >= 0 {
+                j = star + 1
+                match_i = match_i + 1
+                i = match_i
+            } ellers {
+                returner usann
+            }
+        } ellers hvis j < m og p[j] == "*" {
+            star = j
+            match_i = i
+            j = j + 1
+        } ellers hvis star >= 0 {
+            j = star + 1
+            match_i = match_i + 1
+            i = match_i
+        } ellers {
+            returner usann
+        }
+    }
+    mens j < m og p[j] == "*" { j = j + 1 }
+    returner j == m
+}
+
+// ── Uttrykks-evaluator (Fase 7a/7b) ──────────────────────────────────
+// Recursive-descent med presedens: cmp → concat(||) → add(+-) → mul(*/%) → unary → primær.
+// Evaluerer mot ei rad. Verdiar er strengar ("1"/"0" boolsk, "" tomt). Re-parsar per rad.
+funksjon _truthy(v: tekst) -> boolsk {
+    returner v != "" og v != "0"
+}
+
+funksjon _ex_prim(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    hvis pos >= lengde(toks) { returner {"v": "", "n": pos} }
+    la t = toks[pos]
+    hvis _er_tal(t) { returner {"v": t, "n": pos + 1} }
+    hvis lengde(t) >= 2 og builtin.slice(t, 0, 1) == "'" { returner {"v": _unquote(t), "n": pos + 1} }
+    // EXISTS (SELECT …) → "1"/"0"
+    hvis _opp(t) == "EXISTS" og pos + 1 < lengde(toks) og toks[pos + 1] == "(" {
+        la sub = _slice_paren(toks, pos + 1)
+        la n = _subq_rader(kt["db"], sub["inner"], rad)
+        returner {"v": _b(lengde(n) > 0), "n": sub["etter"]}
+    }
+    hvis t == "(" {
+        // Skalar subquery: ( SELECT … ) → første kolonne av første rad, elles "".
+        hvis pos + 1 < lengde(toks) og _opp(toks[pos + 1]) == "SELECT" {
+            la sub = _slice_paren(toks, pos)
+            la verdiar = _subq_verdiar(kt["db"], sub["inner"], rad)
+            la sv = ""
+            hvis lengde(verdiar) > 0 { sv = verdiar[0] }
+            returner {"v": sv, "n": sub["etter"]}
+        }
+        la e = _ex_or(toks, pos + 1, rad, kt)
+        la nn = e["n"]
+        hvis nn < lengde(toks) og toks[nn] == ")" { nn = nn + 1 }
+        returner {"v": e["v"], "n": nn}
+    }
+    hvis _opp(t) == "CASE" { returner _ex_case(toks, pos, rad, kt) }
+    hvis pos + 1 < lengde(toks) og toks[pos + 1] == "(" { returner _ex_func(toks, pos, rad, kt) }
+    la v = ""
+    hvis finnes_nøkkel(rad, t) {
+        v = rad[t]
+    } ellers hvis _kolnavn(t) != t {
+        // Kvalifisert namn ("scope.kol"): bind til rett scope — indre om prefikset er
+        // denne tabellen/aliaset, elles ytre (korrelasjon). Fell attende til indre til slutt.
+        la kn = _kolnavn(t)
+        la kval = _kolprefiks(t)
+        la denne = finnes_nøkkel(kt, "navn") og (kval == kt["navn"] eller (finnes_nøkkel(kt, "alias") og kt["alias"] != "" og kval == kt["alias"]))
+        hvis denne {
+            hvis finnes_nøkkel(rad, kn) { v = rad[kn] }
+        } ellers hvis finnes_nøkkel(kt, "ytre") og finnes_nøkkel(kt["ytre"], t) {
+            v = kt["ytre"][t]
+        } ellers hvis finnes_nøkkel(kt, "ytre") og finnes_nøkkel(kt["ytre"], kn) {
+            v = kt["ytre"][kn]
+        } ellers hvis finnes_nøkkel(rad, kn) {
+            v = rad[kn]
+        }
+    } ellers hvis finnes_nøkkel(kt, "ytre") og finnes_nøkkel(kt["ytre"], t) {
+        v = kt["ytre"][t]
+    }
+    returner {"v": v, "n": pos + 1}
+}
+
+funksjon _ex_unary(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    hvis pos < lengde(toks) og toks[pos] == "-" {
+        la e = _ex_prim(toks, pos + 1, rad, kt)
+        returner {"v": _num_bin("0", "-", e["v"]), "n": e["n"]}
+    }
+    returner _ex_prim(toks, pos, rad, kt)
+}
+
+funksjon _ex_mul(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_unary(toks, pos, rad, kt)
+    la p = l["n"]
+    la akk = l["v"]
+    mens p < lengde(toks) og (toks[p] == "*" eller toks[p] == "/" eller toks[p] == "%") {
+        la op = toks[p]
+        la r = _ex_unary(toks, p + 1, rad, kt)
+        akk = _num_bin(akk, op, r["v"])
+        p = r["n"]
+    }
+    returner {"v": akk, "n": p}
+}
+
+funksjon _ex_add(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_mul(toks, pos, rad, kt)
+    la p = l["n"]
+    la akk = l["v"]
+    mens p < lengde(toks) og (toks[p] == "+" eller toks[p] == "-") {
+        la op = toks[p]
+        la r = _ex_mul(toks, p + 1, rad, kt)
+        akk = _num_bin(akk, op, r["v"])
+        p = r["n"]
+    }
+    returner {"v": akk, "n": p}
+}
+
+funksjon _ex_concat(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_add(toks, pos, rad, kt)
+    la p = l["n"]
+    la akk = l["v"]
+    mens p < lengde(toks) og toks[p] == "||" {
+        la r = _ex_add(toks, p + 1, rad, kt)
+        akk = akk + r["v"]
+        p = r["n"]
+    }
+    returner {"v": akk, "n": p}
+}
+
+funksjon _b(b: boolsk) -> tekst { hvis b { returner "1" } returner "0" }
+funksjon _ikke(b: boolsk) -> boolsk { hvis b { returner usann } returner sann }
+
+// Samanlikningsnivå: = != <> < <= > >=, LIKE, IN, BETWEEN, IS [NOT] NULL, m/ infiks-NOT.
+funksjon _ex_cmp(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_concat(toks, pos, rad, kt)
+    la p = l["n"]
+    hvis p >= lengde(toks) { returner l }
+
+    la neg = usann
+    hvis _opp(toks[p]) == "NOT" og p + 1 < lengde(toks) {
+        la nx = _opp(toks[p + 1])
+        hvis nx == "IN" eller nx == "LIKE" eller nx == "GLOB" eller nx == "BETWEEN" {
+            neg = sann
+            p = p + 1
+        }
+    }
+    la op = toks[p]
+    la opp = _opp(op)
+
+    hvis op == "=" eller op == "!=" eller op == "<>" eller op == "<" eller op == "<=" eller op == ">" eller op == ">=" {
+        la r = _ex_concat(toks, p + 1, rad, kt)
+        returner {"v": _b(_cmp(l["v"], op, r["v"])), "n": r["n"]}
+    }
+    hvis opp == "LIKE" {
+        la r = _ex_concat(toks, p + 1, rad, kt)
+        la res = _like(l["v"], r["v"])
+        hvis neg { res = _ikke(res) }
+        returner {"v": _b(res), "n": r["n"]}
+    }
+    hvis opp == "GLOB" {
+        la r = _ex_concat(toks, p + 1, rad, kt)
+        la res = _glob(l["v"], r["v"])
+        hvis neg { res = _ikke(res) }
+        returner {"v": _b(res), "n": r["n"]}
+    }
+    hvis opp == "IN" {
+        // IN (SELECT …) → medlemskap i subquery-resultat.
+        hvis p + 1 < lengde(toks) og toks[p + 1] == "(" og p + 2 < lengde(toks) og _opp(toks[p + 2]) == "SELECT" {
+            la sub = _slice_paren(toks, p + 1)
+            la verdiar = _subq_verdiar(kt["db"], sub["inner"], rad)
+            la funnet = usann
+            la vi = 0
+            mens vi < lengde(verdiar) {
+                hvis _cmp(l["v"], "=", verdiar[vi]) { funnet = sann }
+                vi = vi + 1
+            }
+            hvis neg { funnet = _ikke(funnet) }
+            returner {"v": _b(funnet), "n": sub["etter"]}
+        }
+        la j = p + 1
+        hvis j < lengde(toks) og toks[j] == "(" { j = j + 1 }
+        la funnet = usann
+        mens j < lengde(toks) og toks[j] != ")" {
+            hvis toks[j] == "," {
+                j = j + 1
+            } ellers {
+                la e = _ex_concat(toks, j, rad, kt)
+                hvis _cmp(l["v"], "=", e["v"]) { funnet = sann }
+                j = e["n"]
+            }
+        }
+        hvis j < lengde(toks) og toks[j] == ")" { j = j + 1 }
+        hvis neg { funnet = _ikke(funnet) }
+        returner {"v": _b(funnet), "n": j}
+    }
+    hvis opp == "BETWEEN" {
+        la a = _ex_concat(toks, p + 1, rad, kt)
+        la q = a["n"]
+        hvis q < lengde(toks) og _opp(toks[q]) == "AND" { q = q + 1 }
+        la bb = _ex_concat(toks, q, rad, kt)
+        la res = _cmp(l["v"], ">=", a["v"]) og _cmp(l["v"], "<=", bb["v"])
+        hvis neg { res = _ikke(res) }
+        returner {"v": _b(res), "n": bb["n"]}
+    }
+    hvis opp == "IS" {
+        la q = p + 1
+        la isnot = usann
+        hvis q < lengde(toks) og _opp(toks[q]) == "NOT" { isnot = sann; q = q + 1 }
+        hvis q < lengde(toks) og _opp(toks[q]) == "NULL" { q = q + 1 }
+        la ernull = l["v"] == ""
+        hvis isnot { ernull = _ikke(ernull) }
+        returner {"v": _b(ernull), "n": q}
+    }
+    returner l
+}
+
+funksjon _ex_not(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    hvis pos < lengde(toks) og _opp(toks[pos]) == "NOT" {
+        la e = _ex_cmp(toks, pos + 1, rad, kt)
+        returner {"v": _b(_ikke(_truthy(e["v"]))), "n": e["n"]}
+    }
+    returner _ex_cmp(toks, pos, rad, kt)
+}
+
+funksjon _ex_and(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_not(toks, pos, rad, kt)
+    la p = l["n"]
+    hvis p >= lengde(toks) eller _opp(toks[p]) != "AND" { returner l }
+    la akk = _truthy(l["v"])
+    mens p < lengde(toks) og _opp(toks[p]) == "AND" {
+        la r = _ex_not(toks, p + 1, rad, kt)
+        akk = akk og _truthy(r["v"])
+        p = r["n"]
+    }
+    returner {"v": _b(akk), "n": p}
+}
+
+funksjon _ex_or(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la l = _ex_and(toks, pos, rad, kt)
+    la p = l["n"]
+    hvis p >= lengde(toks) eller _opp(toks[p]) != "OR" { returner l }
+    la akk = _truthy(l["v"])
+    mens p < lengde(toks) og _opp(toks[p]) == "OR" {
+        la r = _ex_and(toks, p + 1, rad, kt)
+        akk = akk eller _truthy(r["v"])
+        p = r["n"]
+    }
+    returner {"v": _b(akk), "n": p}
+}
+
+funksjon _ex_case(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la p = pos + 1
+    la resultat = ""
+    la satt = usann
+    mens p < lengde(toks) og _opp(toks[p]) == "WHEN" {
+        la c = _ex_or(toks, p + 1, rad, kt)
+        p = c["n"]
+        hvis p < lengde(toks) og _opp(toks[p]) == "THEN" { p = p + 1 }
+        la v = _ex_or(toks, p, rad, kt)
+        p = v["n"]
+        hvis ikke satt og _truthy(c["v"]) {
+            resultat = v["v"]
+            satt = sann
+        }
+    }
+    hvis p < lengde(toks) og _opp(toks[p]) == "ELSE" {
+        la e = _ex_or(toks, p + 1, rad, kt)
+        p = e["n"]
+        hvis ikke satt { resultat = e["v"] }
+    }
+    hvis p < lengde(toks) og _opp(toks[p]) == "END" { p = p + 1 }
+    returner {"v": resultat, "n": p}
+}
+
+funksjon _ex_func(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la fn = _opp(toks[pos])
+    la p = pos + 2
+    hvis fn == "CAST" {
+        la e = _ex_or(toks, p, rad, kt)
+        p = e["n"]
+        mens p < lengde(toks) og toks[p] != ")" { p = p + 1 }
+        hvis p < lengde(toks) og toks[p] == ")" { p = p + 1 }
+        returner {"v": e["v"], "n": p}
+    }
+    la args = []
+    mens p < lengde(toks) og toks[p] != ")" {
+        hvis toks[p] == "," { p = p + 1; fortsett }
+        la e = _ex_or(toks, p, rad, kt)
+        legg_til(args, e["v"])
+        p = e["n"]
+    }
+    hvis p < lengde(toks) og toks[p] == ")" { p = p + 1 }
+    returner {"v": _kall_funksjon(fn, args), "n": p}
+}
+
+funksjon _kall_funksjon(fn: tekst, args) -> tekst {
+    hvis fn == "COALESCE" {
+        la i = 0
+        mens i < lengde(args) {
+            hvis args[i] != "" { returner args[i] }
+            i = i + 1
+        }
+        returner ""
+    }
+    hvis fn == "UPPER" { hvis lengde(args) > 0 { returner builtin.upper(args[0]) } returner "" }
+    hvis fn == "LOWER" { hvis lengde(args) > 0 { returner builtin.lower(args[0]) } returner "" }
+    hvis fn == "LENGTH" { hvis lengde(args) > 0 { returner tekst_fra_heltall(lengde(builtin.split(args[0], ""))) } returner "0" }
+    hvis fn == "ABS" {
+        hvis lengde(args) > 0 {
+            la a = builtin.heltall_fra_tekst(args[0])
+            hvis a < 0 { returner tekst_fra_heltall(0 - a) }
+            returner tekst_fra_heltall(a)
+        }
+        returner "0"
+    }
+    hvis fn == "SUBSTR" og lengde(args) >= 2 {
+        la s = args[0]
+        la slen = lengde(builtin.split(s, ""))
+        la p1 = builtin.heltall_fra_tekst(args[1])
+        la start = p1 - 1
+        hvis p1 < 0 { start = slen + p1 }
+        hvis start < 0 { start = 0 }
+        la slutt = slen
+        hvis lengde(args) >= 3 { slutt = start + builtin.heltall_fra_tekst(args[2]) }
+        hvis slutt > slen { slutt = slen }
+        hvis start > slen { returner "" }
+        hvis slutt < start { returner "" }
+        returner builtin.slice(s, start, slutt)
+    }
+    hvis fn == "REPLACE" og lengde(args) >= 3 {
+        returner builtin.join(builtin.split(args[0], args[1]), args[2])
+    }
+    hvis fn == "CHAR" og lengde(args) >= 1 {
+        la ut = ""
+        la i = 0
+        mens i < lengde(args) {
+            ut = ut + builtin.chr(builtin.heltall_fra_tekst(args[i]))
+            i = i + 1
+        }
+        returner ut
+    }
+    hvis fn == "TRIM" og lengde(args) >= 1 { returner builtin.trim(args[0]) }
+    hvis fn == "LTRIM" og lengde(args) >= 1 { returner _ltrim(args[0]) }
+    hvis fn == "RTRIM" og lengde(args) >= 1 { returner _rtrim(args[0]) }
+    hvis fn == "INSTR" og lengde(args) >= 2 {
+        la idx = builtin.index_of(args[0], args[1])
+        hvis idx < 0 { returner "0" }
+        returner tekst_fra_heltall(idx + 1)
+    }
+    hvis fn == "IFNULL" og lengde(args) >= 2 {
+        hvis args[0] != "" { returner args[0] }
+        returner args[1]
+    }
+    hvis fn == "NULLIF" og lengde(args) >= 2 {
+        hvis args[0] == args[1] { returner "" }
+        returner args[0]
+    }
+    hvis fn == "HEX" og lengde(args) >= 1 { returner _hex(args[0]) }
+    hvis fn == "QUOTE" og lengde(args) >= 1 {
+        returner "'" + builtin.join(builtin.split(args[0], "'"), "''") + "'"
+    }
+    hvis (fn == "MAX" eller fn == "MIN") og lengde(args) >= 2 {
+        la best = args[0]
+        la i = 1
+        mens i < lengde(args) {
+            hvis fn == "MAX" og _cmp(args[i], ">", best) { best = args[i] }
+            hvis fn == "MIN" og _cmp(args[i], "<", best) { best = args[i] }
+            i = i + 1
+        }
+        returner best
+    }
+    hvis fn == "PRINTF" eller fn == "FORMAT" {
+        hvis lengde(args) == 0 { returner "" }
+        returner _printf(args)
+    }
+    hvis fn == "ROUND" og lengde(args) >= 1 {
+        la nd = 0
+        hvis lengde(args) >= 2 { nd = builtin.heltall_fra_tekst(args[1]) }
+        returner _round_real(args[0], nd)
+    }
+    hvis fn == "TYPEOF" og lengde(args) >= 1 {
+        la v = args[0]
+        hvis v == "" { returner "null" }
+        hvis _er_real(v) { returner "real" }
+        hvis _er_tal(v) { returner "integer" }
+        returner "text"
+    }
+    returner ""
+}
+
+// ROUND(x, nd): rund halv bort frå null via IEEE-flyt (matchar SQLite si double-avrunding).
+// Resultatet er alltid REAL (har "."). nd < 0 ikkje støtta.
+funksjon _round_real(s: tekst, nd: heltall) -> tekst {
+    hvis ikke _er_tal(s) { returner "0.0" }
+    la x = builtin.desimaltall(s)
+    la faktor = builtin.desimaltall("1")
+    la ti = builtin.desimaltall("10")
+    la k = 0
+    mens k < nd { faktor = faktor * ti; k = k + 1 }
+    la skalert = x * faktor
+    la half = builtin.desimaltall("0.5")
+    la rundet_i = 0
+    hvis skalert < builtin.desimaltall("0") { rundet_i = _flyt_trunk(skalert - half) } ellers { rundet_i = _flyt_trunk(skalert + half) }
+    la resultat = builtin.desimaltall(tekst_fra_heltall(rundet_i)) / faktor
+    returner _fmt_real(resultat)
+}
+
+// LTRIM/RTRIM — berre mellomrom (SQLite-default), ingen builtin finst.
+funksjon _ltrim(s: tekst) -> tekst {
+    la ch = builtin.split(s, "")
+    la i = 0
+    mens i < lengde(ch) og (ch[i] == " " eller ch[i] == "\t" eller ch[i] == "\n" eller ch[i] == "\r") { i = i + 1 }
+    returner builtin.slice(s, i, lengde(s))
+}
+
+funksjon _rtrim(s: tekst) -> tekst {
+    la ch = builtin.split(s, "")
+    la j = lengde(ch)
+    mens j > 0 og (ch[j - 1] == " " eller ch[j - 1] == "\t" eller ch[j - 1] == "\n" eller ch[j - 1] == "\r") { j = j - 1 }
+    returner builtin.slice(s, 0, j)
+}
+
+funksjon _hex_siffer(n: heltall) -> tekst {
+    la d = "0123456789ABCDEF"
+    returner builtin.slice(d, n, n + 1)
+}
+
+funksjon _hex(s: tekst) -> tekst {
+    la ch = builtin.split(s, "")
+    la ut = ""
+    la i = 0
+    mens i < lengde(ch) {
+        la k = builtin.char_code(ch[i])
+        ut = ut + _hex_siffer(k / 16) + _hex_siffer(k % 16)
+        i = i + 1
+    }
+    returner ut
+}
+
+// Formatér flyt med NØYAKTIG nd desimalar (for printf %f).
+funksjon _fmt_f(s: tekst, nd: heltall) -> tekst {
+    la r = _round_real(s, nd)
+    la d = builtin.index_of(r, ".")
+    hvis nd == 0 {
+        hvis d >= 0 { returner builtin.slice(r, 0, d) }
+        returner r
+    }
+    hvis d < 0 { r = r + "."; d = lengde(r) - 1 }
+    la desimaler = lengde(r) - d - 1
+    mens desimaler < nd { r = r + "0"; desimaler = desimaler + 1 }
+    returner r
+}
+
+// printf/format: %d %i %s %x %X %f %% + valfri breidde/presisjon/null-padding (%5d, %05d, %-5d, %.2f).
+funksjon _printf(args) -> tekst {
+    la fmt = args[0]
+    la ch = builtin.split(fmt, "")
+    la n = lengde(ch)
+    la ut = ""
+    la ai = 1
+    la i = 0
+    mens i < n {
+        hvis ch[i] != "%" {
+            ut = ut + ch[i]
+            i = i + 1
+            fortsett
+        }
+        // %-spesifikator: [flagg -][flagg 0][breidde-siffer]*[konv]
+        i = i + 1
+        hvis i < n og ch[i] == "%" { ut = ut + "%"; i = i + 1; fortsett }
+        la venstre = usann
+        la null_pad = usann
+        mens i < n og (ch[i] == "-" eller ch[i] == "0") {
+            hvis ch[i] == "-" { venstre = sann }
+            hvis ch[i] == "0" { null_pad = sann }
+            i = i + 1
+        }
+        la breidde = 0
+        mens i < n og _er_siffer(ch[i]) { breidde = breidde * 10 + (builtin.char_code(ch[i]) - 48); i = i + 1 }
+        la presisjon = 0 - 1
+        hvis i < n og ch[i] == "." {
+            i = i + 1
+            presisjon = 0
+            mens i < n og _er_siffer(ch[i]) { presisjon = presisjon * 10 + (builtin.char_code(ch[i]) - 48); i = i + 1 }
+        }
+        hvis i >= n { bryt }
+        la konv = ch[i]
+        i = i + 1
+        la verdi = ""
+        hvis ai < lengde(args) { verdi = args[ai]; ai = ai + 1 }
+        la iverdi = 0
+        hvis _er_tal(verdi) { iverdi = _flyt_trunk(builtin.desimaltall(verdi)) }
+        hvis konv == "d" eller konv == "i" { verdi = tekst_fra_heltall(iverdi) }
+        hvis konv == "x" { verdi = _til_hex_tal(iverdi, usann) }
+        hvis konv == "X" { verdi = _til_hex_tal(iverdi, sann) }
+        hvis konv == "f" {
+            la nd = 6
+            hvis presisjon >= 0 { nd = presisjon }
+            verdi = _fmt_f(verdi, nd)
+        }
+        // padding
+        mens lengde(builtin.split(verdi, "")) < breidde {
+            hvis venstre { verdi = verdi + " " }
+            ellers hvis null_pad og (konv == "d" eller konv == "i" eller konv == "x" eller konv == "X" eller konv == "f") { verdi = "0" + verdi }
+            ellers { verdi = " " + verdi }
+        }
+        ut = ut + verdi
+    }
+    returner ut
+}
+
+funksjon _til_hex_tal(n: heltall, stor: boolsk) -> tekst {
+    hvis n == 0 { returner "0" }
+    la neg = usann
+    la m = n
+    hvis m < 0 { neg = sann; m = 0 - m }
+    la ut = ""
+    mens m > 0 {
+        la d = _hex_siffer(m % 16)
+        hvis ikke stor { d = builtin.lower(d) }
+        ut = d + ut
+        m = m / 16
+    }
+    hvis neg { ut = "-" + ut }
+    returner ut
+}
+
+// Kontekst for evaluatoren: `db` (for subqueries) + `ytre` (ytre rad, for korrelasjon).
+funksjon _kt_ny(db, ytre) -> ordbok {
+    returner {"db": db, "ytre": ytre}
+}
+funksjon _kt_tom() -> ordbok {
+    returner {"db": {}, "ytre": {}}
+}
+
+// Offentleg inngang: evaluer eit SQL-uttrykk mot ei rad (utan subquery-kontekst).
+funksjon evaluer_uttrykk(uttrykk: tekst, rad) -> tekst {
+    la e = _ex_or(_tok(uttrykk), 0, rad, _kt_tom())
+    returner e["v"]
+}
+
+// WHERE-matcher: ei WHERE-klausul ER eit boolsk uttrykk. Delegerer til uttrykks-
+// evaluatoren, som gjev full presedens + parentesar + uttrykk (7a/7c) + subqueries (7d),
+// i tillegg til = != <> < <= > >=, LIKE, IN, BETWEEN, IS [NOT] NULL, NOT, AND, OR.
+funksjon _match(rad, toks, kt) -> boolsk {
+    hvis lengde(toks) == 0 { returner sann }
+    returner _truthy(_ex_or(toks, 0, rad, kt)["v"])
+}
+
+funksjon _match_fra(rad, toks, start: heltall, kt) -> boolsk {
+    returner _match(rad, _slice_fra(toks, start), kt)
+}
+
+// ── Subqueries (Fase 7d) ─────────────────────────────────────────────
+// Hent tokens mellom balanserte parentesar. `åpen` = indeks til "(".
+// Returnerer {"inner": [tokens inni], "etter": indeks etter matchande ")"}.
+funksjon _slice_paren(toks, åpen: heltall) -> ordbok {
+    la depth = 0
+    la inner = []
+    la i = åpen
+    mens i < lengde(toks) {
+        hvis toks[i] == "(" {
+            depth = depth + 1
+            hvis depth == 1 {
+                i = i + 1
+                fortsett
+            }
+        }
+        hvis toks[i] == ")" {
+            depth = depth - 1
+            hvis depth == 0 { returner {"inner": inner, "etter": i + 1} }
+        }
+        legg_til(inner, toks[i])
+        i = i + 1
+    }
+    returner {"inner": inner, "etter": i}
+}
+
+// Projisér eitt select-felt (indeks) frå ei rad til ein tekstverdi.
+funksjon _felt_verdi(felt, idx: heltall, rad, kt) -> tekst {
+    la k = felt["kind"][idx]
+    hvis k == "expr" { returner _ex_or(felt["expr"][idx], 0, rad, kt)["v"] }
+    hvis k == "col" {
+        la cn = felt["a"][idx]
+        hvis finnes_nøkkel(rad, cn) { returner rad[cn] }
+        returner ""
+    }
+    returner ""
+}
+
+// Rå rader frå ein subquery (for EXISTS). `subtoks` startar på SELECT.
+funksjon _subq_rader(db, subtoks, ytre) -> liste {
+    la p = _parse_select(subtoks)
+    returner _filtrer_kt(db, p, ytre)
+}
+
+// Verdilista frå første select-kolonne i ein subquery (for skalar + IN).
+funksjon _subq_verdiar(db, subtoks, ytre) -> liste {
+    la p = _parse_select(subtoks)
+    la felt = _sel_felt(p["sel_items"])
+    la rader = _filtrer_kt(db, p, ytre)
+    // Skalar-aggregat utan GROUP → éin verdi.
+    hvis lengde(p["group_by"]) == 0 og _har_agg(felt) {
+        returner [_agg_txt(rader, felt["a"][0], felt["b"][0], felt["expr"][0])]
+    }
+    hvis p["order_col"] != "" { rader = _sorter(rader, p["order_col"], p["order_asc"]) }
+    rader = _snitt(rader, p["offset"], p["limit"])
+    la kt = _kt_ny(db, ytre)
+    la ut = []
+    la i = 0
+    mens i < lengde(rader) {
+        legg_til(ut, _felt_verdi(felt, 0, rader[i], kt))
+        i = i + 1
+    }
+    returner ut
+}
+
+// Utnamn for eit select-felt: `AS alias`, elles rein kolonne, elles "colN".
+funksjon _sel_label(item, idx: heltall, felt) -> tekst {
+    la k = 0
+    mens k < lengde(item) {
+        hvis _opp(item[k]) == "AS" og k + 1 < lengde(item) { returner item[k + 1] }
+        k = k + 1
+    }
+    hvis felt["kind"][idx] == "col" { returner _kolnavn(felt["a"][idx]) }
+    returner "col" + tekst_fra_heltall(idx)
+}
+
+// Full projeksjon av ein subquery → rader (ordbøker) med namngjevne kolonnar.
+// For FROM (SELECT …). Handterer kolonnar/uttrykk/*; GROUP i subquery ikkje støtta her.
+funksjon _subq_projiser(db, subtoks, ytre) -> liste {
+    la p = _parse_select(subtoks)
+    la felt = _sel_felt(p["sel_items"])
+    la items = p["sel_items"]
+    la rader0 = _filtrer_kt(db, p, ytre)
+    hvis p["order_col"] != "" { rader0 = _sorter(rader0, p["order_col"], p["order_asc"]) }
+    rader0 = _snitt(rader0, p["offset"], p["limit"])
+    la kt = _kt_ny(db, ytre)
+    la ut = []
+    la ri = 0
+    mens ri < lengde(rader0) {
+        la nyrad = {}
+        la fi = 0
+        mens fi < lengde(felt["kind"]) {
+            hvis felt["kind"][fi] == "star" {
+                la kk = nøkler(rader0[ri])
+                la ki = 0
+                mens ki < lengde(kk) { nyrad[kk[ki]] = rader0[ri][kk[ki]]; ki = ki + 1 }
+            } ellers {
+                nyrad[_sel_label(items[fi], fi, felt)] = _felt_verdi(felt, fi, rader0[ri], kt)
+            }
+            fi = fi + 1
+        }
+        legg_til(ut, nyrad)
+        ri = ri + 1
+    }
+    returner ut
+}
+
+// ── SQL-typenamn → record-tag ────────────────────────────────────────
+funksjon _tag_av_type(t: tekst) -> heltall {
+    la u = _opp(t)
+    hvis u == "INTEGER" eller u == "INT" { returner motor.tag_int() }
+    hvis u == "REAL" eller u == "FLOAT" eller u == "DOUBLE" { returner motor.tag_real() }
+    hvis u == "BLOB" { returner motor.tag_blob() }
+    returner motor.tag_tekst()
+}
+
+// ── Constraints (Fase 7i) ────────────────────────────────────────────
+// Er token eit kolonne-constraint-nøkkelord (så det ikkje mistolkast som type)?
+funksjon _er_kol_constraint_kw(t: tekst) -> boolsk {
+    la u = _opp(t)
+    returner u == "NOT" eller u == "NULL" eller u == "PRIMARY" eller u == "UNIQUE" eller u == "DEFAULT" eller u == "CHECK" eller u == "REFERENCES" eller u == "COLLATE" eller u == "AUTOINCREMENT"
+}
+
+// Les "( a , b , … )" frå indeks `i` (som peikar på "("). Returnerer {cols, etter}.
+funksjon _les_kol_liste(toks, i: heltall) -> ordbok {
+    la cols = []
+    hvis i < lengde(toks) og toks[i] == "(" { i = i + 1 }
+    mens i < lengde(toks) og toks[i] != ")" {
+        hvis toks[i] != "," { legg_til(cols, toks[i]) }
+        i = i + 1
+    }
+    hvis i < lengde(toks) og toks[i] == ")" { i = i + 1 }
+    returner {"cols": cols, "etter": i}
+}
+
+funksjon _tab_c(t) -> ordbok {
+    hvis finnes_nøkkel(t, "c") { returner t["c"] }
+    returner {"notnull": [], "pk": [], "unique": [], "default": {}, "checks": [], "fk": []}
+}
+
+// Finst det ei anna rad (≠ ekskluder_rowid) som er lik `nyrad` på alle kolonnar i `grp`?
+// NULL ("") reknast aldri som lik (SQLite-semantikk for UNIQUE).
+funksjon _finst_dup(db, navn: tekst, grp, nyrad, ekskluder_rowid: heltall) -> boolsk {
+    la rowids = motor.db_rowids(db, navn)
+    la r = 0
+    mens r < lengde(rowids) {
+        hvis rowids[r] != ekskluder_rowid {
+            la rad = motor.db_hent(db, navn, rowids[r])
+            la lik = sann
+            la g = 0
+            mens g < lengde(grp) {
+                la col = grp[g]
+                la ev = ""
+                hvis finnes_nøkkel(rad, col) { ev = rad[col] }
+                la nv = ""
+                hvis finnes_nøkkel(nyrad, col) { nv = nyrad[col] }
+                hvis ev != nv eller ev == "" { lik = usann }
+                g = g + 1
+            }
+            hvis lik { returner sann }
+        }
+        r = r + 1
+    }
+    returner usann
+}
+
+funksjon _finst_verdi(db, tab: tekst, col: tekst, v: tekst) -> boolsk {
+    hvis ikke finnes_nøkkel(db["tabellar"], tab) { returner usann }
+    la rowids = motor.db_rowids(db, tab)
+    la r = 0
+    mens r < lengde(rowids) {
+        la rad = motor.db_hent(db, tab, rowids[r])
+        hvis finnes_nøkkel(rad, col) og rad[col] == v { returner sann }
+        r = r + 1
+    }
+    returner usann
+}
+
+// Rowids som kolliderer med `nyrad` på nokon unik-/PK-gruppe (for OR REPLACE / UPSERT).
+funksjon _konflikt_rowids(db, navn: tekst, nyrad) -> liste {
+    la c = _tab_c(db["tabellar"][navn])
+    la uq = c["unique"]
+    la ut = []
+    la rowids = motor.db_rowids(db, navn)
+    la r = 0
+    mens r < lengde(rowids) {
+        la rad = motor.db_hent(db, navn, rowids[r])
+        la kollisjon = usann
+        la i = 0
+        mens i < lengde(uq) {
+            la grp = uq[i]
+            la lik = sann
+            la g = 0
+            mens g < lengde(grp) {
+                la col = grp[g]
+                la ev = ""
+                hvis finnes_nøkkel(rad, col) { ev = rad[col] }
+                la nv = ""
+                hvis finnes_nøkkel(nyrad, col) { nv = nyrad[col] }
+                hvis ev != nv eller ev == "" { lik = usann }
+                g = g + 1
+            }
+            hvis lik { kollisjon = sann }
+            i = i + 1
+        }
+        hvis kollisjon { legg_til(ut, rowids[r]) }
+        r = r + 1
+    }
+    returner ut
+}
+
+// Sjekk NOT NULL / CHECK / UNIQUE / PK / FK for ei foreslått rad. "" = ok, elles feilmelding.
+funksjon _sjekk_constraints(db, navn: tekst, nyrad, ekskluder_rowid: heltall) -> tekst {
+    la c = _tab_c(db["tabellar"][navn])
+    la nn = c["notnull"]
+    la i = 0
+    mens i < lengde(nn) {
+        la col = nn[i]
+        hvis (ikke finnes_nøkkel(nyrad, col)) eller nyrad[col] == "" { returner "NOT NULL constraint failed: " + navn + "." + col }
+        i = i + 1
+    }
+    la kt = _kt_ny(db, {})
+    la ch = c["checks"]
+    i = 0
+    mens i < lengde(ch) {
+        hvis ikke _truthy(_ex_or(ch[i], 0, nyrad, kt)["v"]) { returner "CHECK constraint failed: " + navn }
+        i = i + 1
+    }
+    la uq = c["unique"]
+    i = 0
+    mens i < lengde(uq) {
+        la grp = uq[i]
+        hvis _finst_dup(db, navn, grp, nyrad, ekskluder_rowid) { returner "UNIQUE constraint failed: " + navn + "." + grp[0] }
+        i = i + 1
+    }
+    la fk = c["fk"]
+    i = 0
+    mens i < lengde(fk) {
+        la f = fk[i]
+        la v = ""
+        hvis finnes_nøkkel(nyrad, f["col"]) { v = nyrad[f["col"]] }
+        hvis v != "" og ikke _finst_verdi(db, f["tab"], f["refcol"], v) { returner "FOREIGN KEY constraint failed" }
+        i = i + 1
+    }
+    returner ""
+}
+
+// UPSERT SET-verdi: "excluded.X" → den foreslåtte rada sin X, elles literal.
+funksjon _upsert_verdi(tok: tekst, nyrad) -> tekst {
+    hvis _opp(_kolprefiks(tok)) == "EXCLUDED" {
+        la kn = _kolnavn(tok)
+        hvis finnes_nøkkel(nyrad, kn) { returner nyrad[kn] }
+        returner ""
+    }
+    returner _unquote(tok)
+}
+
+// ── FOREIGN KEY-referanseaksjonar (ON DELETE/UPDATE) ─────────────────
+// Les referanse-aksjonar etter REFERENCES tab(col), fram til , eller ).
+funksjon _fk_les_actions(toks, start: heltall) -> ordbok {
+    la on_del = "NO ACTION"
+    la on_upd = "NO ACTION"
+    la i = start
+    mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" {
+        hvis _opp(toks[i]) == "ON" og i + 1 < lengde(toks) {
+            la ev = _opp(toks[i + 1])
+            la j = i + 2
+            la act = "NO ACTION"
+            hvis j < lengde(toks) {
+                la a0 = _opp(toks[j])
+                hvis a0 == "SET" og j + 1 < lengde(toks) {
+                    act = "SET " + _opp(toks[j + 1])
+                    j = j + 2
+                } ellers hvis a0 == "NO" og j + 1 < lengde(toks) {
+                    act = "NO ACTION"
+                    j = j + 2
+                } ellers {
+                    act = a0
+                    j = j + 1
+                }
+            }
+            hvis ev == "DELETE" { on_del = act }
+            hvis ev == "UPDATE" { on_upd = act }
+            i = j
+        } ellers {
+            i = i + 1
+        }
+    }
+    returner {"on_delete": on_del, "on_update": on_upd}
+}
+
+funksjon _fk_act(fk, key: tekst) -> tekst {
+    hvis finnes_nøkkel(fk, key) { returner fk[key] }
+    returner "NO ACTION"
+}
+
+funksjon _sql_lit(v: tekst) -> tekst {
+    returner "'" + builtin.join(builtin.split(v, "'"), "''") + "'"
+}
+
+// Alle FK-ar (på tvers av tabellar) som peikar på foreldretabellen `ptab`.
+funksjon _fk_barn(db, ptab: tekst) -> liste {
+    la ut = []
+    la tbls = nøkler(db["tabellar"])
+    la i = 0
+    mens i < lengde(tbls) {
+        la c = _tab_c(db["tabellar"][tbls[i]])
+        la fks = c["fk"]
+        la k = 0
+        mens k < lengde(fks) {
+            hvis fks[k]["tab"] == ptab {
+                legg_til(ut, {"tab": tbls[i], "col": fks[k]["col"], "refcol": fks[k]["refcol"],
+                              "on_delete": _fk_act(fks[k], "on_delete"), "on_update": _fk_act(fks[k], "on_update")})
+            }
+            k = k + 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Pre-sjekk RESTRICT/NO ACTION FØR forelder-mutasjonen (event = DELETE|UPDATE).
+// usann = brot (blokkér setninga). CASCADE/SET NULL handterast av _apply etterpå.
+funksjon _kaskade_restrict_ok(db, ptab: tekst, oldrad, newrad, event: tekst) -> boolsk {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la act = b["on_delete"]
+        hvis event == "UPDATE" { act = b["on_update"] }
+        hvis act != "CASCADE" og act != "SET NULL" og act != "SET DEFAULT" {
+            la oldv = ""
+            hvis finnes_nøkkel(oldrad, b["refcol"]) { oldv = oldrad[b["refcol"]] }
+            la endra = sann
+            hvis event == "UPDATE" {
+                la newv = ""
+                hvis finnes_nøkkel(newrad, b["refcol"]) { newv = newrad[b["refcol"]] }
+                endra = (oldv != newv)
+            }
+            hvis oldv != "" og endra og _finst_verdi(db, b["tab"], b["col"], oldv) {
+                db["_siste_feil"] = "FOREIGN KEY constraint failed"
+                returner usann
+            }
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Bruk CASCADE/SET NULL på barnrader ETTER at forelderrada er sletta.
+funksjon _kaskade_delete_apply(db, ptab: tekst, rad) {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la val = ""
+        hvis finnes_nøkkel(rad, b["refcol"]) { val = rad[b["refcol"]] }
+        hvis val != "" {
+            hvis b["on_delete"] == "CASCADE" {
+                _exec_t(db, _tok("DELETE FROM " + b["tab"] + " WHERE " + b["col"] + " = " + _sql_lit(val)))
+            } ellers hvis b["on_delete"] == "SET NULL" eller b["on_delete"] == "SET DEFAULT" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(val)))
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// Bruk CASCADE/SET NULL på barnrader ETTER at forelder-nøkkelen er oppdatert
+// (så barnet sin nye FK-verdi finst i forelderen). Berre når refcol endra seg.
+funksjon _kaskade_update_apply(db, ptab: tekst, oldrad, newrad) {
+    la barn = _fk_barn(db, ptab)
+    la i = 0
+    mens i < lengde(barn) {
+        la b = barn[i]
+        la oldv = ""
+        hvis finnes_nøkkel(oldrad, b["refcol"]) { oldv = oldrad[b["refcol"]] }
+        la newv = ""
+        hvis finnes_nøkkel(newrad, b["refcol"]) { newv = newrad[b["refcol"]] }
+        hvis oldv != "" og oldv != newv {
+            hvis b["on_update"] == "CASCADE" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = " + _sql_lit(newv) + " WHERE " + b["col"] + " = " + _sql_lit(oldv)))
+            } ellers hvis b["on_update"] == "SET NULL" eller b["on_update"] == "SET DEFAULT" {
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(oldv)))
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// Finn ON CONFLICT-klausul i INSERT. Returnerer {har, do: NOTHING|UPDATE, set_kol, set_val}.
+funksjon _finn_on_conflict(toks) -> ordbok {
+    la i = 0
+    mens i < lengde(toks) {
+        hvis _opp(toks[i]) == "ON" og i + 1 < lengde(toks) og _opp(toks[i + 1]) == "CONFLICT" {
+            i = i + 2
+            hvis i < lengde(toks) og toks[i] == "(" {
+                la g = _les_kol_liste(toks, i)
+                i = g["etter"]
+            }
+            hvis i < lengde(toks) og _opp(toks[i]) == "DO" { i = i + 1 }
+            hvis i < lengde(toks) og _opp(toks[i]) == "UPDATE" {
+                i = i + 1
+                hvis i < lengde(toks) og _opp(toks[i]) == "SET" { i = i + 1 }
+                la sk = []
+                la sv = []
+                mens i < lengde(toks) og _opp(toks[i]) != "WHERE" {
+                    hvis toks[i] == "," { i = i + 1; fortsett }
+                    hvis i + 2 < lengde(toks) og toks[i + 1] == "=" {
+                        legg_til(sk, toks[i])
+                        legg_til(sv, toks[i + 2])
+                        i = i + 3
+                    } ellers {
+                        i = i + 1
+                    }
+                }
+                returner {"har": sann, "do": "UPDATE", "set_kol": sk, "set_val": sv}
+            }
+            returner {"har": sann, "do": "NOTHING", "set_kol": [], "set_val": []}
+        }
+        i = i + 1
+    }
+    returner {"har": usann, "do": "", "set_kol": [], "set_val": []}
+}
+
+// Bygg posisjonell verdi-liste (skjema-rekkefølge) frå ei rad-ordbok.
+funksjon _verdier_av_rad(t, rad) -> liste {
+    la ut = []
+    la k = 0
+    mens k < lengde(t["kolonner"]) {
+        la cn = t["kolonner"][k]["navn"]
+        la v = ""
+        hvis finnes_nøkkel(rad, cn) { v = rad[cn] }
+        legg_til(ut, v)
+        k = k + 1
+    }
+    returner ut
+}
+
+// Bygg rad-ordbok (kol→verdi) frå posisjonelle verdiar i skjema-rekkefølge.
+funksjon _rad_av_verdier(t, verdier) -> ordbok_tekst {
+    la rad = {}
+    la k = 0
+    mens k < lengde(t["kolonner"]) {
+        la cn = t["kolonner"][k]["navn"]
+        la v = ""
+        hvis k < lengde(verdier) { v = verdier[k] }
+        rad[cn] = v
+        k = k + 1
+    }
+    returner rad
+}
+
+// ── Public: opne / exec / query ──────────────────────────────────────
+funksjon opne(sti: tekst) -> ordbok_tekst {
+    hvis sti == "" eller sti == ":memory:" {
+        returner motor.db_ny("")
+    }
+    returner motor.db_åpne(sti)
+}
+
+funksjon lukk(db) {
+    hvis db["sti"] != "" {
+        motor.db_checkpoint(db)
+    }
+}
+
+// ── Skjema-utviding (Fase 7k): VIEW / TRIGGER / ALTER ────────────────
+funksjon _sikre_views(db) {
+    hvis ikke finnes_nøkkel(db, "_views") { db["_views"] = {} }
+}
+funksjon _sikre_triggers(db) {
+    hvis ikke finnes_nøkkel(db, "_triggers") { db["_triggers"] = [] }
+}
+funksjon _er_view(db, navn: tekst) -> boolsk {
+    returner finnes_nøkkel(db, "_views") og finnes_nøkkel(db["_views"], navn)
+}
+
+funksjon _rename_kolonne(db, tab: tekst, gammal: tekst, ny: tekst) {
+    la t = db["tabellar"][tab]
+    la i = 0
+    mens i < lengde(t["kolonner"]) {
+        hvis t["kolonner"][i]["navn"] == gammal { t["kolonner"][i]["navn"] = ny }
+        i = i + 1
+    }
+    la rowids = motor.db_rowids(db, tab)
+    la r = 0
+    mens r < lengde(rowids) {
+        la rad = motor.db_hent(db, tab, rowids[r])
+        hvis finnes_nøkkel(rad, gammal) {
+            rad[ny] = rad[gammal]
+            fjern_nokkel(rad, gammal)
+        }
+        r = r + 1
+    }
+}
+
+funksjon _drop_kolonne(db, tab: tekst, kn: tekst) {
+    la t = db["tabellar"][tab]
+    la nykol = []
+    la i = 0
+    mens i < lengde(t["kolonner"]) {
+        hvis t["kolonner"][i]["navn"] != kn { legg_til(nykol, t["kolonner"][i]) }
+        i = i + 1
+    }
+    t["kolonner"] = nykol
+    la rowids = motor.db_rowids(db, tab)
+    la r = 0
+    mens r < lengde(rowids) {
+        la rad = motor.db_hent(db, tab, rowids[r])
+        hvis finnes_nøkkel(rad, kn) { fjern_nokkel(rad, kn) }
+        r = r + 1
+    }
+}
+
+// Bytt ut NEW.x / OLD.x i trigger-kropp med siterte verdiar.
+funksjon _subst_trigger(bodytoks, newrad, oldrad) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(bodytoks) {
+        la tok = bodytoks[i]
+        la pre = _opp(_kolprefiks(tok))
+        hvis pre == "NEW" eller pre == "OLD" {
+            la kn = _kolnavn(tok)
+            la kjelde = newrad
+            hvis pre == "OLD" { kjelde = oldrad }
+            la v = ""
+            hvis finnes_nøkkel(kjelde, kn) { v = kjelde[kn] }
+            legg_til(ut, "'" + builtin.join(builtin.split(v, "'"), "''") + "'")
+        } ellers {
+            legg_til(ut, tok)
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _fyr_triggers(db, when: tekst, event: tekst, tab: tekst, newrad, oldrad) {
+    hvis ikke finnes_nøkkel(db, "_triggers") { returner 0 }
+    la trs = db["_triggers"]
+    la i = 0
+    mens i < lengde(trs) {
+        la tr = trs[i]
+        hvis tr["when"] == when og tr["event"] == event og tr["tab"] == tab {
+            la b = 0
+            mens b < lengde(tr["body"]) {
+                _exec_t(db, _subst_trigger(tr["body"][b], newrad, oldrad))
+                b = b + 1
+            }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// exec: DDL/DML. Returnerer tal på råka rader (CREATE→0, INSERT→1), eller -1 ved ukjend/ugyldig.
+funksjon exec(db, sql: tekst) -> heltall {
+    returner _exec_t(db, _tok(sql))
+}
+
+funksjon _exec_t(db, toks) -> heltall {
+    hvis lengde(toks) == 0 { returner 0 }
+    la kmd = _opp(toks[0])
+
+    hvis kmd == "CREATE" og lengde(toks) >= 5 og _opp(toks[1]) == "INDEX" {
+        la j = 2
+        hvis _opp(toks[j]) != "ON" { j = j + 1 }
+        hvis j < lengde(toks) og _opp(toks[j]) == "ON" { j = j + 1 }
+        la itab = ""
+        hvis j < lengde(toks) { itab = toks[j]; j = j + 1 }
+        hvis j < lengde(toks) og toks[j] == "(" { j = j + 1 }
+        la ikol = ""
+        hvis j < lengde(toks) og toks[j] != ")" { ikol = toks[j] }
+        hvis itab != "" og ikol != "" {
+            motor.db_opprett_indeks(db, itab, ikol)
+        }
+        returner 0
+    }
+
+    hvis kmd == "CREATE" og lengde(toks) >= 3 og _opp(toks[1]) == "TABLE" {
+        la navn = toks[2]
+        la kolonner = []
+        la c_notnull = []
+        la c_pk = []
+        la c_unique = []
+        la c_default = {}
+        la c_checks = []
+        la c_fk = []
+        la i = 3
+        hvis i < lengde(toks) og _opp(toks[i]) == "IF" { mens i < lengde(toks) og toks[i] != "(" { i = i + 1 } }
+        hvis i < lengde(toks) og toks[i] == "(" { i = i + 1 }
+        mens i < lengde(toks) og toks[i] != ")" {
+            hvis toks[i] == "," { i = i + 1; fortsett }
+            la u = _opp(toks[i])
+            // Tabell-nivå constraints
+            hvis u == "PRIMARY" {
+                i = i + 1
+                hvis i < lengde(toks) og _opp(toks[i]) == "KEY" { i = i + 1 }
+                la grp = _les_kol_liste(toks, i)
+                _legg_alle(c_pk, grp["cols"])
+                legg_til(c_unique, grp["cols"])
+                i = grp["etter"]
+                mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" { i = i + 1 }
+                fortsett
+            }
+            hvis u == "UNIQUE" {
+                i = i + 1
+                la grp = _les_kol_liste(toks, i)
+                legg_til(c_unique, grp["cols"])
+                i = grp["etter"]
+                mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" { i = i + 1 }
+                fortsett
+            }
+            hvis u == "CHECK" {
+                i = i + 1
+                la sub = _slice_paren(toks, i)
+                legg_til(c_checks, sub["inner"])
+                i = sub["etter"]
+                mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" { i = i + 1 }
+                fortsett
+            }
+            hvis u == "FOREIGN" {
+                i = i + 1
+                hvis i < lengde(toks) og _opp(toks[i]) == "KEY" { i = i + 1 }
+                la grp = _les_kol_liste(toks, i)
+                i = grp["etter"]
+                hvis i < lengde(toks) og _opp(toks[i]) == "REFERENCES" {
+                    i = i + 1
+                    la rtab = ""
+                    hvis i < lengde(toks) { rtab = toks[i]; i = i + 1 }
+                    la refcol = ""
+                    hvis i < lengde(toks) og toks[i] == "(" {
+                        la rg = _les_kol_liste(toks, i)
+                        hvis lengde(rg["cols"]) > 0 { refcol = rg["cols"][0] }
+                        i = rg["etter"]
+                    }
+                    hvis lengde(grp["cols"]) > 0 {
+                        la acts = _fk_les_actions(toks, i)
+                        legg_til(c_fk, {"col": grp["cols"][0], "tab": rtab, "refcol": refcol, "on_delete": acts["on_delete"], "on_update": acts["on_update"]})
+                    }
+                }
+                mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" { i = i + 1 }
+                fortsett
+            }
+            // Kolonne-definisjon: namn [type] [constraints…]
+            la kol_navn = toks[i]
+            la kol_type = "TEXT"
+            i = i + 1
+            hvis i < lengde(toks) og toks[i] != "," og toks[i] != ")" og ikke _er_kol_constraint_kw(toks[i]) {
+                kol_type = toks[i]
+                i = i + 1
+            }
+            mens i < lengde(toks) og toks[i] != "," og toks[i] != ")" {
+                la cu = _opp(toks[i])
+                hvis cu == "NOT" og i + 1 < lengde(toks) og _opp(toks[i + 1]) == "NULL" {
+                    legg_til(c_notnull, kol_navn)
+                    i = i + 2
+                } ellers hvis cu == "PRIMARY" {
+                    i = i + 1
+                    hvis i < lengde(toks) og _opp(toks[i]) == "KEY" { i = i + 1 }
+                    legg_til(c_pk, kol_navn)
+                    legg_til(c_unique, [kol_navn])
+                } ellers hvis cu == "UNIQUE" {
+                    legg_til(c_unique, [kol_navn])
+                    i = i + 1
+                } ellers hvis cu == "DEFAULT" {
+                    i = i + 1
+                    hvis i < lengde(toks) { c_default[kol_navn] = _unquote(toks[i]); i = i + 1 }
+                } ellers hvis cu == "CHECK" {
+                    i = i + 1
+                    la sub = _slice_paren(toks, i)
+                    legg_til(c_checks, sub["inner"])
+                    i = sub["etter"]
+                } ellers hvis cu == "REFERENCES" {
+                    i = i + 1
+                    la rtab = ""
+                    hvis i < lengde(toks) { rtab = toks[i]; i = i + 1 }
+                    la refcol = ""
+                    hvis i < lengde(toks) og toks[i] == "(" {
+                        la rg = _les_kol_liste(toks, i)
+                        hvis lengde(rg["cols"]) > 0 { refcol = rg["cols"][0] }
+                        i = rg["etter"]
+                    }
+                    la acts = _fk_les_actions(toks, i)
+                    legg_til(c_fk, {"col": kol_navn, "tab": rtab, "refcol": refcol, "on_delete": acts["on_delete"], "on_update": acts["on_update"]})
+                } ellers {
+                    i = i + 1
+                }
+            }
+            legg_til(kolonner, {"navn": kol_navn, "tag": _tag_av_type(kol_type)})
+        }
+        motor.db_opprett_tabell(db, navn, kolonner)
+        db["tabellar"][navn]["c"] = {"notnull": c_notnull, "pk": c_pk, "unique": c_unique, "default": c_default, "checks": c_checks, "fk": c_fk}
+        returner 0
+    }
+
+    hvis kmd == "DROP" og lengde(toks) >= 3 og _opp(toks[1]) == "TABLE" {
+        la idx = 2
+        hvis _opp(toks[idx]) == "IF" og idx + 1 < lengde(toks) og _opp(toks[idx + 1]) == "EXISTS" {
+            idx = idx + 2
+        }
+        hvis idx < lengde(toks) {
+            la navn = toks[idx]
+            hvis finnes_nøkkel(db["tabellar"], navn) {
+                fjern_nokkel(db["tabellar"], navn)
+            }
+        }
+        returner 0
+    }
+
+    // CREATE VIEW navn AS <select>
+    hvis kmd == "CREATE" og lengde(toks) >= 5 og _opp(toks[1]) == "VIEW" {
+        la j = 2
+        hvis _opp(toks[j]) == "IF" { mens j < lengde(toks) og _opp(toks[j]) != "AS" og toks[j] != "(" { j = j + 1 } }
+        la vnavn = ""
+        hvis j < lengde(toks) og _opp(toks[j]) != "AS" { vnavn = toks[j]; j = j + 1 }
+        hvis j < lengde(toks) og _opp(toks[j]) == "AS" { j = j + 1 }
+        _sikre_views(db)
+        db["_views"][vnavn] = _slice_range(toks, j, lengde(toks))
+        returner 0
+    }
+
+    // CREATE TRIGGER navn [BEFORE|AFTER] EVENT ON tab [FOR EACH ROW] BEGIN … END
+    hvis kmd == "CREATE" og lengde(toks) >= 6 og _opp(toks[1]) == "TRIGGER" {
+        la j = 2
+        la tnavn = toks[j]
+        j = j + 1
+        la when = "AFTER"
+        hvis j < lengde(toks) og (_opp(toks[j]) == "BEFORE" eller _opp(toks[j]) == "AFTER") { when = _opp(toks[j]); j = j + 1 } ellers hvis j < lengde(toks) og _opp(toks[j]) == "INSTEAD" { when = "INSTEAD"; j = j + 1; hvis j < lengde(toks) og _opp(toks[j]) == "OF" { j = j + 1 } }
+        la event = ""
+        hvis j < lengde(toks) { event = _opp(toks[j]); j = j + 1 }
+        hvis event == "UPDATE" og j < lengde(toks) og _opp(toks[j]) == "OF" { mens j < lengde(toks) og _opp(toks[j]) != "ON" { j = j + 1 } }
+        hvis j < lengde(toks) og _opp(toks[j]) == "ON" { j = j + 1 }
+        la ttab = ""
+        hvis j < lengde(toks) { ttab = toks[j]; j = j + 1 }
+        mens j < lengde(toks) og _opp(toks[j]) != "BEGIN" { j = j + 1 }
+        hvis j < lengde(toks) og _opp(toks[j]) == "BEGIN" { j = j + 1 }
+        // Kropp: setningar skilde med ";" til END.
+        la body = []
+        la cur = []
+        mens j < lengde(toks) og _opp(toks[j]) != "END" {
+            hvis toks[j] == ";" {
+                hvis lengde(cur) > 0 { legg_til(body, cur); cur = [] }
+            } ellers {
+                legg_til(cur, toks[j])
+            }
+            j = j + 1
+        }
+        hvis lengde(cur) > 0 { legg_til(body, cur) }
+        _sikre_triggers(db)
+        legg_til(db["_triggers"], {"navn": tnavn, "when": when, "event": event, "tab": ttab, "body": body})
+        returner 0
+    }
+
+    hvis kmd == "DROP" og lengde(toks) >= 3 og _opp(toks[1]) == "VIEW" {
+        la idx = 2
+        hvis _opp(toks[idx]) == "IF" og idx + 1 < lengde(toks) og _opp(toks[idx + 1]) == "EXISTS" { idx = idx + 2 }
+        _sikre_views(db)
+        hvis idx < lengde(toks) og finnes_nøkkel(db["_views"], toks[idx]) { fjern_nokkel(db["_views"], toks[idx]) }
+        returner 0
+    }
+
+    hvis kmd == "DROP" og lengde(toks) >= 3 og _opp(toks[1]) == "TRIGGER" {
+        la idx = 2
+        hvis _opp(toks[idx]) == "IF" og idx + 1 < lengde(toks) og _opp(toks[idx + 1]) == "EXISTS" { idx = idx + 2 }
+        _sikre_triggers(db)
+        hvis idx < lengde(toks) {
+            la nye = []
+            la ti = 0
+            mens ti < lengde(db["_triggers"]) {
+                hvis db["_triggers"][ti]["navn"] != toks[idx] { legg_til(nye, db["_triggers"][ti]) }
+                ti = ti + 1
+            }
+            db["_triggers"] = nye
+        }
+        returner 0
+    }
+
+    // ALTER TABLE t (ADD COLUMN | RENAME TO | RENAME COLUMN | DROP COLUMN)
+    hvis kmd == "ALTER" og lengde(toks) >= 4 og _opp(toks[1]) == "TABLE" {
+        la tnavn = toks[2]
+        hvis ikke finnes_nøkkel(db["tabellar"], tnavn) { returner 0 - 1 }
+        la t = db["tabellar"][tnavn]
+        la j = 3
+        la aksjon = _opp(toks[j])
+        hvis aksjon == "ADD" {
+            j = j + 1
+            hvis j < lengde(toks) og _opp(toks[j]) == "COLUMN" { j = j + 1 }
+            la kn = ""
+            hvis j < lengde(toks) { kn = toks[j]; j = j + 1 }
+            la kt = "TEXT"
+            hvis j < lengde(toks) { kt = toks[j] }
+            legg_til(t["kolonner"], {"navn": kn, "tag": _tag_av_type(kt)})
+            returner 0
+        }
+        hvis aksjon == "RENAME" {
+            j = j + 1
+            hvis j < lengde(toks) og _opp(toks[j]) == "TO" {
+                j = j + 1
+                la nynavn = toks[j]
+                db["tabellar"][nynavn] = t
+                fjern_nokkel(db["tabellar"], tnavn)
+                returner 0
+            }
+            hvis j < lengde(toks) og _opp(toks[j]) == "COLUMN" { j = j + 1 }
+            la gammal = ""
+            hvis j < lengde(toks) { gammal = toks[j]; j = j + 1 }
+            hvis j < lengde(toks) og _opp(toks[j]) == "TO" { j = j + 1 }
+            la nynavn = ""
+            hvis j < lengde(toks) { nynavn = toks[j] }
+            _rename_kolonne(db, tnavn, gammal, nynavn)
+            returner 0
+        }
+        hvis aksjon == "DROP" {
+            j = j + 1
+            hvis j < lengde(toks) og _opp(toks[j]) == "COLUMN" { j = j + 1 }
+            la kn = ""
+            hvis j < lengde(toks) { kn = toks[j] }
+            _drop_kolonne(db, tnavn, kn)
+            returner 0
+        }
+        returner 0 - 1
+    }
+
+    hvis kmd == "INSERT" og lengde(toks) >= 4 {
+        la mode = ""
+        la ci = 1
+        hvis _opp(toks[ci]) == "OR" og ci + 1 < lengde(toks) {
+            mode = _opp(toks[ci + 1])
+            ci = ci + 2
+        }
+        hvis ci >= lengde(toks) eller _opp(toks[ci]) != "INTO" { returner -1 }
+        ci = ci + 1
+        la navn = toks[ci]
+        ci = ci + 1
+        la kol_namn = []
+        la i = ci
+        hvis i < lengde(toks) og toks[i] == "(" {
+            i = i + 1
+            mens i < lengde(toks) og toks[i] != ")" {
+                hvis toks[i] != "," { legg_til(kol_namn, toks[i]) }
+                i = i + 1
+            }
+            i = i + 1
+        }
+        mens i < lengde(toks) og _opp(toks[i]) != "VALUES" { i = i + 1 }
+        i = i + 1
+        // VALUES ( uttrykk , uttrykk , … ) — evaluer kvart uttrykk (topp-nivå-komma).
+        la verdiar_inn = []
+        hvis i < lengde(toks) og toks[i] == "(" {
+            la vp = _slice_paren(toks, i)
+            i = vp["etter"]
+            la inner = vp["inner"]
+            la grp = []
+            la gd = 0
+            la gi = 0
+            mens gi < lengde(inner) {
+                hvis inner[gi] == "(" { gd = gd + 1 } ellers hvis inner[gi] == ")" { gd = gd - 1 }
+                hvis inner[gi] == "," og gd == 0 {
+                    legg_til(verdiar_inn, _ex_or(grp, 0, {}, _kt_ny(db, {}))["v"])
+                    grp = []
+                } ellers {
+                    legg_til(grp, inner[gi])
+                }
+                gi = gi + 1
+            }
+            hvis lengde(grp) > 0 { legg_til(verdiar_inn, _ex_or(grp, 0, {}, _kt_ny(db, {}))["v"]) }
+        }
+        // Bygg verdiar i tabellens kolonne-rekkefølge + spor kva som vart gitt.
+        la t = db["tabellar"][navn]
+        la gitt = {}
+        la verdier = []
+        hvis lengde(kol_namn) == 0 {
+            la k = 0
+            mens k < lengde(t["kolonner"]) {
+                la v = ""
+                hvis k < lengde(verdiar_inn) { v = verdiar_inn[k]; gitt[t["kolonner"][k]["navn"]] = "1" }
+                legg_til(verdier, v)
+                k = k + 1
+            }
+        } ellers {
+            la k = 0
+            mens k < lengde(t["kolonner"]) {
+                la cn = t["kolonner"][k]["navn"]
+                la v = ""
+                la m = 0
+                mens m < lengde(kol_namn) {
+                    hvis kol_namn[m] == cn og m < lengde(verdiar_inn) { v = verdiar_inn[m]; gitt[cn] = "1" }
+                    m = m + 1
+                }
+                legg_til(verdier, v)
+                k = k + 1
+            }
+        }
+        // DEFAULT for kolonnar som ikkje vart gitt.
+        la c = _tab_c(t)
+        la def = c["default"]
+        la di = 0
+        mens di < lengde(t["kolonner"]) {
+            la cn = t["kolonner"][di]["navn"]
+            hvis (ikke finnes_nøkkel(gitt, cn)) og finnes_nøkkel(def, cn) { verdier[di] = def[cn] }
+            di = di + 1
+        }
+        // Auto-id (som JSON-std.db): tom 'id'-kolonne får neste rowid.
+        la ai = 0
+        mens ai < lengde(t["kolonner"]) {
+            hvis t["kolonner"][ai]["navn"] == "id" og verdier[ai] == "" {
+                verdier[ai] = tekst_fra_heltall(t["next_rowid"])
+            }
+            ai = ai + 1
+        }
+        la nyrad = _rad_av_verdier(t, verdier)
+        la feil = _sjekk_constraints(db, navn, nyrad, 0 - 1)
+        hvis feil != "" {
+            la ups = _finn_on_conflict(toks)
+            hvis ups["har"] {
+                hvis ups["do"] == "NOTHING" { returner 0 }
+                la kr = _konflikt_rowids(db, navn, nyrad)
+                la oppd = 0
+                la ri = 0
+                mens ri < lengde(kr) {
+                    la rad = motor.db_hent(db, navn, kr[ri])
+                    la sk = 0
+                    mens sk < lengde(ups["set_kol"]) {
+                        rad[ups["set_kol"][sk]] = _upsert_verdi(ups["set_val"][sk], nyrad)
+                        sk = sk + 1
+                    }
+                    motor.db_oppdater(db, navn, kr[ri], _verdier_av_rad(t, rad))
+                    oppd = oppd + 1
+                    ri = ri + 1
+                }
+                returner oppd
+            }
+            hvis mode == "IGNORE" { returner 0 }
+            hvis mode == "REPLACE" {
+                la kr = _konflikt_rowids(db, navn, nyrad)
+                la ri = 0
+                mens ri < lengde(kr) { motor.db_slett(db, navn, kr[ri]); ri = ri + 1 }
+                la f2 = _sjekk_constraints(db, navn, nyrad, 0 - 1)
+                hvis f2 != "" { db["_siste_feil"] = f2; returner 0 - 1 }
+                _fyr_triggers(db, "BEFORE", "INSERT", navn, nyrad, {})
+                motor.db_sett_inn(db, navn, verdier)
+                _fyr_triggers(db, "AFTER", "INSERT", navn, nyrad, {})
+                returner 1
+            }
+            db["_siste_feil"] = feil
+            returner 0 - 1
+        }
+        _fyr_triggers(db, "BEFORE", "INSERT", navn, nyrad, {})
+        motor.db_sett_inn(db, navn, verdier)
+        _fyr_triggers(db, "AFTER", "INSERT", navn, nyrad, {})
+        returner 1
+    }
+
+    hvis kmd == "DELETE" og lengde(toks) >= 3 og _opp(toks[1]) == "FROM" {
+        la navn = toks[2]
+        la where_start = -1
+        hvis 3 < lengde(toks) og _opp(toks[3]) == "WHERE" { where_start = 4 }
+        la rowids = motor.db_rowids(db, navn)
+        la slettet = 0
+        la r = 0
+        mens r < lengde(rowids) {
+            la rad = motor.db_hent(db, navn, rowids[r])
+            la treff = sann
+            hvis where_start >= 0 { treff = _match_fra(rad, toks, where_start, _kt_ny(db, {})) }
+            hvis treff {
+                hvis ikke _kaskade_restrict_ok(db, navn, rad, {}, "DELETE") { returner 0 - 1 }
+                _fyr_triggers(db, "BEFORE", "DELETE", navn, {}, rad)
+                motor.db_slett(db, navn, rowids[r])
+                _kaskade_delete_apply(db, navn, rad)
+                slettet = slettet + 1
+                _fyr_triggers(db, "AFTER", "DELETE", navn, {}, rad)
+            }
+            r = r + 1
+        }
+        returner slettet
+    }
+
+    hvis kmd == "UPDATE" og lengde(toks) >= 4 og _opp(toks[2]) == "SET" {
+        la navn = toks[1]
+        la set_kol = []
+        la set_val = []
+        la i = 3
+        mens i < lengde(toks) og _opp(toks[i]) != "WHERE" {
+            hvis toks[i] == "," { i = i + 1; fortsett }
+            hvis i + 2 < lengde(toks) og toks[i + 1] == "=" {
+                legg_til(set_kol, toks[i])
+                legg_til(set_val, _unquote(toks[i + 2]))
+                i = i + 3
+            } ellers {
+                i = i + 1
+            }
+        }
+        la where_start = -1
+        hvis i < lengde(toks) og _opp(toks[i]) == "WHERE" { where_start = i + 1 }
+        la t = db["tabellar"][navn]
+        la rowids = motor.db_rowids(db, navn)
+        la oppdatert = 0
+        la r = 0
+        mens r < lengde(rowids) {
+            la rad = motor.db_hent(db, navn, rowids[r])
+            la treff = sann
+            hvis where_start >= 0 { treff = _match_fra(rad, toks, where_start, _kt_ny(db, {})) }
+            hvis treff {
+                la verdier = []
+                la k = 0
+                mens k < lengde(t["kolonner"]) {
+                    la cn = t["kolonner"][k]["navn"]
+                    la v = ""
+                    hvis finnes_nøkkel(rad, cn) { v = rad[cn] }
+                    la s = 0
+                    mens s < lengde(set_kol) {
+                        hvis set_kol[s] == cn { v = set_val[s] }
+                        s = s + 1
+                    }
+                    legg_til(verdier, v)
+                    k = k + 1
+                }
+                la nyrad = _rad_av_verdier(t, verdier)
+                la feil = _sjekk_constraints(db, navn, nyrad, rowids[r])
+                hvis feil != "" { db["_siste_feil"] = feil; returner 0 - 1 }
+                hvis ikke _kaskade_restrict_ok(db, navn, rad, nyrad, "UPDATE") { returner 0 - 1 }
+                _fyr_triggers(db, "BEFORE", "UPDATE", navn, nyrad, rad)
+                motor.db_oppdater(db, navn, rowids[r], verdier)
+                _kaskade_update_apply(db, navn, rad, nyrad)
+                oppdatert = oppdatert + 1
+                _fyr_triggers(db, "AFTER", "UPDATE", navn, nyrad, rad)
+            }
+            r = r + 1
+        }
+        returner oppdatert
+    }
+
+    // Kjende men uimplementerte kontrollsetningar (PRAGMA + transaksjons-/
+    // vedlikehaldsverb) => stille no-op (0), ikkje feilsignal. Speglar
+    // selfhost/vm.no sin _vm_db_stmt_known slik at std.db og VM-motoren har
+    // same feilsemantikk (jf. test_norsdb_feilsignal). Ukjend/ugyldig SQL
+    // (t.d. skrivefeil) held distinkt -1 + siste_feil.
+    hvis kmd == "PRAGMA" eller kmd == "BEGIN" eller kmd == "COMMIT" eller
+        kmd == "ROLLBACK" eller kmd == "SAVEPOINT" eller kmd == "RELEASE" eller
+        kmd == "VACUUM" eller kmd == "ANALYZE" eller kmd == "ATTACH" eller
+        kmd == "DETACH" {
+        returner 0
+    }
+
+    returner -1
+}
+
+// Interne: parse SELECT → {kolonner (namn eller *), tabell, where-start-indeks}
+// Er token eit klausul-startande nøkkelord (topp-nivå-grense i WHERE/GROUP/HAVING)?
+funksjon _er_klausul_kw(u: tekst) -> boolsk {
+    returner u == "ORDER" eller u == "LIMIT" eller u == "OFFSET" eller u == "GROUP" eller u == "HAVING"
+}
+
+// Kan token vere ein tabell-alias (identifikator, ikkje nøkkelord/teiknsetjing)?
+funksjon _er_alias_token(t: tekst) -> boolsk {
+    la u = _opp(t)
+    hvis u == "WHERE" eller u == "GROUP" eller u == "HAVING" eller u == "ORDER" eller u == "LIMIT" eller u == "OFFSET" eller u == "JOIN" eller u == "INNER" eller u == "LEFT" eller u == "RIGHT" eller u == "FULL" eller u == "CROSS" eller u == "ON" eller u == "AS" eller u == "UNION" eller u == "INTERSECT" eller u == "EXCEPT" { returner usann }
+    hvis t == "(" eller t == ")" eller t == "," eller t == ";" { returner usann }
+    la c0 = builtin.slice(t, 0, 1)
+    returner _er_ident(c0) og ikke _er_siffer(c0)
+}
+
+funksjon _parse_select(toks) -> ordbok_tekst {
+    la ut = {}
+    la sel = []
+    la sel_items = []
+    la cur = []
+    la dep = 0
+    la i = 1
+    la distinct = usann
+    hvis i < lengde(toks) og _opp(toks[i]) == "DISTINCT" { distinct = sann; i = i + 1 } ellers hvis i < lengde(toks) og _opp(toks[i]) == "ALL" { i = i + 1 }
+    // SELECT-liste til topp-nivå FROM (paren-djupne-bevisst; hopp over subquery-FROM).
+    mens i < lengde(toks) {
+        la stk = toks[i]
+        hvis stk == "(" { dep = dep + 1 }
+        ellers hvis stk == ")" { dep = dep - 1 }
+        hvis dep == 0 og _opp(stk) == "FROM" { bryt }
+        hvis stk == "," og dep == 0 {
+            hvis lengde(cur) > 0 { legg_til(sel_items, cur) }
+            cur = []
+        } ellers {
+            legg_til(sel, stk)
+            legg_til(cur, stk)
+        }
+        i = i + 1
+    }
+    hvis lengde(cur) > 0 { legg_til(sel_items, cur) }
+    hvis i < lengde(toks) og _opp(toks[i]) == "FROM" { i = i + 1 }
+
+    // FROM: enten (SELECT …) subquery, eller tabellnamn. Deretter valfri alias.
+    la tabell = ""
+    la from_sub = []
+    hvis i < lengde(toks) og toks[i] == "(" {
+        la fsub = _slice_paren(toks, i)
+        from_sub = fsub["inner"]
+        i = fsub["etter"]
+    } ellers hvis i < lengde(toks) {
+        tabell = toks[i]
+        i = i + 1
+    }
+    la alias = ""
+    hvis i < lengde(toks) og _opp(toks[i]) == "AS" {
+        i = i + 1
+        hvis i < lengde(toks) { alias = toks[i]; i = i + 1 }
+    } ellers hvis i < lengde(toks) og _er_alias_token(toks[i]) {
+        alias = toks[i]
+        i = i + 1
+    }
+
+    // JOIN-kjede: [INNER|LEFT|RIGHT|FULL|CROSS] JOIN tab [alias] [ON <uttrykk>], eller "," (implisitt CROSS).
+    // Kvar join = {type, tabell, alias, on: [tokens]}. Multi-vilkår ON støtta via evaluatoren.
+    la joins = []
+    mens sann {
+        la jtype = "INNER"
+        la er_join = usann
+        hvis i < lengde(toks) og toks[i] == "," {
+            jtype = "CROSS"
+            er_join = sann
+            i = i + 1
+        } ellers {
+            la kw = ""
+            hvis i < lengde(toks) { kw = _opp(toks[i]) }
+            hvis kw == "INNER" eller kw == "LEFT" eller kw == "RIGHT" eller kw == "FULL" eller kw == "CROSS" {
+                jtype = kw
+                i = i + 1
+                hvis i < lengde(toks) og _opp(toks[i]) == "OUTER" { i = i + 1 }
+            }
+            hvis i < lengde(toks) og _opp(toks[i]) == "JOIN" {
+                er_join = sann
+                i = i + 1
+            }
+        }
+        hvis ikke er_join { bryt }
+        la jtab = ""
+        hvis i < lengde(toks) { jtab = toks[i]; i = i + 1 }
+        la jalias = ""
+        hvis i < lengde(toks) og _opp(toks[i]) == "AS" {
+            i = i + 1
+            hvis i < lengde(toks) { jalias = toks[i]; i = i + 1 }
+        } ellers hvis i < lengde(toks) og _er_alias_token(toks[i]) {
+            jalias = toks[i]
+            i = i + 1
+        }
+        la on_toks = []
+        hvis i < lengde(toks) og _opp(toks[i]) == "ON" {
+            i = i + 1
+            la od = 0
+            mens i < lengde(toks) {
+                la u = _opp(toks[i])
+                hvis toks[i] == "(" { od = od + 1 }
+                ellers hvis toks[i] == ")" { od = od - 1 }
+                hvis od == 0 og (u == "WHERE" eller u == "GROUP" eller u == "HAVING" eller u == "ORDER" eller u == "LIMIT" eller u == "OFFSET" eller u == "JOIN" eller u == "INNER" eller u == "LEFT" eller u == "RIGHT" eller u == "FULL" eller u == "CROSS" eller toks[i] == ",") { bryt }
+                legg_til(on_toks, toks[i])
+                i = i + 1
+            }
+        }
+        legg_til(joins, {"type": jtype, "tabell": jtab, "alias": jalias, "on": on_toks})
+    }
+
+    la where_toks = []
+    la order_col = ""
+    la order_asc = sann
+    la limit_n = -1
+    la offset_n = 0
+    la group_by = []
+    la having_toks = []
+
+    hvis i < lengde(toks) og _opp(toks[i]) == "WHERE" {
+        i = i + 1
+        la wd = 0
+        mens i < lengde(toks) {
+            hvis toks[i] == "(" { wd = wd + 1 }
+            ellers hvis toks[i] == ")" { wd = wd - 1 }
+            hvis wd == 0 og _er_klausul_kw(_opp(toks[i])) { bryt }
+            legg_til(where_toks, toks[i])
+            i = i + 1
+        }
+    }
+    mens i < lengde(toks) {
+        la tk = _opp(toks[i])
+        hvis tk == "GROUP" {
+            i = i + 1
+            hvis i < lengde(toks) og _opp(toks[i]) == "BY" { i = i + 1 }
+            la gd = 0
+            mens i < lengde(toks) {
+                hvis toks[i] == "(" { gd = gd + 1 }
+                ellers hvis toks[i] == ")" { gd = gd - 1 }
+                hvis gd == 0 og (_opp(toks[i]) == "ORDER" eller _opp(toks[i]) == "LIMIT" eller _opp(toks[i]) == "OFFSET" eller _opp(toks[i]) == "HAVING") { bryt }
+                hvis toks[i] != "," { legg_til(group_by, toks[i]) }
+                i = i + 1
+            }
+        } ellers hvis tk == "HAVING" {
+            i = i + 1
+            la hd = 0
+            mens i < lengde(toks) {
+                hvis toks[i] == "(" { hd = hd + 1 }
+                ellers hvis toks[i] == ")" { hd = hd - 1 }
+                hvis hd == 0 og (_opp(toks[i]) == "ORDER" eller _opp(toks[i]) == "LIMIT" eller _opp(toks[i]) == "OFFSET") { bryt }
+                legg_til(having_toks, toks[i])
+                i = i + 1
+            }
+        } ellers hvis tk == "ORDER" {
+            i = i + 1
+            hvis i < lengde(toks) og _opp(toks[i]) == "BY" { i = i + 1 }
+            hvis i < lengde(toks) { order_col = toks[i]; i = i + 1 }
+            hvis i < lengde(toks) og _opp(toks[i]) == "DESC" {
+                order_asc = usann
+                i = i + 1
+            } ellers hvis i < lengde(toks) og _opp(toks[i]) == "ASC" {
+                i = i + 1
+            }
+        } ellers hvis tk == "LIMIT" {
+            i = i + 1
+            hvis i < lengde(toks) { limit_n = builtin.heltall_fra_tekst(toks[i]); i = i + 1 }
+        } ellers hvis tk == "OFFSET" {
+            i = i + 1
+            hvis i < lengde(toks) { offset_n = builtin.heltall_fra_tekst(toks[i]); i = i + 1 }
+        } ellers {
+            i = i + 1
+        }
+    }
+
+    ut["sel"] = sel
+    ut["sel_items"] = sel_items
+    ut["distinct"] = distinct
+    ut["tabell"] = tabell
+    ut["alias"] = alias
+    ut["from_sub"] = from_sub
+    ut["where"] = where_toks
+    ut["order_col"] = order_col
+    ut["order_asc"] = order_asc
+    ut["limit"] = limit_n
+    ut["offset"] = offset_n
+    ut["group_by"] = group_by
+    ut["having"] = having_toks
+    ut["joins"] = joins
+    returner ut
+}
+
+// Kolonnenamn utan tabell-prefiks: "folk.by" → "by".
+funksjon _kolnavn(ref: tekst) -> tekst {
+    la idx = builtin.index_of(ref, ".")
+    hvis idx >= 0 { returner builtin.slice(ref, idx + 1, lengde(ref)) }
+    returner ref
+}
+
+// Tabell-/alias-prefiks: "folk.by" → "folk"; utan prefiks → "".
+funksjon _kolprefiks(ref: tekst) -> tekst {
+    la idx = builtin.index_of(ref, ".")
+    hvis idx >= 0 { returner builtin.slice(ref, 0, idx) }
+    returner ""
+}
+
+// Slå saman ei (alt akkumulert) venstre-rad med ei høgre rad. Høgre-kolonnar leggjast
+// inn både kvalifisert ("a2.kol") og ukvalifisert ("kol"). Tom rr = NULL-side (utfyll ""-verdi).
+funksjon _merge_inn(lr, rr, a2: tekst) -> ordbok_tekst {
+    la m = {}
+    la lk = nøkler(lr)
+    la i = 0
+    mens i < lengde(lk) { m[lk[i]] = lr[lk[i]]; i = i + 1 }
+    la rk = nøkler(rr)
+    i = 0
+    mens i < lengde(rk) {
+        m[a2 + "." + rk[i]] = rr[rk[i]]
+        m[rk[i]] = rr[rk[i]]
+        i = i + 1
+    }
+    returner m
+}
+
+// Join av akkumulerte venstre-rader med ei høgre-tabell. ON-uttrykk (`on_toks`) evaluerast
+// mot den samanslåtte rada (multi-vilkår via evaluatoren). Handterar INNER/LEFT/RIGHT/FULL/CROSS.
+funksjon _join2(venstre, hoyre, a2: tekst, on_toks, jtype: tekst, kt) -> liste {
+    la ut = []
+    la hoyre_matchet = []
+    la hi = 0
+    mens hi < lengde(hoyre) { legg_til(hoyre_matchet, usann); hi = hi + 1 }
+    la li = 0
+    mens li < lengde(venstre) {
+        la lr = venstre[li]
+        la matchet = usann
+        la rj = 0
+        mens rj < lengde(hoyre) {
+            la merged = _merge_inn(lr, hoyre[rj], a2)
+            la ok = sann
+            hvis lengde(on_toks) > 0 { ok = _match(merged, on_toks, kt) }
+            hvis ok {
+                legg_til(ut, merged)
+                matchet = sann
+                hoyre_matchet[rj] = sann
+            }
+            rj = rj + 1
+        }
+        hvis ikke matchet og (jtype == "LEFT" eller jtype == "FULL") {
+            legg_til(ut, _merge_inn(lr, {}, a2))
+        }
+        li = li + 1
+    }
+    hvis jtype == "RIGHT" eller jtype == "FULL" {
+        la rk = 0
+        mens rk < lengde(hoyre) {
+            hvis ikke hoyre_matchet[rk] {
+                legg_til(ut, _merge_inn({}, hoyre[rk], a2))
+            }
+            rk = rk + 1
+        }
+    }
+    returner ut
+}
+
+// Bygg join-resultatet ved å folde JOIN-kjeda venstre→høgre.
+funksjon _joinede_rader(db, p) -> liste {
+    la kt = _kt_ny(db, {})
+    la a1 = p["tabell"]
+    hvis finnes_nøkkel(p, "alias") og p["alias"] != "" { a1 = p["alias"] }
+    la akk = []
+    la base = motor.db_alle(db, p["tabell"])
+    la bi = 0
+    mens bi < lengde(base) { legg_til(akk, _merge_inn({}, base[bi], a1)); bi = bi + 1 }
+    la joins = p["joins"]
+    la ji = 0
+    mens ji < lengde(joins) {
+        la jn = joins[ji]
+        la a2 = jn["tabell"]
+        hvis jn["alias"] != "" { a2 = jn["alias"] }
+        akk = _join2(akk, motor.db_alle(db, jn["tabell"]), a2, jn["on"], jn["type"], kt)
+        ji = ji + 1
+    }
+    returner akk
+}
+
+funksjon _filtrer_liste(alle, wt, kt) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(alle) {
+        hvis _match(alle[i], wt, kt) { legg_til(ut, alle[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _er_range_op(op: tekst) -> boolsk {
+    returner op == ">" eller op == "<" eller op == ">=" eller op == "<="
+}
+
+funksjon _legg_alle(mål, kjelde) {
+    la i = 0
+    mens i < lengde(kjelde) { legg_til(mål, kjelde[i]); i = i + 1 }
+}
+
+// Prøv å bruke equality-/range-indeks for WHERE. Returnerer {brukt, rowids}.
+// Dekkjer `kol = v`, `kol >/</>=/<= v`, og `kol BETWEEN a AND b` når kol er indeksert.
+funksjon _indeks_kandidatar(db, p) -> ordbok_tekst {
+    la wt = p["where"]
+    la tab = p["tabell"]
+    hvis lengde(wt) == 3 og wt[1] == "=" og motor.db_har_indeks(db, tab, wt[0]) {
+        returner {"brukt": sann, "rowids": motor.db_indeks_søk(db, tab, wt[0], _unquote(wt[2]))}
+    }
+    hvis lengde(wt) == 3 og _er_range_op(wt[1]) og motor.db_har_indeks(db, tab, wt[0]) {
+        la verdi = _unquote(wt[2])
+        la nkl = motor.db_indeks_nøkler(db, tab, wt[0])
+        la rowids = []
+        la ni = 0
+        mens ni < lengde(nkl) {
+            hvis _cmp(nkl[ni], wt[1], verdi) {
+                _legg_alle(rowids, motor.db_indeks_søk(db, tab, wt[0], nkl[ni]))
+            }
+            ni = ni + 1
+        }
+        returner {"brukt": sann, "rowids": rowids}
+    }
+    hvis lengde(wt) == 5 og _opp(wt[1]) == "BETWEEN" og motor.db_har_indeks(db, tab, wt[0]) {
+        la laag = _unquote(wt[2])
+        la hoeg = _unquote(wt[4])
+        la nkl = motor.db_indeks_nøkler(db, tab, wt[0])
+        la rowids = []
+        la ni = 0
+        mens ni < lengde(nkl) {
+            hvis _cmp(nkl[ni], ">=", laag) og _cmp(nkl[ni], "<=", hoeg) {
+                _legg_alle(rowids, motor.db_indeks_søk(db, tab, wt[0], nkl[ni]))
+            }
+            ni = ni + 1
+        }
+        returner {"brukt": sann, "rowids": rowids}
+    }
+    returner {"brukt": usann, "rowids": []}
+}
+
+// WHERE-filtrerte rader. Handterer JOIN, og brukar indeks (equality + range + BETWEEN)
+// når mogleg. Kandidatar re-verifiserast med _match, så resultatet er alltid korrekt.
+funksjon _filtrer(db, p) -> liste {
+    returner _filtrer_kt(db, p, {})
+}
+
+// Som _filtrer, men med ytre rad-scope (`ytre`) for korrelerte subqueries.
+// Indeks-snarveg deaktiverast når WHERE er korrelert (ytre ikkje tom), for korrektheit.
+funksjon _filtrer_kt(db, p, ytre) -> liste {
+    la kt = _kt_ny(db, ytre)
+    kt["navn"] = p["tabell"]
+    kt["alias"] = ""
+    hvis finnes_nøkkel(p, "alias") { kt["alias"] = p["alias"] }
+    // FROM (SELECT …): materialiser subquery som baserader, filtrer så ytre WHERE.
+    hvis finnes_nøkkel(p, "from_sub") og lengde(p["from_sub"]) > 0 {
+        returner _filtrer_liste(_subq_projiser(db, p["from_sub"], ytre), p["where"], kt)
+    }
+    // FROM <view>: materialiser view-spørjinga som baserader.
+    hvis _er_view(db, p["tabell"]) {
+        returner _filtrer_liste(_subq_projiser(db, db["_views"][p["tabell"]], ytre), p["where"], kt)
+    }
+    hvis finnes_nøkkel(p, "joins") og lengde(p["joins"]) > 0 {
+        returner _filtrer_liste(_joinede_rader(db, p), p["where"], kt)
+    }
+    // FROM-laus SELECT (t.d. "SELECT 1"): éi syntetisk rad gjennom WHERE.
+    hvis p["tabell"] == "" {
+        returner _filtrer_liste([{}], p["where"], kt)
+    }
+    hvis lengde(nøkler(ytre)) == 0 {
+        la kand = _indeks_kandidatar(db, p)
+        hvis kand["brukt"] {
+            la rowids = kand["rowids"]
+            la ut = []
+            la i = 0
+            mens i < lengde(rowids) {
+                la rad = motor.db_hent(db, p["tabell"], rowids[i])
+                hvis lengde(nøkler(rad)) > 0 og _match(rad, p["where"], kt) {
+                    legg_til(ut, rad)
+                }
+                i = i + 1
+            }
+            returner ut
+        }
+    }
+    returner _filtrer_liste(motor.db_alle(db, p["tabell"]), p["where"], kt)
+}
+
+// Selection-sort på ein kolonne, tal-bevisst.
+funksjon _sorter(rader, kol: tekst, asc: boolsk) -> liste {
+    la i = 0
+    mens i < lengde(rader) {
+        la j = i + 1
+        mens j < lengde(rader) {
+            la a = ""
+            hvis finnes_nøkkel(rader[i], kol) { a = rader[i][kol] }
+            la b = ""
+            hvis finnes_nøkkel(rader[j], kol) { b = rader[j][kol] }
+            la bytt = usann
+            hvis _er_tal(a) og _er_tal(b) {
+                la x = builtin.heltall_fra_tekst(a)
+                la y = builtin.heltall_fra_tekst(b)
+                hvis asc {
+                    hvis x > y { bytt = sann }
+                } ellers {
+                    hvis x < y { bytt = sann }
+                }
+            } ellers {
+                hvis asc {
+                    hvis a > b { bytt = sann }
+                } ellers {
+                    hvis a < b { bytt = sann }
+                }
+            }
+            hvis bytt {
+                la tmp = rader[i]
+                rader[i] = rader[j]
+                rader[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner rader
+}
+
+funksjon _snitt(rader, offset: heltall, limit: heltall) -> liste {
+    hvis offset <= 0 og limit < 0 { returner rader }
+    la ut = []
+    la start = offset
+    hvis start < 0 { start = 0 }
+    la i = start
+    la tatt = 0
+    mens i < lengde(rader) {
+        hvis limit >= 0 og tatt >= limit { bryt }
+        legg_til(ut, rader[i])
+        tatt = tatt + 1
+        i = i + 1
+    }
+    returner ut
+}
+
+// Del select-items i felt: "col" (kolonne) eller "agg" (COUNT/SUM/AVG/MIN/MAX(arg)).
+// Klassifiser SELECT-element (token-lister frå sel_items) i felt:
+//   star = "*",  agg = COUNT/SUM/…,  col = eitt reint kolonne-namn,  expr = uttrykk (evaluerast per rad).
+funksjon _sel_felt(items) -> ordbok_tekst {
+    la kind = []
+    la a = []
+    la b = []
+    la expr = []
+    la si = 0
+    mens si < lengde(items) {
+        la it = items[si]
+        la t0 = _opp(it[0])
+        hvis lengde(it) == 1 og it[0] == "*" {
+            legg_til(kind, "star")
+            legg_til(a, "*")
+            legg_til(b, "")
+            legg_til(expr, [])
+        } ellers hvis _item_har_over(it) {
+            // Vindusfunksjon: FN(...) OVER (...) — sjekk FØR agg (SUM(x) OVER er vindu, ikkje agg).
+            legg_til(kind, "window")
+            legg_til(a, _opp(it[0]))
+            legg_til(b, "")
+            legg_til(expr, it)
+        } ellers hvis lengde(it) >= 2 og (t0 == "COUNT" eller t0 == "SUM" eller t0 == "AVG" eller t0 == "MIN" eller t0 == "MAX" eller t0 == "GROUP_CONCAT" eller t0 == "TOTAL") og it[1] == "(" {
+            la arg = "*"
+            // COUNT(DISTINCT kol) / SUM(DISTINCT kol) osv: hopp over DISTINCT-nøkkelordet
+            // og kod distinkt-flagget inn i arg med "DISTINCT "-prefiks (kolonnenamn er
+            // enkelt-tokens utan mellomrom, så prefikset kolliderer ikkje).
+            la argi = 2
+            hvis lengde(it) >= 3 og _opp(it[2]) == "DISTINCT" { argi = 3 }
+            hvis lengde(it) > argi og it[argi] != ")" {
+                hvis argi == 3 { arg = "DISTINCT " + it[argi] } ellers { arg = it[argi] }
+            }
+            legg_til(kind, "agg")
+            legg_til(a, t0)
+            legg_til(b, arg)
+            legg_til(expr, it)
+        } ellers hvis lengde(it) == 1 og ikke _er_tal(it[0]) og builtin.slice(it[0], 0, 1) != "'" {
+            legg_til(kind, "col")
+            legg_til(a, it[0])
+            legg_til(b, "")
+            legg_til(expr, [])
+        } ellers {
+            legg_til(kind, "expr")
+            legg_til(a, "")
+            legg_til(b, "")
+            legg_til(expr, it)
+        }
+        si = si + 1
+    }
+    returner {"kind": kind, "a": a, "b": b, "expr": expr}
+}
+
+// DISTINCT-handtering for aggregat: arg med "DISTINCT "-prefiks → dedupliser radene
+// på kolonneverdien (behald første rad per verdi) og returner rein kolonne. NULL/""
+// blir éin distinkt verdi; COUNT hoppar over den via si eiga v != ""-sjekk (SQLite-likt).
+funksjon _agg_dedup(rader, arg: tekst) -> ordbok_tekst {
+    hvis lengde(arg) > 9 og builtin.slice(arg, 0, 9) == "DISTINCT " {
+        la kol = builtin.slice(arg, 9, lengde(arg))
+        la sett = {}
+        la nye = []
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], kol) { v = rader[i][kol] }
+            hvis ikke finnes_nøkkel(sett, v) { sett[v] = sann; legg_til(nye, rader[i]) }
+            i = i + 1
+        }
+        returner {"arg": kol, "rader": nye}
+    }
+    returner {"arg": arg, "rader": rader}
+}
+
+// Aggregat over ei liste rader. AVG = heiltalsdivisjon (G1).
+funksjon _agg_over(rader, fn: tekst, arg: tekst) -> heltall {
+    la _dd = _agg_dedup(rader, arg)
+    rader = _dd["rader"]
+    arg = _dd["arg"]
+    hvis fn == "COUNT" {
+        hvis arg == "*" { returner lengde(rader) }
+        la c = 0
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis v != "" { c = c + 1 }
+            i = i + 1
+        }
+        returner c
+    }
+    hvis fn == "MIN" eller fn == "MAX" {
+        la first = sann
+        la best = 0
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis _er_tal(v) {
+                la x = builtin.heltall_fra_tekst(v)
+                hvis first {
+                    best = x
+                    first = usann
+                } ellers hvis fn == "MIN" og x < best {
+                    best = x
+                } ellers hvis fn == "MAX" og x > best {
+                    best = x
+                }
+            }
+            i = i + 1
+        }
+        returner best
+    }
+    la total = 0
+    la cnt = 0
+    la i = 0
+    mens i < lengde(rader) {
+        la v = ""
+        hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+        hvis _er_tal(v) {
+            total = total + builtin.heltall_fra_tekst(v)
+            cnt = cnt + 1
+        }
+        i = i + 1
+    }
+    hvis fn == "SUM" eller fn == "TOTAL" { returner total }
+    hvis cnt == 0 { returner 0 }
+    returner total / cnt
+}
+
+// Tekst-aggregat: GROUP_CONCAT gjev tekst; numeriske delegerer til _agg_over.
+// `item` = heile token-lista for aggregatet (for å hente valfri separator).
+funksjon _agg_txt(rader, fn: tekst, arg: tekst, item) -> tekst {
+    la _dd = _agg_dedup(rader, arg)
+    rader = _dd["rader"]
+    arg = _dd["arg"]
+    hvis fn == "GROUP_CONCAT" {
+        la sep = ","
+        // Finn valfri separator: GROUP_CONCAT(kol, 'sep') → token etter topp-nivå-komma.
+        la k = 2
+        mens k < lengde(item) og item[k] != "," og item[k] != ")" { k = k + 1 }
+        hvis k + 1 < lengde(item) og item[k] == "," { sep = _unquote(item[k + 1]) }
+        la deler = []
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis v != "" { legg_til(deler, v) }
+            i = i + 1
+        }
+        returner builtin.join(deler, sep)
+    }
+    hvis fn == "AVG" {
+        la sum = builtin.desimaltall("0")
+        la cnt = 0
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis _er_tal(v) { sum = sum + builtin.desimaltall(v); cnt = cnt + 1 }
+            i = i + 1
+        }
+        hvis cnt == 0 { returner "" }
+        returner _fmt_real(sum / builtin.desimaltall(tekst_fra_heltall(cnt)))
+    }
+    hvis fn == "SUM" eller fn == "TOTAL" {
+        la sum = builtin.desimaltall("0")
+        la har_real = usann
+        la har_verdi = usann
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis _er_tal(v) {
+                sum = sum + builtin.desimaltall(v)
+                har_verdi = sann
+                hvis _er_real(v) { har_real = sann }
+            }
+            i = i + 1
+        }
+        hvis fn == "SUM" og ikke har_verdi { returner "" }
+        hvis har_real eller fn == "TOTAL" { returner _fmt_real(sum) }
+        returner tekst_fra_heltall(_flyt_trunk(sum))
+    }
+    hvis fn == "MIN" eller fn == "MAX" {
+        la best = ""
+        la har = usann
+        la i = 0
+        mens i < lengde(rader) {
+            la v = ""
+            hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
+            hvis v != "" {
+                hvis ikke har { best = v; har = sann } ellers hvis fn == "MIN" og _cmp(v, "<", best) { best = v } ellers hvis fn == "MAX" og _cmp(v, ">", best) { best = v }
+            }
+            i = i + 1
+        }
+        returner best
+    }
+    returner tekst_fra_heltall(_agg_over(rader, fn, arg))
+}
+
+// HAVING: eit aggregat-uttrykk samanlikna med ein verdi (t.d. COUNT(*) > 1).
+funksjon _having(grp, toks) -> boolsk {
+    hvis lengde(toks) < 4 { returner sann }
+    la fn = _opp(toks[0])
+    la j = 0
+    mens j < lengde(toks) og toks[j] != ")" { j = j + 1 }
+    la arg = "*"
+    hvis j >= 3 { arg = toks[2] }
+    hvis j + 2 >= lengde(toks) { returner sann }
+    la aggval = _agg_over(grp, fn, arg)
+    returner _cmp(tekst_fra_heltall(aggval), toks[j + 1], _unquote(toks[j + 2]))
+}
+
+// ── Set-operasjonar + linje-hjelparar (Fase 7e) ──────────────────────
+funksjon _slice_range(toks, a: heltall, b: heltall) -> liste {
+    la ut = []
+    la i = a
+    mens i < b { legg_til(ut, toks[i]); i = i + 1 }
+    returner ut
+}
+
+funksjon _splittlinjer(s: tekst) -> liste {
+    hvis s == "" { returner [] }
+    returner builtin.split(s, "\n")
+}
+
+funksjon _snitt_linjer(linjer, offset: heltall, limit: heltall) -> liste {
+    la ut = []
+    la i = offset
+    hvis i < 0 { i = 0 }
+    la tatt = 0
+    mens i < lengde(linjer) og (limit < 0 eller tatt < limit) {
+        legg_til(ut, linjer[i])
+        tatt = tatt + 1
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _dedup_linjer(linjer) -> liste {
+    la sett = {}
+    la ut = []
+    la i = 0
+    mens i < lengde(linjer) {
+        hvis ikke finnes_nøkkel(sett, linjer[i]) {
+            sett[linjer[i]] = "1"
+            legg_til(ut, linjer[i])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _linje_felt0(linje: tekst) -> tekst {
+    la b = builtin.index_of(linje, "|")
+    hvis b >= 0 { returner builtin.slice(linje, 0, b) }
+    returner linje
+}
+
+funksjon _linje_mindre(a: tekst, b: tekst) -> boolsk {
+    la fa = _linje_felt0(a)
+    la fb = _linje_felt0(b)
+    hvis _er_tal(fa) og _er_tal(fb) { returner _cmp(fa, "<", fb) }
+    returner fa < fb
+}
+
+// Selection-sort på første felt (tal-bevisst), stigande/synkande.
+funksjon _sorter_linjer(linjer, asc: boolsk) -> liste {
+    la ut = []
+    la n = 0
+    mens n < lengde(linjer) { legg_til(ut, linjer[n]); n = n + 1 }
+    la i = 0
+    mens i < lengde(ut) {
+        la best = i
+        la j = i + 1
+        mens j < lengde(ut) {
+            la swap = usann
+            hvis asc { swap = _linje_mindre(ut[j], ut[best]) } ellers { swap = _linje_mindre(ut[best], ut[j]) }
+            hvis swap { best = j }
+            j = j + 1
+        }
+        la tmp = ut[i]
+        ut[i] = ut[best]
+        ut[best] = tmp
+        i = i + 1
+    }
+    returner ut
+}
+
+// Finn første topp-nivå set-operator. {har, op, venstre, hoyre}.
+funksjon _finn_setop(toks) -> ordbok {
+    la dep = 0
+    la i = 0
+    mens i < lengde(toks) {
+        hvis toks[i] == "(" { dep = dep + 1 } ellers hvis toks[i] == ")" { dep = dep - 1 } ellers hvis dep == 0 {
+            la u = _opp(toks[i])
+            hvis u == "UNION" eller u == "INTERSECT" eller u == "EXCEPT" {
+                la op = u
+                la nxt = i + 1
+                hvis u == "UNION" og nxt < lengde(toks) og _opp(toks[nxt]) == "ALL" { op = "UNION ALL"; nxt = nxt + 1 }
+                returner {"har": sann, "op": op, "venstre": _slice_range(toks, 0, i), "hoyre": _slice_range(toks, nxt, lengde(toks))}
+            }
+        }
+        i = i + 1
+    }
+    returner {"har": usann, "op": "", "venstre": [], "hoyre": []}
+}
+
+// Trekk ut topp-nivå ORDER BY / LIMIT som gjeld heile set-op-uttrykket.
+funksjon _setop_order(toks) -> ordbok {
+    la dep = 0
+    la op_i = 0 - 1
+    la lim_i = 0 - 1
+    la i = 0
+    mens i < lengde(toks) {
+        hvis toks[i] == "(" { dep = dep + 1 } ellers hvis toks[i] == ")" { dep = dep - 1 } ellers hvis dep == 0 {
+            la u = _opp(toks[i])
+            hvis u == "ORDER" og op_i < 0 { op_i = i }
+            hvis u == "LIMIT" og lim_i < 0 { lim_i = i }
+        }
+        i = i + 1
+    }
+    la slutt = lengde(toks)
+    hvis op_i >= 0 og op_i < slutt { slutt = op_i }
+    hvis lim_i >= 0 og lim_i < slutt { slutt = lim_i }
+    la order_har = usann
+    la asc = sann
+    la limit = 0 - 1
+    la offset = 0
+    hvis op_i >= 0 {
+        order_har = sann
+        la j = op_i + 1
+        hvis j < lengde(toks) og _opp(toks[j]) == "BY" { j = j + 1 }
+        hvis j < lengde(toks) { j = j + 1 }
+        hvis j < lengde(toks) og _opp(toks[j]) == "DESC" { asc = usann }
+    }
+    hvis lim_i >= 0 {
+        la j = lim_i + 1
+        hvis j < lengde(toks) { limit = builtin.heltall_fra_tekst(toks[j]); j = j + 1 }
+        hvis j < lengde(toks) og _opp(toks[j]) == "OFFSET" { j = j + 1; hvis j < lengde(toks) { offset = builtin.heltall_fra_tekst(toks[j]) } }
+    }
+    returner {"kropp": _slice_range(toks, 0, slutt), "order_har": order_har, "asc": asc, "limit": limit, "offset": offset}
+}
+
+funksjon _komb_setop(op: tekst, vl, hl) -> liste {
+    hvis op == "UNION ALL" {
+        la ut = []
+        _legg_alle(ut, vl)
+        _legg_alle(ut, hl)
+        returner ut
+    }
+    hvis op == "INTERSECT" eller op == "EXCEPT" {
+        la hs = {}
+        la i = 0
+        mens i < lengde(hl) { hs[hl[i]] = "1"; i = i + 1 }
+        la ut = []
+        i = 0
+        mens i < lengde(vl) {
+            la inn = finnes_nøkkel(hs, vl[i])
+            hvis (op == "INTERSECT" og inn) eller (op == "EXCEPT" og ikke inn) { legg_til(ut, vl[i]) }
+            i = i + 1
+        }
+        returner _dedup_linjer(ut)
+    }
+    // UNION
+    la ut = []
+    _legg_alle(ut, vl)
+    _legg_alle(ut, hl)
+    returner _dedup_linjer(ut)
+}
+
+// ── Vindusfunksjonar (Fase 7g) ───────────────────────────────────────
+funksjon _item_har_over(it) -> boolsk {
+    la i = 0
+    mens i < lengde(it) {
+        hvis _opp(it[i]) == "OVER" { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _har_vindu(felt) -> boolsk {
+    la i = 0
+    mens i < lengde(felt["kind"]) {
+        hvis felt["kind"][i] == "window" { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Parse "FN(arg) OVER (PARTITION BY … ORDER BY … [ASC|DESC])".
+funksjon _parse_window(item) -> ordbok {
+    la fn = _opp(item[0])
+    la i = 1
+    la arg = "*"
+    hvis i < lengde(item) og item[i] == "(" {
+        i = i + 1
+        hvis i < lengde(item) og item[i] != ")" { arg = item[i] }
+        mens i < lengde(item) og item[i] != ")" { i = i + 1 }
+        hvis i < lengde(item) og item[i] == ")" { i = i + 1 }
+    }
+    hvis i < lengde(item) og _opp(item[i]) == "OVER" { i = i + 1 }
+    la part = []
+    la ocol = ""
+    la oasc = sann
+    hvis i < lengde(item) og item[i] == "(" {
+        i = i + 1
+        mens i < lengde(item) og item[i] != ")" {
+            la u = _opp(item[i])
+            hvis u == "PARTITION" {
+                i = i + 1
+                hvis i < lengde(item) og _opp(item[i]) == "BY" { i = i + 1 }
+                mens i < lengde(item) og item[i] != ")" og _opp(item[i]) != "ORDER" {
+                    hvis item[i] != "," { legg_til(part, item[i]) }
+                    i = i + 1
+                }
+            } ellers hvis u == "ORDER" {
+                i = i + 1
+                hvis i < lengde(item) og _opp(item[i]) == "BY" { i = i + 1 }
+                hvis i < lengde(item) og item[i] != ")" { ocol = item[i]; i = i + 1 }
+                hvis i < lengde(item) og _opp(item[i]) == "DESC" { oasc = usann; i = i + 1 } ellers hvis i < lengde(item) og _opp(item[i]) == "ASC" { i = i + 1 }
+            } ellers {
+                i = i + 1
+            }
+        }
+    }
+    returner {"fn": fn, "arg": arg, "part": part, "ocol": ocol, "oasc": oasc}
+}
+
+funksjon _part_key(rad, part) -> tekst {
+    la deler = []
+    la i = 0
+    mens i < lengde(part) {
+        la v = ""
+        hvis finnes_nøkkel(rad, part[i]) { v = rad[part[i]] }
+        legg_til(deler, v)
+        i = i + 1
+    }
+    returner builtin.join(deler, "")
+}
+
+// Stabil sortering av rad-indeksar på ein kolonne (tal-bevisst, bevar orden ved likheit).
+funksjon _stabil_sort_idx(rader, idxs, kol: tekst, asc: boolsk) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(idxs) { legg_til(ut, idxs[i]); i = i + 1 }
+    // insertion sort (stabil)
+    i = 1
+    mens i < lengde(ut) {
+        la cur = ut[i]
+        la cv = ""
+        hvis finnes_nøkkel(rader[cur], kol) { cv = rader[cur][kol] }
+        la j = i - 1
+        mens j >= 0 {
+            la jv = ""
+            hvis finnes_nøkkel(rader[ut[j]], kol) { jv = rader[ut[j]][kol] }
+            la storre = usann
+            hvis asc { storre = _cmp(jv, ">", cv) } ellers { storre = _cmp(cv, ">", jv) }
+            hvis ikke storre { bryt }
+            ut[j + 1] = ut[j]
+            j = j - 1
+        }
+        ut[j + 1] = cur
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _vindu_ein_part(rader, idxs, w, resultat) {
+    la fn = w["fn"]
+    hvis fn == "ROW_NUMBER" {
+        la rn = 1
+        la j = 0
+        mens j < lengde(idxs) { resultat[idxs[j]] = tekst_fra_heltall(rn); rn = rn + 1; j = j + 1 }
+        returner 0
+    }
+    hvis fn == "RANK" eller fn == "DENSE_RANK" {
+        la prev = ""
+        la har_prev = usann
+        la rank = 0
+        la dense = 0
+        la count = 0
+        la j = 0
+        mens j < lengde(idxs) {
+            count = count + 1
+            la val = ""
+            hvis finnes_nøkkel(rader[idxs[j]], w["ocol"]) { val = rader[idxs[j]][w["ocol"]] }
+            hvis (ikke har_prev) eller val != prev { dense = dense + 1; rank = count; prev = val; har_prev = sann }
+            hvis fn == "DENSE_RANK" { resultat[idxs[j]] = tekst_fra_heltall(dense) } ellers { resultat[idxs[j]] = tekst_fra_heltall(rank) }
+            j = j + 1
+        }
+        returner 0
+    }
+    // Aggregat OVER: heile partisjon (utan ORDER) eller løpande (med ORDER, ROWS-ramme).
+    hvis w["ocol"] == "" {
+        la delrader = []
+        la j = 0
+        mens j < lengde(idxs) { legg_til(delrader, rader[idxs[j]]); j = j + 1 }
+        la aggv = _agg_txt(delrader, fn, w["arg"], [])
+        j = 0
+        mens j < lengde(idxs) { resultat[idxs[j]] = aggv; j = j + 1 }
+    } ellers {
+        la delrader = []
+        la j = 0
+        mens j < lengde(idxs) {
+            legg_til(delrader, rader[idxs[j]])
+            resultat[idxs[j]] = _agg_txt(delrader, fn, w["arg"], [])
+            j = j + 1
+        }
+    }
+    returner 0
+}
+
+// Rekn ut vindus-verdiar for alle rader (justert til `rader`-indeks).
+funksjon _vindu_verdiar(rader, w) -> liste {
+    la resultat = []
+    la z = 0
+    mens z < lengde(rader) { legg_til(resultat, ""); z = z + 1 }
+    la pkeys = []
+    la pmap = {}
+    la i = 0
+    mens i < lengde(rader) {
+        la key = _part_key(rader[i], w["part"])
+        hvis ikke finnes_nøkkel(pmap, key) { pmap[key] = []; legg_til(pkeys, key) }
+        legg_til(pmap[key], i)
+        i = i + 1
+    }
+    la pi = 0
+    mens pi < lengde(pkeys) {
+        la idxs = pmap[pkeys[pi]]
+        hvis w["ocol"] != "" { idxs = _stabil_sort_idx(rader, idxs, w["ocol"], w["oasc"]) }
+        _vindu_ein_part(rader, idxs, w, resultat)
+        pi = pi + 1
+    }
+    returner resultat
+}
+
+// ── CTE (Fase 7f): WITH [RECURSIVE] n AS (…), … <hovudspørjing> ───────
+funksjon _er_with(toks) -> boolsk {
+    returner lengde(toks) > 0 og _opp(toks[0]) == "WITH"
+}
+
+// Sett CTE-temp-tabell `navn` = rader (drop+opprett+insert). Kolonnar frå `cols`.
+funksjon _sett_cte_tabell(db, navn: tekst, cols, rader) {
+    la kolonner = []
+    la ci = 0
+    mens ci < lengde(cols) { legg_til(kolonner, {"navn": cols[ci], "tag": motor.tag_tekst()}); ci = ci + 1 }
+    hvis finnes_nøkkel(db["tabellar"], navn) { fjern_nokkel(db["tabellar"], navn) }
+    motor.db_opprett_tabell(db, navn, kolonner)
+    la ri = 0
+    mens ri < lengde(rader) {
+        la verdier = []
+        la k = 0
+        mens k < lengde(cols) {
+            la v = ""
+            hvis finnes_nøkkel(rader[ri], cols[k]) { v = rader[ri][cols[k]] }
+            legg_til(verdier, v)
+            k = k + 1
+        }
+        motor.db_sett_inn(db, navn, verdier)
+        ri = ri + 1
+    }
+}
+
+funksjon _rad_lik(a, b, cols) -> boolsk {
+    la k = 0
+    mens k < lengde(cols) {
+        la av = ""
+        hvis finnes_nøkkel(a, cols[k]) { av = a[cols[k]] }
+        la bv = ""
+        hvis finnes_nøkkel(b, cols[k]) { bv = b[cols[k]] }
+        hvis av != bv { returner usann }
+        k = k + 1
+    }
+    returner sann
+}
+
+funksjon _rad_finst(liste, rad, cols) -> boolsk {
+    la i = 0
+    mens i < lengde(liste) {
+        hvis _rad_lik(liste[i], rad, cols) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Nøkle-om til deklarerte CTE-kolonnenamn (posisjonelt).
+funksjon _remap_rader(rader, frakols, tilkols) -> liste {
+    la ut = []
+    la i = 0
+    mens i < lengde(rader) {
+        la nr = {}
+        la k = 0
+        mens k < lengde(tilkols) {
+            la v = ""
+            hvis k < lengde(frakols) og finnes_nøkkel(rader[i], frakols[k]) { v = rader[i][frakols[k]] }
+            nr[tilkols[k]] = v
+            k = k + 1
+        }
+        legg_til(ut, nr)
+        i = i + 1
+    }
+    returner ut
+}
+
+// Ikkje-rekursiv CTE: materialiser subquery-resultatet som temp-tabell.
+// `declcols` = deklarerte kolonnenamn (frå "navn(a,b)"), tom om ikkje oppgitt.
+funksjon _materialiser_ett_cte(db, navn: tekst, subtoks, declcols) {
+    la rader = _subq_projiser(db, subtoks, {})
+    la derived = []
+    hvis lengde(rader) > 0 { derived = nøkler(rader[0]) }
+    la cols = derived
+    hvis lengde(declcols) > 0 {
+        rader = _remap_rader(rader, derived, declcols)
+        cols = declcols
+    }
+    _sett_cte_tabell(db, navn, cols, rader)
+}
+
+// Rekursiv CTE: base UNION [ALL] rekursiv. Semi-naiv fikspunkt-iterasjon.
+funksjon _materialiser_rec_cte(db, navn: tekst, subtoks, declcols) {
+    la sp = _finn_setop(subtoks)
+    hvis ikke sp["har"] {
+        _materialiser_ett_cte(db, navn, subtoks, declcols)
+        returner 0
+    }
+    la result = _subq_projiser(db, sp["venstre"], {})
+    la derived = []
+    hvis lengde(result) > 0 { derived = nøkler(result[0]) }
+    la cols = derived
+    hvis lengde(declcols) > 0 { result = _remap_rader(result, derived, declcols); cols = declcols }
+    la working = result
+    la iter = 0
+    mens lengde(working) > 0 og iter < 10000 {
+        _sett_cte_tabell(db, navn, cols, working)
+        la kand = _subq_projiser(db, sp["hoyre"], {})
+        hvis lengde(declcols) > 0 og lengde(kand) > 0 { kand = _remap_rader(kand, nøkler(kand[0]), declcols) }
+        la nye = []
+        la j = 0
+        mens j < lengde(kand) {
+            hvis (ikke _rad_finst(result, kand[j], cols)) og (ikke _rad_finst(nye, kand[j], cols)) { legg_til(nye, kand[j]) }
+            j = j + 1
+        }
+        hvis lengde(nye) == 0 { bryt }
+        _legg_alle(result, nye)
+        working = nye
+        iter = iter + 1
+    }
+    _sett_cte_tabell(db, navn, cols, result)
+    returner 0
+}
+
+// Materialiser alle CTE-ar. Returnerer {main: hovud-toks, temp: [namn]}.
+funksjon _materialiser_cte(db, toks) -> ordbok {
+    la i = 1
+    la recursive = usann
+    hvis i < lengde(toks) og _opp(toks[i]) == "RECURSIVE" { recursive = sann; i = i + 1 }
+    la temp = []
+    mens i < lengde(toks) {
+        la navn = toks[i]
+        i = i + 1
+        // valfri deklarert kolonneliste ( a , b , … )
+        la declcols = []
+        hvis i < lengde(toks) og toks[i] == "(" {
+            la g = _les_kol_liste(toks, i)
+            declcols = g["cols"]
+            i = g["etter"]
+        }
+        hvis i < lengde(toks) og _opp(toks[i]) == "AS" { i = i + 1 }
+        hvis i >= lengde(toks) eller toks[i] != "(" { bryt }
+        la sub = _slice_paren(toks, i)
+        i = sub["etter"]
+        hvis recursive { _materialiser_rec_cte(db, navn, sub["inner"], declcols) } ellers { _materialiser_ett_cte(db, navn, sub["inner"], declcols) }
+        legg_til(temp, navn)
+        hvis i < lengde(toks) og toks[i] == "," { i = i + 1; fortsett }
+        bryt
+    }
+    returner {"main": _slice_range(toks, i, lengde(toks)), "temp": temp}
+}
+
+funksjon _rydd_cte(db, temp) {
+    la i = 0
+    mens i < lengde(temp) {
+        hvis finnes_nøkkel(db["tabellar"], temp[i]) { fjern_nokkel(db["tabellar"], temp[i]) }
+        i = i + 1
+    }
+}
+
+// query_int: COUNT/SUM/AVG/MIN/MAX over WHERE-filtrerte rader (skalar; ignorer GROUP/ORDER/LIMIT).
+funksjon query_int(db, sql: tekst) -> heltall {
+    la toks0 = _tok(sql)
+    la temp = []
+    hvis _er_with(toks0) {
+        la cte = _materialiser_cte(db, toks0)
+        toks0 = cte["main"]
+        temp = cte["temp"]
+    }
+    la p = _parse_select(toks0)
+    la rader = _filtrer(db, p)
+    la felt = _sel_felt(p["sel_items"])
+    la svar = lengde(rader)
+    hvis lengde(felt["kind"]) >= 1 og felt["kind"][0] == "agg" {
+        svar = _agg_over(rader, felt["a"][0], felt["b"][0])
+    }
+    _rydd_cte(db, temp)
+    returner svar
+}
+
+// GROUP BY-eksekusjon → "|"/"\n"-delimitert (som query_rader). Grupper sortert på
+// gruppenøkkel (SQLite default) om inga ORDER BY.
+funksjon _group_rader(db, p) -> tekst {
+    la rader = _filtrer(db, p)
+    la group_cols = p["group_by"]
+    la felt = _sel_felt(p["sel_items"])
+    la having = p["having"]
+
+    la keys = []
+    la groups = {}
+    la r = 0
+    mens r < lengde(rader) {
+        la kdel = []
+        la g = 0
+        mens g < lengde(group_cols) {
+            la gv = ""
+            hvis finnes_nøkkel(rader[r], group_cols[g]) { gv = rader[r][group_cols[g]] }
+            legg_til(kdel, gv)
+            g = g + 1
+        }
+        la key = builtin.join(kdel, "|")
+        hvis ikke finnes_nøkkel(groups, key) {
+            groups[key] = []
+            legg_til(keys, key)
+        }
+        legg_til(groups[key], rader[r])
+        r = r + 1
+    }
+
+    la resultrader = []
+    la ki = 0
+    mens ki < lengde(keys) {
+        la grp = groups[keys[ki]]
+        hvis lengde(having) == 0 eller _having(grp, having) {
+            la rr = {}
+            la fi = 0
+            mens fi < lengde(felt["kind"]) {
+                hvis felt["kind"][fi] == "agg" {
+                    rr["f" + tekst_fra_heltall(fi)] = _agg_txt(grp, felt["a"][fi], felt["b"][fi], felt["expr"][fi])
+                } ellers hvis felt["kind"][fi] == "expr" {
+                    rr["f" + tekst_fra_heltall(fi)] = _ex_or(felt["expr"][fi], 0, grp[0], _kt_ny(db, {}))["v"]
+                } ellers {
+                    la cn = felt["a"][fi]
+                    la v = ""
+                    hvis finnes_nøkkel(grp[0], cn) { v = grp[0][cn] }
+                    rr["f" + tekst_fra_heltall(fi)] = v
+                    rr[cn] = v
+                }
+                fi = fi + 1
+            }
+            legg_til(resultrader, rr)
+        }
+        ki = ki + 1
+    }
+
+    la sort_col = p["order_col"]
+    hvis sort_col == "" og lengde(group_cols) > 0 { sort_col = group_cols[0] }
+    resultrader = _sorter(resultrader, sort_col, p["order_asc"])
+    resultrader = _snitt(resultrader, p["offset"], p["limit"])
+
+    la linjer = []
+    la rj = 0
+    mens rj < lengde(resultrader) {
+        la ut_felt = []
+        la fi = 0
+        mens fi < lengde(felt["kind"]) {
+            legg_til(ut_felt, resultrader[rj]["f" + tekst_fra_heltall(fi)])
+            fi = fi + 1
+        }
+        legg_til(linjer, builtin.join(ut_felt, "|"))
+        rj = rj + 1
+    }
+    returner builtin.join(linjer, "\n")
+}
+
+funksjon _har_agg(felt) -> boolsk {
+    la i = 0
+    mens i < lengde(felt["kind"]) {
+        hvis felt["kind"][i] == "agg" { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// query_rader: SELECT ... [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT/OFFSET].
+funksjon query_rader(db, sql: tekst) -> tekst {
+    returner _query_rader_t(db, _tok(sql))
+}
+
+funksjon _query_rader_t(db, toks) -> tekst {
+    // CTE: materialiser WITH-ledda som temp-tabellar, køyr hovudspørjinga, rydd opp.
+    hvis _er_with(toks) {
+        la cte = _materialiser_cte(db, toks)
+        la res = _query_rader_t(db, cte["main"])
+        _rydd_cte(db, cte["temp"])
+        returner res
+    }
+    // Set-operasjonar (UNION/UNION ALL/INTERSECT/EXCEPT) på topp-nivå.
+    hvis _finn_setop(toks)["har"] {
+        la ordinfo = _setop_order(toks)
+        la sp = _finn_setop(ordinfo["kropp"])
+        la vl = _splittlinjer(_query_rader_t(db, sp["venstre"]))
+        la hl = _splittlinjer(_query_rader_t(db, sp["hoyre"]))
+        la komb = _komb_setop(sp["op"], vl, hl)
+        hvis ordinfo["order_har"] { komb = _sorter_linjer(komb, ordinfo["asc"]) } ellers hvis sp["op"] != "UNION ALL" { komb = _sorter_linjer(komb, sann) }
+        hvis ordinfo["limit"] >= 0 eller ordinfo["offset"] > 0 { komb = _snitt_linjer(komb, ordinfo["offset"], ordinfo["limit"]) }
+        returner builtin.join(komb, "\n")
+    }
+    la p = _parse_select(toks)
+    hvis lengde(p["group_by"]) > 0 {
+        returner _group_rader(db, p)
+    }
+    // Skalar-aggregat utan GROUP BY (éin eller fleire) → éi rad med aggregata.
+    la felt0 = _sel_felt(p["sel_items"])
+    hvis _har_agg(felt0) {
+        la agg_rader = _filtrer(db, p)
+        la ut_felt = []
+        la fi = 0
+        mens fi < lengde(felt0["kind"]) {
+            hvis felt0["kind"][fi] == "agg" {
+                legg_til(ut_felt, _agg_txt(agg_rader, felt0["a"][fi], felt0["b"][fi], felt0["expr"][fi]))
+            } ellers hvis felt0["kind"][fi] == "expr" {
+                la ev = ""
+                hvis lengde(agg_rader) > 0 { ev = _ex_or(felt0["expr"][fi], 0, agg_rader[0], _kt_ny(db, {}))["v"] }
+                legg_til(ut_felt, ev)
+            } ellers {
+                la v = ""
+                hvis lengde(agg_rader) > 0 og finnes_nøkkel(agg_rader[0], felt0["a"][fi]) { v = agg_rader[0][felt0["a"][fi]] }
+                legg_til(ut_felt, v)
+            }
+            fi = fi + 1
+        }
+        returner builtin.join(ut_felt, "|")
+    }
+    // Vindusfunksjonar: rekn vindus-kolonnar over (filtrerte) rader, sorter så på ytre ORDER BY.
+    hvis _har_vindu(felt0) {
+        la wrader = _filtrer(db, p)
+        la wv = {}
+        la wk = 0
+        mens wk < lengde(felt0["kind"]) {
+            hvis felt0["kind"][wk] == "window" {
+                wv["w" + tekst_fra_heltall(wk)] = _vindu_verdiar(wrader, _parse_window(felt0["expr"][wk]))
+            }
+            wk = wk + 1
+        }
+        la widx = []
+        la wz = 0
+        mens wz < lengde(wrader) { legg_til(widx, wz); wz = wz + 1 }
+        hvis p["order_col"] != "" { widx = _stabil_sort_idx(wrader, widx, p["order_col"], p["order_asc"]) }
+        la wlinjer = []
+        la wr = 0
+        mens wr < lengde(widx) {
+            la ii = widx[wr]
+            la wfelt = []
+            la wc = 0
+            mens wc < lengde(felt0["kind"]) {
+                hvis felt0["kind"][wc] == "window" {
+                    legg_til(wfelt, wv["w" + tekst_fra_heltall(wc)][ii])
+                } ellers hvis felt0["kind"][wc] == "expr" {
+                    legg_til(wfelt, _ex_or(felt0["expr"][wc], 0, wrader[ii], _kt_ny(db, {}))["v"])
+                } ellers hvis felt0["kind"][wc] == "star" {
+                    la kn = nøkler(wrader[ii])
+                    la kk = 0
+                    mens kk < lengde(kn) { legg_til(wfelt, wrader[ii][kn[kk]]); kk = kk + 1 }
+                } ellers {
+                    la v = ""
+                    hvis finnes_nøkkel(wrader[ii], felt0["a"][wc]) { v = wrader[ii][felt0["a"][wc]] }
+                    legg_til(wfelt, v)
+                }
+                wc = wc + 1
+            }
+            legg_til(wlinjer, builtin.join(wfelt, "|"))
+            wr = wr + 1
+        }
+        wlinjer = _snitt_linjer(wlinjer, p["offset"], p["limit"])
+        returner builtin.join(wlinjer, "\n")
+    }
+    la rader = _filtrer(db, p)
+    hvis p["order_col"] != "" {
+        rader = _sorter(rader, p["order_col"], p["order_asc"])
+    }
+    // Tabell-metadata for star-ekspansjon (kan mangle ved FROM-subquery → bruk rada sine nøklar).
+    la har_t = finnes_nøkkel(db["tabellar"], p["tabell"])
+    la t = {}
+    hvis har_t { t = db["tabellar"][p["tabell"]] }
+
+    la linjer = []
+    la i = 0
+    mens i < lengde(rader) {
+        la feltvals = []
+        la k = 0
+        mens k < lengde(felt0["kind"]) {
+            hvis felt0["kind"][k] == "star" {
+                la kolnavn = []
+                hvis har_t {
+                    la kk = 0
+                    mens kk < lengde(t["kolonner"]) { legg_til(kolnavn, t["kolonner"][kk]["navn"]); kk = kk + 1 }
+                } ellers {
+                    kolnavn = nøkler(rader[i])
+                }
+                la kk = 0
+                mens kk < lengde(kolnavn) {
+                    la sv = ""
+                    hvis finnes_nøkkel(rader[i], kolnavn[kk]) { sv = rader[i][kolnavn[kk]] }
+                    legg_til(feltvals, sv)
+                    kk = kk + 1
+                }
+            } ellers hvis felt0["kind"][k] == "expr" {
+                legg_til(feltvals, _ex_or(felt0["expr"][k], 0, rader[i], _kt_ny(db, {}))["v"])
+            } ellers {
+                la v = ""
+                hvis finnes_nøkkel(rader[i], felt0["a"][k]) { v = rader[i][felt0["a"][k]] }
+                legg_til(feltvals, v)
+            }
+            k = k + 1
+        }
+        legg_til(linjer, builtin.join(feltvals, "|"))
+        i = i + 1
+    }
+    hvis finnes_nøkkel(p, "distinct") og p["distinct"] { linjer = _dedup_linjer(linjer) }
+    linjer = _snitt_linjer(linjer, p["offset"], p["limit"])
+    returner builtin.join(linjer, "\n")
+}
+
+// query_text: første verdi (som JSON-std.db). Skalar-aggregat → talet som tekst.
+funksjon query_text(db, sql: tekst) -> tekst {
+    // Alt (inkl. skalar-aggregat) via query_rader, som brukar _agg_txt (REAL-bevisst).
+    la r = query_rader(db, sql)
+    hvis r == "" { returner "" }
+    la linje0 = r
+    la nl = builtin.index_of(r, "\n")
+    hvis nl >= 0 { linje0 = builtin.slice(r, 0, nl) }
+    la bar = builtin.index_of(linje0, "|")
+    hvis bar >= 0 { returner builtin.slice(linje0, 0, bar) }
+    returner linje0
+}
+
+// ── EXPLAIN (7l) — rapporter vald tilgangs-plan (scan vs indeks-søk) ──
+funksjon explain(db, sql: tekst) -> tekst {
+    la toks = _tok(sql)
+    hvis _er_with(toks) { returner "COMPOUND (CTE)" }
+    hvis _finn_setop(toks)["har"] { returner "COMPOUND (set-op)" }
+    la p = _parse_select(toks)
+    la linjer = []
+    hvis lengde(p["from_sub"]) > 0 {
+        legg_til(linjer, "SCAN (subquery)")
+    } ellers hvis lengde(p["joins"]) > 0 {
+        legg_til(linjer, "SCAN " + p["tabell"])
+        la j = 0
+        mens j < lengde(p["joins"]) { legg_til(linjer, p["joins"][j]["type"] + " JOIN " + p["joins"][j]["tabell"]); j = j + 1 }
+    } ellers hvis _er_view(db, p["tabell"]) {
+        legg_til(linjer, "SCAN VIEW " + p["tabell"])
+    } ellers hvis p["tabell"] != "" {
+        la kand = _indeks_kandidatar(db, p)
+        hvis kand["brukt"] { legg_til(linjer, "SEARCH " + p["tabell"] + " USING INDEX (" + p["where"][0] + ")") } ellers { legg_til(linjer, "SCAN " + p["tabell"]) }
+    }
+    returner builtin.join(linjer, "\n")
+}
+
+// ── Prepared statements (8e) — pre-tokeniser éin gong, køyr fleire med params ──
+// Bind ?-plassholdarar med siterte parameter-verdiar.
+funksjon _bind_toks(toks, params) -> liste {
+    la ut = []
+    la pi = 0
+    la i = 0
+    mens i < lengde(toks) {
+        hvis toks[i] == "?" og pi < lengde(params) {
+            legg_til(ut, "'" + builtin.join(builtin.split(params[pi], "'"), "''") + "'")
+            pi = pi + 1
+        } ellers {
+            legg_til(ut, toks[i])
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon prepar(db, sql: tekst) -> ordbok {
+    returner {"toks": _tok(sql)}
+}
+
+funksjon kjor_forberedt_rader(db, stmt, params) -> tekst {
+    returner _query_rader_t(db, _bind_toks(stmt["toks"], params))
+}
+
+funksjon kjor_forberedt_int(db, stmt, params) -> heltall {
+    la bt = _bind_toks(stmt["toks"], params)
+    la p = _parse_select(bt)
+    la rader = _filtrer(db, p)
+    la felt = _sel_felt(p["sel_items"])
+    hvis lengde(felt["kind"]) >= 1 og felt["kind"][0] == "agg" { returner _agg_over(rader, felt["a"][0], felt["b"][0]) }
+    returner lengde(rader)
+}
+
+funksjon kjor_forberedt(db, stmt, params) -> heltall {
+    returner _exec_t(db, _bind_toks(stmt["toks"], params))
+}

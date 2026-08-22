@@ -1,0 +1,146 @@
+# deploy_state.no — varig, rollback-sikker deploy-state-machine i Norscode
+
+bruk std.filops som filops
+bruk std.tarfile som tarfile
+bruk std.runtime_filesystem som native_fs
+bruk std.sha256 som sha256
+bruk std.http som http
+bruk std.linux_drift som linux
+
+funksjon _result(status: tekst, state: tekst, error: tekst) -> ordbok_tekst {
+    returner {"status": status, "state": state, "error": error, "release_id": "", "previous_release": "", "rolled_back": "usann"}
+}
+
+funksjon _safe_rel(sti: tekst) -> boolsk {
+    hvis sti == "" eller builtin.starts_with(sti, "/") eller builtin.index_of(sti, "\\") >= 0 { returner usann }
+    la delar = builtin.split(sti, "/")
+    la i = 0
+    mens i < lengde(delar) { hvis delar[i] == "" eller delar[i] == ".." eller delar[i] == "." { returner usann } i = i + 1 }
+    returner sann
+}
+
+funksjon _safe_id(id: tekst) -> boolsk {
+    hvis ikkje _safe_rel(id) eller builtin.index_of(id, "/") >= 0 eller lengde(id) > 128 { returner usann }
+    la i = 0
+    mens i < lengde(id) {
+        la c = builtin.slice(id, i, i + 1)
+        hvis ikkje ((c >= "a" og c <= "z") eller (c >= "A" og c <= "Z") eller (c >= "0" og c <= "9") eller c == "-" eller c == "_" eller c == ".") { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _hash_file(sti: tekst) -> tekst {
+    hvis ikkje filops.fil_finnes(sti) { returner "" }
+    la bytes = builtin.fil_les_binær(sti)
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { returner sha256.hash_bytes(bytes) }
+    returner ""
+}
+
+funksjon ny(root: tekst, systemd_unit: tekst, health_url: tekst) -> ordbok {
+    returner {
+        "root": root, "systemd_unit": systemd_unit, "health_url": health_url,
+        "health_timeout_ms": 5000, "health_attempts": 5,
+        "max_archive_bytes": 268435456, "max_total_bytes": 536870912,
+        "max_file_bytes": 134217728, "max_files": 10000
+    }
+}
+
+funksjon _atomic_text(root: tekst, relative: tekst, data: tekst) -> boolsk {
+    la dir = filops.katalog(relative)
+    hvis dir != "." og ikkje filops.lag_katalogar(root + "/" + dir) { returner usann }
+    la tmp = dir + "/.deploy-" + builtin.random_hex(12) + ".tmp"
+    hvis dir == "." { tmp = ".deploy-" + builtin.random_hex(12) + ".tmp" }
+    prøv { builtin.fil_skriv(root + "/" + tmp, data) } fang (e) { returner usann }
+    la replaced = native_fs.native_erstatt_fil_atomisk(root, tmp, relative)
+    hvis replaced["status"] != "replaced" { filops.slett_fil(root + "/" + tmp) returner usann }
+    returner sann
+}
+
+funksjon _state(cfg: ordbok, state: tekst, release_id: tekst, previous: tekst, error: tekst) -> boolsk {
+    la body = builtin.json_stringify({"version": "norscode-deploy-state-v1", "state": state, "release_id": release_id, "previous_release": previous, "error": error, "updated_ms": builtin.tid_ms()})
+    returner _atomic_text(cfg["root"], "deploy/state.json", body)
+}
+
+funksjon _current(cfg: ordbok) -> tekst {
+    prøv { returner builtin.trim(builtin.fil_les(cfg["root"] + "/deploy/current.release")) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon _switch(cfg: ordbok, release_id: tekst) -> boolsk {
+    hvis ikkje _safe_id(release_id) { returner usann }
+    la link = native_fs.native_erstatt_symbolsk_lenke(cfg["root"], "current", "releases/" + release_id)
+    hvis link["status"] != "ok" { returner usann }
+    hvis ikkje _atomic_text(cfg["root"], "deploy/current.release", release_id + "\n") { returner usann }
+    hvis cfg["systemd_unit"] == "" { returner sann }
+    returner linux.systemd_restart(cfg["systemd_unit"])["status"] == "ok"
+}
+
+funksjon _health(cfg: ordbok, forced: tekst) -> boolsk {
+    hvis forced == "ok" { returner sann }
+    hvis forced == "fail" { returner usann }
+    hvis cfg["health_url"] == "" { returner usann }
+    la i = 0
+    mens i < cfg["health_attempts"] {
+        la response = http.request_full_simple("GET", cfg["health_url"], "", cfg["health_timeout_ms"])
+        la status = http.response_status(response)
+        hvis status >= 200 og status < 300 { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon _rollback(cfg: ordbok, previous: tekst, failed_release: tekst) -> boolsk {
+    _state(cfg, "rolling_back", failed_release, previous, "health check failed")
+    hvis previous == "" eller ikkje _switch(cfg, previous) { _state(cfg, "failed", failed_release, previous, "rollback failed") returner usann }
+    _state(cfg, "rolled_back", failed_release, previous, "health check failed")
+    returner sann
+}
+
+funksjon _deploy(cfg: ordbok, archive_relative: tekst, expected_sha256: tekst,
+                 release_id: tekst, forced_health: tekst) -> ordbok_tekst {
+    la result = _result("feil", "validating", "")
+    result["release_id"] = release_id
+    hvis cfg["root"] == "" eller ikkje _safe_rel(archive_relative) eller ikkje _safe_id(release_id) eller lengde(expected_sha256) != 64 { result["error"] = "invalid deploy contract" returner result }
+    hvis ikkje filops.lag_katalogar(cfg["root"] + "/deploy") eller ikkje filops.lag_katalogar(cfg["root"] + "/releases") { result["error"] = "cannot create deploy roots" returner result }
+    la previous = _current(cfg)
+    result["previous_release"] = previous
+    _state(cfg, "validating", release_id, previous, "")
+    la archive = cfg["root"] + "/" + archive_relative
+    hvis _hash_file(archive) != expected_sha256 { result["error"] = "archive hash mismatch" _state(cfg, "failed", release_id, previous, result["error"]) returner result }
+    la staging_rel = "releases/.staging-" + release_id
+    la staging = cfg["root"] + "/" + staging_rel
+    hvis filops.katalog_finnes(staging) { filops.slett_tre(staging) }
+    _state(cfg, "staging", release_id, previous, "")
+    la ark = tarfile.open(archive, "r")
+    hvis ikkje tarfile.extractall_med_grenser(ark, staging, cfg["max_archive_bytes"], cfg["max_total_bytes"], cfg["max_file_bytes"], cfg["max_files"]) {
+        filops.slett_tre(staging) result["error"] = "secure archive extraction failed" _state(cfg, "failed", release_id, previous, result["error"]) returner result
+    }
+    hvis ikkje filops.fil_finnes(staging + "/release.manifest") eller builtin.trim(builtin.fil_les(staging + "/release.manifest")) != "release_id=" + release_id {
+        filops.slett_tre(staging) result["error"] = "release manifest mismatch" _state(cfg, "failed", release_id, previous, result["error"]) returner result
+    }
+    la release_path = cfg["root"] + "/releases/" + release_id
+    hvis filops.katalog_finnes(release_path) { result["error"] = "release already exists" filops.slett_tre(staging) _state(cfg, "failed", release_id, previous, result["error"]) returner result }
+    hvis ikkje filops.flytt(staging, release_path) { result["error"] = "release publish failed" filops.slett_tre(staging) _state(cfg, "failed", release_id, previous, result["error"]) returner result }
+    _state(cfg, "switching", release_id, previous, "")
+    hvis ikkje _switch(cfg, release_id) { result["error"] = "service switch failed" hvis previous != "" { _rollback(cfg, previous, release_id) } returner result }
+    _state(cfg, "healthchecking", release_id, previous, "")
+    hvis ikkje _health(cfg, forced_health) {
+        result["error"] = "health check failed"
+        hvis _rollback(cfg, previous, release_id) { result["state"] = "rolled_back" result["rolled_back"] = "sann" }
+        ellers { result["state"] = "failed" }
+        returner result
+    }
+    _state(cfg, "completed", release_id, previous, "")
+    result["status"] = "deployed" result["state"] = "completed"
+    returner result
+}
+
+funksjon deploy(cfg: ordbok, archive_relative: tekst, expected_sha256: tekst, release_id: tekst) -> ordbok_tekst {
+    returner _deploy(cfg, archive_relative, expected_sha256, release_id, "auto")
+}
+
+funksjon deploy_test(cfg: ordbok, archive_relative: tekst, expected_sha256: tekst,
+                     release_id: tekst, health_ok: boolsk) -> ordbok_tekst {
+    returner _deploy(cfg, archive_relative, expected_sha256, release_id, hvis health_ok da "ok" ellers "fail")
+}

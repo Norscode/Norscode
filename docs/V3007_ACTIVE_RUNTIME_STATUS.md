@@ -38,12 +38,7 @@ Scriptet:
 - endrar ingen filer
 - promoterer ingenting
 
-## Historical snapshot etter v3007 (ikkje aktuell release-status)
-
-Dette er eit historisk kontrollpunkt frå før den versjonerte sluttporten vart
-innført. Det skal ikkje brukast som aktuell readiness-attestasjon. Les
-`reports/norscode-completion-v1.json` frå same commit som kjelda for gjeldande
-status.
+## Historical status etter v3007
 
 ```text
 candidate_runtime_gap: green

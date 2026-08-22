@@ -1,6 +1,11 @@
 // tools/package-macos-app.no — pakk lokal macOS app-bundle
 
-bruk std.path som path
+bruk std.filops som filops
+bruk std.tempfile som tempfile
+bruk tools.process_runner som prosess
+bruk tools.package_macos_app_core som package_core
+bruk tools.macos_plist_gate_v1 som plist_gate
+bruk tools.platform_context_v1 som kontekst
 
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
@@ -12,55 +17,14 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
-}
-
-funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
-funksjon res_ut(res: liste_tekst) -> tekst {
-    la ut = res_felt(res, 1)
-    hvis ut == "" { ut = res_felt(res, 2) }
-    returner ut
-}
-
 funksjon trim(t: tekst) -> tekst {
     returner builtin.trim(t)
 }
 
-funksjon første_felt(t: tekst) -> tekst {
-    la delar = builtin.split(trim(t), " ")
-    la i = 0
-    mens i < lengde(delar) {
-        la d = trim(delar[i])
-        hvis d != "" { returner d }
-        i = i + 1
-    }
-    returner ""
-}
-
-funksjon run(cmd: tekst) -> bool {
-    la res = kommando(cmd)
-    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
-    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
-    returner ok(res)
+funksjon run(executable: tekst, argv: liste_tekst, cwd: tekst) -> bool {
+    la res = prosess.køyr(executable, argv, cwd, {}, 600000)
+    prosess.skriv_resultat(res)
+    returner prosess.ok(res)
 }
 
 funksjon fil_finst(sti: tekst) -> bool {
@@ -70,12 +34,6 @@ funksjon fil_finst(sti: tekst) -> bool {
 
 funksjon mappe_finst(sti: tekst) -> bool {
     returner fil_finst(sti)
-}
-
-funksjon krev_cmd(namn: tekst) -> bool {
-    hvis ok(kommando("command -v " + namn + " >/dev/null 2>&1")) { returner sann }
-    linje("Feil: manglar macOS-verktøyet " + namn)
-    returner usann
 }
 
 funksjon toml_version_fra_innhald(innhald: tekst) -> tekst {
@@ -102,7 +60,13 @@ funksjon repo_version(root: tekst) -> tekst {
 }
 
 funksjon basename_app(sti: tekst) -> tekst {
-    la namn = path.basename(sti)
+    la delar = builtin.split(sti, "/")
+    la namn = ""
+    la i = lengde(delar) - 1
+    mens i >= 0 og namn == "" {
+        hvis delar[i] != "" { namn = delar[i] }
+        i = i - 1
+    }
     hvis builtin.ends_with(namn, ".app") {
         returner builtin.slice(namn, 0, lengde(namn) - 4)
     }
@@ -110,14 +74,9 @@ funksjon basename_app(sti: tekst) -> tekst {
 }
 
 funksjon sha256_skriv(sti: tekst) -> bool {
-    la sha = ""
-    hvis ok(kommando("command -v shasum >/dev/null 2>&1")) {
-        sha = første_felt(res_felt(kommando("shasum -a 256 " + shell(sti)), 1))
-    } ellers {
-        sha = første_felt(res_felt(kommando("sha256sum " + shell(sti)), 1))
-    }
-    hvis sha == "" { returner usann }
     prøv {
+        la sha = builtin.sha256_bytes(builtin.fil_les_binær(sti))
+        hvis sha == "" { returner usann }
         builtin.fil_skriv(sti + ".sha256", sha + "\n")
         returner sann
     } fang (e) {
@@ -125,43 +84,42 @@ funksjon sha256_skriv(sti: tekst) -> bool {
     }
 }
 
-funksjon package_zip(app_path: tekst, zip_path: tekst) -> bool {
-    hvis ikkje run("ditto -c -k --sequesterRsrc --keepParent " + shell(app_path) + " " + shell(zip_path)) { returner usann }
-    hvis ikkje sha256_skriv(zip_path) { returner usann }
+funksjon package_zip(root: tekst, app_path: tekst, zip_path: tekst) -> bool {
+    hvis ikkje package_core.package_zip(app_path, zip_path) { returner usann }
     linje("Bygde ZIP-artefakt: " + zip_path)
     returner sann
 }
 
-funksjon package_dmg(app_path: tekst, dmg_path: tekst, stage_dir: tekst, app_basename: tekst, vol_name: tekst) -> bool {
+funksjon package_dmg(root: tekst, app_path: tekst, dmg_path: tekst, stage_dir: tekst, app_basename: tekst, vol_name: tekst) -> bool {
     la dmg_src_dir = stage_dir + "/dmg-root"
     la tmp_dmg = stage_dir + "/" + app_basename + ".dmg"
-    hvis ikkje run("mkdir -p " + shell(dmg_src_dir)) { returner usann }
-    hvis ikkje run("cp -R " + shell(app_path) + " " + shell(dmg_src_dir + "/")) { returner usann }
-    hvis ikkje run("ln -s /Applications " + shell(dmg_src_dir + "/Applications")) { returner usann }
-    hvis ikkje run("hdiutil create -volname " + shell(vol_name) + " -srcfolder " + shell(dmg_src_dir) + " -ov -format UDZO " + shell(tmp_dmg) + " >/dev/null") {
+    hvis ikkje filops.lag_katalogar(dmg_src_dir) { returner usann }
+    hvis ikkje filops.kopier_tre(app_path, dmg_src_dir + "/" + app_basename + ".app") { returner usann }
+    // Applications-snøgglenka var berre kosmetisk og kravde ekstern lenkeprosess.
+    // DMG-en held no berre den verifiserte app-bundelen.
+    hvis ikkje run("/usr/bin/hdiutil", ["create", "-volname", vol_name, "-srcfolder", dmg_src_dir, "-ov", "-format", "UDZO", tmp_dmg], root) {
         linje("Merk: DMG-bygging feila via hdiutil, ZIP-artefakt kan framleis brukast.")
         returner usann
     }
-    hvis ikkje run("mv " + shell(tmp_dmg) + " " + shell(dmg_path)) { returner usann }
+    hvis ikkje filops.flytt(tmp_dmg, dmg_path) { returner usann }
     hvis ikkje sha256_skriv(dmg_path) { returner usann }
     linje("Bygde DMG-artefakt: " + dmg_path)
     returner sann
 }
 
-funksjon package_pkg(app_path: tekst, pkg_path: tekst, stage_dir: tekst, version: tekst) -> bool {
+funksjon package_pkg(root: tekst, app_path: tekst, pkg_path: tekst, stage_dir: tekst, version: tekst) -> bool {
     la pkg_root_dir = stage_dir + "/pkg-root"
     la install_root = pkg_root_dir + "/Applications"
-    hvis ikkje run("mkdir -p " + shell(install_root)) { returner usann }
-    hvis ikkje run("cp -R " + shell(app_path) + " " + shell(install_root + "/")) { returner usann }
-    hvis ikkje run("pkgbuild --root " + shell(pkg_root_dir) + " --identifier dev.norscode.app.pkg --version " + shell(version) + " --install-location / " + shell(pkg_path) + " >/dev/null") { returner usann }
+    hvis ikkje filops.lag_katalogar(install_root) { returner usann }
+    hvis ikkje filops.kopier_tre(app_path, install_root + "/" + basename_app(app_path) + ".app") { returner usann }
+    hvis ikkje run("/usr/bin/pkgbuild", ["--root", pkg_root_dir, "--identifier", "dev.norscode.app.pkg", "--version", version, "--install-location", "/", pkg_path], root) { returner usann }
     hvis ikkje sha256_skriv(pkg_path) { returner usann }
     linje("Bygde PKG-artefakt: " + pkg_path)
     returner sann
 }
 
 funksjon start() -> heiltall {
-    la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(res_ut(kommando("pwd"))) }
+    la root = kontekst.root()
     la app_path = env("NORSCODE_MACOS_PACKAGE_APP")
     hvis app_path == "" { app_path = root + "/build/macos-app/Norscode.app" }
     la format = env("NORSCODE_MACOS_PACKAGE_FORMAT")
@@ -170,80 +128,77 @@ funksjon start() -> heiltall {
     hvis version == "" { version = repo_version(root) }
     la release_dir = env("NORSCODE_MACOS_PACKAGE_RELEASE_DIR")
     hvis release_dir == "" { release_dir = root + "/release-artifacts" }
-    la host_os = env("NORSCODE_HOST_OS")
-    hvis host_os == "" { host_os = trim(res_ut(kommando("uname -s"))) }
-
-    hvis host_os != "Darwin" {
+    hvis ikkje kontekst.er_macos() {
         linje("Feil: package-macos-app krev macOS.")
         returner 1
     }
-    hvis ikkje krev_cmd("hdiutil") { returner 1 }
-    hvis ikkje krev_cmd("ditto") { returner 1 }
-    hvis ikkje krev_cmd("plutil") { returner 1 }
-    hvis ikkje krev_cmd("pkgbuild") { returner 1 }
-
     hvis ikkje mappe_finst(app_path) {
-        hvis ikkje run(shell(root + "/bin/nc") + " build-macos-app --mode gui --version " + shell(version)) { returner 1 }
+        hvis ikkje run(root + "/bin/nc", ["build-macos-app", "--mode", "gui", "--version", version], root) { returner 1 }
     }
     hvis ikkje mappe_finst(app_path) {
         linje("Feil: manglar app-bundle: " + app_path)
         returner 1
     }
-    hvis ikkje run("plutil -lint " + shell(app_path + "/Contents/Info.plist") + " >/dev/null") { returner 1 }
+    hvis ikkje plist_gate.valider_info(app_path + "/Contents/Info.plist") {
+        linje("Feil: Info.plist validerte ikkje gjennom Norscode")
+        returner 1
+    }
 
-    hvis ikkje run("mkdir -p " + shell(release_dir)) { returner 1 }
+    hvis ikkje filops.lag_katalogar(release_dir) { returner 1 }
     la app_basename = basename_app(app_path)
     la zip_path = release_dir + "/" + app_basename + "-macos-" + version + ".zip"
     la dmg_path = release_dir + "/" + app_basename + "-macos-" + version + ".dmg"
     la pkg_path = release_dir + "/" + app_basename + "-macos-" + version + ".pkg"
-    la stage_dir = trim(res_ut(kommando("mktemp -d")))
-    hvis stage_dir == "" { returner 1 }
+    la temp_obj = tempfile.ny_tempkatalog("norscode_macos_package_")
+    la stage_dir = tempfile.sti(temp_obj)
     la vol_name = app_basename + " " + version
 
-    hvis ikkje run("rm -f " + shell(zip_path) + " " + shell(zip_path + ".sha256") + " " + shell(dmg_path) + " " + shell(dmg_path + ".sha256") + " " + shell(pkg_path) + " " + shell(pkg_path + ".sha256")) {
-        kommando("rm -rf " + shell(stage_dir))
-        returner 1
-    }
+    filops.slett_fil(zip_path)
+    filops.slett_fil(zip_path + ".sha256")
+    filops.slett_fil(dmg_path)
+    filops.slett_fil(dmg_path + ".sha256")
+    filops.slett_fil(pkg_path)
+    filops.slett_fil(pkg_path + ".sha256")
 
     hvis format == "zip" {
-        hvis package_zip(app_path, zip_path) {
-            kommando("rm -rf " + shell(stage_dir))
+        hvis package_zip(root, app_path, zip_path) {
+            tempfile.lukk(temp_obj)
             returner 0
         }
-        kommando("rm -rf " + shell(stage_dir))
+        tempfile.lukk(temp_obj)
         returner 1
     }
     hvis format == "dmg" {
-        hvis package_dmg(app_path, dmg_path, stage_dir, app_basename, vol_name) {
-            kommando("rm -rf " + shell(stage_dir))
+        hvis package_dmg(root, app_path, dmg_path, stage_dir, app_basename, vol_name) {
+            tempfile.lukk(temp_obj)
             returner 0
         }
-        kommando("rm -rf " + shell(stage_dir))
+        tempfile.lukk(temp_obj)
         returner 1
     }
     hvis format == "pkg" {
-        hvis package_pkg(app_path, pkg_path, stage_dir, version) {
-            kommando("rm -rf " + shell(stage_dir))
+        hvis package_pkg(root, app_path, pkg_path, stage_dir, version) {
+            tempfile.lukk(temp_obj)
             returner 0
         }
-        kommando("rm -rf " + shell(stage_dir))
+        tempfile.lukk(temp_obj)
         returner 1
     }
     hvis format == "both" eller format == "all" {
-        hvis ikkje package_zip(app_path, zip_path) {
-            kommando("rm -rf " + shell(stage_dir))
+        hvis ikkje package_zip(root, app_path, zip_path) {
+            tempfile.lukk(temp_obj)
             returner 1
         }
-        package_dmg(app_path, dmg_path, stage_dir, app_basename, vol_name)
-        hvis ikkje package_pkg(app_path, pkg_path, stage_dir, version) {
-            kommando("rm -rf " + shell(stage_dir))
+        package_dmg(root, app_path, dmg_path, stage_dir, app_basename, vol_name)
+        hvis ikkje package_pkg(root, app_path, pkg_path, stage_dir, version) {
+            tempfile.lukk(temp_obj)
             returner 1
         }
-        kommando("rm -rf " + shell(stage_dir))
+        tempfile.lukk(temp_obj)
         returner 0
     }
 
-    kommando("rm -rf " + shell(stage_dir))
+    tempfile.lukk(temp_obj)
     linje("Feil: ugyldig format " + format + " (bruk zip, dmg, pkg eller all)")
     returner 1
 }

@@ -38,7 +38,7 @@ DMG blir forsøkt, men er framleis beste innsats inntil den er stabil i CI.
 
 Denne workflowen brukar ad-hoc-signering som fallback, men er no klar for Developer ID- og notarization-steg via secrets.
 
-Den aktive appvarianten i workflowen er no GUI-host-sporet, ikkje den eldre Terminal-launcheren. Dersom Terminal-varianten trengst for vedlikehald eller samanlikning, kan han framleis byggjast lokalt med `NORSCODE_MACOS_APP_MODE=terminal ./bin/nc run tools/build-macos-app.no`.
+Den aktive appvarianten i workflowen er GUI-host-sporet. Terminal-varianten kan byggjast lokalt med `NORSCODE_MACOS_APP_MODE=terminal ./bin/nc run tools/build-macos-app.no`; han brukar no den native Norscode-binæren direkte og genererer ikkje shellscript.
 
 Det som framleis manglar for full produksjonslinje:
 

@@ -1,7 +1,8 @@
 # plistlib.no — Apple Property List (plist) parsing og skriving
 # Python: plistlib
 #
-# Les og skriv XML-plist og binære plist-filer (binære via plutil).
+# Les og skriv XML-plist i Norscode. Binær plist går gjennom den versjonerte
+# `norscode-property-list-v1`-plattform-ABI-en (CoreFoundation på macOS).
 # Alle verdiar representert som ordbok_tekst.
 #
 # Bruk:
@@ -10,8 +11,28 @@
 #   la verdi = plist.get(data, "NøkkelNamn")
 #   plist.skriv_fil("/path/til/ut.plist", data)
 
-funksjon _shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+funksjon _sti_request(sti: tekst, operation: tekst) -> ordbok_tekst {
+    la root = "."
+    la relative = sti
+    hvis builtin.starts_with(sti, "/") {
+        root = "/"
+        relative = builtin.slice(sti, 1, lengde(sti))
+    }
+    returner {
+        "abi": "norscode-property-list-v1",
+        "operation": operation,
+        "root": root,
+        "relative": relative
+    }
+}
+
+funksjon _er_binær_plist(sti: tekst) -> bool {
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        returner lengde(bytes) >= 6 og bytes[0] == 98 og bytes[1] == 112 og
+            bytes[2] == 108 og bytes[3] == 105 og bytes[4] == 115 og bytes[5] == 116
+    } fang (e) { returner usann }
+    returner usann
 }
 
 # ─── Plist-datastruktur ───────────────────────────────────────────────────────
@@ -28,13 +49,7 @@ funksjon _shell(sti: tekst) -> tekst {
 # Les ein plist-fil → ordbok_tekst
 funksjon les_fil(sti: tekst) -> ordbok_tekst {
     prøv {
-        # Prøv plutil (macOS) for å konvertere til XML fyrst
-        la xml = builtin.exec_prosess("plutil -convert xml1 -o - " + _shell(sti) + " 2>/dev/null")
-        la trim_xml: tekst = _trim(xml)
-        hvis (lengde(builtin.split(trim_xml, "")) > 10) {
-            returner _parse_xml_plist(trim_xml)
-        }
-        # Prøv å lese direkte som XML
+        hvis _er_binær_plist(sti) { returner les_binær(sti) }
         la rå = builtin.fil_les(sti)
         returner _parse_xml_plist(rå)
     } fang (e) {
@@ -67,7 +82,7 @@ funksjon format_xml(data: ordbok_tekst) -> tekst {
 
 funksjon _ordbok_til_xml(data: ordbok_tekst, innrykk: tekst) -> tekst {
     la ut: tekst = innrykk + "<dict>\n"
-    la nøklar = builtin.nøklar(data)
+    la nøklar = nøkler(data)
     la i: heltall = 0
     mens (i < lengde(nøklar)) {
         la nk: tekst = nøklar[i]
@@ -142,7 +157,10 @@ funksjon _parse_xml_plist(xml: tekst) -> ordbok_tekst {
 
 funksjon _enkel_xml_parse(xml: tekst) -> ordbok_tekst {
     la res: ordbok_tekst = {}
-    la linjer = builtin.split(xml, "\n")
+    // Normaliser kvar key til eit eige segment. Dette støttar både den
+    // tradisjonelle linjeforma og kompakte Info.plist-filer med fleire
+    // key/value-par på same linje, utan å starte plutil.
+    la linjer = builtin.split(builtin.replace(xml, "<key>", "\n<key>"), "\n")
     la i: heltall = 0
     la siste_nøkkel: tekst = ""
     mens (i < lengde(linjer)) {
@@ -205,7 +223,7 @@ funksjon til_bool(verdi: tekst) -> bool {
 }
 
 funksjon nøklar(data: ordbok_tekst) -> liste_tekst {
-    returner builtin.nøklar(data)
+    returner nøkler(data)
 }
 
 # ─── Konvertering plist ↔ JSON ────────────────────────────────────────────────
@@ -234,22 +252,36 @@ funksjon er_plist_fil(sti: tekst) -> bool {
 # Konverter binær plist til XML og les
 funksjon les_binær(sti: tekst) -> ordbok_tekst {
     prøv {
-        la tmp: tekst = "/tmp/_plist_konv.xml"
-        builtin.exec_prosess("plutil -convert xml1 -o " + _shell(tmp) + " " + _shell(sti) + " 2>/dev/null")
-        returner les_fil(tmp)
+        la request = _sti_request(sti, "read_xml")
+        la svar = builtin.property_list_operation(request)
+        hvis svar["status"] != "ok" { returner {} }
+        returner _parse_xml_plist(svar["data"])
     } fang (e) { returner {} }
     returner {}
 }
 
-# Skriv til binær plist (via macOS plutil)
-funksjon skriv_binær(sti: tekst, data: ordbok_tekst) -> bool {
-    la tmp_xml: tekst = "/tmp/_plist_tmp.xml"
+# Skriv til binær plist gjennom plattform-ABI-en og returner det strukturerte
+# ABI-svaret. Dette gjer feil frå den smale plattformgrensa synlege i porter.
+funksjon skriv_binær_resultat(sti: tekst, data: ordbok_tekst) -> ordbok_tekst {
     prøv {
-        skriv_fil(tmp_xml, data)
-        builtin.exec_prosess("plutil -convert binary1 -o " + _shell(sti) + " " + _shell(tmp_xml) + " 2>/dev/null")
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
+        la request = _sti_request(sti, "write_binary")
+        request["data"] = format_xml(data)
+        returner builtin.property_list_operation(request)
+    } fang (e) {
+        returner {
+            "abi": "norscode-property-list-v1",
+            "status": "feil",
+            "data": "",
+            "value": "0",
+            "error": tekst(e)
+        }
+    }
+    returner {"status": "feil", "error": "ukjent plist-feil"}
+}
+
+# Boolsk kompatibilitetsflate for eksisterande kall.
+funksjon skriv_binær(sti: tekst, data: ordbok_tekst) -> bool {
+    returner skriv_binær_resultat(sti, data)["status"] == "ok"
 }
 
 funksjon _xml_escape(s: tekst) -> tekst {

@@ -1,0 +1,284 @@
+# Strøymande, autentisert backupformat over RFC 8439 ChaCha20-Poly1305.
+# Stiar er alltid relative til ei eksplisitt rot. Restore blir publisert atomisk.
+
+bruk std.chacha20_poly1305 som aead
+bruk std.runtime_filesystem som fs
+bruk std.bytes som bytes
+
+funksjon _trygg_relativ(sti: tekst) -> boolsk {
+    hvis sti == "" eller builtin.starts_with(sti, "/") eller builtin.index_of(sti, "\\") >= 0 { returner usann }
+    hvis lengde(sti) >= 2 og builtin.slice(sti, 1, 2) == ":" { returner usann }
+    la delar = builtin.split(sti, "/")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis delar[i] == "" eller delar[i] == "." eller delar[i] == ".." { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _mappe(rel: tekst) -> tekst {
+    la delar = builtin.split(rel, "/")
+    hvis lengde(delar) <= 1 { returner "" }
+    returner builtin.join(builtin.slice(delar, 0, lengde(delar) - 1), "/")
+}
+
+funksjon _u32_le(n: heiltall) -> liste_heiltall {
+    returner [n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >> 24) & 255]
+}
+
+funksjon _u64_le(n_verdi: heiltall) -> liste_heiltall {
+    la n = n_verdi
+    la out: liste_heiltall = []
+    la i = 0
+    mens i < 8 { legg_til(out, n & 255) n = n / 256 i = i + 1 }
+    returner out
+}
+
+funksjon _les_u32(data: liste_heiltall, p: heiltall) -> heiltall {
+    returner data[p] | (data[p + 1] << 8) | (data[p + 2] << 16) | (data[p + 3] << 24)
+}
+
+funksjon _les_u64(data: liste_heiltall, p: heiltall) -> heiltall {
+    la n = 0
+    la i = 7
+    mens i >= 0 { n = n * 256 + data[p + i] i = i - 1 }
+    returner n
+}
+
+funksjon _legg(ut: liste_heiltall, del: liste_heiltall) {
+    la i = 0
+    mens i < lengde(del) { legg_til(ut, del[i]) i = i + 1 }
+}
+
+funksjon _hex_nibble(c: tekst) -> heiltall {
+    returner builtin.index_of("0123456789abcdef", builtin.lower(c))
+}
+
+funksjon _bytes_fra_hex(hex: tekst, n: heiltall) {
+    hvis lengde(hex) != n * 2 { kast "BackupNøkkelFeil: feil hex-lengde" }
+    la out: liste_heiltall = []
+    la i = 0
+    mens i < lengde(hex) {
+        la a = _hex_nibble(builtin.slice(hex, i, i + 1))
+        la b = _hex_nibble(builtin.slice(hex, i + 1, i + 2))
+        hvis a < 0 eller b < 0 { kast "BackupNøkkelFeil: ugyldig hex" }
+        legg_til(out, a * 16 + b)
+        i = i + 2
+    }
+    returner bytes.fra_liste(out)
+}
+
+funksjon nøkkel_fra_hex(hex: tekst) {
+    hvis lengde(hex) != 64 { kast "BackupNøkkelFeil: krev 32-byte hex-nøkkel" }
+    returner _bytes_fra_hex(hex, 32)
+}
+
+funksjon nøkkel_fra_miljø(namn: tekst) {
+    hvis namn == "" { kast "BackupNøkkelFeil: miljønamn manglar" }
+    la verdi = miljo_hent(namn)
+    hvis verdi == "" { kast "BackupNøkkelFeil: hemmeleg nøkkel manglar" }
+    returner nøkkel_fra_hex(verdi)
+}
+
+funksjon _nonce(base: liste_heiltall, indeks: heiltall) {
+    la out: liste_heiltall = []
+    _legg(out, builtin.slice(base, 0, 8))
+    la tail = _les_u32(base, 8)
+    _legg(out, _u32_le((tail + indeks) & 4294967295))
+    returner bytes.fra_liste(out)
+}
+
+funksjon _aad(header: liste_heiltall, indeks: heiltall, n: heiltall) {
+    la out: liste_heiltall = []
+    _legg(out, header)
+    _legg(out, _u32_le(indeks))
+    _legg(out, _u32_le(n))
+    returner bytes.fra_liste(out)
+}
+
+funksjon _header(chunk_size: heiltall, base_nonce: liste_heiltall, source_size: heiltall) -> liste_heiltall {
+    la out: liste_heiltall = [78,67,66,65,69,65,68,49]
+    _legg(out, _u32_le(chunk_size))
+    _legg(out, base_nonce)
+    _legg(out, _u64_le(source_size))
+    returner out
+}
+
+funksjon _header_ok(h: liste_heiltall) -> boolsk {
+    la magic: liste_heiltall = [78,67,66,65,69,65,68,49]
+    hvis lengde(h) != 32 { returner usann }
+    la diff = 0
+    la i = 0
+    mens i < 8 { diff = diff | (h[i] ^ magic[i]) i = i + 1 }
+    returner diff == 0
+}
+
+funksjon _les_nøyaktig(h: ordbok_tekst, n: heiltall) -> ordbok {
+    la out: liste_heiltall = []
+    mens lengde(out) < n {
+        la del = fs.native_les_binær(h, n - lengde(out))
+        hvis del["status"] != "ok" { returner {"status": "feil", "data": bytes.tom()} }
+        la tal = heltall_fra_tekst(tekst(del["value"]))
+        hvis tal <= 0 { returner {"status": "feil", "data": bytes.tom()} }
+        _legg(out, bytes.til_liste(del["data_bytes"]))
+    }
+    returner {"status": "ok", "data": bytes.fra_liste(out)}
+}
+
+funksjon _append(sti: tekst, data) -> boolsk {
+    prøv { builtin.fil_append_binary(sti, data) returner sann }
+    fang (e) { returner usann }
+    returner usann
+}
+
+funksjon _slett_trygt(root: tekst, rel: tekst) {
+    prøv { fs.native_slett(root, rel) } fang (e) {}
+}
+
+funksjon _nullstill(key: liste_heiltall) {
+    la i = 0
+    mens i < lengde(key) { key[i] = 0 i = i + 1 }
+}
+
+funksjon lag_backup(root: tekst, kjelde_rel: tekst, backup_rel: tekst,
+                    key_verdi, chunk_size: heiltall, maks_kjelde: heiltall) -> ordbok_tekst {
+    hvis root == "" eller ikkje _trygg_relativ(kjelde_rel) eller ikkje _trygg_relativ(backup_rel) eller kjelde_rel == backup_rel {
+        returner {"status": "feil", "error": "ugyldig backupsti", "bytes": "0", "chunks": "0"}
+    }
+    hvis chunk_size < 4096 eller chunk_size > 1048576 eller maks_kjelde < 0 {
+        returner {"status": "feil", "error": "ugyldig backupgrense", "bytes": "0", "chunks": "0"}
+    }
+    la key = bytes.til_liste(key_verdi)
+    hvis lengde(key) != 32 { returner {"status": "feil", "error": "nøkkel må vere 32 byte", "bytes": "0", "chunks": "0"} }
+    la stat = fs.native_stat_sti(root + "/" + kjelde_rel)
+    hvis stat["status"] != "ok" { _nullstill(key) returner {"status": "feil", "error": "kjelde manglar", "bytes": "0", "chunks": "0"} }
+    la source_size = heltall_fra_tekst(tekst(stat["value"]))
+    hvis source_size < 0 eller source_size > maks_kjelde { _nullstill(key) returner {"status": "feil", "error": "kjelde over grensa", "bytes": "0", "chunks": "0"} }
+    la parent = _mappe(backup_rel)
+    hvis parent != "" og fs.native_lag_mappe(root, parent)["status"] != "ok" { _nullstill(key) returner {"status": "feil", "error": "kan ikkje lage backupmappe", "bytes": "0", "chunks": "0"} }
+    la tmp = (hvis parent != "" da parent + "/" ellers "") + ".backup-aead-" + builtin.random_hex(12) + ".tmp"
+    la base_nonce = bytes.til_liste(_bytes_fra_hex(builtin.random_hex(12), 12))
+    la header = _header(chunk_size, base_nonce, source_size)
+    prøv { builtin.fil_skriv_binær(root + "/" + tmp, bytes.fra_liste(header)) }
+    fang (e) { _nullstill(key) returner {"status": "feil", "error": "kan ikkje opprette backup", "bytes": "0", "chunks": "0"} }
+    la inn = fs.opne_native(root, kjelde_rel, "read")
+    hvis inn["status"] != "open" { _slett_trygt(root, tmp) _nullstill(key) returner {"status": "feil", "error": "kan ikkje opne kjelde", "bytes": "0", "chunks": "0"} }
+    la total = 0
+    la indeks = 0
+    la ok = sann
+    la ferdig = usann
+    mens ikkje ferdig {
+        la del = fs.native_les_binær(inn, chunk_size)
+        hvis del["status"] != "ok" { ok = usann ferdig = sann }
+        ellers {
+            la n = heltall_fra_tekst(tekst(del["value"]))
+            hvis n == 0 { ferdig = sann }
+            ellers {
+                hvis indeks >= 4294967295 eller n > source_size - total { ok = usann ferdig = sann }
+                ellers {
+                    la encrypted = aead.krypter(bytes.fra_liste(key), _nonce(base_nonce, indeks), del["data_bytes"], _aad(header, indeks, n))
+                    ok = _append(root + "/" + tmp, bytes.fra_liste(_u32_le(n))) og
+                         _append(root + "/" + tmp, encrypted["ciphertext"]) og
+                         _append(root + "/" + tmp, encrypted["tag"])
+                    hvis ok { total = total + n indeks = indeks + 1 } ellers { ferdig = sann }
+                }
+            }
+        }
+    }
+    fs.native_lukk(inn)
+    hvis ok og total == source_size {
+        la terminal = aead.krypter(bytes.fra_liste(key), _nonce(base_nonce, indeks), bytes.tom(), _aad(header, indeks, 0))
+        ok = _append(root + "/" + tmp, bytes.fra_liste(_u32_le(0))) og _append(root + "/" + tmp, terminal["tag"])
+    } ellers { ok = usann }
+    _nullstill(key)
+    hvis ikkje ok { _slett_trygt(root, tmp) returner {"status": "feil", "error": "backupstraum feila", "bytes": tekst_fra_heltall(total), "chunks": tekst_fra_heltall(indeks)} }
+    hvis fs.native_sett_modus(root, tmp, 384)["status"] != "ok" { _slett_trygt(root, tmp) returner {"status": "feil", "error": "backupmodus feila", "bytes": tekst_fra_heltall(total), "chunks": tekst_fra_heltall(indeks)} }
+    la publish = fs.native_erstatt_fil_atomisk(root, tmp, backup_rel)
+    hvis publish["status"] != "replaced" { _slett_trygt(root, tmp) returner {"status": "feil", "error": "atomisk backuppublisering feila", "bytes": tekst_fra_heltall(total), "chunks": tekst_fra_heltall(indeks)} }
+    returner {"status": "ok", "error": "", "bytes": tekst_fra_heltall(total), "chunks": tekst_fra_heltall(indeks)}
+}
+
+funksjon gjenopprett(root: tekst, backup_rel: tekst, mål_rel: tekst, key_verdi,
+                     maks_output: heiltall, maks_backup: heiltall) -> ordbok_tekst {
+    hvis root == "" eller ikkje _trygg_relativ(backup_rel) eller ikkje _trygg_relativ(mål_rel) eller backup_rel == mål_rel {
+        returner {"status": "feil", "error": "ugyldig restoresti", "bytes": "0"}
+    }
+    la key = bytes.til_liste(key_verdi)
+    hvis lengde(key) != 32 eller maks_output < 0 eller maks_backup < 52 { returner {"status": "feil", "error": "ugyldig restoregrense", "bytes": "0"} }
+    la stat = fs.native_stat_sti(root + "/" + backup_rel)
+    hvis stat["status"] != "ok" eller heltall_fra_tekst(tekst(stat["value"])) > maks_backup { _nullstill(key) returner {"status": "feil", "error": "backup manglar eller er for stor", "bytes": "0"} }
+    la inn = fs.opne_native(root, backup_rel, "read")
+    hvis inn["status"] != "open" { _nullstill(key) returner {"status": "feil", "error": "kan ikkje opne backup", "bytes": "0"} }
+    la hr = _les_nøyaktig(inn, 32)
+    hvis hr["status"] != "ok" { fs.native_lukk(inn) _nullstill(key) returner {"status": "feil", "error": "avkorta backupheader", "bytes": "0"} }
+    la header = bytes.til_liste(hr["data"])
+    la chunk_size = _les_u32(header, 8)
+    la source_size = _les_u64(header, 24)
+    hvis ikkje _header_ok(header) eller chunk_size < 4096 eller chunk_size > 1048576 eller source_size < 0 eller source_size > maks_output {
+        fs.native_lukk(inn) _nullstill(key) returner {"status": "feil", "error": "ugyldig backupheader", "bytes": "0"}
+    }
+    la base_nonce = builtin.slice(header, 12, 24)
+    la parent = _mappe(mål_rel)
+    hvis parent != "" og fs.native_lag_mappe(root, parent)["status"] != "ok" { fs.native_lukk(inn) _nullstill(key) returner {"status": "feil", "error": "kan ikkje lage målmappe", "bytes": "0"} }
+    la tmp = (hvis parent != "" da parent + "/" ellers "") + ".restore-aead-" + builtin.random_hex(12) + ".tmp"
+    prøv { builtin.fil_skriv_binær(root + "/" + tmp, bytes.tom()) }
+    fang (e) { fs.native_lukk(inn) _nullstill(key) returner {"status": "feil", "error": "kan ikkje lage restoretemp", "bytes": "0"} }
+    la total = 0
+    la indeks = 0
+    la ok = sann
+    la terminal = usann
+    mens ok og ikkje terminal {
+        la lr = _les_nøyaktig(inn, 4)
+        hvis lr["status"] != "ok" { ok = usann }
+        ellers {
+            la n = _les_u32(bytes.til_liste(lr["data"]), 0)
+            hvis n < 0 eller n > chunk_size eller n > source_size - total { ok = usann }
+            ellers {
+                la cipher = bytes.tom()
+                hvis n > 0 {
+                    la cr = _les_nøyaktig(inn, n)
+                    hvis cr["status"] != "ok" { ok = usann } ellers { cipher = cr["data"] }
+                }
+                hvis ok {
+                    la tr = _les_nøyaktig(inn, 16)
+                    hvis tr["status"] != "ok" { ok = usann }
+                    ellers {
+                        la opened = aead.dekrypter(bytes.fra_liste(key), _nonce(base_nonce, indeks), cipher, _aad(header, indeks, n), tr["data"])
+                        hvis opened["status"] != "ok" { ok = usann }
+                        ellers hvis n == 0 {
+                            terminal = sann
+                            hvis total != source_size { ok = usann }
+                        } ellers {
+                            ok = _append(root + "/" + tmp, opened["plaintext"])
+                            hvis ok { total = total + n indeks = indeks + 1 }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hvis ok og terminal {
+        la ekstra = fs.native_les_binær(inn, 1)
+        hvis ekstra["status"] != "ok" eller heltall_fra_tekst(tekst(ekstra["value"])) != 0 { ok = usann }
+    }
+    fs.native_lukk(inn)
+    _nullstill(key)
+    hvis ikkje ok { _slett_trygt(root, tmp) returner {"status": "feil", "error": "backupautentisering eller format feila", "bytes": tekst_fra_heltall(total)} }
+    hvis fs.native_sett_modus(root, tmp, 384)["status"] != "ok" { _slett_trygt(root, tmp) returner {"status": "feil", "error": "restoremodus feila", "bytes": tekst_fra_heltall(total)} }
+    la publish = fs.native_erstatt_fil_atomisk(root, tmp, mål_rel)
+    hvis publish["status"] != "replaced" { _slett_trygt(root, tmp) returner {"status": "feil", "error": "atomisk restore feila", "bytes": tekst_fra_heltall(total)} }
+    returner {"status": "ok", "error": "", "bytes": tekst_fra_heltall(total)}
+}
+
+funksjon lag_backup_fra_miljø(root: tekst, kjelde_rel: tekst, backup_rel: tekst,
+                              nøkkel_namn: tekst, chunk_size: heiltall,
+                              maks_kjelde: heiltall) -> ordbok_tekst {
+    returner lag_backup(root, kjelde_rel, backup_rel, nøkkel_fra_miljø(nøkkel_namn), chunk_size, maks_kjelde)
+}
+
+funksjon gjenopprett_fra_miljø(root: tekst, backup_rel: tekst, mål_rel: tekst,
+                               nøkkel_namn: tekst, maks_output: heiltall,
+                               maks_backup: heiltall) -> ordbok_tekst {
+    returner gjenopprett(root, backup_rel, mål_rel, nøkkel_fra_miljø(nøkkel_namn), maks_output, maks_backup)
+}

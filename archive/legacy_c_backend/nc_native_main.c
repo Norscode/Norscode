@@ -15,15 +15,18 @@
 #if defined(_WIN32)
 #include "nc_windows_backend.h"
 #include <bcrypt.h>
-#include <wincrypt.h>
 #else
 #include <pthread.h>
+#include <dlfcn.h>
 #include <dirent.h>
 #include <poll.h>
+#include <termios.h>
 #include <netdb.h>
+#include <sys/utsname.h>
 #include <arpa/inet.h>
 #include <sys/resource.h>
 #include <sys/mman.h>
+#include <syslog.h>
 #endif
 #include <signal.h>
 #include <fcntl.h>
@@ -32,16 +35,24 @@
 #include <sandbox.h>
 #include <libproc.h>
 #include <sys/event.h>
+#include <sys/sysctl.h>
+#include <mach-o/dyld.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include <CommonCrypto/CommonKeyDerivation.h>
 #include <CommonCrypto/CommonDigest.h>
 #endif
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/epoll.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <linux/audit.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
+#include <pwd.h>
+#include <grp.h>
 #endif
 #if defined(NC_ENABLE_OPENSSL)
 #include <openssl/ssl.h>
@@ -91,7 +102,85 @@ static NcVal *nc_builtin_acme_sign(NcVal *algorithm_v, NcVal *private_key_v,
 static NcVal *nc_builtin_acme_verify(NcVal *algorithm_v, NcVal *public_key_v,
                                      NcVal *input_v, NcVal *signature_hex_v);
 static NcVal *nc_builtin_dns_lookup(NcVal *host_v, NcVal *service_v);
+static NcVal *nc_builtin_property_list_operation(NcVal *request);
+static NcVal *nc_builtin_argv(void);
+static NcVal *nc_builtin_argv_operation(NcVal *request);
 static void nc_list_append_raw(NcVal *lst, NcVal *v);
+
+/* Kompatibilitet for eldre genererte runtime-snapshot. Canonical
+ * nc_runtime_mini.c eig no norscode-argv-v1 direkte. */
+#if !defined(NC_HAS_ARGV_OPERATION)
+static int g_main_argc = 0;
+static char **g_main_argv = NULL;
+static void nc_set_process_arguments(int argc, char **argv) {
+    g_main_argc = argc;
+    g_main_argv = argv;
+}
+#endif
+
+/* Den innchecka stage0-kandidaten kan innehalde eit eldre runtime-snapshot.
+ * Canonical nc_runtime_mini.c set NC_HAS_BUILTIN_READLINE; denne smale
+ * kompatibilitetsimplementasjonen held kandidaten byggbar fram til neste
+ * fullverifiserte regenerering. */
+#if !defined(NC_HAS_BUILTIN_READLINE)
+static NcVal *nc_builtin_readline(NcVal *prompt_v) {
+    if (prompt_v && prompt_v->type != NC_NIL) {
+        char *prompt = nc_to_str_raw(prompt_v);
+        fputs(prompt, stdout);
+        free(prompt);
+        fflush(stdout);
+    }
+    size_t capacity = 256, length = 0;
+    char *line = malloc(capacity);
+    if (!line) nc_panic("readline: minnefeil");
+    for (;;) {
+        int ch = fgetc(stdin);
+        if (ch == EOF || ch == '\n') break;
+        if (length + 1 >= capacity) {
+            if (capacity >= 65536) {
+                free(line);
+                nc_throw("readline: linje overskrid 65535 byte");
+                return nc_nil();
+            }
+            size_t next_capacity = capacity * 2;
+            if (next_capacity > 65536) next_capacity = 65536;
+            char *grown = realloc(line, next_capacity);
+            if (!grown) {
+                free(line);
+                nc_panic("readline: minnefeil");
+            }
+            line = grown;
+            capacity = next_capacity;
+        }
+        line[length++] = (char)ch;
+    }
+    if (length > 0 && line[length - 1] == '\r') length--;
+    line[length] = '\0';
+    return nc_str_own(line);
+}
+#endif
+
+/* Eldre genererte runtime-snapshot har contains, men ikkje den listebaserte
+ * contains_any-operasjonen som fase-0-porten brukar. Canonical runtime eig
+ * implementasjonen og set featuremarkøren; denne kompatibilitetsbana blir
+ * berre kompilert under materialisering frå eit eldre tillitsanker. */
+#if !defined(NC_HAS_BUILTIN_CONTAINS_ANY)
+static NcVal *nc_builtin_contains_any(NcVal *s_v, NcVal *needles_v) {
+    NcVal *matches = nc_list_new();
+    if (!needles_v || needles_v->type != NC_LIST) return matches;
+    char *s = nc_to_str_raw(s_v);
+    for (int i = 0; i < needles_v->list->len; i++) {
+        NcVal *needle_v = needles_v->list->items[i];
+        char *needle = nc_to_str_raw(needle_v);
+        if (needle[0] && strstr(s, needle) != NULL)
+            nc_builtin_legg_til(matches, nc_str(needle));
+        free(needle);
+    }
+    free(s);
+    return matches;
+}
+#endif
+
 static NcVal *g_current_route_handlers = NULL;
 static NcVal *g_current_functions = NULL;
 static NcVal *g_current_ncb = NULL;
@@ -144,6 +233,455 @@ static const char *nc_atomic_text_field(NcVal *request, const char *key, const c
     return v && v->type == NC_STR ? v->s : fallback;
 }
 
+static NcVal *nc_terminal_result(const char *status, long long value,
+                                 const char *data, const char *error) {
+    NcVal *r = nc_map_new();
+    nc_index_set(r, nc_str("abi"), nc_str("norscode-terminal-v1"));
+    nc_index_set(r, nc_str("status"), nc_str(status));
+    nc_index_set(r, nc_str("value"), nc_int(value));
+    nc_index_set(r, nc_str("data"), nc_str(data ? data : ""));
+    nc_index_set(r, nc_str("error"), nc_str(error ? error : ""));
+    return r;
+}
+
+static int nc_terminal_is_tty(void) {
+#if defined(_WIN32)
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    return input != INVALID_HANDLE_VALUE && input != NULL &&
+           GetConsoleMode(input, &mode) != 0;
+#else
+    return isatty(STDIN_FILENO) != 0;
+#endif
+}
+
+static int nc_terminal_set_echo(int enabled) {
+#if defined(_WIN32)
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD mode = 0;
+    if (input == INVALID_HANDLE_VALUE || input == NULL ||
+        !GetConsoleMode(input, &mode)) return 0;
+    if (enabled) mode |= ENABLE_ECHO_INPUT;
+    else mode &= ~ENABLE_ECHO_INPUT;
+    return SetConsoleMode(input, mode) != 0;
+#else
+    struct termios state;
+    if (tcgetattr(STDIN_FILENO, &state) != 0) return 0;
+    if (enabled) state.c_lflag |= ECHO;
+    else state.c_lflag &= (tcflag_t)~ECHO;
+    return tcsetattr(STDIN_FILENO, TCSAFLUSH, &state) == 0;
+#endif
+}
+
+static NcVal *nc_builtin_terminal_operation(NcVal *request) {
+    if (!request || request->type != NC_MAP ||
+        strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-terminal-v1"))
+        return nc_terminal_result("feil", 0, "", "invalid request");
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    if (!strcmp(operation, "is_tty"))
+        return nc_terminal_result("ok", nc_terminal_is_tty(), "", "");
+    if (!strcmp(operation, "echo")) {
+        int enabled = nc_atomic_int_field(request, "enabled", 1) != 0;
+        int ok = nc_terminal_set_echo(enabled);
+        return nc_terminal_result(ok ? "ok" : "feil", ok, "",
+                                  ok ? "" : "terminal echo unavailable");
+    }
+    if (!strcmp(operation, "readline")) {
+        int hidden = nc_atomic_int_field(request, "hidden", 0) != 0;
+        if (hidden && !nc_terminal_is_tty())
+            return nc_terminal_result("feil", 0, "", "hidden input requires tty");
+        int echo_changed = hidden ? nc_terminal_set_echo(0) : 0;
+        if (hidden && !echo_changed)
+            return nc_terminal_result("feil", 0, "", "cannot disable terminal echo");
+        NcVal *line = nc_builtin_readline(nc_str(nc_atomic_text_field(request, "prompt", "")));
+        if (hidden) {
+            int restored = nc_terminal_set_echo(1);
+            fputc('\n', stdout);
+            fflush(stdout);
+            if (!restored)
+                return nc_terminal_result("feil", 0, "", "cannot restore terminal echo");
+        }
+        const char *data = line && line->type == NC_STR ? line->s : "";
+        return nc_terminal_result("ok", (long long)strlen(data), data, "");
+    }
+    return nc_terminal_result("feil", 0, "", "invalid operation");
+}
+
+static void nc_system_set_text(NcVal *result, const char *key, const char *value) {
+    nc_index_set(result, nc_str(key), nc_str(value ? value : ""));
+}
+
+static void nc_system_set_int(NcVal *result, const char *key, long long value) {
+    nc_index_set(result, nc_str(key), nc_int(value));
+}
+
+static NcVal *nc_builtin_system_info(void) {
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-system-info-v1");
+    nc_system_set_text(result, "status", "ok");
+    nc_system_set_text(result, "error", "");
+#if defined(_WIN32)
+    char node[256] = "", executable[32768] = "", cwd[32768] = "";
+    DWORD node_size = (DWORD)sizeof(node);
+    if (!GetComputerNameA(node, &node_size)) node[0] = '\0';
+    DWORD executable_size = GetModuleFileNameA(NULL, executable, (DWORD)sizeof(executable));
+    if (!executable_size || executable_size >= sizeof(executable)) executable[0] = '\0';
+    DWORD cwd_size = GetCurrentDirectoryA((DWORD)sizeof(cwd), cwd);
+    if (!cwd_size || cwd_size >= sizeof(cwd)) cwd[0] = '\0';
+
+    SYSTEM_INFO system_info;
+    GetNativeSystemInfo(&system_info);
+    const char *machine = "unknown";
+    if (system_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) machine = "x86_64";
+    else if (system_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64) machine = "arm64";
+    else if (system_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL) machine = "x86";
+
+    OSVERSIONINFOEXW version_info;
+    memset(&version_info, 0, sizeof(version_info));
+    version_info.dwOSVersionInfoSize = sizeof(version_info);
+    typedef LONG (WINAPI *NcRtlGetVersion)(OSVERSIONINFOW *);
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    NcRtlGetVersion rtl_get_version = ntdll ?
+        (NcRtlGetVersion)(void *)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    if (rtl_get_version) rtl_get_version((OSVERSIONINFOW *)&version_info);
+    char release[64] = "", version[128] = "";
+    snprintf(release, sizeof(release), "%lu.%lu.%lu",
+             (unsigned long)version_info.dwMajorVersion,
+             (unsigned long)version_info.dwMinorVersion,
+             (unsigned long)version_info.dwBuildNumber);
+    snprintf(version, sizeof(version), "Windows build %lu",
+             (unsigned long)version_info.dwBuildNumber);
+
+    MEMORYSTATUSEX memory;
+    memset(&memory, 0, sizeof(memory));
+    memory.dwLength = sizeof(memory);
+    unsigned long long total_memory = GlobalMemoryStatusEx(&memory) ?
+        memory.ullTotalPhys : 0;
+
+    nc_system_set_text(result, "system", "Windows");
+    nc_system_set_text(result, "node", node);
+    nc_system_set_text(result, "release", release);
+    nc_system_set_text(result, "version", version);
+    nc_system_set_text(result, "machine", machine);
+    nc_system_set_text(result, "processor", machine);
+    nc_system_set_int(result, "cpu_count", (long long)system_info.dwNumberOfProcessors);
+    nc_system_set_int(result, "total_memory_bytes", (long long)total_memory);
+    nc_system_set_text(result, "executable", executable);
+    nc_system_set_text(result, "cwd", cwd);
+#else
+    struct utsname uts;
+    memset(&uts, 0, sizeof(uts));
+    if (uname(&uts) != 0) {
+        nc_system_set_text(result, "status", "feil");
+        nc_system_set_text(result, "error", strerror(errno));
+    }
+    long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+    if (cpu_count < 1) cpu_count = 1;
+    unsigned long long total_memory = 0;
+#if defined(__APPLE__)
+    uint64_t memory_size = 0;
+    size_t memory_size_len = sizeof(memory_size);
+    if (sysctlbyname("hw.memsize", &memory_size, &memory_size_len, NULL, 0) == 0)
+        total_memory = memory_size;
+    char executable[4096] = "";
+    uint32_t executable_size = (uint32_t)sizeof(executable);
+    if (_NSGetExecutablePath(executable, &executable_size) != 0) executable[0] = '\0';
+#else
+    struct sysinfo memory_info;
+    if (sysinfo(&memory_info) == 0)
+        total_memory = (unsigned long long)memory_info.totalram *
+                       (unsigned long long)memory_info.mem_unit;
+    char executable[4096] = "";
+    ssize_t executable_size = readlink("/proc/self/exe", executable, sizeof(executable) - 1);
+    if (executable_size > 0) executable[executable_size] = '\0';
+    else executable[0] = '\0';
+#endif
+    nc_system_set_text(result, "system", uts.sysname);
+    nc_system_set_text(result, "node", uts.nodename);
+    nc_system_set_text(result, "release", uts.release);
+    nc_system_set_text(result, "version", uts.version);
+    nc_system_set_text(result, "machine", uts.machine);
+    nc_system_set_text(result, "processor", uts.machine);
+    nc_system_set_int(result, "cpu_count", (long long)cpu_count);
+    nc_system_set_int(result, "total_memory_bytes", (long long)total_memory);
+    nc_system_set_text(result, "executable", executable);
+    char cwd[4096] = "";
+    if (!getcwd(cwd, sizeof(cwd))) cwd[0] = '\0';
+    nc_system_set_text(result, "cwd", cwd);
+#endif
+    return result;
+}
+
+static NcVal *nc_linux_result(const char *status, const char *error) {
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-linux-ops-v1");
+    nc_system_set_text(result, "status", status);
+    nc_system_set_text(result, "error", error ? error : "");
+    return result;
+}
+
+#if defined(__linux__)
+static int nc_linux_safe_text(const char *value, size_t maximum) {
+    return value && value[0] && strlen(value) <= maximum &&
+           !strchr(value, '\n') && !strchr(value, '\r');
+}
+
+static void *nc_linux_systemd_library(void) {
+    static void *library = NULL; static int attempted = 0;
+    if (!attempted) { attempted = 1; library = dlopen("libsystemd.so.0", RTLD_NOW | RTLD_LOCAL); }
+    return library;
+}
+
+static NcVal *nc_linux_systemd(NcVal *request, const char *operation) {
+    const char *unit = nc_atomic_text_field(request, "unit", "");
+    if (!nc_linux_safe_text(unit, 255) || strchr(unit, '/')) return nc_linux_result("feil", "invalid unit");
+    void *library = nc_linux_systemd_library();
+    if (!library) return nc_linux_result("unsupported", "libsystemd unavailable");
+    typedef int (*DefaultBus)(void **); typedef int (*CallMethod)(void *, const char *, const char *, const char *, const char *, void *, void **, const char *, ...);
+    typedef int (*MessageRead)(void *, const char *, ...); typedef int (*GetPropertyString)(void *, const char *, const char *, const char *, const char *, void *, char **);
+    typedef void *(*Unref)(void *);
+    DefaultBus default_bus = (DefaultBus)dlsym(library, "sd_bus_default_system");
+    CallMethod call_method = (CallMethod)dlsym(library, "sd_bus_call_method");
+    MessageRead message_read = (MessageRead)dlsym(library, "sd_bus_message_read");
+    GetPropertyString get_property = (GetPropertyString)dlsym(library, "sd_bus_get_property_string");
+    Unref bus_unref = (Unref)dlsym(library, "sd_bus_unref"), message_unref = (Unref)dlsym(library, "sd_bus_message_unref");
+    if (!default_bus || !call_method || !message_read || !get_property || !bus_unref || !message_unref) return nc_linux_result("unsupported", "incomplete libsystemd ABI");
+    void *bus = NULL, *reply = NULL; int rc = default_bus(&bus);
+    if (rc < 0 || !bus) return nc_linux_result("feil", "system bus unavailable");
+    if (!strcmp(operation, "systemd_status")) {
+        const char *path = NULL;
+        rc = call_method(bus, "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "GetUnit", NULL, &reply, "s", unit);
+        if (rc >= 0) rc = message_read(reply, "o", &path);
+        char *active = NULL, *sub = NULL;
+        if (rc >= 0 && path) rc = get_property(bus, "org.freedesktop.systemd1", path, "org.freedesktop.systemd1.Unit", "ActiveState", NULL, &active);
+        if (rc >= 0 && path) rc = get_property(bus, "org.freedesktop.systemd1", path, "org.freedesktop.systemd1.Unit", "SubState", NULL, &sub);
+        NcVal *result = rc < 0 ? nc_linux_result("feil", "systemd status failed") : nc_linux_result("ok", "");
+        nc_system_set_text(result, "unit", unit); nc_system_set_text(result, "active_state", active ? active : ""); nc_system_set_text(result, "sub_state", sub ? sub : "");
+        free(active); free(sub); if (reply) message_unref(reply); bus_unref(bus); return result;
+    }
+    const char *method = !strcmp(operation, "systemd_start") ? "StartUnit" : !strcmp(operation, "systemd_stop") ? "StopUnit" : !strcmp(operation, "systemd_restart") ? "RestartUnit" : "";
+    if (!method[0]) { bus_unref(bus); return nc_linux_result("feil", "invalid systemd operation"); }
+    rc = call_method(bus, "org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", method, NULL, &reply, "ss", unit, "replace");
+    NcVal *result = rc < 0 ? nc_linux_result("feil", "systemd action failed") : nc_linux_result("ok", "");
+    nc_system_set_text(result, "unit", unit); nc_system_set_text(result, "action", method);
+    if (reply) message_unref(reply); bus_unref(bus); return result;
+}
+
+static NcVal *nc_builtin_linux_operation(NcVal *request) {
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    if (!strcmp(operation, "systemd_start") || !strcmp(operation, "systemd_stop") || !strcmp(operation, "systemd_restart") || !strcmp(operation, "systemd_status")) return nc_linux_systemd(request, operation);
+    if (!strcmp(operation, "procfs_metrics")) {
+        long pid = (long)nc_atomic_int_field(request, "pid", (long long)getpid());
+        if (pid != (long)getpid()) return nc_linux_result("feil", "only current process metrics are allowed");
+        struct rusage usage; memset(&usage, 0, sizeof(usage)); if (getrusage(RUSAGE_SELF, &usage) != 0) return nc_linux_result("feil", strerror(errno));
+        long page_size = sysconf(_SC_PAGESIZE), total_pages = 0, resident_pages = 0; FILE *statm = fopen("/proc/self/statm", "r");
+        if (statm) { if (fscanf(statm, "%ld %ld", &total_pages, &resident_pages) != 2) total_pages = resident_pages = 0; fclose(statm); }
+        NcVal *result = nc_linux_result("ok", ""); nc_system_set_int(result, "pid", pid); nc_system_set_int(result, "rss_bytes", resident_pages * page_size); nc_system_set_int(result, "virtual_bytes", total_pages * page_size);
+        nc_system_set_int(result, "minor_faults", usage.ru_minflt); nc_system_set_int(result, "major_faults", usage.ru_majflt); nc_system_set_int(result, "voluntary_context_switches", usage.ru_nvcsw); nc_system_set_int(result, "involuntary_context_switches", usage.ru_nivcsw); return result;
+    }
+    if (!strcmp(operation, "user_lookup")) {
+        const char *name = nc_atomic_text_field(request, "name", ""); if (!nc_linux_safe_text(name, 255)) return nc_linux_result("feil", "invalid user");
+        struct passwd *entry = getpwnam(name); if (!entry) return nc_linux_result("not_found", "user not found"); NcVal *result = nc_linux_result("ok", "");
+        nc_system_set_text(result, "name", entry->pw_name); nc_system_set_int(result, "uid", entry->pw_uid); nc_system_set_int(result, "gid", entry->pw_gid); nc_system_set_text(result, "home", entry->pw_dir); nc_system_set_text(result, "shell", entry->pw_shell); return result;
+    }
+    if (!strcmp(operation, "group_lookup")) {
+        const char *name = nc_atomic_text_field(request, "name", ""); if (!nc_linux_safe_text(name, 255)) return nc_linux_result("feil", "invalid group");
+        struct group *entry = getgrnam(name); if (!entry) return nc_linux_result("not_found", "group not found"); NcVal *result = nc_linux_result("ok", ""); nc_system_set_text(result, "name", entry->gr_name); nc_system_set_int(result, "gid", entry->gr_gid); return result;
+    }
+    if (!strcmp(operation, "chmod") || !strcmp(operation, "chown")) {
+        const char *path = nc_atomic_text_field(request, "path", ""); if (!nc_linux_safe_text(path, 4095) || path[0] != '/') return nc_linux_result("feil", "absolute path required");
+        int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW); if (fd < 0) return nc_linux_result("feil", strerror(errno));
+        int rc;
+        if (!strcmp(operation, "chmod")) { long mode = (long)nc_atomic_int_field(request, "mode", -1); rc = mode < 0 || mode > 07777 ? -1 : fchmod(fd, (mode_t)mode); }
+        else { long uid = (long)nc_atomic_int_field(request, "uid", -1), gid = (long)nc_atomic_int_field(request, "gid", -1); rc = uid < -1 || gid < -1 ? -1 : fchown(fd, (uid_t)uid, (gid_t)gid); }
+        int saved = errno; close(fd); return rc == 0 ? nc_linux_result("ok", "") : nc_linux_result("feil", saved ? strerror(saved) : "invalid ownership or mode");
+    }
+    if (!strcmp(operation, "privilege_drop")) {
+        const char *user = nc_atomic_text_field(request, "user", ""), *group = nc_atomic_text_field(request, "group", "");
+        if (!nc_linux_safe_text(user, 255) || !nc_linux_safe_text(group, 255)) return nc_linux_result("feil", "invalid identity");
+        struct passwd *pw = getpwnam(user); struct group *gr = getgrnam(group); if (!pw || !gr) return nc_linux_result("not_found", "identity not found");
+        if (geteuid() != 0) return nc_linux_result("feil", "privilege drop requires root");
+        if (initgroups(user, gr->gr_gid) != 0 || setgid(gr->gr_gid) != 0 || setuid(pw->pw_uid) != 0 || prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return nc_linux_result("feil", "irreversible privilege drop failed");
+        NcVal *result = nc_linux_result("ok", ""); nc_system_set_int(result, "uid", getuid()); nc_system_set_int(result, "gid", getgid()); nc_system_set_text(result, "no_new_privs", "1"); return result;
+    }
+    if (!strcmp(operation, "journald_write")) {
+        const char *message = nc_atomic_text_field(request, "message", ""), *identifier = nc_atomic_text_field(request, "identifier", "norscode");
+        int priority = (int)nc_atomic_int_field(request, "priority", 6); if (!nc_linux_safe_text(message, 65535) || !nc_linux_safe_text(identifier, 64) || priority < 0 || priority > 7) return nc_linux_result("feil", "invalid journal entry");
+        int fd = socket(AF_UNIX, SOCK_DGRAM | SOCK_CLOEXEC, 0); if (fd < 0) return nc_linux_result("feil", strerror(errno)); struct sockaddr_un address; memset(&address, 0, sizeof(address)); address.sun_family = AF_UNIX; snprintf(address.sun_path, sizeof(address.sun_path), "%s", "/run/systemd/journal/socket");
+        char *payload = malloc(strlen(message) + strlen(identifier) + 64); if (!payload) { close(fd); return nc_linux_result("feil", "out of memory"); } int length = sprintf(payload, "MESSAGE=%s\nSYSLOG_IDENTIFIER=%s\nPRIORITY=%d", message, identifier, priority);
+        int rc = sendto(fd, payload, (size_t)length, MSG_NOSIGNAL, (struct sockaddr *)&address, sizeof(address)); int saved = errno; free(payload); close(fd); return rc >= 0 ? nc_linux_result("ok", "") : nc_linux_result("feil", strerror(saved));
+    }
+    return nc_linux_result("feil", "invalid operation");
+}
+#else
+static NcVal *nc_builtin_linux_operation(NcVal *request) { (void)request; return nc_linux_result("unsupported", "Linux ABI unavailable on this platform"); }
+#endif
+
+static NcVal *nc_builtin_system_operation(NcVal *request) {
+    if (request && request->type == NC_MAP && !strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-linux-ops-v1")) return nc_builtin_linux_operation(request);
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-system-v1");
+    nc_system_set_text(result, "status", "feil");
+    nc_system_set_text(result, "path", "");
+    nc_system_set_text(result, "error", "");
+    if (!request || request->type != NC_MAP ||
+        strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-system-v1")) {
+        nc_system_set_text(result, "error", "invalid request");
+        return result;
+    }
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    const char *name = nc_atomic_text_field(request, "name", "");
+    if (strcmp(operation, "resolve_executable") || !name[0] ||
+        strchr(name, '\n') || strchr(name, '\r')) {
+        nc_system_set_text(result, "error", "invalid operation");
+        return result;
+    }
+#if defined(_WIN32)
+    char path[32768] = "";
+    DWORD length = SearchPathA(NULL, name, NULL, (DWORD)sizeof(path), path, NULL);
+    if ((!length || length >= sizeof(path)) && !strchr(name, '.'))
+        length = SearchPathA(NULL, name, ".exe", (DWORD)sizeof(path), path, NULL);
+    if (length > 0 && length < sizeof(path)) {
+        nc_system_set_text(result, "status", "ok");
+        nc_system_set_text(result, "path", path);
+        return result;
+    }
+#else
+    if (strchr(name, '/')) {
+        if (access(name, X_OK) == 0) {
+            nc_system_set_text(result, "status", "ok");
+            nc_system_set_text(result, "path", name);
+            return result;
+        }
+    } else {
+        const char *path_env = getenv("PATH");
+        if (path_env && path_env[0]) {
+            char *copy = strdup(path_env), *save = NULL;
+            char *directory = strtok_r(copy, ":", &save);
+            while (directory) {
+                if (!directory[0]) directory = ".";
+                size_t needed = strlen(directory) + strlen(name) + 2;
+                char *candidate = malloc(needed);
+                if (!candidate) { free(copy); nc_panic("resolve executable: minnefeil"); }
+                snprintf(candidate, needed, "%s/%s", directory, name);
+                if (access(candidate, X_OK) == 0) {
+                    nc_system_set_text(result, "status", "ok");
+                    nc_system_set_text(result, "path", candidate);
+                    free(candidate);
+                    free(copy);
+                    return result;
+                }
+                free(candidate);
+                directory = strtok_r(NULL, ":", &save);
+            }
+            free(copy);
+        }
+    }
+#endif
+    nc_system_set_text(result, "error", "executable not found");
+    return result;
+}
+
+#define NC_SYSTEM_LOG_RING 128
+#define NC_SYSTEM_LOG_ENTRY 1024
+static char g_system_log_ring[NC_SYSTEM_LOG_RING][NC_SYSTEM_LOG_ENTRY];
+static size_t g_system_log_count = 0;
+static size_t g_system_log_next = 0;
+static pthread_mutex_t g_system_log_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static NcVal *nc_system_log_result(const char *status, long long value,
+                                   const char *data, const char *error) {
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-system-log-v1");
+    nc_system_set_text(result, "status", status);
+    nc_system_set_int(result, "value", value);
+    nc_system_set_text(result, "data", data ? data : "");
+    nc_system_set_text(result, "error", error ? error : "");
+    return result;
+}
+
+static void nc_system_log_remember(const char *ident, const char *message,
+                                   int priority, int include_pid) {
+    char entry[NC_SYSTEM_LOG_ENTRY];
+#if defined(_WIN32)
+    unsigned long process_id = (unsigned long)GetCurrentProcessId();
+#else
+    unsigned long process_id = (unsigned long)getpid();
+#endif
+    if (include_pid)
+        snprintf(entry, sizeof(entry), "%s[%lu] <%d> %s",
+                 ident && ident[0] ? ident : "norscode", process_id, priority,
+                 message ? message : "");
+    else
+        snprintf(entry, sizeof(entry), "%s <%d> %s",
+                 ident && ident[0] ? ident : "norscode", priority,
+                 message ? message : "");
+    pthread_mutex_lock(&g_system_log_lock);
+    snprintf(g_system_log_ring[g_system_log_next], NC_SYSTEM_LOG_ENTRY, "%s", entry);
+    g_system_log_next = (g_system_log_next + 1) % NC_SYSTEM_LOG_RING;
+    if (g_system_log_count < NC_SYSTEM_LOG_RING) g_system_log_count++;
+    pthread_mutex_unlock(&g_system_log_lock);
+}
+
+static NcVal *nc_builtin_system_log_operation(NcVal *request) {
+    if (!request || request->type != NC_MAP ||
+        strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-system-log-v1"))
+        return nc_system_log_result("feil", 0, "", "invalid request");
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    if (!strcmp(operation, "write")) {
+        const char *ident = nc_atomic_text_field(request, "ident", "norscode");
+        const char *message = nc_atomic_text_field(request, "message", "");
+        int priority = (int)nc_atomic_int_field(request, "priority", 6);
+        int facility = (int)nc_atomic_int_field(request, "facility", 8);
+        int options = (int)nc_atomic_int_field(request, "options", 0);
+        if (!message[0] || priority < 0 || priority > 7 ||
+            strchr(ident, '\n') || strchr(ident, '\r'))
+            return nc_system_log_result("feil", 0, "", "invalid log entry");
+#if defined(_WIN32)
+        HANDLE source = RegisterEventSourceA(NULL, ident[0] ? ident : "Norscode");
+        if (!source) return nc_system_log_result("feil", 0, "", "RegisterEventSource failed");
+        WORD event_type = priority <= 3 ? EVENTLOG_ERROR_TYPE :
+                          priority == 4 ? EVENTLOG_WARNING_TYPE :
+                          EVENTLOG_INFORMATION_TYPE;
+        const char *strings[1] = {message};
+        BOOL ok = ReportEventA(source, event_type, 0, 0x1000, NULL, 1, 0, strings, NULL);
+        DeregisterEventSource(source);
+        if (!ok) return nc_system_log_result("feil", 0, "", "ReportEvent failed");
+#else
+        openlog(ident[0] ? ident : "norscode", options, facility);
+        syslog(facility | priority, "%s", message);
+        closelog();
+#endif
+        nc_system_log_remember(ident, message, priority, (options & 1) != 0);
+        return nc_system_log_result("ok", 1, "", "");
+    }
+    if (!strcmp(operation, "read_recent")) {
+        long long requested = nc_atomic_int_field(request, "limit", 20);
+        if (requested < 0) requested = 0;
+        if (requested > NC_SYSTEM_LOG_RING) requested = NC_SYSTEM_LOG_RING;
+        char *data = calloc((size_t)requested, NC_SYSTEM_LOG_ENTRY);
+        if (!data && requested > 0) nc_panic("system log: minnefeil");
+        pthread_mutex_lock(&g_system_log_lock);
+        size_t available = g_system_log_count;
+        size_t take = (size_t)requested < available ? (size_t)requested : available;
+        size_t start = (g_system_log_next + NC_SYSTEM_LOG_RING - take) % NC_SYSTEM_LOG_RING;
+        size_t used = 0;
+        for (size_t i = 0; i < take; i++) {
+            const char *entry = g_system_log_ring[(start + i) % NC_SYSTEM_LOG_RING];
+            size_t length = strlen(entry);
+            if (i > 0) data[used++] = '\n';
+            memcpy(data + used, entry, length);
+            used += length;
+        }
+        pthread_mutex_unlock(&g_system_log_lock);
+        if (data) data[used] = '\0';
+        NcVal *result = nc_system_log_result("ok", (long long)take, data ? data : "", "");
+        free(data);
+        return result;
+    }
+    return nc_system_log_result("feil", 0, "", "invalid operation");
+}
+
 static NcVal *nc_process_result(const char *status, pid_t pid, int exit_code,
                                 const char *out, const char *err, const char *error) {
     NcVal *r = nc_map_new();
@@ -154,6 +692,8 @@ static NcVal *nc_process_result(const char *status, pid_t pid, int exit_code,
     nc_index_set(r, nc_str("stdout"), nc_str(out ? out : ""));
     nc_index_set(r, nc_str("stderr"), nc_str(err ? err : ""));
     nc_index_set(r, nc_str("error"), nc_str(error ? error : ""));
+    nc_index_set(r, nc_str("wall_ms"), nc_int(0));
+    nc_index_set(r, nc_str("peak_rss_bytes"), nc_int(0));
     return r;
 }
 
@@ -913,20 +1453,6 @@ static int nc_apply_process_sandbox(const char *profile,long long timeout_ms,lon
 static unsigned long long nc_process_resident_bytes(pid_t pid);
 #endif
 
-/* Keep the secure 512 MiB default, but allow an explicitly opted-in
- * maintainer gate to raise the cap for the large stage-0 compiler. */
-static long long nc_process_default_max_memory(void) {
-    const long long fallback = 536870912LL;
-    const unsigned long long ceiling = 8589934592ULL;
-    const char *raw = getenv("NORSCODE_PROCESS_MAX_MEMORY_BYTES");
-    if (!raw || !*raw) return fallback;
-    errno = 0;
-    char *end = NULL;
-    unsigned long long value = strtoull(raw, &end, 10);
-    if (errno || end == raw || *end != '\0' || value == 0 || value > ceiling) return fallback;
-    return (long long)value;
-}
-
 #if defined(_WIN32)
 static char *nc_process_environment_block(NcVal *environment, int inherit_env, int *valid) {
     *valid = 1;
@@ -969,7 +1495,7 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     long long timeout_ms = nc_atomic_int_field(request, "timeout_ms", 0);
     long long max_output = nc_atomic_int_field(request, "max_output_bytes", 0);
     const char *sandbox_profile = nc_atomic_text_field(request, "sandbox", "none");
-    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", nc_process_default_max_memory());
+    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", 536870912);
     long long max_files = nc_atomic_int_field(request, "max_open_files", 64);
     int inherit_env = nc_atomic_int_field(request, "inherit_env", 1) != 0;
     NcVal *environment = nc_index_get(request, nc_str("environment"));
@@ -996,6 +1522,7 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     }
 
 #if defined(_WIN32)
+    long long started_ms = nc_monotonic_ms();
     int environment_valid = 1;
     char *environment_block = nc_process_environment_block(environment, inherit_env, &environment_valid);
     if (!environment_valid) {
@@ -1035,6 +1562,8 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     const char *status = timed_out ? "timeout" : output_limit ? "feil" : "ferdig";
     const char *error = timed_out ? "timeout" : output_limit ? "output limit" : "";
     NcVal *result = nc_process_result(status, pid, timed_out ? 124 : output_limit ? 125 : (int)exit_code, out, err, error);
+    nc_index_set(result,nc_str("wall_ms"),nc_int(nc_monotonic_ms()-started_ms));
+    nc_index_set(result,nc_str("peak_rss_bytes"),nc_int((long long)process.peak_memory_bytes));
     nc_index_set(result,nc_str("sandbox"),nc_str(sandbox_profile));
     nc_index_set(result,nc_str("sandbox_backend"),nc_str(process.appcontainer?"appcontainer+job-object":strcmp(sandbox_profile,"none")?"job-object":"none"));
     free(out); free(err); return result;
@@ -1092,13 +1621,15 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     size_t out_len = 0, err_len = 0, stdin_off = 0, stdin_len = strlen(stdin_text);
     int in_open = 1, out_open = 1, err_open = 1, child_done = 0, wait_status = 0;
     int timed_out = 0, output_limit = 0, memory_limited = 0;
-    long long deadline = nc_monotonic_ms() + timeout_ms;
+    long long started_ms = nc_monotonic_ms();
+    long long deadline = started_ms + timeout_ms;
+    unsigned long long peak_rss_bytes = 0;
     while (!child_done || out_open || err_open) {
         if (!child_done && nc_monotonic_ms() >= deadline) {
             timed_out = 1;
             kill(pid, SIGKILL);
         }
-        if(!child_done&&!memory_limited&&max_memory>0){unsigned long long resident=nc_process_resident_bytes(pid);if(resident>(unsigned long long)max_memory){memory_limited=1;kill(pid,SIGKILL);}}
+        if(!child_done){unsigned long long resident=nc_process_resident_bytes(pid);if(resident>peak_rss_bytes)peak_rss_bytes=resident;if(!memory_limited&&max_memory>0&&resident>(unsigned long long)max_memory){memory_limited=1;kill(pid,SIGKILL);}}
         struct pollfd fds[3];
         int nfds = 0, in_idx = -1, out_idx = -1, err_idx = -1;
         if (in_open) { in_idx = nfds; fds[nfds++] = (struct pollfd){in_pipe[1], POLLOUT, 0}; }
@@ -1150,6 +1681,8 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request) {
     else if (WIFSIGNALED(wait_status)) { status = "signal"; exit_code = 128 + WTERMSIG(wait_status); }
     else if (WIFEXITED(wait_status)) exit_code = WEXITSTATUS(wait_status);
     NcVal *result = nc_process_result(status, pid, exit_code, out, err, error);
+    nc_index_set(result,nc_str("wall_ms"),nc_int(nc_monotonic_ms()-started_ms));
+    nc_index_set(result,nc_str("peak_rss_bytes"),nc_int((long long)peak_rss_bytes));
     nc_index_set(result,nc_str("sandbox"),nc_str(sandbox_profile));
 #if defined(__linux__)
     nc_index_set(result,nc_str("sandbox_backend"),nc_str(strcmp(sandbox_profile,"none") ? "seccomp" : "none"));
@@ -1397,7 +1930,8 @@ static int nc_csv_has_token(const char *csv, const char *token) {
 
 static int nc_native_disk_scope_allows(const char *path) {
     if (!path || !path[0] || strstr(path, "..")) return 0;
-    const char *scope = getenv("NORSCODE_VM_DISK_ROOT");
+    const char *scope = getenv("NORSCODE_VM_DIRECT_DISK_ROOT");
+    if (!scope || !scope[0]) scope = getenv("NORSCODE_VM_DISK_ROOT");
     if (!scope || !scope[0] || !strcmp(scope, ".")) return path[0] != '/';
     const char *cursor = scope;
     while (*cursor) {
@@ -1415,7 +1949,9 @@ static int nc_native_disk_scope_allows(const char *path) {
 
 static const char *nc_native_capability_for(const char *name) {
     if (!strcmp(name, "exec_prosess") || !strcmp(name, "process_spawn_argv") ||
-        !strcmp(name, "process_operation") || !strcmp(name, "kompiler_fil")) return "process.exec";
+        !strcmp(name, "process_operation") || !strcmp(name, "system_operation") ||
+        !strcmp(name, "system_log_operation") || !strcmp(name, "property_list_operation") ||
+        !strcmp(name, "kompiler_fil")) return "process.exec";
     if (!strncmp(name, "thread_", 7) || !strcmp(name, "atomic_operation")) return "thread.spawn";
     if (!strcmp(name, "jit_operation") || !strcmp(name, "vm_jit_cleanup")) return "jit.execute";
     if (!strcmp(name, "miljo_hent")) return "env.read";
@@ -1496,7 +2032,8 @@ static const char *nc_native_security_check(const char *name, NcVal **args, int 
     }
     const char *capability = nc_native_capability_for(name);
     if (!capability) return NULL;
-    const char *caps = getenv("NORSCODE_VM_CAPABILITIES");
+    const char *caps = getenv("NORSCODE_VM_DIRECT_CAPABILITIES");
+    if (!caps || !caps[0]) caps = getenv("NORSCODE_VM_CAPABILITIES");
     if (!nc_csv_has_token(caps, capability)) {
         snprintf(g_native_last_security_denial, sizeof(g_native_last_security_denial),
                  "%s:denied", capability);
@@ -1957,6 +2494,14 @@ static NcVal *nc_dispatch_call(const char *n, NcVal **a, int na) {
     if (!strcmp(builtin, "fil_les_binary") || !strcmp(builtin, "fil_les_binær")) return nc_builtin_fil_les_binary(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "fil_append_binary") || !strcmp(builtin, "fil_append_binær")) return nc_builtin_fil_append_binary(na > 0 ? a[0] : nc_nil(), na > 1 ? a[1] : nc_nil());
     if (!strcmp(builtin, "fil_sett_kjorbar")) return nc_builtin_fil_sett_kjorbar(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "readline") || !strcmp(builtin, "stdin_read") || !strcmp(builtin, "les_input")) return nc_builtin_readline(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "terminal_operation")) return nc_builtin_terminal_operation(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "system_info")) return nc_builtin_system_info();
+    if (!strcmp(builtin, "system_operation")) return nc_builtin_system_operation(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "system_log_operation")) return nc_builtin_system_log_operation(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "property_list_operation")) return nc_builtin_property_list_operation(na > 0 ? a[0] : nc_nil());
+    if (!strcmp(builtin, "argv")) return nc_builtin_argv();
+    if (!strcmp(builtin, "argv_operation")) return nc_builtin_argv_operation(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "process_spawn_argv")) return nc_builtin_process_spawn_argv(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "process_operation")) return nc_builtin_process_operation(na > 0 ? a[0] : nc_nil());
     if (!strcmp(builtin, "filesystem_read_operation")) return nc_builtin_filesystem_read_operation(na > 0 ? a[0] : nc_nil());
@@ -2291,8 +2836,11 @@ static int nc_tls_attach_client(NcNetworkSlot *s,const char *hostname,const char
     s->require_ocsp=require_ocsp;if(require_ocsp)SSL_set_tlsext_status_type(ssl,TLSEXT_STATUSTYPE_ocsp);
     s->ssl_ctx=ctx;s->ssl=ssl;snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",hostname);return 1;
 }
+static int nc_tls_attach_server(NcNetworkSlot *s,const char *cert,const char *key,const char *client_ca,const char *client_crl,const char *ocsp_response,int require_client_cert){
+    SSL_CTX *ctx=nc_tls_server_ctx(cert,key,client_ca,client_crl,ocsp_response,require_client_cert);if(!ctx)return 0;SSL *ssl=SSL_new(ctx);if(!ssl){SSL_CTX_free(ctx);return 0;}if(SSL_set_fd(ssl,(int)s->fd)!=1){SSL_free(ssl);SSL_CTX_free(ctx);return 0;}SSL_set_accept_state(ssl);s->ssl_ctx=ctx;s->ssl=ssl;s->tls_server=1;return 1;
+}
 static int nc_tls_handshake_step(NcNetworkSlot *s,int *want_events,char *error,size_t error_cap){
-    if(s->tls_handshake_done)return 1;int rc=SSL_do_handshake(s->ssl);if(rc==1){if(!s->tls_server&&!nc_tls_verify_ocsp(s,error,error_cap))return -1;s->tls_handshake_done=1;*want_events=0;return 1;}int e=SSL_get_error(s->ssl,rc);
+    if(s->tls_handshake_done)return 1;int rc=SSL_do_handshake(s->ssl);if(rc==1){if(!s->tls_server&&!nc_tls_verify_ocsp(s,error,error_cap))return -1;if(s->tls_server){const char *server_name=SSL_get_servername(s->ssl,TLSEXT_NAMETYPE_host_name);snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",server_name?server_name:"");}s->tls_handshake_done=1;*want_events=0;return 1;}int e=SSL_get_error(s->ssl,rc);
     if(e==SSL_ERROR_WANT_READ){*want_events=1;return 0;}if(e==SSL_ERROR_WANT_WRITE){*want_events=2;return 0;}unsigned long oe=ERR_get_error();snprintf(error,error_cap,"%s",oe?ERR_error_string(oe,NULL):"TLS handshake failed");return -1;
 }
 #endif
@@ -2350,7 +2898,7 @@ static NcVal *nc_builtin_network_operation(NcVal *request){
         return result;
     }
 #if !defined(NC_ENABLE_OPENSSL) && !defined(_WIN32)
-    if(!strcmp(op,"tls_listen")||!strcmp(op,"tls_connect")||!strcmp(op,"tls_handshake"))return nc_network_result("feil",NULL,"",-1,0,"native TLS backend unavailable");
+    if(!strcmp(op,"tls_listen")||!strcmp(op,"tls_connect")||!strcmp(op,"tls_handshake")||!strcmp(op,"tls_upgrade_client")||!strcmp(op,"tls_upgrade_server"))return nc_network_result("feil",NULL,"",-1,0,"native TLS backend unavailable");
 #endif
     if(!strcmp(op,"listen")||!strcmp(op,"tls_listen")){
         const char *host=nc_atomic_text_field(request,"host","127.0.0.1");int port=(int)nc_atomic_int_field(request,"port",0),backlog=(int)nc_atomic_int_field(request,"backlog",128);struct sockaddr_in addr;
@@ -2407,6 +2955,20 @@ static NcVal *nc_builtin_network_operation(NcVal *request){
         return s?nc_network_result(connecting?"connecting":"connected",s,"",0,port,""):nc_network_result("feil",NULL,"",-1,0,"socket capacity");
     }
     NcNetworkSlot *s=nc_network_slot(request);if(!s)return nc_network_result("feil",NULL,"",-1,0,"invalid handle");pthread_mutex_lock(&s->mutex);
+#if defined(NC_ENABLE_OPENSSL)
+    if(!strcmp(op,"tls_upgrade_client")||!strcmp(op,"tls_upgrade_server")){
+        if(s->listener||s->datagram||s->connecting||s->ssl){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"socket cannot be upgraded to TLS");}
+        int ok=!strcmp(op,"tls_upgrade_client")?nc_tls_attach_client(s,nc_atomic_text_field(request,"hostname",""),nc_atomic_text_field(request,"ca_file",""),nc_atomic_text_field(request,"crl_file",""),nc_atomic_text_field(request,"client_cert_file",""),nc_atomic_text_field(request,"client_key_file",""),nc_atomic_int_field(request,"require_ocsp",0)!=0):nc_tls_attach_server(s,nc_atomic_text_field(request,"cert_file",""),nc_atomic_text_field(request,"key_file",""),nc_atomic_text_field(request,"client_ca_file",""),nc_atomic_text_field(request,"client_crl_file",""),nc_atomic_text_field(request,"ocsp_response_file",""),nc_atomic_int_field(request,"require_client_cert",0)!=0);
+        NcVal *r=ok?nc_network_result("tls_ready",s,"",0,0,""):nc_network_result("feil",s,"",-1,0,"TLS upgrade configuration failed");pthread_mutex_unlock(&s->mutex);return r;
+    }
+#elif defined(_WIN32)
+    if(!strcmp(op,"tls_upgrade_client")){
+        if(s->listener||s->datagram||s->connecting||s->schannel||s->schannel_server){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"socket cannot be upgraded to TLS");}
+        if(*nc_atomic_text_field(request,"ca_file","")||*nc_atomic_text_field(request,"crl_file","")||*nc_atomic_text_field(request,"client_cert_file","")||*nc_atomic_text_field(request,"client_key_file","")||nc_atomic_int_field(request,"require_ocsp",0)!=0){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"SChannel custom PEM trust, CRL, OCSP and mTLS are not available");}
+        s->schannel=calloc(1,sizeof(NcwSChannelClient));if(!s->schannel){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"out of memory");}snprintf(s->tls_hostname,sizeof(s->tls_hostname),"%s",nc_atomic_text_field(request,"hostname",""));snprintf(s->tls_client_certificate_subject,sizeof(s->tls_client_certificate_subject),"%s",nc_atomic_text_field(request,"client_certificate_subject",""));pthread_mutex_unlock(&s->mutex);return nc_network_result("tls_ready",s,"",0,0,"");
+    }
+    if(!strcmp(op,"tls_upgrade_server")){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,"SChannel STARTTLS server upgrade unavailable");}
+#endif
 #if defined(NC_ENABLE_OPENSSL)
     if(!strcmp(op,"tls_handshake")){
         if(s->connecting){int ready=0;if(nc_wait_fd(s->fd,2,0,&ready)<=0||!(ready&2)){pthread_mutex_unlock(&s->mutex);return nc_network_result("ventende",s,"",2,0,"");}int err=0;socklen_t n=sizeof(err);getsockopt(s->fd,SOL_SOCKET,SO_ERROR,&err,&n);if(err){pthread_mutex_unlock(&s->mutex);return nc_network_result("feil",s,"",-1,0,strerror(err));}s->connecting=0;}
@@ -2521,9 +3083,19 @@ static int nc_safe_component(const char *s) {
 
 #if !defined(_WIN32)
 static int nc_open_root_dir(const char *root) {
-    if (!root || !*root || root[0] == '/') { errno = EINVAL; return -1; }
+    if (!root || !*root) { errno = EINVAL; return -1; }
+    /* "." og "/" er eksplisitte ABI-røter. Absolutte røter blir opna
+       komponentvis frå "/" slik at kvar katalog framleis går gjennom
+       nc_safe_component og O_NOFOLLOW. Dette gir same absolutte rotkontrakt
+       som list/list_typed utan å opne ei symlenkjebane direkte. */
+    if (!strcmp(root, "."))
+        return open(".", O_RDONLY | O_DIRECTORY);
+    if (!strcmp(root, "/"))
+        return open("/", O_RDONLY | O_DIRECTORY);
+    int absolute = root[0] == '/';
     char *copy = strdup(root), *save = NULL, *part = strtok_r(copy, "/", &save);
-    int fd = open(".", O_RDONLY | O_DIRECTORY);
+    if (!copy || !part) { free(copy); errno = EINVAL; return -1; }
+    int fd = open(absolute ? "/" : ".", O_RDONLY | O_DIRECTORY);
     while (fd >= 0 && part) {
         if (!nc_safe_component(part)) { close(fd); fd = -1; errno = EINVAL; break; }
         int next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
@@ -2550,7 +3122,270 @@ static int nc_open_beneath(const char *root, const char *relative, int flags, mo
         part = next_part;
     }
 }
+
+typedef struct {
+    char *data;
+    size_t length, capacity, count;
+    const char *suffixes;
+    const char *exclude_prefixes;
+    int failed;
+} NcWalkFilesBuffer;
+
+static int nc_walk_files_is_excluded(const char *path, const char *prefixes) {
+    if (!prefixes || !*prefixes) return 0;
+    const char *cursor = prefixes;
+    while (*cursor) {
+        const char *comma = strchr(cursor, ',');
+        size_t prefix_length = comma ? (size_t)(comma - cursor) : strlen(cursor);
+        int wildcard = prefix_length > 0 && cursor[prefix_length - 1] == '*';
+        if (wildcard) prefix_length--;
+        if (prefix_length > 0 && !strncmp(path, cursor, prefix_length) &&
+            (wildcard || path[prefix_length] == '\0' || path[prefix_length] == '/'))
+            return 1;
+        if (!comma) break;
+        cursor = comma + 1;
+    }
+    return 0;
+}
+
+static int nc_walk_files_matches_suffix(const char *path, const char *suffixes) {
+    if (!suffixes || !*suffixes) return 1;
+    size_t path_length = strlen(path);
+    const char *cursor = suffixes;
+    while (*cursor) {
+        const char *comma = strchr(cursor, ',');
+        size_t suffix_length = comma ? (size_t)(comma - cursor) : strlen(cursor);
+        if (suffix_length > 0 && suffix_length <= path_length &&
+            !memcmp(path + path_length - suffix_length, cursor, suffix_length))
+            return 1;
+        if (!comma) break;
+        cursor = comma + 1;
+    }
+    return 0;
+}
+
+static int nc_walk_files_append(NcWalkFilesBuffer *buffer, const char *path) {
+    if (!nc_walk_files_matches_suffix(path, buffer->suffixes)) return 1;
+    size_t path_length = strlen(path);
+    if (buffer->count >= 200000 || buffer->length + path_length + 2 > 16777216) {
+        errno = EFBIG;
+        buffer->failed = 1;
+        return 0;
+    }
+    if (buffer->length + path_length + 2 > buffer->capacity) {
+        size_t next = buffer->capacity ? buffer->capacity : 4096;
+        while (next < buffer->length + path_length + 2) next *= 2;
+        char *grown = realloc(buffer->data, next);
+        if (!grown) { errno = ENOMEM; buffer->failed = 1; return 0; }
+        buffer->data = grown;
+        buffer->capacity = next;
+    }
+    memcpy(buffer->data + buffer->length, path, path_length);
+    buffer->length += path_length;
+    buffer->data[buffer->length++] = '\n';
+    buffer->data[buffer->length] = '\0';
+    buffer->count++;
+    return 1;
+}
+
+static int nc_walk_files_dir(int dirfd, const char *relative, int depth,
+                             NcWalkFilesBuffer *buffer) {
+    if (depth > 128) { errno = ELOOP; buffer->failed = 1; return 0; }
+    int scanfd = dup(dirfd);
+    if (scanfd < 0) { buffer->failed = 1; return 0; }
+    DIR *dir = fdopendir(scanfd);
+    if (!dir) { close(scanfd); buffer->failed = 1; return 0; }
+    struct dirent *entry;
+    while (!buffer->failed && (entry = readdir(dir))) {
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (!nc_safe_component(entry->d_name)) { errno = EINVAL; buffer->failed = 1; break; }
+        size_t relative_length = strlen(relative), name_length = strlen(entry->d_name);
+        if (relative_length + name_length + 2 > 4096) { errno = ENAMETOOLONG; buffer->failed = 1; break; }
+        char path[4096];
+        snprintf(path, sizeof(path), "%s%s%s", relative,
+                 relative_length ? "/" : "", entry->d_name);
+        if (nc_walk_files_is_excluded(path, buffer->exclude_prefixes)) continue;
+        struct stat st;
+        if (fstatat(dirfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) != 0) {
+            buffer->failed = 1;
+            break;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            int child = openat(dirfd, entry->d_name,
+                               O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            if (child < 0 || !nc_walk_files_dir(child, path, depth + 1, buffer)) {
+                if (child >= 0) close(child);
+                break;
+            }
+            close(child);
+        } else if (S_ISREG(st.st_mode) || S_ISLNK(st.st_mode)) {
+            if (!nc_walk_files_append(buffer, path)) break;
+        }
+    }
+    closedir(dir);
+    return !buffer->failed;
+}
+
+static int nc_walk_files_beneath(const char *root, const char *relative,
+                                 NcWalkFilesBuffer *buffer) {
+    int dirfd = nc_open_root_dir(root);
+    if (dirfd < 0 || !relative || relative[0] == '/') {
+        if (dirfd >= 0) close(dirfd);
+        errno = EINVAL;
+        return 0;
+    }
+    if (!*relative) {
+        int ok = nc_walk_files_dir(dirfd, "", 0, buffer);
+        close(dirfd);
+        return ok;
+    }
+    char *copy = strdup(relative), *save = NULL, *part = strtok_r(copy, "/", &save);
+    if (!copy || !part) {
+        free(copy); close(dirfd); errno = EINVAL; return 0;
+    }
+    while (part) {
+        if (!nc_safe_component(part)) {
+            free(copy); close(dirfd); errno = EINVAL; return 0;
+        }
+        int next = openat(dirfd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        close(dirfd);
+        dirfd = next;
+        if (dirfd < 0) { free(copy); return 0; }
+        part = strtok_r(NULL, "/", &save);
+    }
+    free(copy);
+    int ok = nc_walk_files_dir(dirfd, relative, 0, buffer);
+    close(dirfd);
+    return ok;
+}
 #endif
+
+static NcVal *nc_property_list_result(const char *status, const char *data,
+                                      long long value, const char *error) {
+    NcVal *result = nc_map_new();
+    nc_system_set_text(result, "abi", "norscode-property-list-v1");
+    nc_system_set_text(result, "status", status);
+    nc_system_set_text(result, "data", data ? data : "");
+    nc_system_set_int(result, "value", value);
+    nc_system_set_text(result, "error", error ? error : "");
+    return result;
+}
+
+static NcVal *nc_builtin_property_list_operation(NcVal *request) {
+    if (!request || request->type != NC_MAP ||
+        strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-property-list-v1"))
+        return nc_property_list_result("feil", "", 0, "invalid request");
+    const char *operation = nc_atomic_text_field(request, "operation", "");
+    const char *root = nc_atomic_text_field(request, "root", "");
+    const char *relative = nc_atomic_text_field(request, "relative", "");
+    if (!root[0] || !relative[0] || relative[0] == '/' || strstr(relative, ".."))
+        return nc_property_list_result("feil", "", 0, "invalid plist path");
+#if defined(__APPLE__)
+    if (!strcmp(operation, "read_xml")) {
+        int fd = nc_open_beneath(root, relative, O_RDONLY, 0);
+        if (fd < 0) return nc_property_list_result("feil", "", 0, strerror(errno));
+        struct stat st;
+        if (fstat(fd, &st) != 0 || st.st_size < 0 || st.st_size > 16777216) {
+            close(fd);
+            return nc_property_list_result("feil", "", 0, "plist size invalid");
+        }
+        size_t length = (size_t)st.st_size;
+        unsigned char *bytes = malloc(length ? length : 1);
+        if (!bytes) { close(fd); nc_panic("plist read: minnefeil"); }
+        size_t offset = 0;
+        while (offset < length) {
+            ssize_t count = read(fd, bytes + offset, length - offset);
+            if (count <= 0) {
+                int saved = errno;
+                free(bytes);
+                close(fd);
+                return nc_property_list_result("feil", "", 0, strerror(saved));
+            }
+            offset += (size_t)count;
+        }
+        close(fd);
+        CFDataRef input = CFDataCreate(kCFAllocatorDefault, bytes, (CFIndex)length);
+        free(bytes);
+        if (!input) return nc_property_list_result("feil", "", 0, "CFDataCreate failed");
+        CFErrorRef parse_error = NULL;
+        CFPropertyListRef plist = CFPropertyListCreateWithData(
+            kCFAllocatorDefault, input, kCFPropertyListImmutable, NULL, &parse_error);
+        CFRelease(input);
+        if (!plist) {
+            if (parse_error) CFRelease(parse_error);
+            return nc_property_list_result("feil", "", 0, "invalid property list");
+        }
+        CFErrorRef encode_error = NULL;
+        CFDataRef xml = CFPropertyListCreateData(
+            kCFAllocatorDefault, plist, kCFPropertyListXMLFormat_v1_0, 0, &encode_error);
+        CFRelease(plist);
+        if (!xml) {
+            if (encode_error) CFRelease(encode_error);
+            return nc_property_list_result("feil", "", 0, "property list XML conversion failed");
+        }
+        CFIndex xml_length = CFDataGetLength(xml);
+        char *text = malloc((size_t)xml_length + 1);
+        if (!text) { CFRelease(xml); nc_panic("plist XML: minnefeil"); }
+        memcpy(text, CFDataGetBytePtr(xml), (size_t)xml_length);
+        text[xml_length] = '\0';
+        CFRelease(xml);
+        NcVal *result = nc_property_list_result("ok", text, (long long)xml_length, "");
+        free(text);
+        return result;
+    }
+    if (!strcmp(operation, "write_binary")) {
+        const char *xml_text = nc_atomic_text_field(request, "data", "");
+        if (!xml_text[0] || strlen(xml_text) > 16777216)
+            return nc_property_list_result("feil", "", 0, "invalid plist XML");
+        CFDataRef xml = CFDataCreate(kCFAllocatorDefault,
+                                     (const UInt8 *)xml_text,
+                                     (CFIndex)strlen(xml_text));
+        if (!xml) return nc_property_list_result("feil", "", 0, "CFDataCreate failed");
+        CFErrorRef parse_error = NULL;
+        CFPropertyListRef plist = CFPropertyListCreateWithData(
+            kCFAllocatorDefault, xml, kCFPropertyListImmutable, NULL, &parse_error);
+        CFRelease(xml);
+        if (!plist) {
+            if (parse_error) CFRelease(parse_error);
+            return nc_property_list_result("feil", "", 0, "invalid plist XML");
+        }
+        CFErrorRef encode_error = NULL;
+        CFDataRef binary = CFPropertyListCreateData(
+            kCFAllocatorDefault, plist, kCFPropertyListBinaryFormat_v1_0, 0, &encode_error);
+        CFRelease(plist);
+        if (!binary) {
+            if (encode_error) CFRelease(encode_error);
+            return nc_property_list_result("feil", "", 0, "binary plist conversion failed");
+        }
+        int fd = nc_open_beneath(root, relative, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) {
+            CFRelease(binary);
+            return nc_property_list_result("feil", "", 0, strerror(errno));
+        }
+        const UInt8 *bytes = CFDataGetBytePtr(binary);
+        size_t length = (size_t)CFDataGetLength(binary), offset = 0;
+        while (offset < length) {
+            ssize_t count = write(fd, bytes + offset, length - offset);
+            if (count <= 0) {
+                int saved = errno;
+                close(fd);
+                CFRelease(binary);
+                return nc_property_list_result("feil", "", 0, strerror(saved));
+            }
+            offset += (size_t)count;
+        }
+        int close_result = close(fd);
+        CFRelease(binary);
+        if (close_result != 0)
+            return nc_property_list_result("feil", "", 0, strerror(errno));
+        return nc_property_list_result("ok", "", (long long)length, "");
+    }
+    return nc_property_list_result("feil", "", 0, "invalid operation");
+#else
+    (void)operation;
+    return nc_property_list_result("feil", "", 0, "binary plist platform ABI unavailable");
+#endif
+}
 
 static NcFilesystemSlot *nc_filesystem_slot(NcVal *request) {
     const char *handle = nc_atomic_text_field(request, "handle", "");
@@ -2573,15 +3408,271 @@ static int nc_unlink_beneath(const char *root, const char *relative) {
         int next=openat(dirfd,part,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);close(dirfd);dirfd=next;if(dirfd<0){free(copy);return -1;}part=next_part;
     }
 }
+
+static int nc_rmdir_beneath(const char *root, const char *relative) {
+    int dirfd=nc_open_root_dir(root); if(dirfd<0||!relative||!*relative||relative[0]=='/'){if(dirfd>=0)close(dirfd);errno=EINVAL;return -1;}
+    char *copy=strdup(relative),*save=NULL,*part=strtok_r(copy,"/",&save); if(!part){close(dirfd);free(copy);errno=EINVAL;return -1;}
+    for(;;){
+        if(!nc_safe_component(part)){close(dirfd);free(copy);errno=EINVAL;return -1;}
+        char *next_part=strtok_r(NULL,"/",&save);
+        if(!next_part){int rc=unlinkat(dirfd,part,AT_REMOVEDIR);close(dirfd);free(copy);return rc;}
+        int next=openat(dirfd,part,O_RDONLY|O_DIRECTORY|O_NOFOLLOW);close(dirfd);dirfd=next;if(dirfd<0){free(copy);return -1;}part=next_part;
+    }
+}
+
+static int nc_chmod_beneath(const char *root, const char *relative, mode_t mode) {
+    int fd=nc_open_beneath(root,relative,O_RDONLY,0);
+    if(fd<0)return -1;
+    int rc=fchmod(fd,mode);
+    close(fd);
+    return rc;
+}
+
+static int nc_regular_file_replace_beneath(const char *root,
+                                           const char *source_relative,
+                                           const char *target_relative) {
+    if (!source_relative || !*source_relative || source_relative[0] == '/' ||
+        !target_relative || !*target_relative || target_relative[0] == '/') {
+        errno = EINVAL;
+        return -1;
+    }
+    int source_parent = nc_open_root_dir(root);
+    int target_parent = nc_open_root_dir(root);
+    if (source_parent < 0 || target_parent < 0) {
+        int saved = errno;
+        if (source_parent >= 0) close(source_parent);
+        if (target_parent >= 0) close(target_parent);
+        errno = saved;
+        return -1;
+    }
+    char *source_copy = strdup(source_relative);
+    char *target_copy = strdup(target_relative);
+    if (!source_copy || !target_copy) {
+        free(source_copy); free(target_copy);
+        close(source_parent); close(target_parent);
+        errno = ENOMEM;
+        return -1;
+    }
+    char *source_save = NULL, *target_save = NULL;
+    char *source_name = strtok_r(source_copy, "/", &source_save);
+    char *target_name = strtok_r(target_copy, "/", &target_save);
+    if (!source_name || !target_name) {
+        free(source_copy); free(target_copy);
+        close(source_parent); close(target_parent);
+        errno = EINVAL;
+        return -1;
+    }
+    for (;;) {
+        if (!nc_safe_component(source_name)) { errno = EINVAL; goto fail; }
+        char *next = strtok_r(NULL, "/", &source_save);
+        if (!next) break;
+        int opened = openat(source_parent, source_name,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (opened < 0) goto fail;
+        close(source_parent);
+        source_parent = opened;
+        source_name = next;
+    }
+    for (;;) {
+        if (!nc_safe_component(target_name)) { errno = EINVAL; goto fail; }
+        char *next = strtok_r(NULL, "/", &target_save);
+        if (!next) break;
+        int opened = openat(target_parent, target_name,
+                            O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        if (opened < 0) goto fail;
+        close(target_parent);
+        target_parent = opened;
+        target_name = next;
+    }
+    struct stat source_stat;
+    if (fstatat(source_parent, source_name, &source_stat,
+                AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(source_stat.st_mode)) {
+        if (errno == 0) errno = EINVAL;
+        goto fail;
+    }
+    struct stat target_stat;
+    if (fstatat(target_parent, target_name, &target_stat,
+                AT_SYMLINK_NOFOLLOW) == 0) {
+        /* renameat erstattar sjølve sluttlenka og følgjer henne ikkje. Dette
+         * gjer første promotering frå committed dist-symlink atomisk, medan
+         * alle foreldre framleis blir opna med O_NOFOLLOW. */
+        if (!S_ISREG(target_stat.st_mode) && !S_ISLNK(target_stat.st_mode)) {
+            errno = EINVAL;
+            goto fail;
+        }
+    } else if (errno != ENOENT) {
+        goto fail;
+    }
+    if (renameat(source_parent, source_name, target_parent, target_name) != 0)
+        goto fail;
+    free(source_copy); free(target_copy);
+    close(source_parent); close(target_parent);
+    return 0;
+fail:
+    {
+        int saved = errno;
+        free(source_copy); free(target_copy);
+        close(source_parent); close(target_parent);
+        errno = saved;
+        return -1;
+    }
+}
+
+static int nc_symlink_target_beneath(const char *relative, const char *target) {
+    if (!relative || !*relative || relative[0] == '/' ||
+        !target || !*target || target[0] == '/' ||
+        strchr(target, '\\') || strchr(target, '\n') || strchr(target, '\r'))
+        return 0;
+    int depth = 0;
+    char *relative_copy = strdup(relative), *relative_save = NULL;
+    if (!relative_copy) return 0;
+    char *part = strtok_r(relative_copy, "/", &relative_save);
+    while (part) {
+        char *next = strtok_r(NULL, "/", &relative_save);
+        if (!nc_safe_component(part)) { free(relative_copy); return 0; }
+        if (next) depth++;
+        part = next;
+    }
+    free(relative_copy);
+    char *target_copy = strdup(target), *target_save = NULL;
+    if (!target_copy) return 0;
+    part = strtok_r(target_copy, "/", &target_save);
+    if (!part) { free(target_copy); return 0; }
+    while (part) {
+        if (!strcmp(part, ".")) {
+            /* Same directory. */
+        } else if (!strcmp(part, "..")) {
+            if (depth == 0) { free(target_copy); return 0; }
+            depth--;
+        } else {
+            if (!nc_safe_component(part)) { free(target_copy); return 0; }
+            depth++;
+        }
+        part = strtok_r(NULL, "/", &target_save);
+    }
+    free(target_copy);
+    return 1;
+}
+
+static int nc_symlink_replace_beneath(const char *root, const char *relative,
+                                      const char *target) {
+    if (!nc_symlink_target_beneath(relative, target)) { errno = EINVAL; return -1; }
+    int dirfd = nc_open_root_dir(root);
+    if (dirfd < 0) return -1;
+    char *copy = strdup(relative), *save = NULL, *part = strtok_r(copy, "/", &save);
+    if (!copy || !part) { if (copy) free(copy); close(dirfd); errno = EINVAL; return -1; }
+    for (;;) {
+        char *next_part = strtok_r(NULL, "/", &save);
+        if (!next_part) break;
+        int next = openat(dirfd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+        close(dirfd);
+        dirfd = next;
+        if (dirfd < 0) { free(copy); return -1; }
+        part = next_part;
+    }
+    struct stat existing;
+    int stat_result = fstatat(dirfd, part, &existing, AT_SYMLINK_NOFOLLOW);
+    if (stat_result == 0 && !S_ISLNK(existing.st_mode)) {
+        close(dirfd); free(copy); errno = EEXIST; return -1;
+    }
+    if (stat_result != 0 && errno != ENOENT) {
+        int saved = errno; close(dirfd); free(copy); errno = saved; return -1;
+    }
+    static _Atomic unsigned long long link_counter = 0;
+    char temporary[96];
+    unsigned long long sequence =
+        atomic_fetch_add_explicit(&link_counter, 1, memory_order_relaxed) + 1;
+    snprintf(temporary, sizeof(temporary), ".norscode-link-%ld-%llu",
+             (long)getpid(), sequence);
+    if (symlinkat(target, dirfd, temporary) != 0) {
+        int saved = errno; close(dirfd); free(copy); errno = saved; return -1;
+    }
+    if (renameat(dirfd, temporary, dirfd, part) != 0) {
+        int saved = errno;
+        unlinkat(dirfd, temporary, 0);
+        close(dirfd); free(copy); errno = saved; return -1;
+    }
+    close(dirfd); free(copy); return 0;
+}
 #endif
 
 static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
     if (!request || request->type != NC_MAP || strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-native-filesystem-v1")) return nc_filesystem_result("feil", NULL, "", -1, "invalid request");
     const char *operation = nc_atomic_text_field(request, "operation", "");
+    if (!strcmp(operation, "path_stat")) {
+        const char *root = nc_atomic_text_field(request, "root", "");
+        const char *relative = nc_atomic_text_field(request, "relative", "");
+        if (!root[0] || !relative[0] || relative[0] == '/' || strstr(relative, ".."))
+            return nc_filesystem_result("feil", NULL, "", -1, "invalid stat path");
+        NcVal *result = NULL;
+#if defined(_WIN32)
+        NcwPathStat st; char backend_error[NCW_ERROR_CAP] = "";
+        if (!ncw_path_stat(root, relative, &st, backend_error, sizeof(backend_error)))
+            return nc_filesystem_result("feil", NULL, "", -1, backend_error);
+        result = nc_filesystem_result("ok", NULL, "", (long long)st.size, "");
+        nc_index_set(result, nc_str("kind"), nc_str(st.kind == 2 ? "directory" : st.kind == 3 ? "symlink" : "file"));
+        long long type_mode = st.kind == 2 ? 0040000 : st.kind == 3 ? 0120000 : 0100000;
+        nc_index_set(result, nc_str("mode"), nc_int(type_mode | (long long)st.mode));
+        nc_index_set(result, nc_str("inode"), nc_int((long long)st.inode));
+        nc_index_set(result, nc_str("device"), nc_int((long long)st.device));
+        nc_index_set(result, nc_str("nlink"), nc_int((long long)st.nlink));
+        nc_index_set(result, nc_str("uid"), nc_int(0));
+        nc_index_set(result, nc_str("gid"), nc_int(0));
+        nc_index_set(result, nc_str("atime"), nc_int((long long)st.atime_seconds));
+        nc_index_set(result, nc_str("mtime"), nc_int((long long)st.mtime_seconds));
+        nc_index_set(result, nc_str("ctime"), nc_int((long long)st.ctime_seconds));
+#else
+        int fd = nc_open_beneath(root, relative, O_RDONLY, 0);
+        if (fd < 0) return nc_filesystem_result("feil", NULL, "", -1, strerror(errno));
+        struct stat st;
+        int rc = fstat(fd, &st);
+        close(fd);
+        if (rc != 0) return nc_filesystem_result("feil", NULL, "", -1, strerror(errno));
+        result = nc_filesystem_result("ok", NULL, "", (long long)st.st_size, "");
+        nc_index_set(result, nc_str("kind"), nc_str(S_ISDIR(st.st_mode) ? "directory" : S_ISREG(st.st_mode) ? "file" : S_ISLNK(st.st_mode) ? "symlink" : "other"));
+        nc_index_set(result, nc_str("mode"), nc_int((long long)st.st_mode));
+        nc_index_set(result, nc_str("inode"), nc_int((long long)st.st_ino));
+        nc_index_set(result, nc_str("device"), nc_int((long long)st.st_dev));
+        nc_index_set(result, nc_str("nlink"), nc_int((long long)st.st_nlink));
+        nc_index_set(result, nc_str("uid"), nc_int((long long)st.st_uid));
+        nc_index_set(result, nc_str("gid"), nc_int((long long)st.st_gid));
+        nc_index_set(result, nc_str("atime"), nc_int((long long)st.st_atime));
+        nc_index_set(result, nc_str("mtime"), nc_int((long long)st.st_mtime));
+        nc_index_set(result, nc_str("ctime"), nc_int((long long)st.st_ctime));
+#endif
+        return result;
+    }
+    if (!strcmp(operation, "walk_files")) {
+        const char *root = nc_atomic_text_field(request, "root", "");
+        const char *relative = nc_atomic_text_field(request, "relative", "");
+        const char *suffixes = nc_atomic_text_field(request, "suffixes", "");
+        const char *exclude_prefixes = nc_atomic_text_field(request, "exclude_prefixes", "");
+#if defined(_WIN32)
+        (void)root; (void)relative; (void)suffixes; (void)exclude_prefixes;
+        return nc_filesystem_result("feil", NULL, "", -1,
+                                    "walk_files platform ABI unavailable on Windows");
+#else
+        NcWalkFilesBuffer buffer = {0};
+        buffer.suffixes = suffixes;
+        buffer.exclude_prefixes = exclude_prefixes;
+        if (!nc_walk_files_beneath(root, relative, &buffer)) {
+            int saved = errno;
+            free(buffer.data);
+            return nc_filesystem_result("feil", NULL, "", -1, strerror(saved));
+        }
+        NcVal *result = nc_filesystem_result("ok", NULL,
+                                             buffer.data ? buffer.data : "",
+                                             (long long)buffer.count, "");
+        free(buffer.data);
+        return result;
+#endif
+    }
     /* Stateless, native directory enumeration used by the pure release tools.
        The returned data is newline-delimited relative entry names so the ABI
        remains text-only and can be consumed by every stage0 VM. */
-    if (!strcmp(operation, "list")) {
+    if (!strcmp(operation, "list") || !strcmp(operation, "list_typed")) {
+        int typed = !strcmp(operation, "list_typed");
         const char *root = nc_atomic_text_field(request, "root", "");
         const char *relative = nc_atomic_text_field(request, "relative", "");
         if (!*root || (relative[0] == '/' || strstr(relative, "..")))
@@ -2596,7 +3687,13 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
         do {
             if (!strcmp(entry.cFileName, ".") || !strcmp(entry.cFileName, "..")) continue;
             size_t n = strlen(entry.cFileName);
-            if (len + n + 2 > cap) { while (len + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); FindClose(h); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; }
+            size_t prefix = typed ? 2 : 0;
+            if (len + prefix + n + 2 > cap) { while (len + prefix + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); FindClose(h); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; }
+            if (typed) {
+                data[len++] = (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? 'l' :
+                              (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 'd' : 'f';
+                data[len++] = '\t';
+            }
             memcpy(data + len, entry.cFileName, n); len += n; data[len++] = '\n'; count++;
         } while (FindNextFileA(h, &entry));
         FindClose(h); data[len] = '\0'; NcVal *r = nc_filesystem_result("ok", NULL, data, (long long)count, ""); free(data); return r;
@@ -2613,7 +3710,21 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
         size_t cap = 4096, len = 0, count = 0; char *data = calloc(cap, 1);
         if (!data) { closedir(dir); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); }
         struct dirent *entry;
-        while ((entry = readdir(dir))) { if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue; size_t n = strlen(entry->d_name); if (len + n + 2 > cap) { while (len + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); closedir(dir); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; } memcpy(data + len, entry->d_name, n); len += n; data[len++] = '\n'; count++; }
+        while ((entry = readdir(dir))) {
+            if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+            size_t n = strlen(entry->d_name), prefix = typed ? 2 : 0;
+            if (len + prefix + n + 2 > cap) { while (len + prefix + n + 2 > cap) cap *= 2; char *grown = realloc(data, cap); if (!grown) { free(data); closedir(dir); return nc_filesystem_result("feil", NULL, "", -1, "out of memory"); } data = grown; }
+            if (typed) {
+                struct stat entry_stat;
+                char kind = 'o';
+                if (fstatat(dirfd, entry->d_name, &entry_stat, AT_SYMLINK_NOFOLLOW) == 0)
+                    kind = S_ISDIR(entry_stat.st_mode) ? 'd' :
+                           S_ISREG(entry_stat.st_mode) ? 'f' :
+                           S_ISLNK(entry_stat.st_mode) ? 'l' : 'o';
+                data[len++] = kind; data[len++] = '\t';
+            }
+            memcpy(data + len, entry->d_name, n); len += n; data[len++] = '\n'; count++;
+        }
         closedir(dir); data[len] = '\0'; NcVal *r = nc_filesystem_result("ok", NULL, data, (long long)count, ""); free(data); return r;
 #endif
     }
@@ -2635,6 +3746,49 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
         char backend_error[NCW_ERROR_CAP]=""; int rc=ncw_file_delete(root,relative,backend_error,sizeof(backend_error)); return !rc?nc_filesystem_result("feil",NULL,"",-1,backend_error):nc_filesystem_result("deleted",NULL,"",0,"");
 #else
         int rc=nc_unlink_beneath(root,relative); return rc?nc_filesystem_result("feil",NULL,"",-1,strerror(errno)):nc_filesystem_result("deleted",NULL,"",0,"");
+#endif
+    }
+    if (!strcmp(operation,"rmdir")) {
+        const char *root=nc_atomic_text_field(request,"root",""),*relative=nc_atomic_text_field(request,"relative","");
+#if defined(_WIN32)
+        char backend_error[NCW_ERROR_CAP]=""; int rc=ncw_directory_delete(root,relative,backend_error,sizeof(backend_error)); return !rc?nc_filesystem_result("feil",NULL,"",-1,backend_error):nc_filesystem_result("deleted",NULL,"",0,"");
+#else
+        int rc=nc_rmdir_beneath(root,relative); return rc?nc_filesystem_result("feil",NULL,"",-1,strerror(errno)):nc_filesystem_result("deleted",NULL,"",0,"");
+#endif
+    }
+    if (!strcmp(operation,"chmod")) {
+        const char *root=nc_atomic_text_field(request,"root",""),*relative=nc_atomic_text_field(request,"relative","");
+        long long mode=nc_atomic_int_field(request,"mode",-1);
+        if(mode<0||mode>0777)return nc_filesystem_result("feil",NULL,"",-1,"invalid mode");
+#if defined(_WIN32)
+        char backend_error[NCW_ERROR_CAP]=""; int rc=ncw_file_set_mode(root,relative,(uint32_t)mode,backend_error,sizeof(backend_error)); return !rc?nc_filesystem_result("feil",NULL,"",-1,backend_error):nc_filesystem_result("ok",NULL,"",mode,"");
+#else
+        int rc=nc_chmod_beneath(root,relative,(mode_t)mode); return rc?nc_filesystem_result("feil",NULL,"",-1,strerror(errno)):nc_filesystem_result("ok",NULL,"",mode,"");
+#endif
+    }
+    if (!strcmp(operation,"file_replace")) {
+        const char *root=nc_atomic_text_field(request,"root","");
+        const char *source=nc_atomic_text_field(request,"source","");
+        const char *target=nc_atomic_text_field(request,"target","");
+#if defined(_WIN32)
+        char backend_error[NCW_ERROR_CAP]="";
+        int rc=ncw_file_replace(root,source,target,backend_error,sizeof(backend_error));
+        return !rc?nc_filesystem_result("feil",NULL,"",-1,backend_error):nc_filesystem_result("replaced",NULL,"",1,"");
+#else
+        int rc=nc_regular_file_replace_beneath(root,source,target);
+        return rc?nc_filesystem_result("feil",NULL,"",-1,strerror(errno)):nc_filesystem_result("replaced",NULL,"",1,"");
+#endif
+    }
+    if (!strcmp(operation,"symlink_replace")) {
+        const char *root=nc_atomic_text_field(request,"root","");
+        const char *relative=nc_atomic_text_field(request,"relative","");
+        const char *target=nc_atomic_text_field(request,"target","");
+#if defined(_WIN32)
+        (void)root; (void)relative; (void)target;
+        return nc_filesystem_result("feil",NULL,"",-1,"symbolic link platform ABI unavailable on Windows");
+#else
+        int rc=nc_symlink_replace_beneath(root,relative,target);
+        return rc?nc_filesystem_result("feil",NULL,"",-1,strerror(errno)):nc_filesystem_result("ok",NULL,"",1,"");
 #endif
     }
     if (!strcmp(operation, "open")) {
@@ -2686,6 +3840,21 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
 #endif
         free(buf); pthread_mutex_unlock(&slot->mutex); return r;
     }
+    if (!strcmp(operation,"read_binary")) {
+        long long max=nc_atomic_int_field(request,"max",65536);
+        if(max<1||max>1048576){pthread_mutex_unlock(&slot->mutex);return nc_filesystem_result("feil",slot,"",-1,"invalid binary read size");}
+        NcVal *bytes=nc_bytes_new((size_t)max,0);
+#if defined(_WIN32)
+        char backend_error[NCW_ERROR_CAP]="";
+        int64_t n=ncw_file_read(&slot->file,bytes->bytes->data,(size_t)max,backend_error,sizeof(backend_error));
+        NcVal *r=n<0?nc_filesystem_result("feil",slot,"",-1,backend_error):nc_filesystem_result("ok",slot,"",n,"");
+#else
+        ssize_t n=read(slot->fd,bytes->bytes->data,(size_t)max);
+        NcVal *r=n<0?nc_filesystem_result("feil",slot,"",-1,strerror(errno)):nc_filesystem_result("ok",slot,"",n,"");
+#endif
+        if(n>=0){bytes->bytes->len=(size_t)n;nc_index_set(r,nc_str("data_bytes"),bytes);}
+        pthread_mutex_unlock(&slot->mutex);return r;
+    }
     if (!strcmp(operation,"write")) {
         const char *data=nc_atomic_text_field(request,"data","");
 #if defined(_WIN32)
@@ -2732,14 +3901,14 @@ static NcVal *nc_builtin_filesystem_operation(NcVal *request) {
 static NcVal *nc_builtin_filesystem_read_operation(NcVal *request) {
     const char *operation=nc_atomic_text_field(request,"operation","");
     if (!strcmp(operation,"open") && strcmp(nc_atomic_text_field(request,"mode",""),"read")) return nc_filesystem_result("feil",NULL,"",-1,"write mode requires disk.write");
-    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"list") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
+    if (strcmp(operation,"open") && strcmp(operation,"read") && strcmp(operation,"read_binary") && strcmp(operation,"list") && strcmp(operation,"list_typed") && strcmp(operation,"walk_files") && strcmp(operation,"path_stat") && strcmp(operation,"read_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"stat") && strcmp(operation,"close")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.write");
     return nc_builtin_filesystem_operation(request);
 }
 
 static NcVal *nc_builtin_filesystem_write_operation(NcVal *request) {
     const char *operation=nc_atomic_text_field(request,"operation","");
     if (!strcmp(operation,"open") && !strcmp(nc_atomic_text_field(request,"mode",""),"read")) return nc_filesystem_result("feil",NULL,"",-1,"read mode requires disk.read");
-    if (strcmp(operation,"open") && strcmp(operation,"write") && strcmp(operation,"write_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"flush") && strcmp(operation,"close") && strcmp(operation,"delete") && strcmp(operation,"mkdir_p")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.read");
+    if (strcmp(operation,"open") && strcmp(operation,"write") && strcmp(operation,"write_async") && strcmp(operation,"wait_async") && strcmp(operation,"cancel_async") && strcmp(operation,"ready") && strcmp(operation,"seek") && strcmp(operation,"flush") && strcmp(operation,"close") && strcmp(operation,"delete") && strcmp(operation,"rmdir") && strcmp(operation,"chmod") && strcmp(operation,"mkdir_p") && strcmp(operation,"file_replace") && strcmp(operation,"symlink_replace")) return nc_filesystem_result("feil",NULL,"",-1,"operation requires disk.read");
     return nc_builtin_filesystem_operation(request);
 }
 
@@ -2752,8 +3921,8 @@ typedef struct {
     int stdin_fd, stdout_fd, stderr_fd;
     char *stdin_data, *stdout_data, *stderr_data;
     size_t stdin_len, stdin_off, stdout_len, stderr_len, output_total, max_output;
-    unsigned long long max_memory_bytes;
-    long long deadline_ms;
+    unsigned long long max_memory_bytes, peak_rss_bytes;
+    long long started_ms, deadline_ms;
     int exited, wait_status, timed_out, output_limited, memory_limited;
     char sandbox_profile[32];
     pthread_mutex_t mutex;
@@ -2783,6 +3952,8 @@ static NcVal *nc_process_async_result(NcProcessSlot *slot, const char *error) {
     nc_index_set(r, nc_str("stdout"), nc_str(slot && slot->stdout_data ? slot->stdout_data : ""));
     nc_index_set(r, nc_str("stderr"), nc_str(slot && slot->stderr_data ? slot->stderr_data : ""));
     nc_index_set(r, nc_str("error"), nc_str(error && *error ? error : (slot && slot->memory_limited ? "memory limit" : slot && slot->output_limited ? "output limit" : slot && slot->timed_out ? "timeout" : "")));
+    nc_index_set(r, nc_str("wall_ms"), nc_int(slot ? nc_monotonic_ms() - slot->started_ms : 0));
+    nc_index_set(r, nc_str("peak_rss_bytes"), nc_int(slot ? (long long)slot->peak_rss_bytes : 0));
     nc_index_set(r, nc_str("sandbox"), nc_str(slot ? slot->sandbox_profile : "none"));
 #if defined(__linux__)
     nc_index_set(r, nc_str("sandbox_backend"), nc_str(slot && strcmp(slot->sandbox_profile, "none") ? "seccomp" : "none"));
@@ -3110,6 +4281,11 @@ static unsigned long long nc_process_resident_bytes(pid_t pid){
 #if defined(__APPLE__)
     struct rusage_info_v2 info;memset(&info,0,sizeof(info));
     if(proc_pid_rusage(pid,RUSAGE_INFO_V2,(rusage_info_t *)&info)==0)return info.ri_resident_size;
+#elif defined(__linux__)
+    char path[64];snprintf(path,sizeof(path),"/proc/%lld/statm",(long long)pid);
+    FILE *file=fopen(path,"r");unsigned long long pages=0,resident=0;
+    if(file){if(fscanf(file,"%llu %llu",&pages,&resident)!=2)resident=0;fclose(file);}
+    long page_size=sysconf(_SC_PAGESIZE);if(page_size>0)return resident*(unsigned long long)page_size;
 #else
     (void)pid;
 #endif
@@ -3118,7 +4294,7 @@ static unsigned long long nc_process_resident_bytes(pid_t pid){
 
 static void nc_process_refresh(NcProcessSlot *slot, int wait_ms) {
     if (!slot || !slot->active) return;
-    if(!slot->exited&&!slot->memory_limited&&slot->max_memory_bytes>0){unsigned long long resident=nc_process_resident_bytes(slot->pid);if(resident>slot->max_memory_bytes){slot->memory_limited=1;kill(slot->pid,SIGKILL);}}
+    if(!slot->exited){unsigned long long resident=nc_process_resident_bytes(slot->pid);if(resident>slot->peak_rss_bytes)slot->peak_rss_bytes=resident;if(!slot->memory_limited&&slot->max_memory_bytes>0&&resident>slot->max_memory_bytes){slot->memory_limited=1;kill(slot->pid,SIGKILL);}}
     if (!slot->exited && nc_monotonic_ms() >= slot->deadline_ms) { slot->timed_out = 1; kill(slot->pid, SIGKILL); }
     struct pollfd fds[3]; int nfds = 0, in_idx = -1, out_idx = -1, err_idx = -1;
     if (slot->stdin_fd >= 0) { in_idx = nfds; fds[nfds++] = (struct pollfd){slot->stdin_fd, POLLOUT, 0}; }
@@ -3142,9 +4318,10 @@ static NcVal *nc_process_async_spawn(NcVal *request) {
     long long timeout_ms = nc_atomic_int_field(request, "timeout_ms", 0);
     long long max_output = nc_atomic_int_field(request, "max_output_bytes", 0);
     const char *sandbox_profile = nc_atomic_text_field(request, "sandbox", "none");
-    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", nc_process_default_max_memory());
+    long long max_memory = nc_atomic_int_field(request, "max_memory_bytes", 536870912);
     long long max_files = nc_atomic_int_field(request, "max_open_files", 64);
     int inherit_env = nc_atomic_int_field(request, "inherit_env", 1) != 0;
+    NcVal *environment = nc_index_get(request, nc_str("environment"));
     NcVal *args = nc_index_get(request, nc_str("args"));
     if (!*executable || timeout_ms <= 0 || max_output <= 0 || !args || args->type != NC_LIST) return nc_process_async_result(NULL, "invalid spawn request");
     if (max_output > 64LL * 1024LL * 1024LL) max_output = 64LL * 1024LL * 1024LL;
@@ -3170,6 +4347,19 @@ static NcVal *nc_process_async_spawn(NcVal *request) {
         nc_close_inherited_fds();
         if (*cwd && chdir(cwd) != 0) { dprintf(STDERR_FILENO, "chdir failed: %s", strerror(errno)); _exit(126); }
         if (!nc_apply_process_sandbox(sandbox_profile,timeout_ms,max_memory,max_files,inherit_env)) { dprintf(STDERR_FILENO,"sandbox setup failed"); _exit(126); }
+        if (environment && environment->type == NC_MAP && environment->map->len > 0) {
+            if (!inherit_env) { unsetenv("PATH"); unsetenv("LANG"); }
+            for (int ei = 0; ei < environment->map->len; ei++) {
+                const char *ek = environment->map->keys[ei];
+                NcVal *ev = environment->map->vals[ei];
+                if (!ek || !*ek || strchr(ek, '=') || strchr(ek, '\n') ||
+                    strchr(ek, '\r') || !ev || ev->type != NC_STR ||
+                    setenv(ek, ev->s ? ev->s : "", 1) != 0) {
+                    dprintf(STDERR_FILENO, "invalid environment");
+                    _exit(126);
+                }
+            }
+        }
         execv(executable, argv); dprintf(STDERR_FILENO, "execv failed: %s", strerror(errno)); _exit(127);
     }
     for (int i = 0; i < argc; i++) free(argv[i]); free(argv);
@@ -3180,7 +4370,7 @@ static NcVal *nc_process_async_spawn(NcVal *request) {
     slot->generation=generation; slot->active = 2; slot->id = id; slot->pid = pid; slot->stdin_fd = in_pipe[1]; slot->stdout_fd = out_pipe[0]; slot->stderr_fd = err_pipe[0];
     slot->stdin_data = strdup(stdin_text); slot->stdin_len = strlen(stdin_text); slot->stdout_data = strdup(""); slot->stderr_data = strdup("");
     snprintf(slot->sandbox_profile,sizeof(slot->sandbox_profile),"%s",sandbox_profile);
-    slot->max_output = (size_t)max_output;slot->max_memory_bytes=(unsigned long long)(max_memory>0?max_memory:0); slot->deadline_ms = nc_monotonic_ms() + timeout_ms; pthread_mutex_init(&slot->mutex, NULL);
+    slot->max_output = (size_t)max_output;slot->max_memory_bytes=(unsigned long long)(max_memory>0?max_memory:0);slot->started_ms=nc_monotonic_ms();slot->deadline_ms=slot->started_ms+timeout_ms;pthread_mutex_init(&slot->mutex, NULL);
     pthread_mutex_lock(&g_process_registry_lock); slot->active = 1; pthread_mutex_unlock(&g_process_registry_lock);
     return nc_process_async_result(slot, "");
 }
@@ -3239,6 +4429,8 @@ static NcVal *nc_process_windows_result(NcProcessSlot *slot,const char *error){
     nc_index_set(r,nc_str("pid"),nc_int(slot?(long long)slot->process.pid:-1));nc_index_set(r,nc_str("exit_code"),nc_int(exit_code));
     nc_index_set(r,nc_str("stdout"),nc_str(slot&&slot->stdout_data?slot->stdout_data:""));nc_index_set(r,nc_str("stderr"),nc_str(slot&&slot->stderr_data?slot->stderr_data:""));
     nc_index_set(r,nc_str("error"),nc_str(error&&*error?error:slot&&slot->process.timed_out?"timeout":slot&&slot->output_limited?"output limit":""));
+    nc_index_set(r,nc_str("wall_ms"),nc_int(slot?(long long)(GetTickCount64()-slot->process.started_ms):0));
+    nc_index_set(r,nc_str("peak_rss_bytes"),nc_int(slot?(long long)slot->process.peak_memory_bytes:0));
     nc_index_set(r,nc_str("sandbox"),nc_str(slot?slot->sandbox_profile:"none"));nc_index_set(r,nc_str("sandbox_backend"),nc_str(slot&&slot->process.appcontainer?"appcontainer+job-object":slot&&strcmp(slot->sandbox_profile,"none")?"job-object":"none"));return r;
 }
 
@@ -3263,7 +4455,7 @@ static void nc_process_windows_refresh(NcProcessSlot *slot,uint64_t wait_ms,char
 
 static NcVal *nc_process_windows_spawn(NcVal *request){
     const char *executable=nc_atomic_text_field(request,"executable",""),*cwd=nc_atomic_text_field(request,"cwd",""),*stdin_text=nc_atomic_text_field(request,"stdin",""),*sandbox=nc_atomic_text_field(request,"sandbox","none");
-    long long timeout_ms=nc_atomic_int_field(request,"timeout_ms",0),max_output=nc_atomic_int_field(request,"max_output_bytes",0),max_memory=nc_atomic_int_field(request,"max_memory_bytes",nc_process_default_max_memory());NcVal *args=nc_index_get(request,nc_str("args"));
+    long long timeout_ms=nc_atomic_int_field(request,"timeout_ms",0),max_output=nc_atomic_int_field(request,"max_output_bytes",0),max_memory=nc_atomic_int_field(request,"max_memory_bytes",536870912);NcVal *args=nc_index_get(request,nc_str("args"));
     if(!*executable||timeout_ms<=0||max_output<=0||!args||args->type!=NC_LIST)return nc_process_windows_result(NULL,"invalid spawn request");if(max_output>64LL*1024LL*1024LL)max_output=64LL*1024LL*1024LL;
     int argc=args->list->len+1;char **argv=calloc((size_t)argc+1,sizeof(char *));if(!argv)return nc_process_windows_result(NULL,"out of memory");argv[0]=strdup(executable);
     for(int i=1;i<argc;i++){NcVal *value=args->list->items[i-1];if(!value||value->type!=NC_STR){for(int j=0;j<argc;j++)free(argv[j]);free(argv);return nc_process_windows_result(NULL,"argv must contain text");}argv[i]=strdup(value->s?value->s:"");}
@@ -3314,10 +4506,6 @@ typedef struct {
 } NcThreadSlot;
 static NcThreadSlot g_thread_slots[NC_THREAD_MAX];
 static pthread_mutex_t g_thread_registry_lock=PTHREAD_MUTEX_INITIALIZER;
-/* Generic callbacks execute against process-global interpreter/GC state.
- * Keep native worker threads concurrent, but serialize that shared callback
- * section so worker results remain deterministic on every platform. */
-static pthread_mutex_t g_generic_thread_exec_lock=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int g_native_thread_id = 0;
 static NcVal *nc_builtin_thread_current_id(void) { return nc_int(g_native_thread_id); }
 static NcVal *nc_thread_result(const char *status, NcThreadSlot *slot,
@@ -3444,14 +4632,6 @@ static void *nc_thread_worker(void *raw) {
             snprintf(slot->value, sizeof(slot->value), "signalled");
         }
     } else {
-        /* A generic worker may wait for another worker while the collector is
-         * stopping the world. Mark this thread as blocked until it owns the
-         * serialized VM section, otherwise GC waits forever for a thread that
-         * is asleep on this mutex. Resolve the function after acquiring the
-         * lock because GC may relocate the NCB while this worker waits. */
-        nc_gc_blocking_enter();
-        pthread_mutex_lock(&g_generic_thread_exec_lock);
-        nc_gc_blocking_leave();
         NcVal *functions = slot->functions ? slot->functions : g_current_functions;
         NcVal *fn_def = functions ? nc_exec_find_fn(functions, slot->fn) : NULL;
         if (getenv("NORSCODE_THREAD_TRACE"))
@@ -3459,13 +4639,10 @@ static void *nc_thread_worker(void *raw) {
                     slot->id, (void *)functions, (void *)fn_def);
         if (!fn_def) {
             snprintf(slot->error, sizeof(slot->error), "unknown thread function: %.190s", slot->fn);
-            pthread_mutex_unlock(&g_generic_thread_exec_lock);
-        } else {
-            if (setjmp(g_err_jmp)) {
-                pthread_mutex_unlock(&g_generic_thread_exec_lock);
+        } else if (setjmp(g_err_jmp)) {
             snprintf(slot->error, sizeof(slot->error), "%.250s", g_err_msg[0] ? g_err_msg : "worker exception");
             g_err_msg[0] = 0;
-            } else {
+        } else {
             NcVal *worker_args[1] = {slot->args ? slot->args : nc_map_new()};
             if (getenv("NORSCODE_THREAD_TRACE"))
                 fprintf(stderr, "[nc-thread] generic id=%d execute\n", slot->id);
@@ -3473,8 +4650,6 @@ static void *nc_thread_worker(void *raw) {
             char *text = nc_to_str_raw(result);
             snprintf(slot->value, sizeof(slot->value), "%.127s", text ? text : "");
             free(text);
-                pthread_mutex_unlock(&g_generic_thread_exec_lock);
-            }
         }
     }
 
@@ -3840,9 +5015,10 @@ typedef long long sqlite3_int64;
 #define SQLITE_OK   0
 #define SQLITE_ROW  100
 #define SQLITE_DONE 101
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(NC_DYNAMIC_SQLITE)
 /* Windows has a system winsqlite3.dll, so the native runtime must not require
- * a developer-only import library just to link. */
+ * a developer-only import library just to link. NC_DYNAMIC_SQLITE gives the
+ * same optional-adapter boundary to POSIX transition candidates. */
 typedef int (*nc_sqlite3_open_fn)(const char *, sqlite3 **);
 typedef int (*nc_sqlite3_close_fn)(sqlite3 *);
 typedef int (*nc_sqlite3_exec_fn)(sqlite3 *, const char *, int (*)(void *, int, char **, char **), void *, char **);
@@ -3855,7 +5031,11 @@ typedef int (*nc_sqlite3_finalize_fn)(sqlite3_stmt *);
 typedef const unsigned char *(*nc_sqlite3_column_text_fn)(sqlite3_stmt *, int);
 typedef sqlite3_int64 (*nc_sqlite3_column_int64_fn)(sqlite3_stmt *, int);
 typedef int (*nc_sqlite3_changes_fn)(sqlite3 *);
+#if defined(_WIN32)
 static HMODULE g_nc_sqlite_module = NULL;
+#else
+static void *g_nc_sqlite_module = NULL;
+#endif
 static nc_sqlite3_open_fn g_nc_sqlite3_open;
 static nc_sqlite3_close_fn g_nc_sqlite3_close;
 static nc_sqlite3_exec_fn g_nc_sqlite3_exec;
@@ -3871,10 +5051,24 @@ static nc_sqlite3_changes_fn g_nc_sqlite3_changes;
 
 static int nc_sqlite_load(void) {
     if (g_nc_sqlite_module) return g_nc_sqlite3_open != NULL;
+#if defined(_WIN32)
     g_nc_sqlite_module = LoadLibraryA("winsqlite3.dll");
     if (!g_nc_sqlite_module) g_nc_sqlite_module = LoadLibraryA("sqlite3.dll");
+#else
+#if defined(__APPLE__)
+    g_nc_sqlite_module = dlopen("/usr/lib/libsqlite3.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!g_nc_sqlite_module) g_nc_sqlite_module = dlopen("libsqlite3.dylib", RTLD_NOW | RTLD_LOCAL);
+#else
+    g_nc_sqlite_module = dlopen("libsqlite3.so.0", RTLD_NOW | RTLD_LOCAL);
+    if (!g_nc_sqlite_module) g_nc_sqlite_module = dlopen("libsqlite3.so", RTLD_NOW | RTLD_LOCAL);
+#endif
+#endif
     if (!g_nc_sqlite_module) return 0;
+#if defined(_WIN32)
 #define NC_SQLITE_SYMBOL(name) g_nc_##name = (nc_##name##_fn)GetProcAddress(g_nc_sqlite_module, #name)
+#else
+#define NC_SQLITE_SYMBOL(name) g_nc_##name = (nc_##name##_fn)dlsym(g_nc_sqlite_module, #name)
+#endif
     NC_SQLITE_SYMBOL(sqlite3_open);
     NC_SQLITE_SYMBOL(sqlite3_close);
     NC_SQLITE_SYMBOL(sqlite3_exec);
@@ -3948,6 +5142,38 @@ static unsigned long long nc_db_sql_hash(const char *s) {
 /* Lazy-load selfhost/common.no for sh.* / selfhost.common.* / selfhost.compiler.* */
 static NcVal *g_sh_common_fns = NULL;
 
+static int nc_compiler_bundle_supports_module_globals(NcVal *ncb, NcVal *fns) {
+    /*
+     * Build-katalogen kan innehalde eldre, lokalt genererte compiler-bundlar.
+     * Dei må ikkje få høgare tillit enn committed bootstrap når dei manglar
+     * den aktive NCB-ABI-en for modulglobale verdiar. Utan denne kontrollen
+     * blir toppnivå-`la` kompilert som LOAD_NAME/STORE_NAME og feilar først
+     * når ein importert funksjon prøver å lese globalen.
+     */
+    if (!ncb || ncb->type != NC_MAP || !fns || fns->type != NC_MAP) return 0;
+    NcVal *initializers = nc_index_get(ncb, nc_str("module_initializers"));
+    NcVal *global_names = nc_index_get(ncb, nc_str("global_names"));
+    if (!initializers || initializers->type != NC_LIST ||
+        !global_names || global_names->type != NC_MAP) return 0;
+    if (!nc_exec_find_fn(fns, "selfhost.compiler.ir_to_bytecode.emit_load_namn") ||
+        !nc_exec_find_fn(fns, "selfhost.compiler.ir_to_bytecode.kompiler_modul_init")) return 0;
+    NcVal *map_helper = nc_exec_find_fn(fns, "selfhost.vm.vm_map_har_nokkel");
+    if (map_helper && map_helper->type == NC_MAP) {
+        NcVal *code = nc_index_get(map_helper, nc_str("code"));
+        if (!code || code->type != NC_LIST) return 0;
+        for (int i = 0; i < code->list->len; i++) {
+            NcVal *instr = code->list->items[i];
+            if (!instr || instr->type != NC_LIST || instr->list->len < 2) continue;
+            NcVal *op = instr->list->items[0];
+            NcVal *target = instr->list->items[1];
+            if (op && op->type == NC_STR && !strcmp(op->s, "CALL") &&
+                target && target->type == NC_STR &&
+                !strcmp(target->s, "selfhost.vm.vm_map_har_nokkel")) return 0;
+        }
+    }
+    return 1;
+}
+
 static NcVal *nc_load_precompiled_functions(const char *path, const char *label) {
     NcVal *ncb_file = nc_builtin_fil_les(nc_str(path));
     if (!ncb_file || ncb_file->type != NC_STR) {
@@ -3969,7 +5195,9 @@ static NcVal *nc_load_precompiled_functions(const char *path, const char *label)
 
 static NcVal *nc_try_stage0_compiler_bundle(const char *src_text, const char *modul) {
     const char *root = getenv("NORSCODE_ROOT");
+    const char *candidate_override = getenv("NORSCODE_COMPILER_BUNDLE");
     const char *paths[] = {
+        candidate_override && candidate_override[0] ? candidate_override : "build/v9400/hybrid_compiler_bundle_v9400.ncb.json",
         "build/v9400/hybrid_compiler_bundle_v9400.ncb.json",
         "build/v6000/compiler_stage0_v6000.ncb.json",
         "build/nc-regen/selfhost_kompiler.ncb.json",
@@ -3999,6 +5227,7 @@ static NcVal *nc_try_stage0_compiler_bundle(const char *src_text, const char *mo
         NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
         if (!fns_v || fns_v->type != NC_MAP) continue;
         if (!nc_exec_find_fn(fns_v, "selfhost.kompiler.kompiler_fil")) continue;
+        if (!nc_compiler_bundle_supports_module_globals(ncb, fns_v)) continue;
 
         NcVal *saved_functions = g_current_functions;
         NcVal *saved_ncb = g_current_ncb;
@@ -4211,6 +5440,27 @@ static NcVal *nc_sha256_hex(const unsigned char *data, size_t length) {
     if (length <= UINT32_MAX) {
         ok = CC_SHA256(data, (CC_LONG)length, digest) != NULL;
     }
+#elif defined(_WIN32)
+    BCRYPT_ALG_HANDLE algorithm = NULL;
+    BCRYPT_HASH_HANDLE hash = NULL;
+    NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                                   NULL, 0);
+    if (BCRYPT_SUCCESS(status)) {
+        status = BCryptCreateHash(algorithm, &hash, NULL, 0, NULL, 0, 0);
+    }
+    size_t offset = 0;
+    while (BCRYPT_SUCCESS(status) && offset < length) {
+        size_t remaining = length - offset;
+        ULONG chunk = remaining > ULONG_MAX ? ULONG_MAX : (ULONG)remaining;
+        status = BCryptHashData(hash, (PUCHAR)(data + offset), chunk, 0);
+        offset += chunk;
+    }
+    if (BCRYPT_SUCCESS(status)) {
+        status = BCryptFinishHash(hash, digest, (ULONG)sizeof(digest), 0);
+    }
+    ok = BCRYPT_SUCCESS(status);
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
 #elif defined(NC_ENABLE_OPENSSL)
     unsigned int digest_length = 0;
     ok = EVP_Digest(data, length, digest, &digest_length, EVP_sha256(), NULL) == 1 && digest_length == 32;
@@ -4479,152 +5729,6 @@ static NcVal *nc_builtin_argon2id(NcVal *password_v, NcVal *salt_v,
 #endif
 }
 
-#if defined(_WIN32) && !defined(NC_ENABLE_OPENSSL)
-typedef struct {
-    const unsigned char *data;
-    size_t length;
-} NcDerSlice;
-
-static int ncw_der_tlv(const unsigned char *data, size_t length,
-                       unsigned char tag, NcDerSlice *value, size_t *used) {
-    if (!data || length < 2 || data[0] != tag) return 0;
-    size_t pos = 1, count = data[pos++];
-    if (count & 0x80) {
-        size_t octets = count & 0x7f;
-        if (octets == 0 || octets > sizeof(size_t) || pos + octets > length) return 0;
-        count = 0;
-        for (size_t i = 0; i < octets; i++) count = (count << 8) | data[pos++];
-    }
-    if (pos > length || count > length - pos) return 0;
-    if (value) { value->data = data + pos; value->length = count; }
-    if (used) *used = pos + count;
-    return 1;
-}
-
-static int ncw_pem_der(const char *pem, unsigned char **der, DWORD *length) {
-    if (!pem || !der || !length) return 0;
-    DWORD needed = 0, flags = CRYPT_STRING_BASE64_ANY;
-    if (!CryptStringToBinaryA(pem, 0, flags, NULL, &needed, NULL, NULL)) return 0;
-    unsigned char *out = malloc(needed ? needed : 1);
-    if (!out || !CryptStringToBinaryA(pem, 0, flags, out, &needed, NULL, NULL)) {
-        free(out); return 0;
-    }
-    *der = out; *length = needed; return 1;
-}
-
-static int ncw_rsa_private_key(const char *pem, BCRYPT_KEY_HANDLE *key) {
-    unsigned char *der = NULL; DWORD der_len = 0;
-    if (!ncw_pem_der(pem, &der, &der_len)) return 0;
-    NcDerSlice outer, version, algorithm, private_octet, rsa;
-    size_t used = 0, pos = 0;
-    int ok = ncw_der_tlv(der, der_len, 0x30, &outer, &used) &&
-             ncw_der_tlv(outer.data, outer.length, 0x02, &version, &used);
-    pos += used;
-    if (ok && pos < outer.length) { ok = ncw_der_tlv(outer.data + pos, outer.length - pos, 0x30, &algorithm, &used); pos += used; }
-    if (ok && pos < outer.length) { ok = ncw_der_tlv(outer.data + pos, outer.length - pos, 0x04, &private_octet, &used); }
-    if (ok) ok = ncw_der_tlv(private_octet.data, private_octet.length, 0x30, &rsa, &used);
-    NcDerSlice parts[9];
-    if (ok) {
-        pos = 0;
-        for (int i = 0; i < 9 && ok; i++) {
-            size_t part_used = 0;
-            ok = ncw_der_tlv(rsa.data + pos, rsa.length - pos, 0x02, &parts[i], &part_used);
-            pos += part_used;
-        }
-    }
-    if (!ok) { free(der); return 0; }
-    size_t trim[9];
-    for (int i = 0; i < 9; i++) {
-        size_t skip = 0;
-        while (skip + 1 < parts[i].length && parts[i].data[skip] == 0) skip++;
-        trim[i] = parts[i].length - skip;
-        parts[i].data += skip; parts[i].length = trim[i];
-    }
-    BCRYPT_ALG_HANDLE alg = NULL;
-    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_RSA_ALGORITHM, NULL, 0) != 0) { free(der); return 0; }
-    size_t modulus = parts[1].length, prime = (modulus + 1) / 2;
-    if (modulus == 0 || parts[2].length == 0 || parts[3].length == 0 ||
-        parts[4].length > prime || parts[5].length > prime) {
-        BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0;
-    }
-    BCRYPT_RSAKEY_BLOB header = { BCRYPT_RSAPRIVATE_MAGIC, (ULONG)(modulus * 8),
-        (ULONG)parts[2].length, (ULONG)modulus, (ULONG)prime, (ULONG)prime };
-    size_t blob_len = sizeof(header) + parts[2].length + modulus + prime * 6;
-    unsigned char *blob = calloc(blob_len, 1);
-    if (!blob) { BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0; }
-    memcpy(blob, &header, sizeof(header)); size_t out = sizeof(header);
-    memcpy(blob + out, parts[2].data, parts[2].length); out += parts[2].length;
-    memcpy(blob + out + modulus - parts[1].length, parts[1].data, parts[1].length); out += modulus;
-    for (int i = 4; i <= 8; i++) {
-        if (parts[i].length > prime) { free(blob); BCryptCloseAlgorithmProvider(alg, 0); free(der); return 0; }
-        memcpy(blob + out + prime - parts[i].length, parts[i].data, parts[i].length); out += prime;
-    }
-    NTSTATUS status = BCryptImportKeyPair(alg, NULL, BCRYPT_RSAPRIVATE_BLOB,
-        key, blob, (ULONG)blob_len, 0);
-    free(blob); BCryptCloseAlgorithmProvider(alg, 0); free(der);
-    return status == 0;
-}
-
-static int ncw_rsa_public_from_cert(const char *pem, BCRYPT_KEY_HANDLE *key) {
-    unsigned char *der = NULL; DWORD der_len = 0;
-    if (!ncw_pem_der(pem, &der, &der_len)) return 0;
-    PCCERT_CONTEXT cert = CertCreateCertificateContext(X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, der, der_len);
-    if (!cert) { free(der); return 0; }
-    NTSTATUS status = CryptImportPublicKeyInfoEx2(X509_ASN_ENCODING,
-        &cert->pCertInfo->SubjectPublicKeyInfo, 0, NULL, key);
-    CertFreeCertificateContext(cert);
-    if (status == 0) { free(der); return 1; }
-    // MinGW's CryptImportPublicKeyInfoEx2 can reject a certificate whose
-    // provider metadata is newer than the runner's CNG shim.  Extract the
-    // RSA SubjectPublicKeyInfo directly as a standards-compliant fallback.
-    NcDerSlice bit_string, rsa, modulus, exponent;
-    size_t used = 0;
-    int found = 0;
-    for (size_t i = 0; i + 2 < der_len && !found; i++) {
-        if (der[i] != 0x03 || !ncw_der_tlv(der + i, der_len - i, 0x03, &bit_string, &used) || bit_string.length < 2 || bit_string.data[0] != 0) continue;
-        if (ncw_der_tlv(bit_string.data + 1, bit_string.length - 1, 0x30, &rsa, &used)) {
-            size_t p = 0, u1 = 0, u2 = 0;
-            if (ncw_der_tlv(rsa.data + p, rsa.length - p, 0x02, &modulus, &u1)) {
-                p += u1;
-                if (ncw_der_tlv(rsa.data + p, rsa.length - p, 0x02, &exponent, &u2)) found = 1;
-            }
-        }
-    }
-    if (!found) { free(der); return 0; }
-    while (modulus.length > 1 && modulus.data[0] == 0) { modulus.data++; modulus.length--; }
-    while (exponent.length > 1 && exponent.data[0] == 0) { exponent.data++; exponent.length--; }
-    BCRYPT_RSAKEY_BLOB header = { BCRYPT_RSAPUBLIC_MAGIC, (ULONG)(modulus.length * 8),
-        (ULONG)exponent.length, (ULONG)modulus.length, 0, 0 };
-    size_t blob_len = sizeof(header) + exponent.length + modulus.length;
-    unsigned char *blob = malloc(blob_len);
-    if (!blob) { free(der); return 0; }
-    memcpy(blob, &header, sizeof(header)); size_t out = sizeof(header);
-    memcpy(blob + out, exponent.data, exponent.length); out += exponent.length;
-    memcpy(blob + out, modulus.data, modulus.length);
-    BCRYPT_ALG_HANDLE alg = NULL;
-    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_RSA_ALGORITHM, NULL, 0);
-    if (status == 0) status = BCryptImportKeyPair(alg, NULL, BCRYPT_RSAPUBLIC_BLOB,
-        key, blob, (ULONG)blob_len, 0);
-    if (alg) BCryptCloseAlgorithmProvider(alg, 0);
-    free(blob); free(der);
-    return status == 0;
-}
-
-static int ncw_rsa_sign(const char *pem, const char *input, unsigned char *signature, ULONG *length) {
-    BCRYPT_KEY_HANDLE key = NULL;
-    if (!ncw_rsa_private_key(pem, &key)) return 0;
-    BCRYPT_PKCS1_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM };
-    unsigned char digest[32]; BCRYPT_HASH_HANDLE hash = NULL; BCRYPT_ALG_HANDLE sha = NULL;
-    int ok = BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 &&
-        BCryptCreateHash(sha, &hash, NULL, 0, NULL, 0, 0) == 0 &&
-        BCryptHashData(hash, (PUCHAR)input, (ULONG)strlen(input), 0) == 0 &&
-        BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0 &&
-        BCryptSignHash(key, &padding, digest, sizeof(digest), signature, *length, length, BCRYPT_PAD_PKCS1) == 0;
-    if (hash) BCryptDestroyHash(hash); if (sha) BCryptCloseAlgorithmProvider(sha, 0); BCryptDestroyKey(key);
-    return ok;
-}
-#endif
-
 static NcVal *nc_builtin_acme_sign(NcVal *algorithm_v, NcVal *private_key_v,
                                    NcVal *input_v) {
 #if defined(NC_ENABLE_OPENSSL)
@@ -4687,19 +5791,6 @@ static NcVal *nc_builtin_acme_sign(NcVal *algorithm_v, NcVal *private_key_v,
     }
     hex[rawlen * 2] = '\0';
     return nc_str_own(hex);
-#elif defined(_WIN32)
-    char *algorithm = nc_to_str_raw(algorithm_v), *private_key = nc_to_str_raw(private_key_v), *input = nc_to_str_raw(input_v);
-    if (strcmp(algorithm, "RS256") || !private_key[0] || !input[0]) {
-        free(algorithm); free(private_key); free(input); nc_throw("ACME signering: ugyldig algoritme eller nøkkel"); return nc_nil();
-    }
-    unsigned char signature[512]; ULONG signature_len = sizeof(signature);
-    int ok = ncw_rsa_sign(private_key, input, signature, &signature_len);
-    free(algorithm); free(private_key); free(input);
-    if (!ok) { nc_throw("ACME signering feila"); return nc_nil(); }
-    char *hex = malloc((size_t)signature_len * 2 + 1); if (!hex) { nc_throw("ACME signering: minnefeil"); return nc_nil(); }
-    static const char digits[] = "0123456789abcdef";
-    for (ULONG i = 0; i < signature_len; i++) { hex[i * 2] = digits[(signature[i] >> 4) & 15]; hex[i * 2 + 1] = digits[signature[i] & 15]; }
-    hex[signature_len * 2] = 0; return nc_str_own(hex);
 #else
     (void)algorithm_v; (void)private_key_v; (void)input_v;
     nc_throw("ACME signering native backend er ikkje bygd på denne plattforma");
@@ -4803,31 +5894,6 @@ static NcVal *nc_builtin_acme_verify(NcVal *algorithm_v, NcVal *public_key_v,
     free(der_signature); free(signature);
     free(algorithm); free(public_key); free(input); free(signature_hex);
     return nc_bool(ok ? 1 : 0);
-#elif defined(_WIN32)
-    char *algorithm = nc_to_str_raw(algorithm_v), *public_key = nc_to_str_raw(public_key_v);
-    char *input = nc_to_str_raw(input_v), *signature_hex = nc_to_str_raw(signature_hex_v);
-    size_t hex_len = strlen(signature_hex);
-    if (strcmp(algorithm, "RS256") || !public_key[0] || !input[0] || hex_len == 0 || (hex_len & 1) != 0) {
-        free(algorithm); free(public_key); free(input); free(signature_hex); return nc_bool(0);
-    }
-    size_t signature_len = hex_len / 2;
-    unsigned char *signature = malloc(signature_len ? signature_len : 1);
-    int parsed = signature != NULL;
-    for (size_t i = 0; parsed && i < signature_len; i++) {
-        char a = signature_hex[i * 2], b = signature_hex[i * 2 + 1];
-        int hi = (a >= '0' && a <= '9') ? a - '0' : (a >= 'a' && a <= 'f') ? a - 'a' + 10 : (a >= 'A' && a <= 'F') ? a - 'A' + 10 : -1;
-        int lo = (b >= '0' && b <= '9') ? b - '0' : (b >= 'a' && b <= 'f') ? b - 'a' + 10 : (b >= 'A' && b <= 'F') ? b - 'a' + 10 : -1;
-        if (hi < 0 || lo < 0) parsed = 0; else signature[i] = (unsigned char)((hi << 4) | lo);
-    }
-    BCRYPT_KEY_HANDLE key = NULL; unsigned char digest[32]; BCRYPT_HASH_HANDLE hash = NULL; BCRYPT_ALG_HANDLE sha = NULL;
-    int ok = parsed && signature_len <= ULONG_MAX && ncw_rsa_public_from_cert(public_key, &key) &&
-        BCryptOpenAlgorithmProvider(&sha, BCRYPT_SHA256_ALGORITHM, NULL, 0) == 0 &&
-        BCryptCreateHash(sha, &hash, NULL, 0, NULL, 0, 0) == 0 &&
-        BCryptHashData(hash, (PUCHAR)input, (ULONG)strlen(input), 0) == 0 &&
-        BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0;
-    if (ok) { BCRYPT_PKCS1_PADDING_INFO padding = { BCRYPT_SHA256_ALGORITHM }; ok = BCryptVerifySignature(key, &padding, digest, sizeof(digest), signature, (ULONG)signature_len, BCRYPT_PAD_PKCS1) == 0; }
-    if (hash) BCryptDestroyHash(hash); if (sha) BCryptCloseAlgorithmProvider(sha, 0); if (key) BCryptDestroyKey(key);
-    free(signature); free(algorithm); free(public_key); free(input); free(signature_hex); return nc_bool(ok);
 #else
     (void)algorithm_v; (void)public_key_v; (void)input_v; (void)signature_hex_v;
     nc_throw("ACME verifisering native backend er ikkje bygd på denne plattforma");
@@ -4901,6 +5967,14 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         if (!strcmp(builtin_name, "bytes_slice_to_text")) return nc_builtin_bytes_slice_to_text(nargs > 0 ? args[0] : nc_nil(), nargs > 1 ? args[1] : nc_int(0), nargs > 2 ? args[2] : nc_int(0));
         if (!strcmp(builtin_name, "fil_les_binary") || !strcmp(builtin_name, "fil_les_binær")) return nc_builtin_fil_les_binary(nargs > 0 ? args[0] : nc_nil());
         if (!strcmp(builtin_name, "fil_sett_kjorbar")) return nc_builtin_fil_sett_kjorbar(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "readline") || !strcmp(builtin_name, "stdin_read") || !strcmp(builtin_name, "les_input")) return nc_builtin_readline(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "terminal_operation")) return nc_builtin_terminal_operation(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "system_info")) return nc_builtin_system_info();
+        if (!strcmp(builtin_name, "system_operation")) return nc_builtin_system_operation(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "system_log_operation")) return nc_builtin_system_log_operation(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "property_list_operation")) return nc_builtin_property_list_operation(nargs > 0 ? args[0] : nc_nil());
+        if (!strcmp(builtin_name, "argv")) return nc_builtin_argv();
+        if (!strcmp(builtin_name, "argv_operation")) return nc_builtin_argv_operation(nargs > 0 ? args[0] : nc_nil());
         if (!strcmp(builtin_name, "process_spawn_argv")) {
             return nc_builtin_process_spawn_argv(nargs > 0 ? args[0] : nc_nil());
         }
@@ -4944,7 +6018,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
     NcVal *params_v = nc_index_get(fn_def, nc_str("params"));
     NcVal *code_v   = nc_index_get(fn_def, nc_str("code"));
 
-    NcVal **stack_arr = calloc(8192, sizeof(NcVal*));
+    NcVal **stack_arr = calloc(512, sizeof(NcVal*));
     NcExecControl *control = calloc(1, sizeof(NcExecControl));
     NcVal **vars_arr  = calloc(2048, sizeof(NcVal*));
     char **varnames   = calloc(2048, sizeof(char*)); int nvars = 0;
@@ -5006,6 +6080,17 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
         NcVal *instr = code_v->list->items[ip];
         if (!instr || instr->type != NC_LIST || instr->list->len < 1) { ip++; continue; }
         NcVal *op_v = instr->list->items[0];
+        /*
+         * Same legacy transport boundary as LOAD_NAME/null below: some old
+         * compiler bundles collapsed the complete instruction text
+         * ["LOAD_NAME","null"] to [null]. It represents the language
+         * literal null, not an opcode that may be skipped.
+         */
+        if ((!op_v || op_v->type == NC_NIL) && instr->list->len == 1) {
+            nc_push(&sp, stack_arr, nc_nil());
+            ip++;
+            continue;
+        }
         if (!op_v || op_v->type != NC_STR) { ip++; continue; }
         const char *op = op_v->s;
         nc_native_debug_observe(fn_name, ip, op, varnames, nvars, depth);
@@ -5021,6 +6106,18 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             ip++;
         } else if (!strcmp(op, "LOAD_NAME")) {
             if (instr->list->len >= 2) {
+                /*
+                 * Eldre compiler-NCB-ar kan ha transportert namnet "null"
+                 * gjennom smart JSON-dekoding og dermed lagra operand 1 som
+                 * JSON null. Semantikken er framleis Norscode-literal null;
+                 * utan denne kompatibilitetsgrensa blir ingen verdi pusha og
+                 * neste binæropcode feilar misvisande med stack-underflow.
+                 */
+                if (!instr->list->items[1] || instr->list->items[1]->type == NC_NIL) {
+                    nc_push(&sp, stack_arr, nc_nil());
+                    ip++;
+                    continue;
+                }
                 char *n = nc_to_str_raw(instr->list->items[1]);
                 /* Sjekk lokale vars fyrst */
                 NcVal *lv = nc_nil();
@@ -5035,6 +6132,38 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 lv = nc_load(vars_arr, varnames, nvars, n); /* kastar for ukjent */
                 _load_done: free(n);
                 nc_push(&sp, stack_arr, lv);
+            }
+            ip++;
+        } else if (!strcmp(op, "STORE_GLOBAL")) {
+            if (instr->list->len >= 2) {
+                NcVal *module_v = nc_index_get(fn_def, nc_str("module"));
+                NcVal *globals = nc_map_get_cstr(functions, "__ncb_globals__");
+                if (!globals || globals->type != NC_MAP || !module_v || module_v->type != NC_STR) {
+                    nc_panic("STORE_GLOBAL utan initialisert modulglobal-kontekst i %s", fn_name);
+                }
+                NcVal *module_globals = nc_index_get(globals, module_v);
+                if (!module_globals || module_globals->type != NC_MAP) {
+                    module_globals = nc_map_new();
+                    nc_index_set(globals, module_v, module_globals);
+                }
+                nc_index_set(module_globals, instr->list->items[1], nc_pop(&sp, stack_arr));
+            }
+            ip++;
+        } else if (!strcmp(op, "LOAD_GLOBAL")) {
+            if (instr->list->len >= 2) {
+                NcVal *module_v = nc_index_get(fn_def, nc_str("module"));
+                NcVal *globals = nc_map_get_cstr(functions, "__ncb_globals__");
+                if (!globals || globals->type != NC_MAP || !module_v || module_v->type != NC_STR) {
+                    nc_panic("LOAD_GLOBAL utan initialisert modulglobal-kontekst i %s", fn_name);
+                }
+                NcVal *module_globals = nc_index_get(globals, module_v);
+                if (!module_globals || module_globals->type != NC_MAP ||
+                    !nc_truthy(nc_builtin_finnes_nokkel(module_globals, instr->list->items[1]))) {
+                    char *global_name = nc_to_str_raw(instr->list->items[1]);
+                    nc_panic("Ukjent global variabel: %s.%s", module_v->s, global_name);
+                    free(global_name);
+                }
+                nc_push(&sp, stack_arr, nc_index_get(module_globals, instr->list->items[1]));
             }
             ip++;
         } else if (!strcmp(op, "POP")) {
@@ -5266,6 +6395,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"starts_with")||!strcmp(cn,"tekst_starter_med")) fn_r=nc_builtin_starts_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"ends_with")||!strcmp(cn,"tekst_slutter_med"))   fn_r=nc_builtin_ends_with(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"contains")||!strcmp(cn,"tekst_inneholder"))     fn_r=nc_builtin_contains(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
+            else if (!strcmp(cn,"contains_any")||!strcmp(cn,"tekst_inneholder_noen")) fn_r=nc_builtin_contains_any(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"split")||!strcmp(cn,"tekst_splitt"))  fn_r=nc_builtin_split(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"join")||!strcmp(cn,"tekst_join"))     fn_r=nc_builtin_join(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil());
             else if (!strcmp(cn,"replace")||!strcmp(cn,"tekst_erstatt")) fn_r=nc_builtin_replace(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),narg>2?cargs[2]:nc_nil());
@@ -5360,6 +6490,14 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             }
             else if (!strcmp(cn,"fil_skriv_bin\xc3\xa6r")||!strcmp(cn,"fil_skriv_binary")) { if(narg>=2) nc_builtin_fil_skriv_binary(cargs[0],cargs[1]); }
             else if (!strcmp(cn,"fil_sett_kjorbar")) fn_r=nc_builtin_fil_sett_kjorbar(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"readline")||!strcmp(cn,"stdin_read")||!strcmp(cn,"les_input")) fn_r=nc_builtin_readline(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"terminal_operation")) fn_r=nc_builtin_terminal_operation(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"system_info")) fn_r=nc_builtin_system_info();
+            else if (!strcmp(cn,"system_operation")) fn_r=nc_builtin_system_operation(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"system_log_operation")) fn_r=nc_builtin_system_log_operation(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"property_list_operation")) fn_r=nc_builtin_property_list_operation(narg>0?cargs[0]:nc_nil());
+            else if (!strcmp(cn,"argv")) fn_r=nc_builtin_argv();
+            else if (!strcmp(cn,"argv_operation")) fn_r=nc_builtin_argv_operation(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"mkdir")||!strcmp(cn,"mkdir_p")||!strcmp(cn,"mappe_opprett")||!strcmp(cn,"builtin.mkdir")||!strcmp(cn,"builtin.mkdir_p")||!strcmp(cn,"builtin.mappe_opprett")) fn_r=nc_builtin_mkdir_p(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"char_code")) fn_r=nc_builtin_char_code(narg>0?cargs[0]:nc_nil());
             else if (!strcmp(cn,"chr")) fn_r=nc_builtin_chr(narg>0?cargs[0]:nc_nil());
@@ -5408,7 +6546,22 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
             else if (!strcmp(cn,"math.maks")||!strcmp(cn,"std.math.maks")||!strcmp(cn,"builtin.math.maks")) fn_r=nc_truthy(nc_cmp(narg>0?cargs[0]:nc_nil(),narg>1?cargs[1]:nc_nil(),1))?cargs[0]:cargs[1];
             else if (!strcmp(cn,"assert") || !strcmp(cn,"builtin.assert")) {
                 if (narg>0 && !nc_truthy(cargs[0])) {
-                    char *msg = narg>1 ? nc_to_str_raw(cargs[1]) : strdup("assert feilet");
+                    char *msg = NULL;
+                    if (narg > 1) msg = nc_to_str_raw(cargs[1]);
+                    else {
+                        long source_line = 0;
+                        NcVal *source_lines = fn_def && fn_def->type == NC_MAP
+                            ? nc_index_get(fn_def, nc_str("source_lines")) : NULL;
+                        if (source_lines && source_lines->type == NC_LIST && ip >= 0 &&
+                            ip < source_lines->list->len &&
+                            source_lines->list->items[ip]->type == NC_INT)
+                            source_line = source_lines->list->items[ip]->i;
+                        char diagnostic[256];
+                        snprintf(diagnostic, sizeof(diagnostic),
+                                 "assert feilet: funksjon=%s linje=%ld ip=%d",
+                                 fn_name ? fn_name : "<ukjent>", source_line, ip);
+                        msg = strdup(diagnostic);
+                    }
                     nc_throw(msg); free(msg);
                 }
             }
@@ -5460,7 +6613,7 @@ static NcVal *nc_exec_call(NcVal *functions, const char *fn_name, NcVal **args, 
                 }
                 fn_r = v;
             }
-            else if (!strcmp(cn,"vent.sov") || !strcmp(cn,"builtin.vent.sov")) { /* noop — sync runtime */ }
+            else if (!strcmp(cn,"vent.sov") || !strcmp(cn,"builtin.vent.sov")) fn_r=nc_builtin_vent_sov(narg>0?cargs[0]:nc_int(0));
             else if (!strcmp(cn,"vent.timeout") || !strcmp(cn,"builtin.vent.timeout")) {
                 /* vent.timeout(value, ms) — ms=0 → always timed out in sync mode */
                 NcVal *m = nc_map_new();
@@ -6564,6 +7717,33 @@ static void nc_list_append_raw(NcVal *lst, NcVal *v) {
     lst->list->items[lst->list->len++] = v;
 }
 
+#if !defined(NC_HAS_ARGV_OPERATION)
+static NcVal *nc_builtin_argv(void) {
+    NcVal *result = nc_list_new();
+    for (int i = 0; i < g_main_argc; i++) {
+        nc_list_append_raw(result, nc_str(g_main_argv && g_main_argv[i] ? g_main_argv[i] : ""));
+    }
+    return result;
+}
+
+static NcVal *nc_builtin_argv_operation(NcVal *request) {
+    NcVal *result = nc_map_new();
+    nc_index_set(result, nc_str("abi"), nc_str("norscode-argv-v1"));
+    if (!request || request->type != NC_MAP ||
+        strcmp(nc_atomic_text_field(request, "abi", ""), "norscode-argv-v1") ||
+        strcmp(nc_atomic_text_field(request, "operation", ""), "get")) {
+        nc_index_set(result, nc_str("status"), nc_str("feil"));
+        nc_index_set(result, nc_str("error"), nc_str("invalid argv request"));
+        nc_index_set(result, nc_str("argv"), nc_list_new());
+        return result;
+    }
+    nc_index_set(result, nc_str("status"), nc_str("ok"));
+    nc_index_set(result, nc_str("error"), nc_str(""));
+    nc_index_set(result, nc_str("argv"), nc_builtin_argv());
+    return result;
+}
+#endif
+
 /* ── Standard Library Dispatch Handlers (implementations) ── */
 static NcVal *nc_std_path_basename(NcVal **args, int na) {
     if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_nil();
@@ -6708,6 +7888,10 @@ NcVal *nc_builtin_ncb_call_fn(NcVal **args, int na) {
 /* Host FFI: køyr NCB via C-exec (same motor som standard run), brukt av selfhost.nc_main.no */
 NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     if (na < 1 || !args[0] || args[0]->type != NC_STR) return nc_int(1);
+    const char *debug_ncb_path = getenv("NORSCODE_HOST_NCB_DEBUG_OUTPUT");
+    if (debug_ncb_path && debug_ncb_path[0]) {
+        nc_builtin_fil_skriv(nc_str(debug_ncb_path), args[0]);
+    }
     NcVal *ncb = nc_builtin_json_parse_raw(args[0]);
     if (!ncb || ncb->type != NC_MAP) return nc_int(1);
     NcVal *fns_v = nc_index_get(ncb, nc_str("functions"));
@@ -6760,6 +7944,76 @@ NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **args, int na) {
     // if (g_sh_common_fns) nc_merge_fns(fns_v, g_sh_common_fns);
     g_current_functions = fns_v;
     g_native_app_security_active = 1;
+    /*
+     * C-executoren køyrer same NCB-format som pure VM og må derfor honorere
+     * modulglobale metadata før entry. Tidlegare vart LOAD_GLOBAL ignorert;
+     * argumentet forsvann frå operandstacken og neste CALL feila misvisande
+     * med Stack underflow.
+     */
+    NcVal *globals = nc_map_new();
+    NcVal *global_names = nc_index_get(ncb, nc_str("global_names"));
+    if (global_names && global_names->type == NC_MAP) {
+        for (int gi = 0; gi < global_names->map->len; gi++) {
+            nc_index_set(globals, nc_str(global_names->map->keys[gi]), nc_map_new());
+        }
+    }
+    NcVal *initializers = nc_index_get(ncb, nc_str("module_initializers"));
+    if (!initializers || initializers->type != NC_LIST) initializers = nc_list_new();
+    /*
+     * Verifiser metadata mot levande kode. Legacy bundletransport kan bevare
+     * __module_init__ og STORE_GLOBAL, men miste dei parallelle metadatafelta.
+     * Gjenopprett berre eksakte initialisatorar og namn som kan provast frå
+     * bytekoden; dette er deterministisk og legg ikkje til gjetta state.
+     */
+    for (int fi = 0; fi < fns_v->map->len; fi++) {
+        const char *candidate_name = fns_v->map->keys[fi];
+        const char *suffix = ".__module_init__";
+        size_t candidate_len = strlen(candidate_name), suffix_len = strlen(suffix);
+        if (candidate_len <= suffix_len || strcmp(candidate_name + candidate_len - suffix_len, suffix)) continue;
+        NcVal *definition = fns_v->map->vals[fi];
+        if (!definition || definition->type != NC_MAP) continue;
+        int initializer_known = 0;
+        for (int ii = 0; ii < initializers->list->len; ii++) {
+            NcVal *known = initializers->list->items[ii];
+            if (known && known->type == NC_STR && !strcmp(known->s, candidate_name)) {
+                initializer_known = 1;
+                break;
+            }
+        }
+        if (!initializer_known) nc_list_append_raw(initializers, nc_str(candidate_name));
+
+        NcVal *module_v = nc_map_get_cstr(definition, "module");
+        if (!module_v || module_v->type != NC_STR) continue;
+        NcVal *module_globals = nc_index_get(globals, module_v);
+        if (!module_globals || module_globals->type != NC_MAP) {
+            module_globals = nc_map_new();
+            nc_index_set(globals, module_v, module_globals);
+        }
+        NcVal *initializer_code = nc_map_get_cstr(definition, "code");
+        if (!initializer_code || initializer_code->type != NC_LIST) continue;
+        for (int ci = 0; ci < initializer_code->list->len; ci++) {
+            NcVal *instruction = initializer_code->list->items[ci];
+            if (!instruction || instruction->type != NC_LIST || instruction->list->len < 2) continue;
+            NcVal *opcode = instruction->list->items[0];
+            NcVal *global_name = instruction->list->items[1];
+            if (opcode && opcode->type == NC_STR && !strcmp(opcode->s, "STORE_GLOBAL") &&
+                global_name && global_name->type == NC_STR &&
+                !nc_truthy(nc_builtin_finnes_nokkel(module_globals, global_name))) {
+                nc_index_set(module_globals, global_name, nc_nil());
+            }
+        }
+    }
+    nc_index_set(fns_v, nc_str("__ncb_globals__"), globals);
+    if (initializers && initializers->type == NC_LIST) {
+        for (int ii = 0; ii < initializers->list->len; ii++) {
+            NcVal *initializer = initializers->list->items[ii];
+            if (!initializer || initializer->type != NC_STR ||
+                !nc_exec_find_fn(fns_v, initializer->s)) {
+                nc_panic("Manglar modulinitialisator i NCB");
+            }
+            (void)nc_exec_call(fns_v, initializer->s, NULL, 0, 0);
+        }
+    }
     NcVal *r = nc_exec_call(fns_v, entry, NULL, 0, 0);
     int exit_code = nc_val_til_exit(r);
     g_current_functions = saved_functions;
@@ -6840,6 +8094,12 @@ static NcVal *nc_builtin_koyr_med_kontekst_host(NcVal **args, int na) {
 /* Køyr selfhost.nc_main.start; returnerer exit-kode eller -1 ved feil */
 static int nc_try_nc_main_host(void) {
     const char *cmd = getenv("NORSCODE_CMD");
+    /* Smal overgangs-ABI for ein kandidat som blir starta av ein historisk
+     * stage0 der process_spawn_argv ikkje kan erstatte miljøet. Desse felta
+     * blir berre sette på den direkte kandidatprosessen i ARM64-attestasjonen. */
+    const char *direct_cmd = getenv("NORSCODE_VM_DIRECT_CMD");
+    const char *direct_file = getenv("NORSCODE_VM_DIRECT_FILE");
+    if (direct_cmd && direct_cmd[0]) cmd = direct_cmd;
     /* Når den genererte selfhost-flaten er embedda, skal run/compile gå
      * gjennom Norscode-VM-en og ikkje starte host-exec-ncb-json på nytt. */
     const char *selfhost_mode = getenv("NORSCODE_NATIVE_SELFHOST");
@@ -6882,7 +8142,7 @@ static int nc_try_nc_main_host(void) {
         return nc_val_til_exit(r);
     }
     if(cmd&&!strcmp(cmd,"run-ncb")){
-        const char *path=getenv("NORSCODE_FILE");if(!path||!*path)return -1;NcVal *ncb_json=nc_builtin_fil_les(nc_str(path));if(!ncb_json||ncb_json->type!=NC_STR)return -1;NcVal *args[]={ncb_json};NcVal *result=nc_fn_builtin_host_exec_ncb_json(args,1);return nc_val_til_exit(result);
+        const char *path=(direct_file&&direct_file[0])?direct_file:getenv("NORSCODE_FILE");if(!path||!*path)return -1;NcVal *ncb_json=nc_builtin_fil_les(nc_str(path));if(!ncb_json||ncb_json->type!=NC_STR)return -1;NcVal *args[]={ncb_json};NcVal *result=nc_fn_builtin_host_exec_ncb_json(args,1);return nc_val_til_exit(result);
     }
     if (cmd && !strcmp(cmd, "l5b-gen2")) {
         unsetenv("NORSCODE_FILE");
@@ -6895,10 +8155,15 @@ static int nc_try_nc_main_host(void) {
 
 /* ── main() — alle kommandoar delegert til selfhost.nc_main.no ── */
 int main(int argc, char **argv) {
+    nc_set_process_arguments(argc, argv);
     if (setjmp(g_err_jmp)) {
         fprintf(stderr, "norscode: %s\n", g_err_msg);
         return 1;
     }
+
+#if defined(NC_HAS_GENERATED_MODULE_INITIALIZERS)
+    nc_run_generated_module_initializers();
+#endif
 
     const char *cmd = getenv("NORSCODE_CMD");
     if (!cmd) cmd = "selftest";

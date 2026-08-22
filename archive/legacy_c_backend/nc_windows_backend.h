@@ -27,6 +27,18 @@ typedef struct {
     int writable;
 } NcwFile;
 
+typedef struct {
+    uint64_t size;
+    uint64_t inode;
+    uint64_t device;
+    uint64_t atime_seconds;
+    uint64_t mtime_seconds;
+    uint64_t ctime_seconds;
+    uint32_t mode;
+    uint32_t nlink;
+    uint32_t kind;
+} NcwPathStat;
+
 int ncw_file_open(NcwFile *file, const char *root_utf8, const char *relative_utf8,
                   const char *mode, char *error, size_t error_cap);
 int64_t ncw_file_read(NcwFile *file, void *buffer, size_t size,
@@ -40,6 +52,15 @@ int ncw_file_flush(NcwFile *file, char *error, size_t error_cap);
 int ncw_file_close(NcwFile *file, char *error, size_t error_cap);
 int ncw_file_delete(const char *root_utf8, const char *relative_utf8,
                     char *error, size_t error_cap);
+int ncw_file_replace(const char *root_utf8, const char *source_relative_utf8,
+                     const char *target_relative_utf8,
+                     char *error, size_t error_cap);
+int ncw_directory_delete(const char *root_utf8, const char *relative_utf8,
+                         char *error, size_t error_cap);
+int ncw_file_set_mode(const char *root_utf8, const char *relative_utf8,
+                      uint32_t mode, char *error, size_t error_cap);
+int ncw_path_stat(const char *root_utf8, const char *relative_utf8,
+                  NcwPathStat *out, char *error, size_t error_cap);
 
 typedef struct {
     HANDLE process;
@@ -50,7 +71,9 @@ typedef struct {
     HANDLE stderr_read;
     DWORD pid;
     DWORD exit_code;
+    ULONGLONG started_ms;
     ULONGLONG deadline_ms;
+    uint64_t peak_memory_bytes;
     int exited;
     int timed_out;
     int appcontainer;

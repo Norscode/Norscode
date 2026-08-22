@@ -36,9 +36,10 @@ NODE_BIN=/nonexistent ./bin/nc maintenance maturity
 Denne poengsummen gjeld repoets produkt- og bevisflate, ikkje universell
 plattformattestasjon. `tools/platform_readiness_v3600.no` er den strengare
 releaseflata: macOS ARM64 og Linux x86_64/ARM64 kan vere grøne samstundes,
-medan `production_ready_all_platforms` skal vere `false` fram til kandidaten er
-køyrd og attestert på ekte Windows. Krysskompilering åleine tel ikkje som slik
-attestasjon.
+medan `production_ready_all_platforms` berre kan vere `true` når kandidatane er
+køyrde og signert attesterte på ekte macOS, Linux x86_64/ARM64 og Windows.
+Samla CI-køyring `30788036517` oppfylte denne porten for commit `39f0447`.
+Krysskompilering åleine tel framleis ikkje som attestasjon.
 
 ## Status Og Mål
 

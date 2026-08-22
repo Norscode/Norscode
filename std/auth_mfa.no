@@ -1,0 +1,180 @@
+// MFA-enrollment og recovery. TOTP-hemmelegheita blir aldri lagra her;
+// kallaren held henne bak plattformens secret-store-ABI og leverer henne ved bruk.
+
+bruk std.auth_security som state_store
+bruk std.base32 som base32
+bruk std.totp som totp
+bruk std.krypto som krypto
+
+funksjon brukar_nokkel(brukar_id: tekst) -> tekst {
+    hvis brukar_id == "" { kast "MFAFeil: brukar manglar" }
+    returner krypto.sha256("norscode-mfa-user-v1|" + brukar_id)
+}
+
+funksjon secret_hash(secret: tekst) -> tekst {
+    returner krypto.sha256("norscode-mfa-secret-ref-v1|" + base32.normaliser(secret))
+}
+
+funksjon start_enrollment(root: tekst, relativ: tekst, brukar_id: tekst, secret: tekst,
+                          utstedar: tekst, konto: tekst, no_ms: heiltall) -> tekst {
+    la bytes = base32.dekod_bytes(secret)
+    hvis lengde(bytes) < 20 { kast "MFAFeil: TOTP-secret må vere minst 160 bit" }
+    la state = state_store.last(root, relativ)
+    state["mfa"][brukar_nokkel(brukar_id)] = {
+        "status": "pending",
+        "secret_hash": secret_hash(secret),
+        "oppretta_ms": tekst_fra_heltall(no_ms),
+        "recovery": []
+    }
+    state_store.lagre_atomisk(root, relativ, state)
+    returner totp.otpauth_uri(utstedar, konto, secret, 30, 8)
+}
+
+funksjon lag_recovery_kodar(tal: heiltall) -> liste_tekst {
+    hvis tal < 4 eller tal > 20 { kast "MFAFeil: recovery-tal må vere 4..20" }
+    la kodar: liste_tekst = []
+    la i: heiltall = 0
+    mens i < tal {
+        la raw = builtin.upper(builtin.random_hex(8))
+        legg_til(kodar, builtin.slice(raw, 0, 8) + "-" + builtin.slice(raw, 8, 16))
+        i = i + 1
+    }
+    returner kodar
+}
+
+funksjon aktiver(root: tekst, relativ: tekst, brukar_id: tekst, secret: tekst,
+                 kode: tekst, unix_tid: heiltall, recovery_tal: heiltall) -> liste_tekst {
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    hvis ikkje har_nokkel(state["mfa"], key) { returner [] }
+    la rad = state["mfa"][key]
+    hvis rad["status"] != "pending" { returner [] }
+    hvis ikkje krypto.konstant_lik(rad["secret_hash"], secret_hash(secret)) { returner [] }
+    hvis ikkje totp.verifiser(secret, kode, unix_tid, 30, 8, 1) { returner [] }
+    la kodar = lag_recovery_kodar(recovery_tal)
+    la hashes: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(kodar) {
+        legg_til(hashes, krypto.sha256("norscode-mfa-recovery-v1|" + kodar[i]))
+        i = i + 1
+    }
+    rad["status"] = "active"
+    rad["recovery"] = hashes
+    state_store.lagre_atomisk(root, relativ, state)
+    returner kodar
+}
+
+funksjon verifiser_totp(root: tekst, relativ: tekst, brukar_id: tekst, secret: tekst,
+                        kode: tekst, unix_tid: heiltall) -> boolsk {
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    hvis ikkje har_nokkel(state["mfa"], key) { returner usann }
+    la rad = state["mfa"][key]
+    hvis rad["status"] != "active" { returner usann }
+    hvis ikkje krypto.konstant_lik(rad["secret_hash"], secret_hash(secret)) { returner usann }
+    returner totp.verifiser(secret, kode, unix_tid, 30, 8, 1)
+}
+
+funksjon bruk_recovery(root: tekst, relativ: tekst, brukar_id: tekst, kode: tekst) -> boolsk {
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    hvis ikkje har_nokkel(state["mfa"], key) { returner usann }
+    la rad = state["mfa"][key]
+    hvis rad["status"] != "active" { returner usann }
+    la venta = krypto.sha256("norscode-mfa-recovery-v1|" + builtin.upper(builtin.trim(kode)))
+    la gamle = rad["recovery"]
+    la nye: liste_tekst = []
+    la treff = usann
+    la i: heiltall = 0
+    mens i < lengde(gamle) {
+        la lik = krypto.konstant_lik(gamle[i], venta)
+        hvis lik og ikkje treff { treff = sann }
+        ellers { legg_til(nye, gamle[i]) }
+        i = i + 1
+    }
+    hvis treff {
+        rad["recovery"] = nye
+        state_store.lagre_atomisk(root, relativ, state)
+    }
+    returner treff
+}
+
+funksjon aktiv(root: tekst, relativ: tekst, brukar_id: tekst) -> boolsk {
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    returner har_nokkel(state["mfa"], key) og state["mfa"][key]["status"] == "active"
+}
+
+funksjon deaktiver(root: tekst, relativ: tekst, brukar_id: tekst) -> heiltall {
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    hvis ikkje har_nokkel(state["mfa"], key) { returner 0 }
+    fjern_nokkel(state["mfa"], key)
+    returner state_store.lagre_atomisk(root, relativ, state)
+}
+
+funksjon utsted_innloggingsutfordring(root: tekst, relativ: tekst, brukar_id: tekst,
+                                     no_ms: heiltall, ttl_ms: heiltall) -> tekst {
+    hvis ttl_ms < 1000 eller ttl_ms > 300000 { kast "MFAFeil: utfordring TTL må vere 1..300 sekund" }
+    la state = state_store.last(root, relativ)
+    la key = brukar_nokkel(brukar_id)
+    hvis ikkje har_nokkel(state["mfa"], key) { returner "" }
+    hvis state["mfa"][key]["status"] != "active" { returner "" }
+    la token = builtin.random_hex(32)
+    la token_hash = krypto.sha256("norscode-mfa-challenge-v1|" + token)
+    state["mfa_challenges"][token_hash] = {
+        "brukar_id": brukar_id,
+        "utgår_ms": tekst_fra_heltall(no_ms + ttl_ms),
+        "forsøk": "0"
+    }
+    state_store.lagre_atomisk(root, relativ, state)
+    returner token
+}
+
+funksjon fullfor_innloggingsutfordring(root: tekst, relativ: tekst, token: tekst,
+                                      secret: tekst, kode: tekst, no_ms: heiltall) -> tekst {
+    la state = state_store.last(root, relativ)
+    la token_hash = krypto.sha256("norscode-mfa-challenge-v1|" + token)
+    hvis ikkje har_nokkel(state["mfa_challenges"], token_hash) { returner "" }
+    la challenge = state["mfa_challenges"][token_hash]
+    la brukar_id = challenge["brukar_id"]
+    la forsøk = heltall_fra_tekst(challenge["forsøk"])
+    hvis no_ms > heltall_fra_tekst(challenge["utgår_ms"]) eller forsøk >= 5 {
+        fjern_nokkel(state["mfa_challenges"], token_hash)
+        state_store.lagre_atomisk(root, relativ, state)
+        returner ""
+    }
+
+    la key = brukar_nokkel(brukar_id)
+    la godkjend = usann
+    hvis har_nokkel(state["mfa"], key) {
+        la rad = state["mfa"][key]
+        hvis rad["status"] == "active" og krypto.konstant_lik(rad["secret_hash"], secret_hash(secret)) {
+            godkjend = totp.verifiser(secret, kode, no_ms / 1000, 30, 8, 1)
+            hvis ikkje godkjend {
+                la venta = krypto.sha256("norscode-mfa-recovery-v1|" + builtin.upper(builtin.trim(kode)))
+                la gamle = rad["recovery"]
+                la nye: liste_tekst = []
+                la i: heiltall = 0
+                mens i < lengde(gamle) {
+                    la lik = krypto.konstant_lik(gamle[i], venta)
+                    hvis lik og ikkje godkjend { godkjend = sann }
+                    ellers { legg_til(nye, gamle[i]) }
+                    i = i + 1
+                }
+                hvis godkjend { rad["recovery"] = nye }
+            }
+        }
+    }
+
+    hvis godkjend {
+        fjern_nokkel(state["mfa_challenges"], token_hash)
+        state_store.lagre_atomisk(root, relativ, state)
+        returner brukar_id
+    }
+    forsøk = forsøk + 1
+    hvis forsøk >= 5 { fjern_nokkel(state["mfa_challenges"], token_hash) }
+    ellers { challenge["forsøk"] = tekst_fra_heltall(forsøk) }
+    state_store.lagre_atomisk(root, relativ, state)
+    returner ""
+}

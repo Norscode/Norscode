@@ -1,11 +1,9 @@
-# v3600 Platform readiness status (historisk snapshot)
+# v3600 Platform readiness status
 
-Dette dokumentet er eit eldre v3600-snapshot med kandidathashar. Det er ikkje
-releasebevis for Norscode 1.0. Bruk den signerte
-`reports/norscode-completion-v1.json` frå same commit som kjelda for aktuell
-plattformstatus og `production_ready_all_platforms`.
-
-Status: macOS runtime-gap er verifisert lokalt. Linux x86_64-kandidat er krysskompilert og full runtime-gap er verifisert i Ubuntu 24.04 Docker. Portable Zig Argon2id og OpenSSL PBKDF2/ACME er i tillegg verifisert i Linux-releasekandidaten.
+Status 2026-08-06: denne fila dokumenterer historisk v3600-evidens. Ho er
+ikkje ein attestasjon av den gjeldande fixed14-kandidaten. Fixed14 har lokal
+macOS-`local-green --strict`, men manglar nye, signerte rapportar frå macOS,
+Linux x86-64, Linux ARM64 og ekte Windows bundne til same kjeldegenerasjon.
 
 ## macOS
 
@@ -13,7 +11,8 @@ Status: macOS runtime-gap er verifisert lokalt. Linux x86_64-kandidat er kryssko
 dist=norscode_native
 stage0=bootstrap/stage0/norscode-macos-arm64
 runtime_gap=green
-production_ready_macos=true
+production_ready_macos=false
+reason=current_fixed14_generation_not_remotely_attested
 ```
 
 Aktuelle SHA256:
@@ -32,7 +31,8 @@ linux_candidate=build/v3600/linux/norscode_native_linux_x86_64_v3605_zigargon
 linux_stage0=bootstrap/stage0/norscode-linux-x86_64
 cross_compile=green
 runtime_execution=green
-production_ready_linux_x86_64=true
+production_ready_linux_x86_64=false
+reason=current_fixed14_generation_not_attested
 ```
 
 Aktuelle SHA256:
@@ -47,22 +47,25 @@ bootstrap/stage0/norscode-linux-x86_64: 1b13546961aa2c647cc97211ca86e45eb41b7919
 ## Global status
 
 ```text
-production_ready_macos=true
-production_ready_linux_x86_64=true
-production_ready_all_platforms=true
-reason=linux_docker_runtime_gap_verified
+production_ready_macos=false
+production_ready_linux_x86_64=false
+production_ready_linux_arm64=false
+production_ready_windows=false
+production_ready_all_platforms=false
+reason=current_fixed14_generation_requires_new_signed_attestations
 ```
 
-Dette betyr at macOS- og Linux x86_64-linene er verifiserte, inkludert portable Argon2id og OpenSSL-krypto i Linux-releasekandidaten. Stage0-seed, ekte Windows execution, ACME-utstedelse og andre plattformspesifikke native backendar blir framleis rapporterte separat i `std.runtime_status`.
+Dei eldre v3600-resultata under viser at plattformporten har vore grøn for ein
+tidlegare generasjon. Dei kan ikkje brukast som produksjonsbevis for fixed14.
+Stage0-seed, ekte Windows-køyring, ACME-utferding og andre
+plattformspesifikke native backendar blir framleis rapporterte separat i
+`std.runtime_status`.
 
-Linux ARM64 er i tillegg køyrd native, med 560/560 testar bestått og ingen Rosetta-emulering.
+Historisk vart Linux ARM64 køyrd native med 560/560 testar og utan
+Rosetta-emulering. Same port må køyrast på nytt for fixed14.
 
-Repeterbar Docker-kommando:
-
-```sh
-NORSCODE_ROOT="$PWD" ./bin/nc run tools/build_linux_cross_candidate_v3602.no
-
-NORSCODE_ROOT="$PWD" ./bin/nc run tools/build_linux_zig_argon_candidate_v3606.no
-
-NORSCODE_ROOT="$PWD" NORSCODE_VERIFY_LINUX_DOCKER=1 ./bin/nc run tools/platform_readiness_v3600.no
-```
+Dei historiske v3602/v3606 Zig-verktøya er fjerna frå aktiv `tools/`-flate og
+kan ikkje brukast som kommandoar eller gjeldande bevis. Ny readiness skal gå
+gjennom dei native `.no`-eigarane og publisere ferske, signerte rapportar for
+same kandidatgenerasjon. `tools/platform_readiness_v3600.no` er framleis den
+fail-closed samla rapportporten.

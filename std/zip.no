@@ -16,6 +16,7 @@
 #   skriv(zp.les_fil(les_ark, "hallo.txt"))
 
 bruk std.bytes som bytes
+bruk std.runtime_filesystem som runtime_fs
 
 # ─── Virtuell ZIP (in-memory) ─────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ funksjon lista_filer(ark: ordbok_tekst) -> liste_tekst {
     la i: heltall = 0
     mens (i < lengde(nøklar)) {
         la k: tekst = nøklar[i]
-        hvis (k != "__type__") { legg_til(ut, k) }
+        hvis (k != "__type__" og k != "__norscode_tar_modes") { legg_til(ut, k) }
         i = i + 1
     }
     returner ut
@@ -56,9 +57,181 @@ funksjon slett_frå_zip(ark: ordbok_tekst, namn: tekst) -> heltall {
     returner 0
 }
 
-funksjon tal_filer(ark: ordbok_tekst) -> heltall {
-    la n: heltall = lengde(builtin.nøkler(ark))
-    returner n - 1  # minus __type__
+funksjon tal_filer(ark: ordbok_tekst) -> heltall { returner lengde(lista_filer(ark)) }
+
+funksjon _zip_le(data: liste_heltall, verdi: heiltall, breidde: heiltall) -> heiltall {
+    la i = 0
+    mens i < breidde {
+        legg_til(data, (verdi >> (i * 8)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _zip_les_le(data: liste_heltall, pos: heiltall, breidde: heiltall) -> heiltall {
+    hvis pos < 0 eller pos + breidde > lengde(data) { returner -1 }
+    la verdi = 0
+    la i = 0
+    mens i < breidde {
+        verdi = verdi | (data[pos + i] << (i * 8))
+        i = i + 1
+    }
+    returner verdi
+}
+
+funksjon _zip_namn_bytes(namn: tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    la i = 0
+    mens i < lengde(namn) {
+        la kode = builtin.char_code(builtin.slice(namn, i, i + 1))
+        hvis kode < 1 eller kode > 127 { returner [] }
+        legg_til(ut, kode)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _zip_trygt_namn(namn: tekst) -> bool {
+    hvis namn == "" eller builtin.starts_with(namn, "/") eller
+       builtin.index_of(namn, "\\") >= 0 eller builtin.index_of(namn, "\n") >= 0 {
+        returner usann
+    }
+    la delar = builtin.split(namn, "/")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis delar[i] == "" eller delar[i] == "." eller delar[i] == ".." { returner usann }
+        i = i + 1
+    }
+    returner lengde(_zip_namn_bytes(namn)) > 0
+}
+
+funksjon _zip_crc32(data: liste_heltall) -> heiltall {
+    # Reflektert CRC-32 nibble-tabell. To oppslag per byte krev denne
+    # 16-verdi-tabellen, ikkje dei første 16 verdiane frå byte-tabellen.
+    la tabell: liste_heiltall = [0, 498536548, 997073096, 651767980,
+        1994146192, 1802195444, 1303535960, 1342533948,
+        3988292384, 4027552580, 3604390888, 3412177804,
+        2607071920, 2262029012, 2685067896, 3183342108]
+    la crc = 4294967295
+    la i = 0
+    mens i < lengde(data) {
+        crc = crc ^ data[i]
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        crc = (crc >> 4) ^ tabell[crc & 15]
+        i = i + 1
+    }
+    returner crc ^ 4294967295
+}
+
+# Deterministisk ZIP med stored entries. Tidsfelt er null og filrekkjefølgja
+# kjem eksplisitt frå kallaren, slik at same input gir byte-identisk arkiv.
+funksjon zip_skriv_lagra_filer(sti: tekst, root: tekst, filer: liste_tekst) -> bool {
+    prøv {
+        la data: liste_heltall = []
+        la metadata = []
+        la i = 0
+        mens i < lengde(filer) {
+            la namn = filer[i]
+            hvis ikkje _zip_trygt_namn(namn) { returner usann }
+            la namn_bytes = _zip_namn_bytes(namn)
+            la innhald = bytes.til_liste(builtin.fil_les_binær(root + "/" + namn))
+            hvis lengde(innhald) > 4294967295 { returner usann }
+            la crc = _zip_crc32(innhald)
+            la offset = lengde(data)
+            _zip_le(data, 67324752, 4)
+            _zip_le(data, 20, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, crc, 4)
+            _zip_le(data, lengde(innhald), 4)
+            _zip_le(data, lengde(innhald), 4)
+            _zip_le(data, lengde(namn_bytes), 2)
+            _zip_le(data, 0, 2)
+            la j = 0
+            mens j < lengde(namn_bytes) { legg_til(data, namn_bytes[j]) j = j + 1 }
+            j = 0
+            mens j < lengde(innhald) { legg_til(data, innhald[j]) j = j + 1 }
+            legg_til(metadata, {"name": namn, "crc": crc, "size": lengde(innhald), "offset": offset})
+            i = i + 1
+        }
+
+        la central_start = lengde(data)
+        i = 0
+        mens i < lengde(metadata) {
+            la namn_bytes = _zip_namn_bytes(tekst(metadata[i]["name"]))
+            _zip_le(data, 33639248, 4)
+            _zip_le(data, 20, 2)
+            _zip_le(data, 20, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, heltall_fra_tekst(tekst(metadata[i]["crc"])), 4)
+            _zip_le(data, heltall_fra_tekst(tekst(metadata[i]["size"])), 4)
+            _zip_le(data, heltall_fra_tekst(tekst(metadata[i]["size"])), 4)
+            _zip_le(data, lengde(namn_bytes), 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 2)
+            _zip_le(data, 0, 4)
+            _zip_le(data, heltall_fra_tekst(tekst(metadata[i]["offset"])), 4)
+            la j = 0
+            mens j < lengde(namn_bytes) { legg_til(data, namn_bytes[j]) j = j + 1 }
+            i = i + 1
+        }
+        la central_size = lengde(data) - central_start
+        _zip_le(data, 101010256, 4)
+        _zip_le(data, 0, 2)
+        _zip_le(data, 0, 2)
+        _zip_le(data, lengde(metadata), 2)
+        _zip_le(data, lengde(metadata), 2)
+        _zip_le(data, central_size, 4)
+        _zip_le(data, central_start, 4)
+        _zip_le(data, 0, 2)
+        // fil_skriv_binær tek byte-lista direkte også i committed Windows-
+        // stage0; bytes_from_list er ein nyare runtime-konvertering.
+        builtin.fil_skriv_binær(sti, data)
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon zip_les_lagra(sti: tekst) -> ordbok_tekst {
+    la resultat: ordbok_tekst = {}
+    prøv {
+        la data = bytes.til_liste(builtin.fil_les_binær(sti))
+        la pos = 0
+        mens pos + 4 <= lengde(data) og _zip_les_le(data, pos, 4) == 67324752 {
+            hvis pos + 30 > lengde(data) { returner {} }
+            hvis _zip_les_le(data, pos + 8, 2) != 0 { returner {} }
+            la crc = _zip_les_le(data, pos + 14, 4)
+            la komprimert = _zip_les_le(data, pos + 18, 4)
+            la storleik = _zip_les_le(data, pos + 22, 4)
+            la namn_len = _zip_les_le(data, pos + 26, 2)
+            la ekstra_len = _zip_les_le(data, pos + 28, 2)
+            hvis komprimert != storleik eller pos + 30 + namn_len + ekstra_len + storleik > lengde(data) {
+                returner {}
+            }
+            la namn = ""
+            la i = 0
+            mens i < namn_len {
+                namn = namn + builtin.chr(data[pos + 30 + i])
+                i = i + 1
+            }
+            hvis ikkje _zip_trygt_namn(namn) { returner {} }
+            la start = pos + 30 + namn_len + ekstra_len
+            la innhald: liste_heltall = []
+            i = 0
+            mens i < storleik { legg_til(innhald, data[start + i]) i = i + 1 }
+            hvis _zip_crc32(innhald) != crc { returner {} }
+            resultat[namn] = bytes.fra_liste(innhald)
+            pos = start + storleik
+        }
+    } fang (e) { returner {} }
+    returner resultat
 }
 
 # ─── Disk-operasjonar (krev builtin) ──────────────────────────────────────────
@@ -134,16 +307,35 @@ funksjon ny_frå_katalog(katalog: tekst) -> ordbok_tekst {
 funksjon ny_tar() -> ordbok_tekst {
     la ark: ordbok_tekst = {}
     ark["__type__"] = "tar"
+    ark["__norscode_tar_modes"] = {}
     returner ark
 }
 
 funksjon tar_legg_til(ark: ordbok_tekst, namn: tekst, innhald: tekst) -> heltall {
+    hvis ikkje _tar_trygg_namn(namn) eller lengde(namn) > 100 { returner -1 }
     returner legg_til_fil(ark, namn, innhald)
 }
 
 funksjon tar_legg_til_bytes(ark: ordbok_tekst, namn: tekst, innhald) -> heltall {
+    hvis ikkje _tar_trygg_namn(namn) eller lengde(namn) > 100 { returner -1 }
     ark[namn] = innhald
     returner 0
+}
+
+funksjon tar_sett_modus(ark: ordbok_tekst, namn: tekst, modus: heiltall) -> heiltall {
+    hvis ikkje _tar_trygg_namn(namn) eller modus < 0 eller modus > 511 { returner -1 }
+    hvis ikkje har_nokkel(ark, "__norscode_tar_modes") { ark["__norscode_tar_modes"] = {} }
+    ark["__norscode_tar_modes"][namn] = modus
+    returner 0
+}
+
+funksjon _tar_modus(ark: ordbok_tekst, namn: tekst) -> heiltall {
+    hvis har_nokkel(ark, "__norscode_tar_modes") og
+       har_nokkel(ark["__norscode_tar_modes"], namn) {
+        la modus = heltall_fra_tekst(tekst(ark["__norscode_tar_modes"][namn]))
+        hvis modus >= 0 og modus <= 511 { returner modus }
+    }
+    returner 420
 }
 
 funksjon tar_les_fil(ark: ordbok_tekst, namn: tekst) -> tekst {
@@ -197,7 +389,7 @@ funksjon _tar_innhald_liste(innhald) -> liste_heltall {
     returner ut
 }
 
-funksjon _tar_fil(data: liste_heltall, namn: tekst, innhald) -> heiltall {
+funksjon _tar_fil(data: liste_heltall, namn: tekst, innhald, modus: heiltall) -> heiltall {
     la innhald_bytes = _tar_innhald_liste(innhald)
     la header: liste_heltall = []
     la hi = 0
@@ -206,7 +398,7 @@ funksjon _tar_fil(data: liste_heltall, namn: tekst, innhald) -> heiltall {
         hi = hi + 1
     }
     _tar_ascii(header, 0, namn, 100)
-    _tar_ascii(header, 100, "0000644", 8)
+    _tar_ascii(header, 100, _tar_octal(modus & 511, 8), 8)
     _tar_ascii(header, 108, "0000000", 8)
     _tar_ascii(header, 116, "0000000", 8)
     _tar_ascii(header, 124, _tar_octal(lengde(innhald_bytes), 12), 12)
@@ -254,7 +446,7 @@ funksjon _tar_skriv_pure(ark: ordbok_tekst, sti: tekst) -> bool {
         la filer = lista_filer(ark)
         la i = 0
         mens i < lengde(filer) {
-            _tar_fil(data, filer[i], ark[filer[i]])
+            _tar_fil(data, filer[i], ark[filer[i]], _tar_modus(ark, filer[i]))
             i = i + 1
         }
         la zi = 0
@@ -269,10 +461,10 @@ funksjon _tar_skriv_pure(ark: ordbok_tekst, sti: tekst) -> bool {
 }
 
 funksjon _tar_crc32(data: liste_heltall) -> heiltall {
-    la tabell: liste_heltall = [0, 1996959894, 3993919788, 2567524794,
-        124634137, 1886057615, 3915621685, 2657392035,
-        249268274, 2044508324, 3772115230, 2547177864,
-        162941995, 2125561021, 3887607047, 2428444049]
+    la tabell: liste_heiltall = [0, 498536548, 997073096, 651767980,
+        1994146192, 1802195444, 1303535960, 1342533948,
+        3988292384, 4027552580, 3604390888, 3412177804,
+        2607071920, 2262029012, 2685067896, 3183342108]
     la crc = 4294967295
     la i = 0
     mens i < lengde(data) {
@@ -289,7 +481,7 @@ funksjon _tar_lagre_data(ark: ordbok_tekst) -> liste_heltall {
     la filer = lista_filer(ark)
     la i = 0
     mens i < lengde(filer) {
-        _tar_fil(data, filer[i], ark[filer[i]])
+        _tar_fil(data, filer[i], ark[filer[i]], _tar_modus(ark, filer[i]))
         i = i + 1
     }
     la zi = 0
@@ -395,7 +587,7 @@ funksjon tar_skriv(ark: ordbok_tekst, sti: tekst) -> bool {
     returner usann
 }
 
-funksjon _tar_gzip_dekomprimer(data: liste_heltall) -> liste_heltall {
+funksjon _tar_gzip_dekomprimer_med_grense(data: liste_heltall, maks_ut: heiltall) -> liste_heltall {
     hvis lengde(data) < 18 eller data[0] != 31 eller data[1] != 139 { returner [] }
     la pos = 10
     la ut: liste_heltall = []
@@ -411,6 +603,7 @@ funksjon _tar_gzip_dekomprimer(data: liste_heltall) -> liste_heltall {
         hvis (storleik ^ 65535) != invers { returner [] }
         pos = pos + 4
         hvis pos + storleik > lengde(data) { returner [] }
+        hvis storleik > maks_ut - lengde(ut) { returner [] }
         la i = 0
         mens i < storleik {
             legg_til(ut, data[pos + i])
@@ -419,6 +612,50 @@ funksjon _tar_gzip_dekomprimer(data: liste_heltall) -> liste_heltall {
         pos = pos + storleik
     }
     returner ut
+}
+
+funksjon _tar_gzip_dekomprimer(data: liste_heltall) -> liste_heltall {
+    returner _tar_gzip_dekomprimer_med_grense(data, 536870912)
+}
+
+# Offentleg, prosessfri gzip-byteflyt. Skrivaren brukar gyldige DEFLATE
+# stored-blokker; lesaren avviser andre blokktypekodar fail-closed og
+# kontrollerer både CRC32 og ISIZE før data blir returnerte.
+funksjon gzip_komprimer_bytes(buffer) {
+    returner bytes.fra_liste(_tar_gzip_bytes(bytes.til_liste(buffer)))
+}
+
+funksjon gzip_dekomprimer_bytes(buffer) {
+    returner gzip_dekomprimer_bytes_med_grense(buffer, 536870912)
+}
+
+funksjon gzip_dekomprimer_bytes_med_grense(buffer, maks_ut: heiltall) {
+    hvis maks_ut < 0 { returner bytes.tom() }
+    la rå = bytes.til_liste(buffer)
+    hvis lengde(rå) < 18 eller rå[0] != 31 eller rå[1] != 139 eller rå[2] != 8 eller rå[3] != 0 {
+        returner bytes.tom()
+    }
+    la ut = _tar_gzip_dekomprimer_med_grense(rå, maks_ut)
+    la n = lengde(rå)
+    la crc = rå[n - 8] + (rå[n - 7] << 8) + (rå[n - 6] << 16) + (rå[n - 5] << 24)
+    la isize = rå[n - 4] + (rå[n - 3] << 8) + (rå[n - 2] << 16) + (rå[n - 1] << 24)
+    hvis (_tar_crc32(ut) & 4294967295) != (crc & 4294967295) { returner bytes.tom() }
+    hvis (lengde(ut) & 4294967295) != (isize & 4294967295) { returner bytes.tom() }
+    returner bytes.fra_liste(ut)
+}
+
+funksjon gzip_skriv_bytes(sti: tekst, buffer) -> bool {
+    prøv {
+        builtin.fil_skriv_binær(sti, gzip_komprimer_bytes(buffer))
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon gzip_les_bytes(sti: tekst) {
+    prøv { returner gzip_dekomprimer_bytes(builtin.fil_les_binær(sti)) }
+    fang (e) { returner bytes.tom() }
+    returner bytes.tom()
 }
 
 funksjon _tar_namn(data: liste_heltall, start: heiltall, breidde: heiltall) -> tekst {
@@ -453,6 +690,19 @@ funksjon _tar_trygg_namn(namn: tekst) -> bool {
     returner sann
 }
 
+funksjon _tar_checksum_ok(data: liste_heltall, pos: heiltall) -> bool {
+    hvis pos < 0 eller pos + 512 > lengde(data) { returner usann }
+    la venta = _tar_storleik(data, pos + 148, 8)
+    la faktisk = 0
+    la i = 0
+    mens i < 512 {
+        hvis i >= 148 og i < 156 { faktisk = faktisk + 32 }
+        ellers { faktisk = faktisk + data[pos + i] }
+        i = i + 1
+    }
+    returner venta == faktisk
+}
+
 funksjon _tar_forelder(sti: tekst) -> tekst {
     la pos = -1
     la i = 0
@@ -464,35 +714,82 @@ funksjon _tar_forelder(sti: tekst) -> tekst {
     returner builtin.slice(sti, 0, pos)
 }
 
-funksjon tar_pakk_ut(sti: tekst, katalog: tekst) -> bool {
+funksjon tar_les_pure_med_grenser(sti: tekst, maks_arkiv: heiltall, maks_total: heiltall,
+                                 maks_fil: heiltall, maks_filer: heiltall) -> ordbok_tekst {
+    la ark = ny_tar()
     prøv {
+        hvis maks_arkiv < 1 eller maks_total < 0 eller maks_fil < 0 eller maks_filer < 1 { returner ark }
+        la stat = runtime_fs.native_stat_sti(sti)
+        hvis stat["status"] != "ok" eller heltall_fra_tekst(tekst(stat["value"])) > maks_arkiv { returner ark }
         la rå = bytes.til_liste(builtin.fil_les_binær(sti))
-        la data = _tar_gzip_dekomprimer(rå)
-        hvis lengde(data) == 0 { returner usann }
+        hvis lengde(rå) > maks_arkiv { returner ark }
+        la data = rå
+        hvis lengde(rå) >= 2 og rå[0] == 31 og rå[1] == 139 {
+            data = bytes.til_liste(gzip_dekomprimer_bytes_med_grense(bytes.fra_liste(rå), maks_total + (maks_filer * 512) + 1024))
+            hvis lengde(data) == 0 { returner ark }
+        }
         la pos = 0
+        la total = 0
+        la filer = 0
         mens pos + 512 <= lengde(data) {
-            hvis data[pos] == 0 { returner sann }
+            hvis data[pos] == 0 { returner ark }
+            hvis ikkje _tar_checksum_ok(data, pos) { returner ny_tar() }
             la namn = _tar_namn(data, pos, 100)
-            hvis ikkje _tar_trygg_namn(namn) { returner usann }
+            hvis lengde(namn) > 255 eller ikkje _tar_trygg_namn(namn) { returner ny_tar() }
+            la typeflag = data[pos + 156]
+            hvis typeflag != 0 og typeflag != 48 { returner ny_tar() }
+            la modus = _tar_storleik(data, pos + 100, 8) & 511
             la storleik = _tar_storleik(data, pos + 124, 12)
+            filer = filer + 1
+            hvis filer > maks_filer eller storleik > maks_fil eller storleik > maks_total - total { returner ny_tar() }
+            total = total + storleik
             la innhald_start = pos + 512
-            hvis innhald_start + storleik > lengde(data) { returner usann }
+            hvis innhald_start + storleik > lengde(data) { returner ny_tar() }
             la innhald: liste_heltall = []
             la i = 0
             mens i < storleik {
                 legg_til(innhald, data[innhald_start + i])
                 i = i + 1
             }
-            la mål = katalog + "/" + namn
-            la forelder = _tar_forelder(mål)
-            hvis forelder != "" { builtin.mkdir_p(forelder) }
-            builtin.fil_skriv_binær(mål, bytes.fra_liste(innhald))
+            tar_legg_til_bytes(ark, namn, bytes.fra_liste(innhald))
+            tar_sett_modus(ark, namn, modus)
             la blokker = storleik / 512
             hvis storleik % 512 != 0 { blokker = blokker + 1 }
             pos = innhald_start + blokker * 512
         }
+    } fang (e) { returner ny_tar() }
+    returner ark
+}
+
+funksjon tar_les_pure(sti: tekst) -> ordbok_tekst {
+    returner tar_les_pure_med_grenser(sti, 268435456, 536870912, 134217728, 10000)
+}
+
+funksjon tar_pakk_ut_med_grenser(sti: tekst, katalog: tekst, maks_arkiv: heiltall,
+                                maks_total: heiltall, maks_fil: heiltall,
+                                maks_filer: heiltall) -> bool {
+    prøv {
+        la ark = tar_les_pure_med_grenser(sti, maks_arkiv, maks_total, maks_fil, maks_filer)
+        la namn_liste = tar_lista(ark)
+        hvis lengde(namn_liste) == 0 { returner usann }
+        la i = 0
+        mens i < lengde(namn_liste) {
+            la namn = namn_liste[i]
+            hvis ikkje _tar_trygg_namn(namn) { returner usann }
+            la mål = katalog + "/" + namn
+            la forelder = _tar_forelder(mål)
+            hvis forelder != "" { builtin.mkdir_p(forelder) }
+            builtin.fil_skriv_binær(mål, ark[namn])
+            hvis runtime_fs.native_sett_modus_sti(mål, _tar_modus(ark, namn))["status"] != "ok" { returner usann }
+            i = i + 1
+        }
+        returner sann
     } fang (e) { returner usann }
     returner usann
+}
+
+funksjon tar_pakk_ut(sti: tekst, katalog: tekst) -> bool {
+    returner tar_pakk_ut_med_grenser(sti, katalog, 268435456, 536870912, 134217728, 10000)
 }
 
 funksjon tar_les(sti: tekst) -> ordbok_tekst {

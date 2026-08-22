@@ -1,0 +1,184 @@
+// Postbasert NCB-format for store bundle. Metadata og kvar funksjon er ei
+// sjølvstendig JSON-linje, slik at serialisering og parsing ikkje treng ein
+// ekstra kopi av heile NCB-teksten.
+
+bruk std.runtime_filesystem som fs
+
+funksjon versjon() -> tekst { returner "norscode-ncb-stream-v1" }
+funksjon magic() -> tekst { returner "NORSCODE_NCB_STREAM_V1" }
+
+funksjon sorter_tekst(verdiar: liste_tekst) -> liste_tekst {
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        la j: heiltall = i + 1
+        mens j < lengde(verdiar) {
+            hvis verdiar[j] < verdiar[i] {
+                la tmp = verdiar[i]
+                verdiar[i] = verdiar[j]
+                verdiar[j] = tmp
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner verdiar
+}
+
+funksjon skriv_alt(h, data: tekst) -> heiltall {
+    la offset: heiltall = 0
+    mens offset < lengde(data) {
+        la svar = fs.native_skriv(h, builtin.slice(data, offset, lengde(data)))
+        hvis svar["status"] != "ok" { kast "NCB-stream: skriving feila" }
+        la skreve = heltall_fra_tekst(tekst(svar["value"]))
+        hvis skreve <= 0 { kast "NCB-stream: nullskriving" }
+        offset = offset + skreve
+    }
+    returner offset
+}
+
+funksjon skriv_fil(sti: tekst, ncb) -> ordbok_tekst {
+    la delar = fs.native_sti_rot_relativ(sti)
+    la root = tekst(delar["root"])
+    la relativ = tekst(delar["relative"])
+    la h = fs.opne_native(root, relativ, "write")
+    hvis h["status"] != "open" { kast "NCB-stream: kan ikkje opne utfil" }
+    la bytes: heiltall = 0
+    la postar: heiltall = 0
+    prøv {
+        bytes = bytes + skriv_alt(h, magic() + "\n")
+        la metadata = {}
+        la felt = sorter_tekst(nøkler(ncb))
+        la i: heiltall = 0
+        mens i < lengde(felt) {
+            hvis felt[i] != "functions" { metadata[felt[i]] = ncb[felt[i]] }
+            i = i + 1
+        }
+        bytes = bytes + skriv_alt(h, "M" + builtin.json_skriv(metadata) + "\n")
+        postar = postar + 1
+        la functions = ncb["functions"]
+        la namn = sorter_tekst(nøkler(functions))
+        i = 0
+        mens i < lengde(namn) {
+            bytes = bytes + skriv_alt(h, "F" + namn[i] + "\t" + builtin.json_skriv(functions[namn[i]]) + "\n")
+            postar = postar + 1
+            i = i + 1
+        }
+        hvis fs.native_flush(h)["status"] != "ok" { kast "NCB-stream: flush feila" }
+        fs.native_lukk(h)
+        returner {"status": "ok", "abi": versjon(), "bytes": tekst_fra_heltall(bytes), "records": tekst_fra_heltall(postar)}
+    } fang (e) {
+        fs.native_lukk(h)
+        kast e
+    }
+    kast "NCB-stream: ukjend skrivefeil"
+}
+
+funksjon bruk_linje(state, linje: tekst) -> heiltall {
+    hvis linje == "" { returner 0 }
+    hvis state["line"] == "0" {
+        hvis linje != magic() { kast "NCB-stream: ugyldig magic" }
+        state["line"] = "1"
+        returner 0
+    }
+    la tag = builtin.slice(linje, 0, 1)
+    la payload = builtin.slice(linje, 1, lengde(linje))
+    hvis tag == "M" {
+        hvis state["metadata"] == "sann" { kast "NCB-stream: duplikat metadata" }
+        la metadata = builtin.json_parse_raw(payload)
+        la felt = nøkler(metadata)
+        la i: heiltall = 0
+        mens i < lengde(felt) {
+            state["ncb"][felt[i]] = metadata[felt[i]]
+            i = i + 1
+        }
+        state["metadata"] = "sann"
+    } ellers hvis tag == "F" {
+        la tab = builtin.index_of(payload, "\t")
+        hvis tab <= 0 { kast "NCB-stream: funksjonspost manglar skilje" }
+        la namn = builtin.slice(payload, 0, tab)
+        hvis namn == "" eller har_nokkel(state["functions"], namn) { kast "NCB-stream: ugyldig funksjonspost" }
+        la definition_json = builtin.slice(payload, tab + 1, lengde(payload))
+        hvis state["lazy"] == "sann" {
+            state["functions"][namn] = {"__ncb_lazy_json__": definition_json}
+        } ellers {
+            state["functions"][namn] = builtin.json_parse_raw(definition_json)
+        }
+        state["records"] = tekst_fra_heltall(heltall_fra_tekst(state["records"]) + 1)
+    } ellers {
+        kast "NCB-stream: ukjend post"
+    }
+    state["line"] = tekst_fra_heltall(heltall_fra_tekst(state["line"]) + 1)
+    hvis lengde(linje) > heltall_fra_tekst(state["max_record"]) {
+        state["max_record"] = tekst_fra_heltall(lengde(linje))
+    }
+    returner 0
+}
+
+funksjon les_fil_rapport_modus(sti: tekst, chunk_bytes: heiltall, lazy: boolsk) -> ordbok_tekst {
+    hvis chunk_bytes < 4096 { chunk_bytes = 4096 }
+    hvis chunk_bytes > 1048576 { chunk_bytes = 1048576 }
+    la delar = fs.native_sti_rot_relativ(sti)
+    la h = fs.opne_native(tekst(delar["root"]), tekst(delar["relative"]), "read")
+    hvis h["status"] != "open" { kast "NCB-stream: kan ikkje opne innfil" }
+    la functions = {}
+    la state = {"line": "0", "metadata": "usann", "records": "0", "max_record": "0", "ncb": {}, "functions": functions, "lazy": hvis lazy da "sann" ellers "usann"}
+    la rest = ""
+    la chunks: heiltall = 0
+    prøv {
+        la ferdig = usann
+        mens ikkje ferdig {
+            la svar = fs.native_les(h, chunk_bytes)
+            hvis svar["status"] != "ok" { kast "NCB-stream: lesing feila" }
+            hvis heltall_fra_tekst(tekst(svar["value"])) == 0 {
+                ferdig = sann
+            } ellers {
+                chunks = chunks + 1
+                la data = rest + svar["data"]
+                la linjer = builtin.split(data, "\n")
+                la i: heiltall = 0
+                mens i + 1 < lengde(linjer) {
+                    bruk_linje(state, linjer[i])
+                    i = i + 1
+                }
+                rest = linjer[lengde(linjer) - 1]
+            }
+        }
+        hvis rest != "" { bruk_linje(state, rest) }
+        fs.native_lukk(h)
+        hvis state["metadata"] != "sann" { kast "NCB-stream: metadata manglar" }
+        state["ncb"]["functions"] = state["functions"]
+        hvis ikkje har_nokkel(state["ncb"], "entry") eller ikkje har_nokkel(state["functions"], state["ncb"]["entry"]) {
+            kast "NCB-stream: entry manglar"
+        }
+        returner {"value": state["ncb"], "abi": versjon(), "chunks": tekst_fra_heltall(chunks), "records": state["records"], "max_record": state["max_record"], "chunk_bytes": tekst_fra_heltall(chunk_bytes)}
+    } fang (e) {
+        fs.native_lukk(h)
+        kast e
+    }
+    kast "NCB-stream: ukjend lesefeil"
+}
+
+funksjon les_fil_rapport(sti: tekst, chunk_bytes: heiltall) -> ordbok_tekst {
+    returner les_fil_rapport_modus(sti, chunk_bytes, usann)
+}
+
+funksjon les_fil_lazy_rapport(sti: tekst, chunk_bytes: heiltall) -> ordbok_tekst {
+    returner les_fil_rapport_modus(sti, chunk_bytes, sann)
+}
+
+funksjon les_fil(sti: tekst, chunk_bytes: heiltall) {
+    returner les_fil_rapport(sti, chunk_bytes)["value"]
+}
+
+funksjon les_fil_lazy(sti: tekst, chunk_bytes: heiltall) {
+    returner les_fil_lazy_rapport(sti, chunk_bytes)["value"]
+}
+
+funksjon er_stream_fil(sti: tekst) -> boolsk {
+    la delar = fs.native_sti_rot_relativ(sti)
+    la h = fs.opne_native(tekst(delar["root"]), tekst(delar["relative"]), "read")
+    hvis h["status"] != "open" { returner usann }
+    la svar = fs.native_les(h, 32)
+    fs.native_lukk(h)
+    returner svar["status"] == "ok" og builtin.starts_with(svar["data"], magic())
+}

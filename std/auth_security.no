@@ -1,0 +1,134 @@
+// Persistent innloggingsvern og eingongs reautentisering.
+// Tilstanden blir publisert atomisk under ei eksplisitt filesystem-rot.
+
+bruk std.krypto som krypto
+
+funksjon tom_state() -> ordbok {
+    returner {"schema": "norscode-auth-security-v1", "guards": {}, "reauth": {}, "mfa": {}, "mfa_challenges": {}}
+}
+
+funksjon sti(root: tekst, relativ: tekst) -> tekst {
+    hvis root == "" eller relativ == "" eller builtin.starts_with(relativ, "/") eller builtin.contains(relativ, "..") {
+        kast "AuthFeil: ugyldig sikkerheitstilstand-sti"
+    }
+    hvis builtin.ends_with(root, "/") { returner root + relativ }
+    returner root + "/" + relativ
+}
+
+funksjon last(root: tekst, relativ: tekst) -> ordbok {
+    la full = sti(root, relativ)
+    hvis ikkje builtin.fil_finnes(full) { returner tom_state() }
+    la parsed = builtin.json_parse_raw(builtin.fil_les(full))
+    hvis builtin.type(parsed) != "ordbok" eller parsed["schema"] != "norscode-auth-security-v1" {
+        kast "AuthFeil: ugyldig sikkerheitstilstand"
+    }
+    hvis ikkje har_nokkel(parsed, "guards") { parsed["guards"] = {} }
+    hvis ikkje har_nokkel(parsed, "reauth") { parsed["reauth"] = {} }
+    hvis ikkje har_nokkel(parsed, "mfa") { parsed["mfa"] = {} }
+    hvis ikkje har_nokkel(parsed, "mfa_challenges") { parsed["mfa_challenges"] = {} }
+    returner parsed
+}
+
+funksjon lagre_atomisk(root: tekst, relativ: tekst, state: ordbok) -> heiltall {
+    la tmp = relativ + ".tmp-" + builtin.random_hex(12)
+    builtin.fil_skriv(sti(root, tmp), builtin.json_stringify(state))
+    la resultat = builtin.filesystem_write_operation({
+        "abi": "norscode-native-filesystem-v1",
+        "operation": "file_replace",
+        "root": root,
+        "source": tmp,
+        "target": relativ
+    })
+    hvis resultat["status"] != "replaced" {
+        kast "AuthFeil: atomisk sikkerheitspublisering feila status=" + tekst(resultat["status"]) + " error=" + tekst(resultat["error"])
+    }
+    returner 1
+}
+
+funksjon guard_hash(identitet: tekst, klient: tekst) -> tekst {
+    returner krypto.sha256("norscode-auth-rate-v1|" + tekst_til_liten(builtin.trim(identitet)) + "|" + builtin.trim(klient))
+}
+
+funksjon innlogging_tillaten_ved(root: tekst, relativ: tekst, identitet: tekst, klient: tekst, no_ms: heiltall) -> boolsk {
+    la state = last(root, relativ)
+    la h = guard_hash(identitet, klient)
+    hvis ikkje har_nokkel(state["guards"], h) { returner sann }
+    returner no_ms >= heltall_fra_tekst(state["guards"][h]["sperra_til_ms"])
+}
+
+funksjon registrer_innloggingsfeil_ved(root: tekst, relativ: tekst, identitet: tekst, klient: tekst,
+                                      no_ms: heiltall, maks_feil: heiltall,
+                                      vindauge_ms: heiltall, sperre_ms: heiltall) -> heiltall {
+    hvis maks_feil < 1 eller vindauge_ms < 1 eller sperre_ms < 1 { kast "AuthFeil: ugyldig rate-limit-policy" }
+    la state = last(root, relativ)
+    la h = guard_hash(identitet, klient)
+    la start = no_ms
+    la feil: heiltall = 0
+    la sperra_til: heiltall = 0
+    hvis har_nokkel(state["guards"], h) {
+        la rad = state["guards"][h]
+        start = heltall_fra_tekst(rad["vindauge_start_ms"])
+        feil = heltall_fra_tekst(rad["feil_tal"])
+        sperra_til = heltall_fra_tekst(rad["sperra_til_ms"])
+        hvis no_ms >= sperra_til og no_ms - start >= vindauge_ms {
+            start = no_ms
+            feil = 0
+            sperra_til = 0
+        }
+    }
+    feil = feil + 1
+    hvis feil >= maks_feil { sperra_til = no_ms + sperre_ms }
+    state["guards"][h] = {
+        "vindauge_start_ms": tekst_fra_heltall(start),
+        "feil_tal": tekst_fra_heltall(feil),
+        "sperra_til_ms": tekst_fra_heltall(sperra_til),
+        "oppdatert_ms": tekst_fra_heltall(no_ms)
+    }
+    lagre_atomisk(root, relativ, state)
+    returner sperra_til
+}
+
+funksjon nullstill_innloggingsvern(root: tekst, relativ: tekst, identitet: tekst, klient: tekst) -> heiltall {
+    la state = last(root, relativ)
+    la h = guard_hash(identitet, klient)
+    hvis ikkje har_nokkel(state["guards"], h) { returner 0 }
+    fjern_nokkel(state["guards"], h)
+    returner lagre_atomisk(root, relativ, state)
+}
+
+funksjon utsted_reautentisering_ved(root: tekst, relativ: tekst, session_token: tekst,
+                                   brukar_id: tekst, no_ms: heiltall, ttl_ms: heiltall) -> tekst {
+    hvis session_token == "" eller brukar_id == "" { returner "" }
+    hvis ttl_ms < 1000 eller ttl_ms > 900000 { kast "AuthFeil: reautentisering TTL utanfor 1s..15min" }
+    la state = last(root, relativ)
+    la token = krypto.token(32)
+    la token_hash = krypto.sha256("norscode-reauth-token-v1|" + token)
+    state["reauth"][token_hash] = {
+        "session_hash": krypto.sha256("norscode-reauth-session-v1|" + session_token),
+        "brukar_id": brukar_id,
+        "utlop_ms": tekst_fra_heltall(no_ms + ttl_ms),
+        "brukt": "usann",
+        "oppretta_ms": tekst_fra_heltall(no_ms)
+    }
+    lagre_atomisk(root, relativ, state)
+    returner token
+}
+
+funksjon bruk_reautentisering_ved(root: tekst, relativ: tekst, session_token: tekst,
+                                 brukar_id: tekst, token: tekst, no_ms: heiltall) -> boolsk {
+    hvis token == "" eller session_token == "" eller brukar_id == "" { returner usann }
+    la state = last(root, relativ)
+    la token_hash = krypto.sha256("norscode-reauth-token-v1|" + token)
+    hvis ikkje har_nokkel(state["reauth"], token_hash) { returner usann }
+    la rad = state["reauth"][token_hash]
+    la venta_session = krypto.sha256("norscode-reauth-session-v1|" + session_token)
+    la gyldig = krypto.konstant_lik(rad["session_hash"], venta_session) og
+        // Legacy smart JSON kan materialisere ein numerisk tekst-ID som
+        // heiltal ved reload. Normaliser eksplisitt ved persistensgrensa.
+        krypto.konstant_lik(tekst(rad["brukar_id"]), brukar_id) og rad["brukt"] == "usann" og
+        no_ms <= heltall_fra_tekst(rad["utlop_ms"])
+    // Ein funnen billett blir alltid brend, også ved feil session/brukar.
+    rad["brukt"] = "sann"
+    lagre_atomisk(root, relativ, state)
+    returner gyldig
+}

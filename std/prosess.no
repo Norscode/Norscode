@@ -1,9 +1,9 @@
 # prosess.no — Subprosess og OS-kommandoar
 # Python: subprocess, os.system, shlex
 #
-# Prosesskøyring krev builtin.exec_prosess; PID, miljø og katalogbytte brukar
-# direkte runtime-bindingar når dei finst.
-# Alle funksjonar degraderer grasiøst utan nødvendig builtin-støtte.
+# Prosesskøyring går gjennom `norscode-process-spawn-v1` med eksplisitt
+# executable/argv. Shellmetateikn blir avviste, og katalog/miljø/PID brukar
+# direkte, versjonerte runtime-bindingar.
 #
 # Prosess-resultat: liste representert som liste_tekst
 #   [returkode_tekst, stdout, stderr]
@@ -26,10 +26,6 @@ funksjon _nytt_resultat(kode: heltall, ut: tekst, feil: tekst) -> liste_tekst {
     legg_til(r, ut)
     legg_til(r, feil)
     returner r
-}
-
-funksjon _shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
 }
 
 funksjon _tekst_inneheld(s: tekst, del: tekst) -> bool {
@@ -169,8 +165,8 @@ funksjon tillat_alle(policy: ordbok_tekst) -> bool {
 }
 
 funksjon tillat_shell(policy: ordbok_tekst) -> bool {
-    policy["allow_shell"] = "sann"
-    returner sann
+    policy["allow_shell"] = "av"
+    returner usann
 }
 
 funksjon aktiver_køyring(policy: ordbok_tekst) -> bool {
@@ -193,7 +189,7 @@ funksjon set_maks_output(policy: ordbok_tekst, bytes: heltall) -> bool {
 funksjon policy_tillater(policy: ordbok_tekst, kommando: tekst) -> bool {
     hvis ikkje _trygg_kommando_tekst(kommando) { returner usann }
     la shell = _inneheld(kommando, ";") eller _inneheld(kommando, "|") eller _inneheld(kommando, "&") eller _inneheld(kommando, ">") eller _inneheld(kommando, "<") eller _inneheld(kommando, "$") eller _inneheld(kommando, "`")
-    hvis shell og policy["allow_shell"] != "sann" { returner usann }
+    hvis shell { returner usann }
     hvis policy["allow_all"] == "sann" { returner sann }
     la namn = _kommando_namn(kommando)
     hvis namn == "" { returner usann }
@@ -211,7 +207,7 @@ funksjon start_plan(kommando: tekst) -> ordbok_tekst {
     p["capture_stdout"] = "sann"
     p["capture_stderr"] = "sann"
     p["status"] = "planlagt"
-    p["execution_mode"] = "shell"
+    p["execution_mode"] = "argv_text"
     returner p
 }
 
@@ -232,6 +228,7 @@ funksjon start_argv_plan(executable: tekst, args: liste_tekst) -> ordbok_tekst {
     p["max_memory_bytes"] = "536870912"
     p["max_open_files"] = "64"
     p["inherit_env"] = "1"
+    p["environment"] = {}
     returner p
 }
 
@@ -275,6 +272,11 @@ funksjon med_stdin(plan: ordbok_tekst, stdin: tekst) -> ordbok_tekst {
     returner plan
 }
 
+funksjon med_miljø(plan: ordbok_tekst, miljø: ordbok_tekst) -> ordbok_tekst {
+    plan["environment"] = miljø
+    returner plan
+}
+
 funksjon med_timeout(plan: ordbok_tekst, sekund: heltall) -> ordbok_tekst {
     hvis sekund > 0 { plan["timeout_seconds"] = tekst_fra_heltall(sekund) }
     returner plan
@@ -315,9 +317,6 @@ funksjon start_trygt(policy: ordbok_tekst, plan: ordbok_tekst) -> liste_tekst {
     hvis tekst(policy["dry_run_default"]) == "sann" {
         returner _nytt_resultat(0, "dry-run: " + plan["kommando"], "")
     }
-    hvis policy["allow_shell"] != "sann" {
-        returner _nytt_resultat(-1, "", "shell-backend krev eksplisitt allow_shell")
-    }
     returner køyr(plan["kommando"])
 }
 
@@ -332,6 +331,7 @@ funksjon start_argv_trygt(policy: ordbok_tekst, plan: ordbok_tekst) -> liste_tek
         heltall_fra_tekst(plan["max_output_bytes"])
     )
     process_abi.sett_sandbox(req, plan["sandbox"], heltall_fra_tekst(plan["max_memory_bytes"]), heltall_fra_tekst(plan["max_open_files"]), plan["inherit_env"] == "1")
+    process_abi.sett_environment(req, plan["environment"])
     hvis ikkje process_abi.gyldig_request(req) { returner _nytt_resultat(-1, "", "ugyldig spawn_argv request") }
     prøv {
         la svar = builtin.process_spawn_argv(req)
@@ -352,6 +352,7 @@ funksjon start_argv_async_trygt(policy: ordbok_tekst, plan: ordbok_tekst) -> ord
         heltall_fra_tekst(plan["max_output_bytes"])
     )
     process_abi.sett_sandbox(req, plan["sandbox"], heltall_fra_tekst(plan["max_memory_bytes"]), heltall_fra_tekst(plan["max_open_files"]), plan["inherit_env"] == "1")
+    process_abi.sett_environment(req, plan["environment"])
     returner builtin.process_operation(req)
 }
 
@@ -388,51 +389,28 @@ funksjon drep_plan(pid: heltall) -> ordbok_tekst {
     returner p
 }
 
-# ─── Levande prosesshandtak (POSIX) ──────────────────────────────────────────
-
-funksjon _trygg_spool_rot(sti: tekst) -> bool {
-    hvis sti == "" eller tekst_starter_med(sti, "/") { returner usann }
-    hvis _inneheld(sti, "..") eller _inneheld(sti, "'") { returner usann }
-    hvis _inneheld(sti, "\n") eller _inneheld(sti, "\r") { returner usann }
-    returner sann
-}
-
-funksjon _les_fil_trygt(sti: tekst) -> tekst {
-    prøv {
-        hvis ikkje builtin.fil_finnes(sti) { returner "" }
-        returner builtin.fil_les(sti)
-    } fang (e) { returner "" }
-    returner ""
-}
-
-funksjon _skriv_fil_trygt(sti: tekst, innhald: tekst) -> bool {
-    prøv { builtin.fil_skriv(sti, innhald)  returner sann } fang (e) { returner usann }
-    returner usann
-}
+# ─── Levande prosesshandtak gjennom native ABI ───────────────────────────────
 
 funksjon _prosess_oppdater(handle: ordbok_tekst) -> tekst {
-    hvis handle["status"] == "ferdig" eller handle["status"] == "signal" eller handle["status"] == "feil" eller handle["status"] == "timeout" eller handle["status"] == "kansellert" {
+    hvis handle["status"] == "ferdig" eller handle["status"] == "signal" eller
+       handle["status"] == "timeout" eller handle["status"] == "feil" eller
+       handle["status"] == "kansellert" {
         returner handle["status"]
     }
-    la kode_raw = builtin.trim(_les_fil_trygt(handle["exit_path"]))
-    hvis kode_raw != "" {
-        handle["exit_code"] = kode_raw
-        handle["status"] = "ferdig"
-        returner "ferdig"
+    la svar = native_async_poll(handle)
+    hvis finnes_nøkkel(svar, "status") { handle["status"] = tekst(svar["status"]) }
+    hvis finnes_nøkkel(svar, "exit_code") { handle["exit_code"] = tekst(svar["exit_code"]) }
+    hvis finnes_nøkkel(svar, "pid") { handle["pid"] = tekst(svar["pid"]) }
+    hvis finnes_nøkkel(svar, "error") { handle["feil"] = tekst(svar["error"]) }
+    hvis handle["status"] == "ventende" {
+        handle["status"] = "kjorer"
     }
-    # Exit-fila vert skriven av wrapperen etter at barnet er reapa. PID-probing
-    # kan rase mot denne skrivinga og er derfor ikkje autoritativ.
-    handle["status"] = "kjorer"
-    returner "kjorer"
+    returner handle["status"]
 }
 
 funksjon start_async_trygt(policy: ordbok_tekst, plan: ordbok_tekst,
                            spool_rot: tekst) -> ordbok_tekst {
-    la h: ordbok_tekst = {}
-    h["status"] = "feil"
-    h["pid"] = "-1"
-    h["exit_code"] = "-1"
-    h["feil"] = ""
+    la h: ordbok_tekst = {"status": "feil", "pid": "-1", "exit_code": "-1", "feil": ""}
     hvis ikkje valider_plan(policy, plan) {
         h["feil"] = "prosess avvist av policy"
         returner h
@@ -442,109 +420,91 @@ funksjon start_async_trygt(policy: ordbok_tekst, plan: ordbok_tekst,
         h["feil"] = "dry-run er aktiv"
         returner h
     }
-    hvis policy["allow_shell"] != "sann" {
-        h["feil"] = "async shell-backend krev eksplisitt allow_shell"
+    hvis _har_shell_metategn(plan["kommando"]) {
+        h["feil"] = "async argv-tekst avviser shellmetateikn"
         returner h
     }
-    hvis ikkje _trygg_spool_rot(spool_rot) {
-        h["feil"] = "ugyldig spool-rot"
+    la delar = split_args(plan["kommando"])
+    hvis lengde(delar) == 0 {
+        h["feil"] = "tom async-kommando"
         returner h
     }
-
-    la id = builtin.random_hex(12)
-    la dir = spool_rot + "/process-" + id
-    la mkdir_res = køyr("mkdir -p '" + dir + "'")
-    hvis ikkje er_ok(mkdir_res) {
-        h["feil"] = "kunne ikkje opprette prosess-spool: " + stderr(mkdir_res)
+    la executable = _finn_kjorbar(delar[0])
+    hvis executable == "" {
+        h["feil"] = "kommando ikkje funnen: " + delar[0]
         returner h
     }
-    la out_path = dir + "/stdout"
-    la err_path = dir + "/stderr"
-    la exit_path = dir + "/exit"
-    la stdin_path = dir + "/stdin"
-    hvis ikkje _skriv_fil_trygt(out_path, "") eller ikkje _skriv_fil_trygt(err_path, "") {
-        h["feil"] = "kunne ikkje initialisere prosess-spool"
-        returner h
+    la args: liste_tekst = []
+    la i: heiltall = 1
+    mens i < lengde(delar) {
+        legg_til(args, delar[i])
+        i = i + 1
     }
-    _skriv_fil_trygt(stdin_path, plan["stdin"])
-
-    la body = "(" + plan["kommando"] + ")"
-    hvis plan["cwd"] != "" {
-        hvis ikkje _trygg_spool_rot(plan["cwd"]) {
-            h["feil"] = "ugyldig arbeidskatalog"
-            returner h
-        }
-        body = "cd '" + plan["cwd"] + "' && " + body
+    la argv_plan = start_argv_plan(executable, args)
+    argv_plan["cwd"] = plan["cwd"]
+    argv_plan["stdin"] = plan["stdin"]
+    argv_plan["timeout_seconds"] = plan["timeout_seconds"]
+    argv_plan["max_output_bytes"] = plan["max_output_bytes"]
+    la native = start_argv_async_trygt(policy, argv_plan)
+    hvis finnes_nøkkel(native, "error") { native["feil"] = tekst(native["error"]) }
+    ellers { native["feil"] = "" }
+    hvis ikkje finnes_nøkkel(native, "exit_code") { native["exit_code"] = "-1" }
+    hvis ikkje finnes_nøkkel(native, "pid") { native["pid"] = "-1" }
+    hvis ikkje finnes_nøkkel(native, "status") {
+        native["status"] = "feil"
+        native["feil"] = "ugyldig native async-resultat"
     }
-    la start_cmd = "(" + body + " < '" + stdin_path + "'; code=$?; printf '%s' \"$code\" > '" + exit_path + "') > '" + out_path + "' 2> '" + err_path + "' & echo $!"
-    la res = køyr(start_cmd)
-    hvis ikkje er_ok(res) {
-        h["feil"] = "async start feilet: " + stderr(res)
-        returner h
-    }
-    la child_pid = builtin.trim(stdout(res))
-    hvis child_pid == "" {
-        h["feil"] = "async start manglar pid"
-        returner h
-    }
-    h["id"] = id
-    h["pid"] = child_pid
-    h["status"] = "kjorer"
-    h["exit_code"] = ""
-    h["stdout_path"] = out_path
-    h["stderr_path"] = err_path
-    h["exit_path"] = exit_path
-    h["stdin_path"] = stdin_path
-    h["stdout_offset"] = "0"
-    h["stderr_offset"] = "0"
-    h["max_output_bytes"] = plan["max_output_bytes"]
-    h["start_ms"] = tekst_fra_heltall(builtin.now_ms())
-    h["timeout_ms"] = tekst_fra_heltall(heltall_fra_tekst(plan["timeout_seconds"]) * 1000)
-    returner h
+    native["timeout_ms"] = tekst_fra_heltall(heltall_fra_tekst(plan["timeout_seconds"]) * 1000)
+    native["stdout_buffer"] = ""
+    native["stderr_buffer"] = ""
+    returner native
 }
 
 funksjon async_status(handle: ordbok_tekst) -> tekst { returner _prosess_oppdater(handle) }
 funksjon async_pid(handle: ordbok_tekst) -> heltall { returner heltall_fra_tekst(handle["pid"]) }
 funksjon async_exit_code(handle: ordbok_tekst) -> heltall {
     _prosess_oppdater(handle)
-    hvis handle["exit_code"] == "" { returner -1 }
+    hvis handle["exit_code"] == "" eller handle["exit_code"] == "-1" { returner -1 }
     returner heltall_fra_tekst(handle["exit_code"])
 }
 
-funksjon _les_chunk(handle: ordbok_tekst, stream: tekst) -> tekst {
-    la sti = handle[stream + "_path"]
-    la raw = _les_fil_trygt(sti)
-    la offset_key = stream + "_offset"
-    la offset = heltall_fra_tekst(handle[offset_key])
-    hvis offset < 0 eller offset > lengde(raw) { offset = 0 }
-    la maks = heltall_fra_tekst(handle["max_output_bytes"])
-    la slutt = lengde(raw)
-    hvis slutt - offset > maks { slutt = offset + maks }
-    la chunk = builtin.slice(raw, offset, slutt)
-    handle[offset_key] = tekst_fra_heltall(slutt)
-    returner chunk
+funksjon _async_les_stream(handle: ordbok_tekst, stream: tekst) -> tekst {
+    la nøkkel = stream + "_buffer"
+    hvis ikkje finnes_nøkkel(handle, nøkkel) { handle[nøkkel] = "" }
+    hvis handle[nøkkel] != "" {
+        la bufret = handle[nøkkel]
+        handle[nøkkel] = ""
+        returner bufret
+    }
+    la svar = native_async_les(handle)
+    hvis finnes_nøkkel(svar, "stdout") og stream != "stdout" {
+        handle["stdout_buffer"] = tekst(svar["stdout"])
+    }
+    hvis finnes_nøkkel(svar, "stderr") og stream != "stderr" {
+        handle["stderr_buffer"] = tekst(svar["stderr"])
+    }
+    hvis finnes_nøkkel(svar, stream) { returner tekst(svar[stream]) }
+    returner ""
 }
 
-funksjon async_les_stdout(handle: ordbok_tekst) -> tekst { returner _les_chunk(handle, "stdout") }
-funksjon async_les_stderr(handle: ordbok_tekst) -> tekst { returner _les_chunk(handle, "stderr") }
+funksjon async_les_stdout(handle: ordbok_tekst) -> tekst { returner _async_les_stream(handle, "stdout") }
+funksjon async_les_stderr(handle: ordbok_tekst) -> tekst { returner _async_les_stream(handle, "stderr") }
 
 funksjon async_signal(handle: ordbok_tekst, signal: heltall) -> bool {
     hvis signal != 1 og signal != 2 og signal != 9 og signal != 15 { returner usann }
     hvis _prosess_oppdater(handle) != "kjorer" { returner usann }
-    la sig = tekst_fra_heltall(signal)
-    # Terminer direkte barn før wrapperen, elles kan barnet bli foreldreløst.
-    la res = køyr("pkill -" + sig + " -P " + handle["pid"] + " 2>/dev/null; kill -" + sig + " " + handle["pid"])
-    hvis ikkje er_ok(res) { returner usann }
-    handle["status"] = "signal"
-    handle["exit_code"] = tekst_fra_heltall(128 + signal)
-    returner sann
+    la svar = native_async_signal(handle, signal)
+    hvis finnes_nøkkel(svar, "status") { handle["status"] = tekst(svar["status"]) }
+    hvis finnes_nøkkel(svar, "exit_code") { handle["exit_code"] = tekst(svar["exit_code"]) }
+    hvis handle["status"] == "feil" { returner usann }
+    la ferdig = native_async_vent(handle, 5000)
+    hvis finnes_nøkkel(ferdig, "status") { handle["status"] = tekst(ferdig["status"]) }
+    hvis finnes_nøkkel(ferdig, "exit_code") { handle["exit_code"] = tekst(ferdig["exit_code"]) }
+    returner handle["status"] == "signal"
 }
 
 funksjon async_timeout_sjekk(handle: ordbok_tekst) -> bool {
-    hvis _prosess_oppdater(handle) != "kjorer" { returner usann }
-    la brukt = builtin.now_ms() - heltall_fra_tekst(handle["start_ms"])
-    hvis brukt < heltall_fra_tekst(handle["timeout_ms"]) { returner usann }
-    returner async_signal(handle, 15)
+    returner _prosess_oppdater(handle) == "timeout"
 }
 
 funksjon start_async_med_future(scheduler: ordbok_tekst, policy: ordbok_tekst,
@@ -569,30 +529,15 @@ funksjon _async_cleanup(args: ordbok_tekst) -> boolsk {
     la handle = args["handle"]
     la reason = args["cleanup_reason"]
     hvis _prosess_oppdater(handle) != "kjorer" { returner sann }
-    # Cleanup is best-effort: the wrapper may have exited between the status
-    # probe and kill. The scheduler timeout/cancel event is still authoritative.
-    async_signal(handle, 15)
-    hvis reason == "timeout" {
-        handle["status"] = "timeout"
-        handle["exit_code"] = "143"
-    }
-    ellers {
-        handle["status"] = "kansellert"
-        handle["exit_code"] = "143"
-    }
+    hvis ikkje async_signal(handle, 15) { returner usann }
+    hvis reason == "timeout" { handle["status"] = "timeout" }
+    ellers { handle["status"] = "kansellert" }
     returner sann
 }
 
 funksjon async_kanseller_future(scheduler: ordbok_tekst, handle: ordbok_tekst) -> boolsk {
     hvis handle["future_id"] == "" { returner usann }
-    la avvist = sched.future_kanseller(scheduler, handle["future_id"])
-    hvis avvist og handle["status"] == "kjorer" {
-        // The scheduler owns cancellation even if the cleanup signal races
-        // with the child exit; keep the public process handle authoritative.
-        handle["status"] = "kansellert"
-        handle["exit_code"] = "143"
-    }
-    returner avvist
+    returner sched.future_kanseller(scheduler, handle["future_id"])
 }
 
 funksjon _async_poll_svar(args: ordbok_tekst) -> ordbok_tekst {
@@ -602,11 +547,12 @@ funksjon _async_poll_svar(args: ordbok_tekst) -> ordbok_tekst {
     hvis st == "kjorer" { returner svar }
     hvis st == "ferdig" {
         la kode = async_exit_code(handle)
+        la output = native_async_les(handle)
         la resultat: ordbok_tekst = {}
         resultat["pid"] = handle["pid"]
         resultat["exit_code"] = tekst_fra_heltall(kode)
-        resultat["stdout"] = _les_fil_trygt(handle["stdout_path"])
-        resultat["stderr"] = _les_fil_trygt(handle["stderr_path"])
+        resultat["stdout"] = tekst(output["stdout"])
+        resultat["stderr"] = tekst(output["stderr"])
         hvis kode == 0 {
             svar["status"] = "ferdig"
             svar["resultat"] = builtin.json_stringify(resultat)
@@ -640,20 +586,38 @@ funksjon produksjonsstatus() -> ordbok_tekst {
 
 # ─── Køyr kommando ────────────────────────────────────────────────────────────
 
-# Køyr ein shell-kommando, returner [kode, stdout, stderr]
+# Køyr ei enkel kommandolinje som strukturert executable/argv.
 funksjon køyr(kommando: tekst) -> liste_tekst {
+    hvis _har_shell_metategn(kommando) {
+        returner _nytt_resultat(126, "", "shellmetateikn er ikkje tillatne")
+    }
+    la delar = split_args(kommando)
+    hvis lengde(delar) == 0 { returner _nytt_resultat(126, "", "tom kommando") }
+    la executable = _finn_kjorbar(delar[0])
+    hvis executable == "" { returner _nytt_resultat(127, "", "kommando ikkje funnen: " + delar[0]) }
+    la args: liste_tekst = []
+    la i: heltall = 1
+    mens i < lengde(delar) {
+        legg_til(args, delar[i])
+        i = i + 1
+    }
+    la req = process_abi.request(executable, args, "", "", 30000, 1048576)
     prøv {
-        la res = builtin.exec_prosess(kommando)
-        returner res
+        la svar = builtin.process_spawn_argv(req)
+        returner _nytt_resultat(
+            heltall_fra_tekst(tekst(svar["exit_code"])),
+            tekst(svar["stdout"]),
+            tekst(svar["stderr"]) + tekst(svar["error"])
+        )
     } fang (e) {
-        returner _nytt_resultat(-1, "", "ikkje støtta: " + e)
+        returner _nytt_resultat(-1, "", "native spawn_argv-backend manglar: " + tekst(e))
     }
     returner _nytt_resultat(-1, "", "ukjent feil")
 }
 
 funksjon køyr_med_policy(kommando: tekst, policy: ordbok_tekst) -> liste_tekst {
     hvis ikkje policy_tillater(policy, kommando) {
-        returner _nytt_resultat(126, "", "exec_prosess blokkert av policy")
+        returner _nytt_resultat(126, "", "strukturert prosess blokkert av policy")
     }
     returner køyr(kommando)
 }
@@ -666,14 +630,11 @@ funksjon køyr_og_hent(kommando: tekst) -> tekst {
 
 # Sjekk om ein kommando eksisterer i PATH
 funksjon kommando_finnes(namn: tekst) -> bool {
-    prøv {
-        la res = builtin.exec_prosess("which " + _shell(namn))
-        la kode: heltall = builtin.heltall_fra_tekst(res[0])
-        returner kode == 0
-    } fang (e) {
-        returner usann
-    }
-    returner usann
+    returner _finn_kjorbar(namn) != ""
+}
+
+funksjon finn_kjorbar(namn: tekst) -> tekst {
+    returner _finn_kjorbar(namn)
 }
 
 # ─── Miljøvariablar ───────────────────────────────────────────────────────────
@@ -721,7 +682,7 @@ funksjon ppid() -> heltall {
 }
 
 funksjon arbeids_katalog() -> tekst {
-    prøv { returner builtin.exec_prosess("pwd")[1] } fang (e) { returner "." }
+    prøv { returner tekst(builtin.system_info()["cwd"]) } fang (e) { returner "." }
     returner "."
 }
 
@@ -738,23 +699,7 @@ funksjon byt_katalog(sti: tekst) -> bool {
 # ─── OS-informasjon ───────────────────────────────────────────────────────────
 
 funksjon os_namn() -> tekst {
-    prøv {
-        la res = builtin.exec_prosess("uname -s")
-        la namn: tekst = res[1]
-        la teikn = builtin.split(namn, "")
-        # Fjern newline på slutten
-        la n: heltall = lengde(teikn)
-        la ut: tekst = ""
-        la i: heltall = 0
-        mens (i < n) {
-            la k: heltall = builtin.char_code(teikn[i])
-            hvis (k != 10 og k != 13) { ut = ut + teikn[i] }
-            i = i + 1
-        }
-        returner ut
-    } fang (e) {
-        returner "ukjent"
-    }
+    prøv { returner tekst(builtin.system_info()["system"]) } fang (e) { returner "ukjent" }
     returner "ukjent"
 }
 
@@ -765,13 +710,7 @@ funksjon er_macos() -> bool  {
     returner os_namn() == "Darwin"
 }
 funksjon er_windows() -> bool {
-    prøv {
-        la res = builtin.exec_prosess("ver")
-        returner er_ok(res)
-    } fang (e) {
-        returner usann
-    }
-    returner usann
+    returner os_namn() == "Windows"
 }
 
 # ─── Argument-splitting (shlex-liknande) ──────────────────────────────────────
@@ -807,14 +746,25 @@ funksjon split_args(linje: tekst) -> liste_tekst {
     returner delar
 }
 
+funksjon _finn_kjorbar(namn: tekst) -> tekst {
+    hvis namn == "" eller _har_shell_metategn(namn) { returner "" }
+    prøv {
+        la svar = builtin.system_operation({
+            "abi": "norscode-system-v1",
+            "operation": "resolve_executable",
+            "name": namn
+        })
+        hvis svar["status"] == "ok" { returner tekst(svar["path"]) }
+    } fang (e) {
+        # Eldre stage0: eksplisitte stiar kan framleis sendast fail-closed til execv.
+        hvis _inneheld(namn, "/") eller _inneheld(namn, "\\") { returner namn }
+    }
+    returner ""
+}
+
 # ─── Støttesjekk ──────────────────────────────────────────────────────────────
 
 funksjon er_støtta() -> bool {
-    prøv {
-        la res = builtin.exec_prosess("true")
-        returner er_ok(res)
-    } fang (e) {
-        returner usann
-    }
+    prøv { returner builtin.system_info()["status"] == "ok" } fang (e) { returner usann }
     returner usann
 }

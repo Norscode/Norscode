@@ -1,74 +1,139 @@
-// tools/test_kernel_boot.no — QEMU-boottest for Norscode OS-kernel
+// tools/test_kernel_boot.no — shellfri QEMU-boottest for Norscode OS-kernel
 
-funksjon linje(melding: tekst) -> heiltall {
-    skriv(melding + "\n")
-    returner 0
-}
+bruk std.prosess som system_prosess
+bruk std.socket som sok
+bruk tools.process_runner som prosess
+
+funksjon linje(melding: tekst) -> heiltall { skriv(melding + "\n") returner 0 }
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
-}
-
-funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
-funksjon trim(t: tekst) -> tekst {
-    returner builtin.trim(t)
-}
-
 funksjon finn_qemu() -> tekst {
-    hvis ok(kommando("command -v qemu-system-x86_64 >/dev/null 2>&1")) { returner "qemu-system-x86_64" }
-    hvis ok(kommando("command -v qemu-system-i386 >/dev/null 2>&1")) { returner "qemu-system-i386" }
-    returner ""
+    la qemu = system_prosess.finn_kjorbar("qemu-system-x86_64")
+    hvis qemu != "" { returner qemu }
+    returner system_prosess.finn_kjorbar("qemu-system-i386")
+}
+
+funksjon bygg_kernel(root: tekst, kernel: tekst) -> boolsk {
+    la miljø = {
+        "NC_OUTPUT": kernel,
+        "NORSCODE_ROOT": root,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la resultat = prosess.køyr(root + "/bin/nc",
+        ["run", root + "/selfhost/native_execution/kernel_builder.no"],
+        root, miljø, 180000)
+    hvis prosess.ok(resultat) { returner sann }
+    prosess.skriv_resultat(resultat)
+    returner usann
+}
+
+funksjon start_qemu(qemu: tekst, root: tekst, kernel: tekst, port: heiltall) -> ordbok_tekst {
+    la policy = system_prosess.ny_policy("kernel-qemu-monitor")
+    system_prosess.tillat_alle(policy)
+    system_prosess.aktiver_køyring(policy)
+    la monitor = "tcp:127.0.0.1:" + tekst_fra_heiltall(port) + ",server,nowait"
+    la plan = system_prosess.start_argv_plan(qemu,
+        ["-kernel", kernel, "-display", "none", "-S", "-monitor", monitor])
+    system_prosess.med_cwd(plan, root)
+    system_prosess.med_timeout(plan, 30)
+    system_prosess.med_maks_output(plan, 16777216)
+    system_prosess.med_sandbox(plan, "none", 2147483648, 256, sann)
+    returner system_prosess.start_argv_async_trygt(policy, plan)
+}
+
+funksjon stans_qemu(handle: ordbok_tekst) -> heiltall {
+    hvis finnes_nøkkel(handle, "handle") {
+        system_prosess.native_async_signal(handle, 15)
+        system_prosess.native_async_vent(handle, 5000)
+        system_prosess.native_async_lukk(handle)
+    }
+    returner 0
+}
+
+funksjon koble_monitor(handle: ordbok_tekst, port: heiltall) -> ordbok_tekst {
+    la forsøk = 0
+    mens forsøk < 40 {
+        la status = system_prosess.native_async_poll(handle)
+        hvis tekst(status["status"]) != "kjorer" { returner {} }
+        la s = sok.native_tilkoble("127.0.0.1", port)
+        hvis tekst(s["status"]) == "connected" { returner s }
+        hvis tekst(s["status"]) == "connecting" {
+            la klar = sok.native_poll_vent(s, 2, 100)
+            hvis tekst(klar["status"]) == "klar" { returner s }
+        }
+        hvis finnes_nøkkel(s, "handle") { sok.native_lukk(s) }
+        system_prosess.native_async_vent(handle, 100)
+        forsøk = forsøk + 1
+    }
+    returner {}
+}
+
+funksjon les_monitor(monitor: ordbok_tekst, timeout_ms: heiltall) -> tekst {
+    la klar = sok.native_poll_vent(monitor, 1, timeout_ms)
+    hvis tekst(klar["status"]) != "klar" { returner "" }
+    la data = sok.native_les(monitor, 65536)
+    hvis tekst(data["status"]) != "ok" { returner "" }
+    returner tekst(data["data"])
+}
+
+funksjon qemu_monitor_vga(qemu: tekst, root: tekst, kernel: tekst) -> tekst {
+    la port = 18791
+    la handle = start_qemu(qemu, root, kernel, port)
+    hvis tekst(handle["status"]) != "kjorer" { returner "" }
+    la monitor = koble_monitor(handle, port)
+    hvis ikkje finnes_nøkkel(monitor, "handle") {
+        la qemu_status = system_prosess.native_async_poll(handle)
+        la qemu_output = system_prosess.native_async_les(handle)
+        linje("[FEIL] QEMU-monitor ikkje tilgjengeleg: " + tekst(qemu_status["status"]))
+        hvis tekst(qemu_output["stderr"]) != "" { skriv(tekst(qemu_output["stderr"])) }
+        stans_qemu(handle)
+        returner ""
+    }
+    la velkomst = les_monitor(monitor, 1000)
+    hvis tekst(sok.native_skriv(monitor, "cont\n")["status"]) != "ok" {
+        sok.native_lukk(monitor)
+        stans_qemu(handle)
+        returner ""
+    }
+    // Vent gjennom det levande prosesshandtaket. `std.tid.sov` er ikkje
+    // tilgjengeleg i alle committed stage0-kandidatar.
+    system_prosess.native_async_vent(handle, 3000)
+    hvis tekst(sok.native_skriv(monitor, "xp/32xb 0xb8000\n")["status"]) != "ok" {
+        sok.native_lukk(monitor)
+        stans_qemu(handle)
+        returner ""
+    }
+    la vga = velkomst + les_monitor(monitor, 3000)
+    sok.native_skriv(monitor, "quit\n")
+    sok.native_lukk(monitor)
+    system_prosess.native_async_vent(handle, 10000)
+    la output = system_prosess.native_async_les(handle)
+    system_prosess.native_async_lukk(handle)
+    hvis finnes_nøkkel(output, "stderr") og tekst(output["stderr"]) != "" { skriv(tekst(output["stderr"])) }
+    returner vga
 }
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
-
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
     la qemu = finn_qemu()
-    hvis qemu == "" {
-        linje("HOPP: ingen QEMU funnen")
-        returner 0
-    }
+    hvis qemu == "" { linje("HOPP: ingen QEMU funnen") returner 0 }
     linje("Brukar: " + qemu)
 
     la kernel = root + "/build/norscode_kernel.elf"
-    la build = kommando("NC_OUTPUT=" + shell(kernel) + " " + shell(root + "/bin/nc") + " run " + shell(root + "/selfhost/native_execution/kernel_builder.no") + " >/dev/null")
-    hvis ikkje ok(build) {
-        hvis res_felt(build, 1) != "" { skriv(res_felt(build, 1)) }
-        hvis res_felt(build, 2) != "" { skriv(res_felt(build, 2)) }
-        returner 1
-    }
-
-    la qcmd = "(printf 'cont\\n'; sleep 3; printf 'xp/32xb 0xb8000\\n'; sleep 0.3; printf 'quit\\n') | " +
-        qemu + " -kernel " + shell(kernel) + " -display none -S -monitor stdio 2>&1"
-    la vga = res_felt(kommando(qcmd), 1)
+    hvis ikkje bygg_kernel(root, kernel) { returner 1 }
+    la vga = qemu_monitor_vga(qemu, root, kernel)
     hvis builtin.index_of(vga, "0x4e 0x0e 0x6f 0x0e 0x72 0x0e") >= 0 {
         linje("✓ Kernel v1: 'Nor...' i VGA (Multiboot1 OK)")
     } ellers {
         linje("✗ FEIL: kernel v1 VGA-innhald ikkje som forventa")
+        hvis vga != "" { skriv(vga) }
         returner 1
     }
     linje("✓ Norscode OS bootar korrekt")

@@ -1,0 +1,319 @@
+// Minimal L5b-bundler for ferdig materialiserte NCB-fragment.
+// Ingen parser eller kompilator blir lasta i denne prosessen.
+
+funksjon fremdrift(fase: tekst) -> heiltall {
+    la sti = miljo_hent("NORSCODE_BUNDLE_PROGRESS_FILE")
+    hvis sti != "" { prøv { fil_skriv(sti, fase + "\n") } fang (e) {} }
+    returner 0
+}
+
+funksjon objekt_slutt(raw: tekst, start: heiltall) -> heiltall {
+    la djupn: heiltall = 0
+    la i_streng = usann
+    la escape = usann
+    la i = start
+    mens i < lengde(raw) {
+        la c = raw[i]
+        hvis i_streng {
+            hvis escape { escape = usann }
+            ellers hvis c == "\\" { escape = sann }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers hvis c == "\"" { i_streng = sann }
+        ellers hvis c == "{" { djupn = djupn + 1 }
+        ellers hvis c == "}" {
+            djupn = djupn - 1
+            hvis djupn == 0 { returner i }
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon kandidatsti(source_dir: tekst, fil_sti: tekst) -> tekst {
+    la delar = builtin.split(fil_sti, "/")
+    la namn = delar[lengde(delar) - 1]
+    hvis builtin.ends_with(namn, ".no") { namn = builtin.slice(namn, 0, lengde(namn) - 3) }
+    returner source_dir + "/" + namn + ".ncb.json"
+}
+
+funksjon funksjonar_innhald(sti: tekst) -> tekst {
+    fremdrift("raw-text-read " + sti)
+    la raw = fil_les(sti)
+    fremdrift("raw-text-read-done " + sti + " bytes=" + tekst_fra_heltall(lengde(raw)))
+    la markor = "\"functions\":{"
+    la start = builtin.index_of(raw, markor)
+    hvis start < 0 { kast "L5b raw-bundler: fragment manglar functions: " + sti }
+    // Kjeldekandidatane har functions sist, medan committed precompiled-cache
+    // har module_initializers og global_names etter functions. Finn den faste
+    // kanoniske feltgrensa med native index_of; dette unngår éin VM-iterasjon
+    // og allokering per byte i store emit-funksjonar.
+    hvis lengde(raw) < start + lengde(markor) + 2 { kast "L5b raw-bundler: avkorta fragment: " + sti }
+    la rest = builtin.slice(raw, start + lengde(markor), lengde(raw))
+    // Metadatarekkjefølgja kan variere mellom committed L5-driver og den
+    // levande A-driveren. Finn den første versjonerte toppnivågrensa etter
+    // functions i staden for å krevje module_initializers som neste felt.
+    la metadatafelt: liste_tekst = [
+        "module_initializers", "global_names", "imports", "route_handlers",
+        "tests", "request_middlewares", "response_middlewares",
+        "error_middlewares", "startup_hooks", "shutdown_hooks",
+        "guard_providers", "dependency_providers"
+    ]
+    la slutt: heiltall = -1
+    la mi: heiltall = 0
+    mens mi < lengde(metadatafelt) {
+        la kandidat = builtin.index_of(rest, "},\"" + metadatafelt[mi] + "\":")
+        hvis kandidat >= 0 og (slutt < 0 eller kandidat < slutt) { slutt = kandidat }
+        mi = mi + 1
+    }
+    la innhald = ""
+    hvis slutt >= 0 {
+        innhald = builtin.slice(rest, 0, slutt)
+    } ellers {
+        // Kanoniske kjeldefragment har functions som siste felt.
+        innhald = builtin.slice(rest, 0, lengde(rest) - 2)
+    }
+    fremdrift("raw-text-slice-done " + sti + " bytes=" + tekst_fra_heltall(lengde(innhald)))
+    returner innhald
+}
+
+funksjon siter_json_definisjon(definisjon: tekst) -> tekst {
+    // Definisjonen er alt kanonisk JSON utan rå kontrollteikn. Lazy-formatet
+    // treng berre å gjere den til ein JSON-streng; to lineære replace-pass
+    // unngår den rekursive native json_stringify-stacken på store funksjonar.
+    la escaped = builtin.replace(definisjon, "\\", "\\\\")
+    escaped = builtin.replace(escaped, "\"", "\\\"")
+    returner "\"" + escaped + "\""
+}
+
+funksjon formater_entry(entry: tekst, format: tekst) -> tekst {
+    la kolon = builtin.index_of(entry, ":")
+    hvis kolon < 2 { returner "" }
+    la namn_json = builtin.slice(entry, 0, kolon)
+    la definisjon = builtin.slice(entry, kolon + 1, lengde(entry))
+    hvis format == "stream" {
+        la namn = builtin.slice(namn_json, 1, lengde(namn_json) - 1)
+        returner "F" + namn + "\t" + definisjon + "\n"
+    }
+    hvis format == "lazy-json" {
+        returner namn_json + ":{\"__ncb_lazy_json__\":" + siter_json_definisjon(definisjon) + "}"
+    }
+    returner entry
+}
+
+funksjon funksjonsmodul_prefiks(innhald: tekst) -> tekst {
+    la kolon = builtin.index_of(innhald, ":")
+    hvis kolon < 3 { returner "" }
+    la fullt_namn = builtin.slice(innhald, 1, kolon - 1)
+    la namn_delar = builtin.split(fullt_namn, ".")
+    la modul_delar: liste_tekst = []
+    la i: heiltall = 0
+    mens i + 1 < lengde(namn_delar) {
+        legg_til(modul_delar, namn_delar[i])
+        i = i + 1
+    }
+    returner builtin.join(modul_delar, ".")
+}
+
+funksjon transformer_funksjonar(innhald: tekst, format: tekst) -> tekst {
+    hvis format == "json" { returner innhald }
+    la postar: liste_tekst = []
+    // Bruk heile modulnamnet i skiljet. Det generiske }," kan finnast inni
+    // PUSH_CONST-strengar, medan },"<modul>. berre finst mellom funksjonane i
+    // eit kandidatfragment. Native split held arbeidssettet lineært.
+    fremdrift("raw-text-split bytes=" + tekst_fra_heltall(lengde(innhald)))
+    la modul_prefiks = funksjonsmodul_prefiks(innhald)
+    hvis modul_prefiks == "" { kast "L5b raw-bundler: kan ikkje finne funksjonsmodul" }
+    la skilje = "},\"" + modul_prefiks + "."
+    la delar = builtin.split(innhald, skilje)
+    fremdrift("raw-text-split-done delar=" + tekst_fra_heltall(lengde(delar)))
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        fremdrift("raw-text-entry " + tekst_fra_heltall(i + 1) + "/" + tekst_fra_heltall(lengde(delar)))
+        la entry = delar[i]
+        hvis i > 0 { entry = "\"" + modul_prefiks + "." + entry }
+        hvis i + 1 < lengde(delar) { entry = entry + "}" }
+        legg_til(postar, formater_entry(entry, format))
+        i = i + 1
+    }
+    hvis format == "stream" { returner builtin.join(postar, "") }
+    returner builtin.join(postar, ",")
+}
+
+funksjon stream_fragment(sti: tekst) -> tekst {
+    returner transformer_funksjonar(funksjonar_innhald(sti), "stream")
+}
+
+funksjon json_fragment(sti: tekst, lazy: boolsk) -> tekst {
+    la format = "json"
+    hvis lazy { format = "lazy-json" }
+    returner transformer_funksjonar(funksjonar_innhald(sti), format)
+}
+
+funksjon legg_fragment_til(deler: liste_tekst, fragment_sti: tekst, format: tekst, første: boolsk) -> heiltall {
+    hvis format == "json" eller format == "lazy-json" {
+        hvis ikkje første { legg_til(deler, ",") }
+        legg_til(deler, json_fragment(fragment_sti, format == "lazy-json"))
+    } ellers {
+        legg_til(deler, stream_fragment(fragment_sti))
+    }
+    returner 1
+}
+
+funksjon specs_har_modul(specs: liste_tekst, modul: tekst) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(specs) {
+        la spec = builtin.trim(specs[i])
+        la eq = builtin.index_of(spec, "=")
+        hvis eq > 0 og builtin.slice(spec, 0, eq) == modul { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon fil_har_funksjon(sti: tekst, funksjonsnamn: tekst) -> boolsk {
+    prøv {
+        la raw = fil_les(sti)
+        returner builtin.index_of(raw, "\"" + funksjonsnamn + "\":{") >= 0
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon specs_har_funksjon(source_dir: tekst, specs: liste_tekst,
+                            modul: tekst, funksjonsnamn: tekst) -> boolsk {
+    hvis source_dir == "" { returner specs_har_modul(specs, modul) }
+    la i: heiltall = 0
+    mens i < lengde(specs) {
+        la spec = builtin.trim(specs[i])
+        la eq = builtin.index_of(spec, "=")
+        hvis eq > 0 og builtin.slice(spec, 0, eq) == modul {
+            hvis modul == "selfhost.vm" {
+                la rå_tal = miljo_hent("NORSCODE_L5B_VM_PART_COUNT")
+                la del_tal: heiltall = 0
+                hvis rå_tal != "" { del_tal = heltall_fra_tekst(rå_tal) }
+                la di: heiltall = 0
+                mens di < del_tal {
+                    hvis fil_har_funksjon(source_dir + "/vm-source-part-" + tekst_fra_heltall(di) + ".ncb.json", funksjonsnamn) {
+                        returner sann
+                    }
+                    di = di + 1
+                }
+            }
+            returner fil_har_funksjon(kandidatsti(source_dir,
+                builtin.slice(spec, eq + 1, lengde(spec))), funksjonsnamn)
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon filtrer_metadata_for_source(metadata_raw: tekst, specs: liste_tekst,
+                                     source_dir: tekst) -> tekst {
+    la metadata = builtin.json_parse_raw(metadata_raw)
+    hvis finnes_nøkkel(metadata, "module_initializers") {
+        la filtrert: liste_tekst = []
+        la initializers = metadata["module_initializers"]
+        la i: heiltall = 0
+        mens i < lengde(initializers) {
+            la init_namn = tekst(initializers[i])
+            la suffix = ".__module_init__"
+            la modul = init_namn
+            hvis builtin.ends_with(init_namn, suffix) {
+                modul = builtin.slice(init_namn, 0, lengde(init_namn) - lengde(suffix))
+            }
+            hvis specs_har_modul(specs, modul) og
+               specs_har_funksjon(source_dir, specs, modul, init_namn) {
+                legg_til(filtrert, init_namn)
+            }
+            i = i + 1
+        }
+        metadata["module_initializers"] = filtrert
+    }
+    hvis finnes_nøkkel(metadata, "global_names") {
+        la globale = metadata["global_names"]
+        la filtrerte_globalar = {}
+        la modular = nøkler(globale)
+        la i: heiltall = 0
+        mens i < lengde(modular) {
+            hvis specs_har_modul(specs, modular[i]) {
+                filtrerte_globalar[modular[i]] = globale[modular[i]]
+            }
+            i = i + 1
+        }
+        metadata["global_names"] = filtrerte_globalar
+    }
+    returner builtin.json_stringify(metadata)
+}
+
+funksjon filtrer_metadata(metadata_raw: tekst, specs: liste_tekst) -> tekst {
+    returner filtrer_metadata_for_source(metadata_raw, specs, "")
+}
+
+funksjon start() -> heiltall {
+    fremdrift("raw-bundler-start")
+    la source_dir = miljo_hent("NORSCODE_L5B_SOURCE_CANDIDATE_DIR")
+    la template_sti = miljo_hent("NORSCODE_BUNDLE_TEMPLATE_NCB")
+    la utfil = miljo_hent("NORSCODE_BUNDLE_OUTPUT")
+    la specs = builtin.split(miljo_hent("NORSCODE_BUNDLE_ARGS"), " ")
+    hvis source_dir == "" eller template_sti == "" eller utfil == "" { kast "L5b raw-bundler: manglar miljø" }
+
+    la metadata = fil_les(template_sti)
+    hvis metadata == "" { kast "L5b raw-bundler: tom metadata" }
+    metadata = filtrer_metadata_for_source(metadata, specs, source_dir)
+    la entry_override = miljo_hent("NORSCODE_BUNDLE_ENTRY_OVERRIDE")
+    hvis entry_override != "" {
+        metadata = builtin.replace(metadata,
+            "\"entry\":\"selfhost.l5b_host.start\"",
+            "\"entry\":\"" + entry_override + "\"")
+    }
+    fremdrift("raw-bundler-metadata-ready")
+
+    la format = miljo_hent("NORSCODE_L5B_RAW_FORMAT")
+    hvis format != "json" og format != "lazy-json" { format = "stream" }
+    la output_deler: liste_tekst = []
+    hvis format == "json" eller format == "lazy-json" {
+        legg_til(output_deler, builtin.slice(metadata, 0, lengde(metadata) - 1) + ",\"functions\":{")
+    } ellers {
+        legg_til(output_deler, "NORSCODE_NCB_STREAM_V1\nM" + metadata + "\n")
+    }
+    fremdrift("raw-bundler-header-written")
+
+    la fragment: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(specs) {
+        la spec = builtin.trim(specs[i])
+        hvis spec != "" {
+            la eq = builtin.index_of(spec, "=")
+            hvis eq < 1 { kast "L5b raw-bundler: ugyldig spec" }
+            la modul = builtin.slice(spec, 0, eq)
+            la fil_sti = builtin.slice(spec, eq + 1, lengde(spec))
+            hvis modul == "selfhost.vm" eller modul == "selfhost.compiler.ir_to_bytecode" {
+                la prefiks = "vm"
+                la delar_miljo = "NORSCODE_L5B_VM_PART_COUNT"
+                hvis modul == "selfhost.compiler.ir_to_bytecode" {
+                    prefiks = "ir"
+                    delar_miljo = "NORSCODE_L5B_IR_PART_COUNT"
+                }
+                la del_tal = heltall_fra_tekst(miljo_hent(delar_miljo))
+                hvis del_tal > 0 {
+                    la di: heiltall = 0
+                    mens di < del_tal {
+                        fragment = fragment + legg_fragment_til(output_deler, source_dir + "/" + prefiks + "-source-part-" + tekst_fra_heltall(di) + ".ncb.json", format, fragment == 0)
+                        di = di + 1
+                    }
+                } ellers {
+                    fragment = fragment + legg_fragment_til(output_deler, kandidatsti(source_dir, fil_sti), format, fragment == 0)
+                }
+            } ellers {
+                fragment = fragment + legg_fragment_til(output_deler, kandidatsti(source_dir, fil_sti), format, fragment == 0)
+            }
+            fremdrift("raw-bundler " + tekst_fra_heltall(i + 1) + "/" + tekst_fra_heltall(lengde(specs)) + " " + modul)
+        }
+        i = i + 1
+    }
+    fremdrift("raw-bundler-join fragments=" + tekst_fra_heltall(fragment))
+    hvis format == "json" eller format == "lazy-json" { legg_til(output_deler, "}}") }
+    fil_skriv(utfil, builtin.join(output_deler, ""))
+    fremdrift("raw-bundler-done fragments=" + tekst_fra_heltall(fragment))
+    skriv("L5b raw stream: " + utfil + " (" + tekst_fra_heltall(fragment) + " fragment)\n")
+    returner 0
+}

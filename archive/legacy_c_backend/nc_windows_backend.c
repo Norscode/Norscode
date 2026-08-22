@@ -259,6 +259,159 @@ int ncw_file_delete(const char *root_utf8, const char *relative_utf8,
     return ok;
 }
 
+int ncw_file_replace(const char *root_utf8, const char *source_relative_utf8,
+                     const char *target_relative_utf8,
+                     char *error, size_t error_cap) {
+    wchar_t source_root[NCW_PATH_CAP], source[NCW_PATH_CAP];
+    wchar_t target_root[NCW_PATH_CAP], target[NCW_PATH_CAP];
+    if (!ncw_resolve(root_utf8, source_relative_utf8, source_root, source,
+                     error, error_cap) ||
+        !ncw_resolve(root_utf8, target_relative_utf8, target_root, target,
+                     error, error_cap) ||
+        _wcsicmp(source_root, target_root) != 0) {
+        if (!error || !error[0])
+            ncw_error(error, error_cap, "file replace root", ERROR_ACCESS_DENIED);
+        return 0;
+    }
+    HANDLE source_handle = CreateFileW(
+        source, DELETE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (source_handle == INVALID_HANDLE_VALUE) {
+        ncw_error(error, error_cap, "file replace source open", GetLastError());
+        return 0;
+    }
+    FILE_ATTRIBUTE_TAG_INFO source_tag;
+    if (!ncw_verify_open_handle(source_handle, source_root, error, error_cap) ||
+        !GetFileInformationByHandleEx(source_handle, FileAttributeTagInfo,
+                                      &source_tag, sizeof(source_tag)) ||
+        (source_tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                      FILE_ATTRIBUTE_REPARSE_POINT))) {
+        if (!error || !error[0])
+            ncw_error(error, error_cap, "file replace source type",
+                      ERROR_INVALID_PARAMETER);
+        CloseHandle(source_handle);
+        return 0;
+    }
+    CloseHandle(source_handle);
+
+    HANDLE target_handle = CreateFileW(
+        target, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (target_handle != INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_TAG_INFO target_tag;
+        int target_ok =
+            ncw_verify_open_handle(target_handle, target_root, error, error_cap) &&
+            GetFileInformationByHandleEx(target_handle, FileAttributeTagInfo,
+                                         &target_tag, sizeof(target_tag)) &&
+            !(target_tag.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                           FILE_ATTRIBUTE_REPARSE_POINT));
+        CloseHandle(target_handle);
+        if (!target_ok) {
+            if (!error || !error[0])
+                ncw_error(error, error_cap, "file replace target type",
+                          ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    } else if (GetLastError() != ERROR_FILE_NOT_FOUND &&
+               GetLastError() != ERROR_PATH_NOT_FOUND) {
+        ncw_error(error, error_cap, "file replace target open", GetLastError());
+        return 0;
+    }
+    if (!MoveFileExW(source, target,
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        ncw_error(error, error_cap, "MoveFileExW", GetLastError());
+        return 0;
+    }
+    return 1;
+}
+
+int ncw_directory_delete(const char *root_utf8, const char *relative_utf8,
+                         char *error, size_t error_cap) {
+    wchar_t root[NCW_PATH_CAP], candidate[NCW_PATH_CAP];
+    if (!ncw_resolve(root_utf8, relative_utf8, root, candidate, error, error_cap)) return 0;
+    HANDLE handle = CreateFileW(candidate, DELETE | FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) { ncw_error(error, error_cap, "directory delete open", GetLastError()); return 0; }
+    if (!ncw_verify_open_handle(handle, root, error, error_cap)) { CloseHandle(handle); return 0; }
+    FILE_DISPOSITION_INFO disposition; disposition.DeleteFile = TRUE;
+    int ok = SetFileInformationByHandle(handle, FileDispositionInfo,
+                                        &disposition, sizeof(disposition)) != 0;
+    if (!ok) ncw_error(error, error_cap, "directory delete", GetLastError());
+    CloseHandle(handle);
+    return ok;
+}
+
+int ncw_file_set_mode(const char *root_utf8, const char *relative_utf8,
+                      uint32_t mode, char *error, size_t error_cap) {
+    wchar_t root[NCW_PATH_CAP], candidate[NCW_PATH_CAP];
+    if (!ncw_resolve(root_utf8, relative_utf8, root, candidate, error, error_cap)) return 0;
+    HANDLE handle = CreateFileW(candidate, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) { ncw_error(error, error_cap, "mode open", GetLastError()); return 0; }
+    if (!ncw_verify_open_handle(handle, root, error, error_cap)) { CloseHandle(handle); return 0; }
+    FILE_BASIC_INFO info;
+    if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &info, sizeof(info))) {
+        ncw_error(error, error_cap, "mode read", GetLastError()); CloseHandle(handle); return 0;
+    }
+    if (mode & 0222u) info.FileAttributes &= ~FILE_ATTRIBUTE_READONLY;
+    else info.FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    int ok = SetFileInformationByHandle(handle, FileBasicInfo, &info, sizeof(info)) != 0;
+    if (!ok) ncw_error(error, error_cap, "mode write", GetLastError());
+    CloseHandle(handle);
+    return ok;
+}
+
+static uint64_t ncw_filetime_unix_seconds(LARGE_INTEGER value) {
+    const uint64_t epoch = 116444736000000000ULL;
+    uint64_t ticks = (uint64_t)value.QuadPart;
+    return ticks > epoch ? (ticks - epoch) / 10000000ULL : 0;
+}
+
+int ncw_path_stat(const char *root_utf8, const char *relative_utf8,
+                  NcwPathStat *out, char *error, size_t error_cap) {
+    if (!out) { ncw_error(error, error_cap, "path stat", ERROR_INVALID_PARAMETER); return 0; }
+    memset(out, 0, sizeof(*out));
+    wchar_t root[NCW_PATH_CAP], candidate[NCW_PATH_CAP];
+    if (!ncw_resolve(root_utf8, relative_utf8, root, candidate, error, error_cap)) return 0;
+    HANDLE handle = CreateFileW(candidate, FILE_READ_ATTRIBUTES,
+                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                NULL, OPEN_EXISTING,
+                                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    if (handle == INVALID_HANDLE_VALUE) { ncw_error(error, error_cap, "path stat open", GetLastError()); return 0; }
+    if (!ncw_verify_open_handle(handle, root, error, error_cap)) { CloseHandle(handle); return 0; }
+    BY_HANDLE_FILE_INFORMATION legacy;
+    FILE_BASIC_INFO basic;
+    FILE_STANDARD_INFO standard;
+    if (!GetFileInformationByHandle(handle, &legacy) ||
+        !GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic)) ||
+        !GetFileInformationByHandleEx(handle, FileStandardInfo, &standard, sizeof(standard))) {
+        ncw_error(error, error_cap, "path stat read", GetLastError());
+        CloseHandle(handle);
+        return 0;
+    }
+    out->size = (uint64_t)standard.EndOfFile.QuadPart;
+    out->inode = ((uint64_t)legacy.nFileIndexHigh << 32) | legacy.nFileIndexLow;
+    out->device = legacy.dwVolumeSerialNumber;
+    out->atime_seconds = ncw_filetime_unix_seconds(basic.LastAccessTime);
+    out->mtime_seconds = ncw_filetime_unix_seconds(basic.LastWriteTime);
+    out->ctime_seconds = ncw_filetime_unix_seconds(basic.ChangeTime);
+    out->nlink = standard.NumberOfLinks;
+    out->kind = (basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 2u :
+                (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ? 3u : 1u;
+    out->mode = (basic.FileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444u : 0666u;
+    if (out->kind == 2u) out->mode |= 0111u;
+    CloseHandle(handle);
+    return 1;
+}
+
 static int ncw_append_wide(wchar_t *output, size_t cap, size_t *length,
                            const wchar_t *value, size_t count) {
     if (*length + count + 1 > cap) return 0;
@@ -424,9 +577,14 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
     process->job = CreateJobObjectW(NULL, NULL);
     if (!process->job) { ncw_error(error, error_cap, "CreateJobObjectW", GetLastError()); TerminateProcess(info.hProcess, 126); CloseHandle(info.hThread); CloseHandle(info.hProcess); goto failure; }
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; memset(&limits, 0, sizeof(limits));
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
-                                              JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    /* Ein eksplisitt usandboxa verktøyprosess må kunne starte legitime
+       underprosessar (til dømes compiler-driver -> linker). Avgrensa profiler
+       held fram med éin-prosessgrensa og AppContainer der det er kravd. */
+    if (sandbox_profile && strcmp(sandbox_profile, "none")) {
+        limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    }
     if (max_memory_bytes) {
         limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_PROCESS_MEMORY;
         limits.ProcessMemoryLimit = (SIZE_T)max_memory_bytes;
@@ -439,7 +597,8 @@ int ncw_process_spawn(NcwProcess *process, const char *executable_utf8,
     }
     process->process = info.hProcess; process->thread = info.hThread;
     process->appcontainer=use_appcontainer;
-    process->pid = info.dwProcessId; process->deadline_ms = GetTickCount64() + timeout_ms;
+    process->pid = info.dwProcessId; process->started_ms = GetTickCount64();
+    process->deadline_ms = process->started_ms + timeout_ms;
     if (ResumeThread(process->thread) == (DWORD)-1) {
         ncw_error(error, error_cap, "ResumeThread", GetLastError()); goto failure;
     }
@@ -467,6 +626,12 @@ int ncw_process_poll(NcwProcess *process, char *error, size_t error_cap) {
     if (!process->exited && GetTickCount64() >= process->deadline_ms) {
         process->timed_out = 1;
         if (!TerminateJobObject(process->job, 124)) { ncw_error(error, error_cap, "process timeout", GetLastError()); return -1; }
+    }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION usage; memset(&usage, 0, sizeof(usage));
+    if (process->job && QueryInformationJobObject(process->job, JobObjectExtendedLimitInformation,
+                                                   &usage, sizeof(usage), NULL)) {
+        uint64_t peak = (uint64_t)usage.PeakProcessMemoryUsed;
+        if (peak > process->peak_memory_bytes) process->peak_memory_bytes = peak;
     }
     DWORD code = STILL_ACTIVE;
     if (!GetExitCodeProcess(process->process, &code)) { ncw_error(error, error_cap, "GetExitCodeProcess", GetLastError()); return -1; }

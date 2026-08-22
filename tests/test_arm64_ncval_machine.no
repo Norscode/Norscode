@@ -1,0 +1,203 @@
+// Fase 2: full NcVal stakk-VM på AArch64 (SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md).
+// Kompilerer heiltalsfixturane gjennom kompiler_ncb_ncval (operandane er heap-
+// NcVal, locals i heapen, aritmetikk/samanlikning/greiner over NcVal) og
+// stadfestar at exit-kodene er identiske med den registerbaserte maskina, pluss
+// at `skriv` over NcVal gjev rett stdout. Køyrer berre på Darwin/arm64 der
+// Mach-O-binæren kan eksekverast; Linux-ELF deler same instruksjonar.
+
+bruk std.runtime_filesystem som native_fs
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+bruk selfhost.native_execution.macho_arm64_codegen som codegen
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv { sti = tekst(builtin.system_info()["executable"]) hvis sti != "" { returner sti } } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon miljø_kontrakt(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+// Kompiler kjelde → NCB → NcVal-Mach-O; køyr og returner resultatet.
+funksjon bygg_ncval(root: tekst, nc: tekst, kjelde: tekst, binær: tekst) -> ordbok_tekst {
+    la ncb = "/tmp/norscode_ncval_" + builtin.random_hex(8) + ".ncb.json"
+    la kompres = prosess.køyr(nc, ["compile", kjelde, ncb], root, miljø_kontrakt(root), 180000)
+    hvis tekst(kompres["status"]) != "ferdig" eller heltall_fra_tekst(tekst(kompres["exit_code"])) != 0 {
+        prosess.skriv_resultat(kompres)
+        returner {"ok": "usann", "error": "compile feila", "exit_code": "-", "stdout": ""}
+    }
+    la parsed = builtin.json_parse_raw(builtin.fil_les(ncb))
+    la r = codegen.kompiler_ncb_ncval(parsed, binær, "macos")
+    filops.slett_fil(ncb)
+    hvis r["ok"] != "sann" { returner {"ok": "usann", "error": tekst(r["error"]), "exit_code": "-", "stdout": ""} }
+    assert(builtin.fil_sett_kjorbar(binær))
+    la run = prosess.køyr(binær, [], root, {}, 30000)
+    filops.slett_fil(binær)
+    run["ok"] = "sann"
+    returner run
+}
+
+funksjon krev_exit(root: tekst, nc: tekst, namn: tekst, venta: heiltall) -> heiltall {
+    la r = bygg_ncval(root, nc, root + "/tests/fixtures/" + namn + ".no", "/tmp/ncvalbin_" + namn)
+    hvis r["ok"] != "sann" {
+        skriv("FEIL " + namn + ": " + tekst(r["error"]) + "\n")
+        assert_eq(r["ok"], "sann")
+    }
+    hvis heltall_fra_tekst(tekst(r["exit_code"])) != venta {
+        prosess.skriv_resultat(r)
+        assert_eq(heltall_fra_tekst(tekst(r["exit_code"])), venta)
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    hvis tekst(info["system"]) != "Darwin" eller tekst(info["machine"]) != "arm64" { returner 0 }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la nc = runtime(root)
+
+    // Heiltalsfixturar: same exit-koder som den registerbaserte maskina.
+    krev_exit(root, nc, "aot_common_integer_ops", 11)
+    krev_exit(root, nc, "macos_aot_std_math", 49)
+    krev_exit(root, nc, "macos_aot_std_math_control", 10)
+    krev_exit(root, nc, "macos_aot_control_flow", 17)
+    krev_exit(root, nc, "macos_aot_function_call", 12)
+
+    // skriv over NcVal (forteikn + fleirsifra + null).
+    la s = bygg_ncval(root, nc, root + "/tests/fixtures/arm64_skriv_int.no", "/tmp/ncvalbin_skriv")
+    assert_eq(s["ok"], "sann")
+    assert_eq(tekst(s["stdout"]), "-123450")
+
+    // Fase 3: heap-strengkonstantar + skriv-type-dispatch (streng + heiltal).
+    la ss = bygg_ncval(root, nc, root + "/tests/fixtures/arm64_str_skriv.no", "/tmp/ncvalbin_str")
+    assert_eq(ss["ok"], "sann")
+    assert_eq(tekst(ss["stdout"]), "Hei fra Norscode42!")
+
+    // Fase 3: streng-`+`-konkatenering + lengde(streng) + heiltals-`+`.
+    la sc = bygg_ncval(root, nc, root + "/tests/fixtures/arm64_str_concat.no", "/tmp/ncvalbin_concat")
+    assert_eq(sc["ok"], "sann")
+    assert_eq(tekst(sc["stdout"]), "Hei verden!")
+    assert_eq(heltall_fra_tekst(tekst(sc["exit_code"])), 12)
+
+    // Fase 3: samla strengruntime (contains/starts_with/ends_with/index_of/lower/
+    // upper/trim/replace/slice/char_code/tekst/heltall/streng-==) → exit 16.
+    krev_exit(root, nc, "arm64_str_ops", 16)
+
+    // Fase 4: lister + kart (BUILD_LIST/BUILD_MAP/INDEX_GET/finnes_nøkkel/lengde)
+    // saman med heile strengruntimen — macos_aot_common_runtime → exit 25 = VM.
+    krev_exit(root, nc, "macos_aot_common_runtime", 25)
+
+    // Fase 5: ekte rekursive kall (bl/ret) — fakultet(5) = 120.
+    krev_exit(root, nc, "arm64_factorial", 120)
+    // Fase 5: fleir-arg ikkje-rekursivt brukarkall — legg_saman(7,5) = 12.
+    krev_exit(root, nc, "macos_aot_function_call", 12)
+
+    // Fase 6: fil-I/O (fil_skriv/fil_les/fil_finnes) med innhalds-rundtur → 18.
+    krev_exit(root, nc, "arm64_fileio", 18)
+
+    // Fase 6-JSON (skalarar): json_stringify int/streng/bool → "42"/"\"hei\""/
+    // "true"/"false" (skriv 42|"hei"|true|false); sum lengder = exit 16. Vi sjekkar
+    // exit (ikkje stdout-streng: prosess.køyr JSON-escaper fanga stdout).
+    krev_exit(root, nc, "arm64_json_scalar", 16)
+
+    // Fase 6-JSON (containerar): rekursiv json_stringify av lister/kart + nøsting
+    // (skriv [1,2,3]|{"a":1}|[true,false]|[[1,2],[3]]); sum lengder = exit 37.
+    krev_exit(root, nc, "arm64_json_container", 37)
+
+    // Fase 6-JSON: recursive-descent json_parse (streng/bool/tal/nøsta liste/kart)
+    // + json_stringify→json_parse-rundtur. Sum = 142. Testar òg tekst(streng).
+    krev_exit(root, nc, "arm64_json_parse", 142)
+
+    // Fase 7: TCP socket-loopback i éin prosess (socket/bind+SO_REUSEADDR/listen/
+    // connect/accept/send/recv/close via ekte syscalls) → 6 byte ("hello!").
+    krev_exit(root, nc, "arm64_socket_loopback", 6)
+
+    // Fase 8: INDEX_SET — liste-mutasjon + kart oppdater/vekst (realloc) → 241.
+    krev_exit(root, nc, "arm64_index_set", 241)
+
+    // Fase 8: legg_til — liste-append med vekst i ei løkke (tom → 5) → 35.
+    krev_exit(root, nc, "arm64_legg_til", 35)
+
+    // Fase 8: modul-globalar (LOAD/STORE_GLOBAL i x25-base) + modul-initialisator
+    // køyrd før entry; global teller mutert på tvers av kall → 109.
+    krev_exit(root, nc, "arm64_globals", 109)
+
+    // Fase 8: unnataks-handtering (TRY_BEGIN/TRY_END/THROW/LOAD_EXCEPTION) med
+    // djup rekursiv utrulling + nøsta try + re-kast → 53.
+    krev_exit(root, nc, "arm64_try_catch", 53)
+
+    // Fase 8: builtin-hale — tekst_fra_heltall/heltall_fra_tekst-alias, builtin.type
+    // (typenamn, kart→"ordbok"), nøkler (kart→liste) → 26.
+    krev_exit(root, nc, "arm64_builtins_tail", 26)
+
+    // Fase 8: builtin-hale batch 2 — verdier (kart→verdiar) + fjern_siste (pop) → 96.
+    krev_exit(root, nc, "arm64_builtins_tail2", 96)
+
+    // Fase 8: split (runtime-rutine __split; streng→liste, generell fleirteikns-
+    // delim; delstreng-peikarar på maskinstakk-buffer, kopiert til heap-listdata) → 12.
+    krev_exit(root, nc, "arm64_split", 12)
+
+    // Fase 8: join (runtime-rutine __join; liste av strengar + separator → streng,
+    // akkumulator + emit_str_concat i løkke) → 13.
+    krev_exit(root, nc, "arm64_join", 13)
+
+    // Fase 8: fjern_nokkel (kart-nøkkelfjerning) + json_parse_raw (alias for
+    // __json_parse). 3-nøkkel-kart (operand-djupn ≤ 6) → 30.
+    krev_exit(root, nc, "arm64_fjern_nokkel", 30)
+
+    // Fase 8: tid_ms (gettimeofday-syscall; ms sidan epoke). Verdien er ekte 64-bit
+    // (~1.7e12), så den blir boksa med heile registeret (ikkje sxtw-trunkert) og
+    // samanlikna med 64-bit `cmp x`. Sjekkar t1>0 + monoton + lite spenn → 3.
+    krev_exit(root, nc, "arm64_tid_ms", 3)
+
+    // Operand-spilling (mem-modus): liste-literal >6 element + kart-literal >3 par
+    // sprekk den register-baserte operand-stakken (x19–x24, maks djupn 6); codegen
+    // rekompilerer då funksjonen med operandane i minne-heimar etter lokalvariablane.
+    // 280 (liste-sum) + 1 + 4 (kart) = 285 → 285 & 0xFF = 29.
+    krev_exit(root, nc, "arm64_operand_spill", 29)
+    // Generell mem-modus-stress: djup aritmetikk, samanlikning, indeksering på spilla
+    // container og 7-arg brukarkall, alt medan djupna er > 6. Fasit frå VM-tolken.
+    krev_exit(root, nc, "arm64_spill_stress", 44)
+
+    // Builtin-hale batch 3: aliasar som rutar til eksisterande emitterar
+    // (tekst_erstatt→replace, tekst_starter_med→starts_with, nøkkel_finnes→map_get,
+    // json_skriv→__json_stringify) → 10+5+13 = 28.
+    krev_exit(root, nc, "arm64_builtins_tail3", 28)
+    // exit(kode): exit-syscall (macOS x16=1 / Linux x8=93) terminerer med koden.
+    krev_exit(root, nc, "arm64_exit", 42)
+    // miljo_sett/miljo_hent round-trip via in-heap overlay-kart (skjult global
+    // __env_overlay__): set→hent→oppdater→miss→ny nøkkel(grow) = 5+9+0+2 = 16.
+    krev_exit(root, nc, "arm64_env", 16)
+    // 64-bit-aritmetikk: carry over bit 32, mask og skift (krav for SHA/krypto).
+    // 7 + 255 + 0 = 262 → exit 6.
+    krev_exit(root, nc, "arm64_bit64", 6)
+    // Krypto-kjerne-regresjon (verifisert VM=native på Linux ARM64):
+    krev_exit(root, nc, "arm64_mul64", 252)     // 64-bit sum-av-produkt (x25519 field-mul)
+    krev_exit(root, nc, "arm64_bignew", 104)    // bytes_new(>6) + INDEX_SET-løkke
+    krev_exit(root, nc, "arm64_list16", 136)    // 16-elem liste-literal (mem-modus)
+    krev_exit(root, nc, "arm64_ctmask", 11)     // konstanttids-swap m/ negativ maske
+    krev_exit(root, nc, "arm64_negsub", 102)    // negativ mellomrekning + mask/borrow
+    krev_exit(root, nc, "arm64_fieldmul", 196)  // full x25519 _M (field-multiply)
+    krev_exit(root, nc, "arm64_andcond", 9)     // kortslutta `og` over kontrollflyt-merge (a!=2 og a!=4)
+    krev_exit(root, nc, "arm64_listslice", 184)  // slice på liste (type-dispatch, ikkje berre streng)
+    krev_exit(root, nc, "arm64_orcond", 12)      // kortslutta `eller` over merge
+    krev_exit(root, nc, "arm64_memmerge", 148)   // kortslutta og/eller i mem-modus-funksjon (4-nøkkel-map)
+    krev_exit(root, nc, "arm64_strne", 7)        // streng-`!=` (innhald, ikkje peikar)
+    krev_exit(root, nc, "arm64_fileops2", 18)    // fil_append + fil_sett_kjorbar + fil_slett (syscalls)
+    krev_exit(root, nc, "arm64_bytesio", 73)     // bytes_to_text + fil_skriv_binær (bytes≡liste)
+    krev_exit(root, nc, "arm64_binio", 157)      // fil_les_binær round-trip (les→boks kvar byte→liste)
+    krev_exit(root, nc, "arm64_random_hex", 101) // random_hex: OS-entropi (getrandom/getentropy), 2n hex-teikn
+    krev_exit(root, nc, "arm64_miljofinnes", 10) // miljo_finnes via overlay (miljo_sett)
+    krev_exit(root, nc, "arm64_appendbin", 55)   // fil_append_binær (O_APPEND byteliste)
+
+    skriv("test_arm64_ncval_machine OK\n")
+    returner 0
+}
