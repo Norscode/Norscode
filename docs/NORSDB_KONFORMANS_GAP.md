@@ -19,7 +19,7 @@
 
 | Funksjon | Status | Merknad |
 |---|---|---|
-| Dato-/tidsfunksjonar (`date/time/datetime/strftime/julianday`) | manglar | Krev sjølv-implementert kalendermatematikk (`builtin.now_iso` finst ikkje i seed). |
+| `julianday` / `%f` (fraksjons-sekund) / `weekday N`-modifikator | manglar | `julianday` krev IEEE-presisjon. Resten av dato/tid er dekt (sjå under). |
 | BLOB-literalar (`x'…'`) | manglar | Strengbasert lagring; blob ikkje distinkt frå TEXT. |
 | Full 3-verdi NULL i lagring/samanlikning | manglar | Krev storage-endring (skilje NULL frå `''`). |
 | Kostnadsbasert join-planleggar | manglar | I dag nested-loop + indeks-guard; ingen statistikk-basert omordning. |
@@ -38,7 +38,9 @@ vindusfunksjonar, `JOIN` (INNER/LEFT/RIGHT/FULL/CROSS), constraints
 `INSERT OR IGNORE/REPLACE` + UPSERT, `ALTER TABLE`, `CREATE VIEW`,
 **`CREATE TRIGGER` BEFORE + AFTER** (INSERT/UPDATE/DELETE, NEW/OLD),
 `CREATE INDEX` (equality + range i planen), prepared statements (`?`), `EXPLAIN`,
-REAL-typar, parameter-binding, transaksjonar (`begin/commit/rollback`, `transaction`).
+REAL-typar, parameter-binding, transaksjonar (`begin/commit/rollback`, `transaction`),
+**dato/tid** (`date/time/datetime/strftime/unixepoch` + modifikatorar `±N days/months/years…`,
+`start of …`; skotår-korrekt kalendermatte).
 
 ## Slik oppdaterer du fasit
 
