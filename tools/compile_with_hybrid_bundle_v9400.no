@@ -1027,14 +1027,62 @@ funksjon vel_entry(bundle, modul: tekst) -> heiltall {
     returner 0
 }
 
-funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src: tekst, modul: tekst, out: tekst, tmpdir: tekst) -> bool {
+// Hash av ei kjeldefil, memoisert per køyring. Same fil blir spurt om ein
+// gong per modul i den transitive grafen, og filene kan vere fleire hundre kB.
+funksjon fil_hash_memo(memo, sti: tekst) -> tekst {
+    hvis har_nokkel(memo, sti) { returner memo[sti] }
+    la h = ""
+    hvis builtin.fil_finnes(sti) { h = rask_hash_bytes(builtin.fil_les_binær(sti)) }
+    memo[sti] = h
+    returner h
+}
+
+// Manifest over heile den transitive importgrafen til `src`, med innhaldshash
+// per fil. Ein modulkompilering kan innehalde funksjonane til importane sine
+// (sjå merge_fragment), så cachen må ugyldiggjerast når ein import endrar seg —
+// ikkje berre når modulen sjølv endrar seg.
+funksjon import_manifest(root: tekst, project_root: tekst, src: tekst, memo) -> tekst {
+    la kø: liste_tekst = importer_fraa(src)
+    la sett: liste_tekst = []
+    la manifest = ""
+    la i: heiltall = 0
+    mens i < lengde(kø) {
+        la import_mod = kø[i]
+        hvis ikkje liste_har(sett, import_mod) {
+            legg_til(sett, import_mod)
+            la import_abs = finn_import_abs(root, project_root, import_mod)
+            hvis import_abs != "" {
+                manifest = manifest + import_mod + ":" + fil_hash_memo(memo, import_abs) + "\n"
+                la vidare = importer_fraa(import_abs)
+                la j: heiltall = 0
+                mens j < lengde(vidare) {
+                    hvis ikkje liste_har(sett, vidare[j]) og ikkje liste_har(kø, vidare[j]) {
+                        legg_til(kø, vidare[j])
+                    }
+                    j = j + 1
+                }
+            } ellers {
+                // Uløyst import: ta med namnet, slik at nøkkelen endrar seg
+                // dersom modulen dukkar opp seinare.
+                manifest = manifest + import_mod + ":ULØYST\n"
+            }
+        }
+        i = i + 1
+    }
+    returner manifest
+}
+
+funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src: tekst, modul: tekst, out: tekst, tmpdir: tekst, hash_memo) -> bool {
     la cache_dir = root + "/build/nc-module-cache"
-    la cache_abi = "norscode-module-cache-v2|norscode-bytecode-v1|selfhost-compiler-0.31"
+    la cache_abi = "norscode-module-cache-v3|norscode-bytecode-v1|selfhost-compiler-0.31"
     la cache_key = rask_hash(
         cache_abi + "|" +
         rask_hash_bytes(builtin.fil_les_binær(src)) + "|" +
-        rask_hash_bytes(builtin.fil_les_binær(root + "/tools/compile_with_hybrid_bundle_v9400.no"))
+        fil_hash_memo(hash_memo, root + "/tools/compile_with_hybrid_bundle_v9400.no") + "|" +
+        rask_hash(import_manifest(root, project_root, src, hash_memo))
     )
+    // Naudutgang: NORSCODE_NO_MODULE_CACHE=1 hoppar over modulcachen heilt.
+    hvis env("NORSCODE_NO_MODULE_CACHE") == "1" { cache_key = "" }
     la cache_fil = ""
     hvis cache_key != "" {
         cache_fil = cache_dir + "/" + import_out_namn(modul) + "." + cache_key
@@ -1133,6 +1181,9 @@ funksjon node_finst(home: tekst) -> bool {
 }
 
 funksjon start() -> heiltall {
+    // Delt memo for innhaldshashar, slik at den transitive importgrafen berre
+    // blir lesen ein gong per fil i denne køyringa.
+    la hash_memo = {}
     la root = env("NORSCODE_HYBRID_ROOT")
     hvis root == "" {
         prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." }
@@ -1214,7 +1265,7 @@ funksjon start() -> heiltall {
             returner 1
         }
     } ellers {
-        hvis ikkje kompiler_modul(root, project_root, native_bin, src, modul, root_ncb, tmpdir) {
+        hvis ikkje kompiler_modul(root, project_root, native_bin, src, modul, root_ncb, tmpdir, hash_memo) {
             rydd_temp(tmpdir)
             returner 1
         }
@@ -1262,7 +1313,7 @@ funksjon start() -> heiltall {
                     // ein gong til når ingen source-only-kandidat skal overstyre.
                 } ellers {
                     la import_out = tmpdir + "/" + import_out_namn(import_mod)
-                    hvis ikkje kompiler_modul(root, project_root, native_bin, import_abs, import_mod, import_out, tmpdir) {
+                    hvis ikkje kompiler_modul(root, project_root, native_bin, import_abs, import_mod, import_out, tmpdir, hash_memo) {
                         rydd_temp(tmpdir)
                         returner 1
                     }

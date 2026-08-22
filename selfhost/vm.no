@@ -139,7 +139,11 @@ funksjon ramme_les_var(ramme, namn: tekst) {
         // nc_vm.c: "null", "true", "false" er globale konstantar
         // Bygg null-namnet av to literal-delar. Den eldre C-materialiseraren
         // må ikkje forveksle tekstverdien "null" med sjølve nullkonstanten.
-        hvis namn == "nul" + "l" eller namn == "ingenting" { returner 0 }
+        // M4: `ingenting`/`null` gir den native ingenting-verdien (distinkt frå
+        // 0), slik at `x == ingenting` verkar for manglande oppslag og
+        // `type(ingenting)` er "ingenting". json_parse_raw("null") gir denne
+        // verdien; ingenting-lesingar er sjeldne så kostnaden er ubetydeleg.
+        hvis namn == "nul" + "l" eller namn == "ingenting" { returner builtin.json_parse_raw("null") }
         hvis namn == "true" eller namn == "sann" { returner sann }
         hvis namn == "false" eller namn == "usann" { returner usann }
         kast "Ukjent variabel: " + namn
@@ -207,6 +211,63 @@ funksjon vm_handler_match(handler, verdi) -> boolsk {
     hvis expected == "" eller expected == "*" eller expected == "alle" { returner sann }
     hvis expected == vm_exception_type(verdi) { returner sann }
     returner expected == "tekst" og builtin.type(verdi) == "tekst"
+}
+
+// M2: bygg ei feilmelding med kallstack. Meldinga sjølv står fyrst, slik at
+// eksisterande delstreng-sjekkar på feiltekst framleis treffer.
+//
+// Sporet står på éi linje med " | ved "-skilje. Eit linjeskift ville blitt
+// escapa til literal "\n" når unntaksverdien kryssar VM-grensa, og då er
+// eittlinjeforma lettare å lese i loggar.
+// M3: bind fanga lambda-variablar som lokale i callee-ramma, slik at
+// LOAD_NAME i lambda-kroppen finn dei. Blir kalla etter at parametrane er bundne.
+// M10: varargs — bind siste parameter til ei liste av dei overskytande
+// argumenta når funksjonen har rest_param.
+// M5: kort struktur-typenamn (siste dot-segment av konstruktørnamnet).
+funksjon vm_kort_typenamn(namn: tekst) -> tekst {
+    la delar = builtin.split(namn, ".")
+    returner delar[lengde(delar) - 1]
+}
+
+funksjon vm_bind_rest(ramme, params, args, fn_def) {
+    hvis ikkje vm_map_har_nokkel(fn_def, "rest_param") { returner 0 }
+    hvis tekst(fn_def["rest_param"]) != "sann" { returner 0 }
+    la n: heiltall = lengde(params)
+    hvis n == 0 { returner 0 }
+    la rest_namn = params[n - 1]
+    la rest_liste: liste = []
+    la ri: heiltall = n - 1
+    mens ri < lengde(args) {
+        legg_til(rest_liste, args[ri])
+        ri = ri + 1
+    }
+    ramme["last_heap_id"] = ""
+    ramme_sett_var(ramme, rest_namn, rest_liste)
+    returner 0
+}
+
+funksjon vm_bind_lambda_capture(ramme, capture) {
+    hvis builtin.type(capture) != "ordbok" { returner 0 }
+    la cap_namn = builtin.nøkler(capture)
+    la i: heiltall = 0
+    mens i < lengde(cap_namn) {
+        ramme["last_heap_id"] = ""
+        ramme_sett_var(ramme, cap_namn[i], capture[cap_namn[i]])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon vm_med_spor(melding, spor: liste_tekst) -> tekst {
+    la ut: tekst = tekst(melding)
+    hvis lengde(spor) == 0 { returner ut }
+    hvis builtin.contains(ut, " | ved ") { returner ut }
+    la i: heltall = 0
+    mens i < lengde(spor) {
+        ut = ut + " | ved " + spor[i]
+        i = i + 1
+    }
+    returner ut
 }
 
 funksjon vm_find_handler(try_stack, verdi) -> heiltall {
@@ -2825,6 +2886,19 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner 0
     }
 
+    // M10: utvid ei liste med alle elementa i ei anna (spread-lowering).
+    hvis namn == "builtin.utvid" eller namn == "utvid" {
+        la kjelde = args[1]
+        hvis builtin.type(kjelde) == "liste" {
+            la ui: heiltall = 0
+            mens ui < lengde(kjelde) {
+                legg_til(args[0], kjelde[ui])
+                ui = ui + 1
+            }
+        }
+        returner 0
+    }
+
     hvis namn == "builtin.pop_siste" eller namn == "builtin.fjern_siste" eller namn == "pop_siste" eller namn == "fjern_siste" {
         hvis lengde(args[0]) == 0 { kast "pop_siste frå tom liste" }
         la siste = args[0][lengde(args[0]) - 1]
@@ -3764,6 +3838,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     la første_ch = builtin.slice(namn, 0, 1)
     hvis første_ch >= "A" og første_ch <= "Z" {
         la obj: ordbok<tekst, tekst> = {}
+        obj["__struct_type__"] = vm_kort_typenamn(namn)
         returner obj
     }
     // Prefiks-stripping for kall som kjem via builtin.
@@ -3772,6 +3847,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         la første2 = builtin.slice(kortnavn2, 0, 1)
         hvis første2 >= "A" og første2 <= "Z" {
             la obj2: ordbok<tekst, tekst> = {}
+            obj2["__struct_type__"] = vm_kort_typenamn(kortnavn2)
             returner obj2
         }
     }
@@ -4407,7 +4483,11 @@ funksjon køyr_funksjon(
             hvis pi < lengde(pending_ids) {
                 ramme["last_heap_id"] = pending_ids[pi]
             }
-            ramme_sett_var(ramme, params[pi], arg_verdiar[pi])
+            hvis pi < lengde(arg_verdiar) {
+                ramme_sett_var(ramme, params[pi], arg_verdiar[pi])
+            } ellers {
+                ramme_sett_var(ramme, params[pi], "__norscode_unset__")
+            }
             pi = pi + 1
         }
         functions["__vm_pending_arg_heap_ids__"] = []
@@ -4903,6 +4983,60 @@ funksjon køyr_funksjon(
 
             // Dynamisk NCB-kall frå bytekode blir normalisert til same
             // continuation-frame som statiske CALL, utan reentrant VM-kall.
+            // M5: metodekall. call_args = [mottakar, metodenamn, arg0, ...].
+            // Byggjer "<struct_type>.<metode>" og kallar med mottakaren fyrst.
+            hvis (mål_namn == "builtin.kall_metode" eller mål_namn == "kall_metode") og lengde(call_args) >= 2 {
+                la m_mottakar = call_args[0]
+                la m_metode = tekst(call_args[1])
+                la m_type = ""
+                hvis builtin.type(m_mottakar) == "ordbok" og vm_map_har_nokkel(m_mottakar, "__struct_type__") {
+                    m_type = tekst(m_mottakar["__struct_type__"])
+                }
+                hvis m_type == "" {
+                    intern_feil = "TypeFeil: metodekall ." + m_metode + " på ein verdi utan struktur-type"
+                    fortsett
+                }
+                la m_fn = m_type + "." + m_metode
+                // Løys via EKSAKT eller SUFFIKS-treff på ".Type.metode" — ikkje
+                // finn_funksjon (som fuzzy-matchar berre siste segment "metode"
+                // og difor er tvitydig når fleire typar har same metodenamn).
+                la m_løyst = ""
+                hvis vm_map_har_nokkel(functions, m_fn) {
+                    m_løyst = m_fn
+                } ellers {
+                    la m_keys = nøkler(functions)
+                    la m_suffiks = "." + m_fn
+                    la m_ki: heiltall = 0
+                    mens m_ki < lengde(m_keys) {
+                        hvis builtin.ends_with(tekst(m_keys[m_ki]), m_suffiks) {
+                            m_løyst = tekst(m_keys[m_ki])
+                            m_ki = lengde(m_keys)
+                        } ellers {
+                            m_ki = m_ki + 1
+                        }
+                    }
+                }
+                hvis m_løyst == "" {
+                    intern_feil = "MetodeFeil: fann ikkje " + m_fn
+                    fortsett
+                }
+                la m_args: liste = [m_mottakar]
+                la m_heap: liste_tekst = []
+                hvis lengde(call_heap_ids) > 0 { legg_til(m_heap, call_heap_ids[0]) }
+                la m_i: heiltall = 2
+                mens m_i < lengde(call_args) {
+                    legg_til(m_args, call_args[m_i])
+                    hvis m_i < lengde(call_heap_ids) { legg_til(m_heap, call_heap_ids[m_i]) }
+                    m_i = m_i + 1
+                }
+                mål_namn = m_fn
+                løyst_namn = m_løyst
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                call_args = m_args
+                call_heap_ids = m_heap
+                vm_metric_inc(functions, "method_calls")
+            }
+
             hvis (mål_namn == "builtin.ncb_call_fn" eller mål_namn == "ncb_call_fn") og lengde(call_args) > 0 {
                 la dynamisk_namn = tekst(call_args[0])
                 la dynamisk_løyst = finn_funksjon(dynamisk_namn, functions)
@@ -5000,9 +5134,15 @@ funksjon køyr_funksjon(
                 mens tpi < lengde(params) {
                     ramme["last_heap_id"] = ""
                     hvis tpi < lengde(call_heap_ids) { ramme["last_heap_id"] = call_heap_ids[tpi] }
-                    ramme_sett_var(ramme, params[tpi], call_args[tpi])
+                    hvis tpi < lengde(call_args) {
+                        ramme_sett_var(ramme, params[tpi], call_args[tpi])
+                    } ellers {
+                        ramme_sett_var(ramme, params[tpi], "__norscode_unset__")
+                    }
                     tpi = tpi + 1
                 }
+                vm_bind_rest(ramme, params, call_args, fn_def)
+                vm_bind_lambda_capture(ramme, lambda_capture)
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""
@@ -5090,9 +5230,15 @@ funksjon køyr_funksjon(
                 mens cpi < lengde(params) {
                     ramme["last_heap_id"] = ""
                     hvis cpi < lengde(call_heap_ids) { ramme["last_heap_id"] = call_heap_ids[cpi] }
-                    ramme_sett_var(ramme, params[cpi], call_args[cpi])
+                    hvis cpi < lengde(call_args) {
+                        ramme_sett_var(ramme, params[cpi], call_args[cpi])
+                    } ellers {
+                        ramme_sett_var(ramme, params[cpi], "__norscode_unset__")
+                    }
                     cpi = cpi + 1
                 }
+                vm_bind_rest(ramme, params, call_args, fn_def)
+                vm_bind_lambda_capture(ramme, lambda_capture)
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 hvis ikkje fast_mode { functions["__vm_pending_arg_heap_ids__"] = [] }
                 functions["__vm_last_return_heap_id__"] = ""

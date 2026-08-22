@@ -1,0 +1,157 @@
+# std/hendelseslokke.no — M7 (grunnmur): kooperativ event loop med virtuell klokke.
+#
+# Ei oppgåve er ei data-driven tilstandsmaskin (som M11-iteratorane):
+# `oppg_neste(t)` returnerer anten { "ferdig": sann, "merke": ... } eller
+# { "ferdig": usann, "vent": ms } — «vent» gir kontrollen tilbake til loopen,
+# som parkerer oppgåva til den virtuelle klokka har gått `ms` fram.
+#
+# Poenget (M7-akseptkriteriet): to oppgåver som kvar søv `ms` fullfører på
+# virtuell tid ≈ maks(ms), IKKJE sum(ms), fordi loopen køyrer dei samtidig.
+#
+# Køyrer på seed-runtimen i dag (ingen førsteklasses funksjonar, ingen ekte
+# suspend). Ekte `await`-suspendering av vilkårlege rammer og ikkje-blokkerande
+# socket-IO krev VM-maskineri — sjå plan-dokumentet.
+
+# ── Oppgåver ─────────────────────────────────────────────────────────────
+
+# Ei oppgåve som søv `ms` og så fullfører med etiketten `merke`.
+funksjon sov_oppgåve(ms: heiltall, merke: tekst) -> ordbok {
+    returner { "kind": "sov", "state": { "ms": ms, "fase": 0, "merke": merke } }
+}
+
+# Éi steg-utrekning av ei oppgåve.
+funksjon oppg_neste(t: ordbok) -> ordbok {
+    la st = t["state"]
+    hvis t["kind"] == "sov" {
+        hvis st["fase"] == 0 {
+            st["fase"] = 1
+            returner { "ferdig": usann, "vent": st["ms"] }
+        }
+        returner { "ferdig": sann, "merke": st["merke"] }
+    }
+    kast "HendelseslokkeFeil: ukjend oppgåve-kind: " + tekst(t["kind"])
+}
+
+# ── Hjelparar (seed-trygge, ingen slice/førsteklasses fn) ────────────────
+
+funksjon _fjern_første(xs: liste) -> liste {
+    la ut = []
+    la j = 1
+    mens j < lengde(xs) {
+        legg_til(ut, xs[j])
+        j = j + 1
+    }
+    returner ut
+}
+
+funksjon _min_vekk(parkerte: liste) -> heiltall {
+    la m = parkerte[0]["vekk"]
+    la j = 1
+    mens j < lengde(parkerte) {
+        hvis parkerte[j]["vekk"] < m {
+            m = parkerte[j]["vekk"]
+        }
+        j = j + 1
+    }
+    returner m
+}
+
+# ── Scheduler ────────────────────────────────────────────────────────────
+
+# Køyr alle oppgåvene samtidig på éi virtuell klokke. Returnerer
+# { "tid": <virtuell slutt-tid>, "ferdige": [merke i fullføringsrekkefølgje] }.
+# Dette er Promise.all-semantikken: ferdig når ALLE er ferdige.
+funksjon køyr_alle(oppgåver: liste) -> ordbok {
+    la tid = 0
+    la klare = []
+    la parkerte = []
+    la ferdige = []
+
+    la j = 0
+    mens j < lengde(oppgåver) {
+        legg_til(klare, oppgåver[j])
+        j = j + 1
+    }
+
+    mens lengde(klare) > 0 eller lengde(parkerte) > 0 {
+        hvis lengde(klare) == 0 {
+            # Ingen er køyreklare: hopp klokka fram til neste vekketid.
+            tid = _min_vekk(parkerte)
+            la nye_park = []
+            la p = 0
+            mens p < lengde(parkerte) {
+                hvis parkerte[p]["vekk"] <= tid {
+                    legg_til(klare, parkerte[p]["oppg"])
+                } ellers {
+                    legg_til(nye_park, parkerte[p])
+                }
+                p = p + 1
+            }
+            parkerte = nye_park
+        }
+
+        la t = klare[0]
+        klare = _fjern_første(klare)
+        la r = oppg_neste(t)
+        hvis r["ferdig"] {
+            legg_til(ferdige, r["merke"])
+        } ellers {
+            legg_til(parkerte, { "vekk": tid + r["vent"], "oppg": t })
+        }
+    }
+
+    returner { "tid": tid, "ferdige": ferdige }
+}
+
+# Race-semantikk (Promise.race / «først»): køyr samtidig, returner så snart
+# den FØRSTE oppgåva er ferdig. { "tid": <virtuell tid>, "merke": <vinnar> }.
+funksjon køyr_først(oppgåver: liste) -> ordbok {
+    la tid = 0
+    la klare = []
+    la parkerte = []
+
+    la j = 0
+    mens j < lengde(oppgåver) {
+        legg_til(klare, oppgåver[j])
+        j = j + 1
+    }
+
+    mens lengde(klare) > 0 eller lengde(parkerte) > 0 {
+        hvis lengde(klare) == 0 {
+            tid = _min_vekk(parkerte)
+            la nye_park = []
+            la p = 0
+            mens p < lengde(parkerte) {
+                hvis parkerte[p]["vekk"] <= tid {
+                    legg_til(klare, parkerte[p]["oppg"])
+                } ellers {
+                    legg_til(nye_park, parkerte[p])
+                }
+                p = p + 1
+            }
+            parkerte = nye_park
+        }
+
+        la t = klare[0]
+        klare = _fjern_første(klare)
+        la r = oppg_neste(t)
+        hvis r["ferdig"] {
+            returner { "tid": tid, "merke": r["merke"] }
+        }
+        legg_til(parkerte, { "vekk": tid + r["vent"], "oppg": t })
+    }
+
+    returner { "tid": tid, "merke": ingenting }
+}
+
+# Timeout-kombinator (Promise-timeout): køyr `oppgåve`, men gi opp dersom ho
+# ikkje er ferdig innan `frist` ms. Returnerer
+# { "tidsavbrot": bool, "merke": <vinnar eller ingenting>, "tid": <virtuell tid> }.
+funksjon med_timeout(oppgåve: ordbok, frist: heiltall) -> ordbok {
+    la vakt = sov_oppgåve(frist, "__tidsavbrot__")
+    la r = køyr_først([oppgåve, vakt])
+    hvis r["merke"] == "__tidsavbrot__" {
+        returner { "tidsavbrot": sann, "merke": ingenting, "tid": r["tid"] }
+    }
+    returner { "tidsavbrot": usann, "merke": r["merke"], "tid": r["tid"] }
+}
