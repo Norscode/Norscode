@@ -794,6 +794,44 @@ funksjon samanfatt_rute(route)
     returner summary
 slutt
 
+// M3: samle alle Ident-namn som blir refererte i eit uttrykkstre. Feltnamn
+// (obj.felt) er ikkje variablar og blir difor ikkje samla, sidan feltnamnet
+// ligg i node["verdi"] og ikkje som barn.
+funksjon _lambda_saml_referert(node, ut)
+    hvis node == null
+        returner 0
+    slutt
+    la t = node["type"]
+    hvis t == "Ident"
+        ut[node["verdi"]] = sann
+        returner 0
+    slutt
+    la barn = node["barn"]
+    la i = 0
+    mens i < lengde(barn)
+        _lambda_saml_referert(barn[i], ut)
+        i = i + 1
+    slutt
+    returner 0
+slutt
+
+// Samle namn som blir bundne inne i lambdaen: alle La-deklarasjonar i treet.
+funksjon _lambda_saml_bundne(node, ut)
+    hvis node == null
+        returner 0
+    slutt
+    hvis node["type"] == "La"
+        ut[node["verdi"]] = sann
+    slutt
+    la barn = node["barn"]
+    la i = 0
+    mens i < lengde(barn)
+        _lambda_saml_bundne(barn[i], ut)
+        i = i + 1
+    slutt
+    returner 0
+slutt
+
 funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
     // Lambdaen har sitt eige lokale namnrom. Ta vare på funksjonstilstanden
     // medan hjelpekoden blir generert, elles kan eit parameternamn som òg er
@@ -829,6 +867,31 @@ funksjon emit_lambda_hjelpefunksjon(komp, lambda_node, helper_namn)
         lokale[param_namn] = sann
         i = i + 1
     slutt
+
+    // M3: capture-analyse. Frie variablar = namn referert i kroppen, som ikkje
+    // er lambda-param, ikkje deklarert inne i kroppen, men som finst i det ytre
+    // lokale namnrommet (førre_lokale). Desse blir fanga ved BUILD_LAMBDA.
+    la referert = {}
+    _lambda_saml_referert(blokk, referert)
+    la bundne = {}
+    _lambda_saml_bundne(blokk, bundne)
+    la param_sett = {}
+    la ppi = 0
+    mens ppi < lengde(params)
+        param_sett[params[ppi]] = sann
+        ppi = ppi + 1
+    slutt
+    la capture_namn = []
+    la ref_namn = builtin.nøkler(referert)
+    la rni = 0
+    mens rni < lengde(ref_namn)
+        la kandidat = ref_namn[rni]
+        hvis ikkje har_nokkel(param_sett, kandidat) og ikkje har_nokkel(bundne, kandidat) og har_nokkel(førre_lokale, kandidat)
+            legg_til(capture_namn, kandidat)
+        slutt
+        rni = rni + 1
+    slutt
+    komp["lambda_siste_capture"] = capture_namn
 
     kode = []
     emit_blokk(komp, blokk, kode)
@@ -887,6 +950,8 @@ funksjon ny_komp()
     komp["global_kart"] = {}
     komp["global_namn"] = []
     komp["current_locals"] = {}
+    komp["enums"] = {}
+    komp["grensesnitt"] = {}
     komp["in_module_init"] = usann
     komp["source_map_active"] = sann
     hvis miljo_hent("NORSCODE_COMPILE_SOURCE_MAP") == "0"
@@ -1231,12 +1296,43 @@ funksjon emit_uttrykk(komp, node, kode)
     // avgrense emit-funksjonen ved den lange kall-delen; denne tidlege grenen
     // sikrar at BUILD_LIST finst i den sjølvstendige kompilatorflata.
     hvis t == "Liste"
+        // M10: har lista spread-element? Då byggjer vi henne dynamisk med
+        // legg_til/utvid i staden for BUILD_LIST (talet er ikkje statisk kjent).
+        har_spread = usann
+        si = 0
+        mens si < lengde(node["barn"])
+            hvis node["barn"][si]["type"] == "Spread" har_spread = sann slutt
+            si = si + 1
+        slutt
+        hvis ikkje har_spread
+            i = 0
+            mens i < lengde(node["barn"])
+                emit_uttrykk(komp, node["barn"][i], kode)
+                i = i + 1
+            slutt
+            legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(node["barn"])))
+            returner sann
+        slutt
+        // Dynamisk bygging: tmp = []; for kvart element append/utvid; returner tmp
+        spread_tmp = "__spread_" + tekst_fra_heltall(komp["teller"]) + "__"
+        komp["teller"] = komp["teller"] + 1
+        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", 0))
+        emit_store_namn(komp, kode, spread_tmp, sann)
         i = 0
         mens i < lengde(node["barn"])
-            emit_uttrykk(komp, node["barn"][i], kode)
+            el = node["barn"][i]
+            emit_load_namn(komp, kode, spread_tmp)
+            hvis el["type"] == "Spread"
+                emit_uttrykk(komp, el["barn"][0], kode)
+                legg_til(kode, json_kall("builtin.utvid", 2))
+            ellers
+                emit_uttrykk(komp, el, kode)
+                legg_til(kode, json_kall("builtin.legg_til", 2))
+            slutt
+            legg_til(kode, json_instruksjon_uten_arg("POP"))
             i = i + 1
         slutt
-        legg_til(kode, json_instruksjon_med_int("BUILD_LIST", lengde(node["barn"])))
+        emit_load_namn(komp, kode, spread_tmp)
         returner sann
     slutt
 
@@ -1250,7 +1346,36 @@ funksjon emit_uttrykk(komp, node, kode)
         returner sann
     slutt
 
+    hvis t == "OptionalFelt"
+        // M10: o?.felt → viss o er ingenting, ingenting; elles o[felt].
+        n_opt = tekst_fra_heltall(komp["teller"])
+        komp["teller"] = komp["teller"] + 1
+        acc_lbl = "__qacc_" + n_opt + "__"
+        end_lbl = "__qend_" + n_opt + "__"
+        emit_uttrykk(komp, node["barn"][0], kode)
+        legg_til(kode, json_instruksjon_uten_arg("DUP"))
+        emit_load_namn(komp, kode, "ingenting")
+        legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+        legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", acc_lbl))
+        legg_til(kode, json_instruksjon_uten_arg("POP"))
+        emit_load_namn(komp, kode, "ingenting")
+        legg_til(kode, json_instruksjon_med_tekst("JUMP", end_lbl))
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", acc_lbl))
+        legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
+        legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+        legg_til(kode, json_instruksjon_med_tekst("LABEL", end_lbl))
+        returner sann
+    slutt
+
     hvis t == "Felt"
+        // M9: enum-tilgang Farge.RAUD → heiltalskonstant
+        hvis node["barn"][0]["type"] == "Ident" og har_nokkel(komp["enums"], node["barn"][0]["verdi"])
+            la enum_kart = komp["enums"][node["barn"][0]["verdi"]]
+            hvis har_nokkel(enum_kart, node["verdi"])
+                legg_til(kode, json_instruksjon_med_int("PUSH_CONST", enum_kart[node["verdi"]]))
+                returner sann
+            slutt
+        slutt
         emit_uttrykk(komp, node["barn"][0], kode)
         legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", node["verdi"]))
         legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
@@ -1296,7 +1421,8 @@ funksjon emit_uttrykk(komp, node, kode)
         helper_namn = "__lambda_" + tekst_fra_heltall(komp["lambda_teller"])
         komp["lambda_teller"] = komp["lambda_teller"] + 1
         emit_lambda_hjelpefunksjon(komp, node, helper_namn)
-        legg_til(kode, "[\"BUILD_LAMBDA\"," + json_escape_tekst(komp["modul"] + "." + helper_namn) + "," + json_liste_tekst([]) + "]")
+        la lam_capture = komp["lambda_siste_capture"]
+        legg_til(kode, "[\"BUILD_LAMBDA\"," + json_escape_tekst(komp["modul"] + "." + helper_namn) + "," + json_liste_tekst(lam_capture) + "]")
         returner sann
     slutt
 
@@ -1372,6 +1498,20 @@ funksjon emit_uttrykk(komp, node, kode)
         argumenter = node["barn"][1]
         arg_antal = lengde(argumenter["barn"])
 
+        // M5: metodekall p.metode(args) der p er ein lokal variabel → dispatch
+        // på struktur-typen i køyretid. Rekkjefølgje: mottakar, metodenamn, args.
+        hvis fn_ident["type"] == "Felt" og fn_ident["barn"][0]["type"] == "Ident" og har_nokkel(komp["current_locals"], fn_ident["barn"][0]["verdi"]) og ikkje har_nokkel(komp["import_alias"], fn_ident["barn"][0]["verdi"])
+            emit_load_namn(komp, kode, fn_ident["barn"][0]["verdi"])
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", fn_ident["verdi"]))
+            mi = 0
+            mens mi < arg_antal
+                emit_uttrykk(komp, argumenter["barn"][mi], kode)
+                mi = mi + 1
+            slutt
+            legg_til(kode, json_kall("builtin.kall_metode", arg_antal + 2))
+            returner sann
+        slutt
+
         // Evaluer alle argument
         i = 0
         mens i < arg_antal
@@ -1405,6 +1545,14 @@ funksjon emit_uttrykk(komp, node, kode)
 
         fn_navn = fn_ident["verdi"]
         fullt_namn = modul + "." + fn_navn
+
+        // M3: kall til ein lokal variabel som held ein lambda-verdi. Args er
+        // alt evaluerte; last verdien øvst og bruk CALL_VALUE.
+        hvis fn_ident["type"] == "Ident" og har_nokkel(komp["current_locals"], fn_navn) og ikkje har_nokkel(komp["funk_kart"], fn_navn)
+            emit_load_namn(komp, kode, fn_navn)
+            legg_til(kode, "[\"CALL_VALUE\"," + json_heiltal_tekst(arg_antal) + "]")
+            returner sann
+        slutt
 
         // Sjekk om det er ein brukardefinert funksjon i same modul
         hvis builtin.starts_with(fn_navn, "builtin.")
@@ -1624,6 +1772,45 @@ funksjon emit_setning(komp, node, kode)
     slutt
 
     // La x = expr  (variabel-deklarasjon)
+    hvis t == "LaOrdbok"
+        // M10: la {x, y} = ordbok  → tmp = ordbok; x = tmp["x"]; y = tmp["y"]
+        omønster = node["barn"][0]
+        overdi = node["barn"][1]
+        otmp = "__destructm_" + tekst_fra_heltall(komp["teller"]) + "__"
+        komp["teller"] = komp["teller"] + 1
+        emit_uttrykk(komp, overdi, kode)
+        emit_store_namn(komp, kode, otmp, sann)
+        oi = 0
+        mens oi < lengde(omønster["barn"])
+            la feltnamn = omønster["barn"][oi]["verdi"]
+            emit_load_namn(komp, kode, otmp)
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", feltnamn))
+            legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+            emit_store_namn(komp, kode, feltnamn, sann)
+            oi = oi + 1
+        slutt
+        returner sann
+    slutt
+
+    hvis t == "LaListe"
+        // M10: la [a, b] = uttrykk  → tmp = uttrykk; a = tmp[0]; b = tmp[1]; ...
+        mønster = node["barn"][0]
+        verdi_uttrykk = node["barn"][1]
+        tmp_var = "__destruct_" + tekst_fra_heltall(komp["teller"]) + "__"
+        komp["teller"] = komp["teller"] + 1
+        emit_uttrykk(komp, verdi_uttrykk, kode)
+        emit_store_namn(komp, kode, tmp_var, sann)
+        di = 0
+        mens di < lengde(mønster["barn"])
+            emit_load_namn(komp, kode, tmp_var)
+            legg_til(kode, json_instruksjon_med_int("PUSH_CONST", di))
+            legg_til(kode, json_instruksjon_uten_arg("INDEX_GET"))
+            emit_store_namn(komp, kode, mønster["barn"][di]["verdi"], sann)
+            di = di + 1
+        slutt
+        returner sann
+    slutt
+
     hvis t == "La"
         namn = node["verdi"]
         hvis lengde(node["barn"]) > 0
@@ -1787,7 +1974,10 @@ funksjon emit_setning(komp, node, kode)
         loop_end_lbl   = "__for_end_"   + loop_n + "__"
         loop_cont_lbl  = "__for_cont_"  + loop_n + "__"
 
-        // Evaluer liste og lagre
+        // Evaluer samlinga. For-løkke-codegen er byte-identisk med seeden
+        // (ingen ekstra opcode) — det held sjølvhostings-fixpunktet Gen1==Gen2.
+        // For-løkke over ordbok (nøklane) går via std.iterator.frå_ordbok i
+        // staden for ei codegen-endring; liste og tekst itererast direkte.
         emit_uttrykk(komp, node["barn"][0], kode)
         legg_til(kode, json_instruksjon_med_tekst("STORE_NAME", iter_liste_var))
         // Indeks = 0
@@ -1936,11 +2126,19 @@ funksjon kompiler_funksjon(komp, fn_node)
     komp["in_module_init"] = usann
     i = 0
     param_barn = param_node["barn"]
+    har_rest_param = usann
     mens i < lengde(param_barn)
         la param_namn = param_barn[i]["verdi"]
         legg_til(params, param_namn)
         la lokale = komp["current_locals"]
         lokale[param_namn] = sann
+        // M10: varargs — parameteren har ein Rest-node
+        la prb = param_barn[i]["barn"]
+        la rk = 0
+        mens rk < lengde(prb)
+            hvis prb[rk]["type"] == "Rest" har_rest_param = sann slutt
+            rk = rk + 1
+        slutt
         i = i + 1
     slutt
     ir_fremdrift("compile-function-params " + fn_node["verdi"])
@@ -1950,6 +2148,32 @@ funksjon kompiler_funksjon(komp, fn_node)
     komp["current_source_lines"] = []
     komp["current_source_columns"] = []
     komp["defer_blocks"] = []
+
+    // M10: standardargument. For kvar parameter med ein Standard-node: viss han
+    // er ingenting ved inngang (manglande argument), fyll inn standardverdien.
+    di = 0
+    mens di < lengde(param_barn)
+        pb = param_barn[di]
+        std_barn = null
+        bj = 0
+        mens bj < lengde(pb["barn"])
+            hvis pb["barn"][bj]["type"] == "Standard" std_barn = pb["barn"][bj] slutt
+            bj = bj + 1
+        slutt
+        hvis std_barn != null
+            skip_lbl = "__defskip_" + tekst_fra_heltall(komp["teller"]) + "__"
+            komp["teller"] = komp["teller"] + 1
+            emit_load_namn(komp, kode, pb["verdi"])
+            legg_til(kode, json_instruksjon_med_tekst("PUSH_CONST", "__norscode_unset__"))
+            legg_til(kode, json_instruksjon_uten_arg("COMPARE_EQ"))
+            legg_til(kode, json_instruksjon_med_tekst("JUMP_IF_FALSE", skip_lbl))
+            emit_uttrykk(komp, std_barn["barn"][0], kode)
+            emit_store_namn(komp, kode, pb["verdi"], usann)
+            legg_til(kode, json_instruksjon_med_tekst("LABEL", skip_lbl))
+        slutt
+        di = di + 1
+    slutt
+
     ir_fremdrift("compile-function-body " + fn_node["verdi"])
     emit_blokk(komp, blokk, kode)
 
@@ -2022,6 +2246,9 @@ funksjon kompiler_funksjon(komp, fn_node)
         fn_json = fn_json + "\"is_async\":true,"
     ellers
         fn_json = fn_json + "\"is_async\":false,"
+    slutt
+    hvis har_rest_param
+        fn_json = fn_json + "\"rest_param\":\"sann\","
     slutt
     fn_json = fn_json + "\"string_encoding\":\"decoded-v1\","
     fn_json = fn_json + "\"code\":" + kode_json + ","
@@ -2136,6 +2363,26 @@ funksjon kompiler_program(ast_program, modul_namn)
         hvis node["type"] == "Funksjon"
             fk[node["verdi"]] = sann
         slutt
+        hvis node["type"] == "Enum"
+            la enum_kart = {}
+            la ei = 0
+            mens ei < lengde(node["barn"])
+                enum_kart[node["barn"][ei]["verdi"]] = ei
+                ei = ei + 1
+            slutt
+            komp["enums"][node["verdi"]] = enum_kart
+        slutt
+        hvis node["type"] == "Grensesnitt"
+            la metodar = []
+            la gi = 0
+            mens gi < lengde(node["barn"])
+                hvis node["barn"][gi]["type"] == "MetodeSig"
+                    legg_til(metodar, node["barn"][gi]["verdi"])
+                slutt
+                gi = gi + 1
+            slutt
+            komp["grensesnitt"][node["verdi"]] = metodar
+        slutt
         hvis node["type"] == "La" {
             la global_namn = node["verdi"]
             hvis ikkje har_nokkel(komp["global_kart"], global_namn) {
@@ -2153,6 +2400,34 @@ funksjon kompiler_program(ast_program, modul_namn)
             registrer_importerte_funksjonar(komp, alias, node["verdi"])
         slutt
         i = i + 1
+    slutt
+
+    // M9: sjekk at strukturar som implementerer eit grensesnitt har alle
+    // metodane. Metodar er registrerte som "Struktur.metode" i fk.
+    ci = 0
+    mens ci < lengde(ast_program["barn"])
+        cnode = ast_program["barn"][ci]
+        hvis cnode["type"] == "Struktur"
+            bi = 0
+            mens bi < lengde(cnode["barn"])
+                hvis cnode["barn"][bi]["type"] == "Implementerer"
+                    la grnamn = cnode["barn"][bi]["verdi"]
+                    hvis har_nokkel(komp["grensesnitt"], grnamn)
+                        la krav = komp["grensesnitt"][grnamn]
+                        la ki = 0
+                        mens ki < lengde(krav)
+                            la mnamn = cnode["verdi"] + "." + krav[ki]
+                            hvis ikkje har_nokkel(fk, mnamn)
+                                kast "Grensesnittfeil: " + cnode["verdi"] + " implementerer " + grnamn + " men manglar metoden " + krav[ki]
+                            slutt
+                            ki = ki + 1
+                        slutt
+                    slutt
+                slutt
+                bi = bi + 1
+            slutt
+        slutt
+        ci = ci + 1
     slutt
 
     // Andre pass: kompiler kvar funksjon

@@ -1,0 +1,160 @@
+# tools/rebuild_seed_kandidat.no
+#
+# Byggjer ein FERSK seed-kandidat frå gjeldande kjelde og verifiserer at
+# paritetsarbeidet (M1–M11) er aktivert i han — UTAN å promotere noko.
+# Skriv berre under build/seedkandidat/ og build/fullhost/; rører ALDRI
+# dist/norscode_native, bin/nc eller bootstrap/stage0.
+#
+# Køyr på ein host med nok minne (~10–13 GiB ledig arbeidssett; native
+# codegen toppar ~8,7 GiB). På ein maskin med samtidig last / lite ledig
+# minne kan macOS jetsam-drepe steg 2 — sjå [[seed-aktivering-minnevegg]].
+#
+# Bruk:
+#   NORSCODE_ENABLE_EXEC_PROSESS=1 \
+#   NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+#   NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+#   ./bin/nc run tools/rebuild_seed_kandidat.no
+#
+# Miljø-overstyringar:
+#   NC_SEED_TARGET   — codegen-mål (standard "macos-arm64"; t.d. "linux-arm64")
+#   NC_SEED_OUT      — kandidat-binærsti (standard build/seedkandidat/nc_kandidat)
+
+bruk tools.process_runner som prosess
+
+funksjon linje(m: tekst) -> heiltall { skriv(m + "\n") returner 0 }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon fil_finst(sti: tekst) -> bool {
+    prøv { returner builtin.fil_finnes(sti) } fang (e) { returner usann }
+    returner usann
+}
+
+# Køyr eit vilkårleg binær (bin/nc eller kandidaten) med exec-capabilities.
+# reuse=sann set NC_FULLHOST_REUSE=1 slik at materialiseringa hoppar over
+# modulfragment som alt er kompilerte på disk (går rett til samanslåinga).
+funksjon køyr_bin(bin: tekst, argv: liste_tekst, root: tekst, timeout_ms: heiltall, reuse: bool) -> ordbok {
+    la miljø = {
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        // Full cap-sett: bygg-native lastar nc_main-bundlen og køyrer
+        // modul-initialisatoren, som reserverer net/thread/jit-capabilities.
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write,jit.execute",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    hvis reuse { miljø["NC_FULLHOST_REUSE"] = "1" }
+    la resultat = prosess.køyr(bin, argv, root, miljø, timeout_ms)
+    returner resultat
+}
+
+funksjon rapporter(merke: tekst, resultat: ordbok) -> bool {
+    la ok = prosess.ok(resultat)
+    la ms = prosess.veggtid_ms(resultat)
+    la rss = prosess.minnetopp_bytes(resultat)
+    la rss_gb = rss / 1073741824
+    hvis ok {
+        linje("  [OK] " + merke + "  (" + tekst(ms / 1000) + "s, topp ~" + tekst(rss_gb) + " GiB)")
+    } ellers {
+        linje("  [FEIL] " + merke + "  status=" + tekst(resultat["status"]) +
+            " exit=" + tekst(resultat["exit_code"]) + " (" + tekst(ms / 1000) + "s)")
+        prosess.skriv_resultat(resultat)
+    }
+    returner ok
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+
+    la target = env("NC_SEED_TARGET")
+    hvis target == "" { target = "macos-arm64" }
+
+    la ut = env("NC_SEED_OUT")
+    hvis ut == "" { ut = root + "/build/seedkandidat/nc_kandidat" }
+
+    la driver = root + "/build/l5/compiler_driver.ncb.json"
+    la bundle = root + "/build/fullhost/nc_main_fullhost_candidate.ncb.json"
+    la smoke = root + "/tools/fixtures/seed_aktivering_smoke.no"
+
+    linje("=== Seed-kandidat frå levande kjelde (ikkje-destruktiv) ===")
+    linje("  root   : " + root)
+    linje("  mål    : " + target)
+    linje("  kandidat: " + ut)
+    linje("  (kvart steg hoppast over om utfila alt finst — trygt å køyre på nytt)")
+    linje("")
+
+    hvis ikkje fil_finst(smoke) {
+        linje("Feil: manglar " + smoke)
+        returner 1
+    }
+
+    # [1/4] L5: sjølvkompiler selfhost-modulane frå kjelde til L5-bundles
+    #       (byte-identisk Gen1/Gen2). Produserer build/l5/compiler_driver.ncb.json
+    #       som materialiseringa treng.
+    hvis fil_finst(driver) {
+        linje("[1/4] L5-driver finst alt — hoppar over selfcompile-l5")
+    } ellers {
+        linje("[1/4] selfcompile-l5 (byggjer build/l5/*) ...")
+        la r1 = køyr_bin(root + "/bin/nc", ["selfcompile-l5"], root, 3600000, usann)
+        hvis ikkje rapporter("selfcompile-l5", r1) { returner 1 }
+        hvis ikkje fil_finst(driver) {
+            linje("Feil: selfcompile-l5 gav ingen driver: " + driver)
+            returner 1
+        }
+    }
+    linje("")
+
+    # [2/4] Materialiser full nc_main-bundle frå kjelde (minnetrygg L5b-fragment-
+    #       materialisering; per-modul barneprosessar). Skriv build/fullhost/.
+    hvis fil_finst(bundle) {
+        linje("[2/4] nc_main-bundle finst alt — hoppar over materialisering")
+    } ellers {
+        linje("[2/4] Materialiser nc_main-fullhost-bundle frå kjelde ...")
+        la r2 = køyr_bin(root + "/bin/nc",
+            ["run", "tools/materialize_nc_main_fullhost_candidate.no"], root, 5400000, sann)
+        hvis ikkje rapporter("materialisering", r2) { returner 1 }
+        hvis ikkje fil_finst(bundle) {
+            linje("Feil: materialiseringa gav ingen bundle: " + bundle)
+            returner 1
+        }
+    }
+    linje("")
+
+    # [3/4] Native codegen: bundle → kandidat-binær. DENNE toppar ~8,7 GiB.
+    hvis fil_finst(ut) {
+        linje("[3/4] Kandidat-binær finst alt — hoppar over bygg-native")
+    } ellers {
+        linje("[3/4] Native codegen (bygg-native --ncb) → kandidat ...")
+        la r3 = køyr_bin(root + "/bin/nc",
+            ["bygg-native", "--target", target, "--ncb", bundle, ut], root, 5400000, usann)
+        hvis ikkje rapporter("bygg-native", r3) { returner 1 }
+        hvis ikkje fil_finst(ut) {
+            linje("Feil: bygg-native gav ingen binær: " + ut)
+            returner 1
+        }
+    }
+    linje("")
+
+    # [4/4] Aktiverings-smoke GJENNOM kandidaten. Gammal seed feilar med
+    #       BUILD_LAMBDA; ein korrekt fersk seed skriv «SEED-AKTIVERING OK».
+    linje("[4/4] Aktiverings-smoke gjennom kandidaten ...")
+    la r4 = køyr_bin(ut, ["run", smoke], root, 120000, usann)
+    la ok4 = rapporter("aktiverings-smoke", r4)
+    linje("")
+
+    hvis ok4 {
+        linje("=== KANDIDAT GRØN: M1–M11 er aktivert i " + ut + " ===")
+        linje("")
+        linje("Ikkje-destruktivt. Promotering (berre på B2-sporet, medvite):")
+        linje("  cp bootstrap/stage0/norscode-<plattform> bootstrap/stage0/rollback/")
+        linje("  cp " + ut + " dist/norscode_native   # OG bootstrap/stage0/<plattform>")
+        linje("  shasum -a 256 dist/norscode_native bootstrap/stage0/* > oppdater SHA256SUMS")
+        linje("  ./bin/nc selvstendighet --strict     # full port før promotering")
+        returner 0
+    }
+
+    linje("=== KANDIDAT IKKJE VERIFISERT — sjå [FEIL] over ===")
+    returner 1
+}
