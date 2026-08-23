@@ -49,9 +49,15 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 2 — Differensial-sele + opcode-matrise  ·  *1 v*
 
-- [ ] `nc run --diff <fil>` køyrer AOT + tolk og feilar ved ulikt resultat.
-- [ ] Full opcode/builtin-matrise: {støtta i tolk} × {støtta i AOT}.
-- **Port:** differensial-selen grøn for alle opcodane AOT alt støttar.
+- [x] Differensial-sele som køyrer AOT + tolk og feilar ved ulikt resultat:
+      `tools/differensial_sele.no` (returverdi/exit-kode-samanlikning) +
+      fixturar (`diff_smoke`, `diff_null_index`) + **CI-jobb «Differensial-sele
+      (AOT vs tolk)»** på Linux. Tolk-delen verifisert lokalt (=42).
+      *(0a90c7c, ca05609)*
+- [ ] Full opcode/builtin-matrise (dokumentert oversyn) — sela er verktøyet;
+      matrisa som eksplisitt dokument står att.
+- **Port:** differensial-selen grøn for alle opcodane AOT alt støttar
+      — CI-jobben er verifiseringa (tolk-delen lokalt grøn).
 
 ## Omgang 3 — M3 i AOT: closures/lambdaer  ·  *3–5 v · tyngst*
 
