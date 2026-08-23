@@ -54,8 +54,10 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       fixturar (`diff_smoke`, `diff_null_index`) + **CI-jobb «Differensial-sele
       (AOT vs tolk)»** på Linux. Tolk-delen verifisert lokalt (=42).
       *(0a90c7c, ca05609)*
-- [ ] Full opcode/builtin-matrise (dokumentert oversyn) — sela er verktøyet;
-      matrisa som eksplisitt dokument står att.
+- [x] Full opcode-støttematrise: `tools/opcode_matrise.no` (regenererbar) +
+      `docs/OPCODE_MATRISE.md`. Viser tolk × AOT-x86 × AOT-arm64. Funn: M3
+      (BUILD_LAMBDA/CALL_VALUE) manglar overalt, unntak/felt berre tolk,
+      TRY_*/LOAD_EXCEPTION manglar i AOT-x86. *(f844c08)*
 - **Port:** differensial-selen grøn for alle opcodane AOT alt støttar
       — CI-jobben er verifiseringa (tolk-delen lokalt grøn).
 
