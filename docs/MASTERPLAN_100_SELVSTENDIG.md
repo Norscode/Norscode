@@ -38,11 +38,14 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 - [x] Diagnose + fiks av `INDEX_SET`-null-deref (signal 139): INDEX_GET var
       null-trygg, INDEX_SET ikkje. Ny `emit_null_safe_index_set` (x86_64) +
-      `cbz Xobj,done`-vakt (ARM64). *(commit 32c0693; nc check OK — maskinkode
-      + port må verifiserast på native bygg)*
-- [ ] Konsistent null/ingenting-boksing elles i native codegen (breiare gjennomgang).
-- **Port:** eksisterande native regresjonssuite grøn på x86_64 + ARM64
-      *(krev Linux/CI + ARM64-host — ikkje stadfestbart frå macOS)*.
+      `cbz Xobj,done`-vakt (ARM64). *(32c0693)*
+- [x] Konsistent null-tryggleik i heile codegen: alle inlina container-deref-
+      punkt vakta. x86_64 = `emit_null_safe_index_get/set` (map/list via RT-kall
+      = runtime-lag). ARM64 = `emit_index_get/set` + `emit_map_get` + `emit_legg_til`
+      (cbz-vakter). *(0b9ae37, 8df31bf; nc check OK)*
+- **Port:** native regresjonssuite grøn på x86_64 + ARM64 — **verifiserast av
+      PR #184 sin CI** (ELF stage-0 alt grøn 2×; Native-jobbane er den siste biten).
+      *Ikkje stadfestbart frå macOS; maskinkoden er byte-usjekka herifrå.*
 
 ## Omgang 2 — Differensial-sele + opcode-matrise  ·  *1 v*
 
