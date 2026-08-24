@@ -10,9 +10,17 @@ og codegen-endringane må vere rebygde. Dette dokumentet SCOPER kva loopen skal 
 - **M1 streng typesjekk** — compile-tid (`semantic.no` Pass 3 → `typecheck.kt_koyr`,
   av som standard). Skjer under kompilering, ikkje i native runtime → **ingen
   native jobb**. ✓
-- **Omgang 3–6-opcodane** (closures, struct-metodar, M10, typa unnatak) — ARM64
-  dekt (sjå `docs/OPCODE_MATRISE.md`: BUILD_LAMBDA/CALL_VALUE/TRY_*/LOAD_EXCEPTION
-  = `arm=JA`).
+- **Omgang 3–7 EXECUTION-VERIFISERT på ekte ARM64 Linux** (Docker linux/arm64,
+  Apple Silicon). Kjør `tools/verify_omgang_docker.sh` (fixturar i
+  `tools/fixtures/ncb_arm64/`). Alle exit 42:
+  - O3 closures: capture (0-arg) + capture+arg (CALL_VALUE arg-passing).
+  - O4 struct-konstruktor + kall_metode: TYPE-dispatch (Punkt.sum vs Kvadrat.sum)
+    + metode-med-argument.
+  - O5 M10: default, rest, spread (`utvid`), optional (`DUP`), destrukturering.
+  - O6 typa unnatak: typa-catch + catch-all + PROPAGERING (NettFeil forbi FilFeil).
+  - O7 defer/finally: normal + return-gjennom + throw-gjennom.
+  - **5 enkoding-bugs funne+fiksa** som strukturell codegen ikkje kunne sjå (sjå
+    commit-historikk + [[omgang-native-codegen]]-minnet).
 
 ## Attståande native-hol (det Omgang 7-loopen tettar)
 
