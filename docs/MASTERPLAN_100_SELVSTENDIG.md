@@ -63,7 +63,11 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 3 — M3 i AOT: closures/lambdaer  ·  *3–5 v · tyngst*
 
-- [ ] Closure-representasjon i heap (funksjonsindeks + capture-peikar, ABI-dok).
+- [x] Closure-representasjon i heap (funksjonsindeks + capture-peikar, ABI-dok):
+      tagg 6 = `{fn_index, capture_ptr}`, funksjons-adressetabell (indeks→adresse
+      via `adrp+add`), capture som etterfølgjande arg `x[argc]`, prolog-binding
+      via `map_get`. Grunna i faktisk NcVal-/funksjonslayout, differensial-kontrakt
+      mot tolk-orakelet. **[docs/OMGANG3_CLOSURE_ABI.md](OMGANG3_CLOSURE_ABI.md)**
 - [ ] `BUILD_LAMBDA` + `CALL_VALUE` i native codegen (indirekte kall).
 - [ ] Capture-binding i callee-prolog + fixpunkt-regenerering av seed.
 - **Port:** `test_lambda_closure` AOT == tolk (differensial grøn).
