@@ -113,8 +113,12 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       rest-NCB → 1668 B). **[docs/OMGANG5_M10_ABI.md](OMGANG5_M10_ABI.md)**,
       fixturar `diff_default.no`/`diff_varargs.no`. *(ARM64; enkoding via Docker/CI;
       seed-frontend parsar ikkje M10-syntaks → differensial ventar rebuild)*
-- [ ] Spread/destrukturering/optional/template i native (alt vanleg bytekode →
-      ventar mest verifisering; sjå oppgåve 2 i ABI-doket).
+- [x] Spread/destrukturering/optional/template i native. Gjennomgang: destrukturering
+      (INDEX_GET) + template (lexer→konkat) er alt vanleg bytekode. To hol tetta:
+      **`emit_utvid`** (spread `[...a,b]` → `builtin.utvid`, éin realloc kopier
+      begge lister) + **`DUP`**-opcode (optional `o?.felt`). Strukturelt verifisert
+      (DUP+utvid+INDEX_GET-NCB → 960 B). Fixturar `diff_spread/optional/destruct.no`.
+      *(ARM64; enkoding via Docker/CI; seed-frontend parsar ikkje M10 → ventar rebuild)*
 - **Port:** `test_varargs/standardarg/spread/destrukturering/optional/template` AOT == tolk.
 
 ## Omgang 6 — M2/M4/M6/M9 i AOT  ·  *2–3 v*

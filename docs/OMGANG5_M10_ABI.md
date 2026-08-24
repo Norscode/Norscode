@@ -45,9 +45,25 @@ M10-syntaks (`b = 10`, `...resten`) enno, så differensial via `bygg-native`
 ventar på seed-rebuild; tolk-sida (kjelde-kompilator) + strukturell codegen dekkjer
 logikken. Fixturar: `tools/fixtures/diff_default.no`, `diff_varargs.no`.
 
-## Oppgåve 2 — spread/destrukturering/optional/template *(neste)*
+## Oppgåve 2 — spread/destrukturering/optional/template *(GJORT)*
 
-Sidan desse alt er vanleg bytekode (over), er forventinga at native ALT køyrer
-dei — oppgåve 2 = verifisere med fixturar (differensial grøn) og tette
-eventuelle attståande opcode-hol (t.d. optional-chaining/template-spesifikke
-opcodar om nokon finst). `test_spread/destrukturering/optional/template` AOT == tolk.
+Gjennomgang av kompilator-emisjonen viste at DESSE alt er vanleg bytekode med
+berre TO native-hol:
+
+- **Destrukturering** (`la [a,b]=e`): `tmp=e; a=tmp[0]; b=tmp[1]` (INDEX_GET) —
+  alt støtta. Ingen hol.
+- **Template** (`f"svar {n}"`): lexeren lowrar til `"" + "svar " + tekst(n)`
+  (konkat) — alt støtta. Ingen hol.
+- **Spread** (`[...a, b]`): kallstaden byggjer lista med `BUILD_LIST 0` +
+  `builtin.utvid`(spread-element) + `builtin.legg_til`(vanleg). `legg_til` var
+  støtta; **`utvid` var eit hol** → ny `emit_utvid` (éin realloc: ny listdata
+  dst_count+src_count, kopier begge, repoint; null-trygg).
+- **Optional** (`o?.felt`): `DUP; LOAD ingenting; COMPARE_EQ; JUMP_IF_FALSE; …;
+  INDEX_GET`. **`DUP` var eit hol** → ny DUP-handterar (reg: `mov`; mem: ldr/str
+  home; maxdjupn +1).
+
+Strukturelt verifisert: NCB med DUP + utvid + legg_til + INDEX_GET → image utan
+feil. `test_spread/destrukturering/optional/template` AOT == tolk er fasit via
+Docker/CI. Fixturar: `diff_spread.no`, `diff_optional.no`, `diff_destruct.no`
+(seed-frontenden parsar ikkje M10-syntaks → differensial ventar seed-rebuild;
+dei eksisterande `tests/test_*.no` dekkjer tolk-sida via kjelde-kompilator).
