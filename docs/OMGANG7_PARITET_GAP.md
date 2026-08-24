@@ -11,8 +11,19 @@ og codegen-endringane må vere rebygde. Dette dokumentet SCOPER kva loopen skal 
   av som standard). Skjer under kompilering, ikkje i native runtime → **ingen
   native jobb**. ✓
 - **Omgang 3–7 EXECUTION-VERIFISERT på ekte ARM64 Linux** (Docker linux/arm64,
-  Apple Silicon). Kjør `tools/verify_omgang_docker.sh` (fixturar i
-  `tools/fixtures/ncb_arm64/`). Alle exit 42:
+  Apple Silicon). Fixturar: `tools/fixtures/ncb_arm64/*.ncb.json`. Reprodusér
+  (Norscode-first, ingen shell-wrapper — Fase 0 tillèt ikkje aktive .sh utan
+  .no-eigar):
+
+  ```
+  # 1) bygg alle fixturane til ELF i EIN kjelde-codegen-køyring (~5-8 min):
+  NC_ELF_SPECS="tools/fixtures/ncb_arm64/nc_closure.ncb.json:build/e_closure,..." \
+    NORSCODE_USE_PRECOMPILED_SELFHOST=0 ./bin/nc run tools/elf_multi_host.no
+  # 2) køyr kvar i Docker og sjekk exit (42, unnt.):
+  docker run --rm --platform linux/arm64 -v "$PWD/build:/w:ro" alpine:3.20 /w/e_closure
+  ```
+
+  Alle exit 42:
   - O3 closures: capture (0-arg) + capture+arg (CALL_VALUE arg-passing).
   - O4 struct-konstruktor + kall_metode: TYPE-dispatch (Punkt.sum vs Kvadrat.sum)
     + metode-med-argument.
