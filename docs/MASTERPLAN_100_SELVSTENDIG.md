@@ -104,8 +104,17 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 5 — M10 i AOT: varargs, standardarg, spread, destrukturering  ·  *2–3 v*
 
-- [ ] Rest-param → liste i native prolog; standardargument-prolog.
-- [ ] Spread/destrukturering/optional/template i native.
+- [x] Rest-param → liste; standardargument-tilpassing. Sidan `bl` ikkje ber
+      argumenttal skjer det på KALLSTADEN (kjenner argc + målsignatur): rest →
+      pakk overskytande operandar i liste (`emit_build_list`, siste param);
+      nargs<nparams → pad `x[nargs..nparams-1]` med `"__norscode_unset__"`-sentinel
+      (standardarg-prologen i kroppen fyller default — rein bytekode alt støtta).
+      Normal-vegen byte-identisk (fixpunkt urørt). Strukturelt verifisert (default+
+      rest-NCB → 1668 B). **[docs/OMGANG5_M10_ABI.md](OMGANG5_M10_ABI.md)**,
+      fixturar `diff_default.no`/`diff_varargs.no`. *(ARM64; enkoding via Docker/CI;
+      seed-frontend parsar ikkje M10-syntaks → differensial ventar rebuild)*
+- [ ] Spread/destrukturering/optional/template i native (alt vanleg bytekode →
+      ventar mest verifisering; sjå oppgåve 2 i ABI-doket).
 - **Port:** `test_varargs/standardarg/spread/destrukturering/optional/template` AOT == tolk.
 
 ## Omgang 6 — M2/M4/M6/M9 i AOT  ·  *2–3 v*
