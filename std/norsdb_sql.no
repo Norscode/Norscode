@@ -23,6 +23,28 @@ funksjon _opp(s: tekst) -> tekst {
     returner builtin.upper(s)
 }
 
+// Hex-teikn → 0-15. (NB: _hex_siffer finst alt med motsett signatur — difor _hex_val.)
+funksjon _hex_val(c: tekst) -> heltall {
+    la cc = builtin.char_code(builtin.lower(c))
+    hvis cc >= 48 og cc <= 57 { returner cc - 48 }
+    hvis cc >= 97 og cc <= 102 { returner cc - 87 }
+    returner 0
+}
+
+// Dekod hex-par → bytes-som-streng (BLOB-literal x'…'). ASCII-trygt.
+funksjon _blob_decode(hex: tekst) -> tekst {
+    la h = builtin.split(hex, "")
+    la ut = ""
+    la i = 0
+    mens (i + 1) < lengde(h) {
+        la hi = _hex_val(h[i])
+        la lo = _hex_val(h[i + 1])
+        ut = ut + builtin.chr((hi * 16) + lo)
+        i = i + 2
+    }
+    returner ut
+}
+
 funksjon _unquote(v: tekst) -> tekst {
     la s = builtin.trim(v)
     hvis lengde(s) >= 2 og builtin.slice(s, 0, 1) == "'" og builtin.slice(s, lengde(s) - 1, lengde(s)) == "'" {
@@ -40,6 +62,16 @@ funksjon _tok(sql: tekst) -> liste {
         la c = chars[i]
         hvis _er_ws(c) {
             i = i + 1
+            fortsett
+        }
+        // BLOB-literal x'…' / X'…' → eige token "x'…'" (før identifikator/streng).
+        hvis (c == "x" eller c == "X") og i + 1 < n og chars[i + 1] == "'" {
+            la hv = ""
+            la j = i + 2
+            mens j < n og chars[j] != "'" { hv = hv + chars[j]; j = j + 1 }
+            hvis j < n { j = j + 1 }
+            legg_til(ut, "x'" + hv + "'")
+            i = j
             fortsett
         }
         hvis c == "'" {
@@ -126,7 +158,17 @@ funksjon _er_tal(v: tekst) -> boolsk {
     returner sann
 }
 
+// ── 3-verdi NULL: sentinel (chr(1)"NUL"chr(1) — finst aldri i SQL-tekst, ≠ "") ──
+funksjon _NULLV() -> tekst { returner builtin.chr(1) + "NUL" + builtin.chr(1) }
+funksjon _ern(v: tekst) -> boolsk { returner v == _NULLV() }
+// Output: sentinel → "" (SQLite viser NULL som tomt i -noheader).
+funksjon _null_ut(v: tekst) -> tekst { hvis _ern(v) { returner "" } returner v }
+// Fjern alle NULL-sentinelar frå eit ferdig output-streng (sentinelen finst aldri i data).
+funksjon _strip_null(s: tekst) -> tekst { returner builtin.join(builtin.split(s, _NULLV()), "") }
+
 funksjon _cmp(a: tekst, op: tekst, b: tekst) -> boolsk {
+    // NULL-samanlikning er «unknown» → aldri sann (SQLite: WHERE ekskluderer).
+    hvis _ern(a) eller _ern(b) { returner usann }
     hvis _er_tal(a) og _er_tal(b) {
         hvis _er_real(a) eller _er_real(b) {
             la x = builtin.desimaltall(a)
@@ -183,7 +225,7 @@ funksjon _fmt_real(f) -> tekst {
 // Type-bevisst binær aritmetikk. REAL om nokon operand er REAL (utanom % = heiltal).
 // NULL ("") propagerer; divisjon/modulo med 0 → NULL; ikkje-numerisk tekst → 0 (SQLite).
 funksjon _num_bin(a: tekst, op: tekst, b: tekst) -> tekst {
-    hvis a == "" eller b == "" { returner "" }
+    hvis _ern(a) eller _ern(b) { returner _NULLV() }
     la an = a
     la bn = b
     hvis ikke _er_tal(an) { an = "0" }
@@ -334,6 +376,7 @@ funksjon _glob(verdi: tekst, monster: tekst) -> boolsk {
 // Recursive-descent med presedens: cmp → concat(||) → add(+-) → mul(*/%) → unary → primær.
 // Evaluerer mot ei rad. Verdiar er strengar ("1"/"0" boolsk, "" tomt). Re-parsar per rad.
 funksjon _truthy(v: tekst) -> boolsk {
+    hvis _ern(v) { returner usann }
     returner v != "" og v != "0"
 }
 
@@ -341,7 +384,13 @@ funksjon _ex_prim(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     hvis pos >= lengde(toks) { returner {"v": "", "n": pos} }
     la t = toks[pos]
     hvis _er_tal(t) { returner {"v": t, "n": pos + 1} }
+    // BLOB-literal x'…' → dekod hex til bytes-streng (string-lagring; typeof forblir text).
+    hvis lengde(t) >= 3 og builtin.lower(builtin.slice(t, 0, 2)) == "x'" {
+        returner {"v": _blob_decode(builtin.slice(t, 2, lengde(t) - 1)), "n": pos + 1}
+    }
     hvis lengde(t) >= 2 og builtin.slice(t, 0, 1) == "'" { returner {"v": _unquote(t), "n": pos + 1} }
+    // NULL-literal → sentinel (3-verdi NULL).
+    hvis _opp(t) == "NULL" { returner {"v": _NULLV(), "n": pos + 1} }
     // EXISTS (SELECT …) → "1"/"0"
     hvis _opp(t) == "EXISTS" og pos + 1 < lengde(toks) og toks[pos + 1] == "(" {
         la sub = _slice_paren(toks, pos + 1)
@@ -428,7 +477,8 @@ funksjon _ex_concat(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     la akk = l["v"]
     mens p < lengde(toks) og toks[p] == "||" {
         la r = _ex_add(toks, p + 1, rad, kt)
-        akk = akk + r["v"]
+        // SQLite: konkat med NULL → NULL.
+        hvis _ern(akk) eller _ern(r["v"]) { akk = _NULLV() } ellers { akk = akk + r["v"] }
         p = r["n"]
     }
     returner {"v": akk, "n": p}
@@ -514,7 +564,7 @@ funksjon _ex_cmp(toks, pos: heltall, rad, kt) -> ordbok_tekst {
         la isnot = usann
         hvis q < lengde(toks) og _opp(toks[q]) == "NOT" { isnot = sann; q = q + 1 }
         hvis q < lengde(toks) og _opp(toks[q]) == "NULL" { q = q + 1 }
-        la ernull = l["v"] == ""
+        la ernull = _ern(l["v"])
         hvis isnot { ernull = _ikke(ernull) }
         returner {"v": _b(ernull), "n": q}
     }
@@ -600,14 +650,195 @@ funksjon _ex_func(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     returner {"v": _kall_funksjon(fn, args), "n": p}
 }
 
+// ── Dato/tid (SQLite-kompatibel delmengd) ────────────────────────────
+// Kalendermatte via Hinnant (civil ↔ dagar sidan epoch), skotår-korrekt for y>=1970.
+// Lagringa er strengbasert, so verdiane er ISO-tekst; epoch-heltal berre internt.
+funksjon _imod(a: heltall, b: heltall) -> heltall { returner a - (a / b) * b }
+
+// heltall_fra_tekst tolkar leiande null som oktal ("08"/"09" feilar) — strip nullar først.
+funksjon _num0(s: tekst) -> heltall {
+    la t = s
+    mens lengde(t) > 1 og builtin.slice(t, 0, 1) == "0" { t = builtin.slice(t, 1, lengde(t)) }
+    returner builtin.heltall_fra_tekst(t)
+}
+
+funksjon _pad(n: heltall, bredde: heltall) -> tekst {
+    la s = tekst_fra_heltall(n)
+    mens lengde(builtin.split(s, "")) < bredde { s = "0" + s }
+    returner s
+}
+
+funksjon _days_from_civil(y0: heltall, m: heltall, d: heltall) -> heltall {
+    la y = y0
+    hvis m <= 2 { y = y - 1 }
+    la era = y / 400
+    la yoe = y - era * 400
+    la mm = m + 9
+    hvis m > 2 { mm = m - 3 }
+    la doy = (153 * mm + 2) / 5 + d - 1
+    la doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    returner era * 146097 + doe - 719468
+}
+
+funksjon _civil_from_days(z0: heltall) -> ordbok {
+    la z = z0 + 719468
+    la era = z / 146097
+    la doe = z - era * 146097
+    la yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    la y = yoe + era * 400
+    la doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    la mp = (5 * doy + 2) / 153
+    la d = doy - (153 * mp + 2) / 5 + 1
+    la m = mp + 3
+    hvis mp >= 10 { m = mp - 9 }
+    hvis m <= 2 { y = y + 1 }
+    returner {"y": y, "m": m, "d": d}
+}
+
+// Parse ISO ('YYYY-MM-DD', med valfri ' '/'T' + 'HH:MM[:SS]'), 'now', eller unix-heiltal.
+funksjon _dt_parse_val(x: tekst, unixep: boolsk) -> heltall {
+    la xl = builtin.lower(builtin.trim(x))
+    hvis xl == "now" { returner builtin.timestamp() }
+    hvis unixep og _er_tal(x) { returner builtin.heltall_fra_tekst(x) }
+    la del = builtin.split(x, "T")
+    hvis lengde(del) == 1 { del = builtin.split(x, " ") }
+    la dp = builtin.split(del[0], "-")
+    hvis lengde(dp) < 3 { returner 0 }
+    la y = _num0(dp[0])
+    la mo = _num0(dp[1])
+    la dagnr = _num0(dp[2])
+    la hh = 0
+    la mi = 0
+    la ss = 0
+    hvis lengde(del) >= 2 {
+        la tp = builtin.split(del[1], ":")
+        hvis lengde(tp) >= 1 { hh = _num0(tp[0]) }
+        hvis lengde(tp) >= 2 { mi = _num0(tp[1]) }
+        hvis lengde(tp) >= 3 { ss = _num0(tp[2]) }
+    }
+    returner _days_from_civil(y, mo, dagnr) * 86400 + hh * 3600 + mi * 60 + ss
+}
+
+funksjon _dt_mod(epoch: heltall, mod: tekst) -> heltall {
+    la m = builtin.lower(builtin.trim(mod))
+    hvis m == "unixepoch" eller m == "localtime" eller m == "utc" { returner epoch }
+    hvis lengde(m) >= 9 og builtin.slice(m, 0, 9) == "start of " {
+        la enhet = builtin.slice(m, 9, lengde(m))
+        la dag = epoch / 86400
+        la c = _civil_from_days(dag)
+        hvis enhet == "day" { returner dag * 86400 }
+        hvis enhet == "month" { returner _days_from_civil(c["y"], c["m"], 1) * 86400 }
+        hvis enhet == "year" { returner _days_from_civil(c["y"], 1, 1) * 86400 }
+        returner epoch
+    }
+    hvis lengde(m) >= 8 og builtin.slice(m, 0, 8) == "weekday " {
+        la mål = _num0(builtin.slice(m, 8, lengde(m)))
+        la dag = epoch / 86400
+        la cur = _imod(dag + 4, 7)
+        la delta = _imod(mål - cur + 7, 7)
+        returner epoch + delta * 86400
+    }
+    la deler = builtin.split(m, " ")
+    hvis lengde(deler) < 2 { returner epoch }
+    la tal_s = deler[0]
+    hvis lengde(tal_s) >= 1 og builtin.slice(tal_s, 0, 1) == "+" { tal_s = builtin.slice(tal_s, 1, lengde(tal_s)) }
+    la n = builtin.heltall_fra_tekst(tal_s)
+    la enhet = deler[1]
+    hvis lengde(enhet) >= 1 og builtin.slice(enhet, lengde(enhet) - 1, lengde(enhet)) == "s" {
+        enhet = builtin.slice(enhet, 0, lengde(enhet) - 1)
+    }
+    hvis enhet == "day" { returner epoch + n * 86400 }
+    hvis enhet == "hour" { returner epoch + n * 3600 }
+    hvis enhet == "minute" { returner epoch + n * 60 }
+    hvis enhet == "second" { returner epoch + n }
+    hvis enhet == "month" eller enhet == "year" {
+        la dag = epoch / 86400
+        la tod = epoch - dag * 86400
+        la c = _civil_from_days(dag)
+        la ny_y = c["y"]
+        la ny_m = c["m"]
+        hvis enhet == "year" { ny_y = ny_y + n }
+        hvis enhet == "month" {
+            la tot = ny_y * 12 + (ny_m - 1) + n
+            la q = tot / 12
+            la r = tot - q * 12
+            hvis r < 0 { r = r + 12; q = q - 1 }
+            ny_y = q
+            ny_m = r + 1
+        }
+        returner _days_from_civil(ny_y, ny_m, c["d"]) * 86400 + tod
+    }
+    returner epoch
+}
+
+funksjon _dt_resolve(args, timeidx: heltall) -> heltall {
+    hvis timeidx >= lengde(args) { returner 0 }
+    la unixep = usann
+    la i = timeidx + 1
+    mens i < lengde(args) {
+        hvis builtin.lower(builtin.trim(args[i])) == "unixepoch" { unixep = sann }
+        i = i + 1
+    }
+    la epoch = _dt_parse_val(args[timeidx], unixep)
+    i = timeidx + 1
+    mens i < lengde(args) {
+        epoch = _dt_mod(epoch, args[i])
+        i = i + 1
+    }
+    returner epoch
+}
+
+funksjon _dt_fmt(epoch: heltall, fmt: tekst) -> tekst {
+    la dag = epoch / 86400
+    la tod = epoch - dag * 86400
+    la c = _civil_from_days(dag)
+    la hh = tod / 3600
+    la mi = (tod - hh * 3600) / 60
+    la ss = tod - hh * 3600 - mi * 60
+    la ut = ""
+    la fc = builtin.split(fmt, "")
+    la i = 0
+    mens i < lengde(fc) {
+        hvis fc[i] == "%" og i + 1 < lengde(fc) {
+            la spec = fc[i + 1]
+            hvis spec == "Y" { ut = ut + _pad(c["y"], 4) } ellers
+            hvis spec == "m" { ut = ut + _pad(c["m"], 2) } ellers
+            hvis spec == "d" { ut = ut + _pad(c["d"], 2) } ellers
+            hvis spec == "H" { ut = ut + _pad(hh, 2) } ellers
+            hvis spec == "M" { ut = ut + _pad(mi, 2) } ellers
+            hvis spec == "S" { ut = ut + _pad(ss, 2) } ellers
+            hvis spec == "j" { ut = ut + _pad(dag - _days_from_civil(c["y"], 1, 1) + 1, 3) } ellers
+            hvis spec == "w" { ut = ut + tekst_fra_heltall(_imod(dag + 4, 7)) } ellers
+            hvis spec == "s" { ut = ut + tekst_fra_heltall(epoch) } ellers
+            hvis spec == "f" { ut = ut + _pad(ss, 2) + ".000" } ellers
+            hvis spec == "%" { ut = ut + "%" } ellers { ut = ut + "%" + spec }
+            i = i + 2
+        } ellers {
+            ut = ut + fc[i]
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
 funksjon _kall_funksjon(fn: tekst, args) -> tekst {
+    hvis fn == "DATE" og lengde(args) >= 1 { returner _dt_fmt(_dt_resolve(args, 0), "%Y-%m-%d") }
+    hvis fn == "TIME" og lengde(args) >= 1 { returner _dt_fmt(_dt_resolve(args, 0), "%H:%M:%S") }
+    hvis fn == "DATETIME" og lengde(args) >= 1 { returner _dt_fmt(_dt_resolve(args, 0), "%Y-%m-%d %H:%M:%S") }
+    hvis fn == "STRFTIME" og lengde(args) >= 2 { returner _dt_fmt(_dt_resolve(args, 1), args[0]) }
+    hvis fn == "UNIXEPOCH" og lengde(args) >= 1 { returner tekst_fra_heltall(_dt_resolve(args, 0)) }
+    hvis fn == "JULIANDAY" og lengde(args) >= 1 {
+        la ep = _dt_resolve(args, 0)
+        la jd = builtin.desimaltall(tekst_fra_heltall(ep)) / builtin.desimaltall("86400") + builtin.desimaltall("2440587.5")
+        returner _fmt_real(jd)
+    }
     hvis fn == "COALESCE" {
         la i = 0
         mens i < lengde(args) {
-            hvis args[i] != "" { returner args[i] }
+            hvis ikke _ern(args[i]) { returner args[i] }
             i = i + 1
         }
-        returner ""
+        returner _NULLV()
     }
     hvis fn == "UPPER" { hvis lengde(args) > 0 { returner builtin.upper(args[0]) } returner "" }
     hvis fn == "LOWER" { hvis lengde(args) > 0 { returner builtin.lower(args[0]) } returner "" }
@@ -655,11 +886,11 @@ funksjon _kall_funksjon(fn: tekst, args) -> tekst {
         returner tekst_fra_heltall(idx + 1)
     }
     hvis fn == "IFNULL" og lengde(args) >= 2 {
-        hvis args[0] != "" { returner args[0] }
+        hvis ikke _ern(args[0]) { returner args[0] }
         returner args[1]
     }
     hvis fn == "NULLIF" og lengde(args) >= 2 {
-        hvis args[0] == args[1] { returner "" }
+        hvis args[0] == args[1] { returner _NULLV() }
         returner args[0]
     }
     hvis fn == "HEX" og lengde(args) >= 1 { returner _hex(args[0]) }
@@ -687,7 +918,7 @@ funksjon _kall_funksjon(fn: tekst, args) -> tekst {
     }
     hvis fn == "TYPEOF" og lengde(args) >= 1 {
         la v = args[0]
-        hvis v == "" { returner "null" }
+        hvis _ern(v) { returner "null" }
         hvis _er_real(v) { returner "real" }
         hvis _er_tal(v) { returner "integer" }
         returner "text"
@@ -843,7 +1074,7 @@ funksjon _kt_tom() -> ordbok {
 // Offentleg inngang: evaluer eit SQL-uttrykk mot ei rad (utan subquery-kontekst).
 funksjon evaluer_uttrykk(uttrykk: tekst, rad) -> tekst {
     la e = _ex_or(_tok(uttrykk), 0, rad, _kt_tom())
-    returner e["v"]
+    returner _null_ut(e["v"])
 }
 
 // WHERE-matcher: ei WHERE-klausul ER eit boolsk uttrykk. Delegerer til uttrykks-
@@ -1075,7 +1306,7 @@ funksjon _sjekk_constraints(db, navn: tekst, nyrad, ekskluder_rowid: heltall) ->
     la i = 0
     mens i < lengde(nn) {
         la col = nn[i]
-        hvis (ikke finnes_nøkkel(nyrad, col)) eller nyrad[col] == "" { returner "NOT NULL constraint failed: " + navn + "." + col }
+        hvis (ikke finnes_nøkkel(nyrad, col)) eller _ern(nyrad[col]) { returner "NOT NULL constraint failed: " + navn + "." + col }
         i = i + 1
     }
     la kt = _kt_ny(db, {})
@@ -1098,20 +1329,27 @@ funksjon _sjekk_constraints(db, navn: tekst, nyrad, ekskluder_rowid: heltall) ->
         la f = fk[i]
         la v = ""
         hvis finnes_nøkkel(nyrad, f["col"]) { v = nyrad[f["col"]] }
-        hvis v != "" og ikke _finst_verdi(db, f["tab"], f["refcol"], v) { returner "FOREIGN KEY constraint failed" }
+        // NULL FK (sentinel eller "") er tillate — berre ikkje-null verdiar må referere.
+        hvis (ikke _ern(v)) og v != "" og ikke _finst_verdi(db, f["tab"], f["refcol"], v) { returner "FOREIGN KEY constraint failed" }
         i = i + 1
     }
     returner ""
 }
 
 // UPSERT SET-verdi: "excluded.X" → den foreslåtte rada sin X, elles literal.
+// Literal-verdi frå eit token: NULL-nøkkelord → sentinel, elles unquote.
+funksjon _verdi_lit(tok: tekst) -> tekst {
+    hvis _opp(tok) == "NULL" { returner _NULLV() }
+    returner _unquote(tok)
+}
+
 funksjon _upsert_verdi(tok: tekst, nyrad) -> tekst {
     hvis _opp(_kolprefiks(tok)) == "EXCLUDED" {
         la kn = _kolnavn(tok)
         hvis finnes_nøkkel(nyrad, kn) { returner nyrad[kn] }
         returner ""
     }
-    returner _unquote(tok)
+    returner _verdi_lit(tok)
 }
 
 // ── FOREIGN KEY-referanseaksjonar (ON DELETE/UPDATE) ─────────────────
@@ -1218,7 +1456,7 @@ funksjon _kaskade_delete_apply(db, ptab: tekst, rad) {
             hvis b["on_delete"] == "CASCADE" {
                 _exec_t(db, _tok("DELETE FROM " + b["tab"] + " WHERE " + b["col"] + " = " + _sql_lit(val)))
             } ellers hvis b["on_delete"] == "SET NULL" eller b["on_delete"] == "SET DEFAULT" {
-                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(val)))
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = NULL WHERE " + b["col"] + " = " + _sql_lit(val)))
             }
         }
         i = i + 1
@@ -1241,7 +1479,7 @@ funksjon _kaskade_update_apply(db, ptab: tekst, oldrad, newrad) {
             hvis b["on_update"] == "CASCADE" {
                 _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = " + _sql_lit(newv) + " WHERE " + b["col"] + " = " + _sql_lit(oldv)))
             } ellers hvis b["on_update"] == "SET NULL" eller b["on_update"] == "SET DEFAULT" {
-                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = '' WHERE " + b["col"] + " = " + _sql_lit(oldv)))
+                _exec_t(db, _tok("UPDATE " + b["tab"] + " SET " + b["col"] + " = NULL WHERE " + b["col"] + " = " + _sql_lit(oldv)))
             }
         }
         i = i + 1
@@ -1770,6 +2008,15 @@ funksjon _exec_t(db, toks) -> heltall {
             }
             ai = ai + 1
         }
+        // Utelatne kolonnar (ikkje gitt, ingen default, ikkje auto-id) → NULL (3-verdi).
+        la ni = 0
+        mens ni < lengde(t["kolonner"]) {
+            la cnn = t["kolonner"][ni]["navn"]
+            hvis (ikke finnes_nøkkel(gitt, cnn)) og (ikke finnes_nøkkel(def, cnn)) og verdier[ni] == "" {
+                verdier[ni] = _NULLV()
+            }
+            ni = ni + 1
+        }
         la nyrad = _rad_av_verdier(t, verdier)
         la feil = _sjekk_constraints(db, navn, nyrad, 0 - 1)
         hvis feil != "" {
@@ -1846,7 +2093,7 @@ funksjon _exec_t(db, toks) -> heltall {
             hvis toks[i] == "," { i = i + 1; fortsett }
             hvis i + 2 < lengde(toks) og toks[i + 1] == "=" {
                 legg_til(set_kol, toks[i])
-                legg_til(set_val, _unquote(toks[i + 2]))
+                legg_til(set_val, _verdi_lit(toks[i + 2]))
                 i = i + 3
             } ellers {
                 i = i + 1
@@ -2113,8 +2360,18 @@ funksjon _kolprefiks(ref: tekst) -> tekst {
     returner ""
 }
 
+// Ei "null-rad" med same kolonnar som `sample`, alle sett til NULL-sentinel.
+// For outer-join-utfyll av den umatcha sida (SQLite: umatcha kolonnar → NULL).
+funksjon _null_rad(sample) -> ordbok_tekst {
+    la m = {}
+    la ks = nøkler(sample)
+    la i = 0
+    mens i < lengde(ks) { m[ks[i]] = _NULLV(); i = i + 1 }
+    returner m
+}
+
 // Slå saman ei (alt akkumulert) venstre-rad med ei høgre rad. Høgre-kolonnar leggjast
-// inn både kvalifisert ("a2.kol") og ukvalifisert ("kol"). Tom rr = NULL-side (utfyll ""-verdi).
+// inn både kvalifisert ("a2.kol") og ukvalifisert ("kol").
 funksjon _merge_inn(lr, rr, a2: tekst) -> ordbok_tekst {
     la m = {}
     la lk = nøkler(lr)
@@ -2154,15 +2411,19 @@ funksjon _join2(venstre, hoyre, a2: tekst, on_toks, jtype: tekst, kt) -> liste {
             rj = rj + 1
         }
         hvis ikke matchet og (jtype == "LEFT" eller jtype == "FULL") {
-            legg_til(ut, _merge_inn(lr, {}, a2))
+            la h_null = {}
+            hvis lengde(hoyre) > 0 { h_null = _null_rad(hoyre[0]) }
+            legg_til(ut, _merge_inn(lr, h_null, a2))
         }
         li = li + 1
     }
     hvis jtype == "RIGHT" eller jtype == "FULL" {
+        la v_null = {}
+        hvis lengde(venstre) > 0 { v_null = _null_rad(venstre[0]) }
         la rk = 0
         mens rk < lengde(hoyre) {
             hvis ikke hoyre_matchet[rk] {
-                legg_til(ut, _merge_inn({}, hoyre[rk], a2))
+                legg_til(ut, _merge_inn(v_null, hoyre[rk], a2))
             }
             rk = rk + 1
         }
@@ -2434,7 +2695,7 @@ funksjon _agg_over(rader, fn: tekst, arg: tekst) -> heltall {
         mens i < lengde(rader) {
             la v = ""
             hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
-            hvis v != "" { c = c + 1 }
+            hvis ikke _ern(v) { c = c + 1 }
             i = i + 1
         }
         returner c
@@ -2495,7 +2756,7 @@ funksjon _agg_txt(rader, fn: tekst, arg: tekst, item) -> tekst {
         mens i < lengde(rader) {
             la v = ""
             hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
-            hvis v != "" { legg_til(deler, v) }
+            hvis ikke _ern(v) { legg_til(deler, v) }
             i = i + 1
         }
         returner builtin.join(deler, sep)
@@ -2539,7 +2800,7 @@ funksjon _agg_txt(rader, fn: tekst, arg: tekst, item) -> tekst {
         mens i < lengde(rader) {
             la v = ""
             hvis finnes_nøkkel(rader[i], arg) { v = rader[i][arg] }
-            hvis v != "" {
+            hvis ikke _ern(v) {
                 hvis ikke har { best = v; har = sann } ellers hvis fn == "MIN" og _cmp(v, "<", best) { best = v } ellers hvis fn == "MAX" og _cmp(v, ">", best) { best = v }
             }
             i = i + 1
@@ -3143,7 +3404,7 @@ funksjon _har_agg(felt) -> boolsk {
 
 // query_rader: SELECT ... [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT/OFFSET].
 funksjon query_rader(db, sql: tekst) -> tekst {
-    returner _query_rader_t(db, _tok(sql))
+    returner _strip_null(_query_rader_t(db, _tok(sql)))
 }
 
 funksjon _query_rader_t(db, toks) -> tekst {
