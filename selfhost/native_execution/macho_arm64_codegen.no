@@ -699,6 +699,111 @@ funksjon ncval_er_struct_konstruktor(namn: tekst) -> boolsk {
     returner c >= "A" og c <= "Z"
 }
 
+// M5 oppgåve 2: metode-kandidatar = funksjonar som ser ut som `<Type>.<metode>`
+// (minst 2 "."-segment, nest-siste segment startar med stor bokstav). Returnerer
+// [[kort="Type.metode", full=heile funksjonsnamnet], ...]. kall_metode-dispatchen
+// samanliknar runtime-nøkkelen "<type>.<metode>" mot `kort` (= tolken sin suffiks-
+// match ".Type.metode" sidan full endar på ".kort").
+funksjon ncval_metode_kandidatar(funksjonar) -> liste {
+    la ut = []
+    la keys = builtin.nøkler(funksjonar)
+    la i = 0
+    mens i < lengde(keys) {
+        la fnamn = tekst(keys[i])
+        la delar = builtin.split(fnamn, ".")
+        hvis lengde(delar) >= 2 {
+            la typ = tekst(delar[lengde(delar) - 2])
+            hvis lengde(typ) >= 1 {
+                la c = builtin.slice(typ, 0, 1)
+                hvis c >= "A" og c <= "Z" {
+                    la kort = typ + "." + tekst(delar[lengde(delar) - 1])
+                    legg_til(ut, [kort, fnamn])
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// M5 oppgåve 2: emitter for `CALL builtin.kall_metode, N`. Operandar (logisk idx):
+// mottakar=djupn-N, metodenamn=djupn-N+1, realarg j=djupn-N+2+j. Byggjer runtime
+// nøkkelen "<mottakar.__struct_type__>.<metodenamn>", samanliknar mot kvar
+// kandidat, og ved treff: mottakar→x0, realarg j→x(j+1), `bl` kandidatfunksjonen
+// (self-fyrst, som tolken). Returnerer ny djupn. Registerdisiplin: hjelpe-
+// emittarane (map_get/str_concat/str_eq) rører berre x9–x16 → nøkkelen bur trygt
+// i x17, mottakar/metode/args i operand-registra (x19+). str_eq/map_get gjev
+// BOKSA NcVal → les [+8] før forgreining. Ingen-treff = brk (uråkeleg i korrekt
+// kode; compiler emitterer kall_metode berre for reelle metodar).
+funksjon emit_kall_metode(native: liste_heiltall, djupn: heiltall, N: heiltall, memmode: boolsk, home_off: heiltall, kand, bl_patchar) -> heiltall {
+    la recv_idx = djupn - N
+    la meth_idx = djupn - N + 1
+    // Mottakar + metodenamn i overlevande register.
+    la RREC = 19 + recv_idx
+    hvis memmode {
+        legg_u32(native, 0xF9400340 | ((home_off + recv_idx) << 10) | 19)  // ldr x19, [x26, #recv]
+        RREC = 19
+    }
+    la RMET = 19 + meth_idx
+    hvis memmode {
+        legg_u32(native, 0xF9400340 | ((home_off + meth_idx) << 10) | 20)  // ldr x20, [x26, #meth]
+        RMET = 20
+    }
+    // Nøkkel i x17: type = map_get(mottakar, "__struct_type__"); key = type+"."+metode.
+    emit_ncval_str_const(native, "__struct_type__", 15)     // x15 = nøkkel-streng
+    emit_map_get(native, RREC, 15, 17, usann)               // x17 = type (verdi-peikar, ikkje bool)
+    emit_ncval_str_const(native, ".", 9)                    // x9 = "."
+    emit_str_concat(native, 17, 9, 17)                      // x17 = type + "."
+    emit_str_concat(native, 17, RMET, 17)                   // x17 = key
+    la done_patches = []
+    la ki = 0
+    mens ki < lengde(kand) {
+        la kort = tekst(kand[ki][0])
+        la full = tekst(kand[ki][1])
+        emit_ncval_str_const(native, kort, 9)               // x9 = kandidat-namn
+        emit_str_eq(native, 17, 9, 15)                      // x15 = boksa bool (key == kort)
+        legg_u32(native, 0xF94005F0)                        // ldr x16, [x15, #8]  (0/1)
+        la p_skip = lengde(native)
+        legg_u32(native, 0)                                 // cbz x16, skip  (patch)
+        // treff: mottakar→x0, realarg j→x(j+1); bl full.
+        legg_u32(native, 0xAA0003E0 | (RREC << 16))         // mov x0, RREC
+        la j = 0
+        mens j < N - 2 {
+            la aidx = djupn - N + 2 + j
+            hvis memmode {
+                legg_u32(native, 0xF9400340 | ((home_off + aidx) << 10) | (j + 1))  // ldr x(j+1), [x26,#arg]
+            } ellers {
+                legg_u32(native, 0xAA0003E0 | ((19 + aidx) << 16) | (j + 1))         // mov x(j+1), Xarg
+            }
+            j = j + 1
+        }
+        la p_bl = lengde(native)
+        legg_u32(native, 0x94000000)                        // bl full  (patch via bl_patchar)
+        legg_til(bl_patchar, [p_bl, full])
+        la p_done = lengde(native)
+        legg_u32(native, 0)                                 // b done  (patch)
+        legg_til(done_patches, p_done)
+        la skip_pos = lengde(native)
+        skriv_u32(native, p_skip, 0xB4000010 | ((((skip_pos - p_skip) / 4) & 0x7FFFF) << 5))  // cbz x16, skip
+        ki = ki + 1
+    }
+    legg_u32(native, 0xD4200000)                            // brk #0  (ingen treff — uråkeleg)
+    la done_pos = lengde(native)
+    la dp = 0
+    mens dp < lengde(done_patches) {
+        la pp = done_patches[dp]
+        skriv_u32(native, pp, 0x14000000 | (((done_pos - pp) / 4) & 0x03FFFFFF))  // b done
+        dp = dp + 1
+    }
+    // resultat x0 → mottakar-slot.
+    hvis memmode {
+        legg_u32(native, 0xF9000340 | ((home_off + recv_idx) << 10) | 0)   // str x0, [x26, #recv]
+    } ellers {
+        legg_u32(native, 0xAA0003E0 | (19 + recv_idx))                     // mov Xdst, x0
+    }
+    returner djupn - N + 1
+}
+
 // Fase 8: builtin.type(x) → typenamn-streng (køyretids-dispatch på NcVal-tagg).
 // 1→"heltall", 2→"boolsk", 3→"tekst", 4→"liste", 5→"kart".
 funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: heiltall) -> heiltall {
@@ -3629,6 +3734,38 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst 
             r = r + 1
         }
     }
+    // M5: metode-funksjonar (`Type.metode`) er berre nådd via kall_metode
+    // (dynamisk dispatch), aldri via direkte CALL. Om noko funksjon brukar
+    // kall_metode, må ALLE metode-kandidatar med i order (elles feilar bl-patchen
+    // i emit_kall_metode). BFS-en under følgjer deretter kroppane deira.
+    la brukar_metode = usann
+    la allkeys = builtin.nøkler(funksjonar)
+    la fk = 0
+    mens fk < lengde(allkeys) og ikkje brukar_metode {
+        la fkode = funksjonar[tekst(allkeys[fk])]["code"]
+        hvis fkode != null {
+            la gi = 0
+            mens gi < lengde(fkode) {
+                hvis opcode(fkode[gi]) == "CALL" og lengde(fkode[gi]) == 3 og (tekst(fkode[gi][1]) == "kall_metode" eller tekst(fkode[gi][1]) == "builtin.kall_metode") {
+                    brukar_metode = sann
+                    gi = lengde(fkode)
+                } ellers { gi = gi + 1 }
+            }
+        }
+        fk = fk + 1
+    }
+    hvis brukar_metode {
+        la mk = ncval_metode_kandidatar(funksjonar)
+        la mi = 0
+        mens mi < lengde(mk) {
+            la mnamn = tekst(mk[mi][1])
+            hvis finnes_nøkkel(funksjonar, mnamn) og ikkje finnes_nøkkel(sett, mnamn) {
+                sett[mnamn] = 1
+                legg_til(order, mnamn)
+            }
+            mi = mi + 1
+        }
+    }
     la k = 0
     mens k < lengde(order) {
         la fname = order[k]
@@ -3804,6 +3941,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
     }
     la djupn = 0
     la etikettar = {}
+    la metode_kand = null   // M5: lat metode-kandidatliste (fyrst når kall_metode nås)
     // Operand-djupn ved kvar grein til ei etikett. Codegen sporar djupn LINEÆRT,
     // men ved kontrollflyt-samanslåing (t.d. kortslutta `og`/`eller`) er den
     // lineære djupna feil på fall-inn til ei etikett som berre nås via hopp.
@@ -4742,6 +4880,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_u32(native, 0xF940215A)                        // ldr x26, [x10, #64]
                     legg_u32(native, 0xD61F0120)                        // br x9  (til catch)
                     // djupn-bokføring: konsumerer 1, "produserer" 1 (uråkeleg)
+                } ellers hvis (kallnamn == "kall_metode" eller kallnamn == "builtin.kall_metode") og lengde(instr) == 3 {
+                    // M5 oppgåve 2: metode-dispatch. call_args = [mottakar, metode,
+                    // arg0...]; byggjer "<type>.<metode>" i runtime og kallar den
+                    // rette funksjonen (self-fyrst). Sjå emit_kall_metode.
+                    la nm = instr[2]
+                    hvis nm < 2 { returner {"ok": "usann", "error": "NcVal kall_metode krev >=2 argument", "image": []} }
+                    hvis djupn < nm { returner {"ok": "usann", "error": "NcVal kall_metode arg underflyt", "image": []} }
+                    hvis (nm - 1) > 8 { returner {"ok": "usann", "error": "NcVal metodekall støttar høgst 7 argument", "image": []} }
+                    hvis metode_kand == null { metode_kand = ncval_metode_kandidatar(funksjonar) }
+                    prøv {
+                        djupn = emit_kall_metode(native, djupn, nm, memmode, home_off, metode_kand, bl_patchar)
+                    } fang (mkfeil) {
+                        returner {"ok": "usann", "error": tekst(mkfeil), "image": []}
+                    }
                 } ellers hvis ncval_er_struct_konstruktor(kallnamn) og lengde(instr) == 3 {
                     // M5: struktur-konstruktor. Som tolken (vm.no:3839): ignorer
                     // argumenta, returner eit tomt kart tagga med __struct_type__ =

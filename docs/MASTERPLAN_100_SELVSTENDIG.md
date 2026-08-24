@@ -91,8 +91,16 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       `ncval_struct_kort` speglar `vm_kort_typenamn`. Strukturelt verifisert (NCB→
       image); tolk-sida = exit 42. **[docs/OMGANG4_STRUCT_ABI.md](OMGANG4_STRUCT_ABI.md)**,
       fixtur `tools/fixtures/diff_struct.no`. *(ARM64; enkoding via Docker/CI-loop)*
-- [ ] `kall_metode`-dispatch i native (eksakt/suffiks `<type>.<metode>`).
-- **Port:** `test_metode` + `test_grensesnitt`-dispatch AOT == tolk.
+- [x] `kall_metode`-dispatch i native (eksakt/suffiks `<type>.<metode>`):
+      `emit_kall_metode` byggjer runtime-nøkkelen `type + "." + metode` (map_get +
+      str_concat, nøkkel i x17), samanliknar mot compile-tid-kjende `Type.metode`-
+      kandidatar (`str_eq` → boksa bool, `cbz`), og ved treff `mottakar→x0,
+      arg_j→x(j+1), bl <full>`. `ncval_reachable` dreg inn alle metode-kandidatar
+      når kall_metode nyttast. Strukturelt verifisert (metode-NCB → 2824 B image;
+      fann+fiksa emit_map_get-arity-bug undervegs). *(ARM64; enkoding via Docker/CI;
+      seed-frontend parsar ikkje metodesyntaks enno → differensial ventar rebuild)*
+- **Port:** `test_metode` + `test_grensesnitt`-dispatch AOT == tolk (fixtur
+      `tools/fixtures/diff_metode.no`; verifiserast ved seed-rebuild + Docker/CI).
 
 ## Omgang 5 — M10 i AOT: varargs, standardarg, spread, destrukturering  ·  *2–3 v*
 

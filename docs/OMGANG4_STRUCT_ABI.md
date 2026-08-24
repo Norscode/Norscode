@@ -51,18 +51,35 @@ følgjer det ikkje (rett — det er syntetisk, treng ingen `fn_start`).
 (`CALL builtin.Punkt` + INDEX_SET/GET) → image utan feil. Tolk-sida gjev alt
 exit 42 (seed-VM-en kan konstruktørar). Maskinkode-enkoding = Docker/CI-loop.
 
-### Oppgåve 2 — metode-dispatch *(neste)*
+### Oppgåve 2 — metode-dispatch *(GJORT)*
 
-`CALL "builtin.kall_metode", argc+2` i native: mottakar er ein tagg-5 struct;
-les `__struct_type__`-verdien (map_get), bygg `"<type>.<metode>"`, slå opp
-funksjonsadressa og kall med mottakaren som første argument. Krev:
-- runtime string-konkat av type + "." + metodenamn (finst: `emit_str_concat`),
-- namn→adresse-oppslag i runtime (ulikt closures sin compile-tid-`lamaddr`; her
-  er målet datadrive) → anten ein **metodetabell** `{"<type>.<metode>": fn_addr}`
-  emittert i imaget, eller ei kjede av compile-tid-kjende kandidatar. Val + ABI
-  vert fastlagt i oppgåve 2.
-- `test_metode` (Punkt.sum vs Kvadrat.sum-dispatch) + `test_grensesnitt` AOT == tolk.
+`CALL "builtin.kall_metode", N` i native (`emit_kall_metode`). Operandar (logisk
+idx): mottakar `djupn-N`, metodenamn `djupn-N+1`, realarg j `djupn-N+2+j`.
+
+- **Nøkkel** (runtime): `type = map_get(mottakar, "__struct_type__")`, deretter
+  `key = type + "." + metodenamn` via `emit_str_concat` (to konkat). Nøkkelen bur
+  i `x17` — hjelpe-emittarane (`map_get`/`str_concat`/`str_eq`) rører berre
+  x9–x16, så x17 + operand-registra (x19+) overlever.
+- **Dispatch** (compile-tid-kjende kandidatar, ikkje tabell): for kvar metode-
+  funksjon `<Type>.<metode>` (`ncval_metode_kandidatar`: nest-siste "."-segment
+  stor forbokstav) samanlikn `key` mot `"Type.metode"` med `emit_str_eq` (gjev
+  BOKSA bool → les `[+8]`, `cbz`). Ved treff: `mottakar→x0`, `realarg j→x(j+1)`,
+  `bl <full>` (vanleg bl-patch — måla er compile-tid-kjende). Vald framfor ein
+  runtime-adressetabell fordi det gjenbrukar den prova bl-patch-vegen og slepp
+  adresse-aritmetikk; kostnad = kode-bloat O(sites×metodar) (Omgang 17-optim).
+  Match mot `"Type.metode"` = tolken sin suffiks-semantikk (full endar på `.key`).
+- **Reachability:** `ncval_reachable` legg ALLE metode-kandidatar i `order` når
+  noko funksjon brukar `kall_metode` (metodar er berre nådd dynamisk, aldri via
+  direkte CALL — elles feilar bl-patchen).
+- **Ingen-treff:** `brk #0` (uråkeleg i korrekt kode; divergerer frå tolken sin
+  katchbare MetodeFeil berre i patologisk catch-tilfelle).
+
+Strukturelt verifisert: kjelde-codegen kompilerer eit metode-NCB (konstruktor +
+`Punkt.sum` + `kall_metode`) → image utan feil (reachability + dispatch + bl-patch
+sunn). `test_metode`/`test_grensesnitt` AOT == tolk er fasit via Docker/CI.
 
 MERK: seed-frontenden parsar ikkje `funksjon Type.metode(...)`-syntaksen enno, så
-metode-differensial via `bygg-native` ventar på seed-rebuild; konstruktør+felt
-(oppgåve 1) parsar seed-frontenden alt (`tools/fixtures/diff_struct.no`).
+metode-differensial via `bygg-native` ventar på seed-rebuild med M5-frontenden;
+konstruktør+felt (oppgåve 1) parsar seed-frontenden alt. Fixturar:
+`tools/fixtures/diff_struct.no` (oppgåve 1), `diff_metode.no` (oppgåve 2, type-
+dispatch Punkt.sum vs Kvadrat.sum).
