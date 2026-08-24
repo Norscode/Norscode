@@ -19,6 +19,7 @@ Start med brukarmanualen dersom du vil bruke Norscode. Start med opplæringsguid
 - [Status](STATUS.md)
 - [Merkevare og ikon](BRAND.md)
 - [Selfhost-handlingsplan](SELFHOST_HANDLINGSPLAN.md)
+- [Språkparitet-plan (JS- og Java-hol)](SPRAAK_PARITET_PLAN.md)
 
 ## Brukarmanual
 
