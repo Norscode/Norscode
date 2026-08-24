@@ -3824,8 +3824,10 @@ funksjon ncval_maxdjupn(kode) -> heiltall {
             d = d - instr[1]
         } ellers hvis op == "DUP" {
             d = d + 1
+        } ellers hvis op == "LOAD_PENDING" {
+            d = d + 1
         }
-        // (UNARY_*, LABEL, JUMP, TRY_BEGIN, TRY_END = netto 0)
+        // (UNARY_*, LABEL, JUMP, TRY_BEGIN, TRY_END, FINALLY_* , CLEAR_PENDING = netto 0)
         hvis d > maks { maks = d }
         i = i + 1
     }
@@ -4031,6 +4033,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         }
         s = s + 1
     }
+    // Omgang 7: finally-funksjonar får 2 skjulte pending-slots (return/throw-tilstand
+    // som må overleve finally-blokka; lokale → recursion-trygt, per-ramme).
+    la fn_brukar_finally = usann
+    la fs = 0
+    mens fs < lengde(kode) {
+        hvis opcode(kode[fs]) == "FINALLY_PUSH" { fn_brukar_finally = sann fs = lengde(kode) } ellers { fs = fs + 1 }
+    }
+    la pending_ctrl_slot = 0 - 1
+    la pending_val_slot = 0 - 1
+    hvis fn_brukar_finally {
+        pending_ctrl_slot = variabel_antal
+        pending_val_slot = variabel_antal + 1
+        variabel_antal = variabel_antal + 2
+    }
     // Mem-modus: operandane bur i minne-heimar rett etter lokalvariablane.
     // home_off = tal lokalvariablar; reserver maks operand-djupn (+margin) ekstra slots.
     la home_off = variabel_antal
@@ -4077,6 +4093,15 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0xF9000320 | (gEB0 << 10) | 9) // str x9, [x25, #EB*8]
             }
             legg_u32(native, 0x9140179C)                // add x28, x28, #5, lsl #12 (20480)
+            // Omgang 7: cleanup-stakk-region (finally). 256 record × 16 byte etter exc-regionen.
+            hvis finnes_nøkkel(globals, "__cleanup_top__") {
+                la gCT0 = globals["__cleanup_top__"]
+                la gCB0 = globals["__cleanup_base__"]
+                legg_u32(native, 0xAA1C03E9)                // mov x9, x28  (cleanup-base)
+                legg_u32(native, 0xF9000320 | (gCT0 << 10) | 9) // str x9, [x25, #CT*8]
+                legg_u32(native, 0xF9000320 | (gCB0 << 10) | 9) // str x9, [x25, #CB*8]
+                legg_u32(native, 0x9140079C)                // add x28, x28, #1, lsl #12 (4096)
+            }
         }
         // Miljø-overlay: initialiser __env_overlay__ til eit tomt kart (type 5).
         hvis finnes_nøkkel(globals, "__env_overlay__") {
@@ -4436,11 +4461,97 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la posisjon = lengde(native)
             legg_u32(native, 0x34000009)                        // cbz w9, <patch>
             legg_til(grein_patchar, [posisjon, instr[1], "cbz", 9])
+        } ellers hvis op == "FINALLY_PUSH" {
+            // Omgang 7: registrer finally-handler. Record (16 B) på cleanup-stakken:
+            // [finally-adresse (adr)][__exc_top__ ved push (til pruning ved unwind)].
+            hvis lengde(instr) < 2 eller builtin.type(instr[1]) != "tekst" { returner {"ok": "usann", "error": "NcVal FINALLY_PUSH krev etikett", "image": []} }
+            la gET_fp = globals["__exc_top__"]
+            la gCT_fp = globals["__cleanup_top__"]
+            label_djupn[instr[1]] = 0                            // finally-blokka startar tom
+            la p_adr_fp = lengde(native)
+            legg_u32(native, 0x10000009)                        // adr x9, finally_lbl (patch)
+            legg_til(grein_patchar, [p_adr_fp, instr[1], "adr", 9])
+            legg_u32(native, 0xF9400320 | (gET_fp << 10) | 11)  // ldr x11, [x25, #ET*8]  (lagra exc_top)
+            legg_u32(native, 0xF9400320 | (gCT_fp << 10) | 10)  // ldr x10, [x25, #CT*8]
+            legg_u32(native, 0xF9000149)                        // str x9, [x10]      (finally-adr)
+            legg_u32(native, 0xF900054B)                        // str x11, [x10, #8] (lagra exc_top)
+            legg_u32(native, 0x9100414A)                        // add x10, x10, #16
+            legg_u32(native, 0xF9000320 | (gCT_fp << 10) | 10)  // str x10, [x25, #CT*8]
+        } ellers hvis op == "FINALLY_RUN" {
+            // Normal fullføring → køyr finally med pending=normal. Poppar cleanup.
+            la gCT_fr = globals["__cleanup_top__"]
+            legg_u32(native, 0xF9400320 | (gCT_fr << 10) | 10)  // ldr x10, [x25, #CT*8]
+            legg_u32(native, 0xD100414A)                        // sub x10, x10, #16
+            legg_u32(native, 0xF9000320 | (gCT_fr << 10) | 10)  // str x10, [x25, #CT*8]
+            legg_u32(native, 0xF9400149)                        // ldr x9, [x10]  (finally-adr)
+            legg_u32(native, 0xF900035F | (pending_ctrl_slot << 10)) // str xzr, [x26, #PC*8] (pending=normal)
+            legg_u32(native, 0xD61F0120)                        // br x9
+        } ellers hvis op == "FINALLY_END" {
+            // Etter finally: dispatch på pending_ctrl (1=return, 2=throw, elles=normal).
+            hvis lengde(instr) < 4 { returner {"ok": "usann", "error": "NcVal FINALLY_END krev 3 etikettar", "image": []} }
+            label_djupn[instr[1]] = djupn
+            label_djupn[instr[2]] = djupn
+            label_djupn[instr[3]] = djupn
+            legg_u32(native, 0xF9400349 | (pending_ctrl_slot << 10)) // ldr x9, [x26, #PC*8]
+            legg_u32(native, 0xF100053F)                        // cmp x9, #1
+            la p_bne1_fe = lengde(native)
+            legg_u32(native, 0)                                 // b.ne ck_throw
+            la p_bret_fe = lengde(native)
+            legg_u32(native, 0x14000000)                        // b ret_lbl (patch)
+            legg_til(grein_patchar, [p_bret_fe, instr[2], "b", 0])
+            la lbl_ck_throw = lengde(native)
+            legg_u32(native, 0xF100093F)                        // cmp x9, #2
+            la p_bne2_fe = lengde(native)
+            legg_u32(native, 0)                                 // b.ne go_after
+            la p_bthrow_fe = lengde(native)
+            legg_u32(native, 0x14000000)                        // b throw_lbl (patch)
+            legg_til(grein_patchar, [p_bthrow_fe, instr[3], "b", 0])
+            la lbl_go_after = lengde(native)
+            la p_bafter_fe = lengde(native)
+            legg_u32(native, 0x14000000)                        // b after_lbl (patch)
+            legg_til(grein_patchar, [p_bafter_fe, instr[1], "b", 0])
+            skriv_u32(native, p_bne1_fe, 0x54000001 | ((((lbl_ck_throw - p_bne1_fe) / 4) & 0x7FFFF) << 5))
+            skriv_u32(native, p_bne2_fe, 0x54000001 | ((((lbl_go_after - p_bne2_fe) / 4) & 0x7FFFF) << 5))
+        } ellers hvis op == "LOAD_PENDING" {
+            hvis pending_val_slot < 0 { returner {"ok": "usann", "error": "NcVal LOAD_PENDING utan finally-slot", "image": []} }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (LOAD_PENDING)", "overflow": "sann", "image": []} }
+            la lpdst = opnd_push_reg(djupn, memmode)
+            legg_u32(native, 0xF9400340 | (pending_val_slot << 10) | lpdst) // ldr Xdst, [x26, #PV*8]
+            opnd_ut(native, djupn, lpdst, memmode, home_off)
+            djupn = djupn + 1
+        } ellers hvis op == "CLEAR_PENDING" {
+            hvis pending_ctrl_slot >= 0 {
+                legg_u32(native, 0xF900035F | (pending_ctrl_slot << 10)) // str xzr, [x26, #PC*8]
+                legg_u32(native, 0xF900035F | (pending_val_slot << 10))  // str xzr, [x26, #PV*8]
+            }
         } ellers hvis op == "RETURN" {
             // Fase 5: RETURN kan stå kvar som helst (tidleg retur i greiner). Entry
             // pakkar ut heiltalet til w0 (exit); brukarfunksjon returnerer NcVal* i x0.
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal RETURN krev stakkverdi", "image": []} }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
+            // Omgang 7: RETURN-gjennom-finally (berre finally-funksjonar; elles byte-
+            // identisk). Om cleanup ikkje er tom → køyr finally med pending=return.
+            hvis fn_brukar_finally {
+                la gCT_r = globals["__cleanup_top__"]
+                la gCB_r = globals["__cleanup_base__"]
+                la gET_r = globals["__exc_top__"]
+                legg_u32(native, 0xF9400320 | (gCT_r << 10) | 10)  // ldr x10, [x25, #CT*8]
+                legg_u32(native, 0xF9400320 | (gCB_r << 10) | 11)  // ldr x11, [x25, #CB*8]
+                legg_u32(native, 0xEB0B015F)                       // cmp x10, x11
+                la p_beq_norm = lengde(native)
+                legg_u32(native, 0)                                // b.eq normal_return
+                legg_u32(native, 0xD100414A)                       // sub x10, x10, #16
+                legg_u32(native, 0xF9000320 | (gCT_r << 10) | 10)  // str x10, [x25, #CT*8]
+                legg_u32(native, 0xF9400149)                       // ldr x9, [x10]  (finally-adr)
+                legg_u32(native, 0xF900054C)                       // ldr x12, [x10, #8] (lagra exc_top)
+                legg_u32(native, 0xF9000320 | (gET_r << 10) | 12)  // str x12, [x25, #ET*8] (prune)
+                legg_u32(native, 0xD2800026)                       // movz x6, #1  (pending=return)
+                legg_u32(native, 0xF9000346 | (pending_ctrl_slot << 10)) // str x6, [x26, #PC*8]
+                legg_u32(native, 0xF9000340 | (pending_val_slot << 10) | topp) // str Xtopp, [x26, #PV*8]
+                legg_u32(native, 0xD61F0120)                       // br x9  (til finally)
+                la lbl_norm_ret = lengde(native)
+                skriv_u32(native, p_beq_norm, 0x54000000 | ((((lbl_norm_ret - p_beq_norm) / 4) & 0x7FFFF) << 5))
+            }
             hvis is_entry {
                 legg_u32(native, 0xB9400800 | (topp << 5) | 0)  // ldr w0, [Xtopp, #8]  (utpakka int)
             } ellers {
@@ -4498,6 +4609,37 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la gEV3 = globals["__exc_val__"]
             la etopp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000320 | (gEV3 << 10) | etopp) // str Xtopp, [x25, #EV*8] (unnatak)
+            // Omgang 7: throw-gjennom-finally (finally-funksjonar). Om cleanup ikkje
+            // er tom OG ingen handler er installert inni finally-en (lagra exc_top ==
+            // gjeldande exc_top) → køyr finally med pending=throw fyrst; FINALLY_END
+            // re-kastar (nøsta finallys via iterasjon). Elles vanleg dispatch.
+            hvis fn_brukar_finally {
+                la gCT_t = globals["__cleanup_top__"]
+                la gCB_t = globals["__cleanup_base__"]
+                la gET_t = globals["__exc_top__"]
+                la gEV_t = globals["__exc_val__"]
+                legg_u32(native, 0xF9400320 | (gCT_t << 10) | 10)  // ldr x10, [x25, #CT*8]
+                legg_u32(native, 0xF9400320 | (gCB_t << 10) | 11)  // ldr x11, [x25, #CB*8]
+                legg_u32(native, 0xEB0B015F)                       // cmp x10, x11
+                la p_beq_disp = lengde(native)
+                legg_u32(native, 0)                                // b.eq do_dispatch
+                legg_u32(native, 0xD100414A)                       // sub x10, x10, #16 (uncommitted)
+                legg_u32(native, 0xF940054C)                       // ldr x12, [x10, #8] (lagra exc_top)
+                legg_u32(native, 0xF9400320 | (gET_t << 10) | 13)  // ldr x13, [x25, #ET*8]
+                legg_u32(native, 0xEB0D019F)                       // cmp x12, x13
+                la p_bne_disp = lengde(native)
+                legg_u32(native, 0)                                // b.ne do_dispatch (handler inni finally)
+                legg_u32(native, 0xF9000320 | (gCT_t << 10) | 10)  // str x10, [x25, #CT*8] (commit pop)
+                legg_u32(native, 0xF9400149)                       // ldr x9, [x10]  (finally-adr)
+                legg_u32(native, 0xD2800046)                       // movz x6, #2  (pending=throw)
+                legg_u32(native, 0xF9000346 | (pending_ctrl_slot << 10)) // str x6, [x26, #PC*8]
+                legg_u32(native, 0xF9400320 | (gEV_t << 10) | 14)  // ldr x14, [x25, #EV*8] (exc)
+                legg_u32(native, 0xF9000340 | (pending_val_slot << 10) | 14) // str x14, [x26, #PV*8]
+                legg_u32(native, 0xD61F0120)                       // br x9  (til finally)
+                la lbl_do_disp = lengde(native)
+                skriv_u32(native, p_beq_disp, 0x54000000 | ((((lbl_do_disp - p_beq_disp) / 4) & 0x7FFFF) << 5))
+                skriv_u32(native, p_bne_disp, 0x54000001 | ((((lbl_do_disp - p_bne_disp) / 4) & 0x7FFFF) << 5))
+            }
             la p_bl_td = lengde(native)
             legg_u32(native, 0x94000000)                        // bl __throw_dispatch__
             legg_til(bl_patchar, [p_bl_td, "__throw_dispatch__"])
@@ -5725,6 +5867,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     la gcount = 0
     la brukar_try = usann
     la brukar_env = usann
+    la brukar_finally = usann
     la gf = 0
     mens gf < lengde(order) {
         la gcode = funksjonar[order[gf]]["code"]
@@ -5738,6 +5881,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
                 }
             }
             hvis gop == "TRY_BEGIN" { brukar_try = sann }
+            hvis gop == "FINALLY_PUSH" { brukar_finally = sann brukar_try = sann }  // Omgang 7: defer/finally treng __exc + __cleanup
             hvis gop == "CALL" og lengde(gcode[gi]) == 3 og (gcode[gi][1] == "miljo_sett" eller gcode[gi][1] == "builtin.miljo_sett") { brukar_env = sann }
             // feil()-builtinen og NATIV-GAP-stubbane kastar via same handler-
             // maskineri som THROW; sørg for at __exc-globalane finst.
@@ -5758,6 +5902,12 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         globals["__exc_base__"] = gcount + 2   // M6: handler-stakk-basis (uncaught-deteksjon)
         globals["__exc_type__"] = gcount + 3   // M6: rekna exc-type (scratch for dispatch)
         gcount = gcount + 4
+    }
+    // Omgang 7: defer/finally cleanup-stakk (finally-adresse + try_depth per record).
+    hvis brukar_finally {
+        globals["__cleanup_top__"] = gcount
+        globals["__cleanup_base__"] = gcount + 1
+        gcount = gcount + 2
     }
     // Miljø-overlay: skjult global for miljo_sett/miljo_hent (in-heap kart).
     hvis brukar_env {
@@ -5962,6 +6112,7 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
     la gcount = 0
     la brukar_try = usann
     la brukar_env = usann
+    la brukar_finally = usann
     la gf = 0
     mens gf < lengde(order) {
         la gcode = funksjonar[order[gf]]["code"]
@@ -5975,6 +6126,7 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
                 }
             }
             hvis gop == "TRY_BEGIN" { brukar_try = sann }
+            hvis gop == "FINALLY_PUSH" { brukar_finally = sann brukar_try = sann }
             hvis gop == "CALL" og lengde(gcode[gi]) == 3 og (gcode[gi][1] == "miljo_sett" eller gcode[gi][1] == "builtin.miljo_sett") { brukar_env = sann }
             hvis gop == "CALL" og lengde(gcode[gi]) == 3 og builtin.type(gcode[gi][1]) == "tekst" {
                 la gapnamn = tekst(gcode[gi][1])
@@ -5992,6 +6144,11 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
         globals["__exc_base__"] = gcount + 2   // M6: handler-stakk-basis (uncaught-deteksjon)
         globals["__exc_type__"] = gcount + 3   // M6: rekna exc-type (scratch for dispatch)
         gcount = gcount + 4
+    }
+    hvis brukar_finally {
+        globals["__cleanup_top__"] = gcount
+        globals["__cleanup_base__"] = gcount + 1
+        gcount = gcount + 2
     }
     hvis brukar_env {
         globals["__env_overlay__"] = gcount

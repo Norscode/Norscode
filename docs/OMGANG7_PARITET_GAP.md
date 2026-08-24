@@ -16,15 +16,28 @@ og codegen-endringane må vere rebygde. Dette dokumentet SCOPER kva loopen skal 
 
 ## Attståande native-hol (det Omgang 7-loopen tettar)
 
-### 1. defer/finally-opcodar (ARM64) — `FINALLY_PUSH/RUN/END`, `LOAD_PENDING`, `CLEAR_PENDING`
+### 1. defer/finally-opcodar (ARM64) — `FINALLY_PUSH/RUN/END`, `LOAD_PENDING`, `CLEAR_PENDING` *(GJORT)*
 
-`prøv { } etterpå { }` (finally). KOMPLEKST + kryssande: tolken brukar ein eigen
-`cleanup_stack` (skild frå try_stack) + per-ramme `pending_control`/`pending_value`/
-`pending_target`, og THROW må KØYRE finally-blokkene under unntaks-propagering og
-resume pending-kontroll (return/throw/normal) etter. **Interagerer direkte med den
-M6-typa THROW-dispatchen** (Omgang 6), som enno ikkje er køyre-verifisert. Difor:
-bør implementerast ETTER at `__throw_dispatch__` er stadfesta i Docker/CI — elles
-byggjer ein uverifisert kompleks maskinkode på uverifisert maskinkode.
+`prøv { } endeleg { }` (finally). Design:
+- **cleanup-stakk** (globalar `__cleanup_top__`/`__cleanup_base__`, region etter
+  exc-regionen): record `[finally-adresse][lagra __exc_top__]` (rå verdi, ikkje
+  count → inga divisjon; pruning = `str lagra → __exc_top__`).
+- **pending-tilstand i LOKALE slots** (2 per finally-funksjon) → per-ramme,
+  recursion-trygt (ikkje globalt som ville klobba nøsta kall).
+- **FINALLY_PUSH**: adr finally + lagra __exc_top__ → cleanup-record. **FINALLY_RUN**:
+  pop, pending=normal, `br` finally. **FINALLY_END**: dispatch pending_ctrl
+  (1=return→ret_lbl, 2=throw→throw_lbl, elles→after_lbl). **LOAD/CLEAR_PENDING**:
+  pending_val-slot.
+- **RETURN gata på per-funksjon finally-bruk** (ikkje-finally-funksjonar er BYTE-
+  IDENTISKE → avgrensa blast-radius): om cleanup ikkje tom → køyr finally med
+  pending=return. **THROW**: om cleanup ikkje tom OG lagra exc_top == gjeldande
+  (ingen handler inni finally) → køyr finally med pending=throw; FINALLY_END
+  re-kastar → nøsta finallys via iterasjon.
+
+Strukturelt verifisert (kompilerer). ⚠ **Maskinkode-ENKODINGA (inkl. den byte-
+kritiske RETURN-endringa + M6-THROW-utvidinga) er handkoda + kryss-sjekka, IKKJE
+køyrt** — svakast verifiserte biten. Docker/CI ARM64-Linux (`test_vm_finally`) er
+fasit. Fixtur `diff_finally.no` (tolk-sida = exit 42, seed parsar `endeleg`).
 
 ### 2. x86-64-backend (`native_codegen_v2.no`) etterslep
 

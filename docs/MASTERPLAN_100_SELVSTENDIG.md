@@ -144,9 +144,17 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       **[docs/OMGANG7_PARITET_GAP.md](OMGANG7_PARITET_GAP.md)** + regenerert
       `docs/OPCODE_MATRISE.md`. Attståande native-hol: defer/finally-opcodar (ARM64,
       kryssar M6-THROW), x86-backend-etterslep, ~28 gap-stubba builtins (runtime-ABI).
+- [x] defer/finally-opcodane (`FINALLY_PUSH/RUN/END`, `LOAD/CLEAR_PENDING`) på ARM64:
+      cleanup-stakk (globalar, rå exc_top lagra → inga divisjon), pending-tilstand i
+      LOKALE slots (per-ramme, recursion-trygt), RETURN gata på per-funksjon finally-
+      bruk (ikkje-finally byte-identisk → avgrensa blast-radius), THROW-gjennom-finally
+      (køyr finally om ingen handler inni; FINALLY_END re-kastar → nøsta via iterasjon).
+      Strukturelt verifisert (finally-NCB → 1720 B; tolk-sida exit 42, seed parsar
+      `endeleg`). ⚠ RETURN/THROW-enkodinga handkoda + IKKJE køyrt — Docker/CI fasit.
+      Fixtur `diff_finally.no`.
 - [ ] Køyr heile testflata gjennom differensial-selen; tett kvart avvik — **Docker/
-      CI ARM64-Linux-loop** (kan ikkje drivast frå macOS). Rekkjefølgje: (1) execution-
-      verifiser Omgang 3–6, (2) defer/finally, (3) builtin-hol, (4) x86-backend.
+      CI ARM64-Linux-loop** (kan ikkje drivast frå macOS). Attståande: (1) execution-
+      verifiser Omgang 3–6 + defer/finally, (2) builtin-hol, (3) x86-backend.
 - **Port:** **null differensial-avvik** over heile testflata (Docker/CI).
 
 ## Omgang 8 — Innebygd seed  ·  *2–3 v*
