@@ -85,7 +85,12 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 4 — M5 i AOT: struktur-metodar  ·  *2 v*
 
-- [ ] `__struct_type__`-tagging i native konstruktørar.
+- [x] `__struct_type__`-tagging i native konstruktørar: CALL til stor-forbokstav-
+      namn → tagg-5 kart `{"__struct_type__": <kort type>}` (ignorerer args, som
+      tolken); felt via INDEX_SET/GET (alt støtta). `ncval_er_struct_konstruktor`/
+      `ncval_struct_kort` speglar `vm_kort_typenamn`. Strukturelt verifisert (NCB→
+      image); tolk-sida = exit 42. **[docs/OMGANG4_STRUCT_ABI.md](OMGANG4_STRUCT_ABI.md)**,
+      fixtur `tools/fixtures/diff_struct.no`. *(ARM64; enkoding via Docker/CI-loop)*
 - [ ] `kall_metode`-dispatch i native (eksakt/suffiks `<type>.<metode>`).
 - **Port:** `test_metode` + `test_grensesnitt`-dispatch AOT == tolk.
 
