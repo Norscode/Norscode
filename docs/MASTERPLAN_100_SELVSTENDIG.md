@@ -156,10 +156,15 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       cleanup-stakk-globalar, pending i lokale slots (recursion-trygt), RETURN gata
       per-funksjon (ikkje-finally = byte-identisk), THROW-gjennom-finally m/re-kast-
       iterasjon. Strukturelt verifisert (finally-NCB → 1720 B).
-- [~] Execution-verifisering via **Docker linux/arm64** (Apple Silicon KØYRER det):
-      kjelde-codegen ELF → `docker run --platform linux/arm64`. Pågåande for struct/
-      typa-unnatak/finally. Docker/CI er fasit for HEILE flata; builtin-hol (2) +
-      x86-backend (3) står att.
+- [x] **Execution-verifisert Omgang 3–7 via Docker linux/arm64** (Apple Silicon
+      køyrer native aarch64): kjelde-codegen ELF → `docker run --platform linux/arm64`
+      → exit 42 for ALLE: O3 closures, O4 struct-konstruktor + kall_metode, O5 M10
+      (default+rest+spread+optional), O6 typa-unnatak (m/propagering), O7 defer/finally
+      (normal+return+throw-gjennom). **5 enkoding-bugs funne+fiksa** som strukturell
+      codegen ikkje kunne sjå (str/ldr-swap, Rt/Rn-feil, right_reg=9-klobb,
+      str_const(dst=9)-landmine). Verktøy: `tools/elf_multi_host.no` + gdb-i-Docker.
+- [ ] Attståande for FULL paritet: køyr heile std/+selfhost/-testflata gjennom
+      differensial-selen (Docker/CI), builtin-hol (~28), x86-backend-etterslep.
 - **Port:** **null differensial-avvik** over heile testflata (Docker/CI).
 
 ## Omgang 8 — Innebygd seed  ·  *2–3 v*
