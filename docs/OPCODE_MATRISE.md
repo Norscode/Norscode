@@ -1,10 +1,4 @@
-<!-- Autogenerert av tools/opcode_matrise.no — regenerer med: ./bin/nc run tools/opcode_matrise.no -->
-
-# Opcode-støttematrise — tolk vs AOT (Omgang 2)
-
-Kva opcodar kvar backend handterer. `JA` = dispatch finst; `.` = manglar.
-Kompilatoren kan emittere alle desse; tolk-VM-en er orakelet AOT må matche.
-
+# Opcode-støttematrise (tolk vs AOT)
 
 | opcode | TOLK | AOT-x86 | AOT-arm64 |
 |---|:--:|:--:|:--:|
@@ -19,11 +13,11 @@ Kompilatoren kan emittere alle desse; tolk-VM-en er orakelet AOT må matche.
 | BINARY_RSHIFT | JA | JA | JA |
 | BINARY_SUB | JA | JA | JA |
 | BINARY_XOR | JA | JA | JA |
-| BUILD_LAMBDA |  . |  . |  . |
+| BUILD_LAMBDA | JA |  . | JA |
 | BUILD_LIST | JA | JA | JA |
 | BUILD_MAP | JA | JA | JA |
 | CALL | JA | JA | JA |
-| CALL_VALUE |  . |  . |  . |
+| CALL_VALUE | JA |  . | JA |
 | CLEAR_PENDING | JA |  . |  . |
 | COMPARE_EQ | JA | JA | JA |
 | COMPARE_GE | JA | JA | JA |
@@ -32,7 +26,7 @@ Kompilatoren kan emittere alle desse; tolk-VM-en er orakelet AOT må matche.
 | COMPARE_LT | JA | JA | JA |
 | COMPARE_NE | JA | JA | JA |
 | DIV |  . |  . | JA |
-| DUP | JA | JA |  . |
+| DUP | JA | JA | JA |
 | FINALLY_END | JA |  . |  . |
 | FINALLY_PUSH | JA |  . |  . |
 | FINALLY_RUN | JA |  . |  . |
@@ -66,17 +60,5 @@ Kompilatoren kan emittere alle desse; tolk-VM-en er orakelet AOT må matche.
 | UNARY_NEG | JA | JA | JA |
 | UNARY_NOT | JA | JA | JA |
 
-Totalt opcodar: 57 · tolk-støtta men ikkje full AOT: 15
-
-## Nøkkelfunn (hol AOT må tette)
-
-- **M3 (`BUILD_LAMBDA`, `CALL_VALUE`)** — manglar OVERALT. Tolk mista dei i rebase-mergen
-  (må gjenopprettast, jf. VM-fiks), AOT har dei aldri hatt. Blokkerer closures i begge.
-- **Unntak/finally** (`FINALLY_*`, `LOAD_PENDING`, `CLEAR_PENDING`, `LOAD_FIELD`,
-  `STORE_FIELD`) — berre tolk. AOT-backendane manglar felt- og finally-handtering.
-- **`TRY_BEGIN`/`TRY_END`/`LOAD_EXCEPTION`** — tolk + AOT-arm64, men IKKJE AOT-x86.
-- **`DUP`** — tolk + x86, men ikkje arm64. **`SWAP`/`OVER`/`PRINT`/`HALT`** — berre tolk.
-- `ADD`/`DIV`/`MUL`/`SUB` (berre arm64) er interne codegen-etikettar, ikkje ekte opcodar
-  (falske treff frå ekstraksjonen).
-
-Rekkefølgje for AOT-paritet: M3-opcodane (Omgang 3) → unntak/felt → per-backend-hol.
+Totalt opcodar: 57 · tolk-støtta men ikkje full AOT: 16
+[vm] entry returned

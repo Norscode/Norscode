@@ -138,9 +138,16 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 7 — Full runtime-paritet  ·  *1–2 v*
 
-- [ ] Køyr heile `std/`- + `selfhost/`-testflata gjennom differensial-selen; tett kvart avvik.
-- [ ] M1 strict typesjekk verkar likt; alle builtins dekt i AOT.
-- **Port:** **null differensial-avvik** over heile testflata.
+- [x] M1 strict typesjekk: compile-tid (`semantic.no` Pass 3 → `typecheck.kt_koyr`)
+      → skjer under kompilering, IKKJE native runtime → ingen native jobb. ✓
+- [x] Gap-inventar for full paritet produsert (scoper Docker/CI-loopen):
+      **[docs/OMGANG7_PARITET_GAP.md](OMGANG7_PARITET_GAP.md)** + regenerert
+      `docs/OPCODE_MATRISE.md`. Attståande native-hol: defer/finally-opcodar (ARM64,
+      kryssar M6-THROW), x86-backend-etterslep, ~28 gap-stubba builtins (runtime-ABI).
+- [ ] Køyr heile testflata gjennom differensial-selen; tett kvart avvik — **Docker/
+      CI ARM64-Linux-loop** (kan ikkje drivast frå macOS). Rekkjefølgje: (1) execution-
+      verifiser Omgang 3–6, (2) defer/finally, (3) builtin-hol, (4) x86-backend.
+- **Port:** **null differensial-avvik** over heile testflata (Docker/CI).
 
 ## Omgang 8 — Innebygd seed  ·  *2–3 v*
 
