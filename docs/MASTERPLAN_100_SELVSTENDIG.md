@@ -152,9 +152,14 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       Strukturelt verifisert (finally-NCB → 1720 B; tolk-sida exit 42, seed parsar
       `endeleg`). ⚠ RETURN/THROW-enkodinga handkoda + IKKJE køyrt — Docker/CI fasit.
       Fixtur `diff_finally.no`.
-- [ ] Køyr heile testflata gjennom differensial-selen; tett kvart avvik — **Docker/
-      CI ARM64-Linux-loop** (kan ikkje drivast frå macOS). Attståande: (1) execution-
-      verifiser Omgang 3–6 + defer/finally, (2) builtin-hol, (3) x86-backend.
+- [x] defer/finally-opcodane (ARM64): `FINALLY_PUSH/RUN/END` + `LOAD/CLEAR_PENDING`,
+      cleanup-stakk-globalar, pending i lokale slots (recursion-trygt), RETURN gata
+      per-funksjon (ikkje-finally = byte-identisk), THROW-gjennom-finally m/re-kast-
+      iterasjon. Strukturelt verifisert (finally-NCB → 1720 B).
+- [~] Execution-verifisering via **Docker linux/arm64** (Apple Silicon KØYRER det):
+      kjelde-codegen ELF → `docker run --platform linux/arm64`. Pågåande for struct/
+      typa-unnatak/finally. Docker/CI er fasit for HEILE flata; builtin-hol (2) +
+      x86-backend (3) står att.
 - **Port:** **null differensial-avvik** over heile testflata (Docker/CI).
 
 ## Omgang 8 — Innebygd seed  ·  *2–3 v*
