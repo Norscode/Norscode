@@ -3543,6 +3543,10 @@ funksjon ncval_maxdjupn(kode) -> heiltall {
             d = d - instr[1] * 2 + 1
         } ellers hvis op == "CALL" og lengde(instr) == 3 {
             d = d - instr[2] + 1
+        } ellers hvis op == "BUILD_LAMBDA" {
+            d = d + 1
+        } ellers hvis op == "CALL_VALUE" og lengde(instr) == 2 {
+            d = d - instr[1]
         }
         // (UNARY_*, LABEL, JUMP, TRY_BEGIN, TRY_END = netto 0)
         hvis d > maks { maks = d }
@@ -3622,6 +3626,16 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst 
                         legg_til(order, namn)
                     }
                 }
+                // M3: BUILD_LAMBDA-målet (lambda-funksjonen) er berre nådd via
+                // closure-verdien, ikkje via CALL — følg det eksplisitt, elles blir
+                // lambdaen aldri kompilert og lamaddr-patchen finn ikkje fn_start.
+                hvis opcode(ins) == "BUILD_LAMBDA" og lengde(ins) >= 2 og builtin.type(ins[1]) == "tekst" {
+                    la lnamn = ins[1]
+                    hvis finnes_nøkkel(funksjonar, lnamn) og ikkje finnes_nøkkel(sett, lnamn) {
+                        sett[lnamn] = 1
+                        legg_til(order, lnamn)
+                    }
+                }
                 i = i + 1
             }
         }
@@ -3633,8 +3647,36 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst 
 // Fase 5: kompiler éin funksjonskropp til eit fragment med prolog/epilog og ekte
 // bl-kall. funksjonar = heile NCB-funksjonstabellen (for å kjenne att brukarkall);
 // params = parameternamn (locals 0..n-1); is_entry avgjer heap-init + w0-exit;
-// bl_patchar samlar [pos_i_native, mål-namn] for bl-lenking av multi-drivaren.
-funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk) -> ordbok_tekst {
+// M3: bygg kart lambda-namn → fanga-namn-liste ved å skanne alle
+// BUILD_LAMBDA-instruksjonar i heile programmet. Kompilatoren (ir_to_bytecode)
+// legg capture-lista i instr[2]; ncval treng ho både på build-staden (les frie
+// verdiar frå ytre ramme) og i callee-prologen (bind dei inn i lokale slots).
+funksjon ncval_lambda_captures(funksjonar, order) -> ordbok {
+    la m = {}
+    la k = 0
+    mens k < lengde(order) {
+        la mål = funksjonar[order[k]]
+        hvis mål != null og mål["code"] != null {
+            la kode = mål["code"]
+            la i = 0
+            mens i < lengde(kode) {
+                la ins = kode[i]
+                hvis opcode(ins) == "BUILD_LAMBDA" og lengde(ins) >= 3 og builtin.type(ins[1]) == "tekst" {
+                    m[tekst(ins[1])] = ins[2]
+                }
+                i = i + 1
+            }
+        }
+        k = k + 1
+    }
+    returner m
+}
+
+// bl_patchar samlar [pos_i_native, mål-namn(, kind)] for lenking av multi-
+// drivaren. kind == "lamaddr" → adr+movz/movk+add-sekvens (closure→fn-adresse);
+// elles bl. lam_captures = fanga-namn for DENNE funksjonen (om lambda) elles [].
+funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures) -> ordbok_tekst {
+    hvis lam_captures == null { lam_captures = [] }
     hvis memmode == null { memmode = usann }
     hvis builtin.type(kode) != "liste" {
         returner {"ok": "usann", "error": "AArch64 NcVal krev instruksjonsliste", "image": []}
@@ -3653,6 +3695,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             variabel_antal = variabel_antal + 1
         }
         pi = pi + 1
+    }
+    // M3: fanga variablar får eigne lokal-slots rett etter parametrane (same
+    // rekkjefølgje som capture-lista), slik at LOAD_NAME inni lambdaen les dei
+    // som vanlege locals — den native motparten til vm_bind_lambda_capture.
+    // Prologen fyller slotsa frå capture-kartet (sjå under). Posisjonell
+    // binding: capture[i] → slot (nparams+i), aligna med kart-oppslag [+16+16i].
+    la ci = 0
+    mens ci < lengde(lam_captures) {
+        la cnamn = tekst(lam_captures[ci])
+        hvis ikkje finnes_nøkkel(variablar, cnamn) {
+            variablar[cnamn] = variabel_antal
+            variabel_antal = variabel_antal + 1
+        }
+        ci = ci + 1
     }
     la s = 0
     mens s < lengde(kode) {
@@ -3680,6 +3736,23 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
     }
     la native: liste_heiltall = []
     emit_fn_prologue(native, is_entry, prolog_locals, lengde(params), os, lengde(nøkler(globals)))
+    // M3: bind fanga variablar inn i sine lokal-slots. capture-NcVal (tagg 5)
+    // kjem inn som etterfølgjande argument i x[nparams] (CALL_VALUE la det der);
+    // prologen over rører ikkje det registeret (rører berre x0..x[np-1] + x19–x28).
+    // Posisjonell binding: kart-verdi i = [mapdata + 16 + 16*i] → slot (np+i).
+    hvis lengde(lam_captures) > 0 {
+        la np = lengde(params)
+        la ncap = lengde(lam_captures)
+        // cbz x[np], skip  — ingen fangst (null-peikar) → hopp over bindinga.
+        legg_u32(native, 0xB4000000 | ((2 + 2 * ncap) << 5) | np)   // cbz X[np], +(2+2*ncap)
+        legg_u32(native, 0xF9400400 | (np << 5) | 12)               // ldr x12, [X[np], #8]  (mapdata)
+        la bci = 0
+        mens bci < ncap {
+            legg_u32(native, 0xF9400000 | ((2 + 2 * bci) << 10) | (12 << 5) | 13)  // ldr x13, [x12, #16+16i]
+            legg_u32(native, 0xF9000000 | ((np + bci) << 10) | (26 << 5) | 13)     // str x13, [x26, #(np+i)*8]
+            bci = bci + 1
+        }
+    }
     // Fase 8: køyr modul-initialisatorane (STORE_GLOBAL av toppnivå-verdiar) før
     // entry-kroppen. x25/x28 er alt sett opp av entry-prologen.
     hvis is_entry {
@@ -4116,6 +4189,88 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF9400320 | (gEV4 << 10) | edst) // ldr Xdst, [x25, #EV*8]
             opnd_ut(native, djupn, edst, memmode, home_off)
             djupn = djupn + 1
+        } ellers hvis op == "BUILD_LAMBDA" {
+            // M3: instr = ["BUILD_LAMBDA", lam_namn, [capnamn...]]. Byggjer ein
+            // tagg-6 closure {fn_addr, capture_ptr} på heapen. capture_ptr = tagg-5
+            // kart med dei frie verdiane lesne frå denne (ytre) ramma sine slots.
+            hvis lengde(instr) < 3 eller builtin.type(instr[1]) != "tekst" {
+                returner {"ok": "usann", "error": "NcVal BUILD_LAMBDA krev namn og capture-liste", "image": []}
+            }
+            hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (BUILD_LAMBDA)", "overflow": "sann", "image": []} }
+            la lamnamn = tekst(instr[1])
+            la caps = instr[2]
+            la ncap = lengde(caps)
+            // 1. capture-kart (tagg 5): mapdata = [count][k0][v0]... i x15.
+            legg_u32(native, 0xAA1C03EF)                     // mov x15, x28  (mapdata-base)
+            last_heiltall(native, 9, ncap)
+            legg_u32(native, 0xF90001E9)                     // str x9, [x15]  (count)
+            la mapsize = ((1 + 2 * ncap) * 8 + 15) / 16 * 16
+            hvis mapsize > 4095 { returner {"ok": "usann", "error": "NcVal closure capture for stor", "image": []} }
+            legg_u32(native, 0x9100039C | (mapsize << 10))   // add x28, x28, #mapsize
+            la bi = 0
+            mens bi < ncap {
+                la cn = tekst(caps[bi])
+                hvis ikkje finnes_nøkkel(variablar, cn) {
+                    returner {"ok": "usann", "error": "NcVal BUILD_LAMBDA: fri variabel ikkje i ramma: " + cn, "image": []}
+                }
+                emit_ncval_str_const(native, cn, 9)                        // x9 = nøkkel-streng (bumpar x28)
+                legg_u32(native, 0xF90001E9 | ((1 + 2 * bi) << 10))        // str x9, [x15, #8+16i]
+                la cslot = variablar[cn]
+                legg_u32(native, 0xF9400340 | (cslot << 10) | 10)          // ldr x10, [x26, #cslot*8]
+                legg_u32(native, 0xF90001EA | ((2 + 2 * bi) << 10))        // str x10, [x15, #16+16i]
+                bi = bi + 1
+            }
+            emit_ncval_alloc_ptr(native, 15, 12, 5)          // x12 = capture NcVal (tagg 5)
+            // 2. fn_addr via adr+movz/movk+add (lamaddr-patch, vaddr-uavhengig delta).
+            legg_u32(native, 0x10000009)                     // adr x9, #0   (x9 = denne instr-adr)
+            la p_lam = lengde(native)
+            legg_u32(native, 0xD280000A)                     // movz x10, #0        (patch: delta lo16)
+            legg_u32(native, 0xF2A0000A)                     // movk x10, #0, lsl16 (patch: delta hi16)
+            legg_u32(native, 0x8B0A0129)                     // add x9, x9, x10     (x9 = fn_addr)
+            legg_til(bl_patchar, [p_lam, lamnamn, "lamaddr"])
+            // 3. closure_data = [fn_addr][capture_ptr] i x11 → boks tagg-6.
+            legg_u32(native, 0xAA1C03EB)                     // mov x11, x28  (closure_data-base)
+            legg_u32(native, 0xF9000169)                     // str x9, [x11]       (fn_addr)
+            legg_u32(native, 0xF900056C)                     // str x12, [x11, #8]  (capture_ptr)
+            legg_u32(native, 0x9100439C)                     // add x28, x28, #16
+            la ldst = opnd_push_reg(djupn, memmode)
+            emit_ncval_alloc_ptr(native, 11, ldst, 6)        // closure NcVal (tagg 6) → operand
+            opnd_ut(native, djupn, ldst, memmode, home_off)
+            djupn = djupn + 1
+        } ellers hvis op == "CALL_VALUE" {
+            // M3: instr = ["CALL_VALUE", argc]. Stack (topp→botn): closure, arg_{n-1}
+            // ... arg_0. Poppar closure, hentar fn_addr + capture, gjer indirekte
+            // kall (blr) med capture som etterfølgjande argument x[argc].
+            hvis lengde(instr) < 2 { returner {"ok": "usann", "error": "NcVal CALL_VALUE krev argc", "image": []} }
+            la nargs = instr[1]
+            hvis djupn < nargs + 1 { returner {"ok": "usann", "error": "NcVal CALL_VALUE underflyt", "image": []} }
+            hvis nargs > 7 { returner {"ok": "usann", "error": "NcVal closure-kall støttar høgst 7 argument", "image": []} }
+            // closure NcVal → x11; closure_data → x12; fn_addr → x13; capture → x14.
+            hvis memmode {
+                legg_u32(native, 0xF9400340 | ((home_off + djupn - 1) << 10) | 11)  // ldr x11, [x26, #home(closure)]
+            } ellers {
+                legg_u32(native, 0xAA0003EB | (ncval_opreg(djupn - 1) << 16))       // mov x11, Xclosure
+            }
+            legg_u32(native, 0xF940056C)                     // ldr x12, [x11, #8]  (closure_data)
+            legg_u32(native, 0xF940018D)                     // ldr x13, [x12]      (fn_addr)
+            legg_u32(native, 0xF940058E)                     // ldr x14, [x12, #8]  (capture)
+            la a = 0
+            mens a < nargs {
+                hvis memmode {
+                    legg_u32(native, 0xF9400340 | ((home_off + djupn - 1 - nargs + a) << 10) | a)  // ldr x_a, [x26, #home(arg)]
+                } ellers {
+                    legg_u32(native, 0xAA0003E0 | (ncval_opreg(djupn - 1 - nargs + a) << 16) | a)  // mov x_a, Xarg
+                }
+                a = a + 1
+            }
+            legg_u32(native, 0xAA0003E0 | (14 << 16) | nargs)  // mov X[nargs], x14  (capture)
+            legg_u32(native, 0xD63F01A0)                       // blr x13
+            hvis memmode {
+                legg_u32(native, 0xF9000340 | ((home_off + djupn - 1 - nargs) << 10) | 0)  // str x0, [x26, #home(dst)]
+            } ellers {
+                legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - 1 - nargs))  // mov Xdst, x0
+            }
+            djupn = djupn - nargs
         } ellers hvis op == "CALL" {
             la kallnamn = tekst(instr[1])
             hvis finnes_nøkkel(funksjonar, kallnamn) og ikkje er_ncval_builtin(kallnamn) og lengde(instr) == 3 {
@@ -5197,20 +5352,23 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     la image: liste_heiltall = []
     la fn_start = {}
     la all_patchar = []
+    la lambda_captures = ncval_lambda_captures(funksjonar, order)
     la fi = 0
     mens fi < lengde(order) {
         la fname = order[fi]
         la mål = funksjonar[fname]
         la params = mål["params"]
         hvis params == null { params = [] }
+        la fn_caps = []
+        hvis finnes_nøkkel(lambda_captures, fname) { fn_caps = lambda_captures[fname] }
         la bl_patchar = []
         // Prøv rask reg-modus (x19–x24, byte-identisk med før). Sprekk operand-
         // stakken (>6), rekompiler funksjonen i mem-modus der operandane bur i
         // minne-heimar etter lokalvariablane (operand-spilling).
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann)
+        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps)
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann)
+            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps)
         }
         hvis res["ok"] != "sann" { returner {"ok": "usann", "error": "[" + fname + "] " + tekst(res["error"]), "image": []} }
         la frag = res["image"]
@@ -5220,7 +5378,12 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         mens j < lengde(frag) { legg_til(image, frag[j]) j = j + 1 }
         la pj = 0
         mens pj < lengde(bl_patchar) {
-            legg_til(all_patchar, [base + bl_patchar[pj][0], bl_patchar[pj][1]])
+            la ent = bl_patchar[pj]
+            hvis lengde(ent) >= 3 {
+                legg_til(all_patchar, [base + ent[0], ent[1], ent[2]])
+            } ellers {
+                legg_til(all_patchar, [base + ent[0], ent[1]])
+            }
             pj = pj + 1
         }
         fi = fi + 1
@@ -5312,13 +5475,26 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
-        la pos = all_patchar[pk][0]
-        la target = all_patchar[pk][1]
+        la pe = all_patchar[pk]
+        la pos = pe[0]
+        la target = pe[1]
         hvis ikkje finnes_nøkkel(fn_start, target) {
             returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
         }
-        la delta = (fn_start[target] - pos) / 4
-        skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+        hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
+            // M3 closure fn-adresse: x9 (=adr-instr på pos-4) + delta = fn-adresse.
+            // delta er reint byte-avstand i imaget → vaddr-uavhengig. Alltid positiv
+            // (lambdaen kjem etter build-staden i order); patch movz+movk (lo/hi 16).
+            la delta = fn_start[target] - (pos - 4)
+            hvis delta < 0 {
+                returner {"ok": "usann", "error": "NcVal lamaddr negativ delta: " + target, "image": []}
+            }
+            skriv_u32(image, pos, 0xD2800000 | ((delta & 0xFFFF) << 5) | 10)          // movz x10, #lo16
+            skriv_u32(image, pos + 4, 0xF2A00000 | (((delta >> 16) & 0xFFFF) << 5) | 10) // movk x10, #hi16, lsl16
+        } ellers {
+            la delta = (fn_start[target] - pos) / 4
+            skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+        }
         pk = pk + 1
     }
     returner {"ok": "sann", "error": "", "image": image}
@@ -5403,6 +5579,7 @@ funksjon ncval_compile_range(ncb, os: tekst, order, globals, start: heiltall, co
     la initializers = ncb["module_initializers"]
     hvis initializers == null { initializers = [] }
     la frags = []
+    la lambda_captures = ncval_lambda_captures(funksjonar, order)
     la slutt = start + count
     hvis slutt > lengde(order) { slutt = lengde(order) }
     la fi = start
@@ -5411,11 +5588,13 @@ funksjon ncval_compile_range(ncb, os: tekst, order, globals, start: heiltall, co
         la mål = funksjonar[fname]
         la params = mål["params"]
         hvis params == null { params = [] }
+        la fn_caps = []
+        hvis finnes_nøkkel(lambda_captures, fname) { fn_caps = lambda_captures[fname] }
         la bl_patchar = []
-        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann)
+        la res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, usann, fn_caps)
         hvis res["ok"] != "sann" og finnes_nøkkel(res, "overflow") og res["overflow"] == "sann" {
             bl_patchar = []
-            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann)
+            res = kompiler_arm64_ncval(mål["code"], os, funksjonar, params, fname == entry, bl_patchar, globals, initializers, sann, fn_caps)
         }
         hvis res["ok"] != "sann" { returner {"ok": "usann", "error": "[" + fname + "] " + tekst(res["error"]), "frags": []} }
         legg_til(frags, {"name": fname, "words": res["image"], "patches": bl_patchar})
@@ -5443,7 +5622,11 @@ funksjon ncval_link(os: tekst, entries) -> ordbok_tekst {
         la pat = e["patches"]
         la pj = 0
         mens pj < lengde(pat) {
-            legg_til(all_patchar, [base + pat[pj][0], tekst(pat[pj][1])])
+            hvis lengde(pat[pj]) >= 3 {
+                legg_til(all_patchar, [base + pat[pj][0], tekst(pat[pj][1]), tekst(pat[pj][2])])
+            } ellers {
+                legg_til(all_patchar, [base + pat[pj][0], tekst(pat[pj][1])])
+            }
             pj = pj + 1
         }
         ei = ei + 1
@@ -5513,13 +5696,26 @@ funksjon ncval_link(os: tekst, entries) -> ordbok_tekst {
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
-        la pos = all_patchar[pk][0]
-        la target = all_patchar[pk][1]
+        la pe = all_patchar[pk]
+        la pos = pe[0]
+        la target = pe[1]
         hvis ikkje finnes_nøkkel(fn_start, target) {
             returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
         }
-        la delta = (fn_start[target] - pos) / 4
-        skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+        hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
+            // M3 closure fn-adresse: x9 (=adr-instr på pos-4) + delta = fn-adresse.
+            // delta er reint byte-avstand i imaget → vaddr-uavhengig. Alltid positiv
+            // (lambdaen kjem etter build-staden i order); patch movz+movk (lo/hi 16).
+            la delta = fn_start[target] - (pos - 4)
+            hvis delta < 0 {
+                returner {"ok": "usann", "error": "NcVal lamaddr negativ delta: " + target, "image": []}
+            }
+            skriv_u32(image, pos, 0xD2800000 | ((delta & 0xFFFF) << 5) | 10)          // movz x10, #lo16
+            skriv_u32(image, pos + 4, 0xF2A00000 | (((delta >> 16) & 0xFFFF) << 5) | 10) // movk x10, #hi16, lsl16
+        } ellers {
+            la delta = (fn_start[target] - pos) / 4
+            skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+        }
         pk = pk + 1
     }
     returner {"ok": "sann", "error": "", "image": image}

@@ -68,9 +68,20 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
       via `adrp+add`), capture som etterfølgjande arg `x[argc]`, prolog-binding
       via `map_get`. Grunna i faktisk NcVal-/funksjonslayout, differensial-kontrakt
       mot tolk-orakelet. **[docs/OMGANG3_CLOSURE_ABI.md](OMGANG3_CLOSURE_ABI.md)**
-- [ ] `BUILD_LAMBDA` + `CALL_VALUE` i native codegen (indirekte kall).
-- [ ] Capture-binding i callee-prolog + fixpunkt-regenerering av seed.
-- **Port:** `test_lambda_closure` AOT == tolk (differensial grøn).
+- [x] `BUILD_LAMBDA` + `CALL_VALUE` i native codegen (indirekte kall) — **ARM64**
+      (`macho_arm64_codegen.no`, både macOS Mach-O + Linux ELF via delt codegen):
+      tagg-6 closure `{fn_addr, capture_ptr}`, `lamaddr`-patch (vaddr-uavhengig
+      adr+delta), CALL_VALUE `blr` med capture i `x[argc]`, `ncval_reachable`
+      følgjer BUILD_LAMBDA, maxdjupn/spilling dekt. Strukturelt verifisert:
+      kjelde-codegen kompilerer ein closure-NCB → 604 B image, ingen feil (patch/
+      slot/reachability-logikk sunn). *Maskinkode-ENKODINGA er byte-usjekka frå
+      macOS → Docker/CI-loop er fasit.* x86-64-backend (`native_codegen_v2.no`) =
+      attståande følgje-arbeid i denne oppgåva.
+- [x] Capture-binding i callee-prolog (native motpart til `vm_bind_lambda_capture`:
+      fanga verdiar bundne inn i lokal-slots posisjonelt frå capture-kartet, cbz-
+      vakta). [ ] fixpunkt-regenerering av seed (Docker/CI-rebuild).
+- **Port:** `test_lambda_closure` AOT == tolk (differensial grøn) — fixtur
+      `tools/fixtures/diff_closure.no`; verifiserast når codegen-NCB er rebygd.
 
 ## Omgang 4 — M5 i AOT: struktur-metodar  ·  *2 v*
 

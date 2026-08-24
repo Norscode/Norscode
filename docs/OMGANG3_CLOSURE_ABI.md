@@ -62,16 +62,18 @@ blokk** på heapen:
 
 ```
 NcVal closure:            closure-data (16 byte, x28-bump-allokert):
-  [i64 type = 6]            [i64 fn_index ]   ← indeks i funksjons-adressetabellen
+  [i64 type = 6]            [i64 fn_addr ]   ← absolutt runtime kode-adresse
   [i64 val   ]──────────▶   [i64 capture ]    ← NcVal* (tagg 5 kart) ELLER 0
 ```
 
-- **`fn_index`** — indeksen til lambda-funksjonen i den deterministiske
-  reachability-rekkjefølgja `order` frå `ncval_reachable(entry, funksjonar,
-  initializers)` (`macho_arm64_codegen.no:3594`). Same rekkjefølgje som
-  `fn_start`/`ncval_compile_program` (`:5145`) legg funksjonane i imaget.
-  Indeks (ikkje byte-offset) fordi han er stabil på tvers av link-passet og
-  slår opp via tabellen i §4.
+- **`fn_addr`** — den absolutte runtime-adressa til lambda-funksjonen, rekna ut på
+  BUILD_LAMBDA-staden med ein `adr x9,#0` (x9 = adressa til adr-instruksjonen)
+  pluss eit **rein byte-avstand** til lambdaen: `movz/movk x10, #delta; add x9,x9,x10`.
+  `delta = fn_start[lam] − adr_pos` er vaddr-**uavhengig** (rein avstand i imaget)
+  og alltid positiv (lambdaen kjem etter build-staden i `order`), patcha i
+  link-passet (`lamaddr`-patch, §4). Vald framfor ein fn-indeks + tabell fordi
+  det droppar all tabell-materialisering og eitt runtime-oppslag, og adr+delta
+  er allereie PC-relativt (PIE-trygt) utan å tråkle inn tekst-vaddr.
 - **`capture`** — NcVal-peikar til eit **tagg-5 kart** med *identisk* innhald som
   tolken sitt `__capture__` (nøkkel = fritt-variabel-namn, verdi = boksa NcVal
   fanga på BUILD_LAMBDA-tidspunktet). `0` (null-peikar) når lambdaen ikkje fangar
@@ -79,35 +81,42 @@ NcVal closure:            closure-data (16 byte, x28-bump-allokert):
   binding.
 
 Blokka er **immutabel** etter bygging (fangst er by-value på byggjetidspunktet,
-som tolken). Ingen GC enno (Fase 6-porten open) → inga rewind.
+som tolken). Ingen GC enno (Fase 6-porten open) → inga rewind. Reachability:
+`ncval_reachable` følgjer no BUILD_LAMBDA-målet eksplisitt (`:3618`-blokka), elles
+blir lambdaen aldri lagd i `order`/`fn_start` og `lamaddr`-patchen feilar.
 
 ---
 
-## 4. Funksjons-adressetabell (indeks → kode-adresse)
+## 4. `lamaddr`-patch: closure → fn-adresse (vaddr-uavhengig)
 
 `CALL` i dag er ein **direkte** `bl` med namn-patch (`bl_patchar` →
 `all_patchar`, resolvert via `fn_start[namn]`). `CALL_VALUE` har **ikkje** målet
-på byggjetidspunktet — det kjem frå closure-verdien i runtime. Løysing: ein
-**adressetabell** emittert i imaget etter at alle `fn_start` er kjende.
+på byggjetidspunktet — det kjem frå closure-verdien. BUILD_LAMBDA legg difor
+adressa inn i closure-blokka via ein ny patch-type `lamaddr`.
 
-- `ncval_compile_program` (og `ncval_link` for batch-vegen) emitterer, etter
-  siste funksjon/runtime-rutine, ei tabellblokk `__fn_addr_table__`:
-  entry `i` = **absolutt kode-vaddr** til `order[i]` = `text_vaddr_base +
-  fn_start[order[i]]` (statisk ikkje-PIE ELF/Mach-O → fast lasteadresse, så
-  absolutte adresser er lovlege; jf. dei eksisterande absolutte layout-vala i
-  emittarane).
-- Basisadressa til tabellen blir materialisert på `CALL_VALUE`-staden med
-  `adrp+add` (±4 GiB rekkjevidd — naudsynt av di imaget er >1 MiB, så `adr`
-  (±1 MiB) ikkje held). Ein ny **`adrp_add`-patchtype** i patch-lista (parallelt
-  med `adr`-patchen som TRY_BEGIN alt bruker, `:4071`).
+BUILD_LAMBDA emitterer (4 instr):
+```
+adr  x9, #0                 ; x9 = adressa til denne instruksjonen (base+adr_pos)
+movz x10, #delta_lo16        ; ← patch
+movk x10, #delta_hi16, lsl16 ; ← patch
+add  x9, x9, x10             ; x9 = base + adr_pos + delta = fn_addr
+```
+og registrerer `[movz_pos, lam_namn, "lamaddr"]` i `bl_patchar`. Sidan
+emitterbufferen er **byte-indeksert**, resolverer link-passet:
+```
+delta = fn_start[lam_namn] − (movz_pos − 4)      // −4: adr står rett før movz
+movz-imm = delta & 0xFFFF ; movk-imm = (delta>>16) & 0xFFFF
+```
+`delta` er rein byte-avstand i imaget → **uavhengig av tekst-vaddr** (PIE-trygt),
+og alltid positiv (unik build-stad, lambdaen kjem etter i `order`); resolveren
+feilar eksplisitt ved negativ delta. 32-bit rekkjevidd (>4 GiB image utenkjeleg).
 
-Oppslag i `CALL_VALUE`: `addr = load(__fn_addr_table__ + fn_index*8)` → `blr addr`.
+`CALL_VALUE`: last `fn_addr = [closure_data+0]`, `capture = [closure_data+8]`,
+sett opp argument + capture (§5), `blr fn_addr`.
 
-> **Alternativ (forkasta for no):** lagre kode-adressa direkte i closure-blokka
-> via `adrp+add`-patch på BUILD_LAMBDA-staden. Sparer eitt oppslag, men flyttar
-> patch-kompleksiteten til kvar BUILD_LAMBDA og gjer closure-blokka
-> load-adresse-avhengig (bryt reproduserbar byte-likskap lettare). Indeks +
-> tabell er meir robust og held closure-blokka reint logisk.
+> **Alternativ (forkasta):** ein fn-indeks + `__fn_addr_table__` (indeks→adresse)
+> materialisert med `adrp+add`. Meir indireksjon (tabell-oppslag) og `adrp`
+> treng absolutt tekst-vaddr for sideberekninga — `adr`+delta unngår begge.
 
 ---
 
