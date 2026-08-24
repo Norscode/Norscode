@@ -3391,6 +3391,102 @@ funksjon emit_env_get_routine() -> liste_heiltall {
     returner r
 }
 
+// M6: __throw_dispatch__ — typa unnataks-dispatch. Kalla av THROW/feil/gap_stub
+// etter at __exc_val__ er sett. Reknar exc-typen ÉIN gong (map "type"-felt / streng
+// ":"-prefiks / "tekst"), går så handler-kjeda frå toppen og rullar tilbake til
+// FYRSTE handler med matchande catch_type ("" / null = fang-alt). Ingen match →
+// exit(1) (uråkeleg unnatak). Rullar aldri x28-heapen. Returnerer aldri (br til
+// catch eller exit). Persistente register x19–x21 treng ikkje lagrast: unwind
+// gjenopprettar x19–x24/x26 frå handler-recorden, og rutina returnerer aldri normalt.
+// Register: x19=handler-cursor, x20=exc-type-peikar, x21=catch_type. Hjelpe-
+// emittarane rører berre x9–x16 → x19–x21 overlever. et/ev/eb/ety = globalindeksar.
+funksjon emit_throw_dispatch_routine(os: tekst, et: heiltall, ev: heiltall, eb: heiltall, ety: heiltall) -> liste_heiltall {
+    la exitnum = 1
+    hvis os == "linux" { exitnum = 93 }
+    la r: liste_heiltall = []
+    // === rekn exc-type → x20 ===
+    legg_u32(r, 0xF9400320 | (ev << 10) | 0)            // ldr x0, [x25, #ev*8]  (exc)
+    legg_u32(r, 0xF9400009)                             // ldr x9, [x0]  (tag)
+    legg_u32(r, 0xF100153F)                             // cmp x9, #5  (map?)
+    la p_bne_map = lengde(r)
+    legg_u32(r, 0)                                      // b.ne chk_str
+    // map: exc_type = map_get(exc, "type")
+    emit_ncval_str_const(r, "type", 1)                  // x1 = "type"
+    emit_map_get(r, 0, 1, 20, usann)                    // x20 = verdi-peikar (eller 0)
+    la p_b_have1 = lengde(r)
+    legg_u32(r, 0)                                      // b have_type
+    la lbl_chk_str = lengde(r)
+    legg_u32(r, 0xF1000D3F)                             // cmp x9, #3  (streng?)
+    la p_bne_str = lengde(r)
+    legg_u32(r, 0)                                      // b.ne no_type
+    // streng: pos = index_of(exc, ":"); pos>=1 → slice(exc,0,pos), elles "tekst"
+    emit_ncval_str_const(r, ":", 1)                     // x1 = ":"
+    emit_str_find(r, 0, 1, 2, usann)                    // x2 = boksa pos (-1 om ikkje funne)
+    legg_u32(r, 0xF9400443)                             // ldr x3, [x2, #8]  (pos)
+    legg_u32(r, 0xF100047F)                             // cmp x3, #1
+    la p_blt_notype = lengde(r)
+    legg_u32(r, 0)                                      // b.lt str_notype
+    legg_u32(r, 0xD2800004)                             // movz x4, #0
+    emit_ncval_alloc(r, 4, 5, 1)                        // x5 = boksa 0 (slice-start)
+    legg_u32(r, 0xF9400320 | (ev << 10) | 0)            // ldr x0, [x25, #ev*8]  (reload exc)
+    emit_slice(r, 0, 5, 2, 20)                          // x20 = slice(exc, 0, pos) = prefiks
+    la p_b_have2 = lengde(r)
+    legg_u32(r, 0)                                      // b have_type
+    la lbl_str_notype = lengde(r)
+    emit_ncval_str_const(r, "tekst", 20)                // x20 = "tekst"
+    la p_b_have3 = lengde(r)
+    legg_u32(r, 0)                                      // b have_type
+    la lbl_no_type = lengde(r)
+    legg_u32(r, 0xD2800014)                             // movz x20, #0  (ingen type → berre fang-alt)
+    la lbl_have_type = lengde(r)
+    // === gå handler-kjeda ===
+    legg_u32(r, 0xF9400320 | (et << 10) | 19)           // ldr x19, [x25, #et*8]  (top)
+    la lbl_walk = lengde(r)
+    legg_u32(r, 0xD1014273)                             // sub x19, x19, #80  (handler)
+    legg_u32(r, 0xF9400320 | (eb << 10) | 9)            // ldr x9, [x25, #eb*8]  (base)
+    legg_u32(r, 0xEB09027F)                             // cmp x19, x9
+    la p_blt_uncaught = lengde(r)
+    legg_u32(r, 0)                                      // b.lt uncaught
+    legg_u32(r, 0xF9402675)                             // ldr x21, [x19, #72]  (catch_type)
+    la p_cbz_unwind = lengde(r)
+    legg_u32(r, 0)                                      // cbz x21, do_unwind  (fang-alt)
+    la p_cbz_walk1 = lengde(r)
+    legg_u32(r, 0)                                      // cbz x20, walk  (ingen exc-type → ikkje match)
+    emit_str_eq(r, 20, 21, 2)                           // x2 = boksa bool (exc_type == catch_type)
+    legg_u32(r, 0xF9400449)                             // ldr x9, [x2, #8]
+    la p_cbz_walk2 = lengde(r)
+    legg_u32(r, 0)                                      // cbz x9, walk  (ulik → neste handler)
+    la lbl_do_unwind = lengde(r)
+    legg_u32(r, 0x91014269)                             // add x9, x19, #80
+    legg_u32(r, 0xF9000320 | (et << 10) | 9)            // str x9, [x25, #et*8]  (top = handler+80)
+    legg_u32(r, 0xF940026F)                             // ldr x15, [x19]      (catch-adr)
+    legg_u32(r, 0xF9400669)                             // ldr x9,  [x19, #8]  (sp)
+    legg_u32(r, 0x9100013F)                             // mov sp, x9
+    legg_u32(r, 0xF940227A)                             // ldr x26, [x19, #64]
+    legg_u32(r, 0xF9401E78)                             // ldr x24, [x19, #56]
+    legg_u32(r, 0xF9401A77)                             // ldr x23, [x19, #48]
+    legg_u32(r, 0xF9401676)                             // ldr x22, [x19, #40]
+    legg_u32(r, 0xF9401275)                             // ldr x21, [x19, #32]
+    legg_u32(r, 0xF9400E74)                             // ldr x20, [x19, #24]
+    legg_u32(r, 0xF9400A73)                             // ldr x19, [x19, #16]  (x19 SIST)
+    legg_u32(r, 0xD61F01E0)                             // br x15  (til catch)
+    la lbl_uncaught = lengde(r)
+    legg_u32(r, 0x52800020)                             // movz w0, #1
+    emit_syscall(r, exitnum, os)                        // exit(1)  (uråkeleg unnatak)
+    // === patch framover-greiner ===
+    skriv_u32(r, p_bne_map,      0x54000001 | ((((lbl_chk_str    - p_bne_map)      / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_have1,      0x14000000 |  (((lbl_have_type   - p_b_have1)      / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_bne_str,      0x54000001 | ((((lbl_no_type     - p_bne_str)      / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_blt_notype,   0x5400000B | ((((lbl_str_notype  - p_blt_notype)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b_have2,      0x14000000 |  (((lbl_have_type   - p_b_have2)      / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_b_have3,      0x14000000 |  (((lbl_have_type   - p_b_have3)      / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_blt_uncaught, 0x5400000B | ((((lbl_uncaught    - p_blt_uncaught) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_cbz_unwind,   0xB4000015 | ((((lbl_do_unwind   - p_cbz_unwind)   / 4) & 0x7FFFF) << 5))  // cbz x21
+    skriv_u32(r, p_cbz_walk1,    0xB4000014 | ((((lbl_walk        - p_cbz_walk1)    / 4) & 0x7FFFF) << 5))  // cbz x20
+    skriv_u32(r, p_cbz_walk2,    0xB4000009 | ((((lbl_walk        - p_cbz_walk2)    / 4) & 0x7FFFF) << 5))  // cbz x9
+    returner r
+}
+
 // ─── bytes-type (representert som NcVal-liste) ───────────────────────────────
 // std.bytes byggjer på ein liste av byte-heiltal (indeksert + lengde), så vi
 // representerer NC_BYTES som ei vanleg NcVal-liste (type 4). bytes_from_list/
@@ -3975,6 +4071,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la gET0 = globals["__exc_top__"]
             legg_u32(native, 0xAA1C03E9)                // mov x9, x28  (handler-base)
             legg_u32(native, 0xF9000320 | (gET0 << 10) | 9) // str x9, [x25, #ET*8]
+            // M6: __exc_base__ = same basis (uncaught-deteksjon i __throw_dispatch__).
+            hvis finnes_nøkkel(globals, "__exc_base__") {
+                la gEB0 = globals["__exc_base__"]
+                legg_u32(native, 0xF9000320 | (gEB0 << 10) | 9) // str x9, [x25, #EB*8]
+            }
             legg_u32(native, 0x9140179C)                // add x28, x28, #5, lsl #12 (20480)
         }
         // Miljø-overlay: initialiser __env_overlay__ til eit tomt kart (type 5).
@@ -4355,6 +4456,15 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             // og allokeringar overlever).
             hvis lengde(instr) < 2 eller builtin.type(instr[1]) != "tekst" { returner {"ok": "usann", "error": "NcVal TRY_BEGIN krev catch-etikett", "image": []} }
             la gET = globals["__exc_top__"]
+            // M6: catch_type (instr[2]). "" / "*" / "alle" = fang-alt → lagra 0 i
+            // record[72]; elles bygg strengen i x11 FØRST (str_const klobbar x9/x10
+            // = record-peikaren), lagra etter recorden.
+            la ct = "*"
+            hvis lengde(instr) >= 3 og builtin.type(instr[2]) == "tekst" { ct = tekst(instr[2]) }
+            la ct_allmenn = (ct == "" eller ct == "*" eller ct == "alle")
+            hvis ikkje ct_allmenn {
+                prøv { emit_ncval_str_const(native, ct, 11) } fang (ce) { returner {"ok": "usann", "error": tekst(ce), "image": []} }
+            }
             la p_adr = lengde(native)
             legg_u32(native, 0x10000009)                        // adr x9, catch (patch)
             legg_til(grein_patchar, [p_adr, instr[1], "adr", 9])
@@ -4369,6 +4479,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF9001957)                        // str x23, [x10, #48]
             legg_u32(native, 0xF9001D58)                        // str x24, [x10, #56]
             legg_u32(native, 0xF900215A)                        // str x26, [x10, #64]
+            hvis ct_allmenn {
+                legg_u32(native, 0xF900255F)                    // str xzr, [x10, #72]  (fang-alt)
+            } ellers {
+                legg_u32(native, 0xF9002575)                    // str x11, [x10, #72]  (catch_type)
+            }
             legg_u32(native, 0x9101414A)                        // add x10, x10, #80
             legg_u32(native, 0xF9000320 | (gET << 10) | 10)     // str x10, [x25, #ET*8]
         } ellers hvis op == "TRY_END" {
@@ -4378,23 +4493,14 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF9000320 | (gET2 << 10) | 10)    // str x10, [x25, #ET*8]
         } ellers hvis op == "THROW" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal THROW krev stakkverdi", "image": []} }
-            la gET3 = globals["__exc_top__"]
+            // M6: lagra unnataket og deleger til __throw_dispatch__ (typa dispatch
+            // + kjede-unwind). Rutina returnerer aldri (br til catch eller exit).
             la gEV3 = globals["__exc_val__"]
             la etopp = opnd_les(native, djupn - 1, 0, memmode, home_off)
             legg_u32(native, 0xF9000320 | (gEV3 << 10) | etopp) // str Xtopp, [x25, #EV*8] (unnatak)
-            legg_u32(native, 0xF9400320 | (gET3 << 10) | 10)    // ldr x10, [x25, #ET*8]
-            legg_u32(native, 0xD101414A)                        // sub x10, x10, #80  (gjeldande handler — IKKJE pop; catch-blokka sin TRY_END popper)
-            legg_u32(native, 0xF9400149)                        // ldr x9, [x10]  (catch-adr)
-            legg_u32(native, 0xF940054B)                        // ldr x11, [x10, #8] (sp)
-            legg_u32(native, 0x9100017F)                        // mov sp, x11
-            legg_u32(native, 0xF9400953)                        // ldr x19, [x10, #16]
-            legg_u32(native, 0xF9400D54)                        // ldr x20, [x10, #24]
-            legg_u32(native, 0xF9401155)                        // ldr x21, [x10, #32]
-            legg_u32(native, 0xF9401556)                        // ldr x22, [x10, #40]
-            legg_u32(native, 0xF9401957)                        // ldr x23, [x10, #48]
-            legg_u32(native, 0xF9401D58)                        // ldr x24, [x10, #56]
-            legg_u32(native, 0xF940215A)                        // ldr x26, [x10, #64]
-            legg_u32(native, 0xD61F0120)                        // br x9  (til catch)
+            la p_bl_td = lengde(native)
+            legg_u32(native, 0x94000000)                        // bl __throw_dispatch__
+            legg_til(bl_patchar, [p_bl_td, "__throw_dispatch__"])
             djupn = djupn - 1
         } ellers hvis op == "LOAD_EXCEPTION" {
             hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
@@ -4993,22 +5099,12 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     // handler-maskineri som THROW-opcoden; catch-blokkas TRY_END
                     // popper handleren).
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal feil krev 1 arg", "image": []} }
-                    la gETf = globals["__exc_top__"]
+                    // M6: deleger til __throw_dispatch__ (typa dispatch + kjede-unwind).
                     la gEVf = globals["__exc_val__"]
                     legg_u32(native, 0xF9000320 | (gEVf << 10) | r1)    // str Xmsg, [x25, #EV*8]
-                    legg_u32(native, 0xF9400320 | (gETf << 10) | 10)    // ldr x10, [x25, #ET*8]
-                    legg_u32(native, 0xD101414A)                        // sub x10, x10, #80
-                    legg_u32(native, 0xF9400149)                        // ldr x9, [x10]
-                    legg_u32(native, 0xF940054B)                        // ldr x11, [x10, #8]
-                    legg_u32(native, 0x9100017F)                        // mov sp, x11
-                    legg_u32(native, 0xF9400953)                        // ldr x19, [x10, #16]
-                    legg_u32(native, 0xF9400D54)                        // ldr x20, [x10, #24]
-                    legg_u32(native, 0xF9401155)                        // ldr x21, [x10, #32]
-                    legg_u32(native, 0xF9401556)                        // ldr x22, [x10, #40]
-                    legg_u32(native, 0xF9401957)                        // ldr x23, [x10, #48]
-                    legg_u32(native, 0xF9401D58)                        // ldr x24, [x10, #56]
-                    legg_u32(native, 0xF940215A)                        // ldr x26, [x10, #64]
-                    legg_u32(native, 0xD61F0120)                        // br x9  (til catch)
+                    la p_bl_tf = lengde(native)
+                    legg_u32(native, 0x94000000)                        // bl __throw_dispatch__
+                    legg_til(bl_patchar, [p_bl_tf, "__throw_dispatch__"])
                     // djupn-bokføring: konsumerer 1, "produserer" 1 (uråkeleg)
                 } ellers hvis (kallnamn == "kall_metode" eller kallnamn == "builtin.kall_metode") og lengde(instr) == 3 {
                     // M5 oppgåve 2: metode-dispatch. call_args = [mottakar, metode,
@@ -5058,22 +5154,12 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     prøv { emit_ncval_str_const(native, "NATIV-GAP:" + ncval_avkort_builtin(kallnamn), 11) } fang melding {
                         returner {"ok": "usann", "error": tekst(melding), "image": []}
                     }
-                    la gETs = globals["__exc_top__"]
+                    // M6: deleger til __throw_dispatch__ (typa dispatch + kjede-unwind).
                     la gEVs = globals["__exc_val__"]
                     legg_u32(native, 0xF9000320 | (gEVs << 10) | 11)    // str x11, [x25, #EV*8]
-                    legg_u32(native, 0xF9400320 | (gETs << 10) | 10)    // ldr x10, [x25, #ET*8]
-                    legg_u32(native, 0xD101414A)                        // sub x10, x10, #80
-                    legg_u32(native, 0xF9400149)                        // ldr x9, [x10]
-                    legg_u32(native, 0xF940054B)                        // ldr x11, [x10, #8]
-                    legg_u32(native, 0x9100017F)                        // mov sp, x11
-                    legg_u32(native, 0xF9400953)                        // ldr x19, [x10, #16]
-                    legg_u32(native, 0xF9400D54)                        // ldr x20, [x10, #24]
-                    legg_u32(native, 0xF9401155)                        // ldr x21, [x10, #32]
-                    legg_u32(native, 0xF9401556)                        // ldr x22, [x10, #40]
-                    legg_u32(native, 0xF9401957)                        // ldr x23, [x10, #48]
-                    legg_u32(native, 0xF9401D58)                        // ldr x24, [x10, #56]
-                    legg_u32(native, 0xF940215A)                        // ldr x26, [x10, #64]
-                    legg_u32(native, 0xD61F0120)                        // br x9  (til catch)
+                    la p_bl_ts = lengde(native)
+                    legg_u32(native, 0x94000000)                        // bl __throw_dispatch__
+                    legg_til(bl_patchar, [p_bl_ts, "__throw_dispatch__"])
                     djupn = djupn - nargs_st + 1
                 } ellers {
                     returner {"ok": "usann", "error": "NcVal støttar ikkje kall: " + kallnamn, "image": []}
@@ -5669,7 +5755,9 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     hvis brukar_try {
         globals["__exc_top__"] = gcount
         globals["__exc_val__"] = gcount + 1
-        gcount = gcount + 2
+        globals["__exc_base__"] = gcount + 2   // M6: handler-stakk-basis (uncaught-deteksjon)
+        globals["__exc_type__"] = gcount + 3   // M6: rekna exc-type (scratch for dispatch)
+        gcount = gcount + 4
     }
     // Miljø-overlay: skjult global for miljo_sett/miljo_hent (in-heap kart).
     hvis brukar_env {
@@ -5800,6 +5888,19 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         la ae2 = 0
         mens ae2 < lengde(rutae) { legg_til(image, rutae[ae2]) ae2 = ae2 + 1 }
     }
+    // M6: typa unnataks-dispatch (bl-referert av THROW/feil/gap_stub).
+    la treng_throwdisp = usann
+    la ptd = 0
+    mens ptd < lengde(all_patchar) {
+        hvis all_patchar[ptd][1] == "__throw_dispatch__" { treng_throwdisp = sann }
+        ptd = ptd + 1
+    }
+    hvis treng_throwdisp {
+        la rutd = emit_throw_dispatch_routine(os, globals["__exc_top__"], globals["__exc_val__"], globals["__exc_base__"], globals["__exc_type__"])
+        fn_start["__throw_dispatch__"] = lengde(image)
+        la td2 = 0
+        mens td2 < lengde(rutd) { legg_til(image, rutd[td2]) td2 = td2 + 1 }
+    }
     la pk = 0
     mens pk < lengde(all_patchar) {
         la pe = all_patchar[pk]
@@ -5888,7 +5989,9 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
     hvis brukar_try {
         globals["__exc_top__"] = gcount
         globals["__exc_val__"] = gcount + 1
-        gcount = gcount + 2
+        globals["__exc_base__"] = gcount + 2   // M6: handler-stakk-basis (uncaught-deteksjon)
+        globals["__exc_type__"] = gcount + 3   // M6: rekna exc-type (scratch for dispatch)
+        gcount = gcount + 4
     }
     hvis brukar_env {
         globals["__env_overlay__"] = gcount
@@ -5934,7 +6037,7 @@ funksjon ncval_compile_range(ncb, os: tekst, order, globals, start: heiltall, co
 // batchane). Byggjer image, emitterer delte runtime-rutinar som er bl-referert,
 // og resolverer alle bl-patchar. Held berre image (~få MB) — lett nok til å
 // køyre i éin run-ncb-pure-prosess.
-funksjon ncval_link(os: tekst, entries) -> ordbok_tekst {
+funksjon ncval_link(os: tekst, entries, globals) -> ordbok_tekst {
     la image: liste_heiltall = []
     la fn_start = {}
     la all_patchar = []
@@ -6020,6 +6123,21 @@ funksjon ncval_link(os: tekst, entries) -> ordbok_tekst {
         la rutae = emit_assert_eq_routine(os)
         fn_start["__assert_eq"] = lengde(image)
         la k = 0 mens k < lengde(rutae) { legg_til(image, rutae[k]) k = k + 1 }
+    }
+    // M6: typa unnataks-dispatch (batch). Treng __exc-globalindeksar frå planen.
+    la treng_td = usann
+    la ptdl = 0
+    mens ptdl < lengde(all_patchar) {
+        hvis all_patchar[ptdl][1] == "__throw_dispatch__" { treng_td = sann }
+        ptdl = ptdl + 1
+    }
+    hvis treng_td {
+        hvis globals == null eller ikkje finnes_nøkkel(globals, "__exc_base__") {
+            returner {"ok": "usann", "error": "NcVal batch-link manglar __exc-globals for __throw_dispatch__ (pass plan-globals til ncval_link)", "image": []}
+        }
+        la rutd = emit_throw_dispatch_routine(os, globals["__exc_top__"], globals["__exc_val__"], globals["__exc_base__"], globals["__exc_type__"])
+        fn_start["__throw_dispatch__"] = lengde(image)
+        la k = 0 mens k < lengde(rutd) { legg_til(image, rutd[k]) k = k + 1 }
     }
     la pk = 0
     mens pk < lengde(all_patchar) {

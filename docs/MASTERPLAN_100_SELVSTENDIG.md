@@ -123,9 +123,18 @@ ut som følgje. Rekkefølgja: **Omgang 0 → 1–8 (flaskehals) → 9–18 → 1
 
 ## Omgang 6 — M2/M4/M6/M9 i AOT  ·  *2–3 v*
 
-- [ ] Fangbare feil + stack traces (native `vm_med_spor`-motstykke); `ingenting`-type;
-      unntakstypar/hierarki; enum-konstantar + grensesnitt-kontraktsjekk.
-- **Port:** M2/M4/M6/M9-testane AOT == tolk.
+- [x] M4 `ingenting`-type (boksa int 0), M9 enum (compile-tid PUSH_CONST) +
+      grensesnitt-kontrakt (compile-tid semantisk sjekk), M2 try/catch + stack
+      traces (`std.trace` = reint bibliotek) — alt ALLEREIE dekt av native. M6
+      typa unnatak (`fang (e: Type)`) = einaste nye jobb: handler-record[72] held
+      catch_type, ny `__throw_dispatch__`-rutine reknar exc-type éin gong + går
+      handler-kjeda med str_eq (fyrste match / fang-alt → unwind; ingen → exit).
+      THROW/feil/gap_stub delegerer dit. Strukturelt verifisert (try/catch-NCB →
+      1496 B); tolk-logikken stadfesta (sum=42, rett propagering).
+      **[docs/OMGANG6_ABI.md](OMGANG6_ABI.md)**, fixtur `diff_unntakstype.no`.
+      *(⚠ __throw_dispatch__-ENKODINGA er handkoda + berre kryss-sjekka, IKKJE køyrt
+      — svakare verifisert enn andre omgangar; Docker/CI ARM64-Linux er fasit.)*
+- **Port:** M2/M4/M6/M9-testane AOT == tolk (`test_unntakstypar` hovudport for M6).
 
 ## Omgang 7 — Full runtime-paritet  ·  *1–2 v*
 
