@@ -3015,7 +3015,12 @@ funksjon emit_split_routine() -> liste_heiltall {
     legg_u32(r, 0xF9400429)                          // ldr x9, [x1, #8] (delim strdata)
     legg_u32(r, 0xF9400137)                          // ldr x23, [x9]   (delim_len)
     legg_u32(r, 0x91002136)                          // add x22, x9, #8 (delim_bytes)
-    legg_u32(r, 0xD10803FF)                          // sub sp, sp, #512 (buffer)
+    // Segment-peikarbuffer på stakken. 32768 slots (som __json_parse, linjene
+    // 2785/2839) — nok til å splitte den største kjeldefila (vm.no, 5561 linjer)
+    // med rikeleg margin; buffer blir frigjort ved ret (add sp,#262144 under).
+    // TIDLEGARE 512 byte (64 slots) → split av fil med >64 segment skreiv forbi
+    // bufferet og smadra lagra x30/LR → ret hoppa i heapen (SIGBUS/SIGSEGV).
+    legg_u32(r, 0xD14103FF)                          // sub sp, sp, #262144 (32768 slots)
     legg_u32(r, 0x910003F8)                          // add x24, sp, #0  (write ptr)
     la lbl_scan = lengde(r)
     legg_u32(r, 0x8B170289)                          // add x9, x20, x23 (pos+dlen)
@@ -3076,7 +3081,7 @@ funksjon emit_split_routine() -> liste_heiltall {
     la lbl_copydone = lengde(r)
     legg_u32(r, 0xAA0F03FC)                          // mov x28, x15
     emit_ncval_alloc_ptr(r, 14, 0, 4)               // boks liste → x0
-    legg_u32(r, 0x910803FF)                          // add sp, sp, #512 (frigi buffer)
+    legg_u32(r, 0x914103FF)                          // add sp, sp, #262144 (frigi buffer)
     legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
     legg_u32(r, 0xA94263F7)                          // ldp x23, x24, [sp, #32]
     legg_u32(r, 0xA9415BF5)                          // ldp x21, x22, [sp, #16]
@@ -3632,7 +3637,9 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         hvis opcode(kode[s]) == "STORE_NAME" og lengde(kode[s]) == 2 og builtin.type(kode[s][1]) == "tekst" {
             // finnes_nøkkel, ikkje [key]==null: committed stage0 gjev absent-key-
             // oppslag på tomme/populerte dict ustabile ikkje-null-verdiar.
-            hvis ikkje finnes_nøkkel(variablar, kode[s][1]) {
+            // Modul-globalar (registrert i `globals` av ncval_compile_program sin
+            // fri-variabel-skann) er IKKJE lokale — STORE_NAME rutar til x25-slotet.
+            hvis ikkje finnes_nøkkel(variablar, kode[s][1]) og ikkje finnes_nøkkel(globals, kode[s][1]) {
                 variablar[kode[s][1]] = variabel_antal
                 variabel_antal = variabel_antal + 1
             }
@@ -3933,9 +3940,15 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" eller djupn < 1 {
                 returner {"ok": "usann", "error": "NcVal STORE_NAME krev namn og stakkverdi", "image": []}
             }
-            la idx = variablar[instr[1]]
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
-            legg_u32(native, 0xF9000000 | (idx << 10) | (26 << 5) | topp) // str Xtopp, [x26, #idx*8]
+            // Modul-global (NAME-opcode for ein global): skriv til x25-slotet, ikkje lokal.
+            hvis finnes_nøkkel(globals, instr[1]) {
+                la gslotn = globals[instr[1]]
+                legg_u32(native, 0xF9000320 | (gslotn << 10) | topp) // str Xtopp, [x25, #slot*8]
+            } ellers {
+                la idx = variablar[instr[1]]
+                legg_u32(native, 0xF9000000 | (idx << 10) | (26 << 5) | topp) // str Xtopp, [x26, #idx*8]
+            }
             djupn = djupn - 1
         } ellers hvis op == "LOAD_NAME" {
             hvis lengde(instr) != 2 eller builtin.type(instr[1]) != "tekst" {
@@ -3943,10 +3956,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             }
             la ln = instr[1]
             hvis ikkje finnes_nøkkel(variablar, ln) {
-                // null/ingenting/sann/usann/true/false er konstant-namn i VM-en
-                // (ramme_les_var), ikkje lokale. Emitter dei som boksa konstantar
-                // (som PUSH_CONST): null/ingenting → int 0; bool → tag 2.
-                hvis ln == "null" eller ln == "ingenting" eller ln == "sann" eller ln == "usann" eller ln == "true" eller ln == "false" {
+                // Modul-global via LOAD_NAME (kompilatoren emitterte NAME i staden for
+                // GLOBAL for ein modul-global): last frå x25-slotet. Registrert i
+                // `globals` av fri-variabel-skannen i ncval_compile_program.
+                hvis finnes_nøkkel(globals, ln) {
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la gslotl = globals[ln]
+                    la gmåll = opnd_push_reg(djupn, memmode)
+                    legg_u32(native, 0xF9400320 | (gslotl << 10) | gmåll) // ldr Xmål, [x25, #slot*8]
+                    opnd_ut(native, djupn, gmåll, memmode, home_off)
+                    djupn = djupn + 1
+                } ellers hvis ln == "null" eller ln == "ingenting" eller ln == "sann" eller ln == "usann" eller ln == "true" eller ln == "false" {
                     hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
                     la kdst = opnd_push_reg(djupn, memmode)
                     hvis ln == "null" eller ln == "ingenting" {
@@ -5156,6 +5176,51 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         }
         gf = gf + 1
     }
+    // Modul-globalar aksessert via LOAD_NAME (fri variabel): kompilatoren kan emittere
+    // NAME-opcode i staden for GLOBAL for ein modul-global (t.d. `vm_active_functions`
+    // i selfhost.vm — STORE_NAME i vm_sett_kontekst, LOAD_NAME i køyr_med_kontekst).
+    // Identifiser: eit namn som blir LOAD_NAME'a i ein funksjon UTAN å vere param eller
+    // STORE_NAME'a der = fri variabel = modul-global. Registrer det som global (eigen
+    // x25-slot) så LOAD_NAME/STORE_NAME kan rute til global-lageret i staden for å
+    // feile med «ukjend lokal variabel» / skrive til feil (per-funksjon) lokal-slot.
+    // NC_FREEVAR_SCAN=0 hoppar over (treg i tolka bootstrap; sjå ncval_plan).
+    hvis miljo_hent("NC_FREEVAR_SCAN") != "0" {
+    la fg = 0
+    mens fg < lengde(order) {
+        la fgcode = funksjonar[order[fg]]["code"]
+        la fgparams = funksjonar[order[fg]]["params"]
+        hvis fgparams == null { fgparams = [] }
+        la fglokale = {}
+        la fgp = 0
+        mens fgp < lengde(fgparams) { fglokale[tekst(fgparams[fgp])] = 1  fgp = fgp + 1 }
+        // Éin samle-pass (STORE→lokale, LOAD→unike frie); dedup gjer at den dyre
+        // finnes_nøkkel-sjekken berre køyrer per UNIKT lasta namn (yting).
+        la fgfri = {}
+        la fgs = 0
+        mens fgs < lengde(fgcode) {
+            la fgop = opcode(fgcode[fgs])
+            hvis fgop == "STORE_NAME" og lengde(fgcode[fgs]) == 2 og builtin.type(fgcode[fgs][1]) == "tekst" {
+                fglokale[tekst(fgcode[fgs][1])] = 1
+            } ellers hvis fgop == "LOAD_NAME" og lengde(fgcode[fgs]) == 2 og builtin.type(fgcode[fgs][1]) == "tekst" {
+                fgfri[tekst(fgcode[fgs][1])] = 1
+            }
+            fgs = fgs + 1
+        }
+        la fgnavn = nøkler(fgfri)
+        la fgi = 0
+        mens fgi < lengde(fgnavn) {
+            la fgnm = tekst(fgnavn[fgi])
+            hvis ikkje finnes_nøkkel(fglokale, fgnm) og fgnm != "null" og fgnm != "ingenting" og fgnm != "sann" og fgnm != "usann" og fgnm != "true" og fgnm != "false" {
+                hvis ikkje finnes_nøkkel(globals, fgnm) {
+                    globals[fgnm] = gcount
+                    gcount = gcount + 1
+                }
+            }
+            fgi = fgi + 1
+        }
+        fg = fg + 1
+    }
+    }
     // Fase 8: skjulte globalar for unnataks-tilstand (handler-topp + gjeldande verdi).
     hvis brukar_try {
         globals["__exc_top__"] = gcount
@@ -5354,6 +5419,52 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
             gi = gi + 1
         }
         gf = gf + 1
+    }
+    // Modul-globalar aksessert via LOAD_NAME (fri variabel) — SAME skann som i
+    // ncval_compile_program. MÅ vere her òg: batch-vegen (elf_batch_host) brukar
+    // desse globals-slottane via ncval_compile_range, så utan skannen feilar
+    // køyr_med_kontekst med «ukjend lokal variabel: vm_active_functions».
+    // NC_FREEVAR_SCAN=0 hoppar over skannen (treg i tolka bootstrap-bygg der dict-
+    // oppslag er O(n); då må NCB-en pre-transformerast så modul-globalar brukar
+    // GLOBAL-opcode). Standard = på (native seed: rask, robust for AOT av vilkårlege
+    // program som brukar modul-globalar via NAME-opcode).
+    hvis miljo_hent("NC_FREEVAR_SCAN") != "0" {
+    la pfg = 0
+    mens pfg < lengde(order) {
+        la pfgcode = funksjonar[order[pfg]]["code"]
+        la pfgparams = funksjonar[order[pfg]]["params"]
+        hvis pfgparams == null { pfgparams = [] }
+        la pfglokale = {}
+        la pfgp = 0
+        mens pfgp < lengde(pfgparams) { pfglokale[tekst(pfgparams[pfgp])] = 1  pfgp = pfgp + 1 }
+        // Éin samle-pass: STORE_NAME → lokale, LOAD_NAME → unike frie kandidatar.
+        // (Dedup i pfgfri gjer at den dyre finnes_nøkkel-sjekken berre køyrer per
+        // UNIKT lasta namn, ikkje per LOAD_NAME-førekomst — held plan-steget raskt.)
+        la pfgfri = {}
+        la pfgs = 0
+        mens pfgs < lengde(pfgcode) {
+            la pfgop = opcode(pfgcode[pfgs])
+            hvis pfgop == "STORE_NAME" og lengde(pfgcode[pfgs]) == 2 og builtin.type(pfgcode[pfgs][1]) == "tekst" {
+                pfglokale[tekst(pfgcode[pfgs][1])] = 1
+            } ellers hvis pfgop == "LOAD_NAME" og lengde(pfgcode[pfgs]) == 2 og builtin.type(pfgcode[pfgs][1]) == "tekst" {
+                pfgfri[tekst(pfgcode[pfgs][1])] = 1
+            }
+            pfgs = pfgs + 1
+        }
+        la pfgnavn = nøkler(pfgfri)
+        la pfgi = 0
+        mens pfgi < lengde(pfgnavn) {
+            la pfgnm = tekst(pfgnavn[pfgi])
+            hvis ikkje finnes_nøkkel(pfglokale, pfgnm) og pfgnm != "null" og pfgnm != "ingenting" og pfgnm != "sann" og pfgnm != "usann" og pfgnm != "true" og pfgnm != "false" {
+                hvis ikkje finnes_nøkkel(globals, pfgnm) {
+                    globals[pfgnm] = gcount
+                    gcount = gcount + 1
+                }
+            }
+            pfgi = pfgi + 1
+        }
+        pfg = pfg + 1
+    }
     }
     hvis brukar_try {
         globals["__exc_top__"] = gcount
