@@ -3440,7 +3440,14 @@ funksjon emit_fn_prologue(native: liste_heiltall, is_entry: boolsk, nlocals: hei
     }
     la i = 0
     mens i < nparams {
-        legg_u32(native, 0xF9000000 | (i << 10) | (26 << 5) | i)  // str x_i, [x26, #i*8]
+        hvis i < 8 {
+            legg_u32(native, 0xF9000000 | (i << 10) | (26 << 5) | i)  // str x_i, [x26, #i*8]
+        } ellers {
+            // Arg 8+ kom på stakken; prologen gjorde `sub sp,#80`, så stakk-arg (i-8)
+            // ligg ved [sp + 80 + (i-8)*8] = [sp + (i+2)*8]. Les inn og lagra i lokal.
+            legg_u32(native, 0xF94003E9 | ((i + 2) << 10))           // ldr x9, [sp, #(i+2)*8]
+            legg_u32(native, 0xF9000349 | (i << 10))                 // str x9, [x26, #i*8]
+        }
         i = i + 1
     }
     returner 0
@@ -3620,7 +3627,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
     hvis globals == null { globals = {} }
     hvis initializers == null { initializers = [] }
     hvis params == null { params = [] }
-    hvis lengde(params) > 8 { returner {"ok": "usann", "error": "NcVal funksjon støttar høgst 8 parametrar", "image": []} }
+    // >8 parametrar er no støtta: prologen les param 8+ frå stakken (AArch64 ABI).
     // Forhandsskanning: parametrar først (locals 0..n-1), så STORE_NAME-namn.
     la variablar = {}
     la variabel_antal = 0
@@ -4115,9 +4122,31 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 // Fase 5: ekte kall til brukarfunksjon. Argument i x0..x(n-1), bl, resultat i x0.
                 la nargs = instr[2]
                 hvis djupn < nargs { returner {"ok": "usann", "error": "NcVal kall-argument underflyt: " + kallnamn, "image": []} }
-                hvis nargs > 8 { returner {"ok": "usann", "error": "NcVal kall støttar høgst 8 argument: " + kallnamn, "image": []} }
+                // AArch64-kallkonvensjon: dei 8 fyrste argumenta i x0-x7; arg 8+ blir
+                // pusha på stakken (callee-prologen les dei ved [sp+80+(i-8)*8], sidan
+                // prologen gjer `sub sp,#80`). Dette gjer codegen-en AOT-KOMPATIBEL:
+                // funksjonar med >8 arg (finst i sjølve codegen) kan no kompilerast native.
+                la stackn = 0
+                hvis nargs > 8 { stackn = nargs - 8 }
+                la aligned = ((stackn * 8 + 15) / 16) * 16
+                hvis stackn > 0 {
+                    legg_u32(native, 0xD10003FF | (aligned << 10))   // sub sp, sp, #aligned
+                    la sa = 8
+                    mens sa < nargs {
+                        hvis memmode {
+                            legg_u32(native, 0xF9400349 | ((home_off + djupn - nargs + sa) << 10))  // ldr x9, [x26, #home]
+                        } ellers {
+                            la ssrc = ncval_opreg(djupn - nargs + sa)
+                            legg_u32(native, 0xAA0003E9 | (ssrc << 16))  // mov x9, Xsrc
+                        }
+                        legg_u32(native, 0xF90003E9 | ((sa - 8) << 10))  // str x9, [sp, #(sa-8)*8]
+                        sa = sa + 1
+                    }
+                }
+                la regn = nargs
+                hvis regn > 8 { regn = 8 }
                 la a = 0
-                mens a < nargs {
+                mens a < regn {
                     hvis memmode {
                         legg_u32(native, 0xF9400340 | ((home_off + djupn - nargs + a) << 10) | a)  // ldr x_a, [x26, #home]
                     } ellers {
@@ -4133,6 +4162,9 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_u32(native, 0xF9000340 | ((home_off + djupn - nargs) << 10) | 0)  // str x0, [x26, #home(dst)]
                 } ellers {
                     legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs)) // mov Xdst, x0  (resultat)
+                }
+                hvis stackn > 0 {
+                    legg_u32(native, 0x910003FF | (aligned << 10))   // add sp, sp, #aligned  (rydd stakk-arg)
                 }
                 djupn = djupn - nargs + 1
             } ellers {
@@ -5594,6 +5626,101 @@ funksjon ncval_link(os: tekst, entries) -> ordbok_tekst {
         la rutae = emit_assert_eq_routine(os)
         fn_start["__assert_eq"] = lengde(image)
         la k = 0 mens k < lengde(rutae) { legg_til(image, rutae[k]) k = k + 1 }
+    }
+    la pk = 0
+    mens pk < lengde(all_patchar) {
+        la pos = all_patchar[pk][0]
+        la target = all_patchar[pk][1]
+        hvis ikkje finnes_nøkkel(fn_start, target) {
+            returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
+        }
+        la delta = (fn_start[target] - pos) / 4
+        skriv_u32(image, pos, 0x94000000 | (delta & 0x03FFFFFF))
+        pk = pk + 1
+    }
+    returner {"ok": "sann", "error": "", "image": image}
+}
+
+// Flat variant: image er ALT samanbygd (alle funksjonsord i order, bygd av
+// kallaren via for-iterasjon O(n)); fn_meta = [{name, base, patches}]. Unngår
+// ncval_link sin per-funksjon `words[j]`-indeksering (O(n²) med tolka O(n)-index
+// på store lister). Berre delte rutinar + patch-resolve står att (få patchar).
+funksjon ncval_link_flat(os: tekst, image, fn_meta) -> ordbok_tekst {
+    la fn_start = {}
+    la all_patchar = []
+    la ei = 0
+    mens ei < lengde(fn_meta) {
+        la e = fn_meta[ei]
+        la fbase = e["base"]
+        fn_start[tekst(e["name"])] = fbase
+        la pat = e["patches"]
+        la pj = 0
+        mens pj < lengde(pat) {
+            legg_til(all_patchar, [fbase + pat[pj][0], tekst(pat[pj][1])])
+            pj = pj + 1
+        }
+        ei = ei + 1
+    }
+    la treng_str = usann
+    la treng_parse = usann
+    la treng_split = usann
+    la treng_join = usann
+    la treng_env_set = usann
+    la treng_env_get = usann
+    la treng_assert = usann
+    la treng_assert_eq = usann
+    la pj0 = 0
+    mens pj0 < lengde(all_patchar) {
+        la t = all_patchar[pj0][1]
+        hvis t == "__json_stringify" { treng_str = sann }
+        hvis t == "__json_parse" { treng_parse = sann }
+        hvis t == "__split" { treng_split = sann }
+        hvis t == "__join" { treng_join = sann }
+        hvis t == "__env_set" { treng_env_set = sann }
+        hvis t == "__env_get" { treng_env_get = sann }
+        hvis t == "__assert" { treng_assert = sann }
+        hvis t == "__assert_eq" { treng_assert_eq = sann }
+        pj0 = pj0 + 1
+    }
+    hvis treng_str {
+        la rut = emit_json_stringify_routine(os)
+        fn_start["__json_stringify"] = lengde(image)
+        for w i rut { legg_til(image, w) }
+    }
+    hvis treng_parse {
+        la rutp = emit_json_parse_routine()
+        fn_start["__json_parse"] = lengde(image)
+        for w i rutp { legg_til(image, w) }
+    }
+    hvis treng_split {
+        la ruts = emit_split_routine()
+        fn_start["__split"] = lengde(image)
+        for w i ruts { legg_til(image, w) }
+    }
+    hvis treng_join {
+        la rutj = emit_join_routine()
+        fn_start["__join"] = lengde(image)
+        for w i rutj { legg_til(image, w) }
+    }
+    hvis treng_env_set {
+        la rutes = emit_env_set_routine()
+        fn_start["__env_set"] = lengde(image)
+        for w i rutes { legg_til(image, w) }
+    }
+    hvis treng_env_get {
+        la ruteg = emit_env_get_routine()
+        fn_start["__env_get"] = lengde(image)
+        for w i ruteg { legg_til(image, w) }
+    }
+    hvis treng_assert {
+        la ruta = emit_assert_routine(os)
+        fn_start["__assert"] = lengde(image)
+        for w i ruta { legg_til(image, w) }
+    }
+    hvis treng_assert_eq {
+        la rutae = emit_assert_eq_routine(os)
+        fn_start["__assert_eq"] = lengde(image)
+        for w i rutae { legg_til(image, w) }
     }
     la pk = 0
     mens pk < lengde(all_patchar) {
