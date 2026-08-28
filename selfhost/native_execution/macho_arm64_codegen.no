@@ -1132,9 +1132,18 @@ funksjon emit_build_list(native: liste_heiltall, n: heiltall, first_reg: heiltal
         legg_u32(native, 0xF9000000 | ((1 + i) << 10) | (14 << 5) | src) // str Xsrc, [x14, #8+i*8]
         i = i + 1
     }
-    la total = 8 + n * 8
-    hvis total > 4095 { kast "NcVal liste for stor for eitt add-steg" }
-    legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)       // add x28, x14, #total
+    // Reserver next_pow2(n) element-slots (ikkje berre n) så invarianten
+    // buffer==next_pow2(count) held om lista seinare blir legg_til-a (amortisert
+    // vekst i emit_legg_til reknar med det). count=n står; ekstra slots er ubrukt.
+    la cap = 0
+    hvis n > 0 { cap = 1  mens cap < n { cap = cap * 2 } }
+    la total = 8 + cap * 8
+    hvis total <= 4095 {
+        legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)   // add x28, x14, #total
+    } ellers {
+        last_heiltall(native, 9, total)
+        legg_u32(native, 0x8B0901DC)                                     // add x28, x14, x9
+    }
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
     returner 0
 }
@@ -1410,10 +1419,29 @@ funksjon emit_legg_til(native: liste_heiltall, list_reg: heiltall, val_reg: heil
     // Null-trygg: hopp over heile appenderinga når lista er null (0) — elles
     // dereferens ldr x9,[Xlist,#8] + str x14,[Xlist,#8] gjennom nullpeikaren.
     // list_reg (0) blir ståande på stakken (no-op på null-liste).
+    // AMORTISERT vekst: den gamle kopi-per-append allokerte O(n²) minne i den GC-
+    // lause bump-heapen (byggje 131 K-liste = ~69 GB → sprengde 4 GiB → native seed-
+    // link segfaulta). No: reserver next_pow2(count) element-slots. Realloc BERRE når
+    // count er 0 eller ein toarpotens (count & (count-1) == 0); elles skriv på plass
+    // i den alt reserverte plassen. Buffer = next_pow2(count) held (build_list + denne
+    // held invarianten). Total garbage = 1+2+…+n = O(n).
     la p_cbz_nulllist = lengde(native)
     legg_u32(native, 0)                                 // cbz Xlist, skip  (patch)
-    legg_u32(native, 0xF9400400 | (list_reg << 5) | 9)  // ldr x9, [Xlist, #8] (gammal listdata)
-    legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (gammal count)
+    legg_u32(native, 0xF9400400 | (list_reg << 5) | 9)  // ldr x9, [Xlist, #8] (listdata)
+    legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (count)
+    legg_u32(native, 0xD100054B)                        // sub x11, x10, #1
+    legg_u32(native, 0x8A0A016B)                        // and x11, x11, x10  (count & count-1)
+    la p_cbnz_inplace = lengde(native)
+    legg_u32(native, 0)                                 // cbnz x11, inplace  (ikkje pow2 → plass)
+    // realloc: newcap = count==0 ? 1 : count*2
+    la p_cbz_capone = lengde(native)
+    legg_u32(native, 0)                                 // cbz x10, capone
+    legg_u32(native, 0xD37FF94C)                        // lsl x12, x10, #1  (newcap = count*2)
+    la p_b_havecap = lengde(native)
+    legg_u32(native, 0)                                 // b havecap
+    la lbl_capone = lengde(native)
+    legg_u32(native, 0xD280002C)                        // movz x12, #1
+    la lbl_havecap = lengde(native)
     legg_u32(native, 0xAA1C03EE)                        // mov x14, x28   (ny listdata-base)
     legg_u32(native, 0x9100054B)                        // add x11, x10, #1 (ny count)
     legg_u32(native, 0xF90001CB)                        // str x11, [x14]
@@ -1431,14 +1459,26 @@ funksjon emit_legg_til(native: liste_heiltall, list_reg: heiltall, val_reg: heil
     la p_b_copy = lengde(native)
     legg_u32(native, 0)                                 // b copy
     la lbl_done = lengde(native)
-    legg_u32(native, 0xF9000020 | val_reg)              // str Xval, [x1]  (nytt element)
-    legg_u32(native, 0x91002021)                        // add x1, x1, #8
-    legg_u32(native, 0xAA0103FC)                        // mov x28, x1  (bump)
-    legg_u32(native, 0xF9000400 | (list_reg << 5) | 14) // str x14, [Xlist, #8]
+    legg_u32(native, 0xF9000020 | val_reg)              // str Xval, [x1]  (nytt element ved slot count)
+    legg_u32(native, 0x910021DC)                        // add x28, x14, #8
+    legg_u32(native, 0x8B0C0F9C)                        // add x28, x28, x12, lsl #3  (reserver newcap)
+    legg_u32(native, 0xF9000400 | (list_reg << 5) | 14) // str x14, [Xlist, #8] (repeik)
+    la p_b_skip = lengde(native)
+    legg_u32(native, 0)                                 // b skip
+    la lbl_inplace = lengde(native)
+    legg_u32(native, 0x91002121)                        // add x1, x9, #8
+    legg_u32(native, 0x8B0A0C21)                        // add x1, x1, x10, lsl #3  (&elem[count])
+    legg_u32(native, 0xF9000020 | val_reg)              // str Xval, [x1]
+    legg_u32(native, 0x9100054B)                        // add x11, x10, #1
+    legg_u32(native, 0xF900012B)                        // str x11, [x9]  (count++)
     la lbl_skip = lengde(native)
-    skriv_u32(native, p_cbz_nulllist, 0xB4000000 | ((((lbl_skip - p_cbz_nulllist) / 4) & 0x7FFFF) << 5) | list_reg)
-    skriv_u32(native, p_cbz_done, 0xB4000002 | ((((lbl_done - p_cbz_done) / 4) & 0x7FFFF) << 5))
-    skriv_u32(native, p_b_copy,   0x14000000 |  (((lbl_copy - p_b_copy)   / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_cbz_nulllist, 0xB4000000 | ((((lbl_skip     - p_cbz_nulllist) / 4) & 0x7FFFF) << 5) | list_reg)
+    skriv_u32(native, p_cbnz_inplace, 0xB5000000 | ((((lbl_inplace  - p_cbnz_inplace) / 4) & 0x7FFFF) << 5) | 11)
+    skriv_u32(native, p_cbz_capone,   0xB4000000 | ((((lbl_capone   - p_cbz_capone)   / 4) & 0x7FFFF) << 5) | 10)
+    skriv_u32(native, p_b_havecap,    0x14000000 |  (((lbl_havecap  - p_b_havecap)    / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_cbz_done,     0xB4000000 | ((((lbl_done     - p_cbz_done)     / 4) & 0x7FFFF) << 5) | 2)
+    skriv_u32(native, p_b_copy,       0x14000000 |  (((lbl_copy     - p_b_copy)       / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_b_skip,       0x14000000 |  (((lbl_skip     - p_b_skip)       / 4) & 0x03FFFFFF))
     returner 0
 }
 
