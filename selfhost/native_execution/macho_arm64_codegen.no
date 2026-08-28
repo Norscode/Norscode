@@ -1783,6 +1783,151 @@ funksjon emit_mkdir_p(native: liste_heiltall, path_reg: heiltall, dst_reg: heilt
     returner 0
 }
 
+// Kopier ein NcVal-streng (str_reg) som null-terminert C-streng til [ptr_reg],
+// og ADVANCE ptr_reg forbi null-byten (for neste). Scratch: x9,x10,x11. str_reg
+// og ptr_reg må ikkje vere x9/x10/x11.
+funksjon emit_cstr_to_buf(native: liste_heiltall, str_reg: heiltall, ptr_reg: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400400 | (str_reg << 5) | 9)   // ldr x9, [Xstr, #8] (strdata)
+    legg_u32(native, 0xF940012A)                        // ldr x10, [x9] (len)
+    legg_u32(native, 0x91002129)                        // add x9, x9, #8 (bytes)
+    la p_cbz = lengde(native)
+    legg_u32(native, 0)                                 // cbz x10, done
+    la lbl_loop = lengde(native)
+    legg_u32(native, 0x3940012B)                        // ldrb w11, [x9]
+    legg_u32(native, 0x3900000B | (ptr_reg << 5))       // strb w11, [Xptr]
+    legg_u32(native, 0x91000529)                        // add x9, x9, #1
+    legg_u32(native, 0x91000400 | (ptr_reg << 5) | ptr_reg) // add Xptr, Xptr, #1
+    legg_u32(native, 0xD100054A)                        // sub x10, x10, #1
+    la p_cbnz = lengde(native)
+    legg_u32(native, 0)                                 // cbnz x10, loop
+    la lbl_done = lengde(native)
+    legg_u32(native, 0x3900001F | (ptr_reg << 5))       // strb wzr, [Xptr] (null)
+    legg_u32(native, 0x91000400 | (ptr_reg << 5) | ptr_reg) // add Xptr, Xptr, #1 (forbi null)
+    skriv_u32(native, p_cbz,  0xB400000A | ((((lbl_done - p_cbz)  / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_cbnz, 0xB500000A | ((((lbl_loop - p_cbnz) / 4) & 0x7FFFF) << 5))
+    returner 0
+}
+
+// exec_prosess(req): MINIMAL — parse req["executable"] + req["args"], bygg char**
+// argv (argv[0]=exec, argv[1..]=args-elem, NULL-term), fork/execve/wait4, returner
+// {status:"ferdig", exit_code:N}. (stdout/stderr/timeout kjem inkrementelt.) req er
+// ei NcVal-map i req_reg (operand-reg, overlever). Stakk: [sp..sp+256) argv-ptr-array;
+// [sp+256..sp+8192) cstr-buffer; [sp+8100..sp+8192) stage-slots.
+funksjon emit_exec_prosess(native: liste_heiltall, req_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
+    legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096  (til saman 8192)
+    // --- parse executable → stage på [sp+8184] ---
+    emit_ncval_str_const(native, "executable", 0)       // x0 = nøkkel-NcVal
+    emit_map_get(native, req_reg, 0, 13, usann)         // x13 = exec-streng
+    legg_u32(native, 0xF90FFFED)                        // str x13, [sp, #8184]
+    // --- parse args → stage på [sp+8176] ---
+    emit_ncval_str_const(native, "args", 0)             // x0 = nøkkel
+    emit_map_get(native, req_reg, 0, 13, usann)         // x13 = args-liste
+    legg_u32(native, 0xF90FFBED)                        // str x13, [sp, #8176]
+    // --- bygg argv: x14=argv-array (sp), x15=cstr-buf (sp+256) ---
+    legg_u32(native, 0x910003EE)                        // mov x14, sp
+    legg_u32(native, 0x910403EF)                        // add x15, sp, #256
+    // argv[0] = exec-cstr
+    legg_u32(native, 0xF90001CF)                        // str x15, [x14]  (argv[0]=buf-start)
+    legg_u32(native, 0xF94FFFED)                        // ldr x13, [sp, #8184] (exec)
+    emit_cstr_to_buf(native, 13, 15)                    // kopier exec → [x15], advance x15
+    // loop args: x16=listdata, x17=count, x12=i
+    legg_u32(native, 0xF94FFBED)                        // ldr x13, [sp, #8176] (args)
+    legg_u32(native, 0xF94005B0)                        // ldr x16, [x13, #8] (listdata)
+    legg_u32(native, 0xF9400211)                        // ldr x17, [x16] (count)
+    legg_u32(native, 0xD280000C)                        // movz x12, #0 (i)
+    la lbl_argloop = lengde(native)
+    legg_u32(native, 0xEB11019F)                        // cmp x12, x17
+    la p_bge_argdone = lengde(native)
+    legg_u32(native, 0)                                 // b.ge argdone
+    // element = [x16 + 8 + i*8]  (streng-NcVal)
+    // rett: x13 = x16 + 8 + i*8
+    legg_u32(native, 0x91002209)                        // add x9, x16, #8
+    legg_u32(native, 0xF86C792D)                        // ldr x13, [x9, x12, lsl #3]
+    // argv[1+i] = x15 (current buf ptr)
+    legg_u32(native, 0x9100058A)                        // add x10, x12, #1  (1+i)
+    legg_u32(native, 0xF82A79CF)                        // str x15, [x14, x10, lsl #3]
+    emit_cstr_to_buf(native, 13, 15)                    // kopier arg → [x15], advance
+    legg_u32(native, 0x9100058C)                        // add x12, x12, #1
+    la p_b_argloop = lengde(native)
+    legg_u32(native, 0)                                 // b argloop
+    la lbl_argdone = lengde(native)
+    // argv[1+count] = NULL
+    legg_u32(native, 0x9100062A)                        // add x10, x17, #1
+    legg_u32(native, 0xF82A79DF)                        // str xzr, [x14, x10, lsl #3]
+    // --- fork/clone ---
+    hvis os == "linux" {
+        legg_u32(native, 0xD2800220)                    // movz x0, #17 (SIGCHLD flags)
+        legg_u32(native, 0xAA1F03E1)                    // mov x1, xzr (stack=0)
+        legg_u32(native, 0xAA1F03E2)                    // mov x2, xzr
+        legg_u32(native, 0xAA1F03E3)                    // mov x3, xzr
+        legg_u32(native, 0xAA1F03E4)                    // mov x4, xzr
+        emit_syscall(native, 220, os)                   // clone
+    } ellers {
+        emit_syscall(native, 2, os)                     // fork (macOS)
+    }
+    // x0 = pid (parent) / 0 (child). Ta vare på pid i x19? NEI operand. Bruk x9.
+    legg_u32(native, 0xAA0003E9)                        // mov x9, x0 (pid)
+    la p_cbnz_parent = lengde(native)
+    legg_u32(native, 0)                                 // cbnz x9, parent
+    // --- child: execve(argv[0], argv, envp=x27) ---
+    legg_u32(native, 0xF94001C0)                        // ldr x0, [x14] (argv[0]=exec-cstr)
+    legg_u32(native, 0xAA0E03E1)                        // mov x1, x14 (argv)
+    legg_u32(native, 0xAA1B03E2)                        // mov x2, x27 (envp)
+    hvis os == "linux" { emit_syscall(native, 221, os) } ellers { emit_syscall(native, 59, os) }
+    // execve feila → exit(127)
+    legg_u32(native, 0xD2800FE0)                        // movz x0, #127
+    hvis os == "linux" { emit_syscall(native, 93, os) } ellers { emit_syscall(native, 1, os) }
+    la lbl_parent = lengde(native)
+    // --- parent: wait4(pid, &status, 0, 0) ---
+    legg_u32(native, 0xAA0903E0)                        // mov x0, x9 (pid)
+    legg_u32(native, 0x910FA3E1)                        // add x1, sp, #1000 (&status)
+    legg_u32(native, 0xAA1F03E2)                        // mov x2, xzr (options)
+    legg_u32(native, 0xAA1F03E3)                        // mov x3, xzr (rusage)
+    hvis os == "linux" { emit_syscall(native, 260, os) } ellers { emit_syscall(native, 7, os) }
+    // exit_code = (status >> 8) & 0xFF
+    legg_u32(native, 0xB943EBE9)                        // ldr w9, [sp, #1000] (status)
+    legg_u32(native, 0xD348FD29)                        // lsr x9, x9, #8  (wait: ubfx)
+    legg_u32(native, 0x92401D29)                        // and x9, x9, #0xFF
+    legg_u32(native, 0xF90FF3E9)                        // str x9, [sp, #8160] (exit_code)
+    // --- bygg respons {status:"ferdig", exit_code:N} manuelt ---
+    emit_ncval_str_const(native, "status", 0)           // x0
+    legg_u32(native, 0xF90FEBE0)                        // str x0, [sp, #8144]
+    emit_ncval_str_const(native, "ferdig", 0)           // x0
+    legg_u32(native, 0xF90FE7E0)                        // str x0, [sp, #8136]
+    emit_ncval_str_const(native, "exit_code", 0)        // x0
+    legg_u32(native, 0xF90FE3E0)                        // str x0, [sp, #8128]
+    legg_u32(native, 0xF94FF3E9)                        // ldr x9, [sp, #8160] (exit_code)
+    emit_ncval_alloc(native, 9, 0, 1)                   // x0 = int NcVal
+    legg_u32(native, 0xF90FDFE0)                        // str x0, [sp, #8120]
+    // mapdata = [2][statusK][ferdigV][exitK][codeV]
+    legg_u32(native, 0xAA1C03EE)                        // mov x14, x28
+    legg_u32(native, 0xD2800049)                        // movz x9, #2
+    legg_u32(native, 0xF90001C9)                        // str x9, [x14]
+    legg_u32(native, 0xF94FEBE9)                        // ldr x9, [sp, #8144]; str [x14,#8]
+    legg_u32(native, 0xF90005C9)
+    legg_u32(native, 0xF94FE7E9)                        // ldr [sp,#8136]; str [x14,#16]
+    legg_u32(native, 0xF90009C9)
+    legg_u32(native, 0xF94FE3E9)                        // ldr [sp,#8128]; str [x14,#24]
+    legg_u32(native, 0xF9000DC9)
+    legg_u32(native, 0xF94FDFE9)                        // ldr [sp,#8120]; str [x14,#32]
+    legg_u32(native, 0xF90011C9)
+    legg_u32(native, 0x9100A39C)                        // add x28, x28, #40
+    emit_ncval_alloc_ptr(native, 14, dst_reg, 5)        // respons-map → dst
+    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
+    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
+    skriv_u32(native, p_bge_argdone, 0x5400000A | ((((lbl_argdone - p_bge_argdone) / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_b_argloop,   0x14000000 |  (((lbl_argloop - p_b_argloop)   / 4) & 0x03FFFFFF))
+    // Linux clone: barn har x0=0 → cbnz x9(=x0),parent. macOS fork: x0=pid i BEGGE,
+    // barn flagga av x1!=0 → cbz x1,parent (barn fell gjennom til execve).
+    hvis os == "linux" {
+        skriv_u32(native, p_cbnz_parent, 0xB5000009 | ((((lbl_parent - p_cbnz_parent) / 4) & 0x7FFFF) << 5))
+    } ellers {
+        skriv_u32(native, p_cbnz_parent, 0xB4000001 | ((((lbl_parent - p_cbnz_parent) / 4) & 0x7FFFF) << 5))
+    }
+    returner 0
+}
+
 // fil_les(path): les heile fila inn i ein NcVal-streng (read-loop til EOF).
 funksjon emit_fil_les(native: liste_heiltall, path_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
@@ -5121,6 +5266,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "mkdir_p" eller kallnamn == "builtin.mkdir_p" eller kallnamn == "native_mkdir_p" eller kallnamn == "builtin.native_mkdir_p" eller kallnamn == "mappe_opprett" eller kallnamn == "builtin.mappe_opprett") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal mkdir_p krev 1 arg", "image": []} }
                     emit_mkdir_p(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "exec_prosess" eller kallnamn == "builtin.exec_prosess" eller kallnamn == "process_spawn_argv" eller kallnamn == "builtin.process_spawn_argv") og lengde(instr) == 3 og instr[2] == 1 {
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal exec_prosess krev 1 arg", "image": []} }
+                    emit_exec_prosess(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis (kallnamn == "fil_finnes" eller kallnamn == "builtin.fil_finnes") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_finnes krev 1 arg", "image": []} }
