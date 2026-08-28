@@ -1855,6 +1855,17 @@ funksjon emit_exec_prosess(native: liste_heiltall, req_reg: heiltall, dst_reg: h
     // argv[1+count] = NULL
     legg_u32(native, 0x9100062A)                        // add x10, x17, #1
     legg_u32(native, 0xF82A79DF)                        // str xzr, [x14, x10, lsl #3]
+    // --- lag stdout-pipe → [sp+7000]=read_fd, [sp+7004]=write_fd ---
+    hvis os == "linux" {
+        legg_u32(native, 0x914007E0)                    // add x0, sp, #4096
+        legg_u32(native, 0x912D6000)                    // add x0, x0, #2904  (→ sp+7000, buf for fds[2])
+        legg_u32(native, 0xAA1F03E1)                    // mov x1, xzr (flags)
+        emit_syscall(native, 59, os)                    // pipe2(buf, 0)
+    } ellers {
+        emit_syscall(native, 42, os)                    // pipe → x0=read, x1=write
+        legg_u32(native, 0xB91B5BE0)                    // strw w0, [sp, #7000]
+        legg_u32(native, 0xB91B5FE1)                    // strw w1, [sp, #7004]
+    }
     // --- fork/clone ---
     hvis os == "linux" {
         legg_u32(native, 0xD2800220)                    // movz x0, #17 (SIGCHLD flags)
@@ -1870,6 +1881,19 @@ funksjon emit_exec_prosess(native: liste_heiltall, req_reg: heiltall, dst_reg: h
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0 (pid)
     la p_cbnz_parent = lengde(native)
     legg_u32(native, 0)                                 // cbnz x9, parent
+    // --- barn: dup2(write_fd, 1) [stdout], close begge pipe-fd, så execve ---
+    legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
+    legg_u32(native, 0xD2800021)                        // movz x1, #1 (STDOUT)
+    hvis os == "linux" {
+        legg_u32(native, 0xAA1F03E2)                    // mov x2, xzr (flags)
+        emit_syscall(native, 24, os)                    // dup3(write,1,0)
+    } ellers {
+        emit_syscall(native, 90, os)                    // dup2(write,1)
+    }
+    legg_u32(native, 0xB95B5BE0)                        // ldrw w0, [sp, #7000] (read_fd)
+    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close
+    legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
+    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close
     // --- child: execve(argv[0], argv, envp=x27) ---
     legg_u32(native, 0xF94001C0)                        // ldr x0, [x14] (argv[0]=exec-cstr)
     legg_u32(native, 0xAA0E03E1)                        // mov x1, x14 (argv)
@@ -1879,43 +1903,74 @@ funksjon emit_exec_prosess(native: liste_heiltall, req_reg: heiltall, dst_reg: h
     legg_u32(native, 0xD2800FE0)                        // movz x0, #127
     hvis os == "linux" { emit_syscall(native, 93, os) } ellers { emit_syscall(native, 1, os) }
     la lbl_parent = lengde(native)
-    // --- parent: wait4(pid, &status, 0, 0) ---
-    legg_u32(native, 0xAA0903E0)                        // mov x0, x9 (pid)
-    legg_u32(native, 0x910FA3E1)                        // add x1, sp, #1000 (&status)
-    legg_u32(native, 0xAA1F03E2)                        // mov x2, xzr (options)
-    legg_u32(native, 0xAA1F03E3)                        // mov x3, xzr (rusage)
+    // --- forelder: lagra pid, close write_fd, les stdout til heap-streng ---
+    legg_u32(native, 0xF90DD7E9)                        // str x9, [sp, #7080] (pid)
+    legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
+    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close write
+    legg_u32(native, 0xAA1C03EA)                        // mov x10, x28 (strdata-base)
+    legg_u32(native, 0x9100214B)                        // add x11, x10, #8 (skrivepeikar)
+    legg_u32(native, 0xAA1F03EC)                        // mov x12, xzr (total)
+    la lbl_read = lengde(native)
+    legg_u32(native, 0xB95B5BE0)                        // ldrw w0, [sp, #7000] (read_fd)
+    legg_u32(native, 0xAA0B03E1)                        // mov x1, x11 (buf)
+    legg_u32(native, 0xD2800002)                        // movz x2, #0
+    legg_u32(native, 0xF2A00022)                        // movk x2, #1, lsl #16 (65536)
+    hvis os == "linux" { emit_syscall(native, 63, os) } ellers { emit_syscall(native, 3, os) }  // read
+    legg_u32(native, 0xF100041F)                        // cmp x0, #1
+    la p_blt_readdone = lengde(native)
+    legg_u32(native, 0)                                 // b.lt readdone
+    legg_u32(native, 0x8B00016B)                        // add x11, x11, x0
+    legg_u32(native, 0x8B00018C)                        // add x12, x12, x0
+    la p_b_read = lengde(native)
+    legg_u32(native, 0)                                 // b read
+    la lbl_readdone = lengde(native)
+    legg_u32(native, 0xF900014C)                        // str x12, [x10] (lengd)
+    legg_u32(native, 0x91003D7C)                        // add x28, x11, #15
+    legg_u32(native, 0x927CEF9C)                        // and x28, x28, #~0xF (16-align)
+    emit_ncval_alloc_ptr(native, 10, 0, 3)              // x0 = stdout-streng NcVal
+    legg_u32(native, 0xF90DBFE0)                        // str x0, [sp, #7032] (stdout-ptr)
+    legg_u32(native, 0xB95B5BE0)                        // ldrw w0, [sp, #7000] (read_fd)
+    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close read
+    // --- wait4(pid, &status, 0, 0) ---
+    legg_u32(native, 0xF94DD7E9)                        // ldr x9, [sp, #7080] (pid)
+    legg_u32(native, 0xAA0903E0)                        // mov x0, x9
+    legg_u32(native, 0x914007E1)                        // add x1, sp, #4096
+    legg_u32(native, 0x912DA021)                        // add x1, x1, #2920  (→ sp+7016, &status)
+    legg_u32(native, 0xAA1F03E2)                        // mov x2, xzr
+    legg_u32(native, 0xAA1F03E3)                        // mov x3, xzr
     hvis os == "linux" { emit_syscall(native, 260, os) } ellers { emit_syscall(native, 7, os) }
-    // exit_code = (status >> 8) & 0xFF
-    legg_u32(native, 0xB943EBE9)                        // ldr w9, [sp, #1000] (status)
-    legg_u32(native, 0xD348FD29)                        // lsr x9, x9, #8  (wait: ubfx)
+    legg_u32(native, 0xB95B6BE9)                        // ldrw w9, [sp, #7016] (status)
+    legg_u32(native, 0xD348FD29)                        // lsr x9, x9, #8
     legg_u32(native, 0x92401D29)                        // and x9, x9, #0xFF
-    legg_u32(native, 0xF90FF3E9)                        // str x9, [sp, #8160] (exit_code)
-    // --- bygg respons {status:"ferdig", exit_code:N} manuelt ---
-    emit_ncval_str_const(native, "status", 0)           // x0
-    legg_u32(native, 0xF90FEBE0)                        // str x0, [sp, #8144]
-    emit_ncval_str_const(native, "ferdig", 0)           // x0
-    legg_u32(native, 0xF90FE7E0)                        // str x0, [sp, #8136]
-    emit_ncval_str_const(native, "exit_code", 0)        // x0
-    legg_u32(native, 0xF90FE3E0)                        // str x0, [sp, #8128]
-    legg_u32(native, 0xF94FF3E9)                        // ldr x9, [sp, #8160] (exit_code)
+    legg_u32(native, 0xF90DBBE9)                        // str x9, [sp, #7024] (exit_code)
+    // --- respons {status:"ferdig", exit_code:N, stdout:S} (3 par) ---
+    emit_ncval_str_const(native, "status", 0)
+    legg_u32(native, 0xF90DC3E0)                        // str x0, [sp,#7040] statusK
+    emit_ncval_str_const(native, "ferdig", 0)
+    legg_u32(native, 0xF90DC7E0)                        // str x0, [sp,#7048] ferdigV
+    emit_ncval_str_const(native, "exit_code", 0)
+    legg_u32(native, 0xF90DCBE0)                        // str x0, [sp,#7056] exitK
+    legg_u32(native, 0xF94DBBE9)                        // ldr x9, [sp,#7024]
     emit_ncval_alloc(native, 9, 0, 1)                   // x0 = int NcVal
-    legg_u32(native, 0xF90FDFE0)                        // str x0, [sp, #8120]
-    // mapdata = [2][statusK][ferdigV][exitK][codeV]
+    legg_u32(native, 0xF90DCFE0)                        // str x0, [sp,#7064] codeV
+    emit_ncval_str_const(native, "stdout", 0)
+    legg_u32(native, 0xF90DD3E0)                        // str x0, [sp,#7072] stdoutK
+    // stdoutV alt i [sp+7032]
     legg_u32(native, 0xAA1C03EE)                        // mov x14, x28
-    legg_u32(native, 0xD2800049)                        // movz x9, #2
+    legg_u32(native, 0xD2800069)                        // movz x9, #3
     legg_u32(native, 0xF90001C9)                        // str x9, [x14]
-    legg_u32(native, 0xF94FEBE9)                        // ldr x9, [sp, #8144]; str [x14,#8]
-    legg_u32(native, 0xF90005C9)
-    legg_u32(native, 0xF94FE7E9)                        // ldr [sp,#8136]; str [x14,#16]
-    legg_u32(native, 0xF90009C9)
-    legg_u32(native, 0xF94FE3E9)                        // ldr [sp,#8128]; str [x14,#24]
-    legg_u32(native, 0xF9000DC9)
-    legg_u32(native, 0xF94FDFE9)                        // ldr [sp,#8120]; str [x14,#32]
-    legg_u32(native, 0xF90011C9)
-    legg_u32(native, 0x9100A39C)                        // add x28, x28, #40
+    legg_u32(native, 0xF94DC3E9)  legg_u32(native, 0xF90005C9)   // statusK → [x14,#8]
+    legg_u32(native, 0xF94DC7E9)  legg_u32(native, 0xF90009C9)   // ferdigV → [x14,#16]
+    legg_u32(native, 0xF94DCBE9)  legg_u32(native, 0xF9000DC9)   // exitK   → [x14,#24]
+    legg_u32(native, 0xF94DCFE9)  legg_u32(native, 0xF90011C9)   // codeV   → [x14,#32]
+    legg_u32(native, 0xF94DD3E9)  legg_u32(native, 0xF90015C9)   // stdoutK → [x14,#40]
+    legg_u32(native, 0xF94DBFE9)  legg_u32(native, 0xF90019C9)   // stdoutV → [x14,#48]
+    legg_u32(native, 0x9100E39C)                        // add x28, x28, #56
     emit_ncval_alloc_ptr(native, 14, dst_reg, 5)        // respons-map → dst
     legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
     legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
+    skriv_u32(native, p_blt_readdone, 0x5400000B | ((((lbl_readdone - p_blt_readdone) / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_b_read,       0x14000000 |  (((lbl_read     - p_b_read)       / 4) & 0x03FFFFFF))
     skriv_u32(native, p_bge_argdone, 0x5400000A | ((((lbl_argdone - p_bge_argdone) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_argloop,   0x14000000 |  (((lbl_argloop - p_b_argloop)   / 4) & 0x03FFFFFF))
     // Linux clone: barn har x0=0 → cbnz x9(=x0),parent. macOS fork: x0=pid i BEGGE,
