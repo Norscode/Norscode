@@ -1,3 +1,8 @@
+// tools/render-norscode-mark.swift — OPT-IN dev-/branding-hjelpar (ikkje runtime).
+// Rasteriserer logoen (norscode-mark.svg) til PNG via CoreGraphics/ImageIO.
+// Eigar: tools/render-norscode-mark.no. Den sjølvhosta verktøykjeda brukar ikkje
+// denne fila — ho er framand tooling utanfor bygg-/køyre-/sjølvhost-flata.
+// Sjå docs/BYGG_ALT_SELVSTENDIG_PLAN.md Blokk A3.
 import Foundation
 import CoreGraphics
 import ImageIO

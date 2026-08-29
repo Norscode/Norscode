@@ -2,6 +2,11 @@
 
 Denne mappa inneheld små plattformgrenser som Norscode ikkje kan erstatte fullt ut enno.
 
+> **Sjølvstende:** Alt her er **opt-in framand tooling** for desktop-GUI-pakking på
+> ein spesifikk plattform. Den sjølvhosta kjeda — kompilere, køyre, sjølvhoste og
+> native ELF/Mach-O/PE-codegen — treng **null** av dette. Sjå
+> [docs/BYGG_ALT_SELVSTENDIG_PLAN.md](../docs/BYGG_ALT_SELVSTENDIG_PLAN.md) Blokk A3/C.
+
 Aktive filer her skal ha ein Norscode-eigar ved sida av seg eller ein Norscode-byggar som validerer og brukar dei. For macOS-window-hosten er `Main.swift` AppKit/WebKit-brua, medan `Main.no`, `app.no` og `tools/build-macos-window-host.no` eig kontrollen, malen og bygginga.
 
 ## Reglar

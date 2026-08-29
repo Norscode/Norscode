@@ -85,21 +85,41 @@ men **ingen** workflow refererte den (live Windows-release brukar `build_windows
       (`release_preflight.no`) + byggartefakt-stiar (`platform_readiness_v3600.no`) — ingen zig-kall
 - [x] Fjernar eitt reelt flagg frå gate 4 sin «legacy tekstprosess-kall»-liste
 
-### A3 — Merk opt-in framand tooling eksplisitt
-Desse er valfrie og matar ikkje kjeda, men bør vere tydeleg utanfor purity-porten:
+### A3 — Merk opt-in framand tooling eksplisitt ✅ *gjort 2026-08-29*
+Desse er valfrie og matar ikkje kjeda, men bør vere tydeleg utanfor purity-porten.
+Alle tre hadde alt `.no`-eigar/README; A3 la til eksplisitt **sjølvstende-framing**.
 
-- [ ] Dokumenter i `platform/macos/README` at Swift-vertsprosessen
-      ([Main.swift](../platform/macos/window-host/Main.swift)) er opt-in GUI-pakking
-- [ ] Merk `tools/render-norscode-mark.swift` som dev-/branding-hjelpar (ikkje runtime)
-- [ ] Merk `vscode-norscode/package.json` som editor-tooling (utanfor kjeda)
-- [ ] (Valfritt) flytt desse tre til eit eige `tooling/`-tre / eige repo så
-      kjeldeflata blir 100 % `.no`
+- [x] `platform/README.md`: la til «Sjølvstende»-notat — window-host ([Main.swift](../platform/macos/window-host/Main.swift))
+      er opt-in GUI-pakking; kjeda treng null av det
+- [x] `tools/render-norscode-mark.swift`: header-kommentar «OPT-IN dev-/branding-hjelpar (ikkje runtime)»
+- [x] `vscode-norscode/README.md`: «Self-sufficiency note» — opt-in editor-tooling utanfor kjeda
+- [x] (Valfritt) ~~flytt til eige `tooling/`-tre~~ → **valde deklarasjon i staden**
+      (2026-08-29): fysisk flytt hadde ~35 referansar (byggelane + CLI-dispatch +
+      attest-testar) med reell CI-risiko for kosmetisk gevinst. I staden: ny
+      maskin-sjekka deklarasjon i `tools/no_c_python_active_surface.no`
+      (`collect_foreign_source_hits` + `deklarert_opt_in_kjelde`) som slår fast at
+      **einaste framand programkjelde i aktiv flate er 4 deklarerte opt-in-filer**;
+      ny fil feilar porten. Gjev «100 % `.no` utanom deklarert opt-in»-garanti, låg risiko.
+      - Disk-skann (walk_active_files-eksklusjonar) stadfesta nøyaktig 4: `Main.swift`,
+        `render-norscode-mark.swift`, `install.ps1` (Windows-installer, `.no`-eigar),
+        `native_metal_gpu_smoke.m`.
+      - **Slettekandidat:** `tools/native_metal_gpu_smoke.m` — Metal-GPU-gaten er alt fjerna
+        frå CI (commit ded0be4); .m-fila + `test_native_metal_gate_structured_process.no`
+        heng att som forelda par (som rollback-tilfellet). Eiga oppgåve å fjerne begge.
 
-### A4 — Gate-herding mot regresjon
-- [ ] Legg `no_c_python_active_surface` + `verify_selvstendighet` som **påkravde**
-      status-checks på `main` (kan ikkje merge om raud)
-- [ ] Legg til `codesign`/`xcrun`/`gcc`/`zig`-allowlist-assert: berre dei kjende
-      opt-in-verktøyfilene får nemne dei (ellers port raud)
+### A4 — Gate-herding mot regresjon ⏳ *item 2 gjort 2026-08-29; item 1 er repo-admin*
+- [x] **Framand-verktøy-kall-allowlist (item 2):** ny port i `no_c_python_active_surface.no`
+      (`collect_framand_verktoy_kall` + `framand_verktoy_kall_tillate` + `har_framand_verktoy_kall`)
+      som feilar viss ei aktiv `.no` kallar gcc/clang/cc/zig/codesign/xcrun/security utanfor
+      allowlista (11 deklarerte: gcc-attest Blokk B, macOS sign/verify/notarize/build, + attest/test
+      som berre nemner stien). `nc check` grøn; fullstendig rot-søk stadfesta at settet er ⊆ allowlist.
+      Når B4 slettar gcc-attesten → fjern den frå allowlista → **0 gcc-kall att**.
+- [x] **Framand-programkjelde-deklarasjon (frå A3):** same gate slår fast 100 % `.no` utanom 4 opt-in.
+- [ ] **Påkravde status-checks på `main` (item 1) — REPO-ADMIN, ikkje kode:** både gatene køyrer alt
+      i CI via `selvstendighet.yml`, så CI går raud ved regresjon. Å BLOKKERE merge krev ei
+      GitHub branch-protection-regel (Settings → Branches, eller `gh api`). **Vent til gatene er
+      grøne** — dei er raude no på WIP-greina (py i `build/`, CI-shell-blokker, ukommitterte `.sh`);
+      krav-check før grønt ville blokkere alle merges. Brukar-handling.
 
 ---
 

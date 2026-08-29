@@ -2,6 +2,13 @@
 
 This folder contains the bundled VS Code support for Norscode.
 
+> **Self-sufficiency note:** This extension is **opt-in editor tooling** (Node/npm
+> ecosystem) and is **not part of the self-hosted toolchain**. The compiler, VM,
+> and native codegen build and run with zero dependency on it — it only improves
+> the editing experience. It is excluded from the `.dockerignore` runtime image
+> and lives outside the toolchain surface. See
+> `docs/BYGG_ALT_SELVSTENDIG_PLAN.md` Blokk A3.
+
 It provides:
 
 - syntax highlighting for `.no` files
