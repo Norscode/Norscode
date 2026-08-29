@@ -1,0 +1,161 @@
+# ncb_bin.no — deterministisk BINÆR serialisering av vilkårlege Norscode-verdiar.
+#
+# Erstattar JSON (json_skriv/json_parse_raw) i sjølv-host-kjeda: NCB-IR er berre ein
+# nøsta Norscode-verdi (kart/liste/int/streng/bool/null), so ein generell verdi-codec
+# dekker heile NCB. Binært → byte-deterministisk (ingen escaping, ingen whitespace,
+# ingen \uXXXX) → drep escaping-bug-klassen OG gjer Gen1==Gen2-fixpunktet trivielt.
+#
+# Format (little-endian): tag-byte + nyttelast.
+#   0 = null/ingenting
+#   1 = heiltall  (8 byte, two's complement)
+#   2 = tekst     (u32 lengd + råbyte)
+#   3 = liste     (u32 tal + element…)
+#   4 = kart      (u32 tal + (nøkkel-streng, verdi)…, i innsetjingsrekkjefølgje)
+#   5 = bool      (1 byte)
+
+funksjon _put_u32(buf: liste_heiltall, v: heiltall) -> heiltall {
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+    returner 0
+}
+
+funksjon _put_i64(buf: liste_heiltall, v: heiltall) -> heiltall {
+    la i = 0
+    mens i < 8 {
+        legg_til(buf, (v >> (i * 8)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _get_u32(bytes: liste_heiltall, pos: heiltall) -> heiltall {
+    returner bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)
+}
+
+# Byte-verdiar → NcVal-streng (byte-basert, som resten av runtime).
+funksjon _bytes_til_tekst(bytes: liste_heiltall, pos: heiltall, n: heiltall) -> tekst {
+    la s = ""
+    la i = 0
+    mens i < n {
+        s = s + builtin.chr(bytes[pos + i] & 255)
+        i = i + 1
+    }
+    returner s
+}
+
+funksjon _encode_inn(buf: liste_heiltall, v) -> heiltall {
+    la t = builtin.type(v)
+    hvis t == "ingenting" eller t == "null" {
+        legg_til(buf, 0)
+        returner 0
+    }
+    hvis t == "boolsk" eller t == "bool" {
+        legg_til(buf, 5)
+        hvis v { legg_til(buf, 1) } ellers { legg_til(buf, 0) }
+        returner 0
+    }
+    hvis t == "heltall" eller t == "heiltall" {
+        legg_til(buf, 1)
+        _put_i64(buf, v)
+        returner 0
+    }
+    hvis t == "tekst" {
+        legg_til(buf, 2)
+        la n = lengde(v)
+        _put_u32(buf, n)
+        la i = 0
+        mens i < n {
+            legg_til(buf, builtin.char_code(builtin.slice(v, i, i + 1)) & 255)
+            i = i + 1
+        }
+        returner 0
+    }
+    hvis t == "liste" {
+        legg_til(buf, 3)
+        _put_u32(buf, lengde(v))
+        for e i v { _encode_inn(buf, e) }
+        returner 0
+    }
+    hvis t == "ordbok" {
+        legg_til(buf, 4)
+        la k = nøkler(v)
+        _put_u32(buf, lengde(k))
+        la i = 0
+        mens i < lengde(k) {
+            _encode_inn(buf, k[i])       # nøkkel (streng)
+            _encode_inn(buf, v[k[i]])    # verdi
+            i = i + 1
+        }
+        returner 0
+    }
+    kast "ncb_bin: ukjend type " + t
+}
+
+# bin_encode(verdi) → liste_heiltall (byte). Deterministisk.
+funksjon bin_encode(v) -> liste_heiltall {
+    la buf: liste_heiltall = []
+    _encode_inn(buf, v)
+    returner buf
+}
+
+# _decode_inn(bytes, pos) → [verdi, ny_pos]
+funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
+    la tag = bytes[pos]
+    pos = pos + 1
+    hvis tag == 0 { returner [null, pos] }
+    hvis tag == 5 {
+        la b = bytes[pos] == 1
+        returner [b, pos + 1]
+    }
+    hvis tag == 1 {
+        la v = 0
+        la i = 0
+        mens i < 8 { v = v | (bytes[pos + i] << (i * 8)) i = i + 1 }
+        # teiknutviding (bit 63)
+        hvis (bytes[pos + 7] & 128) != 0 { v = v - (1 << 64) }
+        returner [v, pos + 8]
+    }
+    hvis tag == 2 {
+        la n = _get_u32(bytes, pos)
+        pos = pos + 4
+        la s = _bytes_til_tekst(bytes, pos, n)
+        returner [s, pos + n]
+    }
+    hvis tag == 3 {
+        la n = _get_u32(bytes, pos)
+        pos = pos + 4
+        la ut: liste = []
+        la i = 0
+        mens i < n {
+            la r = _decode_inn(bytes, pos)
+            legg_til(ut, r[0])
+            pos = r[1]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    hvis tag == 4 {
+        la n = _get_u32(bytes, pos)
+        pos = pos + 4
+        la ut = {}
+        la i = 0
+        mens i < n {
+            la kr = _decode_inn(bytes, pos)
+            pos = kr[1]
+            la vr = _decode_inn(bytes, pos)
+            pos = vr[1]
+            ut[kr[0]] = vr[0]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    kast "ncb_bin: ukjend tag " + tekst_fra_heltall(tag)
+}
+
+# bin_decode(byte) → verdi
+funksjon bin_decode(bytes: liste_heiltall) {
+    la r = _decode_inn(bytes, 0)
+    returner r[0]
+}
