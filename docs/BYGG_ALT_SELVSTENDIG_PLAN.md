@@ -148,6 +148,20 @@ den committede arm64-stage0-seeden er for gammal (manglar 2026-08-codegen-rettin
 - [ ] Fjern `linux-arm64-runtime-attestation`-gcc-jobben frå [ci.yml](../.github/workflows/ci.yml)
 - [ ] Slett `tools/build_linux_arm64_tls_attestation_candidate.no`
 
+### B0 — ELF stage-0 fixpunkt (pre-eksisterande blokkerar) ⏳ *harness bygd 2026-08-29*
+`nc selfcompile-stage0-elf` [4/4] feilar: Gen1 ELF (4,36 MB, frå oppblåste committa
+`precompiled_fragments*` — bundler inner 867 KB) vs source-only Gen2 ELF (674 KB, frå
+fersk kjelde 645 KB). Rot: committa fragment er oppblåste vs det fersk native
+kjelde-kompilering gjev. Feila alt før A-blokk-commitane (pre-eksisterande).
+
+- [x] Ny **sjølv-verifiserande** workflow [.github/workflows/elf-fixpunkt-regen.yml](../.github/workflows/elf-fixpunkt-regen.yml)
+      (workflow_dispatch): materialiser native runtime → `regen-bootstrap --full` →
+      `regenerate_omgang6b_fragments_safe.no` med `SOURCE_NATIVE=1` (rein konvensjon) →
+      `selfcompile-stage0-elf` som BEVIS → last opp ferske fragment som artefakt (ingen auto-commit)
+- [ ] **Køyr workflowen i CI** (kan ikkje verifiserast lokalt — lokal `bin/nc` ≠ CI native compiler)
+- [ ] Viss `[3/3]`-beviset er grønt: last ned artefakt, commit ferske `precompiled_fragments*`, push → ELF stage-0 grøn
+- [ ] Viss raudt: bruk artefakt + logg til å iterere på regen-oppskrifta (SOURCE_NATIVE-input/naming)
+
 ### B4 — Slett legacy C-backend (Omgang 10–11)
 - [ ] Slett `-DNC_ENABLE_OPENSSL -DNC_DYNAMIC_SQLITE`-kandidatane + `build/v3009/*.c`
 - [ ] `git rm -r archive/legacy_c_backend`

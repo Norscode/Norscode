@@ -1,0 +1,112 @@
+# ELF stage-0 fixpunkt-regen (eksperimentell, sjølv-verifiserande)
+#
+# FORMÅL: regenerer dei committa Omgang-6b-fragmenta frå FERSK native kjelde med
+# CI sin native compiler (byte-identisk med Gen2), og VERIFISER byte-paritet i
+# same køyring. Dette er den einaste trygge staden å regenerere: lokal bin/nc på
+# macOS er IKKJE byte-identisk med CI sin native compiler, så lokalt regenererte
+# fragment blir feil og kan brekke seeden (jf. docs/BYGG_ALT_SELVSTENDIG_PLAN.md).
+#
+# ROT-ÅRSAK som dette adresserer: dei committa bootstrap/precompiled_fragments*
+# er oppblåste (t.d. bundler inner = 867 KB) mot det fersk kjelde-kompilering gjev
+# (~108 KB). Difor: Gen1 NCB = 3 MB (frå oppblåste fragment) vs source-only Gen2
+# NCB = 645 KB → `nc selfcompile-stage0-elf` [4/4] ELF differ.
+#
+# SIKKERHEIT: workflow_dispatch (manuell), INGEN auto-commit/push. Ferske fragment
+# blir lasta opp som artefakt; eit menneske lastar ned + committar etter at
+# verifikasjonssteget er grønt. Verifikasjonssteget (selfcompile-stage0-elf) er
+# BEVISET — jobben er berre grøn om Gen1 == Gen2 byte-identisk med dei nye fragmenta.
+#
+# MERK: dette er ein FØRSTE harness. Sidan byte-paritet ikkje kan stadfestast lokalt,
+# kan regen-oppskrifta trenge CI-iterasjon; artefakt + loggar frå kvar køyring styrer
+# neste steg.
+
+name: ELF fixpunkt regen
+
+on:
+  # workflow_dispatch krev at fila ligg på default-greina (main). Fram til
+  # workflowen er merga til main, gjer ein scoped push-trigger den køyrbar:
+  # den startar berre når SJØLVE workflow-fila endrar seg på b2-independence.
+  workflow_dispatch:
+  push:
+    branches:
+      - b2-independence
+    paths:
+      - .github/workflows/elf-fixpunkt-regen.yml
+
+env:
+  NORSCODE_CMD: run
+  NORSCODE_FILE: tools/ci_shell_runner.no
+  NORSCODE_ROOT: ${{ github.workspace }}
+  NORSCODE_ENABLE_EXEC_PROSESS: "1"
+  NORSCODE_VM_CAPABILITIES: env.read,env.write,process.exec,disk.read,disk.write
+  NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+  GITHUB_TOKEN: ${{ github.token }}
+  NC_CI: "1"
+
+concurrency:
+  group: elf-fixpunkt-regen-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  regen:
+    name: Regenerer fragment frå fersk native kjelde + verifiser fixpunkt
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: ${{ github.workspace }}/bootstrap/stage0/norscode-linux-x86_64 run ${{ github.workspace }}/tools/ci_shell_runner.no {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Materialiser attestert Linux v146-kandidat
+        env:
+          NORSCODE_ROOT: ${{ github.workspace }}
+          NORSCODE_CI_FILE_SOURCE: bootstrap/candidates/norscode-linux-x86_64-v146
+          NORSCODE_CI_FILE_TARGET: dist/norscode_native
+          NORSCODE_VM_CI_CHILD_CMD: run
+          NORSCODE_VM_CI_CHILD_EXECUTABLE: ./bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_VM_CI_CHILD_FILE: ${{ github.workspace }}/tools/ci_runtime_fileops.no
+          NORSCODE_ENABLE_EXEC_PROSESS: "1"
+          NORSCODE_VM_CI_CHILD_CAPABILITIES: env.read,process.exec,disk.read,disk.write
+          NORSCODE_VM_CI_CHILD_DISK_ROOT: ${{ github.workspace }},.,/tmp
+          NORSCODE_VM_CI_COMMAND: "./bootstrap/stage0/norscode-linux-x86_64"
+        run: ./bootstrap/stage0/norscode-linux-x86_64
+
+      - name: "Baseline (diagnose): stadfest at fixpunktet feilar FØR regen"
+        continue-on-error: true
+        env:
+          NC_OM6B_RUN_STAGE0: "1"
+          NORSCODE_VM_CI_COMMAND: "./bin/nc selfcompile-stage0-elf"
+        run: ./bin/nc selfcompile-stage0-elf
+
+      - name: "[1/3] Regenerer bootstrap-precompiled NCB frå kjelde (native)"
+        env:
+          NORSCODE_VM_CI_COMMAND: "./bin/nc regen-bootstrap --full"
+        run: ./bin/nc regen-bootstrap --full
+
+      - name: "[2/3] Regenerer fragment i REIN konvensjon (SOURCE_NATIVE)"
+        env:
+          NORSCODE_FRAGMENT_SOURCE_NATIVE: "1"
+          NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/regenerate_omgang6b_fragments_safe.no"
+        run: ./bin/nc run tools/regenerate_omgang6b_fragments_safe.no
+
+      - name: "[3/3] BEVIS: Gen1 ELF == source-only Gen2 ELF byte-paritet"
+        env:
+          NC_OM6B_RUN_STAGE0: "1"
+          NORSCODE_VM_CI_COMMAND: "./bin/nc selfcompile-stage0-elf"
+        run: ./bin/nc selfcompile-stage0-elf
+
+      - name: "Last opp ferske fragment (for review + commit av menneske)"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elf-fixpunkt-fragment-${{ github.run_id }}
+          path: |
+            bootstrap/precompiled_fragments/
+            bootstrap/precompiled_fragments_inner/
+            bootstrap/precompiled/
+          if-no-files-found: warn
+          retention-days: 7
