@@ -135,6 +135,20 @@ full NcVal-runtime. Difor byggjer `linux-arm64-runtime-attestation` framleis
 - [ ] Rein native TLS/krypto-flate over syscall-socket (D2) — ingen OpenSSL-lenking
 - [ ] Port: `nc bygg-native --target linux-arm64 <nc_main>` → køyrande binær, selftest exit 0
 
+**Framgang 2026-08-30 (VM==AOT-verifikasjonsloop + sha256-fiks):**
+- Bygd lokal Docker-loop (`/tmp/arm64_litmus.sh`): emit ELF-arm64 i `linux/amd64`-container
+  (seed tolkar `build_native_from_ncb.no`), køyr i native `linux/arm64`-container = AOT;
+  tolk kjelde = VM-referanse; samanlikn exit+stdout. NcVal-emisjonen er identisk macos/linux-arm64.
+- Verifisert at kjerne-value-builtins alt PASSER i AOT: `fjern`, `fjern_indeks`, `sett_inn`,
+  `miljo_sett/hent`, `feil`+prøv/fang, `nøkler`, `fjern_nokkel`, `split/join` — codegen lenger enn plan-doc.
+- **Ekte bug fiksa** i [macho_arm64_codegen.no](../selfhost/native_execution/macho_arm64_codegen.no):
+  `builtin.sha256(tekst)` segfaulta — CALL-dispatch (linje ~6992) mata streng-argumentet til
+  `emit_sha256_bytes`, som les LISTE-av-boksa-int (8-byte stride, deref) → streng si rå-byte-layout
+  vart tolka som peikarar. Fiks: streng-varianten fell no gjennom til `ncval_gap_rute → std.sha256.hash`
+  (rein bit-ops-impl, verifisert VM==AOT); byte-varianten (`sha256_bytes`) held rask native inline-sti.
+  Låser opp `nc_main`-linje 1910 (`builtin.sha256(materiale)` cache-nøkkel) for AArch64 AOT.
+  Ingen regresjon: `test_sha256_native_arm64.no` brukar berre byte-varianten.
+
 ### B2 — Fersk ARM64-seed frå gjeldande kjelde
 Blokkeringa for [arm64-native-attest.yml](../.github/workflows/arm64-native-attest.yml):
 den committede arm64-stage0-seeden er for gammal (manglar 2026-08-codegen-rettingar).
