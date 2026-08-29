@@ -34,6 +34,35 @@ funksjon _get_u32(bytes: liste_heiltall, pos: heiltall) -> heiltall {
     returner bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)
 }
 
+# Varint (LEB128, usignert). Kompakt for dei mange små tala.
+funksjon _put_varint(buf: liste_heiltall, v: heiltall) -> heiltall {
+    mens v >= 128 { legg_til(buf, (v & 127) | 128) v = v >> 7 }
+    legg_til(buf, v & 127)
+    returner 0
+}
+# _get_varint → [verdi, ny_pos]
+funksjon _get_varint(bytes: liste_heiltall, pos: heiltall) -> liste {
+    la v = 0
+    la skift = 0
+    mens sann {
+        la b = bytes[pos]
+        pos = pos + 1
+        v = v | ((b & 127) << skift)
+        hvis b < 128 { returner [v, pos] }
+        skift = skift + 7
+    }
+    returner [v, pos]
+}
+# Zigzag: signert → usignert (små |tal| → få byte).
+funksjon _zigzag(v: heiltall) -> heiltall {
+    hvis v < 0 { returner (0 - v) * 2 - 1 }
+    returner v * 2
+}
+funksjon _unzigzag(z: heiltall) -> heiltall {
+    hvis (z & 1) == 1 { returner 0 - ((z + 1) / 2) }
+    returner z / 2
+}
+
 # Byte-verdiar → NcVal-streng (byte-basert, som resten av runtime).
 funksjon _bytes_til_tekst(bytes: liste_heiltall, pos: heiltall, n: heiltall) -> tekst {
     la s = ""
@@ -58,13 +87,13 @@ funksjon _encode_inn(buf: liste_heiltall, v) -> heiltall {
     }
     hvis t == "heltall" eller t == "heiltall" {
         legg_til(buf, 1)
-        _put_i64(buf, v)
+        _put_varint(buf, _zigzag(v))
         returner 0
     }
     hvis t == "tekst" {
         legg_til(buf, 2)
         la n = lengde(v)
-        _put_u32(buf, n)
+        _put_varint(buf, n)
         la i = 0
         mens i < n {
             legg_til(buf, builtin.char_code(builtin.slice(v, i, i + 1)) & 255)
@@ -74,14 +103,14 @@ funksjon _encode_inn(buf: liste_heiltall, v) -> heiltall {
     }
     hvis t == "liste" {
         legg_til(buf, 3)
-        _put_u32(buf, lengde(v))
+        _put_varint(buf, lengde(v))
         for e i v { _encode_inn(buf, e) }
         returner 0
     }
     hvis t == "ordbok" {
         legg_til(buf, 4)
         la k = nøkler(v)
-        _put_u32(buf, lengde(k))
+        _put_varint(buf, lengde(k))
         la i = 0
         mens i < lengde(k) {
             _encode_inn(buf, k[i])       # nøkkel (streng)
@@ -110,22 +139,20 @@ funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
         returner [b, pos + 1]
     }
     hvis tag == 1 {
-        la v = 0
-        la i = 0
-        mens i < 8 { v = v | (bytes[pos + i] << (i * 8)) i = i + 1 }
-        # teiknutviding (bit 63)
-        hvis (bytes[pos + 7] & 128) != 0 { v = v - (1 << 64) }
-        returner [v, pos + 8]
+        la r = _get_varint(bytes, pos)
+        returner [_unzigzag(r[0]), r[1]]
     }
     hvis tag == 2 {
-        la n = _get_u32(bytes, pos)
-        pos = pos + 4
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
         la s = _bytes_til_tekst(bytes, pos, n)
         returner [s, pos + n]
     }
     hvis tag == 3 {
-        la n = _get_u32(bytes, pos)
-        pos = pos + 4
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
         la ut: liste = []
         la i = 0
         mens i < n {
@@ -137,8 +164,9 @@ funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
         returner [ut, pos]
     }
     hvis tag == 4 {
-        la n = _get_u32(bytes, pos)
-        pos = pos + 4
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
         la ut = {}
         la i = 0
         mens i < n {
@@ -158,4 +186,27 @@ funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
 funksjon bin_decode(bytes: liste_heiltall) {
     la r = _decode_inn(bytes, 0)
     returner r[0]
+}
+
+# ncb_encode(ncb) → byte. Strippar debug-metadata (source_lines/source_columns) frå
+# kvar funksjon FØR encoding: dei trengst ikkje for køyring, utgjer ~24% av bloaten,
+# og er hovudkjelda til Gen1≠Gen2-serialiserings-drifta. Muterer ncb in-place (den
+# blir serialisert og forkasta). Deterministisk + lean.
+funksjon ncb_encode(ncb) -> liste_heiltall {
+    hvis builtin.type(ncb) == "ordbok" og finnes_nøkkel(ncb, "functions") {
+        la fns = ncb["functions"]
+        la navn = nøkler(fns)
+        la i = 0
+        mens i < lengde(navn) {
+            la fn = fns[navn[i]]
+            hvis finnes_nøkkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
+            hvis finnes_nøkkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
+            i = i + 1
+        }
+    }
+    returner bin_encode(ncb)
+}
+
+funksjon ncb_decode(bytes: liste_heiltall) {
+    returner bin_decode(bytes)
 }
