@@ -91,17 +91,23 @@ FØR sin boks). MARK-fasen har no full peikarfelt-kart. SWEEP treng framleis
 objekt-grenser → header (sjå under), sidan `[len]`-ord (1–5) er tvetydig mot
 box-type-tag (1–5) ved lineær walk.
 
-## Objekt-header (påkravd for sweep)
+## Objekt-header FORKASTA → live-map sweep (avgjerd 2026-08-30)
 
-Sweep må enumerere alle objekt. Utan header er lineær heap-walk tvetydig (boks
-type-tag 1–5 vs payload-len 1–5 kolliderer). Val:
-- **A (vald): re-pek dei allokerande RT_*-rutinene til nye appenda header-
-  leggjande versjonar.** Kvar allokering: bump med `(8 + storleik)`, skriv
-  `[size:8]` (+ mark-bit i høg-bit eller sidekart), returner boks etter headeren.
-  All allokering går då gjennom våre rutiner; frosen rt_hex-bump vert forbigått.
-  Meir arbeid, men NYE rutiner (ikkje redigering av hex).
-- B (forkasta): sjølv-beskrivande walk — krev regulær, eintydig layout per type;
-  boks/payload-interleaving gjer det tvetydig.
+Headrar krev at ALLE allokeringar er headra. MEN den frosne rt_hex-bloben
+allokerer header-lause objekt INTERNT (rutiner kallar RT_INT/RT_LIST_APP o.l. på
+HARDKODA adresser i bloben) — dei kan ikkje re-pekast. Ein blanda heap (headra +
+header-laus) kan ikkje walkast eintydig. **Difor: INGEN headrar.**
+
+**Vald: live-map sweep.** Mark (som uansett besøker kvart levande objekt) reknar
+storleik frå layout og registrerer (addr, size) i eit rå-minne live-kart. Sweep =
+sortér live-kartet, hola mellom påfølgjande levande objekt = frie blokker →
+fri-liste. Fungerer på dei eksisterande header-lause objekta. Re-peikte HOT-
+allokatorar (codegen-emitterte RT_LIST_*/STR_RAW/INT-kall — som tolkaren og pure-
+crypto går gjennom) sjekkar fri-lista. Frosen-blob sine INTERNE allokeringar
+(sjeldne, ikkje hot-path for pbkdf2) bumpar berre — greit.
+
+Fri-liste: hovud i kontrollblokk-slot (HEAP_VA+40). Blokk: [next:8][size:8].
+gc_alloc(size): first-fit i fri-lista, elles bump.
 
 ## Mark-sweep-algoritme (stop-the-world, konservativ rot)
 
