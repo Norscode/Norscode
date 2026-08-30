@@ -2041,26 +2041,55 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, HEAP_VA())                          // [0x600000] = bump-slot
     copy(bytes, [0x48, 0x89, 0xF8, 0xC3])          // mov rax, rdi; ret
 
-    // ── GC F4: delt gc_alloc(size) — allokerings-choke-point ──
-    // Fri-liste-hovud i kontrollblokk-slot HEAP_VA+40 (BSS-null til sweep fyller
-    // det). v1: fri-liste tom → berre bump. Returnerer BOKSA adresse (for
-    // Norscode-test). Seinare re-peikte allokatorar kallar ein rå-variant.
-    // Header-laust design (sjå AOT_GC_DESIGN: live-map sweep).
+    // ── GC F4: delt gc_alloc(size) — allokerings-choke-point med fri-liste ──
+    // Fri-liste-hovud i kontrollblokk-slot HEAP_VA+40 (BSS-null til sweep/gc_free
+    // fyller). Fri-blokk-layout: [next:8][size:8]. v1 head-fit: gjenbruk hovud-
+    // blokka om ho er stor nok, elles bump (inga djup-walk/split enno). Header-
+    // laust (sjå AOT_GC_DESIGN: live-map sweep). Returnerer BOKSA adresse.
     atomics["gc_alloc"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [
-        0x48, 0x8B, 0x47, 0x08,                   // mov rax, [rdi+8]  (size unboxa)
-        0x48, 0x8B, 0x0C, 0x25                     // mov rcx, [moffs32]  (bump)
-    ])
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8]  (size)
+    copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[moffs32] (head)
+    u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x4D, 0x85, 0xC0])                // test r8,r8
+    la ga_empty = emit_je_placeholder(bytes)       // jz L_bump  (tom fri-liste)
+    copy(bytes, [0x4D, 0x8B, 0x48, 0x08])          // mov r9,[r8+8]  (blokk-size)
+    copy(bytes, [0x49, 0x39, 0xC1])                // cmp r9,rax
+    copy(bytes, [0x0F, 0x83])                       // jae L_reuse (blokk >= size)
+    u32(bytes, 0)
+    la ga_reuse = lengde(bytes) - 4
+    la ga_Lbump = lengde(bytes)                    // L_bump:
+    patch_jump(bytes, ga_empty, ga_Lbump)
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x25])          // mov rcx,[moffs32] (bump)
     u32(bytes, HEAP_VA())
-    copy(bytes, [
-        0x48, 0x89, 0xCF,                         // mov rdi, rcx      (obj-addr)
-        0x48, 0x01, 0xC1,                         // add rcx, rax      (ny bump)
-        0x48, 0x89, 0x0C, 0x25                     // mov [moffs32], rcx
-    ])
+    copy(bytes, [0x48, 0x89, 0xCF])                // mov rdi,rcx  (obj-addr)
+    copy(bytes, [0x48, 0x01, 0xC1])                // add rcx,rax  (ny bump)
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [moffs32],rcx
     u32(bytes, HEAP_VA())
-    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp, 8 (align)
-    call_rel32(bytes, RT_INT(), TEXT_VA())        // box rdi (obj-addr) → rax
-    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])   // add rsp, 8; ret
+    la ga_box = emit_jmp_placeholder(bytes)        // jmp L_box
+    la ga_Lreuse = lengde(bytes)                   // L_reuse:
+    patch_jump(bytes, ga_reuse, ga_Lreuse)
+    copy(bytes, [0x4D, 0x8B, 0x10])                // mov r10,[r8]  (next)
+    copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [moffs32],r10 (head=next)
+    u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x4C, 0x89, 0xC7])                // mov rdi,r8  (obj = blokk)
+    la ga_Lbox = lengde(bytes)                     // L_box:
+    patch_jump(bytes, ga_box, ga_Lbox)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8 (align)
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box rdi → rax
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])   // add rsp,8; ret
+
+    // gc_free(addr, size): push fri-blokk på fri-lista. [addr]=old_head,
+    // [addr+8]=size, head=addr. Blokk må vere >= 16B. rdi=addr, rsi=size.
+    atomics["gc_free"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8] (addr)
+    copy(bytes, [0x48, 0x8B, 0x56, 0x08])          // mov rdx,[rsi+8] (size)
+    copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[moffs32] (old head)
+    u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x4C, 0x89, 0x00])                // mov [rax],r8  (next=old head)
+    copy(bytes, [0x48, 0x89, 0x50, 0x08])          // mov [rax+8],rdx (size)
+    copy(bytes, [0x48, 0x89, 0x04, 0x25])          // mov [moffs32],rax (head=addr)
+    u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x48, 0x89, 0xF8, 0xC3])          // mov rax,rdi; ret
 
     la safepoint_adresse = HEAP_VA() + GC_SAFEPOINT_OFFSET()
     // mov rax,[moffs64]; inc rax; mov [moffs64],rax; ret
@@ -2426,6 +2455,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.obj_addr" eller fn_nm == "obj_addr" { returner atomic_vas["obj_addr"] }
     hvis fn_nm == "builtin.heap_set_bump" eller fn_nm == "heap_set_bump" { returner atomic_vas["heap_set_bump"] }
     hvis fn_nm == "builtin.gc_alloc" eller fn_nm == "gc_alloc" { returner atomic_vas["gc_alloc"] }
+    hvis fn_nm == "builtin.gc_free" eller fn_nm == "gc_free" { returner atomic_vas["gc_free"] }
     // String-ops
     la er_split        = fn_nm == "builtin.split" eller builtin.ends_with(fn_nm, ".split") eller fn_nm == "tekst_splitt"
     la er_join         = fn_nm == "builtin.join" eller builtin.ends_with(fn_nm, ".join") eller fn_nm == "tekst_join"
