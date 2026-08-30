@@ -1,0 +1,213 @@
+# wasm_binary.no — Ekte WASM-binæremitter (WebAssembly MVP).
+#
+# Byggjer eit gyldig .wasm-modul frå funksjonsspesifikasjonar. Sjølvstendig
+# (ingen selfhost-import) so han kan testast raskt på seed-en.
+#
+# Funksjonsspek (ordbok):
+#   namn      : tekst        — eksportnamn
+#   n_param   : heltall      — talet på i32-parametrar
+#   n_resultat: heltall      — 0 eller 1 (i32)
+#   kropp     : liste_heltall — instruksjonsbytar (utan lokal-teljar/end)
+#
+# WASM-verditype i32 = 0x7f. Funksjonstype = 0x60. Vi dedup ikkje typar.
+
+# ─── LEB128 ───────────────────────────────────────────────────────────────────
+
+funksjon leb_u(verdi: heltall) -> liste_heltall {
+    la ut: liste_heltall = []
+    la n: heltall = verdi
+    mens sann {
+        la b: heltall = n & 127
+        n = n >> 7
+        hvis n != 0 { b = b | 128 }
+        legg_til(ut, b)
+        hvis n == 0 { returner ut }
+    }
+    returner ut
+}
+
+# Signert LEB128 (for i32.const).
+funksjon leb_s(verdi: heltall) -> liste_heltall {
+    la ut: liste_heltall = []
+    la n: heltall = verdi
+    la meir: bool = sann
+    mens meir {
+        la b: heltall = n & 127
+        n = n >> 7   # aritmetisk skift held forteikn for negative
+        la forteikn: heltall = b & 64
+        hvis (n == 0 og forteikn == 0) eller (n == (0 - 1) og forteikn != 0) {
+            meir = usann
+        } ellers {
+            b = b | 128
+        }
+        legg_til(ut, b)
+    }
+    returner ut
+}
+
+# ─── Byte-hjelparar ───────────────────────────────────────────────────────────
+
+funksjon legg_alle(mål: liste_heltall, kjelde: liste_heltall) -> heltall {
+    la i: heltall = 0
+    mens i < lengde(kjelde) {
+        legg_til(mål, kjelde[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+# Ein vektor: leb_u(lengd) etterfølgd av innhaldet.
+funksjon vektor(innhald: liste_heltall) -> liste_heltall {
+    kast "ikkje brukt"
+}
+
+# Ein seksjon: id, leb_u(storleik), payload.
+funksjon seksjon(id: heltall, payload: liste_heltall) -> liste_heltall {
+    la ut: liste_heltall = []
+    legg_til(ut, id)
+    legg_alle(ut, leb_u(lengde(payload)))
+    legg_alle(ut, payload)
+    returner ut
+}
+
+# Namn som UTF-8-bytar med leb_u-lengdeprefiks.
+funksjon namn_bytar(s: tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    la teikn = builtin.split(s, "")
+    legg_alle(ut, leb_u(lengde(s)))
+    la i: heltall = 0
+    mens i < lengde(s) {
+        legg_til(ut, builtin.char_code(builtin.slice(s, i, i + 1)))
+        i = i + 1
+    }
+    returner ut
+}
+
+# ─── Modulbygging ─────────────────────────────────────────────────────────────
+
+funksjon bygg_modul(funksjonar: liste) -> liste_heltall {
+    la modul: liste_heltall = []
+    # Magic + versjon
+    legg_alle(modul, [0, 97, 115, 109])
+    legg_alle(modul, [1, 0, 0, 0])
+
+    la n_fn: heltall = lengde(funksjonar)
+
+    # ── Type-seksjon (id 1): ein functype per funksjon ──
+    la type_payload: liste_heltall = []
+    legg_alle(type_payload, leb_u(n_fn))
+    la ti: heltall = 0
+    mens ti < n_fn {
+        la fn = funksjonar[ti]
+        legg_til(type_payload, 96)                 # 0x60 functype
+        legg_alle(type_payload, leb_u(fn["n_param"]))
+        la pi: heltall = 0
+        mens pi < fn["n_param"] { legg_til(type_payload, 127) pi = pi + 1 }   # i32
+        legg_alle(type_payload, leb_u(fn["n_resultat"]))
+        hvis fn["n_resultat"] > 0 { legg_til(type_payload, 127) }
+        ti = ti + 1
+    }
+    legg_alle(modul, seksjon(1, type_payload))
+
+    # ── Funksjon-seksjon (id 3): typeindeks per funksjon ──
+    la func_payload: liste_heltall = []
+    legg_alle(func_payload, leb_u(n_fn))
+    la fi: heltall = 0
+    mens fi < n_fn { legg_alle(func_payload, leb_u(fi)) fi = fi + 1 }
+    legg_alle(modul, seksjon(3, func_payload))
+
+    # ── Eksport-seksjon (id 7): eksporter kvar funksjon ved namn ──
+    la exp_payload: liste_heltall = []
+    legg_alle(exp_payload, leb_u(n_fn))
+    la ei: heltall = 0
+    mens ei < n_fn {
+        la efn = funksjonar[ei]
+        legg_alle(exp_payload, namn_bytar(efn["namn"]))
+        legg_til(exp_payload, 0)                    # kind: func
+        legg_alle(exp_payload, leb_u(ei))
+        ei = ei + 1
+    }
+    legg_alle(modul, seksjon(7, exp_payload))
+
+    # ── Kode-seksjon (id 10): kropp per funksjon ──
+    la code_payload: liste_heltall = []
+    legg_alle(code_payload, leb_u(n_fn))
+    la ci: heltall = 0
+    mens ci < n_fn {
+        la cfn = funksjonar[ci]
+        la body: liste_heltall = []
+        legg_alle(body, leb_u(0))                   # 0 lokale-grupper
+        legg_alle(body, cfn["kropp"])               # instruksjonar
+        legg_til(body, 11)                          # 0x0b end
+        legg_alle(code_payload, leb_u(lengde(body)))
+        legg_alle(code_payload, body)
+        ci = ci + 1
+    }
+    legg_alle(modul, seksjon(10, code_payload))
+
+    returner modul
+}
+
+# Instruksjon: i32.const <n>  → [0x41, leb_s(n)...]
+funksjon i32_const(n: heltall) -> liste_heltall {
+    la ut: liste_heltall = [65]
+    legg_alle(ut, leb_s(n))
+    returner ut
+}
+
+# ─── Lowering: Norscode-bytekode (stack-maskin) → WASM (stack-maskin) ──────────
+#
+# Støttar heiltalsaritmetikk og parameter-lesing. param_kart: namn → local-indeks.
+# Returnerer instruksjonsbytane (utan end). Kastar på uttrykk vi ikkje kan lowre,
+# so oppringaren kan velje seg vekk frå WASM-målet for den funksjonen.
+funksjon lower_kropp(kode, param_kart) -> liste_heltall {
+    la ut: liste_heltall = []
+    la i: heltall = 0
+    mens i < lengde(kode) {
+        la instr = kode[i]
+        la op = tekst(instr[0])
+        hvis op == "PUSH_CONST" {
+            hvis builtin.type(instr[1]) != "heltall" {
+                kast "WASM: berre heiltalskonstantar kan lowrast"
+            }
+            legg_alle(ut, i32_const(instr[1]))
+        } ellers hvis op == "LOAD_NAME" {
+            la namn = tekst(instr[1])
+            hvis ikkje har_nokkel(param_kart, namn) {
+                kast "WASM: kan ikkje lowre ikkje-parameter " + namn
+            }
+            legg_til(ut, 32)                          # 0x20 local.get
+            legg_alle(ut, leb_u(param_kart[namn]))
+        } ellers hvis op == "BINARY_ADD" {
+            legg_til(ut, 106)                         # 0x6a i32.add
+        } ellers hvis op == "BINARY_SUB" {
+            legg_til(ut, 107)                         # 0x6b i32.sub
+        } ellers hvis op == "BINARY_MUL" {
+            legg_til(ut, 108)                         # 0x6c i32.mul
+        } ellers hvis op == "BINARY_DIV" {
+            legg_til(ut, 109)                         # 0x6d i32.div_s
+        } ellers hvis op == "RETURN" {
+            # WASM-funksjonen returnerer implisitt toppverdien ved end
+        } ellers {
+            kast "WASM: ustøtta opcode " + op
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# Bygg ein funksjonsspek frå NCB-funksjonsdefinisjon (params + code).
+funksjon spek_frå_ncb(namn: tekst, params, kode) -> ordbok {
+    la param_kart = {}
+    la i: heltall = 0
+    mens i < lengde(params) {
+        param_kart[tekst(params[i])] = i
+        i = i + 1
+    }
+    la fn = {}
+    fn["namn"] = namn
+    fn["n_param"] = lengde(params)
+    fn["n_resultat"] = 1
+    fn["kropp"] = lower_kropp(kode, param_kart)
+    returner fn
+}
