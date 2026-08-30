@@ -1,0 +1,142 @@
+# tls13_handshake_flow.no - TLS 1.3 1-RTT handshake-tilstandsmaskin (RFC 8446 §2, §4)
+# i rein Norscode, køyrt som loopback (klient <-> tenar) i minnet.
+# Suite: TLS_CHACHA20_POLY1305_SHA256. ECDHE: X25519. Signatur: Ed25519.
+bruk std.tls13_handshake som hs
+bruk std.tls13_keyschedule som ks
+bruk std.tls13_record som rec
+bruk std.x25519 som dh
+bruk std.ed25519 som eddsa
+bruk std.sha256 som sha
+
+funksjon _kopi(a: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    returner ut
+}
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut = _kopi(a) la i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+
+# finished_key = HKDF-Expand-Label(secret, "finished", "", 32)  (RFC 8446 §4.4.4)
+funksjon finished_key(secret: liste_heiltall) -> liste_heiltall {
+    returner ks.expand_label(secret, "finished", [], 32)
+}
+# verify_data = HMAC-SHA256(finished_key, transcript_hash)
+funksjon finished_mac(secret: liste_heiltall, transcript_hash: liste_heiltall) -> liste_heiltall {
+    returner sha.hmac_sha256_bytes(finished_key(secret), transcript_hash)
+}
+
+# Køyr eit heilt 1-RTT-handtrykk i minnet.
+# ins: {"c_priv":32b, "s_priv":32b, "s_id_seed":32b} (deterministiske innputt for test).
+# Returnerer alle avleidde verdiar og verifikasjonsflagg.
+funksjon handshake_loopback(ins: ordbok) -> ordbok {
+    # --- Nøkkelpar ---
+    la c_priv = ins["c_priv"]
+    la s_priv = ins["s_priv"]
+    la c_pub = dh.scalarmult_base(c_priv)
+    la s_pub = dh.scalarmult_base(s_priv)
+    # Tenaren si langtids Ed25519-identitet.
+    la s_id_seed = ins["s_id_seed"]
+    la s_id_pub = eddsa.public_key(s_id_seed)
+
+    # --- ClientHello / ServerHello ---
+    la rnd: liste_heiltall = [] la i = 0
+    mens i < 32 { legg_til(rnd, 0) i = i + 1 }
+    la CH = hs.build_client_hello({"random": rnd, "session_id": [], "key_share_pub": c_pub, "server_name": "norscode.example"})
+    # Tenar les klientens key_share.
+    la ph = hs.parse_handshake(CH, 0)
+    la cparsed = hs.parse_client_hello(CH, ph["start"], ph["end"])
+    la SH = hs.build_server_hello({"random": rnd, "session_id": [], "key_share_pub": s_pub})
+    la psh = hs.parse_handshake(SH, 0)
+    la sparsed = hs.parse_server_hello(SH, psh["start"], psh["end"])
+
+    # --- ECDHE delt løyndom (begge sider) ---
+    la shared_srv = dh.scalarmult(s_priv, cparsed["key_share_pub"])   # tenar: s_priv * C_pub
+    la shared_cli = dh.scalarmult(c_priv, sparsed["key_share_pub"])   # klient: c_priv * S_pub
+
+    # --- Nøkkelplan (RFC 8446 §7) ---
+    la early = ks.early_secret([])
+    la derived1 = ks.derive_secret(early, "derived", ks.transcript_hash([]))
+    la hs_secret = ks.handshake_secret(derived1, shared_srv)
+    la th_sh = ks.transcript_hash(_saman(CH, SH))
+    la c_hs = ks.derive_secret(hs_secret, "c hs traffic", th_sh)
+    la s_hs = ks.derive_secret(hs_secret, "s hs traffic", th_sh)
+    la derived2 = ks.derive_secret(hs_secret, "derived", ks.transcript_hash([]))
+    la master = ks.master_secret(derived2)
+
+    # --- Tenarens flight: EncryptedExtensions, Certificate, CertificateVerify, Finished ---
+    la EE = hs.build_encrypted_extensions()
+    la CERT = hs.build_certificate(s_id_pub)          # rå Ed25519-pubkey som sertifikatinnhald
+    # CertificateVerify over transcript CH..Certificate
+    la th_cert = ks.transcript_hash(_saman(_saman(_saman(CH, SH), EE), CERT))
+    la cv_content = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
+    la cv_sig = eddsa.sign(s_id_seed, cv_content)
+    la CV = hs.build_certificate_verify(hs.SIG_ED25519(), cv_sig)
+    # Server Finished over transcript CH..CertificateVerify
+    la th_cv = ks.transcript_hash(_saman(_saman(_saman(_saman(CH, SH), EE), CERT), CV))
+    la s_verify = finished_mac(s_hs, th_cv)
+    la SFIN = hs.build_finished(s_verify)
+
+    # --- Klienten validerer tenaren ---
+    # 1) CertificateVerify: hent cert + signatur, verifiser Ed25519 over transcript-hash.
+    la pcert = hs.parse_handshake(CERT, 0)
+    la cert_obj = hs.parse_certificate(CERT, pcert["start"], pcert["end"])
+    la pcv = hs.parse_handshake(CV, 0)
+    la cv_obj = hs.parse_certificate_verify(CV, pcv["start"], pcv["end"])
+    la cv_content_cli = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
+    la cv_ok = eddsa.verify(cert_obj["cert_der"], cv_content_cli, cv_obj["signatur"])
+    # Fail-closed-kontroll: tukla signatur skal forkastast.
+    la tuklet_sig = _kopi(cv_obj["signatur"])
+    tuklet_sig[0] = tuklet_sig[0] ^ 1
+    la cv_reject_tamper = ikkje eddsa.verify(cert_obj["cert_der"], cv_content_cli, tuklet_sig)
+    # 2) Server Finished MAC.
+    la psf = hs.parse_handshake(SFIN, 0)
+    la sf_obj = hs.parse_finished(SFIN, psf["start"], psf["end"])
+    la s_verify_cli = finished_mac(s_hs, th_cv)
+    la sfin_ok = _lik(sf_obj["verify_data"], s_verify_cli)
+
+    # --- Klientens Finished over transcript CH..server Finished ---
+    la th_sfin = ks.transcript_hash(_saman(_saman(_saman(_saman(_saman(CH, SH), EE), CERT), CV), SFIN))
+    la c_verify = finished_mac(c_hs, th_sfin)
+    la CFIN = hs.build_finished(c_verify)
+    # Tenar validerer klientens Finished.
+    la pcf = hs.parse_handshake(CFIN, 0)
+    la cf_obj = hs.parse_finished(CFIN, pcf["start"], pcf["end"])
+    la cfin_ok = _lik(cf_obj["verify_data"], finished_mac(c_hs, th_sfin))
+
+    # --- Applikasjonstrafikk-nøklar (RFC 8446 §7.2) etter server Finished ---
+    la c_ap = ks.derive_secret(master, "c ap traffic", th_sfin)
+    la s_ap = ks.derive_secret(master, "s ap traffic", th_sfin)
+    la s_ap_keys = rec.traffic_keys(s_ap)
+
+    # --- Applikasjonsdata: tenar krypterer, klient dekrypterer ---
+    la melding: liste_heiltall = []
+    la m = "Hei frå Norscode TLS 1.3"
+    i = 0
+    mens i < lengde(m) { legg_til(melding, builtin.char_code(builtin.slice(m, i, i+1)) & 255) i = i + 1 }
+    la post = rec.krypter_post(s_ap_keys["key"], s_ap_keys["iv"], 0, 23, melding)
+    la dekryptert = rec.dekrypter_post(s_ap_keys["key"], s_ap_keys["iv"], 0, post)
+    la app_ok = (dekryptert["status"] == "ok") og (dekryptert["type"] == 23) og _lik(dekryptert["plaintext"], melding)
+
+    returner {
+        "ecdhe_lik": _lik(shared_srv, shared_cli),
+        "cv_ok": cv_ok,
+        "cv_reject_tamper": cv_reject_tamper,
+        "server_finished_ok": sfin_ok,
+        "client_finished_ok": cfin_ok,
+        "app_data_ok": app_ok,
+        "shared": shared_srv,
+        "c_hs": c_hs, "s_hs": s_hs, "master": master,
+        "c_ap": c_ap, "s_ap": s_ap
+    }
+}
+
+funksjon status() { returner { "abi": "norscode-tls13-flow-v1", "suite": "TLS_CHACHA20_POLY1305_SHA256", "kx": "x25519", "sig": "ed25519" } }
