@@ -160,6 +160,19 @@ gc_alloc(size): first-fit i fri-lista, elles bump.
   (gjenbruk hol utan å flytte/frigje levande objekt) er PÅKRAVD.** heap_set_bump
   er berre trygt EtTER mark, når ein veit kva som er levande.
 
+## Rot-sett-funn (2026-08-30): globals er hovudrota, ikkje stakken
+
+Rot-skann-primitiv (stack_base/stack_ptr, HEAP_VA+48 = initiell rsp fanga i
+_start) er landa og validert: djupde positiv (2720 B), 93 heap-peikarar funne i
+stakken. MEN native stakk-djupde er LITEN (2720 B) fordi tolkaren held rammene
+sine i ei HEAP-DATASTRUKTUR (__vm_active_frames__), ikkje på native-stakken.
+Difor er HOVUD-rotsettet **globals** (global_vas — der VM sin `functions`-map og
+persistent tilstand bur), ikkje stakken. Rot-skann MÅ dekke:
+  1. Native stakk [stack_ptr, stack_base) — nokre roter (gjeldande lokale).
+  2. **Globals-regionen** (global_vas) — hovudrota; trace herifrå når heile den
+     levande tolkar-grafen. Treng globals-region-grenser (start/slutt).
+Merk: skann [stack_ptr, stack_base) — IKKJE forbi stack_base (les då argv/env).
+
 ## Risiko
 
 GC-bug korrupterer alt. Kvar fase må verifiserast isolert (litmus før full
