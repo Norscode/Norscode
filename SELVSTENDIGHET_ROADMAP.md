@@ -63,8 +63,13 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
   - [x] Krypto-bolk: `builtin.sha256 → std.sha256.hash` (`95550ba`), pbkdf2_sha256
     + random_hex → pure (`3b3389b`). CI grøn. Inert for committa seed/stage-0.
   - [x] Binær-NCB-bolk: rein NCB-codec (`9abfa49`), varint/zigzag (`93063da`),
-    dual-format serde (`fe4e752`), opt-in output (`9112b4b`). Premature test
-    karantenert til Fase 3 (`78a0d05`).
+    dual-format serde (`fe4e752`), opt-in output (`9112b4b`), null-decode-fiks
+    (`fc6e681`). **Validert grøn via `nc run-pure` (exit 42)** — ikkje berre landa.
+    Premature test i `tests/pending_seed_activation/` (`78a0d05`).
+  - **Validerings-verktøy funne:** `nc run-pure <fil.no>` (hybrid-bundlar → rein
+    VM) aktiverer nye `selfhost.*`-modular UTAN seed-rebygg, og propagerer stdout +
+    returverdi→exit. Avdekte `null→0`-bug i porten (missa b2-followup `edcf29f`) →
+    cherry-picka. Køyr run-pure på kvar port sin test for ekte «bevist grøn».
   - **Strukturell grense funnen:** portert b2-kode er DVALE på committa seed
     (seed-aktiveringsgapet — nye `selfhost.*`-modular er ikkje i seeden sin
     innebygde bunt). Sann validering krev soft-seed (`run-ncb-pure`) eller Fase 3
