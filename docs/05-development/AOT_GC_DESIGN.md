@@ -140,6 +140,20 @@ type-tag 1–5 vs payload-len 1–5 kolliderer). Val:
   Native Linux-flate på fersk seed.
 - **F6:** ELF stage-0-paritet-sjekk + arm64-port (macho_arm64_codegen).
 
+## Empiriske funn som styrer designet (2026-08-30)
+
+- **Allokeringsrate: ~65 KB PER tolka loop-iterasjon** (målt: 195 MB / 3000 iter
+  som allokerer ei 4-element-liste + forkastar). Difor sprenger allokeringstunge
+  loopar heapen så fort: pbkdf2 sine 120000 iter ≈ 7.8 GB ≫ 2 GB. Bekreftar at
+  problemet er tolkar-temporær-garbage, ikkje berre crypto.
+- **Bump-reset (kompakter-toppen) er FUNDAMENTALT UTRYGT.** Eksperiment: snapshot
+  bump, alloker garbage, `heap_set_bump(snap)` → SIGSEGV + korrupt `snap`-boks.
+  Rot: tolkaren allokerer LEVANDE tilstand (rammer, temporærar, sjølve snap-
+  boksen) INTERLEAVA med garbage etter snap; å setje bump under desse frigjer
+  levande objekt. **KONKLUSJON: ingen snarveg — full mark-sweep med fri-liste
+  (gjenbruk hol utan å flytte/frigje levande objekt) er PÅKRAVD.** heap_set_bump
+  er berre trygt EtTER mark, når ein veit kva som er levande.
+
 ## Risiko
 
 GC-bug korrupterer alt. Kvar fase må verifiserast isolert (litmus før full
