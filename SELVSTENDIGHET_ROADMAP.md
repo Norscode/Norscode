@@ -52,5 +52,11 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
 ## Status
 
 - [x] Fase 0: roadmap dokumentert
-- [ ] Fase 0: grøn CI-port stadfesta
-- [ ] Fase 1 …
+- [x] Fase 0: grøn CI-port stadfesta (run 33334581579 — verify-linux + hard
+  ELF Gen1==Gen2-gate begge grøne på `selvstendig-fra-179`)
+  - Greina held seg **uavhengig** av main (main absorberte B2 sin big-bang, er
+    raud, divergerer ~1190 filer). Forsoning utsett til Fase 4. PR #186 = draft.
+  - Portfiksar: seed-materialisering før feature-check (`d658ca4`); bin/nc
+    fallback til committa stage-0-seed på Linux/macOS (`3fcb241`); branch i
+    push-trigger (`38b8fa5`).
+- [ ] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
