@@ -76,5 +76,25 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     seed-rebygg. Vidare b2-C-frie arbeid (atomics, vm-builtins, defer/finally)
     er dessutan velda til b2 sine store kjerne-omskrivingar (`macho_arm64_codegen.no`
     ~7000-linjes divergens, `vm.no` ~337) → ikkje reine cherry-picks; krev manuell
-    kirurgisk port eller seed-rebygg. Reine cherry-pick-vinstane er dermed uttømte.
+    kirurgisk port eller seed-rebygg.
+  - [x] **Nøkkelinnsikt:** nye `std.*`-modular resolverer frå KJELDE på committa
+    seed (ulikt `selfhost.*`) → INGEN aktiveringsgap; testar køyrer grønt direkte
+    via `nc test`. Dette opna den store, reine Fase 1-lana:
+  - [x] **Rein Norscode-krypto/stdlib/TLS portert frå b2, alt validert via `nc test`:**
+    - Hash: md5 (RFC 1321), sha1 (RFC 3174), sha512 (NIST), blake2b (RFC 7693).
+    - KDF/MAC: hkdf (RFC 5869), argon2id_pure (RFC 9106).
+    - Koding/OTP: base32 + totp (RFC 4648/6238).
+    - AEAD: chacha20_poly1305 (RFC 8439), AES-GCM (aes+ghash+aes_gcm, NIST).
+    - Signatur/ECDH: ed25519 (RFC 8032), x25519 (RFC 7748).
+    - **TLS 1.3 (rein Norscode):** tls13_handshake, tls13_keyschedule (RFC 8448),
+      tls13_record, tls13_handshake_flow (full handshake).
+    - Stdlib/JS-paritet: js_liste, js_objekt, js_streng, js_tal, hendelseslokke,
+      kanal, pixel_diff, wasm_binary, protocol_stream, backup_aead.
+  - **Blokkert/utsett tail (dokumentert):** rsa/ecdsa_p256/x509/x509_chain krev
+    `std.bigint` (annan sesjon eig bigint/ecdsa/vapid/webpush); norsdb-kjeda brukar
+    `;`-syntaks committa seed sin parser avviser (kompilator-mismatch); linux_drift/
+    auth_mfa/http_download krev native-builtins (`system_operation`/`system_info`)
+    ikkje i seeden; pbkdf2-multiblock krev endring i core `std/krypto.no` (32-byte-cap);
+    atomics/vm-builtins/defer-finally velda til b2-kjerne-omskrivingar. Alle desse
+    gate-ar på Fase 3 seed-rebygg eller annan sesjon.
 - [ ] Fase 2 …
