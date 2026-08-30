@@ -97,4 +97,18 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     ikkje i seeden; pbkdf2-multiblock krev endring i core `std/krypto.no` (32-byte-cap);
     atomics/vm-builtins/defer-finally velda til b2-kjerne-omskrivingar. Alle desse
     gate-ar på Fase 3 seed-rebygg eller annan sesjon.
-- [ ] Fase 2 …
+- [~] Fase 2: fjern C-bibliotek, kvart gated
+  - [x] **sqlite → NorsDB**: pure `std.db`/NorsDB verifisert grøn FØRST
+    (test_db_features/repository/integration), so sletta vendra
+    `third_party/sqlite/sqlite3.{c,h}` (9.7 MB, `7916320`) + rydda alle
+    vendra-refs i seed-bygg-verktøy/ci.yml/allowlist (`2e7c902`). Gate grøn.
+  - **Strukturell grense:** resten av Fase 2 er kopla til Fase 3. C-en som står
+    att ER seed-bygg-motoren:
+    - Metal-GPU-C (`nc_metal_tensor.c`) er `#include`-a i `nc_native_main.c`.
+    - legacy-C-backend (`nc_native_main.c`/`nc_runtime_mini.c`) + `build/v3009/*.c`
+      er sjølve C-seed-bygget (ci.yml `clang`/`cc`).
+    - System-dynamisk libsqlite3 (dlopen; committa Linux-seed lenkar libsqlite3.so)
+      + `tests/native_gc_*.c` (GC-design, Fase 3).
+    Å fjerne desse før sjølvhosta seed-rebygg (Fase 3) bryt «pure erstatning grøn
+    FØRST» (ingen sjølvhosta seed-bygg enno). Difor: Fase 2-restar gate-ar på Fase 3.
+- [ ] Fase 3 …
