@@ -59,4 +59,17 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
   - Portfiksar: seed-materialisering før feature-check (`d658ca4`); bin/nc
     fallback til committa stage-0-seed på Linux/macOS (`3fcb241`); branch i
     push-trigger (`38b8fa5`).
-- [ ] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
+- [~] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
+  - [x] Krypto-bolk: `builtin.sha256 → std.sha256.hash` (`95550ba`), pbkdf2_sha256
+    + random_hex → pure (`3b3389b`). CI grøn. Inert for committa seed/stage-0.
+  - [x] Binær-NCB-bolk: rein NCB-codec (`9abfa49`), varint/zigzag (`93063da`),
+    dual-format serde (`fe4e752`), opt-in output (`9112b4b`). Premature test
+    karantenert til Fase 3 (`78a0d05`).
+  - **Strukturell grense funnen:** portert b2-kode er DVALE på committa seed
+    (seed-aktiveringsgapet — nye `selfhost.*`-modular er ikkje i seeden sin
+    innebygde bunt). Sann validering krev soft-seed (`run-ncb-pure`) eller Fase 3
+    seed-rebygg. Vidare b2-C-frie arbeid (atomics, vm-builtins, defer/finally)
+    er dessutan velda til b2 sine store kjerne-omskrivingar (`macho_arm64_codegen.no`
+    ~7000-linjes divergens, `vm.no` ~337) → ikkje reine cherry-picks; krev manuell
+    kirurgisk port eller seed-rebygg. Reine cherry-pick-vinstane er dermed uttømte.
+- [ ] Fase 2 …
