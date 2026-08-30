@@ -71,6 +71,26 @@ Konsekvens — eitt av:
 robust), eller (b) om ein vil halde logikken i Norscode. (a) er tryggast for
 korrektheit; (b) er best for langsiktig vedlikehald/sjølvstende. Avgjer i F1.
 
+## Eksakte objekt-layout (empirisk via obj_addr/raw_load64, 2026-08-30)
+
+Alle heap-objekt er anten ein 16B NcVal-boks eller ein payload-blokk. Boksen er
+`[type:8][payload:8]`. Verifisert layout per type:
+- **int (1) / bool (5):** boks `[type][verdi]`, 16B, INGEN peikarar. Små int
+  (−32768..32767) bur i immutable-cachen (SMALL_INT_CACHE_BASE) → aldri allokert,
+  aldri samla. Store int allokerer boks.
+- **streng (2):** boks `[2][payload→]` (16B) + payload `[len:8][bytes, padda]`.
+  Peikarfelt: box+8. Payload har INGEN NcVal-peikarar (rå byte).
+- **liste (3):** boks `[3][payload→]` (16B) + payload `[len:8][cap:8][elem_ptr…]`.
+  Peikarar å trace: box+8 (→payload), og payload+16 .. +16+len·8 (elementa er
+  NcVal-peikarar; små int → cache, større → heap).
+- **map (4):** boks `[4][payload→]` (16B) + payload `[len:8][cap:8][key,val-par…]`.
+  Peikarar: box+8, og payload+16 .. +16+len·16 (nøkkel- og verdi-peikarar).
+
+Heapen er ein monoton bump-straum av desse allokeringane (payload ofte allokert
+FØR sin boks). MARK-fasen har no full peikarfelt-kart. SWEEP treng framleis
+objekt-grenser → header (sjå under), sidan `[len]`-ord (1–5) er tvetydig mot
+box-type-tag (1–5) ved lineær walk.
+
 ## Objekt-header (påkravd for sweep)
 
 Sweep må enumerere alle objekt. Utan header er lineær heap-walk tvetydig (boks
