@@ -121,8 +121,17 @@ type-tag 1–5 vs payload-len 1–5 kolliderer). Val:
 
 ## Fasar (multi-sesjon)
 
-- **F1 (foundation):** råminne-primitiv (appenda) + `gc.no`-skjelett + verifiser
-  at Norscode kan lese/skrive heapen via primitiva. Lågrisiko.
+- **F1 (foundation): LANDA** (commit 3862a46). råminne-primitiv raw_load64/
+  raw_store64/heap_bump/heap_alloc_start (appenda). Norscode les heapen.
+- **F2-investigering: LANDA** (commit f75336d). obj_addr-primitiv + eksakt
+  objekt-layout kartlagt empirisk (sjå over).
+- **F3 mark-LOGIKK: VALIDERT** (`selfhost/native_execution/gc.no`, gc_trace).
+  Graf-traversering per layout verifisert: `[[1,2],[3,4],"hello"]`→7 (streng-
+  literal-payload i .data korrekt ekskludert), `map{a,b}`→8. Retter største
+  konseptuelle risiko (er layout-modellen rett?). Referanse-versjonen ALLOKERER
+  (Norscode-ordbok som besøkt-sett) → må gjerast allokeringsfri (rå-bitmap) for
+  produksjon. ATT i F3: konservativ rot-skann (stack+globals → treng stack-
+  primitiv) + allokeringsfri besøkt-bitmap.
 - **F2:** header-leggjande allokatorar (re-pek RT_INT/STR_RAW/MAP_NEW/LIST_APP/
   CONCAT/SLICE/…). Verifiser at seed framleis byggjer + køyrer basis.
 - **F3:** konservativ mark i Norscode. Verifiser reachable-count på litmus.

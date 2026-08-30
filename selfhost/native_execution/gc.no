@@ -1,0 +1,64 @@
+# gc.no — sjølvhosta mark-sweep GC for AOT-runtimen (native_codegen_v2)
+#
+# Sjå docs/05-development/AOT_GC_DESIGN.md for full design. Kollektoren er skriven
+# i Norscode og brukar råminne-primitiv (builtin.raw_load64/raw_store64/heap_bump/
+# heap_alloc_start/obj_addr) mot AOT-heapen. Objekt-layout (verifisert empirisk):
+#   int(1)/bool(5): 16B boks [type][verdi], ingen peikarar (små int i cache).
+#   streng(2): boks[2,payload→] + payload[len][bytes]; peikar box+8.
+#   liste(3):  boks[3,payload→] + payload[len][cap][elem_ptr…]; box+8 + element.
+#   map(4):    boks[4,payload→] + payload[len][cap][key,val…]; box+8 + par.
+#
+# STATUS: mark-trace-LOGIKKEN under er verifisert korrekt (graf-traversering følgjer
+# objekt-grafen; cache/immutable + .data-konstantar korrekt ekskludert). Denne
+# referanse-versjonen brukar ei Norscode-ordbok som besøkt-sett (ALLOKERER) og er
+# difor berre for validering/diagnostikk. PRODUKSJONS-mark må vere ALLOKERINGSFRI
+# (rå-minne besøkt-bitmap i ein reservert region), elles allokerer GC-en på heapen
+# han samlar. Sjå AOT_GC_DESIGN.md «boksa verdi-modell vs allokeringsfri GC».
+
+# Er `addr` ein peikar inn i den dynamiske heap-regionen (dvs. eit samlbart
+# objekt)? Cache/immutable (små int, bool, char) og .data-konstantar ligg utanfor
+# [alloc_start, bump) og skal ALDRI samlast eller traverserast som heap-objekt.
+funksjon gc_i_heap(addr: heltall) -> boolsk {
+    returner addr >= builtin.heap_alloc_start() og addr < builtin.heap_bump()
+}
+
+# Trace/mark: tel unike reachable heap-objekt (boksar OG payload-blokker) frå
+# `addr`, følgjer peikarfelt per objekt-layout. `sett` er besøkt-settet (nøkkel =
+# adresse som tekst). Returnerer oppdatert tal. Idempotent på sykliske grafar.
+funksjon gc_trace(addr: heltall, sett: ordbok<tekst, tekst>, tel: heltall) -> heltall {
+    hvis ikkje gc_i_heap(addr) { returner tel }
+    la nokkel = tekst(addr)
+    hvis finnes_nøkkel(sett, nokkel) { returner tel }
+    sett[nokkel] = "1"
+    tel = tel + 1
+
+    la type = builtin.raw_load64(addr)
+    hvis type == 1 eller type == 5 { returner tel }   # int/bool: ingen barn
+
+    # Alle sammensette typar har payload-blokk på box+8 — også ei allokering.
+    la payload = builtin.raw_load64(addr + 8)
+    hvis gc_i_heap(payload) {
+        la pk = tekst(payload)
+        hvis ikkje finnes_nøkkel(sett, pk) { sett[pk] = "1"  tel = tel + 1 }
+    }
+    hvis type == 2 { returner tel }                    # streng: rå byte, ingen barn
+
+    hvis type == 3 {                                   # liste
+        la len = builtin.raw_load64(payload)
+        la i = 0
+        mens i < len {
+            tel = gc_trace(builtin.raw_load64(payload + 16 + i * 8), sett, tel)
+            i = i + 1
+        }
+    }
+    hvis type == 4 {                                   # map
+        la len = builtin.raw_load64(payload)
+        la i = 0
+        mens i < len {
+            tel = gc_trace(builtin.raw_load64(payload + 16 + i * 16), sett, tel)
+            tel = gc_trace(builtin.raw_load64(payload + 16 + i * 16 + 8), sett, tel)
+            i = i + 1
+        }
+    }
+    returner tel
+}
