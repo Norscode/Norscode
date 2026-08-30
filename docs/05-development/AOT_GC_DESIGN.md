@@ -166,12 +166,16 @@ Rot-skann-primitiv (stack_base/stack_ptr, HEAP_VA+48 = initiell rsp fanga i
 _start) er landa og validert: djupde positiv (2720 B), 93 heap-peikarar funne i
 stakken. MEN native stakk-djupde er LITEN (2720 B) fordi tolkaren held rammene
 sine i ei HEAP-DATASTRUKTUR (__vm_active_frames__), ikkje på native-stakken.
-Difor er HOVUD-rotsettet **globals** (global_vas — der VM sin `functions`-map og
-persistent tilstand bur), ikkje stakken. Rot-skann MÅ dekke:
-  1. Native stakk [stack_ptr, stack_base) — nokre roter (gjeldande lokale).
-  2. **Globals-regionen** (global_vas) — hovudrota; trace herifrå når heile den
-     levande tolkar-grafen. Treng globals-region-grenser (start/slutt).
-Merk: skann [stack_ptr, stack_base) — IKKJE forbi stack_base (les då argv/env).
+KORRIGERT (empirisk): globals-regionen (HOST_ABI_VA+16, 510 slots = 4080B) held
+0 heap-peikarar — tolkaren sender `functions`-mapen som PARAMETER, så ho bur på
+NATIVE-STAKKEN. Difor er STAKKEN det komplette rotsettet: stakk-skann fann 93
+roter (inkl. `functions`), og trace frå `functions` når heile den levande
+tolkar-grafen. Rot-skann:
+  1. Native stakk [stack_ptr, stack_base) — KOMPLETT rotsett (functions + lokale
+     + spilte callee-saved). Skann IKKJE forbi stack_base (les då argv/env).
+  2. Globals [globals_base, globals_end) — tomt her, men skann konservativt for
+     framtidssikring (0-slots hoppa).
+Dette FORENKLAR designet: mark trace frå stakk-roter.
 
 ## Risiko
 
