@@ -142,17 +142,20 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
     primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
     (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
-  - [~] **F2 (obj_addr) DELVIS — codegen-divergens-funn:** `obj_addr(x)` porta
-    (`f75336d`) og emittert (parity urørt), men på vår #179-baseline-codegen
-    returnerer den ein verdi som IKKJE er trygt dereferer-bar: `raw_load64(addr)`
-    og `tekst(addr)` SIGSEGV-ar (verdien er ikkje liste-boksen si reelle adresse).
-    Empirisk bisektert via inkrementelle probar i CI: list-creation ok, `lengde()`
-    er eit eige AOT-gap, men obj_addr-resultatet dereferer-krasjar. Rota: vår
-    arg-konvensjon/RT_INT-interaksjon skil seg frå b2 #181-codegen der F2 vart
-    validert. **obj_addr treng vår-codegen-spesifikk revers-engineering** (kva rdi
-    faktisk held ved routine-entry) før layout-mapping/mark-trace kan byggjast.
-    Generisk `tools/gc_probe_run.sh <probe.no>` + non-gating diagnostikk-workflow
-    (`gc-litmus.yml`, continue-on-error) etablert. `lengde()`-AOT-gap òg notert.
+  - [~] **F2 (obj_addr) DELVIS — presist codegen-funn:** `obj_addr(x)` porta
+    (`f75336d`) og emittert (parity urørt), men **returnerer 0** på vår #179-
+    baseline-codegen — dvs. arg-en (liste sin NcVal*) når IKKJE `rdi` ved routine-
+    entry, så `RT_INT` boksar 0. Det forklarar alle tidlegare krasj: `raw_load64(0)`
+    /deref var null-dereferansar. Empirisk bisektert i CI (inkrementelle probar):
+    list-creation ok, `lengde()` er eit eige AOT-gap, obj_addr→0. **UTELUKKA:**
+    NCB er rett (`['CALL','builtin.obj_addr',1]` med `LOAD_NAME liste` føre →
+    nargs=1, arg pusha); ingen tidlegare special-case-handler matchar (berre
+    `er_exit`); builtin_va-dispatch + atomics["obj_addr"]-VA er rette. **ATT:**
+    kvifor er rdi=0 ved obj_addr-entry når emit_rt_call_1 (`pop rdi`) gir raw_load64
+    rett arg? Suspekt: RT_INT/emit_rt_call_1-interaksjon for akkurat dette tilfellet
+    (obj_addr boksar rdi DIREKTE utan deref, ulikt raw_load64 som gjer `mov rdi,
+    [rdi+8]` først). Treng interaktiv ELF-debug (single-step), ikkje CI-rundar.
+    Generisk `tools/gc_probe_run.sh` + non-gating diagnostikk-workflow etablert.
   - **Attståande (fleir-sesjons):** derive HEAP_ALLOC_START for vår layout +
     konservativ rot-skann (stack_base/stack_ptr); allokeringsfri maskinkode
     mark+sweep + fri-liste (live-map); re-pekte HOT-allokatorar; safepoint-terskel-
