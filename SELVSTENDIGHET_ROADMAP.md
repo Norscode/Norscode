@@ -188,17 +188,18 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     objekt-grafen med rå-minne mark-stakk (@0x10300000) + gc_mark_bit; manuell graf
     (liste[intA,intB]) → marka=3, alle boksar markerte → exit 0. Mark-LOGIKKEN verkar
     (referanse-versjon i høg-nivå Norscode). `2542bb2`.
-  - **Attståande — sweep + wiring (b2 fullførte det ALDRI heller):**
-    (c) **SWEEP** — live-map: mark registrerer (addr,size) per live boks+payload;
-    sorter; hol mellom → gc_free (byggjer fri-lista). (c2) konverter referanse-mark
-    til ALLOKERINGSFRI maskinkode (referanse-en allokerer via boksande primitiv →
-    ok for validering, ikkje for produksjon-safepoint). (d) re-pek codegen-allokator-
-    emisjonar (RT_LIST_*/
-    STR_RAW/INT) → gc_alloc så litmus-allokeringane sjekkar fri-lista; (e) safepoint-
-    terskel → kall gc_collect; (f) ELF-paritet + arm64; (g) F5: køyr i seed mot 10k-hmac.
-    **Alle GC-BYGGJEKLOSSANE står no validerte (F1 les-heap, F2 layout, F3 rot-skann,
-    (b) graf-trace, reclaim-motor). Det som står att er SAMANSETJINGA til ein korrekt,
-    allokeringsfri gc_collect + wiring — reint konsentrert maskinkode-arbeid, ikkje
-    single-session-trygt (GC-bug korrupterer alt).**
+  - [x] **SWEEP (live-map → gc_free) VALIDERT:** `gc_sweep_probe` — live-map
+    (sortert (addr,size)), hol mellom påfølgjande live objekt → gc_free; gc_alloc
+    gjenbrukar holet. sweep→reclaim-kjeda verkar. `53bf201`.
+  - **HEILE mark-sweep-ALGORITMEN er no validert ende-til-ende** (referanse-form:
+    mark-bitmap + DFS-trace + live-map-sweep + gc_alloc/gc_free). Den ALGORITMISKE
+    uvissa er borte.
+  - **Attståande — produksjon-samansetjing (engineering, ikkje lenger algoritme-uvisst):**
+    (i) éin `gc_collect`: mark registrerer (addr,size) i live-map medan han tracer;
+    (ii) konverter referanse (som ALLOKERER via boksande raw_*/gc_mark_bit) til
+    ALLOKERINGSFRI rein maskinkode (kan køyre på safepoint utan å vekse heapen);
+    (iii) re-pek codegen-allokator-emisjonar (RT_LIST_*/STR_RAW/INT) → gc_alloc;
+    (iv) safepoint-terskel → kall gc_collect; (v) ELF-paritet + arm64; (vi) F5: seed
+    mot 10k-hmac (den store raud→grøn). Steg (ii)+(iii) er høg-risiko maskinkode.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
