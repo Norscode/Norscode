@@ -184,12 +184,16 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     1 bit/16B-slot i scratch @ 0x10400000 (2 MB på toppen av 256 MB-heapen). Hand-
     emittert bit-set/les (sub/shr/and/movzx/shr/or/mov). `gc_mark_probe`: ny=0,
     gjenta=1, annan-slot=0 → exit 0. Første stein i mark-fasen. `03012bb`.
-  - **Attståande — det GENUINT HARDE (uferdig, b2 fullførte det ALDRI heller):**
-    (c) **mark-sweep-DRIVAREN** — ei ALLOKERINGSFRI maskinkode-`gc_collect`-rutine som:
-    frå rot-skann tracer live-grafen (mark-stack i scratch-minne), reknar objekt-
-    storleik frå layout, byggjer live-map, og gc_free-ar hola. Må vere allokeringsfri
-    (dei høg-nivå-primitiva ALLOKERER via RT_INT → chicken-and-egg) → hundrevis av
-    linjer korrekt hand-assembly. (d) re-pek codegen sine allokator-emisjonar (RT_LIST_*/
+  - [x] **MARK-fasen (DFS-algoritme) VALIDERT:** `gc_mark_traverse_probe` — DFS over
+    objekt-grafen med rå-minne mark-stakk (@0x10300000) + gc_mark_bit; manuell graf
+    (liste[intA,intB]) → marka=3, alle boksar markerte → exit 0. Mark-LOGIKKEN verkar
+    (referanse-versjon i høg-nivå Norscode). `2542bb2`.
+  - **Attståande — sweep + wiring (b2 fullførte det ALDRI heller):**
+    (c) **SWEEP** — live-map: mark registrerer (addr,size) per live boks+payload;
+    sorter; hol mellom → gc_free (byggjer fri-lista). (c2) konverter referanse-mark
+    til ALLOKERINGSFRI maskinkode (referanse-en allokerer via boksande primitiv →
+    ok for validering, ikkje for produksjon-safepoint). (d) re-pek codegen-allokator-
+    emisjonar (RT_LIST_*/
     STR_RAW/INT) → gc_alloc så litmus-allokeringane sjekkar fri-lista; (e) safepoint-
     terskel → kall gc_collect; (f) ELF-paritet + arm64; (g) F5: køyr i seed mot 10k-hmac.
     **Alle GC-BYGGJEKLOSSANE står no validerte (F1 les-heap, F2 layout, F3 rot-skann,
