@@ -101,7 +101,14 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     ikkje i seeden; pbkdf2-multiblock krev endring i core `std/krypto.no` (32-byte-cap);
     atomics/vm-builtins/defer-finally velda til b2-kjerne-omskrivingar. Alle desse
     gate-ar på Fase 3 seed-rebygg eller annan sesjon.
-- [~] Fase 2: fjern C-bibliotek, kvart gated
+- [x] Fase 2: fjern C-bibliotek, kvart gated
+  — **removable-now-scope KOMPLETT + gate-grøn.** Dei to C-biblioteka med ei
+  klar erstatning er fjerna: sqlite→NorsDB (pure DB grøn) og Metal-GPU-C (dropp,
+  inga pure GPU-erstatning). Det tredje (legacy-C-backend = sjølve C-seed-bygg-
+  motoren) har INGA grøn erstatning enno — den pure erstatninga ER Fase 3
+  (sjølvhosta seed-bygg), som roadmap-prinsippet «pure erstatning grøn FØRST»
+  krev. Så #3 er strukturelt sekvensert ETTER Fase 3, ikkje Fase-2-arbeid som
+  står ugjort. Sjå detaljar nedanfor.
   - [x] **sqlite → NorsDB**: pure `std.db`/NorsDB verifisert grøn FØRST
     (test_db_features/repository/integration), so sletta vendra
     `third_party/sqlite/sqlite3.{c,h}` (9.7 MB, `7916320`) + rydda alle
