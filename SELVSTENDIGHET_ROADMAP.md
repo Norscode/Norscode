@@ -214,6 +214,14 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     mark→sweep ende-til-ende i maskinkode (curated graf: eitt-element-liste, DFS-
     record==adresse-orden, 48B daudt hol → marka(2)+entry(3)+sweep(1)+gjenbruk).
     `5b1e9ce`. **HEILE den allokeringsfrie maskinkode-GC-syklusen står validert.**
+  - [x] **Fri-liste-stabilitet ved LITMUS-SKALA (`gc_reclaim_loop_probe`):** 5000×
+    (gc_free 64 → gc_alloc 32) head-fit-ar SAME region utan korrupsjon/drift. `exit 0`.
+  - **NØKKELFUNN (kritisk sti):** sjølve løkka BUMPAR — kvar `la`/`i+1`/aritmetikk
+    BOKSAR eit heiltal (RT_INT bumpar 16B). Det er litmus-sjukdomen i miniatyr og
+    slår fast at **(iii)** er den låsande biten: så lenge boks-emisjonane bumpar,
+    veks minnet ubunde uansett kor god fri-lista er. Rekkjefylgja bør vere
+    **(iii) fyrst** (re-pek RT_INT/STR/LIST → gc_alloc), så (iv) safepoint→collect,
+    så (a) root-scan/(b) sort/(c) full-range sweep for å hauste boks-garbagen.
   - **Attståande — real-world-hardning mot litmusen (engineering):**
     (a) ROOT-SCAN: scan ALLE stakk-roter [rsp, stack_base) i staden for éin manuell;
     (b) SORT live-map (DFS-orden ≠ adresse-orden for ekte grafar);
