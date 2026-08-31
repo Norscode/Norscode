@@ -165,11 +165,16 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     **IKKJE GC-blokker:** GC-mark-trace les rå-peikarar frå stakk-rot-skann +
     `raw_load64`, ikkje `obj_addr` på Norscode-var. Kartlegging av liste-/map-
     layout skjer i F3 via rot-skann-adresser. (`lengde()` er òg eit eige AOT-gap.)
-  - **Attståande (fleir-sesjons) — F3+:** (a) konservativ rot-skann (stack_base/
-    stack_ptr-primitiv + derive HEAP_ALLOC_START for vår layout) → hent live objekt-
-    adresser frå stakken; (b) valider liste-/map-trace via raw_load64 på dei; (c)
+  - [x] **F3 (konservativ rot-skann) VALIDERT:** `stack_base()` (initiell rsp @
+    [HEAP_VA+48], fanga i _start via ny `mov [HEAP_VA+48],r12`) + `stack_ptr()`
+    (kallarens rsp) porta frå b2 (`c7436c7`). `gc_f3_probe` skannar [sp,sb) etter
+    heap-peikar-slots (0x600000<=v<heap_bump) → fann roots (`F3 OK`, exit 0). Gen1
+    ==Gen2-paritet urørt (begge generasjonar får rsp-capture). `1624c5f`.
+  - **Attståande (fleir-sesjons) — F4+:** (b) valider liste-/map-trace via raw_load64
+    på rot-adresser (les type-tag 3/4, følg payload+element-peikarar); (c)
     allokeringsfri maskinkode mark+sweep + fri-liste (live-map); (d) re-pekte HOT-
     allokatorar; (e) safepoint-terskel-wiring; (f) ELF-paritet + arm64-port. Kvar
-    fase probe/litmus-validert — GC-bug korrupterer alt.
+    fase probe/litmus-validert — GC-bug korrupterer alt. GC-fundamentet (F1–F3)
+    står no; det HARDE er sjølve mark-sweep-løkka (c).
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
