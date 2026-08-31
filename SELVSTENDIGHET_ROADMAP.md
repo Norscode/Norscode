@@ -222,12 +222,26 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     veks minnet ubunde uansett kor god fri-lista er. Rekkjefylgja bør vere
     **(iii) fyrst** (re-pek RT_INT/STR/LIST → gc_alloc), så (iv) safepoint→collect,
     så (a) root-scan/(b) sort/(c) full-range sweep for å hauste boks-garbagen.
-  - **Attståande — real-world-hardning mot litmusen (engineering):**
-    (a) ROOT-SCAN: scan ALLE stakk-roter [rsp, stack_base) i staden for éin manuell;
-    (b) SORT live-map (DFS-orden ≠ adresse-orden for ekte grafar);
-    (c) FULL-RANGE sweep: frigjer òg [alloc_start, first_live) og [last_live, bump);
-    (iii) re-pek codegen-allokator-emisjonar (RT_LIST_*/STR_RAW/INT) → gc_alloc;
-    (iv) safepoint-terskel → kall gc_collect; (v) ELF-paritet + arm64; (vi) F5: seed
-    mot 10k-hmac (den store raud→grøn). (iii) er den siste høg-risiko-biten.
+  - [x] **(iii)-byggjekloss: `gc_box_int` VALIDERT** — fri-liste-støtta int-boksar
+    (16B via head-fit >=16, elles bump-fallback; fyller [1][verdi]). Korrektheit +
+    gjenbruk grønt. `8b59cdf`.
+  - **AVGJERANDE ARKITEKTUR-FUNN (omformar (iii)):** runtime-en er ein **FROSEN
+    prekompilert binærblokk lagra som hex** (`rt_hex_del0..6`, 10 567 B). Allokeringa
+    er **inline BUMP baka inn** — kvar RT_* har sin eigen `mov rax,[0x600000]; lea
+    rcx,[rax+16]; mov [0x600000],rcx`. Ingen omdirigerbar felles-chokepoint via
+    call-sites. MEN fila **hex-patchar alt blokka 30+ gonger** (`builtin.replace`,
+    linje 9–40). Difor er (iii) gjennomførbar med SAME teknikk: patch dei **4 faste
+    16B-bump-prologane** (int/bool/list/map-boksarane; `replace` er global → éin patch
+    tek alle 4) → `call gc_alloc16` (fri-liste-støtta, som gc_box_int), bak
+    `NORSCODE_GC_ALLOC=1`. De-riska: hex-patch, IKKJE runtime-rebygg. (8 variabel-
+    storleik-bump-sites for str/liste-payload er vanskelegare — treng size til alloc.)
+  - **Attståande — konkret (iii)+(iv)-sekvens mot litmusen:**
+    1. `gc_alloc16`-rutine (som gc_box_int, men returnerer rå blokk i rax) + hex-patch
+       dei 4 faste bump-prologane bak flagget; validér korrektheit (flagg PÅ: aritmetikk
+       stemmer) + paritet (flagg AV: grøn).
+    2. (iv) safepoint-stubben (som eg KAN endre — ikkje frosen) → kall `gc_collect`
+       ved terskel; (a) root-scan (stakk-roter), (b) sort, (c) full-range sweep.
+    3. Variabel-storleik-allokatorane (str/liste) → gc_alloc(size).
+    4. (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
