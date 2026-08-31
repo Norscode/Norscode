@@ -142,11 +142,17 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
     primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
     (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
-  - [x] **F2 (obj_addr + objekt-layout) landa + CI-validert:** `obj_addr(x)`
-    (boksar NcVal-peikaren) porta (`f75336d`) inn i vår codegen. `gc_f2_probe.no`
-    inspiserer liste-layout via obj_addr+raw_load64 (type_tag==3, len==3) → GATING
-    F2-steg i `gc-litmus.yml`. Generisk `tools/gc_probe_run.sh <probe.no>` køyrar.
-    Gen1==Gen2-paritet urørt (gate grøn).
+  - [~] **F2 (obj_addr) DELVIS — codegen-divergens-funn:** `obj_addr(x)` porta
+    (`f75336d`) og emittert (parity urørt), men på vår #179-baseline-codegen
+    returnerer den ein verdi som IKKJE er trygt dereferer-bar: `raw_load64(addr)`
+    og `tekst(addr)` SIGSEGV-ar (verdien er ikkje liste-boksen si reelle adresse).
+    Empirisk bisektert via inkrementelle probar i CI: list-creation ok, `lengde()`
+    er eit eige AOT-gap, men obj_addr-resultatet dereferer-krasjar. Rota: vår
+    arg-konvensjon/RT_INT-interaksjon skil seg frå b2 #181-codegen der F2 vart
+    validert. **obj_addr treng vår-codegen-spesifikk revers-engineering** (kva rdi
+    faktisk held ved routine-entry) før layout-mapping/mark-trace kan byggjast.
+    Generisk `tools/gc_probe_run.sh <probe.no>` + non-gating diagnostikk-workflow
+    (`gc-litmus.yml`, continue-on-error) etablert. `lengde()`-AOT-gap òg notert.
   - **Attståande (fleir-sesjons):** derive HEAP_ALLOC_START for vår layout +
     konservativ rot-skann (stack_base/stack_ptr); allokeringsfri maskinkode
     mark+sweep + fri-liste (live-map); re-pekte HOT-allokatorar; safepoint-terskel-
