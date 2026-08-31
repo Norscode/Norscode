@@ -106,15 +106,20 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     (test_db_features/repository/integration), so sletta vendra
     `third_party/sqlite/sqlite3.{c,h}` (9.7 MB, `7916320`) + rydda alle
     vendra-refs i seed-bygg-verktøy/ci.yml/allowlist (`2e7c902`). Gate grøn.
-  - **Strukturell grense:** resten av Fase 2 er kopla til Fase 3. C-en som står
-    att ER seed-bygg-motoren:
-    - Metal-GPU-C (`nc_metal_tensor.c`) er `#include`-a i `nc_native_main.c`.
-    - legacy-C-backend (`nc_native_main.c`/`nc_runtime_mini.c`) + `build/v3009/*.c`
-      er sjølve C-seed-bygget (ci.yml `clang`/`cc`).
-    - System-dynamisk libsqlite3 (dlopen; committa Linux-seed lenkar libsqlite3.so)
-      + `tests/native_gc_*.c` (GC-design, Fase 3).
-    Å fjerne desse før sjølvhosta seed-rebygg (Fase 3) bryt «pure erstatning grøn
-    FØRST» (ingen sjølvhosta seed-bygg enno). Difor: Fase 2-restar gate-ar på Fase 3.
+  - [x] **Metal-GPU-C droppa**: inga rein-Norscode GPU-erstatning → droppa som
+    feature. Fjerna `nc_metal_tensor.c` + `native_metal_gpu_gate.no` + Metal-
+    frameworks/gate i ci.yml; erstatta `#include "nc_metal_tensor.c"` i seed-bygg-
+    motoren `nc_native_main.c` med pure-C ABI-stub (metal_available=0, matmul→CPU-
+    veg, diffusion→grasiøs feil). Committa seed urørt (gate grøn). Merk: metal/
+    tensor-testar passerer på committa seed no; må oppdaterast når Metal-fri seed
+    landar (Fase 3).
+  - **Strukturell grense (attståande #3):** legacy-C-backend
+    (`nc_native_main.c`/`nc_runtime_mini.c`) + `build/v3009/*.c` ER sjølve C-seed-
+    bygget (ci.yml `clang`/`cc`) — pure erstatning = sjølvhosta seed-bygg (Fase 3).
+    System-dynamisk libsqlite3 (dlopen; committa Linux-seed lenkar libsqlite3.so)
+    + `tests/native_gc_*.c` (GC-design) høyrer òg Fase 3 til. Å fjerne desse før
+    sjølvhosta seed-rebygg bryt «pure erstatning grøn FØRST». **2 av 3 mål gjort;
+    #3 (legacy-backend) gate-ar på Fase 3.**
 - [~] Fase 3: sjølvhosta seed-bygging (GC-en) — den harde veggen
   - [x] Landa validert GC-design: `docs/05-development/AOT_GC_DESIGN.md` (frå b2
     sin scoping). Objekt-layout kartlagt, mark-logikk validert (gc.no gc_trace),
