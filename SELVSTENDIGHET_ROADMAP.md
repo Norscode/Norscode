@@ -194,8 +194,12 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
   - **HEILE mark-sweep-ALGORITMEN er no validert ende-til-ende** (referanse-form:
     mark-bitmap + DFS-trace + live-map-sweep + gc_alloc/gc_free). Den ALGORITMISKE
     uvissa er borte.
-  - **Attståande — produksjon-samansetjing (engineering, ikkje lenger algoritme-uvisst):**
-    (i) éin `gc_collect`: mark registrerer (addr,size) i live-map medan han tracer;
+  - [x] **(i) `gc_collect` ENDE-TIL-ENDE VALIDERT (referanse):** mark+sweep samla —
+    DFS-mark frå rot registrerer (addr,size) i live-map (box+payload); sweep gap-walk
+    → gc_free døde hol; gc_alloc gjenbrukar. Probe: region m/live liste + interleava
+    48B dødt hol → holet frigjort+gjenbrukt, live-verdi 777 URØRT. **Ein komplett,
+    arbeidande mark-sweep-GC (referanse-form).** `97ac6f1`.
+  - **Attståande — produksjon-hardning (engineering):**
     (ii) konverter referanse (som ALLOKERER via boksande raw_*/gc_mark_bit) til
     ALLOKERINGSFRI rein maskinkode (kan køyre på safepoint utan å vekse heapen);
     (iii) re-pek codegen-allokator-emisjonar (RT_LIST_*/STR_RAW/INT) → gc_alloc;
