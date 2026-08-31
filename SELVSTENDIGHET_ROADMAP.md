@@ -199,11 +199,16 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     → gc_free døde hol; gc_alloc gjenbrukar. Probe: region m/live liste + interleava
     48B dødt hol → holet frigjort+gjenbrukt, live-verdi 777 URØRT. **Ein komplett,
     arbeidande mark-sweep-GC (referanse-form).** `97ac6f1`.
+  - [x] **(ii-mark) ALLOKERINGSFRI maskinkode-MARK (`gc_mark_native`) VALIDERT:**
+    ~60-instruksjons hand-emittert DFS med rå register + scratch (mark-stakk/live-map/
+    bitmap), INGEN boksing i løkka. Same graf → retur 3, boksane markerte. **Bevist at
+    maskinkode-GC-konverteringa er gjennomførbar.** `60c20b3` (test-fiks: heap_set_bump
+    forbi grafen sidan range-sjekk krev addr<bump).
   - **Attståande — produksjon-hardning (engineering):**
-    (ii) konverter referanse (som ALLOKERER via boksande raw_*/gc_mark_bit) til
-    ALLOKERINGSFRI rein maskinkode (kan køyre på safepoint utan å vekse heapen);
+    (ii-sweep) `gc_sweep_native` — walk live-map (sorter), gc_free hol (rein maskinkode,
+    enklare enn mark: lineær + sort); samle mark+sweep til `gc_collect_native`;
     (iii) re-pek codegen-allokator-emisjonar (RT_LIST_*/STR_RAW/INT) → gc_alloc;
-    (iv) safepoint-terskel → kall gc_collect; (v) ELF-paritet + arm64; (vi) F5: seed
-    mot 10k-hmac (den store raud→grøn). Steg (ii)+(iii) er høg-risiko maskinkode.
+    (iv) safepoint-terskel → kall gc_collect (+ bitmap-clear per collect); (v) ELF-
+    paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn). (iii) høg-risiko.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
