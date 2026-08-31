@@ -177,11 +177,20 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     blokkert av liste-arg-quirken (obj_addr/legg_til får 0 for liste-arg), og liste-
     literalar bur i `.data` (ikkje heap) → ekte-liste-layout stadfestast når GC køyrer
     i VM-en/seeden (F5). `9e4f918`.
-  - **Attståande (fleir-sesjons) — det HARDE (c+):** (c) allokeringsfri maskinkode
-    **mark+sweep-løkke** + fri-liste (live-map) — dette er kjernen; (d) re-pekte HOT-
-    allokatorar; (e) safepoint-terskel-wiring; (f) ELF-paritet + arm64-port; (g) F5:
-    køyr GC i seeden mot 10k-hmac-litmus (den store raud→grøn). **GC-fundamentet står
-    no komplett:** lese heap (F1), objekt-layout (F2), rot-skann (F3), graf-trace-
-    logikk (b). Att: reclaim-motoren (sweep) + wiring — reint maskinkode-arbeid.
+  - [x] **Reclaim-motor (gc_alloc/gc_free/heap_set_bump) porta + validert:** fri-liste-
+    hovud @ HEAP_VA+40; gc_alloc head-fit (gjenbruk om >= size, elles bump); gc_free
+    push [next][size]. `gc_reclaim_probe`: gjenbruk + tom-liste-bump → exit 0. `069d4cd`.
+  - **Attståande — det GENUINT HARDE (uferdig, b2 fullførte det ALDRI heller):**
+    (c) **mark-sweep-DRIVAREN** — ei ALLOKERINGSFRI maskinkode-`gc_collect`-rutine som:
+    frå rot-skann tracer live-grafen (mark-stack i scratch-minne), reknar objekt-
+    storleik frå layout, byggjer live-map, og gc_free-ar hola. Må vere allokeringsfri
+    (dei høg-nivå-primitiva ALLOKERER via RT_INT → chicken-and-egg) → hundrevis av
+    linjer korrekt hand-assembly. (d) re-pek codegen sine allokator-emisjonar (RT_LIST_*/
+    STR_RAW/INT) → gc_alloc så litmus-allokeringane sjekkar fri-lista; (e) safepoint-
+    terskel → kall gc_collect; (f) ELF-paritet + arm64; (g) F5: køyr i seed mot 10k-hmac.
+    **Alle GC-BYGGJEKLOSSANE står no validerte (F1 les-heap, F2 layout, F3 rot-skann,
+    (b) graf-trace, reclaim-motor). Det som står att er SAMANSETJINGA til ein korrekt,
+    allokeringsfri gc_collect + wiring — reint konsentrert maskinkode-arbeid, ikkje
+    single-session-trygt (GC-bug korrupterer alt).**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
