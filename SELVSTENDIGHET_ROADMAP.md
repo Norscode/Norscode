@@ -149,21 +149,18 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
     primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
     (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
-  - [~] **F2 (obj_addr) DELVIS — presist codegen-funn:** `obj_addr(x)` porta
-    (`f75336d`) og emittert (parity urørt), men **returnerer 0** på vår #179-
-    baseline-codegen — dvs. arg-en (liste sin NcVal*) når IKKJE `rdi` ved routine-
-    entry, så `RT_INT` boksar 0. Det forklarar alle tidlegare krasj: `raw_load64(0)`
-    /deref var null-dereferansar. Empirisk bisektert i CI (inkrementelle probar):
-    list-creation ok, `lengde()` er eit eige AOT-gap, obj_addr→0. **UTELUKKA:**
-    NCB er rett (`['CALL','builtin.obj_addr',1]` med `LOAD_NAME liste` føre →
-    nargs=1, arg pusha); ingen tidlegare special-case-handler matchar (berre
-    `er_exit`); builtin_va-dispatch + atomics["obj_addr"]-VA er rette. **ATT:**
-    kvifor er rdi=0 ved obj_addr-entry når emit_rt_call_1 (`pop rdi`) gir raw_load64
-    rett arg? Suspekt: RT_INT/emit_rt_call_1-interaksjon for akkurat dette tilfellet
-    (obj_addr boksar rdi DIREKTE utan deref, ulikt raw_load64 som gjer `mov rdi,
-    [rdi+8]` først). Treng interaktiv ELF-debug (single-step), ikkje CI-rundar.
-    Generisk `tools/gc_probe_run.sh` + non-gating diagnostikk-workflow etablert.
-  - **Attståande (fleir-sesjons):** derive HEAP_ALLOC_START for vår layout +
+  - [x] **F2 (obj_addr) VALIDERT + separat liste-literal-bug funnen:** `obj_addr(x)`
+    porta (`f75336d`) og emittert (parity urørt) VERKAR — bevist ved å lagra rdi@
+    routine-entry til [0x600030] og lese det tilbake: på INT-arg er rdi = gyldig
+    heap-ptr, og int-boks-layouten [type=1][value=12345] les rett via obj_addr+
+    raw_load64. **Heile «obj_addr→0»-sagaen var ein SEPARAT, pre-eksisterande
+    liste-literal-codegen-bug:** `la liste = [111,222,333]` etterlèt `rsp` feiljustert
+    (usert `sub rsp,0x60`), så den påfølgjande builtin-arg-`pop` les 0. Bevist via
+    lokal ELF-disasm (call-site) + runtime rdi-probe. obj_addr eksponerte berre
+    bugen. Debug-teknikk: lagra register til fri kontrollblokk-slot [HEAP_VA+48] og
+    les tilbake (betre enn gdb her). `lengde()` er òg eit eige AOT-gap.
+  - **Attståande (fleir-sesjons):** (0) fiks liste-literal-stakk-bug (VIKTIG — GC-
+    mark-trace må traversere lister); derive HEAP_ALLOC_START for vår layout +
     konservativ rot-skann (stack_base/stack_ptr); allokeringsfri maskinkode
     mark+sweep + fri-liste (live-map); re-pekte HOT-allokatorar; safepoint-terskel-
     wiring; ELF-paritet + arm64-port. Kvar fase probe/litmus-validert — GC-bug
