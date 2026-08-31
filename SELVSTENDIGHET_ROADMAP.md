@@ -135,10 +135,17 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     native ELF → køyr. `tools/gc_litmus_run.sh` + EIGA workflow `gc-litmus.yml`
     (non-gating, rører ikkje Selvstendighet-porten). Byggjer lokalt (71 KB x86-64
     ELF); køyrer på Linux CI og REPRODUSERER veggen (SIGSEGV) = raud→grøn-mål (`ad293d2`).
-  - **Attståande (fleir-sesjons, frå AOT_GC_DESIGN F2–F6):** port F1–F3-primitiv
-    (raw_load64/obj_addr/stack-skann — konflikt mot vår diverga `native_codegen_v2`/
-    `vm.no`, krev kirurgisk merge); allokeringsfri maskinkode mark+sweep + fri-liste;
-    re-pekte HOT-allokatorar; safepoint-terskel-wiring; ELF-paritet + arm64-port.
-    Kvar fase isolert-validert (litmus før full flate) — GC-bug korrupterer alt.
+  - [x] **F1 (råminne-primitiv) landa + CI-validert:** raw_load64/raw_store64/
+    heap_bump kirurgisk inn i vår `native_codegen_v2.no` (via `atomics`-mapen, l.
+    ~1230 + `builtin_va`-dispatch). Lazily emittert → Gen1==Gen2-paritet urørt
+    (gate grøn). `tests/fixtures/gc_f1_probe.no` (store→load round-trip) byggjer
+    self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
+    primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
+    (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
+  - **Attståande (fleir-sesjons, frå AOT_GC_DESIGN F2–F6):** F2 obj_addr + eksakt
+    layout (+ derive HEAP_ALLOC_START for vår layout); allokeringsfri maskinkode
+    mark+sweep + fri-liste; re-pekte HOT-allokatorar; safepoint-terskel-wiring;
+    ELF-paritet + arm64-port. Kvar fase isolert-validert (probe/litmus) — GC-bug
+    korrupterer alt.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
