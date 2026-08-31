@@ -209,8 +209,15 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     fri-liste-push (rå, ingen boksing). Probe: 2 live + 48B hol → frigjort+gjenbrukt.
     `fa14a99`. **BEGGE dei harde maskinkode-delane (mark+sweep) står no validerte
     allokeringsfritt.**
-  - **Attståande — integrasjon:** samle mark+sweep til `gc_collect_native` (bru
-    live-map-teljar mark→sweep; bitmap-clear; scan ALLE stakk-roter, ikkje éin);
+  - [x] **SAMLA maskinkode-collect VALIDERT (`gc_collect_native`-komposisjon):**
+    `gc_mark_native` lagrar live-map entry-teljar @0x600038; probe komponerer
+    mark→sweep ende-til-ende i maskinkode (curated graf: eitt-element-liste, DFS-
+    record==adresse-orden, 48B daudt hol → marka(2)+entry(3)+sweep(1)+gjenbruk).
+    `5b1e9ce`. **HEILE den allokeringsfrie maskinkode-GC-syklusen står validert.**
+  - **Attståande — real-world-hardning mot litmusen (engineering):**
+    (a) ROOT-SCAN: scan ALLE stakk-roter [rsp, stack_base) i staden for éin manuell;
+    (b) SORT live-map (DFS-orden ≠ adresse-orden for ekte grafar);
+    (c) FULL-RANGE sweep: frigjer òg [alloc_start, first_live) og [last_live, bump);
     (iii) re-pek codegen-allokator-emisjonar (RT_LIST_*/STR_RAW/INT) → gc_alloc;
     (iv) safepoint-terskel → kall gc_collect; (v) ELF-paritet + arm64; (vi) F5: seed
     mot 10k-hmac (den store raud→grøn). (iii) er den siste høg-risiko-biten.
