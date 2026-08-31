@@ -142,10 +142,15 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
     primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
     (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
-  - **Attståande (fleir-sesjons, frå AOT_GC_DESIGN F2–F6):** F2 obj_addr + eksakt
-    layout (+ derive HEAP_ALLOC_START for vår layout); allokeringsfri maskinkode
-    mark+sweep + fri-liste; re-pekte HOT-allokatorar; safepoint-terskel-wiring;
-    ELF-paritet + arm64-port. Kvar fase isolert-validert (probe/litmus) — GC-bug
+  - [x] **F2 (obj_addr + objekt-layout) landa + CI-validert:** `obj_addr(x)`
+    (boksar NcVal-peikaren) porta (`f75336d`) inn i vår codegen. `gc_f2_probe.no`
+    inspiserer liste-layout via obj_addr+raw_load64 (type_tag==3, len==3) → GATING
+    F2-steg i `gc-litmus.yml`. Generisk `tools/gc_probe_run.sh <probe.no>` køyrar.
+    Gen1==Gen2-paritet urørt (gate grøn).
+  - **Attståande (fleir-sesjons):** derive HEAP_ALLOC_START for vår layout +
+    konservativ rot-skann (stack_base/stack_ptr); allokeringsfri maskinkode
+    mark+sweep + fri-liste (live-map); re-pekte HOT-allokatorar; safepoint-terskel-
+    wiring; ELF-paritet + arm64-port. Kvar fase probe/litmus-validert — GC-bug
     korrupterer alt.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
