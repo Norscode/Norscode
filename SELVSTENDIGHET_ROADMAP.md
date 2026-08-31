@@ -170,11 +170,18 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     (kallarens rsp) porta frå b2 (`c7436c7`). `gc_f3_probe` skannar [sp,sb) etter
     heap-peikar-slots (0x600000<=v<heap_bump) → fann roots (`F3 OK`, exit 0). Gen1
     ==Gen2-paritet urørt (begge generasjonar får rsp-capture). `1624c5f`.
-  - **Attståande (fleir-sesjons) — F4+:** (b) valider liste-/map-trace via raw_load64
-    på rot-adresser (les type-tag 3/4, følg payload+element-peikarar); (c)
-    allokeringsfri maskinkode mark+sweep + fri-liste (live-map); (d) re-pekte HOT-
-    allokatorar; (e) safepoint-terskel-wiring; (f) ELF-paritet + arm64-port. Kvar
-    fase probe/litmus-validert — GC-bug korrupterer alt. GC-fundamentet (F1–F3)
-    står no; det HARDE er sjølve mark-sweep-løkka (c).
+  - [x] **(b) Mark-traversering-LOGIKK validert:** fleir-nivå raw_load64-peikar-jakt
+    (boks[3]→payload[len][cap][elem-ptr..]→int-boks[1][value]) verifisert via manuelt
+    konstruert struktur (raw_store64) → `trace OK` exit 0. Traverserings-maskineriet
+    GC-mark brukar verkar. MERK: ekte-liste-manipulasjon i direkte-kompilert probe er
+    blokkert av liste-arg-quirken (obj_addr/legg_til får 0 for liste-arg), og liste-
+    literalar bur i `.data` (ikkje heap) → ekte-liste-layout stadfestast når GC køyrer
+    i VM-en/seeden (F5). `9e4f918`.
+  - **Attståande (fleir-sesjons) — det HARDE (c+):** (c) allokeringsfri maskinkode
+    **mark+sweep-løkke** + fri-liste (live-map) — dette er kjernen; (d) re-pekte HOT-
+    allokatorar; (e) safepoint-terskel-wiring; (f) ELF-paritet + arm64-port; (g) F5:
+    køyr GC i seeden mot 10k-hmac-litmus (den store raud→grøn). **GC-fundamentet står
+    no komplett:** lese heap (F1), objekt-layout (F2), rot-skann (F3), graf-trace-
+    logikk (b). Att: reclaim-motoren (sweep) + wiring — reint maskinkode-arbeid.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
