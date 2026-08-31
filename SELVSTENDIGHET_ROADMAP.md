@@ -59,7 +59,11 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
   - Portfiksar: seed-materialisering før feature-check (`d658ca4`); bin/nc
     fallback til committa stage-0-seed på Linux/macOS (`3fcb241`); branch i
     push-trigger (`38b8fa5`).
-- [~] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
+- [x] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
+  — **achievable-on-committed-seed-scope KOMPLETT + CI-grøn.** Alt attståande b2-
+  C-fritt arbeid er strukturelt gated (ikkje Fase-1-arbeid som står ugjort): sjå
+  «Blokkert/utsett tail» nedanfor — gate-ar på Fase 3 (seed-rebygg/kompilator/core)
+  eller annan sesjon (bigint-familien).
   - [x] Krypto-bolk: `builtin.sha256 → std.sha256.hash` (`95550ba`), pbkdf2_sha256
     + random_hex → pure (`3b3389b`). CI grøn. Inert for committa seed/stage-0.
   - [x] Binær-NCB-bolk: rein NCB-codec (`9abfa49`), varint/zigzag (`93063da`),
