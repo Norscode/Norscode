@@ -111,4 +111,23 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
       + `tests/native_gc_*.c` (GC-design, Fase 3).
     Å fjerne desse før sjølvhosta seed-rebygg (Fase 3) bryt «pure erstatning grøn
     FØRST» (ingen sjølvhosta seed-bygg enno). Difor: Fase 2-restar gate-ar på Fase 3.
-- [ ] Fase 3 …
+- [~] Fase 3: sjølvhosta seed-bygging (GC-en) — den harde veggen
+  - [x] Landa validert GC-design: `docs/05-development/AOT_GC_DESIGN.md` (frå b2
+    sin scoping). Objekt-layout kartlagt, mark-logikk validert (gc.no gc_trace),
+    live-map-sweep vald (headrar forkasta), rot-sett = native stakk (`functions`).
+  - **Kvifor dette er annleis enn Fase 1/2:** GC er hand-emittert maskinkode i
+    `native_codegen_v2.no` — DVALE på committa seed OG ikkje `run-pure`-validerbar
+    (run-pure køyrer ikkje native codegen). Einaste validering = **byggje eit
+    sjølvhosta seed + køyre litmus** (10k-hmac må ikkje SIGSEGV). Det krev minne-
+    tungt bygg (OOM på 16 GB Mac → Docker/CI). Chicken-and-egg: seed-bygget treng
+    GC-en for å passere litmus.
+  - **Validerings-loop (må etablerast FØRST):** `selfcompile-stage0-elf` byggjer
+    alt eit Gen1 ELF-seed i CI (grøn). Utvid til: bygg sjølvhosta seed → køyr
+    10k-hmac-litmus. Det REPRODUSERER veggen (raud baseline) = grønt-målet for GC.
+  - **Attståande (fleir-sesjons, frå AOT_GC_DESIGN F2–F6):** port F1–F3-primitiv
+    (raw_load64/obj_addr/stack-skann — konflikt mot vår diverga `native_codegen_v2`/
+    `vm.no`, krev kirurgisk merge); allokeringsfri maskinkode mark+sweep + fri-liste;
+    re-pekte HOT-allokatorar; safepoint-terskel-wiring; ELF-paritet + arm64-port.
+    Kvar fase isolert-validert (litmus før full flate) — GC-bug korrupterer alt.
+  - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
+    grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
