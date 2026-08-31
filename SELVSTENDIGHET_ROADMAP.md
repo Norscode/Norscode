@@ -121,9 +121,11 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     sjølvhosta seed + køyre litmus** (10k-hmac må ikkje SIGSEGV). Det krev minne-
     tungt bygg (OOM på 16 GB Mac → Docker/CI). Chicken-and-egg: seed-bygget treng
     GC-en for å passere litmus.
-  - **Validerings-loop (må etablerast FØRST):** `selfcompile-stage0-elf` byggjer
-    alt eit Gen1 ELF-seed i CI (grøn). Utvid til: bygg sjølvhosta seed → køyr
-    10k-hmac-litmus. Det REPRODUSERER veggen (raud baseline) = grønt-målet for GC.
+  - [x] **Validerings-loop ETABLERT:** `tests/fixtures/gc_litmus_hmac.no` (10000
+    hmac_sha256_bytes) → bundla → `ncb-to-elf` (self-hosted native_codegen_v2) →
+    native ELF → køyr. `tools/gc_litmus_run.sh` + EIGA workflow `gc-litmus.yml`
+    (non-gating, rører ikkje Selvstendighet-porten). Byggjer lokalt (71 KB x86-64
+    ELF); køyrer på Linux CI og REPRODUSERER veggen (SIGSEGV) = raud→grøn-mål (`ad293d2`).
   - **Attståande (fleir-sesjons, frå AOT_GC_DESIGN F2–F6):** port F1–F3-primitiv
     (raw_load64/obj_addr/stack-skann — konflikt mot vår diverga `native_codegen_v2`/
     `vm.no`, krev kirurgisk merge); allokeringsfri maskinkode mark+sweep + fri-liste;
