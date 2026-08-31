@@ -235,13 +235,23 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     tek alle 4) → `call gc_alloc16` (fri-liste-støtta, som gc_box_int), bak
     `NORSCODE_GC_ALLOC=1`. De-riska: hex-patch, IKKJE runtime-rebygg. (8 variabel-
     storleik-bump-sites for str/liste-payload er vanskelegare — treng size til alloc.)
-  - **Attståande — konkret (iii)+(iv)-sekvens mot litmusen:**
-    1. `gc_alloc16`-rutine (som gc_box_int, men returnerer rå blokk i rax) + hex-patch
-       dei 4 faste bump-prologane bak flagget; validér korrektheit (flagg PÅ: aritmetikk
-       stemmer) + paritet (flagg AV: grøn).
-    2. (iv) safepoint-stubben (som eg KAN endre — ikkje frosen) → kall `gc_collect`
-       ved terskel; (a) root-scan (stakk-roter), (b) sort, (c) full-range sweep.
-    3. Variabel-storleik-allokatorane (str/liste) → gc_alloc(size).
+  - [x] **(iii-1a) `gc_alloc16` VALIDERT** — register-trygg rå 16B-allokator (fri-liste
+    head-fit >=16, elles bump; klobrar berre rax+rcx, bevarer flagg). `e6d2ee5`.
+  - [x] **(iii-1b) HEX-PATCH VALIDERT — fri-liste-boksing verkar, register-trygt.**
+    `bygg_runtime_v2` les `NORSCODE_GC_ALLOC`; `patch_bump_prologer` byte-patchar dei
+    faste 16B-bump-prologane i den FROSNE regionen `[0,frozen_len)` → posisjons-
+    uavhengig `mov rax,ga16_va; call rax; nop*8` (same 20B → VA-ar urørte; skannar KUN
+    frosen region so mine eigne primitiv ikkje treffast). `tools/ncb_to_elf.no` sender
+    flagget til subprosessen. CI: **flagg PÅ → 5 prologar patcha, `1..100=5050 &
+    2^10=1024` KORREKT** (register-trygt ende-til-ende); **flagg AV → 0 patchar,
+    paritet grøn**. `e6d2ee5`. **Den harde biten — patche frosen inline-bump
+    utan å velte runtime-en — er bevist trygg.**
+  - **Attståande mot litmus-grønt:**
+    2. **(iv) safepoint→collect:** safepoint-stubben (eg KAN endre) → kall `gc_collect`
+       ved terskel. UTAN dette står fri-lista tom → gc_alloc16 berre bumpar (ingen
+       hausting). Krev `gc_collect_native` med (a) root-scan (stakk-roter), (b) sort,
+       (c) full-range sweep — samla i éi maskinkode-rutine.
+    3. **Variabel-storleik-allokatorane** (str/liste-payload, 8 bump-sites) → gc_alloc(size).
     4. (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
