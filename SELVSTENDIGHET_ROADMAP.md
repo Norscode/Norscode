@@ -180,6 +180,10 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
   - [x] **Reclaim-motor (gc_alloc/gc_free/heap_set_bump) porta + validert:** fri-liste-
     hovud @ HEAP_VA+40; gc_alloc head-fit (gjenbruk om >= size, elles bump); gc_free
     push [next][size]. `gc_reclaim_probe`: gjenbruk + tom-liste-bump → exit 0. `069d4cd`.
+  - [x] **gc_collect START — allokeringsfri mark-bitmap (`gc_mark_bit`) validert:**
+    1 bit/16B-slot i scratch @ 0x10400000 (2 MB på toppen av 256 MB-heapen). Hand-
+    emittert bit-set/les (sub/shr/and/movzx/shr/or/mov). `gc_mark_probe`: ny=0,
+    gjenta=1, annan-slot=0 → exit 0. Første stein i mark-fasen. `03012bb`.
   - **Attståande — det GENUINT HARDE (uferdig, b2 fullførte det ALDRI heller):**
     (c) **mark-sweep-DRIVAREN** — ei ALLOKERINGSFRI maskinkode-`gc_collect`-rutine som:
     frå rot-skann tracer live-grafen (mark-stack i scratch-minne), reknar objekt-
