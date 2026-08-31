@@ -159,11 +159,17 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     lokal ELF-disasm (call-site) + runtime rdi-probe. obj_addr eksponerte berre
     bugen. Debug-teknikk: lagra register til fri kontrollblokk-slot [HEAP_VA+48] og
     les tilbake (betre enn gdb her). `lengde()` er òg eit eige AOT-gap.
-  - **Attståande (fleir-sesjons):** (0) fiks liste-literal-stakk-bug (VIKTIG — GC-
-    mark-trace må traversere lister); derive HEAP_ALLOC_START for vår layout +
-    konservativ rot-skann (stack_base/stack_ptr); allokeringsfri maskinkode
-    mark+sweep + fri-liste (live-map); re-pekte HOT-allokatorar; safepoint-terskel-
-    wiring; ELF-paritet + arm64-port. Kvar fase probe/litmus-validert — GC-bug
-    korrupterer alt.
+  - **Merknad (non-blocking):** `obj_addr` på LISTE-typa Norscode-variablar gjev 0
+    via den generiske `emit_rt_call_1`-vegen (int-typa verkar; hmac sin dedikerte
+    handler les liste-arg rett). Djup AOT-arg-passing-quirk for liste-typa verdiar.
+    **IKKJE GC-blokker:** GC-mark-trace les rå-peikarar frå stakk-rot-skann +
+    `raw_load64`, ikkje `obj_addr` på Norscode-var. Kartlegging av liste-/map-
+    layout skjer i F3 via rot-skann-adresser. (`lengde()` er òg eit eige AOT-gap.)
+  - **Attståande (fleir-sesjons) — F3+:** (a) konservativ rot-skann (stack_base/
+    stack_ptr-primitiv + derive HEAP_ALLOC_START for vår layout) → hent live objekt-
+    adresser frå stakken; (b) valider liste-/map-trace via raw_load64 på dei; (c)
+    allokeringsfri maskinkode mark+sweep + fri-liste (live-map); (d) re-pekte HOT-
+    allokatorar; (e) safepoint-terskel-wiring; (f) ELF-paritet + arm64-port. Kvar
+    fase probe/litmus-validert — GC-bug korrupterer alt.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
