@@ -975,6 +975,49 @@ funksjon patch_bump_prologer(bytes, ga16_va, frozen_len) -> liste {
     returner ut
 }
 
+// (3b) hex-patch: STRENG-payload-allokatoren (variabel storleik). Frosen mønster (24B):
+//   mov rax,[bump]; lea rsi,[rax+rsi*2]; add rsi,11; mov [bump],rsi
+// → new_bump = rax + 2·len + 11, dvs size = 2·len + 11 (len i rsi). Erstatt med (24B):
+//   lea rcx,[rsi*2+11]; mov rax,gc_alloc_var_va; call rax; nop*4
+// gc_alloc_var(size i rcx) allokerer via fri-lista (head-fit+split) elles bump. Bevarar
+// rsi/rdi (fill-kode). Skannar berre frosen region. (Liste-payload-advance er skjult i
+// fill-koden etter bug-fiks @linje-27 → treng djupare analyse; streng er rein her.)
+funksjon patch_var_allocators(bytes, gav_va, frozen_len) -> liste {
+    la pat = [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x60, 0x00, 0x48, 0x8D, 0x34, 0x70, 0x48, 0x83, 0xC6, 0x0B, 0x48, 0x89, 0x34, 0x25, 0x00, 0x00, 0x60, 0x00]
+    la repl = []
+    copy(repl, [0x48, 0x8D, 0x0C, 0x75, 0x0B, 0x00, 0x00, 0x00]) // lea rcx,[rsi*2+11]
+    copy(repl, [0x48, 0xB8])
+    u64(repl, gav_va)
+    copy(repl, [0xFF, 0xD0])                        // call rax
+    copy(repl, [0x90, 0x90, 0x90, 0x90])
+    la ut = []
+    la n: heltall = lengde(bytes)
+    la plen: heltall = lengde(pat)
+    la i: heltall = 0
+    la treff: heltall = 0
+    mens i < n {
+        la m: heltall = 0
+        hvis i + plen <= frozen_len {
+            m = 1
+            la j: heltall = 0
+            mens j < plen {
+                hvis bytes[i + j] != pat[j] { m = 0 }
+                j = j + 1
+            }
+        }
+        hvis m == 1 {
+            copy(ut, repl)
+            i = i + plen
+            treff = treff + 1
+        } ellers {
+            legg_til(ut, bytes[i])
+            i = i + 1
+        }
+    }
+    skriv("native_codegen_v2: (3b) hex-patcha " + tekst_fra_heltall(treff) + " streng-payload-allokatorar → gc_alloc_var\n")
+    returner ut
+}
+
 funksjon bygg_runtime_v2() -> liste {
     la gc_mode = miljo_hent("NORSCODE_GC_ALLOC")   // (iii) "1" = fri-liste-boksing (flagg-gata)
     la hex = rt_hex_del0() + rt_hex_del1() + rt_hex_del2() + rt_hex_del3() + rt_hex_del4() + rt_hex_del5() + rt_hex_del6()
@@ -1650,6 +1693,55 @@ funksjon bygg_runtime_v2() -> liste {
     copy(bytes, [0x9D])                            // popfq
     copy(bytes, [0xC3])                            // ret
 
+    // ── GC (iii/3b): STORLEIK-BEVISST allokator for variabel-storleik-payloadar ──
+    // gc_alloc_var(size i rcx) -> rax = blokk på >= size byte. Head-fit på fri-lista
+    // (splittar resten når rom for header), elles bump. Klobrar rax + r9/r10/r11 (alle
+    // caller-saved; frosen fill-kode set r8-r10 friskt, r11 urørt av fill). Bevarar rdi/
+    // rsi/rdx/rcx → trygt midt i variabel-allokator-sites.
+    atomics["gc_alloc_var"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x9C])                            // pushfq
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[head]
+    u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la av_empty = emit_je_placeholder(bytes)       // jz V_bump
+    copy(bytes, [0x4C, 0x8B, 0x50, 0x08])          // mov r10,[rax+8] (blokk-size)
+    copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx (blokk-size >= req?)
+    copy(bytes, [0x0F, 0x82])                       // jb V_bump
+    u32(bytes, 0)
+    la av_pbump = lengde(bytes) - 4
+    copy(bytes, [0x4C, 0x8B, 0x18])                // mov r11,[rax] (next)
+    copy(bytes, [0x49, 0x29, 0xCA])                // sub r10,rcx (rest-size)
+    copy(bytes, [0x49, 0x83, 0xFA, 0x10])          // cmp r10,16
+    copy(bytes, [0x0F, 0x82])                       // jb V_nosplit
+    u32(bytes, 0)
+    la av_pnosplit = lengde(bytes) - 4
+    copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
+    copy(bytes, [0x49, 0x01, 0xC9])                // add r9,rcx (rest-addr = rax+req)
+    copy(bytes, [0x4D, 0x89, 0x19])                // mov [r9],r11 (rest.next)
+    copy(bytes, [0x4D, 0x89, 0x51, 0x08])          // mov [r9+8],r10 (rest.size)
+    copy(bytes, [0x4C, 0x89, 0x0C, 0x25])          // mov [head],r9
+    u32(bytes, HEAP_VA() + 40)
+    la av_prdone = emit_jmp_placeholder(bytes)     // jmp V_done
+    la av_nosplit = lengde(bytes)                  // V_nosplit:
+    patch_jump(bytes, av_pnosplit, av_nosplit)
+    copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11 (pop heile)
+    u32(bytes, HEAP_VA() + 40)
+    la av_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_done
+    la av_Vbump = lengde(bytes)                    // V_bump:
+    patch_jump(bytes, av_empty, av_Vbump)
+    patch_jump(bytes, av_pbump, av_Vbump)
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
+    u32(bytes, HEAP_VA())
+    copy(bytes, [0x4C, 0x89, 0xD2])                // mov r10,rax
+    copy(bytes, [0x49, 0x01, 0xCA])                // add r10,rcx (new bump = rax+size)
+    copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
+    u32(bytes, HEAP_VA())
+    la av_done = lengde(bytes)                     // V_done:
+    patch_jump(bytes, av_prdone, av_done)
+    patch_jump(bytes, av_prdone2, av_done)
+    copy(bytes, [0x9D])                            // popfq
+    copy(bytes, [0xC3])                            // ret
+
     // ── GC (iv): nullstill mark-bitmap (2MB @0x10400000) — per collect ──
     // gc_bitmap_clear() -> boksa 0. rep stosq over 262144 qwords = 2MB.
     atomics["gc_bitmap_clear"] = TEXT_VA() + lengde(bytes)
@@ -1964,6 +2056,7 @@ funksjon bygg_runtime_v2() -> liste {
     copy(bytes, [0xC3])                            // .skip: ret
     hvis gc_mode == "1" {
         bytes = patch_bump_prologer(bytes, atomics["gc_alloc16"], frozen_len)
+        bytes = patch_var_allocators(bytes, atomics["gc_alloc_var"], frozen_len)
     }
     returner [bytes, atomics]
 }
