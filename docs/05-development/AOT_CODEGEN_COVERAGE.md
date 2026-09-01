@@ -83,9 +83,13 @@ som nye emitterte atom (rekursiv streng-bygging via RT_CONCAT + sjølv-rekursjon
 rute til ein Norscode-implementasjon (native_codegen_v2 kompilerer alt rekursjon+map+streng
 korrekt, jf. mini-tolk). STOR, men veldefinert.
 
-## Sekvens vidare
+## Sekvens vidare (oppdatert)
 
-GC-veggen OG unnatak-hullet er klarert; kompilator-like kode (mini-tolk) verkar. NESTE
-konkrete blokkar er dei frosne JSON-rutinane (over) — reimplementer json_stringify+json_parse
-for list/map. Deretter: AOT-kompiler heile kompilatoren, gjer GC standard av flagget, byt
-seed-bygging C→sjølvhosta (Fase 4). Valfritt seinare: finally + float for brukarprogram.
+Klarert denne økta: GC (type-komplett, gated), unnatak (prøv/fang/kast), tekst(heiltall),
+**JSON-serialisering** (json_stringify + json_parse_raw for list/map — seed-blokkaren), og
+slice(liste)-dispatch. Kompilator-like kode (mini-tolk) verkar.
+
+NESTE: AOT-kompiler ein EKTE kompilator-modul / heile kompilatoren og iterér på gjenverande
+smale frosne-runtime-edge-cases etter kvart som dei treffast (jf. json_les fleir-element over
+— json.no-spesifikk, låg prioritet). Deretter: gjer GC standard av flagget → byt seed-bygging
+C→sjølvhosta (Fase 4). Valfritt seinare: finally + float for brukarprogram.
