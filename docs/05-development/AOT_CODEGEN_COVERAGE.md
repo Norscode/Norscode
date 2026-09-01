@@ -34,10 +34,27 @@ og køyre ELF-en under Docker `linux/amd64` (flagg AV = paritet, flagg PÅ = `NO
    float-parsing (json.no) som ikkje vert køyrt under .no-kompilering. Trengst berre om ein
    vil køyre float-tunge brukarprogram native.
 
+## ❌ NESTE BLOKKAR (for seed-bygging): frosne JSON-rutinar krasjar på lister/map
+
+`builtin.json_stringify` (json_skriv) og `json_parse`/`json_parse_raw` krasjar i native
+codegen når input er ei LISTE eller MAP (skalar-verdiar verkar). Rota: dei frosne C-avleidde
+JSON-rutinane (`json_list_case`→0x4029c3, `json_map_case`→0x4026ad) har ein lengd-bug —
+rekursjonen reknar feil strenglengd → kopi-løkke med rax≈16 KB → segfault (krasj @0x4010ab
+`mov (%r12,%rax),%cl`). Òg kjent i kjelda: nc_main.no:1613 «json_skriv mister data i komplekse
+nøsta lister».
+
+Dette BLOKKERER seed-bygging: NCB-serialisering brukar json_skriv/json_parse pervasivt
+(nc_main.no:1614-1615, bundler.no:357/67), og sjølv binær-serde-ruta går via
+`serde.serialiser(json_parse_raw(...))` (nc_main.no:1659) → treng json_parse.
+
+**Fiks:** reimplementer `json_stringify` (list+map) og `json_parse` for lister/map — anten
+som nye emitterte atom (rekursiv streng-bygging via RT_CONCAT + sjølv-rekursjon) eller ved å
+rute til ein Norscode-implementasjon (native_codegen_v2 kompilerer alt rekursjon+map+streng
+korrekt, jf. mini-tolk). STOR, men veldefinert.
+
 ## Sekvens vidare
 
-GC-veggen OG unnatak-hullet er klarert. Codegen ser no funksjonelt komplett ut for
-kompilator-like kode (verifisert med mini-tolk). Neste: prøv å AOT-kompilere ein EKTE
-kompilator-modul / heile kompilatoren via native_codegen_v2 og iterer på evt. gjenverande
-hull; gjer GC standard av flagget; byt seed-bygging C→sjølvhosta (Fase 4: fjern gjenverande C).
-Valfritt seinare: finally + float for full brukarprogram-dekning.
+GC-veggen OG unnatak-hullet er klarert; kompilator-like kode (mini-tolk) verkar. NESTE
+konkrete blokkar er dei frosne JSON-rutinane (over) — reimplementer json_stringify+json_parse
+for list/map. Deretter: AOT-kompiler heile kompilatoren, gjer GC standard av flagget, byt
+seed-bygging C→sjølvhosta (Fase 4). Valfritt seinare: finally + float for brukarprogram.
