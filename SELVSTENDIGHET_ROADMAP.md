@@ -247,11 +247,23 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     paritet grøn**. `e6d2ee5`. **Den harde biten — patche frosen inline-bump
     utan å velte runtime-en — er bevist trygg.**
   - **Attståande mot litmus-grønt:**
-    2. **(iv) safepoint→collect:** safepoint-stubben (eg KAN endre) → kall `gc_collect`
-       ved terskel. UTAN dette står fri-lista tom → gc_alloc16 berre bumpar (ingen
-       hausting). Krev `gc_collect_native` med (a) root-scan (stakk-roter), (b) sort,
-       (c) full-range sweep — samla i éi maskinkode-rutine.
+  - [x] **(iv) SAFEPOINT→COLLECT + heile GC-en VALIDERT ENDE-TIL-ENDE.** Byggjeklossar
+    validerte kvar for seg: `gc_bitmap_clear` (rep stosq), `gc_sort_livemap` (insertion-
+    sort), `gc_sweep_full` (indre hol + hale), `gc_mark_roots` (konservativ stakk-skann +
+    DFS — lokalar er rbp-relative PÅ stakken → dekt), samla i `gc_collect_native` (reset
+    fri-liste → mark-roots → sort → sweep-full). Safepoint-stub (49B, terskel 1000 i GC-
+    modus / aldri elles) kallar det ved terskel. **ENDE-TIL-ENDE: 6M-iter-loop med flagg
+    PÅ FULLFØRER (exit 0) — collect avgrensar minnet, levande verdiar urørte; SAME loop
+    flagg AV → SIGSEGV (exhaustion ~5.3M).** GC-en avgrensar altså minnet i ekte sjølv-
+    hosta native ELF. **Kritiske fiksar undervegs:** (1) reset fri-liste-hovud ved collect-
+    start (unngå double-free over mange collects); (2) konservativ DFS validerer payload-
+    range + cap len (mot falske roter); (3) **SPLITTING gc_alloc16** — tek 16B, legg
+    resten attende (utan split tok éin alloc heile store frie blokka → reclaim
+    ineffektiv → exhaustion likevel). Paritet grøn (flagg av) heile vegen.
+  - **Attståande mot SJØLVE 10k-hmac-litmusen:**
     3. **Variabel-storleik-allokatorane** (str/liste-payload, 8 bump-sites) → gc_alloc(size).
+       hmac allokerer byte-lister/strengar (variabel storleik) som framleis bumpar →
+       må òg via fri-lista + splitting for at litmusen skal bli grøn.
     4. (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
