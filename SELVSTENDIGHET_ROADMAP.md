@@ -260,10 +260,19 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     range + cap len (mot falske roter); (3) **SPLITTING gc_alloc16** — tek 16B, legg
     resten attende (utan split tok éin alloc heile store frie blokka → reclaim
     ineffektiv → exhaustion likevel). Paritet grøn (flagg av) heile vegen.
-  - **Attståande mot SJØLVE 10k-hmac-litmusen:**
-    3. **Variabel-storleik-allokatorane** (str/liste-payload, 8 bump-sites) → gc_alloc(size).
-       hmac allokerer byte-lister/strengar (variabel storleik) som framleis bumpar →
-       må òg via fri-lista + splitting for at litmusen skal bli grøn.
-    4. (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
+  - [x] **(steg 3a) ALLE 16B-allokatorar (begge prolog-variantar) → fri-lista.** Analyse:
+    12 `mov rax,[bump]`; 5 rcx-variant + 6 rdx-variant (`lea rdx,[rax+16]`, verdi i rcx) =
+    11 faste 16B (int/bool/streng-boks/liste-boks/map-boks). `gc_alloc16` samla til å klobre
+    BERRE rax → trygg for begge; patch_bump_prologer matchar begge → **11 prologar patcha**.
+    e2e + probar grøne. `f35e898`.
+  - **MÅLING: sjølve 10k-hmac-litmusen med flagg PÅ KRASJAR framleis (exit 139).** 16B-
+    reclaim er ikkje nok — litmusen sine VARIABEL-STORLEIK-payloadar dominerer. Dei 2 EKTE
+    variabel-allokatorane: streng @6071 (`lea rsi,[rax+rsi*2]; add rsi,11` → 2·len+11) og
+    **liste @10223 (`lea rcx,[rax+rdx]; add rcx,0x10008` → rdx+~64KB PER LISTE)** — den siste
+    er drapsmannen (10k hmac × 64KB = exhaustion). Desse bumpar framleis.
+  - **Attståande (steg 3b) mot litmus-grønt:** `gc_alloc_var(size)` (fri-liste first-fit +
+    split + bump-fallback) + SITE-SPESIFIKKE patchar av dei 2 variabel-allokatorane (kvar
+    reknar size ulikt + bevarer ulike register). @10223 (liste, 64KB) har størst effekt.
+    Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
