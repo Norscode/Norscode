@@ -993,6 +993,20 @@ funksjon patch_var_allocators(bytes, gav_va, frozen_len) -> liste {
     u64(repl, gav_va)
     copy(repl, [0xFF, 0xD0])                        // call rax
     copy(repl, [0x90, 0x90, 0x90, 0x90])
+    // pat_rcx-variant: etterfølgjande kode brukar RCX som buffer, men gc_alloc_var gjev rax
+    // (og BEVARER rcx = storleiken) → må leggje til mov rcx,rax. Elles skriv koden til
+    // [storleik+8] → segfault (t.d. json_string_case under GC). Same lengd (24B).
+    // json_string_case brukar OGSÅ rax = kjelde-payload ([rdi+8], lest før). gc_alloc_var
+    // klobrar rax → gjenopprett rax=[rdi+8] (rdi bevart). 32-bit `mov eax,gav` (gav<2^32)
+    // for å få plass til mov rcx,rax + mov rax,[rdi+8] i den faste 24-byte-luka.
+    la repl_rcx = []
+    copy(repl_rcx, [0x48, 0x8D, 0x0C, 0x75, 0x0B, 0x00, 0x00, 0x00]) // lea rcx,[rsi*2+11] (8)
+    copy(repl_rcx, [0xB8])
+    u32(repl_rcx, gav_va)                           // mov eax, gav32 (5)
+    copy(repl_rcx, [0xFF, 0xD0])                    // call rax (2)
+    copy(repl_rcx, [0x48, 0x89, 0xC1])              // mov rcx,rax (buffer) (3)
+    copy(repl_rcx, [0x48, 0x8B, 0x47, 0x08])        // mov rax,[rdi+8] (gjenopprett kjelde) (4)
+    copy(repl_rcx, [0x90, 0x90])                    // nop nop (2) → 24
     la ut = []
     la n: heltall = lengde(bytes)
     la plen: heltall = 24
@@ -1000,19 +1014,23 @@ funksjon patch_var_allocators(bytes, gav_va, frozen_len) -> liste {
     la treff: heltall = 0
     mens i < n {
         la m: heltall = 0
+        la mr: heltall = 0
         hvis i + plen <= frozen_len {
             m = 1
-            la mr: heltall = 1
+            mr = 1
             la j: heltall = 0
             mens j < plen {
                 hvis bytes[i + j] != pat_rax[j] { m = 0 }
                 hvis bytes[i + j] != pat_rcx[j] { mr = 0 }
                 j = j + 1
             }
-            hvis mr == 1 { m = 1 }
         }
         hvis m == 1 {
             copy(ut, repl)
+            i = i + plen
+            treff = treff + 1
+        } ellers hvis mr == 1 {
+            copy(ut, repl_rcx)
             i = i + plen
             treff = treff + 1
         } ellers {
@@ -1356,8 +1374,11 @@ funksjon bygg_runtime_v2() -> liste {
     call_rel32(bytes, RT_BOOL(), TEXT_VA())
     legg_til(bytes, 0xC3)
 
-    // Interne JSON-greiner deler prolog/epilog med legacy-dispatchen. Kvar
-    // wrapper byggjer det frame-et før han hoppar inn i den valde greina.
+    // Reimplementerte JSON-list/map-greiner (dei frosne C-rutinane hadde lengd-bug →
+    // krasj på lister/map). Rekursive call json_stringify (definert SEINARE) → forward-ref
+    // samla her og patcha etter json_stringify er emittert.
+    la json_recur_patches: liste = []
+    // Interne JSON-greiner deler prolog/epilog med legacy-dispatchen.
     atomics["json_string_case"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
         0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
@@ -1365,19 +1386,138 @@ funksjon bygg_runtime_v2() -> liste {
     ])
     jump_rel32(bytes, 4204754, TEXT_VA()) // 0x4028d2
 
+    // json_list_case(rdi=liste) → rax = "[e0,e1,...]". rbx=elem_ptr r12=len r13=i r14=acc.
     atomics["json_list_case"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-        0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x18
-    ])
-    jump_rel32(bytes, 4204995, TEXT_VA()) // 0x4029c3
+    copy(bytes, [0x55, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbp,rbx,r12,r13,r14,r15
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8 (align)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x4C, 0x8B, 0x20])                // mov r12,[rax] (len)
+    copy(bytes, [0x48, 0x8B, 0x58, 0x10])          // mov rbx,[rax+16] (elem_ptr)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x5B])          // mov byte[rsp],'['
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    copy(bytes, [0x4D, 0x31, 0xED])                // xor r13,r13 (i=0)
+    la jlc_loop = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xE5])                // cmp r13,r12
+    copy(bytes, [0x0F, 0x83]) u32(bytes, 0)        // jae done
+    la jlc_pdone = lengde(bytes) - 4
+    copy(bytes, [0x4D, 0x85, 0xED])                // test r13,r13
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // jz nocomma
+    la jlc_pnocomma = lengde(bytes) - 4
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x2C])          // mov byte[rsp],','
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    patch_jump(bytes, jlc_pnocomma, lengde(bytes)) // nocomma:
+    copy(bytes, [0x4A, 0x8B, 0x3C, 0xEB])          // mov rdi,[rbx+r13*8] (element)
+    copy(bytes, [0xE8]) u32(bytes, 0)              // call json_stringify (recur-patch)
+    legg_til(json_recur_patches, lengde(bytes) - 4)
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    copy(bytes, [0x49, 0xFF, 0xC5])                // inc r13
+    copy(bytes, [0xE9]) u32(bytes, (jlc_loop - (lengde(bytes) + 4)) & 4294967295) // jmp loop
+    patch_jump(bytes, jlc_pdone, lengde(bytes))    // done:
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x5D])          // mov byte[rsp],']'
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())      // rax = resultat
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])          // add rsp,8
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D]) // pop r15,r14,r13,r12,rbx,rbp
+    copy(bytes, [0xC3])                            // ret
 
+    // json_map_case(rdi=map) → rax = "{k0:v0,...}". rbx=keys_ptr r15=vals_ptr r12=count r13=i r14=acc.
     atomics["json_map_case"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-        0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x18
-    ])
-    jump_rel32(bytes, 4204205, TEXT_VA()) // 0x4026ad
+    copy(bytes, [0x55, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbp,rbx,r12,r13,r14,r15
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x4C, 0x8B, 0x20])                // mov r12,[rax] (count)
+    copy(bytes, [0x48, 0x8B, 0x58, 0x10])          // mov rbx,[rax+16] (keys_ptr)
+    copy(bytes, [0x4C, 0x8B, 0x78, 0x18])          // mov r15,[rax+24] (vals_ptr)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x7B])          // mov byte[rsp],'{'
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    copy(bytes, [0x4D, 0x31, 0xED])                // xor r13,r13
+    la jmc_loop = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xE5])                // cmp r13,r12
+    copy(bytes, [0x0F, 0x83]) u32(bytes, 0)        // jae done
+    la jmc_pdone = lengde(bytes) - 4
+    copy(bytes, [0x4D, 0x85, 0xED])                // test r13,r13
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // jz nocomma
+    la jmc_pnocomma = lengde(bytes) - 4
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x2C])          // mov byte[rsp],','
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    patch_jump(bytes, jmc_pnocomma, lengde(bytes)) // nocomma:
+    // key: json_stringify([keys_ptr+i*8]) → concat
+    copy(bytes, [0x4A, 0x8B, 0x3C, 0xEB])          // mov rdi,[rbx+r13*8] (key)
+    copy(bytes, [0xE8]) u32(bytes, 0)              // call json_stringify
+    legg_til(json_recur_patches, lengde(bytes) - 4)
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    // ":"
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x3A])          // mov byte[rsp],':'
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    // val: json_stringify([vals_ptr+i*8]) → concat
+    copy(bytes, [0x4B, 0x8B, 0x3C, 0xEF])          // mov rdi,[r15+r13*8] (val)
+    copy(bytes, [0xE8]) u32(bytes, 0)              // call json_stringify
+    legg_til(json_recur_patches, lengde(bytes) - 4)
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax
+    copy(bytes, [0x49, 0xFF, 0xC5])                // inc r13
+    copy(bytes, [0xE9]) u32(bytes, (jmc_loop - (lengde(bytes) + 4)) & 4294967295) // jmp loop
+    patch_jump(bytes, jmc_pdone, lengde(bytes))    // done:
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
+    copy(bytes, [0xC6, 0x04, 0x24, 0x7D])          // mov byte[rsp],'}'
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])    // mov esi,1
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])          // add rsp,16
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14
+    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
+    call_rel32(bytes, RT_CONCAT(), TEXT_VA())      // rax = resultat
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])          // add rsp,8
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D]) // pop r15,r14,r13,r12,rbx,rbp
+    copy(bytes, [0xC3])                            // ret
 
     atomics["json_bool_case"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -1412,6 +1552,20 @@ funksjon bygg_runtime_v2() -> liste {
     legg_til(bytes, 0xC3)
     call_rel32(bytes, atomics["json_bool_case"], TEXT_VA())
     legg_til(bytes, 0xC3)
+
+    // Patch forward-ref: json_list_case/json_map_case sine `call json_stringify` (rel32 @0)
+    // → no som json_stringify-VA er kjend. rel = js_va - (TEXT_VA + pos + 4).
+    la js_va: heltall = atomics["json_stringify"]
+    la jrp: heltall = 0
+    mens jrp < lengde(json_recur_patches)
+        la jpos: heltall = json_recur_patches[jrp]
+        la jrel: heltall = (js_va - (TEXT_VA() + jpos + 4)) & 4294967295
+        bytes[jpos] = jrel & 255
+        bytes[jpos + 1] = (jrel >> 8) & 255
+        bytes[jpos + 2] = (jrel >> 16) & 255
+        bytes[jpos + 3] = (jrel >> 24) & 255
+        jrp = jrp + 1
+    slutt
 
     // miljo_hent i den opphavlege runtime-bloba sende vidare ei vilkårleg
     // lengd i rsi. Resultatet kunne difor innehalde resten av envp-blokka.
