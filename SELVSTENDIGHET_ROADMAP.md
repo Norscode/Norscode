@@ -270,9 +270,22 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     variabel-allokatorane: streng @6071 (`lea rsi,[rax+rsi*2]; add rsi,11` → 2·len+11) og
     **liste @10223 (`lea rcx,[rax+rdx]; add rcx,0x10008` → rdx+~64KB PER LISTE)** — den siste
     er drapsmannen (10k hmac × 64KB = exhaustion). Desse bumpar framleis.
-  - **Attståande (steg 3b) mot litmus-grønt:** `gc_alloc_var(size)` (fri-liste first-fit +
-    split + bump-fallback) + SITE-SPESIFIKKE patchar av dei 2 variabel-allokatorane (kvar
-    reknar size ulikt + bevarer ulike register). @10223 (liste, 64KB) har størst effekt.
+  - [x] **(3b-start) `gc_alloc_var(size i rcx)` bygd + streng-allokator patcha.** Storleik-
+    bevisst fri-liste-allokator (head-fit + split, elles bump; klobrar berre rax+r9/r10/r11,
+    bevarer rdi/rsi/rdx/rcx). Streng-payload @6071 (size=2·len+11) → gc_alloc_var. Gate grøn.
+    Men litmus flagg PÅ KRASJAR framleis (exit 139) — strengar er ikkje nok.
+  - **FULL KARTLEGGING av variabel-allokatorane (disasm av patcha frosne hex):** det finst
+    ~8-10 DISTINKTE variabel-storleik-bump-sites, kvar med ulik size-utrekning + base-
+    register: @1164 (`lea r10,[r9+r11]; add r11,9`), @1947/@2075 (`lea rsi,[rcx+rdx]; add
+    rdi,9`), @5004 (`add rcx,0x40`), @6087 (streng, patcha), @6381 (streng rcx-variant,
+    UPATCHA), **@10314 (`add rsi,rcx; add rsi,9` = DEN EKTE liste-payload-advance** — @10223-
+    sekvensen `mov rcx,rax;nops` gjev berre basen etter bug-fiks; den verkelege advance er
+    her). Kvar treng SITE-SPESIFIKK patch (size-uttrekk + register-bevaring).
+  - **Attståande mot litmus-grønt:** patch dei resterande ~8-9 variabel-allokator-sitene →
+    gc_alloc_var (mest intrikate: @10314 liste). `gc_alloc_var`-infrastrukturen står klar.
     Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
+  - **STATUS: kjerne-GC-en er PROVA (avgrensar minne ende-til-ende, 6M-iter); alle faste
+    16B + éin streng-allokator haustar. Att for SJØLVE litmusen: resterande variabel-
+    allokator-sites (site-spesifikt, ~8-9 stk) — velkartlagt men intrikat.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
