@@ -327,10 +327,25 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     `0x403cdb` djupt i hmac). Ny krasj: binær list/samanlikn-rutine `mov rax,[rdi+8]; mov
     rdx,[rsi+8]; ...` med **rsi=NULL** → ein sha256-del-operasjon produserer null. Neste
     codegen-bug i kjeda (djupare enn list-bygging).
-  - **ÆRLEG STATUS (revidert):** kjerne-GC-en er PROVA (int-basert e2e). **Fase-3-«veggen»
-    var ALDRI GC-en (løyst)** — det er ei KJEDE av codegen-bugar: (1) [FIKSA] bundler droppa
-    list-literalar; (2) [ATT] null NcVal i binær list-op @0x403cdb djupt i hmac; muligens
-    fleire. Litmusen testar GC-en fyrst når heile sha256-kjeda køyrer. Verktøy: gdb-krasj-
-    analyse (`tools/gdb_crash.sh`) gjev eksakt PC+register; objdump-slice for rutine-id.
+  - [x] **(2) FIKSA: `tekst_til_liten`-dispatch.** gdb: hmac krasja @0x403cdb (index_of med
+    NULL 2. arg) — `_hex_verdi` sitt `tekst_til_liten(c)` returnerte NULL. Rot: `er_lower`
+    sjekka `fn_nm == "tekst_til_liten"` men bytecode-namnet er `"builtin.tekst_til_liten"`
+    (prefiks) UTAN ends_with-fallback (ulikt slice/index_of). Fiks: `ends_with(fn_nm,
+    "tekst_til_liten"/"tekst_sma")`, same for er_upper. `4eada36`.
+  - **RESULTAT: ENKELT hmac KØYRER (gdb: rein exit); flagg AV fullfører 200 hmac** (`hmac_n
+    OK`). Så ALLE list-codegen-bugane som blokkerte hmac er FIKSA — hmac køyrer på ekte.
+    Full 10k flagg AV krasjar no på GENUIN exhaustion (~4k hmac × 65KB > 256MB) = den
+    verkelege bump-veggen. **FINALLY testar litmusen GC-en.**
+  - **(3) [ATT] GC-en (flagg PÅ) KRASJAR på ekte lister.** gdb: `[100,200]`/hmac med flagg PÅ
+    krasjar @0x4018ef i (patcha) RT_LIST_NEW — `mov q[rax],3` med **rax=0x58=88** (box-alloc
+    gc_alloc16 returnerte 88 = payload-storleik, ikkje ei blokk-adresse). Fri-lista @0x600028
+    er 0-init (frosen rører han ikkje), gc_alloc_var sin bump-veg skriv berre [bump] — likevel
+    les gc_alloc16 [head]=88. GC-alloc16/alloc_var-INTERAKSJONEN i RT_LIST_NEW sin dobbel-
+    alloc (88B payload via gc_alloc_var → 16B box via gc_alloc16) er buggy. Treng meir gdb-
+    single-step. Kjerne-GC (int-reclaim) PROVA; list-allokator-patchane treng debugging.
+  - **STATUS: codegen-bug-kjeda som blokkerte hmac er FIKSA (litmus køyrer sha256 på ekte,
+    flagg AV fullfører småN). Att for litmus-GRØNT: fiks GC-list-allokator-interaksjonen
+    (flagg PÅ krasjar på list-build). Verktøy: `tools/gdb_crash.sh` (køyr med NORSCODE_GC_ALLOC=1
+    for flagg-PÅ-krasj), objdump-slice, python-disasm.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
