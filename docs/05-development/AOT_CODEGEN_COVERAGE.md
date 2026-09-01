@@ -18,24 +18,26 @@ og køyre ELF-en under Docker `linux/amd64` (flagg AV = paritet, flagg PÅ = `NO
 - **Lister:** literal, `legg_til` (grow), indeksering, lengde.
 - **Maps (ordbok):** literal, `map_set`/`map_get` (grow), streng- og liste-verdiar.
 - **Importar (`bruk`):** verkar — 10k-litmusen importerer `std.sha256`.
+- **Unnatak — `prøv`/`fang`/`kast` (LANDA denne økta):** full kryssfunksjon-handtering
+  (handler-stakk i utvida mmap, TRY_BEGIN/TRY_END/LOAD_EXCEPTION + throw_unwind, setjmp/
+  longjmp-stil). Verifisert: 400 kryssfunksjon-kast fanga, nøsta try, unntaksverdi, rethrow,
+  alt under GC. **Catch-all** (typa `fang (e: Type)` er IKKJE brukt av kompilatoren).
+- **Integrasjon:** mini-uttrykkstolk (rekursiv-nedstig parse + symboltabell-map + unnatak,
+  2000 evalueringar under GC) kompilerer og køyrer korrekt — kompilator-like mønster verkar.
 
-## ❌ Codegen-hull (blokkerer seed-bygging — kompilatoren brukar begge)
+## ⚠️ Ikkje implementert — men IKKJE påkravd for å kompilere kompilatoren
 
-1. **Unnatak — `prøv`/`fang`/`kast` (try/catch/throw).** `native_codegen_v2` handterer
-   `THROW` (→ RT_THROW som skriv+avsluttar) men IKKJE `TRY_BEGIN`/`TRY_END`/`LOAD_EXCEPTION`
-   → unnatak vert ALDRI fanga, dei propagerer til topp og avsluttar. Krev: global handler-
-   stakk i mappa scratch-minne (utvid ELF-mmap/HEAP_SZ), TRY_BEGIN push {catch_addr, rsp,
-   rbp}, TRY_END pop, RT_THROW → unwind (restore rsp/rbp, hopp til catch, sett last_exception),
-   LOAD_EXCEPTION push. Pluss FINALLY_PUSH/RUN/END + type-matching for full VM-paritet
-   (sjå `selfhost/vm.no` linje ~6298 for kanon-semantikk). STOR, kryssfunksjon-unwinding.
-
-2. **Flyttal — `desimaltall` (float).** INGEN SSE/float-støtte i codegen (ingen movsd/xmm/
-   cvtsi). Float-aritmetikk gir feil resultat. Krev: NcVal-float-representasjon, float-literal
-   (PUSH_CONST), SSE +-*/ og samanlikningar, int↔float-konvertering. STOR, frå grunnen.
+1. **`endeleg` (finally).** Ikkje implementert (FINALLY_PUSH/RUN/END). Men kompilatoren
+   brukar det IKKJE (einaste `endeleg` i kjelda er inne i ein feilmeldingsstreng, parser.no:1037).
+2. **Flyttal-aritmetikk — `desimaltall` (float).** Ingen SSE/float-støtte. Men kompilatoren
+   gjer INGEN float-aritmetikk: `desimaltall` er berre eit typenamn (semantic.no) + JSON-
+   float-parsing (json.no) som ikkje vert køyrt under .no-kompilering. Trengst berre om ein
+   vil køyre float-tunge brukarprogram native.
 
 ## Sekvens vidare
 
-GC-veggen er klarert. Neste: implementer (1) unnatak og (2) flyttal (kvar sitt fokuserte
-delprosjekt, verifiser mot VM-paritet), deretter prøv å AOT-kompilere ein ekte kompilator-
-modul og iterer på gjenverande hull, gjer GC standard av flagget, og byt seed-bygging
-C→sjølvhosta (Fase 4: fjern gjenverande C).
+GC-veggen OG unnatak-hullet er klarert. Codegen ser no funksjonelt komplett ut for
+kompilator-like kode (verifisert med mini-tolk). Neste: prøv å AOT-kompilere ein EKTE
+kompilator-modul / heile kompilatoren via native_codegen_v2 og iterer på evt. gjenverande
+hull; gjer GC standard av flagget; byt seed-bygging C→sjølvhosta (Fase 4: fjern gjenverande C).
+Valfritt seinare: finally + float for full brukarprogram-dekning.
