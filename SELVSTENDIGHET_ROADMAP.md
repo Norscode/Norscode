@@ -24,11 +24,18 @@ frå den grøne baselinen i staden.
 - **Fase 2 — Fjern C-bibliotek, kvart gated.** sqlite→NorsDB (pure), Metal-GPU-
   C-runtime, legacy-C-backend. For kvar: bygg+verifiser pure erstatning grøn
   FØRST, deretter fjern C-en.
-- **Fase 3 — Sjølvhosta seed-bygging (GC-en).** Fullfør sjølvhosta native codegen:
-  legg inn GC (validert fundament, sjå AOT_GC_DESIGN nedanfor) + tett codegen-hull
-  (crypto-gap-rute, JIT, minne-effektiv batched Mach-O mot OOM). Litmus: sjølvhosta
-  codegen byggjer ein seed som passerer HEILE grøne suita (inkl. 10k-hmac). Først
-  då: bytt seed-bygging C→sjølvhosta, fjern C-bootstrap.
+- **Fase 3 — Sjølvhosta seed-bygging (GC-en). ✅ GC-KJERNEN LANDA (2026-09-01).**
+  Self-hosta mark-sweep-GC (safepoint-driven, `NORSCODE_GC_ALLOC=1`) i AOT-runtime
+  (`selfhost/native_execution/native_codegen_v2.no`) held **10k-hmac-litmusen** innan
+  avgrensa minne (exit 0, var SIGSEGV = veggen); 300 hmac == kanon mac; paritet flagg
+  AV urørt. Verifisert på ekte native Linux x86-64 i CI (`gc-litmus.yml`, flagg-PÅ-steg
+  no GATING). 9 codegen-korrektheitsbugs fiksa (kontrollblokk-bounds, objektstorleikar
+  88B/cap*8, register-save i safepoint-stub) — sjå commit-historikk + AOT_GC_DESIGN.
+  GJENSTÅR for full Fase 3: tett resten av codegen-hull (crypto-gap-rute, JIT, minne-
+  effektiv batched Mach-O mot OOM) + gjer GC standard (av flagg) slik at sjølvhosta
+  codegen byggjer ein seed som passerer HEILE grøne suita. Kjend urelatert side-bug:
+  `tekst(heiltall)` renderar tom streng i native codegen (verdiane rette). Først når
+  heile suita er grøn: bytt seed-bygging C→sjølvhosta, fjern C-bootstrap.
 - **Fase 4 — Siste C-fjerning + attestering.** Fjern gjenverande C; selvstendig-
   hets-gatane (L1–L6, active-surface) grøne med null C.
 
