@@ -303,10 +303,21 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     sha256, ikkje i mi enkle probe). **Konsekvens: litmusen er blokkert av ORTOGONALE list-
     codegen-gap (list-literal/legg_til), ikkje berre av allokator-reclaim.** gc_alloc_var_r8-
     korrektheita kan difor IKKJE validerast via legg_til-probar (dei krasjar sjølvstendig).
-  - **ÆRLEG STATUS: kjerne-GC-en er PROVA (int-basert e2e, 6M-iter — rein, utan lister); all
-    allokator-infra bygd (16B/streng/RT_LIST_NEW/APP + gc_alloc_var[_r8] + patch-verktøy).
-    SJØLVE 10k-hmac-litmusen er blokkert av TO ortogonale ting: (a) resterande allokator-
-    reclaim (velkartlagt), og (b) PRE-EKSISTERANDE list-codegen-bugar (list-literal/legg_til)
-    som må fiksast fyrst/parallelt. (b) er ein eigen workstream, ikkje GC-arbeid.**
+  - **STORT AVGJERANDE FUNN — LITMUSEN VAR FEILDIAGNOSTISERT.** Systematiske minimal-probar
+    (lc_*) viser: **eit ENKELT hmac-kall krasjar (exit 139)** — litmusen sprenger IKKJE heapen
+    (banneret «bump-allokator sprenger 2GB» er FEIL); han krasjar UMIDDELBART på fyrste hmac
+    pga. øydelagde list-operasjonar i AOT-codegen, lenge før allokering blir eit problem.
+    Konkret lokalisert (inkrementell skriv-trace):
+    - **`legg_til` KRASJAR** (RT_LIST_APP kalla frå codegen; verkar inne i RT_BUILD_LIST_REV
+      → anten produserer RT_BUILD_LIST_REV malforma liste, eller kontekst-spesifikt fault).
+    - **`lengde` KRASJAR** (RT_LENGDE).
+    - **literal-indeks gjev FEIL VERDI** (`[10,20,30]; w[1]` != 20; RT_INDEX_GET/RT_BUILD_LIST_REV-layout).
+    Statisk inspeksjon av RT_LIST_APP/RT_LIST_NEW/RT_LIST_GET viser KORREKT logikk → rot-
+    årsaka krev RUNTIME single-step (gdb på Linux-ELF), som CI ikkje gjev effektivt.
+  - **ÆRLEG STATUS (revidert):** kjerne-GC-en er PROVA (int-basert e2e, 6M-iter — rein). Men
+    **10k-hmac-litmusen testar i praksis ALDRI GC-en** — han døyr på list-codegen-bugane fyrst.
+    Så Fase-3-«veggen» var ikkje GC-en (løyst), men **grunnleggjande list-codegen-bugar
+    (legg_til/lengde/index)** i den frosne runtime-en. Desse er den REELLE blokkeringa og
+    krev runtime-debugging (gdb single-step), ikkje meir statisk analyse + CI-gjetting.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
