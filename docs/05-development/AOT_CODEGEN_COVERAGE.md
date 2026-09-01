@@ -34,7 +34,24 @@ og køyre ELF-en under Docker `linux/amd64` (flagg AV = paritet, flagg PÅ = `NO
    float-parsing (json.no) som ikkje vert køyrt under .no-kompilering. Trengst berre om ein
    vil køyre float-tunge brukarprogram native.
 
-## ❌ NESTE BLOKKAR (for seed-bygging): frosne JSON-rutinar krasjar på lister/map
+## ✅ JSON-serialisering LANDA (var seed-bygging-blokkar)
+
+`builtin.json_stringify` (json_skriv) og `builtin.json_parse_raw` verkar no korrekt på
+LISTER og MAP (inkl. djupt nøsta NCB-like `{"namn":..,"kode":[["PUSH_CONST",42],..]}`),
+flagg AV+PÅ. Fiksa: (1) reimplementerte json_list_case/json_map_case som emitterte rekursive
+atom; (2) LATENT pat_rcx-alloc-bug — patch_var_allocators gav buffer i rax for BÅDE pat_rax
+og pat_rcx, men pat_rcx-sites (json_string_case) brukar rcx=buffer + rax=kjelde → eigen
+repl_rcx (mov rcx,rax + mov rax,[rdi+8]). Same fiks løyste OGSÅ json_parse_raw under GC.
+Dette låser opp NCB-serialiseringa i seed-pipeline (nc_main json_skriv/json_parse).
+
+## ⚠️ Kjent separat codegen-bug (IKKJE seed-blokkar): selfhost.json.json_les
+
+`selfhost/json.no` sin EIGNE Norscode-parser (`json_les`/`json_verdi`) krasjar i native
+codegen (BÅDE flagg AV+PÅ; VM OK) — smal bug i kompilering av den modulen (spesifikk builtin/
+mønster). Seed-pipeline brukar builtin.json_parse_raw (verkar), ikkje json_les, så ikkje
+blokkerande. Verd å isolere seinare (kan avdekke ein codegen-detalj andre modular òg treff).
+
+## (historikk) opphavleg frosen JSON-bug
 
 `builtin.json_stringify` (json_skriv) og `json_parse`/`json_parse_raw` krasjar i native
 codegen når input er ei LISTE eller MAP (skalar-verdiar verkar). Rota: dei frosne C-avleidde
