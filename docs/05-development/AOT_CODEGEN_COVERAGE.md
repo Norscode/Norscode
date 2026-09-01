@@ -49,13 +49,14 @@ Dette låser opp NCB-serialiseringa i seed-pipeline (nc_main json_skriv/json_par
 Etter hovudblokkarane er tetta dukkar det opp smale frosne-runtime-edge-cases når codegen
 kompilerer meir variert kode. Kjende:
 
-1. **`builtin.slice(liste, i, j)` + `legg_til`** krasjar (native flagg AV+PÅ; VM OK). Minimal
-   repro: `la t = builtin.slice([1,2,3], 0, 0); legg_til(t, 99)` → segfault i RT_LIST_APP
-   (0x401940, `mov [rdx+rcx*8],rsi` med dårleg elem_ptr). RT_LIST_SLICE lagar ei liste med
-   struktur RT_LIST_APP ikkje kan appende til. Dette er rota til at `selfhost.json.json_les`
-   krasjar (json_tom_liste = `slice(split("a b"," "),0,0)`). Seed-pipeline brukar builtin
-   json_parse_raw (verkar), ikkje json_les. Fiks: patch/reimplementer RT_LIST_SLICE så tom/
-   sliced liste har gyldig elem_ptr+cap for seinare append.
+1. **`builtin.slice(liste)` — FIKSA.** Rota var IKKJE RT_LIST_SLICE, men at slice-atomet
+   dispatcha ALLTID til streng-slice → slice(liste) gav STRENG (type=tekst) → legg_til krasja.
+   Fiks: type-sjekk ved slice-inngangen (cmp [rdi],3 → tail-call RT_LIST_SLICE @0x401f10).
+   Verifisert flagg AV+PÅ. Løyste OGSÅ json_les-KRASJEN.
+2. **`selfhost.json.json_les` tal-parsing** (låg prioritet, json.no-spesifikk, IKKJE seed-
+   blokkar): json_les parsar no list-struktur rett (len=3) men element-tal kjem ut som
+   `boolsk` i staden for `heltall` (VM: heltall). Tal→verdi-konvertering i json.no si
+   json_verdi gjev feil type native. Seed brukar builtin json_parse_raw (verkar).
 
 Mønster: dei fleste språktrekk verkar isolert, men spesifikke KOMBINASJONAR (slice→append,
 json list/map) treff akkumulerte C-avleidde frosne-runtime-bugs. Full seed-bygging krev å
