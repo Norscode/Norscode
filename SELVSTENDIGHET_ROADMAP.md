@@ -281,11 +281,22 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     UPATCHA), **@10314 (`add rsi,rcx; add rsi,9` = DEN EKTE liste-payload-advance** — @10223-
     sekvensen `mov rcx,rax;nops` gjev berre basen etter bug-fiks; den verkelege advance er
     her). Kvar treng SITE-SPESIFIKK patch (size-uttrekk + register-bevaring).
-  - **Attståande mot litmus-grønt:** patch dei resterande ~8-9 variabel-allokator-sitene →
-    gc_alloc_var (mest intrikate: @10314 liste). `gc_alloc_var`-infrastrukturen står klar.
-    Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac (den store raud→grøn).
-  - **STATUS: kjerne-GC-en er PROVA (avgrensar minne ende-til-ende, 6M-iter); alle faste
-    16B + éin streng-allokator haustar. Att for SJØLVE litmusen: resterande variabel-
-    allokator-sites (site-spesifikt, ~8-9 stk) — velkartlagt men intrikat.**
+  - [x] **(3b) fleire variabel-allokatorar patcha:** begge streng-variantar (@6071 rax +
+    @6381 rcx), `RT_LIST_NEW` (fast 88B payload → gc_alloc_var), `RT_LIST_APP` grow (variabel
+    cap*16 → `gc_alloc_var_r8` som returnerer i R8 så gamal payload-struct i rax vert bevart).
+    Gate + e2e grøne. Men litmus KRASJAR framleis.
+  - **AVGJERANDE FUNN — eg patcha feil allokatorar for litmusen:** (1) `legg_til`-append er
+    ein SJØLVSTENDIG AOT-codegen-gap (krasjar flagg AV òg) → RT_LIST_APP-grow-testen ugyldig;
+    (2) **litmusen byggjer lister via LITERAL (`[11,22,..]` → `RT_BUILD_LIST_REV`), IKKJE
+    RT_LIST_APP** — så grow-patchen råkar ikkje litmusen. hmac allokerer via RT_BUILD_LIST_REV
+    + sha256-interne strukturar. **Neste steg må IDENTIFISERE litmusen sine FAKTISKE alloke-
+    ringssites** (profilering/analyse av hmac_sha256_bytes + RT_BUILD_LIST_REV), ikkje gjette.
+  - **Attståande mot litmus-grønt (velkartlagt, djup):** finn litmusen sine reelle allokerings-
+    sites (RT_BUILD_LIST_REV @9936 + sha256-interne) → gc_alloc_var/-r8. Verktøy klare: python-
+    disasm av patcha hex, `gc_alloc_var`/`gc_alloc_var_r8`-infra, `patch_*`-funksjonar.
+    Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac.
+  - **STATUS: kjerne-GC-en er PROVA (avgrensar minne ende-til-ende, 6M-iter); 16B + strengar +
+    RT_LIST_NEW/APP haustar. Litmusen brukar ANDRE allokatorar (RT_BUILD_LIST_REV + sha256-
+    interne) som må identifiserast og patchast — djup, systematisk, velkartlagt fortsetjing.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
