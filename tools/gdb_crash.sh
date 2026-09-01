@@ -10,7 +10,7 @@ DR=".,/tmp,/private/tmp,build,selfhost,bootstrap,tests,std,$ROOT"
 env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_VM_REQUESTED_POLICY=1 \
     NORSCODE_VM_REQUESTED_CAPABILITIES="$CAPS" NORSCODE_VM_CAPABILITIES="$CAPS" \
     NORSCODE_VM_REQUESTED_DISK_ROOT="$DR" NORSCODE_VM_DISK_ROOT="$DR" NORSCODE_ROOT="$ROOT" \
-    ./bin/nc bundle --output "$OUT/$STEM.ncb.json" "__main__=$PROBE" >/dev/null
+    ./bin/nc compile "$PROBE" "$OUT/$STEM.ncb.json" >/dev/null
 ./bin/nc ncb-to-elf "$OUT/$STEM.ncb.json" "$OUT/$STEM.elf"
 chmod +x "$OUT/$STEM.elf"
 which gdb >/dev/null 2>&1 || sudo apt-get install -y gdb >/dev/null 2>&1 || true
