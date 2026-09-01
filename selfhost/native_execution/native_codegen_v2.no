@@ -17,7 +17,7 @@ funksjon HEAP_VA()   { returner 6291456 }
 // Den breie sjølvhost-VM-en held framleis alle AOT-objekt levande mellom
 // safepoint-ar. 256 MiB gjev single-binary-prototypen rom til full init medan
 // tracing/komprimerande native GC blir ferdigstilt.
-funksjon HEAP_SZ()   { returner 268435456 }
+funksjon HEAP_SZ()   { returner 269484032 } // 256MB heap/scratch + 1MB handler-region [0x10600000,0x10700000)
 funksjon HEAP_CONTROLSZ() { returner 64 }
 funksjon GC_SAFEPOINT_OFFSET() { returner 32 }
 funksjon ENVP_OFFSET() { returner 8 }
@@ -1283,6 +1283,27 @@ funksjon bygg_runtime_v2() -> liste {
     copy(bytes, [0x31, 0xF6])                       // xor esi,esi
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
     copy(bytes, [0x48, 0x83, 0xC4, 0x08, 0xC3])
+
+    // ── Unnatak: throw_unwind(rdi=unntak-NcVal) — unwind til næraste handler ──────
+    // Handler-stakk i utvida mmap-region: teljar @0x106F0000 (0-init av loader), last_exc
+    // @0x106F0008, frames @0x10600000 (32B: [catch_va][saved_rsp][saved_rbp][pad]).
+    // TRY_BEGIN pushar, TRY_END poppar. Kast → finn TOPP-handler (catch-all), sett last_exc,
+    // restore rsp/rbp, hopp til catch. Handler vert IKKJE poppa her — catch sin TRY_END gjer
+    // det (som VM-en, vm.no:6451). Ingen handler → jmp RT_THROW (skriv melding + avslutt).
+    atomics["throw_unwind"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000] (count)
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    copy(bytes, [0x74, 0x1F])                      // jz .no_handler (+31)
+    copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax (index = count-1)
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
+    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x60, 0x10]) // add rax,0x10600000 (frame)
+    copy(bytes, [0x48, 0x89, 0x3C, 0x25, 0x08, 0x00, 0x6F, 0x10]) // mov [0x106F0008],rdi (last_exc)
+    copy(bytes, [0x48, 0x8B, 0x68, 0x10])          // mov rbp,[rax+16] (restore rbp)
+    copy(bytes, [0x48, 0x8B, 0x60, 0x08])          // mov rsp,[rax+8] (restore rsp)
+    copy(bytes, [0xFF, 0x20])                      // jmp [rax] (catch_va)
+    copy(bytes, [0x48, 0xB8])                      // .no_handler: mov rax, RT_THROW
+    u64(bytes, RT_THROW())
+    copy(bytes, [0xFF, 0xE0])                      // jmp rax (skriv + avslutt)
 
     atomics["starts_with"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -2646,7 +2667,37 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va, gc_safepoint_va,
 
         // ─── THROW ────────────────────────────────────────────────────────────
         ellers hvis op == "THROW"
-            emit_rt_call_1(buf, RT_THROW(), eiga_va)
+            emit_rt_call_1(buf, atomic_vas["throw_unwind"], eiga_va)
+
+        // ─── TRY_BEGIN (push handler {catch_va, rsp, rbp}) ──────────────────────
+        ellers hvis op == "TRY_BEGIN"
+            la catch_lbl3: tekst = tekst(instr[1])
+            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000] (count)
+            copy(buf, [0x48, 0x89, 0xC1])                // mov rcx,rax
+            copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
+            copy(buf, [0x48, 0x05, 0x00, 0x00, 0x60, 0x10]) // add rax,0x10600000 (frame)
+            copy(buf, [0x49, 0xB8])                       // mov r8, imm64 (catch_va — abs64-patch)
+            u64(buf, 0)
+            legg_til(patches, {"type": "abs64", "pos": lengde(buf) - 8, "lbl": catch_lbl3})
+            copy(buf, [0x4C, 0x89, 0x00])                // mov [rax],r8 (catch_va)
+            copy(buf, [0x48, 0x89, 0x60, 0x08])          // mov [rax+8],rsp
+            copy(buf, [0x48, 0x89, 0x68, 0x10])          // mov [rax+16],rbp
+            copy(buf, [0x48, 0xFF, 0xC1])                // inc rcx
+            copy(buf, [0x48, 0x89, 0x0C, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov [0x106F0000],rcx (count++)
+
+        // ─── TRY_END (pop handler) ──────────────────────────────────────────────
+        ellers hvis op == "TRY_END"
+            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000]
+            copy(buf, [0x48, 0x85, 0xC0])                // test rax,rax
+            copy(buf, [0x74, 0x0B])                      // jz +11
+            copy(buf, [0x48, 0xFF, 0xC8])                // dec rax
+            copy(buf, [0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov [0x106F0000],rax
+
+        // ─── LOAD_EXCEPTION (push last_exception) ───────────────────────────────
+        ellers hvis op == "LOAD_EXCEPTION"
+            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x08, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0008]
+            legg_til(buf, 0x50)                          // push rax
+            legg_til(tstack, "any")
 
         slutt
         ci = ci + 1
@@ -2665,7 +2716,17 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va, gc_safepoint_va,
         la target: heltall = 0
         la lbl_nm = p["lbl"]
         hvis finnes_nøkkel(lbl_kart, lbl_nm) { target = lbl_kart[lbl_nm] }
-        patch_jump(buf, p["pos"], target)
+        hvis p["type"] == "abs64"
+            // absolutt catch-VA = funksjonens eiga_va + etikett-offset, skriv 8 byte LE
+            la abs_va: heltall = eiga_va + target
+            la bi: heltall = 0
+            mens bi < 8
+                buf[p["pos"] + bi] = (abs_va >> (bi * 8)) & 255
+                bi = bi + 1
+            slutt
+        ellers
+            patch_jump(buf, p["pos"], target)
+        slutt
         pi2 = pi2 + 1
     slutt
 
