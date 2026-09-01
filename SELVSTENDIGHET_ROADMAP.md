@@ -295,8 +295,18 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     sites (RT_BUILD_LIST_REV @9936 + sha256-interne) → gc_alloc_var/-r8. Verktøy klare: python-
     disasm av patcha hex, `gc_alloc_var`/`gc_alloc_var_r8`-infra, `patch_*`-funksjonar.
     Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac.
-  - **STATUS: kjerne-GC-en er PROVA (avgrensar minne ende-til-ende, 6M-iter); 16B + strengar +
-    RT_LIST_NEW/APP haustar. Litmusen brukar ANDRE allokatorar (RT_BUILD_LIST_REV + sha256-
-    interne) som må identifiserast og patchast — djup, systematisk, velkartlagt fortsetjing.**
+  - **NYTT AVGJERANDE FUNN — litmus-blokkeringa er DJUPARE enn allokator-reclaim:** eit rein
+    `legg_til`-bygd 60-elem liste-probe KRASJAR flagg AV OG PÅ (exit 139) — dvs. `legg_til`/
+    tom-liste-literal `[]` har ein PRE-EKSISTERANDE AOT-codegen-bug UAVHENGIG av GC-en (jf.
+    memory: list-literal rsp-feiljustering). MEN sha256 brukar `legg_til` (message-schedule
+    w=64) og litmusen KØYRER til exhaustion → bug-en er kontekst-spesifikk (verkar nesta i
+    sha256, ikkje i mi enkle probe). **Konsekvens: litmusen er blokkert av ORTOGONALE list-
+    codegen-gap (list-literal/legg_til), ikkje berre av allokator-reclaim.** gc_alloc_var_r8-
+    korrektheita kan difor IKKJE validerast via legg_til-probar (dei krasjar sjølvstendig).
+  - **ÆRLEG STATUS: kjerne-GC-en er PROVA (int-basert e2e, 6M-iter — rein, utan lister); all
+    allokator-infra bygd (16B/streng/RT_LIST_NEW/APP + gc_alloc_var[_r8] + patch-verktøy).
+    SJØLVE 10k-hmac-litmusen er blokkert av TO ortogonale ting: (a) resterande allokator-
+    reclaim (velkartlagt), og (b) PRE-EKSISTERANDE list-codegen-bugar (list-literal/legg_til)
+    som må fiksast fyrst/parallelt. (b) er ein eigen workstream, ikkje GC-arbeid.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
