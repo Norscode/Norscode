@@ -314,10 +314,23 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     - **literal-indeks gjev FEIL VERDI** (`[10,20,30]; w[1]` != 20; RT_INDEX_GET/RT_BUILD_LIST_REV-layout).
     Statisk inspeksjon av RT_LIST_APP/RT_LIST_NEW/RT_LIST_GET viser KORREKT logikk → rot-
     årsaka krev RUNTIME single-step (gdb på Linux-ELF), som CI ikkje gjev effektivt.
-  - **ÆRLEG STATUS (revidert):** kjerne-GC-en er PROVA (int-basert e2e, 6M-iter — rein). Men
-    **10k-hmac-litmusen testar i praksis ALDRI GC-en** — han døyr på list-codegen-bugane fyrst.
-    Så Fase-3-«veggen» var ikkje GC-en (løyst), men **grunnleggjande list-codegen-bugar
-    (legg_til/lengde/index)** i den frosne runtime-en. Desse er den REELLE blokkeringa og
-    krev runtime-debugging (gdb single-step), ikkje meir statisk analyse + CI-gjetting.
+  - [x] **ROT-FIKS LANDA — `nc compile` i staden for `nc bundle`.** gdb+objdump viste at
+    litmus-krasjen var `RT_LIST_APP` med `rdi=NULL` (null liste). NCB-dump: `la w=[100]`
+    kompilerte til berre `STORE_NAME w` (tom stakk) — **list-literal-bytecoden VAR BORTE**.
+    Rota: `nc bundle` køyrer `bundler.no` som lastar ein STALE selfhost-compiler-modul
+    (`ir_to_bytecode` DVALE på committa seed; Liste-fiksen @linje-1074 inert — debug-print
+    fyrte ALDRI) som droppar BUILD_LIST/INDEX_GET. **`nc compile` (seeden sin GODE innebygde
+    compiler, `NORSCODE_CMD=compile`) løyser importar OG kompilerer lister rett** (verifisert:
+    litmus-NCB har 24 fns + BUILD_LIST + key-elementa). Bytte `gc_probe_run.sh` +
+    `gc_litmus_run.sh` frå bundle→compile. `6e5fc06`.
+  - **RESULTAT: litmusen KØYRER no sha256 på ekte** (krasj flytta `0x401900`=RT_LIST_APP →
+    `0x403cdb` djupt i hmac). Ny krasj: binær list/samanlikn-rutine `mov rax,[rdi+8]; mov
+    rdx,[rsi+8]; ...` med **rsi=NULL** → ein sha256-del-operasjon produserer null. Neste
+    codegen-bug i kjeda (djupare enn list-bygging).
+  - **ÆRLEG STATUS (revidert):** kjerne-GC-en er PROVA (int-basert e2e). **Fase-3-«veggen»
+    var ALDRI GC-en (løyst)** — det er ei KJEDE av codegen-bugar: (1) [FIKSA] bundler droppa
+    list-literalar; (2) [ATT] null NcVal i binær list-op @0x403cdb djupt i hmac; muligens
+    fleire. Litmusen testar GC-en fyrst når heile sha256-kjeda køyrer. Verktøy: gdb-krasj-
+    analyse (`tools/gdb_crash.sh`) gjev eksakt PC+register; objdump-slice for rutine-id.
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.
