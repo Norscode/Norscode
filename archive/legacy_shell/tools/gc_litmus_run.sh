@@ -7,7 +7,7 @@
 # bundla program — lett å byggje; tungt berre å KØYRE (garbage-rate ~65 KB/iter).
 set -eu
 
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 cd "$ROOT"
 OUT="$ROOT/build/gc-litmus"
 mkdir -p "$OUT"

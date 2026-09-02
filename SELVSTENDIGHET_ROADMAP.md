@@ -146,7 +146,7 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     GC-en for å passere litmus.
   - [x] **Validerings-loop ETABLERT:** `tests/fixtures/gc_litmus_hmac.no` (10000
     hmac_sha256_bytes) → bundla → `ncb-to-elf` (self-hosted native_codegen_v2) →
-    native ELF → køyr. `tools/gc_litmus_run.sh` + EIGA workflow `gc-litmus.yml`
+    native ELF → køyr. `archive/legacy_shell/tools/gc_litmus_run.sh` + EIGA workflow `gc-litmus.yml`
     (non-gating, rører ikkje Selvstendighet-porten). Byggjer lokalt (71 KB x86-64
     ELF); køyrer på Linux CI og REPRODUSERER veggen (SIGSEGV) = raud→grøn-mål (`ad293d2`).
   - [x] **F1 (råminne-primitiv) landa + CI-validert:** raw_load64/raw_store64/
@@ -352,7 +352,7 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     single-step. Kjerne-GC (int-reclaim) PROVA; list-allokator-patchane treng debugging.
   - **STATUS: codegen-bug-kjeda som blokkerte hmac er FIKSA (litmus køyrer sha256 på ekte,
     flagg AV fullfører småN). Att for litmus-GRØNT: fiks GC-list-allokator-interaksjonen
-    (flagg PÅ krasjar på list-build). Verktøy: `tools/gdb_crash.sh` (køyr med NORSCODE_GC_ALLOC=1
+    (flagg PÅ krasjar på list-build). Verktøy: `archive/legacy_shell/tools/gdb_crash.sh` (køyr med NORSCODE_GC_ALLOC=1
     for flagg-PÅ-krasj), objdump-slice, python-disasm.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.

@@ -1,14 +1,14 @@
 #!/usr/bin/env sh
 # Generisk GC-probe-køyrar (Fase 3): byggjer ein probe-.no til self-hosted native
 # ELF via native_codegen_v2 (ncb-to-elf) og køyrer han. Exit 0 = proben verkar.
-# Bruk: sh tools/gc_probe_run.sh <probe.no> [label]
+# Bruk: sh archive/legacy_shell/tools/gc_probe_run.sh <probe.no> [label]
 # Kvar GC-fase (F1 primitiv, F2 obj_addr/layout, …) får sin probe og blir eit
 # GATING steg i gc-litmus.yml — validerer GC-codegen mot ekte native maskinkode.
 set -eu
 
 PROBE="${1:?bruk: gc_probe_run.sh <probe.no> [label]}"
 LABEL="${2:-GC-probe}"
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 cd "$ROOT"
 OUT="$ROOT/build/gc-litmus"
 mkdir -p "$OUT"

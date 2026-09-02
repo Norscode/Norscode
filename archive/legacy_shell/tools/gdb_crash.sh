@@ -2,7 +2,7 @@
 # Byggjer ein probe til ELF og køyrer under gdb for å fange krasj-PC + register.
 set -eu
 PROBE="${1:?bruk: gdb_crash.sh <probe.no>}"
-ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"; cd "$ROOT"
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"; cd "$ROOT"
 OUT="$ROOT/build/gc-litmus"; mkdir -p "$OUT"
 STEM="$(basename "$PROBE" .no)"
 CAPS="env.read,env.write,disk.read,disk.write,process.exec"

@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-PROBE="${1:?}"; ADDR="${2:-0x600000}"; ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"; cd "$ROOT"
+PROBE="${1:?}"; ADDR="${2:-0x600000}"; ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"; cd "$ROOT"
 OUT="$ROOT/build/gc-litmus"; mkdir -p "$OUT"; STEM="$(basename "$PROBE" .no)"
 CAPS="env.read,env.write,disk.read,disk.write,process.exec"
 DR=".,/tmp,/private/tmp,build,selfhost,bootstrap,tests,std,$ROOT"
