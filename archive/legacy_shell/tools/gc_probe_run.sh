@@ -16,20 +16,31 @@ STEM="$(basename "$PROBE" .no)"
 
 CAPS="env.read,env.write,disk.read,disk.write,process.exec"
 DR=".,/tmp,/private/tmp,build,selfhost,bootstrap,tests,std,$ROOT"
+# Driv den native binæren DIREKTE via miljø (NORSCODE_CMD/FILE …), slik den gamle
+# shell-wrapperen gjorde. bin/nc er (som på main) ein symlink til dist/norscode_native,
+# og den innbakte CLI-en sin argv-handtering varierer mellom seed-versjonar (Linux-
+# stage0-seeden køyrde selftest på `run tools/ncb_to_elf.no`). Miljø-vegen er stabil.
+NATIVE="${NORSCODE_NATIVE_BIN:-$ROOT/dist/norscode_native}"
 
-# VIKTIG: bruk `nc compile` (seeden sin GODE innebygde compiler), IKKJE `nc bundle`
+# VIKTIG: bruk `compile` (seeden sin GODE innebygde compiler), IKKJE `bundle`
 # (som lastar ein STALE selfhost-compiler-modul som DROPPAR list-literal-bytecode →
-# null-lister → krasj). `nc compile` løyser importar OG kompilerer BUILD_LIST/INDEX_GET rett.
+# null-lister → krasj). `compile` løyser importar OG kompilerer BUILD_LIST/INDEX_GET rett.
 echo "=== [$LABEL] 1) compile $PROBE → NCB (nc compile, ikkje bundle) ==="
 env NORSCODE_ENABLE_EXEC_PROSESS=1 \
     NORSCODE_VM_REQUESTED_POLICY=1 \
     NORSCODE_VM_REQUESTED_CAPABILITIES="$CAPS" NORSCODE_VM_CAPABILITIES="$CAPS" \
     NORSCODE_VM_REQUESTED_DISK_ROOT="$DR" NORSCODE_VM_DISK_ROOT="$DR" \
     NORSCODE_ROOT="$ROOT" \
-    ./bin/nc compile "$PROBE" "$OUT/$STEM.ncb.json" >/dev/null
+    NORSCODE_CMD=compile NORSCODE_FILE="$ROOT/$PROBE" NORSCODE_OUTPUT="$OUT/$STEM.ncb.json" \
+    "$NATIVE" >/dev/null
 
 echo "=== [$LABEL] 2) ncb-to-elf (self-hosted native_codegen_v2) ==="
-env NORSCODE_NCB_TO_ELF_INPUT="$OUT/$STEM.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/$STEM.elf" NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/ncb_to_elf.no
+env NORSCODE_ENABLE_EXEC_PROSESS=1 \
+    NORSCODE_VM_CAPABILITIES="$CAPS" NORSCODE_VM_DISK_ROOT="$DR" NORSCODE_ROOT="$ROOT" \
+    NORSCODE_NATIVE_BIN="$NATIVE" \
+    NORSCODE_NCB_TO_ELF_INPUT="$OUT/$STEM.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/$STEM.elf" \
+    NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/ncb_to_elf.no" \
+    "$NATIVE"
 chmod +x "$OUT/$STEM.elf"
 
 echo "=== [$LABEL] 3) køyr probe ==="

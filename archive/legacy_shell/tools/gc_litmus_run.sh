@@ -14,6 +14,7 @@ mkdir -p "$OUT"
 
 CAPS="env.read,env.write,disk.read,disk.write,process.exec"
 DR=".,/tmp,/private/tmp,build,selfhost,bootstrap,tests,std,$ROOT"
+NATIVE="${NORSCODE_NATIVE_BIN:-$ROOT/dist/norscode_native}"  # driv native direkte via miljø (seed-uavhengig)
 
 # VIKTIG: `nc compile` (seeden sin GODE compiler) løyser std.sha256-importen OG kompilerer
 # list-literal-bytecode (BUILD_LIST/INDEX_GET) rett. `nc bundle` brukte ein stale selfhost-
@@ -25,10 +26,11 @@ env NORSCODE_ENABLE_EXEC_PROSESS=1 \
     NORSCODE_VM_REQUESTED_CAPABILITIES="$CAPS" NORSCODE_VM_CAPABILITIES="$CAPS" \
     NORSCODE_VM_REQUESTED_DISK_ROOT="$DR" NORSCODE_VM_DISK_ROOT="$DR" \
     NORSCODE_ROOT="$ROOT" \
-    ./bin/nc compile tests/fixtures/gc_litmus_hmac.no "$OUT/litmus.ncb.json" >/dev/null
+    NORSCODE_CMD=compile NORSCODE_FILE="$ROOT/tests/fixtures/gc_litmus_hmac.no" NORSCODE_OUTPUT="$OUT/litmus.ncb.json" \
+    "$NATIVE" >/dev/null
 
 echo "=== 2) ncb-to-elf (self-hosted native_codegen_v2 AOT-runtime) ==="
-env NORSCODE_NCB_TO_ELF_INPUT="$OUT/litmus.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/litmus.elf" NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/ncb_to_elf.no
+env NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_VM_CAPABILITIES="$CAPS" NORSCODE_VM_DISK_ROOT="$DR" NORSCODE_ROOT="$ROOT" NORSCODE_NATIVE_BIN="$NATIVE" NORSCODE_NCB_TO_ELF_INPUT="$OUT/litmus.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/litmus.elf" NORSCODE_CMD=run NORSCODE_FILE="$ROOT/tools/ncb_to_elf.no" "$NATIVE"
 chmod +x "$OUT/litmus.elf"
 
 echo "=== 3) køyr GC-litmus (10000 hmac_sha256_bytes) ==="
