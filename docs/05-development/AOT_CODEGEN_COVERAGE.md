@@ -83,11 +83,32 @@ som nye emitterte atom (rekursiv streng-bygging via RT_CONCAT + sjølv-rekursjon
 rute til ein Norscode-implementasjon (native_codegen_v2 kompilerer alt rekursjon+map+streng
 korrekt, jf. mini-tolk). STOR, men veldefinert.
 
+## ⚠️ Main-flettings-gotcha (LØYST): cache-optimalisering vs GC-patchgate
+
+Ved fletting av `main` (språkparitet #182) inn i GC-greina segfaulta 10k-litmusen (og hmac
+for N > ~300) under GC, sjølv om paritet (flagg AV) var grøn. Rot: main sin cache-optimalisering
+byter RT_INT/RT_BOOL/RT_STR_RAW sine INLINE bump-allokatorar med trampolinar (`movabs rax,
+cached_va; jmp rax`) til nye runtime-blokkar APPENDA forbi `frozen_len`. Cache-FALLBACK-ane
+(int utanfor [-32768,32767], fleir-byte str_raw) bump-allokerer rått via `movabs rcx,&bump` —
+eit mønster `patch_bump_prologer`/`patch_var_allocators` IKKJE fangar, OG dei ligg forbi
+frozen_len → dei blir ALDRI ruta til `gc_alloc16`. sha256 sine 32-bit-ord treff int-fallbacken
+pervasivt → kvar allokering BUMPAR (ingen fri-liste-gjenbruk) → bump klatrar monotont (257MB @
+3000 hmac, berre 125 levande) INN i GC-scratchen (0x10300000+) → mark/sweep skriv oppå levande
+objekt → segfault. Diagnose: patch-teljar 9 (fletta) vs 11 (før). Dei 2 tapte = RT_INT@32 +
+RT_BOOL@64. **Fiks (begge GC-gata, paritet BYTE-urørt):** (1) installer cache-trampolinane berre
+når `gc_mode != "1"` → under GC held RT_INT/RT_BOOL/RT_STR_RAW dei patchbare inline-prologane;
+(2) `HEAP_SZ` gc-gata (269484032 = 256MB+handler, scratch på toppen med naturleg bump-tak) under
+GC, main sin 2GiB for paritet. **Lærdom:** GC-patchgaten krev at ALL allokering ligg i den
+frosne, mønster-matchbare regionen; nye allokatorar (frå framtidige main-fletting) må anten
+emitte den kanoniske bump-prologen ELLER gc-gatast av.
+
 ## Sekvens vidare (oppdatert)
 
 Klarert denne økta: GC (type-komplett, gated), unnatak (prøv/fang/kast), tekst(heiltall),
 **JSON-serialisering** (json_stringify + json_parse_raw for list/map — seed-blokkaren), og
-slice(liste)-dispatch. Kompilator-like kode (mini-tolk) verkar.
+slice(liste)-dispatch. Kompilator-like kode (mini-tolk) verkar. **main (#181–#184) er no fletta
+inn** (PR #186) og cache-vs-GC-regresjonen over er løyst — heile GC-suiten + 10k-litmus grøn på
+det fletta resultatet, paritet flagg-AV urørt.
 
 NESTE: AOT-kompiler ein EKTE kompilator-modul / heile kompilatoren og iterér på gjenverande
 smale frosne-runtime-edge-cases etter kvart som dei treffast (jf. json_les fleir-element over
