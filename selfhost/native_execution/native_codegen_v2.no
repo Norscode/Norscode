@@ -1293,19 +1293,29 @@ funksjon bygg_data(strenger) {
     la bytes: liste = []
     la offs: ordbok = {}
     la i: heltall = 0
+    // Sjølvkalibrering av escape-dekoding (sjå notat i løkka under): parse ein kjend
+    // JSON-tekst `["a\nb"]` — kjem elementet ut som 3 teikn (a, LF, b) dekodar parseren
+    // sjølv og vi må IKKJE dekode ein gong til; 4 teikn (a, \, n, b) → parseren er rå.
+    la parser_dekodar = usann
+    prøv {
+        la kal = builtin.json_parse_raw("[\"a\\nb\"]")
+        hvis lengde(kal) == 1 og lengde(tekst(kal[0])) == 3 { parser_dekodar = sann }
+    } fang (e) { }
     mens i < lengde(strenger) {
         la s = strenger[i]
         mens lengde(bytes) % 16 != 0 { legg_til(bytes, 0) }
         offs[s] = lengde(bytes)
         la sbytes: liste = []
         la j: heltall = 0
-        // json_parse_raw(fil_les(...)) unescapar ikkje JSON-escapes i NCB-strengar
-        // (host-runtime-inkonsistens: inline unescapar, fil ikkje). Dekod difor
-        // escape-SEKVENSAR her, elles lagrar per-teikns char_to_byte t.d. `\"` som
-        // `\`+`"` (2 byte) → korrupte strengliteralar (lexer/serialisering feilar).
-        // \uXXXX finst ikkje i NCB-ar.
+        // json_parse_raw(fil_les(...)) unescapar JSON-escapes i NCB-strengar i NOKRE
+        // runtimes (stage-0-seed) men IKKJE i andre (host-runtime-inkonsistens). Dekodar
+        // vi escape-sekvensar her når parseren ALT har dekoda, dobbeltdekodar vi:
+        // "a\\b" (rå a,\,b) → `\b` → backspace → korrupt konstant (RAW=[a]). Dekodar vi
+        // IKKJE når parseren er rå, lagrast `\"` som 2 byte → òg korrupt. Difor:
+        // SJØLVKALIBRER éin gong — parse ein kjend JSON-tekst og sjå om `\n` kom ut som
+        // ekte LF (parser dekodar) eller som `\`+`n` (rå). \uXXXX finst ikkje i NCB-ar.
         mens j < lengde(s) {
-            hvis s[j] == "\\" og j + 1 < lengde(s) {
+            hvis s[j] == "\\" og ikkje parser_dekodar og j + 1 < lengde(s) {
                 la e = s[j + 1]
                 hvis e == "n" { legg_til(sbytes, 10) }
                 ellers hvis e == "t" { legg_til(sbytes, 9) }
@@ -2009,11 +2019,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la json_recur_patches: liste = []
     // Interne JSON-greiner deler prolog/epilog med legacy-dispatchen.
     atomics["json_string_case"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [
-        0x55, 0x41, 0x57, 0x41, 0x56, 0x41, 0x55,
-        0x41, 0x54, 0x53, 0x48, 0x83, 0xEC, 0x18
-    ])
-    jump_rel32(bytes, 4204754, TEXT_VA()) // 0x4028d2
+    // REIMPLEMENTERT: den frosne rutinen @0x4028d2 escapa IKKJE bakstrek ("a\b" → "a",
+    // einsleg "\" → ugyldig JSON `"\"`) → Gen1-ELF-skrivne NCB-ar korrupte → ELF stage-0-
+    // fixpunktet divergerte. Kroppen (treng gc_alloc_var, emittert seinare) ligg etter
+    // gc_alloc_var; framover-jmp herifrå blir patcha der.
+    la json_str_body_patch = emit_jmp_placeholder(bytes)
 
     // json_list_case(rdi=liste) → rax = "[e0,e1,...]". rbx=elem_ptr r12=len r13=i r14=acc.
     atomics["json_list_case"] = TEXT_VA() + lengde(bytes)
@@ -2710,6 +2720,98 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, av_prdone2, av_done)
     copy(bytes, [0x9D])                            // popfq
     copy(bytes, [0xC3])                            // ret
+
+    // ── json_string_case KROPP (rdi=streng-NcVal → rax=JSON-streng-NcVal) ──
+    // Den frosne rutinen @0x4028d2 escapa ikkje bakstrek. Sidan codegen DEKODAR escape-
+    // sekvensar ved innbaking av konstantar, er runtime-strengar rå og MÅ escapast her:
+    // " → \"   \ → \\   LF → \n   CR → \r   TAB → \t  (andre byte kopierast rått).
+    // Scratch (2*len+16) via gc_alloc_var (GC-vennleg, ikkje rå bump), resultat via
+    // RT_STR_RAW. Framover-jmp-en frå atomics["json_string_case"] landar her.
+    la json_str_body = lengde(bytes)
+    patch_jump(bytes, json_str_body_patch, json_str_body)
+    copy(bytes, [0x55, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbp,rbx,r12,r13,r14,r15
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8 (align)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x4C, 0x8B, 0x20])                // mov r12,[rax] (len)
+    copy(bytes, [0x4C, 0x8D, 0x68, 0x08])          // lea r13,[rax+8] (kjeldebyte)
+    copy(bytes, [0x4B, 0x8D, 0x4C, 0x24, 0x10])    // lea rcx,[r12+r12+16] (scratch-storleik)
+    call_rel32(bytes, atomics["gc_alloc_var"], TEXT_VA()) // rax = scratch
+    copy(bytes, [0x49, 0x89, 0xC6])                // mov r14,rax (dst-base)
+    copy(bytes, [0x48, 0x89, 0xC3])                // mov rbx,rax (dst-markør)
+    copy(bytes, [0xC6, 0x03, 0x22])                // mov byte[rbx],'"'
+    copy(bytes, [0x48, 0xFF, 0xC3])                // inc rbx
+    copy(bytes, [0x4D, 0x31, 0xFF])                // xor r15,r15 (i=0)
+    la jsc_loop = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xE7])                // cmp r15,r12
+    copy(bytes, [0x0F, 0x83]) u32(bytes, 0)        // jae done
+    la jsc_pdone = lengde(bytes) - 4
+    copy(bytes, [0x43, 0x0F, 0xB6, 0x44, 0x2F, 0x00]) // movzx eax,byte[r13+r15]
+    copy(bytes, [0x3C, 0x22])                      // cmp al,'"'
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // je esc_q
+    la jsc_pq = lengde(bytes) - 4
+    copy(bytes, [0x3C, 0x5C])                      // cmp al,'\'
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // je esc_b
+    la jsc_pb = lengde(bytes) - 4
+    copy(bytes, [0x3C, 0x0A])                      // cmp al,LF
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // je esc_n
+    la jsc_pn = lengde(bytes) - 4
+    copy(bytes, [0x3C, 0x0D])                      // cmp al,CR
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // je esc_r
+    la jsc_pr = lengde(bytes) - 4
+    copy(bytes, [0x3C, 0x09])                      // cmp al,TAB
+    copy(bytes, [0x0F, 0x84]) u32(bytes, 0)        // je esc_t
+    la jsc_pt = lengde(bytes) - 4
+    copy(bytes, [0x88, 0x03])                      // mov [rbx],al (rå byte)
+    copy(bytes, [0x48, 0xFF, 0xC3])                // inc rbx
+    copy(bytes, [0xE9]) u32(bytes, 0)              // jmp next
+    la jsc_pnext0 = lengde(bytes) - 4
+    la jsc_esc_q = lengde(bytes)
+    copy(bytes, [0x66, 0xC7, 0x03, 0x5C, 0x22])    // mov word[rbx],'\"'
+    copy(bytes, [0x48, 0x83, 0xC3, 0x02])          // add rbx,2
+    copy(bytes, [0xE9]) u32(bytes, 0)              // jmp next
+    la jsc_pnext1 = lengde(bytes) - 4
+    la jsc_esc_b = lengde(bytes)
+    copy(bytes, [0x66, 0xC7, 0x03, 0x5C, 0x5C])    // mov word[rbx],'\\'
+    copy(bytes, [0x48, 0x83, 0xC3, 0x02])          // add rbx,2
+    copy(bytes, [0xE9]) u32(bytes, 0)              // jmp next
+    la jsc_pnext2 = lengde(bytes) - 4
+    la jsc_esc_n = lengde(bytes)
+    copy(bytes, [0x66, 0xC7, 0x03, 0x5C, 0x6E])    // mov word[rbx],'\n'
+    copy(bytes, [0x48, 0x83, 0xC3, 0x02])          // add rbx,2
+    copy(bytes, [0xE9]) u32(bytes, 0)              // jmp next
+    la jsc_pnext3 = lengde(bytes) - 4
+    la jsc_esc_r = lengde(bytes)
+    copy(bytes, [0x66, 0xC7, 0x03, 0x5C, 0x72])    // mov word[rbx],'\r'
+    copy(bytes, [0x48, 0x83, 0xC3, 0x02])          // add rbx,2
+    copy(bytes, [0xE9]) u32(bytes, 0)              // jmp next
+    la jsc_pnext4 = lengde(bytes) - 4
+    la jsc_esc_t = lengde(bytes)
+    copy(bytes, [0x66, 0xC7, 0x03, 0x5C, 0x74])    // mov word[rbx],'\t'
+    copy(bytes, [0x48, 0x83, 0xC3, 0x02])          // add rbx,2
+    la jsc_next = lengde(bytes)                    // next: (fell gjennom)
+    copy(bytes, [0x49, 0xFF, 0xC7])                // inc r15
+    copy(bytes, [0xE9]) u32(bytes, (jsc_loop - (lengde(bytes) + 4)) & 4294967295) // jmp loop
+    la jsc_done = lengde(bytes)
+    copy(bytes, [0xC6, 0x03, 0x22])                // mov byte[rbx],'"'
+    copy(bytes, [0x48, 0xFF, 0xC3])                // inc rbx
+    copy(bytes, [0x4C, 0x89, 0xF7])                // mov rdi,r14 (peikar)
+    copy(bytes, [0x48, 0x89, 0xDE])                // mov rsi,rbx
+    copy(bytes, [0x4C, 0x29, 0xF6])                // sub rsi,r14 (lengd)
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())     // rax = NcVal
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])          // add rsp,8
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D]) // pop r15,r14,r13,r12,rbx,rbp
+    copy(bytes, [0xC3])                            // ret
+    patch_jump(bytes, jsc_pdone, jsc_done)
+    patch_jump(bytes, jsc_pq, jsc_esc_q)
+    patch_jump(bytes, jsc_pb, jsc_esc_b)
+    patch_jump(bytes, jsc_pn, jsc_esc_n)
+    patch_jump(bytes, jsc_pr, jsc_esc_r)
+    patch_jump(bytes, jsc_pt, jsc_esc_t)
+    patch_jump(bytes, jsc_pnext0, jsc_next)
+    patch_jump(bytes, jsc_pnext1, jsc_next)
+    patch_jump(bytes, jsc_pnext2, jsc_next)
+    patch_jump(bytes, jsc_pnext3, jsc_next)
+    patch_jump(bytes, jsc_pnext4, jsc_next)
 
     // ── GC (3b): variabel-allokator som returnerer i R8 (for RT_LIST_APP grow) ──
     // gc_alloc_var_r8(size i r9) -> r8 = blokk. Head-fit+split på fri-lista, elles bump.
