@@ -1,0 +1,199 @@
+funksjon __nclit_decode_v9400(verdi: tekst) -> tekst { returner builtin.slice(verdi, 9, -1) }
+// selfhost/vm_executor.no — Pure-Norscode NCB Executor
+//
+// Steg C: Load NCB JSON bytecode og kjør via selfhost/vm.no
+// Fullstendig self-contained, unngår C-host runtime-compilation
+//
+// Bruk:
+//   1. Kompilér program til NCB: ./bin/nc compile program.no > program.ncb.json
+//   2. Kjør NCB via executor:
+//      NORSCODE_CMD=run NORSCODE_FILE=selfhost/vm_executor.no NORSCODE_NCB_FILE=program.ncb.json ./dist/norscode_native
+//
+// Eller lag ein wrapper i bin/ for lettar bruk:
+//   ./bin/nc run-ncb program.ncb.json
+
+bruk selfhost.json
+bruk selfhost.kompiler
+bruk selfhost.vm
+
+// ─── Hjelpar-funksjonar ──────────────────────────────────────────────────────
+
+funksjon stille() -> boolsk
+    returner miljo_hent("NORSCODE_VM_QUIET") == builtin.chr(49)
+slutt
+
+funksjon logg(melding: tekst)
+    hvis ikkje stille()
+        skriv(melding)
+    slutt
+slutt
+
+funksjon les_ncb_fil(fil: tekst) -> ordbok<tekst, tekst>
+    logg("[VM Executor] Les NCB-fil: " + fil + "\n")
+    la json_tekst = fil_les(fil)
+    skriv("  Lest NCB-json\n")
+    returner json_parse_raw(json_tekst)
+slutt
+
+funksjon verifiser_ncb(ncb: ordbok<tekst, tekst>) -> boolsk
+    logg("[VM Executor] Verifiserer NCB...\n")
+
+    la entry = ncb["entry"]
+    la fns = ncb["functions"]
+
+    hvis entry == null eller entry == ""
+        skriv("ERROR: Manglar entry-point\n")
+        returner usann
+    slutt
+
+    hvis fns == null
+        skriv("ERROR: Manglar functions\n")
+        returner usann
+    slutt
+
+    returner sann
+slutt
+
+funksjon les_vm_ncb() -> ordbok<tekst, tekst>
+    la vm_sti = miljo_hent("NORSCODE_VM_NCB")
+    hvis vm_sti == ""
+        vm_sti = "bootstrap/precompiled/vm.ncb.json"
+    slutt
+    logg("[VM Executor] Les Norscode-VM: " + vm_sti + "\n")
+    returner builtin.json_parse_raw(fil_les(vm_sti))
+slutt
+
+// Materialiser imported selfhost.vm names in the target function table before
+// Steg-C starts. The embedded VM bundle is compiled under __main__, while
+// consumer bytecode keeps its qualified module names.
+funksjon legg_til_vm_aliasar(ncb: ordbok<tekst, tekst>) -> ordbok<tekst, tekst>
+    la vm_ncb = les_vm_ncb()
+    la mål_funksjonar = ncb["functions"]
+    la vm_funksjonar = vm_ncb["functions"]
+    la namn = builtin.nøkler(vm_funksjonar)
+    la i = 0
+    mens i < lengde(namn) {
+        la namnverdi = namn[i]
+        hvis builtin.starts_with(namnverdi, "__main__.") {
+            la kortnamn = builtin.slice(namnverdi, 9, lengde(namnverdi))
+            // Keep the consumer's entry point and any same-named program
+            // functions authoritative; aliases are the compatibility path.
+            hvis namnverdi != "__main__.start" {
+                mål_funksjonar[namnverdi] = vm_funksjonar[namnverdi]
+            }
+            mål_funksjonar["selfhost.vm." + kortnamn] = vm_funksjonar[namnverdi]
+        } ellers {
+            mål_funksjonar[namnverdi] = vm_funksjonar[namnverdi]
+        }
+        i = i + 1
+    }
+    mål_funksjonar["selfhost.json.json_skriv"] = mål_funksjonar["__main__.json_skriv"]
+    mål_funksjonar["selfhost.json.json_les"] = mål_funksjonar["__main__.json_les"]
+    // Preserve the native key enumeration for the pure VM.  The VM cannot
+    // safely enumerate a large host map by recursively JSON-stringifying it.
+    la alle_namn = builtin.nøkler(mål_funksjonar)
+    la vm_namn: liste_tekst = []
+    la vi = 0
+    mens vi < lengde(alle_namn) {
+        hvis alle_namn[vi] != "__vm_key_list__" {
+            legg_til(vm_namn, alle_namn[vi])
+        }
+        vi = vi + 1
+    }
+    mål_funksjonar["__vm_key_list__"] = vm_namn
+    returner ncb
+slutt
+
+funksjon json_skriv(verdi)
+    returner builtin.json_stringify(verdi)
+slutt
+
+funksjon json_les(verdi: tekst)
+    returner builtin.json_parse_raw(verdi)
+slutt
+
+funksjon normaliser_null_loads(ncb: ordbok<tekst, tekst>) -> ordbok<tekst, tekst>
+    la fns = ncb["functions"]
+    la fn_namn = builtin.nøkler(fns)
+    la fi = 0
+    mens fi < lengde(fn_namn) {
+        la fn = fns[fn_namn[fi]]
+        la code = fn["code"]
+        la ci = 0
+        mens ci < lengde(code) {
+            la instr = code[ci]
+            hvis instr[0] == "LOAD_NAME" {
+                hvis instr[1] == __nclit_decode_v9400("__nclit__null") eller instr[1] == "ingenting" {
+                    instr[0] = "PUSH_CONST"
+                    instr[1] = 0
+                } ellers hvis instr[1] == __nclit_decode_v9400("__nclit__true") eller instr[1] == "sann" {
+                    instr[0] = "PUSH_CONST"
+                    instr[1] = sann
+                } ellers hvis instr[1] == __nclit_decode_v9400("__nclit__false") eller instr[1] == "usann" {
+                    instr[0] = "PUSH_CONST"
+                    instr[1] = usann
+                }
+            }
+            ci = ci + 1
+        }
+        fi = fi + 1
+    }
+    returner ncb
+slutt
+
+funksjon aktiver_målpolicy() -> heltall
+    hvis miljo_hent("NORSCODE_VM_REQUESTED_POLICY") != builtin.chr(49)
+        returner 0
+    slutt
+    la caps = miljo_hent("NORSCODE_VM_REQUESTED_CAPABILITIES")
+    la disk_root = miljo_hent("NORSCODE_VM_REQUESTED_DISK_ROOT")
+    la net_scope = miljo_hent("NORSCODE_VM_REQUESTED_NET_SCOPE")
+    la process_scope = miljo_hent("NORSCODE_VM_REQUESTED_PROCESS_SCOPE")
+    miljo_sett("NORSCODE_VM_TARGET_CAPABILITIES", caps)
+    miljo_sett("NORSCODE_VM_TARGET_DISK_ROOT", disk_root)
+    miljo_sett("NORSCODE_VM_TARGET_NET_SCOPE", net_scope)
+    miljo_sett("NORSCODE_VM_TARGET_PROCESS_SCOPE", process_scope)
+    returner 0
+slutt
+
+funksjon kjør_ncb(ncb: ordbok<tekst, tekst>) -> heltall
+    logg("[VM Executor] Kjører bytekode...\n")
+
+    prøv {
+        // selfhost.vm er allereie importert i denne executoren. Køyr målet
+        // direkte i den VM-en; eit ekstra VM-i-VM-lag kan returnere før
+        // mål-entryen blir kalla på eldre stage-0-runtime-ar.
+        aktiver_målpolicy()
+        la med_aliasar = legg_til_vm_aliasar(ncb)
+        la normalisert = normaliser_null_loads(med_aliasar)
+        returner køyr_ncb(normalisert)
+    } fang melding {
+        skriv("ERROR: " + melding + "\n")
+        returner 1
+    }
+slutt
+
+// ─── Hovud-executor ──────────────────────────────────────────────────────────
+
+funksjon start() -> heltall
+    logg("=== Norscode Pure-VM Executor (Steg C) ===\n\n")
+
+    // Les NCB-fil frå miljø-variabel
+    la ncb_fil = miljo_hent("NORSCODE_NCB_FILE")
+    hvis ncb_fil == ""
+        skriv("ERROR: NORSCODE_NCB_FILE ikkje sett\n")
+        skriv("Bruk: NORSCODE_NCB_FILE=program.ncb.json NORSCODE_CMD=run NORSCODE_FILE=selfhost/vm_executor.no ./dist/norscode_native\n")
+        returner 1
+    slutt
+
+    // Les og parse NCB
+    prøv {
+        la ncb = les_ncb_fil(ncb_fil)
+
+        returner kjør_ncb(ncb)
+    } fang melding {
+        skriv("FATAL ERROR: " + melding + "\n")
+        returner 1
+    }
+slutt
+
