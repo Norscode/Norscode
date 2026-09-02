@@ -44,6 +44,25 @@ og pat_rcx, men pat_rcx-sites (json_string_case) brukar rcx=buffer + rax=kjelde 
 repl_rcx (mov rcx,rax + mov rax,[rdi+8]). Same fiks løyste OGSÅ json_parse_raw under GC.
 Dette låser opp NCB-serialiseringa i seed-pipeline (nc_main json_skriv/json_parse).
 
+## ✅ JSON-escaping i AOT FIKSA (var rota til ELF stage-0-fixpunkt-divergens)
+
+To uavhengige codegen-feil gjorde at NCB-ar skrivne av ein Gen1-ELF (og konstantar baka
+inn frå seed-runtime) vart korrupte for strengar med bakstrek — Gen2-bundlen i fixpunktet
+inneheldt `["PUSH_CONST","\"]` (ugyldig JSON) → «Source-only NCB differ»:
+
+1. **`json_string_case`** var ein trampoline til den frosne legacy-rutinen @0x4028d2 som
+   IKKJE escapa bakstrek (`"a\b"`→`"a"`, einsleg `\` → rått). Reimplementert som emittert
+   atom (kropp etter `gc_alloc_var`, framover-jmp frå atomics-adressa; scratch via
+   `gc_alloc_var`, resultat via `RT_STR_RAW`; escapar `" \ LF CR TAB`, rå kopi elles).
+2. **Konstant-innbaking dobbeltdekoda** på stage-0-seed-runtime, der `json_parse_raw(fil_les)`
+   ALT dekodar escapes (runtime-avhengig!) → `a\b` vart a+backspace. No SJØLVKALIBRERT: parse
+   `["a\nb"]` éin gong → 3 teikn ⇒ parseren dekodar ⇒ hopp over eigen dekoding.
+
+Sjølvsjekkande vakter i gc-litmus.yml: `gc_jsonesc_probe` (serialisering) og `gc_bs_probe`
+(konstant-round-trip + runtime-bakstrek). Lærdom: alt som kryssar JSON-grensa i AOT-en
+(NCB-skriving/-lesing) må verifiserast byte-eksakt mot VM-referansen — VM-en escapa rett
+heile tida (`["a\\b","q\"r","n\nl","\\"]`).
+
 ## ⚠️ Kjende separate frosne-runtime-bugs (IKKJE seed-blokkar)
 
 Etter hovudblokkarane er tetta dukkar det opp smale frosne-runtime-edge-cases når codegen
