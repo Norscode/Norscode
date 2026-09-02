@@ -28,7 +28,7 @@ env NORSCODE_ENABLE_EXEC_PROSESS=1 \
     ./bin/nc compile tests/fixtures/gc_litmus_hmac.no "$OUT/litmus.ncb.json" >/dev/null
 
 echo "=== 2) ncb-to-elf (self-hosted native_codegen_v2 AOT-runtime) ==="
-./bin/nc ncb-to-elf "$OUT/litmus.ncb.json" "$OUT/litmus.elf"
+env NORSCODE_NCB_TO_ELF_INPUT="$OUT/litmus.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/litmus.elf" NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/ncb_to_elf.no
 chmod +x "$OUT/litmus.elf"
 
 echo "=== 3) køyr GC-litmus (10000 hmac_sha256_bytes) ==="

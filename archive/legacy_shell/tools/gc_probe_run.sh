@@ -29,7 +29,7 @@ env NORSCODE_ENABLE_EXEC_PROSESS=1 \
     ./bin/nc compile "$PROBE" "$OUT/$STEM.ncb.json" >/dev/null
 
 echo "=== [$LABEL] 2) ncb-to-elf (self-hosted native_codegen_v2) ==="
-./bin/nc ncb-to-elf "$OUT/$STEM.ncb.json" "$OUT/$STEM.elf"
+env NORSCODE_NCB_TO_ELF_INPUT="$OUT/$STEM.ncb.json" NORSCODE_NCB_TO_ELF_OUTPUT="$OUT/$STEM.elf" NORSCODE_ENABLE_EXEC_PROSESS=1 ./bin/nc run tools/ncb_to_elf.no
 chmod +x "$OUT/$STEM.elf"
 
 echo "=== [$LABEL] 3) køyr probe ==="
