@@ -1,0 +1,141 @@
+bruk std.socket som socket
+bruk std.https_front som front
+
+// M3: live multi-site serving gjennom std.https_front.
+//
+// Ekte reverse-proxy-flyt over native socket: to backend-tenarar (kvar sin
+// tråd), Host/SNI-basert vhost-ruting til rett backend, djup nøsta HTML (600
+// nivå) som passerer intakt, 421 ved SNI/Host-mismatch og 502 ved daud
+// backend. Dette er #5-multi-site-beviset over den verifiserte socket-stacken.
+//
+// Krev net.tcp/127.0.0.1 (gitt av testløparen; sjå tools/nc_test.no).
+
+// Merk: modul-globalar blir IKKJE initialiserte i native worker-trådar (dei
+// deler funksjonstabell, ikkje topp-nivå-tilstand). ABI-strengen må difor vere
+// lokal/literal i alt som køyrer i backend-tråden.
+
+funksjon _accept_klar(lh: tekst) -> ordbok_tekst {
+    la abi = "norscode-native-network-v1"
+    la peer = {"status": "ventende"}
+    la n: heltall = 0
+    mens tekst(peer["status"]) == "ventende" og n < 5000000 {
+        peer = builtin.network_operation({"abi": abi, "operation": "accept", "handle": lh})
+        n = n + 1
+    }
+    returner peer
+}
+
+funksjon _les_request(ph: tekst) -> tekst {
+    la abi = "norscode-native-network-v1"
+    la data = ""
+    la n: heltall = 0
+    mens builtin.index_of(data, "\r\n\r\n") < 0 og n < 5000000 {
+        la r = builtin.network_operation({"abi": abi, "operation": "read", "handle": ph, "max": "65536"})
+        hvis tekst(r["status"]) == "ok" { data = data + tekst(r["data"]) }
+        hvis tekst(r["status"]) == "eof" { returner data }
+        n = n + 1
+    }
+    returner data
+}
+
+funksjon _skriv_alt(ph: tekst, payload: tekst) -> heltall {
+    la abi = "norscode-native-network-v1"
+    la off: heltall = 0
+    la n: heltall = 0
+    mens off < lengde(payload) og n < 5000000 {
+        la r = builtin.network_operation({"abi": abi, "operation": "write", "handle": ph, "data": builtin.slice(payload, off, lengde(payload))})
+        hvis tekst(r["status"]) == "ok" {
+            la skrive = heltall_fra_tekst(tekst(r["value"]))
+            hvis skrive > 0 { off = off + skrive }
+        }
+        n = n + 1
+    }
+    returner off
+}
+
+// Backend-tråd: accept éin tilkopling, les request, svar med ferdig respons.
+funksjon backend_server(args: ordbok_tekst) -> tekst {
+    la abi = "norscode-native-network-v1"
+    la peer = _accept_klar(args["listener_handle"])
+    hvis tekst(peer["status"]) != "connected" { returner "accept:" + tekst(peer["status"]) }
+    la ph = peer["handle"]
+    _les_request(ph)
+    _skriv_alt(ph, args["response"])
+    builtin.network_operation({"abi": abi, "operation": "close", "handle": ph})
+    returner "ok"
+}
+
+funksjon _djup_html(kjerne: tekst, nivaa: heltall) -> tekst {
+    la body = kjerne
+    la d: heltall = 0
+    mens d < nivaa { body = "<div>" + body + "</div>" d = d + 1 }
+    returner body
+}
+
+funksjon _http_ok(body: tekst) -> tekst {
+    returner "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " +
+        tekst_fra_heltall(lengde(body)) + "\r\nConnection: close\r\n\r\n" + body
+}
+
+funksjon _spawn_backend(listener_handle: tekst, response: tekst) -> ordbok_tekst {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
+        "fn": "__main__.backend_server",
+        "args": {"listener_handle": listener_handle, "response": response},
+        "name": "backend", "stack_bytes": "262144"})
+}
+
+funksjon _join(t: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": "15000"})
+}
+
+funksjon start() -> heiltall {
+    // To backend-listenerar (auto-port), bunde i hovudtråd.
+    la lA = socket.native_lytt("127.0.0.1", 0, 16)
+    la lB = socket.native_lytt("127.0.0.1", 0, 16)
+    assert(tekst(lA["status"]) == "listening")
+    assert(tekst(lB["status"]) == "listening")
+    la portA = heltall_fra_tekst(tekst(lA["port"]))
+    la portB = heltall_fra_tekst(tekst(lB["port"]))
+
+    // Distinkte djupe HTML-sider (600 nivå nesting).
+    la bodyA = _djup_html("SIDE-A-KJERNE", 600)
+    la bodyB = _djup_html("SIDE-B-KJERNE", 600)
+
+    // Front med to domene → to backends, pluss eitt domene til daud port.
+    la f = front.ny("cert", "key")
+    assert(front.legg_til_domene(f, "a.site.test", "127.0.0.1", portA))
+    assert(front.legg_til_domene(f, "b.site.test", "127.0.0.1", portB))
+    assert(front.legg_til_domene(f, "dead.site.test", "127.0.0.1", 9))
+
+    // Domene A: spawn backend, proxy, verifiser rett side + djup HTML.
+    la tA = _spawn_backend(lA["handle"], _http_ok(bodyA))
+    la rA = front.handter(f, "a.site.test", "GET / HTTP/1.1\r\nHost: a.site.test\r\n\r\n")
+    assert(tekst(_join(tA)["value"]) == "ok")
+    assert(builtin.index_of(rA, "HTTP/1.1 200 OK") >= 0)
+    assert(builtin.index_of(rA, "SIDE-A-KJERNE") >= 0)
+    assert(builtin.index_of(rA, "<div><div>") >= 0)          // djup nesting intakt
+    assert(builtin.index_of(rA, "SIDE-B-KJERNE") < 0)        // ikkje krysslekkasje
+
+    // Domene B: rutar til rett (anna) backend.
+    la tB = _spawn_backend(lB["handle"], _http_ok(bodyB))
+    la rB = front.handter(f, "b.site.test", "GET / HTTP/1.1\r\nHost: b.site.test\r\n\r\n")
+    assert(tekst(_join(tB)["value"]) == "ok")
+    assert(builtin.index_of(rB, "SIDE-B-KJERNE") >= 0)
+    assert(builtin.index_of(rB, "SIDE-A-KJERNE") < 0)
+
+    // SNI/Host-mismatch → 421 Misdirected Request (fail-closed).
+    la r421 = front.handter(f, "a.site.test", "GET / HTTP/1.1\r\nHost: b.site.test\r\n\r\n")
+    assert(builtin.index_of(r421, "421") >= 0)
+
+    // Daud backend → 502 Bad Gateway, ingen backend-adresse lekkjer.
+    la r502 = front.handter(f, "dead.site.test", "GET / HTTP/1.1\r\nHost: dead.site.test\r\n\r\n")
+    assert(builtin.index_of(r502, "502") >= 0)
+    assert(builtin.index_of(r502, "127.0.0.1") < 0)
+
+    front.lukk(f)
+    socket.native_lukk(lA)
+    socket.native_lukk(lB)
+    skriv("test_https_front_live_multisite: OK (13 assertar)\n")
+    returner 0
+}

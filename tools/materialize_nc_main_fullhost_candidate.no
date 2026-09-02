@@ -1,0 +1,533 @@
+// tools/materialize_nc_main_fullhost_candidate.no — kandidatverktøy.
+//
+// Byggjer ein FERSK komplett nc_main-fullhost-NCB frå levande kjelde UTAN å
+// kompilere heile importgrafen i éin prosess (det OOM-ar på 16 GB-verten).
+// Mønsteret er identisk med L5b: éin frisk barneprosess per modul (minnet vert
+// frigjort ved prosessdød), store modular delte i kjeldefragment, og til slutt
+// rå tekst-samanslåing av kandidat-fragmenta til éi bundlefil. Kvar barneprosess
+// køyrer under prosess-runnaren si 4 GiB-grense, så heile flyten er beviseleg
+// innanfor eit 8 GB-budsjett.
+//
+// Verktøyet skriv berre kandidatfiler under build/fullhost/ og promoterer aldri
+// runtime, stage0 eller committed cache.
+//
+// Køyring (frå repo-rot):
+//   NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+//   NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+//   ./bin/nc run tools/materialize_nc_main_fullhost_candidate.no
+//
+// Miljøknappar:
+//   NC_FULLHOST_DIR  — kandidatkatalog (standard build/fullhost/source-nc_main)
+//   NC_FULLHOST_OUT  — bundlefil (standard build/fullhost/nc_main_fullhost_candidate.ncb.json)
+//   NC_FULLHOST_REUSE=1 — hopp over kompilering av modular som alt har kandidat
+
+bruk tools.process_runner som prosess
+
+funksjon linje(melding: tekst) -> heiltall {
+    skriv(melding + "\n")
+    returner 0
+}
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon fil_finst(sti: tekst) -> bool {
+    prøv { returner builtin.fil_finnes(sti) } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon slett_hvis_finst(sti: tekst) -> heiltall {
+    hvis fil_finst(sti) {
+        prøv { builtin.fil_slett(sti) } fang (e) { returner 1 }
+    }
+    returner 0
+}
+
+// Modulgraf. Standard = `bruk`-lukkinga til selfhost/nc_main.no (avhengige
+// først). Kan overstyrast via NC_MAT_SPECS for å bundle ein annan graf (t.d.
+// codegen-driveren) med same isolerte per-modul-flyt.
+funksjon bundle_specs() -> tekst {
+    la overstyrt = env("NC_MAT_SPECS")
+    hvis overstyrt != "" { returner overstyrt }
+    returner "std.runtime.atomic=std/runtime/atomic.no " +
+        "std.runtime.memory_abi=std/runtime/memory_abi.no " +
+        "std.runtime.allocator=std/runtime/allocator.no " +
+        "std.runtime_memory=std/runtime_memory.no " +
+        "std.runtime_security=std/runtime_security.no " +
+        "std.runtime.process_abi=std/runtime/process_abi.no " +
+        "std.runtime_filesystem=std/runtime_filesystem.no " +
+        "std.sha256=std/sha256.no " +
+        "std.sched=std/sched.no " +
+        "std.socket=std/socket.no " +
+        "tools.process_runner=tools/process_runner.no " +
+        "selfhost.ast=selfhost/ast.no " +
+        "selfhost.json=selfhost/json.no " +
+        "selfhost.ncb_stream=selfhost/ncb_stream.no " +
+        "selfhost.http_response=selfhost/http_response.no " +
+        "selfhost.semantic_validation_real=selfhost/semantic_validation_real.no " +
+        "selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no " +
+        "selfhost.parser=selfhost/parser.no " +
+        "selfhost.compiler.semantic=selfhost/compiler/semantic.no " +
+        "selfhost.compiler.ir_to_bytecode=selfhost/compiler/ir_to_bytecode.no " +
+        "selfhost.kompiler=selfhost/kompiler.no " +
+        "selfhost.vm=selfhost/vm.no " +
+        "selfhost.bundler=selfhost/bundler.no " +
+        "selfhost.nc_main=selfhost/nc_main.no"
+}
+
+// Store modular vert delte i kjeldefragment slik L5b gjer for vm/ir. Kvar
+// fragmentkompilering er ei eiga barneprosess med eiga heap-livstid.
+funksjon fragment_prefiks(modul: tekst) -> tekst {
+    hvis modul == "selfhost.vm" { returner "vm" }
+    hvis modul == "selfhost.compiler.ir_to_bytecode" { returner "ir" }
+    // nc_main.no (142 KB, ingen toppnivå-globalar) er for stor for éin
+    // kompileringsprosess i praksis (>10 min); same fragmentering gjeld.
+    hvis modul == "selfhost.nc_main" { returner "nm" }
+    // macho_arm64_codegen.no (~320 KB, 5200+ linjer) er den store codegen-
+    // modulen; fragmenter han når codegen-driveren bundlast.
+    hvis modul == "selfhost.native_execution.macho_arm64_codegen" { returner "mc" }
+    returner ""
+}
+
+funksjon spec_modul(spec: tekst) -> tekst {
+    la pos = builtin.index_of(spec, "=")
+    hvis pos < 1 { returner "" }
+    returner builtin.slice(spec, 0, pos)
+}
+
+funksjon spec_sti(spec: tekst) -> tekst {
+    la pos = builtin.index_of(spec, "=")
+    hvis pos < 1 { returner "" }
+    returner builtin.slice(spec, pos + 1, lengde(spec))
+}
+
+funksjon kandidat_namn(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    la namn = delar[lengde(delar) - 1]
+    hvis builtin.ends_with(namn, ".no") {
+        namn = builtin.slice(namn, 0, lengde(namn) - 3)
+    }
+    returner namn + ".ncb.json"
+}
+
+// Alias for ei bruk-linje: "bruk M som A" → A, elles siste punktdel av M.
+funksjon bruk_alias(bruk_linje: tekst) -> tekst {
+    la resten = builtin.trim(builtin.slice(builtin.trim(bruk_linje), 5, lengde(bruk_linje)))
+    la som_pos = builtin.index_of(resten, " som ")
+    hvis som_pos > 0 {
+        returner builtin.trim(builtin.slice(resten, som_pos + 5, lengde(resten)))
+    }
+    la delar = builtin.split(resten, ".")
+    returner builtin.trim(delar[lengde(delar) - 1])
+}
+
+funksjon bruk_modulsti(bruk_linje: tekst, root: tekst) -> tekst {
+    la resten = builtin.trim(builtin.slice(builtin.trim(bruk_linje), 5, lengde(bruk_linje)))
+    la som_pos = builtin.index_of(resten, " som ")
+    hvis som_pos > 0 { resten = builtin.trim(builtin.slice(resten, 0, som_pos)) }
+    returner root + "/" + builtin.replace(resten, ".", "/") + ".no"
+}
+
+// Konservativ prelude per fragment: behald ei bruk-linje dersom fragmentet
+// refererer "alias." ELLER nemner nokon av modulens funksjonsnamn med "(".
+// Å droppe ein import ingen namn i fragmentet kan treffe, endrar ikkje
+// oppløysinga av noko som faktisk finst i fragmentet — men kuttar den dyre
+// import-lexinga (registrer_importerte_funksjonar les og parsar heile
+// importfila per kompilering).
+funksjon prelude_for_fragment(bruk_linjer: liste_tekst, import_funknamn: liste_tekst,
+                              fragmentinnhald: tekst) -> tekst {
+    la prelude = ""
+    la i: heiltall = 0
+    mens i < lengde(bruk_linjer) {
+        la behald = usann
+        la alias = bruk_alias(bruk_linjer[i])
+        hvis alias != "" og builtin.index_of(fragmentinnhald, alias + ".") >= 0 { behald = sann }
+        hvis ikkje behald {
+            la namn = builtin.split(import_funknamn[i], ",")
+            la j: heiltall = 0
+            mens j < lengde(namn) {
+                hvis namn[j] != "" og builtin.index_of(fragmentinnhald, namn[j] + "(") >= 0 {
+                    behald = sann
+                    j = lengde(namn)
+                } ellers {
+                    j = j + 1
+                }
+            }
+        }
+        hvis behald { prelude = prelude + bruk_linjer[i] + "\n" }
+        i = i + 1
+    }
+    returner prelude
+}
+
+// Kjeldefragmentering (same terskel som L5b, men prelude per fragment vert
+// avgrensa til importar fragmentet faktisk kan referere).
+funksjon source_bitar(kjelde: tekst, kandidat_dir: tekst, prefiks: tekst, root: tekst) -> liste_tekst {
+    la linjer = builtin.split(kjelde, "\n")
+    la bruk_linjer: liste_tekst = []
+    // Topp-nivå `la`-deklarasjonar er modul-globalar. Utan dei i prelude ser
+    // eit seinare fragment ikkje at namnet er ein global → kompilatoren
+    // emitterer LOAD_NAME (lokal) i staden for LOAD_GLOBAL. Det divergerer
+    // frå heil-modul-kompilering og bryt byte-identitet OG korrektheit
+    // (t.d. selfhost.vm.vm_active_functions lese på tvers av funksjonar).
+    // Fragment 0 har dei inline; fragment 1+ får dei via prelude.
+    la global_linjer: liste_tekst = []
+    la pi: heiltall = 0
+    mens pi < lengde(linjer) {
+        hvis builtin.starts_with(builtin.trim(linjer[pi]), "bruk ") {
+            legg_til(bruk_linjer, linjer[pi])
+        }
+        hvis builtin.starts_with(linjer[pi], "la ") {
+            legg_til(global_linjer, linjer[pi])
+        }
+        pi = pi + 1
+    }
+    // Funksjonsnamn per import (for konservativ prelude-pruning).
+    la import_funknamn: liste_tekst = []
+    la bi: heiltall = 0
+    mens bi < lengde(bruk_linjer) {
+        la modulsti = bruk_modulsti(bruk_linjer[bi], root)
+        la namn = ""
+        prøv { namn = source_funksjonsnamn(builtin.fil_les(modulsti)) } fang (e) { namn = "" }
+        legg_til(import_funknamn, namn)
+        bi = bi + 1
+    }
+    // Del først i råchunkar utan prelude.
+    la chunkar: liste_tekst = []
+    la innhald = ""
+    la bytes_i_bit: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la linje_tekst = linjer[i]
+        la ny_funksjon = builtin.starts_with(linje_tekst, "funksjon ")
+        hvis ny_funksjon og bytes_i_bit >= 16384 {
+            legg_til(chunkar, innhald)
+            innhald = ""
+            bytes_i_bit = 0
+        }
+        innhald = innhald + linje_tekst + "\n"
+        bytes_i_bit = bytes_i_bit + lengde(linje_tekst) + 1
+        i = i + 1
+    }
+    hvis innhald != "" { legg_til(chunkar, innhald) }
+    // Skriv kvar chunk med sitt pruna prelude. Chunk 0 har originale bruk-
+    // linjer inline; dei vert filtrerte med same konservative regel.
+    la bitar: liste_tekst = []
+    la ci: heiltall = 0
+    mens ci < lengde(chunkar) {
+        la sti = kandidat_dir + "/" + prefiks + "-source-part-" + tekst_fra_heltall(ci) + ".no"
+        la ut = chunkar[ci]
+        hvis ci == 0 {
+            la utan_bruk = ""
+            la clinjer = builtin.split(ut, "\n")
+            la li: heiltall = 0
+            mens li < lengde(clinjer) {
+                hvis ikkje builtin.starts_with(builtin.trim(clinjer[li]), "bruk ") {
+                    utan_bruk = utan_bruk + clinjer[li] + "\n"
+                }
+                li = li + 1
+            }
+            ut = prelude_for_fragment(bruk_linjer, import_funknamn, utan_bruk) + utan_bruk
+        } ellers {
+            // Fragment 1+: bruk-prelude + ALLE global-deklarasjonar (så
+            // krysskall til modul-globalar vert LOAD_GLOBAL). Kvart slikt
+            // fragment genererer eit identisk __module_init__; flett-dedup
+            // (sett_seen i funksjonsfletting) held berre éin.
+            la gprelude = ""
+            la gi: heiltall = 0
+            mens gi < lengde(global_linjer) {
+                gprelude = gprelude + global_linjer[gi] + "\n"
+                gi = gi + 1
+            }
+            ut = prelude_for_fragment(bruk_linjer, import_funknamn, ut) + gprelude + ut
+        }
+        builtin.fil_skriv(sti, ut)
+        legg_til(bitar, sti)
+        ci = ci + 1
+    }
+    returner bitar
+}
+
+funksjon source_funksjonsnamn(kjelde: tekst) -> tekst {
+    la namn: liste_tekst = []
+    la linjer = builtin.split(kjelde, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(linjer[i], "funksjon ") {
+            la resten = builtin.slice(linjer[i], 9, lengde(linjer[i]))
+            la parentes = builtin.index_of(resten, "(")
+            hvis parentes > 0 { legg_til(namn, builtin.trim(builtin.slice(resten, 0, parentes))) }
+        }
+        i = i + 1
+    }
+    returner builtin.join(namn, ",")
+}
+
+funksjon mb(bytes_verdi: heiltall) -> tekst {
+    returner tekst_fra_heltall(bytes_verdi / 1048576) + " MB"
+}
+
+// Kompiler éi kjeldefil som éin modul i ei frisk barneprosess.
+funksjon kompiler_isolert(root: tekst, native: tekst, driver: tekst,
+                          kjelde_sti: tekst, utfil: tekst, modul: tekst,
+                          kjende_funksjonar: tekst, merkelapp: tekst) -> heiltall {
+    hvis slett_hvis_finst(utfil) != 0 {
+        linje("  [FEIL] kan ikkje fjerne gammal kandidat " + utfil)
+        returner -1
+    }
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_L5B_COMPILE_SOURCE": kjelde_sti,
+        "NORSCODE_L5B_COMPILE_OUTPUT": utfil,
+        "NORSCODE_L5B_COMPILE_MODULE": modul,
+        // Bundelen skal til native-codegen-prober og selftest-attestasjon;
+        // debugkart doblar berre heapen utan å endre bytekodesemantikk.
+        "NORSCODE_COMPILE_SOURCE_MAP": "0",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_VM_FAST": "1",
+        "NORSCODE_CMD": "run-ncb-pure",
+        "NORSCODE_FILE": driver,
+        "NORSCODE_HOST_NCB_FILE": driver,
+        "NORSCODE_NCB_FILE": driver,
+        "NORSCODE_VM_SOURCE": "1"
+    }
+    hvis kjende_funksjonar != "" {
+        miljø["NORSCODE_COMPILER_KNOWN_FUNCTIONS"] = kjende_funksjonar
+    }
+    // 45 min per barn: import-lexinga i Gen1-tolken er treg (socket+sched tok
+    // ~6 min åleine), og samtidige prosessar på verten kan doble tida.
+    // Inntil 3 forsøk: eksterne SIGTERM-ar (t.d. `pkill -f norscode_native`
+    // frå parallelle verifiseringsløkker på verten) skal ikkje velte heile
+    // materialiseringa. Kall difor gjerne verktøyet med NORSCODE_NATIVE_BIN
+    // peika på ein kopi av stage0-binæren med nøytralt namn.
+    la forsøk: heiltall = 0
+    mens forsøk < 3 {
+        la res = prosess.køyr(native, ["run-ncb-pure", driver], root, miljø, 2700000)
+        hvis prosess.ok(res) og fil_finst(utfil) {
+            returner prosess.minnetopp_bytes(res)
+        }
+        prosess.skriv_resultat(res)
+        linje("  [RETRY] " + merkelapp + " forsøk " + tekst_fra_heltall(forsøk + 1) +
+              " feila (exit=" + tekst(res["exit_code"]) + ")")
+        forsøk = forsøk + 1
+    }
+    linje("  [FEIL] " + merkelapp + " stoppa etter 3 forsøk")
+    returner -1
+}
+
+funksjon har_tekst(verdiar: liste_tekst, verdi: tekst) -> boolsk {
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        hvis verdiar[i] == verdi { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Flett module_initializers og global_names frå éin kandidat inn i akkumulatorane.
+funksjon flett_metadata(sti: tekst, initializers: liste_tekst, globale) -> heiltall {
+    la ncb = builtin.json_parse_raw(builtin.fil_les(sti))
+    hvis finnes_nøkkel(ncb, "module_initializers") {
+        la mi = ncb["module_initializers"]
+        la i: heiltall = 0
+        mens i < lengde(mi) {
+            la namn = tekst(mi[i])
+            hvis ikkje har_tekst(initializers, namn) { legg_til(initializers, namn) }
+            i = i + 1
+        }
+    }
+    hvis finnes_nøkkel(ncb, "global_names") {
+        la gn = ncb["global_names"]
+        la modular = nøkler(gn)
+        la i: heiltall = 0
+        mens i < lengde(modular) {
+            la modul = tekst(modular[i])
+            hvis finnes_nøkkel(globale, modul) {
+                la eksisterande = globale[modul]
+                la nye = gn[modul]
+                la j: heiltall = 0
+                mens j < lengde(nye) {
+                    la namn = tekst(nye[j])
+                    la funne = usann
+                    la k: heiltall = 0
+                    mens k < lengde(eksisterande) {
+                        hvis tekst(eksisterande[k]) == namn { funne = sann }
+                        k = k + 1
+                    }
+                    hvis ikkje funne { legg_til(eksisterande, namn) }
+                    j = j + 1
+                }
+                globale[modul] = eksisterande
+            } ellers {
+                globale[modul] = gn[modul]
+            }
+            i = i + 1
+        }
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = root + "/dist/norscode_native"
+    la configured_native = env("NORSCODE_NATIVE_BIN")
+    hvis configured_native != "" { native = configured_native }
+    la driver = root + "/build/l5/compiler_driver.ncb.json"
+    la kandidat_dir = env("NC_FULLHOST_DIR")
+    hvis kandidat_dir == "" { kandidat_dir = root + "/build/fullhost/source-nc_main" }
+    la utfil = env("NC_FULLHOST_OUT")
+    hvis utfil == "" { utfil = root + "/build/fullhost/nc_main_fullhost_candidate.ncb.json" }
+    la gjenbruk = env("NC_FULLHOST_REUSE") == "1"
+
+    hvis ikkje fil_finst(native) {
+        linje("✗ Treng dist/norscode_native. Køyr: ./bin/nc fetch-stage0-seed")
+        returner 1
+    }
+    hvis ikkje fil_finst(driver) {
+        linje("✗ Treng " + driver + ". Køyr: ./bin/nc selfcompile-l5")
+        returner 1
+    }
+    prøv { builtin.mkdir_p(kandidat_dir) } fang (e) {
+        linje("[FEIL] kan ikkje opprette " + kandidat_dir + ": " + tekst(e))
+        returner 1
+    }
+
+    linje("=== Fullhost-materialisering: nc_main-bundle i isolerte prosessar ===")
+    la specs = builtin.split(bundle_specs(), " ")
+    la maks_rss: heiltall = 0
+    la maks_rss_kilde = ""
+    // Bundelfragmenta i rekkjefølgje (kandidatfiler som skal strøymast).
+    la fragmentfiler: liste_tekst = []
+
+    la i: heiltall = 0
+    mens i < lengde(specs) {
+        la spec = builtin.trim(specs[i])
+        hvis spec == "" {
+            i = i + 1
+            fortsett
+        }
+        la modul = spec_modul(spec)
+        la rel_sti = spec_sti(spec)
+        la kjelde_sti = root + "/" + rel_sti
+        la prefiks = fragment_prefiks(modul)
+        hvis prefiks != "" {
+            la delt_kjelde = builtin.fil_les(kjelde_sti)
+            la bitar = source_bitar(delt_kjelde, kandidat_dir, prefiks, root)
+            la kjende = source_funksjonsnamn(delt_kjelde)
+            la bit_i: heiltall = 0
+            mens bit_i < lengde(bitar) {
+                la bit_ut = kandidat_dir + "/" + prefiks + "-source-part-" + tekst_fra_heltall(bit_i) + ".ncb.json"
+                hvis gjenbruk og fil_finst(bit_ut) {
+                    linje("  [HOPP] " + modul + " del " + tekst_fra_heltall(bit_i))
+                } ellers {
+                    la rss = kompiler_isolert(root, native, driver, bitar[bit_i], bit_ut, modul, kjende,
+                                              modul + " del " + tekst_fra_heltall(bit_i))
+                    hvis rss < 0 { returner 1 }
+                    hvis rss > maks_rss {
+                        maks_rss = rss
+                        maks_rss_kilde = modul + " del " + tekst_fra_heltall(bit_i)
+                    }
+                    linje("  [OK] " + modul + " del " + tekst_fra_heltall(bit_i) + " (topp-RSS " + mb(rss) + ")")
+                }
+                legg_til(fragmentfiler, bit_ut)
+                bit_i = bit_i + 1
+            }
+        } ellers {
+            la ut = kandidat_dir + "/" + kandidat_namn(rel_sti)
+            hvis gjenbruk og fil_finst(ut) {
+                linje("  [HOPP] " + modul)
+            } ellers {
+                la rss = kompiler_isolert(root, native, driver, kjelde_sti, ut, modul, "", modul)
+                hvis rss < 0 { returner 1 }
+                hvis rss > maks_rss {
+                    maks_rss = rss
+                    maks_rss_kilde = modul
+                }
+                linje("  [OK] " + modul + " (topp-RSS " + mb(rss) + ")")
+            }
+            legg_til(fragmentfiler, ut)
+        }
+        i = i + 1
+    }
+    linje("  Høgaste barneprosess-RSS: " + mb(maks_rss) + " (" + maks_rss_kilde + ")")
+
+    // Metadata: feltform frå nc_main-kandidaten, initializers/globals fletta
+    // frå alle kandidatane, entry sett til nc_main.
+    linje("  [bundle] flettar metadata frå " + tekst_fra_heltall(lengde(fragmentfiler)) + " kandidatar")
+    // Feltforma er lik for alle kandidatar frå same kompilator; bruk den første.
+    la metadata = builtin.json_parse_raw(builtin.fil_les(fragmentfiler[0]))
+    hvis finnes_nøkkel(metadata, "functions") { fjern_nokkel(metadata, "functions") }
+    la initializers: liste_tekst = []
+    la globale = {}
+    la fi: heiltall = 0
+    mens fi < lengde(fragmentfiler) {
+        flett_metadata(fragmentfiler[fi], initializers, globale)
+        fi = fi + 1
+    }
+    la entry_namn = env("NC_MAT_ENTRY")
+    hvis entry_namn == "" { entry_namn = "selfhost.nc_main.start" }
+    metadata["entry"] = entry_namn
+    metadata["module_initializers"] = initializers
+    metadata["global_names"] = globale
+    la metadata_json = builtin.json_stringify(metadata)
+
+    // Samanslåing av functions med dedup på funksjonsnamn. Fleire fragment kan
+    // generere same __module_init__ (kvart som deklarerer modul-globalar), og
+    // JSON kan ikkje ha duplikatnøklar. Parse per fragment (kvart <400 KB;
+    // verktøyet køyrer i VM-en der json_stringify er trygt) og emitter berre
+    // uSette namn. Første observasjon vinn → fragment 0 sitt komplette
+    // __module_init__ (deklarerer alle globalane inline).
+    linje("  [bundle] flettar functions med dedup")
+    la deler: liste_tekst = []
+    legg_til(deler, builtin.slice(metadata_json, 0, lengde(metadata_json) - 1) + ",\"functions\":{")
+    la sett_seen = {}
+    la første = sann
+    la dropp: heiltall = 0
+    fi = 0
+    mens fi < lengde(fragmentfiler) {
+        la fragncb = builtin.json_parse_raw(builtin.fil_les(fragmentfiler[fi]))
+        la ffns = fragncb["functions"]
+        la fnavn = nøkler(ffns)
+        la fj: heiltall = 0
+        mens fj < lengde(fnavn) {
+            la namn = fnavn[fj]
+            hvis finnes_nøkkel(sett_seen, namn) {
+                dropp = dropp + 1
+            } ellers {
+                sett_seen[namn] = sann
+                hvis ikkje første { legg_til(deler, ",") }
+                legg_til(deler, "\"" + namn + "\":" + builtin.json_stringify(ffns[namn]))
+                første = usann
+            }
+            fj = fj + 1
+        }
+        fi = fi + 1
+    }
+    legg_til(deler, "}}")
+    hvis dropp > 0 { linje("  [bundle] dropp av " + tekst_fra_heltall(dropp) + " duplikat-funksjonar (t.d. __module_init__)") }
+    hvis slett_hvis_finst(utfil) != 0 {
+        linje("[FEIL] kan ikkje fjerne gammal bundle " + utfil)
+        returner 1
+    }
+    builtin.fil_skriv(utfil, builtin.join(deler, ""))
+    linje("  [OK] " + utfil + " skriven")
+
+    // Sanity: bundelen må vere parsbar JSON med entry-funksjonen til stades.
+    la kontroll = builtin.json_parse_raw(builtin.fil_les(utfil))
+    la fns = kontroll["functions"]
+    hvis ikkje finnes_nøkkel(fns, entry_namn) {
+        linje("[FEIL] bundelen manglar entry " + entry_namn)
+        returner 1
+    }
+    linje("  [OK] bundle-parse: " + tekst_fra_heltall(lengde(nøkler(fns))) + " funksjonar, " +
+          tekst_fra_heltall(lengde(initializers)) + " module_initializers")
+    linje("")
+    linje("Ferdig. Høgaste barneprosess-RSS " + mb(maks_rss) + " — flyten er innanfor 8 GB-budsjettet.")
+    returner 0
+}

@@ -1,0 +1,115 @@
+bruk std.socket som socket
+
+funksjon vent_aksept(listener: ordbok_tekst) -> ordbok_tekst {
+    la i = 0
+    mens i < 300 {
+        la peer = socket.native_aksepter(listener)
+        hvis peer["status"] == "connected" { returner peer }
+        socket.native_poll_vent(listener, 1, 100)
+        i = i + 1
+    }
+    returner {"status": "feil"}
+}
+
+funksjon les(peer: ordbok_tekst) -> tekst {
+    la i = 0
+    mens i < 300 {
+        la r = socket.native_les(peer, 65536)
+        hvis r["status"] == "ok" { returner r["data"] }
+        hvis r["status"] == "feil" eller r["status"] == "eof" { returner "" }
+        socket.native_poll_vent(peer, 3, 100)
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon skriv_alt(peer: ordbok_tekst, data: tekst) -> boolsk {
+    la p = 0
+    mens p < lengde(data) {
+        la r = socket.native_skriv(peer, builtin.slice(data, p, lengde(data)))
+        hvis r["status"] == "ventende" { socket.native_poll_vent(peer, 3, 100) }
+        ellers hvis r["status"] != "ok" { returner usann }
+        ellers { p = p + heltall_fra_tekst(tekst(r["value"])) }
+    }
+    returner sann
+}
+
+funksjon les_til(peer: ordbok_tekst, marker: tekst, maks: heiltall) -> tekst {
+    la out = ""
+    la i = 0
+    mens i < 300 og lengde(out) < maks {
+        la del = les(peer)
+        hvis del == "" { returner out }
+        out = out + del
+        hvis builtin.index_of(out, marker) >= 0 { returner out }
+        i = i + 1
+    }
+    returner out
+}
+
+funksjon krev(peer: ordbok_tekst, prefix: tekst, svar: tekst) -> boolsk {
+    la got = les(peer)
+    hvis ikkje builtin.starts_with(got, prefix) { skriv("venta " + prefix + ", fekk " + got + "\n") returner usann }
+    returner skriv_alt(peer, svar)
+}
+
+funksjon tls_handshake(peer: ordbok_tekst) -> boolsk {
+    la hs = socket.native_tls_handshake(peer)
+    la i = 0
+    mens hs["status"] == "ventende" og i < 300 {
+        socket.native_poll_vent(peer, 3, 100)
+        hs = socket.native_tls_handshake(peer)
+        i = i + 1
+    }
+    returner hs["status"] == "connected"
+}
+
+funksjon køyr_dialog(peer: ordbok_tekst, implicit_tls: boolsk) -> boolsk {
+    hvis implicit_tls og ikkje tls_handshake(peer) { returner usann }
+    hvis ikkje skriv_alt(peer, "220 test ESMTP ready\r\n") { returner usann }
+    hvis implicit_tls {
+        hvis ikkje krev(peer, "EHLO ", "250-test-secure\r\n250 AUTH PLAIN LOGIN\r\n") { returner usann }
+    } ellers {
+        hvis ikkje krev(peer, "EHLO ", "250-test\r\n250-STARTTLS\r\n250 AUTH PLAIN LOGIN\r\n") { returner usann }
+        hvis ikkje krev(peer, "STARTTLS", "220 2.0.0 Begin TLS\r\n") { returner usann }
+        la up = socket.native_tls_oppgrader_server(peer, "tests/fixtures/tls/localhost.crt", "tests/fixtures/tls/localhost.key")
+        hvis up["status"] != "tls_ready" eller ikkje tls_handshake(peer) { returner usann }
+        hvis ikkje krev(peer, "EHLO ", "250-test-secure\r\n250 AUTH PLAIN LOGIN\r\n") { returner usann }
+    }
+    hvis ikkje krev(peer, "AUTH PLAIN ", "235 2.7.0 authenticated\r\n") { returner usann }
+    hvis ikkje krev(peer, "MAIL FROM:<sender@example.test>", "250 2.1.0 sender ok\r\n") { returner usann }
+    hvis ikkje krev(peer, "RCPT TO:<receiver@example.test>", "250 2.1.5 recipient ok\r\n") { returner usann }
+    hvis ikkje krev(peer, "DATA", "354 end with dot\r\n") { returner usann }
+    la body = les_til(peer, "\r\n.\r\n", 1048576)
+    hvis builtin.index_of(body, "Content-Type: multipart/mixed") < 0 { skriv("manglar mixed\n") returner usann }
+    hvis builtin.index_of(body, "Content-Type: multipart/alternative") < 0 { skriv("manglar alternative\n") returner usann }
+    hvis builtin.index_of(body, "Content-Disposition: attachment") < 0 { skriv("manglar attachment\n") returner usann }
+    hvis builtin.index_of(body, "\r\n..dot-stuffed\r\n") < 0 { skriv("manglar dot-stuff\n") returner usann }
+    hvis builtin.index_of(body, "\r\nAP8RQQ==\r\n") < 0 { skriv("manglar binært vedlegg\n") returner usann }
+    hvis ikkje builtin.ends_with(body, "\r\n.\r\n") { skriv("manglar terminal\n") returner usann }
+    hvis ikkje skriv_alt(peer, "250 2.0.0 queued provider-123\r\n") { returner usann }
+    hvis ikkje krev(peer, "QUIT", "221 2.0.0 bye\r\n") { returner usann }
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    la port = heltall_fra_tekst(miljo_hent("NORSCODE_SMTP_E2E_PORT"))
+    la mode = miljo_hent("NORSCODE_SMTP_E2E_MODE")
+    hvis mode == "" { mode = "starttls" }
+    la listener = hvis mode == "implicit" da socket.native_tls_lytt("127.0.0.1", port, 8, "tests/fixtures/tls/localhost.crt", "tests/fixtures/tls/localhost.key") ellers socket.native_lytt("127.0.0.1", port, 8)
+    hvis listener["status"] != "listening" { returner 1 }
+    la peer = vent_aksept(listener)
+    hvis peer["status"] != "connected" { returner 1 }
+    hvis mode == "retry" {
+        skriv_alt(peer, "421 4.3.0 temporary test failure\r\n")
+        socket.native_lukk(peer)
+        peer = vent_aksept(listener)
+        hvis peer["status"] != "connected" { returner 1 }
+    }
+    hvis ikkje køyr_dialog(peer, mode == "implicit") { returner 1 }
+    socket.native_poll_vent(peer, 1, 500)
+    socket.native_lukk(peer)
+    socket.native_lukk(listener)
+    skriv("smtp_" + mode + "_server OK\n")
+    returner 0
+}

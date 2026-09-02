@@ -1,0 +1,99 @@
+bruk std.socket som socket
+
+funksjon vent_aksept(listener: ordbok_tekst) -> ordbok_tekst {
+    la i = 0
+    mens i < 300 {
+        la peer = socket.native_aksepter(listener)
+        hvis peer["status"] == "connected" { returner peer }
+        socket.native_poll_vent(listener, 1, 100)
+        i = i + 1
+    }
+    returner {"status": "feil"}
+}
+
+funksjon handshake(peer: ordbok_tekst) -> boolsk {
+    la r = socket.native_tls_handshake(peer)
+    la i = 0
+    mens r["status"] == "ventende" og i < 300 { socket.native_poll_vent(peer, 3, 100) r = socket.native_tls_handshake(peer) i = i + 1 }
+    returner r["status"] == "connected"
+}
+
+funksjon les(peer: ordbok_tekst) -> tekst {
+    la i = 0
+    mens i < 300 {
+        la r = socket.native_les(peer, 65536)
+        hvis r["status"] == "ok" { returner r["data"] }
+        hvis r["status"] == "feil" eller r["status"] == "eof" { returner "" }
+        socket.native_poll_vent(peer, 3, 100)
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon skriv_alt(peer: ordbok_tekst, data: tekst) -> boolsk {
+    la p = 0
+    mens p < lengde(data) {
+        la r = socket.native_skriv(peer, builtin.slice(data, p, lengde(data)))
+        hvis r["status"] == "ventende" { socket.native_poll_vent(peer, 3, 100) }
+        ellers hvis r["status"] != "ok" { returner usann }
+        ellers { p = p + heltall_fra_tekst(tekst(r["value"])) }
+    }
+    returner sann
+}
+
+funksjon tag_fra(line: tekst) -> tekst { returner builtin.split(builtin.trim(line), " ")[0] }
+
+funksjon svar(peer: ordbok_tekst, expected: tekst, payload: tekst) -> boolsk {
+    la got = les(peer)
+    hvis builtin.index_of(got, expected) < 0 { skriv("venta " + expected + ", fekk " + got + "\n") returner usann }
+    returner skriv_alt(peer, builtin.replace(payload, "$TAG", tag_fra(got)))
+}
+
+funksjon ny_tls_peer(listener: ordbok_tekst, starttls: boolsk) -> ordbok_tekst {
+    la peer = vent_aksept(listener)
+    hvis peer["status"] != "connected" { returner {"status": "feil"} }
+    hvis starttls {
+        hvis ikkje skriv_alt(peer, "* OK Norscode IMAP ready\r\n") { returner {"status": "feil"} }
+        hvis ikkje svar(peer, " STARTTLS", "$TAG OK Begin TLS\r\n") { returner {"status": "feil"} }
+        la up = socket.native_tls_oppgrader_server(peer, "tests/fixtures/tls/localhost.crt", "tests/fixtures/tls/localhost.key")
+        hvis up["status"] != "tls_ready" eller ikkje handshake(peer) { returner {"status": "feil"} }
+        returner peer
+    }
+    hvis ikkje handshake(peer) { returner {"status": "feil"} }
+    hvis ikkje skriv_alt(peer, "* OK Norscode IMAP ready\r\n") { returner {"status": "feil"} }
+    returner peer
+}
+
+funksjon start() -> heiltall {
+    la port = heltall_fra_tekst(miljo_hent("NORSCODE_IMAP_E2E_PORT"))
+    la mode = miljo_hent("NORSCODE_IMAP_E2E_MODE")
+    la starttls = mode == "starttls"
+    la listener = hvis starttls da socket.native_lytt("127.0.0.1", port, 8) ellers socket.native_tls_lytt("127.0.0.1", port, 8, "tests/fixtures/tls/localhost.crt", "tests/fixtures/tls/localhost.key")
+    hvis listener["status"] != "listening" { returner 1 }
+
+    la peer = ny_tls_peer(listener, starttls)
+    hvis peer["status"] != "connected" { returner 1 }
+    hvis ikkje svar(peer, " LOGIN ", "$TAG OK LOGIN complete\r\n") { returner 1 }
+    hvis ikkje svar(peer, " SELECT ", "* 2 EXISTS\r\n$TAG OK [READ-WRITE] SELECT complete\r\n") { returner 1 }
+    hvis ikkje svar(peer, " LIST ", "* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n$TAG OK LIST complete\r\n") { returner 1 }
+    la search = les(peer)
+    hvis builtin.index_of(search, " UID SEARCH UNSEEN") < 0 { returner 1 }
+    socket.native_lukk(peer)
+
+    peer = ny_tls_peer(listener, starttls)
+    hvis peer["status"] != "connected" { returner 1 }
+    hvis ikkje svar(peer, " LOGIN ", "$TAG OK LOGIN complete\r\n") { returner 1 }
+    hvis ikkje svar(peer, " SELECT ", "* 2 EXISTS\r\n$TAG OK [READ-WRITE] SELECT complete\r\n") { returner 1 }
+    hvis ikkje svar(peer, " UID SEARCH UNSEEN", "* SEARCH 42 77\r\n$TAG OK SEARCH complete\r\n") { returner 1 }
+
+    la body = "From: sender@example.test\r\nTo: receiver@example.test\r\nSubject: Hei frå IMAP\r\nDate: Tue, 5 Aug 2026 12:00:00 +0200\r\n\r\nN8 OK dette er literaltekst"
+    la fetch_payload = "* 1 FETCH (UID 42 FLAGS (\\Seen \\Flagged) BODY[] {" + tekst_fra_heltall(lengde(body)) + "}\r\n" + body + ")\r\n$TAG OK FETCH complete\r\n"
+    hvis ikkje svar(peer, " UID FETCH 42 ", fetch_payload) { returner 1 }
+    hvis ikkje svar(peer, " UID FETCH 42 ", fetch_payload) { returner 1 }
+    hvis ikkje svar(peer, " UID STORE 42 +FLAGS.SILENT (\\Seen)", "$TAG OK STORE complete\r\n") { returner 1 }
+    hvis ikkje svar(peer, " LOGOUT", "* BYE logging out\r\n$TAG OK LOGOUT complete\r\n") { returner 1 }
+    socket.native_lukk(peer)
+    socket.native_lukk(listener)
+    skriv("imap_tls_server OK\n")
+    returner 0
+}

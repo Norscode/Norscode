@@ -9,7 +9,8 @@ Repoet kan no:
 - bygge Linux-native binær som før
 - bygge ein `AppDir`-struktur
 - pakke `AppDir` som `.tar.gz`
-- prøve å bygge `AppImage` naar køyringa skjer paa Linux med `appimagetool`
+- byggje `AppImage` berre når den valfrie, eksplisitte
+  `appimage-adapter`-vegen blir vald på Linux
 
 ## Standard køyring
 
@@ -25,7 +26,8 @@ Det gjev:
 
 Og i tillegg:
 
-- `release-artifacts/Norscode-linux-<versjon>.AppImage` naar Linux + `appimagetool` finst
+- valfritt `release-artifacts/Norscode-linux-<versjon>.AppImage` etter
+  `--format appimage-adapter`
 
 ## Kvifor denne forma først
 
@@ -38,7 +40,7 @@ Denne omgongen beviser:
 
 - Linux app-layout
 - tarball-artefakt
-- AppImage-best-effort
+- ingen skjult AppImage-/appimagetool-avhengigheit i normalflyten
 
 Det beviser ikkje enno:
 

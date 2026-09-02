@@ -1,0 +1,83 @@
+bruk std.socket som socket
+bruk std.fjern_agent som agent
+
+// M6: autentisert fjern-eksekvering over socket (loopback-bevis).
+//
+// Ein agent-tråd aksepterer ei tilkopling og handterer éin HMAC-autentisert
+// exec-forespurnad via std.fjern_agent; hovudtråden er klient. Verifiserer at
+// rett token gir køyrd kommando (stdout/exit), og at feil token blir avvist.
+//
+// Krev net.tcp/127.0.0.1 + thread.spawn + process.exec/'/usr/bin/printf'
+// (gitt av testløparen; sjå tools/nc_test.no).
+
+funksjon _accept_klar(lh: tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["handle"] = lh
+    la peer = {"status": "ventende"}
+    la deadline = builtin.tid_ms() + 10000
+    mens tekst(peer["status"]) == "ventende" og builtin.tid_ms() < deadline {
+        peer = socket.native_aksepter(h)
+    }
+    returner peer
+}
+
+// Agent-tråd: aksepter éi tilkopling og handter éin exec-forespurnad.
+funksjon agent_worker(args: ordbok_tekst) -> tekst {
+    la peer = _accept_klar(args["listener_handle"])
+    hvis tekst(peer["status"]) != "connected" { returner "accept:" + tekst(peer["status"]) }
+    la tillatne: liste_tekst = ["printf"]
+    returner agent.agent_handter_ei(peer, args["token"], tillatne)
+}
+
+funksjon _spawn_agent(lh: tekst, token: tekst) -> ordbok_tekst {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn",
+        "fn": "__main__.agent_worker",
+        "args": {"listener_handle": lh, "token": token},
+        "name": "agent", "stack_bytes": "262144"})
+}
+
+funksjon _join(t: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": "15000"})
+}
+
+funksjon start() -> heiltall {
+    la token = "hemmeleg-delt-token-0xABCDEF"
+
+    // ── 1) Rett token → kommando køyrer ──────────────────────────────────
+    la l1 = socket.native_lytt("127.0.0.1", 0, 16)
+    assert(tekst(l1["status"]) == "listening")
+    la p1 = heltall_fra_tekst(tekst(l1["port"]))
+    la a1 = _spawn_agent(l1["handle"], token)
+    la c1 = socket.native_tilkoble("127.0.0.1", p1)
+    la argv: liste_tekst = ["/usr/bin/printf", "hei-fra-agent"]
+    la res = agent.klient_exec(c1, token, argv)
+    assert(tekst(_join(a1)["value"]) == "ok")
+    assert(heltall_fra_tekst(tekst(res["exit"])) == 0)
+    assert(builtin.index_of(tekst(res["stdout"]), "hei-fra-agent") >= 0)
+    socket.native_lukk(l1)
+
+    // ── 2) Feil token → avvist, kommando køyrer ikkje ────────────────────
+    la l2 = socket.native_lytt("127.0.0.1", 0, 16)
+    la p2 = heltall_fra_tekst(tekst(l2["port"]))
+    la a2 = _spawn_agent(l2["handle"], token)
+    la c2 = socket.native_tilkoble("127.0.0.1", p2)
+    la res2 = agent.klient_exec(c2, "feil-token", argv)
+    assert(tekst(_join(a2)["value"]) == "auth-avvist")
+    assert(heltall_fra_tekst(tekst(res2["exit"])) == -1)
+    assert(builtin.index_of(tekst(res2["stderr"]), "auth") >= 0)
+    socket.native_lukk(l2)
+
+    // ── 3) Ikkje-allowlista kommando → avvist ────────────────────────────
+    la l3 = socket.native_lytt("127.0.0.1", 0, 16)
+    la p3 = heltall_fra_tekst(tekst(l3["port"]))
+    la a3 = _spawn_agent(l3["handle"], token)
+    la c3 = socket.native_tilkoble("127.0.0.1", p3)
+    la res3 = agent.klient_exec(c3, token, ["/bin/ls", "-la"])
+    assert(tekst(_join(a3)["value"]) == "avvist")
+    assert(heltall_fra_tekst(tekst(res3["exit"])) == -1)
+    socket.native_lukk(l3)
+
+    skriv("test_fjern_agent_loopback: OK (9 assertar)\n")
+    returner 0
+}

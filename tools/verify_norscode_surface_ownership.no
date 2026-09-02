@@ -1,5 +1,7 @@
 // tools/verify_norscode_surface_ownership.no — samla eigarskapsgate
 
+bruk std.runtime_filesystem som native_fs
+
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
     returner 0
@@ -10,44 +12,11 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(s: tekst) -> tekst {
-    returner "'" + builtin.replace(s, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
+funksjon trace(melding: tekst) -> heiltall {
+    hvis env("NORSCODE_PHASE0_TRACE") == "on" {
+        linje("[phase0] " + melding)
     }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
-}
-
-funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
-funksjon trim(t: tekst) -> tekst {
-    returner builtin.trim(t)
-}
-
-funksjon run_check(cmd: tekst, title: tekst) -> bool {
-    la res = kommando(cmd)
-    hvis ok(res) {
-        linje("OK: " + title)
-        hvis trim(felt(res, 1)) != "" { skriv(felt(res, 1)) }
-        returner sann
-    }
-    linje("FEIL: " + title)
-    hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
-    hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
-    returner usann
+    returner 0
 }
 
 funksjon fil_inneheld(sti: tekst, needle: tekst) -> bool {
@@ -68,15 +37,8 @@ funksjon sluttar_med(t: tekst, suffiks: tekst) -> bool {
     returner builtin.slice(t, lengde(t) - lengde(suffiks), lengde(t)) == suffiks
 }
 
-funksjon fjern_dot_slash(sti: tekst) -> tekst {
-    hvis startar_med(sti, "./") { returner builtin.slice(sti, 2, lengde(sti)) }
-    returner sti
-}
-
 funksjon aktiv_rel(sti: tekst) -> bool {
     hvis sti == "" { returner usann }
-    // build/ is generated output, not active source ownership surface.
-    hvis startar_med(sti, "build/") { returner usann }
     hvis startar_med(sti, "archive/") { returner usann }
     hvis startar_med(sti, "ai_assistent") { returner usann }
     hvis startar_med(sti, "ai_assistent_bak_") { returner usann }
@@ -84,18 +46,207 @@ funksjon aktiv_rel(sti: tekst) -> bool {
     returner sann
 }
 
-funksjon liste_aktive_filer(root: tekst, mønster: tekst) -> liste_tekst {
-    la res = kommando("cd " + shell(root) + " && find . -path ./.git -prune -o " + mønster + " -print")
-    la ut: liste_tekst = []
-    hvis ikkje ok(res) { returner ut }
-    la linjer = builtin.split(felt(res, 1), "\n")
+funksjon har_eitt_suffiks(sti: tekst, suffiksar: liste_tekst) -> bool {
     la i = 0
-    mens i < lengde(linjer) {
-        la rel = fjern_dot_slash(trim(linjer[i]))
-        hvis aktiv_rel(rel) { legg_til(ut, rel) }
+    mens i < lengde(suffiksar) {
+        hvis sluttar_med(sti, suffiksar[i]) { returner sann }
         i = i + 1
     }
+    returner usann
+}
+
+funksjon traverser_katalog(rel: tekst) -> bool {
+    hvis rel == ".norscode" eller startar_med(rel, ".norscode/") { returner usann }
+    hvis rel == "build" { returner sann }
+    hvis startar_med(rel, "build/") {
+        hvis rel == "build/v3009" eller startar_med(rel, "build/v3009/") { returner sann }
+        hvis rel == "build/v9630" eller startar_med(rel, "build/v9630/") { returner sann }
+        hvis rel == "build/v9646" eller startar_med(rel, "build/v9646/") { returner sann }
+        returner usann
+    }
+    returner sann
+}
+
+// `build/` er ei generert arbeidsflate, ikkje aktiv kjelde. Tre historiske,
+// committed rotartefaktar blir framleis kontrollerte eksplisitt; vilkårlege
+// kandidat-mellomfiler skal ikkje gjere eigarskapsgaten arbeidsmappeavhengig.
+funksjon inkluder_bygg_rotfil(rel: tekst) -> bool {
+    returner rel == "build/bootstrap_compiler_bundle_ncb_data.c" eller
+             rel == "build/native_elf_compiler_bundle_ncb_data.c" eller
+             rel == "build/runtime_before_hex_json_fix.c"
+}
+
+funksjon legg_til_walk_filer(root: tekst, relativ: tekst,
+                              suffiksar: liste_tekst, ut: liste_tekst) -> bool {
+    trace("walk start " + relativ)
+    la walk = native_fs.native_walk_files_med_suffiks(
+        root, relativ, builtin.join(suffiksar, ","))
+    trace("walk ferdig " + relativ + ": status=" + tekst(walk["status"]) +
+          " value=" + tekst(walk["value"]) + " error=" + tekst(walk["error"]))
+    hvis walk["status"] != "ok" { returner usann }
+    la filer = builtin.split(walk["data"], "\n")
+    la i = 0
+    mens i < lengde(filer) {
+        la rel = builtin.trim(filer[i])
+        hvis rel != "" og aktiv_rel(rel) og har_eitt_suffiks(rel, suffiksar) {
+            legg_til(ut, rel)
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon liste_aktive_filer_walk_samla(root: tekst,
+                                        suffiksar: liste_tekst) -> ordbok_tekst {
+    la ut: liste_tekst = []
+    trace("samla rotvandring start")
+    la walk = native_fs.native_walk_files_filtrert(
+        root, "", builtin.join(suffiksar, ","),
+        "archive,.norscode,build,.git,ai_assistent*,tests_bak_*")
+    trace("samla rotvandring ferdig: status=" + tekst(walk["status"]) +
+          " value=" + tekst(walk["value"]) + " error=" + tekst(walk["error"]))
+    hvis walk["status"] != "ok" { returner {"status": "feil", "filer": ut} }
+    la filer = builtin.split(walk["data"], "\n")
+    la i = 0
+    mens i < lengde(filer) {
+        la rel = builtin.trim(filer[i])
+        hvis rel != "" og aktiv_rel(rel) og har_eitt_suffiks(rel, suffiksar) {
+            legg_til(ut, rel)
+        }
+        i = i + 1
+    }
+
+    // Build blir pruna frå rotvandringa. Berre direkte artefaktar og dei tre
+    // eksplisitt eigde historiske kandidatkatalogane blir tekne med.
+    la build = native_fs.native_list_typed(root, "build")
+    hvis build["status"] != "ok" { returner {"status": "feil", "filer": ut} }
+    la records = builtin.split(build["data"], "\n")
+    i = 0
+    mens i < lengde(records) {
+        la record = builtin.trim(records[i])
+        hvis lengde(record) >= 3 og builtin.slice(record, 1, 2) == "\t" {
+            la kind = builtin.slice(record, 0, 1)
+            la namn = builtin.slice(record, 2, lengde(record))
+            la brel = "build/" + namn
+            hvis (kind == "f" eller kind == "l") og inkluder_bygg_rotfil(brel) og har_eitt_suffiks(brel, suffiksar) {
+                legg_til(ut, brel)
+            } ellers hvis kind == "d" og traverser_katalog(brel) {
+                hvis ikkje legg_til_walk_filer(root, brel, suffiksar, ut) {
+                    returner {"status": "feil", "filer": ut}
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner {"status": "ok", "filer": ut}
+}
+
+funksjon liste_aktive_filer_walk(root: tekst, suffiksar: liste_tekst) -> ordbok_tekst {
+    la ut: liste_tekst = []
+    la top = native_fs.native_list_typed(root, "")
+    hvis top["status"] != "ok" { returner {"status": "feil", "filer": ut} }
+    la records = builtin.split(top["data"], "\n")
+    la i = 0
+    mens i < lengde(records) {
+        la record = builtin.trim(records[i])
+        hvis lengde(record) >= 3 og builtin.slice(record, 1, 2) == "\t" {
+            la kind = builtin.slice(record, 0, 1)
+            la namn = builtin.slice(record, 2, lengde(record))
+            hvis aktiv_rel(namn) {
+                hvis kind == "f" eller kind == "l" {
+                    hvis har_eitt_suffiks(namn, suffiksar) { legg_til(ut, namn) }
+                } ellers hvis kind == "d" {
+                    trace("inventory katalog " + namn)
+                    hvis namn == "build" {
+                        la build = native_fs.native_list_typed(root, "build")
+                        hvis build["status"] != "ok" { returner {"status": "feil", "filer": ut} }
+                        la build_records = builtin.split(build["data"], "\n")
+                        la bi = 0
+                        mens bi < lengde(build_records) {
+                            la br = builtin.trim(build_records[bi])
+                            hvis lengde(br) >= 3 og builtin.slice(br, 1, 2) == "\t" {
+                                la bk = builtin.slice(br, 0, 1)
+                                la bn = builtin.slice(br, 2, lengde(br))
+                                la brel = "build/" + bn
+                                hvis (bk == "f" eller bk == "l") og inkluder_bygg_rotfil(brel) og har_eitt_suffiks(brel, suffiksar) {
+                                    legg_til(ut, brel)
+                                } ellers hvis bk == "d" og traverser_katalog(brel) {
+                                    trace("inventory build-katalog " + brel)
+                                    hvis ikkje legg_til_walk_filer(root, brel, suffiksar, ut) {
+                                        returner {"status": "feil", "filer": ut}
+                                    }
+                                }
+                            }
+                            bi = bi + 1
+                        }
+                    } ellers hvis ikkje legg_til_walk_filer(root, namn, suffiksar, ut) {
+                        returner {"status": "feil", "filer": ut}
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner {"status": "ok", "filer": sorter_tekst(ut)}
+}
+
+funksjon liste_aktive_filer(root: tekst, suffiksar: liste_tekst) -> liste_tekst {
+    la samla = liste_aktive_filer_walk_samla(root, suffiksar)
+    hvis samla["status"] == "ok" { returner samla["filer"] }
+    la rask = liste_aktive_filer_walk(root, suffiksar)
+    hvis rask["status"] == "ok" { returner rask["filer"] }
+    la ut: liste_tekst = []
+    la kø: liste_tekst = [""]
+    la qi = 0
+    mens qi < lengde(kø) {
+        la katalog = kø[qi]
+        la listing = native_fs.native_list_typed(root, katalog)
+        la typed = listing["status"] == "ok"
+        hvis ikkje typed { listing = native_fs.native_list(root, katalog) }
+        hvis listing["status"] == "ok" {
+            la barn = builtin.split(listing["data"], "\n")
+            la bi = 0
+            mens bi < lengde(barn) {
+                la record = builtin.trim(barn[bi])
+                la kind = ""
+                la namn = record
+                hvis typed og lengde(record) >= 3 og builtin.slice(record, 1, 2) == "\t" {
+                    kind = builtin.slice(record, 0, 1)
+                    namn = builtin.slice(record, 2, lengde(record))
+                }
+                hvis namn != "" {
+                    la rel = namn
+                    hvis katalog != "" { rel = katalog + "/" + namn }
+                    hvis rel != ".git" og aktiv_rel(rel) {
+                        hvis kind == "d" {
+                            hvis traverser_katalog(rel) { legg_til(kø, rel) }
+                        } ellers hvis typed {
+                            hvis kind == "f" og har_eitt_suffiks(rel, suffiksar) {
+                                legg_til(ut, rel)
+                            }
+                        } ellers hvis native_fs.native_list(root, rel)["status"] == "ok" {
+                            hvis traverser_katalog(rel) { legg_til(kø, rel) }
+                        } ellers hvis har_eitt_suffiks(rel, suffiksar) {
+                            legg_til(ut, rel)
+                        }
+                    }
+                }
+                bi = bi + 1
+            }
+        }
+        qi = qi + 1
+    }
     returner sorter_tekst(ut)
+}
+
+funksjon filtrer_suffiks(filer: liste_tekst, suffiksar: liste_tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(filer) {
+        hvis har_eitt_suffiks(filer[i], suffiksar) { legg_til(ut, filer[i]) }
+        i = i + 1
+    }
+    returner ut
 }
 
 funksjon sett_inn_sortert(liste: liste_tekst, verdi: tekst) -> liste_tekst {
@@ -168,8 +319,7 @@ funksjon liste_til_tekst(liste: liste_tekst) -> tekst {
     returner ut
 }
 
-funksjon script_eigar_gate(root: tekst) -> bool {
-    la filer = liste_aktive_filer(root, "\\( -name '*.sh' -o -name '*.ps1' -o -name '*.js' -o -name '*.swift' \\)")
+funksjon script_eigar_gate_med_filer(root: tekst, filer: liste_tekst) -> bool {
     la ok_gate = sann
     la i = 0
     mens i < lengde(filer) {
@@ -186,12 +336,15 @@ funksjon script_eigar_gate(root: tekst) -> bool {
     returner ok_gate
 }
 
+funksjon script_eigar_gate(root: tekst) -> bool {
+    returner script_eigar_gate_med_filer(
+        root, liste_aktive_filer(root, [".sh", ".ps1", ".js", ".swift"]))
+}
+
 funksjon script_markor_ok(root: tekst, rel: tekst) -> bool {
     la sti = root + "/" + rel
     hvis sluttar_med(rel, ".sh") {
         hvis fil_inneheld(sti, "Norscode-first wrapper") { returner sann }
-        hvis rel == "tools/install.sh" og fil_inneheld(sti, "Bootstrap POSIX-installer") { returner sann }
-        hvis rel == "tools/omgang6b_compiler_bundle_args.inc.sh" og fil_inneheld(sti, "Norscode-first include") { returner sann }
         returner usann
     }
     hvis sluttar_med(rel, ".ps1") {
@@ -201,8 +354,7 @@ funksjon script_markor_ok(root: tekst, rel: tekst) -> bool {
     returner sann
 }
 
-funksjon script_markor_gate(root: tekst) -> bool {
-    la filer = liste_aktive_filer(root, "\\( -name '*.sh' -o -name '*.ps1' -o -name '*.js' -o -name '*.swift' \\)")
+funksjon script_markor_gate_med_filer(root: tekst, filer: liste_tekst) -> bool {
     la ok_gate = sann
     la i = 0
     mens i < lengde(filer) {
@@ -218,38 +370,48 @@ funksjon script_markor_gate(root: tekst) -> bool {
     returner ok_gate
 }
 
-funksjon c_overflate_gate(root: tekst) -> bool {
-    la actual = liste_aktive_filer(root, "-name '*.c'")
+funksjon script_markor_gate(root: tekst) -> bool {
+    returner script_markor_gate_med_filer(
+        root, liste_aktive_filer(root, [".sh", ".ps1", ".js", ".swift"]))
+}
+
+funksjon c_overflate_gate_med_filer(root: tekst, actual: liste_tekst) -> bool {
     hvis lengde(actual) == 0 {
         linje("OK: C-rest er avgrensa til kjende genererte artefaktar")
         returner sann
     }
-    la expected: liste_tekst = []
-    legg_til(expected, "build/bootstrap_compiler_bundle_ncb_data.c")
-    legg_til(expected, "build/native_elf_compiler_bundle_ncb_data.c")
-    legg_til(expected, "build/runtime_before_hex_json_fix.c")
-    legg_til(expected, "build/v3009/native_candidate_combined.c")
-    legg_til(expected, "build/v3009/native_candidate_gc.c")
-    legg_til(expected, "build/v3009/native_gc_stress.c")
-    legg_til(expected, "build/v3009/norscode_generated.c")
-    legg_til(expected, "build/v3009/norscode_generated_gc.c")
-    legg_til(expected, "build/v9630/native_candidate_linux.c")
-    legg_til(expected, "build/v9630/norscode_generated.c")
-    legg_til(expected, "build/v9646/native_candidate_linux_aarch64.c")
-    legg_til(expected, "build/v9646/native_candidate_linux_x86_64.c")
-    legg_til(expected, "build/v9646/native_candidate_macos.c")
-    legg_til(expected, "build/v9646/native_candidate_windows.c")
-    legg_til(expected, "build/v9646/norscode_generated.c")
-    legg_til(expected, "tests/fixtures/windows_process_fixture.c")
-    legg_til(expected, "tests/fixtures/windows_utf8_file_fixture.c")
-    legg_til(expected, "tests/native_gc_blocked_thread.c")
-    legg_til(expected, "tests/native_gc_exception_unwind.c")
-    legg_til(expected, "tests/native_gc_generational.c")
-    legg_til(expected, "tests/native_gc_lifecycle.c")
-    legg_til(expected, "tests/native_gc_relocation.c")
-    legg_til(expected, "tests/native_gc_threads.c")
-    expected = sorter_tekst(expected)
-    hvis berre_forventa(actual, expected) {
+    la expected: ordbok_tekst = {}
+    expected["build/bootstrap_compiler_bundle_ncb_data.c"] = "1"
+    expected["build/native_elf_compiler_bundle_ncb_data.c"] = "1"
+    expected["build/runtime_before_hex_json_fix.c"] = "1"
+    expected["build/v3009/native_candidate_combined.c"] = "1"
+    expected["build/v3009/native_argv_dispatch_candidate.c"] = "1"
+    expected["build/v3009/native_full_host_argv_candidate.c"] = "1"
+    expected["build/v3009/native_candidate_gc.c"] = "1"
+    expected["build/v3009/native_gc_stress.c"] = "1"
+    expected["build/v3009/norscode_generated.c"] = "1"
+    expected["build/v3009/norscode_generated_argv_candidate.c"] = "1"
+    expected["build/v3009/norscode_generated_argv_dispatch.c"] = "1"
+    expected["build/v3009/norscode_generated_full_host_argv.c"] = "1"
+    expected["build/v3009/norscode_generated_gc.c"] = "1"
+    expected["build/v3009/norscode_generated_main_argv.c"] = "1"
+    expected["build/v9630/native_candidate_linux.c"] = "1"
+    expected["build/v9630/norscode_generated.c"] = "1"
+    expected["build/v9646/native_candidate_linux_aarch64.c"] = "1"
+    expected["build/v9646/native_candidate_linux_x86_64.c"] = "1"
+    expected["build/v9646/native_candidate_macos.c"] = "1"
+    expected["build/v9646/native_candidate_windows.c"] = "1"
+    expected["build/v9646/norscode_generated.c"] = "1"
+    expected["tests/fixtures/windows_process_fixture.c"] = "1"
+    expected["tests/fixtures/windows_utf8_file_fixture.c"] = "1"
+    expected["third_party/sqlite/sqlite3.c"] = "1"
+    la berre_kjende = sann
+    la ai = 0
+    mens ai < lengde(actual) {
+        hvis ikkje finnes_nøkkel(expected, actual[ai]) { berre_kjende = usann }
+        ai = ai + 1
+    }
+    hvis berre_kjende {
         linje("OK: C-rest er avgrensa til kjende genererte artefaktar")
         returner sann
     }
@@ -257,6 +419,10 @@ funksjon c_overflate_gate(root: tekst) -> bool {
     linje("uventa C-overflate:")
     linje(liste_til_tekst(actual))
     returner usann
+}
+
+funksjon c_overflate_gate(root: tekst) -> bool {
+    returner c_overflate_gate_med_filer(root, liste_aktive_filer(root, [".c"]))
 }
 
 funksjon krev_filmarkor(root: tekst, rel: tekst, needle: tekst) -> bool {
@@ -270,8 +436,8 @@ funksjon krev_filmarkor_hvis_finnes(root: tekst, rel: tekst, needle: tekst) -> b
     returner krev_filmarkor(root, rel, needle)
 }
 
-funksjon c_artifact_markorar(root: tekst) -> bool {
-    hvis lengde(liste_aktive_filer(root, "-name '*.c'")) == 0 {
+funksjon c_artifact_markorar_med_filer(root: tekst, c_filer: liste_tekst) -> bool {
+    hvis lengde(c_filer) == 0 {
         linje("OK: ingen aktive C-artefaktar treng markørsjekk")
         returner sann
     }
@@ -285,15 +451,34 @@ funksjon c_artifact_markorar(root: tekst) -> bool {
     returner ok_markor
 }
 
+funksjon c_artifact_markorar(root: tekst) -> bool {
+    returner c_artifact_markorar_med_filer(root, liste_aktive_filer(root, [".c"]))
+}
+
+funksjon samla_eigarskap_gate(root: tekst) -> bool {
+    trace("ownership inventory start")
+    la alle = liste_aktive_filer(root, [".sh", ".ps1", ".js", ".swift", ".c"])
+    trace("ownership inventory ferdig: " + tekst_fra_heltall(lengde(alle)) + " relevante filer")
+    la scripts = filtrer_suffiks(alle, [".sh", ".ps1", ".js", ".swift"])
+    la c_filer = filtrer_suffiks(alle, [".c"])
+    la ok_all = sann
+    hvis ikkje script_eigar_gate_med_filer(root, scripts) { ok_all = usann }
+    trace("script-eigar ferdig")
+    hvis ikkje script_markor_gate_med_filer(root, scripts) { ok_all = usann }
+    trace("script-markør ferdig")
+    hvis ikkje c_overflate_gate_med_filer(root, c_filer) { ok_all = usann }
+    trace("C-overflate ferdig")
+    hvis ikkje c_artifact_markorar_med_filer(root, c_filer) { ok_all = usann }
+    trace("C-markør ferdig")
+    returner ok_all
+}
+
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(felt(kommando("pwd"), 1)) }
+    hvis root == "" { root = "." }
     la ok_all = sann
 
-    hvis ikkje script_eigar_gate(root) { ok_all = usann }
-    hvis ikkje script_markor_gate(root) { ok_all = usann }
-    hvis ikkje c_overflate_gate(root) { ok_all = usann }
-    hvis ikkje c_artifact_markorar(root) { ok_all = usann }
+    hvis ikkje samla_eigarskap_gate(root) { ok_all = usann }
 
     hvis ok_all {
         linje("=== Norscode surface ownership: BESTÅTT ===")

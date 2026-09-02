@@ -1,416 +1,367 @@
-# ftplib.no — FTP-klient
-# Python: ftplib
+# ftplib.no — prosessfri FTP-klient over Norscode native socket-ABI
 #
-# FTP-operasjonar med Norscode socket først for kontrollkanalen, og curl som
-# reserveveg for datakanal/filer til runtime får komplett FTP-dataflyt.
-# Støttar opplasting, nedlasting, listning og katalogoperasjonar.
-#
-# FTP-tilstand: ordbok_tekst
-#   "vert"     → vertsnamn
-#   "port"     → portnummer (tekst)
-#   "brukar"   → brukarnamn
-#   "passord"  → passord
-#   "passiv"   → "sann"/"usann"
-#   "tilkopla" → "sann"/"usann"
-#
-# Bruk:
-#   bruk std.ftplib som ftp
-#   la f = ftp.connect("ftp.example.com", 21)
-#   ftp.login(f, "brukar", "passord")
-#   la filer = ftp.nlst(f, "/")
-#   ftp.retrbinary(f, "fil.txt", "/lokal/fil.txt")
-#   ftp.quit(f)
+# Kontrollkanalen er persistent. Listing, nedlasting og opplasting brukar EPSV
+# eller PASV og ei separat native datakanal. Ingen curl- eller shellreserveveg.
 
 bruk std.socket som sok
+bruk std.bytes som bytes
+bruk std.struct som bin
 
-funksjon _shell(verdi: tekst) -> tekst {
-    returner "'" + builtin.replace(verdi, "'", "'\"'\"'") + "'"
-}
+funksjon _inneheld(s: tekst, nål: tekst) -> bool { returner builtin.index_of(s, nål) >= 0 }
+funksjon _starter_med(s: tekst, prefiks: tekst) -> bool { returner builtin.starts_with(s, prefiks) }
+funksjon _trim(s: tekst) -> tekst { returner builtin.trim(s) }
 
 funksjon _har_kontrollteikn(verdi: tekst) -> bool {
     returner _inneheld(verdi, "\n") eller _inneheld(verdi, "\r") eller _inneheld(verdi, "\t")
 }
 
 funksjon _trygg_felt(verdi: tekst) -> bool {
-    hvis verdi == "" { returner usann }
-    hvis _har_kontrollteikn(verdi) { returner usann }
-    hvis _inneheld(verdi, "`") { returner usann }
-    returner sann
+    returner verdi != "" og ikkje _har_kontrollteikn(verdi) og ikkje _inneheld(verdi, "`")
 }
 
 funksjon _trygg_sti(sti: tekst) -> bool {
-    hvis ikkje _trygg_felt(sti) { returner usann }
-    hvis _inneheld(sti, "..") { returner usann }
-    returner sann
+    returner _trygg_felt(sti) og ikkje _inneheld(sti, "..")
 }
 
 funksjon _trygg_lokal_sti(sti: tekst) -> bool {
-    hvis ikkje _trygg_felt(sti) { returner usann }
-    returner sann
+    returner _trygg_felt(sti) og sti != "/" og sti != "."
 }
 
-funksjon _trygg_tilstand(f: ordbok_tekst) -> bool {
-    hvis ikkje _trygg_felt(f["vert"]) { returner usann }
-    hvis ikkje _trygg_felt(f["port"]) { returner usann }
-    hvis ikkje _trygg_felt(f["brukar"]) { returner usann }
-    hvis ikkje _trygg_felt(f["passord"]) { returner usann }
-    returner sann
+funksjon _vent(h: ordbok_tekst, events: heiltall) -> bool {
+    returner sok.native_poll_vent(h, events, 5000)["status"] == "klar"
 }
 
-funksjon connect(vert: tekst, port: heltall) -> ordbok_tekst {
-    la f: ordbok_tekst = {}
-    f["vert"]     = vert
-    f["port"]     = tekst_fra_heltall(port)
-    f["brukar"]   = "anonymous"
-    f["passord"]  = "anonymous@"
-    f["passiv"]   = "sann"
-    f["tilkopla"] = "usann"
-    f["gjeldande_katalog"] = "/"
-    hvis ikkje _trygg_felt(vert) { returner f }
-    hvis _ftp_socket_kan_kople(f) {
-        f["tilkopla"] = "sann"
-        returner f
-    }
-    prøv {
-        la url: tekst = "ftp://" + vert + ":" + tekst_fra_heltall(port) + "/"
-        la res = builtin.exec_prosess("curl --connect-timeout 5 -s " + _shell(url) + " 2>&1")
-        f["tilkopla"] = "sann"
-    } fang (e) {}
-    returner f
-}
-
-funksjon connect_standard(vert: tekst) -> ordbok_tekst {
-    returner connect(vert, 21)
-}
-
-funksjon login(f: ordbok_tekst, brukar: tekst, passord: tekst) -> bool {
-    hvis ikkje _trygg_felt(brukar) eller ikkje _trygg_felt(passord) { returner usann }
-    f["brukar"]  = brukar
-    f["passord"] = passord
-    hvis ikkje _trygg_tilstand(f) { returner usann }
-    la svar = _ftp_kommando(f, "")
-    hvis svar != "" { returner _ftp_ok(svar) }
-    prøv {
-        la url: tekst = "ftp://" + brukar + ":" + passord + "@" + f["vert"] + ":" + f["port"] + "/"
-        la res = builtin.exec_prosess("curl --connect-timeout 5 -s " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) {
-        returner usann
-    }
-    returner usann
-}
-
-funksjon quit(f: ordbok_tekst) {
-    f["tilkopla"] = "usann"
-}
-
-funksjon _ftp_url(f: ordbok_tekst, sti: tekst) -> tekst {
-    hvis ikkje _trygg_tilstand(f) eller ikkje _trygg_sti(sti) { returner "" }
-    la brukar: tekst = f["brukar"]
-    la passord: tekst = f["passord"]
-    la vert: tekst = f["vert"]
-    la port: tekst = f["port"]
-    returner "ftp://" + brukar + ":" + passord + "@" + vert + ":" + port + sti
-}
-
-funksjon _ftp_socket_kan_kople(f: ordbok_tekst) -> bool {
-    hvis ikkje _trygg_tilstand(f) { returner usann }
-    la s = sok.ny_tcp()
-    prøv {
-        sok.set_timeout(s, 5000)
-        hvis ikkje sok.tilkoble(s, f["vert"], builtin.heltall_fra_tekst(f["port"])) {
-            sok.lukk(s)
+funksjon _skriv(h: ordbok_tekst, data: tekst) -> bool {
+    la offset = 0
+    mens offset < lengde(data) {
+        la r = sok.native_skriv(h, builtin.slice(data, offset, lengde(data)))
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 2) { returner usann }
+        } ellers hvis r["status"] != "ok" {
             returner usann
+        } ellers {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            hvis n <= 0 { returner usann }
+            offset = offset + n
         }
-        sok.lukk(s)
-        returner sann
-    } fang (e) {
-        sok.lukk(s)
-        returner usann
     }
-    returner usann
-}
-
-funksjon _ftp_kommando(f: ordbok_tekst, kommando: tekst) -> tekst {
-    hvis ikkje _trygg_tilstand(f) { returner "" }
-    hvis _har_kontrollteikn(kommando) { returner "" }
-    la s = sok.ny_tcp()
-    prøv {
-        sok.set_timeout(s, 5000)
-        hvis ikkje sok.tilkoble(s, f["vert"], builtin.heltall_fra_tekst(f["port"])) {
-            sok.lukk(s)
-            returner ""
-        }
-        la svar = sok.motta(s, 4096)
-        la innhald = "USER " + f["brukar"] + "\r\nPASS " + f["passord"] + "\r\n"
-        hvis kommando != "" { innhald = innhald + kommando + "\r\n" }
-        innhald = innhald + "QUIT\r\n"
-        hvis sok.send(s, innhald) < 0 {
-            sok.lukk(s)
-            returner svar
-        }
-        svar = svar + sok.motta(s, 65535)
-        sok.lukk(s)
-        returner svar
-    } fang (e) {
-        sok.lukk(s)
-        returner ""
-    }
-    returner ""
-}
-
-funksjon _ftp_ok(svar: tekst) -> bool {
-    returner _inneheld(svar, "\n230") eller _inneheld(svar, "\n250") eller _inneheld(svar, "\n257") eller _inneheld(svar, "\n213") eller _starter_med(svar, "230") eller _starter_med(svar, "250") eller _starter_med(svar, "257") eller _starter_med(svar, "213")
-}
-
-# List filer i katalog
-funksjon nlst(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
-    hvis ikkje _trygg_sti(katalog) { returner [] }
-    prøv {
-        la url: tekst = _ftp_url(f, katalog)
-        hvis url == "" { returner [] }
-        la res = builtin.exec_prosess("curl -s --list-only " + _shell(url) + " 2>/dev/null")
-        la linjer = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(linjer)) {
-            la s: tekst = _trim(linjer[i])
-            hvis (s != "") { legg_til(resultat, s) }
-            i = i + 1
-        }
-        returner resultat
-    } fang (e) {
-        returner []
-    }
-    returner []
-}
-
-# Detaljert listing
-funksjon dir(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
-    hvis ikkje _trygg_sti(katalog) { returner [] }
-    prøv {
-        la url: tekst = _ftp_url(f, katalog)
-        hvis url == "" { returner [] }
-        la res = builtin.exec_prosess("curl -s " + _shell(url) + " 2>/dev/null")
-        la linjer = builtin.split(res, "\n")
-        la resultat: liste_tekst = []
-        la i: heltall = 0
-        mens (i < lengde(linjer)) {
-            la s: tekst = _trim(linjer[i])
-            hvis (s != "") { legg_til(resultat, s) }
-            i = i + 1
-        }
-        returner resultat
-    } fang (e) {
-        returner []
-    }
-    returner []
-}
-
-# Last ned fil binært
-funksjon retrbinary(f: ordbok_tekst, fjern_fil: tekst, lokal_sti: tekst) -> bool {
-    hvis ikkje _trygg_sti(fjern_fil) eller ikkje _trygg_lokal_sti(lokal_sti) { returner usann }
-    prøv {
-        la url: tekst = _ftp_url(f, fjern_fil)
-        hvis url == "" { returner usann }
-        builtin.exec_prosess("curl -s -o " + _shell(lokal_sti) + " " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) {
-        returner usann
-    }
-    returner usann
-}
-
-# Last ned fil som tekst
-funksjon retrlines(f: ordbok_tekst, fjern_fil: tekst) -> tekst {
-    hvis ikkje _trygg_sti(fjern_fil) { returner "" }
-    prøv {
-        la url: tekst = _ftp_url(f, fjern_fil)
-        hvis url == "" { returner "" }
-        la res = builtin.exec_prosess("curl -s " + _shell(url) + " 2>/dev/null")
-        returner res
-    } fang (e) {
-        returner ""
-    }
-    returner ""
-}
-
-# Last opp fil
-funksjon storbinary(f: ordbok_tekst, lokal_sti: tekst, fjern_fil: tekst) -> bool {
-    hvis ikkje _trygg_lokal_sti(lokal_sti) eller ikkje _trygg_sti(fjern_fil) { returner usann }
-    prøv {
-        la url: tekst = _ftp_url(f, fjern_fil)
-        hvis url == "" { returner usann }
-        builtin.exec_prosess("curl -s -T " + _shell(lokal_sti) + " " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) {
-        returner usann
-    }
-    returner usann
-}
-
-# Endre katalog
-funksjon cwd(f: ordbok_tekst, katalog: tekst) -> bool {
-    hvis ikkje _trygg_sti(katalog) { returner usann }
-    la svar = _ftp_kommando(f, "CWD " + katalog)
-    hvis svar != "" og ikkje _ftp_ok(svar) { returner usann }
-    f["gjeldande_katalog"] = katalog
     returner sann
 }
 
-# Gjeldande katalog
-funksjon pwd(f: ordbok_tekst) -> tekst {
-    la svar = _ftp_kommando(f, "PWD")
-    hvis svar != "" {
-        la parsed = _ftp_257_tekst(svar)
-        hvis parsed != "" { returner parsed }
+funksjon _svar_ferdig(data: tekst) -> bool {
+    la linjer = builtin.split(data, "\n")
+    hvis lengde(linjer) == 0 { returner usann }
+    la første = _trim(linjer[0])
+    hvis lengde(første) < 3 { returner usann }
+    la kode = builtin.slice(første, 0, 3)
+    hvis lengde(første) >= 4 og builtin.slice(første, 3, 4) == "-" {
+        la i = 1
+        mens i < lengde(linjer) {
+            la linje = _trim(linjer[i])
+            hvis builtin.starts_with(linje, kode + " ") { returner sann }
+            i = i + 1
+        }
+        returner usann
     }
-    returner f["gjeldande_katalog"]
+    returner lengde(første) >= 4
 }
 
-# Lag katalog
-funksjon mkd(f: ordbok_tekst, katalog: tekst) -> bool {
-    hvis ikkje _trygg_sti(katalog) { returner usann }
-    la svar = _ftp_kommando(f, "MKD " + katalog)
-    hvis svar != "" { returner _ftp_ok(svar) }
-    prøv {
-        la url: tekst = _ftp_url(f, katalog)
-        hvis url == "" { returner usann }
-        builtin.exec_prosess("curl -s -X MKD " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
-}
-
-# Slett fil
-funksjon delete(f: ordbok_tekst, fjern_fil: tekst) -> bool {
-    hvis ikkje _trygg_sti(fjern_fil) { returner usann }
-    la svar = _ftp_kommando(f, "DELE " + fjern_fil)
-    hvis svar != "" { returner _ftp_ok(svar) }
-    prøv {
-        la url: tekst = _ftp_url(f, fjern_fil)
-        hvis url == "" { returner usann }
-        builtin.exec_prosess("curl -s -X DELE " + _shell(url) + " 2>&1")
-        returner sann
-    } fang (e) { returner usann }
-    returner usann
-}
-
-# Filstorleik
-funksjon size(f: ordbok_tekst, fjern_fil: tekst) -> heltall {
-    hvis ikkje _trygg_sti(fjern_fil) { returner -1 }
-    la svar = _ftp_kommando(f, "SIZE " + fjern_fil)
-    hvis svar != "" {
-        la n = _ftp_213_tal(svar)
-        hvis n >= 0 { returner n }
+funksjon _les_svar(h: ordbok_tekst) -> tekst {
+    la ut = ""
+    la rundar = 0
+    mens rundar < 64 og lengde(ut) < 65536 {
+        la r = sok.native_les(h, 4096)
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 1) { returner "" }
+        } ellers hvis r["status"] != "ok" {
+            returner ""
+        } ellers {
+            la del = tekst(r["data"])
+            hvis del == "" { returner ut }
+            ut = ut + del
+            hvis _svar_ferdig(ut) { returner ut }
+            rundar = rundar + 1
+        }
     }
-    prøv {
-        la url: tekst = _ftp_url(f, fjern_fil)
-        hvis url == "" { returner -1 }
-        la res = builtin.exec_prosess("curl -sI " + _shell(url) + " 2>/dev/null")
-        returner _content_length(res)
-    } fang (e) { returner -1 }
+    returner ut
+}
+
+funksjon _kode(svar: tekst) -> heltall {
+    la s = _trim(svar)
+    hvis lengde(s) < 3 { returner -1 }
+    prøv { returner heltall_fra_tekst(builtin.slice(s, 0, 3)) }
+    fang (e) { returner -1 }
     returner -1
 }
 
-funksjon set_pasv(f: ordbok_tekst, aktiv: bool) {
-    hvis (aktiv) { f["passiv"] = "sann" } ellers { f["passiv"] = "usann" }
+funksjon _kommando(f: ordbok_tekst, kommando: tekst) -> tekst {
+    hvis f["tilkopla"] != "sann" eller _har_kontrollteikn(kommando) { returner "" }
+    hvis ikkje _skriv(f["kontroll"], kommando + "\r\n") { returner "" }
+    returner _les_svar(f["kontroll"])
 }
 
-funksjon _trim(s: tekst) -> tekst {
-    la t = builtin.split(s, "")
-    la n: heltall = lengde(t)
-    la a: heltall = 0  la b: heltall = n
-    mens (a < b og (t[a]==" " eller t[a]=="\t" eller t[a]=="\n" eller t[a]=="\r")) { a=a+1 }
-    mens (b > a og (t[b-1]==" " eller t[b-1]=="\t" eller t[b-1]=="\n" eller t[b-1]=="\r")) { b=b-1 }
-    returner builtin.join(builtin.slice(t, a, b), "")
+funksjon connect(vert: tekst, port: heltall) -> ordbok_tekst {
+    la f: ordbok_tekst = {
+        "vert": vert, "port": tekst_fra_heltall(port), "brukar": "anonymous",
+        "passord": "anonymous@", "passiv": "sann", "tilkopla": "usann",
+        "gjeldande_katalog": "/", "feil": ""
+    }
+    hvis ikkje _trygg_felt(vert) eller port <= 0 eller port > 65535 { returner f }
+    la h = sok.native_tilkoble(vert, port)
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje _vent(h, 2) { sok.native_lukk(h) returner f }
+    } ellers hvis h["status"] == "feil" { returner f }
+    la helsing = _les_svar(h)
+    hvis _kode(helsing) != 220 {
+        sok.native_lukk(h)
+        f["feil"] = "FTP-helsing manglar"
+        returner f
+    }
+    f["kontroll"] = h
+    f["tilkopla"] = "sann"
+    returner f
 }
 
-funksjon _lower_ascii(s: tekst) -> tekst {
-    la teikn = builtin.split(s, "")
-    la ut: tekst = ""
-    la i: heltall = 0
-    mens (i < lengde(teikn)) {
-        la k: heltall = builtin.char_code(teikn[i])
-        hvis (k >= 65 og k <= 90) {
-            ut = ut + builtin.char_from_code(k + 32)
-        } ellers {
-            ut = ut + teikn[i]
+funksjon connect_standard(vert: tekst) -> ordbok_tekst { returner connect(vert, 21) }
+
+funksjon login(f: ordbok_tekst, brukar: tekst, passord: tekst) -> bool {
+    hvis ikkje _trygg_felt(brukar) eller ikkje _trygg_felt(passord) eller f["tilkopla"] != "sann" {
+        returner usann
+    }
+    la svar = _kommando(f, "USER " + brukar)
+    la kode = _kode(svar)
+    hvis kode == 331 { svar = _kommando(f, "PASS " + passord) kode = _kode(svar) }
+    hvis kode != 230 { returner usann }
+    f["brukar"] = brukar
+    f["passord"] = passord
+    returner sann
+}
+
+funksjon quit(f: ordbok_tekst) {
+    hvis f["tilkopla"] == "sann" {
+        _kommando(f, "QUIT")
+        sok.native_lukk(f["kontroll"])
+    }
+    f["tilkopla"] = "usann"
+}
+
+funksjon _epsv_port(svar: tekst) -> heltall {
+    la start = builtin.index_of(svar, "(|||")
+    hvis start < 0 { returner -1 }
+    la rest = builtin.slice(svar, start + 4, lengde(svar))
+    la slutt = builtin.index_of(rest, "|)")
+    hvis slutt < 0 { returner -1 }
+    prøv { returner heltall_fra_tekst(builtin.slice(rest, 0, slutt)) }
+    fang (e) { returner -1 }
+    returner -1
+}
+
+funksjon _pasv_endpoint(svar: tekst, standard_vert: tekst) -> ordbok_tekst {
+    la port = _epsv_port(svar)
+    hvis port > 0 { returner {"vert": standard_vert, "port": tekst_fra_heltall(port)} }
+    la a = builtin.index_of(svar, "(")
+    la b = builtin.index_of(svar, ")")
+    hvis a < 0 eller b <= a { returner {"vert": "", "port": "-1"} }
+    la delar = builtin.split(builtin.slice(svar, a + 1, b), ",")
+    hvis lengde(delar) != 6 { returner {"vert": "", "port": "-1"} }
+    prøv {
+        la p1 = heltall_fra_tekst(_trim(delar[4]))
+        la p2 = heltall_fra_tekst(_trim(delar[5]))
+        returner {
+            "vert": _trim(delar[0]) + "." + _trim(delar[1]) + "." + _trim(delar[2]) + "." + _trim(delar[3]),
+            "port": tekst_fra_heltall(p1 * 256 + p2)
         }
+    } fang (e) { returner {"vert": "", "port": "-1"} }
+    returner {"vert": "", "port": "-1"}
+}
+
+funksjon _data_tilkoble(f: ordbok_tekst) -> ordbok_tekst {
+    hvis f["passiv"] != "sann" { returner {"status": "feil", "error": "aktiv FTP er ikkje støtta"} }
+    la svar = _kommando(f, "EPSV")
+    la ep = _pasv_endpoint(svar, f["vert"])
+    hvis heltall_fra_tekst(ep["port"]) <= 0 {
+        svar = _kommando(f, "PASV")
+        ep = _pasv_endpoint(svar, f["vert"])
+    }
+    la port = heltall_fra_tekst(ep["port"])
+    hvis ep["vert"] == "" eller port <= 0 { returner {"status": "feil", "error": "passiv endpoint manglar"} }
+    la h = sok.native_tilkoble(ep["vert"], port)
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje _vent(h, 2) { sok.native_lukk(h) returner {"status": "feil", "error": "data-timeout"} }
+    }
+    returner h
+}
+
+funksjon _les_data_tekst(h: ordbok_tekst) -> tekst {
+    la ut = ""
+    la rundar = 0
+    mens rundar < 1024 og lengde(ut) < 16777216 {
+        la r = sok.native_les(h, 16384)
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 1) { rundar = 1024 }
+        } ellers hvis r["status"] != "ok" eller tekst(r["data"]) == "" {
+            rundar = 1024
+        } ellers {
+            ut = ut + tekst(r["data"])
+            rundar = rundar + 1
+        }
+    }
+    returner ut
+}
+
+funksjon _data_kommando(f: ordbok_tekst, kommando: tekst) -> ordbok_tekst {
+    la data = _data_tilkoble(f)
+    hvis data["status"] == "feil" { returner data }
+    la svar = _kommando(f, kommando)
+    la kode = _kode(svar)
+    hvis kode != 125 og kode != 150 {
+        sok.native_lukk(data)
+        returner {"status": "feil", "error": "FTP avviste dataoverføring"}
+    }
+    data["status"] = "ok"
+    returner data
+}
+
+funksjon nlst(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
+    hvis ikkje _trygg_sti(katalog) { returner [] }
+    la h = _data_kommando(f, "NLST " + katalog)
+    hvis h["status"] != "ok" { returner [] }
+    la data = _les_data_tekst(h)
+    sok.native_lukk(h)
+    la slutt = _les_svar(f["kontroll"])
+    hvis _kode(slutt) != 226 og _kode(slutt) != 250 { returner [] }
+    la linjer = builtin.split(data, "\n")
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(linjer) {
+        la linje = _trim(linjer[i])
+        hvis linje != "" { legg_til(ut, linje) }
         i = i + 1
     }
     returner ut
 }
 
-funksjon _starter_med(s: tekst, prefiks: tekst) -> bool {
-    la st = builtin.split(s, "")
-    la pt = builtin.split(prefiks, "")
-    hvis (lengde(st) < lengde(pt)) { returner usann }
-    la i: heltall = 0
-    mens (i < lengde(pt)) {
-        hvis (st[i] != pt[i]) { returner usann }
+funksjon dir(f: ordbok_tekst, katalog: tekst) -> liste_tekst {
+    hvis ikkje _trygg_sti(katalog) { returner [] }
+    la h = _data_kommando(f, "LIST " + katalog)
+    hvis h["status"] != "ok" { returner [] }
+    la data = _les_data_tekst(h)
+    sok.native_lukk(h)
+    la slutt = _les_svar(f["kontroll"])
+    hvis _kode(slutt) != 226 og _kode(slutt) != 250 { returner [] }
+    la linjer = builtin.split(data, "\n")
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(linjer) {
+        la linje = _trim(linjer[i])
+        hvis linje != "" { legg_til(ut, linje) }
         i = i + 1
     }
+    returner ut
+}
+
+funksjon retrbinary(f: ordbok_tekst, fjern_fil: tekst, lokal_sti: tekst) -> bool {
+    hvis ikkje _trygg_sti(fjern_fil) eller ikkje _trygg_lokal_sti(lokal_sti) { returner usann }
+    hvis _kode(_kommando(f, "TYPE I")) != 200 { returner usann }
+    la h = _data_kommando(f, "RETR " + fjern_fil)
+    hvis h["status"] != "ok" { returner usann }
+    builtin.fil_skriv_binær(lokal_sti, bytes.tom())
+    la ok = sann
+    la ferdig = usann
+    mens ikkje ferdig {
+        la r = sok.native_les_hex(h, 65536)
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 1) { ok = usann ferdig = sann }
+        } ellers hvis r["status"] != "ok" {
+            ferdig = sann
+        } ellers hvis r["data_hex"] == "" {
+            ferdig = sann
+        } ellers {
+            builtin.fil_append_binary(lokal_sti, bytes.fra_liste(bin.hex_til_bytes(r["data_hex"])))
+        }
+    }
+    sok.native_lukk(h)
+    la slutt = _kode(_les_svar(f["kontroll"]))
+    returner ok og (slutt == 226 eller slutt == 250)
+}
+
+funksjon retrlines(f: ordbok_tekst, fjern_fil: tekst) -> tekst {
+    hvis ikkje _trygg_sti(fjern_fil) { returner "" }
+    la h = _data_kommando(f, "RETR " + fjern_fil)
+    hvis h["status"] != "ok" { returner "" }
+    la data = _les_data_tekst(h)
+    sok.native_lukk(h)
+    la slutt = _kode(_les_svar(f["kontroll"]))
+    hvis slutt != 226 og slutt != 250 { returner "" }
+    returner data
+}
+
+funksjon storbinary(f: ordbok_tekst, lokal_sti: tekst, fjern_fil: tekst) -> bool {
+    hvis ikkje _trygg_lokal_sti(lokal_sti) eller ikkje _trygg_sti(fjern_fil) eller
+       ikkje builtin.fil_finnes(lokal_sti) { returner usann }
+    hvis _kode(_kommando(f, "TYPE I")) != 200 { returner usann }
+    la h = _data_kommando(f, "STOR " + fjern_fil)
+    hvis h["status"] != "ok" { returner usann }
+    la data = bytes.til_liste(builtin.fil_les_binær(lokal_sti))
+    la pos = 0
+    la ok = sann
+    mens pos < lengde(data) og ok {
+        la slutt = pos + 32768
+        hvis slutt > lengde(data) { slutt = lengde(data) }
+        la r = sok.native_skriv_hex(h, bin.bytes_til_hex(builtin.slice(data, pos, slutt)))
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 2) { ok = usann }
+        } ellers hvis r["status"] != "ok" { ok = usann }
+        ellers { pos = slutt }
+    }
+    sok.native_lukk(h)
+    la kode = _kode(_les_svar(f["kontroll"]))
+    returner ok og (kode == 226 eller kode == 250)
+}
+
+funksjon cwd(f: ordbok_tekst, katalog: tekst) -> bool {
+    hvis ikkje _trygg_sti(katalog) { returner usann }
+    hvis _kode(_kommando(f, "CWD " + katalog)) != 250 { returner usann }
+    f["gjeldande_katalog"] = katalog
     returner sann
 }
 
-funksjon _etter_kolon(linje: tekst) -> tekst {
-    la teikn = builtin.split(linje, "")
-    la i: heltall = 0
-    mens (i < lengde(teikn)) {
-        hvis (teikn[i] == ":") {
-            returner _trim(builtin.join(builtin.slice(teikn, i + 1, lengde(teikn)), ""))
-        }
-        i = i + 1
+funksjon _sitert_257(svar: tekst) -> tekst {
+    la a = builtin.index_of(svar, "\"")
+    hvis a < 0 { returner "" }
+    la rest = builtin.slice(svar, a + 1, lengde(svar))
+    la b = builtin.index_of(rest, "\"")
+    hvis b < 0 { returner "" }
+    returner builtin.slice(rest, 0, b)
+}
+
+funksjon pwd(f: ordbok_tekst) -> tekst {
+    la svar = _kommando(f, "PWD")
+    hvis _kode(svar) == 257 {
+        la sti = _sitert_257(svar)
+        hvis sti != "" { f["gjeldande_katalog"] = sti returner sti }
     }
     returner ""
 }
 
-funksjon _inneheld(s: tekst, nål: tekst) -> bool {
-    la delar = builtin.split(s, nål)
-    returner lengde(delar) > 1
+funksjon mkd(f: ordbok_tekst, katalog: tekst) -> bool {
+    returner _trygg_sti(katalog) og _kode(_kommando(f, "MKD " + katalog)) == 257
 }
 
-funksjon _ftp_213_tal(svar: tekst) -> heltall {
-    la linjer = builtin.split(svar, "\n")
-    la i: heltall = 0
-    mens (i < lengde(linjer)) {
-        la s = _trim(linjer[i])
-        hvis (_starter_med(s, "213 ")) {
-            returner builtin.heltall_fra_tekst(_trim(builtin.join(builtin.slice(builtin.split(s, ""), 4, lengde(builtin.split(s, ""))), "")))
-        }
-        i = i + 1
-    }
+funksjon delete(f: ordbok_tekst, fjern_fil: tekst) -> bool {
+    returner _trygg_sti(fjern_fil) og _kode(_kommando(f, "DELE " + fjern_fil)) == 250
+}
+
+funksjon size(f: ordbok_tekst, fjern_fil: tekst) -> heltall {
+    hvis ikkje _trygg_sti(fjern_fil) { returner -1 }
+    la svar = _kommando(f, "SIZE " + fjern_fil)
+    hvis _kode(svar) != 213 { returner -1 }
+    la linje = _trim(svar)
+    prøv { returner heltall_fra_tekst(_trim(builtin.slice(linje, 3, lengde(linje)))) }
+    fang (e) { returner -1 }
     returner -1
 }
 
-funksjon _ftp_257_tekst(svar: tekst) -> tekst {
-    la linjer = builtin.split(svar, "\n")
-    la i: heltall = 0
-    mens (i < lengde(linjer)) {
-        la s = _trim(linjer[i])
-        hvis (_starter_med(s, "257 ")) {
-            la teikn = builtin.split(s, "")
-            la start: heltall = 4
-            hvis (lengde(teikn) > 4 og teikn[4] == "\"") { start = 5 }
-            la slutt: heltall = lengde(teikn)
-            hvis (slutt > start og teikn[slutt - 1] == "\"") { slutt = slutt - 1 }
-            returner builtin.join(builtin.slice(teikn, start, slutt), "")
-        }
-        i = i + 1
-    }
-    returner ""
-}
-
-funksjon _content_length(headers: tekst) -> heltall {
-    la linjer = builtin.split(headers, "\n")
-    la i: heltall = 0
-    mens (i < lengde(linjer)) {
-        la linje: tekst = _trim(linjer[i])
-        hvis (_starter_med(_lower_ascii(linje), "content-length:")) {
-            returner builtin.heltall_fra_tekst(_etter_kolon(linje))
-        }
-        i = i + 1
-    }
-    returner -1
+funksjon set_pasv(f: ordbok_tekst, aktiv: bool) {
+    hvis aktiv { f["passiv"] = "sann" } ellers { f["passiv"] = "usann" }
 }

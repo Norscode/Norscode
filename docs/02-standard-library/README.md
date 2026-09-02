@@ -7,6 +7,7 @@ Dokumentasjon av Norscodes standard library, innebygde typer og moduler.
 | Dokument | Beskrivelse |
 |----------|-------------|
 | **STDLIB_STATUS.md** | Status og roadmap for stdlib |
+| **JS_PARITET.md** | JavaScript-innebygde funksjonar som Norscode-modular |
 | **AST_FORMAT_V1.md** | Abstract Syntax Tree format |
 | **TOKEN_FORMAT_V1.md** | Lexer token format |
 | **IR_CONTRACT.md** | Intermediate Representation |

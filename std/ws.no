@@ -19,6 +19,10 @@
 #       returner 0
 #   }
 
+bruk std.sha1 som _ws_sha1
+bruk std.base64 som _ws_base64
+bruk std.socket som _ws_socket
+
 # ─── Handshake ────────────────────────────────────────────────────────────────
 
 funksjon er_ws_request(ctx: ordbok_tekst) -> boolsk {
@@ -47,16 +51,11 @@ funksjon handshake_respons(ctx: ordbok_tekst) -> ordbok_tekst {
 }
 
 funksjon _ws_aksept_nøkkel(nøkkel: tekst) -> tekst {
+    // RFC 6455: Sec-WebSocket-Accept = base64(SHA1(nøkkel + magic)).
+    // Rein pure-VM SHA-1 (std.sha1) + rein base64 (std.base64) — ingen
+    // avhengnad til native builtins som ikkje finst.
     la magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-    la kombinert = nøkkel + magic
-    prøv {
-        la sha = builtin.sha1(kombinert)
-        returner builtin.base64_encode(sha)
-    } fang (e) {
-        // Fallback
-        returner builtin.base64_encode(kombinert)
-    }
-    returner ""
+    returner _ws_base64.kod_bytes(_ws_sha1.hash_raw_tekst(nøkkel + magic))
 }
 
 # ─── Tilkoplingshandsaming ────────────────────────────────────────────────────
@@ -84,6 +83,14 @@ funksjon er_open(conn: ordbok_tekst) -> boolsk {
 
 funksjon lukk(conn: ordbok_tekst) -> heltall {
     conn["open"] = "usann"
+    hvis _har_socket(conn) {
+        prøv {
+            la cf = lag_close_frame(1000, "")
+            _ws_socket.native_skriv_hex(_ws_sock_handle(conn), _ws_bytes_til_hex(cf))
+            _ws_socket.native_lukk(_ws_sock_handle(conn))
+        } fang (e) { }
+        returner 0
+    }
     prøv { builtin.ws_close(conn["id"]) } fang (e) { }
     returner 0
 }
@@ -103,17 +110,118 @@ funksjon sett_brukar(conn: ordbok_tekst, brukar_id: tekst) -> ordbok_tekst {
     returner conn
 }
 
+# ─── Socket-transport (RFC 6455 over std.socket) ─────────────────────────────
+# WS-frames er binære (byte 0-255) og går over den native socketen som
+# hex-I/O (native_les_hex/native_skriv_hex), som er binær-sikkert. Fest ein
+# socket på ei tilkopling med fest_socket(conn, sock); då sender/mottek
+# send/motta ekte frames. Utan festa socket fell dei tilbake til den valfrie
+# builtin.ws_*-adapteren (uendra oppførsel for eldre integrasjonar).
+
+funksjon _ws_bytes_saman(a: liste_heltall, b: liste_heltall) -> liste_heltall {
+    la ut: liste_heltall = []
+    la i: heltall = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _ws_bytes_til_hex(bytes: liste_heltall) -> tekst {
+    la sifre = "0123456789abcdef"
+    la ut = ""
+    la i: heltall = 0
+    mens i < lengde(bytes) {
+        la v = bytes[i] & 255
+        la hi = (v >> 4) & 15
+        la lo = v & 15
+        ut = ut + builtin.slice(sifre, hi, hi + 1) + builtin.slice(sifre, lo, lo + 1)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _ws_hex_til_bytes(hex: tekst) -> liste_heltall {
+    la sifre = "0123456789abcdef"
+    la ut: liste_heltall = []
+    la i: heltall = 0
+    mens i + 1 < lengde(hex) {
+        la hi = builtin.index_of(sifre, tekst_til_liten(builtin.slice(hex, i, i + 1)))
+        la lo = builtin.index_of(sifre, tekst_til_liten(builtin.slice(hex, i + 1, i + 2)))
+        hvis hi < 0 eller lo < 0 { returner ut }
+        legg_til(ut, hi * 16 + lo)
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _ws_sock_handle(conn: ordbok_tekst) -> ordbok_tekst {
+    la h: ordbok_tekst = {}
+    h["handle"] = conn["sock"]
+    returner h
+}
+
+funksjon _har_socket(conn: ordbok_tekst) -> boolsk {
+    returner har_nokkel(conn, "sock") og conn["sock"] != ""
+}
+
+# Fest ein native socket (frå std.socket, t.d. resultat av native_aksepter)
+# til ei WS-tilkopling.
+funksjon fest_socket(conn: ordbok_tekst, sock: ordbok_tekst) -> ordbok_tekst {
+    conn["sock"] = tekst(sock["handle"])
+    returner conn
+}
+
+# Les til bufferen har minst n byte, eller til tilkoplinga stengjer.
+funksjon _les_minst(h: ordbok_tekst, buf: liste_heltall, n: heltall) -> liste_heltall {
+    mens lengde(buf) < n {
+        la r = _ws_socket.native_les_hex(h, 65536)
+        hvis tekst(r["status"]) != "ok" { returner buf }
+        la chunk = _ws_hex_til_bytes(tekst(r["data_hex"]))
+        hvis lengde(chunk) == 0 { returner buf }
+        buf = _ws_bytes_saman(buf, chunk)
+    }
+    returner buf
+}
+
+# Les nøyaktig éin komplett WS-frame frå socketen (byte-eksakt lengd).
+funksjon _les_full_frame(sock_handle: tekst) -> liste_heltall {
+    la h: ordbok_tekst = {}
+    h["handle"] = sock_handle
+    la buf: liste_heltall = []
+    buf = _les_minst(h, buf, 2)
+    hvis lengde(buf) < 2 { returner buf }
+    la payload_len = buf[1] % 128
+    la header_len = 2
+    hvis payload_len == 126 {
+        buf = _les_minst(h, buf, 4)
+        hvis lengde(buf) < 4 { returner buf }
+        payload_len = buf[2] * 256 + buf[3]
+        header_len = 4
+    } ellers hvis payload_len == 127 {
+        buf = _les_minst(h, buf, 10)
+        hvis lengde(buf) < 10 { returner buf }
+        payload_len = buf[6] * 16777216 + buf[7] * 65536 + buf[8] * 256 + buf[9]
+        header_len = 10
+    }
+    la total = header_len + payload_len
+    hvis (buf[1] / 128) % 2 == 1 { total = total + 4 }
+    buf = _les_minst(h, buf, total)
+    returner buf
+}
+
 # ─── Meldingssending ──────────────────────────────────────────────────────────
 
 funksjon send(conn: ordbok_tekst, melding: tekst) -> heltall {
     hvis ikkje er_open(conn) { returner 0 }
-    prøv {
-        returner builtin.ws_send(conn["id"], melding)
-    } fang (e) {
-        conn["open"] = "usann"
-        returner 0
+    hvis ikkje _har_socket(conn) {
+        prøv { returner builtin.ws_send(conn["id"], melding) }
+        fang (e) { conn["open"] = "usann" returner 0 }
     }
-    returner 0
+    // Server → klient: umaskert tekst-frame (RFC 6455 §5.1).
+    la frame = bygg_tekst_frame(melding, usann)
+    la r = _ws_socket.native_skriv_hex(_ws_sock_handle(conn), _ws_bytes_til_hex(frame))
+    hvis tekst(r["status"]) != "ok" { conn["open"] = "usann" returner 0 }
+    returner lengde(melding)
 }
 
 funksjon send_json(conn: ordbok_tekst, data: ordbok_tekst) -> heltall {
@@ -122,21 +230,32 @@ funksjon send_json(conn: ordbok_tekst, data: ordbok_tekst) -> heltall {
 }
 
 funksjon send_binar(conn: ordbok_tekst, data: tekst) -> heltall {
-    prøv { returner builtin.ws_send_binary(conn["id"], data) } fang (e) { returner 0 }
-    returner 0
+    hvis ikkje _har_socket(conn) {
+        prøv { returner builtin.ws_send_binary(conn["id"], data) } fang (e) { returner 0 }
+    }
+    la teikn = builtin.split(data, "")
+    la bytes: liste_heltall = []
+    la i: heltall = 0
+    mens i < lengde(teikn) { legg_til(bytes, builtin.char_code(teikn[i]) & 255) i = i + 1 }
+    la frame = bygg_frame(bytes, OPCODE_BINAR(), usann)
+    la r = _ws_socket.native_skriv_hex(_ws_sock_handle(conn), _ws_bytes_til_hex(frame))
+    hvis tekst(r["status"]) != "ok" { conn["open"] = "usann" returner 0 }
+    returner lengde(bytes)
 }
 
 # ─── Mottak ───────────────────────────────────────────────────────────────────
 
 funksjon motta(conn: ordbok_tekst) -> tekst {
-    prøv {
-        la m = builtin.ws_recv(conn["id"])
-        returner tekst(m)
-    } fang (e) {
-        conn["open"] = "usann"
-        returner ""
+    hvis ikkje _har_socket(conn) {
+        prøv { returner tekst(builtin.ws_recv(conn["id"])) }
+        fang (e) { conn["open"] = "usann" returner "" }
     }
-    returner ""
+    la frame = _les_full_frame(conn["sock"])
+    hvis lengde(frame) < 2 { conn["open"] = "usann" returner "" }
+    la p = parse_frame(frame)
+    la opcode = heltall_fra_tekst(p["opcode"])
+    hvis opcode == OPCODE_LUKK() { conn["open"] = "usann" returner "" }
+    returner frame_til_tekst(p)
 }
 
 funksjon motta_json(conn: ordbok_tekst) -> ordbok_tekst {
@@ -150,13 +269,14 @@ funksjon motta_json(conn: ordbok_tekst) -> ordbok_tekst {
 }
 
 funksjon motta_med_timeout(conn: ordbok_tekst, timeout_ms: heltall) -> tekst {
-    prøv {
-        la m = builtin.ws_recv_timeout(conn["id"], timeout_ms)
-        returner tekst(m)
-    } fang (e) {
-        returner ""
+    hvis ikkje _har_socket(conn) {
+        prøv { returner tekst(builtin.ws_recv_timeout(conn["id"], timeout_ms)) }
+        fang (e) { returner "" }
     }
-    returner ""
+    // Vent på lese-klar (best effort); les deretter full frame.
+    la pr = _ws_socket.native_poll_vent(_ws_sock_handle(conn), 1, timeout_ms)
+    hvis tekst(pr["status"]) != "ok" { returner "" }
+    returner motta(conn)
 }
 
 # ─── Grupper / broadcast ──────────────────────────────────────────────────────
@@ -438,24 +558,34 @@ funksjon parse_frame(frame: liste_heltall) -> ordbok_tekst {
     returner r
 }
 
-# Hent tekst-payload frå parsed frame
+# Hent tekst-payload frå parsed frame. Binær-sikker: kvar byte (0-255) blir
+# konvertert med builtin.chr, slik at newline, kontrollteikn og UTF-8-byte
+# blir bevarte (den gamle printbar-berre-tabellen slepte dei).
 funksjon frame_til_tekst(r: ordbok_tekst) -> tekst {
     hvis (ikkje har_nokkel(r, "payload_bytes")) { returner "" }
+    hvis (r["payload_bytes"] == "") { returner "" }
     la byte_delar = builtin.split(r["payload_bytes"], ",")
     la ut: liste_tekst = []
-    # Konverter ASCII-kodar til teikn via ordbok (berre printbare 32-126)
-    la ascii: ordbok_tekst = {}
-    la printable: tekst = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
-    la pc = builtin.split(printable, "")
-    la j: heltall = 0
-    mens (j < lengde(pc)) { ascii[tekst_fra_heltall(32 + j)] = pc[j]  j = j + 1 }
     la i: heltall = 0
     mens (i < lengde(byte_delar)) {
-        la kode: tekst = byte_delar[i]
-        hvis (har_nokkel(ascii, kode)) { legg_til(ut, ascii[kode]) }
+        legg_til(ut, builtin.chr(heltall_fra_tekst(byte_delar[i]) & 255))
         i = i + 1
     }
     returner builtin.join(ut, "")
+}
+
+# Rå byte-liste (0-255) frå parsed frame — for binær payload.
+funksjon frame_til_bytes(r: ordbok_tekst) -> liste_heltall {
+    la ut: liste_heltall = []
+    hvis (ikkje har_nokkel(r, "payload_bytes")) { returner ut }
+    hvis (r["payload_bytes"] == "") { returner ut }
+    la byte_delar = builtin.split(r["payload_bytes"], ",")
+    la i: heltall = 0
+    mens (i < lengde(byte_delar)) {
+        legg_til(ut, heltall_fra_tekst(byte_delar[i]) & 255)
+        i = i + 1
+    }
+    returner ut
 }
 
 # Reconnect-logikk med eksponentiell backoff

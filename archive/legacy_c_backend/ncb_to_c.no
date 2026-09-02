@@ -12,6 +12,202 @@ funksjon ncb_safe_num_text(verdi) -> tekst {
     returner tekst_fra_heiltall(verdi)
 }
 
+// Lokal JSON-lesar for NCB-materialisering. Committed stage0 si native
+// json_parse_raw-bru fjernar eitt escape-lag for mykje; denne parseren les
+// RFC 8259-escape nøyaktig éin gong og har ingen importavhengigheit.
+funksjon ncbj_tom_liste() {
+    la seed = builtin.split("a b", " ")
+    returner builtin.slice(seed, 0, 0)
+}
+
+funksjon ncbj_peek(t) -> tekst {
+    la p = t["p"]
+    la s = t["s"]
+    hvis p >= lengde(s) { returner "" }
+    returner s[p]
+}
+
+funksjon ncbj_les_ch(t) -> tekst {
+    la p = t["p"]
+    la s = t["s"]
+    hvis p >= lengde(s) { returner "" }
+    la ch = s[p]
+    t["p"] = p + 1
+    returner ch
+}
+
+funksjon ncbj_ws(t) {
+    la ch = ncbj_peek(t)
+    mens ch == " " eller ch == "\t" eller ch == "\n" eller ch == "\r" {
+        ncbj_les_ch(t)
+        ch = ncbj_peek(t)
+    }
+}
+
+funksjon ncbj_streng(t) -> tekst {
+    ncbj_les_ch(t)
+    la r = ""
+    la bs = builtin.chr(92)
+    la ch = ncbj_les_ch(t)
+    mens ch != "" og ch != "\"" {
+        hvis ch == bs {
+            la n = ncbj_les_ch(t)
+            hvis n == "\"" { r = r + "\"" }
+            ellers hvis n == bs { r = r + bs }
+            ellers hvis n == "/" { r = r + "/" }
+            ellers hvis n == "n" { r = r + "\n" }
+            ellers hvis n == "r" { r = r + "\r" }
+            ellers hvis n == "t" { r = r + "\t" }
+            ellers hvis n == "b" { r = r + builtin.chr(8) }
+            ellers hvis n == "f" { r = r + builtin.chr(12) }
+            ellers hvis n == "u" {
+                // NCB-nøkkeldata er UTF-8. Historiske \u-sekvensar blir
+                // fail-closed markerte fram til full kodepunktstøtte finst.
+                ncbj_les_ch(t); ncbj_les_ch(t); ncbj_les_ch(t); ncbj_les_ch(t)
+                r = r + "?"
+            } ellers { kast "NCB-JSON: ugyldig escape" }
+        } ellers { r = r + ch }
+        ch = ncbj_les_ch(t)
+    }
+    hvis ch == "" { kast "NCB-JSON: uavslutta streng" }
+    returner r
+}
+
+funksjon ncbj_tal(t) {
+    la s = ""
+    hvis ncbj_peek(t) == "-" { s = s + ncbj_les_ch(t) }
+    la ch = ncbj_peek(t)
+    mens ch >= "0" og ch <= "9" {
+        s = s + ncbj_les_ch(t)
+        ch = ncbj_peek(t)
+    }
+    la desimal = usann
+    hvis ncbj_peek(t) == "." {
+        desimal = sann
+        s = s + ncbj_les_ch(t)
+        ch = ncbj_peek(t)
+        mens ch >= "0" og ch <= "9" {
+            s = s + ncbj_les_ch(t)
+            ch = ncbj_peek(t)
+        }
+    }
+    la e = ncbj_peek(t)
+    hvis e == "e" eller e == "E" {
+        desimal = sann
+        s = s + ncbj_les_ch(t)
+        la fortegn = ncbj_peek(t)
+        hvis fortegn == "+" eller fortegn == "-" { s = s + ncbj_les_ch(t) }
+        ch = ncbj_peek(t)
+        mens ch >= "0" og ch <= "9" {
+            s = s + ncbj_les_ch(t)
+            ch = ncbj_peek(t)
+        }
+    }
+    hvis desimal { returner builtin.desimaltall(s) }
+    returner heiltall_fra_tekst(s)
+}
+
+funksjon ncbj_verdi(t) {
+    ncbj_ws(t)
+    la ch = ncbj_peek(t)
+    hvis ch == "\"" { returner ncbj_streng(t) }
+    hvis ch == "{" {
+        ncbj_les_ch(t)
+        la obj = {}
+        ncbj_ws(t)
+        mens ncbj_peek(t) != "}" {
+            hvis ncbj_peek(t) == "" { kast "NCB-JSON: uavslutta objekt" }
+            la k = ncbj_streng(t)
+            ncbj_ws(t)
+            hvis ncbj_les_ch(t) != ":" { kast "NCB-JSON: venta kolon" }
+            obj[k] = ncbj_verdi(t)
+            ncbj_ws(t)
+            hvis ncbj_peek(t) == "," { ncbj_les_ch(t); ncbj_ws(t) }
+        }
+        ncbj_les_ch(t)
+        returner obj
+    }
+    hvis ch == "[" {
+        ncbj_les_ch(t)
+        la liste = ncbj_tom_liste()
+        ncbj_ws(t)
+        mens ncbj_peek(t) != "]" {
+            hvis ncbj_peek(t) == "" { kast "NCB-JSON: uavslutta liste" }
+            legg_til(liste, ncbj_verdi(t))
+            ncbj_ws(t)
+            hvis ncbj_peek(t) == "," { ncbj_les_ch(t); ncbj_ws(t) }
+        }
+        ncbj_les_ch(t)
+        returner liste
+    }
+    la p = t["p"]
+    la rest = builtin.slice(t["s"], p, p + 5)
+    hvis builtin.starts_with(rest, "true") { t["p"] = p + 4; returner sann }
+    hvis builtin.starts_with(rest, "false") { t["p"] = p + 5; returner usann }
+    hvis builtin.starts_with(rest, "null") { t["p"] = p + 4; returner null }
+    hvis ch == "-" eller (ch >= "0" og ch <= "9") { returner ncbj_tal(t) }
+    kast "NCB-JSON: uventa teikn"
+}
+
+funksjon ncbj_les(src: tekst) {
+    la t = {"s": src, "p": 0}
+    returner ncbj_verdi(t)
+}
+
+funksjon ncbj_selftest() -> heiltall {
+    la bs = builtin.chr(92)
+    la json = "{\"v\":\"" + bs + bs + bs + "\"\"}"
+    la verdi = ncbj_les(json)["v"]
+    hvis lengde(verdi) != 2 { kast "NCB-JSON selftest: feil lengd" }
+    hvis builtin.char_code(verdi[0]) != 92 { kast "NCB-JSON selftest: manglar backslash" }
+    hvis builtin.char_code(verdi[1]) != 34 { kast "NCB-JSON selftest: manglar sitatteikn" }
+    skriv("ncbj-selftest OK\n")
+    returner 0
+}
+
+funksjon ncb_parse_nonnegative(t: tekst, namn: tekst) -> heiltall {
+    hvis t == "" { kast "tom " + namn }
+    la verdi: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la teikn = builtin.slice(t, i, i + 1)
+        hvis teikn < "0" eller teikn > "9" { kast "ugyldig " + namn }
+        verdi = verdi * 10 + (builtin.char_code(teikn) - 48)
+        i = i + 1
+    }
+    returner verdi
+}
+
+// Nokre committed stage0-runtimear returnerer JSON-strengar med eitt rått
+// escape-lag. Dekod éin JSON-strengpass; allereie dekoda tekst går uendra,
+// medan ein faktisk literal backslash er representert som \\ og blir bevart.
+funksjon ncb_json_unescape_tekst(t: tekst) -> tekst {
+    la ut = ""
+    la bs = builtin.chr(92)
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la c = builtin.slice(t, i, i + 1)
+        hvis c == bs og i + 1 < lengde(t) {
+            la n = builtin.slice(t, i + 1, i + 2)
+            hvis n == "n" { ut = ut + builtin.chr(10) }
+            ellers hvis n == "t" { ut = ut + builtin.chr(9) }
+            ellers hvis n == "r" { ut = ut + builtin.chr(13) }
+            ellers hvis n == "b" { ut = ut + builtin.chr(8) }
+            ellers hvis n == "f" { ut = ut + builtin.chr(12) }
+            ellers hvis n == "\"" { ut = ut + builtin.chr(34) }
+            ellers hvis n == bs { ut = ut + bs }
+            ellers {
+                ut = ut + bs + n
+            }
+            i = i + 2
+        } ellers {
+            ut = ut + c
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
 
 // ─── C-runtime som vert embed i generert fil ──────────────────────────────────
 
@@ -25,7 +221,17 @@ funksjon c_runtime_header() -> tekst {
     }
     returner "/* Generert av archive/legacy_c_backend/ncb_to_c.no — IKKJE REDIGER */\n" +
         "/* archive/legacy_c_backend/nc_runtime_mini.c embedded inline */\n" +
-        runtime_kode + "\n"
+        runtime_kode + "\n" +
+        "/* Smal plattform-ABI levert av nc_native_main.c. */\n" +
+        "static NcVal *nc_builtin_system_info(void);\n" +
+        "static NcVal *nc_builtin_system_operation(NcVal *request);\n" +
+        "static NcVal *nc_builtin_pbkdf2_sha256(NcVal *, NcVal *, NcVal *, NcVal *);\n" +
+        "static NcVal *nc_builtin_argon2id(NcVal *, NcVal *, NcVal *, NcVal *, NcVal *, NcVal *);\n" +
+        "static NcVal *nc_builtin_acme_sign(NcVal *, NcVal *, NcVal *);\n" +
+        "static NcVal *nc_builtin_acme_verify(NcVal *, NcVal *, NcVal *, NcVal *);\n" +
+        "static NcVal *nc_builtin_dns_lookup(NcVal *, NcVal *);\n"
+        + "NcVal *nc_fn_builtin_host_exec_ncb_json(NcVal **, int);\n"
+        + "NcVal *nc_fn_builtin_host_kall_bygg_bundle(NcVal **, int);\n"
 }
 
 // ─── C-namnsanitisering ───────────────────────────────────────────────────────
@@ -102,7 +308,9 @@ funksjon løys_funksjon(namn: tekst, functions: ordbok<tekst, tekst>) -> tekst {
 
 // ─── Opcode → C ──────────────────────────────────────────────────────────────
 
-funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: heltall) -> tekst {
+funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>,
+                      ip: heltall, builtin_kart: ordbok<tekst, tekst>,
+                      legacy_escape: boolsk) -> tekst {
     la op: tekst = instr[0]
 
     hvis op == "PUSH_CONST" {
@@ -123,13 +331,20 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
             returner "  nc_push(&sp, stack, nc_nil());\n"
         }
         // Alt anna er tekst/streng
-        la s0 = builtin.replace(tekst(verdi), "\\", "\\\\")
-        la s1 = builtin.replace(s0, "\"", "\\\"")
-        la s2 = builtin.replace(s1, "\n", "\\n")
-        la s3 = builtin.replace(s2, "\t", "\\t")
+        // Bygg C-escape med teiknkodar. Eldre bootstrap-kompilatorar har
+        // ulik behandling av backslash i kjeldeliteralar; chr-kontrakten er
+        // eintydig og hindrar dobbel escaping i regenererte kandidatar.
+        la bs = builtin.chr(92)
+        la quote = builtin.chr(34)
+        la dekoda = tekst(verdi)
+        hvis legacy_escape { dekoda = ncb_json_unescape_tekst(dekoda) }
+        la s0 = builtin.replace(dekoda, bs, bs + bs)
+        la s1 = builtin.replace(s0, quote, bs + quote)
+        la s2 = builtin.replace(s1, builtin.chr(10), bs + "n")
+        la s3 = builtin.replace(s2, builtin.chr(9), bs + "t")
         // Escape \r (0x0D) — bruk builtin.chr for å matche rå byte
-        la s4 = builtin.replace(s3, builtin.chr(13), "\\r")
-        la s5 = builtin.replace(s4, builtin.chr(0), "\\0")
+        la s4 = builtin.replace(s3, builtin.chr(13), bs + "r")
+        la s5 = builtin.replace(s4, builtin.chr(0), bs + "0")
         la escaped = s5
         returner "  nc_push(&sp, stack, nc_str(\"" + escaped + "\"));\n"
     }
@@ -138,8 +353,16 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         returner "  nc_store(vars, varnames, &nvars, \"" + instr[1] + "\", nc_pop(&sp, stack));\n"
     }
 
+    hvis op == "STORE_GLOBAL" {
+        returner "  nc_global_store(_nc_module, \"" + instr[1] + "\", nc_pop(&sp, stack));\n"
+    }
+
     hvis op == "LOAD_NAME" {
         returner "  nc_push(&sp, stack, nc_load(vars, varnames, nvars, \"" + instr[1] + "\"));\n"
+    }
+
+    hvis op == "LOAD_GLOBAL" {
+        returner "  nc_push(&sp, stack, nc_global_load(_nc_module, \"" + instr[1] + "\"));\n"
     }
 
     hvis op == "POP" {
@@ -256,12 +479,19 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         hvis builtin.starts_with(fn_namn, "builtin.builtin.") {
             fn_namn = builtin.slice(fn_namn, 8, lengde(fn_namn))
         }
+        hvis fn_namn == "builtin.kompiler_fil_aktiv" {
+            fn_namn = "selfhost.kompiler.kompiler_fil"
+        }
         la nargs_int: heltall = 0
         hvis lengde(instr) > 2 { nargs_int = instr[2] }
         la nargs: tekst = ncb_safe_num_text(nargs_int)
 
         // Builtin-funksjonar: direkte C-kall til nc_builtin_*
-        la builtin_kart: ordbok<tekst, tekst> = {}
+        // Kartet blir delt av alle instruksjonar i éi generering.
+        // Ikkje materialiser heile nøkkellista for kvart CALL. På store
+        // selfhost-bundlar vart denne init-sjekken ein dominerande O(kall *
+        // builtin-namn)-kostnad og skapte mykje kortliva GC-data.
+        hvis ikkje finnes_nøkkel(builtin_kart, "builtin.lengde") {
         builtin_kart["builtin.lengde"] = "nc_builtin_lengde"
         builtin_kart["builtin.legg_til"] = "nc_builtin_legg_til"
         builtin_kart["builtin.fjern_siste"] = "nc_builtin_fjern_siste"
@@ -275,6 +505,8 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.fil_les_binary"] = "nc_builtin_fil_les_binary"
         builtin_kart["builtin.fil_les_binær"] = "nc_builtin_fil_les_binary"
         builtin_kart["builtin.fil_skriv"] = "nc_builtin_fil_skriv"
+        builtin_kart["builtin.fil_append_binary"] = "nc_builtin_fil_append_binary"
+        builtin_kart["builtin.fil_append_binær"] = "nc_builtin_fil_append_binary"
         builtin_kart["fil_les"] = "nc_builtin_fil_les"
         builtin_kart["fil_skriv"] = "nc_builtin_fil_skriv"
         builtin_kart["builtin.builtin.fil_les"] = "nc_builtin_fil_les"
@@ -283,6 +515,7 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.fil_sett_kjorbar"] = "nc_builtin_fil_sett_kjorbar"
         builtin_kart["fil_finnes"] = "nc_builtin_fil_finnes"
         builtin_kart["builtin.miljo_hent"] = "nc_builtin_miljo_hent"
+        builtin_kart["builtin.miljo_sett"] = "nc_builtin_miljo_sett"
         builtin_kart["miljo_hent"] = "nc_builtin_miljo_hent"
         builtin_kart["builtin.miljo_finnes"] = "nc_builtin_miljo_finnes"
         builtin_kart["miljo_finnes"] = "nc_builtin_miljo_finnes"
@@ -319,6 +552,9 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.feil"] = "nc_builtin_feil"
         builtin_kart["builtin.json_parse"] = "nc_json_parse_from_ncval"
         builtin_kart["builtin.index_of"] = "nc_builtin_index_of"
+        builtin_kart["builtin.contains_any"] = "nc_builtin_contains_any"
+        builtin_kart["builtin.system_info"] = "nc_builtin_system_info"
+        builtin_kart["builtin.system_operation"] = "nc_builtin_system_operation"
         builtin_kart["builtin.lower"] = "nc_builtin_lower"
         builtin_kart["builtin.upper"] = "nc_builtin_upper"
         builtin_kart["builtin.tekst_til_liten"] = "nc_builtin_lower"
@@ -333,6 +569,7 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.jit_operation"] = "nc_builtin_jit_operation"
         builtin_kart["builtin.process_spawn_argv"] = "nc_builtin_process_spawn_argv"
         builtin_kart["builtin.process_operation"] = "nc_builtin_process_operation"
+        builtin_kart["builtin.argv_operation"] = "nc_builtin_argv_operation"
         builtin_kart["builtin.filesystem_read_operation"] = "nc_builtin_filesystem_read_operation"
         builtin_kart["builtin.filesystem_write_operation"] = "nc_builtin_filesystem_write_operation"
         builtin_kart["builtin.network_operation"] = "nc_builtin_network_operation"
@@ -340,7 +577,16 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.thread_join"] = "nc_builtin_thread_join"
         builtin_kart["builtin.thread_sync"] = "nc_builtin_thread_sync"
         builtin_kart["builtin.thread_current_id"] = "nc_builtin_thread_current_id"
+        builtin_kart["builtin.mkdir_p"] = "nc_builtin_mkdir_p"
         builtin_kart["builtin.random_hex"] = "nc_builtin_random_hex"
+        builtin_kart["builtin.sha256"] = "nc_builtin_sha256"
+        builtin_kart["builtin.sha256_bytes"] = "nc_builtin_sha256_bytes"
+        builtin_kart["builtin.pbkdf2_sha256"] = "nc_builtin_pbkdf2_sha256"
+        builtin_kart["builtin.argon2id"] = "nc_builtin_argon2id"
+        builtin_kart["builtin.acme_sign"] = "nc_builtin_acme_sign"
+        builtin_kart["builtin.acme_verify"] = "nc_builtin_acme_verify"
+        builtin_kart["builtin.dns_lookup"] = "nc_builtin_dns_lookup"
+        builtin_kart["builtin.resolve_host"] = "nc_builtin_dns_lookup"
         builtin_kart["builtin.exec_prosess"] = "nc_builtin_exec_prosess"
         builtin_kart["builtin.tid_ms"] = "nc_builtin_tid_ms"
         builtin_kart["builtin.now_ms"] = "nc_builtin_tid_ms"
@@ -354,6 +600,8 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.builtin.starts_with"] = "nc_builtin_starts_with"
         builtin_kart["builtin.builtin.ends_with"] = "nc_builtin_ends_with"
         builtin_kart["builtin.builtin.contains"] = "nc_builtin_contains"
+        builtin_kart["builtin.builtin.system_info"] = "nc_builtin_system_info"
+        builtin_kart["builtin.builtin.system_operation"] = "nc_builtin_system_operation"
         builtin_kart["builtin.builtin.split"] = "nc_builtin_split"
         builtin_kart["builtin.builtin.join"] = "nc_builtin_join"
         builtin_kart["builtin.builtin.trim"] = "nc_builtin_trim"
@@ -371,6 +619,8 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.builtin.n"] = "nc_builtin_n"
         builtin_kart["builtin.builtin.fil_append"] = "nc_builtin_fil_append"
         builtin_kart["builtin.builtin.random_hex"] = "nc_builtin_random_hex"
+        builtin_kart["builtin.builtin.sha256"] = "nc_builtin_sha256"
+        builtin_kart["builtin.builtin.sha256_bytes"] = "nc_builtin_sha256_bytes"
         builtin_kart["builtin.builtin.exec_prosess"] = "nc_builtin_exec_prosess"
         builtin_kart["builtin.builtin.tid_ms"] = "nc_builtin_tid_ms"
         builtin_kart["builtin.builtin.now_ms"] = "nc_builtin_tid_ms"
@@ -417,6 +667,7 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
         builtin_kart["builtin.builtin.socket_recv_bytes"] = "nc_builtin_socket_recv_bytes"
         builtin_kart["builtin.builtin.socket_close"] = "nc_builtin_socket_close"
         builtin_kart["builtin.builtin.socket_settimeout"] = "nc_builtin_socket_settimeout"
+        }
 
         // Bruk ip i variabelnamn for å unngå kollisjonar
         la suf = ncb_safe_num_text(ip)
@@ -488,9 +739,17 @@ funksjon opcode_til_c(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: 
 
 // Stream-variant: vanlege builtin-kall kan avleiast direkte frå namnet.
 // Den tunge alias-tabellen i opcode_til_c vert berre brukt for særnamn.
-funksjon opcode_til_c_stream(instr: liste<tekst>, functions: ordbok<tekst, tekst>, ip: heiltall) -> tekst {
-    hvis instr[0] != "CALL" { returner opcode_til_c(instr, functions, ip) }
+funksjon opcode_til_c_stream(instr: liste<tekst>, functions: ordbok<tekst, tekst>,
+                             ip: heiltall, builtin_kart: ordbok<tekst, tekst>,
+                             legacy_escape: boolsk) -> tekst {
+    hvis instr[0] != "CALL" { returner opcode_til_c(instr, functions, ip, builtin_kart, legacy_escape) }
     la fn_namn: tekst = instr[1]
+    // Builtins har fleire C-signaturfamiliar og historiske alias. Den
+    // eksplisitte hovudbana handterer begge korrekt; stream-snøggvegen er
+    // berre trygg for vanlege interne Norscode-funksjonar.
+    hvis builtin.starts_with(fn_namn, "builtin.") {
+        returner opcode_til_c(instr, functions, ip, builtin_kart, legacy_escape)
+    }
     hvis builtin.starts_with(fn_namn, "builtin.builtin.") { fn_namn = builtin.slice(fn_namn, 8, lengde(fn_namn)) }
     la nargs_int: heiltall = 0
     hvis lengde(instr) > 2 { nargs_int = instr[2] }
@@ -514,6 +773,12 @@ funksjon opcode_til_c_stream(instr: liste<tekst>, functions: ordbok<tekst, tekst
             hvis base == "tekst_til_liten" { c_builtin = "nc_builtin_lower" }
             hvis base == "tekst_til_store" { c_builtin = "nc_builtin_upper" }
             hvis base == "tid_no" eller base == "tid" eller base == "timestamp" eller base == "unix_timestamp" { c_builtin = "nc_builtin_tid_no" }
+            // Desse runtimeinngangane brukar den generiske (NcVal **, int)-
+            // signaturen. La den ordinære CALL-bana byggje argumentarrayen.
+            hvis base == "ncb_call_fn" eller base == "ncb_route_handlers" eller
+               base == "tensor_operation" {
+                direkte = usann
+            }
         }
     }
     hvis direkte {
@@ -551,20 +816,25 @@ funksjon opcode_til_c_stream(instr: liste<tekst>, functions: ordbok<tekst, tekst
         }
         returner ut2 + "nc_push(&sp,stack," + sanitiser_namn(fn_namn) + "(NULL,0)); }\n"
     }
-    returner opcode_til_c(instr, functions, ip)
+    returner opcode_til_c(instr, functions, ip, builtin_kart, legacy_escape)
 }
 
 // ─── Generer C for éin funksjon ──────────────────────────────────────────────
 
-funksjon generer_funksjon(fn_namn: tekst, fn_def: ordbok<tekst, tekst>, functions: ordbok<tekst, tekst>) -> tekst {
+funksjon generer_funksjon(fn_namn: tekst, fn_def: ordbok<tekst, tekst>,
+                          functions: ordbok<tekst, tekst>, builtin_kart: ordbok<tekst, tekst>) -> tekst {
     la params = fn_def["params"]
     la kode = fn_def["code"]
     la c_namn = sanitiser_namn(fn_namn)
+    // ncbj_les dekodar RFC 8259 nøyaktig éin gong for både gamle og nye
+    // funksjonar. Eit ekstra legacy-pass ville øydeleggje backslash-literal.
+    la legacy_escape = usann
 
     // Funksjonssignatur
     la ut: tekst = "static NcVal *" + c_namn + "(NcVal **args, int nargs) {\n"
+    ut = ut + "  const char *_nc_module = \"" + fn_def["module"] + "\";\n"
     // Heap-allokerte stacks for å unngå stack overflow ved djup rekursjon
-    ut = ut + "  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;\n"
+    ut = ut + "  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;\n"
     ut = ut + "  NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;\n"
     ut = ut + "  NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);\n"
     ut = ut + "  jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;\n"
@@ -582,7 +852,7 @@ funksjon generer_funksjon(fn_namn: tekst, fn_def: ordbok<tekst, tekst>, function
     la ip: heltall = 0
     mens ip < lengde(kode) {
         la instr = kode[ip]
-        ut = ut + opcode_til_c(instr, functions, ip)
+        ut = ut + opcode_til_c(instr, functions, ip, builtin_kart, legacy_escape)
         hvis instr[0] != "RETURN" og instr[0] != "LABEL" {
             ut = ut + "  nc_gc_safepoint();\n"
         }
@@ -595,13 +865,16 @@ funksjon generer_funksjon(fn_namn: tekst, fn_def: ordbok<tekst, tekst>, function
 
 funksjon generer_funksjon_stream(output_sti: tekst, fn_namn: tekst,
                                  fn_def: ordbok<tekst, tekst>,
-                                 functions: ordbok<tekst, tekst>) -> bool {
+                                 functions: ordbok<tekst, tekst>,
+                                 builtin_kart: ordbok<tekst, tekst>) -> bool {
     la params = fn_def["params"]
     la kode = fn_def["code"]
     la c_namn = sanitiser_namn(fn_namn)
+    // Same eintydige parserkontrakt som ikkje-streamande materialisering.
+    la legacy_escape = usann
     prøv {
-        builtin.fil_append(output_sti, "static NcVal *" + c_namn + "(NcVal **args, int nargs) {\n")
-        builtin.fil_append(output_sti, "  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;\n  NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;\n  NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);\n  jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;\n")
+        builtin.fil_append(output_sti, "static NcVal *" + c_namn + "(NcVal **args, int nargs) {\n  const char *_nc_module = \"" + fn_def["module"] + "\";\n")
+        builtin.fil_append(output_sti, "  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;\n  NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;\n  NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);\n  jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;\n")
         la pi: heiltall = 0
         mens pi < lengde(params) {
             builtin.fil_append(output_sti, "  nc_store(vars,varnames,&nvars,\"" + params[pi] + "\",nargs>" + ncb_safe_num_text(pi) + "?args[" + ncb_safe_num_text(pi) + "]:nc_nil());\n")
@@ -615,9 +888,12 @@ funksjon generer_funksjon_stream(output_sti: tekst, fn_namn: tekst,
             // Buffer eit avgrensa tal instruksjonar før disk-append. Dette
             // reduserer native-kall og mengda kortliva strengobjekt i pure VM,
             // utan å halde heile funksjonen eller C-fila i minnet.
-            kodeblokk = kodeblokk + opcode_til_c_stream(instr, functions, ip)
+            kodeblokk = kodeblokk + opcode_til_c_stream(instr, functions, ip, builtin_kart, legacy_escape)
             hvis instr[0] != "RETURN" og instr[0] != "LABEL" { kodeblokk = kodeblokk + "  nc_gc_safepoint();\n" }
-            hvis (ip + 1) % 8 == 0 {
+            // Samle ei avgrensa, men vesentleg større blokk per append. Å opne
+            // og lukke målfilen for kvar åttande instruksjon gjorde store
+            // selfhost-bundlar unødvendig mange gonger tregare.
+            hvis (ip + 1) % 256 == 0 {
                 builtin.fil_append(output_sti, kodeblokk)
                 kodeblokk = ""
             }
@@ -639,6 +915,7 @@ funksjon generer_c_frå_ncb(ncb: ordbok<tekst, tekst>) -> tekst {
     la ut: tekst = c_runtime_header()
     la fns = ncb["functions"]
     la nk = nøkler(fns)
+    la builtin_kart: ordbok<tekst, tekst> = {}
 
     // Forhandsdeklarasjonar
     ut = ut + "/* ── Forhandsdeklarasjonar ── */\n"
@@ -660,7 +937,7 @@ funksjon generer_c_frå_ncb(ncb: ordbok<tekst, tekst>) -> tekst {
     i = 0
     mens i < lengde(nk) {
         la fn_namn: tekst = nk[i]
-        ut = ut + generer_funksjon(fn_namn, fns[fn_namn], fns)
+        ut = ut + generer_funksjon(fn_namn, fns[fn_namn], fns, builtin_kart)
         i = i + 1
     }
 
@@ -699,8 +976,21 @@ funksjon generer_c_frå_ncb(ncb: ordbok<tekst, tekst>) -> tekst {
         }
     }
     ut = ut + "/* Inngangspunkt: " + entry_fn + " */\n"
+    ut = ut + "#define NC_HAS_GENERATED_MODULE_INITIALIZERS 1\n"
+    ut = ut + "static void nc_run_generated_module_initializers(void) {\n"
+    hvis finnes_nøkkel(ncb, "module_initializers") {
+        la hook_initializers = ncb["module_initializers"]
+        la hi: heiltall = 0
+        mens hi < lengde(hook_initializers) {
+            ut = ut + "  " + sanitiser_namn(hook_initializers[hi]) + "(NULL, 0);\n"
+            hi = hi + 1
+        }
+    }
+    ut = ut + "}\n"
     ut = ut + "int main(int argc, char **argv) {\n"
-    ut = ut + "  if (setjmp(g_err_jmp)) { fprintf(stderr, \"nc-vm feil: %s\\n\", g_err_msg); return 1; }\n"
+    ut = ut + "  if (setjmp(g_err_jmp)) { fprintf(stderr, \"nc-vm feil: %s" +
+        builtin.chr(92) + "n\", g_err_msg); return 1; }\n"
+    ut = ut + "  nc_run_generated_module_initializers();\n"
     ut = ut + "  " + sanitiser_namn(entry_fn) + "(NULL, 0);\n"
     ut = ut + "  return 0;\n"
     ut = ut + "}\n"
@@ -715,6 +1005,24 @@ funksjon generer_c_stream(ncb: ordbok<tekst, tekst>, output_sti: tekst) -> bool 
     prøv {
         la fns = ncb["functions"]
         la nk = nøkler(fns)
+        la funksjon_start: heiltall = 0
+        la funksjon_slutt: heiltall = lengde(nk)
+        prøv {
+            la start_tekst = miljo_hent("NC_NCB_FUNCTION_START")
+            hvis start_tekst != "" {
+                funksjon_start = ncb_parse_nonnegative(start_tekst, "NC_NCB_FUNCTION_START")
+            }
+        } fang (e) { kast "ugyldig NC_NCB_FUNCTION_START" }
+        prøv {
+            la slutt_tekst = miljo_hent("NC_NCB_FUNCTION_END")
+            hvis slutt_tekst != "" {
+                funksjon_slutt = ncb_parse_nonnegative(slutt_tekst, "NC_NCB_FUNCTION_END")
+            }
+        } fang (e) { kast "ugyldig NC_NCB_FUNCTION_END" }
+        hvis funksjon_start < 0 { funksjon_start = 0 }
+        hvis funksjon_slutt > lengde(nk) { funksjon_slutt = lengde(nk) }
+        hvis funksjon_start > funksjon_slutt { kast "ugyldig NCB-funksjonsintervall" }
+        la builtin_kart: ordbok<tekst, tekst> = {}
         builtin.fil_skriv(output_sti, c_runtime_header())
         builtin.fil_append(output_sti, "/* ── Forhandsdeklarasjonar ── */\n")
         builtin.fil_append(output_sti, "static NcVal *nc_builtin_socket_listen(NcVal *host_v, NcVal *port_v);\n")
@@ -734,9 +1042,9 @@ funksjon generer_c_stream(ncb: ordbok<tekst, tekst>, output_sti: tekst) -> bool 
         }
         hvis deklarasjonar != "" { builtin.fil_append(output_sti, deklarasjonar) }
         builtin.fil_append(output_sti, "\n/* ── Funksjonsdefinisjonar ── */\n")
-        i = 0
-        mens i < lengde(nk) {
-            hvis ikkje generer_funksjon_stream(output_sti, nk[i], fns[nk[i]], fns) { returner usann }
+        i = funksjon_start
+        mens i < funksjon_slutt {
+            hvis ikkje generer_funksjon_stream(output_sti, nk[i], fns[nk[i]], fns, builtin_kart) { returner usann }
             i = i + 1
         }
         builtin.fil_append(output_sti, "/* ── Dispatch-tabell for maintainer-host ── */\ntypedef struct { const char *name; NcVal *(*fn)(NcVal **, int); } NcDispatch;\nstatic NcDispatch nc_dispatch[] = {\n")
@@ -754,7 +1062,19 @@ funksjon generer_c_stream(ncb: ordbok<tekst, tekst>, output_sti: tekst) -> bool 
             la ei: heiltall = 0
             mens ei < lengde(nk) { hvis builtin.ends_with(nk[ei], ".start") og entry_fn == "" { entry_fn = nk[ei] } ei = ei + 1 }
         }
-        builtin.fil_append(output_sti, "/* Inngangspunkt: " + entry_fn + " */\nint main(int argc, char **argv) {\n  if (setjmp(g_err_jmp)) { fprintf(stderr, \"nc-vm feil: %s\\n\", g_err_msg); return 1; }\n  " + sanitiser_namn(entry_fn) + "(NULL, 0);\n  return 0;\n}\n")
+        la main_kode = "/* Inngangspunkt: " + entry_fn + " */\n#define NC_HAS_GENERATED_MODULE_INITIALIZERS 1\nstatic void nc_run_generated_module_initializers(void) {\n"
+        hvis finnes_nøkkel(ncb, "module_initializers") {
+            la initializers = ncb["module_initializers"]
+            la ii: heiltall = 0
+            mens ii < lengde(initializers) {
+                main_kode = main_kode + "  " + sanitiser_namn(initializers[ii]) + "(NULL, 0);\n"
+                ii = ii + 1
+            }
+        }
+        main_kode = main_kode + "}\nint main(int argc, char **argv) {\n  if (setjmp(g_err_jmp)) { fprintf(stderr, \"nc-vm feil: %s" +
+            builtin.chr(92) + "n\", g_err_msg); return 1; }\n  nc_run_generated_module_initializers();\n  " +
+            sanitiser_namn(entry_fn) + "(NULL, 0);\n  return 0;\n}\n"
+        builtin.fil_append(output_sti, main_kode)
         returner sann
     } fang (e) {
         skriv("Klarte ikkje skrive C-stream: " + tekst(e) + "\n")
@@ -766,6 +1086,12 @@ funksjon generer_c_stream(ncb: ordbok<tekst, tekst>, output_sti: tekst) -> bool 
 // ─── Inngangspunkt ───────────────────────────────────────────────────────────
 
 funksjon start() {
+    prøv {
+        hvis miljo_hent("NC_NCB_JSON_SELFTEST") == "1" {
+            ncbj_selftest()
+            returner
+        }
+    } fang (e) { kast e }
     la input_sti = miljo_hent("NC_NCB_INPUT")
     la output_sti = miljo_hent("NC_C_OUTPUT")
 
@@ -778,9 +1104,36 @@ funksjon start() {
 
     skriv("Les " + input_sti + "...\n")
     la ncb_json = fil_les(input_sti)
-    la ncb = json_parse_raw(ncb_json)
+    // Bruk same Norscode-parser på committed stage0 og kandidatar. Den gamle
+    // native json_parse_raw-brua i committed stage0 dekodar enkelte
+    // backslash-literal eitt steg for mykje og kan elles materialisere ein
+    // kompilator som skriv ugyldig NCB-JSON.
+    la ncb = null
+    // Nyare kandidatvertar har ein bytebevarande RFC 8259-parser og kan
+    // materialisere store NCB-filer direkte. Den lokale kompatibilitetslesaren
+    // blir framleis brukt av committed stage0, der rå backslash-literal elles
+    // kan bli dekoda eitt steg for mykje.
+    hvis miljo_hent("NC_NCB_USE_NATIVE_JSON") == builtin.chr(49) {
+        ncb = builtin.json_parse_raw(ncb_json)
+    } ellers {
+        ncb = ncbj_les(ncb_json)
+    }
 
     la fns = ncb["functions"]
+    // Committed VM-hostar leverer historisk eitt rått JSON-escape-lag,
+    // medan den native AOT-parseren leverer ferdig dekoda strengverdiar.
+    // I rå hostmodus må alle funksjonar dekodast éin gong. I native modus
+    // blir decoded-v1-markøren per funksjon respektert, slik at legacy og nye
+    // modular trygt kan blandast i same bundle.
+    hvis miljo_hent("NC_NCB_PARSER_DECODED") != "1" {
+        la fn_namn = nøkler(fns)
+        la fi: heiltall = 0
+        mens fi < lengde(fn_namn) {
+            la fn = fns[fn_namn[fi]]
+            fn["string_encoding"] = "legacy-raw-v1"
+            fi = fi + 1
+        }
+    }
     skriv("Funksjonar: " + ncb_safe_num_text(lengde(nøkler(fns))) + "\n")
 
     skriv("Genererer C...\n")

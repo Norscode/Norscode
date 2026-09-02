@@ -1,5 +1,7 @@
 // tools/selfcompile_l5b.no — L5b maintenance: full Gen1-NCB → Gen2 via VM
 
+bruk tools.process_runner som prosess
+
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
     returner 0
@@ -10,42 +12,8 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner res[0] == "0"
-}
-
-funksjon res_felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
 funksjon trim(t: tekst) -> tekst {
     returner builtin.trim(t)
-}
-
-funksjon første_felt(t: tekst) -> tekst {
-    la delar = builtin.split(trim(t), " ")
-    la i = 0
-    mens i < lengde(delar) {
-        la d = trim(delar[i])
-        hvis d != "" { returner d }
-        i = i + 1
-    }
-    returner ""
 }
 
 funksjon fil_finst(sti: tekst) -> bool {
@@ -57,11 +25,78 @@ funksjon executable(sti: tekst) -> bool {
     returner fil_finst(sti)
 }
 
-funksjon run(cmd: tekst) -> bool {
-    la res = kommando(cmd)
-    hvis res_felt(res, 1) != "" { skriv(res_felt(res, 1)) }
-    hvis res_felt(res, 2) != "" { skriv(res_felt(res, 2)) }
-    returner ok(res)
+funksjon køyr_native(native: tekst, root: tekst, miljø: ordbok_tekst, timeout_ms: heiltall) -> boolsk {
+    la argv: liste_tekst = []
+    hvis tekst(miljø["NORSCODE_CMD"]) == "run-ncb-pure" {
+        la program = tekst(miljø["NORSCODE_FILE"])
+        hvis har_nokkel(miljø, "NORSCODE_L5B_VM_WRAPPER_NCB") {
+            program = tekst(miljø["NORSCODE_L5B_VM_WRAPPER_NCB"])
+        }
+        argv = ["run-ncb-pure", program]
+    }
+    la res = prosess.køyr(native, argv, root, miljø, timeout_ms)
+    prosess.skriv_resultat(res)
+    hvis ikkje prosess.ok(res) {
+        linje("L5b child: status=" + tekst(res["status"]) +
+              " exit=" + tekst(res["exit_code"]) +
+              " error=" + tekst(res["error"]) +
+              " wall_ms=" + tekst(res["wall_ms"]) +
+              " peak_rss_bytes=" + tekst(res["peak_rss_bytes"]))
+    }
+    returner prosess.ok(res)
+}
+
+funksjon bygg_vm_runner_native(root: tekst, vm_runner_ncb: tekst) -> tekst {
+    la konfigurert = env("NORSCODE_L5B_VM_RUNNER")
+    hvis konfigurert != "" og executable(konfigurert) { returner konfigurert }
+    la out = root + "/build/l5/l5b_vm_runner_native"
+    la miljø: ordbok_tekst = {
+        "NORSCODE_ROOT": root,
+        "NC_INPUT": vm_runner_ncb,
+        "NC_OUTPUT": out,
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la info = builtin.system_info()
+    la system = tekst(info["system"])
+    la maskin = tekst(info["machine"])
+    la codegen = env("NORSCODE_L5B_NATIVE_CODEGEN")
+    la executable_codegen = codegen
+    la argv: liste_tekst = []
+    hvis codegen == "" og system == "Darwin" og maskin == "arm64" {
+        // Køyr den avgrensa runner-NCB-en gjennom den aktive native hosten på
+        // macOS. Mach-O AOT-subsettet støttar enno ikkje alle dynamiske
+        // miljø-/filesystem-kall runneren treng, medan run-ncb-pure gjer det.
+        executable_codegen = env("NORSCODE_NATIVE_BIN")
+        hvis executable_codegen == "" { executable_codegen = root + "/dist/norscode_native" }
+        hvis ikkje executable(executable_codegen) {
+            linje("  [FEIL] konfigurert native L5b-host finst ikkje: " + executable_codegen)
+            returner ""
+        }
+        linje("  [OK] avgrensa L5b VM-runner brukar konfigurert native run-ncb-pure på macOS")
+        returner executable_codegen
+    } ellers hvis codegen == "" {
+        executable_codegen = root + "/build/v3600/linux/native_codegen_v2_current"
+    }
+    hvis ikkje executable(executable_codegen) {
+        linje("  [FEIL] manglar avgrensa L5b native codegen: " + executable_codegen)
+        returner ""
+    }
+    la res = prosess.køyr(executable_codegen, argv, root, miljø, 600000)
+    prosess.skriv_resultat(res)
+    hvis ikkje prosess.ok(res) eller ikkje executable(out) {
+        linje("  [FEIL] kunne ikkje byggje avgrensa L5b VM-runner")
+        returner ""
+    }
+    hvis ikkje builtin.fil_sett_kjorbar(out) {
+        // Nokre overgangskandidatar kan skrive ELF-en, men manglar chmod-
+        // operasjonen. Ei eksisterande executable kandidatfil bevarer modus
+        // ved overskriving; den etterfølgjande spawn-porten feilar lukka på
+        // ein rein build dersom fila faktisk ikkje kan køyrast.
+        linje("  [MERK] filmodus-ABI rapporterte overgangsgap; spawn-porten verifiserer faktisk modus")
+    }
+    linje("  [OK] avgrensa L5b VM-runner: " + bytes(out) + " bytes")
+    returner out
 }
 
 funksjon bytes(sti: tekst) -> tekst {
@@ -69,7 +104,7 @@ funksjon bytes(sti: tekst) -> tekst {
         la innhald = builtin.fil_les(sti)
         returner tekst_fra_heltall(lengde(innhald))
     } fang (e) {}
-    returner første_felt(res_felt(kommando("wc -c " + shell(sti)), 1))
+    returner "0"
 }
 
 funksjon første_forskjellar(sti_a: tekst, sti_b: tekst, maks: heiltall) -> tekst {
@@ -94,54 +129,37 @@ funksjon første_forskjellar(sti_a: tekst, sti_b: tekst, maks: heiltall) -> teks
     returner out
 }
 
-funksjon prøv_json_literal(verdi: tekst) {
-    prøv {
-        la parsed = builtin.json_parse_raw(verdi)
-        hvis parsed != null { returner parsed }
-    } fang (e) {}
-    returner verdi
-}
-
-funksjon normaliser_ncb_literalar(ncb) {
-    la fns = ncb["functions"]
-    la fn_namn = nøkler(fns)
-    la fi = 0
-    mens fi < lengde(fn_namn) {
-        la fn = fns[fn_namn[fi]]
-        la code = fn["code"]
-        la ci = 0
-        mens ci < lengde(code) {
-            la instr = code[ci]
-            hvis lengde(instr) > 1 {
-                la op = instr[0]
-                la operand = instr[1]
-                hvis builtin.type(operand) == "tekst" {
-                    hvis op == "PUSH_CONST" {
-                        la first = builtin.slice(operand, 0, 1)
-                        hvis first == "[" eller first == "{" eller operand == "null" eller operand == "true" eller operand == "false" {
-                            instr[1] = prøv_json_literal(operand)
-                        }
-                    } ellers hvis op == "LOAD_NAME" og operand == "null" {
-                        instr[1] = null
-                    }
-                }
-            }
-            ci = ci + 1
-        }
-        fi = fi + 1
-    }
-    returner ncb
-}
-
-funksjon kanonisk_paritetsjson(verdi: tekst) -> tekst {
-    la ncb = builtin.json_parse_raw(verdi)
-    hvis ncb == null { returner verdi }
-    returner builtin.json_stringify(normaliser_ncb_literalar(ncb))
-}
-
 funksjon filer_identiske(sti_a: tekst, sti_b: tekst) -> bool {
     hvis ikkje fil_finst(sti_a) eller ikkje fil_finst(sti_b) { returner usann }
-    returner kanonisk_paritetsjson(builtin.fil_les(sti_a)) == kanonisk_paritetsjson(builtin.fil_les(sti_b))
+    returner builtin.fil_les(sti_a) == builtin.fil_les(sti_b)
+}
+
+funksjon les_source_fragment_tal(source_dir: tekst, prefiks: tekst) -> heiltall {
+    la sti = source_dir + "/" + prefiks + "-source-part-count.txt"
+    hvis ikkje fil_finst(sti) { returner 0 }
+    returner heltall_fra_tekst(trim(builtin.fil_les(sti)))
+}
+
+funksjon lag_driver_utan_debugmetadata(kjelde: tekst, utfil: tekst) -> boolsk {
+    prøv {
+        la ncb = builtin.json_parse_raw(builtin.fil_les(kjelde))
+        la fns = ncb["functions"]
+        la namn = nøkler(fns)
+        la i: heiltall = 0
+        mens i < lengde(namn) {
+            la fn = fns[namn[i]]
+            hvis har_nokkel(fn, "source_lines") { fjern_nokkel(fn, "source_lines") }
+            hvis har_nokkel(fn, "source_columns") { fjern_nokkel(fn, "source_columns") }
+            fns[namn[i]] = {"__ncb_lazy_json__": builtin.json_stringify(fn)}
+            i = i + 1
+        }
+        builtin.fil_skriv(utfil, builtin.json_stringify(builtin.json_parse_raw(builtin.json_stringify(ncb))))
+        returner sann
+    } fang (e) {
+        linje("  [FEIL] kunne ikkje lage avgrensa driver: " + tekst(e))
+        returner usann
+    }
+    returner usann
 }
 
 funksjon bundle_args() -> tekst {
@@ -152,26 +170,353 @@ funksjon bundle_args() -> tekst {
         "selfhost.kompiler=selfhost/kompiler.no " +
         "selfhost.json=selfhost/json.no " +
         "selfhost.vm=selfhost/vm.no " +
-        "selfhost.bundler=selfhost/bundler.no"
+        "selfhost.bundler=selfhost/bundler.no " +
+        "selfhost.l5b_host=selfhost/l5b_host.no " +
+        "selfhost.l5b_raw_bundler=selfhost/l5b_raw_bundler.no"
+}
+
+funksjon bundle_args_source() -> tekst {
+    returner "selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no " +
+        "selfhost.parser=selfhost/parser.no " +
+        "selfhost.compiler.semantic=selfhost/compiler/semantic.no " +
+        "selfhost.compiler.ir_to_bytecode=selfhost/compiler/ir_to_bytecode.no " +
+        "selfhost.kompiler=selfhost/kompiler.no " +
+        "selfhost.json=selfhost/json.no " +
+        "std.runtime.atomic=std/runtime/atomic.no " +
+        "std.runtime.allocator=std/runtime/allocator.no " +
+        "std.runtime.memory_abi=std/runtime/memory_abi.no " +
+        "std.runtime_memory=std/runtime_memory.no " +
+        "std.runtime_security=std/runtime_security.no " +
+        "std.sha256=std/sha256.no " +
+        "selfhost.vm=selfhost/vm.no " +
+        "selfhost.bundler=selfhost/bundler.no " +
+        "selfhost.l5b_host=selfhost/l5b_host.no " +
+        "selfhost.l5b_raw_bundler=selfhost/l5b_raw_bundler.no"
+}
+
+funksjon compiler_bundle_args_source() -> tekst {
+    returner "selfhost.lexer.lexer_m1=selfhost/lexer/lexer_m1.no " +
+        "selfhost.parser=selfhost/parser.no " +
+        "selfhost.compiler.semantic=selfhost/compiler/semantic.no " +
+        "selfhost.compiler.ir_to_bytecode=selfhost/compiler/ir_to_bytecode.no " +
+        "selfhost.kompiler=selfhost/kompiler.no " +
+        "selfhost.l5b_host=selfhost/l5b_host.no"
+}
+
+funksjon spec_modul(spec: tekst) -> tekst {
+    la pos = builtin.index_of(spec, "=")
+    hvis pos < 1 { returner "" }
+    returner builtin.slice(spec, 0, pos)
+}
+
+funksjon spec_sti(spec: tekst) -> tekst {
+    la pos = builtin.index_of(spec, "=")
+    hvis pos < 1 { returner "" }
+    returner builtin.slice(spec, pos + 1, lengde(spec))
+}
+
+funksjon source_kandidat_namn(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    la namn = delar[lengde(delar) - 1]
+    hvis builtin.ends_with(namn, ".no") {
+        namn = builtin.slice(namn, 0, lengde(namn) - 3)
+    }
+    returner namn + ".ncb.json"
+}
+
+funksjon source_bitar(kjelde: tekst, kandidat_dir: tekst, prefiks: tekst) -> liste_tekst {
+    la linjer = builtin.split(kjelde, "\n")
+    la prelude = ""
+    la pi: heiltall = 0
+    mens pi < lengde(linjer) {
+        hvis builtin.starts_with(builtin.trim(linjer[pi]), "bruk ") {
+            prelude = prelude + linjer[pi] + "\n"
+        }
+        pi = pi + 1
+    }
+    la bitar: liste_tekst = []
+    la innhald = ""
+    la bytes_i_bit: heiltall = 0
+    la indeks: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la linje_tekst = linjer[i]
+        la ny_funksjon = builtin.starts_with(linje_tekst, "funksjon ")
+        // Hald store nabofunksjonar i kvar si kompileringseining. Særleg
+        // kall_innebygd og køyr_funksjon har store AST/IR-ar; ein 64 KiB
+        // terskel la tidlegare begge få titals kilobyte nabokode og passerte
+        // 2 GiB heap i codegen før kjelda kunne frigjerast.
+        hvis ny_funksjon og bytes_i_bit >= 16384 {
+            la sti = kandidat_dir + "/" + prefiks + "-source-part-" + tekst_fra_heltall(indeks) + ".no"
+            builtin.fil_skriv(sti, innhald)
+            legg_til(bitar, sti)
+            indeks = indeks + 1
+            innhald = prelude
+            bytes_i_bit = lengde(prelude)
+        }
+        innhald = innhald + linje_tekst + "\n"
+        bytes_i_bit = bytes_i_bit + lengde(linje_tekst) + 1
+        i = i + 1
+    }
+    hvis innhald != "" {
+        la siste_sti = kandidat_dir + "/" + prefiks + "-source-part-" + tekst_fra_heltall(indeks) + ".no"
+        builtin.fil_skriv(siste_sti, innhald)
+        legg_til(bitar, siste_sti)
+    }
+    returner bitar
+}
+
+funksjon source_funksjonsnamn(kjelde: tekst) -> tekst {
+    la namn: liste_tekst = []
+    la linjer = builtin.split(kjelde, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(linjer[i], "funksjon ") {
+            la resten = builtin.slice(linjer[i], 9, lengde(linjer[i]))
+            la parentes = builtin.index_of(resten, "(")
+            hvis parentes > 0 { legg_til(namn, builtin.trim(builtin.slice(resten, 0, parentes))) }
+        }
+        i = i + 1
+    }
+    returner builtin.join(namn, ",")
+}
+
+funksjon slett_hvis_finst(sti: tekst) -> heiltall {
+    hvis fil_finst(sti) {
+        prøv { builtin.fil_slett(sti) } fang (e) { returner 1 }
+    }
+    returner 0
+}
+
+funksjon materialiser_source_generasjon(root: tekst, native: tekst, host_ncb: tekst, kandidat_dir: tekst, namn: tekst, specs_tekst: tekst) -> bool {
+    prøv { builtin.mkdir_p(kandidat_dir) } fang (e) {
+        linje("  [FEIL] kan ikkje opprette " + kandidat_dir + ": " + tekst(e))
+        returner usann
+    }
+    la specs = builtin.split(specs_tekst, " ")
+    la i: heiltall = 0
+    linje("  Materialiserer source-generasjon " + namn + " med aktiv kandidat...")
+    mens i < lengde(specs) {
+        la spec = trim(specs[i])
+        hvis spec != "" {
+            la modul = spec_modul(spec)
+            la rel_sti = spec_sti(spec)
+            la kjelde_sti = root + "/" + rel_sti
+            la utfil = kandidat_dir + "/" + source_kandidat_namn(rel_sti)
+            la compile_progress = kandidat_dir + "/compile-progress.txt"
+            hvis slett_hvis_finst(compile_progress) != 0 {
+                linje("  [FEIL] kan ikkje nullstille kompileringssporet")
+                returner usann
+            }
+            hvis slett_hvis_finst(utfil) != 0 {
+                linje("  [FEIL] kan ikkje fjerne gammal source-kandidat " + utfil)
+                returner usann
+            }
+            hvis modul == "selfhost.vm" eller modul == "selfhost.compiler.ir_to_bytecode" {
+                la prefiks = "vm"
+                hvis modul == "selfhost.compiler.ir_to_bytecode" { prefiks = "ir" }
+                la delt_kjelde = builtin.fil_les(kjelde_sti)
+                la bitar = source_bitar(delt_kjelde, kandidat_dir, prefiks)
+                builtin.fil_skriv(kandidat_dir + "/" + prefiks + "-source-part-count.txt", tekst_fra_heltall(lengde(bitar)) + "\n")
+                la kjende_funksjonar = source_funksjonsnamn(delt_kjelde)
+                la bit_i: heiltall = 0
+                mens bit_i < lengde(bitar) {
+                    la bit_ut = kandidat_dir + "/" + prefiks + "-source-part-" + tekst_fra_heiltall(bit_i) + ".ncb.json"
+                    hvis slett_hvis_finst(bit_ut) != 0 { returner usann }
+                    la bit_miljø = {
+                        "NORSCODE_ROOT": root,
+                        "NORSCODE_L5B_COMPILE_SOURCE": bitar[bit_i],
+                        "NORSCODE_L5B_COMPILE_OUTPUT": bit_ut,
+                        "NORSCODE_L5B_COMPILE_MODULE": modul,
+                        "NORSCODE_COMPILER_PROGRESS_FILE": compile_progress,
+                        "NORSCODE_COMPILER_KNOWN_FUNCTIONS": kjende_funksjonar,
+                        // Desse fragmenta er intern bundletransport. Tomme
+                        // debugkart reduserer arbeidssettet for dei store VM-
+                        // dispatchfunksjonane utan å endre bytekodesemantikk.
+                        "NORSCODE_COMPILE_SOURCE_MAP": "0",
+                        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+                        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+                        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,disk.read,disk.write",
+                        "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+                        "NORSCODE_VM_FAST": "1",
+                        "NORSCODE_CMD": "run-ncb-pure",
+                        "NORSCODE_FILE": host_ncb,
+                        "NORSCODE_HOST_NCB_FILE": host_ncb,
+                        "NORSCODE_NCB_FILE": host_ncb,
+                        "NORSCODE_VM_SOURCE": "1"
+                    }
+                    hvis miljo_hent("NORSCODE_L5B_COMPILER_TRACE") == "1" {
+                        bit_miljø["NORSCODE_COMPILER_PROGRESS_DETAILED"] = "1"
+                    }
+                    hvis builtin.ends_with(host_ncb, ".ncbs") {
+                        bit_miljø["NORSCODE_L5B_VM_WRAPPER_NCB"] = root + "/build/l5/vm_runner.ncb.json"
+                    }
+                    hvis ikkje køyr_native(native, root, bit_miljø, 900000) eller ikkje fil_finst(bit_ut) {
+                        hvis fil_finst(compile_progress) { linje("  Siste kompileringsfase: " + trim(builtin.fil_les(compile_progress))) }
+                        linje("  [FEIL] source-generasjon " + namn + " stoppa ved " + modul + " del " + tekst_fra_heltall(bit_i))
+                        returner usann
+                    }
+                    linje("    [OK] " + modul + " del " + tekst_fra_heltall(bit_i) + " (" + bytes(bit_ut) + " bytes)")
+                    bit_i = bit_i + 1
+                }
+                linje("    [OK] " + modul + " delt i " + tekst_fra_heltall(lengde(bitar)) + " kandidatfragment")
+                i = i + 1
+                fortsett
+            }
+            la miljø = {
+                "NORSCODE_ROOT": root,
+                "NORSCODE_L5B_COMPILE_SOURCE": kjelde_sti,
+                "NORSCODE_L5B_COMPILE_OUTPUT": utfil,
+                "NORSCODE_L5B_COMPILE_MODULE": modul,
+                "NORSCODE_COMPILER_PROGRESS_FILE": compile_progress,
+                "NORSCODE_COMPILE_SOURCE_MAP": "1",
+                "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+                "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+                "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,disk.read,disk.write",
+                "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+                // L5b materialiserer bytekode deterministisk; profilerings-
+                // metrikk per opcode/funksjonskall er ikkje del av output og
+                // skal ikkje doble heap- og tidskostnaden i byggjeporten.
+                "NORSCODE_VM_FAST": "1",
+                "NORSCODE_CMD": "run-ncb-pure",
+                "NORSCODE_FILE": host_ncb,
+                "NORSCODE_HOST_NCB_FILE": host_ncb,
+                "NORSCODE_NCB_FILE": host_ncb,
+                "NORSCODE_VM_SOURCE": "1"
+            }
+            hvis miljo_hent("NORSCODE_L5B_IR_TRACE") == "1" {
+                miljø["NORSCODE_IR_PROGRESS_FILE"] = compile_progress
+            }
+            hvis miljo_hent("NORSCODE_L5B_COMPILER_TRACE") == "1" {
+                miljø["NORSCODE_COMPILER_PROGRESS_DETAILED"] = "1"
+            }
+            hvis builtin.ends_with(host_ncb, ".ncbs") {
+                miljø["NORSCODE_L5B_VM_WRAPPER_NCB"] = root + "/build/l5/vm_runner.ncb.json"
+            }
+            hvis ikkje køyr_native(native, root, miljø, 900000) eller ikkje fil_finst(utfil) {
+                hvis fil_finst(compile_progress) {
+                    linje("  Siste kompileringsfase: " + trim(builtin.fil_les(compile_progress)))
+                }
+                linje("  [FEIL] source-generasjon " + namn + " stoppa ved " + modul)
+                returner usann
+            }
+            linje("    [OK] " + modul + " (" + bytes(utfil) + " bytes)")
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon bundle_via_vm(root: tekst, native: tekst, host_ncb: tekst, utfil: tekst, progress: tekst, source_dir: tekst, specs_tekst: tekst) -> bool {
+    linje("  [L5b-bundle] førebur " + utfil)
+    hvis slett_hvis_finst(utfil) != 0 { returner usann }
+    fil_skriv(progress, "host-start\n")
+    la cache = "1"
+    hvis source_dir != "" { cache = "0" }
+    la bundle_utfil = utfil
+    hvis source_dir != "" og builtin.starts_with(utfil, root + "/") {
+        // Native filesystem-opning er avgrensa til eksplisitte røter. Køyringa
+        // har root som cwd, så den rå streamskrivaren får ei relativ målsti.
+        bundle_utfil = builtin.slice(utfil, lengde(root) + 1, lengde(utfil))
+    }
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_FAST": "1",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": cache,
+        "NORSCODE_L5B_SOURCE_CANDIDATE_DIR": source_dir,
+        "NORSCODE_BUNDLE_JSON_STREAM": "1",
+        "NORSCODE_BUNDLE_TEMPLATE_NCB": hvis source_dir != "" da root + "/build/l5/compiler_metadata.json" ellers root + "/build/l5/compiler_v1.ncb.json",
+        "NORSCODE_BUNDLE_PROGRESS_FILE": progress,
+        "NORSCODE_BUNDLE_ENTRY": "selfhost.l5b_host.start",
+        "NORSCODE_BUNDLE_OUTPUT": bundle_utfil,
+        "NORSCODE_L5B_V1": host_ncb,
+        "NORSCODE_L5B_V2": utfil,
+        "NORSCODE_BUNDLE_ARGS": specs_tekst,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,thread.spawn,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,process.exec,thread.spawn,disk.read,disk.write",
+        "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_CMD": "run-ncb-pure",
+        "NORSCODE_FILE": host_ncb,
+        "NORSCODE_HOST_NCB_FILE": host_ncb,
+        "NORSCODE_NCB_FILE": host_ncb,
+        "NORSCODE_VM_SOURCE": "1"
+    }
+    linje("  [L5b-bundle] grunnmiljø klart")
+    hvis source_dir != "" {
+        miljø["NORSCODE_BUNDLE_RAW_STREAM_CANDIDATES"] = "1"
+        hvis builtin.ends_with(utfil, ".lazy.ncb.json") { miljø["NORSCODE_L5B_RAW_FORMAT"] = "lazy-json" }
+        hvis builtin.ends_with(source_dir, "/bootstrap/precompiled") {
+            // Cache-kandidatane er sjølve raw-bundler-driverar. Dermed kan A
+            // køyrast direkte for å produsere B utan ein uverifisert host.
+            miljø["NORSCODE_BUNDLE_ENTRY_OVERRIDE"] = "selfhost.l5b_raw_bundler.start"
+        }
+        linje("  [L5b-bundle] kjeldemodus klart")
+        la vm_delar: heiltall = 0
+        la fragmentert_source = ikkje builtin.ends_with(source_dir, "/bootstrap/precompiled")
+        hvis fragmentert_source og builtin.contains(specs_tekst, "selfhost.vm=") {
+            vm_delar = les_source_fragment_tal(source_dir, "vm")
+        }
+        // Set alltid eksplisitt. Tom/manglande miljøverdi kan ikkje sendast
+        // gjennom heltall_fra_tekst i raw-bundleren.
+        miljø["NORSCODE_L5B_VM_PART_COUNT"] = tekst_fra_heltall(vm_delar)
+        linje("  [L5b-bundle] VM-fragment=" + tekst_fra_heltall(vm_delar))
+        la ir_delar: heiltall = 0
+        hvis fragmentert_source { ir_delar = les_source_fragment_tal(source_dir, "ir") }
+        miljø["NORSCODE_L5B_IR_PART_COUNT"] = tekst_fra_heltall(ir_delar)
+        linje("  [L5b-bundle] IR-fragment=" + tekst_fra_heltall(ir_delar))
+    }
+    hvis builtin.ends_with(host_ncb, ".ncbs") {
+        miljø["NORSCODE_L5B_VM_WRAPPER_NCB"] = root + "/build/l5/vm_runner.ncb.json"
+    }
+    linje("  [L5b-bundle] start " + host_ncb + " -> " + utfil)
+    hvis ikkje køyr_native(native, root, miljø, 900000) { returner usann }
+    linje("  [L5b-bundle] ferdig " + utfil)
+    returner fil_finst(utfil)
 }
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(res_felt(kommando("pwd"), 1)) }
+    hvis root == "" { root = "." }
     la native = root + "/dist/norscode_native"
-    la v1 = root + "/build/l5b/compiler_v1.ncb.json"
+    la configured_native = env("NORSCODE_NATIVE_BIN")
+    hvis configured_native != "" { native = configured_native }
+    la v1 = root + "/build/l5/compiler_v1.ncb.json"
+    la l5_bundler_driver = root + "/build/l5/bundler_driver.ncb.json"
+    la l5_compiler_driver = root + "/build/l5/compiler_driver.ncb.json"
+    la l5_vm_runner = root + "/build/l5/vm_runner.ncb.json"
+    la l5_raw_bundler = root + "/build/l5/l5b_raw_bundler.ncb.json"
     la v2 = root + "/build/l5b/compiler_v2.ncb.json"
+    la progress = root + "/build/l5b/progress.txt"
+    la cache_raw = env("NORSCODE_USE_PRECOMPILED_SELFHOST")
+    la source_only = cache_raw != "" og heltall_fra_tekst(cache_raw) == 0
+    hvis source_only { v2 = root + "/build/l5b/compiler_v2.ncbs" }
+    la specs_tekst = bundle_args()
+    hvis source_only { specs_tekst = bundle_args_source() }
 
     hvis ikkje executable(native) {
         linje("✗ Trenger dist/norscode_native. Køyr: ./bin/nc fetch-stage0-seed")
         returner 1
     }
 
-    hvis ikkje run("mkdir -p " + shell(root + "/build/l5b")) { returner 1 }
+    prøv { builtin.mkdir_p(root + "/build/l5b") } fang (e) {
+        linje("[FEIL] kan ikkje opprette build/l5b: " + tekst(e))
+        returner 1
+    }
     linje("=== L5b: VM sjølvkompilering (byte-paritet) ===")
     linje("")
-    linje("[1/3] Gen1: kompilator-bundle (bootstrap-host)...")
-    hvis ikkje run("NORSCODE_L5B_LITERAL_NORMALIZE=1 " + shell(root + "/bin/nc") + " bundle " + bundle_args() + " --output " + shell(v1)) { returner 1 }
+    linje("[1/3] Gen1: kjeldebygd L5-kandidat...")
+    hvis ikkje fil_finst(v1) eller ikkje fil_finst(l5_bundler_driver) eller ikkje fil_finst(l5_compiler_driver) eller ikkje fil_finst(l5_vm_runner) eller ikkje fil_finst(l5_raw_bundler) {
+        hvis ikkje køyr_native(native, root, {
+            "NORSCODE_ROOT": root,
+            "NORSCODE_NATIVE_BIN": native,
+            "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+            "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+            "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+            "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+            "NORSCODE_CMD": "selfcompile-l5"
+        }, 600000) { returner 1 }
+    }
     hvis ikkje fil_finst(v1) {
         linje("  [FEIL] Gen1 skreiv ikkje " + v1)
         returner 1
@@ -180,29 +525,91 @@ funksjon start() -> heiltall {
     linje("  ✓ " + v1_bytes + " bytes")
     linje("")
 
-    linje("[2/3] Gen2: bundle via Gen1-bytekode (bygg_bundle)...")
-    // Same Gen2 path as L5b-mini: NORSCODE_CMD=l5b-gen2 is executed by the
-    // Norscode nc_main VM so the bounded native host is not a competing gate.
-    hvis ikkje run("NORSCODE_RUN_CMD=l5b-gen2 NORSCODE_L5B_V1=" + shell(v1) + " NORSCODE_L5B_V2=" + shell(v2) + " NORSCODE_BUNDLE_ARGS=" + shell(bundle_args()) + " NORSCODE_L5B_LITERAL_NORMALIZE=1 NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write NORSCODE_VM_DISK_ROOT=" + shell(root + ",.,/tmp,/private/tmp") + " " + shell(root + "/bin/nc") + " run " + shell(root + "/selfhost/nc_main.no")) {
-        linje("  [FEIL] l5b-gen2 feila")
-        returner 1
+    la samanlikn_v1 = v1
+    hvis source_only {
+        linje("[2/3] Source-only: kandidat A byggjer kandidat B via VM...")
+        la vm_runner_native = bygg_vm_runner_native(root, l5_vm_runner)
+        hvis vm_runner_native == "" { returner 1 }
+        la source_a = root + "/build/l5b/source-a"
+        la source_b = root + "/build/l5b/source-b"
+        la kandidat_a = root + "/build/l5b/compiler_source_a.ncbs"
+        hvis env("NORSCODE_L5B_REUSE_SOURCE_A") == builtin.chr(49) {
+            linje("  [DIAG] brukar eksisterande source-generasjon A i frisk orkestrator")
+        } ellers hvis ikkje materialiser_source_generasjon(root, vm_runner_native, l5_compiler_driver, source_a, "A", specs_tekst) {
+            returner 1
+        }
+        la raw_bundler_a = source_a + "/l5b_raw_bundler.ncb.json"
+        la compiler_driver_a = source_a + "/compiler.driver.lazy.ncb.json"
+        hvis ikkje fil_finst(raw_bundler_a) {
+            linje("  [FEIL] source-generasjon A manglar raw-bundler")
+            returner 1
+        }
+        // Materialiser argumentteksten før det sju-argument lange kallet.
+        // Eldre stage0 held elles den nestede returverdien på operandstacken
+        // saman med alle kallargumenta og kan gå tom før bundle_via_vm startar.
+        la compiler_specs = compiler_bundle_args_source()
+        linje("  [L5b] compiler-sidecar specs klare")
+        hvis ikkje bundle_via_vm(root, vm_runner_native, raw_bundler_a, compiler_driver_a, progress, source_a, compiler_specs) {
+            linje("  [FEIL] kandidat A kunne ikkje byggje eigen lazy compiler-driver")
+            returner 1
+        }
+        hvis ikkje bundle_via_vm(root, vm_runner_native, raw_bundler_a, kandidat_a, progress, source_a, specs_tekst) {
+            hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
+            linje("  [FEIL] source-kandidat A feila")
+            returner 1
+        }
+        // Sidecar-driveren og raw-bundleren er begge materialiserte av kandidat
+        // A-kjelda; fullstreamen treng derfor ikkje lastast eager for å byggje B.
+        hvis env("NORSCODE_L5B_REUSE_SOURCE_B") == builtin.chr(49) {
+            linje("  [DIAG] brukar eksisterande source-generasjon B i frisk orkestrator")
+        } ellers hvis ikkje materialiser_source_generasjon(root, vm_runner_native, compiler_driver_a, source_b, "B", specs_tekst) {
+            returner 1
+        }
+        la raw_bundler_b = source_b + "/l5b_raw_bundler.ncb.json"
+        hvis ikkje bundle_via_vm(root, vm_runner_native, raw_bundler_b, v2, progress, source_b, specs_tekst) {
+            hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
+            linje("  [FEIL] source-kandidat B feila")
+            returner 1
+        }
+        samanlikn_v1 = kandidat_a
+    } ellers {
+        // Cache-på må samanlikne to generasjonar bygde med same cachemodus.
+        // Å samanlikne kjeldebygd L5-Gen1 direkte med éin cachebygd Gen2
+        // måler cacheinnhald mot kjelde, ikkje deterministisk sjølvkompilering.
+        la kandidat_a = root + "/build/l5b/compiler_cache_a.lazy.ncb.json"
+        v2 = root + "/build/l5b/compiler_cache_b.lazy.ncb.json"
+        la cache_source = root + "/bootstrap/precompiled"
+        linje("[2/3] Cache-på: kandidat A byggjer kandidat B via VM...")
+        hvis ikkje bundle_via_vm(root, native, l5_raw_bundler, kandidat_a, progress, cache_source, specs_tekst) {
+            hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
+            linje("  [FEIL] cache-kandidat A feila")
+            returner 1
+        }
+        hvis ikkje bundle_via_vm(root, native, kandidat_a, v2, progress, cache_source, specs_tekst) {
+            hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
+            linje("  [FEIL] cache-kandidat B feila")
+            returner 1
+        }
+        samanlikn_v1 = kandidat_a
     }
     hvis ikkje fil_finst(v2) {
+        hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
         linje("  [FEIL] Gen2 skreiv ikkje " + v2 + " - sjekk l5b-gen2 og host_kall_bygg_bundle")
         returner 1
     }
     linje("")
 
-    linje("[3/3] Byte-paritet Gen1 == Gen2...")
-    hvis filer_identiske(v1, v2) {
-        linje("  [OK] " + v1_bytes + " bytes identiske")
+    linje("[3/3] Byte-paritet kandidat A == kandidat B...")
+    la samanlikn_bytes = bytes(samanlikn_v1)
+    hvis filer_identiske(samanlikn_v1, v2) {
+        linje("  [OK] " + samanlikn_bytes + " bytes identiske")
         linje("")
         linje("=== L5b: BESTÅTT ===")
         linje("Kompilator-bundle frå VM er byte-identisk med bootstrap-host.")
         returner 0
     }
 
-    linje("  [FEIL] Bundles differ (v1=" + v1_bytes + ", v2=" + bytes(v2) + " bytes)")
-    skriv(første_forskjellar(v1, v2, 5))
+    linje("  [FEIL] Bundles differ (kandidat-a=" + samanlikn_bytes + ", kandidat-b=" + bytes(v2) + " bytes)")
+    skriv(første_forskjellar(samanlikn_v1, v2, 5))
     returner 1
 }

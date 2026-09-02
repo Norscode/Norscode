@@ -1,0 +1,257 @@
+// Fast, repeterbar ytelsesbaseline eigd av Norscode.
+// Full modus måler kald/varm kompilering, L5b og full test. l5b-modus køyrer
+// same faste grunnmålingar og L5b utan den lange fulltesten. Quick hoppar over
+// begge dei lange portane, men alle modus beheld same rapportskjema.
+
+bruk tools.process_runner som prosess
+bruk std.runtime_filesystem som native_fs
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon linje(melding: tekst) -> heiltall { skriv(melding + "\n") returner 0 }
+
+funksjon rot() -> tekst {
+    la r = env("NORSCODE_ROOT")
+    hvis r != "" { returner r }
+    returner tekst(builtin.system_info()["cwd"])
+}
+
+funksjon runtime_sti(root: tekst) -> tekst {
+    la sti = env("NORSCODE_BENCHMARK_BIN")
+    hvis sti == "" { sti = env("NORSCODE_NATIVE_BIN") }
+    hvis sti == "" { sti = tekst(builtin.system_info()["executable"]) }
+    hvis sti == "" { sti = root + "/dist/norscode_native" }
+    returner sti
+}
+
+funksjon l5b_baseline_rss() -> heiltall {
+    // Verifisert full-v114-baseline på same Darwin-arm64-maskin og L5b-løype.
+    // Eksplisitt overstyring finst for andre attestasjonshostar/plattformer.
+    la rå = env("NORSCODE_L5B_BASELINE_RSS_BYTES")
+    hvis rå != "" { returner heltall_fra_tekst(rå) }
+    returner 67452928
+}
+
+funksjon grunnmiljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_NATIVE_BIN": runtime_sti(root),
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon slett_hvis_finst(sti: tekst) -> heiltall {
+    prøv { hvis builtin.fil_finnes(sti) { builtin.fil_slett(sti) } } fang (e) { }
+    returner 0
+}
+
+funksjon måling(namn: tekst, resultat: ordbok_tekst, hash: tekst) -> ordbok_tekst {
+    returner {
+        "name": namn,
+        "status": hvis prosess.ok(resultat) da "passed" ellers "failed",
+        "exit_code": tekst(resultat["exit_code"]),
+        "wall_ms": tekst_fra_heltall(prosess.veggtid_ms(resultat)),
+        "peak_rss_bytes": tekst_fra_heltall(prosess.minnetopp_bytes(resultat)),
+        "artifact_sha256": hash
+    }
+}
+
+funksjon hoppa_over(namn: tekst, grunn: tekst) -> ordbok_tekst {
+    returner {
+        "name": namn, "status": "skipped", "reason": grunn,
+        "exit_code": "0", "wall_ms": "0", "peak_rss_bytes": "0",
+        "artifact_sha256": ""
+    }
+}
+
+funksjon fil_hash(sti: tekst) -> tekst {
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon køyr_kompilering(root: tekst, runtime: tekst, namn: tekst,
+                           cache: tekst, stdlib_cache: tekst,
+                           output: tekst) -> ordbok_tekst {
+    slett_hvis_finst(output)
+    la miljø = grunnmiljø(root)
+    miljø["NORSCODE_USE_PRECOMPILED_SELFHOST"] = cache
+    miljø["NORSCODE_NATIVE_TOOL_CACHE"] = cache
+    miljø["NORSCODE_USE_PRECOMPILED_STDLIB"] = stdlib_cache
+    miljø["NORSCODE_NC_TEST_CACHE_DIR"] = root + "/build/benchmarks/cache-" + namn
+    la res = prosess.køyr(runtime,
+        ["compile", root + "/tests/fixtures/performance_compile_probe.no", output],
+        root, miljø, 600000)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    returner måling(namn, res, fil_hash(output))
+}
+
+funksjon markør_heiltall_fra_stdout(stdout: tekst, markør: tekst) -> heiltall {
+    // Prosess-ABI-en serialiserer linjeskift som dei to teikna \\n i tekstfelt.
+    la linjer = builtin.split(stdout, "\\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la rad = builtin.trim(tekst(linjer[i]))
+        hvis builtin.starts_with(rad, markør) {
+            prøv { returner heltall_fra_tekst(builtin.slice(rad, lengde(markør), lengde(rad))) }
+            fang (e) { returner -1 }
+        }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon gc_pause_fra_stdout(stdout: tekst) -> heiltall {
+    returner markør_heiltall_fra_stdout(stdout, "__NORSCODE_GC_PAUSE_MS__=")
+}
+
+funksjon køyr_gc_probe(root: tekst, runtime: tekst) -> ordbok_tekst {
+    la res = prosess.køyr(runtime, ["run", root + "/tests/fixtures/performance_gc_probe.no"],
+        root, grunnmiljø(root), 120000)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    la gc_pause = gc_pause_fra_stdout(tekst(res["stdout"]))
+    returner {
+        "name": "gc_probe",
+        "status": hvis prosess.ok(res) og gc_pause >= 0 da "passed" ellers "failed",
+        "exit_code": tekst(res["exit_code"]),
+        "wall_ms": tekst_fra_heltall(prosess.veggtid_ms(res)),
+        "peak_rss_bytes": tekst_fra_heltall(prosess.minnetopp_bytes(res)),
+        "gc_pause_ms": tekst_fra_heltall(gc_pause),
+        "artifact_sha256": ""
+    }
+}
+
+funksjon køyr_port(root: tekst, runtime: tekst, namn: tekst, argv: liste_tekst,
+                    timeout_ms: heiltall, ekstra: ordbok_tekst) -> ordbok_tekst {
+    la miljø = grunnmiljø(root)
+    la nøklar = nøkler(ekstra)
+    la i: heiltall = 0
+    mens i < lengde(nøklar) {
+        la nøkkel = tekst(nøklar[i])
+        miljø[nøkkel] = tekst(ekstra[nøkkel])
+        i = i + 1
+    }
+    la res = prosess.køyr(runtime, argv, root, miljø, timeout_ms)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    la resultat = måling(namn, res, "")
+    hvis namn == "full_test" {
+        la shard_wall = markør_heiltall_fra_stdout(tekst(res["stdout"]), "__NORSCODE_TEST_SHARD_WALL_MS_MAX__=")
+        la shard_rss = markør_heiltall_fra_stdout(tekst(res["stdout"]), "__NORSCODE_TEST_SHARD_PEAK_RSS_SUM_BYTES__=")
+        resultat["shard_wall_ms_max"] = tekst_fra_heltall(shard_wall)
+        resultat["shard_peak_rss_sum_bytes"] = tekst_fra_heltall(shard_rss)
+        hvis shard_rss > 0 { resultat["peak_rss_bytes"] = tekst_fra_heltall(shard_rss) }
+    }
+    returner resultat
+}
+
+funksjon start() -> heiltall {
+    la root = rot()
+    la runtime = runtime_sti(root)
+    la scope = env("NORSCODE_BENCHMARK_SCOPE")
+    hvis scope == "" { scope = "full" }
+    hvis scope != "quick" og scope != "l5b" og scope != "full" {
+        linje("[FEIL] NORSCODE_BENCHMARK_SCOPE må vere quick, l5b eller full")
+        returner 2
+    }
+    hvis ikkje builtin.fil_finnes(runtime) {
+        linje("[FEIL] benchmark-runtime finst ikkje: " + runtime)
+        returner 1
+    }
+    builtin.mkdir_p(root + "/build/benchmarks")
+
+    la cold_source_out = root + "/build/benchmarks/cold-source-reference.ncb.json"
+    la cold_out = root + "/build/benchmarks/cold.ncb.json"
+    la warmup_out = root + "/build/benchmarks/warmup.ncb.json"
+    la warm_out = root + "/build/benchmarks/warm.ncb.json"
+    la kald_kjelde = køyr_kompilering(root, runtime, "cold_source_reference", "0", "0", cold_source_out)
+    la kald = køyr_kompilering(root, runtime, "cold_compile", "0", "1", cold_out)
+    la varm_opp = køyr_kompilering(root, runtime, "warmup_compile", "1", "1", warmup_out)
+    hvis varm_opp["status"] != "passed" { returner 1 }
+    la varm = køyr_kompilering(root, runtime, "warm_compile", "1", "1", warm_out)
+    la gc = køyr_gc_probe(root, runtime)
+
+    la l5b = hoppa_over("l5b", "quick scope")
+    la full_test_måling = hoppa_over("full_test", "quick scope")
+    hvis scope == "l5b" eller scope == "full" {
+        l5b = køyr_port(root, runtime, "l5b", ["selfcompile-l5b"], 3600000,
+            {"NORSCODE_USE_PRECOMPILED_SELFHOST": "1"})
+    }
+    hvis scope == "full" {
+        full_test_måling = køyr_port(root, runtime, "full_test",
+            ["run", root + "/tools/nc_test_parallel.no"], 14400000, {
+            "NORSCODE_USE_PRECOMPILED_SELFHOST": "1",
+            "NC_TEST_CACHE": "1",
+            "NC_PARALLEL_TEST_SHARDS": "8"
+        })
+    }
+
+    la l5b_baseline = l5b_baseline_rss()
+    la l5b_rss = heltall_fra_tekst(tekst(l5b["peak_rss_bytes"]))
+    la l5b_reduksjon_bp: heiltall = 0
+    hvis l5b_rss > 0 og l5b_baseline > 0 og l5b_rss < l5b_baseline {
+        l5b_reduksjon_bp = (l5b_baseline - l5b_rss) * 10000 / l5b_baseline
+    }
+    la l5b_mål_grønt = scope == "quick" eller (l5b["status"] == "passed" og l5b_reduksjon_bp >= 4000)
+
+    la deterministisk = kald_kjelde["status"] == "passed" og kald["status"] == "passed" og
+        varm["status"] == "passed" og kald["artifact_sha256"] != "" og
+        kald_kjelde["artifact_sha256"] == kald["artifact_sha256"] og
+        kald["artifact_sha256"] == varm["artifact_sha256"]
+    la kald_ms = heltall_fra_tekst(tekst(kald["wall_ms"]))
+    la kald_kjelde_ms = heltall_fra_tekst(tekst(kald_kjelde["wall_ms"]))
+    la kald_forbetring_bp: heiltall = 0
+    hvis kald_kjelde_ms > 0 og kald_ms >= 0 og kald_ms <= kald_kjelde_ms {
+        kald_forbetring_bp = (kald_kjelde_ms - kald_ms) * 10000 / kald_kjelde_ms
+    }
+    la kald_30_grønt = kald_kjelde_ms > 0 og kald_ms > 0 og kald_forbetring_bp >= 3000
+    la varm_ms = heltall_fra_tekst(tekst(varm["wall_ms"]))
+    la varm_fart_bp: heiltall = 0
+    hvis varm_ms > 0 { varm_fart_bp = kald_kjelde_ms * 10000 / varm_ms }
+    la varm_2x_grønt = kald_kjelde_ms > 0 og varm_ms > 0 og varm_fart_bp >= 20000
+    la status = "passed"
+    hvis kald_kjelde["status"] != "passed" eller kald["status"] != "passed" eller
+       varm["status"] != "passed" eller gc["status"] != "passed" eller
+       ((scope == "l5b" eller scope == "full") og l5b["status"] != "passed") eller
+       (scope == "full" og full_test_måling["status"] != "passed") eller ikkje l5b_mål_grønt eller
+       ikkje kald_30_grønt eller ikkje varm_2x_grønt eller ikkje deterministisk {
+        status = "failed"
+    }
+    la rapport = {
+        "schema": "norscode-performance-benchmark-v1",
+        "status": status,
+        "scope": scope,
+        "runtime": runtime,
+        "runtime_sha256": fil_hash(runtime),
+        "platform": tekst(builtin.system_info()["system"]) + "-" + tekst(builtin.system_info()["machine"]),
+        "deterministic_compile": hvis deterministisk da "true" ellers "false",
+        "cold_source_reference": kald_kjelde,
+        "cold_compile": kald,
+        "cold_compile_reduction_basis_points": tekst_fra_heltall(kald_forbetring_bp),
+        "cold_compile_30_percent_target": hvis kald_30_grønt da "passed" ellers "failed",
+        "warm_compile": varm,
+        "warm_compile_speedup_basis_points": tekst_fra_heltall(varm_fart_bp),
+        "warm_compile_2x_target": hvis varm_2x_grønt da "passed" ellers "failed",
+        "l5b": l5b,
+        "l5b_baseline_peak_rss_bytes": tekst_fra_heltall(l5b_baseline),
+        "l5b_rss_reduction_basis_points": tekst_fra_heltall(l5b_reduksjon_bp),
+        "l5b_40_percent_target": hvis l5b_mål_grønt da "passed" ellers "failed",
+        "full_test": full_test_måling,
+        "gc_probe": gc
+    }
+    la output = env("NORSCODE_BENCHMARK_OUTPUT")
+    hvis output == "" { output = root + "/build/benchmarks/current.json" }
+    builtin.fil_skriv(output, builtin.json_stringify(rapport))
+    linje("benchmark_status=" + status)
+    linje("benchmark_scope=" + scope)
+    linje("benchmark_report=" + output)
+    linje("cold_source_reference_ms=" + kald_kjelde["wall_ms"])
+    linje("cold_compile_ms=" + kald["wall_ms"])
+    linje("warm_compile_ms=" + varm["wall_ms"])
+    linje("peak_rss_bytes=" + gc["peak_rss_bytes"])
+    linje("gc_pause_ms=" + gc["gc_pause_ms"])
+    hvis status != "passed" { returner 1 }
+    returner 0
+}

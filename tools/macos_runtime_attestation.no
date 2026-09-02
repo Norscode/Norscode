@@ -1,0 +1,166 @@
+// Ekte macOS arm64-køyring og kjeldebunden runtime-attestasjon.
+
+bruk std.runtime_filesystem som native_fs
+bruk std.sha256 som sha256
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon er_arm64(ark: tekst) -> boolsk {
+    returner ark == "arm64" eller ark == "aarch64"
+}
+
+funksjon er_macos(system: tekst) -> boolsk {
+    // GitHub sitt signerte runnerfelt heiter "macOS", medan system-ABI-en
+    // brukar Darwin. Begge namna viser den same ekte plattformgrensa.
+    returner system == "darwin" eller system == "macos"
+}
+
+funksjon system_felt(felt: tekst) -> tekst {
+    hvis felt == "system" og env("RUNNER_OS") != "" { returner builtin.lower(env("RUNNER_OS")) }
+    hvis felt == "machine" og env("RUNNER_ARCH") != "" { returner builtin.lower(env("RUNNER_ARCH")) }
+    prøv {
+        la info = builtin.system_info()
+        la verdi = tekst(info[felt])
+        hvis verdi == "" og felt == "system" { verdi = tekst(info["os"]) }
+        hvis verdi == "" og felt == "machine" { verdi = tekst(info["arch"]) }
+        returner builtin.lower(builtin.trim(verdi))
+    } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon fil_sha256(sti: tekst) -> tekst {
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) {
+        prøv { returner sha256.hash_bytes(builtin.fil_les_binær(sti)) } fang (e2) { returner "" }
+    }
+    returner ""
+}
+
+funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
+    hvis lengde(bytes) < lengde(markør) { returner usann }
+    la start = lengde(bytes) - lengde(markør)
+    la i = 0
+    mens i < lengde(markør) {
+        hvis bytes[start + i] != (builtin.char_code(markør[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon har_embedded_ncb(sti: tekst) -> boolsk {
+    prøv {
+        la bytes = builtin.fil_les_binær(sti)
+        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon gyldig_commit(verdi: tekst) -> boolsk {
+    hvis lengde(verdi) != 40 og lengde(verdi) != 64 { returner usann }
+    la heks = "0123456789abcdefABCDEF"
+    la i = 0
+    mens i < lengde(verdi) {
+        hvis builtin.index_of(heks, verdi[i]) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon køyr(root: tekst, native: tekst, argv: liste_tekst,
+              ekstra: ordbok_tekst, namn: tekst, markør: tekst) -> boolsk {
+    la miljø: ordbok_tekst = {
+        "NORSCODE_CMD": "selftest",
+        "NORSCODE_FILE": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_NATIVE_BIN": native,
+        "NC_NATIVE": native,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write,net.tcp,net.tls",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la nøklar = builtin.nøkler(ekstra)
+    la i = 0
+    mens i < lengde(nøklar) { miljø[nøklar[i]] = tekst(ekstra[nøklar[i]]) i = i + 1 }
+    la resultat = prosess.køyr(native, argv, root, miljø, 900000)
+    prosess.skriv_resultat(resultat)
+    hvis ikkje prosess.ok(resultat) eller
+       (markør != "" og ikkje builtin.contains(tekst(resultat["stdout"]), markør)) {
+        skriv("[FAIL] macOS-attestasjon " + namn + "\n")
+        returner usann
+    }
+    skriv("[OK] macOS-attestasjon " + namn + "\n")
+    returner sann
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la vertssystem = system_felt("system")
+    la vertsarkitektur = system_felt("machine")
+    skriv("[INFO] macOS-attestasjon host=" + vertssystem + " architecture=" + vertsarkitektur + "\n")
+    hvis ikkje er_macos(vertssystem) eller ikkje er_arm64(vertsarkitektur) {
+        skriv("[FAIL] macOS-attestasjon krev ekte Darwin arm64/aarch64-host\n")
+        returner 2
+    }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    la native_hash = fil_sha256(native)
+    hvis native_hash == "" eller ikkje har_embedded_ncb(native) {
+        skriv("[FAIL] macOS-attestasjon krev hashbar single-binary runtime\n")
+        returner 1
+    }
+    hvis ikkje køyr(root, native, ["selftest"], {}, "native selftest", "test OK") { returner 1 }
+    la testar: liste_tekst = [
+        "tests/test_macho_arm64_aot_cli.no",
+        "tests/test_process_os_sandbox.no",
+        "tests/test_native_tls_event_loop.no"
+    ]
+    la namn: liste_tekst = ["Mach-O signering og native AOT", "Seatbelt sandbox", "TLS 1.3 runtime"]
+    la markørar: liste_tekst = ["test_macho_arm64_aot_cli OK", "test_process_os_sandbox OK", "test_native_tls_event_loop OK"]
+    la i = 0
+    mens i < lengde(testar) {
+        la ekstra: ordbok_tekst = {
+            "NORSCODE_CMD": "run",
+            "NORSCODE_FILE": root + "/" + testar[i],
+            "NORSCODE_ATTEST_REAL_MACOS": "1",
+            "NC_TEST_FILE": testar[i],
+            "NC_VERBOSE": "1"
+        }
+        hvis i == 1 { ekstra["NORSCODE_EXPECT_SANDBOX_BACKEND"] = "seatbelt" }
+        hvis ikkje køyr(root, native, ["test"], ekstra, namn[i], markørar[i]) { returner 1 }
+        i = i + 1
+    }
+    la commit = env("NORSCODE_SOURCE_COMMIT")
+    hvis commit == "" { commit = env("GITHUB_SHA") }
+    hvis ikkje gyldig_commit(commit) eller (env("GITHUB_SHA") != "" og env("GITHUB_SHA") != commit) {
+        skriv("[FAIL] macOS-attestasjon krev samsvarande kjeldecommit\n")
+        returner 1
+    }
+    la rapport: ordbok_tekst = {
+        "schema": "norscode-macos-runtime-attestation-v1",
+        "status": "verified",
+        "platform": "macos",
+        "architecture": "arm64",
+        "source_commit": commit,
+        "runtime_sha256": native_hash,
+        "tests": "native_selftest,macho_codesign,native_aot,seatbelt_sandbox,tls13",
+        "repository": env("GITHUB_REPOSITORY"),
+        "workflow": env("GITHUB_WORKFLOW"),
+        "run_id": env("GITHUB_RUN_ID"),
+        "run_attempt": env("GITHUB_RUN_ATTEMPT"),
+        "runner_name": env("RUNNER_NAME")
+    }
+    la output = env("NORSCODE_MACOS_ATTESTATION_OUTPUT")
+    hvis output == "" { output = root + "/reports/macos-runtime-attestation.json" }
+    la laga = native_fs.native_lag_mappe(root, "reports")
+    hvis laga["status"] != "created" og laga["status"] != "ok" og laga["status"] != "exists" {
+        skriv("[FAIL] macOS-attestasjon kunne ikkje lage rapportmappe\n")
+        returner 1
+    }
+    builtin.fil_skriv(output, builtin.json_skriv(rapport) + "\n")
+    skriv("[OK] Ekte macOS runtime-attestasjon: " + output + "\n")
+    returner 0
+}

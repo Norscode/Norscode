@@ -1,0 +1,325 @@
+// Binærsikker HTTP(S)-nedlasting eigd av Norscode.
+// Protokolltolkinga ligg her; std.socket er den smale plattform-ABI-en.
+
+bruk std.bytes som bytes
+bruk std.dns som dns
+bruk std.socket som socket
+
+funksjon _hexverdi(c: tekst) -> heiltall {
+    la k = builtin.char_code(c)
+    hvis k >= 48 og k <= 57 { returner k - 48 }
+    hvis k >= 65 og k <= 70 { returner k - 55 }
+    hvis k >= 97 og k <= 102 { returner k - 87 }
+    returner -1
+}
+
+funksjon _hex_bytes(hex: tekst) -> liste_heiltall {
+    la out: liste_heiltall = []
+    hvis lengde(hex) % 2 != 0 { returner out }
+    la i: heiltall = 0
+    mens i + 1 < lengde(hex) {
+        la hi = _hexverdi(builtin.slice(hex, i, i + 1))
+        la lo = _hexverdi(builtin.slice(hex, i + 1, i + 2))
+        hvis hi < 0 eller lo < 0 { returner [] }
+        builtin.legg_til(out, (hi << 4) + lo)
+        i = i + 2
+    }
+    returner out
+}
+
+funksjon _hex_tekst(hex: tekst) -> tekst {
+    returner bytes.til_tekst(bytes.fra_liste(_hex_bytes(hex)))
+}
+
+funksjon _parse_url(url: tekst) -> ordbok_tekst {
+    la secure = builtin.starts_with(url, "https://")
+    la prefiks = "http://"
+    hvis secure { prefiks = "https://" }
+    hvis ikkje builtin.starts_with(url, prefiks) { returner {"status": "feil"} }
+    la rest = builtin.slice(url, lengde(prefiks), lengde(url))
+    la slash = builtin.index_of(rest, "/")
+    la authority = rest
+    la path = "/"
+    hvis slash >= 0 {
+        authority = builtin.slice(rest, 0, slash)
+        path = builtin.slice(rest, slash, lengde(rest))
+    }
+    hvis authority == "" eller builtin.contains(authority, "@") { returner {"status": "feil"} }
+    la host = authority
+    la port = hvis secure da 443 ellers 80
+    la colon = builtin.index_of(authority, ":")
+    hvis colon >= 0 {
+        host = builtin.slice(authority, 0, colon)
+        port = heltall_fra_tekst(builtin.slice(authority, colon + 1, lengde(authority)))
+    }
+    hvis host == "" eller port < 1 eller port > 65535 { returner {"status": "feil"} }
+    returner {"status": "ok", "secure": tekst(secure), "host": host,
+        "port": tekst_fra_heltall(port), "path": path, "authority": authority,
+        "scheme": hvis secure da "https" ellers "http"}
+}
+
+funksjon _header_verdi(header: tekst, namn: tekst) -> tekst {
+    la linjer = builtin.split(header, "\r\n")
+    la søk = tekst_til_liten(namn)
+    la i: heiltall = 1
+    mens i < lengde(linjer) {
+        la colon = builtin.index_of(linjer[i], ":")
+        hvis colon > 0 og tekst_til_liten(builtin.trim(builtin.slice(linjer[i], 0, colon))) == søk {
+            returner builtin.trim(builtin.slice(linjer[i], colon + 1, lengde(linjer[i])))
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon _statuskode(header: tekst) -> heiltall {
+    la slutt = builtin.index_of(header, "\r\n")
+    hvis slutt < 0 { returner 0 }
+    la line = builtin.slice(header, 0, slutt)
+    la første = builtin.index_of(line, " ")
+    hvis første < 0 eller første + 4 > lengde(line) { returner 0 }
+    returner heltall_fra_tekst(builtin.slice(line, første + 1, første + 4))
+}
+
+funksjon _hex_tal(t: tekst) -> heiltall {
+    la verdi: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la v = _hexverdi(builtin.slice(t, i, i + 1))
+        hvis v < 0 { returner -1 }
+        hvis verdi > 134217728 { returner -1 }
+        verdi = (verdi << 4) + v
+        i = i + 1
+    }
+    returner verdi
+}
+
+funksjon _vent(h: ordbok_tekst, events: heiltall, frist: heiltall) -> boolsk {
+    mens builtin.tid_ms() < frist {
+        la att = frist - builtin.tid_ms()
+        hvis att > 250 { att = 250 }
+        la p = socket.native_poll_vent(h, events, att)
+        hvis p["status"] != "ventende" { returner p["status"] != "feil" }
+    }
+    returner usann
+}
+
+funksjon _koble(d: ordbok_tekst, ca_file: tekst, frist: heiltall) -> ordbok_tekst {
+    la port = heltall_fra_tekst(d["port"])
+    la connect_host = d["host"]
+    prøv {
+        la resolved = dns.resolve(d["host"], port)
+        hvis resolved["status"] == "ok" {
+            la addresses = resolved["addresses"]
+            la ri: heiltall = 0
+            mens ri < lengde(addresses) {
+                la candidate = tekst(addresses[ri])
+                hvis builtin.contains(candidate, ".") { connect_host = candidate ri = lengde(addresses) }
+                ellers { ri = ri + 1 }
+            }
+        }
+    } fang (e) {}
+    la h: ordbok_tekst = {}
+    hvis d["secure"] == "sann" {
+        h = socket.native_tls_tilkoble(connect_host, port, d["host"], ca_file)
+    } ellers {
+        h = socket.native_tilkoble(connect_host, port)
+    }
+    hvis h["status"] == "feil" { returner h }
+    hvis h["status"] == "ventende" eller h["status"] == "connecting" {
+        hvis ikkje _vent(h, 2, frist) { socket.native_lukk(h) returner {"status": "feil", "error": "connect timeout"} }
+    }
+    hvis d["secure"] == "sann" {
+        la tls = socket.native_tls_handshake(h)
+        mens tls["status"] == "ventende" og _vent(h, 1, frist) { tls = socket.native_tls_handshake(h) }
+        hvis tls["status"] != "connected" { socket.native_lukk(h) returner {"status": "feil", "error": "TLS handshake failed"} }
+    }
+    returner h
+}
+
+funksjon _send(h: ordbok_tekst, data: tekst, frist: heiltall) -> boolsk {
+    la offset: heiltall = 0
+    mens offset < lengde(data) {
+        la r = socket.native_skriv(h, builtin.slice(data, offset, lengde(data)))
+        hvis r["status"] == "ventende" {
+            hvis ikkje _vent(h, 2, frist) { returner usann }
+        } ellers hvis r["status"] == "ok" {
+            la n = heltall_fra_tekst(tekst(r["value"]))
+            hvis n <= 0 { returner usann }
+            offset = offset + n
+        } ellers { returner usann }
+    }
+    returner sann
+}
+
+funksjon _les_hex(h: ordbok_tekst, frist: heiltall) -> ordbok_tekst {
+    la r = socket.native_les_hex(h, 16384)
+    mens r["status"] == "ventende" og builtin.tid_ms() < frist {
+        hvis ikkje _vent(h, 1, frist) { returner {"status": "feil", "error": "read timeout", "data_hex": ""} }
+        r = socket.native_les_hex(h, 16384)
+    }
+    returner r
+}
+
+funksjon _skriv_hex(sti: tekst, hex: tekst, brukt: heiltall, maks: heiltall) -> heiltall {
+    hvis hex == "" { returner brukt }
+    hvis lengde(hex) % 2 != 0 { returner -1 }
+    la n = lengde(hex) / 2
+    hvis brukt + n > maks { returner -1 }
+    la data = _hex_bytes(hex)
+    hvis lengde(data) != n { returner -1 }
+    builtin.fil_append_binary(sti, bytes.fra_liste(data))
+    returner brukt + n
+}
+
+funksjon _redirect_url(d: ordbok_tekst, location: tekst) -> tekst {
+    hvis builtin.starts_with(location, "https://") eller builtin.starts_with(location, "http://") { returner location }
+    hvis builtin.starts_with(location, "/") { returner d["scheme"] + "://" + d["authority"] + location }
+    returner ""
+}
+
+funksjon _ein(url: tekst, headers: ordbok_tekst, mål: tekst, maks_bytes: heiltall,
+             timeout_ms: heiltall, ca_file: tekst) -> ordbok_tekst {
+    la d = _parse_url(url)
+    hvis d["status"] != "ok" { returner {"status": "feil", "error": "invalid URL", "bytes": "0"} }
+    la frist = builtin.tid_ms() + timeout_ms
+    la h = _koble(d, ca_file, frist)
+    hvis h["status"] == "feil" { returner {"status": "feil", "error": tekst(h["error"]), "bytes": "0"} }
+    la request = "GET " + d["path"] + " HTTP/1.1\r\nHost: " + d["authority"] + "\r\nUser-Agent: Norscode/1.0\r\nConnection: close\r\n"
+    la keys = nøkler(headers)
+    la i: heiltall = 0
+    mens i < lengde(keys) {
+        la k = tekst(keys[i])
+        hvis builtin.contains(k, "\r") eller builtin.contains(k, "\n") eller
+           builtin.contains(tekst(headers[keys[i]]), "\r") eller builtin.contains(tekst(headers[keys[i]]), "\n") {
+            socket.native_lukk(h)
+            returner {"status": "feil", "error": "invalid header", "bytes": "0"}
+        }
+        request = request + k + ": " + tekst(headers[keys[i]]) + "\r\n"
+        i = i + 1
+    }
+    request = request + "\r\n"
+    hvis ikkje _send(h, request, frist) { socket.native_lukk(h) returner {"status": "feil", "error": "write failed", "bytes": "0"} }
+
+    la pending = ""
+    la header_end = -1
+    mens header_end < 0 og lengde(pending) <= 131072 {
+        la r = _les_hex(h, frist)
+        hvis r["status"] != "ok" { socket.native_lukk(h) returner {"status": "feil", "error": "header read failed: " + tekst(r["status"]) + " " + tekst(r["error"]), "bytes": "0"} }
+        la del = tekst(r["data_hex"])
+        hvis del == "" { socket.native_lukk(h) returner {"status": "feil", "error": "truncated header", "bytes": "0"} }
+        pending = pending + tekst_til_liten(del)
+        header_end = builtin.index_of(pending, "0d0a0d0a")
+    }
+    hvis header_end < 0 { socket.native_lukk(h) returner {"status": "feil", "error": "header too large", "bytes": "0"} }
+    la header = _hex_tekst(builtin.slice(pending, 0, header_end)) + "\r\n"
+    pending = builtin.slice(pending, header_end + 8, lengde(pending))
+    la code = _statuskode(header)
+    hvis code == 301 eller code == 302 eller code == 303 eller code == 307 eller code == 308 {
+        la location = _redirect_url(d, _header_verdi(header, "location"))
+        socket.native_lukk(h)
+        hvis location == "" { returner {"status": "feil", "error": "invalid redirect", "bytes": "0"} }
+        returner {"status": "redirect", "location": location, "error": "", "bytes": "0"}
+    }
+    hvis code < 200 eller code >= 300 { socket.native_lukk(h) returner {"status": "feil", "error": "HTTP " + tekst_fra_heltall(code), "bytes": "0"} }
+    builtin.fil_skriv_binær(mål, bytes.tom())
+    la brukt: heiltall = 0
+    la transfer = tekst_til_liten(_header_verdi(header, "transfer-encoding"))
+    la lengdetekst = _header_verdi(header, "content-length")
+    hvis transfer != "" og transfer != "chunked" { socket.native_lukk(h) returner {"status": "feil", "error": "unsupported transfer encoding", "bytes": "0"} }
+
+    hvis transfer == "chunked" {
+        la att: heiltall = -1
+        la treng_crlf = usann
+        la ferdig = usann
+        mens ikkje ferdig og builtin.tid_ms() < frist {
+            hvis treng_crlf {
+                hvis lengde(pending) >= 4 {
+                    hvis builtin.slice(pending, 0, 4) != "0d0a" { brukt = -1 ferdig = sann }
+                    ellers { pending = builtin.slice(pending, 4, lengde(pending)) att = -1 treng_crlf = usann }
+                }
+            } ellers hvis att < 0 {
+                la line_end = builtin.index_of(pending, "0d0a")
+                hvis line_end >= 0 {
+                    la line = _hex_tekst(builtin.slice(pending, 0, line_end))
+                    la semi = builtin.index_of(line, ";")
+                    hvis semi >= 0 { line = builtin.slice(line, 0, semi) }
+                    att = _hex_tal(builtin.trim(line))
+                    pending = builtin.slice(pending, line_end + 4, lengde(pending))
+                    hvis att < 0 { brukt = -1 ferdig = sann }
+                    ellers hvis att == 0 { ferdig = sann }
+                }
+            } ellers hvis att > 0 og lengde(pending) >= 2 {
+                la tilgjengeleg = lengde(pending) / 2
+                la ta = tilgjengeleg
+                hvis ta > att { ta = att }
+                brukt = _skriv_hex(mål, builtin.slice(pending, 0, ta * 2), brukt, maks_bytes)
+                hvis brukt < 0 { ferdig = sann }
+                pending = builtin.slice(pending, ta * 2, lengde(pending))
+                att = att - ta
+                hvis att == 0 { treng_crlf = sann }
+            }
+            hvis ikkje ferdig og ((treng_crlf og lengde(pending) < 4) eller (att < 0 og builtin.index_of(pending, "0d0a") < 0) eller (att > 0 og lengde(pending) < 2)) {
+                la r = _les_hex(h, frist)
+                hvis r["status"] != "ok" eller tekst(r["data_hex"]) == "" { brukt = -1 ferdig = sann }
+                ellers { pending = pending + tekst_til_liten(tekst(r["data_hex"])) }
+            }
+        }
+        socket.native_lukk(h)
+        hvis brukt < 0 eller ikkje ferdig { returner {"status": "feil", "error": "invalid chunked body", "bytes": "0"} }
+        returner {"status": "ok", "error": "", "bytes": tekst_fra_heiltall(brukt)}
+    }
+
+    la venta: heiltall = -1
+    hvis lengdetekst != "" { venta = heltall_fra_tekst(lengdetekst) }
+    hvis venta > maks_bytes { socket.native_lukk(h) returner {"status": "feil", "error": "response too large", "bytes": "0"} }
+    mens venta < 0 eller brukt < venta {
+        hvis pending != "" {
+            la ta_hex = pending
+            hvis venta >= 0 og brukt + (lengde(ta_hex) / 2) > venta {
+                ta_hex = builtin.slice(ta_hex, 0, (venta - brukt) * 2)
+            }
+            brukt = _skriv_hex(mål, ta_hex, brukt, maks_bytes)
+            pending = ""
+            hvis brukt < 0 { socket.native_lukk(h) returner {"status": "feil", "error": "response too large", "bytes": "0"} }
+            hvis venta >= 0 og brukt == venta { socket.native_lukk(h) returner {"status": "ok", "error": "", "bytes": tekst_fra_heiltall(brukt)} }
+        }
+        la r = _les_hex(h, frist)
+        hvis r["status"] != "ok" { socket.native_lukk(h) returner {"status": "feil", "error": "body read failed", "bytes": "0"} }
+        pending = tekst_til_liten(tekst(r["data_hex"]))
+        hvis pending == "" {
+            socket.native_lukk(h)
+            hvis venta >= 0 og brukt != venta { returner {"status": "feil", "error": "truncated body", "bytes": "0"} }
+            returner {"status": "ok", "error": "", "bytes": tekst_fra_heiltall(brukt)}
+        }
+    }
+    socket.native_lukk(h)
+    returner {"status": "ok", "error": "", "bytes": tekst_fra_heiltall(brukt)}
+}
+
+funksjon last_ned(url: tekst, headers: ordbok_tekst, mål: tekst,
+                  maks_bytes: heiltall, timeout_ms: heiltall,
+                  ca_file: tekst) -> ordbok_tekst {
+    hvis maks_bytes < 1 eller maks_bytes > 536870912 eller timeout_ms < 1 {
+        returner {"status": "feil", "error": "invalid limits", "bytes": "0"}
+    }
+    la current = url
+    la hopp: heiltall = 0
+    mens hopp <= 5 {
+        la resultat = _ein(current, headers, mål, maks_bytes, timeout_ms, ca_file)
+        hvis resultat["status"] == "ok" { returner resultat }
+        hvis resultat["status"] != "redirect" {
+            prøv { builtin.fil_slett(mål) } fang (e) {}
+            returner resultat
+        }
+        current = resultat["location"]
+        hopp = hopp + 1
+    }
+    prøv { builtin.fil_slett(mål) } fang (e) {}
+    returner {"status": "feil", "error": "too many redirects", "bytes": "0"}
+}
+
+funksjon produksjonsstatus() -> ordbok_tekst {
+    returner {"status": "stabil", "abi": "norscode-http-download-v1",
+        "dekning": "HTTPS, redirect, binærstraum, Content-Length, chunked og ressursgrenser"}
+}

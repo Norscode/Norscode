@@ -1,0 +1,148 @@
+// tools/build_fullhost_elf_batched.no — orkestrator for batch-ELF-codegen.
+//
+// Byggjer ein full Linux ARM64 ELF frå ein NCB-bundle ved å køyre den
+// precompilerte codegen-en (tools/elf_batch_host via run-ncb-pure) i tre steg:
+// plan → N compile-batchar (kvar sin prosess) → link. run-ncb-pure gjev vm.no
+// sin GC, og prosess-isolasjon per batch frigjer minnet, så toppminnet held
+// seg på ~éin batch (få hundre MB–low GB) i staden for ~11 GB for heile
+// programmet i eitt kall.
+//
+// Miljø:
+//   NC_ELF_NCB          — inn-bundle (standard build/fullhost/nc_main_fullhost_candidate.ncb.json)
+//   NC_ELF_BIN          — ut-ELF (standard build/fullhost/nc_main_fullhost_linux_arm64)
+//   NC_BATCH_CODEGEN    — codegen-NCB (standard build/fullhost/codegen_batch_host.ncb.json)
+//   NC_BATCH_SIZE       — funksjonar per batch (standard 100)
+//   NC_BATCH_WORKDIR    — mellomlager (standard build/fullhost/batch)
+
+bruk tools.process_runner som prosess
+
+funksjon linje(m: tekst) -> heiltall { skriv(m + "\n") returner 0 }
+funksjon env(n: tekst) -> tekst { prøv { returner miljo_hent(n) } fang (e) { returner "" } }
+funksjon fil_finst(s: tekst) -> bool { prøv { returner builtin.fil_finnes(s) } fang (e) { returner usann } }
+
+funksjon mb(b: heiltall) -> tekst { returner tekst_fra_heltall(b / 1048576) + " MB" }
+
+funksjon grunnmiljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_VM_TARGET_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_TARGET_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+// Køyr codegen-NCB via run-ncb-pure med gitt ekstra-miljø. Returnerer peak_rss.
+funksjon køyr_steg(native: tekst, codegen: tekst, root: tekst, ekstra: ordbok_tekst, merkelapp: tekst) -> heiltall {
+    la miljø = grunnmiljø(root)
+    la nøkl = nøkler(ekstra)
+    la i = 0
+    mens i < lengde(nøkl) { miljø[nøkl[i]] = ekstra[nøkl[i]] i = i + 1 }
+    // process_runner.køyr har ei 4 GiB per-barn-grense; ein compile-batch treng
+    // litt meir (bundle-parse ~3 GB + codegen + batch-arbeid). Bruk 7 GiB som
+    // ærleg vokter: høgt nok for batchen, men held heile flyten godt under
+    // 8 GB-budsjettet (kvart steg er prosess-isolert og frigjort etterpå).
+    la res = prosess.køyr_med_grenser(native, ["run-ncb-pure", codegen], root, miljø, 2700000, 7516192768, 1024)
+    prosess.skriv_resultat(res)
+    hvis ikkje prosess.ok(res) {
+        linje("  [FEIL] " + merkelapp + " (exit=" + tekst(res["exit_code"]) + ")")
+        returner 0 - 1
+    }
+    returner prosess.minnetopp_bytes(res)
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = root + "/dist/norscode_native"
+    la konfig = env("NORSCODE_NATIVE_BIN")
+    hvis konfig != "" { native = konfig }
+    la inn = env("NC_ELF_NCB")
+    hvis inn == "" { inn = root + "/build/fullhost/nc_main_fullhost_candidate.ncb.json" }
+    la ut = env("NC_ELF_BIN")
+    hvis ut == "" { ut = root + "/build/fullhost/nc_main_fullhost_linux_arm64" }
+    la codegen = env("NC_BATCH_CODEGEN")
+    hvis codegen == "" { codegen = root + "/build/fullhost/codegen_batch_host.ncb.json" }
+    la batch_size = heltall_fra_tekst(env("NC_BATCH_SIZE"))
+    hvis batch_size <= 0 { batch_size = 100 }
+    la workdir = env("NC_BATCH_WORKDIR")
+    hvis workdir == "" { workdir = root + "/build/fullhost/batch" }
+
+    hvis ikkje fil_finst(native) { linje("✗ manglar " + native) returner 1 }
+    hvis ikkje fil_finst(codegen) { linje("✗ manglar codegen-NCB " + codegen) returner 1 }
+    hvis ikkje fil_finst(inn) { linje("✗ manglar inn-bundle " + inn) returner 1 }
+    prøv { builtin.mkdir_p(workdir) } fang (e) { linje("✗ kan ikkje opprette " + workdir) returner 1 }
+
+    linje("=== Batch-ELF-codegen: " + inn + " → " + ut + " ===")
+    la maks_rss = 0
+
+    // 1) plan
+    la plan_sti = workdir + "/plan.json"
+    la rss = køyr_steg(native, codegen, root, {
+        "NC_BATCH_MODE": "plan", "NC_ELF_NCB": inn, "NC_BATCH_PLAN": plan_sti
+    }, "plan")
+    hvis rss < 0 { returner 1 }
+    hvis rss > maks_rss { maks_rss = rss }
+    hvis ikkje fil_finst(plan_sti) { linje("✗ plan skreiv ikkje " + plan_sti) returner 1 }
+    la plan = builtin.json_parse_raw(builtin.fil_les(plan_sti))
+    la total = lengde(plan["order"])
+    linje("  [plan] " + tekst_fra_heltall(total) + " funksjonar, batch=" + tekst_fra_heltall(batch_size) + " (topp-RSS " + mb(rss) + ")")
+
+    // 2) compile-batchar
+    la fragfiler: liste_tekst = []
+    la start_idx = 0
+    la batchnr = 0
+    mens start_idx < total {
+        la fragut = workdir + "/frags-" + tekst_fra_heltall(batchnr) + ".json"
+        la sluttidx = start_idx + batch_size
+        hvis sluttidx > total { sluttidx = total }
+        // RESUME: hopp over batchar som alt har ferdig frag-fil.
+        hvis fil_finst(fragut) {
+            linje("  [batch " + tekst_fra_heltall(batchnr) + "] [" + tekst_fra_heltall(start_idx) + "," +
+                  tekst_fra_heltall(sluttidx) + ") resume (finst)")
+            legg_til(fragfiler, fragut)
+            start_idx = start_idx + batch_size
+            batchnr = batchnr + 1
+            fortsett
+        }
+        // RETRY: køyr_med_kontekst sin vm_active_functions-feil er FLAKY (~20 %/batch,
+        // minnepress). Fersk retry lukkast nesten alltid. Opp til 6 forsøk.
+        la forsøk = 0
+        la ferdig = usann
+        mens forsøk < 6 og ikkje ferdig {
+            la brss = køyr_steg(native, codegen, root, {
+                "NC_BATCH_MODE": "compile", "NC_ELF_NCB": inn, "NC_BATCH_PLAN": plan_sti,
+                "NC_BATCH_OUT": fragut,
+                "NC_BATCH_START": tekst_fra_heltall(start_idx),
+                "NC_BATCH_COUNT": tekst_fra_heltall(batch_size)
+            }, "compile-batch " + tekst_fra_heltall(batchnr))
+            hvis brss >= 0 og fil_finst(fragut) {
+                ferdig = sann
+                hvis brss > maks_rss { maks_rss = brss }
+                linje("  [batch " + tekst_fra_heltall(batchnr) + "] [" + tekst_fra_heltall(start_idx) + "," +
+                      tekst_fra_heltall(sluttidx) + ") ok (topp-RSS " + mb(brss) + ", forsøk " + tekst_fra_heltall(forsøk + 1) + ")")
+            } ellers {
+                forsøk = forsøk + 1
+                linje("  [batch " + tekst_fra_heltall(batchnr) + "] flaky-feil, retry " + tekst_fra_heltall(forsøk) + "/6")
+            }
+        }
+        hvis ikkje ferdig { linje("✗ batch " + tekst_fra_heltall(batchnr) + " feila etter 6 forsøk") returner 1 }
+        legg_til(fragfiler, fragut)
+        start_idx = start_idx + batch_size
+        batchnr = batchnr + 1
+    }
+
+    // 3) link
+    la lrss = køyr_steg(native, codegen, root, {
+        "NC_BATCH_MODE": "link",
+        "NC_BATCH_FRAGS": builtin.join(fragfiler, ","),
+        "NC_ELF_BIN": ut
+    }, "link")
+    hvis lrss < 0 { returner 1 }
+    hvis lrss > maks_rss { maks_rss = lrss }
+    hvis ikkje fil_finst(ut) { linje("✗ link skreiv ikkje ELF " + ut) returner 1 }
+    linje("  [link] ELF skriven (topp-RSS " + mb(lrss) + ")")
+    linje("")
+    linje("Ferdig. Full ELF: " + ut + " — høgaste steg-RSS " + mb(maks_rss) + ".")
+    returner 0
+}

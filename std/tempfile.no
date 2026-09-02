@@ -1,8 +1,8 @@
 # tempfile.no — Mellombels filer og katalogar
 # Python: tempfile
 #
-# Byggjer og registrerer mellombels ressursar i Norscode, og brukar trygt
-# quota OS-kall berre ved mktemp/mkdir/rm-grensa.
+# Byggjer og registrerer mellombels ressursar i Norscode gjennom den
+# versjonerte filesystem-ABI-en. Ingen ekstern prosess eller shelltekst.
 # Alle mellombels ressursar vert registrert i eit globalt register
 # slik at dei kan ryddast opp (via rydd_opp()).
 #
@@ -21,34 +21,79 @@
 # ─── Oppslagsregister ─────────────────────────────────────────────────────────
 # Vi held styr på aktive tempobjekt i ei global liste
 
-la _register: ordbok_tekst = {}
-la _teller: heltall = 0
+bruk std.runtime_filesystem som native_fs
 
 funksjon _ny_id() -> tekst {
-    _teller = _teller + 1
-    returner "tmp_" + tekst_fra_heltall(_teller)
+    returner "tmp_" + builtin.random_hex(12)
 }
 
-funksjon _shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+funksjon _trygg_namnedel(verdi: tekst) -> tekst {
+    hvis builtin.index_of(verdi, "/") >= 0 eller builtin.index_of(verdi, "\\") >= 0 eller
+       builtin.index_of(verdi, "\u0000") >= 0 eller builtin.index_of(verdi, "\n") >= 0 eller
+       builtin.index_of(verdi, "\r") >= 0 { kast "tempfile: ugyldig namn" }
+    returner verdi
+}
+
+funksjon _unik_del() -> tekst {
+    returner builtin.random_hex(12)
+}
+
+funksjon _forelder(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    hvis lengde(delar) <= 1 { returner "." }
+    la siste = lengde(delar) - 1
+    la ut = ""
+    la i = 0
+    mens i < siste {
+        hvis i == 0 og delar[i] == "" { ut = "/" }
+        ellers hvis delar[i] != "" {
+            hvis ut != "" og ut != "/" { ut = ut + "/" }
+            ut = ut + delar[i]
+        }
+        i = i + 1
+    }
+    hvis ut == "" { returner "." }
+    returner ut
+}
+
+funksjon _namn(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    hvis lengde(delar) == 0 { returner sti }
+    returner delar[lengde(delar) - 1]
+}
+
+funksjon _slett_tre(sti: tekst) -> bool {
+    hvis sti == "" eller sti == "/" { returner usann }
+    hvis ikkje builtin.fil_finnes(sti) { returner sann }
+    la rot = _forelder(sti)
+    la relativ = _namn(sti)
+    la listing = native_fs.native_list(rot, relativ)
+    hvis listing["status"] == "ok" {
+        la barn = builtin.split(listing["data"], "\n")
+        la i = 0
+        mens i < lengde(barn) {
+            la namn = builtin.trim(barn[i])
+            hvis namn != "" og ikkje _slett_tre(sti + "/" + namn) { returner usann }
+            i = i + 1
+        }
+    }
+    la sletta = native_fs.native_slett(rot, relativ)
+    returner sletta["status"] == "deleted" eller ikkje builtin.fil_finnes(sti)
 }
 
 # ─── Temp-katalog ─────────────────────────────────────────────────────────────
 
 funksjon _temp_dir() -> tekst {
     prøv {
-        la res = builtin.miljo_hent("TMPDIR")
-        hvis (res != "") { returner res }
+        la res = builtin.miljo_hent("NORSCODE_TEMP_ROOT")
+        hvis res != "" og ikkje builtin.starts_with(res, "/") og
+           builtin.index_of(res, "\\") < 0 og builtin.index_of(res, "..") < 0 {
+            builtin.mkdir_p(res)
+            returner res
+        }
     } fang (e) {}
-    prøv {
-        la res = builtin.miljo_hent("TMP")
-        hvis (res != "") { returner res }
-    } fang (e) {}
-    prøv {
-        la res = builtin.miljo_hent("TEMP")
-        hvis (res != "") { returner res }
-    } fang (e) {}
-    returner "/tmp"
+    builtin.mkdir_p(".norscode/tmp")
+    returner ".norscode/tmp"
 }
 
 # ─── Tempfil ──────────────────────────────────────────────────────────────────
@@ -56,18 +101,19 @@ funksjon _temp_dir() -> tekst {
 # Returner eit tempfil-objekt: ordbok_tekst med metadata
 funksjon ny_tempfil(prefiks: tekst, suffiks: tekst) -> ordbok_tekst {
     la tmpdir: tekst = _temp_dir()
+    prefiks = _trygg_namnedel(prefiks)
+    suffiks = _trygg_namnedel(suffiks)
     la sti: tekst = ""
-    prøv {
-        la cmd: tekst = "mktemp " + _shell(tmpdir + "/" + prefiks + "XXXXXX" + suffiks)
-        la res = builtin.exec_prosess(cmd)
-        la delar = builtin.split(res, "\n")
-        sti = delar[0]
-    } fang (e) {
-        # Fallback: lag unikt namn manuelt
-        la tid_str: tekst = tekst_fra_heltall(builtin.tid_ms())
-        sti = tmpdir + "/" + prefiks + tid_str + suffiks
-        builtin.fil_skriv(sti, "")
+    la forsøk = 0
+    mens sti == "" og forsøk < 32 {
+        la kandidat = tmpdir + "/" + prefiks + _unik_del() + suffiks
+        hvis ikkje builtin.fil_finnes(kandidat) {
+            builtin.fil_skriv(kandidat, "")
+            sti = kandidat
+        }
+        forsøk = forsøk + 1
     }
+    hvis sti == "" { kast "tempfile: klarte ikkje lage unik tempfil" }
 
     la obj: ordbok_tekst = {}
     la id: tekst = _ny_id()
@@ -77,7 +123,6 @@ funksjon ny_tempfil(prefiks: tekst, suffiks: tekst) -> ordbok_tekst {
     obj["open"] = "sann"
     obj["prefiks"] = prefiks
     obj["suffiks"] = suffiks
-    _register[id] = builtin.json_stringify(obj)
     returner obj
 }
 
@@ -111,17 +156,18 @@ funksjon append_tempfil(obj: ordbok_tekst, innhald: tekst) {
 
 funksjon ny_tempkatalog(prefiks: tekst) -> ordbok_tekst {
     la tmpdir: tekst = _temp_dir()
+    prefiks = _trygg_namnedel(prefiks)
     la sti: tekst = ""
-    prøv {
-        la cmd: tekst = "mktemp -d " + _shell(tmpdir + "/" + prefiks + "XXXXXX")
-        la res = builtin.exec_prosess(cmd)
-        la delar = builtin.split(res, "\n")
-        sti = delar[0]
-    } fang (e) {
-        la tid_str: tekst = tekst_fra_heltall(builtin.tid_ms())
-        sti = tmpdir + "/" + prefiks + tid_str
-        prøv { builtin.exec_prosess("mkdir -p " + _shell(sti)) } fang (e2) {}
+    la forsøk = 0
+    mens sti == "" og forsøk < 32 {
+        la kandidat = tmpdir + "/" + prefiks + _unik_del()
+        hvis ikkje builtin.fil_finnes(kandidat) {
+            builtin.mkdir_p(kandidat)
+            sti = kandidat
+        }
+        forsøk = forsøk + 1
     }
+    hvis sti == "" { kast "tempfile: klarte ikkje lage unik tempkatalog" }
 
     la obj: ordbok_tekst = {}
     la id: tekst = _ny_id()
@@ -129,7 +175,6 @@ funksjon ny_tempkatalog(prefiks: tekst) -> ordbok_tekst {
     obj["sti"] = sti
     obj["type"] = "katalog"
     obj["prefiks"] = prefiks
-    _register[id] = builtin.json_stringify(obj)
     returner obj
 }
 
@@ -139,50 +184,27 @@ funksjon ny_tempkatalog_enkel() -> ordbok_tekst {
 
 # ─── Slett ────────────────────────────────────────────────────────────────────
 
-funksjon slett(obj: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("rm -f " + _shell(obj["sti"]))
-    } fang (e) {}
-    fjern_nokkel(_register, obj["id"])
+funksjon slett(obj: ordbok_tekst) -> bool {
+    returner _slett_tre(obj["sti"])
 }
 
-funksjon slett_katalog(obj: ordbok_tekst) {
-    prøv {
-        builtin.exec_prosess("rm -rf " + _shell(obj["sti"]))
-    } fang (e) {}
-    fjern_nokkel(_register, obj["id"])
+funksjon slett_katalog(obj: ordbok_tekst) -> bool {
+    returner _slett_tre(obj["sti"])
 }
 
 # Slett basert på sti-type
 funksjon lukk(obj: ordbok_tekst) {
     hvis (obj["type"] == "katalog") {
-        slett_katalog(obj)
+        returner slett_katalog(obj)
     } ellers {
-        slett(obj)
+        returner slett(obj)
     }
 }
 
 # Rydd opp alle registrerte tempobjekt
 funksjon rydd_opp() {
-    la nøklar = builtin.nøkler(_register)
-    la i: heltall = 0
-    mens (i < lengde(nøklar)) {
-        la obj = builtin.json_parse(_register[nøklar[i]])
-        prøv {
-            hvis (obj["type"] == "katalog") {
-                builtin.exec_prosess("rm -rf " + _shell(obj["sti"]))
-            } ellers {
-                builtin.exec_prosess("rm -f " + _shell(obj["sti"]))
-            }
-        } fang (e) {}
-        i = i + 1
-    }
-    la nøklar2 = builtin.nøkler(_register)
-    la j: heltall = 0
-    mens (j < lengde(nøklar2)) {
-        fjern_nokkel(_register, nøklar2[j])
-        j = j + 1
-    }
+    # Ressursane er objekt-eigde. Bruk lukk/slett på kvart returnert objekt.
+    returner 0
 }
 
 # ─── Hent-funksjonar ─────────────────────────────────────────────────────────
@@ -291,5 +313,5 @@ funksjon mktempnamn(prefiks: tekst, suffiks: tekst) -> tekst {
 }
 
 funksjon registrert_tal() -> heltall {
-    returner lengde(builtin.nøkler(_register))
+    returner 0
 }

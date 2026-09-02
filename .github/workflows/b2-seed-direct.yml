@@ -1,0 +1,103 @@
+name: B2 Seed Direct (x86_64)
+
+on:
+  workflow_dispatch:
+
+env:
+  NORSCODE_CMD: run
+  NORSCODE_FILE: tools/ci_shell_runner.no
+  NORSCODE_ROOT: ${{ github.workspace }}
+  NORSCODE_ENABLE_EXEC_PROSESS: "1"
+  NORSCODE_VM_CAPABILITIES: env.read,env.write,process.exec,disk.read,disk.write,jit.execute
+  NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+
+permissions:
+  contents: read
+
+jobs:
+  build-seed:
+    name: Direkte nc_main native seed
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: ${{ github.workspace }}/bootstrap/stage0/norscode-linux-x86_64 run ${{ github.workspace }}/tools/ci_shell_runner.no {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Materialiser runtime gjennom committed stage0
+        env:
+          NORSCODE_CI_FILE_SOURCE: bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_CI_FILE_TARGET: dist/norscode_native
+          NORSCODE_VM_CI_CHILD_CMD: run
+          NORSCODE_VM_CI_CHILD_EXECUTABLE: ./bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_VM_CI_CHILD_FILE: ${{ github.workspace }}/tools/ci_runtime_fileops.no
+          NORSCODE_VM_CI_CHILD_CAPABILITIES: env.read,process.exec,disk.read,disk.write
+          NORSCODE_VM_CI_CHILD_DISK_ROOT: ${{ github.workspace }},.,/tmp
+          NORSCODE_VM_CI_COMMAND: "./bootstrap/stage0/norscode-linux-x86_64"
+        run: ./bootstrap/stage0/norscode-linux-x86_64
+
+      # Driver spawnar to subprosessar med EKSPLISITT miljø (omgår
+      # ci_shell_runner-whitelista): (1) dist compile nc_main → NCB, (2) dist
+      # run native_codegen_v2 (INTERPRETERT → ingen self-boot-segfault) → ELF.
+      - name: Bygg full nc_main native seed (driver)
+        env:
+          NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/build_x86_seed.no"
+        run: ./bin/nc run tools/build_x86_seed.no
+
+      - name: "Verifiser seed (diagnose — basiskommandoar + gdb-backtrace)"
+        shell: bash
+        env:
+          NORSCODE_ROOT: ${{ github.workspace }}
+          NORSCODE_VM_CAPABILITIES: env.read,env.write,process.exec,disk.read,disk.write,jit.execute
+          NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp
+        run: |
+          set +e
+          SEED=./build/nc_main_seed.elf
+          file "$SEED"
+          chmod +x "$SEED"
+          echo "===== TRACE help (siste VMCALL før krasj) ====="
+          NC_VM_TRACE_CALLS=1 "$SEED" help > /tmp/trace.out 2>&1
+          echo "--- NCBDIAG ---"; cat /tmp/ncbdiag.txt 2>/dev/null || echo "(ingen ncbdiag)"
+          echo "TRACE_EXIT=$?"
+          echo "--- siste 8 VMCALL ---"; grep "VMCALL:" /tmp/trace.out | tail -8
+          echo "--- siste 8 linjer totalt ---"; tail -8 /tmp/trace.out
+          echo "===== help ====="
+          "$SEED" help
+          echo "HELP_EXIT=$?"
+          echo "===== version ====="
+          "$SEED" version
+          echo "VERSION_EXIT=$?"
+          echo "===== run-ncb-pure exit-42 ====="
+          printf 'funksjon start() -> heiltall { returner 42 }\n' > /tmp/tiny42.no
+          ./dist/norscode_native compile /tmp/tiny42.no /tmp/tiny42.ncb.json
+          "$SEED" run-ncb-pure /tmp/tiny42.ncb.json
+          echo "RUNNCBPURE_EXIT=$?"
+          echo "===== selftest ====="
+          "$SEED" selftest
+          echo "SELFTEST_EXIT=$?"
+          echo "===== gdb backtrace ====="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gdb
+          gdb -q -batch -ex "run selftest" -ex "info registers rdi rbp rsp" -ex "echo \n==PROLOG 0x49f166==\n" -ex "x/40i 0x49f166" -ex "echo \n==LOCALS==\n" -ex "x/8gx \$rbp-0x40" -ex "echo \n==ARGS above rbp==\n" -ex "x/6gx \$rbp" "$SEED" 2>&1 | tail -80
+          echo "===== symbol-oppslag for krasj-adresser ====="
+          SYM="$SEED.symbols"
+          ls -la "$SYM" || true
+          for A in 4200896 4846267; do
+            echo "--- addr $A (0x$(printf '%x' $A)) ---"
+            awk -F'\t' -v a=$A '$1<=a && a<$2 {print "  FN: "$3" ["$1","$2")"}' "$SYM" | head -3
+            # nærmaste funksjon under adressa som fallback
+            awk -F'\t' -v a=$A '$1<=a {print $1"\t"$3}' "$SYM" | sort -n | tail -1 | sed 's/^/  nearest<=: /'
+          done
+          echo "diagnose ferdig"
+
+      - name: Last opp native seed-kandidat
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nc_main_x86_64_seed
+          path: |
+            build/nc_main_seed.elf
+            build/nc_main_seed.elf.symbols
+          if-no-files-found: warn
+          retention-days: 7

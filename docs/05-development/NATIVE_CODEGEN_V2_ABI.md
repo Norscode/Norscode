@@ -6,9 +6,15 @@ runtime-kontrakt, minneoppsett og inngangspunkt-åtferd for staging og oppstart.
 ## Runtime-seksjonar
 
 - `TEXT_VA()` – tekstsegmentbase: `4198400`.
-- `DATA_VA()` – konstantdatabase (string-litteraler): `5242880`.
+- `DATA_VA()` – konstantdatabase (string-litteraler): `5505024` (`0x540000`).
+  Basen held full-host-text og konstantdata i separate ELF-segment; kodegeneratoren
+  feilar lukka dersom tekst eller data veks inn i neste segment.
+- `HOST_ABI_VA()` – eiga skrivebar vertsside: `6225920` (`0x5f0000`).
+  `_start` lagrar rå `argv**` og `argc` her; konstantsida held fram read-only og GC-kontrollblokka
+  blir ikkje brukt til vertspekeren.
 - `HEAP_VA()` – heapbase: `6291456`.
-- `HEAP_SZ()` – reserverer 64 MiB heap.
+- `HEAP_SZ()` – reserverer 1 GiB virtuell heap for den breie, to-passa
+  source-only selfhost-kandidaten; berre rørte sider blir fysisk minne.
 
 Kompilerte ELF-binarar legg runtime-kode på `TEXT_VA` og data/heap i faste område
 for deterministisk bygging.
@@ -32,7 +38,7 @@ og ikkje del av seed-first bygg i dagleg flyt.
 
 `_start`:
 
-1. Initialiserer `rbp`/stakk og legg `argv/envp` i runtime-slot.
+1. Fangar original stack og legg `argv`/`argc` i verts-ABI-segmentet og `envp` i runtime-slotten.
 2. Justerer stack til SysV-aligned tilstand.
 3. Kallar `RT_INIT_HEAP()` før start-funksjon.
 4. Kallar entryfunksjon (`start_fn`) frå NCB-entryfeltet.

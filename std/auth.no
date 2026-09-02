@@ -27,6 +27,24 @@ bruk std.db som db
 bruk std.orm som orm
 bruk std.krypto som krypto
 bruk std.web som web
+bruk std.auth_security som auth_security
+bruk std.auth_mfa som auth_mfa
+
+funksjon _auth_security_root() -> tekst {
+    prøv {
+        la root = miljo_hent("NORSCODE_AUTH_SECURITY_ROOT")
+        hvis root != "" { returner root }
+    } fang (e) {}
+    returner "."
+}
+
+funksjon _auth_security_relativ() -> tekst {
+    prøv {
+        la relativ = miljo_hent("NORSCODE_AUTH_SECURITY_FILE")
+        hvis relativ != "" { returner relativ }
+    } fang (e) {}
+    returner ".norscode-auth-security.json"
+}
 
 # ─── Database-oppsett ─────────────────────────────────────────────────────────
 
@@ -114,7 +132,11 @@ funksjon registrer(conn: tekst, brukarnamn: tekst, epost: tekst, passord: tekst)
         "brukarnamn": brukarnamn,
         "epost": epost,
         "passord_hash": hash,
-        "salt": salt
+        "salt": salt,
+        // Ikkje stol på database-spesifikk DEFAULT-materialisering. NorsDB,
+        // SQLite og framtidige adapterar skal få identisk auth-state.
+        "aktiv": "sann",
+        "rolle": "brukar"
     })
 }
 
@@ -128,7 +150,21 @@ funksjon registrer_med_rolle(conn: tekst, brukarnamn: tekst, epost: tekst, passo
 
 # ─── Innlogging / utlogging ───────────────────────────────────────────────────
 
-funksjon logg_inn(conn: tekst, epost: tekst, passord: tekst) -> tekst {
+funksjon innlogging_tillaten_ved(conn: tekst, identitet: tekst, klient: tekst, no_ms: heiltall) -> boolsk {
+    returner auth_security.innlogging_tillaten_ved(_auth_security_root(), _auth_security_relativ(), identitet, klient, no_ms)
+}
+
+funksjon registrer_innloggingsfeil_ved(conn: tekst, identitet: tekst, klient: tekst,
+                                      no_ms: heiltall, maks_feil: heiltall,
+                                      vindauge_ms: heiltall, sperre_ms: heiltall) -> heiltall {
+    returner auth_security.registrer_innloggingsfeil_ved(_auth_security_root(), _auth_security_relativ(), identitet, klient, no_ms, maks_feil, vindauge_ms, sperre_ms)
+}
+
+funksjon nullstill_innloggingsvern(conn: tekst, identitet: tekst, klient: tekst) -> heiltall {
+    returner auth_security.nullstill_innloggingsvern(_auth_security_root(), _auth_security_relativ(), identitet, klient)
+}
+
+funksjon _logg_inn_utan_vern(conn: tekst, epost: tekst, passord: tekst) -> tekst {
     la brukar = orm.finn_ved(conn, "auth_brukar", "epost", epost)
     hvis ikkje har_nokkel(brukar, "id") { returner "" }
     hvis brukar["aktiv"] != "sann" { returner "" }
@@ -153,6 +189,65 @@ funksjon logg_inn(conn: tekst, epost: tekst, passord: tekst) -> tekst {
     } fang (e) { }
 
     returner token
+}
+
+funksjon _verifiser_innlogging(conn: tekst, epost: tekst, passord: tekst) -> ordbok_tekst {
+    la brukar = orm.finn_ved(conn, "auth_brukar", "epost", epost)
+    hvis ikkje har_nokkel(brukar, "id") { returner {} }
+    hvis brukar["aktiv"] != "sann" { returner {} }
+    hvis ikkje verifiser_passord(passord, brukar["salt"], brukar["passord_hash"]) { returner {} }
+    returner brukar
+}
+
+funksjon _opprett_session(conn: tekst, brukar_id: tekst) -> tekst {
+    la token = _generer_token()
+    orm.lagre(conn, "auth_session", {"token": token, "brukar_id": brukar_id, "aktiv": "sann"})
+    prøv { orm.oppdater(conn, "auth_brukar", heltall_fra_tekst(brukar_id), {"sist_innlogga": builtin.now_iso()}) } fang (e) {}
+    returner token
+}
+
+funksjon logg_inn_med_mfa_ved(conn: tekst, epost: tekst, passord: tekst, klient: tekst,
+                              no_ms: heiltall) -> ordbok_tekst {
+    hvis ikkje innlogging_tillaten_ved(conn, epost, klient, no_ms) {
+        returner {"status": "sperra", "token": "", "challenge": ""}
+    }
+    la brukar = _verifiser_innlogging(conn, epost, passord)
+    hvis ikkje har_nokkel(brukar, "id") {
+        registrer_innloggingsfeil_ved(conn, epost, klient, no_ms, 5, 900000, 900000)
+        returner {"status": "avvist", "token": "", "challenge": ""}
+    }
+    nullstill_innloggingsvern(conn, epost, klient)
+    hvis auth_mfa.aktiv(_auth_security_root(), _auth_security_relativ(), brukar["id"]) {
+        la challenge = auth_mfa.utsted_innloggingsutfordring(_auth_security_root(), _auth_security_relativ(), brukar["id"], no_ms, 300000)
+        returner {"status": "mfa_påkravd", "token": "", "challenge": challenge}
+    }
+    returner {"status": "innlogga", "token": _opprett_session(conn, brukar["id"]), "challenge": ""}
+}
+
+funksjon fullfor_mfa_innlogging_ved(conn: tekst, challenge: tekst, secret: tekst,
+                                   kode: tekst, no_ms: heiltall) -> tekst {
+    la brukar_id = auth_mfa.fullfor_innloggingsutfordring(_auth_security_root(), _auth_security_relativ(), challenge, secret, kode, no_ms)
+    hvis brukar_id == "" { returner "" }
+    la brukar = orm.finn(conn, "auth_brukar", heltall_fra_tekst(brukar_id))
+    hvis ikkje har_nokkel(brukar, "id") eller brukar["aktiv"] != "sann" { returner "" }
+    returner _opprett_session(conn, brukar_id)
+}
+
+funksjon logg_inn_sikra_ved(conn: tekst, epost: tekst, passord: tekst, klient: tekst,
+                           no_ms: heiltall, maks_feil: heiltall,
+                           vindauge_ms: heiltall, sperre_ms: heiltall) -> tekst {
+    hvis ikkje innlogging_tillaten_ved(conn, epost, klient, no_ms) { returner "" }
+    la token = _logg_inn_utan_vern(conn, epost, passord)
+    hvis token == "" {
+        registrer_innloggingsfeil_ved(conn, epost, klient, no_ms, maks_feil, vindauge_ms, sperre_ms)
+        returner ""
+    }
+    nullstill_innloggingsvern(conn, epost, klient)
+    returner token
+}
+
+funksjon logg_inn(conn: tekst, epost: tekst, passord: tekst) -> tekst {
+    returner logg_inn_sikra_ved(conn, epost, passord, "konto", builtin.now_ms(), 5, 900000, 900000)
 }
 
 funksjon logg_ut(conn: tekst, token: tekst) -> boolsk {
@@ -196,6 +291,18 @@ funksjon hent_brukar_frå_session(conn: tekst, token: tekst) -> ordbok_tekst {
 funksjon er_gyldig_session(conn: tekst, token: tekst) -> boolsk {
     la session = hent_session(conn, token)
     returner har_nokkel(session, "id")
+}
+
+funksjon utsted_reautentisering_ved(conn: tekst, session_token: tekst, no_ms: heiltall, ttl_ms: heiltall) -> tekst {
+    la session = hent_session(conn, session_token)
+    hvis ikkje har_nokkel(session, "brukar_id") { returner "" }
+    returner auth_security.utsted_reautentisering_ved(_auth_security_root(), _auth_security_relativ(), session_token, session["brukar_id"], no_ms, ttl_ms)
+}
+
+funksjon bruk_reautentisering_ved(conn: tekst, session_token: tekst, token: tekst, no_ms: heiltall) -> boolsk {
+    la session = hent_session(conn, session_token)
+    hvis ikkje har_nokkel(session, "brukar_id") { returner usann }
+    returner auth_security.bruk_reautentisering_ved(_auth_security_root(), _auth_security_relativ(), session_token, session["brukar_id"], token, no_ms)
 }
 
 # ─── Web-integrasjon ─────────────────────────────────────────────────────────

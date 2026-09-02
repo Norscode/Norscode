@@ -1,0 +1,111 @@
+// tools/elf_batch_host.no — batch-codegen-entrypoint for run-ncb-pure.
+//
+// Tre modi (NC_BATCH_MODE) som saman byggjer ein full ELF utan å halde heile
+// programmet i minne i eitt kall. Kvar modus køyrer i sin EIGEN run-ncb-pure-
+// prosess (vm.no sin GC + prosess-isolasjon), så toppminnet = éin batch.
+//
+//   plan:    NC_ELF_NCB → NC_BATCH_PLAN (order + globals som JSON)
+//   compile: NC_ELF_NCB + NC_BATCH_PLAN + NC_BATCH_START/COUNT → NC_BATCH_OUT
+//            (per-fn {name, words, patches})
+//   link:    NC_BATCH_FRAGS (komma-separte fragfiler i order) + NC_ELF_BIN
+//            → ferdig Linux ARM64 ELF
+//
+// Delt av orkestratoren tools/build_fullhost_elf_batched.no.
+
+bruk selfhost.native_execution.macho_arm64_codegen som arm64
+bruk selfhost.native_execution.elf_arm64_emitter som elf
+
+funksjon modus_plan() -> heiltall {
+    la inn = miljo_hent("NC_ELF_NCB")
+    la ut = miljo_hent("NC_BATCH_PLAN")
+    hvis inn == "" eller ut == "" {
+        skriv("[batch-plan] NC_ELF_NCB og NC_BATCH_PLAN er påkravde\n")
+        returner 2
+    }
+    la ncb = builtin.json_parse_raw(builtin.fil_les(inn))
+    la plan = arm64.ncval_plan(ncb)
+    hvis tekst(plan["ok"]) != "sann" {
+        skriv("[batch-plan] FEIL: " + tekst(plan["error"]) + "\n")
+        returner 1
+    }
+    la ut_obj = {"order": plan["order"], "globals": plan["globals"]}
+    builtin.fil_skriv(ut, builtin.json_stringify(ut_obj))
+    skriv("[batch-plan] " + tekst_fra_heltall(lengde(plan["order"])) + " nåbare funksjonar → " + ut + "\n")
+    returner 0
+}
+
+funksjon modus_compile() -> heiltall {
+    la inn = miljo_hent("NC_ELF_NCB")
+    la plansti = miljo_hent("NC_BATCH_PLAN")
+    la ut = miljo_hent("NC_BATCH_OUT")
+    la start = heltall_fra_tekst(miljo_hent("NC_BATCH_START"))
+    la count = heltall_fra_tekst(miljo_hent("NC_BATCH_COUNT"))
+    hvis inn == "" eller plansti == "" eller ut == "" {
+        skriv("[batch-compile] NC_ELF_NCB, NC_BATCH_PLAN, NC_BATCH_OUT er påkravde\n")
+        returner 2
+    }
+    la ncb = builtin.json_parse_raw(builtin.fil_les(inn))
+    la plan = builtin.json_parse_raw(builtin.fil_les(plansti))
+    la res = arm64.ncval_compile_range(ncb, "linux", plan["order"], plan["globals"], start, count)
+    hvis tekst(res["ok"]) != "sann" {
+        skriv("[batch-compile] FEIL: " + tekst(res["error"]) + "\n")
+        returner 1
+    }
+    builtin.fil_skriv(ut, builtin.json_stringify({"frags": res["frags"]}))
+    skriv("[batch-compile] [" + tekst_fra_heltall(start) + "," + tekst_fra_heltall(start + count) + ") → " +
+          tekst_fra_heltall(lengde(res["frags"])) + " fragment\n")
+    returner 0
+}
+
+funksjon modus_link() -> heiltall {
+    la fragliste = miljo_hent("NC_BATCH_FRAGS")
+    la ut = miljo_hent("NC_ELF_BIN")
+    hvis fragliste == "" eller ut == "" {
+        skriv("[batch-link] NC_BATCH_FRAGS og NC_ELF_BIN er påkravde\n")
+        returner 2
+    }
+    la filer = builtin.split(fragliste, ",")
+    la entries = []
+    la i = 0
+    mens i < lengde(filer) {
+        la f = builtin.trim(filer[i])
+        hvis f != "" {
+            la obj = builtin.json_parse_raw(builtin.fil_les(f))
+            la fr = obj["frags"]
+            la j = 0
+            mens j < lengde(fr) {
+                legg_til(entries, fr[j])
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    skriv("[batch-link] " + tekst_fra_heltall(lengde(entries)) + " fragment → lenkar\n")
+    // M6: last plan-globals (om tilgjengeleg) så __throw_dispatch__ får __exc-indeksane.
+    la link_globals = null
+    la plansti_l = miljo_hent("NC_BATCH_PLAN")
+    hvis plansti_l != "" {
+        prøv {
+            la planobj_l = builtin.json_parse_raw(builtin.fil_les(plansti_l))
+            link_globals = planobj_l["globals"]
+        } fang (e) { link_globals = null }
+    }
+    la res = arm64.ncval_link("linux", entries, link_globals)
+    hvis tekst(res["ok"]) != "sann" {
+        skriv("[batch-link] FEIL: " + tekst(res["error"]) + "\n")
+        returner 1
+    }
+    la image = elf.bygg_program(res["image"])
+    builtin.fil_skriv_binær(ut, image)
+    skriv("[batch-link] ELF OK: " + ut + " (" + tekst_fra_heltall(lengde(image)) + " bytes)\n")
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la modus = miljo_hent("NC_BATCH_MODE")
+    hvis modus == "plan" { returner modus_plan() }
+    hvis modus == "compile" { returner modus_compile() }
+    hvis modus == "link" { returner modus_link() }
+    skriv("[batch-host] ukjend NC_BATCH_MODE: " + modus + " (plan|compile|link)\n")
+    returner 2
+}

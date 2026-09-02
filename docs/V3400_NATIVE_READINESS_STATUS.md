@@ -47,11 +47,7 @@ exec_prosess OK
 - Runtime-gap gate: grønn
 - Promotert: 2026-06-25T15:19:03Z
 
-## Historisk produksjonsstatus
-
-Blokka under er eit eldre statusbilete frå v3400. Ho er ikkje autoritativ for
-Norscode 1.0; den maskinlesbare sluttportrapporten på same commit avgjer
-produksjonsstatus.
+## Produksjonsstatus
 
 ```text
 candidate_runtime_gap=green

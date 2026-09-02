@@ -2,6 +2,12 @@
 // Ingen Node-, JavaScript-, Python- eller C-transformasjon er del av denne bana.
 // NORSCODE_HYBRID_ROOT=<repo-root> NORSCODE_HYBRID_SRC=<src.no> NORSCODE_HYBRID_OUT=<out.ncb.json> ./bin/nc run tools/compile_with_hybrid_bundle_v9400.no
 
+bruk std.sha256 som sha256
+bruk std.runtime_filesystem som runtime_fs
+bruk std.filops som filops
+bruk tools.process_runner som process_runner
+bruk selfhost.json som canonical_json
+
 funksjon linje(melding: tekst) -> heiltall {
     skriv(melding + "\n")
     returner 0
@@ -12,59 +18,19 @@ funksjon env(namn: tekst) -> tekst {
     returner ""
 }
 
-funksjon shell(s: tekst) -> tekst { returner "'" + builtin.replace(s, "'", "'\"'\"'") + "'" }
-
-// Windows-native runtime køyrer `exec_prosess` gjennom cmd.exe.  Denne
-// kompilatorfila brukar elles POSIX-verktøy (test/cp/mkdir/mv), og dei skal
-// difor eksplisitt innom den Git-Bash-en som allereie er ein del av Windows
-// release-runneren.  Utan dette blir POSIX-enkeltanførsel sendt direkte til
-// cmd.exe og feilar med «The syntax of the command is incorrect.».
-funksjon er_windows() -> bool {
-    prøv {
-        returner miljo_hent("OS") == "Windows_NT"
-    } fang (e) { returner usann }
-    returner usann
-}
-
-funksjon er_absolutt_sti(sti: tekst) -> bool {
-    hvis builtin.starts_with(sti, "/") { returner sann }
-    hvis lengde(sti) >= 3 og builtin.slice(sti, 1, 2) == ":" {
-        la skilje = builtin.slice(sti, 2, 3)
-        hvis skilje == "/" eller skilje == "\\" { returner sann }
-    }
-    returner usann
-}
-
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv {
-        hvis ikkje er_windows() {
-            returner exec_prosess(cmd)
-        }
-        la faktisk = cmd
-        // Kommandoane frå denne fila inneheld ikkje doble hermeteikn; dei
-        // brukar shell() for sti-quoting.  Ytre doble hermeteikn er difor
-        // trygge for cmd.exe og let bash ta over POSIX-syntaksen.
-        faktisk = "bash -lc \"" + cmd + "\""
-        returner exec_prosess(faktisk)
-    } fang (e) {
-        la r: liste_tekst = []
-        legg_til(r, "1")
-        legg_til(r, "")
-        legg_til(r, tekst(e))
-        returner r
-    }
-}
-
-funksjon ok(res: liste_tekst) -> bool {
-    returner lengde(res) > 0 og res[0] == "0"
-}
-
-funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner res[idx] }
-    returner ""
-}
-
 funksjon trim(t: tekst) -> tekst { returner builtin.trim(t) }
+
+funksjon rask_hash_bytes(data: liste_heiltall) -> tekst {
+    prøv { returner builtin.sha256_bytes(data) }
+    fang (e) { returner sha256.hash_bytes(data) }
+    returner sha256.hash_bytes(data)
+}
+
+funksjon rask_hash(data: tekst) -> tekst {
+    prøv { returner builtin.sha256(data) }
+    fang (e) { returner sha256.hash(data) }
+    returner sha256.hash(data)
+}
 
 funksjon dirname(sti: tekst) -> tekst {
     la siste: heiltall = -1
@@ -92,6 +58,135 @@ funksjon liste_har(verdiar: liste_tekst, verdi: tekst) -> bool {
         i = i + 1
     }
     returner usann
+}
+
+// Skriv store NCB-kart utan å materialisere ein ny JSON-tekst på storleik med
+// heile importgrafen. Den allereie samanslåtte grafen blir traversert éin gong,
+// medan ein avgrensa tekstbuffer blir tømd til filesystem-ABI-en fortløpande.
+funksjon json_stream_flush(sti: tekst, buffer: tekst) -> tekst {
+    hvis buffer != "" {
+        builtin.fil_append(sti, buffer)
+    }
+    returner ""
+}
+
+funksjon json_stream_put(sti: tekst, buffer: tekst, del: tekst) -> tekst {
+    la etter = buffer + del
+    // Den reine VM-en kopierer tekst ved kvar konkatenering. 64 KiB gav difor
+    // kvadratisk arbeid og fleire gigabyte temporære allokeringar per stor
+    // NCB-verdi. 8 KiB bevarer identiske byte, men avgrensar kopiar og GC-pausar.
+    hvis lengde(etter) >= 8192 {
+        returner json_stream_flush(sti, etter)
+    }
+    returner etter
+}
+
+funksjon json_stream_verdi(sti: tekst, verdi, buffer: tekst) -> tekst {
+    // Native NcVal-likskap kan representere både null og heiltalet 0 med ei
+    // falsy payloadgrense. Typeporten må derfor kome før nullserialisering;
+    // elles blir gyldige bytecode-operandar som BUILD_MAP 0 skrivne som null.
+    la type_namn = builtin.type(verdi)
+    hvis type_namn == "ingenting" eller type_namn == "null" {
+        returner json_stream_put(sti, buffer, "null")
+    }
+    hvis type_namn == "liste" {
+        buffer = json_stream_put(sti, buffer, "[")
+        la i: heiltall = 0
+        mens i < lengde(verdi) {
+            hvis i > 0 { buffer = json_stream_put(sti, buffer, ",") }
+            buffer = json_stream_verdi(sti, verdi[i], buffer)
+            i = i + 1
+        }
+        returner json_stream_put(sti, buffer, "]")
+    }
+    hvis type_namn == "ordbok" {
+        buffer = json_stream_put(sti, buffer, "{")
+        la keys = nøkler(verdi)
+        la i: heiltall = 0
+        mens i < lengde(keys) {
+            hvis i > 0 { buffer = json_stream_put(sti, buffer, ",") }
+            la key = tekst(keys[i])
+            la encoded_key = canonical_json.json_skriv(key)
+            buffer = json_stream_put(sti, buffer, encoded_key)
+            buffer = json_stream_put(sti, buffer, ":")
+            buffer = json_stream_verdi(sti, verdi[key], buffer)
+            i = i + 1
+        }
+        returner json_stream_put(sti, buffer, "}")
+    }
+    la encoded = canonical_json.json_skriv(verdi)
+    returner json_stream_put(sti, buffer, encoded)
+}
+
+funksjon json_stream_skriv_fil(sti: tekst, verdi) {
+    // Stage0 sitt verdi-ABI rapporterer både null og heiltalet 0 som heiltal.
+    // Native JSON bevarer skiljet som tokena `ingenting` og `0`; normaliser
+    // berre null-tokenet utanfor strengar etter serialisering.
+    builtin.fil_skriv(sti, json_native(verdi))
+}
+
+funksjon json_native(verdi) -> tekst {
+    la raw = canonical_json.json_skriv(verdi)
+    // Den eldre stage0-verdien kan bli serialisert som det uquoted interne
+    // tokenet `ingenting`. Tekstverdien "ingenting" er sitert og må stå urørt.
+    la ut = ""
+    la i: heiltall = 0
+    la i_streng = usann
+    la escape = usann
+    mens i < lengde(raw) {
+        la ch = builtin.slice(raw, i, i + 1)
+        hvis i_streng {
+            ut = ut + ch
+            hvis escape { escape = usann }
+            ellers hvis ch == "\\" { escape = sann }
+            ellers hvis ch == "\"" { i_streng = usann }
+            i = i + 1
+        } ellers hvis ch == "\"" {
+            i_streng = sann
+            ut = ut + ch
+            i = i + 1
+        } ellers hvis builtin.slice(raw, i, i + 9) == "ingenting" {
+            ut = ut + "null"
+            i = i + 9
+        } ellers {
+            ut = ut + ch
+            i = i + 1
+        }
+    }
+    returner ut
+}
+
+funksjon json_stream_skriv_ncb_fil(sti: tekst, ncb) -> heiltall {
+    // NCB-en er dominert av functions-kartet. Serialiser kvar funksjon som ei
+    // avgrensa, typebevarande eining og stream berre toppnivået. Det fjernar
+    // eitt tolka json_stream_put-kall per opcodeoperand utan å byggje ein ny
+    // fleirmegabyte-tekst for heile bunten.
+    builtin.fil_skriv(sti, "{")
+    la felt = nøkler(ncb)
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        hvis i > 0 { builtin.fil_append(sti, ",") }
+        la namn = tekst(felt[i])
+        builtin.fil_append(sti, json_native(namn) + ":")
+        hvis namn == "functions" {
+            builtin.fil_append(sti, "{")
+            la fns = ncb["functions"]
+            la fn_namn = nøkler(fns)
+            la fi: heiltall = 0
+            mens fi < lengde(fn_namn) {
+                hvis fi > 0 { builtin.fil_append(sti, ",") }
+                la nøkkel = tekst(fn_namn[fi])
+                builtin.fil_append(sti, json_native(nøkkel) + ":" + json_native(fns[nøkkel]))
+                fi = fi + 1
+            }
+            builtin.fil_append(sti, "}")
+        } ellers {
+            builtin.fil_append(sti, json_native(ncb[namn]))
+        }
+        i = i + 1
+    }
+    builtin.fil_append(sti, "}")
+    returner 0
 }
 
 funksjon fyrste_ord(t: tekst) -> tekst {
@@ -123,6 +218,58 @@ funksjon importer_fraa(src: tekst) -> liste_tekst {
     returner ut
 }
 
+funksjon normaliser_lokale_importar(kjelde: tekst, root: tekst, project_root: tekst) -> tekst {
+    la prefiks = ""
+    hvis project_root != root og builtin.starts_with(project_root, root + "/") {
+        prefiks = builtin.replace(builtin.slice(project_root, lengde(root) + 1, -1), "/", ".")
+    }
+    hvis prefiks == "" { returner kjelde }
+
+    la linjer = builtin.split(kjelde, "\n")
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la trimma = trim(linjer[i])
+        la nøkkel = ""
+        la modul = ""
+        hvis builtin.starts_with(trimma, "bruk ") {
+            nøkkel = "bruk "
+            modul = fyrste_ord(builtin.slice(trimma, 5, -1))
+        } ellers hvis builtin.starts_with(trimma, "import ") {
+            nøkkel = "import "
+            modul = fyrste_ord(builtin.slice(trimma, 7, -1))
+        }
+        hvis modul != "" {
+            la basis = import_sti(modul)
+            la lokal_no = project_root + "/" + basis + ".no"
+            la lokal_nors = project_root + "/" + basis + ".nors"
+            la root_no = root + "/" + basis + ".no"
+            la root_nors = root + "/" + basis + ".nors"
+            la lokal_stat = runtime_fs.native_stat_sti(lokal_no)
+            hvis builtin.starts_with(tekst(lokal_stat["status"]), "feil") {
+                lokal_stat = runtime_fs.native_stat_sti(lokal_nors)
+            }
+            la root_stat = runtime_fs.native_stat_sti(root_no)
+            hvis env("NC_TRACE_IMPORTS") == "1" {
+                linje("[IMPORT] root=" + root + " project=" + project_root + " local_path=" + lokal_no + " root_path=" + root_no)
+                linje("[IMPORT] local_stat=" + builtin.json_stringify(lokal_stat) + " root_stat=" + builtin.json_stringify(root_stat))
+            }
+            hvis builtin.starts_with(tekst(lokal_stat["status"]), "ok") og
+               builtin.starts_with(tekst(root_stat["status"]), "feil") {
+                linjer[i] = builtin.replace(linjer[i], nøkkel + modul, nøkkel + prefiks + "." + modul)
+                hvis env("NC_TRACE_IMPORTS") == "1" {
+                    linje("[IMPORT] " + modul + " -> " + prefiks + "." + modul)
+                }
+            } ellers hvis env("NC_TRACE_IMPORTS") == "1" {
+                linje("[IMPORT] behold " + modul)
+            }
+        }
+        ut = ut + linjer[i] + "\n"
+        i = i + 1
+    }
+    returner ut
+}
+
 funksjon finn_import_abs(root: tekst, project_root: tekst, modul: tekst) -> tekst {
     la base = import_sti(modul)
     la kandidatar: liste_tekst = [
@@ -133,7 +280,7 @@ funksjon finn_import_abs(root: tekst, project_root: tekst, modul: tekst) -> teks
     ]
     la i: heiltall = 0
     mens i < lengde(kandidatar) {
-        hvis ok(kommando("test -f " + shell(kandidatar[i]))) { returner kandidatar[i] }
+        hvis builtin.fil_finnes(kandidatar[i]) { returner kandidatar[i] }
         i = i + 1
     }
     returner ""
@@ -757,17 +904,52 @@ funksjon merge_listefelt(merged, fragment, namn: tekst) -> heiltall {
 funksjon merge_kartfelt(merged, fragment, namn: tekst) -> heiltall {
     hvis ikkje har_nokkel(fragment, namn) { returner 0 }
     la kart = fragment[namn]
+    la mål = merged[namn]
     la n = builtin.nøkler(kart)
     la i: heiltall = 0
     mens i < lengde(n) {
-        merged[namn][n[i]] = kart[n[i]]
+        mål[n[i]] = kart[n[i]]
         i = i + 1
     }
     returner 0
 }
 
-funksjon merge_fragment(merged, fragment) -> heiltall {
-    merge_kartfelt(merged, fragment, "functions")
+funksjon merge_modulfunksjonar(merged, fragment, modul: tekst) -> heiltall {
+    hvis ikkje har_nokkel(fragment, "functions") { returner 0 }
+    la kjelde = fragment["functions"]
+    la mål = merged["functions"]
+    la namn = nøkler(kjelde)
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la fn = kjelde[namn[i]]
+        la fn_modul = ""
+        hvis har_nokkel(fn, "module") { fn_modul = tekst(fn["module"]) }
+        hvis fn_modul == modul eller builtin.starts_with(tekst(namn[i]), modul + ".") {
+            mål[namn[i]] = fn
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon fragment_har_modul(fragment, modul: tekst) -> bool {
+    hvis ikkje har_nokkel(fragment, "functions") { returner usann }
+    la fns = fragment["functions"]
+    la namn = nøkler(fns)
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la fn = fns[namn[i]]
+        hvis har_nokkel(fn, "module") og tekst(fn["module"]) == modul { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon merge_fragment(merged, fragment, modul: tekst) -> heiltall {
+    // Kvar modulkompilering kan innehalde heile den transitive importgrafen.
+    // Berre modulens eigne funksjonar får overskrive root-grafen; elles kan ein
+    // sein fragment-cache maskere ei nyare, eksplisitt kompilert kjeldefil.
+    merge_modulfunksjonar(merged, fragment, modul)
     merge_kartfelt(merged, fragment, "dependency_providers")
     merge_kartfelt(merged, fragment, "guard_providers")
     merge_listefelt(merged, fragment, "imports")
@@ -778,7 +960,49 @@ funksjon merge_fragment(merged, fragment) -> heiltall {
     merge_listefelt(merged, fragment, "startup_hooks")
     merge_listefelt(merged, fragment, "shutdown_hooks")
     merge_listefelt(merged, fragment, "tests")
+    hvis ikkje har_nokkel(merged, "module_initializers") { merged["module_initializers"] = [] }
+    hvis ikkje har_nokkel(merged, "global_names") { merged["global_names"] = {} }
+    merge_listefelt(merged, fragment, "module_initializers")
+    merge_kartfelt(merged, fragment, "global_names")
     returner 0
+}
+
+funksjon source_kandidat_namn(modul: tekst) -> tekst {
+    la delar = builtin.split(modul, ".")
+    returner delar[lengde(delar) - 1] + ".ncb.json"
+}
+
+funksjon merge_source_dir_modul(merged, source_dir: tekst, modul: tekst) -> bool {
+    hvis source_dir == "" { returner usann }
+    la prefiks = ""
+    hvis modul == "selfhost.vm" { prefiks = "vm" }
+    ellers hvis modul == "selfhost.compiler.ir_to_bytecode" { prefiks = "ir" }
+    hvis prefiks != "" {
+        la count_sti = source_dir + "/" + prefiks + "-source-part-count.txt"
+        hvis ikkje builtin.fil_finnes(count_sti) { returner usann }
+        la count = heltall_fra_tekst(builtin.trim(builtin.fil_les(count_sti)))
+        la i: heiltall = 0
+        la funne = usann
+        mens i < count {
+            la sti = source_dir + "/" + prefiks + "-source-part-" + tekst_fra_heiltall(i) + ".ncb.json"
+            hvis ikkje builtin.fil_finnes(sti) { returner usann }
+            la fragment = builtin.json_parse_raw(builtin.fil_les(sti))
+            hvis fragment_har_modul(fragment, modul) {
+                merge_fragment(merged, fragment, modul)
+                funne = sann
+            }
+            fragment = {}
+            hvis i % 4 == 0 { prøv { builtin.gc_collect() } fang (e) { } }
+            i = i + 1
+        }
+        returner funne
+    }
+    la sti = source_dir + "/" + source_kandidat_namn(modul)
+    hvis ikkje builtin.fil_finnes(sti) { returner usann }
+    la fragment = builtin.json_parse_raw(builtin.fil_les(sti))
+    hvis ikkje fragment_har_modul(fragment, modul) { returner usann }
+    merge_fragment(merged, fragment, modul)
+    returner sann
 }
 
 funksjon vel_entry(bundle, modul: tekst) -> heiltall {
@@ -805,34 +1029,46 @@ funksjon vel_entry(bundle, modul: tekst) -> heiltall {
 
 funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src: tekst, modul: tekst, out: tekst, tmpdir: tekst) -> bool {
     la cache_dir = root + "/build/nc-module-cache"
-    la cache_key_cmd = "{ " +
-        "if command -v shasum >/dev/null 2>&1; then shasum -a 256 " + shell(src) + " " + shell(root + "/tools/compile_with_hybrid_bundle_v9400.no") + "; " +
-        "else sha256sum " + shell(src) + " " + shell(root + "/tools/compile_with_hybrid_bundle_v9400.no") + "; fi; " +
-        "if stat -f '%m:%z' " + shell(native_bin) + " >/dev/null 2>&1; then stat -f '%m:%z' " + shell(native_bin) + "; " +
-        "else stat -c '%Y:%s' " + shell(native_bin) + "; fi; } | " +
-        "if command -v shasum >/dev/null 2>&1; then shasum -a 256; else sha256sum; fi | awk '{print $1}'"
-    la cache_key_res = kommando(cache_key_cmd)
+    la cache_abi = "norscode-module-cache-v2|norscode-bytecode-v1|selfhost-compiler-0.31"
+    la cache_key = rask_hash(
+        cache_abi + "|" +
+        rask_hash_bytes(builtin.fil_les_binær(src)) + "|" +
+        rask_hash_bytes(builtin.fil_les_binær(root + "/tools/compile_with_hybrid_bundle_v9400.no"))
+    )
     la cache_fil = ""
-    hvis ok(cache_key_res) {
-        cache_fil = cache_dir + "/" + import_out_namn(modul) + "." + trim(felt(cache_key_res, 1))
-        hvis ok(kommando("test -f " + shell(cache_fil))) {
-            returner ok(kommando("cp " + shell(cache_fil) + " " + shell(out)))
+    hvis cache_key != "" {
+        cache_fil = cache_dir + "/" + import_out_namn(modul) + "." + cache_key
+        hvis builtin.fil_finnes(cache_fil) {
+            returner filops.kopier(cache_fil, out)
         }
     }
     la transformed = tmpdir + "/" + import_out_namn(modul) + ".no"
-    builtin.fil_skriv(transformed, normaliser_kjelde(builtin.fil_les(src)))
-    la cmd = "cd " + shell(project_root) + " && env NORSCODE_CMD=compile NORSCODE_FILE=" + shell(transformed) + " NORSCODE_OUTPUT=" + shell(out) + " NORSCODE_MODULE=" + shell(modul) + " NORSCODE_ROOT=" + shell(root) + " NORSCODE_IMPORT_BASE=" + shell(project_root) + " " + shell(native_bin)
-    la res = kommando(cmd)
-    hvis ikkje ok(res) {
-        hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
-        hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
+    la kjelde = normaliser_lokale_importar(builtin.fil_les(src), root, project_root)
+    builtin.fil_skriv(transformed, normaliser_kjelde(kjelde))
+    // Importoppløysinga søkjer prosjektrota fyrst og arbeidskatalogen etterpå.
+    // Køyr frå repo-rota slik at testlokale modular og repo-modular kan
+    // sameksistere utan å endre aliasinformasjonen i `bruk`-linjene.
+    la compile_miljø: ordbok_tekst = {
+        "NORSCODE_CMD": "compile",
+        "NORSCODE_FILE": transformed,
+        "NORSCODE_OUTPUT": out,
+        "NORSCODE_MODULE": modul,
+        "NORSCODE_ROOT": root,
+        "NORSCODE_IMPORT_BASE": project_root
+    }
+    la res = process_runner.køyr(native_bin, [], root, compile_miljø, 900000)
+    hvis ikkje process_runner.ok(res) {
+        process_runner.skriv_resultat(res)
         returner usann
     }
     hvis cache_fil != "" {
-        kommando("mkdir -p " + shell(cache_dir))
-        la cache_tmp = cache_fil + "." + import_out_namn(modul) + ".tmp"
-        hvis ok(kommando("cp " + shell(out) + " " + shell(cache_tmp))) {
-            kommando("mv " + shell(cache_tmp) + " " + shell(cache_fil))
+        hvis ikkje filops.lag_katalogar(cache_dir) { returner usann }
+        // Publiser frå det prosess-eigde tempområdet. Eit felles
+        // `cache_fil.*.tmp` kolliderer når deterministiske shards kompilerer
+        // same import samstundes.
+        la cache_tmp = tmpdir + "/cache-publish-" + import_out_namn(modul) + ".ncb.json"
+        hvis filops.kopier(out, cache_tmp) {
+            runtime_fs.native_erstatt_fil_atomisk(root, builtin.slice(cache_tmp, lengde(root) + 1, lengde(cache_tmp)), builtin.slice(cache_fil, lengde(root) + 1, lengde(cache_fil)))
         }
     }
     returner sann
@@ -843,7 +1079,42 @@ funksjon rydd_temp(tmpdir: tekst) -> heiltall {
         linje("Norscode compile temp: " + tmpdir)
         returner 0
     }
-    kommando("rm -rf " + shell(tmpdir))
+    la rot = "."
+    la relativ = tmpdir
+    hvis builtin.starts_with(tmpdir, "/") {
+        rot = "/"
+        relativ = builtin.slice(tmpdir, 1, lengde(tmpdir))
+    }
+    la kø: liste_tekst = [relativ]
+    la ferdige: liste_tekst = []
+    la qi: heiltall = 0
+    mens qi < lengde(kø) {
+        la katalog = kø[qi]
+        la listing = runtime_fs.native_list(rot, katalog)
+        hvis listing["status"] == "ok" {
+            la barn = builtin.split(listing["data"], "\n")
+            la bi: heiltall = 0
+            mens bi < lengde(barn) {
+                la namn = builtin.trim(barn[bi])
+                hvis namn != "" {
+                    la sti = katalog + "/" + namn
+                    hvis runtime_fs.native_list(rot, sti)["status"] == "ok" {
+                        legg_til(kø, sti)
+                    } ellers {
+                        runtime_fs.native_slett(rot, sti)
+                    }
+                }
+                bi = bi + 1
+            }
+            legg_til(ferdige, katalog)
+        }
+        qi = qi + 1
+    }
+    la fi: heiltall = lengde(ferdige) - 1
+    mens fi >= 0 {
+        runtime_fs.native_slett_mappe(rot, ferdige[fi])
+        fi = fi - 1
+    }
     returner 0
 }
 
@@ -863,17 +1134,41 @@ funksjon node_finst(home: tekst) -> bool {
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_HYBRID_ROOT")
-    hvis root == "" { root = trim(felt(kommando("pwd"), 1)) }
+    hvis root == "" {
+        prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." }
+    }
     la src = env("NORSCODE_HYBRID_SRC")
     la out = env("NORSCODE_HYBRID_OUT")
     la modul = env("NORSCODE_HYBRID_MODULE")
     hvis modul == "" { modul = "__main__" }
     la project_root = env("NORSCODE_HYBRID_PROJECT_ROOT")
     hvis project_root == "" { project_root = root }
-    hvis ikkje er_absolutt_sti(src) { src = project_root + "/" + src }
-    hvis out != "" og ikkje er_absolutt_sti(out) { out = project_root + "/" + out }
+    hvis ikkje builtin.starts_with(src, "/") { src = project_root + "/" + src }
+    hvis out != "" og ikkje builtin.starts_with(out, "/") { out = project_root + "/" + out }
     la native_bin = env("NORSCODE_NATIVE_BIN")
     hvis native_bin == "" { native_bin = root + "/dist/norscode_native" }
+    // Ei fullført source-only L5b-generasjon er den levande kompilatorbunten.
+    // Når ho er eksplisitt oppgitt, skal modular frå denne bunten vinne over
+    // den eldre stage0-kompilatoren. Det bevarer LOAD_GLOBAL, modulinitialisatorar
+    // og global_names som gamle compile-fragment kan mangle heilt.
+    la source_bundle_sti = env("NORSCODE_HYBRID_SOURCE_BUNDLE")
+    la source_dir = env("NORSCODE_HYBRID_SOURCE_DIR")
+    la source_bundle = {}
+    hvis source_bundle_sti != "" {
+        hvis ikkje builtin.starts_with(source_bundle_sti, "/") { source_bundle_sti = root + "/" + source_bundle_sti }
+        hvis ikkje builtin.fil_finnes(source_bundle_sti) {
+            linje("feil: manglar verifisert source-bundle: " + source_bundle_sti)
+            returner 1
+        }
+    }
+    hvis source_dir != "" {
+        hvis ikkje builtin.starts_with(source_dir, "/") { source_dir = root + "/" + source_dir }
+        hvis ikkje builtin.fil_finnes(source_dir + "/vm-source-part-count.txt") eller
+           ikkje builtin.fil_finnes(source_dir + "/ir-source-part-count.txt") {
+            linje("feil: manglar verifisert source-kandidatmappe: " + source_dir)
+            returner 1
+        }
+    }
     la home = env("HOME")
 
     hvis src == "" eller out == "" {
@@ -891,24 +1186,56 @@ funksjon start() -> heiltall {
     // Reserveveg: hvis ikkje node_finst(home), blir Node-bundling avgrensa til wrapperen.
 
     la tmp_root = root + "/build/nc-import-tmp"
-    hvis er_windows() {
-        // Hald arbeidsmappa relativ på Windows.  Drive-letter-stiar blir
-        // elles tolka som relative av Norscode-kjeldeflyten og får
-        // repository-rota prefiksa ein gong til.
-        la windows_tmp = env("TMPDIR")
-        hvis windows_tmp != "" { la tmp_root = windows_tmp }
-    }
-    hvis ikkje ok(kommando("mkdir -p " + shell(tmp_root) + " " + shell(dirname(out)))) { returner 1 }
-    la tmp_res = kommando("mktemp -d " + shell(tmp_root + "/norscode_native_bundle.XXXXXX"))
-    hvis ikkje ok(tmp_res) { returner 1 }
-    la tmpdir = trim(felt(tmp_res, 1))
+    hvis ikkje filops.lag_katalogar(tmp_root) eller ikkje filops.lag_katalogar(dirname(out)) { returner 1 }
+    la tmp_res = runtime_fs.native_tempområde(tmp_root, "norscode_native_bundle-")
+    hvis tmp_res["status"] != "created" { returner 1 }
+    la tmpdir = tmp_root + "/" + tmp_res["relative"]
     la root_ncb = tmpdir + "/root.ncb.json"
-    hvis ikkje kompiler_modul(root, project_root, native_bin, src, modul, root_ncb, tmpdir) {
-        rydd_temp(tmpdir)
-        returner 1
+    la root_cache = env("NORSCODE_HYBRID_ROOT_NCB")
+    hvis root_cache != "" {
+        hvis ikkje builtin.starts_with(root_cache, "/") { root_cache = root + "/" + root_cache }
+        la venta_ncb_hash = env("NORSCODE_HYBRID_ROOT_NCB_SHA256")
+        la venta_source_hash = env("NORSCODE_HYBRID_ROOT_SOURCE_SHA256")
+        hvis venta_ncb_hash == "" eller venta_source_hash == "" eller ikkje builtin.fil_finnes(root_cache) {
+            linje("feil: root-cache krev eksisterande fil og begge SHA-256-verdiar")
+            rydd_temp(tmpdir)
+            returner 1
+        }
+        la faktisk_ncb_hash = rask_hash_bytes(builtin.fil_les_binær(root_cache))
+        la faktisk_source_hash = rask_hash_bytes(builtin.fil_les_binær(src))
+        hvis faktisk_ncb_hash != venta_ncb_hash eller faktisk_source_hash != venta_source_hash {
+            linje("feil: root-cache eller kjelde har feil SHA-256")
+            rydd_temp(tmpdir)
+            returner 1
+        }
+        hvis ikkje filops.kopier(root_cache, root_ncb) {
+            linje("feil: kunne ikkje kopiere verifisert root-cache")
+            rydd_temp(tmpdir)
+            returner 1
+        }
+    } ellers {
+        hvis ikkje kompiler_modul(root, project_root, native_bin, src, modul, root_ncb, tmpdir) {
+            rydd_temp(tmpdir)
+            returner 1
+        }
     }
 
     la merged = builtin.json_parse_raw(builtin.fil_les(root_ncb))
+    hvis ikkje fragment_har_modul(merged, modul) {
+        linje("feil: root-NCB manglar eigarmodulen " + modul)
+        rydd_temp(tmpdir)
+        returner 1
+    }
+    // Last ein eventuell monolittisk source-bundle først etter root-kompilering.
+    // Elles blir heile bunten ei GC-rot gjennom den dyraste strengnormaliseringa.
+    hvis source_bundle_sti != "" {
+        source_bundle = builtin.json_parse_raw(builtin.fil_les(source_bundle_sti))
+        hvis ikkje har_nokkel(source_bundle, "functions") {
+            linje("feil: source-bundle manglar functions: " + source_bundle_sti)
+            rydd_temp(tmpdir)
+            returner 1
+        }
+    }
     la queue = importer_fraa(src)
     la ferdige: liste_tekst = []
     la i: heiltall = 0
@@ -918,13 +1245,31 @@ funksjon start() -> heiltall {
             legg_til(ferdige, import_mod)
             la import_abs = finn_import_abs(root, project_root, import_mod)
             hvis import_abs != "" {
-                la import_out = tmpdir + "/" + import_out_namn(import_mod)
-                hvis ikkje kompiler_modul(root, project_root, native_bin, import_abs, import_mod, import_out, tmpdir) {
-                    rydd_temp(tmpdir)
-                    returner 1
+                la fragment = {}
+                la brukt_source = merge_source_dir_modul(merged, source_dir, import_mod)
+                la skal_merge_fragment = usann
+                hvis brukt_source {
+                    // Fragmenta er materialiserte av same byte-identiske L5b-
+                    // generasjon, men blir sleppte mellom modulane for låg GC-topp.
+                } ellers hvis source_bundle_sti != "" og fragment_har_modul(source_bundle, import_mod) {
+                    // Source-bunten er allereie bygd A/B byte-identisk. Bruk
+                    // bytekoden og metadataen direkte, utan eit nytt VM-i-VM-kall.
+                    fragment = source_bundle
+                    skal_merge_fragment = sann
+                } ellers hvis fragment_har_modul(merged, import_mod) {
+                    // Den innhaldsadresserte root-NCB-en inneheld alt denne
+                    // importen trong. Ikkje bruk fleire minutt på same modul
+                    // ein gong til når ingen source-only-kandidat skal overstyre.
+                } ellers {
+                    la import_out = tmpdir + "/" + import_out_namn(import_mod)
+                    hvis ikkje kompiler_modul(root, project_root, native_bin, import_abs, import_mod, import_out, tmpdir) {
+                        rydd_temp(tmpdir)
+                        returner 1
+                    }
+                    fragment = builtin.json_parse_raw(builtin.fil_les(import_out))
+                    skal_merge_fragment = sann
                 }
-                la fragment = builtin.json_parse_raw(builtin.fil_les(import_out))
-                merge_fragment(merged, fragment)
+                hvis skal_merge_fragment { merge_fragment(merged, fragment, import_mod) }
                 la vidare = importer_fraa(import_abs)
                 la j: heiltall = 0
                 mens j < lengde(vidare) {
@@ -933,13 +1278,19 @@ funksjon start() -> heiltall {
                     }
                     j = j + 1
                 }
+                // Fragmentet kan innehalde ein heil transitiv graf. Slepp den
+                // store mellombelse rota straks modulens eigne funksjonar er
+                // kopierte, og be den versjonerte runtime-GC-en samle mellom
+                // modulane i staden for å vente på neste globale terskel.
+                fragment = {}
+                hvis i % 8 == 0 { prøv { builtin.gc_collect() } fang (e) { } }
             }
         }
         i = i + 1
     }
 
     vel_entry(merged, modul)
-    builtin.fil_skriv(out, builtin.json_stringify(merged))
+    json_stream_skriv_ncb_fil(out, merged)
     rydd_temp(tmpdir)
     linje("Norscode compile: " + out)
     returner 0

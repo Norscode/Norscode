@@ -1,0 +1,310 @@
+// Shellfri GitHub Actions-adapter. Actions startar denne Norscode-fila som
+// custom shell og legg den mellombelse run-fila i siste argv-posisjon.
+// Adapteren godtek berre éi direkte executable/argv-linje og bruker den
+// versjonerte prosess-ABI-en; shellsyntaks og PATH-oppslag er forbode.
+
+bruk std.runtime.process_abi som prosess
+bruk std.runtime_filesystem som native_fs
+bruk tools.build_linux_arm64_tls_attestation_candidate som arm64_tls_bygg
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon argv() -> liste_tekst {
+    prøv {
+        la svar = builtin.argv_operation({"abi": "norscode-argv-v1", "operation": "get"})
+        hvis svar["status"] == "ok" { returner svar["argv"] }
+    } fang (e) {}
+    returner []
+}
+
+funksjon run_fil() -> tekst {
+    la frå_miljø = env("NORSCODE_VM_CI_RUN_FILE")
+    hvis frå_miljø != "" og builtin.fil_finnes(frå_miljø) { returner frå_miljø }
+    la args = argv()
+    la i = lengde(args) - 1
+    mens i >= 0 {
+        la kandidat = tekst(args[i])
+        hvis kandidat != "tools/ci_shell_runner.no" og builtin.fil_finnes(kandidat) {
+            returner kandidat
+        }
+        i = i - 1
+    }
+    // Eldre committed stage0-ar eksponerer ikkje det ekstra custom-shell-
+    // argumentet inne i den nøsta VM-en. Actions legg den aktive skriptfila i
+    // RUNNER_TEMP; vel den nyaste vanlege fila som kompatibilitetsbru.
+    la temp = env("RUNNER_TEMP")
+    hvis temp != "" {
+        la listing = native_fs.native_list(temp, "")
+        hvis listing["status"] == "ok" {
+            la namn = builtin.split(listing["data"], "\n")
+            la nyaste = ""
+            la nyaste_tid: heiltall = -1
+            i = 0
+            mens i < lengde(namn) {
+                la kandidat_namn = builtin.trim(namn[i])
+                hvis kandidat_namn != "" {
+                    la sti = temp + "/" + kandidat_namn
+                    la tid = i
+                    prøv {
+                        la stat = native_fs.native_stat_sti(sti)
+                        tid = heiltall_fra_tekst(tekst(stat["mtime"]))
+                    } fang (e) {}
+                    hvis tid >= nyaste_tid {
+                        prøv {
+                            la innhald = builtin.trim(builtin.fil_les(sti))
+                            hvis builtin.starts_with(innhald, "./") {
+                                nyaste = sti
+                                nyaste_tid = tid
+                            }
+                        } fang (e) {}
+                    }
+                }
+                i = i + 1
+            }
+            hvis nyaste != "" { returner nyaste }
+        }
+    }
+    returner ""
+}
+
+funksjon forboden_shellsyntaks(line: tekst) -> boolsk {
+    returner builtin.contains(line, "|") eller builtin.contains(line, ";") eller
+        builtin.contains(line, "&&") eller builtin.contains(line, "||") eller
+        builtin.contains(line, ">") eller builtin.contains(line, "<") eller
+        builtin.contains(line, "`") eller builtin.contains(line, "$(") eller
+        builtin.contains(line, "\\") eller builtin.contains(line, "\"") eller
+        builtin.contains(line, "'")
+}
+
+funksjon tokeniser(line: tekst) -> liste_tekst {
+    la rå = builtin.split(builtin.replace(line, "\t", " "), " ")
+    la ut: liste_tekst = []
+    la i = 0
+    mens i < lengde(rå) {
+        la token = builtin.trim(rå[i])
+        hvis token != "" { legg_til(ut, token) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon er_norscode_executable(sti: tekst) -> boolsk {
+    returner sti == "./bin/nc" eller sti == "./dist/norscode_native" eller
+        builtin.starts_with(sti, "./bootstrap/stage0/norscode-") eller
+        builtin.starts_with(sti, "./build/norscode_native") eller
+        builtin.starts_with(sti, "./build/windows/norscode_native_") eller
+        builtin.starts_with(sti, "./build/linux-arm64-attested/norscode-")
+}
+
+funksjon cli_verktøysti(cmd: tekst) -> tekst {
+    hvis cmd == "check" { returner "tools/ci_check_source.no" }
+    hvis cmd == "verify-seed" eller cmd == "seed-only" { returner "tools/verify_seed_only.no" }
+    hvis cmd == "selfhost-bootstrap-gate" { returner "selfhost/bootstrap_gate.no" }
+    hvis cmd == "bootstrap-self" { returner "selfhost/bootstrap_self_pure.no" }
+    hvis cmd == "test" eller cmd == "selfcheck" { returner "tools/nc_test.no" }
+    hvis cmd == "feature-check" eller cmd == "feature" { returner "tools/norscode_feature_gate.no" }
+    hvis cmd == "verify-omgang6" eller cmd == "omgang6" { returner "tools/verify_omgang6.no" }
+    hvis cmd == "verify-omgang6b" eller cmd == "omgang6b" { returner "tools/verify_omgang6b.no" }
+    hvis cmd == "selfcompile-stage0-elf" eller cmd == "stage0-elf-selfcompile" {
+        returner "tools/selfcompile_stage0_elf.no"
+    }
+    returner ""
+}
+
+funksjon kopier_miljø(miljø, namn: tekst) -> heiltall {
+    la verdi = env(namn)
+    hvis verdi != "" { miljø[namn] = verdi }
+    returner 0
+}
+
+funksjon barnemiljø() -> ordbok_tekst {
+    // Committed Windows-stage0 sin prosess-ABI erstattar miljøblokka når
+    // overrides finst. Videresend derfor berre dei eksplisitt klassifiserte
+    // CI-, plattform- og Norscode-felta barnet kan trenge.
+    la miljø = {}
+    la namn: liste_tekst = [
+        // B2 batch-seed-pipeline (materialize + batch-codegen)
+        "NC_FULLHOST_REUSE", "NC_FULLHOST_OUT", "NC_FULLHOST_DIR",
+        "NC_ELF_NCB", "NC_ELF_BIN", "NC_BATCH_CODEGEN", "NC_BATCH_SIZE",
+        "NC_BATCH_WORKDIR", "NC_BATCH_MODE", "NC_BATCH_PLAN", "NC_BATCH_OUT",
+        "NC_BATCH_START", "NC_BATCH_COUNT", "NC_BATCH_FRAGS", "NC_VM_TRACE_CALLS",
+        "PATH", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR",
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "COMSPEC", "PATHEXT",
+        "GITHUB_ACTIONS", "GITHUB_WORKSPACE", "GITHUB_SHA", "GITHUB_REF",
+        "GITHUB_REPOSITORY", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "GITHUB_TOKEN",
+        "RUNNER_OS", "RUNNER_ARCH", "RUNNER_TEMP", "NC_CI", "NC_NATIVE",
+        "NC_OM6B_RUN_STAGE0", "NC_SLOW_TESTS", "NC_TEST_SHARD", "NC_TEST_SHARDS",
+        "NC_TRACE_TESTS", "NODE_BIN", "TEST_TIMEOUT",
+        "NORSCODE_ROOT", "NORSCODE_SEED_PLATFORM", "NORSCODE_ENABLE_EXEC_PROSESS", "NORSCODE_VM_CAPABILITIES",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST", "NORSCODE_USE_PRECOMPILED_STDLIB",
+        "NORSCODE_RUN_CACHE",
+        "NORSCODE_VM_DIRECT_CMD", "NORSCODE_VM_DIRECT_FILE",
+        "NORSCODE_VM_DIRECT_CAPABILITIES", "NORSCODE_VM_DIRECT_DISK_ROOT",
+        "NORSCODE_VM_DISK_ROOT", "NORSCODE_TEMP_FORCE_FALLBACK", "NORSCODE_NATIVE_BIN", "NORSCODE_SOURCE_COMMIT",
+        "NORSCODE_CI_FILE_SOURCE", "NORSCODE_CI_FILE_TARGET",
+        "NORSCODE_COMPARE_FILE_A", "NORSCODE_COMPARE_FILE_B",
+        "NORSCODE_SELVSTENDIGHET_STRICT", "NORSCODE_WINDOWS_CANDIDATE",
+        "NORSCODE_WINDOWS_PACKAGE_EXE", "NORSCODE_WINDOWS_ATTESTATION",
+        "NORSCODE_REQUIRE_WINDOWS_ATTESTATION", "NORSCODE_MACOS_CANDIDATE",
+        "NORSCODE_MACOS_ATTESTATION", "NORSCODE_REQUIRE_MACOS_ATTESTATION",
+        "NORSCODE_LINUX_CANDIDATE", "NORSCODE_LINUX_ARM64_CANDIDATE",
+        "NORSCODE_LINUX_X86_64_ATTESTATION", "NORSCODE_LINUX_ARM64_ATTESTATION",
+        "NORSCODE_REQUIRE_LINUX_ATTESTATION", "NORSCODE_LINUX_ATTESTATION_ARCH",
+        "NORSCODE_LINUX_ATTESTATION_CANDIDATE", "NORSCODE_LINUX_CANDIDATE_ALREADY_EMBEDDED",
+        "NORSCODE_LINUX_ATTESTATION_NCB", "NORSCODE_LINUX_ARM64_ATTESTATION_NCB",
+        "NORSCODE_LINUX_ATTESTATION_DRIVER_NCB", "NORSCODE_LINUX_ATTESTATION_MARKER",
+        "NORSCODE_LINUX_ATTESTATION_OUTPUT", "NORSCODE_LINUX_ATTESTATION_REPORT_ONLY",
+        "NORSCODE_ARM64_PROBE_SECTION", "NORSCODE_EXPECT_EVENT_BACKEND",
+        "NORSCODE_EXPECT_SANDBOX_BACKEND", "NORSCODE_HOSTING_RUNTIME_BIN",
+        "NORSCODE_MEDIA_RUNTIME_BIN", "NORSCODE_PUBLISH_RUNTIME_OUTPUT",
+        "NORSCODE_PUBLISH_RUNTIME_SOURCE", "NORSCODE_PUBLISH_SELFCHECK",
+        "NORSCODE_LINUX_PACKAGE_FORMAT", "NORSCODE_MACOS_PACKAGE_FORMAT",
+        "NORSCODE_MACOS_APP_MODE", "NORSCODE_MACOS_SIGN_VERIFY",
+        "NORSCODE_ACME_CA_FILE", "NORSCODE_ACME_CI_ACTION", "NORSCODE_ACME_DIRECTORY",
+        "NORSCODE_ACME_DNS_ACK_FILE", "NORSCODE_ACME_DNS_VALUE_FILE",
+        "MACOS_CODESIGN_IDENTITY", "APPLE_ID", "APPLE_TEAM_ID", "APPLE_APP_PASSWORD"
+    ]
+    la i = 0
+    mens i < lengde(namn) {
+        kopier_miljø(miljø, namn[i])
+        i = i + 1
+    }
+    returner miljø
+}
+
+funksjon start() -> heiltall {
+    // Den historiske Linux ARM64-stage0-en arvar ikkje environment-kartet ved
+    // nøsta process_spawn_argv. Køyr denne eksplisitte Norscode-eigaren i
+    // same VM fram til stage0 er promotert til den nye prosess-ABI-en.
+    hvis env("NORSCODE_VM_CI_DIRECT_OWNER") == "linux-arm64-tls-attestation" {
+        returner arm64_tls_bygg.start()
+    }
+    la delar: liste_tekst = []
+    la bunden_kommando = env("NORSCODE_VM_CI_COMMAND")
+    la eksplisitt_barn = env("NORSCODE_VM_CI_CHILD_EXECUTABLE")
+    hvis bunden_kommando != "" {
+        hvis forboden_shellsyntaks(bunden_kommando) {
+            skriv("FEIL: CI-adapteren avviser shellsyntaks i bunden kommando\n")
+            returner 2
+        }
+        delar = tokeniser(bunden_kommando)
+    } ellers hvis eksplisitt_barn != "" {
+        // Kritiske steg bind executable direkte i workflow-miljøet. Dermed
+        // treng ikkje eldre stage0-ar gjette kva mellombels Actions-fil som
+        // høyrer til steget.
+        legg_til(delar, eksplisitt_barn)
+    } ellers {
+        la fil = run_fil()
+        hvis fil == "" {
+            skriv("FEIL: CI-adapteren manglar Actions run-fil\n")
+            returner 2
+        }
+        la data = builtin.replace(builtin.fil_les(fil), "\r", "")
+        la linjer = builtin.split(data, "\n")
+        la kommando = ""
+        la i = 0
+        mens i < lengde(linjer) {
+            la line = builtin.trim(linjer[i])
+            hvis line != "" {
+                hvis kommando != "" {
+                    skriv("FEIL: CI-adapteren tillèt berre éi direkte kommandolinje\n")
+                    returner 2
+                }
+                kommando = line
+            }
+            i = i + 1
+        }
+        hvis kommando == "" eller forboden_shellsyntaks(kommando) {
+            skriv("FEIL: CI-adapteren avviser tom kommando eller shellsyntaks\n")
+            returner 2
+        }
+        delar = tokeniser(kommando)
+    }
+    hvis lengde(delar) == 0 eller ikkje builtin.starts_with(delar[0], "./") {
+        skriv("FEIL: CI-adapteren krev eksplisitt repository-relativ executable\n")
+        returner 2
+    }
+    la argument: liste_tekst = []
+    la i = 1
+    mens i < lengde(delar) {
+        legg_til(argument, delar[i])
+        i = i + 1
+    }
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la timeout_ms = 14400000
+    la timeout_env = env("NORSCODE_VM_CI_STEP_TIMEOUT_MS")
+    hvis timeout_env != "" { timeout_ms = heiltall_fra_tekst(timeout_env) }
+    la req = prosess.request(delar[0], argument, root, "", timeout_ms, 67108864)
+    // Den committed prosess-ABI-en har ei lita implisitt minnegrense når
+    // sandbox-felta manglar. Store single-binary/selfhost-barn må få same
+    // eksplisitte 4 GiB-grense som Norscode sin strukturerte verktøyrunner.
+    req = prosess.sett_sandbox(req, "none", 4294967296, 1024, sann)
+    // Steg som vil styre Norscode-barnet kan ikkje setje NORSCODE_CMD eller
+    // NORSCODE_FILE direkte: dei namna ville kapre den committed stage0-en
+    // før denne adapteren fekk lese Actions-fila. Bruk eit eige CI-namnerom
+    // på ytre prosess og omset først idet det verkelege barnet blir starta.
+    la barn_cmd = env("NORSCODE_VM_CI_CHILD_CMD")
+    la barn_fil = env("NORSCODE_VM_CI_CHILD_FILE")
+    // Workflow-nivået bruker dei vanlege namna for å starte adapteren. Barnet
+    // må alltid få nye verdiar, elles ville det starte adapteren rekursivt.
+    hvis barn_cmd == "" {
+        hvis lengde(argument) > 1 og argument[0] == "run" {
+            barn_cmd = "run"
+            barn_fil = argument[1]
+        } ellers hvis lengde(argument) > 0 og er_norscode_executable(delar[0]) og
+           cli_verktøysti(argument[0]) != "" {
+            // Eldre stage0 kjenner ikkje dei nye CLI-rutene. Køyr den aktive
+            // Norscode-eigaren direkte; original argv blir verande til flagg.
+            barn_cmd = "run"
+            barn_fil = root + "/" + cli_verktøysti(argument[0])
+        } ellers hvis lengde(argument) > 0 {
+            barn_cmd = argument[0]
+        } ellers { barn_cmd = "selftest" }
+    }
+    hvis barn_fil == "" og lengde(argument) > 1 og
+       ikkje builtin.starts_with(argument[1], "-") {
+        barn_fil = argument[1]
+    }
+    la barn_miljø = barnemiljø()
+    la barn_caps = env("NORSCODE_VM_CI_CHILD_CAPABILITIES")
+    la barn_disk = env("NORSCODE_VM_CI_CHILD_DISK_ROOT")
+    hvis barn_caps != "" {
+        barn_miljø["NORSCODE_VM_CAPABILITIES"] = barn_caps
+        // nc_run_policy prioriterer målpolicyen. Overstyr ein eventuell verdi
+        // arva frå den committed adapter-VM-en, elles kan den skjule den
+        // eksplisitte capability-lista til barnet.
+        barn_miljø["NORSCODE_VM_TARGET_CAPABILITIES"] = barn_caps
+    }
+    hvis barn_disk != "" {
+        barn_miljø["NORSCODE_VM_DISK_ROOT"] = barn_disk
+        barn_miljø["NORSCODE_VM_TARGET_DISK_ROOT"] = barn_disk
+    }
+    barn_miljø["NORSCODE_CMD"] = barn_cmd
+    barn_miljø["NORSCODE_FILE"] = barn_fil
+    // Committed stage0 bevarer ikkje alltid original CLI-argv når den aktive
+    // `check`-eigaren blir køyrd i ein nøsta VM. Bind kjeldefila eksplisitt i
+    // det strukturerte barnemiljøet; eigaren prioriterer denne byteeksakte
+    // stien og treng ikkje rekonstruere argument frå verten.
+    hvis lengde(argument) > 1 og argument[0] == "check" {
+        barn_miljø["NORSCODE_CI_CHECK_FILE"] = argument[1]
+    }
+    // Eldre committed VM-ar garanterer ikkje kryssmodul-mutasjon av kart.
+    // Behald den returnerte requesten, elles blir heile barnemiljøet kasta.
+    req = prosess.sett_environment(req, barn_miljø)
+    la res = builtin.process_spawn_argv(req)
+    skriv(tekst(res["stdout"]))
+    hvis tekst(res["stderr"]) != "" { skriv(tekst(res["stderr"])) }
+    hvis res["status"] == "timeout" { returner 124 }
+    la exit_code = heltall_fra_tekst(tekst(res["exit_code"]))
+    hvis res["status"] != "ferdig" eller exit_code != 0 {
+        skriv("[CI-BARN] status=" + tekst(res["status"]) +
+              " exit=" + tekst(res["exit_code"]) +
+              " error=" + tekst(res["error"]) + "\n")
+    }
+    hvis res["status"] != "ferdig" { returner 1 }
+    returner exit_code
+}

@@ -1,0 +1,233 @@
+# https_front.no — Norscode-eigd HTTPS reverse proxy med fail-closed routing
+
+bruk std.socket som socket
+bruk std.protocol_stream som stream
+
+funksjon _safe_token(s: tekst) -> boolsk {
+    hvis s == "" eller lengde(s) > 255 { returner usann }
+    hvis builtin.index_of(s, "\r") >= 0 eller builtin.index_of(s, "\n") >= 0 eller builtin.index_of(s, "\u0000") >= 0 { returner usann }
+    returner sann
+}
+
+funksjon _domain(s: tekst) -> tekst {
+    la d = builtin.lower(builtin.trim(s))
+    hvis builtin.ends_with(d, ".") { d = builtin.slice(d, 0, lengde(d) - 1) }
+    la kolon = builtin.index_of(d, ":")
+    hvis kolon >= 0 { d = builtin.slice(d, 0, kolon) }
+    hvis ikkje _safe_token(d) eller builtin.index_of(d, "/") >= 0 eller builtin.index_of(d, " ") >= 0 { returner "" }
+    returner d
+}
+
+funksjon ny(cert_file: tekst, key_file: tekst) -> ordbok {
+    returner {
+        "cert_file": cert_file, "key_file": key_file, "domains": {}, "listener": {},
+        "accept_timeout_ms": 30000, "connect_timeout_ms": 3000, "read_timeout_ms": 10000,
+        "max_header_bytes": 65536, "max_body_bytes": 10485760,
+        "max_response_bytes": 16777216,
+        "telemetry": {"requests": 0, "routed": 0, "rejected": 0, "backend_errors": 0, "timeouts": 0, "latency_ms_total": 0, "latency_ms_max": 0}
+    }
+}
+
+funksjon sett_grenser(front: ordbok, connect_ms: heiltall, read_ms: heiltall,
+                      max_header: heiltall, max_body: heiltall,
+                      max_response: heiltall) -> boolsk {
+    hvis connect_ms < 100 eller connect_ms > 60000 eller read_ms < 100 eller read_ms > 300000 { returner usann }
+    hvis max_header < 1024 eller max_header > 262144 eller max_body < 0 eller max_body > 1073741824 { returner usann }
+    hvis max_response < 1024 eller max_response > 1073741824 { returner usann }
+    front["connect_timeout_ms"] = connect_ms
+    front["read_timeout_ms"] = read_ms
+    front["max_header_bytes"] = max_header
+    front["max_body_bytes"] = max_body
+    front["max_response_bytes"] = max_response
+    returner sann
+}
+
+funksjon legg_til_domene(front: ordbok, domain: tekst, backend_host: tekst,
+                         backend_port: heiltall) -> boolsk {
+    la d = _domain(domain)
+    hvis d == "" eller ikkje _safe_token(backend_host) eller backend_port < 1 eller backend_port > 65535 { returner usann }
+    front["domains"][d] = {"host": backend_host, "port": backend_port}
+    returner sann
+}
+
+funksjon _error_response(status: heiltall, reason: tekst, request_id: tekst) -> tekst {
+    la body = "{\"error\":\"request_rejected\",\"request_id\":\"" + request_id + "\"}"
+    returner "HTTP/1.1 " + tekst_fra_heltall(status) + " " + reason + "\r\n" +
+        "Content-Type: application/json\r\nContent-Length: " + tekst_fra_heltall(lengde(body)) + "\r\n" +
+        "Connection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\n\r\n" + body
+}
+
+funksjon _parse_request(raw: tekst, max_header: heiltall, max_body: heiltall) -> ordbok {
+    la split_at = builtin.index_of(raw, "\r\n\r\n")
+    hvis split_at < 0 { returner {"status": "incomplete", "error": "header incomplete"} }
+    hvis split_at + 4 > max_header { returner {"status": "invalid", "error": "header too large"} }
+    la header_text = builtin.slice(raw, 0, split_at)
+    la lines = builtin.split(header_text, "\r\n")
+    hvis lengde(lines) < 2 { returner {"status": "invalid", "error": "missing headers"} }
+    la request_line = builtin.split(lines[0], " ")
+    hvis lengde(request_line) != 3 eller request_line[2] != "HTTP/1.1" { returner {"status": "invalid", "error": "request line"} }
+    la method = request_line[0]
+    hvis method != "GET" og method != "HEAD" og method != "POST" og method != "PUT" og method != "PATCH" og method != "DELETE" og method != "OPTIONS" { returner {"status": "invalid", "error": "method"} }
+    la target = request_line[1]
+    hvis ikkje builtin.starts_with(target, "/") eller ikkje _safe_token(target) eller builtin.index_of(target, " ") >= 0 { returner {"status": "invalid", "error": "target"} }
+    la headers: ordbok_tekst = {}
+    la names: liste_tekst = []
+    la i = 1
+    mens i < lengde(lines) {
+        la colon = builtin.index_of(lines[i], ":")
+        hvis colon <= 0 { returner {"status": "invalid", "error": "header syntax"} }
+        la name = builtin.lower(builtin.trim(builtin.slice(lines[i], 0, colon)))
+        la value = builtin.trim(builtin.slice(lines[i], colon + 1, lengde(lines[i])))
+        hvis ikkje _safe_token(name) eller ikkje _safe_token(value) { returner {"status": "invalid", "error": "header control"} }
+        hvis finnes_nøkkel(headers, name) { returner {"status": "invalid", "error": "duplicate header"} }
+        headers[name] = value
+        legg_til(names, name)
+        i = i + 1
+    }
+    hvis ikkje finnes_nøkkel(headers, "host") { returner {"status": "invalid", "error": "host missing"} }
+    hvis finnes_nøkkel(headers, "transfer-encoding") { returner {"status": "invalid", "error": "transfer encoding denied"} }
+    la content_length = 0
+    hvis finnes_nøkkel(headers, "content-length") {
+        prøv { content_length = heltall_fra_tekst(headers["content-length"]) } fang (e) { returner {"status": "invalid", "error": "content length"} }
+    }
+    hvis content_length < 0 eller content_length > max_body { returner {"status": "invalid", "error": "body too large"} }
+    la total = split_at + 4 + content_length
+    hvis lengde(raw) < total { returner {"status": "incomplete", "expected": total, "error": "body incomplete"} }
+    hvis lengde(raw) != total { returner {"status": "invalid", "error": "trailing request bytes"} }
+    returner {"status": "ok", "method": method, "target": target, "headers": headers,
+             "header_names": names, "host": _domain(headers["host"]),
+             "body": builtin.slice(raw, split_at + 4, total)}
+}
+
+funksjon klassifiser(front: ordbok, sni: tekst, raw: tekst) -> ordbok {
+    la request_id = builtin.random_hex(12)
+    la req = _parse_request(raw, front["max_header_bytes"], front["max_body_bytes"])
+    hvis req["status"] != "ok" { returner {"status": "reject", "code": 400, "request_id": request_id, "response": _error_response(400, "Bad Request", request_id)} }
+    la host = req["host"]
+    la tls_name = _domain(sni)
+    hvis host == "" eller tls_name == "" eller host != tls_name { returner {"status": "reject", "code": 421, "request_id": request_id, "response": _error_response(421, "Misdirected Request", request_id)} }
+    hvis ikkje finnes_nøkkel(front["domains"], host) { returner {"status": "reject", "code": 421, "request_id": request_id, "response": _error_response(421, "Misdirected Request", request_id)} }
+    returner {"status": "route", "code": 200, "request_id": request_id, "request": req, "backend": front["domains"][host]}
+}
+
+funksjon _backend_payload(route: ordbok) -> tekst {
+    la req = route["request"]
+    la out = req["method"] + " " + req["target"] + " HTTP/1.1\r\n"
+    la names = req["header_names"]
+    la headers = req["headers"]
+    la i = 0
+    mens i < lengde(names) {
+        la name = names[i]
+        hvis name != "connection" og name != "proxy-connection" og name != "keep-alive" og name != "upgrade" og name != "te" og name != "trailer" {
+            out = out + name + ": " + headers[name] + "\r\n"
+        }
+        i = i + 1
+    }
+    out = out + "x-forwarded-proto: https\r\nx-norscode-request-id: " + route["request_id"] + "\r\nconnection: close\r\n\r\n"
+    returner out + req["body"]
+}
+
+funksjon _proxy(route: ordbok, front: ordbok) -> ordbok_tekst {
+    la backend = route["backend"]
+    la session = stream.opne_session(backend["host"], backend["port"], usann, front["connect_timeout_ms"])
+    hvis session["status"] != "open" { returner {"status": "backend_error", "raw": ""} }
+    session["timeout_ms"] = front["read_timeout_ms"]
+    hvis ikkje stream.skriv_alt(session, _backend_payload(route)) { stream.lukk_session(session) returner {"status": "backend_error", "raw": ""} }
+    la out = ""
+    la done = usann
+    mens ikkje done og lengde(out) < front["max_response_bytes"] {
+        la r = stream.les_chunk(session, 1048576)
+        hvis r["status"] == "ok" { out = out + r["data"] }
+        ellers hvis r["status"] == "eof" { done = sann }
+        ellers { stream.lukk_session(session) returner {"status": "timeout", "raw": ""} }
+    }
+    stream.lukk_session(session)
+    hvis ikkje done eller (ikkje builtin.starts_with(out, "HTTP/1.1 ") og ikkje builtin.starts_with(out, "HTTP/1.0 ")) { returner {"status": "backend_error", "raw": ""} }
+    returner {"status": "ok", "raw": out}
+}
+
+funksjon handter(front: ordbok, sni: tekst, raw: tekst) -> tekst {
+    la started = builtin.tid_ms()
+    front["telemetry"]["requests"] = front["telemetry"]["requests"] + 1
+    la route = klassifiser(front, sni, raw)
+    la response = ""
+    hvis route["status"] != "route" {
+        front["telemetry"]["rejected"] = front["telemetry"]["rejected"] + 1
+        response = route["response"]
+    } ellers {
+        la backend = _proxy(route, front)
+        hvis backend["status"] == "ok" { front["telemetry"]["routed"] = front["telemetry"]["routed"] + 1 response = backend["raw"] }
+        ellers {
+            front["telemetry"]["backend_errors"] = front["telemetry"]["backend_errors"] + 1
+            hvis backend["status"] == "timeout" { front["telemetry"]["timeouts"] = front["telemetry"]["timeouts"] + 1 }
+            response = _error_response(502, "Bad Gateway", route["request_id"])
+        }
+    }
+    la elapsed = builtin.tid_ms() - started
+    front["telemetry"]["latency_ms_total"] = front["telemetry"]["latency_ms_total"] + elapsed
+    hvis elapsed > front["telemetry"]["latency_ms_max"] { front["telemetry"]["latency_ms_max"] = elapsed }
+    returner response
+}
+
+funksjon opne(front: ordbok, host: tekst, port: heiltall) -> boolsk {
+    front["listener"] = socket.native_tls_lytt(host, port, 128, front["cert_file"], front["key_file"])
+    returner front["listener"]["status"] == "listening"
+}
+
+funksjon _vent_aksept(listener: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la end_at = builtin.tid_ms() + timeout_ms
+    mens builtin.tid_ms() < end_at {
+        la peer = socket.native_aksepter(listener)
+        hvis peer["status"] == "connected" { returner peer }
+        socket.native_poll_vent(listener, 1, 100)
+    }
+    returner {"status": "feil", "error": "accept timeout"}
+}
+
+funksjon _handshake(peer: ordbok_tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    la r = socket.native_tls_handshake(peer)
+    la end_at = builtin.tid_ms() + timeout_ms
+    mens r["status"] == "ventende" og builtin.tid_ms() < end_at { socket.native_poll_vent(peer, 3, 100) r = socket.native_tls_handshake(peer) }
+    returner r
+}
+
+funksjon _les_request(peer: ordbok_tekst, front: ordbok) -> tekst {
+    la raw = ""
+    la end_at = builtin.tid_ms() + front["read_timeout_ms"]
+    mens builtin.tid_ms() < end_at og lengde(raw) <= front["max_header_bytes"] + front["max_body_bytes"] {
+        la parsed = _parse_request(raw, front["max_header_bytes"], front["max_body_bytes"])
+        hvis parsed["status"] == "ok" eller parsed["status"] == "invalid" { returner raw }
+        la r = socket.native_les(peer, 65536)
+        hvis r["status"] == "ok" { raw = raw + r["data"] }
+        ellers hvis r["status"] == "ventende" { socket.native_poll_vent(peer, 3, 100) }
+        ellers { returner raw }
+    }
+    returner raw
+}
+
+funksjon _skriv_alt(peer: ordbok_tekst, data: tekst, timeout_ms: heiltall) -> boolsk {
+    la p = 0
+    la end_at = builtin.tid_ms() + timeout_ms
+    mens p < lengde(data) og builtin.tid_ms() < end_at {
+        la r = socket.native_skriv(peer, builtin.slice(data, p, lengde(data)))
+        hvis r["status"] == "ventende" { socket.native_poll_vent(peer, 3, 100) }
+        ellers hvis r["status"] != "ok" { returner usann }
+        ellers { p = p + heltall_fra_tekst(tekst(r["value"])) }
+    }
+    returner p == lengde(data)
+}
+
+funksjon serve_once(front: ordbok) -> boolsk {
+    la peer = _vent_aksept(front["listener"], front["accept_timeout_ms"])
+    hvis peer["status"] != "connected" { returner usann }
+    la hs = _handshake(peer, front["read_timeout_ms"])
+    hvis hs["status"] != "connected" { socket.native_lukk(peer) returner usann }
+    la raw = _les_request(peer, front)
+    la response = handter(front, hs["hostname"], raw)
+    la ok = _skriv_alt(peer, response, front["read_timeout_ms"])
+    socket.native_lukk(peer)
+    returner ok
+}
+
+funksjon lukk(front: ordbok) { hvis front["listener"]["status"] == "listening" { socket.native_lukk(front["listener"]) } }
+funksjon telemetri(front: ordbok) -> ordbok { returner front["telemetry"] }

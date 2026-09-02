@@ -142,6 +142,12 @@ static NcGcEdge *g_gc_edges = NULL;
 static size_t g_gc_edge_count = 0;
 static int g_gc_mark_use_edges = 0;
 static NcGcFrame *g_gc_frames = NULL;
+/* Modulglobale verdiar er eksplisitte røter i den genererte hosten. */
+#define NC_MAX_MODULE_GLOBALS 8192
+static char *g_module_global_modules[NC_MAX_MODULE_GLOBALS];
+static char *g_module_global_names[NC_MAX_MODULE_GLOBALS];
+static NcVal *g_module_global_values[NC_MAX_MODULE_GLOBALS];
+static int g_module_global_count = 0;
 static size_t g_gc_allocated = 0;
 static size_t g_gc_threshold = 4096;
 static size_t g_gc_collections = 0;
@@ -520,6 +526,8 @@ static void nc_val_arena_compact_locked(void) {
         for (int i = 0; i < nvars; i++)
             frame->vars[i] = nc_gc_relocation_get(relocations, relocation_capacity, frame->vars[i]);
     }
+    for (int i = 0; i < g_module_global_count; i++)
+        g_module_global_values[i] = nc_gc_relocation_get(relocations, relocation_capacity, g_module_global_values[i]);
     for (NcGcEdge *edge = g_gc_edges; edge; edge = edge->registry_next) {
         edge->from = nc_gc_relocation_get(relocations, relocation_capacity, edge->from);
         edge->to = nc_gc_relocation_get(relocations, relocation_capacity, edge->to);
@@ -572,6 +580,8 @@ static void nc_gc_collect_locked(int major) {
         for (int i = 0; i < sp; i++) nc_gc_mark_value(f->stack[i]);
         for (int i = 0; i < nv; i++) nc_gc_mark_value(f->vars[i]);
     }
+    for (int i = 0; i < g_module_global_count; i++)
+        nc_gc_mark_value(g_module_global_values[i]);
     size_t survivors = 0;
     NcVal **cursor = &g_gc_values;
     while (*cursor) {
@@ -783,7 +793,12 @@ static NcVal *nc_builtin_process_spawn_argv(NcVal *request);
 static NcVal *nc_builtin_process_operation(NcVal *request);
 static NcVal *nc_builtin_filesystem_read_operation(NcVal *request);
 static NcVal *nc_builtin_filesystem_write_operation(NcVal *request);
+static NcVal *nc_builtin_sha256(NcVal *data_v);
+static NcVal *nc_builtin_sha256_bytes(NcVal *data_v);
 static NcVal *nc_builtin_network_operation(NcVal *request);
+static NcVal *nc_builtin_argv(void);
+static NcVal *nc_builtin_argv_operation(NcVal *request);
+static void nc_set_process_arguments(int argc, char **argv);
 static NcVal *nc_builtin_thread_spawn(NcVal *request);
 static NcVal *nc_builtin_thread_join(NcVal *request);
 static NcVal *nc_builtin_thread_sync(NcVal *request);
@@ -855,7 +870,7 @@ static NcVal *nc_fn_builtin_now_iso(NcVal **args, int na) {
 
 /* ── Stage0-kjerne: stack ── */
 static void nc_push(int *sp, NcVal **stack, NcVal *v) {
-    if (*sp >= 8192) nc_panic("Stack overflow");
+    if (*sp >= 512) nc_panic("Stack overflow");
     stack[(*sp)++] = v ? v : nc_nil();
 }
 static NcVal *nc_pop(int *sp, NcVal **stack) {
@@ -880,6 +895,28 @@ static NcVal *nc_load(NcVal **vars, char **varnames, int nvars, const char *name
     if (!strcmp(name, "true") || !strcmp(name, "sann"))  return nc_bool(1);
     if (!strcmp(name, "false") || !strcmp(name, "usann")) return nc_bool(0);
     nc_panic("Ukjent variabel: %s", name);
+    return nc_nil();
+}
+
+static void nc_global_store(const char *module, const char *name, NcVal *val) {
+    for (int i = 0; i < g_module_global_count; i++) {
+        if (!strcmp(g_module_global_modules[i], module) && !strcmp(g_module_global_names[i], name)) {
+            g_module_global_values[i] = val ? val : nc_nil();
+            return;
+        }
+    }
+    if (g_module_global_count >= NC_MAX_MODULE_GLOBALS) nc_panic("For mange modulglobale variablar");
+    g_module_global_modules[g_module_global_count] = strdup(module);
+    g_module_global_names[g_module_global_count] = strdup(name);
+    g_module_global_values[g_module_global_count] = val ? val : nc_nil();
+    g_module_global_count++;
+}
+
+static NcVal *nc_global_load(const char *module, const char *name) {
+    for (int i = 0; i < g_module_global_count; i++)
+        if (!strcmp(g_module_global_modules[i], module) && !strcmp(g_module_global_names[i], name))
+            return g_module_global_values[i];
+    nc_panic("Ukjent global variabel: %s.%s", module, name);
     return nc_nil();
 }
 
@@ -1181,6 +1218,38 @@ static NcVal *nc_builtin_legg_til(NcVal *lst, NcVal *v) {
     lst->list->items[lst->list->len++] = v;
     return nc_nil();
 }
+
+/* norscode-argv-v1: smal, prosesslokal og skrivebeskytta OS-grense. */
+#define NC_HAS_ARGV_OPERATION 1
+static int g_main_argc = 0;
+static char **g_main_argv = NULL;
+
+static void nc_set_process_arguments(int argc, char **argv) {
+    g_main_argc = argc;
+    g_main_argv = argv;
+}
+
+static NcVal *nc_builtin_argv(void) {
+    NcVal *result = nc_list_new();
+    for (int i = 0; i < g_main_argc; i++)
+        nc_builtin_legg_til(result, nc_str(g_main_argv && g_main_argv[i] ? g_main_argv[i] : ""));
+    return result;
+}
+
+static NcVal *nc_builtin_argv_operation(NcVal *request) {
+    NcVal *result = nc_map_new();
+    nc_index_set(result, nc_str("abi"), nc_str("norscode-argv-v1"));
+    NcVal *abi = request && request->type == NC_MAP
+        ? nc_index_get(request, nc_str("abi")) : nc_nil();
+    NcVal *operation = request && request->type == NC_MAP
+        ? nc_index_get(request, nc_str("operation")) : nc_nil();
+    int valid = abi && abi->type == NC_STR && operation && operation->type == NC_STR &&
+        !strcmp(abi->s, "norscode-argv-v1") && !strcmp(operation->s, "get");
+    nc_index_set(result, nc_str("status"), nc_str(valid ? "ok" : "feil"));
+    nc_index_set(result, nc_str("error"), nc_str(valid ? "" : "invalid argv request"));
+    nc_index_set(result, nc_str("argv"), valid ? nc_builtin_argv() : nc_list_new());
+    return result;
+}
 static NcVal *nc_builtin_fjern_siste(NcVal *lst) {
     if (!lst || lst->type != NC_LIST || lst->list->len == 0) return nc_nil();
     return lst->list->items[--lst->list->len];
@@ -1223,6 +1292,45 @@ static NcVal *nc_builtin_skriv_linje(NcVal *v) {
     fputc('\n', stdout); fflush(stdout);
     return r;
 }
+static NcVal *nc_builtin_readline(NcVal *prompt_v) {
+    if (prompt_v && prompt_v->type != NC_NIL) {
+        char *prompt = nc_to_str_raw(prompt_v);
+        fputs(prompt, stdout);
+        free(prompt);
+        fflush(stdout);
+    }
+
+    size_t capacity = 256;
+    size_t length = 0;
+    char *line = malloc(capacity);
+    if (!line) nc_panic("readline: minnefeil");
+
+    for (;;) {
+        int ch = fgetc(stdin);
+        if (ch == EOF || ch == '\n') break;
+        if (length + 1 >= capacity) {
+            if (capacity >= 65536) {
+                free(line);
+                nc_throw("readline: linje overskrid 65535 byte");
+                return nc_nil();
+            }
+            size_t next_capacity = capacity * 2;
+            if (next_capacity > 65536) next_capacity = 65536;
+            char *grown = realloc(line, next_capacity);
+            if (!grown) {
+                free(line);
+                nc_panic("readline: minnefeil");
+            }
+            line = grown;
+            capacity = next_capacity;
+        }
+        line[length++] = (char)ch;
+    }
+    if (length > 0 && line[length - 1] == '\r') length--;
+    line[length] = '\0';
+    return nc_str_own(line);
+}
+#define NC_HAS_BUILTIN_READLINE 1
 static NcVal *nc_builtin_vent_sov(NcVal *millis_v) {
     long long millis = millis_v && millis_v->type == NC_INT ? millis_v->i : 0;
     if (millis < 0) millis = 0;
@@ -1822,6 +1930,21 @@ static NcVal *nc_builtin_contains(NcVal *s_v, NcVal *p_v) {
     NcVal *r = nc_bool(nc_text_contains_raw(s, p)); free(s); free(p);
     return r;
 }
+static NcVal *nc_builtin_contains_any(NcVal *s_v, NcVal *needles_v) {
+    NcVal *matches = nc_list_new();
+    if (!needles_v || needles_v->type != NC_LIST) return matches;
+    char *s = nc_to_str_raw(s_v);
+    for (int i = 0; i < needles_v->list->len; i++) {
+        NcVal *needle_v = needles_v->list->items[i];
+        char *needle = nc_to_str_raw(needle_v);
+        if (needle[0] && nc_text_contains_raw(s, needle))
+            nc_builtin_legg_til(matches, nc_str(needle));
+        free(needle);
+    }
+    free(s);
+    return matches;
+}
+#define NC_HAS_BUILTIN_CONTAINS_ANY 1
 static NcVal *nc_builtin_split(NcVal *s_v, NcVal *sep_v) {
     char *s = nc_to_str_raw(s_v), *sep = nc_to_str_raw(sep_v);
     NcVal *lst = nc_text_split_to_list(s, sep);

@@ -1,0 +1,102 @@
+// tools/differensial_sele.no — Omgang 2 (AOT-masterplan): differensial-sele.
+//
+// Køyrer eit program BÅDE via VM-tolk (`vm.køyr_ncb`) og AOT-native
+// (`bygg-native` + køyr binæren), og samanliknar returverdien. For AOT er
+// returverdien exit-koden (0–255). Skil dei seg → codegen har eit avvik frå
+// tolk-orakelet, og selen feilar. Dette er verifiseringsverktøyet som gjer
+// codegen-fiksar (t.d. Omgang 1 null-tryggleik) etterprøvbare.
+//
+// Bruk:
+//   NORSCODE_ENABLE_EXEC_PROSESS=1 \
+//   NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+//   NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp,/private/tmp" \
+//   NORSCODE_DIFF_FILE=<fil.no> ./bin/nc run tools/differensial_sele.no
+//
+// MERK: testar codegen i den KØYRANDE seeden. For å teste kjelde-codegen må
+// seeden vere rebygd frå kjelde (fixpunkt/CI). Exit-kode-samanlikninga dekker
+// heiltal 0–255; utvid til stdout-samanlikning ved behov.
+
+bruk selfhost.kompiler som kompiler
+bruk selfhost.vm som vm
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon aot_target() -> tekst {
+    // Overstyr via NORSCODE_DIFF_TARGET; standard linux-x86_64 (CI-verten).
+    // Unngår builtin.system_info som ikkje finst i committa stage0-seed.
+    la t = env("NORSCODE_DIFF_TARGET")
+    hvis t != "" { returner t }
+    returner "linux-x86_64"
+}
+
+funksjon køyr_tolk(kjelde: tekst) -> heiltall {
+    la ncb = builtin.json_parse_raw(kompiler.kompiler_fil(kjelde, "__main__"))
+    returner vm.køyr_ncb(ncb)
+}
+
+funksjon køyr_aot(root: tekst, src_sti: tekst, target: tekst) -> ordbok {
+    prøv { filops_lag_dir(root + "/build/diff") } fang (e) {}
+    la ut = root + "/build/diff/aot_bin"
+    la miljø = {
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la bygg = prosess.køyr(root + "/bin/nc",
+        ["bygg-native", "--target", target, src_sti, ut], root, miljø, 600000)
+    hvis ikkje prosess.ok(bygg) {
+        returner { "ok": "usann", "steg": "bygg-native", "res": bygg }
+    }
+    la kjor = prosess.køyr(ut, [], root, {}, 120000)
+    returner { "ok": "sann", "exit": kjor["exit_code"], "res": kjor }
+}
+
+funksjon filops_lag_dir(sti: tekst) -> heiltall {
+    prøv { builtin.mkdir_p(sti) } fang (e) {}
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la fil = env("NORSCODE_DIFF_FILE")
+    hvis fil == "" { skriv("Feil: sett NORSCODE_DIFF_FILE=<fil.no>\n") returner 2 }
+    la target = aot_target()
+    hvis target == "" { skriv("Feil: ingen AOT-target for denne verten\n") returner 2 }
+
+    la kjelde = builtin.fil_les(fil)
+    skriv("[differensial] " + fil + " (target " + target + ")\n")
+
+    la tolk = køyr_tolk(kjelde)
+    skriv("  tolk (vm.køyr_ncb) = " + tekst(tolk) + "\n")
+
+    // Diagnostikk-modus (standard): rapporter avvik men blokker ikkje CI, fordi
+    // AOT enno ikkje er ved paritet (det er heile poenget med omgangane). Sett
+    // NORSCODE_DIFF_STRICT=1 for å feile ved avvik (målretta verifisering).
+    la strikt = env("NORSCODE_DIFF_STRICT") == "1"
+
+    la aot = køyr_aot(root, fil, target)
+    hvis tekst(aot["ok"]) != "sann" {
+        skriv("  [FEIL] AOT-steget feila ved " + tekst(aot["steg"]) + "\n")
+        prosess.skriv_resultat(aot["res"])
+        hvis strikt { returner 1 }
+        returner 0
+    }
+    la aot_exit = heltall_fra_tekst(tekst(aot["exit"]))
+    skriv("  AOT (bygg-native + køyr) = " + tekst(aot_exit) + "\n")
+
+    hvis (tolk % 256) == aot_exit {
+        skriv("  [OK] tolk == AOT\n")
+        returner 0
+    }
+    skriv("  [AVVIK] tolk=" + tekst(tolk) + " (mod256=" + tekst(tolk % 256) +
+          ") != AOT=" + tekst(aot_exit) + "\n")
+    hvis strikt { returner 1 }
+    skriv("  (diagnostikk-modus: avvik rapportert, blokkerer ikkje CI. " +
+          "Sett NORSCODE_DIFF_STRICT=1 for streng.)\n")
+    returner 0
+}

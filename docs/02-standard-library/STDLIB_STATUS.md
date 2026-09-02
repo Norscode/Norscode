@@ -1,12 +1,12 @@
 # Standardbibliotekstatus
 
-> Sist oppdatert: 21. juli 2026
+> Sist oppdatert: 15. juli 2026
 > Omfang: `std/` og dei nært tilknytte `selfhost/std/`-modulane
 
 Dette dokumentet er ei praktisk statusliste for standardbiblioteket i Norscode.
 Målet er å skilje mellom moduler som verkar modne, moduler som er nyttige men ujamne, og moduler som treng meir standardisering før dei kan kallast stabile.
 
-Den maskinlesbare statusmatrisa i `std/stdlib_status.no` har 61 registrerte modular: 61 stabile, 0 eksperimentelle og 0 stubbar. Statusen er dokumentert av den signerte sluttporten, ekte Windows-plattformattestasjon, Linux ARM64/QEMU, Linux/macOS native gates, Pebble DNS-01 og `test_domenehost_e2e.no`.
+Den maskinlesbare statusmatrisa i `std/stdlib_status.no` har no 61 registrerte modular: 57 stabile, 4 eksperimentelle og 0 stubbar. Dette er om lag 93 % stabil dekning. Dei fire opne radene er `sikkerheit`, `dns`, `tls_acme` og `domenehost`. `dns` og `tls_acme` har no full Pebble-utstedelse med Norscode-eigd autoritativ DNS/TCP i ein fastlåst Linux CI-gate, men ventar framleis på den signerte ekte Windows-attestasjonen; dei andre opne radene krev tilsvarande ekstern leverandør- eller plattformattestasjon og skal ikkje presenterast som stabile enno.
 
 ## Kort vurdering
 
@@ -138,12 +138,12 @@ Desse modulane er tett knytte til runtime og selfhost, og bør behandlast som ei
 - `selfhost/std/security.no`
 - `selfhost/std/web.no`
 
-## Vedlikehald etter stabilisering
+## Det som manglar for å kalle stdlib stabilt
 
-Etter 61/61 stabilt er vidare arbeid vedlikehald og utviding, ikkje ubeviste statusløft:
+For å flytte `std/` frå “breitt og nyttig” til “stabilt og produksjonsklart”, treng vi særleg:
 
 - modulvis eigarskap og status
-- vidare testdekning per eksportert funksjon
+- testdekning per eksportert funksjon
 - tydeleg canonical namn og alias-policy
 - docs-generering frå kommentarar eller deklarasjonar
 - rydding i overlapp og doble moduler
@@ -159,6 +159,4 @@ Etter 61/61 stabilt er vidare arbeid vedlikehald og utviding, ikkje ubeviste sta
 
 ## Konklusjon
 
-`std/` er no ei stabil 61/61-flate for Norscode 1.0. Nye modular skal framleis
-gå gjennom same maskinlesbare status- og attestasjonsspor før dei får stabil
-status.
+`std/` er ikkje eit tomt bibliotek. Det er eit stort bibliotek som allereie gjev mykje verdi, men som framleis treng rydding, standardisering og testdekning før heile flata kan kallast stabil.

@@ -857,7 +857,7 @@ static NcVal *nc_fn_builtin_now_iso(NcVal **args, int na) {
 
 /* ── Stage0-kjerne: stack ── */
 static void nc_push(int *sp, NcVal **stack, NcVal *v) {
-    if (*sp >= 8192) nc_panic("Stack overflow");
+    if (*sp >= 512) nc_panic("Stack overflow");
     stack[(*sp)++] = v ? v : nc_nil();
 }
 static NcVal *nc_pop(int *sp, NcVal **stack) {
@@ -3488,7 +3488,7 @@ static NcVal *nc_fn_selfhost_native_execution_elf_arm64_codegen_start(NcVal **ar
 
 /* ── Funksjonsdefinisjonar ── */
 static NcVal *nc_fn_selfhost_nc_main_nc_kompiler_fil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -3512,7 +3512,7 @@ static NcVal *nc_fn_selfhost_nc_main_nc_kompiler_fil(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_k__yr_ncb_json(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -3633,7 +3633,7 @@ lbl_nc_fn___L7__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_path_segments(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -3740,7 +3740,7 @@ lbl_nc_fn___L12__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_is_int_text(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -3864,7 +3864,7 @@ lbl_nc_fn___L19__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_path_match(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4101,7 +4101,7 @@ lbl_nc_fn___L31__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_parse_query(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4243,7 +4243,7 @@ lbl_nc_fn___L47__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_parse_http_request(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4648,7 +4648,7 @@ lbl_nc_fn___L67__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_request_content_length(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4833,7 +4833,7 @@ lbl_nc_fn___L75__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_request_total_length(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4902,7 +4902,7 @@ lbl_nc_fn___L84__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_max_request_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -4959,7 +4959,7 @@ lbl_nc_fn___L86__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_receive_request(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -5245,7 +5245,7 @@ lbl_nc_fn___L103__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_receive_error(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -5314,7 +5314,7 @@ lbl_nc_fn___L108__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_response_to_http(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -8772,7 +8772,7 @@ lbl_nc_fn___L418__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_k__yre_ncb_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -8826,7 +8826,7 @@ lbl_nc_fn___L426__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_standard_helse_respons(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -8854,7 +8854,7 @@ static NcVal *nc_fn_selfhost_nc_main_standard_helse_respons(NcVal **args, int na
 }
 
 static NcVal *nc_fn_selfhost_nc_main_standard_server_logg(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9028,7 +9028,7 @@ lbl_nc_fn___L437__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_bygg_trace(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9083,7 +9083,7 @@ lbl_nc_fn___L441__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_bygg_allow_liste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9243,7 +9243,7 @@ lbl_nc_fn___L454__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_bygg_feil_respons(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9265,7 +9265,7 @@ static NcVal *nc_fn_selfhost_nc_main_bygg_feil_respons(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_selfhost_nc_main_hent_header_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9328,7 +9328,7 @@ lbl_nc_fn___L460__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_er_helse_rute(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9359,7 +9359,7 @@ lbl_nc_fn___L463__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_bygg_standard_helse_respons(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9425,7 +9425,7 @@ lbl_nc_fn___L464__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_avgjer_standard_handler_respons(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -9896,7 +9896,7 @@ lbl_nc_fn___L512__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_avgjer_route_respons(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -10627,7 +10627,7 @@ lbl_nc_fn___L556__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_anvend_response_middlewares(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -10868,7 +10868,7 @@ lbl_nc_fn___L565__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_anvend_request_middlewares(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -11109,7 +11109,7 @@ lbl_nc_fn___L589__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_anvend_error_middlewares(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -11350,7 +11350,7 @@ lbl_nc_fn___L613__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_k__yre_livssyklus_hooks(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -11514,7 +11514,7 @@ lbl_nc_fn___L637__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_k__yre_livssyklus_hooks_trygt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -11590,7 +11590,7 @@ lbl_nc_fn___L643__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_serve_handle_one(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -11779,7 +11779,7 @@ lbl_nc_fn___L646__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_serve(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -12682,7 +12682,7 @@ lbl_nc_fn___L706__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_reload_bundle(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -12822,7 +12822,7 @@ lbl_nc_fn___L709__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main__dirname(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -12875,7 +12875,7 @@ lbl_nc_fn___L712__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main__finn_import_base(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -12916,7 +12916,7 @@ lbl_nc_fn___L714__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main__resolve_import_sti(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -13078,7 +13078,7 @@ lbl_nc_fn___L730__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main__modul_filsti_fra_namn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -13137,7 +13137,7 @@ lbl_nc_fn___L734__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_finn_bruk_imports(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -13447,7 +13447,7 @@ lbl_nc_fn___L752__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_fjern_bruk_linjer(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -13568,7 +13568,7 @@ lbl_nc_fn___L755__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_bundle_ncb(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -14712,7 +14712,7 @@ lbl_nc_fn___L813__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_run(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -14794,7 +14794,7 @@ lbl_nc_fn___L819__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_compile(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -14940,7 +14940,7 @@ lbl_nc_fn___L822__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_nc_l5b_gen2(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15262,7 +15262,7 @@ lbl_nc_fn___L843__:;
 }
 
 static NcVal *nc_fn_selfhost_nc_main_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15560,7 +15560,7 @@ lbl_nc_fn___L866__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15581,7 +15581,7 @@ static NcVal *nc_fn_selfhost_bundler___nclit_decode_v9400(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_selfhost_bundler_omd__yp_kall_i_kode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15745,7 +15745,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_omd__yp_funksjonar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15879,7 +15879,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_sl___saman_funksjonar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -15947,7 +15947,7 @@ lbl_nc_fn___L15__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_legg_modul_til_bundle(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -16054,7 +16054,7 @@ static NcVal *nc_fn_selfhost_bundler_legg_modul_til_bundle(NcVal **args, int nar
 }
 
 static NcVal *nc_fn_selfhost_bundler_les_precompiled_ncb(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -16249,7 +16249,7 @@ lbl_nc_fn___L63__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_les_ncb_eller_kompiler(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -16368,7 +16368,7 @@ lbl_nc_fn___L75__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_bygg_bundle(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -16867,7 +16867,7 @@ lbl_nc_fn___L83__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17028,7 +17028,7 @@ lbl_nc_fn___L95__:;
 }
 
 static NcVal *nc_fn_selfhost_json___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17049,7 +17049,7 @@ static NcVal *nc_fn_selfhost_json___nclit_decode_v9400(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_selfhost_json_json_ny(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17086,7 +17086,7 @@ static NcVal *nc_fn_selfhost_json_json_ny(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_json_json_tom_liste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17112,7 +17112,7 @@ static NcVal *nc_fn_selfhost_json_json_tom_liste(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_json_json_p(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17131,7 +17131,7 @@ static NcVal *nc_fn_selfhost_json_json_p(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_json_json_peek(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17182,7 +17182,7 @@ lbl_nc_fn___L0__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_les_ch(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17253,7 +17253,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_ws(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17338,7 +17338,7 @@ lbl_nc_fn___L5__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_streng(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17614,7 +17614,7 @@ lbl_nc_fn___L32__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_tal(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -17919,7 +17919,7 @@ lbl_nc_fn___L58__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18402,7 +18402,7 @@ lbl_nc_fn___L88__:;
 }
 
 static NcVal *nc_fn_selfhost_json_json_les(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18423,7 +18423,7 @@ static NcVal *nc_fn_selfhost_json_json_les(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_json_json_skriv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18438,7 +18438,7 @@ static NcVal *nc_fn_selfhost_json_json_skriv(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_kompiler_kompiler_fil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18482,7 +18482,7 @@ static NcVal *nc_fn_selfhost_kompiler_kompiler_fil(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_kompiler_kompiler_fil_til_disk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18521,7 +18521,7 @@ static NcVal *nc_fn_selfhost_kompiler_kompiler_fil_til_disk(NcVal **args, int na
 }
 
 static NcVal *nc_fn_selfhost_kompiler_r__yk_test(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18683,7 +18683,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_selfhost_kompiler_kompiler_sj__lvtest(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18751,7 +18751,7 @@ static NcVal *nc_fn_selfhost_kompiler_kompiler_sj__lvtest(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_selfhost_kompiler_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18779,7 +18779,7 @@ static NcVal *nc_fn_selfhost_kompiler_start(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18801,7 +18801,7 @@ static NcVal *nc_fn_selfhost_lexer_lexer_m1___nclit_decode_v9400(NcVal **args, i
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_bokstav(NcVal **args, int nargs) {
   fprintf(stderr, "[selftest] letter-entry\n"); fflush(stderr);
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18908,7 +18908,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_tall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18945,7 +18945,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_ident_tegn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -18972,7 +18972,7 @@ lbl_nc_fn___L15__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_whitespace(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -19031,7 +19031,7 @@ lbl_nc_fn___L17__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_lexer_keyword_type_for(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -19632,7 +19632,7 @@ lbl_nc_fn___L118__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_keyword(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -19651,7 +19651,7 @@ static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_keyword(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_token_type_for_ident(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -19666,7 +19666,7 @@ static NcVal *nc_fn_selfhost_lexer_lexer_m1_token_type_for_ident(NcVal **args, i
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_operator_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -19865,7 +19865,7 @@ lbl_nc_fn___L121__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_operator_type_for(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20178,7 +20178,7 @@ lbl_nc_fn___L194__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_punctuation(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20293,7 +20293,7 @@ lbl_nc_fn___L197__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_punctuation_type(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20402,7 +20402,7 @@ lbl_nc_fn___L224__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_deltekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20457,7 +20457,7 @@ lbl_nc_fn___L227__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_lag_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20490,7 +20490,7 @@ static NcVal *nc_fn_selfhost_lexer_lexer_m1_lag_token(NcVal **args, int nargs) {
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_les_ident(NcVal **args, int nargs) {
   fprintf(stderr, "[selftest] ident-entry\n"); fflush(stderr);
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20552,7 +20552,7 @@ lbl_nc_fn___L229__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_er_hex_tegn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -20735,7 +20735,7 @@ lbl_nc_fn___L233__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_hex_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21018,7 +21018,7 @@ lbl_nc_fn___L292__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_hex_tekst_til_heltall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21079,7 +21079,7 @@ lbl_nc_fn___L297__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_les_tall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21543,7 +21543,7 @@ lbl_nc_fn___L324__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_les_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21693,7 +21693,7 @@ lbl_nc_fn___L350__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_unescape_tegn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21796,7 +21796,7 @@ lbl_nc_fn___L364__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_unescape_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -21913,7 +21913,7 @@ lbl_nc_fn___L367__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_les_operator(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22132,7 +22132,7 @@ lbl_nc_fn___L372__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_hopp_kommentar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22191,7 +22191,7 @@ lbl_nc_fn___L399__:;
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_lex(NcVal **args, int nargs) {
   fprintf(stderr, "[selftest] lex-entry\n"); fflush(stderr);
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   fprintf(stderr, "[selftest] lex-stack\n"); fflush(stderr);
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   fprintf(stderr, "[selftest] lex-vars\n"); fflush(stderr);
@@ -22765,7 +22765,7 @@ lbl_nc_fn___L403__:;
 }
 
 static NcVal *nc_fn_selfhost_lexer_lexer_m1_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22777,7 +22777,7 @@ static NcVal *nc_fn_selfhost_lexer_lexer_m1_start(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22798,7 +22798,7 @@ static NcVal *nc_fn_selfhost_parser___nclit_decode_v9400(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_selfhost_parser_ny_node(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22858,7 +22858,7 @@ static NcVal *nc_fn_selfhost_parser_ny_node(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_ny_state(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22899,7 +22899,7 @@ static NcVal *nc_fn_selfhost_parser_ny_state(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_token_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -22952,7 +22952,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_token_linje(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23005,7 +23005,7 @@ lbl_nc_fn___L6__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_token_kolonne(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23058,7 +23058,7 @@ lbl_nc_fn___L10__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_er_slutt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23105,7 +23105,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_gjeldende(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23188,7 +23188,7 @@ lbl_nc_fn___L14__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_se_frem(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23242,7 +23242,7 @@ lbl_nc_fn___L16__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_neste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23296,7 +23296,7 @@ lbl_nc_fn___L18__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parserfeil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23366,7 +23366,7 @@ static NcVal *nc_fn_selfhost_parser_parserfeil(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_matcher(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23400,7 +23400,7 @@ lbl_nc_fn___L20__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_forvent(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23456,7 +23456,7 @@ lbl_nc_fn___L22__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_legg_barn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23482,7 +23482,7 @@ static NcVal *nc_fn_selfhost_parser_legg_barn(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_er_type_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23541,7 +23541,7 @@ lbl_nc_fn___L25__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_ny_parser(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -23602,7 +23602,7 @@ lbl_nc_fn___L31__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24046,7 +24046,7 @@ lbl_nc_fn___L33__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_er_kort_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24304,7 +24304,7 @@ lbl_nc_fn___L73__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_er_kort_funksjon_setning(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24565,7 +24565,7 @@ lbl_nc_fn___L97__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_kort_funksjon_for_utsagn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24598,7 +24598,7 @@ lbl_nc_fn___L114__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_er_kort_funksjon_ved_i(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24801,7 +24801,7 @@ lbl_nc_fn___L120__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_struktur(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -24989,7 +24989,7 @@ lbl_nc_fn___L141__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_les_modul_del(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -25147,7 +25147,7 @@ lbl_nc_fn___L142__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_bruk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -25311,7 +25311,7 @@ lbl_nc_fn___L162__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -25687,7 +25687,7 @@ lbl_nc_fn___L176__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_kort_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -25997,7 +25997,7 @@ lbl_nc_fn___L184__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_test(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26058,7 +26058,7 @@ static NcVal *nc_fn_selfhost_parser_parse_test(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_er_type_token_type(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26179,7 +26179,7 @@ lbl_nc_fn___L202__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_les_type_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26401,7 +26401,7 @@ lbl_nc_fn___L206__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_les_namn_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26426,7 +26426,7 @@ static NcVal *nc_fn_selfhost_parser_les_namn_token(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_parameterliste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26573,7 +26573,7 @@ lbl_nc_fn___L227__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_blokk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26694,7 +26694,7 @@ lbl_nc_fn___L235__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_klammeblokk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -26779,7 +26779,7 @@ lbl_nc_fn___L241__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_setning(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -27596,7 +27596,7 @@ lbl_nc_fn___L298__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_la(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -27715,7 +27715,7 @@ lbl_nc_fn___L310__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_returner(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -27897,7 +27897,7 @@ lbl_nc_fn___L316__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_hvis(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -28158,7 +28158,7 @@ lbl_nc_fn___L330__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_match(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -28485,7 +28485,7 @@ lbl_nc_fn___L337__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_mens(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -28544,7 +28544,7 @@ static NcVal *nc_fn_selfhost_parser_parse_mens(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_presedens(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -28847,7 +28847,7 @@ lbl_nc_fn___L386__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_for(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -29183,7 +29183,7 @@ lbl_nc_fn___L404__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_pr__v_fang(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -29523,7 +29523,7 @@ lbl_nc_fn___L422__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_uttrykk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -29540,7 +29540,7 @@ static NcVal *nc_fn_selfhost_parser_parse_uttrykk(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_binop(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -29648,7 +29648,7 @@ lbl_nc_fn___L427__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_unar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -29797,7 +29797,7 @@ lbl_nc_fn___L428__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_postfix(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -30354,7 +30354,7 @@ lbl_nc_fn___L439__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_argumentliste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -30438,7 +30438,7 @@ lbl_nc_fn___L459__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_er_desimal_litteral(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -30529,7 +30529,7 @@ lbl_nc_fn___L470__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_primar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -31578,7 +31578,7 @@ lbl_nc_fn___L532__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_lambda(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -31698,7 +31698,7 @@ lbl_nc_fn___L534__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_fun_lambda(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -31839,7 +31839,7 @@ static NcVal *nc_fn_selfhost_parser_parse_fun_lambda(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_liste_literal(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32085,7 +32085,7 @@ lbl_nc_fn___L545__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_parse_map_eller_struct_literal(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32403,7 +32403,7 @@ lbl_nc_fn___L557__:;
 }
 
 static NcVal *nc_fn_selfhost_parser_ast_til_snapshot(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32556,7 +32556,7 @@ lbl_nc_fn___L565__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_er_builtin(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32881,7 +32881,7 @@ lbl_nc_fn___L50__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_ny_symbol_tabell(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32913,7 +32913,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_ny_symbol_tabell(NcVal **args, in
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_registrer_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32940,7 +32940,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_registrer_funksjon(NcVal **args, 
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_funksjon_finst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32962,7 +32962,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_funksjon_finst(NcVal **args, int 
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_legg_til_feil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -32988,7 +32988,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_legg_til_feil(NcVal **args, int n
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_samle_funksjonar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33137,7 +33137,7 @@ lbl_nc_fn___L53__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_sjekk_kall_i_uttrykk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33316,7 +33316,7 @@ lbl_nc_fn___L67__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_analyser_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33404,7 +33404,7 @@ lbl_nc_fn___L69__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_hent_funksjon_param(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33442,7 +33442,7 @@ lbl_nc_fn___L72__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_semantic_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33454,7 +33454,7 @@ static NcVal *nc_fn_selfhost_compiler_semantic_start(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33475,7 +33475,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode___nclit_decode_v9400(NcVal 
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tegn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33618,7 +33618,7 @@ lbl_nc_fn___L10__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_escape_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33687,7 +33687,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_liste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33712,7 +33712,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_liste(NcVal **args, in
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_liste_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33781,7 +33781,7 @@ lbl_nc_fn___L15__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33863,7 +33863,7 @@ lbl_nc_fn___L17__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33897,7 +33897,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_int(Nc
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_desimal(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33931,7 +33931,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_desima
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -33965,7 +33965,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_tekst(
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_med_bool(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34007,7 +34007,7 @@ lbl_nc_fn___L20__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_normaliser_builtin_kall_namn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34126,7 +34126,7 @@ lbl_nc_fn___L34__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_kall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34189,7 +34189,7 @@ lbl_nc_fn___L38__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34212,7 +34212,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_instruksjon_uten_arg(N
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_try_begin(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34246,7 +34246,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_try_begin(NcVal **args
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_bool(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34271,7 +34271,7 @@ lbl_nc_fn___L42__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_tekstliste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34300,7 +34300,7 @@ lbl_nc_fn___L44__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_map_parliste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34566,7 +34566,7 @@ lbl_nc_fn___L49__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_schema(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34735,7 +34735,7 @@ lbl_nc_fn___L80__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_type_til_eksempel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34904,7 +34904,7 @@ lbl_nc_fn___L102__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_normaliser_sti(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -34953,7 +34953,7 @@ lbl_nc_fn___L106__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_kombiner_prefiks(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -35229,7 +35229,7 @@ lbl_nc_fn___L128__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_split_spec(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -35338,7 +35338,7 @@ lbl_nc_fn___L134__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_metode_liten(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -35459,7 +35459,7 @@ lbl_nc_fn___L152__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_liste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -35489,7 +35489,7 @@ lbl_nc_fn___L154__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_rute_til_json(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36195,7 +36195,7 @@ lbl_nc_fn___L165__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_json_fra_ruteliste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36287,7 +36287,7 @@ lbl_nc_fn___L175__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_felt_kjede_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36390,7 +36390,7 @@ lbl_nc_fn___L182__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_tekst_ender_med(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36444,7 +36444,7 @@ lbl_nc_fn___L186__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_web_kall_namn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36517,7 +36517,7 @@ lbl_nc_fn___L188__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_er_web_kall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -36577,7 +36577,7 @@ lbl_nc_fn___L198__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_samla_web_annotasjonar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -38517,7 +38517,7 @@ lbl_nc_fn___L201__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_route_felt_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -38547,7 +38547,7 @@ lbl_nc_fn___L314__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_samanfatt_rute(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -38636,7 +38636,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_samanfatt_rute(NcVal **args
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_lambda_hjelpefunksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39066,7 +39066,7 @@ lbl_nc_fn___L327__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_komp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39170,7 +39170,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_komp(NcVal **args, int n
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_finn_modul_filsti(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39229,7 +39229,7 @@ lbl_nc_fn___L332__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_finn_modul_i_base(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39309,7 +39309,7 @@ lbl_nc_fn___L338__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_modul_til_filsti(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39534,7 +39534,7 @@ lbl_nc_fn___L356__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_siste_moduldel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39579,7 +39579,7 @@ lbl_nc_fn___L358__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39622,7 +39622,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_ny_etikett(NcVal **args, in
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39661,7 +39661,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_push_loop(NcVal **args, int
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_pop_loop(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39749,7 +39749,7 @@ lbl_nc_fn___L360__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39796,7 +39796,7 @@ lbl_nc_fn___L362__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_gjeldande_loop_slutt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -39843,7 +39843,7 @@ lbl_nc_fn___L364__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_binop_til_opcode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -40120,7 +40120,7 @@ lbl_nc_fn___L408__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_unar_til_opcode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -40193,7 +40193,7 @@ lbl_nc_fn___L418__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_aug_til_binop(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -40266,7 +40266,7 @@ lbl_nc_fn___L428__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_listekomprehensjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -40764,7 +40764,7 @@ lbl_nc_fn___L430__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_uttrykk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -41786,7 +41786,7 @@ lbl_nc_fn___L452__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_sett_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -41997,7 +41997,7 @@ lbl_nc_fn___L478__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_setning(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -44568,7 +44568,7 @@ lbl_nc_fn___L552__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_emit_blokk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -44726,7 +44726,7 @@ lbl_nc_fn___L555__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_registrer_importerte_funksjonar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -44931,7 +44931,7 @@ lbl_nc_fn___L563__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -45732,7 +45732,7 @@ lbl_nc_fn___L589__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_test(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -45949,7 +45949,7 @@ lbl_nc_fn___L590__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_samla_importar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -46065,7 +46065,7 @@ lbl_nc_fn___L595__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -46865,7 +46865,7 @@ lbl_nc_fn___L621__:;
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_til_ncb_json(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -46883,7 +46883,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_kompiler_til_ncb_json(NcVal
 }
 
 static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -46895,7 +46895,7 @@ static NcVal *nc_fn_selfhost_compiler_ir_to_bytecode_start(NcVal **args, int nar
 }
 
 static NcVal *nc_fn_selfhost_vm___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -46916,7 +46916,7 @@ static NcVal *nc_fn_selfhost_vm___nclit_decode_v9400(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_ny_rammeverk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47104,7 +47104,7 @@ static NcVal *nc_fn_selfhost_vm_ny_rammeverk(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_ramme_les_var(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47239,7 +47239,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_ramme_sett_var(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47282,7 +47282,7 @@ static NcVal *nc_fn_selfhost_vm_ramme_sett_var(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_stack_push(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47320,7 +47320,7 @@ static NcVal *nc_fn_selfhost_vm_stack_push(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_stack_push_heap(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47359,7 +47359,7 @@ static NcVal *nc_fn_selfhost_vm_stack_push_heap(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_stack_pop(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47473,7 +47473,7 @@ lbl_nc_fn___L16__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_stack_topp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47521,7 +47521,7 @@ lbl_nc_fn___L18__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_exception_type(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47610,7 +47610,7 @@ lbl_nc_fn___L24__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_handler_match(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47706,7 +47706,7 @@ lbl_nc_fn___L37__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_find_handler(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47768,7 +47768,7 @@ lbl_nc_fn___L39__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_prune_handlers(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -47808,7 +47808,7 @@ lbl_nc_fn___L43__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_unwind_continuations(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48277,7 +48277,7 @@ lbl_nc_fn___L47__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_heap_track(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48347,7 +48347,7 @@ lbl_nc_fn___L60__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_heap_sync_roots(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48569,7 +48569,7 @@ lbl_nc_fn___L67__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_gc_safe_point(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48648,7 +48648,7 @@ lbl_nc_fn___L76__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_memory_status(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48673,7 +48673,7 @@ static NcVal *nc_fn_selfhost_vm_vm_memory_status(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_call_stack_status(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48847,7 +48847,7 @@ lbl_nc_fn___L85__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_state(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48864,7 +48864,7 @@ static NcVal *nc_fn_selfhost_vm_vm_debug_state(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_breakpoint_key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48896,7 +48896,7 @@ static NcVal *nc_fn_selfhost_vm_vm_debug_breakpoint_key(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_breakpoint_add(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -48984,7 +48984,7 @@ lbl_nc_fn___L90__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_breakpoint_remove(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49051,7 +49051,7 @@ lbl_nc_fn___L92__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_breakpoints_clear(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49141,7 +49141,7 @@ lbl_nc_fn___L95__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_watch_add(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49218,7 +49218,7 @@ lbl_nc_fn___L100__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_watch_remove(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49288,7 +49288,7 @@ lbl_nc_fn___L102__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_watches_clear(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49386,7 +49386,7 @@ lbl_nc_fn___L105__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_source_position(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49557,7 +49557,7 @@ lbl_nc_fn___L116__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_capture_watches(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -49672,7 +49672,7 @@ lbl_nc_fn___L123__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_check(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50028,7 +50028,7 @@ lbl_nc_fn___L140__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_suspend_on_hit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50067,7 +50067,7 @@ lbl_nc_fn___L142__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_resume(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50258,7 +50258,7 @@ lbl_nc_fn___L152__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_async_er_suspendert(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50319,7 +50319,7 @@ lbl_nc_fn___L157__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_async_resume(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50365,7 +50365,7 @@ lbl_nc_fn___L158__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_debug_abort(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50453,7 +50453,7 @@ lbl_nc_fn___L160__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_metric_inc(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50473,7 +50473,7 @@ static NcVal *nc_fn_selfhost_vm_vm_metric_inc(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_metric_add(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50539,7 +50539,7 @@ lbl_nc_fn___L162__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_runtime_metrics(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50838,7 +50838,7 @@ lbl_nc_fn___L172__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_function_finish(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50962,7 +50962,7 @@ lbl_nc_fn___L177__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_profiler_set_sample_interval(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -50998,7 +50998,7 @@ lbl_nc_fn___L178__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_profiler_sample(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51282,7 +51282,7 @@ lbl_nc_fn___L188__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_profiler_reset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51347,7 +51347,7 @@ static NcVal *nc_fn_selfhost_vm_vm_profiler_reset(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_profiler_chrome_trace(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51398,7 +51398,7 @@ static NcVal *nc_fn_selfhost_vm_vm_profiler_chrome_trace(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_descriptor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51502,7 +51502,7 @@ lbl_nc_fn___L190__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_register(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51548,7 +51548,7 @@ lbl_nc_fn___L192__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_init(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51687,7 +51687,7 @@ static NcVal *nc_fn_selfhost_vm_vm_type_init(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_name(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51768,7 +51768,7 @@ lbl_nc_fn___L202__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_of(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -51883,7 +51883,7 @@ lbl_nc_fn___L204__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_host_register(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52080,7 +52080,7 @@ lbl_nc_fn___L214__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_host_resolve(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52230,7 +52230,7 @@ lbl_nc_fn___L228__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_host_revoke(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52260,7 +52260,7 @@ static NcVal *nc_fn_selfhost_vm_vm_host_revoke(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_host_call(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52428,7 +52428,7 @@ lbl_nc_fn___L239__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_function_info(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52680,7 +52680,7 @@ lbl_nc_fn___L246__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_reflection_add_csv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -52782,7 +52782,7 @@ lbl_nc_fn___L251__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_type_reflection(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -53175,7 +53175,7 @@ lbl_nc_fn___L259__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_symbol_table(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -53378,7 +53378,7 @@ lbl_nc_fn___L277__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_info(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -53530,7 +53530,7 @@ lbl_nc_fn___L287__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_security_policy(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -53778,7 +53778,7 @@ lbl_nc_fn___L314__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_capability_for(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -54717,7 +54717,7 @@ lbl_nc_fn___L450__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_disk_sti_trygg(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -54810,7 +54810,7 @@ lbl_nc_fn___L462__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_disk_scope_tillat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -55028,7 +55028,7 @@ lbl_nc_fn___L471__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_disk_scope_krev_sti(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -55153,7 +55153,7 @@ lbl_nc_fn___L498__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_net_scope_tillat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -55323,7 +55323,7 @@ lbl_nc_fn___L515__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_process_scope_tillat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -55544,7 +55544,7 @@ lbl_nc_fn___L533__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_security_enforce(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -56461,7 +56461,7 @@ lbl_nc_fn___L628__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_free_entry(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -56576,7 +56576,7 @@ lbl_nc_fn___L634__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_cleanup(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -56659,7 +56659,7 @@ lbl_nc_fn___L641__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_runtime_init(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -57493,7 +57493,7 @@ lbl_nc_fn___L716__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_id_trygg(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -57676,7 +57676,7 @@ lbl_nc_fn___L723__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_caps(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -57803,7 +57803,7 @@ lbl_nc_fn___L741__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_hash_lik(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -57908,7 +57908,7 @@ lbl_nc_fn___L751__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_verify_trust(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -57998,7 +57998,7 @@ lbl_nc_fn___L756__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_dependencies(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -58161,7 +58161,7 @@ lbl_nc_fn___L761__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_module_load(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59019,7 +59019,7 @@ lbl_nc_fn___L818__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_next_request_id(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59037,7 +59037,7 @@ static NcVal *nc_fn_selfhost_vm_vm_next_request_id(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_hex_tegn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59255,7 +59255,7 @@ lbl_nc_fn___L850__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_random_seed(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59339,7 +59339,7 @@ lbl_nc_fn___L856__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_random_hex(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59435,7 +59435,7 @@ lbl_nc_fn___L861__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_shell_quote(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59475,7 +59475,7 @@ lbl_nc_fn___L862__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_mappe_opprett(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59553,7 +59553,7 @@ lbl_nc_fn___L866__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_header_finnes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59661,7 +59661,7 @@ lbl_nc_fn___L875__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_header_default(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59708,7 +59708,7 @@ lbl_nc_fn___L880__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_body_ser_json_ut(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59745,7 +59745,7 @@ lbl_nc_fn___L883__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_web_request_header(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -59829,7 +59829,7 @@ lbl_nc_fn___L890__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_web_finalize_response(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -60220,7 +60220,7 @@ lbl_nc_fn___L914__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_web_finalize_response_strict(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -60328,7 +60328,7 @@ static NcVal *nc_fn_selfhost_vm_vm_web_finalize_response_strict(NcVal **args, in
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_er_heltallstekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -60452,7 +60452,7 @@ lbl_nc_fn___L919__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_path_segments(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -60559,7 +60559,7 @@ lbl_nc_fn___L932__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_path_match(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -60796,7 +60796,7 @@ lbl_nc_fn___L939__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_json_parse_array_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61079,7 +61079,7 @@ lbl_nc_fn___L978__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_json_er_heiltall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61249,7 +61249,7 @@ lbl_nc_fn___L991__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_json_parse_array_map(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61428,7 +61428,7 @@ lbl_nc_fn___L1005__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_json_parse(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61485,7 +61485,7 @@ lbl_nc_fn___L1008__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_json_stringify(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61500,7 +61500,7 @@ static NcVal *nc_fn_selfhost_vm_json_stringify(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_json_parse_raw(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61534,7 +61534,7 @@ lbl_nc_fn___L1017__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_http_json_tal(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -61799,7 +61799,7 @@ lbl_nc_fn___L1044__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_http_json_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62012,7 +62012,7 @@ lbl_nc_fn___L1049__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_http_header_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62062,7 +62062,7 @@ lbl_nc_fn___L1062__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_ny_id(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62123,7 +62123,7 @@ lbl_nc_fn___L1064__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_set(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62145,7 +62145,7 @@ static NcVal *nc_fn_selfhost_vm__vm_db_set(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_get(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62181,7 +62181,7 @@ lbl_nc_fn___L1066__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_pool_get(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62217,7 +62217,7 @@ lbl_nc_fn___L1068__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_ny(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62273,7 +62273,7 @@ static NcVal *nc_fn_selfhost_vm__vm_db_ny(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_clone(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62290,7 +62290,7 @@ static NcVal *nc_fn_selfhost_vm__vm_db_clone(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_load(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62397,7 +62397,7 @@ lbl_nc_fn___L1074__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_save(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62454,7 +62454,7 @@ lbl_nc_fn___L1082__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_result_ok(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62487,7 +62487,7 @@ static NcVal *nc_fn_selfhost_vm__vm_result_ok(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_result_feil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62528,7 +62528,7 @@ static NcVal *nc_fn_selfhost_vm__vm_result_feil(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_norsdb_active_db(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62555,7 +62555,7 @@ lbl_nc_fn___L1086__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_norsdb_table_key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62577,7 +62577,7 @@ static NcVal *nc_fn_selfhost_vm__vm_norsdb_table_key(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_upper(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62592,7 +62592,7 @@ static NcVal *nc_fn_selfhost_vm__vm_sql_upper(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_trim_semi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62671,7 +62671,7 @@ lbl_nc_fn___L1089__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_is_ws(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62730,7 +62730,7 @@ lbl_nc_fn___L1093__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_is_digit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62767,7 +62767,7 @@ lbl_nc_fn___L1099__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_is_ident_char(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -62888,7 +62888,7 @@ lbl_nc_fn___L1101__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_split_csv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63046,7 +63046,7 @@ lbl_nc_fn___L1122__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_tokeniser(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63746,7 +63746,7 @@ lbl_nc_fn___L1125__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_sql_unquote(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63839,7 +63839,7 @@ lbl_nc_fn___L1190__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_tbl(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63884,7 +63884,7 @@ lbl_nc_fn___L1196__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_col_from_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63941,7 +63941,7 @@ lbl_nc_fn___L1198__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_row_val(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -63999,7 +63999,7 @@ lbl_nc_fn___L1202__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_is_number(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -64129,7 +64129,7 @@ lbl_nc_fn___L1211__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_compare(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -64448,7 +64448,7 @@ lbl_nc_fn___L1250__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_condition(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -64531,7 +64531,7 @@ lbl_nc_fn___L1252__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_where(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -64730,7 +64730,7 @@ lbl_nc_fn___L1257__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_collect_select_rows(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -64808,7 +64808,7 @@ lbl_nc_fn___L1273__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_sort_rows(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -65113,7 +65113,7 @@ lbl_nc_fn___L1279__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_parse_select(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -65909,7 +65909,7 @@ lbl_nc_fn___L1323__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_select_mode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -66022,7 +66022,7 @@ lbl_nc_fn___L1358__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_parse_aggregate(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -66304,7 +66304,7 @@ lbl_nc_fn___L1387__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_contains_text(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -66360,7 +66360,7 @@ lbl_nc_fn___L1393__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_find_matching_row(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -66480,7 +66480,7 @@ lbl_nc_fn___L1397__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_parse_insert(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -66962,7 +66962,7 @@ lbl_nc_fn___L1434__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_create_table(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -67490,7 +67490,7 @@ lbl_nc_fn___L1471__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_insert_core(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -67993,7 +67993,7 @@ lbl_nc_fn___L1506__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_insert(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -68013,7 +68013,7 @@ static NcVal *nc_fn_selfhost_vm__vm_db_insert(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_update(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -68468,7 +68468,7 @@ lbl_nc_fn___L1543__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_delete(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -68729,7 +68729,7 @@ lbl_nc_fn___L1559__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_drop_table(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -68886,7 +68886,7 @@ lbl_nc_fn___L1574__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_select_rows_with_meta(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -69038,7 +69038,7 @@ lbl_nc_fn___L1580__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_select_count(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -69632,7 +69632,7 @@ lbl_nc_fn___L1604__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_select_text(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70063,7 +70063,7 @@ lbl_nc_fn___L1659__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_exec(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70181,7 +70181,7 @@ lbl_nc_fn___L1680__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__vm_db_migrate(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70341,7 +70341,7 @@ lbl_nc_fn___L1683__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_map_n__kler(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70368,7 +70368,7 @@ lbl_nc_fn___L1694__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_har_n__kkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70410,7 +70410,7 @@ lbl_nc_fn___L1698__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_join_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70490,7 +70490,7 @@ lbl_nc_fn___L1703__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_liste_finn_innhald(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70548,7 +70548,7 @@ lbl_nc_fn___L1705__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_liste_fjern_alle(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70614,7 +70614,7 @@ lbl_nc_fn___L1709__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_liste_finn_siste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70652,7 +70652,7 @@ lbl_nc_fn___L1712__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_path_basename(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70697,7 +70697,7 @@ lbl_nc_fn___L1714__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_path_join(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70801,7 +70801,7 @@ lbl_nc_fn___L1722__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_path_dirname(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -70951,7 +70951,7 @@ lbl_nc_fn___L1734__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_path_stem(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71006,7 +71006,7 @@ lbl_nc_fn___L1738__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_fil_finnes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71045,7 +71045,7 @@ lbl_nc_fn___L1741__:;
 }
 
 static NcVal *nc_fn_selfhost_vm__rt_hent_bool_fra_map_data(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71150,7 +71150,7 @@ lbl_nc_fn___L1750__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_bygg_label_kart(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71226,7 +71226,7 @@ lbl_nc_fn___L1757__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_ny_try_post(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71269,7 +71269,7 @@ static NcVal *nc_fn_selfhost_vm_ny_try_post(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_builtin_har_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71372,7 +71372,7 @@ lbl_nc_fn___L1765__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_future(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71422,7 +71422,7 @@ static NcVal *nc_fn_selfhost_vm_vm_future(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_await_value(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71651,7 +71651,7 @@ lbl_nc_fn___L1768__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_web_safe_filename(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71858,7 +71858,7 @@ lbl_nc_fn___L1797__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_web_escape_html(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -71895,7 +71895,7 @@ static NcVal *nc_fn_selfhost_vm_vm_web_escape_html(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_ascii_upper(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -72006,7 +72006,7 @@ lbl_nc_fn___L1817__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_kall_innebygd(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85327,7 +85327,7 @@ lbl_nc_fn___L3010__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_sikker_get(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85369,7 +85369,7 @@ lbl_nc_fn___L3018__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_map_har_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85431,7 +85431,7 @@ lbl_nc_fn___L3021__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_map_get(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85501,7 +85501,7 @@ lbl_nc_fn___L3025__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_finn_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85801,7 +85801,7 @@ lbl_nc_fn___L3047__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_opcode_fra_instr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -85840,7 +85840,7 @@ lbl_nc_fn___L3056__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_opcode_operandar(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -86545,7 +86545,7 @@ lbl_nc_fn___L3088__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_verifiser_kode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -87034,7 +87034,7 @@ lbl_nc_fn___L3155__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_optimize_once(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -87935,7 +87935,7 @@ lbl_nc_fn___L3191__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_optimize(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -88018,7 +88018,7 @@ lbl_nc_fn___L3273__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_arg_numeric_kind(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -88193,7 +88193,7 @@ lbl_nc_fn___L3292__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_function_numeric_kind(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -88328,7 +88328,7 @@ lbl_nc_fn___L3295__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_lower(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -90755,7 +90755,7 @@ lbl_nc_fn___L3498__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_jit_try(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -91346,7 +91346,7 @@ lbl_nc_fn___L3534__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_k__yr_funksjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -91559,7 +91559,6 @@ lbl_nc_fn___L3544__:;
   nc_push(&sp, stack, nc_str("usann"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   goto lbl_nc_fn___L3551__;
   nc_gc_safepoint();
@@ -91610,7 +91609,6 @@ lbl_nc_fn___L3551__:;
   nc_push(&sp, stack, nc_int(0LL));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3552__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "djupn"));
@@ -91693,7 +91691,6 @@ lbl_nc_fn___L3554__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   goto lbl_nc_fn___L3557__;
   nc_gc_safepoint();
@@ -91705,7 +91702,6 @@ lbl_nc_fn___L3556__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -91714,7 +91710,6 @@ lbl_nc_fn___L3556__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "params"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -91725,7 +91720,6 @@ lbl_nc_fn___L3556__:;
   { NcVal *_c188_0=nc_pop(&sp,stack); NcVal *_arr188[]={_c188_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_bygg_label_kart(_arr188,1)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn_namn"));
   nc_gc_safepoint();
@@ -91748,7 +91742,6 @@ lbl_nc_fn___L3556__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -91757,7 +91750,6 @@ lbl_nc_fn___L3556__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "function_start_ms"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -91821,7 +91813,6 @@ lbl_nc_fn___L3557__:;
   { NcVal *_a235_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a235_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3558__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
@@ -91860,7 +91851,6 @@ lbl_nc_fn___L3562__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -91891,7 +91881,6 @@ lbl_nc_fn___L3562__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3564__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
@@ -91930,7 +91919,6 @@ lbl_nc_fn___L3563__:;
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3560__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
@@ -91976,7 +91964,6 @@ lbl_nc_fn___L3568__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -92005,7 +91992,6 @@ lbl_nc_fn___L3568__:;
   { NcVal *_a328_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a328_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -92034,7 +92020,6 @@ lbl_nc_fn___L3568__:;
   { NcVal *_a342_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a342_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_gc_safepoint();
@@ -92109,7 +92094,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_str("paused"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   nc_gc_safepoint();
@@ -92122,7 +92106,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_str("sann"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92131,7 +92114,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_str("debugger"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92140,7 +92122,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn_namn"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92149,7 +92130,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92158,7 +92138,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92167,7 +92146,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "continuations"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92176,7 +92154,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tail_chain_count"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
@@ -92185,7 +92162,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "function_start_ms"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -92194,7 +92170,6 @@ lbl_nc_fn___L3573__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "suspended"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -92221,7 +92196,6 @@ lbl_nc_fn___L3573__:;
   { NcVal *_a431_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a431_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_str("status"));
   nc_gc_safepoint();
@@ -94103,7 +94077,6 @@ lbl_nc_fn___L3678__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "mi"));
   nc_gc_safepoint();
@@ -94268,7 +94241,6 @@ lbl_nc_fn___L3680__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -94402,7 +94374,6 @@ lbl_nc_fn___L3686__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "verdi"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
@@ -95067,7 +95038,6 @@ lbl_nc_fn___L3726__:;
   nc_push(&sp, stack, nc_str("tail_returned"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -95150,7 +95120,6 @@ lbl_nc_fn___L3726__:;
   nc_push(&sp, stack, nc_int(0LL));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
@@ -95192,7 +95161,6 @@ lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95201,7 +95169,6 @@ lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "params"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95212,7 +95179,6 @@ lbl_nc_fn___L3730__:;
   { NcVal *_c1969_0=nc_pop(&sp,stack); NcVal *_arr1969[]={_c1969_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_bygg_label_kart(_arr1969,1)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95221,7 +95187,6 @@ lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95230,7 +95195,6 @@ lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95239,7 +95203,6 @@ lbl_nc_fn___L3730__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "function_start_ms"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -95283,7 +95246,6 @@ lbl_nc_fn___L3732__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tpi"));
   nc_gc_safepoint();
@@ -95306,7 +95268,6 @@ lbl_nc_fn___L3732__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3734__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
@@ -95345,7 +95306,6 @@ lbl_nc_fn___L3733__:;
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -95354,7 +95314,6 @@ lbl_nc_fn___L3733__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95426,7 +95385,6 @@ lbl_nc_fn___L3724__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "frame_feil"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
   nc_gc_safepoint();
@@ -95630,7 +95588,6 @@ lbl_nc_fn___L3738__:;
   nc_push(&sp, stack, nc_str("waiting"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95643,7 +95600,6 @@ lbl_nc_fn___L3738__:;
   { NcVal *b=nc_pop(&sp,stack),*a=nc_pop(&sp,stack); nc_push(&sp,stack,nc_add(a,b)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "continuations"));
   nc_gc_safepoint();
@@ -95706,7 +95662,6 @@ lbl_nc_fn___L3738__:;
   nc_push(&sp, stack, nc_int(0LL));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
@@ -95748,7 +95703,6 @@ lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "kode"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95757,7 +95711,6 @@ lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "params"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95768,7 +95721,6 @@ lbl_nc_fn___L3746__:;
   { NcVal *_c2245_0=nc_pop(&sp,stack); NcVal *_arr2245[]={_c2245_0}; nc_push(&sp,stack,nc_fn_selfhost_vm_bygg_label_kart(_arr2245,1)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95777,7 +95729,6 @@ lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95786,7 +95737,6 @@ lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95795,7 +95745,6 @@ lbl_nc_fn___L3746__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "function_start_ms"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -95858,7 +95807,6 @@ lbl_nc_fn___L3746__:;
   { NcVal *_a2288_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst_fra_heltall(_a2288_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3748__:;
   nc_push(&sp, stack, nc_int(0LL));
@@ -95883,7 +95831,6 @@ lbl_nc_fn___L3750__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "cpi"));
   nc_gc_safepoint();
@@ -95906,7 +95853,6 @@ lbl_nc_fn___L3750__:;
   { NcVal *k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_push(&sp,stack,nc_index_get(o,k)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3752__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
@@ -95945,7 +95891,6 @@ lbl_nc_fn___L3751__:;
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -95954,7 +95899,6 @@ lbl_nc_fn___L3751__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -95996,7 +95940,6 @@ lbl_nc_fn___L3736__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_heap_ids"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "løyst_namn"));
   nc_gc_safepoint();
@@ -96038,7 +95981,6 @@ lbl_nc_fn___L3756__:;
   { NcVal *_c2378_1=nc_pop(&sp,stack); NcVal *_c2378_0=nc_pop(&sp,stack); NcVal *_arr2378[]={_c2378_0,_c2378_1}; nc_push(&sp,stack,nc_fn_selfhost_vm_vm_heap_track(_arr2378,2)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3757__:;
   if(_try_depth>0){ _try_depth--; memcpy(&g_err_jmp,&_try_saved[_try_depth],sizeof(jmp_buf)); g_err_gc_boundary=_try_boundaries[_try_depth]; }
@@ -96169,7 +96111,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_str("waiting"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96178,7 +96119,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp,stack,nc_build_map(&sp,stack,0));
   nc_gc_safepoint();
@@ -96191,7 +96131,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_str("sann"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96200,7 +96139,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_str("await"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96209,7 +96147,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "fn_namn"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96218,7 +96155,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96227,7 +96163,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96236,7 +96171,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "continuations"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96245,7 +96179,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "tail_chain_count"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
@@ -96254,7 +96187,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "function_start_ms"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -96263,7 +96195,6 @@ lbl_nc_fn___L3765__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "await_state"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_args"));
   nc_gc_safepoint();
@@ -96292,7 +96223,6 @@ lbl_nc_fn___L3758__:;
   nc_push(&sp,stack,nc_build_list(&sp,stack,0));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -96301,7 +96231,6 @@ lbl_nc_fn___L3758__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
 lbl_nc_fn___L3770__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
@@ -96428,7 +96357,6 @@ lbl_nc_fn___L3777__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_error"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96437,7 +96365,6 @@ lbl_nc_fn___L3777__:;
   nc_push(&sp, stack, nc_str("throw"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96446,7 +96373,6 @@ lbl_nc_fn___L3777__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_error"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96455,7 +96381,6 @@ lbl_nc_fn___L3777__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "label_kart"));
   nc_gc_safepoint();
@@ -96602,7 +96527,6 @@ lbl_nc_fn___L3778__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "call_error"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
   nc_gc_safepoint();
@@ -96707,7 +96631,6 @@ lbl_nc_fn___L3768__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -96819,7 +96742,6 @@ lbl_nc_fn___L3791__:;
   nc_push(&sp, stack, nc_str("return"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96828,7 +96750,6 @@ lbl_nc_fn___L3791__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ret_v"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96837,7 +96758,6 @@ lbl_nc_fn___L3791__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ret_heap_id"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "label_kart"));
   nc_gc_safepoint();
@@ -96861,7 +96781,6 @@ lbl_nc_fn___L3788__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ret_heap_id"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -96870,7 +96789,6 @@ lbl_nc_fn___L3788__:;
   nc_push(&sp, stack, nc_str("returned"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -96929,7 +96847,6 @@ lbl_nc_fn___L3788__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97012,7 +96929,6 @@ lbl_nc_fn___L3788__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -97254,7 +97170,6 @@ lbl_nc_fn___L3806__:;
   nc_push(&sp, stack, nc_str("normal"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97269,7 +97184,6 @@ lbl_nc_fn___L3806__:;
   { NcVal *_a2998_0=nc_pop(&sp,stack); nc_push(&sp,stack,nc_builtin_tekst(_a2998_0)); }
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "label_kart"));
   nc_gc_safepoint();
@@ -97423,7 +97337,6 @@ lbl_nc_fn___L3814__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97432,7 +97345,6 @@ lbl_nc_fn___L3814__:;
   nc_push(&sp, stack, nc_int(0LL));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97441,7 +97353,6 @@ lbl_nc_fn___L3814__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97450,7 +97361,6 @@ lbl_nc_fn___L3814__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ip"));
   nc_gc_safepoint();
@@ -97492,7 +97402,6 @@ lbl_nc_fn___L3816__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "try_stack"));
   nc_gc_safepoint();
@@ -97600,7 +97509,6 @@ lbl_nc_fn___L3827__:;
   nc_push(&sp, stack, nc_str("throw"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97609,7 +97517,6 @@ lbl_nc_fn___L3827__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97618,7 +97525,6 @@ lbl_nc_fn___L3827__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "label_kart"));
   nc_gc_safepoint();
@@ -97651,7 +97557,6 @@ lbl_nc_fn___L3822__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -97660,7 +97565,6 @@ lbl_nc_fn___L3822__:;
   nc_push(&sp, stack, nc_str("thrown"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -97826,7 +97730,6 @@ lbl_nc_fn___L3839__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -97835,7 +97738,6 @@ lbl_nc_fn___L3839__:;
   nc_push(&sp, stack, nc_str("throw"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -97844,7 +97746,6 @@ lbl_nc_fn___L3839__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -97853,7 +97754,6 @@ lbl_nc_fn___L3839__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -97862,7 +97762,6 @@ lbl_nc_fn___L3839__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -98041,7 +97940,6 @@ lbl_nc_fn___L3847__:;
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "unntak_melding"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -98050,7 +97948,6 @@ lbl_nc_fn___L3847__:;
   nc_push(&sp, stack, nc_str("running"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "forelder"));
   nc_gc_safepoint();
@@ -98139,7 +98036,6 @@ lbl_nc_fn___L3840__:;
   nc_push(&sp, stack, nc_str("unwound"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -98242,7 +98138,6 @@ lbl_nc_fn___L3828__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -98399,7 +98294,6 @@ lbl_nc_fn___L3858__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -98408,7 +98302,6 @@ lbl_nc_fn___L3858__:;
   nc_push(&sp, stack, nc_str("halted"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -98462,7 +98355,6 @@ lbl_nc_fn___L3569__:;
   nc_push(&sp, stack, nc_str(""));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "ramme"));
   nc_gc_safepoint();
@@ -98471,7 +98363,6 @@ lbl_nc_fn___L3569__:;
   nc_push(&sp, stack, nc_str("returned"));
   nc_gc_safepoint();
   { NcVal *v=nc_pop(&sp,stack),*k=nc_pop(&sp,stack),*o=nc_pop(&sp,stack); nc_index_set(o,k,v); nc_push(&sp,stack,o); }
-  nc_pop(&sp, stack);
   nc_gc_safepoint();
   nc_push(&sp, stack, nc_load(vars, varnames, nvars, "functions"));
   nc_gc_safepoint();
@@ -98508,7 +98399,7 @@ lbl_nc_fn___L3569__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_sett_kontekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98561,7 +98452,7 @@ static NcVal *nc_fn_selfhost_vm_vm_sett_kontekst(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_k__yr_med_kontekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98608,7 +98499,7 @@ lbl_nc_fn___L3862__:;
 }
 
 static NcVal *nc_fn_selfhost_vm_k__yr_ncb(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98695,7 +98586,7 @@ static NcVal *nc_fn_selfhost_vm_k__yr_ncb(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98713,7 +98604,7 @@ static NcVal *nc_fn_selfhost_vm_start(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_context(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98723,7 +98614,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_context(NcVal **a
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98734,7 +98625,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_scope(NcVal **arg
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_current_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98753,7 +98644,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_current_scope(NcV
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_push_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98780,7 +98671,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_push_scope(NcVal 
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_pop_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98806,7 +98697,7 @@ lbl_nc_fn___L0__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_error(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98861,7 +98752,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_define(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98919,7 +98810,7 @@ lbl_nc_fn___L8__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_lookup_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98963,7 +98854,7 @@ lbl_nc_fn___L12__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_lookup(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -98983,7 +98874,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_lookup(NcVal **ar
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_infer_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -99694,7 +99585,7 @@ lbl_nc_fn___L76__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_validate_node(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100150,7 +100041,7 @@ lbl_nc_fn___L112__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_validate_block(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100202,7 +100093,7 @@ lbl_nc_fn___L119__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_validate_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100269,7 +100160,7 @@ lbl_nc_fn___L121__:;
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_analyser(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100296,7 +100187,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_analyser(NcVal **
 }
 
 static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_has_errors(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100313,7 +100204,7 @@ static NcVal *nc_fn_selfhost_semantic_validation_real_semantic_has_errors(NcVal 
 }
 
 static NcVal *nc_fn_std_runtime_memory___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100334,7 +100225,7 @@ static NcVal *nc_fn_std_runtime_memory___nclit_decode_v9400(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_memory_ny_heap(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100530,7 +100421,7 @@ static NcVal *nc_fn_std_runtime_memory_ny_heap(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__arena_owner(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100568,7 +100459,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__heap_lock(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100591,7 +100482,7 @@ static NcVal *nc_fn_std_runtime_memory__heap_lock(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__heap_unlock(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100612,7 +100503,7 @@ static NcVal *nc_fn_std_runtime_memory__heap_unlock(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__arena_alloker(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100642,7 +100533,7 @@ static NcVal *nc_fn_std_runtime_memory__arena_alloker(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__arena_frigjor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100672,7 +100563,7 @@ static NcVal *nc_fn_std_runtime_memory__arena_frigjor(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__arena_kompakter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100699,7 +100590,7 @@ static NcVal *nc_fn_std_runtime_memory__arena_kompakter(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_runtime_memory__key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100725,7 +100616,7 @@ static NcVal *nc_fn_std_runtime_memory__key(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__har_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100755,7 +100646,7 @@ static NcVal *nc_fn_std_runtime_memory__har_token(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__legg_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100801,7 +100692,7 @@ lbl_nc_fn___L4__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__fjern_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100896,7 +100787,7 @@ lbl_nc_fn___L7__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__finnes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100918,7 +100809,7 @@ static NcVal *nc_fn_std_runtime_memory__finnes(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__type_tag(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100967,7 +100858,7 @@ lbl_nc_fn___L16__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__skriv_u64le(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -100988,7 +100879,7 @@ static NcVal *nc_fn_std_runtime_memory__skriv_u64le(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__skriv_header(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101130,7 +101021,7 @@ lbl_nc_fn___L22__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__header_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101170,7 +101061,7 @@ static NcVal *nc_fn_std_runtime_memory__header_byte(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__edge_key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101196,7 +101087,7 @@ static NcVal *nc_fn_std_runtime_memory__edge_key(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__skriv_edge_header(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101371,7 +101262,7 @@ lbl_nc_fn___L34__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__sett_ref_header(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101445,7 +101336,7 @@ lbl_nc_fn___L38__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__legg_ref_fysisk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101661,7 +101552,7 @@ lbl_nc_fn___L48__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__frigjor_fysiske_refs(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -101845,7 +101736,7 @@ lbl_nc_fn___L53__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_alloker(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102264,7 +102155,7 @@ lbl_nc_fn___L68__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_objekt_adresse(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102304,7 +102195,7 @@ lbl_nc_fn___L70__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__objekt_skriv_byte_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102392,7 +102283,7 @@ lbl_nc_fn___L74__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_objekt_skriv_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102438,7 +102329,7 @@ lbl_nc_fn___L78__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_objekt_les_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102527,7 +102418,7 @@ lbl_nc_fn___L82__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__legg_ref_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102630,7 +102521,7 @@ lbl_nc_fn___L92__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_legg_ref(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102673,7 +102564,7 @@ lbl_nc_fn___L94__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__fjern_ref_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102832,7 +102723,7 @@ lbl_nc_fn___L101__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_fjern_ref(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102875,7 +102766,7 @@ lbl_nc_fn___L106__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__legg_rot_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102919,7 +102810,7 @@ lbl_nc_fn___L108__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_legg_rot(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -102959,7 +102850,7 @@ lbl_nc_fn___L110__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__fjern_rot_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103007,7 +102898,7 @@ lbl_nc_fn___L112__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_fjern_rot(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103047,7 +102938,7 @@ lbl_nc_fn___L114__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__nullstill_roter_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103131,7 +103022,7 @@ lbl_nc_fn___L117__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_nullstill_roter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103170,7 +103061,7 @@ lbl_nc_fn___L120__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_objekt_levande(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103210,7 +103101,7 @@ lbl_nc_fn___L123__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_objekt_generasjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103246,7 +103137,7 @@ lbl_nc_fn___L124__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__mark_id(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103397,7 +103288,7 @@ lbl_nc_fn___L131__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__mark_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103501,7 +103392,7 @@ lbl_nc_fn___L135__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_mark(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103540,7 +103431,7 @@ lbl_nc_fn___L138__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__mark_minor_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103733,7 +103624,7 @@ lbl_nc_fn___L145__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_mark_minor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -103772,7 +103663,7 @@ lbl_nc_fn___L150__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__sweep_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104078,7 +103969,7 @@ lbl_nc_fn___L153__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_sweep(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104117,7 +104008,7 @@ lbl_nc_fn___L158__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__sweep_minor_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104449,7 +104340,7 @@ lbl_nc_fn___L161__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_sweep_minor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104488,7 +104379,7 @@ lbl_nc_fn___L168__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__aldr_overlevande(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104687,7 +104578,7 @@ lbl_nc_fn___L171__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__oppdater_gc_threshold(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104755,7 +104646,7 @@ lbl_nc_fn___L178__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__collect_major_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104898,7 +104789,7 @@ static NcVal *nc_fn_std_runtime_memory__collect_major_unlocked(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_memory_collect_major(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -104943,7 +104834,7 @@ lbl_nc_fn___L180__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__collect_minor_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105098,7 +104989,7 @@ static NcVal *nc_fn_std_runtime_memory__collect_minor_unlocked(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_memory_collect_minor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105143,7 +105034,7 @@ lbl_nc_fn___L182__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_collect_auto(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105227,7 +105118,7 @@ lbl_nc_fn___L187__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_collect(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105242,7 +105133,7 @@ static NcVal *nc_fn_std_runtime_memory_collect(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_sett_gc_threshold(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105288,7 +105179,7 @@ lbl_nc_fn___L190__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_gc_trengs(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105317,7 +105208,7 @@ static NcVal *nc_fn_std_runtime_memory_gc_trengs(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory__sync_fysiske_refs_etter_compact(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105726,7 +105617,7 @@ lbl_nc_fn___L203__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory__compact_unlocked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105914,7 +105805,7 @@ lbl_nc_fn___L217__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_compact(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -105971,7 +105862,7 @@ lbl_nc_fn___L220__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_samandrag(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106202,7 +106093,7 @@ static NcVal *nc_fn_std_runtime_memory_samandrag(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_produksjonsstatus(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106250,7 +106141,7 @@ static NcVal *nc_fn_std_runtime_memory_produksjonsstatus(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_std_runtime_security_ny_policy(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106339,7 +106230,7 @@ static NcVal *nc_fn_std_runtime_security_ny_policy(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_security__har_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106369,7 +106260,7 @@ static NcVal *nc_fn_std_runtime_security__har_token(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_security__legg_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106415,7 +106306,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_gyldig_capability(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106642,7 +106533,7 @@ lbl_nc_fn___L5__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_sensitiv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106799,7 +106690,7 @@ lbl_nc_fn___L35__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_tillat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106841,7 +106732,7 @@ lbl_nc_fn___L54__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_nekt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106883,7 +106774,7 @@ lbl_nc_fn___L56__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_har(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -106933,7 +106824,7 @@ lbl_nc_fn___L60__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_krev(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107087,7 +106978,7 @@ lbl_nc_fn___L68__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_set_scope(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107168,7 +107059,7 @@ lbl_nc_fn___L72__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_hosting_policy(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107333,7 +107224,7 @@ lbl_nc_fn___L80__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_brannmur_policy_ok(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107402,7 +107293,7 @@ lbl_nc_fn___L86__:;
 }
 
 static NcVal *nc_fn_std_runtime_security_produksjonsstatus(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107450,7 +107341,7 @@ static NcVal *nc_fn_std_runtime_security_produksjonsstatus(NcVal **args, int nar
 }
 
 static NcVal *nc_fn_std_sha256__u32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107467,7 +107358,7 @@ static NcVal *nc_fn_std_sha256__u32(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__rotr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107499,7 +107390,7 @@ static NcVal *nc_fn_std_sha256__rotr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__shr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107517,7 +107408,7 @@ static NcVal *nc_fn_std_sha256__shr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__ch(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107550,7 +107441,7 @@ static NcVal *nc_fn_std_sha256__ch(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__maj(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107585,7 +107476,7 @@ static NcVal *nc_fn_std_sha256__maj(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__bsig0(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107618,7 +107509,7 @@ static NcVal *nc_fn_std_sha256__bsig0(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__bsig1(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107651,7 +107542,7 @@ static NcVal *nc_fn_std_sha256__bsig1(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__ssig0(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107684,7 +107575,7 @@ static NcVal *nc_fn_std_sha256__ssig0(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__ssig1(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107717,7 +107608,7 @@ static NcVal *nc_fn_std_sha256__ssig1(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__k(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -107857,7 +107748,7 @@ static NcVal *nc_fn_std_sha256__k(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256__bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108060,7 +107951,7 @@ lbl_nc_fn___L3__:;
 }
 
 static NcVal *nc_fn_std_sha256__hex32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108135,7 +108026,7 @@ lbl_nc_fn___L5__:;
 }
 
 static NcVal *nc_fn_std_sha256__hash_padda(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108670,7 +108561,7 @@ lbl_nc_fn___L7__:;
 }
 
 static NcVal *nc_fn_std_sha256_hash(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108687,7 +108578,7 @@ static NcVal *nc_fn_std_sha256_hash(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256_hash_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108915,7 +108806,7 @@ lbl_nc_fn___L21__:;
 }
 
 static NcVal *nc_fn_std_sha256__bytes_kopier(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -108970,7 +108861,7 @@ lbl_nc_fn___L23__:;
 }
 
 static NcVal *nc_fn_std_sha256__bytes_saman(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109028,7 +108919,7 @@ lbl_nc_fn___L25__:;
 }
 
 static NcVal *nc_fn_std_sha256__hmac_sha256_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109295,7 +109186,7 @@ lbl_nc_fn___L37__:;
 }
 
 static NcVal *nc_fn_std_sha256__hex_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109331,7 +109222,7 @@ lbl_nc_fn___L38__:;
 }
 
 static NcVal *nc_fn_std_sha256__hex_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109389,7 +109280,7 @@ static NcVal *nc_fn_std_sha256__hex_byte(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sha256_hmac_sha256_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109407,7 +109298,7 @@ static NcVal *nc_fn_std_sha256_hmac_sha256_bytes(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_type(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109436,7 +109327,7 @@ lbl_nc_fn___L0__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109481,7 +109372,7 @@ lbl_nc_fn___L4__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_barn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109526,7 +109417,7 @@ lbl_nc_fn___L8__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_linje(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109571,7 +109462,7 @@ lbl_nc_fn___L12__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_kolonne(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109616,7 +109507,7 @@ lbl_nc_fn___L16__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_er(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109652,7 +109543,7 @@ lbl_nc_fn___L19__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_antall_barn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109669,7 +109560,7 @@ static NcVal *nc_fn_selfhost_ast_ast_antall_barn(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_hent_barn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109719,7 +109610,7 @@ lbl_nc_fn___L22__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_valider(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109799,7 +109690,7 @@ lbl_nc_fn___L30__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_v1_valider(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109921,7 +109812,7 @@ lbl_nc_fn___L38__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_er_l__v(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109958,7 +109849,7 @@ lbl_nc_fn___L46__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_posisjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -109987,7 +109878,7 @@ static NcVal *nc_fn_selfhost_ast_ast_posisjon(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_node_navn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110048,7 +109939,7 @@ lbl_nc_fn___L50__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_normaliser_type(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110371,7 +110262,7 @@ lbl_nc_fn___L100__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_snapshot(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110560,7 +110451,7 @@ lbl_nc_fn___L113__:;
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_binary_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110591,7 +110482,7 @@ static NcVal *nc_fn_selfhost_ast_ast_binary_expr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_unary_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110619,7 +110510,7 @@ static NcVal *nc_fn_selfhost_ast_ast_unary_expr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_literal_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110644,7 +110535,7 @@ static NcVal *nc_fn_selfhost_ast_ast_literal_expr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_variable_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110669,7 +110560,7 @@ static NcVal *nc_fn_selfhost_ast_ast_variable_expr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_call_expr(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110695,7 +110586,7 @@ static NcVal *nc_fn_selfhost_ast_ast_call_expr(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_function_decl(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110726,7 +110617,7 @@ static NcVal *nc_fn_selfhost_ast_ast_function_decl(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_ast_ast_module(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110747,7 +110638,7 @@ static NcVal *nc_fn_selfhost_ast_ast_module(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_allocator___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110768,7 +110659,7 @@ static NcVal *nc_fn_std_runtime_allocator___nclit_decode_v9400(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_allocator_ny_allocator_lock(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110812,7 +110703,7 @@ static NcVal *nc_fn_std_runtime_allocator_ny_allocator_lock(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_allocator__owner_token(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -110900,7 +110791,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_allocator_lock(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111050,7 +110941,7 @@ lbl_nc_fn___L8__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_allocator_lock_wait(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111114,7 +111005,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_allocator_unlock(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111240,7 +111131,7 @@ lbl_nc_fn___L20__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_allocator_lock_stats(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111311,7 +111202,7 @@ static NcVal *nc_fn_std_runtime_allocator_allocator_lock_stats(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_allocator__key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111337,7 +111228,7 @@ static NcVal *nc_fn_std_runtime_allocator__key(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_allocator__align8(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111374,7 +111265,7 @@ lbl_nc_fn___L22__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_ny_allocator(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111548,7 +111439,7 @@ lbl_nc_fn___L26__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator__ids(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111569,7 +111460,7 @@ static NcVal *nc_fn_std_runtime_allocator__ids(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_allocator__finn_id_for_adresse(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -111748,7 +111639,7 @@ lbl_nc_fn___L37__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator__finn_aktiv_blokk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112005,7 +111896,7 @@ lbl_nc_fn___L53__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator__memory_key(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112024,7 +111915,7 @@ static NcVal *nc_fn_std_runtime_allocator__memory_key(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_allocator__nullstill_blokk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112100,7 +111991,7 @@ lbl_nc_fn___L63__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_skriv_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112169,7 +112060,7 @@ lbl_nc_fn___L68__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_les_byte(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112227,7 +112118,7 @@ lbl_nc_fn___L72__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_skriv_u64le(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112374,7 +112265,7 @@ lbl_nc_fn___L81__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_les_u64le(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112541,7 +112432,7 @@ lbl_nc_fn___L87__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_skriv_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112702,7 +112593,7 @@ lbl_nc_fn___L95__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_les_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112862,7 +112753,7 @@ lbl_nc_fn___L107__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator__oppdater_peak(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -112910,7 +112801,7 @@ lbl_nc_fn___L110__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_alloker(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -113512,7 +113403,7 @@ lbl_nc_fn___L124__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_kompakter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114129,7 +114020,7 @@ lbl_nc_fn___L143__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_alloker_locked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114177,7 +114068,7 @@ lbl_nc_fn___L150__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_kompakter_locked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114240,7 +114131,7 @@ lbl_nc_fn___L152__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_relokert_adresse(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114284,7 +114175,7 @@ lbl_nc_fn___L154__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_frigjor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114422,7 +114313,7 @@ lbl_nc_fn___L156__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_frigjor_locked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114468,7 +114359,7 @@ lbl_nc_fn___L160__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_aktiv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114516,7 +114407,7 @@ lbl_nc_fn___L163__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_aktive_adresser(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114622,7 +114513,7 @@ lbl_nc_fn___L165__:;
 }
 
 static NcVal *nc_fn_std_runtime_allocator_statistikk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114811,7 +114702,7 @@ static NcVal *nc_fn_std_runtime_allocator_statistikk(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_allocator_produksjonsstatus(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114859,7 +114750,7 @@ static NcVal *nc_fn_std_runtime_allocator_produksjonsstatus(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_versjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114871,7 +114762,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_versjon(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_heap_base(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114883,7 +114774,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_heap_base(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_heap_size(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114895,7 +114786,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_heap_size(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_cursor_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114907,7 +114798,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_cursor_offset(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_envp_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114919,7 +114810,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_envp_offset(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gc_alloc_count_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114931,7 +114822,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_gc_alloc_count_offset(NcVal **args, i
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gc_threshold_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114943,7 +114834,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_gc_threshold_offset(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gc_safepoint_count_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114955,7 +114846,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_gc_safepoint_count_offset(NcVal **arg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gc_collection_count_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114967,7 +114858,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_gc_collection_count_offset(NcVal **ar
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gc_root_stack_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114979,7 +114870,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_gc_root_stack_offset(NcVal **args, in
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_control_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -114991,7 +114882,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_control_bytes(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_object_header_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115003,7 +114894,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_object_header_bytes(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_alignment(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115015,7 +114906,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_alignment(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_magic_0(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115027,7 +114918,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_magic_0(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_magic_1(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115039,7 +114930,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_magic_1(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_magic_2(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115051,7 +114942,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_magic_2(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_magic_3(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115063,7 +114954,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_magic_3(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_flags_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115075,7 +114966,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_flags_offset(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_generation_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115087,7 +114978,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_generation_offset(NcVal **args
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_age_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115099,7 +114990,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_age_offset(NcVal **args, int n
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_type_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115111,7 +115002,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_type_offset(NcVal **args, int 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_size_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115123,7 +115014,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_size_offset(NcVal **args, int 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_first_edge_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115135,7 +115026,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_first_edge_offset(NcVal **args
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_header_ref_count_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115147,7 +115038,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_header_ref_count_offset(NcVal **args,
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_flag_active(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115159,7 +115050,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_flag_active(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_flag_marked(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115171,7 +115062,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_flag_marked(NcVal **args, int nargs) 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_edge_type_tag(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115183,7 +115074,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_edge_type_tag(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_edge_payload_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115195,7 +115086,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_edge_payload_bytes(NcVal **args, int 
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_edge_from_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115207,7 +115098,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_edge_from_offset(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_edge_to_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115219,7 +115110,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_edge_to_offset(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_edge_next_offset(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115231,7 +115122,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_edge_next_offset(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_payload_base(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115247,7 +115138,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_payload_base(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_heap_limit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115263,7 +115154,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_heap_limit(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_payload_capacity(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115279,7 +115170,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_payload_capacity(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_envp_address(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115295,7 +115186,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_envp_address(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_align_block(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115336,7 +115227,7 @@ lbl_nc_fn___L0__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_gyldig_payload_adresse(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115384,7 +115275,7 @@ lbl_nc_fn___L2__:;
 }
 
 static NcVal *nc_fn_std_runtime_memory_abi_segment(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115534,7 +115425,7 @@ static NcVal *nc_fn_std_runtime_memory_abi_segment(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_atomic___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115555,7 +115446,7 @@ static NcVal *nc_fn_std_runtime_atomic___nclit_decode_v9400(NcVal **args, int na
 }
 
 static NcVal *nc_fn_std_runtime_atomic_versjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115567,7 +115458,7 @@ static NcVal *nc_fn_std_runtime_atomic_versjon(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_atomic_gyldig_order(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115640,7 +115531,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic__native(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115701,7 +115592,7 @@ lbl_nc_fn___L9__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_ny(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115804,7 +115695,7 @@ lbl_nc_fn___L10__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_gyldig(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115843,7 +115734,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_load(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115953,7 +115844,7 @@ lbl_nc_fn___L18__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic__commit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -115997,7 +115888,7 @@ static NcVal *nc_fn_std_runtime_atomic__commit(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_runtime_atomic_store(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116122,7 +116013,7 @@ lbl_nc_fn___L28__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_exchange(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116220,7 +116111,7 @@ lbl_nc_fn___L32__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_compare_exchange(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116490,7 +116381,7 @@ lbl_nc_fn___L50__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_fetch_add(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116592,7 +116483,7 @@ lbl_nc_fn___L52__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_native_operasjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116607,7 +116498,7 @@ static NcVal *nc_fn_std_runtime_atomic_native_operasjon(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_runtime_atomic_fence(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116654,7 +116545,7 @@ lbl_nc_fn___L56__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_destroy(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116753,7 +116644,7 @@ lbl_nc_fn___L62__:;
 }
 
 static NcVal *nc_fn_std_runtime_atomic_produksjonsstatus(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116777,7 +116668,7 @@ static NcVal *nc_fn_std_runtime_atomic_produksjonsstatus(NcVal **args, int nargs
 }
 
 static NcVal *nc_fn_std_socket___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116798,7 +116689,7 @@ static NcVal *nc_fn_std_socket___nclit_decode_v9400(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_versjon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116810,7 +116701,7 @@ static NcVal *nc_fn_std_socket_native_versjon(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket__native_req(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116836,7 +116727,7 @@ static NcVal *nc_fn_std_socket__native_req(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket__reparer_dns_hex_transport(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -116987,7 +116878,7 @@ lbl_nc_fn___L4__:;
 }
 
 static NcVal *nc_fn_std_socket_native_lytt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117028,7 +116919,7 @@ static NcVal *nc_fn_std_socket_native_lytt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_tilkoble(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117062,7 +116953,7 @@ static NcVal *nc_fn_std_socket_native_tilkoble(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_udp_lytt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117096,7 +116987,7 @@ static NcVal *nc_fn_std_socket_native_udp_lytt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_udp_tilkoble(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117130,7 +117021,7 @@ static NcVal *nc_fn_std_socket_native_udp_tilkoble(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_udp_les(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117168,7 +117059,7 @@ static NcVal *nc_fn_std_socket_native_udp_les(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_udp_skriv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117224,7 +117115,7 @@ static NcVal *nc_fn_std_socket_native_udp_skriv(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_poll(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117262,7 +117153,7 @@ static NcVal *nc_fn_std_socket_native_poll(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_poll_vent(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117311,7 +117202,7 @@ static NcVal *nc_fn_std_socket_native_poll_vent(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_aksepter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117334,7 +117225,7 @@ static NcVal *nc_fn_std_socket_native_aksepter(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_les(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -117372,7 +117263,7 @@ static NcVal *nc_fn_std_socket_native_les(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_les_hex(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118139,7 +118030,7 @@ lbl_nc_fn___L49__:;
 }
 
 static NcVal *nc_fn_std_socket_native_skriv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118175,7 +118066,7 @@ static NcVal *nc_fn_std_socket_native_skriv(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_skriv_hex(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118359,7 +118250,7 @@ lbl_nc_fn___L55__:;
 }
 
 static NcVal *nc_fn_std_socket__hex_digit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118396,7 +118287,7 @@ lbl_nc_fn___L56__:;
 }
 
 static NcVal *nc_fn_std_socket__hex_value(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118505,7 +118396,7 @@ lbl_nc_fn___L66__:;
 }
 
 static NcVal *nc_fn_std_socket_native_lukk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118528,7 +118419,7 @@ static NcVal *nc_fn_std_socket_native_lukk(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_lytt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118562,7 +118453,7 @@ static NcVal *nc_fn_std_socket_native_iocp_lytt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_tilkoble(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118596,7 +118487,7 @@ static NcVal *nc_fn_std_socket_native_iocp_tilkoble(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_aksepter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118623,7 +118514,7 @@ static NcVal *nc_fn_std_socket_native_iocp_aksepter(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_les(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118661,7 +118552,7 @@ static NcVal *nc_fn_std_socket_native_iocp_les(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_skriv(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118697,7 +118588,7 @@ static NcVal *nc_fn_std_socket_native_iocp_skriv(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_vent(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118731,7 +118622,7 @@ static NcVal *nc_fn_std_socket_native_iocp_vent(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket__native_poll_iocp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118828,7 +118719,7 @@ lbl_nc_fn___L72__:;
 }
 
 static NcVal *nc_fn_std_socket__native_cleanup_iocp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -118953,7 +118844,7 @@ lbl_nc_fn___L77__:;
 }
 
 static NcVal *nc_fn_std_socket_native_iocp_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119028,7 +118919,7 @@ lbl_nc_fn___L80__:;
 }
 
 static NcVal *nc_fn_std_socket_native_tls_lytt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119079,7 +118970,7 @@ static NcVal *nc_fn_std_socket_native_tls_lytt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_tls_lytt_schannel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119128,7 +119019,7 @@ static NcVal *nc_fn_std_socket_native_tls_lytt_schannel(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble_systemlager(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119171,7 +119062,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble_systemlager(NcVal **args, int
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble_schannel_mtls(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119219,7 +119110,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble_schannel_mtls(NcVal **args, i
 }
 
 static NcVal *nc_fn_std_socket_native_tls_lytt_med_klientsertifikat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119281,7 +119172,7 @@ static NcVal *nc_fn_std_socket_native_tls_lytt_med_klientsertifikat(NcVal **args
 }
 
 static NcVal *nc_fn_std_socket_native_tls_lytt_med_klientsertifikat_og_crl(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119348,7 +119239,7 @@ static NcVal *nc_fn_std_socket_native_tls_lytt_med_klientsertifikat_og_crl(NcVal
 }
 
 static NcVal *nc_fn_std_socket_native_tls_lytt_med_ocsp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119404,7 +119295,7 @@ static NcVal *nc_fn_std_socket_native_tls_lytt_med_ocsp(NcVal **args, int nargs)
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119448,7 +119339,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble_med_klientsertifikat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119502,7 +119393,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble_med_klientsertifikat(NcVal **
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble_med_crl(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119551,7 +119442,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble_med_crl(NcVal **args, int nar
 }
 
 static NcVal *nc_fn_std_socket_native_tls_tilkoble_krev_ocsp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119601,7 +119492,7 @@ static NcVal *nc_fn_std_socket_native_tls_tilkoble_krev_ocsp(NcVal **args, int n
 }
 
 static NcVal *nc_fn_std_socket_native_tls_handshake(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119624,7 +119515,7 @@ static NcVal *nc_fn_std_socket_native_tls_handshake(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket__native_poll_tls_handshake(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119719,7 +119610,7 @@ lbl_nc_fn___L86__:;
 }
 
 static NcVal *nc_fn_std_socket_native_tls_handshake_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119748,7 +119639,7 @@ static NcVal *nc_fn_std_socket_native_tls_handshake_async(NcVal **args, int narg
 }
 
 static NcVal *nc_fn_std_socket__native_poll_connect(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -119849,7 +119740,7 @@ lbl_nc_fn___L90__:;
 }
 
 static NcVal *nc_fn_std_socket__native_poll_accept(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120016,7 +119907,7 @@ lbl_nc_fn___L98__:;
 }
 
 static NcVal *nc_fn_std_socket__native_poll_read(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120195,7 +120086,7 @@ lbl_nc_fn___L106__:;
 }
 
 static NcVal *nc_fn_std_socket__native_poll_write(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120446,7 +120337,7 @@ lbl_nc_fn___L116__:;
 }
 
 static NcVal *nc_fn_std_socket_native_connect_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120500,7 +120391,7 @@ lbl_nc_fn___L118__:;
 }
 
 static NcVal *nc_fn_std_socket_native_accept_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120529,7 +120420,7 @@ static NcVal *nc_fn_std_socket_native_accept_async(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_les_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120565,7 +120456,7 @@ static NcVal *nc_fn_std_socket_native_les_async(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_native_skriv_async(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120605,7 +120496,7 @@ static NcVal *nc_fn_std_socket_native_skriv_async(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_AF_INET(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120617,7 +120508,7 @@ static NcVal *nc_fn_std_socket_AF_INET(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_SOCK_STREAM(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120629,7 +120520,7 @@ static NcVal *nc_fn_std_socket_SOCK_STREAM(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_SOCK_DGRAM(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120641,7 +120532,7 @@ static NcVal *nc_fn_std_socket_SOCK_DGRAM(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_FEIL_IKKJE_ST__TTA(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120655,7 +120546,7 @@ static NcVal *nc_fn_std_socket_FEIL_IKKJE_ST__TTA(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_FEIL_TILKOBLING(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120669,7 +120560,7 @@ static NcVal *nc_fn_std_socket_FEIL_TILKOBLING(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_FEIL_SEND(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120683,7 +120574,7 @@ static NcVal *nc_fn_std_socket_FEIL_SEND(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_FEIL_MOTTA(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120697,7 +120588,7 @@ static NcVal *nc_fn_std_socket_FEIL_MOTTA(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket__ny_sokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120748,7 +120639,7 @@ static NcVal *nc_fn_std_socket__ny_sokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_ny_tcp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120812,7 +120703,7 @@ lbl_nc_fn___L121__:;
 }
 
 static NcVal *nc_fn_std_socket_ny_udp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120876,7 +120767,7 @@ lbl_nc_fn___L123__:;
 }
 
 static NcVal *nc_fn_std_socket_tilkoble(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120937,7 +120828,7 @@ lbl_nc_fn___L125__:;
 }
 
 static NcVal *nc_fn_std_socket_bind(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -120998,7 +120889,7 @@ lbl_nc_fn___L127__:;
 }
 
 static NcVal *nc_fn_std_socket_lytt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121056,7 +120947,7 @@ lbl_nc_fn___L129__:;
 }
 
 static NcVal *nc_fn_std_socket_aksepter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121127,7 +121018,7 @@ lbl_nc_fn___L131__:;
 }
 
 static NcVal *nc_fn_std_socket_send(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121181,7 +121072,7 @@ lbl_nc_fn___L133__:;
 }
 
 static NcVal *nc_fn_std_socket_send_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121235,7 +121126,7 @@ lbl_nc_fn___L135__:;
 }
 
 static NcVal *nc_fn_std_socket_motta(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121285,7 +121176,7 @@ lbl_nc_fn___L137__:;
 }
 
 static NcVal *nc_fn_std_socket_motta_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121337,7 +121228,7 @@ lbl_nc_fn___L139__:;
 }
 
 static NcVal *nc_fn_std_socket_lukk(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121387,7 +121278,7 @@ lbl_nc_fn___L141__:;
 }
 
 static NcVal *nc_fn_std_socket_er_open(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121408,7 +121299,7 @@ static NcVal *nc_fn_std_socket_er_open(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_er_feil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121429,7 +121320,7 @@ static NcVal *nc_fn_std_socket_er_feil(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_feilkode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121446,7 +121337,7 @@ static NcVal *nc_fn_std_socket_feilkode(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_fil_deskriptor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121463,7 +121354,7 @@ static NcVal *nc_fn_std_socket_fil_deskriptor(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_er_st__tta(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121509,7 +121400,7 @@ lbl_nc_fn___L143__:;
 }
 
 static NcVal *nc_fn_std_socket_set_timeout(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121559,7 +121450,7 @@ lbl_nc_fn___L145__:;
 }
 
 static NcVal *nc_fn_std_socket_ipv4(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121607,7 +121498,7 @@ static NcVal *nc_fn_std_socket_ipv4(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_socket_er_gyldig_ipv4(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121806,7 +121697,7 @@ lbl_nc_fn___L149__:;
 }
 
 static NcVal *nc_fn_std_socket_http_get(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121935,7 +121826,7 @@ lbl_nc_fn___L169__:;
 }
 
 static NcVal *nc_fn_std_sched___nclit_decode_v9400(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121956,7 +121847,7 @@ static NcVal *nc_fn_std_sched___nclit_decode_v9400(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__gyldig(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -121987,7 +121878,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_std_sched_ny(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122079,7 +121970,7 @@ static NcVal *nc_fn_std_sched_ny(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__no_ms(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122111,7 +122002,7 @@ lbl_nc_fn___L3__:;
 }
 
 static NcVal *nc_fn_std_sched__event_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122128,7 +122019,7 @@ static NcVal *nc_fn_std_sched__event_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__felt_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122154,7 +122045,7 @@ static NcVal *nc_fn_std_sched__felt_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__ny_id(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122197,7 +122088,7 @@ static NcVal *nc_fn_std_sched__ny_id(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__er_event_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122214,7 +122105,7 @@ static NcVal *nc_fn_std_sched__er_event_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_enter(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122258,7 +122149,7 @@ lbl_nc_fn___L4__:;
 }
 
 static NcVal *nc_fn_std_sched_enterabs(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122393,7 +122284,7 @@ lbl_nc_fn___L6__:;
 }
 
 static NcVal *nc_fn_std_sched_call_soon(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122418,7 +122309,7 @@ static NcVal *nc_fn_std_sched_call_soon(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__for_event(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122532,7 +122423,7 @@ lbl_nc_fn___L16__:;
 }
 
 static NcVal *nc_fn_std_sched__les_event(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122638,7 +122529,7 @@ static NcVal *nc_fn_std_sched__les_event(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_neste_hending(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122773,7 +122664,7 @@ lbl_nc_fn___L21__:;
 }
 
 static NcVal *nc_fn_std_sched_cancel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122899,7 +122790,7 @@ lbl_nc_fn___L30__:;
 }
 
 static NcVal *nc_fn_std_sched_tal_ventande(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122979,7 +122870,7 @@ lbl_nc_fn___L35__:;
 }
 
 static NcVal *nc_fn_std_sched_er_tom(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -122998,7 +122889,7 @@ static NcVal *nc_fn_std_sched_er_tom(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_tid_til_neste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123055,7 +122946,7 @@ lbl_nc_fn___L40__:;
 }
 
 static NcVal *nc_fn_std_sched__kall_trygt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123183,7 +123074,7 @@ lbl_nc_fn___L43__:;
 }
 
 static NcVal *nc_fn_std_sched__koyr_event(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123316,7 +123207,7 @@ lbl_nc_fn___L48__:;
 }
 
 static NcVal *nc_fn_std_sched_run_neste(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123361,7 +123252,7 @@ lbl_nc_fn___L52__:;
 }
 
 static NcVal *nc_fn_std_sched_run_ferdig(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123437,7 +123328,7 @@ lbl_nc_fn___L57__:;
 }
 
 static NcVal *nc_fn_std_sched_hent_ko(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123502,7 +123393,7 @@ lbl_nc_fn___L63__:;
 }
 
 static NcVal *nc_fn_std_sched_hent_k__(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123517,7 +123408,7 @@ static NcVal *nc_fn_std_sched_hent_k__(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_stopp(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123550,7 +123441,7 @@ lbl_nc_fn___L64__:;
 }
 
 static NcVal *nc_fn_std_sched_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123583,7 +123474,7 @@ lbl_nc_fn___L66__:;
 }
 
 static NcVal *nc_fn_std_sched_run(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123717,7 +123608,7 @@ lbl_nc_fn___L71__:;
 }
 
 static NcVal *nc_fn_std_sched_status(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123933,7 +123824,7 @@ lbl_nc_fn___L85__:;
 }
 
 static NcVal *nc_fn_std_sched_enter_gjentak(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -123996,7 +123887,7 @@ static NcVal *nc_fn_std_sched_enter_gjentak(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__future_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124013,7 +123904,7 @@ static NcVal *nc_fn_std_sched__future_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__future_felt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124039,7 +123930,7 @@ static NcVal *nc_fn_std_sched__future_felt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__future_synkroniser(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124131,7 +124022,7 @@ lbl_nc_fn___L86__:;
 }
 
 static NcVal *nc_fn_std_sched_future_ny(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124272,7 +124163,7 @@ lbl_nc_fn___L88__:;
 }
 
 static NcVal *nc_fn_std_sched_future_handtak(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124308,7 +124199,7 @@ lbl_nc_fn___L90__:;
 }
 
 static NcVal *nc_fn_std_sched_future_finnes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124340,7 +124231,7 @@ lbl_nc_fn___L93__:;
 }
 
 static NcVal *nc_fn_std_sched_future_status(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124376,7 +124267,7 @@ lbl_nc_fn___L94__:;
 }
 
 static NcVal *nc_fn_std_sched_future_kjorer(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124426,7 +124317,7 @@ lbl_nc_fn___L96__:;
 }
 
 static NcVal *nc_fn_std_sched_future_fullfor(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124507,7 +124398,7 @@ lbl_nc_fn___L98__:;
 }
 
 static NcVal *nc_fn_std_sched_future_avvis(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124588,7 +124479,7 @@ lbl_nc_fn___L102__:;
 }
 
 static NcVal *nc_fn_std_sched_future_kanseller(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124768,7 +124659,7 @@ lbl_nc_fn___L109__:;
 }
 
 static NcVal *nc_fn_std_sched_future_er_ferdig(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124822,7 +124713,7 @@ lbl_nc_fn___L119__:;
 }
 
 static NcVal *nc_fn_std_sched_future_resultat(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124860,7 +124751,7 @@ lbl_nc_fn___L122__:;
 }
 
 static NcVal *nc_fn_std_sched_future_feil(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124898,7 +124789,7 @@ lbl_nc_fn___L124__:;
 }
 
 static NcVal *nc_fn_std_sched_opprett_oppgave(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -124981,7 +124872,7 @@ lbl_nc_fn___L128__:;
 }
 
 static NcVal *nc_fn_std_sched_vent_future(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125092,7 +124983,7 @@ lbl_nc_fn___L131__:;
 }
 
 static NcVal *nc_fn_std_sched__io_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125109,7 +125000,7 @@ static NcVal *nc_fn_std_sched__io_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__io_felt(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125135,7 +125026,7 @@ static NcVal *nc_fn_std_sched__io_felt(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched__er_io_nokkel(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125152,7 +125043,7 @@ static NcVal *nc_fn_std_sched__er_io_nokkel(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_io_tal_ventande(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125232,7 +125123,7 @@ lbl_nc_fn___L143__:;
 }
 
 static NcVal *nc_fn_std_sched_har_arbeid(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125267,7 +125158,7 @@ lbl_nc_fn___L147__:;
 }
 
 static NcVal *nc_fn_std_sched_io_registrer(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125298,7 +125189,7 @@ static NcVal *nc_fn_std_sched_io_registrer(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_std_sched_io_registrer_med_cleanup(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125507,7 +125398,7 @@ lbl_nc_fn___L148__:;
 }
 
 static NcVal *nc_fn_std_sched__io_cleanup(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125610,7 +125501,7 @@ lbl_nc_fn___L157__:;
 }
 
 static NcVal *nc_fn_std_sched_io_kanseller(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125655,7 +125546,7 @@ lbl_nc_fn___L158__:;
 }
 
 static NcVal *nc_fn_std_sched_io_fjern(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125803,7 +125694,7 @@ lbl_nc_fn___L160__:;
 }
 
 static NcVal *nc_fn_std_sched__io_native_events(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -125868,7 +125759,7 @@ lbl_nc_fn___L166__:;
 }
 
 static NcVal *nc_fn_std_sched__io_poll_batch(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -126277,7 +126168,7 @@ lbl_nc_fn___L185__:;
 }
 
 static NcVal *nc_fn_std_sched__io_poll_ein(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -126612,7 +126503,7 @@ lbl_nc_fn___L203__:;
 }
 
 static NcVal *nc_fn_std_sched_io_poll(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -126725,7 +126616,7 @@ lbl_nc_fn___L213__:;
 }
 
 static NcVal *nc_fn_std_sched_produksjonsstatus(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -126765,7 +126656,7 @@ static NcVal *nc_fn_std_sched_produksjonsstatus(NcVal **args, int nargs) {
 }
 
 static NcVal *nc_fn_selfhost_vm_vm_bytes_to_text(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -126837,7 +126728,7 @@ lbl_nc_fn___L1015__:;
 }
 
 static NcVal *nc_fn_selfhost_bundler_normaliser_json_heks(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127345,7 +127236,7 @@ lbl_nc_fn___L17__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_u8(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127371,7 +127262,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_u8(NcVal **arg
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_u32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127425,7 +127316,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_u64(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127479,7 +127370,7 @@ lbl_nc_fn___L3__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_be32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127537,7 +127428,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_be32(NcVal **a
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_be64(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127591,7 +127482,7 @@ lbl_nc_fn___L5__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_hex_verdi(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127712,7 +127603,7 @@ lbl_nc_fn___L14__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_hex_til_bytes(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127806,7 +127697,7 @@ lbl_nc_fn___L21__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_fast_namn(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127880,7 +127771,7 @@ lbl_nc_fn___L23__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_fast_tekst(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127955,7 +127846,7 @@ lbl_nc_fn___L27__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_pad(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -127991,7 +127882,7 @@ lbl_nc_fn___L31__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_arm64_exit_kode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128036,7 +127927,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_arm64_exit_kod
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_code_directory(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128363,7 +128254,7 @@ lbl_nc_fn___L36__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_signatur_blob(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128479,7 +128370,7 @@ lbl_nc_fn___L39__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_byte_omraade(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128534,7 +128425,7 @@ lbl_nc_fn___L41__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_chained_fixups_tom(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128654,7 +128545,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_chained_fixups
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_exports_trie_exit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -128762,7 +128653,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_exports_trie_e
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_bygg_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130522,7 +130413,7 @@ lbl_nc_fn___L65__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_bygg_exit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130539,7 +130430,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_bygg_exit(NcVa
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_skriv_exit(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130569,7 +130460,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_emitter_skriv_exit(NcV
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_opcode(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130618,7 +130509,7 @@ lbl_nc_fn___L0__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_legg_u32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130692,7 +130583,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_legg_u32(NcVal
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_skriv_u32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130787,7 +130678,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_skriv_u32(NcVa
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_last_heiltall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130908,7 +130799,7 @@ lbl_nc_fn___L8__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_variabel_register(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -130945,7 +130836,7 @@ lbl_nc_fn___L10__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_kompiler_arm64(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -133554,7 +133445,7 @@ lbl_nc_fn___L183__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_kompiler_instruksjoner(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -133631,7 +133522,7 @@ lbl_nc_fn___L196__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_inline_kall(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134519,7 +134410,7 @@ lbl_nc_fn___L254__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_kompiler_ncb(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134715,7 +134606,7 @@ lbl_nc_fn___L266__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_shell(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134742,7 +134633,7 @@ static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_shell(NcVal **
 }
 
 static NcVal *nc_fn_selfhost_native_execution_macho_arm64_codegen_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134877,7 +134768,7 @@ lbl_nc_fn___L274__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u8(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134903,7 +134794,7 @@ static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u8(NcVal **args,
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u16(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134937,7 +134828,7 @@ static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u16(NcVal **args
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u32(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -134991,7 +134882,7 @@ lbl_nc_fn___L1__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_u64(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -135045,7 +134936,7 @@ lbl_nc_fn___L3__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_pad(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -135081,7 +134972,7 @@ lbl_nc_fn___L5__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_emitter_bygg_program(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -135529,7 +135420,7 @@ lbl_nc_fn___L13__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_codegen_kompiler_ncb(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -135761,7 +135652,7 @@ lbl_nc_fn___L8__:;
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_codegen_shell(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
@@ -135788,7 +135679,7 @@ static NcVal *nc_fn_selfhost_native_execution_elf_arm64_codegen_shell(NcVal **ar
 }
 
 static NcVal *nc_fn_selfhost_native_execution_elf_arm64_codegen_start(NcVal **args, int nargs) {
-  NcVal **stack = calloc(8192,sizeof(NcVal*)); int sp=0;
+  NcVal **stack = calloc(512,sizeof(NcVal*)); int sp=0;
   NcVal **vars = calloc(2048,sizeof(NcVal*)); char **varnames = calloc(2048,sizeof(char*)); int nvars=0;
   NcGcFrame _gc_frame; nc_gc_frame_enter(&_gc_frame,stack,&sp,vars,&nvars);
   jmp_buf *_try_saved=calloc(32,sizeof(jmp_buf)); NcGcFrame **_try_boundaries=calloc(32,sizeof(NcGcFrame*)); int _try_depth=0;
