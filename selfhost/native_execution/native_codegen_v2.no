@@ -28,7 +28,17 @@ funksjon HEAP_VA()   { returner 6291456 }
 // emit-indeks 687. Segmentet er derfor 2 GiB virtuelt (berre rørte sider blir
 // fysiske) fram til komprimerande native GC kan gjenvinne målebufferane mellom
 // passa; fase-6-minneporten står framleis open.
-funksjon HEAP_SZ()   { returner 2147483648 }
+funksjon HEAP_SZ() {
+    // GC-gata: under NORSCODE_GC_ALLOC=1 er GC-scratchen (mark-stakk 0x10300000, live-map
+    // 0x10340000, bitmap 0x10400000, unnatak-handler [0x10600000,0x10700000)) lagt på TOPPEN
+    // av heapen. 269484032 = 256MB heap/scratch + 1MB handler-region sizera EKSAKT for dette:
+    // heap-segmentet endar rett etter handler-regionen, så bump aldri kan klatre forbi
+    // scratchen (naturleg tak). Hev IKKJE til 2GiB under GC — då blir scratchen liggande MIDT
+    // i det allokerbare området og ei einaste rømt bump-løype korrupterer han (jf. cache-
+    // fallback-regresjonen). Paritet-løypa (flagg AV) brukar main sin 2GiB for store program.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 269484032 }
+    returner 2147483648
+}
 funksjon HEAP_CONTROLSZ() { returner 64 }
 // VM-i-VM gjenbruker svært mange små heiltal og boolverdiar. Desse er
 // immutable og kan derfor bu i ein kanonisk cache i starten av heap-segmentet
@@ -1748,10 +1758,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la cached_bool_va = emit_cached_bool_runtime(bytes)
     la cached_str_raw_va = emit_cached_str_raw_runtime(bytes)
     la linear_join_va = emit_linear_join_runtime(bytes)
-    patch_abs_jump(bytes, RT_INT() - TEXT_VA(), RT_BOOL() - TEXT_VA(), cached_int_va)
-    patch_abs_jump(bytes, RT_BOOL() - TEXT_VA(), RT_STR_RAW() - TEXT_VA(), cached_bool_va)
-    patch_abs_jump(bytes, RT_STR_RAW() - TEXT_VA(), RT_STR_RAW() - TEXT_VA() + 12, cached_str_raw_va)
-    patch_abs_jump(bytes, RT_JOIN() - TEXT_VA(), RT_MAP_NEW() - TEXT_VA(), linear_join_va)
+    // GC-gata: main sin cache-optimalisering (kanoniske int/bool/char + lineær join)
+    // flyttar allokeringa ut av den frosne, patchbare regionen. Cache-FALLBACK-ane
+    // (int utanfor [-32768,32767], fleir-byte str_raw, join) bump-allokerer RÅTT via
+    // `movabs rcx,&bump` — eit mønster patch_bump_prologer/patch_var_allocators IKKJE
+    // fangar, OG dei ligg forbi frozen_len. Under GC lek dei difor (aldri fri-liste-
+    // gjenbruk) → bump klatrar inn i GC-scratch (0x10300000+) → korrupsjon. sha256 sine
+    // 32-bit-ord treff int-fallbacken pervasivt. Difor: berre installer trampolinane i
+    // paritet-løypa (flagg AV). Under GC held RT_INT/RT_BOOL/RT_STR_RAW dei opphavlege
+    // inline-allokatorane (bump-prologar @32/@64 …) som patch_bump_prologer rutar til
+    // gc_alloc16 (fri-liste) — nett den grøne før-flettings-ruta (11 prologar, ikkje 9).
+    hvis gc_mode != "1" {
+        patch_abs_jump(bytes, RT_INT() - TEXT_VA(), RT_BOOL() - TEXT_VA(), cached_int_va)
+        patch_abs_jump(bytes, RT_BOOL() - TEXT_VA(), RT_STR_RAW() - TEXT_VA(), cached_bool_va)
+        patch_abs_jump(bytes, RT_STR_RAW() - TEXT_VA(), RT_STR_RAW() - TEXT_VA() + 12, cached_str_raw_va)
+        patch_abs_jump(bytes, RT_JOIN() - TEXT_VA(), RT_MAP_NEW() - TEXT_VA(), linear_join_va)
+    }
 
     atomics["load"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08, 0x48, 0x8B, 0x3F])
