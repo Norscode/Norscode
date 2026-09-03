@@ -726,6 +726,12 @@ funksjon emit_sys_write_marker(buf, ch: tekst) {
     legg_til(buf, 0x08)  // add rsp, 8
 }
 // ─── Funksjonsprolog/epilog ───────────────────────────────────────────────────
+// Ramme: botnslottet (n_local+1) = unnatak-handler-count ved inngang (sjå epilog). VM-en har try-stakk PER RAMME; AOT-
+// handler-stakken er global og blir berre poppa av TRY_END. `returner` INNE i
+// prøv {} hoppa over TRY_END → lekt handler-ramme → neste kast unwinda inn i ei
+// død ramme (rsp/rbp frå ein retur-nert funksjon) → «ret til stakkadresse» i fersk
+// seed (std.runtime.atomic._native: prøv { returner builtin… }). Epilogen
+// restaurerer difor count til inngangsverdien på KVAR retur.
 funksjon prolog(buf, n_local) {
     legg_til(buf, 0x55)                             // push rbp
     legg_til(buf, 0x48)
@@ -737,8 +743,15 @@ funksjon prolog(buf, n_local) {
     legg_til(buf, 0x81)
     legg_til(buf, 0xEC)
     u32(buf, sz)                                    // sub rsp, sz
+    // Handler-count-slot = botnslottet (n_local+1), UNDER alle variabel-/scratch-slottar
+    // (variabel-slottane må ikkje flyttast: andre pass reknar slot frå namneindeks).
+    copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, HANDLER_COUNT_VA())  // mov rax,[count]
+    copy(buf, [0x48, 0x89, 0x85]) u32(buf, rbp_off(n_local + 1))      // mov [rbp-8*(n_local+1)],rax
 }
-funksjon epilog(buf) {
+funksjon epilog(buf, count_slot: heiltall) {
+    // rax held returverdien (RETURN: pop rax) — bruk rcx for restaureringa.
+    copy(buf, [0x48, 0x8B, 0x8D]) u32(buf, rbp_off(count_slot))       // mov rcx,[rbp-8*slot]
+    copy(buf, [0x48, 0x89, 0x0C, 0x25]) u32(buf, HANDLER_COUNT_VA())  // mov [count],rcx
     legg_til(buf, 0x48)
     legg_til(buf, 0x89)
     legg_til(buf, 0xEC)  // mov rsp, rbp
@@ -3933,8 +3946,7 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
         ellers hvis op == "RETURN"
             legg_til(buf, 0x58)  // pop rax (return value = NcVal*)
             tstack_drop(tstack, 1)
-            epilog(buf)
-
+            epilog(buf, n_vars + 9)
         // ─── THROW ────────────────────────────────────────────────────────────
         ellers hvis op == "THROW"
             emit_rt_call_1(buf, atomic_vas["throw_unwind"], eiga_va)
@@ -3977,8 +3989,7 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
     legg_til(buf, 0x48)
     legg_til(buf, 0x31)
     legg_til(buf, 0xC0)   // xor rax, rax
-    epilog(buf)
-
+    epilog(buf, n_vars + 9)
     // Patch jump-labels
     la pi2: heltall = 0
     mens pi2 < lengde(patches)
