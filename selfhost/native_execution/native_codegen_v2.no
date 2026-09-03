@@ -641,19 +641,74 @@ funksjon emit_null_safe_compare(buf, rt_va, ulik: boolsk, code_va) {
     patch_jump(buf, jmp_end, lbl_end)
 }
 
-funksjon emit_null_safe_index_get(buf, code_va) {
-    legg_til(buf, 0x5E)
-    legg_til(buf, 0x5F)
-    copy(buf, [0x48, 0x85, 0xFF])
+funksjon emit_jcc_placeholder(buf, cc: heiltall) {
+    legg_til(buf, 0x0F)
+    legg_til(buf, cc)                 // 0x88 = js, 0x8D = jge, 0x85 = jne
+    u32(buf, 0)
+    returner lengde(buf) - 4
+}
+
+// INDEX_GET: null-trygg + LISTE-grensesjekk. Frosen RT_INDEX_GET reiser «Indeks
+// utanfor» via RT_FEIL, som krasjar (RT_STR_RAW frå kodeadresse 0x401050, len≈1 MB)
+// i staden for å kaste — fersk seed sin parser (se_frem) SIGSEGVa på det. Liste
+// (type 3) + heiltalsnøkkel (type 1) utanfor [0,len) → kast fangbart unntak
+// "Indeks utanfor: N" via throw_unwind (VM-tekst). Liste-layout: payload=[len,cap,elem_ptr].
+funksjon emit_null_safe_index_get(buf, code_va, rd_offs, atomic_vas) {
+    legg_til(buf, 0x5E)                             // pop rsi (nøkkel)
+    legg_til(buf, 0x5F)                             // pop rdi (container)
+    copy(buf, [0x48, 0x85, 0xFF])                   // test rdi,rdi
     la je_null = emit_je_placeholder(buf)
+    copy(buf, [0x48, 0x83, 0x3F, 0x03])             // cmp qword [rdi],3 (liste?)
+    la jne_rt1 = emit_jcc_placeholder(buf, 0x85)
+    copy(buf, [0x48, 0x85, 0xF6])                   // test rsi,rsi
+    la je_rt2 = emit_je_placeholder(buf)
+    copy(buf, [0x48, 0x83, 0x3E, 0x01])             // cmp qword [rsi],1 (heiltal?)
+    la jne_rt3 = emit_jcc_placeholder(buf, 0x85)
+    copy(buf, [0x48, 0x8B, 0x46, 0x08])             // mov rax,[rsi+8] (idx)
+    copy(buf, [0x48, 0x8B, 0x4F, 0x08])             // mov rcx,[rdi+8] (payload)
+    copy(buf, [0x48, 0x8B, 0x09])                   // mov rcx,[rcx] (len)
+    copy(buf, [0x48, 0x85, 0xC0])                   // test rax,rax
+    la js_oob = emit_jcc_placeholder(buf, 0x88)
+    copy(buf, [0x48, 0x39, 0xC8])                   // cmp rax,rcx
+    la jge_oob = emit_jcc_placeholder(buf, 0x8D)
+    la lbl_rt = lengde(buf)
     call_rel32(buf, RT_INDEX_GET(), code_va)
     legg_til(buf, 0x50)
     la jmp_end = emit_jmp_placeholder(buf)
     la lbl_null = lengde(buf)
-    copy(buf, [0x48, 0x31, 0xC0, 0x50])   // xor rax,rax; push (behald rå NULL-semantikk)
+    copy(buf, [0x48, 0x31, 0xC0, 0x50])             // xor rax,rax; push (behald rå NULL-semantikk)
+    la jmp_end2 = emit_jmp_placeholder(buf)
+    la lbl_oob = lengde(buf)
+    // Prefiks "Indeks utanfor: " (16 byte) blir bygd på stakken — nye literalar kan
+    // ikkje leggjast i rodata (rd_offs) ved emittering (emit_push_const gav «ingenting»).
+    legg_til(buf, 0x56)                             // push rsi (nøkkel)
+    copy(buf, [0x48, 0x83, 0xEC, 0x20])             // sub rsp,32
+    copy(buf, [0x48, 0xB8, 0x49, 0x6E, 0x64, 0x65, 0x6B, 0x73, 0x20, 0x75])  // "Indeks u"
+    copy(buf, [0x48, 0x89, 0x04, 0x24])             // mov [rsp],rax
+    copy(buf, [0x48, 0xB8, 0x74, 0x61, 0x6E, 0x66, 0x6F, 0x72, 0x3A, 0x20])  // "tanfor: "
+    copy(buf, [0x48, 0x89, 0x44, 0x24, 0x08])       // mov [rsp+8],rax
+    copy(buf, [0x48, 0x89, 0xE7])                   // mov rdi,rsp
+    copy(buf, [0xBE, 0x10, 0x00, 0x00, 0x00])       // mov esi,16
+    call_rel32(buf, RT_STR_RAW(), code_va)          // rax = prefiks-NcVal
+    copy(buf, [0x48, 0x83, 0xC4, 0x20])             // add rsp,32
+    legg_til(buf, 0x5E)                             // pop rsi (nøkkel)
+    legg_til(buf, 0x50)                             // push rax (prefiks)
+    copy(buf, [0x48, 0x89, 0xF7])                   // mov rdi,rsi
+    call_rel32(buf, atomic_vas["to_text"], code_va) // rax = tekst(idx)
+    copy(buf, [0x48, 0x89, 0xC6])                   // mov rsi,rax
+    legg_til(buf, 0x5F)                             // pop rdi (prefiks)
+    call_rel32(buf, RT_CONCAT(), code_va)           // rax = "Indeks utanfor: N"
+    copy(buf, [0x48, 0x89, 0xC7])                   // mov rdi,rax
+    call_rel32(buf, atomic_vas["throw_unwind"], code_va)  // returnerer ikkje
     la lbl_end = lengde(buf)
     patch_jump(buf, je_null, lbl_null)
+    patch_jump(buf, jne_rt1, lbl_rt)
+    patch_jump(buf, je_rt2, lbl_rt)
+    patch_jump(buf, jne_rt3, lbl_rt)
+    patch_jump(buf, js_oob, lbl_oob)
+    patch_jump(buf, jge_oob, lbl_oob)
     patch_jump(buf, jmp_end, lbl_end)
+    patch_jump(buf, jmp_end2, lbl_end)
 }
 // Null-trygg INDEX_SET: speglar emit_null_safe_index_get, men poppar 3 operandar
 // (verdi=rdx, nøkkel=rsi, container=rdi) og hoppar over RT_INDEX_SET når
@@ -3738,7 +3793,7 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
 
         // ─── INDEX_GET ────────────────────────────────────────────────────────
         ellers hvis op == "INDEX_GET"
-            emit_null_safe_index_get(buf, eiga_va)
+            emit_null_safe_index_get(buf, eiga_va, rd_offs, atomic_vas)
             tstack_drop(tstack, 2)
             legg_til(tstack, "any")
 
