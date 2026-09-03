@@ -105,6 +105,11 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 9 | SIGSEGV på uendeleg rekursjon | inga djupnevakt | rsp-grense (initiell rsp − 7 MiB) i prologen → fangbart unntak |
 | 10 | «path outside disk scope: /» | vm.no sjekka berre root av rot+relativ | effektiv sti (vm.no) |
 | 11 | tekst(sann) == "" | to_text mangla bool | "sann"/"usann" |
+| 12 | «manglar capability env.read» sjølv med miljø | ingen miljo_sett → NORSCODE_VM_TARGET_* tomme | env_set/env_get-overlay-atom |
+| 13 | SIGSEGV ved djup rekursjon | inga stakkvakt | rsp-grense i prolog → fangbart «For djup rekursjon» |
+| 14 | ELF stage-0 raud etter overlay | overlay-slot @HEAP+56 = GC-live-map-teljar | slottar flytta til toppen av HOST_ABI-sida (+4088/+4080) |
+| 15 | katalog_finnes/lag_katalogar usann → hybrid-kompilering «feila utan output» | builtin.filesystem_read/write_operation uimplementert | rein Norscode `std/runtime_filesystem_native.no` (gap-ruta) på nye syscall-primitiv native_fs_dirents/stat/unlink/rmdir/chmod/rename/symlink |
+| 16 | SIGSEGV i feilvegen til stat/dirents | `x == null` på liste-/tekst-typa var derefererer payload | primitiv gjev sentinel («!», [−1]), aldri null |
 
 Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
