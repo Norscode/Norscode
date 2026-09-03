@@ -915,6 +915,9 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".atomic_load_ptr") eller builtin.ends_with(fn_nm, ".atomic_store_ptr") eller builtin.ends_with(fn_nm, ".atomic_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_compare_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_fetch_add_ptr") eller builtin.ends_with(fn_nm, ".atomic_fence") { returner "int" }
     hvis builtin.ends_with(fn_nm, ".fil_les") eller fn_nm == "fil_les" { returner "str" }
+    hvis builtin.ends_with(fn_nm, ".fil_les_binær") eller builtin.ends_with(fn_nm, ".fil_les_binary") eller fn_nm == "fil_les_binær" eller fn_nm == "fil_les_binary" { returner "list" }
+    hvis builtin.ends_with(fn_nm, ".bytes_to_list") eller builtin.ends_with(fn_nm, ".bytes_from_list") { returner "list" }
+    hvis builtin.ends_with(fn_nm, ".bytes_to_text") eller fn_nm == "bytes_to_text" { returner "str" }
     hvis builtin.ends_with(fn_nm, ".fil_skriv") eller fn_nm == "fil_skriv" { returner "null" }
     hvis builtin.ends_with(fn_nm, ".fil_skriv_binar") eller fn_nm == "fil_skriv_binar" eller builtin.ends_with(fn_nm, ".fil_skriv_binary") eller fn_nm == "fil_skriv_binary" { returner "null" }
     hvis builtin.ends_with(fn_nm, ".fil_finnes") eller fn_nm == "fil_finnes" { returner "bool" }
@@ -2367,6 +2370,74 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la ct_bad = lengde(bytes)
     patch_jump(bytes, ct_null, ct_bad) patch_jump(bytes, ct_null2, ct_bad) patch_jump(bytes, ct_long, ct_bad)
     copy(bytes, [0x31, 0xC0, 0xC3])                       // xor eax,eax; ret
+
+    // ── identity(rdi) → rax=rdi. bytes_to_list/bytes_from_list: v2 har ingen bytes-
+    // type — fil_les_binær gjev alt liste_heiltall, så normalisering er identitet.
+    atomics["identity"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x89, 0xF8, 0xC3])                 // mov rax,rdi; ret
+
+    // ── fil_les_bin(rdi=sti) → liste av byte-heiltal (fil_les_safe + RT_INT/RT_LIST_APP)
+    // Kontrakt som committed seed («bytes» med lengde = talet på byte; bytes.til_liste
+    // = identitet). Kastar «Kan ikkje opne fil» via fil_les_safe.
+    atomics["fil_les_bin"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0 mod 16)
+    call_rel32(bytes, atomics["fil_les_safe"], TEXT_VA())  // rax = streng-NcVal
+    copy(bytes, [0x49, 0x89, 0xC4])                       // mov r12,rax
+    copy(bytes, [0x49, 0x8B, 0x5C, 0x24, 0x08])           // mov rbx,[r12+8] (payload)
+    copy(bytes, [0x4C, 0x8B, 0x2B])                       // mov r13,[rbx] (len)
+    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
+    copy(bytes, [0x31, 0xF6])                             // xor esi,esi (n=0)
+    call_rel32(bytes, RT_BUILD_LIST_REV(), TEXT_VA())     // rax = tom liste
+    copy(bytes, [0x49, 0x89, 0xC6])                       // mov r14,rax
+    copy(bytes, [0x45, 0x31, 0xFF])                       // xor r15d,r15d
+    la flb_loop = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xEF])                       // cmp r15,r13
+    la flb_done = emit_jcc_placeholder(bytes, 0x83)       // jae done
+    copy(bytes, [0x42, 0x0F, 0xB6, 0x7C, 0x3B, 0x08])     // movzx edi,byte [rbx+r15+8]
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
+    copy(bytes, [0x4C, 0x89, 0xF7])                       // mov rdi,r14 (liste)
+    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
+    call_rel32(bytes, RT_LIST_APP(), TEXT_VA())
+    copy(bytes, [0x49, 0xFF, 0xC7])                       // inc r15
+    la flb_j = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, flb_j, flb_loop)
+    la flb_donel = lengde(bytes)
+    patch_jump(bytes, flb_done, flb_donel)
+    copy(bytes, [0x4C, 0x89, 0xF0])                       // mov rax,r14
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    // ── bytes_to_text(rdi=liste av byte-heiltal) → streng (rå byte). Elementa er
+    // 8-byte-peikarar til boksa NcVal (som frosen RT_FIL_SKRIV_BINAR les dei).
+    // Stakkbuffer 1 MiB (klamra) → RT_STR_RAW. null-liste → "".
+    atomics["bytes_to_text"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15
+    copy(bytes, [0x48, 0x81, 0xEC]) u32(bytes, 1048576)   // sub rsp,1 MiB
+    copy(bytes, [0x45, 0x31, 0xED])                       // xor r13d,r13d (len=0)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la btt_empty = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x5F, 0x08])                 // mov rbx,[rdi+8] (payload)
+    copy(bytes, [0x4C, 0x8B, 0x2B])                       // mov r13,[rbx] (len)
+    copy(bytes, [0x49, 0x81, 0xFD]) u32(bytes, 1048576)   // cmp r13,1 MiB
+    copy(bytes, [0x76, 0x07])                             // jbe +7
+    copy(bytes, [0x49, 0xC7, 0xC5]) u32(bytes, 1048576)   // mov r13,1 MiB (klamring)
+    copy(bytes, [0x4C, 0x8B, 0x63, 0x10])                 // mov r12,[rbx+16] (elem-peikarar)
+    copy(bytes, [0x45, 0x31, 0xFF])                       // xor r15d,r15d
+    la btt_loop = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xEF])                       // cmp r15,r13
+    la btt_done = emit_jcc_placeholder(bytes, 0x83)       // jae done
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xFC])                 // mov rax,[r12+r15*8]
+    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                 // mov rax,[rax+8] (int-payload)
+    copy(bytes, [0x42, 0x88, 0x04, 0x3C])                 // mov [rsp+r15],al
+    copy(bytes, [0x49, 0xFF, 0xC7])                       // inc r15
+    la btt_j = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, btt_j, btt_loop)
+    la btt_donel = lengde(bytes)
+    patch_jump(bytes, btt_done, btt_donel) patch_jump(bytes, btt_empty, btt_donel)
+    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
+    copy(bytes, [0x4C, 0x89, 0xEE])                       // mov rsi,r13
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x81, 0xC4]) u32(bytes, 1048576)   // add rsp,1 MiB
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
 
     atomics["starts_with"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -4316,6 +4387,8 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     la er_fil_skriv    = fn_nm == "fil_skriv" eller builtin.ends_with(fn_nm, ".fil_skriv")
     la er_fil_binar    = fn_nm == "fil_skriv_binar" eller fn_nm == "fil_skriv_binary" eller builtin.ends_with(fn_nm, ".fil_skriv_binar") eller builtin.ends_with(fn_nm, ".fil_skriv_binary") eller builtin.ends_with(fn_nm, ".fil_skriv_binær")
     la er_fil_finnes   = fn_nm == "fil_finnes" eller builtin.ends_with(fn_nm, ".fil_finnes")
+    la er_fil_les_bin  = fn_nm == "fil_les_binær" eller fn_nm == "fil_les_binary" eller builtin.ends_with(fn_nm, ".fil_les_binær") eller builtin.ends_with(fn_nm, ".fil_les_binary")
+    la er_bytes_ident  = fn_nm == "bytes_to_list" eller fn_nm == "bytes_from_list" eller builtin.ends_with(fn_nm, ".bytes_to_list") eller builtin.ends_with(fn_nm, ".bytes_from_list")
     la er_mkdir        = fn_nm == "builtin.mkdir_p" eller fn_nm == "mkdir_p" eller builtin.ends_with(fn_nm, ".mkdir_p") eller fn_nm == "builtin.mkdir" eller fn_nm == "mkdir"
     la er_miljo_hent   = fn_nm == "miljo_hent" eller builtin.ends_with(fn_nm, ".miljo_hent")
     la er_miljo_finnes = fn_nm == "miljo_finnes" eller builtin.ends_with(fn_nm, ".miljo_finnes")
@@ -4371,6 +4444,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_les     { returner atomic_vas["fil_les_safe"] }
     hvis er_fil_skriv   { returner RT_FIL_SKRIV() }
     hvis er_fil_binar   { returner RT_FIL_SKRIV_BINAR() }
+    hvis er_fil_les_bin { returner atomic_vas["fil_les_bin"] }
+    hvis er_bytes_ident { returner atomic_vas["identity"] }
+    hvis fn_nm == "bytes_to_text" eller builtin.ends_with(fn_nm, ".bytes_to_text") { returner atomic_vas["bytes_to_text"] }
     hvis er_fil_finnes  { returner atomic_vas["fil_finnes"] }
     hvis er_mkdir       { returner atomic_vas["mkdir_p"] }
     hvis er_miljo_hent  { returner atomic_vas["env_get"] }
@@ -4413,6 +4489,9 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     // trygg åtferd). Ruta aktiverer seg berre når std.sha256.hash faktisk er i
     // bunten (nc_main via vm.no-importen); elles inert (t.d. stage-0-modulane).
     hvis kort == "sha256"     { returner ["std.sha256.hash"] }
+    // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
+    // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).
+    hvis kort == "sha256_bytes" { returner ["std.sha256.hash_bytes"] }
     // pbkdf2_sha256(tekst,tekst,int,int) → pure tekst-signatur std.sha256.pbkdf2_hex.
     hvis kort == "pbkdf2_sha256" { returner ["std.sha256.pbkdf2_hex"] }
     // random_hex(int) → pure LCG std.sha256.random_hex_pure (unngår vm_random_hex-heng).
@@ -5079,6 +5158,15 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         returner
     }
 
+    // Bundla brukarfunksjon (eksakt nøkkel, ikkje builtin.*) vinn ALLTID over
+    // suffiks-matchinga i builtin_va: std.bytes.til_tekst vart ruta til tekst()-
+    // konverteringa (".til_tekst"-suffiks) → "" i staden for brukarfunksjonen
+    // (gc_lesbin_probe). Gap-ruting og siste-segment-matching gjeld framleis
+    // berre for namn som IKKJE finst eksakt i bunten.
+    hvis ikkje builtin.starts_with(fn_nm, "builtin.") og finnes_nøkkel(fn_vas, fn_nm) {
+        emit_user_call(buf, fn_vas[fn_nm], nargs, code_va)
+        returner
+    }
     la rt_va = builtin_va(fn_nm, atomic_vas)
     hvis rt_va != 0 {
         hvis nargs == 0 {
