@@ -920,6 +920,10 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".fil_finnes") eller fn_nm == "fil_finnes" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".miljo_hent") eller fn_nm == "miljo_hent" { returner "str" }
     hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" { returner "map" }
+    hvis fn_nm == "builtin.native_fs_dirents" { returner "any" }
+    hvis fn_nm == "builtin.native_fs_stat" { returner "any" }
+    hvis fn_nm == "builtin.native_fs_unlink" eller fn_nm == "builtin.native_fs_rmdir" eller fn_nm == "builtin.native_fs_chmod" eller fn_nm == "builtin.native_fs_rename" eller fn_nm == "builtin.native_fs_symlink" { returner "int" }
+    hvis fn_nm == "builtin.filesystem_read_operation" eller fn_nm == "builtin.filesystem_write_operation" { returner "map" }
     hvis builtin.ends_with(fn_nm, ".miljo_finnes") eller fn_nm == "miljo_finnes" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".miljo_sett") eller fn_nm == "miljo_sett" { returner "null" }
     hvis builtin.ends_with(fn_nm, ".ny_liste") eller fn_nm == "ny_liste" eller fn_nm == "liste_ny" eller fn_nm == "ny_tekst_liste" { returner "list" }
@@ -2334,6 +2338,35 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5B, 0x5D])                             // pop rbx; pop rbp
     la fls_jmp = emit_jmp_placeholder(bytes)
     patch_jump(bytes, fls_jmp, atomics["throw_unwind"] - TEXT_VA())
+
+    // ── cstr_to(rdi=streng-NcVal, rsi=dest) → rax=dest (0 ved null/for lang) ─────
+    // Kopierer strengbytane NUL-terminert til ein kallar-eigd buffer (maks 4000 B).
+    atomics["cstr_to"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la ct_null = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8]
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la ct_null2 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x08])                       // mov rcx,[rax] (len)
+    copy(bytes, [0x48, 0x81, 0xF9, 0xA0, 0x0F, 0x00, 0x00]) // cmp rcx,4000
+    la ct_long = emit_jcc_placeholder(bytes, 0x8D)        // jge bad
+    copy(bytes, [0x48, 0x8D, 0x50, 0x08])                 // lea rdx,[rax+8] (src)
+    copy(bytes, [0x48, 0x89, 0xF0])                       // mov rax,rsi (dest = returverdi)
+    copy(bytes, [0x48, 0x85, 0xC9])                       // test rcx,rcx
+    la ct_skip = emit_je_placeholder(bytes)
+    la ct_loop = lengde(bytes)
+    copy(bytes, [0x44, 0x8A, 0x02])                       // mov r8b,[rdx]
+    copy(bytes, [0x44, 0x88, 0x06])                       // mov [rsi],r8b
+    copy(bytes, [0x48, 0xFF, 0xC2, 0x48, 0xFF, 0xC6, 0x48, 0xFF, 0xC9]) // inc rdx; inc rsi; dec rcx
+    la ct_jnz = lengde(bytes)
+    legg_til(bytes, 0x75) legg_til(bytes, (ct_loop - (ct_jnz + 2)) & 255)
+    la ct_done = lengde(bytes)
+    patch_jump(bytes, ct_skip, ct_done)
+    copy(bytes, [0xC6, 0x06, 0x00])                       // mov byte [rsi],0
+    copy(bytes, [0xC3])                                   // ret
+    la ct_bad = lengde(bytes)
+    patch_jump(bytes, ct_null, ct_bad) patch_jump(bytes, ct_null2, ct_bad) patch_jump(bytes, ct_long, ct_bad)
+    copy(bytes, [0x31, 0xC0, 0xC3])                       // xor eax,eax; ret
 
     atomics["starts_with"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -4384,6 +4417,10 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "pbkdf2_sha256" { returner ["std.sha256.pbkdf2_hex"] }
     // random_hex(int) → pure LCG std.sha256.random_hex_pure (unngår vm_random_hex-heng).
     hvis kort == "random_hex" { returner ["std.sha256.random_hex_pure"] }
+    // Filsystem-ABI (list/list_typed/walk_files/stat/path_stat/mkdir_p/delete/rmdir/
+    // chmod/file_replace/symlink_replace) → rein-Norscode-impl på native_fs_*-primitiv.
+    hvis kort == "filesystem_read_operation" { returner ["std.runtime_filesystem_native.read_operation"] }
+    hvis kort == "filesystem_write_operation" { returner ["std.runtime_filesystem_native.write_operation"] }
     returner []
 }
 
@@ -4476,6 +4513,259 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x48, 0x81, 0xEF])
         u32(buf, HEAP_ALLOC_START())
         call_rel32(buf, RT_INT(), code_va)
+        legg_til(buf, 0x50)
+        returner
+    }
+    // ── Filsystem-primitiv for std.runtime_filesystem_native (rein-Norscode-ABI) ──
+    // native_fs_dirents(sti) → "k<TAB>namn<LF>…" (k: d/f/l/o), "!" ved feil. open(#2,
+    // O_RDONLY|O_DIRECTORY|O_CLOEXEC) + getdents64(#217). Ramme: [rsp,+4096) sti,
+    // [rsp+4096,+36864) dirent-buffer, [rsp+36864,+299008) utdata (256 KiB).
+    hvis fn_nm == "builtin.native_fs_dirents" {
+        la dr_i: heiltall = 1
+        mens dr_i < nargs { legg_til(buf, 0x58) dr_i = dr_i + 1 }   // dropp ekstra
+        legg_til(buf, 0x5F)                                          // pop rdi (sti)
+        copy(buf, [0x55, 0x48, 0x89, 0xE5])                          // push rbp; mov rbp,rsp
+        copy(buf, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15
+        copy(buf, [0x48, 0x81, 0xEC]) u32(buf, 299008 + 8)           // sub rsp,299016
+        copy(buf, [0x48, 0x89, 0xE6])                                // mov rsi,rsp (dest)
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)              // rax=dest / 0
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la dr_bad1 = emit_je_placeholder(buf)
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (sti)
+        copy(buf, [0xBE, 0x00, 0x00, 0x09, 0x00])                    // mov esi,0x90000 (O_DIRECTORY|O_CLOEXEC)
+        copy(buf, [0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F, 0x05])        // open
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la dr_bad2 = emit_jcc_placeholder(buf, 0x88)                 // js bad
+        copy(buf, [0x49, 0x89, 0xC4])                                // mov r12,rax (fd)
+        copy(buf, [0x4C, 0x8D, 0xAC, 0x24]) u32(buf, 36864)          // lea r13,[rsp+36864] (ut-start)
+        copy(buf, [0x4D, 0x89, 0xEE])                                // mov r14,r13 (ut-peikar)
+        la dr_getd = lengde(buf)                                     // .getdents:
+        copy(buf, [0x4C, 0x89, 0xE7])                                // mov rdi,r12
+        copy(buf, [0x48, 0x8D, 0xB4, 0x24]) u32(buf, 4096)           // lea rsi,[rsp+4096]
+        copy(buf, [0xBA, 0x00, 0x80, 0x00, 0x00])                    // mov edx,32768
+        copy(buf, [0xB8, 0xD9, 0x00, 0x00, 0x00, 0x0F, 0x05])        // getdents64
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la dr_end = emit_jcc_placeholder(buf, 0x8E)                  // jle .end (0 eller feil)
+        copy(buf, [0x48, 0x8D, 0x9C, 0x24]) u32(buf, 4096)           // lea rbx,[rsp+4096] (cur)
+        copy(buf, [0x4C, 0x8D, 0x3C, 0x03])                          // lea r15,[rbx+rax] (end)
+        la dr_ent = lengde(buf)                                      // .entry:
+        copy(buf, [0x4C, 0x39, 0xFB])                                // cmp rbx,r15
+        la dr_next_chunk = emit_jcc_placeholder(buf, 0x8D)           // jge .getdents
+        // hopp over "." og ".."
+        copy(buf, [0x80, 0x7B, 0x13, 0x2E])                          // cmp byte [rbx+19],'.'
+        la dr_notdot = emit_jcc_placeholder(buf, 0x85)
+        copy(buf, [0x80, 0x7B, 0x14, 0x00])                          // cmp byte [rbx+20],0
+        la dr_skip1 = emit_je_placeholder(buf)
+        copy(buf, [0x80, 0x7B, 0x14, 0x2E])                          // cmp byte [rbx+20],'.'
+        la dr_notdd = emit_jcc_placeholder(buf, 0x85)
+        copy(buf, [0x80, 0x7B, 0x15, 0x00])                          // cmp byte [rbx+21],0
+        la dr_skip2 = emit_je_placeholder(buf)
+        la dr_keep = lengde(buf)
+        patch_jump(buf, dr_notdot, dr_keep) patch_jump(buf, dr_notdd, dr_keep)
+        // plass? (ut-peikar − ut-start) < 261888 (256 KiB − 256)
+        copy(buf, [0x4C, 0x89, 0xF0])                                // mov rax,r14
+        copy(buf, [0x4C, 0x29, 0xE8])                                // sub rax,r13
+        copy(buf, [0x48, 0x3D, 0x00, 0xFF, 0x03, 0x00])              // cmp rax,261888
+        la dr_full = emit_jcc_placeholder(buf, 0x8D)                 // jge .skip (full)
+        // kind-teikn frå d_type ([rbx+18]): 4→d, 8→f, 10→l, elles o
+        copy(buf, [0x0F, 0xB6, 0x43, 0x12])                          // movzx eax,byte [rbx+18]
+        copy(buf, [0x41, 0xB0, 0x6F])                                // mov r8b,'o'
+        copy(buf, [0x3C, 0x04, 0x75, 0x03, 0x41, 0xB0, 0x64])        // cmp al,4; jne +3; mov r8b,'d'
+        copy(buf, [0x3C, 0x08, 0x75, 0x03, 0x41, 0xB0, 0x66])        // cmp al,8; jne +3; mov r8b,'f'
+        copy(buf, [0x3C, 0x0A, 0x75, 0x03, 0x41, 0xB0, 0x6C])        // cmp al,10; jne +3; mov r8b,'l'
+        copy(buf, [0x45, 0x88, 0x06])                                // mov [r14],r8b
+        copy(buf, [0x41, 0xC6, 0x46, 0x01, 0x09])                    // mov byte [r14+1],TAB
+        copy(buf, [0x49, 0x83, 0xC6, 0x02])                          // add r14,2
+        copy(buf, [0x48, 0x8D, 0x73, 0x13])                          // lea rsi,[rbx+19] (namn)
+        la dr_cp = lengde(buf)                                       // .cp:
+        copy(buf, [0x8A, 0x06])                                      // mov al,[rsi]
+        copy(buf, [0x84, 0xC0])                                      // test al,al
+        la dr_cpdone = emit_je_placeholder(buf)
+        copy(buf, [0x41, 0x88, 0x06])                                // mov [r14],al
+        copy(buf, [0x49, 0xFF, 0xC6, 0x48, 0xFF, 0xC6])              // inc r14; inc rsi
+        la dr_cpj = emit_jmp_placeholder(buf)
+        patch_jump(buf, dr_cpj, dr_cp)
+        la dr_cpd = lengde(buf)
+        patch_jump(buf, dr_cpdone, dr_cpd)
+        copy(buf, [0x41, 0xC6, 0x06, 0x0A])                          // mov byte [r14],LF
+        copy(buf, [0x49, 0xFF, 0xC6])                                // inc r14
+        la dr_skip = lengde(buf)                                     // .skip:
+        patch_jump(buf, dr_skip1, dr_skip) patch_jump(buf, dr_skip2, dr_skip) patch_jump(buf, dr_full, dr_skip)
+        copy(buf, [0x0F, 0xB7, 0x43, 0x10])                          // movzx eax,word [rbx+16] (d_reclen)
+        copy(buf, [0x48, 0x01, 0xC3])                                // add rbx,rax
+        la dr_entj = emit_jmp_placeholder(buf)
+        patch_jump(buf, dr_entj, dr_ent)
+        la dr_nc = lengde(buf)
+        patch_jump(buf, dr_next_chunk, dr_nc)
+        la dr_gj = emit_jmp_placeholder(buf)
+        patch_jump(buf, dr_gj, dr_getd)
+        la dr_endl = lengde(buf)                                     // .end:
+        patch_jump(buf, dr_end, dr_endl)
+        copy(buf, [0x4C, 0x89, 0xE7])                                // mov rdi,r12
+        copy(buf, [0xB8, 0x03, 0x00, 0x00, 0x00, 0x0F, 0x05])        // close
+        copy(buf, [0x4C, 0x89, 0xEF])                                // mov rdi,r13
+        copy(buf, [0x4C, 0x89, 0xF6])                                // mov rsi,r14
+        copy(buf, [0x4C, 0x29, 0xEE])                                // sub rsi,r13 (len)
+        call_rel32(buf, RT_STR_RAW(), code_va)                       // rax = streng
+        la dr_ret = emit_jmp_placeholder(buf)
+        la dr_badl = lengde(buf)                                     // .bad: → "!"
+        patch_jump(buf, dr_bad1, dr_badl) patch_jump(buf, dr_bad2, dr_badl)
+        // (ikkje null: typa null-samanlikning på tekst-var derefererer payload)
+        copy(buf, [0xC6, 0x04, 0x24, 0x21])                          // mov byte [rsp],'!'
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp
+        copy(buf, [0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00])        // mov rsi,1
+        call_rel32(buf, RT_STR_RAW(), code_va)
+        la dr_retl = lengde(buf)
+        patch_jump(buf, dr_ret, dr_retl)
+        copy(buf, [0x48, 0x81, 0xC4]) u32(buf, 299008 + 8)           // add rsp
+        copy(buf, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B]) // pop r15..rbx
+        copy(buf, [0x5D])                                            // pop rbp
+        legg_til(buf, 0x50)                                          // push rax
+        returner
+    }
+    // native_fs_stat(sti, follow) → liste [mode,size,ino,dev,nlink,uid,gid,atime,mtime,ctime]
+    // eller [-1] ved feil. stat(#4) om follow≠0, elles lstat(#6). struct stat: dev@0 ino@8
+    // nlink@16 mode@24(u32) uid@28 gid@32 size@48 atime@72 mtime@88 ctime@104.
+    hvis fn_nm == "builtin.native_fs_stat" {
+        la st_i: heiltall = 2
+        mens st_i < nargs { legg_til(buf, 0x58) st_i = st_i + 1 }
+        legg_til(buf, 0x5E)                                          // pop rsi (follow)
+        legg_til(buf, 0x5F)                                          // pop rdi (sti)
+        copy(buf, [0x55, 0x48, 0x89, 0xE5])                          // push rbp; mov rbp,rsp
+        copy(buf, [0x53, 0x41, 0x54, 0x41, 0x55])                    // push rbx,r12,r13
+        copy(buf, [0x48, 0x81, 0xEC]) u32(buf, 4096 + 256)           // sub rsp,4352
+        copy(buf, [0x49, 0x89, 0xF4])                                // mov r12,rsi (follow-NcVal)
+        copy(buf, [0x48, 0x89, 0xE6])                                // mov rsi,rsp
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la st_bad1 = emit_je_placeholder(buf)
+        copy(buf, [0xB8, 0x06, 0x00, 0x00, 0x00])                    // mov eax,6 (lstat)
+        copy(buf, [0x4D, 0x85, 0xE4])                                // test r12,r12
+        copy(buf, [0x74, 0x0D])                                      // je +13 (null → lstat)
+        copy(buf, [0x49, 0x83, 0x7C, 0x24, 0x08, 0x00])              // cmp qword [r12+8],0
+        copy(buf, [0x74, 0x05])                                      // je +5
+        copy(buf, [0xB8, 0x04, 0x00, 0x00, 0x00])                    // mov eax,4 (stat)
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp
+        copy(buf, [0x48, 0x8D, 0xB4, 0x24]) u32(buf, 4096)           // lea rsi,[rsp+4096]
+        copy(buf, [0x0F, 0x05])                                      // syscall
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la st_bad2 = emit_jcc_placeholder(buf, 0x85)                 // jne bad
+        copy(buf, [0x4C, 0x8D, 0xAC, 0x24]) u32(buf, 4096)           // lea r13,[rsp+4096]
+        // push 10 int-NcVal (mode,size,ino,dev,nlink,uid,gid,atime,mtime,ctime) i rekkjefølgje
+        la st_felt = [[24, 4], [48, 8], [8, 8], [0, 8], [16, 8], [28, 4], [32, 4], [72, 8], [88, 8], [104, 8]]
+        la st_k: heiltall = 0
+        mens st_k < 10 {
+            la st_off: heiltall = st_felt[st_k][0]
+            hvis st_felt[st_k][1] == 4 { copy(buf, [0x41, 0x8B, 0x7D, st_off]) }   // mov edi,[r13+off]
+            ellers { copy(buf, [0x49, 0x8B, 0x7D, st_off]) }                        // mov rdi,[r13+off]
+            call_rel32(buf, RT_INT(), code_va)
+            legg_til(buf, 0x50)                                      // push NcVal
+            st_k = st_k + 1
+        }
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp
+        copy(buf, [0x48, 0xC7, 0xC6, 0x0A, 0x00, 0x00, 0x00])        // mov rsi,10
+        call_rel32(buf, RT_BUILD_LIST_REV(), code_va)                // rax = liste
+        copy(buf, [0x48, 0x83, 0xC4, 0x50])                          // add rsp,80
+        la st_ret = emit_jmp_placeholder(buf)
+        la st_badl = lengde(buf)                                     // .bad: → [-1]
+        patch_jump(buf, st_bad1, st_badl) patch_jump(buf, st_bad2, st_badl)
+        // (typa `st == null` på ein liste-var derefererer payload → aldri null her)
+        copy(buf, [0x48, 0xC7, 0xC7, 0xFF, 0xFF, 0xFF, 0xFF])        // mov rdi,-1
+        call_rel32(buf, RT_INT(), code_va)
+        legg_til(buf, 0x50)                                          // push
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp
+        copy(buf, [0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00])        // mov rsi,1
+        call_rel32(buf, RT_BUILD_LIST_REV(), code_va)
+        copy(buf, [0x48, 0x83, 0xC4, 0x08])                          // add rsp,8
+        la st_retl = lengde(buf)
+        patch_jump(buf, st_ret, st_retl)
+        copy(buf, [0x48, 0x8D, 0x65, 0xE8])                          // lea rsp,[rbp-24]
+        copy(buf, [0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D])              // pop r13,r12,rbx,rbp
+        legg_til(buf, 0x50)
+        returner
+    }
+    // native_fs_unlink(sti) #87 / native_fs_rmdir(sti) #84 → int (0 ok, −errno)
+    hvis fn_nm == "builtin.native_fs_unlink" eller fn_nm == "builtin.native_fs_rmdir" {
+        la u_nr: heiltall = 87
+        hvis fn_nm == "builtin.native_fs_rmdir" { u_nr = 84 }
+        la u_i: heiltall = 1
+        mens u_i < nargs { legg_til(buf, 0x58) u_i = u_i + 1 }
+        legg_til(buf, 0x5F)                                          // pop rdi
+        copy(buf, [0x55, 0x48, 0x89, 0xE5])                          // push rbp; mov rbp,rsp
+        copy(buf, [0x48, 0x81, 0xEC, 0x00, 0x10, 0x00, 0x00])        // sub rsp,4096
+        copy(buf, [0x48, 0x89, 0xE6])                                // mov rsi,rsp
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        copy(buf, [0x75, 0x09])                                      // jne +9
+        copy(buf, [0x48, 0xC7, 0xC0, 0xEA, 0xFF, 0xFF, 0xFF])        // mov rax,-22 (EINVAL) (7 B)
+        copy(buf, [0xEB, 0x0A])                                      // jmp +10 (2 B)
+        copy(buf, [0xB8]) u32(buf, u_nr)                             // mov eax,nr (5 B)
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (3 B)
+        copy(buf, [0x0F, 0x05])                                      // syscall (2 B)
+        copy(buf, [0x48, 0x89, 0xC7])                                // mov rdi,rax
+        call_rel32(buf, RT_INT(), code_va)
+        copy(buf, [0x48, 0x89, 0xEC, 0x5D])                          // mov rsp,rbp; pop rbp
+        legg_til(buf, 0x50)
+        returner
+    }
+    // native_fs_chmod(sti, mode) #90 → int
+    hvis fn_nm == "builtin.native_fs_chmod" {
+        la c_i: heiltall = 2
+        mens c_i < nargs { legg_til(buf, 0x58) c_i = c_i + 1 }
+        legg_til(buf, 0x5E)                                          // pop rsi (mode-NcVal)
+        legg_til(buf, 0x5F)                                          // pop rdi (sti)
+        copy(buf, [0x55, 0x48, 0x89, 0xE5, 0x53])                    // push rbp; mov rbp,rsp; push rbx
+        copy(buf, [0x48, 0x81, 0xEC, 0x08, 0x10, 0x00, 0x00])        // sub rsp,4104
+        copy(buf, [0x48, 0x8B, 0x5E, 0x08])                          // mov rbx,[rsi+8] (mode)
+        copy(buf, [0x48, 0x89, 0xE6])                                // mov rsi,rsp
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        copy(buf, [0x75, 0x09])                                      // jne +9
+        copy(buf, [0x48, 0xC7, 0xC0, 0xEA, 0xFF, 0xFF, 0xFF])        // mov rax,-22 (7 B)
+        copy(buf, [0xEB, 0x0D])                                      // jmp +13 (2 B)
+        copy(buf, [0xB8, 0x5A, 0x00, 0x00, 0x00])                    // mov eax,90 (5)
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (3)
+        copy(buf, [0x48, 0x89, 0xDE])                                // mov rsi,rbx (3)
+        copy(buf, [0x0F, 0x05])                                      // syscall (2)
+        copy(buf, [0x48, 0x89, 0xC7])                                // mov rdi,rax
+        call_rel32(buf, RT_INT(), code_va)
+        copy(buf, [0x48, 0x8D, 0x65, 0xF8, 0x5B, 0x5D])              // lea rsp,[rbp-8]; pop rbx; pop rbp
+        legg_til(buf, 0x50)
+        returner
+    }
+    // native_fs_rename(frå, til) #82 / native_fs_symlink(mål, lenkje) #88 → int
+    hvis fn_nm == "builtin.native_fs_rename" eller fn_nm == "builtin.native_fs_symlink" {
+        la r_nr: heiltall = 82
+        hvis fn_nm == "builtin.native_fs_symlink" { r_nr = 88 }
+        la r_i: heiltall = 2
+        mens r_i < nargs { legg_til(buf, 0x58) r_i = r_i + 1 }
+        legg_til(buf, 0x5E)                                          // pop rsi (b)
+        legg_til(buf, 0x5F)                                          // pop rdi (a)
+        copy(buf, [0x55, 0x48, 0x89, 0xE5, 0x53])                    // push rbp; mov rbp,rsp; push rbx
+        copy(buf, [0x48, 0x81, 0xEC, 0x08, 0x20, 0x00, 0x00])        // sub rsp,8200
+        copy(buf, [0x48, 0x89, 0xF3])                                // mov rbx,rsi (b-NcVal)
+        copy(buf, [0x48, 0x89, 0xE6])                                // mov rsi,rsp (a → [rsp])
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la r_bad1 = emit_je_placeholder(buf)
+        copy(buf, [0x48, 0x89, 0xDF])                                // mov rdi,rbx
+        copy(buf, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x10, 0x00, 0x00])  // lea rsi,[rsp+4096] (b)
+        call_rel32(buf, atomic_vas["cstr_to"], code_va)
+        copy(buf, [0x48, 0x85, 0xC0])                                // test rax,rax
+        la r_bad2 = emit_je_placeholder(buf)
+        copy(buf, [0xB8]) u32(buf, r_nr)                             // mov eax,nr
+        copy(buf, [0x48, 0x89, 0xE7])                                // mov rdi,rsp (a)
+        copy(buf, [0x48, 0x8D, 0xB4, 0x24, 0x00, 0x10, 0x00, 0x00])  // lea rsi,[rsp+4096] (b)
+        copy(buf, [0x0F, 0x05])                                      // syscall
+        la r_ok = emit_jmp_placeholder(buf)
+        la r_badl = lengde(buf)
+        patch_jump(buf, r_bad1, r_badl) patch_jump(buf, r_bad2, r_badl)
+        copy(buf, [0x48, 0xC7, 0xC0, 0xEA, 0xFF, 0xFF, 0xFF])        // mov rax,-22
+        la r_okl = lengde(buf)
+        patch_jump(buf, r_ok, r_okl)
+        copy(buf, [0x48, 0x89, 0xC7])                                // mov rdi,rax
+        call_rel32(buf, RT_INT(), code_va)
+        copy(buf, [0x48, 0x8D, 0x65, 0xF8, 0x5B, 0x5D])              // lea rsp,[rbp-8]; pop rbx; pop rbp
         legg_til(buf, 0x50)
         returner
     }
