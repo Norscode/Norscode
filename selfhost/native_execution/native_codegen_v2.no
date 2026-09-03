@@ -879,6 +879,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".fil_skriv_binar") eller fn_nm == "fil_skriv_binar" eller builtin.ends_with(fn_nm, ".fil_skriv_binary") eller fn_nm == "fil_skriv_binary" { returner "null" }
     hvis builtin.ends_with(fn_nm, ".fil_finnes") eller fn_nm == "fil_finnes" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".miljo_hent") eller fn_nm == "miljo_hent" { returner "str" }
+    hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" { returner "map" }
     hvis builtin.ends_with(fn_nm, ".miljo_finnes") eller fn_nm == "miljo_finnes" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".ny_liste") eller fn_nm == "ny_liste" eller fn_nm == "liste_ny" eller fn_nm == "ny_tekst_liste" { returner "list" }
     hvis builtin.ends_with(fn_nm, ".ny_map") eller builtin.ends_with(fn_nm, ".ny_map_native") eller fn_nm == "ny_map" eller fn_nm == "ny_map_native" { returner "map" }
@@ -3586,12 +3587,16 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
                 // fann det i fersk seed sin parser-feilmeldingsveg). Konverter operandar
                 // som ikkje er statisk "str" via to_text-atomet (str→same, int→desimal,
                 // elles tom streng) FØR kallet. Stakk: [.., venstre, høgre(topp)].
-                hvis t2 != "str" {
+                // Statisk "str" er ikkje garantert (deklarert `: tekst` kan halde null/
+                // bool/tal ved køyring — fersk seed krasja i parser-vegen sjølv med
+                // statisk-gata konvertering). Konverter difor ALLTID begge (to_text er
+                // rein passthrough for ekte strengar: cmp type,2 → ret).
+                hvis sann {
                     legg_til(buf, 0x5F)                              // pop rdi (høgre)
                     call_rel32(buf, atomic_vas["to_text"], eiga_va)  // rax = streng
                     legg_til(buf, 0x50)                              // push rax
                 }
-                hvis t1 != "str" {
+                hvis sann {
                     legg_til(buf, 0x5E)                              // pop rsi (høgre)
                     legg_til(buf, 0x5F)                              // pop rdi (venstre)
                     legg_til(buf, 0x56)                              // push rsi (spar høgre)
@@ -4091,6 +4096,81 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         u32(buf, HEAP_ALLOC_START())
         call_rel32(buf, RT_INT(), code_va)
         legg_til(buf, 0x50)
+        returner
+    }
+    hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" {
+        // Linux x86-64: uname(#63) + getcwd(#79) + readlink(#89 "/proc/self/exe") →
+        // map {system, machine, cwd, executable, status:"ok"}. Manglande builtin gav
+        // null → RT_MAP_KEYS(null) SIGSEGV (0x401ee9) i fersk seed; nc_main/harness/
+        // verktøy les system_info()["system"|"machine"|"cwd"|"executable"|"status"].
+        // Scratch på maskinstakken (r12 = base): [0,512) utsname (sysname@0,
+        // machine@260), [512,1536) cwd, [1536,2560) exe, [2400,2416) "/proc/self/exe",
+        // [2496,2536) 5 NcVal-slot. Strengar via RT_STR_RAW(rdi=ptr, rsi=len).
+        la si_drop: heiltall = 0
+        mens si_drop < nargs {
+            legg_til(buf, 0x58)
+            si_drop = si_drop + 1
+        }
+        copy(buf, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56])   // push rbx,r12,r13,r14
+        copy(buf, [0x48, 0x81, 0xEC])                           // sub rsp,2560
+        u32(buf, 2560)
+        copy(buf, [0x49, 0x89, 0xE4])                           // mov r12,rsp
+        // "/proc/self/exe\0" → [r12+2400]
+        copy(buf, [0x48, 0xB8, 0x2F, 0x70, 0x72, 0x6F, 0x63, 0x2F, 0x73, 0x65]) // mov rax,"/proc/se"
+        copy(buf, [0x49, 0x89, 0x84, 0x24]) u32(buf, 2400)                        // mov [r12+2400],rax
+        copy(buf, [0x48, 0xB8, 0x6C, 0x66, 0x2F, 0x65, 0x78, 0x65, 0x00, 0x00]) // mov rax,"lf/exe\0\0"
+        copy(buf, [0x49, 0x89, 0x84, 0x24]) u32(buf, 2408)                        // mov [r12+2408],rax
+        // nullstill fyrste byte i sysname/cwd/exe (om syscall feilar → tom streng)
+        copy(buf, [0x41, 0xC6, 0x04, 0x24, 0x00])                                  // mov byte[r12],0
+        copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 260) legg_til(buf, 0x00)      // mov byte[r12+260],0
+        copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 512) legg_til(buf, 0x00)      // mov byte[r12+512],0
+        copy(buf, [0x41, 0xC6, 0x84, 0x24]) u32(buf, 1536) legg_til(buf, 0x00)     // mov byte[r12+1536],0
+        // uname(r12)
+        copy(buf, [0xB8, 0x3F, 0x00, 0x00, 0x00, 0x4C, 0x89, 0xE7, 0x0F, 0x05])   // mov eax,63; mov rdi,r12; syscall
+        // getcwd(r12+512, 1024)
+        copy(buf, [0xB8, 0x4F, 0x00, 0x00, 0x00])                                  // mov eax,79
+        copy(buf, [0x49, 0x8D, 0xBC, 0x24]) u32(buf, 512)                          // lea rdi,[r12+512]
+        copy(buf, [0xBE, 0x00, 0x04, 0x00, 0x00, 0x0F, 0x05])                      // mov esi,1024; syscall
+        // readlink(r12+2400, r12+1536, 1023) → rax=len; NUL-terminer
+        copy(buf, [0xB8, 0x59, 0x00, 0x00, 0x00])                                  // mov eax,89
+        copy(buf, [0x49, 0x8D, 0xBC, 0x24]) u32(buf, 2400)                         // lea rdi,[r12+2400]
+        copy(buf, [0x49, 0x8D, 0xB4, 0x24]) u32(buf, 1536)                         // lea rsi,[r12+1536]
+        copy(buf, [0xBA, 0xFF, 0x03, 0x00, 0x00, 0x0F, 0x05])                      // mov edx,1023; syscall
+        copy(buf, [0x48, 0x85, 0xC0, 0x78, 0x04])                                  // test rax,rax; js +4
+        copy(buf, [0xC6, 0x04, 0x06, 0x00])                                        // mov byte[rsi+rax],0
+        // fire C-strengar → NcVal-slot [r12+2496+8*i]: sysname@0, machine@260, cwd@512, exe@1536
+        la si_felt = [0, 260, 512, 1536]
+        la si_i: heiltall = 0
+        mens si_i < 4 {
+            copy(buf, [0x49, 0x8D, 0xBC, 0x24]) u32(buf, si_felt[si_i])            // lea rdi,[r12+felt]
+            copy(buf, [0x31, 0xC9])                                                // xor ecx,ecx
+            copy(buf, [0x80, 0x3C, 0x0F, 0x00])                                    // cmp byte[rdi+rcx],0
+            copy(buf, [0x74, 0x05])                                                // je +5
+            copy(buf, [0x48, 0xFF, 0xC1])                                          // inc rcx
+            copy(buf, [0xEB, 0xF5])                                                // jmp cmp
+            copy(buf, [0x48, 0x89, 0xCE])                                          // mov rsi,rcx
+            call_rel32(buf, RT_STR_RAW(), code_va)                                 // rax = streng-NcVal
+            copy(buf, [0x49, 0x89, 0x84, 0x24]) u32(buf, 2496 + 8 * si_i)          // mov [r12+slot],rax
+            si_i = si_i + 1
+        }
+        // par: (system, machine, cwd, executable, status) → RT_BUILD_MAP_REV(rsp, 5)
+        la si_nøklar = ["system", "machine", "cwd", "executable"]
+        si_i = 0
+        mens si_i < 4 {
+            emit_push_const(buf, si_nøklar[si_i], rd_offs, code_va)               // push nøkkel
+            copy(buf, [0x49, 0x8B, 0x84, 0x24]) u32(buf, 2496 + 8 * si_i)          // mov rax,[r12+slot]
+            legg_til(buf, 0x50)                                                    // push verdi
+            si_i = si_i + 1
+        }
+        emit_push_const(buf, "status", rd_offs, code_va)
+        emit_push_const(buf, "ok", rd_offs, code_va)
+        copy(buf, [0x48, 0x89, 0xE7])                                              // mov rdi,rsp
+        copy(buf, [0x48, 0xC7, 0xC6, 0x05, 0x00, 0x00, 0x00])                      // mov rsi,5
+        call_rel32(buf, RT_BUILD_MAP_REV(), code_va)                               // rax = map
+        copy(buf, [0x48, 0x83, 0xC4, 0x50])                                        // add rsp,80
+        copy(buf, [0x48, 0x81, 0xC4]) u32(buf, 2560)                               // add rsp,2560
+        copy(buf, [0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B])                      // pop r14,r13,r12,rbx
+        legg_til(buf, 0x50)                                                        // push map
         returner
     }
     hvis fn_nm == "builtin.tid_ms" eller fn_nm == "tid_ms" {
