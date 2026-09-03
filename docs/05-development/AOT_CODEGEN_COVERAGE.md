@@ -63,6 +63,29 @@ Sjølvsjekkande vakter i gc-litmus.yml: `gc_jsonesc_probe` (serialisering) og `g
 (NCB-skriving/-lesing) må verifiserast byte-eksakt mot VM-referansen — VM-en escapa rett
 heile tida (`["a\\b","q\"r","n\nl","\\"]`).
 
+## ✅ ELF stage-0-fixpunkt: committa fragment var MISKOMPILERTE (presedens `&` vs `+`)
+
+Etter JSON-escaping-fiksen var Gen2 gyldig, men Gen1 ≠ Gen2 (988283 vs 1042140 B). Diff av
+CI-artefaktet `norscode-linux-x86_64-source-only-fragments` mot `bootstrap/precompiled_fragments*`
+(223 funksjonar): ALLE skil seg berre i `source_lines`/`source_columns` (metadata som blir baka
+inn i ELF-en) — pluss ÉIN reell kodeforskjell: `ir_to_bytecode.json_escape_tegn` sitt
+`(code & 15) + 1` var i dei committa fragmenta kompilert som `code & (15 + 1)` (PUSH 1, ADD, AND).
+Den self-hosta parseren (Gen1) kompilerer parentesen rett (AND, PUSH 1, ADD). Dvs. kompilatoren som
+laga dei committa fragmenta hadde ein presedensfeil; fixpunktet konvergerer ved å committe Gen2-
+fragmenta (dei er sjølvkonsistente: Gen1' frå dei gir same Gen2). **Lærdom:** ved fixpunkt-drift,
+diff fragmenta funksjon-for-funksjon FØR ein leitar i codegen — metadata-drift og éin miskompilering
+såg ut som «strukturell divergens».
+
+## ✅ `vent.sov` søv faktisk (var no-op i seed-runtime → test_vm_vent_sleep raud)
+
+x86-64 v2 mangla `builtin.vent.sov` heilt (ukjend builtin → returnerte straks); ARM64-emitteren
+var eksplisitt no-op på macOS. No: x86-64 → `nanosleep`(#35) med timespec på stakken (ms/1000,
+(ms%1000)·1e6; negativt → 0; returnerer int 0); macOS-ARM64 → `poll(NULL, 0, ms)` (BSD #230), Linux-
+ARM64 hadde alt nanosleep(#101). Vakter: `gc_sov_probe` (gc-litmus, Docker-verifisert 69 ms av 60)
+og `arm64_sov`-fixture i test_arm64_ncval_machine. **Committed stage-0-seed søv framleis ikkje** før
+han er regenerert — harnessen klassifiserer test_vm_vent_sleep som `native-unsupported` via ein
+LEVANDE måling (sov(15) < 5 ms ⇒ hopp), så testen kjem automatisk tilbake med ein seed som søv.
+
 ## ⚠️ Kjende separate frosne-runtime-bugs (IKKJE seed-blokkar)
 
 Etter hovudblokkarane er tetta dukkar det opp smale frosne-runtime-edge-cases når codegen
