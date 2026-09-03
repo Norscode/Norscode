@@ -40,6 +40,18 @@ funksjon HEAP_SZ() {
     returner 2147483648
 }
 funksjon HEAP_CONTROLSZ() { returner 64 }
+// Unnatak-handler-region: [frames, frames+0xF0000) 32B-rammer, count @+0xF0000, last_exc
+// @+0xF0008. Under GC ligg han i GC-scratchen på toppen av 256 MB-heapen (0x10600000).
+// UTAN GC er heapen ein 2 GiB monoton bump — full nc_main (bundle-lasting) passerte
+// 256 MB og OVERSKREIV handler-regionen (count=garbage → TRY_BEGIN SIGSEGV @0x4058d7,
+// throw restaurerte rsp frå garbage → ret til stakkadresse). Legg han difor på toppen
+// av 2 GiB-heapen, men UNDER 0x80000000 så abs32-adresseringa (mov rax,[abs32]) held.
+funksjon HANDLER_FRAMES_VA() {
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 274792448 }   // 0x10600000
+    returner 2146435072                                                    // 0x7FF00000
+}
+funksjon HANDLER_COUNT_VA() { returner HANDLER_FRAMES_VA() + 983040 }    // +0xF0000
+funksjon HANDLER_LASTEXC_VA() { returner HANDLER_FRAMES_VA() + 983048 }  // +0xF0008
 // VM-i-VM gjenbruker svært mange små heiltal og boolverdiar. Desse er
 // immutable og kan derfor bu i ein kanonisk cache i starten av heap-segmentet
 // i staden for å fylle den monotone prototypheapen. Området dekkjer
@@ -1982,13 +1994,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // restore rsp/rbp, hopp til catch. Handler vert IKKJE poppa her — catch sin TRY_END gjer
     // det (som VM-en, vm.no:6451). Ingen handler → jmp RT_THROW (skriv melding + avslutt).
     atomics["throw_unwind"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000] (count)
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HANDLER_COUNT_VA())   // mov rax,[count]
     copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
     copy(bytes, [0x74, 0x1F])                      // jz .no_handler (+31)
     copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax (index = count-1)
     copy(bytes, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
-    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x60, 0x10]) // add rax,0x10600000 (frame)
-    copy(bytes, [0x48, 0x89, 0x3C, 0x25, 0x08, 0x00, 0x6F, 0x10]) // mov [0x106F0008],rdi (last_exc)
+    copy(bytes, [0x48, 0x05]) u32(bytes, HANDLER_FRAMES_VA())               // add rax,frames
+    copy(bytes, [0x48, 0x89, 0x3C, 0x25]) u32(bytes, HANDLER_LASTEXC_VA()) // mov [last_exc],rdi
     copy(bytes, [0x48, 0x8B, 0x68, 0x10])          // mov rbp,[rax+16] (restore rbp)
     copy(bytes, [0x48, 0x8B, 0x60, 0x08])          // mov rsp,[rax+8] (restore rsp)
     copy(bytes, [0xFF, 0x20])                      // jmp [rax] (catch_va)
@@ -3892,10 +3904,10 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
         // ─── TRY_BEGIN (push handler {catch_va, rsp, rbp}) ──────────────────────
         ellers hvis op == "TRY_BEGIN"
             la catch_lbl3: tekst = tekst(instr[1])
-            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000] (count)
+            copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, HANDLER_COUNT_VA())   // mov rax,[count]
             copy(buf, [0x48, 0x89, 0xC1])                // mov rcx,rax
             copy(buf, [0x48, 0xC1, 0xE0, 0x05])          // shl rax,5 (*32)
-            copy(buf, [0x48, 0x05, 0x00, 0x00, 0x60, 0x10]) // add rax,0x10600000 (frame)
+            copy(buf, [0x48, 0x05]) u32(buf, HANDLER_FRAMES_VA())               // add rax,frames
             copy(buf, [0x49, 0xB8])                       // mov r8, imm64 (catch_va — abs64-patch)
             u64(buf, 0)
             legg_til(patches, {"type": "abs64", "pos": lengde(buf) - 8, "lbl": catch_lbl3})
@@ -3903,19 +3915,19 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             copy(buf, [0x48, 0x89, 0x60, 0x08])          // mov [rax+8],rsp
             copy(buf, [0x48, 0x89, 0x68, 0x10])          // mov [rax+16],rbp
             copy(buf, [0x48, 0xFF, 0xC1])                // inc rcx
-            copy(buf, [0x48, 0x89, 0x0C, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov [0x106F0000],rcx (count++)
+            copy(buf, [0x48, 0x89, 0x0C, 0x25]) u32(buf, HANDLER_COUNT_VA())   // mov [count],rcx (count++)
 
         // ─── TRY_END (pop handler) ──────────────────────────────────────────────
         ellers hvis op == "TRY_END"
-            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0000]
+            copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, HANDLER_COUNT_VA())   // mov rax,[count]
             copy(buf, [0x48, 0x85, 0xC0])                // test rax,rax
             copy(buf, [0x74, 0x0B])                      // jz +11
             copy(buf, [0x48, 0xFF, 0xC8])                // dec rax
-            copy(buf, [0x48, 0x89, 0x04, 0x25, 0x00, 0x00, 0x6F, 0x10]) // mov [0x106F0000],rax
+            copy(buf, [0x48, 0x89, 0x04, 0x25]) u32(buf, HANDLER_COUNT_VA())   // mov [count],rax
 
         // ─── LOAD_EXCEPTION (push last_exception) ───────────────────────────────
         ellers hvis op == "LOAD_EXCEPTION"
-            copy(buf, [0x48, 0x8B, 0x04, 0x25, 0x08, 0x00, 0x6F, 0x10]) // mov rax,[0x106F0008]
+            copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, HANDLER_LASTEXC_VA()) // mov rax,[last_exc]
             legg_til(buf, 0x50)                          // push rax
             legg_til(tstack, "any")
 
