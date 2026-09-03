@@ -732,7 +732,7 @@ funksjon emit_sys_write_marker(buf, ch: tekst) {
 // død ramme (rsp/rbp frå ein retur-nert funksjon) → «ret til stakkadresse» i fersk
 // seed (std.runtime.atomic._native: prøv { returner builtin… }). Epilogen
 // restaurerer difor count til inngangsverdien på KVAR retur.
-funksjon prolog(buf, n_local) {
+funksjon prolog(buf, n_local, code_va, atomic_vas) {
     legg_til(buf, 0x55)                             // push rbp
     legg_til(buf, 0x48)
     legg_til(buf, 0x89)
@@ -743,6 +743,11 @@ funksjon prolog(buf, n_local) {
     legg_til(buf, 0x81)
     legg_til(buf, 0xEC)
     u32(buf, sz)                                    // sub rsp, sz
+    // Native rekursjonsvakt (sjå _start): rsp under grensa → stack_overflow-atomet
+    // kastar fangbart unntak (throw_unwind restaurerer rsp til handlaren).
+    copy(buf, [0x48, 0x3B, 0x24, 0x25]) u32(buf, HEAP_VA() + 24)  // cmp rsp,[limit]
+    copy(buf, [0x73, 0x05])                                       // jae +5 (ok)
+    call_rel32(buf, atomic_vas["stack_overflow"], code_va)        // call atom (kastar)
     // Handler-count-slot = botnslottet (n_local+1), UNDER alle variabel-/scratch-slottar
     // (variabel-slottane må ikkje flyttast: andre pass reknar slot frå namneindeks).
     copy(buf, [0x48, 0x8B, 0x04, 0x25]) u32(buf, HANDLER_COUNT_VA())  // mov rax,[count]
@@ -2231,6 +2236,29 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, ff_box, ff_boxl)
     call_rel32(bytes, RT_BOOL(), TEXT_VA())               // rax = bool-NcVal
     copy(bytes, [0x48, 0x89, 0xEC, 0x5D, 0xC3])           // mov rsp,rbp; pop rbp; ret
+
+    // ── stack_overflow: kalla frå prologen når rsp < [HEAP_VA+24] ─────────────
+    // Byggjer «For djup rekursjon (native stakk)» på stakken → RT_STR_RAW → throw_unwind
+    // (fangbart; handlaren restaurerer rsp høgare opp). Ingen handler → uncaught-vegen.
+    atomics["stack_overflow"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x28])                 // sub rsp,40
+    copy(bytes, [0x48, 0xB8, 0x46, 0x6F, 0x72, 0x20, 0x64, 0x6A, 0x75, 0x70]) // "For djup"
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])
+    copy(bytes, [0x48, 0xB8, 0x20, 0x72, 0x65, 0x6B, 0x75, 0x72, 0x73, 0x6A]) // " rekursj"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x08])
+    copy(bytes, [0x48, 0xB8, 0x6F, 0x6E, 0x20, 0x28, 0x6E, 0x61, 0x74, 0x69]) // "on (nati"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x10])
+    copy(bytes, [0x48, 0xB8, 0x76, 0x65, 0x20, 0x73, 0x74, 0x61, 0x6B, 0x6B]) // "ve stakk"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x18])
+    copy(bytes, [0x48, 0xB8, 0x29, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) // ")"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x20])
+    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
+    copy(bytes, [0xBE, 0x21, 0x00, 0x00, 0x00])           // mov esi,33
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = melding
+    copy(bytes, [0x48, 0x83, 0xC4, 0x28])                 // add rsp,40
+    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
+    la so_jmp = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, so_jmp, atomics["throw_unwind"] - TEXT_VA())
 
     atomics["starts_with"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -3745,7 +3773,7 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
     hvis detaljsporing { native_codegen_trace("kompiler_fn var_namn") }
     la n_vars: heltall = lengde(var_namn)
     hvis detaljsporing { native_codegen_trace("kompiler_fn n_vars=" + tekst_fra_heltall(n_vars)) }
-    prolog(buf, n_vars + 8)
+    prolog(buf, n_vars + 8, eiga_va, atomic_vas)
     hvis detaljsporing { native_codegen_trace("kompiler_fn prolog") }
 
     // Lagre parameter-register (System V: rdi, rsi, rdx, rcx)
@@ -4978,6 +5006,12 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x24)
     legg_til(text, 0x25)
     u32(text, HEAP_VA() + 48)
+    // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
+    // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
+    // FANGBART «For djup rekursjon» (AOT-VM-en hadde inga vakt → SIGSEGV; C-seeden
+    // hadde nc_exec_call-teljar). Slot 48 = stakk-base (GC-rotskann).
+    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF)  // lea rax,[r12-7MiB]
+    copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, HEAP_VA() + 24)             // mov [limit],rax
     // mov rdi, [r12] = argc
     legg_til(text, 0x49)
     legg_til(text, 0x8B)
@@ -5417,6 +5451,9 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
     // modulinitialisatorar, kall start(), sys_exit med returverdien).
     la entry_va: heltall = TEXT_VA() + lengde(text)
     legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0xE4)          // mov r12, rsp
+    copy(text, [0x4C, 0x89, 0x24, 0x25]) u32(text, HEAP_VA() + 48)           // mov [stakk-base],r12
+    copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF) // lea rax,[r12-7MiB]
+    copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, HEAP_VA() + 24)           // mov [stakk-grense],rax
     legg_til(text, 0x49) legg_til(text, 0x8B) legg_til(text, 0x3C) legg_til(text, 0x24) // mov rdi,[r12]=argc
     legg_til(text, 0x49) legg_til(text, 0x8D) legg_til(text, 0x74) legg_til(text, 0x24) legg_til(text, 0x08) // lea rsi,[r12+8]
     legg_til(text, 0x49) legg_til(text, 0xBB) u64(text, argv_store_va)
