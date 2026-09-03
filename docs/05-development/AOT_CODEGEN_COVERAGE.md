@@ -116,6 +116,10 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 20 | compile-steg «hang» (16 min CPU) | frosen map lineær; VM-runtime-heap-bokhald 100k+ nøklar → O(n²) | hasha map-atom (entry-trampolinar), allocator nullstiller berre eksisterande nøklar |
 | 21 | collect SIGSEGV ved map >16 384 entryar (GC) | mark-stakk 32k peikarar / live-map 768 KiB rann over | scratch flytta over handler-regionen, 32 MiB kvar |
 | 22 | fjern_nøkkel no-op | berre ASCII «fjern_nokkel» ruta | ø-variant ruta |
+| 23 | compile-steg gav 1-byte NCB | fil_append ikkje ruta (straumande JSON-skrivar) | atom fil_append/fil_append_bin |
+| 24 | «Ukjent innebygd funksjon: host_exec_ncb_json» i harness-køyring | C-seed-vertsbuiltin utan VM-dispatch | vm.no: json_parse_raw + køyr_ncb (nøsta VM) |
+| 25 | SIGSEGV @0x80600000 i harness/compile av større testar | 2 GiB bump utan reclaim (VM_FAST=0-bokhald) | seed må byggjast i GC-layout; build_x86_seed vidarefører NORSCODE_GC_ALLOC |
+| 26 | ELF stage-0: «Kan ikkje opne fil: /selfhost/…nors» | lukka executor manglar NORSCODE_ROOT; frosen fil_les las stille tomt før | gen1_source_entry utleier rota frå innbakt kjeldesti (miljo_sett) |
 
 Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
