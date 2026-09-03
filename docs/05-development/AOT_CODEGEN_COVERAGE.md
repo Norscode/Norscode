@@ -110,6 +110,12 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 14 | ELF stage-0 raud etter overlay | overlay-slot @HEAP+56 = GC-live-map-teljar | slottar flytta til toppen av HOST_ABI-sida (+4088/+4080) |
 | 15 | katalog_finnes/lag_katalogar usann → hybrid-kompilering «feila utan output» | builtin.filesystem_read/write_operation uimplementert | rein Norscode `std/runtime_filesystem_native.no` (gap-ruta) på nye syscall-primitiv native_fs_dirents/stat/unlink/rmdir/chmod/rename/symlink |
 | 16 | SIGSEGV i feilvegen til stat/dirents | `x == null` på liste-/tekst-typa var derefererer payload | primitiv gjev sentinel («!», [−1]), aldri null |
+| 17 | harness-compile-steg SIGSEGV @0x402371 (frosen fil_skriv_binær) | fil_les_binær ikkje ruta → null | atom fil_les_bin (byte-liste), bytes_to_text, identity for bytes_to_list; sha256_bytes gap-ruta |
+| 18 | std.bytes.til_tekst gav "" | eksakt brukarfunksjon tapte for builtin-suffiks («.til_tekst» = tekst()) | fn_vas-nøkkel vinn før builtin_va |
+| 19 | Gen1-ELF: «Kan ikkje opne fil: /selfhost/…nors» (GC-layout) | miljo_sett-overlay ikkje GC-rot → sweepa | verts-ABI-sida [HOST_ABI+16,+4096) skanna konservativt som rot |
+| 20 | compile-steg «hang» (16 min CPU) | frosen map lineær; VM-runtime-heap-bokhald 100k+ nøklar → O(n²) | hasha map-atom (entry-trampolinar), allocator nullstiller berre eksisterande nøklar |
+| 21 | collect SIGSEGV ved map >16 384 entryar (GC) | mark-stakk 32k peikarar / live-map 768 KiB rann over | scratch flytta over handler-regionen, 32 MiB kvar |
+| 22 | fjern_nøkkel no-op | berre ASCII «fjern_nokkel» ruta | ø-variant ruta |
 
 Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
