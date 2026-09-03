@@ -1,5 +1,6 @@
 // tools/verify_omgang6.no — shellfri Omgang 6: bygg-native → Linux ELF64
 
+bruk std.filops som filops
 bruk std.runtime_filesystem som native_fs
 bruk std.tempfile som tempfile
 bruk tools.process_runner som prosess
@@ -37,41 +38,127 @@ funksjon filer_identiske(a: tekst, b: tekst) -> boolsk {
 }
 
 funksjon nc_miljø(root: tekst) -> ordbok_tekst {
+    // Temp-katalogen (tempfile → TMPDIR, på macOS /var/folders/…) må ligge INNANFOR
+    // disk-scopet barnet får, elles svarar seeden «Sikkerheitsfeil: … path outside
+    // disk scope» på bygg-native (start() legg basen i NC_OM6_TMPBASE).
+    la disk = root + ",.,/tmp,/private/tmp"
+    la tmpbase = env("NC_OM6_TMPBASE")
+    hvis tmpbase != "" { disk = disk + "," + tmpbase }
     returner {
         "NORSCODE_ENABLE_EXEC_PROSESS": "1",
         "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
-        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_VM_DISK_ROOT": disk,
         "NORSCODE_ROOT": root
     }
 }
 
-funksjon run_nc(root: tekst, argv: liste_tekst, timeout_ms: heiltall) -> boolsk {
-    la resultat = prosess.køyr(root + "/bin/nc", argv, root, nc_miljø(root), timeout_ms)
-    prosess.skriv_resultat(resultat)
-    returner prosess.ok(resultat)
+// Committed Linux-stage0 manglar builtin.system_info → bruk GitHub Actions sine
+// RUNNER_OS/RUNNER_ARCH (evt. NORSCODE_CI_SYSTEM/ARCH) fyrst, system_info elles.
+funksjon plattform_system() -> tekst {
+    la os = env("RUNNER_OS")
+    hvis os == "" { os = env("NORSCODE_CI_SYSTEM") }
+    hvis os == "" { prøv { os = tekst(builtin.system_info()["system"]) } fang (e) { os = "" } }
+    hvis os == "macOS" { os = "Darwin" }
+    returner os
 }
 
+funksjon plattform_maskin() -> tekst {
+    la arch = builtin.lower(env("RUNNER_ARCH"))
+    hvis arch == "" { arch = builtin.lower(env("NORSCODE_CI_ARCH")) }
+    hvis arch == "" { prøv { arch = builtin.lower(tekst(builtin.system_info()["machine"])) } fang (e) { arch = "" } }
+    hvis arch == "x64" { arch = "x86_64" }
+    hvis arch == "aarch64" { arch = "arm64" }
+    returner arch
+}
+
+// Barn av bin/nc må drivast via miljø-kontrakten (NORSCODE_CMD/NORSCODE_FILE):
+// committed Linux-stage0 manglar argv-builtinane (argv → [] → selftest, exit 0
+// utan å gjere noko), og miljøet vinn over argv i nc_main.start på alle seedar —
+// utan eksplisitt NORSCODE_CMD/FILE arvar barnet FORELDRA sine (denne fila) og
+// køyrer feil ting. Argv blir send med i tillegg (kontrakt/lesbarheit).
+funksjon nc_verktøy_for(cmd: tekst) -> tekst {
+    hvis cmd == "verify-seed" eller cmd == "seed-only" { returner "tools/verify_seed_only.no" }
+    hvis cmd == "fetch-stage0-seed" { returner "tools/fetch_stage0_seed.no" }
+    hvis cmd == "selfcompile-stage0-elf" { returner "tools/selfcompile_stage0_elf.no" }
+    returner ""
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner root + "/" + sti
+}
+
+funksjon run_nc_miljø(root: tekst, argv: liste_tekst, miljø: ordbok_tekst, timeout_ms: heiltall) -> boolsk {
+    la resultat = prosess.køyr(root + "/bin/nc", argv, root, miljø, timeout_ms)
+    prosess.skriv_resultat(resultat)
+    hvis prosess.ok(resultat) { returner sann }
+    la kva = ""
+    hvis lengde(argv) > 0 { kva = tekst(argv[0]) }
+    linje("  [FEIL] nc " + kva + ": status=" + tekst(resultat["status"]) +
+          " exit=" + tekst(resultat["exit_code"]) + " error=" + tekst(resultat["error"]))
+    returner usann
+}
+
+funksjon run_nc(root: tekst, argv: liste_tekst, timeout_ms: heiltall) -> boolsk {
+    la miljø = nc_miljø(root)
+    la verktøy = ""
+    hvis lengde(argv) > 0 { verktøy = nc_verktøy_for(tekst(argv[0])) }
+    hvis verktøy != "" {
+        miljø["NORSCODE_CMD"] = "run"
+        miljø["NORSCODE_FILE"] = root + "/" + verktøy
+    }
+    returner run_nc_miljø(root, argv, miljø, timeout_ms)
+}
+
+// bygg-native (--target linux-x86_64) = compile → NCB, ncb_to_elf (native_codegen_v2)
+// → ELF, executable-modus. Same to steg som archive/legacy_shell/tools/gc_probe_run.sh.
 funksjon bygg_native(root: tekst, src: tekst, out: tekst) -> boolsk {
-    returner run_nc(root, ["bygg-native", "--target", "linux-x86_64", src, out], 600000)
+    la abs_src = absolutt(root, src)
+    la abs_out = absolutt(root, out)
+    la ncb = abs_out + ".ncb.json"
+    la m1 = nc_miljø(root)
+    m1["NORSCODE_CMD"] = "compile"
+    m1["NORSCODE_FILE"] = abs_src
+    m1["NORSCODE_OUTPUT"] = ncb
+    hvis ikkje run_nc_miljø(root, ["compile", abs_src, ncb], m1, 600000) { returner usann }
+    la m2 = nc_miljø(root)
+    m2["NORSCODE_CMD"] = "run"
+    m2["NORSCODE_FILE"] = root + "/tools/ncb_to_elf.no"
+    m2["NORSCODE_NCB_TO_ELF_INPUT"] = ncb
+    m2["NORSCODE_NCB_TO_ELF_OUTPUT"] = abs_out
+    m2["NORSCODE_NATIVE_BIN"] = root + "/dist/norscode_native"
+    hvis ikkje run_nc_miljø(root, ["run", "tools/ncb_to_elf.no"], m2, 600000) { returner usann }
+    filops.slett_fil(ncb)
+    hvis ikkje fil_finst(abs_out) { linje("  [FEIL] ncb_to_elf skreiv ikkje " + abs_out) returner usann }
+    hvis ikkje gjer_kjørbar(abs_out) { linje("  [FEIL] klarte ikkje setje executable-modus på " + abs_out) returner usann }
+    returner sann
 }
 
 funksjon linux_x86_64() -> boolsk {
-    la info = builtin.system_info()
-    la system = tekst(info["system"])
-    la machine = tekst(info["machine"])
+    la system = plattform_system()
+    la machine = plattform_maskin()
     returner system == "Linux" og (machine == "x86_64" eller machine == "amd64")
 }
 
 funksjon plattform() -> tekst {
-    la info = builtin.system_info()
-    returner tekst(info["system"]) + "/" + tekst(info["machine"])
+    returner plattform_system() + "/" + plattform_maskin()
 }
 
 funksjon mode_match(mode: tekst, a: tekst) -> boolsk { returner mode == a eller mode == "all" }
 
+// Executable-modus: runtime-filsystem-ABI-en fyrst (nyare seedar), elles
+// builtin.fil_sett_kjorbar (committed Linux-stage0 manglar modus-ABI-en → «[verdi]»).
+funksjon gjer_kjørbar(out: tekst) -> boolsk {
+    prøv {
+        la r = native_fs.native_sett_modus_sti(out, 493)
+        hvis tekst(r["status"]) == "ok" { returner sann }
+    } fang (e) { }
+    prøv { returner builtin.fil_sett_kjorbar(out) } fang (e) { returner usann }
+    returner usann
+}
+
 funksjon køyr_elf(root: tekst, out: tekst, forvent: tekst, label: tekst) -> boolsk {
-    la mode = native_fs.native_sett_modus_sti(out, 493)
-    hvis tekst(mode["status"]) != "ok" {
+    hvis ikkje gjer_kjørbar(out) {
         linje("  [FEIL] klarte ikkje setje executable-modus på ELF")
         returner usann
     }
@@ -99,7 +186,7 @@ funksjon feil_rydd(tmp: ordbok_tekst, melding: tekst) -> heiltall {
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
     la mode = env("NC_OM6_MODE")
     hvis mode == "" { mode = "all" }
 
@@ -111,6 +198,7 @@ funksjon start() -> heiltall {
 
     la tmp = tempfile.ny_tempkatalog("omgang6_")
     la base = tempfile.sti(tmp)
+    miljo_sett("NC_OM6_TMPBASE", base)
     la src1 = base + "/src1.no"
     la src2 = base + "/src2.no"
     la src3 = base + "/src3.no"
