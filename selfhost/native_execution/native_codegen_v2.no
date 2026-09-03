@@ -910,6 +910,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".miljo_hent") eller fn_nm == "miljo_hent" { returner "str" }
     hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" { returner "map" }
     hvis builtin.ends_with(fn_nm, ".miljo_finnes") eller fn_nm == "miljo_finnes" { returner "bool" }
+    hvis builtin.ends_with(fn_nm, ".miljo_sett") eller fn_nm == "miljo_sett" { returner "null" }
     hvis builtin.ends_with(fn_nm, ".ny_liste") eller fn_nm == "ny_liste" eller fn_nm == "liste_ny" eller fn_nm == "ny_tekst_liste" { returner "list" }
     hvis builtin.ends_with(fn_nm, ".ny_map") eller builtin.ends_with(fn_nm, ".ny_map_native") eller fn_nm == "ny_map" eller fn_nm == "ny_map_native" { returner "map" }
     hvis fn_nm == "map_get" eller builtin.ends_with(fn_nm, ".map_get") { returner "any" }
@@ -2140,6 +2141,55 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
     la feil_jmp = emit_jmp_placeholder(bytes)             // jmp throw_unwind
     patch_jump(bytes, feil_jmp, atomics["throw_unwind"] - TEXT_VA())
+
+    // ── miljø-overlay: env_set(rdi=nøkkel, rsi=verdi) / env_get(rdi=nøkkel) ──────
+    // x86-64 v2 hadde INGEN miljo_sett (ukjend builtin → ingenting skjedde). nc_main
+    // publiserer NORSCODE_VM_TARGET_* via miljo_sett → policyen las tom streng → alt
+    // nekta i fersk seed («manglar capability env.read/disk.read»). Overlay-map (NcVal
+    // map) i heap-kontrollblokka @HEAP_VA+56; miljo_hent sjekkar overlayen fyrst, så
+    // frosen RT_MILJO_HENT (envp). (Same design som ARM64 sin __env_overlay__.)
+    atomics["env_set"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])           // push rbx,r12,r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x49, 0x89, 0xFC, 0x49, 0x89, 0xF5])     // mov r12,rdi; mov r13,rsi
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 56)   // mov rax,[overlay]
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la es_have = emit_jcc_placeholder(bytes, 0x85)        // jne have
+    call_rel32(bytes, RT_MAP_NEW(), TEXT_VA())            // rax = ny map
+    copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, HEAP_VA() + 56)   // mov [overlay],rax
+    la es_havel = lengde(bytes)
+    patch_jump(bytes, es_have, es_havel)
+    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax (map)
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12 (nøkkel)
+    copy(bytes, [0x4C, 0x89, 0xEA])                       // mov rdx,r13 (verdi)
+    call_rel32(bytes, RT_MAP_SET(), TEXT_VA())
+    copy(bytes, [0x31, 0xC0])                             // xor eax,eax (null)
+    copy(bytes, [0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3])     // pop r13,r12,rbx; ret
+
+    atomics["env_get"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8 (align)
+    copy(bytes, [0x49, 0x89, 0xFC])                       // mov r12,rdi (nøkkel)
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 56)   // mov rax,[overlay]
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la eg_fb1 = emit_je_placeholder(bytes)                // je fallback
+    copy(bytes, [0x48, 0x89, 0xC3])                       // mov rbx,rax (map)
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xE6])     // mov rdi,rbx; mov rsi,r12
+    call_rel32(bytes, RT_MAP_HAS(), TEXT_VA())            // rax = bool-NcVal
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la eg_fb2 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x78, 0x08, 0x00])           // cmp qword [rax+8],0
+    la eg_fb3 = emit_je_placeholder(bytes)                // je fallback (finst ikkje)
+    copy(bytes, [0x48, 0x89, 0xDF, 0x4C, 0x89, 0xE6])     // mov rdi,rbx; mov rsi,r12
+    call_rel32(bytes, RT_MAP_GET(), TEXT_VA())            // rax = verdi
+    la eg_done = emit_jmp_placeholder(bytes)
+    la eg_fb = lengde(bytes)
+    patch_jump(bytes, eg_fb1, eg_fb) patch_jump(bytes, eg_fb2, eg_fb) patch_jump(bytes, eg_fb3, eg_fb)
+    copy(bytes, [0x4C, 0x89, 0xE7])                       // mov rdi,r12
+    call_rel32(bytes, RT_MILJO_HENT(), TEXT_VA())         // rax = frå envp
+    la eg_donel = lengde(bytes)
+    patch_jump(bytes, eg_done, eg_donel)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                 // add rsp,8
+    copy(bytes, [0x41, 0x5C, 0x5B, 0xC3])                 // pop r12,rbx; ret
 
     atomics["starts_with"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -4092,6 +4142,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     la er_mkdir        = fn_nm == "builtin.mkdir_p" eller fn_nm == "mkdir_p" eller builtin.ends_with(fn_nm, ".mkdir_p") eller fn_nm == "builtin.mkdir" eller fn_nm == "mkdir"
     la er_miljo_hent   = fn_nm == "miljo_hent" eller builtin.ends_with(fn_nm, ".miljo_hent")
     la er_miljo_finnes = fn_nm == "miljo_finnes" eller builtin.ends_with(fn_nm, ".miljo_finnes")
+    la er_miljo_sett   = fn_nm == "miljo_sett" eller builtin.ends_with(fn_nm, ".miljo_sett")
     // JSON
     la er_json_parse   = fn_nm == "json_parse_raw" eller fn_nm == "json_parse" eller builtin.ends_with(fn_nm, ".json_parse_raw") eller builtin.ends_with(fn_nm, ".json_parse")
     // Brukardefinerte funksjonar som selfhost.json.json_skriv må relokerast
@@ -4145,7 +4196,8 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_binar   { returner RT_FIL_SKRIV_BINAR() }
     hvis er_fil_finnes  { returner RT_FIL_FINNES() }
     hvis er_mkdir       { returner atomic_vas["mkdir_p"] }
-    hvis er_miljo_hent  { returner RT_MILJO_HENT() }
+    hvis er_miljo_hent  { returner atomic_vas["env_get"] }
+    hvis er_miljo_sett  { returner atomic_vas["env_set"] }
     hvis er_miljo_finnes { returner RT_MILJO_FINNES() }
     hvis er_json_parse  { returner RT_JSON_PARSE() }
     hvis er_json_str    { returner atomic_vas["json_stringify"] }
