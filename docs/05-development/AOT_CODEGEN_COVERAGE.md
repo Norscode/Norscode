@@ -86,6 +86,32 @@ og `arm64_sov`-fixture i test_arm64_ncval_machine. **Committed stage-0-seed søv
 han er regenerert — harnessen klassifiserer test_vm_vent_sleep som `native-unsupported` via ein
 LEVANDE måling (sov(15) < 5 ms ⇒ hopp), så testen kjem automatisk tilbake med ein seed som søv.
 
+## ✅ Fersk self-hosta x86-64-seed (2026-09-03): frå SIGSEGV til null krasj
+
+`tools/build_x86_seed.no` (Docker linux/amd64, ~4 min) gjev ein STATISK ELF (3.7 MB; den
+committa 10 MB-seeden lenkar libssl3). Full nc_main + heile VM-en (vm.no) køyrer no natively.
+Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmus):
+
+| # | Symptom i fersk seed | Rot | Fiks |
+|---|---|---|---|
+| 1 | SIGSEGV @0x4010ab i parser-feilmelding | `"b" + 7` / `any + any` gjekk rått til RT_CONCAT/RT_ADD | to_text på operandar (statisk + dynamisk) |
+| 2 | RT_MAP_KEYS(0) SIGSEGV | `builtin.system_info` mangla | nativt uname/getcwd/readlink → map |
+| 3 | RT_FEIL → RT_STR_RAW(0x401050) SIGSEGV | frosen RT_FEIL/RT_THROW brotne (literal overskriven av RT_BOOL-trampolinen) | INDEX_GET-grensesjekk-atom, feil-atom, emittert ufanga-kast-veg |
+| 4 | TRY_BEGIN count=garbage / ret til stakkadresse | handler-region @0x10600000 overskriven av 2 GiB-bump-heapen (non-GC) | gc-gata region (0x7FF00000 non-GC) |
+| 5 | stille tidleg retur / syscall m/ tilfeldig rax | safepoint-VA = «siste 93 byte av runtimeen» — feil når trampolinar er appenda | `atomics["gc_safepoint"]` registrert ved emittering |
+| 6 | ret til stakkadresse i VM-init | `returner` inne i prøv {} lekte global handler-ramme | count lagra i botnslottet, restaurert (rcx) i epilog |
+| 7 | policy nekta alt («manglar capability env.read») | ingen miljo_sett → NORSCODE_VM_TARGET_* tomme | env_set/env_get-overlay (@HEAP_VA+56) |
+| 8 | fil_finnes sann for alt | frosen RT_FIL_FINNES + RT_FIL_LES returnerte i staden for å kaste | access(2)-atom + fil_les_safe som kastar |
+| 9 | SIGSEGV på uendeleg rekursjon | inga djupnevakt | rsp-grense (initiell rsp − 7 MiB) i prologen → fangbart unntak |
+| 10 | «path outside disk scope: /» | vm.no sjekka berre root av rot+relativ | effektiv sti (vm.no) |
+| 11 | tekst(sann) == "" | to_text mangla bool | "sann"/"usann" |
+
+Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
+`qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
+break på throw_unwind-atomet (bytemønster) for å sjå kva som blir kasta og kvar det unwindar.
+Attståande før promotering: harness-subset grønt på fersk seed, så committ som stage0 +
+SHA256SUMS; deretter macOS-seed (Mach-O-emitter-tak) og binær NCB (JSON bort).
+
 ## ⚠️ Kjende separate frosne-runtime-bugs (IKKJE seed-blokkar)
 
 Etter hovudblokkarane er tetta dukkar det opp smale frosne-runtime-edge-cases når codegen
