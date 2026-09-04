@@ -34,21 +34,27 @@ funksjon HEAP_VA()   { returner 6291456 }
 // emit-indeks 687. Segmentet er derfor 2 GiB virtuelt (berre rørte sider blir
 // fysiske) fram til komprimerande native GC kan gjenvinne målebufferane mellom
 // passa; fase-6-minneporten står framleis open.
+// ── GC-layout v3 (2026-09-04) ─────────────────────────────────────────────────
+// Heap [0x600000, GC_HEAP_LIMIT) = 1 GiB allokerbart; ALL GC-metadata ligg OVER heapen.
+// Tidlegare (v2) låg bitmap/handler/mark-stakk/live-map på 0x10400000..0x14700000 MIDT
+// i eit heap-segment som gjekk til 0x14700000, utan tak på bump: bump steig monotont
+// (concat/RT_STR_RAW er rå bump, halen vart berre fri-liste-node) → forbi 0x8600000 hamna
+// mark-bitane i handler-regionen (bitmap var 2 MiB = 128 MiB heap), og forbi 0x10400000
+// vart bitmap/mark-stakk overskrivne av objekt (seed28-krasj: bump=0x11053068 i mark-
+// stakken, garbage strenglengd i concat). Fiks: (a) metadata over 1 GiB-heapen, (b) sweep
+// SET bump = siste levande slutt (halen attvunnen), (c) safepoint-tak + eksplisitt OOM-
+// avslutning (exit 199), (d) vaktside (PROT_NONE) rett under GC_HEAP_LIMIT.
+funksjon GC_HEAP_LIMIT() { returner 1080033280 }   // 0x40600000 (heap-tak; vaktside i [−4096, 0))
+funksjon GC_BITMAP_VA() { returner 1080033280 }    // 0x40600000, 8 MiB (1 bit / 16 B-slot frå 0x600000)
+funksjon GC_MSTACK_VA() { returner 1090519040 }    // 0x41000000, 32 MiB (4M peikarar)
+funksjon GC_LIVEMAP_VA() { returner 1124073472 }   // 0x43000000, 128 MiB (8M entryar à 16 B)
+funksjon GC_SOFT_LIMIT() { returner 1012924416 }   // 0x3C600000 = tak − 64 MiB: safepoint samlar uansett teljar
+funksjon GC_HARD_LIMIT() { returner 1046478848 }   // 0x3E600000 = tak − 32 MiB: bump ≥ dette ETTER collect → OOM
 funksjon HEAP_SZ() {
-    // GC-gata: under NORSCODE_GC_ALLOC=1 er GC-scratchen (mark-stakk 0x10300000, live-map
-    // 0x10340000, bitmap 0x10400000, unnatak-handler [0x10600000,0x10700000)) lagt på TOPPEN
-    // av heapen. 269484032 = 256MB heap/scratch + 1MB handler-region sizera EKSAKT for dette:
-    // heap-segmentet endar rett etter handler-regionen, så bump aldri kan klatre forbi
-    // scratchen (naturleg tak). Hev IKKJE til 2GiB under GC — då blir scratchen liggande MIDT
-    // i det allokerbare området og ei einaste rømt bump-løype korrupterer han (jf. cache-
-    // fallback-regresjonen). Paritet-løypa (flagg AV) brukar main sin 2GiB for store program.
-    // 2026-09-03: mark-stakk og live-map FLYTTA over handler-regionen og gjort 32 MiB kvar
-    // (mark-stakk 0x10700000..0x12700000 = 4M peikarar, live-map 0x12700000..0x14700000 =
-    // 2M entryar). Dei gamle 256 KiB / 768 KiB-regionane (0x10300000/0x10340000) rann over
-    // ved eitt einaste map med >16 384 entryar (2×16 384 peikarar) → live-map korrupt →
-    // SIGSEGV i collect. Kompilatoren sin VM-tilstand er langt større. Heap-segment =
-    // 0x14700000 − 0x600000 = 336592896 (lat mapping; berre brukte sider blir rørde).
-    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 336592896 }
+    // GC-modus: segment [0x600000, 0x4B000000) = heap 1 GiB + bitmap + handler (0x40E00000)
+    // + mark-stakk + live-map. Lat mapping; berre brukte sider blir rørde.
+    // Paritet-løypa (flagg AV) brukar main sin 2 GiB monotone bump for store program.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1252658176 }   // 0x4AA00000
     returner 2147483648
 }
 funksjon HEAP_CONTROLSZ() { returner 64 }
@@ -59,7 +65,7 @@ funksjon HEAP_CONTROLSZ() { returner 64 }
 // throw restaurerte rsp frå garbage → ret til stakkadresse). Legg han difor på toppen
 // av 2 GiB-heapen, men UNDER 0x80000000 så abs32-adresseringa (mov rax,[abs32]) held.
 funksjon HANDLER_FRAMES_VA() {
-    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 274726912 }   // 0x10600000 (IKKJE 274792448 = 0x10610000)
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1088421888 }  // 0x40E00000 (over bitmapen, under mark-stakken)
     returner 2146435072                                                    // 0x7FF00000
 }
 funksjon HANDLER_COUNT_VA() { returner HANDLER_FRAMES_VA() + 983040 }    // +0xF0000
@@ -2967,7 +2973,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xF9])                // mov rcx, rdi
     copy(bytes, [0x48, 0x83, 0xE1, 0x07])          // and rcx, 7  (bit-pos)
     copy(bytes, [0x48, 0xC1, 0xEF, 0x03])          // shr rdi, 3  (byte-index)
-    copy(bytes, [0xB8, 0x00, 0x00, 0x40, 0x10])    // mov eax, 0x10400000 (bitmap-base)
+    copy(bytes, [0xB8, 0x00, 0x00, 0x60, 0x40])    // mov eax, 0x40600000 GC_BITMAP_VA
     copy(bytes, [0x48, 0x01, 0xC7])                // add rdi, rax  (byte-adresse)
     copy(bytes, [0x48, 0x0F, 0xB6, 0x17])          // movzx rdx,[rdi] (byte)
     copy(bytes, [0x48, 0x89, 0xD0])                // mov rax, rdx
@@ -2989,13 +2995,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // (Bitmap må nullstillast mellom collections; single-call her.)
     atomics["gc_mark_native"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])          // mov rdi,[rdi+8] (unbox root)
-    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x70, 0x10]) // mov r11d,0x10300000 (mstack)
-    copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x70, 0x12]) // mov r10d,0x10340000 (live-map)
+    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x41]) // mov r11d,0x41000000 GC_MSTACK_VA
+    copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x00, 0x43]) // mov r10d,0x43000000 GC_LIVEMAP_VA
     copy(bytes, [0x41, 0xB9, 0x00, 0x00, 0x00, 0x00]) // mov r9d,0 (count)
     copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push root)
     copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
     la mnat_loop = lengde(bytes)                   // .loop:
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x10]) // cmp r11,0x10300000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x41]) // cmp r11,0x41000000 (GC_MSTACK_VA)
     copy(bytes, [0x0F, 0x86])                      // jbe done
     u32(bytes, 0)
     la mnat_pdone = lengde(bytes) - 4
@@ -3014,7 +3020,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xC1])                // mov rcx,rax
     copy(bytes, [0x48, 0x83, 0xE1, 0x07])          // and rcx,7
     copy(bytes, [0x48, 0xC1, 0xE8, 0x03])          // shr rax,3
-    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x40, 0x10]) // add rax,0x10400000
+    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x60, 0x40]) // add rax,0x40600000 (GC_BITMAP_VA)
     copy(bytes, [0x0F, 0xB6, 0x10])                // movzx edx,[rax]
     copy(bytes, [0x48, 0x89, 0xD6])                // mov rsi,rdx
     copy(bytes, [0x48, 0xD3, 0xEA])                // shr rdx,cl
@@ -3058,7 +3064,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, mnat_pdone, mnat_done)
     // bru til sweep: lagre live-map ENTRY-teljar (r10-lm_base)>>4 @0x600038
     copy(bytes, [0x4C, 0x89, 0xD0])                // mov rax,r10 (lm end)
-    copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x70, 0x12]) // sub rax,0x10340000
+    copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x00, 0x43]) // sub rax,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x48, 0xC1, 0xE8, 0x04])          // shr rax,4 (entries)
     copy(bytes, [0x48, 0x89, 0x04, 0x25, 0x38, 0x00, 0x60, 0x00]) // mov [0x600038],rax
     copy(bytes, [0x4C, 0x89, 0xCF])                // mov rdi,r9 (count)
@@ -3073,9 +3079,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // r11=freed, rcx=j, rdi=n. Fri-liste-hovud @0x600028 (HEAP_VA+40).
     atomics["gc_sweep_native"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])          // mov rdi,[rdi+8] (unbox n)
-    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x70, 0x12]) // mov r8d,0x10340000 (lm base)
+    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x00, 0x43]) // mov r8d,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x4D, 0x8B, 0x08])                // mov r9,[r8]  (lm[0].addr)
     copy(bytes, [0x4D, 0x03, 0x48, 0x08])          // add r9,[r8+8] (prev_end)
+    // v3: klamp ende til bump (over-rekna streng-entry 2*len+11 kunne gje r9 > bump → ingen
+    // bump-reset → heapen voks til taket → collect ved kvart safepoint).
+    copy(bytes, [0x4C, 0x3B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp r9,[bump]
+    copy(bytes, [0x76, 0x08])                      // jbe +8
+    copy(bytes, [0x4C, 0x8B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov r9,[bump]
     copy(bytes, [0x4D, 0x31, 0xDB])                // xor r11,r11 (freed=0)
     copy(bytes, [0x48, 0xC7, 0xC1, 0x01, 0x00, 0x00, 0x00]) // mov rcx,1 (j=1)
     la swp_loop = lengde(bytes)                    // .loop:
@@ -3106,6 +3117,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x01, 0xC0])                // add rax,r8 (&lm[j])
     copy(bytes, [0x48, 0x8B, 0x10])                // mov rdx,[rax] (addr)
     copy(bytes, [0x48, 0x03, 0x50, 0x08])          // add rdx,[rax+8] (end)
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump] (v3: klamp)
+    copy(bytes, [0x76, 0x08])                      // jbe +8
+    copy(bytes, [0x48, 0x8B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rdx,[bump]
     copy(bytes, [0x4C, 0x39, 0xCA])                // cmp rdx,r9
     copy(bytes, [0x0F, 0x86])                      // jbe no_upd
     u32(bytes, 0)
@@ -3437,10 +3451,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // ── GC (iv): nullstill mark-bitmap (2MB @0x10400000) — per collect ──
     // gc_bitmap_clear() -> boksa 0. rep stosq over 262144 qwords = 2MB.
     atomics["gc_bitmap_clear"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0xBF, 0x00, 0x00, 0x40, 0x10])    // mov edi,0x10400000 (bitmap base)
-    copy(bytes, [0xB9, 0x00, 0x00, 0x04, 0x00])    // mov ecx,0x40000 (262144 qwords)
+    copy(bytes, [0xBF, 0x00, 0x00, 0x60, 0x40])    // mov edi,GC_BITMAP_VA (0x40600000)
+    // v3: nullstill berre [base, bump) sin del: qwords = (bump − 0x600000) / 1024 + 2
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rcx,[bump]
+    copy(bytes, [0x48, 0x81, 0xE9, 0x00, 0x00, 0x60, 0x00]) // sub rcx,0x600000
+    copy(bytes, [0x48, 0xC1, 0xE9, 0x0A])          // shr rcx,10
+    copy(bytes, [0x48, 0x83, 0xC1, 0x02])          // add rcx,2
     copy(bytes, [0x31, 0xC0])                       // xor eax,eax
-    copy(bytes, [0xF3, 0x48, 0xAB])                 // rep stosq (nullstill 2MB)
+    copy(bytes, [0xF3, 0x48, 0xAB])                 // rep stosq
     copy(bytes, [0x31, 0xFF])                       // xor edi,edi (box 0)
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8
     call_rel32(bytes, RT_INT(), TEXT_VA())         // box → rax
@@ -3496,7 +3514,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la hs_mainl = lengde(bytes)                    // main:
     patch_jump(bytes, hs_main, hs_mainl)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])          // mov rdi,[rdi+8] (unbox n)
-    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x70, 0x12]) // mov r8d,LM_BASE
+    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x00, 0x43]) // mov r8d,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x48, 0x89, 0xF9])                // mov rcx,rdi
     copy(bytes, [0x48, 0xD1, 0xE9])                // shr rcx,1
     copy(bytes, [0x48, 0xFF, 0xC9])                // dec rcx (start = n/2-1)
@@ -3542,9 +3560,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // bump. Krev SORTERT live-map. r8=lm-base, r9=prev_end, r11=freed, rcx=j, rdi=n.
     atomics["gc_sweep_full"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])          // mov rdi,[rdi+8] (unbox n)
-    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x70, 0x12]) // mov r8d,0x10340000
+    copy(bytes, [0x4D, 0x31, 0xDB])                // xor r11,r11 (freed=0; også for n==0)
+    copy(bytes, [0x48, 0x85, 0xFF])                // test rdi,rdi
+    la swf_pn0 = emit_je_placeholder(bytes)        // n==0 → ingen live-map → hopp ALT (ingen bump-reset)
+    copy(bytes, [0x41, 0xB8, 0x00, 0x00, 0x00, 0x43]) // mov r8d,GC_LIVEMAP_VA
     copy(bytes, [0x4D, 0x8B, 0x08])                // mov r9,[r8] (lm[0].addr)
     copy(bytes, [0x4D, 0x03, 0x48, 0x08])          // add r9,[r8+8] (prev_end)
+    // v3: klamp ende til bump (over-rekna streng-entry 2*len+11 kunne gje r9 > bump → ingen
+    // bump-reset → heapen voks til taket → collect ved kvart safepoint).
+    copy(bytes, [0x4C, 0x3B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp r9,[bump]
+    copy(bytes, [0x76, 0x08])                      // jbe +8
+    copy(bytes, [0x4C, 0x8B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov r9,[bump]
     copy(bytes, [0x4D, 0x31, 0xDB])                // xor r11,r11 (freed=0)
     copy(bytes, [0x48, 0xC7, 0xC1, 0x01, 0x00, 0x00, 0x00]) // mov rcx,1 (j=1)
     la swf_loop = lengde(bytes)                    // .loop:
@@ -3583,6 +3609,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x01, 0xC0])                // add rax,r8
     copy(bytes, [0x48, 0x8B, 0x10])                // mov rdx,[rax] (addr)
     copy(bytes, [0x48, 0x03, 0x50, 0x08])          // add rdx,[rax+8] (end)
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump] (v3: klamp)
+    copy(bytes, [0x76, 0x08])                      // jbe +8
+    copy(bytes, [0x48, 0x8B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rdx,[bump]
     copy(bytes, [0x4C, 0x39, 0xCA])                // cmp rdx,r9
     copy(bytes, [0x0F, 0x86])                      // jbe no_upd
     u32(bytes, 0)
@@ -3595,29 +3624,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (swf_loop - (lengde(bytes) + 4)) & 4294967295)
     la swf_done = lengde(bytes)                    // done:
     patch_jump(bytes, swf_pdone, swf_done)
-    // HALE: frigjer [r9=last_live_end, bump) om >= 16
+    // HALE (v3, 2026-09-04): SET bump = r9 (last_live_end) i staden for å leggje halen på
+    // fri-lista. Rå-bump-rutinar (concat, RT_STR_RAW, json_parse) gjekk ALDRI via fri-lista,
+    // så bump steig monotont til han nådde GC-metadataen (seed28-krasj). Alt over r9 er
+    // per definisjon daudt ved collect (maks levande slutt), så tilbakestillinga er trygg.
+    // KLAMP: r9 kan overstige bump om eit objekt er over-rekna (falsk rot nær bump) → ikkje
+    // hev bump. Gate-slotten [HEAP+24] blir sett av safepoint-stubben ETTER collect.
     copy(bytes, [0x48, 0x8B, 0x04, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rax,[bump]
-    copy(bytes, [0x48, 0x89, 0xC6])                // mov rsi,rax
-    // KLAMP: last_live_end (r9) kan overstige bump om eit objekt er over-rekna (falsk rot
-    // nær bump, mis-sizea som streng) → hale-size = bump - r9 < 0 → HUGE unsigned → frigjer
-    // bogus enorm region → korrupsjon. bump <= r9 → hopp hale.
     copy(bytes, [0x4C, 0x39, 0xC8])                // cmp rax,r9 (bump vs last_live_end)
     copy(bytes, [0x0F, 0x86])                      // jbe tail_skip
     u32(bytes, 0)
     la swf_ptail0 = lengde(bytes) - 4
-    copy(bytes, [0x4C, 0x29, 0xCE])                // sub rsi,r9 (hale-size)
-    copy(bytes, [0x48, 0x83, 0xFE, 0x10])          // cmp rsi,16
-    copy(bytes, [0x0F, 0x82])                      // jb tail_skip
-    u32(bytes, 0)
-    la swf_ptail = lengde(bytes) - 4
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25, 0x28, 0x00, 0x60, 0x00]) // mov rax,[head]
-    copy(bytes, [0x49, 0x89, 0x01])                // mov [r9],rax
-    copy(bytes, [0x49, 0x89, 0x71, 0x08])          // mov [r9+8],rsi
-    copy(bytes, [0x4C, 0x89, 0x0C, 0x25, 0x28, 0x00, 0x60, 0x00]) // mov [head],r9
-    copy(bytes, [0x49, 0xFF, 0xC3])                // inc r11
+    copy(bytes, [0x4C, 0x89, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov [bump],r9 (bump-reset)
+    copy(bytes, [0x49, 0xFF, 0xC3])                // inc r11 (tel halen som frigjort)
     la swf_tailskip = lengde(bytes)                // .tail_skip:
-    patch_jump(bytes, swf_ptail, swf_tailskip)
     patch_jump(bytes, swf_ptail0, swf_tailskip)
+    patch_jump(bytes, swf_pn0, swf_tailskip)
     copy(bytes, [0x4C, 0x89, 0xDF])                // mov rdi,r11 (freed)
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8
     call_rel32(bytes, RT_INT(), TEXT_VA())         // box → rax
@@ -4001,12 +4023,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // Klobrar berre caller-saved (rax,rcx,rdx,rsi,rdi,r8-r11) — trygt ved safepoint
     // (verdiar ligg på stakken, ikkje i register). r11=mstack, r10=live-map, r9=count.
     atomics["gc_mark_roots"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0xBF, 0x00, 0x00, 0x40, 0x10])    // mov edi,0x10400000 (bitmap)
+    copy(bytes, [0xBF, 0x00, 0x00, 0x60, 0x40])    // mov edi,0x40600000 GC_BITMAP_VA
     copy(bytes, [0xB9, 0x00, 0x00, 0x04, 0x00])    // mov ecx,0x40000
     copy(bytes, [0x31, 0xC0])                       // xor eax,eax
     copy(bytes, [0xF3, 0x48, 0xAB])                 // rep stosq (nullstill bitmap)
-    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x70, 0x10]) // mov r11d,0x10300000 (mstack)
-    copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x70, 0x12]) // mov r10d,0x10340000 (live-map)
+    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x41]) // mov r11d,0x41000000 GC_MSTACK_VA
+    copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x00, 0x43]) // mov r10d,0x43000000 GC_LIVEMAP_VA
     copy(bytes, [0x41, 0xB9, 0x00, 0x00, 0x00, 0x00]) // mov r9d,0 (count)
     // root-scan 0: verts-ABI-sida [HOST_ABI+16, HOST_ABI+4096) — modulglobalar OG
     // ENV_OVERLAY-slotten (miljo_sett-mappet var IKKJE rot → sweep frigav det →
@@ -4024,7 +4046,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la mrg_n1 = emit_jcc_placeholder(bytes, 0x82)  // jb gnext
     copy(bytes, [0x48, 0x39, 0xC8])                // cmp rax,rcx (bump)
     la mrg_n2 = emit_jcc_placeholder(bytes, 0x83)  // jae gnext
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x12]) // cmp r11,0x10340000 (mstack full)
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (mstack full = GC_LIVEMAP_VA)
     la mrg_full = emit_jcc_placeholder(bytes, 0x83) // jae gdone
     copy(bytes, [0x49, 0x89, 0x03])                // mov [r11],rax (push root)
     copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
@@ -4054,7 +4076,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, 0)
     la mrt_pnext2 = lengde(bytes) - 4
     // BOUND: stopp om mark-stakk full (r11 >= live-map base) → hindrar overflow-write
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x12]) // cmp r11,0x10340000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x0F, 0x83])                      // jae scan_done
     u32(bytes, 0)
     la mrt_pscanfull = lengde(bytes) - 4
@@ -4071,7 +4093,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, mrt_pscanfull, mrt_scandone)
     // DFS-drain (som gc_mark_native):
     la mrt_loop = lengde(bytes)                    // .loop:
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x10]) // cmp r11,0x10300000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x41]) // cmp r11,0x41000000 (GC_MSTACK_VA)
     copy(bytes, [0x0F, 0x86])                      // jbe done
     u32(bytes, 0)
     la mrt_pdone = lengde(bytes) - 4
@@ -4090,7 +4112,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xC1])                // mov rcx,rax
     copy(bytes, [0x48, 0x83, 0xE1, 0x07])          // and rcx,7
     copy(bytes, [0x48, 0xC1, 0xE8, 0x03])          // shr rax,3
-    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x40, 0x10]) // add rax,0x10400000
+    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x60, 0x40]) // add rax,0x40600000 (GC_BITMAP_VA)
     copy(bytes, [0x0F, 0xB6, 0x10])                // movzx edx,[rax]
     copy(bytes, [0x48, 0x89, 0xD6])                // mov rsi,rdx
     copy(bytes, [0x48, 0xD3, 0xEA])                // shr rdx,cl
@@ -4122,7 +4144,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (count)
-    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x01, 0x00]) // cmp rax,0x10000
+    // v3: taket var 65536 → levande map > 65536 nøklar (VM-heap-bokhald) uverna.
+    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000 (16M)
     copy(bytes, [0x0F, 0x87])                      // ja loop (sanity)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x49, 0x89, 0x32])                // mov [r10],rsi (payload)
@@ -4136,6 +4159,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rcx,[bump]
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8] (v3: keys-ende ≤ bump)
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump]
+    copy(bytes, [0x0F, 0x87])                      // ja loop
+    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x49, 0x89, 0x0A])                // mov [r10],rcx (keys_ptr)
     copy(bytes, [0x4C, 0x8B, 0x46, 0x08])          // mov r8,[rsi+8] (cap)
     copy(bytes, [0x4C, 0x89, 0xC2])                // mov rdx,r8
@@ -4148,7 +4175,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x84])                      // jz vals_start
     u32(bytes, 0)
     la mrt_pvals1 = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x12]) // cmp r11,0x10340000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x0F, 0x83])                      // jae vals_start (mark-stakk full)
     u32(bytes, 0)
     la mrt_pvals2 = lengde(bytes) - 4
@@ -4170,6 +4197,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rcx,[bump]
     copy(bytes, [0x0F, 0x83])                      // jae loop
+    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8] (v3: vals-ende ≤ bump)
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump]
+    copy(bytes, [0x0F, 0x87])                      // ja loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x49, 0x89, 0x0A])                // mov [r10],rcx (vals_ptr)
     copy(bytes, [0x4C, 0x8B, 0x46, 0x08])          // mov r8,[rsi+8] (cap)
@@ -4198,7 +4229,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x84])                      // jz map_done
     u32(bytes, 0)
     la mrt_pmapdone1 = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x12]) // cmp r11,0x10340000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x0F, 0x83])                      // jae map_done
     u32(bytes, 0)
     la mrt_pmapdone2 = lengde(bytes) - 4
@@ -4231,8 +4262,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (len@payload[0])
-    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x01, 0x00]) // cmp rax,0x10000 (65536)
+    // v3 (2026-09-04): taket var 65536 → LEVANDE strengar > 64 KiB (kjeldefiler, NCB-JSON,
+    // bundle) vart rekna som falske → payload uverna → sweep frigjorde/overskreiv dei.
+    // No: len ≤ 1 GiB OG payload+8+len ≤ bump (presis falsk-rot-test).
+    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x40]) // cmp rax,0x40000000
     copy(bytes, [0x0F, 0x87])                      // ja loop (len for stor → falsk streng)
+    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    copy(bytes, [0x48, 0x8D, 0x54, 0x06, 0x08])    // lea rdx,[rsi+rax+8] (payload-ende)
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump]
+    copy(bytes, [0x0F, 0x87])                      // ja loop (ende forbi bump → falsk streng)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x49, 0x89, 0x32])                // mov [r10],rsi (payload addr)
     copy(bytes, [0x48, 0xD1, 0xE0])                // shl rax,1 (2*len)
@@ -4257,7 +4295,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x83])                      // jae loop (payload >= bump)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (len)
-    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x01, 0x00]) // cmp rax,0x10000 (65536)
+    // v3: taket var 65536 → levande lister > 65536 element (token-lister o.l.) uverna.
+    copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000 (16M)
     copy(bytes, [0x0F, 0x87])                      // ja loop (len for stor → falsk liste)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     // FIKS (collect-korrektheit): ekte liste-layout = payload[len,cap,elem_ptr]; element-
@@ -4279,6 +4318,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rcx,[0x600000] (bump)
     copy(bytes, [0x0F, 0x83])                      // jae loop
+    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    // v3: element-array-ende (elem_ptr + len*8) må liggje under bump — elles falsk liste.
+    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8]
+    copy(bytes, [0x48, 0x3B, 0x14, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdx,[bump]
+    copy(bytes, [0x0F, 0x87])                      // ja loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     // (c) BERRE grodde lister (elem_ptr utanfor 88B-blokka): ver element-array cap*16
     //     (RT_LIST_APP grow: `shl r9,4` = cap*16). Inline (elem_ptr-payload<88) er alt dekt
@@ -4304,7 +4348,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     // BOUND: mark-stakk full (r11 >= live-map base) → stopp push (elles overflow-write
     // inn i live-map → korrupte entryar → sweep frigjer levande). Same vakt som rot-scan.
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x70, 0x12]) // cmp r11,0x10340000
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x8B, 0x3A])                // mov rdi,[rdx] (element)
@@ -4317,7 +4361,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la mrt_done = lengde(bytes)                    // done:
     patch_jump(bytes, mrt_pdone, mrt_done)
     copy(bytes, [0x4C, 0x89, 0xD0])                // mov rax,r10 (lm end)
-    copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x70, 0x12]) // sub rax,0x10340000
+    copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x00, 0x43]) // sub rax,0x43000000 (GC_LIVEMAP_VA)
     copy(bytes, [0x48, 0xC1, 0xE8, 0x04])          // shr rax,4 (entries)
     copy(bytes, [0x48, 0x89, 0x04, 0x25, 0x38, 0x00, 0x60, 0x00]) // mov [0x600038],rax
     copy(bytes, [0x4C, 0x89, 0xCF])                // mov rdi,r9 (count)
@@ -4446,6 +4490,26 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // blokkar, non-GC-modus): kvart safepoint-kall landa 21 byte inn i føregåande
     // rutine (syscall med tilfeldig rax + `mov rsp,rbp; pop rbp; ret` → stille
     // tidleg retur frå kallaren, evt. ret til stakkadresse). Fersk seed post-merge.
+    // ── gc_oom(): «norscode: GC-heap full» på stderr + exit 199 (aldri stille korrupsjon) ──
+    la oom_msg = "norscode: GC-heap full (1 GiB levande etter collect) - avsluttar (exit 199)\n"
+    la oom_msg_bytes = tekst_til_bytes(oom_msg)
+    la oom_msg_va = TEXT_VA() + lengde(bytes)
+    copy(bytes, oom_msg_bytes)
+    atomics["gc_oom"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
+    copy(bytes, [0x48, 0xBE]) u64(bytes, oom_msg_va) // movabs rsi,msg
+    copy(bytes, [0xBA]) u32(bytes, lengde(oom_msg_bytes)) // mov edx,len
+    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])    // mov eax,1 (write)
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0xBF, 0xC7, 0x00, 0x00, 0x00])    // mov edi,199
+    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])    // mov eax,60 (exit)
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    // ── Safepoint-stub v3: (teljar ≥ terskel OG bump−sist ≥ port) ELLER bump ≥ SOFT_LIMIT
+    //    → collect; deretter sist = bump (ETTER collect, sidan sweepen no set bump ned);
+    //    bump ≥ HARD_LIMIT etter collect → gc_oom. Utan GC: terskel/tak = 0x7FFFFFFF (aldri).
+    la sp_soft: heltall = 2147483647
+    la sp_hard: heltall = 2147483647
+    hvis gc_mode == "1" { sp_soft = GC_SOFT_LIMIT() sp_hard = GC_HARD_LIMIT() }
     atomics["gc_safepoint"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0xA1])                       // mov rax,[counter]
     u64(bytes, safepoint_adresse)
@@ -4454,27 +4518,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u64(bytes, safepoint_adresse)
     copy(bytes, [0x48, 0x3D])                       // cmp rax, terskel
     u32(bytes, sp_terskel)
-    copy(bytes, [0x72, 0x65])                       // jb .skip (+101 = 12 + 40 port + 49)
+    la sp_pceil = emit_jcc_placeholder(bytes, 0x82) // jb .ceiling (teljar under terskel)
     copy(bytes, [0x31, 0xC0])                       // xor eax,eax
     copy(bytes, [0x48, 0xA3])                       // mov [counter],rax (nullstill)
     u64(bytes, safepoint_adresse)
-    // ALLOKERINGSPORT (2026-09-04): samla berre om ≥ terskel byte er allokerte sidan
-    // førre collect ([HEAP+24] = bump ved førre collect). Kompilator-arbeidslast med
-    // MB levande data markerte elles heile live-settet kvart 1000. kall (>90 min).
-    // Same safepoint-sites som før (1000-teljaren), berre sjeldnare. Terskelen er
-    // moderat (sjå NORSCODE_GC_TERSKEL_BYTES) fordi fri-lista er head-fit og store
-    // hol mellom collects svekkjer attbruken (32 MiB → OOM i 10k-hmac-litmusen).
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
     copy(bytes, [0x48, 0x2B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // sub rax,[sist]
-    copy(bytes, [0x48, 0x3D]) u32(bytes, gc_port_bytes)                    // cmp rax,terskel
-    copy(bytes, [0x72, 0x41])                                              // jb .skip (+65)
+    copy(bytes, [0x48, 0x3D]) u32(bytes, gc_port_bytes)                    // cmp rax,port
+    la sp_pcollect = emit_jcc_placeholder(bytes, 0x83) // jae .collect
+    la sp_ceiling = lengde(bytes)                  // .ceiling:
+    patch_jump(bytes, sp_pceil, sp_ceiling)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
-    copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // mov [sist],rax
+    copy(bytes, [0x48, 0x3D]) u32(bytes, sp_soft)                          // cmp rax,SOFT_LIMIT
+    la sp_pskip1 = emit_jcc_placeholder(bytes, 0x82) // jb .skip
+    la sp_collect = lengde(bytes)                  // .collect:
+    patch_jump(bytes, sp_pcollect, sp_collect)
     // KRITISK: safepoint kan fyre midt i uttrykk der levande NcVal-ar ligg i register.
-    // (1) gc_collect_native klobrar caller-saved (rcx/rdx/rsi/rdi/r8-r11) → må lagrast.
-    // (2) codegen held levande NcVal-ar i CALLEE-saved (rbx/r12-r15, jf. `mov rdi,r12`)
-    //     som collect BEVARER men den konservative stakk-skanninga ALDRI ser (ikkje på
-    //     stakken) → objektet vert ikkje markert → sweep frigjer det → korrupsjon.
     // Push ALLE (14, 16-justert) FØR collect: bevarer caller-saved OG legg callee-saved
     // på stakken slik at [rsp+8, stack_base)-skanninga finn dei som røter. rax er daud her.
     copy(bytes, [0x51, 0x52, 0x56, 0x57])          // push rcx,rdx,rsi,rdi
@@ -4486,7 +4545,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5D, 0x5B])                       // pop rbp,rbx
     copy(bytes, [0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58]) // pop r11,r10,r9,r8
     copy(bytes, [0x5F, 0x5E, 0x5A, 0x59])          // pop rdi,rsi,rdx,rcx
-    copy(bytes, [0xC3])                            // .skip: ret
+    copy(bytes, [0x50])                            // push rax (bevar; sist-oppdatering brukar rax)
+    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump] (etter reset)
+    copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // mov [sist],rax
+    copy(bytes, [0x48, 0x3D]) u32(bytes, sp_hard)                          // cmp rax,HARD_LIMIT
+    la sp_pskip2 = emit_jcc_placeholder(bytes, 0x82) // jb .pop_skip
+    call_rel32(bytes, atomics["gc_oom"], TEXT_VA())  // aldri retur
+    la sp_popskip = lengde(bytes)                  // .pop_skip:
+    patch_jump(bytes, sp_pskip2, sp_popskip)
+    copy(bytes, [0x58])                            // pop rax
+    la sp_skip = lengde(bytes)                     // .skip:
+    patch_jump(bytes, sp_pskip1, sp_skip)
+    copy(bytes, [0xC3])                            // ret
     hvis gc_mode == "1" {
         bytes = patch_bump_prologer(bytes, atomics["gc_alloc16"], frozen_len)
         bytes = patch_var_allocators(bytes, atomics["gc_alloc_var"], frozen_len)
@@ -6028,6 +6098,16 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x24)
     legg_til(text, 0x25)
     u32(text, HEAP_VA() + 48)
+    // GC-layout v3: vaktside (PROT_NONE) rett under GC_HEAP_LIMIT — ei rå-bump-løype som
+    // rømmer forbi taket mellom to safepoints SIGSEGV-ar reint (rdi≈0x405FF000) i staden
+    // for å overskrive bitmapen. mprotect(0x405FF000, 4096, PROT_NONE); rax daud her.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(text, [0xBF]) u32(text, GC_HEAP_LIMIT() - 4096)               // mov edi,vaktside
+        copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
+        copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
+        copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                         // mov eax,10 (mprotect)
+        copy(text, [0x0F, 0x05])                                           // syscall
+    }
     // Native rekursjonsvakt: stakk-grense = initiell rsp − 7 MiB (hovudtråd-stakk er
     // 8 MiB) i slot HEAP_VA+24; funksjonsprologen samanliknar rsp mot han og kastar
     // FANGBART «For djup rekursjon» (AOT-VM-en hadde inga vakt → SIGSEGV; C-seeden
@@ -6475,6 +6555,16 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
     la entry_va: heltall = TEXT_VA() + lengde(text)
     legg_til(text, 0x49) legg_til(text, 0x89) legg_til(text, 0xE4)          // mov r12, rsp
     copy(text, [0x4C, 0x89, 0x24, 0x25]) u32(text, HEAP_VA() + 48)           // mov [stakk-base],r12
+    // GC-layout v3: vaktside (PROT_NONE) rett under GC_HEAP_LIMIT — ei rå-bump-løype som
+    // rømmer forbi taket mellom to safepoints SIGSEGV-ar reint (rdi≈0x405FF000) i staden
+    // for å overskrive bitmapen. mprotect(0x405FF000, 4096, PROT_NONE); rax daud her.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(text, [0xBF]) u32(text, GC_HEAP_LIMIT() - 4096)               // mov edi,vaktside
+        copy(text, [0xBE, 0x00, 0x10, 0x00, 0x00])                         // mov esi,4096
+        copy(text, [0x31, 0xD2])                                           // xor edx,edx (PROT_NONE)
+        copy(text, [0xB8, 0x0A, 0x00, 0x00, 0x00])                         // mov eax,10 (mprotect)
+        copy(text, [0x0F, 0x05])                                           // syscall
+    }
     copy(text, [0x49, 0x8D, 0x84, 0x24]) u32(text, (0 - 7340032) & 0xFFFFFFFF) // lea rax,[r12-7MiB]
     copy(text, [0x48, 0x89, 0x04, 0x25]) u32(text, STACK_LIMIT_VA())           // mov [stakk-grense],rax
     legg_til(text, 0x49) legg_til(text, 0x8B) legg_til(text, 0x3C) legg_til(text, 0x24) // mov rdi,[r12]=argc
