@@ -120,6 +120,7 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 24 | «Ukjent innebygd funksjon: host_exec_ncb_json» i harness-køyring | C-seed-vertsbuiltin utan VM-dispatch | vm.no: json_parse_raw + køyr_ncb (nøsta VM) |
 | 25 | SIGSEGV @0x80600000 i harness/compile av større testar | 2 GiB bump utan reclaim (VM_FAST=0-bokhald) | seed må byggjast i GC-layout; build_x86_seed vidarefører NORSCODE_GC_ALLOC |
 | 26 | ELF stage-0: «Kan ikkje opne fil: /selfhost/…nors» | lukka executor manglar NORSCODE_ROOT; frosen fil_les las stille tomt før | gen1_source_entry utleier rota frå innbakt kjeldesti (miljo_sett) |
+| 27 | GC-seed: test_security-compile >90 min | safepoint samla kvart 1000. kall uansett allokering (MB levande data markert tusenvis av gonger) | allokeringsport: collect berre når ≥4 MiB allokert sidan førre (NORSCODE_GC_TERSKEL_BYTES); rein allokeringsbasert trigger korrumperer (early collect / head-fit-fri-liste) |
 
 Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
