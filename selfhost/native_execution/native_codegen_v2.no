@@ -3166,19 +3166,34 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // Klobrar BERRE rax (rcx/rdx via push/pop; rsi/rdi/flagg bevart) → trygt for BEGGE
     // 16B-prolog-variantane: rcx-variant (verdi i rsi) OG rdx-variant (verdi i rcx).
     atomics["gc_alloc16"] = TEXT_VA() + lengde(bytes)
+    // 2026-09-04: FIRST-FIT-vandring (maks 512 blokkar) i staden for head-fit. Sweepen
+    // prependar hol → hovudet er halen [siste levande, bump), som er bitte lite når ein
+    // stale stakkslot held eit nyleg objekt «levande» → head-fit gav ~0 attbruk (bump
+    // voks 61 MB per runde i gc_reuse2_probe). Klobrar berre rax (rcx/rdx/r9/r11 via
+    // push/pop; flagg bevart).
     copy(bytes, [0x9C])                            // pushfq (bevar flagg)
     copy(bytes, [0x51])                            // push rcx
     copy(bytes, [0x52])                            // push rdx
+    copy(bytes, [0x41, 0x51])                      // push r9
+    copy(bytes, [0x41, 0x53])                      // push r11
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[head]
     u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x45, 0x31, 0xC9])                // xor r9d,r9d (prev=0)
+    copy(bytes, [0x41, 0xBB, 0x00, 0x02, 0x00, 0x00]) // mov r11d,512 (vandringstak)
+    la a16_walk = lengde(bytes)                    // walk:
     copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
     la a16_empty = emit_je_placeholder(bytes)      // jz L_bump
     copy(bytes, [0x48, 0x8B, 0x50, 0x08])          // mov rdx,[rax+8] (blokk-size)
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
-    copy(bytes, [0x0F, 0x82])                       // jb L_bump
-    u32(bytes, 0)
-    la a16_pbump = lengde(bytes) - 4
-    // REUSE med SPLIT: ta 16B, legg resten (blokk+16, size-16) attende (rom for header).
+    la a16_found = emit_jcc_placeholder(bytes, 0x83) // jae found
+    copy(bytes, [0x49, 0xFF, 0xCB])                // dec r11
+    la a16_cap = emit_je_placeholder(bytes)        // jz L_bump (tak nådd)
+    copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax (prev)
+    copy(bytes, [0x48, 0x8B, 0x00])                // mov rax,[rax] (next)
+    la a16_wj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, a16_wj, a16_walk)
+    la a16_foundl = lengde(bytes)                  // found: rax=blokk, rdx=size, r9=prev
+    patch_jump(bytes, a16_found, a16_foundl)
     copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax] (next)
     copy(bytes, [0x48, 0x83, 0xEA, 0x10])          // sub rdx,16 (rest-size)
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
@@ -3187,20 +3202,21 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la a16_pnosplit = lengde(bytes) - 4
     copy(bytes, [0x48, 0x89, 0x48, 0x10])          // mov [rax+16],rcx (rest.next)
     copy(bytes, [0x48, 0x89, 0x50, 0x18])          // mov [rax+24],rdx (rest.size)
-    copy(bytes, [0x48, 0x8D, 0x48, 0x10])          // lea rcx,[rax+16] (rest-addr)
+    copy(bytes, [0x48, 0x8D, 0x48, 0x10])          // lea rcx,[rax+16] (etterfølgjar = rest)
+    la a16_nosplit = lengde(bytes)                 // nosplit: rcx = etterfølgjar
+    patch_jump(bytes, a16_pnosplit, a16_nosplit)
+    copy(bytes, [0x4D, 0x85, 0xC9])                // test r9,r9
+    la a16_sethead = emit_je_placeholder(bytes)    // jz sethead
+    copy(bytes, [0x49, 0x89, 0x09])                // mov [r9],rcx (prev.next = etterfølgjar)
+    la a16_prdone = emit_jmp_placeholder(bytes)    // jmp done
+    la a16_setheadl = lengde(bytes)                // sethead:
+    patch_jump(bytes, a16_sethead, a16_setheadl)
     copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [head],rcx
     u32(bytes, HEAP_VA() + 40)
-    la a16_prdone = emit_jmp_placeholder(bytes)    // jmp Rdone
-    la a16_nosplit = lengde(bytes)                 // nosplit:
-    patch_jump(bytes, a16_pnosplit, a16_nosplit)
-    copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [head],rcx (pop heile)
-    u32(bytes, HEAP_VA() + 40)
-    la a16_Rdone = lengde(bytes)                   // Rdone:
-    patch_jump(bytes, a16_prdone, a16_Rdone)
     la a16_pdone = emit_jmp_placeholder(bytes)     // jmp done
     la a16_Lbump = lengde(bytes)                   // L_bump:
     patch_jump(bytes, a16_empty, a16_Lbump)
-    patch_jump(bytes, a16_pbump, a16_Lbump)
+    patch_jump(bytes, a16_cap, a16_Lbump)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
     u32(bytes, HEAP_VA())
     copy(bytes, [0x48, 0x89, 0xC2])                // mov rdx,rax
@@ -3209,6 +3225,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, HEAP_VA())
     la a16_Ldone = lengde(bytes)                   // done:
     patch_jump(bytes, a16_pdone, a16_Ldone)
+    patch_jump(bytes, a16_prdone, a16_Ldone)
+    copy(bytes, [0x41, 0x5B])                      // pop r11
+    copy(bytes, [0x41, 0x59])                      // pop r9
     copy(bytes, [0x5A])                            // pop rdx
     copy(bytes, [0x59])                            // pop rcx
     copy(bytes, [0x9D])                            // popfq
@@ -3220,40 +3239,53 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // caller-saved; frosen fill-kode set r8-r10 friskt, r11 urørt av fill). Bevarar rdi/
     // rsi/rdx/rcx → trygt midt i variabel-allokator-sites.
     atomics["gc_alloc_var"] = TEXT_VA() + lengde(bytes)
+    // 2026-09-04: FIRST-FIT-vandring (maks 512) i staden for head-fit (sjå gc_alloc16).
+    // Klobrar rax + r9/r10/r11; bevarer rdi/rsi/rdx/rcx (rcx = storleik).
     copy(bytes, [0x9C])                            // pushfq
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[head]
     u32(bytes, HEAP_VA() + 40)
+    copy(bytes, [0x45, 0x31, 0xC9])                // xor r9d,r9d (prev=0)
+    copy(bytes, [0x41, 0xBB, 0x00, 0x02, 0x00, 0x00]) // mov r11d,512
+    la av_walk = lengde(bytes)                     // walk:
     copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
     la av_empty = emit_je_placeholder(bytes)       // jz V_bump
     copy(bytes, [0x4C, 0x8B, 0x50, 0x08])          // mov r10,[rax+8] (blokk-size)
-    copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx (blokk-size >= req?)
-    copy(bytes, [0x0F, 0x82])                       // jb V_bump
-    u32(bytes, 0)
-    la av_pbump = lengde(bytes) - 4
+    copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx
+    la av_found = emit_jcc_placeholder(bytes, 0x83) // jae found
+    copy(bytes, [0x49, 0xFF, 0xCB])                // dec r11
+    la av_cap = emit_je_placeholder(bytes)         // jz V_bump
+    copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
+    copy(bytes, [0x48, 0x8B, 0x00])                // mov rax,[rax]
+    la av_wj = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, av_wj, av_walk)
+    la av_foundl = lengde(bytes)                   // found: rax=blokk, r10=size, r9=prev
+    patch_jump(bytes, av_found, av_foundl)
     copy(bytes, [0x4C, 0x8B, 0x18])                // mov r11,[rax] (next)
     copy(bytes, [0x49, 0x29, 0xCA])                // sub r10,rcx (rest-size)
     copy(bytes, [0x49, 0x83, 0xFA, 0x10])          // cmp r10,16
     copy(bytes, [0x0F, 0x82])                       // jb V_nosplit
     u32(bytes, 0)
     la av_pnosplit = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
-    copy(bytes, [0x49, 0x01, 0xC9])                // add r9,rcx (rest-addr = rax+req)
-    copy(bytes, [0x4D, 0x89, 0x19])                // mov [r9],r11 (rest.next)
-    copy(bytes, [0x4D, 0x89, 0x51, 0x08])          // mov [r9+8],r10 (rest.size)
-    copy(bytes, [0x4C, 0x89, 0x0C, 0x25])          // mov [head],r9
-    u32(bytes, HEAP_VA() + 40)
-    la av_prdone = emit_jmp_placeholder(bytes)     // jmp V_done
-    la av_nosplit = lengde(bytes)                  // V_nosplit:
+    copy(bytes, [0x4C, 0x89, 0x1C, 0x08])          // mov [rax+rcx],r11 (rest.next)
+    copy(bytes, [0x4C, 0x89, 0x54, 0x08, 0x08])    // mov [rax+rcx+8],r10 (rest.size)
+    copy(bytes, [0x4C, 0x8D, 0x1C, 0x08])          // lea r11,[rax+rcx] (etterfølgjar = rest)
+    la av_nosplit = lengde(bytes)                  // V_nosplit: r11 = etterfølgjar
     patch_jump(bytes, av_pnosplit, av_nosplit)
-    copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11 (pop heile)
+    copy(bytes, [0x4D, 0x85, 0xC9])                // test r9,r9
+    la av_sethead = emit_je_placeholder(bytes)     // jz sethead
+    copy(bytes, [0x4D, 0x89, 0x19])                // mov [r9],r11
+    la av_prdone = emit_jmp_placeholder(bytes)     // jmp V_done
+    la av_setheadl = lengde(bytes)                 // sethead:
+    patch_jump(bytes, av_sethead, av_setheadl)
+    copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11
     u32(bytes, HEAP_VA() + 40)
     la av_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_done
     la av_Vbump = lengde(bytes)                    // V_bump:
     patch_jump(bytes, av_empty, av_Vbump)
-    patch_jump(bytes, av_pbump, av_Vbump)
+    patch_jump(bytes, av_cap, av_Vbump)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
     u32(bytes, HEAP_VA())
-    copy(bytes, [0x49, 0x89, 0xC2])                // mov r10,rax  (FIKS: var 4C89D2=mov rdx,r10!)
+    copy(bytes, [0x49, 0x89, 0xC2])                // mov r10,rax
     copy(bytes, [0x49, 0x01, 0xCA])                // add r10,rcx (new bump = rax+size)
     copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
     u32(bytes, HEAP_VA())
@@ -4400,12 +4432,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // standard-modus, 1000 i GC-modus (NORSCODE_GC_ALLOC=1). Same storleik i begge modus
     // → gc_safepoint_va stabil, paritet urørt.
     la sp_terskel: heltall = 2147483647            // 0x7FFFFFFF (av)
-    // Standard 0 = porten er AV (identisk med 1000-kadensen). Porten (≥4 MiB) gjorde
-    // hashmap-proben 27 s → 3 s og 10k-hmac grøn, men fersk seed med port krasja
-    // ikkje-deterministisk i compile-steget (test_while!) medan 1000-kadensen heldt
-    // >90 min: store hol → mykje attbruk frå fri-lista → latent attbruksfeil i GC-en
-    // (head-fit/sweep). Slå på med NORSCODE_GC_TERSKEL_BYTES for eksperiment.
-    la gc_port_bytes: heltall = 0
+    // Standard 4 MiB (2026-09-04). Var 0 (AV) medan attbruksfeilen var ukjend; rota var
+    // insertion-sort i gc_sort_livemap (→ heapsort) og head-fit i fri-lista (→ first-fit).
+    // Med begge fiksa er probar + 10k-hmac grøne med port PÅ. NB: tools/build_x86_seed.no
+    // sitt codegen-barn får IKKJE knappen via miljø (eksplisitt miljøkart) → standarden
+    // her er det som gjeld for seed-bygg. NORSCODE_GC_TERSKEL_BYTES overstyrer.
+    la gc_port_bytes: heltall = 4194304
     hvis miljo_hent("NORSCODE_GC_TERSKEL_BYTES") != "" { gc_port_bytes = heltall_fra_tekst(miljo_hent("NORSCODE_GC_TERSKEL_BYTES")) }
     hvis gc_mode == "1" { sp_terskel = 1000 }
     // Stubben si adresse blir REGISTRERT her (atomics["gc_safepoint"]) — kallarane
