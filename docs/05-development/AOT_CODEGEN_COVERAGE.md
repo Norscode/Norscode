@@ -121,6 +121,7 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 25 | SIGSEGV @0x80600000 i harness/compile av større testar | 2 GiB bump utan reclaim (VM_FAST=0-bokhald) | seed må byggjast i GC-layout; build_x86_seed vidarefører NORSCODE_GC_ALLOC |
 | 26 | ELF stage-0: «Kan ikkje opne fil: /selfhost/…nors» | lukka executor manglar NORSCODE_ROOT; frosen fil_les las stille tomt før | gen1_source_entry utleier rota frå innbakt kjeldesti (miljo_sett) |
 | 27 | GC-seed: test_security-compile >90 min | safepoint samla kvart 1000. kall uansett allokering (MB levande data markert tusenvis av gonger) | allokeringsport: collect berre når ≥4 MiB allokert sidan førre (NORSCODE_GC_TERSKEL_BYTES); rein allokeringsbasert trigger korrumperer (early collect / head-fit-fri-liste) |
+| 28 | GC-seed framleis >60 min sjølv med FAST=1 og port | `gc_sort_livemap` var insertion-sort O(n²) over heile live-map per collect (kompilator = 100k+ entryar → minutt per collect) | in-place heapsort (siftdown-rutine); gdb-sampling fann `test r10,r10`-løkka i begge laster |
 
 Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
