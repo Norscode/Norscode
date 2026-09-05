@@ -311,8 +311,12 @@ funksjon vm_heap_sync_roots(functions) -> heiltall {
     la sett: ordbok<tekst, boolsk> = {}
     la kandidatar: heiltall = 0
     la unike: heiltall = 0
-    la last_return = functions["__vm_last_return_heap_id__"]
-    hvis last_return != "" {
+    // Defensivt: ein eldre embedded host kan ha laga functions-kartet utan desse
+    // felta (jf. metrikk-migreringa i vm_runtime_init). Utan vern kasta oppslaget
+    // og heile rot-synken avbraut FØR gc_root_*-metrikkane vart kreditert.
+    la last_return = ""
+    hvis vm_map_har_nokkel(functions, "__vm_last_return_heap_id__") { last_return = tekst(functions["__vm_last_return_heap_id__"]) }
+    hvis last_return != "" og last_return != "ingenting" {
         kandidatar = kandidatar + 1
         hvis ikkje vm_map_har_nokkel(sett, last_return) {
             sett[last_return] = sann
@@ -324,7 +328,9 @@ funksjon vm_heap_sync_roots(functions) -> heiltall {
     la fi: heiltall = 0
     mens fi < lengde(active_frames) {
         la frame = active_frames[fi]
-        la hs = frame["heap_stack"]
+        // Defensivt (som over): host-laga rammer kan mangle heap_stack/var_heap.
+        la hs = []
+        hvis vm_map_har_nokkel(frame, "heap_stack") { hs = frame["heap_stack"] }
         la si: heiltall = 0
         mens si < lengde(hs) {
             hvis hs[si] != "" {
@@ -337,7 +343,8 @@ funksjon vm_heap_sync_roots(functions) -> heiltall {
             }
             si = si + 1
         }
-        la vh = frame["var_heap"]
+        la vh = {}
+        hvis vm_map_har_nokkel(frame, "var_heap") { vh = frame["var_heap"] }
         la keys = nøkler(vh)
         la vi: heiltall = 0
         mens vi < lengde(keys) {
@@ -759,6 +766,12 @@ funksjon vm_type_of(functions, verdi) -> ordbok_tekst {
     returner ukjent
 }
 
+funksjon vm_type_get(functions, namn: tekst) -> ordbok_tekst {
+    hvis vm_map_har_nokkel(functions["__vm_types__"], namn) { returner functions["__vm_types__"][namn] }
+    la tom: ordbok_tekst = {}
+    returner tom
+}
+
 funksjon vm_host_register(functions, type_namn: tekst, payload) -> ordbok_tekst {
     hvis ikkje vm_map_har_nokkel(functions["__vm_types__"], type_namn) {
         kast "HostTypeFeil: ukjent type " + type_namn
@@ -1069,9 +1082,16 @@ funksjon vm_disk_scope_sti(namn: tekst, args) -> tekst {
        vm_map_har_nokkel(args[0], "root") {
         // Filesystem-ABI-en bind alle relative kjelde-/målstiar til denne
         // rota og avviser sjølv traversal og symlink-flukt. VM-policyen skal
-        // derfor godkjenne den eksplisitte rota, ikkje tekstrepresentasjonen
-        // av heile request-mappet (historisk "[verdi]").
-        returner tekst(args[0]["root"])
+        // derfor godkjenne den EFFEKTIVE stien (rot + relativ), ikkje berre rota:
+        // native_sti_rot_relativ deler "/w/build/x" i root="/" + relative="w/build/x",
+        // og rota "/" åleine ligg utanfor eitkvart disk-scope → alle absolutte
+        // filsystem-operasjonar vart nekta («path outside disk scope: /»).
+        la rot = tekst(args[0]["root"])
+        la rel = ""
+        hvis vm_map_har_nokkel(args[0], "relative") { rel = tekst(args[0]["relative"]) }
+        hvis rel == "" { returner rot }
+        hvis builtin.ends_with(rot, "/") { returner rot + rel }
+        returner rot + "/" + rel
     }
     returner tekst(args[0])
 }
@@ -2855,6 +2875,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         returner verdier(args[0])
     }
 
+    // Typeregister-builtins (std.runtime_type). Utan desse dispatch-oppføringane
+    // fall kalla gjennom til «returner args»-fallbacken og gav ["verdi"] i staden
+    // for type-info-kartet — heile std.runtime_type braut (test_vm_type_registry).
+    hvis namn == "builtin.vm_type_of" { returner vm_type_of(active_functions, args[0]) }
+    hvis namn == "builtin.vm_type_register" { returner vm_type_register(active_functions, args[0]) }
+    hvis namn == "builtin.vm_type_get" { returner vm_type_get(active_functions, args[0]) }
+    hvis namn == "builtin.vm_type_registry" { returner active_functions["__vm_types__"] }
+
     hvis namn == "builtin.vm_memory_status" {
         returner vm_memory_status(active_functions)
     }
@@ -3383,6 +3411,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     hvis namn == "builtin.fil_append_binary" eller namn == "builtin.fil_append_binær" {
         returner builtin.fil_append_binary(args[0], args[1])
     }
+    // host_exec_ncb_json: C-seeden hadde dette som vertsbuiltin (nc_main sin køyr-veg).
+    // Sjølvhosta seed: tolka kallarar (selfhost/tooling/ncb_host_run_entry.no i
+    // testharnessen) køyrer NCB-en i ein nøsta VM.
+    hvis namn == "builtin.host_exec_ncb_json" eller namn == "host_exec_ncb_json" {
+        la vert_ncb = json_parse_raw(tekst(args[0]))
+        hvis vert_ncb == null { kast "host_exec_ncb_json: ugyldig NCB-json" }
+        returner køyr_ncb(vert_ncb)
+    }
 
     // Type og konvertering
     hvis namn == "builtin.type" eller namn == "builtin.type_av" {
@@ -3406,7 +3442,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     // Ordbok
-    hvis namn == "builtin.fjern_nokkel" {
+    hvis namn == "builtin.fjern_nokkel" eller namn == "builtin.fjern_nøkkel" {
         builtin.fjern_nokkel(args[0], args[1])
         returner 0
     }

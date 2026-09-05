@@ -1,0 +1,267 @@
+// std/runtime_filesystem_native.no — rein-Norscode-implementasjon av den native
+// filsystem-ABI-en (norscode-native-filesystem-v1) for self-hosta AOT-runtimes.
+//
+// Native x86-64-codegen (native_codegen_v2) rutar builtin.filesystem_read_operation
+// og builtin.filesystem_write_operation hit (gap_rute_v2) og emitterer dei små
+// primitiva builtin.native_fs_dirents / native_fs_stat / native_fs_unlink /
+// native_fs_rmdir / native_fs_chmod / native_fs_rename / native_fs_symlink som
+// rå syscall-innpakkingar. På VM-/C-runtimes med eigen ABI blir denne modulen
+// aldri kalla (berre bundla). Svar-forma speglar nc_filesystem_result i den gamle
+// C-runtimen: {abi, status, handle, data, value, error, event_backend}.
+
+funksjon abi_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
+
+funksjon svar(status: tekst, data: tekst, verdi: heiltall, feil: tekst) -> ordbok_tekst {
+    la r: ordbok_tekst = {}
+    r["abi"] = abi_versjon()
+    r["status"] = status
+    r["handle"] = ""
+    r["data"] = data
+    r["value"] = verdi
+    r["error"] = feil
+    r["event_backend"] = "native"
+    returner r
+}
+
+funksjon feilsvar(melding: tekst) -> ordbok_tekst { returner svar("feil", "", 0 - 1, melding) }
+
+funksjon felt(req, namn: tekst) -> tekst {
+    hvis req == null { returner "" }
+    hvis ikkje finnes_nøkkel(req, namn) { returner "" }
+    la v = req[namn]
+    hvis v == null { returner "" }
+    returner tekst(v)
+}
+
+funksjon heiltall_felt(req, namn: tekst, standard: heiltall) -> heiltall {
+    la t = felt(req, namn)
+    hvis t == "" { returner standard }
+    prøv { returner heltall_fra_tekst(t) } fang (e) { returner standard }
+    returner standard
+}
+
+funksjon trygg_relativ(rel: tekst) -> bool {
+    hvis builtin.starts_with(rel, "/") { returner usann }
+    hvis builtin.index_of(rel, "..") >= 0 { returner usann }
+    hvis builtin.index_of(rel, "\n") >= 0 eller builtin.index_of(rel, "\r") >= 0 { returner usann }
+    returner sann
+}
+
+funksjon sett_saman(root: tekst, rel: tekst) -> tekst {
+    hvis rel == "" { returner root }
+    hvis root == "" eller root == "." { returner rel }
+    hvis builtin.ends_with(root, "/") { returner root + rel }
+    returner root + "/" + rel
+}
+
+funksjon full_sti(req) -> tekst {
+    la root = felt(req, "root")
+    la rel = felt(req, "relative")
+    hvis ikkje trygg_relativ(rel) { returner "" }
+    hvis root == "" { root = "." }
+    returner sett_saman(root, rel)
+}
+
+funksjon kind_frå_mode(mode: heiltall) -> tekst {
+    la fmt = mode & 61440
+    hvis fmt == 16384 { returner "directory" }
+    hvis fmt == 32768 { returner "file" }
+    hvis fmt == 40960 { returner "symlink" }
+    returner "other"
+}
+
+funksjon stat_svar(sti: tekst, følg: bool) -> ordbok_tekst {
+    la f: heiltall = 0
+    hvis følg { f = 1 }
+    la st = builtin.native_fs_stat(sti, f)
+    // Primitivet gjev [-1] ved feil (aldri null: typa null-samanlikning på liste-var
+    // derefererer payload i native codegen).
+    hvis lengde(st) < 10 { returner feilsvar("stat feila: " + sti) }
+    la mode: heiltall = st[0]
+    la r = svar("ok", "", st[1], "")
+    r["kind"] = kind_frå_mode(mode)
+    r["mode"] = mode
+    r["inode"] = st[2]
+    r["device"] = st[3]
+    r["nlink"] = st[4]
+    r["uid"] = st[5]
+    r["gid"] = st[6]
+    r["atime"] = st[7]
+    r["mtime"] = st[8]
+    r["ctime"] = st[9]
+    returner r
+}
+
+funksjon del_linjer(data: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis data == "" { returner ut }
+    la linjer = builtin.split(data, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis linjer[i] != "" { legg_til(ut, linjer[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon list_svar(sti: tekst, typa: bool) -> ordbok_tekst {
+    la rå = builtin.native_fs_dirents(sti)
+    hvis rå == "!" { returner feilsvar("katalog kan ikkje opnast: " + sti) }
+    la linjer = del_linjer(tekst(rå))
+    la data = ""
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = linjer[i]
+        hvis typa { data = data + l + "\n" }
+        ellers { data = data + builtin.slice(l, 2, lengde(l)) + "\n" }
+        i = i + 1
+    }
+    returner svar("ok", data, lengde(linjer), "")
+}
+
+funksjon har_suffiks(namn: tekst, suffiksar: liste_tekst) -> bool {
+    hvis lengde(suffiksar) == 0 { returner sann }
+    la i: heiltall = 0
+    mens i < lengde(suffiksar) {
+        hvis suffiksar[i] != "" og builtin.ends_with(namn, suffiksar[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon har_prefiks(rel: tekst, prefiksar: liste_tekst) -> bool {
+    la i: heiltall = 0
+    mens i < lengde(prefiksar) {
+        hvis prefiksar[i] != "" og builtin.starts_with(rel, prefiksar[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon gå(base: tekst, rel: tekst, suffiksar: liste_tekst, ekskluder: liste_tekst, ut: liste_tekst, djup: heiltall) -> heiltall {
+    hvis djup > 64 { returner 0 }
+    la rå = builtin.native_fs_dirents(sett_saman(base, rel))
+    hvis rå == "!" { returner 0 }
+    la linjer = del_linjer(tekst(rå))
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = linjer[i]
+        la k = builtin.slice(l, 0, 1)
+        la namn = builtin.slice(l, 2, lengde(l))
+        la barn = namn
+        hvis rel != "" { barn = rel + "/" + namn }
+        hvis ikkje har_prefiks(barn, ekskluder) {
+            hvis k == "d" { gå(base, barn, suffiksar, ekskluder, ut, djup + 1) }
+            ellers hvis k == "f" og har_suffiks(namn, suffiksar) { legg_til(ut, barn) }
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon walk_svar(req) -> ordbok_tekst {
+    la root = felt(req, "root")
+    la rel = felt(req, "relative")
+    hvis ikkje trygg_relativ(rel) { returner feilsvar("invalid directory path") }
+    hvis root == "" { root = "." }
+    la suffiksar = del_kommalist(felt(req, "suffixes"))
+    la ekskluder = del_kommalist(felt(req, "exclude_prefixes"))
+    la ut: liste_tekst = []
+    gå(root, rel, suffiksar, ekskluder, ut, 0)
+    la data = ""
+    la i: heiltall = 0
+    mens i < lengde(ut) {
+        data = data + ut[i] + "\n"
+        i = i + 1
+    }
+    returner svar("ok", data, lengde(ut), "")
+}
+
+funksjon del_kommalist(t: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis t == "" { returner ut }
+    la delar = builtin.split(t, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        hvis d != "" { legg_til(ut, d) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon read_operation(req) -> ordbok_tekst {
+    la op = felt(req, "operation")
+    hvis op == "list" eller op == "list_typed" {
+        la sti = full_sti(req)
+        hvis sti == "" { returner feilsvar("invalid directory path") }
+        returner list_svar(sti, op == "list_typed")
+    }
+    hvis op == "walk_files" { returner walk_svar(req) }
+    hvis op == "stat" eller op == "path_stat" {
+        la sti = full_sti(req)
+        hvis sti == "" { returner feilsvar("invalid path") }
+        returner stat_svar(sti, op == "stat")
+    }
+    hvis op == "open" eller op == "read" eller op == "read_binary" eller op == "close" eller op == "seek" eller op == "ready" eller op == "read_async" eller op == "wait_async" eller op == "cancel_async" {
+        returner feilsvar("operation " + op + " unsupported in native seed")
+    }
+    returner feilsvar("operation requires disk.write")
+}
+
+funksjon write_operation(req) -> ordbok_tekst {
+    la op = felt(req, "operation")
+    la root = felt(req, "root")
+    hvis root == "" { root = "." }
+    hvis op == "mkdir_p" {
+        la sti = full_sti(req)
+        hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid directory path") }
+        prøv { builtin.mkdir_p(sti) } fang (e) { returner feilsvar("mkdir feila: " + sti) }
+        returner svar("ok", "", 1, "")
+    }
+    hvis op == "delete" {
+        la sti = full_sti(req)
+        hvis sti == "" { returner feilsvar("invalid path") }
+        la rc: heiltall = builtin.native_fs_unlink(sti)
+        hvis rc != 0 { returner feilsvar("unlink feila (" + tekst(rc) + "): " + sti) }
+        returner svar("deleted", "", 0, "")
+    }
+    hvis op == "rmdir" {
+        la sti = full_sti(req)
+        hvis sti == "" { returner feilsvar("invalid path") }
+        la rc: heiltall = builtin.native_fs_rmdir(sti)
+        hvis rc != 0 { returner feilsvar("rmdir feila (" + tekst(rc) + "): " + sti) }
+        returner svar("deleted", "", 0, "")
+    }
+    hvis op == "chmod" {
+        la sti = full_sti(req)
+        la mode = heiltall_felt(req, "mode", 0 - 1)
+        hvis sti == "" { returner feilsvar("invalid path") }
+        hvis mode < 0 eller mode > 511 { returner feilsvar("invalid mode") }
+        la rc: heiltall = builtin.native_fs_chmod(sti, mode)
+        hvis rc != 0 { returner feilsvar("chmod feila (" + tekst(rc) + "): " + sti) }
+        returner svar("ok", "", mode, "")
+    }
+    hvis op == "file_replace" {
+        la kjelde = felt(req, "source")
+        la mål = felt(req, "target")
+        hvis ikkje trygg_relativ(kjelde) eller ikkje trygg_relativ(mål) eller kjelde == "" eller mål == "" { returner feilsvar("invalid path") }
+        la rc: heiltall = builtin.native_fs_rename(sett_saman(root, kjelde), sett_saman(root, mål))
+        hvis rc != 0 { returner feilsvar("rename feila (" + tekst(rc) + ")") }
+        returner svar("replaced", "", 1, "")
+    }
+    hvis op == "symlink_replace" {
+        la rel = felt(req, "relative")
+        la mål = felt(req, "target")
+        hvis ikkje trygg_relativ(rel) eller rel == "" eller mål == "" { returner feilsvar("invalid path") }
+        la lenkje = sett_saman(root, rel)
+        builtin.native_fs_unlink(lenkje)
+        la rc: heiltall = builtin.native_fs_symlink(mål, lenkje)
+        hvis rc != 0 { returner feilsvar("symlink feila (" + tekst(rc) + ")") }
+        returner svar("ok", "", 1, "")
+    }
+    hvis op == "open" eller op == "write" eller op == "flush" eller op == "close" eller op == "seek" eller op == "ready" eller op == "write_async" eller op == "wait_async" eller op == "cancel_async" {
+        returner feilsvar("operation " + op + " unsupported in native seed")
+    }
+    returner feilsvar("operation requires disk.read")
+}

@@ -158,6 +158,18 @@ funksjon start() -> heiltall {
         }
         legg_til(handles, handle)
         i = i + 1
+        // Forskyv shard-startane: alle shardane kompilerer sin fyrste (tunge) test
+        // samstundes → ressurs-topp på 7 GB-macOS-verten → stille «exit 1» for den
+        // fyrste testen i ein shard (jf. nc_test.no er_stille_feil). vent.sov er no-op
+        // på committed seedar → spinn på tid_ms. NC_PARALLEL_STAGGER_MS=0 slår av.
+        hvis i < shard_tal {
+            la stagger = tal_env("NC_PARALLEL_STAGGER_MS", 15000)
+            hvis stagger > 0 {
+                skriv("[start] shard " + tekst_fra_heltall(i - 1) + " starta; ventar " + tekst_fra_heltall(stagger) + " ms før neste\n")
+                la t0 = builtin.tid_ms()
+                mens builtin.tid_ms() - t0 < stagger { }
+            }
+        }
     }
 
     skriv("Norscode parallell test: " + tekst_fra_heltall(shard_tal) + " deterministiske shards\n")
@@ -165,43 +177,82 @@ funksjon start() -> heiltall {
     la test_total: heiltall = 0
     la shard_wall_ms_max: heiltall = 0
     la shard_peak_rss_sum_bytes: heiltall = 0
+    // Rundgangs-polling i staden for sekvensiell blokkering: den gamle løkka gjorde
+    // vent_shard(handles[i], timeout) shard for shard, så ALL output kom først når ein
+    // heil shard var ferdig — og éin hengande shard gav 0 byte output i opptil ein time
+    // (CI såg «ingen endring på 30 min»). No: kort vent (5 s) på kvar open shard etter
+    // tur; status "kjorer" = framleis i gang; elles skriv shard-outputen MED EIN GONG og
+    // gjer opp. Hjarteslag kvart 60. sekund namngjev shardane som framleis køyrer.
+    // Sjølve tidsbudsjettet (timeout) handhevast av spawn-førespurnaden i ABI-en.
+    la open: liste_heiltall = []
     i = 0
-    mens i < lengde(handles) {
-        la ferdig = vent_shard(handles[i], timeout * 1000)
-        la output = les_shard(handles[i])
-        hvis output["stdout"] != "" { skriv(output["stdout"]) }
-        hvis output["stderr"] != "" { skriv(output["stderr"]) }
-        la status = tekst(ferdig["status"])
-        la exit_code = -1
-        hvis finnes_nøkkel(ferdig, "exit_code") {
-            exit_code = heltall_fra_tekst(tekst(ferdig["exit_code"]))
-        }
-        hvis finnes_nøkkel(ferdig, "wall_ms") {
-            la shard_wall = heltall_fra_tekst(tekst(ferdig["wall_ms"]))
-            hvis shard_wall > shard_wall_ms_max { shard_wall_ms_max = shard_wall }
-        }
-        hvis finnes_nøkkel(ferdig, "peak_rss_bytes") {
-            shard_peak_rss_sum_bytes = shard_peak_rss_sum_bytes +
-                heltall_fra_tekst(tekst(ferdig["peak_rss_bytes"]))
-        }
-        la shard_total = resultat_tal(tekst(output["stdout"]), "Totalt")
-        hvis shard_total > 0 { test_total = test_total + shard_total }
-        hvis status != "ferdig" eller exit_code != 0 {
-            skriv("[FEIL] shard " + tekst_fra_heltall(i) + " status=" + status +
-                  " exit=" + tekst_fra_heltall(exit_code) + "\n")
-            hvis finnes_nøkkel(ferdig, "error") og tekst(ferdig["error"]) != "" {
-                skriv("  error=" + tekst(ferdig["error"]) + "\n")
+    mens i < lengde(handles) { legg_til(open, 1)  i = i + 1 }
+    la open_tal: heiltall = lengde(handles)
+    la start_ms: heiltall = builtin.tid_ms()
+    la sist_hjarteslag_ms: heiltall = start_ms
+    mens open_tal > 0 {
+        i = 0
+        mens i < lengde(handles) {
+            hvis open[i] == 1 {
+                la ferdig = vent_shard(handles[i], 5000)
+                hvis tekst(ferdig["status"]) != "kjorer" {
+                    la elapsed_s = (builtin.tid_ms() - start_ms) / 1000
+                    skriv("[shard " + tekst_fra_heltall(i) + " ferdig etter " +
+                          tekst_fra_heltall(elapsed_s / 60) + "m" + tekst_fra_heltall(elapsed_s % 60) + "s]\n")
+                    la output = les_shard(handles[i])
+                    hvis output["stdout"] != "" { skriv(output["stdout"]) }
+                    hvis output["stderr"] != "" { skriv(output["stderr"]) }
+                    la status = tekst(ferdig["status"])
+                    la exit_code = -1
+                    hvis finnes_nøkkel(ferdig, "exit_code") {
+                        exit_code = heltall_fra_tekst(tekst(ferdig["exit_code"]))
+                    }
+                    hvis finnes_nøkkel(ferdig, "wall_ms") {
+                        la shard_wall = heltall_fra_tekst(tekst(ferdig["wall_ms"]))
+                        hvis shard_wall > shard_wall_ms_max { shard_wall_ms_max = shard_wall }
+                    }
+                    hvis finnes_nøkkel(ferdig, "peak_rss_bytes") {
+                        shard_peak_rss_sum_bytes = shard_peak_rss_sum_bytes +
+                            heltall_fra_tekst(tekst(ferdig["peak_rss_bytes"]))
+                    }
+                    la shard_total = resultat_tal(tekst(output["stdout"]), "Totalt")
+                    hvis shard_total > 0 { test_total = test_total + shard_total }
+                    hvis status != "ferdig" eller exit_code != 0 {
+                        skriv("[FEIL] shard " + tekst_fra_heltall(i) + " status=" + status +
+                              " exit=" + tekst_fra_heltall(exit_code) + "\n")
+                        hvis finnes_nøkkel(ferdig, "error") og tekst(ferdig["error"]) != "" {
+                            skriv("  error=" + tekst(ferdig["error"]) + "\n")
+                        }
+                        feil = feil + 1
+                    } ellers hvis shard_total <= 0 {
+                        skriv("[FEIL] shard " + tekst_fra_heltall(i) +
+                              " manglar ikkje-tom testoppsummering; nc_main-selftest tel ikkje\n")
+                        feil = feil + 1
+                    } ellers {
+                        skriv("[OK] shard " + tekst_fra_heltall(i) + "\n")
+                    }
+                    lukk_shard(handles[i])
+                    open[i] = 0
+                    open_tal = open_tal - 1
+                }
             }
-            feil = feil + 1
-        } ellers hvis shard_total <= 0 {
-            skriv("[FEIL] shard " + tekst_fra_heltall(i) +
-                  " manglar ikkje-tom testoppsummering; nc_main-selftest tel ikkje\n")
-            feil = feil + 1
-        } ellers {
-            skriv("[OK] shard " + tekst_fra_heltall(i) + "\n")
+            i = i + 1
         }
-        lukk_shard(handles[i])
-        i = i + 1
+        la no_ms: heiltall = builtin.tid_ms()
+        hvis open_tal > 0 og no_ms - sist_hjarteslag_ms >= 60000 {
+            la aktive = ""
+            i = 0
+            mens i < lengde(handles) {
+                hvis open[i] == 1 {
+                    hvis aktive != "" { aktive = aktive + "," }
+                    aktive = aktive + tekst_fra_heltall(i)
+                }
+                i = i + 1
+            }
+            skriv("[vent] shard(ar) framleis i gang: " + aktive + " — " +
+                  tekst_fra_heltall((no_ms - start_ms) / 60000) + " min\n")
+            sist_hjarteslag_ms = no_ms
+        }
     }
 
     hvis feil > 0 {
