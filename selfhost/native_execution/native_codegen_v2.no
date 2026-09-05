@@ -1561,27 +1561,53 @@ funksjon patch_bump_prologer(bytes, ga16_va, frozen_len) -> liste {
     u64(repl, ga16_va)
     copy(repl, [0xFF, 0xD0])
     copy(repl, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])
+    // v4 (2026-09-05): to boks-allokatorar til som IKKJE var fanga → rå, UALIGNA
+    // strengboksar (etter rå payload) → markøren sitt alignment-filter forkasta dei →
+    // frigjort medan levande → SIGSEGV (gc_reuse/hashmap/mapstress).
+    //  (a) r12-variant (21 B) i frosen json_string (@0x40286b):
+    //      mov r12,[bump]; lea rcx,[r12+16]; mov [bump],rcx
+    //      → push rax; mov rax,ga16; call rax; mov r12,rax; pop rax; nop*4
+    //      (rax = payload-peikar brukt etterpå → bevart via push/pop).
+    la pat_r12 = [0x4C, 0x8B, 0x24, 0x25, 0x00, 0x00, 0x60, 0x00, 0x49, 0x8D, 0x4C, 0x24, 0x10, 0x48, 0x89, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]
+    la repl_r12 = []
+    copy(repl_r12, [0x50])                              // push rax
+    copy(repl_r12, [0x48, 0xB8]) u64(repl_r12, ga16_va) // mov rax,ga16
+    copy(repl_r12, [0xFF, 0xD0])                        // call rax
+    copy(repl_r12, [0x49, 0x89, 0xC4])                  // mov r12,rax
+    copy(repl_r12, [0x58])                              // pop rax
+    copy(repl_r12, [0x90, 0x90, 0x90, 0x90])            // → 21
+    //  (b) movabs-variant (33 B) i dei PÅHENGDE concat-/tekst()-rutinene (hex @bygg_runtime_v2,
+    //      0x4039aa/0x403a70): rcx = payload-ende (ny bump); rax = rcx (boks); rcx = rax+16; bump = rcx
+    //      movabs rax,0x600000; mov [rax],rcx; mov rax,rcx; lea rcx,[rax+16]; movabs rsi,0x600000; mov [rsi],rcx
+    //      → mov [0x600000],rcx (reserver payloaden); mov rax,ga16; call rax; nop*13
+    //      (gc_alloc16 bevarer rcx/r11; etterfølgjande kode: mov [rax],2; mov [rax+8],r11).
+    la pat_mov = [0x48, 0xB8, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x08, 0x48, 0x89, 0xC8, 0x48, 0x8D, 0x48, 0x10, 0x48, 0xBE, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00, 0x48, 0x89, 0x0E]
+    la repl_mov = []
+    copy(repl_mov, [0x48, 0x89, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov [0x600000],rcx
+    copy(repl_mov, [0x48, 0xB8]) u64(repl_mov, ga16_va) // mov rax,ga16
+    copy(repl_mov, [0xFF, 0xD0])                        // call rax
+    la k: heltall = 0
+    mens k < 13 { legg_til(repl_mov, 0x90) k = k + 1 }  // → 33
     la ut = []
     la n: heltall = lengde(bytes)
-    la plen: heltall = 20
     la i: heltall = 0
     la treff: heltall = 0
     mens i < n {
-        la m: heltall = 0
-        hvis i + plen <= frozen_len {
-            m = 1
-            la mrdx: heltall = 1
-            la j: heltall = 0
-            mens j < plen {
-                hvis bytes[i + j] != pat_rcx[j] { m = 0 }
-                hvis bytes[i + j] != pat_rdx[j] { mrdx = 0 }
-                j = j + 1
-            }
-            hvis mrdx == 1 { m = 1 }
-        }
-        hvis m == 1 {
+        la m_mov = hexpatch_matchar(bytes, i, pat_mov, frozen_len)
+        la m_r12 = hexpatch_matchar(bytes, i, pat_r12, frozen_len)
+        la m_rcx = hexpatch_matchar(bytes, i, pat_rcx, frozen_len)
+        la m_rdx = hexpatch_matchar(bytes, i, pat_rdx, frozen_len)
+        hvis m_mov == 1 {
+            copy(ut, repl_mov)
+            i = i + lengde(pat_mov)
+            treff = treff + 1
+        } ellers hvis m_r12 == 1 {
+            copy(ut, repl_r12)
+            i = i + lengde(pat_r12)
+            treff = treff + 1
+        } ellers hvis m_rcx == 1 eller m_rdx == 1 {
             copy(ut, repl)
-            i = i + plen
+            i = i + lengde(pat_rcx)
             treff = treff + 1
         } ellers {
             legg_til(ut, bytes[i])
@@ -1590,6 +1616,18 @@ funksjon patch_bump_prologer(bytes, ga16_va, frozen_len) -> liste {
     }
     skriv("native_codegen_v2: (iii) hex-patcha " + tekst_fra_heltall(treff) + " bump-prologar → gc_alloc16\n")
     returner ut
+}
+
+// hexpatch_matchar(bytes, i, pat, grense) → 1 når pat ligg på bytes[i..] og heilt innanfor grensa.
+funksjon hexpatch_matchar(bytes, i: heltall, pat, grense: heltall) -> heltall {
+    la plen: heltall = lengde(pat)
+    hvis i + plen > grense { returner 0 }
+    la j: heltall = 0
+    mens j < plen {
+        hvis bytes[i + j] != pat[j] { returner 0 }
+        j = j + 1
+    }
+    returner 1
 }
 
 // (3b) hex-patch: STRENG-payload-allokatoren (variabel storleik). Frosen mønster (24B):
@@ -3157,16 +3195,26 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, gbi_empty, gbi_Lbump)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
     u32(bytes, HEAP_VA())
+    copy(bytes, [0x48, 0x83, 0xC0, 0x0F])          // add rax,15  (v4: 16-alignér, sjå gc_alloc16)
+    copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x48, 0x8D, 0x48, 0x10])          // lea rcx,[rax+16]
     copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [bump],rcx
     u32(bytes, HEAP_VA())
     la gbi_box = emit_jmp_placeholder(bytes)       // jmp L_fill
-    la gbi_Lreuse = lengde(bytes)                  // L_reuse:
+    la gbi_Lreuse = lengde(bytes)                  // L_reuse: r8=blokk, r9=size
     patch_jump(bytes, gbi_reuse, gbi_Lreuse)
+    // v4: P = round16(r8); blokka må romme lead+16, elles bump (head-fit, ingen vandring).
+    copy(bytes, [0x49, 0x8D, 0x40, 0x0F])          // lea rax,[r8+15]
+    copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16 (P)
+    copy(bytes, [0x49, 0x89, 0xC2])                // mov r10,rax
+    copy(bytes, [0x4D, 0x29, 0xC2])                // sub r10,r8 (lead)
+    copy(bytes, [0x4D, 0x29, 0xD1])                // sub r9,r10 (S' = S - lead)
+    copy(bytes, [0x49, 0x83, 0xF9, 0x10])          // cmp r9,16
+    la gbi_nofit = emit_jcc_placeholder(bytes, 0x82) // jb L_bump
+    patch_jump(bytes, gbi_nofit, gbi_Lbump)
     copy(bytes, [0x4D, 0x8B, 0x10])                // mov r10,[r8] (next)
-    copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [head],r10
+    copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [head],r10 (pop heile blokka)
     u32(bytes, HEAP_VA() + 40)
-    copy(bytes, [0x4C, 0x89, 0xC0])                // mov rax,r8
     la gbi_Lfill = lengde(bytes)                   // L_fill:
     patch_jump(bytes, gbi_box, gbi_Lfill)
     copy(bytes, [0x48, 0xC7, 0x00, 0x01, 0x00, 0x00, 0x00]) // mov q[rax],1 (type int)
@@ -3190,6 +3238,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x51])                            // push rcx
     copy(bytes, [0x52])                            // push rdx
     copy(bytes, [0x41, 0x51])                      // push r9
+    copy(bytes, [0x41, 0x52])                      // push r10 (v4: P-scratch)
     copy(bytes, [0x41, 0x53])                      // push r11
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[head]
     u32(bytes, HEAP_VA() + 40)
@@ -3201,25 +3250,37 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x50, 0x08])          // mov rdx,[rax+8] (blokk-size)
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
     la a16_found = emit_jcc_placeholder(bytes, 0x83) // jae found
+    la a16_nextl = lengde(bytes)                   // next: (òg nofit-mål)
     copy(bytes, [0x49, 0xFF, 0xCB])                // dec r11
     la a16_cap = emit_je_placeholder(bytes)        // jz L_bump (tak nådd)
     copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax (prev)
     copy(bytes, [0x48, 0x8B, 0x00])                // mov rax,[rax] (next)
     la a16_wj = emit_jmp_placeholder(bytes)
     patch_jump(bytes, a16_wj, a16_walk)
-    la a16_foundl = lengde(bytes)                  // found: rax=blokk, rdx=size, r9=prev
+    la a16_foundl = lengde(bytes)                  // found: rax=blokk A, rdx=size S, r9=prev
     patch_jump(bytes, a16_found, a16_foundl)
+    // v4: del ut P = round16(A). Leiande [A,P) (≤15 B) fell attende som hol ved neste sweep.
+    // Blokka må romme lead+16, elles gå vidare (nofit).
+    copy(bytes, [0x4C, 0x8D, 0x50, 0x0F])          // lea r10,[rax+15]
+    copy(bytes, [0x49, 0x83, 0xE2, 0xF0])          // and r10,-16 (P)
+    copy(bytes, [0x4C, 0x89, 0xD1])                // mov rcx,r10
+    copy(bytes, [0x48, 0x29, 0xC1])                // sub rcx,rax (lead)
+    copy(bytes, [0x48, 0x29, 0xCA])                // sub rdx,rcx (S' = S - lead)
+    copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
+    la a16_nofit = emit_jcc_placeholder(bytes, 0x82) // jb next (passar ikkje)
     copy(bytes, [0x48, 0x8B, 0x08])                // mov rcx,[rax] (next)
     copy(bytes, [0x48, 0x83, 0xEA, 0x10])          // sub rdx,16 (rest-size)
     copy(bytes, [0x48, 0x83, 0xFA, 0x10])          // cmp rdx,16
     copy(bytes, [0x0F, 0x82])                       // jb nosplit
     u32(bytes, 0)
     la a16_pnosplit = lengde(bytes) - 4
-    copy(bytes, [0x48, 0x89, 0x48, 0x10])          // mov [rax+16],rcx (rest.next)
-    copy(bytes, [0x48, 0x89, 0x50, 0x18])          // mov [rax+24],rdx (rest.size)
-    copy(bytes, [0x48, 0x8D, 0x48, 0x10])          // lea rcx,[rax+16] (etterfølgjar = rest)
+    copy(bytes, [0x49, 0x89, 0x4A, 0x10])          // mov [r10+16],rcx (rest.next)
+    copy(bytes, [0x49, 0x89, 0x52, 0x18])          // mov [r10+24],rdx (rest.size)
+    copy(bytes, [0x49, 0x8D, 0x4A, 0x10])          // lea rcx,[r10+16] (etterfølgjar = rest)
     la a16_nosplit = lengde(bytes)                 // nosplit: rcx = etterfølgjar
     patch_jump(bytes, a16_pnosplit, a16_nosplit)
+    patch_jump(bytes, a16_nofit, a16_nextl)
+    copy(bytes, [0x4C, 0x89, 0xD0])                // mov rax,r10 (returverdi = P)
     copy(bytes, [0x4D, 0x85, 0xC9])                // test r9,r9
     la a16_sethead = emit_je_placeholder(bytes)    // jz sethead
     copy(bytes, [0x49, 0x89, 0x09])                // mov [r9],rcx (prev.next = etterfølgjar)
@@ -3234,6 +3295,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, a16_cap, a16_Lbump)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
     u32(bytes, HEAP_VA())
+    // v4 (2026-09-05): 16-ALIGNÉR bump-blokka. Frosne rå-bump-strengar (2*len+11) let
+    // bump stå ualigna → boksar hamna i same 16 B-slot som ein liten streng-payload
+    // (len+9 ≤ 15 B) → stale payload-peikar på stakken markerte slotten fyrst → den
+    // EKTE boksen vart hoppa over som «alt markert» → uregistrert → frigjort → attbruk
+    // korrupterte nøklar (gc_mapstress: sjekksum-feil etter collect 1). Med alle
+    // GC-blokker aligna kan markøren avvise ualigna kandidatar (sjå gc_mark_roots).
+    copy(bytes, [0x48, 0x83, 0xC0, 0x0F])          // add rax,15
+    copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x48, 0x89, 0xC2])                // mov rdx,rax
     copy(bytes, [0x48, 0x83, 0xC2, 0x10])          // add rdx,16
     copy(bytes, [0x48, 0x89, 0x14, 0x25])          // mov [bump],rdx
@@ -3242,6 +3311,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, a16_pdone, a16_Ldone)
     patch_jump(bytes, a16_prdone, a16_Ldone)
     copy(bytes, [0x41, 0x5B])                      // pop r11
+    copy(bytes, [0x41, 0x5A])                      // pop r10
     copy(bytes, [0x41, 0x59])                      // pop r9
     copy(bytes, [0x5A])                            // pop rdx
     copy(bytes, [0x59])                            // pop rcx
@@ -3257,6 +3327,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // 2026-09-04: FIRST-FIT-vandring (maks 512) i staden for head-fit (sjå gc_alloc16).
     // Klobrar rax + r9/r10/r11; bevarer rdi/rsi/rdx/rcx (rcx = storleik).
     copy(bytes, [0x9C])                            // pushfq
+    // v4: rund storleiken opp til 16 (rcx bevart via push/pop) → split-restar og bump-
+    // blokker held 16-alignment (sjå gc_alloc16).
+    copy(bytes, [0x51])                            // push rcx
+    copy(bytes, [0x52])                            // push rdx (v4: P-scratch)
+    copy(bytes, [0x48, 0x83, 0xC1, 0x0F])          // add rcx,15
+    copy(bytes, [0x48, 0x83, 0xE1, 0xF0])          // and rcx,-16
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[head]
     u32(bytes, HEAP_VA() + 40)
     copy(bytes, [0x45, 0x31, 0xC9])                // xor r9d,r9d (prev=0)
@@ -3269,23 +3345,33 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la av_found = emit_jcc_placeholder(bytes, 0x83) // jae found
     copy(bytes, [0x49, 0xFF, 0xCB])                // dec r11
     la av_cap = emit_je_placeholder(bytes)         // jz V_bump
+    la av_nextl = lengde(bytes)                    // next: (òg nofit-mål)
     copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
     copy(bytes, [0x48, 0x8B, 0x00])                // mov rax,[rax]
     la av_wj = emit_jmp_placeholder(bytes)
     patch_jump(bytes, av_wj, av_walk)
-    la av_foundl = lengde(bytes)                   // found: rax=blokk, r10=size, r9=prev
+    la av_foundl = lengde(bytes)                   // found: rax=blokk A, r10=size S, r9=prev
     patch_jump(bytes, av_found, av_foundl)
+    // v4: del ut P = round16(A); leiande [A,P) ≤15 B fell attende som hol ved neste sweep.
+    copy(bytes, [0x48, 0x8D, 0x50, 0x0F])          // lea rdx,[rax+15]
+    copy(bytes, [0x48, 0x83, 0xE2, 0xF0])          // and rdx,-16 (P)
+    copy(bytes, [0x49, 0x89, 0xD3])                // mov r11,rdx
+    copy(bytes, [0x49, 0x29, 0xC3])                // sub r11,rax (lead)
+    copy(bytes, [0x4D, 0x29, 0xDA])                // sub r10,r11 (S' = S - lead)
+    copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx
+    la av_nofit = emit_jcc_placeholder(bytes, 0x82) // jb nofit
     copy(bytes, [0x4C, 0x8B, 0x18])                // mov r11,[rax] (next)
     copy(bytes, [0x49, 0x29, 0xCA])                // sub r10,rcx (rest-size)
     copy(bytes, [0x49, 0x83, 0xFA, 0x10])          // cmp r10,16
     copy(bytes, [0x0F, 0x82])                       // jb V_nosplit
     u32(bytes, 0)
     la av_pnosplit = lengde(bytes) - 4
-    copy(bytes, [0x4C, 0x89, 0x1C, 0x08])          // mov [rax+rcx],r11 (rest.next)
-    copy(bytes, [0x4C, 0x89, 0x54, 0x08, 0x08])    // mov [rax+rcx+8],r10 (rest.size)
-    copy(bytes, [0x4C, 0x8D, 0x1C, 0x08])          // lea r11,[rax+rcx] (etterfølgjar = rest)
+    copy(bytes, [0x4C, 0x89, 0x1C, 0x0A])          // mov [rdx+rcx],r11 (rest.next)
+    copy(bytes, [0x4C, 0x89, 0x54, 0x0A, 0x08])    // mov [rdx+rcx+8],r10 (rest.size)
+    copy(bytes, [0x4C, 0x8D, 0x1C, 0x0A])          // lea r11,[rdx+rcx] (etterfølgjar = rest)
     la av_nosplit = lengde(bytes)                  // V_nosplit: r11 = etterfølgjar
     patch_jump(bytes, av_pnosplit, av_nosplit)
+    copy(bytes, [0x48, 0x89, 0xD0])                // mov rax,rdx (returverdi = P)
     copy(bytes, [0x4D, 0x85, 0xC9])                // test r9,r9
     la av_sethead = emit_je_placeholder(bytes)     // jz sethead
     copy(bytes, [0x4D, 0x89, 0x19])                // mov [r9],r11
@@ -3295,11 +3381,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11
     u32(bytes, HEAP_VA() + 40)
     la av_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_done
+    la av_nofitl = lengde(bytes)                   // nofit: (blokka rommar ikkje lead+req)
+    patch_jump(bytes, av_nofit, av_nofitl)
+    copy(bytes, [0x41, 0xBB, 0x00, 0x02, 0x00, 0x00]) // mov r11d,512 (tak att; r11 var lead)
+    la av_nofitj = emit_jmp_placeholder(bytes)     // jmp next
+    patch_jump(bytes, av_nofitj, av_nextl)
     la av_Vbump = lengde(bytes)                    // V_bump:
     patch_jump(bytes, av_empty, av_Vbump)
     patch_jump(bytes, av_cap, av_Vbump)
     copy(bytes, [0x48, 0x8B, 0x04, 0x25])          // mov rax,[bump]
     u32(bytes, HEAP_VA())
+    copy(bytes, [0x48, 0x83, 0xC0, 0x0F])          // add rax,15  (v4: 16-alignér)
+    copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x49, 0x89, 0xC2])                // mov r10,rax
     copy(bytes, [0x49, 0x01, 0xCA])                // add r10,rcx (new bump = rax+size)
     copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
@@ -3307,6 +3400,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la av_done = lengde(bytes)                     // V_done:
     patch_jump(bytes, av_prdone, av_done)
     patch_jump(bytes, av_prdone2, av_done)
+    copy(bytes, [0x5A])                            // pop rdx (v4)
+    copy(bytes, [0x59])                            // pop rcx (v4: opphavleg storleik attende)
     copy(bytes, [0x9D])                            // popfq
     copy(bytes, [0xC3])                            // ret
 
@@ -3408,6 +3503,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // r10/r11 (grow-copy-loopen set r9/r10 friskt etterpå). Kalla via `mov r10,va; call r10`.
     atomics["gc_alloc_var_r8"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x9C])                            // pushfq
+    copy(bytes, [0x49, 0x83, 0xC1, 0x0F])          // add r9,15  (v4: rund opp til 16; r9 er scratch for kallaren)
+    copy(bytes, [0x49, 0x83, 0xE1, 0xF0])          // and r9,-16
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[head]
     u32(bytes, HEAP_VA() + 40)
     copy(bytes, [0x4D, 0x85, 0xC0])                // test r8,r8
@@ -3417,35 +3514,50 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x82])                       // jb V_bump
     u32(bytes, 0)
     la r8_pbump = lengde(bytes) - 4
-    copy(bytes, [0x4D, 0x8B, 0x18])                // mov r11,[r8] (next)
+    // v4: del ut P = round16(r8); leiande ≤15 B fell attende som hol ved neste sweep.
+    copy(bytes, [0x4D, 0x8D, 0x58, 0x0F])          // lea r11,[r8+15]
+    copy(bytes, [0x49, 0x83, 0xE3, 0xF0])          // and r11,-16 (P)
+    copy(bytes, [0x51])                            // push rcx (scratch)
+    copy(bytes, [0x4C, 0x89, 0xD9])                // mov rcx,r11
+    copy(bytes, [0x4C, 0x29, 0xC1])                // sub rcx,r8 (lead)
+    copy(bytes, [0x49, 0x29, 0xCA])                // sub r10,rcx (S' = S - lead)
+    copy(bytes, [0x4D, 0x39, 0xCA])                // cmp r10,r9
+    la r8_nofit = emit_jcc_placeholder(bytes, 0x82) // jb nofit_pop
+    copy(bytes, [0x49, 0x8B, 0x08])                // mov rcx,[r8] (next)
     copy(bytes, [0x4D, 0x29, 0xCA])                // sub r10,r9 (rest-size)
     copy(bytes, [0x49, 0x83, 0xFA, 0x10])          // cmp r10,16
     copy(bytes, [0x0F, 0x82])                       // jb V_nosplit
     u32(bytes, 0)
     la r8_pnosplit = lengde(bytes) - 4
-    copy(bytes, [0x4F, 0x89, 0x1C, 0x08])          // mov [r8+r9],r11 (rest.next)
-    copy(bytes, [0x4F, 0x89, 0x54, 0x08, 0x08])    // mov [r8+r9+8],r10 (rest.size)
-    copy(bytes, [0x4F, 0x8D, 0x14, 0x08])          // lea r10,[r8+r9] (rest-addr)
-    copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [head],r10
-    u32(bytes, HEAP_VA() + 40)
-    la r8_prdone = emit_jmp_placeholder(bytes)     // jmp V_done
-    la r8_nosplit = lengde(bytes)                  // V_nosplit:
+    copy(bytes, [0x4B, 0x89, 0x0C, 0x0B])          // mov [r11+r9],rcx (rest.next)
+    copy(bytes, [0x4F, 0x89, 0x54, 0x0B, 0x08])    // mov [r11+r9+8],r10 (rest.size)
+    copy(bytes, [0x4B, 0x8D, 0x0C, 0x0B])          // lea rcx,[r11+r9] (etterfølgjar = rest)
+    la r8_nosplit = lengde(bytes)                  // V_nosplit: rcx = etterfølgjar
     patch_jump(bytes, r8_pnosplit, r8_nosplit)
-    copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11 (pop heile)
+    copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [head],rcx
     u32(bytes, HEAP_VA() + 40)
-    la r8_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_done
+    copy(bytes, [0x4D, 0x89, 0xD8])                // mov r8,r11 (returverdi = P)
+    copy(bytes, [0x59])                            // pop rcx
+    la r8_prdone = emit_jmp_placeholder(bytes)     // jmp V_done
+    la r8_nofitl = lengde(bytes)                   // nofit_pop:
+    patch_jump(bytes, r8_nofit, r8_nofitl)
+    copy(bytes, [0x59])                            // pop rcx
+    la r8_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_bump (head-fit passa ikkje → bump)
     la r8_Vbump = lengde(bytes)                    // V_bump:
     patch_jump(bytes, r8_empty, r8_Vbump)
     patch_jump(bytes, r8_pbump, r8_Vbump)
+    patch_jump(bytes, r8_prdone2, r8_Vbump)
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[bump]
     u32(bytes, HEAP_VA())
+    copy(bytes, [0x49, 0x83, 0xC0, 0x0F])          // add r8,15  (v4: 16-alignér)
+    copy(bytes, [0x49, 0x83, 0xE0, 0xF0])          // and r8,-16
     copy(bytes, [0x4D, 0x89, 0xC2])                // mov r10,r8
     copy(bytes, [0x4D, 0x01, 0xCA])                // add r10,r9 (new bump = r8+size)
     copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
     u32(bytes, HEAP_VA())
     la r8_done = lengde(bytes)                     // V_done:
     patch_jump(bytes, r8_prdone, r8_done)
-    patch_jump(bytes, r8_prdone2, r8_done)
+    // (r8_prdone2 = nofit → V_bump, patcha ovanfor; IKKJE hit — elles returnerte nofit rå r8)
     copy(bytes, [0x9D])                            // popfq
     copy(bytes, [0xC3])                            // ret
 
@@ -3583,6 +3695,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0xC1, 0xE0, 0x04])          // shl rax,4
     copy(bytes, [0x4C, 0x01, 0xC0])                // add rax,r8 (&lm[j])
     copy(bytes, [0x48, 0x8B, 0x10])                // mov rdx,[rax] (lm[j].addr)
+    // v4: hola er EKSAKTE (ingen runding her — probane pinnar bump == last_live_end).
+    // Alignment er allokatorane sitt ansvar: dei deler ut P = round16(blokkstart).
     // KRITISK: overlappande/nøsta live-entry (cur_addr <= prev_end) → gap ville underflyte
     // (rdx-r9 < 0 → HUGE unsigned → cmp,16/jb slår IKKJE til → frigjer bogus enorm region →
     // korrupsjon). Nøsta entryar er lovlege (liste-payload dekkjer inline-element, streng-
@@ -4025,7 +4139,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // (verdiar ligg på stakken, ikkje i register). r11=mstack, r10=live-map, r9=count.
     atomics["gc_mark_roots"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0xBF, 0x00, 0x00, 0x60, 0x40])    // mov edi,0x40600000 GC_BITMAP_VA
-    copy(bytes, [0xB9, 0x00, 0x00, 0x04, 0x00])    // mov ecx,0x40000
+    // v4: nullstill [base, bump) sin del av bitmapen (qwords = (bump−0x600000)/1024 + 2),
+    // som gc_bitmap_clear. Var FAST 0x40000 qwords = 2 MiB = berre dei fyrste 256 MiB av
+    // 1 GiB-heapen → stale mark-bitar over 0x10600000 overlevde mellom collects → nye
+    // objekt der vart «alt markert» → uregistrerte → frigjorde (kompilator-last).
+    copy(bytes, [0x48, 0x8B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rcx,[bump]
+    copy(bytes, [0x48, 0x81, 0xE9, 0x00, 0x00, 0x60, 0x00]) // sub rcx,0x600000
+    copy(bytes, [0x48, 0xC1, 0xE9, 0x0A])          // shr rcx,10
+    copy(bytes, [0x48, 0x83, 0xC1, 0x02])          // add rcx,2
     copy(bytes, [0x31, 0xC0])                       // xor eax,eax
     copy(bytes, [0xF3, 0x48, 0xAB])                 // rep stosq (nullstill bitmap)
     copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x41]) // mov r11d,0x41000000 GC_MSTACK_VA
@@ -4107,6 +4228,16 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x39, 0xC8])                // cmp rax,rcx
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    // v4: berre 16-ALIGNA kandidatar er NcVal-boksar (alle GC-blokker er aligna, sjå
+    // gc_alloc16). Ualigna ord (interiør-peikarar payload+8, stale streng-payloadar frå
+    // frosen rå bump) markerte elles slotten til ein EKTE boks → hoppa over → frigjort.
+    // BERRE i GC-modus: med flagg AV er bump-prologane upatcha → boksar ualigna → filteret
+    // ville forkaste ekte boksar (gc_hashmap_probe flagg AV: «orden etter fjern feil»).
+    hvis gc_mode == "1" {
+        copy(bytes, [0xA8, 0x0F])                  // test al,15
+        copy(bytes, [0x0F, 0x85])                  // jnz loop (ualigna → ikkje kandidat)
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     copy(bytes, [0x48, 0x89, 0xC7])                // mov rdi,rax (addr)
     copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x60, 0x00]) // sub rax,0x600000
     copy(bytes, [0x48, 0xC1, 0xE8, 0x04])          // shr rax,4
