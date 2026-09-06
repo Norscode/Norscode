@@ -8,6 +8,255 @@
 // I native runtime er «bytes» ei liste_heiltall (fil_les_binær gjev liste), så
 // bytes_new gjev liste av `storleik` byte-verdiar.
 
+// builtin.json_parse (IKKJE _raw): legacy «tekst-typa» kontrakt frå C-æra-runtimen
+// (referanse: committed Linux-VM 2026-09-06): objekt → ordbok, array → tett ordbok
+// {"0":..,"1":..}, tal → tekst ("1e3" → "1000", "12.3" → "12.3"), true/false →
+// "true"/"false", null → "null", og UGYLDIG JSON (òg etterfølgjande søppel:
+// "true true", "123abc", "[0]x", "-1.") → "null". std.json.parse/hent_* er bygde
+// på denne. Native RT_JSON_PARSE er typa og lempeleg (= json_parse_raw), so codegen
+// rutar builtin.json_parse hit når modulen er i bunten (gap-fyrst i
+// emit_builtin_or_user_call). Sjølvstendig strikt parser (selfhost.json sin
+// json_tal kallar builtin.desimaltall, som SIGSEGV-ar i frosen runtime).
+funksjon json_parse(t: tekst) {
+    hvis builtin.type(t) != "tekst" { returner "null" }
+    la st = {"s": t, "p": 0, "feil": usann}
+    la v = _jp_verdi(st)
+    _jp_ws(st)
+    hvis st["feil"] eller st["p"] != lengde(t) { returner "null" }
+    returner v
+}
+
+funksjon _jp_peek(st) -> tekst {
+    la p: heiltall = st["p"]
+    la s: tekst = st["s"]
+    hvis p >= lengde(s) { returner "" }
+    returner builtin.slice(s, p, p + 1)
+}
+
+funksjon _jp_ws(st) -> heiltall {
+    la c = _jp_peek(st)
+    mens c == " " eller c == "\n" eller c == "\t" eller c == "\r" {
+        st["p"] = st["p"] + 1
+        c = _jp_peek(st)
+    }
+    returner 0
+}
+
+funksjon _jp_feil(st) {
+    st["feil"] = sann
+    returner "null"
+}
+
+funksjon _jp_verdi(st) {
+    _jp_ws(st)
+    la c = _jp_peek(st)
+    hvis c == "" { returner _jp_feil(st) }
+    hvis c == "{" { returner _jp_objekt(st) }
+    hvis c == "[" { returner _jp_liste(st) }
+    hvis c == "\"" { returner _jp_streng(st) }
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"]
+    hvis builtin.slice(s, p, p + 4) == "true" { st["p"] = p + 4 returner "true" }
+    hvis builtin.slice(s, p, p + 5) == "false" { st["p"] = p + 5 returner "false" }
+    hvis builtin.slice(s, p, p + 4) == "null" { st["p"] = p + 4 returner "null" }
+    hvis c == "-" eller (c >= "0" og c <= "9") { returner _jp_tal(st) }
+    returner _jp_feil(st)
+}
+
+funksjon _jp_objekt(st) {
+    st["p"] = st["p"] + 1
+    la ut = {}
+    _jp_ws(st)
+    hvis _jp_peek(st) == "}" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        _jp_ws(st)
+        hvis _jp_peek(st) != "\"" { returner _jp_feil(st) }
+        la k = _jp_streng(st)
+        hvis st["feil"] { returner "null" }
+        _jp_ws(st)
+        hvis _jp_peek(st) != ":" { returner _jp_feil(st) }
+        st["p"] = st["p"] + 1
+        _jp_ws(st)
+        la p0: heiltall = st["p"]
+        la v = _jp_verdi(st)
+        hvis st["feil"] { returner "null" }
+        // Legacy: nøsta objekt/array vert lagra som RÅ JSON-TEKST (std.json.hent_array_*
+        // parsar teksten vidare); berre skalarar vert tekst-typa direkte.
+        hvis builtin.type(v) == "ordbok" { v = _jp_kompakt(builtin.slice(st["s"], p0, st["p"])) }
+        ut[k] = v
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," { st["p"] = st["p"] + 1 fortsett }
+        hvis c == "}" { st["p"] = st["p"] + 1 returner ut }
+        returner _jp_feil(st)
+    }
+    returner ut
+}
+
+funksjon _jp_liste(st) {
+    st["p"] = st["p"] + 1
+    la ut = {}
+    la n: heiltall = 0
+    _jp_ws(st)
+    hvis _jp_peek(st) == "]" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        _jp_ws(st)
+        la p0: heiltall = st["p"]
+        la v = _jp_verdi(st)
+        hvis st["feil"] { returner "null" }
+        hvis builtin.type(v) == "ordbok" { v = _jp_kompakt(builtin.slice(st["s"], p0, st["p"])) }
+        ut[tekst_fra_heltall(n)] = v
+        n = n + 1
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," { st["p"] = st["p"] + 1 fortsett }
+        hvis c == "]" { st["p"] = st["p"] + 1 returner ut }
+        returner _jp_feil(st)
+    }
+    returner ut
+}
+
+// Kompakt JSON-tekst (referanse-VM-en serialiserer nøsta verdiar utan blank:
+// ["alpha","beta"], {"s":"ok"}): fjern blankteikn utanfor strengar.
+funksjon _jp_kompakt(r: tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    la n: heiltall = lengde(r)
+    la i_streng = usann
+    mens i < n {
+        la c = builtin.slice(r, i, i + 1)
+        hvis i_streng {
+            ut = ut + c
+            hvis c == "\\" og i + 1 < n { ut = ut + builtin.slice(r, i + 1, i + 2) i = i + 1 }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers {
+            hvis c == "\"" { i_streng = sann ut = ut + c }
+            ellers hvis c != " " og c != "\n" og c != "\t" og c != "\r" { ut = ut + c }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _jp_hex(c: tekst) -> heiltall {
+    hvis c >= "0" og c <= "9" { returner builtin.char_code(c) - 48 }
+    hvis c >= "a" og c <= "f" { returner builtin.char_code(c) - 87 }
+    hvis c >= "A" og c <= "F" { returner builtin.char_code(c) - 55 }
+    returner -1
+}
+
+funksjon _jp_streng(st) -> tekst {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"] + 1
+    la n: heiltall = lengde(s)
+    la ut = ""
+    mens p < n {
+        la c = builtin.slice(s, p, p + 1)
+        hvis c == "\"" { st["p"] = p + 1 returner ut }
+        hvis c == "\\" {
+            hvis p + 1 >= n { st["feil"] = sann returner "" }
+            la e = builtin.slice(s, p + 1, p + 2)
+            p = p + 2
+            hvis e == "n" { ut = ut + "\n" }
+            ellers hvis e == "t" { ut = ut + "\t" }
+            ellers hvis e == "r" { ut = ut + "\r" }
+            ellers hvis e == "b" { ut = ut + builtin.chr(8) }
+            ellers hvis e == "f" { ut = ut + builtin.chr(12) }
+            ellers hvis e == "u" {
+                hvis p + 4 > n { st["feil"] = sann returner "" }
+                la kode: heiltall = 0
+                la i: heiltall = 0
+                mens i < 4 {
+                    la h = _jp_hex(builtin.slice(s, p + i, p + i + 1))
+                    hvis h < 0 { st["feil"] = sann returner "" }
+                    kode = kode * 16 + h
+                    i = i + 1
+                }
+                p = p + 4
+                ut = ut + builtin.chr(kode)
+            }
+            ellers { ut = ut + e }
+            fortsett
+        }
+        ut = ut + c
+        p = p + 1
+    }
+    st["feil"] = sann
+    returner ""
+}
+
+// Tal → normalisert desimaltekst: heiltal som dei er; med brøk/eksponent vert
+// verdien rekna om til rein desimalform (1e3 → "1000", 12.30 → "12.3", -1e2 → "-100").
+funksjon _jp_tal(st) -> tekst {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"]
+    la n: heiltall = lengde(s)
+    la neg = usann
+    hvis builtin.slice(s, p, p + 1) == "-" { neg = sann p = p + 1 }
+    la heil = ""
+    mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+        heil = heil + builtin.slice(s, p, p + 1)
+        p = p + 1
+    }
+    hvis heil == "" { returner _jp_feil(st) }
+    la brok = ""
+    la har_brok = usann
+    hvis p < n og builtin.slice(s, p, p + 1) == "." {
+        har_brok = sann
+        p = p + 1
+        mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+            brok = brok + builtin.slice(s, p, p + 1)
+            p = p + 1
+        }
+        hvis brok == "" { returner _jp_feil(st) }
+    }
+    la eksp: heiltall = 0
+    la har_eksp = usann
+    hvis p < n og (builtin.slice(s, p, p + 1) == "e" eller builtin.slice(s, p, p + 1) == "E") {
+        har_eksp = sann
+        p = p + 1
+        la eneg = usann
+        hvis p < n og builtin.slice(s, p, p + 1) == "+" { p = p + 1 }
+        ellers hvis p < n og builtin.slice(s, p, p + 1) == "-" { eneg = sann p = p + 1 }
+        la ed = ""
+        mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+            ed = ed + builtin.slice(s, p, p + 1)
+            p = p + 1
+        }
+        hvis ed == "" eller lengde(ed) > 4 { returner _jp_feil(st) }
+        eksp = heltall_fra_tekst(ed)
+        hvis eneg { eksp = 0 - eksp }
+    }
+    st["p"] = p
+    la fortegn = ""
+    hvis neg { fortegn = "-" }
+    hvis ikkje har_brok og ikkje har_eksp { returner fortegn + heil }
+    // siffer = heil+brok, skala = lengde(brok) - eksp
+    la siffer = heil + brok
+    la skala: heiltall = lengde(brok) - eksp
+    la ut = ""
+    hvis skala <= 0 {
+        ut = siffer
+        la z: heiltall = 0 - skala
+        mens z > 0 { ut = ut + "0" z = z - 1 }
+    } ellers hvis skala >= lengde(siffer) {
+        ut = "0."
+        la z2: heiltall = skala - lengde(siffer)
+        mens z2 > 0 { ut = ut + "0" z2 = z2 - 1 }
+        ut = ut + siffer
+    } ellers {
+        ut = builtin.slice(siffer, 0, lengde(siffer) - skala) + "." + builtin.slice(siffer, lengde(siffer) - skala, lengde(siffer))
+    }
+    // strip leiande nullar i heildelen (behald éin) og etterfølgjande nullar i brøken
+    mens lengde(ut) > 1 og builtin.slice(ut, 0, 1) == "0" og builtin.slice(ut, 1, 2) != "." { ut = builtin.slice(ut, 1, lengde(ut)) }
+    hvis builtin.index_of(ut, ".") >= 0 {
+        mens builtin.ends_with(ut, "0") { ut = builtin.slice(ut, 0, lengde(ut) - 1) }
+        hvis builtin.ends_with(ut, ".") { ut = builtin.slice(ut, 0, lengde(ut) - 1) }
+    }
+    hvis ut == "0" { returner "0" }
+    returner fortegn + ut
+}
+
 funksjon bytes_new(storleik: heiltall, fyll: heiltall) -> liste_heiltall {
     la ut: liste_heiltall = []
     la i: heiltall = 0

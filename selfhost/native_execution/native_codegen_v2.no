@@ -677,26 +677,14 @@ funksjon emit_null_safe_compare(buf, rt_va, ulik: boolsk, code_va) {
     legg_til(buf, 0x50)
     la jmp_end = emit_jmp_placeholder(buf)
     la lbl_null = lengde(buf)
-    // Minst éin side er rå null (0). VM-semantikk: null ≡ heiltal 0 (PUSH_CONST
-    // null boksar som int-0-NcVal, sjå emit_push_const; INDEX_GET-miss gjev rå 0).
-    // Utan denne likskapen såg `x == null` FALSK ut for rå-null x, og koden gjekk
-    // vidare med nullpeikaren (nc_køyr_ncb_verdi → nøkler(null) → SIGSEGV).
-    // rax = rdi | rsi (= den ikkje-null-sida, eller 0 om begge er null):
-    //   begge null → lik; elles lik berre om type==int(1) OG payload==0.
-    copy(buf, [0x48, 0x89, 0xF8])                  // mov rax, rdi
-    copy(buf, [0x48, 0x09, 0xF0])                  // or  rax, rsi
-    copy(buf, [0x48, 0x85, 0xC0])                  // test rax, rax
-    copy(buf, [0x74, 0x0D])                        // je  LIK
-    copy(buf, [0x48, 0x83, 0x38, 0x01])            // cmp qword [rax], 1
-    copy(buf, [0x75, 0x09])                        // jne ULIK
-    copy(buf, [0x48, 0x83, 0x78, 0x08, 0x00])      // cmp qword [rax+8], 0
-    copy(buf, [0x75, 0x02])                        // jne ULIK
-    hvis ulik { copy(buf, [0xB0, 0x00]) }          // LIK:  mov al, 0 (ulik-op)
-    ellers { copy(buf, [0xB0, 0x01]) }             //       mov al, 1
-    copy(buf, [0xEB, 0x02])                        // jmp FERDIG
-    hvis ulik { copy(buf, [0xB0, 0x01]) }          // ULIK: mov al, 1 (ulik-op)
-    ellers { copy(buf, [0xB0, 0x00]) }             //       mov al, 0
-    copy(buf, [0x0F, 0xB6, 0xF8])                  // FERDIG: movzx edi, al
+    // Minst éin side er rå null (0): peikarlikskap. Referanse (committed Linux-VM):
+    // null == null sann, 0 == null USANN, ordbok/liste/tekst == null usann. Null er
+    // no rå 0 òg frå PUSH_CONST (sjå emit_push_const), så `x == null` for rå-null x
+    // er sann utan boks-triks (tidlegare int-0 ≡ null-hacken er fjerna, 2026-09-06).
+    copy(buf, [0x48, 0x39, 0xF7])                  // cmp rdi, rsi
+    hvis ulik { copy(buf, [0x0F, 0x95, 0xC0]) }    // setne al
+    ellers { copy(buf, [0x0F, 0x94, 0xC0]) }       // sete al
+    copy(buf, [0x0F, 0xB6, 0xF8])                  // movzx edi, al
     call_rel32(buf, RT_BOOL(), code_va)
     legg_til(buf, 0x50)
     la lbl_end = lengde(buf)
@@ -997,6 +985,16 @@ funksjon emit_push_const(buf, v, rd_offs, code_va) {
     hvis detaljsporing { native_codegen_trace("push_const enter") }
     la vtype = builtin.type(v)
     hvis detaljsporing { native_codegen_trace("push_const type=" + vtype) }
+    // 2026-09-06: JSON-null i NCB-en (type «ingenting» på BÅDE Linux- og macOS-
+    // verts-VM) → rå null-peikar (native null). Før: Linux-vert boksa han som int-0
+    // (`v == null` sann der), macOS-vert lét han falle til tekst(v)-literal — to
+    // ulike seedar, begge feil mot referansen (committed Linux-VM: 0 == null usann,
+    // ordbok == null usann). Heiltal 0 går framleis til int-greina under.
+    hvis vtype == "ingenting" {
+        copy(buf, [0x48, 0x31, 0xC0])     // xor rax, rax (rå null)
+        legg_til(buf, 0x50)               // push rax
+        returner
+    }
     hvis v == null {
         // KRITISK: i stage0-VM-en som køyrer denne codegen-en er null ≡ heiltal 0
         // (0 == null er sann, type(null)=="heltall", json/tekst(null)=="0"). Difor
@@ -2218,9 +2216,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la tt_checkbool = lengde(bytes)                // check_bool:
     patch_jump(bytes, tt_pnotint, tt_checkbool)
     copy(bytes, [0x48, 0x83, 0xF8, 0x05])          // cmp rax,5
-    copy(bytes, [0x0F, 0x85])                      // jne make_empty
+    copy(bytes, [0x0F, 0x85])                      // jne check_verdi
     u32(bytes, 0)
-    la tt_pempty2 = lengde(bytes) - 4
+    la tt_pnotbool = lengde(bytes) - 4
     copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // sub rsp,16
     copy(bytes, [0x48, 0x83, 0x7F, 0x08, 0x00])    // cmp qword [rdi+8],0
     copy(bytes, [0x74, 0x15])                      // je .usann (+21: movabs 10 + mov 4 + mov esi 5 + jmp 2)
@@ -2232,6 +2230,23 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0x04, 0x24])          // mov [rsp],rax
     copy(bytes, [0xBE, 0x05, 0x00, 0x00, 0x00])    // mov esi,5
     copy(bytes, [0x48, 0x89, 0xE7])                // .mk: mov rdi,rsp
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10, 0xC3])    // add rsp,16; ret
+    // liste (3) / ordbok (4) → "[verdi]" (VM-paritet: committed Linux-VM skriv «[verdi]»;
+    // "" gjorde m.a. tekst(ordbok)-samanlikningar og loggar ulike, 2026-09-06).
+    la tt_checkverdi = lengde(bytes)               // check_verdi:
+    patch_jump(bytes, tt_pnotbool, tt_checkverdi)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x03])          // cmp rax,3
+    copy(bytes, [0x74, 0x0B])                      // je .verdi (+11: cmp 4 + jne 6)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x04])          // cmp rax,4
+    copy(bytes, [0x0F, 0x85])                      // jne make_empty
+    u32(bytes, 0)
+    la tt_pempty2 = lengde(bytes) - 4
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])          // .verdi: sub rsp,16
+    copy(bytes, [0x48, 0xB8, 0x5B, 0x76, 0x65, 0x72, 0x64, 0x69, 0x5D, 0x00]) // "[verdi]\0"
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])          // mov [rsp],rax
+    copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
+    copy(bytes, [0xBE, 0x07, 0x00, 0x00, 0x00])    // mov esi,7
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
     copy(bytes, [0x48, 0x83, 0xC4, 0x10, 0xC3])    // add rsp,16; ret
     la tt_empty = lengde(bytes)                    // make_empty:
@@ -2606,6 +2621,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x31, 0xFF])                             // xor edi,edi
     call_rel32(bytes, RT_BOOL(), TEXT_VA())               // rax = usann
     legg_til(bytes, 0xC3)                                 // ret
+
+    // ── nokler_safe(rdi=ordbok) → nøkler(null / ikkje-ordbok) = [] ────────────
+    // Frosen RT_MAP_KEYS las [rdi+8] med rdi=0 (NCB med "global_names": null →
+    // vm_initialiser_modular → nøkler(null) → SIGSEGV @0x401ee9 på run-ncb-pure
+    // av L5-driveren). VM-en tolererer det; returner tom liste.
+    atomics["nokler_safe"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la nk_f1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x04])                 // cmp qword [rdi],4 (ordbok)
+    la nk_f2 = emit_jcc_placeholder(bytes, 0x85)          // jne tom
+    la nk_j = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, nk_j, RT_MAP_KEYS() - TEXT_VA())    // jmp RT_MAP_KEYS
+    la nk_fl = lengde(bytes)
+    patch_jump(bytes, nk_f1, nk_fl) patch_jump(bytes, nk_f2, nk_fl)
+    la nk_j2 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, nk_j2, RT_LIST_NEW() - TEXT_VA())   // jmp RT_LIST_NEW → rax = []
 
     // ── stack_overflow: kalla frå prologen når rsp < [HEAP_VA+24] ─────────────
     // Byggjer «For djup rekursjon (native stakk)» på stakken → RT_STR_RAW → throw_unwind
@@ -5715,7 +5746,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fjern_siste { returner RT_LIST_POP() }
     hvis er_fjern       { returner RT_LIST_REMOVE() }
     hvis er_finnes_nokkel { returner atomic_vas["map_has_safe"] }
-    hvis er_nokler      { returner RT_MAP_KEYS() }
+    hvis er_nokler      { returner atomic_vas["nokler_safe"] }
     hvis er_verdier     { returner RT_MAP_VALS() }
     hvis er_fjern_nokkel { returner RT_MAP_DEL() }
     hvis er_feil        { returner atomic_vas["feil"] }
@@ -6422,6 +6453,15 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // berre for namn som IKKJE finst eksakt i bunten.
     hvis ikkje builtin.starts_with(fn_nm, "builtin.") og finnes_nøkkel(fn_vas, fn_nm) {
         emit_user_call(buf, fn_vas[fn_nm], nargs, code_va)
+        returner
+    }
+    // Gap-FYRST for builtins der den native rutina har feil KONTRAKT (ikkje berre
+    // manglar): builtin.json_parse (ikkje _raw) er legacy tekst-typa i VM-en, men
+    // RT_JSON_PARSE er typa/lempeleg. Rein Norscode-impl vinn når han er i bunten
+    // (std/native_gap.no, importert av nc_main); elles fell vi til RT_JSON_PARSE.
+    hvis (fn_nm == "builtin.json_parse" eller fn_nm == "json_parse") og nargs == 1
+       og finnes_nøkkel(fn_vas, "std.native_gap.json_parse") {
+        emit_user_call(buf, fn_vas["std.native_gap.json_parse"], nargs, code_va)
         returner
     }
     la rt_va = builtin_va(fn_nm, atomic_vas)
