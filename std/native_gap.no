@@ -817,3 +817,228 @@ funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
     hvis r1 < 0 { returner r1 }
     returner r2
 }
+
+// ── builtin.network_operation («norscode-native-network-v1») i rein Norscode ────
+// Handle-ABI over sys6: listen/connect/accept/read/read_hex/write/write_hex/poll/
+// close/shutdown + udp_listen/udp_connect/recvfrom/sendto. Sokkelane er ikkje-
+// blokkerande (som C-æra): accept/read/recvfrom gjev «ventende» når ingenting er klart.
+// tls_* → «feil» (ingen TLS-backend enno). Handle: "socket:<n>:1".
+la _nw_slots = {}
+la _nw_neste = 0
+
+funksjon _nw_res(status: tekst, handle: tekst, data: tekst, verdi: heiltall, port: heiltall, error: tekst) {
+    returner {"abi": "norscode-native-network-v1", "status": status, "handle": handle, "data": data,
+              "value": verdi, "port": port, "error": error, "event_backend": "poll",
+              "tls_version": "", "cipher": "", "peer_verified": usann, "peer_cert_present": usann,
+              "peer_subject": "", "ocsp_stapled": usann, "ocsp_status": ""}
+}
+
+funksjon _nw_feil(handle: tekst, error: tekst) { returner _nw_res("feil", handle, "", -1, 0, error) }
+
+funksjon _nw_ny_slot(fd: heiltall, type: tekst) -> tekst {
+    _nw_neste = _nw_neste + 1
+    la h = "socket:" + tekst_fra_heltall(_nw_neste) + ":1"
+    _nw_slots[h] = {"fd": fd, "type": type}
+    returner h
+}
+
+funksjon _nw_heiltal(req, felt: tekst, standard: heiltall) -> heiltall {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    la v = req[felt]
+    hvis builtin.type(v) == "heltall" { returner v }
+    la t = tekst(v)
+    hvis t == "" { returner standard }
+    returner heltall_fra_tekst(t)
+}
+
+funksjon _nw_tekst(req, felt: tekst, standard: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    returner tekst(req[felt])
+}
+
+funksjon _nw_lokal_port(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 160, 16)
+    hvis builtin.sys6(51, fd, b + 176, b + 160, 0, 0, 0) != 0 { returner 0 }
+    returner (builtin.raw_load8(b + 178) << 8) | builtin.raw_load8(b + 179)
+}
+
+funksjon _nw_hex_kod(l: liste_heiltall) -> tekst {
+    la siffer = "0123456789abcdef"
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        la v = l[i] & 255
+        ut = ut + builtin.slice(siffer, v >> 4, (v >> 4) + 1) + builtin.slice(siffer, v & 15, (v & 15) + 1)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _nw_hex_dekod(h: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i + 1 < lengde(h) {
+        la a = _jp_hex(builtin.slice(h, i, i + 1))
+        la b = _jp_hex(builtin.slice(h, i + 1, i + 2))
+        hvis a < 0 eller b < 0 { returner [] }
+        legg_til(ut, a * 16 + b)
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _nw_liste_til_tekst(l: liste_heiltall) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) { ut = ut + builtin.chr(l[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _nw_tekst_til_liste(t: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(t) { legg_til(ut, builtin.char_code(builtin.slice(t, i, i + 1))) i = i + 1 }
+    returner ut
+}
+
+funksjon network_operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
+    la op = _nw_tekst(req, "operation", "")
+    hvis builtin.starts_with(op, "tls_") { returner _nw_feil("", "native TLS backend unavailable") }
+    hvis op == "listen" eller op == "udp_listen" eller op == "udp_connect" {
+        la host = _nw_tekst(req, "host", "127.0.0.1")
+        la port = _nw_heiltal(req, "port", 0)
+        la type: heiltall = 1
+        hvis op != "listen" { type = 2 }
+        la fd = 0
+        prøv { fd = builtin.sys6(41, 2, type, 0, 0, 0, 0) } fang (e) { fd = -1 }
+        hvis fd < 0 { returner _nw_feil("", "socket failed") }
+        prøv {
+            hvis op == "udp_connect" {
+                la r = socket_connect(fd, host, port)
+                hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+            } ellers {
+                la r2 = socket_bind(fd, host, port)
+                hvis r2 < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "bind failed") }
+                hvis op == "listen" {
+                    la backlog = _nw_heiltal(req, "backlog", 128)
+                    hvis builtin.sys6(50, fd, backlog, 0, 0, 0, 0) < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "listen failed") }
+                }
+            }
+        } fang (e2) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+        _pg_nonblock(fd)
+        la h = _nw_ny_slot(fd, op)
+        la status = "listening"
+        hvis op == "udp_connect" { status = "connected" }
+        returner _nw_res(status, h, "", 0, _nw_lokal_port(fd), "")
+    }
+    hvis op == "connect" {
+        la host = _nw_tekst(req, "host", "")
+        la port = _nw_heiltal(req, "port", 0)
+        hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
+        la fd = builtin.sys6(41, 2, 1, 0, 0, 0, 0)
+        hvis fd < 0 { returner _nw_feil("", "socket failed") }
+        la r = 0
+        prøv { r = socket_connect(fd, host, port) } fang (e) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+        hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+        _pg_nonblock(fd)
+        la h = _nw_ny_slot(fd, "tcp")
+        returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
+    }
+    la handle = _nw_tekst(req, "handle", "")
+    hvis ikkje finnes_nøkkel(_nw_slots, handle) { returner _nw_feil(handle, "unknown handle") }
+    la s = _nw_slots[handle]
+    la fd: heiltall = s["fd"]
+    hvis op == "close" {
+        builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+        fjern_nokkel(_nw_slots, handle)
+        returner _nw_res("closed", handle, "", 0, 0, "")
+    }
+    hvis op == "shutdown" {
+        builtin.sys6(48, fd, 2, 0, 0, 0, 0)
+        returner _nw_res("ok", handle, "", 0, 0, "")
+    }
+    hvis op == "accept" {
+        la b = _sk_buf()
+        builtin.raw_store64(b + 96, 16)
+        la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+        hvis ny == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        hvis ny < 0 { returner _nw_feil(handle, "accept failed") }
+        _pg_nonblock(ny)
+        la h2 = _nw_ny_slot(ny, "tcp")
+        returner _nw_res("connected", h2, "", 0, 0, "")
+    }
+    hvis op == "poll" {
+        la events = _nw_heiltal(req, "events", 1)
+        la timeout_ms = _nw_heiltal(req, "timeout_ms", 0)
+        la b = _sk_buf()
+        la pfd: heiltall = b + 256
+        la maske: heiltall = 0
+        hvis (events & 1) != 0 { maske = maske | 1 }      // POLLIN
+        hvis (events & 2) != 0 { maske = maske | 4 }      // POLLOUT
+        builtin.raw_store64(pfd, (fd & 4294967295) | (maske << 32))
+        la r = builtin.sys6(7, pfd, 1, timeout_ms, 0, 0, 0)
+        hvis r < 0 { returner _nw_feil(handle, "poll failed") }
+        la revents = (builtin.raw_load64(pfd) >> 48) & 65535
+        la klar: heiltall = 0
+        hvis (revents & 1) != 0 eller (revents & 16) != 0 eller (revents & 8) != 0 { klar = klar | 1 }
+        hvis (revents & 4) != 0 { klar = klar | 2 }
+        hvis klar == 0 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        returner _nw_res("klar", handle, "", klar, 0, "")
+    }
+    hvis op == "read" eller op == "read_hex" eller op == "recvfrom" {
+        la maks = _nw_heiltal(req, "max", 65536)
+        hvis maks < 1 eller maks > 1048576 { returner _nw_feil(handle, "invalid read size") }
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        hvis maks > 32768 { maks = 32768 }
+        la peer: heiltall = b + 512
+        builtin.raw_store64(b + 528, 16)
+        la n = 0
+        hvis op == "recvfrom" { n = builtin.sys6(45, fd, buf, maks, 0, peer, b + 528) }
+        ellers { n = builtin.sys6(0, fd, buf, maks, 0, 0, 0) }
+        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        hvis n < 0 { returner _nw_feil(handle, "read failed") }
+        la l: liste_heiltall = []
+        la i: heiltall = 0
+        mens i < n { legg_til(l, builtin.raw_load8(buf + i)) i = i + 1 }
+        hvis op == "read" {
+            hvis n == 0 { returner _nw_res("closed", handle, "", 0, 0, "") }
+            returner _nw_res("ok", handle, _nw_liste_til_tekst(l), n, 0, "")
+        }
+        la r = _nw_res("ok", handle, "", n, 0, "")
+        r["data_hex"] = _nw_hex_kod(l)
+        hvis op == "recvfrom" {
+            r["peer_host"] = tekst_fra_heltall(builtin.raw_load8(peer + 4)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 5)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 6)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 7))
+            r["peer_port"] = (builtin.raw_load8(peer + 2) << 8) | builtin.raw_load8(peer + 3)
+            r["port"] = r["peer_port"]
+        }
+        returner r
+    }
+    hvis op == "write" eller op == "write_hex" eller op == "sendto" {
+        la data: liste_heiltall = []
+        hvis op == "write" { data = _nw_tekst_til_liste(_nw_tekst(req, "data", "")) }
+        ellers { data = _nw_hex_dekod(_nw_tekst(req, "data_hex", "")) }
+        hvis lengde(data) == 0 { returner _nw_feil(handle, "invalid payload") }
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        la bit = lengde(data)
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[k] & 255) k = k + 1 }
+        la n = 0
+        la port: heiltall = 0
+        hvis op == "sendto" og _nw_tekst(req, "peer_host", "") != "" {
+            port = _nw_heiltal(req, "peer_port", 0)
+            prøv { _sk_sockaddr(b + 640, _nw_tekst(req, "peer_host", ""), port) } fang (e) { returner _nw_feil(handle, "invalid UDP peer") }
+            n = builtin.sys6(44, fd, buf, bit, 16384, b + 640, 16)
+        } ellers {
+            n = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        }
+        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, port, "") }
+        hvis n < 0 { returner _nw_feil(handle, "write failed") }
+        returner _nw_res("ok", handle, "", n, port, "")
+    }
+    returner _nw_feil(handle, "invalid operation")
+}
