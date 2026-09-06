@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-06 (kveld, 19:15)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-06 (natt, 21:30)**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -21,7 +21,7 @@ Ferdig når: alle jobbar i `ci.yml`, `gc-litmus.yml` og `b2-seed-direct.yml` er 
 | ELF stage-0 fixpunkt (Gen1 == Gen2) | `[x]` lokalt | Fragment regenerert i Docker; ny køyring: NCB 704393 == 704393, ELF 1097696 identiske (BESTÅTT). Verifiserast i CI |
 | Slow tests Linux | `[~]` | var exit 143 (OOM) etter 96 min utan logg. No: 2 runnarar (matrix) + strøymd logg (A1). Verifiserast i neste CI-runde |
 | Slow tests macOS | `[~]` | var 300 min timeout + 22 forlatne prosessar. No: 3 runnarar (matrix), SIGKILL ved test-timeout, strøymd logg (A2). Verifiserast i neste CI-runde |
-| B2 «Fullhost nc_main native seed» | `[~]` | `Ukjend NORSCODE_CMD: selfcompile-l5` — fiks (`run tools/selfcompile_l5.no`) ligg lokalt, går med neste push |
+| B2 «Fullhost nc_main native seed» | `[~]` | L5 grøn i CI (ncb_stream tekst-fallback). Materialize krev `run-ncb-pure` → køyrer no på den ferske direkte seeden (`needs: build-seed`). Ventar på køyring |
 
 ### Tiltak
 - **A1 Linux-OOM diagnose** `[x]` kode / `[ ]` verifisert — `ci_shell_runner.no` strøymer barnet sitt stdout (async spawn + wait/read) når `NORSCODE_VM_CI_STREAM=1`; `nc_test_parallel.no` drenerer shard-output kvar 5. sekund. Neste runner-død viser kva test som køyrde.
@@ -43,7 +43,7 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | zip/tar/filops/media/shutil/process/socket/network/DNS/json | `[x]` | passerer på seed AA–AE |
 | `test_dns_ds_record` | `[x]` | rot-årsak var A3 (kompilatorfeil); grøn på seed AE |
 | `test_template` (verts-VM via host_kall) | `[x]` flytta | «Ukjent variabel: f» — feilar òg på committa VM → språkparitet (f-strengar). Flytta til `language_parity_tests.txt` |
-| `test_security` | `[!]` | timeout 400 s på seed — må profilerast (neste) |
+| `test_security` | `[~]` | PBKDF2 var FEIL (padda nøkkel) → fiksa + 2× raskare. Attståande: heng i native PBKDF2 ved 64 MiB GC-port (>40k iterasjonar), OK med 4 MiB port → GC-/allokator-feil under diagnose (qemu+gdb) |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
 | Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
 | `db.*` (NorsDB rein Norscode) | `[ ]` | eige spor |
@@ -81,6 +81,8 @@ Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 | `test_security` på seed AE: html-delen OK på 0 s; PBKDF2- og rekursjonsdelen under måling | Docker | — |
 
 ## Logg
+
+- 2026-09-06 21:30: B2 fullhost: L5 BESTÅTT i CI etter ncb_stream-fallback (committed Linux-stage0 fil-open = EINVAL). Materialize flytta til fersk direkte seed (verts-executor køyrer ikkje fersk NCB; hybrid-compile manglar module_initializers). std.sha256.pbkdf2_hex: feil digest (padda nøkkel/salt) fiksa mot Python; HMAC-midtstand. Ny blokkar: native PBKDF2 heng ved 64 MiB GC-port (4 MiB OK) — gdb-sampling pågår. GC-litmus grøn på 1fc73e0.
 
 - 2026-09-06 19:40: Fixpunkt BESTÅTT lokalt med regenererte fragment (Gen1 == Gen2). Alt pusha (18 commits), B2 fullhost dispatcha. Linux-stage0 sin async-backend ignorerer environment-kartet → adapteren bind miljøet sjølv (env.write), harness-async berre på macOS.
 
