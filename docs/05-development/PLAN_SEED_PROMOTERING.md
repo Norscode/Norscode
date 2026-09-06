@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-06 (natt, 21:30)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-06 (natt, 23:40)**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -18,10 +18,10 @@ Ferdig når: alle jobbar i `ci.yml`, `gc-litmus.yml` og `b2-seed-direct.yml` er 
 |---|---|---|
 | Fast lanes (Linux/macOS) | `[x]` grøn | — |
 | GC-litmus (10k, sys6, nulltype, eqnull, strnull) | `[x]` grøn | — |
-| ELF stage-0 fixpunkt (Gen1 == Gen2) | `[x]` lokalt | Fragment regenerert i Docker; ny køyring: NCB 704393 == 704393, ELF 1097696 identiske (BESTÅTT). Verifiserast i CI |
+| ELF stage-0 fixpunkt (Gen1 == Gen2) | `[x]` | Grøn i CI på eadab74 (regenererte fragment) |
 | Slow tests Linux | `[~]` | var exit 143 (OOM) etter 96 min utan logg. No: 2 runnarar (matrix) + strøymd logg (A1). Verifiserast i neste CI-runde |
 | Slow tests macOS | `[~]` | var 300 min timeout + 22 forlatne prosessar. No: 3 runnarar (matrix), SIGKILL ved test-timeout, strøymd logg (A2). Verifiserast i neste CI-runde |
-| B2 «Fullhost nc_main native seed» | `[~]` | L5 grøn i CI (ncb_stream tekst-fallback). Materialize krev `run-ncb-pure` → køyrer no på den ferske direkte seeden (`needs: build-seed`). Ventar på køyring |
+| B2 «Fullhost nc_main native seed» | `[!]` diagnose | Heile pipeline (L5+materialize+seed-bygg) grøn; BEVIS feilar: fullhost-seeden segfaultar på run-ncb-pure. Rot = GC-tidsavhengig strengkorrupsjon under materialize-kompilering (sjå Fase B). JOBBEN er promoterings-diagnose (hoppa over på push) → IKKJE PR-blokkerande |
 
 ### Tiltak
 - **A1 Linux-OOM diagnose** `[x]` kode / `[ ]` verifisert — `ci_shell_runner.no` strøymer barnet sitt stdout (async spawn + wait/read) når `NORSCODE_VM_CI_STREAM=1`; `nc_test_parallel.no` drenerer shard-output kvar 5. sekund. Neste runner-død viser kva test som køyrde.
@@ -43,7 +43,8 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | zip/tar/filops/media/shutil/process/socket/network/DNS/json | `[x]` | passerer på seed AA–AE |
 | `test_dns_ds_record` | `[x]` | rot-årsak var A3 (kompilatorfeil); grøn på seed AE |
 | `test_template` (verts-VM via host_kall) | `[x]` flytta | «Ukjent variabel: f» — feilar òg på committa VM → språkparitet (f-strengar). Flytta til `language_parity_tests.txt` |
-| `test_security` | `[~]` | PBKDF2 var FEIL (padda nøkkel) → fiksa + 2× raskare. Attståande: heng i native PBKDF2 ved 64 MiB GC-port (>40k iterasjonar), OK med 4 MiB port → GC-/allokator-feil under diagnose (qemu+gdb) |
+| `test_security` | `[~]` | PBKDF2 var FEIL (padda nøkkel) → fiksa + raskare. PBKDF2-heng: sweep frigjorde ikkje LEIANDE hol → bump klatra til 1 GiB (fiksa, commit 28db3bb; litmus grøn). |
+| **GC-korrupsjon under materialize** | `[!]` NØKKELBLOKKAR | Full materialize-kompilering korrupterer strengkonstantar tidsavhengig: socket.no:38 all-siffer-strengar → bar tal i CI-kandidaten (isolert korrekt), run-ncb-pure på full kandidat segfaultar (korrupt vm/serde-bytekode). Klassisk falsk-rot/alignment-reuse. MÅ løysast for trygg fullhost-seed |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
 | Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
 | `db.*` (NorsDB rein Norscode) | `[ ]` | eige spor |
@@ -76,11 +77,13 @@ Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 
 | Jobb | Kvar | Forventa |
 |---|---|---|
-| CI-runde på pusha HEAD (slow-lanes matrix, ELF-fixpunkt, GC-litmus) | GitHub | ~3–4 t |
-| B2 fullhost (L5 + materialize + seed-port 97 testar) | GitHub | ~3 t |
-| `test_security` på seed AE: html-delen OK på 0 s; PBKDF2- og rekursjonsdelen under måling | Docker | — |
+| CI (ci.yml) slow-lane matrix på eadab74 | GitHub | slow-lanes ~2–3 t; ELF-fixpunkt+attestasjon alt grøne |
+| NorsDB Fase 7 (SQL-uttrykk/funksjonar) | bakgrunnsagent, eige worktree | parallelt |
 
 ## Logg
+
+- 2026-09-06 23:40: B2 fullhost-pipeline heil (L5+materialize+seed-bygg grøn på fersk direkte seed). BEVIS-crash = GC-tidsavhengig strengkorrupsjon under materialize (socket.no:38 + run-ncb-pure-segfault, begge frå same GC-reuse-feil). GC leiande-hol-sweep fiksa (28db3bb, litmus grøn). Fullhost-jobb er diagnose, ikkje PR-blokkerande. ci.yml: ELF-fixpunkt + attestasjonar grøne, slow-lane matrix køyrer. NorsDB Fase 7 delegert til bakgrunnsagent.
+
 
 - 2026-09-06 21:30: B2 fullhost: L5 BESTÅTT i CI etter ncb_stream-fallback (committed Linux-stage0 fil-open = EINVAL). Materialize flytta til fersk direkte seed (verts-executor køyrer ikkje fersk NCB; hybrid-compile manglar module_initializers). std.sha256.pbkdf2_hex: feil digest (padda nøkkel/salt) fiksa mot Python; HMAC-midtstand. Ny blokkar: native PBKDF2 heng ved 64 MiB GC-port (4 MiB OK) — gdb-sampling pågår. GC-litmus grøn på 1fc73e0.
 
