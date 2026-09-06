@@ -2484,11 +2484,23 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
     copy(bytes, [0x0F, 0x05])                             // syscall
     copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
-    copy(bytes, [0x0F, 0x94, 0xC0])                       // sete al
-    copy(bytes, [0x48, 0x0F, 0xB6, 0xF8])                 // movzx rdi,al
+    la fs_ok1 = emit_je_placeholder(bytes)                // unlink OK → sann
+    // VM-en (remove(3)) slettar òg ein TOM katalog (std.filops.slett_tre stolar på
+    // det som fallback). unlink → EISDIR(-21) → prøv rmdir(#84).
+    copy(bytes, [0x48, 0x83, 0xF8, 0xEB])                 // cmp rax,-21
+    la fs_fail1 = emit_jcc_placeholder(bytes, 0x85)       // jne usann
+    copy(bytes, [0xB8, 0x54, 0x00, 0x00, 0x00])           // mov eax,84 (rmdir)
+    copy(bytes, [0x48, 0x89, 0xE7])                       // mov rdi,rsp
+    copy(bytes, [0x0F, 0x05])                             // syscall
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la fs_fail2 = emit_jcc_placeholder(bytes, 0x85)       // jne usann
+    la fs_okl = lengde(bytes)
+    patch_jump(bytes, fs_ok1, fs_okl)
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])           // mov edi,1
     la fs_box = emit_jmp_placeholder(bytes)
     la fs_usann = lengde(bytes)
     patch_jump(bytes, fs_null, fs_usann) patch_jump(bytes, fs_null2, fs_usann) patch_jump(bytes, fs_toolong, fs_usann)
+    patch_jump(bytes, fs_fail1, fs_usann) patch_jump(bytes, fs_fail2, fs_usann)
     copy(bytes, [0x31, 0xFF])                             // xor edi,edi
     la fs_boxl = lengde(bytes)
     patch_jump(bytes, fs_box, fs_boxl)
@@ -2658,14 +2670,24 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x8B, 0x84, 0x24, 0x18, 0x0F, 0x00, 0x00]) // mov eax,[rsp+0xF18] (st_mode)
     copy(bytes, [0x25, 0x00, 0xF0, 0x00, 0x00])           // and eax,0xF000
     copy(bytes, [0x3D, 0x00, 0x40, 0x00, 0x00])           // cmp eax,0x4000 (S_IFDIR)
-    la fls_bad5 = emit_je_placeholder(bytes)              // katalog → bad
+    la fls_dir = emit_je_placeholder(bytes)               // katalog → tom streng (sjå under)
     copy(bytes, [0x48, 0x89, 0xDF])                       // mov rdi,rbx
     copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00]) // add rsp,0x1008
     copy(bytes, [0x5B, 0x5D])                             // pop rbx; pop rbp
     copy(bytes, [0xE9]) u32(bytes, (RT_FIL_LES() - (TEXT_VA() + lengde(bytes) + 4)) & 0xFFFFFFFF) // jmp RT_FIL_LES
+    // Katalog: committed seed sin fil_les(katalog) RETURNERER (tekst) i staden for å
+    // kaste, og vm._rt_fil_finnes er «fil_les kastar ikkje» → fil_finnes(katalog) var
+    // usann på fersk seed → std.filops.slett_tre/lag_katalogar feila (2026-09-06).
+    // Returner "" (aldri RT_FIL_LES, som avslutta prosessen stille på katalog).
+    la fls_dirl = lengde(bytes)
+    patch_jump(bytes, fls_dir, fls_dirl)
+    copy(bytes, [0x31, 0xFF, 0x31, 0xF6])                 // xor edi,edi; xor esi,esi
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = ""
+    copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x10, 0x00, 0x00]) // add rsp,0x1008
+    copy(bytes, [0x5B, 0x5D, 0xC3])                       // pop rbx; pop rbp; ret
     la fls_bad = lengde(bytes)
     patch_jump(bytes, fls_bad1, fls_bad) patch_jump(bytes, fls_bad2, fls_bad) patch_jump(bytes, fls_bad3, fls_bad)
-    patch_jump(bytes, fls_bad4, fls_bad) patch_jump(bytes, fls_bad5, fls_bad)
+    patch_jump(bytes, fls_bad4, fls_bad)
     copy(bytes, [0x48, 0xB8, 0x4B, 0x61, 0x6E, 0x20, 0x69, 0x6B, 0x6B, 0x6A]) // "Kan ikkj"
     copy(bytes, [0x48, 0x89, 0x04, 0x24])
     copy(bytes, [0x48, 0xB8, 0x65, 0x20, 0x6F, 0x70, 0x6E, 0x65, 0x20, 0x66]) // "e opne f"
@@ -5665,10 +5687,14 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_to_tekst    { returner atomic_vas["to_text"] }
     hvis er_to_int      { returner RT_TO_INT() }
     hvis er_skriv       { returner RT_SKRIV() }
+    // fil_les_binær FØR fil_les: er_fil_les matchar òg binær-namna, så lista-atomet
+    // (byte-heiltal, VM-paritet: b[0] == 77) var uoppnåeleg og fil_les_binær gav
+    // tekst (LESBIN-proben raud, test_zip_stored_pure: ark[..][0] == "M" ≠ 77).
+    // serde.deserialiser tek liste-vegen via nativ bytes_to_text (2026-09-06).
+    hvis er_fil_les_bin { returner atomic_vas["fil_les_bin"] }
     hvis er_fil_les     { returner atomic_vas["fil_les_safe"] }
     hvis er_fil_skriv   { returner RT_FIL_SKRIV() }
     hvis er_fil_binar   { returner atomic_vas["fil_skriv_bin_safe"] }
-    hvis er_fil_les_bin { returner atomic_vas["fil_les_bin"] }
     hvis er_bytes_ident { returner atomic_vas["identity"] }
     hvis er_fil_append  { returner atomic_vas["fil_append"] }
     hvis er_fil_append_bin { returner atomic_vas["fil_append_bin"] }
