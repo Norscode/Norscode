@@ -318,6 +318,54 @@ funksjon absolutt_native(root: tekst, native: tekst) -> tekst {
     returner root + "/" + native
 }
 
+// køyr_native_async: same kontrakt som køyr_native ([kode, stdout, stderr]), men via
+// den levande async-ABI-en (norscode-native-process-v1). Returnerer tom liste når
+// ABI-en ikkje startar prosessen (eldre stage0) — då tek den synkrone vegen over.
+// Ved timeout: SIGKILL (9) → vent → close, slik at barnet ikkje blir forlate.
+funksjon køyr_native_async(executable: tekst, root: tekst, miljø: ordbok_tekst,
+                            timeout_ms: heiltall, minne: heiltall) -> liste_tekst {
+    la areq = process_abi.async_spawn_request(executable, [], root, "", timeout_ms, 8388608)
+    process_abi.sett_sandbox(areq, "none", minne, 128, sann)
+    process_abi.sett_environment(areq, miljø)
+    la handtak = {}
+    prøv { handtak = builtin.process_operation(areq) } fang (e) { returner [] }
+    hvis ikkje finnes_nøkkel(handtak, "status") eller tekst(handtak["status"]) != "kjorer" { returner [] }
+    la h = tekst(handtak["handle"])
+    la ut = ""
+    la feil_ut = ""
+    la siste = handtak
+    la start_ms = builtin.tid_ms()
+    la drepen = usann
+    mens tekst(siste["status"]) == "kjorer" {
+        siste = builtin.process_operation(process_abi.async_wait_request(h, 5000))
+        la bit = builtin.process_operation(process_abi.async_operation("read", h))
+        hvis finnes_nøkkel(bit, "stdout") { ut = ut + tekst(bit["stdout"]) }
+        hvis finnes_nøkkel(bit, "stderr") { feil_ut = feil_ut + tekst(bit["stderr"]) }
+        // Eiga tidsvakt i tillegg til ABI-en sin: drep hardt om barnet lever vidare.
+        hvis tekst(siste["status"]) == "kjorer" og ikkje drepen og
+           builtin.tid_ms() - start_ms > timeout_ms + 2000 {
+            prøv { builtin.process_operation(process_abi.async_signal_request(h, 9)) } fang (e) {}
+            drepen = sann
+        }
+    }
+    la status = tekst(siste["status"])
+    hvis status == "timeout" eller drepen {
+        // ABI-en rapporterer timeout; syt for at prosessen faktisk er borte.
+        prøv { builtin.process_operation(process_abi.async_signal_request(h, 9)) } fang (e) {}
+        prøv { builtin.process_operation(process_abi.async_wait_request(h, 2000)) } fang (e) {}
+    }
+    la rest = builtin.process_operation(process_abi.async_operation("read", h))
+    hvis finnes_nøkkel(rest, "stdout") { ut = ut + tekst(rest["stdout"]) }
+    hvis finnes_nøkkel(rest, "stderr") { feil_ut = feil_ut + tekst(rest["stderr"]) }
+    prøv { builtin.process_operation(process_abi.async_operation("close", h)) } fang (e) {}
+    la kode = -1
+    hvis finnes_nøkkel(siste, "exit_code") { kode = til_tal_eller(tekst(siste["exit_code"]), -1) }
+    hvis status == "timeout" eller drepen { kode = 124  status = "timeout" }
+    hvis feil_ut == "" og finnes_nøkkel(siste, "error") { feil_ut = tekst(siste["error"]) }
+    hvis feil_ut == "" og status != "ferdig" { feil_ut = "prosessstatus: " + status }
+    returner [tekst_fra_heiltall(kode), ut, feil_ut]
+}
+
 funksjon køyr_native(root: tekst, native: tekst, miljø: ordbok_tekst,
                       timeout: tekst) -> liste_tekst {
     la sekund = til_tal_eller(timeout, 180)
@@ -338,6 +386,15 @@ funksjon køyr_native(root: tekst, native: tekst, miljø: ordbok_tekst,
     }
     process_abi.sett_sandbox(req, "none", minne, 128, sann)
     process_abi.sett_environment(req, miljø)
+    // 2026-09-06: async-vegen (spawn + wait + SIGKILL ved timeout + close) der ho
+    // finst. Den synkrone spawn_argv let barnet leve vidare etter «timeout» på
+    // macOS-slow-lanen: 22 forlatne norscode_native-prosessar (compile-steg som
+    // hadde gått ut på tid) åt CPU-en → alle seinare compile-steg gjekk òg ut på
+    // tid, og shard 0 nådde 300 min. NC_TEST_SYNC_SPAWN=1 tvingar gamal veg.
+    hvis env("NC_TEST_SYNC_SPAWN") != "1" {
+        la asvar = køyr_native_async(executable, root, miljø, sekund * 1000, minne)
+        hvis lengde(asvar) == 3 { returner asvar }
+    }
     prøv {
         la svar = builtin.process_spawn_argv(req)
         la status = tekst(svar["status"])
