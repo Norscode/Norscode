@@ -240,6 +240,19 @@ ingen gjesteregister).
     Legacy-kompilatoren emitterte `LOAD_NAME "null"` → codegen las eit nullinitialisert
     lokalslot (rå 0) → «virka» ved eit uhell. Null-vegen reknar no boksa int-0 ≡ rå null.
 
+12. **Builtin-hol (statisk revisjon 2026-09-06).** Codegen-åtvaringane over fullhost-bunten gav
+    50 `builtin.*` utan native rutine, alle nådd via `selfhost.vm.kall_innebygd` (VM-dispatcheren),
+    så KVART program seeden køyrer i sin innebygde VM treff dei og får stille `null`. Kryssa mot
+    dei seed-klassifiserte testane: `fil_slett` ~40, `tekst_erstatt` ~15, `bytes_new` ~15,
+    `process_operation`/`system_operation` ~12. Dekt: `fil_slett`-atom (unlink), alias for dei
+    kvalifiserte namna VM-en brukar (`builtin.tekst_erstatt`, `tekst_til_heltall`,
+    `heiltall_fra_tekst`, `tekst_fra_heiltall`, `tekst_starter_med`, `nøkkel_finnes`), reine
+    erstatningar i `std/native_gap.no` (`bytes_new`, `sett_inn`; gap-ruta, importert av nc_main),
+    og `fil_skriv_bin_safe`: `fil_les_binær` gjev TEKST i denne runtimen, og den frosne
+    binærskrivaren las teksten som liste av boksa heiltal (SIGSEGV i harness-compile-steget via
+    `std.filops.kopier`). Attståande: prosess/system-operasjonar, `now_ms`, nett (socket/web/dns/
+    acme/argon2id), trådar.
+
 Kjende pre-eksisterande diagnostikk-feil (flagg AV, `continue-on-error`): SWEEPNAT, SWEEPFULL,
 LESBIN. Port før seed-promotering: `b2-seed-direct.yml` BEVIS-steget (nativ tidsmåling fersk
 vs committed på `selfhost/vm.no` + harness-subset med `NC_NATIVE = fersk seed`). Attståande:
