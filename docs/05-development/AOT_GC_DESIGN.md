@@ -225,6 +225,21 @@ ingen gjesteregister).
 8. **Heap-tak i allokatorane.** Bump-vegane sjekkar GC_HEAP_LIMIT → `gc_oom` (exit 199) i
    staden for stille skriving inn i vaktsida.
 
+9. **CI-seed ≠ lokal seed (2026-09-06).** `b2-seed-direct.yml` sette aldri `NORSCODE_GC_ALLOC=1`
+   på bygg-steget → codegen i rein bump-modus (ingen «hex-patcha»-linjer i loggen, 3,83 MB
+   ELF) → exit 199 etter 2 s på `selfhost/vm.no`. GC-modus er bakt inn ved codegen-tid.
+10. **Materialize-kandidaten mangla tre modular** (`selfhost.ncb_serde`, `selfhost.ncb_bin`,
+    `std.runtime_filesystem_native`): handskriven modulliste vart stale. Ukjende kall får
+    codegen sin null-fallback → `ncb = null` → `nøkler(null)` → SIGSEGV i `run-ncb-pure`.
+    No: `bundle_specs(root)` utleier `bruk`-lukkinga frå kjelda (`NC_MAT_LIST=1` viser grafen),
+    codegen skriv «ÅTVARING ukjent kall …» éin gong per namn, og `NORSCODE_CODEGEN_STRIKT=1`
+    (på i fullhost-jobben) kastar på ukjende *modul*-kall (builtin.* utan native rutine er
+    framleis frivillige krokar: web, thread, acme, argon2id, …).
+11. **`x == null` fanga ikkje rå null.** `PUSH_CONST null` boksar som int-0-NcVal (stage0-VM:
+    null ≡ 0), INDEX_GET-miss gjev rå 0 → `emit_null_safe_compare` samanlikna peikarar → usann.
+    Legacy-kompilatoren emitterte `LOAD_NAME "null"` → codegen las eit nullinitialisert
+    lokalslot (rå 0) → «virka» ved eit uhell. Null-vegen reknar no boksa int-0 ≡ rå null.
+
 Kjende pre-eksisterande diagnostikk-feil (flagg AV, `continue-on-error`): SWEEPNAT, SWEEPFULL,
 LESBIN. Port før seed-promotering: `b2-seed-direct.yml` BEVIS-steget (nativ tidsmåling fersk
 vs committed på `selfhost/vm.no` + harness-subset med `NC_NATIVE = fersk seed`). Attståande:

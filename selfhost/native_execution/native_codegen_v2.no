@@ -664,10 +664,26 @@ funksjon emit_null_safe_compare(buf, rt_va, ulik: boolsk, code_va) {
     legg_til(buf, 0x50)
     la jmp_end = emit_jmp_placeholder(buf)
     la lbl_null = lengde(buf)
-    copy(buf, [0x48, 0x39, 0xF7])
-    hvis ulik { copy(buf, [0x0F, 0x95, 0xC0]) }
-    ellers { copy(buf, [0x0F, 0x94, 0xC0]) }
-    copy(buf, [0x0F, 0xB6, 0xF8])
+    // Minst éin side er rå null (0). VM-semantikk: null ≡ heiltal 0 (PUSH_CONST
+    // null boksar som int-0-NcVal, sjå emit_push_const; INDEX_GET-miss gjev rå 0).
+    // Utan denne likskapen såg `x == null` FALSK ut for rå-null x, og koden gjekk
+    // vidare med nullpeikaren (nc_køyr_ncb_verdi → nøkler(null) → SIGSEGV).
+    // rax = rdi | rsi (= den ikkje-null-sida, eller 0 om begge er null):
+    //   begge null → lik; elles lik berre om type==int(1) OG payload==0.
+    copy(buf, [0x48, 0x89, 0xF8])                  // mov rax, rdi
+    copy(buf, [0x48, 0x09, 0xF0])                  // or  rax, rsi
+    copy(buf, [0x48, 0x85, 0xC0])                  // test rax, rax
+    copy(buf, [0x74, 0x0D])                        // je  LIK
+    copy(buf, [0x48, 0x83, 0x38, 0x01])            // cmp qword [rax], 1
+    copy(buf, [0x75, 0x09])                        // jne ULIK
+    copy(buf, [0x48, 0x83, 0x78, 0x08, 0x00])      // cmp qword [rax+8], 0
+    copy(buf, [0x75, 0x02])                        // jne ULIK
+    hvis ulik { copy(buf, [0xB0, 0x00]) }          // LIK:  mov al, 0 (ulik-op)
+    ellers { copy(buf, [0xB0, 0x01]) }             //       mov al, 1
+    copy(buf, [0xEB, 0x02])                        // jmp FERDIG
+    hvis ulik { copy(buf, [0xB0, 0x01]) }          // ULIK: mov al, 1 (ulik-op)
+    ellers { copy(buf, [0xB0, 0x00]) }             //       mov al, 0
+    copy(buf, [0x0F, 0xB6, 0xF8])                  // FERDIG: movzx edi, al
     call_rel32(buf, RT_BOOL(), code_va)
     legg_til(buf, 0x50)
     la lbl_end = lengde(buf)
@@ -6284,6 +6300,29 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         // segmentfeil i breie AOT-buntar (mellom anna valfri atomic backend).
         // Returner Norscode-null slik at frivillige backend-krokar kan bruke
         // den reine VM-fallbacken sin.
+        // 2026-09-06: Fallbacken skjulte at heile modular mangla i bunten
+        // (selfhost.ncb_serde → run-ncb-pure SIGSEGV på fersk seed). Skriv difor
+        // ÅTVARING éin gong per namn (dedup via miljø), og under
+        // NORSCODE_CODEGEN_STRIKT=1 er ukjende kvalifiserte kall ein hard feil.
+        // Dedup via miljø er BEST-EFFORT: ncb_to_elf-underprosessen (gc_probe_run.sh,
+        // gc-litmus) har ikkje env.write → miljo_sett kastar Sikkerheitsfeil. Då
+        // skriv vi berre åtvaringa utan dedup.
+        la ukjent_nøkkel = "NC_CODEGEN_UKJENT:" + fn_nm
+        la alt_meldt = usann
+        prøv {
+            alt_meldt = miljo_hent(ukjent_nøkkel) != ""
+            hvis ikkje alt_meldt { miljo_sett(ukjent_nøkkel, "1") }
+        } fang (miljøfeil) { alt_meldt = usann }
+        hvis ikkje alt_meldt {
+            skriv("native_codegen_v2: ÅTVARING ukjent kall " + fn_nm + "/" +
+                  tekst_fra_heltall(nargs) + " → null-fallback\n")
+            // Strikt gjeld kvalifiserte BRUKARMODUL-kall (modul.funksjon); builtin.*
+            // utan native rutine (web/thread/acme/…) er framleis frivillige krokar.
+            hvis miljo_hent("NORSCODE_CODEGEN_STRIKT") == "1" og builtin.index_of(fn_nm, ".") >= 0
+               og ikkje builtin.starts_with(fn_nm, "builtin.") {
+                kast "native codegen: ukjent kall " + fn_nm + " (NORSCODE_CODEGEN_STRIKT=1)"
+            }
+        }
         la ui: heiltall = 0
         mens ui < nargs {
             legg_til(buf, 0x58)

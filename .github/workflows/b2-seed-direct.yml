@@ -50,6 +50,10 @@ jobs:
       - name: Bygg full nc_main native seed (driver)
         env:
           NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/build_x86_seed.no"
+          # GC-modus (v5) er bakt inn ved CODEGEN-tid: utan denne vert seeden
+          # rein bump og døyr ved 1 GiB-heapen (exit 199 på selfhost/vm.no etter
+          # 2 s). Lokalt (v5d) er ALLE seedar bygde med flagget på.
+          NORSCODE_GC_ALLOC: "1"
         run: ./bin/nc run tools/build_x86_seed.no
 
       - name: "Verifiser seed (diagnose — basiskommandoar + gdb-backtrace)"
@@ -160,3 +164,99 @@ jobs:
             build/nc_main_seed.elf.symbols
           if-no-files-found: warn
           retention-days: 7
+
+  # ── Fullhost-seed: NCB frå KJELDE-kompilatoren (L5-driver + materialize) ──
+  # Promoteringsvegen. Committed seed sin `compile` gjev legacy-form (LOAD_NAME
+  # for modulglobalar, `LOAD_NAME "null"`); kjelde-kompilatoren gjev LOAD_GLOBAL/
+  # global_names/module_initializers. Materialize kompilerer bruk-lukkinga til
+  # nc_main modul for modul i isolerte prosessar (~2 t lokalt) → build_x86_seed
+  # med NORSCODE_SEED_NCB + NORSCODE_CODEGEN_STRIKT=1 (ukjende modulkall = feil).
+  # Tung (timar) → køyrer berre på workflow_dispatch eller commit-melding «[fullhost]».
+  fullhost-seed:
+    name: Fullhost nc_main native seed (L5 + materialize)
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[fullhost]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    defaults:
+      run:
+        shell: ${{ github.workspace }}/bootstrap/stage0/norscode-linux-x86_64 run ${{ github.workspace }}/tools/ci_shell_runner.no {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Materialiser runtime gjennom committed stage0
+        env:
+          NORSCODE_CI_FILE_SOURCE: bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_CI_FILE_TARGET: dist/norscode_native
+          NORSCODE_VM_CI_CHILD_CMD: run
+          NORSCODE_VM_CI_CHILD_EXECUTABLE: ./bootstrap/stage0/norscode-linux-x86_64
+          NORSCODE_VM_CI_CHILD_FILE: ${{ github.workspace }}/tools/ci_runtime_fileops.no
+          NORSCODE_VM_CI_CHILD_CAPABILITIES: env.read,process.exec,disk.read,disk.write
+          NORSCODE_VM_CI_CHILD_DISK_ROOT: ${{ github.workspace }},.,/tmp
+          NORSCODE_VM_CI_COMMAND: "./bootstrap/stage0/norscode-linux-x86_64"
+        run: ./bootstrap/stage0/norscode-linux-x86_64
+
+      - name: "L5: kjelde-kompilator-driver (build/l5/compiler_driver.ncb.json)"
+        env:
+          NORSCODE_VM_CI_COMMAND: "./bin/nc selfcompile-l5"
+        run: ./bin/nc selfcompile-l5
+
+      - name: "Materialize: nc_main bruk-lukking modul for modul → build/fullhost/nc_main_fullhost_candidate.ncb.json"
+        env:
+          NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/materialize_nc_main_fullhost_candidate.no"
+        run: ./bin/nc run tools/materialize_nc_main_fullhost_candidate.no
+
+      - name: Bygg fullhost native seed (driver, GC-modus, strikt codegen)
+        env:
+          NORSCODE_VM_CI_COMMAND: "./bin/nc run tools/build_x86_seed.no"
+          NORSCODE_SEED_NCB: ${{ github.workspace }}/build/fullhost/nc_main_fullhost_candidate.ncb.json
+          NORSCODE_GC_ALLOC: "1"
+          NORSCODE_CODEGEN_STRIKT: "1"
+        run: ./bin/nc run tools/build_x86_seed.no
+
+      - name: "BEVIS (fullhost): basiskommandoar + tiny42 + vm.no + harness-subset"
+        shell: bash
+        env:
+          NORSCODE_ROOT: ${{ github.workspace }}
+          NORSCODE_ENABLE_EXEC_PROSESS: "1"
+          NORSCODE_VM_CAPABILITIES: env.read,env.write,process.exec,thread.spawn,net.tcp,net.dns,disk.read,disk.write,jit.execute
+          NORSCODE_VM_DISK_ROOT: ${{ github.workspace }},.,/tmp,/private/tmp
+          NC_CI: "1"
+          NC_TEST_ALL: "1"
+          NC_SLOW_TESTS: "1"
+          NC_TEST_CACHE: "0"
+          NC_TRACE_TESTS: "1"
+          TEST_TIMEOUT: "600"
+          SLOW_TEST_TIMEOUT: "1200"
+          NC_TEST_MEMORY_BYTES: "12884901888"
+        run: |
+          set -e
+          SEED=./build/nc_main_seed.elf
+          chmod +x "$SEED"
+          "$SEED" version
+          "$SEED" help | head -3
+          echo "=== run-ncb-pure tiny42 (forventar exit 42) ==="
+          set +e
+          "$SEED" run-ncb-pure seedcheck/tiny42.ncb.json; RC=$?
+          set -e
+          echo "TINY42_EXIT=$RC"; [ "$RC" -eq 42 ]
+          echo "=== kompileringstid fersk seed vs committed (selfhost/vm.no) ==="
+          /usr/bin/time -f "fersk:     %e s  maxrss=%M KB" env NORSCODE_CMD=compile NORSCODE_FILE=$PWD/selfhost/vm.no NORSCODE_OUTPUT=/tmp/vm_fresh.ncb.json "$SEED" >/dev/null
+          /usr/bin/time -f "committed: %e s  maxrss=%M KB" env NORSCODE_CMD=compile NORSCODE_FILE=$PWD/selfhost/vm.no NORSCODE_OUTPUT=/tmp/vm_seed.ncb.json ./bootstrap/stage0/norscode-linux-x86_64 >/dev/null
+          ls -la /tmp/vm_fresh.ncb.json /tmp/vm_seed.ncb.json
+          echo "=== harness-subset (compile+run via fersk seed) ==="
+          printf '%s\n' tests/test_liste_unik.no tests/test_ncb_bin_edgecases.no tests/test_ncb_serde_dualformat.no tests/test_unntakstypar.no tests/test_json_array.no tests/test_json_typed.no tests/test_json_skriv_raw_bool.no tests/test_native_module_globals_codegen.no tests/test_tarfile_pure.no tests/test_zip_stored_pure.no > /tmp/subset.txt
+          : > /tmp/subset_ok.txt; while read t; do [ -f "$t" ] && echo "$t" >> /tmp/subset_ok.txt; done < /tmp/subset.txt
+          echo "testar: $(wc -l < /tmp/subset_ok.txt)"
+          NC_NATIVE="$SEED" NC_TEST_FILES="$(cat /tmp/subset_ok.txt)" NORSCODE_CMD=run NORSCODE_FILE=tools/nc_test.no "$SEED"
+
+      - name: Last opp fullhost seed-kandidat + NCB
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: nc_main_x86_64_seed_fullhost
+          path: |
+            build/nc_main_seed.elf
+            build/nc_main_seed.elf.symbols
+            build/fullhost/nc_main_fullhost_candidate.ncb.json
+          if-no-files-found: warn
+          retention-days: 14
