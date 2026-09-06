@@ -220,8 +220,12 @@ primitiv + rein Norscode:
   `process_operation` (heile «norscode-native-process-v1»-ABI-en: pipe2/fork/dup2/execve/
   waitpid/kill/fcntl/nanosleep — test_native_process_async m/ SIGTERM=143, timeout=124,
   stdin-røyr, attbruk). Handle-tabellen er ein modul-global (module_initializers).
-- Same mønster står att for sokkel/nett (`socket_*`, `network_operation`, `dns_lookup`),
-  trådar og `db.*`.
+- `socket_*` (AF_INET TCP/UDP, sockaddr_in i mmap-scratch) og `network_operation` (handle-ABI
+  «norscode-native-network-v1»: listen/connect/accept/read/write/poll/udp/close, ikkje-blokkerande,
+  kontrakt frå archive/legacy_c_backend/nc_native_main.c) er òg reine — test_vm_network_scope,
+  socketserver_native/shell_quote, native_network_event_loop grøne. VM-policy: nc_run_policy set
+  NORSCODE_VM_TARGET_NET_SCOPE (loopback som standard).
+- Same mønster står att for `dns_lookup`, tls_*, trådar, sandbox-profilar og `db.*`.
 
 Seed-porten: `tools/seed_gate_tests.txt` (krev_ny_seed-lista) via harnessen med
 `NC_NATIVE=<fersk seed>` — harnessen slepp desse testane laus berre når `builtin.vent.sov`
