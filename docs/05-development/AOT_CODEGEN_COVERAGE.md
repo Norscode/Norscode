@@ -203,3 +203,26 @@ NESTE: AOT-kompiler ein EKTE kompilator-modul / heile kompilatoren og iterér p�
 smale frosne-runtime-edge-cases etter kvart som dei treffast (jf. json_les fleir-element over
 — json.no-spesifikk, låg prioritet). Deretter: gjer GC standard av flagget → byt seed-bygging
 C→sjølvhosta (Fase 4). Valfritt seinare: finally + float for brukarprogram.
+
+## Rein Norscode over rå syscall (2026-09-06): `builtin.sys6` + `std/native_gap.no`
+
+Retninga for resten av runtime-hola er IKKJE fleire frosne C-rutinar, men eit einaste
+primitiv + rein Norscode:
+
+- `builtin.sys6(nr, a1..a6)` → heiltal: rått Linux x86-64-systemkall (7 int-NcVal-argument,
+  null → 0, negativ retur = −errno). `builtin.raw_load8/raw_store8` (+ eksisterande
+  `raw_load64/raw_store64`) for byte-buffer i mmap-scratch. Probe: `gc_sys6_probe`
+  (getpid/mmap/write/open/close/munmap). NB: ugyldige peikarar til kernelen gjev SIGSEGV i
+  Rosetta-emulatoren (ikkje −EFAULT) — ikkje ein feil i primitivet.
+- `std/native_gap.no` (importert av nc_main.no så bunten alltid har han; codegen rutar
+  `builtin.X` hit via `gap_rute_v2` / gap-fyrst): `json_parse` (legacy tekst-typa kontrakt),
+  `bytes_new`, `sett_inn`, `system_operation` (resolve_executable = PATH-oppslag),
+  `process_operation` (heile «norscode-native-process-v1»-ABI-en: pipe2/fork/dup2/execve/
+  waitpid/kill/fcntl/nanosleep — test_native_process_async m/ SIGTERM=143, timeout=124,
+  stdin-røyr, attbruk). Handle-tabellen er ein modul-global (module_initializers).
+- Same mønster står att for sokkel/nett (`socket_*`, `network_operation`, `dns_lookup`),
+  trådar og `db.*`.
+
+Seed-porten: `tools/seed_gate_tests.txt` (krev_ny_seed-lista) via harnessen med
+`NC_NATIVE=<fersk seed>` — harnessen slepp desse testane laus berre når `builtin.vent.sov`
+verkeleg søv (vent_sov-atomet) og NC_TEST_ALL/NC_SLOW_TESTS er sette.
