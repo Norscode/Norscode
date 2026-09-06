@@ -642,6 +642,19 @@ funksjon emit_raw_bool_rt_call_2(buf, rt_va, code_va) {
     call_rel32(buf, RT_BOOL(), code_va)
     legg_til(buf, 0x50)
 }
+// Ordningssamanlikning med null-vakt: rå null → int-0 (VM: null ≡ 0) før
+// RT_LT/GT (returnerer bool-NcVal) eller RT_LE/GE (rå bool → RT_BOOL).
+funksjon emit_ord_compare(buf, rt_va, raw_bool: boolsk, code_va, atomic_vas) {
+    legg_til(buf, 0x5E)           // pop rsi
+    legg_til(buf, 0x5F)           // pop rdi
+    call_rel32(buf, atomic_vas["ord_null_guard"], code_va)
+    call_rel32(buf, rt_va, code_va)
+    hvis raw_bool {
+        copy(buf, [0x48, 0x89, 0xC7])   // mov rdi, rax
+        call_rel32(buf, RT_BOOL(), code_va)
+    }
+    legg_til(buf, 0x50)           // push rax
+}
 funksjon emit_int_order_compare_inline(buf, op: tekst, code_va) {
     legg_til(buf, 0x5E)                       // pop rsi = høgre NcVal*
     legg_til(buf, 0x5F)                       // pop rdi = venstre NcVal*
@@ -2524,6 +2537,62 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
     copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
     call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // ── ord_null_guard(rdi, rsi) → rdi/rsi med rå null bytt ut med int-0 ─────
+    // Ordningssamanlikning (<, >, <=, >=) gjekk rett til RT_LT/GT/LE/GE utan
+    // null-vakt (berre ==/!= hadde det). VM-en reknar null ≡ 0; den frosne
+    // RT_LT las [rsi] med rsi=0 → SIGSEGV i selfhost.vm.køyr_funksjon
+    // (test_norsdb_migrering, qemu+gdb 2026-09-06). Returnerer via rdi/rsi.
+    atomics["ord_null_guard"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la og_l1 = emit_jcc_placeholder(bytes, 0x85)          // jne L1
+    copy(bytes, [0x56])                                   // push rsi
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-0-NcVal
+    copy(bytes, [0x5E])                                   // pop rsi
+    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
+    la og_l1l = lengde(bytes)
+    patch_jump(bytes, og_l1, og_l1l)
+    copy(bytes, [0x48, 0x85, 0xF6])                       // test rsi,rsi
+    la og_l2 = emit_jcc_placeholder(bytes, 0x85)          // jne L2
+    copy(bytes, [0x57])                                   // push rdi
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    call_rel32(bytes, RT_INT(), TEXT_VA())
+    copy(bytes, [0x5F])                                   // pop rdi
+    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
+    la og_l2l = lengde(bytes)
+    patch_jump(bytes, og_l2, og_l2l)
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // ── lengde_safe(rdi) → lengde(null) = 0 (VM-paritet) ─────────────────────
+    // Frosen RT_LENGDE las [rdi+8] med rdi=0 → SIGSEGV via vm.kall_innebygd
+    // (test_zip_stored_pure, qemu+gdb 2026-09-06).
+    atomics["lengde_safe"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la ls_nn = emit_jcc_placeholder(bytes, 0x85)          // jne → RT_LENGDE
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-0
+    legg_til(bytes, 0xC3)                                 // ret
+    la ls_nnl = lengde(bytes)
+    patch_jump(bytes, ls_nn, ls_nnl)
+    la ls_j = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, ls_j, RT_LENGDE() - TEXT_VA())      // jmp RT_LENGDE
+
+    // ── map_has_safe(rdi=obj, rsi=nøkkel) → usann for null/ikkje-ordbok ──────
+    // vm._rt_har_nøkkel kalla har_nøkkel på ein TEKST-verdi → frosen RT_MAP_HAS
+    // las strenginnhald som map-payload (test_json_typed: rbx = "290919").
+    atomics["map_has_safe"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    la mh_f1 = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x04])                 // cmp qword [rdi],4 (ordbok)
+    la mh_f2 = emit_jcc_placeholder(bytes, 0x85)          // jne usann
+    la mh_j = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, mh_j, RT_MAP_HAS() - TEXT_VA())     // jmp RT_MAP_HAS
+    la mh_fl = lengde(bytes)
+    patch_jump(bytes, mh_f1, mh_fl) patch_jump(bytes, mh_f2, mh_fl)
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    call_rel32(bytes, RT_BOOL(), TEXT_VA())               // rax = usann
     legg_til(bytes, 0xC3)                                 // ret
 
     // ── stack_overflow: kalla frå prologen når rsp < [HEAP_VA+24] ─────────────
@@ -5286,18 +5355,18 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
         ellers hvis op == "COMPARE_LT"
-            emit_rt_call_2(buf, RT_LT(), eiga_va)
+            emit_ord_compare(buf, RT_LT(), usann, eiga_va, atomic_vas)
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
         ellers hvis op == "COMPARE_GT"
-            emit_rt_call_2(buf, RT_GT(), eiga_va)
+            emit_ord_compare(buf, RT_GT(), usann, eiga_va, atomic_vas)
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
         ellers hvis op == "COMPARE_LE"
             hvis tstack_top_2(tstack) == "int" og tstack_top(tstack) == "int" {
                 emit_int_order_compare_inline(buf, "le", eiga_va)
             } ellers {
-                emit_raw_bool_rt_call_2(buf, RT_LE(), eiga_va)
+                emit_ord_compare(buf, RT_LE(), sann, eiga_va, atomic_vas)
             }
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
@@ -5305,7 +5374,7 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             hvis tstack_top_2(tstack) == "int" og tstack_top(tstack) == "int" {
                 emit_int_order_compare_inline(buf, "ge", eiga_va)
             } ellers {
-                emit_raw_bool_rt_call_2(buf, RT_GE(), eiga_va)
+                emit_ord_compare(buf, RT_GE(), sann, eiga_va, atomic_vas)
             }
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
@@ -5616,10 +5685,10 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_map_set     { returner RT_MAP_SET() }
     hvis er_map_get     { returner RT_MAP_GET() }
     hvis er_legg_til    { returner RT_LIST_APP() }
-    hvis er_lengde      { returner RT_LENGDE() }
+    hvis er_lengde      { returner atomic_vas["lengde_safe"] }
     hvis er_fjern_siste { returner RT_LIST_POP() }
     hvis er_fjern       { returner RT_LIST_REMOVE() }
-    hvis er_finnes_nokkel { returner RT_MAP_HAS() }
+    hvis er_finnes_nokkel { returner atomic_vas["map_has_safe"] }
     hvis er_nokler      { returner RT_MAP_KEYS() }
     hvis er_verdier     { returner RT_MAP_VALS() }
     hvis er_fjern_nokkel { returner RT_MAP_DEL() }
@@ -6606,6 +6675,34 @@ funksjon kompiler_v2(ncb_json) {
             la s_end: heltall = s_start + fn_sizes[s_fn]
             symbol_map = symbol_map + tekst_fra_heltall(s_start) + "\t" + tekst_fra_heltall(s_end) + "\t" + s_fn + "\n"
             fi2 = fi2 + 1
+        }
+        // Atom-rutinar (runtime-prelude) som «atom:<namn>», sorterte etter VA med
+        // slutt = neste atom sin start. Krasj-PC-ar i 0x40xxxx-området (lengde,
+        // map_has, fil_skriv_bin_safe, …) var elles usynlege i kartet (2026-09-06).
+        la a_namn = nøkler(atomic_vas)
+        la a_sort: liste_tekst = []
+        la ai: heiltall = 0
+        mens ai < lengde(a_namn) {
+            la a_nm: tekst = tekst(a_namn[ai])
+            la a_va: heltall = atomic_vas[a_nm]
+            la a_pos: heltall = 0
+            mens a_pos < lengde(a_sort) og atomic_vas[a_sort[a_pos]] <= a_va { a_pos = a_pos + 1 }
+            legg_til(a_sort, a_nm)
+            la a_j: heltall = lengde(a_sort) - 1
+            mens a_j > a_pos {
+                a_sort[a_j] = a_sort[a_j - 1]
+                a_j = a_j - 1
+            }
+            a_sort[a_pos] = a_nm
+            ai = ai + 1
+        }
+        ai = 0
+        mens ai < lengde(a_sort) {
+            la a_start: heltall = atomic_vas[a_sort[ai]]
+            la a_end: heltall = a_start + 64
+            hvis ai + 1 < lengde(a_sort) { a_end = atomic_vas[a_sort[ai + 1]] }
+            symbol_map = symbol_map + tekst_fra_heltall(a_start) + "\t" + tekst_fra_heltall(a_end) + "\t" + "atom:" + a_sort[ai] + "\n"
+            ai = ai + 1
         }
         fil_skriv(symbol_map_sti, symbol_map)
     }
