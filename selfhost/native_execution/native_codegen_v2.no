@@ -946,6 +946,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".heltall_fra_tekst") eller fn_nm == "heltall_fra_tekst" eller fn_nm == "heltall" eller builtin.ends_with(fn_nm, ".heltall") { returner "int" }
     hvis builtin.ends_with(fn_nm, ".lengde") eller fn_nm == "lengde" { returner "int" }
     hvis fn_nm == "builtin.sys6" eller fn_nm == "sys6" eller fn_nm == "builtin.raw_load8" eller fn_nm == "raw_load8" { returner "int" }
+    hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".now_ms") eller fn_nm == "now_ms" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".char_code") eller fn_nm == "char_code" { returner "int" }
     hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
@@ -2238,7 +2239,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la tt_checkverdi = lengde(bytes)               // check_verdi:
     patch_jump(bytes, tt_pnotbool, tt_checkverdi)
     copy(bytes, [0x48, 0x83, 0xF8, 0x03])          // cmp rax,3
-    copy(bytes, [0x74, 0x0B])                      // je .verdi (+11: cmp 4 + jne 6)
+    copy(bytes, [0x74, 0x0A])                      // je .verdi (+10: cmp 4 B + jne 6 B) — +11 hoppa INN i
+                                                   // «sub rsp,16» → «sub esp,16» → rsp trunkert → SIGSEGV
+                                                   // for tekst(liste) (DNS-proben, 2026-09-06)
     copy(bytes, [0x48, 0x83, 0xF8, 0x04])          // cmp rax,4
     copy(bytes, [0x0F, 0x85])                      // jne make_empty
     u32(bytes, 0)
@@ -2669,6 +2672,171 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x31, 0xFF])                             // xor edi,edi
     call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = 0
     legg_til(bytes, 0xC3)                                 // ret
+
+    // ── host_finst(rdi=namn) / host_kall(rdi=namn, rsi=arg-liste) ─────────────
+    // Verts-innbakte funksjonar: C-æra-VM-en lét program kalle seeden sine eigne
+    // modulfunksjonar (t.d. selfhost.vm.køyr_ncb) når dei ikkje låg i bunten.
+    // Tabell [cstr-peikar][VA][nargs]×N + null-rad, emittert ETTER _start (VA-ane er
+    // endelege då) og lappa inn i movabs-plassane under (atomics["host_tbl_patch_*"]).
+    // host_kall lastar inntil 6 arg i rdi..r9 frå lista (manglande → null) og pushar
+    // resten høgre→venstre med 16-B-justering (same konvensjon som emit_user_call).
+    atomics["host_finst"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12,r13,r14,r15
+    copy(bytes, [0x49, 0xBC])                             // movabs r12, TABELL
+    atomics["host_tbl_patch_finst"] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8]
+    copy(bytes, [0x4C, 0x8B, 0x30])                       // mov r14,[rax] (len)
+    copy(bytes, [0x4C, 0x8D, 0x78, 0x08])                 // lea r15,[rax+8] (byte)
+    la hf_l = lengde(bytes)                               // L:
+    copy(bytes, [0x4D, 0x8B, 0x2C, 0x24])                 // mov r13,[r12]
+    copy(bytes, [0x4D, 0x85, 0xED])                       // test r13,r13
+    la hf_nf = emit_je_placeholder(bytes)                 // jz NOTFOUND
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la hf_c = lengde(bytes)                               // C:
+    copy(bytes, [0x4C, 0x39, 0xF1])                       // cmp rcx,r14
+    la hf_end = emit_jcc_placeholder(bytes, 0x83)         // jae ENDCMP
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x04, 0x0F])           // movzx eax,byte [r15+rcx]
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x54, 0x0D, 0x00])     // movzx edx,byte [r13+rcx]
+    copy(bytes, [0x38, 0xD0])                             // cmp al,dl
+    la hf_n1 = emit_jcc_placeholder(bytes, 0x85)          // jne NEXT
+    copy(bytes, [0x84, 0xD2])                             // test dl,dl
+    la hf_n2 = emit_je_placeholder(bytes)                 // jz NEXT
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    la hf_jc = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hf_jc, hf_c)                        // jmp C
+    la hf_endl = lengde(bytes)                            // ENDCMP:
+    patch_jump(bytes, hf_end, hf_endl)
+    copy(bytes, [0x43, 0x80, 0x7C, 0x35, 0x00, 0x00])     // cmp byte [r13+r14],0
+    la hf_n3 = emit_jcc_placeholder(bytes, 0x85)          // jne NEXT
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])           // FOUND: mov edi,1
+    la hf_box = emit_jmp_placeholder(bytes)
+    la hf_next = lengde(bytes)                            // NEXT:
+    patch_jump(bytes, hf_n1, hf_next) patch_jump(bytes, hf_n2, hf_next) patch_jump(bytes, hf_n3, hf_next)
+    copy(bytes, [0x49, 0x83, 0xC4, 0x18])                 // add r12,24
+    la hf_jl = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hf_jl, hf_l)                        // jmp L
+    la hf_nfl = lengde(bytes)                             // NOTFOUND:
+    patch_jump(bytes, hf_nf, hf_nfl)
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    la hf_boxl = lengde(bytes)
+    patch_jump(bytes, hf_box, hf_boxl)
+    call_rel32(bytes, RT_BOOL(), TEXT_VA())
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
+
+    atomics["host_kall"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12,r13,r14,r15
+    copy(bytes, [0x49, 0xBC])                             // movabs r12, TABELL
+    atomics["host_tbl_patch_kall"] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8]
+    copy(bytes, [0x4C, 0x8B, 0x30])                       // mov r14,[rax]
+    copy(bytes, [0x4C, 0x8D, 0x78, 0x08])                 // lea r15,[rax+8]
+    la hk_l = lengde(bytes)                               // L:
+    copy(bytes, [0x4D, 0x8B, 0x2C, 0x24])                 // mov r13,[r12]
+    copy(bytes, [0x4D, 0x85, 0xED])                       // test r13,r13
+    la hk_nf = emit_je_placeholder(bytes)                 // jz NOTFOUND
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la hk_c = lengde(bytes)                               // C:
+    copy(bytes, [0x4C, 0x39, 0xF1])                       // cmp rcx,r14
+    la hk_end = emit_jcc_placeholder(bytes, 0x83)         // jae ENDCMP
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x04, 0x0F])           // movzx eax,byte [r15+rcx]
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x54, 0x0D, 0x00])     // movzx edx,byte [r13+rcx]
+    copy(bytes, [0x38, 0xD0])                             // cmp al,dl
+    la hk_n1 = emit_jcc_placeholder(bytes, 0x85)          // jne NEXT
+    copy(bytes, [0x84, 0xD2])                             // test dl,dl
+    la hk_n2 = emit_je_placeholder(bytes)                 // jz NEXT
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    la hk_jc = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hk_jc, hk_c)
+    la hk_endl = lengde(bytes)                            // ENDCMP:
+    patch_jump(bytes, hk_end, hk_endl)
+    copy(bytes, [0x43, 0x80, 0x7C, 0x35, 0x00, 0x00])     // cmp byte [r13+r14],0
+    la hk_n3 = emit_jcc_placeholder(bytes, 0x85)          // jne NEXT
+    // FOUND: r13 = VA, rbx = nargs, r10 = listelengd, r11 = elementpeikarar
+    copy(bytes, [0x4D, 0x8B, 0x6C, 0x24, 0x08])           // mov r13,[r12+8]
+    copy(bytes, [0x49, 0x8B, 0x5C, 0x24, 0x10])           // mov rbx,[r12+16]
+    copy(bytes, [0x45, 0x31, 0xD2, 0x45, 0x31, 0xDB])     // xor r10,r10; xor r11,r11
+    copy(bytes, [0x48, 0x85, 0xF6])                       // test rsi,rsi (null-liste → 0 arg)
+    la hk_nolist = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0x8B, 0x46, 0x08])                 // mov rax,[rsi+8]
+    copy(bytes, [0x4C, 0x8B, 0x10])                       // mov r10,[rax] (len)
+    copy(bytes, [0x4C, 0x8B, 0x58, 0x10])                 // mov r11,[rax+16] (elem)
+    la hk_nolistl = lengde(bytes)
+    patch_jump(bytes, hk_nolist, hk_nolistl)
+    // ekstra-arg (nargs > 6): pad om talet er odde, push høgre→venstre
+    copy(bytes, [0x48, 0x89, 0xD8])                       // mov rax,rbx
+    copy(bytes, [0x48, 0x83, 0xE8, 0x06])                 // sub rax,6
+    la hk_nopad = emit_jcc_placeholder(bytes, 0x8E)       // jle NOPAD
+    copy(bytes, [0xA8, 0x01])                             // test al,1
+    la hk_nopad2 = emit_je_placeholder(bytes)             // jz NOPAD
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8
+    la hk_nopadl = lengde(bytes)
+    patch_jump(bytes, hk_nopad, hk_nopadl) patch_jump(bytes, hk_nopad2, hk_nopadl)
+    copy(bytes, [0x48, 0x89, 0xD9])                       // mov rcx,rbx
+    la hk_loop = lengde(bytes)                            // LOOP:
+    copy(bytes, [0x48, 0x83, 0xF9, 0x06])                 // cmp rcx,6
+    la hk_done = emit_jcc_placeholder(bytes, 0x86)        // jbe DONE
+    copy(bytes, [0x48, 0xFF, 0xC9])                       // dec rcx
+    copy(bytes, [0x4C, 0x39, 0xD1])                       // cmp rcx,r10
+    la hk_p0 = emit_jcc_placeholder(bytes, 0x83)          // jae PUSH0
+    copy(bytes, [0x41, 0xFF, 0x34, 0xCB])                 // push qword [r11+rcx*8]
+    la hk_jl2 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hk_jl2, hk_loop)
+    la hk_p0l = lengde(bytes)                             // PUSH0:
+    patch_jump(bytes, hk_p0, hk_p0l)
+    copy(bytes, [0x6A, 0x00])                             // push 0
+    la hk_jl3 = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hk_jl3, hk_loop)
+    la hk_donel = lengde(bytes)                           // DONE:
+    patch_jump(bytes, hk_done, hk_donel)
+    // registerargument: reg_i = (i < nargs og i < len) ? elem[i] : null
+    la hk_regs: liste = [
+        [0x31, 0xFF, 0x49, 0x8B, 0x3B],                   // xor edi,edi … mov rdi,[r11]
+        [0x31, 0xF6, 0x49, 0x8B, 0x73, 0x08],             // rsi,[r11+8]
+        [0x31, 0xD2, 0x49, 0x8B, 0x53, 0x10],             // rdx,[r11+16]
+        [0x31, 0xC9, 0x49, 0x8B, 0x4B, 0x18],             // rcx,[r11+24]
+        [0x45, 0x31, 0xC0, 0x4D, 0x8B, 0x43, 0x20],       // r8,[r11+32]
+        [0x45, 0x31, 0xC9, 0x4D, 0x8B, 0x4B, 0x28]        // r9,[r11+40]
+    ]
+    la hk_i: heiltall = 0
+    mens hk_i < 6 {
+        la spec = hk_regs[hk_i]
+        la xor_len: heiltall = 2
+        hvis hk_i >= 4 { xor_len = 3 }
+        la zi: heiltall = 0
+        mens zi < xor_len { legg_til(bytes, spec[zi]) zi = zi + 1 }   // xor reg,reg
+        copy(bytes, [0x48, 0x83, 0xFB, hk_i + 1])                       // cmp rbx,i+1
+        la hk_s1 = emit_jcc_placeholder(bytes, 0x82)                    // jb SKIP
+        copy(bytes, [0x49, 0x83, 0xFA, hk_i + 1])                       // cmp r10,i+1
+        la hk_s2 = emit_jcc_placeholder(bytes, 0x82)                    // jb SKIP
+        mens zi < lengde(spec) { legg_til(bytes, spec[zi]) zi = zi + 1 } // mov reg,[r11+i*8]
+        la hk_sl = lengde(bytes)
+        patch_jump(bytes, hk_s1, hk_sl) patch_jump(bytes, hk_s2, hk_sl)
+        hk_i = hk_i + 1
+    }
+    copy(bytes, [0x41, 0xFF, 0xD5])                       // call r13
+    // rydd ekstra-arg + pad: bytes = (rbx-6)*8 + ((rbx-6)&1)*8
+    copy(bytes, [0x48, 0x89, 0xD9])                       // mov rcx,rbx
+    copy(bytes, [0x48, 0x83, 0xE9, 0x06])                 // sub rcx,6
+    la hk_noclean = emit_jcc_placeholder(bytes, 0x8E)     // jle END
+    copy(bytes, [0x48, 0x89, 0xCA])                       // mov rdx,rcx
+    copy(bytes, [0x48, 0x83, 0xE2, 0x01])                 // and rdx,1
+    copy(bytes, [0x48, 0x01, 0xD1])                       // add rcx,rdx
+    copy(bytes, [0x48, 0xC1, 0xE1, 0x03])                 // shl rcx,3
+    copy(bytes, [0x48, 0x01, 0xCC])                       // add rsp,rcx
+    la hk_endcall = emit_jmp_placeholder(bytes)
+    la hk_next = lengde(bytes)                            // NEXT:
+    patch_jump(bytes, hk_n1, hk_next) patch_jump(bytes, hk_n2, hk_next) patch_jump(bytes, hk_n3, hk_next)
+    copy(bytes, [0x49, 0x83, 0xC4, 0x18])                 // add r12,24
+    la hk_jl = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, hk_jl, hk_l)
+    la hk_nfl = lengde(bytes)                             // NOTFOUND:
+    patch_jump(bytes, hk_nf, hk_nfl)
+    copy(bytes, [0x31, 0xC0])                             // xor eax,eax (rå null)
+    la hk_endl = lengde(bytes)                            // END:
+    patch_jump(bytes, hk_noclean, hk_endl) patch_jump(bytes, hk_endcall, hk_endl)
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3]) // pop; ret
 
     // ── stack_overflow: kalla frå prologen når rsp < [HEAP_VA+24] ─────────────
     // Byggjer «For djup rekursjon (native stakk)» på stakken → RT_STR_RAW → throw_unwind
@@ -5793,6 +5961,8 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_slett   { returner atomic_vas["fil_slett"] }
     hvis fn_nm == "now_ms" eller builtin.ends_with(fn_nm, ".now_ms") { returner atomic_vas["now_ms"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
+    hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner atomic_vas["host_finst"] }
+    hvis fn_nm == "builtin.host_kall" eller fn_nm == "host_kall" { returner atomic_vas["host_kall"] }
     hvis er_mkdir       { returner atomic_vas["mkdir_p"] }
     hvis er_miljo_hent  { returner atomic_vas["env_get"] }
     hvis er_miljo_sett  { returner atomic_vas["env_set"] }
@@ -5841,6 +6011,7 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "process_operation" { returner ["std.native_gap.process_operation"] }
     hvis builtin.starts_with(kort, "socket_") { returner ["std.native_gap." + kort] }
     hvis kort == "network_operation" { returner ["std.native_gap.network_operation"] }
+    hvis kort == "dns_lookup" { returner ["std.native_gap.dns_lookup"] }
     // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
     // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).
     hvis kort == "sha256_bytes" { returner ["std.sha256.hash_bytes"] }
@@ -7006,6 +7177,51 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x0F)
     legg_til(text, 0x05)  // syscall
     native_codegen_trace("post-emit start-prolog ferdig")
+
+    // Verts-funksjonstabell for host_finst/host_kall (sjå bygg_runtime_v2): [cstr][VA][nargs]
+    // per bundla funksjon (sortert), null-rad, så C-strengane. Lappar movabs-plassane i
+    // atoma (offset i rt = offset i text, sidan rt ligg fyrst). 2026-09-06.
+    hvis finnes_nøkkel(atomic_vas, "host_tbl_patch_finst") {
+        la ht_va: heltall = DATA_VA() + lengde(data_bytes)   // i konstant-segmentet (R); .text var 50 KB frå DATA_VA
+        la ht_n: heltall = lengde(sorted)
+        la ht_str_va: heltall = ht_va + (ht_n + 1) * 24
+        la ht_str_off: heltall = 0
+        la ht_i: heltall = 0
+        mens ht_i < ht_n {
+            la ht_fn: tekst = sorted[ht_i]
+            u64(data_bytes, ht_str_va + ht_str_off)
+            u64(data_bytes, fn_vas[ht_fn])
+            u64(data_bytes, lengde(fns[ht_fn]["params"]))
+            ht_str_off = ht_str_off + lengde(ht_fn) + 1
+            ht_i = ht_i + 1
+        }
+        u64(data_bytes, 0) u64(data_bytes, 0) u64(data_bytes, 0)
+        ht_i = 0
+        mens ht_i < ht_n {
+            la ht_fn2: tekst = sorted[ht_i]
+            la ht_k: heltall = 0
+            mens ht_k < lengde(ht_fn2) {
+                legg_til(data_bytes, builtin.char_code(builtin.slice(ht_fn2, ht_k, ht_k + 1)) & 255)
+                ht_k = ht_k + 1
+            }
+            legg_til(data_bytes, 0)
+            ht_i = ht_i + 1
+        }
+        la ht_patch: liste = [atomic_vas["host_tbl_patch_finst"], atomic_vas["host_tbl_patch_kall"]]
+        la ht_p: heltall = 0
+        mens ht_p < 2 {
+            la ht_pos: heltall = ht_patch[ht_p]
+            la ht_b: heltall = 0
+            la ht_v: heltall = ht_va
+            mens ht_b < 8 {
+                text[ht_pos + ht_b] = ht_v & 255
+                ht_v = ht_v >> 8
+                ht_b = ht_b + 1
+            }
+            ht_p = ht_p + 1
+        }
+        native_codegen_trace("verts-tabell: " + tekst_fra_heltall(ht_n) + " funksjonar @" + tekst_fra_heltall(ht_va))
+    }
 
     la text_size: heltall = lengde(text)
     la data_size: heltall = lengde(data_bytes)

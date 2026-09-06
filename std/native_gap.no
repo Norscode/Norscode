@@ -1042,3 +1042,131 @@ funksjon network_operation(req) {
     }
     returner _nw_feil(handle, "invalid operation")
 }
+
+// ── builtin.dns_lookup(host, port_tekst) («norscode-dns-v1») i rein Norscode ────
+// Rekkjefølgje: numerisk IPv4 / localhost → /etc/hosts → UDP A-spørjing (RFC 1035)
+// mot fyrste «nameserver» i /etc/resolv.conf (2 s timeout) via socket_* over sys6.
+// Svar: {"abi","status":"ok"|"feil","error","host","port","addresses":[ip...]}.
+funksjon _dns_svar(status: tekst, host: tekst, port: tekst, adresser, error: tekst) {
+    returner {"abi": "norscode-dns-v1", "status": status, "error": error, "host": host,
+              "port": port, "addresses": adresser}
+}
+
+funksjon _dns_er_ipv4(host: tekst) -> boolsk {
+    la d = builtin.split(host, ".")
+    hvis lengde(d) != 4 { returner usann }
+    la i: heiltall = 0
+    mens i < 4 {
+        hvis d[i] == "" eller lengde(d[i]) > 3 { returner usann }
+        la j: heiltall = 0
+        mens j < lengde(d[i]) {
+            la c = builtin.slice(d[i], j, j + 1)
+            hvis c < "0" eller c > "9" { returner usann }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _dns_hosts(host: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la innhald = ""
+    prøv { innhald = builtin.fil_les("/etc/hosts") } fang (e) { returner ut }
+    la linjer = builtin.split(innhald, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis l != "" og ikkje builtin.starts_with(l, "#") {
+            la felt = builtin.split(builtin.replace(l, "\t", " "), " ")
+            hvis lengde(felt) >= 2 og _dns_er_ipv4(felt[0]) {
+                la k: heiltall = 1
+                mens k < lengde(felt) {
+                    hvis felt[k] == host { legg_til(ut, felt[0]) k = lengde(felt) }
+                    ellers { k = k + 1 }
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _dns_resolver() -> tekst {
+    la innhald = ""
+    prøv { innhald = builtin.fil_les("/etc/resolv.conf") } fang (e) { returner "" }
+    la linjer = builtin.split(innhald, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "nameserver ") {
+            la ns = builtin.trim(builtin.slice(l, 11, lengde(l)))
+            hvis _dns_er_ipv4(ns) { returner ns }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+// UDP A-spørjing; returnerer IPv4-adresser frå svaret (følgjer CNAME implisitt via RR-lista).
+funksjon _dns_sporjing(host: tekst, ns: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la pk: liste_heiltall = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    la etikettar = builtin.split(host, ".")
+    la i: heiltall = 0
+    mens i < lengde(etikettar) {
+        la e = etikettar[i]
+        hvis e != "" {
+            legg_til(pk, lengde(e))
+            la j: heiltall = 0
+            mens j < lengde(e) { legg_til(pk, builtin.char_code(builtin.slice(e, j, j + 1))) j = j + 1 }
+        }
+        i = i + 1
+    }
+    legg_til(pk, 0) legg_til(pk, 0) legg_til(pk, 1) legg_til(pk, 0) legg_til(pk, 1)   // QTYPE A, QCLASS IN
+    la fd = -1
+    prøv { fd = socket_new(2, 2) } fang (e) { returner ut }
+    socket_settimeout(fd, 2000)
+    hvis socket_connect(fd, ns, 53) < 0 { socket_close(fd) returner ut }
+    prøv { _sk_send_liste(fd, pk) } fang (e2) { socket_close(fd) returner ut }
+    la svar: liste_heiltall = []
+    prøv { svar = _sk_recv_liste(fd, 4096) } fang (e3) { socket_close(fd) returner ut }
+    socket_close(fd)
+    hvis lengde(svar) < 12 { returner ut }
+    la ancount = (svar[6] << 8) | svar[7]
+    // hopp over spørsmålet
+    la p: heiltall = 12
+    mens p < lengde(svar) og svar[p] != 0 { p = p + svar[p] + 1 }
+    p = p + 5
+    la n: heiltall = 0
+    mens n < ancount og p + 12 <= lengde(svar) {
+        // namn (komprimert peikar eller etikettar)
+        mens p < lengde(svar) og svar[p] != 0 og (svar[p] & 192) != 192 { p = p + svar[p] + 1 }
+        hvis p < lengde(svar) og (svar[p] & 192) == 192 { p = p + 2 } ellers { p = p + 1 }
+        hvis p + 10 > lengde(svar) { returner ut }
+        la type = (svar[p] << 8) | svar[p + 1]
+        la rdlen = (svar[p + 8] << 8) | svar[p + 9]
+        p = p + 10
+        hvis type == 1 og rdlen == 4 og p + 4 <= lengde(svar) {
+            legg_til(ut, tekst_fra_heltall(svar[p]) + "." + tekst_fra_heltall(svar[p + 1]) + "." + tekst_fra_heltall(svar[p + 2]) + "." + tekst_fra_heltall(svar[p + 3]))
+        }
+        p = p + rdlen
+        n = n + 1
+    }
+    returner ut
+}
+
+funksjon dns_lookup(host, port) {
+    la h = tekst(host)
+    la pt = tekst(port)
+    hvis h == "" { returner _dns_svar("feil", h, pt, [], "host manglar") }
+    hvis _dns_er_ipv4(h) { returner _dns_svar("ok", h, pt, [h], "") }
+    hvis h == "localhost" { returner _dns_svar("ok", h, pt, ["127.0.0.1"], "") }
+    la lokal = _dns_hosts(h)
+    hvis lengde(lokal) > 0 { returner _dns_svar("ok", h, pt, lokal, "") }
+    la ns = _dns_resolver()
+    hvis ns == "" { returner _dns_svar("feil", h, pt, [], "ingen resolver i /etc/resolv.conf") }
+    la adresser = _dns_sporjing(h, ns)
+    hvis lengde(adresser) == 0 { returner _dns_svar("feil", h, pt, [], "ingen A-post for " + h) }
+    returner _dns_svar("ok", h, pt, adresser, "")
+}
