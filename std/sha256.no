@@ -338,9 +338,93 @@ funksjon hmac_sha256_bytes(nøkkel: liste_heiltall, melding: liste_heiltall) -> 
 // Native_codegen_v2 har inga native pbkdf2-rutine; rutar hit slik at
 // krypto.pbkdf2_sha256 sin `prøv { builtin.pbkdf2 }` reknar rett (utan å måtte
 // kaste og falle til si eiga pure-løype, som ikkje fangast i AOT).
+// _raa_bytes: tekst → rå byteliste UTAN SHA-256-padding. (_bytes over legg på
+// 0x80 + nullar + bitlengd — det er meldingspadding for éin-blokk-hashing, og
+// gav feil PBKDF2 (nøkkel/salt som padda blokker) — funne 2026-09-06 mot
+// Python hashlib på fersk seed: pbkdf2_hex(…, 1, 32) ≠ HMAC(pw, salt‖0001).)
+funksjon _raa_bytes(data: tekst) -> liste_heiltall {
+    la out: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(data) {
+        legg_til(out, builtin.char_code(builtin.slice(data, i, i + 1)) & 255)
+        i = i + 1
+    }
+    returner out
+}
+
+// ── PBKDF2-akselerasjon: HMAC-midtstand ─────────────────────────────────────
+// Kvar iterasjon i PBKDF2 er HMAC(pw, U) med 32-byte U. Med nøkkelblokka
+// (ipad/opad) komprimert éin gong på førehand kostar ein iterasjon berre TO
+// kompresjonar (indre: U‖padding, ytre: indre‖padding) — mot fire + nøkkel-
+// oppsett + hex-omvegar i den generelle _hmac_sha256_bytes. (2026-09-06:
+// 0,3 ms/iter nativt på fersk seed → hash_passord (120 000) tok 36 s.)
+funksjon _hmac_nøkkel64(nøkkel: liste_heiltall) -> liste_heiltall {
+    la k = _bytes_kopier(nøkkel)
+    hvis lengde(k) > 64 {
+        la kh = hash_bytes(k)
+        la kb: liste_heiltall = []
+        la j: heiltall = 0
+        mens j < 32 {
+            legg_til(kb, _hex_byte(kh, j))
+            j = j + 1
+        }
+        k = kb
+    }
+    mens lengde(k) < 64 { legg_til(k, 0) }
+    returner k
+}
+
+funksjon _hmac_midtstand(k64: liste_heiltall, pad: heiltall) -> liste_heiltall {
+    la ctx = ny_kontekst()
+    la blokk: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 64 {
+        legg_til(blokk, k64[i] ^ pad)
+        i = i + 1
+    }
+    _komprimer_blokk(ctx, blokk)
+    returner ctx["h"]
+}
+
+funksjon _h_til_bytes(h: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 8 {
+        la w = h[i]
+        legg_til(ut, (w >> 24) & 255)
+        legg_til(ut, (w >> 16) & 255)
+        legg_til(ut, (w >> 8) & 255)
+        legg_til(ut, w & 255)
+        i = i + 1
+    }
+    returner ut
+}
+
+// Éin kompresjon av «32 byte melding etter éi 64-byte-blokk»: melding ‖ 0x80 ‖
+// 23 nullar ‖ bitlengd (96·8 = 768 = 0x0300) — same for indre og ytre steg.
+funksjon _komprimer_32_etter_blokk(h_start: liste_heiltall, ktab: liste_heiltall, m32: liste_heiltall) -> liste_heiltall {
+    la ctx = {"h": _bytes_kopier(h_start), "k": ktab, "buffer": [], "total": 96, "ferdig": usann}
+    la blokk: liste_heiltall = _bytes_kopier(m32)
+    legg_til(blokk, 128)
+    mens lengde(blokk) < 62 { legg_til(blokk, 0) }
+    legg_til(blokk, 3)
+    legg_til(blokk, 0)
+    _komprimer_blokk(ctx, blokk)
+    returner ctx["h"]
+}
+
+funksjon _hmac32_midtstand(h_i: liste_heiltall, h_o: liste_heiltall, ktab: liste_heiltall, m32: liste_heiltall) -> liste_heiltall {
+    la indre = _h_til_bytes(_komprimer_32_etter_blokk(h_i, ktab, m32))
+    returner _h_til_bytes(_komprimer_32_etter_blokk(h_o, ktab, indre))
+}
+
 funksjon pbkdf2_hex(passord: tekst, salt: tekst, iterasjonar: heiltall, dklen: heiltall) -> tekst {
-    la pw = _bytes(passord)
-    la slt = _bytes(salt)
+    la pw = _raa_bytes(passord)
+    la slt = _raa_bytes(salt)
+    la k64 = _hmac_nøkkel64(pw)
+    la h_i = _hmac_midtstand(k64, 54)
+    la h_o = _hmac_midtstand(k64, 92)
+    la ktab = _k()
     la nblokk = (dklen + 31) / 32
     la dk: liste_heiltall = []
     la bi: heiltall = 1
@@ -354,7 +438,7 @@ funksjon pbkdf2_hex(passord: tekst, salt: tekst, iterasjonar: heiltall, dklen: h
         la t = _bytes_kopier(u)
         la c: heiltall = 2
         mens c <= iterasjonar {
-            u = hmac_sha256_bytes(pw, u)
+            u = _hmac32_midtstand(h_i, h_o, ktab, u)
             la j: heiltall = 0
             mens j < 32 {
                 t[j] = t[j] ^ u[j]
