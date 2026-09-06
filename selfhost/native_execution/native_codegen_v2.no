@@ -2033,9 +2033,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_abs_jump(bytes, RT_INT() - TEXT_VA(), RT_BOOL() - TEXT_VA(), cached_int_va)
     patch_abs_jump(bytes, RT_BOOL() - TEXT_VA(), RT_STR_RAW() - TEXT_VA(), cached_bool_va)
     patch_abs_jump(bytes, RT_STR_RAW() - TEXT_VA(), RT_STR_RAW() - TEXT_VA() + 12, cached_str_raw_va)
-    hvis gc_mode != "1" {
-        patch_abs_jump(bytes, RT_JOIN() - TEXT_VA(), RT_MAP_NEW() - TEXT_VA(), linear_join_va)
-    }
+    // v5b (2026-09-06): lineær join PÅ i GC-modus òg — join sin rå objekt-alloc er patcha til
+    // fri-lista (patch_raw_string_allocs H). Med legacy RT_JOIN (éin RT_CONCAT per del) vart
+    // strengbygging KVADRATISK: kvar mellomstreng ny-allokert og større enn alle hol → bump
+    // til heap-toppen → concat-kopi inn i vaktsida (SIGSEGV @0x40397a, rdi=0x405ff000) på vm.no.
+    patch_abs_jump(bytes, RT_JOIN() - TEXT_VA(), RT_MAP_NEW() - TEXT_VA(), linear_join_va)
 
     atomics["load"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08, 0x48, 0x8B, 0x3F])
@@ -3077,6 +3079,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 
     // gc_alloc(size) -> boksa adresse. Fri-liste-hovud @ HEAP_VA+40. v1 head-fit:
     // gjenbruk hovudblokka om >= size, elles bump. Header-laust (live-map sweep).
+    // v5d: bump-vegane i GC-allokatorane sjekkar heap-taket → gc_oom (exit 199) i staden for
+    // å skrive inn i vaktsida (SIGSEGV @concat-kopi, rdi=0x405ff000, vm.no 2026-09-06).
+    // gc_oom blir emittert seinare → call rel32-placeholders patcha der. Berre GC-modus
+    // (utan GC er heapen 2 GiB og desse allokatorane brukte av hasha map).
+    la oom_sites: liste = []
     atomics["gc_alloc"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])          // mov rax,[rdi+8]  (size)
     copy(bytes, [0x4C, 0x8B, 0x04, 0x25])          // mov r8,[moffs32] (head)
@@ -3318,6 +3325,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC0, 0x0F])          // add rax,15  (v4: 16-alignér, sjå gc_alloc16)
     copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x48, 0x8D, 0x48, 0x10])          // lea rcx,[rax+16]
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(bytes, [0x48, 0x81, 0xF9]) u32(bytes, GC_HEAP_LIMIT())   // cmp rcx,GC_HEAP_LIMIT
+        copy(bytes, [0x72, 0x05])                      // jb +5 (ok)
+        copy(bytes, [0xE8]) u32(bytes, 0)              // call gc_oom (patcha seinare)
+        legg_til(oom_sites, lengde(bytes) - 4)
+    }
     copy(bytes, [0x48, 0x89, 0x0C, 0x25])          // mov [bump],rcx
     u32(bytes, HEAP_VA())
     la gbi_box = emit_jmp_placeholder(bytes)       // jmp L_fill
@@ -3425,6 +3438,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x48, 0x89, 0xC2])                // mov rdx,rax
     copy(bytes, [0x48, 0x83, 0xC2, 0x10])          // add rdx,16
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(bytes, [0x48, 0x81, 0xFA]) u32(bytes, GC_HEAP_LIMIT())   // cmp rdx,GC_HEAP_LIMIT
+        copy(bytes, [0x72, 0x05])                      // jb +5 (ok)
+        copy(bytes, [0xE8]) u32(bytes, 0)              // call gc_oom (patcha seinare)
+        legg_til(oom_sites, lengde(bytes) - 4)
+    }
     copy(bytes, [0x48, 0x89, 0x14, 0x25])          // mov [bump],rdx
     u32(bytes, HEAP_VA())
     la a16_Ldone = lengde(bytes)                   // done:
@@ -3515,6 +3534,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xE0, 0xF0])          // and rax,-16
     copy(bytes, [0x49, 0x89, 0xC2])                // mov r10,rax
     copy(bytes, [0x49, 0x01, 0xCA])                // add r10,rcx (new bump = rax+size)
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(bytes, [0x49, 0x81, 0xFA]) u32(bytes, GC_HEAP_LIMIT())   // cmp r10,GC_HEAP_LIMIT
+        copy(bytes, [0x72, 0x05])                      // jb +5 (ok)
+        copy(bytes, [0xE8]) u32(bytes, 0)              // call gc_oom (patcha seinare)
+        legg_til(oom_sites, lengde(bytes) - 4)
+    }
     copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
     u32(bytes, HEAP_VA())
     la av_done = lengde(bytes)                     // V_done:
@@ -3673,6 +3698,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x49, 0x83, 0xE0, 0xF0])          // and r8,-16
     copy(bytes, [0x4D, 0x89, 0xC2])                // mov r10,r8
     copy(bytes, [0x4D, 0x01, 0xCA])                // add r10,r9 (new bump = r8+size)
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" {
+        copy(bytes, [0x49, 0x81, 0xFA]) u32(bytes, GC_HEAP_LIMIT())   // cmp r10,GC_HEAP_LIMIT
+        copy(bytes, [0x72, 0x05])                      // jb +5 (ok)
+        copy(bytes, [0xE8]) u32(bytes, 0)              // call gc_oom (patcha seinare)
+        legg_til(oom_sites, lengde(bytes) - 4)
+    }
     copy(bytes, [0x4C, 0x89, 0x14, 0x25])          // mov [bump],r10
     u32(bytes, HEAP_VA())
     la r8_done = lengde(bytes)                     // V_done:
@@ -4794,6 +4825,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la oom_msg_va = TEXT_VA() + lengde(bytes)
     copy(bytes, oom_msg_bytes)
     atomics["gc_oom"] = TEXT_VA() + lengde(bytes)
+    for oom_site i oom_sites { patch_jump(bytes, oom_site, lengde(bytes)) }   // v5d: allokator-tak → gc_oom
     copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2
     copy(bytes, [0x48, 0xBE]) u64(bytes, oom_msg_va) // movabs rsi,msg
     copy(bytes, [0xBA]) u32(bytes, lengde(oom_msg_bytes)) // mov edx,len
