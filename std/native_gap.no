@@ -656,3 +656,164 @@ funksjon process_operation(req) {
     }
     returner _pg_feil("ukjent operasjon: " + op)
 }
+
+// ── builtin.socket_* (AF_INET TCP/UDP) i REIN Norscode over builtin.sys6 ─────────
+// socket(41)/connect(42)/bind(49)/listen(50)/accept(43)/sendto(44, MSG_NOSIGNAL)/
+// read(0)/close(3)/setsockopt(54). Vert: "" | "0.0.0.0" | "localhost" | a.b.c.d
+// (DNS er ikkje med enno → kast). Feil = negativ retur → kast (std.socket fangar).
+la _sk_scratch = 0
+
+funksjon _sk_buf() -> heiltall {
+    hvis _sk_scratch == 0 {
+        _sk_scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+        hvis _sk_scratch <= 0 { _sk_scratch = 0 kast "socket: mmap feila" }
+    }
+    returner _sk_scratch
+}
+
+funksjon _sk_ip(vert: tekst) -> liste_heiltall {
+    hvis vert == "" eller vert == "0.0.0.0" eller vert == "*" { returner [0, 0, 0, 0] }
+    hvis vert == "localhost" { returner [127, 0, 0, 1] }
+    la delar = builtin.split(vert, ".")
+    hvis lengde(delar) != 4 { kast "socket: DNS-oppslag ikkje støtta enno: " + vert }
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 4 {
+        la d = delar[i]
+        hvis d == "" eller lengde(d) > 3 { kast "socket: ugyldig IPv4: " + vert }
+        la v = heltall_fra_tekst(d)
+        hvis v < 0 eller v > 255 { kast "socket: ugyldig IPv4: " + vert }
+        legg_til(ut, v)
+        i = i + 1
+    }
+    returner ut
+}
+
+// sockaddr_in (16 byte) på adr: sin_family=2 (LE), sin_port (BE), sin_addr, 8 null-byte.
+funksjon _sk_sockaddr(adr: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la ip = _sk_ip(vert)
+    builtin.raw_store8(adr, 2)
+    builtin.raw_store8(adr + 1, 0)
+    builtin.raw_store8(adr + 2, (port >> 8) & 255)
+    builtin.raw_store8(adr + 3, port & 255)
+    builtin.raw_store8(adr + 4, ip[0])
+    builtin.raw_store8(adr + 5, ip[1])
+    builtin.raw_store8(adr + 6, ip[2])
+    builtin.raw_store8(adr + 7, ip[3])
+    builtin.raw_store64(adr + 8, 0)
+    returner 16
+}
+
+funksjon socket_new(af: heiltall, type: heiltall) -> heiltall {
+    la fd = builtin.sys6(41, af, type, 0, 0, 0, 0)
+    hvis fd < 0 { kast "socket_new feila: " + tekst_fra_heltall(fd) }
+    returner fd
+}
+
+funksjon socket_connect(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la b = _sk_buf()
+    _sk_sockaddr(b, vert, port)
+    returner builtin.sys6(42, fd, b, 16, 0, 0, 0)
+}
+
+funksjon socket_bind(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 64, 1)
+    builtin.sys6(54, fd, 1, 2, b + 64, 4, 0)      // SO_REUSEADDR
+    _sk_sockaddr(b, vert, port)
+    returner builtin.sys6(49, fd, b, 16, 0, 0, 0)
+}
+
+funksjon socket_listen(fd: heiltall, etterslep: heiltall) -> heiltall {
+    returner builtin.sys6(50, fd, etterslep, 0, 0, 0, 0)
+}
+
+funksjon socket_accept(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 96, 16)
+    la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+    hvis ny < 0 { kast "socket_accept feila: " + tekst_fra_heltall(ny) }
+    returner ny
+}
+
+funksjon _sk_send_liste(fd: heiltall, data: liste_heiltall) -> heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la sendt: heiltall = 0
+    mens sendt < lengde(data) {
+        la bit = lengde(data) - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)   // MSG_NOSIGNAL
+        hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
+        hvis w == 0 { returner sendt }
+        sendt = sendt + w
+    }
+    returner sendt
+}
+
+funksjon socket_send(fd: heiltall, data: tekst) -> heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la sendt: heiltall = 0
+    mens sendt < lengde(data) {
+        la bit = lengde(data) - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
+        hvis w == 0 { returner sendt }
+        sendt = sendt + w
+    }
+    returner sendt
+}
+
+funksjon socket_send_bytes(fd: heiltall, data) -> heiltall {
+    hvis builtin.type(data) == "tekst" { returner socket_send(fd, data) }
+    returner _sk_send_liste(fd, data)
+}
+
+funksjon _sk_recv_liste(fd: heiltall, maks: heiltall) -> liste_heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n_maks = maks
+    hvis n_maks > 32768 { n_maks = 32768 }
+    hvis n_maks <= 0 { returner [] }
+    la n = builtin.sys6(0, fd, buf, n_maks, 0, 0, 0)
+    hvis n == -11 { returner [] }                      // EAGAIN (timeout)
+    hvis n < 0 { kast "socket_recv feila: " + tekst_fra_heltall(n) }
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < n { legg_til(ut, builtin.raw_load8(buf + i)) i = i + 1 }
+    returner ut
+}
+
+funksjon socket_recv(fd: heiltall, maks: heiltall) -> tekst {
+    la l = _sk_recv_liste(fd, maks)
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) { ut = ut + builtin.chr(l[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon socket_recv_bytes(fd: heiltall, maks: heiltall) -> liste_heiltall {
+    returner _sk_recv_liste(fd, maks)
+}
+
+funksjon socket_close(fd: heiltall) -> heiltall {
+    returner builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+}
+
+funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
+    la b = _sk_buf()
+    la tv: heiltall = b + 128
+    hvis ms < 0 { ms = 0 }
+    builtin.raw_store64(tv, ms / 1000)
+    builtin.raw_store64(tv + 8, (ms % 1000) * 1000)
+    la r1 = builtin.sys6(54, fd, 1, 20, tv, 16, 0)    // SO_RCVTIMEO
+    la r2 = builtin.sys6(54, fd, 1, 21, tv, 16, 0)    // SO_SNDTIMEO
+    hvis r1 < 0 { returner r1 }
+    returner r2
+}
