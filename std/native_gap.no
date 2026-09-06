@@ -371,3 +371,288 @@ funksjon _sys_ok_sti(sti: tekst) {
 funksjon _sys_feil(melding: tekst) {
     returner {"abi": "norscode-system-v1", "status": "feil", "path": "", "error": melding}
 }
+
+// ── builtin.process_operation («norscode-native-process-v1») i REIN Norscode over
+// builtin.sys6 (Linux x86-64: pipe2/fork/dup2/execve/waitpid/kill/read/fcntl/nanosleep).
+// Ingen frosen C-rutine. Handle-tabellen er ein modul-global (init ved seed-start).
+// Operasjonar: spawn_argv (→ status "kjorer" + handle), poll, read (tømer buffera),
+// wait (wait_ms), signal (signal), close (drep om nødvendig, frigjer). Statusar:
+// kjorer / ferdig (exit_code) / signal (128+sig) / timeout (124, drep med SIGKILL når
+// request-timeout_ms er passert) / feil. (2026-09-06)
+la _pg_prosessar = {}
+
+funksjon _pg_res(status: tekst, pid: heiltall, handle: tekst, exit_code: heiltall,
+                 ut: tekst, feil: tekst, error: tekst, wall_ms: heiltall) {
+    returner {
+        "abi": "norscode-native-process-v1", "status": status, "pid": tekst_fra_heltall(pid),
+        "handle": handle, "exit_code": tekst_fra_heltall(exit_code), "stdout": ut,
+        "stderr": feil, "error": error, "wall_ms": tekst_fra_heltall(wall_ms),
+        "peak_rss_bytes": "0"
+    }
+}
+
+funksjon _pg_feil(melding: tekst) {
+    returner _pg_res("feil", -1, "", -1, "", "", melding, 0)
+}
+
+funksjon _pg_cstr(adr: heiltall, s: tekst) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        builtin.raw_store8(adr + i, builtin.char_code(builtin.slice(s, i, i + 1)))
+        i = i + 1
+    }
+    builtin.raw_store8(adr + lengde(s), 0)
+    returner adr + lengde(s) + 1
+}
+
+// Set O_NONBLOCK (fcntl F_SETFL=4, O_NONBLOCK=2048) på fd.
+funksjon _pg_nonblock(fd: heiltall) -> heiltall {
+    la flagg = builtin.sys6(72, fd, 3, 0, 0, 0, 0)          // F_GETFL
+    hvis flagg < 0 { flagg = 0 }
+    returner builtin.sys6(72, fd, 4, flagg | 2048, 0, 0, 0)  // F_SETFL
+}
+
+// Les alt tilgjengeleg (ikkje-blokkerande) frå fd til tekst; stoppar ved maks.
+funksjon _pg_dren(p, felt: tekst, fdfelt: tekst) -> heiltall {
+    la fd: heiltall = p[fdfelt]
+    hvis fd < 0 { returner 0 }
+    la buf: heiltall = p["buf"]
+    la maks: heiltall = p["maks"]
+    mens sann {
+        la n = builtin.sys6(0, fd, buf, 4096, 0, 0, 0)
+        hvis n <= 0 {
+            hvis n == 0 {                                  // EOF → lukk
+                builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+                p[fdfelt] = -1
+            }
+            returner 0
+        }
+        la del = ""
+        la i: heiltall = 0
+        mens i < n {
+            del = del + builtin.chr(builtin.raw_load8(buf + i))
+            i = i + 1
+        }
+        hvis lengde(p[felt]) + lengde(del) > maks { del = builtin.slice(del, 0, maks - lengde(p[felt])) }
+        p[felt] = p[felt] + del
+    }
+    returner 0
+}
+
+funksjon _pg_sov_ms(p, ms: heiltall) -> heiltall {
+    la ts: heiltall = p["scratch"] + 65536 - 16
+    builtin.raw_store64(ts, ms / 1000)
+    builtin.raw_store64(ts + 8, (ms % 1000) * 1000000)
+    returner builtin.sys6(35, ts, 0, 0, 0, 0, 0)
+}
+
+// waitpid(pid, WNOHANG=1). Returnerer sann når prosessen er ferdig (og set status).
+funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
+    hvis p["status"] != "kjorer" { returner sann }
+    _pg_dren(p, "stdout", "fd_ut")
+    _pg_dren(p, "stderr", "fd_feil")
+    la st: heiltall = p["scratch"] + 65536 - 32
+    builtin.raw_store64(st, 0)
+    la flagg: heiltall = 1
+    hvis blokker { flagg = 0 }
+    la r = builtin.sys6(61, p["pid"], st, flagg, 0, 0, 0)
+    hvis r == p["pid"] {
+        la status = builtin.raw_load64(st) & 4294967295
+        la sig = status & 127
+        hvis p["drept_timeout"] {
+            p["status"] = "timeout"
+            p["exit_code"] = 124
+        } ellers hvis sig == 0 {
+            p["status"] = "ferdig"
+            p["exit_code"] = (status >> 8) & 255
+        } ellers {
+            p["status"] = "signal"
+            p["exit_code"] = 128 + sig
+        }
+        _pg_dren(p, "stdout", "fd_ut")
+        _pg_dren(p, "stderr", "fd_feil")
+        returner sann
+    }
+    // Request-timeout → SIGKILL, ventar blokkerande, status timeout
+    hvis p["timeout_ms"] > 0 og builtin.now_ms() - p["start_ms"] > p["timeout_ms"] og ikkje p["drept_timeout"] {
+        p["drept_timeout"] = sann
+        builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+        returner _pg_sjekk(p, sann)
+    }
+    returner usann
+}
+
+funksjon _pg_svar(p) {
+    returner _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], p["stdout"], p["stderr"], "",
+                     builtin.now_ms() - p["start_ms"])
+}
+
+funksjon _pg_spawn(req) {
+    la executable = tekst(req["executable"])
+    hvis executable == "" { returner _pg_feil("tom executable") }
+    la args = req["args"]
+    hvis builtin.type(args) != "liste" { args = [] }
+    la scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+    hvis scratch <= 0 { returner _pg_feil("mmap feila") }
+    // C-strengar: executable, args, cwd, miljø-overstyringar
+    la fri: heiltall = scratch
+    la exe_adr = fri
+    fri = _pg_cstr(fri, executable)
+    la argv_adr: heiltall = 0
+    la arg_adr: liste_heiltall = []
+    legg_til(arg_adr, exe_adr)
+    la ai: heiltall = 0
+    mens ai < lengde(args) {
+        legg_til(arg_adr, fri)
+        fri = _pg_cstr(fri, tekst(args[ai]))
+        ai = ai + 1
+    }
+    la cwd_adr: heiltall = 0
+    la cwd = ""
+    hvis finnes_nøkkel(req, "cwd") { cwd = tekst(req["cwd"]) }
+    hvis cwd != "" { cwd_adr = fri fri = _pg_cstr(fri, cwd) }
+    // envp: eigne overstyringar fyrst, så prosessen sitt envp ([HEAP+8] = 0x600008)
+    la miljø = {}
+    hvis finnes_nøkkel(req, "environment") og builtin.type(req["environment"]) == "ordbok" { miljø = req["environment"] }
+    la env_adr: liste_heiltall = []
+    la mk = nøkler(miljø)
+    la mi: heiltall = 0
+    mens mi < lengde(mk) {
+        legg_til(env_adr, fri)
+        fri = _pg_cstr(fri, tekst(mk[mi]) + "=" + tekst(miljø[mk[mi]]))
+        mi = mi + 1
+    }
+    la arv = sann
+    hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
+    la envp0 = builtin.raw_load64(6291464)
+    hvis arv og envp0 != 0 {
+        la ei: heiltall = 0
+        mens builtin.raw_load64(envp0 + ei * 8) != 0 og ei < 4096 {
+            legg_til(env_adr, builtin.raw_load64(envp0 + ei * 8))
+            ei = ei + 1
+        }
+    }
+    // peikartabellar (8-aligna)
+    fri = (fri + 15) & (0 - 16)
+    argv_adr = fri
+    la pi: heiltall = 0
+    mens pi < lengde(arg_adr) { builtin.raw_store64(fri, arg_adr[pi]) fri = fri + 8 pi = pi + 1 }
+    builtin.raw_store64(fri, 0)
+    fri = fri + 8
+    la envp_adr = fri
+    pi = 0
+    mens pi < lengde(env_adr) { builtin.raw_store64(fri, env_adr[pi]) fri = fri + 8 pi = pi + 1 }
+    builtin.raw_store64(fri, 0)
+    fri = fri + 8
+    hvis fri > scratch + 65536 - 4096 - 64 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("for stor request") }
+    // røyr: [0]=inn(les,skriv) [1]=ut [2]=feil — kvart pipe2 skriv to 32-bit fd-ar
+    la pipes: heiltall = scratch + 65536 - 64
+    la pi2: heiltall = 0
+    mens pi2 < 3 {
+        hvis builtin.sys6(293, pipes + pi2 * 8, 0, 0, 0, 0, 0) != 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("pipe2 feila") }
+        pi2 = pi2 + 1
+    }
+    la inn_r = builtin.raw_load64(pipes) & 4294967295
+    la inn_w = (builtin.raw_load64(pipes) >> 32) & 4294967295
+    la ut_r = builtin.raw_load64(pipes + 8) & 4294967295
+    la ut_w = (builtin.raw_load64(pipes + 8) >> 32) & 4294967295
+    la feil_r = builtin.raw_load64(pipes + 16) & 4294967295
+    la feil_w = (builtin.raw_load64(pipes + 16) >> 32) & 4294967295
+    la pid = builtin.sys6(57, 0, 0, 0, 0, 0, 0)          // fork
+    hvis pid == 0 {
+        // BARN: koplar røyr, chdir, execve; aldri tilbake til Norscode-koden.
+        builtin.sys6(33, inn_r, 0, 0, 0, 0, 0)
+        builtin.sys6(33, ut_w, 1, 0, 0, 0, 0)
+        builtin.sys6(33, feil_w, 2, 0, 0, 0, 0)
+        builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
+        builtin.sys6(3, ut_r, 0, 0, 0, 0, 0)
+        builtin.sys6(3, feil_r, 0, 0, 0, 0, 0)
+        hvis cwd_adr != 0 { builtin.sys6(80, cwd_adr, 0, 0, 0, 0, 0) }
+        builtin.sys6(59, exe_adr, argv_adr, envp_adr, 0, 0, 0)
+        builtin.sys6(60, 127, 0, 0, 0, 0, 0)
+        returner _pg_feil("execve feila")
+    }
+    hvis pid < 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("fork feila") }
+    builtin.sys6(3, inn_r, 0, 0, 0, 0, 0)
+    builtin.sys6(3, ut_w, 0, 0, 0, 0, 0)
+    builtin.sys6(3, feil_w, 0, 0, 0, 0, 0)
+    // stdin: skriv heile teksten (små mengder; røyrbuffer 64 KiB) og lukk
+    la stdin_t = ""
+    hvis finnes_nøkkel(req, "stdin") { stdin_t = tekst(req["stdin"]) }
+    hvis stdin_t != "" {
+        la sb: heiltall = scratch + 65536 - 4096 - 64
+        la skrive: heiltall = 0
+        mens skrive < lengde(stdin_t) {
+            la bit = lengde(stdin_t) - skrive
+            hvis bit > 4000 { bit = 4000 }
+            la k: heiltall = 0
+            mens k < bit { builtin.raw_store8(sb + k, builtin.char_code(builtin.slice(stdin_t, skrive + k, skrive + k + 1))) k = k + 1 }
+            la w = builtin.sys6(1, inn_w, sb, bit, 0, 0, 0)
+            hvis w <= 0 { skrive = lengde(stdin_t) } ellers { skrive = skrive + w }
+        }
+    }
+    builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
+    _pg_nonblock(ut_r)
+    _pg_nonblock(feil_r)
+    la timeout_ms: heiltall = 0
+    hvis finnes_nøkkel(req, "timeout_ms") { timeout_ms = heltall_fra_tekst(tekst(req["timeout_ms"])) }
+    la maks: heiltall = 1048576
+    hvis finnes_nøkkel(req, "max_output_bytes") { maks = heltall_fra_tekst(tekst(req["max_output_bytes"])) }
+    hvis maks <= 0 { maks = 1048576 }
+    la handle = "np-" + tekst_fra_heltall(pid) + "-" + tekst_fra_heltall(builtin.now_ms())
+    la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "stdout": "", "stderr": "",
+            "fd_ut": ut_r, "fd_feil": feil_r, "scratch": scratch, "buf": scratch + 65536 - 4096 - 64,
+            "maks": maks, "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann}
+    _pg_prosessar[handle] = p
+    returner _pg_svar(p)
+}
+
+funksjon process_operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _pg_feil("ugyldig request") }
+    la op = tekst(req["operation"])
+    hvis op == "spawn_argv" { returner _pg_spawn(req) }
+    la handle = tekst(req["handle"])
+    hvis ikkje finnes_nøkkel(_pg_prosessar, handle) { returner _pg_feil("ukjent handle: " + handle) }
+    la p = _pg_prosessar[handle]
+    hvis op == "poll" {
+        _pg_sjekk(p, usann)
+        returner _pg_svar(p)
+    }
+    hvis op == "read" {
+        _pg_dren(p, "stdout", "fd_ut")
+        _pg_dren(p, "stderr", "fd_feil")
+        la r = _pg_svar(p)
+        p["stdout"] = ""
+        p["stderr"] = ""
+        returner r
+    }
+    hvis op == "wait" {
+        la wait_ms: heiltall = 0
+        hvis finnes_nøkkel(req, "wait_ms") { wait_ms = heltall_fra_tekst(tekst(req["wait_ms"])) }
+        la frist = builtin.now_ms() + wait_ms
+        mens ikkje _pg_sjekk(p, usann) {
+            hvis builtin.now_ms() >= frist { returner _pg_svar(p) }
+            _pg_sov_ms(p, 10)
+        }
+        returner _pg_svar(p)
+    }
+    hvis op == "signal" {
+        la sig: heiltall = 15
+        hvis finnes_nøkkel(req, "signal") { sig = heltall_fra_tekst(tekst(req["signal"])) }
+        hvis p["status"] == "kjorer" { builtin.sys6(62, p["pid"], sig, 0, 0, 0, 0) }
+        returner _pg_svar(p)
+    }
+    hvis op == "close" {
+        hvis p["status"] == "kjorer" {
+            builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+            _pg_sjekk(p, sann)
+        }
+        hvis p["fd_ut"] >= 0 { builtin.sys6(3, p["fd_ut"], 0, 0, 0, 0, 0) p["fd_ut"] = -1 }
+        hvis p["fd_feil"] >= 0 { builtin.sys6(3, p["fd_feil"], 0, 0, 0, 0, 0) p["fd_feil"] = -1 }
+        la r = _pg_svar(p)
+        builtin.sys6(11, p["scratch"], 65536, 0, 0, 0, 0)
+        fjern_nokkel(_pg_prosessar, handle)
+        returner r
+    }
+    returner _pg_feil("ukjent operasjon: " + op)
+}
