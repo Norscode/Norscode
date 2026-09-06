@@ -183,3 +183,50 @@ GC-bug korrupterer alt. Kvar fase må verifiserast isolert (litmus før full
 flate). ELF stage-0-paritet må haldast etter kvar codegen-endring. Arm64 må
 portast separat (eiga NcVal-emisjon). Realistisk fleir-sesjons maskinkode-nær
 arbeid.
+
+## Layout v3 → v4 → v5 (2026-09-04 – 2026-09-06): frå litmus-grøn til sjølv-kompilering
+
+Status v5d: fersk x86-64-seed (`tools/build_x86_seed.no`, GC-modus) kompilerer
+`std/zip.no` (6 s, bump-topp 96 MB), `selfhost/vm.no` (254 MB) og **`selfhost/nc_main.no`**
+(sjølv-kompilering, exit 0, 381 MB) i Docker linux/amd64. Committed seed: zip 19 s / 181 MB
+rein bump. Lokal litmus 53/57 (rest pre-eksisterande diagnostikk). Kvart steg under vart
+funne med spor (`NORSCODE_GC_SPOR=1` ved codegen: safepoint-stubben skriv «<bump> <live-n>»
+per collect) og qemu-user-gdbstub (`qemu-x86_64-static -g` + `gdb-multiarch`; Rosetta gjev
+ingen gjesteregister).
+
+1. **Mark-bit-kollisjon (v4).** Bitmapen har 1 bit per 16 B-slot og DFS-en hoppar over «alt
+   markert» FØR registrering. Frosne rå-bump-strengar (2·len+11) let bump stå ualigna → ein
+   boks kunne dele slot med ein liten streng-payload (len+9 ≤ 15 B); ein stale payload-peikar
+   på stakken markerte slotten fyrst → den ekte boksen vart hoppa over → uregistrert →
+   frigjort → attbruk korrupterte levande data. Fiks: alle GC-allokatorar deler ut 16-aligna
+   blokker (bump-veg rundar opp; frå fri-lista P = round16(start), lead ≤ 15 B fell attende
+   som hol ved neste sweep; sweepen held EKSAKTE hol/bump-reset), og DFS-en avviser ualigna
+   kandidatar — berre i GC-modus (utan GC er prologane upatcha → ualigna boksar).
+2. **Upatcha boks-prologar.** Tre til: r12-variant (frosen json_string) og movabs-varianten
+   i dei påhengde concat/tekst()-rutinene (`patch_bump_prologer` 11 → 14/15 treff).
+3. **Bitmap-clear dekte berre 256 MiB** (fast 2 MiB rep stosq) av 1 GiB-heapen → stale
+   mark-bitar over 0x10600000 → nye objekt «alt markert». No bump-proporsjonal.
+4. **Kanon-cache AV i GC-modus** (int/bool/char-trampolinane var berre i paritet-løypa fordi
+   fallback-ane rå-bump-allokerte). VM-i-VM-kompilering boksa millionar av heiltal → GB.
+   v5: fallback-ane har standard prolog-form, `patch_bump_prologer` skannar til `cache_end`,
+   trampolinane er PÅ i GC-modus, og DFS/rot-grenser er heva 0x600040 → HEAP_ALLOC_START
+   (kanon-regionen er udødeleg; elles hadde sweepen laga hol *inni* cachen).
+5. **Rå streng-payload-allokatorar** (concat, RT_STR_RAW ×2, json-streng, str_raw-fallback,
+   str_raw todelt, aktiv concat/tekst() movabs-form, join) gjekk ALDRI via fri-lista →
+   veksande strengar dreiv bump monotont (spor: 114 levande, bump 1013 MB, exit 199).
+   `patch_raw_string_allocs` rutar alle ni til `gc_alloc_var` via små hjelpe-atomics som
+   bevarer kallaren sine register; todelte mønster (reservasjon etter kopi) blir nop-a, og
+   patcharen kastar om hovud/hale-tal ikkje stemmer (elles bump-korrupsjon).
+6. **Dynamisk port** `[HEAP+16] = max(4 MiB, 64 B × live-tal)`. Bump-basert («bump − start»)
+   gav eksponentiell vekst: bump-reset tek berre halen over høgaste levande objekt.
+7. **Lineær join i GC-modus.** Legacy RT_JOIN = éin RT_CONCAT per del → kvadratisk; kvar
+   mellomstreng var større enn alle hol → bump til heap-toppen → concat-kopi inn i vaktsida
+   (SIGSEGV @0x40397a, rdi=0x405ff000). Med join sin rå alloc patcha (5) er lineær join PÅ.
+8. **Heap-tak i allokatorane.** Bump-vegane sjekkar GC_HEAP_LIMIT → `gc_oom` (exit 199) i
+   staden for stille skriving inn i vaktsida.
+
+Kjende pre-eksisterande diagnostikk-feil (flagg AV, `continue-on-error`): SWEEPNAT, SWEEPFULL,
+LESBIN. Port før seed-promotering: `b2-seed-direct.yml` BEVIS-steget (nativ tidsmåling fersk
+vs committed på `selfhost/vm.no` + harness-subset med `NC_NATIVE = fersk seed`). Attståande:
+generert kode er ~5× tregare per kompilering enn C-era-seeden (collect-kost ved 400k+ levande
++ naiv codegen), macOS/arm64-seed, og fixpunkt (seed kompilert av seg sjølv → identisk NCB).
