@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-06 (natt, 23:40)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-07 (natt, 00:20)**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -27,7 +27,7 @@ Ferdig når: alle jobbar i `ci.yml`, `gc-litmus.yml` og `b2-seed-direct.yml` er 
 - **A1 Linux-OOM diagnose** `[x]` kode / `[ ]` verifisert — `ci_shell_runner.no` strøymer barnet sitt stdout (async spawn + wait/read) når `NORSCODE_VM_CI_STREAM=1`; `nc_test_parallel.no` drenerer shard-output kvar 5. sekund. Neste runner-død viser kva test som køyrde.
 - **A2 macOS forlatne prosessar** `[x]` kode / `[ ]` verifisert — Lokalt lek ingen av async-/daemon-testane; kjelda er compile-steg som gjekk ut på tid utan å bli drepne. `nc_test.no` køyrer no testbarnet via async-ABI-en og sender SIGKILL ved timeout. I tillegg er lanen delt på 3 runnarar (`NC_PARALLEL_SHARD_ONLY`).
 - **A3 Kompilator: builtin skal vinne over ukvalifisert import** `[x]` — `legg_til(l, x)` i `__main__` vart `CALL std.dns.legg_til` når `std.dns` var importert (`imported_funk_kart`). Fiks i `ir_to_bytecode.registrer_importerte_funksjonar` + utvida `semantic.er_builtin`. Verifisert på seed AE: `test_dns_ds_record` OK. Fragment regenerert og fixpunkt BESTÅTT lokalt (commit 39aaef1).
-- **A4 Push + ny CI-runde** `[~]` — 18 commits pusha 2026-09-06 kveld; B2 fullhost dispatcha. Ventar på: CI (slow-lanes matrix, ELF-fixpunkt), GC-litmus, B2 seed-port-tabell.
+- **A4 Push + ny CI-runde** `[~]` — Alle reelle fiksar er i origin/eadab74 (kompilatorfiks+fragment, PBKDF2, ncb_stream, slow-lane matrix/strøyming/SIGKILL). ci.yml på eadab74: 21/26 jobbar GRØNE (fast-lanes, ELF-fixpunkt, attestasjonar, ACME, Windows, plattformreadiness); berre 5 slow-lane-shards står att (infra verifisert lokalt: async-timeout→rein kill, 0 foreldrelause; strøyming OK). Lokale commitar etter eadab74 = berre docs (sweep add+revert = netto null kode).
 - **A5 Linux-async-backend** `[ ]` (valfri) — committed Linux-stage0 sin async-spawn ignorerer environment-kartet. Ikkje blokkerande (adapteren bind miljøet sjølv), men bør fiksast i native_gap/process når seeden blir promotert.
 
 ---
@@ -43,7 +43,7 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | zip/tar/filops/media/shutil/process/socket/network/DNS/json | `[x]` | passerer på seed AA–AE |
 | `test_dns_ds_record` | `[x]` | rot-årsak var A3 (kompilatorfeil); grøn på seed AE |
 | `test_template` (verts-VM via host_kall) | `[x]` flytta | «Ukjent variabel: f» — feilar òg på committa VM → språkparitet (f-strengar). Flytta til `language_parity_tests.txt` |
-| `test_security` | `[~]` | PBKDF2 var FEIL (padda nøkkel) → fiksa + raskare. PBKDF2-heng: sweep frigjorde ikkje LEIANDE hol → bump klatra til 1 GiB (fiksa, commit 28db3bb; litmus grøn). |
+| `test_security` | `[~]` | PBKDF2 var FEIL (padda nøkkel) → fiksa + raskare. PBKDF2-heng (bump→1 GiB): sweep-leiande-hol-forsøket REVERTERT (bef0bb1) — det gav bos region-verdiar i gc_sweep_full/native-probane. Heng står att i den IKKJE-blokkerande fullhost-porten. |
 | **GC-korrupsjon under materialize** | `[!]` NØKKELBLOKKAR | Full materialize-kompilering korrupterer strengkonstantar tidsavhengig: socket.no:38 all-siffer-strengar → bar tal i CI-kandidaten (isolert korrekt), run-ncb-pure på full kandidat segfaultar (korrupt vm/serde-bytekode). Klassisk falsk-rot/alignment-reuse. MÅ løysast for trygg fullhost-seed |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
 | Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
