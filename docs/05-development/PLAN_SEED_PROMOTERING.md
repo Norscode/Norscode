@@ -59,11 +59,14 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 Ferdig når: `bootstrap/stage0/*` er bygd av Norscode frå kjelde, og `archive/`-C, hex-blobar,
 Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 
+**Inventar 2026-09-07 (utforskingsagent, sjå minne `fase-c-inventar`):** CI er ALT fri for gcc/clang/python/pip/jq/node. 0 Python-filer. 13 C/H-filer (archive/legacy_c_backend + build/v3009) haldne i live berre av innhaldsassertar i `tools/release_preflight.no` + `verify_norscode_surface_ownership.no`. 212 JSON-filer (11,6 MB), 92 `.ncb.json` (9,3 MB). Frosen maskinkode i `native_codegen_v2.no`: 10 913 B (`rt_hex_del0–6` + 2 inline-halar) + 1 999 B `rt_hex_process_spawn` = 12,6 KiB; 70 `RT_*`-adressekonstantar: 9 trampolinerte, 20 daude, **39 framleis levande** (~9 KiB C-æra-kode).
+
 1. `[ ]` Promoter fersk seed til `bootstrap/stage0/norscode-linux-x86_64` (etter Fase B).
 2. `[ ]` Regenerer `bin/nc`/`dist` frå promotert seed på alle plattformer.
-3. `[ ]` Slett C-arkivet, frosne hex-runtime-blobar (RT_*), C-æra-seedar.
-4. `[ ]` NCB JSON → binær (`ncb_serde` dual-format er alt på plass; skru om skrivaren).
-5. `[ ]` Slett Python-hjelparar og legacy-shell.
+3. `[ ]` **Emitter dei 39 levande frosne rutinene som Norscode-atomics** (mønster: 90 atomics + `patch_abs_jump` finst alt). Tyngdepunkt: `RT_JSON_PARSE` (~1,1 KB), `RT_SPLIT`/`RT_REPLACE`/`RT_STR_TO_INT`, `RT_LIST_*`, `RT_MAP_KEYS`/`RT_MAP_VALS` (mest presserande: legacy-lesarar på ny map-layout), `RT_INDEX_GET/SET`, `RT_BUILD_{LIST,MAP}_REV`, `RT_FIL_LES`/`RT_FIL_SKRIV*`, `RT_MILJO_HENT`, 12 aritmetikk/samanlikning, `RT_CONCAT`/`RT_INT_TO_STR`, `RT_INIT_HEAP`, `process_spawn`-blobben (eige atomic). **Blobben må vekk i EITT jafs** (alle RT_* er absolutte VA-ar) → så slett `rt_hex_del*`, `hex_to_bytes`, dei ~25 `replace`-patchane og `patch_*`-funksjonane.
+4. `[ ]` NCB JSON → binær (`.ncbin`) overalt: (a) ncb_bin bulk-kodar (agent, pågår); (b) skru på skrivaren (`NORSCODE_NCB_BINARY=1`); (c) konverter/regenerer 92 `.ncb.json`; (d) `elf_compile_driver.no` les 8 `precompiled_fragments_inner/*.functions.json` hardkoda — den EINASTE harde JSON-avhengnaden i bootstrap; fersk seed treng dei ikkje. `nc_main` sine `stdlib`/`precompiled`-oppslag er mjuke (fallback til kjelde; risiko = AOT-heap, som GC-modus løyser).
+5. `[ ]` Slett C-arkivet + `build/v3009/*.c` (fjern ~20 assert-linjer i preflight/ownership), `archive/legacy_shell/` (119 .sh), `Dockerfile` (broten python:3.12-image) + `Dockerfile.linux-build`.
+6. `[ ]` **Triviell sletting NO (ingen kode les dei, ~2 MB):** 47 `*.tokens.json`, 8 `bootstrap/precompiled_fragments/` (outer-kopi; berre skriven av regenerate-verktøyet), 7 rot-nivå testutdata-JSON, 14 `tools/fixtures/ncb_arm64/`, `build/v9400/`.
 
 ---
 
