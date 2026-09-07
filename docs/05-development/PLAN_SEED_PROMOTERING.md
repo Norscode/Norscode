@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-07 (kveld, 22:10)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt)**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -45,6 +45,7 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | `test_template` (verts-VM via host_kall) | `[x]` flytta | «Ukjent variabel: f» — feilar òg på committa VM → språkparitet (f-strengar). Flytta til `language_parity_tests.txt` |
 | `test_security` | `[ ]` | PBKDF2-fiksen (rett digest: `_raa_bytes` + HMAC-midtstand) er REVERTERT frå greina (19efa03) fordi ho braut precompiled-stdlib byte-identitet. Reapply i Fase B SAMAN med at stdlib-JSON-cachen (bootstrap/stdlib/*.ncb.json) blir sletta i Fase C. PBKDF2-heng (bump→1 GiB) står att. |
 | **Materialize-korrupsjon** | `[x]` ROT-ÅRSAK: json_stringify (IKKJE GC) | KORRIGERT 2026-09-07: bundle-steget i `materialize_*.no` serialiserte med `builtin.json_stringify` → på committed **Linux**-stage0 er det legacy-serializeren som skriv numerisk-utsjåande STRENG-konstantar som bare tokens ("00"→00 → ugyldig JSON → run-ncb-pure SIGSEGV). Deterministisk, ikkje GC/race. Symptomet (socket.no bare tal) reproduserte i lokal kandidat. Fiks: `json_skriv` i begge serialiserings-stadene (metadata + per-funksjon). GC v6 (marker-ved-push) står som eigen robustheitsfiks (gating-probar grøne), men var ikkje blokkaren. **VERIFISERT (Docker linux/amd64):** materialize m/fiks rc=0, bare_token_count=0 (rein kandidat 2,17 MB), fullhost-seed byggjer (3,66 MB), `run-ncb-pure tiny42=42` (var 139), version OK. Seed-porten (108 testar) på fullhost-seed køyrer. |
+| **Seed-port finn fersk-seed-diskrepansar** | `[~]` PÅGÅR | Materialize-blokkaren er borte, men seed-porten (fullhost-seed) avdekkjer per-test fersk-seed-feil: `test_auth_mfa_enrollment_recovery` = «assert feilet» på fersk seed men **OK på committed seed** (direkte VM) → ekte codegen/runtime-diskrepans, ikkje testfeil. Må fiksast før promotering. Full lokal port er upraktisk: kvar fersk-seed-compile ~6,5 GiB + 6–15 min (naiv codegen) → 2-vegs parallell = 11+ t; høyrer heime i CI B2-jobben eller målretta debugging per diskrepans. |
 | `test_stil` («Ukjent innebygd funksjon: builtin.t.inneholder») | `[~]` fiksa, verifisering pågår | ROT: `selfhost/nc_main.no` sin råskann av `bruk`-linjer tok med etterfølgjande `// kommentar` i aliaset («t   // …») → `t.inneholder` fall til builtin. Fiks: strip `//`/`#` før modul/alias (ikkje fragmentmodul). Committed seed har same feil innebygd (testen er skippa der) → verifiserast på fersk seed (aliasfix-container) |
 | Binær NCB-kodar bulk (førebuing Fase C.4) | `[~]` agent | `selfhost/ncb_bin.no` per-teikn-kodar toppa 8,1 GB RSS → OOM; bakgrunnsagent gjer han bulk med byte-identisk wire-format + A/B-måling på committed seed |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
