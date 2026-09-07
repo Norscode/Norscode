@@ -69,6 +69,14 @@ funksjon køyr_ok(root: tekst, executable: tekst, argv: liste_tekst,
 
 funksjon run_nc_med_miljø(root: tekst, argv: liste_tekst, miljø: ordbok_tekst,
                            timeout_ms: heiltall) -> boolsk {
+    // Miljø-drive kommando (sjå nc_verktøy_for): set NORSCODE_CMD/FILE om ikkje sett.
+    hvis lengde(argv) > 0 og ikkje finnes_nøkkel(miljø, "NORSCODE_CMD") {
+        la verktøy = nc_verktøy_for(tekst(argv[0]))
+        hvis verktøy != "" {
+            miljø["NORSCODE_CMD"] = "run"
+            miljø["NORSCODE_FILE"] = root + "/" + verktøy
+        }
+    }
     // Compiler-bundlebygg passerer førebels 4 GiB-profilen. Null let OS-et
     // handheve minne medan timeout, fd-tak og outputgrense framleis er eksplisitte.
     la resultat = prosess.køyr_med_grenser(root + "/bin/nc", argv, root,
@@ -81,8 +89,42 @@ funksjon run_nc_med_miljø(root: tekst, argv: liste_tekst, miljø: ordbok_tekst,
     returner usann
 }
 
+// Barn av bin/nc må drivast via miljø-kontrakten (NORSCODE_CMD/NORSCODE_FILE):
+// committed Linux-stage0 manglar argv-builtinane (argv → [] → selftest, exit 0
+// utan å gjere noko), og miljøet vinn over argv i nc_main.start på alle seedar.
+funksjon nc_verktøy_for(cmd: tekst) -> tekst {
+    hvis cmd == "verify-seed" eller cmd == "seed-only" { returner "tools/verify_seed_only.no" }
+    hvis cmd == "fetch-stage0-seed" { returner "tools/fetch_stage0_seed.no" }
+    hvis cmd == "selfcompile-stage0-elf" { returner "tools/selfcompile_stage0_elf.no" }
+    hvis cmd == "build-omgang6b-ncb" { returner "tools/build_omgang6b_compiler_ncb.no" }
+    returner ""
+}
+
 funksjon run_nc(root: tekst, argv: liste_tekst, timeout_ms: heiltall) -> boolsk {
     returner run_nc_med_miljø(root, argv, nc_miljø(root), timeout_ms)
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner root + "/" + sti
+}
+
+// bygg-native (--target linux-x86_64) = compile → NCB, ncb_to_elf → ELF, executable-
+// modus — miljø-drive (jf. archive/legacy_shell/tools/gc_probe_run.sh).
+funksjon bygg_native(root: tekst, src: tekst, out: tekst) -> boolsk {
+    la abs_src = absolutt(root, src)
+    la abs_out = absolutt(root, out)
+    la ncb = abs_out + ".ncb.json"
+    la m1 = nc_miljø(root)
+    m1["NORSCODE_CMD"] = "compile"
+    m1["NORSCODE_FILE"] = abs_src
+    m1["NORSCODE_OUTPUT"] = ncb
+    hvis ikkje køyr_ok(root, root + "/bin/nc", ["compile", abs_src, ncb], m1, 600000) { returner usann }
+    hvis ikkje run_ncb_to_elf(root, ncb, abs_out) { returner usann }
+    filops.slett_fil(ncb)
+    hvis ikkje fil_finst(abs_out) { linje("[FEIL] ncb_to_elf skreiv ikkje " + abs_out) returner usann }
+    hvis ikkje sett_executable(abs_out) { returner usann }
+    returner sann
 }
 
 funksjon run_ncb_to_elf(root: tekst, input: tekst, output: tekst) -> boolsk {
@@ -145,8 +187,12 @@ funksjon pad3(n: heiltall) -> tekst {
 }
 
 funksjon lag_ncb_chunks(src: tekst, out_dir: tekst, chunk: tekst) -> tekst {
-    hvis filops.katalog_finnes(out_dir) og ikkje filops.slett_tre(out_dir) { returner "" }
-    hvis ikkje filops.lag_katalogar(out_dir) { returner "" }
+    // Committed Linux-stage0 kan ikkje slette tre (filops.slett_tre → usann); delane
+    // blir uansett overskrivne og drivaren les berre COUNT delar → logg og gå vidare.
+    hvis filops.katalog_finnes(out_dir) og ikkje filops.slett_tre(out_dir) {
+        linje("  [MERK] klarte ikkje slette " + out_dir + " — overskriv delane")
+    }
+    hvis ikkje filops.lag_katalogar(out_dir) { linje("[FEIL] Kan ikkje lage " + out_dir) returner "" }
     la data = les_fil_trygt(src)
     hvis data == "" { linje("[FEIL] Kan ikkje lese NCB for chunking: " + src) returner "" }
     la storleik = heiltal_frå_tekst_trygt(chunk, 65536)
@@ -190,16 +236,42 @@ funksjon run_log(root: tekst, executable: tekst, argv: liste_tekst,
     returner usann
 }
 
+// Executable-modus: runtime-filsystem-ABI-en fyrst (nyare seedar), elles
+// builtin.fil_sett_kjorbar (committed Linux-stage0 manglar modus-ABI-en → «[verdi]»).
+funksjon gjer_kjørbar(sti: tekst) -> boolsk {
+    prøv {
+        la r = native_fs.native_sett_modus_sti(sti, 493)
+        hvis tekst(r["status"]) == "ok" { returner sann }
+    } fang (e) { }
+    prøv { returner builtin.fil_sett_kjorbar(sti) } fang (e) { returner usann }
+    returner usann
+}
+
 funksjon sett_executable(sti: tekst) -> boolsk {
-    returner tekst(native_fs.native_sett_modus_sti(sti, 493)["status"]) == "ok"
+    hvis gjer_kjørbar(sti) { returner sann }
+    linje("[FEIL] klarte ikkje setje executable-modus på " + sti)
+    returner usann
 }
 
 funksjon main() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
-    la info = builtin.system_info()
-    la os = tekst(info["system"])
-    la arch = tekst(info["machine"])
+    hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
+    // Committed Linux-stage0 manglar builtin.system_info («Ukjent funksjon») →
+    // GitHub Actions sine RUNNER_OS/RUNNER_ARCH (evt. NORSCODE_CI_SYSTEM/ARCH) fyrst.
+    la os = env("RUNNER_OS")
+    hvis os == "" { os = env("NORSCODE_CI_SYSTEM") }
+    hvis os == "macOS" { os = "Darwin" }
+    la arch = builtin.lower(env("RUNNER_ARCH"))
+    hvis arch == "" { arch = builtin.lower(env("NORSCODE_CI_ARCH")) }
+    hvis arch == "x64" { arch = "x86_64" }
+    hvis arch == "aarch64" { arch = "arm64" }
+    hvis os == "" eller arch == "" {
+        prøv {
+            la info = builtin.system_info()
+            hvis os == "" { os = tekst(info["system"]) }
+            hvis arch == "" { arch = tekst(info["machine"]) }
+        } fang (e) { }
+    }
     la chunk = chunk_size()
     la build = root + "/build/6b"
     la chunk_dir = build + "/chunk_copy"
@@ -215,8 +287,8 @@ funksjon main() -> heiltall {
     hvis ikkje filops.lag_katalogar(build) { returner 1 }
 
     linje("1a. Host-ELF frå omgang6b_host.no...")
-    hvis ikkje run_nc(root, ["bygg-native", "--target", "linux-x86_64", "tests/fixtures/omgang6b_host.no", "build/6b/host_v1.elf"], 600000) { returner 1 }
-    hvis ikkje run_nc(root, ["bygg-native", "--target", "linux-x86_64", "tests/fixtures/omgang6b_host.no", "build/6b/host_v2.elf"], 600000) { returner 1 }
+    hvis ikkje bygg_native(root, "tests/fixtures/omgang6b_host.no", "build/6b/host_v1.elf") { returner 1 }
+    hvis ikkje bygg_native(root, "tests/fixtures/omgang6b_host.no", "build/6b/host_v2.elf") { returner 1 }
     hvis ikkje sett_executable(build + "/host_v1.elf") eller ikkje sett_executable(build + "/host_v2.elf") { returner 1 }
     hvis ikkje filer_identiske(build + "/host_v1.elf", build + "/host_v2.elf") {
         linje("  [FEIL] host ELF ikkje deterministisk")

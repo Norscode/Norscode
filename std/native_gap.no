@@ -1,0 +1,1172 @@
+// std/native_gap.no — reine Norscode-erstatningar for VM-builtins som manglar
+// native rutine i native_codegen_v2 (x86-64). Codegen sin gap-ruting
+// (gap_rute_v2) sender `builtin.X` hit når modulen er med i bunten; nc_main.no
+// importerer han difor eksplisitt slik at den ferske seeden alltid har dei.
+//
+// 2026-09-06 statisk revisjon av fullhost-bunten: bytes_new (~15 seed-testar)
+// og sett_inn (vm.kall_innebygd liste.sett_inn_*) gjekk til null-fallback.
+// I native runtime er «bytes» ei liste_heiltall (fil_les_binær gjev liste), så
+// bytes_new gjev liste av `storleik` byte-verdiar.
+
+// builtin.json_parse (IKKJE _raw): legacy «tekst-typa» kontrakt frå C-æra-runtimen
+// (referanse: committed Linux-VM 2026-09-06): objekt → ordbok, array → tett ordbok
+// {"0":..,"1":..}, tal → tekst ("1e3" → "1000", "12.3" → "12.3"), true/false →
+// "true"/"false", null → "null", og UGYLDIG JSON (òg etterfølgjande søppel:
+// "true true", "123abc", "[0]x", "-1.") → "null". std.json.parse/hent_* er bygde
+// på denne. Native RT_JSON_PARSE er typa og lempeleg (= json_parse_raw), so codegen
+// rutar builtin.json_parse hit når modulen er i bunten (gap-fyrst i
+// emit_builtin_or_user_call). Sjølvstendig strikt parser (selfhost.json sin
+// json_tal kallar builtin.desimaltall, som SIGSEGV-ar i frosen runtime).
+funksjon json_parse(t: tekst) {
+    hvis builtin.type(t) != "tekst" { returner "null" }
+    la st = {"s": t, "p": 0, "feil": usann}
+    la v = _jp_verdi(st)
+    _jp_ws(st)
+    hvis st["feil"] eller st["p"] != lengde(t) { returner "null" }
+    returner v
+}
+
+funksjon _jp_peek(st) -> tekst {
+    la p: heiltall = st["p"]
+    la s: tekst = st["s"]
+    hvis p >= lengde(s) { returner "" }
+    returner builtin.slice(s, p, p + 1)
+}
+
+funksjon _jp_ws(st) -> heiltall {
+    la c = _jp_peek(st)
+    mens c == " " eller c == "\n" eller c == "\t" eller c == "\r" {
+        st["p"] = st["p"] + 1
+        c = _jp_peek(st)
+    }
+    returner 0
+}
+
+funksjon _jp_feil(st) {
+    st["feil"] = sann
+    returner "null"
+}
+
+funksjon _jp_grense(c: tekst) -> boolsk {
+    returner c == "" eller c == " " eller c == "\t" eller c == "\n" eller c == "\r" eller c == "," eller c == "}" eller c == "]" eller c == ":"
+}
+
+// Nøkkelord berre når neste teikn er ei token-grense (C-æra: nc_json_consume_keyword).
+funksjon _jp_nokkelord(st, kw: tekst) -> boolsk {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"]
+    la n: heiltall = lengde(kw)
+    hvis builtin.slice(s, p, p + n) != kw { returner usann }
+    hvis ikkje _jp_grense(builtin.slice(s, p + n, p + n + 1)) { returner usann }
+    st["p"] = p + n
+    returner sann
+}
+
+// Ukjent token: konsumer fram til grense og gje «null» for DENNE verdien
+// (C-æra nc_json_parse_unknown → nil; «[123abc]» → {"0":"null"}, «123abc» → "null").
+funksjon _jp_ukjend(st) -> heiltall {
+    mens ikkje _jp_grense(_jp_peek(st)) { st["p"] = st["p"] + 1 }
+    returner 0
+}
+
+funksjon _jp_verdi(st) {
+    _jp_ws(st)
+    la c = _jp_peek(st)
+    hvis c == "{" { returner _jp_objekt(st) }
+    hvis c == "[" { returner _jp_liste(st) }
+    hvis c == "\"" { returner _jp_streng(st) }
+    hvis c == "" { returner "null" }
+    hvis _jp_nokkelord(st, "true") { returner "true" }
+    hvis _jp_nokkelord(st, "false") { returner "false" }
+    hvis _jp_nokkelord(st, "null") { returner "null" }
+    la tal = _jp_tal(st)
+    hvis tal != "" { returner tal }
+    _jp_ukjend(st)
+    returner "null"
+}
+
+funksjon _jp_objekt(st) {
+    st["p"] = st["p"] + 1
+    la ut = {}
+    _jp_ws(st)
+    hvis _jp_peek(st) == "}" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        _jp_ws(st)
+        hvis _jp_peek(st) != "\"" { returner _jp_feil(st) }
+        la k = _jp_streng(st)
+        hvis st["feil"] { returner "null" }
+        _jp_ws(st)
+        hvis _jp_peek(st) != ":" { returner _jp_feil(st) }
+        st["p"] = st["p"] + 1
+        _jp_ws(st)
+        la p0: heiltall = st["p"]
+        la v = _jp_verdi(st)
+        hvis st["feil"] { returner "null" }
+        // Legacy: nøsta objekt/array vert lagra som RÅ JSON-TEKST (std.json.hent_array_*
+        // parsar teksten vidare); berre skalarar vert tekst-typa direkte.
+        hvis builtin.type(v) == "ordbok" { v = _jp_kompakt(builtin.slice(st["s"], p0, st["p"])) }
+        ut[k] = v
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," {
+            st["p"] = st["p"] + 1
+            _jp_ws(st)
+            la c2 = _jp_peek(st)
+            hvis c2 == "}" eller c2 == "," eller c2 == "" { returner _jp_feil(st) }
+            fortsett
+        }
+        hvis c == "}" { st["p"] = st["p"] + 1 returner ut }
+        returner _jp_feil(st)
+    }
+    returner ut
+}
+
+funksjon _jp_liste(st) {
+    st["p"] = st["p"] + 1
+    la ut = {}
+    la n: heiltall = 0
+    _jp_ws(st)
+    hvis _jp_peek(st) == "]" { st["p"] = st["p"] + 1 returner ut }
+    mens sann {
+        _jp_ws(st)
+        hvis _jp_peek(st) == "," { returner _jp_feil(st) }   // «[,1]» → nil (C-æra)
+        la p0: heiltall = st["p"]
+        la v = _jp_verdi(st)
+        hvis st["feil"] { returner "null" }
+        hvis builtin.type(v) == "ordbok" { v = _jp_kompakt(builtin.slice(st["s"], p0, st["p"])) }
+        ut[tekst_fra_heltall(n)] = v
+        n = n + 1
+        _jp_ws(st)
+        la c = _jp_peek(st)
+        hvis c == "," {
+            st["p"] = st["p"] + 1
+            _jp_ws(st)
+            la c2 = _jp_peek(st)
+            // C-æra: «[1,]», «[1,,2]», «[,]» → heile verdien nil
+            hvis c2 == "]" eller c2 == "," eller c2 == "" { returner _jp_feil(st) }
+            fortsett
+        }
+        hvis c == "]" { st["p"] = st["p"] + 1 returner ut }
+        returner _jp_feil(st)
+    }
+    returner ut
+}
+
+// Kompakt JSON-tekst (referanse-VM-en serialiserer nøsta verdiar utan blank:
+// ["alpha","beta"], {"s":"ok"}): fjern blankteikn utanfor strengar.
+funksjon _jp_kompakt(r: tekst) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    la n: heiltall = lengde(r)
+    la i_streng = usann
+    mens i < n {
+        la c = builtin.slice(r, i, i + 1)
+        hvis i_streng {
+            ut = ut + c
+            hvis c == "\\" og i + 1 < n { ut = ut + builtin.slice(r, i + 1, i + 2) i = i + 1 }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers {
+            hvis c == "\"" { i_streng = sann ut = ut + c }
+            ellers hvis c != " " og c != "\n" og c != "\t" og c != "\r" { ut = ut + c }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _jp_hex(c: tekst) -> heiltall {
+    hvis c >= "0" og c <= "9" { returner builtin.char_code(c) - 48 }
+    hvis c >= "a" og c <= "f" { returner builtin.char_code(c) - 87 }
+    hvis c >= "A" og c <= "F" { returner builtin.char_code(c) - 55 }
+    returner -1
+}
+
+funksjon _jp_streng(st) -> tekst {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"] + 1
+    la n: heiltall = lengde(s)
+    la ut = ""
+    mens p < n {
+        la c = builtin.slice(s, p, p + 1)
+        hvis c == "\"" { st["p"] = p + 1 returner ut }
+        hvis c == "\\" {
+            hvis p + 1 >= n { st["feil"] = sann returner "" }
+            la e = builtin.slice(s, p + 1, p + 2)
+            p = p + 2
+            hvis e == "n" { ut = ut + "\n" }
+            ellers hvis e == "t" { ut = ut + "\t" }
+            ellers hvis e == "r" { ut = ut + "\r" }
+            ellers hvis e == "b" { ut = ut + builtin.chr(8) }
+            ellers hvis e == "f" { ut = ut + builtin.chr(12) }
+            ellers hvis e == "u" {
+                hvis p + 4 > n { st["feil"] = sann returner "" }
+                la kode: heiltall = 0
+                la i: heiltall = 0
+                mens i < 4 {
+                    la h = _jp_hex(builtin.slice(s, p + i, p + i + 1))
+                    hvis h < 0 { st["feil"] = sann returner "" }
+                    kode = kode * 16 + h
+                    i = i + 1
+                }
+                p = p + 4
+                ut = ut + builtin.chr(kode)
+            }
+            ellers { ut = ut + e }
+            fortsett
+        }
+        ut = ut + c
+        p = p + 1
+    }
+    st["feil"] = sann
+    returner ""
+}
+
+// Tal → normalisert desimaltekst: heiltal som dei er; med brøk/eksponent vert
+// verdien rekna om til rein desimalform (1e3 → "1000", 12.30 → "12.3", -1e2 → "-100").
+funksjon _jp_tal(st) -> tekst {
+    la s: tekst = st["s"]
+    la p: heiltall = st["p"]
+    la n: heiltall = lengde(s)
+    la neg = usann
+    hvis builtin.slice(s, p, p + 1) == "-" { neg = sann p = p + 1 }
+    la heil = ""
+    mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+        heil = heil + builtin.slice(s, p, p + 1)
+        p = p + 1
+    }
+    hvis heil == "" { returner "" }
+    // JSON: leiande null berre som «0» (C-æra: «007» → ukjent token)
+    hvis lengde(heil) > 1 og builtin.slice(heil, 0, 1) == "0" { returner "" }
+    la brok = ""
+    la har_brok = usann
+    hvis p < n og builtin.slice(s, p, p + 1) == "." {
+        har_brok = sann
+        p = p + 1
+        mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+            brok = brok + builtin.slice(s, p, p + 1)
+            p = p + 1
+        }
+        hvis brok == "" { returner "" }
+    }
+    la eksp: heiltall = 0
+    la har_eksp = usann
+    hvis p < n og (builtin.slice(s, p, p + 1) == "e" eller builtin.slice(s, p, p + 1) == "E") {
+        har_eksp = sann
+        p = p + 1
+        la eneg = usann
+        hvis p < n og builtin.slice(s, p, p + 1) == "+" { p = p + 1 }
+        ellers hvis p < n og builtin.slice(s, p, p + 1) == "-" { eneg = sann p = p + 1 }
+        la ed = ""
+        mens p < n og builtin.slice(s, p, p + 1) >= "0" og builtin.slice(s, p, p + 1) <= "9" {
+            ed = ed + builtin.slice(s, p, p + 1)
+            p = p + 1
+        }
+        hvis ed == "" eller lengde(ed) > 4 { returner "" }
+        eksp = heltall_fra_tekst(ed)
+        hvis eneg { eksp = 0 - eksp }
+    }
+    // talet må ende på ei token-grense («123abc» er ukjent token)
+    hvis ikkje _jp_grense(builtin.slice(s, p, p + 1)) { returner "" }
+    st["p"] = p
+    la fortegn = ""
+    hvis neg { fortegn = "-" }
+    hvis ikkje har_brok og ikkje har_eksp {
+        hvis heil == "0" { returner "0" }   // «-0» → "0" (referanse-VM)
+        returner fortegn + heil
+    }
+    // siffer = heil+brok, skala = lengde(brok) - eksp
+    la siffer = heil + brok
+    la skala: heiltall = lengde(brok) - eksp
+    la ut = ""
+    hvis skala <= 0 {
+        ut = siffer
+        la z: heiltall = 0 - skala
+        mens z > 0 { ut = ut + "0" z = z - 1 }
+    } ellers hvis skala >= lengde(siffer) {
+        ut = "0."
+        la z2: heiltall = skala - lengde(siffer)
+        mens z2 > 0 { ut = ut + "0" z2 = z2 - 1 }
+        ut = ut + siffer
+    } ellers {
+        ut = builtin.slice(siffer, 0, lengde(siffer) - skala) + "." + builtin.slice(siffer, lengde(siffer) - skala, lengde(siffer))
+    }
+    // strip leiande nullar i heildelen (behald éin) og etterfølgjande nullar i brøken
+    mens lengde(ut) > 1 og builtin.slice(ut, 0, 1) == "0" og builtin.slice(ut, 1, 2) != "." { ut = builtin.slice(ut, 1, lengde(ut)) }
+    hvis builtin.index_of(ut, ".") >= 0 {
+        mens builtin.ends_with(ut, "0") { ut = builtin.slice(ut, 0, lengde(ut) - 1) }
+        hvis builtin.ends_with(ut, ".") { ut = builtin.slice(ut, 0, lengde(ut) - 1) }
+    }
+    hvis ut == "0" { returner "0" }
+    returner fortegn + ut
+}
+
+funksjon bytes_new(storleik: heiltall, fyll: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < storleik {
+        legg_til(ut, fyll & 255)
+        i = i + 1
+    }
+    returner ut
+}
+
+// sett_inn(liste, indeks, verdi): set inn PÅ PLASS (som VM-builtinen) og
+// returnerer lista. Indeks utanfor [0, lengde] vert klamra.
+funksjon sett_inn(l: liste, indeks: heiltall, verdi) -> liste {
+    la n: heiltall = lengde(l)
+    la pos: heiltall = indeks
+    hvis pos < 0 { pos = 0 }
+    hvis pos > n { pos = n }
+    legg_til(l, verdi)
+    la j: heiltall = n
+    mens j > pos {
+        l[j] = l[j - 1]
+        j = j - 1
+    }
+    l[pos] = verdi
+    returner l
+}
+
+// builtin.system_operation (C-æra «norscode-system-v1»): rein Norscode for dei
+// operasjonane som ikkje treng nye syscall-primitiv. resolve_executable = PATH-oppslag
+// (std.prosess._finn_kjorbar og nc_main.nc_finn_køyrbar går hit; utan svar vart
+// alle plain-namn «kommando ikkje funnen» (127) på fersk seed).
+funksjon system_operation(req) {
+    hvis builtin.type(req) != "ordbok" {
+        returner {"abi": "norscode-system-v1", "status": "feil", "error": "ugyldig request"}
+    }
+    la op = tekst(req["operation"])
+    hvis op == "resolve_executable" {
+        la namn = tekst(req["name"])
+        hvis namn == "" { returner _sys_feil("tomt namn") }
+        hvis builtin.index_of(namn, "/") >= 0 {
+            hvis builtin.fil_finnes(namn) { returner _sys_ok_sti(namn) }
+            returner _sys_feil("ikkje funnen: " + namn)
+        }
+        la sti_env = ""
+        prøv { sti_env = miljo_hent("PATH") } fang (e) { sti_env = "" }
+        hvis sti_env == "" { sti_env = "/usr/local/bin:/usr/bin:/bin" }
+        la katalogar = builtin.split(sti_env, ":")
+        la i: heiltall = 0
+        mens i < lengde(katalogar) {
+            la k = katalogar[i]
+            hvis k != "" {
+                la kandidat = k + "/" + namn
+                hvis builtin.fil_finnes(kandidat) { returner _sys_ok_sti(kandidat) }
+            }
+            i = i + 1
+        }
+        returner _sys_feil("ikkje funnen i PATH: " + namn)
+    }
+    hvis op == "status" {
+        returner {"abi": "norscode-system-v1", "status": "ok", "backend": "native-gap-pure"}
+    }
+    returner _sys_feil("ukjent operasjon: " + op)
+}
+
+funksjon _sys_ok_sti(sti: tekst) {
+    returner {"abi": "norscode-system-v1", "status": "ok", "path": sti, "error": ""}
+}
+
+funksjon _sys_feil(melding: tekst) {
+    returner {"abi": "norscode-system-v1", "status": "feil", "path": "", "error": melding}
+}
+
+// ── builtin.process_operation («norscode-native-process-v1») i REIN Norscode over
+// builtin.sys6 (Linux x86-64: pipe2/fork/dup2/execve/waitpid/kill/read/fcntl/nanosleep).
+// Ingen frosen C-rutine. Handle-tabellen er ein modul-global (init ved seed-start).
+// Operasjonar: spawn_argv (→ status "kjorer" + handle), poll, read (tømer buffera),
+// wait (wait_ms), signal (signal), close (drep om nødvendig, frigjer). Statusar:
+// kjorer / ferdig (exit_code) / signal (128+sig) / timeout (124, drep med SIGKILL når
+// request-timeout_ms er passert) / feil. (2026-09-06)
+la _pg_prosessar = {}
+
+funksjon _pg_res(status: tekst, pid: heiltall, handle: tekst, exit_code: heiltall,
+                 ut: tekst, feil: tekst, error: tekst, wall_ms: heiltall) {
+    returner {
+        "abi": "norscode-native-process-v1", "status": status, "pid": tekst_fra_heltall(pid),
+        "handle": handle, "exit_code": tekst_fra_heltall(exit_code), "stdout": ut,
+        "stderr": feil, "error": error, "wall_ms": tekst_fra_heltall(wall_ms),
+        "peak_rss_bytes": "0"
+    }
+}
+
+funksjon _pg_feil(melding: tekst) {
+    returner _pg_res("feil", -1, "", -1, "", "", melding, 0)
+}
+
+funksjon _pg_cstr(adr: heiltall, s: tekst) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(s) {
+        builtin.raw_store8(adr + i, builtin.char_code(builtin.slice(s, i, i + 1)))
+        i = i + 1
+    }
+    builtin.raw_store8(adr + lengde(s), 0)
+    returner adr + lengde(s) + 1
+}
+
+// Set O_NONBLOCK (fcntl F_SETFL=4, O_NONBLOCK=2048) på fd.
+funksjon _pg_nonblock(fd: heiltall) -> heiltall {
+    la flagg = builtin.sys6(72, fd, 3, 0, 0, 0, 0)          // F_GETFL
+    hvis flagg < 0 { flagg = 0 }
+    returner builtin.sys6(72, fd, 4, flagg | 2048, 0, 0, 0)  // F_SETFL
+}
+
+// Les alt tilgjengeleg (ikkje-blokkerande) frå fd til tekst; stoppar ved maks.
+funksjon _pg_dren(p, felt: tekst, fdfelt: tekst) -> heiltall {
+    la fd: heiltall = p[fdfelt]
+    hvis fd < 0 { returner 0 }
+    la buf: heiltall = p["buf"]
+    la maks: heiltall = p["maks"]
+    mens sann {
+        la n = builtin.sys6(0, fd, buf, 4096, 0, 0, 0)
+        hvis n <= 0 {
+            hvis n == 0 {                                  // EOF → lukk
+                builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+                p[fdfelt] = -1
+            }
+            returner 0
+        }
+        la del = ""
+        la i: heiltall = 0
+        mens i < n {
+            del = del + builtin.chr(builtin.raw_load8(buf + i))
+            i = i + 1
+        }
+        hvis lengde(p[felt]) + lengde(del) > maks { del = builtin.slice(del, 0, maks - lengde(p[felt])) }
+        p[felt] = p[felt] + del
+    }
+    returner 0
+}
+
+funksjon _pg_sov_ms(p, ms: heiltall) -> heiltall {
+    la ts: heiltall = p["scratch"] + 65536 - 16
+    builtin.raw_store64(ts, ms / 1000)
+    builtin.raw_store64(ts + 8, (ms % 1000) * 1000000)
+    returner builtin.sys6(35, ts, 0, 0, 0, 0, 0)
+}
+
+// waitpid(pid, WNOHANG=1). Returnerer sann når prosessen er ferdig (og set status).
+funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
+    hvis p["status"] != "kjorer" { returner sann }
+    _pg_dren(p, "stdout", "fd_ut")
+    _pg_dren(p, "stderr", "fd_feil")
+    la st: heiltall = p["scratch"] + 65536 - 32
+    builtin.raw_store64(st, 0)
+    la flagg: heiltall = 1
+    hvis blokker { flagg = 0 }
+    la r = builtin.sys6(61, p["pid"], st, flagg, 0, 0, 0)
+    hvis r == p["pid"] {
+        la status = builtin.raw_load64(st) & 4294967295
+        la sig = status & 127
+        hvis p["drept_timeout"] {
+            p["status"] = "timeout"
+            p["exit_code"] = 124
+        } ellers hvis sig == 0 {
+            p["status"] = "ferdig"
+            p["exit_code"] = (status >> 8) & 255
+        } ellers {
+            p["status"] = "signal"
+            p["exit_code"] = 128 + sig
+        }
+        _pg_dren(p, "stdout", "fd_ut")
+        _pg_dren(p, "stderr", "fd_feil")
+        returner sann
+    }
+    // Request-timeout → SIGKILL, ventar blokkerande, status timeout
+    hvis p["timeout_ms"] > 0 og builtin.now_ms() - p["start_ms"] > p["timeout_ms"] og ikkje p["drept_timeout"] {
+        p["drept_timeout"] = sann
+        builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+        returner _pg_sjekk(p, sann)
+    }
+    returner usann
+}
+
+funksjon _pg_svar(p) {
+    returner _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], p["stdout"], p["stderr"], "",
+                     builtin.now_ms() - p["start_ms"])
+}
+
+funksjon _pg_spawn(req) {
+    la executable = tekst(req["executable"])
+    hvis executable == "" { returner _pg_feil("tom executable") }
+    la args = req["args"]
+    hvis builtin.type(args) != "liste" { args = [] }
+    la scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+    hvis scratch <= 0 { returner _pg_feil("mmap feila") }
+    // C-strengar: executable, args, cwd, miljø-overstyringar
+    la fri: heiltall = scratch
+    la exe_adr = fri
+    fri = _pg_cstr(fri, executable)
+    la argv_adr: heiltall = 0
+    la arg_adr: liste_heiltall = []
+    legg_til(arg_adr, exe_adr)
+    la ai: heiltall = 0
+    mens ai < lengde(args) {
+        legg_til(arg_adr, fri)
+        fri = _pg_cstr(fri, tekst(args[ai]))
+        ai = ai + 1
+    }
+    la cwd_adr: heiltall = 0
+    la cwd = ""
+    hvis finnes_nøkkel(req, "cwd") { cwd = tekst(req["cwd"]) }
+    hvis cwd != "" { cwd_adr = fri fri = _pg_cstr(fri, cwd) }
+    // envp: eigne overstyringar fyrst, så prosessen sitt envp ([HEAP+8] = 0x600008)
+    la miljø = {}
+    hvis finnes_nøkkel(req, "environment") og builtin.type(req["environment"]) == "ordbok" { miljø = req["environment"] }
+    la env_adr: liste_heiltall = []
+    la mk = nøkler(miljø)
+    la mi: heiltall = 0
+    mens mi < lengde(mk) {
+        legg_til(env_adr, fri)
+        fri = _pg_cstr(fri, tekst(mk[mi]) + "=" + tekst(miljø[mk[mi]]))
+        mi = mi + 1
+    }
+    la arv = sann
+    hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
+    la envp0 = builtin.raw_load64(6291464)
+    hvis arv og envp0 != 0 {
+        la ei: heiltall = 0
+        mens builtin.raw_load64(envp0 + ei * 8) != 0 og ei < 4096 {
+            legg_til(env_adr, builtin.raw_load64(envp0 + ei * 8))
+            ei = ei + 1
+        }
+    }
+    // peikartabellar (8-aligna)
+    fri = (fri + 15) & (0 - 16)
+    argv_adr = fri
+    la pi: heiltall = 0
+    mens pi < lengde(arg_adr) { builtin.raw_store64(fri, arg_adr[pi]) fri = fri + 8 pi = pi + 1 }
+    builtin.raw_store64(fri, 0)
+    fri = fri + 8
+    la envp_adr = fri
+    pi = 0
+    mens pi < lengde(env_adr) { builtin.raw_store64(fri, env_adr[pi]) fri = fri + 8 pi = pi + 1 }
+    builtin.raw_store64(fri, 0)
+    fri = fri + 8
+    hvis fri > scratch + 65536 - 4096 - 64 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("for stor request") }
+    // røyr: [0]=inn(les,skriv) [1]=ut [2]=feil — kvart pipe2 skriv to 32-bit fd-ar
+    la pipes: heiltall = scratch + 65536 - 64
+    la pi2: heiltall = 0
+    mens pi2 < 3 {
+        hvis builtin.sys6(293, pipes + pi2 * 8, 0, 0, 0, 0, 0) != 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("pipe2 feila") }
+        pi2 = pi2 + 1
+    }
+    la inn_r = builtin.raw_load64(pipes) & 4294967295
+    la inn_w = (builtin.raw_load64(pipes) >> 32) & 4294967295
+    la ut_r = builtin.raw_load64(pipes + 8) & 4294967295
+    la ut_w = (builtin.raw_load64(pipes + 8) >> 32) & 4294967295
+    la feil_r = builtin.raw_load64(pipes + 16) & 4294967295
+    la feil_w = (builtin.raw_load64(pipes + 16) >> 32) & 4294967295
+    la pid = builtin.sys6(57, 0, 0, 0, 0, 0, 0)          // fork
+    hvis pid == 0 {
+        // BARN: koplar røyr, chdir, execve; aldri tilbake til Norscode-koden.
+        builtin.sys6(33, inn_r, 0, 0, 0, 0, 0)
+        builtin.sys6(33, ut_w, 1, 0, 0, 0, 0)
+        builtin.sys6(33, feil_w, 2, 0, 0, 0, 0)
+        builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
+        builtin.sys6(3, ut_r, 0, 0, 0, 0, 0)
+        builtin.sys6(3, feil_r, 0, 0, 0, 0, 0)
+        hvis cwd_adr != 0 { builtin.sys6(80, cwd_adr, 0, 0, 0, 0, 0) }
+        builtin.sys6(59, exe_adr, argv_adr, envp_adr, 0, 0, 0)
+        builtin.sys6(60, 127, 0, 0, 0, 0, 0)
+        returner _pg_feil("execve feila")
+    }
+    hvis pid < 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("fork feila") }
+    builtin.sys6(3, inn_r, 0, 0, 0, 0, 0)
+    builtin.sys6(3, ut_w, 0, 0, 0, 0, 0)
+    builtin.sys6(3, feil_w, 0, 0, 0, 0, 0)
+    // stdin: skriv heile teksten (små mengder; røyrbuffer 64 KiB) og lukk
+    la stdin_t = ""
+    hvis finnes_nøkkel(req, "stdin") { stdin_t = tekst(req["stdin"]) }
+    hvis stdin_t != "" {
+        la sb: heiltall = scratch + 65536 - 4096 - 64
+        la skrive: heiltall = 0
+        mens skrive < lengde(stdin_t) {
+            la bit = lengde(stdin_t) - skrive
+            hvis bit > 4000 { bit = 4000 }
+            la k: heiltall = 0
+            mens k < bit { builtin.raw_store8(sb + k, builtin.char_code(builtin.slice(stdin_t, skrive + k, skrive + k + 1))) k = k + 1 }
+            la w = builtin.sys6(1, inn_w, sb, bit, 0, 0, 0)
+            hvis w <= 0 { skrive = lengde(stdin_t) } ellers { skrive = skrive + w }
+        }
+    }
+    builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
+    _pg_nonblock(ut_r)
+    _pg_nonblock(feil_r)
+    la timeout_ms: heiltall = 0
+    hvis finnes_nøkkel(req, "timeout_ms") { timeout_ms = heltall_fra_tekst(tekst(req["timeout_ms"])) }
+    la maks: heiltall = 1048576
+    hvis finnes_nøkkel(req, "max_output_bytes") { maks = heltall_fra_tekst(tekst(req["max_output_bytes"])) }
+    hvis maks <= 0 { maks = 1048576 }
+    la handle = "np-" + tekst_fra_heltall(pid) + "-" + tekst_fra_heltall(builtin.now_ms())
+    la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "stdout": "", "stderr": "",
+            "fd_ut": ut_r, "fd_feil": feil_r, "scratch": scratch, "buf": scratch + 65536 - 4096 - 64,
+            "maks": maks, "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann}
+    _pg_prosessar[handle] = p
+    returner _pg_svar(p)
+}
+
+funksjon process_operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _pg_feil("ugyldig request") }
+    la op = tekst(req["operation"])
+    hvis op == "spawn_argv" { returner _pg_spawn(req) }
+    la handle = tekst(req["handle"])
+    hvis ikkje finnes_nøkkel(_pg_prosessar, handle) { returner _pg_feil("ukjent handle: " + handle) }
+    la p = _pg_prosessar[handle]
+    hvis op == "poll" {
+        _pg_sjekk(p, usann)
+        returner _pg_svar(p)
+    }
+    hvis op == "read" {
+        _pg_dren(p, "stdout", "fd_ut")
+        _pg_dren(p, "stderr", "fd_feil")
+        la r = _pg_svar(p)
+        p["stdout"] = ""
+        p["stderr"] = ""
+        returner r
+    }
+    hvis op == "wait" {
+        la wait_ms: heiltall = 0
+        hvis finnes_nøkkel(req, "wait_ms") { wait_ms = heltall_fra_tekst(tekst(req["wait_ms"])) }
+        la frist = builtin.now_ms() + wait_ms
+        mens ikkje _pg_sjekk(p, usann) {
+            hvis builtin.now_ms() >= frist { returner _pg_svar(p) }
+            _pg_sov_ms(p, 10)
+        }
+        returner _pg_svar(p)
+    }
+    hvis op == "signal" {
+        la sig: heiltall = 15
+        hvis finnes_nøkkel(req, "signal") { sig = heltall_fra_tekst(tekst(req["signal"])) }
+        hvis p["status"] == "kjorer" { builtin.sys6(62, p["pid"], sig, 0, 0, 0, 0) }
+        returner _pg_svar(p)
+    }
+    hvis op == "close" {
+        hvis p["status"] == "kjorer" {
+            builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+            _pg_sjekk(p, sann)
+        }
+        hvis p["fd_ut"] >= 0 { builtin.sys6(3, p["fd_ut"], 0, 0, 0, 0, 0) p["fd_ut"] = -1 }
+        hvis p["fd_feil"] >= 0 { builtin.sys6(3, p["fd_feil"], 0, 0, 0, 0, 0) p["fd_feil"] = -1 }
+        la r = _pg_svar(p)
+        builtin.sys6(11, p["scratch"], 65536, 0, 0, 0, 0)
+        fjern_nokkel(_pg_prosessar, handle)
+        returner r
+    }
+    returner _pg_feil("ukjent operasjon: " + op)
+}
+
+// ── builtin.socket_* (AF_INET TCP/UDP) i REIN Norscode over builtin.sys6 ─────────
+// socket(41)/connect(42)/bind(49)/listen(50)/accept(43)/sendto(44, MSG_NOSIGNAL)/
+// read(0)/close(3)/setsockopt(54). Vert: "" | "0.0.0.0" | "localhost" | a.b.c.d
+// (DNS er ikkje med enno → kast). Feil = negativ retur → kast (std.socket fangar).
+la _sk_scratch = 0
+
+funksjon _sk_buf() -> heiltall {
+    hvis _sk_scratch == 0 {
+        _sk_scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+        hvis _sk_scratch <= 0 { _sk_scratch = 0 kast "socket: mmap feila" }
+    }
+    returner _sk_scratch
+}
+
+funksjon _sk_ip(vert: tekst) -> liste_heiltall {
+    hvis vert == "" eller vert == "0.0.0.0" eller vert == "*" { returner [0, 0, 0, 0] }
+    hvis vert == "localhost" { returner [127, 0, 0, 1] }
+    la delar = builtin.split(vert, ".")
+    hvis lengde(delar) != 4 { kast "socket: DNS-oppslag ikkje støtta enno: " + vert }
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 4 {
+        la d = delar[i]
+        hvis d == "" eller lengde(d) > 3 { kast "socket: ugyldig IPv4: " + vert }
+        la v = heltall_fra_tekst(d)
+        hvis v < 0 eller v > 255 { kast "socket: ugyldig IPv4: " + vert }
+        legg_til(ut, v)
+        i = i + 1
+    }
+    returner ut
+}
+
+// sockaddr_in (16 byte) på adr: sin_family=2 (LE), sin_port (BE), sin_addr, 8 null-byte.
+funksjon _sk_sockaddr(adr: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la ip = _sk_ip(vert)
+    builtin.raw_store8(adr, 2)
+    builtin.raw_store8(adr + 1, 0)
+    builtin.raw_store8(adr + 2, (port >> 8) & 255)
+    builtin.raw_store8(adr + 3, port & 255)
+    builtin.raw_store8(adr + 4, ip[0])
+    builtin.raw_store8(adr + 5, ip[1])
+    builtin.raw_store8(adr + 6, ip[2])
+    builtin.raw_store8(adr + 7, ip[3])
+    builtin.raw_store64(adr + 8, 0)
+    returner 16
+}
+
+funksjon socket_new(af: heiltall, type: heiltall) -> heiltall {
+    la fd = builtin.sys6(41, af, type, 0, 0, 0, 0)
+    hvis fd < 0 { kast "socket_new feila: " + tekst_fra_heltall(fd) }
+    returner fd
+}
+
+funksjon socket_connect(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la b = _sk_buf()
+    _sk_sockaddr(b, vert, port)
+    returner builtin.sys6(42, fd, b, 16, 0, 0, 0)
+}
+
+funksjon socket_bind(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 64, 1)
+    builtin.sys6(54, fd, 1, 2, b + 64, 4, 0)      // SO_REUSEADDR
+    _sk_sockaddr(b, vert, port)
+    returner builtin.sys6(49, fd, b, 16, 0, 0, 0)
+}
+
+funksjon socket_listen(fd: heiltall, etterslep: heiltall) -> heiltall {
+    returner builtin.sys6(50, fd, etterslep, 0, 0, 0, 0)
+}
+
+funksjon socket_accept(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 96, 16)
+    la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+    hvis ny < 0 { kast "socket_accept feila: " + tekst_fra_heltall(ny) }
+    returner ny
+}
+
+funksjon _sk_send_liste(fd: heiltall, data: liste_heiltall) -> heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la sendt: heiltall = 0
+    mens sendt < lengde(data) {
+        la bit = lengde(data) - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)   // MSG_NOSIGNAL
+        hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
+        hvis w == 0 { returner sendt }
+        sendt = sendt + w
+    }
+    returner sendt
+}
+
+funksjon socket_send(fd: heiltall, data: tekst) -> heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la sendt: heiltall = 0
+    mens sendt < lengde(data) {
+        la bit = lengde(data) - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
+        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
+        hvis w == 0 { returner sendt }
+        sendt = sendt + w
+    }
+    returner sendt
+}
+
+funksjon socket_send_bytes(fd: heiltall, data) -> heiltall {
+    hvis builtin.type(data) == "tekst" { returner socket_send(fd, data) }
+    returner _sk_send_liste(fd, data)
+}
+
+funksjon _sk_recv_liste(fd: heiltall, maks: heiltall) -> liste_heiltall {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n_maks = maks
+    hvis n_maks > 32768 { n_maks = 32768 }
+    hvis n_maks <= 0 { returner [] }
+    la n = builtin.sys6(0, fd, buf, n_maks, 0, 0, 0)
+    hvis n == -11 { returner [] }                      // EAGAIN (timeout)
+    hvis n < 0 { kast "socket_recv feila: " + tekst_fra_heltall(n) }
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < n { legg_til(ut, builtin.raw_load8(buf + i)) i = i + 1 }
+    returner ut
+}
+
+funksjon socket_recv(fd: heiltall, maks: heiltall) -> tekst {
+    la l = _sk_recv_liste(fd, maks)
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) { ut = ut + builtin.chr(l[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon socket_recv_bytes(fd: heiltall, maks: heiltall) -> liste_heiltall {
+    returner _sk_recv_liste(fd, maks)
+}
+
+funksjon socket_close(fd: heiltall) -> heiltall {
+    returner builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+}
+
+funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
+    la b = _sk_buf()
+    la tv: heiltall = b + 128
+    hvis ms < 0 { ms = 0 }
+    builtin.raw_store64(tv, ms / 1000)
+    builtin.raw_store64(tv + 8, (ms % 1000) * 1000)
+    la r1 = builtin.sys6(54, fd, 1, 20, tv, 16, 0)    // SO_RCVTIMEO
+    la r2 = builtin.sys6(54, fd, 1, 21, tv, 16, 0)    // SO_SNDTIMEO
+    hvis r1 < 0 { returner r1 }
+    returner r2
+}
+
+// ── builtin.network_operation («norscode-native-network-v1») i rein Norscode ────
+// Handle-ABI over sys6: listen/connect/accept/read/read_hex/write/write_hex/poll/
+// close/shutdown + udp_listen/udp_connect/recvfrom/sendto. Sokkelane er ikkje-
+// blokkerande (som C-æra): accept/read/recvfrom gjev «ventende» når ingenting er klart.
+// tls_* → «feil» (ingen TLS-backend enno). Handle: "socket:<n>:1".
+la _nw_slots = {}
+la _nw_neste = 0
+
+funksjon _nw_res(status: tekst, handle: tekst, data: tekst, verdi: heiltall, port: heiltall, error: tekst) {
+    returner {"abi": "norscode-native-network-v1", "status": status, "handle": handle, "data": data,
+              "value": verdi, "port": port, "error": error, "event_backend": "poll",
+              "tls_version": "", "cipher": "", "peer_verified": usann, "peer_cert_present": usann,
+              "peer_subject": "", "ocsp_stapled": usann, "ocsp_status": ""}
+}
+
+funksjon _nw_feil(handle: tekst, error: tekst) { returner _nw_res("feil", handle, "", -1, 0, error) }
+
+funksjon _nw_ny_slot(fd: heiltall, type: tekst) -> tekst {
+    _nw_neste = _nw_neste + 1
+    la h = "socket:" + tekst_fra_heltall(_nw_neste) + ":1"
+    _nw_slots[h] = {"fd": fd, "type": type}
+    returner h
+}
+
+funksjon _nw_heiltal(req, felt: tekst, standard: heiltall) -> heiltall {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    la v = req[felt]
+    hvis builtin.type(v) == "heltall" { returner v }
+    la t = tekst(v)
+    hvis t == "" { returner standard }
+    returner heltall_fra_tekst(t)
+}
+
+funksjon _nw_tekst(req, felt: tekst, standard: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    returner tekst(req[felt])
+}
+
+funksjon _nw_lokal_port(fd: heiltall) -> heiltall {
+    la b = _sk_buf()
+    builtin.raw_store64(b + 160, 16)
+    hvis builtin.sys6(51, fd, b + 176, b + 160, 0, 0, 0) != 0 { returner 0 }
+    returner (builtin.raw_load8(b + 178) << 8) | builtin.raw_load8(b + 179)
+}
+
+funksjon _nw_hex_kod(l: liste_heiltall) -> tekst {
+    la siffer = "0123456789abcdef"
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        la v = l[i] & 255
+        ut = ut + builtin.slice(siffer, v >> 4, (v >> 4) + 1) + builtin.slice(siffer, v & 15, (v & 15) + 1)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _nw_hex_dekod(h: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i + 1 < lengde(h) {
+        la a = _jp_hex(builtin.slice(h, i, i + 1))
+        la b = _jp_hex(builtin.slice(h, i + 1, i + 2))
+        hvis a < 0 eller b < 0 { returner [] }
+        legg_til(ut, a * 16 + b)
+        i = i + 2
+    }
+    returner ut
+}
+
+funksjon _nw_liste_til_tekst(l: liste_heiltall) -> tekst {
+    la ut = ""
+    la i: heiltall = 0
+    mens i < lengde(l) { ut = ut + builtin.chr(l[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _nw_tekst_til_liste(t: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < lengde(t) { legg_til(ut, builtin.char_code(builtin.slice(t, i, i + 1))) i = i + 1 }
+    returner ut
+}
+
+funksjon network_operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
+    la op = _nw_tekst(req, "operation", "")
+    hvis builtin.starts_with(op, "tls_") { returner _nw_feil("", "native TLS backend unavailable") }
+    hvis op == "listen" eller op == "udp_listen" eller op == "udp_connect" {
+        la host = _nw_tekst(req, "host", "127.0.0.1")
+        la port = _nw_heiltal(req, "port", 0)
+        la type: heiltall = 1
+        hvis op != "listen" { type = 2 }
+        la fd = 0
+        prøv { fd = builtin.sys6(41, 2, type, 0, 0, 0, 0) } fang (e) { fd = -1 }
+        hvis fd < 0 { returner _nw_feil("", "socket failed") }
+        prøv {
+            hvis op == "udp_connect" {
+                la r = socket_connect(fd, host, port)
+                hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+            } ellers {
+                la r2 = socket_bind(fd, host, port)
+                hvis r2 < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "bind failed") }
+                hvis op == "listen" {
+                    la backlog = _nw_heiltal(req, "backlog", 128)
+                    hvis builtin.sys6(50, fd, backlog, 0, 0, 0, 0) < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "listen failed") }
+                }
+            }
+        } fang (e2) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+        _pg_nonblock(fd)
+        la h = _nw_ny_slot(fd, op)
+        la status = "listening"
+        hvis op == "udp_connect" { status = "connected" }
+        returner _nw_res(status, h, "", 0, _nw_lokal_port(fd), "")
+    }
+    hvis op == "connect" {
+        la host = _nw_tekst(req, "host", "")
+        la port = _nw_heiltal(req, "port", 0)
+        hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
+        la fd = builtin.sys6(41, 2, 1, 0, 0, 0, 0)
+        hvis fd < 0 { returner _nw_feil("", "socket failed") }
+        la r = 0
+        prøv { r = socket_connect(fd, host, port) } fang (e) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+        hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+        _pg_nonblock(fd)
+        la h = _nw_ny_slot(fd, "tcp")
+        returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
+    }
+    la handle = _nw_tekst(req, "handle", "")
+    hvis ikkje finnes_nøkkel(_nw_slots, handle) { returner _nw_feil(handle, "unknown handle") }
+    la s = _nw_slots[handle]
+    la fd: heiltall = s["fd"]
+    hvis op == "close" {
+        builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+        fjern_nokkel(_nw_slots, handle)
+        returner _nw_res("closed", handle, "", 0, 0, "")
+    }
+    hvis op == "shutdown" {
+        builtin.sys6(48, fd, 2, 0, 0, 0, 0)
+        returner _nw_res("ok", handle, "", 0, 0, "")
+    }
+    hvis op == "accept" {
+        la b = _sk_buf()
+        builtin.raw_store64(b + 96, 16)
+        la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+        hvis ny == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        hvis ny < 0 { returner _nw_feil(handle, "accept failed") }
+        _pg_nonblock(ny)
+        la h2 = _nw_ny_slot(ny, "tcp")
+        returner _nw_res("connected", h2, "", 0, 0, "")
+    }
+    hvis op == "poll" {
+        la events = _nw_heiltal(req, "events", 1)
+        la timeout_ms = _nw_heiltal(req, "timeout_ms", 0)
+        la b = _sk_buf()
+        la pfd: heiltall = b + 256
+        la maske: heiltall = 0
+        hvis (events & 1) != 0 { maske = maske | 1 }      // POLLIN
+        hvis (events & 2) != 0 { maske = maske | 4 }      // POLLOUT
+        builtin.raw_store64(pfd, (fd & 4294967295) | (maske << 32))
+        la r = builtin.sys6(7, pfd, 1, timeout_ms, 0, 0, 0)
+        hvis r < 0 { returner _nw_feil(handle, "poll failed") }
+        la revents = (builtin.raw_load64(pfd) >> 48) & 65535
+        la klar: heiltall = 0
+        hvis (revents & 1) != 0 eller (revents & 16) != 0 eller (revents & 8) != 0 { klar = klar | 1 }
+        hvis (revents & 4) != 0 { klar = klar | 2 }
+        hvis klar == 0 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        returner _nw_res("klar", handle, "", klar, 0, "")
+    }
+    hvis op == "read" eller op == "read_hex" eller op == "recvfrom" {
+        la maks = _nw_heiltal(req, "max", 65536)
+        hvis maks < 1 eller maks > 1048576 { returner _nw_feil(handle, "invalid read size") }
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        hvis maks > 32768 { maks = 32768 }
+        la peer: heiltall = b + 512
+        builtin.raw_store64(b + 528, 16)
+        la n = 0
+        hvis op == "recvfrom" { n = builtin.sys6(45, fd, buf, maks, 0, peer, b + 528) }
+        ellers { n = builtin.sys6(0, fd, buf, maks, 0, 0, 0) }
+        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        hvis n < 0 { returner _nw_feil(handle, "read failed") }
+        la l: liste_heiltall = []
+        la i: heiltall = 0
+        mens i < n { legg_til(l, builtin.raw_load8(buf + i)) i = i + 1 }
+        hvis op == "read" {
+            hvis n == 0 { returner _nw_res("closed", handle, "", 0, 0, "") }
+            returner _nw_res("ok", handle, _nw_liste_til_tekst(l), n, 0, "")
+        }
+        la r = _nw_res("ok", handle, "", n, 0, "")
+        r["data_hex"] = _nw_hex_kod(l)
+        hvis op == "recvfrom" {
+            r["peer_host"] = tekst_fra_heltall(builtin.raw_load8(peer + 4)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 5)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 6)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 7))
+            r["peer_port"] = (builtin.raw_load8(peer + 2) << 8) | builtin.raw_load8(peer + 3)
+            r["port"] = r["peer_port"]
+        }
+        returner r
+    }
+    hvis op == "write" eller op == "write_hex" eller op == "sendto" {
+        la data: liste_heiltall = []
+        hvis op == "write" { data = _nw_tekst_til_liste(_nw_tekst(req, "data", "")) }
+        ellers { data = _nw_hex_dekod(_nw_tekst(req, "data_hex", "")) }
+        hvis lengde(data) == 0 { returner _nw_feil(handle, "invalid payload") }
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        la bit = lengde(data)
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[k] & 255) k = k + 1 }
+        la n = 0
+        la port: heiltall = 0
+        hvis op == "sendto" og _nw_tekst(req, "peer_host", "") != "" {
+            port = _nw_heiltal(req, "peer_port", 0)
+            prøv { _sk_sockaddr(b + 640, _nw_tekst(req, "peer_host", ""), port) } fang (e) { returner _nw_feil(handle, "invalid UDP peer") }
+            n = builtin.sys6(44, fd, buf, bit, 16384, b + 640, 16)
+        } ellers {
+            n = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        }
+        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, port, "") }
+        hvis n < 0 { returner _nw_feil(handle, "write failed") }
+        returner _nw_res("ok", handle, "", n, port, "")
+    }
+    returner _nw_feil(handle, "invalid operation")
+}
+
+// ── builtin.dns_lookup(host, port_tekst) («norscode-dns-v1») i rein Norscode ────
+// Rekkjefølgje: numerisk IPv4 / localhost → /etc/hosts → UDP A-spørjing (RFC 1035)
+// mot fyrste «nameserver» i /etc/resolv.conf (2 s timeout) via socket_* over sys6.
+// Svar: {"abi","status":"ok"|"feil","error","host","port","addresses":[ip...]}.
+funksjon _dns_svar(status: tekst, host: tekst, port: tekst, adresser, error: tekst) {
+    returner {"abi": "norscode-dns-v1", "status": status, "error": error, "host": host,
+              "port": port, "addresses": adresser}
+}
+
+funksjon _dns_er_ipv4(host: tekst) -> boolsk {
+    la d = builtin.split(host, ".")
+    hvis lengde(d) != 4 { returner usann }
+    la i: heiltall = 0
+    mens i < 4 {
+        hvis d[i] == "" eller lengde(d[i]) > 3 { returner usann }
+        la j: heiltall = 0
+        mens j < lengde(d[i]) {
+            la c = builtin.slice(d[i], j, j + 1)
+            hvis c < "0" eller c > "9" { returner usann }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _dns_hosts(host: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la innhald = ""
+    prøv { innhald = builtin.fil_les("/etc/hosts") } fang (e) { returner ut }
+    la linjer = builtin.split(innhald, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis l != "" og ikkje builtin.starts_with(l, "#") {
+            la felt = builtin.split(builtin.replace(l, "\t", " "), " ")
+            hvis lengde(felt) >= 2 og _dns_er_ipv4(felt[0]) {
+                la k: heiltall = 1
+                mens k < lengde(felt) {
+                    hvis felt[k] == host { legg_til(ut, felt[0]) k = lengde(felt) }
+                    ellers { k = k + 1 }
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon _dns_resolver() -> tekst {
+    la innhald = ""
+    prøv { innhald = builtin.fil_les("/etc/resolv.conf") } fang (e) { returner "" }
+    la linjer = builtin.split(innhald, "\n")
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la l = builtin.trim(linjer[i])
+        hvis builtin.starts_with(l, "nameserver ") {
+            la ns = builtin.trim(builtin.slice(l, 11, lengde(l)))
+            hvis _dns_er_ipv4(ns) { returner ns }
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+// UDP A-spørjing; returnerer IPv4-adresser frå svaret (følgjer CNAME implisitt via RR-lista).
+funksjon _dns_sporjing(host: tekst, ns: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la pk: liste_heiltall = [0x12, 0x34, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    la etikettar = builtin.split(host, ".")
+    la i: heiltall = 0
+    mens i < lengde(etikettar) {
+        la e = etikettar[i]
+        hvis e != "" {
+            legg_til(pk, lengde(e))
+            la j: heiltall = 0
+            mens j < lengde(e) { legg_til(pk, builtin.char_code(builtin.slice(e, j, j + 1))) j = j + 1 }
+        }
+        i = i + 1
+    }
+    legg_til(pk, 0) legg_til(pk, 0) legg_til(pk, 1) legg_til(pk, 0) legg_til(pk, 1)   // QTYPE A, QCLASS IN
+    la fd = -1
+    prøv { fd = socket_new(2, 2) } fang (e) { returner ut }
+    socket_settimeout(fd, 2000)
+    hvis socket_connect(fd, ns, 53) < 0 { socket_close(fd) returner ut }
+    prøv { _sk_send_liste(fd, pk) } fang (e2) { socket_close(fd) returner ut }
+    la svar: liste_heiltall = []
+    prøv { svar = _sk_recv_liste(fd, 4096) } fang (e3) { socket_close(fd) returner ut }
+    socket_close(fd)
+    hvis lengde(svar) < 12 { returner ut }
+    la ancount = (svar[6] << 8) | svar[7]
+    // hopp over spørsmålet
+    la p: heiltall = 12
+    mens p < lengde(svar) og svar[p] != 0 { p = p + svar[p] + 1 }
+    p = p + 5
+    la n: heiltall = 0
+    mens n < ancount og p + 12 <= lengde(svar) {
+        // namn (komprimert peikar eller etikettar)
+        mens p < lengde(svar) og svar[p] != 0 og (svar[p] & 192) != 192 { p = p + svar[p] + 1 }
+        hvis p < lengde(svar) og (svar[p] & 192) == 192 { p = p + 2 } ellers { p = p + 1 }
+        hvis p + 10 > lengde(svar) { returner ut }
+        la type = (svar[p] << 8) | svar[p + 1]
+        la rdlen = (svar[p + 8] << 8) | svar[p + 9]
+        p = p + 10
+        hvis type == 1 og rdlen == 4 og p + 4 <= lengde(svar) {
+            legg_til(ut, tekst_fra_heltall(svar[p]) + "." + tekst_fra_heltall(svar[p + 1]) + "." + tekst_fra_heltall(svar[p + 2]) + "." + tekst_fra_heltall(svar[p + 3]))
+        }
+        p = p + rdlen
+        n = n + 1
+    }
+    returner ut
+}
+
+funksjon dns_lookup(host, port) {
+    la h = tekst(host)
+    la pt = tekst(port)
+    hvis h == "" { returner _dns_svar("feil", h, pt, [], "host manglar") }
+    hvis _dns_er_ipv4(h) { returner _dns_svar("ok", h, pt, [h], "") }
+    hvis h == "localhost" { returner _dns_svar("ok", h, pt, ["127.0.0.1"], "") }
+    la lokal = _dns_hosts(h)
+    hvis lengde(lokal) > 0 { returner _dns_svar("ok", h, pt, lokal, "") }
+    la ns = _dns_resolver()
+    hvis ns == "" { returner _dns_svar("feil", h, pt, [], "ingen resolver i /etc/resolv.conf") }
+    la adresser = _dns_sporjing(h, ns)
+    hvis lengde(adresser) == 0 { returner _dns_svar("feil", h, pt, [], "ingen A-post for " + h) }
+    returner _dns_svar("ok", h, pt, adresser, "")
+}

@@ -1,0 +1,358 @@
+# Selvstendighet frå #179 — disiplinert, alltid-grøn veikart
+
+**Baseline:** commit `52593ad` (PR #179, «Fix self-sufficiency seed verification
+order»), siste fullt grøne tilstand. C-backa verktøykjede med fungerande GC.
+
+**Kvifor denne linja:** b2-independence prøvde å fjerne C (og GC-en) i eit *big
+bang* FØR den sjølvhosta erstatninga var ferdig → ~150 samtidige feil rota i ein
+ufullstendig runtime (ingen GC). Denne greina byggjer selvstendighet inkrementelt
+frå den grøne baselinen i staden.
+
+## Grunnprinsipp
+
+> **Fjern aldri ei C-avhengnad før den pure-Norscode-erstatninga er BEVIST grøn.
+> CI-grønt er porten — kvart steg må passere.**
+
+## Fasar
+
+- **Fase 0 — Etabler porten.** Push denne greina → GitHub, stadfest CI grøn på
+  baselinen. Utan ein fungerande grøn-port er «hald grønt» umogleg å verifisere.
+- **Fase 1 — Port b2 sitt validerte, C-frie arbeid (grønt kvart steg).**
+  Cherry-pick det som IKKJE treng GC og er bevist: språkfunksjonar (enum, lambda/
+  closure, metode, destrukturering), krypto i rein Norscode (sha256/pbkdf2/web-
+  push/TLS), ELF stage-0-forbetringar. Gjenvinn b2 sin ekte framgang, disiplinert.
+- **Fase 2 — Fjern C-bibliotek, kvart gated.** sqlite→NorsDB (pure), Metal-GPU-
+  C-runtime, legacy-C-backend. For kvar: bygg+verifiser pure erstatning grøn
+  FØRST, deretter fjern C-en.
+- **Fase 3 — Sjølvhosta seed-bygging (GC-en). ✅ GC-KJERNEN LANDA (2026-09-01).**
+  Self-hosta mark-sweep-GC (safepoint-driven, `NORSCODE_GC_ALLOC=1`) i AOT-runtime
+  (`selfhost/native_execution/native_codegen_v2.no`) held **10k-hmac-litmusen** innan
+  avgrensa minne (exit 0, var SIGSEGV = veggen); 300 hmac == kanon mac; paritet flagg
+  AV urørt. Verifisert på ekte native Linux x86-64 i CI (`gc-litmus.yml`, flagg-PÅ-steg
+  no GATING). 9 codegen-korrektheitsbugs fiksa (kontrollblokk-bounds, objektstorleikar
+  88B/cap*8, register-save i safepoint-stub) — sjå commit-historikk + AOT_GC_DESIGN.
+  GJENSTÅR for full Fase 3: tett resten av codegen-hull (crypto-gap-rute, JIT, minne-
+  effektiv batched Mach-O mot OOM) + gjer GC standard (av flagg) slik at sjølvhosta
+  codegen byggjer ein seed som passerer HEILE grøne suita. Kjend urelatert side-bug:
+  `tekst(heiltall)` renderar tom streng i native codegen (verdiane rette). Først når
+  heile suita er grøn: bytt seed-bygging C→sjølvhosta, fjern C-bootstrap.
+- **Fase 4 — Siste C-fjerning + attestering.** Fjern gjenverande C; selvstendig-
+  hets-gatane (L1–L6, active-surface) grøne med null C.
+
+## Avgjerande sekvensering
+
+Contained wins (Fase 1–2) FØRST — lågrisiko, held momentum, gir umiddelbar
+selvstendighets-framgang utan å røre den skjøre runtime-en. Det harde GC/codegen-
+byttet (Fase 3) SIST og fullt gated. Stikk motsett av b2 sin feil.
+
+## GC-fundament (frå b2-undersøkinga, portast i Fase 3)
+
+Validerte komponentar klare til port (b2-independence-commits, sjå
+`docs/05-development/AOT_GC_DESIGN.md` der):
+- Objekt-layout kartlagt (int/bool/streng/liste/map — peikarfelt + storleik).
+- Mark-trace-logikk validert (gc_trace følgjer objekt-grafen korrekt).
+- Reclaim-motor validert (gc_alloc fri-liste-pop + gc_free push, size-fit).
+- Rot-skann (stakk er komplett rotsett; globals tomme).
+- Empirisk: ~65KB/iter garbage-rate; bump-reset utrygt → full mark-sweep påkravd.
+Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wiring.
+
+## Status
+
+- [x] Fase 0: roadmap dokumentert
+- [x] Fase 0: grøn CI-port stadfesta (run 33334581579 — verify-linux + hard
+  ELF Gen1==Gen2-gate begge grøne på `selvstendig-fra-179`)
+  - Greina held seg **uavhengig** av main (main absorberte B2 sin big-bang, er
+    raud, divergerer ~1190 filer). Forsoning utsett til Fase 4. PR #186 = draft.
+  - Portfiksar: seed-materialisering før feature-check (`d658ca4`); bin/nc
+    fallback til committa stage-0-seed på Linux/macOS (`3fcb241`); branch i
+    push-trigger (`38b8fa5`).
+- [x] Fase 1: cherry-pick b2 sitt C-frie validerte arbeid (grønt kvart steg)
+  — **achievable-on-committed-seed-scope KOMPLETT + CI-grøn.** Alt attståande b2-
+  C-fritt arbeid er strukturelt gated (ikkje Fase-1-arbeid som står ugjort): sjå
+  «Blokkert/utsett tail» nedanfor — gate-ar på Fase 3 (seed-rebygg/kompilator/core)
+  eller annan sesjon (bigint-familien).
+  - [x] Krypto-bolk: `builtin.sha256 → std.sha256.hash` (`95550ba`), pbkdf2_sha256
+    + random_hex → pure (`3b3389b`). CI grøn. Inert for committa seed/stage-0.
+  - [x] Binær-NCB-bolk: rein NCB-codec (`9abfa49`), varint/zigzag (`93063da`),
+    dual-format serde (`fe4e752`), opt-in output (`9112b4b`), null-decode-fiks
+    (`fc6e681`). **Validert grøn via `nc run-pure` (exit 42)** — ikkje berre landa.
+    Premature test i `tests/pending_seed_activation/` (`78a0d05`).
+  - **Validerings-verktøy funne:** `nc run-pure <fil.no>` (hybrid-bundlar → rein
+    VM) aktiverer nye `selfhost.*`-modular UTAN seed-rebygg, og propagerer stdout +
+    returverdi→exit. Avdekte `null→0`-bug i porten (missa b2-followup `edcf29f`) →
+    cherry-picka. Køyr run-pure på kvar port sin test for ekte «bevist grøn».
+  - **Strukturell grense funnen:** portert b2-kode er DVALE på committa seed
+    (seed-aktiveringsgapet — nye `selfhost.*`-modular er ikkje i seeden sin
+    innebygde bunt). Sann validering krev soft-seed (`run-ncb-pure`) eller Fase 3
+    seed-rebygg. Vidare b2-C-frie arbeid (atomics, vm-builtins, defer/finally)
+    er dessutan velda til b2 sine store kjerne-omskrivingar (`macho_arm64_codegen.no`
+    ~7000-linjes divergens, `vm.no` ~337) → ikkje reine cherry-picks; krev manuell
+    kirurgisk port eller seed-rebygg.
+  - [x] **Nøkkelinnsikt:** nye `std.*`-modular resolverer frå KJELDE på committa
+    seed (ulikt `selfhost.*`) → INGEN aktiveringsgap; testar køyrer grønt direkte
+    via `nc test`. Dette opna den store, reine Fase 1-lana:
+  - [x] **Rein Norscode-krypto/stdlib/TLS portert frå b2, alt validert via `nc test`:**
+    - Hash: md5 (RFC 1321), sha1 (RFC 3174), sha512 (NIST), blake2b (RFC 7693).
+    - KDF/MAC: hkdf (RFC 5869), argon2id_pure (RFC 9106).
+    - Koding/OTP: base32 + totp (RFC 4648/6238).
+    - AEAD: chacha20_poly1305 (RFC 8439), AES-GCM (aes+ghash+aes_gcm, NIST).
+    - Signatur/ECDH: ed25519 (RFC 8032), x25519 (RFC 7748).
+    - **TLS 1.3 (rein Norscode):** tls13_handshake, tls13_keyschedule (RFC 8448),
+      tls13_record, tls13_handshake_flow (full handshake).
+    - Stdlib/JS-paritet: js_liste, js_objekt, js_streng, js_tal, hendelseslokke,
+      kanal, pixel_diff, wasm_binary, protocol_stream, backup_aead.
+  - **Blokkert/utsett tail (dokumentert):** rsa/ecdsa_p256/x509/x509_chain krev
+    `std.bigint` (annan sesjon eig bigint/ecdsa/vapid/webpush); norsdb-kjeda brukar
+    `;`-syntaks committa seed sin parser avviser (kompilator-mismatch); linux_drift/
+    auth_mfa/http_download krev native-builtins (`system_operation`/`system_info`)
+    ikkje i seeden; pbkdf2-multiblock krev endring i core `std/krypto.no` (32-byte-cap);
+    atomics/vm-builtins/defer-finally velda til b2-kjerne-omskrivingar. Alle desse
+    gate-ar på Fase 3 seed-rebygg eller annan sesjon.
+- [x] Fase 2: fjern C-bibliotek, kvart gated
+  — **removable-now-scope KOMPLETT + gate-grøn.** Dei to C-biblioteka med ei
+  klar erstatning er fjerna: sqlite→NorsDB (pure DB grøn) og Metal-GPU-C (dropp,
+  inga pure GPU-erstatning). Det tredje (legacy-C-backend = sjølve C-seed-bygg-
+  motoren) har INGA grøn erstatning enno — den pure erstatninga ER Fase 3
+  (sjølvhosta seed-bygg), som roadmap-prinsippet «pure erstatning grøn FØRST»
+  krev. Så #3 er strukturelt sekvensert ETTER Fase 3, ikkje Fase-2-arbeid som
+  står ugjort. Sjå detaljar nedanfor.
+  - [x] **sqlite → NorsDB**: pure `std.db`/NorsDB verifisert grøn FØRST
+    (test_db_features/repository/integration), so sletta vendra
+    `third_party/sqlite/sqlite3.{c,h}` (9.7 MB, `7916320`) + rydda alle
+    vendra-refs i seed-bygg-verktøy/ci.yml/allowlist (`2e7c902`). Gate grøn.
+  - [x] **Metal-GPU-C droppa**: inga rein-Norscode GPU-erstatning → droppa som
+    feature. Fjerna `nc_metal_tensor.c` + `native_metal_gpu_gate.no` + Metal-
+    frameworks/gate i ci.yml; erstatta `#include "nc_metal_tensor.c"` i seed-bygg-
+    motoren `nc_native_main.c` med pure-C ABI-stub (metal_available=0, matmul→CPU-
+    veg, diffusion→grasiøs feil). Committa seed urørt (gate grøn). Merk: metal/
+    tensor-testar passerer på committa seed no; må oppdaterast når Metal-fri seed
+    landar (Fase 3).
+  - **Strukturell grense (attståande #3):** legacy-C-backend
+    (`nc_native_main.c`/`nc_runtime_mini.c`) + `build/v3009/*.c` ER sjølve C-seed-
+    bygget (ci.yml `clang`/`cc`) — pure erstatning = sjølvhosta seed-bygg (Fase 3).
+    System-dynamisk libsqlite3 (dlopen; committa Linux-seed lenkar libsqlite3.so)
+    + `tests/native_gc_*.c` (GC-design) høyrer òg Fase 3 til. Å fjerne desse før
+    sjølvhosta seed-rebygg bryt «pure erstatning grøn FØRST». **2 av 3 mål gjort;
+    #3 (legacy-backend) gate-ar på Fase 3.**
+- [~] Fase 3: sjølvhosta seed-bygging (GC-en) — den harde veggen
+  - [x] Landa validert GC-design: `docs/05-development/AOT_GC_DESIGN.md` (frå b2
+    sin scoping). Objekt-layout kartlagt, mark-logikk validert (gc.no gc_trace),
+    live-map-sweep vald (headrar forkasta), rot-sett = native stakk (`functions`).
+  - **Kvifor dette er annleis enn Fase 1/2:** GC er hand-emittert maskinkode i
+    `native_codegen_v2.no` — DVALE på committa seed OG ikkje `run-pure`-validerbar
+    (run-pure køyrer ikkje native codegen). Einaste validering = **byggje eit
+    sjølvhosta seed + køyre litmus** (10k-hmac må ikkje SIGSEGV). Det krev minne-
+    tungt bygg (OOM på 16 GB Mac → Docker/CI). Chicken-and-egg: seed-bygget treng
+    GC-en for å passere litmus.
+  - [x] **Validerings-loop ETABLERT:** `tests/fixtures/gc_litmus_hmac.no` (10000
+    hmac_sha256_bytes) → bundla → `ncb-to-elf` (self-hosted native_codegen_v2) →
+    native ELF → køyr. `archive/legacy_shell/tools/gc_litmus_run.sh` + EIGA workflow `gc-litmus.yml`
+    (non-gating, rører ikkje Selvstendighet-porten). Byggjer lokalt (71 KB x86-64
+    ELF); køyrer på Linux CI og REPRODUSERER veggen (SIGSEGV) = raud→grøn-mål (`ad293d2`).
+  - [x] **F1 (råminne-primitiv) landa + CI-validert:** raw_load64/raw_store64/
+    heap_bump kirurgisk inn i vår `native_codegen_v2.no` (via `atomics`-mapen, l.
+    ~1230 + `builtin_va`-dispatch). Lazily emittert → Gen1==Gen2-paritet urørt
+    (gate grøn). `tests/fixtures/gc_f1_probe.no` (store→load round-trip) byggjer
+    self-hosted ELF + køyrer i `gc-litmus.yml` som **GATING** F1-steg (exit 0 =
+    primitiva verkar). `heap_alloc_start` UTSETT: krev `CHAR_CACHE_BASE/COUNT`
+    (b2 #181-heap-layout vår baseline manglar) → deriver vår alloc-start i F2.
+  - [x] **F2 (obj_addr) VALIDERT + separat liste-literal-bug funnen:** `obj_addr(x)`
+    porta (`f75336d`) og emittert (parity urørt) VERKAR — bevist ved å lagra rdi@
+    routine-entry til [0x600030] og lese det tilbake: på INT-arg er rdi = gyldig
+    heap-ptr, og int-boks-layouten [type=1][value=12345] les rett via obj_addr+
+    raw_load64. **Heile «obj_addr→0»-sagaen var ein SEPARAT, pre-eksisterande
+    liste-literal-codegen-bug:** `la liste = [111,222,333]` etterlèt `rsp` feiljustert
+    (usert `sub rsp,0x60`), så den påfølgjande builtin-arg-`pop` les 0. Bevist via
+    lokal ELF-disasm (call-site) + runtime rdi-probe. obj_addr eksponerte berre
+    bugen. Debug-teknikk: lagra register til fri kontrollblokk-slot [HEAP_VA+48] og
+    les tilbake (betre enn gdb her). `lengde()` er òg eit eige AOT-gap.
+  - **Merknad (non-blocking):** `obj_addr` på LISTE-typa Norscode-variablar gjev 0
+    via den generiske `emit_rt_call_1`-vegen (int-typa verkar; hmac sin dedikerte
+    handler les liste-arg rett). Djup AOT-arg-passing-quirk for liste-typa verdiar.
+    **IKKJE GC-blokker:** GC-mark-trace les rå-peikarar frå stakk-rot-skann +
+    `raw_load64`, ikkje `obj_addr` på Norscode-var. Kartlegging av liste-/map-
+    layout skjer i F3 via rot-skann-adresser. (`lengde()` er òg eit eige AOT-gap.)
+  - [x] **F3 (konservativ rot-skann) VALIDERT:** `stack_base()` (initiell rsp @
+    [HEAP_VA+48], fanga i _start via ny `mov [HEAP_VA+48],r12`) + `stack_ptr()`
+    (kallarens rsp) porta frå b2 (`c7436c7`). `gc_f3_probe` skannar [sp,sb) etter
+    heap-peikar-slots (0x600000<=v<heap_bump) → fann roots (`F3 OK`, exit 0). Gen1
+    ==Gen2-paritet urørt (begge generasjonar får rsp-capture). `1624c5f`.
+  - [x] **(b) Mark-traversering-LOGIKK validert:** fleir-nivå raw_load64-peikar-jakt
+    (boks[3]→payload[len][cap][elem-ptr..]→int-boks[1][value]) verifisert via manuelt
+    konstruert struktur (raw_store64) → `trace OK` exit 0. Traverserings-maskineriet
+    GC-mark brukar verkar. MERK: ekte-liste-manipulasjon i direkte-kompilert probe er
+    blokkert av liste-arg-quirken (obj_addr/legg_til får 0 for liste-arg), og liste-
+    literalar bur i `.data` (ikkje heap) → ekte-liste-layout stadfestast når GC køyrer
+    i VM-en/seeden (F5). `9e4f918`.
+  - [x] **Reclaim-motor (gc_alloc/gc_free/heap_set_bump) porta + validert:** fri-liste-
+    hovud @ HEAP_VA+40; gc_alloc head-fit (gjenbruk om >= size, elles bump); gc_free
+    push [next][size]. `gc_reclaim_probe`: gjenbruk + tom-liste-bump → exit 0. `069d4cd`.
+  - [x] **gc_collect START — allokeringsfri mark-bitmap (`gc_mark_bit`) validert:**
+    1 bit/16B-slot i scratch @ 0x10400000 (2 MB på toppen av 256 MB-heapen). Hand-
+    emittert bit-set/les (sub/shr/and/movzx/shr/or/mov). `gc_mark_probe`: ny=0,
+    gjenta=1, annan-slot=0 → exit 0. Første stein i mark-fasen. `03012bb`.
+  - [x] **MARK-fasen (DFS-algoritme) VALIDERT:** `gc_mark_traverse_probe` — DFS over
+    objekt-grafen med rå-minne mark-stakk (@0x10300000) + gc_mark_bit; manuell graf
+    (liste[intA,intB]) → marka=3, alle boksar markerte → exit 0. Mark-LOGIKKEN verkar
+    (referanse-versjon i høg-nivå Norscode). `2542bb2`.
+  - [x] **SWEEP (live-map → gc_free) VALIDERT:** `gc_sweep_probe` — live-map
+    (sortert (addr,size)), hol mellom påfølgjande live objekt → gc_free; gc_alloc
+    gjenbrukar holet. sweep→reclaim-kjeda verkar. `53bf201`.
+  - **HEILE mark-sweep-ALGORITMEN er no validert ende-til-ende** (referanse-form:
+    mark-bitmap + DFS-trace + live-map-sweep + gc_alloc/gc_free). Den ALGORITMISKE
+    uvissa er borte.
+  - [x] **(i) `gc_collect` ENDE-TIL-ENDE VALIDERT (referanse):** mark+sweep samla —
+    DFS-mark frå rot registrerer (addr,size) i live-map (box+payload); sweep gap-walk
+    → gc_free døde hol; gc_alloc gjenbrukar. Probe: region m/live liste + interleava
+    48B dødt hol → holet frigjort+gjenbrukt, live-verdi 777 URØRT. **Ein komplett,
+    arbeidande mark-sweep-GC (referanse-form).** `97ac6f1`.
+  - [x] **(ii-mark) ALLOKERINGSFRI maskinkode-MARK (`gc_mark_native`) VALIDERT:**
+    ~60-instruksjons hand-emittert DFS med rå register + scratch (mark-stakk/live-map/
+    bitmap), INGEN boksing i løkka. Same graf → retur 3, boksane markerte. **Bevist at
+    maskinkode-GC-konverteringa er gjennomførbar.** `60c20b3` (test-fiks: heap_set_bump
+    forbi grafen sidan range-sjekk krev addr<bump).
+  - [x] **(ii-sweep) ALLOKERINGSFRI maskinkode-SWEEP (`gc_sweep_native`) VALIDERT:**
+    walk live-map @0x10340000, gc_free hol mellom påfølgjande live objekt via INLINE
+    fri-liste-push (rå, ingen boksing). Probe: 2 live + 48B hol → frigjort+gjenbrukt.
+    `fa14a99`. **BEGGE dei harde maskinkode-delane (mark+sweep) står no validerte
+    allokeringsfritt.**
+  - [x] **SAMLA maskinkode-collect VALIDERT (`gc_collect_native`-komposisjon):**
+    `gc_mark_native` lagrar live-map entry-teljar @0x600038; probe komponerer
+    mark→sweep ende-til-ende i maskinkode (curated graf: eitt-element-liste, DFS-
+    record==adresse-orden, 48B daudt hol → marka(2)+entry(3)+sweep(1)+gjenbruk).
+    `5b1e9ce`. **HEILE den allokeringsfrie maskinkode-GC-syklusen står validert.**
+  - [x] **Fri-liste-stabilitet ved LITMUS-SKALA (`gc_reclaim_loop_probe`):** 5000×
+    (gc_free 64 → gc_alloc 32) head-fit-ar SAME region utan korrupsjon/drift. `exit 0`.
+  - **NØKKELFUNN (kritisk sti):** sjølve løkka BUMPAR — kvar `la`/`i+1`/aritmetikk
+    BOKSAR eit heiltal (RT_INT bumpar 16B). Det er litmus-sjukdomen i miniatyr og
+    slår fast at **(iii)** er den låsande biten: så lenge boks-emisjonane bumpar,
+    veks minnet ubunde uansett kor god fri-lista er. Rekkjefylgja bør vere
+    **(iii) fyrst** (re-pek RT_INT/STR/LIST → gc_alloc), så (iv) safepoint→collect,
+    så (a) root-scan/(b) sort/(c) full-range sweep for å hauste boks-garbagen.
+  - [x] **(iii)-byggjekloss: `gc_box_int` VALIDERT** — fri-liste-støtta int-boksar
+    (16B via head-fit >=16, elles bump-fallback; fyller [1][verdi]). Korrektheit +
+    gjenbruk grønt. `8b59cdf`.
+  - **AVGJERANDE ARKITEKTUR-FUNN (omformar (iii)):** runtime-en er ein **FROSEN
+    prekompilert binærblokk lagra som hex** (`rt_hex_del0..6`, 10 567 B). Allokeringa
+    er **inline BUMP baka inn** — kvar RT_* har sin eigen `mov rax,[0x600000]; lea
+    rcx,[rax+16]; mov [0x600000],rcx`. Ingen omdirigerbar felles-chokepoint via
+    call-sites. MEN fila **hex-patchar alt blokka 30+ gonger** (`builtin.replace`,
+    linje 9–40). Difor er (iii) gjennomførbar med SAME teknikk: patch dei **4 faste
+    16B-bump-prologane** (int/bool/list/map-boksarane; `replace` er global → éin patch
+    tek alle 4) → `call gc_alloc16` (fri-liste-støtta, som gc_box_int), bak
+    `NORSCODE_GC_ALLOC=1`. De-riska: hex-patch, IKKJE runtime-rebygg. (8 variabel-
+    storleik-bump-sites for str/liste-payload er vanskelegare — treng size til alloc.)
+  - [x] **(iii-1a) `gc_alloc16` VALIDERT** — register-trygg rå 16B-allokator (fri-liste
+    head-fit >=16, elles bump; klobrar berre rax+rcx, bevarer flagg). `e6d2ee5`.
+  - [x] **(iii-1b) HEX-PATCH VALIDERT — fri-liste-boksing verkar, register-trygt.**
+    `bygg_runtime_v2` les `NORSCODE_GC_ALLOC`; `patch_bump_prologer` byte-patchar dei
+    faste 16B-bump-prologane i den FROSNE regionen `[0,frozen_len)` → posisjons-
+    uavhengig `mov rax,ga16_va; call rax; nop*8` (same 20B → VA-ar urørte; skannar KUN
+    frosen region so mine eigne primitiv ikkje treffast). `tools/ncb_to_elf.no` sender
+    flagget til subprosessen. CI: **flagg PÅ → 5 prologar patcha, `1..100=5050 &
+    2^10=1024` KORREKT** (register-trygt ende-til-ende); **flagg AV → 0 patchar,
+    paritet grøn**. `e6d2ee5`. **Den harde biten — patche frosen inline-bump
+    utan å velte runtime-en — er bevist trygg.**
+  - **Attståande mot litmus-grønt:**
+  - [x] **(iv) SAFEPOINT→COLLECT + heile GC-en VALIDERT ENDE-TIL-ENDE.** Byggjeklossar
+    validerte kvar for seg: `gc_bitmap_clear` (rep stosq), `gc_sort_livemap` (insertion-
+    sort), `gc_sweep_full` (indre hol + hale), `gc_mark_roots` (konservativ stakk-skann +
+    DFS — lokalar er rbp-relative PÅ stakken → dekt), samla i `gc_collect_native` (reset
+    fri-liste → mark-roots → sort → sweep-full). Safepoint-stub (49B, terskel 1000 i GC-
+    modus / aldri elles) kallar det ved terskel. **ENDE-TIL-ENDE: 6M-iter-loop med flagg
+    PÅ FULLFØRER (exit 0) — collect avgrensar minnet, levande verdiar urørte; SAME loop
+    flagg AV → SIGSEGV (exhaustion ~5.3M).** GC-en avgrensar altså minnet i ekte sjølv-
+    hosta native ELF. **Kritiske fiksar undervegs:** (1) reset fri-liste-hovud ved collect-
+    start (unngå double-free over mange collects); (2) konservativ DFS validerer payload-
+    range + cap len (mot falske roter); (3) **SPLITTING gc_alloc16** — tek 16B, legg
+    resten attende (utan split tok éin alloc heile store frie blokka → reclaim
+    ineffektiv → exhaustion likevel). Paritet grøn (flagg av) heile vegen.
+  - [x] **(steg 3a) ALLE 16B-allokatorar (begge prolog-variantar) → fri-lista.** Analyse:
+    12 `mov rax,[bump]`; 5 rcx-variant + 6 rdx-variant (`lea rdx,[rax+16]`, verdi i rcx) =
+    11 faste 16B (int/bool/streng-boks/liste-boks/map-boks). `gc_alloc16` samla til å klobre
+    BERRE rax → trygg for begge; patch_bump_prologer matchar begge → **11 prologar patcha**.
+    e2e + probar grøne. `f35e898`.
+  - **MÅLING: sjølve 10k-hmac-litmusen med flagg PÅ KRASJAR framleis (exit 139).** 16B-
+    reclaim er ikkje nok — litmusen sine VARIABEL-STORLEIK-payloadar dominerer. Dei 2 EKTE
+    variabel-allokatorane: streng @6071 (`lea rsi,[rax+rsi*2]; add rsi,11` → 2·len+11) og
+    **liste @10223 (`lea rcx,[rax+rdx]; add rcx,0x10008` → rdx+~64KB PER LISTE)** — den siste
+    er drapsmannen (10k hmac × 64KB = exhaustion). Desse bumpar framleis.
+  - [x] **(3b-start) `gc_alloc_var(size i rcx)` bygd + streng-allokator patcha.** Storleik-
+    bevisst fri-liste-allokator (head-fit + split, elles bump; klobrar berre rax+r9/r10/r11,
+    bevarer rdi/rsi/rdx/rcx). Streng-payload @6071 (size=2·len+11) → gc_alloc_var. Gate grøn.
+    Men litmus flagg PÅ KRASJAR framleis (exit 139) — strengar er ikkje nok.
+  - **FULL KARTLEGGING av variabel-allokatorane (disasm av patcha frosne hex):** det finst
+    ~8-10 DISTINKTE variabel-storleik-bump-sites, kvar med ulik size-utrekning + base-
+    register: @1164 (`lea r10,[r9+r11]; add r11,9`), @1947/@2075 (`lea rsi,[rcx+rdx]; add
+    rdi,9`), @5004 (`add rcx,0x40`), @6087 (streng, patcha), @6381 (streng rcx-variant,
+    UPATCHA), **@10314 (`add rsi,rcx; add rsi,9` = DEN EKTE liste-payload-advance** — @10223-
+    sekvensen `mov rcx,rax;nops` gjev berre basen etter bug-fiks; den verkelege advance er
+    her). Kvar treng SITE-SPESIFIKK patch (size-uttrekk + register-bevaring).
+  - [x] **(3b) fleire variabel-allokatorar patcha:** begge streng-variantar (@6071 rax +
+    @6381 rcx), `RT_LIST_NEW` (fast 88B payload → gc_alloc_var), `RT_LIST_APP` grow (variabel
+    cap*16 → `gc_alloc_var_r8` som returnerer i R8 så gamal payload-struct i rax vert bevart).
+    Gate + e2e grøne. Men litmus KRASJAR framleis.
+  - **AVGJERANDE FUNN — eg patcha feil allokatorar for litmusen:** (1) `legg_til`-append er
+    ein SJØLVSTENDIG AOT-codegen-gap (krasjar flagg AV òg) → RT_LIST_APP-grow-testen ugyldig;
+    (2) **litmusen byggjer lister via LITERAL (`[11,22,..]` → `RT_BUILD_LIST_REV`), IKKJE
+    RT_LIST_APP** — så grow-patchen råkar ikkje litmusen. hmac allokerer via RT_BUILD_LIST_REV
+    + sha256-interne strukturar. **Neste steg må IDENTIFISERE litmusen sine FAKTISKE alloke-
+    ringssites** (profilering/analyse av hmac_sha256_bytes + RT_BUILD_LIST_REV), ikkje gjette.
+  - **Attståande mot litmus-grønt (velkartlagt, djup):** finn litmusen sine reelle allokerings-
+    sites (RT_BUILD_LIST_REV @9936 + sha256-interne) → gc_alloc_var/-r8. Verktøy klare: python-
+    disasm av patcha hex, `gc_alloc_var`/`gc_alloc_var_r8`-infra, `patch_*`-funksjonar.
+    Så (v) ELF-paritet + arm64; (vi) F5: seed mot 10k-hmac.
+  - **NYTT AVGJERANDE FUNN — litmus-blokkeringa er DJUPARE enn allokator-reclaim:** eit rein
+    `legg_til`-bygd 60-elem liste-probe KRASJAR flagg AV OG PÅ (exit 139) — dvs. `legg_til`/
+    tom-liste-literal `[]` har ein PRE-EKSISTERANDE AOT-codegen-bug UAVHENGIG av GC-en (jf.
+    memory: list-literal rsp-feiljustering). MEN sha256 brukar `legg_til` (message-schedule
+    w=64) og litmusen KØYRER til exhaustion → bug-en er kontekst-spesifikk (verkar nesta i
+    sha256, ikkje i mi enkle probe). **Konsekvens: litmusen er blokkert av ORTOGONALE list-
+    codegen-gap (list-literal/legg_til), ikkje berre av allokator-reclaim.** gc_alloc_var_r8-
+    korrektheita kan difor IKKJE validerast via legg_til-probar (dei krasjar sjølvstendig).
+  - **STORT AVGJERANDE FUNN — LITMUSEN VAR FEILDIAGNOSTISERT.** Systematiske minimal-probar
+    (lc_*) viser: **eit ENKELT hmac-kall krasjar (exit 139)** — litmusen sprenger IKKJE heapen
+    (banneret «bump-allokator sprenger 2GB» er FEIL); han krasjar UMIDDELBART på fyrste hmac
+    pga. øydelagde list-operasjonar i AOT-codegen, lenge før allokering blir eit problem.
+    Konkret lokalisert (inkrementell skriv-trace):
+    - **`legg_til` KRASJAR** (RT_LIST_APP kalla frå codegen; verkar inne i RT_BUILD_LIST_REV
+      → anten produserer RT_BUILD_LIST_REV malforma liste, eller kontekst-spesifikt fault).
+    - **`lengde` KRASJAR** (RT_LENGDE).
+    - **literal-indeks gjev FEIL VERDI** (`[10,20,30]; w[1]` != 20; RT_INDEX_GET/RT_BUILD_LIST_REV-layout).
+    Statisk inspeksjon av RT_LIST_APP/RT_LIST_NEW/RT_LIST_GET viser KORREKT logikk → rot-
+    årsaka krev RUNTIME single-step (gdb på Linux-ELF), som CI ikkje gjev effektivt.
+  - [x] **ROT-FIKS LANDA — `nc compile` i staden for `nc bundle`.** gdb+objdump viste at
+    litmus-krasjen var `RT_LIST_APP` med `rdi=NULL` (null liste). NCB-dump: `la w=[100]`
+    kompilerte til berre `STORE_NAME w` (tom stakk) — **list-literal-bytecoden VAR BORTE**.
+    Rota: `nc bundle` køyrer `bundler.no` som lastar ein STALE selfhost-compiler-modul
+    (`ir_to_bytecode` DVALE på committa seed; Liste-fiksen @linje-1074 inert — debug-print
+    fyrte ALDRI) som droppar BUILD_LIST/INDEX_GET. **`nc compile` (seeden sin GODE innebygde
+    compiler, `NORSCODE_CMD=compile`) løyser importar OG kompilerer lister rett** (verifisert:
+    litmus-NCB har 24 fns + BUILD_LIST + key-elementa). Bytte `gc_probe_run.sh` +
+    `gc_litmus_run.sh` frå bundle→compile. `6e5fc06`.
+  - **RESULTAT: litmusen KØYRER no sha256 på ekte** (krasj flytta `0x401900`=RT_LIST_APP →
+    `0x403cdb` djupt i hmac). Ny krasj: binær list/samanlikn-rutine `mov rax,[rdi+8]; mov
+    rdx,[rsi+8]; ...` med **rsi=NULL** → ein sha256-del-operasjon produserer null. Neste
+    codegen-bug i kjeda (djupare enn list-bygging).
+  - [x] **(2) FIKSA: `tekst_til_liten`-dispatch.** gdb: hmac krasja @0x403cdb (index_of med
+    NULL 2. arg) — `_hex_verdi` sitt `tekst_til_liten(c)` returnerte NULL. Rot: `er_lower`
+    sjekka `fn_nm == "tekst_til_liten"` men bytecode-namnet er `"builtin.tekst_til_liten"`
+    (prefiks) UTAN ends_with-fallback (ulikt slice/index_of). Fiks: `ends_with(fn_nm,
+    "tekst_til_liten"/"tekst_sma")`, same for er_upper. `4eada36`.
+  - **RESULTAT: ENKELT hmac KØYRER (gdb: rein exit); flagg AV fullfører 200 hmac** (`hmac_n
+    OK`). Så ALLE list-codegen-bugane som blokkerte hmac er FIKSA — hmac køyrer på ekte.
+    Full 10k flagg AV krasjar no på GENUIN exhaustion (~4k hmac × 65KB > 256MB) = den
+    verkelege bump-veggen. **FINALLY testar litmusen GC-en.**
+  - **(3) [ATT] GC-en (flagg PÅ) KRASJAR på ekte lister.** gdb: `[100,200]`/hmac med flagg PÅ
+    krasjar @0x4018ef i (patcha) RT_LIST_NEW — `mov q[rax],3` med **rax=0x58=88** (box-alloc
+    gc_alloc16 returnerte 88 = payload-storleik, ikkje ei blokk-adresse). Fri-lista @0x600028
+    er 0-init (frosen rører han ikkje), gc_alloc_var sin bump-veg skriv berre [bump] — likevel
+    les gc_alloc16 [head]=88. GC-alloc16/alloc_var-INTERAKSJONEN i RT_LIST_NEW sin dobbel-
+    alloc (88B payload via gc_alloc_var → 16B box via gc_alloc16) er buggy. Treng meir gdb-
+    single-step. Kjerne-GC (int-reclaim) PROVA; list-allokator-patchane treng debugging.
+  - **STATUS: codegen-bug-kjeda som blokkerte hmac er FIKSA (litmus køyrer sha256 på ekte,
+    flagg AV fullfører småN). Att for litmus-GRØNT: fiks GC-list-allokator-interaksjonen
+    (flagg PÅ krasjar på list-build). Verktøy: `archive/legacy_shell/tools/gdb_crash.sh` (køyr med NORSCODE_GC_ALLOC=1
+    for flagg-PÅ-krasj), objdump-slice, python-disasm.**
+  - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
+    grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.

@@ -11,7 +11,23 @@
  */
 
 #include <stdatomic.h>
-#include "nc_metal_tensor.c"
+#include <stdint.h>  /* int32_t — tidlegare transitivt via nc_metal_tensor.c */
+/* Metal-GPU-C dropp (Fase 2): pure-C stub i staden for nc_metal_tensor.c.
+ * GPU-compute har inga rein-Norscode-erstatning → droppa som feature. Stubben
+ * held ABI-en (så seed-bygget lenkar utan -framework Metal): metal_available=0,
+ * matmul/diffusion returnerer !=0 = «utilgjengeleg» (matmul fell til CPU-veg;
+ * diffusion gjev grasiøs feil). */
+static int nc_metal_available(void) { return 0; }
+static int nc_metal_matmul_i32(const int32_t *left, const int32_t *right,
+                               int32_t *output, int rows, int inner, int columns) {
+    (void)left; (void)right; (void)output; (void)rows; (void)inner; (void)columns;
+    return -1;
+}
+static int nc_metal_diffusion_rgb(const int32_t *initial, int32_t *output,
+                                  int width, int height, int steps, int seed) {
+    (void)initial; (void)output; (void)width; (void)height; (void)steps; (void)seed;
+    return -1;
+}
 #if defined(_WIN32)
 #include "nc_windows_backend.h"
 #include <bcrypt.h>

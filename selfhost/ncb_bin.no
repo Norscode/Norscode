@@ -1,0 +1,218 @@
+# ncb_bin.no — deterministisk BINÆR serialisering av vilkårlege Norscode-verdiar.
+#
+# Erstattar JSON (json_skriv/json_parse_raw) i sjølv-host-kjeda: NCB-IR er berre ein
+# nøsta Norscode-verdi (kart/liste/int/streng/bool/null), so ein generell verdi-codec
+# dekker heile NCB. Binært → byte-deterministisk (ingen escaping, ingen whitespace,
+# ingen \uXXXX) → drep escaping-bug-klassen OG gjer Gen1==Gen2-fixpunktet trivielt.
+#
+# Format (little-endian): tag-byte + nyttelast.
+#   0 = null/ingenting
+#   1 = heiltall  (8 byte, two's complement)
+#   2 = tekst     (u32 lengd + råbyte)
+#   3 = liste     (u32 tal + element…)
+#   4 = kart      (u32 tal + (nøkkel-streng, verdi)…, i innsetjingsrekkjefølgje)
+#   5 = bool      (1 byte)
+
+funksjon _put_u32(buf: liste_heiltall, v: heiltall) -> heiltall {
+    legg_til(buf, v & 255)
+    legg_til(buf, (v >> 8) & 255)
+    legg_til(buf, (v >> 16) & 255)
+    legg_til(buf, (v >> 24) & 255)
+    returner 0
+}
+
+funksjon _put_i64(buf: liste_heiltall, v: heiltall) -> heiltall {
+    la i = 0
+    mens i < 8 {
+        legg_til(buf, (v >> (i * 8)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _get_u32(bytes: liste_heiltall, pos: heiltall) -> heiltall {
+    returner bytes[pos] | (bytes[pos + 1] << 8) | (bytes[pos + 2] << 16) | (bytes[pos + 3] << 24)
+}
+
+# Varint (LEB128, usignert). Kompakt for dei mange små tala.
+funksjon _put_varint(buf: liste_heiltall, v: heiltall) -> heiltall {
+    mens v >= 128 { legg_til(buf, (v & 127) | 128) v = v >> 7 }
+    legg_til(buf, v & 127)
+    returner 0
+}
+# _get_varint → [verdi, ny_pos]
+funksjon _get_varint(bytes: liste_heiltall, pos: heiltall) -> liste {
+    la v = 0
+    la skift = 0
+    mens sann {
+        la b = bytes[pos]
+        pos = pos + 1
+        v = v | ((b & 127) << skift)
+        hvis b < 128 { returner [v, pos] }
+        skift = skift + 7
+    }
+    returner [v, pos]
+}
+# Zigzag: signert → usignert (små |tal| → få byte).
+funksjon _zigzag(v: heiltall) -> heiltall {
+    hvis v < 0 { returner (0 - v) * 2 - 1 }
+    returner v * 2
+}
+funksjon _unzigzag(z: heiltall) -> heiltall {
+    hvis (z & 1) == 1 { returner 0 - ((z + 1) / 2) }
+    returner z / 2
+}
+
+# Ekte ingenting-null-verdi (type "ingenting", json_skriv → "null"). MERK: `null`/
+# `ingenting`-LITERALANE i kjeldekode er boksa int 0 (M4) og json_skriv → "0", so dei
+# kan IKKJE brukast til å rekonstruere ein JSON-null. Ein funksjon utan `returner` gjev
+# derimot den ekte ingenting-verdien. Utan dette blir PUSH_CONST null → PUSH_CONST 0.
+funksjon _ingenting_verdi() { }
+
+# Byte-verdiar → NcVal-streng (byte-basert, som resten av runtime).
+funksjon _bytes_til_tekst(bytes: liste_heiltall, pos: heiltall, n: heiltall) -> tekst {
+    la s = ""
+    la i = 0
+    mens i < n {
+        s = s + builtin.chr(bytes[pos + i] & 255)
+        i = i + 1
+    }
+    returner s
+}
+
+funksjon _encode_inn(buf: liste_heiltall, v) -> heiltall {
+    la t = builtin.type(v)
+    hvis t == "ingenting" eller t == "null" {
+        legg_til(buf, 0)
+        returner 0
+    }
+    hvis t == "boolsk" eller t == "bool" {
+        legg_til(buf, 5)
+        hvis v { legg_til(buf, 1) } ellers { legg_til(buf, 0) }
+        returner 0
+    }
+    hvis t == "heltall" eller t == "heiltall" {
+        legg_til(buf, 1)
+        _put_varint(buf, _zigzag(v))
+        returner 0
+    }
+    hvis t == "tekst" {
+        legg_til(buf, 2)
+        la n = lengde(v)
+        _put_varint(buf, n)
+        la i = 0
+        mens i < n {
+            legg_til(buf, builtin.char_code(builtin.slice(v, i, i + 1)) & 255)
+            i = i + 1
+        }
+        returner 0
+    }
+    hvis t == "liste" {
+        legg_til(buf, 3)
+        _put_varint(buf, lengde(v))
+        for e i v { _encode_inn(buf, e) }
+        returner 0
+    }
+    hvis t == "ordbok" {
+        legg_til(buf, 4)
+        la k = nøkler(v)
+        _put_varint(buf, lengde(k))
+        la i = 0
+        mens i < lengde(k) {
+            _encode_inn(buf, k[i])       # nøkkel (streng)
+            _encode_inn(buf, v[k[i]])    # verdi
+            i = i + 1
+        }
+        returner 0
+    }
+    kast "ncb_bin: ukjend type " + t
+}
+
+# bin_encode(verdi) → liste_heiltall (byte). Deterministisk.
+funksjon bin_encode(v) -> liste_heiltall {
+    la buf: liste_heiltall = []
+    _encode_inn(buf, v)
+    returner buf
+}
+
+# _decode_inn(bytes, pos) → [verdi, ny_pos]
+funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
+    la tag = bytes[pos]
+    pos = pos + 1
+    hvis tag == 0 { returner [_ingenting_verdi(), pos] }
+    hvis tag == 5 {
+        la b = bytes[pos] == 1
+        returner [b, pos + 1]
+    }
+    hvis tag == 1 {
+        la r = _get_varint(bytes, pos)
+        returner [_unzigzag(r[0]), r[1]]
+    }
+    hvis tag == 2 {
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
+        la s = _bytes_til_tekst(bytes, pos, n)
+        returner [s, pos + n]
+    }
+    hvis tag == 3 {
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
+        la ut: liste = []
+        la i = 0
+        mens i < n {
+            la r = _decode_inn(bytes, pos)
+            legg_til(ut, r[0])
+            pos = r[1]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    hvis tag == 4 {
+        la rn = _get_varint(bytes, pos)
+        la n = rn[0]
+        pos = rn[1]
+        la ut = {}
+        la i = 0
+        mens i < n {
+            la kr = _decode_inn(bytes, pos)
+            pos = kr[1]
+            la vr = _decode_inn(bytes, pos)
+            pos = vr[1]
+            ut[kr[0]] = vr[0]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    kast "ncb_bin: ukjend tag " + tekst_fra_heltall(tag)
+}
+
+# bin_decode(byte) → verdi
+funksjon bin_decode(bytes: liste_heiltall) {
+    la r = _decode_inn(bytes, 0)
+    returner r[0]
+}
+
+# ncb_encode(ncb) → byte. Strippar debug-metadata (source_lines/source_columns) frå
+# kvar funksjon FØR encoding: dei trengst ikkje for køyring, utgjer ~24% av bloaten,
+# og er hovudkjelda til Gen1≠Gen2-serialiserings-drifta. Muterer ncb in-place (den
+# blir serialisert og forkasta). Deterministisk + lean.
+funksjon ncb_encode(ncb) -> liste_heiltall {
+    hvis builtin.type(ncb) == "ordbok" og finnes_nøkkel(ncb, "functions") {
+        la fns = ncb["functions"]
+        la navn = nøkler(fns)
+        la i = 0
+        mens i < lengde(navn) {
+            la fn = fns[navn[i]]
+            hvis finnes_nøkkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
+            hvis finnes_nøkkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
+            i = i + 1
+        }
+    }
+    returner bin_encode(ncb)
+}
+
+funksjon ncb_decode(bytes: liste_heiltall) {
+    returner bin_decode(bytes)
+}
