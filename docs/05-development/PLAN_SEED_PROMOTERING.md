@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 3)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 4)**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -51,8 +51,8 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | Binær NCB-kodar bulk (førebuing Fase C.4) | `[~]` agent | `selfhost/ncb_bin.no` per-teikn-kodar toppa 8,1 GB RSS → OOM; bakgrunnsagent gjer han bulk med byte-identisk wire-format + A/B-måling på committed seed |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
 | Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
-| `db.*` (NorsDB rein Norscode) | `[ ]` | eige spor |
-| tls / sandbox-profilar / trådar | `[ ]` | eige spor |
+| `db.*` (NorsDB rein Norscode) | `[x]` konformans komplett | Side-spor FERDIG (aa803ab): siste SQLite-korrektheits-gap lukka — G2 (rowid-alias: berre éin-kolonne INTEGER PRIMARY KEY auto-tildeler) + strftime/julianday `%f` millisekund. KONFORMANS_GAP: «Ingen kjende korrektheits-divergensar att». Verifisert: konformans_gap + subquery + default/tx_commit/param_binding/db_adapter grøne. Att: kostnadsbasert join-planleggar (perf, gated på native). |
+| tls / sandbox-profilar / trådar | `[x]` pure-Norscode komplett | Side-spor FERDIG (3bef50d): TLS 1.3 komplett for mandatory suite (AES-128-GCM + ChaCha20-Poly1305, X25519, Ed25519, RFC 8448-verifisert incl. ny traffic-key-KAT); trådar (std/tråd.no kooperativ) komplett. Att = valfrie suitar (AES-256/SHA-384, HRR, PSK/0-RTT) + native pool/ssl.no (seed-spor). Sjå docs/TLS_TRAAD_SANDBOX_STATUS.md. |
 
 ---
 
