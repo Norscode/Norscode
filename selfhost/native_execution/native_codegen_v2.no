@@ -950,6 +950,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".now_ms") eller fn_nm == "now_ms" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".random_byte") eller fn_nm == "random_byte" { returner "int" }
+    hvis builtin.ends_with(fn_nm, ".sha256_bytes_hex") eller fn_nm == "sha256_bytes_hex" { returner "str" }
     hvis builtin.ends_with(fn_nm, ".char_code") eller fn_nm == "char_code" { returner "int" }
     hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".atomic_load_ptr") eller builtin.ends_with(fn_nm, ".atomic_store_ptr") eller builtin.ends_with(fn_nm, ".atomic_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_compare_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_fetch_add_ptr") eller builtin.ends_with(fn_nm, ".atomic_fence") { returner "int" }
@@ -2586,6 +2587,227 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0xB6, 0x3C, 0x24])                 // movzx edi,byte [rsp] (0..255, zero-ext)
     copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
     call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal (frå rdi)
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // ── sha256_bytes_hex(rdi=liste NcVal) → rax=hex-streng-NcVal (getrandom-modell) ─
+    // Full SHA-256 i native x86-64: streamar byte-lista i 64-byte-blokker med inline
+    // padding, message-schedule (w[64]), 64 rundar, big-endian hex-ut. Gjer PBKDF2/
+    // hash/hmac raske på fersk seed (var 120k pure-iterasjonar → 1 GiB-heng).
+    // K-konstantar (64 u32 LE) og hex-tabell som data-blobbar (hopp over).
+    la sha_skip = emit_jmp_placeholder(bytes)
+    la sha_k_va = TEXT_VA() + lengde(bytes)
+    la kk = [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993,
+             2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987,
+             1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774,
+             264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986,
+             2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711,
+             113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291,
+             1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411,
+             3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344,
+             430227734, 506948616, 659060556, 883997877, 958139571, 1322822218,
+             1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424,
+             2428436474, 2756734187, 3204031479, 3329325298]
+    la ki: heiltall = 0
+    mens ki < 64 { u32(bytes, kk[ki]) ki = ki + 1 }
+    la sha_hex_va = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]) // "0123456789abcdef"
+    patch_jump(bytes, sha_skip, lengde(bytes))
+    atomics["sha256_bytes_hex"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx
+    copy(bytes, [0x48, 0x81, 0xEC]) u32(bytes, 512)       // sub rsp,512
+    // total_len = list.payload[0]; elem = list.payload[16]
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8] (list payload)
+    copy(bytes, [0x48, 0x8B, 0x18])                       // mov rbx,[rax] (total_len)
+    copy(bytes, [0x48, 0x89, 0x9C, 0x24]) u32(bytes, 392) // mov [rsp+392],rbx
+    copy(bytes, [0x48, 0x8B, 0x40, 0x10])                 // mov rax,[rax+16] (elem_ptr)
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 384) // mov [rsp+384],rax
+    // padded = (total+72) & ~63
+    copy(bytes, [0x48, 0x8D, 0x43, 0x48])                 // lea rax,[rbx+72]
+    copy(bytes, [0x48, 0x83, 0xE0, 0xC0])                 // and rax,-64
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 400) // mov [rsp+400],padded
+    // bitlenBE @416 = bswap(total*8)
+    copy(bytes, [0x48, 0x89, 0xD8])                       // mov rax,rbx
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x03])                 // shl rax,3
+    copy(bytes, [0x48, 0x0F, 0xC8])                       // bswap rax
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 416) // mov [rsp+416],rax
+    // init h[0..7]
+    la hinit = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]
+    la hh: heiltall = 0
+    mens hh < 8 {
+        copy(bytes, [0xC7, 0x84, 0x24]) u32(bytes, 256 + hh * 4) u32(bytes, hinit[hh]) // mov d[rsp+256+..],imm
+        hh = hh + 1
+    }
+    // blkstart @408 = 0
+    copy(bytes, [0x48, 0xC7, 0x84, 0x24]) u32(bytes, 408) u32(bytes, 0)
+    // ── blockloop ──
+    la sha_blockloop = lengde(bytes)
+    // build block[0..63] @320
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx (bj)
+    la sha_bytefill = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0xB4, 0x24]) u32(bytes, 408) // mov rsi,[rsp+408] (blkstart)
+    copy(bytes, [0x48, 0x01, 0xCE])                       // add rsi,rcx → rsi=j
+    copy(bytes, [0x48, 0x3B, 0xB4, 0x24]) u32(bytes, 392) // cmp rsi,[rsp+392] (total)
+    la bf_jb_msg = emit_jcc_placeholder(bytes, 0x82)      // jb from_msg
+    la bf_je_80 = emit_jcc_placeholder(bytes, 0x84)       // je emit_80
+    // j > total: rdi = padded-8
+    copy(bytes, [0x48, 0x8B, 0xBC, 0x24]) u32(bytes, 400) // mov rdi,[rsp+400]
+    copy(bytes, [0x48, 0x83, 0xEF, 0x08])                 // sub rdi,8
+    copy(bytes, [0x48, 0x39, 0xFE])                       // cmp rsi,rdi
+    la bf_jb_zero = emit_jcc_placeholder(bytes, 0x82)     // jb emit_zero
+    // length byte: k = j - rdi ; dl = [rsp+416+k]
+    copy(bytes, [0x48, 0x89, 0xF0])                       // mov rax,rsi (j)
+    copy(bytes, [0x48, 0x29, 0xF8])                       // sub rax,rdi (k)
+    copy(bytes, [0x8A, 0x94, 0x04]) u32(bytes, 416)       // mov dl,[rsp+rax+416]
+    la bf_j_store = emit_jmp_placeholder(bytes)           // jmp store
+    // from_msg: dl = [[elem+j*8]+8]
+    la bf_msg_l = lengde(bytes)
+    patch_jump(bytes, bf_jb_msg, bf_msg_l)
+    copy(bytes, [0x48, 0x8B, 0x84, 0x24]) u32(bytes, 384) // mov rax,[rsp+384] (elem)
+    copy(bytes, [0x48, 0x8B, 0x04, 0xF0])                 // mov rax,[rax+rsi*8]
+    copy(bytes, [0x8A, 0x50, 0x08])                       // mov dl,[rax+8]
+    la bf_j_store2 = emit_jmp_placeholder(bytes)
+    // emit_80
+    la bf_80_l = lengde(bytes)
+    patch_jump(bytes, bf_je_80, bf_80_l)
+    copy(bytes, [0xB2, 0x80])                             // mov dl,0x80
+    la bf_j_store3 = emit_jmp_placeholder(bytes)
+    // emit_zero
+    la bf_zero_l = lengde(bytes)
+    patch_jump(bytes, bf_jb_zero, bf_zero_l)
+    copy(bytes, [0x31, 0xD2])                             // xor edx,edx
+    // store: block[bj] = dl
+    la bf_store_l = lengde(bytes)
+    patch_jump(bytes, bf_j_store, bf_store_l) patch_jump(bytes, bf_j_store2, bf_store_l) patch_jump(bytes, bf_j_store3, bf_store_l)
+    copy(bytes, [0x88, 0x94, 0x0C]) u32(bytes, 320)       // mov [rsp+rcx+320],dl
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x40])                 // cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_bytefill - (lengde(bytes) + 4)) & 4294967295) // jl bytefill
+    // ── compress block@320 into h@256 ──
+    // w[0..15] = bswap(block dwords)
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_wload = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 320)       // mov eax,[rsp+rcx*4+320]
+    copy(bytes, [0x0F, 0xC8])                             // bswap eax
+    copy(bytes, [0x89, 0x04, 0x8C])                       // mov [rsp+rcx*4],eax
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x10])                 // cmp rcx,16
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_wload - (lengde(bytes) + 4)) & 4294967295) // jl wload
+    // w[16..63]
+    copy(bytes, [0x48, 0xC7, 0xC1, 0x10, 0x00, 0x00, 0x00]) // mov rcx,16
+    la sha_wext = lengde(bytes)
+    // s0 from x=w[i-15] @ [rsp+rcx*4-60]
+    copy(bytes, [0x8B, 0x44, 0x8C, 0xC4])                 // mov eax,[rsp+rcx*4-60]
+    copy(bytes, [0x89, 0xC2])                             // mov edx,eax
+    copy(bytes, [0xC1, 0xCA, 0x07])                       // ror edx,7
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax
+    copy(bytes, [0xC1, 0xCB, 0x12])                       // ror ebx,18
+    copy(bytes, [0x31, 0xDA])                             // xor edx,ebx
+    copy(bytes, [0xC1, 0xE8, 0x03])                       // shr eax,3
+    copy(bytes, [0x31, 0xC2])                             // xor edx,eax  (edx=s0)
+    // s1 from y=w[i-2] @ [rsp+rcx*4-8]
+    copy(bytes, [0x8B, 0x44, 0x8C, 0xF8])                 // mov eax,[rsp+rcx*4-8]
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax
+    copy(bytes, [0xC1, 0xCB, 0x11])                       // ror ebx,17
+    copy(bytes, [0x89, 0xC6])                             // mov esi,eax
+    copy(bytes, [0xC1, 0xCE, 0x13])                       // ror esi,19
+    copy(bytes, [0x31, 0xF3])                             // xor ebx,esi
+    copy(bytes, [0xC1, 0xE8, 0x0A])                       // shr eax,10
+    copy(bytes, [0x31, 0xC3])                             // xor ebx,eax  (ebx=s1)
+    // w[i] = s1 + s0 + w[i-7] + w[i-16]
+    copy(bytes, [0x01, 0xD3])                             // add ebx,edx
+    copy(bytes, [0x03, 0x5C, 0x8C, 0xE4])                 // add ebx,[rsp+rcx*4-28]
+    copy(bytes, [0x03, 0x5C, 0x8C, 0xC0])                 // add ebx,[rsp+rcx*4-64]
+    copy(bytes, [0x89, 0x1C, 0x8C])                       // mov [rsp+rcx*4],ebx
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x40])                 // cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_wext - (lengde(bytes) + 4)) & 4294967295) // jl wext
+    // copy h[0..7] → work a..h @288
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_copyh = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 256)       // mov eax,[rsp+rcx*4+256]
+    copy(bytes, [0x89, 0x84, 0x8C]) u32(bytes, 288)       // mov [rsp+rcx*4+288],eax
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_copyh - (lengde(bytes) + 4)) & 4294967295) // jl copyh
+    // round loop i=0..63 (a@288 b@292 c@296 d@300 e@304 f@308 g@312 h@316)
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_round = lengde(bytes)
+    // S1 = ror(e,6)^ror(e,11)^ror(e,25)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 304)       // mov eax,[rsp+304] (e)
+    copy(bytes, [0x89, 0xC2]) copy(bytes, [0xC1, 0xCA, 0x06]) // mov edx,eax; ror edx,6
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x0B]) copy(bytes, [0x31, 0xDA]) // mov ebx,eax; ror ebx,11; xor edx,ebx
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x19]) copy(bytes, [0x31, 0xDA]) // ror ebx,25; xor edx,ebx  (edx=S1)
+    // ch = (e&f) ^ (~e&g)
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax (e)
+    copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 308)       // and ebx,[rsp+308] (f)
+    copy(bytes, [0x89, 0xC6]) copy(bytes, [0xF7, 0xD6])   // mov esi,eax; not esi
+    copy(bytes, [0x23, 0xB4, 0x24]) u32(bytes, 312)       // and esi,[rsp+312] (g)
+    copy(bytes, [0x31, 0xF3])                             // xor ebx,esi (ch)
+    // T1 = h + S1 + ch + K[i] + w[i]  → [rsp+424]
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 316)       // mov eax,[rsp+316] (h)
+    copy(bytes, [0x01, 0xD0]) copy(bytes, [0x01, 0xD8])   // add eax,edx; add eax,ebx
+    copy(bytes, [0x03, 0x04, 0x8D]) u32(bytes, sha_k_va)  // add eax,[rcx*4+K_va]
+    copy(bytes, [0x03, 0x04, 0x8C])                       // add eax,[rsp+rcx*4] (w[i])
+    copy(bytes, [0x89, 0x84, 0x24]) u32(bytes, 424)       // mov [rsp+424],eax (T1)
+    // S0 = ror(a,2)^ror(a,13)^ror(a,22)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 288)       // mov eax,[rsp+288] (a)
+    copy(bytes, [0x89, 0xC2]) copy(bytes, [0xC1, 0xCA, 0x02]) // mov edx,eax; ror edx,2
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x0D]) copy(bytes, [0x31, 0xDA]) // ror ebx,13; xor
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x16]) copy(bytes, [0x31, 0xDA]) // ror ebx,22; xor (edx=S0)
+    // maj = (a&b)^(a&c)^(b&c)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 288) copy(bytes, [0x23, 0x84, 0x24]) u32(bytes, 292) // mov eax,[288]; and eax,[292]
+    copy(bytes, [0x8B, 0x9C, 0x24]) u32(bytes, 288) copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 296) // mov ebx,[288]; and ebx,[296]
+    copy(bytes, [0x31, 0xD8])                             // xor eax,ebx
+    copy(bytes, [0x8B, 0x9C, 0x24]) u32(bytes, 292) copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 296) // mov ebx,[292]; and ebx,[296]
+    copy(bytes, [0x31, 0xD8])                             // xor eax,ebx (maj)
+    copy(bytes, [0x01, 0xD0])                             // add eax,edx (T2 = maj + S0)
+    // shifts: h=g;g=f;f=e;e=d+T1;d=c;c=b;b=a;a=T1+T2
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 312) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 316) // h=g
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 308) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 312) // g=f
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 304) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 308) // f=e
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 300) copy(bytes, [0x03, 0x94, 0x24]) u32(bytes, 424) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 304) // e=d+T1
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 296) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 300) // d=c
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 292) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 296) // c=b
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 288) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 292) // b=a
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 424) copy(bytes, [0x01, 0xC2]) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 288) // a=T1+T2
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x40]) // inc rcx; cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_round - (lengde(bytes) + 4)) & 4294967295) // jl round
+    // h[i] += work[i]
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_addh = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 288)       // mov eax,[rsp+rcx*4+288]
+    copy(bytes, [0x03, 0x84, 0x8C]) u32(bytes, 256)       // add eax,[rsp+rcx*4+256]
+    copy(bytes, [0x89, 0x84, 0x8C]) u32(bytes, 256)       // mov [rsp+rcx*4+256],eax
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_addh - (lengde(bytes) + 4)) & 4294967295) // jl addh
+    // blkstart += 64; if < padded → blockloop
+    copy(bytes, [0x48, 0x83, 0x84, 0x24]) u32(bytes, 408) legg_til(bytes, 64) // add q[rsp+408],64
+    copy(bytes, [0x48, 0x8B, 0x84, 0x24]) u32(bytes, 408) // mov rax,[rsp+408]
+    copy(bytes, [0x48, 0x3B, 0x84, 0x24]) u32(bytes, 400) // cmp rax,[rsp+400]
+    copy(bytes, [0x0F, 0x82]) u32(bytes, (sha_blockloop - (lengde(bytes) + 4)) & 4294967295) // jb blockloop
+    // hex-encode h[0..7] big-endian → block area @320 (64 chars). esi=out idx
+    copy(bytes, [0x31, 0xF6])                             // xor esi,esi
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx (word)
+    la sha_hexword = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 256)       // mov eax,[rsp+rcx*4+256]
+    copy(bytes, [0xBF, 0x08, 0x00, 0x00, 0x00])           // mov edi,8 (nibbles)
+    la sha_hexnib = lengde(bytes)
+    copy(bytes, [0xC1, 0xC0, 0x04])                       // rol eax,4
+    copy(bytes, [0x89, 0xC2])                             // mov edx,eax
+    copy(bytes, [0x83, 0xE2, 0x0F])                       // and edx,15
+    copy(bytes, [0x0F, 0xB6, 0x14, 0x15]) u32(bytes, sha_hex_va) // movzx edx,[rdx+hexva]
+    copy(bytes, [0x88, 0x94, 0x34]) u32(bytes, 320)       // mov [rsp+rsi+320],dl
+    copy(bytes, [0x48, 0xFF, 0xC6])                       // inc rsi
+    copy(bytes, [0xFF, 0xCF])                             // dec edi
+    copy(bytes, [0x0F, 0x85]) u32(bytes, (sha_hexnib - (lengde(bytes) + 4)) & 4294967295) // jnz hexnib
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_hexword - (lengde(bytes) + 4)) & 4294967295) // jl hexword
+    // RT_STR_RAW(rdi=rsp+320, rsi=64)
+    copy(bytes, [0x48, 0x8D, 0xBC, 0x24]) u32(bytes, 320) // lea rdi,[rsp+320]
+    copy(bytes, [0xBE, 0x40, 0x00, 0x00, 0x00])           // mov esi,64
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = streng-NcVal
+    copy(bytes, [0x48, 0x81, 0xC4]) u32(bytes, 512)       // add rsp,512
+    copy(bytes, [0x5B])                                   // pop rbx
+    legg_til(bytes, 0xC3)                                 // ret
     legg_til(bytes, 0xC3)                                 // ret
 
     // ── ord_null_guard(rdi, rsi) → rdi/rsi med rå null bytt ut med int-0 ─────
@@ -6035,6 +6257,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_slett   { returner atomic_vas["fil_slett"] }
     hvis fn_nm == "now_ms" eller builtin.ends_with(fn_nm, ".now_ms") { returner atomic_vas["now_ms"] }
     hvis fn_nm == "random_byte" eller builtin.ends_with(fn_nm, ".random_byte") { returner atomic_vas["random_byte"] }
+    hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner atomic_vas["host_finst"] }
     hvis fn_nm == "builtin.host_kall" eller fn_nm == "host_kall" { returner atomic_vas["host_kall"] }
@@ -6089,9 +6312,12 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "dns_lookup" { returner ["std.native_gap.dns_lookup"] }
     // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
     // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).
-    hvis kort == "sha256_bytes" { returner ["std.sha256.hash_bytes"] }
+    // sha256_bytes(liste) → native SHA-256-atom via native_gap (var pure std.sha256.hash_bytes).
+    hvis kort == "sha256_bytes" { returner ["std.native_gap.sha256_hex_gap"] }
     // pbkdf2_sha256(tekst,tekst,int,int) → pure tekst-signatur std.sha256.pbkdf2_hex.
-    hvis kort == "pbkdf2_sha256" { returner ["std.sha256.pbkdf2_hex"] }
+    // pbkdf2_sha256 → native (native_gap.pbkdf2_gap brukar sha256_bytes_hex-atomet).
+    // Var pure std.sha256.pbkdf2_hex = 120k pure HMAC-iterasjonar → 1 GiB-heng.
+    hvis kort == "pbkdf2_sha256" { returner ["std.native_gap.pbkdf2_gap"] }
     // random_hex(int) → pure LCG std.sha256.random_hex_pure (unngår vm_random_hex-heng).
     // random_hex(int) → std.native_gap.random_hex_secure (getrandom(2)-basert; EKTE entropi).
     // Den gamle LCG-ruta (std.sha256.random_hex_pure, seeda berre frå tid_ms) gav
