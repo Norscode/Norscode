@@ -47,15 +47,16 @@ funksjon HEAP_VA()   { returner 6291456 }
 // avslutning (exit 199), (d) vaktside (PROT_NONE) rett under GC_HEAP_LIMIT.
 funksjon GC_HEAP_LIMIT() { returner 1080033280 }   // 0x40600000 (heap-tak; vaktside i [−4096, 0))
 funksjon GC_BITMAP_VA() { returner 1080033280 }    // 0x40600000, 8 MiB (1 bit / 16 B-slot frå 0x600000)
-funksjon GC_MSTACK_VA() { returner 1090519040 }    // 0x41000000, 32 MiB (4M peikarar)
+funksjon GC_MSTACK_VA() { returner 1258291200 }    // 0x4B000000 (etter live-map), 512 MiB lat VA
+funksjon GC_MSTACK_END() { returner 1795162112 }   // 0x6B000000: 64M peikarar = ALLE 16 B-slottar i 1 GiB-heapen → med marker-ved-push (gc_push: éin push per objekt) kan stakken per konstruksjon ikkje renne over. (v5: 32 MiB @0x41000000 = 4M, UTAN dedup → stille dropp av barn ved full stakk = materialize-korrupsjon.)
 funksjon GC_LIVEMAP_VA() { returner 1124073472 }   // 0x43000000, 128 MiB (8M entryar à 16 B)
 funksjon GC_SOFT_LIMIT() { returner 1012924416 }   // 0x3C600000 = tak − 64 MiB: safepoint samlar uansett teljar
 funksjon GC_HARD_LIMIT() { returner 1046478848 }   // 0x3E600000 = tak − 32 MiB: bump ≥ dette ETTER collect → OOM
 funksjon HEAP_SZ() {
-    // GC-modus: segment [0x600000, 0x4B000000) = heap 1 GiB + bitmap + handler (0x40E00000)
-    // + mark-stakk + live-map. Lat mapping; berre brukte sider blir rørde.
-    // Paritet-løypa (flagg AV) brukar main sin 2 GiB monotone bump for store program.
-    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1252658176 }   // 0x4AA00000
+    // GC-modus: segment [0x600000, 0x6B000000) = heap 1 GiB + bitmap + handler (0x40E00000)
+    // + live-map (0x43000000) + mark-stakk 512 MiB (0x4B000000, v6). Lat mapping; berre
+    // brukte sider blir rørde. Paritet-løypa (flagg AV) brukar main sin 2 GiB monotone bump.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1789394944 }   // 0x6AA00000
     returner 2147483648
 }
 funksjon HEAP_CONTROLSZ() { returner 64 }
@@ -948,6 +949,8 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis fn_nm == "builtin.sys6" eller fn_nm == "sys6" eller fn_nm == "builtin.raw_load8" eller fn_nm == "raw_load8" { returner "int" }
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".now_ms") eller fn_nm == "now_ms" { returner "int" }
+    hvis builtin.ends_with(fn_nm, ".random_byte") eller fn_nm == "random_byte" { returner "int" }
+    hvis builtin.ends_with(fn_nm, ".sha256_bytes_hex") eller fn_nm == "sha256_bytes_hex" { returner "str" }
     hvis builtin.ends_with(fn_nm, ".char_code") eller fn_nm == "char_code" { returner "int" }
     hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".atomic_load_ptr") eller builtin.ends_with(fn_nm, ".atomic_store_ptr") eller builtin.ends_with(fn_nm, ".atomic_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_compare_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_fetch_add_ptr") eller builtin.ends_with(fn_nm, ".atomic_fence") { returner "int" }
@@ -2570,6 +2573,243 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
     legg_til(bytes, 0xC3)                                 // ret
 
+    // ── random_byte() → int 0..255 via getrandom(2) (x86-64 #318) ────────────────
+    // EKTE entropi per byte. Gap-ruta random_hex_pure (LCG seeda berre frå tid_ms)
+    // gav identisk output for kall i same ms → duplikate MFA-recovery-kodar på fersk
+    // seed. std.native_gap.random_hex_secure hex-encodar desse bytane i rein Norscode.
+    atomics["random_byte"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16
+    copy(bytes, [0x48, 0x8D, 0x3C, 0x24])                 // lea rdi,[rsp] (buf)
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])           // mov esi,1 (len)
+    copy(bytes, [0x31, 0xD2])                             // xor edx,edx (flags=0)
+    copy(bytes, [0xB8, 0x3E, 0x01, 0x00, 0x00])           // mov eax,318 (getrandom)
+    copy(bytes, [0x0F, 0x05])                             // syscall
+    copy(bytes, [0x0F, 0xB6, 0x3C, 0x24])                 // movzx edi,byte [rsp] (0..255, zero-ext)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal (frå rdi)
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // ── sha256_bytes_hex(rdi=liste NcVal) → rax=hex-streng-NcVal (getrandom-modell) ─
+    // Full SHA-256 i native x86-64: streamar byte-lista i 64-byte-blokker med inline
+    // padding, message-schedule (w[64]), 64 rundar, big-endian hex-ut. Gjer PBKDF2/
+    // hash/hmac raske på fersk seed (var 120k pure-iterasjonar → 1 GiB-heng).
+    // K-konstantar (64 u32 LE) og hex-tabell som data-blobbar (hopp over).
+    la sha_skip = emit_jmp_placeholder(bytes)
+    la sha_k_va = TEXT_VA() + lengde(bytes)
+    la kk = [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993,
+             2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987,
+             1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774,
+             264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986,
+             2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711,
+             113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291,
+             1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411,
+             3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344,
+             430227734, 506948616, 659060556, 883997877, 958139571, 1322822218,
+             1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424,
+             2428436474, 2756734187, 3204031479, 3329325298]
+    la ki: heiltall = 0
+    mens ki < 64 { u32(bytes, kk[ki]) ki = ki + 1 }
+    la sha_hex_va = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]) // "0123456789abcdef"
+    patch_jump(bytes, sha_skip, lengde(bytes))
+    atomics["sha256_bytes_hex"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx
+    copy(bytes, [0x48, 0x81, 0xEC]) u32(bytes, 512)       // sub rsp,512
+    // total_len = list.payload[0]; elem = list.payload[16]
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8] (list payload)
+    copy(bytes, [0x48, 0x8B, 0x18])                       // mov rbx,[rax] (total_len)
+    copy(bytes, [0x48, 0x89, 0x9C, 0x24]) u32(bytes, 392) // mov [rsp+392],rbx
+    copy(bytes, [0x48, 0x8B, 0x40, 0x10])                 // mov rax,[rax+16] (elem_ptr)
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 384) // mov [rsp+384],rax
+    // padded = (total+72) & ~63
+    copy(bytes, [0x48, 0x8D, 0x43, 0x48])                 // lea rax,[rbx+72]
+    copy(bytes, [0x48, 0x83, 0xE0, 0xC0])                 // and rax,-64
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 400) // mov [rsp+400],padded
+    // bitlenBE @416 = bswap(total*8)
+    copy(bytes, [0x48, 0x89, 0xD8])                       // mov rax,rbx
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x03])                 // shl rax,3
+    copy(bytes, [0x48, 0x0F, 0xC8])                       // bswap rax
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 416) // mov [rsp+416],rax
+    // init h[0..7]
+    la hinit = [1779033703, 3144134277, 1013904242, 2773480762, 1359893119, 2600822924, 528734635, 1541459225]
+    la hh: heiltall = 0
+    mens hh < 8 {
+        copy(bytes, [0xC7, 0x84, 0x24]) u32(bytes, 256 + hh * 4) u32(bytes, hinit[hh]) // mov d[rsp+256+..],imm
+        hh = hh + 1
+    }
+    // blkstart @408 = 0
+    copy(bytes, [0x48, 0xC7, 0x84, 0x24]) u32(bytes, 408) u32(bytes, 0)
+    // ── blockloop ──
+    la sha_blockloop = lengde(bytes)
+    // build block[0..63] @320
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx (bj)
+    la sha_bytefill = lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0xB4, 0x24]) u32(bytes, 408) // mov rsi,[rsp+408] (blkstart)
+    copy(bytes, [0x48, 0x01, 0xCE])                       // add rsi,rcx → rsi=j
+    copy(bytes, [0x48, 0x3B, 0xB4, 0x24]) u32(bytes, 392) // cmp rsi,[rsp+392] (total)
+    la bf_jb_msg = emit_jcc_placeholder(bytes, 0x82)      // jb from_msg
+    la bf_je_80 = emit_jcc_placeholder(bytes, 0x84)       // je emit_80
+    // j > total: rdi = padded-8
+    copy(bytes, [0x48, 0x8B, 0xBC, 0x24]) u32(bytes, 400) // mov rdi,[rsp+400]
+    copy(bytes, [0x48, 0x83, 0xEF, 0x08])                 // sub rdi,8
+    copy(bytes, [0x48, 0x39, 0xFE])                       // cmp rsi,rdi
+    la bf_jb_zero = emit_jcc_placeholder(bytes, 0x82)     // jb emit_zero
+    // length byte: k = j - rdi ; dl = [rsp+416+k]
+    copy(bytes, [0x48, 0x89, 0xF0])                       // mov rax,rsi (j)
+    copy(bytes, [0x48, 0x29, 0xF8])                       // sub rax,rdi (k)
+    copy(bytes, [0x8A, 0x94, 0x04]) u32(bytes, 416)       // mov dl,[rsp+rax+416]
+    la bf_j_store = emit_jmp_placeholder(bytes)           // jmp store
+    // from_msg: dl = [[elem+j*8]+8]
+    la bf_msg_l = lengde(bytes)
+    patch_jump(bytes, bf_jb_msg, bf_msg_l)
+    copy(bytes, [0x48, 0x8B, 0x84, 0x24]) u32(bytes, 384) // mov rax,[rsp+384] (elem)
+    copy(bytes, [0x48, 0x8B, 0x04, 0xF0])                 // mov rax,[rax+rsi*8]
+    copy(bytes, [0x8A, 0x50, 0x08])                       // mov dl,[rax+8]
+    la bf_j_store2 = emit_jmp_placeholder(bytes)
+    // emit_80
+    la bf_80_l = lengde(bytes)
+    patch_jump(bytes, bf_je_80, bf_80_l)
+    copy(bytes, [0xB2, 0x80])                             // mov dl,0x80
+    la bf_j_store3 = emit_jmp_placeholder(bytes)
+    // emit_zero
+    la bf_zero_l = lengde(bytes)
+    patch_jump(bytes, bf_jb_zero, bf_zero_l)
+    copy(bytes, [0x31, 0xD2])                             // xor edx,edx
+    // store: block[bj] = dl
+    la bf_store_l = lengde(bytes)
+    patch_jump(bytes, bf_j_store, bf_store_l) patch_jump(bytes, bf_j_store2, bf_store_l) patch_jump(bytes, bf_j_store3, bf_store_l)
+    copy(bytes, [0x88, 0x94, 0x0C]) u32(bytes, 320)       // mov [rsp+rcx+320],dl
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x40])                 // cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_bytefill - (lengde(bytes) + 4)) & 4294967295) // jl bytefill
+    // ── compress block@320 into h@256 ──
+    // w[0..15] = bswap(block dwords)
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_wload = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 320)       // mov eax,[rsp+rcx*4+320]
+    copy(bytes, [0x0F, 0xC8])                             // bswap eax
+    copy(bytes, [0x89, 0x04, 0x8C])                       // mov [rsp+rcx*4],eax
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x10])                 // cmp rcx,16
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_wload - (lengde(bytes) + 4)) & 4294967295) // jl wload
+    // w[16..63]
+    copy(bytes, [0x48, 0xC7, 0xC1, 0x10, 0x00, 0x00, 0x00]) // mov rcx,16
+    la sha_wext = lengde(bytes)
+    // s0 from x=w[i-15] @ [rsp+rcx*4-60]
+    copy(bytes, [0x8B, 0x44, 0x8C, 0xC4])                 // mov eax,[rsp+rcx*4-60]
+    copy(bytes, [0x89, 0xC2])                             // mov edx,eax
+    copy(bytes, [0xC1, 0xCA, 0x07])                       // ror edx,7
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax
+    copy(bytes, [0xC1, 0xCB, 0x12])                       // ror ebx,18
+    copy(bytes, [0x31, 0xDA])                             // xor edx,ebx
+    copy(bytes, [0xC1, 0xE8, 0x03])                       // shr eax,3
+    copy(bytes, [0x31, 0xC2])                             // xor edx,eax  (edx=s0)
+    // s1 from y=w[i-2] @ [rsp+rcx*4-8]
+    copy(bytes, [0x8B, 0x44, 0x8C, 0xF8])                 // mov eax,[rsp+rcx*4-8]
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax
+    copy(bytes, [0xC1, 0xCB, 0x11])                       // ror ebx,17
+    copy(bytes, [0x89, 0xC6])                             // mov esi,eax
+    copy(bytes, [0xC1, 0xCE, 0x13])                       // ror esi,19
+    copy(bytes, [0x31, 0xF3])                             // xor ebx,esi
+    copy(bytes, [0xC1, 0xE8, 0x0A])                       // shr eax,10
+    copy(bytes, [0x31, 0xC3])                             // xor ebx,eax  (ebx=s1)
+    // w[i] = s1 + s0 + w[i-7] + w[i-16]
+    copy(bytes, [0x01, 0xD3])                             // add ebx,edx
+    copy(bytes, [0x03, 0x5C, 0x8C, 0xE4])                 // add ebx,[rsp+rcx*4-28]
+    copy(bytes, [0x03, 0x5C, 0x8C, 0xC0])                 // add ebx,[rsp+rcx*4-64]
+    copy(bytes, [0x89, 0x1C, 0x8C])                       // mov [rsp+rcx*4],ebx
+    copy(bytes, [0x48, 0xFF, 0xC1])                       // inc rcx
+    copy(bytes, [0x48, 0x83, 0xF9, 0x40])                 // cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_wext - (lengde(bytes) + 4)) & 4294967295) // jl wext
+    // copy h[0..7] → work a..h @288
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_copyh = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 256)       // mov eax,[rsp+rcx*4+256]
+    copy(bytes, [0x89, 0x84, 0x8C]) u32(bytes, 288)       // mov [rsp+rcx*4+288],eax
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_copyh - (lengde(bytes) + 4)) & 4294967295) // jl copyh
+    // round loop i=0..63 (a@288 b@292 c@296 d@300 e@304 f@308 g@312 h@316)
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_round = lengde(bytes)
+    // S1 = ror(e,6)^ror(e,11)^ror(e,25)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 304)       // mov eax,[rsp+304] (e)
+    copy(bytes, [0x89, 0xC2]) copy(bytes, [0xC1, 0xCA, 0x06]) // mov edx,eax; ror edx,6
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x0B]) copy(bytes, [0x31, 0xDA]) // mov ebx,eax; ror ebx,11; xor edx,ebx
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x19]) copy(bytes, [0x31, 0xDA]) // ror ebx,25; xor edx,ebx  (edx=S1)
+    // ch = (e&f) ^ (~e&g)
+    copy(bytes, [0x89, 0xC3])                             // mov ebx,eax (e)
+    copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 308)       // and ebx,[rsp+308] (f)
+    copy(bytes, [0x89, 0xC6]) copy(bytes, [0xF7, 0xD6])   // mov esi,eax; not esi
+    copy(bytes, [0x23, 0xB4, 0x24]) u32(bytes, 312)       // and esi,[rsp+312] (g)
+    copy(bytes, [0x31, 0xF3])                             // xor ebx,esi (ch)
+    // T1 = h + S1 + ch + K[i] + w[i]  → [rsp+424]
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 316)       // mov eax,[rsp+316] (h)
+    copy(bytes, [0x01, 0xD0]) copy(bytes, [0x01, 0xD8])   // add eax,edx; add eax,ebx
+    copy(bytes, [0x03, 0x04, 0x8D]) u32(bytes, sha_k_va)  // add eax,[rcx*4+K_va]
+    copy(bytes, [0x03, 0x04, 0x8C])                       // add eax,[rsp+rcx*4] (w[i])
+    copy(bytes, [0x89, 0x84, 0x24]) u32(bytes, 424)       // mov [rsp+424],eax (T1)
+    // S0 = ror(a,2)^ror(a,13)^ror(a,22)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 288)       // mov eax,[rsp+288] (a)
+    copy(bytes, [0x89, 0xC2]) copy(bytes, [0xC1, 0xCA, 0x02]) // mov edx,eax; ror edx,2
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x0D]) copy(bytes, [0x31, 0xDA]) // ror ebx,13; xor
+    copy(bytes, [0x89, 0xC3]) copy(bytes, [0xC1, 0xCB, 0x16]) copy(bytes, [0x31, 0xDA]) // ror ebx,22; xor (edx=S0)
+    // maj = (a&b)^(a&c)^(b&c)
+    copy(bytes, [0x8B, 0x84, 0x24]) u32(bytes, 288) copy(bytes, [0x23, 0x84, 0x24]) u32(bytes, 292) // mov eax,[288]; and eax,[292]
+    copy(bytes, [0x8B, 0x9C, 0x24]) u32(bytes, 288) copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 296) // mov ebx,[288]; and ebx,[296]
+    copy(bytes, [0x31, 0xD8])                             // xor eax,ebx
+    copy(bytes, [0x8B, 0x9C, 0x24]) u32(bytes, 292) copy(bytes, [0x23, 0x9C, 0x24]) u32(bytes, 296) // mov ebx,[292]; and ebx,[296]
+    copy(bytes, [0x31, 0xD8])                             // xor eax,ebx (maj)
+    copy(bytes, [0x01, 0xD0])                             // add eax,edx (T2 = maj + S0)
+    // shifts: h=g;g=f;f=e;e=d+T1;d=c;c=b;b=a;a=T1+T2
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 312) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 316) // h=g
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 308) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 312) // g=f
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 304) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 308) // f=e
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 300) copy(bytes, [0x03, 0x94, 0x24]) u32(bytes, 424) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 304) // e=d+T1
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 296) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 300) // d=c
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 292) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 296) // c=b
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 288) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 292) // b=a
+    copy(bytes, [0x8B, 0x94, 0x24]) u32(bytes, 424) copy(bytes, [0x01, 0xC2]) copy(bytes, [0x89, 0x94, 0x24]) u32(bytes, 288) // a=T1+T2
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x40]) // inc rcx; cmp rcx,64
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_round - (lengde(bytes) + 4)) & 4294967295) // jl round
+    // h[i] += work[i]
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx
+    la sha_addh = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 288)       // mov eax,[rsp+rcx*4+288]
+    copy(bytes, [0x03, 0x84, 0x8C]) u32(bytes, 256)       // add eax,[rsp+rcx*4+256]
+    copy(bytes, [0x89, 0x84, 0x8C]) u32(bytes, 256)       // mov [rsp+rcx*4+256],eax
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_addh - (lengde(bytes) + 4)) & 4294967295) // jl addh
+    // blkstart += 64; if < padded → blockloop
+    copy(bytes, [0x48, 0x83, 0x84, 0x24]) u32(bytes, 408) legg_til(bytes, 64) // add q[rsp+408],64
+    copy(bytes, [0x48, 0x8B, 0x84, 0x24]) u32(bytes, 408) // mov rax,[rsp+408]
+    copy(bytes, [0x48, 0x3B, 0x84, 0x24]) u32(bytes, 400) // cmp rax,[rsp+400]
+    copy(bytes, [0x0F, 0x82]) u32(bytes, (sha_blockloop - (lengde(bytes) + 4)) & 4294967295) // jb blockloop
+    // hex-encode h[0..7] big-endian → block area @320 (64 chars). esi=out idx
+    copy(bytes, [0x31, 0xF6])                             // xor esi,esi
+    copy(bytes, [0x31, 0xC9])                             // xor ecx,ecx (word)
+    la sha_hexword = lengde(bytes)
+    copy(bytes, [0x8B, 0x84, 0x8C]) u32(bytes, 256)       // mov eax,[rsp+rcx*4+256]
+    copy(bytes, [0xBF, 0x08, 0x00, 0x00, 0x00])           // mov edi,8 (nibbles)
+    la sha_hexnib = lengde(bytes)
+    copy(bytes, [0xC1, 0xC0, 0x04])                       // rol eax,4
+    copy(bytes, [0x89, 0xC2])                             // mov edx,eax
+    copy(bytes, [0x83, 0xE2, 0x0F])                       // and edx,15
+    copy(bytes, [0x0F, 0xB6, 0x14, 0x15]) u32(bytes, sha_hex_va) // movzx edx,[rdx+hexva]
+    copy(bytes, [0x88, 0x94, 0x34]) u32(bytes, 320)       // mov [rsp+rsi+320],dl
+    copy(bytes, [0x48, 0xFF, 0xC6])                       // inc rsi
+    copy(bytes, [0xFF, 0xCF])                             // dec edi
+    copy(bytes, [0x0F, 0x85]) u32(bytes, (sha_hexnib - (lengde(bytes) + 4)) & 4294967295) // jnz hexnib
+    copy(bytes, [0x48, 0xFF, 0xC1]) copy(bytes, [0x48, 0x83, 0xF9, 0x08]) // inc rcx; cmp rcx,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (sha_hexword - (lengde(bytes) + 4)) & 4294967295) // jl hexword
+    // RT_STR_RAW(rdi=rsp+320, rsi=64)
+    copy(bytes, [0x48, 0x8D, 0xBC, 0x24]) u32(bytes, 320) // lea rdi,[rsp+320]
+    copy(bytes, [0xBE, 0x40, 0x00, 0x00, 0x00])           // mov esi,64
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())            // rax = streng-NcVal
+    copy(bytes, [0x48, 0x81, 0xC4]) u32(bytes, 512)       // add rsp,512
+    copy(bytes, [0x5B])                                   // pop rbx
+    legg_til(bytes, 0xC3)                                 // ret
+    legg_til(bytes, 0xC3)                                 // ret
+
     // ── ord_null_guard(rdi, rsi) → rdi/rsi med rå null bytt ut med int-0 ─────
     // Ordningssamanlikning (<, >, <=, >=) gjekk rett til RT_LT/GT/LE/GE utan
     // null-vakt (berre ==/!= hadde det). VM-en reknar null ≡ 0; den frosne
@@ -3645,13 +3885,13 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // (Bitmap må nullstillast mellom collections; single-call her.)
     atomics["gc_mark_native"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])          // mov rdi,[rdi+8] (unbox root)
-    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x41]) // mov r11d,0x41000000 GC_MSTACK_VA
+    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x4B]) // mov r11d,0x4B000000 GC_MSTACK_VA (v6)
     copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x00, 0x43]) // mov r10d,0x43000000 GC_LIVEMAP_VA
     copy(bytes, [0x41, 0xB9, 0x00, 0x00, 0x00, 0x00]) // mov r9d,0 (count)
     copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push root)
     copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
     la mnat_loop = lengde(bytes)                   // .loop:
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x41]) // cmp r11,0x41000000 (GC_MSTACK_VA)
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x4B]) // cmp r11,0x4B000000 (GC_MSTACK_VA, v6)
     copy(bytes, [0x0F, 0x86])                      // jbe done
     u32(bytes, 0)
     la mnat_pdone = lengde(bytes) - 4
@@ -4809,6 +5049,69 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_abs_jump(bytes, RT_MAP_HAS() - TEXT_VA(), RT_MAP_HAS() - TEXT_VA() + 12, atomics["map_has"])
     patch_abs_jump(bytes, RT_MAP_DEL() - TEXT_VA(), RT_MAP_DEL() - TEXT_VA() + 12, atomics["map_del"])
 
+    // ── GC (iv-a): gc_push(rdi=kandidat) — MARKER-VED-PUSH (v6, 2026-09-07) ─────────────
+    // Fram til v5 vart barn pusha på mark-stakken UTAN dedup (mark-biten vart sjekka fyrst
+    // ved pop), så eit objekt referert frå K foreldre vart pusha K gonger; når den faste
+    // 4M-stakken var full, vart resten av barna STILLE hoppa over (jae vals_start/map_done/
+    // loop) → aldri markerte → sweepen frigav dei medan dei var levande. Storleiks-/last-
+    // avhengig: isolert modul OK, full materialize korrupt (socket.no:38 strengar → bare tal,
+    // run-ncb-pure SIGSEGV). No: range-/alignment-filter + mark-bit test-og-set VED PUSH →
+    // kvart objekt blir pusha nøyaktig éin gong → stakkbehov ≤ talet levande objekt, og
+    // stakken (512 MiB = 64M slottar) dekkjer heile 1 GiB-heapen. Overflow er dermed umogleg;
+    // skulle det likevel skje → HØG feil (exit 198), aldri stille korrupsjon.
+    // Bevarer alle register unntatt r11 (mark-stakk-topp) og flagg; 6 qword stakk.
+    la gp_skip_msg = emit_jmp_placeholder(bytes)
+    la gp_msg = tekst_til_bytes("FEIL: GC mark-stakk overflow (>64M levande objekt) — exit 198\n")
+    la gp_msg_va = TEXT_VA() + lengde(bytes)
+    copy(bytes, gp_msg)
+    patch_jump(bytes, gp_skip_msg, lengde(bytes))
+    atomics["gc_push"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x81, 0xFF, 0x60, 0x20, 0x70, 0x00]) // cmp rdi,0x702060 (HEAP_ALLOC_START; kanon-cache aldri rot)
+    la gp_ret1 = emit_jcc_placeholder(bytes, 0x82)  // jb ret
+    copy(bytes, [0x48, 0x3B, 0x3C, 0x25, 0x00, 0x00, 0x60, 0x00]) // cmp rdi,[0x600000] (bump)
+    la gp_ret2 = emit_jcc_placeholder(bytes, 0x83)  // jae ret
+    la gp_ret3: heiltall = -1
+    hvis gc_mode == "1" {
+        copy(bytes, [0x40, 0xF6, 0xC7, 0x0F])      // test dil,15 (berre 16-aligna kandidatar er boksar)
+        gp_ret3 = emit_jcc_placeholder(bytes, 0x85) // jnz ret
+    }
+    copy(bytes, [0x50, 0x51, 0x52, 0x56, 0x41, 0x50]) // push rax; push rcx; push rdx; push rsi; push r8
+    copy(bytes, [0x48, 0x89, 0xF8])                // mov rax,rdi
+    copy(bytes, [0x48, 0x2D, 0x00, 0x00, 0x60, 0x00]) // sub rax,0x600000
+    copy(bytes, [0x48, 0xC1, 0xE8, 0x04])          // shr rax,4 (16 B-slot)
+    copy(bytes, [0x48, 0x89, 0xC1])                // mov rcx,rax
+    copy(bytes, [0x48, 0x83, 0xE1, 0x07])          // and rcx,7 (bit-nr)
+    copy(bytes, [0x48, 0xC1, 0xE8, 0x03])          // shr rax,3 (byte-indeks)
+    copy(bytes, [0x48, 0x05, 0x00, 0x00, 0x60, 0x40]) // add rax,0x40600000 (GC_BITMAP_VA)
+    copy(bytes, [0x0F, 0xB6, 0x10])                // movzx edx,byte [rax]
+    copy(bytes, [0x41, 0xB8, 0x01, 0x00, 0x00, 0x00]) // mov r8d,1
+    copy(bytes, [0x49, 0xD3, 0xE0])                // shl r8,cl
+    copy(bytes, [0x4C, 0x85, 0xC2])                // test rdx,r8
+    la gp_pop = emit_jcc_placeholder(bytes, 0x85)  // jnz pop (alt markert → ikkje push: DEDUP)
+    copy(bytes, [0x4C, 0x09, 0xC2])                // or rdx,r8
+    copy(bytes, [0x88, 0x10])                      // mov [rax],dl (set mark-bit VED PUSH)
+    copy(bytes, [0x49, 0x81, 0xFB]) u32(bytes, GC_MSTACK_END()) // cmp r11,GC_MSTACK_END (0x6B000000)
+    la gp_ovf = emit_jcc_placeholder(bytes, 0x83)  // jae overflow (umogleg per konstruksjon)
+    copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push)
+    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
+    la gp_popl = lengde(bytes)                     // .pop:
+    patch_jump(bytes, gp_pop, gp_popl)
+    copy(bytes, [0x41, 0x58, 0x5E, 0x5A, 0x59, 0x58]) // pop r8; pop rsi; pop rdx; pop rcx; pop rax
+    la gp_retl = lengde(bytes)                     // .ret:
+    patch_jump(bytes, gp_ret1, gp_retl) patch_jump(bytes, gp_ret2, gp_retl)
+    hvis gp_ret3 >= 0 { patch_jump(bytes, gp_ret3, gp_retl) }
+    copy(bytes, [0xC3])                            // ret
+    la gp_ovfl = lengde(bytes)                     // .overflow: (returnerer aldri)
+    patch_jump(bytes, gp_ovf, gp_ovfl)
+    copy(bytes, [0xBF, 0x02, 0x00, 0x00, 0x00])    // mov edi,2 (stderr)
+    copy(bytes, [0x48, 0xBE]) u64(bytes, gp_msg_va) // movabs rsi,msg
+    copy(bytes, [0xBA]) u32(bytes, lengde(gp_msg)) // mov edx,len
+    copy(bytes, [0xB8, 0x01, 0x00, 0x00, 0x00])    // mov eax,1 (write)
+    copy(bytes, [0x0F, 0x05])                      // syscall
+    copy(bytes, [0xBF, 0xC6, 0x00, 0x00, 0x00])    // mov edi,198
+    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])    // mov eax,60 (exit)
+    copy(bytes, [0x0F, 0x05])                      // syscall
+
     // ── GC (iv): KONSERVATIV ROT-SKANN + DFS-mark (gc_mark_roots) ────────────────
     // gc_mark_roots() -> boksa mark-teljar. Nullstill bitmap; scan [rsp+8, stack_base)
     // etter heap-peikarar (lokalvariablar er rbp-relative PÅ stakken → dekt); push kvar
@@ -4827,7 +5130,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x83, 0xC1, 0x02])          // add rcx,2
     copy(bytes, [0x31, 0xC0])                       // xor eax,eax
     copy(bytes, [0xF3, 0x48, 0xAB])                 // rep stosq (nullstill bitmap)
-    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x41]) // mov r11d,0x41000000 GC_MSTACK_VA
+    copy(bytes, [0x41, 0xBB, 0x00, 0x00, 0x00, 0x4B]) // mov r11d,0x4B000000 GC_MSTACK_VA (v6)
     copy(bytes, [0x41, 0xBA, 0x00, 0x00, 0x00, 0x43]) // mov r10d,0x43000000 GC_LIVEMAP_VA
     copy(bytes, [0x41, 0xB9, 0x00, 0x00, 0x00, 0x00]) // mov r9d,0 (count)
     // root-scan 0: verts-ABI-sida [HOST_ABI+16, HOST_ABI+4096) — modulglobalar OG
@@ -4841,59 +5144,31 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la mrg_scan = lengde(bytes)                    // .gscan:
     copy(bytes, [0x48, 0x39, 0xD6])                // cmp rsi,rdx
     la mrg_done = emit_jcc_placeholder(bytes, 0x83) // jae gdone
-    copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi]
-    copy(bytes, [0x48, 0x3D, 0x60, 0x20, 0x70, 0x00]) // cmp rax,0x702060 (HEAP_ALLOC_START; kanon-cache aldri rot)
-    la mrg_n1 = emit_jcc_placeholder(bytes, 0x82)  // jb gnext
-    copy(bytes, [0x48, 0x39, 0xC8])                // cmp rax,rcx (bump)
-    la mrg_n2 = emit_jcc_placeholder(bytes, 0x83)  // jae gnext
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (mstack full = GC_LIVEMAP_VA)
-    la mrg_full = emit_jcc_placeholder(bytes, 0x83) // jae gdone
-    copy(bytes, [0x49, 0x89, 0x03])                // mov [r11],rax (push root)
-    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
-    la mrg_next = lengde(bytes)                    // .gnext:
-    patch_jump(bytes, mrg_n1, mrg_next) patch_jump(bytes, mrg_n2, mrg_next)
+    copy(bytes, [0x48, 0x8B, 0x3E])                // mov rdi,[rsi]
+    call_rel32(bytes, atomics["gc_push"], TEXT_VA()) // v6: range/align/mark-bit-dedup + push i gc_push (bevarer rsi/rdx)
     copy(bytes, [0x48, 0x83, 0xC6, 0x08])          // add rsi,8
     la mrg_j = emit_jmp_placeholder(bytes)
     patch_jump(bytes, mrg_j, mrg_scan)
     la mrg_donel = lengde(bytes)                   // .gdone:
-    patch_jump(bytes, mrg_done, mrg_donel) patch_jump(bytes, mrg_full, mrg_donel)
+    patch_jump(bytes, mrg_done, mrg_donel)
     // root-scan [rsp+8, stack_base):
     copy(bytes, [0x48, 0x8D, 0x74, 0x24, 0x08])    // lea rsi,[rsp+8]
     copy(bytes, [0x48, 0x8B, 0x14, 0x25, 0x30, 0x00, 0x60, 0x00]) // mov rdx,[0x600030] (stack_base)
-    copy(bytes, [0x48, 0x8B, 0x0C, 0x25, 0x00, 0x00, 0x60, 0x00]) // mov rcx,[0x600000] (bump)
     la mrt_scan = lengde(bytes)                    // .scan:
     copy(bytes, [0x48, 0x39, 0xD6])                // cmp rsi,rdx
     copy(bytes, [0x0F, 0x83])                      // jae scan_done
     u32(bytes, 0)
     la mrt_pscandone = lengde(bytes) - 4
-    copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi]
-    copy(bytes, [0x48, 0x3D, 0x60, 0x20, 0x70, 0x00]) // cmp rax,0x702060 (HEAP_ALLOC_START: kanon-cachen 0x600040..0x702060 er udødeleg, aldri live-map)
-    copy(bytes, [0x0F, 0x82])                      // jb scan_next
-    u32(bytes, 0)
-    la mrt_pnext1 = lengde(bytes) - 4
-    copy(bytes, [0x48, 0x39, 0xC8])                // cmp rax,rcx (bump)
-    copy(bytes, [0x0F, 0x83])                      // jae scan_next
-    u32(bytes, 0)
-    la mrt_pnext2 = lengde(bytes) - 4
-    // BOUND: stopp om mark-stakk full (r11 >= live-map base) → hindrar overflow-write
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
-    copy(bytes, [0x0F, 0x83])                      // jae scan_done
-    u32(bytes, 0)
-    la mrt_pscanfull = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x89, 0x03])                // mov [r11],rax (push root)
-    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
-    la mrt_next = lengde(bytes)                    // .scan_next:
-    patch_jump(bytes, mrt_pnext1, mrt_next)
-    patch_jump(bytes, mrt_pnext2, mrt_next)
+    copy(bytes, [0x48, 0x8B, 0x3E])                // mov rdi,[rsi]
+    call_rel32(bytes, atomics["gc_push"], TEXT_VA()) // v6: range/align/mark-bit-dedup + push i gc_push (bevarer rsi/rdx)
     copy(bytes, [0x48, 0x83, 0xC6, 0x08])          // add rsi,8
     copy(bytes, [0xE9])                            // jmp scan
     u32(bytes, (mrt_scan - (lengde(bytes) + 4)) & 4294967295)
     la mrt_scandone = lengde(bytes)                // .scan_done:
     patch_jump(bytes, mrt_pscandone, mrt_scandone)
-    patch_jump(bytes, mrt_pscanfull, mrt_scandone)
     // DFS-drain (som gc_mark_native):
     la mrt_loop = lengde(bytes)                    // .loop:
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x41]) // cmp r11,0x41000000 (GC_MSTACK_VA)
+    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x4B]) // cmp r11,0x4B000000 (GC_MSTACK_VA, v6)
     copy(bytes, [0x0F, 0x86])                      // jbe done
     u32(bytes, 0)
     la mrt_pdone = lengde(bytes) - 4
@@ -4927,9 +5202,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0xD6])                // mov rsi,rdx
     copy(bytes, [0x48, 0xD3, 0xEA])                // shr rdx,cl
     copy(bytes, [0x48, 0x83, 0xE2, 0x01])          // and rdx,1
-    copy(bytes, [0x48, 0x85, 0xD2])                // test rdx,rdx
-    copy(bytes, [0x0F, 0x85])                      // jnz loop (alt markert)
-    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    // v6: mark-biten er alt sett VED PUSH (gc_push, dedup) → ingen «alt markert»-skip her:
+    // kvart pop er eit unikt, gyldig objekt som skal registrerast nøyaktig éin gong.
     copy(bytes, [0x41, 0xB8, 0x01, 0x00, 0x00, 0x00]) // mov r8d,1
     copy(bytes, [0x49, 0xD3, 0xE0])                // shl r8,cl
     copy(bytes, [0x4C, 0x09, 0xC6])                // or rsi,r8
@@ -4985,20 +5259,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x84])                      // jz vals_start
     u32(bytes, 0)
     la mrt_pvals1 = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
-    copy(bytes, [0x0F, 0x83])                      // jae vals_start (mark-stakk full)
-    u32(bytes, 0)
-    la mrt_pvals2 = lengde(bytes) - 4
     copy(bytes, [0x48, 0x8B, 0x3A])                // mov rdi,[rdx] (key)
-    copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push)
-    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
+    call_rel32(bytes, atomics["gc_push"], TEXT_VA()) // v6: dedup-push (bevarer rax/rcx/rdx/rsi/r8)
     copy(bytes, [0x48, 0x83, 0xC2, 0x08])          // add rdx,8
     copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax
     copy(bytes, [0xE9])                            // jmp keyloop
     u32(bytes, (mrt_keyloop - (lengde(bytes) + 4)) & 4294967295)
     la mrt_valsstart = lengde(bytes)               // vals_start:
     patch_jump(bytes, mrt_pvals1, mrt_valsstart)
-    patch_jump(bytes, mrt_pvals2, mrt_valsstart)
     // VALS: array cap*8 + push count verdi-peikarar
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (count reload)
     copy(bytes, [0x48, 0x8B, 0x4E, 0x18])          // mov rcx,[rsi+24] (vals_ptr)
@@ -5039,20 +5307,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x0F, 0x84])                      // jz map_done
     u32(bytes, 0)
     la mrt_pmapdone1 = lengde(bytes) - 4
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
-    copy(bytes, [0x0F, 0x83])                      // jae map_done
-    u32(bytes, 0)
-    la mrt_pmapdone2 = lengde(bytes) - 4
     copy(bytes, [0x48, 0x8B, 0x3A])                // mov rdi,[rdx] (val)
-    copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push)
-    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
+    call_rel32(bytes, atomics["gc_push"], TEXT_VA()) // v6: dedup-push (bevarer rax/rcx/rdx/rsi/r8)
     copy(bytes, [0x48, 0x83, 0xC2, 0x08])          // add rdx,8
     copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax
     copy(bytes, [0xE9])                            // jmp valloop
     u32(bytes, (mrt_valloop - (lengde(bytes) + 4)) & 4294967295)
     la mrt_mapdone = lengde(bytes)                 // map_done:
     patch_jump(bytes, mrt_pmapdone1, mrt_mapdone)
-    patch_jump(bytes, mrt_pmapdone2, mrt_mapdone)
     copy(bytes, [0xE9])                            // jmp loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     la mrt_notmap = lengde(bytes)                  // not_map:
@@ -5183,14 +5445,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
     copy(bytes, [0x0F, 0x84])                      // jz loop (len==0)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
-    // BOUND: mark-stakk full (r11 >= live-map base) → stopp push (elles overflow-write
-    // inn i live-map → korrupte entryar → sweep frigjer levande). Same vakt som rot-scan.
-    copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x43]) // cmp r11,0x43000000 (GC_LIVEMAP_VA)
-    copy(bytes, [0x0F, 0x83])                      // jae loop
-    u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x8B, 0x3A])                // mov rdi,[rdx] (element)
-    copy(bytes, [0x49, 0x89, 0x3B])                // mov [r11],rdi (push)
-    copy(bytes, [0x49, 0x83, 0xC3, 0x08])          // add r11,8
+    call_rel32(bytes, atomics["gc_push"], TEXT_VA()) // v6: dedup-push (bevarer rax/rdx); overflow umogleg (512 MiB stakk)
     copy(bytes, [0x48, 0x83, 0xC2, 0x08])          // add rdx,8
     copy(bytes, [0x48, 0xFF, 0xC8])                // dec rax
     copy(bytes, [0xE9])                            // jmp elem_loop
@@ -6000,6 +6256,8 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_finnes  { returner atomic_vas["fil_finnes"] }
     hvis er_fil_slett   { returner atomic_vas["fil_slett"] }
     hvis fn_nm == "now_ms" eller builtin.ends_with(fn_nm, ".now_ms") { returner atomic_vas["now_ms"] }
+    hvis fn_nm == "random_byte" eller builtin.ends_with(fn_nm, ".random_byte") { returner atomic_vas["random_byte"] }
+    hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner atomic_vas["host_finst"] }
     hvis fn_nm == "builtin.host_kall" eller fn_nm == "host_kall" { returner atomic_vas["host_kall"] }
@@ -6054,11 +6312,17 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "dns_lookup" { returner ["std.native_gap.dns_lookup"] }
     // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
     // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).
-    hvis kort == "sha256_bytes" { returner ["std.sha256.hash_bytes"] }
+    // sha256_bytes(liste) → native SHA-256-atom via native_gap (var pure std.sha256.hash_bytes).
+    hvis kort == "sha256_bytes" { returner ["std.native_gap.sha256_hex_gap"] }
     // pbkdf2_sha256(tekst,tekst,int,int) → pure tekst-signatur std.sha256.pbkdf2_hex.
-    hvis kort == "pbkdf2_sha256" { returner ["std.sha256.pbkdf2_hex"] }
+    // pbkdf2_sha256 → native (native_gap.pbkdf2_gap brukar sha256_bytes_hex-atomet).
+    // Var pure std.sha256.pbkdf2_hex = 120k pure HMAC-iterasjonar → 1 GiB-heng.
+    hvis kort == "pbkdf2_sha256" { returner ["std.native_gap.pbkdf2_gap"] }
     // random_hex(int) → pure LCG std.sha256.random_hex_pure (unngår vm_random_hex-heng).
-    hvis kort == "random_hex" { returner ["std.sha256.random_hex_pure"] }
+    // random_hex(int) → std.native_gap.random_hex_secure (getrandom(2)-basert; EKTE entropi).
+    // Den gamle LCG-ruta (std.sha256.random_hex_pure, seeda berre frå tid_ms) gav
+    // same-ms-kollisjonar → duplikate tryggleikskodar. Sjå random_byte-atomet.
+    hvis kort == "random_hex" { returner ["std.native_gap.random_hex_secure"] }
     // Filsystem-ABI (list/list_typed/walk_files/stat/path_stat/mkdir_p/delete/rmdir/
     // chmod/file_replace/symlink_replace) → rein-Norscode-impl på native_fs_*-primitiv.
     hvis kort == "filesystem_read_operation" { returner ["std.runtime_filesystem_native.read_operation"] }

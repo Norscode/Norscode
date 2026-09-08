@@ -115,6 +115,16 @@ funksjon _tok(sql: tekst) -> liste {
             i = i + 1
             fortsett
         }
+        hvis c == ":" {
+            hvis i + 1 < n og chars[i + 1] == ":" {
+                legg_til(ut, "::")
+                i = i + 2
+                fortsett
+            }
+            legg_til(ut, ":")
+            i = i + 1
+            fortsett
+        }
         hvis c == "(" eller c == ")" eller c == "," eller c == ";" eller c == "=" eller c == ">" eller c == "<" eller c == "!" eller c == "*" eller c == "+" eller c == "-" eller c == "/" eller c == "%" {
             hvis (c == ">" eller c == "<" eller c == "!") og i + 1 < n og chars[i + 1] == "=" {
                 legg_til(ut, c + "=")
@@ -437,12 +447,38 @@ funksjon _ex_prim(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     returner {"v": v, "n": pos + 1}
 }
 
+// Postfix `::type`-cast (Postgres). Typen ignorerast (dynamisk typing) — vi konsumerer
+// berre typenamnet (evt. `(n[,m])` eller `[]`) så resten av uttrykket parsar vidare.
+funksjon _ex_postfix(toks, pos: heltall, rad, kt) -> ordbok_tekst {
+    la e = _ex_prim(toks, pos, rad, kt)
+    la p = e["n"]
+    mens p < lengde(toks) og toks[p] == "::" {
+        p = p + 1
+        hvis p < lengde(toks) { p = p + 1 }
+        hvis p < lengde(toks) og toks[p] == "(" {
+            la dybde = 0
+            la gaa = sann
+            mens p < lengde(toks) og gaa {
+                hvis toks[p] == "(" { dybde = dybde + 1 }
+                hvis toks[p] == ")" { dybde = dybde - 1 }
+                p = p + 1
+                hvis dybde == 0 { gaa = usann }
+            }
+        }
+        mens p < lengde(toks) og toks[p] == "[" {
+            mens p < lengde(toks) og toks[p] != "]" { p = p + 1 }
+            hvis p < lengde(toks) og toks[p] == "]" { p = p + 1 }
+        }
+    }
+    returner {"v": e["v"], "n": p}
+}
+
 funksjon _ex_unary(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     hvis pos < lengde(toks) og toks[pos] == "-" {
-        la e = _ex_prim(toks, pos + 1, rad, kt)
+        la e = _ex_postfix(toks, pos + 1, rad, kt)
         returner {"v": _num_bin("0", "-", e["v"]), "n": e["n"]}
     }
-    returner _ex_prim(toks, pos, rad, kt)
+    returner _ex_postfix(toks, pos, rad, kt)
 }
 
 funksjon _ex_mul(toks, pos: heltall, rad, kt) -> ordbok_tekst {
@@ -496,7 +532,7 @@ funksjon _ex_cmp(toks, pos: heltall, rad, kt) -> ordbok_tekst {
     la neg = usann
     hvis _opp(toks[p]) == "NOT" og p + 1 < lengde(toks) {
         la nx = _opp(toks[p + 1])
-        hvis nx == "IN" eller nx == "LIKE" eller nx == "GLOB" eller nx == "BETWEEN" {
+        hvis nx == "IN" eller nx == "LIKE" eller nx == "ILIKE" eller nx == "GLOB" eller nx == "BETWEEN" {
             neg = sann
             p = p + 1
         }
@@ -508,7 +544,8 @@ funksjon _ex_cmp(toks, pos: heltall, rad, kt) -> ordbok_tekst {
         la r = _ex_concat(toks, p + 1, rad, kt)
         returner {"v": _b(_cmp(l["v"], op, r["v"])), "n": r["n"]}
     }
-    hvis opp == "LIKE" {
+    hvis opp == "LIKE" eller opp == "ILIKE" {
+        // ILIKE = eksplisitt case-insensitiv (Postgres). _like uppercaser alt → same åtferd.
         la r = _ex_concat(toks, p + 1, rad, kt)
         la res = _like(l["v"], r["v"])
         hvis neg { res = _ikke(res) }
@@ -647,6 +684,12 @@ funksjon _ex_func(toks, pos: heltall, rad, kt) -> ordbok_tekst {
         p = e["n"]
     }
     hvis p < lengde(toks) og toks[p] == ")" { p = p + 1 }
+    // Sekvens-funksjonar treng db-konteksten (mutasjon) — handter før den reine dispatchen.
+    hvis finnes_nøkkel(kt, "db") {
+        hvis fn == "NEXTVAL" og lengde(args) >= 1 { returner {"v": _seq_nextval(kt["db"], args[0]), "n": p} }
+        hvis fn == "CURRVAL" og lengde(args) >= 1 { returner {"v": _seq_currval(kt["db"], args[0]), "n": p} }
+        hvis fn == "SETVAL" og lengde(args) >= 2 { returner {"v": _seq_setval(kt["db"], args[0], builtin.heltall_fra_tekst(args[1])), "n": p} }
+    }
     returner {"v": _kall_funksjon(fn, args), "n": p}
 }
 
@@ -699,7 +742,9 @@ funksjon _civil_from_days(z0: heltall) -> ordbok {
 funksjon _dt_parse_val(x: tekst, unixep: boolsk) -> heltall {
     la xl = builtin.lower(builtin.trim(x))
     hvis xl == "now" { returner builtin.timestamp() }
-    hvis unixep og _er_tal(x) { returner builtin.heltall_fra_tekst(x) }
+    // unixepoch kan vere flyt (t.d. 1705322096.789) — berre heiltals-sekund tel her;
+    // fraksjonen hentar _dt_frac_ms separat.
+    hvis unixep og _er_tal(x) { returner builtin.heltall_fra_tekst(builtin.split(x, ".")[0]) }
     la del = builtin.split(x, "T")
     hvis lengde(del) == 1 { del = builtin.split(x, " ") }
     la dp = builtin.split(del[0], "-")
@@ -714,7 +759,8 @@ funksjon _dt_parse_val(x: tekst, unixep: boolsk) -> heltall {
         la tp = builtin.split(del[1], ":")
         hvis lengde(tp) >= 1 { hh = _num0(tp[0]) }
         hvis lengde(tp) >= 2 { mi = _num0(tp[1]) }
-        hvis lengde(tp) >= 3 { ss = _num0(tp[2]) }
+        // Sekund-feltet kan ha fraksjon (SS.SSS) — strip han før heiltals-parsing.
+        hvis lengde(tp) >= 3 { ss = _num0(builtin.split(tp[2], ".")[0]) }
     }
     returner _days_from_civil(y, mo, dagnr) * 86400 + hh * 3600 + mi * 60 + ss
 }
@@ -771,6 +817,28 @@ funksjon _dt_mod(epoch: heltall, mod: tekst) -> heltall {
     returner epoch
 }
 
+// Fraksjons-millisekund (0–999) frå eit tid-/tal-uttrykk. SS.SSS: berre dei tre
+// første siffera etter siste '.' tel; kortare fraksjon høgre-padast (".5" → 500).
+funksjon _dt_frac_ms(x: tekst) -> heltall {
+    la p = builtin.split(builtin.trim(x), ".")
+    hvis lengde(p) < 2 { returner 0 }
+    la frac = p[lengde(p) - 1]
+    la d = ""
+    la i = 0
+    la gyldig = sann
+    mens i < lengde(frac) og i < 3 og gyldig {
+        la ch = builtin.slice(frac, i, i + 1)
+        hvis _er_siffer(ch) { d = d + ch } ellers { gyldig = usann }
+        i = i + 1
+    }
+    hvis d == "" { returner 0 }
+    mens lengde(d) < 3 { d = d + "0" }
+    returner builtin.heltall_fra_tekst(d)
+}
+
+// Løyser eit dato/tid-uttrykk til epoke i MILLISEKUND (heiltals-sekund × 1000 +
+// fraksjon). Modifikatorane opererer i heiltals-sekund; fraksjonen ligg ved med,
+// men 'start of …' nullstiller han (tid-på-dagen vert 00:00:00.000).
 funksjon _dt_resolve(args, timeidx: heltall) -> heltall {
     hvis timeidx >= lengde(args) { returner 0 }
     la unixep = usann
@@ -780,21 +848,27 @@ funksjon _dt_resolve(args, timeidx: heltall) -> heltall {
         i = i + 1
     }
     la epoch = _dt_parse_val(args[timeidx], unixep)
+    la frac = _dt_frac_ms(args[timeidx])
     i = timeidx + 1
     mens i < lengde(args) {
+        la ml = builtin.lower(builtin.trim(args[i]))
+        hvis lengde(ml) >= 9 og builtin.slice(ml, 0, 9) == "start of " { frac = 0 }
         epoch = _dt_mod(epoch, args[i])
         i = i + 1
     }
-    returner epoch
+    returner epoch * 1000 + frac
 }
 
-funksjon _dt_fmt(epoch: heltall, fmt: tekst) -> tekst {
-    la dag = epoch / 86400
-    la tod = epoch - dag * 86400
+// `ms` = epoke i millisekund (jf. _dt_resolve).
+funksjon _dt_fmt(ms: heltall, fmt: tekst) -> tekst {
+    la epoch = ms / 1000
+    la dag = ms / 86400000
+    la tod_ms = ms - dag * 86400000
     la c = _civil_from_days(dag)
-    la hh = tod / 3600
-    la mi = (tod - hh * 3600) / 60
-    la ss = tod - hh * 3600 - mi * 60
+    la hh = tod_ms / 3600000
+    la mi = (tod_ms - hh * 3600000) / 60000
+    la ss = (tod_ms - hh * 3600000 - mi * 60000) / 1000
+    la frac_ms = tod_ms - hh * 3600000 - mi * 60000 - ss * 1000
     la ut = ""
     la fc = builtin.split(fmt, "")
     la i = 0
@@ -810,7 +884,7 @@ funksjon _dt_fmt(epoch: heltall, fmt: tekst) -> tekst {
             hvis spec == "j" { ut = ut + _pad(dag - _days_from_civil(c["y"], 1, 1) + 1, 3) } ellers
             hvis spec == "w" { ut = ut + tekst_fra_heltall(_imod(dag + 4, 7)) } ellers
             hvis spec == "s" { ut = ut + tekst_fra_heltall(epoch) } ellers
-            hvis spec == "f" { ut = ut + _pad(ss, 2) + ".000" } ellers
+            hvis spec == "f" { ut = ut + _pad(ss, 2) + "." + _pad(frac_ms, 3) } ellers
             hvis spec == "%" { ut = ut + "%" } ellers { ut = ut + "%" + spec }
             i = i + 2
         } ellers {
@@ -826,10 +900,11 @@ funksjon _kall_funksjon(fn: tekst, args) -> tekst {
     hvis fn == "TIME" og lengde(args) >= 1 { returner _dt_fmt(_dt_resolve(args, 0), "%H:%M:%S") }
     hvis fn == "DATETIME" og lengde(args) >= 1 { returner _dt_fmt(_dt_resolve(args, 0), "%Y-%m-%d %H:%M:%S") }
     hvis fn == "STRFTIME" og lengde(args) >= 2 { returner _dt_fmt(_dt_resolve(args, 1), args[0]) }
-    hvis fn == "UNIXEPOCH" og lengde(args) >= 1 { returner tekst_fra_heltall(_dt_resolve(args, 0)) }
+    hvis fn == "UNIXEPOCH" og lengde(args) >= 1 { returner tekst_fra_heltall(_dt_resolve(args, 0) / 1000) }
     hvis fn == "JULIANDAY" og lengde(args) >= 1 {
+        // _dt_resolve gjev millisekund → del på 86 400 000 ms/dag (fraksjons-korrekt).
         la ep = _dt_resolve(args, 0)
-        la jd = builtin.desimaltall(tekst_fra_heltall(ep)) / builtin.desimaltall("86400") + builtin.desimaltall("2440587.5")
+        la jd = builtin.desimaltall(tekst_fra_heltall(ep)) / builtin.desimaltall("86400000") + builtin.desimaltall("2440587.5")
         returner _fmt_real(jd)
     }
     hvis fn == "COALESCE" {
@@ -923,6 +998,194 @@ funksjon _kall_funksjon(fn: tekst, args) -> tekst {
         hvis _er_tal(v) { returner "integer" }
         returner "text"
     }
+    // ── Postgres-utvidingar (batch 1): streng-/tal-funksjonar utover SQLite ──
+    hvis fn == "SPLIT_PART" og lengde(args) >= 3 {
+        la felt = builtin.split(args[0], args[1])
+        la n = builtin.heltall_fra_tekst(args[2])
+        hvis n >= 1 og n <= lengde(felt) { returner felt[n - 1] }
+        returner ""
+    }
+    hvis fn == "LEFT" og lengde(args) >= 2 {
+        la fc = builtin.split(args[0], "")
+        la n = builtin.heltall_fra_tekst(args[1])
+        hvis n < 0 { n = lengde(fc) + n }
+        hvis n < 0 { n = 0 }
+        hvis n > lengde(fc) { n = lengde(fc) }
+        returner builtin.slice(args[0], 0, n)
+    }
+    hvis fn == "RIGHT" og lengde(args) >= 2 {
+        la fc = builtin.split(args[0], "")
+        la L = lengde(fc)
+        la n = builtin.heltall_fra_tekst(args[1])
+        la start = L - n
+        hvis n < 0 { start = 0 - n }
+        hvis start < 0 { start = 0 }
+        hvis start > L { start = L }
+        returner builtin.slice(args[0], start, L)
+    }
+    hvis fn == "REPEAT" og lengde(args) >= 2 {
+        la n = builtin.heltall_fra_tekst(args[1])
+        la ut = ""
+        la i = 0
+        mens i < n { ut = ut + args[0]; i = i + 1 }
+        returner ut
+    }
+    hvis fn == "REVERSE" og lengde(args) >= 1 {
+        la fc = builtin.split(args[0], "")
+        la ut = ""
+        la i = lengde(fc) - 1
+        mens i >= 0 { ut = ut + fc[i]; i = i - 1 }
+        returner ut
+    }
+    hvis fn == "ASCII" og lengde(args) >= 1 {
+        la fc = builtin.split(args[0], "")
+        hvis lengde(fc) == 0 { returner "0" }
+        returner tekst_fra_heltall(builtin.char_code(fc[0]))
+    }
+    hvis fn == "CHR" og lengde(args) >= 1 { returner builtin.chr(builtin.heltall_fra_tekst(args[0])) }
+    hvis fn == "INITCAP" og lengde(args) >= 1 {
+        la ord = builtin.split(builtin.lower(args[0]), " ")
+        la ut = []
+        la i = 0
+        mens i < lengde(ord) {
+            la w = ord[i]
+            la wc = builtin.split(w, "")
+            hvis lengde(wc) > 0 {
+                legg_til(ut, builtin.upper(wc[0]) + builtin.slice(w, 1, lengde(wc)))
+            } ellers {
+                legg_til(ut, "")
+            }
+            i = i + 1
+        }
+        returner builtin.join(ut, " ")
+    }
+    hvis (fn == "LPAD" eller fn == "RPAD") og lengde(args) >= 2 {
+        la fill = " "
+        hvis lengde(args) >= 3 og lengde(args[2]) > 0 { fill = args[2] }
+        la mållen = builtin.heltall_fra_tekst(args[1])
+        la fc = builtin.split(args[0], "")
+        hvis lengde(fc) >= mållen { returner builtin.slice(args[0], 0, mållen) }
+        la pad = ""
+        mens lengde(builtin.split(pad, "")) < mållen - lengde(fc) { pad = pad + fill }
+        pad = builtin.slice(pad, 0, mållen - lengde(fc))
+        hvis fn == "LPAD" { returner pad + args[0] }
+        returner args[0] + pad
+    }
+    hvis fn == "STRPOS" og lengde(args) >= 2 {
+        la idx = builtin.index_of(args[0], args[1])
+        hvis idx < 0 { returner "0" }
+        returner tekst_fra_heltall(idx + 1)
+    }
+    hvis fn == "CONCAT" {
+        la ut = ""
+        la i = 0
+        mens i < lengde(args) { hvis ikke _ern(args[i]) { ut = ut + args[i] }; i = i + 1 }
+        returner ut
+    }
+    hvis fn == "CONCAT_WS" og lengde(args) >= 1 {
+        la sep = args[0]
+        la deler = []
+        la i = 1
+        mens i < lengde(args) { hvis ikke _ern(args[i]) { legg_til(deler, args[i]) }; i = i + 1 }
+        returner builtin.join(deler, sep)
+    }
+    hvis fn == "GREATEST" eller fn == "LEAST" {
+        la best = _NULLV()
+        la har = usann
+        la i = 0
+        mens i < lengde(args) {
+            hvis ikke _ern(args[i]) {
+                hvis ikke har {
+                    best = args[i]
+                    har = sann
+                } ellers {
+                    hvis fn == "GREATEST" og _cmp(args[i], ">", best) { best = args[i] }
+                    hvis fn == "LEAST" og _cmp(args[i], "<", best) { best = args[i] }
+                }
+            }
+            i = i + 1
+        }
+        returner best
+    }
+    hvis fn == "TRANSLATE" og lengde(args) >= 3 {
+        la dst = builtin.split(args[2], "")
+        la sc = builtin.split(args[0], "")
+        la ut = ""
+        la i = 0
+        mens i < lengde(sc) {
+            la k = builtin.index_of(args[1], sc[i])
+            hvis k < 0 { ut = ut + sc[i] } ellers {
+                hvis k < lengde(dst) { ut = ut + dst[k] }
+            }
+            i = i + 1
+        }
+        returner ut
+    }
+    hvis fn == "BTRIM" og lengde(args) >= 1 {
+        hvis lengde(args) == 1 { returner builtin.trim(args[0]) }
+        la fc = builtin.split(args[0], "")
+        la lo = 0
+        la hi = lengde(fc)
+        mens lo < hi og builtin.index_of(args[1], fc[lo]) >= 0 { lo = lo + 1 }
+        mens hi > lo og builtin.index_of(args[1], fc[hi - 1]) >= 0 { hi = hi - 1 }
+        returner builtin.slice(args[0], lo, hi)
+    }
+    hvis fn == "SIGN" og lengde(args) >= 1 {
+        hvis _ern(args[0]) { returner _NULLV() }
+        hvis _cmp(args[0], ">", "0") { returner "1" }
+        hvis _cmp(args[0], "<", "0") { returner "-1" }
+        returner "0"
+    }
+    hvis fn == "MOD" og lengde(args) >= 2 {
+        la a = builtin.heltall_fra_tekst(args[0])
+        la b = builtin.heltall_fra_tekst(args[1])
+        hvis b == 0 { returner _NULLV() }
+        returner tekst_fra_heltall(a - (a / b) * b)
+    }
+    hvis fn == "TO_HEX" og lengde(args) >= 1 {
+        la n = builtin.heltall_fra_tekst(args[0])
+        hvis n == 0 { returner "0" }
+        la dc = builtin.split("0123456789abcdef", "")
+        la ut = ""
+        la m = n
+        mens m > 0 { la r = m - (m / 16) * 16; ut = dc[r] + ut; m = m / 16 }
+        returner ut
+    }
+    hvis (fn == "CEIL" eller fn == "CEILING") og lengde(args) >= 1 {
+        hvis _ern(args[0]) { returner _NULLV() }
+        la d = builtin.desimaltall(args[0])
+        la t = _flyt_trunk(d)
+        hvis d > builtin.desimaltall(tekst_fra_heltall(t)) { returner tekst_fra_heltall(t + 1) }
+        returner tekst_fra_heltall(t)
+    }
+    hvis fn == "FLOOR" og lengde(args) >= 1 {
+        hvis _ern(args[0]) { returner _NULLV() }
+        la d = builtin.desimaltall(args[0])
+        la t = _flyt_trunk(d)
+        hvis d < builtin.desimaltall(tekst_fra_heltall(t)) { returner tekst_fra_heltall(t - 1) }
+        returner tekst_fra_heltall(t)
+    }
+    hvis fn == "TRUNC" og lengde(args) >= 1 {
+        hvis _ern(args[0]) { returner _NULLV() }
+        returner tekst_fra_heltall(_flyt_trunk(builtin.desimaltall(args[0])))
+    }
+    hvis (fn == "POWER" eller fn == "POW") og lengde(args) >= 2 {
+        la base = builtin.desimaltall(args[0])
+        la e = builtin.heltall_fra_tekst(args[1])
+        la neg = usann
+        hvis e < 0 { neg = sann; e = 0 - e }
+        la acc = builtin.desimaltall("1")
+        la k = 0
+        mens k < e { acc = acc * base; k = k + 1 }
+        hvis neg { acc = builtin.desimaltall("1") / acc }
+        returner builtin.til_tekst(acc)
+    }
+    hvis fn == "DIV" og lengde(args) >= 2 {
+        la bi = builtin.heltall_fra_tekst(args[1])
+        hvis bi == 0 { returner _NULLV() }
+        returner tekst_fra_heltall(builtin.heltall_fra_tekst(args[0]) / bi)
+    }
+    hvis fn == "PI" { returner "3.141592653589793" }
     returner ""
 }
 
@@ -1225,7 +1488,7 @@ funksjon _les_kol_liste(toks, i: heltall) -> ordbok {
 
 funksjon _tab_c(t) -> ordbok {
     hvis finnes_nøkkel(t, "c") { returner t["c"] }
-    returner {"notnull": [], "pk": [], "unique": [], "default": {}, "checks": [], "fk": []}
+    returner {"notnull": [], "pk": [], "unique": [], "default": {}, "checks": [], "fk": [], "rowid_alias": ""}
 }
 
 // Finst det ei anna rad (≠ ekskluder_rowid) som er lik `nyrad` på alle kolonnar i `grp`?
@@ -1571,6 +1834,36 @@ funksjon _sikre_views(db) {
 funksjon _sikre_triggers(db) {
     hvis ikke finnes_nøkkel(db, "_triggers") { db["_triggers"] = [] }
 }
+// ── Sekvensar (Postgres): ikkje-transaksjonelle teljarar. Verdiar lagra som tekst. ──
+funksjon _sikre_sequences(db) {
+    hvis ikke finnes_nøkkel(db, "_sequences") { db["_sequences"] = {} }
+}
+funksjon _seq_nextval(db, navn: tekst) -> tekst {
+    _sikre_sequences(db)
+    hvis ikke finnes_nøkkel(db["_sequences"], navn) { returner _NULLV() }
+    la seq = db["_sequences"][navn]
+    la v = builtin.heltall_fra_tekst(seq["next"])
+    seq["next"] = tekst_fra_heltall(v + builtin.heltall_fra_tekst(seq["inc"]))
+    seq["last"] = tekst_fra_heltall(v)
+    seq["kalt"] = "1"
+    returner tekst_fra_heltall(v)
+}
+funksjon _seq_currval(db, navn: tekst) -> tekst {
+    _sikre_sequences(db)
+    hvis ikke finnes_nøkkel(db["_sequences"], navn) { returner _NULLV() }
+    la seq = db["_sequences"][navn]
+    hvis seq["kalt"] != "1" { returner _NULLV() }
+    returner seq["last"]
+}
+funksjon _seq_setval(db, navn: tekst, n: heltall) -> tekst {
+    _sikre_sequences(db)
+    hvis ikke finnes_nøkkel(db["_sequences"], navn) { returner _NULLV() }
+    la seq = db["_sequences"][navn]
+    seq["last"] = tekst_fra_heltall(n)
+    seq["next"] = tekst_fra_heltall(n + builtin.heltall_fra_tekst(seq["inc"]))
+    seq["kalt"] = "1"
+    returner tekst_fra_heltall(n)
+}
 funksjon _er_view(db, navn: tekst) -> boolsk {
     returner finnes_nøkkel(db, "_views") og finnes_nøkkel(db["_views"], navn)
 }
@@ -1653,6 +1946,87 @@ funksjon _fyr_triggers(db, when: tekst, event: tekst, tab: tekst, newrad, oldrad
 }
 
 // exec: DDL/DML. Returnerer tal på råka rader (CREATE→0, INSERT→1), eller -1 ved ukjend/ugyldig.
+// ── RETURNING (Postgres): DML som returnerer dei påverka radene ──────
+// Del token-lista ved topp-nivå RETURNING → {har, toks (før), retcols (etter)}.
+funksjon _split_returning(toks) -> ordbok {
+    la dep = 0
+    la i = 0
+    mens i < lengde(toks) {
+        hvis toks[i] == "(" { dep = dep + 1 } ellers hvis toks[i] == ")" { dep = dep - 1 } ellers hvis dep == 0 og _opp(toks[i]) == "RETURNING" {
+            returner {"har": sann, "toks": _slice_range(toks, 0, i), "retcols": _slice_range(toks, i + 1, lengde(toks))}
+        }
+        i = i + 1
+    }
+    returner {"har": usann, "toks": toks, "retcols": []}
+}
+
+// Splitt token-liste på topp-nivå-komma → liste av token-underlister.
+funksjon _split_topp_komma(toks) -> liste {
+    la items = []
+    la cur = []
+    la dep = 0
+    la i = 0
+    mens i < lengde(toks) {
+        hvis toks[i] == "(" { dep = dep + 1 } ellers hvis toks[i] == ")" { dep = dep - 1 }
+        hvis toks[i] == "," og dep == 0 {
+            legg_til(items, cur)
+            cur = []
+        } ellers {
+            legg_til(cur, toks[i])
+        }
+        i = i + 1
+    }
+    hvis lengde(cur) > 0 { legg_til(items, cur) }
+    returner items
+}
+
+// Projiser dei fanga radene mot RETURNING-kolonnane ("|"-skilt, "\n" mellom rader).
+funksjon _projiser_returning(db, tab: tekst, rader, retcols) -> tekst {
+    la items = _split_topp_komma(retcols)
+    la linjer = []
+    la ri = 0
+    mens ri < lengde(rader) {
+        la rad = rader[ri]
+        la felt = []
+        la ii = 0
+        mens ii < lengde(items) {
+            la it = items[ii]
+            hvis lengde(it) == 1 og it[0] == "*" {
+                la t = db["tabellar"][tab]
+                la k = 0
+                mens k < lengde(t["kolonner"]) {
+                    la cn = t["kolonner"][k]["navn"]
+                    la v = ""
+                    hvis finnes_nøkkel(rad, cn) { v = rad[cn] }
+                    legg_til(felt, _strip_null(v))
+                    k = k + 1
+                }
+            } ellers {
+                la e = _ex_or(it, 0, rad, _kt_ny(db, {}))
+                legg_til(felt, _strip_null(e["v"]))
+            }
+            ii = ii + 1
+        }
+        legg_til(linjer, builtin.join(felt, "|"))
+        ri = ri + 1
+    }
+    returner builtin.join(linjer, "\n")
+}
+
+funksjon _har_returning_dml(toks) -> boolsk {
+    hvis lengde(toks) == 0 { returner usann }
+    la kmd = _opp(toks[0])
+    hvis kmd != "INSERT" og kmd != "UPDATE" og kmd != "DELETE" { returner usann }
+    returner _split_returning(toks)["har"]
+}
+
+// Køyr DML med RETURNING og projiser resultatet.
+funksjon _returning_ut(db, toks) -> tekst {
+    _exec_t(db, toks)
+    hvis ikke finnes_nøkkel(db, "_ret_rows") { returner "" }
+    returner _projiser_returning(db, db["_ret_tab"], db["_ret_rows"], db["_ret_cols"])
+}
+
 funksjon exec(db, sql: tekst) -> heltall {
     returner _exec_t(db, _tok(sql))
 }
@@ -1660,6 +2034,20 @@ funksjon exec(db, sql: tekst) -> heltall {
 funksjon _exec_t(db, toks) -> heltall {
     hvis lengde(toks) == 0 { returner 0 }
     la kmd = _opp(toks[0])
+
+    // RETURNING (kun DML): strip klausulen så WHERE-/VALUES-parsing ikkje forvirrast,
+    // og opprett fangst-bufferet. Rekursive kall (triggere/kaskade) har inga RETURNING.
+    la har_ret = usann
+    hvis kmd == "INSERT" eller kmd == "UPDATE" eller kmd == "DELETE" {
+        la _rsplit = _split_returning(toks)
+        hvis _rsplit["har"] {
+            har_ret = sann
+            toks = _rsplit["toks"]
+            db["_ret_rows"] = []
+            db["_ret_cols"] = _rsplit["retcols"]
+            db["_ret_tab"] = ""
+        }
+    }
 
     hvis kmd == "CREATE" og lengde(toks) >= 5 og _opp(toks[1]) == "INDEX" {
         la j = 2
@@ -1676,6 +2064,42 @@ funksjon _exec_t(db, toks) -> heltall {
         returner 0
     }
 
+    hvis kmd == "CREATE" og lengde(toks) >= 3 og _opp(toks[1]) == "SEQUENCE" {
+        _sikre_sequences(db)
+        la j = 2
+        hvis j + 2 < lengde(toks) og _opp(toks[j]) == "IF" og _opp(toks[j + 1]) == "NOT" og _opp(toks[j + 2]) == "EXISTS" { j = j + 3 }
+        la snavn = ""
+        hvis j < lengde(toks) { snavn = toks[j]; j = j + 1 }
+        la start = 1
+        la inc = 1
+        mens j < lengde(toks) {
+            la u = _opp(toks[j])
+            hvis u == "START" {
+                j = j + 1
+                hvis j < lengde(toks) og _opp(toks[j]) == "WITH" { j = j + 1 }
+                hvis j < lengde(toks) { start = builtin.heltall_fra_tekst(toks[j]); j = j + 1 }
+            } ellers hvis u == "INCREMENT" {
+                j = j + 1
+                hvis j < lengde(toks) og _opp(toks[j]) == "BY" { j = j + 1 }
+                hvis j < lengde(toks) { inc = builtin.heltall_fra_tekst(toks[j]); j = j + 1 }
+            } ellers {
+                j = j + 1
+            }
+        }
+        hvis snavn != "" {
+            db["_sequences"][snavn] = {"next": tekst_fra_heltall(start), "inc": tekst_fra_heltall(inc), "last": "", "kalt": "0"}
+        }
+        returner 0
+    }
+
+    hvis kmd == "DROP" og lengde(toks) >= 3 og _opp(toks[1]) == "SEQUENCE" {
+        _sikre_sequences(db)
+        la j = 2
+        hvis j + 1 < lengde(toks) og _opp(toks[j]) == "IF" og _opp(toks[j + 1]) == "EXISTS" { j = j + 2 }
+        hvis j < lengde(toks) og finnes_nøkkel(db["_sequences"], toks[j]) { fjern_nokkel(db["_sequences"], toks[j]) }
+        returner 0
+    }
+
     hvis kmd == "CREATE" og lengde(toks) >= 3 og _opp(toks[1]) == "TABLE" {
         la navn = toks[2]
         la kolonner = []
@@ -1685,6 +2109,7 @@ funksjon _exec_t(db, toks) -> heltall {
         la c_default = {}
         la c_checks = []
         la c_fk = []
+        la kol_type_raw = {}
         la i = 3
         hvis i < lengde(toks) og _opp(toks[i]) == "IF" { mens i < lengde(toks) og toks[i] != "(" { i = i + 1 } }
         hvis i < lengde(toks) og toks[i] == "(" { i = i + 1 }
@@ -1786,10 +2211,17 @@ funksjon _exec_t(db, toks) -> heltall {
                     i = i + 1
                 }
             }
+            kol_type_raw[kol_navn] = _opp(kol_type)
             legg_til(kolonner, {"navn": kol_navn, "tag": _tag_av_type(kol_type)})
         }
+        // rowid-alias (SQLite): berre ein éin-kolonne PRIMARY KEY med deklarert type
+        // NØYAKTIG "INTEGER" (ikkje "INT" o.l.) er alias for rowid og auto-tildeler.
+        la rowid_alias = ""
+        hvis lengde(c_pk) == 1 og finnes_nøkkel(kol_type_raw, c_pk[0]) og kol_type_raw[c_pk[0]] == "INTEGER" {
+            rowid_alias = c_pk[0]
+        }
         motor.db_opprett_tabell(db, navn, kolonner)
-        db["tabellar"][navn]["c"] = {"notnull": c_notnull, "pk": c_pk, "unique": c_unique, "default": c_default, "checks": c_checks, "fk": c_fk}
+        db["tabellar"][navn]["c"] = {"notnull": c_notnull, "pk": c_pk, "unique": c_unique, "default": c_default, "checks": c_checks, "fk": c_fk, "rowid_alias": rowid_alias}
         returner 0
     }
 
@@ -2000,13 +2432,19 @@ funksjon _exec_t(db, toks) -> heltall {
             hvis (ikke finnes_nøkkel(gitt, cn)) og finnes_nøkkel(def, cn) { verdier[di] = def[cn] }
             di = di + 1
         }
-        // Auto-id (som JSON-std.db): tom 'id'-kolonne får neste rowid.
-        la ai = 0
-        mens ai < lengde(t["kolonner"]) {
-            hvis t["kolonner"][ai]["navn"] == "id" og verdier[ai] == "" {
-                verdier[ai] = tekst_fra_heltall(t["next_rowid"])
+        // Auto-rowid-alias (SQLite-konform, G2): berre ein INTEGER PRIMARY KEY-kolonne
+        // (rowid-alias) auto-tildeler neste rowid når han er utelaten. Vanleg
+        // `id INTEGER` (utan PK) skal la NULL stå — IKKJE auto-inkrementere.
+        la alias = ""
+        hvis finnes_nøkkel(c, "rowid_alias") { alias = c["rowid_alias"] }
+        hvis alias != "" {
+            la ai = 0
+            mens ai < lengde(t["kolonner"]) {
+                hvis t["kolonner"][ai]["navn"] == alias og verdier[ai] == "" {
+                    verdier[ai] = tekst_fra_heltall(t["next_rowid"])
+                }
+                ai = ai + 1
             }
-            ai = ai + 1
         }
         // Utelatne kolonnar (ikkje gitt, ingen default, ikkje auto-id) → NULL (3-verdi).
         la ni = 0
@@ -2049,6 +2487,7 @@ funksjon _exec_t(db, toks) -> heltall {
                 _fyr_triggers(db, "BEFORE", "INSERT", navn, nyrad, {})
                 motor.db_sett_inn(db, navn, verdier)
                 _fyr_triggers(db, "AFTER", "INSERT", navn, nyrad, {})
+                hvis har_ret { db["_ret_tab"] = navn; legg_til(db["_ret_rows"], nyrad) }
                 returner 1
             }
             db["_siste_feil"] = feil
@@ -2057,6 +2496,7 @@ funksjon _exec_t(db, toks) -> heltall {
         _fyr_triggers(db, "BEFORE", "INSERT", navn, nyrad, {})
         motor.db_sett_inn(db, navn, verdier)
         _fyr_triggers(db, "AFTER", "INSERT", navn, nyrad, {})
+        hvis har_ret { db["_ret_tab"] = navn; legg_til(db["_ret_rows"], nyrad) }
         returner 1
     }
 
@@ -2077,6 +2517,7 @@ funksjon _exec_t(db, toks) -> heltall {
                 motor.db_slett(db, navn, rowids[r])
                 _kaskade_delete_apply(db, navn, rad)
                 slettet = slettet + 1
+                hvis har_ret { db["_ret_tab"] = navn; legg_til(db["_ret_rows"], rad) }
                 _fyr_triggers(db, "AFTER", "DELETE", navn, {}, rad)
             }
             r = r + 1
@@ -2087,14 +2528,24 @@ funksjon _exec_t(db, toks) -> heltall {
     hvis kmd == "UPDATE" og lengde(toks) >= 4 og _opp(toks[2]) == "SET" {
         la navn = toks[1]
         la set_kol = []
-        la set_val = []
+        la set_expr = []
         la i = 3
         mens i < lengde(toks) og _opp(toks[i]) != "WHERE" {
             hvis toks[i] == "," { i = i + 1; fortsett }
-            hvis i + 2 < lengde(toks) og toks[i + 1] == "=" {
-                legg_til(set_kol, toks[i])
-                legg_til(set_val, _verdi_lit(toks[i + 2]))
-                i = i + 3
+            hvis i + 1 < lengde(toks) og toks[i + 1] == "=" {
+                la kol = toks[i]
+                i = i + 2
+                // RHS = uttrykk til topp-nivå-komma eller WHERE (støttar kol = kol + 1 osv).
+                la rhs = []
+                la dep = 0
+                mens i < lengde(toks) {
+                    hvis toks[i] == "(" { dep = dep + 1 } ellers hvis toks[i] == ")" { dep = dep - 1 }
+                    hvis dep == 0 og (toks[i] == "," eller _opp(toks[i]) == "WHERE") { bryt }
+                    legg_til(rhs, toks[i])
+                    i = i + 1
+                }
+                legg_til(set_kol, kol)
+                legg_til(set_expr, rhs)
             } ellers {
                 i = i + 1
             }
@@ -2118,7 +2569,7 @@ funksjon _exec_t(db, toks) -> heltall {
                     hvis finnes_nøkkel(rad, cn) { v = rad[cn] }
                     la s = 0
                     mens s < lengde(set_kol) {
-                        hvis set_kol[s] == cn { v = set_val[s] }
+                        hvis set_kol[s] == cn { v = _ex_or(set_expr[s], 0, rad, _kt_ny(db, {}))["v"] }
                         s = s + 1
                     }
                     legg_til(verdier, v)
@@ -2132,6 +2583,7 @@ funksjon _exec_t(db, toks) -> heltall {
                 motor.db_oppdater(db, navn, rowids[r], verdier)
                 _kaskade_update_apply(db, navn, rad, nyrad)
                 oppdatert = oppdatert + 1
+                hvis har_ret { db["_ret_tab"] = navn; legg_til(db["_ret_rows"], nyrad) }
                 _fyr_triggers(db, "AFTER", "UPDATE", navn, nyrad, rad)
             }
             r = r + 1
@@ -2633,7 +3085,9 @@ funksjon _sel_felt(items) -> ordbok_tekst {
             legg_til(a, _opp(it[0]))
             legg_til(b, "")
             legg_til(expr, it)
-        } ellers hvis lengde(it) >= 2 og (t0 == "COUNT" eller t0 == "SUM" eller t0 == "AVG" eller t0 == "MIN" eller t0 == "MAX" eller t0 == "GROUP_CONCAT" eller t0 == "TOTAL") og it[1] == "(" {
+        } ellers hvis lengde(it) >= 2 og (t0 == "COUNT" eller t0 == "SUM" eller t0 == "AVG" eller t0 == "MIN" eller t0 == "MAX" eller t0 == "GROUP_CONCAT" eller t0 == "STRING_AGG" eller t0 == "TOTAL") og it[1] == "(" {
+            // string_agg = Postgres-namn på group_concat (separator er alltid 2. arg).
+            hvis t0 == "STRING_AGG" { t0 = "GROUP_CONCAT" }
             la arg = "*"
             // COUNT(DISTINCT kol) / SUM(DISTINCT kol) osv: hopp over DISTINCT-nøkkelordet
             // og kod distinkt-flagget inn i arg med "DISTINCT "-prefiks (kolonnenamn er
@@ -3005,12 +3459,16 @@ funksjon _parse_window(item) -> ordbok {
     la fn = _opp(item[0])
     la i = 1
     la arg = "*"
+    la wargs = []
     hvis i < lengde(item) og item[i] == "(" {
         i = i + 1
-        hvis i < lengde(item) og item[i] != ")" { arg = item[i] }
-        mens i < lengde(item) og item[i] != ")" { i = i + 1 }
+        mens i < lengde(item) og item[i] != ")" {
+            hvis item[i] != "," { legg_til(wargs, item[i]) }
+            i = i + 1
+        }
         hvis i < lengde(item) og item[i] == ")" { i = i + 1 }
     }
+    hvis lengde(wargs) > 0 { arg = wargs[0] }
     hvis i < lengde(item) og _opp(item[i]) == "OVER" { i = i + 1 }
     la part = []
     la ocol = ""
@@ -3036,7 +3494,7 @@ funksjon _parse_window(item) -> ordbok {
             }
         }
     }
-    returner {"fn": fn, "arg": arg, "part": part, "ocol": ocol, "oasc": oasc}
+    returner {"fn": fn, "arg": arg, "args": wargs, "part": part, "ocol": ocol, "oasc": oasc}
 }
 
 funksjon _part_key(rad, part) -> tekst {
@@ -3099,6 +3557,87 @@ funksjon _vindu_ein_part(rader, idxs, w, resultat) {
             hvis finnes_nøkkel(rader[idxs[j]], w["ocol"]) { val = rader[idxs[j]][w["ocol"]] }
             hvis (ikke har_prev) eller val != prev { dense = dense + 1; rank = count; prev = val; har_prev = sann }
             hvis fn == "DENSE_RANK" { resultat[idxs[j]] = tekst_fra_heltall(dense) } ellers { resultat[idxs[j]] = tekst_fra_heltall(rank) }
+            j = j + 1
+        }
+        returner 0
+    }
+    // LAG/LEAD — verdi frå rad `offset` før/etter i den ordna partisjonen (default 1).
+    hvis fn == "LAG" eller fn == "LEAD" {
+        la off = 1
+        hvis lengde(w["args"]) >= 2 { off = builtin.heltall_fra_tekst(w["args"][1]) }
+        la defv = _NULLV()
+        hvis lengde(w["args"]) >= 3 {
+            la dt = w["args"][2]
+            hvis lengde(dt) >= 2 og builtin.slice(dt, 0, 1) == "'" { defv = _unquote(dt) } ellers { defv = dt }
+        }
+        la col = w["arg"]
+        la j = 0
+        mens j < lengde(idxs) {
+            la src = j - off
+            hvis fn == "LEAD" { src = j + off }
+            hvis src >= 0 og src < lengde(idxs) {
+                la r = rader[idxs[src]]
+                hvis finnes_nøkkel(r, col) { resultat[idxs[j]] = r[col] } ellers { resultat[idxs[j]] = "" }
+            } ellers {
+                resultat[idxs[j]] = defv
+            }
+            j = j + 1
+        }
+        returner 0
+    }
+    // FIRST_VALUE — fyrste rad i partisjonen (default-ramme).
+    hvis fn == "FIRST_VALUE" {
+        la fv = ""
+        hvis lengde(idxs) > 0 og finnes_nøkkel(rader[idxs[0]], w["arg"]) { fv = rader[idxs[0]][w["arg"]] }
+        la j = 0
+        mens j < lengde(idxs) { resultat[idxs[j]] = fv; j = j + 1 }
+        returner 0
+    }
+    // LAST_VALUE — default-ramma sluttar på CURRENT ROW → gjeldande rad sin verdi (Postgres-quirk).
+    hvis fn == "LAST_VALUE" {
+        la j = 0
+        mens j < lengde(idxs) {
+            hvis finnes_nøkkel(rader[idxs[j]], w["arg"]) { resultat[idxs[j]] = rader[idxs[j]][w["arg"]] } ellers { resultat[idxs[j]] = "" }
+            j = j + 1
+        }
+        returner 0
+    }
+    // NTH_VALUE(col, n) — n-te verdi (1-basert); NULL til ramma har nådd rad n.
+    hvis fn == "NTH_VALUE" {
+        la nn = 1
+        hvis lengde(w["args"]) >= 2 { nn = builtin.heltall_fra_tekst(w["args"][1]) }
+        la j = 0
+        mens j < lengde(idxs) {
+            hvis nn >= 1 og j + 1 >= nn {
+                hvis finnes_nøkkel(rader[idxs[nn - 1]], w["arg"]) { resultat[idxs[j]] = rader[idxs[nn - 1]][w["arg"]] } ellers { resultat[idxs[j]] = "" }
+            } ellers {
+                resultat[idxs[j]] = _NULLV()
+            }
+            j = j + 1
+        }
+        returner 0
+    }
+    // NTILE(n) — del partisjonen i n bøtter; dei første `rem` bøttene får éi rad ekstra.
+    hvis fn == "NTILE" {
+        la nb = builtin.heltall_fra_tekst(w["arg"])
+        hvis nb < 1 { nb = 1 }
+        la cnt = lengde(idxs)
+        la base = cnt / nb
+        la rem = cnt - base * nb
+        la bucket = 1
+        la in_b = 0
+        la cap = base
+        hvis rem > 0 { cap = base + 1 }
+        la j = 0
+        mens j < lengde(idxs) {
+            mens in_b >= cap og bucket < nb {
+                bucket = bucket + 1
+                in_b = 0
+                cap = base
+                hvis bucket <= rem { cap = base + 1 }
+            }
+            resultat[idxs[j]] = tekst_fra_heltall(bucket)
+            in_b = in_b + 1
             j = j + 1
         }
         returner 0
@@ -3404,7 +3943,10 @@ funksjon _har_agg(felt) -> boolsk {
 
 // query_rader: SELECT ... [WHERE] [GROUP BY] [HAVING] [ORDER BY] [LIMIT/OFFSET].
 funksjon query_rader(db, sql: tekst) -> tekst {
-    returner _strip_null(_query_rader_t(db, _tok(sql)))
+    la toks = _tok(sql)
+    // DML med RETURNING → køyr og projiser dei påverka radene.
+    hvis _har_returning_dml(toks) { returner _returning_ut(db, toks) }
+    returner _strip_null(_query_rader_t(db, toks))
 }
 
 funksjon _query_rader_t(db, toks) -> tekst {
