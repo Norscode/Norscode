@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 6) — native SHA256 landa**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 7) — Fase C.1 forsøkt**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -63,7 +63,7 @@ Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 
 **Inventar 2026-09-07 (utforskingsagent, sjå minne `fase-c-inventar`):** CI er ALT fri for gcc/clang/python/pip/jq/node. 0 Python-filer. 13 C/H-filer (archive/legacy_c_backend + build/v3009) haldne i live berre av innhaldsassertar i `tools/release_preflight.no` + `verify_norscode_surface_ownership.no`. 212 JSON-filer (11,6 MB), 92 `.ncb.json` (9,3 MB). Frosen maskinkode i `native_codegen_v2.no`: 10 913 B (`rt_hex_del0–6` + 2 inline-halar) + 1 999 B `rt_hex_process_spawn` = 12,6 KiB; 70 `RT_*`-adressekonstantar: 9 trampolinerte, 20 daude, **39 framleis levande** (~9 KiB C-æra-kode).
 
-1. `[ ]` Promoter fersk seed til `bootstrap/stage0/norscode-linux-x86_64` (etter Fase B).
+1. `[~]` Promoter fersk seed til `bootstrap/stage0/norscode-linux-x86_64` — **STAGED + validert** (grein `promote-fresh-seed-linux-x86`, 1d9746f). Fersk seed (4,24 MB statisk, alle fiksar) verifisert i Docker: version/run/compile/ci_shell_runner+materialize/test_security/tiny42/sweep OK. **BLOKKAR funne av CI:** som CI-ORKESTRATOR krasjar den ferske seeden i NESTA spawn (`run ci_shell_runner` → ci_runtime_fileops → smoke `prosess.køyr(dist,[selftest],{},120000)` = signal 135 / timeout 124). Korrekt isolert + single-level-spawn; ustabil berre som nesta-orkestrator. Treng process-spawn-harding før faktisk promotering. Gamal seed committa att på #187-greina.
 2. `[ ]` Regenerer `bin/nc`/`dist` frå promotert seed på alle plattformer.
 3. `[ ]` **Emitter dei 39 levande frosne rutinene som Norscode-atomics** (mønster: 90 atomics + `patch_abs_jump` finst alt). Tyngdepunkt: `RT_JSON_PARSE` (~1,1 KB), `RT_SPLIT`/`RT_REPLACE`/`RT_STR_TO_INT`, `RT_LIST_*`, `RT_MAP_KEYS`/`RT_MAP_VALS` (mest presserande: legacy-lesarar på ny map-layout), `RT_INDEX_GET/SET`, `RT_BUILD_{LIST,MAP}_REV`, `RT_FIL_LES`/`RT_FIL_SKRIV*`, `RT_MILJO_HENT`, 12 aritmetikk/samanlikning, `RT_CONCAT`/`RT_INT_TO_STR`, `RT_INIT_HEAP`, `process_spawn`-blobben (eige atomic). **Blobben må vekk i EITT jafs** (alle RT_* er absolutte VA-ar) → så slett `rt_hex_del*`, `hex_to_bytes`, dei ~25 `replace`-patchane og `patch_*`-funksjonane.
 4. `[ ]` NCB JSON → binær (`.ncbin`) overalt: (a) ncb_bin bulk-kodar (agent, pågår); (b) skru på skrivaren (`NORSCODE_NCB_BINARY=1`); (c) konverter/regenerer 92 `.ncb.json`; (d) `elf_compile_driver.no` les 8 `precompiled_fragments_inner/*.functions.json` hardkoda — den EINASTE harde JSON-avhengnaden i bootstrap; fersk seed treng dei ikkje. `nc_main` sine `stdlib`/`precompiled`-oppslag er mjuke (fallback til kjelde; risiko = AOT-heap, som GC-modus løyser).
