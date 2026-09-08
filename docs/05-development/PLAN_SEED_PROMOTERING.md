@@ -1,6 +1,6 @@
 # Plan: frå raud CI til 100 % Norscode (seed-promotering)
 
-Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 4)**.
+Levande statusplan. Oppdatert av kvar commit som endrar status. Sist oppdatert: **2026-09-08 (natt, 5) — marker-revisjon**.
 
 Mål (brukaren): *«når alt er ferdig skal det bare være norscode igjen. ingen c, python eller json»*.
 Vegen dit går gjennom **fire fasar** som må takast i rekkjefølgje. Kvar fase har ein målbar
@@ -43,13 +43,13 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | zip/tar/filops/media/shutil/process/socket/network/DNS/json | `[x]` | passerer på seed AA–AE |
 | `test_dns_ds_record` | `[x]` | rot-årsak var A3 (kompilatorfeil); grøn på seed AE |
 | `test_template` (verts-VM via host_kall) | `[x]` flytta | «Ukjent variabel: f» — feilar òg på committa VM → språkparitet (f-strengar). Flytta til `language_parity_tests.txt` |
-| `test_security` | `[ ]` | PBKDF2-fiksen (rett digest: `_raa_bytes` + HMAC-midtstand) er REVERTERT frå greina (19efa03) fordi ho braut precompiled-stdlib byte-identitet. Reapply i Fase B SAMAN med at stdlib-JSON-cachen (bootstrap/stdlib/*.ncb.json) blir sletta i Fase C. PBKDF2-heng (bump→1 GiB) står att. |
+| `test_security` (PBKDF2) | `[ ]` YTING | `hash_passord` = pbkdf2_sha256(pw, salt, **120000**, 32) → gap-ruta pure `std.sha256.pbkdf2_hex` = 120k iter pure HMAC-SHA256 → 1 GiB-heap (heng/OOM) på fersk seed. Ikkje korrektheit — 10k-hmac-litmus (bounded) passerer. FIKS: native SHA256-kompresjon-atom (gjer ALL fersk-krypto rask — modell: getrandom-atomet 1b50506), eller defer. PBKDF2-digest-fiksen (revertert 19efa03) reapplyast når stdlib-JSON-cachen slettas (Fase C.4). |
 | **Materialize-korrupsjon** | `[x]` ROT-ÅRSAK: json_stringify (IKKJE GC) | KORRIGERT 2026-09-07: bundle-steget i `materialize_*.no` serialiserte med `builtin.json_stringify` → på committed **Linux**-stage0 er det legacy-serializeren som skriv numerisk-utsjåande STRENG-konstantar som bare tokens ("00"→00 → ugyldig JSON → run-ncb-pure SIGSEGV). Deterministisk, ikkje GC/race. Symptomet (socket.no bare tal) reproduserte i lokal kandidat. Fiks: `json_skriv` i begge serialiserings-stadene (metadata + per-funksjon). GC v6 (marker-ved-push) står som eigen robustheitsfiks (gating-probar grøne), men var ikkje blokkaren. **VERIFISERT (Docker linux/amd64):** materialize m/fiks rc=0, bare_token_count=0 (rein kandidat 2,17 MB), fullhost-seed byggjer (3,66 MB), `run-ncb-pure tiny42=42` (var 139), version OK. Seed-porten (108 testar) på fullhost-seed køyrer. |
 | **random_hex-kollisjon (fersk seed)** | `[x]` FIKSA + VERIFISERT | Fyrste reelle fersk-seed KØYRETIDS-bug (via seed-porten): `test_auth_mfa_enrollment_recovery` assert #10. Gap-ruta `std.sha256.random_hex_pure` seedar berre frå `tid_ms()` per kall → kall i same ms gjev IDENTISK output (6/64 unike vs committed 64/64) → duplikate MFA-recovery-kodar → eingongsbruk brote. Råkar ALL tryggleiks-random på fersk seed. FIKS: getrandom(2)-syscall-atomic i native_codegen_v2 (fjern gap-ruta linje 6078); LØYST (1b50506): random_byte-atom (getrandom(2) #318) + native_gap.random_hex_secure, gap-ruta repointa. Verifisert på fersk seed: random_hex 64/64 unike (var 6/64), test_auth_mfa_enrollment_recovery OK. Sjå minne `fersk-seed-random-hex-kollisjon`. |
-| **Seed-port finn fersk-seed-diskrepansar** | `[~]` PÅGÅR | Materialize-blokkaren er borte, men seed-porten (fullhost-seed) avdekkjer per-test fersk-seed-feil: `test_auth_mfa_enrollment_recovery` = «assert feilet» på fersk seed men **OK på committed seed** (direkte VM) → ekte codegen/runtime-diskrepans, ikkje testfeil. Må fiksast før promotering. Full lokal port er upraktisk: kvar fersk-seed-compile ~6,5 GiB + 6–15 min (naiv codegen) → 2-vegs parallell = 11+ t; høyrer heime i CI B2-jobben eller målretta debugging per diskrepans. |
-| `test_stil` («Ukjent innebygd funksjon: builtin.t.inneholder») | `[~]` fiksa, verifisering pågår | ROT: `selfhost/nc_main.no` sin råskann av `bruk`-linjer tok med etterfølgjande `// kommentar` i aliaset («t   // …») → `t.inneholder` fall til builtin. Fiks: strip `//`/`#` før modul/alias (ikkje fragmentmodul). Committed seed har same feil innebygd (testen er skippa der) → verifiserast på fersk seed (aliasfix-container) |
-| Binær NCB-kodar bulk (førebuing Fase C.4) | `[~]` agent | `selfhost/ncb_bin.no` per-teikn-kodar toppa 8,1 GB RSS → OOM; bakgrunnsagent gjer han bulk med byte-identisk wire-format + A/B-måling på committed seed |
-| Seed-port-tabell i CI (B2 fullhost) | `[ ]` | ventar på A4 |
+| **Seed-port: fersk-seed runtime-korrektheit** | `[~]` NESTEN | Rask runtime-sweep (compile med committed seed → run-ncb-pure på fiksa fersk seed): **0 feil** gjennom ~54+ ikkje-krypto gate-testar. Einaste kjende fersk-seed-diskrepans (`test_auth_mfa_enrollment_recovery`) er LØYST (random_hex/getrandom). Att: `test_security`/PBKDF2 (yting, ikkje korrektheit — eiga rad). Full compile-port på fersk seed er upraktisk lokalt (6,5 GiB + 6–15 min/test); køyr i CI B2 eller compile-committed/run-fresh-sweep. |
+| `test_stil` («Ukjent innebygd funksjon: builtin.t.inneholder») | `[x]` FIKSA + VERIFISERT | ROT: `selfhost/nc_main.no` sin råskann av `bruk`-linjer tok med etterfølgjande `// kommentar` i aliaset («t   // …») → `t.inneholder` fall til builtin. Fiks: strip `//`/`#` før modul/alias (ikkje fragmentmodul). Committed seed har same feil innebygd (testen er skippa der). VERIFISERT på fersk seed (aliasfix-container): `std.tekst.inneholder` (ikkje builtin) + test_stil rc=0. |
+| Binær NCB-kodar bulk (Fase C.4) | `[ ]` | `selfhost/ncb_bin.no` per-teikn-kodar toppa 8,1 GB RSS → OOM (difor NORSCODE_NCB_BINARY=0). Bulk-agenten stoppa (session-limit) utan committa arbeid. Høyrer til Fase C.4 (NCB→binær), etter promotering. |
+| Seed-port-tabell i CI (B2 fullhost) | `[ ]` | A4 ferdig. B2-fullhost-jobben (b2-seed-direct.yml) køyrer heile porten på dedikert runner; ikkje-blokkerande diagnose. Bør re-dispatchast med materialize-json_skriv + random_hex-fiksane. |
 | Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
 | `db.*` (NorsDB rein Norscode) | `[x]` konformans komplett | Side-spor FERDIG (aa803ab): siste SQLite-korrektheits-gap lukka — G2 (rowid-alias: berre éin-kolonne INTEGER PRIMARY KEY auto-tildeler) + strftime/julianday `%f` millisekund. KONFORMANS_GAP: «Ingen kjende korrektheits-divergensar att». Verifisert: konformans_gap + subquery + default/tx_commit/param_binding/db_adapter grøne. Att: kostnadsbasert join-planleggar (perf, gated på native). |
 | tls / sandbox-profilar / trådar | `[x]` pure-Norscode komplett | Side-spor FERDIG (3bef50d): TLS 1.3 komplett for mandatory suite (AES-128-GCM + ChaCha20-Poly1305, X25519, Ed25519, RFC 8448-verifisert incl. ny traffic-key-KAT); trådar (std/tråd.no kooperativ) komplett. Att = valfrie suitar (AES-256/SHA-384, HRR, PSK/0-RTT) + native pool/ssl.no (seed-spor). Sjå docs/TLS_TRAAD_SANDBOX_STATUS.md. |
@@ -76,18 +76,15 @@ Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 
 - `[ ]` f-strengar (`test_template`), `tools/language_parity_tests.txt` (11 testar, Parserfeil på alle seedar)
 - `[ ]` `desimaltall` nativt
-- `[ ]` NorsDB → SQLite-kompatibel kjerne
+- `[x]` NorsDB → SQLite-kompatibel kjerne — konformans komplett (aa803ab): ingen kjende korrektheits-divergensar mot sqlite3 3.51.0. Att: kostnadsbasert join-planleggar (perf).
 
 ---
 
 ## Nå-kø (kva som køyrer akkurat no)
 
-| Jobb | Kvar | Forventa |
-|---|---|---|
-| `matrepro` — FULL materialize med GAMAL (v5) seed | Docker lokalt | reproduserer korrupsjonen lokalt? (bevis + baseline) |
-| `gcval` — v6-seed → røyk → materialize-v6 ∥ GC-probar + gating MAPSTRESS + 10k-hmac | Docker lokalt | v6 grøn ⇒ fullhost-kandidat utan korrupsjon |
-| `aliasfix` — seed frå noverande kjelde → kompiler alias-variant + køyr test_stil | Docker lokalt | `std.tekst.inneholder` + test_stil OK på fersk seed |
-| ncb_bin bulk-kodar | bakgrunnsagent, eige worktree | A/B-tal + byte-identisk format |
+Ingen bakgrunnsjobbar aktive (Docker restarta ved sesjons-gap; agentane a89b04ec/a204d1ab
+ferdige og integrerte). Neste konkrete steg på kritisk sti: **native SHA256-atom** (for
+test_security/PBKDF2-ytinga), deretter **seed-promotering** (Fase C).
 
 ## Logg
 
