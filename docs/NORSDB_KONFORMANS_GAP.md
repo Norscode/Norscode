@@ -7,18 +7,25 @@
 
 ## Bekrefta divergensar (verifisert mot sqlite3)
 
-| # | SQL | SQLite | NorsDB | Merknad |
-|---|-----|--------|--------|---------|
-| G2 | `INSERT` utan `id` i tabell `id INTEGER` (ikkje PRIMARY KEY) | `id = NULL` | auto-inkrement | NorsDB auto-tildeler alltid rowid; SQLite berre for `INTEGER PRIMARY KEY`. |
+> Ingen kjende korrektheits-divergensar att. Sjå «Løyste gap» under.
 
-> G1 (AVG → heiltal) og NULL-vs-`''` er **løyste**. Full 3-verdi NULL: sentinel skil no NULL frå tom
-> streng (`IS NULL`, propagering, COUNT/COALESCE, outer-join-utfyll — golden mot sqlite3).
+### Løyste gap
+
+- **G1** (AVG → heiltal) og NULL-vs-`''`: løyste. Full 3-verdi NULL — sentinel skil NULL frå
+  tom streng (`IS NULL`, propagering, COUNT/COALESCE, outer-join-utfyll — golden mot sqlite3).
+- **G2** (`INSERT` utan `id`, rowid-alias): **løyst**. Berre ein éin-kolonne `INTEGER PRIMARY KEY`
+  (deklarert type nøyaktig `INTEGER`, kolonne- eller tabell-form) er rowid-alias og auto-tildeler
+  neste rowid. Vanleg `id INTEGER` utan PK let no `NULL` stå, som SQLite. `INT PRIMARY KEY`
+  (ikkje `INTEGER`) er heller ikkje alias. Verifisert i `tests/test_norsdb_konformans_gap.no`.
+- **`strftime` `%f`** (fraksjons-sekund): **løyst**. Dato-pipelinen ber no millisekund, så `%f` gjev
+  ekte `SS.SSS` (t.d. `56.789`, `56.500`), medan `SS.000` står ved manglande fraksjon.
+  `datetime()/time()` droppar framleis fraksjon (heiltals-sekund), som SQLite. `julianday` reknar
+  no i ms internt (fraksjons-korrekt). Verifisert i `tests/test_norsdb_konformans_gap.no`.
 
 ## Manglande funksjonar (parser/motor støttar ikkje)
 
 | Funksjon | Status | Merknad |
 |---|---|---|
-| `julianday` fraksjons-sekund (`%f` = SS.SSS med ekte ms) | delvis | `%f` gjev SS.000 (heiltals-sekund). Resten av dato/tid dekt. |
 | Kostnadsbasert join-planleggar | manglar | Perf-optimering; gated på native (B2) — tolka runtime dominerer kostnad uansett. `SET DEFAULT` handterast som SET NULL. |
 
 ## Dekt i dag (grøn konformans, golden mot sqlite3 3.51.0)
@@ -36,7 +43,8 @@ vindusfunksjonar, `JOIN` (INNER/LEFT/RIGHT/FULL/CROSS), constraints
 `CREATE INDEX` (equality + range i planen), prepared statements (`?`), `EXPLAIN`,
 REAL-typar, parameter-binding, transaksjonar (`begin/commit/rollback`, `transaction`),
 **dato/tid** (`date/time/datetime/strftime/unixepoch/julianday` + modifikatorar `±N days/months/years…`,
-`start of …`, `weekday N`; skotår-korrekt kalendermatte), **BLOB-literalar** (`x'…'`),
+`start of …`, `weekday N`; skotår-korrekt kalendermatte; **`strftime %f` fraksjons-sekund `SS.SSS`**),
+**BLOB-literalar** (`x'…'`),
 **full 3-verdi NULL** (NULL distinkt frå `''`; propagering, `IS NULL`, `COUNT(col)`/COALESCE,
 outer-join-utfyll).
 
