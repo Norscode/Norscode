@@ -113,6 +113,33 @@ To målefeil er retta undervegs, og begge er verdt å hugse:
 
 Terskel-tuning er dermed ein blindveg, og «parse heng» var aldri sant.
 
+**GC-spor (seed bygd med `NORSCODE_GC_SPOR=1`, `nest.no`).** Skriv `<bump> <live-n>`
+etter kvar collect. Heile køyringa (n=500/1000/2000) gav berre FEM collects:
+
+| collect | bump | live-n |
+|---|---|---|
+| 1 | 7 372 032 | 304 |
+| 2 | 74 482 624 | 39 278 |
+| 3 | 141 681 472 | 80 001 |
+| 4 | 209 145 088 | 129 594 |
+| 5 | 276 580 190 | 165 246 |
+
+Tidene: n=500 61 ms, n=1000 1800 ms, n=2000 9020 ms. Med terskelen på 1 GiB
+(praktisk talt ingen collect) fell n=2000 frå 4503 ms til 331 ms. Fem collects
+står altså for det meste av tida → **~1 s per collect ved 165k levande objekt,
+altså ~6 µs per levande objekt** for mark + heapsort av live-mapet + sweep.
+
+Kva dette IKKJE seier: eg har ikkje målt kva for ein av dei tre fasane som
+dominerer, og gjettar ikkje. (Ein tidlegare hypotese om at sweepen var
+«full-range over heapen» er FEIL — `gc_sweep_full` itererer over
+live-map-OPPFØRINGAR, j frå 1 til n, ikkje over heap-granular.)
+
+Kva dette derimot seier heilt konkret: porten er
+`port_dyn = max(64 MiB, live-n × 64)`, og ved 165k levande er det andre leddet
+berre 10,6 MB. **Den adaptive termen slår ikkje inn før ~1M levande objekt** — i
+heile dette arbeidsområdet er porten i praksis eit fast 64 MiB-golv. Det er der
+ein eventuell GC-fiks må byrje, og det er ei anna oppgåve enn å skru på golvet.
+
 ### Nå-kø
 
 1. **C.3** — `fase-c3-atomics-2` (blob fjerna, kjerneport grøn) treng rebase +
