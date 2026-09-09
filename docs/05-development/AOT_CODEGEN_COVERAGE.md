@@ -127,7 +127,7 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 31 | GC: levande strengar > 64 KiB, lister > 65536 element og map > 65536 nøklar uverna (kompilatoren har alle tre: kjeldefiler/NCB-JSON, token-lister, VM-heap-bokhald) | mark-DFS «sanity»-tak (`cmp rax,0x10000; ja loop`) klassifiserte dei som falske røter → payload/element-/nøkkelarray ikkje registrert i live-map → sweep frigjorde og gjenbrukte levande minne | tak → 1 GiB (streng) / 16M (liste, map) PLUSS presis ende-test mot bump: payload+8+len, elem_ptr+len*8, keys/vals_ptr+count*8 må liggje under bump (falsk rot elles) |
 | 32 | reuse2-probe hang på 100 % CPU med RSS > 1 GiB etter layout v3 | streng-entry er over-rekna (2*len+11) → siste levande slutt (r9) > bump → «bump ≤ r9»-klampen hoppa over bump-reset → heapen voks til SOFT-taket → collect ved kvart safepoint | sweep klampar kvar entry-ende (og lm[0]-enden) til bump før prev_end/r9 vert oppdatert (gc_sweep_native + gc_sweep_full) |
 
-Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
+Diagnose-metoden som verka: 30-linjers probe → `./bin/nc run tools/gc_probe_run.no <probe.no> [label]` (byggjer ELF; køyr i Docker linux/amd64 på macOS) ; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
 break på throw_unwind-atomet (bytemønster) for å sjå kva som blir kasta og kvar det unwindar.
 Attståande før promotering: harness-subset grønt på fersk seed, så committ som stage0 +
