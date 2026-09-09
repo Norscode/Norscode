@@ -419,6 +419,15 @@ funksjon _sr_handle_one(ncb, raw: tekst) -> tekst {
                         "body": parsed["body"],
                         "params": params
                     }
+                    // Middleware og guards MÅ køyre før handleren.
+                    la mw_svar = _sr_køyr_request_middleware(ncb, ctx)
+                    hvis mw_svar != null da {
+                        returner _sr_response_to_http(_sr_finalize_response(ctx, mw_svar))
+                    }
+                    la g_svar = _sr_køyr_guards(ncb, item, ctx)
+                    hvis g_svar != null da {
+                        returner _sr_response_to_http(_sr_finalize_response(ctx, g_svar))
+                    }
                     la handler = tekst(item["function"])
                     hvis ikkje builtin.contains(handler, ".") da {
                         handler = "__main__." + handler
@@ -452,6 +461,92 @@ funksjon _sr_handle_one(ncb, raw: tekst) -> tekst {
         returner _sr_response_to_http({"__status__": 405, "__headers__": {"Allow": "GET, HEAD, OPTIONS"}, "__body__": "Method Not Allowed"})
     }
     returner _sr_not_found(method, path)
+}
+
+// ── Request-middleware og guards ────────────────────────────────────────────
+// Kompilatoren (ir_to_bytecode) samlar ALT dette inn i NCB-en frå annotasjonane:
+//   web.request_middleware()  → ncb["request_middlewares"]  = ["modul.fn", …]
+//   web.guard()               → ncb["guard_providers"]      = ["namn|SEP|modul.fn", …] (eller kart)
+//   web.use_guard("namn")     → route["guards"]             = ["namn", …]
+// Men serve_runner køyrde dei ALDRI: API-et kompilerte og såg ut til å verne
+// rutene, medan kvar førespurnad gjekk rett til handleren. Det er verre enn eit
+// manglande API — `use_guard("auth")` gav falsk tryggleik. Her blir dei køyrde.
+funksjon _sr_er_svar(v) -> bool {
+    hvis builtin.type(v) != "ordbok" da { returner usann }
+    returner har_nokkel(v, "__status__") eller har_nokkel(v, "status") eller
+             har_nokkel(v, "__body__") eller har_nokkel(v, "body")
+}
+
+// Guard-providerane kan vere liste («namn|SEP|modul.fn», frå ir_to_bytecode) eller
+// kart (namn → modul.fn, frå bundler). Normaliser til kart.
+funksjon _sr_guard_kart(ncb) -> ordbok {
+    la ut: ordbok = {}
+    la gp = ncb["guard_providers"]
+    hvis gp == null da { returner ut }
+    hvis builtin.type(gp) == "ordbok" da {
+        la nk = nøkler(gp)
+        la i: heiltall = 0
+        mens i < lengde(nk) { ut[tekst(nk[i])] = tekst(gp[nk[i]]) i = i + 1 }
+        returner ut
+    }
+    la i2: heiltall = 0
+    mens i2 < lengde(gp) {
+        la post = tekst(gp[i2])
+        la delar = builtin.split(post, "|SEP|")
+        hvis lengde(delar) >= 2 da { ut[tekst(delar[0])] = tekst(delar[1]) }
+        i2 = i2 + 1
+    }
+    returner ut
+}
+
+// Køyrer request-middleware i deklarert rekkjefølgje. Returnerer eit svar for å
+// KORTSLUTTE (middleware nekta/omdirigerte), elles null.
+funksjon _sr_køyr_request_middleware(ncb, ctx) {
+    la mws = ncb["request_middlewares"]
+    hvis mws == null da { returner null }
+    la fns = ncb["functions"]
+    la i: heiltall = 0
+    mens i < lengde(mws) {
+        la namn = tekst(mws[i])
+        prøv {
+            la svar = køyr_funksjon(namn, [ctx], fns, 0)
+            hvis _sr_er_svar(svar) da { returner svar }
+        } fang (e) {
+            // Fail-closed: ein middleware som kastar skal ALDRI la førespurnaden
+            // gå vidare til handleren.
+            returner {"__status__": 500, "__body__": "middleware feila: " + tekst(e)}
+        }
+        i = i + 1
+    }
+    returner null
+}
+
+// Køyrer guards som ruta har bede om med use_guard(). Fail-closed: ukjend guard
+// eller guard som kastar → 500/403, ALDRI vidare til handleren.
+funksjon _sr_køyr_guards(ncb, item, ctx) {
+    la guards = item["guards"]
+    hvis guards == null da { returner null }
+    hvis lengde(guards) == 0 da { returner null }
+    la kart = _sr_guard_kart(ncb)
+    la fns = ncb["functions"]
+    la i: heiltall = 0
+    mens i < lengde(guards) {
+        la g_namn = tekst(guards[i])
+        hvis ikkje har_nokkel(kart, g_namn) da {
+            returner {"__status__": 500, "__body__": "ukjend guard: " + g_namn}
+        }
+        prøv {
+            la svar = køyr_funksjon(tekst(kart[g_namn]), [ctx], fns, 0)
+            hvis _sr_er_svar(svar) da { returner svar }
+            hvis svar == usann da {
+                returner {"__status__": 403, "__body__": "Forbidden"}
+            }
+        } fang (e) {
+            returner {"__status__": 403, "__body__": "guard avviste: " + tekst(e)}
+        }
+        i = i + 1
+    }
+    returner null
 }
 
 funksjon start() -> heiltall {
