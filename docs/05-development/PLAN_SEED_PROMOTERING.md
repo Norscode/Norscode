@@ -50,7 +50,9 @@ Ferdig når: `tools/seed_gate_tests.txt` (97 testar) køyrer grønt på seed byg
 | `test_stil` («Ukjent innebygd funksjon: builtin.t.inneholder») | `[x]` FIKSA + VERIFISERT | ROT: `selfhost/nc_main.no` sin råskann av `bruk`-linjer tok med etterfølgjande `// kommentar` i aliaset («t   // …») → `t.inneholder` fall til builtin. Fiks: strip `//`/`#` før modul/alias (ikkje fragmentmodul). Committed seed har same feil innebygd (testen er skippa der). VERIFISERT på fersk seed (aliasfix-container): `std.tekst.inneholder` (ikkje builtin) + test_stil rc=0. |
 | Binær NCB-kodar bulk (Fase C.4) | `[ ]` | `selfhost/ncb_bin.no` per-teikn-kodar toppa 8,1 GB RSS → OOM (difor NORSCODE_NCB_BINARY=0). Bulk-agenten stoppa (session-limit) utan committa arbeid. Høyrer til Fase C.4 (NCB→binær), etter promotering. |
 | Seed-port-tabell i CI (B2 fullhost) | `[ ]` | A4 ferdig. B2-fullhost-jobben (b2-seed-direct.yml) køyrer heile porten på dedikert runner; ikkje-blokkerande diagnose. Bør re-dispatchast med materialize-json_skriv + random_hex-fiksane. |
-| Native `desimaltall` (flyttal) | `[ ]` | 2–3 veker om det skal inn i porten; elles utanfor |
+| **Native `desimaltall` (flyttal)** | `[ ]` **BLOKKAR PROMOTERING** | Var klassifisert «utanfor porten» som ein manglande funksjon. Målingar 2026-09-10 oppgraderer den til blokkar: det er ikkje fråvær, det er **stille miskompilering**. Docker linux/amd64, same fil, same køyring, committed vs fersk seed: `3.5`→**3**, `0.1`→**0**, `3.5 + 2.5`→**5**, `json_parse_raw("3.5")`→`heltall 3`, `json_parse_raw({"n":{"m":2.5}})`→`{"m":2}`, `builtin.desimaltall("3.5")`→**SIGSEGV (rc=139)**. Ingen test fanga det (strukturelle testar les kjeldetekst; funksjonelle rekna berre heiltal) → `tests/test_desimaltall_runtime.no` er lagt til som vakt, verifisert grøn på committed og raud på fersk. ROT: x86 sin `RT_JSON_PARSE` er ein FAST adresse (4205248) inn i den frosne blobben, og den les eit desimaltal som heiltal og stoppar på punktumet; NCB-konstantar går gjennom nettopp den parsaren. Kan difor ikkje rettast før **C.3** byter blobben mot atomics. ARM64/Mach-O har ein handemittert `emit_json_parse_routine()` som vart retta i 6d68492 — modell finst, berre ikkje for x86-64. |
+| **`builtin.json_parse`-gapet: 136 000× og feil kontrakt** | `[ ]` | Målt på fersk seed, same 704 KB NCB, same køyring: `json_parse_raw` (native RT) **3 ms** — altså raskare enn committed seed (22 ms) — mot `json_parse` (rutar til `std.native_gap.json_parse`) **409 292 ms**. Gap-en er teikn-for-teikn med `builtin.slice(s,p,p+1)`, éin strengallokering per teikn, og gjer den levande mengda så stor at GC-markinga multipliserer kostnaden på toppen. Gap-en er dessutan **ikkje kontrakt-tru**: for objekt gjev committed `{"a":1,…,"e":[1,2]}` medan fersk gjev `{"a":"1",…,"e":"[1,2]"}` (nøsta verdiar blir JSON-STRENGAR), og `"æ"` blir mojibake i staden for å stå uendra. Gap-en vart lagt inn nettopp for kontrakt-truskap (`native_codegen_v2.no:7021–7029`) og oppfyller ikkje sitt eige føremål. |
+| **Frosen parser godtek ugyldig JSON** | `[ ]` | `json_parse_raw("{bad}")` → committed: `ingenting null` (avvist). Fersk: **`ordbok {}`** — malformert JSON blir stille godteke som tom ordbok. Same frosne blob som flyttal-feilen; lukkast av C.3. |
 | `db.*` (NorsDB rein Norscode) | `[x]` konformans komplett | Side-spor FERDIG (aa803ab): siste SQLite-korrektheits-gap lukka — G2 (rowid-alias: berre éin-kolonne INTEGER PRIMARY KEY auto-tildeler) + strftime/julianday `%f` millisekund. KONFORMANS_GAP: «Ingen kjende korrektheits-divergensar att». Verifisert: konformans_gap + subquery + default/tx_commit/param_binding/db_adapter grøne. Att: kostnadsbasert join-planleggar (perf, gated på native). |
 | tls / sandbox-profilar / trådar | `[x]` pure-Norscode komplett | Side-spor FERDIG (3bef50d): TLS 1.3 komplett for mandatory suite (AES-128-GCM + ChaCha20-Poly1305, X25519, Ed25519, RFC 8448-verifisert incl. ny traffic-key-KAT); trådar (std/tråd.no kooperativ) komplett. Att = valfrie suitar (AES-256/SHA-384, HRR, PSK/0-RTT) + native pool/ssl.no (seed-spor). Sjå docs/TLS_TRAAD_SANDBOX_STATUS.md. |
 
@@ -82,9 +84,43 @@ Python-verktøy og JSON-artefaktar er sletta utan at CI blir raud.
 
 ## Nå-kø (kva som køyrer akkurat no)
 
-Ingen bakgrunnsjobbar aktive (Docker restarta ved sesjons-gap; agentane a89b04ec/a204d1ab
-ferdige og integrerte). Neste konkrete steg på kritisk sti: **native SHA256-atom** (for
-test_security/PBKDF2-ytinga), deretter **seed-promotering** (Fase C).
+**Rekkjefølgja er snudd 2026-09-10.** C.1 (promoter seed) kan ikkje gå føre C.3
+(erstatt den frosne blobben med atomics). Grunnen er ikkje yting, men korrektheit:
+tre av dei fire uløyste feilane i Fase B-tabellen over — flyttal-trunkering,
+`builtin.desimaltall`-SIGSEGV og ugyldig-JSON-godkjenning — har alle same rot,
+nemleg at `RT_JSON_PARSE` er ein fast adresse inn i frosen C-æra-maskinkode som
+ikkje kan redigerast. C.3 er difor forkravet, ikkje eit sidespor.
+
+### Kva GC-sporet faktisk viste (og kva som var målefeil)
+
+AOT-steget vart lenge lese som ein GC-patologi. Terskel-sveipet avviser det:
+
+| `NORSCODE_GC_TERSKEL_BYTES` | AOT-resultat |
+|---|---|
+| 64 MiB (standard) | timeout |
+| 256 MiB | timeout @ 25 min, 0 B ELF |
+| 1 GiB | timeout @ 20 min |
+
+To målefeil er retta undervegs, og begge er verdt å hugse:
+
+1. «AOT-sporet stoppar på `parse start`» var eit **bufferartefakt**. stdout er
+   blokk-buffra mot fil, so linjene etter gjekk tapt då timeout drap prosessen.
+   Målt direkte er heile innleiinga rask: `json_parse_raw` 3 ms,
+   `ncb["functions"]` 1 ms, `nøkler(fns)` 0 ms (n=223), 223 oppslag 23 ms.
+2. Den adaptive GC-porten (`port_dyn = max(golv, 64 B × live-tal)`) EKSISTERER og
+   blir skriven (`native_codegen_v2.no:3965`, `:5465`) — hypotesen om at han
+   mangla var feil.
+
+Terskel-tuning er dermed ein blindveg, og «parse heng» var aldri sant.
+
+### Nå-kø
+
+1. **C.3** — `fase-c3-atomics-2` (blob fjerna, kjerneport grøn) treng rebase +
+   verifisering. Lukkar flyttal, `desimaltall`-krasjen og ugyldig-JSON-hòlet.
+2. **C.1** — seed-promotering, etter C.3. `tests/test_desimaltall_runtime.no`
+   må stå grøn på kandidatruntimen før promotering.
+3. `builtin.json_parse`-gapet — skriv om til ei O(nodar)-omforming over den
+   native parsen i staden for teikn-for-teikn, og gjer han kontrakt-tru.
 
 ## Logg
 
