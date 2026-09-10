@@ -186,3 +186,22 @@ ein eventuell GC-fiks må byrje, og det er ei anna oppgåve enn å skru på golv
 
 - 2026-09-06 19:15: A1/A2-kode ferdig og verifisert lokalt (runner-strøyming, shard-only, SIGKILL ved timeout). Slow-lanes delt i matrix (macOS 3, Linux 2). `test_template` ut av seed-porten. Fragment regenerert (ir_to_bytecode + semantic endra, resten byte-identisk).
 - 2026-09-06 18:50: A3 rot-årsak funne (`imported_funk_kart` skuggar builtin) og verifisert på seed AE. Seed AD bygd med ny nc_main + vm (host_kall-fallback verifisert: `test_template` når no VM-en). CI-runde på ae13f62: begge slow-lanes raude, B2 fullhost raud (gamal kommando).
+
+### C.5 restgjeld: daude C-æra-maint-verktøy (2026-09-10)
+
+C.5 sletta C-KJELDA, men tre vedlikehaldsverktøy som MANIPULERER slik kjelde står
+att og er no funksjonelt daude:
+
+- `tools/maint/refresh_embedded_runtime.no` — les `archive/legacy_c_backend/nc_runtime_mini.c`
+- `tools/maint/splice_native_argv_dispatch.no` — skøyter `build/v3009/*.c`
+- `docs/native_mappe_opprett_gap_v3002.no` — peikar på `build/v3009/`-kandidatar
+
+Dei BRYT ingenting: dei les C-filene fyrst når dei blir køyrde, og ingen workflow
+køyrer dei. Difor feilar dei heller ikkje i CI.
+
+Dei vart med VILJE ikkje sletta i same slengen. `splice_native_argv_dispatch` er
+referert frå `tools/release_preflight.no`, `tests/test_splice_native_argv_dispatch_contract.no`
+og tre andre maint-verktøy (`inject_vm_lex_c`, `splice_generated_function`,
+`splice_generated_functions`) — sletting kaskaderer. C.5 hadde alt to rundar med
+følgjefeil (ARM64-jobben og ti testar som las arkivet), og ein tredje kaskade
+høyrer heime i sin eigen commit med si eiga CI-runde.
