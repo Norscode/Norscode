@@ -1049,6 +1049,14 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     legg_til(buf, 0x04)  // cmp rax, 4
     la je_map = emit_je_placeholder(buf)
 
+    // NcVal-type 6 = desimaltall. builtin.type blir emittert INLINE her, ikkje via
+    // atomics["type_of"] — ein prolog i atomet ville aldri fyrt for denne vegen.
+    legg_til(buf, 0x48)
+    legg_til(buf, 0x83)
+    legg_til(buf, 0xF8)
+    legg_til(buf, 0x06)  // cmp rax, 6
+    la je_desimal = emit_je_placeholder(buf)
+
     la lbl_default = lengde(buf)
     emit_push_const(buf, "ingenting", rd_offs, code_va)
     la jmp_end_default = emit_jmp_placeholder(buf)
@@ -1073,6 +1081,10 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     emit_push_const(buf, "ordbok", rd_offs, code_va)
     la jmp_end_map = emit_jmp_placeholder(buf)
 
+    la lbl_desimal = lengde(buf)
+    emit_push_const(buf, "desimaltall", rd_offs, code_va)
+    la jmp_end_desimal = emit_jmp_placeholder(buf)
+
     la lbl_null = lengde(buf)
     emit_push_const(buf, "ingenting", rd_offs, code_va)
 
@@ -1083,6 +1095,8 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     patch_jump(buf, je_str, lbl_str)
     patch_jump(buf, je_list, lbl_list)
     patch_jump(buf, je_map, lbl_map)
+    patch_jump(buf, je_desimal, lbl_desimal)
+    patch_jump(buf, jmp_end_desimal, lbl_end)
     patch_jump(buf, jmp_end_default, lbl_end)
     patch_jump(buf, jmp_end_int, lbl_end)
     patch_jump(buf, jmp_end_bool, lbl_end)
@@ -4939,18 +4953,172 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
 
+    // ── desimaltall: NcVal-type 6 ────────────────────────────────────────────
+    // Den native x86-64-backenden hadde INGEN flyttalstype. `builtin.desimaltall`
+    // peika rett på heiltalsrutina (er_to_int → RT_TO_INT), so ein literal 3.5
+    // vart 3 alt ved kodegenerering, og konvertering frå tekst segfaulta.
+    //
+    // ARBEIDSDELING: maskinkode gjer BIT-FLYTTING og REKNING. Dei to vanskelege
+    // delane — double → desimalstreng og desimalstreng → double — ligg i Norscode
+    // (std/native_gap.no), same gap-mønster som random_hex_secure og pbkdf2_gap.
+    // Difor treng maskinkoden berre ei bru for råbita pluss xmm-aritmetikk.
+    //
+    // Type 6 er ledig: type_of dekte 1–5 og fall gjennom til «ingenting».
+
+    // desimal_boks_rå(rdi = rå 8 byte) → rax = desimaltall-NcVal
+    atomics["desimal_boks_rå"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi (ta vare på bita)
+    call_rel32(bytes, atomics["gc_alloc16"], TEXT_VA())   // rax = 16B blokk
+    copy(bytes, [0x48, 0xC7, 0x00, 0x06, 0x00, 0x00, 0x00]) // mov qword[rax],6
+    copy(bytes, [0x48, 0x89, 0x58, 0x08])                 // mov [rax+8],rbx
+    copy(bytes, [0x5B])                                   // pop rbx
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // desimal_frå_bits(rdi = int-NcVal) → rax = desimaltall-NcVal  (builtin-bru)
+    atomics["desimal_frå_bits"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                 // mov rdi,[rdi+8]
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_til_bits(rdi = desimaltall-NcVal) → rax = int-NcVal  (builtin-bru)
+    atomics["desimal_til_bits"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                 // mov rdi,[rdi+8]
+    jump_rel32(bytes, RT_INT(), TEXT_VA())
+
+    // last0/last1: hent operand som double i xmm0/xmm1. Eit heiltal blir utvida
+    // med cvtsi2sd, so blanda uttrykk (3.5 * 2) reknar i flyttal slik VM-en gjer.
+    atomics["desimal_last0"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                 // cmp qword[rdi],6
+    copy(bytes, [0x75, 0x06])                             // jne +6 (heiltalsvegen)
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x47, 0x08])           // movsd xmm0,[rdi+8]
+    copy(bytes, [0xC3])                                   // ret
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2A, 0x47, 0x08])     // cvtsi2sd xmm0,[rdi+8]
+    copy(bytes, [0xC3])                                   // ret
+
+    atomics["desimal_last1"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                 // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x06])                             // jne +6
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x4E, 0x08])           // movsd xmm1,[rsi+8]
+    copy(bytes, [0xC3])                                   // ret
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2A, 0x4E, 0x08])     // cvtsi2sd xmm1,[rsi+8]
+    copy(bytes, [0xC3])                                   // ret
+
+    // desimal_add(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_add"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x58, 0xC1])           // addsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_sub(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_sub"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x5C, 0xC1])           // subsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_mul(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_mul"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x59, 0xC1])           // mulsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_div(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_div"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x5E, 0xC1])           // divsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
     atomics["sub"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_sub.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_sub"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                   // mov rdi,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x2B, 0x7E, 0x08])                   // sub rdi,QWORD PTR [rsi+0x8]
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
 
     atomics["mul"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_mul.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_mul"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x46, 0x08])                   // mov rax,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x0F, 0xAF, 0x47, 0x08])             // imul rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
 
     atomics["div"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_div.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_div"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x85, 0xC9])                         // test rcx,rcx
@@ -5140,6 +5308,23 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     jump_rel32(bytes, atomics["str_to_int"], TEXT_VA())             // jmp X_a_str_to_int
 
     atomics["type_of"] = TEXT_VA() + lengde(bytes)
+    // desimaltall (type 6) FØRST, som ein prolog. Den eksisterande kroppen under
+    // brukar hardkoda korthopp (je 6aa, je 6c4 …) som er relative INNANFOR seg
+    // sjølv; ved å leggje sjekken føre heile kroppen står alle dei offseta urørte.
+    // Null-sjekken må kome før dereferansen — type_of blir kalla med null.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x32])                               // jz  +50 → hopp over heile prologen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x75, 0x2C])                               // jne +44 → hopp over utskrifta
+    copy(bytes, [0x48, 0x83, 0xEC, 0x18])                   // sub rsp,0x18
+    copy(bytes, [0x48, 0xB8, 0x64, 0x65, 0x73, 0x69, 0x6D, 0x61, 0x6C, 0x74]) // movabs rax,"desimalt"
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])                   // mov [rsp],rax
+    copy(bytes, [0xC7, 0x44, 0x24, 0x08, 0x61, 0x6C, 0x6C, 0x00]) // mov dword[rsp+8],"all\0"
+    copy(bytes, [0xBE, 0x0B, 0x00, 0x00, 0x00])             // mov esi,11
+    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())              // rax = "desimaltall"
+    copy(bytes, [0x48, 0x83, 0xC4, 0x18])                   // add rsp,0x18
+    copy(bytes, [0xC3])                                     // ret
     copy(bytes, [0x48, 0x83, 0xEC, 0x18])                   // sub rsp,0x18
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
     copy(bytes, [0x74, 0x21])                               // je 6aa
@@ -5186,6 +5371,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                                     // ret
 
     atomics["add"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_add.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_add"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
     copy(bytes, [0x74, 0x1E])                               // je 75b
     copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
@@ -7279,6 +7476,10 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_slett   { returner atomic_vas["fil_slett"] }
     hvis fn_nm == "now_ms" eller builtin.ends_with(fn_nm, ".now_ms") { returner atomic_vas["now_ms"] }
     hvis fn_nm == "random_byte" eller builtin.ends_with(fn_nm, ".random_byte") { returner atomic_vas["random_byte"] }
+    // Bru mellom råbits og desimaltall-NcVal. Formatering og parsing ligg i
+    // Norscode (std/native_gap.no); desse to flyttar berre typetaggen.
+    hvis fn_nm == "desimal_frå_bits" eller builtin.ends_with(fn_nm, ".desimal_frå_bits") { returner atomic_vas["desimal_frå_bits"] }
+    hvis fn_nm == "desimal_til_bits" eller builtin.ends_with(fn_nm, ".desimal_til_bits") { returner atomic_vas["desimal_til_bits"] }
     hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner atomic_vas["host_finst"] }
