@@ -3,18 +3,44 @@
 bruk std.runtime_status som runtime_status
 bruk std.stdlib_status som stdlib_status
 bruk selfhost.ncb_serde som serde
+bruk tools.process_runner som runner
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+// Sluttport-steg køyrer heile testsuitar: 6 t per steg.
+funksjon steg_timeout_ms() -> heiltall { returner 21600000 }
+
+// Strukturert argv-køyring (prosess-ABI, ingen shell): [exit_code, stdout, stderr].
+funksjon program(root: tekst, namn: tekst, argv: liste_tekst) -> liste_tekst {
+    returner runner.køyr_program(namn, argv, root, {}, 600000)
 }
 
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) { returner ["1", "", tekst(e)] }
+// Steg-kommandoane er enkle «[NAMN=verdi …] ./bin/nc arg …»-liner utan
+// shellsyntaks; dei blir tolka til miljø + executable + argv.
+funksjon kommandolinje(root: tekst, cmd: tekst) -> liste_tekst {
+    la delar = builtin.split(trim(cmd), " ")
+    la miljø: ordbok_tekst = {}
+    la i = 0
+    mens i < lengde(delar) og builtin.index_of(delar[i], "=") > 0 og ikkje builtin.starts_with(delar[i], "./") {
+        la p = builtin.index_of(delar[i], "=")
+        miljø[builtin.slice(delar[i], 0, p)] = builtin.slice(delar[i], p + 1, lengde(delar[i]))
+        i = i + 1
+    }
+    hvis i >= lengde(delar) { returner ["2", "", "tom stegkommando: " + cmd + "\n"] }
+    la exe = delar[i]
+    la argv: liste_tekst = []
+    i = i + 1
+    mens i < lengde(delar) {
+        hvis delar[i] != "" { legg_til(argv, delar[i]) }
+        i = i + 1
+    }
+    hvis builtin.starts_with(exe, "./") {
+        returner runner.køyr_liste(root + "/" + builtin.slice(exe, 2, lengde(exe)), argv, root, miljø, steg_timeout_ms())
+    }
+    returner runner.køyr_program(exe, argv, root, miljø, steg_timeout_ms())
 }
 
 funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
@@ -30,7 +56,7 @@ funksjon inneheld(data: tekst, needle: tekst) -> bool {
 
 funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: tekst, cmd: tekst) -> bool {
     skriv("\n=== " + namn + " ===\n")
-    la res = kommando("cd " + shell(root) + " && " + cmd)
+    la res = kommandolinje(root, cmd)
     hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
     hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
     hvis ok(res) {
@@ -42,8 +68,8 @@ funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: te
     returner usann
 }
 
-funksjon sha256(sti: tekst) -> tekst {
-    la res = kommando("shasum -a 256 " + shell(sti))
+funksjon sha256(root: tekst, sti: tekst) -> tekst {
+    la res = program(root, "shasum", ["-a", "256", sti])
     hvis ikkje ok(res) { returner "" }
     la delar = builtin.split(trim(felt(res, 1)), " ")
     hvis lengde(delar) == 0 { returner "" }
@@ -51,7 +77,7 @@ funksjon sha256(sti: tekst) -> tekst {
 }
 
 funksjon git_rein(root: tekst) -> bool {
-    la res = kommando("cd " + shell(root) + " && git status --porcelain --untracked-files=all")
+    la res = program(root, "git", ["status", "--porcelain", "--untracked-files=all"])
     hvis ikkje ok(res) { returner usann }
     returner trim(felt(res, 1)) == ""
 }
@@ -68,10 +94,11 @@ funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, c
         hvis expected_hash == "" { returner usann }
         la candidate = attestasjon_runtime_path(root, platform, arch)
         hvis candidate == "" eller ikkje fil_finnes(candidate) { returner usann }
-        hvis sha256(candidate) != expected_hash { returner usann }
+        hvis sha256(root, candidate) != expected_hash { returner usann }
         la repo = env("GITHUB_REPOSITORY")
         hvis repo == "" { returner usann }
-        returner ok(kommando("cd " + shell(root) + " && gh attestation verify " + shell(sti) + " --repo " + shell(repo)))
+        // GitHub-signaturen: «gh attestation verify <attestasjon> --repo <repo>».
+        returner ok(program(root, "gh", ["attestation", "verify", sti, "--repo", repo]))
     } fang (e) { returner usann }
     returner usann
 }
@@ -100,7 +127,7 @@ funksjon skriv_rapport(sti: tekst, rapport: ordbok_tekst) -> bool {
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(felt(kommando("pwd"), 1)) }
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
     la modus = env("NORSCODE_COMPLETION_MODE")
     hvis modus != "local" og modus != "release" {
         skriv("bruk: ./bin/nc completion-gate --local|--release\n")
@@ -110,10 +137,10 @@ funksjon start() -> heiltall {
     la rapport: ordbok_tekst = {}
     rapport["schema"] = "norscode-completion-gate-v1"
     rapport["mode"] = modus
-    rapport["source_commit"] = trim(felt(kommando("cd " + shell(root) + " && git rev-parse HEAD"), 1))
+    rapport["source_commit"] = runner.første_linje(felt(program(root, "git", ["rev-parse", "HEAD"]), 1))
     rapport["commit"] = rapport["source_commit"]
-    rapport["runtime_sha256"] = sha256(root + "/dist/norscode_native")
-    rapport["stage0_macos_sha256"] = sha256(root + "/bootstrap/stage0/norscode-macos-arm64")
+    rapport["runtime_sha256"] = sha256(root, root + "/dist/norscode_native")
+    rapport["stage0_macos_sha256"] = sha256(root, root + "/bootstrap/stage0/norscode-macos-arm64")
     rapport["runtime_hashes"] = {"dist": rapport["runtime_sha256"], "stage0_macos": rapport["stage0_macos_sha256"]}
     rapport["working_tree_clean"] = "false"
     hvis git_rein(root) { rapport["working_tree_clean"] = "true" }
