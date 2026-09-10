@@ -148,9 +148,25 @@ ein eventuell GC-fiks må byrje, og det er ei anna oppgåve enn å skru på golv
    IKKJE flyttal (byte-identisk transkripsjon, verifisert), men er forkravet for
    at rutinene i det heile kan endrast.
 2. **NY: `desimaltall` som native NcVal-type.** Ikkje ein parserfiks — heile
-   typen manglar i backenden. Krev boksing, xmm-aritmetikk, `tekst()`,
-   samanlikning, og både parse- og stringify-sida. Dette er den eigentlege
-   C.1-blokkaren.
+   typen manglar i backenden. Dette er den eigentlege C.1-blokkaren.
+
+   Arbeidsnedbryting (NcVal er ein 16-byte heap-struct `{type, val}`, so ein ny
+   typekode ved sida av `type=1` int / `type=2` streng er arkitektonisk grei):
+
+   | del | omfang | merknad |
+   |---|---|---|
+   | boks-rutine for double | lite | mønster: `gc_box_int` (`atomics["gc_box_int"]`), same fri-liste/bump-veg, berre ny typekode og `val` = rå double-bit |
+   | aritmetikk `+ − * /` | middels | kvar RT-rutine må typesjekke begge sider og gå xmm-vegen når éi av dei er float; heiltals-vegen må stå urørt (paritet) |
+   | samanlikning | middels | same mønster som aritmetikken |
+   | `tekst()` av double | **hard** | double → desimalstreng krev ein korrekt algoritme; det er ikkje ei mekanisk omsetjing |
+   | `builtin.desimaltall(t)` | **hard** | streng → double, same klasse; i dag peikar han feil på `RT_TO_INT` |
+   | `json_parse` | middels | kjenne att `.` og eksponent og produsere float i staden for å stoppe på punktumet |
+   | `json_stringify` | lite | formatering gjenbrukar `tekst()`-rutina |
+
+   Dei to harde delane er begge double↔desimalstreng i handemittert x86-64. Alt
+   det andre er mekanisk. Estimatet «2–3 veker» frå den gamle raden ser rett ut,
+   og arbeidet høyrer heime OPPÅ C.3 (PR #192) — rutinene er ikkje redigerbare
+   før den er inne.
 3. **C.1** — seed-promotering, etter 1 og 2.
    `tests/test_desimaltall_runtime.no` må stå grøn på kandidatruntimen.
 3. `builtin.json_parse`-gapet — skriv om til ei O(nodar)-omforming over den
