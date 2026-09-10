@@ -27,6 +27,66 @@ funksjon køyr(exe: tekst, argv: liste_tekst, cwd: tekst, miljø: ordbok_tekst) 
     fang (e) { returner {"status": "feil", "exit_code": "1", "stdout": "", "stderr": tekst(e)} }
 }
 
+// Den strukturerte ABI-en gjer med VILJE ikkje PATH-oppslag, so eit bart «git»
+// gjev exit 127. Verktøy må peike på ein konkret fil — same problem som
+// gh-oppslaget i platform_readiness_v3600 løyser med ei kandidatliste.
+//
+// MERK at vi IKKJE kan sondere med fil_finnes: disk-capability-en dekkjer
+// repoet, so `fil_finnes("/usr/bin/git")` blir avvist med «path outside disk
+// scope» før vi rekk å svare. Vi prøver difor kandidatane ved å KØYRE dei, og
+// godtek den fyrste som ikkje gjev 127 (finst ikkje). Vinnaren blir mellomlagra
+// fordi sluttporten kallar git fleire gonger.
+// Stage0 gjev stdout med ESCAPA linjeskift: eit `git rev-parse HEAD`-svar er 42
+// teikn (40 + literal «\n» som to teikn), og `trim` fjernar ikkje det — SHA-en
+// ville aldri matcha attestasjonen. Same normalisering som docker_runner.no og
+// nc_test_parallel.no (begge pinna i release_preflight).
+funksjon ut(res: ordbok_tekst) -> tekst {
+    returner trim(builtin.replace(tekst(res["stdout"]), "\\n", "\n"))
+}
+
+funksjon manglar_program(res: ordbok_tekst) -> bool {
+    hvis tekst(res["status"]) == "feil" { returner sann }
+    returner heltall_fra_tekst(tekst(res["exit_code"])) == 127
+}
+
+funksjon program_kandidatar(namn: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    prøv {
+        la sti = env("PATH")
+        hvis sti != "" {
+            for mappe i builtin.split(sti, ":") {
+                hvis mappe != "" { legg_til(ut, mappe + "/" + namn) }
+            }
+        }
+    } fang (e) { }
+    legg_til(ut, "/usr/bin/" + namn)
+    legg_til(ut, "/opt/homebrew/bin/" + namn)
+    legg_til(ut, "/usr/local/bin/" + namn)
+    returner ut
+}
+
+la GIT_STI: tekst = ""
+
+funksjon git(root: tekst, argv: liste_tekst) -> ordbok_tekst {
+    hvis GIT_STI != "" { returner køyr(GIT_STI, argv, root, {}) }
+    for k i program_kandidatar("git") {
+        la res = køyr(k, argv, root, {})
+        hvis ikkje manglar_program(res) {
+            GIT_STI = k
+            returner res
+        }
+    }
+    returner {"status": "feil", "exit_code": "127", "stdout": "", "stderr": "fann ikkje git"}
+}
+
+funksjon gh(root: tekst, argv: liste_tekst) -> ordbok_tekst {
+    for k i program_kandidatar("gh") {
+        la res = køyr(k, argv, root, {})
+        hvis ikkje manglar_program(res) { returner res }
+    }
+    returner {"status": "feil", "exit_code": "127", "stdout": "", "stderr": "fann ikkje gh"}
+}
+
 funksjon inneheld(data: tekst, needle: tekst) -> bool {
     returner builtin.index_of(data, needle) >= 0
 }
@@ -54,9 +114,9 @@ funksjon sha256(sti: tekst) -> tekst {
 }
 
 funksjon git_rein(root: tekst) -> bool {
-    la res = køyr("git", ["status", "--porcelain", "--untracked-files=all"], root, {})
+    la res = git(root, ["status", "--porcelain", "--untracked-files=all"])
     hvis ikkje prosess.ok(res) { returner usann }
-    returner trim(tekst(res["stdout"])) == ""
+    returner ut(res) == ""
 }
 
 funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, commit: tekst) -> bool {
@@ -74,7 +134,7 @@ funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, c
         hvis sha256(candidate) != expected_hash { returner usann }
         la repo = env("GITHUB_REPOSITORY")
         hvis repo == "" { returner usann }
-        returner prosess.ok(køyr("gh", ["attestation", "verify", sti, "--repo", repo], root, {}))
+        returner prosess.ok(gh(root, ["attestation", "verify", sti, "--repo", repo]))
     } fang (e) { returner usann }
     returner usann
 }
@@ -113,7 +173,7 @@ funksjon start() -> heiltall {
     la rapport: ordbok_tekst = {}
     rapport["schema"] = "norscode-completion-gate-v1"
     rapport["mode"] = modus
-    rapport["source_commit"] = trim(tekst(køyr("git", ["rev-parse", "HEAD"], root, {})["stdout"]))
+    rapport["source_commit"] = ut(git(root, ["rev-parse", "HEAD"]))
     rapport["commit"] = rapport["source_commit"]
     rapport["runtime_sha256"] = sha256(root + "/dist/norscode_native")
     rapport["stage0_macos_sha256"] = sha256(root + "/bootstrap/stage0/norscode-macos-arm64")
