@@ -1357,6 +1357,10 @@ funksjon samle_strenger(fns) {
     la strenger: liste = []
     la sett: ordbok = {}
     // Emittergenererte literalar finst ikkje nødvendigvis i input-NCB-en.
+    // «desimaltall» (NcVal-type 6) MÅ vere med: emit_type_of_inline pushar dette
+    // typenamnet, og i eit lite AOT-program utan strengen i kjelda gav manglande
+    // oppslag offset 0 — so builtin.type(3.5) vart «ingenting». I seed-bygget var
+    // han med ved flaks, fordi vm.no inneheld strengen.
     // Hald alle slike runtime-ABI-strengar i den faste dataseksjonen, elles
     // ville manglande oppslag peike på offset 0 ("ingenting").
     la standard: liste_tekst = [
@@ -1365,7 +1369,8 @@ funksjon samle_strenger(fns) {
         "timeout_ms", "max_output_bytes", "environment", "inherit_env",
         "abi", "status", "ferdig", "timeout", "feil", "signal", "pid",
         "exit_code", "stdout", "stderr", "error", "output limit",
-        "process spawn failed", "wall_ms", "peak_rss_bytes"
+        "process spawn failed", "wall_ms", "peak_rss_bytes",
+        "desimaltall"
     ]
     la std_i: heiltall = 0
     mens std_i < lengde(standard) {
@@ -5919,7 +5924,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // Vi held fram frå r13 — heiltalsdelen er alt i rax, so vi treng ikkje parse
     // han på nytt. Mantissa = alle siffer som eitt heiltal; netto titalseksponent =
     // eksplisitt eksponent − tal brøksiffer. Skalering med 10^n i xmm (éin mul/div
-    // etter at 10^n er bygd, same metode som std.native_gap.desimal_frå_tekst).
+    // etter at 10^n er bygd, same metode som std.desimaltall_tekst.desimal_frå_tekst).
     // Klobrar berre register tal-rutina alt klobrar (rax,rcx,rdx,rsi,rdi,r8,xmm0-2).
     // Interne hopp går via placeholder/patch_jump — ingen handrekna offset.
     atomics["json_tall_desimal"] = TEXT_VA() + lengde(bytes)
@@ -7124,6 +7129,45 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 
 // ─── Hovud kodegenererator ────────────────────────────────────────────────────
 
+// Kodegenereringstid: IEEE754-bitmønsteret til eit desimaltall, som heiltal.
+// Køyrer på VERTEN — committed stage0 under seed-bygg, eller fersk seed — og
+// verten har ikkje nødvendigvis builtin.desimal_til_bits. Difor berre
+// samanlikning, ×/÷ med 2 (eksakt i binær flyttal) og heiltalsrekning; ingen
+// flyttals-literalar i sjølve funksjonen. `a` blir normalisert til [1,2), og
+// dei 52 mantissebita blir henta ut eitt og eitt ved dobling — eksakt, sidan
+// a−1 er eit heilt multiplum av 2^-52.
+// MERK: skriv IKKJE 2^63 som literal. Det får ikkje plass i int64 og krasja
+// kompilert kode tidlegare i dette arbeidet. Minste int64 er (0−(2^63−1))−1.
+funksjon desimal_ieee_bits(v) -> heiltall {
+    hvis v == 0 { returner 0 }
+    la neg = v < 0
+    la a = v
+    hvis neg { a = 0 - v }
+    la e: heiltall = 0
+    la vakt: heiltall = 0
+    mens a >= 2 og vakt < 1100 { a = a / 2  e = e + 1  vakt = vakt + 1 }
+    mens a < 1 og vakt < 2200 { a = a * 2  e = e - 1  vakt = vakt + 1 }
+    la minste: heiltall = (0 - 9223372036854775807) - 1
+    hvis e > 1023 {
+        la inf: heiltall = 2047 * 4503599627370496
+        hvis neg { returner inf + minste }
+        returner inf
+    }
+    hvis e < 0 - 1022 { returner 0 }
+    la frac = a - 1
+    la m: heiltall = 0
+    la i: heiltall = 0
+    mens i < 52 {
+        frac = frac * 2
+        m = m * 2
+        hvis frac >= 1 { m = m + 1  frac = frac - 1 }
+        i = i + 1
+    }
+    la bits: heiltall = (e + 1023) * 4503599627370496 + m
+    hvis neg { bits = bits + minste }
+    returner bits
+}
+
 funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
                         gc_safepoint_va, atomic_vas, global_vas) {
     la detaljsporing = miljo_hent("NC_NATIVE_CODEGEN_TRACE_INSTR") == "1"
@@ -7190,7 +7234,17 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
 
         // ─── PUSH_CONST ───────────────────────────────────────────────────────
         ellers hvis op == "PUSH_CONST"
-            emit_push_const(buf, instr[1], rd_offs, eiga_va)
+            // desimaltall: emit_push_const har inga flyttalsgrein — han har ikkje
+            // atomic_vas, og alle 50 RT-slotar er i bruk, so han kan ikkje nå
+            // desimal_boks_rå. Her er atomic_vas i scope: boks råbita direkte.
+            hvis builtin.type(instr[1]) == "desimaltall" {
+                emit_push_imm64(buf, desimal_ieee_bits(instr[1]))
+                legg_til(buf, 0x5F)                                     // pop rdi (råbits)
+                call_rel32(buf, atomic_vas["desimal_boks_rå"], eiga_va)
+                legg_til(buf, 0x50)                                     // push rax
+            } ellers {
+                emit_push_const(buf, instr[1], rd_offs, eiga_va)
+            }
             la vtype: tekst = builtin.type(instr[1])
             hvis instr[1] == null { vtype = "null" }
             hvis vtype == "tekst" { vtype = "str" }
@@ -7580,7 +7634,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     // FJERNA: `la er_to_int = fn_nm == "builtin.desimaltall"` (→ RT_TO_INT).
     // Dette var sjølve rota til at flyttal var brotne: builtin.desimaltall peika
     // på HEILTALSRUTINA. builtin_va blir konsultert FØR gap_rute_v2, so lenge han
-    // svara her nådde gap-ruta til std.native_gap.desimal_frå_tekst aldri fram.
+    // svara her nådde gap-ruta til desimal_frå_tekst aldri fram.
     // IO
     la er_skriv        = fn_nm == "skriv" eller builtin.ends_with(fn_nm, ".skriv")
     // fil_les_binær/binary (read binary) manglar ei eiga native runtime-rutine.
@@ -7748,7 +7802,7 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     // desimaltall(tekst) → rein-Norscode-parsing. Den gamle ruta var er_to_int →
     // RT_TO_INT, altså HEILTALSRUTINA: builtin.desimaltall("3.5") las bita som
     // heiltal og segfaulta. Sjå std/native_gap.no for parsing og formatering.
-    hvis kort == "desimaltall" { returner ["std.native_gap.desimal_frå_tekst"] }
+    hvis kort == "desimaltall" { returner ["std.desimaltall_tekst.desimal_frå_tekst"] }
     hvis kort == "filesystem_read_operation" { returner ["std.runtime_filesystem_native.read_operation"] }
     hvis kort == "filesystem_write_operation" { returner ["std.runtime_filesystem_native.write_operation"] }
     returner []
@@ -8446,8 +8500,8 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // Fell tilbake til native når native_gap ikkje er i bunten.
     hvis (fn_nm == "tekst" eller fn_nm == "builtin.tekst" eller fn_nm == "til_tekst"
           eller fn_nm == "builtin.til_tekst" eller builtin.ends_with(fn_nm, ".til_tekst"))
-       og nargs == 1 og finnes_nøkkel(fn_vas, "std.native_gap.til_tekst_gap") {
-        emit_user_call(buf, fn_vas["std.native_gap.til_tekst_gap"], nargs, code_va)
+       og nargs == 1 og finnes_nøkkel(fn_vas, "std.desimaltall_tekst.til_tekst_gap") {
+        emit_user_call(buf, fn_vas["std.desimaltall_tekst.til_tekst_gap"], nargs, code_va)
         returner
     }
     hvis (fn_nm == "builtin.json_parse" eller fn_nm == "json_parse") og nargs == 1
