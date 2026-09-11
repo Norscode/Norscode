@@ -1463,3 +1463,472 @@ funksjon pbkdf2_gap(passord: tekst, salt: tekst, iterasjonar: heiltall, dklen: h
     }
     returner ut
 }
+
+// ── JIT-backend (norscode-jit-v1) ────────────────────────────────────────────
+// C-seeden hadde builtin.jit_operation i verten. På fersk x86-64-seed var kallet
+// null-fallback, so VM-en kompilerte aldri noko og jit.status() gav null.
+//
+// Operasjonslista (arg:i, const:v, add/sub/mul/div/neg, eq/ne/lt/le/gt/ge,
+// concat, text_len, jump:L, jump_if_false:L, label:L, return) blir verifisert
+// (stakkdjupn, typar, etikettar) og senka til x86-64 i ei eiga mmap-sone. Sona er
+// skrivbar medan koden blir skriven og blir mprotect-a til les+køyr før første
+// kall — aldri skrivbar og køyrbar samstundes (write-xor-execute).
+//
+// Kallkonvensjon for den genererte funksjonen: rdi = blokk med 8-byte-slots
+//   [0] status (0 ok, 1 feil)  [1] bump-start  [2] bump-grense  [3+i] argument i
+// rax = rått resultat: heiltal, 0/1, IEEE-bit eller peikar til [lengd][byte].
+// Verdiane ligg på maskinstakken; rbp-ramme gjer at feilutgangen kan forlate
+// ein ubalansert stakk.
+
+la _jit_tabell = {}
+la _jit_neste = 0
+la _jit_aktive = 0
+la _jit_skrap = 0
+la _jit_adr = 0
+la _jit_pos = 0
+la _jit_maks = 0
+
+funksjon _jit_feil(melding: tekst) {
+    returner {"status": "feil", "error": melding}
+}
+
+funksjon _jit_ok(v) {
+    returner {"status": "ferdig", "value": v, "backend": "x86_64"}
+}
+
+funksjon _jb(l: liste_heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis _jit_pos < _jit_maks { builtin.raw_store8(_jit_adr + _jit_pos, l[i]) }
+        _jit_pos = _jit_pos + 1
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _jit_u32_ved(pos: heiltall, v: heiltall) -> heiltall {
+    la u = v
+    hvis u < 0 { u = u + 4294967296 }
+    la k: heiltall = 0
+    mens k < 4 {
+        la q = u / 256
+        builtin.raw_store8(_jit_adr + pos + k, u - q * 256)
+        u = q
+        k = k + 1
+    }
+    returner 0
+}
+
+funksjon _j32(v: heiltall) -> heiltall {
+    hvis _jit_pos + 4 <= _jit_maks { _jit_u32_ved(_jit_pos, v) }
+    _jit_pos = _jit_pos + 4
+    returner 0
+}
+
+funksjon _j64(v: heiltall) -> heiltall {
+    hvis _jit_pos + 8 <= _jit_maks { builtin.raw_store64(_jit_adr + _jit_pos, v) }
+    _jit_pos = _jit_pos + 8
+    returner 0
+}
+
+funksjon _jit_er_heiltal(t: tekst) -> boolsk {
+    hvis lengde(t) == 0 { returner usann }
+    la i: heiltall = 0
+    hvis builtin.slice(t, 0, 1) == "-" { i = 1 }
+    hvis i >= lengde(t) { returner usann }
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c < 48 eller c > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _jit_er_desimal(t: tekst) -> boolsk {
+    la siffer: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c >= 48 og c <= 57 { siffer = siffer + 1 }
+        ellers hvis c != 46 og c != 45 og c != 43 og c != 101 og c != 69 { returner usann }
+        i = i + 1
+    }
+    returner siffer > 0
+}
+
+funksjon _jit_tekst_felt(req, felt: tekst, standard: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    la v = req[felt]
+    hvis v == null { returner standard }
+    la t = tekst(v)
+    hvis t == "" { returner standard }
+    returner t
+}
+
+funksjon _jit_heiltal_felt(v) -> heiltall {
+    hvis v == null { returner 0 - 1 }
+    hvis builtin.type(v) == "heltall" { returner v }
+    la t = tekst(v)
+    hvis _jit_er_heiltal(t) { returner heltall_fra_tekst(t) }
+    returner 0 - 1
+}
+
+funksjon _jit_setcc(op: tekst) -> heiltall {
+    hvis op == "eq" { returner 0x94 }
+    hvis op == "ne" { returner 0x95 }
+    hvis op == "lt" { returner 0x9C }
+    hvis op == "le" { returner 0x9E }
+    hvis op == "gt" { returner 0x9F }
+    returner 0x9D
+}
+
+// Etikett-signatur = typane på stakken ved inngang. Alle vegar inn må vere like.
+funksjon _jit_merk(lab_sig, lab: tekst, sig: tekst) -> tekst {
+    hvis finnes_nøkkel(lab_sig, lab) {
+        hvis tekst(lab_sig[lab]) != sig { returner "ulik stakk ved etikett " + lab }
+        returner ""
+    }
+    lab_sig[lab] = sig
+    returner ""
+}
+
+funksjon _jit_sig_typar(sig: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis sig == "" { returner ut }
+    la delar = builtin.split(sig, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) { legg_til(ut, tekst(delar[i])) i = i + 1 }
+    returner ut
+}
+
+funksjon _jit_senk(ops, ar: heiltall, nk: tekst, rk: tekst) {
+    la typar: liste_tekst = []
+    la lab_pos = {}
+    la lab_sig = {}
+    la p_pos: liste_heiltall = []
+    la p_lab: liste_tekst = []
+    la p_ut: liste_heiltall = []
+    la p_feil: liste_heiltall = []
+    la rt = ""
+    la levande = sann
+    // push rbp; mov rbp,rsp; push rbx; push r12; push r13; mov rbx,rdi;
+    // mov r12,[rbx+8]; mov r13,[rbx+16]
+    _jb([0x55, 0x48, 0x89, 0xE5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x48, 0x89, 0xFB,
+         0x4C, 0x8B, 0x63, 0x08, 0x4C, 0x8B, 0x6B, 0x10])
+    la i: heiltall = 0
+    mens i < lengde(ops) {
+        la op = tekst(ops[i])
+        la n = lengde(typar)
+        hvis ikkje levande og ikkje builtin.starts_with(op, "label:") {
+            // Hopp etter return/jump (t.d. «hopp til slutt» frå kompilatoren) er daude.
+            hvis builtin.starts_with(op, "jump:") {
+                i = i + 1
+                fortsett
+            }
+            returner _jit_feil("uoppnåeleg operasjon: " + op)
+        }
+        hvis builtin.starts_with(op, "arg:") {
+            la t = builtin.slice(op, 4, lengde(op))
+            hvis ikkje _jit_er_heiltal(t) { returner _jit_feil("invalid argument index") }
+            la idx = heltall_fra_tekst(t)
+            hvis idx < 0 eller idx >= ar { returner _jit_feil("invalid argument index") }
+            _jb([0xFF, 0xB3])                                  // push qword [rbx+disp32]
+            _j32(8 * (3 + idx))
+            legg_til(typar, nk)
+        } ellers hvis builtin.starts_with(op, "const:") {
+            la t = builtin.slice(op, 6, lengde(op))
+            hvis nk == "text" { returner _jit_feil("konstantar er ikkje støtta i tekst-JIT") }
+            la bits: heiltall = 0
+            hvis nk == "int" {
+                hvis ikkje _jit_er_heiltal(t) { returner _jit_feil("ugyldig heiltalskonstant: " + t) }
+                bits = heltall_fra_tekst(t)
+            } ellers {
+                hvis ikkje _jit_er_desimal(t) { returner _jit_feil("ugyldig desimalkonstant: " + t) }
+                bits = builtin.desimal_til_bits(builtin.desimaltall(t))
+            }
+            _jb([0x48, 0xB8])                                  // mov rax,imm64
+            _j64(bits)
+            _jb([0x50])                                        // push rax
+            legg_til(typar, nk)
+        } ellers hvis op == "add" eller op == "sub" eller op == "mul" eller op == "div" {
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis nk == "text" eller typar[n - 1] != nk eller typar[n - 2] != nk { returner _jit_feil("typefeil i " + op) }
+            hvis op == "div" og nk != "float" { returner _jit_feil("div krev desimaltal") }
+            fjern_siste(typar)
+            _jb([0x59, 0x58])                                  // pop rcx; pop rax
+            hvis nk == "int" {
+                hvis op == "add" { _jb([0x48, 0x01, 0xC8]) }        // add rax,rcx
+                ellers hvis op == "sub" { _jb([0x48, 0x29, 0xC8]) } // sub rax,rcx
+                ellers { _jb([0x48, 0x0F, 0xAF, 0xC1]) }            // imul rax,rcx
+            } ellers {
+                // movq xmm0,rax; movq xmm1,rcx; <op>sd xmm0,xmm1; movq rax,xmm0
+                la sd: heiltall = 0x58
+                hvis op == "sub" { sd = 0x5C }
+                hvis op == "mul" { sd = 0x59 }
+                hvis op == "div" { sd = 0x5E }
+                _jb([0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x66, 0x48, 0x0F, 0x6E, 0xC9,
+                     0xF2, 0x0F, sd, 0xC1, 0x66, 0x48, 0x0F, 0x7E, 0xC0])
+            }
+            _jb([0x50])
+        } ellers hvis op == "neg" {
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            hvis nk == "text" eller typar[n - 1] != nk { returner _jit_feil("typefeil i neg") }
+            hvis nk == "int" { _jb([0x58, 0x48, 0xF7, 0xD8, 0x50]) }       // neg rax
+            ellers { _jb([0x58, 0x48, 0x0F, 0xBA, 0xF8, 0x3F, 0x50]) }     // btc rax,63
+        } ellers hvis op == "eq" eller op == "ne" eller op == "lt" eller op == "le" eller op == "gt" eller op == "ge" {
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != nk eller typar[n - 2] != nk { returner _jit_feil("typefeil i " + op) }
+            hvis nk == "text" og op != "eq" og op != "ne" { returner _jit_feil("tekst støttar berre eq/ne") }
+            fjern_siste(typar)
+            fjern_siste(typar)
+            legg_til(typar, "bool")
+            hvis nk == "int" {
+                _jb([0x59, 0x58, 0x48, 0x39, 0xC8, 0x0F, _jit_setcc(op), 0xC0])   // cmp rax,rcx; setcc al
+            } ellers hvis nk == "float" {
+                _jb([0x59, 0x58, 0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x66, 0x48, 0x0F, 0x6E, 0xC9])
+                // NaN (uordna) gjev PF=CF=ZF=1: lt/le/gt/ge blir usann, eq usann, ne sann.
+                hvis op == "lt" eller op == "le" { _jb([0x66, 0x0F, 0x2E, 0xC8]) }  // ucomisd xmm1,xmm0
+                ellers { _jb([0x66, 0x0F, 0x2E, 0xC1]) }                           // ucomisd xmm0,xmm1
+                hvis op == "eq" { _jb([0x0F, 0x94, 0xC0, 0x0F, 0x9B, 0xC1, 0x20, 0xC8]) }       // sete; setnp; and
+                ellers hvis op == "ne" { _jb([0x0F, 0x95, 0xC0, 0x0F, 0x9A, 0xC1, 0x08, 0xC8]) } // setne; setp; or
+                ellers hvis op == "lt" eller op == "gt" { _jb([0x0F, 0x97, 0xC0]) }             // seta
+                ellers { _jb([0x0F, 0x93, 0xC0]) }                                             // setae
+            } ellers {
+                // pop rsi; pop rdi; mov rcx,[rdi]; cmp rcx,[rsi]; jne +10;
+                // lea rdi,[rdi+8]; lea rsi,[rsi+8]; repe cmpsb
+                _jb([0x5E, 0x5F, 0x48, 0x8B, 0x0F, 0x48, 0x3B, 0x0E, 0x75, 0x0A,
+                     0x48, 0x8D, 0x7F, 0x08, 0x48, 0x8D, 0x76, 0x08, 0xF3, 0xA6])
+                hvis op == "eq" { _jb([0x0F, 0x94, 0xC0]) } ellers { _jb([0x0F, 0x95, 0xC0]) }
+            }
+            _jb([0x0F, 0xB6, 0xC0, 0x50])                      // movzx eax,al; push rax
+        } ellers hvis op == "concat" {
+            hvis nk != "text" { returner _jit_feil("concat krev tekst-JIT") }
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != "text" eller typar[n - 2] != "text" { returner _jit_feil("typefeil i concat") }
+            fjern_siste(typar)
+            // pop rsi(b); pop rdi(a); rcx=|a|+|b|; rax=r12+rcx+8; over r13 → feil
+            _jb([0x5E, 0x5F, 0x48, 0x8B, 0x0F, 0x48, 0x03, 0x0E, 0x49, 0x8D, 0x44, 0x0C, 0x08,
+                 0x4C, 0x39, 0xE8, 0x0F, 0x87])
+            legg_til(p_feil, _jit_pos)
+            _j32(0)
+            // [r12]=lengd; rdx=r12; r8=b; kopier a, så b; r12=rax; push rdx
+            _jb([0x49, 0x89, 0x0C, 0x24, 0x4C, 0x89, 0xE2, 0x49, 0x89, 0xF0,
+                 0x48, 0x8B, 0x0F, 0x48, 0x8D, 0x77, 0x08, 0x49, 0x8D, 0x7C, 0x24, 0x08, 0xF3, 0xA4,
+                 0x49, 0x8B, 0x08, 0x49, 0x8D, 0x70, 0x08, 0xF3, 0xA4,
+                 0x49, 0x89, 0xC4, 0x52])
+        } ellers hvis op == "text_len" {
+            hvis nk != "text" { returner _jit_feil("text_len krev tekst-JIT") }
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != "text" { returner _jit_feil("typefeil i text_len") }
+            fjern_siste(typar)
+            legg_til(typar, "int")
+            _jb([0x58, 0x48, 0x8B, 0x00, 0x50])                // mov rax,[rax]
+        } ellers hvis builtin.starts_with(op, "jump_if_false:") {
+            la lab = builtin.slice(op, 14, lengde(op))
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != "bool" { returner _jit_feil("jump_if_false krev bool") }
+            fjern_siste(typar)
+            la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+            hvis fm != "" { returner _jit_feil(fm) }
+            _jb([0x58, 0x48, 0x85, 0xC0, 0x0F, 0x84])          // pop rax; test; je rel32
+            legg_til(p_pos, _jit_pos)
+            legg_til(p_lab, lab)
+            _j32(0)
+        } ellers hvis builtin.starts_with(op, "jump:") {
+            la lab = builtin.slice(op, 5, lengde(op))
+            la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+            hvis fm != "" { returner _jit_feil(fm) }
+            _jb([0xE9])                                        // jmp rel32
+            legg_til(p_pos, _jit_pos)
+            legg_til(p_lab, lab)
+            _j32(0)
+            typar = []
+            levande = usann
+        } ellers hvis builtin.starts_with(op, "label:") {
+            la lab = builtin.slice(op, 6, lengde(op))
+            hvis finnes_nøkkel(lab_pos, lab) { returner _jit_feil("etikett definert to gonger: " + lab) }
+            lab_pos[lab] = _jit_pos
+            hvis levande {
+                la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+                hvis fm != "" { returner _jit_feil(fm) }
+            } ellers hvis finnes_nøkkel(lab_sig, lab) {
+                typar = _jit_sig_typar(tekst(lab_sig[lab]))
+                levande = sann
+            }
+        } ellers hvis op == "return" {
+            hvis n != 1 { returner _jit_feil("expression must leave one value") }
+            hvis rt != "" og rt != typar[0] { returner _jit_feil("ulike returtypar") }
+            rt = typar[0]
+            _jb([0x58, 0xE9])                                  // pop rax; jmp ut
+            legg_til(p_ut, _jit_pos)
+            _j32(0)
+            typar = []
+            levande = usann
+        } ellers {
+            returner _jit_feil("unsupported JIT operation: " + op)
+        }
+        i = i + 1
+    }
+    hvis levande {
+        hvis lengde(typar) != 1 { returner _jit_feil("expression must leave one value") }
+        hvis rt != "" og rt != typar[0] { returner _jit_feil("ulike returtypar") }
+        rt = typar[0]
+        _jb([0x58, 0xE9])
+        legg_til(p_ut, _jit_pos)
+        _j32(0)
+    }
+    hvis rt == "" { returner _jit_feil("funksjonen returnerer aldri") }
+    la feil_pos = _jit_pos
+    _jb([0x48, 0xC7, 0x03, 0x01, 0x00, 0x00, 0x00, 0x31, 0xC0])  // status=1; xor eax,eax
+    la ut_pos = _jit_pos
+    // lea rsp,[rbp-24]; pop r13; pop r12; pop rbx; pop rbp; ret
+    _jb([0x48, 0x8D, 0x65, 0xE8, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3])
+    hvis _jit_pos > _jit_maks { returner _jit_feil("kodebufferet er for lite") }
+    la k: heiltall = 0
+    mens k < lengde(p_pos) {
+        la lab = p_lab[k]
+        hvis ikkje finnes_nøkkel(lab_pos, lab) { returner _jit_feil("ukjend etikett: " + lab) }
+        la mål: heiltall = lab_pos[lab]
+        _jit_u32_ved(p_pos[k], mål - (p_pos[k] + 4))
+        k = k + 1
+    }
+    k = 0
+    mens k < lengde(p_ut) { _jit_u32_ved(p_ut[k], ut_pos - (p_ut[k] + 4)) k = k + 1 }
+    k = 0
+    mens k < lengde(p_feil) { _jit_u32_ved(p_feil[k], feil_pos - (p_feil[k] + 4)) k = k + 1 }
+    la passar = rk == rt
+    hvis rt == "bool" og (rk == "int" eller rk == "float") { passar = sann }
+    hvis ikkje passar { returner _jit_feil("result_kind " + rk + " passar ikkje med " + rt) }
+    returner {"status": "ferdig", "rt": rt}
+}
+
+funksjon _jit_kompiler(req) {
+    la ops = req["operations"]
+    hvis ops == null { returner _jit_feil("operations mangla") }
+    hvis lengde(ops) == 0 { returner _jit_feil("tom operasjonsliste") }
+    la ar = _jit_heiltal_felt(req["arity"])
+    hvis ar < 0 eller ar > 64 { returner _jit_feil("ugyldig arity") }
+    la nk = _jit_tekst_felt(req, "numeric_kind", "int")
+    hvis nk != "int" og nk != "float" og nk != "text" { returner _jit_feil("ukjend numeric_kind: " + nk) }
+    la rk = _jit_tekst_felt(req, "result_kind", nk)
+    hvis rk != "int" og rk != "float" og rk != "bool" og rk != "text" { returner _jit_feil("ukjend result_kind: " + rk) }
+    la maplen: heiltall = ((lengde(ops) * 64 + 256) / 4096 + 1) * 4096
+    la adr = builtin.sys6(9, 0, maplen, 3, 34, -1, 0)            // mmap RW
+    hvis adr < 0 { returner _jit_feil("mmap feila") }
+    _jit_adr = adr
+    _jit_pos = 0
+    _jit_maks = maplen
+    la res = _jit_senk(ops, ar, nk, rk)
+    hvis res["status"] != "ferdig" {
+        builtin.sys6(11, adr, maplen, 0, 0, 0, 0)
+        returner res
+    }
+    hvis builtin.sys6(10, adr, maplen, 5, 0, 0, 0) != 0 {          // mprotect R|X
+        builtin.sys6(11, adr, maplen, 0, 0, 0, 0)
+        returner _jit_feil("mprotect feila")
+    }
+    _jit_neste = _jit_neste + 1
+    la h = "jit-" + tekst_fra_heltall(_jit_neste)
+    _jit_tabell[h] = {"adr": adr, "len": maplen, "arity": ar, "nk": nk, "rk": rk, "rt": res["rt"]}
+    _jit_aktive = _jit_aktive + 1
+    returner {"status": "ferdig", "handle": h, "code_bytes": _jit_pos, "abi": "norscode-jit-v1",
+              "backend": "x86_64", "memory_policy": "write-xor-execute", "result_kind": rk}
+}
+
+funksjon _jit_skrap_adr() -> heiltall {
+    hvis _jit_skrap == 0 {
+        la a = builtin.sys6(9, 0, 4194304, 3, 34, -1, 0)
+        hvis a < 0 { returner 0 }
+        _jit_skrap = a
+    }
+    returner _jit_skrap
+}
+
+funksjon _jit_køyr(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_jit_tabell, h) { returner _jit_feil("ukjent eller frigjort JIT-handle") }
+    la e = _jit_tabell[h]
+    la args = req["arguments"]
+    hvis args == null { returner _jit_feil("arguments mangla") }
+    la ar: heiltall = e["arity"]
+    hvis lengde(args) != ar { returner _jit_feil("feil tal på argument") }
+    la s = _jit_skrap_adr()
+    hvis s == 0 { returner _jit_feil("mmap feila") }
+    la nk = tekst(e["nk"])
+    // Tekstargument ligg i [s+4096, s+1 MiB); resten av sona er bump-plass for concat.
+    la fri: heiltall = s + 4096
+    la i: heiltall = 0
+    mens i < ar {
+        la v = args[i]
+        la t = builtin.type(v)
+        la slot: heiltall = s + 8 * (3 + i)
+        hvis nk == "int" {
+            hvis t != "heltall" { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje heiltal") }
+            builtin.raw_store64(slot, v)
+        } ellers hvis nk == "float" {
+            hvis t == "heltall" { builtin.raw_store64(slot, builtin.desimal_til_bits(builtin.desimal_frå_bits(0) + v)) }
+            ellers hvis t == "desimaltall" { builtin.raw_store64(slot, builtin.desimal_til_bits(v)) }
+            ellers { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje eit tal") }
+        } ellers {
+            hvis t != "tekst" { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje tekst") }
+            hvis fri + 8 + lengde(v) > s + 1048576 { returner _jit_feil("tekstargument for stort for JIT") }
+            la bl = _nw_tekst_til_liste(v)
+            la bn = lengde(bl)
+            hvis fri + 8 + bn > s + 1048576 { returner _jit_feil("tekstargument for stort for JIT") }
+            builtin.raw_store64(fri, bn)
+            la k: heiltall = 0
+            mens k < bn { builtin.raw_store8(fri + 8 + k, bl[k]) k = k + 1 }
+            builtin.raw_store64(slot, fri)
+            fri = ((fri + 8 + bn + 7) / 8) * 8
+        }
+        i = i + 1
+    }
+    builtin.raw_store64(s, 0)
+    builtin.raw_store64(s + 8, fri)
+    builtin.raw_store64(s + 16, s + 4194304)
+    la r = builtin.raw_call(e["adr"], s)
+    hvis builtin.raw_load64(s) != 0 { returner _jit_feil("JIT-resultatet får ikkje plass") }
+    la rt = tekst(e["rt"])
+    la rk = tekst(e["rk"])
+    hvis rt == "float" { returner _jit_ok(builtin.desimal_frå_bits(r)) }
+    hvis rt == "bool" {
+        hvis rk == "float" {
+            hvis r != 0 { returner _jit_ok(builtin.desimal_frå_bits(4607182418800017408)) }
+            returner _jit_ok(builtin.desimal_frå_bits(0))
+        }
+        hvis rk == "int" { returner _jit_ok(r) }
+        returner _jit_ok(r != 0)
+    }
+    hvis rt == "text" {
+        la n = builtin.raw_load64(r)
+        la ut: liste_heiltall = []
+        la k: heiltall = 0
+        mens k < n { legg_til(ut, builtin.raw_load8(r + 8 + k)) k = k + 1 }
+        returner _jit_ok(_nw_liste_til_tekst(ut))
+    }
+    returner _jit_ok(r)
+}
+
+funksjon _jit_frigjer(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_jit_tabell, h) { returner _jit_feil("ukjent eller frigjort JIT-handle") }
+    la e = _jit_tabell[h]
+    builtin.sys6(11, e["adr"], e["len"], 0, 0, 0, 0)               // munmap
+    fjern_nokkel(_jit_tabell, h)
+    _jit_aktive = _jit_aktive - 1
+    returner {"status": "ferdig", "handle": h}
+}
+
+funksjon jit_operation(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _jit_feil("invalid request") }
+    hvis _jit_tekst_felt(req, "abi", "") != "norscode-jit-v1" { returner _jit_feil("unsupported JIT ABI") }
+    la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "compile" { returner _jit_kompiler(req) }
+    hvis op == "run" { returner _jit_køyr(req) }
+    hvis op == "free" { returner _jit_frigjer(req) }
+    hvis op == "status" {
+        returner {"status": "ferdig", "abi": "norscode-jit-v1", "memory_policy": "write-xor-execute",
+                  "backend": "x86_64", "active": _jit_aktive, "compiled": _jit_neste}
+    }
+    returner _jit_feil("ukjend JIT-operasjon: " + op)
+}
