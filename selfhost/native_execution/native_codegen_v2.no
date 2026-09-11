@@ -3346,6 +3346,118 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     call_rel32(bytes, RT_INT(), TEXT_VA())        // box rdi → rax
     copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
 
+    // atomic_xadd(addr, delta) -> gamal verdi (boksa). rdi=addr NcVal, rsi=delta NcVal.
+    // `lock xadd` gjer inkrementet atomisk på tvers av clone(2)-trådar (delt minne).
+    atomics["atomic_xadd"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x53,                                     // push rbx (align før call)
+        0x48, 0x8B, 0x46, 0x08,                   // mov rax, [rsi+8]  (delta)
+        0x48, 0x8B, 0x7F, 0x08,                   // mov rdi, [rdi+8]  (addr)
+        0xF0, 0x48, 0x0F, 0xC1, 0x07,             // lock xadd [rdi], rax
+        0x48, 0x89, 0xC7                          // mov rdi, rax  (gamal verdi)
+    ])
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box → rax
+    copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
+
+    // atomic_cas(addr, expected, new) -> verdien som LÅG der (boksa). rdi/rsi/rdx.
+    // `lock cmpxchg`: er [addr]==expected byt til new; rax endar alltid = gamal verdi.
+    atomics["atomic_cas"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x53,                                     // push rbx
+        0x48, 0x8B, 0x46, 0x08,                   // mov rax, [rsi+8]  (expected)
+        0x48, 0x8B, 0x5A, 0x08,                   // mov rbx, [rdx+8]  (new)
+        0x48, 0x8B, 0x7F, 0x08,                   // mov rdi, [rdi+8]  (addr)
+        0xF0, 0x48, 0x0F, 0xB1, 0x1F,             // lock cmpxchg [rdi], rbx
+        0x48, 0x89, 0xC7                          // mov rdi, rax  (gamal verdi)
+    ])
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box → rax
+    copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
+
+    // ── Native trådar (norscode-native-thread-v1): thread.*-primitiv utan GC/VM ──
+    // thread_dispatch(rdi = deskriptor i delt arena) køyrer den native trådkroppen
+    // og returnerer ALDRI (exit(2)). Deskriptor-layout (rå 8-byte-ord):
+    //   [0] op (0 noop, 1 atomic_increment, 2 condition_signal)
+    //   [8] done-futex   [16] cancel   [24] teljar/cond-addr   [32] iterasjonar/delay_ms
+    la td_start = lengde(bytes)
+    atomics["thread_dispatch"] = TEXT_VA() + td_start
+    copy(bytes, [0x48, 0x89, 0xFB])                 // mov rbx,rdi (deskriptor)
+    copy(bytes, [0x48, 0x8B, 0x03])                 // mov rax,[rbx] (op)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x01])           // cmp rax,1
+    la td_jne_chk2 = emit_jcc_placeholder(bytes, 0x85)  // jne .chk2
+    copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (teljar)
+    copy(bytes, [0x4C, 0x8B, 0x6B, 0x20])           // mov r13,[rbx+32] (iterasjonar)
+    la td_iloop = lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x7B, 0x10, 0x00])     // cmp qword [rbx+16],0 (cancel)
+    la td_cancel_done = emit_jcc_placeholder(bytes, 0x85) // jne .done
+    copy(bytes, [0x4D, 0x85, 0xED])                 // test r13,r13
+    la td_zero_done = emit_jcc_placeholder(bytes, 0x84)   // jz .done
+    copy(bytes, [0xF0, 0x49, 0xFF, 0x04, 0x24])     // lock inc qword [r12]
+    copy(bytes, [0x49, 0xFF, 0xCD])                 // dec r13
+    la td_back = emit_jmp_placeholder(bytes)        // jmp .iloop
+    patch_jump(bytes, td_back, td_iloop)
+    la td_chk2 = lengde(bytes)
+    patch_jump(bytes, td_jne_chk2, td_chk2)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x02])           // cmp rax,2
+    la td_jne_done2 = emit_jcc_placeholder(bytes, 0x85) // jne .done
+    copy(bytes, [0x48, 0x8B, 0x43, 0x20])           // mov rax,[rbx+32] (delay_ms)
+    copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx
+    copy(bytes, [0x48, 0xC7, 0xC1, 0xE8, 0x03, 0x00, 0x00]) // mov rcx,1000
+    copy(bytes, [0x48, 0xF7, 0xF1])                 // div rcx (rax=sek, rdx=rest-ms)
+    copy(bytes, [0x48, 0x69, 0xD2, 0x40, 0x42, 0x0F, 0x00]) // imul rdx,rdx,1000000
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])           // sub rsp,16
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])           // mov [rsp],rax (tv_sec)
+    copy(bytes, [0x48, 0x89, 0x54, 0x24, 0x08])     // mov [rsp+8],rdx (tv_nsec)
+    copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00])     // mov eax,35 (nanosleep)
+    copy(bytes, [0x48, 0x89, 0xE7])                 // mov rdi,rsp
+    copy(bytes, [0x31, 0xF6])                       // xor esi,esi
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])           // add rsp,16
+    copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (cond-addr)
+    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00]) // mov qword [r12],1 (signalisert)
+    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202 (futex)
+    copy(bytes, [0x4C, 0x89, 0xE7])                 // mov rdi,r12
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1 (FUTEX_WAKE)
+    copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    la td_done = lengde(bytes)
+    patch_jump(bytes, td_cancel_done, td_done)
+    patch_jump(bytes, td_zero_done, td_done)
+    patch_jump(bytes, td_jne_done2, td_done)
+    copy(bytes, [0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00]) // mov qword [rbx+8],1 (done)
+    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202
+    copy(bytes, [0x48, 0x8D, 0x7B, 0x08])           // lea rdi,[rbx+8]
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1
+    copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])     // mov eax,60 (exit)
+    copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+    copy(bytes, [0x0F, 0x05])                       // syscall
+
+    // thread_spawn_native(flags, stack_top, deskriptor) → boksa barne-tid.
+    // clone(2) rått: barnet held fram etter syscall med rsp=stack_top; vi legg
+    // deskriptoren på [stack_top-16] (delt via CLONE_VM) og hoppar til dispatch.
+    atomics["thread_spawn_native"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8] (flags)
+    copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (stack_top)
+    copy(bytes, [0x48, 0x8B, 0x52, 0x08])           // mov rdx,[rdx+8] (deskriptor)
+    copy(bytes, [0x48, 0x89, 0x56, 0xF0])           // mov [rsi-16],rdx
+    copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00])     // mov eax,56 (clone)
+    copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx (ptid)
+    copy(bytes, [0x4D, 0x31, 0xD2])                 // xor r10,r10 (ctid)
+    copy(bytes, [0x4D, 0x31, 0xC0])                 // xor r8,r8 (tls)
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0x48, 0x85, 0xC0])                 // test rax,rax
+    la ts_parent = emit_jcc_placeholder(bytes, 0x85) // jnz .parent
+    copy(bytes, [0x48, 0x8B, 0x7C, 0x24, 0xF0])     // mov rdi,[rsp-16] (deskriptor)
+    jump_rel32(bytes, atomics["thread_dispatch"], TEXT_VA()) // jmp thread_dispatch
+    la ts_parent_pos = lengde(bytes)
+    patch_jump(bytes, ts_parent, ts_parent_pos)
+    copy(bytes, [0x48, 0x89, 0xC7])                 // mov rdi,rax (tid)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8 (align)
+    call_rel32(bytes, RT_INT(), TEXT_VA())          // box tid → rax
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])           // add rsp,8
+    copy(bytes, [0xC3])                             // ret
+
     // heap_bump() -> boksa bump-peikar ([HEAP_VA]).
     atomics["heap_bump"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [
@@ -7725,6 +7837,9 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.raw_load8" eller fn_nm == "raw_load8" { returner atomic_vas["raw_load8"] }
     hvis fn_nm == "builtin.raw_store8" eller fn_nm == "raw_store8" { returner atomic_vas["raw_store8"] }
     hvis fn_nm == "builtin.raw_call" eller fn_nm == "raw_call" { returner atomic_vas["raw_call"] }
+    hvis fn_nm == "builtin.atomic_xadd" eller fn_nm == "atomic_xadd" { returner atomic_vas["atomic_xadd"] }
+    hvis fn_nm == "builtin.atomic_cas" eller fn_nm == "atomic_cas" { returner atomic_vas["atomic_cas"] }
+    hvis fn_nm == "builtin.thread_spawn_native" eller fn_nm == "thread_spawn_native" { returner atomic_vas["thread_spawn_native"] }
     hvis fn_nm == "builtin.heap_bump" eller fn_nm == "heap_bump" { returner atomic_vas["heap_bump"] }
     hvis fn_nm == "builtin.obj_addr" eller fn_nm == "obj_addr" { returner atomic_vas["obj_addr"] }
     hvis fn_nm == "builtin.stack_base" eller fn_nm == "stack_base" { returner atomic_vas["stack_base"] }
@@ -7940,6 +8055,11 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     // var kallet null-fallback, so VM-en kompilerte aldri noko og jit.status() gav null.
     hvis kort == "jit_operation" { returner ["std.native_gap.jit_operation"] }
     hvis kort == "atomic_operation" { returner ["std.native_gap.atomic_operation"] }
+    // Native trådar (thread.*-primitiv): clone(2) + futex, GC-/VM-fri veg.
+    hvis kort == "thread_spawn" { returner ["std.native_gap.thread_spawn"] }
+    hvis kort == "thread_join" { returner ["std.native_gap.thread_join"] }
+    hvis kort == "thread_sync" { returner ["std.native_gap.thread_sync"] }
+    hvis kort == "thread_current_id" { returner ["std.native_gap.thread_current_id"] }
     hvis kort == "dns_lookup" { returner ["std.native_gap.dns_lookup"] }
     // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
     // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).

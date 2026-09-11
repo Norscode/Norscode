@@ -1998,6 +1998,33 @@ funksjon _jit_frigjer(req) {
 // (når native trådar landar) er kvar operasjon allereie serialisert, so det
 // same bordet er trådtrygt då.
 
+// ── Delt rå-arena for atomvariablar, mutex/condvar-futex og trådeskriptorar ──
+// clone(2) med CLONE_VM deler heile adresserommet, so ei vanleg mmap er synleg
+// for barnetrådane. Verdiar som må vere trådtrygge (atomteljarar, futex-ord) MÅ
+// liggje her som rå 8-byte-ord, ikkje som boksa NcVal på GC-heapen.
+la _arena = 0
+la _arena_pos = 0
+
+funksjon _arena_addr() -> heiltall {
+    hvis _arena == 0 {
+        la a = builtin.sys6(9, 0, 16777216, 3, 34, -1, 0)   // mmap 16 MiB RW ANON PRIVATE
+        hvis a < 0 { returner 0 }
+        _arena = a
+        _arena_pos = 0
+    }
+    returner _arena
+}
+
+funksjon _arena_alloc(n: heiltall) -> heiltall {
+    hvis _arena_addr() == 0 { returner 0 }
+    la off = ((_arena_pos + 15) / 16) * 16
+    hvis off + n > 16777216 { returner 0 }
+    _arena_pos = off + n
+    la addr = _arena + off
+    builtin.raw_store64(addr, 0)
+    returner addr
+}
+
 la _at_tabell = {}
 la _at_neste = 0
 
@@ -2028,7 +2055,7 @@ funksjon _at_store_ok(order: tekst) -> boolsk {
 
 funksjon _at_svar(handle: tekst, e, ekstra) {
     la ut = {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle,
-             "value": e["value"], "version": e["version"]}
+             "value": builtin.raw_load64(e["addr"]), "version": e["version"]}
     la nøkler_e = builtin.nøkler(ekstra)
     la i: heiltall = 0
     mens i < lengde(nøkler_e) { ut[nøkler_e[i]] = ekstra[nøkler_e[i]] i = i + 1 }
@@ -2042,9 +2069,12 @@ funksjon atomic_operation(req) {
     hvis op != "fence" og op != "destroy" og ikkje _at_kjend(order) { returner _at_feil("invalid_order") }
 
     hvis op == "create" {
+        la addr = _arena_alloc(8)
+        hvis addr == 0 { returner _at_feil("arena_full") }
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
         _at_neste = _at_neste + 1
         la h = "atomic-" + tekst_fra_heltall(_at_neste)
-        _at_tabell[h] = {"value": _jit_heiltal_felt(req["value"]), "version": 0}
+        _at_tabell[h] = {"addr": addr, "version": 0}
         returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": h}
     }
     hvis op == "fence" { returner {"abi": "norscode-atomic-v1", "status": "ok"} }
@@ -2052,36 +2082,36 @@ funksjon atomic_operation(req) {
     la handle = _jit_tekst_felt(req, "handle", "")
     hvis handle == "" eller ikkje finnes_nøkkel(_at_tabell, handle) { returner _at_feil("invalid_handle") }
     la e = _at_tabell[handle]
+    la addr = e["addr"]
 
     hvis op == "load" {
         hvis ikkje _at_load_ok(order) { returner _at_feil("invalid_order") }
-        returner _at_svar(handle, e, {"observed": e["value"]})
+        returner _at_svar(handle, e, {"observed": builtin.raw_load64(addr)})
     }
     hvis op == "store" {
         hvis ikkje _at_store_ok(order) { returner _at_feil("invalid_order") }
-        e["value"] = _jit_heiltal_felt(req["value"])
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
         e["version"] = e["version"] + 1
         returner _at_svar(handle, e, {})
     }
     hvis op == "exchange" {
-        la gammal = e["value"]
-        e["value"] = _jit_heiltal_felt(req["value"])
+        la gammal = builtin.raw_load64(addr)
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
         e["version"] = e["version"] + 1
         returner _at_svar(handle, e, {"observed": gammal})
     }
     hvis op == "fetch_add" {
-        la gammal = e["value"]
-        e["value"] = gammal + _jit_heiltal_felt(req["delta"])
+        // Atomisk på tvers av clone-trådar (lock xadd).
+        la gammal = builtin.atomic_xadd(addr, _jit_heiltal_felt(req["delta"]))
         e["version"] = e["version"] + 1
         returner _at_svar(handle, e, {"observed": gammal})
     }
     hvis op == "compare_exchange" {
         la fail = _jit_tekst_felt(req, "failure_order", "relaxed")
-        // failure_order kan ikkje vere release/acq_rel og ikkje sterkare enn suksessordenen.
         hvis ikkje _at_load_ok(fail) eller _at_rank(fail) > _at_rank(order) { returner _at_feil("invalid_order") }
-        la gammal = e["value"]
-        hvis gammal == _jit_heiltal_felt(req["expected"]) {
-            e["value"] = _jit_heiltal_felt(req["replacement"])
+        la venta = _jit_heiltal_felt(req["expected"])
+        la gammal = builtin.atomic_cas(addr, venta, _jit_heiltal_felt(req["replacement"]))
+        hvis gammal == venta {
             e["version"] = e["version"] + 1
             returner _at_svar(handle, e, {"success": "sann", "observed": gammal})
         }
@@ -2092,6 +2122,188 @@ funksjon atomic_operation(req) {
         returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle}
     }
     returner _at_feil("unsupported_operation")
+}
+
+// ── Native trådar (norscode-native-thread-v1) ────────────────────────────────
+// thread.*-primitiv køyrer i ein clone(2)-tråd på ein pure-int native veg
+// (thread_dispatch-atomet) — ingen GC, ingen VM. __main__.*-brukarfunksjonar
+// treng VM og er ikkje støtta enno.
+la _th_tabell = {}
+la _th_neste = 0
+la _mx_tabell = {}
+la _mx_neste = 0
+
+funksjon _th_feil(kode: tekst, melding: tekst) {
+    returner {"abi": "norscode-native-thread-v1", "status": kode, "error": melding, "handle": "", "thread_id": "", "value": ""}
+}
+
+// futex(uaddr, op, val, timeout_ptr) via sys6(202). op: FUTEX_WAIT=0, FUTEX_WAKE=1.
+funksjon _futex_wait(addr: heiltall, venta: heiltall, timeout_ms: heiltall) -> heiltall {
+    hvis timeout_ms <= 0 {
+        returner builtin.sys6(202, addr, 0, venta, 0, 0, 0)
+    }
+    // timespec i arena
+    la ts = _arena_alloc(16)
+    builtin.raw_store64(ts, timeout_ms / 1000)
+    builtin.raw_store64(ts + 8, (timeout_ms % 1000) * 1000000)
+    returner builtin.sys6(202, addr, 0, venta, ts, 0, 0)
+}
+
+funksjon _futex_wake(addr: heiltall, tal: heiltall) -> heiltall {
+    returner builtin.sys6(202, addr, 1, tal, 0, 0, 0)
+}
+
+funksjon _th_arg_int(args, felt: tekst) -> heiltall {
+    hvis args == null eller ikkje finnes_nøkkel(args, felt) { returner 0 }
+    returner _jit_heiltal_felt(args[felt])
+}
+
+funksjon thread_spawn(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _th_feil("error", "invalid request") }
+    la fn = _jit_tekst_felt(req, "fn", "")
+    la args = req["args"]
+    la stack_bytes = _jit_heiltal_felt(req["stack_bytes"])
+    hvis stack_bytes < 65536 { stack_bytes = 65536 }
+    stack_bytes = ((stack_bytes + 4095) / 4096) * 4096
+
+    // Deskriptor: [0]op [8]done [16]cancel [24]addr [32]tal
+    la desc = _arena_alloc(64)
+    hvis desc == 0 { returner _th_feil("error", "arena full") }
+    builtin.raw_store64(desc + 8, 0)    // done
+    builtin.raw_store64(desc + 16, 0)   // cancel
+
+    hvis fn == "thread.noop" {
+        builtin.raw_store64(desc, 0)
+    } ellers hvis fn == "thread.atomic_increment" {
+        la handle = _jit_tekst_felt(args, "handle", "")
+        hvis handle == "" eller ikkje finnes_nøkkel(_at_tabell, handle) { returner _th_feil("error", "ukjent atomvariabel") }
+        builtin.raw_store64(desc, 1)
+        builtin.raw_store64(desc + 24, _at_tabell[handle]["addr"])
+        builtin.raw_store64(desc + 32, _th_arg_int(args, "iterations"))
+    } ellers hvis fn == "thread.condition_signal" {
+        la ch = _jit_tekst_felt(args, "condition_handle", "")
+        hvis ch == "" eller ikkje finnes_nøkkel(_mx_tabell, ch) { returner _th_feil("error", "ukjent condition") }
+        builtin.raw_store64(desc, 2)
+        builtin.raw_store64(desc + 24, _mx_tabell[ch])
+        builtin.raw_store64(desc + 32, _th_arg_int(args, "delay_ms"))
+    } ellers {
+        // __main__.*-brukarfunksjonar treng VM — ikkje støtta i den native vegen enno.
+        returner _th_feil("error", "native thread backend støttar berre thread.*-primitiv (fekk " + fn + ")")
+    }
+
+    la stack = builtin.sys6(9, 0, stack_bytes, 3, 34, -1, 0)   // mmap stack
+    hvis stack < 0 { returner _th_feil("error", "mmap stack feila") }
+    la stack_top = stack + stack_bytes
+    // CLONE_VM|FS|FILES|SIGHAND|THREAD = 0x10F00 = 69376
+    la tid = builtin.thread_spawn_native(69376, stack_top, desc)
+    _th_neste = _th_neste + 1
+    la h = "thread-" + tekst_fra_heltall(_th_neste)
+    _th_tabell[h] = {"desc": desc, "stack": stack, "stack_bytes": stack_bytes, "tid": tid}
+    returner {"abi": "norscode-native-thread-v1", "status": "started", "handle": h, "thread_id": tekst_fra_heltall(tid), "value": ""}
+}
+
+funksjon thread_join(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
+    la e = _th_tabell[h]
+    la desc = e["desc"]
+    la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+    // Vent til done-ordet blir 1. FUTEX_WAIT returnerer straks om verdien != venta.
+    hvis builtin.raw_load64(desc + 8) == 0 {
+        hvis timeout_ms == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout", "handle": h, "value": ""} }
+        _futex_wait(desc + 8, 0, timeout_ms)
+        hvis builtin.raw_load64(desc + 8) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout", "handle": h, "value": ""} }
+    }
+    returner {"abi": "norscode-native-thread-v1", "status": "finished", "handle": h, "value": "", "thread_id": tekst_fra_heltall(e["tid"])}
+}
+
+funksjon thread_sync(req) {
+    la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "cancel" {
+        la h = _jit_tekst_felt(req, "handle", "")
+        hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
+        builtin.raw_store64(_th_tabell[h]["desc"] + 16, 1)
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "mutex_create" eller op == "condition_create" {
+        la addr = _arena_alloc(8)
+        hvis addr == 0 { returner _th_feil("error", "arena full") }
+        builtin.raw_store64(addr, 0)
+        _mx_neste = _mx_neste + 1
+        la h = "sync-" + tekst_fra_heltall(_mx_neste)
+        _mx_tabell[h] = addr
+        returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h}
+    }
+    la mh = _jit_tekst_felt(req, "handle", "")
+    hvis op == "mutex_lock" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
+        la addr = _mx_tabell[mh]
+        la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+        mens builtin.atomic_cas(addr, 0, 1) != 0 {
+            la r = _futex_wait(addr, 1, timeout_ms)
+            hvis timeout_ms > 0 og r == 0 - 110 { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+        }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "mutex_unlock" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
+        builtin.raw_store64(_mx_tabell[mh], 0)
+        _futex_wake(_mx_tabell[mh], 1)
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "condition_wait" {
+        la cond_h = mh
+        hvis ikkje finnes_nøkkel(_mx_tabell, cond_h) { returner _th_feil("error", "ukjent condition") }
+        la caddr = _mx_tabell[cond_h]
+        la mutex_h = _jit_tekst_felt(req, "mutex_handle", "")
+        la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+        // Slepp mutex, vent på signal (cond != 0), ta mutex att.
+        hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
+            builtin.raw_store64(_mx_tabell[mutex_h], 0)
+            _futex_wake(_mx_tabell[mutex_h], 1)
+        }
+        hvis builtin.raw_load64(caddr) == 0 { _futex_wait(caddr, 0, timeout_ms) }
+        hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
+            mens builtin.atomic_cas(_mx_tabell[mutex_h], 0, 1) != 0 { _futex_wait(_mx_tabell[mutex_h], 1, timeout_ms) }
+        }
+        hvis builtin.raw_load64(caddr) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "condition_signal" eller op == "condition_broadcast" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent condition") }
+        builtin.raw_store64(_mx_tabell[mh], 1)
+        _futex_wake(_mx_tabell[mh], 2147483647)
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "mutex_destroy" eller op == "condition_destroy" {
+        hvis finnes_nøkkel(_mx_tabell, mh) { fjern_nokkel(_mx_tabell, mh) }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "signal_block" eller op == "signal_unblock" eller op == "signal_query" {
+        // USR1 = 10. Bygg sigsett i arena. rt_sigprocmask(how, set, old, 8).
+        la maske = _arena_alloc(16)
+        builtin.raw_store64(maske, 512)      // bit (10-1)=9 → 1<<9 = 512
+        builtin.raw_store64(maske + 8, 0)
+        hvis op == "signal_block" {
+            builtin.sys6(14, 0, maske, 0, 8, 0, 0)   // SIG_BLOCK=0
+            returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": "sann"}
+        }
+        hvis op == "signal_unblock" {
+            builtin.sys6(14, 1, maske, 0, 8, 0, 0)   // SIG_UNBLOCK=1
+            returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": "sann"}
+        }
+        // signal_query: les gjeldande maske, sjekk bit 9.
+        la old = _arena_alloc(16)
+        builtin.sys6(14, 0, 0, old, 8, 0, 0)         // how ignorert når set=0
+        la blokkert = "usann"
+        hvis (builtin.raw_load64(old) / 512) % 2 == 1 { blokkert = "sann" }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": blokkert}
+    }
+    returner _th_feil("error", "ukjend sync-operasjon: " + op)
+}
+
+funksjon thread_current_id() {
+    returner builtin.sys6(186, 0, 0, 0, 0, 0, 0)   // gettid
 }
 
 funksjon jit_operation(req) {
