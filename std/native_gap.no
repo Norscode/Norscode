@@ -1919,6 +1919,110 @@ funksjon _jit_frigjer(req) {
     returner {"status": "ferdig", "handle": h}
 }
 
+// ── Atomvariabel-backend (norscode-atomic-v1) ────────────────────────────────
+// C-seeden hadde builtin.atomic_operation i verten; på fersk seed var kallet
+// null-fallback (std/runtime/atomic.no rapporterte «unsupported»). Denne
+// backenden gjev korrekt eintråds semantikk: eit handtak-bord med verdi og
+// versjon, og minneordens-validering per operasjon. Med den globale VM-låsen
+// (når native trådar landar) er kvar operasjon allereie serialisert, so det
+// same bordet er trådtrygt då.
+
+la _at_tabell = {}
+la _at_neste = 0
+
+funksjon _at_feil(kode: tekst) {
+    returner {"abi": "norscode-atomic-v1", "status": kode}
+}
+
+// Ordensstyrke: relaxed<consume<acquire<seq_cst og relaxed<release<acq_rel<seq_cst.
+funksjon _at_rank(order: tekst) -> heiltall {
+    hvis order == "relaxed" { returner 0 }
+    hvis order == "consume" { returner 1 }
+    hvis order == "acquire" { returner 2 }
+    hvis order == "release" { returner 2 }
+    hvis order == "acq_rel" { returner 3 }
+    hvis order == "seq_cst" { returner 4 }
+    returner 0 - 1
+}
+
+funksjon _at_kjend(order: tekst) -> boolsk { returner _at_rank(order) >= 0 }
+
+// load kan ikkje bruke release/acq_rel; store kan ikkje bruke consume/acquire/acq_rel.
+funksjon _at_load_ok(order: tekst) -> boolsk {
+    returner order == "relaxed" eller order == "consume" eller order == "acquire" eller order == "seq_cst"
+}
+funksjon _at_store_ok(order: tekst) -> boolsk {
+    returner order == "relaxed" eller order == "release" eller order == "seq_cst"
+}
+
+funksjon _at_svar(handle: tekst, e, ekstra) {
+    la ut = {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle,
+             "value": e["value"], "version": e["version"]}
+    la nøkler_e = builtin.nøkler(ekstra)
+    la i: heiltall = 0
+    mens i < lengde(nøkler_e) { ut[nøkler_e[i]] = ekstra[nøkler_e[i]] i = i + 1 }
+    returner ut
+}
+
+funksjon atomic_operation(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _at_feil("invalid_request") }
+    la op = _jit_tekst_felt(req, "operation", "")
+    la order = _jit_tekst_felt(req, "order", "seq_cst")
+    hvis op != "fence" og op != "destroy" og ikkje _at_kjend(order) { returner _at_feil("invalid_order") }
+
+    hvis op == "create" {
+        _at_neste = _at_neste + 1
+        la h = "atomic-" + tekst_fra_heltall(_at_neste)
+        _at_tabell[h] = {"value": _jit_heiltal_felt(req["value"]), "version": 0}
+        returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": h}
+    }
+    hvis op == "fence" { returner {"abi": "norscode-atomic-v1", "status": "ok"} }
+
+    la handle = _jit_tekst_felt(req, "handle", "")
+    hvis handle == "" eller ikkje finnes_nøkkel(_at_tabell, handle) { returner _at_feil("invalid_handle") }
+    la e = _at_tabell[handle]
+
+    hvis op == "load" {
+        hvis ikkje _at_load_ok(order) { returner _at_feil("invalid_order") }
+        returner _at_svar(handle, e, {"observed": e["value"]})
+    }
+    hvis op == "store" {
+        hvis ikkje _at_store_ok(order) { returner _at_feil("invalid_order") }
+        e["value"] = _jit_heiltal_felt(req["value"])
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {})
+    }
+    hvis op == "exchange" {
+        la gammal = e["value"]
+        e["value"] = _jit_heiltal_felt(req["value"])
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {"observed": gammal})
+    }
+    hvis op == "fetch_add" {
+        la gammal = e["value"]
+        e["value"] = gammal + _jit_heiltal_felt(req["delta"])
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {"observed": gammal})
+    }
+    hvis op == "compare_exchange" {
+        la fail = _jit_tekst_felt(req, "failure_order", "relaxed")
+        // failure_order kan ikkje vere release/acq_rel og ikkje sterkare enn suksessordenen.
+        hvis ikkje _at_load_ok(fail) eller _at_rank(fail) > _at_rank(order) { returner _at_feil("invalid_order") }
+        la gammal = e["value"]
+        hvis gammal == _jit_heiltal_felt(req["expected"]) {
+            e["value"] = _jit_heiltal_felt(req["replacement"])
+            e["version"] = e["version"] + 1
+            returner _at_svar(handle, e, {"success": "sann", "observed": gammal})
+        }
+        returner _at_svar(handle, e, {"success": "usann", "observed": gammal})
+    }
+    hvis op == "destroy" {
+        fjern_nokkel(_at_tabell, handle)
+        returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle}
+    }
+    returner _at_feil("unsupported_operation")
+}
+
 funksjon jit_operation(req) {
     hvis req == null eller builtin.type(req) != "ordbok" { returner _jit_feil("invalid request") }
     hvis _jit_tekst_felt(req, "abi", "") != "norscode-jit-v1" { returner _jit_feil("unsupported JIT ABI") }
