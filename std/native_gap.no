@@ -2216,7 +2216,11 @@ funksjon thread_join(req) {
         _futex_wait(desc + 8, 0, timeout_ms)
         hvis builtin.raw_load64(desc + 8) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout", "handle": h, "value": ""} }
     }
-    returner {"abi": "norscode-native-thread-v1", "status": "finished", "handle": h, "value": e["value"], "thread_id": tekst_fra_heltall(e["tid"])}
+    // Handtaket er konsumert etter fullført join — eit nytt join gjev "error".
+    la rv = e["value"]
+    la rtid = e["tid"]
+    fjern_nokkel(_th_tabell, h)
+    returner {"abi": "norscode-native-thread-v1", "status": "finished", "handle": h, "value": rv, "thread_id": tekst_fra_heltall(rtid)}
 }
 
 funksjon thread_sync(req) {
@@ -2225,7 +2229,7 @@ funksjon thread_sync(req) {
         la h = _jit_tekst_felt(req, "handle", "")
         hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
         builtin.raw_store64(_th_tabell[h]["desc"] + 16, 1)
-        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+        returner {"abi": "norscode-native-thread-v1", "status": "cancelled"}
     }
     hvis op == "mutex_create" eller op == "condition_create" {
         la addr = _arena_alloc(8)
@@ -2259,21 +2263,25 @@ funksjon thread_sync(req) {
         la caddr = _mx_tabell[cond_h]
         la mutex_h = _jit_tekst_felt(req, "mutex_handle", "")
         la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
-        // Slepp mutex, vent på signal (cond != 0), ta mutex att.
+        // Sekvensteljar: les gjeldande seq FØR mutex slepp; eit signal aukar seq.
+        // Utan dette ville eit gamalt signal frå ein tidlegare runde få neste
+        // wait til å returnere med ein gong (ready) i staden for å tidsavbryte.
+        la seq = builtin.raw_load64(caddr)
         hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
             builtin.raw_store64(_mx_tabell[mutex_h], 0)
             _futex_wake(_mx_tabell[mutex_h], 1)
         }
-        hvis builtin.raw_load64(caddr) == 0 { _futex_wait(caddr, 0, timeout_ms) }
+        hvis builtin.raw_load64(caddr) == seq { _futex_wait(caddr, seq, timeout_ms) }
+        la signalisert = builtin.raw_load64(caddr) != seq
         hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
             mens builtin.atomic_cas(_mx_tabell[mutex_h], 0, 1) != 0 { _futex_wait(_mx_tabell[mutex_h], 1, timeout_ms) }
         }
-        hvis builtin.raw_load64(caddr) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+        hvis ikkje signalisert { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
         returner {"abi": "norscode-native-thread-v1", "status": "ready"}
     }
     hvis op == "condition_signal" eller op == "condition_broadcast" {
         hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent condition") }
-        builtin.raw_store64(_mx_tabell[mh], 1)
+        builtin.atomic_xadd(_mx_tabell[mh], 1)     // auk sekvensen
         _futex_wake(_mx_tabell[mh], 2147483647)
         returner {"abi": "norscode-native-thread-v1", "status": "ready"}
     }
