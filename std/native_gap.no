@@ -522,13 +522,94 @@ funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
 }
 
 funksjon _pg_svar(p) {
-    returner _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], p["stdout"], p["stderr"], "",
-                     builtin.now_ms() - p["start_ms"])
+    la r = _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], p["stdout"], p["stderr"], "",
+                   builtin.now_ms() - p["start_ms"])
+    hvis finnes_nøkkel(p, "sandbox") og tekst(p["sandbox"]) != "" {
+        r["sandbox"] = p["sandbox"]
+        r["sandbox_backend"] = "seccomp"
+    }
+    returner r
+}
+
+// ── Sandkasse (seccomp-BPF) for spawn ───────────────────────────────────────────
+// Profilar: "" / "none" = inga avgrensing; "no-network" = socket() berre for AF_UNIX;
+// "no-write" = ingen opning for skriving/oppretting/trunkering og ingen endring av
+// katalogtreet; "restricted" = begge. Ukjende profilar blir avviste (fail-closed): eit
+// barn skal aldri køyre utan avgrensinga det bad om.
+funksjon _pg_sandbox_profil(req) -> tekst {
+    hvis ikkje finnes_nøkkel(req, "sandbox") { returner "" }
+    la p = tekst(req["sandbox"])
+    hvis p == "none" { returner "" }
+    returner p
+}
+
+funksjon _pg_sandbox_kjend(p: tekst) -> bool {
+    returner p == "no-network" eller p == "no-write" eller p == "restricted"
+}
+
+// Byggjer struct sock_fprog + sock_filter[] 16-aligna frå `fri` i scratch-området.
+// Kvar instruksjon er éin u64: code | jt<<16 | jf<<24 | k<<32 (little-endian
+// sock_filter). Hoppmål -1 = avslag (EPERM). Returnerer [prog_adr, fri_etter].
+funksjon _pg_bpf(fri: heiltall, profil: tekst) -> liste_heiltall {
+    la nett = profil == "no-network" eller profil == "restricted"
+    la skriv = profil == "no-write" eller profil == "restricted"
+    la avslag_merke: heiltall = 0 - 1
+    la ins = []
+    legg_til(ins, [32, 0, 0, 4])                     // ld [arch]
+    legg_til(ins, [21, 1, 0, 3221225534])            // jeq AUDIT_ARCH_X86_64 → forbi kill
+    legg_til(ins, [6, 0, 0, 2147483648])             // ret KILL_PROCESS (anna ABI)
+    legg_til(ins, [32, 0, 0, 0])                     // ld [nr]
+    hvis nett {
+        legg_til(ins, [21, 0, 4, 41])                // jeq socket, elles forbi blokka
+        legg_til(ins, [32, 0, 0, 16])                // ld [args0] (domene)
+        legg_til(ins, [21, 1, 0, 1])                 // jeq AF_UNIX → lokal IPC er lov
+        legg_til(ins, [6, 0, 0, 327681])             // ret ERRNO(EPERM)
+        legg_til(ins, [32, 0, 0, 0])                 // ld [nr] att
+    }
+    hvis skriv {
+        // O_WRONLY|O_RDWR|O_CREAT|O_TRUNC = 1|2|64|512 = 579
+        legg_til(ins, [21, 0, 3, 2])                 // jeq open, elles forbi
+        legg_til(ins, [32, 0, 0, 24])                // ld [args1] (flagg)
+        legg_til(ins, [69, avslag_merke, 0, 579])    // jset skriveflagg → avslag
+        legg_til(ins, [32, 0, 0, 0])                 // ld [nr] att
+        legg_til(ins, [21, 0, 3, 257])               // jeq openat, elles forbi
+        legg_til(ins, [32, 0, 0, 32])                // ld [args2] (flagg)
+        legg_til(ins, [69, avslag_merke, 0, 579])    // jset skriveflagg → avslag
+        legg_til(ins, [32, 0, 0, 0])                 // ld [nr] att
+        // creat, openat2, unlink(at), rename(at|at2), mkdir(at), rmdir, truncate,
+        // link(at), symlink(at), chmod, fchmodat, utimensat, mknod(at)
+        la nekta = [85, 437, 87, 263, 82, 264, 316, 83, 258, 84, 76, 86, 265, 88, 266, 90, 268, 280, 133, 259]
+        la ni: heiltall = 0
+        mens ni < lengde(nekta) {
+            legg_til(ins, [21, avslag_merke, 0, nekta[ni]])
+            ni = ni + 1
+        }
+    }
+    legg_til(ins, [6, 0, 0, 2147418112])             // ret ALLOW
+    la avslag: heiltall = lengde(ins)
+    legg_til(ins, [6, 0, 0, 327681])                 // avslag: ret ERRNO(EPERM)
+    la prog: heiltall = (fri + 15) & (0 - 16)
+    la filt: heiltall = prog + 16
+    la i: heiltall = 0
+    mens i < lengde(ins) {
+        la jt: heiltall = ins[i][1]
+        la jf: heiltall = ins[i][2]
+        hvis jt < 0 { jt = avslag - (i + 1) }
+        hvis jf < 0 { jf = avslag - (i + 1) }
+        la k: heiltall = ins[i][3]
+        builtin.raw_store64(filt + i * 8, ins[i][0] + (jt << 16) + (jf << 24) + ((k & 4294967295) << 32))
+        i = i + 1
+    }
+    builtin.raw_store64(prog, lengde(ins))
+    builtin.raw_store64(prog + 8, filt)
+    returner [prog, filt + lengde(ins) * 8]
 }
 
 funksjon _pg_spawn(req) {
     la executable = tekst(req["executable"])
     hvis executable == "" { returner _pg_feil("tom executable") }
+    la profil = _pg_sandbox_profil(req)
+    hvis profil != "" og ikkje _pg_sandbox_kjend(profil) { returner _pg_feil("ukjent sandbox-profil: " + profil) }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
     la scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
@@ -563,6 +644,11 @@ funksjon _pg_spawn(req) {
     }
     la arv = sann
     hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
+    // Eit sandkassa barn utan arva miljø får ein minimal, fast PATH (ikkje forelderens).
+    hvis profil != "" og ikkje arv og ikkje finnes_nøkkel(miljø, "PATH") {
+        legg_til(env_adr, fri)
+        fri = _pg_cstr(fri, "PATH=/usr/bin:/bin")
+    }
     la envp0 = builtin.raw_load64(6291464)
     hvis arv og envp0 != 0 {
         la ei: heiltall = 0
@@ -584,6 +670,14 @@ funksjon _pg_spawn(req) {
     builtin.raw_store64(fri, 0)
     fri = fri + 8
     hvis fri > scratch + 65536 - 4096 - 64 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("for stor request") }
+    // Seccomp-filteret blir bygt i forelderen, so barnet berre treng to syscallar.
+    la bpf_prog: heiltall = 0
+    hvis profil != "" {
+        la bpf = _pg_bpf(fri, profil)
+        bpf_prog = bpf[0]
+        fri = bpf[1]
+        hvis fri > scratch + 65536 - 4096 - 64 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("for stor request") }
+    }
     // røyr: [0]=inn(les,skriv) [1]=ut [2]=feil — kvart pipe2 skriv to 32-bit fd-ar
     la pipes: heiltall = scratch + 65536 - 64
     la pi2: heiltall = 0
@@ -611,6 +705,12 @@ funksjon _pg_spawn(req) {
         builtin.sys6(3, ut_r, 0, 0, 0, 0, 0)
         builtin.sys6(3, feil_r, 0, 0, 0, 0, 0)
         hvis cwd_adr != 0 { builtin.sys6(80, cwd_adr, 0, 0, 0, 0, 0) }
+        hvis bpf_prog != 0 {
+            // prctl(PR_SET_NO_NEW_PRIVS) + seccomp(SET_MODE_FILTER). Feilar det, skal
+            // barnet døy (126) i staden for å køyre utan den avgrensinga det bad om.
+            builtin.sys6(157, 38, 1, 0, 0, 0, 0)
+            hvis builtin.sys6(317, 1, 0, bpf_prog, 0, 0, 0) != 0 { builtin.sys6(60, 126, 0, 0, 0, 0, 0) }
+        }
         builtin.sys6(59, exe_adr, argv_adr, envp_adr, 0, 0, 0)
         builtin.sys6(60, 127, 0, 0, 0, 0, 0)
         returner _pg_feil("execve feila")
@@ -645,7 +745,8 @@ funksjon _pg_spawn(req) {
     la handle = "np-" + tekst_fra_heltall(pid) + "-" + tekst_fra_heltall(builtin.now_ms())
     la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "stdout": "", "stderr": "",
             "fd_ut": ut_r, "fd_feil": feil_r, "scratch": scratch, "buf": scratch + 65536 - 4096 - 64,
-            "maks": maks, "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann}
+            "maks": maks, "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann,
+            "sandbox": profil}
     _pg_prosessar[handle] = p
     returner _pg_svar(p)
 }
@@ -698,6 +799,26 @@ funksjon process_operation(req) {
         returner r
     }
     returner _pg_feil("ukjent operasjon: " + op)
+}
+
+// process_spawn_argv_gap(req): synkron spawn. Utan sandkasseprofil går kallet uendra
+// til den native spawn-rutina (builtin.process_spawn_argv_raa). Med profil må barnet få
+// seccomp-filteret mellom fork og execve, og det kan berre Norscode-vegen (_pg_spawn):
+// kallet blir då ein asynkron spawn med blokkerande venting og same resultatfelt.
+funksjon process_spawn_argv_gap(req) {
+    hvis builtin.type(req) != "ordbok" { returner builtin.process_spawn_argv_raa(req) }
+    hvis _pg_sandbox_profil(req) == "" { returner builtin.process_spawn_argv_raa(req) }
+    la r = _pg_spawn(req)
+    hvis r["status"] == "feil" { returner r }
+    la handle = tekst(r["handle"])
+    la p = _pg_prosessar[handle]
+    mens ikkje _pg_sjekk(p, usann) { _pg_sov_ms(p, 5) }
+    la svar = _pg_svar(p)
+    hvis p["fd_ut"] >= 0 { builtin.sys6(3, p["fd_ut"], 0, 0, 0, 0, 0) p["fd_ut"] = -1 }
+    hvis p["fd_feil"] >= 0 { builtin.sys6(3, p["fd_feil"], 0, 0, 0, 0, 0) p["fd_feil"] = -1 }
+    builtin.sys6(11, p["scratch"], 65536, 0, 0, 0, 0)
+    fjern_nokkel(_pg_prosessar, handle)
+    returner svar
 }
 
 // ── builtin.socket_* (AF_INET TCP/UDP) i REIN Norscode over builtin.sys6 ─────────
