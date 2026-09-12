@@ -352,7 +352,7 @@ Att: allokeringsfri maskinkode-mark+sweep + re-pek allokatorar + safepoint-wirin
     single-step. Kjerne-GC (int-reclaim) PROVA; list-allokator-patchane treng debugging.
   - **STATUS: codegen-bug-kjeda som blokkerte hmac er FIKSA (litmus køyrer sha256 på ekte,
     flagg AV fullfører småN). Att for litmus-GRØNT: fiks GC-list-allokator-interaksjonen
-    (flagg PÅ krasjar på list-build). Verktøy: `archive/legacy_shell/tools/gdb_crash.sh` (køyr med NORSCODE_GC_ALLOC=1
+    (flagg PÅ krasjar på list-build). Verktøy: `gdb_crash.sh` (sletta med shell-arkivet i Fase C.5, sjå git-historikk; køyr med NORSCODE_GC_ALLOC=1
     for flagg-PÅ-krasj), objdump-slice, python-disasm.**
   - Litmus for heile Fase 3: sjølvhosta codegen byggjer seed som passerer HEILE
     grøne suita (inkl. 10k-hmac). Først då: bytt seed-bygging C→sjølvhosta.

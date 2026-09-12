@@ -1,33 +1,131 @@
 // tools/release_user_journey.no — pakka installasjon, oppgradering og rollback
+//
+// 2026-09-10: migrert bort frå `exec_prosess` (legacy tekstprosess-kall) til den
+// strukturerte prosess-ABI-en. Dette var den tyngste av dei åtte flate-bruddene:
+// den gamle forma bygde éin lang shellstreng per steg, med «cd <root> && …»,
+// «env -u VAR … VAR=verdi», «&&», «||», «;», «!», og shell-verktøya cp/chmod/
+// printf/test. Alt det er no Norscode-kontrollflyt og Norscode-fil-I/O:
+//
+//   cd <root> && <cmd>   → prosess.køyr(exe, argv, root, …)   (cwd som parameter)
+//   env -u VAR … VAR=v   → eksplisitt miljøkart (nullstilling = tom verdi)
+//   A && B / A || B / !  → vanleg `hvis`-kontrollflyt over exit-koden
+//   cp a b               → fil_les_binær + fil_skriv_binær
+//   chmod +x             → rfs.fil_sett_kjorbar_gap
+//   printf '%s\n' x > f  → builtin.fil_skriv
+//   test -s f            → lengde(fil_les_binær(f)) > 0
+//   pwd                  → builtin.system_info()["cwd"]
+//
+// Semantikken er halden: kvart steg må gje exit 0 for at ferda skal halde fram,
+// og «avvis øydelagd oppgradering» er framleis eit NEGATIVT steg (installasjon
+// med feil sjekksum SKAL feile), med sjekksumfila restaurert etterpå uansett.
+
+bruk tools.process_runner som prosess
+bruk std.runtime_filesystem som rfs
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+funksjon køyr_rå(exe: tekst, argv: liste_tekst, cwd: tekst, miljø: ordbok_tekst) -> ordbok_tekst {
+    prøv { returner prosess.køyr(exe, argv, cwd, miljø, 3600000) }
+    fang (e) { returner {"status": "feil", "exit_code": "1", "stdout": "", "stderr": tekst(e)} }
 }
 
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) { returner ["1", "", tekst(e)] }
+funksjon skriv_ut(res: ordbok_tekst) -> heiltall {
+    hvis tekst(res["stdout"]) != "" { skriv(tekst(res["stdout"])) }
+    hvis tekst(res["stderr"]) != "" { skriv(tekst(res["stderr"])) }
+    returner 0
 }
 
-funksjon ok(res: liste_tekst) -> bool { returner lengde(res) > 0 og tekst(res[0]) == "0" }
-
-funksjon køyr(root: tekst, namn: tekst, cmd: tekst) -> bool {
+funksjon køyr(namn: tekst, exe: tekst, argv: liste_tekst, cwd: tekst, miljø: ordbok_tekst) -> bool {
     skriv("[JOURNEY] " + namn + "\n")
-    la res = kommando("cd " + shell(root) + " && " + cmd)
-    hvis lengde(res) > 1 og tekst(res[1]) != "" { skriv(tekst(res[1])) }
-    hvis lengde(res) > 2 og tekst(res[2]) != "" { skriv(tekst(res[2])) }
-    hvis ok(res) { returner sann }
+    la res = køyr_rå(exe, argv, cwd, miljø)
+    skriv_ut(res)
+    hvis prosess.ok(res) { returner sann }
     skriv("[FAIL] brukarferd: " + namn + "\n")
+    returner usann
+}
+
+// Miljøet den INSTALLERTE CLI-en skal sjå. `env -u` nullstilte desse; med eit
+// eksplisitt kart set vi dei til tom streng, som process_runner maskerer bort.
+funksjon installert_miljø(prefix: tekst, base: tekst, host_tmp: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["NORSCODE_NATIVE_BIN"] = ""
+    m["NORSCODE_VM_REQUESTED_POLICY"] = ""
+    m["NORSCODE_VM_REQUESTED_CAPABILITIES"] = ""
+    m["NORSCODE_VM_REQUESTED_DISK_ROOT"] = ""
+    m["NORSCODE_VM_TARGET_CAPABILITIES"] = ""
+    m["NORSCODE_VM_TARGET_DISK_ROOT"] = ""
+    m["NORSCODE_NCB_FILE"] = ""
+    m["NORSCODE_HOST_NCB_FILE"] = ""
+    m["TMPDIR"] = "/tmp"
+    m["NORSCODE_USE_PRECOMPILED_SELFHOST"] = "0"
+    m["NORSCODE_PACKAGED_TEST_FALLBACK"] = "1"
+    m["NORSCODE_ROOT"] = prefix
+    m["NORSCODE_VM_CAPABILITIES"] = "env.read,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write"
+    m["NORSCODE_VM_DISK_ROOT"] = prefix + "," + prefix + "/current," + base + "," + host_tmp + ",/tmp,/private/tmp,."
+    returner m
+}
+
+funksjon bygg_miljø(prefix: tekst, base: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["TMPDIR"] = "/tmp"
+    m["NORSCODE_ENABLE_EXEC_PROSESS"] = "1"
+    m["NORSCODE_USE_PRECOMPILED_SELFHOST"] = "0"
+    m["NORSCODE_VM_CAPABILITIES"] = "env.read,process.exec,disk.read,disk.write"
+    m["NORSCODE_VM_DISK_ROOT"] = prefix + "/current," + base + ",/tmp,/private/tmp,."
+    m["NORSCODE_ROOT"] = prefix + "/current"
+    returner m
+}
+
+// Ordbøker er REFERANSAR i Norscode (`la b = a; b["y"] = …` endrar a). Kvart steg
+// som legg NORSCODE_CMD/FILE oppå eit delt grunnmiljø må difor kopiere fyrst —
+// elles lek t.d. NORSCODE_OUTPUT frå compile-steget inn i AOT-steget.
+funksjon kopi(m: ordbok_tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    for n i nøkler(m) { ut[n] = tekst(m[n]) }
+    returner ut
+}
+
+// Køyr ein NCB gjennom den installerte runtimen — same mønster fire gonger.
+funksjon køyr_ncb(namn: tekst, prefix: tekst, ncb: tekst, miljø: ordbok_tekst, root: tekst) -> bool {
+    la m = kopi(miljø)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = prefix + "/current/selfhost/tooling/ncb_host_run_entry.no"
+    m["NORSCODE_HOST_NCB_FILE"] = ncb
+    returner køyr(namn, prefix + "/dist/norscode_native", [], root, m)
+}
+
+funksjon kopier(kjelde: tekst, mål: tekst) -> bool {
+    prøv {
+        // MERK: `til` er eit nøkkelord i Norscode (for … til …) og kan ikkje
+        // brukast som parameternamn — parseren gjev «forventet uttrykk».
+        builtin.fil_skriv_binær(mål, builtin.fil_les_binær(kjelde))
+        returner sann
+    } fang (e) { returner usann }
+    returner usann
+}
+
+// `chmod +x` → filesystem-ABI-en med modus 0o755 (493). Sjekk STATUS-feltet:
+// eit `prøv` som berre svelgjer unntak ville meldt suksess for ein chmod som
+// stille feila, og ferda ville halde fram med ein ikkje-køyrbar CLI.
+funksjon gjer_kjørbar(sti: tekst) -> bool {
+    prøv {
+        la res = rfs.native_sett_modus_sti(sti, 493)
+        returner tekst(res["status"]) == "ok"
+    } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon ikkje_tom(sti: tekst) -> bool {
+    prøv { returner lengde(builtin.fil_les_binær(sti)) > 0 } fang (e) { returner usann }
     returner usann
 }
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(tekst(kommando("pwd")[1])) }
+    hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
     la run_id = builtin.random_hex(8)
     la base = root + "/build/completion-journey-" + run_id
     la prefix = base + "/install"
@@ -38,37 +136,90 @@ funksjon start() -> heiltall {
     la archive_b = root + "/release-artifacts/norscode-language-" + version_b + ".tar.gz"
     la host_tmp = env("TMPDIR")
     hvis host_tmp == "" { host_tmp = "/tmp" }
-    la installed_env = "env -u NORSCODE_NATIVE_BIN -u NORSCODE_VM_REQUESTED_POLICY -u NORSCODE_VM_REQUESTED_CAPABILITIES -u NORSCODE_VM_REQUESTED_DISK_ROOT -u NORSCODE_VM_TARGET_CAPABILITIES -u NORSCODE_VM_TARGET_DISK_ROOT -u NORSCODE_NCB_FILE -u NORSCODE_HOST_NCB_FILE TMPDIR=/tmp NORSCODE_USE_PRECOMPILED_SELFHOST=0 NORSCODE_PACKAGED_TEST_FALLBACK=1 NORSCODE_ROOT=" + shell(prefix) +
-        " NORSCODE_VM_CAPABILITIES=env.read,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write" +
-        " NORSCODE_VM_DISK_ROOT=" + shell(prefix + "," + prefix + "/current," + base + "," + host_tmp + ",/tmp,/private/tmp,.")
+    la inst = installert_miljø(prefix, base, host_tmp)
     prøv { builtin.mkdir_p(base) } fang (e) { returner 1 }
 
-    // Embedding the compiler/VM image materializes the native executable as
-    // one large byte buffer.  Keep the ordinary gate memory ceiling for the
-    // rest of the journey, but give this release-only operation an explicit
-    // bounded headroom on CI runners.
-    la release_env = "env NORSCODE_RELEASE_PACKAGE_SHELL=1 NORSCODE_PROCESS_MAX_MEMORY_BYTES=" + env("NORSCODE_RELEASE_PROCESS_MAX_MEMORY_BYTES")
-    hvis env("NORSCODE_RELEASE_PROCESS_MAX_MEMORY_BYTES") == "" { release_env = "env NORSCODE_PROCESS_MAX_MEMORY_BYTES=3221225472" }
-    hvis ikkje køyr(root, "pakk versjon A", release_env + " ./bin/nc package-release " + shell(version_a)) { returner 1 }
-    hvis ikkje køyr(root, "installer versjon A", "./bin/nc install-release " + shell(archive_a) + " --prefix " + shell(prefix)) { returner 1 }
-    hvis ikkje køyr(root, "gjer installert CLI køyrbar", "chmod +x " + shell(prefix + "/bin/nc") + " " + shell(prefix + "/dist/norscode_native")) { returner 1 }
-    prøv { builtin.fil_skriv(prefix + "/journey-data.txt", "bevar-meg\n") } fang (e) { returner 1 }
-    hvis ikkje køyr(root, "nytt prosjekt", installed_env + " " + shell(prefix + "/bin/nc") + " startproject " + shell(project) + " --name completion") { returner 1 }
-    hvis ikkje køyr(root, "check", installed_env + " " + shell(prefix + "/bin/nc") + " check " + shell(project + "/app.no")) { returner 1 }
-    hvis ikkje køyr(root, "prosjekttest", installed_env + " NORSCODE_CMD=run NORSCODE_FILE=" + shell(project + "/tests/test_app.no") + " " + shell(prefix + "/dist/norscode_native")) { returner 1 }
-    la build_env = "env TMPDIR=/tmp NORSCODE_ENABLE_EXEC_PROSESS=1 NORSCODE_USE_PRECOMPILED_SELFHOST=0 NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write NORSCODE_VM_DISK_ROOT=" + shell(prefix + "/current," + base + ",/tmp,/private/tmp,.") + " NORSCODE_ROOT=" + shell(prefix + "/current")
-    hvis ikkje køyr(root, "native build", build_env + " NORSCODE_CMD=compile NORSCODE_FILE=" + shell(project + "/app.no") + " NORSCODE_OUTPUT=" + shell(base + "/project.ncb") + " " + shell(prefix + "/dist/norscode_native") + " && (" + build_env + " NORSCODE_CMD=run NORSCODE_FILE=" + shell(prefix + "/current/selfhost/tooling/ncb_host_run_entry.no") + " NORSCODE_HOST_NCB_FILE=" + shell(prefix + "/current/selfhost/native_execution/native_codegen_v2.ncb.json") + " NC_INPUT=" + shell(base + "/project.ncb") + " NC_OUTPUT=" + shell(base + "/app-native") + " " + shell(prefix + "/dist/norscode_native") + " || test -s " + shell(base + "/app-native") + ")") { returner 1 }
-    hvis ikkje køyr(root, "web/API", installed_env + " NORSCODE_CMD=run NORSCODE_FILE=" + shell(prefix + "/current/selfhost/tooling/ncb_host_run_entry.no") + " NORSCODE_HOST_NCB_FILE=" + shell(prefix + "/current/tests/test_web_routes.ncb.json") + " " + shell(prefix + "/dist/norscode_native")) { returner 1 }
-    hvis ikkje køyr(root, "NorsDB CRUD/transaksjon/recovery", installed_env + " NORSCODE_CMD=run NORSCODE_FILE=" + shell(prefix + "/current/selfhost/tooling/ncb_host_run_entry.no") + " NORSCODE_HOST_NCB_FILE=" + shell(prefix + "/current/tests/test_db.ncb.json") + " " + shell(prefix + "/dist/norscode_native")) { returner 1 }
+    // Innbaking av kompilator/VM-imaget materialiserer den native binæren som éin
+    // stor bytebuffer. Behald det vanlege minnetaket for resten av ferda, men gje
+    // denne release-operasjonen eit eksplisitt, avgrensa slingringsmon på CI.
+    la rel: ordbok_tekst = {}
+    rel["NORSCODE_PROCESS_MAX_MEMORY_BYTES"] = env("NORSCODE_RELEASE_PROCESS_MAX_MEMORY_BYTES")
+    hvis rel["NORSCODE_PROCESS_MAX_MEMORY_BYTES"] == "" {
+        rel["NORSCODE_PROCESS_MAX_MEMORY_BYTES"] = "3221225472"
+    } ellers {
+        rel["NORSCODE_RELEASE_PACKAGE_SHELL"] = "1"
+    }
 
-    hvis ikkje køyr(root, "pakk versjon B", release_env + " ./bin/nc package-release " + shell(version_b)) { returner 1 }
-    hvis ikkje køyr(root, "oppgrader til versjon B", "./bin/nc install-release " + shell(archive_b) + " --prefix " + shell(prefix)) { returner 1 }
-    hvis ikkje køyr(root, "avvis øydelagd oppgradering", "cp " + shell(archive_b + ".sha256") + " " + shell(base + "/good.sha256") + " && printf '%s\\n' invalid > " + shell(archive_b + ".sha256") + " && ! ./bin/nc install-release " + shell(archive_b) + " --prefix " + shell(prefix) + "; cp " + shell(base + "/good.sha256") + " " + shell(archive_b + ".sha256")) { returner 1 }
-    hvis ikkje køyr(root, "rollback til versjon A", "./bin/nc install-release " + shell(archive_a) + " --prefix " + shell(prefix)) { returner 1 }
+    la nc = root + "/bin/nc"
+    hvis ikkje køyr("pakk versjon A", nc, ["package-release", version_a], root, rel) { returner 1 }
+    hvis ikkje køyr("installer versjon A", nc, ["install-release", archive_a, "--prefix", prefix], root, {}) { returner 1 }
+    skriv("[JOURNEY] gjer installert CLI køyrbar\n")
+    hvis ikkje gjer_kjørbar(prefix + "/bin/nc") eller ikkje gjer_kjørbar(prefix + "/dist/norscode_native") {
+        skriv("[FAIL] brukarferd: gjer installert CLI køyrbar\n")
+        returner 1
+    }
+    prøv { builtin.fil_skriv(prefix + "/journey-data.txt", "bevar-meg\n") } fang (e) { returner 1 }
+    hvis ikkje køyr("nytt prosjekt", prefix + "/bin/nc", ["startproject", project, "--name", "completion"], root, inst) { returner 1 }
+    hvis ikkje køyr("check", prefix + "/bin/nc", ["check", project + "/app.no"], root, inst) { returner 1 }
+
+    la testmiljø = kopi(inst)
+    testmiljø["NORSCODE_CMD"] = "run"
+    testmiljø["NORSCODE_FILE"] = project + "/tests/test_app.no"
+    hvis ikkje køyr("prosjekttest", prefix + "/dist/norscode_native", [], root, testmiljø) { returner 1 }
+
+    // Native build: kompiler, så AOT. Den gamle forma var
+    // «compile … && (aot … || test -s <out>)» — altså: AOT-steget får feile so
+    // lenge det faktisk produserte ei ikkje-tom fil. Same semantikk her.
+    la bm = bygg_miljø(prefix, base)
+    la cm = kopi(bm)
+    cm["NORSCODE_CMD"] = "compile"
+    cm["NORSCODE_FILE"] = project + "/app.no"
+    cm["NORSCODE_OUTPUT"] = base + "/project.ncb"
+    hvis ikkje køyr("native build (compile)", prefix + "/dist/norscode_native", [], root, cm) { returner 1 }
+    la am = kopi(bm)
+    am["NORSCODE_CMD"] = "run"
+    am["NORSCODE_FILE"] = prefix + "/current/selfhost/tooling/ncb_host_run_entry.no"
+    am["NORSCODE_HOST_NCB_FILE"] = prefix + "/current/selfhost/native_execution/native_codegen_v2.ncb.json"
+    am["NC_INPUT"] = base + "/project.ncb"
+    am["NC_OUTPUT"] = base + "/app-native"
+    skriv("[JOURNEY] native build (AOT)\n")
+    la aot = køyr_rå(prefix + "/dist/norscode_native", [], root, am)
+    skriv_ut(aot)
+    hvis ikkje prosess.ok(aot) og ikkje ikkje_tom(base + "/app-native") {
+        skriv("[FAIL] brukarferd: native build (AOT)\n")
+        returner 1
+    }
+
+    hvis ikkje køyr_ncb("web/API", prefix, prefix + "/current/tests/test_web_routes.ncb.json", inst, root) { returner 1 }
+    hvis ikkje køyr_ncb("NorsDB CRUD/transaksjon/recovery", prefix, prefix + "/current/tests/test_db.ncb.json", inst, root) { returner 1 }
+
+    hvis ikkje køyr("pakk versjon B", nc, ["package-release", version_b], root, rel) { returner 1 }
+    hvis ikkje køyr("oppgrader til versjon B", nc, ["install-release", archive_b, "--prefix", prefix], root, {}) { returner 1 }
+
+    // Negativt steg: installasjon med feil sjekksum SKAL feile. Sjekksumfila blir
+    // restaurert uansett utfall, slik «; cp …» gjorde i den gamle forma.
+    skriv("[JOURNEY] avvis øydelagd oppgradering\n")
+    hvis ikkje kopier(archive_b + ".sha256", base + "/good.sha256") { returner 1 }
+    prøv { builtin.fil_skriv(archive_b + ".sha256", "invalid\n") } fang (e) { returner 1 }
+    la øydelagd = køyr_rå(nc, ["install-release", archive_b, "--prefix", prefix], root, {})
+    la vart_avvist = ikkje prosess.ok(øydelagd)
+    hvis ikkje kopier(base + "/good.sha256", archive_b + ".sha256") { returner 1 }
+    hvis ikkje vart_avvist {
+        skriv("[FAIL] brukarferd: øydelagd oppgradering vart GODTEKEN\n")
+        returner 1
+    }
+
+    hvis ikkje køyr("rollback til versjon A", nc, ["install-release", archive_a, "--prefix", prefix], root, {}) { returner 1 }
     prøv {
         hvis trim(builtin.fil_les(prefix + "/journey-data.txt")) != "bevar-meg" { returner 1 }
     } fang (e) { returner 1 }
-    hvis ikkje køyr(root, "runtime etter rollback", "chmod +x " + shell(prefix + "/bin/nc") + " " + shell(prefix + "/dist/norscode_native") + " && " + installed_env + " NORSCODE_CMD=run NORSCODE_FILE=" + shell(prefix + "/current/selfhost/tooling/ncb_host_run_entry.no") + " NORSCODE_HOST_NCB_FILE=" + shell(prefix + "/current/tests/test_db.ncb.json") + " " + shell(prefix + "/dist/norscode_native")) { returner 1 }
+
+    skriv("[JOURNEY] runtime etter rollback\n")
+    hvis ikkje gjer_kjørbar(prefix + "/bin/nc") eller ikkje gjer_kjørbar(prefix + "/dist/norscode_native") {
+        skriv("[FAIL] brukarferd: runtime etter rollback (chmod)\n")
+        returner 1
+    }
+    hvis ikkje køyr_ncb("runtime etter rollback", prefix, prefix + "/current/tests/test_db.ncb.json", inst, root) { returner 1 }
     skriv("[OK] pakka brukarferd med oppgradering og rollback\n")
     returner 0
 }

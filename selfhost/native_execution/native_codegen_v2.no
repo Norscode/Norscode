@@ -11,9 +11,12 @@ bruk selfhost.ncb_serde som serde
 
 // ─── Adressar ────────────────────────────────────────────────────────────────
 funksjon TEXT_VA()   { returner 4198400 }
-// 0x540000 held full nc_main-texten skild frå konstantsegmentet. Den gamle
-// 0x500000-basen overlappa dei siste ~70 KiB av full-host-texten og gav SIGSEGV.
-funksjon DATA_VA()   { returner 5505024 }
+// 0x580000 held full nc_main-texten skild frå konstantsegmentet. Den gamle
+// 0x500000-basen overlappa dei siste ~70 KiB av full-host-texten og gav SIGSEGV;
+// 0x540000 var berre ~13 KiB over seed6-texten og sprakk («.text overlappar .data»)
+// med sandkasse-koden. 0x580000 gjev .text ~275 KiB meir og .data (~210 KiB) held
+// seg godt under verts-ABI-sida på 0x5f0000 (alle overlapp blir sjekka nedanfor).
+funksjon DATA_VA()   { returner 5767168 }
 // Eige skrivebart verts-ABI-segment for rå prosesspekere. Konstantsegmentet
 // held fram som read-only, og GC-/heap-kontrollblokka blir ikkje overlagd.
 funksjon HOST_ABI_VA() { returner 6225920 } // 0x5f0000
@@ -231,6 +234,24 @@ funksjon copy(dst, src) { la i: heltall = 0
 mens i < lengde(src) { legg_til(dst, src[i])
 i = i + 1 } }
 funksjon pad(buf, target) { mens lengde(buf) < target { legg_til(buf, 0) } }
+
+// Patch ein `movabs rax,imm64` (48 B8 imm64) ved pos frå adressa gammal til ny. Kastar om
+// bytane ikkje er nøyaktig som venta — ei endra blob skal feile høgt ved seed-bygg,
+// ikkje bli stille korrumpert.
+funksjon patch_movabs_rax(bytes, pos: heiltall, gammal: heiltall, ny: heiltall) {
+    la venta: liste = [0x48, 0xB8]
+    u64(venta, gammal)
+    la i: heiltall = 0
+    mens i < 10 {
+        hvis bytes[pos + i] != venta[i] { kast "patch_movabs_rax: uventa bytar ved offset " + tekst_fra_heltall(pos) }
+        i = i + 1
+    }
+    la ny_b: liste = []
+    u64(ny_b, ny)
+    i = 0
+    mens i < 8 { bytes[pos + 2 + i] = ny_b[i] i = i + 1 }
+    returner 0
+}
 
 funksjon patch_abs_jump(bytes, start: heiltall, slutt: heiltall, target: heiltall) {
     // movabs rax,target; jmp rax; NOP fram til neste faste runtime-entry.
@@ -553,13 +574,15 @@ funksjon hent_innebygd_ncb(bytes: liste<heltall>) -> tekst {
     hvis ikkje har_innebygd_ncb(bytes) { kast "Native binær manglar innebygd NCB" }
     la payload_lengde = les_u64_le_fra(bytes, lengde(bytes) - 8)
     la payload_start = lengde(bytes) - 8 - lengde(NCB_EMBED_MAGIC()) - payload_lengde
-    la ut = ""
+    // Samla teikna i ei liste og slå saman éin gong: «ut = ut + chr(b)» per byte
+    // var kvadratisk i payload-storleiken (fleire MB for ein full nc_main-bundle).
+    la teikn: liste_tekst = []
     la i = 0
     mens i < payload_lengde {
-        ut = ut + builtin.chr(bytes[payload_start + i])
+        legg_til(teikn, builtin.chr(bytes[payload_start + i]))
         i = i + 1
     }
-    returner ut
+    returner builtin.join(teikn, "")
 }
 funksjon call_rel32(buf, va, code_va) {
     // call target_va: E8 rel32 — code_va = absolut VA for buf[0]
@@ -1049,6 +1072,14 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     legg_til(buf, 0x04)  // cmp rax, 4
     la je_map = emit_je_placeholder(buf)
 
+    // NcVal-type 6 = desimaltall. builtin.type blir emittert INLINE her, ikkje via
+    // atomics["type_of"] — ein prolog i atomet ville aldri fyrt for denne vegen.
+    legg_til(buf, 0x48)
+    legg_til(buf, 0x83)
+    legg_til(buf, 0xF8)
+    legg_til(buf, 0x06)  // cmp rax, 6
+    la je_desimal = emit_je_placeholder(buf)
+
     la lbl_default = lengde(buf)
     emit_push_const(buf, "ingenting", rd_offs, code_va)
     la jmp_end_default = emit_jmp_placeholder(buf)
@@ -1073,6 +1104,10 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     emit_push_const(buf, "ordbok", rd_offs, code_va)
     la jmp_end_map = emit_jmp_placeholder(buf)
 
+    la lbl_desimal = lengde(buf)
+    emit_push_const(buf, "desimaltall", rd_offs, code_va)
+    la jmp_end_desimal = emit_jmp_placeholder(buf)
+
     la lbl_null = lengde(buf)
     emit_push_const(buf, "ingenting", rd_offs, code_va)
 
@@ -1083,6 +1118,8 @@ funksjon emit_type_of_inline(buf, rd_offs, code_va) {
     patch_jump(buf, je_str, lbl_str)
     patch_jump(buf, je_list, lbl_list)
     patch_jump(buf, je_map, lbl_map)
+    patch_jump(buf, je_desimal, lbl_desimal)
+    patch_jump(buf, jmp_end_desimal, lbl_end)
     patch_jump(buf, jmp_end_default, lbl_end)
     patch_jump(buf, jmp_end_int, lbl_end)
     patch_jump(buf, jmp_end_bool, lbl_end)
@@ -1343,6 +1380,10 @@ funksjon samle_strenger(fns) {
     la strenger: liste = []
     la sett: ordbok = {}
     // Emittergenererte literalar finst ikkje nødvendigvis i input-NCB-en.
+    // «desimaltall» (NcVal-type 6) MÅ vere med: emit_type_of_inline pushar dette
+    // typenamnet, og i eit lite AOT-program utan strengen i kjelda gav manglande
+    // oppslag offset 0 — so builtin.type(3.5) vart «ingenting». I seed-bygget var
+    // han med ved flaks, fordi vm.no inneheld strengen.
     // Hald alle slike runtime-ABI-strengar i den faste dataseksjonen, elles
     // ville manglande oppslag peike på offset 0 ("ingenting").
     la standard: liste_tekst = [
@@ -1351,7 +1392,8 @@ funksjon samle_strenger(fns) {
         "timeout_ms", "max_output_bytes", "environment", "inherit_env",
         "abi", "status", "ferdig", "timeout", "feil", "signal", "pid",
         "exit_code", "stdout", "stderr", "error", "output limit",
-        "process spawn failed", "wall_ms", "peak_rss_bytes"
+        "process spawn failed", "wall_ms", "peak_rss_bytes",
+        "desimaltall"
     ]
     la std_i: heiltall = 0
     mens std_i < lengde(standard) {
@@ -1596,6 +1638,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la atomics: ordbok = {}
     atomics["process_spawn_argv"] = TEXT_VA() + lengde(bytes)
     copy(bytes, hex_to_bytes(rt_hex_process_spawn_linux_x86_64()))
+    // C.3-regresjon (2026-09-10): blobben har to ABSOLUTTE kall til runtime-rutinar i den
+    // gamle frosne layouten — movabs rax,0x401ee0 (RT_MAP_KEYS) @+0x13e og movabs rax,
+    // 0x401cc0 (RT_MAP_GET) @+0x184. C.3 erstatta den frosne blobben med inngangstabellen
+    // (RT_SLOT), so adressene peika midt i anna kode → SIGSEGV ved KVAR prosess-spawn på
+    // fersk seed (test-harnessen, ci_shell_runner, test_native_process_spawn_argv). Blobben
+    // har ingen andre eksterne referansar (objdump: ingen rel-kall ut; 0x600008 = envp-slot).
+    la spawn_off = atomics["process_spawn_argv"] - TEXT_VA()
+    patch_movabs_rax(bytes, spawn_off + 318, 4202208, RT_MAP_KEYS())   // +0x13e
+    patch_movabs_rax(bytes, spawn_off + 388, 4201664, RT_MAP_GET())    // +0x184
 
     // Heiltal og boolverdiar er immutable. VM-i-VM-kompilering lagar millionar
     // av dei same indeks-, lengde- og samanlikningsverdiane; la dei peike på
@@ -3231,37 +3282,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, argv_measure_jump, argv_measure)
     patch_jump(bytes, argv_loop_jump, argv_loop)
 
-    // miljo_hent i den opphavlege runtime-bloba sende vidare ei vilkårleg
-    // lengd i rsi. Resultatet kunne difor innehalde resten av envp-blokka.
-    // Denne Norscode-emitterte hjelparen måler den NUL-avslutta verdien før
-    // han byggjer NcVal-strengen.
-    la miljo_verdi_va = TEXT_VA() + lengde(bytes)
-    copy(bytes, [
-        0x31, 0xF6,                         // xor esi, esi
-        0x80, 0x3C, 0x37, 0x00,             // cmp byte [rdi+rsi], 0
-        0x74, 0x05,                         // je ferdig
-        0x48, 0xFF, 0xC6,                   // inc rsi
-        0xEB, 0xF5                          // jmp måleløkke
-    ])
-    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
-    legg_til(bytes, 0xC3)
-
-    // Erstatt berre verdikonverteringa inne i legacy miljo_hent:
-    // add rdi,rcx; inc rdi; call hjelpefunksjon; nop*4.
-    la miljo_call_start = 0x1451
-    bytes[miljo_call_start] = 0x48
-    bytes[miljo_call_start + 1] = 0x01
-    bytes[miljo_call_start + 2] = 0xCF
-    bytes[miljo_call_start + 3] = 0x48
-    bytes[miljo_call_start + 4] = 0xFF
-    bytes[miljo_call_start + 5] = 0xC7
-    bytes[miljo_call_start + 6] = 0xE8
-    patch_jump(bytes, miljo_call_start + 7, miljo_verdi_va - TEXT_VA())
-    la miljo_nop = miljo_call_start + 11
-    mens miljo_nop < miljo_call_start + 15 {
-        bytes[miljo_nop] = 0x90
-        miljo_nop = miljo_nop + 1
-    }
+    // (Fjerna 2026-09-11: ein patch som skreiv 15 byte på fast offset 0x1451 for å
+    // rette verdikonverteringa i miljo_hent inne i den frosne runtime-blobben. Blobben
+    // forsvann i Fase C.3, men patchen vart ståande og skreiv blindt inn i det som no
+    // ligg der — SHA-256-konstantane K[41..44] — so builtin.sha256_bytes og PBKDF2 gav
+    // feil hash på alle ferske seedar. miljo_hent går no via env_get-atomet.)
 
     // ── GC F1: råminne-inspeksjonsprimitiv (appenda; ingen rt_hex-endring) ──
     // Fundamentet for den sjølvhosta GC-en: lèt Norscode lese/skrive heapen og
@@ -3306,6 +3331,132 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         0x48, 0x89, 0xF0,                         // mov rax, rsi
         0xC3
     ])
+
+    // raw_call(addr, argp) -> boksa int. Kallar maskinkode på addr med rdi = argp
+    // (rå peikar) og boksar rax. Brukt av JIT-backenden i std/native_gap.no, som
+    // skriv koden i ei eiga mmap-sone og gjer ho les+køyr før første kall.
+    atomics["raw_call"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x53,                                     // push rbx (align før call)
+        0x48, 0x8B, 0x47, 0x08,                   // mov rax, [rdi+8]  (unbox addr)
+        0x48, 0x8B, 0x7E, 0x08,                   // mov rdi, [rsi+8]  (unbox argp)
+        0xFF, 0xD0,                               // call rax
+        0x48, 0x89, 0xC7                          // mov rdi, rax
+    ])
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box rdi → rax
+    copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
+
+    // atomic_xadd(addr, delta) -> gamal verdi (boksa). rdi=addr NcVal, rsi=delta NcVal.
+    // `lock xadd` gjer inkrementet atomisk på tvers av clone(2)-trådar (delt minne).
+    atomics["atomic_xadd"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x53,                                     // push rbx (align før call)
+        0x48, 0x8B, 0x46, 0x08,                   // mov rax, [rsi+8]  (delta)
+        0x48, 0x8B, 0x7F, 0x08,                   // mov rdi, [rdi+8]  (addr)
+        0xF0, 0x48, 0x0F, 0xC1, 0x07,             // lock xadd [rdi], rax
+        0x48, 0x89, 0xC7                          // mov rdi, rax  (gamal verdi)
+    ])
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box → rax
+    copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
+
+    // atomic_cas(addr, expected, new) -> verdien som LÅG der (boksa). rdi/rsi/rdx.
+    // `lock cmpxchg`: er [addr]==expected byt til new; rax endar alltid = gamal verdi.
+    atomics["atomic_cas"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [
+        0x53,                                     // push rbx
+        0x48, 0x8B, 0x46, 0x08,                   // mov rax, [rsi+8]  (expected)
+        0x48, 0x8B, 0x5A, 0x08,                   // mov rbx, [rdx+8]  (new)
+        0x48, 0x8B, 0x7F, 0x08,                   // mov rdi, [rdi+8]  (addr)
+        0xF0, 0x48, 0x0F, 0xB1, 0x1F,             // lock cmpxchg [rdi], rbx
+        0x48, 0x89, 0xC7                          // mov rdi, rax  (gamal verdi)
+    ])
+    call_rel32(bytes, RT_INT(), TEXT_VA())        // box → rax
+    copy(bytes, [0x5B, 0xC3])                     // pop rbx; ret
+
+    // ── Native trådar (norscode-native-thread-v1): thread.*-primitiv utan GC/VM ──
+    // thread_dispatch(rdi = deskriptor i delt arena) køyrer den native trådkroppen
+    // og returnerer ALDRI (exit(2)). Deskriptor-layout (rå 8-byte-ord):
+    //   [0] op (0 noop, 1 atomic_increment, 2 condition_signal)
+    //   [8] done-futex   [16] cancel   [24] teljar/cond-addr   [32] iterasjonar/delay_ms
+    la td_start = lengde(bytes)
+    atomics["thread_dispatch"] = TEXT_VA() + td_start
+    copy(bytes, [0x48, 0x89, 0xFB])                 // mov rbx,rdi (deskriptor)
+    copy(bytes, [0x48, 0x8B, 0x03])                 // mov rax,[rbx] (op)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x01])           // cmp rax,1
+    la td_jne_chk2 = emit_jcc_placeholder(bytes, 0x85)  // jne .chk2
+    copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (teljar)
+    copy(bytes, [0x4C, 0x8B, 0x6B, 0x20])           // mov r13,[rbx+32] (iterasjonar)
+    la td_iloop = lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x7B, 0x10, 0x00])     // cmp qword [rbx+16],0 (cancel)
+    la td_cancel_done = emit_jcc_placeholder(bytes, 0x85) // jne .done
+    copy(bytes, [0x4D, 0x85, 0xED])                 // test r13,r13
+    la td_zero_done = emit_jcc_placeholder(bytes, 0x84)   // jz .done
+    copy(bytes, [0xF0, 0x49, 0xFF, 0x04, 0x24])     // lock inc qword [r12]
+    copy(bytes, [0x49, 0xFF, 0xCD])                 // dec r13
+    la td_back = emit_jmp_placeholder(bytes)        // jmp .iloop
+    patch_jump(bytes, td_back, td_iloop)
+    la td_chk2 = lengde(bytes)
+    patch_jump(bytes, td_jne_chk2, td_chk2)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x02])           // cmp rax,2
+    la td_jne_done2 = emit_jcc_placeholder(bytes, 0x85) // jne .done
+    copy(bytes, [0x48, 0x8B, 0x43, 0x20])           // mov rax,[rbx+32] (delay_ms)
+    copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx
+    copy(bytes, [0x48, 0xC7, 0xC1, 0xE8, 0x03, 0x00, 0x00]) // mov rcx,1000
+    copy(bytes, [0x48, 0xF7, 0xF1])                 // div rcx (rax=sek, rdx=rest-ms)
+    copy(bytes, [0x48, 0x69, 0xD2, 0x40, 0x42, 0x0F, 0x00]) // imul rdx,rdx,1000000
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])           // sub rsp,16
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])           // mov [rsp],rax (tv_sec)
+    copy(bytes, [0x48, 0x89, 0x54, 0x24, 0x08])     // mov [rsp+8],rdx (tv_nsec)
+    copy(bytes, [0xB8, 0x23, 0x00, 0x00, 0x00])     // mov eax,35 (nanosleep)
+    copy(bytes, [0x48, 0x89, 0xE7])                 // mov rdi,rsp
+    copy(bytes, [0x31, 0xF6])                       // xor esi,esi
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])           // add rsp,16
+    copy(bytes, [0x4C, 0x8B, 0x63, 0x18])           // mov r12,[rbx+24] (cond-addr)
+    copy(bytes, [0xF0, 0x49, 0xFF, 0x04, 0x24])     // lock inc qword [r12] (auk sekvens)
+    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202 (futex)
+    copy(bytes, [0x4C, 0x89, 0xE7])                 // mov rdi,r12
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1 (FUTEX_WAKE)
+    copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    la td_done = lengde(bytes)
+    patch_jump(bytes, td_cancel_done, td_done)
+    patch_jump(bytes, td_zero_done, td_done)
+    patch_jump(bytes, td_jne_done2, td_done)
+    copy(bytes, [0x48, 0xC7, 0x43, 0x08, 0x01, 0x00, 0x00, 0x00]) // mov qword [rbx+8],1 (done)
+    copy(bytes, [0xB8, 0xCA, 0x00, 0x00, 0x00])     // mov eax,202
+    copy(bytes, [0x48, 0x8D, 0x7B, 0x08])           // lea rdi,[rbx+8]
+    copy(bytes, [0xBE, 0x01, 0x00, 0x00, 0x00])     // mov esi,1
+    copy(bytes, [0xBA, 0xFF, 0xFF, 0xFF, 0x7F])     // mov edx,0x7fffffff
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])     // mov eax,60 (exit)
+    copy(bytes, [0x31, 0xFF])                       // xor edi,edi
+    copy(bytes, [0x0F, 0x05])                       // syscall
+
+    // thread_spawn_native(flags, stack_top, deskriptor) → boksa barne-tid.
+    // clone(2) rått: barnet held fram etter syscall med rsp=stack_top; vi legg
+    // deskriptoren på [stack_top-16] (delt via CLONE_VM) og hoppar til dispatch.
+    atomics["thread_spawn_native"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])           // mov rdi,[rdi+8] (flags)
+    copy(bytes, [0x48, 0x8B, 0x76, 0x08])           // mov rsi,[rsi+8] (stack_top)
+    copy(bytes, [0x48, 0x8B, 0x52, 0x08])           // mov rdx,[rdx+8] (deskriptor)
+    copy(bytes, [0x48, 0x89, 0x56, 0xF0])           // mov [rsi-16],rdx
+    copy(bytes, [0xB8, 0x38, 0x00, 0x00, 0x00])     // mov eax,56 (clone)
+    copy(bytes, [0x48, 0x31, 0xD2])                 // xor rdx,rdx (ptid)
+    copy(bytes, [0x4D, 0x31, 0xD2])                 // xor r10,r10 (ctid)
+    copy(bytes, [0x4D, 0x31, 0xC0])                 // xor r8,r8 (tls)
+    copy(bytes, [0x0F, 0x05])                       // syscall
+    copy(bytes, [0x48, 0x85, 0xC0])                 // test rax,rax
+    la ts_parent = emit_jcc_placeholder(bytes, 0x85) // jnz .parent
+    copy(bytes, [0x48, 0x8B, 0x7C, 0x24, 0xF0])     // mov rdi,[rsp-16] (deskriptor)
+    jump_rel32(bytes, atomics["thread_dispatch"], TEXT_VA()) // jmp thread_dispatch
+    la ts_parent_pos = lengde(bytes)
+    patch_jump(bytes, ts_parent, ts_parent_pos)
+    copy(bytes, [0x48, 0x89, 0xC7])                 // mov rdi,rax (tid)
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])           // sub rsp,8 (align)
+    call_rel32(bytes, RT_INT(), TEXT_VA())          // box tid → rax
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])           // add rsp,8
+    copy(bytes, [0xC3])                             // ret
 
     // heap_bump() -> boksa bump-peikar ([HEAP_VA]).
     atomics["heap_bump"] = TEXT_VA() + lengde(bytes)
@@ -4828,7 +4979,191 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x89, 0xC7])                               // mov edi,eax
     jump_rel32(bytes, RT_BOOL(), TEXT_VA())                         // jmp X_RT_BOOL
 
+    // ── desimaltall: NcVal-type 6 ────────────────────────────────────────────
+    // Den native x86-64-backenden hadde INGEN flyttalstype. `builtin.desimaltall`
+    // peika rett på heiltalsrutina (er_to_int → RT_TO_INT), so ein literal 3.5
+    // vart 3 alt ved kodegenerering, og konvertering frå tekst segfaulta.
+    //
+    // ARBEIDSDELING: maskinkode gjer BIT-FLYTTING og REKNING. Dei to vanskelege
+    // delane — double → desimalstreng og desimalstreng → double — ligg i Norscode
+    // (std/native_gap.no), same gap-mønster som random_hex_secure og pbkdf2_gap.
+    // Difor treng maskinkoden berre ei bru for råbita pluss xmm-aritmetikk.
+    //
+    // Type 6 er ledig: type_of dekte 1–5 og fall gjennom til «ingenting».
+
+    // desimal_boks_rå(rdi = rå 8 byte) → rax = desimaltall-NcVal
+    atomics["desimal_boks_rå"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi (ta vare på bita)
+    call_rel32(bytes, atomics["gc_alloc16"], TEXT_VA())   // rax = 16B blokk
+    copy(bytes, [0x48, 0xC7, 0x00, 0x06, 0x00, 0x00, 0x00]) // mov qword[rax],6
+    copy(bytes, [0x48, 0x89, 0x58, 0x08])                 // mov [rax+8],rbx
+    copy(bytes, [0x5B])                                   // pop rbx
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // desimal_frå_bits(rdi = int-NcVal) → rax = desimaltall-NcVal  (builtin-bru)
+    atomics["desimal_frå_bits"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                 // mov rdi,[rdi+8]
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_til_bits(rdi = desimaltall-NcVal) → rax = int-NcVal  (builtin-bru)
+    atomics["desimal_til_bits"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                 // mov rdi,[rdi+8]
+    jump_rel32(bytes, RT_INT(), TEXT_VA())
+
+    // desimal_til_heiltal(rdi = desimaltall-NcVal) → rax = int-NcVal (TRUNKERT)
+    // Trengst av formateringa i std/native_gap.no: siffer blir henta ut med
+    // d = int(x); x = (x - d) * 10. Merk at dette er cvttsd2si (trunkering mot
+    // null), ikkje bit-reintolking — desimal_til_bits er noko heilt anna.
+    atomics["desimal_til_heiltal"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                 // cmp qword[rdi],6
+    copy(bytes, [0x75, 0x0F])                             // jne +15 → alt heiltal, send vidare
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x47, 0x08])           // movsd xmm0,[rdi+8]
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2C, 0xF8])           // cvttsd2si rdi,xmm0
+    jump_rel32(bytes, RT_INT(), TEXT_VA())                // 5 byte
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                 // mov rdi,[rdi+8]
+    jump_rel32(bytes, RT_INT(), TEXT_VA())
+
+    // last0/last1: hent operand som double i xmm0/xmm1. Eit heiltal blir utvida
+    // med cvtsi2sd, so blanda uttrykk (3.5 * 2) reknar i flyttal slik VM-en gjer.
+    atomics["desimal_last0"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                 // cmp qword[rdi],6
+    copy(bytes, [0x75, 0x06])                             // jne +6 (heiltalsvegen)
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x47, 0x08])           // movsd xmm0,[rdi+8]
+    copy(bytes, [0xC3])                                   // ret
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2A, 0x47, 0x08])     // cvtsi2sd xmm0,[rdi+8]
+    copy(bytes, [0xC3])                                   // ret
+
+    atomics["desimal_last1"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                 // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x06])                             // jne +6
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x4E, 0x08])           // movsd xmm1,[rsi+8]
+    copy(bytes, [0xC3])                                   // ret
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2A, 0x4E, 0x08])     // cvtsi2sd xmm1,[rsi+8]
+    copy(bytes, [0xC3])                                   // ret
+
+    // desimal_add(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_add"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x58, 0xC1])           // addsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_sub(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_sub"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x5C, 0xC1])           // subsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_mul(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_mul"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x59, 0xC1])           // mulsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // desimal_div(rdi,rsi) → rax = desimaltall-NcVal
+    atomics["desimal_div"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54])                       // push rbx, r12
+    copy(bytes, [0x48, 0x89, 0xFB])                       // mov rbx,rdi
+    copy(bytes, [0x49, 0x89, 0xF4])                       // mov r12,rsi
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    copy(bytes, [0x4C, 0x89, 0xE6])                       // mov rsi,r12
+    copy(bytes, [0x48, 0x83, 0xEC, 0x10])                 // sub rsp,16 (spar xmm0)
+    copy(bytes, [0xF2, 0x0F, 0x11, 0x04, 0x24])           // movsd [rsp],xmm0
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0xF2, 0x0F, 0x10, 0x04, 0x24])           // movsd xmm0,[rsp]
+    copy(bytes, [0x48, 0x83, 0xC4, 0x10])                 // add rsp,16
+    copy(bytes, [0xF2, 0x0F, 0x5E, 0xC1])           // divsd xmm0,xmm1
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x41, 0x5C, 0x5B])                       // pop r12, rbx
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+
+    // er_desimaltall(rdi) → bool-NcVal. Brukt av til_tekst_gap; eit
+    // `builtin.type(x) == "desimaltall"` ville allokert ein typestreng per kall.
+    atomics["er_desimaltall"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    copy(bytes, [0x74, 0x0F])                             // jz +15 → usann
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                 // cmp qword[rdi],6
+    copy(bytes, [0x0F, 0x94, 0xC0])                       // sete al
+    copy(bytes, [0x0F, 0xB6, 0xF8])                       // movzx edi,al
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())               // 5 byte
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())
+
+    // desimal_lt / desimal_eq → bool-NcVal, same kontrakt som atomics["lt"]/["eq"].
+    // gt er «xchg rdi,rsi; jmp lt», og le/ge kallar både lt og eq — so ein
+    // flyttalsveg i desse to dekkjer alle seks samanlikningane.
+    // NaN: comisd set CF og PF ved uordna operandar. `setb` aleine ville gjort
+    // NaN < x sann; `setnp` maskerer det bort, so uordna alltid gjev usann.
+    atomics["desimal_lt"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx (16-justering)
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0x66, 0x0F, 0x2F, 0xC1])                 // comisd xmm0,xmm1
+    copy(bytes, [0x0F, 0x92, 0xC0])                       // setb al
+    copy(bytes, [0x0F, 0x9B, 0xC1])                       // setnp cl
+    copy(bytes, [0x20, 0xC8])                             // and al,cl
+    copy(bytes, [0x0F, 0xB6, 0xF8])                       // movzx edi,al
+    copy(bytes, [0x5B])                                   // pop rbx
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())
+
+    atomics["desimal_eq"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53])                                   // push rbx
+    call_rel32(bytes, atomics["desimal_last0"], TEXT_VA())
+    call_rel32(bytes, atomics["desimal_last1"], TEXT_VA())
+    copy(bytes, [0x66, 0x0F, 0x2F, 0xC1])                 // comisd xmm0,xmm1
+    copy(bytes, [0x0F, 0x94, 0xC0])                       // sete al
+    copy(bytes, [0x0F, 0x9B, 0xC1])                       // setnp cl
+    copy(bytes, [0x20, 0xC8])                             // and al,cl
+    copy(bytes, [0x0F, 0xB6, 0xF8])                       // movzx edi,al
+    copy(bytes, [0x5B])                                   // pop rbx
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())
+
     atomics["eq"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST (type 6). gt er «xchg; jmp lt», og le/ge kallar lt og eq,
+    // so desse to prologane dekkjer alle seks samanlikningane. Lagt føre den
+    // eksisterande kroppen, so dei hardkoda korthoppa der inne er urørte.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5
+    jump_rel32(bytes, atomics["desimal_eq"], TEXT_VA())
     copy(bytes, [0x48, 0x8B, 0x0F])                         // mov rcx,QWORD PTR [rdi]
     copy(bytes, [0x48, 0x3B, 0x0E])                         // cmp rcx,QWORD PTR [rsi]
     copy(bytes, [0x75, 0x3B])                               // jne 353
@@ -4862,6 +5197,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     jump_rel32(bytes, RT_BOOL(), TEXT_VA())                         // jmp X_RT_BOOL
 
     atomics["lt"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST (type 6). gt er «xchg; jmp lt», og le/ge kallar lt og eq,
+    // so desse to prologane dekkjer alle seks samanlikningane. Lagt føre den
+    // eksisterande kroppen, so dei hardkoda korthoppa der inne er urørte.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5
+    jump_rel32(bytes, atomics["desimal_lt"], TEXT_VA())
     copy(bytes, [0x48, 0x8B, 0x07])                         // mov rax,QWORD PTR [rdi]
     copy(bytes, [0x48, 0x83, 0xF8, 0x02])                   // cmp rax,0x2
     copy(bytes, [0x74, 0x19])                               // je 396
@@ -4940,17 +5287,53 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                                     // ret
 
     atomics["sub"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_sub.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_sub"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                   // mov rdi,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x2B, 0x7E, 0x08])                   // sub rdi,QWORD PTR [rsi+0x8]
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
 
     atomics["mul"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_mul.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_mul"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x46, 0x08])                   // mov rax,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x0F, 0xAF, 0x47, 0x08])             // imul rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
 
     atomics["div"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_div.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_div"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x85, 0xC9])                         // test rcx,rcx
@@ -4982,10 +5365,75 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
 
     atomics["neg"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0x31, 0xC0])                               // xor eax,eax
+    // Desimaltall (type 6) MÅ flippe forteiknsbiten, ikkje heiltalsnegere bit-
+    // mønsteret. Utan dette vart literalen `-3.25` (UNARY_NEG på desimal-konstanten
+    // 3.25) til eit heiltal med IEEE-bita som verdi. `0.0 - 3.25` (BINARY_SUB) hadde
+    // eiga flyttalsrute og verka — difor synte berre negative desimal-LITERALAR feil.
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword [rdi],6
+    copy(bytes, [0x75, 0x0E])                               // jne .int (hopp 14 byte)
+    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                   // mov rdi,[rdi+8]  (rå bit)
+    copy(bytes, [0x48, 0x0F, 0xBA, 0xFF, 0x3F])             // btc rdi,63       (flip forteikn)
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA()) // jmp → desimaltall-NcVal
+    copy(bytes, [0x31, 0xC0])                               // .int: xor eax,eax
     copy(bytes, [0x48, 0x2B, 0x47, 0x08])                   // sub rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
     jump_rel32(bytes, RT_INT(), TEXT_VA())                          // jmp X_RT_INT
+
+    // ── Heiltalsnøkkel på ordbok (C-æra-paritet) ────────────────────────────────
+    // Den gamle json_parse (og std.native_gap.json_parse, som speglar han) lagar
+    // lister som ordbøker med tekstnøklane "0", "1", … Kode som argparse og
+    // tls_acme.order_request les dei med obj[i] (heiltal). C-runtimen fann tekst-
+    // nøkkelen; map_find samanliknar type+verdi og fann ingenting → null → «ugyldig
+    // ACME SAN» o.l. på fersk seed. Rå nøkkel blir alltid prøvd FØRST, so ordbøker
+    // med ekte heiltalsnøklar (BUILD_MAP-literalar) oppfører seg som før.
+    //
+    // index_get_map(rdi=map, rsi=nøkkel) → rax. Inngang rsp ≡ 8 (mod 16).
+    atomics["index_get_map"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x57, 0x56])                             // push rdi; push rsi
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8 (rsp ≡ 0)
+    call_rel32(bytes, atomics["map_get"], TEXT_VA())      // rax = verdi eller 0
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                 // add rsp,8
+    copy(bytes, [0x5E, 0x5F])                             // pop rsi; pop rdi
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la igm_ret1 = emit_jcc_placeholder(bytes, 0x85)       // jne ret (funne)
+    copy(bytes, [0x48, 0x85, 0xF6])                       // test rsi,rsi
+    la igm_ret2 = emit_je_placeholder(bytes)              // je ret (null-nøkkel)
+    copy(bytes, [0x48, 0x83, 0x3E, 0x01])                 // cmp qword [rsi],1 (heiltal?)
+    la igm_ret3 = emit_jcc_placeholder(bytes, 0x85)       // jne ret
+    copy(bytes, [0x57])                                   // push rdi (rsp ≡ 0)
+    copy(bytes, [0x48, 0x89, 0xF7])                       // mov rdi,rsi
+    call_rel32(bytes, RT_INT_TO_STR(), TEXT_VA())         // rax = tekstnøkkel
+    copy(bytes, [0x5F])                                   // pop rdi
+    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
+    jump_rel32(bytes, atomics["map_get"], TEXT_VA())      // hale: map_get(map, tekstnøkkel)
+    la igm_retl = lengde(bytes)
+    patch_jump(bytes, igm_ret1, igm_retl) patch_jump(bytes, igm_ret2, igm_retl) patch_jump(bytes, igm_ret3, igm_retl)
+    copy(bytes, [0xC3])                                   // ret
+
+    // index_set_map(rdi=map, rsi=nøkkel, rdx=verdi) → rax = map. Heiltalsnøkkel blir
+    // bytt til tekstnøkkelen berre når den alt finst (ein json_parse-«liste»); elles
+    // blir han lagra rått som før. Inngang rsp ≡ 8 (mod 16).
+    atomics["index_set_map"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x48, 0x85, 0xF6])                       // test rsi,rsi
+    la ism_go1 = emit_je_placeholder(bytes)               // je go
+    copy(bytes, [0x48, 0x83, 0x3E, 0x01])                 // cmp qword [rsi],1
+    la ism_go2 = emit_jcc_placeholder(bytes, 0x85)        // jne go
+    copy(bytes, [0x57, 0x56, 0x52])                       // push rdi; push rsi; push rdx (rsp ≡ 0)
+    copy(bytes, [0x48, 0x89, 0xF7])                       // mov rdi,rsi
+    call_rel32(bytes, RT_INT_TO_STR(), TEXT_VA())         // rax = tekstnøkkel
+    copy(bytes, [0x50])                                   // push rax
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                 // sub rsp,8 (rsp ≡ 0)
+    copy(bytes, [0x48, 0x8B, 0x7C, 0x24, 0x20])           // mov rdi,[rsp+32] (map)
+    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
+    call_rel32(bytes, atomics["map_find"], TEXT_VA())     // rax = indeks eller -1
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                 // add rsp,8
+    copy(bytes, [0x59, 0x5A, 0x5E, 0x5F])                 // pop rcx (tekst); pop rdx; pop rsi; pop rdi
+    copy(bytes, [0x48, 0x83, 0xF8, 0xFF])                 // cmp rax,-1
+    la ism_go3 = emit_je_placeholder(bytes)               // je go (behald heiltalsnøkkelen)
+    copy(bytes, [0x48, 0x89, 0xCE])                       // mov rsi,rcx
+    la ism_gol = lengde(bytes)
+    patch_jump(bytes, ism_go1, ism_gol) patch_jump(bytes, ism_go2, ism_gol) patch_jump(bytes, ism_go3, ism_gol)
+    jump_rel32(bytes, atomics["map_set"], TEXT_VA())      // hale: map_set(map, nøkkel, verdi)
 
     atomics["index_get"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x8B, 0x07])                         // mov rax,QWORD PTR [rdi]
@@ -5002,7 +5450,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x40, 0x10])                   // mov rax,QWORD PTR [rax+0x10]
     copy(bytes, [0x48, 0x8B, 0x04, 0xC8])                   // mov rax,QWORD PTR [rax+rcx*8]
     copy(bytes, [0xC3])                                     // ret
-    jump_rel32(bytes, atomics["map_get"], TEXT_VA())                // jmp X_a_map_get
+    jump_rel32(bytes, atomics["index_get_map"], TEXT_VA())          // jmp index_get_map (map_get + heiltalsnøkkel-fallback)
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x8B, 0x4E, 0x08])                   // mov rcx,QWORD PTR [rsi+0x8]
     copy(bytes, [0x48, 0x3B, 0x08])                         // cmp rcx,QWORD PTR [rax]
@@ -5031,7 +5479,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x8B, 0x40, 0x10])                   // mov rax,QWORD PTR [rax+0x10]
     copy(bytes, [0x48, 0x89, 0x14, 0xC8])                   // mov QWORD PTR [rax+rcx*8],rdx
     copy(bytes, [0xEB, 0x05])                               // jmp 55a
-    call_rel32(bytes, atomics["map_set"], TEXT_VA())                // call X_a_map_set
+    call_rel32(bytes, atomics["index_set_map"], TEXT_VA())          // call index_set_map (map_set + heiltalsnøkkel-paritet)
     copy(bytes, [0x48, 0x89, 0xD8])                         // mov rax,rbx
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
@@ -5140,6 +5588,23 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     jump_rel32(bytes, atomics["str_to_int"], TEXT_VA())             // jmp X_a_str_to_int
 
     atomics["type_of"] = TEXT_VA() + lengde(bytes)
+    // desimaltall (type 6) FØRST, som ein prolog. Den eksisterande kroppen under
+    // brukar hardkoda korthopp (je 6aa, je 6c4 …) som er relative INNANFOR seg
+    // sjølv; ved å leggje sjekken føre heile kroppen står alle dei offseta urørte.
+    // Null-sjekken må kome før dereferansen — type_of blir kalla med null.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x32])                               // jz  +50 → hopp over heile prologen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x75, 0x2C])                               // jne +44 → hopp over utskrifta
+    copy(bytes, [0x48, 0x83, 0xEC, 0x18])                   // sub rsp,0x18
+    copy(bytes, [0x48, 0xB8, 0x64, 0x65, 0x73, 0x69, 0x6D, 0x61, 0x6C, 0x74]) // movabs rax,"desimalt"
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])                   // mov [rsp],rax
+    copy(bytes, [0xC7, 0x44, 0x24, 0x08, 0x61, 0x6C, 0x6C, 0x00]) // mov dword[rsp+8],"all\0"
+    copy(bytes, [0xBE, 0x0B, 0x00, 0x00, 0x00])             // mov esi,11
+    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())              // rax = "desimaltall"
+    copy(bytes, [0x48, 0x83, 0xC4, 0x18])                   // add rsp,0x18
+    copy(bytes, [0xC3])                                     // ret
     copy(bytes, [0x48, 0x83, 0xEC, 0x18])                   // sub rsp,0x18
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
     copy(bytes, [0x74, 0x21])                               // je 6aa
@@ -5186,6 +5651,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                                     // ret
 
     atomics["add"] = TEXT_VA() + lengde(bytes)
+    // Flyttalsveg FØRST: er ein av operandane type 6, gå til desimal_add.
+    // Prologen ligg føre den eksisterande heiltalskroppen, so dei hardkoda
+    // korthoppa der inne er urørte. Null-sjekk før dereferanse.
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x16])                               // jz  +22 → heiltalsvegen
+    copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
+    copy(bytes, [0x74, 0x11])                               // jz  +17 → heiltalsvegen
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])                   // cmp qword[rdi],6
+    copy(bytes, [0x74, 0x06])                               // je  +6 → flyttal
+    copy(bytes, [0x48, 0x83, 0x3E, 0x06])                   // cmp qword[rsi],6
+    copy(bytes, [0x75, 0x05])                               // jne +5 (heiltalsvegen)
+    jump_rel32(bytes, atomics["desimal_add"], TEXT_VA())   // 5 byte
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
     copy(bytes, [0x74, 0x1E])                               // je 75b
     copy(bytes, [0x48, 0x85, 0xF6])                         // test rsi,rsi
@@ -5375,7 +5852,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                                     // ret
 
     atomics["skriv"] = TEXT_VA() + lengde(bytes)
+    // Ikkje-tekst (bool, heiltal, desimal …) går via to_text først. Før las
+    // rutinen [rdi+8] som strengpeikar uansett type → `skriv(sann)` segfaulta.
     copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    copy(bytes, [0x74, 0x0E])                               // je .tekst (null: som før)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x02])                   // cmp qword [rdi],2
+    copy(bytes, [0x74, 0x08])                               // je .tekst
+    call_rel32(bytes, atomics["to_text"], TEXT_VA())        // call to_text
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    copy(bytes, [0x48, 0x85, 0xFF])                         // .tekst: test rdi,rdi
     copy(bytes, [0x74, 0x29])                               // je 978
     copy(bytes, [0x48, 0x8B, 0x77, 0x08])                   // mov rsi,QWORD PTR [rdi+0x8]
     copy(bytes, [0x48, 0x8B, 0x16])                         // mov rdx,QWORD PTR [rsi]
@@ -5488,7 +5973,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBA, 0xA4, 0x01, 0x00, 0x00])             // mov edx,0x1a4
     copy(bytes, [0x0F, 0x05])                               // syscall
     copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
-    copy(bytes, [0x78, 0x35])                               // js ad9
+    // open feila (katalog, manglande mappe, ingen løyve): kast, som C-seeden gjorde.
+    // Før hoppa rutinen stille til retur 0, so lagring.lagre(".") «lukkast».
+    copy(bytes, [0x0F, 0x88])                               // js .fs_feil (rel32)
+    la fs_feil_hopp = lengde(bytes)
+    u32(bytes, 0)
     copy(bytes, [0x48, 0x89, 0xC3])                         // mov rbx,rax
     copy(bytes, [0x49, 0x8B, 0x74, 0x24, 0x08])             // mov rsi,QWORD PTR [r12+0x8]
     copy(bytes, [0x48, 0x8B, 0x16])                         // mov rdx,QWORD PTR [rsi]
@@ -5511,6 +6000,26 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x5C])                               // pop r12
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
+    // .fs_feil: melding «Kan ikkje skrive fil» i stakkbufferet → streng → throw_unwind
+    // med stakken attende i kallaren si ramme (same mønster som fil_les_safe).
+    patch_jump(bytes, fs_feil_hopp, lengde(bytes))
+    copy(bytes, [0x48, 0xB8, 0x4B, 0x61, 0x6E, 0x20, 0x69, 0x6B, 0x6B, 0x6A]) // "Kan ikkj"
+    copy(bytes, [0x48, 0x89, 0x04, 0x24])                   // mov [rsp],rax
+    copy(bytes, [0x48, 0xB8, 0x65, 0x20, 0x73, 0x6B, 0x72, 0x69, 0x76, 0x65]) // "e skrive"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x08])             // mov [rsp+8],rax
+    copy(bytes, [0x48, 0xB8, 0x20, 0x66, 0x69, 0x6C, 0x00, 0x00, 0x00, 0x00]) // " fil"
+    copy(bytes, [0x48, 0x89, 0x44, 0x24, 0x10])             // mov [rsp+16],rax
+    copy(bytes, [0x48, 0x89, 0xE7])                         // mov rdi,rsp
+    copy(bytes, [0xBE, 0x14, 0x00, 0x00, 0x00])             // mov esi,20
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                   // sub rsp,8 (align)
+    call_rel32(bytes, RT_STR_RAW(), TEXT_VA())              // rax = melding
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                   // add rsp,8
+    copy(bytes, [0x48, 0x89, 0xC7])                         // mov rdi,rax
+    copy(bytes, [0x48, 0x81, 0xC4, 0x00, 0x10, 0x00, 0x00]) // add rsp,0x1000
+    copy(bytes, [0x41, 0x5C])                               // pop r12
+    copy(bytes, [0x5B])                                     // pop rbx
+    la fs_kast = emit_jmp_placeholder(bytes)
+    patch_jump(bytes, fs_kast, atomics["throw_unwind"] - TEXT_VA())
 
     atomics["fil_skriv_binar"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53])                                     // push rbx
@@ -5619,18 +6128,158 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x5B])                                     // pop rbx
     copy(bytes, [0xC3])                                     // ret
 
-    // VM-PARITET: miljo_finnes ser BERRE på envp (som frosen RT_MILJO_FINNES og VM-en: etter
-    // miljo_sett("X","ja") gjev VM-en miljo_hent("X")=="ja" men miljo_finnes("X")==usann, KAT
-    // «miljo_finnes_overlay»). WIP-en gjekk via env_get (overlay) → avvik; retta 2026-09-09.
+    // miljo_finnes ser OVERLAY + envp, same kjelde som miljo_hent (env_get). Målt 2026-09-10
+    // med `nc run`: etter miljo_sett("X","ja") gjev BÅE committa stage0 (macOS arm64 og
+    // Linux x86_64) miljo_finnes("X") == sann. Den tidlegare envp-berre-versjonen (2026-09-09)
+    // kopierte den frosne AOT-rutina RT_MILJO_FINNES, ikkje tolken — so fersk seed sa
+    // hent=="ja" men finnes==usann, og tests/test_path_env.no (sett→finnes) feila.
+    // Vakter: null-peikar og ikkje-tekst-verdi i overlayet → usann (env_get kan returnere
+    // vilkårleg NcVal frå miljo_sett; den gamle envp-vegen gav alltid tekst).
     atomics["miljo_finnes"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])                   // sub rsp,0x8
-    call_rel32(bytes, atomics["miljo_hent"], TEXT_VA())             // call X_a_miljo_hent (envp)
+    call_rel32(bytes, atomics["env_get"], TEXT_VA())                // call env_get (overlay → envp)
     copy(bytes, [0x48, 0x83, 0xC4, 0x08])                   // add rsp,0x8
+    copy(bytes, [0x31, 0xFF])                               // xor edi,edi (usann)
+    copy(bytes, [0x48, 0x85, 0xC0])                         // test rax,rax
+    la mf_null = emit_je_placeholder(bytes)                 // null-peikar → usann
+    copy(bytes, [0x48, 0x83, 0x38, 0x02])                   // cmp QWORD PTR [rax],2 (tekst)
+    la mf_ikkje_tekst = emit_jcc_placeholder(bytes, 0x85)   // jne → usann
     copy(bytes, [0x48, 0x8B, 0x40, 0x08])                   // mov rax,QWORD PTR [rax+0x8]
-    copy(bytes, [0x31, 0xFF])                               // xor edi,edi
     copy(bytes, [0x48, 0x83, 0x38, 0x00])                   // cmp QWORD PTR [rax],0x0
     copy(bytes, [0x40, 0x0F, 0x95, 0xC7])                   // setne dil
+    la mf_ut = lengde(bytes)
+    patch_jump(bytes, mf_null, mf_ut) patch_jump(bytes, mf_ikkje_tekst, mf_ut)
     jump_rel32(bytes, RT_BOOL(), TEXT_VA())                         // jmp X_RT_BOOL
+
+    // ── json_tall_desimal: resten av eit JSON-tal som flyttal ───────────────────
+    // Den transkriberte C-rutina under skanna FORBI brøk og eksponent men KASTA dei
+    // og returnerte alltid RT_INT — so "3.5" vart heiltalet 3. Det var denne vegen
+    // alle flyttals-literalar i NCB-ar gjekk på fersk seed. (Både committed macOS-
+    // og Linux-stage0 gjev desimaltall for same input — berre den transkriberte
+    // forkorta vegen trunkerte.)
+    //
+    // Inngang (frå tal-rutina): rbx=strengbytar, r12=lengd, r13 peikar på '.' eller
+    // 'e', rax=|heiltalsdel| (ikkje negert enno), r8=1 viss teiknet var '-'.
+    // Vi held fram frå r13 — heiltalsdelen er alt i rax, so vi treng ikkje parse
+    // han på nytt. Mantissa = alle siffer som eitt heiltal; netto titalseksponent =
+    // eksplisitt eksponent − tal brøksiffer. Skalering med 10^n i xmm (éin mul/div
+    // etter at 10^n er bygd, same metode som std.desimaltall_tekst.desimal_frå_tekst).
+    // Klobrar berre register tal-rutina alt klobrar (rax,rcx,rdx,rsi,rdi,r8,xmm0-2).
+    // Interne hopp går via placeholder/patch_jump — ingen handrekna offset.
+    atomics["json_tall_desimal"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x31, 0xD2])                             // xor edx,edx (tal brøksiffer)
+    copy(bytes, [0x31, 0xF6])                             // xor esi,esi (eksponent)
+    copy(bytes, [0x42, 0x80, 0x3C, 0x2B, 0x2E])           // cmp byte[rbx+r13],'.'
+    la jt_ikkje_punktum = emit_jcc_placeholder(bytes, 0x85)   // jne → eksponent
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    la jt_frac = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xE5])                       // cmp r13,r12
+    la jt_frac_slutt = emit_jcc_placeholder(bytes, 0x83)  // jae → bygg
+    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])           // movzx ecx,byte[rbx+r13]
+    copy(bytes, [0x83, 0xE9, 0x30])                       // sub ecx,0x30
+    copy(bytes, [0x83, 0xF9, 0x09])                       // cmp ecx,9
+    la jt_frac_ut = emit_jcc_placeholder(bytes, 0x87)     // ja → ikkje siffer
+    // Overflyt-vakt: rax*10+9 må halde seg under 2^63. Siffer utover presisjonen
+    // blir hoppa over (dei påverkar ikkje doublen) og IKKJE tald som brøksiffer.
+    copy(bytes, [0x48, 0xBF]) u64(bytes, 922337203685477579) // mov rdi,LIMIT
+    copy(bytes, [0x48, 0x39, 0xF8])                       // cmp rax,rdi
+    la jt_frac_hopp = emit_jcc_placeholder(bytes, 0x83)   // jae → hopp over siffer
+    copy(bytes, [0x48, 0x6B, 0xC0, 0x0A])                 // imul rax,rax,10
+    copy(bytes, [0x48, 0x01, 0xC8])                       // add rax,rcx
+    copy(bytes, [0xFF, 0xC2])                             // inc edx
+    la jt_frac_hopp_lbl = lengde(bytes)
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    la jt_frac_tilbake = emit_jmp_placeholder(bytes)      // jmp frac
+    la jt_frac_ut_lbl = lengde(bytes)
+    copy(bytes, [0x83, 0xC1, 0x30])                       // add ecx,0x30 (teiknet tilbake)
+    la jt_til_etest = emit_jmp_placeholder(bytes)         // jmp eksponent-test
+    la jt_eks_start = lengde(bytes)                       // inngang via 'e' (ingen brøk)
+    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])           // movzx ecx,byte[rbx+r13]
+    la jt_etest = lengde(bytes)
+    copy(bytes, [0x83, 0xC9, 0x20])                       // or ecx,0x20 (små bokstav)
+    copy(bytes, [0x83, 0xF9, 0x65])                       // cmp ecx,'e'
+    la jt_ingen_eks = emit_jcc_placeholder(bytes, 0x85)   // jne → bygg
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    copy(bytes, [0x31, 0xFF])                             // xor edi,edi (eksponentforteikn)
+    copy(bytes, [0x4D, 0x39, 0xE5])                       // cmp r13,r12
+    la jt_eks_tom = emit_jcc_placeholder(bytes, 0x83)     // jae → bygg
+    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])           // movzx ecx,byte[rbx+r13]
+    copy(bytes, [0x83, 0xF9, 0x2D])                       // cmp ecx,'-'
+    la jt_ikkje_minus = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0xBF, 0x01, 0x00, 0x00, 0x00])           // mov edi,1
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    la jt_til_siffer1 = emit_jmp_placeholder(bytes)
+    la jt_pluss = lengde(bytes)
+    copy(bytes, [0x83, 0xF9, 0x2B])                       // cmp ecx,'+'
+    la jt_ikkje_pluss = emit_jcc_placeholder(bytes, 0x85)
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    la jt_siffer = lengde(bytes)
+    copy(bytes, [0x4D, 0x39, 0xE5])                       // cmp r13,r12
+    la jt_eks_slutt1 = emit_jcc_placeholder(bytes, 0x83)  // jae → eks ferdig
+    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])           // movzx ecx,byte[rbx+r13]
+    copy(bytes, [0x83, 0xE9, 0x30])                       // sub ecx,0x30
+    copy(bytes, [0x83, 0xF9, 0x09])                       // cmp ecx,9
+    la jt_eks_slutt2 = emit_jcc_placeholder(bytes, 0x87)  // ja → eks ferdig
+    copy(bytes, [0x6B, 0xF6, 0x0A])                       // imul esi,esi,10
+    copy(bytes, [0x01, 0xCE])                             // add esi,ecx
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    la jt_siffer_tilbake = emit_jmp_placeholder(bytes)
+    la jt_eks_ferdig = lengde(bytes)
+    copy(bytes, [0x85, 0xFF])                             // test edi,edi
+    la jt_eks_pos = emit_jcc_placeholder(bytes, 0x84)     // je → bygg
+    copy(bytes, [0xF7, 0xDE])                             // neg esi
+    la jt_bygg = lengde(bytes)
+    copy(bytes, [0x29, 0xD6])                             // sub esi,edx (netto eksponent)
+    copy(bytes, [0xF2, 0x48, 0x0F, 0x2A, 0xC0])           // cvtsi2sd xmm0,rax
+    copy(bytes, [0x48, 0xB9]) u64(bytes, 4607182418800017408)  // mov rcx,1.0
+    copy(bytes, [0x66, 0x48, 0x0F, 0x6E, 0xC9])           // movq xmm1,rcx
+    copy(bytes, [0x48, 0xB9]) u64(bytes, 4621819117588971520)  // mov rcx,10.0
+    copy(bytes, [0x66, 0x48, 0x0F, 0x6E, 0xD1])           // movq xmm2,rcx
+    copy(bytes, [0x89, 0xF1])                             // mov ecx,esi
+    copy(bytes, [0x85, 0xC9])                             // test ecx,ecx
+    la jt_pos = emit_jcc_placeholder(bytes, 0x89)         // jns
+    copy(bytes, [0xF7, 0xD9])                             // neg ecx
+    la jt_ploop = lengde(bytes)
+    patch_jump(bytes, jt_pos, jt_ploop)
+    copy(bytes, [0x85, 0xC9])                             // test ecx,ecx
+    la jt_p_ferdig = emit_jcc_placeholder(bytes, 0x84)    // je
+    copy(bytes, [0xF2, 0x0F, 0x59, 0xCA])                 // mulsd xmm1,xmm2
+    copy(bytes, [0xFF, 0xC9])                             // dec ecx
+    la jt_p_tilbake = emit_jmp_placeholder(bytes)
+    la jt_p_ferdig_lbl = lengde(bytes)
+    copy(bytes, [0x85, 0xF6])                             // test esi,esi
+    la jt_del = emit_jcc_placeholder(bytes, 0x88)         // js → del
+    copy(bytes, [0xF2, 0x0F, 0x59, 0xC1])                 // mulsd xmm0,xmm1
+    la jt_til_forteikn = emit_jmp_placeholder(bytes)
+    la jt_del_lbl = lengde(bytes)
+    copy(bytes, [0xF2, 0x0F, 0x5E, 0xC1])                 // divsd xmm0,xmm1
+    la jt_forteikn = lengde(bytes)
+    copy(bytes, [0x66, 0x48, 0x0F, 0x7E, 0xC7])           // movq rdi,xmm0
+    copy(bytes, [0x45, 0x85, 0xC0])                       // test r8d,r8d
+    la jt_ikkje_neg = emit_jcc_placeholder(bytes, 0x84)   // je → boks
+    copy(bytes, [0x48, 0x0F, 0xBA, 0xFF, 0x3F])           // btc rdi,63 (forteiknsbit)
+    la jt_boks = lengde(bytes)
+    jump_rel32(bytes, atomics["desimal_boks_rå"], TEXT_VA())
+    patch_jump(bytes, jt_ikkje_punktum, jt_eks_start)
+    patch_jump(bytes, jt_frac_slutt, jt_bygg)
+    patch_jump(bytes, jt_frac_ut, jt_frac_ut_lbl)
+    patch_jump(bytes, jt_frac_hopp, jt_frac_hopp_lbl)
+    patch_jump(bytes, jt_frac_tilbake, jt_frac)
+    patch_jump(bytes, jt_til_etest, jt_etest)
+    patch_jump(bytes, jt_ingen_eks, jt_bygg)
+    patch_jump(bytes, jt_eks_tom, jt_bygg)
+    patch_jump(bytes, jt_ikkje_minus, jt_pluss)
+    patch_jump(bytes, jt_til_siffer1, jt_siffer)
+    patch_jump(bytes, jt_ikkje_pluss, jt_siffer)
+    patch_jump(bytes, jt_eks_slutt1, jt_eks_ferdig)
+    patch_jump(bytes, jt_eks_slutt2, jt_eks_ferdig)
+    patch_jump(bytes, jt_siffer_tilbake, jt_siffer)
+    patch_jump(bytes, jt_eks_pos, jt_bygg)
+    patch_jump(bytes, jt_p_ferdig, jt_p_ferdig_lbl)
+    patch_jump(bytes, jt_p_tilbake, jt_ploop)
+    patch_jump(bytes, jt_del, jt_del_lbl)
+    patch_jump(bytes, jt_til_forteikn, jt_forteikn)
+    patch_jump(bytes, jt_ikkje_neg, jt_boks)
 
     atomics["json_parse"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53])                                     // push rbx
@@ -5723,36 +6372,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x83, 0xC1, 0x30])                         // add ecx,0x30
     copy(bytes, [0x83, 0xF9, 0x2E])                         // cmp ecx,0x2e
     copy(bytes, [0x75, 0x1D])                               // jne d5c
-    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
-    copy(bytes, [0x4D, 0x39, 0xE5])                         // cmp r13,r12
-    copy(bytes, [0x73, 0x4E])                               // jae d95
-    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])             // movzx ecx,BYTE PTR [rbx+r13*1]
-    copy(bytes, [0x83, 0xE9, 0x30])                         // sub ecx,0x30
-    copy(bytes, [0x83, 0xF9, 0x09])                         // cmp ecx,0x9
-    copy(bytes, [0x77, 0x05])                               // ja d59
-    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
-    copy(bytes, [0xEB, 0xE9])                               // jmp d42
+    // Byte-NØYTRAL patch: dei hardkoda korthoppa rundt (jne d5c, jne d95)
+    // er rekna frå byteposisjonar, so blokka MÅ halde storleiken sin.
+    jump_rel32(bytes, atomics["json_tall_desimal"], TEXT_VA())      // 5 byte
+    copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])  // 21 × NOP
     copy(bytes, [0x83, 0xC1, 0x30])                         // add ecx,0x30
     copy(bytes, [0x83, 0xC9, 0x20])                         // or ecx,0x20
     copy(bytes, [0x83, 0xF9, 0x65])                         // cmp ecx,0x65
     copy(bytes, [0x75, 0x31])                               // jne d95
-    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
-    copy(bytes, [0x4D, 0x39, 0xE5])                         // cmp r13,r12
-    copy(bytes, [0x73, 0x29])                               // jae d95
-    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])             // movzx ecx,BYTE PTR [rbx+r13*1]
-    copy(bytes, [0x83, 0xF9, 0x2D])                         // cmp ecx,0x2d
-    copy(bytes, [0x74, 0x05])                               // je d7b
-    copy(bytes, [0x83, 0xF9, 0x2B])                         // cmp ecx,0x2b
-    copy(bytes, [0x75, 0x03])                               // jne d7e
-    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
-    copy(bytes, [0x4D, 0x39, 0xE5])                         // cmp r13,r12
-    copy(bytes, [0x73, 0x12])                               // jae d95
-    copy(bytes, [0x42, 0x0F, 0xB6, 0x0C, 0x2B])             // movzx ecx,BYTE PTR [rbx+r13*1]
-    copy(bytes, [0x83, 0xE9, 0x30])                         // sub ecx,0x30
-    copy(bytes, [0x83, 0xF9, 0x09])                         // cmp ecx,0x9
-    copy(bytes, [0x77, 0x05])                               // ja d95
-    copy(bytes, [0x49, 0xFF, 0xC5])                         // inc r13
-    copy(bytes, [0xEB, 0xE9])                               // jmp d7e
+    // Byte-NØYTRAL patch: dei hardkoda korthoppa rundt (jne d5c, jne d95)
+    // er rekna frå byteposisjonar, so blokka MÅ halde storleiken sin.
+    jump_rel32(bytes, atomics["json_tall_desimal"], TEXT_VA())      // 5 byte
+    copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])  // 44 × NOP
     copy(bytes, [0x45, 0x85, 0xC0])                         // test r8d,r8d
     copy(bytes, [0x74, 0x03])                               // je d9d
     copy(bytes, [0x48, 0xF7, 0xD8])                         // neg rax
@@ -6732,10 +7363,62 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         }
         rt_k = rt_k + 1
     }
+    // Fail-closed: SHA-256-konstantane ligg som data midt i runtimen og må ha overlevd
+    // alle patchpass. Ein blind patch på fast offset (sjå miljo_hent-merknaden over)
+    // overskreiv K[41..44] og gav feil hash utan krasj — slik skal ikkje seed-bygget sleppe gjennom.
+    la sha_k_off: heltall = sha_k_va - TEXT_VA()
+    la sha_ki: heltall = 0
+    mens sha_ki < 64 {
+        la sha_p: heltall = sha_k_off + sha_ki * 4
+        la sha_v: heltall = bytes[sha_p] + bytes[sha_p + 1] * 256 + bytes[sha_p + 2] * 65536 + bytes[sha_p + 3] * 16777216
+        hvis sha_v != kk[sha_ki] {
+            kast "native_codegen_v2: SHA-256-konstant K[" + tekst_fra_heltall(sha_ki) + "] er overskriven i runtimen"
+        }
+        sha_ki = sha_ki + 1
+    }
     returner [bytes, atomics]
 }
 
 // ─── Hovud kodegenererator ────────────────────────────────────────────────────
+
+// Kodegenereringstid: IEEE754-bitmønsteret til eit desimaltall, som heiltal.
+// Køyrer på VERTEN — committed stage0 under seed-bygg, eller fersk seed — og
+// verten har ikkje nødvendigvis builtin.desimal_til_bits. Difor berre
+// samanlikning, ×/÷ med 2 (eksakt i binær flyttal) og heiltalsrekning; ingen
+// flyttals-literalar i sjølve funksjonen. `a` blir normalisert til [1,2), og
+// dei 52 mantissebita blir henta ut eitt og eitt ved dobling — eksakt, sidan
+// a−1 er eit heilt multiplum av 2^-52.
+// MERK: skriv IKKJE 2^63 som literal. Det får ikkje plass i int64 og krasja
+// kompilert kode tidlegare i dette arbeidet. Minste int64 er (0−(2^63−1))−1.
+funksjon desimal_ieee_bits(v) -> heiltall {
+    hvis v == 0 { returner 0 }
+    la neg = v < 0
+    la a = v
+    hvis neg { a = 0 - v }
+    la e: heiltall = 0
+    la vakt: heiltall = 0
+    mens a >= 2 og vakt < 1100 { a = a / 2  e = e + 1  vakt = vakt + 1 }
+    mens a < 1 og vakt < 2200 { a = a * 2  e = e - 1  vakt = vakt + 1 }
+    la minste: heiltall = (0 - 9223372036854775807) - 1
+    hvis e > 1023 {
+        la inf: heiltall = 2047 * 4503599627370496
+        hvis neg { returner inf + minste }
+        returner inf
+    }
+    hvis e < 0 - 1022 { returner 0 }
+    la frac = a - 1
+    la m: heiltall = 0
+    la i: heiltall = 0
+    mens i < 52 {
+        frac = frac * 2
+        m = m * 2
+        hvis frac >= 1 { m = m + 1  frac = frac - 1 }
+        i = i + 1
+    }
+    la bits: heiltall = (e + 1023) * 4503599627370496 + m
+    hvis neg { bits = bits + minste }
+    returner bits
+}
 
 funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
                         gc_safepoint_va, atomic_vas, global_vas) {
@@ -6803,7 +7486,17 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
 
         // ─── PUSH_CONST ───────────────────────────────────────────────────────
         ellers hvis op == "PUSH_CONST"
-            emit_push_const(buf, instr[1], rd_offs, eiga_va)
+            // desimaltall: emit_push_const har inga flyttalsgrein — han har ikkje
+            // atomic_vas, og alle 50 RT-slotar er i bruk, so han kan ikkje nå
+            // desimal_boks_rå. Her er atomic_vas i scope: boks råbita direkte.
+            hvis builtin.type(instr[1]) == "desimaltall" {
+                emit_push_imm64(buf, desimal_ieee_bits(instr[1]))
+                legg_til(buf, 0x5F)                                     // pop rdi (råbits)
+                call_rel32(buf, atomic_vas["desimal_boks_rå"], eiga_va)
+                legg_til(buf, 0x50)                                     // push rax
+            } ellers {
+                emit_push_const(buf, instr[1], rd_offs, eiga_va)
+            }
             la vtype: tekst = builtin.type(instr[1])
             hvis instr[1] == null { vtype = "null" }
             hvis vtype == "tekst" { vtype = "str" }
@@ -7143,6 +7836,10 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "builtin.raw_store64" eller fn_nm == "raw_store64" { returner atomic_vas["raw_store64"] }
     hvis fn_nm == "builtin.raw_load8" eller fn_nm == "raw_load8" { returner atomic_vas["raw_load8"] }
     hvis fn_nm == "builtin.raw_store8" eller fn_nm == "raw_store8" { returner atomic_vas["raw_store8"] }
+    hvis fn_nm == "builtin.raw_call" eller fn_nm == "raw_call" { returner atomic_vas["raw_call"] }
+    hvis fn_nm == "builtin.atomic_xadd" eller fn_nm == "atomic_xadd" { returner atomic_vas["atomic_xadd"] }
+    hvis fn_nm == "builtin.atomic_cas" eller fn_nm == "atomic_cas" { returner atomic_vas["atomic_cas"] }
+    hvis fn_nm == "builtin.thread_spawn_native" eller fn_nm == "thread_spawn_native" { returner atomic_vas["thread_spawn_native"] }
     hvis fn_nm == "builtin.heap_bump" eller fn_nm == "heap_bump" { returner atomic_vas["heap_bump"] }
     hvis fn_nm == "builtin.obj_addr" eller fn_nm == "obj_addr" { returner atomic_vas["obj_addr"] }
     hvis fn_nm == "builtin.stack_base" eller fn_nm == "stack_base" { returner atomic_vas["stack_base"] }
@@ -7190,7 +7887,10 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
                          eller fn_nm == "tekst_til_heltall" eller builtin.ends_with(fn_nm, ".tekst_til_heltall")
                          eller fn_nm == "heiltall_fra_tekst" eller builtin.ends_with(fn_nm, ".heiltall_fra_tekst")
     la er_to_tekst     = fn_nm == "tekst" eller fn_nm == "builtin.tekst" eller fn_nm == "til_tekst" eller fn_nm == "builtin.til_tekst" eller builtin.ends_with(fn_nm, ".til_tekst")
-    la er_to_int       = fn_nm == "builtin.desimaltall"
+    // FJERNA: `la er_to_int = fn_nm == "builtin.desimaltall"` (→ RT_TO_INT).
+    // Dette var sjølve rota til at flyttal var brotne: builtin.desimaltall peika
+    // på HEILTALSRUTINA. builtin_va blir konsultert FØR gap_rute_v2, so lenge han
+    // svara her nådde gap-ruta til desimal_frå_tekst aldri fram.
     // IO
     la er_skriv        = fn_nm == "skriv" eller builtin.ends_with(fn_nm, ".skriv")
     // fil_les_binær/binary (read binary) manglar ei eiga native runtime-rutine.
@@ -7261,7 +7961,6 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_itos        { returner RT_INT_TO_STR() }
     hvis er_stoi        { returner RT_STR_TO_INT() }
     hvis er_to_tekst    { returner atomic_vas["to_text"] }
-    hvis er_to_int      { returner RT_TO_INT() }
     hvis er_skriv       { returner RT_SKRIV() }
     // fil_les_binær FØR fil_les: er_fil_les matchar òg binær-namna, så lista-atomet
     // (byte-heiltal, VM-paritet: b[0] == 77) var uoppnåeleg og fil_les_binær gav
@@ -7279,8 +7978,21 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_slett   { returner atomic_vas["fil_slett"] }
     hvis fn_nm == "now_ms" eller builtin.ends_with(fn_nm, ".now_ms") { returner atomic_vas["now_ms"] }
     hvis fn_nm == "random_byte" eller builtin.ends_with(fn_nm, ".random_byte") { returner atomic_vas["random_byte"] }
+    // Bru mellom råbits og desimaltall-NcVal. Formatering og parsing ligg i
+    // Norscode (std/native_gap.no); desse to flyttar berre typetaggen.
+    hvis fn_nm == "desimal_frå_bits" eller builtin.ends_with(fn_nm, ".desimal_frå_bits") { returner atomic_vas["desimal_frå_bits"] }
+    hvis fn_nm == "desimal_til_bits" eller builtin.ends_with(fn_nm, ".desimal_til_bits") { returner atomic_vas["desimal_til_bits"] }
+    hvis fn_nm == "desimal_til_heiltal" eller builtin.ends_with(fn_nm, ".desimal_til_heiltal") { returner atomic_vas["desimal_til_heiltal"] }
+    hvis fn_nm == "er_desimaltall" eller builtin.ends_with(fn_nm, ".er_desimaltall") { returner atomic_vas["er_desimaltall"] }
+    // til_tekst_native er den NATIVE to_text-rutina under eit eige namn, so
+    // gap-wrapperen kan falle tilbake til han utan å kalle seg sjølv.
+    hvis fn_nm == "til_tekst_native" eller builtin.ends_with(fn_nm, ".til_tekst_native") { returner atomic_vas["to_text"] }
     hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
+    // builtin.sov (std.tid.sov) var null-fallback → stille no-op: tid.sov(1000) returnerte
+    // på 1 ms på fersk seed. Berre det eksplisitte builtin-namnet — ein naken «sov» er
+    // std.tid.sov sjølv og må ikkje bindast hit.
+    hvis fn_nm == "builtin.sov" { returner atomic_vas["vent_sov"] }
     hvis fn_nm == "builtin.host_finst" eller fn_nm == "host_finst" { returner atomic_vas["host_finst"] }
     hvis fn_nm == "builtin.host_kall" eller fn_nm == "host_kall" { returner atomic_vas["host_kall"] }
     hvis er_mkdir       { returner atomic_vas["mkdir_p"] }
@@ -7326,16 +8038,39 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "sha256"     { returner ["std.sha256.hash"] }
     // 2026-09-06: reine erstatningar i std/native_gap.no (nc_main importerer modulen).
     hvis kort == "bytes_new"  { returner ["std.native_gap.bytes_new"] }
+    // host_exec_ncb_json → selfhost.vm.host_exec_ncb_json_gap. C-æra-vertsbuiltin
+    // utan rute: i kompilert nc_main vart kallet null-fallback (returnerte 0), so
+    // `nc bygg-native` på fersk seed skreiv INGEN ELF men rapporterte rc=0.
+    hvis kort == "host_exec_ncb_json" { returner ["selfhost.vm.host_exec_ncb_json_gap"] }
+    // fil_sett_kjorbar(sti) → chmod 0755 via native_fs_chmod-syscallen (#90).
+    // Var null-fallback: ELF-ar og seed-kopiar vart skrivne utan x-bit, og
+    // ci_runtime_fileops/verify_seed_only kasta på fersk seed.
+    hvis kort == "fil_sett_kjorbar" { returner ["std.native_gap.fil_sett_kjorbar_gap"] }
     hvis kort == "sett_inn"   { returner ["std.native_gap.sett_inn"] }
     hvis kort == "system_operation" { returner ["std.native_gap.system_operation"] }
     hvis kort == "process_operation" { returner ["std.native_gap.process_operation"] }
     hvis builtin.starts_with(kort, "socket_") { returner ["std.native_gap." + kort] }
     hvis kort == "network_operation" { returner ["std.native_gap.network_operation"] }
+    // jit_operation (norscode-jit-v1): C-seeden hadde JIT-en i verten; på fersk seed
+    // var kallet null-fallback, so VM-en kompilerte aldri noko og jit.status() gav null.
+    hvis kort == "jit_operation" { returner ["std.native_gap.jit_operation"] }
+    hvis kort == "atomic_operation" { returner ["std.native_gap.atomic_operation"] }
+    // Native trådar (thread.*-primitiv): clone(2) + futex, GC-/VM-fri veg.
+    hvis kort == "thread_spawn" { returner ["std.native_gap.thread_spawn"] }
+    hvis kort == "thread_join" { returner ["std.native_gap.thread_join"] }
+    hvis kort == "thread_sync" { returner ["std.native_gap.thread_sync"] }
+    hvis kort == "thread_current_id" { returner ["std.native_gap.thread_current_id"] }
     hvis kort == "dns_lookup" { returner ["std.native_gap.dns_lookup"] }
     // sha256_bytes(liste_heiltall): fil_les_binær gjev no liste (fil_les_bin-atomet),
     // så rein std.sha256.hash_bytes er type-trygg (kommentaren over var frå streng-tida).
     // sha256_bytes(liste) → native SHA-256-atom via native_gap (var pure std.sha256.hash_bytes).
     hvis kort == "sha256_bytes" { returner ["std.native_gap.sha256_hex_gap"] }
+    // argon2id(passord,salt,minne_kib,iter,par,lengde) → rå-minne Argon2id.
+    // Var null-fallback (tom streng) → Linux-attestasjonsprobe linje 32 feila.
+    // hash_raw_hex held matrisa i mmap'a rå minne (sys6 #9 + raw_load/store64) i
+    // staden for VM-lister som OOM-ar ved 64 MiB. nc_main importerer argon2id_pure
+    // så ruta er i bunten.
+    hvis kort == "argon2id" { returner ["std.argon2id_pure.hash_raw_hex"] }
     // pbkdf2_sha256(tekst,tekst,int,int) → pure tekst-signatur std.sha256.pbkdf2_hex.
     // pbkdf2_sha256 → native (native_gap.pbkdf2_gap brukar sha256_bytes_hex-atomet).
     // Var pure std.sha256.pbkdf2_hex = 120k pure HMAC-iterasjonar → 1 GiB-heng.
@@ -7347,8 +8082,21 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     hvis kort == "random_hex" { returner ["std.native_gap.random_hex_secure"] }
     // Filsystem-ABI (list/list_typed/walk_files/stat/path_stat/mkdir_p/delete/rmdir/
     // chmod/file_replace/symlink_replace) → rein-Norscode-impl på native_fs_*-primitiv.
+    // desimaltall(tekst) → rein-Norscode-parsing. Den gamle ruta var er_to_int →
+    // RT_TO_INT, altså HEILTALSRUTINA: builtin.desimaltall("3.5") las bita som
+    // heiltal og segfaulta. Sjå std/native_gap.no for parsing og formatering.
+    hvis kort == "desimaltall" { returner ["std.desimaltall_tekst.desimal_frå_tekst"] }
     hvis kort == "filesystem_read_operation" { returner ["std.runtime_filesystem_native.read_operation"] }
     hvis kort == "filesystem_write_operation" { returner ["std.runtime_filesystem_native.write_operation"] }
+    // db.* er ein BUILTIN-namespace i VM-en (vm.no: db.open/db.query_text/db.ping,
+    // capability-gata). Difor bind `bruk std.db som db` + `db.open(...)` seg til
+    // builtin.db.open og IKKJE til aliaset — verifisert: same modul under aliaset
+    // `mydb` resolverer korrekt til std.db.open. Den committa C-æra-seeden har
+    // native db-builtins; fersk seed har dei ikkje → «Ukjent innebygd funksjon:
+    // builtin.db.open» (test_admin_relations). Rut til den reine Norscode-impl.
+    // std/db.no. Dispatchen er gata på finnes_nøkkel(fn_vas, mål), så ruta er
+    // inert når std.db ikkje er i bunten.
+    hvis builtin.starts_with(n, "db.") { returner ["std.db." + builtin.slice(n, 3, lengde(n))] }
     returner []
 }
 
@@ -7842,7 +8590,16 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         legg_til(buf, 0x50)
         returner
     }
-    hvis fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv" {
+    // Sandkasse: builtin.process_spawn_argv går via std.native_gap.process_spawn_argv_gap
+    // når han er i bunten. Gapet vel Norscode-spawnvegen (seccomp i barnet) for requestar
+    // med sandkasseprofil, og kallar elles den native rutina under namnet
+    // builtin.process_spawn_argv_raa (same emisjon som under — inga rekursjon).
+    hvis (fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv")
+       og nargs == 1 og finnes_nøkkel(fn_vas, "std.native_gap.process_spawn_argv_gap") {
+        emit_user_call(buf, fn_vas["std.native_gap.process_spawn_argv_gap"], nargs, code_va)
+        returner
+    }
+    hvis fn_nm == "builtin.process_spawn_argv_raa" eller fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv" {
         // Materialiser det versjonerte request-kartet som eit smalt rå-ABI-
         // område. Sjølve prosessarbeidet ligg i Norscode-emittert Linux-kode;
         // resultatet blir pakka tilbake til vanlege Norscode-verdiar her.
@@ -7943,30 +8700,9 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         copy(buf, [0x4C, 0x89, 0xF0, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x50])
         returner
     }
-    hvis fn_nm == "builtin.atomic_operation" {
-        // Den breie stdlib-en sonderer denne valfrie native-backenden og
-        // fell tilbake til VM-seq-cst når status ikkje er "ok".
-        la ao_i: heltall = 0
-        mens ao_i < nargs {
-            legg_til(buf, 0x58)
-            ao_i = ao_i + 1
-        }
-        emit_push_const(buf, "status", rd_offs, code_va)
-        emit_push_const(buf, "unsupported", rd_offs, code_va)
-        legg_til(buf, 0x48)
-        legg_til(buf, 0x89)
-        legg_til(buf, 0xE7)
-        legg_til(buf, 0x48)
-        legg_til(buf, 0xBE)
-        u64(buf, 1)
-        call_rel32(buf, RT_BUILD_MAP_REV(), code_va)
-        legg_til(buf, 0x48)
-        legg_til(buf, 0x81)
-        legg_til(buf, 0xC4)
-        u32(buf, 16)
-        legg_til(buf, 0x50)
-        returner
-    }
+    // (Fjerna 2026-09-11: inline «status: unsupported»-stubben for
+    // builtin.atomic_operation. Han vann over gap-ruta og hindra
+    // std.native_gap.atomic_operation — den ekte backenden — i å bli kalla.)
     hvis fn_nm == "builtin.argv_list_v1" {
         la argv_list_i: heiltall = 0
         mens argv_list_i < nargs {
@@ -8038,6 +8774,27 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
     // manglar): builtin.json_parse (ikkje _raw) er legacy tekst-typa i VM-en, men
     // RT_JSON_PARSE er typa/lempeleg. Rein Norscode-impl vinn når han er i bunten
     // (std/native_gap.no, importert av nc_main); elles fell vi til RT_JSON_PARSE.
+    // tekst(x) må kunne formatere desimaltall. Same «gap-FYRST»-mønster som
+    // json_parse under: builtin_va blir konsultert seinare og ville svara med den
+    // native to_text-rutina, som ikkje kjenner type 6 og gjev tom streng.
+    // Fell tilbake til native når native_gap ikkje er i bunten.
+    hvis (fn_nm == "tekst" eller fn_nm == "builtin.tekst" eller fn_nm == "til_tekst"
+          eller fn_nm == "builtin.til_tekst" eller builtin.ends_with(fn_nm, ".til_tekst"))
+       og nargs == 1 og finnes_nøkkel(fn_vas, "std.desimaltall_tekst.til_tekst_gap") {
+        emit_user_call(buf, fn_vas["std.desimaltall_tekst.til_tekst_gap"], nargs, code_va)
+        returner
+    }
+    // json_skriv/json_stringify må kunne skrive desimaltall. Den native
+    // json_stringify-rutina kjenner ikkje type 6 og skriv «null» — og sidan
+    // builtin-namn vinn over ukvalifiserte importar, treff det òg kompilatoren
+    // sin eigen NCB-skrivar (0.5 i kjelda → PUSH_CONST null i NCB-en).
+    // Rein Norscode-impl vinn når selfhost.json er i bunten; elles native.
+    hvis (fn_nm == "json_skriv" eller fn_nm == "builtin.json_skriv"
+          eller fn_nm == "json_stringify" eller fn_nm == "builtin.json_stringify")
+       og nargs == 1 og finnes_nøkkel(fn_vas, "selfhost.json.json_skriv") {
+        emit_user_call(buf, fn_vas["selfhost.json.json_skriv"], nargs, code_va)
+        returner
+    }
     hvis (fn_nm == "builtin.json_parse" eller fn_nm == "json_parse") og nargs == 1
        og finnes_nøkkel(fn_vas, "std.native_gap.json_parse") {
         emit_user_call(buf, fn_vas["std.native_gap.json_parse"], nargs, code_va)
@@ -8312,13 +9069,16 @@ funksjon kompiler_v2(ncb_json) {
     // når byggaren uttrykkeleg ber om det.
     la symbol_map_sti = miljo_hent("NC_NATIVE_SYMBOL_MAP")
     hvis symbol_map_sti != "" {
-        la symbol_map: tekst = ""
+        // Linjene blir samla i ei liste og slegne saman éin gong ved skriving:
+        // «symbol_map = symbol_map + linje» per funksjon var kvadratisk i talet på
+        // funksjonar, og ncb_to_elf ber alltid om kartet (Gen1 i ELF stage-0-lana).
+        la symbol_delar: liste_tekst = []
         fi2 = 0
         mens fi2 < lengde(sorted) {
             la s_fn: tekst = sorted[fi2]
             la s_start: heltall = fn_vas[s_fn]
             la s_end: heltall = s_start + fn_sizes[s_fn]
-            symbol_map = symbol_map + tekst_fra_heltall(s_start) + "\t" + tekst_fra_heltall(s_end) + "\t" + s_fn + "\n"
+            legg_til(symbol_delar, tekst_fra_heltall(s_start) + "\t" + tekst_fra_heltall(s_end) + "\t" + s_fn + "\n")
             fi2 = fi2 + 1
         }
         // Atom-rutinar (runtime-prelude) som «atom:<namn>», sorterte etter VA med
@@ -8346,10 +9106,10 @@ funksjon kompiler_v2(ncb_json) {
             la a_start: heltall = atomic_vas[a_sort[ai]]
             la a_end: heltall = a_start + 64
             hvis ai + 1 < lengde(a_sort) { a_end = atomic_vas[a_sort[ai + 1]] }
-            symbol_map = symbol_map + tekst_fra_heltall(a_start) + "\t" + tekst_fra_heltall(a_end) + "\t" + "atom:" + a_sort[ai] + "\n"
+            legg_til(symbol_delar, tekst_fra_heltall(a_start) + "\t" + tekst_fra_heltall(a_end) + "\t" + "atom:" + a_sort[ai] + "\n")
             ai = ai + 1
         }
-        fil_skriv(symbol_map_sti, symbol_map)
+        fil_skriv(symbol_map_sti, builtin.join(symbol_delar, ""))
     }
 
     // Pass 2: kompilér kvar funksjon med endelege rel32-adresser.
@@ -8485,13 +9245,23 @@ funksjon kompiler_v2(ncb_json) {
 
     // sys_exit(start-returverdien): AOT-program skal ha same prosesskontrakt
     // som VM-løypa, også når returverdien kjem frå kart-/tekst-runtime.
+    // Berre eit heiltal (NcVal-type 1) blir exit-kode; null og alle andre typar gjev 0.
+    // Før vart payload-ordet brukt uansett type, so ein start() som returnerte tekst
+    // (t.d. testar med «… OK») fekk den låge byten av ein peikar som exit-kode
+    // (160/176/192/208/224) og såg ut som feil.
     legg_til(text, 0x31)
-    legg_til(text, 0xFF)  // default exit 0 for null
+    legg_til(text, 0xFF)  // xor edi,edi (exit 0)
     legg_til(text, 0x48)
     legg_til(text, 0x85)
     legg_til(text, 0xC0)  // test rax,rax
     legg_til(text, 0x74)
-    legg_til(text, 0x04)  // skip payload load for null
+    legg_til(text, 0x0A)  // je exit (null)
+    legg_til(text, 0x48)
+    legg_til(text, 0x83)
+    legg_til(text, 0x38)
+    legg_til(text, 0x01)  // cmp qword [rax],1 (heiltal?)
+    legg_til(text, 0x75)
+    legg_til(text, 0x04)  // jne exit
     legg_til(text, 0x48)
     legg_til(text, 0x8B)
     legg_til(text, 0x78)
@@ -8928,9 +9698,13 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
     }
     call_rel32(text, main_va, TEXT_VA())
 
+    // Berre heiltal (type 1) blir exit-kode; null og andre typar gjev 0 (sjå den andre
+    // start-prologen over — tekst-retur gav elles låg peikarbyte som exit-kode).
     legg_til(text, 0x31) legg_til(text, 0xFF)                               // xor edi,edi
     legg_til(text, 0x48) legg_til(text, 0x85) legg_til(text, 0xC0)          // test rax,rax
-    legg_til(text, 0x74) legg_til(text, 0x04)                              // je +4
+    legg_til(text, 0x74) legg_til(text, 0x0A)                              // je exit
+    legg_til(text, 0x48) legg_til(text, 0x83) legg_til(text, 0x38) legg_til(text, 0x01) // cmp qword [rax],1
+    legg_til(text, 0x75) legg_til(text, 0x04)                              // jne exit
     legg_til(text, 0x48) legg_til(text, 0x8B) legg_til(text, 0x78) legg_til(text, 0x08) // mov rdi,[rax+8]
     legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC0) u32(text, 60)
     legg_til(text, 0x0F) legg_til(text, 0x05)                              // syscall
@@ -9002,8 +9776,24 @@ funksjon start() {
     // Dual-format: aksepter binær-NCB (magic) ved å normalisere til JSON-tekst so
     // kompiler_v2 (som både parsar OG bygg inn trailer-en) er uendra. JSON-vegen
     // les rå tekst som før (byte-identisk trailer).
-    la raw = builtin.fil_les_binary(inp)
-    la ncb_json = hvis serde.er_binaer(raw) da builtin.json_skriv(serde.deserialiser(raw)) ellers fil_les(inp)
+    // Binær-NCB blir kjend att på magic-byten 0x93 (aldri gyldig JSON-start). Å lese
+    // HEILE fila som BYTE-LISTE berre for den sjekken er patologisk dyrt: byte-lister
+    // er ~100× dyrare enn tekst (målt: 80 KB → fil_les 1 ms vs fil_les_binary 136 ms)
+    // og veks super-lineært i minne. På stage-0-NCB-en (704 KB) hang AOT-steget difor
+    // på 100 % CPU i timevis UTAN å nå fyrste sporingspunkt — «ELF stage-0 kandidat»
+    // og «Native macOS / Omgang 6b: Stage-0 ELF» stod fast på nett dette.
+    // Les tekst fyrst (billeg); fall berre til byte-lesing når fila faktisk ER binær.
+    la ncb_tekst = ""
+    prøv { ncb_tekst = fil_les(inp) } fang (e) { ncb_tekst = "" }
+    la fyrste = builtin.trim(builtin.slice(ncb_tekst, 0, 8))
+    la er_bin = lengde(ncb_tekst) == 0 eller lengde(fyrste) == 0 eller
+                builtin.slice(fyrste, 0, 1) != "{"
+    la ncb_json = ""
+    hvis er_bin {
+        la raw = builtin.fil_les_binary(inp)
+        hvis serde.er_binaer(raw) { ncb_json = builtin.json_skriv(serde.deserialiser(raw)) }
+        ellers { ncb_json = fil_les(inp) }
+    } ellers { ncb_json = ncb_tekst }
     la bytes = kompiler_v2(ncb_json)
     la payload_fil = miljo_hent("NC_EMBED_PAYLOAD_FILE")
     la payload_namn = miljo_hent("NC_EMBED_PAYLOAD_NAME")
