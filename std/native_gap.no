@@ -17,6 +17,11 @@
 // rutar builtin.json_parse hit når modulen er i bunten (gap-fyrst i
 // emit_builtin_or_user_call). Sjølvstendig strikt parser (selfhost.json sin
 // json_tal kallar builtin.desimaltall, som SIGSEGV-ar i frosen runtime).
+// TLS 1.3-over-sokkel (M3): native_gap driv tls13_session over rå fd. network_operation
+// er gap-ruta inn i seeden → heile TLS-stacken kompilerast inn som native (AOT-fart).
+// Krev relayout (DATA_VA 0x700000, .text 3 MB) — sjå tls-over-sokkel-plan.
+bruk std.tls13_session som tls13
+
 funksjon json_parse(t: tekst) {
     hvis builtin.type(t) != "tekst" { returner "null" }
     la st = {"s": t, "p": 0, "feil": usann}
@@ -1060,6 +1065,7 @@ funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
 // tls_* → «feil» (ingen TLS-backend enno). Handle: "socket:<n>:1".
 la _nw_slots = {}
 la _nw_neste = 0
+la _tls_sess = {}   // handle → {fd, sess, rolle, ch_sendt, etablert, appbuf}
 // Éin epoll-instans per prosess (EPOLL_CLOEXEC, so barn via exec ikkje arvar han).
 la _nw_epoll = 0 - 1
 
@@ -1147,7 +1153,17 @@ funksjon _nw_tekst_til_liste(t: tekst) -> liste_heiltall {
 funksjon network_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
     la op = _nw_tekst(req, "operation", "")
+    hvis op == "tls_connect" { returner _tls_connect(req) }
+    hvis op == "tls_listen" { returner _tls_listen(req) }
+    hvis op == "tls_handshake" { returner _tls_handshake(req) }
     hvis builtin.starts_with(op, "tls_") { returner _nw_feil("", "native TLS backend unavailable") }
+    la _tls_h = _nw_tekst(req, "handle", "")
+    hvis _tls_h != "" og finnes_nøkkel(_tls_sess, _tls_h) {
+        hvis op == "read" eller op == "read_hex" { returner _tls_les(req, _tls_h, op) }
+        hvis op == "write" eller op == "write_hex" { returner _tls_skriv(req, _tls_h, op) }
+        hvis op == "accept" { returner _tls_accept(_tls_h) }
+        hvis op == "close" { returner _tls_lukk(_tls_h) }
+    }
     hvis op == "listen" eller op == "udp_listen" eller op == "udp_connect" {
         la host = _nw_tekst(req, "host", "127.0.0.1")
         la port = _nw_heiltal(req, "port", 0)
@@ -2330,4 +2346,168 @@ funksjon jit_operation(req) {
                   "backend": "x86_64", "active": _jit_aktive, "compiled": _jit_neste}
     }
     returner _jit_feil("ukjend JIT-operasjon: " + op)
+}
+
+// ─── TLS 1.3 over sokkel (M3) ───────────────────────────────────────────────
+funksjon _tls_random32() -> liste_heiltall {
+    la r: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 32 {
+        la b: heiltall = builtin.random_byte()
+        hvis b < 0 { b = 0 - b }
+        legg_til(r, b - (b / 256) * 256)
+        i = i + 1
+    }
+    returner r
+}
+funksjon _tls_fd_les(fd: heiltall) -> ordbok {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n = builtin.sys6(0, fd, buf, 32768, 0, 0, 0)
+    hvis n == -11 { returner {"status": "ventende", "data": []} }
+    hvis n < 0 { returner {"status": "feil", "data": []} }
+    hvis n == 0 { returner {"status": "lukka", "data": []} }
+    la l: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < n { legg_til(l, builtin.raw_load8(buf + i)) i = i + 1 }
+    returner {"status": "ok", "data": l}
+}
+funksjon _tls_fd_skriv(fd: heiltall, data: liste_heiltall) -> heiltall {
+    la total = lengde(data)
+    la sendt: heiltall = 0
+    mens sendt < total {
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        la bit = total - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        la n = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        hvis n == -11 { fortsett }
+        hvis n < 0 { returner -1 }
+        sendt = sendt + n
+    }
+    returner sendt
+}
+funksjon _tls_connect(req: ordbok) -> ordbok {
+    la host = _nw_tekst(req, "host", "")
+    la port = _nw_heiltal(req, "port", 0)
+    la hostname = _nw_tekst(req, "hostname", host)
+    hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
+    la fd = builtin.sys6(41, 2, 1, 0, 0, 0, 0)
+    hvis fd < 0 { returner _nw_feil("", "socket failed") }
+    la r = 0
+    prøv { r = socket_connect(fd, host, port) } fang (e) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+    hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+    _pg_nonblock(fd)
+    la h = _nw_ny_slot(fd, "tls")
+    la sess = tls13.ny_klient({"priv": _tls_random32(), "hostname": hostname})
+    _tls_sess[h] = {"fd": fd, "sess": sess, "rolle": "klient", "ch_sendt": usann, "etablert": usann, "appbuf": []}
+    returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
+}
+funksjon _tls_listen(req: ordbok) -> ordbok {
+    la host = _nw_tekst(req, "host", "127.0.0.1")
+    la port = _nw_heiltal(req, "port", 0)
+    la fd = builtin.sys6(41, 2, 1, 0, 0, 0, 0)
+    hvis fd < 0 { returner _nw_feil("", "socket failed") }
+    prøv { hvis socket_bind(fd, host, port) < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "bind failed") } } fang (e) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+    la backlog = _nw_heiltal(req, "backlog", 128)
+    hvis builtin.sys6(50, fd, backlog, 0, 0, 0, 0) < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "listen failed") }
+    _pg_nonblock(fd)
+    la h = _nw_ny_slot(fd, "tls-lyttar")
+    la id_seed = _nw_hex_dekod(_nw_tekst(req, "tls_id_hex", ""))
+    _tls_sess[h] = {"fd": fd, "rolle": "lyttar", "id_seed": id_seed}
+    returner _nw_res("listening", h, "", 0, _nw_lokal_port(fd), "")
+}
+funksjon _tls_accept(lh: tekst) -> ordbok {
+    la lyttar = _tls_sess[lh]
+    la fd: heiltall = lyttar["fd"]
+    la b = _sk_buf()
+    builtin.raw_store64(b + 96, 16)
+    la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+    hvis ny == -11 { returner _nw_res("ventende", lh, "", 0, 0, "") }
+    hvis ny < 0 { returner _nw_feil(lh, "accept failed") }
+    _pg_nonblock(ny)
+    la h = _nw_ny_slot(ny, "tls")
+    la sess = tls13.ny_tenar({"priv": _tls_random32(), "id_seed": lyttar["id_seed"]})
+    _tls_sess[h] = {"fd": ny, "sess": sess, "rolle": "tenar", "ch_sendt": usann, "etablert": usann, "appbuf": []}
+    returner _nw_res("connected", h, "", 0, 0, "")
+}
+funksjon _tls_etablert_res(h: tekst, sess: ordbok) -> ordbok {
+    la ut = _nw_res("connected", h, "", 0, 0, "")
+    ut["tls_version"] = sess["tls_version"]
+    ut["cipher"] = sess["cipher"]
+    ut["peer_verified"] = sess["peer_verified"]
+    ut["peer_subject"] = sess["peer_subject"]
+    returner ut
+}
+funksjon _tls_handshake(req: ordbok) -> ordbok {
+    la h = _nw_tekst(req, "handle", "")
+    hvis ikkje finnes_nøkkel(_tls_sess, h) { returner _nw_feil(h, "unknown TLS handle") }
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la fd: heiltall = st["fd"]
+    hvis st["etablert"] { returner _tls_etablert_res(h, sess) }
+    hvis st["rolle"] == "klient" og ikkje st["ch_sendt"] {
+        la ch = tls13.start(sess)
+        hvis _tls_fd_skriv(fd, ch) < 0 { returner _nw_feil(h, "tls write failed") }
+        st["ch_sendt"] = sann
+    }
+    la r = _tls_fd_les(fd)
+    hvis r["status"] == "feil" { returner _nw_feil(h, "tls read failed") }
+    hvis r["status"] == "lukka" { returner _nw_feil(h, "tls peer closed") }
+    hvis lengde(r["data"]) == 0 { returner _nw_res("ventende", h, "", 0, 0, "") }
+    la res = tls13.motta(sess, r["data"])
+    hvis res["status"] == "feil" { returner _nw_feil(h, "tls handshake: " + res["feil"]) }
+    hvis lengde(res["ut"]) > 0 { hvis _tls_fd_skriv(fd, res["ut"]) < 0 { returner _nw_feil(h, "tls write failed") } }
+    hvis res["status"] == "ferdig" { st["etablert"] = sann returner _tls_etablert_res(h, sess) }
+    returner _nw_res("ventende", h, "", 0, 0, "")
+}
+funksjon _tls_les(req: ordbok, h: tekst, op: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la r = _tls_fd_les(st["fd"])
+    hvis r["status"] == "feil" { returner _nw_feil(h, "tls read failed") }
+    hvis r["status"] == "lukka" og lengde(st["appbuf"]) == 0 { returner _nw_res("closed", h, "", 0, 0, "") }
+    hvis lengde(r["data"]) > 0 {
+        la nb: liste_heiltall = st["appbuf"]
+        la i: heiltall = 0
+        mens i < lengde(r["data"]) { legg_til(nb, r["data"][i]) i = i + 1 }
+        st["appbuf"] = nb
+    }
+    la buf: liste_heiltall = st["appbuf"]
+    hvis lengde(buf) < 5 { returner _nw_res("ventende", h, "", 0, 0, "") }
+    la len = (buf[3] << 8) | buf[4]
+    hvis lengde(buf) < 5 + len { returner _nw_res("ventende", h, "", 0, 0, "") }
+    la post: liste_heiltall = []
+    la j: heiltall = 0
+    mens j < 5 + len { legg_til(post, buf[j]) j = j + 1 }
+    la rest: liste_heiltall = []
+    j = 5 + len
+    mens j < lengde(buf) { legg_til(rest, buf[j]) j = j + 1 }
+    st["appbuf"] = rest
+    la dec = tls13.dekrypter_app(sess, post)
+    hvis dec["status"] != "ok" { returner _nw_feil(h, "tls decrypt failed") }
+    la l: liste_heiltall = dec["plaintext"]
+    hvis op == "read" { returner _nw_res("ok", h, _nw_liste_til_tekst(l), lengde(l), 0, "") }
+    la ut = _nw_res("ok", h, "", lengde(l), 0, "")
+    ut["data_hex"] = _nw_hex_kod(l)
+    returner ut
+}
+funksjon _tls_skriv(req: ordbok, h: tekst, op: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la data: liste_heiltall = []
+    hvis op == "write" { data = _nw_tekst_til_liste(_nw_tekst(req, "data", "")) }
+    ellers { data = _nw_hex_dekod(_nw_tekst(req, "data_hex", "")) }
+    hvis lengde(data) == 0 { returner _nw_feil(h, "invalid payload") }
+    la post = tls13.krypter_app(sess, data)
+    hvis _tls_fd_skriv(st["fd"], post) < 0 { returner _nw_feil(h, "tls write failed") }
+    returner _nw_res("ok", h, "", lengde(data), 0, "")
+}
+funksjon _tls_lukk(h: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    builtin.sys6(3, st["fd"], 0, 0, 0, 0, 0)
+    fjern_nokkel(_tls_sess, h)
+    returner _nw_res("closed", h, "", 0, 0, "")
 }
