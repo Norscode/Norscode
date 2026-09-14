@@ -23,6 +23,7 @@
 bruk std.tls13_session som tls13
 bruk std.rsa som rsa
 bruk std.x509 som x509
+bruk std.ecdsa_p256 som ecdsa
 
 funksjon json_parse(t: tekst) {
     hvis builtin.type(t) != "tekst" { returner "null" }
@@ -622,15 +623,16 @@ funksjon _pg_sandbox_profil(req) -> tekst {
 }
 
 funksjon _pg_sandbox_kjend(p: tekst) -> bool {
-    returner p == "no-network" eller p == "no-write" eller p == "restricted"
+    // «pure» = process_abi sin kombinerte ingen-nett/ingen-skriv-profil (som restricted).
+    returner p == "no-network" eller p == "no-write" eller p == "restricted" eller p == "pure"
 }
 
 // Byggjer struct sock_fprog + sock_filter[] 16-aligna frå `fri` i scratch-området.
 // Kvar instruksjon er éin u64: code | jt<<16 | jf<<24 | k<<32 (little-endian
 // sock_filter). Hoppmål -1 = avslag (EPERM). Returnerer [prog_adr, fri_etter].
 funksjon _pg_bpf(fri: heiltall, profil: tekst) -> liste_heiltall {
-    la nett = profil == "no-network" eller profil == "restricted"
-    la skriv = profil == "no-write" eller profil == "restricted"
+    la nett = profil == "no-network" eller profil == "restricted" eller profil == "pure"
+    la skriv = profil == "no-write" eller profil == "restricted" eller profil == "pure"
     la avslag_merke: heiltall = 0 - 1
     la ins = []
     legg_til(ins, [32, 0, 0, 4])                     // ld [arch]
@@ -1157,12 +1159,30 @@ funksjon _nw_tekst_til_liste(t: tekst) -> liste_heiltall {
 # i C-verten; her rein Norscode. RS256 = RSASSA-PKCS1-v1_5-SHA256 (rsa.rsa_sign +
 # x509.rsa_privat_frå_pem). Tom streng ved feil (tls_acme tolkar det som «signatur manglar»).
 funksjon acme_sign(alg: tekst, privat_nokkel_pem: tekst, signing_input: tekst) -> tekst {
-    hvis alg != "RS256" { returner "" }
-    la key = x509.rsa_privat_frå_pem(privat_nokkel_pem)
-    hvis key["status"] != "ok" { returner "" }
-    la sig = rsa.rsa_sign(key["n"], key["d"], _nw_tekst_til_liste(signing_input))
-    hvis lengde(sig) == 0 { returner "" }
-    returner _nw_hex_kod(sig)
+    hvis alg == "RS256" {
+        # RSA-2048-sign er korrekt men infeasibelt treg på fersk seed (privat modexp);
+        # bruk ES256 for ACME. Behald RS256 for komplettheit.
+        la key = x509.rsa_privat_frå_pem(privat_nokkel_pem)
+        hvis key["status"] != "ok" { returner "" }
+        la sig = rsa.rsa_sign(key["n"], key["d"], _nw_tekst_til_liste(signing_input))
+        hvis lengde(sig) == 0 { returner "" }
+        returner _nw_hex_kod(sig)
+    }
+    hvis alg == "ES256" {
+        la key = x509.ec_privat_frå_pem(privat_nokkel_pem)
+        hvis key["status"] != "ok" { returner "" }
+        la hash = x509._raw_sha256(_nw_tekst_til_liste(signing_input))
+        la res = ecdsa.ecdsa_sign(key["d"], hash)
+        hvis res["status"] != "ok" { returner "" }
+        # JWS ES256-signatur = R (32 byte) || S (32 byte), rå big-endian.
+        la rs: liste_heiltall = []
+        la i = 0
+        mens i < lengde(res["r"]) { legg_til(rs, res["r"][i]) i = i + 1 }
+        i = 0
+        mens i < lengde(res["s"]) { legg_til(rs, res["s"][i]) i = i + 1 }
+        returner _nw_hex_kod(rs)
+    }
+    returner ""
 }
 
 funksjon network_operation(req) {
