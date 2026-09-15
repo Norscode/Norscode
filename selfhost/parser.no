@@ -173,6 +173,16 @@ funksjon parse_program(tokens)
             fortsett
         slutt
 
+        hvis type == "ENUM"
+            legg_barn(rot, parse_enum(state))
+            fortsett
+        slutt
+
+        hvis type == "GRENSESNITT"
+            legg_barn(rot, parse_grensesnitt(state))
+            fortsett
+        slutt
+
         hvis type == "BRUK"
             legg_barn(rot, parse_bruk(state))
             fortsett
@@ -376,6 +386,13 @@ funksjon parse_struktur(state)
     start = forvent(state, "STRUKTUR", "forventet struktur")
     namn_tok = forvent(state, "IDENT", "forventet strukturnamn")
     node = ny_node("Struktur", token_verdi(namn_tok), token_linje(start), token_kolonne(start))
+    // Valfri grensesnitt-klausul: struktur X implementerer Form { … }.
+    // ir_to_bytecode sjekkar at X har alle metodane til Form.
+    hvis gjeldende(state)["type"] == "IMPLEMENTERER"
+        neste(state)
+        iface_tok = forvent(state, "IDENT", "forventet grensesnitt-namn etter implementerer")
+        node["implementerer"] = token_verdi(iface_tok)
+    slutt
     matcher(state, "LBRACE")   // valfri { — støtt begge stilar
 
     mens ikkje er_slutt(state)
@@ -383,9 +400,15 @@ funksjon parse_struktur(state)
         hvis type == "SLUTT" eller type == "RBRACE"
             bryt
         slutt
-        // Selfhost-strukturkontrakt: felt er reine identifikatornamn i denne parservegen
+        // Selfhost-strukturkontrakt: felt er reine identifikatornamn i denne parservegen.
+        // Ein valfri type-annotasjon (`x: heltall`) blir parsa og FORKASTA — Felt-noden
+        // ber berre namnet, og runtime lagrar strukturen som ordbok som før.
         felt_tok = forvent(state, "IDENT", "forventet feltnavn i struktur")
         legg_barn(node, ny_node("Felt", token_verdi(felt_tok), token_linje(felt_tok), token_kolonne(felt_tok)))
+        hvis gjeldende(state)["type"] == "COLON"
+            neste(state)
+            les_type_token(state)
+        slutt
         matcher(state, "SEMICOLON")
         matcher(state, "COMMA")
     slutt
@@ -395,6 +418,61 @@ funksjon parse_struktur(state)
     ellers
         forvent(state, "SLUTT", "forventet slutt etter struktur")
     slutt
+    returner node
+slutt
+
+// ─── enum-deklarasjon ─────────────────────────────────────────────────────────
+// enum Namn { A, B, C }  — variantane blir heiltalskonstantar 0,1,2,… og
+// Namn.Variant blir løyst til konstanten i ir_to_bytecode.
+funksjon parse_enum(state)
+    start = forvent(state, "ENUM", "forventet enum")
+    namn_tok = forvent(state, "IDENT", "forventet enum-namn")
+    node = ny_node("Enum", token_verdi(namn_tok), token_linje(start), token_kolonne(start))
+    matcher(state, "LBRACE")
+    mens ikkje er_slutt(state)
+        type = gjeldende(state)["type"]
+        hvis type == "SLUTT" eller type == "RBRACE"
+            bryt
+        slutt
+        variant_tok = forvent(state, "IDENT", "forventet variantnamn i enum")
+        legg_barn(node, ny_node("Variant", token_verdi(variant_tok), token_linje(variant_tok), token_kolonne(variant_tok)))
+        matcher(state, "COMMA")
+        matcher(state, "SEMICOLON")
+    slutt
+    hvis gjeldende(state)["type"] == "RBRACE"
+        neste(state)
+    ellers
+        forvent(state, "SLUTT", "forventet slutt etter enum")
+    slutt
+    returner node
+slutt
+
+// ─── grensesnitt-deklarasjon ──────────────────────────────────────────────────
+// grensesnitt Form { funksjon areal(self) -> heltall  … }  — listar påkravde
+// metode-signaturar. ir_to_bytecode sjekkar at struktur X implementerer Form har
+// alle metodane (funksjon X.metode), elles kompileringsfeil.
+funksjon parse_grensesnitt(state)
+    start = forvent(state, "GRENSESNITT", "forventet grensesnitt")
+    namn_tok = forvent(state, "IDENT", "forventet grensesnitt-namn")
+    node = ny_node("Grensesnitt", token_verdi(namn_tok), token_linje(start), token_kolonne(start))
+    matcher(state, "LBRACE")
+    // Flat skanning: samle metodenamn (etter kvar `funksjon`), hopp over resten
+    // av signaturen token for token til neste funksjon eller blokkslutt.
+    mens ikkje er_slutt(state)
+        t = gjeldende(state)["type"]
+        hvis t == "SLUTT" eller t == "RBRACE"
+            bryt
+        slutt
+        hvis t == "FUNKSJON"
+            neste(state)
+            m_tok = les_namn_token(state)
+            legg_barn(node, ny_node("Metodekrav", token_verdi(m_tok), token_linje(m_tok), token_kolonne(m_tok)))
+        ellers
+            neste(state)
+        slutt
+    slutt
+    matcher(state, "RBRACE")
+    matcher(state, "SLUTT")
     returner node
 slutt
 
@@ -446,8 +524,16 @@ funksjon parse_funksjon(state)
         neste(state)
     slutt
     navn = les_namn_token(state)
+    // Metode-deklarasjon: funksjon Type.metode(self, …) → funksjonsnamn "Type.metode".
+    // ir_to_bytecode dispatchar p.metode(...) dynamisk via typemerket __type__.
+    fullt_fn_namn = token_verdi(navn)
+    mens gjeldende(state)["type"] == "DOT"
+        neste(state)
+        del = les_namn_token(state)
+        fullt_fn_namn = fullt_fn_namn + "." + token_verdi(del)
+    slutt
 
-    node = ny_node("Funksjon", token_verdi(navn), token_linje(start), token_kolonne(start))
+    node = ny_node("Funksjon", fullt_fn_namn, token_linje(start), token_kolonne(start))
     hvis er_async
         node["is_async"] = sann
     slutt
@@ -604,13 +690,31 @@ funksjon parse_parameterliste(state)
     slutt
 
     mens sann
+        // Varargs: ...namn samlar resten av argumenta (må vere siste parameter).
+        er_vararg = usann
+        hvis gjeldende(state)["type"] == "SPREAD"
+            neste(state)
+            er_vararg = sann
+        slutt
         namn = les_namn_token(state)
         param = ny_node("Parameter", token_verdi(namn), token_linje(namn), token_kolonne(namn))
+        hvis er_vararg
+            param["vararg"] = sann
+        slutt
 
         hvis gjeldende(state)["type"] == "COLON"
             neste(state)
             type_token = les_type_token(state)
             legg_barn(param, ny_node("Type", token_verdi(type_token), token_linje(type_token), token_kolonne(type_token)))
+        slutt
+
+        // Standardargument: param = uttrykk. Standard-noden ber default-uttrykket;
+        // ir_to_bytecode fyller manglande argument på kallstaden.
+        hvis gjeldende(state)["type"] == "ASSIGN"
+            neste(state)
+            standard = ny_node("Standard", "", token_linje(namn), token_kolonne(namn))
+            legg_barn(standard, parse_uttrykk(state))
+            legg_barn(param, standard)
         slutt
 
         legg_barn(node, param)
@@ -793,6 +897,38 @@ slutt
 
 funksjon parse_la(state)
     start = forvent(state, "LA", "forventet la")
+
+    // Destrukturering: la [a, b] = liste  eller  la {a, b} = ordbok.
+    // LaDestrukt-node der verdi="liste" (indeks 0,1,…) eller "ordbok" (nøkkel =
+    // målnamn). ir_to_bytecode lagrar verdien i ein temp og hentar kvart mål
+    // via INDEX_GET. Slutttokenet ] / } avgjer modusen.
+    hvis gjeldende(state)["type"] == "LBRACKET" eller gjeldende(state)["type"] == "LBRACE"
+        la er_ordbok = gjeldende(state)["type"] == "LBRACE"
+        la slutt_type = "RBRACKET"
+        la modus = "liste"
+        hvis er_ordbok
+            slutt_type = "RBRACE"
+            modus = "ordbok"
+        slutt
+        neste(state)
+        destrukt = ny_node("LaDestrukt", modus, token_linje(start), token_kolonne(start))
+        mål = ny_node("Mål", "", token_linje(start), token_kolonne(start))
+        mens gjeldende(state)["type"] != slutt_type og ikkje er_slutt(state)
+            felt = les_namn_token(state)
+            legg_barn(mål, ny_node("Ident", token_verdi(felt), token_linje(felt), token_kolonne(felt)))
+            hvis gjeldende(state)["type"] != "COMMA"
+                bryt
+            slutt
+            neste(state)
+        slutt
+        forvent(state, slutt_type, "forventet slutt-token i destrukturering")
+        forvent(state, "ASSIGN", "forventet = i destrukturering")
+        legg_barn(destrukt, mål)
+        legg_barn(destrukt, parse_uttrykk(state))
+        matcher(state, "SEMICOLON")
+        returner destrukt
+    slutt
+
     namn = les_namn_token(state)
     node = ny_node("La", token_verdi(namn), token_linje(start), token_kolonne(start))
 
@@ -1101,7 +1237,7 @@ slutt
 funksjon parse_postfix(state)
     uttrykk = parse_primar(state)
 
-    mens gjeldende(state)["type"] == "LPAREN" eller gjeldende(state)["type"] == "LBRACKET" eller gjeldende(state)["type"] == "DOT"
+    mens gjeldende(state)["type"] == "LPAREN" eller gjeldende(state)["type"] == "LBRACKET" eller gjeldende(state)["type"] == "DOT" eller gjeldende(state)["type"] == "QDOT"
         la postfix_type = gjeldende(state)["type"]
         hvis postfix_type == "LPAREN"
             neste(state)
@@ -1154,6 +1290,13 @@ funksjon parse_postfix(state)
                     uttrykk = indeks
                 slutt
             slutt
+        ellers hvis postfix_type == "QDOT"
+            // Optional chaining: o?.felt → kortsluttar til ingenting når o er ingenting.
+            qpunkt = forvent(state, "QDOT", "forventet ?.")
+            qfelt = forvent(state, "IDENT", "forventet feltnavn etter ?.")
+            qfelt_node = ny_node("OptionalFelt", token_verdi(qfelt), token_linje(qpunkt), token_kolonne(qpunkt))
+            legg_barn(qfelt_node, uttrykk)
+            uttrykk = qfelt_node
         ellers
             punktum = forvent(state, "DOT", "forventet .")
             felt = forvent(state, "IDENT", "forventet feltnavn etter .")
@@ -1432,6 +1575,17 @@ funksjon parse_fun_lambda(state)
     returner node
 slutt
 
+// Eit liste-element: valfri spread (...uttrykk) eller vanleg uttrykk.
+funksjon parse_liste_element(state)
+    hvis gjeldende(state)["type"] == "SPREAD"
+        s_start = neste(state)
+        sp = ny_node("Spread", "", token_linje(s_start), token_kolonne(s_start))
+        legg_barn(sp, parse_uttrykk(state))
+        returner sp
+    slutt
+    returner parse_uttrykk(state)
+slutt
+
 funksjon parse_liste_literal(state, start)
     node = ny_node("Liste", "", token_linje(start), token_kolonne(start))
 
@@ -1440,8 +1594,9 @@ funksjon parse_liste_literal(state, start)
         returner node
     slutt
 
-    // Les første uttrykk — sjekk om det er ein list comprehension
-    første = parse_uttrykk(state)
+    // Les første element — sjekk om det er ein list comprehension (berre for
+    // vanlege uttrykk; eit spread-element blir aldri følgt av FOR).
+    første = parse_liste_element(state)
 
     // [expr for var i liste] eller [expr for var i liste hvis cond]
     hvis gjeldende(state)["type"] == "FOR"
@@ -1472,7 +1627,7 @@ funksjon parse_liste_literal(state, start)
     legg_barn(node, første)
     mens gjeldende(state)["type"] == "COMMA"
         neste(state)
-        legg_barn(node, parse_uttrykk(state))
+        legg_barn(node, parse_liste_element(state))
     slutt
 
     forvent(state, "RBRACKET", "forventet ] etter liste")

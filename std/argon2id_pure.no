@@ -360,6 +360,123 @@ funksjon hash_pure(passord: tekst, salt: tekst, memory_kib: heiltall,
         [],[],memory_kib,passes,lanes,out_len))
 }
 
+# ── Rå-minne-variant ────────────────────────────────────────────────────────
+# Identisk algoritme som hash_bytes_utvida, men matrisa (memory_blocks * 1024 B)
+# ligg i ei mmap'a rå-sone i staden for ei VM-liste av boksa heiltal (som OOM-ar
+# ved 64 MiB). Kvar blokk er 256 u32-ord, pakka som 128 u64 (u64 = ord[2k] |
+# ord[2k+1]<<32). Berre 2-3 blokker lever som lister om gongen. sys6/raw_* er
+# native atom → hash_bytes_raw må berre kallast i AOT/native-gap-kontekst.
+funksjon _ag_mmap(nbytes: heiltall) -> heiltall {
+    la p = builtin.sys6(9, 0, nbytes, 3, 34, 0 - 1, 0)   # mmap PROT_RW MAP_PRIVATE|ANON
+    hvis p <= 0 { kast "Argon2id: mmap feila" }
+    returner p
+}
+
+funksjon _ag_get(base: heiltall, idx: heiltall) -> liste_heiltall {
+    la off = base + idx * 1024
+    la b: liste_heiltall = []
+    la k: heiltall = 0
+    mens k < 128 {
+        la v = builtin.raw_load64(off + k * 8)
+        legg_til(b, v & 4294967295)
+        legg_til(b, (v >> 32) & 4294967295)
+        k = k + 1
+    }
+    returner b
+}
+
+funksjon _ag_set(base: heiltall, idx: heiltall, block: liste_heiltall) -> heiltall {
+    la off = base + idx * 1024
+    la k: heiltall = 0
+    mens k < 128 {
+        la lo = block[2*k] & 4294967295
+        la hi = block[2*k+1] & 4294967295
+        builtin.raw_store64(off + k * 8, lo | (hi << 32))
+        k = k + 1
+    }
+    returner 0
+}
+
+funksjon hash_bytes_raw(password: liste_heiltall, salt: liste_heiltall,
+                        secret: liste_heiltall, ad: liste_heiltall,
+                        memory_kib: heiltall, passes: heiltall,
+                        lanes: heiltall, out_len: heiltall) -> liste_heiltall {
+    hvis lengde(salt) < 8 eller memory_kib < 8*lanes eller passes < 1 eller
+       lanes < 1 eller out_len < 4 { kast "Argon2id: ugyldige parameter" }
+    la memory_blocks = 4 * lanes * (memory_kib / (4*lanes))
+    la lane_length = memory_blocks / lanes
+    la segment_length = lane_length / 4
+    la h0 = _h0(password,salt,secret,ad,memory_kib,passes,lanes,out_len)
+    la base = _ag_mmap(memory_blocks * 1024)
+    la lane: heiltall = 0
+    mens lane < lanes {
+        la init0 = _copy_bytes(h0)
+        _legg_bytes(init0,_le32(0)) _legg_bytes(init0,_le32(lane))
+        la init1 = _copy_bytes(h0)
+        _legg_bytes(init1,_le32(1)) _legg_bytes(init1,_le32(lane))
+        _ag_set(base, lane*lane_length, _bytes_to_block(_h_prime(init0,1024)))
+        _ag_set(base, lane*lane_length+1, _bytes_to_block(_h_prime(init1,1024)))
+        lane = lane + 1
+    }
+    la pass_no: heiltall = 0
+    mens pass_no < passes {
+        la slice_no: heiltall = 0
+        mens slice_no < 4 {
+            lane = 0
+            mens lane < lanes {
+                la start_index: heiltall = 0
+                hvis pass_no == 0 og slice_no == 0 { start_index = 2 }
+                la data_independent = pass_no == 0 og slice_no < 2
+                la counter: heiltall = 1
+                la addresses = hvis data_independent da _address_block(pass_no,lane,slice_no,memory_blocks,passes,counter) ellers null
+                la index = start_index
+                mens index < segment_length {
+                    hvis data_independent og index > start_index og index % 128 == 0 {
+                        counter = counter + 1
+                        addresses = _address_block(pass_no,lane,slice_no,memory_blocks,passes,counter)
+                    }
+                    la current = slice_no*segment_length + index
+                    la prev = current - 1
+                    hvis current == 0 { prev = lane_length - 1 }
+                    la prev_block = _ag_get(base, lane*lane_length + prev)
+                    la j1: heiltall = 0
+                    la j2: heiltall = 0
+                    hvis data_independent {
+                        la ai = (index % 128) * 2
+                        j1 = addresses[ai] j2 = addresses[ai+1]
+                    } ellers { j1 = prev_block[0] j2 = prev_block[1] }
+                    la ref_lane = j2 % lanes
+                    hvis pass_no == 0 og slice_no == 0 { ref_lane = lane }
+                    la ref_index = _reference_index(pass_no,slice_no,index,ref_lane==lane,j1,lane_length,segment_length)
+                    la old = _ag_get(base, lane*lane_length + current)
+                    _ag_set(base, lane*lane_length + current, _compress(
+                        prev_block, _ag_get(base, ref_lane*lane_length + ref_index), old, pass_no > 0))
+                    index = index + 1
+                }
+                lane = lane + 1
+            }
+            slice_no = slice_no + 1
+        }
+        pass_no = pass_no + 1
+    }
+    la final = _ag_get(base, lane_length-1)
+    lane = 1
+    mens lane < lanes {
+        la other = _ag_get(base, lane*lane_length + lane_length - 1)
+        la mi: heiltall = 0
+        mens mi < 256 { final[mi] = _u32(final[mi] ^ other[mi]) mi = mi + 1 }
+        lane = lane + 1
+    }
+    builtin.sys6(11, base, memory_blocks * 1024, 0, 0, 0, 0)   # munmap
+    returner _h_prime(_block_to_bytes(final),out_len)
+}
+
+funksjon hash_raw_hex(passord: tekst, salt: tekst, memory_kib: heiltall,
+                      passes: heiltall, lanes: heiltall, out_len: heiltall) -> tekst {
+    returner blake.hex_bytes(hash_bytes_raw(blake.tekst_bytes(passord),blake.tekst_bytes(salt),
+        [],[],memory_kib,passes,lanes,out_len))
+}
+
 funksjon test_h0(password: liste_heiltall, salt: liste_heiltall,
                  secret: liste_heiltall, ad: liste_heiltall,
                  memory_kib: heiltall, passes: heiltall,

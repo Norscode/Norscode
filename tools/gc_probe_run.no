@@ -1,0 +1,211 @@
+// tools/gc_probe_run.no — generisk GC-probe-køyrar (Fase 3), shellfri.
+//
+// Byggjer ein probe-.no til self-hosted native ELF via native_codegen_v2
+// (ncb-to-elf) og køyrer han. Exit 0 = proben verkar. Norscode-erstatning for
+// den arkiverte archive/legacy_shell/tools/gc_probe_run.sh (same tre steg).
+//
+// Bruk:
+//   ./bin/nc run tools/gc_probe_run.no <probe.no> [label]
+//   NORSCODE_GC_PROBE=<probe.no> NORSCODE_GC_PROBE_LABEL=<label> ./bin/nc run tools/gc_probe_run.no
+//   (committed stage0-seedar manglar builtin.argv_operation → posisjonsargument er
+//    usynlege der; bruk miljøforma. Nyare seedar tek begge.)
+//
+// Miljø:
+//   NORSCODE_NATIVE_BIN     runtime som driv compile + ncb_to_elf (standard dist/norscode_native)
+//   NORSCODE_GC_PROBE_OUT   utkatalog (standard build/gc-litmus)
+//   NORSCODE_GC_PROBE_RUN   "0" = berre bygg ELF-en, ikkje køyr (t.d. for Docker-køyring)
+//
+// Steg:
+//   1) `compile` (seeden sin innebygde compiler, IKKJE `bundle` — bundle lastar ein
+//      stale selfhost-compiler-modul som droppar list-literal-bytecode) → NCB
+//   2) tools/ncb_to_elf.no (self-hosted native_codegen_v2) → ELF
+//   3) køyr ELF-en. ELF-en er Linux x86_64; på andre vertar blir køyresteget
+//      hoppa over med melding (bygg her, køyr i Docker linux/amd64).
+//
+// Runtimen blir driven DIREKTE via miljøkontrakten (NORSCODE_CMD/NORSCODE_FILE …),
+// ikkje via argv — den innbakte CLI-en sin argv-handtering varierer mellom
+// seed-versjonar; miljø-vegen er stabil (jf. verify_omgang6.bygg_native).
+
+bruk std.filops som filops
+bruk std.runtime_filesystem som native_fs
+bruk tools.process_runner som prosess
+
+funksjon linje(melding: tekst) -> heiltall { skriv(melding + "\n") returner 0 }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon native_argv() -> liste_tekst {
+    prøv {
+        la svar = builtin.argv_operation({"abi": "norscode-argv-v1", "operation": "get"})
+        hvis svar["status"] == "ok" { returner svar["argv"] }
+    } fang (e) {}
+    returner []
+}
+
+// Posisjonsargument etter `run tools/gc_probe_run.no` (eller etter eigarfila
+// uansett kva stien til henne er).
+funksjon probe_argv() -> liste_tekst {
+    la ut: liste_tekst = []
+    la args = native_argv()
+    la start = -1
+    la i = 0
+    mens i < lengde(args) {
+        hvis builtin.ends_with(tekst(args[i]), "gc_probe_run.no") { start = i + 1 }
+        i = i + 1
+    }
+    hvis start < 0 { returner ut }
+    i = start
+    mens i < lengde(args) {
+        legg_til(ut, tekst(args[i]))
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner root + "/" + sti
+}
+
+funksjon fil_finst(sti: tekst) -> bool {
+    prøv { returner builtin.fil_finnes(sti) } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon stamme(sti: tekst) -> tekst {
+    la namn = filops.filnamn(sti)
+    hvis builtin.ends_with(namn, ".no") { returner builtin.slice(namn, 0, lengde(namn) - 3) }
+    returner namn
+}
+
+funksjon plattform_system() -> tekst {
+    la os = env("RUNNER_OS")
+    hvis os == "" { prøv { os = tekst(builtin.system_info()["system"]) } fang (e) { os = "" } }
+    returner os
+}
+
+// Same capabilities/disk-scope som den arkiverte shell-wrapperen.
+funksjon probe_miljø(root: tekst) -> ordbok_tekst {
+    la caps = "env.read,env.write,disk.read,disk.write,process.exec"
+    la disk = ".,/tmp,/private/tmp,build,selfhost,bootstrap,tests,std," + root
+    returner {
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_REQUESTED_POLICY": "1",
+        "NORSCODE_VM_REQUESTED_CAPABILITIES": caps,
+        "NORSCODE_VM_CAPABILITIES": caps,
+        "NORSCODE_VM_REQUESTED_DISK_ROOT": disk,
+        "NORSCODE_VM_DISK_ROOT": disk,
+        "NORSCODE_ROOT": root
+    }
+}
+
+funksjon køyr_native(native: tekst, root: tekst, miljø: ordbok_tekst, timeout_ms: heiltall, kva: tekst, vis: bool) -> bool {
+    la resultat = prosess.køyr(native, [], root, miljø, timeout_ms)
+    hvis vis eller ikkje prosess.ok(resultat) { prosess.skriv_resultat(resultat) }
+    hvis prosess.ok(resultat) { returner sann }
+    linje("[FEIL] " + kva + ": status=" + tekst(resultat["status"]) +
+          " exit=" + tekst(resultat["exit_code"]) + " error=" + tekst(resultat["error"]))
+    returner usann
+}
+
+// Executable-modus: runtime-filsystem-ABI fyrst, elles builtin.fil_sett_kjorbar.
+funksjon gjer_kjørbar(sti: tekst) -> bool {
+    prøv {
+        la r = native_fs.native_sett_modus_sti(sti, 493)
+        hvis tekst(r["status"]) == "ok" { returner sann }
+    } fang (e) { }
+    prøv { returner builtin.fil_sett_kjorbar(sti) } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
+
+    la args = probe_argv()
+    la probe = env("NORSCODE_GC_PROBE")
+    la label = env("NORSCODE_GC_PROBE_LABEL")
+    hvis lengde(args) > 0 { probe = args[0] }
+    hvis lengde(args) > 1 { label = args[1] }
+    hvis label == "" { label = "GC-probe" }
+    hvis probe == "" {
+        linje("bruk: ./bin/nc run tools/gc_probe_run.no <probe.no> [label]")
+        linje("      eller NORSCODE_GC_PROBE=<probe.no> [NORSCODE_GC_PROBE_LABEL=<label>] ./bin/nc run tools/gc_probe_run.no")
+        returner 2
+    }
+    la abs_probe = absolutt(root, probe)
+    hvis ikkje fil_finst(abs_probe) {
+        linje("[FEIL] finn ikkje probe: " + abs_probe)
+        returner 2
+    }
+
+    la out = env("NORSCODE_GC_PROBE_OUT")
+    hvis out == "" { out = root + "/build/gc-litmus" }
+    out = absolutt(root, out)
+    hvis ikkje filops.lag_katalogar(out) {
+        linje("[FEIL] klarte ikkje opprette " + out)
+        returner 1
+    }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    hvis ikkje fil_finst(native) {
+        linje("[FEIL] native runtime manglar: " + native + " (materialiser dist/norscode_native, eller set NORSCODE_NATIVE_BIN)")
+        returner 1
+    }
+    la stem = stamme(abs_probe)
+    la ncb = out + "/" + stem + ".ncb.json"
+    la elf = out + "/" + stem + ".elf"
+
+    linje("=== [" + label + "] 1) compile " + probe + " → NCB (nc compile, ikkje bundle) ===")
+    la m1 = probe_miljø(root)
+    m1["NORSCODE_CMD"] = "compile"
+    m1["NORSCODE_FILE"] = abs_probe
+    m1["NORSCODE_OUTPUT"] = ncb
+    hvis ikkje køyr_native(native, root, m1, 600000, "compile", usann) { returner 1 }
+    hvis ikkje fil_finst(ncb) {
+        linje("[FEIL] compile skreiv ikkje " + ncb)
+        returner 1
+    }
+
+    linje("=== [" + label + "] 2) ncb-to-elf (self-hosted native_codegen_v2) ===")
+    la m2 = probe_miljø(root)
+    m2["NORSCODE_CMD"] = "run"
+    m2["NORSCODE_FILE"] = root + "/tools/ncb_to_elf.no"
+    m2["NORSCODE_NATIVE_BIN"] = native
+    m2["NORSCODE_NCB_TO_ELF_INPUT"] = ncb
+    m2["NORSCODE_NCB_TO_ELF_OUTPUT"] = elf
+    hvis ikkje køyr_native(native, root, m2, 1800000, "ncb-to-elf", sann) { returner 1 }
+    hvis ikkje fil_finst(elf) {
+        linje("[FEIL] ncb_to_elf skreiv ikkje " + elf)
+        returner 1
+    }
+    hvis ikkje gjer_kjørbar(elf) {
+        linje("[FEIL] klarte ikkje setje executable-modus på " + elf)
+        returner 1
+    }
+
+    hvis env("NORSCODE_GC_PROBE_RUN") == "0" {
+        linje("=== [" + label + "] 3) køyr hoppa over (NORSCODE_GC_PROBE_RUN=0): " + elf + " ===")
+        returner 0
+    }
+    hvis plattform_system() != "Linux" {
+        linje("=== [" + label + "] 3) ELF-en er Linux x86_64; køyr han i Docker linux/amd64: " + elf + " ===")
+        returner 0
+    }
+
+    linje("=== [" + label + "] 3) køyr probe ===")
+    la resultat = prosess.køyr(elf, [], root, {}, 1800000)
+    prosess.skriv_resultat(resultat)
+    la rc = heltall_fra_tekst(tekst(resultat["exit_code"]))
+    hvis tekst(resultat["status"]) != "ferdig" { rc = 1 }
+    linje(stem + " exit=" + tekst(rc))
+    hvis rc == 0 {
+        linje("[GRØN] " + label + " verkar.")
+        returner 0
+    }
+    linje("[FEIL] " + label + " feila (exit=" + tekst(rc) + ").")
+    returner rc
+}
