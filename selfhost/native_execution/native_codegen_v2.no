@@ -598,6 +598,30 @@ funksjon jump_rel32(buf, va, code_va) {
     la rel = (va - (code_va + lengde(buf) + 4)) & 0xFFFFFFFF
     u32(buf, rel)
 }
+// Argon2id fill_block: emitter dei 8 G-mix (a,b,c,d) ord-indeks-tuplane for éin
+// runde (16-ords idx-vektor) som råe byte i tabellen. BLAKE2-diagonalmønster,
+// identisk med std.argon2id_pure._round16.
+funksjon emit_arg_round(buf, idx: liste) {
+    la g = [[0,4,8,12],[1,5,9,13],[2,6,10,14],[3,7,11,15],[0,5,10,15],[1,6,11,12],[2,7,8,13],[3,4,9,14]]
+    la gi = 0
+    mens gi < 8 {
+        la t = g[gi]
+        legg_til(buf, idx[t[0]]) legg_til(buf, idx[t[1]]) legg_til(buf, idx[t[2]]) legg_til(buf, idx[t[3]])
+        gi = gi + 1
+    }
+}
+// BLAKE2b F: emitter dei 8 G-tuplane (a,b,c,d,x,y) for éin runde. (a,b,c,d) er det
+// faste diagonalmønsteret; x,y = sigma[runde][2i],[2i+1]. 6 byte per G, 8 G per runde.
+funksjon emit_blake2b_round(buf, sigma_row: liste) {
+    la pat = [[0,4,8,12],[1,5,9,13],[2,6,10,14],[3,7,11,15],[0,5,10,15],[1,6,11,12],[2,7,8,13],[3,4,9,14]]
+    la gi = 0
+    mens gi < 8 {
+        la p = pat[gi]
+        legg_til(buf, p[0]) legg_til(buf, p[1]) legg_til(buf, p[2]) legg_til(buf, p[3])
+        legg_til(buf, sigma_row[gi*2]) legg_til(buf, sigma_row[gi*2+1])
+        gi = gi + 1
+    }
+}
 // ─── Runtime-kall-hjelparar ───────────────────────────────────────────────────
 // call_rt_1arg: pop rdi
 funksjon emit_rt_call_1(buf, rt_va, code_va) {
@@ -938,6 +962,8 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".now_ms") eller fn_nm == "now_ms" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".random_byte") eller fn_nm == "random_byte" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".sha256_bytes_hex") eller fn_nm == "sha256_bytes_hex" { returner "str" }
+    hvis builtin.ends_with(fn_nm, ".argon2_compress") eller fn_nm == "argon2_compress" { returner "list" }
+    hvis builtin.ends_with(fn_nm, ".blake2b_compress") eller fn_nm == "blake2b_compress" { returner "list" }
     hvis builtin.ends_with(fn_nm, ".char_code") eller fn_nm == "char_code" { returner "int" }
     hvis fn_nm == "builtin.native_heap_bytes" { returner "int" }
     hvis builtin.ends_with(fn_nm, ".atomic_load_ptr") eller builtin.ends_with(fn_nm, ".atomic_store_ptr") eller builtin.ends_with(fn_nm, ".atomic_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_compare_exchange_ptr") eller builtin.ends_with(fn_nm, ".atomic_fetch_add_ptr") eller builtin.ends_with(fn_nm, ".atomic_fence") { returner "int" }
@@ -2455,6 +2481,303 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, ls_nn, ls_nnl)
     la ls_j = emit_jmp_placeholder(bytes)
     patch_jump(bytes, ls_j, RT_LENGDE() - TEXT_VA())      // jmp RT_LENGDE
+
+    // ── argon2_compress(rdi=x, rsi=y, rdx=gammel|null, rcx=xor_flag) → 256-u32 liste ─
+    // Argon2id fill_block-kjerna (RFC 9106 §3.5) som native x86-64-atom. Rein Norscode
+    // _compress var ~5,5 s/kall (256-u32-lister + per-ord list-index-overhead) →
+    // test_argon2id_rfc9106_pure/standard timeout (300 s, profilert: _h0 410 ms, ett
+    // _compress 5545 ms). Native: 64-bit-ord i register (fBlaMka = imul+lea×2, rotr =
+    // ror), 128 G-mix frå indeks-tabell. std.argon2id_pure._compress rutar hit; null-
+    // fallback (runtime utan atomet) → rein _compress_pure.
+    // KAT: x=[0x12345678]*256, y=[0x9abcdef0]*256, null, usann → z[0]=1404342739, z[255]=4116264455.
+    la arg_skip = emit_jmp_placeholder(bytes)
+    la arg_tab_va = TEXT_VA() + lengde(bytes)
+    la argrow: heiltall = 0
+    mens argrow < 8 {
+        la aidx: liste_heiltall = []
+        la ai: heiltall = 0
+        mens ai < 16 { legg_til(aidx, argrow*16 + ai) ai = ai + 1 }
+        emit_arg_round(bytes, aidx)
+        argrow = argrow + 1
+    }
+    la argcol: heiltall = 0
+    mens argcol < 8 {
+        la aidx2: liste_heiltall = []
+        la ar2: heiltall = 0
+        mens ar2 < 8 { legg_til(aidx2, ar2*16 + argcol*2) legg_til(aidx2, ar2*16 + argcol*2 + 1) ar2 = ar2 + 1 }
+        emit_arg_round(bytes, aidx2)
+        argcol = argcol + 1
+    }
+    patch_jump(bytes, arg_skip, lengde(bytes))
+    atomics["argon2_compress"] = TEXT_VA() + lengde(bytes)
+    // prolog: rsp ≡ 0 mod 16 etter 5 push; sub 2064 (mult 16) held aligninga
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15
+    copy(bytes, [0x48, 0x81, 0xEC]) u32(bytes, 2064)      // sub rsp,2064 (words@0,rinit@1024,gammel@2048)
+    copy(bytes, [0x49, 0x89, 0xFC])                       // mov r12,rdi (x)
+    copy(bytes, [0x49, 0x89, 0xF5])                       // mov r13,rsi (y)
+    copy(bytes, [0x48, 0x89, 0x94, 0x24]) u32(bytes, 2048)// mov [rsp+2048],rdx (gammel handle)
+    // flag = RT_TRUTHY(gammel): xor_gammel-bool kan kome som rå immediat (rcx=3=usann,
+    // ikkje peikar) og RT_TRUTHY dereferer. gammel er derimot ALLTID ein ekte NcVal
+    // (boksa null eller liste), og xor_gammel ⟺ gammel != null i alle kall-stader
+    // (hash_bytes_utvida linje 349: pass0 old=null; _address_block: null). Så flagg =
+    // «gammel er sann» = gammel er ei ikkje-tom liste.
+    copy(bytes, [0x48, 0x89, 0xD7])                       // mov rdi,rdx (gammel)
+    call_rel32(bytes, RT_TRUTHY(), TEXT_VA())             // rax = 0/1
+    copy(bytes, [0x49, 0x89, 0xC7])                       // mov r15,rax (flag)
+    // bygg words[k]=rinit[k]= (x[2k]^y[2k]) | (x[2k+1]^y[2k+1])<<32 for k=0..127
+    copy(bytes, [0x49, 0x8B, 0x44, 0x24, 0x08])           // mov rax,[r12+8]
+    copy(bytes, [0x4C, 0x8B, 0x40, 0x10])                 // mov r8,[rax+16] (x elem_ptr)
+    copy(bytes, [0x49, 0x8B, 0x45, 0x08])                 // mov rax,[r13+8]
+    copy(bytes, [0x4C, 0x8B, 0x48, 0x10])                 // mov r9,[rax+16] (y elem_ptr)
+    copy(bytes, [0x45, 0x31, 0xD2])                       // xor r10d,r10d (k)
+    la arg_build = lengde(bytes)
+    copy(bytes, [0x4D, 0x89, 0xD3])                       // mov r11,r10
+    copy(bytes, [0x4D, 0x01, 0xDB])                       // add r11,r11 (2k)
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xD8])                 // mov rax,[r8+r11*8]
+    copy(bytes, [0x8B, 0x48, 0x08])                       // mov ecx,[rax+8] (x[2k])
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xD9])                 // mov rax,[r9+r11*8]
+    copy(bytes, [0x8B, 0x50, 0x08])                       // mov edx,[rax+8] (y[2k])
+    copy(bytes, [0x31, 0xD1])                             // xor ecx,edx (lo)
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD8, 0x08])           // mov rax,[r8+r11*8+8]
+    copy(bytes, [0x8B, 0x70, 0x08])                       // mov esi,[rax+8] (x[2k+1])
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD9, 0x08])           // mov rax,[r9+r11*8+8]
+    copy(bytes, [0x8B, 0x78, 0x08])                       // mov edi,[rax+8] (y[2k+1])
+    copy(bytes, [0x31, 0xFE])                             // xor esi,edi (hi)
+    copy(bytes, [0x48, 0xC1, 0xE6, 0x20])                 // shl rsi,32
+    copy(bytes, [0x48, 0x09, 0xF1])                       // or rcx,rsi (word)
+    copy(bytes, [0x4A, 0x89, 0x0C, 0xD4])                 // mov [rsp+r10*8],rcx
+    copy(bytes, [0x4A, 0x89, 0x8C, 0xD4]) u32(bytes, 1024)// mov [rsp+r10*8+1024],rcx
+    copy(bytes, [0x49, 0xFF, 0xC2])                       // inc r10
+    copy(bytes, [0x49, 0x81, 0xFA]) u32(bytes, 128)       // cmp r10,128
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (arg_build - (lengde(bytes) + 4)) & 4294967295) // jl build
+    // mixing: 128 G-mix frå tabellen (r14=tab-peikar, r13=teljar)
+    copy(bytes, [0x49, 0xBE]) u64(bytes, arg_tab_va)      // mov r14, arg_tab_va
+    copy(bytes, [0x45, 0x31, 0xED])                       // xor r13d,r13d
+    la arg_mix = lengde(bytes)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x06])                 // movzx eax,byte [r14] (a)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x4E, 0x01])           // movzx ecx,byte [r14+1] (b)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x56, 0x02])           // movzx edx,byte [r14+2] (c)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x5E, 0x03])           // movzx ebx,byte [r14+3] (d)
+    copy(bytes, [0x4C, 0x8D, 0x04, 0xC4])                 // lea r8,[rsp+rax*8]
+    copy(bytes, [0x4C, 0x8D, 0x0C, 0xCC])                 // lea r9,[rsp+rcx*8]
+    copy(bytes, [0x4C, 0x8D, 0x14, 0xD4])                 // lea r10,[rsp+rdx*8]
+    copy(bytes, [0x4C, 0x8D, 0x1C, 0xDC])                 // lea r11,[rsp+rbx*8]
+    // G(a,b,c,d): blamka(a,b);xor(d,a);rotr(d,32);blamka(c,d);xor(b,c);rotr(b,24);
+    //             blamka(a,b);xor(d,a);rotr(d,16);blamka(c,d);xor(b,c);rotr(b,63)
+    // blamka(r8,r9): [r8]=[r8]+[r9]+2*(u32)[r8]*(u32)[r9]
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x8B, 0x09, 0x89, 0xC2, 0x89, 0xCE, 0x48, 0x0F, 0xAF, 0xD6, 0x48, 0x01, 0xC8, 0x48, 0x8D, 0x04, 0x50, 0x49, 0x89, 0x00])
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x31, 0x03])                 // xor(r11,r8)
+    copy(bytes, [0x49, 0x8B, 0x03, 0x48, 0xC1, 0xC8, 0x20, 0x49, 0x89, 0x03]) // rotr(r11,32)
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x8B, 0x0B, 0x89, 0xC2, 0x89, 0xCE, 0x48, 0x0F, 0xAF, 0xD6, 0x48, 0x01, 0xC8, 0x48, 0x8D, 0x04, 0x50, 0x49, 0x89, 0x02]) // blamka(r10,r11)
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x31, 0x01])                 // xor(r9,r10)
+    copy(bytes, [0x49, 0x8B, 0x01, 0x48, 0xC1, 0xC8, 0x18, 0x49, 0x89, 0x01]) // rotr(r9,24)
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x8B, 0x09, 0x89, 0xC2, 0x89, 0xCE, 0x48, 0x0F, 0xAF, 0xD6, 0x48, 0x01, 0xC8, 0x48, 0x8D, 0x04, 0x50, 0x49, 0x89, 0x00]) // blamka(r8,r9)
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x31, 0x03])                 // xor(r11,r8)
+    copy(bytes, [0x49, 0x8B, 0x03, 0x48, 0xC1, 0xC8, 0x10, 0x49, 0x89, 0x03]) // rotr(r11,16)
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x8B, 0x0B, 0x89, 0xC2, 0x89, 0xCE, 0x48, 0x0F, 0xAF, 0xD6, 0x48, 0x01, 0xC8, 0x48, 0x8D, 0x04, 0x50, 0x49, 0x89, 0x02]) // blamka(r10,r11)
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x31, 0x01])                 // xor(r9,r10)
+    copy(bytes, [0x49, 0x8B, 0x01, 0x48, 0xC1, 0xC8, 0x3F, 0x49, 0x89, 0x01]) // rotr(r9,63)
+    copy(bytes, [0x49, 0x83, 0xC6, 0x04])                 // add r14,4
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    copy(bytes, [0x49, 0x81, 0xFD]) u32(bytes, 128)       // cmp r13,128
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (arg_mix - (lengde(bytes) + 4)) & 4294967295) // jl mix
+    // final: words[k] ^= rinit[k]; hvis gammel-ptr != 0: words[k] ^= gammel-ord[k]
+    copy(bytes, [0x45, 0x31, 0xDB])                       // xor r11d,r11d (gammel elem_ptr)
+    copy(bytes, [0x4D, 0x85, 0xFF])                       // test r15,r15
+    la arg_fo_je = emit_je_placeholder(bytes)             // je fo_setup
+    copy(bytes, [0x48, 0x8B, 0x84, 0x24]) u32(bytes, 2048)// mov rax,[rsp+2048]
+    copy(bytes, [0x48, 0x85, 0xC0])                       // test rax,rax
+    la arg_fo_je2 = emit_je_placeholder(bytes)            // je fo_setup
+    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                 // mov rax,[rax+8]
+    copy(bytes, [0x4C, 0x8B, 0x58, 0x10])                 // mov r11,[rax+16] (gammel elem_ptr)
+    la arg_fo_setup = lengde(bytes)
+    patch_jump(bytes, arg_fo_je, arg_fo_setup) patch_jump(bytes, arg_fo_je2, arg_fo_setup)
+    copy(bytes, [0x45, 0x31, 0xD2])                       // xor r10d,r10d (k)
+    la arg_fin = lengde(bytes)
+    copy(bytes, [0x4A, 0x8B, 0x0C, 0xD4])                 // mov rcx,[rsp+r10*8]
+    copy(bytes, [0x4A, 0x33, 0x8C, 0xD4]) u32(bytes, 1024)// xor rcx,[rsp+r10*8+1024]
+    copy(bytes, [0x4D, 0x85, 0xDB])                       // test r11,r11
+    la arg_fin_je = emit_je_placeholder(bytes)            // je store
+    copy(bytes, [0x4C, 0x89, 0xD6])                       // mov rsi,r10
+    copy(bytes, [0x48, 0x01, 0xF6])                       // add rsi,rsi (2k)
+    copy(bytes, [0x49, 0x8B, 0x04, 0xF3])                 // mov rax,[r11+rsi*8]
+    copy(bytes, [0x8B, 0x50, 0x08])                       // mov edx,[rax+8] (glo)
+    copy(bytes, [0x49, 0x8B, 0x44, 0xF3, 0x08])           // mov rax,[r11+rsi*8+8]
+    copy(bytes, [0x8B, 0x40, 0x08])                       // mov eax,[rax+8] (ghi)
+    copy(bytes, [0x48, 0xC1, 0xE0, 0x20])                 // shl rax,32
+    copy(bytes, [0x48, 0x09, 0xC2])                       // or rdx,rax (gammel-ord)
+    copy(bytes, [0x48, 0x31, 0xD1])                       // xor rcx,rdx
+    la arg_fin_store = lengde(bytes)
+    patch_jump(bytes, arg_fin_je, arg_fin_store)
+    copy(bytes, [0x4A, 0x89, 0x0C, 0xD4])                 // mov [rsp+r10*8],rcx
+    copy(bytes, [0x49, 0xFF, 0xC2])                       // inc r10
+    copy(bytes, [0x49, 0x81, 0xFA]) u32(bytes, 128)       // cmp r10,128
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (arg_fin - (lengde(bytes) + 4)) & 4294967295) // jl fin
+    // bygg resultatliste (256 u32 int-NcVal frå words)
+    call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())           // rax = tom liste
+    copy(bytes, [0x49, 0x89, 0xC4])                       // mov r12,rax (resultat)
+    copy(bytes, [0x45, 0x31, 0xED])                       // xor r13d,r13d (i)
+    la arg_res = lengde(bytes)
+    copy(bytes, [0x4C, 0x89, 0xE8])                       // mov rax,r13
+    copy(bytes, [0x48, 0xD1, 0xE8])                       // shr rax,1 (ord-indeks)
+    copy(bytes, [0x48, 0x8B, 0x04, 0xC4])                 // mov rax,[rsp+rax*8]
+    copy(bytes, [0x41, 0xF6, 0xC5, 0x01])                 // test r13b,1
+    la arg_res_je = emit_je_placeholder(bytes)            // je even
+    copy(bytes, [0x48, 0xC1, 0xE8, 0x20])                 // shr rax,32 (odde → hi-ord)
+    la arg_res_even = lengde(bytes)
+    patch_jump(bytes, arg_res_je, arg_res_even)
+    copy(bytes, [0x89, 0xC7])                             // mov edi,eax (u32-verdi)
+    call_rel32(bytes, RT_INT(), TEXT_VA())                // rax = int-NcVal
+    copy(bytes, [0x4C, 0x89, 0xE7])                       // mov rdi,r12
+    copy(bytes, [0x48, 0x89, 0xC6])                       // mov rsi,rax
+    call_rel32(bytes, RT_LIST_APP(), TEXT_VA())
+    copy(bytes, [0x49, 0xFF, 0xC5])                       // inc r13
+    copy(bytes, [0x49, 0x81, 0xFD]) u32(bytes, 256)       // cmp r13,256
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (arg_res - (lengde(bytes) + 4)) & 4294967295) // jl res
+    copy(bytes, [0x4C, 0x89, 0xE0])                       // mov rax,r12
+    copy(bytes, [0x48, 0x81, 0xC4]) u32(bytes, 2064)      // add rsp,2064
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B]) // pop r15,r14,r13,r12,rbx
+    legg_til(bytes, 0xC3)                                 // ret
+
+    // ── blake2b_compress(rdi=h, rsi=block, rdx=total, rcx=siste) → ny 16-u32 h ─────
+    // BLAKE2b F (RFC 7693) som native x86-64-atom. Rein _compress_pure ~1,7 s/kall →
+    // _h_prime(1024) 54 s → argon2id-timeout. Native: 64-bit-ord i register (add/xor/
+    // ror), 12 rundar × 8 G frå sigma-tabell. h blir mutert på staden av kallarane, så
+    // atomet returnerer ei ny 16-u32-liste og std.blake2b._compress kopierer tilbake.
+    la bl_skip = emit_jmp_placeholder(bytes)
+    la bl_tab_va = TEXT_VA() + lengde(bytes)
+    la bl_sigma = [
+        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+        [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3],
+        [11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4],
+        [7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8],
+        [9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13],
+        [2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9],
+        [12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11],
+        [13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10],
+        [6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5],
+        [10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0],
+        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+        [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3]]
+    la blr: heiltall = 0
+    mens blr < 12 { emit_blake2b_round(bytes, bl_sigma[blr]) blr = blr + 1 }
+    patch_jump(bytes, bl_skip, lengde(bytes))
+    atomics["blake2b_compress"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15
+    copy(bytes, [0x48, 0x81, 0xEC]) u32(bytes, 336)      // sub rsp,336 (v@0,m@128,horig@256,siste@320)
+    copy(bytes, [0x49, 0x89, 0xFC])                      // mov r12,rdi (h)
+    copy(bytes, [0x49, 0x89, 0xF5])                      // mov r13,rsi (block)
+    copy(bytes, [0x44, 0x8B, 0x7A, 0x08])                // mov r15d,[rdx+8] (total32)
+    copy(bytes, [0x48, 0x8B, 0x41, 0x08])                // mov rax,[rcx+8] (siste)
+    copy(bytes, [0x48, 0x89, 0x84, 0x24]) u32(bytes, 320)// mov [rsp+320],rax
+    // v[0..7] = h-ord; horig[0..7] = same
+    copy(bytes, [0x49, 0x8B, 0x44, 0x24, 0x08])          // mov rax,[r12+8] (h payload)
+    copy(bytes, [0x4C, 0x8B, 0x40, 0x10])                // mov r8,[rax+16] (h elem_ptr)
+    copy(bytes, [0x45, 0x31, 0xC9])                      // xor r9d,r9d (k)
+    la bl_hloop = lengde(bytes)
+    copy(bytes, [0x4D, 0x89, 0xCA])                      // mov r10,r9
+    copy(bytes, [0x4D, 0x01, 0xD2])                      // add r10,r10 (2k)
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xD0])                // mov rax,[r8+r10*8]
+    copy(bytes, [0x8B, 0x48, 0x08])                      // mov ecx,[rax+8] (h[2k])
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x08])          // mov rax,[r8+r10*8+8]
+    copy(bytes, [0x8B, 0x50, 0x08])                      // mov edx,[rax+8] (h[2k+1])
+    copy(bytes, [0x48, 0xC1, 0xE2, 0x20])                // shl rdx,32
+    copy(bytes, [0x48, 0x09, 0xD1])                      // or rcx,rdx
+    copy(bytes, [0x4A, 0x89, 0x0C, 0xCC])                // mov [rsp+r9*8],rcx (v[k])
+    copy(bytes, [0x4A, 0x89, 0x8C, 0xCC]) u32(bytes, 256)// mov [rsp+r9*8+256],rcx (horig[k])
+    copy(bytes, [0x49, 0xFF, 0xC1])                      // inc r9
+    copy(bytes, [0x49, 0x83, 0xF9, 0x08])                // cmp r9,8
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (bl_hloop - (lengde(bytes) + 4)) & 4294967295) // jl hloop
+    // v[8..15] = IV (16 u32-halvdelar, lo/hi interleaved som std.blake2b._iv)
+    la bl_iv = [4089235720,1779033703,2227873595,3144134277,4271175723,1013904242,1595750129,2773480762,2917565137,1359893119,725511199,2600822924,4215389547,528734635,327033209,1541459225]
+    la bl_ivk: heiltall = 0
+    mens bl_ivk < 16 {
+        copy(bytes, [0xC7, 0x84, 0x24]) u32(bytes, 64 + bl_ivk*4) u32(bytes, bl_iv[bl_ivk]) // mov dword [rsp+off],imm32
+        bl_ivk = bl_ivk + 1
+    }
+    copy(bytes, [0x44, 0x31, 0xBC, 0x24]) u32(bytes, 96) // xor [rsp+96],r15d (v[12] lo ^= total32)
+    copy(bytes, [0x48, 0x83, 0xBC, 0x24]) u32(bytes, 320) legg_til(bytes, 0x00) // cmp qword [rsp+320],0
+    la bl_nosiste = emit_je_placeholder(bytes)
+    copy(bytes, [0xF7, 0x94, 0x24]) u32(bytes, 112)      // not dword [rsp+112] (v[14] lo)
+    copy(bytes, [0xF7, 0x94, 0x24]) u32(bytes, 116)      // not dword [rsp+116] (v[14] hi)
+    patch_jump(bytes, bl_nosiste, lengde(bytes))
+    // m[0..15] frå block-bytane (128 byte → 16 u64, little-endian)
+    copy(bytes, [0x49, 0x8B, 0x45, 0x08])                // mov rax,[r13+8] (block payload)
+    copy(bytes, [0x4C, 0x8B, 0x40, 0x10])                // mov r8,[rax+16] (block elem_ptr)
+    copy(bytes, [0x45, 0x31, 0xC9])                      // xor r9d,r9d (k)
+    la bl_mloop = lengde(bytes)
+    copy(bytes, [0x4D, 0x89, 0xCA])                      // mov r10,r9
+    copy(bytes, [0x49, 0xC1, 0xE2, 0x03])                // shl r10,3 (8k)
+    copy(bytes, [0x48, 0x31, 0xC9])                      // xor rcx,rcx (acc)
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xD0, 0x8B, 0x50, 0x08, 0x48, 0x09, 0xD1]) // j0
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x08, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x08, 0x48, 0x09, 0xD1]) // j1 <<8
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x10, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x10, 0x48, 0x09, 0xD1]) // j2 <<16
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x18, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x18, 0x48, 0x09, 0xD1]) // j3 <<24
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x20, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x20, 0x48, 0x09, 0xD1]) // j4 <<32
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x28, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x28, 0x48, 0x09, 0xD1]) // j5 <<40
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x30, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x30, 0x48, 0x09, 0xD1]) // j6 <<48
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xD0, 0x38, 0x8B, 0x50, 0x08, 0x48, 0xC1, 0xE2, 0x38, 0x48, 0x09, 0xD1]) // j7 <<56
+    copy(bytes, [0x4A, 0x89, 0x8C, 0xCC]) u32(bytes, 128)// mov [rsp+r9*8+128],rcx (m[k])
+    copy(bytes, [0x49, 0xFF, 0xC1])                      // inc r9
+    copy(bytes, [0x49, 0x83, 0xF9, 0x10])                // cmp r9,16
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (bl_mloop - (lengde(bytes) + 4)) & 4294967295) // jl mloop
+    // mixing: 96 G frå tabell (r14=peikar, r13=teljar)
+    copy(bytes, [0x49, 0xBE]) u64(bytes, bl_tab_va)      // mov r14, tab
+    copy(bytes, [0x45, 0x31, 0xED])                      // xor r13d,r13d
+    la bl_mix = lengde(bytes)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x06])                // movzx eax,[r14] (a)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x5E, 0x01])          // movzx ebx,[r14+1] (b)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x4E, 0x02])          // movzx ecx,[r14+2] (c)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x56, 0x03])          // movzx edx,[r14+3] (d)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x76, 0x04])          // movzx esi,[r14+4] (x)
+    copy(bytes, [0x41, 0x0F, 0xB6, 0x7E, 0x05])          // movzx edi,[r14+5] (y)
+    copy(bytes, [0x4C, 0x8D, 0x04, 0xC4])                // lea r8,[rsp+rax*8] (&v[a])
+    copy(bytes, [0x4C, 0x8D, 0x0C, 0xDC])                // lea r9,[rsp+rbx*8] (&v[b])
+    copy(bytes, [0x4C, 0x8D, 0x14, 0xCC])                // lea r10,[rsp+rcx*8] (&v[c])
+    copy(bytes, [0x4C, 0x8D, 0x1C, 0xD4])                // lea r11,[rsp+rdx*8] (&v[d])
+    // v[a]+=v[b]; v[a]+=m[x]
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x03, 0x01])    // mov rax,[r8]; add rax,[r9]
+    copy(bytes, [0x48, 0x03, 0x84, 0xF4]) u32(bytes, 128)// add rax,[rsp+rsi*8+128] (mx)
+    copy(bytes, [0x49, 0x89, 0x00])                      // mov [r8],rax
+    copy(bytes, [0x49, 0x8B, 0x03, 0x49, 0x33, 0x00, 0x48, 0xC1, 0xC8, 0x20, 0x49, 0x89, 0x03]) // v[d]^=v[a];ror32
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x03, 0x03, 0x49, 0x89, 0x02])                         // v[c]+=v[d]
+    copy(bytes, [0x49, 0x8B, 0x01, 0x49, 0x33, 0x02, 0x48, 0xC1, 0xC8, 0x18, 0x49, 0x89, 0x01]) // v[b]^=v[c];ror24
+    copy(bytes, [0x49, 0x8B, 0x00, 0x49, 0x03, 0x01])    // v[a]+=v[b]
+    copy(bytes, [0x48, 0x03, 0x84, 0xFC]) u32(bytes, 128)// add rax,[rsp+rdi*8+128] (my)
+    copy(bytes, [0x49, 0x89, 0x00])                      // mov [r8],rax
+    copy(bytes, [0x49, 0x8B, 0x03, 0x49, 0x33, 0x00, 0x48, 0xC1, 0xC8, 0x10, 0x49, 0x89, 0x03]) // v[d]^=v[a];ror16
+    copy(bytes, [0x49, 0x8B, 0x02, 0x49, 0x03, 0x03, 0x49, 0x89, 0x02])                         // v[c]+=v[d]
+    copy(bytes, [0x49, 0x8B, 0x01, 0x49, 0x33, 0x02, 0x48, 0xC1, 0xC8, 0x3F, 0x49, 0x89, 0x01]) // v[b]^=v[c];ror63
+    copy(bytes, [0x49, 0x83, 0xC6, 0x06])                // add r14,6
+    copy(bytes, [0x49, 0xFF, 0xC5])                      // inc r13
+    copy(bytes, [0x49, 0x81, 0xFD]) u32(bytes, 96)       // cmp r13,96
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (bl_mix - (lengde(bytes) + 4)) & 4294967295) // jl mix
+    // resultat: 16 u32 der out-ord[wk] = horig[wk]^v[wk]^v[wk+8]
+    call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())          // rax = liste
+    copy(bytes, [0x49, 0x89, 0xC4])                      // mov r12,rax
+    copy(bytes, [0x45, 0x31, 0xED])                      // xor r13d,r13d (i 0..15)
+    la bl_res = lengde(bytes)
+    copy(bytes, [0x4C, 0x89, 0xE8])                      // mov rax,r13
+    copy(bytes, [0x48, 0xD1, 0xE8])                      // shr rax,1 (wk)
+    copy(bytes, [0x48, 0x8B, 0x8C, 0xC4]) u32(bytes, 256)// mov rcx,[rsp+rax*8+256] (horig[wk])
+    copy(bytes, [0x48, 0x33, 0x0C, 0xC4])                // xor rcx,[rsp+rax*8] (v[wk])
+    copy(bytes, [0x48, 0x33, 0x8C, 0xC4]) u32(bytes, 64) // xor rcx,[rsp+rax*8+64] (v[wk+8])
+    copy(bytes, [0x41, 0xF6, 0xC5, 0x01])                // test r13b,1
+    la bl_even = emit_je_placeholder(bytes)
+    copy(bytes, [0x48, 0xC1, 0xE9, 0x20])                // shr rcx,32 (odde → hi)
+    patch_jump(bytes, bl_even, lengde(bytes))
+    copy(bytes, [0x89, 0xCF])                            // mov edi,ecx
+    call_rel32(bytes, RT_INT(), TEXT_VA())               // rax = int
+    copy(bytes, [0x4C, 0x89, 0xE7])                      // mov rdi,r12
+    copy(bytes, [0x48, 0x89, 0xC6])                      // mov rsi,rax
+    call_rel32(bytes, RT_LIST_APP(), TEXT_VA())
+    copy(bytes, [0x49, 0xFF, 0xC5])                      // inc r13
+    copy(bytes, [0x49, 0x83, 0xFD, 0x10])                // cmp r13,16
+    copy(bytes, [0x0F, 0x8C]) u32(bytes, (bl_res - (lengde(bytes) + 4)) & 4294967295) // jl res
+    copy(bytes, [0x4C, 0x89, 0xE0])                      // mov rax,r12
+    copy(bytes, [0x48, 0x81, 0xC4]) u32(bytes, 336)      // add rsp,336
+    copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B]) // pop r15,r14,r13,r12,rbx
+    legg_til(bytes, 0xC3)                                // ret
 
     // ── map_has_safe(rdi=obj, rsi=nøkkel) → usann for null/ikkje-ordbok ──────
     // vm._rt_har_nøkkel kalla har_nøkkel på ein TEKST-verdi → frosen RT_MAP_HAS
@@ -7991,6 +8314,8 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     // gap-wrapperen kan falle tilbake til han utan å kalle seg sjølv.
     hvis fn_nm == "til_tekst_native" eller builtin.ends_with(fn_nm, ".til_tekst_native") { returner atomic_vas["to_text"] }
     hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
+    hvis fn_nm == "argon2_compress" eller builtin.ends_with(fn_nm, ".argon2_compress") { returner atomic_vas["argon2_compress"] }
+    hvis fn_nm == "blake2b_compress" eller builtin.ends_with(fn_nm, ".blake2b_compress") { returner atomic_vas["blake2b_compress"] }
     hvis fn_nm == "builtin.vent.sov" eller builtin.ends_with(fn_nm, ".vent.sov") eller fn_nm == "vent.sov" { returner atomic_vas["vent_sov"] }
     // builtin.sov (std.tid.sov) var null-fallback → stille no-op: tid.sov(1000) returnerte
     // på 1 ms på fersk seed. Berre det eksplisitte builtin-namnet — ein naken «sov» er
@@ -8823,13 +9148,10 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
             returner
         }
         ellers {
-            la ai: heltall = 0
-            mens ai < nargs {
-                legg_til(buf, 0x58)
-                ai = ai + 1
-            }
-            call_rel32(buf, rt_va, code_va)
-            legg_til(buf, 0x50)
+            // nargs >= 4: marshal argumenta korrekt inn i rdi/rsi/rdx/rcx/r8/r9
+            // (System V) som emit_user_call. Den gamle grea poppa berre alle args
+            // til rax og kalla atomet med søppel i argumentregistra (argon2_compress/4).
+            emit_user_call(buf, rt_va, nargs, code_va)
             returner
         }
     }
