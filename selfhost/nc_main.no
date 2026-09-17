@@ -14,6 +14,10 @@ bruk selfhost.http_response som http_response
 // Reine erstatningar for VM-builtins utan native rutine (gap-ruting i
 // native_codegen_v2) — må vere i bunten for at den ferske seeden skal ha dei.
 bruk std.native_gap som native_gap
+bruk std.desimaltall_tekst som desimaltall_tekst
+// Argon2id-gap-ruta (builtin.argon2id → std.argon2id_pure.hash_raw_hex) må ha
+// modulen i bunten; rå-minne-varianten unngår 64 MiB-OOM-en frå VM-lister.
+bruk std.argon2id_pure som argon2id_pure
 
 // ─── Kompiler kjeldekode-fil til NCB ─────────────────────────────────────────
 
@@ -1110,6 +1114,34 @@ funksjon normaliser_importalias_kall(ncb_json: tekst, imports: liste<tekst>) -> 
     returner ut
 }
 
+// SMAL alias-normalisering for HOVUDFILA. Kompilatoren skriv alias-kall som
+// ANTEN «builtin.<alias>.x» ELLER berre «<alias>.x». Begge formene blir rewrita
+// her, men den BARE forma berre i CALL-slotten: ein brei replace av
+// «"<alias>.» (som normaliser_importalias_kall gjer) kan treffe STRENGLITERAL
+// (t.d. "db.x") og korrumpere data.
+// `eigar` er funksjonsnøkkelen JSON-en høyrer til. Ein modul sin eigen kropp blir
+// aldri omskriven: std.path.join kallar builtin-en sti_join, og ei omskriving av
+// det kallet til std.path.join gav uendeleg rekursjon (test_storage stoppa på
+// tail-call-grensa etter 10 001 kall til std.path.join).
+funksjon normaliser_hovudalias_builtin(ncb_json: tekst, imports: liste<tekst>, eigar: tekst) -> tekst {
+    la ut = ncb_json
+    la i: heiltall = 0
+    mens i < lengde(imports) {
+        la arg = imports[i]
+        la eq = builtin.index_of(arg, "=")
+        hvis eq > 0 {
+            la alias = builtin.slice(arg, 0, eq)
+            la kanonisk_modul = modulnamn_fra_importfil(builtin.slice(arg, eq + 1, lengde(arg)))
+            hvis ikkje builtin.starts_with(eigar, kanonisk_modul + ".") {
+                ut = tekst_erstatt(ut, "\"builtin." + alias + ".", "\"" + kanonisk_modul + ".")
+                ut = tekst_erstatt(ut, "[\"CALL\",\"" + alias + ".", "[\"CALL\",\"" + kanonisk_modul + ".")
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
 funksjon normaliser_json_kontrollteikn(data: tekst) -> tekst {
     // Compiler-NCB kan innehalde rå kontrollteikn i strengoperandar. Gjer
     // berre desse byteverdiane JSON-lovlege før den strenge råparseren;
@@ -1695,6 +1727,13 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     // skriv kanoniske CALL-mål direkte. Då treng ikkje heile NCB-teksten ein
     // ustabil alias-replace etter kompilering.
     la hoved_ncb_json = komp.kompiler_fil(hoved_kjelde, modul)
+    // Hovudfila sine importalias MÅ normaliserast òg — den einaste andre
+    // kallstaden er cache-kompatibilitetsbana for IMPORTERTE modular. Utan
+    // dette blir eit alias som KOLLIDERER med ein builtin-namespace bunde til
+    // builtinen: `bruk std.db som db` + `db.open(...)` gav CALL builtin.db.open
+    // (vm.no har db.* som capability-gata builtin-familie), som fersk seed ikkje
+    // implementerer → «Ukjent innebygd funksjon» (test_admin_relations).
+    // Verifisert: same modul under aliaset `mydb` resolverte alt korrekt.
     nc_bundle_fremdrift("bundle-main-compiled")
     hoved_ncb_json = normaliser_json_kontrollteikn(hoved_ncb_json)
     nc_bundle_fremdrift("bundle-main-normalized")
@@ -1809,7 +1848,9 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
         la function_key = tekst(function_keys[bfi])
         legg_til(bundle_deler, json_skriv(function_key))
         legg_til(bundle_deler, ":")
-        legg_til(bundle_deler, nc_json_lineær(alle_fns[function_key]))
+        // Importalias blir normaliserte per funksjon (sjå normaliser_hovudalias_builtin),
+        // slik at eit alias aldri omdirigerer modulen sin eigen kropp til seg sjølv.
+        legg_til(bundle_deler, normaliser_hovudalias_builtin(nc_json_lineær(alle_fns[function_key]), imports, function_key))
         bfi = bfi + 1
     }
     legg_til(bundle_deler, "}")
@@ -1823,6 +1864,13 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     legg_til(bundle_deler, rh_json)
     legg_til(bundle_deler, "}")
     la bundle_json_final = builtin.join(bundle_deler, "")
+    // Alias som KOLLIDERER med ein builtin-namespace må normaliserast på den
+    // FERDIGE bunten: målt med tracing er «builtin.<alias>.» IKKJE til stades i
+    // hovudfila sin NCB rett etter kompilering (treff=-1) — prefikset kjem
+    // lenger nede i kjeda. `bruk std.db som db` + `db.open(...)` gav difor CALL
+    // builtin.db.open (vm.no har db.* som capability-gata builtin-familie), som
+    // fersk seed ikkje implementerer → «Ukjent innebygd funksjon». Verifisert at
+    // same modul under aliaset `mydb` alt resolverte korrekt.
     nc_bundle_fremdrift("bundle-finalized")
     la debug_bundle = builtin.trim(miljo_hent("NORSCODE_DEBUG_BUNDLE_OUTPUT"))
     hvis debug_bundle != "" {
@@ -2146,17 +2194,43 @@ funksjon nc_bygg_native_bruk() -> heiltall {
     returner 0
 }
 
+// AOT-program får std.desimaltall_tekst implisitt. Utan han har eit brukarprogram
+// ingen måte å skrive ut eit desimaltall på: tekst() rutar til
+// std.desimaltall_tekst.til_tekst_gap, og finst ikkje funksjonen i bunten fell
+// kodegeneratoren til den native to_text, som ikkje kjenner type 6 og gav tom
+// streng. Berre bygg-native gjer dette — `compile`-vegen (NCB for VM-en) er
+// urørt, so NCB-bytar og fikspunkt-testar ikkje endrar seg.
+funksjon nc_aot_implisitte_imports(imports: liste<tekst>) -> liste<tekst> {
+    la fil = _modul_filsti_fra_namn("std.desimaltall_tekst")
+    la i: heltall = 0
+    mens i < lengde(imports) {
+        hvis builtin.ends_with(tekst(imports[i]), fil) { returner imports }
+        i = i + 1
+    }
+    la ut: liste<tekst> = []
+    la j: heltall = 0
+    mens j < lengde(imports) { legg_til(ut, imports[j])  j = j + 1 }
+    legg_til(ut, "__desimaltall_tekst=" + fil)
+    returner ut
+}
+
 funksjon nc_bygg_native_ncb_fra_kjelde(src_sti: tekst) -> tekst {
     la kjelde = fil_les(src_sti)
-    la imports = finn_bruk_imports(kjelde)
-    la ncb_json = ""
-    hvis lengde(imports) > 0 { ncb_json = nc_bundle_ncb(src_sti, "__main__", imports) }
-    ellers { ncb_json = komp.kompiler_fil(kjelde, "__main__") }
+    la imports = nc_aot_implisitte_imports(finn_bruk_imports(kjelde))
+    la ncb_json = nc_bundle_ncb(src_sti, "__main__", imports)
     returner normaliser_json_kontrollteikn(ncb_json)
 }
 
 funksjon nc_bygg_native_køyr_codegen(src_sti: tekst) -> heiltall {
+    // host_exec_ncb_json køyrer codegen-NCB-en via køyr_ncb, som slår på
+    // målpolicyen (__vm_target_policy__). Utan nc_run_policy() var
+    // NORSCODE_VM_TARGET_CAPABILITIES tom → «miljo_hent manglar capability
+    // env.read» på fersk seed. Same arv som nc run. (2026-09-10)
+    nc_run_policy()
     la kjelde = fil_les(src_sti)
+    // Her blir KODEGENERATOREN (native_codegen_v2.no) kompilert, ikkje
+    // brukarprogrammet — so den implisitte AOT-importen høyrer IKKJE heime her.
+    // (Ei tidlegare redigering la han til begge stader ved eit feiltreff.)
     la imports = finn_bruk_imports(kjelde)
     la ncb_json = ""
     hvis lengde(imports) > 0 { ncb_json = nc_bundle_ncb(src_sti, "__main__", imports) }

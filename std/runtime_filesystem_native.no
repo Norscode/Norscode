@@ -11,6 +11,93 @@
 
 funksjon abi_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
 
+// Filhandtak (open/read/write/flush/close) for opne_native, native_les, native_skriv,
+// native_lukk og dermed native_kopier_fil/native_flytt_fil. Var «unsupported in native
+// seed». Handtaka lever i ein modulglobal tabell; skriving går rett til fila med
+// fil_append (flush er difor ein no-op), lesing hentar fila éin gong og deler ut bitar.
+la _fh_tabell = {}
+la _fh_neste: heiltall = 1
+
+funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
+    la sti = full_sti(req)
+    hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid path") }
+    la mode = felt(req, "mode")
+    la innhald = ""
+    hvis ikkje skriv {
+        hvis ikkje builtin.fil_finnes(sti) { returner feilsvar("open feila: " + sti) }
+        // Katalogar blir avviste eksplisitt der stat-primitivet finst (native); elles er
+        // fil_les sjølv barrieren (fil_les_safe har S_IFDIR-sjekk).
+        la er_katalog = usann
+        prøv {
+            la st = stat_svar(sti, sann)
+            hvis st["status"] == "ok" og st["kind"] == "directory" { er_katalog = sann }
+        } fang (e) {}
+        hvis er_katalog { returner feilsvar("ikkje ei vanleg fil: " + sti) }
+        // Les innhaldet ved open, so handtaket berre kan opnast for ei lesbar fil.
+        prøv { innhald = builtin.fil_les(sti) } fang (e) { returner feilsvar("ikkje ei lesbar fil: " + sti) }
+    } ellers hvis mode != "append" {
+        prøv { builtin.fil_skriv(sti, "") } fang (e) { returner feilsvar("open feila: " + sti) }
+    }
+    la id = "fh-" + tekst_fra_heltall(_fh_neste)
+    _fh_neste = _fh_neste + 1
+    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": 0, "lasta": ikkje skriv, "innhald": innhald}
+    la r = svar("open", "", 0, "")
+    r["handle"] = id
+    returner r
+}
+
+funksjon fh_hent(req) {
+    la id = felt(req, "handle")
+    hvis id == "" eller ikkje finnes_nøkkel(_fh_tabell, id) { returner null }
+    la h = _fh_tabell[id]
+    hvis h == null { returner null }
+    returner h
+}
+
+funksjon fh_les(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis h["skriv"] { returner feilsvar("handtaket er ope for skriving") }
+    hvis ikkje h["lasta"] {
+        prøv { h["innhald"] = builtin.fil_les(h["sti"]) } fang (e) { returner feilsvar("read feila: " + h["sti"]) }
+        h["lasta"] = sann
+    }
+    la maks = heiltall_felt(req, "max", 65536)
+    hvis maks < 1 { maks = 65536 }
+    la innhald: tekst = h["innhald"]
+    la pos: heiltall = h["pos"]
+    la slutt: heiltall = pos + maks
+    hvis slutt > lengde(innhald) { slutt = lengde(innhald) }
+    la data = ""
+    hvis slutt > pos { data = builtin.slice(innhald, pos, slutt) }
+    h["pos"] = slutt
+    la r = svar("ok", data, slutt - pos, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_skriv(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis ikkje h["skriv"] { returner feilsvar("handtaket er ope for lesing") }
+    la data = felt(req, "data")
+    prøv { builtin.fil_append(h["sti"], data) } fang (e) { returner feilsvar("write feila: " + h["sti"]) }
+    la r = svar("ok", "", lengde(data), "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_lukk(req) -> ordbok_tekst {
+    la id = felt(req, "handle")
+    hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+    // Nullstill i staden for å fjerne nøkkelen: «fjern» er liste-indeks-fjerning i
+    // native codegen og skal ikkje brukast på ordbøker.
+    _fh_tabell[id] = null
+    la r = svar("closed", "", 0, "")
+    r["handle"] = id
+    returner r
+}
+
 funksjon svar(status: tekst, data: tekst, verdi: heiltall, feil: tekst) -> ordbok_tekst {
     la r: ordbok_tekst = {}
     r["abi"] = abi_versjon()
@@ -108,14 +195,17 @@ funksjon list_svar(sti: tekst, typa: bool) -> ordbok_tekst {
     la rå = builtin.native_fs_dirents(sti)
     hvis rå == "!" { returner feilsvar("katalog kan ikkje opnast: " + sti) }
     la linjer = del_linjer(tekst(rå))
-    la data = ""
+    // Samla i liste og slå saman éin gong: «data = data + …» per linje var kvadratisk.
+    la delar: liste_tekst = []
     la i: heiltall = 0
     mens i < lengde(linjer) {
         la l = linjer[i]
-        hvis typa { data = data + l + "\n" }
-        ellers { data = data + builtin.slice(l, 2, lengde(l)) + "\n" }
+        hvis typa { legg_til(delar, l) }
+        ellers { legg_til(delar, builtin.slice(l, 2, lengde(l))) }
         i = i + 1
     }
+    la data = ""
+    hvis lengde(delar) > 0 { data = builtin.join(delar, "\n") + "\n" }
     returner svar("ok", data, lengde(linjer), "")
 }
 
@@ -168,12 +258,10 @@ funksjon walk_svar(req) -> ordbok_tekst {
     la ekskluder = del_kommalist(felt(req, "exclude_prefixes"))
     la ut: liste_tekst = []
     gå(root, rel, suffiksar, ekskluder, ut, 0)
+    // Éin join i staden for «data = data + sti + "\n"» per fil: over heile repoet
+    // (tusenvis av stiar, fleire gonger i 0b-porten) var det kvadratisk kopiering.
     la data = ""
-    la i: heiltall = 0
-    mens i < lengde(ut) {
-        data = data + ut[i] + "\n"
-        i = i + 1
-    }
+    hvis lengde(ut) > 0 { data = builtin.join(ut, "\n") + "\n" }
     returner svar("ok", data, lengde(ut), "")
 }
 
@@ -198,6 +286,9 @@ funksjon read_operation(req) -> ordbok_tekst {
         returner list_svar(sti, op == "list_typed")
     }
     hvis op == "walk_files" { returner walk_svar(req) }
+    hvis op == "open" { returner fh_opne(req, usann) }
+    hvis op == "read" { returner fh_les(req) }
+    hvis op == "close" { returner fh_lukk(req) }
     hvis op == "stat" eller op == "path_stat" {
         la sti = full_sti(req)
         hvis sti == "" { returner feilsvar("invalid path") }
@@ -213,6 +304,13 @@ funksjon write_operation(req) -> ordbok_tekst {
     la op = felt(req, "operation")
     la root = felt(req, "root")
     hvis root == "" { root = "." }
+    hvis op == "open" { returner fh_opne(req, sann) }
+    hvis op == "write" { returner fh_skriv(req) }
+    hvis op == "flush" {
+        hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+        returner svar("ok", "", 0, "")
+    }
+    hvis op == "close" { returner fh_lukk(req) }
     hvis op == "mkdir_p" {
         la sti = full_sti(req)
         hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid directory path") }
