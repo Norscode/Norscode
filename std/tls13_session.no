@@ -86,9 +86,11 @@ funksjon ny_klient(opts: ordbok) -> ordbok {
         "priv": c_priv, "pub": dh.scalarmult_base(c_priv),
         "hostname": opts["hostname"],
         "ca_der": _opt_liste(opts, "ca_der"),
+        "klient_cert": _opt_liste(opts, "client_cert_der"), "klient_seed": _opt_liste(opts, "client_priv_seed"),
+        "cert_requested": usann,
         "transcript": [], "inbuf": [],
         "seq_r": 0, "seq_w": 0,
-        "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
+        "peer_verified": usann, "peer_cert_present": usann, "peer_subject": "", "cipher": "", "tls_version": ""
     }
 }
 funksjon ny_tenar(opts: ordbok) -> ordbok {
@@ -101,9 +103,11 @@ funksjon ny_tenar(opts: ordbok) -> ordbok {
         "priv": s_priv, "pub": dh.scalarmult_base(s_priv),
         "id_seed": opts["id_seed"], "id_pub": t_id_pub,
         "cert_der": t_cert, "priv_seed": _opt_liste(opts, "priv_seed"),
+        "krev_klient": finnes_nøkkel(opts, "require_client_cert") og opts["require_client_cert"],
+        "klient_ca": _opt_liste(opts, "client_ca_der"),
         "transcript": [], "inbuf": [],
         "seq_r": 0, "seq_w": 0,
-        "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
+        "peer_verified": usann, "peer_cert_present": usann, "peer_subject": "", "cipher": "", "tls_version": ""
     }
 }
 
@@ -201,6 +205,8 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
         # Server flight (rå Ed25519-identitet som cert — M2a)
         la EE = hs.build_encrypted_extensions()
         s["transcript"] = _saman(s["transcript"], EE)
+        la CREQ: liste_heiltall = []
+        hvis s["krev_klient"] { CREQ = hs.build_certificate_request() s["transcript"] = _saman(s["transcript"], CREQ) }
         la srv_cert = s["cert_der"]
         hvis lengde(srv_cert) == 0 { srv_cert = s["id_pub"] }
         la CERT = hs.build_certificate(srv_cert)
@@ -217,24 +223,51 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
         s["transcript"] = _saman(s["transcript"], SFIN)
         _avled_app(s)
         # Krypter heile flighten (EE||CERT||CV||SFIN) som eitt record under sk_hs.
-        la flight = _saman(_saman(_saman(EE, CERT), CV), SFIN)
+        la flight = _saman(_saman(_saman(_saman(EE, CREQ), CERT), CV), SFIN)
         la enc = rec.krypter_post(s["sk_hs"]["key"], s["sk_hs"]["iv"], 0, 22, flight)
         s["fase"] = "vent_cfin"
         s["seq_r"] = 0
         returner {"status": "ventande", "feil": "", "ut": _saman(_rec_plain(22, SH), enc)}
     }
     hvis s["fase"] == "vent_cfin" {
-        hvis lengde(records) < 1 { returner _feil("ventar client Finished") }
+        hvis lengde(records) < 1 { returner _feil("ventar klient-flight") }
         la dec = rec.dekrypter_post(s["ck_hs"]["key"], s["ck_hs"]["iv"], 0, records[0])
-        hvis dec["status"] != "ok" eller dec["type"] != 22 { returner _feil("kunne ikkje dekryptere CFIN") }
+        hvis dec["status"] != "ok" eller dec["type"] != 22 { returner _feil("kunne ikkje dekryptere klient-flight") }
         la cf = dec["plaintext"]
-        la ph = hs.parse_handshake(cf, 0)
+        la p = 0
+        hvis s["krev_klient"] {
+            la cph = hs.parse_handshake(cf, p)
+            hvis ikkje cph["ok"] eller cph["type"] != 11 { returner _feil("forventa klient Certificate") }
+            la ccobj = hs.parse_certificate(cf, cph["start"], cph["end"])
+            hvis ikkje ccobj["ok"] eller lengde(ccobj["cert_der"]) == 0 { returner _feil("manglar klientsertifikat") }
+            la kc_der = ccobj["cert_der"]
+            s["transcript"] = _saman(s["transcript"], _slice(cf, p, cph["next"]))
+            la th_ccert = ks.transcript_hash(s["transcript"])
+            p = cph["next"]
+            la vph = hs.parse_handshake(cf, p)
+            hvis ikkje vph["ok"] eller vph["type"] != 15 { returner _feil("forventa klient CertificateVerify") }
+            la vobj = hs.parse_certificate_verify(cf, vph["start"], vph["end"])
+            hvis ikkje vobj["ok"] { returner _feil("ugyldig klient CertificateVerify") }
+            la cvc = hs.certificate_verify_content("TLS 1.3, client CertificateVerify", th_ccert)
+            la kk = x509.hent_offentleg_nøkkel(kc_der)
+            hvis kk["status"] != "ok" eller kk["type"] != "ed25519" { returner _feil("klientsertifikat ikkje Ed25519") }
+            hvis ikkje eddsa.verify(kk["pub"], cvc, vobj["signatur"]) { returner _feil("klient CertificateVerify ugyldig") }
+            hvis lengde(s["klient_ca"]) > 0 {
+                hvis ikkje (_lik(kc_der, s["klient_ca"]) eller x509.verifiser_signert_av(kc_der, s["klient_ca"])) { returner _feil("klientsertifikat ikkje tiltrudd") }
+            }
+            la kinfo = x509.les_der(kc_der)
+            hvis kinfo["status"] == "ok" { s["peer_subject"] = kinfo["subject"] }
+            s["peer_cert_present"] = sann
+            s["peer_verified"] = sann
+            s["transcript"] = _saman(s["transcript"], _slice(cf, p, vph["next"]))
+            p = vph["next"]
+        }
+        la ph = hs.parse_handshake(cf, p)
         hvis ikkje ph["ok"] eller ph["type"] != 20 { returner _feil("forventa Finished") }
         la cf_obj = hs.parse_finished(cf, ph["start"], ph["end"])
-        # Klientens Finished er over transcript CH..SFIN (før CFIN).
-        la th_sfin = ks.transcript_hash(s["transcript"])
-        hvis ikkje _lik(cf_obj["verify_data"], _finished_mac(s["c_hs"], th_sfin)) { returner _feil("client Finished MAC feil") }
-        s["transcript"] = _saman(s["transcript"], _slice(cf, 0, ph["next"]))
+        la th_fin = ks.transcript_hash(s["transcript"])
+        hvis ikkje _lik(cf_obj["verify_data"], _finished_mac(s["c_hs"], th_fin)) { returner _feil("client Finished MAC feil") }
+        s["transcript"] = _saman(s["transcript"], _slice(cf, p, ph["next"]))
         s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256"
         s["tls_version"] = "TLSv1.3"
         s["fase"] = "etablert"
@@ -305,6 +338,9 @@ funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
             s["transcript"] = _saman(s["transcript"], raw)
             s["hs_buf"] = _slice(buf, mph["next"], lengde(buf))
             returner {"status": "ferdig", "feil": "", "ut": []}
+        } ellers hvis t == 13 {
+            s["cert_requested"] = sann
+            s["transcript"] = _saman(s["transcript"], raw)
         } ellers {
             returner _feil("uventa handshake-type " + tekst(t))
         }
@@ -390,9 +426,21 @@ funksjon _klient_motta(s: ordbok, records: liste) -> ordbok {
                 _avled_app(s)
                 s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256"
                 s["tls_version"] = "TLSv1.3"
-                la th_sfin = ks.transcript_hash(s["transcript"])
-                la CFIN = hs.build_finished(_finished_mac(s["c_hs"], th_sfin))
-                la enc = rec.krypter_post(s["ck_hs"]["key"], s["ck_hs"]["iv"], 0, 22, CFIN)
+                la klient_flight: liste_heiltall = []
+                hvis s["cert_requested"] og lengde(s["klient_cert"]) > 0 {
+                    la CCERT = hs.build_certificate(s["klient_cert"])
+                    s["transcript"] = _saman(s["transcript"], CCERT)
+                    la th_cc = ks.transcript_hash(s["transcript"])
+                    la ccv_content = hs.certificate_verify_content("TLS 1.3, client CertificateVerify", th_cc)
+                    la ccv_sig = eddsa.sign(s["klient_seed"], ccv_content)
+                    la CCV = hs.build_certificate_verify(hs.SIG_ED25519(), ccv_sig)
+                    s["transcript"] = _saman(s["transcript"], CCV)
+                    klient_flight = _saman(CCERT, CCV)
+                }
+                la th_fin = ks.transcript_hash(s["transcript"])
+                la CFIN = hs.build_finished(_finished_mac(s["c_hs"], th_fin))
+                klient_flight = _saman(klient_flight, CFIN)
+                la enc = rec.krypter_post(s["ck_hs"]["key"], s["ck_hs"]["iv"], 0, 22, klient_flight)
                 s["transcript"] = _saman(s["transcript"], CFIN)
                 s["fase"] = "etablert"
                 s["seq_w"] = 0
