@@ -58,12 +58,25 @@ funksjon _rnd32() -> liste_heiltall {
 }
 
 # ─── Sesjonskonstruktørar ──────────────────────────────────────────────────
+funksjon _opt_liste(opts: ordbok, key: tekst) -> liste_heiltall {
+    hvis finnes_nøkkel(opts, key) { returner opts[key] }
+    returner []
+}
+# Tillit: tomt anker → hopp (loopback); rå pubkey → hopp; elles nøyaktig pinning
+# (sjølvsignert) eller CA-signert kjede.
+funksjon _verifiser_tillit(cert_der, ca_der) -> boolsk {
+    hvis lengde(ca_der) == 0 { returner sann }
+    hvis x509.les_der(cert_der)["status"] != "ok" { returner sann }
+    hvis _lik(cert_der, ca_der) { returner sann }
+    returner x509.verifiser_signert_av(cert_der, ca_der)
+}
 funksjon ny_klient(opts: ordbok) -> ordbok {
     la c_priv = opts["priv"]
     returner {
         "rolle": "klient", "fase": "start", "suite": "chacha20",
         "priv": c_priv, "pub": dh.scalarmult_base(c_priv),
         "hostname": opts["hostname"],
+        "ca_der": _opt_liste(opts, "ca_der"),
         "transcript": [], "inbuf": [],
         "seq_r": 0, "seq_w": 0,
         "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
@@ -75,6 +88,7 @@ funksjon ny_tenar(opts: ordbok) -> ordbok {
         "rolle": "tenar", "fase": "start", "suite": "chacha20",
         "priv": s_priv, "pub": dh.scalarmult_base(s_priv),
         "id_seed": opts["id_seed"], "id_pub": eddsa.public_key(opts["id_seed"]),
+        "cert_der": _opt_liste(opts, "cert_der"), "priv_seed": _opt_liste(opts, "priv_seed"),
         "transcript": [], "inbuf": [],
         "seq_r": 0, "seq_w": 0,
         "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
@@ -175,11 +189,15 @@ funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
         # Server flight (rå Ed25519-identitet som cert — M2a)
         la EE = hs.build_encrypted_extensions()
         s["transcript"] = _saman(s["transcript"], EE)
-        la CERT = hs.build_certificate(s["id_pub"])
+        la srv_cert = s["cert_der"]
+        hvis lengde(srv_cert) == 0 { srv_cert = s["id_pub"] }
+        la CERT = hs.build_certificate(srv_cert)
         s["transcript"] = _saman(s["transcript"], CERT)
         la th_cert = ks.transcript_hash(s["transcript"])
         la cv_content = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
-        la cv_sig = eddsa.sign(s["id_seed"], cv_content)
+        la cv_signøkkel = s["id_seed"]
+        hvis lengde(s["priv_seed"]) == 32 { cv_signøkkel = s["priv_seed"] }
+        la cv_sig = eddsa.sign(cv_signøkkel, cv_content)
         la CV = hs.build_certificate_verify(hs.SIG_ED25519(), cv_sig)
         s["transcript"] = _saman(s["transcript"], CV)
         la th_cv = ks.transcript_hash(s["transcript"])
@@ -242,7 +260,13 @@ funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
             la alg = cvobj["alg"]
             la cv_ok = usann
             hvis alg == hs.SIG_ED25519() {
-                cv_ok = eddsa.verify(s["cert_pub"], cv_content, cvobj["signatur"])
+                la ed_pub = s["cert_pub"]
+                la ed_nk = x509.hent_offentleg_nøkkel(s["cert_pub"])
+                hvis ed_nk["status"] == "ok" og ed_nk["type"] == "ed25519" {
+                    ed_pub = ed_nk["pub"]
+                    s["peer_subject"] = x509.subject_cn(s["cert_pub"])
+                }
+                cv_ok = eddsa.verify(ed_pub, cv_content, cvobj["signatur"])
             } ellers hvis alg == 1027 {
                 cv_ok = x509.verifiser_data_ecdsa(s["cert_pub"], cv_content, cvobj["signatur"])
                 s["peer_subject"] = x509.subject_cn(s["cert_pub"])
@@ -253,6 +277,12 @@ funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
             }
             hvis ikkje cv_ok { returner _feil("CertificateVerify-signatur ugyldig (alg " + tekst(alg) + ")") }
             s["peer_verified"] = sann
+            hvis ikkje _verifiser_vertsnamn(s["cert_pub"], s["hostname"]) {
+                returner _feil("sertifikat gjeld ikkje vertsnamn " + s["hostname"])
+            }
+            hvis ikkje _verifiser_tillit(s["cert_pub"], s["ca_der"]) {
+                returner _feil("sertifikat ikkje tiltrudd")
+            }
             s["transcript"] = _saman(s["transcript"], raw)
         } ellers hvis t == 20 {
             la sfobj = hs.parse_finished(buf, mph["start"], mph["end"])
@@ -268,6 +298,47 @@ funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
     }
     s["hs_buf"] = _slice(buf, p, lengde(buf))
     returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+# ── Vertsnamn-verifikasjon (RFC 6125): klienten sjekkar at tenar-sertifikatet
+# gjeld det etterspurde vertsnamnet. Rå Ed25519-pubkey (loopback-protokollen)
+# er ikkje eit x509-sertifikat → les_der feilar → hopp over (ingen identitet).
+funksjon _vert_matchar_san(hostname: tekst, sans: liste_tekst) -> ordbok {
+    la hn = builtin.lower(hostname)
+    la har_san = usann
+    la treff = usann
+    la i = 0
+    mens i < lengde(sans) {
+        la san = sans[i]
+        hvis builtin.starts_with(san, "DNS:") {
+            har_san = sann
+            la navn = builtin.lower(builtin.slice(san, 4, lengde(san)))
+            hvis navn == hn { treff = sann }
+            hvis builtin.starts_with(navn, "*.") {
+                la suffix = builtin.slice(navn, 1, lengde(navn))
+                hvis builtin.ends_with(hn, suffix) {
+                    la fram = builtin.slice(hn, 0, lengde(hn) - lengde(suffix))
+                    hvis lengde(fram) > 0 og ikkje builtin.contains(fram, ".") { treff = sann }
+                }
+            }
+        } ellers hvis builtin.starts_with(san, "IP:") {
+            har_san = sann
+            hvis builtin.slice(san, 3, lengde(san)) == hostname { treff = sann }
+        }
+        i = i + 1
+    }
+    returner {"har_san": har_san, "treff": treff}
+}
+
+funksjon _verifiser_vertsnamn(cert_der, hostname: tekst) -> boolsk {
+    hvis hostname == "" { returner sann }
+    la info = x509.les_der(cert_der)
+    hvis info["status"] != "ok" { returner sann }
+    la res = _vert_matchar_san(hostname, info["sans"])
+    hvis res["treff"] { returner sann }
+    hvis res["har_san"] { returner usann }
+    la cn = builtin.lower(x509.subject_cn(cert_der))
+    returner cn != "" og cn == builtin.lower(hostname)
 }
 
 funksjon _klient_motta(s: ordbok, records: liste) -> ordbok {
