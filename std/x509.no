@@ -4,6 +4,9 @@
 bruk std.base64 som base64
 bruk std.bytes som bytes
 bruk std.sha256 som sha256
+bruk std.rsa som rsa
+bruk std.bigint som bn
+bruk std.ecdsa_p256 som ecdsa
 
 funksjon _hex_byte(v: heiltall) -> tekst {
     la h = "0123456789ABCDEF"
@@ -205,4 +208,241 @@ funksjon les_kjede_pem(pem: tekst, maks_sertifikat: heiltall) -> liste {
     }
     hvis i < lengde(delar) { returner [] }
     returner ut
+}
+
+# Hentar RSA privat nøkkel (n, d, e) frå ein PEM-streng. Støttar PKCS#8
+# («BEGIN PRIVATE KEY») og PKCS#1 («BEGIN RSA PRIVATE KEY»). Brukt av ACME
+# JWS RS256-signering (native_gap.acme_sign). Fail-closed: status != "ok" ved feil.
+funksjon rsa_privat_frå_pem(pem: tekst) -> ordbok {
+    la delar = builtin.split(pem, "-----")
+    # PEM: ["", "BEGIN … KEY", "\n<base64>\n", "END … KEY", ...] → body = delar[2]
+    hvis lengde(delar) < 3 { returner {"status": "feil", "error": "ugyldig PEM"} }
+    la body = builtin.replace(builtin.replace(builtin.replace(builtin.replace(delar[2], "\n", ""), "\r", ""), " ", ""), "\t", "")
+    la der = base64.dekod_bytes(body)
+    la rsapk_start = 0
+    la rsapk_end = lengde(der)
+    hvis builtin.index_of(pem, "BEGIN PRIVATE KEY") >= 0 {
+        # PKCS#8: SEQUENCE { version, algorithm SEQUENCE, privateKey OCTET STRING }
+        la outer = _tlv(der, 0, lengde(der))
+        hvis ikkje outer["ok"] eller outer["tag"] != 48 { returner {"status": "feil", "error": "ugyldig PKCS#8"} }
+        la ver = _tlv(der, outer["start"], outer["end"])
+        la alg = _tlv(der, ver["next"], outer["end"])
+        la pk = _tlv(der, alg["next"], outer["end"])
+        hvis ikkje pk["ok"] eller pk["tag"] != 4 { returner {"status": "feil", "error": "manglar privateKey OCTET STRING"} }
+        rsapk_start = pk["start"]
+        rsapk_end = pk["end"]
+    }
+    # RSAPrivateKey ::= SEQUENCE { version, n, e, d, p, q, ... }
+    la seq = _tlv(der, rsapk_start, rsapk_end)
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"status": "feil", "error": "ugyldig RSAPrivateKey"} }
+    la v = _tlv(der, seq["start"], seq["end"])
+    la nnode = _tlv(der, v["next"], seq["end"])
+    hvis ikkje nnode["ok"] eller nnode["tag"] != 2 { returner {"status": "feil", "error": "manglar modulus"} }
+    la enode = _tlv(der, nnode["next"], seq["end"])
+    la dnode = _tlv(der, enode["next"], seq["end"])
+    hvis ikkje dnode["ok"] eller dnode["tag"] != 2 { returner {"status": "feil", "error": "manglar privat eksponent"} }
+    returner {"status": "ok", "n": _int_bytes(der, nnode), "e": _int_bytes(der, enode), "d": _int_bytes(der, dnode)}
+}
+
+# Hentar EC (P-256) privat skalar `d` (32 bytes) frå ein PKCS#8 PEM-streng
+# («BEGIN PRIVATE KEY»). Brukt av ACME JWS ES256-signering (native_gap.acme_sign).
+funksjon ec_privat_frå_pem(pem: tekst) -> ordbok {
+    la delar = builtin.split(pem, "-----")
+    hvis lengde(delar) < 3 { returner {"status": "feil", "error": "ugyldig PEM"} }
+    la body = builtin.replace(builtin.replace(builtin.replace(builtin.replace(delar[2], "\n", ""), "\r", ""), " ", ""), "\t", "")
+    la der = base64.dekod_bytes(body)
+    la outer = _tlv(der, 0, lengde(der))                 # PrivateKeyInfo SEQUENCE
+    hvis ikkje outer["ok"] eller outer["tag"] != 48 { returner {"status": "feil", "error": "ugyldig PKCS#8"} }
+    la ver = _tlv(der, outer["start"], outer["end"])      # version
+    la alg = _tlv(der, ver["next"], outer["end"])         # privateKeyAlgorithm SEQUENCE
+    la pk = _tlv(der, alg["next"], outer["end"])          # privateKey OCTET STRING
+    hvis ikkje pk["ok"] eller pk["tag"] != 4 { returner {"status": "feil", "error": "manglar privateKey"} }
+    la ecseq = _tlv(der, pk["start"], pk["end"])          # ECPrivateKey SEQUENCE
+    hvis ikkje ecseq["ok"] eller ecseq["tag"] != 48 { returner {"status": "feil", "error": "ugyldig ECPrivateKey"} }
+    la ecver = _tlv(der, ecseq["start"], ecseq["end"])    # version
+    la dnode = _tlv(der, ecver["next"], ecseq["end"])     # privateKey d OCTET STRING
+    hvis ikkje dnode["ok"] eller dnode["tag"] != 4 { returner {"status": "feil", "error": "manglar EC-skalar"} }
+    returner {"status": "ok", "d": _skjer_bytes(der, dnode["start"], dnode["end"])}
+}
+
+# ─── Signaturverifisering (kjede + CertificateVerify-nøkkeluttrekk) ──────────
+# Utvidinga hentar subjectPublicKeyInfo, tbsCertificate og ytre signatur slik at
+# ein kan verifisere at eit sertifikat er signert av ein utferdar. RSA (PKCS#1
+# v1.5 + SHA-256) og ECDSA-P256 (SHA-256) er dei to algoritmane web-PKI + Pebble
+# bruker. Rein Norscode; ingen privat nøkkel blir handtert her.
+
+funksjon _skjer_bytes(data: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = a
+    mens i < b {
+        legg_til(ut, data[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+# Rå 32-byte SHA-256 (sha256.hash_bytes gjev hex-tekst).
+funksjon _raw_sha256(melding: liste_heiltall) -> liste_heiltall {
+    la hexs = sha256.hash_bytes(melding)
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < 32 {
+        la hi = builtin.index_of("0123456789abcdef", builtin.slice(hexs, i*2, i*2+1))
+        la lo = builtin.index_of("0123456789abcdef", builtin.slice(hexs, i*2+1, i*2+2))
+        legg_til(ut, hi*16 + lo)
+        i = i + 1
+    }
+    returner ut
+}
+
+# INTEGER-innhald utan leiande null-byte (DER-INTEGER er signert; positive tal med
+# høgste bit sett får ein leiande 0x00 som ikkje høyrer til talet).
+funksjon _int_bytes(data: liste_heiltall, node: ordbok) -> liste_heiltall {
+    la s = node["start"]
+    mens s < node["end"] - 1 og data[s] == 0 {
+        s = s + 1
+    }
+    returner _skjer_bytes(data, s, node["end"])
+}
+
+# Hentar offentleg nøkkel frå TBS-en. Returnerer {status,type,...}:
+#   RSA → {"type":"rsa","n":bytes,"e":bytes}
+#   EC  → {"type":"ec","qx":bytes(32),"qy":bytes(32)}
+funksjon _spki(data: liste_heiltall, tbs: ordbok) -> ordbok {
+    la p = tbs["start"]
+    la first = _tlv(data, p, tbs["end"])
+    hvis ikkje first["ok"] { returner {"status": "feil", "error": "ugyldig TBS"} }
+    hvis first["tag"] == 160 { p = first["next"] }
+    la serial = _tlv(data, p, tbs["end"])
+    hvis ikkje serial["ok"] { returner {"status": "feil", "error": "manglar serial"} }
+    p = serial["next"]
+    la sig = _tlv(data, p, tbs["end"])
+    hvis ikkje sig["ok"] { returner {"status": "feil", "error": "manglar sig-alg"} }
+    p = sig["next"]
+    la issuer = _tlv(data, p, tbs["end"])
+    hvis ikkje issuer["ok"] { returner {"status": "feil", "error": "manglar issuer"} }
+    p = issuer["next"]
+    la validity = _tlv(data, p, tbs["end"])
+    hvis ikkje validity["ok"] { returner {"status": "feil", "error": "manglar gyldigheit"} }
+    p = validity["next"]
+    la subject = _tlv(data, p, tbs["end"])
+    hvis ikkje subject["ok"] { returner {"status": "feil", "error": "manglar subject"} }
+    p = subject["next"]
+    la spki = _tlv(data, p, tbs["end"])
+    hvis ikkje spki["ok"] eller spki["tag"] != 48 { returner {"status": "feil", "error": "manglar SPKI"} }
+    la alg = _tlv(data, spki["start"], spki["end"])
+    hvis ikkje alg["ok"] eller alg["tag"] != 48 { returner {"status": "feil", "error": "ugyldig nøkkelalg"} }
+    la algoid_node = _tlv(data, alg["start"], alg["end"])
+    hvis ikkje algoid_node["ok"] eller algoid_node["tag"] != 6 { returner {"status": "feil", "error": "manglar nøkkel-OID"} }
+    la algoid = _oid(data, algoid_node)
+    la keybits = _tlv(data, alg["next"], spki["end"])
+    hvis ikkje keybits["ok"] eller keybits["tag"] != 3 { returner {"status": "feil", "error": "manglar nøkkel-bitstreng"} }
+    la pk = _skjer_bytes(data, keybits["start"] + 1, keybits["end"])
+    hvis algoid == "2A864886F70D010101" {
+        la seq = _tlv(pk, 0, lengde(pk))
+        hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner {"status": "feil", "error": "ugyldig RSA-nøkkel"} }
+        la nnode = _tlv(pk, seq["start"], seq["end"])
+        hvis ikkje nnode["ok"] eller nnode["tag"] != 2 { returner {"status": "feil", "error": "manglar RSA-modulus"} }
+        la enode = _tlv(pk, nnode["next"], seq["end"])
+        hvis ikkje enode["ok"] eller enode["tag"] != 2 { returner {"status": "feil", "error": "manglar RSA-eksponent"} }
+        returner {"status": "ok", "type": "rsa", "n": _int_bytes(pk, nnode), "e": _int_bytes(pk, enode)}
+    }
+    hvis algoid == "2A8648CE3D0201" {
+        hvis lengde(pk) < 65 eller pk[0] != 4 { returner {"status": "feil", "error": "uventa EC-punkt"} }
+        returner {"status": "ok", "type": "ec", "qx": _skjer_bytes(pk, 1, 33), "qy": _skjer_bytes(pk, 33, 65)}
+    }
+    returner {"status": "feil", "error": "ukjend nøkkelalgoritme " + algoid}
+}
+
+# Offentleg: hent nøkkelen frå eit DER/bytes-sertifikat.
+funksjon hent_offentleg_nøkkel(buffer) -> ordbok {
+    la data = buffer
+    hvis bytes.er_bytes(buffer) { data = bytes.til_liste(buffer) }
+    la cert = _tlv(data, 0, lengde(data))
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 { returner {"status": "feil", "error": "ugyldig sertifikat"} }
+    la tbs = _tlv(data, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner {"status": "feil", "error": "manglar TBS"} }
+    returner _spki(data, tbs)
+}
+
+# Verifiser at `sertifikat` er signert av `utferdar` (begge DER/bytes/PEM-lista til
+# liste_heiltall). Fail-closed: returnerer sann berre ved gyldig signatur.
+funksjon verifiser_signert_av(sertifikat, utferdar) -> boolsk {
+    la data = sertifikat
+    hvis bytes.er_bytes(sertifikat) { data = bytes.til_liste(sertifikat) }
+    la cert = _tlv(data, 0, lengde(data))
+    hvis ikkje cert["ok"] eller cert["tag"] != 48 { returner usann }
+    la tbs = _tlv(data, cert["start"], cert["end"])
+    hvis ikkje tbs["ok"] eller tbs["tag"] != 48 { returner usann }
+    la tbs_raw = _skjer_bytes(data, cert["start"], tbs["end"])
+    la sigalg = _tlv(data, tbs["next"], cert["end"])
+    hvis ikkje sigalg["ok"] eller sigalg["tag"] != 48 { returner usann }
+    la sigval = _tlv(data, sigalg["next"], cert["end"])
+    hvis ikkje sigval["ok"] eller sigval["tag"] != 3 { returner usann }
+    la sig = _skjer_bytes(data, sigval["start"] + 1, sigval["end"])
+    la nøkkel = hent_offentleg_nøkkel(utferdar)
+    hvis nøkkel["status"] != "ok" { returner usann }
+    hvis nøkkel["type"] == "rsa" {
+        returner rsa.rsa_verify(nøkkel["n"], nøkkel["e"], tbs_raw, sig)
+    }
+    hvis nøkkel["type"] == "ec" {
+        # ECDSA-signatur = DER SEQUENCE { INTEGER r, INTEGER s }.
+        la sq = _tlv(sig, 0, lengde(sig))
+        hvis ikkje sq["ok"] eller sq["tag"] != 48 { returner usann }
+        la rnode = _tlv(sig, sq["start"], sq["end"])
+        hvis ikkje rnode["ok"] eller rnode["tag"] != 2 { returner usann }
+        la snode = _tlv(sig, rnode["next"], sq["end"])
+        hvis ikkje snode["ok"] eller snode["tag"] != 2 { returner usann }
+        la r_bn = bn.fra_bytes(_int_bytes(sig, rnode))
+        la s_bn = bn.fra_bytes(_int_bytes(sig, snode))
+        # ECDSA-P256 over SHA-256(tbs); SHA-256 er 256 bit → inga trunkering.
+        la hash_bn = bn.fra_bytes(_raw_sha256(tbs_raw))
+        la qx = bn.fra_bytes(nøkkel["qx"])
+        la qy = bn.fra_bytes(nøkkel["qy"])
+        returner ecdsa.ecdsa_verify(qx, qy, hash_bn, r_bn, s_bn)
+    }
+    returner usann
+}
+
+# Verifiser ein ECDSA-P256-signatur (DER SEQUENCE{r,s}) over vilkårleg `data`
+# (SHA-256) med den offentlege nøkkelen i `sertifikat`. Brukt av TLS 1.3
+# CertificateVerify (ecdsa_secp256r1_sha256).
+funksjon verifiser_data_ecdsa(sertifikat, data: liste_heiltall, sig: liste_heiltall) -> boolsk {
+    la nøkkel = hent_offentleg_nøkkel(sertifikat)
+    hvis nøkkel["status"] != "ok" eller nøkkel["type"] != "ec" { returner usann }
+    la sq = _tlv(sig, 0, lengde(sig))
+    hvis ikkje sq["ok"] eller sq["tag"] != 48 { returner usann }
+    la rnode = _tlv(sig, sq["start"], sq["end"])
+    hvis ikkje rnode["ok"] eller rnode["tag"] != 2 { returner usann }
+    la snode = _tlv(sig, rnode["next"], sq["end"])
+    hvis ikkje snode["ok"] eller snode["tag"] != 2 { returner usann }
+    la r_bn = bn.fra_bytes(_int_bytes(sig, rnode))
+    la s_bn = bn.fra_bytes(_int_bytes(sig, snode))
+    la hash_bn = bn.fra_bytes(_raw_sha256(data))
+    la qx = bn.fra_bytes(nøkkel["qx"])
+    la qy = bn.fra_bytes(nøkkel["qy"])
+    returner ecdsa.ecdsa_verify(qx, qy, hash_bn, r_bn, s_bn)
+}
+
+# Verifiser ein RSASSA-PSS-SHA256-signatur over vilkårleg `data` med den
+# offentlege nøkkelen i `sertifikat`. Brukt av TLS 1.3 CertificateVerify
+# (rsa_pss_rsae_sha256, 0x0804) — t.d. Go/Pebble sin ACME-tenar.
+funksjon verifiser_data_rsa_pss(sertifikat, data: liste_heiltall, sig: liste_heiltall) -> boolsk {
+    la nøkkel = hent_offentleg_nøkkel(sertifikat)
+    hvis nøkkel["status"] != "ok" eller nøkkel["type"] != "rsa" { returner usann }
+    returner rsa.rsa_pss_verify(nøkkel["n"], nøkkel["e"], data, sig)
+}
+
+# Hentar subject-CN (for hostname-sjekk). Tom streng om ikkje funne.
+funksjon subject_cn(sertifikat) -> tekst {
+    la info = les_der(sertifikat)
+    hvis info["status"] != "ok" { returner "" }
+    la subj = info["subject"]
+    la delar = builtin.split(subj, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        hvis builtin.starts_with(delar[i], "CN=") { returner builtin.slice(delar[i], 3, lengde(delar[i])) }
+        i = i + 1
+    }
+    returner ""
 }

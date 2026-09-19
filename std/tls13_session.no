@@ -1,0 +1,350 @@
+# tls13_session.no — inkrementell TLS 1.3-sesjon (RFC 8446) i rein Norscode.
+# Byte-inn/byte-ut tilstandsmaskin for klient- og tenar-rolla, med record-lag,
+# slik at han kan drivast over ein rå sokkel (native_gap tls_*). Krypto og
+# handshake-meldingar kjem frå dei eksisterande modulane; her ligg SEKVENSERINGA,
+# record-ramminga og tilstandshandteringa.
+#
+# M2a-suite: TLS_CHACHA20_POLY1305_SHA256, X25519, Ed25519-identitet (rå pubkey
+# som sertifikatinnhald — same som tls13_handshake_flow). M2b byter til X.509 +
+# RSA-PSS/ECDSA for interop mot ekte tenarar (Pebble) og RSA-fixtures.
+bruk std.tls13_handshake som hs
+bruk std.tls13_keyschedule som ks
+bruk std.tls13_record som rec
+bruk std.x25519 som dh
+bruk std.ed25519 som eddsa
+bruk std.sha256 som sha
+bruk std.x509 som x509
+
+funksjon _kopi(a: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    returner ut
+}
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut = _kopi(a)
+    la i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+
+# finished_key = HKDF-Expand-Label(secret,"finished","",32); MAC = HMAC-SHA256.
+funksjon _finished_mac(secret: liste_heiltall, thash: liste_heiltall) -> liste_heiltall {
+    returner sha.hmac_sha256_bytes(ks.expand_label(secret, "finished", [], 32), thash)
+}
+
+# Plaintext record (type || 0x0303 || len || body).
+funksjon _rec_plain(type: heiltall, body: liste_heiltall) -> liste_heiltall {
+    la n = lengde(body)
+    la ut: liste_heiltall = [type & 255, 3, 3, (n >> 8) & 255, n & 255]
+    la i = 0
+    mens i < n { legg_til(ut, body[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _rnd32() -> liste_heiltall {
+    # Deterministisk null-random held M2a-testen reproduserbar; M3 byter til
+    # ekte random frå runtime (getrandom-atomet på fersk seed).
+    la r: liste_heiltall = []
+    la i = 0
+    mens i < 32 { legg_til(r, 0) i = i + 1 }
+    returner r
+}
+
+# ─── Sesjonskonstruktørar ──────────────────────────────────────────────────
+funksjon ny_klient(opts: ordbok) -> ordbok {
+    la c_priv = opts["priv"]
+    returner {
+        "rolle": "klient", "fase": "start", "suite": "chacha20",
+        "priv": c_priv, "pub": dh.scalarmult_base(c_priv),
+        "hostname": opts["hostname"],
+        "transcript": [], "inbuf": [],
+        "seq_r": 0, "seq_w": 0,
+        "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
+    }
+}
+funksjon ny_tenar(opts: ordbok) -> ordbok {
+    la s_priv = opts["priv"]
+    returner {
+        "rolle": "tenar", "fase": "start", "suite": "chacha20",
+        "priv": s_priv, "pub": dh.scalarmult_base(s_priv),
+        "id_seed": opts["id_seed"], "id_pub": eddsa.public_key(opts["id_seed"]),
+        "transcript": [], "inbuf": [],
+        "seq_r": 0, "seq_w": 0,
+        "peer_verified": usann, "peer_subject": "", "cipher": "", "tls_version": ""
+    }
+}
+
+# ─── Nøkkelplan-hjelpar ─────────────────────────────────────────────────────
+# Etter at begge partar kjenner delt ECDHE + transcript(CH..SH): utleid hs-nøklar.
+funksjon _avled_hs(s: ordbok, delt: liste_heiltall) -> heiltall {
+    la th_sh = ks.transcript_hash(s["transcript"])
+    la early = ks.early_secret([])
+    la derived1 = ks.derive_secret(early, "derived", ks.transcript_hash([]))
+    la hs_secret = ks.handshake_secret(derived1, delt)
+    s["hs_secret"] = hs_secret
+    s["c_hs"] = ks.derive_secret(hs_secret, "c hs traffic", th_sh)
+    s["s_hs"] = ks.derive_secret(hs_secret, "s hs traffic", th_sh)
+    la derived2 = ks.derive_secret(hs_secret, "derived", ks.transcript_hash([]))
+    s["master"] = ks.master_secret(derived2)
+    s["ck_hs"] = rec.traffic_keys(s["c_hs"])
+    s["sk_hs"] = rec.traffic_keys(s["s_hs"])
+    returner 0
+}
+
+# App-trafikk-nøklar etter server Finished (transcript CH..SFIN).
+funksjon _avled_app(s: ordbok) -> heiltall {
+    la th = ks.transcript_hash(s["transcript"])
+    s["c_ap"] = ks.derive_secret(s["master"], "c ap traffic", th)
+    s["s_ap"] = ks.derive_secret(s["master"], "s ap traffic", th)
+    s["ck_ap"] = rec.traffic_keys(s["c_ap"])
+    s["sk_ap"] = rec.traffic_keys(s["s_ap"])
+    returner 0
+}
+
+funksjon _feil(melding: tekst) -> ordbok {
+    returner {"status": "feil", "feil": melding, "ut": []}
+}
+
+# ─── Klient: bygg ClientHello og send ──────────────────────────────────────
+funksjon start(s: ordbok) -> liste_heiltall {
+    hvis s["rolle"] != "klient" { returner [] }
+    la CH = hs.build_client_hello({"random": _rnd32(), "session_id": [], "key_share_pub": s["pub"], "server_name": s["hostname"]})
+    s["transcript"] = _saman(s["transcript"], CH)
+    s["fase"] = "vent_sh"
+    returner _rec_plain(22, CH)
+}
+
+# Del ein byte-straum i komplette records. Returnerer {records: liste<liste>, rest: liste}.
+funksjon _split_records(buf: liste_heiltall) -> ordbok {
+    la records: liste = []
+    la p = 0
+    mens p + 5 <= lengde(buf) {
+        la len = (buf[p+3] << 8) | buf[p+4]
+        hvis p + 5 + len > lengde(buf) { stopp }
+        la r: liste_heiltall = []
+        la i = p
+        mens i < p + 5 + len { legg_til(r, buf[i]) i = i + 1 }
+        legg_til(records, r)
+        p = p + 5 + len
+    }
+    la rest: liste_heiltall = []
+    la j = p
+    mens j < lengde(buf) { legg_til(rest, buf[j]) j = j + 1 }
+    returner {"records": records, "rest": rest}
+}
+
+# Hent handshake-innhald frå eit plaintext record (type 22).
+funksjon _rec_body(r: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 5
+    mens i < lengde(r) { legg_til(ut, r[i]) i = i + 1 }
+    returner ut
+}
+
+funksjon _slice(d: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = a
+    mens i < b { legg_til(ut, d[i]) i = i + 1 }
+    returner ut
+}
+
+# ─── Tenar: motta ClientHello, send SH + kryptert flight ────────────────────
+funksjon _tenar_motta(s: ordbok, records: liste) -> ordbok {
+    hvis s["fase"] == "start" {
+        hvis lengde(records) < 1 { returner _feil("ventar ClientHello") }
+        la chrec = records[0]
+        hvis chrec[0] != 22 { returner _feil("forventa handshake-record") }
+        la ch = _rec_body(chrec)
+        la ph = hs.parse_handshake(ch, 0)
+        hvis ikkje ph["ok"] eller ph["type"] != 1 { returner _feil("ugyldig ClientHello") }
+        la cparsed = hs.parse_client_hello(ch, ph["start"], ph["end"])
+        hvis ikkje cparsed["ok"] { returner _feil("kunne ikkje parse ClientHello") }
+        s["transcript"] = _saman(s["transcript"], _slice(ch, 0, ph["next"]))
+        # ServerHello
+        la SH = hs.build_server_hello({"random": _rnd32(), "session_id": [], "key_share_pub": s["pub"]})
+        s["transcript"] = _saman(s["transcript"], SH)
+        la delt = dh.scalarmult(s["priv"], cparsed["key_share_pub"])
+        _avled_hs(s, delt)
+        # Server flight (rå Ed25519-identitet som cert — M2a)
+        la EE = hs.build_encrypted_extensions()
+        s["transcript"] = _saman(s["transcript"], EE)
+        la CERT = hs.build_certificate(s["id_pub"])
+        s["transcript"] = _saman(s["transcript"], CERT)
+        la th_cert = ks.transcript_hash(s["transcript"])
+        la cv_content = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
+        la cv_sig = eddsa.sign(s["id_seed"], cv_content)
+        la CV = hs.build_certificate_verify(hs.SIG_ED25519(), cv_sig)
+        s["transcript"] = _saman(s["transcript"], CV)
+        la th_cv = ks.transcript_hash(s["transcript"])
+        la SFIN = hs.build_finished(_finished_mac(s["s_hs"], th_cv))
+        s["transcript"] = _saman(s["transcript"], SFIN)
+        _avled_app(s)
+        # Krypter heile flighten (EE||CERT||CV||SFIN) som eitt record under sk_hs.
+        la flight = _saman(_saman(_saman(EE, CERT), CV), SFIN)
+        la enc = rec.krypter_post(s["sk_hs"]["key"], s["sk_hs"]["iv"], 0, 22, flight)
+        s["fase"] = "vent_cfin"
+        s["seq_r"] = 0
+        returner {"status": "ventande", "feil": "", "ut": _saman(_rec_plain(22, SH), enc)}
+    }
+    hvis s["fase"] == "vent_cfin" {
+        hvis lengde(records) < 1 { returner _feil("ventar client Finished") }
+        la dec = rec.dekrypter_post(s["ck_hs"]["key"], s["ck_hs"]["iv"], 0, records[0])
+        hvis dec["status"] != "ok" eller dec["type"] != 22 { returner _feil("kunne ikkje dekryptere CFIN") }
+        la cf = dec["plaintext"]
+        la ph = hs.parse_handshake(cf, 0)
+        hvis ikkje ph["ok"] eller ph["type"] != 20 { returner _feil("forventa Finished") }
+        la cf_obj = hs.parse_finished(cf, ph["start"], ph["end"])
+        # Klientens Finished er over transcript CH..SFIN (før CFIN).
+        la th_sfin = ks.transcript_hash(s["transcript"])
+        hvis ikkje _lik(cf_obj["verify_data"], _finished_mac(s["c_hs"], th_sfin)) { returner _feil("client Finished MAC feil") }
+        s["transcript"] = _saman(s["transcript"], _slice(cf, 0, ph["next"]))
+        s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256"
+        s["tls_version"] = "TLSv1.3"
+        s["fase"] = "etablert"
+        s["seq_w"] = 0
+        s["seq_r"] = 0
+        returner {"status": "ferdig", "feil": "", "ut": []}
+    }
+    returner _feil("uventa tenar-fase " + s["fase"])
+}
+
+# ─── Klient: streaming-handshake (robust mot ekte tenarar: CCS-record, fleire
+# krypterte records, og flight fordelt over fleire motta()-kall) ──────────────
+# Parse komplette handshake-meldingar frå s["hs_buf"], prosesser kvar. Returnerer
+# ferdig når server Finished er verifisert (då er transcript = CH..server-Finished).
+funksjon _klient_prosesser_hs(s: ordbok) -> ordbok {
+    la buf = s["hs_buf"]
+    la p = 0
+    mens p + 4 <= lengde(buf) {
+        la mph = hs.parse_handshake(buf, p)
+        hvis ikkje mph["ok"] eller mph["next"] > lengde(buf) { stopp }   # ufullstendig → vent på meir
+        la raw = _slice(buf, p, mph["next"])
+        la t = mph["type"]
+        hvis t == 8 {
+            s["transcript"] = _saman(s["transcript"], raw)
+        } ellers hvis t == 11 {
+            la cobj = hs.parse_certificate(buf, mph["start"], mph["end"])
+            hvis ikkje cobj["ok"] { returner _feil("ugyldig Certificate") }
+            s["cert_pub"] = cobj["cert_der"]
+            s["transcript"] = _saman(s["transcript"], raw)
+            s["th_cert"] = ks.transcript_hash(s["transcript"])
+        } ellers hvis t == 15 {
+            la cvobj = hs.parse_certificate_verify(buf, mph["start"], mph["end"])
+            hvis ikkje cvobj["ok"] { returner _feil("ugyldig CertificateVerify") }
+            la cv_content = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", s["th_cert"])
+            la alg = cvobj["alg"]
+            la cv_ok = usann
+            hvis alg == hs.SIG_ED25519() {
+                cv_ok = eddsa.verify(s["cert_pub"], cv_content, cvobj["signatur"])
+            } ellers hvis alg == 1027 {
+                cv_ok = x509.verifiser_data_ecdsa(s["cert_pub"], cv_content, cvobj["signatur"])
+                s["peer_subject"] = x509.subject_cn(s["cert_pub"])
+            } ellers hvis alg == 2052 {
+                # rsa_pss_rsae_sha256 (0x0804) — Go/Pebble sin ACME-tenar.
+                cv_ok = x509.verifiser_data_rsa_pss(s["cert_pub"], cv_content, cvobj["signatur"])
+                s["peer_subject"] = x509.subject_cn(s["cert_pub"])
+            }
+            hvis ikkje cv_ok { returner _feil("CertificateVerify-signatur ugyldig (alg " + tekst(alg) + ")") }
+            s["peer_verified"] = sann
+            s["transcript"] = _saman(s["transcript"], raw)
+        } ellers hvis t == 20 {
+            la sfobj = hs.parse_finished(buf, mph["start"], mph["end"])
+            la th_cv = ks.transcript_hash(s["transcript"])
+            hvis ikkje _lik(sfobj["verify_data"], _finished_mac(s["s_hs"], th_cv)) { returner _feil("server Finished MAC feil") }
+            s["transcript"] = _saman(s["transcript"], raw)
+            s["hs_buf"] = _slice(buf, mph["next"], lengde(buf))
+            returner {"status": "ferdig", "feil": "", "ut": []}
+        } ellers {
+            returner _feil("uventa handshake-type " + tekst(t))
+        }
+        p = mph["next"]
+    }
+    s["hs_buf"] = _slice(buf, p, lengde(buf))
+    returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+funksjon _klient_motta(s: ordbok, records: liste) -> ordbok {
+    la ri = 0
+    mens ri < lengde(records) {
+        la r = records[ri]
+        la rtype = r[0]
+        ri = ri + 1
+        hvis rtype == 20 { fortsett }   # ChangeCipherSpec (middleware-compat) — hopp over
+        hvis s["fase"] == "vent_sh" {
+            hvis rtype != 22 { returner _feil("forventa ServerHello, fekk record-type " + tekst(rtype)) }
+            la sh = _rec_body(r)
+            la ph = hs.parse_handshake(sh, 0)
+            hvis ikkje ph["ok"] eller ph["type"] != 2 { returner _feil("ugyldig ServerHello") }
+            la sparsed = hs.parse_server_hello(sh, ph["start"], ph["end"])
+            hvis ikkje sparsed["ok"] { returner _feil("kunne ikkje parse ServerHello") }
+            s["transcript"] = _saman(s["transcript"], _slice(sh, 0, ph["next"]))
+            la delt = dh.scalarmult(s["priv"], sparsed["key_share_pub"])
+            _avled_hs(s, delt)
+            s["hs_buf"] = []
+            s["seq_r_hs"] = 0
+            s["cert_pub"] = []
+            s["th_cert"] = []
+            s["fase"] = "vent_flight"
+        } ellers hvis s["fase"] == "vent_flight" {
+            hvis rtype != 23 { returner _feil("forventa kryptert record, fekk " + tekst(rtype)) }
+            la dec = rec.dekrypter_post(s["sk_hs"]["key"], s["sk_hs"]["iv"], s["seq_r_hs"], r)
+            hvis dec["status"] != "ok" { returner _feil("kunne ikkje dekryptere hs-record") }
+            s["seq_r_hs"] = s["seq_r_hs"] + 1
+            hvis dec["type"] != 22 { fortsett }   # ikkje handshake (t.d. alert/CCS-inner) — hopp
+            s["hs_buf"] = _saman(s["hs_buf"], dec["plaintext"])
+            la pr = _klient_prosesser_hs(s)
+            hvis pr["status"] == "feil" { returner pr }
+            hvis pr["status"] == "ferdig" {
+                hvis ikkje s["peer_verified"] { returner _feil("mangla CertificateVerify") }
+                _avled_app(s)
+                s["cipher"] = "TLS_CHACHA20_POLY1305_SHA256"
+                s["tls_version"] = "TLSv1.3"
+                la th_sfin = ks.transcript_hash(s["transcript"])
+                la CFIN = hs.build_finished(_finished_mac(s["c_hs"], th_sfin))
+                la enc = rec.krypter_post(s["ck_hs"]["key"], s["ck_hs"]["iv"], 0, 22, CFIN)
+                s["transcript"] = _saman(s["transcript"], CFIN)
+                s["fase"] = "etablert"
+                s["seq_w"] = 0
+                s["seq_r"] = 0
+                returner {"status": "ferdig", "feil": "", "ut": enc}
+            }
+        } ellers {
+            returner _feil("uventa klient-fase " + s["fase"])
+        }
+    }
+    returner {"status": "ventande", "feil": "", "ut": []}
+}
+
+# Hovudinngang: mat inn byte, få {status, ut, feil}. status: ventande|ferdig|feil.
+funksjon motta(s: ordbok, innkomande: liste_heiltall) -> ordbok {
+    s["inbuf"] = _saman(s["inbuf"], innkomande)
+    la delt = _split_records(s["inbuf"])
+    s["inbuf"] = delt["rest"]
+    la records = delt["records"]
+    hvis lengde(records) == 0 { returner {"status": "ventande", "feil": "", "ut": []} }
+    hvis s["rolle"] == "tenar" { returner _tenar_motta(s, records) }
+    returner _klient_motta(s, records)
+}
+
+# ─── Applikasjonsdata ───────────────────────────────────────────────────────
+funksjon krypter_app(s: ordbok, data: liste_heiltall) -> liste_heiltall {
+    la keys = hvis s["rolle"] == "klient" da s["ck_ap"] ellers s["sk_ap"]
+    la post = rec.krypter_post(keys["key"], keys["iv"], s["seq_w"], 23, data)
+    s["seq_w"] = s["seq_w"] + 1
+    returner post
+}
+funksjon dekrypter_app(s: ordbok, post: liste_heiltall) -> ordbok {
+    la keys = hvis s["rolle"] == "klient" da s["sk_ap"] ellers s["ck_ap"]
+    la r = rec.dekrypter_post(keys["key"], keys["iv"], s["seq_r"], post)
+    hvis r["status"] == "ok" { s["seq_r"] = s["seq_r"] + 1 }
+    returner r
+}
+
+funksjon status() { returner {"abi": "norscode-tls13-session-v1", "suite": "TLS_CHACHA20_POLY1305_SHA256", "roller": "klient,tenar"} }
