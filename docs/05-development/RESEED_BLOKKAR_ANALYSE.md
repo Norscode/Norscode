@@ -115,6 +115,62 @@ grep -ao '"module":"__main__"' /tmp/x.json | wc -l   # → 0 (buggy) / 2 (fiksa 
 #   → rc=199 (OOM), medan committed seed grind (rc=124) på same test.
 ```
 
+## 5. Empirisk oppdatering 2026-09-22 (ny undersøking) — presisert diagnose
+
+Ei ny undersøking (billeg repro, ikkje fullhost-bygg) korrigerer og skjerpar §2:
+
+1. **Prebygd codegen-ELF er IKKJE stale.** `bootstrap/native_codegen_x86_64.elf.srchash`
+   (`4e7ae236…`) == `sha256(native_codegen_v2.no + ncb_serde.no)` no. `native_codegen_v2.no`
+   er dessutan uendra sidan `37cee6b` — same commit som bygde BÅDE den committa seeden OG
+   den prebygde codegen-ELF-en. Så «rask veg = stale» er ikkje forklaringa.
+
+2. **Prebygd codegen gjev KORREKT rask krypto når native atomar dekker rekninga.**
+   `tests/test_ed25519_rfc8032` kompilert → ELF via prebygd codegen (GC på) → `rc=0`,
+   ingen OOM (native fe_mul/_A/_Z-atomar unngår heap-allokering). rc=199-påstanden i §2(a)
+   reproduserer altså IKKJE for direkte-native krypto.
+
+3. **Den verkelege bresten er ein alvorleg yte-/GC-klippe på LISTE-/allokeringstung
+   native kode** — det som i §2 heiter «grind»/«GC-trash». Billeg repro (sekund å byggje):
+   ein `churn`-lykkje som byggjer + forkastar ei 2000-elements liste per iterasjon:
+   - 15 000 iter → `rc=0`, RSS ~1,8 MB, ferdig på sekund (KORREKT reclaim, rett svar).
+   - 60 000 / 120 000 / 200 000 iter → `rc=124` (timeout), fullfører ikkje → **super-lineær
+     nedbremsing** (ikkje ei lineær minnelekkasje: RSS held seg ~1,8 MB ved GC på;
+     ved GC av (2 GiB bump) same nedbremsing). Ein O(1)-per-iter-lykkje skal ikkje bremse slik.
+   - SAME `churn` køyrd via den committa seeden sin VM (`run-ncb-pure`, GC på) held RSS
+     flatt på 1,8 MB — VM-GC-en reclaimar reint.
+
+4. **Hovudmistenkt: den emitterte fri-liste-allokatoren `gc_alloc`
+   (`native_codegen_v2.no:4077`) er «head-fit»** — han gjenbrukar berre HOVUD-blokka i
+   fri-lista om ho er stor nok, elles bump. Blokkar som ikkje matchar hovudet blir aldri
+   gjenbrukte → fragmentering/bump-vekst og/eller aukande collect-kostnad → thrash når
+   allokeringane hopar seg opp. Dette råkar BÅDE (a) codegen-tida (interpretert fullhost-
+   codegen som byggjer den store grafen) OG (b) seed-runtime på rein-VM-krypto (ed25519
+   via `køyr_ncb` allokerer tungt). Å betre reclaim (ekte fri-liste-søk / storleiksklassar
+   / koalescering, eller kompakterande sweep) er difor eit felles, høgverdig mål.
+
+**Konsekvens for reseed-strategien:** den skarpaste låsen er ikkje «stale prebuilt» og
+ikkje ein rein heap-tak-storleik, men at den emitterte GC-allokatoren skalerer dårleg på
+allokeringstung last. To reelle vegar står att: (i) betre `gc_alloc`/sweep-reclaim i
+`native_codegen_v2` (hand-emittert x86-64 — delikat, men avgrensa; testbar med `churn`-
+reproen under før noko seed-bygg), eller (ii) den større 64-bit-adresserings-/heap-tak-
+endringa frå §2. Begge er substansielle; ingen er ein rask patch.
+
+### Repro (billeg, ingen fullhost-bygg)
+```sh
+SCR=/tmp/nc-churn; mkdir -p $SCR
+cat > $SCR/churn.no <<'NO'
+funksjon lag_liste(n: heiltall) -> liste { la ut: liste = [] la j = 0 mens j < n { legg_til(ut, j) j = j + 1 } returner ut }
+funksjon start() -> heiltall { la i = 0 la sum = 0 mens i < 200000 { la l = lag_liste(2000) sum = sum + lengde(l) i = i + 1 } skriv("churn done\n") returner 0 }
+NO
+NORSCODE_CMD=compile NORSCODE_FILE=$SCR/churn.no NORSCODE_OUTPUT=$SCR/churn.ncb.json \
+  NORSCODE_MODULE=__main__ NORSCODE_ROOT=$PWD NORSCODE_IMPORT_BASE=$PWD ./dist/norscode_native
+NORSCODE_GC_ALLOC=1 NORSCODE_ROOT=$PWD ./bin/nc ncb-to-elf $SCR/churn.ncb.json $SCR/churn.elf
+NORSCODE_GC_ALLOC=1 $SCR/churn.elf                      # native: thrash/timeout (rc=124)
+NORSCODE_GC_ALLOC=1 NORSCODE_CMD=run-ncb-pure NORSCODE_FILE=$SCR/churn.ncb.json \
+  NORSCODE_ROOT=$PWD ./dist/norscode_native            # committed VM: reclaimar, RSS ~1,8 MB
+# Reduser 200000→15000 i kjelda → native ELF fullfører rc=0 (reclaim OK i det små).
+```
+
 ## Relaterte filer
 - `selfhost/nc_main.no` — `normaliser_json_kontrollteikn` (fiksen)
 - `selfhost/native_execution/native_codegen_v2.no` — GC-layout v3 (linje ~44–67),
