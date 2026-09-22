@@ -132,12 +132,14 @@ Ei ny undersøking (billeg repro, ikkje fullhost-bygg) korrigerer og skjerpar §
 3. **Den verkelege bresten er ein alvorleg yte-/GC-klippe på LISTE-/allokeringstung
    native kode** — det som i §2 heiter «grind»/«GC-trash». Billeg repro (sekund å byggje):
    ein `churn`-lykkje som byggjer + forkastar ei 2000-elements liste per iterasjon:
-   - 15 000 iter → `rc=0`, RSS ~1,8 MB, ferdig på sekund (KORREKT reclaim, rett svar).
-   - 60 000 / 120 000 / 200 000 iter → `rc=124` (timeout), fullfører ikkje → **super-lineær
-     nedbremsing** (ikkje ei lineær minnelekkasje: RSS held seg ~1,8 MB ved GC på;
-     ved GC av (2 GiB bump) same nedbremsing). Ein O(1)-per-iter-lykkje skal ikkje bremse slik.
-   - SAME `churn` køyrd via den committa seeden sin VM (`run-ncb-pure`, GC på) held RSS
-     flatt på 1,8 MB — VM-GC-en reclaimar reint.
+   - 15 000 iter → `rc=0`, ferdig på sekund (KORREKT resultat).
+   - 60 000 / 120 000 / 200 000 iter → `rc=124` (timeout), fullfører IKKJE → **super-lineær
+     nedbremsing**. Ein O(1)-per-iter-lykkje skal ikkje bremse slik.
+   - Direkte RSS-måling (`ps -C churn.elf`) på 200 000-iter prebygd-ELF: **~988 MB**
+     (nær 1 GiB-taket) → thrash-signaturen frå §2(b). MERK: tidlegare RSS-tal på «~1,8 MB»
+     i denne undersøkinga var MÅLEFEIL (samla wrapper-PID-en `timeout`/subshell, ikkje
+     `norscode_native`); dei er forkasta. Bruk `ps -C <prosess>` for reelle tal.
+     Om VM-vegen (`run-ncb-pure`) reclaimar reint er difor ikkje reverifisert her.
 
 4. **Hovudmistenkt: den emitterte fri-liste-allokatoren `gc_alloc`
    (`native_codegen_v2.no:4077`) er «head-fit»** — han gjenbrukar berre HOVUD-blokka i
