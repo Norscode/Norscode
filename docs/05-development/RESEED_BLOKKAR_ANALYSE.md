@@ -167,12 +167,26 @@ med `NC_INPUT=churn.ncb.json NC_OUTPUT=churn.elf` (interpretert emit, ~200–400
 `churn.elf` og mål med `ps -C churn.elf`. Sidan emit er deterministisk, matchar interpretert
 resultat det ein regenerert prebygd-ELF ville gjeve.
 
-**Konsekvens for reseed-strategien:** den skarpaste låsen er ikkje «stale prebuilt», ikkje
-«prebuilt miskompilerer» og ikkje ein rein heap-tak-storleik, men at den emitterte
-GC-allokatoren (`gc_alloc` head-fit, `native_codegen_v2.no:4077`, + variantane med OOM-sjekk
-~4321/4434/4530) skalerer dårleg. To reelle vegar: (i) betre reclaim (first-fit/koalescering)
-i desse allokatorane — hand-emittert x86-64, delikat, testbar med løkka over; (ii) den
-større 64-bit-adresserings-/heap-tak-endringa frå §2. Begge substansielle; ingen rask patch.
+6. **ROT-ÅRSAK (definitiv): konservativ stakk-skann pinnar søppel falskt.**
+   `gc_mark_roots` (`native_codegen_v2.no:7451–7490`, jf. `:4044`) skannar HEILE den native
+   stakken `[rsp+8, stack_base)` konservativt som rotsett. Koden erkjenner sjølv (`:7702`)
+   «falske roter (stakk-heiltal som aliasar heap)». Difor: stale stakkslottar + heiltal som
+   ser ut som heap-adresser held daude objekt «levande» → sweep kan ikkje frigje dei → bump
+   ratchetar oppover under allokeringstung last → thrash (rc=124) / OOM (rc=199).
+   **Dei openberre allokator-fiksane er ALT gjorde:** `gc_alloc16` (`:4358`) og
+   `gc_alloc_var` (`:4459`) gjer alt FIRST-FIT-vandring (maks 512; 65536 prøvd 2026-09-06
+   «utan effekt på vm.no»). Det hjelper ikkje fordi problemet ikkje er attbruks-strategien,
+   men at det er for FÅ hol (objekta er falskt pinna, ikkje frigjorde).
+
+**Konsekvens for reseed-strategien:** den skarpaste låsen er verken «stale prebuilt»,
+«prebuilt miskompilerer», heap-tak-storleik, eller head-vs-first-fit — men **konservativ-GC
+falsk-pinning**. Å fikse det krev anten (i) PRESISE stakk-kart (codegen emitterer per
+safepoint kva stakkslottar som held levande peikarar vs skalarar) eller ein kompakterande/
+presis GC — ei stor codegen+GC-omskriving, ikkje ein hand-assembly-patch; eller (ii) den
+64-bit-adresserings-/heap-tak-endringa frå §2 (lindrar symptomet ved å gje meir headroom,
+løyser ikkje pinning). Ingen er sesjon-skala. Dei rimelege snarvegane (first-fit, høgare
+vandringstak) er uttømde. Merk: `nc_main.no`-fiksen `e1c4925` (`__main__`-drop) er uavhengig
+og korrekt; han aktiverast når EIN korrekt fullhost-reseed er mogleg.
 
 ### Repro (billeg, ingen fullhost-bygg)
 ```sh
