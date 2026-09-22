@@ -150,12 +150,29 @@ Ei ny undersøking (billeg repro, ikkje fullhost-bygg) korrigerer og skjerpar §
    via `køyr_ncb` allokerer tungt). Å betre reclaim (ekte fri-liste-søk / storleiksklassar
    / koalescering, eller kompakterande sweep) er difor eit felles, høgverdig mål.
 
-**Konsekvens for reseed-strategien:** den skarpaste låsen er ikkje «stale prebuilt» og
-ikkje ein rein heap-tak-storleik, men at den emitterte GC-allokatoren skalerer dårleg på
-allokeringstung last. To reelle vegar står att: (i) betre `gc_alloc`/sweep-reclaim i
-`native_codegen_v2` (hand-emittert x86-64 — delikat, men avgrensa; testbar med `churn`-
-reproen under før noko seed-bygg), eller (ii) den større 64-bit-adresserings-/heap-tak-
-endringa frå §2. Begge er substansielle; ingen er ein rask patch.
+5. **Codegen er DETERMINISTISK native vs interpretert — prebuilt miskompilerer IKKJE.**
+   `churn` kompilert til ELF via (a) prebygd codegen-ELF og (b) `native_codegen_v2`
+   køyrd interpretert (`run-ncb-pure` på ein fersk-kompilert codegen-NCB, 176 `__main__`,
+   gyldig) gjev **byte-identiske** ELF-ar (38942 B == 38942 B). Difor er §2(a)-påstanden
+   «prebygd codegen miskompilerer GC-emisjonen» FEIL: begge emitterer same kode. Den svake
+   GC-en ligg i KJELDA (`gc_alloc`/sweep i `native_codegen_v2.no`), og RÅKAR ALLE seedar
+   likt (committa, prebygd-bygd, interpretert-bygd). rc=199 (OOM) vs rc=124 (grind) er berre
+   kor vidt lasta kryssar hard- kontra soft-limit — same underliggjande allokator-svakheit.
+
+**Validerings-løkke (fungerer, men treg ~10 min/iterasjon):**
+`compile` av `native_codegen_v2.no` → NCB fungerer på committa seed (målt: rc=0, ~179 s,
+topp-RSS ~811 MB, gyldig 1,63 MB NCB med `__main__.start`). Ein endra codegen testast slik:
+(1) `compile native_codegen_v2.no → ncg.ncb.json` (~180 s); (2) `run-ncb-pure ncg.ncb.json`
+med `NC_INPUT=churn.ncb.json NC_OUTPUT=churn.elf` (interpretert emit, ~200–400 s); (3) køyr
+`churn.elf` og mål med `ps -C churn.elf`. Sidan emit er deterministisk, matchar interpretert
+resultat det ein regenerert prebygd-ELF ville gjeve.
+
+**Konsekvens for reseed-strategien:** den skarpaste låsen er ikkje «stale prebuilt», ikkje
+«prebuilt miskompilerer» og ikkje ein rein heap-tak-storleik, men at den emitterte
+GC-allokatoren (`gc_alloc` head-fit, `native_codegen_v2.no:4077`, + variantane med OOM-sjekk
+~4321/4434/4530) skalerer dårleg. To reelle vegar: (i) betre reclaim (first-fit/koalescering)
+i desse allokatorane — hand-emittert x86-64, delikat, testbar med løkka over; (ii) den
+større 64-bit-adresserings-/heap-tak-endringa frå §2. Begge substansielle; ingen rask patch.
 
 ### Repro (billeg, ingen fullhost-bygg)
 ```sh
