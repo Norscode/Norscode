@@ -18,9 +18,39 @@ funksjon abi_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
 la _fh_tabell = {}
 la _fh_neste: heiltall = 1
 
+// Confinement mot symlenke-flukt: filesystem-ABI-en bind stien til rota og skal
+// avvise både traversal (trygg_relativ over) OG symlenker som kan peike ut av rota.
+// Seed-primitiva har ikkje readlink/realpath, så vi lstat-ar kvar sti-komponent
+// (native_fs_stat med follow=usann) og avviser stiar som går gjennom ei symlenke.
+// Konservativt: ei symlenke vi ikkje kan verifisere blir nekta. (Legitim lesing
+// gjennom in-rot-symlenker går via builtin.fil_les, ikkje dette handtaket.)
+funksjon sti_gjennom_symlenke(root: tekst, rel: tekst) -> boolsk {
+    hvis rel == "" { returner usann }
+    la basis = root
+    hvis basis == "" { basis = "." }
+    la delar = builtin.split(rel, "/")
+    la sti = basis
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = delar[i]
+        hvis d != "" og d != "." {
+            sti = sett_saman(sti, d)
+            prøv {
+                la st = stat_svar(sti, usann)
+                hvis st["status"] == "ok" og st["kind"] == "symlink" { returner sann }
+            } fang (e) {}
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
 funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
     la sti = full_sti(req)
     hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid path") }
+    hvis sti_gjennom_symlenke(felt(req, "root"), felt(req, "relative")) {
+        returner feilsvar("sti går gjennom symlenke (confinement)")
+    }
     la mode = felt(req, "mode")
     // Handhev at operasjonsklassen matchar modusen: read_operation (skriv=usann) kan
     // ikkje opne i skrive-/append-modus, og write_operation (skriv=sann) kan ikkje opne
@@ -33,6 +63,7 @@ funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
         returner feilsvar("write_operation kan ikkje opne i modus read")
     }
     la innhald = ""
+    la startpos: heiltall = 0
     hvis ikkje skriv {
         hvis ikkje builtin.fil_finnes(sti) { returner feilsvar("open feila: " + sti) }
         // Katalogar blir avviste eksplisitt der stat-primitivet finst (native); elles er
@@ -45,12 +76,21 @@ funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
         hvis er_katalog { returner feilsvar("ikkje ei vanleg fil: " + sti) }
         // Les innhaldet ved open, so handtaket berre kan opnast for ei lesbar fil.
         prøv { innhald = builtin.fil_les(sti) } fang (e) { returner feilsvar("ikkje ei lesbar fil: " + sti) }
-    } ellers hvis mode != "append" {
+    } ellers hvis mode == "append" {
+        // Append: last eksisterande innhald i bufferen og sett posisjonen til slutten
+        // slik at seek/skriv arbeider mot heile fila (positioned write).
+        prøv { hvis builtin.fil_finnes(sti) { innhald = builtin.fil_les(sti) } } fang (e) { innhald = "" }
+        startpos = lengde(innhald)
+    } ellers {
+        // Trunkér: skrivebufferen er autoritativ og blir persistert ved kvar skriv.
         prøv { builtin.fil_skriv(sti, "") } fang (e) { returner feilsvar("open feila: " + sti) }
+        innhald = ""
     }
     la id = "fh-" + tekst_fra_heltall(_fh_neste)
     _fh_neste = _fh_neste + 1
-    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": 0, "lasta": ikkje skriv, "innhald": innhald}
+    // lasta=sann: innhald er den autoritative bufferen (lese-handtak lasta ved open,
+    // skrive-handtak held bufferen som blir skriven til fila ved kvar skriv).
+    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "lasta": sann, "innhald": innhald}
     la r = svar("open", "", 0, "")
     r["handle"] = id
     returner r
@@ -91,8 +131,53 @@ funksjon fh_skriv(req) -> ordbok_tekst {
     hvis h == null { returner feilsvar("ukjent filhandtak") }
     hvis ikkje h["skriv"] { returner feilsvar("handtaket er ope for lesing") }
     la data = felt(req, "data")
-    prøv { builtin.fil_append(h["sti"], data) } fang (e) { returner feilsvar("write feila: " + h["sti"]) }
+    // Posisjonert skriving: skriv `data` inn i bufferen ved pos (overskriv/utvid) i
+    // staden for rein append, so seek + skriv gjev same semantikk som lseek+write.
+    la buf: tekst = h["innhald"]
+    la pos: heiltall = h["pos"]
+    la buflen: heiltall = lengde(buf)
+    la prefiks = ""
+    hvis pos < buflen { prefiks = builtin.slice(buf, 0, pos) }
+    ellers { prefiks = buf pos = buflen }
+    la etter_start: heiltall = pos + lengde(data)
+    la suffiks = ""
+    hvis etter_start < buflen { suffiks = builtin.slice(buf, etter_start, buflen) }
+    la nybuf = prefiks + data + suffiks
+    prøv { builtin.fil_skriv(h["sti"], nybuf) } fang (e) { returner feilsvar("write feila: " + h["sti"]) }
+    h["innhald"] = nybuf
+    h["pos"] = pos + lengde(data)
     la r = svar("ok", "", lengde(data), "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Native seed
+// har ikkje eit eige seek-primitiv; posisjonen lever i handtaket sin buffer.
+funksjon fh_seek(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la posisjon = heiltall_felt(req, "position", 0 - 1)
+    hvis posisjon < 0 { returner feilsvar("ugyldig seek-posisjon") }
+    h["pos"] = posisjon
+    la r = svar("ok", "", posisjon, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+// Readiness for kooperativ I/O: eit ope buffer-handtak er alltid klart (value=1);
+// eit ukjent/lukka handtak gjev "feil" so future-en feilar deterministisk.
+funksjon fh_ready(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la r = svar("ok", "", 1, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_stat(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la r = svar("ok", "", lengde(tekst(h["innhald"])), "")
     r["handle"] = felt(req, "handle")
     returner r
 }
@@ -344,12 +429,16 @@ funksjon read_operation(req) -> ordbok_tekst {
     hvis op == "open" { returner fh_opne(req, usann) }
     hvis op == "read" { returner fh_les(req) }
     hvis op == "close" { returner fh_lukk(req) }
+    hvis op == "seek" { returner fh_seek(req) }
+    hvis op == "ready" { returner fh_ready(req) }
+    // Handtak-basert stat (native_stat på eit ope handtak): returner buffer-lengda.
+    hvis op == "stat" og felt(req, "handle") != "" { returner fh_stat(req) }
     hvis op == "stat" eller op == "path_stat" {
         la sti = full_sti(req)
         hvis sti == "" { returner feilsvar("invalid path") }
         returner stat_svar(sti, op == "stat")
     }
-    hvis op == "open" eller op == "read" eller op == "read_binary" eller op == "close" eller op == "seek" eller op == "ready" eller op == "read_async" eller op == "wait_async" eller op == "cancel_async" {
+    hvis op == "read_binary" eller op == "read_async" eller op == "wait_async" eller op == "cancel_async" {
         returner feilsvar("operation " + op + " unsupported in native seed")
     }
     returner feilsvar("operation requires disk.write")
@@ -361,6 +450,8 @@ funksjon write_operation(req) -> ordbok_tekst {
     hvis root == "" { root = "." }
     hvis op == "open" { returner fh_opne(req, sann) }
     hvis op == "write" { returner fh_skriv(req) }
+    hvis op == "seek" { returner fh_seek(req) }
+    hvis op == "ready" { returner fh_ready(req) }
     hvis op == "flush" {
         hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
         returner svar("ok", "", 0, "")
@@ -414,7 +505,7 @@ funksjon write_operation(req) -> ordbok_tekst {
         hvis rc != 0 { returner feilsvar("symlink feila (" + tekst(rc) + ")") }
         returner svar("ok", "", 1, "")
     }
-    hvis op == "open" eller op == "write" eller op == "flush" eller op == "close" eller op == "seek" eller op == "ready" eller op == "write_async" eller op == "wait_async" eller op == "cancel_async" {
+    hvis op == "write_async" eller op == "wait_async" eller op == "cancel_async" {
         returner feilsvar("operation " + op + " unsupported in native seed")
     }
     returner feilsvar("operation requires disk.read")
