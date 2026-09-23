@@ -31,22 +31,45 @@ funksjon native_executable(root: tekst) -> tekst {
     returner root + "/dist/norscode_native"
 }
 
-funksjon fil_sha256(sti: tekst) -> tekst {
-    // builtin.fil_les_binær gjev ~1 VM-verdi per byte (~30 B/byte); ein 36 MB binær
-    // (t.d. bootstrap/stage0/norscode-linux-arm64) blir ~1 GiB byte-liste og sprengjer
-    // den ferske seeden sin faste 1,67 GiB GC-heap → «GC-heap full» / exit 199. Hopp
-    // difor over hashing av filer > 16 MB: dei einaste slike her er informative
-    // rapporter-[INFO]-hashar (t.d. ARM64-stage0, REQUIRE_LINUX_ARM64_ATTESTATION=0).
-    // Alle PÅKRAVDE verifiseringar (macOS/linux/windows-kandidatar) er < 16 MB og blir
-    // framleis byte-eksakt hasha. Storleik via billeg stat (ingen byte-liste).
+// Éi lesing per fil: sha256 og innebygd-NCB-markør blir rekna på same byte-buffer
+// og cacha per sti. Tidlegare las fil_sha256 og har_embedded_ncb kvar fil for
+// seg, og fleire filer vart lesne to gonger (rapporter + *_attestasjon_ok). På
+// fersk seed flyttar kvar heil-fil-lesing bump-heapen eit 64 MiB-steg, så etter
+// ~13 lesingar døydde verktøyet med «GC-heap full (1 GiB levande) – exit 199».
+// Filer > 16 MB blir hoppa over (einaste slike er den ikkje-påkravde ARM64-stage0).
+la _fil_info = {}
+
+funksjon fil_info(sti: tekst) {
+    // Bind den globale cachen lokalt FØR kryssmodulkall: på fersk seed blir ein
+    // modulglobal etter `prøv { native_fs.… } fang` slått opp i feil modul
+    // («Ukjent global variabel: std.runtime_filesystem._fil_info»). Ordboka er ein
+    // referanse, så `cache[sti] = …` oppdaterer den globale.
+    la cache = _fil_info
+    hvis finnes_nøkkel(cache, sti) { returner cache[sti] }
+    la info = {"sha": "", "emb": usann}
+    la for_stor = usann
     prøv {
         la st = native_fs.native_stat_sti(sti)
-        hvis st["status"] == "ok" og heltall_fra_tekst(tekst(st["value"])) > 16777216 { returner "" }
+        hvis st["status"] == "ok" og heltall_fra_tekst(tekst(st["value"])) > 16777216 { for_stor = sann }
     } fang (e0) {}
-    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) {
-        prøv { returner sha256.hash_bytes(builtin.fil_les_binær(sti)) } fang (e2) { returner "" }
+    hvis ikkje for_stor {
+        prøv {
+            la bytes = builtin.fil_les_binær(sti)
+            prøv { info["sha"] = builtin.sha256_bytes(bytes) } fang (e1) {
+                prøv { info["sha"] = sha256.hash_bytes(bytes) } fang (e2) { info["sha"] = "" }
+            }
+            info["emb"] = sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
+                sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1") eller har_native_seed_ncb(bytes)
+            bytes = []
+        } fang (e) {}
+        prøv { builtin.gc_collect() } fang (e3) {}
     }
-    returner ""
+    cache[sti] = info
+    returner info
+}
+
+funksjon fil_sha256(sti: tekst) -> tekst {
+    returner tekst(fil_info(sti)["sha"])
 }
 
 funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
@@ -60,26 +83,32 @@ funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
     returner sann
 }
 
+// Same tre format som tools/linux_runtime_attestation.no: NCB-image-/NCB-text-
+// trailer, og den ferske fullhost-seeden sin trailer «NORSCODE_NCB_V1» + 8 byte
+// lengd (little-endian). Utan det siste formatet vart Linux-kandidaten alltid
+// rapportert som «manglar innebygd NCB-image», og linux_attestasjon_ok feila.
+funksjon har_native_seed_ncb(bytes) -> boolsk {
+    la magic = "NORSCODE_NCB_V1"
+    la trailer = lengde(magic) + 8
+    hvis lengde(bytes) < trailer { returner usann }
+    la start = lengde(bytes) - trailer
+    la i = 0
+    mens i < lengde(magic) {
+        hvis bytes[start + i] != (builtin.char_code(magic[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    la n = 0
+    la j = 7
+    mens j >= 0 {
+        n = n * 256 + bytes[lengde(bytes) - 8 + j]
+        j = j - 1
+    }
+    returner n > 0 og n <= start
+}
+
 funksjon har_embedded_ncb(sti: tekst) -> boolsk {
     hvis ikkje executable(sti) { returner usann }
-    // Byte-liste (fil_les_binær) er byte-eksakt påliteleg for markørhalen på ALLE
-    // format. MERK: fil_les (tekst) oppdaga IKKJE macOS-kandidaten sin NCB-text-image
-    // på Mach-O (regresjon i 71c9bf1 → macOS-attestasjon FAIL) — difor byte-liste her.
-    // Men på fersk «listetung» seed er byte-liste ~30 B/byte, so ein 36 MB fil
-    // (bootstrap/stage0/norscode-linux-arm64) blir ~1 GiB → GC-heap-full/exit 199 på
-    // linux-aggregatoren. Hopp over > 16 MB via billeg stat: alle PÅKRAVDE kandidatar
-    // er < 9 MB (macOS-kandidat ~8,5 MB); einaste > 16 MB er den IKKJE-påkravde
-    // ARM64-stage0 (berre ei informativ [INFO]-linje → kosmetisk PENDING).
-    prøv {
-        la st = native_fs.native_stat_sti(sti)
-        hvis st["status"] == "ok" og heltall_fra_tekst(tekst(st["value"])) > 16777216 { returner usann }
-    } fang (e0) {}
-    prøv {
-        la bytes = builtin.fil_les_binær(sti)
-        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
-            sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
-    } fang (e) { returner usann }
-    returner usann
+    returner fil_info(sti)["emb"] == sann
 }
 
 funksjon runtime_smoke(root: tekst, sti: tekst) -> boolsk {
