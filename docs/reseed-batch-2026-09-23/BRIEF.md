@@ -135,6 +135,17 @@ Neste steg (krev ekte x86):
 - Test òg om `!= 0`-samanlikninga av sys6-resultatet i barnet (etter fork) oppfører seg
   rett. Jf. minnet om boksa int-0 som ikkje var lik 0.
 
+## 5b. VM-feil: modulglobal i feil modul etter kryssmodul-`prøv`
+
+På seed 581bd059: i `tools/platform_readiness_v3600.no` feila
+`_fil_info[sti] = info` med «Ukjent global variabel:
+std.runtime_filesystem._fil_info» når førre setning var
+`prøv { native_fs.native_stat_sti(sti) } fang (e0) {}`. Same tilgang fungerte når
+nokre andre kall kom imellom. Truleg blir modulkonteksten for LOAD_GLOBAL/STORE_GLOBAL
+ståande på modulen til kallet inne i `prøv` etter handler-regionen. Omveg i 66563e1:
+bind den globale lokalt før kallet. Ekte fiks høyrer til i vm.no (modulkontekst ved
+try-exit).
+
 ## 6. Arkitektur (ikkje patchar)
 
 - **thread_pool** og **fjern_agent_loopback** krev at VM-funksjonar køyrer *samstundes*
