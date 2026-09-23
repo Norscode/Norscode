@@ -99,6 +99,16 @@ Forslag:
   eller counter ≥ N. I dag samlar ho ved kvar safepoint.
 - (c) Vurder storleiksklassar: first-fit er avgrensa til 512 blokkar.
 
+**Tillegg (harness-målingar på seed 270f792a):**
+- `test_dns_zone_validation` startar køyringa med ~395 MB bump og står fast på L24
+  (`dnssec_sign_rrset` → RS256 i native_gap). Éi RS256-signering aukar bump med
+  ~400 MB, fordi `std/bigint` lagar nye lister i kvar `mul`/`modulo`.
+- Truleg same mekanisme for dei andre køyretids-timeoutane:
+  - `tls_acme_contract` og `https_front_live_multisite` (RSA `localhost.key`);
+  - `selfhost_part_15` og `chunk_tail_part_15` (tunge VM-køyringar).
+- Utan GC-fiks hjelper det å redusere allokeringa i `std/bigint.modexp`: gjenbruk
+  buffer, Montgomery og CRT. Modulen er baka inn via native_gap, så det krev òg reseed.
+
 ## 5. Må verifiserast på ekte x86
 
 `test_multiprocessing_native` og `test_linux_arm64_runtime_attestation_probe` får begge
