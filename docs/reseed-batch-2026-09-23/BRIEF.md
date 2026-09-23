@@ -7,6 +7,21 @@
 - **Hent:** `git fetch origin reseed-batch-2026-09-23`. Cherry-pick 7f02f4e og 36b4a1d
   (ikkje denne docs-commiten) før reseed. Regenerer `vm_executor.ncb` og Windows `vm.ncb`.
 
+## VIKTIG (2026-09-23 21:xx): 6a02eda er revertert i da8bf31 på PR-greina
+
+Regenereringa av `vm.ncb` braut to portar:
+- **test_precompiled_vm_host_compat:** manglar `["INDEX_SET"],["POP"]` (kompilatoren
+  emitterte ikkje POP etter INDEX_SET, som gav stack overflow i L5b) og
+  `builtin.har_nokkel` (normaliser_ncb vart ikkje køyrd).
+- **Windows runtime ABI:** exe-en byggjer inn `vm.ncb`, men vart ikkje regenerert.
+
+Gjer det slik saman med reseed:
+1. `nc regen-bootstrap` (compile + `normaliser_ncb`) med kompilatoren som emitterer
+   INDEX_SET+POP. Sjekk etterpå at `grep -c '"INDEX_SET"\],\["POP"\]'` er ≥ 1.
+2. Regenerer `selfhost/vm_executor.ncb.json`.
+3. `tools/build_windows_stage0_candidate.no` → committ ny
+   `bootstrap/stage0/norscode-windows-x86_64.exe` og oppdater `SHA256SUMS`.
+
 # Brief til sky-sesjonen: Linux-diagnose av PR #200 (frå Mac-sesjonen, 2026-09-23)
 
 Seed som er målt: `270f792a` (2fc58bc), køyrd under Docker `--platform linux/amd64`
