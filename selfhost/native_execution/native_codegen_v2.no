@@ -670,6 +670,412 @@ funksjon emit_blake2b_round(buf, sigma_row: liste) {
         gi = gi + 1
     }
 }
+// ── bn_modexp_bytes(rdi=base_be, rsi=exp_be, rdx=mod_be) → byteliste ─────────
+// Modulær eksponentiering (base^exp mod n) som native x86-64-atom for RSA/ECDSA.
+// Rein std.bigint.modexp (base 2^16, Knuth-D per steg) brukte ~12 s og +400 MB
+// heap per RSA-2048-signering på fersk seed (test_dns_zone_validation → collect-
+// storm/timeout); ECDSA-P256 Fermat-invers likeins. Atomet: 64-bit limbar på
+// stakken, n0' = −n⁻¹ mod 2^64 (Newton, 5 steg), R² = 2^(128s) mod n (128s
+// doblingar m/ betinga subtraksjon), Montgomery-multiplikasjon (CIOS, mul/adc),
+// fast 4-bit vindauge MSB→LSB med konstant-tid tabelloppslag (maske over alle 16)
+// og konstant-tid sluttsubtraksjon — ingen greiner på eksponent- eller basebitar
+// (berre lengda i byte etter leiande null er synleg). Ut: k = byte-lengda til mod
+// (utan leiande null), big-endian, byte-element frå int-cachen (0 allokering).
+// Kontrakt (kallaren fell tilbake til rein kode på tom liste): alle tre må vere
+// liste (tag 3) eller bytes (tag 7) med heiltal 0..255; mod odde, ≠ 0, ≤ 512 byte
+// (4096 bit); base < 2^(64s) (s = limbar i mod) → elles TOM liste. mod = 1 → [0].
+// Ramme (r15 = rsp etter sub, rbp = N): N@0 R2@528 B@1056 ACC@1584 SEL@2112 T@2640
+// ONE@3168 U@3696 TBL@4224 (16×512) S@12416 N0@12424 K@12432 BASE/EXP/MOD@12440..
+// BYTE@12464 NIB@12472 EPTR/EST/ELEN@12480.. ; FRAME = 12552 (rsp ≡ 0 mod 16).
+// Interne rutinar: Lchk (valider liste), Lld (bytes → limbar), Ldbl (2x mod n),
+// Lcsub (betinga subtraksjon), Lmm (CIOS montmul, dst kan aliase a/b), Lwin
+// (4 kvadreringar + multiplikasjon med T[nibble]). Kjelda er assembly: kommentaren
+// per linje er instruksjonen (bytane er assembler-output, testa under Rosetta mot
+// dc-orakel på 99 vektorar inkl. 2048/4096 bit og feilvegar; mutasjonar blir fanga).
+funksjon emit_bn_modexp_atom(bytes) -> heiltall {
+    la bnm_start = lengde(bytes)
+    la bnm_va = TEXT_VA() + bnm_start
+    copy(bytes, [0x53])                                    // push rbx
+    copy(bytes, [0x55])                                    // push rbp
+    copy(bytes, [0x41, 0x54])                              // push r12
+    copy(bytes, [0x41, 0x55])                              // push r13
+    copy(bytes, [0x41, 0x56])                              // push r14
+    copy(bytes, [0x41, 0x57])                              // push r15
+    copy(bytes, [0x48, 0x81, 0xEC, 0x08, 0x31, 0x00, 0x00]) // sub rsp, FRAME
+    copy(bytes, [0x49, 0x89, 0xE7])                        // mov r15, rsp
+    copy(bytes, [0x49, 0x8D, 0x2F])                        // lea rbp, [r15 + OFF_N]
+    copy(bytes, [0x49, 0x89, 0xBF, 0x98, 0x30, 0x00, 0x00]) // mov [r15 + V_BASE], rdi
+    copy(bytes, [0x49, 0x89, 0xB7, 0xA0, 0x30, 0x00, 0x00]) // mov [r15 + V_EXP], rsi
+    copy(bytes, [0x49, 0x89, 0x97, 0xA8, 0x30, 0x00, 0x00]) // mov [r15 + V_MOD], rdx
+    copy(bytes, [0x4C, 0x89, 0xFF])                        // mov rdi, r15
+    copy(bytes, [0xB9, 0x10, 0x02, 0x00, 0x00])            // mov ecx, 528
+    copy(bytes, [0x31, 0xC0])                              // xor eax, eax
+    copy(bytes, [0xF3, 0x48, 0xAB])                        // rep stosq
+    copy(bytes, [0x49, 0x8B, 0xBF, 0xA8, 0x30, 0x00, 0x00]) // mov rdi, [r15 + V_MOD]
+    copy(bytes, [0xE8, 0x60, 0x02, 0x00, 0x00])            // call Lchk
+    copy(bytes, [0x4D, 0x85, 0xC0])                        // test r8, r8
+    copy(bytes, [0x0F, 0x84, 0x3A, 0x02, 0x00, 0x00])      // jz Lfail
+    copy(bytes, [0x48, 0x89, 0xC8])                        // mov rax, rcx
+    copy(bytes, [0x48, 0x29, 0xD0])                        // sub rax, rdx
+    copy(bytes, [0x0F, 0x84, 0x2E, 0x02, 0x00, 0x00])      // jz Lfail
+    copy(bytes, [0x48, 0x3D, 0x00, 0x02, 0x00, 0x00])      // cmp rax, 512
+    copy(bytes, [0x0F, 0x87, 0x22, 0x02, 0x00, 0x00])      // ja Lfail
+    copy(bytes, [0x49, 0x89, 0x87, 0x90, 0x30, 0x00, 0x00]) // mov [r15 + V_K], rax
+    copy(bytes, [0x48, 0x83, 0xC0, 0x07])                  // add rax, 7
+    copy(bytes, [0x48, 0xC1, 0xE8, 0x03])                  // shr rax, 3
+    copy(bytes, [0x49, 0x89, 0x87, 0x80, 0x30, 0x00, 0x00]) // mov [r15 + V_S], rax
+    copy(bytes, [0x48, 0x89, 0xEF])                        // mov rdi, rbp
+    copy(bytes, [0xE8, 0x82, 0x02, 0x00, 0x00])            // call Lld
+    copy(bytes, [0xF6, 0x45, 0x00, 0x01])                  // test byte ptr [rbp], 1
+    copy(bytes, [0x0F, 0x84, 0xFA, 0x01, 0x00, 0x00])      // jz Lfail
+    copy(bytes, [0x49, 0x8B, 0xBF, 0x98, 0x30, 0x00, 0x00]) // mov rdi, [r15 + V_BASE]
+    copy(bytes, [0xE8, 0x0B, 0x02, 0x00, 0x00])            // call Lchk
+    copy(bytes, [0x4D, 0x85, 0xC0])                        // test r8, r8
+    copy(bytes, [0x0F, 0x84, 0xE5, 0x01, 0x00, 0x00])      // jz Lfail
+    copy(bytes, [0x48, 0x89, 0xC8])                        // mov rax, rcx
+    copy(bytes, [0x48, 0x29, 0xD0])                        // sub rax, rdx
+    copy(bytes, [0x4D, 0x8B, 0x8F, 0x80, 0x30, 0x00, 0x00]) // mov r9, [r15 + V_S]
+    copy(bytes, [0x49, 0xC1, 0xE1, 0x03])                  // shl r9, 3
+    copy(bytes, [0x4C, 0x39, 0xC8])                        // cmp rax, r9
+    copy(bytes, [0x0F, 0x87, 0xCB, 0x01, 0x00, 0x00])      // ja Lfail
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x20, 0x04, 0x00, 0x00]) // lea rdi, [r15 + OFF_B]
+    copy(bytes, [0xE8, 0x3D, 0x02, 0x00, 0x00])            // call Lld
+    copy(bytes, [0x49, 0x8B, 0xBF, 0xA0, 0x30, 0x00, 0x00]) // mov rdi, [r15 + V_EXP]
+    copy(bytes, [0xE8, 0xD0, 0x01, 0x00, 0x00])            // call Lchk
+    copy(bytes, [0x4D, 0x85, 0xC0])                        // test r8, r8
+    copy(bytes, [0x0F, 0x84, 0xAA, 0x01, 0x00, 0x00])      // jz Lfail
+    copy(bytes, [0x49, 0x89, 0xB7, 0xC0, 0x30, 0x00, 0x00]) // mov [r15 + V_EPTR], rsi
+    copy(bytes, [0x49, 0x89, 0x97, 0xC8, 0x30, 0x00, 0x00]) // mov [r15 + V_EST], rdx
+    copy(bytes, [0x49, 0x89, 0x8F, 0xD0, 0x30, 0x00, 0x00]) // mov [r15 + V_ELEN], rcx
+    copy(bytes, [0x49, 0x83, 0xBF, 0x80, 0x30, 0x00, 0x00, 0x01]) // cmp qword ptr [r15 + V_S], 1
+    copy(bytes, [0x75, 0x0B])                              // jne Lgen
+    copy(bytes, [0x48, 0x83, 0x7D, 0x00, 0x01])            // cmp qword ptr [rbp], 1
+    copy(bytes, [0x0F, 0x84, 0x36, 0x01, 0x00, 0x00])      // je Lout
+    // Lgen:
+    copy(bytes, [0x48, 0x8B, 0x4D, 0x00])                  // mov rcx, [rbp]
+    copy(bytes, [0x48, 0x89, 0xC8])                        // mov rax, rcx
+    copy(bytes, [0x41, 0xB8, 0x05, 0x00, 0x00, 0x00])      // mov r8d, 5
+    // Lnw:
+    copy(bytes, [0x48, 0x89, 0xCA])                        // mov rdx, rcx
+    copy(bytes, [0x48, 0x0F, 0xAF, 0xD0])                  // imul rdx, rax
+    copy(bytes, [0x41, 0xB9, 0x02, 0x00, 0x00, 0x00])      // mov r9d, 2
+    copy(bytes, [0x49, 0x29, 0xD1])                        // sub r9, rdx
+    copy(bytes, [0x49, 0x0F, 0xAF, 0xC1])                  // imul rax, r9
+    copy(bytes, [0x41, 0xFF, 0xC8])                        // dec r8d
+    copy(bytes, [0x75, 0xE7])                              // jnz Lnw
+    copy(bytes, [0x48, 0xF7, 0xD8])                        // neg rax
+    copy(bytes, [0x49, 0x89, 0x87, 0x88, 0x30, 0x00, 0x00]) // mov [r15 + V_N0], rax
+    copy(bytes, [0x49, 0xC7, 0x87, 0x10, 0x02, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]) // mov qword ptr [r15 + OFF_R2], 1
+    copy(bytes, [0x4D, 0x8B, 0xA7, 0x80, 0x30, 0x00, 0x00]) // mov r12, [r15 + V_S]
+    copy(bytes, [0x49, 0xC1, 0xE4, 0x07])                  // shl r12, 7
+    // Lr2:
+    copy(bytes, [0xE8, 0xEA, 0x01, 0x00, 0x00])            // call Ldbl
+    copy(bytes, [0x49, 0xFF, 0xCC])                        // dec r12
+    copy(bytes, [0x75, 0xF6])                              // jnz Lr2
+    copy(bytes, [0x49, 0xC7, 0x87, 0x60, 0x0C, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]) // mov qword ptr [r15 + OFF_ONE], 1
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x10, 0x02, 0x00, 0x00]) // lea rdi, [r15 + OFF_R2]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x60, 0x0C, 0x00, 0x00]) // lea rsi, [r15 + OFF_ONE]
+    copy(bytes, [0x49, 0x8D, 0x97, 0x80, 0x10, 0x00, 0x00]) // lea rdx, [r15 + OFF_TBL]
+    copy(bytes, [0xE8, 0x43, 0x02, 0x00, 0x00])            // call Lmm
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x20, 0x04, 0x00, 0x00]) // lea rdi, [r15 + OFF_B]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x10, 0x02, 0x00, 0x00]) // lea rsi, [r15 + OFF_R2]
+    copy(bytes, [0x49, 0x8D, 0x97, 0x80, 0x12, 0x00, 0x00]) // lea rdx, [r15 + OFF_TBL + 512]
+    copy(bytes, [0xE8, 0x29, 0x02, 0x00, 0x00])            // call Lmm
+    copy(bytes, [0x4D, 0x8D, 0xA7, 0x80, 0x14, 0x00, 0x00]) // lea r12, [r15 + OFF_TBL + 1024]
+    copy(bytes, [0x41, 0xBD, 0x0E, 0x00, 0x00, 0x00])      // mov r13d, 14
+    // Ltb:
+    copy(bytes, [0x49, 0x8D, 0xBC, 0x24, 0x00, 0xFE, 0xFF, 0xFF]) // lea rdi, [r12 - 512]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x80, 0x12, 0x00, 0x00]) // lea rsi, [r15 + OFF_TBL + 512]
+    copy(bytes, [0x4C, 0x89, 0xE2])                        // mov rdx, r12
+    copy(bytes, [0xE8, 0x05, 0x02, 0x00, 0x00])            // call Lmm
+    copy(bytes, [0x49, 0x81, 0xC4, 0x00, 0x02, 0x00, 0x00]) // add r12, 512
+    copy(bytes, [0x41, 0xFF, 0xCD])                        // dec r13d
+    copy(bytes, [0x75, 0xDD])                              // jnz Ltb
+    copy(bytes, [0x49, 0x8B, 0x8F, 0x80, 0x30, 0x00, 0x00]) // mov rcx, [r15 + V_S]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x80, 0x10, 0x00, 0x00]) // lea rsi, [r15 + OFF_TBL]
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0xF3, 0x48, 0xA5])                        // rep movsq
+    copy(bytes, [0x4D, 0x8B, 0xA7, 0xC0, 0x30, 0x00, 0x00]) // mov r12, [r15 + V_EPTR]
+    copy(bytes, [0x4D, 0x8B, 0xAF, 0xC8, 0x30, 0x00, 0x00]) // mov r13, [r15 + V_EST]
+    copy(bytes, [0x4D, 0x8B, 0xB7, 0xD0, 0x30, 0x00, 0x00]) // mov r14, [r15 + V_ELEN]
+    // Leb:
+    copy(bytes, [0x4D, 0x39, 0xF5])                        // cmp r13, r14
+    copy(bytes, [0x73, 0x2B])                              // jae Ledone
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xEC])                  // mov rax, [r12 + r13*8]
+    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                  // mov rax, [rax + 8]
+    copy(bytes, [0x49, 0x89, 0x87, 0xB0, 0x30, 0x00, 0x00]) // mov [r15 + V_BYTE], rax
+    copy(bytes, [0xC1, 0xE8, 0x04])                        // shr eax, 4
+    copy(bytes, [0xE8, 0x91, 0x02, 0x00, 0x00])            // call Lwin
+    copy(bytes, [0x49, 0x8B, 0x87, 0xB0, 0x30, 0x00, 0x00]) // mov rax, [r15 + V_BYTE]
+    copy(bytes, [0x83, 0xE0, 0x0F])                        // and eax, 15
+    copy(bytes, [0xE8, 0x82, 0x02, 0x00, 0x00])            // call Lwin
+    copy(bytes, [0x49, 0xFF, 0xC5])                        // inc r13
+    copy(bytes, [0xEB, 0xD0])                              // jmp Leb
+    // Ledone:
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x60, 0x0C, 0x00, 0x00]) // lea rsi, [r15 + OFF_ONE]
+    copy(bytes, [0x49, 0x8D, 0x97, 0x40, 0x08, 0x00, 0x00]) // lea rdx, [r15 + OFF_SEL]
+    copy(bytes, [0xE8, 0x82, 0x01, 0x00, 0x00])            // call Lmm
+    // Lout:
+    call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())            // call RT_LIST_NEW
+    copy(bytes, [0x49, 0x89, 0xC4])                        // mov r12, rax
+    copy(bytes, [0x4D, 0x8B, 0xAF, 0x90, 0x30, 0x00, 0x00]) // mov r13, [r15 + V_K]
+    // Lob:
+    copy(bytes, [0x4D, 0x85, 0xED])                        // test r13, r13
+    copy(bytes, [0x74, 0x3E])                              // jz Lret
+    copy(bytes, [0x49, 0xFF, 0xCD])                        // dec r13
+    copy(bytes, [0x4C, 0x89, 0xE8])                        // mov rax, r13
+    copy(bytes, [0x48, 0xC1, 0xE8, 0x03])                  // shr rax, 3
+    copy(bytes, [0x49, 0x8B, 0xBC, 0xC7, 0x40, 0x08, 0x00, 0x00]) // mov rdi, [r15 + OFF_SEL + rax*8]
+    copy(bytes, [0x44, 0x89, 0xE9])                        // mov ecx, r13d
+    copy(bytes, [0x83, 0xE1, 0x07])                        // and ecx, 7
+    copy(bytes, [0xC1, 0xE1, 0x03])                        // shl ecx, 3
+    copy(bytes, [0x48, 0xD3, 0xEF])                        // shr rdi, cl
+    copy(bytes, [0x81, 0xE7, 0xFF, 0x00, 0x00, 0x00])      // and edi, 255
+    call_rel32(bytes, RT_INT(), TEXT_VA())                 // call RT_INT (rdi=byte → int-NcVal)
+    copy(bytes, [0x4C, 0x89, 0xE7])                        // mov rdi, r12
+    copy(bytes, [0x48, 0x89, 0xC6])                        // mov rsi, rax
+    call_rel32(bytes, RT_LIST_APP(), TEXT_VA())            // call RT_LIST_APP
+    copy(bytes, [0xEB, 0xC5])                              // jmp Lob
+    // Lfail:
+    call_rel32(bytes, RT_LIST_NEW(), TEXT_VA())            // call RT_LIST_NEW
+    copy(bytes, [0x49, 0x89, 0xC4])                        // mov r12, rax
+    // Lret:
+    copy(bytes, [0x4C, 0x89, 0xE0])                        // mov rax, r12
+    copy(bytes, [0x48, 0x81, 0xC4, 0x08, 0x31, 0x00, 0x00]) // add rsp, FRAME
+    copy(bytes, [0x41, 0x5F])                              // pop r15
+    copy(bytes, [0x41, 0x5E])                              // pop r14
+    copy(bytes, [0x41, 0x5D])                              // pop r13
+    copy(bytes, [0x41, 0x5C])                              // pop r12
+    copy(bytes, [0x5D])                                    // pop rbp
+    copy(bytes, [0x5B])                                    // pop rbx
+    copy(bytes, [0xC3])                                    // ret
+    // chk(rdi=liste) -> r8=1 ok/0 feil, rsi=elem_ptr, rcx=len, rdx=første ikkje-null-indeks (len om alle 0)
+    // Lchk:
+    copy(bytes, [0x45, 0x31, 0xC0])                        // xor r8d, r8d
+    copy(bytes, [0x48, 0x85, 0xFF])                        // test rdi, rdi
+    copy(bytes, [0x74, 0x58])                              // jz Lchk_r
+    copy(bytes, [0x48, 0x8B, 0x07])                        // mov rax, [rdi]
+    copy(bytes, [0x48, 0x83, 0xF8, 0x03])                  // cmp rax, 3
+    copy(bytes, [0x74, 0x06])                              // je Lchk_l
+    copy(bytes, [0x48, 0x83, 0xF8, 0x07])                  // cmp rax, 7
+    copy(bytes, [0x75, 0x49])                              // jne Lchk_r
+    // Lchk_l:
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                  // mov rax, [rdi + 8]
+    copy(bytes, [0x48, 0x8B, 0x08])                        // mov rcx, [rax]
+    copy(bytes, [0x48, 0x8B, 0x70, 0x10])                  // mov rsi, [rax + 16]
+    copy(bytes, [0x48, 0x89, 0xCA])                        // mov rdx, rcx
+    copy(bytes, [0x45, 0x31, 0xC9])                        // xor r9d, r9d
+    // Lchk_lp:
+    copy(bytes, [0x49, 0x39, 0xC9])                        // cmp r9, rcx
+    copy(bytes, [0x73, 0x2D])                              // jae Lchk_ok
+    copy(bytes, [0x4A, 0x8B, 0x04, 0xCE])                  // mov rax, [rsi + r9*8]
+    copy(bytes, [0x48, 0x85, 0xC0])                        // test rax, rax
+    copy(bytes, [0x74, 0x2A])                              // jz Lchk_r
+    copy(bytes, [0x48, 0x83, 0x38, 0x01])                  // cmp qword ptr [rax], 1
+    copy(bytes, [0x75, 0x24])                              // jne Lchk_r
+    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                  // mov rax, [rax + 8]
+    copy(bytes, [0x48, 0x3D, 0xFF, 0x00, 0x00, 0x00])      // cmp rax, 255
+    copy(bytes, [0x77, 0x18])                              // ja Lchk_r
+    copy(bytes, [0x48, 0x85, 0xC0])                        // test rax, rax
+    copy(bytes, [0x74, 0x08])                              // jz Lchk_nz
+    copy(bytes, [0x48, 0x39, 0xCA])                        // cmp rdx, rcx
+    copy(bytes, [0x75, 0x03])                              // jne Lchk_nz
+    copy(bytes, [0x4C, 0x89, 0xCA])                        // mov rdx, r9
+    // Lchk_nz:
+    copy(bytes, [0x49, 0xFF, 0xC1])                        // inc r9
+    copy(bytes, [0xEB, 0xCE])                              // jmp Lchk_lp
+    // Lchk_ok:
+    copy(bytes, [0x41, 0xB8, 0x01, 0x00, 0x00, 0x00])      // mov r8d, 1
+    // Lchk_r:
+    copy(bytes, [0xC3])                                    // ret
+    // ld(rdi=dst limbar (nullstilt), rsi=elem_ptr, rcx=len, rdx=start): dst |= bytes (big-endian)
+    // Lld:
+    copy(bytes, [0x49, 0x89, 0xC8])                        // mov r8, rcx
+    copy(bytes, [0x49, 0x89, 0xD1])                        // mov r9, rdx
+    // Lld_l:
+    copy(bytes, [0x4D, 0x39, 0xC1])                        // cmp r9, r8
+    copy(bytes, [0x73, 0x2B])                              // jae Lld_d
+    copy(bytes, [0x4A, 0x8B, 0x04, 0xCE])                  // mov rax, [rsi + r9*8]
+    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                  // mov rax, [rax + 8]
+    copy(bytes, [0x4D, 0x8D, 0x50, 0xFF])                  // lea r10, [r8 - 1]
+    copy(bytes, [0x4D, 0x29, 0xCA])                        // sub r10, r9
+    copy(bytes, [0x4D, 0x89, 0xD3])                        // mov r11, r10
+    copy(bytes, [0x49, 0xC1, 0xEB, 0x03])                  // shr r11, 3
+    copy(bytes, [0x44, 0x89, 0xD1])                        // mov ecx, r10d
+    copy(bytes, [0x83, 0xE1, 0x07])                        // and ecx, 7
+    copy(bytes, [0xC1, 0xE1, 0x03])                        // shl ecx, 3
+    copy(bytes, [0x48, 0xD3, 0xE0])                        // shl rax, cl
+    copy(bytes, [0x4A, 0x09, 0x04, 0xDF])                  // or [rdi + r11*8], rax
+    copy(bytes, [0x49, 0xFF, 0xC1])                        // inc r9
+    copy(bytes, [0xEB, 0xD0])                              // jmp Lld_l
+    // Lld_d:
+    copy(bytes, [0xC3])                                    // ret
+    // dbl: R2 = 2*R2 mod n
+    // Ldbl:
+    copy(bytes, [0x4D, 0x8B, 0x87, 0x80, 0x30, 0x00, 0x00]) // mov r8, [r15 + V_S]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x10, 0x02, 0x00, 0x00]) // lea rsi, [r15 + OFF_R2]
+    copy(bytes, [0x4D, 0x89, 0xC1])                        // mov r9, r8
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Ldbl_l:
+    copy(bytes, [0x48, 0x8B, 0x04, 0xCE])                  // mov rax, [rsi + rcx*8]
+    copy(bytes, [0x48, 0x11, 0xC0])                        // adc rax, rax
+    copy(bytes, [0x48, 0x89, 0x04, 0xCE])                  // mov [rsi + rcx*8], rax
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x49, 0xFF, 0xC9])                        // dec r9
+    copy(bytes, [0x75, 0xED])                              // jnz Ldbl_l
+    copy(bytes, [0x0F, 0x92, 0xC0])                        // setc al
+    copy(bytes, [0x0F, 0xB6, 0xC0])                        // movzx eax, al
+    copy(bytes, [0x48, 0x89, 0xF2])                        // mov rdx, rsi
+    copy(bytes, [0xEB, 0x00])                              // jmp Lcsub
+    // csub(rsi=src s limbar, rax=topp 0/1, rdx=dst): dst = (topp:src >= n) ? src-n : src (konstant tid)
+    // Lcsub:
+    copy(bytes, [0x4D, 0x8B, 0x87, 0x80, 0x30, 0x00, 0x00]) // mov r8, [r15 + V_S]
+    copy(bytes, [0x4D, 0x8D, 0x97, 0x70, 0x0E, 0x00, 0x00]) // lea r10, [r15 + OFF_U]
+    copy(bytes, [0x49, 0x89, 0xC3])                        // mov r11, rax
+    copy(bytes, [0x4D, 0x89, 0xC1])                        // mov r9, r8
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Lcs_l:
+    copy(bytes, [0x48, 0x8B, 0x04, 0xCE])                  // mov rax, [rsi + rcx*8]
+    copy(bytes, [0x48, 0x1B, 0x44, 0xCD, 0x00])            // sbb rax, [rbp + rcx*8]
+    copy(bytes, [0x49, 0x89, 0x04, 0xCA])                  // mov [r10 + rcx*8], rax
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x49, 0xFF, 0xC9])                        // dec r9
+    copy(bytes, [0x75, 0xEB])                              // jnz Lcs_l
+    copy(bytes, [0x49, 0x83, 0xDB, 0x00])                  // sbb r11, 0
+    copy(bytes, [0x48, 0x19, 0xC0])                        // sbb rax, rax
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Lcs_s:
+    copy(bytes, [0x4C, 0x8B, 0x0C, 0xCE])                  // mov r9, [rsi + rcx*8]
+    copy(bytes, [0x4D, 0x8B, 0x1C, 0xCA])                  // mov r11, [r10 + rcx*8]
+    copy(bytes, [0x4D, 0x31, 0xD9])                        // xor r9, r11
+    copy(bytes, [0x49, 0x21, 0xC1])                        // and r9, rax
+    copy(bytes, [0x4D, 0x31, 0xD9])                        // xor r9, r11
+    copy(bytes, [0x4C, 0x89, 0x0C, 0xCA])                  // mov [rdx + rcx*8], r9
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x72, 0xE3])                              // jb Lcs_s
+    copy(bytes, [0xC3])                                    // ret
+    // mm(rdi=a, rsi=b, rdx=dst): dst = a*b*R^-1 mod n (CIOS). dst kan vere a eller b.
+    // Lmm:
+    copy(bytes, [0x52])                                    // push rdx
+    copy(bytes, [0x4D, 0x8B, 0x87, 0x80, 0x30, 0x00, 0x00]) // mov r8, [r15 + V_S]
+    copy(bytes, [0x4D, 0x8D, 0x8F, 0x50, 0x0A, 0x00, 0x00]) // lea r9, [r15 + OFF_T]
+    copy(bytes, [0x31, 0xC0])                              // xor eax, eax
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Lmm_z:
+    copy(bytes, [0x49, 0x89, 0x04, 0xC9])                  // mov [r9 + rcx*8], rax
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x76, 0xF4])                              // jbe Lmm_z
+    copy(bytes, [0x45, 0x31, 0xD2])                        // xor r10d, r10d
+    // Lmm_o:
+    copy(bytes, [0x4A, 0x8B, 0x1C, 0xD6])                  // mov rbx, [rsi + r10*8]
+    copy(bytes, [0x45, 0x31, 0xDB])                        // xor r11d, r11d
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Lmm_i1:
+    copy(bytes, [0x48, 0x8B, 0x04, 0xCF])                  // mov rax, [rdi + rcx*8]
+    copy(bytes, [0x48, 0xF7, 0xE3])                        // mul rbx
+    copy(bytes, [0x4C, 0x01, 0xD8])                        // add rax, r11
+    copy(bytes, [0x48, 0x83, 0xD2, 0x00])                  // adc rdx, 0
+    copy(bytes, [0x49, 0x03, 0x04, 0xC9])                  // add rax, [r9 + rcx*8]
+    copy(bytes, [0x48, 0x83, 0xD2, 0x00])                  // adc rdx, 0
+    copy(bytes, [0x49, 0x89, 0x04, 0xC9])                  // mov [r9 + rcx*8], rax
+    copy(bytes, [0x49, 0x89, 0xD3])                        // mov r11, rdx
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x72, 0xDB])                              // jb Lmm_i1
+    copy(bytes, [0x31, 0xC0])                              // xor eax, eax
+    copy(bytes, [0x4F, 0x03, 0x1C, 0xC1])                  // add r11, [r9 + r8*8]
+    copy(bytes, [0x4F, 0x89, 0x1C, 0xC1])                  // mov [r9 + r8*8], r11
+    copy(bytes, [0x0F, 0x92, 0xC0])                        // setc al
+    copy(bytes, [0x4B, 0x89, 0x44, 0xC1, 0x08])            // mov [r9 + r8*8 + 8], rax
+    copy(bytes, [0x49, 0x8B, 0x19])                        // mov rbx, [r9]
+    copy(bytes, [0x49, 0x0F, 0xAF, 0x9F, 0x88, 0x30, 0x00, 0x00]) // imul rbx, [r15 + V_N0]
+    copy(bytes, [0x48, 0x8B, 0x45, 0x00])                  // mov rax, [rbp]
+    copy(bytes, [0x48, 0xF7, 0xE3])                        // mul rbx
+    copy(bytes, [0x49, 0x03, 0x01])                        // add rax, [r9]
+    copy(bytes, [0x48, 0x83, 0xD2, 0x00])                  // adc rdx, 0
+    copy(bytes, [0x49, 0x89, 0xD3])                        // mov r11, rdx
+    copy(bytes, [0xB9, 0x01, 0x00, 0x00, 0x00])            // mov ecx, 1
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x73, 0x27])                              // jae Lmm_i2d
+    // Lmm_i2:
+    copy(bytes, [0x48, 0x8B, 0x44, 0xCD, 0x00])            // mov rax, [rbp + rcx*8]
+    copy(bytes, [0x48, 0xF7, 0xE3])                        // mul rbx
+    copy(bytes, [0x4C, 0x01, 0xD8])                        // add rax, r11
+    copy(bytes, [0x48, 0x83, 0xD2, 0x00])                  // adc rdx, 0
+    copy(bytes, [0x49, 0x03, 0x04, 0xC9])                  // add rax, [r9 + rcx*8]
+    copy(bytes, [0x48, 0x83, 0xD2, 0x00])                  // adc rdx, 0
+    copy(bytes, [0x49, 0x89, 0x44, 0xC9, 0xF8])            // mov [r9 + rcx*8 - 8], rax
+    copy(bytes, [0x49, 0x89, 0xD3])                        // mov r11, rdx
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x72, 0xD9])                              // jb Lmm_i2
+    // Lmm_i2d:
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xC1])                  // mov rax, [r9 + r8*8]
+    copy(bytes, [0x4C, 0x01, 0xD8])                        // add rax, r11
+    copy(bytes, [0x4B, 0x89, 0x44, 0xC1, 0xF8])            // mov [r9 + r8*8 - 8], rax
+    copy(bytes, [0x4B, 0x8B, 0x44, 0xC1, 0x08])            // mov rax, [r9 + r8*8 + 8]
+    copy(bytes, [0x48, 0x83, 0xD0, 0x00])                  // adc rax, 0
+    copy(bytes, [0x4B, 0x89, 0x04, 0xC1])                  // mov [r9 + r8*8], rax
+    copy(bytes, [0x49, 0xFF, 0xC2])                        // inc r10
+    copy(bytes, [0x4D, 0x39, 0xC2])                        // cmp r10, r8
+    copy(bytes, [0x0F, 0x82, 0x4E, 0xFF, 0xFF, 0xFF])      // jb Lmm_o
+    copy(bytes, [0x5A])                                    // pop rdx
+    copy(bytes, [0x4C, 0x89, 0xCE])                        // mov rsi, r9
+    copy(bytes, [0x4B, 0x8B, 0x04, 0xC1])                  // mov rax, [r9 + r8*8]
+    copy(bytes, [0xE9, 0xCD, 0xFE, 0xFF, 0xFF])            // jmp Lcsub
+    // win(rax=nibble): ACC = ACC^16 * T[nibble] (konstant-tid utval over alle 16)
+    // Lwin:
+    copy(bytes, [0x49, 0x89, 0x87, 0xB8, 0x30, 0x00, 0x00]) // mov [r15 + V_NIB], rax
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x48, 0x89, 0xFE])                        // mov rsi, rdi
+    copy(bytes, [0x48, 0x89, 0xFA])                        // mov rdx, rdi
+    copy(bytes, [0xE8, 0x06, 0xFF, 0xFF, 0xFF])            // call Lmm
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x48, 0x89, 0xFE])                        // mov rsi, rdi
+    copy(bytes, [0x48, 0x89, 0xFA])                        // mov rdx, rdi
+    copy(bytes, [0xE8, 0xF4, 0xFE, 0xFF, 0xFF])            // call Lmm
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x48, 0x89, 0xFE])                        // mov rsi, rdi
+    copy(bytes, [0x48, 0x89, 0xFA])                        // mov rdx, rdi
+    copy(bytes, [0xE8, 0xE2, 0xFE, 0xFF, 0xFF])            // call Lmm
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x48, 0x89, 0xFE])                        // mov rsi, rdi
+    copy(bytes, [0x48, 0x89, 0xFA])                        // mov rdx, rdi
+    copy(bytes, [0xE8, 0xD0, 0xFE, 0xFF, 0xFF])            // call Lmm
+    copy(bytes, [0x49, 0x8B, 0x9F, 0xB8, 0x30, 0x00, 0x00]) // mov rbx, [r15 + V_NIB]
+    copy(bytes, [0x4D, 0x8B, 0x87, 0x80, 0x30, 0x00, 0x00]) // mov r8, [r15 + V_S]
+    copy(bytes, [0x31, 0xC9])                              // xor ecx, ecx
+    // Lwin_j:
+    copy(bytes, [0x31, 0xC0])                              // xor eax, eax
+    copy(bytes, [0x45, 0x31, 0xC9])                        // xor r9d, r9d
+    copy(bytes, [0x4D, 0x8D, 0x97, 0x80, 0x10, 0x00, 0x00]) // lea r10, [r15 + OFF_TBL]
+    // Lwin_e:
+    copy(bytes, [0x4D, 0x89, 0xCB])                        // mov r11, r9
+    copy(bytes, [0x49, 0x31, 0xDB])                        // xor r11, rbx
+    copy(bytes, [0x49, 0x83, 0xEB, 0x01])                  // sub r11, 1
+    copy(bytes, [0x49, 0xC1, 0xFB, 0x3F])                  // sar r11, 63
+    copy(bytes, [0x4D, 0x23, 0x1C, 0xCA])                  // and r11, [r10 + rcx*8]
+    copy(bytes, [0x4C, 0x09, 0xD8])                        // or rax, r11
+    copy(bytes, [0x49, 0x81, 0xC2, 0x00, 0x02, 0x00, 0x00]) // add r10, 512
+    copy(bytes, [0x49, 0xFF, 0xC1])                        // inc r9
+    copy(bytes, [0x49, 0x83, 0xF9, 0x10])                  // cmp r9, 16
+    copy(bytes, [0x72, 0xDB])                              // jb Lwin_e
+    copy(bytes, [0x49, 0x89, 0x84, 0xCF, 0x40, 0x08, 0x00, 0x00]) // mov [r15 + OFF_SEL + rcx*8], rax
+    copy(bytes, [0x48, 0xFF, 0xC1])                        // inc rcx
+    copy(bytes, [0x4C, 0x39, 0xC1])                        // cmp rcx, r8
+    copy(bytes, [0x72, 0xBF])                              // jb Lwin_j
+    copy(bytes, [0x49, 0x8D, 0xBF, 0x30, 0x06, 0x00, 0x00]) // lea rdi, [r15 + OFF_ACC]
+    copy(bytes, [0x49, 0x8D, 0xB7, 0x40, 0x08, 0x00, 0x00]) // lea rsi, [r15 + OFF_SEL]
+    copy(bytes, [0x48, 0x89, 0xFA])                        // mov rdx, rdi
+    copy(bytes, [0xE9, 0x69, 0xFE, 0xFF, 0xFF])            // jmp Lmm
+    hvis lengde(bytes) - bnm_start != 1367 {
+        kast "bn_modexp-atom: uventa lengd " + tekst_fra_heltall(lengde(bytes) - bnm_start) + " (venta 1367)"
+    }
+    returner bnm_va
+}
 // ─── Runtime-kall-hjelparar ───────────────────────────────────────────────────
 // call_rt_1arg: pop rdi
 funksjon emit_rt_call_1(buf, rt_va, code_va) {
@@ -1012,6 +1418,7 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".sha256_bytes_hex") eller fn_nm == "sha256_bytes_hex" { returner "str" }
     hvis builtin.ends_with(fn_nm, ".argon2_compress") eller fn_nm == "argon2_compress" { returner "list" }
     hvis builtin.ends_with(fn_nm, ".blake2b_compress") eller fn_nm == "blake2b_compress" { returner "list" }
+    hvis builtin.ends_with(fn_nm, ".bn_modexp_bytes") eller fn_nm == "bn_modexp_bytes" { returner "list" }
     hvis builtin.ends_with(fn_nm, "x25519._M") eller builtin.ends_with(fn_nm, "ed25519._M") { returner "list" }
     hvis builtin.ends_with(fn_nm, "x25519._A") eller builtin.ends_with(fn_nm, "ed25519._A") { returner "list" }
     hvis builtin.ends_with(fn_nm, "x25519._Z") eller builtin.ends_with(fn_nm, "ed25519._Z") { returner "list" }
@@ -3002,6 +3409,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x89, 0xE0])                      // mov rax,r12
     copy(bytes, [0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B]) // pop
     legg_til(bytes, 0xC3)                                // ret
+
+    // ── bn_modexp_bytes(base_be, exp_be, mod_be) → byteliste (Montgomery, sjå
+    // emit_bn_modexp_atom). std.bigint.modexp rutar hit (RSA/ECDSA); tom liste
+    // (ugyldig input / partal mod) eller null (runtime utan atomet) → rein fallback.
+    atomics["bn_modexp"] = emit_bn_modexp_atom(bytes)
 
     // ── map_has_safe(rdi=obj, rsi=nøkkel) → usann for null/ikkje-ordbok ──────
     // vm._rt_har_nøkkel kalla har_nøkkel på ein TEKST-verdi → frosen RT_MAP_HAS
@@ -8691,6 +9103,7 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis fn_nm == "sha256_bytes_hex" eller builtin.ends_with(fn_nm, ".sha256_bytes_hex") { returner atomic_vas["sha256_bytes_hex"] }
     hvis fn_nm == "argon2_compress" eller builtin.ends_with(fn_nm, ".argon2_compress") { returner atomic_vas["argon2_compress"] }
     hvis fn_nm == "blake2b_compress" eller builtin.ends_with(fn_nm, ".blake2b_compress") { returner atomic_vas["blake2b_compress"] }
+    hvis fn_nm == "bn_modexp_bytes" eller builtin.ends_with(fn_nm, ".bn_modexp_bytes") { returner atomic_vas["bn_modexp"] }
     hvis builtin.ends_with(fn_nm, "x25519._M") eller builtin.ends_with(fn_nm, "ed25519._M") { returner atomic_vas["fe_mul"] }
     hvis builtin.ends_with(fn_nm, "x25519._A") eller builtin.ends_with(fn_nm, "ed25519._A") { returner atomic_vas["fe_add"] }
     hvis builtin.ends_with(fn_nm, "x25519._Z") eller builtin.ends_with(fn_nm, "ed25519._Z") { returner atomic_vas["fe_sub"] }
