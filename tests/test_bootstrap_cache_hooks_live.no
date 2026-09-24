@@ -2,14 +2,19 @@
 //   (a) `nc bundle` utan --output skriv build/kompiler.ncb.json
 //   (b) selfhost-fragment blir berre brukte når manifestet sin kjeldehash og
 //       artefakthash stemmer (elles levande kjelde)
-//   (c) selfhost.vm er vertsstyrt utan bootstrap/precompiled/vm.ncb.json, og
-//       globalinitialiseringa er lik den ein full kompilering av vm.no gjev
-//       (ingen hardkoda liste)
+//   (c) selfhost.vm er vertsstyrt utan bootstrap/precompiled/vm.ncb.json og
+//       uavhengig av kva cachen inneheld; globalinitialiseringa er lik den
+//       vm.no sjølv kompilerer til (ingen hardkoda liste). NORSCODE_VM_HOSTED=0
+//       slår markøren av.
 //   (d) NORSCODE_BOOTSTRAP_CACHE flyttar cacheroten for stdlib og selfhost
 // Alle artefaktar blir genererte i testen; testen les ingen committa JSON.
 // Køyrer i ein tom arbeidskatalog, så ingen CWD-relativ bootstrap/-sti kan
 // hjelpe. Ein seed utan krokane feilar (portane diskriminerer); difor køyrer
 // testen berre på den sjølvhosta Linux-x86-64-seeden (tools/nc_test.no).
+//
+// NC_HOOKS_LIVE_RUNTIME (valfri) peikar barneprosessane til ein annan runtime
+// med same CLI (compile/bundle/run). Berre for VM-i-VM-validering av ny
+// nc_main-kjelde før reseed; CI set han ikkje.
 bruk tools.process_runner som prosess
 
 funksjon selfhost_abi() -> tekst {
@@ -33,7 +38,7 @@ funksjon grunnmiljø(root: tekst, cache: tekst) -> ordbok_tekst {
 }
 
 funksjon kompiler(runtime: tekst, cwd: tekst, miljø: ordbok_tekst, src: tekst, ut: tekst) -> ordbok_tekst {
-    la res = prosess.køyr(runtime, ["compile", src, ut], cwd, miljø, 600000)
+    la res = prosess.køyr(runtime, ["compile", src, ut], cwd, miljø, 900000)
     hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
     assert(prosess.ok(res))
     returner res
@@ -75,32 +80,65 @@ funksjon lik_kode(a, b) -> boolsk {
     returner sann
 }
 
-funksjon skriv_manifest(sti: tekst, kjelde_rel: tekst, modul: tekst, kjelde_hash: tekst,
-                        artefakt_logisk: tekst, artefakt_hash: tekst) -> heiltall {
-    la post = {
+funksjon manifestpost(modul: tekst, kjelde_hash: tekst, artefakt_logisk: tekst, artefakt_hash: tekst) -> ordbok_tekst {
+    returner {
         "module": modul,
         "source_sha256": kjelde_hash,
         "artifact": artefakt_logisk,
         "artifact_sha256": artefakt_hash
     }
-    la modular = {}
-    modular[kjelde_rel] = post
-    fil_skriv(sti, json_skriv({"schema": selfhost_abi(), "modules": modular}))
+}
+
+funksjon skriv_manifest(sti: tekst, postar) -> heiltall {
+    fil_skriv(sti, json_skriv({"schema": selfhost_abi(), "modules": postar}))
     returner 0
+}
+
+funksjon fil_hash(sti: tekst) -> tekst {
+    returner builtin.sha256_bytes(fil_les_binær(sti))
 }
 
 funksjon start() -> heiltall {
     la info = builtin.system_info()
     la runtime = tekst(info["executable"])
+    la overstyrt = ""
+    prøv { overstyrt = builtin.trim(tekst(miljo_hent("NC_HOOKS_LIVE_RUNTIME"))) } fang (e) { overstyrt = "" }
+    hvis overstyrt != "" { runtime = overstyrt }
     la root = tekst(info["cwd"])
     la dir = root + "/build/bootstrap-cache-hooks-" + builtin.random_hex(8)
     la arbeid = dir + "/cwd"
     builtin.mkdir_p(arbeid)
     la tom = dir + "/tom-cache"
+    la cache = dir + "/cache"
+    builtin.mkdir_p(cache + "/precompiled")
+    la manifest = cache + "/precompiled/manifest.json"
+    la postar = {}
 
-    // ── (c) vertsstyrt selfhost.vm utan vm.ncb.json ─────────────────────────
+    // ── (c) vertsstyrt selfhost.vm ──────────────────────────────────────────
+    // Orakel: vm.no kompilert som éin modul (selfhost.vm) i ein eigen
+    // barneprosess. global_names og __module_init__ derifrå er fasiten for den
+    // vertsstyrte initialisatoren; heile funksjonsflata går inn i cachen.
+    la vm_art = cache + "/precompiled/selfhost_vm.ncb.json"
+    la orakel_no = dir + "/orakel_vm.no"
+    fil_skriv(orakel_no,
+        "funksjon start() -> heiltall {\n" +
+        "    fil_skriv(\"" + vm_art + "\", builtin.kompiler_fil(fil_les(\"" + root + "/selfhost/vm.no\"), \"selfhost.vm\"))\n" +
+        "    returner 0\n" +
+        "}\n")
+    la o_res = prosess.køyr(runtime, ["run", orakel_no], arbeid, grunnmiljø(root, tom), 900000)
+    hvis ikkje prosess.ok(o_res) { prosess.skriv_resultat(o_res) }
+    assert(prosess.ok(o_res))
+    la orakel = json_parse_raw(fil_les(vm_art))
+    la orakel_fns = vm_funksjonar(orakel)
+    assert(lengde(orakel_fns) > 50)
+    postar["selfhost/vm.no"] = manifestpost("selfhost.vm", fil_hash(root + "/selfhost/vm.no"),
+                                            "bootstrap/precompiled/selfhost_vm.ncb.json", fil_hash(vm_art))
+    skriv_manifest(manifest, postar)
+
     la p_vm = dir + "/p_vm.no"
     fil_skriv(p_vm, "bruk selfhost.vm som vm\nfunksjon start() -> heiltall { returner 0 }\n")
+
+    // Standard, ingen cache: vertsstyrt, berre __module_init__.
     la vm_ut = dir + "/p_vm.ncb.json"
     la vm_res = kompiler(runtime, arbeid, grunnmiljø(root, tom), p_vm, vm_ut)
     assert(har(vm_res, "[stdlib-cache] selfhost-vm-hosted selfhost.vm"))
@@ -109,17 +147,7 @@ funksjon start() -> heiltall {
     assert_eq(lengde(vm_fns), 1)
     assert_eq(vm_fns[0], "selfhost.vm.__module_init__")
 
-    // Eksplisitt av: heile vm.no blir kompilert (VM-i-VM-modus). Den fulle
-    // kompileringa er orakelet for globalflata til den vertsstyrte modusen.
-    la av_miljø = grunnmiljø(root, tom)
-    av_miljø["NORSCODE_VM_HOSTED"] = "0"
-    la vm_av_ut = dir + "/p_vm_av.ncb.json"
-    la vm_av_res = kompiler(runtime, arbeid, av_miljø, p_vm, vm_av_ut)
-    assert(ikkje har(vm_av_res, "selfhost-vm-hosted"))
-    la full_ncb = json_parse_raw(fil_les(vm_av_ut))
-    assert(lengde(vm_funksjonar(full_ncb)) > 50)
-
-    la venta = full_ncb["global_names"]["selfhost.vm"]
+    la venta = orakel["global_names"]["selfhost.vm"]
     la faktisk = vm_ncb["global_names"]["selfhost.vm"]
     assert(lengde(venta) >= 10)
     assert_eq(lengde(faktisk), lengde(venta))
@@ -129,23 +157,47 @@ funksjon start() -> heiltall {
         gi = gi + 1
     }
     assert(lik_kode(vm_ncb["functions"]["selfhost.vm.__module_init__"]["code"],
-                    full_ncb["functions"]["selfhost.vm.__module_init__"]["code"]))
+                    orakel["functions"]["selfhost.vm.__module_init__"]["code"]))
+    la inits = vm_ncb["module_initializers"]
+    la har_init = usann
+    la ii: heiltall = 0
+    mens ii < lengde(inits) {
+        hvis tekst(inits[ii]) == "selfhost.vm.__module_init__" { har_init = sann }
+        ii = ii + 1
+    }
+    assert(har_init)
+
+    // Markøren avheng ikkje av cacheinnhaldet: med ein verifisert vm-post
+    // i cachen er vm framleis vertsstyrt.
+    la vm_c_ut = dir + "/p_vm_cache.ncb.json"
+    la vm_c_res = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_vm, vm_c_ut)
+    assert(har(vm_c_res, "[stdlib-cache] selfhost-vm-hosted selfhost.vm"))
+    assert(ikkje har(vm_c_res, "selfhost-hit selfhost.vm"))
+    assert_eq(lengde(vm_funksjonar(json_parse_raw(fil_les(vm_c_ut)))), 1)
+
+    // Eksplisitt av (NORSCODE_VM_HOSTED=0): heile selfhost.vm blir bunta, her
+    // frå den verifiserte cacheposten (billegare enn å kompilere vm.no).
+    la av_miljø = grunnmiljø(root, cache)
+    av_miljø["NORSCODE_VM_HOSTED"] = "0"
+    la vm_av_ut = dir + "/p_vm_av.ncb.json"
+    la vm_av_res = kompiler(runtime, arbeid, av_miljø, p_vm, vm_av_ut)
+    assert(ikkje har(vm_av_res, "selfhost-vm-hosted"))
+    assert(har(vm_av_res, "[stdlib-cache] selfhost-hit selfhost.vm"))
+    assert_eq(lengde(vm_funksjonar(json_parse_raw(fil_les(vm_av_ut)))), lengde(orakel_fns))
 
     // ── (b)+(d) kjeldehash-porta selfhost-fragment under flytta cacherot ────
     la p_ast = dir + "/p_ast.no"
     fil_skriv(p_ast, "bruk selfhost.ast som ast\nfunksjon start() -> heiltall { returner 0 }\n")
-    la cache = dir + "/cache"
-    builtin.mkdir_p(cache + "/precompiled")
     la artefakt = cache + "/precompiled/ast.ncb.json"
     la art_miljø = grunnmiljø(root, tom)
     art_miljø["NORSCODE_USE_PRECOMPILED_SELFHOST"] = "0"
     art_miljø["NORSCODE_MODULE"] = "selfhost.ast"
     kompiler(runtime, arbeid, art_miljø, root + "/selfhost/ast.no", artefakt)
-    la kjelde_hash = builtin.sha256_bytes(fil_les_binær(root + "/selfhost/ast.no"))
-    la artefakt_hash = builtin.sha256_bytes(fil_les_binær(artefakt))
-    la manifest = cache + "/precompiled/manifest.json"
-    skriv_manifest(manifest, "selfhost/ast.no", "selfhost.ast", kjelde_hash,
-                   "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    la kjelde_hash = fil_hash(root + "/selfhost/ast.no")
+    la artefakt_hash = fil_hash(artefakt)
+    postar["selfhost/ast.no"] = manifestpost("selfhost.ast", kjelde_hash,
+                                             "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    skriv_manifest(manifest, postar)
 
     la treff_ut = dir + "/p_ast_treff.ncb.json"
     la treff = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, treff_ut)
@@ -167,16 +219,18 @@ funksjon start() -> heiltall {
     }
 
     // Forelda kjelde (feil source_sha256) → miss, aldri stille bruk.
-    skriv_manifest(manifest, "selfhost/ast.no", "selfhost.ast",
-                   "0000000000000000000000000000000000000000000000000000000000000000",
-                   "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    postar["selfhost/ast.no"] = manifestpost("selfhost.ast",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+        "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    skriv_manifest(manifest, postar)
     la stale = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_stale.ncb.json")
     assert(har(stale, "selfhost-miss selfhost.ast source-hash"))
     assert(ikkje har(stale, "selfhost-hit"))
 
     // Endra artefakt (hash stemmer ikkje) → miss.
-    skriv_manifest(manifest, "selfhost/ast.no", "selfhost.ast", kjelde_hash,
-                   "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    postar["selfhost/ast.no"] = manifestpost("selfhost.ast", kjelde_hash,
+                                             "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    skriv_manifest(manifest, postar)
     builtin.fil_append(artefakt, " ")
     la endra = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_endra.ncb.json")
     assert(har(endra, "selfhost-miss selfhost.ast artifact-hash"))
@@ -194,9 +248,9 @@ funksjon start() -> heiltall {
     kompiler(runtime, arbeid, std_miljø, root + "/std/sha256.no", std_art)
     la std_post = {
         "module": "std.sha256",
-        "source_sha256": builtin.sha256_bytes(fil_les_binær(root + "/std/sha256.no")),
+        "source_sha256": fil_hash(root + "/std/sha256.no"),
         "artifact": "bootstrap/stdlib/std_sha256_hooks.ncb.json",
-        "artifact_sha256": builtin.sha256_bytes(fil_les_binær(std_art))
+        "artifact_sha256": fil_hash(std_art)
     }
     la std_modular = {}
     std_modular["std/sha256.no"] = std_post
