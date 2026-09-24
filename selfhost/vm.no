@@ -4886,6 +4886,22 @@ funksjon vm_green_vent_ferdig() -> heiltall {
     returner 0
 }
 
+// Kalla av CALL-handteraren i den ytste slice-aktiveringa når eit kall returnerer
+// normalt eller kastar eit vanleg unnatak. Ventetilstand finst berre mellom eit
+// GreenVenter-kast og fullføringa av den same (re-køyrde) CALL-en, så her er ho
+// alltid over. Utan dette lak vent_frist frå armar som returnerer utan
+// vm_green_vent_ferdig (pool wait der tasken vart ferdig mellom forsøka, dobbel
+// join, destruert mutex, fjerna pool) inn i neste ventepunkt i tråden: sov
+// returnerte med ein gong eller søv til den gamle fristen, join/poll venta utan
+// frist eller gav timeout med ein gong.
+funksjon vm_green_vent_rydd() -> heiltall {
+    la meg = vm_green_cur_t
+    hvis ikkje vm_map_har_nokkel(meg, "id") { returner 0 }
+    la frist = meg["vent_frist"]
+    hvis frist != -1 eller lengde(meg["vent_data"]) > 0 { vm_green_vent_ferdig() }
+    returner 0
+}
+
 funksjon vm_green_join_resultat(t, status: tekst) {
     la verdi = ""
     la feil = ""
@@ -5353,8 +5369,10 @@ funksjon vm_green_pool(req, functions) {
     }
     hvis op == "wait" eller op == "status" {
         la timed_out: heiltall = 0
+        // Konsumer løyvet òg når tasken alt er ferdig (re-køyrd CALL etter venting).
+        la kan_yield2: heiltall = 0
+        hvis op == "wait" { kan_yield2 = vm_green_ta_yield() }
         hvis op == "wait" og ikkje vm_green_er_ferdig(t) {
-            la kan_yield2 = vm_green_ta_yield()
             la timeout = vm_green_felt_heiltal(req, "timeout_ms", -1)
             hvis timeout == 0 {
                 timed_out = 1
@@ -5370,8 +5388,8 @@ funksjon vm_green_pool(req, functions) {
                 }
                 hvis ikkje vm_green_er_ferdig(t) { timed_out = 1 }
             }
-            hvis kan_yield2 == 1 { vm_green_vent_ferdig() }
         }
+        hvis kan_yield2 == 1 { vm_green_vent_ferdig() }
         hvis timed_out == 1 { returner vm_green_pool_svar("timeout", p, t, "timeout") }
         returner vm_green_pool_svar(tekst(t["state"]), p, t, "")
     }
@@ -6323,6 +6341,10 @@ funksjon køyr_funksjon(
                         hvis er_green_slice og op == "CALL" { vm_green_yield_ok = 1 }
                     }
                     retur_verdi = kall_innebygd(mål_namn, call_args, functions)
+                    // Ventetilstand (vent_frist/vent_data) frå eit tidlegare
+                    // GreenVenter-forsøk av same CALL er over når builtinen returnerer
+                    // normalt, same kva veg armen gjekk (sjå vm_green_vent_rydd).
+                    hvis er_green_slice { vm_green_vent_rydd() }
                     functions["__vm_last_return_heap_id__"] = vm_heap_track(functions, retur_verdi)
                 }
             } fang (call_exc) {
@@ -6377,6 +6399,9 @@ funksjon køyr_funksjon(
             }
 
             hvis call_failed {
+                // Vanleg unnatak (ikkje GreenVenter) frå eit kall i ytste slice:
+                // ei eventuell venting i tråden er over.
+                hvis er_green_slice { vm_green_vent_rydd() }
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 vm_metric_inc(functions, "unwinds")
                 functions["__vm_pending_arg_heap_ids__"] = []
