@@ -1,0 +1,238 @@
+// tools/materialize_bootstrap_cache.no — materialiser ein kjeldehash-verifisert
+// bootstrap-cache (selfhost- og stdlib-fragment) under build/, ikkje i git.
+//
+// Konsumenten er bootstrap-krokane i den baka nc_main/bundler:
+//   <rot>/precompiled/manifest.json  schema norscode-selfhost-source-cache-v1|ncb-v1|module-globals-v1
+//   <rot>/stdlib/manifest.json       schema norscode-stdlib-source-cache-v1|ncb-v1|module-globals-v1
+// der <rot> er NORSCODE_BOOTSTRAP_CACHE (absolutt, eller relativ til repo-rota).
+// Kvar post har module, source_sha256 (SHA-256 av .no-bytane), artifact
+// ("bootstrap/<del>/<fil>", eit logisk namnerom som konsumenten legg under
+// <rot>) og artifact_sha256. Eit fragment blir berre brukt når begge hashane
+// stemmer. Ei kjeldeendring gjer posten til ein bom (levande kjelde); ho kan
+// aldri gje stille, forelda bytekode.
+//
+// Artefakta er builtin.kompiler_fil(kjelde, modulnamn), same kall som
+// kjeldevegen i nc_bundle_ncb (nc_materialiser_import_ncb). Eit treff gjev
+// difor same modul som kompilering frå kjelde. Kvar modul blir kompilert i ein
+// eigen barneprosess, så minnet blir frigjort mellom modulane.
+//
+// selfhost.vm er ikkje med som standard: import av selfhost.vm er vertsstyrt
+// (NORSCODE_VM_HOSTED) og les ingen cache. Ta han med eksplisitt berre for
+// bygg-native / NORSCODE_VM_HOSTED=0.
+//
+// Køyring (frå repo-rota):
+//   NORSCODE_BOOTSTRAP_CACHE=build/cache/bootstrap \
+//   NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+//   NORSCODE_VM_DISK_ROOT="$PWD,.,/tmp" ./bin/nc run tools/materialize_bootstrap_cache.no
+// Set så same NORSCODE_BOOTSTRAP_CACHE for kompileringane og testane.
+//
+// Miljø:
+//   NORSCODE_BOOTSTRAP_CACHE    målrot (standard build/cache/bootstrap). Verktøyet
+//                               nektar å skrive i <root>/bootstrap (committa flate).
+//   NC_BOOTSTRAP_CACHE_MODULES  kommaliste med modulnamn (standard: standard_modular()).
+//   NORSCODE_NATIVE_BIN         runtime for barneprosessane (standard: denne runtimen).
+
+bruk tools.process_runner som prosess
+
+funksjon linje(melding: tekst) -> heiltall {
+    skriv(melding + "\n")
+    returner 0
+}
+
+funksjon env(namn: tekst) -> tekst {
+    prøv {
+        la v = miljo_hent(namn)
+        hvis v == null { returner "" }
+        returner builtin.trim(tekst(v))
+    } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon selfhost_abi() -> tekst {
+    returner "norscode-selfhost-source-cache-v1|ncb-v1|module-globals-v1"
+}
+
+funksjon stdlib_abi() -> tekst {
+    returner "norscode-stdlib-source-cache-v1|ncb-v1|module-globals-v1"
+}
+
+// Modular som testsuiten importerer ofte, eller som er dyre å kompilere frå kjelde
+// (målt på fersk Linux-seed under Rosetta: selfhost.common ~40 s og
+// selfhost.kompiler ~50 s frå kjelde). Kompilatorkjeda er med fordi BFS-bundlinga
+// importerer kvar modul for seg.
+funksjon standard_modular() -> liste_tekst {
+    returner [
+        "selfhost.common",
+        "selfhost.lexer.lexer_m1",
+        "selfhost.parser",
+        "selfhost.compiler.semantic",
+        "selfhost.compiler.ir_to_bytecode",
+        "selfhost.kompiler",
+        "selfhost.json",
+        "selfhost.ast",
+        "selfhost.semantic_validation_real",
+        "selfhost.ncb_bin",
+        "selfhost.ncb_serde",
+        "selfhost.bundler",
+        "selfhost.http_response",
+        "std.sha256",
+        "std.tekst"
+    ]
+}
+
+funksjon cache_rot(root: tekst) -> tekst {
+    la eksplisitt = env("NORSCODE_BOOTSTRAP_CACHE")
+    hvis eksplisitt == "" { returner root + "/build/cache/bootstrap" }
+    hvis builtin.starts_with(eksplisitt, "/") { returner eksplisitt }
+    returner root + "/" + eksplisitt
+}
+
+// Norscode-strengliteral for ein sti/modulnamn i den genererte driveren.
+funksjon lit(t: tekst) -> tekst {
+    returner "\"" + builtin.replace(builtin.replace(t, "\\", "\\\\"), "\"", "\\\"") + "\""
+}
+
+funksjon fil_hash(sti: tekst) -> tekst {
+    returner builtin.sha256_bytes(builtin.fil_les_binær(sti))
+}
+
+// "selfhost.compiler.semantic" → "selfhost/compiler/semantic.no"
+funksjon kjelde_rel(modul: tekst) -> tekst {
+    returner builtin.replace(modul, ".", "/") + ".no"
+}
+
+// "selfhost.compiler.semantic" → "selfhost_compiler_semantic.ncb.json"
+funksjon artefakt_namn(modul: tekst) -> tekst {
+    returner builtin.replace(modul, ".", "_") + ".ncb.json"
+}
+
+funksjon del_for(modul: tekst) -> tekst {
+    hvis builtin.starts_with(modul, "selfhost.") { returner "precompiled" }
+    hvis builtin.starts_with(modul, "std.") { returner "stdlib" }
+    returner ""
+}
+
+funksjon modulliste() -> liste_tekst {
+    la rå = env("NC_BOOTSTRAP_CACHE_MODULES")
+    hvis rå == "" { returner standard_modular() }
+    la ut: liste_tekst = []
+    la delar = builtin.split(rå, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la m = builtin.trim(tekst(delar[i]))
+        hvis m != "" { legg_til(ut, m) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Kompiler éin modul i ein frisk barneprosess. Returnerer "" ved suksess,
+// elles ein feilmelding.
+funksjon kompiler_modul(runtime: tekst, root: tekst, rot: tekst, modul: tekst,
+                        kjelde: tekst, artefakt: tekst, nr: heiltall) -> tekst {
+    la driver = rot + "/.materialize-" + tekst_fra_heltall(nr) + ".no"
+    fil_skriv(driver,
+        "funksjon start() -> heiltall {\n" +
+        "    fil_skriv(" + lit(artefakt) + ", builtin.kompiler_fil(fil_les(" +
+        lit(kjelde) + "), " + lit(modul) + "))\n" +
+        "    returner 0\n" +
+        "}\n")
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_MODULE": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + "," + rot + ",.,/tmp,/private/tmp"
+    }
+    la res = prosess.køyr(runtime, ["run", driver], root, miljø, 1800000)
+    prøv { builtin.fil_slett(driver) } fang (e) { }
+    hvis ikkje prosess.ok(res) {
+        prosess.skriv_resultat(res)
+        returner "barneprosessen feila (status=" + tekst(res["status"]) + " exit=" + tekst(res["exit_code"]) + ")"
+    }
+    hvis ikkje builtin.fil_finnes(artefakt) { returner "ingen artefakt" }
+    la ncb = json_parse_raw(fil_les(artefakt))
+    hvis builtin.type(ncb) != "ordbok" eller builtin.type(ncb["functions"]) != "ordbok" {
+        returner "artefakten er ikkje ein NCB med functions"
+    }
+    la fns = nøkler(ncb["functions"])
+    hvis lengde(fns) == 0 { returner "artefakten har ingen funksjonar" }
+    la i: heiltall = 0
+    mens i < lengde(fns) {
+        hvis ikkje builtin.starts_with(tekst(fns[i]), modul + ".") {
+            returner "framand funksjonsnøkkel " + tekst(fns[i])
+        }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon main() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la rot = cache_rot(root)
+    hvis rot == root + "/bootstrap" eller rot == root + "/bootstrap/" {
+        linje("✗ Nektar å skrive bootstrap-cache i den committa " + rot + "; bruk t.d. build/cache/bootstrap")
+        returner 2
+    }
+    la runtime = env("NORSCODE_NATIVE_BIN")
+    hvis runtime == "" { runtime = tekst(builtin.system_info()["executable"]) }
+    builtin.mkdir_p(rot + "/precompiled")
+    builtin.mkdir_p(rot + "/stdlib")
+    linje("Bootstrap-cache → " + rot)
+
+    la selfhost_postar = {}
+    la stdlib_postar = {}
+    la ok_tal: heiltall = 0
+    la feil_tal: heiltall = 0
+    la modular = modulliste()
+    la i: heiltall = 0
+    mens i < lengde(modular) {
+        la modul = tekst(modular[i])
+        la del = del_for(modul)
+        la rel = kjelde_rel(modul)
+        la kjelde = root + "/" + rel
+        hvis del == "" {
+            linje("  [FEIL] " + modul + ": berre selfhost.* og std.* kan cachast")
+            feil_tal = feil_tal + 1
+        } ellers hvis ikkje builtin.fil_finnes(kjelde) {
+            linje("  [FEIL] " + modul + ": finn ikkje " + rel)
+            feil_tal = feil_tal + 1
+        } ellers {
+            la namn = artefakt_namn(modul)
+            la artefakt = rot + "/" + del + "/" + namn
+            la kjelde_hash_før = fil_hash(kjelde)
+            la t0 = builtin.tid_ms()
+            la feil = kompiler_modul(runtime, root, rot, modul, kjelde, artefakt, i)
+            // Kjelda må vere uendra under kompileringa; elles kan hashen i
+            // manifestet peike på bytekode frå ein annan versjon.
+            hvis feil == "" og fil_hash(kjelde) != kjelde_hash_før { feil = "kjelda endra seg under kompilering" }
+            hvis feil != "" {
+                linje("  [FEIL] " + modul + ": " + feil)
+                prøv { builtin.fil_slett(artefakt) } fang (e) { }
+                feil_tal = feil_tal + 1
+            } ellers {
+                la post = {
+                    "module": modul,
+                    "source_sha256": kjelde_hash_før,
+                    "artifact": "bootstrap/" + del + "/" + namn,
+                    "artifact_sha256": fil_hash(artefakt)
+                }
+                hvis del == "precompiled" { selfhost_postar[rel] = post } ellers { stdlib_postar[rel] = post }
+                linje("  [OK] " + modul + " (" + tekst_fra_heltall(builtin.tid_ms() - t0) + " ms)")
+                ok_tal = ok_tal + 1
+            }
+        }
+        i = i + 1
+    }
+    // Manifesta blir skrivne til slutt og berre med modular som faktisk vart
+    // kompilerte; ein halvferdig køyring gjev aldri ein post utan artefakt.
+    fil_skriv(rot + "/precompiled/manifest.json", json_skriv({"schema": selfhost_abi(), "modules": selfhost_postar}))
+    fil_skriv(rot + "/stdlib/manifest.json", json_skriv({"schema": stdlib_abi(), "modules": stdlib_postar}))
+    linje("Bootstrap-cache: " + tekst_fra_heltall(ok_tal) + " OK, " + tekst_fra_heltall(feil_tal) + " feil")
+    hvis feil_tal > 0 { returner 1 }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    returner main()
+}
