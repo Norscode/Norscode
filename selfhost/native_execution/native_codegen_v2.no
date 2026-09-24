@@ -98,6 +98,9 @@ funksjon GC_ALLOC_BYTES_VA() { returner HEAP_VA() + GC_SAFEPOINT_OFFSET() }
 // Soft-sona (bump ≥ GC_SOFT_LIMIT): collect berre når bump har vakse minst så mykje sidan
 // siste collect (v3 samla ved KVART safepoint → collect-storm utan framgang).
 funksjon GC_SOFT_BUDGET() { returner 8388608 }   // 8 MiB
+// Første allokeringsport (port_dyn ved oppstart, GC-modus): første collect etter 64 KiB
+// allokert, deretter max(port, 64 B × live-n). Sjå init_heap (F2b).
+funksjon GC_INIT_PORT() { returner 65536 }
 funksjon ENVP_OFFSET() { returner 8 }
 
 funksjon native_codegen_trace(melding: tekst) -> heiltall {
@@ -7428,6 +7431,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // den replace-patcha frosne rt_init_heap («mov [0x600000],0x702060; ret»).
     atomics["init_heap"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0xC7, 0x04, 0x25]) u32(bytes, HEAP_VA()) u32(bytes, HEAP_ALLOC_START()) // mov q[bump],HEAP_ALLOC_START
+    hvis gc_mode == "1" {
+        // v7 (F2b): port_dyn [HEAP+16] = GC_INIT_PORT ved oppstart. Med 0 samla v4-stubben ved
+        // FYRSTE safepoint (før det finst data): rå GC-probar fekk collect midt i handsett mark-/
+        // live-map-tilstand (gc_mark/gc_sort_livemap raude), og små litmus-probar samla før
+        // objekta dei skal verne fanst. Same «tidleg collect»-invariant som v3 (safepoint nr.
+        // 1000), no målt i allokerte bytes. (Eit tidlegare mål på 7 s → 31 s med 64 KiB var
+        // den kvadratiske heap-bygginga i gc_sort_livemap, ikkje startporten.)
+        copy(bytes, [0x48, 0xC7, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16) u32(bytes, GC_INIT_PORT()) // mov q[port_dyn],GC_INIT_PORT
+    }
     copy(bytes, [0xC3])                                     // ret
 
     // ── Trampolinar batch B (strengar/konvertering), C (fil/miljø/heap), D (JSON) ────
@@ -8025,7 +8037,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la sp_pskip1: heltall = -1
     la sp_pskip1b: heltall = -1
     hvis gc_mode == "1" {
-        // port_dyn = 0 ved oppstart → collect ved 1. safepoint (tom heap, gratis). IKKJE F2b (port_dyn > 0 frå init_heap): målt 2026-09-24 gav 64 KiB startport AOT av native_codegen_v2 7 s → 31 s med like mange collects (truleg små hol frå ein tidleg collect → 512-stegs fri-liste-vandring per allokering).
+        // port_dyn = GC_INIT_PORT (64 KiB) frå init_heap → første collect etter 64 KiB allokert (F2b).
         copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GC_ALLOC_BYTES_VA())   // mov rax,[alloc]
         copy(bytes, [0x48, 0x3B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16)        // cmp rax,[port_dyn]
         sp_pcollect = emit_jcc_placeholder(bytes, 0x83)                          // jae .collect
@@ -8069,6 +8081,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53]) // push r8,r9,r10,r11
     copy(bytes, [0x53, 0x55])                       // push rbx,rbp
     copy(bytes, [0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push r12,r13,r14,r15
+    // DIAGNOSE (NORSCODE_GC_SPOR=1 ved codegen): «F\n» FØR collect → saman med «<bump>
+    // <live-n>» etter kan ein tidsstemple utdata og skilje collect-tid frå mutator-tid.
+    hvis miljo_hent("NORSCODE_GC_SPOR") == "1" {
+        copy(bytes, [0xEB, 0x02, 0x46, 0x0A])      // jmp +2; db 'F', '\n'
+        la spor_f = TEXT_VA() + lengde(bytes) - 2
+        copy(bytes, [0x48, 0xC7, 0xC7]) u32(bytes, spor_f)                  // mov rdi,&'F'
+        copy(bytes, [0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00])            // mov rsi,2 ("F\n")
+        call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+        copy(bytes, [0x48, 0x89, 0xC7])            // mov rdi,rax
+        call_rel32(bytes, RT_SKRIV(), TEXT_VA())
+    }
     call_rel32(bytes, atomics["gc_collect_native"], TEXT_VA()) // call gc_collect_native (5B)
     // v4: port_dyn = max(port, 64 B × live-tal [HEAP_VA+56])  (38 B; rax er daud her).
     // IKKJE bump-basert: bump-reset tek berre halen over høgaste levande objekt, so
