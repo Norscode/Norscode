@@ -146,6 +146,27 @@ ståande på modulen til kallet inne i `prøv` etter handler-regionen. Omveg i 6
 bind den globale lokalt før kallet. Ekte fiks høyrer til i vm.no (modulkontekst ved
 try-exit).
 
+## 5c. Motstridande kontraktar for `vm.ncb` (open avgjerd)
+
+`test_precompiled_vm_host_compat` krev `["INDEX_SET"],["POP"]` og
+`["CALL","builtin.har_nokkel",2]` i `bootstrap/precompiled/vm.ncb.json`. Men den
+offisielle regenereringa (`nc_regen_bootstrap` → `normaliser_ncb` →
+`ncb_normalize_builtin_aliases_v802.no`, som begge er kontrakttesta) fjernar nettopp
+`POP` etter `INDEX_SET` («eldre host-VM») og byter `builtin.har_nokkel` →
+`selfhost.vm.vm_map_har_nokkel`. Begge kan ikkje vere grøne via det offisielle
+verktøyet.
+
+- Historikk: 35d111c (utan POP) → d728347 (vanleg compile *utan* normalisering, med
+  POP) → 6a02eda (utan) → da8bf31 (med) → d3a0901 (utan). Det flip-floppar.
+- Med normalisert form (d3a0901) er Windows ABI, Native macOS, Steg C bootstrap-self og
+  alle andre Linux-testar grøne. Berre host-compat-testen er raud.
+- Semantikk: `vm.no` sin INDEX_SET pushar objektet att, og kompilatoren emitterer POP.
+  Utan POP lek stakken per tilordning (d728347: stack overflow i djup L5b); med POP på
+  ein host som ikkje pushar, underflow.
+- Avgjerd trengst: anten (a) vanleg compile utan normalisering + byggj Windows-exe på nytt
+  (lokalt stormar verktøyet på 8,8 MB-exe-en, så gjer det i CI eller på ekte x86), eller
+  (b) oppdater host-compat-testen til det normaliserte formatet og ta bort POP-kravet.
+
 ## 6. Arkitektur (ikkje patchar)
 
 - **thread_pool** og **fjern_agent_loopback** krev at VM-funksjonar køyrer *samstundes*
