@@ -113,6 +113,88 @@ funksjon w_pool_vent(args: ordbok_tekst) -> tekst {
     returner r["status"] + ":" + r["value"]
 }
 
+// ── ventetilstand etter venting (review-regresjon) ──
+// Ein pool wait / join som måtte vente (GreenVenter), og der CALL-en returnerte
+// via ein veg utan eiga opprydding, etterlét vent_frist til neste ventepunkt i
+// tråden: sov(100) returnerte med ein gong (frist -1 → -2) eller søv til den gamle
+// fristen (5000), og join(100) venta utan frist.
+funksjon w_pool_vent_sov(args: ordbok_tekst) -> tekst {
+    la t = trd.native_pool_submit(args["pool"], "__main__.p_arbeid", {"teljar": args["teljar"]})
+    la r = trd.native_pool_wait(args["pool"], t["task_handle"], som_heiltal(args["ms"]))
+    trd.native_pool_release(args["pool"], t["task_handle"])
+    la t0 = builtin.tid_ms()
+    builtin.vent.sov(100)
+    returner r["status"] + ":" + tekst(builtin.tid_ms() - t0)
+}
+funksjon w_spinn_gate(args: ordbok_tekst) -> tekst {
+    // Spinn til porten er open; tak på 2 s så ein feil gjev svar i staden for heng.
+    la slutt = builtin.tid_ms() + 2000
+    mens atomic_les(args["gate"]) == 0 og builtin.tid_ms() < slutt { }
+    returner "spunne"
+}
+funksjon w_pool_vent_join(args: ordbok_tekst) -> tekst {
+    la t = trd.native_pool_submit(args["pool"], "__main__.p_arbeid", {"teljar": args["teljar"]})
+    la r = trd.native_pool_wait(args["pool"], t["task_handle"], -1)
+    trd.native_pool_release(args["pool"], t["task_handle"])
+    la sp = spawn("__main__.w_spinn_gate", {"gate": args["gate"]})
+    la j = join(sp, 100)
+    atomic_set(args["gate"], 1)
+    la j2 = join(sp, 5000)
+    returner r["status"] + ":" + j["status"] + ":" + j2["status"]
+}
+// To trådar joinar same spinnar: den eine får handtaket, den andre «invalid handle»
+// etter å ha venta. Begge skal sove heile 100 ms etterpå.
+funksjon w_join_sov(args: ordbok_tekst) -> tekst {
+    la j = join(args, -1)
+    la t0 = builtin.tid_ms()
+    builtin.vent.sov(100)
+    returner j["status"] + ":" + tekst(builtin.tid_ms() - t0)
+}
+funksjon w_spinn_ms(args: ordbok_tekst) -> tekst {
+    la slutt = builtin.tid_ms() + 150
+    mens builtin.tid_ms() < slutt { }
+    returner "spunne"
+}
+
+funksjon sov_ms_i(v: tekst, status: tekst) -> heiltall {
+    la d = builtin.split(v, ":")
+    assert_eq(d[0], status)
+    la ms = heltall_fra_tekst(d[1])
+    hvis ms < 90 eller ms >= 1000 {
+        kast "sov(100) etter venting tok " + tekst(ms) + " ms (" + v + ")"
+    }
+    returner ms
+}
+
+funksjon test_ventetilstand(ph: tekst, teljar: tekst) -> heiltall {
+    // pool wait med frist (5000) og utan frist (-1), deretter sov(100)
+    la a = join(spawn("__main__.w_pool_vent_sov", {"pool": ph, "teljar": teljar, "ms": "5000"}), 10000)["value"]
+    sov_ms_i(a, "finished")
+    la b = join(spawn("__main__.w_pool_vent_sov", {"pool": ph, "teljar": teljar, "ms": "-1"}), 10000)["value"]
+    sov_ms_i(b, "finished")
+    // pool wait(-1), deretter join(100) på ein spinnar: timeout, ikkje venting utan frist
+    la gate = atomic_ny(0)
+    assert_eq(join(spawn("__main__.w_pool_vent_join", {"pool": ph, "teljar": teljar, "gate": gate}), 10000)["value"],
+              "finished:timeout:finished")
+    // dobbel join: éin får «finished», den andre «error» (invalid handle); begge søv 100 ms
+    la sp = spawn("__main__.w_spinn_ms", {})
+    la j1 = spawn("__main__.w_join_sov", sp)
+    la j2 = spawn("__main__.w_join_sov", sp)
+    la v1 = join(j1, 10000)["value"]
+    la v2 = join(j2, 10000)["value"]
+    la s1 = builtin.split(v1, ":")[0]
+    la s2 = builtin.split(v2, ":")[0]
+    hvis s1 == "finished" {
+        sov_ms_i(v1, "finished")
+        sov_ms_i(v2, "error")
+    } ellers {
+        sov_ms_i(v1, "error")
+        sov_ms_i(v2, "finished")
+    }
+    assert(s1 != s2)
+    returner 0
+}
+
 // ── prøv/fang ──
 funksjon w_rekn(args: ordbok_tekst) -> tekst {
     la s: heiltall = 0
@@ -211,6 +293,7 @@ funksjon test_pool() -> heiltall {
     assert_eq(atomic_les(teljar), 64)
     // pool wait frå ein grøn tråd
     assert_eq(join(spawn("__main__.w_pool_vent", {"pool": ph, "teljar": teljar}), 10000)["value"], "finished:19900")
+    test_ventetilstand(ph, teljar)
     assert(trd.native_pool_shutdown(ph, usann))
     // shutdown med cancel_pending medan ein task køyrer: kølagde blir kansellerte,
     // den køyrande får fullføre.
