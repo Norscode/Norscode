@@ -167,6 +167,14 @@ verktøyet.
   (lokalt stormar verktøyet på 8,8 MB-exe-en, så gjer det i CI eller på ekte x86), eller
   (b) oppdater host-compat-testen til det normaliserte formatet og ta bort POP-kravet.
 
+## 5d. macOS: førehandsbygd macho-codegen manglar
+
+`bygg-native --target macos-arm64` tolkar heile `macho_arm64_codegen.no` frå kjelde:
+588 s lokalt (42 % CPU) og over 600 s på CI-macOS. `test_arm64_skriv_int_aot` har fått
+1100 s (ad7222f → neste commit) som mildning. Rett fiks er ein førehandsbygd macho-codegen
+med kjeldehash-port, som `bootstrap/native_codegen_x86_64.elf` og
+`nc_bygg_native_prebuilt_x86`.
+
 ## 6. Arkitektur (ikkje patchar)
 
 - **thread_pool** og **fjern_agent_loopback** krev at VM-funksjonar køyrer *samstundes*
