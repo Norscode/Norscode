@@ -1,0 +1,260 @@
+// Grøne trådar (selfhost/vm.no, M:1): synkronisering og pool under last.
+//
+// Dekkjer vegane test_thread_green_preemption ikkje når: yield-medviten
+// mutex_lock (hovudtråd ↔ grøn tråd, med og utan frist), condition_wait/signal
+// i alle retningar, thread_pool med 16 workerar og mange tasks, pool wait frå ein
+// grøn tråd, shutdown med cancel_pending medan ein task køyrer, pool-kapasitet,
+// og at GreenVenter ikkje blir fanga av brukar-prøv/fang i tråden.
+//
+// Med den gamle kooperative spawn-armen heng del 1 og 2 (workeren futex-ventar
+// på ein mutex som hovudtråden held, inne i spawn-kallet). krev_grøne_trådar()
+// feilar difor raskt på seedar utan builtin.thread_pool i VM-en i staden for å
+// henge til harness-timeouten. Sjå krev_ny_seed i tools/nc_test.no.
+bruk std.tråd som trd
+
+funksjon krev_grøne_trådar() -> heiltall {
+    prøv {
+        builtin.thread_pool({"abi": "norscode-native-thread-pool-v1", "operation": "status", "pool_handle": ""})
+    } fang (e) {
+        kast "seeden manglar grøne trådar/builtin.thread_pool i VM-en: " + tekst(e)
+    }
+    returner 0
+}
+
+funksjon atomic_ny(v: heiltall) -> tekst {
+    returner builtin.atomic_operation({"operation": "create", "value": v, "order": "seq_cst"})["handle"]
+}
+funksjon atomic_les(h: tekst) -> heiltall {
+    returner builtin.atomic_operation({"operation": "load", "handle": h, "order": "seq_cst"})["value"]
+}
+funksjon atomic_set(h: tekst, v: heiltall) -> heiltall {
+    builtin.atomic_operation({"operation": "store", "handle": h, "value": v, "order": "seq_cst"})
+    returner 0
+}
+funksjon atomic_add(h: tekst) -> heiltall {
+    builtin.atomic_operation({"operation": "fetch_add", "handle": h, "delta": 1, "order": "seq_cst"})
+    returner 0
+}
+
+funksjon sync(op: tekst, h: tekst, mh: tekst, ms: heiltall) -> ordbok_tekst {
+    returner builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": op, "handle": h,
+        "thread_id": "test", "mutex_handle": mh, "timeout_ms": tekst_fra_heltall(ms)})
+}
+
+funksjon spawn(fn: tekst, args: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn", "fn": fn,
+        "args": args, "name": fn, "stack_bytes": "65536"})
+}
+funksjon join(t: ordbok_tekst, ms: heiltall) -> ordbok_tekst {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": tekst_fra_heltall(ms)})
+}
+
+funksjon som_heiltal(v) -> heiltall {
+    hvis builtin.type(v) == "heltall" { returner v }
+    returner heltall_fra_tekst(tekst(v))
+}
+
+// ── mutex ──
+funksjon w_mutex(args: ordbok_tekst) -> tekst {
+    la r = sync("mutex_lock", args["m"], "", -1)
+    hvis atomic_les(args["inne"]) != 0 { atomic_add(args["brot"]) }
+    atomic_set(args["inne"], 1)
+    builtin.vent.sov(30)
+    atomic_add(args["teljar"])
+    atomic_set(args["inne"], 0)
+    sync("mutex_unlock", args["m"], "", 0)
+    returner r["status"]
+}
+funksjon w_mutex_frist(args: ordbok_tekst) -> tekst {
+    returner sync("mutex_lock", args["m"], "", 50)["status"]
+}
+
+// ── condition ──
+funksjon w_signal(args: ordbok_tekst) -> tekst {
+    builtin.vent.sov(som_heiltal(args["forsink"]))
+    sync("mutex_lock", args["m"], "", -1)
+    atomic_set(args["flagg"], 1)
+    sync("condition_signal", args["c"], "", 0)
+    sync("mutex_unlock", args["m"], "", 0)
+    returner "sig"
+}
+funksjon w_cond_vent(args: ordbok_tekst) -> tekst {
+    sync("mutex_lock", args["m"], "", -1)
+    la r = sync("condition_wait", args["c"], args["m"], som_heiltal(args["ms"]))
+    // condition_wait skal returnere med mutex teken att.
+    la eigar = sync("mutex_trylock", args["m"], "", 0)["status"]
+    sync("mutex_unlock", args["m"], "", 0)
+    returner r["status"] + ":" + eigar
+}
+
+// ── pool ──
+funksjon p_arbeid(args: ordbok_tekst) -> tekst {
+    la s: heiltall = 0
+    la i: heiltall = 0
+    mens i < 200 { s = s + i  i = i + 1 }
+    builtin.vent.sov(2)
+    atomic_add(args["teljar"])
+    returner tekst(s)
+}
+funksjon p_blokker(args: ordbok_tekst) -> tekst {
+    mens atomic_les(args["gate"]) == 0 { }
+    returner "opna"
+}
+funksjon w_opne_gate(args: ordbok_tekst) -> tekst {
+    builtin.vent.sov(50)
+    atomic_set(args["gate"], 1)
+    returner "opna"
+}
+funksjon w_pool_vent(args: ordbok_tekst) -> tekst {
+    la t = trd.native_pool_submit(args["pool"], "__main__.p_arbeid", {"teljar": args["teljar"]})
+    la r = trd.native_pool_wait(args["pool"], t["task_handle"], 5000)
+    trd.native_pool_release(args["pool"], t["task_handle"])
+    returner r["status"] + ":" + r["value"]
+}
+
+// ── prøv/fang ──
+funksjon w_rekn(args: ordbok_tekst) -> tekst {
+    la s: heiltall = 0
+    la i: heiltall = 0
+    mens i < 1000 { s = s + i  i = i + 1 }
+    returner tekst(s)
+}
+funksjon w_prov_vent(args: ordbok_tekst) -> tekst {
+    prøv {
+        builtin.vent.sov(40)
+        la j = join(spawn("__main__.w_rekn", {}), 5000)
+        returner "ok:" + j["value"]
+    } fang (e) {
+        returner "fanga:" + tekst(e)
+    }
+    returner "?"
+}
+
+funksjon test_mutex() -> heiltall {
+    la m = sync("mutex_create", "", "", 0)["handle"]
+    la a = {"m": m, "inne": atomic_ny(0), "brot": atomic_ny(0), "teljar": atomic_ny(0)}
+    // Hovudtråden held låsen: workerane må vente utan å stoppe hovudtråden.
+    assert_eq(sync("mutex_lock", m, "", -1)["status"], "ready")
+    la t1 = spawn("__main__.w_mutex", a)
+    la t2 = spawn("__main__.w_mutex", a)
+    la t3 = spawn("__main__.w_mutex", a)
+    la t0 = builtin.tid_ms()
+    builtin.vent.sov(100)
+    assert_eq(atomic_les(a["teljar"]), 0)
+    sync("mutex_unlock", m, "", 0)
+    assert_eq(join(t1, 5000)["value"], "ready")
+    assert_eq(join(t2, 5000)["value"], "ready")
+    assert_eq(join(t3, 5000)["value"], "ready")
+    assert(builtin.tid_ms() - t0 >= 180)
+    assert_eq(atomic_les(a["teljar"]), 3)
+    assert_eq(atomic_les(a["brot"]), 0)
+    // Grøn tråd med lock-frist medan hovudtråden held låsen.
+    sync("mutex_lock", m, "", -1)
+    assert_eq(join(spawn("__main__.w_mutex_frist", {"m": m}), 5000)["value"], "timeout")
+    sync("mutex_unlock", m, "", 0)
+    // Hovudtråden ventar på ein lås som ein grøn tråd held.
+    la t4 = spawn("__main__.w_mutex", a)
+    la spinn: heiltall = 0
+    mens atomic_les(a["inne"]) == 0 og spinn < 1000000 { spinn = spinn + 1 }
+    assert_eq(sync("mutex_lock", m, "", 2000)["status"], "ready")
+    assert_eq(atomic_les(a["teljar"]), 4)
+    sync("mutex_unlock", m, "", 0)
+    assert_eq(join(t4, 5000)["value"], "ready")
+    assert_eq(atomic_les(a["brot"]), 0)
+    returner 0
+}
+
+funksjon test_condition() -> heiltall {
+    la m = sync("mutex_create", "", "", 0)["handle"]
+    la c = sync("condition_create", "", "", 0)["handle"]
+    la flagg = atomic_ny(0)
+    // Hovudtråden ventar, grøn tråd signaliserer (må få mutexen medan hovud ventar).
+    sync("mutex_lock", m, "", -1)
+    la s = spawn("__main__.w_signal", {"m": m, "c": c, "flagg": flagg, "forsink": 20})
+    assert_eq(sync("condition_wait", c, m, 5000)["status"], "ready")
+    assert_eq(atomic_les(flagg), 1)
+    sync("mutex_unlock", m, "", 0)
+    assert_eq(join(s, 5000)["value"], "sig")
+    // Grøn ventar, grøn signaliserer.
+    la w = spawn("__main__.w_cond_vent", {"m": m, "c": c, "ms": 5000})
+    la s2 = spawn("__main__.w_signal", {"m": m, "c": c, "flagg": flagg, "forsink": 60})
+    assert_eq(join(w, 5000)["value"], "ready:blocked")
+    assert_eq(join(s2, 5000)["value"], "sig")
+    // Grøn ventar med frist, ingen signal.
+    assert_eq(join(spawn("__main__.w_cond_vent", {"m": m, "c": c, "ms": 60}), 5000)["value"], "timeout:blocked")
+    returner 0
+}
+
+funksjon test_pool() -> heiltall {
+    la teljar = atomic_ny(0)
+    la pool = trd.ny_native_pool(16)
+    assert_eq(pool["status"], "ready")
+    assert_eq(pool["workers"], 16)
+    la ph = pool["pool_handle"]
+    la tasks: liste = []
+    la i: heiltall = 0
+    mens i < 64 {
+        la tk = trd.native_pool_submit(ph, "__main__.p_arbeid", {"teljar": teljar})
+        assert_eq(tk["status"], "queued")
+        legg_til(tasks, tk["task_handle"])
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(tasks) {
+        la r = trd.native_pool_wait(ph, tasks[i], 20000)
+        assert_eq(r["status"], "finished")
+        assert_eq(r["value"], "19900")
+        assert(trd.native_pool_release(ph, tasks[i]))
+        i = i + 1
+    }
+    assert_eq(atomic_les(teljar), 64)
+    // pool wait frå ein grøn tråd
+    assert_eq(join(spawn("__main__.w_pool_vent", {"pool": ph, "teljar": teljar}), 10000)["value"], "finished:19900")
+    assert(trd.native_pool_shutdown(ph, usann))
+    // shutdown med cancel_pending medan ein task køyrer: kølagde blir kansellerte,
+    // den køyrande får fullføre.
+    la gate = atomic_ny(0)
+    la single = trd.ny_native_pool(1)["pool_handle"]
+    la blk = trd.native_pool_submit(single, "__main__.p_blokker", {"gate": gate})["task_handle"]
+    la spinn: heiltall = 0
+    mens trd.native_pool_status(single, blk)["status"] == "queued" og spinn < 100000 { spinn = spinn + 1 }
+    assert_eq(trd.native_pool_status(single, blk)["status"], "running")
+    la q1 = trd.native_pool_submit(single, "__main__.p_arbeid", {"teljar": teljar})["task_handle"]
+    trd.native_pool_submit(single, "__main__.p_arbeid", {"teljar": teljar})
+    la før = atomic_les(teljar)
+    la opnar = spawn("__main__.w_opne_gate", {"gate": gate})
+    assert(trd.native_pool_shutdown(single, sann))
+    assert_eq(atomic_les(teljar), før)
+    assert_eq(atomic_les(gate), 1)
+    assert_eq(join(opnar, 5000)["value"], "opna")
+    assert_eq(trd.native_pool_status(single, q1)["status"], "error")
+    // kapasitet: 7 aktive pools, den 8. feilar
+    la pools: liste = []
+    la k: heiltall = 0
+    mens k < 7 {
+        la np = trd.ny_native_pool(1)
+        assert_eq(np["status"], "ready")
+        legg_til(pools, np["pool_handle"])
+        k = k + 1
+    }
+    la full = trd.ny_native_pool(1)
+    assert_eq(full["status"], "error")
+    k = 0
+    mens k < lengde(pools) {
+        assert(trd.native_pool_shutdown(pools[k], usann))
+        k = k + 1
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    krev_grøne_trådar()
+    test_mutex()
+    test_condition()
+    test_pool()
+    // GreenVenter (join/sov i tråden) skal ikkje fangast av brukar-prøv/fang.
+    assert_eq(join(spawn("__main__.w_prov_vent", {}), 5000)["value"], "ok:499500")
+    skriv("test_thread_green_sync OK\n")
+    returner 0
+}
