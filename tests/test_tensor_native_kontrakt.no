@@ -1,0 +1,112 @@
+// Regresjonstest for norscode-tensor-v1 (kontrakt frå C-æra nc_builtin_tensor_operation;
+// på fersk x86-64-seed: std.native_gap.tensor_operation med SSE4.1-kjerne via raw_call).
+// Plattformnøytral: sjekkar berre prefikset «simd-» (arm64: simd-arm64-128, x86-64: simd-x86_64-sse4.1).
+// Dekkjer det test_tensor_native ikkje ser: i64-akkumulering, odde inner (padding),
+// int16-endepunkt, alle feilstrengar, tekst-dimensjonar og tekst-element.
+
+funksjon like(a, b) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(a) { hvis a[i] != b[i] { returner usann } i = i + 1 }
+    returner sann
+}
+
+funksjon req(l, r, rows, inner, cols) {
+    returner {"abi": "norscode-tensor-v1", "operation": "matmul_i32", "left": l, "right": r,
+              "rows": rows, "inner": inner, "columns": cols}
+}
+
+funksjon referanse(l, r, rader: heiltall, inner: heiltall, kolonner: heiltall) {
+    la ut = []
+    la i: heiltall = 0
+    mens i < rader {
+        la c: heiltall = 0
+        mens c < kolonner {
+            la sum: heiltall = 0
+            la k: heiltall = 0
+            mens k < inner { sum = sum + l[i * inner + k] * r[k * kolonner + c] k = k + 1 }
+            legg_til(ut, sum)
+            c = c + 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon fyll(n: heiltall, v: heiltall) {
+    la l = []
+    la i: heiltall = 0
+    mens i < n { legg_til(l, v) i = i + 1 }
+    returner l
+}
+
+// Deterministiske verdiar over heile int16-området (utan globalt frø).
+funksjon mønster(n: heiltall, s: heiltall) {
+    la l = []
+    la i: heiltall = 0
+    mens i < n {
+        la v = ((i + 1) * 7919 + s * 104729) % 65536
+        legg_til(l, v - 32768)
+        i = i + 1
+    }
+    returner l
+}
+
+funksjon start() -> heiltall {
+    la st = builtin.tensor_operation({"abi": "norscode-tensor-v1", "operation": "status"})
+    assert_eq(st["status"], "ferdig")
+    assert(builtin.starts_with(st["backend"], "simd-"))
+    assert_eq(st["vector_lanes"], 4)
+    assert_eq(builtin.type(st["metal_available"]), "boolsk")
+    la har_metal = st["metal_available"] == sann
+
+    // i64-akkumulering: 64 × (-32768)² = 2^36 (overflyt i int32).
+    la neg = fyll(64, 0 - 32768)
+    la big = builtin.tensor_operation(req(neg, neg, 1, 64, 1))
+    assert_eq(big["status"], "ferdig")
+    assert_eq(big["data"][0], 68719476736)
+
+    // Odde og jamne inner (hale/padding), blanda forteikn, endepunkt.
+    la former = [[3, 7, 5], [1, 1, 1], [4, 4, 4], [2, 8, 3], [5, 9, 2], [1, 13, 6], [6, 1, 7]]
+    la fi: heiltall = 0
+    mens fi < lengde(former) {
+        la f = former[fi]
+        la l = mønster(f[0] * f[1], fi)
+        la r = mønster(f[1] * f[2], fi + 11)
+        l[0] = 0 - 32768
+        r[0] = 32767
+        la d = builtin.tensor_operation(req(l, r, f[0], f[1], f[2]))
+        assert_eq(d["status"], "ferdig")
+        assert_eq(d["rows"], f[0])
+        assert_eq(d["columns"], f[2])
+        assert(builtin.starts_with(d["backend"], "simd-"))
+        assert(like(d["data"], referanse(l, r, f[0], f[1], f[2])))
+        fi = fi + 1
+    }
+
+    assert_eq(builtin.tensor_operation(req([40000], [1], 1, 1, 1))["error"], "left value outside int16 range")
+    assert_eq(builtin.tensor_operation(req([1], [0 - 32769], 1, 1, 1))["error"], "right value outside int16 range")
+    assert_eq(builtin.tensor_operation(req([1, "x"], [1, 2], 1, 2, 1))["error"], "left value outside int16 range")
+    assert_eq(builtin.tensor_operation(req([1, 2, 3], [1], 1, 2, 1))["error"], "tensor shape mismatch")
+    assert_eq(builtin.tensor_operation(req([1], [1], 4097, 1, 1))["error"], "tensor limits exceeded")
+    assert_eq(builtin.tensor_operation(req([1], [1], 4096, 4096, 2))["error"], "tensor limits exceeded")
+    assert_eq(builtin.tensor_operation(req([1], [1], 0, 1, 1))["error"], "tensor limits exceeded")
+    assert_eq(builtin.tensor_operation({"abi": "x", "operation": "status"})["error"], "invalid ABI")
+    assert_eq(builtin.tensor_operation({"abi": "norscode-tensor-v1", "operation": "conv"})["error"], "unsupported tensor operation")
+    assert_eq(builtin.tensor_operation([1])["error"], "request must be a map")
+    la mr = req([1, 2, 3, 4], [5, 6, 7, 8], 2, 2, 2)
+    mr["backend"] = "metal"
+    la m = builtin.tensor_operation(mr)
+    hvis har_metal {
+        // macOS-seeden med ekte Metal (committa C-seed): GPU-vegen skal gje same svar.
+        assert_eq(m["status"], "ferdig")
+        assert_eq(m["backend"], "metal")
+        assert(like(m["data"], [19, 22, 43, 50]))
+    } ellers {
+        assert_eq(m["status"], "feil")
+        assert_eq(m["error"], "metal backend unavailable")
+    }
+    assert(like(builtin.tensor_operation(req([1, 2, 3, 4], [5, 6, 7, 8], "2", "2", "2"))["data"], [19, 22, 43, 50]))
+    skriv("test_tensor_native_kontrakt OK\n")
+    returner 0
+}
