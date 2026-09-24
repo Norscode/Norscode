@@ -1,5 +1,10 @@
 # Status per 2026-09-23 kveld
 
+**Ny reseed-commit ddd3dba (2026-09-24):** native `acme_verify` (RS256/ES256) + gap-rute
+i native_codegen_v2. Den endrar `.srchash`, så den førehandsbygde codegen-ELF-en må
+byggjast på nytt. Utan han er `builtin.acme_verify` null-fallback, og
+`test_dns_zone_validation` feilar på verifiseringa sjølv når signeringa er rask.
+
 - PR-greina `promotering-fersk-seed` er på **a0eab40**. CI-status der:
   - «Native Linux (x86_64)» feilar på 8 testar. 7 av dei er dekte av reseed-greina eller
     er arkitektur (§6). Unntaket er multiprocessing, som krev ekte x86 (§5).
