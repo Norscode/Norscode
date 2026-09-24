@@ -1,5 +1,13 @@
 # Status per 2026-09-23 kveld
 
+**`vm.ncb`-avgjerd (brukaren valde (a), 2026-09-24):** normaliseringa held no POP og
+`builtin.har_nokkel` som standard (PR-greina, commit etter e09763b). Legacy-steg: berre med
+`NORSCODE_NCB_LEGACY_HOST=1`. **Gjer no, i éin commit på ekte x86:**
+`nc regen-bootstrap`, som regenererer `vm.ncb` og normaliserer. Regenerer
+`vm_executor.ncb` og byggj ny `bootstrap/stage0/norscode-windows-x86_64.exe` med
+`tools/build_windows_stage0_candidate.no`, pluss `SHA256SUMS`. Kontroller at
+`test_precompiled_vm_host_compat` og Windows ABI er grøne.
+
 **Ny reseed-commit ddd3dba (2026-09-24):** native `acme_verify` (RS256/ES256) + gap-rute
 i native_codegen_v2. Den endrar `.srchash`, så den førehandsbygde codegen-ELF-en må
 byggjast på nytt. Utan han er `builtin.acme_verify` null-fallback, og
