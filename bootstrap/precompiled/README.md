@@ -1,29 +1,21 @@
-# Pre-compiled Bootstrap Modules
+# Prekompilerte bootstrap-modular
 
-Pre-compiled bytecode (NCB JSON) for large selfhost modules to avoid runtime compilation overhead.
+Sidan JSON-avviklinga J1b (2026-09-25) ligg det **ingen committa selfhost-cache**
+her. Einaste fila som står att er `vm.ncb.json`, som er runtime-payload for
+attestasjons-, Windows- og releaseverktøya. Ho blir generert med
+`./bin/nc regen-bootstrap` og fjerna i J1c (`build/payloads/`).
 
-**Files:**
-- `lexer_m1.ncb.json` — lexer tokeniser for bootstrap path (41 KB)
-- `json.ncb.json` — JSON parsing/stringifying (15 KB)
-- `parser.ncb.json` — Norscode parser (91 KB)
-- `semantic.ncb.json` — Semantic analysis (11 KB)
-- `ir_to_bytecode.ncb.json` — IR to bytecode compilation (136 KB)
-- `stil.ncb.json` — norsk stilarkmodul for `std.stil`
+**Kjelda er standardvegen.** `nc compile`, `nc run` og testharnessen kompilerer
+`selfhost/*.no` og `std/*.no` frå kjelde. Ein kjeldehash-verifisert cache er
+valfri og ligg alltid under `build/`:
 
-**Usage:**
-These files are loaded by the bootstrap system to avoid runtime compilation of large modules. The bootstrap gates and bundler can reference these pre-compiled bytecodes instead of compiling from source.
+- `tools/materialize_bootstrap_cache.no` skriv `<rot>/precompiled/manifest.json`
+  og `<rot>/stdlib/manifest.json` med fragment. Set `NORSCODE_BOOTSTRAP_CACHE=<rot>`
+  (standard `build/cache/bootstrap`). Eit fragment blir berre brukt når modulnamn,
+  kjeldehash, artefakthash og kompilatorfingeravtrykk stemmer.
+- `tools/materialize_l5_precompiled.no` hentar L5b-cachemodulane frå ein verifisert
+  L5 Gen1 (`build/l5/compiler_v1.ncb.json`) til `build/l5/precompiled/`.
+  `tools/selfcompile_l5b.no` køyrer han sjølv i cache-på-modus (selvstendighet 7a).
 
-**Building:**
-```bash
-./bin/nc compile selfhost/lexer/lexer_m1.no bootstrap/precompiled/lexer_m1.ncb.json
-./bin/nc compile selfhost/json.no bootstrap/precompiled/json.ncb.json
-./bin/nc compile selfhost/parser.no bootstrap/precompiled/parser.ncb.json
-./bin/nc compile selfhost/compiler/semantic.no bootstrap/precompiled/semantic.ncb.json
-./bin/nc compile selfhost/compiler/ir_to_bytecode.no bootstrap/precompiled/ir_to_bytecode.ncb.json
-./bin/nc compile std/stil.no bootstrap/precompiled/stil.ncb.json
-```
-
-**Note:** common.no (2404 lines) is too large to pre-compile in current C-host (OOM). It requires C-host memory optimization (Task #15).
-
----
-Generated: 2026-06-06
+Ikkje legg `*.ncb.json` inn her att. `tools/no_c_python_active_surface.no`
+(`committed_bytecode`) tel spora bytekode.
