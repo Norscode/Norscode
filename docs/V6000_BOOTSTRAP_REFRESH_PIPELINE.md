@@ -20,7 +20,7 @@ Bakgrunn:
 
 ## Pipeline
 1. `NORSCODE_REGEN_BOOTSTRAP_FULL=1 ./bin/nc run tools/nc_regen_bootstrap.no`
-2. `selfhost/tooling/regenerate_omgang6b_fragments.no`
+2. `tools/gen0_omgang6b_fragments.no` (Gen0-fragment frå kjelde til `build/6b/fragments_gen0`; ingen committa fragment sidan J2)
 3. `tools/build_omgang6b_compiler_ncb.no`
 
 ## Etterpå
