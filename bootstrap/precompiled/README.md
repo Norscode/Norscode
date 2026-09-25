@@ -5,8 +5,13 @@ her. `vm.ncb.json` (runtime-payload for attestasjons-, Windows- og releaseverkt�
 blir generert frå `selfhost/vm.no` av `tools/materialize_runtime_payloads.no`, saman
 med `selfhost/vm_executor.ncb.json`. Begge er gitignorerte; stiane er dei same som før
 fordi dei er baka inn i seedane. Ein `<fil>.srchash`-markør (kjeldehash + sha256)
-lèt verktøyet hoppe over genereringa når kjeldene er uendra. CI genererer dei éin gong
-per køyring på Linux og deler dei som artefakt. `./bin/nc regen-bootstrap` tvingar
+lèt verktøyet hoppe over genereringa når kjeldene er uendra. Forbrukarane
+(testløparen, pakke- og kandidatverktøya) genererer på nytt når markøren ikkje
+stemmer med kjeldene, så ei lokal endring i import-lukkinga til `vm.no` eller
+`vm_executor.no` aldri blir testa eller pakka mot ein gammal payload (på den frosne
+macOS-seeden kostar kontrollen om lag eitt minutt; `NORSCODE_PAYLOADS_TRUST=1` hoppar
+over han, berre for CI-jobbar som nett har lasta ned artefaktet). CI genererer dei éin
+gong per køyring på Linux og deler dei som artefakt. `./bin/nc regen-bootstrap` tvingar
 ny generering.
 
 **Kjelda er standardvegen.** `nc compile`, `nc run` og testharnessen kompilerer

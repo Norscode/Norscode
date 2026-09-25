@@ -1,0 +1,116 @@
+// tools/materialize_runtime_payloads.no: kjeldehashen må sjå same import-lukking som
+// kompilatoren, og forbrukarane må oppdage ein payload som er utdatert mot kjeldene.
+//   - «bruk std.x // kommentar» (og «# …», «;», « som y») blir lese som kompilatoren les ho;
+//     før fiksen fall std/x.no og heile den transitive lukkinga hans stille ut av hashen.
+//   - Ein uløyst import er ein hard feil (kjeldehash "" + status «feil»), ikkje ei stille utelating.
+//   - sikre_vurdering: manglar/ugyldig → generer; markør som ikkje stemmer → generer;
+//     NORSCODE_PAYLOADS_TRUST (stol) → berre gyldigheit; ingen markør → berre gyldigheit.
+// Alt skjer i ein syntetisk rot under build/, så testen kompilerer ingenting.
+
+bruk tools.materialize_runtime_payloads som payloads
+bruk std.filops som filops
+
+funksjon rot() -> tekst { returner "build/test-materialize-payloads" }
+
+funksjon skriv_rel(rel: tekst, innhald: tekst) -> heiltall {
+    assert(filops.lag_katalogar(filops.katalog(rot() + "/" + rel)))
+    fil_skriv(rot() + "/" + rel, innhald)
+    returner 0
+}
+
+funksjon har(l: liste_tekst, verdi: tekst) -> boolsk {
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == verdi { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon gyldig_payload() -> tekst {
+    returner "{\"entry\":\"__main__\",\"functions\":{\"f\":{\"code\":[[\"INDEX_SET\"],[\"POP\"],[\"RETURN\"]]}},\"pad\":\"0123456789\"}"
+}
+
+funksjon start() -> heiltall {
+    // 1. Linjeparsing som kompilatoren (nc_main.no finn_bruk_imports).
+    assert_eq(payloads.import_modul("bruk std.sha256"), "std.sha256")
+    assert_eq(payloads.import_modul("bruk std.sha256 // kommentar"), "std.sha256")
+    assert_eq(payloads.import_modul("bruk std.sha256 som s   // kommentar med som og ;"), "std.sha256")
+    assert_eq(payloads.import_modul("bruk std.sha256 # kommentar"), "std.sha256")
+    assert_eq(payloads.import_modul("bruk std.sha256;"), "std.sha256")
+    assert_eq(payloads.import_modul("bruk std.sha256; // k"), "std.sha256")
+    assert_eq(payloads.import_modul("importer std.sha256 som s"), "std.sha256")
+    assert_eq(payloads.import_modul("la bruk = 1"), "")
+    // Mot det verkelege repoet: kommentaren hindrar ikkje oppslaget.
+    assert_eq(payloads.import_fil(".", "bruk std.sha256 // kommentar"), "std/sha256.no")
+    assert_eq(payloads.import_fil(".", "bruk std.finst_ikkje_modul_xyz"), "")
+
+    // 2. Syntetisk rot: std/c.no er berre nådd gjennom ei bruk-linje med etterfølgjande
+    //    kommentar, og selfhost/lokal/b.nors er ein relativ import ved sida av importøren.
+    filops.slett_tre(rot())
+    skriv_rel("selfhost/vm.no", "bruk std.a // treng a\nbruk lokal.b\nfunksjon start() -> heiltall { returner 0 }\n")
+    skriv_rel("std/a.no", "bruk std.c som c   # kommentar\nfunksjon a() -> heiltall { returner c.c() }\n")
+    skriv_rel("std/c.no", "funksjon c() -> heiltall { returner 1 }\n")
+    skriv_rel("selfhost/lokal/b.nors", "funksjon b() -> heiltall { returner 2 }\n")
+    la lukking = payloads.import_lukking(rot(), "selfhost/vm.no")
+    la filer: liste_tekst = lukking["filer"]
+    la uløyste: liste_tekst = lukking["uløyste"]
+    assert_eq(lengde(uløyste), 0)
+    assert(har(filer, "selfhost/vm.no"))
+    assert(har(filer, "std/a.no"))
+    assert(har(filer, "std/c.no"))
+    assert(har(filer, "selfhost/lokal/b.nors"))
+    assert_eq(lengde(filer), 4)
+    la h1 = payloads.kjeldehash(rot(), "vm")
+    assert(lengde(h1) == 64)
+    // Ei endring i std/c.no (berre nådd via kommentarlinja) må endre kjeldehashen.
+    skriv_rel("std/c.no", "funksjon c() -> heiltall { returner 3 }\n")
+    la h2 = payloads.kjeldehash(rot(), "vm")
+    assert(h2 != h1)
+    assert(lengde(h2) == 64)
+
+    // 3. Forbrukarvurderinga.
+    la v0 = payloads.sikre_vurdering(rot(), "vm", usann)
+    assert_eq(v0[0], "generer")
+    skriv_rel("bootstrap/precompiled/vm.ncb.json", gyldig_payload())
+    assert_eq(payloads.payload_feil(gyldig_payload()), "")
+    // Ingen markør: berre gyldigheit.
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", usann)[0], "ok")
+    // Markør som stemmer.
+    skriv_rel("bootstrap/precompiled/vm.ncb.json.srchash", payloads.markør_tekst(h2, payloads.hash_fil(rot() + "/bootstrap/precompiled/vm.ncb.json"), "test"))
+    la v1 = payloads.sikre_vurdering(rot(), "vm", usann)
+    assert_eq(v1[0], "ok")
+    assert_eq(v1[1], "oppdatert")
+    // Kjeldeendring etter generering → utdatert → generer (med den nye kjeldehashen).
+    skriv_rel("std/c.no", "funksjon c() -> heiltall { returner 4 }\n")
+    la v2 = payloads.sikre_vurdering(rot(), "vm", usann)
+    assert_eq(v2[0], "generer")
+    assert(builtin.index_of(v2[1], "utdatert") >= 0)
+    assert_eq(v2[2], payloads.kjeldehash(rot(), "vm"))
+    // NORSCODE_PAYLOADS_TRUST: berre gyldigheit, sjølv når kjeldene er endra.
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", sann)[0], "ok")
+    // Ein handredigert payload (sha256 i markøren stemmer ikkje) blir òg fanga.
+    skriv_rel("std/c.no", "funksjon c() -> heiltall { returner 3 }\n")
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", usann)[0], "ok")
+    skriv_rel("bootstrap/precompiled/vm.ncb.json", gyldig_payload() + " ")
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", usann)[0], "generer")
+    // Ugyldig payload: generer, òg med stol.
+    skriv_rel("bootstrap/precompiled/vm.ncb.json", builtin.slice(gyldig_payload(), 0, 70))
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", sann)[0], "generer")
+    skriv_rel("bootstrap/precompiled/vm.ncb.json", gyldig_payload())
+
+    // 4. Uløyst import: hard feil, ikkje stille utelating.
+    skriv_rel("std/a.no", "bruk std.c som c   # kommentar\nbruk std.finst_ikkje_modul_xyz\nfunksjon a() -> heiltall { returner 0 }\n")
+    la l2 = payloads.import_lukking(rot(), "selfhost/vm.no")
+    la u2: liste_tekst = l2["uløyste"]
+    assert_eq(lengde(u2), 1)
+    assert(builtin.index_of(u2[0], "std/a.no: bruk std.finst_ikkje_modul_xyz") >= 0)
+    assert_eq(payloads.kjeldehash(rot(), "vm"), "")
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", usann)[0], "feil")
+    // Med stol blir kjeldehashen ikkje rekna ut (CI-artefaktet er frå same køyring).
+    assert_eq(payloads.sikre_vurdering(rot(), "vm", sann)[0], "ok")
+
+    filops.slett_tre(rot())
+    skriv("test_materialize_runtime_payloads OK\n")
+    returner 0
+}
