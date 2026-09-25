@@ -89,6 +89,18 @@ funksjon CHAR_CACHE_BASE() { returner BOOL_CACHE_BASE() + 32 }
 funksjon CHAR_CACHE_COUNT() { returner 256 }
 funksjon HEAP_ALLOC_START() { returner CHAR_CACHE_BASE() + CHAR_CACHE_COUNT() * 32 }
 funksjon GC_SAFEPOINT_OFFSET() { returner 32 }
+// v7 (2026-09-24, bump-ratchet-fiks): [HEAP+32] i GC-modus = bytes allokerte via
+// gc_alloc16/gc_alloc_var (fri-liste- OG bump-vegen) sidan siste collect; safepoint-stubben
+// samlar når han ≥ port_dyn og nullstiller han etter collect. Same slot som den gamle
+// safepoint-teljaren (GC_SAFEPOINT_OFFSET; memory_abi/test_runtime_memory_abi pinnar 32);
+// flagg AV (paritet) brukar han framleis som safepoint-teljar.
+funksjon GC_ALLOC_BYTES_VA() { returner HEAP_VA() + GC_SAFEPOINT_OFFSET() }
+// Soft-sona (bump ≥ GC_SOFT_LIMIT): collect berre når bump har vakse minst så mykje sidan
+// siste collect (v3 samla ved KVART safepoint → collect-storm utan framgang).
+funksjon GC_SOFT_BUDGET() { returner 8388608 }   // 8 MiB
+// Første allokeringsport (port_dyn ved oppstart, GC-modus): første collect etter 64 KiB
+// allokert, deretter max(port, 64 B × live-n). Sjå init_heap (F2b).
+funksjon GC_INIT_PORT() { returner 65536 }
 funksjon ENVP_OFFSET() { returner 8 }
 
 funksjon native_codegen_trace(melding: tekst) -> heiltall {
@@ -159,7 +171,6 @@ funksjon RT_MOD() { returner RT_SLOT(46) }
 funksjon RT_NEG() { returner RT_SLOT(47) }
 funksjon RT_BUILD_LIST_REV() { returner RT_SLOT(48) }
 funksjon RT_BUILD_MAP_REV() { returner RT_SLOT(49) }
-funksjon GC_SAFEPOINT_STUB_BYTES() { returner 173 } // 49 + 42 (dynamisk allokeringsport [HEAP+16]) + 44 (14×push/pop rundt collect) + 38 (port_dyn-oppdatering)
 
 // ASCII lower/upper på ein ny streng. Dei gamle faste peikarane til
 // RT_LOWER/RT_UPPER landar i den endra legacy-runtime-tabellen etter at
@@ -1652,6 +1663,11 @@ funksjon patch_bump_prologer(bytes, ga16_va, grense) -> liste {
         }
     }
     skriv("native_codegen_v2: (iii) hex-patcha " + tekst_fra_heltall(treff) + " bump-prologar → gc_alloc16\n")
+    // F0 (2026-09-24, fail-closed): cache-regionen har NØYAKTIG tre 16 B-bump-prologar
+    // (int-fallback, str_raw-boks, join-boks; bygglogg «(iii) hex-patcha 3»). Eit anna tal
+    // betyr at ein allokator ligg upatcha (rå bump utanom fri-lista/teljaren) eller at
+    // mønsteret har treft data → avbryt i staden for å byggje ein seed med skjult lekkasje.
+    hvis treff != 3 { kast "native_codegen_v2: venta 3 bump-prologar i cache-regionen (int-fallback, str_raw-boks, join-boks), fann " + tekst_fra_heltall(treff) }
     returner ut
 }
 
@@ -1710,6 +1726,9 @@ funksjon patch_raw_string_allocs(bytes, h_r11_rbx, gav_va, grense) -> liste {
     }
     skriv("native_codegen_v2: (v5) hex-patcha rå streng-allokatorar → fri-liste: E=" + tekst_fra_heltall(te) + " H=" + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) + "\n")
     hvis th1 != th2 { kast "native_codegen_v2: todelt streng-patch utan hale (H " + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) + ") → bump-korrupsjon; avbryt" }
+    // F0 (2026-09-24, fail-closed): nøyaktig éin str_raw-fallback (E) og éin lineær join
+    // (H1/H2) i cache-regionen (bygglogg «E=1 H=1/1»).
+    hvis te != 1 eller th1 != 1 { kast "native_codegen_v2: venta E=1 H=1/1 rå streng-allokatorar i cache-regionen, fann E=" + tekst_fra_heltall(te) + " H=" + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) }
     returner ut
 }
 
@@ -4444,6 +4463,12 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la a16_Ldone = lengde(bytes)                   // done:
     patch_jump(bytes, a16_pdone, a16_Ldone)
     patch_jump(bytes, a16_prdone, a16_Ldone)
+    hvis gc_mode == "1" {
+        // v7 (F1): tel 16 B for KVAR allokering (fri-liste- og bump-vegen) i [HEAP+32] →
+        // safepoint-triggeren ser allokeringsvolum, ikkje berre bump-vekst. Flagga blir
+        // bevarte av pushfq/popfq rundt; ingen register blir rørte.
+        copy(bytes, [0x48, 0x83, 0x04, 0x25]) u32(bytes, GC_ALLOC_BYTES_VA()) legg_til(bytes, 0x10) // add qword [alloc],16
+    }
     copy(bytes, [0x41, 0x5B])                      // pop r11
     copy(bytes, [0x41, 0x5A])                      // pop r10
     copy(bytes, [0x41, 0x59])                      // pop r9
@@ -4477,9 +4502,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x8B, 0x50, 0x08])          // mov r10,[rax+8] (blokk-size)
     copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx
     la av_found = emit_jcc_placeholder(bytes, 0x83) // jae found
+    la av_decl = lengde(bytes)                     // decl: (v7/F3: nofit-mål → taket tel òg nofit)
     copy(bytes, [0x49, 0xFF, 0xCB])                // dec r11
     la av_cap = emit_je_placeholder(bytes)         // jz V_bump
-    la av_nextl = lengde(bytes)                    // next: (òg nofit-mål)
+    la av_nextl = lengde(bytes)                    // next:
     copy(bytes, [0x49, 0x89, 0xC1])                // mov r9,rax
     copy(bytes, [0x48, 0x8B, 0x00])                // mov rax,[rax]
     la av_wj = emit_jmp_placeholder(bytes)
@@ -4489,11 +4515,24 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // v4: del ut P = round16(A); leiande [A,P) ≤15 B fell attende som hol ved neste sweep.
     copy(bytes, [0x48, 0x8D, 0x50, 0x0F])          // lea rdx,[rax+15]
     copy(bytes, [0x48, 0x83, 0xE2, 0xF0])          // and rdx,-16 (P)
-    copy(bytes, [0x49, 0x89, 0xD3])                // mov r11,rdx
-    copy(bytes, [0x49, 0x29, 0xC3])                // sub r11,rax (lead)
-    copy(bytes, [0x4D, 0x29, 0xDA])                // sub r10,r11 (S' = S - lead)
-    copy(bytes, [0x49, 0x39, 0xCA])                // cmp r10,rcx
-    la av_nofit = emit_jcc_placeholder(bytes, 0x82) // jb nofit
+    // v7 (F3, 2026-09-24, GC-modus): S' = S − (P − A) = S + A − P utan scratch-register. Før
+    // brukte lead-utrekninga r11 (= vandringstaket) → nofit-vegen måtte setje taket attende til
+    // 512 → vandringa var ubunden. No er r11 urørt og nofit hoppar til `dec r11` (ekte tak 512).
+    // Flagg AV (fri-lista er alltid tom der → found/nofit køyrer aldri): v4-bytane uendra (paritet).
+    la av_nofit: heltall = -1
+    hvis gc_mode == "1" {
+        copy(bytes, [0x49, 0x01, 0xC2])            // add r10,rax
+        copy(bytes, [0x49, 0x29, 0xD2])            // sub r10,rdx (S' = S - lead)
+        copy(bytes, [0x49, 0x39, 0xCA])            // cmp r10,rcx
+        av_nofit = emit_jcc_placeholder(bytes, 0x82) // jb decl (nofit: tel ned taket, gå vidare)
+        patch_jump(bytes, av_nofit, av_decl)
+    } ellers {
+        copy(bytes, [0x49, 0x89, 0xD3])            // mov r11,rdx
+        copy(bytes, [0x49, 0x29, 0xC3])            // sub r11,rax (lead)
+        copy(bytes, [0x4D, 0x29, 0xDA])            // sub r10,r11 (S' = S - lead)
+        copy(bytes, [0x49, 0x39, 0xCA])            // cmp r10,rcx
+        av_nofit = emit_jcc_placeholder(bytes, 0x82) // jb nofit (patcha under)
+    }
     copy(bytes, [0x4C, 0x8B, 0x18])                // mov r11,[rax] (next)
     copy(bytes, [0x49, 0x29, 0xCA])                // sub r10,rcx (rest-size)
     copy(bytes, [0x49, 0x83, 0xFA, 0x10])          // cmp r10,16
@@ -4515,11 +4554,14 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x89, 0x1C, 0x25])          // mov [head],r11
     u32(bytes, HEAP_VA() + 40)
     la av_prdone2 = emit_jmp_placeholder(bytes)    // jmp V_done
-    la av_nofitl = lengde(bytes)                   // nofit: (blokka rommar ikkje lead+req)
-    patch_jump(bytes, av_nofit, av_nofitl)
-    copy(bytes, [0x41, 0xBB, 0x00, 0x02, 0x00, 0x00]) // mov r11d,512 (tak att; r11 var lead)
-    la av_nofitj = emit_jmp_placeholder(bytes)     // jmp next
-    patch_jump(bytes, av_nofitj, av_nextl)
+    hvis gc_mode != "1" {
+        // v4 nofit (flagg AV, paritet): blokka rommar ikkje lead+req → tak att (r11 var lead).
+        la av_nofitl = lengde(bytes)               // nofit:
+        patch_jump(bytes, av_nofit, av_nofitl)
+        copy(bytes, [0x41, 0xBB, 0x00, 0x02, 0x00, 0x00]) // mov r11d,512
+        la av_nofitj = emit_jmp_placeholder(bytes) // jmp next
+        patch_jump(bytes, av_nofitj, av_nextl)
+    }
     la av_Vbump = lengde(bytes)                    // V_bump:
     patch_jump(bytes, av_empty, av_Vbump)
     patch_jump(bytes, av_cap, av_Vbump)
@@ -4540,6 +4582,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la av_done = lengde(bytes)                     // V_done:
     patch_jump(bytes, av_prdone, av_done)
     patch_jump(bytes, av_prdone2, av_done)
+    hvis gc_mode == "1" {
+        // v7 (F1): rcx = round16(storleik) på alle vegar (found/split/bump rører han ikkje)
+        // → tel dei allokerte bytane i [HEAP+32] (safepoint-trigger). Flagg bevart (popfq).
+        copy(bytes, [0x48, 0x01, 0x0C, 0x25]) u32(bytes, GC_ALLOC_BYTES_VA())   // add qword [alloc],rcx
+    }
     copy(bytes, [0x5A])                            // pop rdx (v4)
     copy(bytes, [0x59])                            // pop rcx (v4: opphavleg storleik attende)
     copy(bytes, [0x9D])                            // popfq
@@ -4722,7 +4769,17 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x85, 0xC9])                // test rcx,rcx
     la hs_build_done = emit_jcc_placeholder(bytes, 0x88) // js build_done
     copy(bytes, [0x48, 0x89, 0xFA])                // mov rdx,rdi (end = n)
+    // v7 (2026-09-25, GC-modus): siftdown returnerer med rcx = SLUTTPOSISJONEN til det
+    // sokkne elementet (`mov rcx,r9`), ikkje byggjeindeksen. Utan push/pop heldt bygg-
+    // løkka fram frå den posisjonen − 1 → kvar sokk skanna [i, p) på nytt med no-op-
+    // siftdownar → KVADRATISK, layout-avhengig heap-bygging. Målt (Docker amd64, SPOR
+    // med collect-start-markør): collect med ~298k live-map-entryar 1,4 s eller 21,8 s
+    // avhengig av adresseorden, ~747k entryar 18–25 s per collect; mutatoren mellom
+    // collects < 0,3 s. Sorteringa var rett (berre sløsing). Flagg AV: uendra bytar
+    // (collect køyrer aldri der; paritet).
+    hvis gc_mode == "1" { copy(bytes, [0x51]) }    // push rcx (byggjeindeks)
     call_rel32(bytes, TEXT_VA() + hs_sd, TEXT_VA()) // call siftdown
+    hvis gc_mode == "1" { copy(bytes, [0x59]) }    // pop rcx
     copy(bytes, [0x48, 0xFF, 0xC9])                // dec rcx
     la hs_build_j = emit_jmp_placeholder(bytes)
     patch_jump(bytes, hs_build_j, hs_build)
@@ -7374,6 +7431,15 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // den replace-patcha frosne rt_init_heap («mov [0x600000],0x702060; ret»).
     atomics["init_heap"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0xC7, 0x04, 0x25]) u32(bytes, HEAP_VA()) u32(bytes, HEAP_ALLOC_START()) // mov q[bump],HEAP_ALLOC_START
+    hvis gc_mode == "1" {
+        // v7 (F2b): port_dyn [HEAP+16] = GC_INIT_PORT ved oppstart. Med 0 samla v4-stubben ved
+        // FYRSTE safepoint (før det finst data): rå GC-probar fekk collect midt i handsett mark-/
+        // live-map-tilstand (gc_mark/gc_sort_livemap raude), og små litmus-probar samla før
+        // objekta dei skal verne fanst. Same «tidleg collect»-invariant som v3 (safepoint nr.
+        // 1000), no målt i allokerte bytes. (Eit tidlegare mål på 7 s → 31 s med 64 KiB var
+        // den kvadratiske heap-bygginga i gc_sort_livemap, ikkje startporten.)
+        copy(bytes, [0x48, 0xC7, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16) u32(bytes, GC_INIT_PORT()) // mov q[port_dyn],GC_INIT_PORT
+    }
     copy(bytes, [0xC3])                                     // ret
 
     // ── Trampolinar batch B (strengar/konvertering), C (fil/miljø/heap), D (JSON) ────
@@ -7914,10 +7980,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     ])
 
     la safepoint_adresse = HEAP_VA() + GC_SAFEPOINT_OFFSET()
-    // Safepoint-stub (fast 49 byte, sjå GC_SAFEPOINT_STUB_BYTES): tel opp; når teljaren
-    // når terskelen → nullstill + kall gc_collect_native. Terskel = 0x7FFFFFFF (aldri) i
-    // standard-modus, 1000 i GC-modus (NORSCODE_GC_ALLOC=1). Same storleik i begge modus
-    // → gc_safepoint_va stabil, paritet urørt.
+    // Safepoint-stub (sjå v4-merknaden ved atomics["gc_safepoint"] under). Flagg AV: tel opp;
+    // når teljaren når terskelen 0x7FFFFFFF (aldri) → collect. GC-modus (NORSCODE_GC_ALLOC=1):
+    // v4 tel allokerte bytes i [HEAP+32] (gc_alloc16/gc_alloc_var) mot port_dyn; sp_terskel
+    // (1000) blir då ikkje brukt. Kallarane brukar alltid atomics["gc_safepoint"] (F2c).
     la sp_terskel: heltall = 2147483647            // 0x7FFFFFFF (av)
     // Standard 4 MiB (2026-09-04). Var 0 (AV) medan attbruksfeilen var ukjend; rota var
     // insertion-sort i gc_sort_livemap (→ heapsort) og head-fit i fri-lista (→ first-fit).
@@ -7953,37 +8019,59 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBF, 0xC7, 0x00, 0x00, 0x00])    // mov edi,199
     copy(bytes, [0xB8, 0x3C, 0x00, 0x00, 0x00])    // mov eax,60 (exit)
     copy(bytes, [0x0F, 0x05])                       // syscall
-    // ── Safepoint-stub v3: (teljar ≥ terskel OG bump−sist ≥ port) ELLER bump ≥ SOFT_LIMIT
-    //    → collect; deretter sist = bump (ETTER collect, sidan sweepen no set bump ned);
-    //    bump ≥ HARD_LIMIT etter collect → gc_oom. Utan GC: terskel/tak = 0x7FFFFFFF (aldri).
+    // ── Safepoint-stub v4 (2026-09-24, bump-ratchet-fiks) ──
+    // GC-modus: collect når ALLOKERTE bytes sidan siste collect ([HEAP+32], talde av
+    // gc_alloc16/gc_alloc_var på både fri-liste- og bump-vegen) ≥ port_dyn, ELLER bump ≥
+    // SOFT_LIMIT OG bump har vakse ≥ GC_SOFT_BUDGET sidan siste collect (budsjett → ingen storm).
+    // Etter collect: [HEAP+32] = 0, sist = bump, bump ≥ HARD_LIMIT → gc_oom (exit 199).
+    // v3 talde berre bump-vekst: fri-lista vart brukt gratis før bump, og collect fyrte rett
+    // etter ei bump-allokering hvis resultat er levande og ligg ØVST → sweepen kunne aldri
+    // senke bump → +port per syklus → SOFT → collect ved KVART safepoint (585 collects, 0
+    // framgang; gcdiag/trace_fixed.log: before == after == hi_end i 14/14 collects).
+    // Flagg AV (paritet): v3 uendra byte for byte (teljar/terskel/tak 0x7FFFFFFF → aldri collect).
     la sp_soft: heltall = 2147483647
     la sp_hard: heltall = 2147483647
     hvis gc_mode == "1" { sp_soft = GC_SOFT_LIMIT() sp_hard = GC_HARD_LIMIT() }
     atomics["gc_safepoint"] = TEXT_VA() + lengde(bytes)
-    copy(bytes, [0x48, 0xA1])                       // mov rax,[counter]
-    u64(bytes, safepoint_adresse)
-    copy(bytes, [0x48, 0xFF, 0xC0])                // inc rax
-    copy(bytes, [0x48, 0xA3])                       // mov [counter],rax
-    u64(bytes, safepoint_adresse)
-    copy(bytes, [0x48, 0x3D])                       // cmp rax, terskel
-    u32(bytes, sp_terskel)
-    la sp_pceil = emit_jcc_placeholder(bytes, 0x82) // jb .ceiling (teljar under terskel)
-    copy(bytes, [0x31, 0xC0])                       // xor eax,eax
-    copy(bytes, [0x48, 0xA3])                       // mov [counter],rax (nullstill)
-    u64(bytes, safepoint_adresse)
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
-    copy(bytes, [0x48, 0x2B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // sub rax,[sist]
-    // v4 (2026-09-06): DYNAMISK port i [HEAP+16] = max(port, live/2) sett etter kvar collect
-    // (0 ved oppstart → fyrste 1000. safepoint samlar éin gong på ein bitte liten heap).
-    // Fast 4 MiB gav full mark av heile live-settet per 4 MiB allokert → kompilator-last
-    // med ~1 GB levande (fersk seed sjølv-kompilering) thrasha i timevis.
-    copy(bytes, [0x48, 0x3B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16)       // cmp rax,[port_dyn]
-    la sp_pcollect = emit_jcc_placeholder(bytes, 0x83) // jae .collect
-    la sp_ceiling = lengde(bytes)                  // .ceiling:
-    patch_jump(bytes, sp_pceil, sp_ceiling)
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
-    copy(bytes, [0x48, 0x3D]) u32(bytes, sp_soft)                          // cmp rax,SOFT_LIMIT
-    la sp_pskip1 = emit_jcc_placeholder(bytes, 0x82) // jb .skip
+    la sp_pcollect: heltall = -1
+    la sp_pskip1: heltall = -1
+    la sp_pskip1b: heltall = -1
+    hvis gc_mode == "1" {
+        // port_dyn = GC_INIT_PORT (64 KiB) frå init_heap → første collect etter 64 KiB allokert (F2b).
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, GC_ALLOC_BYTES_VA())   // mov rax,[alloc]
+        copy(bytes, [0x48, 0x3B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16)        // cmp rax,[port_dyn]
+        sp_pcollect = emit_jcc_placeholder(bytes, 0x83)                          // jae .collect
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())             // mov rax,[bump]
+        copy(bytes, [0x48, 0x3D]) u32(bytes, sp_soft)                            // cmp rax,SOFT_LIMIT
+        sp_pskip1 = emit_jcc_placeholder(bytes, 0x82)                            // jb .skip
+        copy(bytes, [0x48, 0x2B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)        // sub rax,[sist]
+        copy(bytes, [0x48, 0x3D]) u32(bytes, GC_SOFT_BUDGET())                   // cmp rax,8 MiB
+        sp_pskip1b = emit_jcc_placeholder(bytes, 0x82)                           // jb .skip
+    } ellers {
+        // ── v3 (paritet flagg AV): (teljar ≥ terskel OG bump−sist ≥ port) ELLER bump ≥ SOFT ──
+        copy(bytes, [0x48, 0xA1])                       // mov rax,[counter]
+        u64(bytes, safepoint_adresse)
+        copy(bytes, [0x48, 0xFF, 0xC0])                // inc rax
+        copy(bytes, [0x48, 0xA3])                       // mov [counter],rax
+        u64(bytes, safepoint_adresse)
+        copy(bytes, [0x48, 0x3D])                       // cmp rax, terskel
+        u32(bytes, sp_terskel)
+        la sp_pceil = emit_jcc_placeholder(bytes, 0x82) // jb .ceiling (teljar under terskel)
+        copy(bytes, [0x31, 0xC0])                       // xor eax,eax
+        copy(bytes, [0x48, 0xA3])                       // mov [counter],rax (nullstill)
+        u64(bytes, safepoint_adresse)
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
+        copy(bytes, [0x48, 0x2B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // sub rax,[sist]
+        // v4 (2026-09-06): DYNAMISK port i [HEAP+16] = max(port, 64 B × live-n) sett etter kvar
+        // collect. Fast 4 MiB gav full mark av heile live-settet per 4 MiB allokert.
+        copy(bytes, [0x48, 0x3B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16)       // cmp rax,[port_dyn]
+        sp_pcollect = emit_jcc_placeholder(bytes, 0x83) // jae .collect
+        la sp_ceiling = lengde(bytes)                  // .ceiling:
+        patch_jump(bytes, sp_pceil, sp_ceiling)
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump]
+        copy(bytes, [0x48, 0x3D]) u32(bytes, sp_soft)                          // cmp rax,SOFT_LIMIT
+        sp_pskip1 = emit_jcc_placeholder(bytes, 0x82) // jb .skip
+    }
     la sp_collect = lengde(bytes)                  // .collect:
     patch_jump(bytes, sp_pcollect, sp_collect)
     // KRITISK: safepoint kan fyre midt i uttrykk der levande NcVal-ar ligg i register.
@@ -7993,16 +8081,27 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53]) // push r8,r9,r10,r11
     copy(bytes, [0x53, 0x55])                       // push rbx,rbp
     copy(bytes, [0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push r12,r13,r14,r15
+    // DIAGNOSE (NORSCODE_GC_SPOR=1 ved codegen): «F\n» FØR collect → saman med «<bump>
+    // <live-n>» etter kan ein tidsstemple utdata og skilje collect-tid frå mutator-tid.
+    hvis miljo_hent("NORSCODE_GC_SPOR") == "1" {
+        copy(bytes, [0xEB, 0x02, 0x46, 0x0A])      // jmp +2; db 'F', '\n'
+        la spor_f = TEXT_VA() + lengde(bytes) - 2
+        copy(bytes, [0x48, 0xC7, 0xC7]) u32(bytes, spor_f)                  // mov rdi,&'F'
+        copy(bytes, [0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00])            // mov rsi,2 ("F\n")
+        call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
+        copy(bytes, [0x48, 0x89, 0xC7])            // mov rdi,rax
+        call_rel32(bytes, RT_SKRIV(), TEXT_VA())
+    }
     call_rel32(bytes, atomics["gc_collect_native"], TEXT_VA()) // call gc_collect_native (5B)
-    // v4: port_dyn = max(port, 64 B × live-tal [0x600038])  (38 B; rax er daud her).
+    // v4: port_dyn = max(port, 64 B × live-tal [HEAP_VA+56])  (38 B; rax er daud her).
     // IKKJE bump-basert: bump-reset tek berre halen over høgaste levande objekt, so
     // «bump − start» ≈ bump → porten voks med bump → eksponentiell vekst til 1 GiB på
     // 13 collects (spor 2026-09-06). Talet levande objekt er mark-kostnaden → rett proxy.
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA() + 56)       // mov rax,[live-n]
     copy(bytes, [0x48, 0xC1, 0xE0, 0x06])          // shl rax,6 (×64 B)
-    copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90])    // nop×5 (held stubb-lengda 173)
+    copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90])    // nop×5 (historisk utfylling; flagg-AV-paritet)
     copy(bytes, [0x48, 0x3D]) u32(bytes, gc_port_bytes)                    // cmp rax,port
-    copy(bytes, [0x73, 0x05])                       // jae +5 (behald live/2)
+    copy(bytes, [0x73, 0x05])                       // jae +5 (behald 64 B × live-n)
     copy(bytes, [0xB8]) u32(bytes, gc_port_bytes)                          // mov eax,port (golv)
     copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, HEAP_VA() + 16)       // mov [port_dyn],rax
     // DIAGNOSE (opt-in ved codegen: NORSCODE_GC_SPOR=1): skriv «<bump> <live-n>\n» etter kvar
@@ -8022,7 +8121,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
         copy(bytes, [0x48, 0x89, 0xC7])            // mov rdi,rax
         call_rel32(bytes, RT_SKRIV(), TEXT_VA())
-        copy(bytes, [0x48, 0x8B, 0x3C, 0x25]) u32(bytes, HEAP_VA() + 56)   // mov rdi,[0x600038] (live-n)
+        copy(bytes, [0x48, 0x8B, 0x3C, 0x25]) u32(bytes, HEAP_VA() + 56)   // mov rdi,[HEAP_VA+56] (live-n)
         call_rel32(bytes, RT_INT(), TEXT_VA())
         copy(bytes, [0x48, 0x89, 0xC7])
         call_rel32(bytes, RT_INT_TO_STR(), TEXT_VA())
@@ -8039,6 +8138,11 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58]) // pop r11,r10,r9,r8
     copy(bytes, [0x5F, 0x5E, 0x5A, 0x59])          // pop rdi,rsi,rdx,rcx
     copy(bytes, [0x50])                            // push rax (bevar; sist-oppdatering brukar rax)
+    hvis gc_mode == "1" {
+        // v7 (F2): nullstill allokeringsteljaren ETTER collect (RT_INT-boksing under collect
+        // kan ha talt nokre bytar; dei høyrer til førre syklus).
+        copy(bytes, [0x48, 0xC7, 0x04, 0x25]) u32(bytes, GC_ALLOC_BYTES_VA()) u32(bytes, 0)   // mov qword [alloc],0
+    }
     copy(bytes, [0x48, 0x8B, 0x04, 0x25]) u32(bytes, HEAP_VA())            // mov rax,[bump] (etter reset)
     copy(bytes, [0x48, 0x89, 0x04, 0x25]) u32(bytes, HEAP_VA() + 24)       // mov [sist],rax
     copy(bytes, [0x48, 0x3D]) u32(bytes, sp_hard)                          // cmp rax,HARD_LIMIT
@@ -8049,6 +8153,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x58])                            // pop rax
     la sp_skip = lengde(bytes)                     // .skip:
     patch_jump(bytes, sp_pskip1, sp_skip)
+    hvis sp_pskip1b >= 0 { patch_jump(bytes, sp_pskip1b, sp_skip) }
     copy(bytes, [0xC3])                            // ret
     hvis gc_mode == "1" {
         bytes = patch_bump_prologer(bytes, atomics["gc_alloc16"], cache_end)   // v4: inkl. cache-fallbackar
@@ -9667,8 +9772,11 @@ funksjon kompiler_v2(ncb_json) {
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
     la rt_size: heltall = lengde(rt)
-    la gc_safepoint_va: heltall = TEXT_VA() + rt_size - GC_SAFEPOINT_STUB_BYTES()
-    hvis finnes_nøkkel(atomic_vas, "gc_safepoint") { gc_safepoint_va = atomic_vas["gc_safepoint"] }
+    // F2c (2026-09-24): stubben blir alltid registrert i atomics["gc_safepoint"]; den gamle
+    // «rt_size − GC_SAFEPOINT_STUB_BYTES»-fallbacken peika midt i anna kode så snart noko
+    // vart appenda etter stubben (og talet 173 var alt feil for v3 = 220 B) → fail-closed.
+    hvis ikkje finnes_nøkkel(atomic_vas, "gc_safepoint") { kast "native_codegen_v2: runtimen registrerte ikkje gc_safepoint (atomics) — avbryt" }
+    la gc_safepoint_va: heltall = atomic_vas["gc_safepoint"]
     native_codegen_trace("runtime bygd bytes=" + tekst_fra_heltall(rt_size))
 
     // Finn entry: NCB entry-felt, deretter __main__.start / *.start
@@ -10193,8 +10301,11 @@ funksjon ncval_x86_setup(ncb) {
     la rt = rt_package[0]
     la atomic_vas = rt_package[1]
     la rt_size: heltall = lengde(rt)
-    la gc_safepoint_va: heltall = TEXT_VA() + rt_size - GC_SAFEPOINT_STUB_BYTES()
-    hvis finnes_nøkkel(atomic_vas, "gc_safepoint") { gc_safepoint_va = atomic_vas["gc_safepoint"] }
+    // F2c (2026-09-24): stubben blir alltid registrert i atomics["gc_safepoint"]; den gamle
+    // «rt_size − GC_SAFEPOINT_STUB_BYTES»-fallbacken peika midt i anna kode så snart noko
+    // vart appenda etter stubben (og talet 173 var alt feil for v3 = 220 B) → fail-closed.
+    hvis ikkje finnes_nøkkel(atomic_vas, "gc_safepoint") { kast "native_codegen_v2: runtimen registrerte ikkje gc_safepoint (atomics) — avbryt" }
+    la gc_safepoint_va: heltall = atomic_vas["gc_safepoint"]
 
     la fn_list = nøkler(fns)
     la sorted: liste = []
