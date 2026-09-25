@@ -1,7 +1,10 @@
-# ecdsa_p256.no - ECDSA-verifikasjon på NIST P-256 (secp256r1) i rein Norscode.
-# Berre verifikasjon. Jacobian-projektive koordinatar (éin inversjon til slutt).
-# Byggjer på std.bigint. Ikkje konstanttid (verifikasjon over offentlege data).
+# ecdsa_p256.no - ECDSA på NIST P-256 (secp256r1) i rein Norscode.
+# Verifikasjon og signering (deterministisk k etter RFC 6979, SHA-256).
+# Jacobian-projektive koordinatar (éin inversjon til slutt). Byggjer på
+# std.bigint. Ikkje konstanttid: signering lekk tidsinformasjon om den
+# private nøkkelen, så bruk han berre der det er akseptabelt.
 bruk std.bigint som bn
+bruk std.sha256 som sha
 
 funksjon _nib(ch: tekst) -> heiltall { returner builtin.index_of("0123456789abcdef", ch) }
 funksjon _hexbn(h: tekst) -> liste_heiltall {
@@ -120,4 +123,90 @@ funksjon ecdsa_verify(qx: liste_heiltall, qy: liste_heiltall, hash_bn: liste_hei
     returner bn.cmp(x1, r) == 0
 }
 
-funksjon status() { returner { "abi": "norscode-ecdsa-p256-v1", "kurve": "secp256r1", "hash": "sha256" } }
+# ---- signering ----
+
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+funksjon _fyll(n: heiltall, v: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < n { legg_til(ut, v) i = i + 1 }
+    returner ut
+}
+funksjon _G() -> ordbok { returner {"x": _Gx(), "y": _Gy(), "z": [1]} }
+
+funksjon _til_affin(pt: ordbok, p: liste_heiltall) -> ordbok {
+    la zinv = _finv(pt["z"], p)
+    la zinv2 = _fmul(zinv, zinv, p)
+    la zinv3 = _fmul(zinv2, zinv, p)
+    returner {"x": _fmul(pt["x"], zinv2, p), "y": _fmul(pt["y"], zinv3, p)}
+}
+
+# RFC 6979 §3.2 for P-256 med SHA-256. Sidan qlen = hlen = 256 er T éi V-blokk
+# og bits2int(T) = int(T). d_oct: 32-byte privat skalar (big-endian),
+# h1: 32-byte hash av meldinga. Returnerer k som bigint.
+funksjon rfc6979_k(d_oct: liste_heiltall, h1: liste_heiltall) -> liste_heiltall {
+    la n = N()
+    la h_oct = bn.til_bytes(bn.modulo(bn.fra_bytes(h1), n), 32)
+    la V = _fyll(32, 1)
+    la K = _fyll(32, 0)
+    K = sha.hmac_sha256_bytes(K, _saman(_saman(_saman(V, [0]), d_oct), h_oct))
+    V = sha.hmac_sha256_bytes(K, V)
+    K = sha.hmac_sha256_bytes(K, _saman(_saman(_saman(V, [1]), d_oct), h_oct))
+    V = sha.hmac_sha256_bytes(K, V)
+    la forsøk = 0
+    mens forsøk < 64 {
+        V = sha.hmac_sha256_bytes(K, V)
+        la k = bn.fra_bytes(V)
+        hvis bn.cmp(k, [1]) >= 0 og bn.cmp(k, n) < 0 { returner k }
+        K = sha.hmac_sha256_bytes(K, _saman(V, [0]))
+        V = sha.hmac_sha256_bytes(K, V)
+        forsøk = forsøk + 1
+    }
+    kast "ecdsa_p256: fann ingen gyldig k"
+    returner [0]
+}
+
+# Offentleg nøkkel Q = d·G i affine koordinatar {"x", "y"} (bigint).
+funksjon offentleg_nokkel(d_bytes: liste_heiltall) -> ordbok {
+    la p = P()
+    returner _til_affin(_skalar(bn.fra_bytes(d_bytes), _G(), p), p)
+}
+
+# ECDSA-signering (FIPS 186-4 §6.4) med deterministisk k (RFC 6979).
+# d_bytes: privat nøkkel (32 byte), hash: 32-byte SHA-256-digest.
+# Returnerer {"r": bigint, "s": bigint}.
+funksjon ecdsa_sign(d_bytes: liste_heiltall, hash: liste_heiltall) -> ordbok {
+    la p = P() la n = N()
+    la d_oct = bn.til_bytes(bn.fra_bytes(d_bytes), 32)
+    la d = bn.fra_bytes(d_oct)
+    la e = bn.modulo(bn.fra_bytes(hash), n)
+    la k = rfc6979_k(d_oct, hash)
+    la r = bn.modulo(_til_affin_x(_skalar(k, _G(), p), p), n)
+    la kinv = bn.modexp(k, bn.sub(n, [2]), n)
+    la s = bn.modulo(bn.mul(kinv, bn.modulo(bn.add(e, bn.mul(r, d)), n)), n)
+    returner {"r": r, "s": s}
+}
+
+# DER-koding av ECDSA-Sig-Value: SEQUENCE { INTEGER r, INTEGER s }.
+# Dette er formatet TLS 1.3 (ecdsa_secp256r1_sha256) og X.509 brukar.
+funksjon _der_heiltal(v: liste_heiltall) -> liste_heiltall {
+    la b = bn.til_bytes(v, 32)
+    la start = 0
+    mens start < 31 og b[start] == 0 { start = start + 1 }
+    la kropp: liste_heiltall = []
+    hvis b[start] >= 128 { legg_til(kropp, 0) }
+    la i = start
+    mens i < 32 { legg_til(kropp, b[i]) i = i + 1 }
+    returner _saman([2, lengde(kropp)], kropp)
+}
+funksjon signatur_der(r: liste_heiltall, s: liste_heiltall) -> liste_heiltall {
+    la kropp = _saman(_der_heiltal(r), _der_heiltal(s))
+    returner _saman([48, lengde(kropp)], kropp)
+}
+
+funksjon status() { returner { "abi": "norscode-ecdsa-p256-v1", "kurve": "secp256r1", "hash": "sha256", "signering": "rfc6979" } }

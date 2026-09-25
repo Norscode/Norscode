@@ -676,7 +676,7 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
         n == "exec_prosess" eller n == "process_spawn_argv" eller n == "process_operation" eller
         n == "native_mkdir_p" eller n == "mkdir_p" eller n == "network_operation" eller
         n == "atomic_operation" eller n == "tensor_operation" eller
-        n == "socket_send_bytes" eller n == "socket_recv_bytes" eller n == "socket_settimeout" eller
+        n == "socket_settimeout" eller
         n == "wasm_selftest" eller n == "ncb_route_handlers" eller
         n == "n" eller n == "desimaltall"
 }
@@ -2437,6 +2437,87 @@ funksjon emit_socket_accept(native: liste_heiltall, fd_reg: heiltall, dst_reg: h
     hvis os == "linux" { emit_syscall(native, 202, os) } ellers { emit_syscall(native, 30, os) }
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
+    returner 0
+}
+
+// Binær-trygg: socket_send_bytes(fd, byteliste) → write(fd, rå byte, len). bytes
+// er ei NcVal-liste av byte-heiltal; pakk han ut i ein heap-buffer (som
+// fil_skriv_binær) og skriv. Held null-byte, i motsetnad til den tekst-baserte
+// socket_send. Returnerer tal sende byte.
+funksjon emit_socket_send_bytes(native: liste_heiltall, fd_reg: heiltall, data_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    legg_u32(native, 0xF9400400 | (data_reg << 5) | 10) // ldr x10, [Xdata, #8]  listdata
+    legg_u32(native, 0xF9400142)                        // ldr x2, [x10]  count
+    legg_u32(native, 0x9100214B)                        // add x11, x10, #8  &elem[0]
+    legg_u32(native, 0xAA1C03ED)                        // mov x13, x28  buffer-base
+    legg_u32(native, 0xAA0D03EF)                        // mov x15, x13  skrive-ptr
+    legg_u32(native, 0xD2800010)                        // movz x16, #0  i
+    la lbl_loop = lengde(native)
+    legg_u32(native, 0xEB02021F)                        // cmp x16, x2
+    la p_bge = lengde(native)
+    legg_u32(native, 0)                                 // b.ge done
+    legg_u32(native, 0x8B100D6C)                        // add x12, x11, x16, lsl #3
+    legg_u32(native, 0xF940018C)                        // ldr x12, [x12]  elem
+    legg_u32(native, 0xB940098C)                        // ldr w12, [x12, #8]  byteverdi
+    legg_u32(native, 0x390001EC)                        // strb w12, [x15]
+    legg_u32(native, 0x910005EF)                        // add x15, x15, #1
+    legg_u32(native, 0x91000610)                        // add x16, x16, #1
+    la p_bloop = lengde(native)
+    legg_u32(native, 0x14000000)                        // b loop
+    la lbl_done = lengde(native)
+    legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
+    legg_u32(native, 0xAA0D03E1)                        // mov x1, x13  buffer
+    hvis os == "linux" { emit_syscall(native, 64, os) } ellers { emit_syscall(native, 4, os) }
+    legg_u32(native, 0xAA0F03FC)                        // mov x28, x15  bump forbi buffer
+    legg_u32(native, 0xAA0003E9)                        // mov x9, x0
+    emit_ncval_alloc(native, 9, dst_reg, 1)
+    skriv_u32(native, p_bge,   0x5400000A | ((((lbl_done - p_bge)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
+    returner 0
+}
+// Binær-trygg: socket_recv_bytes(fd, max) → read til buffer, bygg NcVal-liste av
+// byte-heiltal. Held null-byte, i motsetnad til den tekst-baserte socket_recv.
+funksjon emit_socket_recv_bytes(native: liste_heiltall, fd_reg: heiltall, max_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
+    legg_u32(native, 0xAA1C03E1)                        // mov x1, x28  les-buffer
+    legg_u32(native, 0xF9400400 | (max_reg << 5) | 2)   // ldr x2, [Xmax, #8]
+    hvis os == "linux" { emit_syscall(native, 63, os) } ellers { emit_syscall(native, 3, os) }
+    legg_u32(native, 0xF100001F)                        // cmp x0, #0
+    legg_u32(native, 0x5400004A)                        // b.ge +2 (hopp over movz)
+    legg_u32(native, 0xD2800000)                        // movz x0, #0  klamp negativ
+    // Buffer-basen er x28 (uendra gjennom syscallen). IKKJE x1: kjerna returnerer
+    // ein andre verdi i x1 (0 for read på macOS), så x1 er øydelagd etter svc.
+    legg_u32(native, 0xAA1C03E9)                        // mov x9, x28  buffer-base
+    legg_u32(native, 0xAA0003EA)                        // mov x10, x0  n
+    legg_u32(native, 0x8B00039C)                        // add x28, x28, x0  forbi buffer
+    legg_u32(native, 0x91003F9C)                        // add x28, x28, #15
+    legg_u32(native, 0xD344FF9C)                        // lsr x28, x28, #4
+    legg_u32(native, 0xD37CEF9C)                        // lsl x28, x28, #4  (16-align)
+    legg_u32(native, 0xAA1C03EB)                        // mov x11, x28  list val-base
+    legg_u32(native, 0xF900038A)                        // str x10, [x28]  count
+    legg_u32(native, 0x9100239C)                        // add x28, x28, #8
+    legg_u32(native, 0xAA1C03EC)                        // mov x12, x28  &elem[0]
+    legg_u32(native, 0x8B0A0F9C)                        // add x28, x28, x10, lsl #3  reserver ptrs
+    legg_u32(native, 0xD280000D)                        // movz x13, #0  i
+    la lbl_loop = lengde(native)
+    legg_u32(native, 0xEB0A01BF)                        // cmp x13, x10
+    la p_bge = lengde(native)
+    legg_u32(native, 0)                                 // b.ge done
+    legg_u32(native, 0x8B0D012E)                        // add x14, x9, x13
+    legg_u32(native, 0x394001CE)                        // ldrb w14, [x14]  byte
+    legg_u32(native, 0xAA1C03EF)                        // mov x15, x28  elem-ptr
+    legg_u32(native, 0xD2800030)                        // movz x16, #1  type int
+    legg_u32(native, 0xF9000390)                        // str x16, [x28]
+    legg_u32(native, 0xF900078E)                        // str x14, [x28, #8]  val
+    legg_u32(native, 0x9100439C)                        // add x28, x28, #16
+    legg_u32(native, 0x8B0D0D91)                        // add x17, x12, x13, lsl #3
+    legg_u32(native, 0xF900022F)                        // str x15, [x17]  list[i]
+    legg_u32(native, 0x910005AD)                        // add x13, x13, #1
+    la p_bloop = lengde(native)
+    legg_u32(native, 0x14000000)                        // b loop
+    la lbl_done = lengde(native)
+    emit_ncval_alloc_ptr(native, 11, dst_reg, 4)        // boks som liste
+    skriv_u32(native, p_bge,   0x5400000A | ((((lbl_done - p_bge)   / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
     returner 0
 }
 
@@ -5137,6 +5218,16 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "socket_recv" eller kallnamn == "builtin.socket_recv") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_recv krev 2 arg", "image": []} }
                     emit_socket_recv(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_send_bytes" eller kallnamn == "builtin.socket_send_bytes") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_send_bytes krev 2 arg", "image": []} }
+                    emit_socket_send_bytes(native, r2, r1, r2, os)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "socket_recv_bytes" eller kallnamn == "builtin.socket_recv_bytes") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_recv_bytes krev 2 arg", "image": []} }
+                    emit_socket_recv_bytes(native, r2, r1, r2, os)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "socket_close" eller kallnamn == "builtin.socket_close") og lengde(instr) == 3 og instr[2] == 1 {

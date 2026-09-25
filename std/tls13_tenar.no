@@ -1,0 +1,425 @@
+# tls13_tenar.no - TLS 1.3-tenar (RFC 8446) i rein Norscode, over ein socket frå std.socket.
+# Suite TLS_CHACHA20_POLY1305_SHA256, nøkkelutveksling X25519, sertifikat med
+# ECDSA P-256 (ecdsa_secp256r1_sha256) - det nettlesarar og Let's Encrypt brukar.
+#
+# Avgrensingar: ingen PSK/resumption, ingen HelloRetryRequest (klienten må sende
+# ein X25519-key_share i ClientHello), ingen klientsertifikat, ingen ALPN (klienten
+# fell tilbake til HTTP/1.1). ECDSA-signeringa er ikkje konstanttid.
+#
+# Bruk:
+#   la ctx = tls.ny_kontekst(kjede_pem, nokkel_pem)
+#   la okt = tls.handtrykk(klient_socket, ctx)
+#   hvis okt["ok"] { la data = tls.les_data(okt)  tls.skriv_data(okt, svar)  tls.lukk(okt) }
+bruk std.socket som sok
+bruk std.tls13_handshake som hs
+bruk std.tls13_keyschedule som ks
+bruk std.tls13_record som rec
+bruk std.x25519 som dh
+bruk std.ecdsa_p256 som ec
+bruk std.sha256 som sha
+bruk std.base64 som base64
+bruk std.bytes som bytes
+
+funksjon SIG_ECDSA_P256_SHA256() -> heiltall { returner 1027 }   # 0x0403
+funksjon REC_CCS() -> heiltall { returner 20 }
+funksjon REC_ALERT() -> heiltall { returner 21 }
+funksjon REC_HANDSHAKE() -> heiltall { returner 22 }
+funksjon REC_APPDATA() -> heiltall { returner 23 }
+funksjon MAKS_FRAGMENT() -> heiltall { returner 16384 }
+
+# Alert-kodar (RFC 8446 §6).
+funksjon A_CLOSE_NOTIFY() -> heiltall { returner 0 }
+funksjon A_UNEXPECTED_MESSAGE() -> heiltall { returner 10 }
+funksjon A_HANDSHAKE_FAILURE() -> heiltall { returner 40 }
+funksjon A_ILLEGAL_PARAMETER() -> heiltall { returner 47 }
+funksjon A_DECODE_ERROR() -> heiltall { returner 50 }
+funksjon A_DECRYPT_ERROR() -> heiltall { returner 51 }
+funksjon A_PROTOCOL_VERSION() -> heiltall { returner 70 }
+
+# ============ byte-hjelparar ============
+funksjon _liste(v) -> liste_heiltall {
+    hvis bytes.er_bytes(v) { returner bytes.til_liste(v) }
+    returner v
+}
+funksjon _saman(a: liste_heiltall, b: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i < lengde(a) { legg_til(ut, a[i]) i = i + 1 }
+    i = 0
+    mens i < lengde(b) { legg_til(ut, b[i]) i = i + 1 }
+    returner ut
+}
+funksjon _skjer(d: liste_heiltall, a: heiltall, b: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = a
+    mens i < b { legg_til(ut, d[i]) i = i + 1 }
+    returner ut
+}
+funksjon _lik(a: liste_heiltall, b: liste_heiltall) -> boolsk {
+    hvis lengde(a) != lengde(b) { returner usann }
+    la diff = 0 la i = 0
+    mens i < lengde(a) { diff = diff | (a[i] ^ b[i]) i = i + 1 }
+    returner diff == 0
+}
+funksjon _u16(v: heiltall) -> liste_heiltall { returner [(v >> 8) & 255, v & 255] }
+funksjon _u24(v: heiltall) -> liste_heiltall { returner [(v >> 16) & 255, (v >> 8) & 255, v & 255] }
+funksjon _nib(c: tekst) -> heiltall { returner builtin.index_of("0123456789abcdef", c) }
+funksjon _hexbytes(h: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = 0
+    mens i + 1 < lengde(h) { legg_til(ut, _nib(builtin.slice(h, i, i+1)) * 16 + _nib(builtin.slice(h, i+1, i+2))) i = i + 2 }
+    returner ut
+}
+# n kryptografisk tilfeldige byte frå OS-et (getentropy/getrandom).
+funksjon _tilfeldig(n: heiltall) -> liste_heiltall { returner _hexbytes(builtin.random_hex(n)) }
+
+# Finst u16-verdien i ei liste av u16 som byrjar på posisjon frå?
+funksjon _har_u16(data: liste_heiltall, frå: heiltall, verdi: heiltall) -> boolsk {
+    la i = frå
+    mens i + 1 < lengde(data) {
+        hvis ((data[i] << 8) | data[i+1]) == verdi { returner sann }
+        i = i + 2
+    }
+    returner usann
+}
+funksjon _inneheld(l: liste_heiltall, v: heiltall) -> boolsk {
+    la i = 0
+    mens i < lengde(l) { hvis l[i] == v { returner sann } i = i + 1 }
+    returner usann
+}
+
+# ============ PEM / DER ============
+# Alle PEM-blokker med gitt etikett ("CERTIFICATE", "EC PRIVATE KEY", "PRIVATE KEY") som DER.
+funksjon pem_blokker(pem: tekst, etikett: tekst) -> liste {
+    la ut: liste = []
+    la delar = builtin.split(pem, "-----BEGIN " + etikett + "-----")
+    la i = 1
+    mens i < lengde(delar) {
+        la s = builtin.split(delar[i], "-----END " + etikett + "-----")
+        hvis lengde(s) >= 2 {
+            la body = builtin.replace(builtin.replace(builtin.replace(builtin.replace(s[0], "\n", ""), "\r", ""), " ", ""), "\t", "")
+            legg_til(ut, _liste(base64.dekod_bytes(body)))
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+# DER-TLV frå posisjon p (definitt lengd, maks 3 lengdebyte).
+funksjon _tlv(d: liste_heiltall, p: heiltall, grense: heiltall) -> ordbok {
+    hvis p < 0 eller p + 2 > grense { returner {"ok": usann} }
+    la tag = d[p] la l = d[p + 1] la hl = 2 la n = 0
+    hvis l < 128 { n = l } ellers {
+        la k = l & 127
+        hvis k < 1 eller k > 3 eller p + 2 + k > grense { returner {"ok": usann} }
+        la j = 0
+        mens j < k { n = (n << 8) | d[p + 2 + j] j = j + 1 }
+        hl = 2 + k
+    }
+    la s = p + hl
+    hvis s + n > grense { returner {"ok": usann} }
+    returner {"ok": sann, "tag": tag, "start": s, "end": s + n, "next": s + n}
+}
+
+# OID prime256v1 (1.2.840.10045.3.1.7).
+funksjon _oid_p256() -> liste_heiltall { returner [42, 134, 72, 206, 61, 3, 1, 7] }
+funksjon _venstrepad32(d: liste_heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = [] la i = lengde(d)
+    mens i < 32 { legg_til(ut, 0) i = i + 1 }
+    la j = 0
+    hvis lengde(d) > 32 { j = lengde(d) - 32 }
+    mens j < lengde(d) { legg_til(ut, d[j]) j = j + 1 }
+    returner ut
+}
+# Finst OID-en for P-256 ein stad i [a, b)? (Enkel sjekk av kurveparameteren.)
+funksjon _har_p256(d: liste_heiltall, a: heiltall, b: heiltall) -> boolsk {
+    la o = _oid_p256()
+    la i = a
+    mens i + lengde(o) <= b {
+        la treff = sann la j = 0
+        mens j < lengde(o) og treff { hvis d[i + j] != o[j] { treff = usann } j = j + 1 }
+        hvis treff { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+# SEC1 ECPrivateKey: SEQUENCE { INTEGER 1, OCTET STRING d, [0] kurve OPTIONAL, [1] pub OPTIONAL }
+funksjon _sec1_d(der: liste_heiltall) -> liste_heiltall {
+    la seq = _tlv(der, 0, lengde(der))
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner [] }
+    la ver = _tlv(der, seq["start"], seq["end"])
+    hvis ikkje ver["ok"] eller ver["tag"] != 2 { returner [] }
+    la oct = _tlv(der, ver["next"], seq["end"])
+    hvis ikkje oct["ok"] eller oct["tag"] != 4 { returner [] }
+    # Viss kurveparameteren [0] er med, må han vere P-256.
+    la par = _tlv(der, oct["next"], seq["end"])
+    hvis par["ok"] og par["tag"] == 160 og ikkje _har_p256(der, par["start"], par["end"]) { returner [] }
+    returner _venstrepad32(_skjer(der, oct["start"], oct["end"]))
+}
+# PKCS#8: SEQUENCE { INTEGER 0, SEQUENCE { OID ecPublicKey, OID kurve }, OCTET STRING { SEC1 } }
+funksjon _pkcs8_d(der: liste_heiltall) -> liste_heiltall {
+    la seq = _tlv(der, 0, lengde(der))
+    hvis ikkje seq["ok"] eller seq["tag"] != 48 { returner [] }
+    la ver = _tlv(der, seq["start"], seq["end"])
+    hvis ikkje ver["ok"] eller ver["tag"] != 2 { returner [] }
+    la alg = _tlv(der, ver["next"], seq["end"])
+    hvis ikkje alg["ok"] eller alg["tag"] != 48 eller ikkje _har_p256(der, alg["start"], alg["end"]) { returner [] }
+    la oct = _tlv(der, alg["next"], seq["end"])
+    hvis ikkje oct["ok"] eller oct["tag"] != 4 { returner [] }
+    returner _sec1_d(_skjer(der, oct["start"], oct["end"]))
+}
+# 32-byte P-256-privatnøkkel frå PEM (SEC1 «EC PRIVATE KEY» eller PKCS#8 «PRIVATE KEY»).
+# Tom liste om nøkkelen manglar eller ikkje er P-256.
+funksjon ec_privat_nokkel(pem: tekst) -> liste_heiltall {
+    la sec1 = pem_blokker(pem, "EC PRIVATE KEY")
+    hvis lengde(sec1) > 0 { returner _sec1_d(sec1[0]) }
+    la p8 = pem_blokker(pem, "PRIVATE KEY")
+    hvis lengde(p8) > 0 { returner _pkcs8_d(p8[0]) }
+    returner []
+}
+
+# Tenarkontekst: sertifikatkjede (DER, løvsertifikatet først) og privatnøkkel.
+funksjon ny_kontekst(kjede_pem: tekst, nokkel_pem: tekst) -> ordbok {
+    la kjede = pem_blokker(kjede_pem, "CERTIFICATE")
+    hvis lengde(kjede) == 0 { returner {"ok": usann, "feil": "fann ikkje noko sertifikat i PEM-en"} }
+    la d = ec_privat_nokkel(nokkel_pem)
+    hvis lengde(d) != 32 { returner {"ok": usann, "feil": "fann ikkje ein P-256-privatnøkkel i PEM-en"} }
+    returner {"ok": sann, "feil": "", "kjede": kjede, "d": d}
+}
+
+# Certificate-melding med heile kjeda (RFC 8446 §4.4.2).
+funksjon _certificate(kjede: liste) -> liste_heiltall {
+    la lst: liste_heiltall = [] la i = 0
+    mens i < lengde(kjede) {
+        la der: liste_heiltall = kjede[i]
+        lst = _saman(_saman(_saman(lst, _u24(lengde(der))), der), _u16(0))
+        i = i + 1
+    }
+    la body = _saman(_saman([0], _u24(lengde(lst))), lst)
+    returner hs.encode_handshake(hs.HT_CERTIFICATE(), body)
+}
+
+# verify_data = HMAC-SHA256(HKDF-Expand-Label(secret, "finished", "", 32), transcript-hash)
+funksjon _finished(secret: liste_heiltall, th: liste_heiltall) -> liste_heiltall {
+    returner sha.hmac_sha256_bytes(ks.expand_label(secret, "finished", [], 32), th)
+}
+
+# ============ record-I/O ============
+funksjon _send(okt: ordbok, data: liste_heiltall) -> heiltall { returner sok.send_bytes(okt["s"], data) }
+
+# Fyll innlesingsbufferet til minst `trengs` byte. usann ved EOF.
+funksjon _fyll(okt: ordbok, trengs: heiltall) -> boolsk {
+    la runde = 0
+    mens lengde(okt["buf"]) < trengs {
+        la del = sok.motta_bytes(okt["s"], 16384)
+        hvis lengde(del) == 0 { returner usann }
+        okt["buf"] = _saman(okt["buf"], del)
+        runde = runde + 1
+        hvis runde > 4096 { returner usann }
+    }
+    returner sann
+}
+# Les éin TLSPlaintext/TLSCiphertext-post: {ok, type, post (med hovud), fragment}.
+funksjon _les_post(okt: ordbok) -> ordbok {
+    hvis ikkje _fyll(okt, 5) { returner {"ok": usann, "feil": "tilkoplinga vart lukka"} }
+    la b = okt["buf"]
+    la len = (b[3] << 8) | b[4]
+    hvis len > MAKS_FRAGMENT() + 256 { returner {"ok": usann, "feil": "for lang post"} }
+    hvis ikkje _fyll(okt, 5 + len) { returner {"ok": usann, "feil": "tilkoplinga vart lukka midt i ein post"} }
+    b = okt["buf"]
+    la post = _skjer(b, 0, 5 + len)
+    okt["buf"] = _skjer(b, 5 + len, lengde(b))
+    returner {"ok": sann, "feil": "", "type": post[0], "post": post, "fragment": _skjer(post, 5, 5 + len)}
+}
+# Send ukryptert (TLSPlaintext), delt i fragment.
+funksjon _send_klartekst(okt: ordbok, type: heiltall, data: liste_heiltall) -> heiltall {
+    la p = 0
+    mens p < lengde(data) {
+        la n = lengde(data) - p
+        hvis n > MAKS_FRAGMENT() { n = MAKS_FRAGMENT() }
+        _send(okt, _saman([type, 3, 3, (n >> 8) & 255, n & 255], _skjer(data, p, p + n)))
+        p = p + n
+    }
+    returner lengde(data)
+}
+# Send kryptert med tenarnøklane (indre innhaldstype = type), delt i fragment.
+funksjon _send_kryptert(okt: ordbok, type: heiltall, data: liste_heiltall) -> heiltall {
+    la p = 0
+    mens p < lengde(data) {
+        la n = lengde(data) - p
+        hvis n > MAKS_FRAGMENT() { n = MAKS_FRAGMENT() }
+        _send(okt, rec.krypter_post(okt["s_key"], okt["s_iv"], okt["s_seq"], type, _skjer(data, p, p + n)))
+        okt["s_seq"] = okt["s_seq"] + 1
+        p = p + n
+    }
+    returner lengde(data)
+}
+# Les og dekrypter éin post med klientnøklane. ChangeCipherSpec blir hoppa over.
+funksjon _les_kryptert(okt: ordbok) -> ordbok {
+    la runde = 0
+    mens runde < 64 {
+        la r = _les_post(okt)
+        hvis ikkje r["ok"] { returner r }
+        hvis r["type"] == REC_CCS() { runde = runde + 1 } ellers {
+            hvis r["type"] == REC_ALERT() {
+                la f = r["fragment"]
+                la kode = -1
+                hvis lengde(f) >= 2 { kode = f[1] }
+                returner {"ok": usann, "feil": "klienten sende alert " + tekst_fra_heiltall(kode)}
+            }
+            hvis r["type"] != REC_APPDATA() { returner {"ok": usann, "feil": "uventa posttype " + tekst_fra_heiltall(r["type"])} }
+            la dk = rec.dekrypter_post(okt["c_key"], okt["c_iv"], okt["c_seq"], r["post"])
+            okt["c_seq"] = okt["c_seq"] + 1
+            hvis dk["status"] != "ok" { returner {"ok": usann, "feil": "dekryptering feila: " + dk["error"]} }
+            returner {"ok": sann, "feil": "", "type": dk["type"], "data": dk["plaintext"]}
+        }
+    }
+    returner {"ok": usann, "feil": "for mange ChangeCipherSpec-postar"}
+}
+
+# Hent éi heil handshake-melding frå hsbuf dersom ho er komplett.
+funksjon _ta_hs(okt: ordbok) -> ordbok {
+    la b = okt["hsbuf"]
+    hvis lengde(b) < 4 { returner {"ok": usann} }
+    la len = (b[1] << 16) | (b[2] << 8) | b[3]
+    hvis lengde(b) < 4 + len { returner {"ok": usann} }
+    okt["hsbuf"] = _skjer(b, 4 + len, lengde(b))
+    returner {"ok": sann, "msg": _skjer(b, 0, 4 + len)}
+}
+funksjon _les_hs_klartekst(okt: ordbok) -> ordbok {
+    la runde = 0
+    mens runde < 64 {
+        la m = _ta_hs(okt)
+        hvis m["ok"] { returner m }
+        la r = _les_post(okt)
+        hvis ikkje r["ok"] { returner r }
+        hvis r["type"] != REC_HANDSHAKE() { returner {"ok": usann, "feil": "venta handtrykkspost, fekk type " + tekst_fra_heiltall(r["type"])} }
+        okt["hsbuf"] = _saman(okt["hsbuf"], r["fragment"])
+        runde = runde + 1
+    }
+    returner {"ok": usann, "feil": "handtrykksmeldinga er for lang"}
+}
+funksjon _les_hs_kryptert(okt: ordbok) -> ordbok {
+    la runde = 0
+    mens runde < 64 {
+        la m = _ta_hs(okt)
+        hvis m["ok"] { returner m }
+        la r = _les_kryptert(okt)
+        hvis ikkje r["ok"] { returner r }
+        hvis r["type"] != REC_HANDSHAKE() { returner {"ok": usann, "feil": "venta handtrykksmelding, fekk indre type " + tekst_fra_heiltall(r["type"])} }
+        okt["hsbuf"] = _saman(okt["hsbuf"], r["data"])
+        runde = runde + 1
+    }
+    returner {"ok": usann, "feil": "handtrykksmeldinga er for lang"}
+}
+
+# Send ein fatal alert (kryptert dersom nøklar er etablerte) og merk økta som feila.
+funksjon _feil(okt: ordbok, alert: heiltall, grunn: tekst) -> ordbok {
+    hvis alert >= 0 {
+        hvis lengde(okt["s_key"]) > 0 { _send_kryptert(okt, REC_ALERT(), [2, alert]) }
+        ellers { _send_klartekst(okt, REC_ALERT(), [2, alert]) }
+    }
+    okt["ok"] = usann
+    okt["feil"] = grunn
+    returner okt
+}
+funksjon _set_nøklar(okt: ordbok, c_secret: liste_heiltall, s_secret: liste_heiltall) -> heiltall {
+    la ck = rec.traffic_keys(c_secret)
+    la sk = rec.traffic_keys(s_secret)
+    okt["c_key"] = ck["key"] okt["c_iv"] = ck["iv"] okt["c_seq"] = 0
+    okt["s_key"] = sk["key"] okt["s_iv"] = sk["iv"] okt["s_seq"] = 0
+    returner 0
+}
+
+# ============ handtrykk ============
+# Køyr TLS 1.3-handtrykket på ein akseptert socket. Returnerer økta; okt["ok"]
+# seier om det lukkast, okt["feil"] kvifor ikkje. Ved suksess er
+# applikasjonsnøklane aktive.
+funksjon handtrykk(s: liste_heiltall, ctx: ordbok) -> ordbok {
+    la okt = {"s": s, "buf": [], "hsbuf": [], "ok": usann, "feil": "", "sni": "", "lukka": usann,
+              "c_key": [], "c_iv": [], "c_seq": 0, "s_key": [], "s_iv": [], "s_seq": 0}
+
+    # 1) ClientHello
+    la m = _les_hs_klartekst(okt)
+    hvis ikkje m["ok"] { returner _feil(okt, -1, "ClientHello: " + m["feil"]) }
+    la CH = m["msg"]
+    hvis CH[0] != hs.HT_CLIENT_HELLO() { returner _feil(okt, A_UNEXPECTED_MESSAGE(), "venta ClientHello") }
+    la ch = hs.parse_client_hello(CH, 4, lengde(CH))
+    hvis ikkje ch["ok"] { returner _feil(okt, A_DECODE_ERROR(), "ugyldig ClientHello") }
+    la sv = hs.finn_ext(CH, ch["ext_start"], ch["ext_end"], hs.EXT_SUPPORTED_VERSIONS())
+    hvis ikkje sv["funne"] eller ikkje _har_u16(sv["data"], 1, 772) { returner _feil(okt, A_PROTOCOL_VERSION(), "klienten støttar ikkje TLS 1.3") }
+    hvis ikkje _inneheld(ch["suites"], hs.SUITE_CHACHA20()) { returner _feil(okt, A_HANDSHAKE_FAILURE(), "klienten tilbyr ikkje TLS_CHACHA20_POLY1305_SHA256") }
+    la sa = hs.finn_ext(CH, ch["ext_start"], ch["ext_end"], hs.EXT_SIG_ALGS())
+    hvis ikkje sa["funne"] eller ikkje _har_u16(sa["data"], 2, SIG_ECDSA_P256_SHA256()) { returner _feil(okt, A_HANDSHAKE_FAILURE(), "klienten godtek ikkje ecdsa_secp256r1_sha256") }
+    hvis lengde(ch["key_share_pub"]) != 32 { returner _feil(okt, A_HANDSHAKE_FAILURE(), "manglar X25519-key_share (HelloRetryRequest er ikkje støtta)") }
+    okt["sni"] = ch["server_name"]
+
+    # 2) ServerHello (+ ChangeCipherSpec for mellomboks-kompatibilitet, RFC 8446 D.4)
+    la s_priv = _tilfeldig(32)
+    la SH = hs.build_server_hello({"random": _tilfeldig(32), "session_id": ch["session_id"], "key_share_pub": dh.scalarmult_base(s_priv)})
+    _send_klartekst(okt, REC_HANDSHAKE(), SH)
+    _send(okt, [REC_CCS(), 3, 3, 0, 1, 1])
+
+    # 3) Handtrykksløyndommar (RFC 8446 §7.1)
+    la delt = dh.scalarmult(s_priv, ch["key_share_pub"])
+    hvis _lik(delt, [0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0, 0,0,0,0,0,0,0,0]) { returner _feil(okt, A_ILLEGAL_PARAMETER(), "ugyldig X25519-nøkkel frå klienten") }
+    la tom_hash = ks.transcript_hash([])
+    la hs_sec = ks.handshake_secret(ks.derive_secret(ks.early_secret([]), "derived", tom_hash), delt)
+    la tr = _saman(CH, SH)
+    la th = ks.transcript_hash(tr)
+    la c_hs = ks.derive_secret(hs_sec, "c hs traffic", th)
+    la s_hs = ks.derive_secret(hs_sec, "s hs traffic", th)
+    la master = ks.master_secret(ks.derive_secret(hs_sec, "derived", tom_hash))
+    _set_nøklar(okt, c_hs, s_hs)
+
+    # 4) EncryptedExtensions, Certificate, CertificateVerify, Finished
+    la EE = hs.build_encrypted_extensions()
+    tr = _saman(tr, EE)
+    la CERT = _certificate(ctx["kjede"])
+    tr = _saman(tr, CERT)
+    la innhald = hs.certificate_verify_content("TLS 1.3, server CertificateVerify", ks.transcript_hash(tr))
+    la sig = ec.ecdsa_sign(ctx["d"], ks.transcript_hash(innhald))
+    la CV = hs.build_certificate_verify(SIG_ECDSA_P256_SHA256(), ec.signatur_der(sig["r"], sig["s"]))
+    tr = _saman(tr, CV)
+    la SF = hs.build_finished(_finished(s_hs, ks.transcript_hash(tr)))
+    tr = _saman(tr, SF)
+    _send_kryptert(okt, REC_HANDSHAKE(), _saman(_saman(_saman(EE, CERT), CV), SF))
+
+    # 5) Applikasjonsløyndommar over CH..server-Finished
+    la th_sf = ks.transcript_hash(tr)
+    la c_ap = ks.derive_secret(master, "c ap traffic", th_sf)
+    la s_ap = ks.derive_secret(master, "s ap traffic", th_sf)
+
+    # 6) Klientens Finished
+    la fm = _les_hs_kryptert(okt)
+    hvis ikkje fm["ok"] { returner _feil(okt, -1, "klient-Finished: " + fm["feil"]) }
+    la CF = fm["msg"]
+    hvis CF[0] != hs.HT_FINISHED() { returner _feil(okt, A_UNEXPECTED_MESSAGE(), "venta klient-Finished") }
+    hvis ikkje _lik(_skjer(CF, 4, lengde(CF)), _finished(c_hs, th_sf)) { returner _feil(okt, A_DECRYPT_ERROR(), "klient-Finished stemmer ikkje") }
+
+    # 7) Over til applikasjonsnøklane
+    _set_nøklar(okt, c_ap, s_ap)
+    okt["ok"] = sann
+    returner okt
+}
+
+# ============ applikasjonsdata ============
+# Les neste blokk applikasjonsdata. Tom liste ved close_notify, EOF eller feil.
+funksjon les_data(okt: ordbok) -> liste_heiltall {
+    la runde = 0
+    mens runde < 32 {
+        la r = _les_kryptert(okt)
+        hvis ikkje r["ok"] { okt["lukka"] = sann returner [] }
+        hvis r["type"] == REC_APPDATA() { returner r["data"] }
+        hvis r["type"] == REC_ALERT() { okt["lukka"] = sann returner [] }
+        # Handtrykksmeldingar etter handtrykket (t.d. KeyUpdate) blir ignorerte.
+        runde = runde + 1
+    }
+    returner []
+}
+funksjon skriv_data(okt: ordbok, data: liste_heiltall) -> heiltall { returner _send_kryptert(okt, REC_APPDATA(), data) }
+# Send close_notify.
+funksjon lukk(okt: ordbok) -> heiltall {
+    _send_kryptert(okt, REC_ALERT(), [1, A_CLOSE_NOTIFY()])
+    okt["lukka"] = sann
+    returner 0
+}
+
+funksjon status() { returner { "abi": "norscode-tls13-tenar-v1", "suite": "TLS_CHACHA20_POLY1305_SHA256", "kx": "x25519", "sig": "ecdsa_secp256r1_sha256" } }
