@@ -1844,7 +1844,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0xB8])               // mov rax, RT_LIST_SLICE
     u64(bytes, RT_LIST_SLICE())
     copy(bytes, [0xFF, 0xE0])               // jmp rax (tail-call)
-    patch_jump(bytes, slice_pstr, lengde(bytes)) // string_slice:
+    patch_jump(bytes, slice_pstr, lengde(bytes)) // ikkje_liste:
+    // bytes (type 7) har liste-layout ([len][cap][elem_ptr], sjå fil_les_bin). Før gjekk
+    // han til streng-slicen under, som las [cap][elem_ptr] som tekst → søppeltekst, og
+    // bytes_from_list(tekst) → SIGSEGV i fil_skriv_binær (c717e80). Typebevarande som
+    // tekst→tekst og liste→liste: list_slice (ny liste, same grensesemantikk som lister)
+    // og merk resultatet som bytes (type 7).
+    copy(bytes, [0x48, 0x83, 0x3F, 0x07])   // cmp qword[rdi],7 (bytes?)
+    la slice_pnb = emit_jne_placeholder(bytes) // jne string_slice
+    copy(bytes, [0x48, 0x83, 0xEC, 0x08])   // sub rsp,8 (align)
+    call_rel32(bytes, RT_LIST_SLICE(), TEXT_VA()) // rax = ny liste (type 3)
+    copy(bytes, [0x48, 0x83, 0xC4, 0x08])   // add rsp,8
+    copy(bytes, [0x48, 0x85, 0xC0])         // test rax,rax
+    copy(bytes, [0x74, 0x07])               // jz +7
+    copy(bytes, [0x48, 0xC7, 0x00, 0x07, 0x00, 0x00, 0x00]) // mov qword[rax],7 (bytes)
+    copy(bytes, [0xC3])                     // ret
+    patch_jump(bytes, slice_pnb, lengde(bytes)) // string_slice:
     copy(bytes, [
         0x48, 0x8B, 0x47, 0x08,             // rax = stringobj
         0x48, 0x8B, 0x08,                   // rcx = lengd
@@ -3381,8 +3396,10 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, ct_null, ct_bad) patch_jump(bytes, ct_null2, ct_bad) patch_jump(bytes, ct_long, ct_bad)
     copy(bytes, [0x31, 0xC0, 0xC3])                       // xor eax,eax; ret
 
-    // ── identity(rdi) → rax=rdi. bytes_to_list/bytes_from_list: v2 har ingen bytes-
-    // type — fil_les_binær gjev alt liste_heiltall, så normalisering er identitet.
+    // ── identity(rdi) → rax=rdi. Var bytes_to_list-ruta (og bytes_retag7 bytes_from_list-
+    // ruta); dei går no til bytes_to_list_copy / bytes_from_list_copy (ekte kopi, sjå
+    // list_copy_tag). Desse tre atoma er ikkje ruta lenger; dei står att som små,
+    // ufarlege inngangar so runtime-oppsettet elles er uendra.
     atomics["identity"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x48, 0x89, 0xF8, 0xC3])                 // mov rax,rdi; ret
     // bytes_retag7(rdi) → sett type-tag 7 (bytes) på plass; null → null.
@@ -3401,8 +3418,9 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                                   // ret
 
     // ── fil_les_bin(rdi=sti) → liste av byte-heiltal (fil_les_safe + RT_INT/RT_LIST_APP)
-    // Kontrakt som committed seed («bytes» med lengde = talet på byte; bytes.til_liste
-    // = identitet). Kastar «Kan ikkje opne fil» via fil_les_safe.
+    // Kontrakt som committed seed («bytes» (type 7) med lengde = talet på byte; liste-
+    // layout, so bytes_to_list/slice kan kopiere peikarane direkte). Kastar «Kan ikkje
+    // opne fil» via fil_les_safe.
     atomics["fil_les_bin"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57]) // push rbx,r12-r15 (rsp ≡ 0 mod 16)
     call_rel32(bytes, atomics["fil_les_safe"], TEXT_VA())  // rax = streng-NcVal
@@ -5453,6 +5471,62 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x41, 0x5D])                               // pop r13
     copy(bytes, [0x41, 0x5C])                               // pop r12
     copy(bytes, [0x5B])                                     // pop rbx
+    copy(bytes, [0xC3])                                     // ret
+
+    // ── bytes_to_list / bytes_from_list: EKTE kopi (C-fasiten lagar nytt objekt) ──
+    // Før var bytes_to_list identitet (tag 7 inn → tag 7 ut, same payload) og
+    // bytes_from_list retagga argumentet PÅ PLASS (lista vart sjølv «bytes»). Då delte
+    // liste og bytes lagring: legg_til/indeks-set på den eine endra den andre, og slice
+    // på «lista» gjekk til bytes-/tekst-vegen (c717e80-workaround i embed_release_ncb).
+    // list_copy_tag(rdi=kjelde, esi=ny tag 3|7) → NY behaldar (cap=max(len,8)) med
+    // kopi av element-peikarane (rep movsq, O(n) native; heiltalsboksane er
+    // uforanderlege og alt delte via int-cachen). Kjelde som ikkje er liste/bytes
+    // (null, tekst, …) går uendra attende (som før), so t.d. fil_skriv_binær(sti,
+    // bytes_from_list(tekst)) framleis går tekstvegen i staden for å segfaulte.
+    // Allokering via list_new_cap (gc_alloc_var/gc_alloc16); ingen safepoint her.
+    atomics["bytes_from_list_copy"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0xBE, 0x07, 0x00, 0x00, 0x00])             // mov esi,7 (bytes)
+    la bflc_j = emit_jmp_placeholder(bytes)                 // jmp list_copy_tag
+    atomics["bytes_to_list_copy"] = TEXT_VA() + lengde(bytes)
+    copy(bytes, [0xBE, 0x03, 0x00, 0x00, 0x00])             // mov esi,3 (liste) — fall inn
+    atomics["list_copy_tag"] = TEXT_VA() + lengde(bytes)
+    patch_jump(bytes, bflc_j, lengde(bytes))
+    copy(bytes, [0x48, 0x85, 0xFF])                         // test rdi,rdi
+    la lct_id1 = emit_je_placeholder(bytes)                 // null → identitet
+    copy(bytes, [0x48, 0x8B, 0x07])                         // mov rax,[rdi] (type)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x03])                   // cmp rax,3
+    la lct_ok = emit_je_placeholder(bytes)                  // liste → kopi
+    copy(bytes, [0x48, 0x83, 0xF8, 0x07])                   // cmp rax,7
+    la lct_id2 = emit_jne_placeholder(bytes)                // anna type → identitet
+    patch_jump(bytes, lct_ok, lengde(bytes))                // kopi:
+    copy(bytes, [0x53])                                     // push rbx
+    copy(bytes, [0x41, 0x54])                               // push r12
+    copy(bytes, [0x41, 0x55])                               // push r13 (rsp ≡ 0 mod 16)
+    copy(bytes, [0x49, 0x89, 0xF4])                         // mov r12,rsi (ny tag)
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                   // mov rax,[rdi+8] (payload)
+    copy(bytes, [0x48, 0x8B, 0x18])                         // mov rbx,[rax] (len)
+    copy(bytes, [0x4C, 0x8B, 0x68, 0x10])                   // mov r13,[rax+16] (kjelde-elem)
+    copy(bytes, [0x48, 0x89, 0xDF])                         // mov rdi,rbx
+    copy(bytes, [0x48, 0x83, 0xFF, 0x08])                   // cmp rdi,8
+    copy(bytes, [0x73, 0x05])                               // jae +5
+    copy(bytes, [0xBF, 0x08, 0x00, 0x00, 0x00])             // mov edi,8 (cap ≥ 8: list_app dobling)
+    call_rel32(bytes, atomics["list_new_cap"], TEXT_VA())   // rax = ny liste (type 3, len 0)
+    copy(bytes, [0x4C, 0x89, 0x20])                         // mov [rax],r12 (type)
+    copy(bytes, [0x48, 0x8B, 0x50, 0x08])                   // mov rdx,[rax+8] (payload)
+    copy(bytes, [0x48, 0x89, 0x1A])                         // mov [rdx],rbx (len)
+    copy(bytes, [0x49, 0x89, 0xC0])                         // mov r8,rax (returverdi)
+    copy(bytes, [0x48, 0x8B, 0x7A, 0x10])                   // mov rdi,[rdx+16] (mål-elem)
+    copy(bytes, [0x4C, 0x89, 0xEE])                         // mov rsi,r13
+    copy(bytes, [0x48, 0x89, 0xD9])                         // mov rcx,rbx
+    copy(bytes, [0xF3, 0x48, 0xA5])                         // rep movsq
+    copy(bytes, [0x4C, 0x89, 0xC0])                         // mov rax,r8
+    copy(bytes, [0x41, 0x5D])                               // pop r13
+    copy(bytes, [0x41, 0x5C])                               // pop r12
+    copy(bytes, [0x5B])                                     // pop rbx
+    copy(bytes, [0xC3])                                     // ret
+    patch_jump(bytes, lct_id1, lengde(bytes))               // identitet:
+    patch_jump(bytes, lct_id2, lengde(bytes))
+    copy(bytes, [0x48, 0x89, 0xF8])                         // mov rax,rdi
     copy(bytes, [0xC3])                                     // ret
 
     atomics["map_keys"] = TEXT_VA() + lengde(bytes)
@@ -8713,7 +8787,6 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     la er_fil_les_bin  = fn_nm == "fil_les_binær" eller fn_nm == "fil_les_binary" eller builtin.ends_with(fn_nm, ".fil_les_binær") eller builtin.ends_with(fn_nm, ".fil_les_binary")
     la er_fil_append   = fn_nm == "fil_append" eller builtin.ends_with(fn_nm, ".fil_append")
     la er_fil_append_bin = fn_nm == "fil_append_binær" eller fn_nm == "fil_append_binary" eller fn_nm == "fil_append_bin" eller builtin.ends_with(fn_nm, ".fil_append_binær") eller builtin.ends_with(fn_nm, ".fil_append_binary") eller builtin.ends_with(fn_nm, ".fil_append_bin")
-    la er_bytes_ident  = fn_nm == "bytes_to_list" eller fn_nm == "bytes_from_list" eller builtin.ends_with(fn_nm, ".bytes_to_list") eller builtin.ends_with(fn_nm, ".bytes_from_list")
     la er_mkdir        = fn_nm == "builtin.mkdir_p" eller fn_nm == "mkdir_p" eller builtin.ends_with(fn_nm, ".mkdir_p") eller fn_nm == "builtin.mkdir" eller fn_nm == "mkdir"
     la er_miljo_hent   = fn_nm == "miljo_hent" eller builtin.ends_with(fn_nm, ".miljo_hent")
     la er_miljo_finnes = fn_nm == "miljo_finnes" eller builtin.ends_with(fn_nm, ".miljo_finnes")
@@ -8774,9 +8847,12 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
     hvis er_fil_les     { returner atomic_vas["fil_les_safe"] }
     hvis er_fil_skriv   { returner RT_FIL_SKRIV() }
     hvis er_fil_binar   { returner atomic_vas["fil_skriv_bin_safe"] }
-    hvis fn_nm == "bytes_from_list" eller builtin.ends_with(fn_nm, ".bytes_from_list") { returner atomic_vas["bytes_retag7"] }
-    hvis fn_nm == "bytes_to_list" eller builtin.ends_with(fn_nm, ".bytes_to_list") { returner atomic_vas["identity"] }
-    hvis er_bytes_ident { returner atomic_vas["identity"] }
+    // bytes_from_list → NY tag-7-behaldar (kopi). bytes_retag7 retagga argumentet på
+    // plass, so kjeldelista sjølv vart «bytes» og delte lagring med resultatet.
+    hvis fn_nm == "bytes_from_list" eller builtin.ends_with(fn_nm, ".bytes_from_list") { returner atomic_vas["bytes_from_list_copy"] }
+    // bytes_to_list → NY tag-3-liste (kopi), ikkje identitet: mutasjon/slice/legg_til på
+    // lista skal oppføre seg som liste og ikkje røre bytes-originalen (sjå list_copy_tag).
+    hvis fn_nm == "bytes_to_list" eller builtin.ends_with(fn_nm, ".bytes_to_list") { returner atomic_vas["bytes_to_list_copy"] }
     hvis er_fil_append  { returner atomic_vas["fil_append"] }
     hvis er_fil_append_bin { returner atomic_vas["fil_append_bin"] }
     hvis fn_nm == "bytes_to_text" eller builtin.ends_with(fn_nm, ".bytes_to_text") { returner atomic_vas["bytes_to_text"] }
@@ -8872,6 +8948,12 @@ funksjon gap_rute_v2(fn_nm: tekst) -> liste {
     // var kallet null-fallback, so VM-en kompilerte aldri noko og jit.status() gav null.
     hvis kort == "jit_operation" { returner ["std.native_gap.jit_operation"] }
     hvis kort == "atomic_operation" { returner ["std.native_gap.atomic_operation"] }
+    // tensor_operation (norscode-tensor-v1): eksplisitt rute (critic C11), so ein
+    // *.tensor_operation i bunten ikkje kan kapre builtin-kallet via siste-segment-matching.
+    // Ho kan heller ikkje kapre ein brukarfunksjon: eksakte ikkje-builtin-namn i fn_vas blir
+    // emitterte FØR gap-ruta («Bundla brukarfunksjon … vinn ALLTID»). Finst ikkje målet i
+    // bunten, fell kallet vidare til same siste-segment-/null-fallback som før.
+    hvis kort == "tensor_operation" { returner ["std.native_gap.tensor_operation"] }
     // Native trådar (thread.*-primitiv): clone(2) + futex, GC-/VM-fri veg.
     hvis kort == "thread_spawn" { returner ["std.native_gap.thread_spawn"] }
     hvis kort == "thread_join" { returner ["std.native_gap.thread_join"] }
