@@ -1,5 +1,7 @@
 # V5000 real compiler status
 
+> **Historisk dokument.** `tools/run_real_pipeline_probes_v5000.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 ## Samandrag
 
 Dette steget samlar den nye `*_real`-kjeda til eit meir komplett compiler-spor.
