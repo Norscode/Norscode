@@ -1355,7 +1355,7 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
     hvis ikkje builtin.starts_with(relativ_kjelde, "std/") { returner "" }
     // Cacheroten er <root>/bootstrap som standard; NORSCODE_BOOTSTRAP_CACHE
     // kan flytte han (t.d. til ein CI-materialisert cache under build/).
-    la cache_rot = bundler.bootstrap_cache_rot(root)
+    la cache_rot = nc_bootstrap_cache_rot(root)
     la manifest_sti = cache_rot + "/stdlib/manifest.json"
     hvis ikkje builtin.fil_finnes(manifest_sti) { returner "" }
     prøv {
@@ -1374,7 +1374,7 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
         hvis ikkje builtin.starts_with(artefakt_relativ, "bootstrap/stdlib/") { returner "" }
         // «bootstrap/» er det logiske namnerommet i manifestet; standard-
         // cacheroten gjev same sti som før (root + "/" + artefakt_relativ).
-        la artefakt_sti = bundler.bootstrap_cache_artefakt(cache_rot, artefakt_relativ, "stdlib")
+        la artefakt_sti = nc_bootstrap_cache_artefakt(cache_rot, artefakt_relativ, "stdlib")
         hvis artefakt_sti == "" eller ikkje builtin.fil_finnes(artefakt_sti) { returner "" }
         la artefakt_hash = builtin.sha256_bytes(builtin.fil_les_binær(artefakt_sti))
         hvis artefakt_hash != tekst(post["artifact_sha256"]) {
@@ -1394,19 +1394,231 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
     returner ""
 }
 
+// ─── Bootstrap-cache: rot, kjeldehash-port og kompilatorfingeravtrykk ───────
+//
+// Desse krokane ligg i nc_main, ikkje i selfhost/bundler.no: bundler.no er
+// ein av dei åtte fikspunktmodulane i ELF stage-0-porten (Gen1 frå committa
+// bootstrap/precompiled_fragments_inner/bundler.functions.json, Gen2 frå
+// levande kjelde), så kvar kjeldeendring der ville krevje fragment-regen for
+// å halde Gen1 == Gen2. nc_main er ikkje fikspunktmodul. Bundler sin eigen
+// (legacy) bygg_bundle-veg er uendra.
+//
+// Bootstrap-cachen (selfhost-fragment og stdlib-fragment) ligg under éi rot:
+// NORSCODE_BOOTSTRAP_CACHE (absolutt, eller relativ til repo-rota) eller, som
+// standard, <root>/bootstrap. Då kan CI materialisere ein fersk cache under
+// build/ og peike hit utan at stien er bakt inn i seeden (JSON-avvikling J1b).
+
+funksjon nc_bootstrap_cache_rot(root: tekst) -> tekst {
+    la rå = miljo_hent("NORSCODE_BOOTSTRAP_CACHE")
+    la eksplisitt = ""
+    hvis rå != null { eksplisitt = builtin.trim(tekst(rå)) }
+    la basis = root
+    hvis basis == null eller basis == "" { basis = "." }
+    hvis eksplisitt == "" { returner basis + "/bootstrap" }
+    hvis builtin.starts_with(eksplisitt, "/") { returner eksplisitt }
+    returner basis + "/" + eksplisitt
+}
+
+// Logisk artefaktsti i eit cachemanifest → fysisk sti under cacheroten.
+// Manifesta skriv «bootstrap/<del>/fil» (eller berre «<del>/fil»); prefikset
+// «bootstrap/» er ein logisk namnerom og blir bytt ut med cacheroten. Alt
+// utanfor <del>/ eller med «..» blir avvist (returnerer "").
+funksjon nc_bootstrap_cache_artefakt(cache_rot: tekst, artefakt: tekst, del: tekst) -> tekst {
+    la rel = artefakt
+    hvis builtin.starts_with(rel, "bootstrap/") { rel = builtin.slice(rel, 10, lengde(rel)) }
+    hvis ikkje builtin.starts_with(rel, del + "/") { returner "" }
+    hvis builtin.contains(rel, "..") { returner "" }
+    returner cache_rot + "/" + rel
+}
+
+funksjon nc_selfhost_cache_abi() -> tekst {
+    returner "norscode-selfhost-source-cache-v1|ncb-v1|module-globals-v1"
+}
+
+funksjon nc_selfhost_cache_trace(melding: tekst) -> heiltall {
+    la rå = miljo_hent("NORSCODE_STDLIB_CACHE_TRACE")
+    hvis rå != null og tekst(rå) == "1" {
+        skriv("[stdlib-cache] " + melding + "\n")
+    }
+    returner 0
+}
+
+funksjon nc_selfhost_cache_relativ(kildef: tekst, root: tekst) -> tekst {
+    la rel = kildef
+    hvis root != null og root != "" og builtin.starts_with(rel, root + "/") {
+        rel = builtin.slice(rel, lengde(root) + 1, lengde(rel))
+    }
+    mens builtin.starts_with(rel, "./") { rel = builtin.slice(rel, 2, lengde(rel)) }
+    returner rel
+}
+
+// Kompilatoridentitet for selfhost-cachen. Ved bom blir modulen kompilert frå
+// kjelde av kompilatoren i runtime-binæren som køyrer (innbakt), eller, i
+// soft-seed-/hybridmodus, av den levande kompilatorkjelda. Fingeravtrykket
+// bind difor både SHA-256 av runtime-binæren og kjeldehashane til
+// kompilatormodulane (bundler.modulcache_compiler_fingerprint), slik modulcachen gjer.
+// Ein cache som overlever ein reseed eller ei kompilatorendring blir ein bom,
+// aldri eit stille, forelda treff. Manglande runtime gjev "" (fail-closed).
+// tools/materialize_bootstrap_cache.no skriv same verdi i manifestet.
+funksjon nc_selfhost_cache_compiler_fingerprint(root: tekst, runtime: tekst) -> tekst {
+    hvis runtime == null eller runtime == "" { returner "" }
+    hvis ikkje builtin.fil_finnes(runtime) { returner "" }
+    la runtime_hash = builtin.sha256_bytes(builtin.fil_les_binær(runtime))
+    returner builtin.sha256(nc_selfhost_cache_abi() + "\nruntime " + runtime_hash +
+        "\ncompiler " + bundler.modulcache_compiler_fingerprint(root) + "\n")
+}
+
+// Binæren til denne prosessen: det er han som kompilerer frå kjelde ved bom.
+funksjon nc_selfhost_cache_runtime() -> tekst {
+    prøv { returner tekst(builtin.system_info()["executable"]) } fang (e) { returner "" }
+    returner ""
+}
+
+// Kjeldehash-porta selfhost-fragment. Manifestet
+// <cache>/precompiled/manifest.json har forma
+//   {"schema": nc_selfhost_cache_abi(),
+//    "compiler_fingerprint": nc_selfhost_cache_compiler_fingerprint(root, runtime),
+//    "modules": {"selfhost/common.no": {"module": "selfhost.common",
+//        "source_sha256": sha256(kjeldebytane),
+//        "artifact": "bootstrap/precompiled/common.ncb.json",
+//        "artifact_sha256": sha256(artefaktbytane)}}}
+// Fragmentet blir berre brukt når schema, modulnamn, kjeldehash,
+// artefakthash og kompilatorfingeravtrykk alle stemmer. Alle avvik (inkl.
+// manglande manifest eller fingeravtrykk) gjev "" og kallaren kompilerer frå
+// levande kjelde. Eit stale fragment kan då aldri maskere ei kjeldeendring
+// (jf. common.no/Fix A) eller ein kompilatorfiks (reseed).
+funksjon nc_les_verifisert_selfhost_ncb(kildef: tekst, modul: tekst, root: tekst) -> tekst {
+    la cache_rot = nc_bootstrap_cache_rot(root)
+    la manifest_sti = cache_rot + "/precompiled/manifest.json"
+    la merkelapp = modul
+    hvis merkelapp == "" { merkelapp = kildef }
+    hvis ikkje builtin.fil_finnes(manifest_sti) {
+        nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " no-manifest")
+        returner ""
+    }
+    prøv {
+        la manifest = builtin.json_parse_raw(fil_les(manifest_sti))
+        hvis builtin.type(manifest) != "ordbok" eller tekst(manifest["schema"]) != nc_selfhost_cache_abi() {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " schema")
+            returner ""
+        }
+        la modular = manifest["modules"]
+        hvis builtin.type(modular) != "ordbok" {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " schema")
+            returner ""
+        }
+        la rel = nc_selfhost_cache_relativ(kildef, root)
+        // Ingen null-sentinel: rå null er ikkje påliteleg samanliknbar på alle
+        // seedar. Bruk eit eksplisitt funnen-flagg.
+        la funnen = usann
+        la post = {}
+        hvis finnes_nøkkel(modular, rel) {
+            post = modular[rel]
+            funnen = sann
+        } ellers hvis modul != "" {
+            // Sekundært oppslag på modulnamn (kjeldehashen under er uansett porten).
+            la nøklar = nøkler(modular)
+            la ni: heiltall = 0
+            mens ni < lengde(nøklar) og ikkje funnen {
+                la kandidat = modular[nøklar[ni]]
+                hvis builtin.type(kandidat) == "ordbok" og tekst(kandidat["module"]) == modul {
+                    post = kandidat
+                    funnen = sann
+                }
+                ni = ni + 1
+            }
+        }
+        hvis ikkje funnen eller builtin.type(post) != "ordbok" {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " not-in-manifest")
+            returner ""
+        }
+        hvis modul != "" og tekst(post["module"]) != modul {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " module-mismatch")
+            returner ""
+        }
+        la kjelde_hash = builtin.sha256_bytes(builtin.fil_les_binær(kildef))
+        hvis kjelde_hash != tekst(post["source_sha256"]) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " source-hash")
+            returner ""
+        }
+        la artefakt_sti = nc_bootstrap_cache_artefakt(cache_rot, tekst(post["artifact"]), "precompiled")
+        hvis artefakt_sti == "" eller ikkje builtin.fil_finnes(artefakt_sti) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " artifact-missing")
+            returner ""
+        }
+        la artefakt_hash = builtin.sha256_bytes(builtin.fil_les_binær(artefakt_sti))
+        hvis artefakt_hash != tekst(post["artifact_sha256"]) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " artifact-hash")
+            returner ""
+        }
+        // Siste port (dyrast): manifestet må vere laga av same runtime og
+        // kompilatorkjelde som ville kompilert modulen ved bom.
+        la manifest_fp = ""
+        hvis finnes_nøkkel(manifest, "compiler_fingerprint") {
+            manifest_fp = tekst(manifest["compiler_fingerprint"])
+        }
+        la fp = nc_selfhost_cache_compiler_fingerprint(root, nc_selfhost_cache_runtime())
+        hvis fp == "" eller manifest_fp != fp {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " compiler")
+            returner ""
+        }
+        returner fil_les(artefakt_sti)
+    } fang (e) {
+        nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " invalid: " + tekst(e))
+        returner ""
+    }
+    returner ""
+}
+
+
+// Legacy: basename-oppslag utan kjeldehash (forelda fragment blir brukte
+// stille). Berre for eksplisitt opt-in.
+funksjon nc_les_precompiled_ncb_uverifisert(kildef: tekst) -> tekst {
+    // Standard er dagens CWD-relative «bootstrap/…»; NORSCODE_BOOTSTRAP_CACHE
+    // flyttar rota.
+    la cache_rot = "bootstrap"
+    la cache_rå = miljo_hent("NORSCODE_BOOTSTRAP_CACHE")
+    hvis cache_rå != null og builtin.trim(tekst(cache_rå)) != "" {
+        cache_rot = nc_bootstrap_cache_rot(bundler.modulcache_rot())
+    }
+    // Prøv <cache>/precompiled/[modulnamn].ncb.json først
+    la basename = builtin.split(kildef, "/")[lengde(builtin.split(kildef, "/")) - 1]
+    la utan_no = basename
+    hvis builtin.ends_with(basename, ".no") {
+        utan_no = builtin.slice(basename, 0, lengde(basename) - 3)
+    }
+    la precompiled_path = cache_rot + "/precompiled/" + utan_no + ".ncb.json"
+    la stdlib_path = cache_rot + "/stdlib/" + utan_no + ".ncb.json"
+    la stdlib_flat_path = cache_rot + "/stdlib/" + builtin.replace(kildef, "/", "_")
+    hvis builtin.ends_with(stdlib_flat_path, ".no") {
+        stdlib_flat_path = builtin.slice(stdlib_flat_path, 0, lengde(stdlib_flat_path) - 3)
+    }
+    stdlib_flat_path = stdlib_flat_path + ".ncb.json"
+
+    prøv {
+        returner fil_les(precompiled_path)
+    } fang (e) {
+        prøv {
+            returner fil_les(stdlib_path)
+        } fang (e2) {
+            prøv { returner fil_les(stdlib_flat_path) } fang (e3) { returner "" }
+        }
+    }
+}
+
 // ─── Selfhost-fragment: kjeldehash-porta cache ─────────────────────────────
 // Eit selfhost.*-fragment frå bootstrap-cachen blir berre brukt når
 // <cache>/precompiled/manifest.json har ein post for modulen der schema,
 // modulnamn, source_sha256 (av .no-kjelda) og artifact_sha256 stemmer
-// (bundler.les_verifisert_selfhost_ncb). Utan treff → levande kjelde.
+// (nc_les_verifisert_selfhost_ncb). Utan treff → levande kjelde.
 // NORSCODE_SELFHOST_CACHE_UNVERIFIED=1 gjev det gamle basename-oppslaget
 // utan hash (eksplisitt naudutgang; aldri for selfhost.vm, sjå under).
 funksjon nc_selfhost_fragment(fil: tekst, alias: tekst, root: tekst) -> tekst {
     la uverifisert = builtin.trim(miljo_hent("NORSCODE_SELFHOST_CACHE_UNVERIFIED"))
     hvis uverifisert == "1" og alias != "selfhost.vm" {
-        returner bundler.les_precompiled_ncb_uverifisert(fil)
+        returner nc_les_precompiled_ncb_uverifisert(fil)
     }
-    returner bundler.les_verifisert_selfhost_ncb(fil, alias, root)
+    returner nc_les_verifisert_selfhost_ncb(fil, alias, root)
 }
 
 // ─── Vertsstyrt selfhost.vm (eksplisitt markør) ─────────────────────────────
