@@ -1,9 +1,13 @@
 # Prekompilerte bootstrap-modular
 
-Sidan JSON-avviklinga J1b (2026-09-25) ligg det **ingen committa selfhost-cache**
-her. Einaste fila som står att er `vm.ncb.json`, som er runtime-payload for
-attestasjons-, Windows- og releaseverktøya. Ho blir generert med
-`./bin/nc regen-bootstrap` og fjerna i J1c (`build/payloads/`).
+Sidan JSON-avviklinga J1b/J1c (2026-09-25) ligg det **ingen committa bytekode**
+her. `vm.ncb.json` (runtime-payload for attestasjons-, Windows- og releaseverktøya)
+blir generert frå `selfhost/vm.no` av `tools/materialize_runtime_payloads.no`, saman
+med `selfhost/vm_executor.ncb.json`. Begge er gitignorerte; stiane er dei same som før
+fordi dei er baka inn i seedane. Ein `<fil>.srchash`-markør (kjeldehash + sha256)
+lèt verktøyet hoppe over genereringa når kjeldene er uendra. CI genererer dei éin gong
+per køyring på Linux og deler dei som artefakt. `./bin/nc regen-bootstrap` tvingar
+ny generering.
 
 **Kjelda er standardvegen.** `nc compile`, `nc run` og testharnessen kompilerer
 `selfhost/*.no` og `std/*.no` frå kjelde. Ein kjeldehash-verifisert cache er

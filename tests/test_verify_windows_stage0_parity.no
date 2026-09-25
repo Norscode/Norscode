@@ -1,0 +1,205 @@
+// Paritetsporten for Windows-stage0 (B4) må kunne seie både ja og nei. Syntetiske PE32+-
+// filer med NORSCODE_NCB_TEXT_V1-trailer: stage0 med dei gamle payloadane (compiler, vm,
+// vm-executor), kandidaten med dei genererte (vm, vm-executor) — og éin feil om gongen.
+
+bruk tools.verify_windows_stage0_parity som paritet
+bruk std.filops som filops
+
+funksjon dir() -> tekst { returner "build/test-windows-parity" }
+
+funksjon le32(ut: liste_heiltall, pos: heiltall, v: heiltall) -> heiltall {
+    ut[pos] = v & 255
+    ut[pos + 1] = (v >> 8) & 255
+    ut[pos + 2] = (v >> 16) & 255
+    ut[pos + 3] = (v >> 24) & 255
+    returner 0
+}
+
+// 512 byte PE32+ x86_64-prefiks med eit ikkje-trivielt mønster etter hovudet.
+funksjon pe_prefiks() -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < 512 {
+        legg_til(ut, (i * 7 + 3) & 255)
+        i = i + 1
+    }
+    i = 2
+    mens i < 64 {
+        ut[i] = 0
+        i = i + 1
+    }
+    ut[0] = 0x4D
+    ut[1] = 0x5A
+    le32(ut, 60, 128)
+    ut[128] = 0x50
+    ut[129] = 0x45
+    ut[130] = 0
+    ut[131] = 0
+    ut[132] = 0x64
+    ut[133] = 0x86
+    ut[152] = 0x0B
+    ut[153] = 0x02
+    returner ut
+}
+
+funksjon legg_tekst(ut: liste_heiltall, t: tekst) -> heiltall {
+    la i = 0
+    mens i < lengde(t) {
+        legg_til(ut, builtin.char_code(builtin.slice(t, i, i + 1)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon null_padda(n: heiltall) -> tekst {
+    la t = tekst_fra_heltall(n)
+    mens lengde(t) < 20 { t = "0" + t }
+    returner t
+}
+
+// Byggjer [prefiks][payloadar][manifest][lengd][magic]. `lengde_fyrst` byter nøkkelrekkjefølgja
+// i spenna, og `forskyv` flyttar startverdiane (for å lage hol i utlegget).
+funksjon bygg(prefiks: liste_heiltall, namn: liste_tekst, data: liste_tekst, format: tekst,
+              lengde_fyrst: boolsk, forskyv: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(prefiks) {
+        legg_til(ut, prefiks[i])
+        i = i + 1
+    }
+    la manifest = "{\"format\":\"" + format + "\",\"payloads\":{"
+    la pos = lengde(prefiks)
+    i = 0
+    mens i < lengde(namn) {
+        hvis i > 0 { manifest = manifest + "," }
+        la s = tekst_fra_heltall(pos + forskyv)
+        la l = tekst_fra_heltall(lengde(data[i]))
+        hvis lengde_fyrst {
+            manifest = manifest + "\"" + namn[i] + "\":{\"length\":" + l + ",\"start\":" + s + "}"
+        } ellers {
+            manifest = manifest + "\"" + namn[i] + "\":{\"start\":" + s + ",\"length\":" + l + "}"
+        }
+        legg_tekst(ut, data[i])
+        pos = pos + lengde(data[i])
+        i = i + 1
+    }
+    manifest = manifest + "}}"
+    legg_tekst(ut, manifest)
+    legg_tekst(ut, null_padda(lengde(manifest)))
+    legg_tekst(ut, "NORSCODE_NCB_TEXT_V1")
+    returner ut
+}
+
+funksjon skriv_fil(namn: tekst, bytes: liste_heiltall) -> tekst {
+    la sti = dir() + "/" + namn
+    builtin.fil_skriv_binær(sti, builtin.bytes_from_list(bytes))
+    returner sti
+}
+
+funksjon skriv_tekstfil(namn: tekst, t: tekst) -> tekst {
+    la b: liste_heiltall = []
+    legg_tekst(b, t)
+    returner skriv_fil(namn, b)
+}
+
+funksjon inneheld(brot: liste_tekst, bit: tekst) -> boolsk {
+    la i = 0
+    mens i < lengde(brot) {
+        hvis builtin.index_of(brot[i], bit) >= 0 { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon sjekk(stage0: tekst, kandidat: tekst, stiar: liste_tekst) -> liste_tekst {
+    la rapport: liste_tekst = []
+    returner paritet.verifiser(stage0, kandidat, ["vm", "vm-executor"], stiar, ["compiler"], rapport)
+}
+
+funksjon start() -> heiltall {
+    assert(filops.lag_katalogar(dir()))
+    la fmt = "norscode-ncb-text-v1"
+    la gammal_vm = "{\"entry\":\"gammal-vm\"}"
+    la gammal_ex = "{\"entry\":\"gammal-executor\"}"
+    la ny_vm = "{\"entry\":\"ny-vm\",\"functions\":{}}"
+    la ny_ex = "{\"entry\":\"ny-executor\",\"functions\":{\"a\":1}}"
+    la gen_vm = skriv_tekstfil("vm.ncb.json", ny_vm)
+    la gen_ex = skriv_tekstfil("vm_executor.ncb.json", ny_ex)
+    la stiar = [gen_vm, gen_ex]
+    la pre = pe_prefiks()
+
+    la stage0 = skriv_fil("stage0.exe", bygg(pre, ["compiler", "vm", "vm-executor"],
+                                              ["{\"mini\":1}", gammal_vm, gammal_ex], fmt, usann, 0))
+
+    // Positiv: nye payloadar, pensjonert compiler, annan nøkkel- og payloadrekkjefølgje.
+    la ok = skriv_fil("ok.exe", bygg(pre, ["vm-executor", "vm"], [ny_ex, ny_vm], fmt, sann, 0))
+    la rapport: liste_tekst = []
+    la brot = paritet.verifiser(stage0, ok, ["vm", "vm-executor"], stiar, ["compiler"], rapport)
+    hvis lengde(brot) > 0 { skriv("uventa brot: " + brot[0] + "\n") }
+    assert_eq(lengde(brot), 0)
+    assert(inneheld(rapport, "pe_prefix_identical=true"))
+    assert(inneheld(rapport, "pe_prefix_bytes=512"))
+    // Paritet med seg sjølv når ingenting er pensjonert og payloadane er stage0 sine eigne.
+    la g_mini = skriv_tekstfil("mini.ncb.json", "{\"mini\":1}")
+    la g_vm = skriv_tekstfil("gammal_vm.ncb.json", gammal_vm)
+    la g_ex = skriv_tekstfil("gammal_ex.ncb.json", gammal_ex)
+    la r2: liste_tekst = []
+    assert_eq(lengde(paritet.verifiser(stage0, stage0, ["compiler", "vm", "vm-executor"], [g_mini, g_vm, g_ex], [], r2)), 0)
+
+    // Negativ 1: éin byte i PE-prefikset er endra.
+    la pre2 = pe_prefiks()
+    pre2[300] = (pre2[300] + 1) & 255
+    la b1 = sjekk(stage0, skriv_fil("prefiks.exe", bygg(pre2, ["vm", "vm-executor"], [ny_vm, ny_ex], fmt, usann, 0)), stiar)
+    assert(inneheld(b1, "PE-prefikset skil seg"))
+
+    // Negativ 2: payloaden i kandidaten er ikkje den genererte (stage0 sin gamle vm).
+    la b2 = sjekk(stage0, skriv_fil("gammal.exe", bygg(pre, ["vm", "vm-executor"], [gammal_vm, ny_ex], fmt, usann, 0)), stiar)
+    assert(inneheld(b2, "payload «vm» i kandidaten"))
+    assert(ikkje inneheld(b2, "vm-executor»"))
+
+    // Negativ 3: kandidaten manglar vm-executor.
+    la b3 = sjekk(stage0, skriv_fil("manglar.exe", bygg(pre, ["vm"], [ny_vm], fmt, usann, 0)), stiar)
+    assert(inneheld(b3, "kandidaten manglar payload «vm-executor»"))
+
+    // Negativ 4: den pensjonerte compiler-payloaden er framleis med.
+    la b4 = sjekk(stage0, skriv_fil("compiler.exe", bygg(pre, ["compiler", "vm", "vm-executor"],
+                                                          ["{\"mini\":1}", ny_vm, ny_ex], fmt, usann, 0)), stiar)
+    assert(inneheld(b4, "«compiler» som stage0 ikkje har"))
+
+    // Negativ 5: anna manifestformat.
+    la b5 = sjekk(stage0, skriv_fil("format.exe", bygg(pre, ["vm", "vm-executor"], [ny_vm, ny_ex], "norscode-ncb-text-v2", usann, 0)), stiar)
+    assert(inneheld(b5, "manifestformat skil seg"))
+
+    // Negativ 6: ikkje PE (MZ-signaturen øydelagd).
+    la pre3 = pe_prefiks()
+    pre3[1] = 0x00
+    la b6 = sjekk(stage0, skriv_fil("ikkjepe.exe", bygg(pre3, ["vm", "vm-executor"], [ny_vm, ny_ex], fmt, usann, 0)), stiar)
+    assert(inneheld(b6, "kandidaten er ikkje PE32+"))
+
+    // Negativ 7: spenna peikar forbi payloadane (hol i utlegget).
+    la b7 = sjekk(stage0, skriv_fil("hol.exe", bygg(pre, ["vm", "vm-executor"], [ny_vm, ny_ex], fmt, usann, 3)), stiar)
+    assert(inneheld(b7, "kandidat-trailer"))
+
+    // Negativ 8: ingen trailer i det heile.
+    la b8 = sjekk(stage0, skriv_fil("utan.exe", pre), stiar)
+    assert(inneheld(b8, "manglar NORSCODE_NCB_TEXT_V1"))
+
+    // Negativ 9: den genererte fila er endra etter at kandidaten vart bygd.
+    la gen_vm2 = skriv_tekstfil("vm2.ncb.json", ny_vm + " ")
+    la b9 = sjekk(stage0, ok, [gen_vm2, gen_ex])
+    assert(inneheld(b9, "payload «vm» i kandidaten"))
+
+    // Negativ 10: same lengd, éin byte ulik (byte-for-byte-samanlikninga, ikkje berre lengda).
+    la gen_vm3 = skriv_tekstfil("vm3.ncb.json", "{\"entry\":\"ny-wm\",\"functions\":{}}")
+    la b10 = sjekk(stage0, ok, [gen_vm3, gen_ex])
+    assert(inneheld(b10, "første avvik ved byte 13"))
+
+    // Manifestlesaren: ukjende nøklar og escape blir avviste.
+    assert(paritet.les_manifest("{\"format\":\"x\",\"payloads\":{},\"extra\":1}")["feil"] != "")
+    assert(paritet.les_manifest("{\"format\":\"x\\\"\",\"payloads\":{}}")["feil"] != "")
+    assert_eq(paritet.les_manifest("{ \"payloads\" : { \"vm\" : { \"length\" : 5 , \"start\" : 9 } } , \"format\" : \"f\" }")["feil"], "")
+
+    filops.slett_tre(dir())
+    skriv("test_verify_windows_stage0_parity OK\n")
+    returner 0
+}
