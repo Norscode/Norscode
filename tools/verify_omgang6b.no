@@ -253,6 +253,19 @@ funksjon sett_executable(sti: tekst) -> boolsk {
     returner usann
 }
 
+funksjon kopier_gen0_til_preset_rot(gen0_dir: tekst, mål: tekst) -> boolsk {
+    hvis ikkje filops.lag_katalogar(mål) { returner usann }
+    la namn = ["lexer_m1", "parser", "semantic", "ir_to_bytecode", "json", "kompiler", "bundler", "elf_compile_driver"]
+    la i = 0
+    mens i < lengde(namn) {
+        la fil = namn[i] + ".functions.json"
+        prøv { builtin.fil_skriv(mål + "/" + fil, builtin.fil_les(gen0_dir + "/" + fil)) }
+        fang (e) { linje("[FEIL] kunne ikkje kopiere Gen0-fragment " + fil + ": " + tekst(e)) returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
 funksjon main() -> heiltall {
     la root = env("NORSCODE_ROOT")
     hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
@@ -297,9 +310,18 @@ funksjon main() -> heiltall {
     linje("  [OK] host ELF deterministisk (" + bytes(build + "/host_v1.elf") + " bytes)")
     linje("")
 
-    linje("1b. Stage-0 NCB (driver entry) → ELF...")
+    linje("1b. Gen0-fragment frå kjelde (seed) → stage-0 NCB (driver entry) → ELF...")
+    // J2: ingen committa fragment. Gen0 blir generert frå kjelde med seeden her og
+    // gjenbrukt av steg 5 (selfcompile) via NORSCODE_OMGANG6B_FRAGMENT_DIR.
+    la gen0_dir = build + "/fragments_gen0"
+    la gen0_env = nc_miljø(root)
+    gen0_env["NORSCODE_OMGANG6B_GEN0_DIR"] = gen0_dir
+    gen0_env["NORSCODE_CMD"] = "run"
+    gen0_env["NORSCODE_FILE"] = root + "/tools/gen0_omgang6b_fragments.no"
+    hvis ikkje run_nc_med_miljø(root, ["run", root + "/tools/gen0_omgang6b_fragments.no"], gen0_env, 3600000) { returner 1 }
     la build_ncb_env = nc_miljø(root)
     build_ncb_env["NORSCODE_OMGANG6B_NCB_OUT"] = build + "/compiler_stage0.ncb.json"
+    build_ncb_env["NORSCODE_OMGANG6B_FRAGMENT_DIR"] = gen0_dir
     hvis ikkje run_nc_med_miljø(root, ["build-omgang6b-ncb"], build_ncb_env, 900000) { returner 1 }
     la entry = ncb_entry(build + "/compiler_stage0.ncb.json")
     hvis entry != "selfhost.elf_compile_driver.start" {
@@ -355,9 +377,17 @@ funksjon main() -> heiltall {
         linje("1e. Ekte om6b preset-bundle via elf_compile_driver.no...")
         filops.slett_fil(build + "/compiler_preset_copy.ncb.json")
         filops.slett_fil(preset_log)
+        // Preset-/bundle-args-vegen i elf_compile_driver.no (fikspunktmodul, urørt i J2)
+        // les den harde relative stien bootstrap/precompiled_fragments_inner. Køyr han
+        // med CWD = ei generert rot der stien er ein kopi av Gen0-fragmenta.
+        la preset_rot = build + "/preset_root"
+        hvis ikkje kopier_gen0_til_preset_rot(gen0_dir, preset_rot + "/bootstrap/precompiled_fragments_inner") { returner 1 }
         la preset_env = runtime_miljø(root, build + "/compiler_preset_copy.ncb.json")
         preset_env["NORSCODE_OM6B_PRESET"] = "1"
-        hvis ikkje run_log(root, root + "/dist/norscode_native", [], preset_env, preset_log, 900000) { returner 1 }
+        preset_env["NORSCODE_VM_DISK_ROOT"] = root + "," + preset_rot + ",.,/tmp,/private/tmp"
+        la preset_res = prosess.køyr(root + "/dist/norscode_native", [], preset_rot, preset_env, 900000)
+        builtin.fil_skriv(preset_log, tekst(preset_res["stdout"]) + tekst(preset_res["stderr"]))
+        hvis ikkje prosess.ok(preset_res) { prosess.skriv_resultat(preset_res) returner 1 }
         hvis ikkje filer_identiske(build + "/compiler_stage0.ncb.json", build + "/compiler_preset_copy.ncb.json") { returner 1 }
         linje("  [OK] om6b preset-bundle rekonstruerer stage-0 NCB")
     } ellers { linje("1e. Hopp over ekte om6b preset-bundle (set NC_OM6B_VERIFY_PRESET=1 for eksplisitt preset-verifisering)") }
@@ -391,12 +421,14 @@ funksjon main() -> heiltall {
     } ellers { linje("2–4. Hopp over ELF-køyring (" + os + "/" + arch + " — krev Linux x86-64)") }
     linje("")
 
-    linje("5. Stage-0/6b.3 sjølvkompilering (bundle-args først, så direkte source-ncb, så chunked source-ncb)...")
-    hvis ikkje run_nc(root, ["selfcompile-stage0-elf"], 1200000) { returner 1 }
+    linje("5. Stage-0/6b.3 sjølvkompilering (Gen0 → Gen1 → Gen2 → Gen3, fikspunkt Gen2 == Gen3)...")
+    la selfcompile_env = nc_miljø(root)
+    selfcompile_env["NORSCODE_OMGANG6B_FRAGMENT_DIR"] = gen0_dir
+    hvis ikkje run_nc_med_miljø(root, ["selfcompile-stage0-elf"], selfcompile_env, 2400000) { returner 1 }
     linje("")
     linje("=== Omgang 6b.1 + 6b.2 + 6b.3: BESTÅTT ===")
     linje("NCB → ELF deterministisk; dyp stage-0 ELF runtime er opt-in med NC_OM6B_RUN_STAGE0=1.")
-    linje("Merk: 6b.3 prøver no ekte NORSCODE_BUNDLE_ARGS først; ved Gen1 ELF-feil prøver han direkte source-NCB, og berre deretter chunked source-NCB.")
+    linje("Merk: 6b.3 har ingen committa fragment; Gen0 blir generert frå kjelde med seeden og fikspunktet er Gen2 == Gen3.")
     linje("Merk: NC_OM6B_VERIFY_PRESET=1 verifiserer at preset-bundle rekonstruerer stage-0 NCB via elf_compile_driver.no.")
     returner 0
 }
