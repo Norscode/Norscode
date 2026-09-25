@@ -1,4 +1,4 @@
-// tools/selfcompile_stage0_elf.no — shellfri Omgang 6b.3 Gen1 ELF → Gen2 ELF
+// tools/selfcompile_stage0_elf.no — shellfri Omgang 6b.3: Gen0 (kjelde) → Gen1 → Gen2 → Gen3, fikspunkt Gen2 == Gen3
 
 bruk std.filops som filops
 bruk std.liste som lister
@@ -34,7 +34,13 @@ funksjon append_fil_trygt(sti: tekst, innhald: tekst) -> boolsk {
 
 funksjon filer_identiske(a: tekst, b: tekst) -> boolsk {
     hvis ikkje fil_finst(a) eller ikkje fil_finst(b) { returner usann }
-    returner builtin.fil_les_binær(a) == builtin.fil_les_binær(b)
+    // Liste-== på ~1,2M-element binærlister har gjeve falsk «ulik» på seed.
+    // Lengd + SHA-256 (native atom) er påliteleg og like streng.
+    la ba = bytes(a)
+    hvis ba == "0" eller ba != bytes(b) { returner usann }
+    la ha = sha256_for(a)
+    hvis ha == "" { returner usann }
+    returner ha == sha256_for(b)
 }
 
 funksjon bytes(sti: tekst) -> tekst {
@@ -86,8 +92,25 @@ funksjon build_omgang6b_ncb_frå(root: tekst, output: tekst, fragment_dir: tekst
     returner run_nc_med_miljø(root, ["build-omgang6b-ncb"], miljø, 900000)
 }
 
-funksjon build_omgang6b_ncb(root: tekst, output: tekst) -> boolsk {
-    returner build_omgang6b_ncb_frå(root, output, "")
+// J2 [0/5]: Gen0-fragment frå kjelde med seeden (ingen committa fragment).
+// Returnerer fragmentkatalogen, eller "" ved feil.
+funksjon lag_gen0_fragment(root: tekst) -> tekst {
+    la eksplisitt = env("NORSCODE_OMGANG6B_FRAGMENT_DIR")
+    hvis eksplisitt != "" {
+        linje("  [MERK] Brukar Gen0-fragment frå NORSCODE_OMGANG6B_FRAGMENT_DIR=" + eksplisitt +
+              " (porten Gen2 == Gen3 er uavhengig av kvar Gen0 kjem frå)")
+        returner eksplisitt
+    }
+    la gen0_dir = root + "/build/6b/fragments_gen0"
+    la miljø = nc_miljø(root)
+    miljø["NORSCODE_OMGANG6B_GEN0_DIR"] = gen0_dir
+    miljø["NORSCODE_CMD"] = "run"
+    miljø["NORSCODE_FILE"] = root + "/tools/gen0_omgang6b_fragments.no"
+    hvis ikkje run_nc_med_miljø(root, ["run", root + "/tools/gen0_omgang6b_fragments.no"], miljø, 3600000) {
+        linje("  [FEIL] Gen0-fragment kunne ikkje genererast frå kjelde")
+        returner ""
+    }
+    returner gen0_dir
 }
 
 funksjon gen1_pipeline_binding(logisk_namn: tekst) -> tekst {
@@ -407,8 +430,7 @@ funksjon vent_kjeldefragment(handle: ordbok_tekst) -> boolsk {
 }
 
 funksjon bygg_source_only_gen2(root: tekst, gen1_source_ncb: tekst,
-                               output: tekst) -> boolsk {
-    la base = root + "/build/6b/selfcompile/source_only"
+                               output: tekst, base: tekst) -> boolsk {
     la ncb_dir = base + "/ncb"
     la outer_dir = base + "/fragments"
     la inner_dir = base + "/fragments_inner"
@@ -608,6 +630,46 @@ funksjon koyr_gen1_elf(mode: tekst, mode_log: tekst, gen1_elf: tekst,
     returner resultat
 }
 
+// Kompilatoren `compiler_elf` (elf_compile_driver) materialiserer det source-only
+// kompilerte bundlet `source_bundle` til `ut_ncb`. Berre source-only-modus: env-en
+// set aldri NORSCODE_BUNDLE_ARGS/NORSCODE_OM6B_PRESET, så drivaren sin gamle
+// bundle-args-veg (hard sti til bootstrap/precompiled_fragments_inner) blir aldri nådd.
+funksjon materialiser_frå_kjelde(root: tekst, base: tekst, merkelapp: tekst,
+                                  compiler_elf: tekst, source_bundle: tekst,
+                                  ut_ncb: tekst, mode_log: tekst, aggregate_log: tekst,
+                                  attempts: tekst, os: tekst, arch: tekst) -> boolsk {
+    filops.slett_fil(ut_ncb)
+    slett_chunks(base)
+    la miljø = {
+        "PATH": "/nonexistent",
+        "NORSCODE_CMD": "run",
+        "NORSCODE_OM6B_SOURCE_NCB": source_bundle,
+        "NORSCODE_BUNDLE_OUTPUT": ut_ncb,
+        "NORSCODE_BUNDLE_ENTRY": "selfhost.elf_compile_driver.start"
+    }
+    linje("  [INFO] " + merkelapp + " skriv det source-only materialiserte bundlet...")
+    la res = koyr_gen1_elf("source-only " + merkelapp, mode_log, compiler_elf, miljø, aggregate_log, attempts, root)
+    hvis prosess.ok(res) {
+        hvis fil_finst(ut_ncb) { linje("  [OK] " + merkelapp + " skreiv source-only NCB") }
+        ellers hvis chunk_finst(base) {
+            hvis ikkje samle_chunk_output(base, ut_ncb) { returner usann }
+            linje("  [OK] " + merkelapp + " skreiv NCB via chunk-output")
+        } ellers { linje("  [FEIL] " + merkelapp + " returnerte suksess utan output") returner usann }
+    } ellers {
+        la rc = tekst(res["exit_code"])
+        hvis chunk_finst(base) {
+            hvis ikkje samle_chunk_output(base, ut_ncb) { returner usann }
+            linje("  [MERK] Source-only-kopi krasja med exit " + rc + ", men chunk-output vart skrive; brukar artefaktet")
+        } ellers {
+            skriv_diagnose(root, "source_only", res, mode_log, os, arch)
+            linje("  [FEIL] Source-only-kopi feila med exit " + rc + " og " + merkelapp + " skreiv ikkje NCB")
+            returner usann
+        }
+    }
+    hvis ikkje fil_finst(ut_ncb) { linje("  [FEIL] " + ut_ncb + " ikkje skrive") returner usann }
+    returner sann
+}
+
 funksjon main() -> heiltall {
     la root = env("NORSCODE_ROOT")
     hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
@@ -622,6 +684,13 @@ funksjon main() -> heiltall {
         hvis os == "" { os = tekst(info["system"]) }
         hvis arch == "" { arch = builtin.lower(tekst(info["machine"])) }
     }
+    // J2 tre-generasjonsport (ingen committa fragment):
+    //   Gen0 = fragment frå kjelde med seeden (tools/gen0_omgang6b_fragments.no)
+    //   Gen1 = ELF(Gen0-NCB)
+    //   Gen2 = Gen1(kjelde)              → Gen2 ELF = ELF(Gen2-NCB)
+    //   Gen3 = ELF(Gen2)(kjelde)         → Gen3 ELF = ELF(Gen3-NCB)
+    // Hard port: Gen2 == Gen3 (NCB og ELF). Gen1 == Gen2 er berre [MERK]: seeden sin
+    // kompilator kan vere eldre enn kjelda utan at fikspunktet er brote.
     la gen1_ncb = root + "/build/6b/compiler_stage0.ncb.json"
     la base = root + "/build/6b/selfcompile"
     la gen1_elf = base + "/gen1_compiler.elf"
@@ -629,8 +698,13 @@ funksjon main() -> heiltall {
     la source_executor_elf = base + "/gen1_source_executor.elf"
     la gen2_ncb = base + "/gen2.ncb.json"
     la gen2_elf = base + "/gen2_compiler.elf"
+    la gen2_source_executor_ncb = base + "/gen2_source_executor.ncb.json"
+    la gen2_source_executor_elf = base + "/gen2_source_executor.elf"
+    la gen3_ncb = base + "/gen3.ncb.json"
+    la gen3_elf = base + "/gen3_compiler.elf"
     la gen1_log = base + "/gen1_elf_bundle.log"
     la preset_log = base + "/gen1_elf_preset.log"
+    la gen2_log = base + "/gen2_elf_source.log"
     la attempts = base + "/gen1_elf_attempts.txt"
     la pass_marker = base + "/stage0_elf_passed.marker"
 
@@ -638,6 +712,7 @@ funksjon main() -> heiltall {
     filops.slett_fil(pass_marker)
     filops.slett_fil(gen1_log)
     filops.slett_fil(preset_log)
+    filops.slett_fil(gen2_log)
     filops.slett_fil(base + "/gen1_elf_source_ncb.log")
     filops.slett_fil(base + "/gen1_elf_chunked_source_ncb.log")
     filops.slett_fil(base + "/gen1_elf_diagnose.txt")
@@ -647,10 +722,14 @@ funksjon main() -> heiltall {
         hvis ikkje run_nc(root, ["fetch-stage0-seed"], 300000) { returner 1 }
     }
 
-    linje("=== Omgang 6b.3: stage-0 ELF sjølvkompilering ===")
+    linje("=== Omgang 6b.3: stage-0 ELF sjølvkompilering (tre generasjonar) ===")
     linje("")
-    linje("[1/4] Gen1: stage-0 NCB + ELF (host)...")
-    hvis ikkje build_omgang6b_ncb(root, gen1_ncb) { returner 1 }
+    linje("[0/5] Gen0: kompilatorfragment frå kjelde med seeden...")
+    la gen0_dir = lag_gen0_fragment(root)
+    hvis gen0_dir == "" { returner 1 }
+    linje("")
+    linje("[1/5] Gen1: Gen0 NCB + Gen1 ELF = ELF(Gen0) (host)...")
+    hvis ikkje build_omgang6b_ncb_frå(root, gen1_ncb, gen0_dir) { returner 1 }
     hvis ikkje ncb_to_elf(root, gen1_ncb, gen1_elf) { returner 1 }
     hvis ikkje bygg_gen1_source_executor(root, gen1_ncb,
                                          source_executor_ncb,
@@ -660,74 +739,71 @@ funksjon main() -> heiltall {
     linje("")
 
     hvis os != "Linux" eller (arch != "x86_64" og arch != "amd64") {
-        linje("[2–4/4] Hopp over ELF→ELF (" + os + "/" + arch + " — krev Linux x86-64)")
+        linje("[2–5/5] Hopp over ELF→ELF (" + os + "/" + arch + " — krev Linux x86-64)")
         linje("")
-        linje("=== Omgang 6b.3: DELVIS (host Gen1 bygd) ===")
+        linje("=== Omgang 6b.3: DELVIS (host Gen1 bygd frå Gen0) ===")
         returner 0
     }
     hvis env("NC_OM6B_RUN_STAGE0") != "1" {
-        linje("[2–4/4] Hopp over ELF→ELF runtime (set NC_OM6B_RUN_STAGE0=1 for djup smoke)")
+        linje("[2–5/5] Hopp over ELF→ELF runtime (set NC_OM6B_RUN_STAGE0=1 for djup smoke)")
         linje("")
-        linje("=== Omgang 6b.3: DELVIS (Gen1 ELF bygd) ===")
+        linje("=== Omgang 6b.3: DELVIS (Gen1 ELF bygd frå Gen0) ===")
         returner 0
     }
 
-    linje("[2/4] Gen2 NCB frå kjelder kompilerte isolert av Gen1 NCB...")
-    filops.slett_fil(gen2_ncb)
-    slett_chunks(base)
+    linje("[2/5] Gen2 = Gen1(kjelde): kjelder kompilerte isolert av Gen1...")
     la source_bundle = base + "/source_only_gen2.ncb.json"
     hvis ikkje bygg_source_only_gen2(root, source_executor_ncb,
-                                     source_bundle) { returner 1 }
-    la gen2_miljø = {
-        "PATH": "/nonexistent",
-        "NORSCODE_CMD": "run",
-        "NORSCODE_OM6B_SOURCE_NCB": source_bundle,
-        "NORSCODE_BUNDLE_OUTPUT": gen2_ncb,
-        "NORSCODE_BUNDLE_ENTRY": "selfhost.elf_compile_driver.start"
-    }
-    linje("  [INFO] Gen1 skriv det source-only materialiserte Gen2-bundlet...")
-    la gen2_res = koyr_gen1_elf("source-only", preset_log, gen1_elf, gen2_miljø, gen1_log, attempts, root)
-    hvis prosess.ok(gen2_res) {
-        hvis fil_finst(gen2_ncb) { linje("  [OK] Gen1 ELF skreiv source-only Gen2 NCB") }
-        ellers hvis chunk_finst(base) {
-            hvis ikkje samle_chunk_output(base, gen2_ncb) { returner 1 }
-            linje("  [OK] Gen1 ELF skreiv Gen2 NCB via bundle-args chunk-output")
-        } ellers { linje("  [FEIL] Gen1 ELF returnerte suksess utan output") returner 1 }
-    } ellers {
-        la rc = tekst(gen2_res["exit_code"])
-        hvis chunk_finst(base) {
-            hvis ikkje samle_chunk_output(base, gen2_ncb) { returner 1 }
-            linje("  [MERK] Source-only-kopi krasja med exit " + rc + ", men chunk-output vart skrive; brukar artefaktet")
-        } ellers {
-            skriv_diagnose(root, "source_only", gen2_res, preset_log, os, arch)
-            linje("  [FEIL] Source-only-kopi feila med exit " + rc + " og Gen1 ELF skreiv ikkje Gen2 NCB")
-            returner 1
-        }
-    }
-    hvis ikkje fil_finst(gen2_ncb) { linje("  [FEIL] Gen2 NCB ikkje skrive") returner 1 }
-
+                                     source_bundle, base + "/source_only") { returner 1 }
+    hvis ikkje materialiser_frå_kjelde(root, base, "Gen1 ELF", gen1_elf, source_bundle,
+                                       gen2_ncb, preset_log, gen1_log, attempts, os, arch) { returner 1 }
     la n1 = bytes(gen1_ncb)
     la n2 = bytes(gen2_ncb)
-    linje("  [OK] Gen2 NCB " + n2 + " bytes (Gen1 NCB " + n1 + " bytes)")
-    hvis filer_identiske(gen1_ncb, gen2_ncb) { linje("  [OK] NCB byte-paritet Gen1 == source-only Gen2") }
-    ellers { linje("  [MERK] Source-only NCB differ — sjekkar ELF-paritet og rapporterer kjeldedrift") }
+    linje("  [OK] Gen2 NCB " + n2 + " bytes (Gen0 NCB " + n1 + " bytes)")
+    hvis filer_identiske(gen1_ncb, gen2_ncb) { linje("  [MERK] Gen0 NCB == Gen2 NCB (seeden sin kompilator = kjelda)") }
+    ellers { linje("  [MERK] Gen0 NCB != Gen2 NCB (seeden sin kompilator skil seg frå kjelda) — Gen3 avgjer") }
     linje("")
 
-    linje("[3/4] Gen2 ELF frå Gen2 NCB (native codegen)...")
+    linje("[3/5] Gen2 ELF = ELF(Gen2 NCB) (native codegen)...")
     hvis ikkje ncb_to_elf(root, gen2_ncb, gen2_elf) { returner 1 }
     la b2 = bytes(gen2_elf)
     linje("  [OK] Gen2 ELF " + b2 + " bytes")
+    hvis filer_identiske(gen1_elf, gen2_elf) { linje("  [MERK] Gen1 ELF == Gen2 ELF (" + b1 + " bytes)") }
+    ellers { linje("  [MERK] Gen1 ELF != Gen2 ELF (gen1=" + b1 + ", gen2=" + b2 + " bytes) — Gen3 avgjer") }
     linje("")
-    linje("[4/4] Byte-paritet Gen1 ELF == source-only Gen2 ELF...")
-    hvis filer_identiske(gen1_elf, gen2_elf) {
-        linje("  [OK] " + b1 + " bytes identiske")
-        hvis ikkje skriv_fil_trygt(pass_marker, "bundle-args\n") { returner 1 }
-        linje("=== Omgang 6b.3: BESTÅTT (Gen1 kompilerte kjeldene og skreiv Gen2) ===")
-        returner 0
+
+    linje("[4/5] Gen3 = ELF(Gen2)(kjelde): kjelder kompilerte isolert av Gen2...")
+    hvis ikkje bygg_gen1_source_executor(root, gen2_ncb,
+                                         gen2_source_executor_ncb,
+                                         gen2_source_executor_elf) { returner 1 }
+    la source_bundle3 = base + "/source_only_gen3.ncb.json"
+    hvis ikkje bygg_source_only_gen2(root, gen2_source_executor_ncb,
+                                     source_bundle3, base + "/source_only_gen3") { returner 1 }
+    hvis ikkje materialiser_frå_kjelde(root, base, "Gen2 ELF", gen2_elf, source_bundle3,
+                                       gen3_ncb, gen2_log, gen1_log, attempts, os, arch) { returner 1 }
+    hvis ikkje ncb_to_elf(root, gen3_ncb, gen3_elf) { returner 1 }
+    la n3 = bytes(gen3_ncb)
+    la b3 = bytes(gen3_elf)
+    linje("  [OK] Gen3 NCB " + n3 + " bytes, Gen3 ELF " + b3 + " bytes")
+    linje("")
+
+    linje("[5/5] Fikspunkt: Gen2 == Gen3 (NCB og ELF)...")
+    la ncb_lik = filer_identiske(gen2_ncb, gen3_ncb)
+    la elf_lik = filer_identiske(gen2_elf, gen3_elf)
+    hvis ncb_lik { linje("  [OK] Gen2 NCB == Gen3 NCB (" + n2 + " bytes, sha256 " + sha256_for(gen2_ncb) + ")") }
+    ellers {
+        linje("  [FEIL] Gen2 NCB != Gen3 NCB (gen2=" + n2 + ", gen3=" + n3 + " bytes)")
+        skriv(første_forskjellar(gen2_ncb, gen3_ncb, 5))
     }
-    linje("  [FEIL] ELF differ (gen1=" + b1 + ", gen2=" + b2 + " bytes)")
-    skriv(første_forskjellar(gen1_elf, gen2_elf, 5))
-    returner 1
+    hvis elf_lik { linje("  [OK] Gen2 ELF == Gen3 ELF (" + b2 + " bytes, sha256 " + sha256_for(gen2_elf) + ")") }
+    ellers {
+        linje("  [FEIL] Gen2 ELF != Gen3 ELF (gen2=" + b2 + ", gen3=" + b3 + " bytes)")
+        skriv(første_forskjellar(gen2_elf, gen3_elf, 5))
+    }
+    hvis ikkje ncb_lik eller ikkje elf_lik { returner 1 }
+    hvis ikkje skriv_fil_trygt(pass_marker, "gen2==gen3\n") { returner 1 }
+    linje("=== Omgang 6b.3: BESTÅTT (fikspunkt Gen2 == Gen3 frå kjelde, ingen committa fragment) ===")
+    returner 0
 }
 
 funksjon start() -> heiltall { returner main() }
