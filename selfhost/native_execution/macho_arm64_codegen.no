@@ -354,7 +354,7 @@ funksjon emit_slice(native: liste_heiltall, s_reg: heiltall, start_reg: heiltall
     la p_b_lloop = lengde(native)
     legg_u32(native, 0x14000000)                        // b lloop
     la lbl_ldone = lengde(native)
-    legg_u32(native, 0xAA0F03FC)                        // mov x28, x15       (bump forbi listdata)
+    emit_liste_reserver_kapasitet(native, 14, 15, 16)  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)        // boks som liste
     la p_b_end = lengde(native)
     legg_u32(native, 0x14000000)                        // b end
@@ -691,14 +691,27 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
 // -> "std.sha256.hash_bytes"). Returner "" når ingen ruting finst (då fell
 // gap-greina tilbake til NATIV-GAP-stubben). Rutinga aktiverer seg berre om
 // nøkkelen faktisk finst i `funksjonar` (bundlaren har tvangs-inkludert modulen).
+// Gap-ruting er AV for macOS medan Mach-O-emitteren har 15000-byte-taket
+// (macho_arm64_emitter.bygg_program): ruta drar heile std-målet (t.d.
+// std.sha256.hash) inn i biletet, så program som i dag byggjer og fangar NATIV-
+// GAP ville i staden sprengje taket. Linux-ELF (utan tak) rutar. Slå på att for
+// macOS når M-fasen løfter taket.
+funksjon ncval_ruting_aktiv(os: tekst) -> boolsk {
+    returner os != "macos"
+}
+
 funksjon ncval_gap_rute(namn: tekst) -> tekst {
     la n = ncval_avkort_builtin(namn)
-    // pbkdf2_sha256(tekst, tekst, iter, dklen) -> hex-tekst → std.sha256.pbkdf2_hex
-    // (same tekst-signatur som builtin-en; rein Norscode via std.sha256 sin eigen
-    // hmac_sha256_bytes). IKKJE std.native_gap.pbkdf2_gap (x86-ruta): han kallar
-    // builtin.sha256_bytes_hex, som ARM64 ikkje har emitter for. std.pbkdf2 (b2)
-    // finst ikkje på PR-hovudet og tok dessutan byte-lister, ikkje tekst.
-    hvis n == "pbkdf2_sha256" { returner "std.sha256.pbkdf2_hex" }
+    // pbkdf2_sha256 har MEDVITE inga rute: std.sha256.pbkdf2_hex brukar
+    // std.sha256._bytes (SHA-padding-hjelparen: 0x80, nullar, lengd) som nøkkel/
+    // salt og gjev FEIL PBKDF2 utan å kaste (RFC-vektor "password"/"salt"/1/32 →
+    // 5e5c7e7a… i staden for 120fb6cf…). std.native_gap.pbkdf2_gap (x86-ruta)
+    // kallar builtin.sha256_bytes_hex, som ARM64 ikkje har emitter for. Stubben
+    // kastar difor NATIV-GAP, og std.krypto.pbkdf2_sha256 fangar og fell til den
+    // korrekte reine løypa (_tekst_bytes + hmac_sha256_bytes).
+    // hmac_sha256(tekst, tekst) har heller inga rute: std.krypto.hmac_sha256 kallar
+    // builtin.hmac_sha256 sjølv (ruting dit = uendeleg rekursjon); stubben kastar
+    // og krypto/mw fell tilbake.
     // MERK: rut til den REINE impl (hash -> argon2id_pure.hash_pure), IKKJE
     // hash_native_adapter — sistnemnde kallar builtin.argon2id (uendeleg rekursjon).
     hvis n == "argon2id" { returner "std.argon2id.hash" }
@@ -905,7 +918,7 @@ funksjon emit_noekler(native: liste_heiltall, map_reg: heiltall, dst_reg: heilta
     la p_loop = lengde(native)
     legg_u32(native, 0)                                // b loop
     la lbl_done = lengde(native)
-    legg_u32(native, 0xAA0F03FC)                       // mov x28, x15
+    emit_liste_reserver_kapasitet(native, 14, 15, 16)  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)       // boks som liste
     skriv_u32(native, p_ge,   0x5400000A | ((((lbl_done - p_ge)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_loop, 0x14000000 |  (((lbl_loop - p_loop) / 4) & 0x03FFFFFF))
@@ -933,7 +946,7 @@ funksjon emit_verdier(native: liste_heiltall, map_reg: heiltall, dst_reg: heilta
     la p_loop = lengde(native)
     legg_u32(native, 0)                                // b loop
     la lbl_done = lengde(native)
-    legg_u32(native, 0xAA0F03FC)                       // mov x28, x15
+    emit_liste_reserver_kapasitet(native, 14, 15, 16)  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)       // boks som liste
     skriv_u32(native, p_ge,   0x5400000A | ((((lbl_done - p_ge)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_loop, 0x14000000 |  (((lbl_loop - p_loop) / 4) & 0x03FFFFFF))
@@ -1180,6 +1193,26 @@ funksjon emit_build_list(native: liste_heiltall, n: heiltall, first_reg: heiltal
         legg_u32(native, 0x8B0901DC)                                     // add x28, x14, x9
     }
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
+    returner 0
+}
+
+// Kapasitets-invariant for den amortiserte emit_legg_til: KVAR listdata-buffer
+// ([i64 count][slots…]) må ha plass til next_pow2(count) slots, elles skriv ein
+// seinare legg_til på plass forbi bufferet inn i neste heap-objekt. Alle liste-
+// produsentar med køyretids-count (slice, nøkler/verdier, split, json-array,
+// bytes_new, fil_les_binær, utvid, sett_inn) avsluttar difor med denne i staden
+// for `mov x28, <slutt>`: x28 = base + 8 + next_pow2(count)*8, count frå [Xbase].
+// next_pow2 via clz: cap = 1 << ((64 - clz(count-1)) mod 64) → 0/1→1, 2→2,
+// 3/4→4, 5..8→8. Ekstra slots er ubrukte. Scratch: Xt1, Xt2 (må vere daude).
+funksjon emit_liste_reserver_kapasitet(native: liste_heiltall, base_reg: heiltall, t1: heiltall, t2: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400000 | (base_reg << 5) | t1)             // ldr Xt1, [Xbase]  (count)
+    legg_u32(native, 0xD1000400 | (t1 << 5) | t1)                   // sub Xt1, Xt1, #1
+    legg_u32(native, 0xDAC01000 | (t1 << 5) | t1)                   // clz Xt1, Xt1
+    legg_u32(native, 0xCB0003E0 | (t1 << 16) | t1)                  // neg Xt1, Xt1  (lslv tek mod 64)
+    legg_u32(native, 0xD2800020 | t2)                               // movz Xt2, #1
+    legg_u32(native, 0x9AC02000 | (t1 << 16) | (t2 << 5) | t2)      // lslv Xt2, Xt2, Xt1  (cap)
+    legg_u32(native, 0x8B000C00 | (t2 << 16) | (base_reg << 5) | 28) // add x28, Xbase, Xt2, lsl #3
+    legg_u32(native, 0x9100239C)                                    // add x28, x28, #8  (count-ordet)
     returner 0
 }
 
@@ -1458,8 +1491,11 @@ funksjon emit_legg_til(native: liste_heiltall, list_reg: heiltall, val_reg: heil
     // lause bump-heapen (byggje 131 K-liste = ~69 GB → sprengde 4 GiB → native seed-
     // link segfaulta). No: reserver next_pow2(count) element-slots. Realloc BERRE når
     // count er 0 eller ein toarpotens (count & (count-1) == 0); elles skriv på plass
-    // i den alt reserverte plassen. Buffer = next_pow2(count) held (build_list + denne
-    // held invarianten). Total garbage = 1+2+…+n = O(n).
+    // i den alt reserverte plassen. Buffer >= next_pow2(count) MÅ halde for KVAR
+    // liste: build_list/build_list_mem reknar cap ved kompilering, alle andre
+    // produsentar via emit_liste_reserver_kapasitet (A0-review; utan det skreiv
+    // legg_til på nøkler/split/slice/… forbi bufferet). Realloc-greina her held
+    // han sjølv (newcap = 2*count). Total garbage = 1+2+…+n = O(n).
     la p_cbz_nulllist = lengde(native)
     legg_u32(native, 0)                                 // cbz Xlist, skip  (patch)
     legg_u32(native, 0xF9400400 | (list_reg << 5) | 9)  // ldr x9, [Xlist, #8] (listdata)
@@ -1560,7 +1596,7 @@ funksjon emit_utvid(native: liste_heiltall, dst_reg: heiltall, src_reg: heiltall
     la p_b2 = lengde(native)
     legg_u32(native, 0)                                 // b copyloop2
     la lbl_finish = lengde(native)
-    legg_u32(native, 0xAA0D03FC)                        // mov x28, x13        (bump)
+    emit_liste_reserver_kapasitet(native, 14, 12, 13)  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     legg_u32(native, 0xF9000400 | (dst_reg << 5) | 14)  // str x14, [Xdst, #8] (repoint)
     la lbl_done = lengde(native)
     skriv_u32(native, p_cbz_dstnull, 0xB4000000 | ((((lbl_done - p_cbz_dstnull) / 4) & 0x7FFFF) << 5) | dst_reg)
@@ -1637,7 +1673,7 @@ funksjon emit_sett_inn(native: liste_heiltall, list_reg: heiltall, idx_reg: heil
     la p_b2 = lengde(native)
     legg_u32(native, 0)                                 // b k2
     la lbl_k2done = lengde(native)
-    legg_u32(native, 0xAA0103FC)                        // mov x28, x1 (bump)
+    emit_liste_reserver_kapasitet(native, 14, 2, 3)    // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     legg_u32(native, 0xF9000400 | (list_reg << 5) | 14) // str x14, [Xlist, #8]
     skriv_u32(native, p_cbz1, 0xB4000002 | ((((lbl_k1done - p_cbz1) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b1,   0x14000000 |  (((lbl_k1 - p_b1)       / 4) & 0x03FFFFFF))
@@ -3902,8 +3938,7 @@ funksjon emit_fil_les_binaer(native: liste_heiltall, path_reg: heiltall, dst_reg
     // bygg listdata ved x10 (rett etter råbufferet): [N][elem-ptrar]
     legg_u32(native, 0xAA0A03F1)                        // mov x17, x10 (lbase)
     legg_u32(native, 0xF9000227)                        // str x7, [x17] (count = N)
-    legg_u32(native, 0x9100223C)                        // add x28, x17, #8 (elem-array start)
-    legg_u32(native, 0x8B070F9C)                        // add x28, x28, x7, lsl #3 (reserver N ptrar)
+    emit_liste_reserver_kapasitet(native, 17, 9, 13)   // x28 forbi next_pow2(N) elem-slots (legg_til-invariant); boksar etter
     // boks kvar råbyte som int-NcVal, lagra ptr i elem-arrayet
     legg_u32(native, 0xAA0F03EA)                        // mov x10, x15 (rå-cursor)
     legg_u32(native, 0x9100222C)                        // add x12, x17, #8 (elem-cursor)
@@ -4938,7 +4973,7 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     la p_arr_copyloop = lengde(r)
     legg_u32(r, 0)                                   // b arr_copy
     la lbl_arr_copy_done = lengde(r)
-    legg_u32(r, 0xAA0F03FC)                          // mov x28, x15
+    emit_liste_reserver_kapasitet(r, 14, 15, 16)       // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     legg_u32(r, 0x914103FF)                          // add sp, sp, #262144
     emit_ncval_alloc_ptr(r, 14, 0, 4)               // boks liste → x0
     la p_arr_bdone = lengde(r)
@@ -5189,7 +5224,7 @@ funksjon emit_split_routine() -> liste_heiltall {
     la p_b_copy = lengde(r)
     legg_u32(r, 0)                                   // b copy
     la lbl_copydone = lengde(r)
-    legg_u32(r, 0xAA0F03FC)                          // mov x28, x15
+    emit_liste_reserver_kapasitet(r, 14, 15, 16)       // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     emit_ncval_alloc_ptr(r, 14, 0, 4)               // boks liste → x0
     legg_u32(r, 0x914103FF)                          // add sp, sp, #262144 (frigi buffer)
     legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
@@ -5418,7 +5453,7 @@ funksjon emit_bytes_new(native: liste_heiltall, size_reg: heiltall, fill_reg: he
     la p_bloop = lengde(native)
     legg_u32(native, 0x14000000)                        // b loop
     la lbl_done = lengde(native)
-    legg_u32(native, 0xAA0F03FC)                        // mov x28, x15  (bump)
+    emit_liste_reserver_kapasitet(native, 14, 15, 16)  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
     skriv_u32(native, p_bge,   0x5400000A | ((((lbl_done - p_bge)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
@@ -5762,9 +5797,16 @@ funksjon emit_build_list_mem(native: liste_heiltall, n: heiltall, base_idx: heil
         legg_u32(native, 0xF9000000 | ((1 + i) << 10) | (14 << 5) | 9)        // str x9, [x14, #8+i*8]
         i = i + 1
     }
-    la total = 8 + n * 8
-    hvis total > 4095 { kast "NcVal liste for stor for eitt add-steg" }
-    legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)             // add x28, x14, #total
+    // Reserver next_pow2(n) slots som emit_build_list (legg_til-invarianten).
+    la cap = 0
+    hvis n > 0 { cap = 1  mens cap < n { cap = cap * 2 } }
+    la total = 8 + cap * 8
+    hvis total <= 4095 {
+        legg_u32(native, 0x91000000 | (total << 10) | (14 << 5) | 28)         // add x28, x14, #total
+    } ellers {
+        last_heiltall(native, 9, total)
+        legg_u32(native, 0x8B0901DC)                                         // add x28, x14, x9
+    }
     emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
     returner 0
 }
@@ -5790,7 +5832,7 @@ funksjon emit_build_map_mem(native: liste_heiltall, npairs: heiltall, base_idx: 
 
 // Funksjonar som er nåbare frå entry (og modul-initialisatorane) via CALL til
 // brukarfunksjonar (ikkje builtins).
-funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst {
+funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter, ruting: boolsk) -> liste_tekst {
     la order: liste_tekst = [entry]
     la sett = {}
     sett[entry] = 1
@@ -5858,7 +5900,8 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter) -> liste_tekst 
                 // elles blir det (+ transitive deps) pruna og codegen sin bl upatcha
                 // ("ukjend kallmål"). Målet i order → kroppen skanna → deps følgde.
                 hvis opcode(ins) == "CALL" og lengde(ins) == 3 og builtin.type(ins[1]) == "tekst" {
-                    la rmål = ncval_gap_rute(ins[1])
+                    la rmål = ""
+                    hvis ruting { rmål = ncval_gap_rute(ins[1]) }
                     hvis rmål != "" og finnes_nøkkel(funksjonar, rmål) og ikkje finnes_nøkkel(sett, rmål) {
                         sett[rmål] = 1
                         legg_til(order, rmål)
@@ -6960,7 +7003,11 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal sha256_bytes krev 1 arg", "image": []} }
                     emit_sha256_bytes(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis (kallnamn == "hmac_sha256" eller kallnamn == "builtin.hmac_sha256" eller kallnamn == "hmac_sha256_bytes" eller kallnamn == "builtin.hmac_sha256_bytes") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis (kallnamn == "hmac_sha256_bytes" eller kallnamn == "builtin.hmac_sha256_bytes") og lengde(instr) == 3 og instr[2] == 2 {
+                    // BERRE byte-varianten: emit_hmac_sha256 les lister av boksa
+                    // int. hmac_sha256(tekst, tekst) (std/mw.no, std/krypto.no) har
+                    // rå-byte-strengar og ville segfaulte her — den fell til NATIV-
+                    // GAP-stubben (ncval_gap_stub), som kallarane fangar.
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal hmac_sha256 krev 2 arg", "image": []} }
                     emit_hmac_sha256(native, r2, r1, r2, os, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
@@ -7283,7 +7330,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal atomic_operation krev 1 arg", "image": []} }
                     emit_atomic_operation(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis ncval_gap_rute(kallnamn) != "" og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn)) og lengde(instr) == 3 {
+                } ellers hvis ncval_ruting_aktiv(os) og ncval_gap_rute(kallnamn) != "" og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn)) og lengde(instr) == 3 {
                     // RUTING: builtinet er gap-stubba nativt, men bundlaren har
                     // tvangs-inkludert ein rein-Norscode-impl. Kall han med same
                     // AArch64-kallkonvensjon som ei vanleg brukarfunksjon:
@@ -7882,7 +7929,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     }
     la initializers = ncb["module_initializers"]
     hvis initializers == null { initializers = [] }
-    la order = ncval_reachable(entry, funksjonar, initializers)
+    la order = ncval_reachable(entry, funksjonar, initializers, ncval_ruting_aktiv(os))
     // Fase 8: forhandsskann alle nåbare funksjonar for LOAD/STORE_GLOBAL-namn og
     // tildel kvar global ein fast slot (delt på tvers av funksjonar → x25-base).
     la globals = {}
@@ -8171,7 +8218,16 @@ funksjon kompiler_ncb_ncval(ncb, output: tekst, os: tekst) -> ordbok_tekst {
     hvis res["ok"] != "sann" {
         returner {"ok": "usann", "error": res["error"], "format": "Mach-O arm64", "image": []}
     }
-    la image = macho.bygg_program(res["image"])
+    // Emitteren kastar for kode over Mach-O-taket (15000 byte); gjer det om til
+    // ok=usann så kallarar (bygg-native, testar) får ein fangbar feil, ikkje eit
+    // ufanga unnatak.
+    la image = []
+    la emit_ok = sann
+    la emitfeil = ""
+    prøv { image = macho.bygg_program(res["image"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
+    hvis ikkje emit_ok {
+        returner {"ok": "usann", "error": "Mach-O-emitter: " + emitfeil, "format": "Mach-O arm64", "image": []}
+    }
     builtin.fil_skriv_binær(output, image)
     returner {"ok": "sann", "error": "", "format": "Mach-O arm64", "image": image, "output": output}
 }
@@ -8195,7 +8251,7 @@ funksjon ncval_plan(ncb) -> ordbok_tekst {
     }
     la initializers = ncb["module_initializers"]
     hvis initializers == null { initializers = [] }
-    la order = ncval_reachable(entry, funksjonar, initializers)
+    la order = ncval_reachable(entry, funksjonar, initializers, sann)  // batch = Linux-ELF-nc_main: ruting på
     la globals = {}
     la gcount = 0
     la brukar_try = usann
