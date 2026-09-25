@@ -220,6 +220,15 @@ primitiv + rein Norscode:
   `process_operation` (heile «norscode-native-process-v1»-ABI-en: pipe2/fork/dup2/execve/
   waitpid/kill/fcntl/nanosleep — test_native_process_async m/ SIGTERM=143, timeout=124,
   stdin-røyr, attbruk). Handle-tabellen er ein modul-global (module_initializers).
+- **F3 (2026-09-25): plattformlag og éin spawn-veg.** `std/native_sys.no` held systemkallnummer,
+  flagg, errno og struct-layout per mål (i dag `linux-x86_64`), vald ved køyring via
+  `builtin.native_target()` (konstant-atom i codegen; VM-en svarar frå `system_info`).
+  `native_gap` kallar berre `nsys._nr/_flagg/_errno/_layout` — inga rå tal i `sys6`-kall.
+  `builtin.native_envp()` gjev envp-peikaren frå heap-kontrollblokka (heap_layout), so
+  native_gap har inga hardkoda VA. `builtin.process_spawn_argv` går ALLTID via
+  `std.native_gap.process_spawn_argv_gap` (ikkje-blokkerande stdin, SIGPIPE-vern, output-grense,
+  ppoll-venting, peak_rss frå wait4-rusage); utan native_gap i bunten er det kompileringsfeil.
+  Den rå spawn-emisjonen og S1-atomet er sletta. Port: `tests/test_native_process_stress.no`.
 - `socket_*` (AF_INET TCP/UDP, sockaddr_in i mmap-scratch) og `network_operation` (handle-ABI
   «norscode-native-network-v1»: listen/connect/accept/read/write/poll/udp/close, ikkje-blokkerande,
   kontrakt frå archive/legacy_c_backend/nc_native_main.c) er òg reine — test_vm_network_scope,
