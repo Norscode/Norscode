@@ -128,18 +128,27 @@ funksjon walk_active_files(root: tekst, suffiksar: tekst) -> liste_tekst {
     la walk = native_fs.native_walk_files_filtrert(root, "", suffiksar,
         ".git,.norscode,build,archive,vendor,third_party,node_modules,dist,bootstrap,reports,docs")
     hvis walk["status"] != "ok" {
-        returner walk_files_filtrert([
+        filer = walk_files_filtrert([
             root + "/bin", root + "/std", root + "/selfhost", root + "/compiler",
             root + "/tools", root + "/scripts", root + "/platform", root + "/runtime",
             root + "/packages", root + "/prosjekter", root + "/tests", root + "/.github"
         ], sann, suffiksar)
+    } ellers {
+        la relative = builtin.split(walk["data"], "\n")
+        la i = 0
+        mens i < lengde(relative) {
+            la rel = trim_tekst(relative[i])
+            hvis rel != "" { legg_til(filer, root + "/" + rel) }
+            i = i + 1
+        }
     }
-    la relative = builtin.split(walk["data"], "\n")
-    la i = 0
-    mens i < lengde(relative) {
-        la rel = trim_tekst(relative[i])
-        hvis rel != "" { legg_til(filer, root + "/" + rel) }
-        i = i + 1
+    // F0.1b: sporte filer i build/ og bootstrap/ høyrer òg til flata. Utsporte
+    // byggjeartefaktar blir ikkje vandra (berre med lesbar git-indeks).
+    la sporte = sporte_filer_under(root, ["build/", "bootstrap/"], suffiksar)
+    la si = 0
+    mens si < lengde(sporte) {
+        legg_til(filer, sporte[si])
+        si = si + 1
     }
     returner filer
 }
@@ -166,11 +175,9 @@ funksjon print_policy() -> heiltall {
 }
 
 funksjon allowlisted_path(root: tekst, path: tekst) -> bool {
+    // Berre archive/. Dei tidlegare C-fixture- og sqlite-unntaka peika på filer
+    // som ikkje finst lenger (F0.1).
     hvis builtin.starts_with(path, root + "/archive/") { returner sann }
-    hvis path == root + "/tests/fixtures/windows_process_fixture.c" { returner sann }
-    hvis path == root + "/tests/fixtures/windows_utf8_file_fixture.c" { returner sann }
-    hvis path == root + "/third_party/sqlite/sqlite3.c" { returner sann }
-    hvis path == root + "/third_party/sqlite/sqlite3.h" { returner sann }
     returner usann
 }
 
@@ -242,6 +249,13 @@ funksjon collect_py_hits(root: tekst) -> liste_tekst {
 
 funksjon collect_c_hits(root: tekst) -> liste_tekst {
     la alle = walk_files_filtrert([root], sann, ".c,.h")
+    // F0.1b: build/ blir ikkje vandra (generert), men sporte filer der tel.
+    la sporte = sporte_filer_under(root, ["build/"], ".c,.h")
+    la si = 0
+    mens si < lengde(sporte) {
+        legg_til(alle, sporte[si])
+        si = si + 1
+    }
     la out: liste_tekst = []
     la i = 0
     mens i < lengde(alle) {
@@ -854,6 +868,663 @@ funksjon bytekode_per_katalog(root: tekst, filer: liste_tekst) -> liste_tekst {
     returner ut
 }
 
+// ---------------------------------------------------------------------------
+// F0.1: ikkje-Norscode-flate utover C/Python (rapportmodus).
+//
+// Kategoriar: framandspråk (ending/basenamn), shebang (alt som ikkje er nc/
+// norscode), binær (ELF/Mach-O/PE-magic), c_æra (C-æra-signatur i binær),
+// symlenke, hex (innbakt maskinkode i selfhost/native_execution/*.no), bytekode
+// (J6) og json. Flata er dei SPORTE filene: git-indeksen (v2/v3) blir lesen
+// direkte i Norscode; utan lesbar indeks blir filsystemet vandra (fallback).
+//
+// tools/active_surface_allowlist.txt er ei ratchet-liste: `tak` er største tal
+// treff per kategori og skal berre gå ned; `unntak` er kjende treff; `godkjend`
+// tel ikkje (Norscode-bygde binærar, symlenker med kjent mål i repoet).
+// NORSCODE_SURFACE_GATE=rapport (standard) feilar aldri på desse kategoriane;
+// =ratchet feilar når eit tal går over taket; =hard feilar òg på treff utanfor
+// allowlista (unnateke json, som berre har tak).
+// ---------------------------------------------------------------------------
+
+la _flate_root = ""
+la _flate_modus = ""
+la _flate_oppf: liste_tekst = []
+
+funksjon f0_kategoriar() -> liste_tekst {
+    returner ["framandspråk", "shebang", "binær", "c_æra", "symlenke", "hex", "bytekode", "json"]
+}
+
+funksjon u8(d: tekst, p: heiltall) -> heiltall {
+    returner builtin.char_code(builtin.slice(d, p, p + 1))
+}
+
+funksjon u16be(d: tekst, p: heiltall) -> heiltall {
+    returner u8(d, p) * 256 + u8(d, p + 1)
+}
+
+funksjon u32be(d: tekst, p: heiltall) -> heiltall {
+    returner u16be(d, p) * 65536 + u16be(d, p + 2)
+}
+
+// Git-indeks v2/v3 ("DIRC"): 12 byte hovud, så oppføringar med 62 byte fast del
+// (64 med utvida flagg i v3), sti og 1–8 NUL til 8-byte-grense. Modusbyte 26
+// (bit 15..8) gjev objekttypen: 8 = fil, 10 = symlenke, 14 = gitlink. Ukjent
+// versjon (t.d. v4 med prefikskomprimerte stiar) eller brot gjev tom liste.
+// Ut: "f<TAB>sti" eller "l<TAB>sti", berre steg 0 (ikkje flettekonflikt).
+funksjon git_indeks_oppføringar(data: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la tom: liste_tekst = []
+    hvis lengde(data) < 12 { returner tom }
+    hvis builtin.slice(data, 0, 4) != "DIRC" { returner tom }
+    la versjon = u32be(data, 4)
+    hvis versjon != 2 og versjon != 3 { returner tom }
+    la tal = u32be(data, 8)
+    la p: heiltall = 12
+    la n: heiltall = 0
+    mens n < tal {
+        hvis p + 62 > lengde(data) { returner tom }
+        la type = u8(data, p + 26) / 16
+        la flagg = u16be(data, p + 60)
+        la hovud: heiltall = 62
+        hvis versjon == 3 og (flagg / 16384) % 2 == 1 { hovud = 64 }
+        la start = p + hovud
+        la namnlengd = flagg % 4096
+        hvis namnlengd == 4095 {
+            namnlengd = builtin.index_of(builtin.slice(data, start, lengde(data)), builtin.chr(0))
+            hvis namnlengd < 0 { returner tom }
+        }
+        hvis namnlengd == 0 eller start + namnlengd > lengde(data) { returner tom }
+        la sti = builtin.slice(data, start, start + namnlengd)
+        hvis (flagg / 4096) % 4 == 0 {
+            hvis type == 10 { legg_til(ut, "l\t" + sti) }
+            ellers hvis type == 8 { legg_til(ut, "f\t" + sti) }
+        }
+        p = p + ((hovud + namnlengd + 8) / 8) * 8
+        n = n + 1
+    }
+    // Vern mot runtimes som ikkje les byte-eksakt (byte ≥ 0x80 blir U+FFFD):
+    // då blir typebyten feil for dei fleste oppføringane → fallback.
+    hvis lengde(ut) * 2 < tal { returner tom }
+    returner ut
+}
+
+funksjon git_indeks_sti(root: tekst) -> tekst {
+    la eksplisitt = env("NORSCODE_SURFACE_GIT_INDEX")
+    hvis eksplisitt != "" { returner eksplisitt }
+    hvis is_dir(root + "/.git") { returner root + "/.git/index" }
+    // Worktree: .git er ei fil med «gitdir: <sti>».
+    la peikar = ""
+    prøv { peikar = trim_tekst(builtin.fil_les(root + "/.git")) } fang (e) { returner "" }
+    hvis ikkje builtin.starts_with(peikar, "gitdir:") { returner "" }
+    la g = trim_tekst(builtin.slice(peikar, 7, lengde(peikar)))
+    hvis g == "" { returner "" }
+    hvis ikkje builtin.starts_with(g, "/") { g = root + "/" + g }
+    returner g + "/index"
+}
+
+funksjon flate_ekskludert(rel: tekst) -> bool {
+    returner rel == "archive" eller builtin.starts_with(rel, "archive/")
+}
+
+// Fallback-vandring med typar (d/f/l). Utan git-indeks er «spora» ukjent, så
+// kjende genererte katalogar blir hoppa over: build/ (unnateke build/v9400 og
+// filer direkte i build/), bootstrap/precompiled_fragments* og dist/.
+funksjon fallback_hopp_over(barn: tekst, namn: tekst, er_katalog: bool) -> bool {
+    hvis namn == ".git" eller namn == ".norscode" eller namn == "node_modules" { returner sann }
+    hvis barn == "dist" eller barn == "archive" { returner sann }
+    hvis er_katalog og builtin.starts_with(barn, "build/") og barn != "build/v9400" { returner sann }
+    hvis barn == "bootstrap/precompiled_fragments" eller barn == "bootstrap/precompiled_fragments_inner" { returner sann }
+    returner usann
+}
+
+funksjon typa_vandring(root: tekst, rel: tekst, ut: liste_tekst, djup: heiltall) -> bool {
+    hvis djup > 48 { returner sann }
+    la status = "feil"
+    la rå = ""
+    prøv {
+        la lt = native_fs.native_list_typed(root, rel)
+        status = tekst(lt["status"])
+        hvis status == "ok" { rå = tekst(lt["data"]) }
+    } fang (e) { status = "feil" }
+    hvis status != "ok" { returner usann }
+    la linjene = builtin.split(rå, "\n")
+    la i = 0
+    mens i < lengde(linjene) {
+        la l = linjene[i]
+        hvis lengde(l) > 2 {
+            la k = builtin.slice(l, 0, 1)
+            la namn = builtin.slice(l, 2, lengde(l))
+            la barn = namn
+            hvis rel != "" { barn = rel + "/" + namn }
+            hvis ikkje fallback_hopp_over(barn, namn, k == "d") {
+                hvis k == "d" { typa_vandring(root, barn, ut, djup + 1) }
+                ellers hvis k == "f" { legg_til(ut, "f\t" + barn) }
+                ellers hvis k == "l" { legg_til(ut, "l\t" + barn) }
+            }
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Sporte filer og symlenker relativt til root ("f<TAB>rel" / "l<TAB>rel"),
+// utan archive/. Resultatet blir mellomlagra per root.
+funksjon flate_oppføringar(root: tekst) -> liste_tekst {
+    hvis _flate_modus != "" og _flate_root == root { returner _flate_oppf }
+    la ut: liste_tekst = []
+    la modus = ""
+    la indeks = git_indeks_sti(root)
+    hvis indeks != "" {
+        la data = ""
+        prøv { data = builtin.fil_les(indeks) } fang (e) { data = "" }
+        la rå = git_indeks_oppføringar(data)
+        hvis lengde(rå) > 0 {
+            modus = "git-indeks"
+            la i = 0
+            mens i < lengde(rå) {
+                hvis ikkje flate_ekskludert(builtin.slice(rå[i], 2, lengde(rå[i]))) { legg_til(ut, rå[i]) }
+                i = i + 1
+            }
+        }
+    }
+    hvis modus == "" {
+        modus = "filsystem"
+        hvis ikkje typa_vandring(root, "", ut, 0) {
+            // Eldre stage0 utan list_typed: berre filer, ingen symlenkeinfo.
+            modus = "filsystem-utan-symlenker"
+            la walk = native_fs.native_walk_files_filtrert(root, "", "",
+                ".git,.norscode,build,dist,archive,node_modules")
+            hvis walk["status"] == "ok" {
+                la relative = builtin.split(walk["data"], "\n")
+                la wi = 0
+                mens wi < lengde(relative) {
+                    la rel = trim_tekst(relative[wi])
+                    hvis rel != "" { legg_til(ut, "f\t" + rel) }
+                    wi = wi + 1
+                }
+            }
+        }
+    }
+    _flate_root = root
+    _flate_modus = modus
+    _flate_oppf = ut
+    returner ut
+}
+
+funksjon flate_modus(root: tekst) -> tekst {
+    flate_oppføringar(root)
+    returner _flate_modus
+}
+
+funksjon har_ein_suffiks(namn: tekst, suffiksar: tekst) -> bool {
+    hvis suffiksar == "" { returner sann }
+    la delar = builtin.split(suffiksar, ",")
+    la i = 0
+    mens i < lengde(delar) {
+        la s = trim_tekst(delar[i])
+        hvis s != "" og builtin.ends_with(namn, s) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Absolutte stiar til sporte filer under eitt av prefiksa. Berre når flata kjem
+// frå git-indeksen: utan han kan ikkje sporte og genererte filer skiljast, og
+// dei harde sjekkane held då på den gamle vandringa.
+funksjon sporte_filer_under(root: tekst, prefiksar: liste_tekst, suffiksar: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la oppf = flate_oppføringar(root)
+    hvis _flate_modus != "git-indeks" { returner ut }
+    la i = 0
+    mens i < lengde(oppf) {
+        hvis builtin.starts_with(oppf[i], "f\t") {
+            la rel = builtin.slice(oppf[i], 2, lengde(oppf[i]))
+            la pi = 0
+            mens pi < lengde(prefiksar) {
+                hvis builtin.starts_with(rel, prefiksar[pi]) {
+                    hvis har_ein_suffiks(rel, suffiksar) { legg_til(ut, root + "/" + rel) }
+                    bryt
+                }
+                pi = pi + 1
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// (a) Framandspråk etter ending eller basenamn.
+funksjon framandspråk_namn(rel: tekst) -> bool {
+    la namn = builtin.lower(basename(rel))
+    hvis namn == "makefile" eller namn == "gnumakefile" eller namn == "dockerfile" eller
+       namn == "cmakelists.txt" eller builtin.starts_with(namn, "dockerfile.") { returner sann }
+    la endingar = [".py", ".c", ".h", ".sh", ".ps1", ".psm1", ".bat", ".cmd", ".swift",
+                   ".js", ".mjs", ".cjs", ".ts", ".rb", ".pl", ".go", ".rs", ".java", ".kt",
+                   ".cpp", ".cc", ".cxx", ".hpp", ".inc", ".m", ".mm", ".s", ".asm"]
+    la i = 0
+    mens i < lengde(endingar) {
+        hvis builtin.ends_with(namn, endingar[i]) og lengde(namn) > lengde(endingar[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon json_namn(rel: tekst) -> bool {
+    returner builtin.ends_with(builtin.lower(basename(rel)), ".json")
+}
+
+// (c) Tolken i ein shebang ("" utan shebang). `env` med flagg/VAR=verdi blir
+// hoppa forbi, så «#!/usr/bin/env -S nc run» gjev «nc».
+funksjon shebang_tolk(start: tekst) -> tekst {
+    hvis ikkje builtin.starts_with(start, "#!") { returner "" }
+    la første = builtin.split(start, "\n")[0]
+    første = builtin.replace(builtin.replace(første, "\r", ""), "\t", " ")
+    la delar = builtin.split(builtin.slice(første, 2, lengde(første)), " ")
+    la tok: liste_tekst = []
+    la i = 0
+    mens i < lengde(delar) {
+        hvis trim_tekst(delar[i]) != "" { legg_til(tok, trim_tekst(delar[i])) }
+        i = i + 1
+    }
+    hvis lengde(tok) == 0 { returner "?" }
+    la tolk = basename(tok[0])
+    hvis tolk == "env" {
+        la j = 1
+        mens j < lengde(tok) og (builtin.starts_with(tok[j], "-") eller builtin.contains(tok[j], "=")) {
+            j = j + 1
+        }
+        hvis j < lengde(tok) { tolk = basename(tok[j]) }
+    }
+    returner tolk
+}
+
+funksjon shebang_framand(start: tekst) -> bool {
+    la tolk = shebang_tolk(start)
+    hvis tolk == "" { returner usann }
+    returner ikkje (tolk == "nc" eller builtin.starts_with(tolk, "norscode"))
+}
+
+// (d) Binærformat frå magic: "elf", "macho", "pe" eller "".
+funksjon binær_type(start: tekst) -> tekst {
+    hvis lengde(start) < 4 { returner "" }
+    la b0 = u8(start, 0)
+    la b1 = u8(start, 1)
+    la b2 = u8(start, 2)
+    la b3 = u8(start, 3)
+    hvis b0 == 127 og b1 == 69 og b2 == 76 og b3 == 70 { returner "elf" }
+    hvis (b0 == 207 eller b0 == 206) og b1 == 250 og b2 == 237 og b3 == 254 { returner "macho" }
+    hvis b0 == 254 og b1 == 237 og b2 == 250 og (b3 == 207 eller b3 == 206) { returner "macho" }
+    hvis b0 == 202 og b1 == 254 og b2 == 186 og b3 == 190 { returner "macho" }
+    // PE: «MZ» og PE-signaturen i hovudet (ein tekstfil som byrjar på MZ er ikkje PE).
+    hvis b0 == 77 og b1 == 90 og builtin.contains(start, "PE" + builtin.chr(0) + builtin.chr(0)) { returner "pe" }
+    returner ""
+}
+
+// C-æra-signatur: dynamisk glibc/musl-ELF (PT_INTERP i hovudet), Mach-O som
+// lenkjer libobjc/CoreFoundation, PE med C-runtime-import.
+funksjon c_æra_signatur(type: tekst, innhald: tekst) -> bool {
+    hvis type == "elf" {
+        la hovud = builtin.slice(innhald, 0, 4096)
+        returner builtin.contains(hovud, "ld-linux") eller builtin.contains(hovud, "ld-musl")
+    }
+    hvis type == "macho" {
+        la hovud = builtin.slice(innhald, 0, 32768)
+        returner builtin.contains(hovud, "libobjc") eller builtin.contains(hovud, "CoreFoundation")
+    }
+    hvis type == "pe" {
+        returner builtin.contains(innhald, "api-ms-win-crt") eller builtin.contains(innhald, "msvcrt") eller
+            builtin.contains(innhald, "ucrtbase") eller builtin.contains(innhald, "vcruntime") eller
+            builtin.contains(innhald, "VCRUNTIME")
+    }
+    returner usann
+}
+
+// (e) Er lenkemålet (relativt til lenkja si mappe) innanfor repoet?
+funksjon symlenke_mål_innanfor(lenke: tekst, mål: tekst) -> bool {
+    hvis mål == "" eller builtin.starts_with(mål, "/") eller builtin.starts_with(mål, "\\") { returner usann }
+    hvis lengde(mål) >= 2 og builtin.slice(mål, 1, 2) == ":" { returner usann }
+    la stakk: liste_tekst = []
+    la ld = builtin.split(lenke, "/")
+    la i = 0
+    mens i + 1 < lengde(ld) {
+        hvis ld[i] != "" og ld[i] != "." { legg_til(stakk, ld[i]) }
+        i = i + 1
+    }
+    la md = builtin.split(mål, "/")
+    i = 0
+    mens i < lengde(md) {
+        la d = md[i]
+        hvis d == ".." {
+            hvis lengde(stakk) == 0 { returner usann }
+            la ny: liste_tekst = []
+            la k = 0
+            mens k + 1 < lengde(stakk) {
+                legg_til(ny, stakk[k])
+                k = k + 1
+            }
+            stakk = ny
+        } ellers hvis d != "" og d != "." {
+            legg_til(stakk, d)
+        }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon sti_stat(root: tekst, rel: tekst, følg: bool) -> ordbok_tekst {
+    la op = "path_stat"
+    hvis følg { op = "stat" }
+    prøv {
+        returner builtin.filesystem_read_operation({
+            "abi": native_fs.native_versjon(), "operation": op, "root": root, "relative": rel
+        })
+    } fang (e) {}
+    returner {"status": "feil", "value": "-1"}
+}
+
+// (f) Innbakt maskinkode: streng-literalar med ≥128 hex-teikn og hex_to_bytes(.
+// Nøkkelen er «sti@funksjon:hexlitteral|hex_to_bytes» (utan linjenummer).
+funksjon er_hexlitteral(seg: tekst) -> bool {
+    hvis lengde(seg) < 128 { returner usann }
+    la i = 0
+    mens i < lengde(seg) {
+        hvis builtin.index_of("0123456789abcdefABCDEF", builtin.slice(seg, i, i + 1)) < 0 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon hex_flate(rel: tekst) -> bool {
+    la p = "selfhost/native_execution/"
+    hvis ikkje builtin.starts_with(rel, p) eller ikkje builtin.ends_with(rel, ".no") { returner usann }
+    returner builtin.index_of(builtin.slice(rel, lengde(p), lengde(rel)), "/") < 0
+}
+
+funksjon hex_treff_i_kjelde(rel: tekst, data: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la linjene = builtin.split(data, "\n")
+    la fn = "-"
+    la i = 0
+    mens i < lengde(linjene) {
+        la l = linjene[i]
+        la rein = trim_tekst(l)
+        hvis builtin.starts_with(rein, "funksjon ") {
+            la resten = builtin.slice(rein, 9, lengde(rein))
+            la p = builtin.index_of(resten, "(")
+            hvis p > 0 { fn = trim_tekst(builtin.slice(resten, 0, p)) }
+        }
+        hvis builtin.contains(l, "hex_to_bytes(") { legg_til(ut, rel + "@" + fn + ":hex_to_bytes") }
+        hvis lengde(l) >= 130 og builtin.contains(l, "\"") {
+            la seg = builtin.split(l, "\"")
+            la j = 1
+            mens j < lengde(seg) {
+                hvis er_hexlitteral(seg[j]) { legg_til(ut, rel + "@" + fn + ":hexlitteral") }
+                j = j + 2
+            }
+        }
+        i = i + 1
+    }
+    returner sortert_unik(ut)
+}
+
+// Allowlist-format (éi oppføring per linje, # er kommentar):
+//   tak <kategori> <tal>
+//   unntak <kategori> <nøkkel>
+//   godkjend <kategori> <nøkkel>            (symlenke: «<sti> -> <mål>»)
+// Ut: "tak<TAB>kat" → tal, "unntak<TAB>kat<TAB>nøkkel" → "1",
+//     "godkjend<TAB>kat<TAB>nøkkel" → "1" eller lenkemål.
+funksjon les_allowlist(data: tekst) -> ordbok_tekst {
+    la ut = {}
+    la linjene = builtin.split(data, "\n")
+    la i = 0
+    mens i < lengde(linjene) {
+        la l = trim_tekst(linjene[i])
+        hvis l != "" og ikkje builtin.starts_with(l, "#") {
+            la rå = builtin.split(builtin.replace(l, "\t", " "), " ")
+            la tok: liste_tekst = []
+            la k = 0
+            mens k < lengde(rå) {
+                hvis rå[k] != "" { legg_til(tok, rå[k]) }
+                k = k + 1
+            }
+            hvis lengde(tok) >= 3 {
+                la rest = tok[2]
+                la r = 3
+                mens r < lengde(tok) {
+                    rest = rest + " " + tok[r]
+                    r = r + 1
+                }
+                hvis tok[0] == "tak" {
+                    ut["tak\t" + tok[1]] = rest
+                } ellers hvis tok[0] == "unntak" {
+                    ut["unntak\t" + tok[1] + "\t" + rest] = "1"
+                } ellers hvis tok[0] == "godkjend" {
+                    la verdi = "1"
+                    la nøkkel = rest
+                    la pil = builtin.index_of(rest, " -> ")
+                    hvis pil > 0 {
+                        nøkkel = trim_tekst(builtin.slice(rest, 0, pil))
+                        verdi = trim_tekst(builtin.slice(rest, pil + 4, lengde(rest)))
+                    }
+                    ut["godkjend\t" + tok[1] + "\t" + nøkkel] = verdi
+                }
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon allow_har(allow: ordbok_tekst, nøkkel: tekst) -> bool {
+    returner builtin.har_nokkel(allow, nøkkel)
+}
+
+// Alle F0.1-treff for flata under root som "kategori<TAB>nøkkel<TAB>merknad".
+funksjon f0_treff(root: tekst, allow: ordbok_tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la oppf = flate_oppføringar(root)
+    la i = 0
+    mens i < lengde(oppf) {
+        la kind = builtin.slice(oppf[i], 0, 1)
+        la rel = builtin.slice(oppf[i], 2, lengde(oppf[i]))
+        hvis kind == "l" {
+            hvis allow_har(allow, "godkjend\tsymlenke\t" + rel) {
+                la mål = tekst(allow["godkjend\tsymlenke\t" + rel])
+                la st = sti_stat(root, rel, usann)
+                la storleik_ok = st["status"] != "ok" eller tekst(st["value"]) == tekst_fra_heiltall(lengde(mål))
+                hvis ikkje symlenke_mål_innanfor(rel, mål) eller ikkje storleik_ok {
+                    legg_til(ut, "symlenke\t" + rel + "\tgodkjent mål «" + mål + "» stemmer ikkje")
+                }
+            } ellers {
+                la merk = "mål kan ikkje lesast (manglar readlink); løyst"
+                hvis sti_stat(root, rel, sann)["status"] != "ok" { merk = "brote" }
+                legg_til(ut, "symlenke\t" + rel + "\t" + merk)
+            }
+        } ellers {
+            hvis framandspråk_namn(rel) { legg_til(ut, "framandspråk\t" + rel + "\t") }
+            hvis json_namn(rel) { legg_til(ut, "json\t" + rel + "\t") }
+            la data = ""
+            la lest = usann
+            prøv {
+                data = builtin.fil_les(root + "/" + rel)
+                lest = sann
+            } fang (e) { lest = usann }
+            hvis lest {
+                la start = builtin.slice(data, 0, 1024)
+                hvis builtin.starts_with(start, "#!") og shebang_framand(start) {
+                    legg_til(ut, "shebang\t" + rel + "\t#!" + shebang_tolk(start))
+                }
+                la bt = binær_type(start)
+                hvis bt != "" {
+                    hvis ikkje allow_har(allow, "godkjend\tbinær\t" + rel) {
+                        legg_til(ut, "binær\t" + rel + "\t" + bt)
+                    }
+                    hvis c_æra_signatur(bt, data) { legg_til(ut, "c_æra\t" + rel + "\t" + bt) }
+                }
+                hvis hex_flate(rel) {
+                    la hx = hex_treff_i_kjelde(rel, data)
+                    la h = 0
+                    mens h < lengde(hx) {
+                        legg_til(ut, "hex\t" + hx[h] + "\t")
+                        h = h + 1
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    // (g) Bytekode: same innhaldsport som J6 (namn, ncb-v1/norscode-bytecode-v1,
+    // magic 93 4E 43 42, *.functions.json), no med ratchet-tak.
+    la bk = collect_committed_bytecode(root)
+    la b = 0
+    mens b < lengde(bk) {
+        la rel = bk[b]
+        hvis builtin.starts_with(rel, root + "/") { rel = builtin.slice(rel, lengde(root) + 1, lengde(rel)) }
+        legg_til(ut, "bytekode\t" + rel + "\t")
+        b = b + 1
+    }
+    returner ut
+}
+
+funksjon treff_i_kategori(treff: liste_tekst, kategori: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la prefiks = kategori + "\t"
+    la i = 0
+    mens i < lengde(treff) {
+        hvis builtin.starts_with(treff[i], prefiks) { legg_til(ut, treff[i]) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon treff_nøkkel(t: tekst) -> tekst {
+    returner builtin.split(t, "\t")[1]
+}
+
+funksjon kategori_tak(allow: ordbok_tekst, kategori: tekst) -> heiltall {
+    hvis ikkje allow_har(allow, "tak\t" + kategori) { returner 0 }
+    prøv { returner heltall_fra_tekst(tekst(allow["tak\t" + kategori])) } fang (e) {}
+    returner 0
+}
+
+funksjon berre_tak(kategori: tekst) -> bool {
+    returner kategori == "json"
+}
+
+// Tal nye (ikkje-unntak) treff i kategorien.
+funksjon kategori_nye(treff: liste_tekst, allow: ordbok_tekst, kategori: tekst) -> heiltall {
+    la k = treff_i_kategori(treff, kategori)
+    la nye: heiltall = 0
+    la i = 0
+    mens i < lengde(k) {
+        hvis ikkje allow_har(allow, "unntak\t" + kategori + "\t" + treff_nøkkel(k[i])) { nye = nye + 1 }
+        i = i + 1
+    }
+    returner nye
+}
+
+// Kor mange kategoriar som bryt porten i gjeven modus (rapport|ratchet|hard).
+funksjon f0_brot(treff: liste_tekst, allow: ordbok_tekst, modus: tekst) -> heiltall {
+    hvis modus != "ratchet" og modus != "hard" { returner 0 }
+    la kat = f0_kategoriar()
+    la brot: heiltall = 0
+    la i = 0
+    mens i < lengde(kat) {
+        la tal = lengde(treff_i_kategori(treff, kat[i]))
+        la over_tak = tal > kategori_tak(allow, kat[i])
+        la nye_brot = modus == "hard" og ikkje berre_tak(kat[i]) og kategori_nye(treff, allow, kat[i]) > 0
+        hvis over_tak eller nye_brot { brot = brot + 1 }
+        i = i + 1
+    }
+    returner brot
+}
+
+funksjon json_per_katalog(treff: liste_tekst) -> liste_tekst {
+    la stiar: liste_tekst = []
+    la i = 0
+    mens i < lengde(treff) {
+        legg_til(stiar, treff_nøkkel(treff[i]))
+        i = i + 1
+    }
+    returner bytekode_per_katalog("", stiar)
+}
+
+// Rapportlinjer per kategori (OK/MERK med tal og liste).
+funksjon f0_rapport(treff: liste_tekst, allow: ordbok_tekst, modus: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la kat = f0_kategoriar()
+    la i = 0
+    mens i < lengde(kat) {
+        la k = kat[i]
+        la kt = treff_i_kategori(treff, k)
+        la tal = lengde(kt)
+        la tak = kategori_tak(allow, k)
+        la nye = kategori_nye(treff, allow, k)
+        hvis tal == 0 {
+            legg_til(ut, "OK: " + k + ": 0 treff (tak " + tekst_fra_heiltall(tak) + ")")
+        } ellers hvis berre_tak(k) {
+            legg_til(ut, "MERK: " + k + ": " + tekst_fra_heiltall(tal) + " filer, tak " +
+                     tekst_fra_heiltall(tak) + " (JSON skal ut på sikt; berre tal per katalog):")
+            la pk = json_per_katalog(kt)
+            la p = 0
+            mens p < lengde(pk) {
+                legg_til(ut, pk[p])
+                p = p + 1
+            }
+        } ellers {
+            legg_til(ut, "MERK: " + k + ": " + tekst_fra_heiltall(tal) + " treff, tak " +
+                     tekst_fra_heiltall(tak) + " (" + tekst_fra_heiltall(tal - nye) +
+                     " kjende unntak, " + tekst_fra_heiltall(nye) + " utanfor allowlista):")
+            la j = 0
+            mens j < lengde(kt) {
+                la delar = builtin.split(kt[j], "\t")
+                la merk = ""
+                hvis lengde(delar) > 2 og delar[2] != "" { merk = "  (" + delar[2] + ")" }
+                la status = "[ny]"
+                hvis allow_har(allow, "unntak\t" + k + "\t" + delar[1]) { status = "[unntak]" }
+                legg_til(ut, "  " + status + " " + delar[1] + merk)
+                j = j + 1
+            }
+        }
+        hvis tal > tak {
+            legg_til(ut, "MERK: " + k + ": RATCHET-BROT, " + tekst_fra_heiltall(tal) +
+                     " treff over taket " + tekst_fra_heiltall(tak))
+        } ellers hvis tal < tak {
+            legg_til(ut, "MERK: " + k + ": taket kan senkast frå " + tekst_fra_heiltall(tak) +
+                     " til " + tekst_fra_heiltall(tal))
+        }
+        i = i + 1
+    }
+    // Utdaterte unntak: allowlista skal krympe saman med flata.
+    la nøklar = nøkler(allow)
+    la stale: liste_tekst = []
+    la n = 0
+    mens n < lengde(nøklar) {
+        la nk = tekst(nøklar[n])
+        hvis builtin.starts_with(nk, "unntak\t") {
+            la d = builtin.split(nk, "\t")
+            la funne = usann
+            la kt2 = treff_i_kategori(treff, d[1])
+            la m = 0
+            mens m < lengde(kt2) {
+                hvis treff_nøkkel(kt2[m]) == d[2] { funne = sann }
+                m = m + 1
+            }
+            hvis ikkje funne { legg_til(stale, "  " + d[1] + " " + d[2]) }
+        }
+        n = n + 1
+    }
+    hvis lengde(stale) > 0 {
+        legg_til(ut, "MERK: " + tekst_fra_heiltall(lengde(stale)) + " utdaterte unntak i allowlista (fjern):")
+        stale = sortert_unik(stale)
+        la s = 0
+        mens s < lengde(stale) {
+            legg_til(ut, stale[s])
+            s = s + 1
+        }
+    }
+    returner ut
+}
+
 funksjon hit_path(root: tekst, hit: tekst) -> tekst {
     la deler = builtin.split(hit, ":")
     hvis lengde(deler) < 1 { returner "" }
@@ -1042,6 +1713,42 @@ funksjon start() -> heiltall {
         } ellers hvis env("NORSCODE_BYTECODE_LIST") == "1" {
             skriv_liste("committed_bytecode-filer:", bytekode)
         }
+    }
+
+    // F0.1: ikkje-Norscode-flate. Rapportmodus som standard (feilar ikkje);
+    // NORSCODE_SURFACE_GATE=ratchet|hard gjer han til ein port.
+    la gate_modus = env("NORSCODE_SURFACE_GATE")
+    hvis gate_modus == "" { gate_modus = "rapport" }
+    linje("")
+    linje("=== F0.1 ikkje-Norscode-flate (modus: " + gate_modus + ") ===")
+    la allow_tekst = ""
+    prøv { allow_tekst = builtin.fil_les(root + "/tools/active_surface_allowlist.txt") } fang (e) { allow_tekst = "" }
+    hvis allow_tekst == "" { linje("MERK: tools/active_surface_allowlist.txt manglar; alle tak er 0") }
+    la allow = les_allowlist(allow_tekst)
+    la oppf = flate_oppføringar(root)
+    la tal_lenker: heiltall = 0
+    i = 0
+    mens i < lengde(oppf) {
+        hvis builtin.starts_with(oppf[i], "l\t") { tal_lenker = tal_lenker + 1 }
+        i = i + 1
+    }
+    la flate_tekst = "flata kjem frå " + flate_modus(root) + ": " +
+        tekst_fra_heiltall(lengde(oppf) - tal_lenker) + " filer og " +
+        tekst_fra_heiltall(tal_lenker) + " symlenker (utan archive/)"
+    hvis flate_modus(root) == "git-indeks" { linje("OK: " + flate_tekst) }
+    ellers { linje("MERK: " + flate_tekst + "; git-indeksen kunne ikkje lesast, så utsporte filer kan vere med") }
+    la f0 = f0_treff(root, allow)
+    la rapport = f0_rapport(f0, allow, gate_modus)
+    i = 0
+    mens i < lengde(rapport) {
+        linje(rapport[i])
+        i = i + 1
+    }
+    la f0_feil = f0_brot(f0, allow, gate_modus)
+    hvis f0_feil > 0 {
+        linje("Feil: F0.1 (NORSCODE_SURFACE_GATE=" + gate_modus + "): " +
+              tekst_fra_heiltall(f0_feil) + " kategoriar bryt ratchet-allowlista")
+        fail = 1
     }
 
     hvis fail != 0 { returner 1 }
