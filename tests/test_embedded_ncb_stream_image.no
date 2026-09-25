@@ -1,7 +1,9 @@
-# Stream-image (NORSCODE_NCB_TEXT_V1) via bytes-vegen. hent_stream_bytes,
+# Stream-image (NORSCODE_NCB_TEXT_V1) via bytes- og tekstvegen. hent_stream_bytes,
 # stream_har_image og har_image_bytes brukte builtin.bytes_slice_to_text, ein
 # C-æra-vertsbuiltin: «Ukjent innebygd funksjon» i VM-en og stille null i AOT,
 # så hent_stream_bytes kunne aldri lukkast (R2). No bytes.utsnitt_til_tekst.
+# Tekstvegen (fil_les → stream_har_image/hent_tekst_auto) kjende ikkje att
+# stream-image før typeskiljet, og gav «Binæren manglar innebygd NCB-text-image».
 bruk selfhost.native_execution.embedded_ncb_image som image
 
 funksjon desimal20(v: heiltall) -> tekst {
@@ -24,6 +26,59 @@ funksjon bygg_stream(base: liste_heiltall, namn: tekst, payload: tekst) -> liste
     returner ut
 }
 
+funksjon er_ukjent_payload_kast(r: tekst) -> boolsk {
+    returner builtin.starts_with(r, "KAST:") og builtin.contains(r, "Ukjent innebygd NCB-payload: compiler")
+}
+
+funksjon første_nul(bin: liste_heiltall) -> heiltall {
+    la i = 0
+    mens i < lengde(bin) {
+        hvis bin[i] == 0 { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+# Skriv imaget binært og les det tilbake med fil_les. Returnerer talet på
+# feil, eller -1 når fil_les stoppa nøyaktig ved første NUL (C-string-åtferd
+# på C-æra-seedar); då må stream_har_image seie usann, så køyr_payload_fil
+# fell til bytes-vegen. All anna lengdeavvik er feil.
+funksjon tekstveg_feil(bin: liste_heiltall, vm_ncb: tekst, merke: tekst) -> heiltall {
+    la feil: heiltall = 0
+    la sti = "/tmp/norscode_embedded_stream_" + tekst_fra_heltall(builtin.tid_ms()) + "_" + tekst_fra_heltall(lengde(merke))
+    builtin.fil_skriv_binær(sti, builtin.bytes_from_list(bin))
+    la txt = builtin.fil_les(sti)
+    prøv { builtin.fil_slett(sti) } fang (e) {}
+    hvis lengde(txt) != lengde(bin) {
+        hvis lengde(txt) == første_nul(bin) og ikkje image.stream_har_image(txt) { returner -1 }
+        skriv("FEIL [" + merke + "] fil_les-lengd " + tekst_fra_heltall(lengde(txt)) + " != " + tekst_fra_heltall(lengde(bin)) + "\n")
+        returner 1
+    }
+    hvis ikkje image.stream_har_image(txt) {
+        skriv("FEIL [" + merke + "] stream_har_image(tekst) gav usann\n")
+        feil = feil + 1
+    }
+    la via_auto = ""
+    prøv { via_auto = image.hent_tekst_auto(txt, "vm") } fang (e) { via_auto = "KAST:" + tekst(e) }
+    hvis via_auto != vm_ncb {
+        skriv("FEIL [" + merke + "] hent_tekst_auto(tekst): " + via_auto + "\n")
+        feil = feil + 1
+    }
+    la via_bytes_tekst = ""
+    prøv { via_bytes_tekst = image.hent_stream_bytes(txt, "vm") } fang (e) { via_bytes_tekst = "KAST:" + tekst(e) }
+    hvis via_bytes_tekst != vm_ncb {
+        skriv("FEIL [" + merke + "] hent_stream_bytes(tekst): " + via_bytes_tekst + "\n")
+        feil = feil + 1
+    }
+    la ukjent_tekst = ""
+    prøv { ukjent_tekst = image.hent_tekst_auto(txt, "compiler") } fang (e) { ukjent_tekst = "KAST:" + tekst(e) }
+    hvis ikkje er_ukjent_payload_kast(ukjent_tekst) {
+        skriv("FEIL [" + merke + "] ukjent payload (tekst): " + ukjent_tekst + "\n")
+        feil = feil + 1
+    }
+    returner feil
+}
+
 funksjon start() -> heiltall {
     la feil: heiltall = 0
     la base: liste_heiltall = [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0]
@@ -41,15 +96,17 @@ funksjon start() -> heiltall {
         feil = feil + 1
     }
     # Kryssjekk mot den eldre tekstvegen (bytes_til_tekst) på same image.
-    hvis image.hent_stream_tekst(bin, "vm") != vm_ncb {
-        skriv("FEIL hent_stream_tekst gav anna payload\n")
+    la via_tekstveg = ""
+    prøv { via_tekstveg = image.hent_stream_tekst(bin, "vm") } fang (e) { via_tekstveg = "KAST:" + tekst(e) }
+    hvis via_tekstveg != vm_ncb {
+        skriv("FEIL hent_stream_tekst(liste): " + via_tekstveg + "\n")
         feil = feil + 1
     }
+    # Manglande payload skal kaste same melding på alle seedar (typevakt i manifestoppslaget).
     la ukjent = ""
     prøv { ukjent = image.hent_stream_bytes(bin, "compiler") } fang (e) { ukjent = "KAST:" + tekst(e) }
-    # Må kaste (meldinga varierer: C-æra-seedar gjev «Ugyldig heiltall» for manglande nøkkel).
-    hvis ikkje builtin.starts_with(ukjent, "KAST:") {
-        skriv("FEIL ukjent payload: " + ukjent + "\n")
+    hvis ikkje er_ukjent_payload_kast(ukjent) {
+        skriv("FEIL ukjent payload (bytes): " + ukjent + "\n")
         feil = feil + 1
     }
 
@@ -59,6 +116,24 @@ funksjon start() -> heiltall {
     hvis image.stream_har_image(skadd) {
         skriv("FEIL skadd stream-magic vart godteken\n")
         feil = feil + 1
+    }
+
+    # Tekstvegen (fil_les, slik embedded_runtime_entry.køyr_payload_fil gjer):
+    # først eit image utan NUL (logikken på alle seedar), så det realistiske
+    # med NUL i vertsbinæren.
+    la utan_nul: liste_heiltall = [0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 9]
+    la f_utan = tekstveg_feil(bygg_stream(utan_nul, "vm", vm_ncb), vm_ncb, "utan NUL")
+    hvis f_utan < 0 {
+        skriv("FEIL fil_les avkorta eit image utan NUL\n")
+        feil = feil + 1
+    } ellers {
+        feil = feil + f_utan
+    }
+    la f_med = tekstveg_feil(bin, vm_ncb, "med NUL")
+    hvis f_med < 0 {
+        skriv("INFO fil_les stoppar ved NUL på denne seeden (C-æra); køyr_payload_fil brukar bytes-vegen\n")
+    } ellers {
+        feil = feil + f_med
     }
 
     # har_image_bytes (bytes-vegen for record-image) på eit bygd image.
