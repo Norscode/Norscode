@@ -1,0 +1,92 @@
+// selfhost/native_execution/heap_layout.no
+// Delt heap-/GC-layout for dei native codegenane (F2.2 / X0.1, 2026-09-25).
+//
+// Flytta ordrett frå native_codegen_v2.no; x86-output er byte-identisk (seed-SHA-porten).
+// Absolutte VA-ar tek målet som parameter, slik at arm64/macos kan få eigen base utan å
+// endre kallarane (seeds-plan §6: linux-arm64 = same VA-ar som x86; macos-arm64 = same
+// offsettar, forskyvd base). Førebels er berre "linux-x86_64" definert; andre mål kastar
+// heller enn å gje ein gjetta layout. Storleikar og offsettar er målnøytrale.
+//
+// Baseadresse og kontrollblokk følgjer std.runtime.memory_abi (tests/test_runtime_memory_abi.no).
+
+funksjon _krev_mal(target: tekst) {
+    hvis target != "linux-x86_64" {
+        kast "heap_layout: ingen heap-layout definert for mål " + target
+    }
+}
+
+funksjon HEAP_VA(target: tekst) -> heiltall {
+    _krev_mal(target)
+    returner 7864320   // 0x780000
+}
+// Den breie sjølvhost-VM-en held framleis alle AOT-objekt levande mellom
+// safepoint-ar. Full source-only nc_main har 938 funksjonar og to deterministiske
+// emitterpass; målt bootstrap kom forbi 890 funksjonar etter at traceallokering
+// vart fjerna, før den monotone prototyperuntimen nådde 256 MiB. Med korrekt
+// starts_with/ends_with-semantikk (og dermed full CALL-emittering) nådde den
+// levande 938-funksjonsgrafen den tidlegare 1-GiB-grensa deterministisk ved
+// emit-indeks 687. Segmentet er derfor 2 GiB virtuelt (berre rørte sider blir
+// fysiske) fram til komprimerande native GC kan gjenvinne målebufferane mellom
+// passa; fase-6-minneporten står framleis open.
+// ── GC-layout v3 (2026-09-04) ─────────────────────────────────────────────────
+// Heap [0x600000, GC_HEAP_LIMIT) = 1 GiB allokerbart; ALL GC-metadata ligg OVER heapen.
+// Tidlegare (v2) låg bitmap/handler/mark-stakk/live-map på 0x10400000..0x14700000 MIDT
+// i eit heap-segment som gjekk til 0x14700000, utan tak på bump: bump steig monotont
+// (concat/RT_STR_RAW er rå bump, halen vart berre fri-liste-node) → forbi 0x8600000 hamna
+// mark-bitane i handler-regionen (bitmap var 2 MiB = 128 MiB heap), og forbi 0x10400000
+// vart bitmap/mark-stakk overskrivne av objekt (seed28-krasj: bump=0x11053068 i mark-
+// stakken, garbage strenglengd i concat). Fiks: (a) metadata over 1 GiB-heapen, (b) sweep
+// SET bump = siste levande slutt (halen attvunnen), (c) safepoint-tak + eksplisitt OOM-
+// avslutning (exit 199), (d) vaktside (PROT_NONE) rett under GC_HEAP_LIMIT.
+funksjon GC_HEAP_LIMIT(target: tekst) -> heiltall { _krev_mal(target) returner 1080033280 }   // 0x40600000 (heap-tak; vaktside i [−4096, 0))
+funksjon GC_BITMAP_VA(target: tekst) -> heiltall { _krev_mal(target) returner 1080033280 }    // 0x40600000, 8 MiB (1 bit / 16 B-slot frå 0x600000)
+funksjon GC_MSTACK_VA(target: tekst) -> heiltall { _krev_mal(target) returner 1258291200 }    // 0x4B000000 (etter live-map), 512 MiB lat VA
+funksjon GC_MSTACK_END(target: tekst) -> heiltall { _krev_mal(target) returner 1795162112 }   // 0x6B000000: 64M peikarar = ALLE 16 B-slottar i 1 GiB-heapen → med marker-ved-push (gc_push: éin push per objekt) kan stakken per konstruksjon ikkje renne over. (v5: 32 MiB @0x41000000 = 4M, UTAN dedup → stille dropp av barn ved full stakk = materialize-korrupsjon.)
+funksjon GC_LIVEMAP_VA(target: tekst) -> heiltall { _krev_mal(target) returner 1124073472 }   // 0x43000000, 128 MiB (8M entryar à 16 B)
+funksjon GC_SOFT_LIMIT(target: tekst) -> heiltall { _krev_mal(target) returner 1012924416 }   // 0x3C600000 = tak − 64 MiB: safepoint samlar uansett teljar
+funksjon GC_HARD_LIMIT(target: tekst) -> heiltall { _krev_mal(target) returner 1046478848 }   // 0x3E600000 = tak − 32 MiB: bump ≥ dette ETTER collect → OOM
+funksjon HEAP_SZ() {
+    // GC-modus: segment [0x600000, 0x6B000000) = heap 1 GiB + bitmap + handler (0x40E00000)
+    // + live-map (0x43000000) + mark-stakk 512 MiB (0x4B000000, v6). Lat mapping; berre
+    // brukte sider blir rørde. Paritet-løypa (flagg AV) brukar main sin 2 GiB monotone bump.
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1789394944 }   // 0x6AA00000
+    returner 2147483648
+}
+funksjon HEAP_CONTROLSZ() { returner 64 }
+// Unnatak-handler-region: [frames, frames+0xF0000) 32B-rammer, count @+0xF0000, last_exc
+// @+0xF0008. Under GC ligg han i GC-scratchen på toppen av 256 MB-heapen (0x10600000).
+// UTAN GC er heapen ein 2 GiB monoton bump — full nc_main (bundle-lasting) passerte
+// 256 MB og OVERSKREIV handler-regionen (count=garbage → TRY_BEGIN SIGSEGV @0x4058d7,
+// throw restaurerte rsp frå garbage → ret til stakkadresse). Legg han difor på toppen
+// av 2 GiB-heapen, men UNDER 0x80000000 så abs32-adresseringa (mov rax,[abs32]) held.
+funksjon HANDLER_FRAMES_VA(target: tekst) -> heiltall {
+    _krev_mal(target)
+    hvis miljo_hent("NORSCODE_GC_ALLOC") == "1" { returner 1088421888 }  // 0x40E00000 (over bitmapen, under mark-stakken)
+    returner 2146435072                                                    // 0x7FF00000
+}
+funksjon HANDLER_COUNT_VA(target: tekst) -> heiltall { returner HANDLER_FRAMES_VA(target) + 983040 }    // +0xF0000
+funksjon HANDLER_LASTEXC_VA(target: tekst) -> heiltall { returner HANDLER_FRAMES_VA(target) + 983048 }  // +0xF0008
+// VM-i-VM gjenbruker svært mange små heiltal og boolverdiar. Desse er
+// immutable og kan derfor bu i ein kanonisk cache i starten av heap-segmentet
+// i staden for å fylle den monotone prototypheapen. Området dekkjer
+// -32768..32767 (65536 * 16 byte) og to boolverdiar.
+funksjon SMALL_INT_CACHE_BASE(target: tekst) -> heiltall { returner HEAP_VA(target) + HEAP_CONTROLSZ() }
+funksjon SMALL_INT_CACHE_COUNT() { returner 65536 }
+funksjon BOOL_CACHE_BASE(target: tekst) -> heiltall { returner SMALL_INT_CACHE_BASE(target) + SMALL_INT_CACHE_COUNT() * 16 }
+funksjon CHAR_CACHE_BASE(target: tekst) -> heiltall { returner BOOL_CACHE_BASE(target) + 32 }
+funksjon CHAR_CACHE_COUNT() { returner 256 }
+funksjon HEAP_ALLOC_START(target: tekst) -> heiltall { returner CHAR_CACHE_BASE(target) + CHAR_CACHE_COUNT() * 32 }
+funksjon GC_SAFEPOINT_OFFSET() { returner 32 }
+// v7 (2026-09-24, bump-ratchet-fiks): [HEAP+32] i GC-modus = bytes allokerte via
+// gc_alloc16/gc_alloc_var (fri-liste- OG bump-vegen) sidan siste collect; safepoint-stubben
+// samlar når han ≥ port_dyn og nullstiller han etter collect. Same slot som den gamle
+// safepoint-teljaren (GC_SAFEPOINT_OFFSET; memory_abi/test_runtime_memory_abi pinnar 32);
+// flagg AV (paritet) brukar han framleis som safepoint-teljar.
+funksjon GC_ALLOC_BYTES_VA(target: tekst) -> heiltall { returner HEAP_VA(target) + GC_SAFEPOINT_OFFSET() }
+// Soft-sona (bump ≥ GC_SOFT_LIMIT): collect berre når bump har vakse minst så mykje sidan
+// siste collect (v3 samla ved KVART safepoint → collect-storm utan framgang).
+funksjon GC_SOFT_BUDGET() { returner 8388608 }   // 8 MiB
+// Første allokeringsport (port_dyn ved oppstart, GC-modus): første collect etter 64 KiB
+// allokert, deretter max(port, 64 B × live-n). Sjå init_heap (F2b).
+funksjon GC_INIT_PORT() { returner 65536 }
+funksjon ENVP_OFFSET() { returner 8 }
