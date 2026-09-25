@@ -12,6 +12,8 @@
 #   3 = liste     (u32 tal + element…)
 #   4 = kart      (u32 tal + (nøkkel-streng, verdi)…, i innsetjingsrekkjefølgje)
 #   5 = bool      (1 byte)
+#   6 = desimaltall (8 byte IEEE-754-bitar, little-endian). F3.6: flyttalskonstantar
+#       (PUSH_CONST 3.5) finst i vanlege NCB-ar; utan taggen kasta kodaren «ukjend type».
 
 funksjon _put_u32(buf: liste_heiltall, v: heiltall) -> heiltall {
     legg_til(buf, v & 255)
@@ -82,6 +84,11 @@ funksjon _bytes_til_tekst(bytes: liste_heiltall, pos: heiltall, n: heiltall) -> 
 
 funksjon _encode_inn(buf: liste_heiltall, v) -> heiltall {
     la t = builtin.type(v)
+    hvis t == "desimaltall" {
+        legg_til(buf, 6)
+        _put_i64(buf, builtin.desimal_til_bits(v))
+        returner 0
+    }
     hvis t == "ingenting" eller t == "null" {
         legg_til(buf, 0)
         returner 0
@@ -139,6 +146,15 @@ funksjon bin_encode(v) -> liste_heiltall {
 funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
     la tag = bytes[pos]
     pos = pos + 1
+    hvis tag == 6 {
+        la bits = 0
+        la bi = 7
+        mens bi >= 0 {
+            bits = (bits << 8) | (bytes[pos + bi] & 255)
+            bi = bi - 1
+        }
+        returner [builtin.desimal_frå_bits(bits), pos + 8]
+    }
     hvis tag == 0 { returner [_ingenting_verdi(), pos] }
     hvis tag == 5 {
         la b = bytes[pos] == 1
@@ -199,14 +215,14 @@ funksjon bin_decode(bytes: liste_heiltall) {
 # og er hovudkjelda til Gen1≠Gen2-serialiserings-drifta. Muterer ncb in-place (den
 # blir serialisert og forkasta). Deterministisk + lean.
 funksjon ncb_encode(ncb) -> liste_heiltall {
-    hvis builtin.type(ncb) == "ordbok" og finnes_nøkkel(ncb, "functions") {
+    hvis builtin.type(ncb) == "ordbok" og har_nokkel(ncb, "functions") {
         la fns = ncb["functions"]
         la navn = nøkler(fns)
         la i = 0
         mens i < lengde(navn) {
             la fn = fns[navn[i]]
-            hvis finnes_nøkkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
-            hvis finnes_nøkkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
+            hvis har_nokkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
+            hvis har_nokkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
             i = i + 1
         }
     }
@@ -215,4 +231,212 @@ funksjon ncb_encode(ncb) -> liste_heiltall {
 
 funksjon ncb_decode(bytes: liste_heiltall) {
     returner bin_decode(bytes)
+}
+
+# ── TEKSTVEGEN (F3.6): same byteformat, utan per-teikn-arbeid ─────────────────────
+# Strengane i ein sjølvhosta runtime er byte-baserte og NUL-trygge (chr(0) har lengd
+# 1), so ein binær NCB kan haldast som TEKST: kvar byte er eitt teikn. Då kan ein
+# tekstverdi skrivast som seg sjølv (éin listeinnsetjing, ingen kopi per teikn) og
+# lesast med éin slice. Den gamle liste-vegen (ncb_encode/ncb_decode over
+# liste_heiltall) kosta éin 1-teikns streng og éin listeinnsetjing per BYTE — målt
+# 8,1 GB for ein tung test-NCB før bulk-varint. Tekstvegen kostar per VERDI.
+# Byteformatet er identisk (sjå test_ncb_bin_tekstveg).
+#
+# C-æra-vertane (macOS/Windows-stage0) har NUL-terminerte strengar (chr(0) = ""):
+# der kan ein binær NCB ikkje representerast som tekst. Kallarane sjekkar
+# tekst_nul_trygg() (ncb_serde.binaer_stotta) og held seg til JSON.
+
+funksjon tekst_nul_trygg() -> boolsk {
+    returner lengde(builtin.chr(0)) == 1
+}
+
+# 256 eittteiknsstrengar, laga éin gong per koding (ingen allokering per byte).
+funksjon _chr_tabell() -> liste_tekst {
+    la t: liste_tekst = []
+    la i = 0
+    mens i < 256 {
+        legg_til(t, builtin.chr(i))
+        i = i + 1
+    }
+    returner t
+}
+
+funksjon _tekst_varint(deler: liste_tekst, tab: liste_tekst, v: heiltall) -> heiltall {
+    mens v >= 128 {
+        legg_til(deler, tab[(v & 127) | 128])
+        v = v >> 7
+    }
+    legg_til(deler, tab[v & 127])
+    returner 0
+}
+
+funksjon _encode_tekst_inn(deler: liste_tekst, tab: liste_tekst, v) -> heiltall {
+    la t = builtin.type(v)
+    hvis t == "desimaltall" {
+        legg_til(deler, tab[6])
+        la bits = builtin.desimal_til_bits(v)
+        la bi = 0
+        mens bi < 8 {
+            legg_til(deler, tab[(bits >> (bi * 8)) & 255])
+            bi = bi + 1
+        }
+        returner 0
+    }
+    hvis t == "ingenting" eller t == "null" {
+        legg_til(deler, tab[0])
+        returner 0
+    }
+    hvis t == "boolsk" eller t == "bool" {
+        legg_til(deler, tab[5])
+        hvis v { legg_til(deler, tab[1]) } ellers { legg_til(deler, tab[0]) }
+        returner 0
+    }
+    hvis t == "heltall" eller t == "heiltall" {
+        legg_til(deler, tab[1])
+        _tekst_varint(deler, tab, _zigzag(v))
+        returner 0
+    }
+    hvis t == "tekst" {
+        legg_til(deler, tab[2])
+        _tekst_varint(deler, tab, lengde(v))
+        hvis lengde(v) > 0 { legg_til(deler, v) }
+        returner 0
+    }
+    hvis t == "liste" {
+        legg_til(deler, tab[3])
+        _tekst_varint(deler, tab, lengde(v))
+        for e i v { _encode_tekst_inn(deler, tab, e) }
+        returner 0
+    }
+    hvis t == "ordbok" {
+        legg_til(deler, tab[4])
+        la k = nøkler(v)
+        _tekst_varint(deler, tab, lengde(k))
+        la i = 0
+        mens i < lengde(k) {
+            _encode_tekst_inn(deler, tab, k[i])
+            _encode_tekst_inn(deler, tab, v[k[i]])
+            i = i + 1
+        }
+        returner 0
+    }
+    kast "ncb_bin: ukjend type " + t
+}
+
+# bin_encode_tekst(verdi) → tekst med same bytar som bin_encode(verdi).
+funksjon bin_encode_tekst(v) -> tekst {
+    hvis ikkje tekst_nul_trygg() { kast "ncb_bin: binær koding krev NUL-trygge strengar (sjølvhosta runtime)" }
+    la deler: liste_tekst = []
+    _encode_tekst_inn(deler, _chr_tabell(), v)
+    returner builtin.join(deler, "")
+}
+
+# ncb_encode_tekst(ncb) → tekst. Same stripping av debug-metadata som ncb_encode.
+funksjon ncb_encode_tekst(ncb) -> tekst {
+    hvis builtin.type(ncb) == "ordbok" og har_nokkel(ncb, "functions") {
+        la fns = ncb["functions"]
+        la navn = nøkler(fns)
+        la i = 0
+        mens i < lengde(navn) {
+            la fn = fns[navn[i]]
+            hvis har_nokkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
+            hvis har_nokkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
+            i = i + 1
+        }
+    }
+    returner bin_encode_tekst(ncb)
+}
+
+funksjon _tb(t: tekst, pos: heiltall) -> heiltall {
+    returner builtin.char_code(builtin.slice(t, pos, pos + 1)) & 255
+}
+
+# _get_varint_tekst → [verdi, ny_pos]
+funksjon _get_varint_tekst(t: tekst, pos: heiltall) -> liste {
+    la v = 0
+    la skift = 0
+    mens sann {
+        la b = _tb(t, pos)
+        pos = pos + 1
+        v = v | ((b & 127) << skift)
+        hvis b < 128 { returner [v, pos] }
+        skift = skift + 7
+    }
+    returner [v, pos]
+}
+
+# _decode_tekst_inn(t, pos) → [verdi, ny_pos]
+funksjon _decode_tekst_inn(t: tekst, pos: heiltall) -> liste {
+    hvis pos >= lengde(t) { kast "ncb_bin: avkorta binær NCB" }
+    la tag = _tb(t, pos)
+    pos = pos + 1
+    hvis tag == 6 {
+        hvis pos + 8 > lengde(t) { kast "ncb_bin: avkorta binær NCB (desimaltall)" }
+        la bits = 0
+        la bi = 7
+        mens bi >= 0 {
+            bits = (bits << 8) | _tb(t, pos + bi)
+            bi = bi - 1
+        }
+        returner [builtin.desimal_frå_bits(bits), pos + 8]
+    }
+    hvis tag == 0 { returner [_ingenting_verdi(), pos] }
+    hvis tag == 5 {
+        la b = _tb(t, pos) == 1
+        returner [b, pos + 1]
+    }
+    hvis tag == 1 {
+        la r = _get_varint_tekst(t, pos)
+        returner [_unzigzag(r[0]), r[1]]
+    }
+    hvis tag == 2 {
+        la rn = _get_varint_tekst(t, pos)
+        la n = rn[0]
+        pos = rn[1]
+        hvis pos + n > lengde(t) { kast "ncb_bin: avkorta binær NCB (tekst)" }
+        la s = ""
+        hvis n > 0 { s = builtin.slice(t, pos, pos + n) }
+        returner [s, pos + n]
+    }
+    hvis tag == 3 {
+        la rn = _get_varint_tekst(t, pos)
+        la n = rn[0]
+        pos = rn[1]
+        la ut: liste = []
+        la i = 0
+        mens i < n {
+            la r = _decode_tekst_inn(t, pos)
+            legg_til(ut, r[0])
+            pos = r[1]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    hvis tag == 4 {
+        la rn = _get_varint_tekst(t, pos)
+        la n = rn[0]
+        pos = rn[1]
+        la ut = {}
+        la i = 0
+        mens i < n {
+            la kr = _decode_tekst_inn(t, pos)
+            pos = kr[1]
+            la vr = _decode_tekst_inn(t, pos)
+            pos = vr[1]
+            ut[kr[0]] = vr[0]
+            i = i + 1
+        }
+        returner [ut, pos]
+    }
+    kast "ncb_bin: ukjend tag " + tekst_fra_heltall(tag)
+}
+
+# bin_decode_tekst(t, frå) → verdi. frå = første byte etter eventuelt hovud.
+funksjon bin_decode_tekst(t: tekst, frå: heiltall) {
+    la r = _decode_tekst_inn(t, frå)
+    returner r[0]
+}
+
+funksjon ncb_decode_tekst(t: tekst, frå: heiltall) {
+    returner bin_decode_tekst(t, frå)
 }
