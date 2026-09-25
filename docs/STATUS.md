@@ -76,6 +76,13 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   felles AOT-runtime for liste, tekstfunksjonar og kartoppslag (exit 25).
   ASCII `lower`/`upper` er emitterte runtime-funksjonar i same Norscode-bytebuffer;
   dei gamle faste legacy-peikarane blir ikkje brukte.
+- `bygg-native --target <mål>` (F3.7) tek `linux-x86_64`, `linux-arm64`, `macos-arm64` og
+  `windows-x86_64`. Førehandsbygd (kryss-)codegen for (mål, vert) ligg på
+  `bootstrap/native_codegen_<mål>_on_<vert>.elf` (x86 på x86: legacy-namnet
+  `bootstrap/native_codegen_x86_64.elf`) med `.srchash`/`.depshash` over codegen-kjelda og
+  heile `bruk`-lukkinga (`selfhost/native_execution/codegen_prebuilt.no`). Manglar eller er
+  han stale, fell bygg-native tilbake til tolka codegen med åtvaring; `windows-x86_64` har
+  ingen tolka fallback før PE-codegen finst (W2/W5).
 - `platform_readiness_v3600` er køyrd med `NORSCODE_VERIFY_LINUX_DOCKER=1`:
   `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`
   og `production_ready_unix=true` etter runtime-gap-attestasjon i Docker.

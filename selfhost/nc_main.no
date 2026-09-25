@@ -12,6 +12,8 @@ bruk std.socket som sok
 bruk std.runtime_filesystem som native_fs
 bruk std.runtime.process_abi som bygg_process_abi
 bruk selfhost.http_response som http_response
+// F3.7: mållista, codegen-kjelda og førehandsbygd (kryss-)codegen per mål for bygg-native.
+bruk selfhost.native_execution.codegen_prebuilt som cgp
 // Reine erstatningar for VM-builtins utan native rutine (gap-ruting i
 // native_codegen_v2) — må vere i bunten for at den ferske seeden skal ha dei.
 bruk std.native_gap som native_gap
@@ -2429,6 +2431,7 @@ funksjon nc_bygg_native_bruk() -> heiltall {
     skriv("bruk: nc bygg-native --target macos-arm64 [--ncb] fil ut\n")
     skriv("bruk: nc bygg-native --target linux-x86_64 [--ncb] fil ut\n")
     skriv("bruk: nc bygg-native --target linux-arm64 [--ncb] fil ut\n")
+    skriv("bruk: nc bygg-native --target windows-x86_64 [--ncb] fil ut   (krev førehandsbygd kryss-codegen)\n")
     returner 0
 }
 
@@ -2489,28 +2492,23 @@ funksjon nc_bygg_native_køyr_codegen(src_sti: tekst) -> heiltall {
     returner host_exec_ncb_json(normaliser_json_kontrollteikn(ncb_json))
 }
 
-// Rask veg for linux-x86_64: den førehandsbygde codegen-ELF-en (bootstrap/
-// native_codegen_x86_64.elf) gjer same jobb på sekund, medan tolka
-// native_codegen_v2 via host_exec_ncb_json brukar >40 min (test_linux_x86_64_aot_cli
-// fekk 124). Same kjeldehash-port som tools/ncb_to_elf.no: ELF-en blir berre brukt
-// når .srchash svarar til gjeldande native_codegen_v2 + ncb_serde og .depshash til
-// heap_layout + gap_ruter (codegen-importane sidan F2, 2026-09-25). Returnerer -1
-// når vegen ikkje kan brukast (då fell kallaren tilbake til tolka codegen).
-funksjon nc_bygg_native_prebuilt_x86(root: tekst, ncb: tekst, output: tekst) -> heiltall {
-    la prebuilt = root + "/bootstrap/native_codegen_x86_64.elf"
-    hvis ikkje builtin.fil_finnes(prebuilt) eller ikkje builtin.fil_finnes(prebuilt + ".srchash") eller ikkje builtin.fil_finnes(prebuilt + ".depshash") { returner -1 }
-    la venta = ""
-    la venta_deps = ""
-    la faktisk_deps = ""
-    la faktisk = ""
-    prøv {
-        venta = builtin.trim(fil_les(prebuilt + ".srchash"))
-        faktisk = builtin.sha256(fil_les(root + "/selfhost/native_execution/native_codegen_v2.no") + fil_les(root + "/selfhost/ncb_serde.no"))
-        venta_deps = builtin.trim(fil_les(prebuilt + ".depshash"))
-        faktisk_deps = builtin.sha256(fil_les(root + "/selfhost/native_execution/heap_layout.no") + fil_les(root + "/selfhost/native_execution/gap_ruter.no"))
-    } fang (e) { returner -1 }
-    hvis venta == "" eller faktisk != venta { returner -1 }
-    hvis venta_deps == "" eller faktisk_deps != venta_deps { returner -1 }
+// Rask veg (F3.7): førehandsbygd codegen for (mål, vert) — bootstrap/native_codegen_
+// <mål>_on_<vert>.elf, eller legacy bootstrap/native_codegen_x86_64.elf for x86 på x86 —
+// gjer same jobb på sekund, medan tolka codegen via host_exec_ncb_json brukar 30–95 min
+// (test_linux_x86_64_aot_cli fekk 124). selfhost.native_execution.codegen_prebuilt eig
+// stiane og hashporten (.srchash = codegen-kjelde + ncb_serde, .depshash = resten av
+// bruk-lukkinga); same port som tools/ncb_to_elf.no og tests/test_native_codegen_srchash.no.
+// Returnerer -1 når vegen ikkje kan brukast (manglar/stale/ukjend vert) etter ei tydeleg
+// åtvaring; kallaren fell då tilbake til tolka codegen når målet tillèt det.
+funksjon nc_bygg_native_prebuilt(root: tekst, target: tekst, ncb: tekst, output: tekst) -> heiltall {
+    la val = cgp.vel(root, target, cgp.vert_plattform())
+    hvis tekst(val["status"]) != "ok" {
+        la fallback = "ingen tolka codegen for " + target
+        hvis cgp.tolka_tillaten(target) { fallback = "tolka codegen (" + cgp.codegen_kjelde(target) + ", kan ta 30–95 min)" }
+        skriv("[bygg-native] ÅTVARING: " + tekst(val["melding"]) + " → " + fallback + "\n")
+        returner -1
+    }
+    la prebuilt = tekst(val["sti"])
     la ut_dir = _dirname(output)
     // cwd "" = arv arbeidskatalogen, so relative NC_INPUT/NC_OUTPUT blir løyste likt.
     la req = bygg_process_abi.request(prebuilt, [], "", "", 1800000, 65536)
@@ -2519,6 +2517,7 @@ funksjon nc_bygg_native_prebuilt_x86(root: tekst, ncb: tekst, output: tekst) -> 
         "NORSCODE_ROOT": root,
         "NC_INPUT": ncb,
         "NC_OUTPUT": output,
+        "NC_TARGET": target,
         "NORSCODE_ENABLE_EXEC_PROSESS": "1",
         "NORSCODE_GC_ALLOC": miljo_hent("NORSCODE_GC_ALLOC"),
         "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
@@ -2540,7 +2539,7 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
         returner 2
     }
     la target = tekst(argv[3])
-    hvis target != "macos-arm64" og target != "linux-x86_64" og target != "linux-arm64" {
+    hvis ikkje cgp.er_mål(target) {
         nc_bygg_native_bruk()
         returner 2
     }
@@ -2578,14 +2577,18 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
 
     miljo_sett("NC_INPUT", faktisk_ncb)
     miljo_sett("NC_OUTPUT", output)
-    la codegen = root + "/selfhost/native_execution/native_codegen_v2.no"
-    hvis target == "macos-arm64" { codegen = root + "/selfhost/native_execution/macho_arm64_codegen.no" }
-    hvis target == "linux-arm64" { codegen = root + "/selfhost/native_execution/elf_arm64_codegen.no" }
-    // Codegen køyrer som Norscode-NCB direkte i native host. Det bevarer
-    // etikett-/funksjonsidentiteten og unngår eit feilaktig VM-i-VM-lag.
-    la status = -1
-    hvis target == "linux-x86_64" { status = nc_bygg_native_prebuilt_x86(root, faktisk_ncb, output) }
-    hvis status < 0 { status = nc_bygg_native_køyr_codegen(codegen) }
+    // Førehandsbygd (kryss-)codegen for (mål, vert) først; elles tolka codegen-kjelde,
+    // som køyrer som Norscode-NCB direkte i native host (bevarer etikett-/funksjons-
+    // identiteten og unngår eit feilaktig VM-i-VM-lag).
+    la status = nc_bygg_native_prebuilt(root, target, faktisk_ncb, output)
+    hvis status < 0 {
+        hvis cgp.tolka_tillaten(target) {
+            status = nc_bygg_native_køyr_codegen(root + "/" + cgp.codegen_kjelde(target))
+        } ellers {
+            skriv("nc bygg-native: " + target + " krev førehandsbygd kryss-codegen (bootstrap/native_codegen_" + target + "_on_<vert>); PE-codegen kjem i W2/W5\n")
+            status = 2
+        }
+    }
     hvis mellombels != "" { nc_slett_fil_trygt(mellombels) }
     hvis status != 0 { returner status }
     la modus = native_fs.native_sett_modus_sti(output, 493)
@@ -2879,7 +2882,6 @@ funksjon nc_direkte_verktøysti(cmd: tekst) -> tekst {
     hvis cmd == "ncb-to-elf" { returner "tools/ncb_to_elf.no" }
     hvis cmd == "package-linux-app" { returner "tools/package-linux-app.no" }
     hvis cmd == "docker-build-linux" { returner "tools/docker-build-linux.no" }
-    hvis cmd == "build-linux-stage0-docker" { returner "tools/build_linux_x86_64_stage0_docker_v3601.no" }
     hvis cmd == "package-windows-app" { returner "tools/package-windows-app.no" }
     hvis cmd == "build-windows-app-layout" { returner "tools/build-windows-app-layout.no" }
     hvis cmd == "verify-macos-app" { returner "tools/verify-macos-app.no" }
@@ -3090,7 +3092,6 @@ funksjon nc_direkte_bruk(cmd: tekst) -> tekst {
     hvis cmd == "ncb-to-elf" { returner "bruk: nc ncb-to-elf fil.ncb.json ut.elf" }
     hvis cmd == "package-linux-app" { returner "bruk: nc package-linux-app [--version VER] [--format appdir|tarball|all|appimage-adapter]" }
     hvis cmd == "docker-build-linux" { returner "bruk: nc docker-build-linux [--output FIL]" }
-    hvis cmd == "build-linux-stage0-docker" { returner "bruk: nc build-linux-stage0-docker" }
     hvis cmd == "package-windows-app" { returner "bruk: nc package-windows-app [--version VER] <EXE_PATH>" }
     hvis cmd == "build-windows-app-layout" { returner "bruk: nc build-windows-app-layout [--out DIR] [--name NAMN] <EXE_PATH>" }
     hvis cmd == "verify-macos-app" { returner "bruk: nc verify-macos-app [APP_PATH]" }
@@ -3256,7 +3257,6 @@ funksjon nc_forbered_direkte_miljø(cmd: tekst, argv: liste_tekst) -> boolsk {
         miljo_sett("NORSCODE_DOCKER_BUILD_LINUX_OUTPUT", nc_root_sti(output, "dist/norscode-linux-x86_64"))
         returner sann
     }
-    hvis cmd == "build-linux-stage0-docker" { returner tal == 2 }
     hvis cmd == "package-windows-app" {
         la version = ""
         la exe = ""
