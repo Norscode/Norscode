@@ -1,25 +1,204 @@
-// Materialiser VM-loader-fixtures med Norscode-eigd binær filflyt.
+// Materialiser VM-loader-fixtures frå Norscode-kjelde (JSON-avvikling J1d).
+//
+// Pluginane i tests/fixtures/vm_loader/*.no blir kompilerte med den aktive
+// Norscode-runtimen (NORSCODE_CMD=compile) til build/vm_plugin_*.ncb.json.
+// Den manipulerte pluginen er v1 med éin konstant bytt ut, og trust-storen
+// blir skriven med SHA-256 av dei genererte filene. Det finst ingen committa
+// bytekode for loader-testane.
+//
+// Brukt av CI-steget «Install VM loader fixtures» (start: genererer alltid)
+// og av tools/nc_test.no før test_vm_dynamic_loader* og
+// test_vm_plugin_capability_isolation (sikre: genererer berre når kjelda
+// eller dei genererte filene ikkje lenger stemmer, så parallelle shards ikkje
+// skriv over filer som ein annan shard les).
 
 bruk std.filops som filops
+bruk std.sha256 som sha256
+bruk tools.process_runner som prosess
 
-funksjon start() -> heiltall {
-    hvis ikkje filops.lag_katalogar("build") { returner 1 }
-    la namn = [
-        "vm_plugin_v1.ncb.json",
-        "vm_plugin_v2.ncb.json",
-        "vm_plugin_disk.ncb.json",
-        "vm_plugin_tampered.ncb.json",
-        "vm_trust.json"
-    ]
+funksjon miljø_verdi(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    hvis builtin.starts_with(sti, "./") { returner root + "/" + builtin.slice(sti, 2, lengde(sti)) }
+    returner root + "/" + sti
+}
+
+// Runtimen som kompilerer pluginane: NC_NATIVE (same som testløparen), elles
+// dist/norscode_native, elles bin/nc.
+funksjon finn_native(root: tekst) -> tekst {
+    la frå_env = miljø_verdi("NC_NATIVE")
+    hvis frå_env != "" { returner absolutt(root, frå_env) }
+    hvis builtin.fil_finnes(root + "/dist/norscode_native") { returner root + "/dist/norscode_native" }
+    returner root + "/bin/nc"
+}
+
+// SHA-256 over tekst: den innebygde (rask på alle seedar) med std.sha256 som
+// reserve. Same verdi som vm_module_verify_trust reknar ut (sha256.hash(fil_les)).
+funksjon hash_tekst(data: tekst) -> tekst {
+    prøv { returner builtin.sha256(data) }
+    fang (e) { returner sha256.hash(data) }
+    returner sha256.hash(data)
+}
+
+funksjon plugin_namn() -> liste_tekst {
+    returner ["vm_plugin_v1", "vm_plugin_v2", "vm_plugin_disk"]
+}
+
+funksjon kjelde_sti(root: tekst, namn: tekst) -> tekst {
+    returner root + "/tests/fixtures/vm_loader/" + namn + ".no"
+}
+
+funksjon ut_sti(root: tekst, namn: tekst) -> tekst {
+    returner root + "/build/" + namn + ".ncb.json"
+}
+
+funksjon stempel_sti(root: tekst) -> tekst {
+    returner root + "/build/vm_loader_fixtures/kjelde.sha256"
+}
+
+// Eksplisitt compile-miljø. Alle kommandoval er sette (òg til tom verdi), så
+// arva NORSCODE_CMD/NORSCODE_RUN_* frå ein CI-orkestrator eller testløparen
+// ikkje kan styre barnet. Loaderen i vm.no les berre JSON-tekst, så
+// NORSCODE_NCB_BINARY er eksplisitt av.
+funksjon compile_miljø(root: tekst, src: tekst, ut: tekst) -> ordbok_tekst {
+    returner {
+        "TMPDIR": "/tmp",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_CMD": "compile",
+        "NORSCODE_FILE": src,
+        "NORSCODE_OUTPUT": ut,
+        "NORSCODE_MODULE": "__main__",
+        "NORSCODE_RUN_CMD": "",
+        "NORSCODE_RUN_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_VM_SOURCE": "0",
+        "NORSCODE_NCB_BINARY": "0",
+        "NORSCODE_NATIVE_TOOL_CACHE": "0",
+        "NORSCODE_VM_FAST": "1",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+// Kompiler til ein mellomstad under build/vm_loader_fixtures og kopier deretter
+// til build/: filene testane les blir aldri sletta eller halvskrivne under
+// sjølve kompileringa.
+funksjon kompiler_plugin(root: tekst, native: tekst, namn: tekst) -> boolsk {
+    la src = kjelde_sti(root, namn)
+    la mellom = root + "/build/vm_loader_fixtures/" + namn + ".ncb.json"
+    hvis ikkje builtin.fil_finnes(src) {
+        skriv("FEIL: manglar pluginkjelde " + src + "\n")
+        returner usann
+    }
+    filops.slett_fil(mellom)
+    la res = prosess.køyr_liste(native, [], root, compile_miljø(root, src, mellom), 300000)
+    hvis tekst(res[0]) != "0" eller ikkje builtin.fil_finnes(mellom) {
+        skriv("FEIL: kunne ikkje kompilere " + namn + " med " + native + " (exit " + tekst(res[0]) + ")\n")
+        skriv(tekst(res[1]) + "\n" + tekst(res[2]) + "\n")
+        returner usann
+    }
+    la ncb = fil_les(mellom)
+    hvis builtin.index_of(ncb, "\"format\":\"norscode-bytecode-v1\"") < 0 {
+        skriv("FEIL: " + namn + " er ikkje norscode-bytecode-v1 JSON\n")
+        returner usann
+    }
+    fil_skriv(ut_sti(root, namn), ncb)
+    returner sann
+}
+
+funksjon kjelde_stempel(root: tekst) -> tekst {
+    la samla = "vm-loader-fixtures-v1"
+    la namn = plugin_namn()
     la i: heiltall = 0
     mens i < lengde(namn) {
-        hvis ikkje filops.kopier2("tests/fixtures/vm_loader/" + namn[i], "build/" + namn[i]) {
-            skriv("FEIL: kunne ikkje materialisere " + namn[i] + "\n")
-            returner 1
-        }
+        samla = samla + "|" + namn[i] + "|" + fil_les(kjelde_sti(root, namn[i]))
         i = i + 1
     }
-    skriv("VM-loader-fixtures materialiserte\n")
+    returner hash_tekst(samla)
+}
+
+// Manipulert modul: v1-bytekoden med v1-konstanten bytt ut.
+funksjon manipulert(v1: tekst) -> tekst {
+    returner builtin.replace(v1, "[\"PUSH_CONST\",\"v1\"]", "[\"PUSH_CONST\",\"forfalska\"]")
+}
+
+// Trust-storen for dei genererte filene. Hashen er over teksten slik
+// vm_module_verify_trust les han (fil_les). Den manipulerte fila får v1-hashen.
+funksjon trust_tekst(root: tekst) -> tekst {
+    la h_v1 = hash_tekst(fil_les(ut_sti(root, "vm_plugin_v1")))
+    la h_v2 = hash_tekst(fil_les(ut_sti(root, "vm_plugin_v2")))
+    la h_disk = hash_tekst(fil_les(ut_sti(root, "vm_plugin_disk")))
+    returner "{\"build/vm_plugin_v1.ncb.json\":\"" + h_v1 + "\"," +
+        "\"build/vm_plugin_v2.ncb.json\":\"" + h_v2 + "\"," +
+        "\"build/vm_plugin_disk.ncb.json\":\"" + h_disk + "\"," +
+        "\"build/vm_plugin_tampered.ncb.json\":\"" + h_v1 + "\"}"
+}
+
+funksjon installer(root: tekst, native: tekst) -> heiltall {
+    hvis ikkje filops.lag_katalogar(root + "/build/vm_loader_fixtures") { returner 1 }
+    filops.slett_fil(stempel_sti(root))
+    la namn = plugin_namn()
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        hvis ikkje kompiler_plugin(root, native, namn[i]) { returner 1 }
+        i = i + 1
+    }
+
+    // Manipulert modul: v1-bytekode med éin konstant bytt ut. Trust-storen
+    // held v1-hashen for fila, så loaderen må avvise henne.
+    la v1 = fil_les(ut_sti(root, "vm_plugin_v1"))
+    la tampered = manipulert(v1)
+    hvis tampered == v1 {
+        skriv("FEIL: fann ikkje v1-konstanten å manipulere i vm_plugin_v1.ncb.json\n")
+        returner 1
+    }
+    fil_skriv(root + "/build/vm_plugin_tampered.ncb.json", tampered)
+    fil_skriv(root + "/build/vm_trust.json", trust_tekst(root))
+    fil_skriv(stempel_sti(root), kjelde_stempel(root))
+    skriv("VM-loader-fixtures genererte frå kjelde (vm_plugin_v1/v2/disk/tampered + vm_trust.json)\n")
     returner 0
 }
 
+// Gyldig = stempelet svarar til kjelda, og trust-storen svarar til dei
+// genererte filene som ligg i build/ no.
+funksjon er_gyldig(root: tekst) -> boolsk {
+    prøv {
+        hvis ikkje builtin.fil_finnes(stempel_sti(root)) { returner usann }
+        hvis ikkje builtin.fil_finnes(root + "/build/vm_trust.json") { returner usann }
+        hvis ikkje builtin.fil_finnes(root + "/build/vm_plugin_tampered.ncb.json") { returner usann }
+        la namn = plugin_namn()
+        la i: heiltall = 0
+        mens i < lengde(namn) {
+            hvis ikkje builtin.fil_finnes(ut_sti(root, namn[i])) { returner usann }
+            i = i + 1
+        }
+        hvis builtin.trim(fil_les(stempel_sti(root))) != kjelde_stempel(root) { returner usann }
+        hvis fil_les(root + "/build/vm_plugin_tampered.ncb.json") != manipulert(fil_les(ut_sti(root, "vm_plugin_v1"))) {
+            returner usann
+        }
+        returner fil_les(root + "/build/vm_trust.json") == trust_tekst(root)
+    } fang (e) {
+        returner usann
+    }
+    returner usann
+}
+
+funksjon sikre(root: tekst, native: tekst) -> heiltall {
+    hvis er_gyldig(root) { returner 0 }
+    returner installer(root, native)
+}
+
+funksjon start() -> heiltall {
+    la root = miljø_verdi("NORSCODE_ROOT")
+    hvis root == "" {
+        prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." }
+    }
+    returner installer(root, finn_native(root))
+}

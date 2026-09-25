@@ -28,6 +28,9 @@ funksjon executable(sti: tekst) -> bool {
 
 funksjon køyr_native(native: tekst, root: tekst, miljø: ordbok_tekst, timeout_ms: heiltall) -> boolsk {
     la argv: liste_tekst = []
+    hvis tekst(miljø["NORSCODE_CMD"]) == "run" {
+        argv = ["run", tekst(miljø["NORSCODE_FILE"])]
+    }
     hvis tekst(miljø["NORSCODE_CMD"]) == "run-ncb-pure" {
         la program = tekst(miljø["NORSCODE_FILE"])
         hvis har_nokkel(miljø, "NORSCODE_L5B_VM_WRAPPER_NCB") {
@@ -411,6 +414,56 @@ funksjon materialiser_source_generasjon(root: tekst, native: tekst, host_ncb: te
     returner sann
 }
 
+// J1b: cache-på-modusen (selvstendighet 7a) les ikkje lenger committa
+// bootstrap/precompiled/*.ncb.json. Cachen blir generert frå den verifiserte
+// L5 Gen1 (build/l5/compiler_v1.ncb.json + raw-bundler-sidecaren) av
+// tools/materialize_l5_precompiled.no til denne katalogen under build/.
+funksjon l5b_cachekatalog(root: tekst) -> tekst {
+    returner root + "/build/l5/precompiled"
+}
+
+funksjon materialiser_l5b_cache(root: tekst, native: tekst, v1: tekst, raw_bundler: tekst) -> bool {
+    la katalog = l5b_cachekatalog(root)
+    prøv { builtin.mkdir_p(katalog) } fang (e) {
+        linje("  [FEIL] kan ikkje opprette " + katalog + ": " + tekst(e))
+        returner usann
+    }
+    linje("  [L5b-cache] materialiserer frå " + v1 + " -> " + katalog)
+    hvis ikkje køyr_native(native, root, {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_FAST": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+        "NORSCODE_L5_GEN1": v1,
+        "NORSCODE_L5_RAW_BUNDLER": raw_bundler,
+        "NORSCODE_L5_PRECOMPILED_DIR": katalog,
+        "NORSCODE_CMD": "run",
+        "NORSCODE_FILE": root + "/tools/materialize_l5_precompiled.no"
+    }, 900000) { returner usann }
+    hvis ikkje (fil_finst(katalog + "/l5b_raw_bundler.ncb.json") og fil_finst(katalog + "/vm-source-part-count.txt")) {
+        returner usann
+    }
+    // Legacy v9400 (J3): så lenge den committa hybridbunten (kompilatoren til
+    // C-æra-macOS-seeden) står, må han kunne byggjast på nytt frå den genererte
+    // cachen som eit superset. Erstattar test_hybrid_compiler_bundle_repro.
+    hvis fil_finst(root + "/build/v9400/hybrid_compiler_bundle_v9400.ncb.json") {
+        linje("  [L5b-cache] v9400-superset: hybridbunt frå generert cache mot committa v9400")
+        hvis ikkje køyr_native(native, root, {
+            "NORSCODE_ROOT": root,
+            "NORSCODE_VM_FAST": "1",
+            "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+            "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp",
+            "NORSCODE_HYBRID_PRECOMPILED_DIR": katalog,
+            "NORSCODE_HYBRID_BUNDLE_OUT": root + "/build/l5/hybrid_v9400_repro.ncb.json",
+            "NORSCODE_CMD": "run",
+            "NORSCODE_FILE": root + "/tools/verify_hybrid_bundle_v9400_superset.no"
+        }, 900000) { returner usann }
+    } ellers {
+        linje("  [L5b-cache] v9400-superset: ingen committa v9400-bunt (J3 ferdig) — ingenting å samanlikne")
+    }
+    returner sann
+}
+
 funksjon bundle_via_vm(root: tekst, native: tekst, host_ncb: tekst, utfil: tekst, progress: tekst, source_dir: tekst, specs_tekst: tekst) -> bool {
     linje("  [L5b-bundle] førebur " + utfil)
     hvis slett_hvis_finst(utfil) != 0 { returner usann }
@@ -450,15 +503,17 @@ funksjon bundle_via_vm(root: tekst, native: tekst, host_ncb: tekst, utfil: tekst
     hvis source_dir != "" {
         miljø["NORSCODE_BUNDLE_RAW_STREAM_CANDIDATES"] = "1"
         hvis builtin.ends_with(utfil, ".lazy.ncb.json") { miljø["NORSCODE_L5B_RAW_FORMAT"] = "lazy-json" }
-        hvis builtin.ends_with(source_dir, "/bootstrap/precompiled") {
+        hvis source_dir == l5b_cachekatalog(root) {
             // Cache-kandidatane er sjølve raw-bundler-driverar. Dermed kan A
             // køyrast direkte for å produsere B utan ein uverifisert host.
             miljø["NORSCODE_BUNDLE_ENTRY_OVERRIDE"] = "selfhost.l5b_raw_bundler.start"
         }
         linje("  [L5b-bundle] kjeldemodus klart")
         la vm_delar: heiltall = 0
-        la fragmentert_source = ikkje builtin.ends_with(source_dir, "/bootstrap/precompiled")
-        hvis fragmentert_source og builtin.contains(specs_tekst, "selfhost.vm=") {
+        la fragmentert_source = source_dir != l5b_cachekatalog(root)
+        // Den genererte cachen (J1b) har òg vm-delar per modul
+        // (materialize_l5_precompiled), så vm-teljaren blir lesen i båe modusar.
+        hvis builtin.contains(specs_tekst, "selfhost.vm=") {
             vm_delar = les_source_fragment_tal(source_dir, "vm")
         }
         // Set alltid eksplisitt. Tom/manglande miljøverdi kan ikkje sendast
@@ -582,8 +637,12 @@ funksjon start() -> heiltall {
         // måler cacheinnhald mot kjelde, ikkje deterministisk sjølvkompilering.
         la kandidat_a = root + "/build/l5b/compiler_cache_a.lazy.ncb.json"
         v2 = root + "/build/l5b/compiler_cache_b.lazy.ncb.json"
-        la cache_source = root + "/bootstrap/precompiled"
-        linje("[2/3] Cache-på: kandidat A byggjer kandidat B via VM...")
+        la cache_source = l5b_cachekatalog(root)
+        linje("[2/3] Cache-på: generert cache frå L5 Gen1, kandidat A byggjer kandidat B via VM...")
+        hvis ikkje materialiser_l5b_cache(root, native, v1, l5_raw_bundler) {
+            linje("  [FEIL] materialisering av L5b-cachen feila")
+            returner 1
+        }
         hvis ikkje bundle_via_vm(root, native, l5_raw_bundler, kandidat_a, progress, cache_source, specs_tekst) {
             hvis fil_finst(progress) { linje("  Siste fremdrift: " + trim(builtin.fil_les(progress))) }
             linje("  [FEIL] cache-kandidat A feila")
