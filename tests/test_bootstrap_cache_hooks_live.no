@@ -89,13 +89,42 @@ funksjon manifestpost(modul: tekst, kjelde_hash: tekst, artefakt_logisk: tekst, 
     }
 }
 
-funksjon skriv_manifest(sti: tekst, postar) -> heiltall {
-    fil_skriv(sti, json_skriv({"schema": selfhost_abi(), "modules": postar}))
+funksjon skriv_manifest(sti: tekst, fp: tekst, postar) -> heiltall {
+    fil_skriv(sti, json_skriv({"schema": selfhost_abi(), "compiler_fingerprint": fp, "modules": postar}))
     returner 0
 }
 
 funksjon fil_hash(sti: tekst) -> tekst {
     returner builtin.sha256_bytes(fil_les_binær(sti))
+}
+
+// Kopi av bundler.selfhost_cache_compiler_fingerprint (baka): SHA-256 av
+// runtime-binæren + kjeldehashane til kompilatormodulane
+// (bundler.modulcache_compiler_fingerprint). Kontrakttesten held tekstane like.
+funksjon modulcache_compiler_fingerprint(root: tekst) -> tekst {
+    la filer = [
+        "selfhost/kompiler.no", "selfhost/parser.no", "selfhost/lexer/lexer_m1.no",
+        "selfhost/compiler/semantic.no", "selfhost/compiler/ir_to_bytecode.no"
+    ]
+    la materiale = "norscode-incremental-module-cache-v1|ncb-v1|module-globals-v1" + "\n"
+    la i: heiltall = 0
+    mens i < lengde(filer) {
+        la sti = root + "/" + filer[i]
+        hvis builtin.fil_finnes(sti) {
+            materiale = materiale + filer[i] + " " +
+                builtin.sha256_bytes(builtin.fil_les_binær(sti)) + "\n"
+        } ellers {
+            materiale = materiale + filer[i] + " missing\n"
+        }
+        i = i + 1
+    }
+    returner builtin.sha256(materiale)
+}
+
+funksjon selfhost_cache_compiler_fingerprint(root: tekst, runtime: tekst) -> tekst {
+    la runtime_hash = builtin.sha256_bytes(builtin.fil_les_binær(runtime))
+    returner builtin.sha256(selfhost_abi() + "\nruntime " + runtime_hash +
+        "\ncompiler " + modulcache_compiler_fingerprint(root) + "\n")
 }
 
 funksjon start() -> heiltall {
@@ -113,6 +142,11 @@ funksjon start() -> heiltall {
     builtin.mkdir_p(cache + "/precompiled")
     la manifest = cache + "/precompiled/manifest.json"
     la postar = {}
+    // Kompilatorfingeravtrykket er for binæren som kompilerer ved bom, altså
+    // barneprosessane. Med NC_HOOKS_LIVE_RUNTIME er det ein wrapper rundt same
+    // seed som køyrer testen; difor den eigne binæren, ikkje «runtime».
+    la fp = selfhost_cache_compiler_fingerprint(root, tekst(info["executable"]))
+    assert_eq(lengde(fp), 64)
 
     // ── (c) vertsstyrt selfhost.vm ──────────────────────────────────────────
     // Orakel: vm.no kompilert som éin modul (selfhost.vm) i ein eigen
@@ -136,7 +170,7 @@ funksjon start() -> heiltall {
     assert(lengde(orakel_fns) > 50)
     postar["selfhost/vm.no"] = manifestpost("selfhost.vm", fil_hash(root + "/selfhost/vm.no"),
                                             "bootstrap/precompiled/selfhost_vm.ncb.json", fil_hash(vm_art))
-    skriv_manifest(manifest, postar)
+    skriv_manifest(manifest, fp, postar)
 
     la p_vm = dir + "/p_vm.no"
     fil_skriv(p_vm, "bruk selfhost.vm som vm\nfunksjon start() -> heiltall { returner 0 }\n")
@@ -200,7 +234,7 @@ funksjon start() -> heiltall {
     la artefakt_hash = fil_hash(artefakt)
     postar["selfhost/ast.no"] = manifestpost("selfhost.ast", kjelde_hash,
                                              "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
-    skriv_manifest(manifest, postar)
+    skriv_manifest(manifest, fp, postar)
 
     la treff_ut = dir + "/p_ast_treff.ncb.json"
     la treff = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, treff_ut)
@@ -225,15 +259,29 @@ funksjon start() -> heiltall {
     postar["selfhost/ast.no"] = manifestpost("selfhost.ast",
         "0000000000000000000000000000000000000000000000000000000000000000",
         "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
-    skriv_manifest(manifest, postar)
+    skriv_manifest(manifest, fp, postar)
     la stale = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_stale.ncb.json")
     assert(har(stale, "selfhost-miss selfhost.ast source-hash"))
     assert(ikkje har(stale, "selfhost-hit"))
 
+    // Anna kompilator (feil compiler_fingerprint, t.d. ein cache som overlevde
+    // ein reseed) → miss, sjølv om kjelde- og artefakthash stemmer.
+    postar["selfhost/ast.no"] = manifestpost("selfhost.ast", kjelde_hash,
+                                             "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
+    skriv_manifest(manifest, "0000000000000000000000000000000000000000000000000000000000000000", postar)
+    la anna_komp = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_kompilator.ncb.json")
+    assert(har(anna_komp, "selfhost-miss selfhost.ast compiler"))
+    assert(ikkje har(anna_komp, "selfhost-hit"))
+    // Manifest utan fingeravtrykk (eldre format) → miss.
+    fil_skriv(manifest, json_skriv({"schema": selfhost_abi(), "modules": postar}))
+    la utan_fp = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_utan_fp.ncb.json")
+    assert(har(utan_fp, "selfhost-miss selfhost.ast compiler"))
+    assert(ikkje har(utan_fp, "selfhost-hit"))
+
     // Endra artefakt (hash stemmer ikkje) → miss.
     postar["selfhost/ast.no"] = manifestpost("selfhost.ast", kjelde_hash,
                                              "bootstrap/precompiled/ast.ncb.json", artefakt_hash)
-    skriv_manifest(manifest, postar)
+    skriv_manifest(manifest, fp, postar)
     builtin.fil_append(artefakt, " ")
     la endra = kompiler(runtime, arbeid, grunnmiljø(root, cache), p_ast, dir + "/p_ast_endra.ncb.json")
     assert(har(endra, "selfhost-miss selfhost.ast artifact-hash"))
