@@ -305,9 +305,7 @@ la vm_random_counter: heiltall = 1
 // sanningstest per instruksjon (vm_green_på; eit «> 0»-compare på den boksa
 // teljaren ville vore to runtime-kall per instruksjon i native codegen).
 la vm_green_aktive: heiltall = 0        // kølagde + køyrande grøne trådar (prosessvid)
-la vm_green_på: boolsk = usann          // == (vm_green_aktive > 0); berre vm_green_ny/ferdig skriv
 la vm_green_i_slice: heiltall = 0       // 1 medan ein slice køyrer (ingen nøsta planlegging)
-la vm_green_start_flagg: heiltall = 0   // konsumert av køyr_funksjon-inngangen
 la vm_green_budsjett: heiltall = 0
 la vm_green_yielded: heiltall = 0
 la vm_green_yield_ok: heiltall = 0      // sett av CALL-staden før kall_innebygd
@@ -321,6 +319,15 @@ la vm_green_trådar: ordbok = {}         // handle → trådpost
 la vm_green_rekkje: liste = []          // handle-ar som kan få slice (state running)
 la vm_green_pools: ordbok = {}          // pool-handle → pool
 la vm_green_cur_t: ordbok = {}          // trådposten til sliceen som køyrer no
+
+// Grøn-tilstanden som inngangs- og instruksjonsløkka les, ligg i functions-kartet
+// (parameter), ikkje i modulglobalar: ein frosen C-æra-vert (macOS-/Windows-seeden)
+// injiserer ein hardkoda __module_init__ når han lastar selfhost.vm frå vm.ncb.json,
+// og då finst ingen av modulglobalane til vm.no («Ukjent variabel»). Utan grøne
+// trådar les den varme vegen difor ingen globalar.
+funksjon vm_green_på_i(functions) -> boolsk {
+    returner vm_map_har_nokkel(functions, "__vm_green_på__") og functions["__vm_green_på__"] == "1"
+}
 funksjon vm_heap_track(functions, verdi) -> tekst {
     // Trusted compiler/selfhost-køyringar kan slå av den profilerande
     // skyggeheapen. Verdiane er framleis eigde av den native Norscode-
@@ -3259,7 +3266,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.network_operation" {
         // poll med frist blir yield-medviten når grøne trådar finst.
-        hvis vm_green_på { returner vm_green_network(args[0]) }
+        hvis vm_green_på_i(active_functions) { returner vm_green_network(args[0]) }
         returner builtin.network_operation(args[0])
     }
 
@@ -3298,14 +3305,16 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         hvis sync_op == "cancel" og builtin.starts_with(sync_h, "green-thread:") {
             returner vm_green_cancel(sync_h)
         }
-        hvis vm_green_på og (sync_op == "mutex_lock" eller sync_op == "condition_wait") {
+        hvis vm_green_på_i(active_functions) og (sync_op == "mutex_lock" eller sync_op == "condition_wait") {
             returner vm_green_sync(args[0], sync_op)
         }
         returner builtin.thread_sync(args[0])
     }
     hvis namn == "builtin.thread_pool" { returner vm_green_pool(args[0], active_functions) }
     hvis namn == "builtin.thread_current_id" {
-        hvis vm_green_current_id != 0 { returner vm_green_current_id }
+        hvis vm_green_på_i(active_functions) {
+            hvis vm_green_current_id != 0 { returner vm_green_current_id }
+        }
         returner builtin.thread_current_id()
     }
     hvis namn == "builtin.atomic_operation" { returner builtin.atomic_operation(args[0]) }
@@ -3458,7 +3467,7 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     // Med grøne trådar er søvnen yield-medviten (planleggaren køyrer medan vi søv).
     hvis namn == "builtin.vent.sov" eller namn == "vent.sov" eller namn == "builtin.sov" {
         hvis lengde(args) > 0 {
-            hvis vm_green_på { vm_green_sov(vm_green_til_heiltal(args[0], 0)) }
+            hvis vm_green_på_i(active_functions) { vm_green_sov(vm_green_til_heiltal(args[0], 0)) }
             ellers { builtin.vent.sov(args[0]) }
         }
         returner 0
@@ -4681,7 +4690,7 @@ funksjon vm_green_ny(functions, fn_løyst: tekst, fn_args, id: tekst, nr: heilta
     t["pool_slot"] = 0
     vm_green_trådar[id] = t
     vm_green_aktive = vm_green_aktive + 1
-    vm_green_på = sann
+    functions["__vm_green_på__"] = "1"
     returner t
 }
 
@@ -4694,7 +4703,8 @@ funksjon vm_green_er_ferdig(t) -> boolsk {
 funksjon vm_green_ferdig(t) -> heiltall {
     vm_green_aktive = vm_green_aktive - 1
     hvis vm_green_aktive < 0 { vm_green_aktive = 0 }
-    vm_green_på = vm_green_aktive > 0
+    la gfn = t["functions"]
+    hvis vm_green_aktive > 0 { gfn["__vm_green_på__"] = "1" } ellers { gfn["__vm_green_på__"] = "0" }
     t["frames"] = []
     t["resume"] = {"active": "usann", "reason": ""}
     t["vent_data"] = {}
@@ -4766,7 +4776,7 @@ funksjon vm_green_slice(t) -> heiltall {
     la ferdig: heiltall = 0
     prøv {
         la v = 0
-        vm_green_start_flagg = 1
+        functions["__vm_green_start__"] = "1"
         hvis t["starta"] == 0 {
             t["starta"] = 1
             v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
@@ -4791,7 +4801,7 @@ funksjon vm_green_slice(t) -> heiltall {
         t["error"] = tekst(e)
         ferdig = 1
     }
-    vm_green_start_flagg = 0
+    functions["__vm_green_start__"] = "0"
     t["frames"] = functions["__vm_active_frames__"]
     functions["__vm_active_frames__"] = f_frames
     functions["__vm_pending_arg_heap_ids__"] = f_pending
@@ -5421,8 +5431,12 @@ funksjon køyr_funksjon(
     // Grøn slice: planleggaren set flagget rett før kallet; berre DENNE (ytste)
     // aktiveringa kan preemptast. Nøsta aktiveringar (builtin → køyr_funksjon)
     // ser flagget som konsumert.
-    la er_green_slice = vm_green_start_flagg == 1
-    vm_green_start_flagg = 0
+    la er_green_slice = usann
+    hvis vm_map_har_nokkel(functions, "__vm_green_start__") og functions["__vm_green_start__"] == "1" {
+        er_green_slice = sann
+        functions["__vm_green_start__"] = "0"
+    }
+    la green_på = vm_green_på_i(functions)
     la trace_raw = miljo_hent("NORSCODE_VM_TRACE")
     hvis trace_raw != "" og heltall_fra_tekst(trace_raw) == 1 { skriv("ENTER " + fn_namn + "\n") }
     la trace_frames_raw = miljo_hent("NORSCODE_VM_TRACE_FRAMES")
@@ -5521,8 +5535,8 @@ funksjon køyr_funksjon(
     la tvungen_op: tekst = ""
     mens (ip < lengde(kode)) {
         ramme["ip"] = ip
-        // Grøne trådar: éi global-lesing + sanningstest når ingen finst.
-        hvis vm_green_på {
+        // Grøne trådar: éin lokal sanningstest når ingen finst.
+        hvis green_på {
             hvis er_green_slice {
                 // Preemption berre på ei rein instruksjonsgrense (tvungen_op
                 // er ikkje ein del av den lagra tilstanden).
@@ -6342,8 +6356,9 @@ funksjon køyr_funksjon(
                 hvis løyst_namn != "" {
                     functions["__vm_pending_arg_heap_ids__"] = call_heap_ids
                     retur_verdi = køyr_funksjon(løyst_namn, call_args, functions, djupn + 1)
+                    green_på = vm_green_på_i(functions)
                 } ellers {
-                    hvis vm_green_på {
+                    hvis green_på {
                         // Ventearmar kan berre gje frå seg kontrollen frå den ytste
                         // slice-aktiveringa og berre ved CALL (argumenta kan leggjast
                         // attende og same instruksjon køyrast på nytt).
@@ -6351,6 +6366,7 @@ funksjon køyr_funksjon(
                         hvis er_green_slice og op == "CALL" { vm_green_yield_ok = 1 }
                     }
                     retur_verdi = kall_innebygd(mål_namn, call_args, functions)
+                    green_på = vm_green_på_i(functions)
                     // Ventetilstand (vent_frist/vent_data) frå eit tidlegare
                     // GreenVenter-forsøk av same CALL er over når builtinen returnerer
                     // normalt, same kva veg armen gjekk (sjå vm_green_vent_rydd).
