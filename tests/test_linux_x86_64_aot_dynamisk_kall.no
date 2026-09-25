@@ -1,0 +1,102 @@
+// Linux x86-64 AOT, R2: indirekte kall (builtin.ncb_call_fn, closure/CALL_VALUE,
+// std.sched), ekte assert-sjekkar og bytes_new-atomet. Fixturane returnerer eigne
+// exit-kodar per feil; assert_feil skal gje exit 1 med VM-teksten på stderr.
+// Køyring skjer direkte på Linux x86-64 eller i Docker (NORSCODE_VERIFY_LINUX_DOCKER=1).
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = miljo_hent("NORSCODE_CI_SYSTEM")
+    la maskin = miljo_hent("NORSCODE_CI_ARCH")
+    hvis system == "" { system = miljo_hent("RUNNER_OS") }
+    hvis maskin == "" { maskin = miljo_hent("RUNNER_ARCH") }
+    hvis system == "" eller maskin == "" {
+        prøv {
+            la info = builtin.system_info()
+            hvis system == "" { system = tekst(info["system"]) }
+            hvis maskin == "" { maskin = tekst(info["machine"]) }
+        } fang (e) {}
+    }
+    la linux = system == "Linux" eller system == "linux"
+    la x64 = maskin == "X64" eller maskin == "x64" eller
+              maskin == "x86_64" eller maskin == "amd64"
+    returner linux og x64
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    returner prosess.køyr(executable, argv, root, {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, timeout_ms)
+}
+
+funksjon krev_exit(resultat: ordbok_tekst, kode: heiltall) -> heiltall {
+    hvis tekst(resultat["status"]) != "ferdig" eller heltall_fra_tekst(tekst(resultat["exit_code"])) != kode {
+        prosess.skriv_resultat(resultat)
+        assert_eq(heltall_fra_tekst(tekst(resultat["exit_code"])), kode)
+    }
+    returner 0
+}
+
+funksjon docker_køyr(root: tekst, namn: tekst) -> ordbok_tekst {
+    la docker = miljo_hent("NORSCODE_DOCKER_BIN")
+    hvis docker == "" { docker = "docker" }
+    returner køyr(docker, ["run", "--platform", "linux/amd64", "--rm", "-v", "/private/tmp:/work:ro", "alpine:3.20", "/work/" + namn], root, 180000)
+}
+
+funksjon bygg_og_verifiser(root: tekst, nc: tekst, namn: tekst, kjelde: tekst, kode: heiltall,
+                           stderr_inneheld: tekst, native: boolsk) -> heiltall {
+    la binær = "/tmp/" + namn
+    krev_exit(køyr(nc, ["bygg-native", "--target", "linux-x86_64", kjelde, binær], root, 180000), 0)
+    la bytes = builtin.fil_les_binær(binær)
+    assert(lengde(bytes) > 4096)
+    assert_eq(bytes[0], 0x7F)
+    assert_eq(bytes[18], 62)
+    la resultat: ordbok_tekst = {}
+    la køyrd = usann
+    hvis native {
+        resultat = køyr(binær, [], root, 60000)
+        køyrd = sann
+    } ellers hvis miljo_hent("NORSCODE_VERIFY_LINUX_DOCKER") == "1" {
+        resultat = docker_køyr(root, namn)
+        køyrd = sann
+    }
+    hvis køyrd {
+        krev_exit(resultat, kode)
+        hvis stderr_inneheld != "" og ikkje builtin.contains(tekst(resultat["stderr"]), stderr_inneheld) {
+            prosess.skriv_resultat(resultat)
+            assert_eq(tekst(resultat["stderr"]), stderr_inneheld)
+        }
+    }
+    filops.slett_fil(binær)
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la native = vert_linux_x86_64()
+    la nc = runtime(root)
+    la id = builtin.random_hex(8)
+    bygg_og_verifiser(root, nc, "norscode_aot_dynkall_" + id, root + "/tests/fixtures/aot_dynamisk_kall.no", 42, "", native)
+    bygg_og_verifiser(root, nc, "norscode_aot_assert_ok_" + id, root + "/tests/fixtures/aot_assert_og_bytes.no", 7, "", native)
+    bygg_og_verifiser(root, nc, "norscode_aot_assert_feil_" + id, root + "/tests/fixtures/aot_assert_feil.no", 1,
+                      "assert_eq feilet: 3 != 4", native)
+    skriv("test_linux_x86_64_aot_dynamisk_kall OK\n")
+    returner 0
+}
