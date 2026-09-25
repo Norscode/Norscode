@@ -1,0 +1,136 @@
+# SEED-ONLY (ikkje test_-prefiks med vilje): køyrer i seed-porten
+# (tools/seed_gate_tests.txt), ikkje i stage0-banane. `bruk selfhost.vm` er
+# VERTSSTYRT som standard (nc_main nc_vm_vertsstyrt_aktiv): vm.*-kalla går til
+# VM-en som er baka inn i seeden, så fiksen verkar først etter R2-reseed. Målt
+# 2026-09-25 på R1-seeden (9528709b): FEIL, kompiler_fil_aktiv → ingenting og
+# exit 139 (sjølve holet). Grøn med NORSCODE_VM_HOSTED=0 (vm.no frå kjelda), i
+# mini-køyraren med ny vm.no og på committa macOS-seed.
+#
+# R2: kall_innebygd-armar som var stille null-fallback på fersk seed.
+#
+# - builtin.kompiler_fil_aktiv / kompiler_objekt_aktiv kalla ein C-æra-vertsbuiltin
+#   (builtin.ncb_call_fn) som seeden ikkje har: null, og SIGSEGV (139) for
+#   objekt-varianten (json_parse_raw(null)). No går dei via VM-en sin eigen
+#   ncb_call_fn-arm mot det aktive functions-kartet.
+# - builtin.exec_prosess (pensjonert) returnerte stille null; no eksplisitt kast.
+# - semantic_analyser_rent/semantic_ok/semantic_rapport/wasm_selftest/builtin.n var
+#   daude armar mot funksjonar som ikkje finst; no «Ukjent innebygd funksjon».
+#
+# Kalla MÅ vere kvalifiserte (vm.*): ukvalifisert køyr_funksjon treffer VM-en i
+# stage0-binæren, ikkje selfhost/vm.no-kjelda denne testen dekkjer.
+bruk selfhost.vm som vm
+bruk std.runtime_security som rs
+
+funksjon inneheld(t: tekst, del: tekst) -> bool {
+    returner builtin.index_of(t, del) >= 0
+}
+
+# Syntetisk selfhost.kompiler.kompiler_fil: returnerer NCB-liknande JSON med modulnamnet.
+funksjon kompiler_stub() {
+    returner {"params": ["kjelde_tekst", "modul_namn"], "code": [
+        ["PUSH_CONST", "{\"format\":\"stub\",\"modul\":\""],
+        ["LOAD_NAME", "modul_namn"], ["BINARY_ADD"],
+        ["PUSH_CONST", "\",\"functions\":{}}"], ["BINARY_ADD"],
+        ["RETURN"]]}
+}
+
+funksjon probe(builtin_namn: tekst) {
+    returner {"params": [], "code": [
+        ["PUSH_CONST", "funksjon start() -> heiltall { returner 0 }"],
+        ["PUSH_CONST", "__main__"],
+        ["CALL", builtin_namn, 2],
+        ["RETURN"]]}
+}
+
+# Minimal kontekst for direkte kall_innebygd: metrikkart + policy som tillèt
+# process.exec utan prosess-scope, så kallet når sjølve armen (ikkje
+# Sikkerheitsfeil før armen).
+funksjon kontekst() {
+    la p = rs.ny_policy("r2-null-hol")
+    rs.tillat(p, "process.exec")
+    returner {"__vm_metrics__": {}, "__vm_security_policy__": p}
+}
+
+funksjon kast_melding(namn: tekst, args: liste) -> tekst {
+    prøv {
+        la v = vm.kall_innebygd(namn, args, kontekst())
+        returner "INGEN KAST type=" + builtin.type(v)
+    } fang (e) {
+        returner "KAST:" + tekst(e)
+    }
+    returner "uventa"
+}
+
+funksjon start() -> heiltall {
+    la feil: heiltall = 0
+
+    # (a) kompiler_fil_aktiv: køyrer kompilatoren frå det aktive functions-kartet.
+    la fns = {"__main__.probe": probe("builtin.kompiler_fil_aktiv"),
+              "selfhost.kompiler.kompiler_fil": kompiler_stub()}
+    la ncb_tekst = vm.køyr_funksjon("__main__.probe", [], fns, 0)
+    hvis builtin.type(ncb_tekst) != "tekst" eller ncb_tekst != "{\"format\":\"stub\",\"modul\":\"__main__\",\"functions\":{}}" {
+        skriv("FEIL kompiler_fil_aktiv: type=" + builtin.type(ncb_tekst) + "\n")
+        feil = feil + 1
+    }
+
+    # (a) kompiler_objekt_aktiv: same kall, men parsa til ordbok i verts-ABI-en.
+    la fns_obj = {"__main__.probe": probe("builtin.kompiler_objekt_aktiv"),
+                  "selfhost.kompiler.kompiler_fil": kompiler_stub()}
+    la ncb_obj = vm.køyr_funksjon("__main__.probe", [], fns_obj, 0)
+    hvis builtin.type(ncb_obj) != "ordbok" {
+        skriv("FEIL kompiler_objekt_aktiv: type=" + builtin.type(ncb_obj) + "\n")
+        feil = feil + 1
+    } ellers hvis ncb_obj["modul"] != "__main__" eller ncb_obj["format"] != "stub" {
+        skriv("FEIL kompiler_objekt_aktiv: feil innhald\n")
+        feil = feil + 1
+    }
+
+    # Utan kompilator i kartet: fangbar kast, ikkje null og ikkje SIGSEGV.
+    la utan = ""
+    prøv {
+        la v = vm.køyr_funksjon("__main__.probe", [], {"__main__.probe": probe("builtin.kompiler_objekt_aktiv")}, 0)
+        utan = "INGEN KAST type=" + builtin.type(v)
+    } fang (e) {
+        utan = "KAST:" + tekst(e)
+    }
+    hvis ikkje inneheld(utan, "Ukjent selfhost-funksjon: selfhost.kompiler.kompiler_fil") {
+        skriv("FEIL kompiler_objekt_aktiv utan kompilator: " + utan + "\n")
+        feil = feil + 1
+    }
+
+    # (b) exec_prosess: eksplisitt kast (begge namneformene).
+    la ep1 = kast_melding("builtin.exec_prosess", ["true"])
+    la ep2 = kast_melding("exec_prosess", ["true"])
+    hvis ikkje inneheld(ep1, "builtin.exec_prosess er fjerna") {
+        skriv("FEIL builtin.exec_prosess: " + ep1 + "\n")
+        feil = feil + 1
+    }
+    hvis ikkje inneheld(ep2, "builtin.exec_prosess er fjerna") {
+        skriv("FEIL exec_prosess: " + ep2 + "\n")
+        feil = feil + 1
+    }
+
+    # (c) Daude armar er borte: ukjent builtin kastar i staden for null.
+    la daude = ["builtin.semantic_analyser_rent", "builtin.semantic_ok", "builtin.semantic_rapport", "builtin.n"]
+    la i: heiltall = 0
+    mens i < lengde(daude) {
+        la m = kast_melding(daude[i], [{}])
+        hvis ikkje inneheld(m, "Ukjent innebygd funksjon: " + daude[i]) {
+            skriv("FEIL " + daude[i] + ": " + m + "\n")
+            feil = feil + 1
+        }
+        i = i + 1
+    }
+    la ws = kast_melding("builtin.wasm_selftest", [])
+    hvis ikkje inneheld(ws, "Ukjent innebygd funksjon: builtin.wasm_selftest") {
+        skriv("FEIL builtin.wasm_selftest: " + ws + "\n")
+        feil = feil + 1
+    }
+
+    hvis feil > 0 {
+        skriv("seed_vm_kall_innebygd_null_hol FEIL (" + tekst_fra_heltall(feil) + ")\n")
+        returner 1
+    }
+    skriv("seed_vm_kall_innebygd_null_hol OK\n")
+    returner 0
+}
