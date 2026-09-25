@@ -289,6 +289,36 @@ la vm_pool_counter: heiltall = 1
 la vm_norsdb_active_handle: tekst = ""
 la vm_norsdb_indexes: ordbok<tekst, liste_tekst> = {}
 la vm_random_counter: heiltall = 1
+
+// ─── Grøne trådar (M:1, preemptive på instruksjonsbudsjett) ─────────────────
+// Brukarfunksjonar starta med builtin.thread_spawn/thread_pool køyrer som grøne
+// trådar i DENNE VM-en: kvar tråd er ein suspendert continuation-tilstand (same
+// format som await-suspend), og planleggaren (vm_green_runde) gjev kvar køyrbar
+// tråd ein slice på vm_green_kvantum instruksjonar. Hovudprogrammet er vert: det
+// køyrer ein runde kvar vm_green_kvantum-te instruksjon (tikk i løkketoppen) og i
+// alle ventearmar (join, pool wait, poll, sov, mutex/condition). Ventearmar i ein
+// slice kastar «GreenVenter:» → CALL-handteraren legg argumenta attende og
+// suspenderer tråden; same CALL blir køyrd på nytt ved neste slice.
+// Flagg er heiltal (0/1). Utan grøne trådar kostar dette éi global-lesing +
+// sanningstest per instruksjon (vm_green_på; eit «> 0»-compare på den boksa
+// teljaren ville vore to runtime-kall per instruksjon i native codegen).
+la vm_green_aktive: heiltall = 0        // kølagde + køyrande grøne trådar (prosessvid)
+la vm_green_på: boolsk = usann          // == (vm_green_aktive > 0); berre vm_green_ny/ferdig skriv
+la vm_green_i_slice: heiltall = 0       // 1 medan ein slice køyrer (ingen nøsta planlegging)
+la vm_green_start_flagg: heiltall = 0   // konsumert av køyr_funksjon-inngangen
+la vm_green_budsjett: heiltall = 0
+la vm_green_yielded: heiltall = 0
+la vm_green_yield_ok: heiltall = 0      // sett av CALL-staden før kall_innebygd
+la vm_green_current_id: heiltall = 0    // 0 = hovudtråden; grøn tråd: 2^30 + n
+la vm_green_tikk: heiltall = 0
+la vm_green_kvantum: heiltall = 2000    // NORSCODE_VM_GREEN_SLICE kan overstyre
+la vm_green_kvantum_lest: heiltall = 0
+la vm_green_neste: heiltall = 0
+la vm_green_pool_neste_gen: heiltall = 0
+la vm_green_trådar: ordbok = {}         // handle → trådpost
+la vm_green_rekkje: liste = []          // handle-ar som kan få slice (state running)
+la vm_green_pools: ordbok = {}          // pool-handle → pool
+la vm_green_cur_t: ordbok = {}          // trådposten til sliceen som køyrer no
 funksjon vm_heap_track(functions, verdi) -> tekst {
     // Trusted compiler/selfhost-køyringar kan slå av den profilerande
     // skyggeheapen. Verdiane er framleis eigde av den native Norscode-
@@ -3220,63 +3250,56 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
     }
 
     hvis namn == "builtin.network_operation" {
+        // poll med frist blir yield-medviten når grøne trådar finst.
+        hvis vm_green_på { returner vm_green_network(args[0]) }
         returner builtin.network_operation(args[0])
     }
 
     hvis namn == "builtin.thread_spawn" {
-        la spawn_fn = tekst(args[0]["fn"])
+        la spawn_fn = tekst(vm_sikker_get(args[0], "fn"))
         // thread.*-primitiv → ekte native tråd (clone(2), utan GC/VM).
         hvis builtin.starts_with(spawn_fn, "thread.") {
             args[0]["__vm_functions"] = active_functions
             returner builtin.thread_spawn(args[0])
         }
-        // Ukjend brukarfunksjon: spawn feilar (C-kontrakten), i staden for å rapportere
-        // «started» og berre lagre feilen til join (test_thread_sync_lifecycle).
-        hvis finn_funksjon(spawn_fn, active_functions) == "" {
+        // Ukjend brukarfunksjon: spawn feilar synkront (C-kontrakten,
+        // test_thread_sync_lifecycle), i staden for «started» + feil ved join.
+        la spawn_løyst = finn_funksjon(spawn_fn, active_functions)
+        hvis spawn_løyst == "" {
             returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": "", "thread_id": "",
                       "value": "", "error": "ukjend trådfunksjon: " + spawn_fn}
         }
-        // Brukarfunksjon → kjør kooperativt i DENNE VM-tråden (ingen fleirtråds-GC).
-        // I testflata køyrer ingen ekte trådar samstundes med brukar-workerane, so
-        // resultatet er identisk med parallell køyring, men GC-en held éin stakk.
-        hvis ikkje vm_map_har_nokkel(active_functions, "__vm_thread_coop__") {
-            active_functions["__vm_thread_coop__"] = {}
-        }
-        la coop = active_functions["__vm_thread_coop__"]
-        la coop_id = "coop-" + tekst_fra_heltall(lengde(nøkler(coop)) + 1)
-        la coop_res = {}
-        // Trådtestflata tvingar VM-bokhaldet (skuggeheapen) på for GC-testane, men
-        // ein kooperativ worker som gjer tusenvis av operasjonar blir då uhøveleg treg
-        // (kvar allokering blir spora + safepoint-GC). Køyr worker-kroppen i fast-modus
-        // — han testar ikkje skuggeheap-metrikk (GC-testane kallar memory.* direkte på
-        // ein eigen heap), so det er trygt — og gjenopprett gamal modus etterpå.
-        la coop_fast_før = ""
-        hvis vm_map_har_nokkel(active_functions, "__vm_fast_mode__") { coop_fast_før = active_functions["__vm_fast_mode__"] }
-        active_functions["__vm_fast_mode__"] = "sann"
-        prøv {
-            la coop_v = køyr_funksjon(spawn_fn, [args[0]["args"]], active_functions, 0)
-            coop_res = {"status": "finished", "value": coop_v}
-        } fang (coop_e) {
-            coop_res = {"status": "error", "value": "", "error": tekst(coop_e)}
-        }
-        active_functions["__vm_fast_mode__"] = coop_fast_før
-        coop[coop_id] = coop_res
-        returner {"abi": "norscode-native-thread-v1", "status": "started", "handle": coop_id, "thread_id": coop_id, "value": ""}
+        // Brukarfunksjon → preemptiv grøn tråd i denne VM-en (delt heap, M:1).
+        la spawn_args = vm_sikker_get(args[0], "args")
+        hvis builtin.type(spawn_args) != "ordbok" { spawn_args = {} }
+        la spawn_nr = vm_green_ny_nr()
+        la gt = vm_green_ny(active_functions, spawn_løyst, spawn_args, "green-thread:" + tekst_fra_heltall(spawn_nr), spawn_nr)
+        gt["state"] = "running"
+        legg_til(vm_green_rekkje, gt["id"])
+        returner {"abi": "norscode-native-thread-v1", "status": "started", "handle": gt["id"],
+                  "thread_id": tekst_fra_heltall(gt["gid"]), "value": "", "error": "", "backend": "vm-green"}
     }
     hvis namn == "builtin.thread_join" {
-        la join_h = tekst(args[0]["handle"])
-        hvis builtin.starts_with(join_h, "coop-") og vm_map_har_nokkel(active_functions, "__vm_thread_coop__")
-            og vm_map_har_nokkel(active_functions["__vm_thread_coop__"], join_h) {
-            la cr = active_functions["__vm_thread_coop__"][join_h]
-            la cr_feil = ""
-            hvis vm_map_har_nokkel(cr, "error") { cr_feil = cr["error"] }
-            returner {"abi": "norscode-native-thread-v1", "status": cr["status"], "handle": join_h,
-                      "value": cr["value"], "error": cr_feil, "thread_id": join_h}
-        }
+        la join_h = tekst(vm_sikker_get(args[0], "handle"))
+        hvis builtin.starts_with(join_h, "green-thread:") { returner vm_green_join(args[0], join_h) }
         returner builtin.thread_join(args[0])
     }
-    hvis namn == "builtin.thread_sync" { returner builtin.thread_sync(args[0]) }
-    hvis namn == "builtin.thread_current_id" { returner builtin.thread_current_id() }
+    hvis namn == "builtin.thread_sync" {
+        la sync_op = tekst(vm_sikker_get(args[0], "operation"))
+        la sync_h = tekst(vm_sikker_get(args[0], "handle"))
+        hvis sync_op == "cancel" og builtin.starts_with(sync_h, "green-thread:") {
+            returner vm_green_cancel(sync_h)
+        }
+        hvis vm_green_på og (sync_op == "mutex_lock" eller sync_op == "condition_wait") {
+            returner vm_green_sync(args[0], sync_op)
+        }
+        returner builtin.thread_sync(args[0])
+    }
+    hvis namn == "builtin.thread_pool" { returner vm_green_pool(args[0], active_functions) }
+    hvis namn == "builtin.thread_current_id" {
+        hvis vm_green_current_id != 0 { returner vm_green_current_id }
+        returner builtin.thread_current_id()
+    }
     hvis namn == "builtin.atomic_operation" { returner builtin.atomic_operation(args[0]) }
     hvis namn == "builtin.jit_operation" { returner builtin.jit_operation(args[0]) }
     hvis namn == "builtin.tensor_operation" { returner builtin.tensor_operation(args[0]) }
@@ -3422,14 +3445,14 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
         }
         returner usann
     }
-    hvis namn == "builtin.vent.sov" eller namn == "vent.sov" {
-        hvis lengde(args) > 0 { builtin.vent.sov(args[0]) }
-        returner 0
-    }
     // std.tid.sov kallar builtin.sov; utan eigen arm fall kallet gjennom til ein
     // stille no-op på fersk seed (tid.sov(1000) returnerte på 1 ms).
-    hvis namn == "builtin.sov" {
-        hvis lengde(args) > 0 { builtin.vent.sov(args[0]) }
+    // Med grøne trådar er søvnen yield-medviten (planleggaren køyrer medan vi søv).
+    hvis namn == "builtin.vent.sov" eller namn == "vent.sov" eller namn == "builtin.sov" {
+        hvis lengde(args) > 0 {
+            hvis vm_green_på { vm_green_sov(vm_green_til_heiltal(args[0], 0)) }
+            ellers { builtin.vent.sov(args[0]) }
+        }
         returner 0
     }
 
@@ -4575,12 +4598,823 @@ funksjon vm_jit_try(functions, fn_namn: tekst, fn_def, args) -> ordbok_tekst {
     returner {"used": "sann", "value": result["value"]}
 }
 
+// ─── Grøne trådar: planleggar, slice og ventearmar ──────────────────────────
+// Sjå kommentaren ved vm_green_*-globalane. Trådpost (ordbok):
+//   id, gid (2^30+n), fn (løyst namn), args, functions, state
+//   (queued|running|finished|error|cancelled), starta, resume (suspendert
+//   køyr_funksjon-tilstand), frames (__vm_active_frames__ for tråden), value,
+//   error, vent_frist (-1 = ingen, -2 = utan frist), vent_data, venter, sov_til,
+//   cancel, pool, pool_fn, pool_slot.
+
+funksjon vm_green_til_heiltal(v, standard: heiltall) -> heiltall {
+    la ty = builtin.type(v)
+    hvis ty == "heltall" { returner v }
+    hvis ty != "tekst" { returner standard }
+    la t = builtin.trim(v)
+    hvis ikkje vm_er_heltallstekst(t) { returner standard }
+    returner heltall_fra_tekst(t)
+}
+
+funksjon vm_green_felt_heiltal(req, felt: tekst, standard: heiltall) -> heiltall {
+    hvis builtin.type(req) != "ordbok" { returner standard }
+    hvis ikkje vm_map_har_nokkel(req, felt) { returner standard }
+    returner vm_green_til_heiltal(req[felt], standard)
+}
+
+funksjon vm_green_kopi(m) {
+    la ut = {}
+    la k = nøkler(m)
+    la i: heiltall = 0
+    mens i < lengde(k) {
+        ut[k[i]] = m[k[i]]
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon vm_green_kvantum_les() -> heiltall {
+    hvis vm_green_kvantum_lest == 0 {
+        vm_green_kvantum_lest = 1
+        la raw = builtin.trim(miljo_hent("NORSCODE_VM_GREEN_SLICE"))
+        hvis raw != "" og vm_er_heltallstekst(raw) {
+            la k = heltall_fra_tekst(raw)
+            hvis k >= 10 { vm_green_kvantum = k }
+        }
+    }
+    returner vm_green_kvantum
+}
+
+funksjon vm_green_ny_nr() -> heiltall {
+    vm_green_neste = vm_green_neste + 1
+    returner vm_green_neste
+}
+
+funksjon vm_green_ny(functions, fn_løyst: tekst, fn_args, id: tekst, nr: heiltall) {
+    vm_green_kvantum_les()
+    la t: ordbok = {}
+    t["id"] = id
+    t["gid"] = 1073741824 + nr
+    t["fn"] = fn_løyst
+    t["args"] = fn_args
+    t["functions"] = functions
+    t["state"] = "queued"
+    t["starta"] = 0
+    t["resume"] = {"active": "usann", "reason": ""}
+    t["frames"] = []
+    t["value"] = ""
+    t["error"] = ""
+    t["vent_frist"] = -1
+    t["vent_data"] = {}
+    t["venter"] = 0
+    t["sov_til"] = 0
+    t["cancel"] = 0
+    t["pool"] = ""
+    t["pool_fn"] = ""
+    t["pool_slot"] = 0
+    vm_green_trådar[id] = t
+    vm_green_aktive = vm_green_aktive + 1
+    vm_green_på = sann
+    returner t
+}
+
+funksjon vm_green_er_ferdig(t) -> boolsk {
+    la st = t["state"]
+    returner st == "finished" eller st == "error" eller st == "cancelled"
+}
+
+// Kalla éin gong når ein tråd går frå queued/running til eit slutt-tilstand.
+funksjon vm_green_ferdig(t) -> heiltall {
+    vm_green_aktive = vm_green_aktive - 1
+    hvis vm_green_aktive < 0 { vm_green_aktive = 0 }
+    vm_green_på = vm_green_aktive > 0
+    t["frames"] = []
+    t["resume"] = {"active": "usann", "reason": ""}
+    t["vent_data"] = {}
+    t["vent_frist"] = -1
+    t["sov_til"] = 0
+    hvis t["pool_slot"] == 1 {
+        t["pool_slot"] = 0
+        la ph = tekst(t["pool"])
+        hvis vm_map_har_nokkel(vm_green_pools, ph) {
+            la p = vm_green_pools[ph]
+            p["running"] = p["running"] - 1
+        }
+    }
+    returner 0
+}
+
+funksjon vm_green_verdi_tekst(v) -> tekst {
+    hvis builtin.type(v) == "tekst" { returner v }
+    returner tekst(v)
+}
+
+// Lagrar slice-tilstanden (same format som await-suspend, reason «green»).
+funksjon vm_green_suspender(functions, ip: heiltall, ramme, continuations,
+                            tail_chain_count: heiltall, function_start_ms: heiltall) -> heiltall {
+    ramme["state"] = "waiting"
+    ramme["ip"] = ip
+    la s: ordbok_tekst = {}
+    s["active"] = "sann"
+    s["reason"] = "green"
+    s["fn_namn"] = tekst(ramme["namn"])   // ramme["namn"] == fn_namn i køyr_funksjon
+    s["ip"] = ip
+    s["frame"] = ramme
+    s["continuations"] = continuations
+    s["tail_chain_count"] = tail_chain_count
+    s["function_start_ms"] = function_start_ms
+    functions["__vm_debug_resume_state__"] = s
+    vm_green_yielded = 1
+    returner 0
+}
+
+// Éin slice for tråden t: byt inn tråden sin VM-tilstand, køyr (start eller
+// resume) til budsjettet er brukt, tråden ventar, eller han er ferdig; byt så
+// vertstilstanden attende. Returnerer 1 når tråden gjorde arbeid (ikkje ventar).
+funksjon vm_green_slice(t) -> heiltall {
+    la functions = t["functions"]
+    la f_frames = functions["__vm_active_frames__"]
+    la f_pending = functions["__vm_pending_arg_heap_ids__"]
+    la f_last = functions["__vm_last_return_heap_id__"]
+    la f_resume = functions["__vm_debug_resume_state__"]
+    la f_fast = functions["__vm_fast_mode__"]
+    la f_cur = vm_green_current_id
+    la f_cur_t = vm_green_cur_t
+    functions["__vm_active_frames__"] = t["frames"]
+    functions["__vm_pending_arg_heap_ids__"] = []
+    functions["__vm_last_return_heap_id__"] = ""
+    // Workerar køyrer i fast-modus (som den gamle coop-armen): skuggeheapen og
+    // safepoint-GC-en følgjer hovudrammene, som blir bytte attende etterpå.
+    functions["__vm_fast_mode__"] = "sann"
+    functions["__vm_debug_resume_state__"] = t["resume"]
+    vm_green_current_id = t["gid"]
+    vm_green_cur_t = t
+    vm_green_i_slice = 1
+    vm_green_budsjett = vm_green_kvantum
+    vm_green_yielded = 0
+    vm_green_yield_ok = 0
+    t["venter"] = 0
+    t["sov_til"] = 0
+    la arbeid: heiltall = 1
+    la ferdig: heiltall = 0
+    prøv {
+        la v = 0
+        vm_green_start_flagg = 1
+        hvis t["starta"] == 0 {
+            t["starta"] = 1
+            v = køyr_funksjon(tekst(t["fn"]), [t["args"]], functions, 1)
+        } ellers {
+            v = køyr_funksjon(tekst(t["resume"]["fn_namn"]), [], functions, 1)
+        }
+        la slot = functions["__vm_debug_resume_state__"]
+        hvis vm_green_yielded == 1 {
+            t["resume"] = slot
+            hvis t["venter"] == 1 { arbeid = 0 }
+        } ellers hvis builtin.type(slot) == "ordbok" og vm_map_har_nokkel(slot, "active") og slot["active"] == "sann" {
+            // await på ein ventande future inne i tråden: prøv att i neste runde.
+            t["resume"] = slot
+            arbeid = 0
+        } ellers {
+            t["state"] = "finished"
+            t["value"] = v
+            ferdig = 1
+        }
+    } fang (e) {
+        t["state"] = "error"
+        t["error"] = tekst(e)
+        ferdig = 1
+    }
+    vm_green_start_flagg = 0
+    t["frames"] = functions["__vm_active_frames__"]
+    functions["__vm_active_frames__"] = f_frames
+    functions["__vm_pending_arg_heap_ids__"] = f_pending
+    functions["__vm_last_return_heap_id__"] = f_last
+    functions["__vm_fast_mode__"] = f_fast
+    functions["__vm_debug_resume_state__"] = f_resume
+    vm_green_current_id = f_cur
+    vm_green_cur_t = f_cur_t
+    vm_green_i_slice = 0
+    vm_green_yield_ok = 0
+    vm_green_yielded = 0
+    hvis ferdig == 1 { vm_green_ferdig(t) }
+    returner arbeid
+}
+
+// Éin planleggingsrunde: pool-dispatch og éin slice til kvar køyrbar tråd.
+// Returnerer talet på trådar som gjorde arbeid (0 = alle ventar/søv).
+funksjon vm_green_runde() -> heiltall {
+    hvis vm_green_i_slice == 1 { returner 0 }
+    la arbeid: heiltall = 0
+    hvis lengde(vm_green_pools) > 0 { arbeid = arbeid + vm_green_pool_dispatch() }
+    la rydd: heiltall = 0
+    la no_ms: heiltall = -1
+    la i: heiltall = 0
+    mens i < lengde(vm_green_rekkje) {
+        la id = vm_green_rekkje[i]
+        hvis vm_map_har_nokkel(vm_green_trådar, id) {
+            la t = vm_green_trådar[id]
+            hvis t["state"] == "running" {
+                la kan: heiltall = 1
+                la sov_til = t["sov_til"]
+                hvis sov_til > 0 {
+                    hvis no_ms < 0 { no_ms = builtin.tid_ms() }
+                    hvis no_ms < sov_til { kan = 0 }
+                }
+                hvis kan == 1 {
+                    arbeid = arbeid + vm_green_slice(t)
+                    hvis t["state"] != "running" { rydd = 1 }
+                }
+            } ellers { rydd = 1 }
+        } ellers { rydd = 1 }
+        i = i + 1
+    }
+    hvis rydd == 1 {
+        la ny: liste = []
+        la j: heiltall = 0
+        mens j < lengde(vm_green_rekkje) {
+            la jid = vm_green_rekkje[j]
+            hvis vm_map_har_nokkel(vm_green_trådar, jid) og vm_green_trådar[jid]["state"] == "running" {
+                legg_til(ny, jid)
+            }
+            j = j + 1
+        }
+        vm_green_rekkje = ny
+        hvis lengde(vm_green_pools) > 0 { arbeid = arbeid + vm_green_pool_dispatch() }
+    }
+    returner arbeid
+}
+
+// Hovudtråden ventar: éin runde, og sov 1 ms om ingen tråd gjorde arbeid.
+funksjon vm_green_hovud_steg() -> heiltall {
+    la a = vm_green_runde()
+    hvis a == 0 { builtin.vent.sov(1) }
+    returner a
+}
+
+// Konsumer yield-løyvet frå CALL-staden. 1 = ventearmen kan kaste GreenVenter.
+funksjon vm_green_ta_yield() -> heiltall {
+    la ok = vm_green_yield_ok
+    vm_green_yield_ok = 0
+    hvis ok == 1 og vm_green_i_slice == 1 og vm_green_current_id != 0 og vm_map_har_nokkel(vm_green_cur_t, "id") {
+        returner 1
+    }
+    returner 0
+}
+
+// I ein slice med yield-løyve når vilkåret enno ikkje held: returner 1 når fristen
+// er ute (armen svarar timeout), elles kast GreenVenter (tråden blir suspendert og
+// same CALL køyrd på nytt). timeout_ms < 0 = utan frist.
+funksjon vm_green_vent(timeout_ms: heiltall, grunn: tekst) -> heiltall {
+    la meg = vm_green_cur_t
+    la frist = meg["vent_frist"]
+    hvis frist == -1 {
+        frist = -2
+        hvis timeout_ms >= 0 { frist = builtin.tid_ms() + timeout_ms }
+        meg["vent_frist"] = frist
+    } ellers hvis frist >= 0 og builtin.tid_ms() >= frist {
+        meg["vent_frist"] = -1
+        returner 1
+    }
+    meg["venter"] = 1
+    kast "GreenVenter: " + grunn
+    returner 0
+}
+
+funksjon vm_green_vent_ferdig() -> heiltall {
+    hvis vm_map_har_nokkel(vm_green_cur_t, "id") {
+        vm_green_cur_t["vent_frist"] = -1
+        vm_green_cur_t["vent_data"] = {}
+        vm_green_cur_t["sov_til"] = 0
+    }
+    returner 0
+}
+
+// Kalla av CALL-handteraren i den ytste slice-aktiveringa når eit kall returnerer
+// normalt eller kastar eit vanleg unnatak. Ventetilstand finst berre mellom eit
+// GreenVenter-kast og fullføringa av den same (re-køyrde) CALL-en, så her er ho
+// alltid over. Utan dette lak vent_frist frå armar som returnerer utan
+// vm_green_vent_ferdig (pool wait der tasken vart ferdig mellom forsøka, dobbel
+// join, destruert mutex, fjerna pool) inn i neste ventepunkt i tråden: sov
+// returnerte med ein gong eller søv til den gamle fristen, join/poll venta utan
+// frist eller gav timeout med ein gong.
+funksjon vm_green_vent_rydd() -> heiltall {
+    la meg = vm_green_cur_t
+    hvis ikkje vm_map_har_nokkel(meg, "id") { returner 0 }
+    la frist = meg["vent_frist"]
+    hvis frist != -1 eller lengde(meg["vent_data"]) > 0 { vm_green_vent_ferdig() }
+    returner 0
+}
+
+funksjon vm_green_join_resultat(t, status: tekst) {
+    la verdi = ""
+    la feil = ""
+    la st = status
+    hvis st == "finished" {
+        hvis t["state"] == "error" {
+            st = "error"
+            feil = tekst(t["error"])
+        } ellers {
+            verdi = vm_green_verdi_tekst(t["value"])
+        }
+    }
+    hvis st == "timeout" { feil = "timeout" }
+    returner {"abi": "norscode-native-thread-v1", "status": st, "handle": t["id"],
+              "thread_id": tekst_fra_heltall(t["gid"]), "value": verdi, "error": feil}
+}
+
+funksjon vm_green_join(req, h: tekst) {
+    la kan_yield = vm_green_ta_yield()
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) {
+        returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": h, "thread_id": "",
+                  "value": "", "error": "invalid handle"}
+    }
+    la t = vm_green_trådar[h]
+    la timeout = vm_green_felt_heiltal(req, "timeout_ms", -1)
+    hvis ikkje vm_green_er_ferdig(t) og timeout != 0 {
+        hvis kan_yield == 1 {
+            hvis vm_green_vent(timeout, "join") == 1 { returner vm_green_join_resultat(t, "timeout") }
+        } ellers hvis vm_green_i_slice == 0 {
+            la frist: heiltall = -2
+            hvis timeout > 0 { frist = builtin.tid_ms() + timeout }
+            mens ikkje vm_green_er_ferdig(t) og (frist < 0 eller builtin.tid_ms() < frist) {
+                vm_green_hovud_steg()
+            }
+        }
+        // Nøsta aktivering i ein slice (builtin-callback) kan ikkje vente → timeout.
+    }
+    hvis kan_yield == 1 { vm_green_vent_ferdig() }
+    hvis ikkje vm_green_er_ferdig(t) { returner vm_green_join_resultat(t, "timeout") }
+    // Handtaket er konsumert etter fullført join (som native join).
+    fjern_nokkel(vm_green_trådar, h)
+    returner vm_green_join_resultat(t, "finished")
+}
+
+funksjon vm_green_cancel(h: tekst) {
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, h) {
+        returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": h, "thread_id": "",
+                  "value": "", "error": "invalid handle"}
+    }
+    la t = vm_green_trådar[h]
+    // Som generiske C-workerar: cancel er eit flagg (ein tråd kan halde ein lås).
+    t["cancel"] = 1
+    returner {"abi": "norscode-native-thread-v1", "status": "cancelled", "handle": h,
+              "thread_id": tekst_fra_heltall(t["gid"]), "value": "", "error": ""}
+}
+
+funksjon vm_green_sync_svar(status: tekst) {
+    returner {"abi": "norscode-native-thread-v1", "status": status, "handle": "", "thread_id": "",
+              "value": "", "error": ""}
+}
+
+funksjon vm_green_trylock(h: tekst) -> tekst {
+    la r = builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": "mutex_trylock",
+                                "handle": h, "thread_id": "green", "timeout_ms": "0"})
+    returner tekst(vm_sikker_get(r, "status"))
+}
+
+funksjon vm_green_unlock(h: tekst) -> tekst {
+    la r = builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": "mutex_unlock",
+                                "handle": h, "thread_id": "green", "timeout_ms": "0"})
+    returner tekst(vm_sikker_get(r, "status"))
+}
+
+funksjon vm_green_cond_seq(h: tekst) -> heiltall {
+    la r = builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": "condition_seq",
+                                "handle": h, "thread_id": "green", "timeout_ms": "0"})
+    hvis tekst(vm_sikker_get(r, "status")) != "ready" { returner -1 }
+    returner vm_green_til_heiltal(vm_sikker_get(r, "value"), -1)
+}
+
+// mutex_lock / condition_wait når grøne trådar finst: ein grøn tråd som ventar
+// på ein native futex ville stoppa heile OS-tråden (og dermed alle grøne trådar).
+// Native timeout <= 0 = vent utan frist.
+funksjon vm_green_sync(req, op: tekst) {
+    la kan_yield = vm_green_ta_yield()
+    la h = tekst(vm_sikker_get(req, "handle"))
+    la tm = vm_green_felt_heiltal(req, "timeout_ms", -1)
+    hvis tm <= 0 { tm = -1 }
+    hvis op == "mutex_lock" {
+        la st = vm_green_trylock(h)
+        hvis st == "ready" {
+            hvis kan_yield == 1 { vm_green_vent_ferdig() }
+            returner vm_green_sync_svar("ready")
+        }
+        hvis st != "blocked" { returner builtin.thread_sync(req) }
+        hvis kan_yield == 1 {
+            hvis vm_green_vent(tm, "mutex") == 1 { returner vm_green_sync_svar("timeout") }
+        }
+        hvis vm_green_i_slice == 1 { returner builtin.thread_sync(req) }
+        la frist: heiltall = -2
+        hvis tm > 0 { frist = builtin.tid_ms() + tm }
+        mens frist < 0 eller builtin.tid_ms() < frist {
+            hvis vm_green_aktive == 0 {
+                la rest = req
+                hvis frist >= 0 {
+                    rest = vm_green_kopi(req)
+                    la r_ms = frist - builtin.tid_ms()
+                    hvis r_ms < 1 { r_ms = 1 }
+                    rest["timeout_ms"] = tekst_fra_heltall(r_ms)
+                }
+                returner builtin.thread_sync(rest)
+            }
+            vm_green_hovud_steg()
+            hvis vm_green_trylock(h) == "ready" { returner vm_green_sync_svar("ready") }
+        }
+        returner vm_green_sync_svar("timeout")
+    }
+    // condition_wait: seq-snapshot → slepp mutex → vent på seq-endring (signal) eller
+    // frist → ta mutex att (utan frist, som native).
+    la mutex_h = tekst(vm_sikker_get(req, "mutex_handle"))
+    hvis kan_yield == 1 {
+        la meg = vm_green_cur_t
+        la vd = meg["vent_data"]
+        hvis ikkje vm_map_har_nokkel(vd, "fase") {
+            la seq0 = vm_green_cond_seq(h)
+            hvis seq0 < 0 { returner builtin.thread_sync(req) }
+            hvis mutex_h != "" { vm_green_unlock(mutex_h) }
+            vd = {"fase": 1, "seq": seq0, "signal": 0}
+            meg["vent_data"] = vd
+        }
+        hvis vd["fase"] == 1 {
+            hvis vm_green_cond_seq(h) != vd["seq"] {
+                vd["signal"] = 1
+                vd["fase"] = 2
+                meg["vent_frist"] = -1
+            } ellers hvis vm_green_vent(tm, "condition") == 1 {
+                vd["fase"] = 2
+            }
+        }
+        hvis mutex_h != "" og vm_green_trylock(mutex_h) != "ready" {
+            vm_green_vent(-1, "condition-mutex")
+        }
+        la sig = vd["signal"]
+        vm_green_vent_ferdig()
+        hvis sig == 1 { returner vm_green_sync_svar("ready") }
+        returner vm_green_sync_svar("timeout")
+    }
+    hvis vm_green_i_slice == 1 { returner builtin.thread_sync(req) }
+    la seq = vm_green_cond_seq(h)
+    hvis seq < 0 { returner builtin.thread_sync(req) }
+    hvis mutex_h != "" { vm_green_unlock(mutex_h) }
+    la frist2: heiltall = -2
+    hvis tm > 0 { frist2 = builtin.tid_ms() + tm }
+    la signal: heiltall = 0
+    mens signal == 0 og (frist2 < 0 eller builtin.tid_ms() < frist2) {
+        hvis vm_green_cond_seq(h) != seq { signal = 1 } ellers { vm_green_hovud_steg() }
+    }
+    hvis signal == 0 og vm_green_cond_seq(h) != seq { signal = 1 }
+    hvis mutex_h != "" {
+        mens vm_green_trylock(mutex_h) != "ready" { vm_green_hovud_steg() }
+    }
+    hvis signal == 1 { returner vm_green_sync_svar("ready") }
+    returner vm_green_sync_svar("timeout")
+}
+
+// network_operation når grøne trådar finst: poll med frist blir yield-medviten.
+// Alt anna går uendra til native.
+funksjon vm_green_network(req) {
+    hvis builtin.type(req) != "ordbok" { returner builtin.network_operation(req) }
+    hvis tekst(vm_sikker_get(req, "operation")) != "poll" { returner builtin.network_operation(req) }
+    la timeout = vm_green_felt_heiltal(req, "timeout_ms", 0)
+    hvis timeout == 0 { returner builtin.network_operation(req) }
+    la kan_yield = vm_green_ta_yield()
+    la q = vm_green_kopi(req)
+    q["timeout_ms"] = "0"
+    hvis kan_yield == 1 {
+        la r = builtin.network_operation(q)
+        hvis tekst(vm_sikker_get(r, "status")) != "ventende" {
+            vm_green_vent_ferdig()
+            returner r
+        }
+        vm_green_vent(timeout, "poll")
+        vm_green_vent_ferdig()
+        returner r
+    }
+    hvis vm_green_i_slice == 1 { returner builtin.network_operation(req) }
+    la frist: heiltall = -2
+    hvis timeout > 0 { frist = builtin.tid_ms() + timeout }
+    la køyr: heiltall = 1
+    mens køyr == 1 {
+        la r1 = builtin.network_operation(q)
+        hvis tekst(vm_sikker_get(r1, "status")) != "ventende" { returner r1 }
+        la no = builtin.tid_ms()
+        hvis frist >= 0 og no >= frist { returner r1 }
+        hvis vm_green_aktive == 0 {
+            // Ingen grøne trådar att: vanleg blokkerande poll med resttida.
+            la rest: heiltall = -1
+            hvis frist >= 0 { rest = frist - no }
+            q["timeout_ms"] = tekst_fra_heltall(rest)
+            returner builtin.network_operation(q)
+        }
+        hvis vm_green_runde() == 0 {
+            la vent: heiltall = 5
+            hvis frist >= 0 og frist - no < vent { vent = frist - no }
+            hvis vent < 1 { vent = 1 }
+            q["timeout_ms"] = tekst_fra_heltall(vent)
+            la r2 = builtin.network_operation(q)
+            q["timeout_ms"] = "0"
+            hvis tekst(vm_sikker_get(r2, "status")) != "ventende" { returner r2 }
+        }
+    }
+    returner builtin.network_operation(req)
+}
+
+// vent.sov / sov når grøne trådar finst.
+funksjon vm_green_sov(ms: heiltall) -> heiltall {
+    la kan_yield = vm_green_ta_yield()
+    hvis ms <= 0 { returner 0 }
+    hvis kan_yield == 1 {
+        la meg = vm_green_cur_t
+        la frist = meg["vent_frist"]
+        hvis frist == -1 {
+            frist = builtin.tid_ms() + ms
+            meg["vent_frist"] = frist
+        } ellers hvis builtin.tid_ms() >= frist {
+            vm_green_vent_ferdig()
+            returner 0
+        }
+        meg["sov_til"] = frist
+        meg["venter"] = 1
+        kast "GreenVenter: sov"
+    }
+    hvis vm_green_i_slice == 1 {
+        builtin.vent.sov(ms)
+        returner 0
+    }
+    la frist2 = builtin.tid_ms() + ms
+    la no = builtin.tid_ms()
+    mens no < frist2 {
+        hvis vm_green_aktive == 0 {
+            builtin.vent.sov(frist2 - no)
+            returner 0
+        }
+        hvis vm_green_runde() == 0 { builtin.vent.sov(1) }
+        no = builtin.tid_ms()
+    }
+    returner 0
+}
+
+// ─── builtin.thread_pool (norscode-native-thread-pool-v1, C-kontrakten spegla) ─
+// Handles thread-pool:<slot>:<gen> og thread-task:<slot>:<gen>:<n>:<n>; workers og
+// queued er heiltal. Tasks er grøne trådar (kind pool); workers = maks samtidige.
+
+funksjon vm_green_pool_svar(status: tekst, p, t, feil: tekst) {
+    la ph = ""
+    la th = ""
+    la verdi = ""
+    la terr = ""
+    la workers: heiltall = 0
+    la queued: heiltall = 0
+    hvis builtin.type(p) == "ordbok" og vm_map_har_nokkel(p, "handle") {
+        ph = p["handle"]
+        workers = p["workers"]
+        queued = lengde(p["kø"])
+    }
+    hvis builtin.type(t) == "ordbok" og vm_map_har_nokkel(t, "id") {
+        th = t["id"]
+        hvis t["state"] == "finished" { verdi = vm_green_verdi_tekst(t["value"]) }
+        terr = tekst(t["error"])
+    }
+    hvis feil != "" { terr = feil }
+    returner {"abi": "norscode-native-thread-pool-v1", "status": status, "pool_handle": ph,
+              "task_handle": th, "value": verdi, "error": terr, "workers": workers,
+              "queued": queued, "backend": "vm-green"}
+}
+
+funksjon vm_green_pool_aktiv(p) -> boolsk {
+    returner lengde(p["kø"]) > 0 eller p["running"] > 0
+}
+
+funksjon vm_green_pool_ledig_slot() -> heiltall {
+    la brukt = {}
+    la phs = nøkler(vm_green_pools)
+    la i: heiltall = 0
+    mens i < lengde(phs) {
+        brukt[tekst_fra_heltall(vm_green_pools[phs[i]]["slot"])] = 1
+        i = i + 1
+    }
+    la s: heiltall = 1
+    mens s < 8 {
+        hvis ikkje vm_map_har_nokkel(brukt, tekst_fra_heltall(s)) { returner s }
+        s = s + 1
+    }
+    returner 0
+}
+
+funksjon vm_green_pool_atomic(t) -> heiltall {
+    la targs = t["args"]
+    la h = tekst(vm_sikker_get(targs, "handle"))
+    la n = vm_green_felt_heiltal(targs, "iterations", 1)
+    la gjort: heiltall = 0
+    la feil = ""
+    prøv {
+        mens gjort < n og t["cancel"] == 0 og feil == "" {
+            la r = builtin.atomic_operation({"operation": "fetch_add", "handle": h, "delta": 1, "order": "seq_cst"})
+            hvis tekst(vm_sikker_get(r, "status")) != "ok" { feil = "invalid atomic handle" }
+            ellers { gjort = gjort + 1 }
+        }
+    } fang (e) {
+        feil = tekst(e)
+    }
+    hvis feil != "" {
+        t["state"] = "error"
+        t["error"] = feil
+    } ellers {
+        t["state"] = "finished"
+        t["value"] = tekst_fra_heltall(gjort)
+    }
+    returner 0
+}
+
+// Flytt kølagde tasks til køyrande så lenge poolen har ledige workerar.
+funksjon vm_green_pool_dispatch() -> heiltall {
+    la arbeid: heiltall = 0
+    la phs = nøkler(vm_green_pools)
+    la pi: heiltall = 0
+    mens pi < lengde(phs) {
+        la p = vm_green_pools[phs[pi]]
+        la kø = p["kø"]
+        mens p["running"] < p["workers"] og lengde(kø) > 0 {
+            la tid = kø[0]
+            fjern(kø, 0)
+            hvis vm_map_har_nokkel(vm_green_trådar, tid) {
+                la t = vm_green_trådar[tid]
+                hvis t["state"] == "queued" {
+                    la fn = tekst(t["pool_fn"])
+                    hvis t["cancel"] == 1 {
+                        t["state"] = "cancelled"
+                        t["error"] = "cancelled"
+                        vm_green_ferdig(t)
+                    } ellers hvis fn == "thread.noop" {
+                        t["state"] = "finished"
+                        t["value"] = "ok"
+                        vm_green_ferdig(t)
+                        arbeid = arbeid + 1
+                    } ellers hvis fn == "thread.atomic_increment" {
+                        vm_green_pool_atomic(t)
+                        vm_green_ferdig(t)
+                        arbeid = arbeid + 1
+                    } ellers {
+                        t["state"] = "running"
+                        t["pool_slot"] = 1
+                        p["running"] = p["running"] + 1
+                        legg_til(vm_green_rekkje, tid)
+                        arbeid = arbeid + 1
+                    }
+                }
+            }
+        }
+        pi = pi + 1
+    }
+    returner arbeid
+}
+
+funksjon vm_green_pool(req, functions) {
+    hvis builtin.type(req) != "ordbok" eller tekst(vm_sikker_get(req, "abi")) != "norscode-native-thread-pool-v1" {
+        returner vm_green_pool_svar("error", {}, {}, "invalid pool request")
+    }
+    la op = tekst(vm_sikker_get(req, "operation"))
+    hvis op == "create" {
+        la w = vm_green_felt_heiltal(req, "workers", 0)
+        hvis w < 1 eller w > 16 { returner vm_green_pool_svar("error", {}, {}, "invalid worker count") }
+        la slot = vm_green_pool_ledig_slot()
+        hvis slot == 0 { returner vm_green_pool_svar("error", {}, {}, "pool capacity") }
+        vm_green_kvantum_les()
+        vm_green_pool_neste_gen = vm_green_pool_neste_gen + 1
+        la np: ordbok = {}
+        np["handle"] = "thread-pool:" + tekst_fra_heltall(slot) + ":" + tekst_fra_heltall(vm_green_pool_neste_gen)
+        np["slot"] = slot
+        np["gen"] = vm_green_pool_neste_gen
+        np["workers"] = w
+        np["running"] = 0
+        np["shutdown"] = 0
+        np["kø"] = []
+        np["functions"] = functions
+        vm_green_pools[np["handle"]] = np
+        returner vm_green_pool_svar("ready", np, {}, "")
+    }
+    la ph = tekst(vm_sikker_get(req, "pool_handle"))
+    hvis ikkje vm_map_har_nokkel(vm_green_pools, ph) {
+        returner vm_green_pool_svar("error", {}, {}, "invalid pool handle")
+    }
+    la p = vm_green_pools[ph]
+    hvis op == "submit" {
+        la fn = tekst(vm_sikker_get(req, "fn"))
+        la løyst = fn
+        hvis fn != "thread.noop" og fn != "thread.atomic_increment" {
+            løyst = ""
+            hvis fn != "" { løyst = finn_funksjon(fn, functions) }
+            hvis løyst == "" { returner vm_green_pool_svar("error", p, {}, "unknown pool function") }
+        }
+        hvis p["shutdown"] == 1 eller lengde(p["kø"]) >= 255 {
+            returner vm_green_pool_svar("error", p, {}, "pool queue unavailable")
+        }
+        la targs = vm_sikker_get(req, "args")
+        hvis builtin.type(targs) != "ordbok" { targs = {} }
+        la nr = vm_green_ny_nr()
+        la tid = "thread-task:" + tekst_fra_heltall(p["slot"]) + ":" + tekst_fra_heltall(p["gen"]) + ":" +
+                 tekst_fra_heltall(nr) + ":" + tekst_fra_heltall(nr)
+        la nt = vm_green_ny(functions, løyst, targs, tid, nr)
+        nt["pool"] = ph
+        nt["pool_fn"] = fn
+        legg_til(p["kø"], tid)
+        returner vm_green_pool_svar("queued", p, nt, "")
+    }
+    hvis op == "shutdown" {
+        la kan_yield = vm_green_ta_yield()
+        p["shutdown"] = 1
+        hvis vm_green_felt_heiltal(req, "cancel_pending", 0) != 0 {
+            la kø = p["kø"]
+            la ci: heiltall = 0
+            mens ci < lengde(kø) {
+                hvis vm_map_har_nokkel(vm_green_trådar, kø[ci]) {
+                    la ct = vm_green_trådar[kø[ci]]
+                    hvis ct["state"] == "queued" {
+                        ct["state"] = "cancelled"
+                        ct["error"] = "cancelled"
+                        vm_green_ferdig(ct)
+                    }
+                }
+                ci = ci + 1
+            }
+            p["kø"] = []
+        }
+        hvis vm_green_pool_aktiv(p) {
+            hvis kan_yield == 1 {
+                vm_green_vent(-1, "pool-shutdown")
+            } ellers hvis vm_green_i_slice == 0 {
+                mens vm_green_pool_aktiv(p) { vm_green_hovud_steg() }
+            }
+        }
+        hvis kan_yield == 1 { vm_green_vent_ferdig() }
+        fjern_nokkel(vm_green_pools, ph)
+        returner vm_green_pool_svar("finished", p, {}, "")
+    }
+    la th = tekst(vm_sikker_get(req, "task_handle"))
+    hvis ikkje vm_map_har_nokkel(vm_green_trådar, th) {
+        returner vm_green_pool_svar("error", p, {}, "invalid task handle")
+    }
+    la t = vm_green_trådar[th]
+    hvis tekst(t["pool"]) != ph { returner vm_green_pool_svar("error", p, {}, "invalid task handle") }
+    hvis op == "cancel" {
+        hvis t["state"] != "queued" { returner vm_green_pool_svar("error", p, t, "task already running") }
+        t["cancel"] = 1
+        la svar = vm_green_pool_svar("cancelled", p, t, "")
+        t["state"] = "cancelled"
+        t["error"] = "cancelled"
+        la kø2 = p["kø"]
+        la ki: heiltall = 0
+        mens ki < lengde(kø2) {
+            hvis kø2[ki] == th { fjern(kø2, ki) } ellers { ki = ki + 1 }
+        }
+        vm_green_ferdig(t)
+        returner svar
+    }
+    hvis op == "wait" eller op == "status" {
+        la timed_out: heiltall = 0
+        // Konsumer løyvet òg når tasken alt er ferdig (re-køyrd CALL etter venting).
+        la kan_yield2: heiltall = 0
+        hvis op == "wait" { kan_yield2 = vm_green_ta_yield() }
+        hvis op == "wait" og ikkje vm_green_er_ferdig(t) {
+            la timeout = vm_green_felt_heiltal(req, "timeout_ms", -1)
+            hvis timeout == 0 {
+                timed_out = 1
+            } ellers hvis kan_yield2 == 1 {
+                hvis vm_green_vent(timeout, "pool-wait") == 1 { timed_out = 1 }
+            } ellers hvis vm_green_i_slice == 1 {
+                timed_out = 1
+            } ellers {
+                la frist: heiltall = -2
+                hvis timeout > 0 { frist = builtin.tid_ms() + timeout }
+                mens ikkje vm_green_er_ferdig(t) og (frist < 0 eller builtin.tid_ms() < frist) {
+                    vm_green_hovud_steg()
+                }
+                hvis ikkje vm_green_er_ferdig(t) { timed_out = 1 }
+            }
+        }
+        hvis kan_yield2 == 1 { vm_green_vent_ferdig() }
+        hvis timed_out == 1 { returner vm_green_pool_svar("timeout", p, t, "timeout") }
+        returner vm_green_pool_svar(tekst(t["state"]), p, t, "")
+    }
+    hvis op == "release" {
+        hvis ikkje vm_green_er_ferdig(t) { returner vm_green_pool_svar("error", p, t, "task not finished") }
+        la rsvar = vm_green_pool_svar("finished", p, t, "")
+        fjern_nokkel(vm_green_trådar, th)
+        returner rsvar
+    }
+    returner vm_green_pool_svar("error", p, t, "invalid pool operation")
+}
+
 funksjon køyr_funksjon(
     fn_namn: tekst,
     arg_verdiar: liste,
     functions: ordbok<tekst, tekst>,
     djupn: heltall
 ) {
+    // Grøn slice: planleggaren set flagget rett før kallet; berre DENNE (ytste)
+    // aktiveringa kan preemptast. Nøsta aktiveringar (builtin → køyr_funksjon)
+    // ser flagget som konsumert.
+    la er_green_slice = vm_green_start_flagg == 1
+    vm_green_start_flagg = 0
     la trace_raw = miljo_hent("NORSCODE_VM_TRACE")
     hvis trace_raw != "" og heltall_fra_tekst(trace_raw) == 1 { skriv("ENTER " + fn_namn + "\n") }
     la trace_frames_raw = miljo_hent("NORSCODE_VM_TRACE_FRAMES")
@@ -4624,6 +5458,10 @@ funksjon køyr_funksjon(
     }
 
     la fn_def = vm_map_get(functions, fn_namn)
+    // usann når ei continuation-ramme er teken attende (RETURN/unwind): då er
+    // fn_def framleis callee sin, og LOAD/STORE_GLOBAL hentar kallaren sin
+    // definisjon (modulen) frå fn_namn før bruk.
+    la fn_def_ok: boolsk = sann
     la kode = fn_def["code"]
     la params = fn_def["params"]
     la ramme = vm_ramme_hent(functions, fn_namn, 0, fast_mode)
@@ -4675,6 +5513,26 @@ funksjon køyr_funksjon(
     la tvungen_op: tekst = ""
     mens (ip < lengde(kode)) {
         ramme["ip"] = ip
+        // Grøne trådar: éi global-lesing + sanningstest når ingen finst.
+        hvis vm_green_på {
+            hvis er_green_slice {
+                // Preemption berre på ei rein instruksjonsgrense (tvungen_op
+                // er ikkje ein del av den lagra tilstanden).
+                hvis tvungen_op == "" {
+                    vm_green_budsjett = vm_green_budsjett - 1
+                    hvis vm_green_budsjett <= 0 {
+                        returner vm_green_suspender(functions, ip, ramme, continuations,
+                                                    tail_chain_count, function_start_ms)
+                    }
+                }
+            } ellers hvis vm_green_i_slice == 0 {
+                vm_green_tikk = vm_green_tikk + 1
+                hvis vm_green_tikk >= vm_green_kvantum {
+                    vm_green_tikk = 0
+                    vm_green_runde()
+                }
+            }
+        }
         la instr = kode[ip]
         la op: tekst = vm_opcode_fra_instr(instr)
         hvis tvungen_op != "" {
@@ -4722,6 +5580,10 @@ funksjon køyr_funksjon(
         }
 
         hvis op == "STORE_GLOBAL" {
+            hvis ikkje fn_def_ok {
+                fn_def = vm_map_get(functions, fn_namn)
+                fn_def_ok = sann
+            }
             la modul_namn = tekst(fn_def["module"])
             la globale = functions["__vm_globals__"]
             hvis ikkje vm_map_har_nokkel(globale, modul_namn) {
@@ -4734,6 +5596,10 @@ funksjon køyr_funksjon(
         }
 
         hvis op == "LOAD_GLOBAL" {
+            hvis ikkje fn_def_ok {
+                fn_def = vm_map_get(functions, fn_namn)
+                fn_def_ok = sann
+            }
             la modul_namn = tekst(fn_def["module"])
             la global_namn = tekst(instr[1])
             la globale = functions["__vm_globals__"]
@@ -5299,6 +6165,7 @@ funksjon køyr_funksjon(
                     hvis unwind_tail["handled"] == "sann" {
                         ramme = unwind_tail["frame"]
                         fn_namn = ramme["namn"]
+                        fn_def_ok = usann   // fn_def høyrer til callee → LOAD/STORE_GLOBAL hentar att
                         kode = ramme["code"]
                         params = ramme["params"]
                         label_kart = ramme["label_map"]
@@ -5325,6 +6192,7 @@ funksjon køyr_funksjon(
                     functions["__vm_metrics__"][function_instruction_key] = "0"
                 }
                 fn_def = vm_map_get(functions, fn_namn)
+                fn_def_ok = sann
                 kode = fn_def["code"]
                 params = fn_def["params"]
                 la ferdig_tail_ramme = ramme
@@ -5385,6 +6253,7 @@ funksjon køyr_funksjon(
                     hvis unwind_frame["handled"] == "sann" {
                         ramme = unwind_frame["frame"]
                         fn_namn = ramme["namn"]
+                        fn_def_ok = usann   // fn_def høyrer til callee → LOAD/STORE_GLOBAL hentar att
                         kode = ramme["code"]
                         params = ramme["params"]
                         label_kart = ramme["label_map"]
@@ -5418,6 +6287,7 @@ funksjon køyr_funksjon(
                     functions["__vm_metrics__"][function_instruction_key] = "0"
                 }
                 fn_def = vm_map_get(functions, fn_namn)
+                fn_def_ok = sann
                 hvis trace_ops { skriv("VM-CALL phase=definition target=" + fn_namn + "\n") }
                 kode = fn_def["code"]
                 params = fn_def["params"]
@@ -5465,7 +6335,18 @@ funksjon køyr_funksjon(
                     functions["__vm_pending_arg_heap_ids__"] = call_heap_ids
                     retur_verdi = køyr_funksjon(løyst_namn, call_args, functions, djupn + 1)
                 } ellers {
+                    hvis vm_green_på {
+                        // Ventearmar kan berre gje frå seg kontrollen frå den ytste
+                        // slice-aktiveringa og berre ved CALL (argumenta kan leggjast
+                        // attende og same instruksjon køyrast på nytt).
+                        vm_green_yield_ok = 0
+                        hvis er_green_slice og op == "CALL" { vm_green_yield_ok = 1 }
+                    }
                     retur_verdi = kall_innebygd(mål_namn, call_args, functions)
+                    // Ventetilstand (vent_frist/vent_data) frå eit tidlegare
+                    // GreenVenter-forsøk av same CALL er over når builtinen returnerer
+                    // normalt, same kva veg armen gjekk (sjå vm_green_vent_rydd).
+                    hvis er_green_slice { vm_green_vent_rydd() }
                     functions["__vm_last_return_heap_id__"] = vm_heap_track(functions, retur_verdi)
                 }
             } fang (call_exc) {
@@ -5500,7 +6381,29 @@ funksjon køyr_funksjon(
                 returner await_verdi
             }
 
+            // Grøn tråd som må vente (join/wait/poll/sov/mutex): legg argumenta
+            // attende, lagra tilstanden og gje kontrollen til planleggaren. Same
+            // CALL blir køyrd på nytt i neste slice.
+            hvis call_failed og er_green_slice og op == "CALL" og builtin.index_of(tekst(call_error), "GreenVenter:") >= 0 {
+                mens lengde(functions["__vm_active_frames__"]) > frames_before {
+                    fjern_siste(functions["__vm_active_frames__"])
+                }
+                la gri: heiltall = 0
+                mens gri < lengde(call_args) {
+                    la grh = ""
+                    hvis gri < lengde(call_heap_ids) { grh = call_heap_ids[gri] }
+                    stack_push_heap(ramme, call_args[gri], grh)
+                    gri = gri + 1
+                }
+                vm_arg_liste_frigje(functions, call_args, fast_mode)
+                returner vm_green_suspender(functions, ip, ramme, continuations,
+                                            tail_chain_count, function_start_ms)
+            }
+
             hvis call_failed {
+                // Vanleg unnatak (ikkje GreenVenter) frå eit kall i ytste slice:
+                // ei eventuell venting i tråden er over.
+                hvis er_green_slice { vm_green_vent_rydd() }
                 vm_arg_liste_frigje(functions, call_args, fast_mode)
                 vm_metric_inc(functions, "unwinds")
                 functions["__vm_pending_arg_heap_ids__"] = []
@@ -5530,6 +6433,7 @@ funksjon køyr_funksjon(
                     hvis unwind_call["handled"] == "sann" {
                         ramme = unwind_call["frame"]
                         fn_namn = ramme["namn"]
+                        fn_def_ok = usann   // fn_def høyrer til callee → LOAD/STORE_GLOBAL hentar att
                         kode = ramme["code"]
                         params = ramme["params"]
                         label_kart = ramme["label_map"]
@@ -5597,6 +6501,11 @@ funksjon køyr_funksjon(
                 vm_ramme_frigje(functions, ferdig_ramme)
                 ramme["state"] = "running"
                 fn_namn = ramme["namn"]
+                // fn_def er no callee sin definisjon. LOAD/STORE_GLOBAL les
+                // fn_def["module"] og må få kallaren sin att: varm veg (kvar RETURN),
+                // so berre merk han utdatert — oppslaget skjer først ved neste
+                // LOAD_GLOBAL/STORE_GLOBAL i denne ramma.
+                fn_def_ok = usann
                 kode = ramme["code"]
                 params = ramme["params"]
                 label_kart = ramme["label_map"]
@@ -5725,6 +6634,7 @@ funksjon køyr_funksjon(
                             forelder["state"] = "running"
                             ramme = forelder
                             fn_namn = ramme["namn"]
+                            fn_def_ok = usann   // fn_def høyrer til callee → LOAD/STORE_GLOBAL hentar att
                             kode = ramme["code"]
                             params = ramme["params"]
                             label_kart = ramme["label_map"]
@@ -5747,6 +6657,7 @@ funksjon køyr_funksjon(
                             forelder["state"] = "running"
                             ramme = forelder
                             fn_namn = ramme["namn"]
+                            fn_def_ok = usann   // fn_def høyrer til callee → LOAD/STORE_GLOBAL hentar att
                             kode = ramme["code"]
                             params = ramme["params"]
                             label_kart = ramme["label_map"]
