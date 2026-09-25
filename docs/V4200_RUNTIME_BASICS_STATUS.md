@@ -1,5 +1,7 @@
 # V4200 Runtime Basics Status
 
+> **Historisk dokument.** `tools/run_runtime_basics_phase_v4200.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 Dato: 2026-06-25
 Fase: v3901-v4200 fil/json/map/tekst stabilisering
 
