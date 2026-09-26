@@ -110,8 +110,16 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "random_byte" eller n == "icache_sync" {
         returner sann
     }
+    hvis ncd_er_bru(n) { returner sann }
     hvis ncval_gap_stub(n) { returner sann }
     returner usann
+}
+
+// A5: desimaltall-bruene med eigen ARM64-emitter (sjå kall-kjeda i kompiler_arm64_ncval).
+funksjon ncd_er_bru(namn: tekst) -> boolsk {
+    la n = ncval_avkort_builtin(namn)
+    returner n == "desimal_frå_bits" eller n == "desimal_til_bits" eller n == "desimal_til_heiltal" eller
+        n == "er_desimaltall" eller n == "til_tekst_native"
 }
 
 // Fase 1 (SELFHOST_ARM64_FULLHOST_CODEGEN_PLAN.md): ekte runtime `skriv` av eit
@@ -797,6 +805,7 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
         n == "socket_send_bytes" eller n == "socket_recv_bytes" eller n == "socket_settimeout" eller
         n == "wasm_selftest" eller n == "ncb_route_handlers" eller
         n == "bn_modexp_bytes" eller n == "argon2_compress" eller n == "blake2b_compress" eller
+        n == "host_finst" eller n == "host_kall" eller
         n == "n" eller n == "desimaltall"
 }
 
@@ -1061,6 +1070,9 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     legg_u32(native, 0xF100093F)                       // cmp x9, #2
     la p_boolsk = lengde(native)
     legg_u32(native, 0)                                // b.eq boolsk
+    legg_u32(native, 0xF100193F)                       // cmp x9, #6  (A5)
+    la p_desimal = lengde(native)
+    legg_u32(native, 0)                                // b.eq desimaltall
     emit_ncval_str_const(native, "heltall", dst_reg)   // default (int)
     la p_end1 = lengde(native)
     legg_u32(native, 0)                                // b end
@@ -1078,6 +1090,10 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     legg_u32(native, 0)                                // b end
     la lbl_liste = lengde(native)
     emit_ncval_str_const(native, "liste", dst_reg)
+    la p_end5 = lengde(native)
+    legg_u32(native, 0)                                // b end
+    la lbl_desimal = lengde(native)
+    emit_ncval_str_const(native, "desimaltall", dst_reg)
     la lbl_end = lengde(native)
     skriv_u32(native, p_liste,  0x54000000 | ((((lbl_liste  - p_liste)  / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_kart,   0x54000000 | ((((lbl_kart   - p_kart)   / 4) & 0x7FFFF) << 5))
@@ -1087,6 +1103,8 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     skriv_u32(native, p_end2,   0x14000000 |  (((lbl_end - p_end2) / 4) & 0x03FFFFFF))
     skriv_u32(native, p_end3,   0x14000000 |  (((lbl_end - p_end3) / 4) & 0x03FFFFFF))
     skriv_u32(native, p_end4,   0x14000000 |  (((lbl_end - p_end4) / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_end5,   0x14000000 |  (((lbl_end - p_end5) / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_desimal, 0x54000000 | ((((lbl_desimal - p_desimal) / 4) & 0x7FFFF) << 5))
     returner 0
 }
 
@@ -5739,7 +5757,343 @@ funksjon ncval_legg_til_str_cmp(all_patchar, image: liste_heiltall, fn_start) ->
         fn_start["__str_cmp"] = lengde(image)
         for w i emit_str_cmp_routine() { legg_til(image, w) }
     }
+    // Desimaltall-rutinane (A5) blir lagde til på same vis når eit bl-mål peikar dit.
+    la treng_da = usann
+    la treng_dc = usann
+    for pt i all_patchar {
+        hvis pt[1] == "__desimal_arit" { treng_da = sann }
+        hvis pt[1] == "__desimal_cmp" { treng_dc = sann }
+    }
+    hvis treng_da {
+        fn_start["__desimal_arit"] = lengde(image)
+        for w i emit_desimal_arit_routine() { legg_til(image, w) }
+    }
+    hvis treng_dc {
+        fn_start["__desimal_cmp"] = lengde(image)
+        for w i emit_desimal_cmp_routine() { legg_til(image, w) }
+    }
     returner 0
+}
+
+// ─── A5: desimaltall (type 6) ────────────────────────────────────────────────
+// NcVal {6, IEEE-754-bita til ein double}, same representasjon som x86-AOT
+// (native_codegen_v2: desimal_boks_rå). Aritmetikk og samanlikning går gjennom to
+// løv-rutinar (x0 = venstre, x1 = høgre, x2 = kode) som berre brukar x0–x2, x9–x14,
+// d0–d6 og heap-bumpen x28; operand-registera x19+ og lr blir ikkje rørte.
+// Eit heiltal/bool blir utvida med scvtf, så blanda uttrykk (3.5 * 2) reknar i
+// flyttal slik VM-en gjer.
+
+// b.<cond> / b lappa i ei ordliste (pos og mål er byte-indeksar).
+funksjon ncd_bcond(r: liste_heiltall, pos: heiltall, mål: heiltall, cond: heiltall) -> heiltall {
+    skriv_u32(r, pos, 0x54000000 | ((((mål - pos) / 4) & 0x7FFFF) << 5) | cond)
+    returner 0
+}
+funksjon ncd_b(r: liste_heiltall, pos: heiltall, mål: heiltall) -> heiltall {
+    skriv_u32(r, pos, 0x14000000 | (((mål - pos) / 4) & 0x03FFFFFF))
+    returner 0
+}
+
+// Last operanden i Xsrc som double i Dd. type 6 → fmov, elles scvtf av val.
+// Brukar x9 (type) og x10 (val). Returnerer ingenting; kallaren har ikkje flagg-krav.
+funksjon ncd_last_double(r: liste_heiltall, src: heiltall, d: heiltall) -> heiltall {
+    legg_u32(r, 0xF9400000 | (src << 5) | 9)        // ldr x9, [Xsrc]      (type)
+    legg_u32(r, 0xF9400400 | (src << 5) | 10)       // ldr x10, [Xsrc, #8] (val)
+    legg_u32(r, 0xF100193F)                         // cmp x9, #6
+    la p_ne = lengde(r)
+    legg_u32(r, 0)                                  // b.ne heiltal
+    legg_u32(r, 0x9E670140 | d)                     // fmov Dd, x10
+    la p_b = lengde(r)
+    legg_u32(r, 0)                                  // b ferdig
+    la lbl_int = lengde(r)
+    legg_u32(r, 0x9E620140 | d)                     // scvtf Dd, x10
+    la lbl_ferdig = lengde(r)
+    ncd_bcond(r, p_ne, lbl_int, 1)
+    ncd_b(r, p_b, lbl_ferdig)
+    returner 0
+}
+
+// Boks d0 som desimaltall-NcVal i x0 og returner.
+funksjon ncd_boks_d0_ret(r: liste_heiltall) -> heiltall {
+    legg_u32(r, 0x9E660009)                         // fmov x9, d0
+    legg_u32(r, 0xAA1C03E0)                         // mov x0, x28
+    legg_u32(r, 0xD28000CD)                         // movz x13, #6
+    legg_u32(r, 0xF900038D)                         // str x13, [x28]
+    legg_u32(r, 0xF9000789)                         // str x9, [x28, #8]
+    legg_u32(r, 0x9100439C)                         // add x28, x28, #16
+    legg_u32(r, 0xD65F03C0)                         // ret
+    returner 0
+}
+
+// __desimal_arit(x0 = venstre, x1 = høgre, x2 = kode) → x0 = desimaltall-NcVal.
+// kode: 0 +, 1 −, 2 ×, 3 /, 4 % (fmod-semantikk: eksakt, forteikn frå dividenden,
+// som x86-AOT sin fprem). Divisor ±0.0 ved / og % gjev x0 = 0 (kallaren kastar
+// «DivisjonMedNull»/«ModuloMedNull» som VM-en).
+funksjon emit_desimal_arit_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    // Operandane: x0 og x1 blir lesne før x0 blir skrive.
+    ncd_last_double(r, 0, 0)                        // d0 = venstre
+    ncd_last_double(r, 1, 1)                        // d1 = høgre
+    la p_add = lengde(r)
+    legg_u32(r, 0)                                  // cbz x2, ADD
+    legg_u32(r, 0xF100045F)                         // cmp x2, #1
+    la p_sub = lengde(r)
+    legg_u32(r, 0)                                  // b.eq SUB
+    legg_u32(r, 0xF100085F)                         // cmp x2, #2
+    la p_mul = lengde(r)
+    legg_u32(r, 0)                                  // b.eq MUL
+    legg_u32(r, 0xF1000C5F)                         // cmp x2, #3
+    la p_div = lengde(r)
+    legg_u32(r, 0)                                  // b.eq DIV
+    // MOD: d1 == ±0 → NULL
+    legg_u32(r, 0x1E602028)                         // fcmp d1, #0.0
+    la p_mod_null = lengde(r)
+    legg_u32(r, 0)                                  // b.eq NULL
+    legg_u32(r, 0x1E60C002)                         // fabs d2, d0   |a|
+    legg_u32(r, 0x1E60C023)                         // fabs d3, d1   |b|
+    legg_u32(r, 0xD2EFFE09)                         // movz x9, #0x7FF0, lsl #48  (+inf)
+    legg_u32(r, 0x9E670126)                         // fmov d6, x9
+    legg_u32(r, 0x1E622040)                         // fcmp d2, d2
+    la p_nan_a = lengde(r)
+    legg_u32(r, 0)                                  // b.vs NAN   (a er NaN)
+    legg_u32(r, 0x1E632060)                         // fcmp d3, d3
+    la p_nan_b = lengde(r)
+    legg_u32(r, 0)                                  // b.vs NAN   (b er NaN)
+    legg_u32(r, 0x1E662040)                         // fcmp d2, d6
+    la p_inf_a = lengde(r)
+    legg_u32(r, 0)                                  // b.eq NAN   (a er ±inf)
+    // Ytre løkke: medan |a| >= |b|: t = største |b|·2^k <= |a|; |a| -= t (eksakt).
+    la lbl_ytre = lengde(r)
+    legg_u32(r, 0x1E632040)                         // fcmp d2, d3
+    la p_ferdig = lengde(r)
+    legg_u32(r, 0)                                  // b.mi FERDIG (|a| < |b|)
+    legg_u32(r, 0x1E604064)                         // fmov d4, d3
+    la lbl_indre = lengde(r)
+    legg_u32(r, 0x1E642885)                         // fadd d5, d4, d4
+    legg_u32(r, 0x1E6220A0)                         // fcmp d5, d2
+    la p_indre_ut = lengde(r)
+    legg_u32(r, 0)                                  // b.gt INDRE_UT
+    legg_u32(r, 0x1E6040A4)                         // fmov d4, d5
+    la p_indre_b = lengde(r)
+    legg_u32(r, 0)                                  // b INDRE
+    la lbl_indre_ut = lengde(r)
+    legg_u32(r, 0x1E643842)                         // fsub d2, d2, d4
+    la p_ytre_b = lengde(r)
+    legg_u32(r, 0)                                  // b YTRE
+    la lbl_ferdig = lengde(r)
+    legg_u32(r, 0x9E660009)                         // fmov x9, d0
+    legg_u32(r, 0xF100013F)                         // cmp x9, #0
+    la p_pos = lengde(r)
+    legg_u32(r, 0)                                  // b.ge POSITIV
+    legg_u32(r, 0x1E614042)                         // fneg d2, d2
+    la lbl_pos = lengde(r)
+    legg_u32(r, 0x1E604040)                         // fmov d0, d2
+    la p_mod_boks = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS
+    la lbl_nan = lengde(r)
+    legg_u32(r, 0x1E623840)                         // fsub d0, d2, d2   (inf−inf / NaN → NaN)
+    la p_nan_boks = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS
+    la lbl_div = lengde(r)
+    legg_u32(r, 0x1E602028)                         // fcmp d1, #0.0
+    la p_div_null = lengde(r)
+    legg_u32(r, 0)                                  // b.eq NULL
+    legg_u32(r, 0x1E611800)                         // fdiv d0, d0, d1
+    la p_div_boks = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS
+    la lbl_add = lengde(r)
+    legg_u32(r, 0x1E612800)                         // fadd d0, d0, d1
+    la p_add_boks = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS
+    la lbl_sub = lengde(r)
+    legg_u32(r, 0x1E613800)                         // fsub d0, d0, d1
+    la p_sub_boks = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS
+    la lbl_mul = lengde(r)
+    legg_u32(r, 0x1E610800)                         // fmul d0, d0, d1
+    la lbl_boks = lengde(r)
+    ncd_boks_d0_ret(r)
+    la lbl_null = lengde(r)
+    legg_u32(r, 0xD2800000)                         // movz x0, #0
+    legg_u32(r, 0xD65F03C0)                         // ret
+    skriv_u32(r, p_add, 0xB4000002 | ((((lbl_add - p_add) / 4) & 0x7FFFF) << 5))  // cbz x2
+    ncd_bcond(r, p_sub, lbl_sub, 0)
+    ncd_bcond(r, p_mul, lbl_mul, 0)
+    ncd_bcond(r, p_div, lbl_div, 0)
+    ncd_bcond(r, p_mod_null, lbl_null, 0)
+    ncd_bcond(r, p_nan_a, lbl_nan, 6)
+    ncd_bcond(r, p_nan_b, lbl_nan, 6)
+    ncd_bcond(r, p_inf_a, lbl_nan, 0)
+    ncd_bcond(r, p_ferdig, lbl_ferdig, 4)
+    ncd_bcond(r, p_indre_ut, lbl_indre_ut, 12)
+    ncd_b(r, p_indre_b, lbl_indre)
+    ncd_b(r, p_ytre_b, lbl_ytre)
+    ncd_bcond(r, p_pos, lbl_pos, 10)
+    ncd_b(r, p_mod_boks, lbl_boks)
+    ncd_b(r, p_nan_boks, lbl_boks)
+    ncd_bcond(r, p_div_null, lbl_null, 0)
+    ncd_b(r, p_div_boks, lbl_boks)
+    ncd_b(r, p_add_boks, lbl_boks)
+    ncd_b(r, p_sub_boks, lbl_boks)
+    returner r
+}
+
+// __desimal_cmp(x0 = venstre, x1 = høgre, x2 = kode) → x0 = bool-NcVal.
+// kode: 0 <, 1 <=, 2 >, 3 >=, 4 ==, 5 !=. NaN gjev usann for alt unntatt != (IEEE).
+// Ein operand som ikkje er tal (type 1/2/6) er «ikkje samanliknbar»: same svar som NaN.
+funksjon emit_desimal_cmp_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xD280000E)                         // movz x14, #0  (samanliknbar)
+    // Venstre og høgre: type 6 → fmov, 1/2 → scvtf, anna → x14 = 1.
+    la src = 0
+    mens src < 2 {
+        legg_u32(r, 0xF9400000 | (src << 5) | 9)    // ldr x9, [Xsrc]
+        legg_u32(r, 0xF9400400 | (src << 5) | 10)   // ldr x10, [Xsrc, #8]
+        legg_u32(r, 0xF100193F)                     // cmp x9, #6
+        la p_ne = lengde(r)
+        legg_u32(r, 0)                              // b.ne ikkje_desimal
+        legg_u32(r, 0x9E670140 | src)               // fmov Dsrc, x10
+        la p_b = lengde(r)
+        legg_u32(r, 0)                              // b neste
+        la lbl_ikkje = lengde(r)
+        legg_u32(r, 0x9E620140 | src)               // scvtf Dsrc, x10
+        legg_u32(r, 0xD1000529)                     // sub x9, x9, #1
+        legg_u32(r, 0xF100053F)                     // cmp x9, #1   (type 1/2 → 0/1)
+        legg_u32(r, 0x9A9F95CE)                     // csinc x14, x14, xzr, ls → x14 = 1 om type ∉ {1,2}
+        la lbl_neste = lengde(r)
+        ncd_bcond(r, p_ne, lbl_ikkje, 1)
+        ncd_b(r, p_b, lbl_neste)
+        src = src + 1
+    }
+    legg_u32(r, 0xD2800009)                         // movz x9, #0
+    la p_uord = lengde(r)
+    legg_u32(r, 0)                                  // cbnz x14, UORDNA
+    legg_u32(r, 0x1E612000)                         // fcmp d0, d1
+    // cset per kode (FP-vilkår: mi/ls/gt/ge/eq/ne gjev rett NaN-svar).
+    la vilkår = [4, 9, 12, 10, 0, 1]
+    la hopp: liste_heiltall = []
+    la k = 0
+    mens k < 6 {
+        legg_u32(r, 0xF100001F | (k << 10) | (2 << 5))   // cmp x2, #k  (flagga frå fcmp går tapt → gjer fcmp på nytt)
+        la p_ikkje = lengde(r)
+        legg_u32(r, 0)                              // b.ne neste_k
+        legg_u32(r, 0x1E612000)                     // fcmp d0, d1
+        legg_u32(r, 0x1A9F07E9 | ((vilkår[k] ^ 1) << 12))  // cset w9, vilkår
+        la p_ut = lengde(r)
+        legg_u32(r, 0)                              // b BOKS
+        legg_til(hopp, p_ut)
+        la lbl_neste_k = lengde(r)
+        ncd_bcond(r, p_ikkje, lbl_neste_k, 1)
+        k = k + 1
+    }
+    la p_etter = lengde(r)
+    legg_u32(r, 0)                                  // b BOKS (ukjend kode → usann)
+    legg_til(hopp, p_etter)
+    la lbl_uord = lengde(r)
+    legg_u32(r, 0xF100145F)                         // cmp x2, #5
+    legg_u32(r, 0x1A9F17E9)                         // cset w9, eq  (berre != er sann)
+    la lbl_boks = lengde(r)
+    legg_u32(r, 0xAA1C03E0)                         // mov x0, x28
+    legg_u32(r, 0xD280004D)                         // movz x13, #2
+    legg_u32(r, 0xF900038D)                         // str x13, [x28]
+    legg_u32(r, 0xF9000789)                         // str x9, [x28, #8]
+    legg_u32(r, 0x9100439C)                         // add x28, x28, #16
+    legg_u32(r, 0xD65F03C0)                         // ret
+    skriv_u32(r, p_uord, 0xB500000E | ((((lbl_uord - p_uord) / 4) & 0x7FFFF) << 5))  // cbnz x14
+    for ph i hopp { ncd_b(r, ph, lbl_boks) }
+    returner r
+}
+
+// Kallstad-vakt: hopp til desimal-greina om venstre ELLER høgre har type 6.
+// Emitterer ldr/ldr/cmp/ccmp og ein b.eq-plasshaldar; returnerer posisjonen hans.
+funksjon emit_desimal_vakt2(native: liste_heiltall, venstre: heiltall, høgre: heiltall) -> heiltall {
+    legg_u32(native, 0xF9400000 | (venstre << 5) | 9)   // ldr x9, [Xvenstre]  (type)
+    legg_u32(native, 0xF9400000 | (høgre << 5) | 10)    // ldr x10, [Xhøgre]   (type)
+    legg_u32(native, 0xF100193F)                        // cmp x9, #6
+    legg_u32(native, 0xFA461944)                        // ccmp x10, #6, #4, ne
+    la p = lengde(native)
+    legg_u32(native, 0)                                 // b.eq desimal
+    returner p
+}
+
+// Kallstad: Xdst = __desimal_arit(Xvenstre, Xhøgre, kode). Ved / og % med divisor
+// ±0.0 kastar vi som VM-en (via __throw_dispatch__ når programmet har unnataks-
+// globalar, elles exit(1)).
+funksjon emit_desimal_arit_kall(native: liste_heiltall, venstre: heiltall, høgre: heiltall, dst: heiltall,
+                                kode: heiltall, bl_patchar, globals, os: tekst) -> heiltall {
+    legg_u32(native, 0xAA0003E0 | (venstre << 16) | 0)  // mov x0, Xvenstre
+    legg_u32(native, 0xAA0003E0 | (høgre << 16) | 1)    // mov x1, Xhøgre
+    legg_u32(native, 0xD2800002 | (kode << 5))          // movz x2, #kode
+    la p_bl = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl __desimal_arit
+    legg_til(bl_patchar, [p_bl, "__desimal_arit"])
+    hvis kode >= 3 {
+        la p_ok = lengde(native)
+        legg_u32(native, 0)                             // cbnz x0, ok
+        hvis finnes_nøkkel(globals, "__exc_val__") {
+            la melding = "DivisjonMedNull: divisjon med null"
+            hvis kode == 4 { melding = "ModuloMedNull: modulo med null" }
+            emit_ncval_str_const(native, melding, 11)
+            legg_u32(native, 0xF9000320 | (globals["__exc_val__"] << 10) | 11)  // str x11, [x25, #EV*8]
+            la p_td = lengde(native)
+            legg_u32(native, 0x94000000)                // bl __throw_dispatch__
+            legg_til(bl_patchar, [p_td, "__throw_dispatch__"])
+        } ellers {
+            legg_u32(native, 0x52800020)                // movz w0, #1
+            la exitnum = 1
+            hvis os == "linux" { exitnum = 93 }
+            emit_syscall(native, exitnum, os)
+        }
+        la lbl_ok = lengde(native)
+        skriv_u32(native, p_ok, 0xB5000000 | ((((lbl_ok - p_ok) / 4) & 0x7FFFF) << 5))
+    }
+    legg_u32(native, 0xAA0003E0 | dst)                  // mov Xdst, x0
+    returner 0
+}
+
+// Kallstad: Xdst = __desimal_cmp(Xvenstre, Xhøgre, kode) (bool-NcVal).
+funksjon emit_desimal_cmp_kall(native: liste_heiltall, venstre: heiltall, høgre: heiltall, dst: heiltall,
+                               kode: heiltall, bl_patchar) -> heiltall {
+    legg_u32(native, 0xAA0003E0 | (venstre << 16) | 0)  // mov x0, Xvenstre
+    legg_u32(native, 0xAA0003E0 | (høgre << 16) | 1)    // mov x1, Xhøgre
+    legg_u32(native, 0xD2800002 | (kode << 5))          // movz x2, #kode
+    la p_bl = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl __desimal_cmp
+    legg_til(bl_patchar, [p_bl, "__desimal_cmp"])
+    legg_u32(native, 0xAA0003E0 | dst)                  // mov Xdst, x0
+    returner 0
+}
+
+// IEEE-754-bita til ein desimaltall-konstant (kompileringstid). Same som x86-AOT
+// (native_codegen_v2.desimal_ieee_bits): atomet når det finst, elles ein rein algoritme.
+funksjon ncd_ieee_bits(v) -> heiltall {
+    prøv { returner builtin.desimal_til_bits(v) } fang (e) { }
+    hvis v == 0 { returner 0 }
+    la neg = v < 0
+    la a = v
+    hvis neg { a = 0 - v }
+    la e: heiltall = 0
+    la vakt: heiltall = 0
+    mens ikkje (a < 2) og vakt < 1100 { a = a / 2  e = e + 1  vakt = vakt + 1 }
+    mens a < 1 og vakt < 2200 { a = a * 2  e = e - 1  vakt = vakt + 1 }
+    la minste: heiltall = (0 - 9223372036854775807) - 1
+    hvis e > 1023 {
+        la inf: heiltall = 2047 * 4503599627370496
+        hvis neg { returner inf + minste }
+        returner inf
+    }
+    hvis e < 0 - 1022 { returner 0 }
+    la frac = a - 1
+    la m: heiltall = 0
+    la i: heiltall = 0
+    mens i < 52 {
+        frac = frac * 2
+        m = m * 2
+        hvis ikkje (frac < 1) { m = m + 1  frac = frac - 1 }
+        i = i + 1
+    }
+    la bits: heiltall = (e + 1023) * 4503599627370496 + m
+    hvis neg { bits = bits + minste }
+    returner bits
 }
 
 funksjon emit_assert_routine(os: tekst) -> liste_heiltall {
@@ -6439,6 +6793,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     last_heiltall_64(native, 9, konstant)
                     emit_ncval_alloc_ptr(native, 9, mål_pc, tag)
                 }
+            } ellers hvis kt == "desimaltall" {
+                // A5: IEEE-754-bita blir rekna ut ved kompilering og boksa som type 6.
+                last_heiltall_64(native, 9, ncd_ieee_bits(konstant))
+                emit_ncval_alloc_ptr(native, 9, mål_pc, 6)
             } ellers hvis kt == "ingenting" {
                 // null → int 0 (same null-representasjon som json_parse). Modul-init
                 // returnerer ofte PUSH_CONST null; RETURN treng ein verdi på stakken.
@@ -6469,11 +6827,18 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_b_end = lengde(native)
             legg_u32(native, 0)                                 // b add_end
             la lbl_int = lengde(native)
+            la p_add_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0x8B0A0129)                        // add x9, x9, x10
             emit_ncval_alloc_ptr(native, 9, venstre, 1)         // 64-bit boks
+            la p_add_int_end = lengde(native)
+            legg_u32(native, 0)                                 // b add_end
+            la lbl_add_des = lengde(native)
+            emit_desimal_arit_kall(native, venstre, høgre, venstre, 0, bl_patchar, globals, os)
             la lbl_end = lengde(native)
+            ncd_bcond(native, p_add_des, lbl_add_des, 0)
+            ncd_b(native, p_add_int_end, lbl_end)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
@@ -6482,6 +6847,14 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
             la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
             la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
+            // A5: flyttalsveg for − × / % når ein operand er desimaltall (type 6).
+            la des_kode = -1
+            hvis op == "BINARY_SUB" eller op == "SUB" { des_kode = 1 }
+            hvis op == "BINARY_MUL" eller op == "MUL" { des_kode = 2 }
+            hvis op == "BINARY_DIV" eller op == "DIV" { des_kode = 3 }
+            hvis op == "BINARY_MOD" { des_kode = 4 }
+            la p_ar_des = -1
+            hvis des_kode >= 0 { p_ar_des = emit_desimal_vakt2(native, venstre, høgre) }
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             hvis op == "BINARY_ADD" eller op == "ADD" {
@@ -6507,14 +6880,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0x9ACA2929)                    // asrv x9, x9, x10
             }
             emit_ncval_alloc_ptr(native, 9, venstre, 1)         // 64-bit boks
+            hvis p_ar_des >= 0 {
+                la p_ar_int_end = lengde(native)
+                legg_u32(native, 0)                             // b ar_end
+                la lbl_ar_des = lengde(native)
+                emit_desimal_arit_kall(native, venstre, høgre, venstre, des_kode, bl_patchar, globals, os)
+                la lbl_ar_end = lengde(native)
+                ncd_bcond(native, p_ar_des, lbl_ar_des, 0)
+                ncd_b(native, p_ar_int_end, lbl_ar_end)
+            }
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "UNARY_NEG" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NEG", "image": []} }
             la topp = opnd_les(native, djupn - 1, 0, memmode, home_off)
+            // A5: desimaltall → flipp forteiknsbiten (−0.0 og NaN som VM-en), type 6 bevart.
+            legg_u32(native, 0xF9400000 | (topp << 5) | 10)     // ldr x10, [Xtopp]  (type)
             legg_u32(native, 0xF9400400 | (topp << 5) | 9)      // ldr x9, [Xtopp, #8]
+            legg_u32(native, 0xF100195F)                        // cmp x10, #6
+            la p_neg_int = lengde(native)
+            legg_u32(native, 0)                                 // b.ne heiltal
+            legg_u32(native, 0xD2410129)                        // eor x9, x9, #0x8000000000000000
+            emit_ncval_alloc_ptr(native, 9, topp, 6)
+            la p_neg_end = lengde(native)
+            legg_u32(native, 0)                                 // b slutt
+            la lbl_neg_int = lengde(native)
             legg_u32(native, 0xCB0903E9)                        // neg x9, x9
             emit_ncval_alloc_ptr(native, 9, topp, 1)
+            la lbl_neg_end = lengde(native)
+            ncd_bcond(native, p_neg_int, lbl_neg_int, 1)
+            ncd_b(native, p_neg_end, lbl_neg_end)
             opnd_ut(native, djupn - 1, topp, memmode, home_off)
         } ellers hvis op == "UNARY_NOT" {
             hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved UNARY_NOT", "image": []} }
@@ -6545,12 +6940,19 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_b_end = lengde(native)
             legg_u32(native, 0)                                 // b eq_end
             la lbl_int = lengde(native)
+            la p_cmp_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
             legg_u32(native, 0x1A9F17E9)                        // cset w9, eq
             emit_ncval_alloc(native, 9, venstre, 2)
+            la p_cmp_int_end = lengde(native)
+            legg_u32(native, 0)                                 // b cmp_end
+            la lbl_cmp_des = lengde(native)
+            emit_desimal_cmp_kall(native, venstre, høgre, venstre, 4, bl_patchar)
             la lbl_end = lengde(native)
+            ncd_bcond(native, p_cmp_des, lbl_cmp_des, 0)
+            ncd_b(native, p_cmp_int_end, lbl_end)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
@@ -6574,12 +6976,19 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_b_end = lengde(native)
             legg_u32(native, 0)                                 // b ne_end
             la lbl_int = lengde(native)
+            la p_ne_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
             legg_u32(native, 0x1A9F07E9)                        // cset w9, ne
             emit_ncval_alloc(native, 9, venstre, 2)
+            la p_ne_int_end = lengde(native)
+            legg_u32(native, 0)                                 // b ne_end
+            la lbl_ne_des = lengde(native)
+            emit_desimal_cmp_kall(native, venstre, høgre, venstre, 5, bl_patchar)
             la lbl_end = lengde(native)
+            ncd_bcond(native, p_ne_des, lbl_ne_des, 0)
+            ncd_b(native, p_ne_int_end, lbl_end)
             skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
             skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end)   / 4) & 0x03FFFFFF))
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
@@ -6602,6 +7011,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_cmp_ferdig = lengde(native)
             legg_u32(native, 0)                                 // b cset
             la lbl_cmp_int = lengde(native)
+            la p_ord_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
@@ -6615,6 +7025,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis op == "COMPARE_GT" { cset = 0x1A9FD7E9 }
             legg_u32(native, cset)                              // cset w9, cond
             emit_ncval_alloc(native, 9, venstre, 2)
+            la ord_kode = 0
+            hvis op == "COMPARE_LE" { ord_kode = 1 }
+            hvis op == "COMPARE_GT" { ord_kode = 2 }
+            hvis op == "COMPARE_GE" { ord_kode = 3 }
+            la p_ord_int_end = lengde(native)
+            legg_u32(native, 0)                                 // b ord_end
+            la lbl_ord_des = lengde(native)
+            emit_desimal_cmp_kall(native, venstre, høgre, venstre, ord_kode, bl_patchar)
+            la lbl_ord_end = lengde(native)
+            ncd_bcond(native, p_ord_des, lbl_ord_des, 0)
+            ncd_b(native, p_ord_int_end, lbl_ord_end)
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
         } ellers hvis op == "BUILD_LIST" {
@@ -7877,6 +8298,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "atomic_operation" eller kallnamn == "builtin.atomic_operation") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal atomic_operation krev 1 arg", "image": []} }
                     emit_atomic_operation(native, r1, r1, os)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis ncd_er_bru(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
+                    // A5: desimaltall-bruene (same semantikk som x86-atoma i native_codegen_v2):
+                    // frå_bits/til_bits er rein bit-omtolking, til_heiltal trunkerer mot null
+                    // (fcvtzs), er_desimaltall er ein billeg typetest, til_tekst_native er
+                    // tekst() utan desimalkroken (fallbacken i std.desimaltall_tekst).
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal " + kallnamn + " krev 1 arg", "image": []} }
+                    la bru = ncval_avkort_builtin(kallnamn)
+                    hvis bru == "desimal_frå_bits" {
+                        legg_u32(native, 0xF9400400 | (r1 << 5) | 9)     // ldr x9, [Xarg, #8]
+                        emit_ncval_alloc_ptr(native, 9, r1, 6)
+                    } ellers hvis bru == "desimal_til_bits" {
+                        legg_u32(native, 0xF9400400 | (r1 << 5) | 9)     // ldr x9, [Xarg, #8]
+                        emit_ncval_alloc_ptr(native, 9, r1, 1)
+                    } ellers hvis bru == "desimal_til_heiltal" {
+                        legg_u32(native, 0xF9400000 | (r1 << 5) | 10)    // ldr x10, [Xarg]  (type)
+                        legg_u32(native, 0xF9400400 | (r1 << 5) | 9)     // ldr x9, [Xarg, #8]
+                        legg_u32(native, 0xF100195F)                     // cmp x10, #6
+                        legg_u32(native, 0x54000061)                     // b.ne +3 (heiltal: send vidare)
+                        legg_u32(native, 0x9E670120)                     // fmov d0, x9
+                        legg_u32(native, 0x9E780009)                     // fcvtzs x9, d0
+                        emit_ncval_alloc_ptr(native, 9, r1, 1)
+                    } ellers hvis bru == "er_desimaltall" {
+                        legg_u32(native, 0xF9400000 | (r1 << 5) | 9)     // ldr x9, [Xarg]  (type)
+                        legg_u32(native, 0xF100193F)                     // cmp x9, #6
+                        legg_u32(native, 0x1A9F17E9)                     // cset w9, eq
+                        emit_ncval_alloc(native, 9, r1, 2)
+                    } ellers {
+                        emit_tekst_ncval(native, r1, r1)                 // til_tekst_native
+                    }
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis ncval_ruting_aktiv(os) og ncval_gap_rute(kallnamn) != "" og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn)) og lengde(instr) == 3 {
                     // RUTING: builtinet er gap-stubba nativt, men bundlaren har
