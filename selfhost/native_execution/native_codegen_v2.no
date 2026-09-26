@@ -1421,6 +1421,8 @@ funksjon call_result_type(fn_nm: tekst) {
     hvis builtin.ends_with(fn_nm, ".fil_finnes") eller fn_nm == "fil_finnes" { returner "bool" }
     hvis builtin.ends_with(fn_nm, ".miljo_hent") eller fn_nm == "miljo_hent" { returner "str" }
     hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" { returner "map" }
+    hvis fn_nm == "builtin.native_target" { returner "str" }
+    hvis fn_nm == "builtin.native_envp" { returner "int" }
     hvis fn_nm == "builtin.native_fs_dirents" { returner "any" }
     hvis fn_nm == "builtin.native_fs_stat" { returner "any" }
     hvis fn_nm == "builtin.native_fs_unlink" eller fn_nm == "builtin.native_fs_rmdir" eller fn_nm == "builtin.native_fs_chmod" eller fn_nm == "builtin.native_fs_rename" eller fn_nm == "builtin.native_fs_symlink" { returner "int" }
@@ -1878,7 +1880,8 @@ funksjon samle_strenger(fns) {
         "abi", "status", "ferdig", "timeout", "feil", "signal", "pid",
         "exit_code", "stdout", "stderr", "error", "output limit",
         "process spawn failed", "wall_ms", "peak_rss_bytes",
-        "desimaltall", "bytes", "__lambda__", "__capture__"
+        "desimaltall", "bytes", "__lambda__", "__capture__",
+        X86_MAL()
     ]
     la std_i: heiltall = 0
     mens std_i < lengde(standard) {
@@ -1979,604 +1982,6 @@ funksjon bygg_data(strenger) {
     }
     returner [bytes, offs]
 }
-
-// ─── Etikett-assembler for handskrivne atom (F2.1) ───────────────────────────
-// lbl: etikett → byteposisjon i bytes. fx: liste av [pos, breidd, etikett] for rel8-/
-// rel32-felt; asm_fiks patchar dei når alle etikettar er kjende (forover-hopp). Rel8 som
-// ikkje når fram er ein hard feil (aldri stille avkorta).
-funksjon asm_etikett(bytes, lbl, namn: tekst) { lbl[namn] = lengde(bytes) }
-funksjon asm_rel8(bytes, fx, op: heiltall, namn: tekst) {
-    legg_til(bytes, op)
-    legg_til(fx, [lengde(bytes), 1, namn])
-    legg_til(bytes, 0)
-}
-funksjon asm_rel32(bytes, fx, op, namn: tekst) {
-    copy(bytes, op)
-    legg_til(fx, [lengde(bytes), 4, namn])
-    u32(bytes, 0)
-}
-funksjon asm_movabs_rax(bytes, imm: heiltall) {
-    copy(bytes, [0x48, 0xB8])
-    u64(bytes, imm)
-}
-// mov rax,[disp32] (SIB utan base): disp32 blir forteikn-utvida, so VA-en må liggje under 2 GiB.
-funksjon asm_mov_rax_abs32(bytes, va: heiltall) {
-    hvis va < 0 eller va >= 2147483648 { kast "asm_mov_rax_abs32: VA utanfor disp32: " + tekst_fra_heltall(va) }
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
-    u32(bytes, va)
-}
-funksjon asm_fiks(bytes, lbl, fx) {
-    la i: heiltall = 0
-    mens i < lengde(fx) {
-        la f = fx[i]
-        la namn = f[2]
-        hvis ikkje finnes_nøkkel(lbl, namn) { kast "asm_fiks: ukjent etikett " + tekst(namn) }
-        la pos: heiltall = f[0]
-        la mal: heiltall = lbl[namn]
-        hvis f[1] == 4 {
-            patch_jump(bytes, pos, mal)
-        } ellers {
-            la rel = mal - (pos + 1)
-            hvis rel < -128 eller rel > 127 { kast "asm_fiks: rel8 til " + tekst(namn) + " er utanfor rekkjevidd" }
-            bytes[pos] = rel & 255
-        }
-        i = i + 1
-    }
-}
-
-// ─── Prosess-spawn-atom (linux-x86_64) ───────────────────────────────────────
-// F2.1/S1 (2026-09-25): tidlegare ein frosen 1 999 B hex-blob (C-æra-maskinkode) som
-// bygg_runtime_v2 hex-dekoda og patcha på tre stader. No éi linje per instruksjon (445),
-// transkribert frå disassemblyen og KAT-verifisert byte-lik mot den patcha blobben
-// (tests/test_native_spawn_atom_kat.no). Dei tre eksterne referansane er symbolske:
-// RT_MAP_KEYS/RT_MAP_GET (movabs; slottane i entry-tabellen) og envp-slotten
-// HEAP_VA()+ENVP_OFFSET() (disp32). Interne call/jcc går via etikettar (asm_fiks).
-// Posisjonsuavhengig elles; brukar berre Linux-systemkall og returnerer eit rått
-// resultatområde som Norscode-emitteren pakkar til eit ABI-kart.
-//   Inn  rdi → argpakke: +0x00 program, +0x08 argv, +0x10 cwd, +0x18 stdin, +0x20 timeout_ms,
-//        +0x28 max_output, +0x30 env-kart, +0x38 arv_env ("1").
-//   Ut   rax → resultatområde (0 ved mmap-feil): +0x00 status (0 ferdig, 1 timeout,
-//        2 output-grense, 3 signal, 4 feil), +0x08 pid, +0x10 exit, +0x18/+0x20 stdout
-//        buf/len, +0x28/+0x30 stderr buf/len, +0x40 elapsed_ms, +0x48 peak_rss.
-// 2026-09-08: dei tre pipe2-kalla (eax=0x125) set O_CLOEXEC (esi=0x80000). Utan CLOEXEC
-// lek røyr-fd-ane gjennom nøsta execve: eit barnebarn arvar ein skrive-ende → forelderens
-// les får aldri EOF → nøsta orkestrering heng. dup2→0/1/2 nullstiller CLOEXEC på stdio.
-// F3.2 (S2) erstattar atomet med _pg_spawn i std/native_gap.no.
-funksjon emit_process_spawn_linux_x86_64(bytes) {
-    la lbl: ordbok = {}
-    la fx: liste = []
-    // ── prolog; r15 = argpakke. max_output = tal(+0x28) (0 → 4096), klemt til 64 MiB
-    copy(bytes, [0x55])                                                 // 000 push rbp
-    copy(bytes, [0x48, 0x89, 0xE5])                                     // 001 mov rbp, rsp
-    copy(bytes, [0x53])                                                 // 004 push rbx
-    copy(bytes, [0x41, 0x54])                                           // 005 push r12
-    copy(bytes, [0x41, 0x55])                                           // 007 push r13
-    copy(bytes, [0x41, 0x56])                                           // 009 push r14
-    copy(bytes, [0x41, 0x57])                                           // 00b push r15
-    copy(bytes, [0x48, 0x83, 0xEC, 0x08])                               // 00d sub rsp, 0x8
-    copy(bytes, [0x49, 0x89, 0xFF])                                     // 011 mov r15, rdi
-    copy(bytes, [0x49, 0x8B, 0x7F, 0x28])                               // 014 mov rdi, [r15 + 0x28]
-    asm_rel32(bytes, fx, [0xE8], "u_tal")                               // 018 call u_tal
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 01d test rax, rax
-    asm_rel8(bytes, fx, 0x75, "maks_ok")                                // 020 jne maks_ok
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x00, 0x10, 0x00, 0x00])             // 022 mov rax, 0x1000
-    asm_etikett(bytes, lbl, "maks_ok")
-    copy(bytes, [0x48, 0x89, 0xC3])                                     // 029 mov rbx, rax
-    copy(bytes, [0x48, 0xC7, 0xC1, 0x00, 0x00, 0x00, 0x04])             // 02c mov rcx, 0x4000000
-    copy(bytes, [0x48, 0x39, 0xCB])                                     // 033 cmp rbx, rcx
-    copy(bytes, [0x48, 0x0F, 0x47, 0xD9])                               // 036 cmova rbx, rcx
-    copy(bytes, [0x48, 0x8D, 0x34, 0x5D, 0x02, 0x00, 0x04, 0x00])       // 03a lea rsi, [2*rbx + 0x40002]
-
-    // ── mmap resultatområde r12 = 0x40002 + 2*max_output (ctl 0x1000, argv 0x1000.., envp 0x4000.., env-strengar 0x8000.., stdout 0x40000, stderr etter)
-    copy(bytes, [0x48, 0x31, 0xFF])                                     // 042 xor rdi, rdi
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x09, 0x00, 0x00, 0x00])             // 045 mov rax, 0x9
-    copy(bytes, [0x48, 0xC7, 0xC2, 0x03, 0x00, 0x00, 0x00])             // 04c mov rdx, 0x3
-    copy(bytes, [0x49, 0xC7, 0xC2, 0x22, 0x00, 0x00, 0x00])             // 053 mov r10, 0x22
-    copy(bytes, [0x49, 0xC7, 0xC0, 0xFF, 0xFF, 0xFF, 0xFF])             // 05a mov r8, -0x1
-    copy(bytes, [0x4D, 0x31, 0xC9])                                     // 061 xor r9, r9
-    copy(bytes, [0x0F, 0x05])                                           // 064 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 066 test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x88], "mmap_feil")                     // 069 js mmap_feil
-    copy(bytes, [0x49, 0x89, 0xC4])                                     // 06f mov r12, rax
-    copy(bytes, [0x49, 0x89, 0x9C, 0x24, 0x98, 0x00, 0x00, 0x00])       // 072 mov [r12 + 0x98], rbx
-
-    // ── timeout_ms = tal(+0x20) (0 → 5000); init status=4/pid=-1/exit=127
-    copy(bytes, [0x49, 0x8B, 0x7F, 0x20])                               // 07a mov rdi, [r15 + 0x20]
-    asm_rel32(bytes, fx, [0xE8], "u_tal")                               // 07e call u_tal
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 083 test rax, rax
-    asm_rel8(bytes, fx, 0x75, "timeout_ok")                             // 086 jne timeout_ok
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x88, 0x13, 0x00, 0x00])             // 088 mov rax, 0x1388
-    asm_etikett(bytes, lbl, "timeout_ok")
-    copy(bytes, [0x49, 0x89, 0x84, 0x24, 0x58, 0x01, 0x00, 0x00])       // 08f mov [r12 + 0x158], rax
-    copy(bytes, [0x49, 0x8D, 0x84, 0x24, 0x00, 0x00, 0x04, 0x00])       // 097 lea rax, [r12 + 0x40000]
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x18])                         // 09f mov [r12 + 0x18], rax
-    copy(bytes, [0x48, 0x8D, 0x44, 0x18, 0x01])                         // 0a4 lea rax, [rax + rbx + 0x1]
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x28])                         // 0a9 mov [r12 + 0x28], rax
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x08, 0xFF, 0xFF, 0xFF, 0xFF]) // 0ae mov [r12 + 0x8], -0x1
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x10, 0x7F, 0x00, 0x00, 0x00]) // 0b7 mov [r12 + 0x10], 0x7f
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x04, 0x00, 0x00, 0x00])       // 0c0 mov [r12], 0x4
-
-    // ── argv-tabell @r12+0x1000: [program, argv..., NULL] (maks 510 argument)
-    copy(bytes, [0x4D, 0x8D, 0xAC, 0x24, 0x00, 0x10, 0x00, 0x00])       // 0c8 lea r13, [r12 + 0x1000]
-    copy(bytes, [0x49, 0x8B, 0x07])                                     // 0d0 mov rax, [r15]
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 0d3 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x8D, 0x40, 0x08])                               // 0d7 lea rax, [rax + 0x8]
-    copy(bytes, [0x49, 0x89, 0x45, 0x00])                               // 0db mov [r13], rax
-    copy(bytes, [0x49, 0x8B, 0x47, 0x08])                               // 0df mov rax, [r15 + 0x8]
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 0e3 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x8B, 0x08])                                     // 0e7 mov rcx, [rax]
-    copy(bytes, [0x48, 0x8B, 0x50, 0x10])                               // 0ea mov rdx, [rax + 0x10]
-    copy(bytes, [0x4D, 0x31, 0xC0])                                     // 0ee xor r8, r8
-    asm_etikett(bytes, lbl, "argv_lykkje")
-    copy(bytes, [0x49, 0x39, 0xC8])                                     // 0f1 cmp r8, rcx
-    asm_rel8(bytes, fx, 0x73, "argv_slutt")                             // 0f4 jae argv_slutt
-    copy(bytes, [0x49, 0x81, 0xF8, 0xFE, 0x01, 0x00, 0x00])             // 0f6 cmp r8, 0x1fe
-    asm_rel8(bytes, fx, 0x73, "argv_slutt")                             // 0fd jae argv_slutt
-    copy(bytes, [0x4A, 0x8B, 0x04, 0xC2])                               // 0ff mov rax, [rdx + 8*r8]
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 103 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x8D, 0x40, 0x08])                               // 107 lea rax, [rax + 0x8]
-    copy(bytes, [0x4B, 0x89, 0x44, 0xC5, 0x08])                         // 10b mov [r13 + 8*r8 + 0x8], rax
-    copy(bytes, [0x49, 0xFF, 0xC0])                                     // 110 inc r8
-    asm_rel8(bytes, fx, 0xEB, "argv_lykkje")                            // 113 jmp argv_lykkje
-    asm_etikett(bytes, lbl, "argv_slutt")
-    copy(bytes, [0x4B, 0xC7, 0x44, 0xC5, 0x08, 0x00, 0x00, 0x00, 0x00]) // 115 mov [r13 + 8*r8 + 0x8], 0x0
-
-    // ── envp-tabell @r12+0x4000 frå env-kartet (+0x30): «k=v\0»-strengar @r12+0x8000
-    copy(bytes, [0x4D, 0x8D, 0xAC, 0x24, 0x00, 0x40, 0x00, 0x00])       // 11e lea r13, [r12 + 0x4000]
-    copy(bytes, [0x4D, 0x8D, 0xB4, 0x24, 0x00, 0x80, 0x00, 0x00])       // 126 lea r14, [r12 + 0x8000]
-    copy(bytes, [0x48, 0x31, 0xDB])                                     // 12e xor rbx, rbx
-    copy(bytes, [0x49, 0x8B, 0x7F, 0x30])                               // 131 mov rdi, [r15 + 0x30]
-    copy(bytes, [0x48, 0x85, 0xFF])                                     // 135 test rdi, rdi
-    asm_rel32(bytes, fx, [0x0F, 0x84], "arv_env")                       // 138 je arv_env
-    asm_movabs_rax(bytes, RT_MAP_KEYS())                                // 13e movabs rax, RT_MAP_KEYS
-    copy(bytes, [0xFF, 0xD0])                                           // 148 call rax
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 14a test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x84], "arv_env")                       // 14d je arv_env
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 153 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x8B, 0x08])                                     // 157 mov rcx, [rax]
-    copy(bytes, [0x48, 0x8B, 0x50, 0x10])                               // 15a mov rdx, [rax + 0x10]
-    copy(bytes, [0x4D, 0x31, 0xC0])                                     // 15e xor r8, r8
-    asm_etikett(bytes, lbl, "env_lykkje")
-    copy(bytes, [0x49, 0x39, 0xC8])                                     // 161 cmp r8, rcx
-    asm_rel32(bytes, fx, [0x0F, 0x83], "arv_env")                       // 164 jae arv_env
-    copy(bytes, [0x48, 0x81, 0xFB, 0xFE, 0x03, 0x00, 0x00])             // 16a cmp rbx, 0x3fe
-    asm_rel32(bytes, fx, [0x0F, 0x83], "env_slutt")                     // 171 jae env_slutt
-    copy(bytes, [0x4A, 0x8B, 0x34, 0xC2])                               // 177 mov rsi, [rdx + 8*r8]
-    copy(bytes, [0x51])                                                 // 17b push rcx
-    copy(bytes, [0x52])                                                 // 17c push rdx
-    copy(bytes, [0x41, 0x50])                                           // 17d push r8
-    copy(bytes, [0x56])                                                 // 17f push rsi
-    copy(bytes, [0x49, 0x8B, 0x7F, 0x30])                               // 180 mov rdi, [r15 + 0x30]
-    asm_movabs_rax(bytes, RT_MAP_GET())                                 // 184 movabs rax, RT_MAP_GET
-    copy(bytes, [0xFF, 0xD0])                                           // 18e call rax
-    copy(bytes, [0x5E])                                                 // 190 pop rsi
-    copy(bytes, [0x41, 0x58])                                           // 191 pop r8
-    copy(bytes, [0x5A])                                                 // 193 pop rdx
-    copy(bytes, [0x59])                                                 // 194 pop rcx
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 195 test rax, rax
-    asm_rel8(bytes, fx, 0x74, "env_neste")                              // 198 je env_neste
-    copy(bytes, [0x4D, 0x89, 0x74, 0xDD, 0x00])                         // 19a mov [r13 + 8*rbx], r14
-    copy(bytes, [0x4C, 0x8B, 0x4E, 0x08])                               // 19f mov r9, [rsi + 0x8]
-    copy(bytes, [0x4D, 0x8B, 0x11])                                     // 1a3 mov r10, [r9]
-    copy(bytes, [0x4D, 0x8D, 0x49, 0x08])                               // 1a6 lea r9, [r9 + 0x8]
-    copy(bytes, [0x50])                                                 // 1aa push rax
-    asm_etikett(bytes, lbl, "env_kopi_k")
-    copy(bytes, [0x4D, 0x85, 0xD2])                                     // 1ab test r10, r10
-    asm_rel8(bytes, fx, 0x74, "env_k_slutt")                            // 1ae je env_k_slutt
-    copy(bytes, [0x41, 0x8A, 0x01])                                     // 1b0 mov al, byte [r9]
-    copy(bytes, [0x41, 0x88, 0x06])                                     // 1b3 mov byte [r14], al
-    copy(bytes, [0x49, 0xFF, 0xC1])                                     // 1b6 inc r9
-    copy(bytes, [0x49, 0xFF, 0xC6])                                     // 1b9 inc r14
-    copy(bytes, [0x49, 0xFF, 0xCA])                                     // 1bc dec r10
-    asm_rel8(bytes, fx, 0xEB, "env_kopi_k")                             // 1bf jmp env_kopi_k
-    asm_etikett(bytes, lbl, "env_k_slutt")
-    copy(bytes, [0x41, 0xC6, 0x06, 0x3D])                               // 1c1 mov byte [r14], 0x3d
-    copy(bytes, [0x49, 0xFF, 0xC6])                                     // 1c5 inc r14
-    copy(bytes, [0x58])                                                 // 1c8 pop rax
-    copy(bytes, [0x4C, 0x8B, 0x48, 0x08])                               // 1c9 mov r9, [rax + 0x8]
-    copy(bytes, [0x4D, 0x8B, 0x11])                                     // 1cd mov r10, [r9]
-    copy(bytes, [0x4D, 0x8D, 0x49, 0x08])                               // 1d0 lea r9, [r9 + 0x8]
-    asm_etikett(bytes, lbl, "env_kopi_v")
-    copy(bytes, [0x4D, 0x85, 0xD2])                                     // 1d4 test r10, r10
-    asm_rel8(bytes, fx, 0x74, "env_v_slutt")                            // 1d7 je env_v_slutt
-    copy(bytes, [0x41, 0x8A, 0x01])                                     // 1d9 mov al, byte [r9]
-    copy(bytes, [0x41, 0x88, 0x06])                                     // 1dc mov byte [r14], al
-    copy(bytes, [0x49, 0xFF, 0xC1])                                     // 1df inc r9
-    copy(bytes, [0x49, 0xFF, 0xC6])                                     // 1e2 inc r14
-    copy(bytes, [0x49, 0xFF, 0xCA])                                     // 1e5 dec r10
-    asm_rel8(bytes, fx, 0xEB, "env_kopi_v")                             // 1e8 jmp env_kopi_v
-    asm_etikett(bytes, lbl, "env_v_slutt")
-    copy(bytes, [0x41, 0xC6, 0x06, 0x00])                               // 1ea mov byte [r14], 0x0
-    copy(bytes, [0x49, 0xFF, 0xC6])                                     // 1ee inc r14
-    copy(bytes, [0x48, 0xFF, 0xC3])                                     // 1f1 inc rbx
-    asm_etikett(bytes, lbl, "env_neste")
-    copy(bytes, [0x49, 0xFF, 0xC0])                                     // 1f4 inc r8
-    asm_rel32(bytes, fx, [0xE9], "env_lykkje")                          // 1f7 jmp env_lykkje
-
-    // ── arv_env (+0x38 == "1"): legg til forelderens envp frå heap-slotten HEAP_VA()+ENVP_OFFSET()
-    asm_etikett(bytes, lbl, "arv_env")
-    copy(bytes, [0x49, 0x8B, 0x47, 0x38])                               // 1fc mov rax, [r15 + 0x38]
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 200 test rax, rax
-    asm_rel8(bytes, fx, 0x74, "env_slutt")                              // 203 je env_slutt
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 205 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x83, 0x38, 0x00])                               // 209 cmp [rax], 0x0
-    asm_rel8(bytes, fx, 0x74, "env_slutt")                              // 20d je env_slutt
-    copy(bytes, [0x80, 0x78, 0x08, 0x31])                               // 20f cmp byte [rax + 0x8], 0x31
-    asm_rel8(bytes, fx, 0x75, "env_slutt")                              // 213 jne env_slutt
-    asm_mov_rax_abs32(bytes, hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET())  // 215 mov rax, [HEAP_VA+ENVP_OFFSET] (envp-slot)
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 21d test rax, rax
-    asm_rel8(bytes, fx, 0x74, "env_slutt")                              // 220 je env_slutt
-    copy(bytes, [0x48, 0x31, 0xC9])                                     // 222 xor rcx, rcx
-    asm_etikett(bytes, lbl, "arv_lykkje")
-    copy(bytes, [0x48, 0x81, 0xFB, 0xFE, 0x03, 0x00, 0x00])             // 225 cmp rbx, 0x3fe
-    asm_rel8(bytes, fx, 0x73, "env_slutt")                              // 22c jae env_slutt
-    copy(bytes, [0x48, 0x8B, 0x14, 0xC8])                               // 22e mov rdx, [rax + 8*rcx]
-    copy(bytes, [0x48, 0x85, 0xD2])                                     // 232 test rdx, rdx
-    asm_rel8(bytes, fx, 0x74, "env_slutt")                              // 235 je env_slutt
-    copy(bytes, [0x49, 0x89, 0x54, 0xDD, 0x00])                         // 237 mov [r13 + 8*rbx], rdx
-    copy(bytes, [0x48, 0xFF, 0xC3])                                     // 23c inc rbx
-    copy(bytes, [0x48, 0xFF, 0xC1])                                     // 23f inc rcx
-    asm_rel8(bytes, fx, 0xEB, "arv_lykkje")                             // 242 jmp arv_lykkje
-
-    // ── tre røyr (stdin/stdout/stderr) med O_CLOEXEC, så fork
-    asm_etikett(bytes, lbl, "env_slutt")
-    copy(bytes, [0x49, 0xC7, 0x44, 0xDD, 0x00, 0x00, 0x00, 0x00, 0x00]) // 244 mov [r13 + 8*rbx], 0x0
-    copy(bytes, [0x49, 0x8D, 0x7C, 0x24, 0x60])                         // 24d lea rdi, [r12 + 0x60]
-    copy(bytes, [0xBE, 0x00, 0x00, 0x08, 0x00])                         // 252 mov esi, 0x80000
-    copy(bytes, [0xB8, 0x25, 0x01, 0x00, 0x00])                         // 257 mov eax, 0x125
-    copy(bytes, [0x0F, 0x05])                                           // 25c syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 25e test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x88], "feil")                          // 261 js feil
-    copy(bytes, [0x49, 0x8D, 0x7C, 0x24, 0x68])                         // 267 lea rdi, [r12 + 0x68]
-    copy(bytes, [0xBE, 0x00, 0x00, 0x08, 0x00])                         // 26c mov esi, 0x80000
-    copy(bytes, [0xB8, 0x25, 0x01, 0x00, 0x00])                         // 271 mov eax, 0x125
-    copy(bytes, [0x0F, 0x05])                                           // 276 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 278 test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x88], "feil")                          // 27b js feil
-    copy(bytes, [0x49, 0x8D, 0x7C, 0x24, 0x70])                         // 281 lea rdi, [r12 + 0x70]
-    copy(bytes, [0xBE, 0x00, 0x00, 0x08, 0x00])                         // 286 mov esi, 0x80000
-    copy(bytes, [0xB8, 0x25, 0x01, 0x00, 0x00])                         // 28b mov eax, 0x125
-    copy(bytes, [0x0F, 0x05])                                           // 290 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 292 test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x88], "feil")                          // 295 js feil
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x39, 0x00, 0x00, 0x00])             // 29b mov rax, 0x39
-    copy(bytes, [0x0F, 0x05])                                           // 2a2 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 2a4 test rax, rax
-    asm_rel32(bytes, fx, [0x0F, 0x88], "feil")                          // 2a7 js feil
-    asm_rel8(bytes, fx, 0x74, "barn")                                   // 2ad je barn
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x08])                         // 2af mov [r12 + 0x8], rax
-    asm_rel32(bytes, fx, [0xE9], "forelder")                            // 2b4 jmp forelder
-
-    // ── barn: dup2 røyr → 0/1/2, lukk røyr-fd-ane, chdir(cwd), execve, exit(127)
-    asm_etikett(bytes, lbl, "barn")
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x60])                         // 2b9 mov edi, dword [r12 + 0x60]
-    copy(bytes, [0x48, 0x31, 0xF6])                                     // 2be xor rsi, rsi
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x21, 0x00, 0x00, 0x00])             // 2c1 mov rax, 0x21
-    copy(bytes, [0x0F, 0x05])                                           // 2c8 syscall
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x6C])                         // 2ca mov edi, dword [r12 + 0x6c]
-    copy(bytes, [0x48, 0xC7, 0xC6, 0x01, 0x00, 0x00, 0x00])             // 2cf mov rsi, 0x1
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x21, 0x00, 0x00, 0x00])             // 2d6 mov rax, 0x21
-    copy(bytes, [0x0F, 0x05])                                           // 2dd syscall
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x74])                         // 2df mov edi, dword [r12 + 0x74]
-    copy(bytes, [0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00])             // 2e4 mov rsi, 0x2
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x21, 0x00, 0x00, 0x00])             // 2eb mov rax, 0x21
-    copy(bytes, [0x0F, 0x05])                                           // 2f2 syscall
-    copy(bytes, [0x48, 0xC7, 0xC3, 0x60, 0x00, 0x00, 0x00])             // 2f4 mov rbx, 0x60
-    asm_etikett(bytes, lbl, "barn_lukk_lykkje")
-    copy(bytes, [0x48, 0x83, 0xFB, 0x78])                               // 2fb cmp rbx, 0x78
-    asm_rel8(bytes, fx, 0x73, "barn_lukk_slutt")                        // 2ff jae barn_lukk_slutt
-    copy(bytes, [0x41, 0x8B, 0x3C, 0x1C])                               // 301 mov edi, dword [r12 + rbx]
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00])             // 305 mov rax, 0x3
-    copy(bytes, [0x0F, 0x05])                                           // 30c syscall
-    copy(bytes, [0x48, 0x83, 0xC3, 0x04])                               // 30e add rbx, 0x4
-    asm_rel8(bytes, fx, 0xEB, "barn_lukk_lykkje")                       // 312 jmp barn_lukk_lykkje
-    asm_etikett(bytes, lbl, "barn_lukk_slutt")
-    copy(bytes, [0x49, 0x8B, 0x47, 0x10])                               // 314 mov rax, [r15 + 0x10]
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 318 test rax, rax
-    asm_rel8(bytes, fx, 0x74, "barn_exec")                              // 31b je barn_exec
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 31d mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x83, 0x38, 0x00])                               // 321 cmp [rax], 0x0
-    asm_rel8(bytes, fx, 0x74, "barn_exec")                              // 325 je barn_exec
-    copy(bytes, [0x48, 0x8D, 0x78, 0x08])                               // 327 lea rdi, [rax + 0x8]
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x50, 0x00, 0x00, 0x00])             // 32b mov rax, 0x50
-    copy(bytes, [0x0F, 0x05])                                           // 332 syscall
-    asm_etikett(bytes, lbl, "barn_exec")
-    copy(bytes, [0x49, 0x8B, 0x07])                                     // 334 mov rax, [r15]
-    copy(bytes, [0x48, 0x8B, 0x40, 0x08])                               // 337 mov rax, [rax + 0x8]
-    copy(bytes, [0x48, 0x8D, 0x78, 0x08])                               // 33b lea rdi, [rax + 0x8]
-    copy(bytes, [0x49, 0x8D, 0xB4, 0x24, 0x00, 0x10, 0x00, 0x00])       // 33f lea rsi, [r12 + 0x1000]
-    copy(bytes, [0x49, 0x8D, 0x94, 0x24, 0x00, 0x40, 0x00, 0x00])       // 347 lea rdx, [r12 + 0x4000]
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x3B, 0x00, 0x00, 0x00])             // 34f mov rax, 0x3b
-    copy(bytes, [0x0F, 0x05])                                           // 356 syscall
-    copy(bytes, [0x48, 0xC7, 0xC7, 0x7F, 0x00, 0x00, 0x00])             // 358 mov rdi, 0x7f
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x3C, 0x00, 0x00, 0x00])             // 35f mov rax, 0x3c
-    copy(bytes, [0x0F, 0x05])                                           // 366 syscall
-
-    // ── forelder: lukk barne-endane, skriv stdin (+0x18), lukk, O_NONBLOCK på les-endane
-    asm_etikett(bytes, lbl, "forelder")
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x60])                         // 368 mov edi, dword [r12 + 0x60]
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 36d call u_lukk
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x6C])                         // 372 mov edi, dword [r12 + 0x6c]
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 377 call u_lukk
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x74])                         // 37c mov edi, dword [r12 + 0x74]
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 381 call u_lukk
-    copy(bytes, [0x49, 0x8B, 0x47, 0x18])                               // 386 mov rax, [r15 + 0x18]
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 38a test rax, rax
-    asm_rel8(bytes, fx, 0x74, "stdin_slutt")                            // 38d je stdin_slutt
-    copy(bytes, [0x48, 0x8B, 0x70, 0x08])                               // 38f mov rsi, [rax + 0x8]
-    copy(bytes, [0x48, 0x8B, 0x16])                                     // 393 mov rdx, [rsi]
-    copy(bytes, [0x48, 0x8D, 0x76, 0x08])                               // 396 lea rsi, [rsi + 0x8]
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x64])                         // 39a mov edi, dword [r12 + 0x64]
-    asm_etikett(bytes, lbl, "stdin_lykkje")
-    copy(bytes, [0x48, 0x85, 0xD2])                                     // 39f test rdx, rdx
-    asm_rel8(bytes, fx, 0x74, "stdin_slutt")                            // 3a2 je stdin_slutt
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00])             // 3a4 mov rax, 0x1
-    copy(bytes, [0x0F, 0x05])                                           // 3ab syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 3ad test rax, rax
-    asm_rel8(bytes, fx, 0x7E, "stdin_slutt")                            // 3b0 jle stdin_slutt
-    copy(bytes, [0x48, 0x01, 0xC6])                                     // 3b2 add rsi, rax
-    copy(bytes, [0x48, 0x29, 0xC2])                                     // 3b5 sub rdx, rax
-    asm_rel8(bytes, fx, 0xEB, "stdin_lykkje")                           // 3b8 jmp stdin_lykkje
-    asm_etikett(bytes, lbl, "stdin_slutt")
-    copy(bytes, [0x41, 0x8B, 0x7C, 0x24, 0x64])                         // 3ba mov edi, dword [r12 + 0x64]
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 3bf call u_lukk
-    copy(bytes, [0x45, 0x8B, 0x6C, 0x24, 0x68])                         // 3c4 mov r13d, dword [r12 + 0x68]
-    copy(bytes, [0x45, 0x8B, 0x74, 0x24, 0x70])                         // 3c9 mov r14d, dword [r12 + 0x70]
-    copy(bytes, [0x49, 0xC7, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]) // 3ce mov [r12 + 0x80], 0x1
-    copy(bytes, [0x49, 0xC7, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00]) // 3da mov [r12 + 0x88], 0x1
-    copy(bytes, [0x44, 0x89, 0xEF])                                     // 3e6 mov edi, r13d
-    asm_rel32(bytes, fx, [0xE8], "u_ikkjeblokk")                        // 3e9 call u_ikkjeblokk
-    copy(bytes, [0x44, 0x89, 0xF7])                                     // 3ee mov edi, r14d
-    asm_rel32(bytes, fx, [0xE8], "u_ikkjeblokk")                        // 3f1 call u_ikkjeblokk
-    asm_rel32(bytes, fx, [0xE8], "u_no_ms")                             // 3f6 call u_no_ms
-    copy(bytes, [0x49, 0x89, 0x84, 0x24, 0x50, 0x01, 0x00, 0x00])       // 3fb mov [r12 + 0x150], rax
-
-    // ── vent-lykkje: wait4(WNOHANG), timeout-sjekk, poll(10 ms), les stdout/stderr
-    asm_etikett(bytes, lbl, "vent_lykkje")
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x3D, 0x00, 0x00, 0x00])             // 403 mov rax, 0x3d
-    copy(bytes, [0x49, 0x8B, 0x7C, 0x24, 0x08])                         // 40a mov rdi, [r12 + 0x8]
-    copy(bytes, [0x49, 0x8D, 0x74, 0x24, 0x50])                         // 40f lea rsi, [r12 + 0x50]
-    copy(bytes, [0x48, 0xC7, 0xC2, 0x01, 0x00, 0x00, 0x00])             // 414 mov rdx, 0x1
-    copy(bytes, [0x4D, 0x8D, 0x94, 0x24, 0xC0, 0x00, 0x00, 0x00])       // 41b lea r10, [r12 + 0xc0]
-    copy(bytes, [0x0F, 0x05])                                           // 423 syscall
-    copy(bytes, [0x49, 0x3B, 0x44, 0x24, 0x08])                         // 425 cmp rax, [r12 + 0x8]
-    asm_rel8(bytes, fx, 0x75, "vent_tid")                               // 42a jne vent_tid
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x78, 0x01, 0x00, 0x00, 0x00]) // 42c mov [r12 + 0x78], 0x1
-    asm_etikett(bytes, lbl, "vent_tid")
-    asm_rel32(bytes, fx, [0xE8], "u_no_ms")                             // 435 call u_no_ms
-    copy(bytes, [0x49, 0x2B, 0x84, 0x24, 0x50, 0x01, 0x00, 0x00])       // 43a sub rax, [r12 + 0x150]
-    copy(bytes, [0x49, 0x3B, 0x84, 0x24, 0x58, 0x01, 0x00, 0x00])       // 442 cmp rax, [r12 + 0x158]
-    asm_rel8(bytes, fx, 0x72, "poll")                                   // 44a jb poll
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00])       // 44c mov [r12], 0x1
-    asm_rel32(bytes, fx, [0xE9], "drep")                                // 454 jmp drep
-    asm_etikett(bytes, lbl, "poll")
-    copy(bytes, [0x45, 0x89, 0xAC, 0x24, 0xA0, 0x00, 0x00, 0x00])       // 459 mov dword [r12 + 0xa0], r13d
-    copy(bytes, [0x66, 0x41, 0xC7, 0x84, 0x24, 0xA4, 0x00, 0x00, 0x00, 0x01, 0x00]) // 461 mov word [r12 + 0xa4], 0x1
-    copy(bytes, [0x66, 0x41, 0xC7, 0x84, 0x24, 0xA6, 0x00, 0x00, 0x00, 0x00, 0x00]) // 46c mov word [r12 + 0xa6], 0x0
-    copy(bytes, [0x45, 0x89, 0xB4, 0x24, 0xA8, 0x00, 0x00, 0x00])       // 477 mov dword [r12 + 0xa8], r14d
-    copy(bytes, [0x66, 0x41, 0xC7, 0x84, 0x24, 0xAC, 0x00, 0x00, 0x00, 0x01, 0x00]) // 47f mov word [r12 + 0xac], 0x1
-    copy(bytes, [0x66, 0x41, 0xC7, 0x84, 0x24, 0xAE, 0x00, 0x00, 0x00, 0x00, 0x00]) // 48a mov word [r12 + 0xae], 0x0
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00, 0x00]) // 495 cmp [r12 + 0x80], 0x0
-    asm_rel8(bytes, fx, 0x75, "poll_ut_ok")                             // 49e jne poll_ut_ok
-    copy(bytes, [0x41, 0xC7, 0x84, 0x24, 0xA0, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]) // 4a0 mov dword [r12 + 0xa0], 0xffffffff
-    asm_etikett(bytes, lbl, "poll_ut_ok")
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x88, 0x00, 0x00, 0x00, 0x00]) // 4ac cmp [r12 + 0x88], 0x0
-    asm_rel8(bytes, fx, 0x75, "poll_kall")                              // 4b5 jne poll_kall
-    copy(bytes, [0x41, 0xC7, 0x84, 0x24, 0xA8, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF]) // 4b7 mov dword [r12 + 0xa8], 0xffffffff
-    asm_etikett(bytes, lbl, "poll_kall")
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x07, 0x00, 0x00, 0x00])             // 4c3 mov rax, 0x7
-    copy(bytes, [0x49, 0x8D, 0xBC, 0x24, 0xA0, 0x00, 0x00, 0x00])       // 4ca lea rdi, [r12 + 0xa0]
-    copy(bytes, [0x48, 0xC7, 0xC6, 0x02, 0x00, 0x00, 0x00])             // 4d2 mov rsi, 0x2
-    copy(bytes, [0x48, 0xC7, 0xC2, 0x0A, 0x00, 0x00, 0x00])             // 4d9 mov rdx, 0xa
-    copy(bytes, [0x0F, 0x05])                                           // 4e0 syscall
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00, 0x00]) // 4e2 cmp [r12 + 0x80], 0x0
-    asm_rel8(bytes, fx, 0x74, "les_err")                                // 4eb je les_err
-    copy(bytes, [0x49, 0x8B, 0x94, 0x24, 0x98, 0x00, 0x00, 0x00])       // 4ed mov rdx, [r12 + 0x98]
-    copy(bytes, [0x49, 0x2B, 0x94, 0x24, 0x90, 0x00, 0x00, 0x00])       // 4f5 sub rdx, [r12 + 0x90]
-    copy(bytes, [0x48, 0xFF, 0xC2])                                     // 4fd inc rdx
-    copy(bytes, [0x49, 0x8B, 0x74, 0x24, 0x18])                         // 500 mov rsi, [r12 + 0x18]
-    copy(bytes, [0x49, 0x03, 0x74, 0x24, 0x20])                         // 505 add rsi, [r12 + 0x20]
-    copy(bytes, [0x44, 0x89, 0xEF])                                     // 50a mov edi, r13d
-    copy(bytes, [0x48, 0x31, 0xC0])                                     // 50d xor rax, rax
-    copy(bytes, [0x0F, 0x05])                                           // 510 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 512 test rax, rax
-    asm_rel8(bytes, fx, 0x78, "les_err")                                // 515 js les_err
-    asm_rel8(bytes, fx, 0x74, "ut_eof")                                 // 517 je ut_eof
-    copy(bytes, [0x49, 0x8B, 0x8C, 0x24, 0x98, 0x00, 0x00, 0x00])       // 519 mov rcx, [r12 + 0x98]
-    copy(bytes, [0x49, 0x2B, 0x8C, 0x24, 0x90, 0x00, 0x00, 0x00])       // 521 sub rcx, [r12 + 0x90]
-    copy(bytes, [0x48, 0x39, 0xC8])                                     // 529 cmp rax, rcx
-    asm_rel8(bytes, fx, 0x76, "ut_legg_til")                            // 52c jbe ut_legg_til
-    copy(bytes, [0x48, 0x89, 0xC8])                                     // 52e mov rax, rcx
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x02, 0x00, 0x00, 0x00])       // 531 mov [r12], 0x2
-    asm_etikett(bytes, lbl, "ut_legg_til")
-    copy(bytes, [0x49, 0x01, 0x44, 0x24, 0x20])                         // 539 add [r12 + 0x20], rax
-    copy(bytes, [0x49, 0x01, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00])       // 53e add [r12 + 0x90], rax
-    copy(bytes, [0x49, 0x83, 0x3C, 0x24, 0x02])                         // 546 cmp [r12], 0x2
-    asm_rel32(bytes, fx, [0x0F, 0x84], "drep")                          // 54b je drep
-    asm_rel8(bytes, fx, 0xEB, "les_err")                                // 551 jmp les_err
-    asm_etikett(bytes, lbl, "ut_eof")
-    copy(bytes, [0x44, 0x89, 0xEF])                                     // 553 mov edi, r13d
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 556 call u_lukk
-    copy(bytes, [0x49, 0xC7, 0x84, 0x24, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) // 55b mov [r12 + 0x80], 0x0
-    asm_etikett(bytes, lbl, "les_err")
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x88, 0x00, 0x00, 0x00, 0x00]) // 567 cmp [r12 + 0x88], 0x0
-    asm_rel8(bytes, fx, 0x74, "vent_sjekk")                             // 570 je vent_sjekk
-    copy(bytes, [0x49, 0x8B, 0x94, 0x24, 0x98, 0x00, 0x00, 0x00])       // 572 mov rdx, [r12 + 0x98]
-    copy(bytes, [0x49, 0x2B, 0x94, 0x24, 0x90, 0x00, 0x00, 0x00])       // 57a sub rdx, [r12 + 0x90]
-    copy(bytes, [0x48, 0xFF, 0xC2])                                     // 582 inc rdx
-    copy(bytes, [0x49, 0x8B, 0x74, 0x24, 0x28])                         // 585 mov rsi, [r12 + 0x28]
-    copy(bytes, [0x49, 0x03, 0x74, 0x24, 0x30])                         // 58a add rsi, [r12 + 0x30]
-    copy(bytes, [0x44, 0x89, 0xF7])                                     // 58f mov edi, r14d
-    copy(bytes, [0x48, 0x31, 0xC0])                                     // 592 xor rax, rax
-    copy(bytes, [0x0F, 0x05])                                           // 595 syscall
-    copy(bytes, [0x48, 0x85, 0xC0])                                     // 597 test rax, rax
-    asm_rel8(bytes, fx, 0x78, "vent_sjekk")                             // 59a js vent_sjekk
-    asm_rel8(bytes, fx, 0x74, "err_eof")                                // 59c je err_eof
-    copy(bytes, [0x49, 0x8B, 0x8C, 0x24, 0x98, 0x00, 0x00, 0x00])       // 59e mov rcx, [r12 + 0x98]
-    copy(bytes, [0x49, 0x2B, 0x8C, 0x24, 0x90, 0x00, 0x00, 0x00])       // 5a6 sub rcx, [r12 + 0x90]
-    copy(bytes, [0x48, 0x39, 0xC8])                                     // 5ae cmp rax, rcx
-    asm_rel8(bytes, fx, 0x76, "err_legg_til")                           // 5b1 jbe err_legg_til
-    copy(bytes, [0x48, 0x89, 0xC8])                                     // 5b3 mov rax, rcx
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x02, 0x00, 0x00, 0x00])       // 5b6 mov [r12], 0x2
-    asm_etikett(bytes, lbl, "err_legg_til")
-    copy(bytes, [0x49, 0x01, 0x44, 0x24, 0x30])                         // 5be add [r12 + 0x30], rax
-    copy(bytes, [0x49, 0x01, 0x84, 0x24, 0x90, 0x00, 0x00, 0x00])       // 5c3 add [r12 + 0x90], rax
-    copy(bytes, [0x49, 0x83, 0x3C, 0x24, 0x02])                         // 5cb cmp [r12], 0x2
-    asm_rel8(bytes, fx, 0x74, "drep")                                   // 5d0 je drep
-    asm_rel8(bytes, fx, 0xEB, "vent_sjekk")                             // 5d2 jmp vent_sjekk
-    asm_etikett(bytes, lbl, "err_eof")
-    copy(bytes, [0x44, 0x89, 0xF7])                                     // 5d4 mov edi, r14d
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 5d7 call u_lukk
-    copy(bytes, [0x49, 0xC7, 0x84, 0x24, 0x88, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]) // 5dc mov [r12 + 0x88], 0x0
-    asm_etikett(bytes, lbl, "vent_sjekk")
-    copy(bytes, [0x49, 0x83, 0x7C, 0x24, 0x78, 0x00])                   // 5e8 cmp [r12 + 0x78], 0x0
-    asm_rel32(bytes, fx, [0x0F, 0x84], "vent_lykkje")                   // 5ee je vent_lykkje
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00, 0x00]) // 5f4 cmp [r12 + 0x80], 0x0
-    asm_rel32(bytes, fx, [0x0F, 0x85], "vent_lykkje")                   // 5fd jne vent_lykkje
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x88, 0x00, 0x00, 0x00, 0x00]) // 603 cmp [r12 + 0x88], 0x0
-    asm_rel32(bytes, fx, [0x0F, 0x85], "vent_lykkje")                   // 60c jne vent_lykkje
-    asm_rel8(bytes, fx, 0xEB, "exit_status")                            // 612 jmp exit_status
-
-    // ── drep: kill(SIGKILL) + wait4; status 1 → exit 124, elles (output-grense) exit 1
-    asm_etikett(bytes, lbl, "drep")
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x3E, 0x00, 0x00, 0x00])             // 614 mov rax, 0x3e
-    copy(bytes, [0x49, 0x8B, 0x7C, 0x24, 0x08])                         // 61b mov rdi, [r12 + 0x8]
-    copy(bytes, [0x48, 0xC7, 0xC6, 0x09, 0x00, 0x00, 0x00])             // 620 mov rsi, 0x9
-    copy(bytes, [0x0F, 0x05])                                           // 627 syscall
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x3D, 0x00, 0x00, 0x00])             // 629 mov rax, 0x3d
-    copy(bytes, [0x49, 0x8B, 0x7C, 0x24, 0x08])                         // 630 mov rdi, [r12 + 0x8]
-    copy(bytes, [0x49, 0x8D, 0x74, 0x24, 0x50])                         // 635 lea rsi, [r12 + 0x50]
-    copy(bytes, [0x48, 0x31, 0xD2])                                     // 63a xor rdx, rdx
-    copy(bytes, [0x4D, 0x8D, 0x94, 0x24, 0xC0, 0x00, 0x00, 0x00])       // 63d lea r10, [r12 + 0xc0]
-    copy(bytes, [0x0F, 0x05])                                           // 645 syscall
-    copy(bytes, [0x49, 0x83, 0x3C, 0x24, 0x01])                         // 647 cmp [r12], 0x1
-    asm_rel8(bytes, fx, 0x75, "drep_grense")                            // 64c jne drep_grense
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x10, 0x7C, 0x00, 0x00, 0x00]) // 64e mov [r12 + 0x10], 0x7c
-    asm_rel8(bytes, fx, 0xEB, "rydd")                                   // 657 jmp rydd
-    asm_etikett(bytes, lbl, "drep_grense")
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00]) // 659 mov [r12 + 0x10], 0x1
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x38, 0x01, 0x00, 0x00, 0x00]) // 662 mov [r12 + 0x38], 0x1
-    asm_rel8(bytes, fx, 0xEB, "rydd")                                   // 66b jmp rydd
-
-    // ── normal avslutning: exit-kode eller signal (128+sig, status 3)
-    asm_etikett(bytes, lbl, "exit_status")
-    copy(bytes, [0x49, 0x8B, 0x44, 0x24, 0x50])                         // 66d mov rax, [r12 + 0x50]
-    copy(bytes, [0x48, 0x89, 0xC1])                                     // 672 mov rcx, rax
-    copy(bytes, [0x48, 0x83, 0xE1, 0x7F])                               // 675 and rcx, 0x7f
-    copy(bytes, [0x48, 0x85, 0xC9])                                     // 679 test rcx, rcx
-    asm_rel8(bytes, fx, 0x75, "signal")                                 // 67c jne signal
-    copy(bytes, [0x48, 0xC1, 0xE8, 0x08])                               // 67e shr rax, 0x8
-    copy(bytes, [0x48, 0x25, 0xFF, 0x00, 0x00, 0x00])                   // 682 and rax, 0xff
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x10])                         // 688 mov [r12 + 0x10], rax
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x00, 0x00, 0x00, 0x00])       // 68d mov [r12], 0x0
-    asm_rel8(bytes, fx, 0xEB, "rydd")                                   // 695 jmp rydd
-    asm_etikett(bytes, lbl, "signal")
-    copy(bytes, [0x48, 0x81, 0xC1, 0x80, 0x00, 0x00, 0x00])             // 697 add rcx, 0x80
-    copy(bytes, [0x49, 0x89, 0x4C, 0x24, 0x10])                         // 69e mov [r12 + 0x10], rcx
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x03, 0x00, 0x00, 0x00])       // 6a3 mov [r12], 0x3
-
-    // ── rydd: lukk opne les-endar, elapsed_ms (+0x40), peak_rss = ru_maxrss*1024 (+0x48)
-    asm_etikett(bytes, lbl, "rydd")
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x80, 0x00, 0x00, 0x00, 0x00]) // 6ab cmp [r12 + 0x80], 0x0
-    asm_rel8(bytes, fx, 0x74, "rydd_err")                               // 6b4 je rydd_err
-    copy(bytes, [0x44, 0x89, 0xEF])                                     // 6b6 mov edi, r13d
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 6b9 call u_lukk
-    asm_etikett(bytes, lbl, "rydd_err")
-    copy(bytes, [0x49, 0x83, 0xBC, 0x24, 0x88, 0x00, 0x00, 0x00, 0x00]) // 6be cmp [r12 + 0x88], 0x0
-    asm_rel8(bytes, fx, 0x74, "rydd_tid")                               // 6c7 je rydd_tid
-    copy(bytes, [0x44, 0x89, 0xF7])                                     // 6c9 mov edi, r14d
-    asm_rel32(bytes, fx, [0xE8], "u_lukk")                              // 6cc call u_lukk
-    asm_etikett(bytes, lbl, "rydd_tid")
-    asm_rel32(bytes, fx, [0xE8], "u_no_ms")                             // 6d1 call u_no_ms
-    copy(bytes, [0x49, 0x2B, 0x84, 0x24, 0x50, 0x01, 0x00, 0x00])       // 6d6 sub rax, [r12 + 0x150]
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x40])                         // 6de mov [r12 + 0x40], rax
-    copy(bytes, [0x49, 0x8B, 0x84, 0x24, 0xE0, 0x00, 0x00, 0x00])       // 6e3 mov rax, [r12 + 0xe0]
-    copy(bytes, [0x48, 0xC1, 0xE0, 0x0A])                               // 6eb shl rax, 0xa
-    copy(bytes, [0x49, 0x89, 0x44, 0x24, 0x48])                         // 6ef mov [r12 + 0x48], rax
-    copy(bytes, [0x4C, 0x89, 0xE0])                                     // 6f4 mov rax, r12
-    asm_rel8(bytes, fx, 0xEB, "epilog")                                 // 6f7 jmp epilog
-
-    // ── feil (røyr/fork): status 4, pid -1, exit 127
-    asm_etikett(bytes, lbl, "feil")
-    copy(bytes, [0x49, 0xC7, 0x04, 0x24, 0x04, 0x00, 0x00, 0x00])       // 6f9 mov [r12], 0x4
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x08, 0xFF, 0xFF, 0xFF, 0xFF]) // 701 mov [r12 + 0x8], -0x1
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x10, 0x7F, 0x00, 0x00, 0x00]) // 70a mov [r12 + 0x10], 0x7f
-    copy(bytes, [0x49, 0xC7, 0x44, 0x24, 0x38, 0x02, 0x00, 0x00, 0x00]) // 713 mov [r12 + 0x38], 0x2
-    copy(bytes, [0x4C, 0x89, 0xE0])                                     // 71c mov rax, r12
-    asm_rel8(bytes, fx, 0xEB, "epilog")                                 // 71f jmp epilog
-    asm_etikett(bytes, lbl, "mmap_feil")
-    copy(bytes, [0x48, 0x31, 0xC0])                                     // 721 xor rax, rax
-    asm_etikett(bytes, lbl, "epilog")
-    copy(bytes, [0x48, 0x83, 0xC4, 0x08])                               // 724 add rsp, 0x8
-    copy(bytes, [0x41, 0x5F])                                           // 728 pop r15
-    copy(bytes, [0x41, 0x5E])                                           // 72a pop r14
-    copy(bytes, [0x41, 0x5D])                                           // 72c pop r13
-    copy(bytes, [0x41, 0x5C])                                           // 72e pop r12
-    copy(bytes, [0x5B])                                                 // 730 pop rbx
-    copy(bytes, [0x5D])                                                 // 731 pop rbp
-    copy(bytes, [0xC3])                                                 // 732 ret
-
-    // ── u_tal(rdi = tekst-NcVal) -> rax: desimal-parse av siffer-prefiks (null/tom → 0)
-    asm_etikett(bytes, lbl, "u_tal")
-    copy(bytes, [0x48, 0x31, 0xC0])                                     // 733 xor rax, rax
-    copy(bytes, [0x48, 0x85, 0xFF])                                     // 736 test rdi, rdi
-    asm_rel8(bytes, fx, 0x74, "u_tal_slutt")                            // 739 je u_tal_slutt
-    copy(bytes, [0x48, 0x8B, 0x7F, 0x08])                               // 73b mov rdi, [rdi + 0x8]
-    copy(bytes, [0x48, 0x85, 0xFF])                                     // 73f test rdi, rdi
-    asm_rel8(bytes, fx, 0x74, "u_tal_slutt")                            // 742 je u_tal_slutt
-    copy(bytes, [0x48, 0x8B, 0x0F])                                     // 744 mov rcx, [rdi]
-    copy(bytes, [0x48, 0x8D, 0x7F, 0x08])                               // 747 lea rdi, [rdi + 0x8]
-    copy(bytes, [0x48, 0x31, 0xD2])                                     // 74b xor rdx, rdx
-    asm_etikett(bytes, lbl, "u_tal_lykkje")
-    copy(bytes, [0x48, 0x39, 0xCA])                                     // 74e cmp rdx, rcx
-    asm_rel8(bytes, fx, 0x73, "u_tal_slutt")                            // 751 jae u_tal_slutt
-    copy(bytes, [0x44, 0x0F, 0xB6, 0x04, 0x17])                         // 753 movzx r8d, byte [rdi + rdx]
-    copy(bytes, [0x41, 0x83, 0xE8, 0x30])                               // 758 sub r8d, 0x30
-    copy(bytes, [0x41, 0x83, 0xF8, 0x09])                               // 75c cmp r8d, 0x9
-    asm_rel8(bytes, fx, 0x77, "u_tal_slutt")                            // 760 ja u_tal_slutt
-    copy(bytes, [0x48, 0x6B, 0xC0, 0x0A])                               // 762 imul rax, rax, 0xa
-    copy(bytes, [0x4C, 0x01, 0xC0])                                     // 766 add rax, r8
-    copy(bytes, [0x48, 0xFF, 0xC2])                                     // 769 inc rdx
-    asm_rel8(bytes, fx, 0xEB, "u_tal_lykkje")                           // 76c jmp u_tal_lykkje
-    asm_etikett(bytes, lbl, "u_tal_slutt")
-    copy(bytes, [0xC3])                                                 // 76e ret
-
-    // ── u_no_ms() -> rax: clock_gettime(CLOCK_MONOTONIC) i ms
-    asm_etikett(bytes, lbl, "u_no_ms")
-    copy(bytes, [0x48, 0x83, 0xEC, 0x18])                               // 76f sub rsp, 0x18
-    copy(bytes, [0x48, 0xC7, 0xC0, 0xE4, 0x00, 0x00, 0x00])             // 773 mov rax, 0xe4
-    copy(bytes, [0x48, 0xC7, 0xC7, 0x01, 0x00, 0x00, 0x00])             // 77a mov rdi, 0x1
-    copy(bytes, [0x48, 0x89, 0xE6])                                     // 781 mov rsi, rsp
-    copy(bytes, [0x0F, 0x05])                                           // 784 syscall
-    copy(bytes, [0x48, 0x69, 0x3C, 0x24, 0xE8, 0x03, 0x00, 0x00])       // 786 imul rdi, [rsp], 0x3e8
-    copy(bytes, [0x48, 0x8B, 0x44, 0x24, 0x08])                         // 78e mov rax, [rsp + 0x8]
-    copy(bytes, [0x48, 0x31, 0xD2])                                     // 793 xor rdx, rdx
-    copy(bytes, [0x48, 0xC7, 0xC1, 0x40, 0x42, 0x0F, 0x00])             // 796 mov rcx, 0xf4240
-    copy(bytes, [0x48, 0xF7, 0xF1])                                     // 79d div rcx
-    copy(bytes, [0x48, 0x01, 0xF8])                                     // 7a0 add rax, rdi
-    copy(bytes, [0x48, 0x83, 0xC4, 0x18])                               // 7a3 add rsp, 0x18
-    copy(bytes, [0xC3])                                                 // 7a7 ret
-
-    // ── u_lukk(edi): close om fd >= 0
-    asm_etikett(bytes, lbl, "u_lukk")
-    copy(bytes, [0x83, 0xFF, 0x00])                                     // 7a8 cmp edi, 0x0
-    asm_rel8(bytes, fx, 0x7C, "u_lukk_slutt")                           // 7ab jl u_lukk_slutt
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x03, 0x00, 0x00, 0x00])             // 7ad mov rax, 0x3
-    copy(bytes, [0x0F, 0x05])                                           // 7b4 syscall
-    asm_etikett(bytes, lbl, "u_lukk_slutt")
-    copy(bytes, [0xC3])                                                 // 7b6 ret
-
-    // ── u_ikkjeblokk(edi): fcntl(F_SETFL, O_NONBLOCK)
-    asm_etikett(bytes, lbl, "u_ikkjeblokk")
-    copy(bytes, [0x48, 0xC7, 0xC0, 0x48, 0x00, 0x00, 0x00])             // 7b7 mov rax, 0x48
-    copy(bytes, [0x48, 0xC7, 0xC6, 0x04, 0x00, 0x00, 0x00])             // 7be mov rsi, 0x4
-    copy(bytes, [0x48, 0xC7, 0xC2, 0x00, 0x08, 0x00, 0x00])             // 7c5 mov rdx, 0x800
-    copy(bytes, [0x0F, 0x05])                                           // 7cc syscall
-    copy(bytes, [0xC3])                                                 // 7ce ret
-
-    asm_fiks(bytes, lbl, fx)
-}
-
 
 // Rå byte-søk for NcVal-tekstar. Resultatet blir lagt i rdi som indeks eller
 // -1. Dermed kan både index_of og contains bruke ei gyldig Norscode-emittert
@@ -3147,11 +2552,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
         rt_i = rt_i + 1
     }
     la atomics: ordbok = {}
-    atomics["process_spawn_argv"] = TEXT_VA() + lengde(bytes)
-    // F2.1: spawn-atomet er emittert instruksjon for instruksjon med symbolske RT_MAP_KEYS/
-    // RT_MAP_GET og envp-slot (HEAP_VA()+ENVP_OFFSET()); tidlegare ein frosen blob som vart
-    // hex-dekoda og patcha på tre stader (C.3-regresjonen 2026-09-10, RELAYOUT 2026-09-14).
-    emit_process_spawn_linux_x86_64(bytes)
+    // F3.2 (S2): det finst inga spawn-rutine i runtimen lenger (S1-atomet, opphavleg frosen
+    // C-æra-maskinkode, er sletta); builtin.process_spawn_argv går til std.native_gap.
 
     // Heiltal og boolverdiar er immutable. VM-i-VM-kompilering lagar millionar
     // av dei same indeks-, lengde- og samanlikningsverdiane; la dei peike på
@@ -10307,27 +9709,6 @@ funksjon builtin_va(fn_nm: tekst, atomic_vas) -> heltall {
 
 // Gap-ruting: sjå gap_ruter.no (F2.3, delt med arm64-codegenen).
 
-funksjon emit_process_request_field(buf, nøkkel: tekst, offset: heiltall, rd_offs, code_va) {
-    emit_push_const(buf, nøkkel, rd_offs, code_va)
-    copy(buf, [0x5E, 0x4C, 0x89, 0xE7])
-    call_rel32(buf, RT_MAP_GET(), code_va)
-    copy(buf, [0x48, 0x89, 0x44, 0x24, offset])
-}
-
-funksjon emit_process_result_set(buf, nøkkel: tekst, rd_offs, code_va) {
-    copy(buf, [0x48, 0x89, 0xC2])
-    emit_push_const(buf, nøkkel, rd_offs, code_va)
-    copy(buf, [0x5E, 0x4C, 0x89, 0xF7])
-    call_rel32(buf, RT_MAP_SET(), code_va)
-}
-
-funksjon emit_process_raw_number_text(buf, offset: heiltall, code_va) {
-    copy(buf, [0x49, 0x8B, 0x7D, offset])
-    call_rel32(buf, RT_INT(), code_va)
-    copy(buf, [0x48, 0x89, 0xC7])
-    call_rel32(buf, RT_INT_TO_STR(), code_va)
-}
-
 funksjon er_strukturkonstruktør(fn_nm: tekst, nargs: heiltall) -> boolsk {
     // Strukturkall blir senka til `builtin.<Strukturnamn>()` av selfhost-
     // kompilatoren. Pure VM representerer instansen som ei tom ordbok før
@@ -10757,6 +10138,25 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         legg_til(buf, 0x50)
         returner
     }
+    // F3.1 (X0.3): builtin.native_target() → plattformmålet som konstant ("linux-x86_64" her;
+    // kvar codegen emitterer sin eigen streng). std.native_sys vel systemtabell etter han.
+    hvis fn_nm == "builtin.native_target" {
+        la nt_i: heiltall = 0
+        mens nt_i < nargs { legg_til(buf, 0x58) nt_i = nt_i + 1 }
+        emit_push_const(buf, X86_MAL(), rd_offs, code_va)
+        returner
+    }
+    // F3.3: builtin.native_envp() → envp-peikaren oppstarten lagra i heap-kontrollblokka
+    // (heap_layout: HEAP_VA + ENVP_OFFSET). Symbolsk: std.native_gap har inga hardkoda VA.
+    hvis fn_nm == "builtin.native_envp" {
+        la ne_i: heiltall = 0
+        mens ne_i < nargs { legg_til(buf, 0x58) ne_i = ne_i + 1 }
+        copy(buf, [0x48, 0x8B, 0x3C, 0x25])                                  // mov rdi,[abs32]
+        u32(buf, hl.HEAP_VA(X86_MAL()) + hl.ENVP_OFFSET())
+        call_rel32(buf, RT_INT(), code_va)
+        legg_til(buf, 0x50)
+        returner
+    }
     hvis fn_nm == "builtin.system_info" eller fn_nm == "system_info" {
         // Linux x86-64: uname(#63) + getcwd(#79) + readlink(#89 "/proc/self/exe") →
         // map {system, machine, cwd, executable, status:"ok"}. Manglande builtin gav
@@ -10902,114 +10302,17 @@ funksjon emit_builtin_or_user_call(buf, fn_nm: tekst, nargs: heltall, fn_vas, rd
         legg_til(buf, 0x50)
         returner
     }
-    // Sandkasse: builtin.process_spawn_argv går via std.native_gap.process_spawn_argv_gap
-    // når han er i bunten. Gapet vel Norscode-spawnvegen (seccomp i barnet) for requestar
-    // med sandkasseprofil, og kallar elles den native rutina under namnet
-    // builtin.process_spawn_argv_raa (same emisjon som under — inga rekursjon).
-    hvis (fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv")
-       og nargs == 1 og finnes_nøkkel(fn_vas, "std.native_gap.process_spawn_argv_gap") {
-        emit_user_call(buf, fn_vas["std.native_gap.process_spawn_argv_gap"], nargs, code_va)
-        returner
-    }
-    hvis fn_nm == "builtin.process_spawn_argv_raa" eller fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv" {
-        // Materialiser det versjonerte request-kartet som eit smalt rå-ABI-
-        // område. Sjølve prosessarbeidet ligg i Norscode-emittert Linux-kode;
-        // resultatet blir pakka tilbake til vanlege Norscode-verdiar her.
-        legg_til(buf, 0x5F)                           // rdi=request
-        la process_drop_i: heiltall = 1
-        mens process_drop_i < nargs {
-            legg_til(buf, 0x58)
-            process_drop_i = process_drop_i + 1
+    // F3.2 (S2): builtin.process_spawn_argv går ALLTID via std.native_gap.process_spawn_argv_gap
+    // (rein Norscode over builtin.sys6: pipe2/fork/execve/wait4/ppoll, seccomp-sandkasse,
+    // ikkje-blokkerande stdin, output-grense, peak_rss). Den rå spawn-emisjonen og S1-atomet
+    // er sletta; manglar modulen i bunten, er det ein kompileringsfeil i staden for ein stille
+    // fallback (legg til `bruk std.native_gap` i programmet).
+    hvis fn_nm == "builtin.process_spawn_argv" eller fn_nm == "process_spawn_argv" {
+        hvis ikkje finnes_nøkkel(fn_vas, "std.native_gap.process_spawn_argv_gap") {
+            kast "native_codegen_v2: builtin.process_spawn_argv krev std.native_gap i bunten (legg til `bruk std.native_gap`)"
         }
-        copy(buf, [0x41, 0x54, 0x41, 0x55, 0x41, 0x56])
-        copy(buf, [0x49, 0x89, 0xFC, 0x48, 0x83, 0xEC, 0x40])
-        emit_process_request_field(buf, "executable", 0, rd_offs, code_va)
-        emit_process_request_field(buf, "args", 8, rd_offs, code_va)
-        emit_process_request_field(buf, "cwd", 16, rd_offs, code_va)
-        emit_process_request_field(buf, "stdin", 24, rd_offs, code_va)
-        emit_process_request_field(buf, "timeout_ms", 32, rd_offs, code_va)
-        emit_process_request_field(buf, "max_output_bytes", 40, rd_offs, code_va)
-        emit_process_request_field(buf, "environment", 48, rd_offs, code_va)
-        emit_process_request_field(buf, "inherit_env", 56, rd_offs, code_va)
-        copy(buf, [0x48, 0x89, 0xE7])
-        call_rel32(buf, atomic_vas["process_spawn_argv"], code_va)
-        copy(buf, [0x49, 0x89, 0xC5, 0x48, 0x83, 0xC4, 0x40])
-        call_rel32(buf, RT_MAP_NEW(), code_va)
-        copy(buf, [0x49, 0x89, 0xC6])
-
-        emit_push_const(buf, "norscode-process-spawn-v1", rd_offs, code_va)
-        legg_til(buf, 0x58)
-        emit_process_result_set(buf, "abi", rd_offs, code_va)
-
-        // statuskode: 0 ferdig, 1 timeout, 2 output-limit, 3 signal, 4 feil.
-        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x00])
-        la process_status_timeout = emit_jne_placeholder(buf)
-        emit_push_const(buf, "ferdig", rd_offs, code_va)
-        la process_status_done = emit_jmp_placeholder(buf)
-        la process_status_timeout_label = lengde(buf)
-        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x01])
-        la process_status_limit = emit_jne_placeholder(buf)
-        emit_push_const(buf, "timeout", rd_offs, code_va)
-        la process_status_done_2 = emit_jmp_placeholder(buf)
-        la process_status_limit_label = lengde(buf)
-        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x02])
-        la process_status_signal = emit_jne_placeholder(buf)
-        emit_push_const(buf, "feil", rd_offs, code_va)
-        la process_status_done_3 = emit_jmp_placeholder(buf)
-        la process_status_signal_label = lengde(buf)
-        copy(buf, [0x49, 0x83, 0x7D, 0x00, 0x03])
-        la process_status_error = emit_jne_placeholder(buf)
-        emit_push_const(buf, "signal", rd_offs, code_va)
-        la process_status_done_4 = emit_jmp_placeholder(buf)
-        la process_status_error_label = lengde(buf)
-        emit_push_const(buf, "feil", rd_offs, code_va)
-        la process_status_selected = lengde(buf)
-        patch_jump(buf, process_status_timeout, process_status_timeout_label)
-        patch_jump(buf, process_status_limit, process_status_limit_label)
-        patch_jump(buf, process_status_signal, process_status_signal_label)
-        patch_jump(buf, process_status_error, process_status_error_label)
-        patch_jump(buf, process_status_done, process_status_selected)
-        patch_jump(buf, process_status_done_2, process_status_selected)
-        patch_jump(buf, process_status_done_3, process_status_selected)
-        patch_jump(buf, process_status_done_4, process_status_selected)
-        legg_til(buf, 0x58)
-        emit_process_result_set(buf, "status", rd_offs, code_va)
-
-        emit_process_raw_number_text(buf, 8, code_va)
-        emit_process_result_set(buf, "pid", rd_offs, code_va)
-        emit_process_raw_number_text(buf, 16, code_va)
-        emit_process_result_set(buf, "exit_code", rd_offs, code_va)
-        copy(buf, [0x49, 0x8B, 0x7D, 0x18, 0x49, 0x8B, 0x75, 0x20])
-        call_rel32(buf, RT_STR_RAW(), code_va)
-        emit_process_result_set(buf, "stdout", rd_offs, code_va)
-        copy(buf, [0x49, 0x8B, 0x7D, 0x28, 0x49, 0x8B, 0x75, 0x30])
-        call_rel32(buf, RT_STR_RAW(), code_va)
-        emit_process_result_set(buf, "stderr", rd_offs, code_va)
-
-        copy(buf, [0x49, 0x83, 0x7D, 0x38, 0x01])
-        la process_error_spawn = emit_jne_placeholder(buf)
-        emit_push_const(buf, "output limit", rd_offs, code_va)
-        la process_error_done = emit_jmp_placeholder(buf)
-        la process_error_spawn_label = lengde(buf)
-        copy(buf, [0x49, 0x83, 0x7D, 0x38, 0x02])
-        la process_error_empty = emit_jne_placeholder(buf)
-        emit_push_const(buf, "process spawn failed", rd_offs, code_va)
-        la process_error_done_2 = emit_jmp_placeholder(buf)
-        la process_error_empty_label = lengde(buf)
-        emit_push_const(buf, "", rd_offs, code_va)
-        la process_error_selected = lengde(buf)
-        patch_jump(buf, process_error_spawn, process_error_spawn_label)
-        patch_jump(buf, process_error_empty, process_error_empty_label)
-        patch_jump(buf, process_error_done, process_error_selected)
-        patch_jump(buf, process_error_done_2, process_error_selected)
-        legg_til(buf, 0x58)
-        emit_process_result_set(buf, "error", rd_offs, code_va)
-
-        emit_process_raw_number_text(buf, 64, code_va)
-        emit_process_result_set(buf, "wall_ms", rd_offs, code_va)
-        emit_process_raw_number_text(buf, 72, code_va)
-        emit_process_result_set(buf, "peak_rss_bytes", rd_offs, code_va)
-        copy(buf, [0x4C, 0x89, 0xF0, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x50])
+        hvis nargs != 1 { kast "native_codegen_v2: builtin.process_spawn_argv tek eitt argument (fekk " + tekst_fra_heltall(nargs) + ")" }
+        emit_user_call(buf, fn_vas["std.native_gap.process_spawn_argv_gap"], nargs, code_va)
         returner
     }
     // (Fjerna 2026-09-11: inline «status: unsupported»-stubben for
