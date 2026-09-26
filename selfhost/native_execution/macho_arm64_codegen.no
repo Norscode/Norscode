@@ -115,6 +115,30 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
     returner usann
 }
 
+// A5: JSON-ruting til rein Norscode (same val som x86-AOT). "" = ingen ruting.
+funksjon ncd_json_rute(kallnamn: tekst, funksjonar) -> tekst {
+    la n = ncval_avkort_builtin(kallnamn)
+    hvis (n == "json_skriv" eller n == "json_stringify") og finnes_nøkkel(funksjonar, "selfhost.json.json_skriv") {
+        returner "selfhost.json.json_skriv"
+    }
+    hvis n == "json_parse" og finnes_nøkkel(funksjonar, "std.native_gap.json_parse") {
+        returner "std.native_gap.json_parse"
+    }
+    returner ""
+}
+
+// Alle funksjonar eit JSON-kall kan nå via ruting/fallback (for reachability-passet).
+funksjon ncd_json_rute_mål(kallnamn: tekst, funksjonar) -> liste_tekst {
+    la ut: liste_tekst = []
+    la r = ncd_json_rute(kallnamn, funksjonar)
+    hvis r != "" { legg_til(ut, r) }
+    la n = ncval_avkort_builtin(kallnamn)
+    hvis (n == "json_parse" eller n == "json_parse_raw") og finnes_nøkkel(funksjonar, "selfhost.json.json_les") {
+        legg_til(ut, "selfhost.json.json_les")
+    }
+    returner ut
+}
+
 // A5: desimaltall-bruene med eigen ARM64-emitter (sjå kall-kjeda i kompiler_arm64_ncval).
 funksjon ncd_er_bru(namn: tekst) -> boolsk {
     la n = ncval_avkort_builtin(namn)
@@ -844,6 +868,9 @@ funksjon ncval_os_rute_namn(namn: tekst) -> boolsk {
 funksjon ncval_delt_rute_ok(n: tekst) -> boolsk {
     hvis ncval_os_rute_namn(n) { returner sann }
     hvis builtin.starts_with(n, "db.") { returner sann }
+    // A5: desimaltall(tekst) → std.desimaltall_tekst.desimal_frå_tekst (rein Norscode over
+    // desimal-bruene), same rute som x86. selfhost.json.json_tal treng han for "1.5".
+    hvis n == "desimaltall" { returner sann }
     returner n == "kompiler_fil_aktiv" eller n == "host_exec_ncb_json" eller n == "host_exec_ncb"
 }
 
@@ -1256,6 +1283,21 @@ funksjon emit_fjern_nokkel(native: liste_heiltall, map_reg: heiltall, key_reg: h
 
 // heltall(streng): parse desimalstreng → int (valfri leiande '-').
 funksjon emit_heltall_str(native: liste_heiltall, arg_reg: heiltall, dst_reg: heiltall) -> heiltall {
+    // A5: typedispatch — heiltal/bool → verdien, tekst → parse (under). Før vart alle
+    // argument lesne som tekst. Desimaltall blir trunkert mot null (fcvtzs); VM-en kastar
+    // «Ugyldig heiltall» der, men denne emitteren har ikkje unnataksmaskineriet.
+    legg_u32(native, 0xF9400000 | (arg_reg << 5) | 9)  // ldr x9, [Xarg]  (type)
+    legg_u32(native, 0xF9400400 | (arg_reg << 5) | 10) // ldr x10, [Xarg, #8]
+    legg_u32(native, 0xF1000D3F)                       // cmp x9, #3
+    la p_hs_tekst = lengde(native)
+    legg_u32(native, 0)                                // b.eq tekst
+    legg_u32(native, 0xF100193F)                       // cmp x9, #6
+    legg_u32(native, 0x54000061)                       // b.ne +3 (heiltal/bool: x10 som det er)
+    legg_u32(native, 0x9E670140)                       // fmov d0, x10
+    legg_u32(native, 0x9E78000A)                       // fcvtzs x10, d0
+    la p_hs_ikkje_tekst = lengde(native)
+    legg_u32(native, 0)                                // b hdone
+    ncd_bcond(native, p_hs_tekst, lengde(native), 0)
     legg_u32(native, 0xF9400400 | (arg_reg << 5) | 9)  // ldr x9, [Xarg, #8]
     legg_u32(native, 0xF940012B)                       // ldr x11, [x9]  (len)
     legg_u32(native, 0x91002129)                       // add x9, x9, #8 (base)
@@ -1287,7 +1329,8 @@ funksjon emit_heltall_str(native: liste_heiltall, arg_reg: heiltall, dst_reg: he
     legg_u32(native, 0)                                // cbz x13, hdone
     legg_u32(native, 0xCB0A03EA)                       // neg x10, x10
     la lbl_hdone = lengde(native)
-    emit_ncval_alloc(native, 10, dst_reg, 1)
+    emit_ncval_alloc_ptr(native, 10, dst_reg, 1)       // 64-bit (sxtw avkorta store tal)
+    ncd_b(native, p_hs_ikkje_tekst, lbl_hdone)
     skriv_u32(native, p_cbz_len,    0xB400000B | ((((lbl_hdone     - p_cbz_len)    / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bne_digits, 0x54000001 | ((((lbl_digits    - p_bne_digits) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_d,      0xB400000B | ((((lbl_applysign - p_cbz_d)      / 4) & 0x7FFFF) << 5))
@@ -4746,9 +4789,39 @@ funksjon emit_json_stringify(native: liste_heiltall, arg_reg: heiltall, dst_reg:
     legg_u32(native, 0)                                 // cbz x17, qafter
     la lbl_qcopy = lengde(native)
     legg_u32(native, 0x39400200)                        // ldrb w0, [x16]
+    // Escape som VM-en (json_escape_skriv / x86-atomet): " \ \n \r \t → \" \\ \n \r \t.
+    // Før gjekk bytane råe ut, og json_parse av resultatet braut på første ".
+    la esc_teikn = [34, 92, 10, 13, 9]
+    la esc_bokstav = [34, 92, 110, 114, 116]
+    la esc_hopp: liste_heiltall = []
+    la ei = 0
+    mens ei < 5 {
+        legg_u32(native, 0x7100001F | (esc_teikn[ei] << 10))   // cmp w0, #teikn
+        legg_til(esc_hopp, lengde(native))
+        legg_u32(native, 0)                             // b.eq esc_<ei>
+        ei = ei + 1
+    }
     legg_u32(native, 0x390001E0)                        // strb w0, [x15]
-    legg_u32(native, 0x91000610)                        // add x16, x16, #1
     legg_u32(native, 0x910005EF)                        // add x15, x15, #1
+    la p_q_neste = lengde(native)
+    legg_u32(native, 0)                                 // b neste
+    la esc_til_skriv: liste_heiltall = []
+    ei = 0
+    mens ei < 5 {
+        ncd_bcond(native, esc_hopp[ei], lengde(native), 0)
+        legg_u32(native, 0x5280000C | (esc_bokstav[ei] << 5))  // movz w12, #bokstav
+        legg_til(esc_til_skriv, lengde(native))
+        legg_u32(native, 0)                             // b esc_skriv
+        ei = ei + 1
+    }
+    la lbl_esc_skriv = lengde(native)
+    for pe i esc_til_skriv { ncd_b(native, pe, lbl_esc_skriv) }
+    legg_u32(native, 0x52800B80)                        // movz w0, #92 '\'
+    legg_u32(native, 0x390001E0)                        // strb w0, [x15]
+    legg_u32(native, 0x390005EC)                        // strb w12, [x15, #1]
+    legg_u32(native, 0x910009EF)                        // add x15, x15, #2
+    ncd_b(native, p_q_neste, lengde(native))
+    legg_u32(native, 0x91000610)                        // add x16, x16, #1
     legg_u32(native, 0xD1000631)                        // sub x17, x17, #1
     la p_cbnz_qcopy = lengde(native)
     legg_u32(native, 0)                                 // cbnz x17, qcopy
@@ -4756,6 +4829,9 @@ funksjon emit_json_stringify(native: liste_heiltall, arg_reg: heiltall, dst_reg:
     legg_u32(native, 0x52800440)                        // movz w0, #34 '"'
     legg_u32(native, 0x390001E0)                        // strb w0, [x15]
     legg_u32(native, 0x910005EF)                        // add x15, x15, #1
+    legg_u32(native, 0xCB0E01EB)                        // sub x11, x15, x14
+    legg_u32(native, 0xD100216B)                        // sub x11, x11, #8   (lengd etter escape)
+    legg_u32(native, 0xF90001CB)                        // str x11, [x14]
     legg_u32(native, 0xAA0F03FC)                        // mov x28, x15
     emit_ncval_alloc_ptr(native, 14, dst_reg, 3)
     la p_end3 = lengde(native)
@@ -5000,6 +5076,308 @@ funksjon emit_skip_ws(r: liste_heiltall) -> heiltall {
 // til ekte NCB-ar: functions-map ~2000 slots, største code-array ~6300). Streng
 // utan escape-handtering; null → int 0. x19=cur, x20=end, x21=buffer-base,
 // x22=skrivepeikar, x23=slot-tal. Sjølv-bl patcha lokalt (mål=offset 0).
+// Les 4 hex-siffer ved [x19+off .. x19+off+3] inn i Xdst (x19 blir ikkje flytta).
+// Brukar w9/w11. Ugyldige teikn blir tolka leniant (JSON-en er gyldig i praksis).
+funksjon ncj_emit_hex4(r: liste_heiltall, off: heiltall, dst: heiltall) -> heiltall {
+    legg_u32(r, 0xD2800000 | dst)                    // movz Xdst, #0
+    la k = 0
+    mens k < 4 {
+        legg_u32(r, 0x39400269 | ((off + k) << 10))  // ldrb w9, [x19, #off+k]
+        legg_u32(r, 0x5100C12B)                      // sub w11, w9, #48  ('0'..'9')
+        legg_u32(r, 0x7100257F)                      // cmp w11, #9
+        la p_ok1 = lengde(r)
+        legg_u32(r, 0)                               // b.ls ok
+        legg_u32(r, 0x51015D2B)                      // sub w11, w9, #87  ('a'..'f')
+        legg_u32(r, 0x71003D7F)                      // cmp w11, #15
+        la p_ok2 = lengde(r)
+        legg_u32(r, 0)                               // b.ls ok
+        legg_u32(r, 0x5100DD2B)                      // sub w11, w9, #55  ('A'..'F')
+        la lbl_ok = lengde(r)
+        legg_u32(r, 0xD37CEC00 | (dst << 5) | dst)   // lsl Xdst, Xdst, #4
+        legg_u32(r, 0xAA0B0000 | (dst << 5) | dst)   // orr Xdst, Xdst, x11
+        ncd_bcond(r, p_ok1, lbl_ok, 9)
+        ncd_bcond(r, p_ok2, lbl_ok, 9)
+        k = k + 1
+    }
+    returner 0
+}
+
+// \uXXXX i ein JSON-streng (x19 peikar på 'u', x15 er skrivepeikaren): les kodepunktet,
+// slå saman eit gyldig surrogatpar (😀) og skriv UTF-8 (1–4 byte), som VM-en.
+// Returnerer [b.ge str_end-plasshaldar, b str_loop-plasshaldar] for kallaren å lappe.
+funksjon ncj_emit_u_escape(r: liste_heiltall) -> liste_heiltall {
+    legg_u32(r, 0x9100126D)                          // add x13, x19, #4
+    legg_u32(r, 0xEB1401BF)                          // cmp x13, x20
+    la p_end = lengde(r)
+    legg_u32(r, 0)                                   // b.ge str_end (avkorta \u)
+    ncj_emit_hex4(r, 1, 10)                          // x10 = kodepunkt
+    legg_u32(r, 0x91001273)                          // add x19, x19, #4 (x19 på siste siffer)
+    // Høgt surrogat og eit \u-par etter? → kombiner.
+    legg_u32(r, 0xD29B000B)                          // movz x11, #0xD800
+    legg_u32(r, 0xCB0B014B)                          // sub x11, x10, x11
+    legg_u32(r, 0xF10FFD7F)                          // cmp x11, #0x3FF
+    la p_ikkje_hoeg = lengde(r)
+    legg_u32(r, 0)                                   // b.hi koding
+    legg_u32(r, 0x9100186D)                          // add x13, x19, #6
+    legg_u32(r, 0xEB1401BF)                          // cmp x13, x20
+    la p_kort = lengde(r)
+    legg_u32(r, 0)                                   // b.ge koding
+    legg_u32(r, 0x39400669)                          // ldrb w9, [x19, #1]
+    legg_u32(r, 0x7101713F)                          // cmp w9, #92 (\)
+    la p_ikkje_bs = lengde(r)
+    legg_u32(r, 0)                                   // b.ne koding
+    legg_u32(r, 0x39400A69)                          // ldrb w9, [x19, #2]
+    legg_u32(r, 0x7101D53F)                          // cmp w9, #117 (u)
+    la p_ikkje_u = lengde(r)
+    legg_u32(r, 0)                                   // b.ne koding
+    ncj_emit_hex4(r, 3, 16)                          // x16 = andre kodeeining
+    legg_u32(r, 0xD29B8011)                          // movz x17, #0xDC00
+    legg_u32(r, 0xCB110210)                          // sub x16, x16, x17
+    legg_u32(r, 0xF10FFE1F)                          // cmp x16, #0x3FF
+    la p_ikkje_laag = lengde(r)
+    legg_u32(r, 0)                                   // b.hi koding
+    // ncj_emit_hex4 brukar w11 som mellombels register → rekn (høg − 0xD800) ut på nytt.
+    legg_u32(r, 0xD29B000B)                          // movz x11, #0xD800
+    legg_u32(r, 0xCB0B014B)                          // sub x11, x10, x11
+    legg_u32(r, 0xD376D56B)                          // lsl x11, x11, #10
+    legg_u32(r, 0x8B10016A)                          // add x10, x11, x16
+    legg_u32(r, 0x9140414A)                          // add x10, x10, #0x10, lsl #12  (+0x10000)
+    legg_u32(r, 0x91001A73)                          // add x19, x19, #6
+    la lbl_koding = lengde(r)
+    ncd_bcond(r, p_ikkje_hoeg, lbl_koding, 8)
+    ncd_bcond(r, p_kort, lbl_koding, 10)
+    ncd_bcond(r, p_ikkje_bs, lbl_koding, 1)
+    ncd_bcond(r, p_ikkje_u, lbl_koding, 1)
+    ncd_bcond(r, p_ikkje_laag, lbl_koding, 8)
+    // UTF-8 av x10 → [x15].
+    la ferdig: liste_heiltall = []
+    legg_u32(r, 0xF102015F)                          // cmp x10, #0x80
+    la p_to = lengde(r)
+    legg_u32(r, 0)                                   // b.hs to
+    legg_u32(r, 0x390001EA)                          // strb w10, [x15]
+    legg_u32(r, 0x910005EF)                          // add x15, x15, #1
+    legg_til(ferdig, lengde(r))
+    legg_u32(r, 0)                                   // b ferdig
+    la lbl_to = lengde(r)
+    legg_u32(r, 0xF120015F)                          // cmp x10, #0x800
+    la p_tre = lengde(r)
+    legg_u32(r, 0)                                   // b.hs tre
+    legg_u32(r, 0xD346FD4B)                          // lsr x11, x10, #6
+    legg_u32(r, 0x1103016B)                          // add w11, w11, #0xC0
+    legg_u32(r, 0x390001EB)                          // strb w11, [x15]
+    legg_u32(r, 0x9240154B)                          // and x11, x10, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x390005EB)                          // strb w11, [x15, #1]
+    legg_u32(r, 0x910009EF)                          // add x15, x15, #2
+    legg_til(ferdig, lengde(r))
+    legg_u32(r, 0)                                   // b ferdig
+    la lbl_tre = lengde(r)
+    legg_u32(r, 0xF140415F)                          // cmp x10, #0x10, lsl #12  (0x10000)
+    la p_fire = lengde(r)
+    legg_u32(r, 0)                                   // b.hs fire
+    legg_u32(r, 0xD34CFD4B)                          // lsr x11, x10, #12
+    legg_u32(r, 0x1103816B)                          // add w11, w11, #0xE0
+    legg_u32(r, 0x390001EB)                          // strb w11, [x15]
+    legg_u32(r, 0xD346FD4B)                          // lsr x11, x10, #6
+    legg_u32(r, 0x9240156B)                          // and x11, x11, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x390005EB)                          // strb w11, [x15, #1]
+    legg_u32(r, 0x9240154B)                          // and x11, x10, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x390009EB)                          // strb w11, [x15, #2]
+    legg_u32(r, 0x91000DEF)                          // add x15, x15, #3
+    legg_til(ferdig, lengde(r))
+    legg_u32(r, 0)                                   // b ferdig
+    la lbl_fire = lengde(r)
+    legg_u32(r, 0xD352FD4B)                          // lsr x11, x10, #18
+    legg_u32(r, 0x1103C16B)                          // add w11, w11, #0xF0
+    legg_u32(r, 0x390001EB)                          // strb w11, [x15]
+    legg_u32(r, 0xD34CFD4B)                          // lsr x11, x10, #12
+    legg_u32(r, 0x9240156B)                          // and x11, x11, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x390005EB)                          // strb w11, [x15, #1]
+    legg_u32(r, 0xD346FD4B)                          // lsr x11, x10, #6
+    legg_u32(r, 0x9240156B)                          // and x11, x11, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x390009EB)                          // strb w11, [x15, #2]
+    legg_u32(r, 0x9240154B)                          // and x11, x10, #0x3F
+    legg_u32(r, 0x1102016B)                          // add w11, w11, #0x80
+    legg_u32(r, 0x39000DEB)                          // strb w11, [x15, #3]
+    legg_u32(r, 0x910011EF)                          // add x15, x15, #4
+    la lbl_ferdig = lengde(r)
+    ncd_bcond(r, p_to, lbl_to, 2)
+    ncd_bcond(r, p_tre, lbl_tre, 2)
+    ncd_bcond(r, p_fire, lbl_fire, 2)
+    for pf i ferdig { ncd_b(r, pf, lbl_ferdig) }
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1 (forbi siste siffer)
+    la p_loop = lengde(r)
+    legg_u32(r, 0)                                   // b str_loop
+    returner [p_end, p_loop]
+}
+
+// A5: desimaltal i JSON. Køyrer rett etter heiltalssifra (x10 = siffer som heiltal,
+// x11 = neg-flagg, x13 = tal på siffer, x16 = 0). Ser neste teikn ikkje ut som
+// '.', 'e' eller 'E', hoppar koden til heiltalsvegen (returnert plasshaldar [0]).
+// Elles blir brøk og eksponent lesne, og snøggvegen til Clinger (≤ 15 siffer,
+// |tiarseksponent| ≤ 22: begge operandane er eksakte doublar, så éi multiplikasjon/
+// divisjon gjev korrekt avrunding) boksar ein desimaltall i x0. Utanfor snøggvegen
+// blir x0 = 0: kallaren fell då tilbake til rein Norscode (selfhost.json.json_les).
+// Plasshaldarane i [1] skal hoppe til parse_done.
+funksjon ncj_emit_desimal_tal(r: liste_heiltall) -> liste {
+    la ferdig_b: liste_heiltall = []   // ubetinga b → ferdig
+    la ferdig_v = []                   // [pos, vilkår] → ferdig
+    legg_u32(r, 0xEB14027F)                          // cmp x19, x20
+    la p_slutt = lengde(r)
+    legg_u32(r, 0)                                   // b.ge heiltal
+    legg_u32(r, 0x39400269)                          // ldrb w9, [x19]
+    legg_u32(r, 0x7100B93F)                          // cmp w9, #46 ('.')
+    la p_brok = lengde(r)
+    legg_u32(r, 0)                                   // b.eq brøk
+    legg_u32(r, 0x7101953F)                          // cmp w9, #101 ('e')
+    la p_e1 = lengde(r)
+    legg_u32(r, 0)                                   // b.eq eksponent
+    legg_u32(r, 0x7101153F)                          // cmp w9, #69 ('E')
+    la p_e2 = lengde(r)
+    legg_u32(r, 0)                                   // b.eq eksponent
+    la p_heiltal = lengde(r)
+    legg_u32(r, 0)                                   // b heiltal
+    // brøk
+    la lbl_brok = lengde(r)
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1 (hopp .)
+    la lbl_brok_loop = lengde(r)
+    legg_u32(r, 0xEB14027F)                          // cmp x19, x20
+    la p_brok_ut1 = lengde(r)
+    legg_u32(r, 0)                                   // b.ge rekn
+    legg_u32(r, 0x39400269)                          // ldrb w9, [x19]
+    legg_u32(r, 0x7100C13F)                          // cmp w9, #48
+    la p_brok_ut2 = lengde(r)
+    legg_u32(r, 0)                                   // b.lt brøk_slutt
+    legg_u32(r, 0x7100E53F)                          // cmp w9, #57
+    la p_brok_ut3 = lengde(r)
+    legg_u32(r, 0)                                   // b.gt brøk_slutt
+    legg_u32(r, 0xD280014C)                          // movz x12, #10
+    legg_u32(r, 0x9B0C7D4A)                          // mul x10, x10, x12
+    legg_u32(r, 0x5100C129)                          // sub w9, w9, #48
+    legg_u32(r, 0x8B09014A)                          // add x10, x10, x9
+    legg_u32(r, 0x910005AD)                          // add x13, x13, #1
+    legg_u32(r, 0xD1000610)                          // sub x16, x16, #1
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1
+    la p_brok_b = lengde(r)
+    legg_u32(r, 0)                                   // b brøk_loop
+    la lbl_brok_slutt = lengde(r)
+    legg_u32(r, 0x7101953F)                          // cmp w9, #101 ('e')
+    la p_e3 = lengde(r)
+    legg_u32(r, 0)                                   // b.eq eksponent
+    legg_u32(r, 0x7101153F)                          // cmp w9, #69 ('E')
+    la p_e4 = lengde(r)
+    legg_u32(r, 0)                                   // b.eq eksponent
+    la p_brok_rekn = lengde(r)
+    legg_u32(r, 0)                                   // b rekn
+    // eksponent
+    la lbl_eksp = lengde(r)
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1 (hopp e/E)
+    legg_u32(r, 0xD2800011)                          // movz x17, #0  (eksponent)
+    legg_u32(r, 0xD280000C)                          // movz x12, #0  (neg)
+    legg_u32(r, 0xEB14027F)                          // cmp x19, x20
+    la p_eksp_ut0 = lengde(r)
+    legg_u32(r, 0)                                   // b.ge eksp_ferdig
+    legg_u32(r, 0x39400269)                          // ldrb w9, [x19]
+    legg_u32(r, 0x7100B53F)                          // cmp w9, #45 ('-')
+    la p_ikkje_minus = lengde(r)
+    legg_u32(r, 0)                                   // b.ne ikkje_minus
+    legg_u32(r, 0xD280002C)                          // movz x12, #1
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1
+    la p_til_loop = lengde(r)
+    legg_u32(r, 0)                                   // b eksp_loop
+    la lbl_ikkje_minus = lengde(r)
+    legg_u32(r, 0x7100AD3F)                          // cmp w9, #43 ('+')
+    la p_ikkje_pluss = lengde(r)
+    legg_u32(r, 0)                                   // b.ne eksp_loop
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1
+    la lbl_eksp_loop = lengde(r)
+    legg_u32(r, 0xEB14027F)                          // cmp x19, x20
+    la p_eksp_ut1 = lengde(r)
+    legg_u32(r, 0)                                   // b.ge eksp_ferdig
+    legg_u32(r, 0x39400269)                          // ldrb w9, [x19]
+    legg_u32(r, 0x7100C13F)                          // cmp w9, #48
+    la p_eksp_ut2 = lengde(r)
+    legg_u32(r, 0)                                   // b.lt eksp_ferdig
+    legg_u32(r, 0x7100E53F)                          // cmp w9, #57
+    la p_eksp_ut3 = lengde(r)
+    legg_u32(r, 0)                                   // b.gt eksp_ferdig
+    legg_u32(r, 0xD280014F)                          // movz x15, #10
+    legg_u32(r, 0x9B0F7E31)                          // mul x17, x17, x15
+    legg_u32(r, 0x5100C129)                          // sub w9, w9, #48
+    legg_u32(r, 0x8B090231)                          // add x17, x17, x9
+    legg_u32(r, 0x91000673)                          // add x19, x19, #1
+    la p_eksp_b = lengde(r)
+    legg_u32(r, 0)                                   // b eksp_loop
+    la lbl_eksp_ferdig = lengde(r)
+    legg_u32(r, 0xB400004C)                          // cbz x12, +2
+    legg_u32(r, 0xCB1103F1)                          // neg x17, x17
+    legg_u32(r, 0x8B110210)                          // add x16, x16, x17
+    // rekn: snøggvegen
+    la lbl_rekn = lengde(r)
+    legg_u32(r, 0xD2800000)                          // movz x0, #0  (fall tilbake)
+    legg_u32(r, 0xF1003DBF)                          // cmp x13, #15
+    legg_til(ferdig_v, [lengde(r), 12])
+    legg_u32(r, 0)                                   // b.gt ferdig (x0 = 0)
+    legg_u32(r, 0xB1005A1F)                          // cmn x16, #22
+    legg_til(ferdig_v, [lengde(r), 11])
+    legg_u32(r, 0)                                   // b.lt ferdig
+    legg_u32(r, 0xF1005A1F)                          // cmp x16, #22
+    legg_til(ferdig_v, [lengde(r), 12])
+    legg_u32(r, 0)                                   // b.gt ferdig
+    legg_u32(r, 0x9E620140)                          // scvtf d0, x10
+    legg_u32(r, 0x1E6E1001)                          // fmov d1, #1.0
+    legg_u32(r, 0x1E649002)                          // fmov d2, #10.0
+    legg_u32(r, 0xAA1003EC)                          // mov x12, x16
+    legg_u32(r, 0xF100019F)                          // cmp x12, #0
+    legg_u32(r, 0x5400004A)                          // b.ge +2
+    legg_u32(r, 0xCB0C03EC)                          // neg x12, x12
+    la lbl_pot = lengde(r)
+    la p_pot_ferdig = lengde(r)
+    legg_u32(r, 0)                                   // cbz x12, pot_ferdig
+    legg_u32(r, 0x1E620821)                          // fmul d1, d1, d2
+    legg_u32(r, 0xD100058C)                          // sub x12, x12, #1
+    la p_pot_b = lengde(r)
+    legg_u32(r, 0)                                   // b pot
+    la lbl_pot_ferdig = lengde(r)
+    legg_u32(r, 0xF100021F)                          // cmp x16, #0
+    legg_u32(r, 0x5400006B)                          // b.lt +3 (del)
+    legg_u32(r, 0x1E610800)                          // fmul d0, d0, d1
+    legg_u32(r, 0x14000002)                          // b +2
+    legg_u32(r, 0x1E611800)                          // fdiv d0, d0, d1
+    legg_u32(r, 0xB400004B)                          // cbz x11, +2
+    legg_u32(r, 0x1E614000)                          // fneg d0, d0
+    legg_u32(r, 0x9E660009)                          // fmov x9, d0
+    emit_ncval_alloc_ptr(r, 9, 0, 6)                 // boks desimaltall → x0
+    legg_til(ferdig_b, lengde(r))
+    legg_u32(r, 0)                                   // b ferdig
+    // lapping
+    ncd_bcond(r, p_brok, lbl_brok, 0)
+    ncd_bcond(r, p_e1, lbl_eksp, 0)
+    ncd_bcond(r, p_e2, lbl_eksp, 0)
+    ncd_bcond(r, p_brok_ut1, lbl_rekn, 10)
+    ncd_bcond(r, p_brok_ut2, lbl_brok_slutt, 11)
+    ncd_bcond(r, p_brok_ut3, lbl_brok_slutt, 12)
+    ncd_b(r, p_brok_b, lbl_brok_loop)
+    ncd_bcond(r, p_e3, lbl_eksp, 0)
+    ncd_bcond(r, p_e4, lbl_eksp, 0)
+    ncd_b(r, p_brok_rekn, lbl_rekn)
+    ncd_bcond(r, p_eksp_ut0, lbl_eksp_ferdig, 10)
+    ncd_bcond(r, p_ikkje_minus, lbl_ikkje_minus, 1)
+    ncd_b(r, p_til_loop, lbl_eksp_loop)
+    ncd_bcond(r, p_ikkje_pluss, lbl_eksp_loop, 1)
+    ncd_bcond(r, p_eksp_ut1, lbl_eksp_ferdig, 10)
+    ncd_bcond(r, p_eksp_ut2, lbl_eksp_ferdig, 11)
+    ncd_bcond(r, p_eksp_ut3, lbl_eksp_ferdig, 12)
+    ncd_b(r, p_eksp_b, lbl_eksp_loop)
+    skriv_u32(r, p_pot_ferdig, 0xB400000C | ((((lbl_pot_ferdig - p_pot_ferdig) / 4) & 0x7FFFF) << 5))  // cbz x12
+    ncd_b(r, p_pot_b, lbl_pot)
+    returner [p_heiltal, p_slutt, ferdig_b, ferdig_v]
+}
+
 funksjon emit_json_parse_routine() -> liste_heiltall {
     la r: liste_heiltall = []
     // prolog
@@ -5033,6 +5411,8 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     // --- tal (fallthrough) ---
     legg_u32(r, 0xD280000A)                          // movz x10, #0  (acc)
     legg_u32(r, 0xD280000B)                          // movz x11, #0  (neg-flagg)
+    legg_u32(r, 0xD280000D)                          // movz x13, #0  (siffer, A5)
+    legg_u32(r, 0xD2800010)                          // movz x16, #0  (tiarseksponent, A5)
     legg_u32(r, 0x39400269)                          // ldrb w9, [x19]
     legg_u32(r, 0x7100B53F)                          // cmp w9, #45 ('-')
     la p_num_notneg = lengde(r)
@@ -5054,16 +5434,28 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0x9B0C7D4A)                          // mul x10, x10, x12
     legg_u32(r, 0x5100C129)                          // sub w9, w9, #48
     legg_u32(r, 0x8B09014A)                          // add x10, x10, x9
+    legg_u32(r, 0x910005AD)                          // add x13, x13, #1
     legg_u32(r, 0x91000673)                          // add x19, x19, #1
     la p_num_loop = lengde(r)
     legg_u32(r, 0)                                   // b num_loop
     la lbl_num_done = lengde(r)
+    // A5: '.', 'e' eller 'E' etter sifra → desimaltall (som VM-en/json_les).
+    la des_hopp = ncj_emit_desimal_tal(r)            // [p_heiltal, p_slutt, ferdig_b, ferdig_v]
+    la lbl_num_heiltal = lengde(r)
+    ncd_b(r, des_hopp[0], lbl_num_heiltal)
+    ncd_bcond(r, des_hopp[1], lbl_num_heiltal, 10)
     legg_u32(r, 0xB400004B)                          // cbz x11, num_pos
     legg_u32(r, 0xCB0A03EA)                          // neg x10, x10
     la lbl_num_pos = lengde(r)
     legg_u32(r, 0xAA0A03E9)                          // mov x9, x10
-    emit_ncval_alloc(r, 9, 0, 1)                     // boks int → x0
+    emit_ncval_alloc_ptr(r, 9, 0, 1)                 // boks int (64-bit; sxtw avkorta store tal) → x0
     la p_num_bdone = lengde(r)
+    legg_u32(r, 0)                                   // b parse_done
+    // Snøggvegen for desimaltal hoppar hit med x0 = NcVal (eller 0 = fall tilbake).
+    la lbl_num_des_ferdig = lengde(r)
+    for pd i des_hopp[2] { ncd_b(r, pd, lbl_num_des_ferdig) }
+    for pv i des_hopp[3] { ncd_bcond(r, pv[0], lbl_num_des_ferdig, pv[1]) }
+    la p_num_des_bdone = lengde(r)
     legg_u32(r, 0)                                   // b parse_done
     // --- streng ---
     la lbl_str = lengde(r)
@@ -5094,13 +5486,13 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     la p_str_esc_end = lengde(r)
     legg_u32(r, 0)                                   // b.ge str_end (daudt \ på slutten)
     legg_u32(r, 0x39400269)                          // ldrb w9, [x19] (escape-teikn)
-    legg_u32(r, 0x7101BB3F)                          // cmp w9, #110 (n)
+    legg_u32(r, 0x7101B93F)                          // cmp w9, #110 (n)  (var w25: \n vart aldri gjenkjend)
     la p_esc_n = lengde(r)
     legg_u32(r, 0)                                   // b.eq set_n
     legg_u32(r, 0x7101D13F)                          // cmp w9, #116 (t)
     la p_esc_t = lengde(r)
     legg_u32(r, 0)                                   // b.eq set_t
-    legg_u32(r, 0x7101CB3F)                          // cmp w9, #114 (r)
+    legg_u32(r, 0x7101C93F)                          // cmp w9, #114 (r)  (var w25)
     la p_esc_r = lengde(r)
     legg_u32(r, 0)                                   // b.eq set_r
     legg_u32(r, 0x7101893F)                          // cmp w9, #98 (b)
@@ -5109,6 +5501,9 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0x7101993F)                          // cmp w9, #102 (f)
     la p_esc_f = lengde(r)
     legg_u32(r, 0)                                   // b.eq set_f
+    legg_u32(r, 0x7101D53F)                          // cmp w9, #117 (u)
+    la p_esc_u = lengde(r)
+    legg_u32(r, 0)                                   // b.eq set_u
     la p_esc_lit = lengde(r)
     legg_u32(r, 0)                                   // b str_store (", \, / og andre → literal w9)
     la lbl_set_n = lengde(r)
@@ -5131,6 +5526,8 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0x52800189)                          // movz w9, #12
     la p_setf = lengde(r)
     legg_u32(r, 0)                                   // b str_store
+    la lbl_set_u = lengde(r)
+    la u_hopp = ncj_emit_u_escape(r)                 // \uXXXX (+ surrogatpar) → UTF-8
     la lbl_str_close = lengde(r)
     legg_u32(r, 0x91000673)                          // add x19, x19, #1 (hopp sluttande ")
     la lbl_str_end = lengde(r)
@@ -5179,6 +5576,9 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0xAA1403E1)                          // mov x1, x20
     la p_arr_bl = lengde(r)
     legg_u32(r, 0x94000000)                          // bl self
+    la jp_feil: liste_heiltall = []
+    legg_til(jp_feil, lengde(r))
+    legg_u32(r, 0)                                   // cbz x0, beholdar_feil (A5: fall tilbake)
     legg_u32(r, 0xAA0103F3)                          // mov x19, x1
     legg_u32(r, 0xF90002C0)                          // str x0, [x22]
     legg_u32(r, 0x910022D6)                          // add x22, x22, #8
@@ -5234,6 +5634,8 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0xAA1403E1)                          // mov x1, x20
     la p_obj_bl1 = lengde(r)
     legg_u32(r, 0x94000000)                          // bl self (nøkkel)
+    legg_til(jp_feil, lengde(r))
+    legg_u32(r, 0)                                   // cbz x0, beholdar_feil
     legg_u32(r, 0xAA0103F3)                          // mov x19, x1
     legg_u32(r, 0xF90002C0)                          // str x0, [x22]
     legg_u32(r, 0x910022D6)                          // add x22, x22, #8
@@ -5250,6 +5652,8 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0xAA1403E1)                          // mov x1, x20
     la p_obj_bl2 = lengde(r)
     legg_u32(r, 0x94000000)                          // bl self (verdi)
+    legg_til(jp_feil, lengde(r))
+    legg_u32(r, 0)                                   // cbz x0, beholdar_feil
     legg_u32(r, 0xAA0103F3)                          // mov x19, x1
     legg_u32(r, 0xF90002C0)                          // str x0, [x22]
     legg_u32(r, 0x910022D6)                          // add x22, x22, #8
@@ -5286,7 +5690,16 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     legg_u32(r, 0x914103FF)                          // add sp, sp, #262144
     emit_ncval_alloc_ptr(r, 14, 0, 5)               // boks kart → x0
     // fall to parse_done
+    la p_obj_til_done = lengde(r)
+    legg_u32(r, 0)                                   // b parse_done
+    // A5: eit barn gav 0 (desimaltal utanfor snøggvegen) → gje opp denne beholdaren
+    // (frigjer ramma på 256 KiB) og returner 0 vidare opp.
+    la lbl_jp_feil = lengde(r)
+    legg_u32(r, 0x914103FF)                          // add sp, sp, #262144
+    legg_u32(r, 0xD2800000)                          // movz x0, #0
+    for pf i jp_feil { skriv_u32(r, pf, 0xB4000000 | ((((lbl_jp_feil - pf) / 4) & 0x7FFFF) << 5)) }
     la lbl_parse_done = lengde(r)
+    ncd_b(r, p_obj_til_done, lbl_parse_done)
     legg_u32(r, 0xAA1303E1)                          // mov x1, x19  (ny cur)
     legg_u32(r, 0xF9401BFE)                          // ldr x30, [sp, #48]
     legg_u32(r, 0xA94263F7)                          // ldp x23, x24, [sp, #32]
@@ -5308,6 +5721,7 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     skriv_u32(r, p_num_gt,     0x5400000C | ((((lbl_num_done - p_num_gt) / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_num_loop,   0x14000000 |  (((lbl_num_loop - p_num_loop) / 4) & 0x03FFFFFF))
     skriv_u32(r, p_num_bdone,  0x14000000 |  (((lbl_parse_done - p_num_bdone) / 4) & 0x03FFFFFF))
+    ncd_b(r, p_num_des_bdone, lbl_parse_done)
     // streng
     skriv_u32(r, p_str_end1,   0x5400000A | ((((lbl_str_end - p_str_end1) / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_str_close,  0x54000000 | ((((lbl_str_close - p_str_close) / 4) & 0x7FFFF) << 5))
@@ -5320,6 +5734,9 @@ funksjon emit_json_parse_routine() -> liste_heiltall {
     skriv_u32(r, p_esc_r,       0x54000000 | ((((lbl_set_r - p_esc_r) / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_esc_b,       0x54000000 | ((((lbl_set_b - p_esc_b) / 4) & 0x7FFFF) << 5))
     skriv_u32(r, p_esc_f,       0x54000000 | ((((lbl_set_f - p_esc_f) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_esc_u,       0x54000000 | ((((lbl_set_u - p_esc_u) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(r, u_hopp[0], lbl_str_end, 10)
+    ncd_b(r, u_hopp[1], lbl_str_loop)
     skriv_u32(r, p_esc_lit,     0x14000000 |  (((lbl_str_store - p_esc_lit) / 4) & 0x03FFFFFF))
     skriv_u32(r, p_setn,        0x14000000 |  (((lbl_str_store - p_setn) / 4) & 0x03FFFFFF))
     skriv_u32(r, p_sett,        0x14000000 |  (((lbl_str_store - p_sett) / 4) & 0x03FFFFFF))
@@ -6559,6 +6976,13 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter, ruting: boolsk)
                     hvis rmål != "" og finnes_nøkkel(funksjonar, rmål) og ikkje finnes_nøkkel(sett, rmål) {
                         sett[rmål] = 1
                         legg_til(order, rmål)
+                    }
+                    // A5: JSON-rutemåla (ncd_json_rute + json_les-fallbacken for json_parse_raw).
+                    for jmål i ncd_json_rute_mål(ins[1], funksjonar) {
+                        hvis ikkje finnes_nøkkel(sett, jmål) {
+                            sett[jmål] = 1
+                            legg_til(order, jmål)
+                        }
                     }
                 }
                 // M3: BUILD_LAMBDA-målet (lambda-funksjonen) er berre nådd via
@@ -7899,6 +8323,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_u32(native, 0xF9000320 | (env_ov << 10) | 0)   // str x0, [x25, #OV*8]  (oppdatert kart)
                     opnd_ut(native, djupn - 2, r1, memmode, home_off)   // resultat = verdi
                     djupn = djupn - 1
+                } ellers hvis ncd_json_rute(kallnamn, funksjonar) != "" og lengde(instr) == 3 og instr[2] == 1 {
+                    // A5 (som x86-AOT, native_codegen_v2): json_skriv/json_stringify går til
+                    // selfhost.json.json_skriv (kjenner desimaltall: 2.0 → "2.0", inf/NaN →
+                    // null) og json_parse til std.native_gap.json_parse (VM-paritet: lister som
+                    // ordbøker med tekstnøklar) når modulane er i bunten. json_parse_raw blir
+                    // verande native (snøggveg + json_les-fallback over).
+                    la rk_mål = ncd_json_rute(kallnamn, funksjonar)
+                    la rk_j = emit_rute_kall(native, rk_mål, 1, djupn, memmode, home_off, bl_patchar)
+                    hvis rk_j == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (json-ruting)", "overflow": "sann", "image": []} }
+                    hvis rk_j < 0 { returner {"ok": "usann", "error": "NcVal json-ruting arg-underflyt: " + kallnamn, "image": []} }
+                    djupn = rk_j
                 } ellers hvis (kallnamn == "json_stringify" eller kallnamn == "builtin.json_stringify") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_stringify krev 1 arg", "image": []} }
                     legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp
@@ -7917,6 +8352,24 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     la p_bl_jp = lengde(native)
                     legg_u32(native, 0x94000000)                    // bl __json_parse
                     legg_til(bl_patchar, [p_bl_jp, "__json_parse"])
+                    // A5: x0 = 0 → desimaltal utanfor snøggvegen i den native parseren. Fall
+                    // tilbake til rein Norscode (selfhost.json.json_les, same som vm.no sin
+                    // json_parse_raw-fallback) på heile inputen; Xtopp held framleis strengen.
+                    la p_jp_ok = lengde(native)
+                    legg_u32(native, 0)                             // cbnz x0, ok
+                    hvis finnes_nøkkel(funksjonar, "selfhost.json.json_les") {
+                        legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp
+                        la p_bl_jl = lengde(native)
+                        legg_u32(native, 0x94000000)                // bl selfhost.json.json_les
+                        legg_til(bl_patchar, [p_bl_jl, "selfhost.json.json_les"])
+                    } ellers hvis finnes_nøkkel(globals, "__exc_val__") {
+                        emit_ncval_str_const(native, "NATIV-GAP:json_parse_desimaltal", 11)
+                        legg_u32(native, 0xF9000320 | (globals["__exc_val__"] << 10) | 11)  // str x11, [x25, #EV*8]
+                        la p_td_jp = lengde(native)
+                        legg_u32(native, 0x94000000)                // bl __throw_dispatch__
+                        legg_til(bl_patchar, [p_td_jp, "__throw_dispatch__"])
+                    }
+                    skriv_u32(native, p_jp_ok, 0xB5000000 | ((((lengde(native) - p_jp_ok) / 4) & 0x7FFFF) << 5))
                     legg_u32(native, 0xAA0003E0 | r1)          // mov Xtopp, x0
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis os != "linux" og (kallnamn == "socket_new" eller kallnamn == "builtin.socket_new") og lengde(instr) == 3 og instr[2] == 2 {
