@@ -4,7 +4,11 @@
 
 bruk selfhost.native_execution.macho_arm64_emitter som macho
 bruk selfhost.ncb_serde som serde
-bruk std.runtime_filesystem som native_fs
+// Berre filsystem-ABI-en, ikkje std.runtime_filesystem: den dreg inn std.sched
+// (builtin.network_operation) og builtin.random_hex, som x86-codegen ikkje kan løyse i
+// kryss-codegen-bunten (A1, NC_BUILTIN_REPORT=1 → uløyste=0). Modulen er x86-gap-målet
+// for builtin.filesystem_write_operation (gap_ruter), so han må vere i bunten.
+bruk std.runtime_filesystem_native som fs_native
 
 funksjon opcode(instruksjon) -> tekst {
     hvis builtin.type(instruksjon) != "liste" eller lengde(instruksjon) == 0 { returner "" }
@@ -7372,6 +7376,31 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_u32(native, 0x94000000)                        // bl __throw_dispatch__
                     legg_til(bl_patchar, [p_bl_ts, "__throw_dispatch__"])
                     djupn = djupn - nargs_st + 1
+                } ellers hvis ncval_rapport_på() og lengde(instr) == 3 og instr[2] <= 8 og djupn >= instr[2] {
+                    // NC_BUILTIN_REPORT=1 (A1): i staden for å stoppe på første ustøtta kall,
+                    // bl til eit syntetisk mål «ustøtta:<namn>» med same kallkonvensjon som
+                    // RUTING-greina. Lenkinga (ncval_ukjende_kallmål) listar det saman med alle
+                    // andre ukjende kallmål, og resultatet blir aldri skrive ut. Utan flagget
+                    // (eller når alt er støtta) er greina aldri teken → output er uendra.
+                    la nargs_u = instr[2]
+                    la au = 0
+                    mens au < nargs_u {
+                        hvis memmode {
+                            legg_u32(native, 0xF9400340 | ((home_off + djupn - nargs_u + au) << 10) | au)
+                        } ellers {
+                            legg_u32(native, 0xAA0003E0 | (ncval_opreg(djupn - nargs_u + au) << 16) | au)
+                        }
+                        au = au + 1
+                    }
+                    la p_bl_u = lengde(native)
+                    legg_u32(native, 0x94000000)
+                    legg_til(bl_patchar, [p_bl_u, "ustøtta:" + ncval_avkort_builtin(kallnamn)])
+                    hvis memmode {
+                        legg_u32(native, 0xF9000340 | ((home_off + djupn - nargs_u) << 10) | 0)
+                    } ellers {
+                        legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs_u))
+                    }
+                    djupn = djupn - nargs_u + 1
                 } ellers {
                     returner {"ok": "usann", "error": "NcVal støttar ikkje kall: " + kallnamn, "image": []}
                 }
@@ -7672,6 +7701,15 @@ funksjon inline_kall(kode, funksjonar, prefiks: tekst, behald_return: boolsk, dj
     returner {"ok": "sann", "error": "", "code": ut}
 }
 
+// Heiltals-operand (BUILD_LIST/BUILD_MAP/CALL-argc) frå NCB-en: heiltal i både JSON- og
+// binær-NCB, tekst berre i handlaga NCB. Erstattar `heiltall(x)`, som ingen vert har som
+// builtin: C-æra-VM-en kastar «Ukjent innebygd funksjon: builtin.heiltall», og x86-codegen
+// gav null-fallback (kryss-codegen-bunten, A1).
+funksjon operand_heiltall(v) -> heiltall {
+    hvis builtin.type(v) == "tekst" { returner heltall_fra_tekst(v) }
+    returner v
+}
+
 // Konstante liste-/tekstoperasjonar kan foldast før den smale arm64-emitteren.
 // Det held AOT-binæren fri for ein skjult VM-runtime, men gjer vanlege
 // lengde/contains-kall på compile-time-konstantar reelle native operasjonar.
@@ -7696,7 +7734,7 @@ funksjon fold_konstant_runtime(kode) {
                 legg_til(stakk, {"type": "tal", "verdi": instr[1]})
             }
         } ellers hvis op == "BUILD_LIST" {
-            la antal = heiltall(instr[1])
+            la antal = operand_heiltall(instr[1])
             la element = []
             la kan_bevare = sann
             la j: heiltall = 0
@@ -7720,7 +7758,7 @@ funksjon fold_konstant_runtime(kode) {
                 legg_til(stakk, {"type": "liste_lengd", "verdi": antal})
             }
         } ellers hvis op == "BUILD_MAP" {
-            la antal_par = heiltall(instr[1])
+            la antal_par = operand_heiltall(instr[1])
             la element = []
             la kan_bevare = sann
             la j_map: heiltall = 0
@@ -7789,7 +7827,7 @@ funksjon fold_konstant_runtime(kode) {
                 legg_til(stakk, {"type": "ukjent", "verdi": null})
             }
         } ellers hvis op == "CALL" {
-            la nargs = heiltall(instr[2])
+            la nargs = operand_heiltall(instr[2])
             la argument = []
             la j2: heiltall = 0
             mens j2 < nargs og lengde(stakk) > 0 {
@@ -7914,6 +7952,46 @@ funksjon kompiler_ncb(ncb, output: tekst) -> ordbok_tekst {
     builtin.fil_skriv_binær(output, resultat["image"])
     resultat["output"] = output
     returner resultat
+}
+
+// Feilmelding for kallmål utan kropp i imaget: det første målet (same prefiks som før)
+// pluss ALLE ukjende mål i første-sett-rekkjefølgje, so éin køyring viser heile gapet
+// (A1: nc_main gjennom kryss-codegen → lista over atom som manglar for A2/A4/A5).
+// Berre kalla på feilvegen; ingen allokering når alle mål finst.
+funksjon ncval_ukjende_kallmål(all_patchar, fn_start) -> tekst {
+    la ukjende: liste_tekst = []
+    la sett = {}
+    la i = 0
+    mens i < lengde(all_patchar) {
+        la target = all_patchar[i][1]
+        hvis ikkje finnes_nøkkel(fn_start, target) og ikkje finnes_nøkkel(sett, target) {
+            sett[target] = sann
+            legg_til(ukjende, target)
+        }
+        i = i + 1
+    }
+    hvis lengde(ukjende) == 0 { returner "" }
+    hvis ncval_rapport_på() {
+        // Same form som x86-rapporten (native_codegen_v2 builtin_rapport_skriv).
+        skriv("arm64-codegen: BUILTIN-RAPPORT uløyste=" + tekst(lengde(ukjende)) + "\n")
+        la r = 0
+        mens r < lengde(ukjende) {
+            skriv("  UVENTA    " + tekst(ukjende[r]) + "\n")
+            r = r + 1
+        }
+    }
+    la ut = "NcVal ukjend kallmål: " + tekst(ukjende[0])
+    hvis lengde(ukjende) > 1 {
+        ut = ut + " (" + tekst(lengde(ukjende)) + " ukjende: " + builtin.join(ukjende, ", ") + ")"
+    }
+    returner ut
+}
+
+// NC_BUILTIN_REPORT=1: samle alle ustøtta/ukjende kall i staden for å stoppe på det
+// første (sjå CALL-dispatchen og ncval_ukjende_kallmål). Berre lese på feilvegane.
+funksjon ncval_rapport_på() -> boolsk {
+    prøv { returner miljo_hent("NC_BUILTIN_REPORT") == "1" } fang (e) { returner usann }
+    returner usann
 }
 
 // Fase 2: NCB → Mach-O via den fulle NcVal-stakk-VM-en. Same fold/inline-front
@@ -8192,7 +8270,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         la pos = pe[0]
         la target = pe[1]
         hvis ikkje finnes_nøkkel(fn_start, target) {
-            returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
+            returner {"ok": "usann", "error": ncval_ukjende_kallmål(all_patchar, fn_start), "image": []}
         }
         hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
             // M3 closure fn-adresse: x9 (=adr-instr på pos-4) + delta = fn-adresse.
@@ -8519,7 +8597,7 @@ funksjon ncval_link(os: tekst, entries, globals) -> ordbok_tekst {
         la pos = pe[0]
         la target = pe[1]
         hvis ikkje finnes_nøkkel(fn_start, target) {
-            returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
+            returner {"ok": "usann", "error": ncval_ukjende_kallmål(all_patchar, fn_start), "image": []}
         }
         hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
             // M3 closure fn-adresse: byte-avstand i imaget (vaddr-uavhengig), movz+movk.
@@ -8678,7 +8756,7 @@ funksjon ncval_link_flat(os: tekst, image, fn_meta, globals) -> ordbok_tekst {
         la pos = pe[0]
         la target = pe[1]
         hvis ikkje finnes_nøkkel(fn_start, target) {
-            returner {"ok": "usann", "error": "NcVal ukjend kallmål: " + target, "image": []}
+            returner {"ok": "usann", "error": ncval_ukjende_kallmål(all_patchar, fn_start), "image": []}
         }
         hvis lengde(pe) >= 3 og pe[2] == "lamaddr" {
             // M3 closure fn-adresse: movz/movk-patch (byte-delta, vaddr-uavhengig).
@@ -8699,8 +8777,48 @@ funksjon ncval_link_flat(os: tekst, image, fn_meta, globals) -> ordbok_tekst {
 
 // Dual-format NCB-lesar: rå byte → serde vel binær (magic) eller JSON. Delt av
 // alle codegen-endepunkta (elf_arm64_codegen kallar denne via `arm64`).
+// Tekstvegen først (som serde.les_fil): fil_les er byte-eksakt og billeg, medan
+// byteliste-vegen er ~100× dyrare og i x86-AOT (kryss-codegen, A1) gav eit objekt utan
+// entry for den 3,2 MB store nc_main-NCB-en («NCB manglar gyldig entry» etter 0,5 s).
+// Byteliste-vegen står att for binær NCB på vertar utan NUL-trygge strengar (C-æra).
 funksjon les_ncb_fil(sti: tekst) {
+    la t = ""
+    prøv { t = builtin.fil_les(sti) } fang (e) { t = "" }
+    hvis lengde(t) >= 5 {
+        hvis ikkje serde.er_binaer_tekst(t) { returner builtin.json_parse_raw(t) }
+        hvis serde.binaer_stotta() { returner serde.deserialiser_tekst(t) }
+    }
     returner serde.deserialiser(builtin.fil_les_binary(sti))
+}
+
+// Filmodus 0755 på utdata. Same førespurnad som
+// std.runtime_filesystem.native_sett_modus_sti(sti, 493), inkludert Darwin-aliaset
+// /tmp → /private/tmp, men utan den modulen (sjå importen øvst). Delt av begge
+// codegen-endepunkta (elf_arm64_codegen kallar denne via `arm64`).
+funksjon sett_utdata_kjorbar(sti: tekst) -> ordbok_tekst {
+    hvis sti == "" { returner {"status": "feil", "error": "tom sti", "value": "-1"} }
+    la root = "."
+    la relativ = sti
+    hvis builtin.starts_with(sti, "/") {
+        root = "/"
+        relativ = builtin.slice(sti, 1, lengde(sti))
+        prøv {
+            hvis tekst(builtin.system_info()["system"]) == "Darwin" og builtin.starts_with(sti, "/tmp/") {
+                root = "/private/tmp"
+                relativ = builtin.slice(sti, 5, lengde(sti))
+            }
+        } fang (e) {}
+    } ellers hvis lengde(sti) >= 3 og builtin.slice(sti, 1, 2) == ":" {
+        root = builtin.slice(sti, 0, 3)
+        relativ = builtin.slice(sti, 3, lengde(sti))
+    }
+    returner builtin.filesystem_write_operation({
+        "abi": "norscode-native-filesystem-v1",
+        "operation": "chmod",
+        "root": root,
+        "relative": relativ,
+        "mode": "493"
+    })
 }
 
 funksjon start() -> heiltall {
@@ -8715,8 +8833,16 @@ funksjon start() -> heiltall {
     // NcVal, strengar, lister, kart). Den runtime-lause registermaskina
     // (kompiler_ncb) blir berre halden for test_macho_arm64_codegen.
     la resultat = kompiler_ncb_ncval(ncb, output, "macos")
-    hvis resultat["ok"] != "sann" { kast resultat["error"] }
-    la mode = native_fs.native_sett_modus_sti(output, 493)
+    hvis resultat["ok"] != "sann" {
+        // NC_BUILTIN_REPORT=1: rapporten er skriven (ncval_ukjende_kallmål); exit 3 som x86.
+        hvis ncval_rapport_på() {
+            skriv("macho_arm64_codegen: FEIL " + tekst(resultat["error"]) + "\n")
+            returner 3
+        }
+        kast resultat["error"]
+    }
+    hvis ncval_rapport_på() { skriv("arm64-codegen: BUILTIN-RAPPORT uløyste=0\n") }
+    la mode = sett_utdata_kjorbar(output)
     hvis mode["status"] != "ok" {
         skriv("macho_arm64_codegen: filmodus-ABI er ikkje tilgjengeleg i denne stage0-generasjonen\n")
     }
