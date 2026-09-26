@@ -88,8 +88,15 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   `macho_arm64_codegen.no`, bygde med `nc run tools/build_cross_codegen.no` (0 uløyste
   builtins). Output er byte-identisk med tolka codegen (`tests/test_arm64_kryss_codegen.no`).
   Heile nc_main-NCB-en blir emittert av linux-arm64-codegen på om lag 1 s; han stoppar på
-  kall utan ARM64-emitter, og `NC_BUILTIN_REPORT=1` listar alle (A2/A5). Endrar du
-  ARM64-codegen, køyr verktøyet på nytt (`test_native_codegen_srchash` krev ferske binærar).
+  kall utan ARM64-emitter. `NC_BUILTIN_REPORT=1` listar heile gapet i éi køyring (A2/A5):
+  `UVENTA` (ustøtta kall, uansett argumenttal), `UKJEND`, `STOPPA` (funksjonar som ikkje
+  kompilerte; resten held fram) og `STUBBA` (NATIV-GAP-stubbar som kastar ved køyring; tel
+  ikkje som uløyste). For nc_main: 8 uløyste og 26 (linux) / 27 (macOS) stubba. Kvar
+  kryss-binær har i tillegg `.vertcg` med identiteten til vert-codegen-en (sti, sha256,
+  `.srchash`, `.depshash`) og sha256 til seg sjølv: ein ombygd
+  `bootstrap/native_codegen_x86_64.elf` eller ein utbytt kryss-binær gjer han stale. Endrar du
+  ARM64-codegen eller vert-codegen-en, køyr verktøyet på nytt (`test_native_codegen_srchash`
+  krev ferske binærar og at `.vertcg`-sha-en er allowlist-pinnen).
 - `platform_readiness_v3600` er køyrd med `NORSCODE_VERIFY_LINUX_DOCKER=1`:
   `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`
   og `production_ready_unix=true` etter runtime-gap-attestasjon i Docker.
