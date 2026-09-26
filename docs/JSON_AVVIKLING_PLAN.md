@@ -1,5 +1,13 @@
 # JSON-avvikling — plan for å fjerne dei 319 committede `.ncb.json`
 
+> **Status 2026-09-25 (PR #200):** J0, J1a, J1b, J1d og J2 er landa. Av dei 319 filene står
+> berre 7 `.ncb.json` att: `bootstrap/precompiled/vm.ncb.json`, `selfhost/vm_executor.ncb.json`,
+> `bootstrap/kompiler.ncb.json`, `build/v9400/hybrid_compiler_bundle_v9400.ncb.json`,
+> `selfhost/native_execution/native_codegen_v2.ncb.json` og `tests/test_{db,web_routes}.ncb.json`.
+> Stdlib-cachen og fragmenta er ute, og fikspunktet går Gen2 == Gen3 utan committa fragment.
+> `archive/`-C-en, `tools/maint/*` og `generate_build_embed_c` er sletta (F0.2–F0.3). Tabellane og
+> fasane under er historiske; gjeldande plan står i `PLAN_SEED_PROMOTERING.md` og F1/J3–J6.
+
 > Mål: **null committa JSON-bytekode i repoet.** Trust-anchor skal vere dei native
 > seed-binærane åleine (`bootstrap/stage0/norscode-<plattform>`). All bytekode
 > (kompilator, stdlib, app-bundlar) blir regenerert *natively* frå `.no`-kjelde —
@@ -66,7 +74,7 @@ ETTER: .no kjelde ──native seed (kompiler + stdlib EMBEDDA i binæren)──
   `native_metal_gpu_gate.no`, `windows_runtime_cross_compile_gate.no` kompilerer
   `build/v3009/native_candidate_gc.c` med `-Iarchive/legacy_c_backend`.
 - `build/v3009/*.c` er allowlista i `verify_norscode_surface_ownership.no` og
-  embedda av `tools/maint/refresh_embedded_runtime.no`.
+  var embedda av `tools/maint/refresh_embedded_runtime.no` (sletta i F0.3).
 - `startproject_templates/**payloads` er asserta av `release_preflight.no`.
 
 Desse forsvinn difor **saman med milestone B** (når native codegen fullt erstattar

@@ -1,0 +1,499 @@
+// tools/materialize_runtime_payloads.no — generer runtime-payloadane frå kjelde (J1c, PLAN F1.1).
+//
+// Dei to NCB-payloadane var tidlegare committa. No blir dei genererte her og er gitignorerte:
+//   vm           selfhost/vm.no          → bootstrap/precompiled/vm.ncb.json
+//   vm-executor  selfhost/vm_executor.no → selfhost/vm_executor.ncb.json
+// Stiane er dei same som før fordi dei er baka inn i seedane (selfhost/vm_executor.no les
+// vm-stien når NORSCODE_VM_NCB manglar, og Windows-exe-en sin vm-executor-payload har han
+// som streng). Seedane kan ikkje endrast før neste reseed.
+//
+// Steg per payload (same som den manuelle regen-oppskrifta):
+//   1. `compile <kjelde> <ut>` med den aktive runtimen, som JSON-NCB (NORSCODE_NCB_BINARY=0):
+//      C-æra-vertane (macOS/Windows-stage0) les berre JSON.
+//   2. tools/ncb_normalize_builtin_aliases_v802.no på <ut> (stabile builtin-aliasar).
+//   3. Kontroll: JSON-objekt med entry og functions, og kvar INDEX_SET står i paret
+//      [INDEX_SET],[POP]. Den frosne macOS-C-æra-verten krev stakkbalansen.
+//   4. <ut>.srchash: kjeldehash (første linje) + sha256 av <ut>.
+//
+// Kjeldehashen er sha256 over import-lukkinga av kjelda (alle `bruk`-modular, transitivt),
+// normaliseringsverktøyet og dette verktøyet. `bruk`-linjene blir lesne med same førebehandling
+// og oppslag som kompilatoren (selfhost/nc_main.no: finn_bruk_imports, _modul_filsti_fra_namn,
+// _resolve_import_sti), og ein import som ikkje kan løysast er ein HARD feil: kompilatoren ville
+// feile på han, og ei stille utelating ville la ein stale payload sjå oppdatert ut. Ein payload
+// blir hoppa over når <ut> finst, er gyldig, og markøren stemmer både mot kjeldene og mot <ut>.
+//
+// Bruk:  ./bin/nc run tools/materialize_runtime_payloads.no
+//   NORSCODE_PAYLOADS=vm,vm-executor   kva payloadar (standard: begge)
+//   NORSCODE_PAYLOADS_FORCE=1          generer sjølv om markøren stemmer
+//   NORSCODE_PAYLOADS_CHECK=1          berre kontroller (exit 1 om nokon manglar eller er utdatert)
+//   NC_NATIVE / NORSCODE_NATIVE_BIN    runtimen som kompilerer (standard dist/norscode_native)
+//
+// Forbrukarane (testløparen, pakke- og kandidatverktøy) brukar sikre_finst/sikre_alle: dei
+// genererer når <ut> manglar, er ugyldig eller er utdatert mot kjeldene (markøren finst, men
+// kjeldehashen stemmer ikkje). NORSCODE_PAYLOADS_TRUST=1 hoppar over kjeldehash-kontrollen og
+// sjekkar berre gyldigheit; set han BERRE i CI-jobbar som nett har lasta ned artefaktet frå
+// jobben runtime-payloads i same køyring (C-æra-vertane på macOS/Windows: treg kjeldehashing, og
+// ei re-generering der ville gje ein ikkje-kanonisk payload).
+
+bruk std.filops som filops
+bruk std.sha256 som sha256
+bruk tools.process_runner som prosess
+
+funksjon miljø_verdi(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    hvis builtin.starts_with(sti, "./") { returner root + "/" + builtin.slice(sti, 2, lengde(sti)) }
+    returner root + "/" + sti
+}
+
+funksjon finn_native(root: tekst) -> tekst {
+    la frå_env = miljø_verdi("NC_NATIVE")
+    hvis frå_env == "" { frå_env = miljø_verdi("NORSCODE_NATIVE_BIN") }
+    hvis frå_env != "" { returner absolutt(root, frå_env) }
+    hvis builtin.fil_finnes(root + "/dist/norscode_native") { returner root + "/dist/norscode_native" }
+    returner root + "/bin/nc"
+}
+
+// SHA-256 over tekst: den innebygde (rask på alle seedar) med std.sha256 som reserve.
+funksjon hash_tekst(data: tekst) -> tekst {
+    prøv { returner builtin.sha256(data) }
+    fang (e) { returner sha256.hash(data) }
+    returner sha256.hash(data)
+}
+
+// SHA-256 over bytane i ei fil. sha256_bytes(fil_les_binær) er native på den ferske Linux-seeden
+// (målt 2026-09-25: 4 ms for selfhost/vm.no mot 415 ms for builtin.sha256 over teksten, same
+// hash); for UTF-8-kjelder og JSON-payloadar er verdien den same som hash_tekst(fil_les(sti)).
+// Reserve: hash_tekst over teksten. Ei fil som ikkje kan lesast gjev hashen av "".
+funksjon hash_fil(sti: tekst) -> tekst {
+    // Sjekk eksplisitt: på den frosne macOS-C-æra-verten er «Kan ikkje opne fil» frå
+    // fil_les IKKJE fangbar med prøv/fang, så ei manglande fil ville drepe prosessen.
+    la finst = usann
+    prøv { finst = fil_finnes(sti) } fang (e) { finst = usann }
+    hvis ikkje finst { returner "manglar" }
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) {}
+    la innhald = ""
+    prøv { innhald = fil_les(sti) } fang (e) { innhald = "" }
+    returner hash_tekst(innhald)
+}
+
+funksjon alle_namn() -> liste_tekst {
+    returner ["vm", "vm-executor"]
+}
+
+funksjon kjelde_rel(namn: tekst) -> tekst {
+    hvis namn == "vm" { returner "selfhost/vm.no" }
+    hvis namn == "vm-executor" { returner "selfhost/vm_executor.no" }
+    returner ""
+}
+
+funksjon ut_rel(namn: tekst) -> tekst {
+    hvis namn == "vm" { returner "bootstrap/precompiled/vm.ncb.json" }
+    hvis namn == "vm-executor" { returner "selfhost/vm_executor.ncb.json" }
+    returner ""
+}
+
+funksjon ut_sti(root: tekst, namn: tekst) -> tekst {
+    returner root + "/" + ut_rel(namn)
+}
+
+funksjon markør_sti(root: tekst, namn: tekst) -> tekst {
+    returner ut_sti(root, namn) + ".srchash"
+}
+
+funksjon tel_tekst(src: tekst, needle: tekst) -> heiltall {
+    hvis needle == "" { returner 0 }
+    returner lengde(builtin.split(src, needle)) - 1
+}
+
+// Modulstien i ein `bruk`/`importer`-linje (t.d. "std.sha256"), eller "" når linja ikkje er ein
+// import. Same førebehandling i same rekkjefølgje som kompilatoren (nc_main.no finn_bruk_imports):
+// kutt ved fyrste «//», så ved fyrste «#» (etterfølgjande kommentar), fjern avsluttande «;», og
+// ta bort « som <alias>». Utan kommentarkuttet ville «bruk std.x // …» ha falle ut av lukkinga
+// medan kompilatoren framleis bundlar std/x.no.
+funksjon import_modul(linje: tekst) -> tekst {
+    la rest = ""
+    hvis builtin.starts_with(linje, "bruk ") {
+        rest = builtin.trim(builtin.slice(linje, 5, lengde(linje)))
+    } ellers hvis builtin.starts_with(linje, "importer ") {
+        rest = builtin.trim(builtin.slice(linje, 9, lengde(linje)))
+    } ellers {
+        returner ""
+    }
+    la kom_idx = builtin.index_of(rest, "//")
+    hvis kom_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, kom_idx)) }
+    la hash_idx = builtin.index_of(rest, "#")
+    hvis hash_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, hash_idx)) }
+    hvis builtin.ends_with(rest, ";") { rest = builtin.trim(builtin.slice(rest, 0, lengde(rest) - 1)) }
+    la som_idx = builtin.index_of(rest, " som ")
+    hvis som_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, som_idx)) }
+    returner rest
+}
+
+funksjon finst_rel(root: tekst, rel: tekst) -> boolsk {
+    prøv { returner builtin.fil_finnes(root + "/" + rel) } fang (e) { returner usann }
+    returner usann
+}
+
+// Kompilatoren løyser desse prefiksa alltid mot repo-rota (nc_main.no _resolve_import_sti).
+funksjon har_rotprefiks(fil: tekst) -> boolsk {
+    la prefiks: liste_tekst = ["std/", "selfhost/", "bootstrap/", "tools/", "tests/", "examples/",
+                               "compiler/", "packages/", "toolchain/", "prosjekter/"]
+    la i: heiltall = 0
+    mens i < lengde(prefiks) {
+        hvis builtin.starts_with(fil, prefiks[i]) { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon katalog_rel(sti: tekst) -> tekst {
+    la delar = builtin.split(sti, "/")
+    hvis lengde(delar) <= 1 { returner "" }
+    la ut = delar[0]
+    la i: heiltall = 1
+    mens i < lengde(delar) - 1 {
+        ut = ut + "/" + delar[i]
+        i = i + 1
+    }
+    returner ut
+}
+
+// Repo-relativ fil for `modul` importert frå `importør_rel`, eller "" når ho ikkje finst.
+// Oppslaget følgjer kompilatoren (_modul_filsti_fra_namn + _resolve_import_sti): filendinga blir
+// vald ved repo-rota; kjende prefiks (std/, selfhost/, tools/, …) blir løyste mot rota, andre
+// ved sida av importøren fyrst og så mot rota. Unntak: .no før .nors, fordi den frosne macOS-
+// C-æra-seeden svarar ja på fil_finnes for eit ikkje-eksisterande «.nors»-alias (då ville namna
+// og kjeldehashen skilje seg frå Linux). Berre packages/norsdb/norsdb og norsdb_smoke finst i
+// begge variantane (2026-09-25), og ingen av dei ligg i lukkinga til vm eller vm-executor.
+funksjon løys_modul(root: tekst, importør_rel: tekst, modul: tekst) -> tekst {
+    hvis modul == "" { returner "" }
+    la basis = builtin.replace(modul, ".", "/")
+    la fil = basis + ".nors"
+    hvis finst_rel(root, basis + ".no") { fil = basis + ".no" }
+    hvis har_rotprefiks(fil) {
+        hvis finst_rel(root, fil) { returner fil }
+        returner ""
+    }
+    la dir = katalog_rel(importør_rel)
+    hvis dir != "" og finst_rel(root, dir + "/" + fil) { returner dir + "/" + fil }
+    hvis finst_rel(root, fil) { returner fil }
+    returner ""
+}
+
+// Bakoverkompatibel inngang: modulfila til ei `bruk`-linje i ei fil på repo-rota, eller "".
+funksjon import_fil(root: tekst, linje: tekst) -> tekst {
+    returner løys_modul(root, "", import_modul(linje))
+}
+
+// Import-lukkinga av kjelda: {"filer": repo-relative stiar i besøksrekkjefølgje,
+// "uløyste": ["<importør>: <linje>", …]} for `bruk`-linjer som ikkje kunne løysast.
+funksjon import_lukking(root: tekst, start_rel: tekst) {
+    la kø: liste_tekst = [start_rel]
+    la besøkt = {}
+    la ut: liste_tekst = []
+    la uløyste: liste_tekst = []
+    la indeks: heiltall = 0
+    mens indeks < lengde(kø) {
+        la sti = kø[indeks]
+        indeks = indeks + 1
+        hvis finnes_nøkkel(besøkt, sti) { fortsett }
+        besøkt[sti] = sann
+        legg_til(ut, sti)
+        la kjelde = ""
+        prøv { kjelde = fil_les(root + "/" + sti) } fang (e) { kjelde = "" }
+        la linjer = builtin.split(kjelde, "\n")
+        la i: heiltall = 0
+        mens i < lengde(linjer) {
+            la linje = builtin.trim(linjer[i])
+            la modul = import_modul(linje)
+            hvis modul != "" {
+                la dep = løys_modul(root, sti, modul)
+                hvis dep == "" {
+                    legg_til(uløyste, sti + ": " + linje)
+                } ellers hvis ikkje finnes_nøkkel(besøkt, dep) {
+                    legg_til(kø, dep)
+                }
+            } ellers hvis builtin.starts_with(linje, "bruk ") eller builtin.starts_with(linje, "importer ") {
+                legg_til(uløyste, sti + ": " + linje)
+            }
+            i = i + 1
+        }
+    }
+    returner {"filer": ut, "uløyste": uløyste}
+}
+
+// Kjeldehashen, eller "" når import-lukkinga har uløyste `bruk`-linjer (dei blir skrivne ut).
+// Kallarane skal handsame "" som ein hard feil.
+funksjon kjeldehash(root: tekst, namn: tekst) -> tekst {
+    la lukking = import_lukking(root, kjelde_rel(namn))
+    la uløyste: liste_tekst = lukking["uløyste"]
+    hvis lengde(uløyste) > 0 {
+        skriv("[FEIL] " + namn + ": " + tekst_fra_heltall(lengde(uløyste)) +
+              " uløyst(e) import(ar) i kjeldelukkinga til " + kjelde_rel(namn) +
+              " (kompilatoren ville feile eller bundle ein modul kjeldehashen ikkje ser):\n")
+        la u: heiltall = 0
+        mens u < lengde(uløyste) {
+            skriv("  " + uløyste[u] + "\n")
+            u = u + 1
+        }
+        returner ""
+    }
+    la filer: liste_tekst = lukking["filer"]
+    legg_til(filer, "tools/ncb_normalize_builtin_aliases_v802.no")
+    legg_til(filer, "tools/materialize_runtime_payloads.no")
+    la manifest = "norscode-runtime-payload-v1|" + namn + "|" + ut_rel(namn) + "\n"
+    la i: heiltall = 0
+    mens i < lengde(filer) {
+        manifest = manifest + filer[i] + ":" + hash_fil(root + "/" + filer[i]) + "\n"
+        i = i + 1
+    }
+    returner hash_tekst(manifest)
+}
+
+// "" = gyldig payload; elles grunnen til at han ikkje er det.
+funksjon payload_feil(data: tekst) -> tekst {
+    la n = lengde(data)
+    hvis n < 64 { returner "for kort (" + tekst_fra_heltall(n) + " teikn)" }
+    la tt = builtin.trim(data)
+    hvis builtin.slice(tt, 0, 1) != "{" { returner "ikkje eit JSON-objekt" }
+    hvis builtin.slice(tt, lengde(tt) - 1, lengde(tt)) != "}" { returner "avkorta JSON (manglar avsluttande })" }
+    hvis builtin.index_of(data, "\"entry\":") < 0 { returner "manglar entry" }
+    hvis builtin.index_of(data, "\"functions\":") < 0 { returner "manglar functions" }
+    la is_tal = tel_tekst(data, "[\"INDEX_SET\"]")
+    la par_tal = tel_tekst(data, "[\"INDEX_SET\"],[\"POP\"]")
+    hvis is_tal == 0 { returner "ingen INDEX_SET (uventa for VM-kjelda)" }
+    hvis is_tal != par_tal {
+        returner "stakkubalanse: " + tekst_fra_heltall(is_tal) + " INDEX_SET, men " +
+            tekst_fra_heltall(par_tal) + " [INDEX_SET],[POP]-par"
+    }
+    returner ""
+}
+
+funksjon les_eller_tom(sti: tekst) -> tekst {
+    prøv {
+        hvis builtin.fil_finnes(sti) { returner fil_les(sti) }
+    } fang (e) { returner "" }
+    returner ""
+}
+
+// Markøren: kjeldehash, sha256 av <ut> (hash_fil) og runtimen som genererte.
+funksjon markør_tekst(kjelde: tekst, ut_sha: tekst, native: tekst) -> tekst {
+    returner kjelde + "\n" + "sha256=" + ut_sha + "\n" + "runtime=" + native + "\n"
+}
+
+// Gyldig og oppdatert: <ut> finst og er gyldig, markøren sin kjeldehash er `kjelde`,
+// og markøren sin sha256 er hashen av <ut> slik fila ligg no.
+funksjon er_oppdatert(root: tekst, namn: tekst, kjelde: tekst) -> boolsk {
+    la data = les_eller_tom(ut_sti(root, namn))
+    hvis data == "" eller payload_feil(data) != "" { returner usann }
+    la linjer = builtin.split(les_eller_tom(markør_sti(root, namn)), "\n")
+    hvis lengde(linjer) < 2 { returner usann }
+    hvis builtin.trim(linjer[0]) != kjelde { returner usann }
+    returner builtin.trim(linjer[1]) == "sha256=" + hash_fil(ut_sti(root, namn))
+}
+
+// Eksplisitt barnemiljø. Alle kommandoval er sette (òg til tom verdi), så arva
+// NORSCODE_CMD/NORSCODE_RUN_*/NORSCODE_MODULE frå ein CI-orkestrator eller testløparen
+// ikkje kan styre barnet.
+funksjon barnemiljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "TMPDIR": "/tmp",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_MODULE": "",
+        "NORSCODE_IMPORT_BASE": "",
+        "NORSCODE_RUN_CMD": "",
+        "NORSCODE_RUN_FILE": "",
+        "NORSCODE_RUN_DIRECT_HOST": "0",
+        "NORSCODE_HOST_NCB_FILE": "",
+        "NORSCODE_NCB_FILE": "",
+        "NORSCODE_VM_SOURCE": "0",
+        "NORSCODE_NCB_BINARY": "0",
+        "NORSCODE_NCB_LEGACY_HOST": "",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "",
+        "NORSCODE_VM_FAST": "1",
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon køyr_barn(native: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst,
+                   timeout_ms: heiltall, kva: tekst) -> boolsk {
+    la res = prosess.køyr_liste(native, argv, root, miljø, timeout_ms)
+    hvis tekst(res[0]) != "0" {
+        skriv("[FEIL] " + kva + " feila (exit " + tekst(res[0]) + ")\n")
+        skriv(tekst(res[1]) + "\n" + tekst(res[2]) + "\n")
+        returner usann
+    }
+    returner sann
+}
+
+// Kompiler, normaliser og kontroller éin payload. Ved feil blir både <ut> og markøren
+// fjerna, så ein halvskriven payload aldri ser gyldig ut.
+funksjon generer(root: tekst, native: tekst, namn: tekst, kjelde: tekst) -> boolsk {
+    la ut = ut_sti(root, namn)
+    la markør = markør_sti(root, namn)
+    hvis kjelde == "" {
+        // Utan kjeldehash (uløyst import) ville markøren aldri kunne stemme; generer ikkje.
+        skriv("[FEIL] " + namn + ": ingen kjeldehash (sjå over); genererer ikkje\n")
+        returner usann
+    }
+    hvis ikkje filops.lag_katalogar(filops.katalog(ut)) {
+        skriv("[FEIL] kunne ikkje lage katalogen til " + ut + "\n")
+        returner usann
+    }
+    filops.slett_fil(markør)
+    filops.slett_fil(ut)
+    la start_ms = builtin.tid_ms()
+    skriv("[payload] " + namn + ": kompilerer " + kjelde_rel(namn) + " → " + ut_rel(namn) + "\n")
+    hvis ikkje køyr_barn(native, ["compile", kjelde_rel(namn), ut], root, barnemiljø(root), 2400000,
+                        "compile " + kjelde_rel(namn)) {
+        filops.slett_fil(ut)
+        returner usann
+    }
+    la før = les_eller_tom(ut)
+    la is_før = tel_tekst(før, "[\"INDEX_SET\"],[\"POP\"]")
+    la norm = barnemiljø(root)
+    norm["NORSCODE_NCB_NORMALIZE_IN"] = ut
+    norm["NORSCODE_NCB_NORMALIZE_OUT"] = ut
+    hvis ikkje køyr_barn(native, ["run", "tools/ncb_normalize_builtin_aliases_v802.no"], root, norm, 900000,
+                        "normalisering av " + ut_rel(namn)) {
+        filops.slett_fil(ut)
+        returner usann
+    }
+    la data = les_eller_tom(ut)
+    la feil = payload_feil(data)
+    hvis feil == "" og tel_tekst(data, "[\"INDEX_SET\"],[\"POP\"]") != is_før {
+        feil = "normaliseringa endra INDEX_SET/POP-talet (" + tekst_fra_heltall(is_før) + " → " +
+            tekst_fra_heltall(tel_tekst(data, "[\"INDEX_SET\"],[\"POP\"]")) + ")"
+    }
+    hvis feil != "" {
+        skriv("[FEIL] " + ut_rel(namn) + ": " + feil + "\n")
+        filops.slett_fil(ut)
+        returner usann
+    }
+    la ut_sha = hash_fil(ut)
+    fil_skriv(markør, markør_tekst(kjelde, ut_sha, native))
+    skriv("[payload] " + namn + ": OK " + tekst_fra_heltall(lengde(data)) + " teikn, INDEX_SET/POP=" +
+          tekst_fra_heltall(is_før) + ", sha256=" + ut_sha + ", " +
+          tekst_fra_heltall(builtin.tid_ms() - start_ms) + " ms\n")
+    returner sann
+}
+
+// Full kontroll + generering ved behov. Returnerer sann når payloaden er gyldig etterpå.
+funksjon materialiser(root: tekst, native: tekst, namn: tekst, force: boolsk) -> boolsk {
+    hvis kjelde_rel(namn) == "" {
+        skriv("[FEIL] ukjend payload: " + namn + "\n")
+        returner usann
+    }
+    la kjelde = kjeldehash(root, namn)
+    hvis kjelde == "" { returner usann }
+    hvis ikkje force og er_oppdatert(root, namn, kjelde) {
+        skriv("[payload] " + namn + ": oppdatert (kjeldehash " + builtin.slice(kjelde, 0, 16) + "), hoppar over\n")
+        returner sann
+    }
+    returner generer(root, native, namn, kjelde)
+}
+
+funksjon stol_på_nedlasta() -> boolsk {
+    returner miljø_verdi("NORSCODE_PAYLOADS_TRUST") == "1"
+}
+
+// Forbrukarvurdering av <ut>: [status, grunn, kjeldehash] der status er
+//   "ok"      — kan brukast som han er;
+//   "generer" — manglar, er ugyldig, eller er utdatert mot kjeldene (markøren <ut>.srchash
+//               finst, men kjeldehashen eller sha256-en av <ut> stemmer ikkje);
+//   "feil"    — kjeldehashen kan ikkje reknast ut (uløyst import; sjå kjeldehash).
+// Utan markør blir berre gyldigheit sjekka (ein payload lagd utanfor verktøyet). Med `stol`
+// (NORSCODE_PAYLOADS_TRUST=1) blir kjeldehashen ikkje rekna ut i det heile.
+funksjon sikre_vurdering(root: tekst, namn: tekst, stol: boolsk) -> liste_tekst {
+    la data = les_eller_tom(ut_sti(root, namn))
+    hvis data == "" { returner ["generer", "manglar", ""] }
+    la gyldig = payload_feil(data)
+    hvis gyldig != "" { returner ["generer", "er ugyldig (" + gyldig + ")", ""] }
+    hvis stol { returner ["ok", "NORSCODE_PAYLOADS_TRUST=1", ""] }
+    hvis ikkje builtin.fil_finnes(markør_sti(root, namn)) { returner ["ok", "ingen .srchash-markør", ""] }
+    la kjelde = kjeldehash(root, namn)
+    hvis kjelde == "" { returner ["feil", "uløyst import i kjeldelukkinga", ""] }
+    hvis er_oppdatert(root, namn, kjelde) { returner ["ok", "oppdatert", kjelde] }
+    returner ["generer", "er utdatert mot kjeldene (.srchash stemmer ikkje)", kjelde]
+}
+
+// For forbrukarar (testløparen, pakke- og kandidatverktøy): generer når <ut> manglar, er
+// ugyldig eller er utdatert mot kjeldene, slik at ei lokal kjeldeendring aldri blir køyrd,
+// testa eller pakka mot ein gammal payload. Sjå sikre_vurdering og NORSCODE_PAYLOADS_TRUST.
+funksjon sikre_finst(root: tekst, native: tekst, namn: tekst) -> boolsk {
+    la v = sikre_vurdering(root, namn, stol_på_nedlasta())
+    hvis v[0] == "ok" { returner sann }
+    hvis v[0] == "feil" {
+        skriv("[FEIL] " + ut_rel(namn) + ": " + v[1] + "\n")
+        returner usann
+    }
+    skriv("[payload] " + ut_rel(namn) + " " + v[1] + "; genererer frå kjelde\n")
+    la kjelde = v[2]
+    hvis kjelde == "" { kjelde = kjeldehash(root, namn) }
+    hvis kjelde == "" { returner usann }
+    returner generer(root, native, namn, kjelde)
+}
+
+funksjon sikre_alle(root: tekst, native: tekst) -> boolsk {
+    la namn = alle_namn()
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        hvis ikkje sikre_finst(root, native, namn[i]) { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon valde_namn() -> liste_tekst {
+    la spes = builtin.trim(miljø_verdi("NORSCODE_PAYLOADS"))
+    hvis spes == "" { returner alle_namn() }
+    la ut: liste_tekst = []
+    la delar = builtin.split(spes, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        hvis d != "" { legg_til(ut, d) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la root = miljø_verdi("NORSCODE_ROOT")
+    hvis root == "" {
+        prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." }
+    }
+    la native = finn_native(root)
+    la namn = valde_namn()
+    la berre_sjekk = miljø_verdi("NORSCODE_PAYLOADS_CHECK") == "1"
+    la force = miljø_verdi("NORSCODE_PAYLOADS_FORCE") == "1"
+    la feil: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        hvis kjelde_rel(namn[i]) == "" {
+            skriv("[FEIL] ukjend payload: " + namn[i] + " (kjende: vm, vm-executor)\n")
+            feil = feil + 1
+        } ellers hvis berre_sjekk {
+            la kjelde = kjeldehash(root, namn[i])
+            hvis kjelde != "" og er_oppdatert(root, namn[i], kjelde) {
+                skriv("[OK] " + ut_rel(namn[i]) + " er oppdatert\n")
+            } ellers {
+                skriv("[FEIL] " + ut_rel(namn[i]) + " manglar, er ugyldig, er utdatert mot kjeldene eller har uløyste importar\n")
+                feil = feil + 1
+            }
+        } ellers hvis ikkje materialiser(root, native, namn[i], force) {
+            feil = feil + 1
+        }
+        i = i + 1
+    }
+    hvis feil > 0 { returner 1 }
+    hvis ikkje berre_sjekk { skriv("[OK] runtime-payloadane er genererte frå kjelde\n") }
+    returner 0
+}

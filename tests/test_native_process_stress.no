@@ -1,0 +1,127 @@
+// tests/test_native_process_stress.no — port for F3.2 (S2): ALL spawn går via Norscode-motoren
+// i std/native_gap.no (_pg_spawn) etter at den rå spawn-rutina i codegen er sletta.
+// Dekkjer dei fire hola som måtte tettast før byte-paritet med rå-rutina:
+//   1. stdin 1 MiB + stdout 1 MiB samstundes (vranglås over 64 KiB om stdin blir skriven
+//      blokkerande før lesinga), og asynkron 1 MiB med mottrykk (buffer 64 KiB)
+//   2. output-grense → status "feil", error "output limit", barnet drepe
+//   3. peak_rss_bytes > 0 (rusage frå wait4; på Linux inkluderer verdien RSS-en forelderen
+//      hadde ved fork, so han kan ikkje skilje barnet sitt eige minne ut — sjå std/native_gap.no)
+//   4. timeout → status "timeout", exit 124 (ventinga er ppoll, ikkje sleep)
+// + EPIPE: barnet lukkar stdin tidleg (head -c) → forelderen overlever (SIGPIPE halden unna).
+// + feilformer for synkron spawn (paritet med den tidlegare rå-rutina): tom executable →
+//   ferdig/127; feil før barnet startar → feil/127/«process spawn failed», ingen handle.
+// tests/fixtures/aot_prosess_stress.no byggjer same test AOT (CI-dekning før seed-promotering).
+// Berre Linux: dei frosne C-æra-vertane (macOS/Windows) har eigen spawn-kode.
+bruk std.runtime.process_abi som abi
+
+funksjon er_linux() -> boolsk {
+    prøv { returner tekst(builtin.system_info()["system"]) == "Linux" } fang (e) { returner usann }
+    returner usann
+}
+
+// 1 MiB: 64-byte ASCII-blokk (med linjeskift) dobla til 1 048 576 byte.
+funksjon mib_tekst() -> tekst {
+    la s = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ-\n"
+    assert_eq(lengde(s), 64)
+    mens lengde(s) < 1048576 { s = s + s }
+    assert_eq(lengde(s), 1048576)
+    returner s
+}
+
+funksjon spawn(exe: tekst, args: liste_tekst, stdin: tekst, timeout_ms: heiltall, maks: heiltall) -> ordbok_tekst {
+    returner builtin.process_spawn_argv(abi.request(exe, args, "", stdin, timeout_ms, maks))
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje er_linux() {
+        skriv("test_native_process_stress: hoppa over (ikkje Linux: frosen vert med eigen spawn)\n")
+        returner 0
+    }
+    la mib = mib_tekst()
+
+    // 1. 1 MiB inn og 1 MiB ut samstundes gjennom cat (synkron).
+    la t0 = builtin.tid_ms()
+    la kat = spawn("/bin/cat", [], mib, 60000, 4194304)
+    la kat_ms = builtin.tid_ms() - t0
+    hvis kat["status"] != "ferdig" { skriv("cat: status=" + tekst(kat["status"]) + " error=" + tekst(kat["error"]) + "\n") }
+    assert_eq(kat["status"], "ferdig")
+    assert_eq(heltall_fra_tekst(kat["exit_code"]), 0)
+    assert_eq(lengde(kat["stdout"]), 1048576)
+    assert(kat["stdout"] == mib)
+    assert(heltall_fra_tekst(kat["peak_rss_bytes"]) > 0)
+    assert(abi.gyldig_resultat(kat))
+    skriv("stress: cat 1 MiB inn/ut OK (" + tekst_fra_heltall(kat_ms) + " ms, peak_rss=" + tekst(kat["peak_rss_bytes"]) + ")\n")
+
+    // EPIPE: head les 10 byte og lukkar stdin; forelderen skal ikkje døy av SIGPIPE.
+    la hode = spawn("/usr/bin/head", ["-c", "10"], mib, 20000, 4096)
+    assert_eq(hode["status"], "ferdig")
+    assert_eq(hode["stdout"], "abcdefghij")
+    skriv("stress: EPIPE (head -c 10 av 1 MiB stdin) OK\n")
+
+    // Feilformer for synkron spawn: same form som den tidlegare rå-rutina, utan handle.
+    la tom = spawn("", [], "", 5000, 4096)
+    assert_eq(tom["status"], "ferdig")
+    assert_eq(heltall_fra_tekst(tom["exit_code"]), 127)
+    assert(ikkje finnes_nøkkel(tom, "handle"))
+    la ukjent_req = abi.request("/bin/true", [], "", "", 5000, 4096)
+    ukjent_req["sandbox"] = "finst-ikkje"
+    la ukjent = builtin.process_spawn_argv(ukjent_req)
+    assert_eq(ukjent["status"], "feil")
+    assert_eq(heltall_fra_tekst(ukjent["exit_code"]), 127)
+    assert_eq(ukjent["error"], "process spawn failed")
+    assert(ikkje finnes_nøkkel(ukjent, "handle"))
+    assert(abi.gyldig_resultat(ukjent))
+    skriv("stress: feilformer (tom executable, ukjent sandkasse) OK\n")
+
+    // UTF-8 byte-eksakt gjennom røyra.
+    la utf = "blåbærsyltetøy ÆØÅ\n"
+    la ekko = spawn("/bin/cat", [], utf, 5000, 4096)
+    assert_eq(ekko["stdout"], utf)
+
+    // 2. Output-grense: yes skriv uendeleg; barnet skal drepast og kallet returnere.
+    t0 = builtin.tid_ms()
+    la grense = spawn("/usr/bin/yes", ["x"], "", 20000, 128)
+    assert_eq(grense["status"], "feil")
+    assert_eq(grense["error"], "output limit")
+    assert(lengde(grense["stdout"]) <= 128)
+    assert(builtin.tid_ms() - t0 < 10000)
+    skriv("stress: output-grense OK\n")
+
+    // 4. Timeout: sleep 5 s med 100 ms tak → timeout/124, godt under 5 s.
+    t0 = builtin.tid_ms()
+    la tid = spawn("/bin/sleep", ["5"], "", 100, 4096)
+    la tid_ms = builtin.tid_ms() - t0
+    assert_eq(tid["status"], "timeout")
+    assert_eq(heltall_fra_tekst(tid["exit_code"]), 124)
+    assert(tid_ms < 3000)
+    skriv("stress: timeout OK (" + tekst_fra_heltall(tid_ms) + " ms)\n")
+
+    // 1b. Asynkron 1 MiB med 64 KiB buffer: mottrykk, ingen output går tapt.
+    la areq = abi.async_spawn_request("/bin/cat", [], "", mib, 60000, 65536)
+    la h = builtin.process_operation(areq)
+    assert_eq(h["status"], "kjorer")
+    la handle = tekst(h["handle"])
+    la delar: liste_tekst = []
+    la n: heiltall = 0
+    la siste = h
+    la runder: heiltall = 0
+    mens tekst(siste["status"]) == "kjorer" og runder < 100000 {
+        siste = builtin.process_operation(abi.async_wait_request(handle, 50))
+        la bit = builtin.process_operation(abi.async_operation("read", handle))
+        la ut = tekst(bit["stdout"])
+        assert(lengde(ut) <= 65536)
+        hvis ut != "" { legg_til(delar, ut) n = n + lengde(ut) }
+        runder = runder + 1
+    }
+    la rest = builtin.process_operation(abi.async_operation("read", handle))
+    hvis tekst(rest["stdout"]) != "" { legg_til(delar, tekst(rest["stdout"])) n = n + lengde(tekst(rest["stdout"])) }
+    la lukk = builtin.process_operation(abi.async_operation("close", handle))
+    assert_eq(tekst(siste["status"]), "ferdig")
+    assert_eq(tekst(lukk["status"]), "ferdig")
+    assert_eq(n, 1048576)
+    assert(builtin.join(delar, "") == mib)
+    skriv("stress: asynkron 1 MiB med mottrykk OK (" + tekst_fra_heltall(runder) + " rundar)\n")
+
+    skriv("test_native_process_stress OK\n")
+    returner 0
+}

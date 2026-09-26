@@ -1,0 +1,503 @@
+// tools/verify_windows_stage0_parity.no — paritetsport mellom committa Windows-stage0 og
+// den attesterte kandidaten (PLAN F1.1 / avgjerd B4).
+//
+// Før J1c kravde CI at den committa exe-en var byte-lik kandidaten. Payloadane i traileren
+// blir no genererte frå kjelde i kvar CI-køyring, så heile fila kan ikkje lenger vere lik.
+// Porten krev i staden at:
+//   1. begge er PE32+ x86_64 med ein gyldig NORSCODE_NCB_TEXT_V1-trailer, der payloadane
+//      ligg samanhengande frå slutten av PE-prefikset fram til manifestet;
+//   2. PE-prefikset (alt før fyrste payload) er byte-identisk (lengd + sha256);
+//   3. manifestforma er lik: same format, og kandidaten har nøyaktig dei payloadnamna
+//      stage0 har, minus dei pensjonerte (standard «compiler», søppelbunten frå F1.2);
+//   4. kvar payload i kandidaten er byte-identisk med den genererte fila.
+//
+// Miljø (standardverdiar i parentes):
+//   NORSCODE_PARITY_STAGE0     (bootstrap/stage0/norscode-windows-x86_64.exe)
+//   NORSCODE_PARITY_CANDIDATE  (build/windows/norscode_native_windows_x86_64.exe)
+//   NORSCODE_PARITY_PAYLOADS   (vm=bootstrap/precompiled/vm.ncb.json;vm-executor=selfhost/vm_executor.ncb.json)
+//   NORSCODE_PARITY_RETIRED    (compiler)   kommaseparert; "-" = ingen
+
+bruk std.bytes som bytes_std
+bruk std.sha256 som sha256
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon absolutt(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    hvis lengde(sti) > 1 og builtin.slice(sti, 1, 2) == ":" { returner sti }
+    returner root + "/" + sti
+}
+
+funksjon hash_bytes(bytes) -> tekst {
+    prøv { returner builtin.sha256_bytes(bytes) } fang (e) { returner sha256.hash_bytes(bytes) }
+    returner ""
+}
+
+funksjon trailer_magic() -> tekst { returner "NORSCODE_NCB_TEXT_V1" }
+
+funksjon er_pe64(bytes) -> boolsk {
+    hvis lengde(bytes) < 64 eller bytes[0] != 0x4D eller bytes[1] != 0x5A { returner usann }
+    la pe = bytes[60] | (bytes[61] << 8) | (bytes[62] << 16) | (bytes[63] << 24)
+    hvis pe < 64 eller pe + 26 > lengde(bytes) { returner usann }
+    la maskin = bytes[pe + 4] | (bytes[pe + 5] << 8)
+    la magic = bytes[pe + 24] | (bytes[pe + 25] << 8)
+    returner bytes[pe] == 0x50 og bytes[pe + 1] == 0x45 og bytes[pe + 2] == 0 og bytes[pe + 3] == 0 og
+        maskin == 0x8664 og magic == 0x20B
+}
+
+funksjon ascii_utsnitt(bytes, start: heiltall, slutt: heiltall) -> tekst {
+    la ut = ""
+    la i = start
+    mens i < slutt {
+        ut = ut + builtin.chr(bytes[i])
+        i = i + 1
+    }
+    returner ut
+}
+
+// ── Manifestlesar ──────────────────────────────────────────────────────────
+// Manifestet er eit lite, fast objekt: {"format":"…","payloads":{"<namn>":{"start":N,"length":N},…}}.
+// Nøkkelrekkjefølgja er ikkje fast (runtimen sin serialiserar vel henne), så lesaren tek
+// nøklane i vilkårleg rekkjefølgje, men godtek ingen andre nøklar eller verditypar.
+
+funksjon ny_lesar(t: tekst) {
+    returner {"t": t, "pos": 0, "feil": ""}
+}
+
+funksjon hopp_blankt(l) -> heiltall {
+    la t: tekst = l["t"]
+    mens l["pos"] < lengde(t) {
+        la c = builtin.slice(t, l["pos"], l["pos"] + 1)
+        hvis c != " " og c != "\n" og c != "\r" og c != "\t" { returner 0 }
+        l["pos"] = l["pos"] + 1
+    }
+    returner 0
+}
+
+funksjon forvent(l, teikn: tekst) -> boolsk {
+    hopp_blankt(l)
+    la t: tekst = l["t"]
+    hvis l["pos"] < lengde(t) og builtin.slice(t, l["pos"], l["pos"] + 1) == teikn {
+        l["pos"] = l["pos"] + 1
+        returner sann
+    }
+    hvis l["feil"] == "" { l["feil"] = "venta «" + teikn + "» ved posisjon " + tekst_fra_heltall(l["pos"]) }
+    returner usann
+}
+
+funksjon neste_er(l, teikn: tekst) -> boolsk {
+    hopp_blankt(l)
+    la t: tekst = l["t"]
+    returner l["pos"] < lengde(t) og builtin.slice(t, l["pos"], l["pos"] + 1) == teikn
+}
+
+funksjon les_streng(l) -> tekst {
+    hvis ikkje forvent(l, "\"") { returner "" }
+    la t: tekst = l["t"]
+    la start = l["pos"]
+    mens l["pos"] < lengde(t) {
+        la c = builtin.slice(t, l["pos"], l["pos"] + 1)
+        hvis c == "\\" {
+            l["feil"] = "escape i manifeststreng er ikkje tillate"
+            returner ""
+        }
+        hvis c == "\"" {
+            la s = builtin.slice(t, start, l["pos"])
+            l["pos"] = l["pos"] + 1
+            returner s
+        }
+        l["pos"] = l["pos"] + 1
+    }
+    l["feil"] = "uavslutta streng i manifestet"
+    returner ""
+}
+
+funksjon les_tal(l) -> heiltall {
+    hopp_blankt(l)
+    la t: tekst = l["t"]
+    la verdi = 0
+    la siffer = 0
+    mens l["pos"] < lengde(t) {
+        la k = builtin.char_code(builtin.slice(t, l["pos"], l["pos"] + 1))
+        hvis k < 48 eller k > 57 { bryt }
+        verdi = verdi * 10 + (k - 48)
+        siffer = siffer + 1
+        l["pos"] = l["pos"] + 1
+    }
+    hvis siffer == 0 og l["feil"] == "" { l["feil"] = "venta heiltal ved posisjon " + tekst_fra_heltall(l["pos"]) }
+    returner verdi
+}
+
+// {"start":N,"length":N} i vilkårleg rekkjefølgje → [start, lengd]; [-1, -1] ved feil.
+funksjon les_span(l) -> liste_heiltall {
+    la start = -1
+    la lengd = -1
+    hvis ikkje forvent(l, "{") { returner [-1, -1] }
+    la første = sann
+    mens l["feil"] == "" og ikkje neste_er(l, "}") {
+        hvis ikkje første og ikkje forvent(l, ",") { returner [-1, -1] }
+        første = usann
+        la nøkkel = les_streng(l)
+        hvis ikkje forvent(l, ":") { returner [-1, -1] }
+        la v = les_tal(l)
+        hvis nøkkel == "start" og start < 0 { start = v } ellers hvis nøkkel == "length" og lengd < 0 { lengd = v } ellers {
+            hvis l["feil"] == "" { l["feil"] = "ukjend eller dobbel spannøkkel «" + nøkkel + "»" }
+            returner [-1, -1]
+        }
+    }
+    hvis ikkje forvent(l, "}") { returner [-1, -1] }
+    hvis start < 0 eller lengd < 0 {
+        hvis l["feil"] == "" { l["feil"] = "payloadspan manglar start eller length" }
+        returner [-1, -1]
+    }
+    returner [start, lengd]
+}
+
+// Resultat: {"feil": "", "format": …, "namn": [...], "start": [...], "lengd": [...]}
+funksjon les_manifest(t: tekst) {
+    la l = ny_lesar(t)
+    la ut = {"feil": "", "format": "", "namn": [], "start": [], "lengd": []}
+    la har_format = usann
+    la har_payloads = usann
+    la namn_l: liste_tekst = []
+    la start_l: liste_heiltall = []
+    la lengd_l: liste_heiltall = []
+    hvis forvent(l, "{") {
+        la første = sann
+        mens l["feil"] == "" og ikkje neste_er(l, "}") {
+            hvis ikkje første og ikkje forvent(l, ",") { bryt }
+            første = usann
+            la nøkkel = les_streng(l)
+            hvis ikkje forvent(l, ":") { bryt }
+            hvis nøkkel == "format" og ikkje har_format {
+                ut["format"] = les_streng(l)
+                har_format = sann
+            } ellers hvis nøkkel == "payloads" og ikkje har_payloads {
+                har_payloads = sann
+                hvis forvent(l, "{") {
+                    la første_p = sann
+                    mens l["feil"] == "" og ikkje neste_er(l, "}") {
+                        hvis ikkje første_p og ikkje forvent(l, ",") { bryt }
+                        første_p = usann
+                        la namn = les_streng(l)
+                        hvis ikkje forvent(l, ":") { bryt }
+                        la span = les_span(l)
+                        hvis span[0] < 0 { bryt }
+                        // Eit namn to gonger er ugyldig JSON-semantikk, og kva Windows-runtimen sin
+                        // manifestparser gjer med det (fyrste/siste vinn/feil) er ikkje verifisert.
+                        hvis indeks_av(namn_l, namn) >= 0 {
+                            hvis l["feil"] == "" { l["feil"] = "dobbel payload «" + namn + "» i manifestet" }
+                            bryt
+                        }
+                        legg_til(namn_l, namn)
+                        legg_til(start_l, span[0])
+                        legg_til(lengd_l, span[1])
+                    }
+                    forvent(l, "}")
+                }
+            } ellers {
+                hvis l["feil"] == "" { l["feil"] = "ukjend eller dobbel manifestnøkkel «" + nøkkel + "»" }
+            }
+        }
+        forvent(l, "}")
+        hopp_blankt(l)
+        hvis l["feil"] == "" og l["pos"] != lengde(t) { l["feil"] = "ekstra tekst etter manifestet" }
+    }
+    hvis l["feil"] == "" og ikkje har_format { l["feil"] = "manifestet manglar format" }
+    hvis l["feil"] == "" og ikkje har_payloads { l["feil"] = "manifestet manglar payloads" }
+    ut["feil"] = l["feil"]
+    ut["namn"] = namn_l
+    ut["start"] = start_l
+    ut["lengd"] = lengd_l
+    returner ut
+}
+
+// ── Traileren ──────────────────────────────────────────────────────────────
+// [PE-prefiks][payloadar …][manifest][20 desimalsiffer = manifestlengd]["NORSCODE_NCB_TEXT_V1"]
+// Resultat: les_manifest-resultatet + "prefiks" (lengda på PE-prefikset).
+funksjon les_trailer(bytes) {
+    la magic = trailer_magic()
+    la n = lengde(bytes)
+    la ut = {"feil": "", "format": "", "namn": [], "start": [], "lengd": [], "prefiks": -1}
+    hvis n < lengde(magic) + 20 + 2 {
+        ut["feil"] = "fila er for kort for ein NCB-trailer"
+        returner ut
+    }
+    hvis ascii_utsnitt(bytes, n - lengde(magic), n) != magic {
+        ut["feil"] = "manglar " + magic + "-sluttmarkør"
+        returner ut
+    }
+    la siffer_start = n - lengde(magic) - 20
+    la mlen = 0
+    la i = siffer_start
+    mens i < siffer_start + 20 {
+        hvis bytes[i] < 48 eller bytes[i] > 57 {
+            ut["feil"] = "manifestlengda er ikkje 20 desimalsiffer"
+            returner ut
+        }
+        mlen = mlen * 10 + (bytes[i] - 48)
+        i = i + 1
+    }
+    la mstart = siffer_start - mlen
+    hvis mlen <= 0 eller mstart < 64 {
+        ut["feil"] = "ugyldig manifestlengd " + tekst_fra_heltall(mlen)
+        returner ut
+    }
+    la m = les_manifest(ascii_utsnitt(bytes, mstart, siffer_start))
+    hvis m["feil"] != "" {
+        ut["feil"] = "manifest: " + tekst(m["feil"])
+        returner ut
+    }
+    hvis lengde(m["namn"]) == 0 {
+        ut["feil"] = "manifestet har ingen payloadar"
+        returner ut
+    }
+    // Samanhengande utlegg: sorter spenna etter start og krev at dei følgjer kvarandre
+    // utan hol eller overlapp, og at det siste sluttar der manifestet byrjar.
+    la tal = lengde(m["namn"])
+    la brukt: liste_heiltall = []
+    i = 0
+    mens i < tal {
+        legg_til(brukt, 0)
+        i = i + 1
+    }
+    la prefiks = n
+    i = 0
+    mens i < tal {
+        hvis m["start"][i] < prefiks { prefiks = m["start"][i] }
+        i = i + 1
+    }
+    la pos = prefiks
+    la runde = 0
+    mens runde < tal {
+        la funne = -1
+        i = 0
+        mens i < tal {
+            hvis brukt[i] == 0 og m["start"][i] == pos { funne = i }
+            i = i + 1
+        }
+        hvis funne < 0 {
+            ut["feil"] = "payloadane ligg ikkje samanhengande (hol eller overlapp ved byte " + tekst_fra_heltall(pos) + ")"
+            returner ut
+        }
+        brukt[funne] = 1
+        pos = pos + m["lengd"][funne]
+        runde = runde + 1
+    }
+    hvis pos != mstart {
+        ut["feil"] = "siste payload sluttar ved " + tekst_fra_heltall(pos) + ", men manifestet byrjar ved " +
+            tekst_fra_heltall(mstart)
+        returner ut
+    }
+    ut["format"] = m["format"]
+    ut["namn"] = m["namn"]
+    ut["start"] = m["start"]
+    ut["lengd"] = m["lengd"]
+    ut["prefiks"] = prefiks
+    returner ut
+}
+
+// Fyrste byteavvik mellom a[a_start..a_start+n) og b[b_start..b_start+n), eller -1 når
+// spenna er like. Berre brukt på feilvegen for å peike ut staden (tolka løkke: treg på
+// store spenn, men ein port som alt har sagt nei har tid).
+funksjon første_avvik(a, a_start: heiltall, b, b_start: heiltall, n: heiltall) -> heiltall {
+    la i = 0
+    mens i < n {
+        hvis a[a_start + i] != b[b_start + i] { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+// sha256 av liste[start..slutt). Listekopien er billeg på den ferske x86-seeden (peikarkopi,
+// under 0,5 s for 9 MB), men den frosne macOS-C-æra-seeden brukar ~7 GB RSS på to
+// Windows-exe-ar (målt 2026-09-25). Porten skal difor køyre på Linux-seeden i CI.
+funksjon utsnitt_hash(liste: liste_heiltall, start: heiltall, slutt: heiltall) -> tekst {
+    returner hash_bytes(builtin.bytes_from_list(builtin.slice(liste, start, slutt)))
+}
+
+funksjon indeks_av(l: liste_tekst, verdi: tekst) -> heiltall {
+    la i = 0
+    mens i < lengde(l) {
+        hvis l[i] == verdi { returner i }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon del_liste(spes: tekst, skilje: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la delar = builtin.split(spes, skilje)
+    la i = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(delar[i])
+        hvis d != "" { legg_til(ut, d) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// Kjernen i porten. Returnerer lista over brot (tom = paritet). `rapport` får
+// informative linjer (sha-ar og lengder) for CI-loggen.
+funksjon verifiser(stage0_sti: tekst, kandidat_sti: tekst, payload_namn: liste_tekst,
+                   payload_stiar: liste_tekst, pensjonerte: liste_tekst, rapport: liste_tekst) -> liste_tekst {
+    returner verifiser_modus(stage0_sti, kandidat_sti, payload_namn, payload_stiar, pensjonerte, rapport, usann)
+}
+
+// Berre steg 1 og 3 (PE-hovud, trailer-utlegg og manifestform): les berre halen av filene,
+// så han er billeg òg på C-æra-seedane. Kandidatbyggjaren brukar denne; den fulle porten
+// køyrer på Linux i CI.
+funksjon verifiser_form(stage0_sti: tekst, kandidat_sti: tekst, payload_namn: liste_tekst,
+                        pensjonerte: liste_tekst) -> liste_tekst {
+    la rapport: liste_tekst = []
+    returner verifiser_modus(stage0_sti, kandidat_sti, payload_namn, [], pensjonerte, rapport, sann)
+}
+
+funksjon verifiser_modus(stage0_sti: tekst, kandidat_sti: tekst, payload_namn: liste_tekst,
+                         payload_stiar: liste_tekst, pensjonerte: liste_tekst, rapport: liste_tekst,
+                         berre_form: boolsk) -> liste_tekst {
+    la brot: liste_tekst = []
+    la a = null
+    la b = null
+    prøv { a = builtin.fil_les_binær(stage0_sti) } fang (e) {
+        legg_til(brot, "kan ikkje lese stage0: " + stage0_sti)
+        returner brot
+    }
+    prøv { b = builtin.fil_les_binær(kandidat_sti) } fang (e) {
+        legg_til(brot, "kan ikkje lese kandidaten: " + kandidat_sti)
+        returner brot
+    }
+    hvis ikkje er_pe64(a) { legg_til(brot, "stage0 er ikkje PE32+ x86_64") }
+    hvis ikkje er_pe64(b) { legg_til(brot, "kandidaten er ikkje PE32+ x86_64") }
+    la ta = les_trailer(a)
+    la tb = les_trailer(b)
+    hvis ta["feil"] != "" { legg_til(brot, "stage0-trailer: " + tekst(ta["feil"])) }
+    hvis tb["feil"] != "" { legg_til(brot, "kandidat-trailer: " + tekst(tb["feil"])) }
+    hvis lengde(brot) > 0 { returner brot }
+
+    // 3. Manifestform.
+    hvis ta["format"] != tb["format"] {
+        legg_til(brot, "manifestformat skil seg: stage0=" + tekst(ta["format"]) + " kandidat=" + tekst(tb["format"]))
+    }
+    la venta: liste_tekst = []
+    la i = 0
+    mens i < lengde(ta["namn"]) {
+        hvis indeks_av(pensjonerte, ta["namn"][i]) < 0 { legg_til(venta, ta["namn"][i]) }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(venta) {
+        hvis indeks_av(tb["namn"], venta[i]) < 0 { legg_til(brot, "kandidaten manglar payload «" + venta[i] + "»") }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(tb["namn"]) {
+        hvis indeks_av(venta, tb["namn"][i]) < 0 {
+            legg_til(brot, "kandidaten har payload «" + tb["namn"][i] + "» som stage0 ikkje har (eller som er pensjonert)")
+        }
+        i = i + 1
+    }
+    i = 0
+    mens i < lengde(venta) {
+        hvis indeks_av(payload_namn, venta[i]) < 0 {
+            legg_til(brot, "ingen generert fil er oppgjeven for payload «" + venta[i] + "»")
+        }
+        i = i + 1
+    }
+    hvis lengde(brot) > 0 eller berre_form { returner brot }
+
+    // 2. PE-prefiks: same lengd og same sha256.
+    la la_ = bytes_std.til_liste(a)
+    la lb = bytes_std.til_liste(b)
+    la pa = ta["prefiks"]
+    la pb = tb["prefiks"]
+    la ha = utsnitt_hash(la_, 0, pa)
+    la hb = utsnitt_hash(lb, 0, pb)
+    legg_til(rapport, "stage0_pe_prefix_bytes=" + tekst_fra_heltall(pa) + " sha256=" + ha)
+    legg_til(rapport, "candidate_pe_prefix_bytes=" + tekst_fra_heltall(pb) + " sha256=" + hb)
+    hvis pa != pb eller ha == "" eller ha != hb {
+        la kvar = ""
+        hvis pa == pb { kvar = ", første avvik ved byte " + tekst_fra_heltall(første_avvik(a, 0, b, 0, pa)) }
+        legg_til(brot, "PE-prefikset skil seg (stage0 " + tekst_fra_heltall(pa) + " B " + ha + ", kandidat " +
+            tekst_fra_heltall(pb) + " B " + hb + kvar + ")")
+    } ellers {
+        legg_til(rapport, "pe_prefix_identical=true")
+    }
+
+    // 4. Payloadar == dei genererte filene.
+    i = 0
+    mens i < lengde(tb["namn"]) {
+        la namn = tb["namn"][i]
+        la gi = indeks_av(payload_namn, namn)
+        la generert = null
+        prøv { generert = builtin.fil_les_binær(payload_stiar[gi]) } fang (e) { generert = null }
+        hvis generert == null {
+            legg_til(brot, "kan ikkje lese generert payload «" + namn + "»: " + payload_stiar[gi])
+        } ellers {
+            la hg = hash_bytes(generert)
+            la hk = utsnitt_hash(lb, tb["start"][i], tb["start"][i] + tb["lengd"][i])
+            legg_til(rapport, "payload " + namn + " bytes=" + tekst_fra_heltall(tb["lengd"][i]) + " sha256=" + hk)
+            hvis tb["lengd"][i] != lengde(generert) eller hg == "" eller hg != hk {
+                la kvar = "ulik lengd"
+                hvis tb["lengd"][i] == lengde(generert) {
+                    kvar = "første avvik ved byte " + tekst_fra_heltall(første_avvik(b, tb["start"][i], generert, 0, lengde(generert)))
+                }
+                legg_til(brot, "payload «" + namn + "» i kandidaten (" + tekst_fra_heltall(tb["lengd"][i]) + " B " + hk +
+                    ") er ikkje lik den genererte " + payload_stiar[gi] + " (" + tekst_fra_heltall(lengde(generert)) +
+                    " B " + hg + "): " + kvar)
+            }
+        }
+        i = i + 1
+    }
+    returner brot
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la stage0 = env("NORSCODE_PARITY_STAGE0")
+    hvis stage0 == "" { stage0 = "bootstrap/stage0/norscode-windows-x86_64.exe" }
+    la kandidat = env("NORSCODE_PARITY_CANDIDATE")
+    hvis kandidat == "" { kandidat = "build/windows/norscode_native_windows_x86_64.exe" }
+    la spes = env("NORSCODE_PARITY_PAYLOADS")
+    hvis spes == "" { spes = "vm=bootstrap/precompiled/vm.ncb.json;vm-executor=selfhost/vm_executor.ncb.json" }
+    la pensjonert_spes = env("NORSCODE_PARITY_RETIRED")
+    hvis pensjonert_spes == "" { pensjonert_spes = "compiler" }
+    la pensjonerte: liste_tekst = []
+    hvis pensjonert_spes != "-" { pensjonerte = del_liste(pensjonert_spes, ",") }
+    la namn: liste_tekst = []
+    la stiar: liste_tekst = []
+    la par = del_liste(spes, ";")
+    la i = 0
+    mens i < lengde(par) {
+        la eq = builtin.index_of(par[i], "=")
+        hvis eq <= 0 {
+            skriv("FEIL: ugyldig NORSCODE_PARITY_PAYLOADS-oppføring: " + par[i] + "\n")
+            returner 2
+        }
+        legg_til(namn, builtin.trim(builtin.slice(par[i], 0, eq)))
+        legg_til(stiar, absolutt(root, builtin.trim(builtin.slice(par[i], eq + 1, lengde(par[i])))))
+        i = i + 1
+    }
+    la rapport: liste_tekst = []
+    la brot = verifiser(absolutt(root, stage0), absolutt(root, kandidat), namn, stiar, pensjonerte, rapport)
+    i = 0
+    mens i < lengde(rapport) {
+        skriv(rapport[i] + "\n")
+        i = i + 1
+    }
+    hvis lengde(brot) > 0 {
+        skriv("FEIL: Windows-stage0 og kandidaten har ikkje paritet:\n")
+        i = 0
+        mens i < lengde(brot) {
+            skriv("  - " + brot[i] + "\n")
+            i = i + 1
+        }
+        returner 1
+    }
+    skriv("OK: Windows-paritet — PE-prefikset er byte-identisk, manifestforma er lik og kvar payload er den genererte\n")
+    returner 0
+}

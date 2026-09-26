@@ -76,6 +76,27 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   felles AOT-runtime for liste, tekstfunksjonar og kartoppslag (exit 25).
   ASCII `lower`/`upper` er emitterte runtime-funksjonar i same Norscode-bytebuffer;
   dei gamle faste legacy-peikarane blir ikkje brukte.
+- `bygg-native --target <mål>` (F3.7) tek `linux-x86_64`, `linux-arm64`, `macos-arm64` og
+  `windows-x86_64`. Førehandsbygd (kryss-)codegen for (mål, vert) ligg på
+  `bootstrap/native_codegen_<mål>_on_<vert>.elf` (x86 på x86: legacy-namnet
+  `bootstrap/native_codegen_x86_64.elf`) med `.srchash`/`.depshash` over codegen-kjelda og
+  heile `bruk`-lukkinga (`selfhost/native_execution/codegen_prebuilt.no`). Manglar eller er
+  han stale, fell bygg-native tilbake til tolka codegen med åtvaring; `windows-x86_64` har
+  ingen tolka fallback før PE-codegen finst (W2/W5).
+- Kryss-codegen (A1): `bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf` og
+  `…macos-arm64_on_linux-x86_64.elf` er x86-AOT av `elf_arm64_codegen.no` /
+  `macho_arm64_codegen.no`, bygde med `nc run tools/build_cross_codegen.no` (0 uløyste
+  builtins). Output er byte-identisk med tolka codegen (`tests/test_arm64_kryss_codegen.no`).
+  Heile nc_main-NCB-en blir emittert av linux-arm64-codegen på om lag 1 s; han stoppar på
+  kall utan ARM64-emitter. `NC_BUILTIN_REPORT=1` listar heile gapet i éi køyring (A2/A5):
+  `UVENTA` (ustøtta kall, uansett argumenttal), `UKJEND`, `STOPPA` (funksjonar som ikkje
+  kompilerte; resten held fram) og `STUBBA` (NATIV-GAP-stubbar som kastar ved køyring; tel
+  ikkje som uløyste). For nc_main: 8 uløyste og 26 (linux) / 27 (macOS) stubba. Kvar
+  kryss-binær har i tillegg `.vertcg` med identiteten til vert-codegen-en (sti, sha256,
+  `.srchash`, `.depshash`) og sha256 til seg sjølv: ein ombygd
+  `bootstrap/native_codegen_x86_64.elf` eller ein utbytt kryss-binær gjer han stale. Endrar du
+  ARM64-codegen eller vert-codegen-en, køyr verktøyet på nytt (`test_native_codegen_srchash`
+  krev ferske binærar og at `.vertcg`-sha-en er allowlist-pinnen).
 - `platform_readiness_v3600` er køyrd med `NORSCODE_VERIFY_LINUX_DOCKER=1`:
   `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`
   og `production_ready_unix=true` etter runtime-gap-attestasjon i Docker.
@@ -201,7 +222,7 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
 - Den historiske Linux x86_64-kandidaten `build/v3600/linux/norscode_native_linux_x86_64_v3602` vart krysskompilert med Zig og køyrd gjennom `native_runtime_gap_gate_v3001` i Ubuntu 24.04 Docker. Gjeldande plattformbevis kjem i staden frå signert ekte Linux x86-64/ARM64-køyring i CI `30788036517`; Zig/OpenSSL-løypa er framleis ein eksplisitt overgang og kan ikkje brukast til å lukke fase 5 eller rein-krypto-punkta.
 - Den historiske Linux ARM64 v3608-kandidaten vart køyrd native i ARM64 Ubuntu med portable Zig Argon2id og OpenSSL og passerte 560/560 testar. Han er ikkje gjeldande normalflyt eller bevis for dagens kandidat; den aktive Zig-byggjaren er fjerna, medan ARM64 TLS-overgangen framleis må erstattast og attesterast.
 - `tools/nc_test.no` vel no stat-/hashsignatur etter faktisk operativsystem, slik at Linux-testar ikkje prøver macOS `stat -f` eller `shasum` før fallback. CLI-eksempelet bruker `TMPDIR` i staden for hardkoda macOS-sti.
-- Linux x86-64-kandidaten blir bygd av den native Norscode-codegen-bana i `tools/build_linux_openssl_candidate_v3604.no` utan GCC, Zig eller legacy C-backend. Standard Argon2id er rein Norscode med RFC 9106-vektor. Den historiske Zig-adapteren ligg berre i arkivet; det sletta v3606-verktøyet er ikkje ein aktiv eller støtta byggjeveg.
+- Linux x86-64-kandidaten blir bygd av den native Norscode-codegen-bana i `tools/build_linux_fullhost_candidate.no` utan GCC, Zig eller legacy C-backend. Standard Argon2id er rein Norscode med RFC 9106-vektor. Den historiske Zig-adapteren ligg berre i arkivet; det sletta v3606-verktøyet er ikkje ein aktiv eller støtta byggjeveg.
 - Runtime v1-matrisa er no 19 stabile og 3 delvise av 22; full normal testflate er verifisert 16. juli 2026 med 563/563 bestått, 0 feila og 21 eksplisitt plattform-/lanefiltrerte hopp (584 totalt). Slow-lanen er verifisert separat og gjennom topp-porten med 11/11 bestått, 0 feila og 573 filtrerte hopp. Testløparen bruker signaturbasert NCB-cache i eiga cache-mappe (`NC_TEST_CACHE_DIR`), atomisk artefaktflytting og unik arbeidsmappe per køyring (`NC_TEST_RUN_ID`) for å unngå delte eller utdaterte `.ncb.json`-artefaktar. Cache kan slåast av med `NC_TEST_CACHE=0`.
 - Media runtime-gaten køyrer no eksplisitt i både macOS- og Linux-hovud-CI med aktiv native runtime, inkludert CPU-diffusjon og binær medie-I/O.
 - macOS-CI har ein faktisk Metal compute-gate som kompilerer og køyrer GPU-kernel med buffer-I/O, dispatch, synkronisering og resultatkontroll; `std.tensor.matmul`, `media_neural` og `std.media_diffusion.bilde_med_backend` vel Metal når runtime rapporterer GPU, med SIMD/CPU-fallback. Gaten er no køyrd grøn på Apple M3, inkludert tensor-matmul og diffusjonskernel.

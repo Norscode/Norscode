@@ -12,12 +12,13 @@ har ein konkret **køyr-og-verifiser-port** på ekte maskinkode.
 
 Analyse 2026-08-08 (grein `krypto-tls-primitiver`):
 
-- `selfhost/native_execution/native_codegen_v2.no` (3077 linjer) er ein
-  **x86-64-berre** kodegenerator: han handemitterer x86-64 maskinkode for ein
-  komplett NcVal-runtime (`rt_hex_del0..6`), Linux syscall prosess-ABI
-  (`rt_hex_process_spawn_linux_x86_64`) og set `e_machine = 62` (EM_X86_64).
+- `selfhost/native_execution/native_codegen_v2.no` er ein **x86-64-berre**
+  kodegenerator: han emitterer x86-64 maskinkode for ein komplett NcVal-runtime som
+  Norscode-atom (den frosne `rt_hex_del0..6`-blobben er sletta i `518699e`), Linux
+  syscall prosess-ABI (`rt_hex_process_spawn_linux_x86_64`, den einaste frosne
+  maskinkoden som står att) og set `e_machine = 62` (EM_X86_64).
   Dette er kjernen i den GCC-frie x86-64 full-host-bygginga
-  (`tools/build_linux_openssl_candidate_v3604.no`).
+  (`tools/build_linux_fullhost_candidate.no`).
 - AArch64-backenden finst, men er berre ein **liten heiltals-AOT** utan runtime:
   - `selfhost/native_execution/macho_arm64_codegen.no` (~550 linjer):
     representerer alle verdiar som rå 32-bit heiltal i register (w8–w11 stakk,

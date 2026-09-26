@@ -1,0 +1,132 @@
+// Grøne trådar i VM-en (selfhost/vm.no, M:1 + preemption på instruksjonsbudsjett).
+//
+// Kvar del her HENG eller feilar med den gamle kooperative spawn-armen (worker
+// køyrd synkront inne i thread_spawn): A spinn til B har sett flagget, C tel til
+// hovudtråden har rekna ferdig, og to 200 ms-søvnar må overlappe. Testen krev
+// difor ein seed med vm.no-en som har grøne trådar (sjå krev_ny_seed i
+// tools/nc_test.no); C-æra-seedane serialiserer generiske workerar og har
+// gettid-baserte tråd-id-ar. krev_grøne_trådar() gjer at testen feilar raskt (i
+// staden for å henge til harness-timeouten) på seedar utan grøne trådar i VM-en.
+
+funksjon krev_grøne_trådar() -> heiltall {
+    prøv {
+        builtin.thread_pool({"abi": "norscode-native-thread-pool-v1", "operation": "status", "pool_handle": ""})
+    } fang (e) {
+        kast "seeden manglar grøne trådar/builtin.thread_pool i VM-en: " + tekst(e)
+    }
+    returner 0
+}
+
+funksjon _atomic_ny(v: heiltall) -> tekst {
+    returner builtin.atomic_operation({"operation": "create", "value": v, "order": "seq_cst"})["handle"]
+}
+
+funksjon _atomic_les(h: tekst) -> heiltall {
+    returner builtin.atomic_operation({"operation": "load", "handle": h, "order": "seq_cst"})["value"]
+}
+
+funksjon _atomic_set(h: tekst, v: heiltall) -> heiltall {
+    builtin.atomic_operation({"operation": "store", "handle": h, "value": v, "order": "seq_cst"})
+    returner 0
+}
+
+funksjon worker_spinn(args: ordbok_tekst) -> tekst {
+    mens _atomic_les(args["flagg"]) == 0 { }
+    returner "A"
+}
+
+funksjon worker_set(args: ordbok_tekst) -> tekst {
+    _atomic_set(args["flagg"], 1)
+    returner "B"
+}
+
+funksjon worker_tel(args: ordbok_tekst) -> tekst {
+    mens _atomic_les(args["stopp"]) == 0 {
+        builtin.atomic_operation({"operation": "fetch_add", "handle": args["teljar"], "delta": 1, "order": "seq_cst"})
+    }
+    returner "C"
+}
+
+funksjon worker_id(args: ordbok_tekst) -> tekst {
+    returner tekst_fra_heltall(builtin.thread_current_id())
+}
+
+funksjon worker_sov(args: ordbok_tekst) -> tekst {
+    builtin.vent.sov(200)
+    returner "sov"
+}
+
+funksjon worker_join(args: ordbok_tekst) -> tekst {
+    // join frå ein grøn tråd: ventar (GreenVenter) utan å stoppe hovudtråden.
+    la t = _spawn("__main__.worker_sov", {})
+    returner "join:" + tekst(_join(t, 5000)["value"])
+}
+
+funksjon _spawn(fn: tekst, args: ordbok_tekst) -> ordbok_tekst {
+    returner builtin.thread_spawn({"abi": "norscode-native-thread-v1", "operation": "spawn", "fn": fn,
+        "args": args, "name": fn, "stack_bytes": "65536"})
+}
+
+funksjon _join(t: ordbok_tekst, ms: heiltall) -> ordbok_tekst {
+    returner builtin.thread_join({"abi": "norscode-native-thread-v1", "operation": "join",
+        "handle": t["handle"], "thread_id": t["thread_id"], "timeout_ms": tekst_fra_heltall(ms)})
+}
+
+funksjon start() -> heiltall {
+    krev_grøne_trådar()
+
+    // 1) Preemption: A spinn til B har sett flagget.
+    la flagg = _atomic_ny(0)
+    la a = _spawn("__main__.worker_spinn", {"flagg": flagg})
+    la b = _spawn("__main__.worker_set", {"flagg": flagg})
+    assert_eq(a["status"], "started")
+    assert(a["handle"] != b["handle"])
+    assert_eq(_join(a, 10000)["value"], "A")
+    assert_eq(_join(b, 10000)["value"], "B")
+
+    // 2) Interleaving: C tel medan hovudtråden reknar utan eitt einaste builtin-kall.
+    la stopp = _atomic_ny(0)
+    la teljar = _atomic_ny(0)
+    la c = _spawn("__main__.worker_tel", {"stopp": stopp, "teljar": teljar})
+    la før = _atomic_les(teljar)
+    la s: heiltall = 0
+    la i: heiltall = 0
+    mens i < 50000 {
+        s = s + i
+        i = i + 1
+    }
+    la etter = _atomic_les(teljar)
+    _atomic_set(stopp, 1)
+    assert(etter - før > 0)
+    assert_eq(_join(c, 10000)["value"], "C")
+
+    // 3) Tråd-id: unik per grøn tråd og ulik hovudtråden (runtime_memory-låsen).
+    la x = _spawn("__main__.worker_id", {})
+    la y = _spawn("__main__.worker_id", {})
+    la ix = _join(x, 10000)["value"]
+    la iy = _join(y, 10000)["value"]
+    assert(ix != iy)
+    assert(ix != tekst_fra_heltall(builtin.thread_current_id()))
+    assert(heltall_fra_tekst(ix) >= 1073741824)
+
+    // 4) Søvn i grøne trådar overlappar (yield-medviten vent.sov + join).
+    la t0 = builtin.tid_ms()
+    la z = _spawn("__main__.worker_sov", {})
+    la w = _spawn("__main__.worker_sov", {})
+    assert_eq(_join(z, 10000)["value"], "sov")
+    assert_eq(_join(w, 10000)["value"], "sov")
+    la brukt = builtin.tid_ms() - t0
+    assert(brukt >= 190)
+    assert(brukt < 390)
+
+    // 5) Join inne i ein grøn tråd.
+    la j = _spawn("__main__.worker_join", {})
+    assert_eq(_join(j, 10000)["value"], "join:sov")
+
+    // 6) Ukjend funksjon feilar synkront; handtak blir konsumert av join.
+    assert_eq(_spawn("__main__.finst_ikkje", {})["status"], "error")
+    assert_eq(_join(j, 0)["status"], "error")
+
+    skriv("test_thread_green_preemption OK\n")
+    returner 0
+}

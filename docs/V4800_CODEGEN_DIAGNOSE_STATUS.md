@@ -1,5 +1,7 @@
 # V4800 codegen-diagnose status
 
+> **Historisk dokument.** `tools/run_codegen_diagnose_v4800.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 ## Samandrag
 
 `v4800` gjer compile-blokkeringa frå `v4600` konkret og reproduserbar.

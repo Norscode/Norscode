@@ -1,0 +1,103 @@
+// Linux x86-64 AOT (A2-review): entropien er FAIL-CLOSED. Byggjer
+// tests/fixtures/aot_rng_failclosed.no med bygg-native og køyrer binæren: han nektar
+// getrandom med eit seccomp-filter i prosessen, og då skal random_byte-atomet gje −errno og
+// std.native_gap.random_hex_secure / _tls_random32 kaste (før: atomet las ein uinitialisert
+// stakkbyte, og native_gap tok absoluttverdien). Codegen (random_byte-atomet) og native_gap
+// kjem frå kjelda på greina, so porten verkar før seed-promotering.
+// Negativ kontroll: med det gamle atomet/native_gap skriv fixturen «… gav … (FEIL: fail-open)».
+// Plattform (a12fix): tools/nc_test.no klassifiserer testen som Hoppa utanfor Linux x86-64
+// (eksplisitt plattformhopp, ikkje rc 0 som vart tald som Bestått). Seier CI at verten er
+// linux-x86_64 (NC_TEST_CI_VERT), er både feil vert-deteksjon og exit 3 frå fixturen
+// (getrandom kunne ikkje nektast) FEIL. Utanfor CI hoppar testen framleis ved exit 3 (under
+// Rosetta svarar seccomp EINVAL; på ekte x86-kjerner går filteret).
+
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_linux_x86_64() -> boolsk {
+    la system = miljo_hent("NORSCODE_CI_SYSTEM")
+    la maskin = miljo_hent("NORSCODE_CI_ARCH")
+    hvis system == "" { system = miljo_hent("RUNNER_OS") }
+    hvis maskin == "" { maskin = miljo_hent("RUNNER_ARCH") }
+    hvis system == "" eller maskin == "" {
+        prøv {
+            la info = builtin.system_info()
+            hvis system == "" { system = tekst(info["system"]) }
+            hvis maskin == "" { maskin = tekst(info["machine"]) }
+        } fang (e) {}
+    }
+    la linux = system == "Linux" eller system == "linux"
+    la x64 = maskin == "X64" eller maskin == "x64" eller maskin == "x86_64" eller maskin == "amd64"
+    returner linux og x64
+}
+
+funksjon køyr(executable: tekst, argv: liste_tekst, root: tekst, timeout_ms: heiltall) -> ordbok_tekst {
+    returner prosess.køyr(executable, argv, root, {
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, timeout_ms)
+}
+
+funksjon start() -> heiltall {
+    hvis ikkje vert_linux_x86_64() {
+        hvis env("NC_TEST_CI_VERT") == "linux-x86_64" {
+            kast "test_linux_x86_64_aot_rng_failclosed: CI seier linux-x86_64, men vert-deteksjonen seier noko anna"
+        }
+        skriv("test_linux_x86_64_aot_rng_failclosed: hoppa over (ikkje Linux x86-64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la binær = "/tmp/norscode_aot_rng_failclosed_" + tekst_fra_heltall(builtin.tid_ms())
+    la b = køyr(runtime(root), ["bygg-native", "--target", "linux-x86_64",
+                                root + "/tests/fixtures/aot_rng_failclosed.no", binær], root, 180000)
+    hvis tekst(b["status"]) != "ferdig" eller tekst(b["exit_code"]) != "0" {
+        prosess.skriv_resultat(b)
+        kast "bygg-native av aot_rng_failclosed feila"
+    }
+    la r = køyr(binær, [], root, 60000)
+    filops.slett_fil(binær)
+    // Prosess-ABI-en kan levere linjeskift escapa («\\n» som to teikn); normaliser.
+    la ut = builtin.replace(tekst(r["stdout"]), "\\n", "\n")
+    hvis tekst(r["status"]) == "ferdig" og tekst(r["exit_code"]) == "3" {
+        // a12fix: seier CI at verten er Linux x86-64, MÅ filteret kunne installerast — elles
+        // har testen ikkje testa noko, og ein fail-open-regresjon ville gli gjennom som grøn.
+        // Hopp (rc 0) berre ved direkte køyring utanfor CI (t.d. lokalt under Rosetta).
+        hvis env("NC_TEST_CI_VERT") == "linux-x86_64" {
+            prosess.skriv_resultat(r)
+            kast "aot_rng_failclosed: CI-verten er linux-x86_64, men getrandom kunne ikkje nektast (" + prosess.første_linje(ut) + ")"
+        }
+        skriv("test_linux_x86_64_aot_rng_failclosed: HOPPA (getrandom kan ikkje nektast her: " + prosess.første_linje(ut) + ")\n")
+        returner 0
+    }
+    hvis tekst(r["status"]) != "ferdig" eller tekst(r["exit_code"]) != "57" {
+        prosess.skriv_resultat(r)
+        kast "aot_rng_failclosed: venta ferdig/57, fekk " + tekst(r["status"]) + "/" + tekst(r["exit_code"])
+    }
+    la venta = "getrandom nekta: errno=1\nrandom_byte=-1\nrandom_hex_secure kasta: sann\n_tls_random32 kasta: sann\n"
+    hvis ut != venta {
+        prosess.skriv_resultat(r)
+        kast "aot_rng_failclosed: fail-open eller feil output"
+    }
+    skriv("test_linux_x86_64_aot_rng_failclosed OK\n")
+    returner 0
+}

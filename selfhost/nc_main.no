@@ -10,10 +10,17 @@ bruk selfhost.bundler
 bruk selfhost.vm
 bruk std.socket som sok
 bruk std.runtime_filesystem som native_fs
+bruk std.runtime.process_abi som bygg_process_abi
 bruk selfhost.http_response som http_response
+// F3.7: mållista, codegen-kjelda og førehandsbygd (kryss-)codegen per mål for bygg-native.
+bruk selfhost.native_execution.codegen_prebuilt som cgp
 // Reine erstatningar for VM-builtins utan native rutine (gap-ruting i
 // native_codegen_v2) — må vere i bunten for at den ferske seeden skal ha dei.
 bruk std.native_gap som native_gap
+bruk std.desimaltall_tekst som desimaltall_tekst
+// Argon2id-gap-ruta (builtin.argon2id → std.argon2id_pure.hash_raw_hex) må ha
+// modulen i bunten; rå-minne-varianten unngår 64 MiB-OOM-en frå VM-lister.
+bruk std.argon2id_pure som argon2id_pure
 
 // ─── Kompiler kjeldekode-fil til NCB ─────────────────────────────────────────
 
@@ -947,6 +954,7 @@ funksjon _resolve_import_sti(base_fil: tekst, import_fil: tekst) -> tekst {
        builtin.starts_with(import_fil, "examples/") eller
        builtin.starts_with(import_fil, "compiler/") eller
        builtin.starts_with(import_fil, "packages/") eller
+       builtin.starts_with(import_fil, "toolchain/") eller
        builtin.starts_with(import_fil, "prosjekter/") {
         la root = miljo_hent("NORSCODE_ROOT")
         hvis root != "" {
@@ -964,10 +972,18 @@ funksjon _resolve_import_sti(base_fil: tekst, import_fil: tekst) -> tekst {
         returner import_fil
     }
     la base_dir = _dirname(base_fil)
-    hvis base_dir == "." {
-        returner import_fil
+    la kandidat = import_fil
+    hvis base_dir != "." { kandidat = base_dir + "/" + import_fil }
+    // Repo-modular utanfor prefikslista (t.d. ein testfil i tests/ eller ei
+    // mellombels hybrid-kjelde i build/ som brukar `bruk toolchain.x`) skal
+    // falle tilbake til repo-rota når fila ikkje finst ved sida av importøren.
+    hvis ikkje fil_finnes(kandidat) {
+        la rot_fb = miljo_hent("NORSCODE_ROOT")
+        hvis rot_fb != "" og fil_finnes(rot_fb + "/" + import_fil) {
+            returner rot_fb + "/" + import_fil
+        }
     }
-    returner base_dir + "/" + import_fil
+    returner kandidat
 }
 
 funksjon _modul_filsti_fra_namn(namn: tekst) -> tekst {
@@ -1110,21 +1126,84 @@ funksjon normaliser_importalias_kall(ncb_json: tekst, imports: liste<tekst>) -> 
     returner ut
 }
 
+// SMAL alias-normalisering for HOVUDFILA. Kompilatoren skriv alias-kall som
+// ANTEN «builtin.<alias>.x» ELLER berre «<alias>.x». Begge formene blir rewrita
+// her, men den BARE forma berre i CALL-slotten: ein brei replace av
+// «"<alias>.» (som normaliser_importalias_kall gjer) kan treffe STRENGLITERAL
+// (t.d. "db.x") og korrumpere data.
+// `eigar` er funksjonsnøkkelen JSON-en høyrer til. Ein modul sin eigen kropp blir
+// aldri omskriven: std.path.join kallar builtin-en sti_join, og ei omskriving av
+// det kallet til std.path.join gav uendeleg rekursjon (test_storage stoppa på
+// tail-call-grensa etter 10 001 kall til std.path.join).
+funksjon normaliser_hovudalias_builtin(ncb_json: tekst, imports: liste<tekst>, eigar: tekst) -> tekst {
+    la ut = ncb_json
+    la i: heiltall = 0
+    mens i < lengde(imports) {
+        la arg = imports[i]
+        la eq = builtin.index_of(arg, "=")
+        hvis eq > 0 {
+            la alias = builtin.slice(arg, 0, eq)
+            la kanonisk_modul = modulnamn_fra_importfil(builtin.slice(arg, eq + 1, lengde(arg)))
+            hvis ikkje builtin.starts_with(eigar, kanonisk_modul + ".") {
+                ut = tekst_erstatt(ut, "\"builtin." + alias + ".", "\"" + kanonisk_modul + ".")
+                ut = tekst_erstatt(ut, "[\"CALL\",\"" + alias + ".", "[\"CALL\",\"" + kanonisk_modul + ".")
+            }
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
 funksjon normaliser_json_kontrollteikn(data: tekst) -> tekst {
     // Compiler-NCB kan innehalde rå kontrollteikn i strengoperandar. Gjer
     // berre desse byteverdiane JSON-lovlege før den strenge råparseren;
     // eksisterande escapes og whitespace utanfor streng blir urørte.
     la heks = "0123456789abcdef"
-    // Ein listepost per teikn pressa AOT-heapen hardt sjølv for mellomstore
-    // verktøybundle. Bygg avgrensa tekstblokker og materialiser berre nokre
-    // få blokker til slutt. Den tomme fyrste posten gjer lista stabil også i
-    // eldre runtime-generasjonar som er sårbare for legg_til på [].
+    // Eitt pass: SKANN etter det fyrste rå kontrollteiknet inne i ein streng.
+    // Finst ingen (dette gjeld ALLTID bundle-NCB frå nc_bundle_ncb, som alt er
+    // json_skriv-eskapa), returner input uendra utan å byggje ein ny
+    // fleirmegabyte-streng. Den gamle koden reserialiserte heile NCB-en om att
+    // uansett; på store applikasjonsbundlar skjer det etter at nc_bundle_ncb alt
+    // har fylt heapen, og reallokeringa kunne både avkorte (web/orm-testar mista
+    // __main__-funksjonane) og — på svært store norsdb-bundlar — presse over
+    // 1 GiB-GC-taket. Finst eit kontrollteikn, skriv vi det reine prefikset som
+    // EIN slice og reserialiserer berre resten. Skann + rest er til saman eitt
+    // pass, so toppminnet blir aldri større enn det gamle eitt-pass-bygget.
+    la n = lengde(data)
+    la funn: heiltall = -1
+    la si: heiltall = 0
+    la s_streng = usann
+    la s_escape = usann
+    mens si < n {
+        la sc = data[si]
+        hvis s_streng {
+            hvis s_escape {
+                s_escape = usann
+            } ellers hvis sc == "\\" {
+                s_escape = sann
+            } ellers hvis sc == "\"" {
+                s_streng = usann
+            } ellers {
+                la sk = builtin.char_code(sc)
+                hvis sk >= 0 og sk < 32 { funn = si  bryt }
+            }
+        } ellers {
+            hvis sc == "\"" { s_streng = sann }
+        }
+        si = si + 1
+    }
+    hvis funn < 0 { returner data }
+    // Reserialiser frå det fyrste kontrollteiknet. Ved funn-punktet er vi inne i
+    // ein streng (s_streng=sann) og ikkje midt i ein escape (s_escape=usann).
+    // Den tomme fyrste posten gjer lista stabil også i eldre runtime-generasjonar
+    // som er sårbare for legg_til på [].
     la delar: liste<tekst> = [""]
+    legg_til(delar, builtin.slice(data, 0, funn))
     la bit = ""
-    la i: heiltall = 0
-    la i_streng = usann
+    la i: heiltall = funn
+    la i_streng = sann
     la escape = usann
-    mens i < lengde(data) {
+    mens i < n {
         la c = data[i]
         hvis i_streng {
             hvis escape {
@@ -1276,7 +1355,10 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
     hvis ikkje nc_stdlib_cache_aktiv() { returner "" }
     la relativ_kjelde = nc_verktøy_relativ_sti(src_sti, root)
     hvis ikkje builtin.starts_with(relativ_kjelde, "std/") { returner "" }
-    la manifest_sti = root + "/bootstrap/stdlib/manifest.json"
+    // Cacheroten er <root>/build/cache/nc/bootstrap som standard (F3.5/J4);
+    // NORSCODE_BOOTSTRAP_CACHE kan flytte han.
+    la cache_rot = nc_bootstrap_cache_rot(root)
+    la manifest_sti = cache_rot + "/stdlib/manifest.json"
     hvis ikkje builtin.fil_finnes(manifest_sti) { returner "" }
     prøv {
         la manifest = json_parse_raw(fil_les(manifest_sti))
@@ -1292,8 +1374,10 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
         }
         la artefakt_relativ = tekst(post["artifact"])
         hvis ikkje builtin.starts_with(artefakt_relativ, "bootstrap/stdlib/") { returner "" }
-        la artefakt_sti = root + "/" + artefakt_relativ
-        hvis ikkje builtin.fil_finnes(artefakt_sti) { returner "" }
+        // «bootstrap/» er det logiske namnerommet i manifestet; standard-
+        // cacheroten gjev same sti som før (root + "/" + artefakt_relativ).
+        la artefakt_sti = nc_bootstrap_cache_artefakt(cache_rot, artefakt_relativ, "stdlib")
+        hvis artefakt_sti == "" eller ikkje builtin.fil_finnes(artefakt_sti) { returner "" }
         la artefakt_hash = builtin.sha256_bytes(builtin.fil_les_binær(artefakt_sti))
         hvis artefakt_hash != tekst(post["artifact_sha256"]) {
             nc_stdlib_cache_trace("artifact-miss " + relativ_kjelde)
@@ -1310,6 +1394,272 @@ funksjon nc_stdlib_fragment(src_sti: tekst, modul: tekst, root: tekst) -> tekst 
         returner ""
     }
     returner ""
+}
+
+// ─── Bootstrap-cache: rot, kjeldehash-port og kompilatorfingeravtrykk ───────
+//
+// Desse krokane ligg i nc_main, ikkje i selfhost/bundler.no (fikspunktmodul i
+// ELF stage-0-porten; Gen0 blir generert frå kjelde sidan J2).
+//
+// Bootstrap-cachen (selfhost-fragment og stdlib-fragment) ligg under éi rot:
+// NORSCODE_BOOTSTRAP_CACHE (absolutt, eller relativ til repo-rota) eller, som
+// standard, <root>/build/cache/nc/bootstrap (F3.5/J4: cachen er ein
+// byggjeartefakt, aldri committa; tools/materialize_bootstrap_cache.no skriv
+// same standardrot). Manifesta sine artefaktstiar byrjar med det logiske
+// namnerommet «bootstrap/», som blir bytt ut med cacheroten.
+
+funksjon nc_bootstrap_cache_rot(root: tekst) -> tekst {
+    la rå = miljo_hent("NORSCODE_BOOTSTRAP_CACHE")
+    la eksplisitt = ""
+    hvis rå != null { eksplisitt = builtin.trim(tekst(rå)) }
+    la basis = root
+    hvis basis == null eller basis == "" { basis = "." }
+    hvis eksplisitt == "" { returner basis + "/build/cache/nc/bootstrap" }
+    hvis builtin.starts_with(eksplisitt, "/") { returner eksplisitt }
+    returner basis + "/" + eksplisitt
+}
+
+// Logisk artefaktsti i eit cachemanifest → fysisk sti under cacheroten.
+// Manifesta skriv «bootstrap/<del>/fil» (eller berre «<del>/fil»); prefikset
+// «bootstrap/» er ein logisk namnerom og blir bytt ut med cacheroten. Alt
+// utanfor <del>/ eller med «..» blir avvist (returnerer "").
+funksjon nc_bootstrap_cache_artefakt(cache_rot: tekst, artefakt: tekst, del: tekst) -> tekst {
+    la rel = artefakt
+    hvis builtin.starts_with(rel, "bootstrap/") { rel = builtin.slice(rel, 10, lengde(rel)) }
+    hvis ikkje builtin.starts_with(rel, del + "/") { returner "" }
+    hvis builtin.contains(rel, "..") { returner "" }
+    returner cache_rot + "/" + rel
+}
+
+funksjon nc_selfhost_cache_abi() -> tekst {
+    returner "norscode-selfhost-source-cache-v1|ncb-v1|module-globals-v1"
+}
+
+funksjon nc_selfhost_cache_trace(melding: tekst) -> heiltall {
+    la rå = miljo_hent("NORSCODE_STDLIB_CACHE_TRACE")
+    hvis rå != null og tekst(rå) == "1" {
+        skriv("[stdlib-cache] " + melding + "\n")
+    }
+    returner 0
+}
+
+funksjon nc_selfhost_cache_relativ(kildef: tekst, root: tekst) -> tekst {
+    la rel = kildef
+    hvis root != null og root != "" og builtin.starts_with(rel, root + "/") {
+        rel = builtin.slice(rel, lengde(root) + 1, lengde(rel))
+    }
+    mens builtin.starts_with(rel, "./") { rel = builtin.slice(rel, 2, lengde(rel)) }
+    returner rel
+}
+
+// Kompilatoridentitet for selfhost-cachen. Ved bom blir modulen kompilert frå
+// kjelde av kompilatoren i runtime-binæren som køyrer (innbakt), eller, i
+// soft-seed-/hybridmodus, av den levande kompilatorkjelda. Fingeravtrykket
+// bind difor både SHA-256 av runtime-binæren og kjeldehashane til
+// kompilatormodulane (bundler.modulcache_compiler_fingerprint), slik modulcachen gjer.
+// Ein cache som overlever ein reseed eller ei kompilatorendring blir ein bom,
+// aldri eit stille, forelda treff. Manglande runtime gjev "" (fail-closed).
+// tools/materialize_bootstrap_cache.no skriv same verdi i manifestet.
+funksjon nc_selfhost_cache_compiler_fingerprint(root: tekst, runtime: tekst) -> tekst {
+    hvis runtime == null eller runtime == "" { returner "" }
+    hvis ikkje builtin.fil_finnes(runtime) { returner "" }
+    la runtime_hash = builtin.sha256_bytes(builtin.fil_les_binær(runtime))
+    returner builtin.sha256(nc_selfhost_cache_abi() + "\nruntime " + runtime_hash +
+        "\ncompiler " + bundler.modulcache_compiler_fingerprint(root) + "\n")
+}
+
+// Binæren til denne prosessen: det er han som kompilerer frå kjelde ved bom.
+funksjon nc_selfhost_cache_runtime() -> tekst {
+    prøv { returner tekst(builtin.system_info()["executable"]) } fang (e) { returner "" }
+    returner ""
+}
+
+// Kjeldehash-porta selfhost-fragment. Manifestet
+// <cache>/precompiled/manifest.json har forma
+//   {"schema": nc_selfhost_cache_abi(),
+//    "compiler_fingerprint": nc_selfhost_cache_compiler_fingerprint(root, runtime),
+//    "modules": {"selfhost/common.no": {"module": "selfhost.common",
+//        "source_sha256": sha256(kjeldebytane),
+//        "artifact": "bootstrap/precompiled/common.ncb.json",
+//        "artifact_sha256": sha256(artefaktbytane)}}}
+// Fragmentet blir berre brukt når schema, modulnamn, kjeldehash,
+// artefakthash og kompilatorfingeravtrykk alle stemmer. Alle avvik (inkl.
+// manglande manifest eller fingeravtrykk) gjev "" og kallaren kompilerer frå
+// levande kjelde. Eit stale fragment kan då aldri maskere ei kjeldeendring
+// (jf. common.no/Fix A) eller ein kompilatorfiks (reseed).
+funksjon nc_les_verifisert_selfhost_ncb(kildef: tekst, modul: tekst, root: tekst) -> tekst {
+    la cache_rot = nc_bootstrap_cache_rot(root)
+    la manifest_sti = cache_rot + "/precompiled/manifest.json"
+    la merkelapp = modul
+    hvis merkelapp == "" { merkelapp = kildef }
+    hvis ikkje builtin.fil_finnes(manifest_sti) {
+        nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " no-manifest")
+        returner ""
+    }
+    prøv {
+        la manifest = builtin.json_parse_raw(fil_les(manifest_sti))
+        hvis builtin.type(manifest) != "ordbok" eller tekst(manifest["schema"]) != nc_selfhost_cache_abi() {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " schema")
+            returner ""
+        }
+        la modular = manifest["modules"]
+        hvis builtin.type(modular) != "ordbok" {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " schema")
+            returner ""
+        }
+        la rel = nc_selfhost_cache_relativ(kildef, root)
+        // Ingen null-sentinel: rå null er ikkje påliteleg samanliknbar på alle
+        // seedar. Bruk eit eksplisitt funnen-flagg.
+        la funnen = usann
+        la post = {}
+        hvis finnes_nøkkel(modular, rel) {
+            post = modular[rel]
+            funnen = sann
+        } ellers hvis modul != "" {
+            // Sekundært oppslag på modulnamn (kjeldehashen under er uansett porten).
+            la nøklar = nøkler(modular)
+            la ni: heiltall = 0
+            mens ni < lengde(nøklar) og ikkje funnen {
+                la kandidat = modular[nøklar[ni]]
+                hvis builtin.type(kandidat) == "ordbok" og tekst(kandidat["module"]) == modul {
+                    post = kandidat
+                    funnen = sann
+                }
+                ni = ni + 1
+            }
+        }
+        hvis ikkje funnen eller builtin.type(post) != "ordbok" {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " not-in-manifest")
+            returner ""
+        }
+        hvis modul != "" og tekst(post["module"]) != modul {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " module-mismatch")
+            returner ""
+        }
+        la kjelde_hash = builtin.sha256_bytes(builtin.fil_les_binær(kildef))
+        hvis kjelde_hash != tekst(post["source_sha256"]) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " source-hash")
+            returner ""
+        }
+        la artefakt_sti = nc_bootstrap_cache_artefakt(cache_rot, tekst(post["artifact"]), "precompiled")
+        hvis artefakt_sti == "" eller ikkje builtin.fil_finnes(artefakt_sti) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " artifact-missing")
+            returner ""
+        }
+        la artefakt_hash = builtin.sha256_bytes(builtin.fil_les_binær(artefakt_sti))
+        hvis artefakt_hash != tekst(post["artifact_sha256"]) {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " artifact-hash")
+            returner ""
+        }
+        // Siste port (dyrast): manifestet må vere laga av same runtime og
+        // kompilatorkjelde som ville kompilert modulen ved bom.
+        la manifest_fp = ""
+        hvis finnes_nøkkel(manifest, "compiler_fingerprint") {
+            manifest_fp = tekst(manifest["compiler_fingerprint"])
+        }
+        la fp = nc_selfhost_cache_compiler_fingerprint(root, nc_selfhost_cache_runtime())
+        hvis fp == "" eller manifest_fp != fp {
+            nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " compiler")
+            returner ""
+        }
+        returner fil_les(artefakt_sti)
+    } fang (e) {
+        nc_selfhost_cache_trace("selfhost-miss " + merkelapp + " invalid: " + tekst(e))
+        returner ""
+    }
+    returner ""
+}
+
+
+// ─── Selfhost-fragment: kjeldehash-porta cache ─────────────────────────────
+// Eit selfhost.*-fragment frå bootstrap-cachen blir berre brukt når
+// <cache>/precompiled/manifest.json har ein post for modulen der schema,
+// modulnamn, source_sha256 (av .no-kjelda), artifact_sha256 og
+// kompilatorfingeravtrykket stemmer (nc_les_verifisert_selfhost_ncb). Utan treff
+// → levande kjelde. F3.5 (J4): det gamle basename-oppslaget utan hash
+// (den gamle uverifiserte naudutgangen, «bootstrap/precompiled/<basename>.ncb.json»)
+// er fjerna: det kunne blande saman modular med same filnamn (std/json.no og
+// selfhost/json.no) og bruke forelda fragment stille.
+funksjon nc_selfhost_fragment(fil: tekst, alias: tekst, root: tekst) -> tekst {
+    returner nc_les_verifisert_selfhost_ncb(fil, alias, root)
+}
+
+// ─── Vertsstyrt selfhost.vm (eksplisitt markør) ─────────────────────────────
+// Ein bundle som importerer selfhost.vm får som standard berre VM-modulen sin
+// __module_init__ (modulglobalane). Alle selfhost.vm.*-kall blir løyste av
+// verten sin innbakte VM (vm.no: builtin.host_finst/host_kall). Tidlegare
+// hang denne modusen implisitt på at bootstrap/precompiled/vm.ncb.json fanst
+// (råfilteret heldt berre den injiserte initialisatoren); no er han ein
+// eksplisitt markør som ikkje les nokon JSON-cache, og globalinitialiseringa
+// blir kompilert frå toppnivå-deklarasjonane i levande selfhost/vm.no, så nye
+// modulglobalar (t.d. vm_green_*) kjem med automatisk.
+// Av: NORSCODE_VM_HOSTED=0 (heile vm.no frå kjelde/verifisert cache, VM-i-VM)
+// eller source-only-porten NORSCODE_USE_PRECOMPILED_SELFHOST=0.
+funksjon nc_vm_vertsstyrt_aktiv() -> boolsk {
+    hvis builtin.trim(miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST")) == "0" { returner usann }
+    la eksplisitt = builtin.trim(miljo_hent("NORSCODE_VM_HOSTED"))
+    returner eksplisitt != "0" og eksplisitt != "off" og eksplisitt != "false"
+}
+
+// Netto parentesdjupn for éi kjeldelinje, utanfor strengar og kommentarar.
+funksjon nc_parentesbalanse(linje: tekst) -> heiltall {
+    la djupn: heiltall = 0
+    la i_streng = usann
+    la escape = usann
+    la i: heiltall = 0
+    mens i < lengde(linje) {
+        la c = builtin.slice(linje, i, i + 1)
+        hvis i_streng {
+            hvis escape { escape = usann }
+            ellers hvis c == "\\" { escape = sann }
+            ellers hvis c == "\"" { i_streng = usann }
+        } ellers {
+            hvis c == "\"" { i_streng = sann }
+            ellers hvis c == "#" { bryt }
+            ellers hvis c == "/" og builtin.slice(linje, i + 1, i + 2) == "/" { bryt }
+            ellers hvis c == "(" eller c == "[" eller c == "{" { djupn = djupn + 1 }
+            ellers hvis c == ")" eller c == "]" eller c == "}" { djupn = djupn - 1 }
+        }
+        i = i + 1
+    }
+    returner djupn
+}
+
+// Modulnivå-deklarasjonane i vm-kjelda: bruk/importer-linjer (for alias i
+// initialisatorar) og toppnivå `la` (kolonne 0) med fleirlinjers fortsetjing.
+// Ein `la` held fram så lenge parentesane er opne, OG over innrykte linjer
+// rett etter (t.d. `la x = "a" +` + innrykt `"b"`, der parentesbalansen er 0).
+// Ei tom linje eller ei linje på kolonne 0 avsluttar setninga. Resultatet blir
+// kompilert som modulen selfhost.vm og gjev nøyaktig __module_init__ +
+// global_names til levande kjelde.
+funksjon nc_vm_modulglobal_kjelde(kjelde: tekst) -> tekst {
+    la linjer = builtin.split(kjelde, "\n")
+    la ut: liste<tekst> = []
+    la djupn: heiltall = 0
+    la i_la = usann
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        la linje = tekst(linjer[i])
+        la innrykt = builtin.starts_with(linje, " ") eller builtin.starts_with(linje, "\t")
+        hvis djupn > 0 eller (i_la og innrykt) {
+            legg_til(ut, linje)
+            djupn = djupn + nc_parentesbalanse(linje)
+            hvis djupn < 0 { djupn = 0 }
+        } ellers hvis builtin.starts_with(linje, "la ") {
+            legg_til(ut, linje)
+            i_la = sann
+            djupn = nc_parentesbalanse(linje)
+            hvis djupn < 0 { djupn = 0 }
+        } ellers {
+            i_la = usann
+            hvis builtin.starts_with(linje, "bruk ") eller builtin.starts_with(linje, "importer ") {
+                legg_til(ut, linje)
+            }
+        }
+        i = i + 1
+    }
+    legg_til(ut, "")
+    returner builtin.join(ut, "\n")
 }
 
 funksjon nc_sikre_modulmetadata(alle_initializers, alle_global_names, ncb, modul: tekst) -> heiltall {
@@ -1406,12 +1756,14 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
             la trans = finn_bruk_imports(kjelde)
             la ncb_json = nc_stdlib_fragment(fil, alias, cache_root)
             la brukte_selfhost_fragment = usann
-            // Normal server-/verktøyflyt kan bruke det committed, Norscode-eigde
-            // selfhost-fragmentet. Utan denne bana kompilerer til dømes
+            la vm_vertsstyrt = usann
+            // Normal server-/verktøyflyt importerer selfhost.vm VERTSSTYRT
+            // (sjå nc_vm_vertsstyrt_aktiv): utan det kompilerer til dømes
             // std.norsdb heile selfhost.vm på nytt og tømmer den monotone AOT-
-            // heapen før applikasjonsbundle er ferdig. Source-only-porten med
-            // NORSCODE_USE_PRECOMPILED_SELFHOST=0 går framleis alltid til
-            // levande kjelde og kan ikkje maskererast av fragmentet.
+            // heapen før applikasjonsbundle er ferdig. Andre selfhost.*-
+            // modular kan kome frå ein kjeldehash-verifisert bootstrap-cache.
+            // Source-only-porten med NORSCODE_USE_PRECOMPILED_SELFHOST=0 går
+            // framleis alltid til levande kjelde og kan ikkje maskerast.
             la precompiled_selfhost = builtin.trim(miljo_hent("NORSCODE_USE_PRECOMPILED_SELFHOST"))
             hvis ncb_json == "" og precompiled_selfhost != "0" {
                 // Alias blir materialisert frå køposten før filoppslaget og er
@@ -1419,106 +1771,16 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                 // eldre transitive kødata kan ha null i filfeltet, og ein
                 // tekstoperasjon på den nullverdien er ikkje ABI-trygg.
                 hvis builtin.starts_with(alias, "selfhost.") {
-                    ncb_json = bundler.les_precompiled_ncb(fil)
-                    hvis ncb_json != "" {
+                    hvis alias == "selfhost.vm" og nc_vm_vertsstyrt_aktiv() {
+                        vm_vertsstyrt = sann
                         brukte_selfhost_fragment = sann
-                        hvis alias == "selfhost.vm" {
-                            // vm.ncb.json er ei brei bootstrap-bundle. Filtrer
-                            // funksjonsobjekta som rå JSON før parse; parsing av
-                            // alle 418 funksjonar gjer at forkasta objekt blir
-                            // verande i den monotone AOT-heapen.
-                            la functions_marker = "\"functions\":{"
-                            la raw_pos = builtin.index_of(ncb_json, functions_marker)
-                            hvis raw_pos < 0 { kast "bundle: vm-fragment manglar functions" }
-                            raw_pos = raw_pos + lengde(functions_marker)
-                            la raw_deler: liste<tekst> = ["{\"format\":\"ncb-v1\",\"entry\":\"selfhost.vm.start\",\"module_initializers\":[\"selfhost.vm.__module_init__\"],\"global_names\":{\"selfhost.vm\":[\"vm_active_functions\",\"vm_active_ncb\",\"vm_request_counter\",\"vm_db_store\",\"vm_pool_store\",\"vm_db_counter\",\"vm_pool_counter\",\"vm_norsdb_active_handle\",\"vm_norsdb_indexes\",\"vm_random_counter\"]},\"imports\":[],\"route_handlers\":[],\"functions\":{" ]
-                            // Generert og kontrollert mot
-                            // tests/fixtures/selfhost_vm_globals.no.
-                            la vm_init = {
-                                "name": "__module_init__",
-                                "module": "selfhost.vm",
-                                "params": [],
-                                "is_async": usann,
-                                "module_init": sann,
-                                "string_encoding": "decoded-v1",
-                                "code": [
-                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_active_functions"],
-                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_active_ncb"],
-                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_request_counter"],
-                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_db_store"],
-                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_pool_store"],
-                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_db_counter"],
-                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_pool_counter"],
-                                    ["PUSH_CONST", ""], ["STORE_GLOBAL", "vm_norsdb_active_handle"],
-                                    ["BUILD_MAP", 0], ["STORE_GLOBAL", "vm_norsdb_indexes"],
-                                    ["PUSH_CONST", 1], ["STORE_GLOBAL", "vm_random_counter"],
-                                    ["PUSH_CONST", null], ["RETURN"]
-                                ],
-                                "source_lines": [],
-                                "source_columns": []
-                            }
-                            legg_til(raw_deler, "\"selfhost.vm.__module_init__\":")
-                            legg_til(raw_deler, json_skriv(vm_init))
-                            la raw_første = usann
-                            mens raw_pos < lengde(ncb_json) {
-                                mens raw_pos < lengde(ncb_json) og
-                                      (ncb_json[raw_pos] == " " eller ncb_json[raw_pos] == "\n" eller
-                                       ncb_json[raw_pos] == "\r" eller ncb_json[raw_pos] == "\t" eller
-                                       ncb_json[raw_pos] == ",") {
-                                    raw_pos = raw_pos + 1
-                                }
-                                hvis raw_pos >= lengde(ncb_json) eller ncb_json[raw_pos] == "}" { bryt }
-                                hvis ncb_json[raw_pos] != "\"" { kast "bundle: ugyldig vm-funksjonsnøkkel" }
-                                la raw_entry_start = raw_pos
-                                raw_pos = raw_pos + 1
-                                la raw_key_start = raw_pos
-                                la raw_escape = usann
-                                mens raw_pos < lengde(ncb_json) {
-                                    la raw_c = ncb_json[raw_pos]
-                                    hvis raw_escape { raw_escape = usann }
-                                    ellers hvis raw_c == "\\" { raw_escape = sann }
-                                    ellers hvis raw_c == "\"" { bryt }
-                                    raw_pos = raw_pos + 1
-                                }
-                                hvis raw_pos >= lengde(ncb_json) { kast "bundle: uavslutta vm-funksjonsnøkkel" }
-                                la raw_key = builtin.slice(ncb_json, raw_key_start, raw_pos)
-                                raw_pos = raw_pos + 1
-                                mens raw_pos < lengde(ncb_json) og
-                                      (ncb_json[raw_pos] == " " eller ncb_json[raw_pos] == ":") {
-                                    raw_pos = raw_pos + 1
-                                }
-                                hvis raw_pos >= lengde(ncb_json) eller ncb_json[raw_pos] != "{" {
-                                    kast "bundle: ugyldig vm-funksjonsobjekt"
-                                }
-                                la raw_depth = 0
-                                la raw_i_streng = usann
-                                raw_escape = usann
-                                mens raw_pos < lengde(ncb_json) {
-                                    la raw_v = ncb_json[raw_pos]
-                                    hvis raw_i_streng {
-                                        hvis raw_escape { raw_escape = usann }
-                                        ellers hvis raw_v == "\\" { raw_escape = sann }
-                                        ellers hvis raw_v == "\"" { raw_i_streng = usann }
-                                    } ellers hvis raw_v == "\"" { raw_i_streng = sann }
-                                    ellers hvis raw_v == "{" { raw_depth = raw_depth + 1 }
-                                    ellers hvis raw_v == "}" {
-                                        raw_depth = raw_depth - 1
-                                        hvis raw_depth == 0 { bryt }
-                                    }
-                                    raw_pos = raw_pos + 1
-                                }
-                                hvis raw_depth != 0 { kast "bundle: uavslutta vm-funksjonsobjekt" }
-                                hvis builtin.starts_with(raw_key, alias + ".") {
-                                    hvis ikkje raw_første { legg_til(raw_deler, ",") }
-                                    legg_til(raw_deler, builtin.slice(ncb_json, raw_entry_start, raw_pos + 1))
-                                    raw_første = usann
-                                }
-                                raw_pos = raw_pos + 1
-                            }
-                            legg_til(raw_deler, "}}")
-                            ncb_json = builtin.join(raw_deler, "")
+                        nc_stdlib_cache_trace("selfhost-vm-hosted " + alias)
+                    } ellers {
+                        ncb_json = nc_selfhost_fragment(fil, alias, cache_root)
+                        hvis ncb_json != "" {
+                            brukte_selfhost_fragment = sann
+                            nc_stdlib_cache_trace("selfhost-hit " + alias)
                         }
-                        nc_stdlib_cache_trace("selfhost-hit " + alias)
                     }
                 }
             }
@@ -1527,7 +1789,9 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                 // Compiler og JSON-parse skjer i ei lita hjelpefunksjon som
                 // fyller caller-mapet direkte. Det held den store JSON-teksten
                 // heilt ute av lokal-slotflata i nc_bundle_ncb.
-                la compile_kjelde = fil_les(fil)
+                la compile_kjelde = ""
+                hvis vm_vertsstyrt { compile_kjelde = nc_vm_modulglobal_kjelde(kjelde) }
+                ellers { compile_kjelde = fil_les(fil) }
                 nc_materialiser_import_ncb(parsed_mod_ncb, compile_kjelde, alias, "")
             } ellers {
                 hvis ikkje brukte_selfhost_fragment {
@@ -1545,11 +1809,11 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
             nc_bundle_fremdrift("bundle-import-parsed " + alias)
             la mod_ncb = bundler.omdøyp_ncb_objekt(parsed_mod_ncb, alias)
             hvis brukte_selfhost_fragment {
-                // Committed selfhost-fragment kan vere ei brei bootstrap-
-                // bundle med fleire modular. BFS-køa kompilerer/importerer dei
-                // transitive modulane separat; å slå inn alle her dupliserer
-                // hundrevis av funksjonar og kan tømme AOT-heapen ved den
-                // avsluttande JSON-serialiseringa.
+                // Eit selfhost-fragment kan vere ei brei bundle med fleire
+                // modular. BFS-køa kompilerer/importerer dei transitive
+                // modulane separat; å slå inn alle her dupliserer hundrevis av
+                // funksjonar og kan tømme AOT-heapen ved den avsluttande
+                // JSON-serialiseringa.
                 la fragment_fns = mod_ncb["functions"]
                 la avgrensa_fns: ordbok<tekst, tekst> = {}
                 hvis fragment_fns != null {
@@ -1564,42 +1828,20 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                     }
                 }
                 mod_ncb["functions"] = avgrensa_fns
-                hvis alias == "selfhost.vm" {
-                    // Det committed VM-fragmentet vart produsert før
-                    // eksplisitte global-opkodar. Avgrens kompatibilitets-
-                    // omskrivinga til den eksakte deklarasjonsflata i vm.no.
-                    la vm_globale = {
-                        "vm_active_functions": sann, "vm_active_ncb": sann,
-                        "vm_request_counter": sann, "vm_db_store": sann,
-                        "vm_pool_store": sann, "vm_db_counter": sann,
-                        "vm_pool_counter": sann, "vm_norsdb_active_handle": sann,
-                        "vm_norsdb_indexes": sann, "vm_random_counter": sann
-                    }
-                    la vm_fn_namn = nøkler(avgrensa_fns)
-                    la vm_fi: heiltall = 0
-                    mens vm_fi < lengde(vm_fn_namn) {
-                        la vm_kode = avgrensa_fns[vm_fn_namn[vm_fi]]["code"]
-                        la vm_ii: heiltall = 0
-                        mens vm_ii < lengde(vm_kode) {
-                            la vm_instr = vm_kode[vm_ii]
-                            hvis lengde(vm_instr) >= 2 og
-                               finnes_nøkkel(vm_globale, tekst(vm_instr[1])) {
-                                hvis vm_instr[0] == "LOAD_NAME" { vm_instr[0] = "LOAD_GLOBAL" }
-                                hvis vm_instr[0] == "STORE_NAME" { vm_instr[0] = "STORE_GLOBAL" }
-                            }
-                            vm_ii = vm_ii + 1
-                        }
-                        vm_fi = vm_fi + 1
-                    }
-                }
             }
             // Eldre compilerfragment klassifiserer den norske path-builtinen
             // som builtin.sti_join, medan VM-kontrakten historisk eksponerte
-            // builtin.path.join. std.db er den reine NorsDB-standardflata og
-            // skal på same måte bindast til den versjonerte builtin.db-ABI-en,
-            // ikkje stå att som eit uløyst modulnamn i den lukka kandidaten.
-            // Normaliser kalla i bundlegrensa; levande selfhost.vm støttar òg
-            // dei eksplisitte std.db-aliasa for eldre NCB-ar.
+            // builtin.path.join. Normaliser det kallet i bundlegrensa.
+            //
+            // std.db-kalla skal IKKJE skrivast om til builtin.db.*: den
+            // «versjonerte builtin.db-ABI-en» finst ikkje som køyrbar VM-arm
+            // (berre kapabilitets-gating), så omskrivinga gav
+            // «Ukjent innebygd funksjon: builtin.db.open» når ein IMPORTERT modul
+            // kalla std.db (t.d. test_db_example → examples.db → std.db). std.db
+            // er rein Norscode og blir bundla transitivt, så CALL std.db.open
+            // resolverer mot den bundla funksjonen (verifisert: patcha NCB
+            // builtin.db.* → std.db.* køyrer test_db_example grønt). Standalone
+            // db-testar (test_db) traff aldri denne bana (hovudfil, ikkje import).
             la alias_fns = mod_ncb["functions"]
             hvis alias_fns != null {
                 la alias_fn_namn = nøkler(alias_fns)
@@ -1612,11 +1854,6 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                         hvis lengde(alias_instr) >= 2 og alias_instr[0] == "CALL" og
                            alias_instr[1] == "builtin.sti_join" {
                             alias_instr[1] = "builtin.path.join"
-                        }
-                        hvis lengde(alias_instr) >= 2 og alias_instr[0] == "CALL" og
-                           builtin.starts_with(alias_instr[1], "std.db.") {
-                            alias_instr[1] = "builtin.db." + builtin.slice(
-                                alias_instr[1], 7, lengde(alias_instr[1]))
                         }
                         aii = aii + 1
                     }
@@ -1695,6 +1932,13 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     // skriv kanoniske CALL-mål direkte. Då treng ikkje heile NCB-teksten ein
     // ustabil alias-replace etter kompilering.
     la hoved_ncb_json = komp.kompiler_fil(hoved_kjelde, modul)
+    // Hovudfila sine importalias MÅ normaliserast òg — den einaste andre
+    // kallstaden er cache-kompatibilitetsbana for IMPORTERTE modular. Utan
+    // dette blir eit alias som KOLLIDERER med ein builtin-namespace bunde til
+    // builtinen: `bruk std.db som db` + `db.open(...)` gav CALL builtin.db.open
+    // (vm.no har db.* som capability-gata builtin-familie), som fersk seed ikkje
+    // implementerer → «Ukjent innebygd funksjon» (test_admin_relations).
+    // Verifisert: same modul under aliaset `mydb` resolverte alt korrekt.
     nc_bundle_fremdrift("bundle-main-compiled")
     hoved_ncb_json = normaliser_json_kontrollteikn(hoved_ncb_json)
     nc_bundle_fremdrift("bundle-main-normalized")
@@ -1703,8 +1947,10 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     slå_saman_funksjonar(alle_fns, hoved_ncb["functions"])
     nc_sikre_modulmetadata(alle_initializers, alle_global_names, hoved_ncb, modul)
     // Hovudmodulen blir slått inn etter importløkkja. Køyr same ABI-
-    // normalisering over den ferdige funksjonsflata, slik at direkte kall frå
-    // programmet ikkje kan stå att som std.db.* eller builtin.sti_join.
+    // normalisering (berre builtin.sti_join → builtin.path.join) over den
+    // ferdige funksjonsflata. std.db.* skal IKKJE skrivast om til builtin.db.*
+    // (sjå importløkkja over): builtin.db-ABI-en er ikkje køyrbar i VM-en, og
+    // std.db blir bundla transitivt så CALL std.db.* resolverer direkte.
     la alle_alias_fn_namn = nøkler(alle_fns)
     la aafi: heiltall = 0
     mens aafi < lengde(alle_alias_fn_namn) {
@@ -1716,12 +1962,6 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
                alle_alias_instr[0] == "CALL" og
                alle_alias_instr[1] == "builtin.sti_join" {
                 alle_alias_instr[1] = "builtin.path.join"
-            }
-            hvis lengde(alle_alias_instr) >= 2 og
-               alle_alias_instr[0] == "CALL" og
-               builtin.starts_with(alle_alias_instr[1], "std.db.") {
-                alle_alias_instr[1] = "builtin.db." + builtin.slice(
-                    alle_alias_instr[1], 7, lengde(alle_alias_instr[1]))
             }
             aaii = aaii + 1
         }
@@ -1809,7 +2049,9 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
         la function_key = tekst(function_keys[bfi])
         legg_til(bundle_deler, json_skriv(function_key))
         legg_til(bundle_deler, ":")
-        legg_til(bundle_deler, nc_json_lineær(alle_fns[function_key]))
+        // Importalias blir normaliserte per funksjon (sjå normaliser_hovudalias_builtin),
+        // slik at eit alias aldri omdirigerer modulen sin eigen kropp til seg sjølv.
+        legg_til(bundle_deler, normaliser_hovudalias_builtin(nc_json_lineær(alle_fns[function_key]), imports, function_key))
         bfi = bfi + 1
     }
     legg_til(bundle_deler, "}")
@@ -1823,6 +2065,13 @@ funksjon nc_bundle_ncb(src_sti: tekst, modul: tekst, imports: liste<tekst>) -> t
     legg_til(bundle_deler, rh_json)
     legg_til(bundle_deler, "}")
     la bundle_json_final = builtin.join(bundle_deler, "")
+    // Alias som KOLLIDERER med ein builtin-namespace må normaliserast på den
+    // FERDIGE bunten: målt med tracing er «builtin.<alias>.» IKKJE til stades i
+    // hovudfila sin NCB rett etter kompilering (treff=-1) — prefikset kjem
+    // lenger nede i kjeda. `bruk std.db som db` + `db.open(...)` gav difor CALL
+    // builtin.db.open (vm.no har db.* som capability-gata builtin-familie), som
+    // fersk seed ikkje implementerer → «Ukjent innebygd funksjon». Verifisert at
+    // same modul under aliaset `mydb` alt resolverte korrekt.
     nc_bundle_fremdrift("bundle-finalized")
     la debug_bundle = builtin.trim(miljo_hent("NORSCODE_DEBUG_BUNDLE_OUTPUT"))
     hvis debug_bundle != "" {
@@ -2102,20 +2351,25 @@ funksjon nc_compile(src_sti: tekst, ut_sti: tekst) -> heltall {
     )
     la faktisk_ut = ut_sti
     hvis faktisk_ut == "" {
+        // Standard-utfila følgjer formatregelen (serde.binaer_for_sti): `x.ncb` er
+        // binær; med NORSCODE_NCB_BINARY=0 blir det `x.ncb.json` som før.
+        la ending = ".ncb"
+        hvis builtin.trim(miljo_hent("NORSCODE_NCB_BINARY")) == "0" { ending = ".ncb.json" }
         faktisk_ut = src_sti
         hvis builtin.ends_with(faktisk_ut, ".no") {
-            faktisk_ut = builtin.slice(faktisk_ut, 0, lengde(faktisk_ut) - 3) + ".ncb.json"
+            faktisk_ut = builtin.slice(faktisk_ut, 0, lengde(faktisk_ut) - 3) + ending
         } ellers {
-            faktisk_ut = faktisk_ut + ".ncb.json"
+            faktisk_ut = faktisk_ut + ending
         }
     }
-    // Opt-in binær NCB (masterplan: JSON→binær). NORSCODE_NCB_BINARY=1 skriv det
-    // deterministiske binærformatet via serde.serialiser i staden for JSON-tekst.
-    // Standard er framleis JSON-tekst, so ingen eksisterande veg endrar seg.
-    hvis miljo_hent("NORSCODE_NCB_BINARY") == "1" {
-        la bytes = serde.serialiser(json_parse_raw(ncb_json))
-        builtin.fil_skriv_binary(faktisk_ut, bytes)
-        skriv("NCB (binær) skrive til " + faktisk_ut + " (" + tekst_fra_heltall(lengde(bytes)) + " bytes)\n")
+    // F3.6 (J5.2): binær NCB er standard etter formatregelen i serde.binaer_for_sti
+    // (NORSCODE_NCB_BINARY=1/0 overstyrer; elles `….json` → JSON, anna → binær).
+    // Alle verktøy som gjev ei `.ncb.json`-utfil (payloadane til C-æra-vertane,
+    // bootstrap-cachen, modulcachen) får JSON som før.
+    hvis serde.binaer_for_sti(faktisk_ut) {
+        la data = serde.serialiser_tekst(json_parse_raw(ncb_json))
+        fil_skriv(faktisk_ut, data)
+        skriv("NCB (binær) skrive til " + faktisk_ut + " (" + tekst_fra_heltall(lengde(data)) + " bytes)\n")
         returner 0
     }
     fil_skriv(faktisk_ut, ncb_json)
@@ -2143,25 +2397,207 @@ funksjon nc_bygg_native_bruk() -> heiltall {
     skriv("bruk: nc bygg-native --target macos-arm64 [--ncb] fil ut\n")
     skriv("bruk: nc bygg-native --target linux-x86_64 [--ncb] fil ut\n")
     skriv("bruk: nc bygg-native --target linux-arm64 [--ncb] fil ut\n")
+    skriv("bruk: nc bygg-native --target windows-x86_64 [--ncb] fil ut   (krev førehandsbygd kryss-codegen)\n")
     returner 0
 }
 
-funksjon nc_bygg_native_ncb_fra_kjelde(src_sti: tekst) -> tekst {
+// AOT-program får std.desimaltall_tekst implisitt. Utan han har eit brukarprogram
+// ingen måte å skrive ut eit desimaltall på: tekst() rutar til
+// std.desimaltall_tekst.til_tekst_gap, og finst ikkje funksjonen i bunten fell
+// kodegeneratoren til den native to_text, som ikkje kjenner type 6 og gav tom
+// streng. Berre bygg-native gjer dette — `compile`-vegen (NCB for VM-en) er
+// urørt, so NCB-bytar og fikspunkt-testar ikkje endrar seg.
+funksjon nc_aot_implisitte_imports(imports: liste<tekst>) -> liste<tekst> {
+    returner nc_aot_legg_til_import(imports, "std.desimaltall_tekst", "__desimaltall_tekst")
+}
+
+// bygg-native --ncb (aotfloat): NCB-en kjem då typisk frå `nc compile` (VM-forma), som
+// ikkje har den implisitte AOT-modulen over. Utan std.desimaltall_tekst har
+// desimaltall-krokane i x86-codegenen (to_text/json_stringify) ingen formaterar:
+// tekst(3.5) gav "" og json_skriv null. Flett modulen inn når han manglar, og returner
+// stien til ein mellombels NCB — eller "" når input kan brukast som han er. Berre
+// linux-x86_64: krokane finst berre i x86-codegenen, og andre mål skal ikkje få
+// endra binærar.
+funksjon nc_aot_flett_implisitt_ncb(input: tekst, target: tekst) -> tekst {
+    hvis target != "linux-x86_64" { returner "" }
+    la modul = "std.desimaltall_tekst"
+    la ncb = serde.les_fil(input)
+    hvis ncb == null { returner "" }
+    la fns = ncb["functions"]
+    hvis fns == null { returner "" }
+    hvis finnes_nøkkel(fns, modul + ".desimal_til_tekst") { returner "" }
+    la mod_ncb: ordbok<tekst, tekst> = {}
+    nc_materialiser_import_ncb(mod_ncb, fil_les(_resolve_import_sti("", _modul_filsti_fra_namn(modul))), modul, "")
+    mod_ncb = bundler.omdøyp_ncb_objekt(mod_ncb, modul)
+    slå_saman_funksjonar(fns, mod_ncb["functions"])
+    ncb["functions"] = fns
+    la inits = ncb["module_initializers"]
+    hvis inits == null { inits = json_parse_raw("[]") }
+    la gnamn = ncb["global_names"]
+    hvis gnamn == null { gnamn = json_parse_raw("{}") }
+    nc_sikre_modulmetadata(inits, gnamn, mod_ncb, modul)
+    ncb["module_initializers"] = inits
+    ncb["global_names"] = gnamn
+    la ut = "/tmp/norscode_bygg_native_" + builtin.random_hex(16)
+    hvis serde.binaer_stotta() {
+        ut = ut + ".ncb"
+        fil_skriv(ut, serde.serialiser_tekst(ncb))
+    } ellers {
+        ut = ut + ".ncb.json"
+        fil_skriv(ut, json_skriv(ncb))
+    }
+    returner ut
+}
+
+// Importlista med modulen `namn` lagd til under `alias` (BFS-en i nc_bundle_ncb
+// namngjev modulen etter filstien, ikkje aliaset), eller lista uendra når modulen
+// alt er med.
+funksjon nc_aot_legg_til_import(imports: liste<tekst>, namn: tekst, alias: tekst) -> liste<tekst> {
+    la fil = _modul_filsti_fra_namn(namn)
+    la i: heltall = 0
+    mens i < lengde(imports) {
+        hvis builtin.ends_with(tekst(imports[i]), fil) { returner imports }
+        i = i + 1
+    }
+    la ut: liste<tekst> = []
+    la j: heltall = 0
+    mens j < lengde(imports) { legg_til(ut, imports[j])  j = j + 1 }
+    legg_til(ut, alias + "=" + fil)
+    returner ut
+}
+
+// F3.2: x86-codegenen (native_codegen_v2, mål linux-x86_64) kompilerer
+// builtin.process_spawn_argv til std.native_gap.process_spawn_argv_gap og kastar når
+// funksjonen manglar i bunten. Andre mål har eigen spawn (Mach-O: rå minimal spawn til M3)
+// og skal ikkje få x86-motoren dregen inn.
+// Stdlib-innpakningane som spawnar (std.runtime.process_abi, tools.process_runner,
+// std.prosess, std.multiprocessing, …) importerer ikkje std.native_gap sjølve — det
+// ville tvinge C-æra-hybridlana til å kompilere heile modulen — so bygg-native legg
+// han til når bunten kallar spawn utan han. Program utan spawn får han ikkje
+// (ELF-en veks om lag 1,7 MB med modulen). Eit spawn-namn i ein strengkonstant gjev
+// berre ein unødig import, aldri eit manglande kall.
+funksjon nc_aot_treng_native_gap(ncb_json: tekst, target: tekst) -> boolsk {
+    hvis target != "linux-x86_64" { returner usann }
+    hvis builtin.index_of(ncb_json, "\"std.native_gap.process_spawn_argv_gap\"") >= 0 { returner usann }
+    hvis builtin.index_of(ncb_json, "\"builtin.process_spawn_argv\"") >= 0 { returner sann }
+    hvis builtin.index_of(ncb_json, "\"process_spawn_argv\"") >= 0 { returner sann }
+    // a12fix: tryggleiksbuiltins som x86-codegenen rutar til std.native_gap (gap_ruter).
+    // Utan modulen gav builtin.random_hex null-fallback, altså token == "" utan unnatak;
+    // codegenen gjer det no til byggfeil, og her får programmet modulen i staden.
+    la krypto: liste_tekst = ["random_hex", "pbkdf2_sha256", "sha256_bytes", "acme_sign", "acme_verify"]
+    la i: heiltall = 0
+    mens i < lengde(krypto) {
+        hvis builtin.index_of(ncb_json, "\"builtin." + krypto[i] + "\"") >= 0 { returner sann }
+        hvis builtin.index_of(ncb_json, "\"" + krypto[i] + "\"") >= 0 { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// a12fix: same mønster for dei reine krypto-rutene utanfor native_gap (gap_ruter):
+// builtin.sha256 → std.sha256.hash, builtin.argon2id → std.argon2id_pure.hash_raw_hex.
+// Returnerer importlista med dei modulane bunten manglar lagde til (uendra elles).
+funksjon nc_aot_krypto_imports(ncb_json: tekst, target: tekst, imports: liste<tekst>) -> liste<tekst> {
+    hvis target != "linux-x86_64" { returner imports }
+    la ut = imports
+    hvis builtin.index_of(ncb_json, "\"builtin.sha256\"") >= 0 og builtin.index_of(ncb_json, "\"std.sha256.hash\"") < 0 {
+        ut = nc_aot_legg_til_import(ut, "std.sha256", "__sha256")
+    }
+    hvis builtin.index_of(ncb_json, "\"builtin.argon2id\"") >= 0 og builtin.index_of(ncb_json, "\"std.argon2id_pure.hash_raw_hex\"") < 0 {
+        ut = nc_aot_legg_til_import(ut, "std.argon2id_pure", "__argon2id_pure")
+    }
+    returner ut
+}
+
+funksjon nc_bygg_native_ncb_fra_kjelde(src_sti: tekst, target: tekst) -> tekst {
     la kjelde = fil_les(src_sti)
-    la imports = finn_bruk_imports(kjelde)
+    la imports = nc_aot_implisitte_imports(finn_bruk_imports(kjelde))
+    // Ein AOT-binær har ingen vert-VM å delegere selfhost.vm.* til, så
+    // selfhost.vm blir kompilert inn (ikkje vertsstyrt) med mindre
+    // NORSCODE_VM_HOSTED er sett eksplisitt. (Før markøren hekk dette på om
+    // CWD tilfeldigvis hadde bootstrap/precompiled/vm.ncb.json.)
+    la hosted_før = builtin.trim(miljo_hent("NORSCODE_VM_HOSTED"))
+    hvis hosted_før == "" { miljo_sett("NORSCODE_VM_HOSTED", "0") }
     la ncb_json = ""
-    hvis lengde(imports) > 0 { ncb_json = nc_bundle_ncb(src_sti, "__main__", imports) }
-    ellers { ncb_json = komp.kompiler_fil(kjelde, "__main__") }
+    prøv {
+        ncb_json = nc_bundle_ncb(src_sti, "__main__", imports)
+        // Implisitte importar kan dra inn nye kall (native_gap brukar sjølv krypto-builtins),
+        // so vi buntar på nytt til lista står stille (maks tre rundar).
+        la runde: heiltall = 0
+        mens runde < 3 {
+            la neste = imports
+            hvis nc_aot_treng_native_gap(ncb_json, target) {
+                neste = nc_aot_legg_til_import(neste, "std.native_gap", "__native_gap")
+            }
+            neste = nc_aot_krypto_imports(ncb_json, target, neste)
+            hvis lengde(neste) == lengde(imports) { bryt }
+            imports = neste
+            ncb_json = nc_bundle_ncb(src_sti, "__main__", imports)
+            runde = runde + 1
+        }
+    } fang (e) {
+        hvis hosted_før == "" { miljo_sett("NORSCODE_VM_HOSTED", "") }
+        kast e
+    }
+    hvis hosted_før == "" { miljo_sett("NORSCODE_VM_HOSTED", "") }
     returner normaliser_json_kontrollteikn(ncb_json)
 }
 
 funksjon nc_bygg_native_køyr_codegen(src_sti: tekst) -> heiltall {
+    // host_exec_ncb_json køyrer codegen-NCB-en via køyr_ncb, som slår på
+    // målpolicyen (__vm_target_policy__). Utan nc_run_policy() var
+    // NORSCODE_VM_TARGET_CAPABILITIES tom → «miljo_hent manglar capability
+    // env.read» på fersk seed. Same arv som nc run. (2026-09-10)
+    nc_run_policy()
     la kjelde = fil_les(src_sti)
+    // Her blir KODEGENERATOREN (native_codegen_v2.no) kompilert, ikkje
+    // brukarprogrammet — so den implisitte AOT-importen høyrer IKKJE heime her.
+    // (Ei tidlegare redigering la han til begge stader ved eit feiltreff.)
     la imports = finn_bruk_imports(kjelde)
     la ncb_json = ""
     hvis lengde(imports) > 0 { ncb_json = nc_bundle_ncb(src_sti, "__main__", imports) }
     ellers { ncb_json = komp.kompiler_fil(kjelde, "__main__") }
-    returner host_exec_ncb_json(normaliser_json_kontrollteikn(ncb_json))
+    // F3.6 (J5.3): host_exec_ncb (gap-rute selfhost.vm.host_exec_ncb_gap) tek JSON-tekst,
+    // binær NCB-tekst eller eit objekt; kompilatoren gjev framleis JSON-tekst (J5.5 er F7).
+    returner host_exec_ncb(normaliser_json_kontrollteikn(ncb_json))
+}
+
+// Rask veg (F3.7): førehandsbygd codegen for (mål, vert) — bootstrap/native_codegen_
+// <mål>_on_<vert>.elf, eller legacy bootstrap/native_codegen_x86_64.elf for x86 på x86 —
+// gjer same jobb på sekund, medan tolka codegen via host_exec_ncb_json brukar 30–95 min
+// (test_linux_x86_64_aot_cli fekk 124). selfhost.native_execution.codegen_prebuilt eig
+// stiane og hashporten (.srchash = codegen-kjelde + ncb_serde, .depshash = resten av
+// bruk-lukkinga); same port som tools/ncb_to_elf.no og tests/test_native_codegen_srchash.no.
+// Returnerer -1 når vegen ikkje kan brukast (manglar/stale/ukjend vert) etter ei tydeleg
+// åtvaring; kallaren fell då tilbake til tolka codegen når målet tillèt det.
+funksjon nc_bygg_native_prebuilt(root: tekst, target: tekst, ncb: tekst, output: tekst) -> heiltall {
+    la val = cgp.vel(root, target, cgp.vert_plattform())
+    hvis tekst(val["status"]) != "ok" {
+        la fallback = "ingen tolka codegen for " + target
+        hvis cgp.tolka_tillaten(target) { fallback = "tolka codegen (" + cgp.codegen_kjelde(target) + ", kan ta 30–95 min)" }
+        skriv("[bygg-native] ÅTVARING: " + tekst(val["melding"]) + " → " + fallback + "\n")
+        returner -1
+    }
+    la prebuilt = tekst(val["sti"])
+    la ut_dir = _dirname(output)
+    // cwd "" = arv arbeidskatalogen, so relative NC_INPUT/NC_OUTPUT blir løyste likt.
+    la req = bygg_process_abi.request(prebuilt, [], "", "", 1800000, 65536)
+    bygg_process_abi.sett_sandbox(req, "none", 0, 64, usann)
+    bygg_process_abi.sett_environment(req, {
+        "NORSCODE_ROOT": root,
+        "NC_INPUT": ncb,
+        "NC_OUTPUT": output,
+        "NC_TARGET": target,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_GC_ALLOC": miljo_hent("NORSCODE_GC_ALLOC"),
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp," + ut_dir
+    })
+    la res = builtin.process_spawn_argv(req)
+    hvis tekst(res["stdout"]) != "" { skriv(tekst(res["stdout"])) }
+    hvis tekst(res["stderr"]) != "" { skriv(tekst(res["stderr"])) }
+    hvis tekst(res["status"]) != "ferdig" { returner 1 }
+    returner heltall_fra_tekst(tekst(res["exit_code"]))
 }
 
 funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
@@ -2173,7 +2609,7 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
         returner 2
     }
     la target = tekst(argv[3])
-    hvis target != "macos-arm64" og target != "linux-x86_64" og target != "linux-arm64" {
+    hvis ikkje cgp.er_mål(target) {
         nc_bygg_native_bruk()
         returner 2
     }
@@ -2198,9 +2634,18 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
     hvis root == "" { root = "." }
     la faktisk_ncb = input
     la mellombels = ""
+    hvis er_ncb {
+        prøv { mellombels = nc_aot_flett_implisitt_ncb(input, target) }
+        fang (e) {
+            nc_slett_fil_trygt(mellombels)
+            skriv("nc bygg-native: fletting av std.desimaltall_tekst feila: " + tekst(e) + "\n")
+            returner 1
+        }
+        hvis mellombels != "" { faktisk_ncb = mellombels }
+    }
     hvis ikkje er_ncb {
         mellombels = "/tmp/norscode_bygg_native_" + builtin.random_hex(16) + ".ncb.json"
-        prøv { fil_skriv(mellombels, nc_bygg_native_ncb_fra_kjelde(input)) }
+        prøv { fil_skriv(mellombels, nc_bygg_native_ncb_fra_kjelde(input, target)) }
         fang (e) {
             nc_slett_fil_trygt(mellombels)
             skriv("nc bygg-native: kompilering feila: " + tekst(e) + "\n")
@@ -2211,12 +2656,18 @@ funksjon nc_bygg_native_cli(argv: liste_tekst) -> heiltall {
 
     miljo_sett("NC_INPUT", faktisk_ncb)
     miljo_sett("NC_OUTPUT", output)
-    la codegen = root + "/selfhost/native_execution/native_codegen_v2.no"
-    hvis target == "macos-arm64" { codegen = root + "/selfhost/native_execution/macho_arm64_codegen.no" }
-    hvis target == "linux-arm64" { codegen = root + "/selfhost/native_execution/elf_arm64_codegen.no" }
-    // Codegen køyrer som Norscode-NCB direkte i native host. Det bevarer
-    // etikett-/funksjonsidentiteten og unngår eit feilaktig VM-i-VM-lag.
-    la status = nc_bygg_native_køyr_codegen(codegen)
+    // Førehandsbygd (kryss-)codegen for (mål, vert) først; elles tolka codegen-kjelde,
+    // som køyrer som Norscode-NCB direkte i native host (bevarer etikett-/funksjons-
+    // identiteten og unngår eit feilaktig VM-i-VM-lag).
+    la status = nc_bygg_native_prebuilt(root, target, faktisk_ncb, output)
+    hvis status < 0 {
+        hvis cgp.tolka_tillaten(target) {
+            status = nc_bygg_native_køyr_codegen(root + "/" + cgp.codegen_kjelde(target))
+        } ellers {
+            skriv("nc bygg-native: " + target + " krev førehandsbygd kryss-codegen (bootstrap/native_codegen_" + target + "_on_<vert>); PE-codegen kjem i W2/W5\n")
+            status = 2
+        }
+    }
     hvis mellombels != "" { nc_slett_fil_trygt(mellombels) }
     hvis status != 0 { returner status }
     la modus = native_fs.native_sett_modus_sti(output, 493)
@@ -2269,12 +2720,13 @@ funksjon nc_bundle_fleire_direkte(filer: liste_tekst, ut: tekst) -> heiltall {
     bundle["imports"] = []
     bundle["functions"] = alle_fns
     bundle["tests"] = []
-    // Opt-in binær bundle (masterplan JSON→binær). Standard uendra JSON-tekst.
-    hvis miljo_hent("NORSCODE_NCB_BINARY") == "1" {
-        la bytes = serde.serialiser(bundle)
-        builtin.fil_skriv_binary(ut, bytes)
+    // F3.6: same formatregel som nc_compile (serde.binaer_for_sti). Standard-utfila
+    // build/kompiler.ncb.json er JSON.
+    hvis serde.binaer_for_sti(ut) {
+        la data = serde.serialiser_tekst(bundle)
+        fil_skriv(ut, data)
         skriv("Bundle (binær): " + ut + " (" + tekst_fra_heltall(lengde(alle_fns)) +
-              " funksjonar, " + tekst_fra_heltall(lengde(bytes)) + " bytes)\n")
+              " funksjonar, " + tekst_fra_heltall(lengde(data)) + " bytes)\n")
         returner 0
     }
     fil_skriv(ut, json_skriv(bundle))
@@ -2282,8 +2734,16 @@ funksjon nc_bundle_fleire_direkte(filer: liste_tekst, ut: tekst) -> heiltall {
     returner 0
 }
 
+// Standard-output for `nc bundle` utan --output er ein byggjeartefakt under
+// build/. (Tidlegare bootstrap/kompiler.ncb.json: ein L5b-mini-bunt hamna der
+// og vart bygd inn som «compiler»-payload i attestasjons-/Windows-kandidatar.)
+funksjon nc_bundle_standard_ut() -> tekst {
+    returner "build/kompiler.ncb.json"
+}
+
 funksjon nc_bundle_cli(argv: liste_tekst) -> heiltall {
-    la ut = "bootstrap/kompiler.ncb.json"
+    la ut = nc_bundle_standard_ut()
+    la eksplisitt_ut = usann
     la modular = ""
     la filer: liste_tekst = []
     la i: heiltall = 2
@@ -2295,6 +2755,7 @@ funksjon nc_bundle_cli(argv: liste_tekst) -> heiltall {
                 returner 2
             }
             ut = tekst(argv[i + 1])
+            eksplisitt_ut = sann
             i = i + 2
         } ellers hvis builtin.starts_with(arg, "--") {
             skriv("bruk: nc bundle [--output utdata.ncb.json] [fil.no ...]\n")
@@ -2306,6 +2767,7 @@ funksjon nc_bundle_cli(argv: liste_tekst) -> heiltall {
             i = i + 1
         }
     }
+    hvis ikkje eksplisitt_ut { prøv { builtin.mkdir_p("build") } fang (e) { } }
     // Éin modul er semantisk identisk med compile. Bruk den allereie
     // materialiserte native compilerbanen direkte og unngå VM-i-VM.
     hvis lengde(filer) == 1 {
@@ -2500,7 +2962,6 @@ funksjon nc_direkte_verktøysti(cmd: tekst) -> tekst {
     hvis cmd == "ncb-to-elf" { returner "tools/ncb_to_elf.no" }
     hvis cmd == "package-linux-app" { returner "tools/package-linux-app.no" }
     hvis cmd == "docker-build-linux" { returner "tools/docker-build-linux.no" }
-    hvis cmd == "build-linux-stage0-docker" { returner "tools/build_linux_x86_64_stage0_docker_v3601.no" }
     hvis cmd == "package-windows-app" { returner "tools/package-windows-app.no" }
     hvis cmd == "build-windows-app-layout" { returner "tools/build-windows-app-layout.no" }
     hvis cmd == "verify-macos-app" { returner "tools/verify-macos-app.no" }
@@ -2711,7 +3172,6 @@ funksjon nc_direkte_bruk(cmd: tekst) -> tekst {
     hvis cmd == "ncb-to-elf" { returner "bruk: nc ncb-to-elf fil.ncb.json ut.elf" }
     hvis cmd == "package-linux-app" { returner "bruk: nc package-linux-app [--version VER] [--format appdir|tarball|all|appimage-adapter]" }
     hvis cmd == "docker-build-linux" { returner "bruk: nc docker-build-linux [--output FIL]" }
-    hvis cmd == "build-linux-stage0-docker" { returner "bruk: nc build-linux-stage0-docker" }
     hvis cmd == "package-windows-app" { returner "bruk: nc package-windows-app [--version VER] <EXE_PATH>" }
     hvis cmd == "build-windows-app-layout" { returner "bruk: nc build-windows-app-layout [--out DIR] [--name NAMN] <EXE_PATH>" }
     hvis cmd == "verify-macos-app" { returner "bruk: nc verify-macos-app [APP_PATH]" }
@@ -2877,7 +3337,6 @@ funksjon nc_forbered_direkte_miljø(cmd: tekst, argv: liste_tekst) -> boolsk {
         miljo_sett("NORSCODE_DOCKER_BUILD_LINUX_OUTPUT", nc_root_sti(output, "dist/norscode-linux-x86_64"))
         returner sann
     }
-    hvis cmd == "build-linux-stage0-docker" { returner tal == 2 }
     hvis cmd == "package-windows-app" {
         la version = ""
         la exe = ""

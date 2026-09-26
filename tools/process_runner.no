@@ -19,6 +19,15 @@ funksjon er_norscode_runtime(executable: tekst) -> boolsk {
 funksjon nc_miljø_frå_argv(executable: tekst, argv: liste_tekst, miljø: ordbok_tekst) -> ordbok_tekst {
     hvis ikkje er_norscode_runtime(executable) { returner miljø }
     hvis finnes_nøkkel(miljø, "NORSCODE_CMD") { returner miljø }
+    // Sjølv-hosta seed arvar forelderens envp (inherit_env=1; eigne overstyringar
+    // fyrst, så forelderen sitt). Ein CI-orkestrator har NORSCODE_CMD=run og
+    // NORSCODE_FILE=<orkestrator.no> i miljøet sitt; utan eksplisitt maske arva
+    // eit barn spawna med argv (t.d. `selftest`) dei og køyrde orkestratoren om
+    // att — rekursiv materialisering som trunkerte dist under seg sjølv (SIGBUS)
+    // og hang CI (runtime-smoke timeout 124, 11 foreldrelause prosessar).
+    // Tom verdi = «usett» i nc_main.start, så argv styrer kommandoen.
+    miljø["NORSCODE_CMD"] = ""
+    miljø["NORSCODE_FILE"] = ""
     hvis lengde(argv) < 2 { returner miljø }
     la cmd = tekst(argv[0])
     hvis cmd == "run" {
@@ -52,6 +61,61 @@ funksjon køyr(executable: tekst, argv: liste_tekst, cwd: tekst,
     // kan velje køyr_med_grenser med ei streng, dokumentert høgare grense.
     returner køyr_med_grenser(executable, argv, cwd, miljø, timeout_ms,
                               4294967296, 1024)
+}
+
+// [exit_code, stdout, stderr]-form for verktøy migrerte frå tekstprosess-kall.
+// Ein Norscode-runtime starta med argv får NORSCODE_CMD/FILE/OUTPUT nullstilte
+// (tom verdi = unset i nc_main.start) når argv ikkje sjølv gjev kontrakten:
+// elles ville arva verdiar frå forelderen vinne over argv og starte
+// forelderverktøyet rekursivt. `miljø` blir mutert; send eit ferskt kart.
+funksjon køyr_liste(executable: tekst, argv: liste_tekst, cwd: tekst,
+                    miljø: ordbok_tekst, timeout_ms: heiltall) -> liste_tekst {
+    la m = nc_miljø_frå_argv(executable, argv, miljø)
+    hvis er_norscode_runtime(executable) {
+        hvis ikkje finnes_nøkkel(m, "NORSCODE_CMD") { m["NORSCODE_CMD"] = "" }
+        hvis ikkje finnes_nøkkel(m, "NORSCODE_FILE") { m["NORSCODE_FILE"] = "" }
+        hvis ikkje finnes_nøkkel(m, "NORSCODE_OUTPUT") { m["NORSCODE_OUTPUT"] = "" }
+    }
+    la res = {}
+    prøv {
+        // Minne 0 = OS-et eig grensa (som nc_regen_bootstrap): kallarane køyrer
+        // heile testsuitar og release-pakking; timeout og fd-tak er eksplisitte.
+        res = køyr_med_grenser(executable, argv, cwd, m, timeout_ms, 0, 1024)
+    } fang (e) { returner ["1", "", tekst(e) + "\n"] }
+    la kode = tekst(res["exit_code"])
+    hvis tekst(res["status"]) != "ferdig" og kode == "0" { kode = "1" }
+    la feil = tekst(res["stderr"])
+    hvis finnes_nøkkel(res, "error") og tekst(res["error"]) != "" { feil = feil + tekst(res["error"]) + "\n" }
+    returner [kode, tekst(res["stdout"]), feil]
+}
+
+// Prosess-ABI-en gjer ikkje PATH-oppslag, og VM-ens disk-sandkasse nektar
+// fil_finnes utanfor NORSCODE_VM_DISK_ROOT (t.d. /usr/bin), så PATH kan ikkje
+// slåast opp frå Norscode. Namngjevne systemprogram (git, gh, shasum) blir difor
+// starta via /usr/bin/env, som slår opp i PATH utan shell; 127 = ikkje funne.
+funksjon køyr_program(namn: tekst, argv: liste_tekst, cwd: tekst,
+                      miljø: ordbok_tekst, timeout_ms: heiltall) -> liste_tekst {
+    la full: liste_tekst = [namn]
+    la i: heiltall = 0
+    mens i < lengde(argv) {
+        legg_til(full, argv[i])
+        i = i + 1
+    }
+    returner køyr_liste("/usr/bin/env", full, cwd, miljø, timeout_ms)
+}
+
+// Fyrste linje av prosess-stdout. Prosess-ABI-en kan levere linjeskift escapa
+// (bokstaveleg «\n», målt: `git rev-parse HEAD` → 40 + 3 teikn på macOS-stage0),
+// så kutt ved fyrste ekte linjeskift, CR eller backslash — rett for
+// einlinjeverdiar som git-SHA.
+funksjon første_linje(t: tekst) -> tekst {
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la c = builtin.slice(t, i, i + 1)
+        hvis c == "\n" eller c == "\r" eller c == builtin.chr(92) { returner trim(builtin.slice(t, 0, i)) }
+        i = i + 1
+    }
+    returner trim(t)
 }
 
 funksjon ok(resultat: ordbok_tekst) -> boolsk {

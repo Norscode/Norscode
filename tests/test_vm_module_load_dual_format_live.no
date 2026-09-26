@@ -1,0 +1,92 @@
+// vm_module_load (selfhost/vm.no, baka inn i seeden) les plugin-NCB i begge
+// format: JSON og binær (magic 0x93 'N' 'C' 'B', selfhost.ncb_serde).
+// Trust-store-hashen er SHA-256 over dei rå filbytane i begge tilfelle.
+// Plugins og trust store blir genererte her (ingen committa fiksturar), og
+// lastinga skjer i ein barneprosess med eigen NORSCODE_VM_TRUST_STORE.
+//
+// NC_HOOKS_LIVE_RUNTIME (valfri) peikar barneprosessen til ein annan runtime
+// med same `run`-CLI. Berre for VM-i-VM-validering av ny vm.no-kjelde før
+// reseed; CI set han ikkje.
+bruk tools.process_runner som prosess
+bruk selfhost.ncb_serde som serde
+
+funksjon plugin_json(svar: tekst) -> tekst {
+    returner "{\"format\":\"norscode-bytecode-v1\",\"entry\":\"__main__.start\",\"imports\":[]," +
+        "\"functions\":{" +
+        "\"__main__.intern_verdi\":{\"name\":\"intern_verdi\",\"module\":\"__main__\",\"params\":[],\"is_async\":false," +
+        "\"code\":[[\"PUSH_CONST\",\"" + svar + "\"],[\"RETURN\"]]}," +
+        "\"__main__.svar\":{\"name\":\"svar\",\"module\":\"__main__\",\"params\":[],\"is_async\":false," +
+        "\"code\":[[\"CALL\",\"__main__.intern_verdi\",0],[\"RETURN\"]]}," +
+        "\"__main__.start\":{\"name\":\"start\",\"module\":\"__main__\",\"params\":[],\"is_async\":false," +
+        "\"code\":[[\"PUSH_CONST\",0],[\"RETURN\"]]}}}"
+}
+
+funksjon skriv_binær_plugin(sti: tekst, svar: tekst) -> heiltall {
+    la bytes = serde.serialiser(json_parse_raw(plugin_json(svar)))
+    builtin.fil_skriv_binary(sti, bytes)
+    returner lengde(bytes)
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la overstyrt = ""
+    prøv { overstyrt = builtin.trim(tekst(miljo_hent("NC_HOOKS_LIVE_RUNTIME"))) } fang (e) { overstyrt = "" }
+    hvis overstyrt != "" { runtime = overstyrt }
+    la root = tekst(info["cwd"])
+    la dir = root + "/build/vm-module-dual-" + builtin.random_hex(8)
+    builtin.mkdir_p(dir)
+
+    la json_sti = dir + "/plugin_json.ncb.json"
+    fil_skriv(json_sti, plugin_json("fra-json"))
+    la bin_sti = dir + "/plugin_bin.ncb"
+    assert(skriv_binær_plugin(bin_sti, "fra-binar") > 5)
+    la forfalska_sti = dir + "/plugin_forfalska.ncb"
+    skriv_binær_plugin(forfalska_sti, "forfalska")
+
+    // Binærfila startar verkeleg med magic (elles prøver testen ingenting).
+    la rå = fil_les(bin_sti)
+    assert_eq(builtin.char_code(builtin.slice(rå, 0, 1)) & 255, 147)
+    assert(serde.er_binaer_tekst(rå))
+
+    la trust = {}
+    trust[json_sti] = builtin.sha256_bytes(fil_les_binær(json_sti))
+    trust[bin_sti] = builtin.sha256_bytes(fil_les_binær(bin_sti))
+    // Den forfalska fila er registrert med hashen til den ekte binærfila.
+    trust[forfalska_sti] = builtin.sha256_bytes(fil_les_binær(bin_sti))
+    la trust_sti = dir + "/vm_trust.json"
+    fil_skriv(trust_sti, json_skriv(trust))
+
+    la probe = dir + "/probe.no"
+    fil_skriv(probe,
+        "funksjon start() -> heiltall {\n" +
+        "    la b = builtin.vm_module_load(\"" + bin_sti + "\", \"binplug\", \"\")\n" +
+        "    skriv(\"bin-entry=\" + tekst(b[\"entry\"]) + \"\\n\")\n" +
+        "    skriv(\"bin-svar=\" + tekst(builtin.ncb_call_fn(\"binplug.svar\")) + \"\\n\")\n" +
+        "    builtin.vm_module_load(\"" + json_sti + "\", \"jsonplug\", \"\")\n" +
+        "    skriv(\"json-svar=\" + tekst(builtin.ncb_call_fn(\"jsonplug.svar\")) + \"\\n\")\n" +
+        "    la avvist = \"nei\"\n" +
+        "    prøv { builtin.vm_module_load(\"" + forfalska_sti + "\", \"evil\", \"\") } fang (e) { avvist = \"ja\" }\n" +
+        "    skriv(\"forfalska-avvist=\" + avvist + \"\\n\")\n" +
+        "    returner 0\n" +
+        "}\n")
+
+    la res = prosess.køyr(runtime, ["run", probe], dir, {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_TRUST_STORE": trust_sti,
+        "NORSCODE_VM_ALLOW_UNSIGNED_MODULES": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }, 300000)
+    la ut = tekst(res["stdout"])
+    hvis ikkje prosess.ok(res) eller ikkje builtin.contains(ut, "forfalska-avvist=ja") {
+        prosess.skriv_resultat(res)
+    }
+    assert(prosess.ok(res))
+    assert(builtin.contains(ut, "bin-entry=binplug.start"))
+    assert(builtin.contains(ut, "bin-svar=fra-binar"))
+    assert(builtin.contains(ut, "json-svar=fra-json"))
+    assert(builtin.contains(ut, "forfalska-avvist=ja"))
+    skriv("test_vm_module_load_dual_format_live OK")
+    returner 0
+}
