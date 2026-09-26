@@ -1,0 +1,72 @@
+// AOT-fixture (A2-review): entropien er FAIL-CLOSED når kjernen nektar getrandom.
+// Installerer eit seccomp-filter i prosessen (getrandom → EPERM, alt anna ALLOW) og sjekkar
+// at (1) builtin.random_byte() gjev −errno (< 0) i staden for ein «tilfeldig» byte, og
+// (2) std.native_gap.random_hex_secure og _tls_random32 KASTAR i staden for å gje
+// føreseielege byte (før: absoluttverdien → 0x01 kvar gong, «0101010101010101»).
+// Filteret blir bygt frå std.native_sys-tabellen (AUDIT_ARCH, syscall-nummer, BPF-kodar),
+// so same fixture går på linux-x86_64 (tests/test_linux_x86_64_aot_rng_failclosed.no) og
+// linux-arm64 (tools/arm64_diff_lane.no, fasit). Kan filteret ikkje installerast (Rosetta
+// svarar EINVAL på seccomp) OG getrandom ikkje er nekta på annan måte (t.d. docker
+// --security-opt seccomp=…), skriv fixturen «getrandom ikkje nekta» og avsluttar med 3.
+bruk std.native_gap som ng
+bruk std.native_sys som nsys
+
+funksjon side() -> heiltall {
+    returner builtin.sys6(nsys._nr("mmap"), 0, 4096, nsys._flagg("PROT_READ") | nsys._flagg("PROT_WRITE"),
+                          nsys._flagg("MAP_PRIVATE") | nsys._flagg("MAP_ANONYMOUS"), 0 - 1, 0)
+}
+
+// seccomp-BPF: ld [arch]; jeq AUDIT_ARCH (elles ALLOW); ld [nr]; jeq getrandom (elles ALLOW);
+// ret ERRNO(EPERM); ret ALLOW. Returnerer 0 eller −errno frå prctl/seccomp.
+funksjon installer_filter() -> heiltall {
+    la s = side()
+    hvis s < 0 { returner s }
+    la ld: heiltall = nsys._flagg("BPF_LD_W_ABS")
+    la jeq: heiltall = nsys._flagg("BPF_JEQ_K")
+    la ret: heiltall = nsys._flagg("BPF_RET_K")
+    la ins = []
+    legg_til(ins, [ld, 0, 0, nsys._layout("seccomp_data", "arch")])
+    legg_til(ins, [jeq, 0, 3, nsys._flagg("AUDIT_ARCH")])
+    legg_til(ins, [ld, 0, 0, nsys._layout("seccomp_data", "nr")])
+    legg_til(ins, [jeq, 0, 1, nsys._nr("getrandom")])
+    legg_til(ins, [ret, 0, 0, nsys._flagg("SECCOMP_RET_ERRNO") | nsys._errno("EPERM")])
+    legg_til(ins, [ret, 0, 0, nsys._flagg("SECCOMP_RET_ALLOW")])
+    la filt: heiltall = s + nsys._layout("sock_fprog", "storleik")
+    la i: heiltall = 0
+    mens i < lengde(ins) {
+        la k: heiltall = ins[i][3]
+        builtin.raw_store64(filt + i * 8, ins[i][0] + (ins[i][1] << 16) + (ins[i][2] << 24) + ((k & 4294967295) << 32))
+        i = i + 1
+    }
+    builtin.raw_store64(s + nsys._layout("sock_fprog", "len"), lengde(ins))
+    builtin.raw_store64(s + nsys._layout("sock_fprog", "filter"), filt)
+    la r = builtin.sys6(nsys._nr("prctl"), nsys._flagg("PR_SET_NO_NEW_PRIVS"), 1, 0, 0, 0, 0)
+    hvis r != 0 { returner r }
+    returner builtin.sys6(nsys._nr("seccomp"), nsys._flagg("SECCOMP_SET_MODE_FILTER"), 0, s, 0, 0, 0)
+}
+
+funksjon start() -> heiltall {
+    la inst = installer_filter()
+    // Er getrandom nekta no? Eit rått sys6-kall utanom atomet, 1 byte inn i ei eiga side.
+    la buf = side()
+    la probe = builtin.sys6(nsys._nr("getrandom"), buf, 1, 0, 0, 0, 0)
+    hvis probe >= 0 {
+        skriv("getrandom ikkje nekta (filter=" + tekst(inst) + ")\n")
+        returner 3
+    }
+    skriv("getrandom nekta: errno=" + tekst(0 - probe) + "\n")
+    skriv("random_byte=" + tekst(builtin.random_byte()) + "\n")
+    prøv {
+        la h = ng.random_hex_secure(8)
+        skriv("random_hex_secure gav " + h + " (FEIL: fail-open)\n")
+    } fang (e) {
+        skriv("random_hex_secure kasta: " + tekst(builtin.contains(tekst(e), "nekta entropi")) + "\n")
+    }
+    prøv {
+        la t = ng._tls_random32()
+        skriv("_tls_random32 gav " + tekst(lengde(t)) + " byte (FEIL: fail-open)\n")
+    } fang (e2) {
+        skriv("_tls_random32 kasta: " + tekst(builtin.contains(tekst(e2), "nekta entropi")) + "\n")
+    }
+    returner 57
+}

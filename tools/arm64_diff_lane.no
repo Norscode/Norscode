@@ -1,0 +1,307 @@
+// tools/arm64_diff_lane.no — A2 differensial-lane for linux-arm64: AOT == VM.
+//
+// Same Norscode-program blir køyrt to gonger: som VM (`nc run`, gjeldande vm.no) og som
+// linux-arm64-AOT (ELF frå selfhost/native_execution/elf_arm64_codegen.no, der prosess,
+// sokkel, dns, epoll og miljø går gjennom std.native_gap over builtin.sys6/raw_* og
+// std.native_sys-tabellen for linux-arm64). stdout og exit-kode skal vere identiske.
+// AOT-berre-fixturar (atoma sjølve; VM-en har ikkje sys6 osb.) blir haldne mot ein fasit.
+//
+// Steg (A2_LANE_STEG, kommaskilt; standard "ref,bygg,aot,samanlikn"):
+//   ref       `nc run tests/fixtures/<fx>.no` for kvar differensial-fixture → <dir>/ref/<fx>.txt.
+//             Referansen MÅ køyrast av ein seed med gjeldande vm.no (i dag: den ferske
+//             linux-x86_64-seeden). Den frosne C-æra-arm64-seeden avvik på tre punkt som
+//             ikkje er AOT-feil (ignorerer "environment" i spawn-requesten, eldre
+//             socket_listen(vert, port)-API, ikkje-blokkerande connect → "connecting").
+//   bygg      nc compile → NCB → ARM64-ELF <dir>/elf/<fx>. Codegen: A2_LANE_CODEGEN (ein
+//             codegen-binær med NC_INPUT/NC_OUTPUT-kontrakten), elles blir
+//             elf_arm64_codegen.no bygd til ein native codegen med `nc bygg-native --target
+//             <vert>` (sekund med førehandsbygd x86-codegen), og til sist tolka
+//             (`nc run selfhost/native_execution/elf_arm64_codegen.no`). Den tolka vegen
+//             held berre for små program: eit native_gap-program (arm64_diff_prosess) tok
+//             47 min på den ferske x86-seeden og enda i «GC-heap full» (exit 199), målt
+//             2026-09-26. A1 (førehandsbygd kryss-codegen) gjer han overflødig.
+//   aot       køyr <dir>/elf/<fx> → <dir>/aot/<fx>.txt. Krev linux-arm64-vert.
+//   samanlikn aot == ref (differensial) og aot == fasit (AOT-berre) → exit 0, elles 1.
+//
+// I CI går ref+bygg på ubuntu-latest (fersk x86-seed) og aot+samanlikn på
+// ubuntu-24.04-arm (katalogen som artefakt). Lokalt: Docker linux/amd64, så linux/arm64.
+// Miljø: A2_LANE_DIR (standard <root>/build/arm64_diff). A2_LANE_MILJO=frå-lanen må stå i
+// miljøet til lane-prosessen (fixturane les det; barn arvar det, sidan C-æra-arm64-seeden
+// ignorerer environment-kartet i spawn-requesten).
+
+bruk tools.process_runner som prosess
+
+funksjon diff_fixturar() -> liste_tekst {
+    returner ["arm64_diff_miljo", "arm64_diff_prosess", "arm64_diff_tcp", "arm64_diff_epoll", "arm64_diff_dns"]
+}
+
+// AOT-berre-fixturar med fasit (stdout + statuslinje).
+//   arm64_atom_probe     atoma sjølve (sys6/raw_*/native_target/native_envp/system_info)
+//   aot_rng_failclosed   getrandom nekta med seccomp i prosessen → random_byte < 0 og
+//                        native_gap-entropien KASTAR (fail-closed; A2-review)
+//   arm64_icache_probe   icache_sync før raw_call på sjølvskriven kode (A2-review)
+funksjon aot_fasit() -> ordbok_tekst {
+    returner {
+        "arm64_atom_probe": "pid>0=sann\nmmap_ok=sann\nl64=1234567890123 l8=200 trunk=44\nebadf=-9\nmål=linux-arm64\nenvp_n>0=sann fann_A2_=sann\nmunmap=0\nsi=Linux/aarch64 cwd=/tmp exe_ok=sann status=ok n=5\nstatus=ferdig exit=47\n",
+        "aot_rng_failclosed": "getrandom nekta: errno=1\nrandom_byte=-1\nrandom_hex_secure kasta: sann\n_tls_random32 kasta: sann\nstatus=ferdig exit=57\n",
+        "arm64_icache_probe": "mmap_ok=sann\nicache_sync: 200 kall, feil=0\ntom=0\nstatus=ferdig exit=58\n"
+    }
+}
+
+funksjon lane_miljo_verdi() -> tekst { returner "frå-lanen" }
+
+funksjon rot() -> tekst {
+    la r = miljo_hent("NORSCODE_ROOT")
+    hvis r == "" { r = "." }
+    returner r
+}
+
+funksjon nc_bin(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        la e = tekst(builtin.system_info()["executable"])
+        hvis e != "" { returner e }
+    } fang (feil) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_frå(sys: tekst, m: tekst) -> tekst {
+    hvis sys == "Linux" og (m == "aarch64" eller m == "arm64") { returner "linux-arm64" }
+    hvis sys == "Linux" og (m == "x86_64" eller m == "amd64") { returner "linux-x86_64" }
+    hvis sys == "Darwin" { returner "macos-" + m }
+    returner "ukjend"
+}
+
+funksjon vert() -> tekst {
+    prøv {
+        la info = builtin.system_info()
+        returner vert_frå(tekst(info["system"]), tekst(info["machine"]))
+    } fang (feil) {}
+    // Den frosne C-æra-arm64-seeden har ikkje builtin.system_info: spør uname (shellfritt).
+    la r = prosess.køyr_program("uname", ["-s", "-m"], "/tmp", {}, 10000)
+    hvis tekst(r[0]) == "0" {
+        la d = builtin.split(prosess.første_linje(tekst(r[1])), " ")
+        hvis lengde(d) >= 2 { returner vert_frå(tekst(d[0]), tekst(d[1])) }
+    }
+    returner "ukjend"
+}
+
+funksjon mappe(sti: tekst) -> heiltall {
+    prøv { builtin.mkdir_p(sti) } fang (feil) {}
+    returner 0
+}
+
+// VM-miljø for referansekøyringa: nettverk + prosess, disk-rot med /etc (dns-fixturen les
+// /etc/hostname; AOT har ingen capability-port) og lane-variabelen.
+funksjon vm_miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write,net.dns,net.connect,net.tcp,net.listen,net.udp",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/etc",
+        "A2_LANE_MILJO": lane_miljo_verdi()
+    }
+}
+
+// stdout + ei statuslinje; tolkens «[vm] …»-diagnoselinjer (vm.no skriv «[vm] entry
+// returned» til stdout) er ikkje programoutput og blir filtrerte.
+funksjon post(r, filtrer_vm: boolsk) -> tekst {
+    la ut = tekst(r["stdout"])
+    hvis filtrer_vm {
+        la linjer = builtin.split(ut, "\n")
+        la behald: liste_tekst = []
+        for l i linjer { hvis ikkje builtin.starts_with(l, "[vm] ") { legg_til(behald, l) } }
+        ut = builtin.join(behald, "\n")
+    }
+    returner ut + "status=" + tekst(r["status"]) + " exit=" + tekst(r["exit_code"]) + "\n"
+}
+
+funksjon steg_ref(root: tekst, dir: tekst) -> heiltall {
+    mappe(dir + "/ref")
+    la nc = nc_bin(root)
+    la feil = 0
+    for fx i diff_fixturar() {
+        la r = prosess.køyr_med_grenser(nc, ["run", root + "/tests/fixtures/" + fx + ".no"], "/tmp", vm_miljø(root), 300000, 0, 1024)
+        fil_skriv(dir + "/ref/" + fx + ".txt", post(r, sann))
+        skriv("[ref] " + fx + " " + tekst(r["status"]) + " exit=" + tekst(r["exit_code"]) + "\n")
+        hvis tekst(r["status"]) != "ferdig" { feil = feil + 1 }
+    }
+    returner feil
+}
+
+// Codegen-binær for bygg-steget; "" = bruk tolka elf_arm64_codegen.no.
+funksjon codegen_bin(root: tekst, dir: tekst) -> tekst {
+    la gitt = miljo_hent("A2_LANE_CODEGEN")
+    hvis gitt != "" { returner gitt }
+    la v = vert()
+    hvis v != "linux-x86_64" { returner "" }
+    la ut = dir + "/armcg"
+    la m = {"NORSCODE_ROOT": root, "NORSCODE_GC_ALLOC": "1", "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+            "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+            "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp," + dir}
+    la r = prosess.køyr_med_grenser(nc_bin(root), ["bygg-native", "--target", v, root + "/selfhost/native_execution/elf_arm64_codegen.no", ut], root, m, 3600000, 0, 1024)
+    hvis ikkje prosess.ok(r) {
+        skriv("[bygg] native ARM64-codegen feila; fell til tolka codegen\n")
+        prosess.skriv_resultat(r)
+        returner ""
+    }
+    skriv("[bygg] ARM64-codegen bygd native (" + v + "): " + ut + "\n")
+    returner ut
+}
+
+funksjon steg_bygg(root: tekst, dir: tekst) -> heiltall {
+    mappe(dir + "/ncb")
+    mappe(dir + "/elf")
+    la nc = nc_bin(root)
+    la cg = codegen_bin(root, dir)
+    la alle: liste_tekst = []
+    for fx i diff_fixturar() { legg_til(alle, fx) }
+    for fx i nøkler(aot_fasit()) { legg_til(alle, tekst(fx)) }
+    la feil = 0
+    for fx i alle {
+        la ncb = dir + "/ncb/" + fx + ".ncb"
+        la elf = dir + "/elf/" + fx
+        la mk = {"NORSCODE_ROOT": root, "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+                 "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp," + dir}
+        la c = prosess.køyr_med_grenser(nc, ["compile", root + "/tests/fixtures/" + fx + ".no", ncb], root, mk, 600000, 0, 1024)
+        hvis ikkje prosess.ok(c) {
+            skriv("[bygg] " + fx + " COMPILE-FEIL\n")
+            prosess.skriv_resultat(c)
+            feil = feil + 1
+        } ellers {
+            la gm = {"NORSCODE_ROOT": root, "NC_INPUT": ncb, "NC_OUTPUT": elf,
+                     "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+                     "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp," + dir}
+            la g = {}
+            hvis cg != "" {
+                g = prosess.køyr_med_grenser(cg, [], root, gm, 600000, 0, 1024)
+            } ellers {
+                g = prosess.køyr_med_grenser(nc, ["run", root + "/selfhost/native_execution/elf_arm64_codegen.no"], root, gm, 3600000, 0, 1024)
+            }
+            hvis ikkje prosess.ok(g) eller ikkje builtin.fil_finnes(elf) {
+                skriv("[bygg] " + fx + " CODEGEN-FEIL\n")
+                prosess.skriv_resultat(g)
+                feil = feil + 1
+            } ellers {
+                builtin.fil_sett_kjorbar(elf)
+                skriv("[bygg] " + fx + " → " + elf + "\n")
+            }
+        }
+    }
+    returner feil
+}
+
+funksjon steg_aot(dir: tekst) -> heiltall {
+    hvis vert() != "linux-arm64" {
+        skriv("[aot] krev ein linux-arm64-vert (denne: " + vert() + ")\n")
+        returner 1
+    }
+    mappe(dir + "/aot")
+    la alle: liste_tekst = []
+    for fx i diff_fixturar() { legg_til(alle, fx) }
+    for fx i nøkler(aot_fasit()) { legg_til(alle, tekst(fx)) }
+    la feil = 0
+    for fx i alle {
+        la elf = dir + "/elf/" + fx
+        hvis ikkje builtin.fil_finnes(elf) {
+            skriv("[aot] " + fx + " MANGLAR ELF\n")
+            feil = feil + 1
+        } ellers {
+            // Minne 0 = ingen RLIMIT_AS: ARM64-heapen er ein lat 4 GiB-reservasjon.
+            la r = prosess.køyr_med_grenser(elf, [], "/tmp", {"A2_LANE_MILJO": lane_miljo_verdi()}, 60000, 0, 1024)
+            fil_skriv(dir + "/aot/" + fx + ".txt", post(r, usann))
+            skriv("[aot] " + fx + " " + tekst(r["status"]) + " exit=" + tekst(r["exit_code"]) + "\n")
+        }
+    }
+    returner feil
+}
+
+funksjon les_eller_tom(sti: tekst) -> tekst {
+    hvis ikkje builtin.fil_finnes(sti) { returner "" }
+    returner builtin.fil_les(sti)
+}
+
+// Fyrste linje som skil seg (1-basert), for ei kort feilmelding.
+funksjon fyrste_skilnad(a: tekst, b: tekst) -> tekst {
+    la linjer_a = builtin.split(a, "\n")
+    la lb = builtin.split(b, "\n")
+    la n = lengde(linjer_a)
+    hvis lengde(lb) > n { n = lengde(lb) }
+    la i = 0
+    mens i < n {
+        la x = ""
+        la y = ""
+        hvis i < lengde(linjer_a) { x = linjer_a[i] }
+        hvis i < lengde(lb) { y = lb[i] }
+        hvis x != y { returner "linje " + tekst(i + 1) + ": venta [" + x + "] fekk [" + y + "]" }
+        i = i + 1
+    }
+    returner ""
+}
+
+funksjon steg_samanlikn(dir: tekst) -> heiltall {
+    la ok = 0
+    la feil = 0
+    for fx i diff_fixturar() {
+        la ref = les_eller_tom(dir + "/ref/" + fx + ".txt")
+        la aot = les_eller_tom(dir + "/aot/" + fx + ".txt")
+        hvis ref == "" eller aot == "" {
+            skriv("FEIL " + fx + ": manglar " + (hvis_tom(ref, "ref ") + hvis_tom(aot, "aot")) + "\n")
+            feil = feil + 1
+        } ellers hvis ref == aot {
+            skriv("OK   " + fx + " (AOT == VM)\n")
+            ok = ok + 1
+        } ellers {
+            skriv("FEIL " + fx + " (AOT != VM) " + fyrste_skilnad(ref, aot) + "\n")
+            feil = feil + 1
+        }
+    }
+    la fasit = aot_fasit()
+    for fx i nøkler(fasit) {
+        la aot = les_eller_tom(dir + "/aot/" + tekst(fx) + ".txt")
+        hvis aot == tekst(fasit[fx]) {
+            skriv("OK   " + tekst(fx) + " (AOT == fasit)\n")
+            ok = ok + 1
+        } ellers {
+            skriv("FEIL " + tekst(fx) + " (AOT != fasit) " + fyrste_skilnad(tekst(fasit[fx]), aot) + "\n")
+            feil = feil + 1
+        }
+    }
+    skriv("ARM64-DIFF: ok=" + tekst(ok) + " feil=" + tekst(feil) + "\n")
+    returner feil
+}
+
+funksjon hvis_tom(t: tekst, namn: tekst) -> tekst {
+    hvis t == "" { returner namn }
+    returner ""
+}
+
+funksjon start() -> heiltall {
+    la root = rot()
+    la dir = miljo_hent("A2_LANE_DIR")
+    hvis dir == "" { dir = root + "/build/arm64_diff" }
+    la stega = miljo_hent("A2_LANE_STEG")
+    hvis stega == "" { stega = "ref,bygg,aot,samanlikn" }
+    mappe(dir)
+    la feil = 0
+    for s i builtin.split(stega, ",") {
+        la st = builtin.trim(s)
+        hvis st == "ref" eller st == "aot" {
+            hvis miljo_hent("A2_LANE_MILJO") != lane_miljo_verdi() {
+                skriv("arm64_diff_lane: set A2_LANE_MILJO=" + lane_miljo_verdi() + " i miljøet (fixturane les det)\n")
+                returner 2
+            }
+        }
+        hvis st == "ref" { feil = feil + steg_ref(root, dir) }
+        ellers hvis st == "bygg" { feil = feil + steg_bygg(root, dir) }
+        ellers hvis st == "aot" { feil = feil + steg_aot(dir) }
+        ellers hvis st == "samanlikn" { feil = feil + steg_samanlikn(dir) }
+        ellers {
+            skriv("arm64_diff_lane: ukjent steg «" + st + "» (ref, bygg, aot, samanlikn)\n")
+            returner 2
+        }
+    }
+    hvis feil > 0 { returner 1 }
+    returner 0
+}
