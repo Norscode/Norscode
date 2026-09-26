@@ -1,6 +1,8 @@
-// Vakt: kvar førehandsbygd codegen-binær (bootstrap/native_codegen_x86_64.elf og, når dei
-// kjem, bootstrap/native_codegen_<mål>_on_<vert>.*) må ha .srchash/.depshash som svarar til
-// gjeldande kjelde. Porten ligg i selfhost/native_execution/codegen_prebuilt.no og blir brukt
+// Vakt: kvar førehandsbygd codegen-binær (bootstrap/native_codegen_x86_64.elf og
+// kryss-codegen bootstrap/native_codegen_<mål>_on_<vert>.*) må ha .srchash/.depshash som
+// svarar til gjeldande kjelde. Kryss-codegen for linux-arm64 og macos-arm64 på linux-x86_64
+// (A1) er PÅKRAVD: manglar han, fell `bygg-native --target <arm64-mål>` til 30–95 min tolka
+// codegen. Fiks for dei: `nc run tools/build_cross_codegen.no` (skriv binær + hashar). Porten ligg i selfhost/native_execution/codegen_prebuilt.no og blir brukt
 // av tools/ncb_to_elf.no og nc_main sin nc_bygg_native_prebuilt:
 //   .srchash  = sha256(<codegen-kjelde> ++ selfhost/ncb_serde.no)   (uendra formel; committa
 //               seedar sin innebakte nc_main les berre .srchash)
@@ -12,6 +14,12 @@
 // Fiks: byggj codegen-ELF-fikspunktet (cg1 = committa ELF(ncg), cg2 = cg1(ncg),
 // cg3 = cg2(ncg), krev sha256(cg2) == sha256(cg3)) og commit .elf + .srchash + .depshash
 // i same commit som codegen-endringa. Testen skriv dei venta hashane ved feil.
+// Kryss-codegen har i tillegg .vertcg (vert-codegen-identitet + sha256 til binæren): ein
+// ombygd bootstrap/native_codegen_x86_64.elf eller ein utbytt kryss-binær gjer han stale,
+// og sha256 i .vertcg må vere lik «godkjend binær»-pinnen i tools/active_surface_allowlist.txt.
+// Fast-lane-budsjett (A1-review): kvar kjeldehash kostar ~1,2 s per 0,5 MB i VM-en på fersk
+// seed, so testen hashar kvar codegen-kjelde éin gong for rota og éin gong per x86-probe.
+// Per-mål-proben for arm64-lukkingane ligg i tests/test_arm64_kryss_codegen.no (slow-lane).
 // Negativ kontroll: ein kopi av lukkinga i /tmp med éi endra avhengnad MÅ gje «stale».
 bruk selfhost.native_execution.codegen_prebuilt som cgp
 
@@ -53,6 +61,49 @@ funksjon lag_probe_rot(root: tekst, probe: tekst, deps: liste_tekst, src: tekst)
     fil_skriv(probe + "/bootstrap/native_codegen_x86_64.elf.srchash", src + "\n")
     fil_skriv(probe + "/bootstrap/native_codegen_x86_64.elf.depshash", cgp.depshash_av(probe, deps) + "\n")
     returner 0
+}
+
+// Probe-rot for .vertcg: attrapp-vert-codegen (legacy x86-namnet) med hashfiler og ein
+// attrapp-kryss-binær for linux-arm64 med ein .vertcg som svarar til dei. Ingen kjelder:
+// vel() stoppar på .vertcg før kjeldehashane, og den positive kontrollen går via
+// cgp.vertcg_sjekk (billeg; den fulle «ok»-vegen er dekt av steg 3 på rota).
+funksjon lag_vertcg_probe_rot(probe: tekst) -> tekst {
+    la rel = tekst(cgp.binær_stiar("linux-arm64", "linux-x86_64")[0])
+    builtin.mkdir_p(probe + "/bootstrap")
+    fil_skriv(probe + "/bootstrap/native_codegen_x86_64.elf", "attrapp-vert")
+    fil_skriv(probe + "/bootstrap/native_codegen_x86_64.elf.srchash", "aa\n")
+    fil_skriv(probe + "/bootstrap/native_codegen_x86_64.elf.depshash", "bb\n")
+    fil_skriv(probe + "/" + rel, "attrapp-kryss")
+    fil_skriv(probe + "/" + rel + ".vertcg", cgp.vertcg_tekst(probe, "linux-x86_64", rel))
+    returner rel
+}
+
+funksjon status_for(probe: tekst, mål: tekst) -> tekst {
+    returner tekst(cgp.vel(probe, mål, "linux-x86_64")["status"])
+}
+
+// Meldinga frå vel() for (mål, linux-x86_64) i `probe`; krev status «stale».
+funksjon melding_for(probe: tekst, mål: tekst) -> tekst {
+    la v = cgp.vel(probe, mål, "linux-x86_64")
+    assert_eq(tekst(v["status"]), "stale")
+    returner tekst(v["melding"])
+}
+
+funksjon har_tekst(t: tekst, del: tekst) -> boolsk {
+    hvis builtin.index_of(t, del) >= 0 { returner sann }
+    skriv("test_native_codegen_srchash: venta «" + del + "» i meldinga: " + t + "\n")
+    returner usann
+}
+
+// sha256-pinnen for `rel` i tools/active_surface_allowlist.txt («godkjend binær <rel> sha256=…»);
+// "" når han manglar.
+funksjon allowlist_pin(root: tekst, rel: tekst) -> tekst {
+    la liste = ""
+    prøv { liste = builtin.fil_les(root + "/tools/active_surface_allowlist.txt") } fang (e) { returner "" }
+    la merke = "godkjend binær " + rel + " sha256="
+    la k = builtin.index_of(liste, merke)
+    hvis k < 0 { returner "" }
+    returner builtin.slice(liste, k + lengde(merke), k + lengde(merke) + 64)
 }
 
 funksjon liste_lik(xs: liste_tekst, venta: liste_tekst) -> boolsk {
@@ -100,23 +151,61 @@ funksjon start() -> heiltall {
         feil("native_codegen_x86_64.elf.srchash/.depshash er stale")
     }
     assert_eq(tekst(val["rel"]), "bootstrap/native_codegen_x86_64.elf")
+    // Vert-codegen-binæren sjølv (A1-review): hashfilene seier ingenting om bytane, so ein
+    // utbytt ELF med urørte hashfiler var berre F0.1 sin sak. sha256 via atomet (~80 ms).
+    la x86_sha = cgp.sha256_fil(root + "/bootstrap/native_codegen_x86_64.elf")
+    la x86_pin = allowlist_pin(root, "bootstrap/native_codegen_x86_64.elf")
+    hvis x86_pin == "" eller x86_pin != x86_sha {
+        skriv("test_native_codegen_srchash FEIL: bootstrap/native_codegen_x86_64.elf har sha256=" + x86_sha +
+              ", men tools/active_surface_allowlist.txt pinnar " + x86_pin + "\n")
+        feil("native_codegen_x86_64.elf svarar ikkje til allowlist-pinnen")
+    }
     // Status ok ⇒ den committa .srchash er lik den utrekna; gjenbruk han for probe-røtene.
     la src_root = cgp.les_hash(root + "/bootstrap/native_codegen_x86_64.elf.srchash")
 
     // 3) Alle andre førehandsbygde (kryss-)codegen-binærar som finst, må òg vere ferske.
+    //    x86 på x86 er alt sjekka i steg 2 (hashen av native_codegen_v2 kostar ~2 s).
     la mål = cgp.mål_liste()
+    la status_av = {}
+    status_av["linux-x86_64@linux-x86_64"] = "ok"
     la mi: heiltall = 0
     mens mi < lengde(mål) {
         la vi: heiltall = 0
         mens vi < lengde(mål) {
-            la v = cgp.vel(root, tekst(mål[mi]), tekst(mål[vi]))
-            hvis tekst(v["status"]) == "stale" {
-                skriv("test_native_codegen_srchash FEIL: " + tekst(v["melding"]) + "\n")
-                feil(tekst(v["rel"]) + " er stale")
+            la par = tekst(mål[mi]) + "@" + tekst(mål[vi])
+            hvis ikkje finnes_nøkkel(status_av, par) {
+                la v = cgp.vel(root, tekst(mål[mi]), tekst(mål[vi]))
+                status_av[par] = tekst(v["status"])
+                hvis tekst(v["status"]) == "stale" {
+                    skriv("test_native_codegen_srchash FEIL: " + tekst(v["melding"]) +
+                          " — byggj på nytt med tools/build_cross_codegen.no\n")
+                    feil(tekst(v["rel"]) + " er stale")
+                }
             }
             vi = vi + 1
         }
         mi = mi + 1
+    }
+    // 3b) A1: kryss-codegen for arm64-måla på linux-x86_64 er påkravd («manglar» er FEIL),
+    //     og sha256 i .vertcg (som vel() nett sjekka mot binæren) må vere pinnen i allowlista.
+    la arm64_mål: liste_tekst = ["linux-arm64", "macos-arm64"]
+    la ai: heiltall = 0
+    mens ai < lengde(arm64_mål) {
+        la am = tekst(arm64_mål[ai])
+        la arel = tekst(cgp.binær_stiar(am, "linux-x86_64")[0])
+        hvis tekst(status_av[am + "@linux-x86_64"]) != "ok" {
+            skriv("test_native_codegen_srchash FEIL: " + arel +
+                  " manglar — køyr tools/build_cross_codegen.no og commit .elf/.srchash/.depshash/.vertcg (+ allowlist-pin)\n")
+            feil("kryss-codegen for " + am + " manglar")
+        }
+        la vsha = cgp.vertcg_felt(builtin.fil_les(root + "/" + arel + ".vertcg"), "sha256")
+        la pin = allowlist_pin(root, arel)
+        hvis pin == "" eller pin != vsha {
+            skriv("test_native_codegen_srchash FEIL: tools/active_surface_allowlist.txt pinnar " + arel +
+                  " sha256=" + pin + ", men binæren (.vertcg) har " + vsha + "\n")
+            feil("allowlist-pinnen for " + arel + " er ikkje oppdatert")
+        }
+        ai = ai + 1
     }
 
     // 4) Negativ kontroll: porten må kunne seie nei.
@@ -135,6 +224,33 @@ funksjon start() -> heiltall {
     assert_eq(tekst(cgp.vel(probe, "linux-x86_64", "linux-arm64")["status"]), "manglar")
     assert_eq(tekst(cgp.vel(probe, "linux-x86_64", "")["status"]), "ukjend")
     assert_eq(tekst(cgp.vel(probe, "linux-arm64", "linux-x86_64")["rel"]), "bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf")
+
+    // 5) Negativ kontroll for .vertcg (A1-review): kryss-binæren er stale når vert-codegen-en
+    //    er bygd om (binær eller hashfiler) eller kryss-binæren er bytt ut — utan at nokon
+    //    kjeldehash endrar seg. Probe-rota har ingen kjelder, so vel() ville òg sagt «stale»
+    //    på .depshash; kontrollane krev difor at meldinga namngjev det .vertcg-feltet som
+    //    sprakk, og den positive kontrollen at vel() kom forbi .vertcg (til .depshash).
+    la vprobe = "/tmp/nc_codegen_srchash_probe_vertcg"
+    la vrel = lag_vertcg_probe_rot(vprobe)
+    assert_eq(cgp.vertcg_sjekk(vprobe, "linux-x86_64", vrel), "")
+    assert(lengde(cgp.vertcg_felt(builtin.fil_les(vprobe + "/" + vrel + ".vertcg"), "sha256")) == 64)
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), ".depshash svarar ikkje"))
+    fil_skriv(vprobe + "/" + vrel, "MARKOR")                                        // kryss-binæren bytt ut
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), "binæren er bytt ut"))
+    lag_vertcg_probe_rot(vprobe)
+    fil_skriv(vprobe + "/bootstrap/native_codegen_x86_64.elf", "attrapp-vert-2")  // vert-binæren bygd om
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), "vert_sha256="))
+    lag_vertcg_probe_rot(vprobe)
+    fil_skriv(vprobe + "/bootstrap/native_codegen_x86_64.elf.depshash", "cc\n")   // t.d. gap_ruter endra
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), "vert_depshash="))
+    lag_vertcg_probe_rot(vprobe)
+    fil_skriv(vprobe + "/bootstrap/native_codegen_x86_64.elf.srchash", "dd\n")    // native_codegen_v2 endra
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), "vert_srchash="))
+    lag_vertcg_probe_rot(vprobe)
+    fil_skriv(vprobe + "/" + vrel + ".vertcg", "\n")                                // .vertcg manglar
+    assert(har_tekst(melding_for(vprobe, "linux-arm64"), ".vertcg manglar"))
+    lag_vertcg_probe_rot(vprobe)
+    assert_eq(cgp.vertcg_sjekk(vprobe, "linux-x86_64", vrel), "")
 
     skriv("test_native_codegen_srchash OK\n")
     returner 0

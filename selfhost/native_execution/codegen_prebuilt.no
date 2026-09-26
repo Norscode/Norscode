@@ -15,9 +15,17 @@
 //     .srchash-formelen er uendra (committa seedar). .depshash dekkjer heile lukkinga; for
 //     x86 er det ncb_bin + heap_layout + gap_ruter (før F3.7 mangla ncb_bin, so ei endring
 //     der let ein stale ELF gå gjennom).
+//   * KRYSS-codegen (mål != vert) har i tillegg <binær>.vertcg (A1-review): identiteten til
+//     vert-codegen-en som AOT-kompilerte binæren (sti, sha256, .srchash, .depshash) og sha256
+//     til sjølve kryss-binæren. .srchash/.depshash dekkjer berre mål-kjelda; utan .vertcg
+//     stod ein kryss-binær som «ok» etter at vert-codegen-en (native_codegen_v2 + gap_ruter +
+//     heap_layout) var bygd om, og ein utbytt binær med urørte hashfiler vart brukt utan
+//     åtvaring. Formlane for .srchash/.depshash er uendra, so committa seedar (som ikkje les
+//     .vertcg) godtek dei same filene.
 // Brukt av selfhost/nc_main.no (nc_bygg_native_prebuilt), tools/ncb_to_elf.no og
-// tests/test_native_codegen_srchash.no. Kryss-binærane sjølve kjem i A1 (linux-arm64),
-// M2 (macos-arm64) og W5 (windows-x86_64); ruta er klar, so dei treng ingen x86-reseed.
+// tests/test_native_codegen_srchash.no. Kryss-binærane for linux-arm64 og macos-arm64 på
+// linux-x86_64 finst sidan A1 (tools/build_cross_codegen.no byggjer dei og skriv hashane);
+// windows-x86_64 kjem i W5. Ruta er klar, so dei treng ingen x86-reseed.
 
 funksjon mål_liste() -> liste_tekst {
     returner ["linux-x86_64", "linux-arm64", "macos-arm64", "windows-x86_64"]
@@ -245,10 +253,102 @@ funksjon les_hash(sti: tekst) -> tekst {
     returner ""
 }
 
+// sha256 (hex) av innhaldet i ei fil, byte-eksakt; "" når ho ikkje kan lesast.
+// Snøggvegen fil_les_binær + sha256_bytes er atom på fersk seed (2,6 MB på ~80 ms, mot
+// ~1,2 s per 0,5 MB for builtin.sha256 på tekst) og C-builtin på C-æra-seedar. Gjev han
+// ikkje 64 teikn, blir builtin.sha256 på tekst brukt; han er ikkje NUL-trygg på C-æra-seedar,
+// men ein gal hash gjev berre «stale», aldri ein falsk «ok».
+funksjon sha256_fil(sti: tekst) -> tekst {
+    prøv {
+        la h = tekst(builtin.sha256_bytes(builtin.fil_les_binær(sti)))
+        hvis lengde(h) == 64 { returner h }
+    } fang (e) { }
+    prøv { returner builtin.sha256(builtin.fil_les(sti)) } fang (e2) { returner "" }
+    returner ""
+}
+
+// Den førehandsbygde codegen-en for (vert, vert), dvs. den som AOT-kompilerer kryss-codegen
+// på denne verten (relativ sti); "" når han manglar.
+funksjon vert_codegen_rel(root: tekst, vert: tekst) -> tekst {
+    la stiar = binær_stiar(vert, vert)
+    la i: heiltall = 0
+    mens i < lengde(stiar) {
+        hvis finst(root + "/" + tekst(stiar[i])) { returner tekst(stiar[i]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Innhaldet i <kryss_rel>.vertcg slik det skal vere for binæren og vert-codegen-en som ligg
+// i treet no. tools/build_cross_codegen.no skriv det rett etter bygget; vel() samanliknar
+// felt for felt (vertcg_sjekk).
+funksjon vertcg_tekst(root: tekst, vert: tekst, kryss_rel: tekst) -> tekst {
+    la vrel = vert_codegen_rel(root, vert)
+    la v_sha = ""
+    hvis vrel != "" { v_sha = sha256_fil(root + "/" + vrel) }
+    returner "vert=" + vert + "\n" +
+        "vert_cg=" + vrel + "\n" +
+        "vert_srchash=" + les_hash(root + "/" + vrel + ".srchash") + "\n" +
+        "vert_depshash=" + les_hash(root + "/" + vrel + ".depshash") + "\n" +
+        "vert_sha256=" + v_sha + "\n" +
+        "sha256=" + sha256_fil(root + "/" + kryss_rel) + "\n"
+}
+
+// Verdien til `nøkkel` i ein .vertcg-tekst (key=value-linjer); "" når feltet manglar.
+// index_of i staden for split på linjeskift (split er ikkje eintydig på alle vertar).
+funksjon vertcg_felt(innhald: tekst, nøkkel: tekst) -> tekst {
+    la t = "\n" + builtin.replace(innhald, "\r", "")
+    la merke = "\n" + nøkkel + "="
+    la k = builtin.index_of(t, merke)
+    hvis k < 0 { returner "" }
+    la rest = builtin.slice(t, k + lengde(merke), lengde(t))
+    la nl = builtin.index_of(rest, "\n")
+    hvis nl >= 0 { rest = builtin.slice(rest, 0, nl) }
+    returner builtin.trim(rest)
+}
+
+// Sjekkar <kryss_rel>.vertcg mot treet. "" = i orden; elles ei forklaring. Billege felt
+// (tekst) først, so dei to binær-hashane berre blir rekna ut når resten stemmer.
+funksjon vertcg_sjekk(root: tekst, vert: tekst, kryss_rel: tekst) -> tekst {
+    la innhald = ""
+    prøv { innhald = builtin.fil_les(root + "/" + kryss_rel + ".vertcg") } fang (e) { innhald = "" }
+    hvis builtin.trim(innhald) == "" {
+        returner kryss_rel + ".vertcg manglar (kven bygde kryss-binæren er ukjent)"
+    }
+    la vrel = vert_codegen_rel(root, vert)
+    hvis vrel == "" { returner "vert-codegen for " + vert + " manglar" }
+    la felt: liste_tekst = ["vert", "vert_cg", "vert_srchash", "vert_depshash"]
+    la venta: liste_tekst = [vert, vrel, les_hash(root + "/" + vrel + ".srchash"),
+                             les_hash(root + "/" + vrel + ".depshash")]
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        la har = vertcg_felt(innhald, tekst(felt[i]))
+        hvis har == "" eller har != tekst(venta[i]) {
+            returner kryss_rel + ".vertcg: " + tekst(felt[i]) + "=" + har + " svarar ikkje til " +
+                tekst(venta[i]) + " (vert-codegen " + vrel + " er bygd om sidan kryss-binæren vart bygd)"
+        }
+        i = i + 1
+    }
+    la v_sha = sha256_fil(root + "/" + vrel)
+    la har_v = vertcg_felt(innhald, "vert_sha256")
+    hvis v_sha == "" eller har_v != v_sha {
+        returner kryss_rel + ".vertcg: vert_sha256=" + har_v + " svarar ikkje til " + vrel +
+            " (sha256=" + v_sha + "; kryss-binæren er bygd med ein annan vert-codegen)"
+    }
+    la k_sha = sha256_fil(root + "/" + kryss_rel)
+    la har_k = vertcg_felt(innhald, "sha256")
+    hvis k_sha == "" eller har_k != k_sha {
+        returner kryss_rel + " har sha256=" + k_sha + ", men .vertcg seier " + har_k +
+            " (binæren er bytt ut utan nytt bygg)"
+    }
+    returner ""
+}
+
 // Vel førehandsbygd codegen for (mål, vert). Svar:
-//   status "ok"       — sti er ein binær med ferske .srchash/.depshash
+//   status "ok"       — sti er ein binær med ferske .srchash/.depshash (og for kryss-codegen
+//                       ein .vertcg som svarar til vert-codegen-en og binæren)
 //   status "manglar"  — ingen binær for (mål, vert)
-//   status "stale"    — binæren finst, men hashane svarar ikkje til kjelda
+//   status "stale"    — binæren finst, men hashane (eller .vertcg) svarar ikkje til treet
 //   status "ukjend"   — ukjent mål eller vert
 // melding er ei lesbar forklaring for åtvaringa når status != "ok".
 funksjon vel(root: tekst, mål: tekst, vert: tekst) -> ordbok_tekst {
@@ -276,6 +376,16 @@ funksjon vel(root: tekst, mål: tekst, vert: tekst) -> ordbok_tekst {
     }
     svar["rel"] = rel
     svar["sti"] = root + "/" + rel
+    // Kryss-codegen: .vertcg først (tekstfelt og to atom-hashar, ~0,1 s), før dei dyre
+    // kjeldehashane.
+    hvis mål != vert {
+        la vk = vertcg_sjekk(root, vert, rel)
+        hvis vk != "" {
+            svar["status"] = "stale"
+            svar["melding"] = vk
+            returner svar
+        }
+    }
     // .depshash først: lukkinga er små filer (ms), medan .srchash hashar codegen-kjelda
     // (~0,8 MB, om lag 1 s på committa Linux-seed) — ei stale lukking treng ikkje den.
     la venta_deps = les_hash(root + "/" + rel + ".depshash")
