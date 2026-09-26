@@ -55,6 +55,8 @@ funksjon _get_varint(bytes: liste_heiltall, pos: heiltall) -> liste {
         v = v | ((b & 127) << skift)
         hvis b < 128 { returner [v, pos] }
         skift = skift + 7
+        # Ein gyldig varint har høgst 10 byte (skift 0..63).
+        hvis skift > 63 { kast "ncb_bin: for lang varint" }
     }
     returner [v, pos]
 }
@@ -211,17 +213,20 @@ funksjon _decode_inn(bytes: liste_heiltall, pos: heiltall) -> liste {
     kast "ncb_bin: ukjend tag " + tekst_fra_heltall(tag)
 }
 
-# bin_decode(byte) → verdi
+# bin_decode(byte) → verdi. Heile bytelista skal vere éin verdi: bytar etter slutten
+# er feil (ei avkorta eller samanskøytt fil skal ikkje godtakast).
 funksjon bin_decode(bytes: liste_heiltall) {
     la r = _decode_inn(bytes, 0)
+    hvis r[1] != lengde(bytes) { kast "ncb_bin: overskytande bytar etter binær verdi" }
     returner r[0]
 }
 
-# ncb_encode(ncb) → byte. Strippar debug-metadata (source_lines/source_columns) frå
-# kvar funksjon FØR encoding: dei trengst ikkje for køyring, utgjer ~24% av bloaten,
-# og er hovudkjelda til Gen1≠Gen2-serialiserings-drifta. Muterer ncb in-place (den
-# blir serialisert og forkasta). Deterministisk + lean.
-funksjon ncb_encode(ncb) -> liste_heiltall {
+# ncb_utan_debugmetadata(ncb) → same ncb utan source_lines/source_columns (muterer
+# in-place). Berre for kallarar som eksplisitt vil ha ein mager NCB. ncb_encode og
+# ncb_encode_tekst BEHELD linjetabellane: binær er standardformatet for `nc compile`
+# og test-NCB-ar, og debuggaren (vm_debug_source_position, steg_linje), profileraren
+# og refleksjonen (source_line) les dei. Binærformatet er deterministisk med dei òg.
+funksjon ncb_utan_debugmetadata(ncb) {
     hvis builtin.type(ncb) == "ordbok" og har_nokkel(ncb, "functions") {
         la fns = ncb["functions"]
         la navn = nøkler(fns)
@@ -233,6 +238,12 @@ funksjon ncb_encode(ncb) -> liste_heiltall {
             i = i + 1
         }
     }
+    returner ncb
+}
+
+# ncb_encode(ncb) → byte. Heile NCB-en, debug-metadata inkludert (sjå
+# ncb_utan_debugmetadata). Deterministisk.
+funksjon ncb_encode(ncb) -> liste_heiltall {
     returner bin_encode(ncb)
 }
 
@@ -338,23 +349,16 @@ funksjon bin_encode_tekst(v) -> tekst {
     returner builtin.join(deler, "")
 }
 
-# ncb_encode_tekst(ncb) → tekst. Same stripping av debug-metadata som ncb_encode.
+# ncb_encode_tekst(ncb) → tekst. Same innhald som ncb_encode (debug-metadata med).
 funksjon ncb_encode_tekst(ncb) -> tekst {
-    hvis builtin.type(ncb) == "ordbok" og har_nokkel(ncb, "functions") {
-        la fns = ncb["functions"]
-        la navn = nøkler(fns)
-        la i = 0
-        mens i < lengde(navn) {
-            la fn = fns[navn[i]]
-            hvis har_nokkel(fn, "source_lines") { builtin.fjern_nokkel(fn, "source_lines") }
-            hvis har_nokkel(fn, "source_columns") { builtin.fjern_nokkel(fn, "source_columns") }
-            i = i + 1
-        }
-    }
     returner bin_encode_tekst(ncb)
 }
 
+# _tb(t, pos) → byten på pos. Kastar når pos er forbi slutten: char_code("") gjev 0 på
+# sjølvhosta runtime, so utan porten vart ei avkorta fil lesen som 0-bytar (varint
+# 300 → 44, bool sann → usann) i staden for å bli avvist.
 funksjon _tb(t: tekst, pos: heiltall) -> heiltall {
+    hvis pos < 0 eller pos >= lengde(t) { kast "ncb_bin: avkorta binær NCB" }
     returner builtin.char_code(builtin.slice(t, pos, pos + 1)) & 255
 }
 
@@ -368,6 +372,7 @@ funksjon _get_varint_tekst(t: tekst, pos: heiltall) -> liste {
         v = v | ((b & 127) << skift)
         hvis b < 128 { returner [v, pos] }
         skift = skift + 7
+        hvis skift > 63 { kast "ncb_bin: for lang varint" }
     }
     returner [v, pos]
 }
@@ -389,8 +394,9 @@ funksjon _decode_tekst_inn(t: tekst, pos: heiltall) -> liste {
     }
     hvis tag == 0 { returner [_ingenting_verdi(), pos] }
     hvis tag == 5 {
-        la b = _tb(t, pos) == 1
-        returner [b, pos + 1]
+        la bb = _tb(t, pos)
+        hvis bb > 1 { kast "ncb_bin: ugyldig boolsk byte " + tekst_fra_heltall(bb) }
+        returner [bb == 1, pos + 1]
     }
     hvis tag == 1 {
         la r = _get_varint_tekst(t, pos)
@@ -400,7 +406,7 @@ funksjon _decode_tekst_inn(t: tekst, pos: heiltall) -> liste {
         la rn = _get_varint_tekst(t, pos)
         la n = rn[0]
         pos = rn[1]
-        hvis pos + n > lengde(t) { kast "ncb_bin: avkorta binær NCB (tekst)" }
+        hvis n < 0 eller pos + n > lengde(t) { kast "ncb_bin: avkorta binær NCB (tekst)" }
         la s = ""
         hvis n > 0 { s = builtin.slice(t, pos, pos + n) }
         returner [s, pos + n]
@@ -438,9 +444,11 @@ funksjon _decode_tekst_inn(t: tekst, pos: heiltall) -> liste {
     kast "ncb_bin: ukjend tag " + tekst_fra_heltall(tag)
 }
 
-# bin_decode_tekst(t, frå) → verdi. frå = første byte etter eventuelt hovud.
+# bin_decode_tekst(t, frå) → verdi. frå = første byte etter eventuelt hovud. Resten
+# av teksten skal vere nøyaktig éin verdi: bytar etter slutten blir avviste.
 funksjon bin_decode_tekst(t: tekst, frå: heiltall) {
     la r = _decode_tekst_inn(t, frå)
+    hvis r[1] != lengde(t) { kast "ncb_bin: overskytande bytar etter binær NCB" }
     returner r[0]
 }
 
