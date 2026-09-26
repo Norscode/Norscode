@@ -8400,6 +8400,27 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, (mrt_scan - (lengde(bytes) + 4)) & 4294967295)
     la mrt_scandone = lengde(bytes)                // .scan_done:
     patch_jump(bytes, mrt_pscandone, mrt_scandone)
+    // v8 (2026-09-26, GC-modus): STRUKTURVALIDERING av liste/map før markøren følgjer dei.
+    // Rota er konservativ: ein daud stakkslot kan peike på ein gammal liste-boks (framleis
+    // type 3) der payloaden sidan er frigjord og gjenbrukt, t.d. som element-array full av
+    // peikarar til kanon-heiltalsboksen 0x809d90. Då las markøren len = elem_ptr = 0x809d90
+    // (8,4M, under 16M-taket) og skanna 64 MiB av låg-heapen som «element», fann fleire slike
+    // falske map/lister (count = rodata-/cache-peikar) og brukte ~10^10 gc_push-kall: éin
+    // collect tok ~110 s i staden for ~0,1 s (målt med qemu-dump + offline-attspeling av
+    // markøren; kva stakkslot som er stale, avheng av stakk-layouten, difor lengda på
+    // kjeldekatalognamnet). Ekte objekt oppfyller alltid (alle list/map-byggjarane går via
+    // list_new_cap/map_new/list_app/map-vekst og gc_alloc_var):
+    //   * payload, elem_ptr, keys, vals, idx ≥ HEAP_ALLOC_START (ingenting blir allokert i
+    //     kanon-cachen [HEAP+64, HEAP_ALLOC_START); var HEAP+64 → cache-peikarar slapp gjennom)
+    //   * payload 16-aligna (gc_alloc_var deler ut round16)
+    //   * len ≤ cap og count ≤ cap (list_app/map_set veks ved len == cap; cap ≥ 8)
+    //   * array-ende etter CAP ≤ bump (blokka er cap*8; inline: payload+24+cap*8)
+    // Offline på same dump: berre nedre grense åleine gjev nøyaktig same levande sett som
+    // den raske layouten (304 116 objekt); dei andre er forsvar i djupna. Flagg AV: uendra
+    // bytar (collect køyrer aldri der; paritet).
+    la mrt_has = hl.HEAP_ALLOC_START(X86_MAL())
+    la mrt_lo4: liste = _heap_abs4(64)
+    hvis gc_mode == "1" { mrt_lo4 = [mrt_has & 255, (mrt_has >> 8) & 255, (mrt_has >> 16) & 255, (mrt_has >> 24) & 255] }
     // DFS-drain (som gc_mark_native):
     la mrt_loop = lengde(bytes)                    // .loop:
     copy(bytes, [0x49, 0x81, 0xFB, 0x00, 0x00, 0x00, 0x4B]) // cmp r11,0x4B000000 (GC_MSTACK_VA, v6)
@@ -8455,29 +8476,48 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     u32(bytes, 0)
     la mrt_pnotmap = lengde(bytes) - 4
     copy(bytes, [0x48, 0x8B, 0x77, 0x08])          // mov rsi,[rdi+8] (payload)
-    copy(bytes, [0x48, 0x81, 0xFE]) copy(bytes, _heap_abs4(64)) // cmp rsi,0x600040
+    copy(bytes, [0x48, 0x81, 0xFE]) copy(bytes, mrt_lo4) // cmp rsi,HEAP+64 (v8 GC: HEAP_ALLOC_START)
     copy(bytes, [0x0F, 0x82])                      // jb loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x34, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rsi,[bump]
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x40, 0xF6, 0xC6, 0x0F])      // test sil,15 (v8: map-payload frå gc_alloc_var er 16-aligna)
+        copy(bytes, [0x0F, 0x85])                  // jnz loop
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (count)
     // v3: taket var 65536 → levande map > 65536 nøklar (VM-heap-bokhald) uverna.
     copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000 (16M)
     copy(bytes, [0x0F, 0x87])                      // ja loop (sanity)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
+        copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x04]) // cmp rdx,0x4000000 (v8: cap ≤ 64M → cap*8 kan ikkje flyte over)
+        copy(bytes, [0x0F, 0x87])                  // ja loop
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+        copy(bytes, [0x48, 0x39, 0xD0])            // cmp rax,rdx
+        copy(bytes, [0x0F, 0x87])                  // ja loop (v8: count > cap → ikkje ein ekte map)
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     copy(bytes, [0x49, 0x89, 0x32])                // mov [r10],rsi (payload)
     copy(bytes, [0x49, 0xC7, 0x42, 0x08, 0x40, 0x00, 0x00, 0x00]) // mov q[r10+8],64 (hasha map-payload)
     copy(bytes, [0x49, 0x83, 0xC2, 0x10])          // add r10,16
     // KEYS: array cap*8 + push count key-peikarar
     copy(bytes, [0x48, 0x8B, 0x4E, 0x10])          // mov rcx,[rsi+16] (keys_ptr)
-    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, _heap_abs4(64)) // cmp rcx,0x600040
+    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, mrt_lo4) // cmp rcx,HEAP+64 (v8 GC: HEAP_ALLOC_START)
     copy(bytes, [0x0F, 0x82])                      // jb loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rcx,[bump]
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
-    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8] (v3: keys-ende ≤ bump)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
+        copy(bytes, [0x48, 0x8D, 0x14, 0xD1])      // lea rdx,[rcx+rdx*8] (v8: keys-ende etter cap ≤ bump)
+    } ellers {
+        copy(bytes, [0x48, 0x8D, 0x14, 0xC1])      // lea rdx,[rcx+rax*8] (v3: keys-ende ≤ bump)
+    }
     copy(bytes, [0x48, 0x3B, 0x14, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rdx,[bump]
     copy(bytes, [0x0F, 0x87])                      // ja loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
@@ -8504,13 +8544,18 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // VALS: array cap*8 + push count verdi-peikarar
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (count reload)
     copy(bytes, [0x48, 0x8B, 0x4E, 0x18])          // mov rcx,[rsi+24] (vals_ptr)
-    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, _heap_abs4(64)) // cmp rcx,0x600040
+    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, mrt_lo4) // cmp rcx,HEAP+64 (v8 GC: HEAP_ALLOC_START)
     copy(bytes, [0x0F, 0x82])                      // jb loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rcx,[bump]
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
-    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8] (v3: vals-ende ≤ bump)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
+        copy(bytes, [0x48, 0x8D, 0x14, 0xD1])      // lea rdx,[rcx+rdx*8] (v8: vals-ende etter cap ≤ bump)
+    } ellers {
+        copy(bytes, [0x48, 0x8D, 0x14, 0xC1])      // lea rdx,[rcx+rax*8] (v3: vals-ende ≤ bump)
+    }
     copy(bytes, [0x48, 0x3B, 0x14, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rdx,[bump]
     copy(bytes, [0x0F, 0x87])                      // ja loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
@@ -8524,10 +8569,22 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x4C, 0x8B, 0x46, 0x20])          // mov r8,[rsi+32] (idx)
     copy(bytes, [0x4D, 0x85, 0xC0])                // test r8,r8
     la mrt_pidx1 = emit_je_placeholder(bytes)
-    copy(bytes, [0x49, 0x81, 0xF8]) copy(bytes, _heap_abs4(64)) // cmp r8,0x600040
+    copy(bytes, [0x49, 0x81, 0xF8]) copy(bytes, mrt_lo4) // cmp r8,HEAP+64 (v8 GC: HEAP_ALLOC_START)
     la mrt_pidx2 = emit_jcc_placeholder(bytes, 0x82) // jb skip
     copy(bytes, [0x4C, 0x3B, 0x04, 0x25]) copy(bytes, _heap_abs4(0)) // cmp r8,[bump]
     la mrt_pidx3 = emit_jcc_placeholder(bytes, 0x83) // jae skip
+    la mrt_pidx4: heltall = -1
+    la mrt_pidx5: heltall = -1
+    hvis gc_mode == "1" {
+        // v8: idx-blokka er idx_cap*8 (map_reindex) → ende ≤ bump; falsk idx_cap registrerte
+        // elles eit vilkårleg stort «levande» område.
+        copy(bytes, [0x48, 0x8B, 0x56, 0x28])      // mov rdx,[rsi+40] (idx_cap)
+        copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x04]) // cmp rdx,0x4000000
+        mrt_pidx4 = emit_jcc_placeholder(bytes, 0x87) // ja skip
+        copy(bytes, [0x49, 0x8D, 0x14, 0xD0])      // lea rdx,[r8+rdx*8]
+        copy(bytes, [0x48, 0x3B, 0x14, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rdx,[bump]
+        mrt_pidx5 = emit_jcc_placeholder(bytes, 0x87) // ja skip
+    }
     copy(bytes, [0x4D, 0x89, 0x02])                // mov [r10],r8
     copy(bytes, [0x48, 0x8B, 0x56, 0x28])          // mov rdx,[rsi+40] (idx_cap) (r9 = mark-teljar!)
     copy(bytes, [0x48, 0xC1, 0xE2, 0x03])          // shl rdx,3
@@ -8535,6 +8592,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x49, 0x83, 0xC2, 0x10])          // add r10,16
     la mrt_idxskip = lengde(bytes)
     patch_jump(bytes, mrt_pidx1, mrt_idxskip) patch_jump(bytes, mrt_pidx2, mrt_idxskip) patch_jump(bytes, mrt_pidx3, mrt_idxskip)
+    hvis mrt_pidx4 >= 0 { patch_jump(bytes, mrt_pidx4, mrt_idxskip) patch_jump(bytes, mrt_pidx5, mrt_idxskip) }
     copy(bytes, [0x48, 0x89, 0xCA])                // mov rdx,rcx (cursor)
     la mrt_valloop = lengde(bytes)                 // .valloop:
     copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
@@ -8600,17 +8658,31 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // KONSERVATIV robustheit: falske roter (stakk-heiltal som aliasar heap) kan ha
     // type==3 med søppel-payload/len. Valider payload i [0x600000, bump) + cap len før
     // vi følgjer «lista» — elles wild deref / mark-stakk-overflow → krasj.
-    copy(bytes, [0x48, 0x81, 0xFE]) copy(bytes, _heap_abs4(64)) // cmp rsi,0x600040 (over kontrollblokk)
+    copy(bytes, [0x48, 0x81, 0xFE]) copy(bytes, mrt_lo4) // cmp rsi,HEAP+64 (v8 GC: HEAP_ALLOC_START)
     copy(bytes, [0x0F, 0x82])                      // jb loop (payload under heap)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x34, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rsi,[0x600000] (bump)
     copy(bytes, [0x0F, 0x83])                      // jae loop (payload >= bump)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x40, 0xF6, 0xC6, 0x0F])      // test sil,15 (v8: liste-payload frå list_new_cap/gc_alloc_var er 16-aligna)
+        copy(bytes, [0x0F, 0x85])                  // jnz loop
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     copy(bytes, [0x48, 0x8B, 0x06])                // mov rax,[rsi] (len)
     // v3: taket var 65536 → levande lister > 65536 element (token-lister o.l.) uverna.
     copy(bytes, [0x48, 0x3D, 0x00, 0x00, 0x00, 0x01]) // cmp rax,0x1000000 (16M)
     copy(bytes, [0x0F, 0x87])                      // ja loop (len for stor → falsk liste)
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
+        copy(bytes, [0x48, 0x81, 0xFA, 0x00, 0x00, 0x00, 0x04]) // cmp rdx,0x4000000 (v8: cap ≤ 64M)
+        copy(bytes, [0x0F, 0x87])                  // ja loop
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+        copy(bytes, [0x48, 0x39, 0xD0])            // cmp rax,rdx
+        copy(bytes, [0x0F, 0x87])                  // ja loop (v8: len > cap → ikkje ei ekte liste)
+        u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
+    }
     // FIKS (collect-korrektheit): ekte liste-layout = payload[len,cap,elem_ptr]; element-
     // arrayen er via elem_ptr=[payload+16] (RT_LIST_GET: elem=[[payload+16]+i*8]). Gamal kode
     // las element INLINE @payload+16 (=elem_ptr sjølv som «element0») → følgde feil adresser
@@ -8649,14 +8721,20 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x49, 0x83, 0xC2, 0x10])          // add r10,16
     // (b) elem_ptr = [payload+16]; valider i [0x600040, bump) — falsk liste → hopp element-følging
     copy(bytes, [0x48, 0x8B, 0x4E, 0x10])          // mov rcx,[rsi+16] (elem_ptr)
-    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, _heap_abs4(64)) // cmp rcx,0x600040 (over kontrollblokk)
+    copy(bytes, [0x48, 0x81, 0xF9]) copy(bytes, mrt_lo4) // cmp rcx,HEAP+64 (v8 GC: HEAP_ALLOC_START; 0x809d90-kaskaden)
     copy(bytes, [0x0F, 0x82])                      // jb loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     copy(bytes, [0x48, 0x3B, 0x0C, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rcx,[0x600000] (bump)
     copy(bytes, [0x0F, 0x83])                      // jae loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
     // v3: element-array-ende (elem_ptr + len*8) må liggje under bump — elles falsk liste.
-    copy(bytes, [0x48, 0x8D, 0x14, 0xC1])          // lea rdx,[rcx+rax*8]
+    // v8 (GC): ende etter CAP (blokka er cap*8, inline payload+24+cap*8) — strengare, len ≤ cap.
+    hvis gc_mode == "1" {
+        copy(bytes, [0x48, 0x8B, 0x56, 0x08])      // mov rdx,[rsi+8] (cap)
+        copy(bytes, [0x48, 0x8D, 0x14, 0xD1])      // lea rdx,[rcx+rdx*8]
+    } ellers {
+        copy(bytes, [0x48, 0x8D, 0x14, 0xC1])      // lea rdx,[rcx+rax*8]
+    }
     copy(bytes, [0x48, 0x3B, 0x14, 0x25]) copy(bytes, _heap_abs4(0)) // cmp rdx,[bump]
     copy(bytes, [0x0F, 0x87])                      // ja loop
     u32(bytes, (mrt_loop - (lengde(bytes) + 4)) & 4294967295)
