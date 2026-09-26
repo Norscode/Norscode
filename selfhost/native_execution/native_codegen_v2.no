@@ -259,7 +259,68 @@ funksjon sett_rt_inngang(bytes, rt_va: heiltall, target: heiltall) {
     patch_abs_jump(bytes, rt_va - TEXT_VA(), rt_va - TEXT_VA() + 16, target)
 }
 
-funksjon emit_cached_int_runtime(bytes) -> heiltall {
+// ─── F3.8 (2026-09-25): GC-modus-greina blir emittert direkte ────────────────────
+// Før: cache-fallbackane emitterte alltid rå bump-allokering, og i GC-modus søkte
+// patch_bump_prologer/patch_raw_string_allocs etterpå gjennom eigen output etter
+// bump-mønstera og bytte dei ut. No vel emitteren greina sjølv. GC-atoma
+// (gc_alloc16/gc_alloc_var/gc_alloc_str_r11_rbx) kjem seinare i runtimen enn
+// cache-regionen, so adressa er ei vanleg framover-referanse: gc_fix[namn] = byte-
+// posisjonen til imm64/rel32-feltet, og gc_fix_løys skriv inn adressa når atoma
+// finst (same mønster som patch_jump). Bytane er identiske med det patch-passa
+// laga (same lengd, same VA-ar); berre vegen dit er rein emisjon.
+// gc_fix["gc"] == 1 betyr GC-modus (NORSCODE_GC_ALLOC=1).
+funksjon GC_FIX_NAMN() -> liste { returner ["int_boks", "str_payload", "str_boks", "join_raw", "join_boks"] }
+
+// movabs rax,<gc_alloc16>; call rax; nop×8 — 20 B, same lengd som 16 B-bump-prologen
+// (mov rax,[bump]; lea rcx,[rax+16]; mov [bump],rcx). gc_alloc16 klobrar berre rax.
+funksjon emit_gc_alloc16_kall(bytes, gc_fix, namn: tekst) {
+    copy(bytes, [0x48, 0xB8])
+    gc_fix[namn] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0xFF, 0xD0])
+    copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])
+}
+
+// Skriv inn GC-atom-adressene i dei direkte emitterte kalla. Fail-closed: i GC-modus
+// MÅ alle fem stadene finnast (ein manglande stad = ein allokator som går forbi fri-
+// lista og allokeringsteljaren) og imm64/rel32-feltet vere urørt (0) før innskriving.
+funksjon gc_fix_løys(bytes, gc_fix, atomics) -> heiltall {
+    hvis gc_fix["gc"] != 1 { returner 0 }
+    la namn = GC_FIX_NAMN()
+    la k: heltall = 0
+    mens k < lengde(namn) {
+        la n = namn[k]
+        hvis ikkje finnes_nøkkel(gc_fix, n) {
+            kast "native_codegen_v2: GC-modus utan direkte GC-kall for " + n + " (cache-regionen har ein rå bump-allokator)"
+        }
+        la pos: heltall = gc_fix[n]
+        la bredd: heltall = 8
+        hvis n == "join_raw" { bredd = 4 }
+        la j: heltall = 0
+        mens j < bredd {
+            hvis bytes[pos + j] != 0 { kast "native_codegen_v2: GC-kallstad " + n + " er alt skriven" }
+            j = j + 1
+        }
+        la mål: heltall = atomics["gc_alloc16"]
+        hvis n == "str_payload" { mål = atomics["gc_alloc_var"] }
+        hvis n == "join_raw" { mål = atomics["gc_alloc_str_r11_rbx"] }
+        hvis n == "join_raw" {
+            patch_jump(bytes, pos, mål - TEXT_VA())      // call rel32 (pos = rel32-feltet)
+        } ellers {
+            la enc: liste = []
+            u64(enc, mål)
+            j = 0
+            mens j < 8 {
+                bytes[pos + j] = enc[j]
+                j = j + 1
+            }
+        }
+        k = k + 1
+    }
+    returner lengde(namn)
+}
+
+funksjon emit_cached_int_runtime(bytes, gc_fix) -> heiltall {
     la va = TEXT_VA() + lengde(bytes)
     // rdi = rå i64. Cache berre det trygge, tett brukte intervallet.
     copy(bytes, [0x48, 0x81, 0xFF])              // cmp rdi,-32768
@@ -284,15 +345,18 @@ funksjon emit_cached_int_runtime(bytes) -> heiltall {
     copy(bytes, [0x48, 0x89, 0x78, 0x08, 0xC3])  // payload; ret
 
     la fallback = lengde(bytes)
-    // v4 (2026-09-06): STANDARD 16B-bump-prolog (pat_rcx, 20 B) i staden for movabs-forma —
-    // patch_bump_prologer (skannegrense = cache_end) rutar han til gc_alloc16 i GC-modus, so
-    // int-cachen kan vere PÅ under GC (før: cache AV i GC-modus → kvar heiltalsboks 16 B
-    // → VM-i-VM-kompilering allokerte ~GB og sprengde heapen).
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25])        // mov rax,[bump]
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
-    copy(bytes, [0x48, 0x8D, 0x48, 0x10])        // lea rcx,[rax+16]
-    copy(bytes, [0x48, 0x89, 0x0C, 0x25])        // mov [bump],rcx
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
+    // Int-cachen er PÅ i begge modus (før v4: cache AV i GC-modus → kvar heiltalsboks 16 B
+    // → VM-i-VM-kompilering allokerte ~GB og sprengde heapen). Fallback-boksen går via
+    // gc_alloc16 (fri-liste) i GC-modus og rå bump elles.
+    hvis gc_fix["gc"] == 1 {
+        emit_gc_alloc16_kall(bytes, gc_fix, "int_boks")
+    } ellers {
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25])        // mov rax,[bump]
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+        copy(bytes, [0x48, 0x8D, 0x48, 0x10])        // lea rcx,[rax+16]
+        copy(bytes, [0x48, 0x89, 0x0C, 0x25])        // mov [bump],rcx
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+    }
     copy(bytes, [0x48, 0xC7, 0x00])
     u32(bytes, 1)
     copy(bytes, [0x48, 0x89, 0x78, 0x08, 0xC3])
@@ -317,7 +381,7 @@ funksjon emit_cached_bool_runtime(bytes) -> heiltall {
     returner va
 }
 
-funksjon emit_cached_str_raw_runtime(bytes) -> heiltall {
+funksjon emit_cached_str_raw_runtime(bytes, gc_fix) -> heiltall {
     la va = TEXT_VA() + lengde(bytes)
     // rdi=rå bytes, rsi=lengd. Tekstindeksering produserer alltid eitt byte;
     // returner då ein kanonisk, immutable NcVal frå 256-postars cache.
@@ -343,12 +407,23 @@ funksjon emit_cached_str_raw_runtime(bytes) -> heiltall {
     // Generell dynamisk streng: alloker [len,bytes,NUL] og NcVal.
     copy(bytes, [0x53, 0x41, 0x54, 0x41, 0x55])            // save
     copy(bytes, [0x49, 0x89, 0xFC, 0x49, 0x89, 0xF5])      // r12=src;r13=len
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))                                  // rax=bump
-    copy(bytes, [0x48, 0x89, 0xC3])                        // rbx=obj
-    copy(bytes, [0x4A, 0x8D, 0x4C, 0x28, 0x09])            // rcx=rax+r13+9
-    copy(bytes, [0x48, 0x89, 0x0C, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
+    hvis gc_fix["gc"] == 1 {
+        // Payload [len,bytes,NUL] = len+9 frå fri-lista (24 B, same lengd som bump-greina).
+        copy(bytes, [0x49, 0x8D, 0x4D, 0x09])              // lea rcx,[r13+9]
+        copy(bytes, [0x48, 0xB8])                          // movabs rax,<gc_alloc_var>
+        gc_fix["str_payload"] = lengde(bytes)
+        u64(bytes, 0)
+        copy(bytes, [0xFF, 0xD0])                          // call rax
+        copy(bytes, [0x48, 0x89, 0xC3])                    // rbx=obj
+        copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90])
+    } ellers {
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))                  // rax=bump
+        copy(bytes, [0x48, 0x89, 0xC3])                    // rbx=obj
+        copy(bytes, [0x4A, 0x8D, 0x4C, 0x28, 0x09])        // rcx=rax+r13+9
+        copy(bytes, [0x48, 0x89, 0x0C, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+    }
     copy(bytes, [0x4C, 0x89, 0x2B, 0x48, 0x31, 0xC9])      // len; i=0
     la copy_loop = lengde(bytes)
     copy(bytes, [0x4C, 0x39, 0xE9])                        // cmp rcx,r13
@@ -361,10 +436,14 @@ funksjon emit_cached_str_raw_runtime(bytes) -> heiltall {
     u32(bytes, 0)
     la copied = lengde(bytes)
     copy(bytes, [0x42, 0xC6, 0x44, 0x2B, 0x08, 0x00])      // trailing NUL
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
-    copy(bytes, [0x48, 0x8D, 0x48, 0x10, 0x48, 0x89, 0x0C, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
+    hvis gc_fix["gc"] == 1 {
+        emit_gc_alloc16_kall(bytes, gc_fix, "str_boks")
+    } ellers {
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+        copy(bytes, [0x48, 0x8D, 0x48, 0x10, 0x48, 0x89, 0x0C, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+    }
     copy(bytes, [0x48, 0xC7, 0x00])
     u32(bytes, 2)
     copy(bytes, [0x48, 0x89, 0x58, 0x08])
@@ -379,7 +458,7 @@ funksjon emit_cached_str_raw_runtime(bytes) -> heiltall {
 // med eitt RT_CONCAT-kall per del og heldt alle mellomstrengane levande i den
 // monotone AOT-heapen. Denne rutinen måler total lengd, allokerer éin råstreng
 // og kopierer separator/delar direkte før han materialiserer eitt NcVal.
-funksjon emit_linear_join_runtime(bytes) -> heiltall {
+funksjon emit_linear_join_runtime(bytes, gc_fix) -> heiltall {
     la va = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x55, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57])
     copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // rax=listobj
@@ -435,9 +514,19 @@ funksjon emit_linear_join_runtime(bytes) -> heiltall {
     la no_sep_total = lengde(bytes)
     patch_jump(bytes, jbe_no_sep_total, no_sep_total)
 
-    copy(bytes, [0x4C, 0x8B, 0x1C, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))                                  // r11=raw object
-    copy(bytes, [0x49, 0x89, 0x1B])                       // raw.len=total
+    hvis gc_fix["gc"] == 1 {
+        // r11 = råobjekt (total+9) frå fri-lista via gc_alloc_str_r11_rbx (rbx = total;
+        // bevarer alle andre register). 11 B, same lengd som bump-greina.
+        copy(bytes, [0xE8])                               // call rel32
+        gc_fix["join_raw"] = lengde(bytes)
+        u32(bytes, 0)
+        copy(bytes, [0x49, 0x89, 0x1B])                   // raw.len=total
+        copy(bytes, [0x90, 0x90, 0x90])
+    } ellers {
+        copy(bytes, [0x4C, 0x8B, 0x1C, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))                 // r11=raw object (rå bump)
+        copy(bytes, [0x49, 0x89, 0x1B])                   // raw.len=total
+    }
     copy(bytes, [0x4D, 0x8D, 0x53, 0x08])                 // r10=write cursor
     copy(bytes, [0x31, 0xED])                             // i=0
 
@@ -464,14 +553,20 @@ funksjon emit_linear_join_runtime(bytes) -> heiltall {
     la copy_done = lengde(bytes)
     patch_jump(bytes, je_copy_done, copy_done)
     copy(bytes, [0x41, 0xC6, 0x02, 0x00])                 // trailing NUL
-    copy(bytes, [0x49, 0x8D, 0x42, 0x01])                 // bump=cursor+1
-    copy(bytes, [0x48, 0x89, 0x04, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
-    copy(bytes, [0x48, 0x8B, 0x04, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))                                  // rax=NcVal
-    copy(bytes, [0x48, 0x8D, 0x48, 0x10])
-    copy(bytes, [0x48, 0x89, 0x0C, 0x25])
-    u32(bytes, hl.HEAP_VA(X86_MAL()))
+    copy(bytes, [0x49, 0x8D, 0x42, 0x01])                 // rax=cursor+1
+    hvis gc_fix["gc"] == 1 {
+        // Blokka kom frå fri-lista (storleik alt reservert) → ingen bump-oppdatering.
+        copy(bytes, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])
+        emit_gc_alloc16_kall(bytes, gc_fix, "join_boks")  // rax=NcVal
+    } ellers {
+        copy(bytes, [0x48, 0x89, 0x04, 0x25])             // bump=cursor+1
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+        copy(bytes, [0x48, 0x8B, 0x04, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))                 // rax=NcVal
+        copy(bytes, [0x48, 0x8D, 0x48, 0x10])
+        copy(bytes, [0x48, 0x89, 0x0C, 0x25])
+        u32(bytes, hl.HEAP_VA(X86_MAL()))
+    }
     copy(bytes, [0x48, 0xC7, 0x00])
     u32(bytes, 2)                                          // type=str
     copy(bytes, [0x4C, 0x89, 0x58, 0x08])                 // payload=raw
@@ -2038,109 +2133,6 @@ funksjon emit_text_index_of_raw(bytes) {
     ])
 }
 
-// (iii) hex-patch (GC-modus): dei faste 16 B-bump-prologane i CACHE-REGIONEN
-// (int-fallback i emit_cached_int_runtime, boksen i emit_cached_str_raw_runtime):
-//   mov rax,[0x600000]; lea rcx,[rax+16]; mov [0x600000],rcx   (20 byte)
-// → posisjons-uavhengig absolutt-kall til gc_alloc16 (fri-liste-støtta):
-//   mov rax, ga16_va; call rax; nop*8                          (20 byte)
-// Same lengde → alle andre VA-ar er urørte. Skannar BERRE [0, grense) — mine eigne primitiv
-// (gc_box_int/gc_alloc, emitterte etter grensa) har same prolog-mønster og må IKKJE
-// patchast (elles uendeleg rekursjon). Fase C.3 (2026-09-09): dei frosne variantane
-// (r12-variant i json_string, movabs-33-varianten i dei påhengde halane) er borte med blobben.
-funksjon patch_bump_prologer(bytes, ga16_va, grense) -> liste {
-    // Begge 20-byte 16B-bump-prolog-variantane: rcx-variant (lea rcx,[rax+16]) og
-    // rdx-variant (lea rdx,[rax+16]). gc_alloc16 klobrar berre rax → trygg for begge.
-    la pat_rcx = [] copy(pat_rcx, [0x48, 0x8B, 0x04, 0x25]) copy(pat_rcx, _heap_abs4(0)) copy(pat_rcx, [0x48, 0x8D, 0x48, 0x10, 0x48, 0x89, 0x0C, 0x25]) copy(pat_rcx, _heap_abs4(0))
-    la pat_rdx = [] copy(pat_rdx, [0x48, 0x8B, 0x04, 0x25]) copy(pat_rdx, _heap_abs4(0)) copy(pat_rdx, [0x48, 0x8D, 0x50, 0x10, 0x48, 0x89, 0x14, 0x25]) copy(pat_rdx, _heap_abs4(0))
-    la repl = []
-    copy(repl, [0x48, 0xB8])
-    u64(repl, ga16_va)
-    copy(repl, [0xFF, 0xD0])
-    copy(repl, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])
-    la ut = []
-    la n: heltall = lengde(bytes)
-    la i: heltall = 0
-    la treff: heltall = 0
-    mens i < n {
-        hvis hexpatch_matchar(bytes, i, pat_rcx, grense) == 1 eller hexpatch_matchar(bytes, i, pat_rdx, grense) == 1 {
-            copy(ut, repl)
-            i = i + lengde(pat_rcx)
-            treff = treff + 1
-        } ellers {
-            legg_til(ut, bytes[i])
-            i = i + 1
-        }
-    }
-    skriv("native_codegen_v2: (iii) hex-patcha " + tekst_fra_heltall(treff) + " bump-prologar → gc_alloc16\n")
-    // F0 (2026-09-24, fail-closed): cache-regionen har NØYAKTIG tre 16 B-bump-prologar
-    // (int-fallback, str_raw-boks, join-boks; bygglogg «(iii) hex-patcha 3»). Eit anna tal
-    // betyr at ein allokator ligg upatcha (rå bump utanom fri-lista/teljaren) eller at
-    // mønsteret har treft data → avbryt i staden for å byggje ein seed med skjult lekkasje.
-    hvis treff != 3 { kast "native_codegen_v2: venta 3 bump-prologar i cache-regionen (int-fallback, str_raw-boks, join-boks), fann " + tekst_fra_heltall(treff) }
-    returner ut
-}
-
-// hexpatch_matchar(bytes, i, pat, grense) → 1 når pat ligg på bytes[i..] og heilt innanfor grensa.
-funksjon hexpatch_matchar(bytes, i: heltall, pat, grense: heltall) -> heltall {
-    la plen: heltall = lengde(pat)
-    hvis i + plen > grense { returner 0 }
-    la j: heltall = 0
-    mens j < plen {
-        hvis bytes[i + j] != pat[j] { returner 0 }
-        j = j + 1
-    }
-    returner 1
-}
-
-// (v5) hex-patch (GC-modus): dei RÅ streng-payload-allokatorane (len+9) i CACHE-REGIONEN
-// → fri-liste. Alle erstatningar har SAME lengd. Register-kontekst verifisert i disassembly:
-//   E str_raw-fallback (emit_cached_str_raw_runtime, 24 B): mov rax,[bump]; mov rbx,rax;
-//     lea rcx,[rax+r13+9]; mov [bump],rcx → rcx nulla, rax daud.
-//     → lea rcx,[r13+9]; movabs rax,gav; call rax; mov rbx,rax
-//   H lineær join (emit_linear_join_runtime, TODELT): mov r11,[bump]; mov [r11],rbx (11 B)
-//     … kopi … mov [bump],rax (8 B, reservasjon) → call rel32 h_r11_rbx; mov [r11],rbx;
-//     nop×3 | nop×8 (berre innan 96 B etter H1).
-// Fase C.3 (2026-09-09): mønstra A/B/D/F/G låg i den frosne blobben og er borte med han.
-funksjon patch_raw_string_allocs(bytes, h_r11_rbx, gav_va, grense) -> liste {
-    la pat_e = [] copy(pat_e, [0x48, 0x8B, 0x04, 0x25]) copy(pat_e, _heap_abs4(0)) copy(pat_e, [0x48, 0x89, 0xC3, 0x4A, 0x8D, 0x4C, 0x28, 0x09, 0x48, 0x89, 0x0C, 0x25]) copy(pat_e, _heap_abs4(0))
-    la repl_e = []
-    copy(repl_e, [0x49, 0x8D, 0x4D, 0x09])                        // lea rcx,[r13+9]
-    copy(repl_e, [0x48, 0xB8]) u64(repl_e, gav_va)               // movabs rax,gc_alloc_var
-    copy(repl_e, [0xFF, 0xD0])                                    // call rax
-    copy(repl_e, [0x48, 0x89, 0xC3])                              // mov rbx,rax
-    copy(repl_e, [0x90, 0x90, 0x90, 0x90, 0x90])
-    la pat_h1 = [] copy(pat_h1, [0x4C, 0x8B, 0x1C, 0x25]) copy(pat_h1, _heap_abs4(0)) copy(pat_h1, [0x49, 0x89, 0x1B])
-    la pat_h2 = [] copy(pat_h2, [0x48, 0x89, 0x04, 0x25]) copy(pat_h2, _heap_abs4(0))
-    la ut = []
-    la n: heltall = lengde(bytes)
-    la i: heltall = 0
-    la te: heltall = 0 la th1: heltall = 0 la th2: heltall = 0
-    la h1_pos: heltall = -1000
-    mens i < n {
-        hvis hexpatch_matchar(bytes, i, pat_e, grense) == 1 {
-            copy(ut, repl_e) i = i + lengde(pat_e) te = te + 1
-        } ellers hvis hexpatch_matchar(bytes, i, pat_h1, grense) == 1 {
-            la relh: heltall = h_r11_rbx - (TEXT_VA() + i + 5)
-            legg_til(ut, 0xE8) u32(ut, relh & 4294967295)
-            copy(ut, [0x49, 0x89, 0x1B, 0x90, 0x90, 0x90])
-            h1_pos = i
-            i = i + lengde(pat_h1) th1 = th1 + 1
-        } ellers hvis i - h1_pos < 96 og hexpatch_matchar(bytes, i, pat_h2, grense) == 1 {
-            copy(ut, [0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90])
-            i = i + lengde(pat_h2) th2 = th2 + 1
-        } ellers {
-            legg_til(ut, bytes[i])
-            i = i + 1
-        }
-    }
-    skriv("native_codegen_v2: (v5) hex-patcha rå streng-allokatorar → fri-liste: E=" + tekst_fra_heltall(te) + " H=" + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) + "\n")
-    hvis th1 != th2 { kast "native_codegen_v2: todelt streng-patch utan hale (H " + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) + ") → bump-korrupsjon; avbryt" }
-    // F0 (2026-09-24, fail-closed): nøyaktig éin str_raw-fallback (E) og éin lineær join
-    // (H1/H2) i cache-regionen (bygglogg «E=1 H=1/1»).
-    hvis te != 1 eller th1 != 1 { kast "native_codegen_v2: venta E=1 H=1/1 rå streng-allokatorar i cache-regionen, fann E=" + tekst_fra_heltall(te) + " H=" + tekst_fra_heltall(th1) + "/" + tekst_fra_heltall(th2) }
-    returner ut
-}
-
 // ─── R2: dynamiske kall, assert og bytes_new som eigne atom ──────────────────
 // Byggjer ein ASCII-streng (≤ 100 B) på stakken og kallar RT_STR_RAW → rax = streng-NcVal.
 // Klobrar rax/rdi/rsi og caller-saved; rsp er attende som før.
@@ -2328,7 +2320,7 @@ funksjon lapp_r2_closure_nokler(rt, atomic_vas, rd_offs) {
     }
 }
 
-// Emitterer R2-atoma i runtimen (etter gc_safepoint-stubben; utanfor cache_end-skanninga).
+// Emitterer R2-atoma i runtimen (etter gc_safepoint-stubben).
 funksjon emit_r2_atom(bytes, atomics) {
     // ── host_resolve(rdi=namn-streng) → rax = rad i verts-funksjonstabellen | 0 ─────
     // Oppslag som vm.no finn_funksjon, i fast presedens: (0) eksakt namn,
@@ -2581,9 +2573,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // ── Entry-tabell (Fase C.3, 2026-09-09): erstattar den frosne C-æra-blobben ──────
     // RT_ENTRY_COUNT slottar à 16 B, alle int3 (0xCC) til sett_rt_inngang fyller dei med
     // «movabs rax,<atom>; jmp rax». Eit hopp inn i ein upatcha slot trappar difor høgt og
-    // tydeleg (SIGTRAP) i staden for å køyre søppel. Ingen frosen maskinkode ligg att her;
-    // dei GC-hex-patchane som er att (patch_bump_prologer/patch_raw_string_allocs) skannar
-    // [0, cache_end) og finn berre cache-fallbackane.
+    // tydeleg (SIGTRAP) i staden for å køyre søppel. Ingen frosen maskinkode ligg att her,
+    // og ingen byte blir skriven om etter mønstersøk (F3.8: GC-greina blir emittert direkte).
     la bytes: liste = []
     la rt_i: heltall = 0
     mens rt_i < RT_ENTRY_COUNT() * 16 {
@@ -2599,24 +2590,25 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // eit kanonisk område i staden for å tømme den monotone prototypeheapen.
     // Legacy-inngangane blir bevarte som ABI-stabile trampolinar, slik at alle
     // eksisterande runtime- og emitterkall får same eigde implementasjon.
-    la cached_int_va = emit_cached_int_runtime(bytes)
+    // F3.8: gc_fix samlar dei direkte emitterte GC-kallstadene (framover-referansar til
+    // gc_alloc16/gc_alloc_var/gc_alloc_str_r11_rbx); gc_fix_løys skriv inn adressene.
+    la gc_fix: ordbok = {}
+    gc_fix["gc"] = 0
+    hvis gc_mode == "1" { gc_fix["gc"] = 1 }
+    la cached_int_va = emit_cached_int_runtime(bytes, gc_fix)
     la cached_bool_va = emit_cached_bool_runtime(bytes)
-    la cached_str_raw_va = emit_cached_str_raw_runtime(bytes)
-    la linear_join_va = emit_linear_join_runtime(bytes)
-    // v4 (2026-09-06): skannegrense for patch_bump_prologer = HIT (inkl. cache-fallbackane,
-    // som no har standard prolog-form) — gc_box_int/gc_alloc kjem seinare og blir ikkje rørde.
-    la cache_end: heltall = lengde(bytes)
+    la cached_str_raw_va = emit_cached_str_raw_runtime(bytes, gc_fix)
+    la linear_join_va = emit_linear_join_runtime(bytes, gc_fix)
     // Kanoniske int/bool/char-cachar + lineær join er PÅ i begge modus (v4/v5b, 2026-09-06).
-    // Cache-FALLBACK-ane (int utanfor [-32768,32767], fleir-byte str_raw, join) har standard
-    // 20 B-bump-prolog / rå streng-alloc som patch_bump_prologer/patch_raw_string_allocs rutar
-    // til fri-lista i GC-modus (skannegrense cache_end); str_raw-payloaden er registrert len+9
-    // av markøren. Måling: fersk seed i GC-modus utan cache sprengde 1 GiB på std/zip.no
+    // Cache-FALLBACK-ane (int utanfor [-32768,32767], fleir-byte str_raw, join) allokerer
+    // frå fri-lista i GC-modus (direkte kall til GC-atoma) og rå bump elles; str_raw-
+    // payloaden er registrert len+9 av markøren. Måling: fersk seed i GC-modus utan cache sprengde 1 GiB på std/zip.no
     // (exit 199); med cache 181 MB. Utan lineær join vart strengbygging kvadratisk (vm.no).
     sett_rt_inngang(bytes, RT_INT(), cached_int_va)
     sett_rt_inngang(bytes, RT_BOOL(), cached_bool_va)
     sett_rt_inngang(bytes, RT_STR_RAW(), cached_str_raw_va)
-    // v5b (2026-09-06): lineær join PÅ i GC-modus òg — join sin rå objekt-alloc er patcha til
-    // fri-lista (patch_raw_string_allocs H). Med legacy RT_JOIN (éin RT_CONCAT per del) vart
+    // v5b (2026-09-06): lineær join PÅ i GC-modus òg — join sin rå objekt-alloc går til
+    // fri-lista (gc_alloc_str_r11_rbx). Med legacy RT_JOIN (éin RT_CONCAT per del) vart
     // strengbygging KVADRATISK: kvar mellomstreng ny-allokert og større enn alle hol → bump
     // til heap-toppen → concat-kopi inn i vaktsida (SIGSEGV @0x40397a, rdi=0x405ff000) på vm.no.
     sett_rt_inngang(bytes, RT_JOIN(), linear_join_va)
@@ -5141,7 +5133,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0x48, 0x89, 0x70, 0x08])          // mov [rax+8],rsi (verdi)
     copy(bytes, [0xC3])                            // ret
 
-    // ── GC (iii): REGISTER-TRYGG rå 16B-allokator (mål for hex-patch av bump-prolog) ──
+    // ── GC (iii): REGISTER-TRYGG rå 16B-allokator (mål for dei direkte GC-kalla i cache-fallbackane) ──
     // gc_alloc16() -> rax = 16B blokk (fri-liste head-fit >=16, elles bump). Fyller
     // IKKJE (den frosne allokatoren si eiga fill-kode køyrer etter). Klobrar BERRE
     // rax+rcx (som den originale bump-prologen `mov rax,[bump];lea rcx,[rax+16];mov
@@ -5458,7 +5450,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     patch_jump(bytes, jsc_pnext4, jsc_next)
 
     // ── GC v5 (2026-09-06): streng-payload-hjelpar for den RÅ bump-allokatoren i lineær join
-    // (mønster H i patch_raw_string_allocs): len i rbx → r11 = blokk (len+9) via gc_alloc_var;
+    // (join_raw i emit_linear_join_runtime): len i rbx → r11 = blokk (len+9) via gc_alloc_var;
     // alle andre register bevarte (gc_alloc_var klobrar rax/r9/r10/r11). Fase C.3: dei fem
     // syskena for frosne mønster (r9/rcx/r9_r8/rbx/r11_r10) er borte med blobben.
     atomics["gc_alloc_str_r11_rbx"] = TEXT_VA() + lengde(bytes)  // rbx=len → r11=blokk (påhengd str_raw #2)
@@ -6089,7 +6081,7 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     //   json_parse       rdi=streng → NcVal (typa/lempeleg som frosen; u-escapes → UTF-8, b/f dekoda)
     // Kjelda er skriven som assembly (kommentaren per linje er instruksjonen); allokering går
     // via gc_alloc16/gc_alloc_var (fri-liste i GC-modus, elles aligna bump) — INGEN rå
-    // bump-prologar her, so patch_bump_prologer/patch_raw_string_allocs treng ikkje sjå hit.
+    // bump-prologar her.
 
     atomics["str_new"] = TEXT_VA() + lengde(bytes)
     copy(bytes, [0x53])                                     // push rbx
@@ -8986,10 +8978,8 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xC3])                            // ret
     // R2: dynamiske kall (ncb_call_fn/CALL_VALUE), assert-sjekkar og bytes_new.
     emit_r2_atom(bytes, atomics)
-    hvis gc_mode == "1" {
-        bytes = patch_bump_prologer(bytes, atomics["gc_alloc16"], cache_end)   // v4: inkl. cache-fallbackar
-        bytes = patch_raw_string_allocs(bytes, atomics["gc_alloc_str_r11_rbx"], atomics["gc_alloc_var"], cache_end)   // v5: E/H i cache-regionen
-    }
+    // F3.8: skriv inn GC-atom-adressene i dei direkte emitterte kalla (fail-closed).
+    gc_fix_løys(bytes, gc_fix, atomics)
     // Fail-closed: kvar RT_*-slot i entry-tabellen MÅ vere patcha (movabs rax = 48 B8).
     la rt_k: heltall = 0
     mens rt_k < RT_ENTRY_COUNT() {
