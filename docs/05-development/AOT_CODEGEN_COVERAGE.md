@@ -228,7 +228,15 @@ primitiv + rein Norscode:
   native_gap har inga hardkoda VA. `builtin.process_spawn_argv` går ALLTID via
   `std.native_gap.process_spawn_argv_gap` (ikkje-blokkerande stdin, SIGPIPE-vern, output-grense,
   ppoll-venting, peak_rss frå wait4-rusage); utan native_gap i bunten er det kompileringsfeil.
-  Den rå spawn-emisjonen og S1-atomet er sletta. Port: `tests/test_native_process_stress.no`.
+  Den rå spawn-emisjonen og S1-atomet er sletta i **x86-64-codegenen** (`native_codegen_v2.no`);
+  Mach-O-ARM64-codegenen (`macho_arm64_codegen.no`) har framleis ein rå, minimal spawn til M3.
+  Feil før barnet startar gjev same form som den gamle rå-rutina (`feil`/127/«process spawn
+  failed», norsk detalj i `error_detail`, ingen `handle`); tom executable gjev `ferdig`/127.
+  `peak_rss_bytes` er `ru_maxrss` og tek på Linux med RSS-en forelderen hadde ved fork (i dag
+  ~1,8 GB heap-init i kvar native Norscode-prosess) — berre diagnose, ikkje port.
+  Port: `tests/test_native_process_stress.no` (VM-vegen, seeden sin baka motor) og
+  `tests/test_linux_x86_64_aot_prosess_stress.no` (same test AOT-bygd med motoren frå kjelda —
+  CI-dekning før seed-promotering).
 - `socket_*` (AF_INET TCP/UDP, sockaddr_in i mmap-scratch) og `network_operation` (handle-ABI
   «norscode-native-network-v1»: listen/connect/accept/read/write/poll/udp/close, ikkje-blokkerande,
   kontrakt frå archive/legacy_c_backend/nc_native_main.c) er òg reine — test_vm_network_scope,

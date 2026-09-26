@@ -562,6 +562,12 @@ funksjon _sys_poll(fds: heiltall, n: heiltall, ms: heiltall, ts: heiltall) -> he
 // Paritet med rå-rutina: stdin blir skriven IKKJE-blokkerande i vente-lykkja (ingen
 // vranglås over 64 KiB), SIGPIPE blir halden unna når barnet lukkar stdin, ventinga
 // er ppoll på røyra (ikkje sleep), og peak_rss_bytes kjem frå rusage i wait4.
+// peak_rss_bytes på Linux = ru_maxrss til barnet, og det er max(RSS-en forelderen hadde ved
+// fork, barnet sin eigen topp etter exec): fork kopierer sidetabellane (og RSS-teljarane),
+// og execve (exec_mmap) legg hiwater-RSS-en til det gamle mm-et inn i signal->maxrss.
+// clone(CLONE_VM|CLONE_VFORK) endrar ikkje dette (det gamle mm-et er då forelderen sitt).
+// Ein native Norscode-forelder rører i dag heile heap-segmentet ved oppstart (~1,8 GB), so
+// verdien seier lite om barnet: bruk han berre som øvre grense / diagnose, ikkje som port.
 la _pg_prosessar = {}
 
 // Scratch per prosess (éi mmap): C-strengar/argv/envp/BPF i [0, _PG_STR_SLUTT), så
@@ -662,7 +668,10 @@ funksjon _pg_dren(p, felt: tekst, fdfelt: tekst) -> heiltall {
             returner 0
         }
         // Teikna blir samla i ei liste og slegne saman éin gong per les (byte-eksakt: chr
-        // lagar éin rå byte).
+        // lagar éin rå byte). Per-byte-lykkja kostar om lag 32 ns/byte i AOT (8 MiB ≈ 0,27 s mot
+        // 0,06 s i den gamle rå-rutina); oppslag i ein chr-tabell gav berre ~3 % og er ikkje med.
+        // Ein bulk-primitiv (rå buffer → tekst, som RT_STR_RAW i den gamle rå-rutina) står
+        // att til F3.6/F7.
         la teikn: liste_tekst = []
         la i: heiltall = 0
         mens i < n {
@@ -933,7 +942,9 @@ funksjon _pg_bpf(fri: heiltall, profil: tekst) -> liste_heiltall {
 // asynkron = process_operation spawn_argv (0 = ingen timeout, 1 MiB buffer med mottrykk).
 funksjon _pg_spawn(req, synkron: boolsk) {
     la executable = tekst(req["executable"])
-    hvis executable == "" { returner _pg_feil("tom executable") }
+    // Synkron spawn: tom executable går vidare til execve("") → ENOENT → barnet sluttar med
+    // 127, altså same form som ein executable som ikkje finst (paritet med rå-rutina).
+    hvis executable == "" og ikkje synkron { returner _pg_feil("tom executable") }
     la profil = _pg_sandbox_profil(req)
     hvis profil != "" og ikkje _pg_sandbox_kjend(profil) { returner _pg_feil("ukjent sandbox-profil: " + profil) }
     la args = req["args"]
@@ -1172,21 +1183,25 @@ funksjon process_operation(req) {
     returner _pg_feil("ukjent operasjon: " + op)
 }
 
+// Feil før barnet kom i gang (ugyldig request, sandkasseprofil, mmap/pipe2/fork, for stor
+// request): same form som den tidlegare rå spawn-rutina — status "feil", exit_code 127,
+// error "process spawn failed", ingen handle. Den norske detaljen står i error_detail.
+funksjon _pg_synkron_feil(detalj: tekst) {
+    la r = _pg_res("feil", -1, "", 127, "", "", "process spawn failed", 0, 0)
+    r["abi"] = "norscode-process-spawn-v1"
+    r["error_detail"] = detalj
+    fjern_nokkel(r, "handle")
+    returner r
+}
+
 // process_spawn_argv_gap(req): synkron spawn («norscode-process-spawn-v1»). Codegen rutar
 // ALLE builtin.process_spawn_argv-kall hit (kompileringsfeil utan std.native_gap i bunten).
 // Same Norscode-motor som den asynkrone ABI-en, med blokkerande venting på ppoll og
 // seccomp-sandkasse i barnet når request-en ber om ein profil.
 funksjon process_spawn_argv_gap(req) {
-    hvis builtin.type(req) != "ordbok" {
-        la ug = _pg_feil("ugyldig request")
-        ug["abi"] = "norscode-process-spawn-v1"
-        returner ug
-    }
+    hvis builtin.type(req) != "ordbok" { returner _pg_synkron_feil("ugyldig request") }
     la r = _pg_spawn(req, sann)
-    hvis r["status"] == "feil" {
-        r["abi"] = "norscode-process-spawn-v1"
-        returner r
-    }
+    hvis r["status"] == "feil" { returner _pg_synkron_feil(tekst(r["error"])) }
     la handle = tekst(r["handle"])
     la p = _pg_prosessar[handle]
     mens ikkje _pg_sjekk(p, usann) { _pg_vent(p, 10) }
