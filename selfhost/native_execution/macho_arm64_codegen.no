@@ -103,7 +103,7 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "tekst_til_heltall" eller n == "_rt_env_finnes" eller
        n == "sys6" eller n == "raw_load8" eller n == "raw_load64" eller n == "raw_store8" eller
        n == "raw_store64" eller n == "raw_call" eller n == "native_target" eller n == "native_envp" eller
-       n == "random_byte" {
+       n == "random_byte" eller n == "icache_sync" {
         returner sann
     }
     hvis ncval_gap_stub(n) { returner sann }
@@ -198,6 +198,12 @@ funksjon emit_heap_init(native: liste_heiltall, os: tekst) -> heiltall {
     // (aldri skriv over ein eksisterande mapping). macOS: VA-en som hint utan MAP_FIXED.
     // Begge: returen MÅ vere lik HEAP_VA, elles fatal (skriv til stderr, exit 198) i
     // staden for å køyre med ein annan layout enn codegen og native_gap reknar med.
+    // To diagnosar (same exit 198):
+    //   «heap-VA opptatt (mmap)»  — VA-en er teken: Linux −EEXIST (MAP_FIXED_NOREPLACE) eller
+    //                               ei anna adresse (eldre kjerne / macOS-hint som ikkje held);
+    //   «heap-mmap feila …»       — mmap sjølv feila (Linux x0 ∈ [−4095, −1] utanom EEXIST,
+    //                               macOS carry): typisk ENOMEM frå RLIMIT_AS / `ulimit -v`
+    //                               under ~4 GiB, sidan heapen er ein lat 4 GiB-reservasjon.
     la base = hl.HEAP_VA(ncval_mål(os))
     last_heiltall_64(native, 0, base)               // x0 = HEAP_VA
     legg_u32(native, 0xD2800001)                    // movz x1, #0
@@ -213,17 +219,41 @@ funksjon emit_heap_init(native: liste_heiltall, os: tekst) -> heiltall {
     hvis os == "linux" {
         legg_u32(native, 0xD2801BC8)                // movz x8, #222      (Linux mmap)
         legg_u32(native, 0xD4000001)                // svc #0
-    } ellers {
+    }
+    la p_mac_feil = 0 - 1
+    hvis os != "linux" {
         legg_u32(native, 0xD28018B0)                // movz x16, #197     (macOS mmap)
         legg_u32(native, 0xD4001001)                // svc #0x80
+        p_mac_feil = lengde(native)
+        legg_u32(native, 0)                         // b.cs feila (carry = feil; patch). Før cmp (flagg).
     }
     last_heiltall_64(native, 9, base)
     legg_u32(native, 0xEB09001F)                    // cmp x0, x9
     la p_beq = lengde(native)
     legg_u32(native, 0)                             // b.eq ok (patch)
+    la p_eexist = 0 - 1
+    la p_errno = 0 - 1
+    hvis os == "linux" {
+        legg_u32(native, 0xB100441F)                // cmn x0, #17        (x0 == −EEXIST?)
+        p_eexist = lengde(native)
+        legg_u32(native, 0)                         // b.eq opptatt (patch)
+        legg_u32(native, 0xB13FFC1F)                // cmn x0, #4095      (carry ⇔ x0 ∈ [−4095, −1])
+        p_errno = lengde(native)
+        legg_u32(native, 0)                         // b.cs feila (patch)
+    }
+    la lbl_opptatt = lengde(native)
     emit_fatal_melding(native, "norscode: heap-VA opptatt (mmap)\n", 198, os)
+    la lbl_feila = lengde(native)
+    emit_fatal_melding(native, "norscode: heap-mmap feila (4 GiB VA; RLIMIT_AS/ulimit -v?)\n", 198, os)
     la lbl_ok = lengde(native)
-    skriv_u32(native, p_beq, 0x54000000 | ((((lbl_ok - p_beq) / 4) & 0x7FFFF) << 5))   // b.eq
+    skriv_u32(native, p_beq, 0x54000000 | ((((lbl_ok - p_beq) / 4) & 0x7FFFF) << 5))   // b.eq ok
+    hvis p_eexist >= 0 {
+        skriv_u32(native, p_eexist, 0x54000000 | ((((lbl_opptatt - p_eexist) / 4) & 0x7FFFF) << 5))   // b.eq
+        skriv_u32(native, p_errno, 0x54000002 | ((((lbl_feila - p_errno) / 4) & 0x7FFFF) << 5))        // b.cs
+    }
+    hvis p_mac_feil >= 0 {
+        skriv_u32(native, p_mac_feil, 0x54000002 | ((((lbl_feila - p_mac_feil) / 4) & 0x7FFFF) << 5)) // b.cs
+    }
     // Kontrollblokk: envp (x27, fanga frå x2 i entry-prologen) → [HEAP_VA + ENVP_OFFSET].
     legg_u32(native, 0xF9000000 | ((hl.ENVP_OFFSET() / 8) << 10) | 27)                  // str x27, [x0, #ENVP_OFFSET]
     legg_u32(native, 0x91000000 | (hl.HEAP_CONTROLSZ() << 10) | 28)                     // add x28, x0, #HEAP_CONTROLSZ
@@ -802,6 +832,25 @@ funksjon ncval_delt_rute_ok(n: tekst) -> boolsk {
     hvis ncval_os_rute_namn(n) { returner sann }
     hvis builtin.starts_with(n, "db.") { returner sann }
     returner n == "kompiler_fil_aktiv" eller n == "host_exec_ncb_json" eller n == "host_exec_ncb"
+}
+
+// Feilmelding når eit OS-builtin på Linux-ELF ikkje kan rutast. Skil mellom (a) at
+// std.native_gap ikkje er i bunten i det heile (legg til `bruk std.native_gap`) og (b) at
+// native_gap ER i bunten men ikkje har målfunksjonen (t.d. builtin.socket_read/socket_write,
+// som native_gap ikkje definerer) — då hjelper ikkje importen.
+funksjon ncval_os_rute_feil(kallnamn: tekst, os_mål: tekst, funksjonar) -> tekst {
+    la kort = ncval_avkort_builtin(kallnamn)
+    la har_gap = usann
+    for k i nøkler(funksjonar) {
+        hvis builtin.starts_with(tekst(k), "std.native_gap.") { har_gap = sann }
+    }
+    hvis ikkje har_gap {
+        returner "builtin." + kort + " krev std.native_gap i bunten på linux-arm64 (legg til `bruk std.native_gap`)"
+    }
+    hvis os_mål == "" {
+        returner "builtin." + kort + " har inga rute til std.native_gap på linux-arm64 (std.native_gap er i bunten)"
+    }
+    returner "builtin." + kort + ": std.native_gap har ingen «" + os_mål + "» (std.native_gap er i bunten; builtinet manglar på linux-arm64)"
 }
 
 // Emitterer eit ruta builtin-kall som vanleg AArch64-kall: argument (NcVal-peikarar) i
@@ -7125,7 +7174,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     // bunten, er det kompileringsfeil (same kontrakt som x86 sin process_spawn_argv).
                     la os_mål = ncval_gap_rute(kallnamn)
                     hvis os_mål == "" eller ikkje finnes_nøkkel(funksjonar, os_mål) {
-                        returner {"ok": "usann", "error": "builtin." + ncval_avkort_builtin(kallnamn) + " krev std.native_gap i bunten på linux-arm64 (legg til `bruk std.native_gap`)", "image": []}
+                        returner {"ok": "usann", "error": ncval_os_rute_feil(kallnamn, os_mål, funksjonar), "image": []}
                     }
                     la os_res = emit_rute_kall(native, os_mål, instr[2], djupn, memmode, home_off, bl_patchar)
                     hvis os_res == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (ruting)", "overflow": "sann", "image": []} }
@@ -7267,7 +7316,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal mkdir_p krev 1 arg", "image": []} }
                     emit_mkdir_p(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis (kallnamn == "exec_prosess" eller kallnamn == "builtin.exec_prosess" eller kallnamn == "process_spawn_argv" eller kallnamn == "builtin.process_spawn_argv") og lengde(instr) == 3 og instr[2] == 1 {
+                } ellers hvis os != "linux" og (kallnamn == "exec_prosess" eller kallnamn == "builtin.exec_prosess" eller kallnamn == "process_spawn_argv" eller kallnamn == "builtin.process_spawn_argv") og lengde(instr) == 3 og instr[2] == 1 {
+                    // macOS-berre (M0). Linux-ELF: process_spawn_argv er alt ruta til native_gap over, og
+                    // den pensjonerte exec_prosess fell til NATIV-GAP-stubben (fangbar, som VM-en sin
+                    // «builtin.exec_prosess er fjerna»), ikkje til den macOS-berre emitteren (som kastar).
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal exec_prosess krev 1 arg", "image": []} }
                     emit_prosess_spawn_req(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
@@ -7416,41 +7468,41 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_til(bl_patchar, [p_bl_jp, "__json_parse"])
                     legg_u32(native, 0xAA0003E0 | r1)          // mov Xtopp, x0
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis (kallnamn == "socket_new" eller kallnamn == "builtin.socket_new") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_new" eller kallnamn == "builtin.socket_new") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_new krev 2 arg", "image": []} }
                     emit_socket_new(native, r2, r1, r2, os)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
-                } ellers hvis (kallnamn == "socket_bind" eller kallnamn == "builtin.socket_bind") og lengde(instr) == 3 og instr[2] == 3 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_bind" eller kallnamn == "builtin.socket_bind") og lengde(instr) == 3 og instr[2] == 3 {
                     hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_bind krev 3 arg", "image": []} }
                     emit_socket_bind(native, r3, r2, r1, r3, os)
                     opnd_ut(native, djupn - 3, r3, memmode, home_off)
                     djupn = djupn - 2
-                } ellers hvis (kallnamn == "socket_connect" eller kallnamn == "builtin.socket_connect") og lengde(instr) == 3 og instr[2] == 3 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_connect" eller kallnamn == "builtin.socket_connect") og lengde(instr) == 3 og instr[2] == 3 {
                     hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal socket_connect krev 3 arg", "image": []} }
                     emit_socket_connect(native, r3, r2, r1, r3, os)
                     opnd_ut(native, djupn - 3, r3, memmode, home_off)
                     djupn = djupn - 2
-                } ellers hvis (kallnamn == "socket_listen" eller kallnamn == "builtin.socket_listen") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_listen" eller kallnamn == "builtin.socket_listen") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_listen krev 2 arg", "image": []} }
                     emit_socket_listen(native, r2, r1, r2, os)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
-                } ellers hvis (kallnamn == "socket_accept" eller kallnamn == "builtin.socket_accept") og lengde(instr) == 3 og instr[2] == 1 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_accept" eller kallnamn == "builtin.socket_accept") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_accept krev 1 arg", "image": []} }
                     emit_socket_accept(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis (kallnamn == "socket_send" eller kallnamn == "builtin.socket_send") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_send" eller kallnamn == "builtin.socket_send") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_send krev 2 arg", "image": []} }
                     emit_socket_send(native, r2, r1, r2, os)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
-                } ellers hvis (kallnamn == "socket_recv" eller kallnamn == "builtin.socket_recv") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_recv" eller kallnamn == "builtin.socket_recv") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal socket_recv krev 2 arg", "image": []} }
                     emit_socket_recv(native, r2, r1, r2, os)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
-                } ellers hvis (kallnamn == "socket_close" eller kallnamn == "builtin.socket_close") og lengde(instr) == 3 og instr[2] == 1 {
+                } ellers hvis os != "linux" og (kallnamn == "socket_close" eller kallnamn == "builtin.socket_close") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal socket_close krev 1 arg", "image": []} }
                     emit_socket_close(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
@@ -7593,11 +7645,72 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     // A2: raw_call(adr, argp) → heiltal: kallar AAPCS64-maskinkode på adr med
                     // x0 = argp (rå), boksar x0. Callee-saved x19–x28 må vere urørte (AAPCS64).
                     // (JIT-en i native_gap skriv x86-kode og blir difor ikkje ruta hit på arm64.)
+                    // KONTRAKT (AArch64): I-cachen er IKKJE koherent med D-cachen. Kode som er
+                    // skriven til minne (t.d. anonym RWX) MÅ synkast med builtin.icache_sync(adr, n)
+                    // før raw_call, elles kan kjerna køyre gamle instruksjonar / få SIGILL (målt:
+                    // 6 av 8 køyringar SIGILL utan sync). Filbacka PROT_EXEC-mappingar og kode i
+                    // biletet treng det ikkje (kjernen synkar ved fault). x86-64 er koherent.
+                    // macOS: anonym RWX krev i tillegg MAP_JIT + W^X-veksling (M-fasen); sync-atomet
+                    // sjølv er prøvd på Mach-O (EL0 dc cvau/ic ivau lovleg, CTR_EL0 ikkje).
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal raw_call krev 2 arg", "image": []} }
                     legg_u32(native, 0xF9400400 | (r2 << 5) | 9)        // ldr x9, [Xadr, #8]
                     legg_u32(native, 0xF9400400 | (r1 << 5) | 0)        // ldr x0, [Xargp, #8]
                     legg_u32(native, 0xD63F0120)                        // blr x9
                     emit_ncval_alloc_ptr(native, 0, r2, 1)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "icache_sync" eller kallnamn == "builtin.icache_sync") og lengde(instr) == 3 og instr[2] == 2 {
+                    // A2-review: icache_sync(adr, n) → 0. Gjer [adr, adr+n) køyrbar etter at koden er
+                    // skriven som data (ARM ARM B2.4.4 / Linux __flush_icache_range):
+                    //   dc cvau over D-linjene; dsb ish; ic ivau over I-linjene; dsb ish; isb.
+                    // Linjelengdene kjem på Linux frå CTR_EL0 (DminLine [19:16], IminLine [3:0], 4 << felt
+                    // byte; EL0-tilgang via SCTLR_EL1.UCT/UCI). macOS: fast 64 B (CTR_EL0 trappar der).
+                    // n <= 0 gjer ingenting. Krav før ein arm64-JIT (A5) blir ruta til raw_call.
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal icache_sync krev 2 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r2 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 10)       // ldr x10, [Xn, #8]
+                    legg_u32(native, 0xF100015F)                        // cmp x10, #0
+                    la p_ic_tom = lengde(native)
+                    legg_u32(native, 0)                                 // b.le ferdig (patch)
+                    legg_u32(native, 0x8B0A012A)                        // add x10, x9, x10   (slutt)
+                    hvis os == "linux" {
+                        legg_u32(native, 0xD53B002B)                    // mrs x11, ctr_el0
+                        legg_u32(native, 0xD280008D)                    // movz x13, #4
+                        legg_u32(native, 0xD3504D6C)                    // ubfx x12, x11, #16, #4 (DminLine)
+                        legg_u32(native, 0x9ACC21AC)                    // lslv x12, x13, x12  (D-linje byte)
+                    } ellers {
+                        // macOS: CTR_EL0 trappar på EL0 (målt: SIGILL på Apple M3), men dc cvau /
+                        // ic ivau / dsb / isb er lovlege. Fast steg 64 B ≤ hw.cachelinesize (128 på
+                        // Apple Silicon): eit mindre steg enn linja er alltid korrekt.
+                        legg_u32(native, 0xD280080C)                    // movz x12, #64
+                    }
+                    legg_u32(native, 0xD100058F)                        // sub x15, x12, #1
+                    legg_u32(native, 0x8A2F012E)                        // bic x14, x9, x15   (linjestart)
+                    la lbl_ic_d = lengde(native)
+                    legg_u32(native, 0xD50B7B2E)                        // d: dc cvau, x14
+                    legg_u32(native, 0x8B0C01CE)                        // add x14, x14, x12
+                    legg_u32(native, 0xEB0A01DF)                        // cmp x14, x10
+                    la p_ic_d = lengde(native)
+                    legg_u32(native, 0x54000003 | ((((lbl_ic_d - p_ic_d) / 4) & 0x7FFFF) << 5))   // b.lo d
+                    legg_u32(native, 0xD5033B9F)                        // dsb ish
+                    hvis os == "linux" {
+                        legg_u32(native, 0xD3400D6C)                    // ubfx x12, x11, #0, #4 (IminLine)
+                        legg_u32(native, 0x9ACC21AC)                    // lslv x12, x13, x12  (I-linje byte)
+                    }
+                    legg_u32(native, 0xD100058F)                        // sub x15, x12, #1
+                    legg_u32(native, 0x8A2F012E)                        // bic x14, x9, x15
+                    la lbl_ic_i = lengde(native)
+                    legg_u32(native, 0xD50B752E)                        // i: ic ivau, x14
+                    legg_u32(native, 0x8B0C01CE)                        // add x14, x14, x12
+                    legg_u32(native, 0xEB0A01DF)                        // cmp x14, x10
+                    la p_ic_i = lengde(native)
+                    legg_u32(native, 0x54000003 | ((((lbl_ic_i - p_ic_i) / 4) & 0x7FFFF) << 5))   // b.lo i
+                    legg_u32(native, 0xD5033B9F)                        // dsb ish
+                    legg_u32(native, 0xD5033FDF)                        // isb
+                    la lbl_ic_ferdig = lengde(native)
+                    skriv_u32(native, p_ic_tom, 0x5400000D | ((((lbl_ic_ferdig - p_ic_tom) / 4) & 0x7FFFF) << 5))  // b.le
+                    legg_u32(native, 0xD2800009)                        // movz x9, #0 (resultat)
+                    emit_ncval_alloc_ptr(native, 9, r2, 1)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "native_target" eller kallnamn == "builtin.native_target") og lengde(instr) == 3 og instr[2] == 0 {
@@ -7622,24 +7735,36 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     djupn = djupn + 1
                 } ellers hvis (kallnamn == "random_byte" eller kallnamn == "builtin.random_byte") og lengde(instr) == 3 og instr[2] == 0 {
                     // A2: random_byte() → 0..255 frå kjernen (Linux getrandom(buf,1,0) #278;
-                    // macOS getentropy(buf,1) #500), som x86-atomet. Feil → −errno (native_gap
-                    // sin random_hex_secure / TLS-nonce tek absoluttverdien).
+                    // macOS getentropy(buf,1) #500). FEILKONTRAKT (same på x86-64, sjå
+                    // native_codegen_v2 sitt random_byte-atom): nektar kjernen entropi (EPERM/
+                    // ENOSYS frå seccomp/sandkasse, …), blir svaret −errno (< 0), aldri ein
+                    // «tilfeldig» byte; 0 lesne byte gjev −EIO (−5); EINTR blir prøvd på nytt.
+                    // Kallarane (std.native_gap random_hex_secure / _tls_random32) KASTAR på
+                    // b < 0 (fail-closed) — dei tek ikkje absoluttverdien.
                     hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
                     la rb_d = opnd_push_reg(djupn, memmode)
                     legg_u32(native, 0xD10043FF)                        // sub sp, sp, #16
                     legg_u32(native, 0xF90003FF)                        // str xzr, [sp]
-                    legg_u32(native, 0x910003E0)                        // mov x0, sp
+                    la rb_igjen = lengde(native)
+                    legg_u32(native, 0x910003E0)                        // igjen: mov x0, sp
                     legg_u32(native, 0xD2800021)                        // movz x1, #1
                     legg_u32(native, 0xD2800002)                        // movz x2, #0
-                    hvis os == "linux" { emit_syscall(native, 278, os) } ellers { emit_syscall(native, 500, os) }
-                    legg_u32(native, 0xAA0003E9)                        // mov x9, x0 (feilkode)
                     hvis os == "linux" {
+                        emit_syscall(native, 278, os)                   // getrandom(buf, 1, 0)
+                        legg_u32(native, 0xB100101F)                    // cmn x0, #4  (x0 == −EINTR?)
+                        la p_rb_eintr = lengde(native)
+                        legg_u32(native, 0x54000000 | ((((rb_igjen - p_rb_eintr) / 4) & 0x7FFFF) << 5))   // b.eq igjen
                         legg_u32(native, 0xF100041F)                    // cmp x0, #1
-                        legg_u32(native, 0x5400004B)                    // b.lt +2 (behald −errno)
+                        legg_u32(native, 0x540000A0)                    // b.eq +5 (ok → ldrb)
+                        legg_u32(native, 0x92800089)                    // movn x9, #4  (x9 = −5 = −EIO)
+                        legg_u32(native, 0xF100001F)                    // cmp x0, #0
+                        legg_u32(native, 0x9A89B009)                    // csel x9, x0, x9, lt  (−errno, elles −EIO)
+                        legg_u32(native, 0x14000002)                    // b +2 (over ldrb → add sp)
                     } ellers {
+                        emit_syscall(native, 500, os)                   // getentropy(buf, 1)
                         legg_u32(native, 0x54000063)                    // b.cc +3 (carry clear = ok → ldrb)
                         legg_u32(native, 0xCB0003E9)                    // neg x9, x0 (+errno → −errno)
-                        legg_u32(native, 0x14000002)                    // b +2 (hopp over ldrb)
+                        legg_u32(native, 0x14000002)                    // b +2 (over ldrb → add sp)
                     }
                     legg_u32(native, 0x394003E9)                        // ldrb w9, [sp]
                     legg_u32(native, 0x910043FF)                        // add sp, sp, #16
