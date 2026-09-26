@@ -7,18 +7,33 @@
 // 39 696 B → 389 909 B for same program). Denne modulen er sjølvstendig — han
 // kallar berre builtins og seg sjølv — og blir bunta implisitt av bygg-native.
 //
-// ─── desimaltall: tekst ↔ double (Fase C, 2026-09-10) ────────────────────────
+// ─── desimaltall: tekst ↔ double ─────────────────────────────────────────────
 //
 // Den native x86-64-backenden fekk typen og xmm-aritmetikken i maskinkode. Dei
 // TO VANSKELEGE delane ligg her, i Norscode, med vilje: double → desimalstreng
-// og desimalstreng → double er algoritmar, ikkje instruksjonar, og dei ville
-// vore mange hundre linjer handemittert maskinkode med tilsvarande feilrisiko.
-// Maskinkoden gjev oss det vi treng: aritmetikk, cvttsd2si og bit-brua.
+// og desimalstreng → double er algoritmar, ikkje instruksjonar.
 //
-// Formateringa brukar RUNDTUR-SØK: prøv 1, 2, 3 … signifikante siffer og ta det
-// fyrste som parsar tilbake til nøyaktig same bitmønster. Det gjev den kortaste
-// representasjonen som er tapsfri, som er det committed seed gjer (0.1 → «0.1»,
-// ikkje «0.1000000000000000055511151231257827»).
+// EKSAKT (a12fix, 2026-09-26). Den førre versjonen henta siffer ut med gjentatt ×10 i
+// flyttal og skalerte med gjentatt multiplikasjon av 10. Det samla avrundingsfeil:
+// 123456789012345678.0 vart «1.2345678901234565e17» (rett: …68e17), og ±inf fekk
+// sifferlykkja til å gå for alltid (SIGSEGV i AOT). No:
+//   * formatering = Steele–White/Burger–Dybvig («Dragon4», fritt format) på eksakte
+//     store heiltal: det kortaste sifferstrengen som les attende til NØYAKTIG same bit,
+//     og den næraste av dei når fleire er like korte;
+//   * parsing = rask veg når svaret er eksakt i éi IEEE-operasjon (≤ 15 siffer og
+//     |eksponent| ≤ 22), elles eksakt divisjon på store heiltal med
+//     round-half-even — same svar som ein korrekt avrundande strtod;
+//   * ±inf/NaN blir «inf»/«-inf»/«nan» i tekst og «null» i JSON (JSON har ikkje dei).
+//
+// Store heiltal: liste av 28-bits lemmer, minst signifikante først, utan nullar på
+// toppen; [] er 0. Alle operasjonane lagar nye lister (ingen aliasing).
+//
+// MERK: modulen skal ikkje bruke prøv/fang. to_text- og json_stringify-atoma i
+// x86-codegenen hoppar hit, og kompilerte funksjonar lagrar ikkje rbx/r12–r15 —
+// eit unnatak fanga inne i kallkjeda kunne gje atoma attende andre register.
+
+// 0x7FF0000000000000: bitmønsteret til +inf, og den minste storleiken som ikkje er endeleg.
+funksjon _d_inf_bits() -> heiltall { returner 9218868437227405312 }
 
 funksjon _d_null() { returner builtin.desimal_frå_bits(0) }
 
@@ -34,7 +49,18 @@ funksjon _d_abs(x) {
     returner x
 }
 
-// 10^n som double, n >= 0. Gjentatt multiplikasjon; n er lite i praksis.
+// |bits| utan forteiknsbiten, utan å skrive 2^63 (får ikkje plass i eit 64-bits heiltal).
+funksjon _d_storleik(bits: heiltall) -> heiltall {
+    hvis bits < 0 { returner (bits + 9223372036854775807) + 1 }
+    returner bits
+}
+
+// Set forteiknsbiten på eit ikkje-negativt bitmønster.
+funksjon _d_negativ_bits(bits: heiltall) -> heiltall {
+    returner (bits - 9223372036854775807) - 1
+}
+
+// 10^n som double, 0 <= n <= 22: alle mellomledda er eksakte (5^22 < 2^53).
 funksjon _d_pow10(n: heiltall) {
     la r = _d_frå_heiltal(1)
     la i: heiltall = 0
@@ -42,9 +68,287 @@ funksjon _d_pow10(n: heiltall) {
     returner r
 }
 
-// Desimalstreng → double. M × 10^E, der M er sifra som heiltal.
-// Skalering skjer i flyttal, so 35/10 blir nøyaktig 3.5 og 1/10 blir den
-// korrekt avrunda 0.1.
+// 10^n som heiltal, 0 <= n <= 18.
+funksjon _i_pow10(n: heiltall) -> heiltall {
+    la r: heiltall = 1
+    la i: heiltall = 0
+    mens i < n { r = r * 10 i = i + 1 }
+    returner r
+}
+
+// Bitlengda til eit ikkje-negativt heiltal (0 → 0).
+funksjon _i_bitlen(v: heiltall) -> heiltall {
+    la n: heiltall = 0
+    mens v > 0 { n = n + 1 v = v >> 1 }
+    returner n
+}
+
+// ─── Store naturlege tal ──────────────────────────────────────────────────────
+
+funksjon _b_frå(n: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    mens n > 0 {
+        legg_til(r, n & 268435455)
+        n = n >> 28
+    }
+    returner r
+}
+
+funksjon _b_normaliser(a: liste_heltall) -> liste_heltall {
+    mens lengde(a) > 0 og a[lengde(a) - 1] == 0 { fjern_siste(a) }
+    returner a
+}
+
+// a × k + c, 0 <= k <= 2^30, 0 <= c < 2^34.
+funksjon _b_mul_add(a: liste_heltall, k: heiltall, c: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    la mente: heiltall = c
+    la i: heiltall = 0
+    mens i < lengde(a) {
+        la v: heiltall = a[i] * k + mente
+        legg_til(r, v & 268435455)
+        mente = v >> 28
+        i = i + 1
+    }
+    mens mente > 0 {
+        legg_til(r, mente & 268435455)
+        mente = mente >> 28
+    }
+    returner _b_normaliser(r)
+}
+
+// a × 2^n, n >= 0.
+funksjon _b_shl(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = []
+    hvis lengde(a) == 0 { returner r }
+    la heile: heiltall = n / 28
+    la rest: heiltall = n - heile * 28
+    la z: heiltall = 0
+    mens z < heile { legg_til(r, 0) z = z + 1 }
+    la mente: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(a) {
+        la v: heiltall = (a[i] << rest) + mente
+        legg_til(r, v & 268435455)
+        mente = v >> 28
+        i = i + 1
+    }
+    hvis mente > 0 { legg_til(r, mente) }
+    returner r
+}
+
+funksjon _b_add(a: liste_heltall, b: liste_heltall) -> liste_heltall {
+    la r: liste_heltall = []
+    la n: heiltall = lengde(a)
+    hvis lengde(b) > n { n = lengde(b) }
+    la mente: heiltall = 0
+    la i: heiltall = 0
+    mens i < n {
+        la v: heiltall = mente
+        hvis i < lengde(a) { v = v + a[i] }
+        hvis i < lengde(b) { v = v + b[i] }
+        legg_til(r, v & 268435455)
+        mente = v >> 28
+        i = i + 1
+    }
+    hvis mente > 0 { legg_til(r, mente) }
+    returner r
+}
+
+// a − b, krev a >= b.
+funksjon _b_sub(a: liste_heltall, b: liste_heltall) -> liste_heltall {
+    la r: liste_heltall = []
+    la lån: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(a) {
+        la v: heiltall = a[i] - lån
+        hvis i < lengde(b) { v = v - b[i] }
+        hvis v < 0 {
+            v = v + 268435456
+            lån = 1
+        } ellers {
+            lån = 0
+        }
+        legg_til(r, v)
+        i = i + 1
+    }
+    returner _b_normaliser(r)
+}
+
+// −1, 0 eller 1.
+funksjon _b_cmp(a: liste_heltall, b: liste_heltall) -> heiltall {
+    hvis lengde(a) != lengde(b) {
+        hvis lengde(a) < lengde(b) { returner 0 - 1 }
+        returner 1
+    }
+    la i: heiltall = lengde(a) - 1
+    mens i >= 0 {
+        hvis a[i] != b[i] {
+            hvis a[i] < b[i] { returner 0 - 1 }
+            returner 1
+        }
+        i = i - 1
+    }
+    returner 0
+}
+
+funksjon _b_bitlen(a: liste_heltall) -> heiltall {
+    hvis lengde(a) == 0 { returner 0 }
+    returner (lengde(a) - 1) * 28 + _i_bitlen(a[lengde(a) - 1])
+}
+
+// a × 10^n, n >= 0.
+funksjon _b_mul_pow10(a: liste_heltall, n: heiltall) -> liste_heltall {
+    la r: liste_heltall = a
+    la k: heiltall = n
+    mens k >= 9 {
+        r = _b_mul_add(r, 1000000000, 0)
+        k = k - 9
+    }
+    hvis k > 0 { r = _b_mul_add(r, _i_pow10(k), 0) }
+    returner r
+}
+
+// Verdien som heiltal; krev bitlengd <= 62.
+funksjon _b_til_heiltal(a: liste_heltall) -> heiltall {
+    la v: heiltall = 0
+    la i: heiltall = lengde(a) - 1
+    mens i >= 0 {
+        v = (v << 28) + a[i]
+        i = i - 1
+    }
+    returner v
+}
+
+// D × 10^e10 mot A × 2^b2 (alle eksakte): −1, 0 eller 1.
+funksjon _b_cmp_skalert(d: liste_heltall, e10: heiltall, a: liste_heltall, b2: heiltall) -> heiltall {
+    la v: liste_heltall = d
+    la h: liste_heltall = a
+    hvis e10 >= 0 { v = _b_mul_pow10(v, e10) } ellers { h = _b_mul_pow10(h, 0 - e10) }
+    hvis b2 >= 0 { h = _b_shl(h, b2) } ellers { v = _b_shl(v, 0 - b2) }
+    returner _b_cmp(v, h)
+}
+
+// Clinger sin AlgorithmR: rett eit godt estimat z0 (bitmønster for ein positiv, endeleg
+// double) til den korrekt avrunda verdien av D × 10^e10 ved å samanlikne eksakt med
+// midtpunkta mot nabo-doublane. Eit estimat innan éin–to ulp treng ein–to rundar med små
+// store-heiltal — mykje billegare enn full divisjon. −1 = gje opp (bruk _d_eksakt_bits).
+funksjon _d_korriger(d: liste_heltall, e10: heiltall, z0: heiltall) -> heiltall {
+    la z: heiltall = z0
+    la n: heiltall = 0
+    mens n < 8 {
+        hvis z <= 0 eller z >= _d_inf_bits() { returner 0 - 1 }
+        la ef: heiltall = z >> 52
+        la m: heiltall = z & 4503599627370495
+        la q: heiltall = 0 - 1074
+        hvis ef > 0 {
+            m = m + 4503599627370496
+            q = ef - 1075
+        }
+        // Høgt midtpunkt (2m+1)·2^(q−1): over (eller på, med oddetals m) → opp.
+        la c_hi: heiltall = _b_cmp_skalert(d, e10, _b_frå(2 * m + 1), q - 1)
+        hvis c_hi > 0 eller (c_hi == 0 og (m & 1) == 1) {
+            z = z + 1
+            n = n + 1
+        } ellers {
+            // Lågt midtpunkt; ved m = 2^52 (og ikkje minste eksponent) er gapet ned halvt.
+            la c_lo: heiltall = 0
+            hvis m == 4503599627370496 og ef > 1 {
+                c_lo = _b_cmp_skalert(d, e10, _b_frå(4 * m - 1), q - 2)
+            } ellers {
+                c_lo = _b_cmp_skalert(d, e10, _b_frå(2 * m - 1), q - 1)
+            }
+            hvis c_lo < 0 eller (c_lo == 0 og (m & 1) == 1) {
+                z = z - 1
+                n = n + 1
+            } ellers {
+                returner z
+            }
+        }
+    }
+    returner 0 - 1
+}
+
+// ─── Tekst → double ───────────────────────────────────────────────────────────
+
+// Teiknkoden til s[i] i små bokstavar (berre A–Z blir endra).
+funksjon _d_liten(s: tekst, i: heiltall) -> heiltall {
+    la c: heiltall = builtin.char_code(builtin.slice(s, i, i + 1))
+    hvis c >= 65 og c <= 90 { returner c + 32 }
+    returner c
+}
+
+// Byrjar s[i..] med `ord` (små bokstavar)?
+funksjon _d_har_ord(s: tekst, i: heiltall, ord: tekst) -> boolsk {
+    la n: heiltall = lengde(ord)
+    hvis i + n > lengde(s) { returner usann }
+    la j: heiltall = 0
+    mens j < n {
+        hvis _d_liten(s, i + j) != builtin.char_code(builtin.slice(ord, j, j + 1)) { returner usann }
+        j = j + 1
+    }
+    returner sann
+}
+
+funksjon _d_med_forteikn(bits: heiltall, neg: boolsk) {
+    hvis neg { returner builtin.desimal_frå_bits(_d_negativ_bits(bits)) }
+    returner builtin.desimal_frå_bits(bits)
+}
+
+// Eksakt: næraste double til D × 10^eksp (D > 0), round-half-even. `sticky` seier at
+// D er avkorta og at det sanne talet er litt større (D har då eit ekstra 1-siffer til slutt,
+// so avkortinga kan aldri gje eit falskt midtpunkt).
+funksjon _d_eksakt_bits(d: liste_heltall, eksp: heiltall) -> heiltall {
+    la teljar: liste_heltall = d
+    la nemnar: liste_heltall = _b_frå(1)
+    hvis eksp >= 0 { teljar = _b_mul_pow10(teljar, eksp) }
+    ellers { nemnar = _b_mul_pow10(nemnar, 0 - eksp) }
+    // Skaler so kvotienten q = floor(teljar·2^sh / nemnar) ligg i [2^54, 2^56).
+    la sh: heiltall = 55 - (_b_bitlen(teljar) - _b_bitlen(nemnar))
+    hvis sh >= 0 { teljar = _b_shl(teljar, sh) }
+    ellers { nemnar = _b_shl(nemnar, 0 - sh) }
+    // Binær lang divisjon: 56 kvotientbit, rest i teljar (skalert).
+    la t: liste_heltall = _b_shl(nemnar, 55)
+    la q: heiltall = 0
+    la j: heiltall = 0
+    mens j < 56 {
+        q = q * 2
+        hvis _b_cmp(teljar, t) >= 0 {
+            teljar = _b_sub(teljar, t)
+            q = q + 1
+        }
+        hvis j < 55 { teljar = _b_shl(teljar, 1) }
+        j = j + 1
+    }
+    la sticky: boolsk = lengde(teljar) > 0
+    // q × 2^(−sh) = m × 2^e2 med 53-bits m.
+    la ekstra: heiltall = _i_bitlen(q) - 53
+    la e2: heiltall = ekstra - sh
+    hvis e2 < 0 - 1074 {
+        ekstra = ekstra + ((0 - 1074) - e2)
+        e2 = 0 - 1074
+    }
+    hvis ekstra >= 57 { returner 0 }
+    la m: heiltall = q >> ekstra
+    la rb: heiltall = q - (m << ekstra)
+    la halv: heiltall = 1 << (ekstra - 1)
+    la opp: boolsk = rb > halv
+    hvis rb == halv og (sticky eller (m & 1) == 1) { opp = sann }
+    hvis opp { m = m + 1 }
+    hvis m == 9007199254740992 {
+        m = m >> 1
+        e2 = e2 + 1
+    }
+    hvis m == 0 { returner 0 }
+    hvis m < 4503599627370496 { returner m }
+    la eb: heiltall = e2 + 1075
+    hvis eb >= 2047 { returner _d_inf_bits() }
+    returner (eb - 1) * 4503599627370496 + m
+}
+
+// Desimalstreng → double, korrekt avrunda (round-half-even). Godtek "3.5", "-0.25",
+// "1e3", "2.5E-4", "+7", ".5", "inf", "-Infinity", "nan"; stoppar ved første ugyldige
+// teikn (som før).
 funksjon desimal_frå_tekst(t) {
     // builtin.desimaltall(x) er gap-ruta hit for ALLE typar, ikkje berre tekst.
     // Er argumentet allereie eit desimaltall, er konverteringa identitet. Er det
@@ -55,18 +359,29 @@ funksjon desimal_frå_tekst(t) {
     hvis _ty == "desimaltall" { returner t }
     hvis _ty != "tekst" { t = tekst(t) }
     la s = builtin.trim(t)
-    la n = lengde(s)
+    la n: heiltall = lengde(s)
     hvis n == 0 { returner _d_null() }
     la i: heiltall = 0
-    la neg = usann
+    la neg: boolsk = usann
     la c0 = builtin.slice(s, 0, 1)
-    hvis c0 == "-" { neg = sann i = 1 }
-    ellers hvis c0 == "+" { i = 1 }
+    hvis c0 == "-" {
+        neg = sann
+        i = 1
+    } ellers hvis c0 == "+" {
+        i = 1
+    }
+    hvis _d_har_ord(s, i, "inf") { returner _d_med_forteikn(_d_inf_bits(), neg) }
+    hvis _d_har_ord(s, i, "nan") { returner builtin.desimal_frå_bits(9221120237041090560) }
 
+    // Sifra: D (store heiltal) + mant (same tal som heiltal medan det er ≤ 18 siffer).
+    la d: liste_heltall = []
     la mant: heiltall = 0
+    la bolk: heiltall = 0
+    la bolk_n: heiltall = 0
+    la sig: heiltall = 0
     la eksp: heiltall = 0
-    la siffer: heiltall = 0
-    la sett_punktum = usann
+    la sett_punktum: boolsk = usann
+    la sticky: boolsk = usann
     mens i < n {
         la c = builtin.slice(s, i, i + 1)
         hvis c == "." {
@@ -75,143 +390,307 @@ funksjon desimal_frå_tekst(t) {
             i = i + 1
             fortsett
         }
-        hvis c == "e" eller c == "E" { bryt }
-        la d = builtin.char_code(c) - 48
-        hvis d < 0 eller d > 9 { bryt }
-        // Maks 18 siffer i mantissa; resten justerer berre eksponenten.
-        hvis siffer < 18 {
-            mant = mant * 10 + d
-            siffer = siffer + 1
+        la dv: heiltall = builtin.char_code(c) - 48
+        hvis dv < 0 eller dv > 9 { bryt }
+        hvis sig == 0 og dv == 0 {
+            // Leiande null: ikkje signifikant, men flyttar komma etter punktum.
+            hvis sett_punktum { eksp = eksp - 1 }
+        } ellers hvis sig < 800 {
+            // 800 > 768 siffer: meir enn nok til å avgjere avrundinga av ein double.
+            bolk = bolk * 10 + dv
+            bolk_n = bolk_n + 1
+            hvis bolk_n == 9 {
+                d = _b_mul_add(d, 1000000000, bolk)
+                bolk = 0
+                bolk_n = 0
+            }
+            hvis sig < 18 { mant = mant * 10 + dv }
+            sig = sig + 1
             hvis sett_punktum { eksp = eksp - 1 }
         } ellers {
+            hvis dv != 0 { sticky = sann }
             hvis ikkje sett_punktum { eksp = eksp + 1 }
         }
         i = i + 1
     }
-    // Eksplisitt eksponent (1e3, 2.5E-4)
+    hvis bolk_n > 0 { d = _b_mul_add(d, _i_pow10(bolk_n), bolk) }
+    // Eksplisitt eksponent (1e3, 2.5E-4). Klemt, so 1e999999999999999999999 ikkje flyt over.
     hvis i < n {
         la ec = builtin.slice(s, i, i + 1)
         hvis ec == "e" eller ec == "E" {
             i = i + 1
-            la eneg = usann
+            la eneg: boolsk = usann
             hvis i < n {
                 la sc = builtin.slice(s, i, i + 1)
-                hvis sc == "-" { eneg = sann i = i + 1 }
-                ellers hvis sc == "+" { i = i + 1 }
+                hvis sc == "-" {
+                    eneg = sann
+                    i = i + 1
+                } ellers hvis sc == "+" {
+                    i = i + 1
+                }
             }
             la ev: heiltall = 0
             mens i < n {
-                la d2 = builtin.char_code(builtin.slice(s, i, i + 1)) - 48
+                la d2: heiltall = builtin.char_code(builtin.slice(s, i, i + 1)) - 48
                 hvis d2 < 0 eller d2 > 9 { bryt }
-                ev = ev * 10 + d2
+                hvis ev < 100000 { ev = ev * 10 + d2 }
                 i = i + 1
             }
             hvis eneg { eksp = eksp - ev } ellers { eksp = eksp + ev }
         }
     }
+    hvis sig == 0 { returner _d_med_forteikn(0, neg) }
 
-    la v = _d_frå_heiltal(mant)
-    hvis eksp > 0 { v = v * _d_pow10(eksp) }
-    hvis eksp < 0 { v = v / _d_pow10(0 - eksp) }
-    hvis neg { v = _d_null() - v }
-    returner v
+    // Rask veg: D < 10^15 < 2^53 og 10^|eksp| er eksakte → éi korrekt avrunda operasjon.
+    hvis sig <= 15 og eksp >= 0 - 22 og eksp <= 22 {
+        la v = _d_frå_heiltal(mant)
+        hvis eksp > 0 { v = v * _d_pow10(eksp) }
+        hvis eksp < 0 { v = v / _d_pow10(0 - eksp) }
+        hvis neg { v = _d_null() - v }
+        returner v
+    }
+    // Vanlege «harde» tal (16–18 siffer, t.d. 0.30000000000000004): estimat med to IEEE-
+    // operasjonar (feil < 1,5 ulp), retta eksakt med AlgorithmR.
+    hvis sig <= 18 og eksp >= 0 - 22 og eksp <= 22 {
+        la est = _d_frå_heiltal(mant)
+        hvis eksp > 0 { est = est * _d_pow10(eksp) }
+        hvis eksp < 0 { est = est / _d_pow10(0 - eksp) }
+        la kb: heiltall = _d_korriger(d, eksp, builtin.desimal_til_bits(est))
+        hvis kb >= 0 { returner _d_med_forteikn(kb, neg) }
+    }
+    // Verdien ligg i [10^(sig−1+eksp), 10^(sig+eksp)).
+    hvis sig + eksp > 310 { returner _d_med_forteikn(_d_inf_bits(), neg) }
+    hvis sig + eksp < 0 - 325 { returner _d_med_forteikn(0, neg) }
+    hvis sticky {
+        d = _b_mul_add(d, 10, 1)
+        eksp = eksp - 1
+    }
+    returner _d_med_forteikn(_d_eksakt_bits(d, eksp), neg)
 }
 
-// Formater med nøyaktig `sig` signifikante siffer. Returnerer utan eksponent
-// for moderate storleikar, elles på e-form.
-funksjon _d_format_sig(x, sig: heiltall) -> tekst {
-    la bits = builtin.desimal_til_bits(x)
-    hvis bits == 0 { returner "0" }
-    la neg = _d_er_negativ(x)
-    la a = _d_abs(x)
+// ─── Double → tekst ───────────────────────────────────────────────────────────
 
-    // Normaliser til [1,10) og tel titalseksponenten.
-    la e10: heiltall = 0
-    la ti = _d_ti()
-    la ein = _d_frå_heiltal(1)
-    mens (a / ti) >= ein { a = a / ti e10 = e10 + 1 }
-    mens a < ein { a = a * ti e10 = e10 - 1 }
-
-    // Hent ut `sig` siffer med avrunding på det siste.
+// Kortaste sifferstreng for f × 2^e (f > 0): [siffer, k] med verdi 0.d1d2…dn × 10^k.
+// Burger & Dybvig (1996), fritt format med eksakte store heiltal. Grensene mot
+// nabo-doublane er med når f er partal (round-half-even ved innlesing).
+funksjon _d_kortaste(f: heiltall, e: heiltall) -> liste {
+    la jamn: boolsk = (f & 1) == 0
+    la grense: boolsk = f == 4503599627370496 og e > 0 - 1074
+    la r: liste_heltall = []
+    la s: liste_heltall = []
+    la mp: liste_heltall = []
+    la mm: liste_heltall = []
+    hvis e >= 0 {
+        la be: liste_heltall = _b_shl(_b_frå(1), e)
+        hvis grense {
+            r = _b_shl(_b_frå(f), e + 2)
+            s = _b_frå(4)
+            mp = _b_shl(be, 1)
+            mm = be
+        } ellers {
+            r = _b_shl(_b_frå(f), e + 1)
+            s = _b_frå(2)
+            mp = be
+            mm = be
+        }
+    } ellers {
+        hvis grense {
+            r = _b_frå(f * 4)
+            s = _b_shl(_b_frå(1), 2 - e)
+            mp = _b_frå(2)
+            mm = _b_frå(1)
+        } ellers {
+            r = _b_frå(f * 2)
+            s = _b_shl(_b_frå(1), 1 - e)
+            mp = _b_frå(1)
+            mm = _b_frå(1)
+        }
+    }
+    // k-estimat frå binæreksponenten (≈ floor(log10 v), aldri for stort med meir enn 1).
+    la b2: heiltall = _i_bitlen(f) + e - 1
+    la k: heiltall = 0
+    hvis b2 >= 0 { k = (b2 * 30103) / 100000 }
+    ellers { k = 0 - (((0 - b2) * 30103 + 99999) / 100000) }
+    hvis k >= 0 { s = _b_mul_pow10(s, k) }
+    ellers {
+        r = _b_mul_pow10(r, 0 - k)
+        mp = _b_mul_pow10(mp, 0 - k)
+        mm = _b_mul_pow10(mm, 0 - k)
+    }
+    // Fiks k: minste k med høg < 10^k (høg er med når jamn: då må høg < 10^k strengt).
+    la ferdig: boolsk = usann
+    mens ikkje ferdig {
+        la c: heiltall = _b_cmp(_b_add(r, mp), s)
+        hvis c > 0 eller (jamn og c == 0) {
+            s = _b_mul_add(s, 10, 0)
+            k = k + 1
+        } ellers {
+            ferdig = sann
+        }
+    }
+    ferdig = usann
+    mens ikkje ferdig {
+        la c2: heiltall = _b_cmp(_b_mul_add(_b_add(r, mp), 10, 0), s)
+        hvis c2 < 0 eller (ikkje jamn og c2 == 0) {
+            r = _b_mul_add(r, 10, 0)
+            mp = _b_mul_add(mp, 10, 0)
+            mm = _b_mul_add(mm, 10, 0)
+            k = k - 1
+        } ellers {
+            ferdig = sann
+        }
+    }
+    // Siffergenerering. Når s < 2^59 får r, s, m+ og m− plass i vanlege heiltal gjennom
+    // heile genereringa (r < s, m+ ≤ s før ×10, r + m+ < 11·s < 2^63) — den vanlege
+    // storleiksklassen (om lag 0,015 … 9·10^15); elles store heiltal.
     la sifre: liste_heltall = []
-    la j: heiltall = 0
-    mens j < sig {
-        la d = builtin.desimal_til_heiltal(a)
-        hvis d > 9 { d = 9 }
-        hvis d < 0 { d = 0 }
-        legg_til(sifre, d)
-        a = (a - _d_frå_heiltal(d)) * ti
-        j = j + 1
-    }
-    // Avrund på neste siffer.
-    hvis builtin.desimal_til_heiltal(a) >= 5 {
-        la k: heiltall = lengde(sifre) - 1
-        la bær = sann
-        mens k >= 0 og bær {
-            sifre[k] = sifre[k] + 1
-            hvis sifre[k] == 10 { sifre[k] = 0 k = k - 1 }
-            ellers { bær = usann }
+    la stopp: boolsk = usann
+    hvis _b_bitlen(s) <= 59 {
+        la ri: heiltall = _b_til_heiltal(r)
+        la si: heiltall = _b_til_heiltal(s)
+        la pi: heiltall = _b_til_heiltal(mp)
+        la mi: heiltall = _b_til_heiltal(mm)
+        mens ikkje stopp {
+            ri = ri * 10
+            pi = pi * 10
+            mi = mi * 10
+            la dvi: heiltall = ri / si
+            ri = ri - dvi * si
+            la tc1i: boolsk = ri < mi eller (jamn og ri == mi)
+            la tc2i: boolsk = ri + pi > si eller (jamn og ri + pi == si)
+            hvis ikkje tc1i og ikkje tc2i {
+                legg_til(sifre, dvi)
+            } ellers {
+                stopp = sann
+                hvis tc1i og ikkje tc2i {
+                    legg_til(sifre, dvi)
+                } ellers hvis tc2i og ikkje tc1i {
+                    legg_til(sifre, dvi + 1)
+                } ellers {
+                    hvis ri * 2 < si { legg_til(sifre, dvi) } ellers { legg_til(sifre, dvi + 1) }
+                }
+            }
+            hvis lengde(sifre) > 30 { stopp = sann }
         }
-        hvis bær {
-            la ny: liste_heltall = [1]
-            la m: heiltall = 0
-            mens m < lengde(sifre) { legg_til(ny, sifre[m]) m = m + 1 }
-            sifre = ny
-            e10 = e10 + 1
-            fjern_siste(sifre)
-        }
     }
-
-    // Bygg sifferstrengen og fjern etterfølgjande nullar.
+    mens ikkje stopp {
+        r = _b_mul_add(r, 10, 0)
+        mp = _b_mul_add(mp, 10, 0)
+        mm = _b_mul_add(mm, 10, 0)
+        la dv: heiltall = 0
+        mens _b_cmp(r, s) >= 0 {
+            r = _b_sub(r, s)
+            dv = dv + 1
+        }
+        la c1: heiltall = _b_cmp(r, mm)
+        la tc1: boolsk = c1 < 0 eller (jamn og c1 == 0)
+        la c3: heiltall = _b_cmp(_b_add(r, mp), s)
+        la tc2: boolsk = c3 > 0 eller (jamn og c3 == 0)
+        hvis ikkje tc1 og ikkje tc2 {
+            legg_til(sifre, dv)
+        } ellers {
+            stopp = sann
+            hvis tc1 og ikkje tc2 {
+                legg_til(sifre, dv)
+            } ellers hvis tc2 og ikkje tc1 {
+                legg_til(sifre, dv + 1)
+            } ellers {
+                // Begge sifra les attende rett; ta det næraste (uavgjort → opp).
+                hvis _b_cmp(_b_mul_add(r, 2, 0), s) < 0 { legg_til(sifre, dv) }
+                ellers { legg_til(sifre, dv + 1) }
+            }
+        }
+        hvis lengde(sifre) > 30 { stopp = sann }
+    }
+    // Mente (skal ikkje skje etter k-fiksen, men eit «10» må aldri nå ut).
+    la p: heiltall = lengde(sifre) - 1
+    mens p > 0 og sifre[p] > 9 {
+        sifre[p] = sifre[p] - 10
+        sifre[p - 1] = sifre[p - 1] + 1
+        p = p - 1
+    }
+    hvis sifre[0] > 9 {
+        sifre[0] = sifre[0] - 10
+        la ny: liste_heltall = [1]
+        la q: heiltall = 0
+        mens q < lengde(sifre) { legg_til(ny, sifre[q]) q = q + 1 }
+        sifre = ny
+        k = k + 1
+    }
     la ds = ""
-    la q: heiltall = 0
-    mens q < lengde(sifre) { ds = ds + tekst_fra_heltall(sifre[q]) q = q + 1 }
+    la qi: heiltall = 0
+    mens qi < lengde(sifre) {
+        ds = ds + tekst_fra_heltall(sifre[qi])
+        qi = qi + 1
+    }
     mens lengde(ds) > 1 og builtin.slice(ds, lengde(ds) - 1, lengde(ds)) == "0" {
         ds = builtin.slice(ds, 0, lengde(ds) - 1)
     }
+    returner [ds, k]
+}
 
+// Sifferstreng ds (utan etterfølgjande nullar) med titalseksponent e10 for første siffer →
+// «1234.5», «0.001», «1e20», «1.5e-7». Uendra form frå før a12fix.
+funksjon _d_formater(ds: tekst, e10: heiltall) -> tekst {
     la ut = ""
     hvis e10 >= 0 og e10 < 17 {
         hvis lengde(ds) <= e10 + 1 {
             ut = ds
             la pad: heiltall = e10 + 1 - lengde(ds)
             la pi: heiltall = 0
-            mens pi < pad { ut = ut + "0" pi = pi + 1 }
+            mens pi < pad {
+                ut = ut + "0"
+                pi = pi + 1
+            }
         } ellers {
             ut = builtin.slice(ds, 0, e10 + 1) + "." + builtin.slice(ds, e10 + 1, lengde(ds))
         }
     } ellers hvis e10 < 0 og e10 > 0 - 5 {
         la nullar = ""
         la z: heiltall = 0
-        mens z < (0 - e10) - 1 { nullar = nullar + "0" z = z + 1 }
+        mens z < (0 - e10) - 1 {
+            nullar = nullar + "0"
+            z = z + 1
+        }
         ut = "0." + nullar + ds
     } ellers {
-        // e-form
         la mantstr = builtin.slice(ds, 0, 1)
         hvis lengde(ds) > 1 { mantstr = mantstr + "." + builtin.slice(ds, 1, lengde(ds)) }
         ut = mantstr + "e" + tekst_fra_heltall(e10)
     }
-    hvis neg { ut = "-" + ut }
     returner ut
 }
 
-// double → kortaste tapsfrie desimalstreng (rundtur-søk).
+// double → kortaste tapsfrie desimalstreng. ±0 → "0" (som committed seed), ±inf →
+// "inf"/"-inf", NaN → "nan".
 funksjon desimal_til_tekst(x) -> tekst {
-    la bits = builtin.desimal_til_bits(x)
-    hvis bits == 0 { returner "0" }
-    // -0.0 skal skrivast som 0, slik committed seed gjer. MERK: skriv IKKJE
-    // dette som `bits == 0 - 9223372036854775808` — 2^63 får ikkje plass i eit
-    // fortegnsbestemt 64-bits heiltal, og den literalen krasja kompilert kode.
-    // Mønsteret for -0.0 er «fortegnsbit sett, resten null», som ein kan teste
-    // utan å skrive 2^63 i det heile.
-    hvis bits < 0 og (bits + 1) == 0 - 9223372036854775807 { returner "0" }
-    la sig: heiltall = 1
-    mens sig <= 17 {
-        la kandidat = _d_format_sig(x, sig)
-        hvis builtin.desimal_til_bits(desimal_frå_tekst(kandidat)) == bits { returner kandidat }
-        sig = sig + 1
+    la bits: heiltall = builtin.desimal_til_bits(x)
+    la neg: boolsk = bits < 0
+    la mag: heiltall = _d_storleik(bits)
+    hvis mag == 0 { returner "0" }
+    hvis mag >= _d_inf_bits() {
+        hvis mag > _d_inf_bits() { returner "nan" }
+        hvis neg { returner "-inf" }
+        returner "inf"
     }
-    returner _d_format_sig(x, 17)
+    la eksp_felt: heiltall = mag >> 52
+    la f: heiltall = mag & 4503599627370495
+    la e: heiltall = 0 - 1074
+    hvis eksp_felt > 0 {
+        f = f + 4503599627370496
+        e = eksp_felt - 1075
+    }
+    la forteikn = ""
+    hvis neg { forteikn = "-" }
+    // Heiltalsverdig og < 2^53: heiltalet sjølv er den kortaste forma.
+    hvis e == 0 { returner forteikn + tekst_fra_heltall(f) }
+    hvis e < 0 og e > 0 - 53 {
+        la maske: heiltall = (1 << (0 - e)) - 1
+        hvis (f & maske) == 0 { returner forteikn + tekst_fra_heltall(f >> (0 - e)) }
+    }
+    la res = _d_kortaste(f, e)
+    la k: heiltall = res[1]
+    returner forteikn + _d_formater(tekst(res[0]), k - 1)
 }
 
 // JSON-forma av eit desimaltall: som desimal_til_tekst, men eit heiltalsverdig
@@ -219,7 +698,9 @@ funksjon desimal_til_tekst(x) -> tekst {
 // att. Utan dette gjorde ein NCB-rundtur (bundle) PUSH_CONST 7.0 til heiltalet 7, og
 // `7.0 / 2` vart 3. Same regel som selfhost/json.no json_desimal_tekst (VM-vegen);
 // codegen-kroken i json_stringify-atomet kallar denne (AOT-vegen).
+// JSON har ikkje inf/NaN: dei blir «null» (som JSON.stringify i JS).
 funksjon desimal_til_json(x) -> tekst {
+    hvis _d_storleik(builtin.desimal_til_bits(x)) >= _d_inf_bits() { returner "null" }
     returner json_tal_med_desimalmerke(desimal_til_tekst(x))
 }
 
