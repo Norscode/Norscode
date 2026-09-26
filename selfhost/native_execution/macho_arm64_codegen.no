@@ -3,8 +3,18 @@
 // arm64-instruksjonar. Resultatet frå RETURN blir native main-retur.
 
 bruk selfhost.native_execution.macho_arm64_emitter som macho
+bruk selfhost.native_execution.heap_layout som hl
+bruk selfhost.native_execution.gap_ruter som gr
 bruk selfhost.ncb_serde som serde
 bruk std.runtime_filesystem som native_fs
+
+// Plattformmålet codegenen emitterer for (A2): "linux-arm64" (ELF) eller "macos-arm64"
+// (Mach-O). Same strengar som builtin.native_target() gjev i programmet og som
+// heap_layout / std.native_sys brukar som nøkkel.
+funksjon ncval_mål(os: tekst) -> tekst {
+    hvis os == "linux" { returner "linux-arm64" }
+    returner "macos-arm64"
+}
 
 funksjon opcode(instruksjon) -> tekst {
     hvis builtin.type(instruksjon) != "liste" eller lengde(instruksjon) == 0 { returner "" }
@@ -90,7 +100,10 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "fil_append_binær" eller n == "fil_append_binary" eller
        n == "feil" eller n == "fjern" eller n == "fjern_indeks" eller n == "sett_inn" eller
        n == "system_info" eller n == "native_heap_bytes" eller n == "vent.sov" eller
-       n == "tekst_til_heltall" eller n == "_rt_env_finnes" {
+       n == "tekst_til_heltall" eller n == "_rt_env_finnes" eller
+       n == "sys6" eller n == "raw_load8" eller n == "raw_load64" eller n == "raw_store8" eller
+       n == "raw_store64" eller n == "raw_call" eller n == "native_target" eller n == "native_envp" eller
+       n == "random_byte" {
         returner sann
     }
     hvis ncval_gap_stub(n) { returner sann }
@@ -178,12 +191,20 @@ funksjon emit_skriv_int(native: liste_heiltall, arg: heiltall, os: tekst) -> hei
 // mmap er OS-spesifikk: macOS x16=197, svc #0x80, flags MAP_PRIVATE|MAP_ANON
 // =0x1002; Linux x8=222, svc #0, flags MAP_PRIVATE|MAP_ANONYMOUS=0x22.
 funksjon emit_heap_init(native: liste_heiltall, os: tekst) -> heiltall {
-    legg_u32(native, 0xD2800000)                    // movz x0, #0        (addr = NULL)
+    // A2: heapen ligg på den faste VA-en heap_layout.HEAP_VA(mål) (linux-arm64
+    // 0x10_0000_0000, macos-arm64 0xC0_0000_0000; sjå heap_layout.no), og
+    // dei fyrste HEAP_CONTROLSZ byte er kontrollblokka som på x86 (envp @ ENVP_OFFSET, so
+    // builtin.native_envp() er symbolsk; GC-felta kjem i A4). Linux: MAP_FIXED_NOREPLACE
+    // (aldri skriv over ein eksisterande mapping). macOS: VA-en som hint utan MAP_FIXED.
+    // Begge: returen MÅ vere lik HEAP_VA, elles fatal (skriv til stderr, exit 198) i
+    // staden for å køyre med ein annan layout enn codegen og native_gap reknar med.
+    la base = hl.HEAP_VA(ncval_mål(os))
+    last_heiltall_64(native, 0, base)               // x0 = HEAP_VA
     legg_u32(native, 0xD2800001)                    // movz x1, #0
     legg_u32(native, 0xF2C00021)                    // movk x1, #1, lsl #32  (len=4 GiB; anon mmap er lat, ingen GC enno)
     legg_u32(native, 0xD2800062)                    // movz x2, #3        (PROT_READ|WRITE)
     hvis os == "linux" {
-        legg_u32(native, 0xD2800443)                // movz x3, #0x22     (MAP_PRIVATE|ANONYMOUS)
+        last_heiltall_64(native, 3, 1048610)        // x3 = 0x100022 (MAP_PRIVATE|ANONYMOUS|FIXED_NOREPLACE)
     } ellers {
         legg_u32(native, 0xD2820043)                // movz x3, #0x1002   (MAP_PRIVATE|MAP_ANON)
     }
@@ -196,8 +217,47 @@ funksjon emit_heap_init(native: liste_heiltall, os: tekst) -> heiltall {
         legg_u32(native, 0xD28018B0)                // movz x16, #197     (macOS mmap)
         legg_u32(native, 0xD4001001)                // svc #0x80
     }
-    legg_u32(native, 0xAA0003FC)                    // mov x28, x0        (bump = heap-start)
+    last_heiltall_64(native, 9, base)
+    legg_u32(native, 0xEB09001F)                    // cmp x0, x9
+    la p_beq = lengde(native)
+    legg_u32(native, 0)                             // b.eq ok (patch)
+    emit_fatal_melding(native, "norscode: heap-VA opptatt (mmap)\n", 198, os)
+    la lbl_ok = lengde(native)
+    skriv_u32(native, p_beq, 0x54000000 | ((((lbl_ok - p_beq) / 4) & 0x7FFFF) << 5))   // b.eq
+    // Kontrollblokk: envp (x27, fanga frå x2 i entry-prologen) → [HEAP_VA + ENVP_OFFSET].
+    legg_u32(native, 0xF9000000 | ((hl.ENVP_OFFSET() / 8) << 10) | 27)                  // str x27, [x0, #ENVP_OFFSET]
+    legg_u32(native, 0x91000000 | (hl.HEAP_CONTROLSZ() << 10) | 28)                     // add x28, x0, #HEAP_CONTROLSZ
     // (x27 er reservert til envp for miljo_hent — ikkje klobb her.)
+    returner 0
+}
+
+// Skriv ein kort ASCII-melding til stderr og avsluttar prosessen med `kode`. Brukt før
+// Norscode-runtimen er oppe (ingen heap). Meldinga blir bygd på maskinstakken i 8-byte-
+// bitar. Scratch: x0–x2, x8/x16, x10.
+funksjon emit_fatal_melding(native: liste_heiltall, melding: tekst, kode: heiltall, os: tekst) -> heiltall {
+    la n = lengde(melding)
+    la ramme = ((n + 15) / 16) * 16
+    hvis ramme > 4095 { kast "fatal-melding for lang" }
+    legg_u32(native, 0xD10003FF | (ramme << 10))    // sub sp, sp, #ramme
+    la off = 0
+    mens off < n {
+        la v = 0
+        la k = 7
+        mens k >= 0 {
+            v = v * 256
+            hvis off + k < n { v = v + (builtin.char_code(builtin.slice(melding, off + k, off + k + 1)) & 127) }
+            k = k - 1
+        }
+        last_heiltall_64(native, 10, v)
+        legg_u32(native, 0xF90003EA | ((off / 8) << 10))   // str x10, [sp, #off]
+        off = off + 8
+    }
+    legg_u32(native, 0xD2800040)                    // movz x0, #2 (stderr)
+    legg_u32(native, 0x910003E1)                    // mov x1, sp
+    last_heiltall_64(native, 2, n)                  // x2 = lengd
+    hvis os == "linux" { emit_syscall(native, 64, os) } ellers { emit_syscall(native, 4, os) }   // write
+    last_heiltall_64(native, 0, kode)
+    hvis os == "linux" { emit_syscall(native, 94, os) } ellers { emit_syscall(native, 1, os) }   // exit_group / exit
     returner 0
 }
 
@@ -634,10 +694,30 @@ funksjon emit_tekst_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: he
     la p_b_end = lengde(native)
     legg_u32(native, 0)                                // b end
     la lbl_int = lengde(native)
+    // A2 (VM-paritet, funne av differensial-lanen): bool (tagg 2) → "sann"/"usann" som
+    // tolken og x86-AOT (native_codegen_v2 to_text), ikkje heiltalet 1/0.
+    legg_u32(native, 0xF100093F)                       // cmp x9, #2
+    la p_bne_ikkjebool = lengde(native)
+    legg_u32(native, 0)                                // b.ne do_int_eigentleg
+    legg_u32(native, 0xF9400400 | (arg_reg << 5) | 10) // ldr x10, [Xarg, #8]
+    la p_cbz_usann = lengde(native)
+    legg_u32(native, 0)                                // cbz x10, usann
+    emit_ncval_str_const(native, "sann", dst_reg)
+    la p_b_end_sann = lengde(native)
+    legg_u32(native, 0)                                // b end
+    la lbl_usann = lengde(native)
+    emit_ncval_str_const(native, "usann", dst_reg)
+    la p_b_end_usann = lengde(native)
+    legg_u32(native, 0)                                // b end
+    la lbl_int_eigentleg = lengde(native)
     emit_tekst_int(native, arg_reg, dst_reg)
     la lbl_end = lengde(native)
     skriv_u32(native, p_bne_int, 0x54000001 | ((((lbl_int - p_bne_int) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_end,   0x14000000 |  (((lbl_end - p_b_end) / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_bne_ikkjebool, 0x54000001 | ((((lbl_int_eigentleg - p_bne_ikkjebool) / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_cbz_usann, 0xB400000A | ((((lbl_usann - p_cbz_usann) / 4) & 0x7FFFF) << 5))
+    skriv_u32(native, p_b_end_sann,  0x14000000 | (((lbl_end - p_b_end_sann) / 4) & 0x03FFFFFF))
+    skriv_u32(native, p_b_end_usann, 0x14000000 | (((lbl_end - p_b_end_usann) / 4) & 0x03FFFFFF))
     returner 0
 }
 
@@ -700,8 +780,68 @@ funksjon ncval_ruting_aktiv(os: tekst) -> boolsk {
     returner os != "macos"
 }
 
+// A2: OS-vegane som Linux-ELF rutar til std.native_gap (via den delte tabellen i
+// gap_ruter.no, same mål som x86): prosess-spawn, sokkel, nettverk/epoll og dns.
+// Inline-emitterane (emit_socket_*, emit_prosess_spawn_req) er no berre for macOS (M0).
+funksjon ncval_os_rute_namn(namn: tekst) -> boolsk {
+    la n = ncval_avkort_builtin(namn)
+    hvis builtin.starts_with(n, "socket_") { returner sann }
+    returner n == "process_spawn_argv" eller n == "process_operation" eller
+        n == "network_operation" eller n == "dns_lookup" eller n == "system_operation"
+}
+
+// A2: kva for namn i den DELTE rutetabellen (gap_ruter.gap_rute) ARM64 tek i bruk. Berre
+// namn utan eigen ARM64-emitter og der målet ikkje kviler på x86-atom ARM64 manglar:
+//   * OS-vegane (ncval_os_rute_namn) — native_gap over sys6/raw_*/native_sys;
+//   * kompiler_fil_aktiv (fail-closed stubb i native_gap), host_exec_ncb(_json) (selfhost.vm);
+//   * db.* (rein std.db).
+// IKKJE: sha256_bytes/pbkdf2_sha256/random_hex (native_gap-krypto over sha256_bytes_hex /
+// random_byte — ARM64 har eigne emitterar), argon2id (rå-minne-varianten), desimaltall og
+// filesystem_* (desimal-/native_fs-atom, A5), thread_*/atomic/jit/tensor (A5; JIT-en er x86).
+funksjon ncval_delt_rute_ok(n: tekst) -> boolsk {
+    hvis ncval_os_rute_namn(n) { returner sann }
+    hvis builtin.starts_with(n, "db.") { returner sann }
+    returner n == "kompiler_fil_aktiv" eller n == "host_exec_ncb_json" eller n == "host_exec_ncb"
+}
+
+// Emitterer eit ruta builtin-kall som vanleg AArch64-kall: argument (NcVal-peikarar) i
+// x0..x(n-1), `bl mål`, resultat x0 til operand-slot djupn-nargs. Returnerer ny djupn,
+// −1 ved underflyt/>8 argument, −2 når reg-modus-stakken er full (kallaren rekompilerer
+// i mem-modus).
+funksjon emit_rute_kall(native: liste_heiltall, mål_namn: tekst, nargs_r: heiltall, djupn: heiltall, memmode: boolsk, home_off: heiltall, bl_patchar) -> heiltall {
+    hvis djupn < nargs_r eller nargs_r > 8 { returner -1 }
+    hvis nargs_r == 0 og ikkje memmode og djupn >= 6 { returner -2 }
+    la ar = 0
+    mens ar < nargs_r {
+        hvis memmode {
+            legg_u32(native, 0xF9400340 | ((home_off + djupn - nargs_r + ar) << 10) | ar)  // ldr x_ar, [x26, #home]
+        } ellers {
+            legg_u32(native, 0xAA0003E0 | (ncval_opreg(djupn - nargs_r + ar) << 16) | ar)  // mov x_ar, Xsrc
+        }
+        ar = ar + 1
+    }
+    la p_bl_rute = lengde(native)
+    legg_u32(native, 0x94000000)                        // bl <mål_namn> (patch)
+    legg_til(bl_patchar, [p_bl_rute, mål_namn])
+    hvis memmode {
+        legg_u32(native, 0xF9000340 | ((home_off + djupn - nargs_r) << 10) | 0)  // str x0, [x26, #home(dst)]
+    } ellers {
+        legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs_r))  // mov Xdst, x0
+    }
+    returner djupn - nargs_r + 1
+}
+
 funksjon ncval_gap_rute(namn: tekst) -> tekst {
     la n = ncval_avkort_builtin(namn)
+    // Prosess-spawn: x86 sender builtin.process_spawn_argv ALLTID til native_gap sin
+    // spawn-motor (F3.2, spesialtilfelle i native_codegen_v2, ikkje i gap_ruter).
+    // (builtin.exec_prosess er pensjonert i vm.no — «bruk process_spawn_argv» — og blir
+    // NATIV-GAP-stubben på Linux-ELF.)
+    hvis n == "process_spawn_argv" { returner "std.native_gap.process_spawn_argv_gap" }
+    hvis ncval_delt_rute_ok(n) {
+        la kand = gr.gap_rute(namn)
+        hvis lengde(kand) > 0 { returner tekst(kand[0]) }
+    }
     // pbkdf2_sha256 har MEDVITE inga rute: std.sha256.pbkdf2_hex brukar
     // std.sha256._bytes (SHA-padding-hjelparen: 0x80, nullar, lengd) som nøkkel/
     // salt og gjev FEIL PBKDF2 utan å kaste (RFC-vektor "password"/"salt"/1/32 →
@@ -1682,29 +1822,73 @@ funksjon emit_sett_inn(native: liste_heiltall, list_reg: heiltall, idx_reg: heil
     returner 0
 }
 
-// system_info() → NcVal-kart {"system": ..., "machine": ...}. Verdiane er
-// compile-time-konstantar per målplattform (codegen kjenner OS-et), så kartet
-// materialiserast frå strengkonstantar. Kallarane i repoet les berre desse to
-// felta. Scratch: x9/x10/x13/x14 (via str_const/alloc) + x11/x12/x15/x16.
+// system_info() → NcVal-kart {"system", "machine", "cwd", "executable", "status"}.
+// system/machine er compile-time-konstantar per målplattform (codegen kjenner OS-et).
+// Scratch: x0–x3, x8/x16, x9–x17 (via str_const/alloc_str_copy); ramme på maskinstakken.
 funksjon emit_system_info(native: liste_heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    // A2: same fem felt som x86-atomet (native_codegen_v2): system, machine, cwd,
+    // executable, status. os/arch er konstantar per mål (seeds-plan §3.3). Linux: cwd frå
+    // getcwd (#17), executable frå readlinkat(AT_FDCWD, "/proc/self/exe") (#78); ved feil
+    // tom streng. macOS (M0): cwd/executable = "" (ingen getcwd-syscall; kjem med
+    // libSystem-/F_GETPATH-vegen). Ramme: [sp, sp+80) = 10 NcVal-peikarar (5 par),
+    // [sp+128, sp+2048) buffer, [sp+2048, sp+2064) "/proc/self/exe".
     la sysnamn = "Darwin"
     la maskin = "arm64"
     hvis os == "linux" {
         sysnamn = "Linux"
         maskin = "aarch64"
     }
-    emit_ncval_str_const(native, "system", 11)
-    emit_ncval_str_const(native, sysnamn, 12)
-    emit_ncval_str_const(native, "machine", 15)
-    emit_ncval_str_const(native, maskin, 16)
+    legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
+    la faste = [["system", 0], [sysnamn, 1], ["machine", 2], [maskin, 3], ["cwd", 4],
+                ["executable", 6], ["status", 8], ["ok", 9]]
+    for fp i faste {
+        emit_ncval_str_const(native, tekst(fp[0]), 11)
+        legg_u32(native, 0xF90003EB | (fp[1] << 10))        // str x11, [sp, #slot*8]
+    }
+    hvis os == "linux" {
+        // cwd: getcwd(sp+128, 1920) → lengd inkl. NUL, eller −errno
+        legg_u32(native, 0x910203E0)                    // add x0, sp, #128
+        legg_u32(native, 0xD280F001)                    // movz x1, #1920
+        emit_syscall(native, 17, os)
+        legg_u32(native, 0xD100040A)                    // sub x10, x0, #1
+        legg_u32(native, 0xF100041F)                    // cmp x0, #1
+        legg_u32(native, 0x9A9FA14A)                    // csel x10, x10, xzr, ge
+        legg_u32(native, 0x910203E9)                    // add x9, sp, #128
+        emit_alloc_str_copy(native, 11, 0)
+        legg_u32(native, 0xF90017EB)                    // str x11, [sp, #40]  (cwd-verdi)
+        // executable: readlinkat(AT_FDCWD, "/proc/self/exe", sp+128, 1920) → lengd eller −errno
+        last_heiltall_64(native, 10, 7310238724270485551)   // "/proc/se" (LE)
+        legg_u32(native, 0x914007E9)                    // add x9, sp, #4096
+        legg_u32(native, 0xD1200129)                    // sub x9, x9, #2048  (sp+2048)
+        legg_u32(native, 0xF900012A)                    // str x10, [x9]
+        last_heiltall_64(native, 10, 111567768086124)    // "lf/exe" + 2 NUL (LE)
+        legg_u32(native, 0xF900052A)                    // str x10, [x9, #8]
+        legg_u32(native, 0x92800C60)                    // movn x0, #99  (AT_FDCWD = −100)
+        legg_u32(native, 0xAA0903E1)                    // mov x1, x9
+        legg_u32(native, 0x910203E2)                    // add x2, sp, #128
+        legg_u32(native, 0xD280F003)                    // movz x3, #1920
+        emit_syscall(native, 78, os)
+        legg_u32(native, 0xF100001F)                    // cmp x0, #0
+        legg_u32(native, 0x9A9FA00A)                    // csel x10, x0, xzr, ge
+        legg_u32(native, 0x910203E9)                    // add x9, sp, #128
+        emit_alloc_str_copy(native, 11, 0)
+        legg_u32(native, 0xF9001FEB)                    // str x11, [sp, #56]  (executable-verdi)
+    } ellers {
+        emit_ncval_str_const(native, "", 11)
+        legg_u32(native, 0xF90017EB)                    // str x11, [sp, #40]
+        legg_u32(native, 0xF9001FEB)                    // str x11, [sp, #56]
+    }
     legg_u32(native, 0xAA1C03EE)                        // mov x14, x28 (mapdata)
-    legg_u32(native, 0xD2800049)                        // movz x9, #2  (count)
+    legg_u32(native, 0xD28000A9)                        // movz x9, #5  (count)
     legg_u32(native, 0xF90001C9)                        // str x9, [x14]
-    legg_u32(native, 0xF90005CB)                        // str x11, [x14, #8]
-    legg_u32(native, 0xF90009CC)                        // str x12, [x14, #16]
-    legg_u32(native, 0xF9000DCF)                        // str x15, [x14, #24]
-    legg_u32(native, 0xF90011D0)                        // str x16, [x14, #32]
-    legg_u32(native, 0x9100A1DC)                        // add x28, x14, #40
+    la si = 0
+    mens si < 10 {
+        legg_u32(native, 0xF94003E9 | (si << 10))       // ldr x9, [sp, #si*8]
+        legg_u32(native, 0xF90001C9 | ((si + 1) << 10)) // str x9, [x14, #8+si*8]
+        si = si + 1
+    }
+    legg_u32(native, 0x910161DC)                        // add x28, x14, #88
+    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
     emit_ncval_alloc_ptr(native, 14, dst_reg, 5)
     returner 0
 }
@@ -1885,12 +2069,21 @@ funksjon emit_cstr_to_buf(native: liste_heiltall, str_reg: heiltall, ptr_reg: he
     returner 0
 }
 
-// Prosess-spawn med req-kart (builtin-namna «exec_prosess»/«process_spawn_argv»): MINIMAL — parse req["executable"] + req["args"], bygg char**
+// A2: inline OS-emitterane under (prosess-spawn, sockaddr, socket_*) er berre for macOS
+// til M0. Linux-ELF rutar same builtins til std.native_gap (ncval_os_rute_namn), so dei
+// Linux-spesifikke greinene (syscall-nummer, sockaddr-layout, clone/dup3) er fjerna her.
+funksjon krev_macos_inline(os: tekst, namn: tekst) -> heiltall {
+    hvis os == "linux" { kast namn + ": inline OS-emitter er berre for macOS; linux-arm64 rutar til std.native_gap (A2)" }
+    returner 0
+}
+
+// macOS-berre (A2). Prosess-spawn med req-kart (builtin-namna «exec_prosess»/«process_spawn_argv»): MINIMAL — parse req["executable"] + req["args"], bygg char**
 // argv (argv[0]=exec, argv[1..]=args-elem, NULL-term), fork/execve/wait4, returner
 // {status:"ferdig", exit_code:N}. (stdout/stderr/timeout kjem inkrementelt.) req er
 // ei NcVal-map i req_reg (operand-reg, overlever). Stakk: [sp..sp+256) argv-ptr-array;
 // [sp+256..sp+8192) cstr-buffer; [sp+8100..sp+8192) stage-slots.
 funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_prosess_spawn_req")
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096  (til saman 8192)
     // --- parse executable → stage på [sp+8184] ---
@@ -1933,27 +2126,11 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     legg_u32(native, 0x9100062A)                        // add x10, x17, #1
     legg_u32(native, 0xF82A79DF)                        // str xzr, [x14, x10, lsl #3]
     // --- lag stdout-pipe → [sp+7000]=read_fd, [sp+7004]=write_fd ---
-    hvis os == "linux" {
-        legg_u32(native, 0x914007E0)                    // add x0, sp, #4096
-        legg_u32(native, 0x912D6000)                    // add x0, x0, #2904  (→ sp+7000, buf for fds[2])
-        legg_u32(native, 0xAA1F03E1)                    // mov x1, xzr (flags)
-        emit_syscall(native, 59, os)                    // pipe2(buf, 0)
-    } ellers {
-        emit_syscall(native, 42, os)                    // pipe → x0=read, x1=write
-        legg_u32(native, 0xB91B5BE0)                    // strw w0, [sp, #7000]
-        legg_u32(native, 0xB91B5FE1)                    // strw w1, [sp, #7004]
-    }
+    emit_syscall(native, 42, os)                    // pipe → x0=read, x1=write
+    legg_u32(native, 0xB91B5BE0)                    // strw w0, [sp, #7000]
+    legg_u32(native, 0xB91B5FE1)                    // strw w1, [sp, #7004]
     // --- fork/clone ---
-    hvis os == "linux" {
-        legg_u32(native, 0xD2800220)                    // movz x0, #17 (SIGCHLD flags)
-        legg_u32(native, 0xAA1F03E1)                    // mov x1, xzr (stack=0)
-        legg_u32(native, 0xAA1F03E2)                    // mov x2, xzr
-        legg_u32(native, 0xAA1F03E3)                    // mov x3, xzr
-        legg_u32(native, 0xAA1F03E4)                    // mov x4, xzr
-        emit_syscall(native, 220, os)                   // clone
-    } ellers {
-        emit_syscall(native, 2, os)                     // fork (macOS)
-    }
+    emit_syscall(native, 2, os)                     // fork (macOS)
     // x0 = pid (parent) / 0 (child). Ta vare på pid i x19? NEI operand. Bruk x9.
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0 (pid)
     la p_cbnz_parent = lengde(native)
@@ -1961,29 +2138,24 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     // --- barn: dup2(write_fd, 1) [stdout], close begge pipe-fd, så execve ---
     legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
     legg_u32(native, 0xD2800021)                        // movz x1, #1 (STDOUT)
-    hvis os == "linux" {
-        legg_u32(native, 0xAA1F03E2)                    // mov x2, xzr (flags)
-        emit_syscall(native, 24, os)                    // dup3(write,1,0)
-    } ellers {
-        emit_syscall(native, 90, os)                    // dup2(write,1)
-    }
+    emit_syscall(native, 90, os)                    // dup2(write,1)
     legg_u32(native, 0xB95B5BE0)                        // ldrw w0, [sp, #7000] (read_fd)
-    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close
+    emit_syscall(native, 6, os)  // close
     legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
-    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close
+    emit_syscall(native, 6, os)  // close
     // --- child: execve(argv[0], argv, envp=x27) ---
     legg_u32(native, 0xF94001C0)                        // ldr x0, [x14] (argv[0]=exec-cstr)
     legg_u32(native, 0xAA0E03E1)                        // mov x1, x14 (argv)
     legg_u32(native, 0xAA1B03E2)                        // mov x2, x27 (envp)
-    hvis os == "linux" { emit_syscall(native, 221, os) } ellers { emit_syscall(native, 59, os) }
+    emit_syscall(native, 59, os)
     // execve feila → exit(127)
     legg_u32(native, 0xD2800FE0)                        // movz x0, #127
-    hvis os == "linux" { emit_syscall(native, 93, os) } ellers { emit_syscall(native, 1, os) }
+    emit_syscall(native, 1, os)
     la lbl_parent = lengde(native)
     // --- forelder: lagra pid, close write_fd, les stdout til heap-streng ---
     legg_u32(native, 0xF90DD7E9)                        // str x9, [sp, #7080] (pid)
     legg_u32(native, 0xB95B5FE0)                        // ldrw w0, [sp, #7004] (write_fd)
-    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close write
+    emit_syscall(native, 6, os)  // close write
     legg_u32(native, 0xAA1C03EA)                        // mov x10, x28 (strdata-base)
     legg_u32(native, 0x9100214B)                        // add x11, x10, #8 (skrivepeikar)
     legg_u32(native, 0xAA1F03EC)                        // mov x12, xzr (total)
@@ -1992,7 +2164,7 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     legg_u32(native, 0xAA0B03E1)                        // mov x1, x11 (buf)
     legg_u32(native, 0xD2800002)                        // movz x2, #0
     legg_u32(native, 0xF2A00022)                        // movk x2, #1, lsl #16 (65536)
-    hvis os == "linux" { emit_syscall(native, 63, os) } ellers { emit_syscall(native, 3, os) }  // read
+    emit_syscall(native, 3, os)  // read
     legg_u32(native, 0xF100041F)                        // cmp x0, #1
     la p_blt_readdone = lengde(native)
     legg_u32(native, 0)                                 // b.lt readdone
@@ -2007,7 +2179,7 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     emit_ncval_alloc_ptr(native, 10, 0, 3)              // x0 = stdout-streng NcVal
     legg_u32(native, 0xF90DBFE0)                        // str x0, [sp, #7032] (stdout-ptr)
     legg_u32(native, 0xB95B5BE0)                        // ldrw w0, [sp, #7000] (read_fd)
-    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }  // close read
+    emit_syscall(native, 6, os)  // close read
     // --- wait4(pid, &status, 0, 0) ---
     legg_u32(native, 0xF94DD7E9)                        // ldr x9, [sp, #7080] (pid)
     legg_u32(native, 0xAA0903E0)                        // mov x0, x9
@@ -2015,7 +2187,7 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     legg_u32(native, 0x912DA021)                        // add x1, x1, #2920  (→ sp+7016, &status)
     legg_u32(native, 0xAA1F03E2)                        // mov x2, xzr
     legg_u32(native, 0xAA1F03E3)                        // mov x3, xzr
-    hvis os == "linux" { emit_syscall(native, 260, os) } ellers { emit_syscall(native, 7, os) }
+    emit_syscall(native, 7, os)
     legg_u32(native, 0xB95B6BE9)                        // ldrw w9, [sp, #7016] (status)
     legg_u32(native, 0xD348FD29)                        // lsr x9, x9, #8
     legg_u32(native, 0x92401D29)                        // and x9, x9, #0xFF
@@ -2056,13 +2228,9 @@ funksjon emit_prosess_spawn_req(native: liste_heiltall, req_reg: heiltall, dst_r
     skriv_u32(native, p_b_read,       0x14000000 |  (((lbl_read     - p_b_read)       / 4) & 0x03FFFFFF))
     skriv_u32(native, p_bge_argdone, 0x5400000A | ((((lbl_argdone - p_bge_argdone) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_argloop,   0x14000000 |  (((lbl_argloop - p_b_argloop)   / 4) & 0x03FFFFFF))
-    // Linux clone: barn har x0=0 → cbnz x9(=x0),parent. macOS fork: x0=pid i BEGGE,
-    // barn flagga av x1!=0 → cbz x1,parent (barn fell gjennom til execve).
-    hvis os == "linux" {
-        skriv_u32(native, p_cbnz_parent, 0xB5000009 | ((((lbl_parent - p_cbnz_parent) / 4) & 0x7FFFF) << 5))
-    } ellers {
-        skriv_u32(native, p_cbnz_parent, 0xB4000001 | ((((lbl_parent - p_cbnz_parent) / 4) & 0x7FFFF) << 5))
-    }
+    // macOS fork: x0=pid i BEGGE, barn flagga av x1!=0 → cbz x1,parent (barn fell
+    // gjennom til execve). (Linux-ELF rutar til std.native_gap sin spawn-motor, A2.)
+    skriv_u32(native, p_cbnz_parent, 0xB4000001 | ((((lbl_parent - p_cbnz_parent) / 4) & 0x7FFFF) << 5))
     returner 0
 }
 
@@ -4223,22 +4391,18 @@ funksjon emit_syscall(native: liste_heiltall, num: heiltall, os: tekst) -> heilt
 
 // Fase 7: byggjer ein sockaddr_in (16 byte) på maskinstakken (sub sp,#16).
 // macOS-layout: [sin_len=16][sin_family=2][port hi][port lo][a][b][c][d][0×8].
-// Linux-layout: [family lo=2][0][port hi][port lo][a][b][c][d][0×8]. Verten
+// (Berre macOS sidan A2; Linux-ELF brukar std.native_gap._sk_sockaddr.) Verten
 // (NcVal-streng i host_reg) blir parsa som punkt-desimal → 4 addr-byte. Etter
 // kallet står strukturen på [sp..sp+16); den som kallar set x1=sp og add sp,#16.
 funksjon emit_sockaddr_in(native: liste_heiltall, host_reg: heiltall, port_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_sockaddr_in")
     legg_u32(native, 0xD10043FF)                        // sub sp, sp, #16
     legg_u32(native, 0xF90003FF)                        // str xzr, [sp]
     legg_u32(native, 0xF90007FF)                        // str xzr, [sp, #8]
-    hvis os == "linux" {
-        legg_u32(native, 0xD2800049)                    // movz x9, #2
-        legg_u32(native, 0x390003E9)                    // strb w9, [sp]  (family lo)
-    } ellers {
-        legg_u32(native, 0xD2800209)                    // movz x9, #16
-        legg_u32(native, 0x390003E9)                    // strb w9, [sp]  (sin_len)
-        legg_u32(native, 0xD2800049)                    // movz x9, #2
-        legg_u32(native, 0x390007E9)                    // strb w9, [sp, #1] (sin_family)
-    }
+    legg_u32(native, 0xD2800209)                    // movz x9, #16
+    legg_u32(native, 0x390003E9)                    // strb w9, [sp]  (sin_len)
+    legg_u32(native, 0xD2800049)                    // movz x9, #2
+    legg_u32(native, 0x390007E9)                    // strb w9, [sp, #1] (sin_family)
     // port → nettverksrekkjefølgje (big-endian) i [sp+2],[sp+3]
     legg_u32(native, 0xF9400400 | (port_reg << 5) | 9)  // ldr x9, [Xport, #8]
     legg_u32(native, 0xD348FD2A)                        // lsr x10, x9, #8
@@ -4299,10 +4463,11 @@ funksjon emit_sockaddr_in(native: liste_heiltall, host_reg: heiltall, port_reg: 
 
 // Fase 7: socket_new(family, type) → socket(family, type, 0); fd i int-NcVal.
 funksjon emit_socket_new(native: liste_heiltall, fam_reg: heiltall, type_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_new")
     legg_u32(native, 0xF9400400 | (fam_reg << 5) | 0)   // ldr x0, [Xfam, #8]
     legg_u32(native, 0xF9400400 | (type_reg << 5) | 1)  // ldr x1, [Xtype, #8]
     legg_u32(native, 0xD2800002)                        // movz x2, #0
-    hvis os == "linux" { emit_syscall(native, 198, os) } ellers { emit_syscall(native, 97, os) }
+    emit_syscall(native, 97, os)
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0  (fd)
     emit_ncval_alloc(native, 9, dst_reg, 1)
     returner 0
@@ -4311,27 +4476,23 @@ funksjon emit_socket_new(native: liste_heiltall, fam_reg: heiltall, type_reg: he
 // Fase 7: socket_bind(fd, host, port) → bind(fd, &sockaddr, 16); status i NcVal.
 // Set fyrst SO_REUSEADDR så testen ikkje feilar mot ein port i TIME_WAIT.
 funksjon emit_socket_bind(native: liste_heiltall, fd_reg: heiltall, host_reg: heiltall, port_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_bind")
     // setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, 4)
     legg_u32(native, 0xD10043FF)                        // sub sp, sp, #16
     legg_u32(native, 0xD2800029)                        // movz x9, #1
     legg_u32(native, 0xF90003E9)                        // str x9, [sp]  (one=1)
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
-    hvis os == "linux" {
-        legg_u32(native, 0xD2800021)                    // movz x1, #1  (SOL_SOCKET)
-        legg_u32(native, 0xD2800042)                    // movz x2, #2  (SO_REUSEADDR)
-    } ellers {
-        legg_u32(native, 0xD29FFFE1)                    // movz x1, #0xffff (SOL_SOCKET)
-        legg_u32(native, 0xD2800082)                    // movz x2, #4  (SO_REUSEADDR)
-    }
+    legg_u32(native, 0xD29FFFE1)                    // movz x1, #0xffff (SOL_SOCKET)
+    legg_u32(native, 0xD2800082)                    // movz x2, #4  (SO_REUSEADDR)
     legg_u32(native, 0x910003E3)                        // add x3, sp, #0  (&one)
     legg_u32(native, 0xD2800084)                        // movz x4, #4  (optlen)
-    hvis os == "linux" { emit_syscall(native, 208, os) } ellers { emit_syscall(native, 105, os) }
+    emit_syscall(native, 105, os)
     legg_u32(native, 0x910043FF)                        // add sp, sp, #16
     emit_sockaddr_in(native, host_reg, port_reg, os)
     legg_u32(native, 0x910003E1)                        // add x1, sp, #0  (&addr)
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0xD2800202)                        // movz x2, #16
-    hvis os == "linux" { emit_syscall(native, 200, os) } ellers { emit_syscall(native, 104, os) }
+    emit_syscall(native, 104, os)
     legg_u32(native, 0x910043FF)                        // add sp, sp, #16
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
@@ -4340,11 +4501,12 @@ funksjon emit_socket_bind(native: liste_heiltall, fd_reg: heiltall, host_reg: he
 
 // Fase 7: socket_connect(fd, host, port) → connect(fd, &sockaddr, 16).
 funksjon emit_socket_connect(native: liste_heiltall, fd_reg: heiltall, host_reg: heiltall, port_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_connect")
     emit_sockaddr_in(native, host_reg, port_reg, os)
     legg_u32(native, 0x910003E1)                        // add x1, sp, #0
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0xD2800202)                        // movz x2, #16
-    hvis os == "linux" { emit_syscall(native, 203, os) } ellers { emit_syscall(native, 98, os) }
+    emit_syscall(native, 98, os)
     legg_u32(native, 0x910043FF)                        // add sp, sp, #16
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
@@ -4353,9 +4515,10 @@ funksjon emit_socket_connect(native: liste_heiltall, fd_reg: heiltall, host_reg:
 
 // Fase 7: socket_listen(fd, backlog) → listen(fd, backlog).
 funksjon emit_socket_listen(native: liste_heiltall, fd_reg: heiltall, back_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_listen")
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0xF9400400 | (back_reg << 5) | 1)  // ldr x1, [Xbacklog, #8]
-    hvis os == "linux" { emit_syscall(native, 201, os) } ellers { emit_syscall(native, 106, os) }
+    emit_syscall(native, 106, os)
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
     returner 0
@@ -4363,10 +4526,11 @@ funksjon emit_socket_listen(native: liste_heiltall, fd_reg: heiltall, back_reg: 
 
 // Fase 7: socket_accept(fd) → accept(fd, NULL, NULL); ny fd i NcVal.
 funksjon emit_socket_accept(native: liste_heiltall, fd_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_accept")
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0xD2800001)                        // movz x1, #0
     legg_u32(native, 0xD2800002)                        // movz x2, #0
-    hvis os == "linux" { emit_syscall(native, 202, os) } ellers { emit_syscall(native, 30, os) }
+    emit_syscall(native, 30, os)
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
     returner 0
@@ -4374,11 +4538,12 @@ funksjon emit_socket_accept(native: liste_heiltall, fd_reg: heiltall, dst_reg: h
 
 // Fase 7: socket_send(fd, data) → write(fd, bytes, len); tal sende byte i NcVal.
 funksjon emit_socket_send(native: liste_heiltall, fd_reg: heiltall, data_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_send")
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0xF9400400 | (data_reg << 5) | 9)  // ldr x9, [Xdata, #8] (strdata)
     legg_u32(native, 0xF9400122)                        // ldr x2, [x9]  (len)
     legg_u32(native, 0x91002121)                        // add x1, x9, #8 (bytes)
-    hvis os == "linux" { emit_syscall(native, 64, os) } ellers { emit_syscall(native, 4, os) }
+    emit_syscall(native, 4, os)
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0
     emit_ncval_alloc(native, 9, dst_reg, 1)
     returner 0
@@ -4386,10 +4551,11 @@ funksjon emit_socket_send(native: liste_heiltall, fd_reg: heiltall, data_reg: he
 
 // Fase 7: socket_recv(fd, max) → read(fd, heap, max); data som NcVal-streng.
 funksjon emit_socket_recv(native: liste_heiltall, fd_reg: heiltall, max_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_recv")
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
     legg_u32(native, 0x91002381)                        // add x1, x28, #8  (buf = strdata+8)
     legg_u32(native, 0xF9400400 | (max_reg << 5) | 2)   // ldr x2, [Xmax, #8]
-    hvis os == "linux" { emit_syscall(native, 63, os) } ellers { emit_syscall(native, 3, os) }
+    emit_syscall(native, 3, os)
     legg_u32(native, 0xF100001F)                        // cmp x0, #0
     legg_u32(native, 0x5400004A)                        // b.ge +2 (hopp over movz)
     legg_u32(native, 0xD2800000)                        // movz x0, #0  (klamp negativ)
@@ -4403,8 +4569,9 @@ funksjon emit_socket_recv(native: liste_heiltall, fd_reg: heiltall, max_reg: hei
 
 // Fase 7: socket_close(fd) → close(fd); returnerer 0.
 funksjon emit_socket_close(native: liste_heiltall, fd_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
+    krev_macos_inline(os, "emit_socket_close")
     legg_u32(native, 0xF9400400 | (fd_reg << 5) | 0)    // ldr x0, [Xfd, #8]
-    hvis os == "linux" { emit_syscall(native, 57, os) } ellers { emit_syscall(native, 6, os) }
+    emit_syscall(native, 6, os)
     legg_u32(native, 0xD2800009)                        // movz x9, #0
     emit_ncval_alloc(native, 9, dst_reg, 1)
     returner 0
@@ -5462,6 +5629,66 @@ funksjon emit_bytes_new(native: liste_heiltall, size_reg: heiltall, fill_reg: he
 
 // ─── assert / assert_eq (test-/attestasjonsbuiltins) ────────────────────────
 // __assert(x0=vilkår): terminerer med exit(1) dersom val==0, elles retur.
+// A2 (VM-paritet, funne av differensial-lanen): __str_cmp(x0 = venstre streng-NcVal,
+// x1 = høgre NcVal) → x0 = −1 / 0 / 1, leksikografisk på byte (usignert), kortaste
+// prefiks først — same ordning som tolken for `<`/`<=`/`>`/`>=` på tekst. COMPARE_LT
+// o.l. samanlikna før payloaden (strdata-PEIKARANE) → `"5" < "0"` kunne bli sann
+// (std.native_gap._dns_er_ipv4 avviste "10.1.2.3"). Høgre ikkje-streng → 1 (ingen
+// krasj). Blad-rutine: rører berre x0, x1, x9–x17.
+funksjon emit_str_cmp_routine() -> liste_heiltall {
+    la r: liste_heiltall = []
+    legg_u32(r, 0xF9400029)                         // ldr x9, [x1]        (høgre type)
+    legg_u32(r, 0xF1000D3F)                         // cmp x9, #3
+    legg_u32(r, 0x54000060)                         // b.eq +3 (streng)
+    legg_u32(r, 0xD2800020)                         // movz x0, #1
+    legg_u32(r, 0xD65F03C0)                         // ret
+    legg_u32(r, 0xF9400409)                         // ldr x9, [x0, #8]   (strdata V)
+    legg_u32(r, 0xF940042A)                         // ldr x10, [x1, #8]  (strdata H)
+    legg_u32(r, 0xF940012B)                         // ldr x11, [x9]      (lenV)
+    legg_u32(r, 0xF940014C)                         // ldr x12, [x10]     (lenH)
+    legg_u32(r, 0x91002129)                         // add x9, x9, #8
+    legg_u32(r, 0x9100214A)                         // add x10, x10, #8
+    legg_u32(r, 0xEB0C017F)                         // cmp x11, x12
+    legg_u32(r, 0x9A8CB16D)                         // csel x13, x11, x12, lt  (min)
+    legg_u32(r, 0xD280000E)                         // movz x14, #0       (i)
+    la lbl_loop = lengde(r)
+    legg_u32(r, 0xEB0D01DF)                         // cmp x14, x13
+    la p_ge = lengde(r)
+    legg_u32(r, 0)                                  // b.ge len_cmp
+    legg_u32(r, 0x386E692F)                         // ldrb w15, [x9, x14]
+    legg_u32(r, 0x386E6950)                         // ldrb w16, [x10, x14]
+    legg_u32(r, 0x6B1001FF)                         // cmp w15, w16
+    la p_ne = lengde(r)
+    legg_u32(r, 0)                                  // b.ne byte_diff
+    legg_u32(r, 0x910005CE)                         // add x14, x14, #1
+    la p_b = lengde(r)
+    legg_u32(r, 0)                                  // b loop
+    la lbl_diff = lengde(r)
+    legg_u32(r, 0xD2800020)                         // movz x0, #1
+    legg_u32(r, 0xDA802400)                         // cneg x0, x0, lo = csneg x0, x0, x0, hs  (lo → −1)
+    legg_u32(r, 0xD65F03C0)                         // ret
+    la lbl_len = lengde(r)
+    legg_u32(r, 0xEB0C017F)                         // cmp x11, x12
+    legg_u32(r, 0x9A9FD7E0)                         // cset x0, gt
+    legg_u32(r, 0xDA9FA000)                         // csinv x0, x0, xzr, ge  (lt → −1)
+    legg_u32(r, 0xD65F03C0)                         // ret
+    skriv_u32(r, p_ge, 0x5400000A | ((((lbl_len - p_ge) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_ne, 0x54000001 | ((((lbl_diff - p_ne) / 4) & 0x7FFFF) << 5))
+    skriv_u32(r, p_b,  0x14000000 | (((lbl_loop - p_b) / 4) & 0x03FFFFFF))
+    returner r
+}
+
+// Legg __str_cmp til imaget om eit bl-mål peikar dit (felles for dei tre link-vegane).
+funksjon ncval_legg_til_str_cmp(all_patchar, image: liste_heiltall, fn_start) -> heiltall {
+    la treng = usann
+    for pt i all_patchar { hvis pt[1] == "__str_cmp" { treng = sann } }
+    hvis treng {
+        fn_start["__str_cmp"] = lengde(image)
+        for w i emit_str_cmp_routine() { legg_til(image, w) }
+    }
+    returner 0
+}
+
 funksjon emit_assert_routine(os: tekst) -> liste_heiltall {
     la exitnum = 1
     hvis os == "linux" { exitnum = 93 }
@@ -5734,6 +5961,26 @@ funksjon opnd_ut(native: liste_heiltall, idx: heiltall, rr: heiltall, memmode: b
         returner 0
     }
     legg_u32(native, 0xF9000340 | ((home_off + idx) << 10) | rr)  // str Xrr, [x26, #(home_off+idx)*8]
+    returner 0
+}
+
+// A2: last operanden ved logisk indeks `idx` (NcVal-peikar) inn i x9 — for kall med
+// fleire argument enn scratch-slotsa (sys6 har 7). Rører ikkje x19–x28.
+funksjon emit_opnd_til_x9(native: liste_heiltall, idx: heiltall, memmode: boolsk, home_off: heiltall) -> heiltall {
+    hvis memmode {
+        legg_u32(native, 0xF9400340 | ((home_off + idx) << 10) | 9)   // ldr x9, [x26, #(home_off+idx)*8]
+    } ellers {
+        legg_u32(native, 0xAA0003E9 | ((19 + idx) << 16))             // mov x9, X(19+idx)
+    }
+    returner 0
+}
+
+// A2: Xdst = int-payloaden til NcVal-en i x9, eller 0 når x9 er ein null-peikar (usett
+// global) — same null → 0-regel som x86-sys6-atomet.
+funksjon emit_unbox_int_x9(native: liste_heiltall, dst: heiltall) -> heiltall {
+    legg_u32(native, 0xAA1F03E0 | dst)              // mov Xdst, xzr
+    legg_u32(native, 0xB4000049)                    // cbz x9, +8
+    legg_u32(native, 0xF9400520 | dst)              // ldr Xdst, [x9, #8]
     returner 0
 }
 
@@ -6285,9 +6532,26 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
             la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
             la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
+            // A2: tekst-ordning (venstre tagg 3) via __str_cmp; elles 64-bit heiltal.
+            legg_u32(native, 0xF9400000 | (venstre << 5) | 9)   // ldr x9, [Xvenstre]  (type)
+            legg_u32(native, 0xF1000D3F)                        // cmp x9, #3
+            la p_cmp_int = lengde(native)
+            legg_u32(native, 0)                                 // b.ne int_cmp
+            legg_u32(native, 0xAA0003E0 | (venstre << 16) | 0)  // mov x0, Xvenstre
+            legg_u32(native, 0xAA0003E0 | (høgre << 16) | 1)    // mov x1, Xhøgre
+            la p_bl_scmp = lengde(native)
+            legg_u32(native, 0x94000000)                        // bl __str_cmp
+            legg_til(bl_patchar, [p_bl_scmp, "__str_cmp"])
+            legg_u32(native, 0xF100001F)                        // cmp x0, #0
+            la p_cmp_ferdig = lengde(native)
+            legg_u32(native, 0)                                 // b cset
+            la lbl_cmp_int = lengde(native)
             legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
+            la lbl_cmp_cset = lengde(native)
+            skriv_u32(native, p_cmp_int, 0x54000001 | ((((lbl_cmp_int - p_cmp_int) / 4) & 0x7FFFF) << 5))
+            skriv_u32(native, p_cmp_ferdig, 0x14000000 | (((lbl_cmp_cset - p_cmp_ferdig) / 4) & 0x03FFFFFF))
             la cset = 0x1A9F07E9
             hvis op == "COMPARE_LT" { cset = 0x1A9FA7E9 }
             hvis op == "COMPARE_GE" { cset = 0x1A9FB7E9 }
@@ -6854,7 +7118,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 hvis djupn >= 4 { r4 = opnd_les(native, djupn - 4, 3, memmode, home_off) }
                 la env_ov = 0 - 1
                 hvis finnes_nøkkel(globals, "__env_overlay__") { env_ov = globals["__env_overlay__"] }
-                hvis (kallnamn == "skriv" eller kallnamn == "builtin.skriv" eller kallnamn == "print" eller kallnamn == "builtin.print") og lengde(instr) == 3 og instr[2] == 1 {
+                hvis ncval_ruting_aktiv(os) og ncval_os_rute_namn(kallnamn) og lengde(instr) == 3 {
+                    // A2: OS-vegane (prosess, sokkel, nettverk, dns) går på Linux-ELF ALLTID til
+                    // std.native_gap (rein Norscode over sys6/raw_*/native_sys), som på x86 —
+                    // dei gamle inline-emitterane gjeld berre macOS (M0). Manglar native_gap i
+                    // bunten, er det kompileringsfeil (same kontrakt som x86 sin process_spawn_argv).
+                    la os_mål = ncval_gap_rute(kallnamn)
+                    hvis os_mål == "" eller ikkje finnes_nøkkel(funksjonar, os_mål) {
+                        returner {"ok": "usann", "error": "builtin." + ncval_avkort_builtin(kallnamn) + " krev std.native_gap i bunten på linux-arm64 (legg til `bruk std.native_gap`)", "image": []}
+                    }
+                    la os_res = emit_rute_kall(native, os_mål, instr[2], djupn, memmode, home_off, bl_patchar)
+                    hvis os_res == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (ruting)", "overflow": "sann", "image": []} }
+                    hvis os_res < 0 { returner {"ok": "usann", "error": "NcVal ruting-arg underflyt/over 8: " + kallnamn, "image": []} }
+                    djupn = os_res
+                } ellers hvis (kallnamn == "skriv" eller kallnamn == "builtin.skriv" eller kallnamn == "print" eller kallnamn == "builtin.print") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal skriv krev éin stakkverdi", "image": []} }
                     emit_skriv_ncval(native, r1, os)
                     // skriv gjev nil→held argumentet som dummy-resultat; djupn uendra.
@@ -7258,6 +7535,117 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     emit_sett_inn(native, r3, r2, r1)
                     opnd_ut(native, djupn - 3, r3, memmode, home_off)   // resultat = lista
                     djupn = djupn - 2
+                } ellers hvis (kallnamn == "sys6" eller kallnamn == "builtin.sys6") og lengde(instr) == 3 og instr[2] == 7 {
+                    // A2: builtin.sys6(nr, a1..a6) → heiltal. Rått systemkall, same kontrakt
+                    // som x86-atomet (native_codegen_v2): argument er int-NcVal (payload +8),
+                    // null-peikar → 0, resultat = x0 (−errno ved feil) boksa som int.
+                    // Linux: x8 = nr, svc #0. macOS (M0-struktur): x16 = nr, svc #0x80, og
+                    // carry = feil med x0 = +errno → normalisert til −errno som på Linux.
+                    // 7 operandar > 6 register → alltid mem-modus (operand-spilling).
+                    hvis djupn < 7 { returner {"ok": "usann", "error": "NcVal sys6 krev 7 arg", "image": []} }
+                    la s6b = djupn - 7
+                    la s6i = 0
+                    mens s6i < 7 {
+                        la s6mål = s6i - 1                     // a1..a6 → x0..x5
+                        hvis s6i == 0 {
+                            s6mål = 8                          // nr → x8 (Linux)
+                            hvis os != "linux" { s6mål = 16 }  // nr → x16 (macOS)
+                        }
+                        emit_opnd_til_x9(native, s6b + s6i, memmode, home_off)
+                        emit_unbox_int_x9(native, s6mål)
+                        s6i = s6i + 1
+                    }
+                    hvis os == "linux" {
+                        legg_u32(native, 0xD4000001)                    // svc #0
+                    } ellers {
+                        legg_u32(native, 0xD4001001)                    // svc #0x80
+                        legg_u32(native, 0x54000043)                    // b.cc +2 (carry clear = ok)
+                        legg_u32(native, 0xCB0003E0)                    // neg x0, x0 (+errno → −errno)
+                    }
+                    la s6d = opnd_push_reg(s6b, memmode)
+                    emit_ncval_alloc_ptr(native, 0, s6d, 1)             // boks x0 (64-bit)
+                    opnd_ut(native, s6b, s6d, memmode, home_off)
+                    djupn = djupn - 6
+                } ellers hvis (kallnamn == "raw_load64" eller kallnamn == "builtin.raw_load64" eller kallnamn == "raw_load8" eller kallnamn == "builtin.raw_load8") og lengde(instr) == 3 og instr[2] == 1 {
+                    // A2: raw_load64(adr) / raw_load8(adr) → heiltal (rå minnelesing, som x86).
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal raw_load krev 1 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    hvis builtin.ends_with(kallnamn, "raw_load8") {
+                        legg_u32(native, 0x39400129)                    // ldrb w9, [x9]
+                    } ellers {
+                        legg_u32(native, 0xF9400129)                    // ldr x9, [x9]
+                    }
+                    emit_ncval_alloc_ptr(native, 9, r1, 1)
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis (kallnamn == "raw_store64" eller kallnamn == "builtin.raw_store64" eller kallnamn == "raw_store8" eller kallnamn == "builtin.raw_store8") og lengde(instr) == 3 og instr[2] == 2 {
+                    // A2: raw_store64(adr, v) / raw_store8(adr, v) → v (ingen allokering).
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal raw_store krev 2 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r2 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 10)       // ldr x10, [Xv, #8]
+                    hvis builtin.ends_with(kallnamn, "raw_store8") {
+                        legg_u32(native, 0x3900012A)                    // strb w10, [x9]
+                    } ellers {
+                        legg_u32(native, 0xF900012A)                    // str x10, [x9]
+                    }
+                    opnd_ut(native, djupn - 2, r1, memmode, home_off)   // resultat = v
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "raw_call" eller kallnamn == "builtin.raw_call") og lengde(instr) == 3 og instr[2] == 2 {
+                    // A2: raw_call(adr, argp) → heiltal: kallar AAPCS64-maskinkode på adr med
+                    // x0 = argp (rå), boksar x0. Callee-saved x19–x28 må vere urørte (AAPCS64).
+                    // (JIT-en i native_gap skriv x86-kode og blir difor ikkje ruta hit på arm64.)
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal raw_call krev 2 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r2 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 0)        // ldr x0, [Xargp, #8]
+                    legg_u32(native, 0xD63F0120)                        // blr x9
+                    emit_ncval_alloc_ptr(native, 0, r2, 1)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "native_target" eller kallnamn == "builtin.native_target") og lengde(instr) == 3 og instr[2] == 0 {
+                    // A2: plattformmålet som konstant ("linux-arm64" / "macos-arm64"); std.native_sys
+                    // vel systemtabell etter dette (VM-en svarar frå system_info).
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la nt_d = opnd_push_reg(djupn, memmode)
+                    prøv { emit_ncval_str_const(native, ncval_mål(os), nt_d) } fang melding {
+                        returner {"ok": "usann", "error": tekst(melding), "image": []}
+                    }
+                    opnd_ut(native, djupn, nt_d, memmode, home_off)
+                    djupn = djupn + 1
+                } ellers hvis (kallnamn == "native_envp" eller kallnamn == "builtin.native_envp") og lengde(instr) == 3 og instr[2] == 0 {
+                    // A2: envp-peikaren som heap-init la i kontrollblokka (HEAP_VA + ENVP_OFFSET),
+                    // symbolsk frå heap_layout som på x86 (F3.3).
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la ne_d = opnd_push_reg(djupn, memmode)
+                    last_heiltall_64(native, 9, hl.HEAP_VA(ncval_mål(os)) + hl.ENVP_OFFSET())
+                    legg_u32(native, 0xF9400129)                        // ldr x9, [x9]
+                    emit_ncval_alloc_ptr(native, 9, ne_d, 1)
+                    opnd_ut(native, djupn, ne_d, memmode, home_off)
+                    djupn = djupn + 1
+                } ellers hvis (kallnamn == "random_byte" eller kallnamn == "builtin.random_byte") og lengde(instr) == 3 og instr[2] == 0 {
+                    // A2: random_byte() → 0..255 frå kjernen (Linux getrandom(buf,1,0) #278;
+                    // macOS getentropy(buf,1) #500), som x86-atomet. Feil → −errno (native_gap
+                    // sin random_hex_secure / TLS-nonce tek absoluttverdien).
+                    hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
+                    la rb_d = opnd_push_reg(djupn, memmode)
+                    legg_u32(native, 0xD10043FF)                        // sub sp, sp, #16
+                    legg_u32(native, 0xF90003FF)                        // str xzr, [sp]
+                    legg_u32(native, 0x910003E0)                        // mov x0, sp
+                    legg_u32(native, 0xD2800021)                        // movz x1, #1
+                    legg_u32(native, 0xD2800002)                        // movz x2, #0
+                    hvis os == "linux" { emit_syscall(native, 278, os) } ellers { emit_syscall(native, 500, os) }
+                    legg_u32(native, 0xAA0003E9)                        // mov x9, x0 (feilkode)
+                    hvis os == "linux" {
+                        legg_u32(native, 0xF100041F)                    // cmp x0, #1
+                        legg_u32(native, 0x5400004B)                    // b.lt +2 (behald −errno)
+                    } ellers {
+                        legg_u32(native, 0x54000063)                    // b.cc +3 (carry clear = ok → ldrb)
+                        legg_u32(native, 0xCB0003E9)                    // neg x9, x0 (+errno → −errno)
+                        legg_u32(native, 0x14000002)                    // b +2 (hopp over ldrb)
+                    }
+                    legg_u32(native, 0x394003E9)                        // ldrb w9, [sp]
+                    legg_u32(native, 0x910043FF)                        // add sp, sp, #16
+                    emit_ncval_alloc_ptr(native, 9, rb_d, 1)
+                    opnd_ut(native, djupn, rb_d, memmode, home_off)
+                    djupn = djupn + 1
                 } ellers hvis (kallnamn == "system_info" eller kallnamn == "builtin.system_info") og lengde(instr) == 3 og instr[2] == 0 {
                     hvis ikkje memmode og djupn >= 6 { returner {"ok": "usann", "error": "NcVal operand-stakk full (>6, x25 reservert globals)", "overflow": "sann", "image": []} }
                     la si_d = opnd_push_reg(djupn, memmode)
@@ -7336,27 +7724,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     // AArch64-kallkonvensjon som ei vanleg brukarfunksjon:
                     // argument i x0..x(n-1) (NcVal-peikarar), `bl`, resultat i x0.
                     la mål_namn = ncval_gap_rute(kallnamn)
-                    la nargs_r = instr[2]
-                    hvis djupn < nargs_r { returner {"ok": "usann", "error": "NcVal ruting-arg underflyt: " + kallnamn, "image": []} }
-                    hvis nargs_r > 8 { returner {"ok": "usann", "error": "NcVal ruting støttar høgst 8 argument: " + kallnamn, "image": []} }
-                    la ar = 0
-                    mens ar < nargs_r {
-                        hvis memmode {
-                            legg_u32(native, 0xF9400340 | ((home_off + djupn - nargs_r + ar) << 10) | ar)  // ldr x_ar, [x26, #home]
-                        } ellers {
-                            legg_u32(native, 0xAA0003E0 | (ncval_opreg(djupn - nargs_r + ar) << 16) | ar)  // mov x_ar, Xsrc
-                        }
-                        ar = ar + 1
-                    }
-                    la p_bl_rute = lengde(native)
-                    legg_u32(native, 0x94000000)                        // bl <mål_namn> (patch)
-                    legg_til(bl_patchar, [p_bl_rute, mål_namn])
-                    hvis memmode {
-                        legg_u32(native, 0xF9000340 | ((home_off + djupn - nargs_r) << 10) | 0)  // str x0, [x26, #home(dst)]
-                    } ellers {
-                        legg_u32(native, 0xAA0003E0 | ncval_opreg(djupn - nargs_r))  // mov Xdst, x0
-                    }
-                    djupn = djupn - nargs_r + 1
+                    la rk_res = emit_rute_kall(native, mål_namn, instr[2], djupn, memmode, home_off, bl_patchar)
+                    hvis rk_res == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (ruting)", "overflow": "sann", "image": []} }
+                    hvis rk_res < 0 { returner {"ok": "usann", "error": "NcVal ruting-arg underflyt/over 8: " + kallnamn, "image": []} }
+                    djupn = rk_res
                 } ellers hvis ncval_gap_stub(kallnamn) og lengde(instr) == 3 {
                     // Fail-closed stubb: kast "NATIV-GAP:<namn>" (sjå ncval_gap_stub).
                     la nargs_st = instr[2]
@@ -8173,6 +8544,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         la sc2 = 0
         mens sc2 < lengde(rsc) { legg_til(image, rsc[sc2]) sc2 = sc2 + 1 }
     }
+    ncval_legg_til_str_cmp(all_patchar, image, fn_start)
     // M6: typa unnataks-dispatch (bl-referert av THROW/feil/gap_stub).
     la treng_throwdisp = usann
     la ptd = 0
@@ -8489,6 +8861,7 @@ funksjon ncval_link(os: tekst, entries, globals) -> ordbok_tekst {
         fn_start["__sha256_core"] = lengde(image)
         la k = 0 mens k < lengde(rsc) { legg_til(image, rsc[k]) k = k + 1 }
     }
+    ncval_legg_til_str_cmp(all_patchar, image, fn_start)
     // M6: typa unnataks-dispatch (batch). Treng __exc-globalindeksar frå planen.
     la treng_td = usann
     la ptdl = 0
@@ -8657,6 +9030,7 @@ funksjon ncval_link_flat(os: tekst, image, fn_meta, globals) -> ordbok_tekst {
         fn_start["__sha256_core"] = lengde(image)
         for w i rsc { legg_til(image, w) }
     }
+    ncval_legg_til_str_cmp(all_patchar, image, fn_start)
     // M6: typa unnataks-dispatch (batch, flat). Treng __exc-globalindeksar frå planen.
     la treng_td = usann
     la ptdl = 0
