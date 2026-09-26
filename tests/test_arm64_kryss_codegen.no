@@ -1,0 +1,112 @@
+// A1-port: førehandsbygd KRYSS-codegen (bootstrap/native_codegen_<arm64-mål>_on_linux-x86_64.elf,
+// bygd av tools/build_cross_codegen.no) skal gje BYTE-IDENTISK output med tolka codegen
+// (same kjelde køyrd i VM-en) — både Linux-ELF (elf_arm64_codegen) og Mach-O
+// (macho_arm64_codegen). Hashporten (.srchash/.depshash) seier berre at binæren svarar til
+// kjelda; denne testen seier at han òg GJER det kjelda gjer.
+// Køyrer berre på linux-x86_64 (binæren er ein x86-64-ELF); andre vertar hoppar.
+bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk selfhost.native_execution.macho_arm64_codegen som arm64
+bruk selfhost.native_execution.elf_arm64_codegen som elfcg
+bruk tools.process_runner som prosess
+bruk std.filops som filops
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv { sti = tekst(builtin.system_info()["executable"]) hvis sti != "" { returner sti } } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp"
+    }
+}
+
+funksjon sha(sti: tekst) -> tekst { returner builtin.sha256(builtin.fil_les(sti)) }
+
+funksjon byte(t: tekst, i: heiltall) -> heiltall { returner builtin.char_code(builtin.slice(t, i, i + 1)) & 255 }
+
+funksjon kryss(root: tekst, mål: tekst, ncb: tekst, ut: tekst) -> heiltall {
+    la bin = root + "/" + tekst(cgp.binær_stiar(mål, "linux-x86_64")[0])
+    la m = miljø(root)
+    m["NC_INPUT"] = ncb
+    m["NC_OUTPUT"] = ut
+    la res = prosess.køyr_med_grenser(bin, [], root, m, 120000, 0, 64)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    assert(prosess.ok(res))
+    assert(builtin.fil_finnes(ut))
+    returner 0
+}
+
+// Kompiler fixturen, byggj ELF og Mach-O med kryss-binæren og med tolka codegen, og krev
+// like bytar. Returnerer sha-ane [elf, macho] for den negative kontrollen.
+funksjon samanlikn(root: tekst, nc: tekst, namn: tekst) -> liste_tekst {
+    la tmp = "/tmp/nc_arm64_kryss_" + builtin.random_hex(6) + "_" + namn
+    la ncb = tmp + ".ncb"
+    la kres = prosess.køyr(nc, ["compile", root + "/tests/fixtures/" + namn + ".no", ncb], root, miljø(root), 180000)
+    hvis ikkje prosess.ok(kres) { prosess.skriv_resultat(kres) }
+    assert(prosess.ok(kres))
+
+    kryss(root, "linux-arm64", ncb, tmp + "_k.elf")
+    kryss(root, "macos-arm64", ncb, tmp + "_k.macho")
+    la re = elfcg.kompiler_ncb(arm64.les_ncb_fil(ncb), tmp + "_t.elf")
+    assert_eq(tekst(re["ok"]), "sann")
+    la rm = arm64.kompiler_ncb_ncval(arm64.les_ncb_fil(ncb), tmp + "_t.macho", "macos")
+    assert_eq(tekst(rm["ok"]), "sann")
+
+    // Formatet er det venta (ELF64 AArch64 / Mach-O arm64), ikkje berre «like filer».
+    la ke = builtin.fil_les(tmp + "_k.elf")
+    assert(lengde(ke) > 64)
+    assert_eq(byte(ke, 0), 127)
+    assert_eq(byte(ke, 1), 69)
+    assert_eq(byte(ke, 18), 183)   // e_machine = EM_AARCH64 (0xB7)
+    la km = builtin.fil_les(tmp + "_k.macho")
+    assert(lengde(km) > 64)
+    assert_eq(byte(km, 0), 207)    // MH_MAGIC_64 = 0xFEEDFACF (LE: CF FA ED FE)
+    assert_eq(byte(km, 3), 254)
+    assert_eq(byte(km, 4), 12)     // CPU_TYPE_ARM64 = 0x0100000C
+    assert_eq(byte(km, 7), 1)
+
+    la ut: liste_tekst = [sha(tmp + "_k.elf"), sha(tmp + "_k.macho")]
+    la te = sha(tmp + "_t.elf")
+    la tm = sha(tmp + "_t.macho")
+    hvis tekst(ut[0]) != te eller tekst(ut[1]) != tm {
+        skriv("test_arm64_kryss_codegen FEIL " + namn + ": kryss elf=" + tekst(ut[0]) + " tolka elf=" + te +
+              " kryss macho=" + tekst(ut[1]) + " tolka macho=" + tm + "\n")
+    }
+    assert_eq(tekst(ut[0]), te)
+    assert_eq(tekst(ut[1]), tm)
+    filops.slett_fil(ncb)
+    filops.slett_fil(tmp + "_k.elf")
+    filops.slett_fil(tmp + "_k.macho")
+    filops.slett_fil(tmp + "_t.elf")
+    filops.slett_fil(tmp + "_t.macho")
+    returner ut
+}
+
+funksjon start() -> heiltall {
+    la vert = cgp.vert_plattform()
+    hvis vert != "linux-x86_64" {
+        skriv("test_arm64_kryss_codegen: hoppar (vert " + vert + "; kryss-binæren er linux-x86_64)\n")
+        returner 0
+    }
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    // Binærane må vere ferske (test_native_codegen_srchash seier kva som er stale).
+    assert_eq(tekst(cgp.vel(root, "linux-arm64", vert)["status"]), "ok")
+    assert_eq(tekst(cgp.vel(root, "macos-arm64", vert)["status"]), "ok")
+    la nc = runtime(root)
+
+    la a = samanlikn(root, nc, "macos_aot_function_call")
+    la b = samanlikn(root, nc, "arm64_factorial")
+
+    // Negativ kontroll: samanlikninga skil — ulike program og ulike format gjev ulike bytar.
+    assert(tekst(a[0]) != tekst(b[0]))
+    assert(tekst(a[1]) != tekst(b[1]))
+    assert(tekst(a[0]) != tekst(a[1]))
+    skriv("test_arm64_kryss_codegen OK\n")
+    returner 0
+}

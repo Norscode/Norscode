@@ -83,6 +83,13 @@ Dette viser status for dokumentasjonen som faktisk ligg i repoet.
   heile `bruk`-lukkinga (`selfhost/native_execution/codegen_prebuilt.no`). Manglar eller er
   han stale, fell bygg-native tilbake til tolka codegen med åtvaring; `windows-x86_64` har
   ingen tolka fallback før PE-codegen finst (W2/W5).
+- Kryss-codegen (A1): `bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf` og
+  `…macos-arm64_on_linux-x86_64.elf` er x86-AOT av `elf_arm64_codegen.no` /
+  `macho_arm64_codegen.no`, bygde med `nc run tools/build_cross_codegen.no` (0 uløyste
+  builtins). Output er byte-identisk med tolka codegen (`tests/test_arm64_kryss_codegen.no`).
+  Heile nc_main-NCB-en blir emittert av linux-arm64-codegen på om lag 1 s; han stoppar på
+  kall utan ARM64-emitter, og `NC_BUILTIN_REPORT=1` listar alle (A2/A5). Endrar du
+  ARM64-codegen, køyr verktøyet på nytt (`test_native_codegen_srchash` krev ferske binærar).
 - `platform_readiness_v3600` er køyrd med `NORSCODE_VERIFY_LINUX_DOCKER=1`:
   `production_ready_linux_x86_64=true`, `production_ready_linux_arm64=true`
   og `production_ready_unix=true` etter runtime-gap-attestasjon i Docker.
