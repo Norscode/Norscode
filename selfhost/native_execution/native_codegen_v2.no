@@ -1184,16 +1184,101 @@ funksjon emit_ord_compare(buf, rt_va, raw_bool: boolsk, code_va, atomic_vas) {
     }
     legg_til(buf, 0x50)           // push rax
 }
-funksjon emit_int_order_compare_inline(buf, op: tekst, code_va) {
+// ─── Typehint er HINT, ikkje bevis (aotfloat, 2026-09-26) ───────────────────
+// tstack/var_types er flyt-ufølsame: var_types[x] er typen ved den SISTE lagringa i
+// lineær kode-rekkjefølgje, og aritmetikk gav alltid «int». So `a = a / 2` gjorde `a`
+// til «int» for alle seinare instruksjonar — også når `a` heldt eit desimaltall — og
+// heiltalssnarvegane samanlikna/adderte IEEE-bita som heiltal: `1.75 >= 2` var sann
+// (bit-mønsteret er eit stort positivt tal). Det var sjølve rota til at codegen-ELF-en
+// koda brøk-konstantar feil (desimal_ieee_bits: 3.5 → 4.0-bit). Snarvegane under
+// sjekkar difor type-taggen ved køyring og fell til den dynamiske rutina elles.
+
+// COMPARE_LE/COMPARE_GE: alltid via atoma cmp_le/cmp_ge (heiltalssnarveg bak typevakt,
+// elles ord_null_guard + RT_LE/RT_GE). 8 byte per kallstad mot 22 for den gamle
+// uvakta inline-varianten.
+funksjon emit_ordning_samanlikning(buf, atom_va: heiltall, code_va) {
     legg_til(buf, 0x5E)                       // pop rsi = høgre NcVal*
     legg_til(buf, 0x5F)                       // pop rdi = venstre NcVal*
-    copy(buf, [0x48, 0x8B, 0x47, 0x08])       // rax = venstre payload
-    copy(buf, [0x48, 0x3B, 0x46, 0x08])       // cmp rax,[rsi+8]
-    hvis op == "ge" { copy(buf, [0x0F, 0x9D, 0xC0]) }
-    ellers { copy(buf, [0x0F, 0x9E, 0xC0]) }
-    copy(buf, [0x0F, 0xB6, 0xF8])             // movzx edi,al
-    call_rel32(buf, RT_BOOL(), code_va)
+    call_rel32(buf, atom_va, code_va)         // rax = bool-NcVal
     legg_til(buf, 0x50)
+}
+
+// Kort (rel8) hopp for snarvegar som blir emitterte per kallstad.
+funksjon emit_jcc8_placeholder(buf, opc: heiltall) -> heiltall {
+    legg_til(buf, opc)                        // 0x74 jz, 0x75 jne, 0xEB jmp
+    legg_til(buf, 0)
+    returner lengde(buf) - 1
+}
+funksjon patch_jump8(buf, pos: heiltall, mål: heiltall) {
+    la rel: heiltall = mål - (pos + 1)
+    hvis rel < 0 - 128 eller rel > 127 { kast "native codegen: kort hopp utanfor rekkjevidd" }
+    buf[pos] = rel & 255
+}
+
+// BINARY_ADD med «int»+«int»-hint: inline heiltalsaddisjon berre når begge operandane
+// er ikkje-null og type 1 ved køyring; elles RT_ADD (atomics["add"]: desimal → xmm,
+// tekst → konkatenering, heiltal). rdi/rsi er urørte når den trege vegen tek over.
+funksjon emit_int_add_vakta(buf, code_va) {
+    legg_til(buf, 0x5E)                                  // pop rsi = høgre
+    legg_til(buf, 0x5F)                                  // pop rdi = venstre
+    la treg_hopp: liste = []
+    copy(buf, [0x48, 0x85, 0xFF])                        // test rdi,rdi
+    legg_til(treg_hopp, emit_jcc8_placeholder(buf, 0x74))
+    copy(buf, [0x48, 0x85, 0xF6])                        // test rsi,rsi
+    legg_til(treg_hopp, emit_jcc8_placeholder(buf, 0x74))
+    copy(buf, [0x48, 0x83, 0x3F, 0x01])                  // cmp qword[rdi],1
+    legg_til(treg_hopp, emit_jcc8_placeholder(buf, 0x75))
+    copy(buf, [0x48, 0x83, 0x3E, 0x01])                  // cmp qword[rsi],1
+    legg_til(treg_hopp, emit_jcc8_placeholder(buf, 0x75))
+    copy(buf, [0x48, 0x8B, 0x47, 0x08])                  // mov rax,[rdi+8]
+    copy(buf, [0x48, 0x03, 0x46, 0x08])                  // add rax,[rsi+8]
+    copy(buf, [0x48, 0x89, 0xC7])                        // mov rdi,rax
+    call_rel32(buf, RT_INT(), code_va)
+    la til_slutt = emit_jcc8_placeholder(buf, 0xEB)      // jmp slutt
+    la treg: heiltall = lengde(buf)
+    call_rel32(buf, RT_ADD(), code_va)
+    patch_jump8(buf, til_slutt, lengde(buf))
+    legg_til(buf, 0x50)                                  // slutt: push rax
+    la thi: heiltall = 0
+    mens thi < lengde(treg_hopp) {
+        patch_jump8(buf, treg_hopp[thi], treg)
+        thi = thi + 1
+    }
+}
+
+// Resultathint for SUB/MUL/DIV/MOD: «int» berre når begge operandane er «int».
+// Blanda eller ukjende operandar kan gje desimaltall (RT_SUB & co. har flyttalsveg).
+funksjon aritmetikk_hint(t1: tekst, t2: tekst) -> tekst {
+    hvis t1 == "int" og t2 == "int" { returner "int" }
+    returner "any"
+}
+
+// Kropp for atoma cmp_le/cmp_ge (sjå bygg_runtime_v2). setcc: 0x9E setle, 0x9D setge.
+funksjon emit_ordning_rask_atom(bytes, atomics, setcc: heiltall, rt_va: heiltall) {
+    la treg_hopp: liste = []
+    copy(bytes, [0x48, 0x85, 0xFF])                       // test rdi,rdi
+    legg_til(treg_hopp, emit_je_placeholder(bytes))       // jz treg (rå null)
+    copy(bytes, [0x48, 0x85, 0xF6])                       // test rsi,rsi
+    legg_til(treg_hopp, emit_je_placeholder(bytes))
+    copy(bytes, [0x48, 0x83, 0x3F, 0x01])                 // cmp qword[rdi],1
+    legg_til(treg_hopp, emit_jne_placeholder(bytes))
+    copy(bytes, [0x48, 0x83, 0x3E, 0x01])                 // cmp qword[rsi],1
+    legg_til(treg_hopp, emit_jne_placeholder(bytes))
+    copy(bytes, [0x48, 0x8B, 0x47, 0x08])                 // mov rax,[rdi+8]
+    copy(bytes, [0x48, 0x3B, 0x46, 0x08])                 // cmp rax,[rsi+8]
+    copy(bytes, [0x0F, setcc, 0xC0])                      // setle/setge al
+    copy(bytes, [0x0F, 0xB6, 0xF8])                       // movzx edi,al
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())
+    la treg: heiltall = lengde(bytes)
+    call_rel32(bytes, atomics["ord_null_guard"], TEXT_VA())  // rå null → int-0 (VM: null ≡ 0)
+    call_rel32(bytes, rt_va, TEXT_VA())                   // rax = rå bool
+    copy(bytes, [0x48, 0x89, 0xC7])                       // mov rdi,rax
+    jump_rel32(bytes, RT_BOOL(), TEXT_VA())
+    la thi: heiltall = 0
+    mens thi < lengde(treg_hopp) {
+        patch_jump(bytes, treg_hopp[thi], treg)
+        thi = thi + 1
+    }
 }
 // Same maskinkode som BUILD_MAP-opkoden: n par (nøkkel, verdi) på stakken → ordbok.
 funksjon emit_build_map_n(buf, n: heiltall, code_va) {
@@ -2320,6 +2405,29 @@ funksjon lapp_r2_closure_nokler(rt, atomic_vas, rd_offs) {
     }
 }
 
+// Desimaltall-krokane i to_text og json_stringify (sjå dei atoma): lapp movabs-plassane
+// med VA-en til Norscode-formateraren når std.desimaltall_tekst er i bunten, elles står
+// dei som 0 (gammal åtferd). Kallast når fn_vas er endelege; `text` byrjar med runtimen,
+// so offset i rt = offset i text (same mønster som emit_verts_funksjonstabell).
+funksjon lapp_desimal_tekst_krokar(text, fn_vas, atomic_vas) {
+    la par: liste_tekst = ["desimal_tekst_krok_patch", "std.desimaltall_tekst.desimal_til_tekst",
+                           "desimal_json_krok_patch", "std.desimaltall_tekst.desimal_til_json"]
+    la i: heiltall = 0
+    mens i < lengde(par) {
+        hvis ikkje finnes_nøkkel(atomic_vas, par[i]) { kast "native_codegen_v2: runtimen registrerte ikkje " + par[i] }
+        la pos: heiltall = atomic_vas[par[i]]
+        la v: heiltall = 0
+        hvis finnes_nøkkel(fn_vas, par[i + 1]) { v = fn_vas[par[i + 1]] }
+        la b: heiltall = 0
+        mens b < 8 {
+            text[pos + b] = v & 255
+            v = v >> 8
+            b = b + 1
+        }
+        i = i + 2
+    }
+}
+
 // Emitterer R2-atoma i runtimen (etter gc_safepoint-stubben).
 funksjon emit_r2_atom(bytes, atomics) {
     // ── host_resolve(rdi=namn-streng) → rax = rad i verts-funksjonstabellen | 0 ─────
@@ -2812,9 +2920,25 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     copy(bytes, [0xBE, 0x07, 0x00, 0x00, 0x00])    // mov esi,7
     call_rel32(bytes, RT_STR_RAW(), TEXT_VA())
     copy(bytes, [0x48, 0x83, 0xC4, 0x10, 0xC3])    // add rsp,16; ret
+    // desimaltall (6) → std.desimaltall_tekst.desimal_til_tekst når modulen er i bunten
+    // (bygg-native legg han til implisitt). Formateringa er ein algoritme i Norscode,
+    // ikkje maskinkode; kroken er ein movabs-plass som lenkjaren lappar med VA-en til
+    // funksjonen (lapp_desimal_tekst_krokar), elles 0 → tom streng som før. Utan dette
+    // gav `"x=" + 3.5` og tekst(3.5) utan gap-rutinga "" i AOT (VM: "x=3.5").
+    la tt_checkdes = lengde(bytes)                 // check_desimal: (rax = type, rdi = NcVal)
+    copy(bytes, [0x48, 0x83, 0xF8, 0x06])          // cmp rax,6
+    la tt_pnotdes = emit_jne_placeholder(bytes)    // jne make_empty
+    copy(bytes, [0x48, 0xB8])                      // movabs rax,krok
+    atomics["desimal_tekst_krok_patch"] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la tt_pnokrok = emit_je_placeholder(bytes)     // jz make_empty
+    copy(bytes, [0xFF, 0xE0])                      // jmp rax (tail: rdi = desimaltall)
     la tt_empty = lengde(bytes)                    // make_empty:
     patch_jump(bytes, tt_pempty1, tt_empty)
-    patch_jump(bytes, tt_pempty2, tt_empty)
+    patch_jump(bytes, tt_pempty2, tt_checkdes)
+    patch_jump(bytes, tt_pnotdes, tt_empty)
+    patch_jump(bytes, tt_pnokrok, tt_empty)
     copy(bytes, [0x48, 0x83, 0xEC, 0x08])          // sub rsp,8
     copy(bytes, [0xC6, 0x04, 0x24, 0x00])          // mov byte[rsp],0
     copy(bytes, [0x48, 0x89, 0xE7])                // mov rdi,rsp
@@ -3405,6 +3529,16 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     la og_l2l = lengde(bytes)
     patch_jump(bytes, og_l2, og_l2l)
     legg_til(bytes, 0xC3)                                 // ret
+
+    // ── cmp_le / cmp_ge(rdi, rsi) → bool-NcVal (COMPARE_LE/COMPARE_GE) ──────────
+    // Heiltalssnarveg berre når begge er ikkje-null og type 1 VED KØYRING; elles
+    // same veg som emit_ord_compare (ord_null_guard → RT_LE/RT_GE, som når
+    // desimal_lt/desimal_eq via lt/eq). Erstattar den uvakta inline-varianten som
+    // stolte på tstack-hintet «int» og samanlikna IEEE-bita til eit desimaltall.
+    atomics["cmp_le"] = TEXT_VA() + lengde(bytes)
+    emit_ordning_rask_atom(bytes, atomics, 0x9E, RT_LE())   // setle
+    atomics["cmp_ge"] = TEXT_VA() + lengde(bytes)
+    emit_ordning_rask_atom(bytes, atomics, 0x9D, RT_GE())   // setge
 
     // ── lengde_safe(rdi) → lengde(null) = 0 (VM-paritet) ─────────────────────
     // Frosen RT_LENGDE las [rdi+8] med rdi=0 → SIGSEGV via vm.kall_innebygd
@@ -4564,6 +4698,24 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
     // Den historiske JSON-dispatchen på 0x402660 hoppa via data som ikkje var
     // funksjonsadresser. Vel gyldig typeinngang direkte frå NcVal.type.
     atomics["json_stringify"] = TEXT_VA() + lengde(bytes)
+    // Desimaltall-prolog (type 6): std.desimaltall_tekst.desimal_til_json via krok
+    // (lappa av lapp_desimal_tekst_krokar; 0 → gammal «null»-veg). Utan kroken skreiv
+    // AOT-json_skriv/json_stringify desimaltal som null. json_list_case/json_map_case
+    // kallar denne inngangen rekursivt, so nøsta desimaltal går same veg.
+    copy(bytes, [0x48, 0x85, 0xFF])                // test rdi,rdi
+    la js_des_p1 = emit_je_placeholder(bytes)      // jz kropp (null)
+    copy(bytes, [0x48, 0x83, 0x3F, 0x06])          // cmp qword[rdi],6
+    la js_des_p2 = emit_jne_placeholder(bytes)     // jne kropp
+    copy(bytes, [0x48, 0xB8])                      // movabs rax,krok
+    atomics["desimal_json_krok_patch"] = lengde(bytes)
+    u64(bytes, 0)
+    copy(bytes, [0x48, 0x85, 0xC0])                // test rax,rax
+    la js_des_p3 = emit_je_placeholder(bytes)      // jz kropp
+    copy(bytes, [0xFF, 0xE0])                      // jmp rax
+    la js_kropp = lengde(bytes)
+    patch_jump(bytes, js_des_p1, js_kropp)
+    patch_jump(bytes, js_des_p2, js_kropp)
+    patch_jump(bytes, js_des_p3, js_kropp)
     copy(bytes, [
         // null er ein gyldig JSON-verdi og må testast før NcVal.type blir lesen.
         0x48, 0x85, 0xFF, 0x74, 0x1E,
@@ -9099,22 +9251,34 @@ funksjon bygg_runtime_v2(argv_store_va: heiltall) -> liste {
 // ─── Hovud kodegenererator ────────────────────────────────────────────────────
 
 // Kodegenereringstid: IEEE754-bitmønsteret til eit desimaltall, som heiltal.
-// Køyrer på VERTEN — committed stage0 under seed-bygg, eller fersk seed — og
-// verten har ikkje nødvendigvis builtin.desimal_til_bits. Difor berre
-// samanlikning, ×/÷ med 2 (eksakt i binær flyttal) og heiltalsrekning; ingen
-// flyttals-literalar i sjølve funksjonen. `a` blir normalisert til [1,2), og
+// Køyrer på VERTEN: codegen-ELF-en (AOT), fersk seed (VM) eller C-æra-verten (tolka
+// codegen). builtin.desimal_til_bits er eksakt (òg -0.0, subnormale, NaN) og finst i
+// AOT (atomet desimal_til_bits) og i vm.no; C-æra-verten kastar eit fangbart
+// «Ukjent innebygd funksjon» (målt 2026-09-26), og då tek algoritmen under over.
+// Algoritmen: berre samanlikning, ×/÷ med 2 (eksakt i binær flyttal) og
+// heiltalsrekning; ingen flyttals-literalar. `a` blir normalisert til [1,2), og
 // dei 52 mantissebita blir henta ut eitt og eitt ved dobling — eksakt, sidan
 // a−1 er eit heilt multiplum av 2^-52.
+// aotfloat: samanlikningane er skrivne som `ikkje (x < k)` i staden for `x >= k`.
+// Gamle codegen-ELF-ar kompilerte `a >= 2` til ein uvakta heiltalssamanlikning av
+// IEEE-bita (tstack-hintet «int» frå `a = a / 2`), so 1.75 >= 2 vart sann og 3.5
+// vart koda som 4.0. COMPARE_LT har alltid gått via den dynamiske rutina, so denne
+// forma er rett òg når ein gammal codegen kompilerer ny kjelde (fikspunkt-steg 1).
 // MERK: skriv IKKJE 2^63 som literal. Det får ikkje plass i int64 og krasja
 // kompilert kode tidlegare i dette arbeidet. Minste int64 er (0−(2^63−1))−1.
 funksjon desimal_ieee_bits(v) -> heiltall {
+    prøv { returner builtin.desimal_til_bits(v) } fang (e) { }
+    returner desimal_ieee_bits_algoritme(v)
+}
+
+funksjon desimal_ieee_bits_algoritme(v) -> heiltall {
     hvis v == 0 { returner 0 }
     la neg = v < 0
     la a = v
     hvis neg { a = 0 - v }
     la e: heiltall = 0
     la vakt: heiltall = 0
-    mens a >= 2 og vakt < 1100 { a = a / 2  e = e + 1  vakt = vakt + 1 }
+    mens ikkje (a < 2) og vakt < 1100 { a = a / 2  e = e + 1  vakt = vakt + 1 }
     mens a < 1 og vakt < 2200 { a = a * 2  e = e - 1  vakt = vakt + 1 }
     la minste: heiltall = (0 - 9223372036854775807) - 1
     hvis e > 1023 {
@@ -9129,7 +9293,7 @@ funksjon desimal_ieee_bits(v) -> heiltall {
     mens i < 52 {
         frac = frac * 2
         m = m * 2
-        hvis frac >= 1 { m = m + 1  frac = frac - 1 }
+        hvis ikkje (frac < 1) { m = m + 1  frac = frac - 1 }
         i = i + 1
     }
     la bits: heiltall = (e + 1023) * 4503599627370496 + m
@@ -9343,32 +9507,38 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
                 emit_rt_call_2(buf, RT_CONCAT(), eiga_va)
                 legg_til(tstack, "str")
             } ellers hvis t1 == "int" og t2 == "int" {
-                emit_int_binary_inline(buf, op, eiga_va)
+                // Hintet kan vere feil (sjå emit_int_add_vakta) — typevakt ved køyring.
+                emit_int_add_vakta(buf, eiga_va)
                 legg_til(tstack, "int")
             } ellers {
                 emit_dynamic_add_inline(buf, eiga_va, atomic_vas["to_text"])
                 legg_til(tstack, "any")
             }
 
+        // SUB/MUL/DIV/MOD: RT_* har flyttalsveg; resultatet er «int» berre for int op int.
         ellers hvis op == "BINARY_SUB"
+            la st_sub: tekst = aritmetikk_hint(tstack_top_2(tstack), tstack_top(tstack))
             emit_rt_call_2(buf, RT_SUB(), eiga_va)
             tstack_drop(tstack, 2)
-            legg_til(tstack, "int")
+            legg_til(tstack, st_sub)
 
         ellers hvis op == "BINARY_MUL"
+            la st_mul: tekst = aritmetikk_hint(tstack_top_2(tstack), tstack_top(tstack))
             emit_rt_call_2(buf, RT_MUL(), eiga_va)
             tstack_drop(tstack, 2)
-            legg_til(tstack, "int")
+            legg_til(tstack, st_mul)
 
         ellers hvis op == "BINARY_DIV"
+            la st_div: tekst = aritmetikk_hint(tstack_top_2(tstack), tstack_top(tstack))
             emit_rt_call_2(buf, RT_DIV(), eiga_va)
             tstack_drop(tstack, 2)
-            legg_til(tstack, "int")
+            legg_til(tstack, st_div)
 
         ellers hvis op == "BINARY_MOD"
+            la st_mod: tekst = aritmetikk_hint(tstack_top_2(tstack), tstack_top(tstack))
             emit_rt_call_2(buf, RT_MOD(), eiga_va)
             tstack_drop(tstack, 2)
-            legg_til(tstack, "int")
+            legg_til(tstack, st_mod)
 
         ellers hvis op == "BINARY_AND" eller op == "BINARY_OR" eller op == "BINARY_XOR" eller op == "BINARY_LSHIFT" eller op == "BINARY_RSHIFT"
             emit_int_binary_inline(buf, op, eiga_va)
@@ -9376,9 +9546,10 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             legg_til(tstack, "int")
 
         ellers hvis op == "UNARY_NEG"
+            la st_neg: tekst = aritmetikk_hint(tstack_top(tstack), "int")
             emit_rt_call_1(buf, RT_NEG(), eiga_va)
             tstack_drop(tstack, 1)
-            legg_til(tstack, "int")
+            legg_til(tstack, st_neg)
         ellers hvis op == "UNARY_NOT"
             emit_rt_call_1(buf, RT_NOT(), eiga_va)
             tstack_drop(tstack, 1)
@@ -9405,20 +9576,13 @@ funksjon kompiler_fn_v2(fn_def, vars, fn_vas, rd_offs, eiga_va,
             emit_ord_compare(buf, RT_GT(), usann, eiga_va, atomic_vas)
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
+        // LE/GE: ingen hint-avhengig inline-veg lenger (sjå emit_ordning_samanlikning).
         ellers hvis op == "COMPARE_LE"
-            hvis tstack_top_2(tstack) == "int" og tstack_top(tstack) == "int" {
-                emit_int_order_compare_inline(buf, "le", eiga_va)
-            } ellers {
-                emit_ord_compare(buf, RT_LE(), sann, eiga_va, atomic_vas)
-            }
+            emit_ordning_samanlikning(buf, atomic_vas["cmp_le"], eiga_va)
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
         ellers hvis op == "COMPARE_GE"
-            hvis tstack_top_2(tstack) == "int" og tstack_top(tstack) == "int" {
-                emit_int_order_compare_inline(buf, "ge", eiga_va)
-            } ellers {
-                emit_ord_compare(buf, RT_GE(), sann, eiga_va, atomic_vas)
-            }
+            emit_ordning_samanlikning(buf, atomic_vas["cmp_ge"], eiga_va)
             tstack_drop(tstack, 2)
             legg_til(tstack, "bool")
 
@@ -11086,6 +11250,9 @@ funksjon kompiler_v2(ncb_json) {
     legg_til(text, 0x05)  // syscall
     native_codegen_trace("post-emit start-prolog ferdig")
 
+    // Desimaltall-krokane i to_text/json_stringify (sjå lapp_desimal_tekst_krokar).
+    lapp_desimal_tekst_krokar(text, fn_vas, atomic_vas)
+
     // Verts-funksjonstabell for host_finst/host_kall/host_resolve (sjå emit_verts_funksjonstabell).
     hvis finnes_nøkkel(atomic_vas, "host_tbl_patch_finst") {
         emit_verts_funksjonstabell(text, data_bytes, sorted, fn_vas, fns, atomic_vas)
@@ -11485,6 +11652,9 @@ funksjon ncval_x86_link_with(ncb_json, oppsett, sizes, frag_byte_lists) -> ordbo
     legg_til(text, 0x48) legg_til(text, 0x8B) legg_til(text, 0x78) legg_til(text, 0x08) // mov rdi,[rax+8]
     legg_til(text, 0x48) legg_til(text, 0xC7) legg_til(text, 0xC0) u32(text, 60)
     legg_til(text, 0x0F) legg_til(text, 0x05)                              // syscall
+
+    // Desimaltall-krokane i to_text/json_stringify (same som kompiler_v2).
+    lapp_desimal_tekst_krokar(text, fn_vas, oppsett["atomic_vas"])
 
     // R2: verts-funksjonstabellen (host_kall/ncb_call_fn/CALL_VALUE) — berre når
     // programmet har dynamiske kall; elles står tabellpeikaren som 0 (host_resolve → ukjent).
