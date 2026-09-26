@@ -482,12 +482,18 @@ funksjon emit_linear_join_runtime(bytes) -> heiltall {
 // ─── Innebygd NCB-format ────────────────────────────────────────────────────
 //
 // ELF-fila endar med:
-//   [rå NCB JSON]["NORSCODE_NCB_V1"][u64 payload-lengde, little-endian]
+//   V2 (F3.6, standard):  [binær NCB (magic 0x93 'N' 'C' 'B' + versjon + ncb_bin)]
+//                         ["NORSCODE_NCB_V2"][u64 payload-lengde, little-endian]
+//   V1 (eldre seedar, og som reserve når runtimen ikkje har NUL-trygge strengar):
+//                         [rå NCB JSON]["NORSCODE_NCB_V1"][u64 payload-lengde, LE]
 //
 // Data etter siste lastbare ELF-segment blir ignorerte av OS-loaderen. Dermed
 // er binæren framleis direkte køyrbar, medan eksakt NCB kan verifiserast eller
-// hentast ut utan ei ekstern .ncb.json-fil.
-funksjon NCB_EMBED_MAGIC() -> tekst { returner "NORSCODE_NCB_V1" }
+// hentast ut utan ei ekstern .ncb.json-fil. Lesarane (har_/hent_innebygd_ncb her,
+// og trailer-sjekkane i tools/*attestation*, platform_readiness, extract_…) godtek
+// begge versjonane. V2 er byte-deterministisk og ber med source_lines/-columns.
+funksjon NCB_EMBED_MAGIC() -> tekst { returner "NORSCODE_NCB_V2" }
+funksjon NCB_EMBED_MAGIC_V1() -> tekst { returner "NORSCODE_NCB_V1" }
 
 funksjon legg_innebygd_named_ncb(bytes, namn: tekst, payload: tekst) {
     // Skriv tekst direkte i sluttbufferen. Store compiler-/runtime-payloadar
@@ -519,9 +525,20 @@ funksjon tekst_til_bytes(verdi: tekst) -> liste<heltall> {
     returner bytes
 }
 
+// Trailer-payload for ncb_json: binær NCB-tekst (V2) når runtimen kan halde han
+// (serde.binaer_stotta: sjølvhosta seed/codegen-ELF), elles JSON-teksten (V1).
+// Teksten (JSON eller binær NCB) blir dekoda på nytt her: kompiler_v2 annoterer sitt
+// eige objekt (annoter_lambda_fangst), og traileren skal vere NCB-en slik han kom inn.
 funksjon legg_innebygd_ncb(binær: liste<heltall>, ncb_json: tekst) -> liste<heltall> {
+    hvis serde.binaer_stotta() {
+        la payload = serde.serialiser_tekst(serde.deserialiser_tekst(ncb_json))
+        copy_tekst_bytes(binær, payload)
+        copy_tekst_bytes(binær, NCB_EMBED_MAGIC())
+        u64(binær, lengde(payload))
+        returner binær
+    }
     copy_tekst_bytes(binær, ncb_json)
-    copy_tekst_bytes(binær, NCB_EMBED_MAGIC())
+    copy_tekst_bytes(binær, NCB_EMBED_MAGIC_V1())
     u64(binær, lengde(ncb_json))
     returner binær
 }
@@ -536,24 +553,42 @@ funksjon les_u64_le_fra(bytes: liste<heltall>, start: heiltall) -> heiltall {
     returner verdi
 }
 
-funksjon har_innebygd_ncb(bytes: liste<heltall>) -> boolsk {
-    la magic = tekst_til_bytes(NCB_EMBED_MAGIC())
-    la trailer_lengde = lengde(magic) + 8
-    hvis lengde(bytes) < trailer_lengde { returner usann }
-    la magic_start = lengde(bytes) - trailer_lengde
-    la i = 0
-    mens i < lengde(magic) {
-        hvis bytes[magic_start + i] != magic[i] { returner usann }
-        i = i + 1
+// Trailer-magic (V2 eller V1) som bytes slutter med, eller "".
+funksjon innebygd_ncb_magic(bytes: liste<heltall>) -> tekst {
+    la kandidatar = [NCB_EMBED_MAGIC(), NCB_EMBED_MAGIC_V1()]
+    la k = 0
+    mens k < lengde(kandidatar) {
+        la magic = tekst_til_bytes(kandidatar[k])
+        la trailer_lengde = lengde(magic) + 8
+        hvis lengde(bytes) >= trailer_lengde {
+            la magic_start = lengde(bytes) - trailer_lengde
+            la lik = sann
+            la i = 0
+            mens i < lengde(magic) og lik {
+                hvis bytes[magic_start + i] != magic[i] { lik = usann }
+                i = i + 1
+            }
+            hvis lik {
+                la payload_lengde = les_u64_le_fra(bytes, lengde(bytes) - 8)
+                hvis payload_lengde > 0 og payload_lengde <= magic_start { returner kandidatar[k] }
+            }
+        }
+        k = k + 1
     }
-    la payload_lengde = les_u64_le_fra(bytes, lengde(bytes) - 8)
-    returner payload_lengde > 0 og payload_lengde <= magic_start
+    returner ""
 }
 
+funksjon har_innebygd_ncb(bytes: liste<heltall>) -> boolsk {
+    returner innebygd_ncb_magic(bytes) != ""
+}
+
+// Rå payload som tekst: JSON (V1) eller binær NCB-tekst (V2). Bruk
+// hent_innebygd_ncb_objekt for eit NCB-objekt uavhengig av versjon.
 funksjon hent_innebygd_ncb(bytes: liste<heltall>) -> tekst {
-    hvis ikkje har_innebygd_ncb(bytes) { kast "Native binær manglar innebygd NCB" }
+    la magic = innebygd_ncb_magic(bytes)
+    hvis magic == "" { kast "Native binær manglar innebygd NCB" }
     la payload_lengde = les_u64_le_fra(bytes, lengde(bytes) - 8)
-    la payload_start = lengde(bytes) - 8 - lengde(NCB_EMBED_MAGIC()) - payload_lengde
+    la payload_start = lengde(bytes) - 8 - lengde(magic) - payload_lengde
     // Samla teikna i ei liste og slå saman éin gong: «ut = ut + chr(b)» per byte
     // var kvadratisk i payload-storleiken (fleire MB for ein full nc_main-bundle).
     la teikn: liste_tekst = []
@@ -563,6 +598,10 @@ funksjon hent_innebygd_ncb(bytes: liste<heltall>) -> tekst {
         i = i + 1
     }
     returner builtin.join(teikn, "")
+}
+
+funksjon hent_innebygd_ncb_objekt(bytes: liste<heltall>) {
+    returner serde.deserialiser_tekst(hent_innebygd_ncb(bytes))
 }
 funksjon call_rel32(buf, va, code_va) {
     // call target_va: E8 rel32 — code_va = absolut VA for buf[0]
@@ -10592,7 +10631,10 @@ funksjon bruker_dynamiske_kall(fns) -> boolsk {
 // ─── Hovud-kompilator v2 ─────────────────────────────────────────────────────
 funksjon kompiler_v2(ncb_json) {
     native_codegen_trace("parse start")
-    la ncb = json_parse_raw(ncb_json)
+    // F3.6: ncb_json kan vere JSON-tekst eller binær NCB-tekst (magic 0x93). Binær går
+    // tekstvegen utan JSON-rundtur — AOT-json_skriv skriv desimaltall som null, so ein
+    // rundtur via json_skriv øydela flyttalskonstantar (3.5 > 3 vart usann).
+    la ncb = serde.deserialiser_tekst(ncb_json)
     la fns = ncb["functions"]
     annoter_lambda_fangst(fns)
     native_codegen_trace("parse ferdig funksjonar=" + tekst_fra_heltall(lengde(nøkler(fns))))
@@ -11448,11 +11490,18 @@ funksjon start() {
     la er_bin = lengde(ncb_tekst) == 0 eller lengde(fyrste) == 0 eller
                 builtin.slice(fyrste, 0, 1) != "{"
     la ncb_json = ""
-    hvis er_bin {
-        la raw = builtin.fil_les_binary(inp)
-        hvis serde.er_binaer(raw) { ncb_json = builtin.json_skriv(serde.deserialiser(raw)) }
-        ellers { ncb_json = fil_les(inp) }
-    } ellers { ncb_json = ncb_tekst }
+    // F3.6: binær NCB (standard-utfila til `nc compile` sidan F3) går rett til
+    // kompiler_v2 (tekstvegen, éin slice per tekstverdi) når runtimen har NUL-trygge
+    // strengar. IKKJE via json_skriv: AOT-json_skriv skriv desimaltall som null.
+    hvis er_bin og serde.er_binaer_tekst(ncb_tekst) og serde.binaer_stotta() {
+        ncb_json = ncb_tekst
+    } ellers {
+        hvis er_bin {
+            la raw = builtin.fil_les_binary(inp)
+            hvis serde.er_binaer(raw) { ncb_json = builtin.json_skriv(serde.deserialiser(raw)) }
+            ellers { ncb_json = fil_les(inp) }
+        } ellers { ncb_json = ncb_tekst }
+    }
     la bytes = kompiler_v2(ncb_json)
     la payload_fil = miljo_hent("NC_EMBED_PAYLOAD_FILE")
     la payload_namn = miljo_hent("NC_EMBED_PAYLOAD_NAME")

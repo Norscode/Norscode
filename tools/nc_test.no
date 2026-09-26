@@ -141,9 +141,27 @@ funksjon legg_kjelde_filer(root: tekst, relativ: tekst, ut: liste_tekst) -> heil
 }
 
 funksjon compiler_cache_abi() -> tekst {
-    // v5 (2026-09-05): normal-sti-NCB-ar er binære (NORSCODE_NCB_BINARY=1) — ny nøkkel så
-    // gamle JSON-oppføringar ikkje blir gjenbrukt under same nøkkel.
-    returner "norscode-test-cache-v5|norscode-bytecode-v1|selfhost-compiler-0.31|runtime-library-abi-v1"
+    // v6 (F3.6): formatet (binær/JSON) er med i nøkkelen via test_ncb_ending(), og
+    // binær NCB er ny standard der runtimen kan lese han.
+    returner "norscode-test-cache-v6|norscode-bytecode-v1|selfhost-compiler-0.31|runtime-library-abi-v1"
+}
+
+// F3.6 (J5.2) — NCB-formatet for normal-stien (compile → ncb_host_run_entry):
+// binær berre når runtimen melder at han har host_exec_ncb og den binære kodaren/
+// lesaren med NUL-trygge strengar (builtin.ncb_binaer_versjon() >= 1). Dei frosne
+// C-æra-vertane (macOS/Windows-stage0) og seedar frå før F3 kastar «Ukjent innebygd
+// funksjon» → JSON, slik at ingen binær NCB går til ein JSON-berre lesar.
+// NC_TEST_NCB_BINARY=0 tvingar JSON. Pure-VM-lana (vm_executor-payloaden) er alltid JSON.
+funksjon test_ncb_binær() -> bool {
+    hvis env("NC_TEST_NCB_BINARY") == "0" { returner usann }
+    la v = 0
+    prøv { v = builtin.ncb_binaer_versjon() } fang (e) { returner usann }
+    returner v >= 1
+}
+
+funksjon test_ncb_ending() -> tekst {
+    hvis test_ncb_binær() { returner ".ncb" }
+    returner ".ncb.json"
 }
 
 funksjon cached_fil_hash(cache, sti: tekst) -> tekst {
@@ -253,7 +271,13 @@ funksjon cache_ncb_gyldig(sti: tekst) -> bool {
         la t = fil_les(sti)
         hvis lengde(t) < 16 { returner usann }
         la c0 = builtin.char_code(builtin.slice(t, 0, 1)) & 255
-        hvis c0 == 147 { returner sann }                       // binær-magic (kan ikkje ende-sjekkast)
+        // Binær NCB har ingen avsluttande markør: dekod han heilt i den kompilerte VM-en
+        // (builtin.ncb_fra_tekst, millisekund for ein test-NCB). Ei avkorta cachefil frå
+        // ein kansellert shard kastar «avkorta binær NCB» → usann → rekompilering.
+        hvis c0 == 147 {
+            la obj = builtin.ncb_fra_tekst(t)
+            returner builtin.type(obj) == "ordbok"
+        }
         hvis c0 != 123 { returner usann }
         // JSON må òg SLUTTE med «}»: cache tar-a frå ein kansellert slow-lane hadde filer som
         // framleis vart skrivne av foreldrelause shard-prosessar → «{…» men avkorta →
@@ -1251,8 +1275,9 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
         pure_compile["NORSCODE_HYBRID_PROJECT_ROOT"] = root
         // Pure/native-direkte-stien lastar test-NCB-en gjennom den GENERERTE
         // selfhost/vm_executor.ncb.json (NORSCODE_HOST_NCB_FILE, J1c). Han er kompilert frå
-        // gjeldande kjelde og har dual-lesaren (JSON/binær), så pure-lana treng ikkje
-        // lenger tvinge NORSCODE_NCB_BINARY=0; standarden (JSON) gjeld.
+        // gjeldande kjelde og har dual-lesaren (JSON/binær), men lesaren køyrer TOLKA i
+        // vm_executor (og C-æra-vertane er JSON-berre): F3.6 held pure-lana eksplisitt på JSON.
+        pure_compile["NORSCODE_NCB_BINARY"] = "0"
         pure_compile["NORSCODE_CMD"] = "run"
         pure_compile["NORSCODE_FILE"] = hybrid
         la pure_comp = køyr_native(root, native, pure_compile, tekst_pure_timeout())
@@ -1291,10 +1316,13 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
         // som før; enkeltfilcache er opt-in med NC_TEST_CACHE=1.
         la cache_val = env("NC_TEST_CACHE")
         la use_cache = cache_val != "0" og (env("NC_TEST_FILE") == "" eller cache_val == "1")
-        la ncb = tmpdir + "/" + test_namn(fil) + ".ncb.json"
-        la cache_ncb = cache_dir + "/" + test_namn(fil) + ".ncb.json"
+        // F3.6: filendinga følgjer formatet (".ncb" binær / ".ncb.json" JSON), og
+        // formatet er med i cachenøkkelen.
+        la ncb_ending = test_ncb_ending()
+        la ncb = tmpdir + "/" + test_namn(fil) + ncb_ending
+        la cache_ncb = cache_dir + "/" + test_namn(fil) + ncb_ending
         la cache_meta = cache_dir + "/" + test_namn(fil) + ".key"
-        la key = test_cache_key(cache, root, fil, hybrid, native)
+        la key = test_cache_key(cache, root, fil, hybrid, native) + ncb_ending
         la kompilert: bool = usann
         hvis use_cache og finst(cache_ncb) og finst(cache_meta) og trim(fil_les(cache_meta)) == key og cache_ncb_gyldig(cache_ncb) {
             ncb = cache_ncb
@@ -1310,7 +1338,7 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
                 // Bygg kandidaten i det prosess-/shard-eigde arbeidsområdet.
                 // Eit felles `cache_ncb + ".tmp"` kolliderte når fleire
                 // deterministiske shards kompilerte samstundes.
-                ncb = tmpdir + "/cache-" + test_namn(fil) + ".ncb.json"
+                ncb = tmpdir + "/cache-" + test_namn(fil) + ncb_ending
             }
             la absolutt_test = absolutt_fil(root, fil)
             la compile_miljø = runtime_miljø(root)
@@ -1322,13 +1350,13 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
             compile_miljø["NORSCODE_HYBRID_OUT"] = ncb
             compile_miljø["NORSCODE_HYBRID_MODULE"] = "__main__"
             compile_miljø["NORSCODE_HYBRID_PROJECT_ROOT"] = dirname(absolutt_test)
-            // «JSON skal vekk»: målet er BINÆRE test-NCB-ar (serde, magic 0x93) — køyresteget
-            // (selfhost/tooling/ncb_host_run_entry.no) er alt dual-format. MEN 2026-09-05: med
-            // "1" døydde begge slow-lanene etter ~4 min (exit 143, «runner shutdown» = VM-OOM):
-            // ncb_bin sin per-teikn slice/char_code-encoder under seeden (bump-allokering utan
-            // frigjering) toppa på 8,1 GB mot 5,7 GB for JSON per tung kompilering × 2 shards.
-            // Held JSON til codec-en er bulk (ingen per-teikn-arbeid) og målt ≤ JSON i RSS.
-            compile_miljø["NORSCODE_NCB_BINARY"] = "0"
+            // F3.6 (J5.2): binære test-NCB-ar der runtimen kan lese dei (test_ncb_binær).
+            // Historikk: 2026-09-05 døydde slow-lanene med "1" (8,1 GB mot 5,7 GB for JSON)
+            // fordi ncb_bin koda per teikn under seeden. No går kodinga tekstvegen
+            // (ncb_bin.ncb_encode_tekst, éin innsetjing per verdi) i den kompilerte VM-en
+            // (builtin.ncb_til_binaer), og køyresteget dekodar i verts-VM-en (host_exec_ncb).
+            hvis ncb_ending == ".ncb" { compile_miljø["NORSCODE_NCB_BINARY"] = "1" }
+            ellers { compile_miljø["NORSCODE_NCB_BINARY"] = "0" }
             compile_miljø["NORSCODE_CMD"] = "run"
             compile_miljø["NORSCODE_FILE"] = hybrid
             la comp = køyr_native(root, native, compile_miljø, timeout)
