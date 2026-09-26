@@ -229,7 +229,7 @@ primitiv + rein Norscode:
   `std.native_gap.process_spawn_argv_gap` (ikkje-blokkerande stdin, SIGPIPE-vern, output-grense,
   ppoll-venting, peak_rss frå wait4-rusage); utan native_gap i bunten er det kompileringsfeil.
   Den rå spawn-emisjonen og S1-atomet er sletta i **x86-64-codegenen** (`native_codegen_v2.no`);
-  Mach-O-ARM64-codegenen (`macho_arm64_codegen.no`) har framleis ein rå, minimal spawn til M3.
+  Mach-O-ARM64-codegenen (`macho_arm64_codegen.no`) har framleis ein rå, minimal spawn for macOS til M0/M3 (Linux-ELF rutar til native_gap sidan A2).
   Feil før barnet startar gjev same form som den gamle rå-rutina (`feil`/127/«process spawn
   failed», norsk detalj i `error_detail`, ingen `handle`); tom executable gjev `ferdig`/127.
   `peak_rss_bytes` er `ru_maxrss` og tek på Linux med RSS-en forelderen hadde ved fork (i dag
@@ -243,6 +243,36 @@ primitiv + rein Norscode:
   socketserver_native/shell_quote, native_network_event_loop grøne. VM-policy: nc_run_policy set
   NORSCODE_VM_TARGET_NET_SCOPE (loopback som standard).
 - Same mønster står att for `dns_lookup`, tls_*, trådar, sandbox-profilar og `db.*`.
+- **A2 (2026-09-26): same plattformlag på linux-arm64.** Følgjande gjeld ARM64-codegenen
+  (`macho_arm64_codegen.no`, som både Linux-ELF og Mach-O brukar):
+  - Nye atom:
+    - `builtin.sys6`: `x8` + `svc #0`. På macOS `x16` + `svc #0x80`, og carry blir til
+      −errno, som M0-struktur.
+    - `raw_load8/64`, `raw_store8/64` og `raw_call`.
+    - `native_target`: gjev `linux-arm64` eller `macos-arm64`.
+    - `native_envp`: les `[HEAP_VA + ENVP_OFFSET]`.
+    - `random_byte`.
+    - `system_info` har dei same fem felta som på x86.
+  - Heapen ligg på ein fast VA frå `heap_layout.HEAP_VA(mål)`, og først kjem ei
+    kontrollblokk:
+    - linux-arm64: `0x10_0000_0000` med `MAP_FIXED_NOREPLACE`.
+    - macos-arm64: `0xC0_0000_0000` som hint. Målt: hintet 64 GiB blir ikkje halde.
+    - Gjev mmap ein annan adresse, avsluttar programmet med exit 198.
+  - `std/native_sys.no` har tabellen for linux-arm64. Han følgjer `asm-generic/unistd.h`,
+    har upakka `epoll_event` på 16 B og `AUDIT_ARCH_AARCH64`. I tillegg finst
+    `_nr_kompat`: fork → `clone(SIGCHLD)`, dup2 → dup3 og epoll_wait → epoll_pwait.
+  - Linux-ELF rutar desse til `std.native_gap` gjennom `gap_ruter.no`: `socket_*`,
+    `process_spawn_argv`, `process_operation`, `network_operation`, `dns_lookup` og
+    `system_operation`. Manglar native_gap i bunten, blir det kompileringsfeil. Dei inline
+    OS-emitterane gjeld berre macOS til M0.
+  - Port: `tools/arm64_diff_lane.no`, som er ein differensial-lane:
+    - VM-referanse frå `nc run` på fersk x86-seed.
+    - AOT-ELF køyrt på ein linux-arm64-vert.
+    - Fixturane `tests/fixtures/arm64_diff_{prosess,tcp,epoll,dns,miljo}.no` skal gje
+      identisk stdout og exit-kode.
+    - `arm64_atom_probe` blir samanlikna med ein fasit.
+    - Kontrakten for samanlikningssteget: `tests/test_diff_lane_arm64_kontrakt.no`.
+    - Tabellane: `tests/test_native_sys_tabellar.no`.
 
 Seed-porten: `tools/seed_gate_tests.txt` (krev_ny_seed-lista) via harnessen med
 `NC_NATIVE=<fersk seed>` — harnessen slepp desse testane laus berre når `builtin.vent.sov`
