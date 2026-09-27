@@ -1,0 +1,375 @@
+// os/boot/stubbar.no — K2-maskinkode i trampolinen: maskinvare-stubbar for raw_call,
+// 8259-PIC-oppsett, IRQ-stubbar og hendingsringen.
+//
+// Arkitekturregel: avbrot køyrer ALDRI Norscode-kode (allokator og GC er ikkje reentrante,
+// og det kjem eit safepoint etter kvart CALL). IRQ-stubbane (IST4-stakk, rører aldri
+// programstakken) kvitterer (EOI), legg {vektor, data, tsc, sekvens} i ein låsefri ring
+// med éin produsent og éin konsument, og returnerer med iretq. Norscode-kjernen tømer
+// ringen synkront (os/drivarar/hendingar.no).
+//
+// Stubbane følgjer raw_call-kontrakten i native_codegen_v2: rdi = argument (verdien, eller
+// adressa til argumentblokka), rax = resultat, og dei tek vare på rbx/rbp/r12–r15.
+// Indeksar og layout: os/x86/info.no.
+
+bruk os.boot.x86 som x86
+bruk os.x86.info som info
+
+la RAX = 0
+la RCX = 1
+la RDX = 2
+la RBX = 3
+la RSI = 6
+la RDI = 7
+la R8 = 8
+la R9 = 9
+
+funksjon _outb_konst(port: heiltall, verdi: heiltall) -> heiltall {
+    x86.mov_ri(RDX, port)
+    x86.mov_ri(RAX, verdi)
+    x86.out_dx_al()
+    returner 0
+}
+
+// ─── PIC ─────────────────────────────────────────────────────────────────────
+
+// pic_init: remap master til 32–39 og slave til 40–47, maskér alt unntatt kaskaden (IRQ2).
+// Drivarane (Norscode) opnar sine IRQ-ar via port 0x21/0xA1.
+funksjon emit_pic_init() -> heiltall {
+    x86.etikett("pic_init")
+    _outb_konst(32, 17)      // 0x20 ← ICW1 (init | ICW4)
+    _outb_konst(160, 17)     // 0xA0
+    _outb_konst(33, 32)      // 0x21 ← ICW2: vektor 32
+    _outb_konst(161, 40)     // 0xA1 ← vektor 40
+    _outb_konst(33, 4)       // ICW3: slave på IRQ2
+    _outb_konst(161, 2)      // slave-identitet 2
+    _outb_konst(33, 1)       // ICW4: 8086-modus
+    _outb_konst(161, 1)
+    _outb_konst(33, 251)     // maske 0xFB (berre kaskaden open)
+    _outb_konst(161, 255)    // 0xFF
+    x86.ret()
+    returner 0
+}
+
+// ─── Hendingsringen ──────────────────────────────────────────────────────────
+
+// hending_post: rdi = vektor, rsi = data. Øydelegg rax, rcx, rdx. Køyrer med IF=0.
+funksjon emit_hending_post() -> heiltall {
+    x86.etikett("hending_post")
+    x86.mov_r_abs(RAX, "ring_hovud")
+    x86.mov_rr(RCX, RAX)
+    x86.mov_r_abs(RDX, "ring_hale")
+    x86.sub_rr(RCX, RDX)
+    x86.cmp_ri(RCX, info.RING_KAPASITET())
+    x86.jcc(x86.CC_AE(), "hending_full")
+    x86.mov_rr(RCX, RAX)
+    x86.and_ri(RCX, info.RING_KAPASITET() - 1)
+    x86.shl_ri(RCX, 5)
+    x86.mov_ri_etikett(RDX, "ring_postar")
+    x86.add_rr(RCX, RDX)
+    x86.mov_mr(RCX, 0, RDI)
+    x86.mov_mr(RCX, 8, RSI)
+    x86.mov_mr(RCX, 24, RAX)
+    x86.push(RAX)
+    x86.rdtsc()
+    x86.shl_ri(RDX, 32)
+    x86.or_rr(RAX, RDX)
+    x86.mov_mr(RCX, 16, RAX)
+    x86.pop(RAX)
+    x86.add_ri(RAX, 1)
+    x86.mov_abs_r("ring_hovud", RAX)
+    x86.ret()
+    x86.etikett("hending_full")
+    x86.mov_r_abs(RAX, "ring_tapte")
+    x86.add_ri(RAX, 1)
+    x86.mov_abs_r("ring_tapte", RAX)
+    x86.ret()
+    returner 0
+}
+
+// ─── IRQ-stubbar (vektor 32–47, IST4) ────────────────────────────────────────
+
+funksjon emit_irq_stubbar() -> heiltall {
+    la irq = 0
+    mens irq < 16 {
+        la v = info.IRQ_BASE() + irq
+        x86.etikett("isr_" + tekst(v))
+        x86.push(RAX)
+        x86.push(RCX)
+        x86.push(RDX)
+        x86.push(RSI)
+        x86.push(RDI)
+        la ut = "irq_ut_" + tekst(v)
+        la eoi = "irq_eoi_" + tekst(v)
+        hvis irq == 7 eller irq == 15 {
+            // Falsk (spurious) IRQ: ISR-biten er 0 → ingen EOI til den PIC-en (for 15 må
+            // masteren likevel få EOI for kaskaden).
+            la port = 32
+            hvis irq == 15 { port = 160 }
+            _outb_konst(port, 11)                 // OCW3: les ISR
+            x86.mov_ri(RDX, port)
+            x86.mov_ri(RAX, 0)
+            x86.in_al_dx()
+            x86.and_ri(RAX, 128)
+            x86.cmp_ri(RAX, 0)
+            hvis irq == 7 {
+                x86.jcc(x86.CC_E(), ut)
+            } ellers {
+                la berre_master = "irq_master_" + tekst(v)
+                x86.jcc(x86.CC_NE(), berre_master + "_ekte")
+                _outb_konst(32, 32)
+                x86.jmp(ut)
+                x86.etikett(berre_master + "_ekte")
+            }
+        }
+        hvis irq == 0 {
+            x86.mov_r_abs(RAX, "var_tikk")
+            x86.add_ri(RAX, 1)
+            x86.mov_abs_r("var_tikk", RAX)
+        } ellers hvis irq == 1 {
+            x86.mov_ri(RDX, 96)                   // 0x60
+            x86.mov_ri(RAX, 0)
+            x86.in_al_dx()
+            x86.mov_rr(RSI, RAX)
+            x86.mov_ri(RDI, v)
+            x86.call("hending_post")
+        } ellers hvis irq == 4 {
+            la lykkje = "irq_serie_lykkje"
+            x86.etikett(lykkje)
+            x86.mov_ri(RDX, 1021)                 // 0x3FD LSR
+            x86.mov_ri(RAX, 0)
+            x86.in_al_dx()
+            x86.and_ri(RAX, 1)                    // DR
+            x86.cmp_ri(RAX, 0)
+            x86.jcc(x86.CC_E(), eoi)
+            x86.mov_ri(RDX, 1016)                 // 0x3F8 RBR
+            x86.mov_ri(RAX, 0)
+            x86.in_al_dx()
+            x86.mov_rr(RSI, RAX)
+            x86.mov_ri(RDI, v)
+            x86.call("hending_post")
+            x86.jmp(lykkje)
+        } ellers {
+            x86.mov_ri(RSI, 0)
+            x86.mov_ri(RDI, v)
+            x86.call("hending_post")
+        }
+        x86.etikett(eoi)
+        hvis irq >= 8 { _outb_konst(160, 32) }
+        _outb_konst(32, 32)
+        x86.etikett(ut)
+        x86.pop(RDI)
+        x86.pop(RSI)
+        x86.pop(RDX)
+        x86.pop(RCX)
+        x86.pop(RAX)
+        x86.iretq()
+        irq = irq + 1
+    }
+    returner 0
+}
+
+// ─── raw_call-stubbar ────────────────────────────────────────────────────────
+
+funksjon _stubb(namn: tekst) -> heiltall {
+    x86.etikett("stubb_" + namn)
+    returner 0
+}
+
+funksjon emit_stubbar() -> heiltall {
+    // Port-I/O
+    _stubb("inb")
+    x86.mov_rr(RDX, RDI)
+    x86.mov_ri(RAX, 0)
+    x86.in_al_dx()
+    x86.ret()
+    _stubb("inw")
+    x86.mov_rr(RDX, RDI)
+    x86.mov_ri(RAX, 0)
+    x86.in_ax_dx()
+    x86.ret()
+    _stubb("inl")
+    x86.mov_rr(RDX, RDI)
+    x86.mov_ri(RAX, 0)
+    x86.in_eax_dx()
+    x86.ret()
+    _stubb("outb")
+    x86.mov_rm(RDX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.out_dx_al()
+    x86.ret()
+    _stubb("outw")
+    x86.mov_rm(RDX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.out_dx_ax()
+    x86.ret()
+    _stubb("outl")
+    x86.mov_rm(RDX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.out_dx_eax()
+    x86.ret()
+    // MMIO 16/32 (adressa er ein VA, t.d. direktekart + fysisk)
+    _stubb("mmio_les16")
+    x86.movzx16_rm(RAX, RDI, 0)
+    x86.ret()
+    _stubb("mmio_les32")
+    x86.mov32_rm(RAX, RDI, 0)
+    x86.ret()
+    _stubb("mmio_skriv16")
+    x86.mov_rm(RCX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.mov16_mr(RCX, 0, RAX)
+    x86.ret()
+    _stubb("mmio_skriv32")
+    x86.mov_rm(RCX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.mov32_mr(RCX, 0, RAX)
+    x86.ret()
+    // Avbrotsflagg og hlt
+    _stubb("cli")
+    x86.cli()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("sti")
+    x86.sti()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("hlt")
+    x86.hlt()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    // vent_hending: cli; ring tom → sti;hlt (sti-skuggen gjer at eit avbrot mellom
+    // sjekken og hlt ikkje går tapt: det blir levert fyrst når hlt har starta).
+    _stubb("vent_hending")
+    x86.cli()
+    x86.mov_r_abs(RAX, "ring_hovud")
+    x86.mov_r_abs(RCX, "ring_hale")
+    x86.cmp_rr(RAX, RCX)
+    x86.jcc(x86.CC_NE(), "vent_har")
+    x86.sti()
+    x86.hlt()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    x86.etikett("vent_har")
+    x86.sti()
+    x86.mov_ri(RAX, 1)
+    x86.ret()
+    // Kontrollregister
+    la cr: liste_heiltall = [0, 2, 3, 4]
+    for n i cr {
+        _stubb("les_cr" + tekst(n))
+        x86.mov_r_cr(RAX, n)
+        x86.ret()
+    }
+    la crs: liste_heiltall = [0, 3, 4]
+    for n2 i crs {
+        _stubb("skriv_cr" + tekst(n2))
+        x86.mov_cr_r(n2, RDI)
+        x86.mov_ri(RAX, 0)
+        x86.ret()
+    }
+    // MSR
+    _stubb("rdmsr")
+    x86.mov_rr(RCX, RDI)
+    x86.rdmsr()
+    x86.shl_ri(RDX, 32)
+    x86.or_rr(RAX, RDX)
+    x86.ret()
+    _stubb("wrmsr")
+    x86.mov_rm(RCX, RDI, 0)
+    x86.mov_rm(RAX, RDI, 8)
+    x86.mov_rr(RDX, RAX)
+    x86.shr_ri(RDX, 32)
+    x86.wrmsr()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("invlpg")
+    x86.invlpg(RDI)
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("rdtsc")
+    x86.rdtsc()
+    x86.shl_ri(RDX, 32)
+    x86.or_rr(RAX, RDX)
+    x86.ret()
+    _stubb("cpuid")
+    x86.push(RBX)
+    x86.mov_rr(R8, RDI)
+    x86.mov_rm(RAX, R8, 0)
+    x86.mov_rm(RCX, R8, 8)
+    x86.cpuid()
+    x86.mov_mr(R8, 16, RAX)
+    x86.mov_mr(R8, 24, RBX)
+    x86.mov_mr(R8, 32, RCX)
+    x86.mov_mr(R8, 40, RDX)
+    x86.pop(RBX)
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("rdrand")
+    x86.mov_ri(RCX, 64)
+    x86.etikett("rdrand_prov")
+    x86.rdrand(RAX)
+    x86.jcc(x86.CC_B(), "rdrand_ok")
+    x86.sub_ri(RCX, 1)
+    x86.jcc(x86.CC_NE(), "rdrand_prov")
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    x86.etikett("rdrand_ok")
+    x86.mov_mr(RDI, 0, RAX)
+    x86.mov_ri(RAX, 1)
+    x86.ret()
+    _stubb("nullstill_side")
+    x86.and_ri(RDI, -4096)
+    x86.mov_ri(RCX, 512)
+    x86.mov_ri(RAX, 0)
+    x86.cld()
+    x86.rep_stosq()
+    x86.ret()
+    // pool_avgrens(ny_slutt): senkar slutten på #PF-poolen (Norscode-rammeallokatoren tek
+    // resten). Avslår (0) om ny_slutt er under bump-peikaren eller over noverande slutt.
+    _stubb("pool_avgrens")
+    x86.and_ri(RDI, -4096)
+    x86.mov_r_abs(RAX, "var_pool_neste")
+    x86.cmp_rr(RDI, RAX)
+    x86.jcc(x86.CC_B(), "avgrens_nei")
+    x86.mov_r_abs(RAX, "var_pool_slutt")
+    x86.cmp_rr(RDI, RAX)
+    x86.jcc(x86.CC_A(), "avgrens_nei")
+    x86.mov_abs_r("var_pool_slutt", RDI)
+    x86.mov_rr(RAX, RDI)
+    x86.ret()
+    x86.etikett("avgrens_nei")
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    _stubb("les_rflags")
+    x86.pushfq()
+    x86.pop(RAX)
+    x86.ret()
+    returner 0
+}
+
+// Stubbtabellen (u64-adresser i os.x86.info-rekkjefølgja).
+funksjon emit_stubbtabell() -> heiltall {
+    x86.juster(8)
+    x86.etikett("stubbtabell")
+    la namn = info.STUBB_NAMN()
+    hvis lengde(namn) != info.TAL_STUBBAR() { kast "stubbar: STUBB_NAMN og TAL_STUBBAR er ikkje like lange" }
+    for n i namn { x86.abs64("stubb_" + n) }
+    returner 0
+}
+
+// Ringen: 64 byte hovud + kapasitet × 32 byte postar.
+funksjon emit_ring() -> heiltall {
+    x86.juster(64)
+    x86.etikett("ring")
+    x86.etikett("ring_hovud")
+    x86.u64(0)
+    x86.etikett("ring_hale")
+    x86.u64(0)
+    x86.etikett("ring_tapte")
+    x86.u64(0)
+    x86.u64(info.RING_KAPASITET())
+    x86.nullar(32)
+    x86.etikett("ring_postar")
+    x86.nullar(info.RING_KAPASITET() * info.RING_POST())
+    returner 0
+}

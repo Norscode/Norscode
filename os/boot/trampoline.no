@@ -28,6 +28,8 @@
 
 bruk os.boot.x86 som x86
 bruk os.boot.elf som elf
+bruk os.boot.stubbar som stubbar
+bruk os.x86.info som info
 
 la RAX = 0
 la RCX = 1
@@ -169,10 +171,12 @@ funksjon _emit_inngang64() -> heiltall {
     x86.wrmsr()
     x86.fninit()
     x86.call("serie_init")
+    x86.call("pic_init")
     x86.call("pool_init")
     x86.call("tid_init")
     x86.call("rdrand_init")
-    // Linux-startstakk: argc=1, argv[0]="kjerne", NULL, envp[0], NULL, auxv AT_NULL.
+    // Linux-startstakk: argc=1, argv[0]="kjerne", NULL, envp[0..1], NULL, auxv AT_NULL.
+    // envp[1] = NORSCODE_OS_INFO=<adresse til info-blokka> (os/x86/info.no).
     // (I demand-modus utløyser den fyrste skrivinga sidefeil-stubben.)
     x86.mov_ri(RDI, STAKK_TOPP() - 64)
     x86.mov_ri(RAX, 1)
@@ -183,8 +187,9 @@ funksjon _emit_inngang64() -> heiltall {
     x86.mov_mr(RDI, 16, RAX)
     x86.mov_ri_etikett(RAX, "str_env0")
     x86.mov_mr(RDI, 24, RAX)
-    x86.mov_ri(RAX, 0)
+    x86.mov_ri_etikett(RAX, "str_env1")
     x86.mov_mr(RDI, 32, RAX)
+    x86.mov_ri(RAX, 0)
     x86.mov_mr(RDI, 40, RAX)
     x86.mov_mr(RDI, 48, RAX)
     x86.mov_rr(RSP, RDI)
@@ -208,8 +213,8 @@ funksjon _emit_rutinar() -> heiltall {
     _outb(1016, 1)      // 0x3F8 DLL = 1 (115200)
     _outb(1017, 0)      // 0x3F9 DLM = 0
     _outb(1019, 3)      // 0x3FB LCR = 8N1
-    _outb(1018, 199)    // 0x3FA FCR = 0xC7
-    _outb(1020, 3)      // 0x3FC MCR = DTR|RTS
+    _outb(1018, 7)      // 0x3FA FCR = FIFO på, tøm, RX-terskel 1 byte (rask IRQ4 i K2)
+    _outb(1020, 11)     // 0x3FC MCR = DTR|RTS|OUT2 (OUT2 slepper IRQ4 gjennom på PC)
     x86.ret()
 
     // teikn: al → COM1 (ventar på THRE), eller → port 0xE9 (debugcon) når var_til_e9 != 0.
@@ -293,7 +298,7 @@ funksjon _emit_rutinar() -> heiltall {
     x86.call("skriv_hex")
     _skriv_melding(" rammer=")
     x86.mov_r_abs(RAX, "var_pool_neste")
-    x86.mov_ri_etikett(RCX, "pool_start")
+    x86.mov_r_abs(RCX, "var_pool_forste")
     x86.sub_rr(RAX, RCX)
     x86.shr_ri(RAX, 12)
     x86.call("skriv_hex")
@@ -302,6 +307,12 @@ funksjon _emit_rutinar() -> heiltall {
     x86.call("skriv_hex")
     _skriv_melding(" sidefeil=")
     x86.mov_r_abs(RAX, "var_sidefeil")
+    x86.call("skriv_hex")
+    _skriv_melding(" tikk=")
+    x86.mov_r_abs(RAX, "var_tikk")
+    x86.call("skriv_hex")
+    _skriv_melding(" tapte=")
+    x86.mov_r_abs(RAX, "ring_tapte")
     x86.call("skriv_hex")
     _skriv_melding("\n")
     x86.pop(RAX)
@@ -338,7 +349,8 @@ funksjon _emit_rutinar() -> heiltall {
     x86.pop(RCX)
     x86.ret()
 
-    // mono_ns → rax (øydelegg rcx, rdx). HPET om han finst, elles TSC (1 GHz antatt).
+    // mono_ns → rax (øydelegg rcx, rdx). HPET om han finst, elles PIT-tikk (når
+    // tidtakaren er sett opp), elles TSC (1 GHz antatt).
     x86.etikett("mono_ns")
     x86.mov_r_abs(RCX, "var_hpet_periode")
     x86.cmp_ri(RCX, 0)
@@ -353,6 +365,17 @@ funksjon _emit_rutinar() -> heiltall {
     x86.div_r(RCX)                      // → ns
     x86.ret()
     x86.etikett(mono_tsc)
+    x86.mov_r_abs(RCX, "var_tikk_hz")
+    x86.cmp_ri(RCX, 0)
+    la mono_rdtsc = _ny("rdtsc")
+    x86.jcc(x86.CC_E(), mono_rdtsc)
+    x86.mov_ri(RAX, 1000000000)
+    x86.mov_ri(RDX, 0)
+    x86.div_r(RCX)                      // rax = ns per tikk
+    x86.mov_r_abs(RCX, "var_tikk")
+    x86.mul_r(RCX)
+    x86.ret()
+    x86.etikett(mono_rdtsc)
     x86.rdtsc()
     x86.shl_ri(RDX, 32)
     x86.or_rr(RAX, RDX)
@@ -534,43 +557,97 @@ funksjon _cmos_felt(reg: heiltall, mål: heiltall) -> heiltall {
     returner 0
 }
 
-// pool_init: [pool_start, slutt på RAM-regionen som inneheld pool_start) frå Multiboot-
-// minnekartet (mbi-flagg bit 6), elles mem_upper (bit 0). Avgrensa til 4 GiB (direktekartet).
+// maks: dst = max(dst, src) usignert.
+funksjon _maks(dst: heiltall, src: heiltall) -> heiltall {
+    la hopp = _ny("maks")
+    x86.cmp_rr(dst, src)
+    x86.jcc(x86.CC_AE(), hopp)
+    x86.mov_rr(dst, src)
+    x86.etikett(hopp)
+    returner 0
+}
+
+// r13 = max(r13, slutten (fysisk, inkl. NUL) på C-strengen med fysisk adresse i rsi).
+funksjon _strengslutt_maks() -> heiltall {
+    la lykkje = _ny("strlen")
+    x86.mov_ri(RAX, DIREKTEKART())
+    x86.add_rr(RSI, RAX)
+    x86.etikett(lykkje)
+    x86.movzx8_rm(RAX, RSI, 0)
+    x86.add_ri(RSI, 1)
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_NE(), lykkje)
+    x86.mov_ri(RAX, DIREKTEKART())
+    x86.sub_rr(RSI, RAX)
+    _maks(R13, RSI)
+    returner 0
+}
+
+// pool_init (K2): les Multiboot-infoen (EBX) ÉIN gong og kopier det kjernen treng inn i
+// info-blokka (flagg, mem_lower/upper, minnekartet → mmap_kopi), før noko ramme blir
+// delt ut. #PF-poolen startar etter BÅDE biletet+bss og alle Multiboot-strukturar som
+// ligg over biletet (QEMU legg cmdline/lastarnamn rett etter bss_end) — poolen skriv
+// aldri over Multiboot-data. Slutt = enden på RAM-regionen som inneheld pool_start
+// (mmap, elles mem_upper), avgrensa til 4 GiB (direktekartet).
 funksjon _emit_pool_init() -> heiltall {
     x86.etikett("pool_init")
-    x86.mov_ri_etikett(RAX, "pool_start")
-    x86.mov_abs_r("var_pool_neste", RAX)
     x86.mov_ri(RAX, 0)
     x86.mov_abs_r("var_pool_slutt", RAX)
     x86.mov_r_abs(RBX, "var_mbi")
+    x86.mov_rr(R13, RBX)
+    x86.add_ri(R13, 88)                          // slutten på sjølve mbi-strukturen
     x86.mov_ri(RAX, DIREKTEKART())
     x86.add_rr(RBX, RAX)
-    x86.mov32_rm(RAX, RBX, 0)                    // flagg
+    x86.mov32_rm(R14, RBX, 0)                    // flagg
+    x86.mov_abs_r("var_mbi_flagg", R14)
+    la ingen_mem = _ny("nomem")
+    x86.mov_rr(RCX, R14)
+    x86.and_ri(RCX, 1)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ingen_mem)
+    x86.mov32_rm(RAX, RBX, 4)
+    x86.mov_abs_r("var_mem_lag", RAX)
+    x86.mov32_rm(RAX, RBX, 8)
+    x86.mov_abs_r("var_mem_hog", RAX)
+    x86.etikett(ingen_mem)
+    // Minnekartet
+    x86.mov_ri(R12, 0)                           // tal kopierte postar
+    x86.mov_ri_etikett(R11, "mmap_kopi")
     la ingen_mmap = _ny("nommap")
-    la slutt = _ny("poolslutt")
-    x86.mov_rr(RCX, RAX)
+    la etter_mmap = _ny("ettermmap")
+    x86.mov_rr(RCX, R14)
     x86.and_ri(RCX, 64)
     x86.cmp_ri(RCX, 0)
     x86.jcc(x86.CC_E(), ingen_mmap)
     x86.mov32_rm(RDI, RBX, 44)                   // mmap_length
     x86.mov32_rm(RSI, RBX, 48)                   // mmap_addr
     x86.add_rr(RDI, RSI)
+    _maks(R13, RDI)
     x86.mov_ri(RAX, DIREKTEKART())
     x86.add_rr(RSI, RAX)
     x86.add_rr(RDI, RAX)
     x86.mov_ri_etikett(R8, "pool_start")
     la lykkje = _ny("mmap")
     la neste = _ny("mmapneste")
+    la ikkje_kopi = _ny("mmapfull")
     x86.etikett(lykkje)
     x86.cmp_rr(RSI, RDI)
-    x86.jcc(x86.CC_AE(), slutt)
+    x86.jcc(x86.CC_AE(), etter_mmap)
+    x86.mov_rm(R9, RSI, 4)                       // base
+    x86.mov_rm(R10, RSI, 12)                     // lengd
     x86.mov32_rm(RAX, RSI, 20)                   // type
+    x86.cmp_ri(R12, info.MMAP_MAKS())
+    x86.jcc(x86.CC_AE(), ikkje_kopi)
+    x86.mov_mr(R11, 0, R9)
+    x86.mov_mr(R11, 8, R10)
+    x86.mov_mr(R11, 16, RAX)
+    x86.add_ri(R11, info.MMAP_POST())
+    x86.add_ri(R12, 1)
+    x86.etikett(ikkje_kopi)
     x86.cmp_ri(RAX, 1)
     x86.jcc(x86.CC_NE(), neste)
-    x86.mov_rm(R9, RSI, 4)                       // base
     x86.cmp_rr(R8, R9)
     x86.jcc(x86.CC_B(), neste)
-    x86.mov_rm(R10, RSI, 12)                     // lengd
     x86.add_rr(R10, R9)
     x86.cmp_rr(R8, R10)
     x86.jcc(x86.CC_AE(), neste)
@@ -581,15 +658,41 @@ funksjon _emit_pool_init() -> heiltall {
     x86.add_ri(RSI, 4)
     x86.jmp(lykkje)
     x86.etikett(ingen_mmap)
-    x86.mov_rr(RCX, RAX)
+    x86.mov_rr(RCX, R14)
     x86.and_ri(RCX, 1)
     x86.cmp_ri(RCX, 0)
-    x86.jcc(x86.CC_E(), slutt)
+    x86.jcc(x86.CC_E(), etter_mmap)
     x86.mov32_rm(RAX, RBX, 8)                    // mem_upper (KiB over 1 MiB)
     x86.shl_ri(RAX, 10)
     x86.add_ri(RAX, 1048576)
     x86.mov_abs_r("var_pool_slutt", RAX)
-    x86.etikett(slutt)
+    x86.etikett(etter_mmap)
+    x86.mov_abs_r("var_mmap_tal", R12)
+    // cmdline (bit 2) og lastarnamn (bit 9)
+    la ingen_cmd = _ny("nocmd")
+    x86.mov_rr(RCX, R14)
+    x86.and_ri(RCX, 4)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ingen_cmd)
+    x86.mov32_rm(RSI, RBX, 16)
+    _strengslutt_maks()
+    x86.etikett(ingen_cmd)
+    la ingen_namn = _ny("nonamn")
+    x86.mov_rr(RCX, R14)
+    x86.and_ri(RCX, 512)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ingen_namn)
+    x86.mov32_rm(RSI, RBX, 64)
+    _strengslutt_maks()
+    x86.etikett(ingen_namn)
+    x86.mov_abs_r("var_mbi_slutt", R13)
+    // pool_første = juster_opp(max(pool_start, mbi_slutt), 4096)
+    x86.mov_ri_etikett(RAX, "pool_start")
+    _maks(RAX, R13)
+    x86.add_ri(RAX, 4095)
+    x86.and_ri(RAX, -4096)
+    x86.mov_abs_r("var_pool_neste", RAX)
+    x86.mov_abs_r("var_pool_forste", RAX)
     x86.mov_r_abs(RAX, "var_pool_slutt")
     x86.mov_ri(RCX, 0x100000000)
     la under4g = _ny("u4g")
@@ -624,8 +727,8 @@ funksjon _emit_shim() -> heiltall {
     x86.jcc(x86.CC_E(), "sys_exit")
     x86.cmp_ri(RAX, 10)                 // mprotect (GC-vaktside) → ok
     x86.jcc(x86.CC_E(), "sys_null")
-    x86.cmp_ri(RAX, 35)                 // nanosleep → ok (éin tråd, ingen tidtakar enno)
-    x86.jcc(x86.CC_E(), "sys_null")
+    x86.cmp_ri(RAX, 35)                 // nanosleep → hlt til tikk-fristen (K2)
+    x86.jcc(x86.CC_E(), "sys_sov")
     x86.cmp_ri(RAX, 228)
     x86.jcc(x86.CC_E(), "sys_klokke")
     x86.cmp_ri(RAX, 318)
@@ -645,6 +748,41 @@ funksjon _emit_shim() -> heiltall {
     x86.popfq()
     x86.mov_r_abs(RSP, "var_prog_rsp")
     x86.jmp_r(RCX)
+
+    // nanosleep(req, rem): utan tidtakar (tikk_hz = 0) → 0 straks. Elles frist =
+    // tikk + ceil(ns · hz / 1e9) (minst 1), og sti;hlt;cli til IRQ0-stubben har nådd han.
+    // sti;hlt er atomisk mot avbrot (sti-skuggen). rem blir ikkje skriven (ingen signal).
+    x86.etikett("sys_sov")
+    x86.mov_r_abs(R9, "var_tikk_hz")
+    x86.cmp_ri(R9, 0)
+    x86.jcc(x86.CC_E(), "sys_null")
+    x86.mov_rm(RAX, RDI, 0)             // tv_sec
+    x86.mov_ri(RCX, 1000000000)
+    x86.imul_rr(RAX, RCX)
+    x86.mov_rm(RCX, RDI, 8)             // tv_nsec
+    x86.add_rr(RAX, RCX)
+    x86.mul_r(R9)
+    x86.mov_ri(RCX, 999999999)
+    x86.add_rr(RAX, RCX)
+    x86.mov_ri(RDX, 0)
+    x86.mov_ri(RCX, 1000000000)
+    x86.div_r(RCX)
+    la sov_minst = _ny("sovminst")
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_NE(), sov_minst)
+    x86.mov_ri(RAX, 1)
+    x86.etikett(sov_minst)
+    x86.mov_r_abs(R8, "var_tikk")
+    x86.add_rr(R8, RAX)
+    la sov_lykkje = _ny("sovlykkje")
+    x86.etikett(sov_lykkje)
+    x86.mov_r_abs(RAX, "var_tikk")
+    x86.cmp_rr(RAX, R8)
+    x86.jcc(x86.CC_AE(), "sys_null")
+    x86.sti()
+    x86.hlt()
+    x86.cli()
+    x86.jmp(sov_lykkje)
 
     // write(fd, buf, n): fd 1/2 → COM1
     x86.etikett("sys_write")
@@ -864,10 +1002,71 @@ funksjon _emit_unnatak() -> heiltall {
 
 // ─── Data ────────────────────────────────────────────────────────────────────
 
-funksjon _emit_data() -> heiltall {
+// Info-blokka (os/x86/info.no). Felt som trampolinen sjølv oppdaterer har etikettar
+// (var_*), resten er konstantar kjende ved pakketid.
+funksjon _emit_info(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
+    x86.juster(64)
+    x86.etikett("os_info")
+    la base = x86.adr()
+    la namn: ordbok_tekst = {}
+    namn[tekst(info.F_TIKK())] = "var_tikk"
+    namn[tekst(info.F_TIKK_HZ())] = "var_tikk_hz"
+    namn[tekst(info.F_MMAP_TAL())] = "var_mmap_tal"
+    namn[tekst(info.F_POOL_FØRSTE())] = "var_pool_forste"
+    namn[tekst(info.F_POOL_NESTE())] = "var_pool_neste"
+    namn[tekst(info.F_POOL_SLUTT())] = "var_pool_slutt"
+    namn[tekst(info.F_MBI_FLAGG())] = "var_mbi_flagg"
+    namn[tekst(info.F_MEM_LÅG())] = "var_mem_lag"
+    namn[tekst(info.F_MEM_HØG())] = "var_mem_hog"
+    namn[tekst(info.F_SIDEFEIL())] = "var_sidefeil"
+    namn[tekst(info.F_HPET_PERIODE())] = "var_hpet_periode"
+    namn[tekst(info.F_MBI_SLUTT())] = "var_mbi_slutt"
+    la konst: ordbok_heltall = {}
+    konst[tekst(info.F_MAGI())] = info.MAGI()
+    konst[tekst(info.F_VERSJON())] = info.VERSJON()
+    konst[tekst(info.F_TAL_STUBBAR())] = info.TAL_STUBBAR()
+    konst[tekst(info.F_DIREKTEKART())] = DIREKTEKART()
+    konst[tekst(info.F_SERIE_PORT())] = 1016
+    konst[tekst(info.F_FRAMEBUFFER())] = 0
+    konst[tekst(info.F_HEAP_LÅG())] = heap_lo
+    konst[tekst(info.F_HEAP_HØG())] = heap_hi
+    konst[tekst(info.F_STAKK_LÅG())] = STAKK_TOPP() - STAKK_STORLEIK()
+    konst[tekst(info.F_STAKK_TOPP())] = STAKK_TOPP()
+    la peikar: ordbok_tekst = {}
+    peikar[tekst(info.F_STUBBTABELL())] = "stubbtabell"
+    peikar[tekst(info.F_RING())] = "ring"
+    peikar[tekst(info.F_MMAP())] = "mmap_kopi"
+    peikar[tekst(info.F_ARGBLOKK())] = "argblokk"
+    peikar[tekst(info.F_BILETE_SLUTT())] = "bss_slutt"
+    la off = 0
+    mens off < info.STORLEIK() {
+        la k = tekst(off)
+        hvis finnes_nøkkel(namn, k) {
+            x86.etikett(namn[k])
+            x86.u64(0)
+        } ellers hvis finnes_nøkkel(konst, k) {
+            x86.u64(konst[k])
+        } ellers hvis finnes_nøkkel(peikar, k) {
+            x86.abs64(peikar[k])
+        } ellers {
+            x86.u64(0)
+        }
+        off = off + 8
+    }
+    hvis x86.adr() != base + info.STORLEIK() { kast "trampoline: info-blokka har feil storleik" }
+    x86.etikett("argblokk")
+    x86.nullar(64)
+    x86.etikett("mmap_kopi")
+    x86.nullar(info.MMAP_MAKS() * info.MMAP_POST())
+    returner 0
+}
+
+funksjon _emit_data(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
+    _emit_info(heap_lo, heap_hi)
+    stubbar.emit_stubbtabell()
+    stubbar.emit_ring()
     x86.juster(16)
-    la variablar: liste_tekst = ["var_mbi", "var_prog_rsp", "var_pool_neste", "var_pool_slutt",
-        "var_hpet_periode", "var_epoke_ns", "var_rdrand", "var_til_e9", "var_sidefeil"]
+    la variablar: liste_tekst = ["var_mbi", "var_prog_rsp", "var_epoke_ns", "var_rdrand", "var_til_e9"]
     la i = 0
     mens i < lengde(variablar) {
         x86.etikett(variablar[i])
@@ -885,7 +1084,7 @@ funksjon _emit_data() -> heiltall {
     x86.abs64("stakk_ist1_topp")     // IST1: #PF
     x86.abs64("stakk_ist2_topp")     // IST2: #DF
     x86.abs64("stakk_ist3_topp")     // IST3: andre unnatak
-    x86.u64(0)
+    x86.abs64("stakk_ist4_topp")     // IST4: IRQ 32–47
     x86.u64(0)
     x86.u64(0)
     x86.u64(0)
@@ -921,6 +1120,9 @@ funksjon _emit_data() -> heiltall {
     x86.etikett("str_env0")
     x86.bytar(x86.tekst_bytar("NORSCODE_OS=1"))
     x86.u8(0)
+    x86.etikett("str_env1")
+    x86.bytar(x86.tekst_bytar("NORSCODE_OS_INFO=" + tekst(x86.adresse("os_info"))))
+    x86.u8(0)
     i = 0
     mens i < lengde(_strengar_namn) {
         x86.etikett(_strengar_namn[i])
@@ -935,11 +1137,12 @@ funksjon _emit_idt() -> heiltall {
     x86.etikett("idt")
     la v = 0
     mens v < 256 {
-        hvis v < 32 {
+        hvis v < 48 {
             la h = x86.adresse("isr_" + tekst(v))
             la ist = 3
             hvis v == 14 { ist = 1 }
             hvis v == 8 { ist = 2 }
+            hvis v >= 32 { ist = 4 }
             x86.u16(h & 65535)
             x86.u16(8)
             x86.u8(ist)
@@ -1019,7 +1222,11 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
     _emit_shim()
     _emit_sidefeil(heap_lo, heap_hi)
     _emit_unnatak()
-    _emit_data()
+    stubbar.emit_pic_init()
+    stubbar.emit_hending_post()
+    stubbar.emit_irq_stubbar()
+    stubbar.emit_stubbar()
+    _emit_data(heap_lo, heap_hi)
     _emit_idt()
 
     // Layout: 13 sider sidetabellar + stakkar, så ELF-fila (E) og kopisider (C).
@@ -1076,11 +1283,12 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
         i = i + 1
     }
     la bilete_slutt = c_fys + tal_kopi * 4096
-    // bss: stakkar (boot, shim, IST1–3) etter biletet, nådde via direktekartet (fysisk
+    // bss: stakkar (boot, shim, IST1–4) etter biletet, nådde via direktekartet (fysisk
     // adresse kan liggje over identitetsområdet når ELF-en er stor).
     la bss = bilete_slutt
-    la stakkar: liste_tekst = ["stakk_boot_topp", "stakk_shim_topp", "stakk_ist1_topp", "stakk_ist2_topp", "stakk_ist3_topp"]
-    la storleikar: liste_heiltall = [16384, 16384, 16384, 8192, 16384]
+    la stakkar: liste_tekst = ["stakk_boot_topp", "stakk_shim_topp", "stakk_ist1_topp", "stakk_ist2_topp",
+        "stakk_ist3_topp", "stakk_ist4_topp"]
+    la storleikar: liste_heiltall = [16384, 16384, 16384, 8192, 16384, 16384]
     i = 0
     mens i < lengde(stakkar) {
         bss = bss + storleikar[i]
@@ -1198,17 +1406,18 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
     builtin.fil_append_binær(ut_sti, elfb)
     hvis lengde(hale) > 0 { builtin.fil_append_binær(ut_sti, hale) }
 
-    la info: ordbok_heltall = {}
-    info["boot_bytes"] = e_fys - LAST_ADR()
-    info["elf_fys"] = e_fys
-    info["elf_bytes"] = lengde(elfb)
-    info["kopisider"] = tal_kopi
-    info["bilete_bytes"] = bilete_slutt - LAST_ADR()
-    info["pool_start"] = pool_start
-    info["inngang"] = inngang
-    info["heap_lo"] = heap_lo
-    info["heap_hi"] = heap_hi
-    info["shim"] = x86.adresse("shim")
-    info["isr_14"] = x86.adresse("isr_14")
-    returner info
+    la layout: ordbok_heltall = {}
+    layout["boot_bytes"] = e_fys - LAST_ADR()
+    layout["elf_fys"] = e_fys
+    layout["elf_bytes"] = lengde(elfb)
+    layout["kopisider"] = tal_kopi
+    layout["bilete_bytes"] = bilete_slutt - LAST_ADR()
+    layout["pool_start"] = pool_start
+    layout["inngang"] = inngang
+    layout["heap_lo"] = heap_lo
+    layout["heap_hi"] = heap_hi
+    layout["shim"] = x86.adresse("shim")
+    layout["isr_14"] = x86.adresse("isr_14")
+    layout["os_info"] = x86.adresse("os_info")
+    returner layout
 }
