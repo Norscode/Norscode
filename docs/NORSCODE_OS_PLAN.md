@@ -1,6 +1,6 @@
 # Norscode OS — plan (x86-64 først, AArch64 seinare)
 
-Status: K0 og K1 ferdige 2026-09-27 (sjå «Status K0/K1» under). Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
+Status: K0, K1 og K2 ferdige 2026-09-27 (sjå «Status K0/K1» og «Status K2» under). Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
 native_sys, bootformat, minne/GC, historikk og AArch64 (8 kart + kritikar, målte eksperiment i QEMU 11).
 
 ## Mål
@@ -115,14 +115,87 @@ Avvik frå planen / val tekne under K0–K1 (og kvifor):
 - Heapen må liggje under 2 GiB (GC-modus); ein ikkje-GC-ELF (2 GiB heap) blir avvist ved pakking
   med ei tydeleg melding.
 
-Opne punkt etter K1:
+Opne punkt etter K1 (oppdatert etter K2):
 - Alle ELF-sider er mappa RW (ingen W^X); literal-segmentet er skrivbart i motsetnad til Linux.
-- Rammepoolen er ein bump-allokator frå den RAM-regionen som inneheld `pool_start` (avgrensa til
-  4 GiB); ingen frigjering. Multiboot-infoen ligg i poolen og blir overskriven etter at `pool_init`
-  har lese minnekartet (K2 må kopiere mbi først om ho trengst seinare).
-- `raw_call`-stubbar, IRQ-ar, timer og ring 3 manglar (K2/K3). SYSCALL-shimmen er ikkje reentrant
-  (éin global lagra rsp), og ein syscall-buffer som ikkje er mappa enno går gjennom #PF på IST1.
+- #PF-poolen er ein bump-allokator utan frigjering (heap-sider blir aldri gjevne tilbake).
+  ~~Multiboot-infoen blir overskriven av poolen~~ — løyst i K2 (sjå under).
+- Ring 3 manglar (K3). SYSCALL-shimmen er ikkje reentrant (éin global lagra rsp), og ein
+  syscall-buffer som ikkje er mappa enno går gjennom #PF på IST1.
 - Byggjekjeda brukar den committa Linux-stage0 i Docker (stale mot kjelda for store program).
+
+## Status K2 (2026-09-27) — ferdig, med målte resultat
+
+Nye filer: `os/x86/info.no` (kontrakt: info-blokk, stubb-indeksar, ringlayout — delt av
+trampolinen ved byggjetid og kjernen ved køyretid), `os/x86/maskin.no` (primitiv),
+`os/boot/stubbar.no` (maskinkode: 30 raw_call-stubbar, PIC-oppsett, IRQ-stubbar, ring),
+`os/drivarar/{hendingar,pic,tidtakar,serie,tastatur,rtc}.no`, `os/minne/{rammer,sidetabell}.no`,
+`os/kjerne/k2_prøve.no`, `tests/test_os_k2_drivarar.no`. Selen: `os/boot/qemu.no`
+`køyr_med_inndata` og `OS_SERIE_INN`/`OS_TASTAR` i `tools/os_qemu_test.no`.
+
+```
+OS_KJERNE=os/kjerne/k2_prøve.no OS_BILETE=build/os/k2.img ./bin/nc run tools/os_bygg.no
+OS_BILETE=build/os/k2.img OS_VENTA="K2-prøve: ferdig" OS_SERIE_INN='Hei fra verten over COM1\n' \
+  OS_TASTAR="shift-n o r s c o d e spc shift-o shift-s spc k 2 backspace 2 shift-1 ret" \
+  ./bin/nc run tools/os_qemu_test.no
+```
+
+Arkitektur (som planlagt: avbrot køyrer aldri Norscode):
+- **Info-blokk** i trampolinen sitt identitetskarta dataområde; adressa kjem til kjernen som
+  `NORSCODE_OS_INFO=<desimal>` i envp (miljo_hent verkar i AOT under shimmen). Blokka har
+  magi/versjon, stubbtabell, ring, tikk/tikk_hz, kopi av minnekartet (≤ 32 postar), #PF-pool-
+  felt, direktekart-base, argumentblokk, heap-/stakkvindauge, HPET-periode, mbi-slutt.
+- **Stubbar** (maskinkode frå Norscode, kalla med `builtin.raw_call(adr, arg)`): in/out 8/16/32,
+  MMIO 16/32 (VA = direktekart + fysisk), cli/sti/hlt, `vent_hending` (cli; tom ring → sti;hlt —
+  sti-skuggen gjer sjekk+søvn atomisk), CR0/2/3/4 les/skriv, rdmsr/wrmsr, invlpg, rdtsc, cpuid,
+  rdrand, nullstill_side, pool_avgrens, rflags. Fleire argument går via argumentblokka.
+- **Avbrot:** 8259 remappa til 32–47 og alt maskert ved oppstart (IF=0 til kjernen kallar sti).
+  IRQ-stubbar på IST4 (rører aldri programstakken): IRQ0 aukar `tikk` (postar ikkje — 100/s ville
+  fylt ringen), IRQ1 postar scancode frå 0x60, IRQ4 postar kvar byte medan LSR.DR, andre postar
+  vektoren; falske IRQ7/15 blir filtrerte via ISR. EOI til slave/master. Ringen: SPSC, 256 × 32 B
+  {vektor, data, tsc, sekvens}, monotone indeksar, `tapte`-teljar ved full ring.
+- **Drivarane er Norscode** og opnar sine eigne IRQ-ar: PIT kanal 0 (modus 3, 100 Hz) set
+  `tikk_hz`; seriell (IER.RDA, MCR.OUT2, FCR RX-terskel 1); PS/2 sett 1 (i8042-omsetjing frå BIOS)
+  → ASCII med shift/caps/Enter/Backspace; CMOS-RTC med UIP-venting, BCD/12 t og dobbel avlesing.
+- **Shimmen:** nanosleep søv no verkeleg (frist = tikk + ceil(ns·hz/1e9), sti;hlt;cli-løkke)
+  når `tikk_hz` ≠ 0, elles 0 straks som før. Monoton klokke: HPET → tikk → TSC.
+- **Fysisk minne:** `pool_init` kopierer minnekartet inn i info-blokka og startar #PF-poolen etter
+  både biletet+bss og alle Multiboot-strukturar (mbi, mmap, cmdline, lastarnamn; QEMU legg strengane
+  rett etter bss_end) → poolen skriv aldri over Multiboot-data. Delinga med Norscode-allokatoren:
+  `rammer.init(n)` kallar `pool_avgrens` éin gong og tek toppen av pool-regionen (stubben endrar
+  berre `pool_slutt`, og kan ikkje sidefeile, så han er atomisk mot #PF-stubben som eig
+  `pool_neste`). Bitmap (1 bit/ramme, 0 … høgaste brukande < 4 GiB) i dei første overtekne
+  rammene, via direktekartet. alloc/alloc_null/fri med dobbel-fri-vern.
+- **Sidetabell-API** (4 KiB) over CR3 via direktekartet, vindauge [2 GiB, 0x8000000000) — under
+  2 GiB eig trampolinen identitets-/ELF-kart og demand-vindauga. Mellomtabellar frå `rammer`.
+  `oversett` kjenner 2 MiB/1 GiB-sider.
+
+Målt (QEMU 11 TCG, `-m 256M`, ~0,8 s utan GC-delen, ~11 s med):
+`sov(100 ms): 10 tikk, 98 ms`; `rtc: 2026-09-27 20:44:08` (= vertsdato UTC); `rammer: 4094 frie
+(15 MiB) frå 0xefe2000, pool_slutt=0xefe0000`; sidetabell på 0x7000000000 laga 2 mellomtabellar,
+skriv via VA = les via direktekart; `serie: ekko «Hei fra verten over COM1»`;
+`tastatur: «Norscode OS k2!»` (shift, backspace); `hendingar: tapte=0`; K1-søppellasta med
+PIT på: `tot=102889` (same som utan avbrot), 8 GC-innsamlingar, 988 IRQ0 midt i Norscode-kode.
+8/8 gjentekne køyringar grøne. K0/K1-testane er framleis grøne (K1 byte-lik Linux).
+
+Avvik / val i K2:
+- **Inndata frå selen:** `-serial mon:stdio`, stdin = seriell-tekst + Ctrl-A c + `sendkey …`-linjer.
+  QEMU sin mux les stdin berre når 16550-en kan ta imot, men han har eit eige 32 B-buffer: målt
+  gjekk linjeskiftet tapt i 2 av 4 køyringar (bytar i mux-bufferet blir ikkje leverte etter
+  fokusbytet). Løysing: 64 «.» + LF før og 48 «.» (utan LF) etter teksten; gjesten ignorerer
+  punktum. Kjernen opnar RX/tastatur og tier medan han ventar, så monitor-ekkoet (ANSI) ligg
+  mellom linjene og blir filtrert bort (`serie`), rått i `stdout`.
+- **Seriell mottak er ASCII** (andre bytar → «?»); tastaturet har amerikansk oppsett.
+- **LAPIC/IOAPIC** er ikkje tekne i bruk (8259 held for éin CPU); **framebuffer** finst ikkje
+  (feltet er 0). MMIO via direktekartet brukar WB-caching (ingen PAT/MTRR-oppsett).
+- Kjernen køyrer med IF=1 etter `sti`; stubbane er usynlege for Norscode-koden (eigen IST-stakk).
+
+Opne punkt etter K2:
+- Tidtakaren postar ikkje i ringen; ei hendingsløkke må lese `tikk` sjølv (vent_hending vaknar på
+  kvart tikk). Ingen one-shot-tidtakar/LAPIC-timer.
+- `rammer` tek ein fast del av #PF-poolen ved init; heapen kan ikkje låne tilbake (OOM 126 om
+  delen er for stor). Rammer ≥ 4 GiB blir ikkje brukte (direktekartet dekkjer 0–4 GiB).
+- Sidetabell-API-et frigjer ikkje mellomtabellar, og har ingen TLB-shootdown (éin CPU).
+- Ringen har ingen tidsstempel-kalibrering (TSC-verdiar er rå).
 
 ## Kjende hol og risikoar (frå kartlegginga)
 
