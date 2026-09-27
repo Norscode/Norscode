@@ -334,6 +334,34 @@ funksjon emit_fatal_melding(native: liste_heiltall, melding: tekst, kode: heilta
 // Allokerer ein NcVal med gitt tagg frå heiltalet i Wval_reg; peikar i Xdst_reg.
 // Brukar x13/x14 som scratch (daude etter kvar alloc). type_imm: 1=int, 2=bool.
 funksjon emit_ncval_alloc(native: liste_heiltall, val_reg: heiltall, dst_reg: heiltall, type_imm: heiltall) -> heiltall {
+    // A5 (linux-arm64): heiltal 0..65535 og bool 0/1 kjem frå ein førehandsbygd buffer
+    // (som x86 sin SMALL_INT_CACHE) i staden for ein ny 16-byte-boks. Layout frå entry-
+    // prologen: [bool×2][int×65536][null]{x25 = globalar}, so int_base = x25 − 16 − 1 MiB
+    // og bool_base = int_base − 32. Trygt fordi ingen emitter skriv i ein int-/bool-boks.
+    hvis ncd_intcache og (type_imm == 1 eller type_imm == 2) {
+        legg_u32(native, 0x93407C00 | (val_reg << 5) | 14) // sxtw x14, Wval
+        hvis type_imm == 1 {
+            legg_u32(native, 0xF14041DF)                // cmp x14, #16, lsl #12  (65536)
+            legg_u32(native, 0x540000A2)                // b.hs alloc (+5)
+        } ellers {
+            legg_u32(native, 0xF10005DF)                // cmp x14, #1
+            legg_u32(native, 0x540000A8)                // b.hi alloc (+5)
+        }
+        legg_u32(native, 0xD1440320 | dst_reg)          // sub Xdst, x25, #0x100, lsl #12
+        hvis type_imm == 1 {
+            legg_u32(native, 0xD1004000 | (dst_reg << 5) | dst_reg) // sub Xdst, Xdst, #16
+        } ellers {
+            legg_u32(native, 0xD100C000 | (dst_reg << 5) | dst_reg) // sub Xdst, Xdst, #48
+        }
+        legg_u32(native, 0x8B0E1000 | (dst_reg << 5) | dst_reg)     // add Xdst, Xdst, x14, lsl #4
+        legg_u32(native, 0x14000006)                    // b ferdig (+6)
+        legg_u32(native, 0xAA1C03E0 | dst_reg)          // alloc: mov Xdst, x28
+        legg_u32(native, 0xD2800000 | (type_imm << 5) | 13) // movz x13, #type
+        legg_u32(native, 0xF900038D)                    // str x13, [x28]
+        legg_u32(native, 0xF900078E)                    // str x14, [x28, #8]
+        legg_u32(native, 0x9100439C)                    // add x28, x28, #16
+        returner 0                                      // ferdig:
+    }
     legg_u32(native, 0xAA1C03E0 | dst_reg)          // mov Xdst, x28      (peikar = bump)
     legg_u32(native, 0xD2800000 | (type_imm << 5) | 13) // movz x13, #type
     legg_u32(native, 0xF900038D)                    // str x13, [x28]
@@ -7249,6 +7277,7 @@ funksjon emit_skriv_ncval(native: liste_heiltall, ptr_reg: heiltall, os: tekst) 
 // returner det utpakka heiltalet som exit-kode (= 42). Provar heile
 // mmap+alloc+aritmetikk+utpakking-kjeda på ekte AArch64-maskinvare.
 funksjon phase2_ncval_probe(os: tekst) -> liste_heiltall {
+    ncd_intcache = usann   // rå prøve utan entry-prolog: ingen hurtigbuffer
     la native: liste_heiltall = []
     emit_heap_init(native, os)
     legg_u32(native, 0x52800289)                    // movz w9, #20
@@ -7293,6 +7322,26 @@ funksjon emit_fn_prologue(native: liste_heiltall, is_entry: boolsk, nlocals: hei
         // og passar han i x2 før `bl main`, så begge OS held envp i x2 her.
         legg_u32(native, 0xAA0203FB)                // mov x27, x2  (envp)
         emit_heap_init(native, os)
+        hvis ncd_intcache {
+            // A5: bool- og små-heiltal-buffer (sjå emit_ncval_alloc) før null-objektet og
+            // globalane: [bool 0, bool 1][int 0..65535][null {0,0}] → x25.
+            legg_u32(native, 0xD2800049)            // movz x9, #2
+            legg_u32(native, 0xF9000389)            // str x9, [x28]        (usann)
+            legg_u32(native, 0xF900079F)            // str xzr, [x28, #8]
+            legg_u32(native, 0xF9000B89)            // str x9, [x28, #16]   (sann)
+            legg_u32(native, 0xD280002A)            // movz x10, #1
+            legg_u32(native, 0xF9000F8A)            // str x10, [x28, #24]
+            legg_u32(native, 0x9100839C)            // add x28, x28, #32
+            legg_u32(native, 0xD280000A)            // movz x10, #0   (i)
+            legg_u32(native, 0xD280002B)            // movz x11, #1   (int-type)
+            legg_u32(native, 0xF900038B)            // loop: str x11, [x28]
+            legg_u32(native, 0xF900078A)            // str x10, [x28, #8]
+            legg_u32(native, 0x9100439C)            // add x28, x28, #16
+            legg_u32(native, 0x9100054A)            // add x10, x10, #1
+            legg_u32(native, 0xF140415F)            // cmp x10, #16, lsl #12  (65536)
+            legg_u32(native, 0x54FFFF63)            // b.lo loop (-5)
+            legg_u32(native, 0x9100439C)            // add x28, x28, #16  (null-objektet, mmap = 0)
+        }
         // Fase 8: modul-globalar. x25 = globals-base = heap-start (mmap nullstiller,
         // så alle globalar startar som null-peikar). Heapen (x28) startar etter
         // globals-arrayet. x25 er reservert globalt (operandstakken er x19–x24).
@@ -7656,6 +7705,7 @@ funksjon ncval_lambda_captures(funksjonar, order) -> ordbok {
 // drivaren. kind == "lamaddr" → adr+movz/movk+add-sekvens (closure→fn-adresse);
 // elles bl. lam_captures = fanga-namn for DENNE funksjonen (om lambda) elles [].
 funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl_patchar, globals, initializers, memmode: boolsk, lam_captures) -> ordbok_tekst {
+    ncd_intcache = os == "linux"
     hvis lam_captures == null { lam_captures = [] }
     hvis memmode == null { memmode = usann }
     hvis builtin.type(kode) != "liste" {
@@ -10150,6 +10200,9 @@ funksjon ncval_rapport_på() -> boolsk {
 //             («[fn] feil»). Kompileringa held fram med neste funksjon; kall etter
 //             stoppestaden i sjølve funksjonen er ikkje med (DELVIS)
 // Utan flagget blir ingenting notert, og output er uendra.
+// A5: små-heiltal-/bool-hurtigbuffer (sjå emit_ncval_alloc). Berre linux-arm64: Mach-O har
+// 15000-byte-taket og treng ikkje dei ekstra instruksjonane.
+la ncd_intcache = usann
 la ncval_rapport_ustotta: liste_tekst = []
 la ncval_rapport_stubba: liste_tekst = []
 la ncval_rapport_ukjende: liste_tekst = []
@@ -10215,6 +10268,7 @@ funksjon ncval_rapport_skriv() -> heiltall {
 // fungerer. Deld av macOS- og Linux-driverane. Returnerer rå AArch64-kode.
 funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     la rapport = ncval_rapport_på()
+    ncd_intcache = os == "linux"
     ncval_rapport_nullstill()
     la entry = ncb["entry"]
     la funksjonar = ncb["functions"]
