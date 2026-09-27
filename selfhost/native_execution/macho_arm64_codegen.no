@@ -2158,6 +2158,13 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
     legg_u32(native, 0xD280000E)                        // movz x14, #0  (funne)
     la p_cbz_nullmap = lengde(native)
     legg_u32(native, 0)                                 // cbz Xmap, done  (patch)
+    // Ikkje-kart (null-objektet, heiltal, tekst, liste …) → nil/usann, som VM-en og x86.
+    // Før vart payloaden til t.d. eit heiltal deref-a som mapdata: selfhost.vm sin
+    // vm_await_value(42) spør finnes_nøkkel(42, "__future__") → SIGSEGV (test_async_*).
+    legg_u32(native, 0xF9400000 | (map_reg << 5) | 9)   // ldr x9, [Xmap]  (tagg)
+    legg_u32(native, 0xF100153F)                        // cmp x9, #5
+    la p_bne_ikkjekart = lengde(native)
+    legg_u32(native, 0)                                 // b.ne done  (patch)
     legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)   // ldr x9,  [Xmap, #8]  (mapdata)
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]   (count)
     legg_u32(native, 0x91002129)                        // add x9, x9, #8  (første par)
@@ -2231,6 +2238,7 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
         legg_u32(native, 0xAA0D03E0 | dst_reg)          // mov Xdst, x13  (verdipeikar/nil)
     }
     skriv_u32(native, p_cbz_nullmap, 0xB4000000 | ((((lbl_done     - p_cbz_nullmap) / 4) & 0x7FFFF) << 5) | map_reg)
+    ncd_bcond(native, p_bne_ikkjekart, lbl_done, 1)
     skriv_u32(native, p_bge_done,  0x5400000A | ((((lbl_done      - p_bge_done)  / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bne_next1, 0x54000001 | ((((lbl_nextpair  - p_bne_next1) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_match, 0xB4000004 | ((((lbl_matchpair - p_cbz_match) / 4) & 0x7FFFF) << 5))
@@ -2946,6 +2954,10 @@ funksjon emit_cstr_to_sp(native: liste_heiltall, str_reg: heiltall) -> heiltall 
 }
 
 // fil_skriv(path, content): opna/lag fila og skriv innhaldet. Returnerer int 0.
+// Returnerer FEIL-plasshaldaren (tbnz x9, #63) for open-feil; kallaren lappar han med
+// ncd_fil_les_kast («Kan ikkje skrive fil: <sti>», som x86). Før vart open-feilen
+// ignorert: fil_skriv(".", …) (EISDIR) lukkast stilt, og std.lagring.lagre kasta aldri
+// IOFeil (test_storage_error returnerte 99).
 funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
     emit_cstr_to_sp(native, path_reg)
@@ -2965,6 +2977,9 @@ funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg:
         legg_u32(native, 0xDA803400)                    // cneg x0, x0, cs  (Darwin-feil → −errno som Linux)
     }
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0  (fd)
+    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096  (stien trengst ikkje meir)
+    la p_feil = lengde(native)
+    legg_u32(native, 0)                                 // tbnz x9, #63, FEIL (lappa av kallaren)
     legg_u32(native, 0xF9400400 | (content_reg << 5) | 10) // ldr x10, [Xcontent, #8]
     legg_u32(native, 0xF9400142)                        // ldr x2, [x10]  (len)
     legg_u32(native, 0x91002141)                        // add x1, x10, #8 (bytes)
@@ -2986,10 +3001,10 @@ funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg:
         legg_u32(native, 0xD4001001)                    // svc #0x80
         legg_u32(native, 0xDA803400)                    // cneg x0, x0, cs  (Darwin-feil → −errno som Linux)
     }
-    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
     legg_u32(native, 0x52800009)                        // movz w9, #0
     emit_ncval_alloc(native, 9, dst_reg, 1)
-    returner 0
+    skriv_u32(native, p_feil, 0xB7F80009 | (1 << 5))    // standard: tbnz til neste instruksjon
+    returner p_feil
 }
 
 // mkdir(sti ved sp, modus 0777). Linux: mkdirat(AT_FDCWD, path, mode) x8=34;
@@ -4920,12 +4935,18 @@ funksjon emit_fil_les(native: liste_heiltall, path_reg: heiltall, dst_reg: heilt
 // Lapp fil_les sin FEIL-plasshaldar (sjå emit_fil_les): kast «Kan ikkje opne fil: <sti>»
 // (Xpath er urørt fram til FEIL). Utan __exc_val__ står han som no-op.
 funksjon ncd_fil_les_kast(native: liste_heiltall, p_feil: heiltall, path_reg: heiltall, globals, bl_patchar) -> heiltall {
+    returner ncd_fil_kast(native, p_feil, path_reg, "Kan ikkje opne fil: ", globals, bl_patchar)
+}
+
+// Felles FEIL-lapp for fil_les/fil_skriv: kast «<prefiks><sti>» (Xpath er urørt fram
+// til FEIL). Utan __exc_val__ står plasshaldaren som no-op (tbnz til neste instruksjon).
+funksjon ncd_fil_kast(native: liste_heiltall, p_feil: heiltall, path_reg: heiltall, prefiks: tekst, globals, bl_patchar) -> heiltall {
     hvis globals == null eller ikkje finnes_nøkkel(globals, "__exc_val__") { returner 0 }
     la p_ok = lengde(native)
     legg_u32(native, 0)                                 // b OK
     la lbl_feil = lengde(native)
     skriv_u32(native, p_feil, 0xB7F80009 | ((((lbl_feil - p_feil) / 4) & 0x3FFF) << 5))  // tbnz x9, #63, FEIL
-    emit_ncval_str_const(native, "Kan ikkje opne fil: ", 11)
+    emit_ncval_str_const(native, prefiks, 11)
     emit_str_concat(native, 11, path_reg, 11)
     legg_u32(native, 0xF9000320 | (globals["__exc_val__"] << 10) | 11)  // str x11, [x25, #EV*8]
     la p_td = lengde(native)
@@ -7984,20 +8005,24 @@ funksjon ncd_emit_null(r: liste_heiltall, reg: heiltall) -> heiltall {
 }
 
 // EQ/NE: rett etter emit_desimal_vakt2 held x9/x10 typane til venstre/høgre. Er dei
-// ulike og éin av dei er null (type 0), er verdiane ulike (VM-en: null == 0 er usann).
-// Returnerer [[pos, reg], ...] for cbz-plasshaldarane (sjå ncd_lapp_null_ulik).
+// ulike, er verdiane ulike (VM-en/x86: null == 0 og 1 == sann er usann). Heiltal mot
+// desimaltal er alt teke av desimal-vakta (flyttal-samanlikning) før dette. Før galdt
+// regelen berre null (type 0); då samanlikna 1 == sann payloaden åleine og gav sann
+// (compiler.semantic.types.type_checker.check_type(1) svarte «bool», test_typechecker).
+// Returnerer [[pos, reg], ...] for plasshaldarane (sjå ncd_lapp_null_ulik; reg −1 = b).
 funksjon ncd_emit_null_ulik(native: liste_heiltall) -> liste {
     legg_u32(native, 0xEB0A013F)                     // cmp x9, x10
-    legg_u32(native, 0x54000060)                     // b.eq +3 (same type → vanleg samanlikning)
     la p1 = lengde(native)
-    legg_u32(native, 0)                              // cbz x9, ulik
-    la p2 = lengde(native)
-    legg_u32(native, 0)                              // cbz x10, ulik
-    returner [[p1, 9], [p2, 10]]
+    legg_u32(native, 0)                              // b.ne ulik (ulike typar)
+    returner [[p1, -1]]
 }
 funksjon ncd_lapp_null_ulik(native: liste_heiltall, hopp, mål: heiltall) -> heiltall {
     for ph i hopp {
-        skriv_u32(native, ph[0], 0xB4000000 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5) | ph[1])
+        hvis ph[1] < 0 {
+            skriv_u32(native, ph[0], 0x54000001 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5))   // b.ne
+        } ellers {
+            skriv_u32(native, ph[0], 0xB4000000 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5) | ph[1])
+        }
     }
     returner 0
 }
@@ -10175,7 +10200,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "fil_skriv" eller kallnamn == "builtin.fil_skriv") og lengde(instr) == 3 og instr[2] == 2 {
                     // Fase 6: fil_skriv(path, content).
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fil_skriv krev 2 arg", "image": []} }
-                    emit_fil_skriv(native, r2, r1, r2, os)
+                    la p_fs_feil = emit_fil_skriv(native, r2, r1, r2, os)
+                    ncd_fil_kast(native, p_fs_feil, r2, "Kan ikkje skrive fil: ", globals, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "fil_les" eller kallnamn == "builtin.fil_les") og lengde(instr) == 3 og instr[2] == 1 {
