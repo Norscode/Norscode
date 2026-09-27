@@ -2639,6 +2639,66 @@ funksjon _tn_kjerne_bytes() -> liste_heiltall {
 
 funksjon _tn_cpuid_off() -> heiltall { returner 178 }
 
+// linux-arm64: AdvSIMD (NEON) er obligatorisk i ARMv8-A, so ingen CPUID-test. Andre
+// arm64-mål (macOS: MAP_JIT/sys_icache_invalidate) held seg på skalar veg.
+funksjon _tn_er_arm64() -> boolsk {
+    prøv { returner builtin.native_target() == "linux-arm64" } fang (e) { returner usann }
+    returner usann
+}
+
+// NEON-kjerne med same parameterblokk-ABI som SSE4.1-kjerna (x0 = blokk, x0 = 1 ut):
+//   ldp x8,x9,[x0]; ldp x10,x11,[x0,#16]; ldp x12,x13,[x0,#32]   (A, BT, OUT, rows, inner_p, cols)
+//   r=x14: arad x15 = A + r*inner_p*4;  c=x16: bkol x17 = BT + c*inner_p*4; v0.2d = 0
+//   k=x1:  q1 = [x15+k*4], q2 = [x17+k*4]; mul v1.4s; saddw/saddw2 v0.2d (int64-akkumulering)
+//   addp d0; fmov x2,d0; OUT[r*cols + c] = x2
+// Berre x0–x17 og v0–v2 (caller-saved i AAPCS64). Hoppa blir rekna frå etikettane under.
+funksjon _tn_kjerne_arm64() -> liste_heiltall {
+    la k: liste_heiltall = [
+        0xA9402408, 0xA9412C0A, 0xA942340C,   // ldp x8,x9,[x0]; ldp x10,x11,[x0,#16]; ldp x12,x13,[x0,#32]
+        0xD280000E,                           // mov x14, #0
+        // 4 rad:
+        0xEB0B01DF, 0,                        // cmp x14, x11; b.ge ferdig (5)
+        0x9B0C7DCF, 0x8B0F090F,               // mul x15, x14, x12; add x15, x8, x15, lsl #2
+        0xD2800010,                           // mov x16, #0
+        // 9 kol:
+        0xEB0D021F, 0,                        // cmp x16, x13; b.ge neste_rad (10)
+        0x9B0C7E11, 0x8B110931,               // mul x17, x16, x12; add x17, x9, x17, lsl #2
+        0x6F00E400, 0xD2800001,               // movi v0.2d, #0; mov x1, #0
+        // 15 vek:
+        0xEB0C003F, 0,                        // cmp x1, x12; b.ge hsum (16)
+        0x8B0109E2, 0x3DC00041,               // add x2, x15, x1, lsl #2; ldr q1, [x2]
+        0x8B010A23, 0x3DC00062,               // add x3, x17, x1, lsl #2; ldr q2, [x3]
+        0x4EA29C21,                           // mul v1.4s, v1.4s, v2.4s
+        0x0EA11000, 0x4EA11000,               // saddw v0.2d, v0.2d, v1.2s; saddw2 v0.2d, v0.2d, v1.4s
+        0x91001021, 0,                        // add x1, x1, #4; b vek (25)
+        // 26 hsum:
+        0x5EF1B800, 0x9E660002,               // addp d0, v0.2d; fmov x2, d0
+        0x9B0D7DC3, 0x8B100063,               // mul x3, x14, x13; add x3, x3, x16
+        0xF8237942,                           // str x2, [x10, x3, lsl #3]
+        0x91000610, 0,                        // add x16, x16, #1; b kol (32)
+        // 33 neste_rad:
+        0x910005CE, 0,                        // add x14, x14, #1; b rad (34)
+        // 35 ferdig:
+        0xD2800020, 0xD65F03C0                // mov x0, #1; ret
+    ]
+    k[5] = _tn_bcond(5, 35, 10)
+    k[10] = _tn_bcond(10, 33, 10)
+    k[16] = _tn_bcond(16, 26, 10)
+    k[25] = _tn_b(25, 15)
+    k[32] = _tn_b(32, 9)
+    k[34] = _tn_b(34, 4)
+    for w i k { hvis w == 0 { kast "tensor: NEON-kjerna har ein ulappa plasshaldar" } }
+    returner k
+}
+
+funksjon _tn_bcond(frå: heiltall, mål: heiltall, vilkår: heiltall) -> heiltall {
+    returner 0x54000000 | (((mål - frå) & 0x7FFFF) << 5) | vilkår
+}
+
+funksjon _tn_b(frå: heiltall, mål: heiltall) -> heiltall {
+    returner 0x14000000 | ((mål - frå) & 0x03FFFFFF)
+}
+
 funksjon _tn_svar(status: tekst, feil: tekst) {
     returner {"abi": "norscode-tensor-v1", "status": status, "error": feil}
 }
@@ -2706,6 +2766,20 @@ funksjon _tn_simd_klar() -> boolsk {
     _tn_simd = 2
     la adr = _sys_mmap_rw(4096)              // mmap RW, anonym
     hvis adr < 0 { returner usann }
+    hvis _tn_er_arm64() {
+        // Linux arm64: mprotect til R|X på ei anonym side synkar I-cachen i kjernen
+        // (set_pte_at → __sync_icache_dcache for køyrbare brukarsider).
+        la ord = _tn_kjerne_arm64()
+        la j: heiltall = 0
+        mens j < lengde(ord) { _sys_u32(adr + j * 4, ord[j]) j = j + 1 }
+        hvis _sys_mprotect_rx(adr, 4096) != 0 {
+            _sys_munmap(adr, 4096)
+            returner usann
+        }
+        _tn_kode = adr
+        _tn_simd = 1
+        returner sann
+    }
     la kode = _tn_kjerne_bytes()
     la i: heiltall = 0
     mens i < lengde(kode) { builtin.raw_store8(adr + i, kode[i]) i = i + 1 }
@@ -2724,6 +2798,7 @@ funksjon _tn_simd_klar() -> boolsk {
 }
 
 funksjon _tn_backend() -> tekst {
+    hvis _tn_simd_klar() og _tn_er_arm64() { returner "simd-aarch64-neon" }
     hvis _tn_simd_klar() { returner "simd-x86_64-sse4.1" }
     returner "scalar"
 }
@@ -2862,7 +2937,7 @@ funksjon tensor_operation(req) {
     la backend = "scalar"
     hvis _tn_simd_klar() {
         data = _tn_matmul_simd(l, r, rader, inner, kolonner)
-        hvis lengde(data) > 0 { backend = "simd-x86_64-sse4.1" }
+        hvis lengde(data) > 0 { backend = _tn_backend() }
     }
     hvis lengde(data) == 0 { data = _tn_matmul_skalar(l, r, rader, inner, kolonner) }
     la ut = _tn_svar("ferdig", "")
