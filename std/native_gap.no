@@ -2948,6 +2948,175 @@ funksjon tensor_operation(req) {
     returner ut
 }
 
+// ── native_fs_* over sys6 (A5) ───────────────────────────────────────────────
+// x86-64-AOT har eigne inline-atom for builtin.native_fs_* (native_codegen_v2); linux-arm64
+// rutar dei hit (macho_arm64_codegen.ncval_gap_rute), so std.runtime_filesystem_native
+// (filesystem_read/write_operation) fungerer på begge. Same kontrakt som atoma:
+//   fs_gap_dirents(sti)       → "k<TAB>namn<LF>…" (k: d/f/l/o; utan «.»/«..»), "!" ved feil
+//   fs_gap_stat(sti, follow)  → [mode,size,ino,dev,nlink,uid,gid,atime,mtime,ctime] | [-1]
+//   fs_gap_unlink/rmdir(sti), fs_gap_chmod(sti, mode), fs_gap_rename(frå, mål_sti),
+//   fs_gap_symlink(mål, lenkje) → 0 eller −errno (−EINVAL for ugyldig sti, som atoma).
+// Stiane blir skrivne NUL-terminerte i ei mmap-sone: [0, 4096) og [4096, 8192).
+
+funksjon _fsg_sti_ok(sti) -> boolsk {
+    hvis builtin.type(sti) != "tekst" { returner usann }
+    returner lengde(sti) < 4096 og builtin.index_of(sti, builtin.chr(0)) < 0
+}
+
+funksjon _fsg_einval() -> heiltall {
+    returner 0 - nsys._errno("EINVAL")
+}
+
+funksjon _fsg_u32(adr: heiltall) -> heiltall {
+    returner builtin.raw_load64(adr) & 4294967295
+}
+
+funksjon _fsg_sann(v) -> boolsk {
+    la t = builtin.type(v)
+    hvis t == "boolsk" { hvis v { returner sann } returner usann }
+    hvis t == "heltall" { returner v != 0 }
+    returner usann
+}
+
+funksjon _fsg_unlinkat(sti, flagg: heiltall) -> heiltall {
+    hvis ikkje _fsg_sti_ok(sti) { returner _fsg_einval() }
+    la b = _sys_mmap_rw(4096)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, sti)
+    la r = builtin.sys6(nsys._nr("unlinkat"), nsys._flagg("AT_FDCWD"), b, flagg, 0, 0, 0)
+    _sys_munmap(b, 4096)
+    returner r
+}
+
+funksjon fs_gap_unlink(sti) -> heiltall {
+    returner _fsg_unlinkat(sti, 0)
+}
+
+funksjon fs_gap_rmdir(sti) -> heiltall {
+    returner _fsg_unlinkat(sti, nsys._flagg("AT_REMOVEDIR"))
+}
+
+funksjon fs_gap_chmod(sti, modus) -> heiltall {
+    hvis ikkje _fsg_sti_ok(sti) eller builtin.type(modus) != "heltall" { returner _fsg_einval() }
+    la b = _sys_mmap_rw(4096)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, sti)
+    la r = builtin.sys6(nsys._nr("fchmodat"), nsys._flagg("AT_FDCWD"), b, modus, 0, 0, 0)
+    _sys_munmap(b, 4096)
+    returner r
+}
+
+funksjon fs_gap_rename(frå, mål_sti) -> heiltall {
+    hvis ikkje _fsg_sti_ok(frå) eller ikkje _fsg_sti_ok(mål_sti) { returner _fsg_einval() }
+    la b = _sys_mmap_rw(8192)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, frå)
+    _pg_cstr(b + 4096, mål_sti)
+    la fd = nsys._flagg("AT_FDCWD")
+    la r = builtin.sys6(nsys._nr("renameat"), fd, b, fd, b + 4096, 0, 0)
+    _sys_munmap(b, 8192)
+    returner r
+}
+
+funksjon fs_gap_symlink(mål, lenkje) -> heiltall {
+    hvis ikkje _fsg_sti_ok(mål) eller ikkje _fsg_sti_ok(lenkje) { returner _fsg_einval() }
+    la b = _sys_mmap_rw(8192)
+    hvis b < 0 { returner b }
+    _pg_cstr(b, mål)
+    _pg_cstr(b + 4096, lenkje)
+    la r = builtin.sys6(nsys._nr("symlinkat"), b, nsys._flagg("AT_FDCWD"), b + 4096, 0, 0, 0)
+    _sys_munmap(b, 8192)
+    returner r
+}
+
+funksjon fs_gap_stat(sti, follow) {
+    hvis ikkje _fsg_sti_ok(sti) { returner [0 - 1] }
+    la b = _sys_mmap_rw(8192)
+    hvis b < 0 { returner [0 - 1] }
+    _pg_cstr(b, sti)
+    la flagg: heiltall = nsys._flagg("AT_SYMLINK_NOFOLLOW")
+    hvis _fsg_sann(follow) { flagg = 0 }
+    la st = b + 4096
+    la r = builtin.sys6(nsys._nr("newfstatat"), nsys._flagg("AT_FDCWD"), b, st, flagg, 0, 0)
+    hvis r != 0 {
+        _sys_munmap(b, 8192)
+        returner [0 - 1]
+    }
+    la nlink: heiltall = builtin.raw_load64(st + nsys._layout("stat", "nlink"))
+    hvis nsys._layout("stat", "nlink_breidd") == 4 { nlink = nlink & 4294967295 }
+    la ut = [
+        _fsg_u32(st + nsys._layout("stat", "mode")),
+        builtin.raw_load64(st + nsys._layout("stat", "size")),
+        builtin.raw_load64(st + nsys._layout("stat", "ino")),
+        builtin.raw_load64(st + nsys._layout("stat", "dev")),
+        nlink,
+        _fsg_u32(st + nsys._layout("stat", "uid")),
+        _fsg_u32(st + nsys._layout("stat", "gid")),
+        builtin.raw_load64(st + nsys._layout("stat", "atime")),
+        builtin.raw_load64(st + nsys._layout("stat", "mtime")),
+        builtin.raw_load64(st + nsys._layout("stat", "ctime"))
+    ]
+    _sys_munmap(b, 8192)
+    returner ut
+}
+
+funksjon fs_gap_dirents(sti) -> tekst {
+    hvis ikkje _fsg_sti_ok(sti) { returner "!" }
+    la buflen: heiltall = 32768
+    la b = _sys_mmap_rw(4096 + buflen)
+    hvis b < 0 { returner "!" }
+    _pg_cstr(b, sti)
+    la fd = builtin.sys6(nsys._nr("openat"), nsys._flagg("AT_FDCWD"), b,
+                         nsys._flagg("O_DIRECTORY") | nsys._flagg("O_CLOEXEC"), 0, 0, 0)
+    hvis fd < 0 {
+        _sys_munmap(b, 4096 + buflen)
+        returner "!"
+    }
+    la o_reclen = nsys._layout("dirent64", "reclen")
+    la o_type = nsys._layout("dirent64", "type")
+    la o_namn = nsys._layout("dirent64", "name")
+    la dt_dir = nsys._flagg("DT_DIR")
+    la dt_reg = nsys._flagg("DT_REG")
+    la dt_lnk = nsys._flagg("DT_LNK")
+    la delar: liste_tekst = []
+    la total: heiltall = 0
+    la meir = sann
+    mens meir {
+        la n = builtin.sys6(nsys._nr("getdents64"), fd, b + 4096, buflen, 0, 0, 0)
+        hvis n <= 0 {
+            meir = usann
+        } ellers {
+            la pos: heiltall = 0
+            mens pos < n {
+                la e = b + 4096 + pos
+                la reclen = _sys_les_u16(e + o_reclen)
+                la teikn: liste_tekst = []
+                la j: heiltall = 0
+                la c = builtin.raw_load8(e + o_namn)
+                mens c != 0 {
+                    legg_til(teikn, builtin.chr(c))
+                    j = j + 1
+                    c = builtin.raw_load8(e + o_namn + j)
+                }
+                la namn = builtin.join(teikn, "")
+                // Som atomet: hopp over «.»/«..», og stopp å leggje til ved 256 KiB − 256.
+                hvis namn != "." og namn != ".." og total < 261888 {
+                    la typ = builtin.raw_load8(e + o_type)
+                    la k = "o"
+                    hvis typ == dt_dir { k = "d" } ellers hvis typ == dt_reg { k = "f" } ellers hvis typ == dt_lnk { k = "l" }
+                    la linje = k + "\t" + namn + "\n"
+                    legg_til(delar, linje)
+                    total = total + lengde(linje)
+                }
+                hvis reclen <= 0 { pos = n } ellers { pos = pos + reclen }
+            }
+        }
+    }
+    _sys_lukk(fd)
+    _sys_munmap(b, 4096 + buflen)
+    returner builtin.join(delar, "")
+}
+
 // ── Native trådar (norscode-native-thread-v1) ────────────────────────────────
 // thread.*-primitiv køyrer i ein clone(2)-tråd på ein pure-int native veg
 // (thread_dispatch-atomet) — ingen GC, ingen VM. __main__.*-brukarfunksjonar
