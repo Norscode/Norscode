@@ -1,7 +1,7 @@
 // os/boot/byggjar.no — byggjekjeda for Norscode OS-kjernebilete (K0/K1).
 //
 //   kjerne.no ──nc compile──▶ kjerne.ncb.json ──bygg-native (GC-modus)──▶ kjerne.elf
-//             ──os.boot.trampoline.bygg──▶ build/os/<namn>.img (Multiboot1, flatt)
+//             ──tools/os_pakk.no (os.boot.trampoline)──▶ build/os/<namn>.img (Multiboot1, flatt)
 //
 // Codegen (linux-x86_64, NORSCODE_GC_ALLOC=1):
 //   * Linux x86-64-vert: `bin/nc bygg-native` direkte (førehandsbygd codegen, sekund).
@@ -14,7 +14,6 @@
 
 bruk tools.process_runner som prosess
 bruk std.prosess som system_prosess
-bruk os.boot.trampoline som tramp
 
 funksjon miljø(namn: tekst) -> tekst {
     prøv { returner tekst(miljo_hent(namn)) } fang (e) { returner "" }
@@ -78,22 +77,16 @@ funksjon kompiler_ncb(root: tekst, kjelde: tekst, ncb: tekst) -> tekst {
     returner ""
 }
 
-// Sørgjer for build/os/linux-dist/norscode_native = committa Linux x86-64-stage0.
-funksjon _linux_dist(root: tekst) -> tekst {
-    la mappe = root + "/build/os/linux-dist"
-    builtin.mappe_opprett(mappe)
-    la mål = mappe + "/norscode_native"
-    la kjelde = root + "/bootstrap/stage0/norscode-linux-x86_64"
-    la kb = builtin.fil_les_binær(kjelde)
-    la treng = sann
-    hvis builtin.fil_finnes(mål) {
-        prøv { treng = lengde(builtin.fil_les_binær(mål)) != lengde(kb) } fang (e) { treng = sann }
-    }
-    hvis treng {
-        builtin.fil_skriv_binær(mål, kb)
-        builtin.fil_sett_kjorbar(mål)
-    }
-    returner mål
+// Sørgjer for build/os/linux-dist/norscode_native = committa Linux x86-64-stage0. Kopien
+// blir laga INNE i containeren (/bin/cp): å lese 5 MB inn i VM-en som liste gjer resten av
+// verktøyprosessen målbart tregare (utan NORSCODE_VM_FAST).
+funksjon _linux_dist(root: tekst, docker: tekst) -> tekst {
+    builtin.mappe_opprett(root + "/build/os/linux-dist")
+    la d: liste_tekst = ["run", "--rm", "--platform", "linux/amd64", "-v", root + ":/work", docker_image(),
+        "/bin/cp", "/work/bootstrap/stage0/norscode-linux-x86_64", "/work/build/os/linux-dist/norscode_native"]
+    la r = prosess.køyr_liste(docker, d, root, {}, 300000)
+    hvis r[0] != "0" { returner "kopiering av Linux-stage0 feila: " + _meld(r) }
+    returner ""
 }
 
 funksjon _i_container(root: tekst, sti: tekst) -> tekst {
@@ -108,7 +101,8 @@ funksjon codegen(root: tekst, ncb: tekst, elf_ut: tekst) -> tekst {
     hvis ikkje lokal og ikkje er_linux_x86_64() {
         la docker = finn_docker(root)
         hvis docker != "" {
-            _linux_dist(root)
+            la kf = _linux_dist(root, docker)
+            hvis kf != "" { returner kf }
             la d: liste_tekst = ["run", "--rm", "--platform", "linux/amd64",
                 "-v", root + ":/work", "-v", root + "/build/os/linux-dist:/work/dist", "-w", "/work",
                 "-e", "NORSCODE_ROOT=/work",
@@ -131,6 +125,24 @@ funksjon codegen(root: tekst, ncb: tekst, elf_ut: tekst) -> tekst {
     la r2 = prosess.køyr_liste(root + "/bin/nc", argv, root, m, 3600000)
     hvis r2[0] != "0" { returner "bygg-native feila: " + _meld(r2) }
     hvis ikkje builtin.fil_finnes(elf_ut) { returner "bygg-native laga ikkje " + elf_ut }
+    returner ""
+}
+
+// ELF → bilete via tools/os_pakk.no i eigen prosess med NORSCODE_VM_FAST=1 (sjå der).
+// Layout-tala («nøkkel=verdi») blir lagde inn i `ut`. Returnerer "" eller feilmelding.
+funksjon pakk(root: tekst, elf_sti: tekst, bilete: tekst, modus: tekst, ut: ordbok_tekst) -> tekst {
+    la m = _nc_miljø(root)
+    m["OS_ELF"] = elf_sti
+    m["OS_BILETE"] = bilete
+    m["OS_MODUS"] = modus
+    la r = prosess.køyr_liste(root + "/bin/nc", ["run", root + "/tools/os_pakk.no"], root, m, 600000)
+    hvis r[0] != "0" { returner "os_pakk feila: " + _meld(r) }
+    la tekst_ut = builtin.replace(r[1], "\\n", "\n")
+    for linje i builtin.split(tekst_ut, "\n") {
+        la i = builtin.index_of(linje, "=")
+        hvis i > 0 { ut[builtin.slice(linje, 0, i)] = builtin.trim(builtin.slice(linje, i + 1, lengde(linje))) }
+    }
+    hvis ikkje finnes_nøkkel(ut, "bilete_bytes") { returner "os_pakk gav ingen layout: " + _meld(r) }
     returner ""
 }
 
@@ -162,9 +174,12 @@ funksjon bygg_kjerne(kjelde: tekst, bilete: tekst, modus: tekst) -> ordbok_tekst
         returner ut
     }
     la t2 = builtin.tid_ms()
-    la info = tramp.bygg(builtin.fil_les_binær(elf_sti), modus, bilete_abs)
+    f = pakk(root, elf_sti, bilete_abs, modus, ut)
+    hvis f != "" {
+        ut["feil"] = f
+        returner ut
+    }
     la t3 = builtin.tid_ms()
-    for k i nøkler(info) { ut[k] = tekst(info[k]) }
     ut["ms_compile"] = tekst(t1 - t0)
     ut["ms_codegen"] = tekst(t2 - t1)
     ut["ms_pakk"] = tekst(t3 - t2)

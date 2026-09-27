@@ -1,0 +1,116 @@
+// tests/test_os_k1_ring0.no — Norscode OS K1: ring-0-kjerne med syscall-shim og
+// demand-zero-paging.
+//
+// 1. Byggjer os/kjerne/k1_prøve.no (strengar, lister, kart, prøv/fang, rekursjon 1000,
+//    >300 MiB søppel → fleire GC-innsamlingar) til eitt GC-modus-ELF og bootar det med
+//    `-m 256M` (GC-heapen er 1,7 GiB virtuelt; berre rørte sider får fysiske rammer).
+//    Seriell-utdata må vere lik (a) fasiten under og (b) same ELF køyrt på Linux
+//    (direkte på Linux x86-64, elles i Docker linux/amd64 når Docker finst).
+// 2. Same bilete med `-m 48M`: rammepoolen går tom → diagnose + debug-exit 126.
+// 3. os/kjerne/k1_feil.no les side 0 → #PF-diagnose (v=0e, CR2=8) + debug-exit 125,
+//    ikkje trippelfeil.
+// Hoppar reint over (rc 0, med grunn) når qemu-system-x86_64 manglar.
+
+bruk os.boot.byggjar som byggjar
+bruk os.boot.qemu som qemu
+bruk tools.process_runner som prosess
+
+funksjon fasit() -> tekst {
+    la l: liste_tekst = [
+        "K1-prøve: Norscode OS",
+        "streng: Norscode OS 2026 lengd=16",
+        "streng: slice=Nors index=9",
+        "streng: samla=01234567890123456789012345678901234567890123456789",
+        "streng: æøå=blåbærsyltetøy 17",
+        "liste: n=2000 sum=1008062 maks=1008 l0=123456",
+        "liste: ord=eple;banan;kirsebær;drue;",
+        "kart: n=500 k499=249001 k7=-7 sum=41541694",
+        "kart: finst k3=sann finst x=usann",
+        "fang: bom",
+        "fang: djupt botn nådd",
+        "fang: n=3466",
+        "rekursjon: djup(1000)=1000 fib(22)=17711",
+        "søppel: runder=8000 tot=102889",
+        "gc: samlingar=7",
+        "gc: minst 3 innsamlingar",
+        "tid: ok",
+        "tilfeldig: ok",
+        "K1-prøve: ferdig"]
+    la t = ""
+    for linje i l { t = t + linje + "\n" }
+    returner t
+}
+
+// Køyrer ELF-en på Linux: direkte på Linux x86-64, elles i Docker. "" + grunn når umogleg.
+funksjon linux_utdata(root: tekst, elf_sti: tekst) -> liste_tekst {
+    hvis byggjar.er_linux_x86_64() {
+        la r = prosess.køyr_liste(elf_sti, [], root, {}, 300000)
+        returner [r[0], r[1], "linux-x86_64 direkte"]
+    }
+    la docker = byggjar.finn_docker(root)
+    hvis docker == "" { returner ["", "", "verken Linux x86-64 eller Docker"] }
+    la mappe = root + "/build/os"
+    la namn = builtin.slice(elf_sti, lengde(mappe) + 1, lengde(elf_sti))
+    la r2 = prosess.køyr_liste(docker, ["run", "--rm", "--platform", "linux/amd64", "-v", mappe + ":/b",
+        byggjar.docker_image(), "/b/" + namn], root, {}, 300000)
+    returner [r2[0], r2[1], "Docker " + byggjar.docker_image()]
+}
+
+funksjon normaliser(t: tekst) -> tekst {
+    hvis builtin.index_of(t, "\n") < 0 { returner builtin.replace(t, "\\n", "\n") }
+    returner t
+}
+
+funksjon start() -> heiltall {
+    la q = qemu.finn_qemu()
+    hvis q == "" {
+        skriv("HOPPA: qemu-system-x86_64 finst ikkje (set OS_QEMU eller installer QEMU)\n")
+        returner 0
+    }
+    la root = byggjar.rot()
+    la ut = root + "/build/os/"
+
+    // 1. K1-prøva, demand-zero, -m 256M
+    la r = byggjar.bygg_kjerne("os/kjerne/k1_prøve.no", "build/os/test_k1.img", "demand")
+    hvis r["feil"] != "" { skriv("FEIL (bygg): " + r["feil"] + "\n") }
+    assert_eq(r["feil"], "")
+    skriv("bilete " + r["bilete"] + " (" + r["bilete_bytes"] + " B), elf " + r["elf_bytes"] + " B\n")
+    la k = qemu.køyr(q, r["bilete"], "256M", 300000, ut + "test_k1.serie.txt", ut + "test_k1.debugcon.txt")
+    skriv("QEMU -m 256M: status=" + k["status"] + " qemu=" + k["qemu_kode"] + " kjerne=" + k["kjerne_kode"] + " ms=" + k["ms"] + "\n")
+    skriv(k["serie"])
+    skriv("debugcon: " + k["debugcon"])
+    assert_eq(k["status"], "ferdig")
+    assert_eq(k["kjerne_kode"], "0")
+    assert_eq(k["serie"], fasit())
+
+    la lx = linux_utdata(root, r["elf"])
+    hvis lx[0] == "" {
+        skriv("MERK: Linux-samanlikninga hoppa over (" + lx[2] + "); fasiten er samanlikna\n")
+    } ellers {
+        skriv("Linux (" + lx[2] + "): exit=" + lx[0] + "\n")
+        assert_eq(lx[0], "0")
+        assert_eq(normaliser(lx[1]), k["serie"])
+        skriv("OK: QEMU-utdata == Linux-utdata (" + tekst(lengde(k["serie"])) + " B)\n")
+    }
+
+    // 2. For lite RAM → tom rammepool → diagnose, ikkje heng/trippelfeil
+    la k2 = qemu.køyr(q, r["bilete"], "48M", 300000, ut + "test_k1_48m.serie.txt", ut + "test_k1_48m.debugcon.txt")
+    skriv("QEMU -m 48M: status=" + k2["status"] + " kjerne=" + k2["kjerne_kode"] + "\n")
+    assert_eq(k2["status"], "ferdig")
+    assert_eq(k2["kjerne_kode"], "126")
+    assert(builtin.index_of(k2["serie"], "[kjerne] tomt for fysiske sider") >= 0)
+
+    // 3. Null-peikar → #PF-diagnose
+    la f = byggjar.bygg_kjerne("os/kjerne/k1_feil.no", "build/os/test_k1_feil.img", "demand")
+    assert_eq(f["feil"], "")
+    la k3 = qemu.køyr(q, f["bilete"], "256M", 120000, ut + "test_k1_feil.serie.txt", ut + "test_k1_feil.debugcon.txt")
+    skriv("QEMU null-peikar: status=" + k3["status"] + " kjerne=" + k3["kjerne_kode"] + "\n" + k3["serie"])
+    assert_eq(k3["status"], "ferdig")
+    assert_eq(k3["kjerne_kode"], "125")
+    assert(builtin.starts_with(k3["serie"], "før feil\n"))
+    assert(builtin.index_of(k3["serie"], "[kjerne] unnatak v=000000000000000e") >= 0)
+    assert(builtin.index_of(k3["serie"], "cr2=0000000000000008") >= 0)
+    assert(builtin.index_of(k3["serie"], "etter feil") < 0)
+    skriv("OK: K1 ring-0-kjerne (demand-zero, -m 256M) == Linux\n")
+    returner 0
+}
