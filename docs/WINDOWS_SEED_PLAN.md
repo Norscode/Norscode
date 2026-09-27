@@ -140,6 +140,28 @@ Windows i CI.
 Estimat: W0–W2 er éi–to økter kvar; W3/W4 to–tre; W5 éi; W6 er den største (tre–fem);
 W7 éi. Kring 8 milepælar / 12–18 økter til promoterbar seed.
 
+## 3b. Status (2026-09-28)
+
+* **W0 — ferdig.** `pe_emitter.no`: `bygg_importar` (importkatalog/ILT/IAT/namn, fleire DLL-ar),
+  `bygg_pe` (samanhengande seksjonar, ImageBase 0x400000, RELOCS_STRIPPED, utan DYNAMIC_BASE),
+  `beskriv_pe` og `bygg_hei_pe`. Ny `win64_asm.no` (assemblar med etikettar/rel32).
+  Verifisert under wine: hello world via IAT, rett UTF-8-linje + exit 42. `tests/test_pe_emitter.no`.
+* **W1 — grunnmur ferdig, codegen-innkopling står att.** `win64_os.no` emitterer heile
+  OS-call-trampolina: OSTAB + rutinane write/exit/getrandom bak IAT med Linux-syscall-ABI,
+  felles rbp-ankra ramme som self-alignar og bevarer rdi/rsi/rdx/r10/r8/r9. `emit_os_call`
+  gjev 7 B (= «mov eax,nr; syscall»). Verifisert under wine (`bygg_os_demo_pe`: write+getrandom+exit
+  via OSTAB → rett linje + exit 42). `tests/test_win64_os.no`.
+  Att i W1: emittere OSTAB + rutinane inn i `native_codegen_v2` `.text`/`.idata`, PE-emisjonsvegen
+  (§2.1), Windows-`_start` (argv/envp), heap som bss-seksjon, GC-vaktside via `VirtualProtect`,
+  og rute alle 58 `syscall`-stader gjennom `emit_os_call` i Windows-modus. Alt gata på
+  `NC_TARGET=windows-x86_64` så Linux-output held seg byte-lik (harness under).
+* **Verifikasjonsharness (ferdig).** `scratch/windows/`: `wineimg/` (Docker `nc-wine`),
+  `wrun.sh` (køyr exe i wine), `cgbuild.sh` (rebygg codegen-ELF frå worktree-kjelde — reproduserer
+  committa `native_codegen_x86_64.elf` byte-eksakt på ~6 s), `linuxlik.sh` (Linux-output for
+  seks fiksturar × GC 0/1 + full nc_main-NCB) og `likcheck.sh` (byte-likskaps-diff mot committa
+  codegen). `prog/` har fiksturane (hei, tekst, unnatak, tidrand, gcstress, argenv).
+  `ref/SHA256SUMS` er referansen frå committa codegen.
+
 ## 4. Bygg- og verifikasjonsveg
 
 1. Lokalt (Mac): `NORSCODE_ROOT=$PWD … ./bin/nc run` for Norscode-verktøy; codegen-ELF-bygg i
