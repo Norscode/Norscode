@@ -8,6 +8,7 @@
 
 bruk tools.process_runner som prosess
 bruk std.prosess som system_prosess
+bruk std.runtime.process_abi som process_abi
 
 funksjon miljø(namn: tekst) -> tekst {
     prøv { returner tekst(miljo_hent(namn)) } fang (e) { returner "" }
@@ -24,6 +25,84 @@ funksjon finn_qemu() -> tekst {
 funksjon _les(sti: tekst) -> tekst {
     prøv { returner tekst(fil_les(sti)) } fang (e) { returner "" }
     returner ""
+}
+
+// Status/kode-felta som køyr() og køyr_med_inndata() deler.
+funksjon _resultat(r: ordbok_tekst, t0: heiltall, debug_fil: tekst) -> ordbok_tekst {
+    la ut: ordbok_tekst = {}
+    ut["status"] = tekst(r["status"])
+    ut["ms"] = tekst(builtin.tid_ms() - t0)
+    la kode = heltall_fra_tekst(tekst(r["exit_code"]))
+    ut["qemu_kode"] = tekst(kode)
+    la kk = -1
+    hvis ut["status"] == "ferdig" og (kode % 2) == 1 { kk = (kode - 1) / 2 }
+    ut["kjerne_kode"] = tekst(kk)
+    ut["debugcon"] = _les(debug_fil)
+    ut["stderr"] = tekst(r["stderr"])
+    returner ut
+}
+
+// Inndata til gjesten via stdin på `-serial mon:stdio` (seriell og QEMU-monitoren
+// multipleksa på stdio, Ctrl-A c byter mellom dei):
+//   stdin = serie_inn + Ctrl-A c + «sendkey <tast>» per tast + Ctrl-A c
+// Rekkjefølgja er sikra av QEMU sjølv: mux-en les stdin berre når den fokuserte
+// frontenden (16550-en) kan ta imot, så monitor-kommandoane (tastane) blir lesne fyrst
+// når gjesten har teke imot seriell-teksten. To målte fallgruver (QEMU 11):
+//   * 16550-FIFO-en (16 B) og mux-bufferet (32 B) tek imot 48 B utan at gjesten les, og
+//     trampolinen nullstiller FIFO-en ved oppstart → seriell-teksten blir innleidd med
+//     ei utfyllingslinje på 64 «.» (gjesten ignorerer ho; nokre punkt kan gå tapt).
+//   * Mux-en les Ctrl-A c medan inntil 32 B seriell-data framleis ligg i bufferet hans;
+//     etter fokusbytet blir dei ikkje leverte (2 av 4 køyringar mista linjeskiftet) →
+//     etter teksten kjem 48 «.» utan linjeskift, så berre utfylling kan bli ståande att.
+// Tastane er QEMU-namn («shift-h», «spc», «ret»). Seriell utdata kjem på stdout saman
+// med monitor-ekkoet (ANSI-redigering); «serie» er utan monitor-linjer, «stdout» er rå.
+funksjon køyr_med_inndata(qemu: tekst, bilete: tekst, minne: tekst, tidsgrense_ms: heiltall,
+                          serie_inn: tekst, tastar: liste_tekst, debug_fil: tekst) -> ordbok_tekst {
+    prøv { builtin.fil_slett(debug_fil) } fang (e) { }
+    la inn = serie_inn
+    hvis lengde(tastar) > 0 {
+        inn = _punktum(64) + builtin.chr(10) + inn + _punktum(48)
+        inn = inn + builtin.chr(1) + "c"
+        for t i tastar { inn = inn + "sendkey " + t + builtin.chr(10) }
+        inn = inn + builtin.chr(1) + "c"
+    }
+    la argv: liste_tekst = ["-kernel", bilete, "-m", minne, "-cpu", "max",
+        "-display", "none", "-serial", "mon:stdio", "-debugcon", "file:" + debug_fil,
+        "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-no-reboot"]
+    la req = process_abi.request(qemu, argv, "/tmp", inn, tidsgrense_ms, 33554432)
+    process_abi.sett_sandbox(req, "none", 4294967296, 1024, sann)
+    process_abi.sett_environment(req, {})
+    la t0 = builtin.tid_ms()
+    la r = builtin.process_spawn_argv(req)
+    la ut = _resultat(r, t0, debug_fil)
+    la o = tekst(r["stdout"])
+    hvis builtin.index_of(o, builtin.chr(10)) < 0 { o = builtin.replace(o, "\\n", builtin.chr(10)) }
+    ut["stdout"] = o
+    ut["serie"] = utan_monitor(o)
+    returner ut
+}
+
+funksjon _punktum(n: heiltall) -> tekst {
+    la t = ""
+    la i = 0
+    mens i < n {
+        t = t + "."
+        i = i + 1
+    }
+    returner t
+}
+
+// Fjernar linjer frå QEMU-monitoren (banner, «(qemu)»-ledetekst, ANSI-redigering) og CR.
+funksjon utan_monitor(t: tekst) -> tekst {
+    la ut = ""
+    for l i builtin.split(builtin.replace(t, builtin.chr(13), ""), builtin.chr(10)) {
+        la støy = builtin.index_of(l, builtin.chr(27)) >= 0 eller builtin.index_of(l, "(qemu)") >= 0 eller
+            builtin.starts_with(l, "QEMU ")
+        hvis ikkje støy { ut = ut + l + builtin.chr(10) }
+    }
+    // split gjev ein tom siste bit etter avsluttande linjeskift
+    hvis builtin.ends_with(ut, builtin.chr(10) + builtin.chr(10)) { ut = builtin.slice(ut, 0, lengde(ut) - 1) }
+    returner ut
 }
 
 // Køyrer biletet. Returnerer kart: status, qemu_kode, kjerne_kode (-1 = inga debug-exit),

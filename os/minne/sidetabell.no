@@ -1,0 +1,84 @@
+// os/minne/sidetabell.no — 4 KiB-sidetabell-API over gjeldande CR3 (K2).
+//
+// Tabellane blir lesne og skrivne via direktekartet (0x8000000000 + fysisk). Nye
+// mellomnivå-tabellar kjem frå os/minne/rammer. Kjerne-vindauget for dette API-et er
+// [2 GiB, 0x8000000000): under 2 GiB eig trampolinen identitets-/ELF-kartet og
+// demand-zero-vindauga (heap/stakk) — #PF-stubben brukar sine eigne tabellar der.
+// Ingen NX/PAT i K2: flagg er P (1), RW (2), US (4).
+
+bruk os.x86.maskin som maskin
+bruk os.minne.rammer som rammer
+
+funksjon ADR_MASKE() -> heiltall { returner 0x000FFFFFFFFFF000 }
+funksjon VINDAUGE_LÅG() -> heiltall { returner 0x80000000 }
+funksjon VINDAUGE_HØG() -> heiltall { returner 0x8000000000 }
+
+funksjon _sjekk_va(va: heiltall) -> heiltall {
+    hvis (va % 4096) != 0 { kast "sidetabell: ujustert VA " + tekst(va) }
+    hvis va < VINDAUGE_LÅG() eller va >= VINDAUGE_HØG() { kast "sidetabell: VA utanfor kjerne-vindauget: " + tekst(va) }
+    returner 0
+}
+
+funksjon _idx(va: heiltall, skift: heiltall) -> heiltall { returner (va >> skift) & 511 }
+
+// Adressa (VA i direktekartet) til oppføringa for `va` på nivået `skift` (39/30/21/12),
+// eller -1 når vegen manglar. Med lag=sann blir manglande tabellar oppretta.
+funksjon _oppføring(va: heiltall, lag: boolsk) -> heiltall {
+    la tabell = maskin.les_cr3() & ADR_MASKE()
+    la skift: liste_heiltall = [39, 30, 21]
+    for s i skift {
+        la a = maskin.fys_til_va(tabell) + _idx(va, s) * 8
+        la e = builtin.raw_load64(a)
+        hvis (e & 1) == 0 {
+            hvis ikkje lag { returner -1 }
+            la ny = rammer.alloc_null()
+            hvis ny < 0 { kast "sidetabell: tomt for rammer" }
+            builtin.raw_store64(a, ny | 3)
+            e = ny | 3
+        }
+        hvis (e & 128) != 0 { kast "sidetabell: stor side (PS) på vegen til " + tekst(va) }
+        tabell = e & ADR_MASKE()
+    }
+    returner maskin.fys_til_va(tabell) + _idx(va, 12) * 8
+}
+
+// Fysisk adresse for `va` (4 KiB, 2 MiB eller 1 GiB side), eller -1 når ikkje mappa.
+funksjon oversett(va: heiltall) -> heiltall {
+    la tabell = maskin.les_cr3() & ADR_MASKE()
+    la skift: liste_heiltall = [39, 30, 21, 12]
+    for s i skift {
+        la e = builtin.raw_load64(maskin.fys_til_va(tabell) + _idx(va, s) * 8)
+        hvis (e & 1) == 0 { returner -1 }
+        hvis s != 39 og s != 12 og (e & 128) != 0 {
+            la storleik = 1 << s
+            returner (e & ADR_MASKE() & (0 - storleik)) + (va & (storleik - 1))
+        }
+        tabell = e & ADR_MASKE()
+    }
+    returner tabell + (va & 4095)
+}
+
+funksjon map(va: heiltall, fys: heiltall, skrivbar: boolsk) -> heiltall {
+    _sjekk_va(va)
+    hvis (fys % 4096) != 0 { kast "sidetabell: ujustert fysisk adresse" }
+    la a = _oppføring(va, sann)
+    hvis (builtin.raw_load64(a) & 1) != 0 { kast "sidetabell: " + tekst(va) + " er alt mappa" }
+    la flagg = 1
+    hvis skrivbar { flagg = 3 }
+    builtin.raw_store64(a, fys | flagg)
+    maskin.invlpg(va)
+    returner 0
+}
+
+// Fjernar mappinga; returnerer den gamle fysiske adressa eller -1. Rammene til
+// mellomnivå-tabellane blir verande.
+funksjon unmap(va: heiltall) -> heiltall {
+    _sjekk_va(va)
+    la a = _oppføring(va, usann)
+    hvis a < 0 { returner -1 }
+    la e = builtin.raw_load64(a)
+    hvis (e & 1) == 0 { returner -1 }
+    builtin.raw_store64(a, 0)
+    maskin.invlpg(va)
+    returner e & ADR_MASKE()
+}

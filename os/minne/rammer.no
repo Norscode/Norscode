@@ -1,0 +1,152 @@
+// os/minne/rammer.no — fysisk rammeallokator (4 KiB) over Multiboot-minnekartet (K2).
+//
+// Eigarskap av fysisk minne etter init(ønskt_bytes):
+//   [0, 1 MiB)                         reservert (BIOS, Multiboot-strukturar, sanntidsmodus)
+//   [1 MiB, pool_slutt)                trampoline + ELF + bss + #PF-poolen (demand-zero).
+//                                      #PF-stubben eig bump-peikaren sin åleine.
+//   [pool_slutt, regionslutt)          DENNE allokatoren. Delinga skjer éin gong: init
+//                                      kallar pool_avgrens (maskinkode, atomisk mot #PF
+//                                      fordi stubben ikkje kan sidefeile) og tek toppen.
+//   andre brukande regionar < 4 GiB    òg denne allokatoren (over pool-regionen).
+// Bitmap (1 bit per ramme, 1 = oppteken) dekkjer 0 … høgaste brukande adresse < 4 GiB og
+// ligg i dei første rammene av den overtekne delen, lesen/skriven via direktekartet.
+
+bruk os.x86.info som info
+bruk os.x86.maskin som maskin
+
+la _bitmap = 0      // VA (direktekart) til bitmapet
+la _rammer = 0      // tal rammer bitmapet dekkjer
+la _ord = 0         // tal u64-ord
+la _frie = 0
+la _totalt = 0
+la _hint = 0
+la _lågaste = 0     // første fysiske adresse denne allokatoren eig
+
+funksjon GRENSE() -> heiltall { returner 0x100000000 }   // direktekartet dekkjer 0–4 GiB
+
+funksjon _sett(r: heiltall) -> heiltall {
+    la a = _bitmap + (r / 64) * 8
+    la w = builtin.raw_load64(a)
+    la bit = 1 << (r % 64)
+    hvis (w & bit) == 0 { builtin.raw_store64(a, w | bit) }
+    returner 0
+}
+
+funksjon _nullstill(r: heiltall) -> heiltall {
+    la a = _bitmap + (r / 64) * 8
+    la w = builtin.raw_load64(a)
+    la bit = 1 << (r % 64)
+    hvis (w & bit) != 0 { builtin.raw_store64(a, w - bit) }
+    returner 0
+}
+
+funksjon oppteken(fys: heiltall) -> boolsk {
+    la r = fys / 4096
+    hvis r < 0 eller r >= _rammer { returner sann }
+    la w = builtin.raw_load64(_bitmap + (r / 64) * 8)
+    returner (w & (1 << (r % 64))) != 0
+}
+
+// Tek over `ønskt_bytes` frå toppen av #PF-poolen. Returnerer tal frie rammer.
+funksjon init(ønskt_bytes: heiltall) -> heiltall {
+    maskin.init()
+    la kart = maskin.minnekart()
+    la topp = 0
+    for p i kart {
+        hvis p[2] == 1 {
+            la slutt = p[0] + p[1]
+            hvis slutt > GRENSE() { slutt = GRENSE() }
+            hvis slutt > topp { topp = slutt }
+        }
+    }
+    hvis topp == 0 { kast "rammer: minnekartet har ingen brukande RAM" }
+    la gammal_slutt = maskin.felt(info.F_POOL_SLUTT())
+    la ny_slutt = (gammal_slutt - ønskt_bytes) & -4096
+    la fekk = maskin.pool_avgrens(ny_slutt)
+    hvis fekk == 0 { kast "rammer: #PF-poolen nekta å gje frå seg " + tekst(ønskt_bytes) + " byte" }
+    _rammer = (topp & -4096) / 4096
+    _ord = (_rammer + 63) / 64
+    la bitmap_rammer = (_ord * 8 + 4095) / 4096
+    _bitmap = maskin.fys_til_va(ny_slutt)
+    la i = 0
+    mens i < bitmap_rammer {
+        maskin.nullstill_side(_bitmap + i * 4096)
+        i = i + 1
+    }
+    // Alt oppteke, så frigjer me det allokatoren eig.
+    i = 0
+    mens i < _ord {
+        builtin.raw_store64(_bitmap + i * 8, -1)
+        i = i + 1
+    }
+    _lågaste = ny_slutt + bitmap_rammer * 4096
+    _frie = 0
+    for p2 i kart {
+        hvis p2[2] == 1 {
+            la start_a = (p2[0] + 4095) & -4096
+            la slutt_a = (p2[0] + p2[1]) & -4096
+            hvis slutt_a > GRENSE() { slutt_a = GRENSE() }
+            hvis start_a < _lågaste { start_a = _lågaste }
+            la a = start_a
+            mens a < slutt_a {
+                _nullstill(a / 4096)
+                _frie = _frie + 1
+                a = a + 4096
+            }
+        }
+    }
+    _totalt = _frie
+    _hint = _lågaste / 4096 / 64
+    returner _frie
+}
+
+// Ei ledig ramme (fysisk adresse), eller -1 når alt er oppteke. Innhaldet er udefinert.
+funksjon alloc() -> heiltall {
+    hvis _frie == 0 { returner -1 }
+    la n = 0
+    la i = _hint
+    mens n < _ord {
+        hvis i >= _ord { i = 0 }
+        la w = builtin.raw_load64(_bitmap + i * 8)
+        hvis w != -1 {
+            la b = 0
+            mens b < 64 {
+                hvis (w & (1 << b)) == 0 {
+                    la r = i * 64 + b
+                    hvis r < _rammer {
+                        builtin.raw_store64(_bitmap + i * 8, w | (1 << b))
+                        _frie = _frie - 1
+                        _hint = i
+                        returner r * 4096
+                    }
+                }
+                b = b + 1
+            }
+        }
+        i = i + 1
+        n = n + 1
+    }
+    returner -1
+}
+
+// Som alloc, men nullstilt.
+funksjon alloc_null() -> heiltall {
+    la f = alloc()
+    hvis f >= 0 { maskin.nullstill_side(maskin.fys_til_va(f)) }
+    returner f
+}
+
+funksjon fri(fys: heiltall) -> heiltall {
+    hvis (fys % 4096) != 0 { kast "rammer: fri av ujustert adresse " + tekst(fys) }
+    hvis fys < _lågaste eller fys / 4096 >= _rammer { kast "rammer: fri av ramme allokatoren ikkje eig: " + tekst(fys) }
+    hvis ikkje oppteken(fys) { kast "rammer: dobbel fri av " + tekst(fys) }
+    _nullstill(fys / 4096)
+    _frie = _frie + 1
+    la ord = fys / 4096 / 64
+    hvis ord < _hint { _hint = ord }
+    returner 0
+}
+
+funksjon frie() -> heiltall { returner _frie }
+funksjon totalt() -> heiltall { returner _totalt }
+funksjon lågaste() -> heiltall { returner _lågaste }

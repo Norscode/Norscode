@@ -1,0 +1,187 @@
+// os/kjerne/k2_prøve.no — K2-prøvekjerne: maskinvarebibliotek og drivarar.
+//
+// Køyrer berre under Norscode OS-trampolinen (treng NORSCODE_OS_INFO). Viser:
+//   * info-blokka og stubbane (cpuid, rdrand, CR0/CR4, rflags)
+//   * PIT-tidtakar 100 Hz: tikk går, og nanosleep(100 ms) tek ~10 tikk (shimmen søv med hlt)
+//   * RTC-dato
+//   * rammeallokator (alloc/fri) og sidetabell-API (map/skriv/les/oversett/unmap)
+//   * seriell mottak via IRQ4 (ei linje frå verten blir ekko-a)
+//   * PS/2-tastatur via IRQ1 (tekst skriven med QEMU-monitoren sin sendkey)
+// Avbrot køyrer aldri Norscode: IRQ-stubbane postar i hendingsringen, og start() tømer
+// han synkront i ei hendingsløkke (hlt når ringen er tom).
+
+bruk os.x86.info som info
+bruk os.x86.maskin som maskin
+bruk os.drivarar.hendingar som hendingar
+bruk os.drivarar.pic som pic
+bruk os.drivarar.tidtakar som tidtakar
+bruk os.drivarar.serie som serie
+bruk os.drivarar.tastatur som tastatur
+bruk os.drivarar.rtc som rtc
+bruk os.minne.rammer som rammer
+bruk os.minne.sidetabell som sidetabell
+
+funksjon hex(v: heiltall) -> tekst {
+    la siffer = "0123456789abcdef"
+    hvis v == 0 { returner "0x0" }
+    la t = ""
+    la x = v
+    la n = 0
+    mens n < 16 og x != 0 {
+        t = builtin.slice(siffer, x & 15, (x & 15) + 1) + t
+        x = (x >> 4) & 0x0FFFFFFFFFFFFFFF
+        n = n + 1
+    }
+    returner "0x" + t
+}
+
+funksjon ok_feil(b: boolsk) -> tekst {
+    hvis b { returner "ok" }
+    returner "FEIL"
+}
+
+// Tømer hendingsringen éin gong og sender postane til drivarane.
+funksjon pump() -> heiltall {
+    la n = 0
+    la h = hendingar.neste()
+    mens lengde(h) > 0 {
+        hvis h[0] == info.V_SERIE() {
+            serie.mottak(h[1])
+        } ellers hvis h[0] == info.V_TASTATUR() {
+            tastatur.scancode(h[1])
+        }
+        n = n + 1
+        h = hendingar.neste()
+    }
+    returner n
+}
+
+// Ventar på ei ikkje-tom seriell-linje (punktum i starten er utfylling frå verten).
+funksjon vent_serielinje(frist_tikk: heiltall) -> tekst {
+    la slutt = tidtakar.tikk() + frist_tikk
+    mens tidtakar.tikk() < slutt {
+        pump()
+        mens serie.har_linje() {
+            la l = serie.ta_linje()
+            la i = 0
+            mens i < lengde(l) og builtin.slice(l, i, i + 1) == "." { i = i + 1 }
+            la rest = builtin.slice(l, i, lengde(l))
+            hvis rest != "" { returner rest }
+        }
+        hendingar.vent()
+    }
+    returner ""
+}
+
+funksjon vent_tastelinje(frist_tikk: heiltall) -> tekst {
+    la slutt = tidtakar.tikk() + frist_tikk
+    mens tidtakar.tikk() < slutt {
+        pump()
+        hvis tastatur.har_linje() { returner tastatur.ta_linje() }
+        hendingar.vent()
+    }
+    returner "<tidsavbrot>"
+}
+
+funksjon start() -> heiltall {
+    skriv("K2-prøve: Norscode OS\n")
+    la a = maskin.init()
+    skriv("info: versjon=" + tekst(maskin.felt(info.F_VERSJON())) + " stubbar=" + tekst(maskin.felt(info.F_TAL_STUBBAR())) +
+        " ring=" + tekst(builtin.raw_load64(maskin.felt(info.F_RING()) + info.R_KAPASITET())) + "\n")
+    la kart = maskin.minnekart()
+    la brukande = 0
+    for p i kart {
+        hvis p[2] == 1 { brukande = brukande + p[1] }
+    }
+    skriv("minne: " + tekst(lengde(kart)) + " regionar, " + tekst(brukande / 1048576) + " MiB brukande\n")
+    la mbi_slutt = maskin.felt(info.F_MBI_SLUTT())
+    la pool_første = maskin.felt(info.F_POOL_FØRSTE())
+    skriv("multiboot: data før pool=" + ok_feil(mbi_slutt <= pool_første) + "\n")
+
+    // CPU-primitiv
+    la c0 = maskin.cpuid(0, 0)
+    skriv("cpuid: maksblad>=1 " + ok_feil(c0[0] >= 1) + "\n")
+    la r1 = maskin.rdrand()
+    la r2 = maskin.rdrand()
+    skriv("rdrand: " + ok_feil(r1[0] == 1 og r2[0] == 1 og r1[1] != r2[1]) + "\n")
+    la cr0 = maskin.les_cr0()
+    la cr4 = maskin.les_cr4()
+    skriv("cr0: PG=" + tekst((cr0 >> 31) & 1) + " PE=" + tekst(cr0 & 1) + " cr4: PAE=" + tekst((cr4 >> 5) & 1) + " OSFXSR=" + tekst((cr4 >> 9) & 1) + "\n")
+    la t0 = maskin.rdtsc()
+    la t1 = maskin.rdtsc()
+    skriv("rdtsc: aukar " + ok_feil(t1 > t0) + "\n")
+
+    // Avbrot + tidtakar (seriell mottak og tastatur blir opna seinare, sjå under)
+    tidtakar.start(100)
+    maskin.sti()
+    skriv("avbrot: IF=" + tekst(ok_feil(maskin.avbrot_på())) + " pic-maske=" + hex(pic.maske()) + "\n")
+    la k0 = tidtakar.tikk()
+    tidtakar.vent_tikk(5)
+    skriv("tidtakar: " + tekst(tidtakar.hz()) + " Hz, tikk går " + ok_feil(tidtakar.tikk() >= k0 + 5) + "\n")
+    la s0 = tidtakar.tikk()
+    la m0 = builtin.tid_ms()
+    builtin.vent.sov(100)
+    la ds = tidtakar.tikk() - s0
+    la dm = builtin.tid_ms() - m0
+    skriv("sov(100 ms): " + tekst(ds) + " tikk, " + tekst(dm) + " ms\n")
+    skriv("tidtakar: sov " + ok_feil(ds >= 9 og ds <= 11 og dm >= 80 og dm <= 150) + "\n")
+
+    // RTC
+    la tid = rtc.les()
+    skriv("rtc: " + rtc.som_tekst(tid) + "\n")
+    skriv("rtc: plausibel " + ok_feil(tid[0] >= 2024 og tid[0] <= 2100 og tid[1] >= 1 og tid[1] <= 12 og tid[2] >= 1 og tid[2] <= 31 og tid[3] <= 23 og tid[4] <= 59 og tid[5] <= 59) + "\n")
+
+    // Rammeallokator
+    la frie0 = rammer.init(16777216)
+    skriv("rammer: " + tekst(frie0) + " frie (" + tekst(frie0 / 256) + " MiB) frå " + hex(rammer.lågaste()) +
+        ", pool_slutt=" + hex(maskin.felt(info.F_POOL_SLUTT())) + "\n")
+    la ra = rammer.alloc()
+    la rb = rammer.alloc()
+    la rc = rammer.alloc()
+    rammer.fri(rb)
+    la rd = rammer.alloc()
+    la unike = ra != rb og rb != rc og ra != rc
+    skriv("rammer: tre ulike " + ok_feil(unike) + ", gjenbruk etter fri " + ok_feil(rd == rb) +
+        ", utanfor pool " + ok_feil(ra >= maskin.felt(info.F_POOL_SLUTT())) + "\n")
+    rammer.fri(ra)
+    rammer.fri(rc)
+    rammer.fri(rd)
+    skriv("rammer: tilbake til " + tekst(rammer.frie()) + " frie " + ok_feil(rammer.frie() == frie0) + "\n")
+    la dobbel = usann
+    prøv { rammer.fri(ra) } fang e { dobbel = sann }
+    skriv("rammer: dobbel fri avvist " + ok_feil(dobbel) + "\n")
+
+    // Sidetabell
+    la va = 0x7000000000
+    la side = rammer.alloc_null()
+    la frie1 = rammer.frie()
+    sidetabell.map(va, side, sann)
+    skriv("sidetabell: mellomtabellar laga=" + tekst(frie1 - rammer.frie()) + "\n")
+    builtin.raw_store64(va + 8, 0x1234567890)
+    builtin.raw_store64(va + 4088, -2)
+    la via_dm = builtin.raw_load64(maskin.fys_til_va(side) + 8)
+    la via_dm2 = builtin.raw_load64(maskin.fys_til_va(side) + 4088)
+    skriv("sidetabell: skriv via VA, les via direktekart " + ok_feil(via_dm == 0x1234567890 og via_dm2 == -2) + "\n")
+    skriv("sidetabell: oversett " + ok_feil(sidetabell.oversett(va + 123) == side + 123) + "\n")
+    la gamal = sidetabell.unmap(va)
+    skriv("sidetabell: unmap " + ok_feil(gamal == side og sidetabell.oversett(va) == -1) + "\n")
+    skriv("sidetabell: 2 MiB-side i direktekartet " + ok_feil(sidetabell.oversett(maskin.fys_til_va(0x300000) + 5) == 0x300005) + "\n")
+    rammer.fri(side)
+
+    // Seriell inn + tastatur. Kjernen skriv ingenting medan han ventar: harnessen sender
+    // tastane gjennom QEMU-monitoren på same stdio som COM1, og monitoren sitt ekko skal
+    // liggje mellom «klar»-linjene og resultata, ikkje midt i ei linje. RX blir opna
+    // fyrst no, så verten sin tekst (og dermed tastane, som QEMU les etter teksten)
+    // kjem medan kjernen står i hendingsløkka.
+    skriv("serie: klar\n")
+    skriv("tastatur: klar\n")
+    tastatur.start()
+    serie.start()
+    la linje = vent_serielinje(3000)
+    la tl = vent_tastelinje(3000)
+    hvis linje == "" { skriv("serie: tidsavbrot\n") } ellers { skriv("serie: ekko «" + linje + "»\n") }
+    skriv("tastatur: «" + tl + "»\n")
+    skriv("hendingar: tapte=" + tekst(hendingar.tapte()) + "\n")
+    skriv("K2-prøve: ferdig\n")
+    returner 0
+}
