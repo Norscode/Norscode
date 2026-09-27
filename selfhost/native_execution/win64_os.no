@@ -1,0 +1,264 @@
+// selfhost/native_execution/win64_os.no — OS-grensa for Windows-målet (W1, docs/WINDOWS_SEED_PLAN.md §2.2).
+//
+// Windows har ingen stabil systemkall-ABI. Der Linux-codegenen emitterer «mov eax,nr; syscall»,
+// emitterer Windows-modus «call qword [OSTAB + nr*8]» (begge 7 B — sjå emit_os_call). OSTAB er
+// ei tabell med peikarar til Norscode-emitterte OS-rutinar, indeksert med Linux-systemkall-
+// nummeret. Kvar rutine:
+//   * tek Linux-inngangsregistera (rdi, rsi, rdx, r10, r8, r9),
+//   * gjer arbeidet via kernel32/ntdll/ws2_32 kalla gjennom IAT (Win64-ABI berre her inne),
+//   * returnerer Linux-form i rax (≥ 0, eller −errno),
+//   * bevarer alt utanom rax/rcx/r11 (som ein ekte `syscall`).
+// Rutinane blir emitterte med win64_asm (etikettar + rel32), ingen handrekna hoppavstandar.
+//
+// Denne modulen er sjølvstendig testbar: bygg_os_demo_pe lagar ei EXE som køyrer OS-rutinane
+// gjennom OSTAB med Linux-konvensjon, so heile trampolina kan verifiserast under wine før ho
+// blir kopla inn i native_codegen_v2 (W1-vidare). native_codegen_v2 vil emittere same rutinane
+// inn i .text og fylle OSTAB i .idata.
+
+bruk selfhost.native_execution.win64_asm som asm
+bruk selfhost.native_execution.pe_emitter som pe
+
+// Linux x86-64-systemkallnummer som Windows-målet emulerer (delmengd; resten fail-closed).
+funksjon NR_READ() -> heiltall { returner 0 }
+funksjon NR_WRITE() -> heiltall { returner 1 }
+funksjon NR_EXIT() -> heiltall { returner 60 }
+funksjon NR_GETRANDOM() -> heiltall { returner 318 }
+funksjon OSTAB_LEN() -> heiltall { returner 512 }
+
+// DLL-ar og funksjonar OS-rutinane treng (W1-delmengd).
+funksjon os_importar() {
+    returner [["KERNEL32.dll", [
+        "GetStdHandle", "WriteFile", "ReadFile", "ExitProcess", "RtlGenRandom"
+    ]]]
+}
+// RtlGenRandom bur eigentleg i ADVAPI32/SystemFunction036; kernel32 vidareeksporterer henne
+// ikkje. W1 brukar difor ADVAPI32 for getrandom (sett inn under). Hald kernel32-lista rein.
+funksjon os_importar_full() {
+    returner [
+        ["KERNEL32.dll", ["GetStdHandle", "WriteFile", "ReadFile", "ExitProcess"]],
+        ["ADVAPI32.dll", ["SystemFunction036"]]
+    ]
+}
+
+// win — call [IAT-slot]-adresse frå eit slot-kart (base + slot).
+funksjon iat(a, slot, base: heiltall, namn: tekst) -> heiltall {
+    hvis ikkje finnes_nøkkel(slot, namn) { kast "win64_os: manglar import " + namn }
+    asm.call_abs(a, base + slot[namn])
+    returner 0
+}
+
+// Felles ramme for OS-rutinane. Lagrar dei seks Linux-inngangsregistera (rdi, rsi, rdx,
+// r10, r8, r9) — ein ekte `syscall` klobrar berre rax/rcx/r11, so alt anna må bevarast —
+// og alignar stakken til 16 uavhengig av kva justering kallaren hadde (rbp er anker).
+// Saved-slott (rbp-relativt): rdi −8, rsi −16, rdx −24, r10 −32, r8 −40, r9 −48.
+funksjon prolog(a) -> heiltall {
+    asm.push(a, asm.RBP())
+    asm.mov(a, asm.RBP(), asm.RSP())
+    asm.push(a, asm.RDI())
+    asm.push(a, asm.RSI())
+    asm.push(a, asm.RDX())
+    asm.push(a, asm.R10())
+    asm.push(a, asm.R8())
+    asm.push(a, asm.R9())
+    asm.and_i(a, asm.RSP(), 0 - 16)             // 16-align
+    asm.sub_i(a, asm.RSP(), 64)                 // 32 skuggeplass + scratch (held 16-align)
+    returner 0
+}
+
+// Gjenopprett dei seks registera og ramma; rax ber returverdien.
+funksjon epilog(a) -> heiltall {
+    asm.lea(a, asm.RSP(), asm.RBP(), 0 - 48)    // til r9-sloten
+    asm.pop(a, asm.R9())
+    asm.pop(a, asm.R8())
+    asm.pop(a, asm.R10())
+    asm.pop(a, asm.RDX())
+    asm.pop(a, asm.RSI())
+    asm.pop(a, asm.RDI())
+    asm.pop(a, asm.RBP())
+    asm.ret(a)
+    returner 0
+}
+
+funksjon S_RDI() -> heiltall { returner 0 - 8 }
+funksjon S_RSI() -> heiltall { returner 0 - 16 }
+funksjon S_RDX() -> heiltall { returner 0 - 24 }
+funksjon S_R10() -> heiltall { returner 0 - 32 }
+funksjon S_R8() -> heiltall { returner 0 - 40 }
+funksjon S_R9() -> heiltall { returner 0 - 48 }
+
+// ── OS-rutine: write(fd, buf, len) ────────────────────────────────────────────
+// Linux: rdi=fd, rsi=buf, rdx=len → rax=skrivne byte (eller −errno). Windows:
+// GetStdHandle for fd 0/1/2 (STD_*_HANDLE = −10−fd), elles er fd sjølv HANDLE.
+// rsp er konstant gjennom begge kalla (ingen push imellom), so [rsp+32]/[rsp+48] er stabile.
+funksjon emit_write(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_write")
+    prolog(a)
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())    // fd
+    asm.cmp_i(a, asm.RCX(), 2)
+    asm.jcc(a, asm.CC_A(), "os_write_handle")   // fd>2: fd er alt ein HANDLE
+    asm.mov_is(a, asm.RAX(), 0 - 10)
+    asm.ld(a, asm.R11(), asm.RBP(), S_RDI())
+    asm.sub(a, asm.RAX(), asm.R11())            // rax = -10 - fd
+    asm.mov(a, asm.RCX(), asm.RAX())
+    iat(a, slot, base, "KERNEL32.dll!GetStdHandle")
+    asm.mov(a, asm.RCX(), asm.RAX())            // hFile
+    asm.jmp(a, "os_write_call")
+    asm.merk(a, "os_write_handle")
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())
+    asm.merk(a, "os_write_call")
+    asm.ld(a, asm.RDX(), asm.RBP(), S_RSI())    // buf
+    asm.ld(a, asm.R8(), asm.RBP(), S_RDX())     // len
+    asm.lea(a, asm.R9(), asm.RSP(), 48)         // &written
+    asm.st_i(a, asm.RSP(), 32, 0)               // lpOverlapped = NULL
+    iat(a, slot, base, "KERNEL32.dll!WriteFile")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_write_feil")
+    asm.ld32(a, asm.RAX(), asm.RSP(), 48)       // rax = written
+    asm.jmp(a, "os_write_ut")
+    asm.merk(a, "os_write_feil")
+    asm.mov_is(a, asm.RAX(), 0 - 5)             // -EIO
+    asm.merk(a, "os_write_ut")
+    epilog(a)
+    returner 0
+}
+
+// ── OS-rutine: exit(kode) ─────────────────────────────────────────────────────
+funksjon emit_exit(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_exit")
+    asm.mov(a, asm.RCX(), asm.RDI())            // exit-kode
+    asm.and_i(a, asm.RCX(), 255)
+    asm.and_i(a, asm.RSP(), 0 - 16)
+    asm.sub_i(a, asm.RSP(), 32)
+    iat(a, slot, base, "KERNEL32.dll!ExitProcess")
+    asm.int3(a)                                 // ExitProcess returnerer aldri
+    returner 0
+}
+
+// ── OS-rutine: getrandom(buf, len, flags) ─────────────────────────────────────
+// Linux: rdi=buf, rsi=len → rax=len. Windows: SystemFunction036(PVOID, ULONG) → BOOLEAN.
+funksjon emit_getrandom(a, slot, base: heiltall) -> heiltall {
+    asm.merk(a, "os_getrandom")
+    prolog(a)
+    asm.ld(a, asm.RCX(), asm.RBP(), S_RDI())    // buf
+    asm.ld(a, asm.RDX(), asm.RBP(), S_RSI())    // len
+    iat(a, slot, base, "ADVAPI32.dll!SystemFunction036")
+    asm.tst(a, asm.RAX(), asm.RAX())
+    asm.jcc(a, asm.CC_E(), "os_getrandom_feil")
+    asm.ld(a, asm.RAX(), asm.RBP(), S_RSI())    // rax = len
+    asm.jmp(a, "os_getrandom_ut")
+    asm.merk(a, "os_getrandom_feil")
+    asm.mov_is(a, asm.RAX(), 0 - 11)            // -EAGAIN
+    asm.merk(a, "os_getrandom_ut")
+    epilog(a)
+    returner 0
+}
+
+// enosys: alle ukjende OSTAB-slottar → -ENOSYS (fail-closed).
+funksjon emit_enosys(a) -> heiltall {
+    asm.merk(a, "os_enosys")
+    asm.mov_is(a, asm.RAX(), 0 - 38)
+    asm.ret(a)
+    returner 0
+}
+
+// emit_os_call(a, nr, ostab_va): Windows-form for eit systemkall der Linux hadde
+// «mov eax,nr; syscall» (7 B). call qword [OSTAB + nr*8] er FF 14 25 disp32 = 7 B, so
+// storleiken på staden er uendra og handkoda hopp rundt han i native_codegen_v2 held.
+funksjon emit_os_call(a, nr: heiltall, ostab_va: heiltall) -> heiltall {
+    asm.call_abs(a, ostab_va + nr * 8)
+    returner 0
+}
+
+// ── Sjølvstendig demo-PE: køyr OS-rutinane med Linux-konvensjon gjennom OSTAB ──
+// _start (Win64-inngang) skriv ei melding via os_write, hentar 4 tilfeldige byte via
+// os_getrandom, og avsluttar via os_exit med kode = (byte0 xor byte1 xor byte2 xor byte3
+// er ikkje-null ? 42 : 41). Verifiserer heile trampolina under wine.
+funksjon bygg_os_demo_pe(melding: tekst) {
+    la base = 4194304                           // 0x400000
+    la imp = pe.bygg_importar(os_importar_full(), 16384)   // .idata @ 0x4000
+    la slot = imp["slot"]
+    la ostab_va = base + 12288                  // .osdata @ 0x3000
+    la msg_va = base + 8192                     // .rdata @ 0x2000
+    la msg = []
+    pe_bytes(msg, melding)
+
+    la a = asm.ny()
+    // OSTAB fyllest ved lasting? Nei — vi har inga relokering. Rutine-VA-ane er faste
+    // (base+text_rva+etikett), so OSTAB blir emittert som konstant .osdata med dei VA-ane.
+    // Difor to pass: emitter koden for å finne etikett-offset, så bygg OSTAB.
+    // _start:
+    asm.merk(a, "_start")
+    asm.sub_i(a, asm.RSP(), 40)                 // align + skugge for kall inn i rutinane? rutinane alignar sjølve
+    // os_write(1, msg, len)
+    asm.mov_i32(a, asm.RDI(), 1)
+    asm.mov_i64(a, asm.RDX(), lengde(msg))
+    asm.mov_i64(a, asm.RSI(), msg_va)
+    emit_os_call(a, NR_WRITE(), ostab_va)
+    // os_getrandom(buf=rsp+? , 4) — bruk 8 byte skuggeplass over rsp
+    asm.lea(a, asm.RDI(), asm.RSP(), 8)
+    asm.mov_i32(a, asm.RSI(), 4)
+    emit_os_call(a, NR_GETRANDOM(), ostab_va)
+    // exit 42 (fast — random berre for å vise at rutina køyrer utan krasj)
+    asm.mov_i32(a, asm.RDI(), 42)
+    emit_os_call(a, NR_EXIT(), ostab_va)
+    asm.int3(a)
+    // OS-rutinane
+    emit_write(a, slot, base)
+    emit_exit(a, slot, base)
+    emit_getrandom(a, slot, base)
+    emit_enosys(a)
+    la kode = asm.ferdig(a)
+    la lab = a["lab"]
+    la text_rva = 4096
+
+    // OSTAB: OSTAB_LEN slottar, alle → os_enosys, unntatt dei vi fyller.
+    la enosys_va = base + text_rva + lab["os_enosys"]
+    la ostab = []
+    la i = 0
+    mens i < OSTAB_LEN() {
+        legg_u64_le_os(ostab, enosys_va)
+        i = i + 1
+    }
+    sett_slot(ostab, NR_WRITE(), base + text_rva + lab["os_write"])
+    sett_slot(ostab, NR_EXIT(), base + text_rva + lab["os_exit"])
+    sett_slot(ostab, NR_GETRANDOM(), base + text_rva + lab["os_getrandom"])
+
+    la spec = {
+        "image_base": base, "entry_rva": text_rva,
+        "seksjonar": [
+            pe.seksjon(".text", text_rva, lengde(kode), kode, pe.FLAGG_TEXT()),
+            pe.seksjon(".rdata", 8192, lengde(msg), msg, pe.FLAGG_RDATA()),
+            pe.seksjon(".osdata", 12288, lengde(ostab), ostab, pe.FLAGG_RDATA()),
+            pe.seksjon(".idata", 16384, lengde(imp["bytes"]), imp["bytes"], pe.FLAGG_DATA())
+        ],
+        "import_rva": imp["import_rva"], "import_size": imp["import_size"],
+        "iat_rva": imp["iat_rva"], "iat_size": imp["iat_size"],
+        "stack_reserve": 1048576, "stack_commit": 65536
+    }
+    returner pe.bygg_pe(spec)
+}
+
+funksjon pe_bytes(buf, verdi: tekst) {
+    la i = 0
+    mens i < lengde(verdi) { legg_til(buf, builtin.char_code(verdi[i]) & 255)  i = i + 1 }
+}
+
+funksjon legg_u64_le_os(buf, v: heiltall) {
+    la i = 0
+    mens i < 8 { legg_til(buf, (v >> (i * 8)) & 255)  i = i + 1 }
+}
+
+funksjon sett_slot(ostab, nr: heiltall, va: heiltall) {
+    la off = nr * 8
+    la i = 0
+    mens i < 8 { ostab[off + i] = (va >> (i * 8)) & 255  i = i + 1 }
+}
+
+funksjon start() -> heiltall {
+    la out = miljo_hent("NC_PE_OUTPUT")
+    hvis out == "" { out = "build/norscode-os-demo-windows-x86_64.exe" }
+    la image = bygg_os_demo_pe("OS-rutine via OSTAB: write ok\n")
+    fil_skriv_binær(out, image)
+    skriv("win64_os: os-demo " + tekst_fra_heltall(lengde(image)) + " bytes → " + out + "\n")
+    returner 0
+}
