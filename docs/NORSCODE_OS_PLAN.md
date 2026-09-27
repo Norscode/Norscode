@@ -1,6 +1,6 @@
 # Norscode OS — plan (x86-64 først, AArch64 seinare)
 
-Status: utkast 2026-09-27. Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
+Status: K0 og K1 ferdige 2026-09-27 (sjå «Status K0/K1» under). Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
 native_sys, bootformat, minne/GC, historikk og AArch64 (8 kart + kritikar, målte eksperiment i QEMU 11).
 
 ## Mål
@@ -53,13 +53,76 @@ codegen, og der **brukarprogram er vanlege Norscode-program** (uendra AOT-binær
 |---|------|------|
 | K0 | Byggjekjede + testsele | `nc run tools/os_bygg.no` lagar `build/os/norscode_os.img` frå ein Norscode-kjerne; `nc run tools/os_qemu_test.no` bootar i qemu-system-x86_64, les COM1, avsluttar via isa-debug-exit, med tidsgrense og rydding; «Hei frå Norscode OS» over seriell |
 | K1 | Ring-0-kjerne med syscall-shim + demand-zero | Kjerne-program med strengar, lister, kart, prøv/fang, rekursjon og >100 MiB søppel (GC-innsamlingar) gjev same utdata som på Linux; `-m 256M` held |
-| K2 | Maskinvarebibliotek og drivarar | `os/x86` (stubbar), 16550-seriell inn/ut, PIC-remap + PIT/LAPIC-timer via hendingsbuffer, PS/2-tastatur, CMOS-klokke, RDRAND, bootinfo (Multiboot mmap) → fysisk rammeallokator, sidetabell-API; unnatak 0–31 gjev diagnose over seriell i staden for trippelfeil |
+| K2 | Maskinvarebibliotek og drivarar | `os/x86` (stubbar), 16550-seriell inn/ut, PIC-remap + PIT/LAPIC-timer via hendingsbuffer, PS/2-tastatur, CMOS-klokke, RDRAND, bootinfo (Multiboot mmap) → fysisk rammeallokator med frigjering, sidetabell-API (unnatak 0–31 → diagnose er alt gjort i K1) |
 | K3 | Prosessar i ring 3 | ELF64-lastar, eige CR3, `kjør_brukar`-trampoline, Linux-syscall nivå 1, round-robin med timer-preemptering; to uendra Norscode hello-binærar køyrer samstundes |
 | K4 | Filsystem | initramfs (arkiv bygt av tools/os_bygg.no) + VFS + nivå 2-syscalls; uendra Norscode-program les/skriv filer |
 | K5 | Prosess-API og skal | fork/execve/wait4/pipe2/dup2/…; `os/brukar/init.no` + enkel Norscode-skal; **stage0 `nc run hello.no` inne i Norscode OS** |
 | K6 | Lagring og nett | virtio-blk + vedvarande FS; virtio-net + TCP/IP i Norscode + nivå 4-sokkel; `nc`-HTTP-tenar svarar frå OS-et |
 | K7 | CI | QEMU-boottestar i GitHub Actions (Linux-runner) via Norscode CI-adapteren |
 | K8 | AArch64 | same kjerne på qemu-system-aarch64 -M virt (PL011, GIC, generic timer) etter at AArch64-GC er inne |
+
+## Status K0/K1 (2026-09-27) — ferdige, med målte resultat
+
+Filer: `os/boot/x86.no` (maskinkode-emittar: etikettar, rel/abs-fiksar, delsett av x86-64),
+`os/boot/elf.no` (PT_LOAD-lesar), `os/boot/trampoline.no` (heile oppstartsbiletet),
+`os/boot/byggjar.no` + `tools/os_bygg.no` (kjede), `tools/os_pakk.no` (ELF → bilete),
+`os/boot/qemu.no` + `tools/os_qemu_test.no` (sele), `os/kjerne/{hei,k1_prøve,k1_feil}.no`,
+`tests/test_os_k0_boot.no`, `tests/test_os_k1_ring0.no` (begge hoppar reint utan QEMU).
+
+Bruk:
+
+```
+./bin/nc run tools/os_bygg.no                  # os/kjerne/hei.no → build/os/norscode_os.img (demand)
+./bin/nc run tools/os_qemu_test.no             # -m 256M, krev «Hei frå Norscode OS» + exit 0
+OS_KJERNE=os/kjerne/k1_prøve.no OS_BILETE=build/os/k1.img ./bin/nc run tools/os_bygg.no
+OS_BILETE=build/os/k1.img OS_VENTA="K1-prøve: ferdig" ./bin/nc run tools/os_qemu_test.no
+```
+
+Målt (macOS arm64-vert, QEMU 11 TCG, `-cpu max`):
+- K0: hei-ELF (155 KB) → bilete 237 KB; bootar på ~0,17 s; COM1 «Hei frå Norscode OS», QEMU-status 1.
+  Ivrig modus (`OS_MODUS=ivrig`, identitetskart med 2 MiB-sider) krev `-m 2G`; demand held med 256M
+  (3 sidefeil, 6 rammer).
+- K1: k1_prøve-ELF (2,06 MB, med std.native_gap) bootar med `-m 256M` på ~8,7 s; seriell-utdata
+  (546 B) er **byte-identiske** med same ELF i Docker linux/amd64, inkl. 7 GC-innsamlingar over
+  >300 MiB søppel. 16 725 rammer (≈ 65 MiB) rørt → `-m 96M` held òg; `-m 48M` gjev
+  «[kjerne] tomt for fysiske sider» og debug-exit 126. Null-peikar (k1_feil) gjev
+  `[kjerne] unnatak v=0e … cr2=8` og debug-exit 125, ikkje trippelfeil.
+- Byggjetid: compile ~1 s, codegen i Docker ~3–6 s, pakking ~1 s.
+
+Avvik frå planen / val tekne under K0–K1 (og kvifor):
+- **Biletet er ikkje «segment på sine VA-ar».** Codegen-ELF-en har segmenta side-justert og tett
+  i fila, så heile ELF-fila blir lagd uendra inn i biletet, og sidetabellane (bygde av Norscode ved
+  pakketid) mappar VA → fysisk. Berre siste, delvis fylte side per segment blir kopiert (4 sider),
+  for resten av den sida må vere null (NCB-tilhengjet ligg rett etter heap-kontrollblokka i fila).
+  Gjev 2,1 MB bilete for k1 mot ~7,5 MB flatt, og ingen store liste-kopiar i VM-en.
+- **Adresserom:** 0x1000–0x3FFFFF identitet (side 0 umappa), 0x400000–0x7FFFFF ELF (4 KiB-sider),
+  heap `[0x780000, 0x6B200000)` og programstakk `[0x6B800000, 0x6C000000)` demand-zero,
+  direktekart av 0–4 GiB på 0x8000000000 (2 MiB-sider) for sidetabellar, rammer, mbi og HPET.
+  Trampoline-stakkane (boot, shim, IST1–3) ligg i bss og blir nådde via direktekartet.
+- **Unnatak 0–31 → diagnose** er alt gjort i K1 (IST-stakkar: #PF=IST1, #DF=IST2, resten IST3),
+  ikkje K2. Diagnose og statistikk: COM1 for feil, port 0xE9 (`-debugcon`) for
+  «[kjerne] exit=… rammer=… sidefeil=…» slik at COM1 er lik Linux-utdata.
+- **Klokke:** monoton = HPET (periode frå GCAP_ID; TSC som reserve), realtid = CMOS ved boot
+  (days_from_civil i maskinkode) + monoton; målt lik vertsklokka. `nanosleep` returnerer 0 straks
+  (ingen timer før K2). `getrandom` = RDRAND, fail-closed (ENOSYS utan RDRAND → QEMU `-cpu max`,
+  qemu64 manglar RDRAND).
+- **Codegen på macOS går via Docker** (`nc-x86tools`, committa Linux-stage0 kopiert til
+  `build/os/linux-dist` og montert som `/work/dist`), NCB-en blir kompilert lokalt. Utan Docker:
+  lokal tolka codegen (rett, ~20 s for små program). På Linux x86-64: `bin/nc bygg-native` direkte.
+- **Pakkinga køyrer i eigen prosess med `NORSCODE_VM_FAST=1`** (`tools/os_pakk.no`): i
+  `tools/os_bygg.no`-prosessen (mange importerte modular, utan fast-modus) tok same arbeid 74–83 s,
+  i barneprosessen ~1 s.
+- Heapen må liggje under 2 GiB (GC-modus); ein ikkje-GC-ELF (2 GiB heap) blir avvist ved pakking
+  med ei tydeleg melding.
+
+Opne punkt etter K1:
+- Alle ELF-sider er mappa RW (ingen W^X); literal-segmentet er skrivbart i motsetnad til Linux.
+- Rammepoolen er ein bump-allokator frå den RAM-regionen som inneheld `pool_start` (avgrensa til
+  4 GiB); ingen frigjering. Multiboot-infoen ligg i poolen og blir overskriven etter at `pool_init`
+  har lese minnekartet (K2 må kopiere mbi først om ho trengst seinare).
+- `raw_call`-stubbar, IRQ-ar, timer og ring 3 manglar (K2/K3). SYSCALL-shimmen er ikkje reentrant
+  (éin global lagra rsp), og ein syscall-buffer som ikkje er mappa enno går gjennom #PF på IST1.
+- Byggjekjeda brukar den committa Linux-stage0 i Docker (stale mot kjelda for store program).
 
 ## Kjende hol og risikoar (frå kartlegginga)
 
