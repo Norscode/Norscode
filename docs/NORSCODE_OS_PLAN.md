@@ -1,6 +1,6 @@
 # Norscode OS — plan (x86-64 først, AArch64 seinare)
 
-Status: K0, K1 og K2 ferdige 2026-09-27 (sjå «Status K0/K1» og «Status K2» under). Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
+Status: K0–K3 ferdige 2026-09-27 (sjå «Status K0/K1», «Status K2» og «Status K3» under). Grunnlag: kartlegging av kjerne-PoC, x86-codegen, bundle/stage0,
 native_sys, bootformat, minne/GC, historikk og AArch64 (8 kart + kritikar, målte eksperiment i QEMU 11).
 
 ## Mål
@@ -196,6 +196,57 @@ Opne punkt etter K2:
   delen er for stor). Rammer ≥ 4 GiB blir ikkje brukte (direktekartet dekkjer 0–4 GiB).
 - Sidetabell-API-et frigjer ikkje mellomtabellar, og har ingen TLB-shootdown (éin CPU).
 - Ringen har ingen tidsstempel-kalibrering (TSC-verdiar er rå).
+
+## Status K3 (2026-09-27) — ferdig, med målte resultat
+
+Nye filer: `os/prosess/adresserom.no`, `os/prosess/prosess.no`, `os/brukar/*.no` (seks uendra
+brukarprogram), `os/kjerne/k3_prøve.no`, `tests/test_os_k3_prosessar.no`. Maskinkode i
+`os/boot/stubbar.no` (kjor_brukar, til_kjerne, brukar_felle, brukar_syscall) og
+`os/boot/trampoline.no` (brukarsegment 0x2B/0x33 i GDT, EFER.NXE, CPL-sjekk i shim, #PF,
+unnatak og IRQ0, Multiboot-modular). Byggjar: `bygg_brukar(kjelde, elf, gc)`. Sele:
+`køyr_full(…, modular, …)` og `OS_MODULAR` i `tools/os_qemu_test.no`.
+
+Korleis det verkar:
+- Brukarprogram er Multiboot-modular (`-initrd "a.elf,b.elf"`). `pool_init` kopierer
+  modultabellen til info-blokka og startar #PF-poolen etter moduldata og -strengar.
+- Kvar prosess har eigen PML4. Delt og supervisor-only: PT0/PT1 (trampoline-området
+  0x1000–0x3FFFFF, U=0 på PD-nivå) og PML4[1] (direktekartet). ELF-segment: W^X etter
+  PT_LOAD-flagga (RX / R+NX / RW+NX). Heap- og stakkvindauge er demand-zero, mappa av
+  Norscode-kjernen med rammer frå `os/minne/rammer`. Stakken er 8 MiB under 0x7F00000000.
+- `kjor_brukar(pcb)` lagrar kjernekonteksten og FXSAVE64, byter CR3 og går til ring 3 med
+  iretq. Fellene lagrar registra og FPU/SSE i PCB-en og returnerer til kjernen med ein grunn:
+  syscall frå CPL3, unnatak (inkl. #PF) eller IRQ0 (føregriping, kvantum 1 tikk). Andre IRQ-ar
+  under ring 3 blir posta i ringen, og så held prosessen fram.
+- Syscall nivå 1 i Norscode: write(1/2), exit/exit_group, mprotect (alltid 0),
+  clock_gettime, getrandom (RDRAND) og nanosleep (blokkerer, andre prosessar køyrer).
+  Andre syscalls blir logga éin gong og gjev -ENOSYS. Brukarpeikarar blir validerte via
+  prosessen sine sidetabellar (til stades, U, RW ved skriving) og lesne via direktekartet.
+- Feil i ein prosess (null-peikar, vernebrot, supervisor-side, NX) drep berre prosessen:
+  diagnose, exit 128 + signal, og rammene blir frigjorde.
+
+Målt (QEMU 11 TCG, `-m 256M`, 6 modular, ~5,5 s): skrivar (ikkje-GC) exit 3, soppel (GC)
+exit 5, og linjene deira er like same ELF i Docker. 7–8 skrivar-linjer kjem mellom soppel
+sine framdriftslinjer, med ~430 føregripingar per køyring. nullpeikar, vern, kjerneles og nx
+blir drepne med exit 139 og feilkodane 0x6, 0x7, 0x5 og 0x15. vern sin
+`write(kjerneadresse)` gjev -14, som på Linux. soppel hadde 16 657 demand-sidefeil.
+Ukjende syscalls: 0. Alle rammer var frie etter køyringa. K0–K3-testane er grøne (4/4).
+
+Avvik frå planen:
+- Det delte kjerneområdet i brukar-CR3 er trampoline-området på LÅGE adresser (under
+  0x400000, der ET_EXEC-brukarprogram aldri ligg) pluss direktekartet. Dette er ikkje eit
+  høgt område som planen skisserte.
+- Retur til ring 3 skjer alltid med iretq, aldri sysret.
+- Demand-zero for brukarprosessar går via kjernen i Norscode, ikkje via maskinkode.
+- mprotect er ein konsekvent no-op, så GC-vaktsida blir ikkje handheva.
+- NX-proben kan ikkje samanliknast med Docker: emuleringa der handhevar ikkje NX, og
+  programmet heng. Proben blir berre sjekka i QEMU.
+
+Opne punkt etter K3:
+- Kjernen er ikkje-føregripande under syscall-handsaming. Det finst ingen prioritetar og
+  ingen signal, og nanosleep skriv ikkje `rem`.
+- Norscode-rammeallokatoren tek ein fast del på 128 MiB.
+- Brukarprosessar får tomt miljø og berre AT_NULL i auxv.
+- fork/execve, filer og røyr kjem i K4/K5.
 
 ## Kjende hol og risikoar (frå kartlegginga)
 
