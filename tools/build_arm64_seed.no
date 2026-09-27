@@ -1,0 +1,104 @@
+// tools/build_arm64_seed.no — byggjer ein Linux ARM64-nc_main-kandidat frå levande
+// kjelde med Norscode sin eigen AArch64-codegen, køyrt som kryss-codegen på x86_64.
+// Ingen C-kompilator, ingen Python.
+//
+// To steg, begge spawna med EKSPLISITT miljø (omgår ci_shell_runner-whitelista):
+//   1) tools/materialize_nc_main_fullhost_candidate.no → full-host nc_main-NCB
+//      (build/fullhost/nc_main_fullhost_candidate.ncb.json). NORSCODE_SEED_NCB = ferdig
+//      NCB hoppar over steget.
+//   2) bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf (elf_arm64_codegen bygd
+//      til x86_64, pinna i tools/active_surface_allowlist.txt) med NC_INPUT/NC_OUTPUT
+//      → ELF64/AArch64. Codegen-en er deterministisk: same NCB gjev same bytes.
+//
+// Utdata: build/arm64/nc_main_arm64 (NC_ARM64_OUT overstyrer), med .symbols-kart.
+// Køyring og seed-port skjer på ein ekte ubuntu-24.04-arm-runner
+// (.github/workflows/arm64-seed.yml).
+
+bruk std.runtime.process_abi som process_abi
+
+funksjon linje(m: tekst) -> heiltall { skriv(m + "\n") returner 0 }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon bytes(sti: tekst) -> tekst {
+    prøv { returner tekst_fra_heltall(lengde(builtin.fil_les_binær(sti))) } fang (e) { returner "0" }
+}
+
+funksjon spawn(prog: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst,
+               timeout_ms: heiltall) -> ordbok_tekst {
+    la req = process_abi.request(prog, argv, root, "", timeout_ms, 65536)
+    process_abi.sett_sandbox(req, "none", 0, 64, usann)
+    process_abi.sett_environment(req, miljø)
+    la res = builtin.process_spawn_argv(req)
+    hvis res["stdout"] != "" { skriv(res["stdout"]) }
+    hvis res["stderr"] != "" { skriv(res["stderr"]) }
+    returner res
+}
+
+funksjon ok(res: ordbok_tekst) -> boolsk {
+    returner res["status"] == "ferdig" og heltall_fra_tekst(tekst(res["exit_code"])) == 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    hvis ikkje builtin.fil_finnes(native) { linje("Feil: manglar native runtime: " + native) returner 1 }
+    la codegen = root + "/bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf"
+    hvis ikkje builtin.fil_finnes(codegen) { linje("Feil: manglar kryss-codegen: " + codegen) returner 1 }
+    la ut = env("NC_ARM64_OUT")
+    hvis ut == "" { ut = root + "/build/arm64/nc_main_arm64" }
+    la ncb = env("NORSCODE_SEED_NCB")
+    la disk = root + ",.,/tmp,/private/tmp," + root + "/build"
+    builtin.mkdir_p(root + "/build/arm64")
+
+    hvis ncb == "" {
+        ncb = root + "/build/fullhost/nc_main_fullhost_candidate.ncb.json"
+        linje("[1/2] Materialiser full-host nc_main-NCB frå kjelde ...")
+        la m1 = {
+            "NORSCODE_ROOT": root,
+            "NORSCODE_CMD": "run",
+            "NORSCODE_FILE": root + "/tools/materialize_nc_main_fullhost_candidate.no",
+            "NORSCODE_ENABLE_EXEC_PROSESS": "1",
+            "NC_FULLHOST_REUSE": env("NC_FULLHOST_REUSE"),
+            "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,thread.spawn,net.tcp,net.http,net.dns,disk.read,disk.write,jit.execute",
+            "NORSCODE_VM_DISK_ROOT": disk,
+            "PATH": env("PATH"),
+            "TMPDIR": "/tmp"
+        }
+        la r1 = spawn(native, [], root, m1, 3600000)
+        hvis ikkje ok(r1) {
+            linje("[FEIL] materialisering: status=" + tekst(r1["status"]) + " exit=" + tekst(r1["exit_code"]) +
+                  " error=" + tekst(r1["error"]))
+            returner 1
+        }
+    } ellers {
+        linje("[1/2] Brukar ferdig NCB (NORSCODE_SEED_NCB): " + ncb)
+    }
+    hvis ikkje builtin.fil_finnes(ncb) { linje("[FEIL] manglar NCB: " + ncb) returner 1 }
+    linje("[OK] NCB " + bytes(ncb) + " bytes")
+
+    linje("[2/2] Kryss-codegen NCB → ELF64/AArch64 ...")
+    la m2 = {
+        "NC_INPUT": ncb,
+        "NC_OUTPUT": ut,
+        "NC_NATIVE_SYMBOL_MAP": ut + ".symbols",
+        "NC_BUILTIN_REPORT": "1",
+        "PATH": env("PATH"),
+        "TMPDIR": "/tmp"
+    }
+    la r2 = spawn(codegen, [], root, m2, 3600000)
+    hvis ikkje ok(r2) {
+        linje("[FEIL] kryss-codegen: status=" + tekst(r2["status"]) + " exit=" + tekst(r2["exit_code"]) +
+              " error=" + tekst(r2["error"]))
+        returner 1
+    }
+    hvis ikkje builtin.fil_finnes(ut) { linje("[FEIL] ELF ikkje skriven: " + ut) returner 1 }
+    prøv { builtin.fil_sett_kjorbar(ut) } fang (e) {}
+    linje("[OK] linux-arm64 nc_main " + bytes(ut) + " bytes → " + ut)
+    returner 0
+}
