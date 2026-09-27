@@ -144,7 +144,7 @@ funksjon er_ncval_builtin(namn: tekst) -> boolsk {
        n == "tekst_til_heltall" eller n == "_rt_env_finnes" eller
        n == "sys6" eller n == "raw_load8" eller n == "raw_load64" eller n == "raw_store8" eller
        n == "raw_store64" eller n == "raw_call" eller n == "native_target" eller n == "native_envp" eller
-       n == "random_byte" eller n == "icache_sync" {
+       n == "random_byte" eller n == "icache_sync" eller n == "atomic_xadd" eller n == "atomic_cas" {
         returner sann
     }
     // A4: GC-builtins og probe-builtins (x86-GC-matrisa). Før A4 var alle desse namna
@@ -774,6 +774,77 @@ funksjon emit_ncval_alloc_ptr(native: liste_heiltall, ptr_reg: heiltall, dst_reg
     returner 0
 }
 
+// Som emit_ncval_alloc_ptr, men taggen kjem frå eit register (Xtag ≠ Xdst, Xptr ≠ Xdst,
+// Xptr ≠ x13). Brukt der ein kopi skal ha same tagg som kjelda (slice på liste/bytes).
+funksjon emit_ncval_alloc_ptr_tagreg(native: liste_heiltall, ptr_reg: heiltall, dst_reg: heiltall, tag_reg: heiltall) -> heiltall {
+    hvis ncval_gc_på() {
+        legg_u32(native, 0xAA0003ED | (tag_reg << 16))  // mov x13, Xtag
+        agc.alloc_imm(native, 16, dst_reg, ncval_gc_os)
+        legg_u32(native, agc.e_stp(13, ptr_reg, dst_reg, 0)) // stp x13, Xptr, [Xdst]
+        returner 0
+    }
+    legg_u32(native, 0xAA1C03E0 | dst_reg)          // mov Xdst, x28
+    legg_u32(native, 0xF9000380 | tag_reg)          // str Xtag, [x28]
+    legg_u32(native, 0xF9000780 | ptr_reg)          // str Xptr, [x28, #8]
+    legg_u32(native, 0x9100439C)                    // add x28, x28, #16
+    returner 0
+}
+
+// bytes (NC_BYTES, tagg 7): same layout som liste ([tal][elem-peikarar til boksa heiltal]),
+// som x86 (native_codegen_v2). builtin.type gjev «bytes»; lengde/indeks/slice/likskap/json
+// og GC-markøren (arm64_gc.TAGG_BYTES) behandlar tagg 7 som ei liste. Før var bytes ei rein
+// liste (tagg 4) på ARM64, og type_av(bytes.fra_liste(...)) svarte «liste»
+// (test_native_bytes_runtime).
+funksjon TAGG_BYTES() -> heiltall { returner 7 }
+
+// Xdst = kopi av liste/bytes i Xsrc med tagg `tagg` (ny listdata, same element-peikarar;
+// heiltalsboksane er uforanderlege). Anna enn liste/bytes (null, tekst, …) → Xdst = Xsrc.
+// bytes_from_list (→ 7) og bytes_to_list (→ 4) lagar EKTE kopiar som x86 (list_copy_tag):
+// mutasjon av kopien rører ikkje originalen (test_native_bytes_copy_slice).
+funksjon emit_liste_kopi_tagg(native: liste_heiltall, src_reg: heiltall, dst_reg: heiltall, tagg: heiltall) -> heiltall {
+    la p_null = lengde(native)
+    legg_u32(native, 0)                                 // cbz Xsrc, ident
+    legg_u32(native, 0xF9400000 | (src_reg << 5) | 9)   // ldr x9, [Xsrc]  (type)
+    legg_u32(native, 0xF100113F)                        // cmp x9, #4
+    legg_u32(native, 0xFA471924)                        // ccmp x9, #7, #4, ne  (liste eller bytes?)
+    la p_ikkje = lengde(native)
+    legg_u32(native, 0)                                 // b.ne ident
+    legg_u32(native, 0xF9400400 | (src_reg << 5) | 9)   // ldr x9, [Xsrc, #8]  (listdata)
+    legg_u32(native, 0xF940012C)                        // ldr x12, [x9]       (tal)
+    la gcm = ncval_gc_på()
+    hvis gcm {
+        agc.liste_storleik(native, 12, 14, 13)          // x14 = 8 + next_pow2(tal)·8
+        agc.alloc_kall(native, 14, ncval_gc_os)
+    } ellers {
+        legg_u32(native, 0xAA1C03EE)                    // mov x14, x28
+    }
+    legg_u32(native, 0xF90001CC)                        // str x12, [x14]  (tal)
+    legg_u32(native, 0x9100212D)                        // add x13, x9, #8  (&src[0])
+    legg_u32(native, 0x910021CF)                        // add x15, x14, #8 (&dst[0])
+    la lbl_loop = lengde(native)
+    la p_done = lengde(native)
+    legg_u32(native, 0)                                 // cbz x12, done
+    legg_u32(native, 0xF84085B0)                        // ldr x16, [x13], #8
+    legg_u32(native, 0xF80085F0)                        // str x16, [x15], #8
+    legg_u32(native, 0xD100058C)                        // sub x12, x12, #1
+    la p_b_loop = lengde(native)
+    legg_u32(native, 0)                                 // b loop
+    la lbl_done = lengde(native)
+    hvis ikkje gcm { emit_liste_reserver_kapasitet(native, 14, 15, 16) }
+    emit_ncval_alloc_ptr(native, 14, dst_reg, tagg)
+    la p_end = lengde(native)
+    legg_u32(native, 0)                                 // b end
+    la lbl_ident = lengde(native)
+    hvis dst_reg != src_reg { legg_u32(native, 0xAA0003E0 | (src_reg << 16) | dst_reg) }  // mov Xdst, Xsrc
+    la lbl_end = lengde(native)
+    skriv_u32(native, p_null, 0xB4000000 | ((((lbl_ident - p_null) / 4) & 0x7FFFF) << 5) | src_reg)
+    ncd_bcond(native, p_ikkje, lbl_ident, 1)
+    skriv_u32(native, p_done, 0xB400000C | ((((lbl_done - p_done) / 4) & 0x7FFFF) << 5))
+    ncd_b(native, p_b_loop, lbl_loop)
+    ncd_b(native, p_end, lbl_end)
+    returner 0
+}
+
 // Fase 3: allokerer ein heap-streng frå ein compile-time-literal og legg NcVal-
 // peikaren (type=3) i Xdst_reg. strdata-layout: [i64 lengd][bytes]. Byte blir
 // materialiserte med movz/strb (kort literal). VM-strengar er byte-baserte
@@ -989,9 +1060,11 @@ funksjon emit_slice(native: liste_heiltall, s_reg: heiltall, start_reg: heiltall
     // streng (type=3) → delstreng (kopier bytes). Krypto skiv lister (keystream).
     legg_u32(native, 0xF9400000 | (s_reg << 5) | 9)     // ldr x9, [Xs]  (type)
     legg_u32(native, 0xF100113F)                        // cmp x9, #4
+    legg_u32(native, 0xFA471924)                        // ccmp x9, #7, #4, ne  (liste eller bytes)
     la p_bne_str = lengde(native)
     legg_u32(native, 0)                                 // b.ne str_path
-    // --- liste-slice ---
+    // --- liste-/bytes-slice (typebevarande: taggen til kjelda i x17) ---
+    legg_u32(native, 0xAA0903F1)                        // mov x17, x9  (tagg)
     legg_u32(native, 0xF9400400 | (s_reg << 5) | 9)     // ldr x9, [Xs, #8]   (listdata)
     emit_slice_klem(native, start_reg, end_reg, sann)   // x10/x11 klemt til [0, count], x12 = count
     la gcm = ncval_gc_på()
@@ -1017,7 +1090,7 @@ funksjon emit_slice(native: liste_heiltall, s_reg: heiltall, start_reg: heiltall
     legg_u32(native, 0x14000000)                        // b lloop
     la lbl_ldone = lengde(native)
     hvis ikkje gcm { emit_liste_reserver_kapasitet(native, 14, 15, 16) }  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
-    emit_ncval_alloc_ptr(native, 14, dst_reg, 4)        // boks som liste
+    emit_ncval_alloc_ptr_tagreg(native, 14, dst_reg, 17) // boks med taggen til kjelda (4/7)
     la p_b_end = lengde(native)
     legg_u32(native, 0x14000000)                        // b end
     // --- streng-slice (uendra) ---
@@ -1366,6 +1439,9 @@ funksjon emit_tekst_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: he
     legg_u32(native, 0xF100153F)                       // cmp x9, #5
     la p_beq_kart = lengde(native)
     legg_u32(native, 0)                                // b.eq verdi
+    legg_u32(native, 0xF1001D3F)                       // cmp x9, #7  (bytes)
+    la p_beq_bytes = lengde(native)
+    legg_u32(native, 0)                                // b.eq verdi
     emit_tekst_int(native, arg_reg, dst_reg)
     la p_tk_end = lengde(native)
     legg_u32(native, 0)                                // b end
@@ -1378,6 +1454,7 @@ funksjon emit_tekst_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: he
     la lbl_end = lengde(native)
     ncd_bcond(native, p_beq_liste, lbl_verdi, 0)
     ncd_bcond(native, p_beq_kart, lbl_verdi, 0)
+    ncd_bcond(native, p_beq_bytes, lbl_verdi, 0)
     ncd_b(native, p_verdi_end, lbl_end)
     skriv_u32(native, p_tk_null1, 0xB4000000 | ((((lbl_tk_tom - p_tk_null1) / 4) & 0x7FFFF) << 5) | arg_reg)
     skriv_u32(native, p_tk_null2, 0xB4000009 | ((((lbl_tk_tom - p_tk_null2) / 4) & 0x7FFFF) << 5))
@@ -1485,6 +1562,14 @@ funksjon ncval_delt_rute_ok(n: tekst) -> boolsk {
     // A5: filesystem_read/write_operation → std.runtime_filesystem_native (same mål som x86),
     // som no fungerer fordi native_fs_* har ARM64-rute (ncval_gap_rute → fs_gap_*).
     hvis n == "filesystem_read_operation" eller n == "filesystem_write_operation" { returner sann }
+    // atomic_operation / thread_sync / thread_current_id → std.native_gap (same mål som x86):
+    // atomcellene, mutex- og condition-orda ligg i ei rå mmap-arena UTANFOR GC-heapen, og
+    // handtaka ("atomic-N"/"sync-N") er vanlege strengar i modulglobale tabellar (røter).
+    // Den inline atom-emitteren la cella rått ved fronten utan boks (GC-en ville frigjere
+    // ho), og han mangla ordens-/handtaksvalideringa; han gjeld berre utan native_gap.
+    // (thread_spawn/thread_join blir ikkje ruta: ARM64 har ikkje clone-atomet
+    // thread_spawn_native; selfhost.vm fell då til grøne trådar for thread.*-primitiva.)
+    hvis n == "atomic_operation" eller n == "thread_sync" eller n == "thread_current_id" { returner sann }
     returner n == "kompiler_fil_aktiv" eller n == "host_exec_ncb_json" eller n == "host_exec_ncb"
 }
 
@@ -1719,6 +1804,9 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     legg_u32(native, 0xF100193F)                       // cmp x9, #6  (A5)
     la p_desimal = lengde(native)
     legg_u32(native, 0)                                // b.eq desimaltall
+    legg_u32(native, 0xF1001D3F)                       // cmp x9, #7  (bytes)
+    la p_bytes = lengde(native)
+    legg_u32(native, 0)                                // b.eq bytes
     emit_ncval_str_const(native, "heltall", dst_reg)   // default (int)
     la p_end1 = lengde(native)
     legg_u32(native, 0)                                // b end
@@ -1742,6 +1830,10 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     emit_ncval_str_const(native, "desimaltall", dst_reg)
     la p_end6 = lengde(native)
     legg_u32(native, 0)                                // b end
+    la lbl_bytes = lengde(native)
+    emit_ncval_str_const(native, "bytes", dst_reg)
+    la p_end7 = lengde(native)
+    legg_u32(native, 0)                                // b end
     la lbl_ingenting = lengde(native)
     emit_ncval_str_const(native, "ingenting", dst_reg)
     la lbl_end = lengde(native)
@@ -1758,6 +1850,8 @@ funksjon emit_type_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: hei
     skriv_u32(native, p_end4,   0x14000000 |  (((lbl_end - p_end4) / 4) & 0x03FFFFFF))
     skriv_u32(native, p_end5,   0x14000000 |  (((lbl_end - p_end5) / 4) & 0x03FFFFFF))
     skriv_u32(native, p_desimal, 0x54000000 | ((((lbl_desimal - p_desimal) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(native, p_bytes, lbl_bytes, 0)
+    ncd_b(native, p_end7, lbl_end)
     returner 0
 }
 
@@ -2158,6 +2252,13 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
     legg_u32(native, 0xD280000E)                        // movz x14, #0  (funne)
     la p_cbz_nullmap = lengde(native)
     legg_u32(native, 0)                                 // cbz Xmap, done  (patch)
+    // Ikkje-kart (null-objektet, heiltal, tekst, liste …) → nil/usann, som VM-en og x86.
+    // Før vart payloaden til t.d. eit heiltal deref-a som mapdata: selfhost.vm sin
+    // vm_await_value(42) spør finnes_nøkkel(42, "__future__") → SIGSEGV (test_async_*).
+    legg_u32(native, 0xF9400000 | (map_reg << 5) | 9)   // ldr x9, [Xmap]  (tagg)
+    legg_u32(native, 0xF100153F)                        // cmp x9, #5
+    la p_bne_ikkjekart = lengde(native)
+    legg_u32(native, 0)                                 // b.ne done  (patch)
     legg_u32(native, 0xF9400400 | (map_reg << 5) | 9)   // ldr x9,  [Xmap, #8]  (mapdata)
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]   (count)
     legg_u32(native, 0x91002129)                        // add x9, x9, #8  (første par)
@@ -2231,6 +2332,7 @@ funksjon emit_map_get(native: liste_heiltall, map_reg: heiltall, key_reg: heilta
         legg_u32(native, 0xAA0D03E0 | dst_reg)          // mov Xdst, x13  (verdipeikar/nil)
     }
     skriv_u32(native, p_cbz_nullmap, 0xB4000000 | ((((lbl_done     - p_cbz_nullmap) / 4) & 0x7FFFF) << 5) | map_reg)
+    ncd_bcond(native, p_bne_ikkjekart, lbl_done, 1)
     skriv_u32(native, p_bge_done,  0x5400000A | ((((lbl_done      - p_bge_done)  / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bne_next1, 0x54000001 | ((((lbl_nextpair  - p_bne_next1) / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_cbz_match, 0xB4000004 | ((((lbl_matchpair - p_cbz_match) / 4) & 0x7FFFF) << 5))
@@ -2289,11 +2391,17 @@ funksjon emit_index_get(native: liste_heiltall, cont_reg: heiltall, idx_reg: hei
     legg_u32(native, 0)                                 // cbz Xcont, end  (patch)
     legg_u32(native, 0xF9400000 | (cont_reg << 5) | 9)  // ldr x9, [Xcont]  (type)
     legg_u32(native, 0xF100113F)                        // cmp x9, #4  (liste?)
+    legg_u32(native, 0xFA471924)                        // ccmp x9, #7, #4, ne  (… eller bytes)
     la p_bne_notlist = lengde(native)
     legg_u32(native, 0)                                 // b.ne notlist
-    // liste: elem = [listdata + 8 + idx*8]
+    // liste/bytes: elem = [listdata + 8 + idx*8]; negativ indeks tel frå slutten
+    // (bytes: data[-1] = siste, som x86; VM-en kastar IndeksFeil for lister før dette).
     legg_u32(native, 0xF9400400 | (cont_reg << 5) | 10) // ldr x10, [Xcont, #8] (listdata)
     legg_u32(native, 0xB9400800 | (idx_reg << 5) | 11)  // ldr w11, [Xidx, #8]  (int-indeks)
+    legg_u32(native, 0x93407D6B)                        // sxtw x11, w11
+    legg_u32(native, 0xB6F8006B)                        // tbz x11, #63, +3
+    legg_u32(native, 0xF940014C)                        // ldr x12, [x10]  (tal)
+    legg_u32(native, 0x8B0C016B)                        // add x11, x11, x12
     legg_u32(native, 0x9100214A)                        // add x10, x10, #8
     legg_u32(native, 0x8B0B0D4A)                        // add x10, x10, x11, lsl #3
     legg_u32(native, 0xF9400140 | dst_reg)              // ldr Xdst, [x10]
@@ -2361,11 +2469,15 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     legg_u32(native, 0)                                 // cbz Xobj, done  (patch)
     legg_u32(native, 0xF9400000 | (obj_reg << 5) | 9)   // ldr x9, [Xobj]  (type)
     legg_u32(native, 0xF100113F)                        // cmp x9, #4  (liste?)
+    legg_u32(native, 0xFA471924)                        // ccmp x9, #7, #4, ne  (… eller bytes)
     la p_bne_map = lengde(native)
     legg_u32(native, 0)                                 // b.ne map
-    // --- liste ---
+    // --- liste/bytes (negativ indeks tel frå slutten, som INDEX_GET) ---
     legg_u32(native, 0xF9400400 | (obj_reg << 5) | 10)  // ldr x10, [Xobj, #8] (listdata)
     legg_u32(native, 0xF9400400 | (idx_reg << 5) | 11)  // ldr x11, [Xidx, #8] (idx)
+    legg_u32(native, 0xB6F8006B)                        // tbz x11, #63, +3
+    legg_u32(native, 0xF940014C)                        // ldr x12, [x10]  (tal)
+    legg_u32(native, 0x8B0C016B)                        // add x11, x11, x12
     legg_u32(native, 0x9100214C)                        // add x12, x10, #8   (&elem[0])
     legg_u32(native, 0x8B0B0D8C)                        // add x12, x12, x11, lsl #3
     legg_u32(native, 0xF9000180 | val_reg)              // str Xval, [x12]
@@ -2946,6 +3058,10 @@ funksjon emit_cstr_to_sp(native: liste_heiltall, str_reg: heiltall) -> heiltall 
 }
 
 // fil_skriv(path, content): opna/lag fila og skriv innhaldet. Returnerer int 0.
+// Returnerer FEIL-plasshaldaren (tbnz x9, #63) for open-feil; kallaren lappar han med
+// ncd_fil_les_kast («Kan ikkje skrive fil: <sti>», som x86). Før vart open-feilen
+// ignorert: fil_skriv(".", …) (EISDIR) lukkast stilt, og std.lagring.lagre kasta aldri
+// IOFeil (test_storage_error returnerte 99).
 funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
     emit_cstr_to_sp(native, path_reg)
@@ -2965,6 +3081,9 @@ funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg:
         legg_u32(native, 0xDA803400)                    // cneg x0, x0, cs  (Darwin-feil → −errno som Linux)
     }
     legg_u32(native, 0xAA0003E9)                        // mov x9, x0  (fd)
+    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096  (stien trengst ikkje meir)
+    la p_feil = lengde(native)
+    legg_u32(native, 0)                                 // tbnz x9, #63, FEIL (lappa av kallaren)
     legg_u32(native, 0xF9400400 | (content_reg << 5) | 10) // ldr x10, [Xcontent, #8]
     legg_u32(native, 0xF9400142)                        // ldr x2, [x10]  (len)
     legg_u32(native, 0x91002141)                        // add x1, x10, #8 (bytes)
@@ -2986,10 +3105,10 @@ funksjon emit_fil_skriv(native: liste_heiltall, path_reg: heiltall, content_reg:
         legg_u32(native, 0xD4001001)                    // svc #0x80
         legg_u32(native, 0xDA803400)                    // cneg x0, x0, cs  (Darwin-feil → −errno som Linux)
     }
-    legg_u32(native, 0x914007FF)                        // add sp, sp, #4096
     legg_u32(native, 0x52800009)                        // movz w9, #0
     emit_ncval_alloc(native, 9, dst_reg, 1)
-    returner 0
+    skriv_u32(native, p_feil, 0xB7F80009 | (1 << 5))    // standard: tbnz til neste instruksjon
+    returner p_feil
 }
 
 // mkdir(sti ved sp, modus 0777). Linux: mkdirat(AT_FDCWD, path, mode) x8=34;
@@ -4920,12 +5039,18 @@ funksjon emit_fil_les(native: liste_heiltall, path_reg: heiltall, dst_reg: heilt
 // Lapp fil_les sin FEIL-plasshaldar (sjå emit_fil_les): kast «Kan ikkje opne fil: <sti>»
 // (Xpath er urørt fram til FEIL). Utan __exc_val__ står han som no-op.
 funksjon ncd_fil_les_kast(native: liste_heiltall, p_feil: heiltall, path_reg: heiltall, globals, bl_patchar) -> heiltall {
+    returner ncd_fil_kast(native, p_feil, path_reg, "Kan ikkje opne fil: ", globals, bl_patchar)
+}
+
+// Felles FEIL-lapp for fil_les/fil_skriv: kast «<prefiks><sti>» (Xpath er urørt fram
+// til FEIL). Utan __exc_val__ står plasshaldaren som no-op (tbnz til neste instruksjon).
+funksjon ncd_fil_kast(native: liste_heiltall, p_feil: heiltall, path_reg: heiltall, prefiks: tekst, globals, bl_patchar) -> heiltall {
     hvis globals == null eller ikkje finnes_nøkkel(globals, "__exc_val__") { returner 0 }
     la p_ok = lengde(native)
     legg_u32(native, 0)                                 // b OK
     la lbl_feil = lengde(native)
     skriv_u32(native, p_feil, 0xB7F80009 | ((((lbl_feil - p_feil) / 4) & 0x3FFF) << 5))  // tbnz x9, #63, FEIL
-    emit_ncval_str_const(native, "Kan ikkje opne fil: ", 11)
+    emit_ncval_str_const(native, prefiks, 11)
     emit_str_concat(native, 11, path_reg, 11)
     legg_u32(native, 0xF9000320 | (globals["__exc_val__"] << 10) | 11)  // str x11, [x25, #EV*8]
     la p_td = lengde(native)
@@ -5032,7 +5157,7 @@ funksjon emit_fil_append(native: liste_heiltall, path_reg: heiltall, content_reg
     returner 0
 }
 
-// bytes_to_text(byteliste) → streng. bytes ≡ NcVal-liste av byte-heiltal; bygg ein
+// bytes_to_text(bytes/byteliste) → streng. Liste-layout av byte-heiltal; bygg ein
 // strdata [len][bytes] ved å pakke ut kvart element sin lågbyte.
 funksjon emit_bytes_to_text(native: liste_heiltall, list_reg: heiltall, dst_reg: heiltall) -> heiltall {
     legg_u32(native, 0xF9400400 | (list_reg << 5) | 9)  // ldr x9, [Xliste, #8] (listdata)
@@ -5132,7 +5257,7 @@ funksjon emit_fil_skriv_binaer(native: liste_heiltall, path_reg: heiltall, conte
 }
 
 // fil_les_binær(path) → byteliste. Les råbytes til ein heap-buffer, boks kvar byte
-// som int-NcVal og bygg ei liste (bytes ≡ liste). Registerbruk unngår x13/x14 som
+// som int-NcVal og bygg bytes (tagg 7, liste-layout). Registerbruk unngår x13/x14 som
 // emit_ncval_alloc klobbar; val-reg (x9) ≠ dst-reg (x0) i boks-løkka.
 funksjon emit_fil_les_binaer(native: liste_heiltall, path_reg: heiltall, dst_reg: heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD14007FF)                        // sub sp, sp, #4096
@@ -5212,7 +5337,7 @@ funksjon emit_fil_les_binaer(native: liste_heiltall, path_reg: heiltall, dst_reg
     la p_bbox = lengde(native)
     legg_u32(native, 0x14000000)                        // b box
     la lbl_boxdone = lengde(native)
-    emit_ncval_alloc_ptr(native, 17, dst_reg, 4)        // boks liste (val = lbase)
+    emit_ncval_alloc_ptr(native, 17, dst_reg, 7)        // boks som bytes (tagg 7, liste-layout)
     skriv_u32(native, p_blt,  0x5400000B | ((((lbl_readdone - p_blt)  / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bread, 0x14000000 |  (((lbl_read    - p_bread) / 4) & 0x03FFFFFF))
     skriv_u32(native, p_bge,  0x5400000A | ((((lbl_boxdone - p_bge)  / 4) & 0x7FFFF) << 5))
@@ -5932,6 +6057,7 @@ funksjon emit_json_stringify_routine(os: tekst) -> liste_heiltall {
     // dispatch på type
     legg_u32(r, 0xF9400009)                          // ldr x9, [x0]  (type)
     legg_u32(r, 0xF100113F)                          // cmp x9, #4  (liste?)
+    legg_u32(r, 0xFA471924)                          // ccmp x9, #7, #4, ne  (… eller bytes)
     la p_beq_list = lengde(r)
     legg_u32(r, 0)                                   // b.eq list
     legg_u32(r, 0xF100153F)                          // cmp x9, #5  (kart?)
@@ -7545,12 +7671,8 @@ funksjon emit_throw_dispatch_routine(os: tekst, et: heiltall, ev: heiltall, eb: 
     returner r
 }
 
-// ─── bytes-type (representert som NcVal-liste) ───────────────────────────────
-// std.bytes byggjer på ein liste av byte-heiltal (indeksert + lengde), så vi
-// representerer NC_BYTES som ei vanleg NcVal-liste (type 4). bytes_from_list/
-// bytes_to_list er difor identitet, og bytes.er_bytes (som spør builtin.type)
-// gjev "liste" → _liste-hjelparane i krypto-stakken tek rett gren uansett.
-// bytes_new(storleik, fyll) allokerer ei liste med `storleik` element = fyll.
+// ─── bytes-type (tagg 7 med liste-layout, sjå TAGG_BYTES) ────────────────────
+// bytes_new(storleik, fyll) allokerer bytes med `storleik` element = fyll.
 funksjon emit_bytes_new(native: liste_heiltall, size_reg: heiltall, fill_reg: heiltall, dst_reg: heiltall) -> heiltall {
     legg_u32(native, 0xF9400400 | (size_reg << 5) | 9)  // ldr x9, [Xsize, #8]  (count)
     la gcm = ncval_gc_på()
@@ -7574,7 +7696,7 @@ funksjon emit_bytes_new(native: liste_heiltall, size_reg: heiltall, fill_reg: he
     legg_u32(native, 0x14000000)                        // b loop
     la lbl_done = lengde(native)
     hvis ikkje gcm { emit_liste_reserver_kapasitet(native, 14, 15, 16) }  // x28 forbi next_pow2(count)-kapasitet (legg_til-invariant)
-    emit_ncval_alloc_ptr(native, 14, dst_reg, 4)
+    emit_ncval_alloc_ptr(native, 14, dst_reg, TAGG_BYTES())   // bytes (tagg 7, liste-layout)
     skriv_u32(native, p_bge,   0x5400000A | ((((lbl_done - p_bge)   / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_bloop, 0x14000000 |  (((lbl_loop - p_bloop) / 4) & 0x03FFFFFF))
     returner 0
@@ -7675,6 +7797,7 @@ funksjon emit_liste_lik_routine() -> liste_heiltall {
     la p_str = lengde(r)
     legg_u32(r, 0)                                      // b.eq str
     legg_u32(r, 0xF100111F)                             // cmp x8, #4
+    legg_u32(r, 0xFA471904)                             // ccmp x8, #7, #4, ne  (bytes-element)
     la p_rek = lengde(r)
     legg_u32(r, 0)                                      // b.eq rek
     legg_u32(r, 0xEB0B015F)                             // cmp x10, x11
@@ -7752,8 +7875,10 @@ funksjon emit_liste_lik_routine() -> liste_heiltall {
 // x9/x10 = typane). Returnerer posisjonen til «b.ne ikkje_liste» som kallaren lappar.
 // Utan denne samanlikna == liste-PEIKARANE (test_install_linux_desktop_entry: bytes-lik).
 funksjon ncd_emit_liste_lik_vakt(native: liste_heiltall) -> liste {
+    // Kallaren har alt skilt ut ulike taggar (ncd_emit_null_ulik), so x9 == x10 her:
+    // begge lister (4) eller begge bytes (7) → djup likskap.
     legg_u32(native, 0xF100113F)                        // cmp x9, #4
-    legg_u32(native, 0xFA440940)                        // ccmp x10, #4, #0, eq  (begge lister?)
+    legg_u32(native, 0xFA471924)                        // ccmp x9, #7, #4, ne  (… eller bytes)
     la p = lengde(native)
     legg_u32(native, 0)                                 // b.eq liste
     returner [p]
@@ -7984,20 +8109,24 @@ funksjon ncd_emit_null(r: liste_heiltall, reg: heiltall) -> heiltall {
 }
 
 // EQ/NE: rett etter emit_desimal_vakt2 held x9/x10 typane til venstre/høgre. Er dei
-// ulike og éin av dei er null (type 0), er verdiane ulike (VM-en: null == 0 er usann).
-// Returnerer [[pos, reg], ...] for cbz-plasshaldarane (sjå ncd_lapp_null_ulik).
+// ulike, er verdiane ulike (VM-en/x86: null == 0 og 1 == sann er usann). Heiltal mot
+// desimaltal er alt teke av desimal-vakta (flyttal-samanlikning) før dette. Før galdt
+// regelen berre null (type 0); då samanlikna 1 == sann payloaden åleine og gav sann
+// (compiler.semantic.types.type_checker.check_type(1) svarte «bool», test_typechecker).
+// Returnerer [[pos, reg], ...] for plasshaldarane (sjå ncd_lapp_null_ulik; reg −1 = b).
 funksjon ncd_emit_null_ulik(native: liste_heiltall) -> liste {
     legg_u32(native, 0xEB0A013F)                     // cmp x9, x10
-    legg_u32(native, 0x54000060)                     // b.eq +3 (same type → vanleg samanlikning)
     la p1 = lengde(native)
-    legg_u32(native, 0)                              // cbz x9, ulik
-    la p2 = lengde(native)
-    legg_u32(native, 0)                              // cbz x10, ulik
-    returner [[p1, 9], [p2, 10]]
+    legg_u32(native, 0)                              // b.ne ulik (ulike typar)
+    returner [[p1, -1]]
 }
 funksjon ncd_lapp_null_ulik(native: liste_heiltall, hopp, mål: heiltall) -> heiltall {
     for ph i hopp {
-        skriv_u32(native, ph[0], 0xB4000000 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5) | ph[1])
+        hvis ph[1] < 0 {
+            skriv_u32(native, ph[0], 0x54000001 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5))   // b.ne
+        } ellers {
+            skriv_u32(native, ph[0], 0xB4000000 | ((((mål - ph[0]) / 4) & 0x7FFFF) << 5) | ph[1])
+        }
     }
     returner 0
 }
@@ -9666,7 +9795,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 skriv_u32(native, p_beq_norm, 0x54000000 | ((((lbl_norm_ret - p_beq_norm) / 4) & 0x7FFFF) << 5))
             }
             hvis is_entry {
-                legg_u32(native, 0xB9400800 | (topp << 5) | 0)  // ldr w0, [Xtopp, #8]  (utpakka int)
+                // Berre eit heiltal (NcVal-tagg 1) blir exit-kode; null og alle andre typar gjev 0
+                // (same kontrakt som x86, 15de0b2). Før vart payload-ordet brukt uansett tagg, so
+                // ein start() som returnerte tekst — t.d. ncb_host_run_entry med ein test() som
+                // gjev «… OK» — fekk den låge byten av strengpeikaren som exit-kode (240/208/224).
+                legg_u32(native, 0xAA0003E9 | (topp << 16))     // mov x9, Xtopp
+                legg_u32(native, 0x52800000)                    // movz w0, #0
+                legg_u32(native, 0xB40000A9)                    // cbz x9, +5 (null → 0)
+                legg_u32(native, 0xF940012A)                    // ldr x10, [x9]      (tagg)
+                legg_u32(native, 0xF100055F)                    // cmp x10, #1
+                legg_u32(native, 0x54000041)                    // b.ne +2 (ikkje heiltal → 0)
+                legg_u32(native, 0xB9400920)                    // ldr w0, [x9, #8]  (utpakka int)
                 hvis os != "linux" {
                     // macOS: entry køyrer på eigen stakk (emit_eigen_stakk), so dyld sin start
                     // (som ventar sin eigen sp etter main) får aldri kontrollen tilbake: exit(w0)
@@ -10037,6 +10176,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     // A5: berre tekst/liste/kart (3/4/5) har [count] i data; anna (null-objektet,
                     // heiltal, bool) gjev 0 i staden for å deref-e val (vm.no: lengde(null) → 0).
                     legg_u32(native, 0xF9400000 | (r1 << 5) | 9)  // ldr x9, [Xtopp]      (type)
+                    legg_u32(native, 0xF1001D3F)                    // cmp x9, #7  (bytes: [tal] som liste)
+                    legg_u32(native, 0x54000080)                    // b.eq les_tal (+4)
                     legg_u32(native, 0xD1000D2B)                    // sub x11, x9, #3
                     legg_u32(native, 0xF100097F)                    // cmp x11, #2
                     legg_u32(native, 0x54000088)                    // b.hi null_lengd (+4)
@@ -10165,7 +10306,8 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 } ellers hvis (kallnamn == "fil_skriv" eller kallnamn == "builtin.fil_skriv") og lengde(instr) == 3 og instr[2] == 2 {
                     // Fase 6: fil_skriv(path, content).
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal fil_skriv krev 2 arg", "image": []} }
-                    emit_fil_skriv(native, r2, r1, r2, os)
+                    la p_fs_feil = emit_fil_skriv(native, r2, r1, r2, os)
+                    ncd_fil_kast(native, p_fs_feil, r2, "Kan ikkje skrive fil: ", globals, bl_patchar)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "fil_les" eller kallnamn == "builtin.fil_les") og lengde(instr) == 3 og instr[2] == 1 {
@@ -10480,14 +10622,17 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis os == "linux" { emit_syscall(native, 93, os) } ellers { emit_syscall(native, 1, os) }
                     // djupn uendra (dummy-resultat, aldri nådd)
                 } ellers hvis (kallnamn == "bytes_new" eller kallnamn == "builtin.bytes_new") og lengde(instr) == 3 og instr[2] == 2 {
-                    // bytes som NcVal-liste: bytes_new(storleik, fyll) → liste av fyll.
+                    // bytes_new(storleik, fyll) → bytes (tagg 7) med storleik × fyll.
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal bytes_new krev 2 arg", "image": []} }
                     emit_bytes_new(native, r2, r1, r2)
                     opnd_ut(native, djupn - 2, r2, memmode, home_off)
                     djupn = djupn - 1
                 } ellers hvis (kallnamn == "bytes_from_list" eller kallnamn == "builtin.bytes_from_list" eller kallnamn == "bytes_to_list" eller kallnamn == "builtin.bytes_to_list") og lengde(instr) == 3 og instr[2] == 1 {
-                    // bytes ≡ liste → begge er identitet (operanden ligg alt på plass).
+                    // Ekte kopi med ny tagg: bytes_from_list → bytes (7), bytes_to_list → liste (4).
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal bytes_from/to_list krev 1 arg", "image": []} }
+                    la bl_tagg = 4
+                    hvis builtin.ends_with(kallnamn, "bytes_from_list") { bl_tagg = TAGG_BYTES() }
+                    emit_liste_kopi_tagg(native, r1, r1, bl_tagg)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers {
                     kall_segment = 3
@@ -10648,6 +10793,47 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     }
                     opnd_ut(native, djupn - 2, r1, memmode, home_off)   // resultat = v
                     djupn = djupn - 1
+                } ellers hvis (kallnamn == "atomic_xadd" eller kallnamn == "builtin.atomic_xadd") og lengde(instr) == 3 og instr[2] == 2 {
+                    // atomic_xadd(adr, delta) → gammal verdi (x86: lock xadd). std.native_gap sin
+                    // atomvariabel-/trådbackend (rå arena utanfor GC-heapen) byggjer på dette.
+                    // LDAXR/STLXR-lykkje + dmb ish = sekvensielt konsistent RMW.
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal atomic_xadd krev 2 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r2 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 10)       // ldr x10, [Xdelta, #8]
+                    la xa_retry = lengde(native)
+                    legg_u32(native, 0xC85FFD2C)                        // ldaxr x12, [x9]
+                    legg_u32(native, 0x8B0A018B)                        // add x11, x12, x10
+                    legg_u32(native, 0xC80DFD2B)                        // stlxr w13, x11, [x9]
+                    la p_xa = lengde(native)
+                    legg_u32(native, 0)                                 // cbnz w13, retry
+                    skriv_u32(native, p_xa, 0x35000000 | ((((xa_retry - p_xa) / 4) & 0x7FFFF) << 5) | 13)
+                    legg_u32(native, 0xD5033BBF)                        // dmb ish
+                    legg_u32(native, 0xAA0C03E9)                        // mov x9, x12  (gammal)
+                    emit_ncval_alloc(native, 9, r2, 1)
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
+                } ellers hvis (kallnamn == "atomic_cas" eller kallnamn == "builtin.atomic_cas") og lengde(instr) == 3 og instr[2] == 3 {
+                    // atomic_cas(adr, venta, ny) → gammal verdi (x86: lock cmpxchg); lagrar ny berre
+                    // når gammal == venta. clrex på mismatch slepp den eksklusive monitoren.
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal atomic_cas krev 3 arg", "image": []} }
+                    legg_u32(native, 0xF9400400 | (r3 << 5) | 9)        // ldr x9, [Xadr, #8]
+                    legg_u32(native, 0xF9400400 | (r2 << 5) | 10)       // ldr x10, [Xventa, #8]
+                    legg_u32(native, 0xF9400400 | (r1 << 5) | 11)       // ldr x11, [Xny, #8]
+                    la cas_retry = lengde(native)
+                    legg_u32(native, 0xC85FFD2C)                        // ldaxr x12, [x9]
+                    legg_u32(native, 0xEB0A019F)                        // cmp x12, x10
+                    legg_u32(native, 0x54000081)                        // b.ne +4 (fail)
+                    legg_u32(native, 0xC80DFD2B)                        // stlxr w13, x11, [x9]
+                    la p_cas = lengde(native)
+                    legg_u32(native, 0)                                 // cbnz w13, retry
+                    skriv_u32(native, p_cas, 0x35000000 | ((((cas_retry - p_cas) / 4) & 0x7FFFF) << 5) | 13)
+                    legg_u32(native, 0x14000002)                        // b +2 (done)
+                    legg_u32(native, 0xD503305F)                        // fail: clrex
+                    legg_u32(native, 0xD5033BBF)                        // done: dmb ish
+                    legg_u32(native, 0xAA0C03E9)                        // mov x9, x12  (gammal)
+                    emit_ncval_alloc(native, 9, r3, 1)
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
                 } ellers hvis (kallnamn == "raw_call" eller kallnamn == "builtin.raw_call") og lengde(instr) == 3 og instr[2] == 2 {
                     // A2: raw_call(adr, argp) → heiltal: kallar AAPCS64-maskinkode på adr med
                     // x0 = argp (rå), boksar x0. Callee-saved x19–x28 må vere urørte (AAPCS64).
@@ -10882,12 +11068,15 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     emit_build_map(native, 1, 11, kdst)              // 1 par frå x11/x12 → tagg-5
                     opnd_ut(native, djupn - nargs_k, kdst, memmode, home_off)
                     djupn = djupn - nargs_k + 1
-                } ellers hvis (kallnamn == "atomic_operation" eller kallnamn == "builtin.atomic_operation") og lengde(instr) == 3 og instr[2] == 1 og ikkje gc_modus {
+                } ellers hvis (kallnamn == "atomic_operation" eller kallnamn == "builtin.atomic_operation") og lengde(instr) == 3 og instr[2] == 1 og ikkje gc_modus og
+                              ikkje (ncval_ruting_aktiv(os) og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn))) {
                     // A4: berre utan GC. Inline-emitteren legg atom-cella rått ved fronten og
                     // adressa hennar som bytes i handtak-strengen — ingen boks peikar på cella,
                     // so sweepen ville frigjere ho (og gjenbruke minnet) medan handtaket lever.
-                    // I GC-modus blir kallet difor NATIV-GAP-stubben (fail-closed; std.runtime.
-                    // atomic fangar og svarar «unsupported»).
+                    // Med std.native_gap i bunten (nc_main) går kallet til native_gap sin
+                    // arena-backend (GC-trygg, full validering) i begge modus; utan native_gap
+                    // blir det i GC-modus NATIV-GAP-stubben (fail-closed; std.runtime.atomic
+                    // fangar og svarar «unsupported»).
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal atomic_operation krev 1 arg", "image": []} }
                     emit_atomic_operation(native, r1, r1, os)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)

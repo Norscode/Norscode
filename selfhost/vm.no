@@ -3251,10 +3251,21 @@ funksjon kall_innebygd(namn: tekst, args: liste<tekst>, active_functions: ordbok
 
     hvis namn == "builtin.thread_spawn" {
         la spawn_fn = tekst(vm_sikker_get(args[0], "fn"))
-        // thread.*-primitiv → ekte native tråd (clone(2), utan GC/VM).
+        // thread.*-primitiv → ekte native tråd (clone(2), utan GC/VM). Vertar utan
+        // native trådar (ARM64-seedane: ingen clone-atom; macOS: ingen clone(2)) kastar
+        // NATIV-GAP eller svarar «ikkje støtta» → same primitiv som grøn tråd i VM-en.
         hvis builtin.starts_with(spawn_fn, "thread.") {
             args[0]["__vm_functions"] = active_functions
-            returner builtin.thread_spawn(args[0])
+            la native_svar = null
+            la native_feil = ""
+            prøv {
+                native_svar = builtin.thread_spawn(args[0])
+            } fang (e) {
+                native_feil = tekst(e)
+            }
+            hvis native_feil == "" og ikkje vm_trad_native_manglar(native_svar) { returner native_svar }
+            hvis native_feil != "" og builtin.index_of(native_feil, "NATIV-GAP") < 0 { kast native_feil }
+            returner vm_green_prim_spawn(args[0], active_functions)
         }
         // Ukjend brukarfunksjon: spawn feilar synkront (C-kontrakten,
         // test_thread_sync_lifecycle), i staden for «started» + feil ved join.
@@ -4741,6 +4752,7 @@ funksjon vm_green_suspender(functions, ip: heiltall, ramme, continuations,
 // resume) til budsjettet er brukt, tråden ventar, eller han er ferdig; byt så
 // vertstilstanden attende. Returnerer 1 når tråden gjorde arbeid (ikkje ventar).
 funksjon vm_green_slice(t) -> heiltall {
+    hvis vm_map_har_nokkel(t, "prim") { returner vm_green_prim_slice(t) }
     la functions = t["functions"]
     la f_frames = functions["__vm_active_frames__"]
     la f_pending = functions["__vm_pending_arg_heap_ids__"]
@@ -4807,6 +4819,81 @@ funksjon vm_green_slice(t) -> heiltall {
     vm_green_yielded = 0
     hvis ferdig == 1 { vm_green_ferdig(t) }
     returner arbeid
+}
+
+// ── thread.*-primitiv som grøne trådar (vert utan native trådar) ──────────────
+// Same kontrakt som den native backenden (std.native_gap.thread_spawn / C-seeden):
+// thread.noop, thread.atomic_increment (args handle/iterations; cancel-flagget stoppar
+// før neste steg), thread.condition_signal (args condition_handle/delay_ms; value
+// «signalled»). Primitiva køyrer i Norscode i VM-en (ingen bytekode), éin avgrensa
+// porsjon per slice, so hovudtråden og andre grøne trådar held fram å gå.
+funksjon vm_trad_native_manglar(svar) -> boolsk {
+    hvis builtin.type(svar) != "ordbok" { returner usann }
+    hvis tekst(vm_sikker_get(svar, "status")) != "error" { returner usann }
+    returner builtin.index_of(tekst(vm_sikker_get(svar, "error")), "ikkje støtta") >= 0
+}
+
+funksjon vm_green_prim_spawn(req, functions) {
+    la fn = tekst(vm_sikker_get(req, "fn"))
+    hvis fn != "thread.noop" og fn != "thread.atomic_increment" og fn != "thread.condition_signal" {
+        returner {"abi": "norscode-native-thread-v1", "status": "error", "handle": "", "thread_id": "",
+                  "value": "", "error": "ukjend trådfunksjon: " + fn}
+    }
+    la targs = vm_sikker_get(req, "args")
+    hvis builtin.type(targs) != "ordbok" { targs = {} }
+    la nr = vm_green_ny_nr()
+    la t = vm_green_ny(functions, "", targs, "green-thread:" + tekst_fra_heltall(nr), nr)
+    t["prim"] = fn
+    t["prim_gjort"] = 0
+    t["prim_frist"] = 0
+    hvis fn == "thread.condition_signal" {
+        t["prim_frist"] = builtin.tid_ms() + vm_green_felt_heiltal(targs, "delay_ms", 0)
+    }
+    t["state"] = "running"
+    legg_til(vm_green_rekkje, t["id"])
+    returner {"abi": "norscode-native-thread-v1", "status": "started", "handle": t["id"],
+              "thread_id": tekst_fra_heltall(t["gid"]), "value": "", "error": "", "backend": "vm-green"}
+}
+
+funksjon vm_green_prim_ferdig(t, state: tekst, verdi: tekst, feil: tekst) -> heiltall {
+    t["state"] = state
+    t["value"] = verdi
+    t["error"] = feil
+    vm_green_ferdig(t)
+    returner 1
+}
+
+// Éin slice for eit primitiv. Returnerer 1 når tråden gjorde arbeid, 0 når han ventar.
+funksjon vm_green_prim_slice(t) -> heiltall {
+    la fn = tekst(t["prim"])
+    la a = t["args"]
+    hvis fn == "thread.noop" { returner vm_green_prim_ferdig(t, "finished", "", "") }
+    hvis fn == "thread.condition_signal" {
+        hvis t["cancel"] == 0 og builtin.tid_ms() < t["prim_frist"] { returner 0 }
+        la ch = tekst(vm_sikker_get(a, "condition_handle"))
+        la r = builtin.thread_sync({"abi": "norscode-native-thread-v1", "operation": "condition_signal",
+                                    "handle": ch, "thread_id": tekst_fra_heltall(t["gid"]), "timeout_ms": "0"})
+        hvis tekst(vm_sikker_get(r, "status")) != "ready" {
+            returner vm_green_prim_ferdig(t, "error", "", "ukjent condition")
+        }
+        returner vm_green_prim_ferdig(t, "finished", "signalled", "")
+    }
+    // thread.atomic_increment
+    la h = tekst(vm_sikker_get(a, "handle"))
+    la n = vm_green_felt_heiltal(a, "iterations", 1)
+    la porsjon: heiltall = 0
+    mens porsjon < vm_green_kvantum og t["prim_gjort"] < n og t["cancel"] == 0 {
+        la r = builtin.atomic_operation({"operation": "fetch_add", "handle": h, "delta": 1, "order": "seq_cst"})
+        hvis tekst(vm_sikker_get(r, "status")) != "ok" {
+            returner vm_green_prim_ferdig(t, "error", "", "invalid atomic handle")
+        }
+        t["prim_gjort"] = t["prim_gjort"] + 1
+        porsjon = porsjon + 1
+    }
+    hvis t["cancel"] != 0 eller t["prim_gjort"] >= n {
+        returner vm_green_prim_ferdig(t, "finished", tekst_fra_heltall(t["prim_gjort"]), "")
+    }
+    returner 1
 }
 
 // Éin planleggingsrunde: pool-dispatch og éin slice til kvar køyrbar tråd.
