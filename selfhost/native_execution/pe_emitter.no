@@ -1,5 +1,7 @@
 // Norscode PE32+ emitter for Windows x86-64.
-// Byggjer ei deterministisk console-EXE med .text og .idata utan C/Python.
+// Byggjer deterministiske console-EXE-ar (PE32+, x86-64) utan C/Python.
+
+bruk selfhost.native_execution.win64_asm som asm
 
 funksjon legg_u8(buf, v) { legg_til(buf, v & 255) }
 
@@ -249,7 +251,382 @@ funksjon skriv_exit_pe(sti) {
 
 funksjon start() {
     la output = miljo_hent("NC_PE_OUTPUT")
+    hvis miljo_hent("NC_PE_DEMO") == "hei" {
+        hvis output == "" { output = "build/norscode-hei-windows-x86_64.exe" }
+        la hei = bygg_hei_pe("Hei frå Norscode på Windows!\n", 42)
+        fil_skriv_binær(output, hei)
+        skriv("pe_emitter: hei " + tekst_fra_heltall(lengde(hei)) + " bytes\n")
+        returner 0
+    }
     hvis output == "" { output = "build/norscode-exit-windows-x86_64.exe" }
     skriv("pe_emitter: " + tekst_fra_heiltall(skriv_exit_pe(output)) + " bytes\n")
     returner 0
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// W0 (docs/WINDOWS_SEED_PLAN.md): generell PE32+-byggjar med ekte importtabell.
+//
+// Biletet har fast ImageBase og er utan relokeringar (IMAGE_FILE_RELOCS_STRIPPED, ingen
+// DYNAMIC_BASE): Norscode-codegenen brukar absolutte adresser, so lastaren må leggje
+// seksjonane der codegenen rekna med. Seksjonane må vere samanhengande i VA.
+// ════════════════════════════════════════════════════════════════════════════
+
+funksjon SEKSJON_ALIGN() -> heiltall { returner 4096 }
+funksjon FIL_ALIGN() -> heiltall { returner 512 }
+funksjon FLAGG_TEXT() -> heiltall { returner 1610612768 }    // 0x60000020 CODE|EXECUTE|READ
+funksjon FLAGG_RDATA() -> heiltall { returner 1073741888 }   // 0x40000040 INITIALIZED|READ
+funksjon FLAGG_DATA() -> heiltall { returner 3221225536 }    // 0xC0000040 INITIALIZED|READ|WRITE
+funksjon FLAGG_BSS() -> heiltall { returner 3221225600 }     // 0xC0000080 UNINITIALIZED|READ|WRITE
+
+funksjon align_opp(v: heiltall, a: heiltall) -> heiltall { returner ((v + a - 1) / a) * a }
+
+funksjon legg_bytes_tekst(buf, verdi: tekst) {
+    la i = 0
+    mens i < lengde(verdi) {
+        legg_til(buf, builtin.char_code(verdi[i]) & 255)
+        i = i + 1
+    }
+}
+
+// Importblokk for `importar` = [[dll, [funk, …]], …], plassert på `rva`.
+// Utdata: bytes, import_rva/import_size (katalog 1), iat_rva/iat_size (katalog 12) og
+// slot: "DLL!Funk" → RVA til IAT-sloten (8 B; lastaren skriv funksjonsadressa der).
+funksjon bygg_importar(importar, rva: heiltall) {
+    la n = lengde(importar)
+    la desc_storleik = (n + 1) * 20
+    // Pass 1: offsettar.
+    la off = align_opp(desc_storleik, 8)
+    la ilt_off: liste = []
+    la i = 0
+    mens i < n {
+        legg_til(ilt_off, off)
+        off = off + (lengde(importar[i][1]) + 1) * 8
+        i = i + 1
+    }
+    la iat_start = off
+    la iat_off: liste = []
+    i = 0
+    mens i < n {
+        legg_til(iat_off, off)
+        off = off + (lengde(importar[i][1]) + 1) * 8
+        i = i + 1
+    }
+    la iat_slutt = off
+    la namn_off: liste = []
+    i = 0
+    mens i < n {
+        la fl: liste = []
+        la j = 0
+        mens j < lengde(importar[i][1]) {
+            off = align_opp(off, 2)
+            legg_til(fl, off)
+            off = off + 2 + lengde(importar[i][1][j]) + 1
+            j = j + 1
+        }
+        legg_til(namn_off, fl)
+        i = i + 1
+    }
+    la dll_off: liste = []
+    i = 0
+    mens i < n {
+        legg_til(dll_off, off)
+        off = off + lengde(importar[i][0]) + 1
+        i = i + 1
+    }
+    la total = align_opp(off, 8)
+
+    // Pass 2: bytes.
+    la b = []
+    i = 0
+    mens i < n {
+        legg_u32_le(b, rva + ilt_off[i])     // OriginalFirstThunk (ILT)
+        legg_u32_le(b, 0)                    // TimeDateStamp
+        legg_u32_le(b, 0)                    // ForwarderChain
+        legg_u32_le(b, rva + dll_off[i])     // Name
+        legg_u32_le(b, rva + iat_off[i])     // FirstThunk (IAT)
+        i = i + 1
+    }
+    pad_til(b, desc_storleik)
+    pad_til(b, align_opp(desc_storleik, 8))
+    // ILT og IAT har same innhald før lasting: RVA til IMAGE_IMPORT_BY_NAME.
+    la runde = 0
+    mens runde < 2 {
+        i = 0
+        mens i < n {
+            la j = 0
+            mens j < lengde(importar[i][1]) {
+                legg_u64_le(b, rva + namn_off[i][j])
+                j = j + 1
+            }
+            legg_u64_le(b, 0)
+            i = i + 1
+        }
+        runde = runde + 1
+    }
+    la slot = {}
+    i = 0
+    mens i < n {
+        la j = 0
+        mens j < lengde(importar[i][1]) {
+            pad_til(b, namn_off[i][j])
+            legg_u16_le(b, 0)                // hint
+            legg_bytes_tekst(b, importar[i][1][j])
+            legg_til(b, 0)
+            slot[importar[i][0] + "!" + importar[i][1][j]] = rva + iat_off[i] + j * 8
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    mens i < n {
+        pad_til(b, dll_off[i])
+        legg_bytes_tekst(b, importar[i][0])
+        legg_til(b, 0)
+        i = i + 1
+    }
+    pad_til(b, total)
+    returner {
+        "bytes": b, "slot": slot,
+        "import_rva": rva, "import_size": desc_storleik,
+        "iat_rva": rva + iat_start, "iat_size": iat_slutt - iat_start
+    }
+}
+
+// Seksjon for bygg_pe: data kan vere kortare enn vsize (resten nullfylt av lastaren);
+// tom data = uinitialisert (SizeOfRawData 0).
+funksjon seksjon(namn: tekst, rva: heiltall, vsize: heiltall, data, flagg: heiltall) {
+    returner {"namn": namn, "rva": rva, "vsize": vsize, "data": data, "flagg": flagg}
+}
+
+// spec: image_base, entry_rva, seksjonar (samanhengande, stigande RVA), import_rva,
+// import_size, iat_rva, iat_size, stack_reserve, stack_commit.
+funksjon bygg_pe(spec) {
+    la seks = spec["seksjonar"]
+    la ns = lengde(seks)
+    la hovud_storleik = 128 + 4 + 20 + 240 + ns * 40
+    la hovud_fil = align_opp(hovud_storleik, FIL_ALIGN())
+    // Kontroll: samanhengande seksjonar som startar rett etter hovuda.
+    la forventa = align_opp(hovud_storleik, SEKSJON_ALIGN())
+    la kode_storleik = 0
+    la init_storleik = 0
+    la uinit_storleik = 0
+    la base_of_code = 0
+    la i = 0
+    mens i < ns {
+        la s = seks[i]
+        hvis s["rva"] != forventa {
+            kast "PE: seksjon " + s["namn"] + " er ikkje samanhengande (rva " + tekst_fra_heltall(s["rva"]) +
+                 ", venta " + tekst_fra_heltall(forventa) + ")"
+        }
+        hvis lengde(s["data"]) > s["vsize"] { kast "PE: seksjon " + s["namn"] + " har meir data enn vsize" }
+        forventa = align_opp(s["rva"] + s["vsize"], SEKSJON_ALIGN())
+        la raw = align_opp(lengde(s["data"]), FIL_ALIGN())
+        hvis s["flagg"] == FLAGG_TEXT() {
+            kode_storleik = kode_storleik + raw
+            hvis base_of_code == 0 { base_of_code = s["rva"] }
+        } ellers hvis lengde(s["data"]) == 0 {
+            uinit_storleik = uinit_storleik + align_opp(s["vsize"], FIL_ALIGN())
+        } ellers {
+            init_storleik = init_storleik + raw
+        }
+        i = i + 1
+    }
+    la image_storleik = forventa
+
+    la fil = bygg_dos_header()
+    legg_u32_le(fil, 17744)                 // "PE\0\0"
+    // COFF
+    legg_u16_le(fil, 34404)                 // AMD64
+    legg_u16_le(fil, ns)
+    legg_u32_le(fil, 0)                     // TimeDateStamp (reproduserbart)
+    legg_u32_le(fil, 0)
+    legg_u32_le(fil, 0)
+    legg_u16_le(fil, 240)
+    legg_u16_le(fil, 35)                    // RELOCS_STRIPPED|EXECUTABLE|LARGE_ADDRESS_AWARE
+    // Optional header (PE32+)
+    legg_u16_le(fil, 523)
+    legg_u8(fil, 1)
+    legg_u8(fil, 0)
+    legg_u32_le(fil, kode_storleik)
+    legg_u32_le(fil, init_storleik)
+    legg_u32_le(fil, uinit_storleik)
+    legg_u32_le(fil, spec["entry_rva"])
+    legg_u32_le(fil, base_of_code)
+    legg_u64_le(fil, spec["image_base"])
+    legg_u32_le(fil, SEKSJON_ALIGN())
+    legg_u32_le(fil, FIL_ALIGN())
+    legg_u16_le(fil, 6)                     // OS 6.0
+    legg_u16_le(fil, 0)
+    legg_u16_le(fil, 0)
+    legg_u16_le(fil, 0)
+    legg_u16_le(fil, 6)                     // subsystem 6.0
+    legg_u16_le(fil, 0)
+    legg_u32_le(fil, 0)
+    legg_u32_le(fil, image_storleik)
+    legg_u32_le(fil, hovud_fil)
+    legg_u32_le(fil, 0)                     // CheckSum
+    legg_u16_le(fil, 3)                     // CONSOLE
+    legg_u16_le(fil, 33024)                 // 0x8100 NX_COMPAT|TERMINAL_SERVER_AWARE (ikkje DYNAMIC_BASE)
+    legg_u64_le(fil, spec["stack_reserve"])
+    legg_u64_le(fil, spec["stack_commit"])
+    legg_u64_le(fil, 1048576)
+    legg_u64_le(fil, 4096)
+    legg_u32_le(fil, 0)
+    legg_u32_le(fil, 16)
+    i = 0
+    mens i < 16 {
+        hvis i == 1 { legg_datakatalog(fil, spec["import_rva"], spec["import_size"]) }
+        ellers hvis i == 12 { legg_datakatalog(fil, spec["iat_rva"], spec["iat_size"]) }
+        ellers { legg_datakatalog(fil, 0, 0) }
+        i = i + 1
+    }
+    // Seksjonstabell
+    la raw_off = hovud_fil
+    i = 0
+    mens i < ns {
+        la s = seks[i]
+        la raw = align_opp(lengde(s["data"]), FIL_ALIGN())
+        la peikar = 0
+        hvis raw > 0 { peikar = raw_off }
+        kopier_inn(fil, bygg_seksjon(s["namn"], s["vsize"], s["rva"], raw, peikar, s["flagg"]))
+        raw_off = raw_off + raw
+        i = i + 1
+    }
+    hvis lengde(fil) != hovud_storleik { kast "PE: hovudstorleik stemmer ikkje" }
+    pad_til(fil, hovud_fil)
+    i = 0
+    mens i < ns {
+        la d = seks[i]["data"]
+        hvis lengde(d) > 0 {
+            kopier_inn(fil, d)
+            pad_til(fil, align_opp(lengde(fil), FIL_ALIGN()))
+        }
+        i = i + 1
+    }
+    returner fil
+}
+
+// Strukturell lesar (testar, verifikasjon): hovudfelt, seksjonar og importar.
+funksjon rva_til_fil(buf, rva: heiltall) -> heiltall {
+    la pe = les_u32_le(buf, 60)
+    la ns = les_u16_le(buf, pe + 6)
+    la tab = pe + 24 + les_u16_le(buf, pe + 20)
+    la i = 0
+    mens i < ns {
+        la h = tab + i * 40
+        la va = les_u32_le(buf, h + 12)
+        la vs = les_u32_le(buf, h + 8)
+        la raw = les_u32_le(buf, h + 16)
+        la ptr = les_u32_le(buf, h + 20)
+        hvis rva >= va og rva < va + raw og rva < va + vs { returner ptr + (rva - va) }
+        i = i + 1
+    }
+    returner -1
+}
+
+funksjon les_cstr(buf, off: heiltall) -> tekst {
+    la delar: liste_tekst = []
+    la i = off
+    mens buf[i] != 0 {
+        legg_til(delar, builtin.chr(buf[i]))
+        i = i + 1
+    }
+    returner builtin.join(delar, "")
+}
+
+funksjon beskriv_pe(buf) {
+    hvis lengde(buf) < 64 eller buf[0] != 77 eller buf[1] != 90 { kast "PE: manglar MZ" }
+    la pe = les_u32_le(buf, 60)
+    hvis les_u32_le(buf, pe) != 17744 { kast "PE: manglar PE-signatur" }
+    la opt = pe + 24
+    hvis les_u16_le(buf, opt) != 523 { kast "PE: ikkje PE32+" }
+    la ut = {
+        "maskin": les_u16_le(buf, pe + 4),
+        "karakteristikk": les_u16_le(buf, pe + 22),
+        "entry_rva": les_u32_le(buf, opt + 16),
+        "image_base": les_u64_le(buf, opt + 24),
+        "image_storleik": les_u32_le(buf, opt + 56),
+        "dll_karakteristikk": les_u16_le(buf, opt + 70),
+        "stack_reserve": les_u64_le(buf, opt + 72),
+        "stack_commit": les_u64_le(buf, opt + 80),
+        "seksjonar": [],
+        "importar": {}
+    }
+    la ns = les_u16_le(buf, pe + 6)
+    la tab = opt + les_u16_le(buf, pe + 20)
+    la i = 0
+    mens i < ns {
+        la h = tab + i * 40
+        la namn_bytes: liste_tekst = []
+        la k = 0
+        mens k < 8 og buf[h + k] != 0 {
+            legg_til(namn_bytes, builtin.chr(buf[h + k]))
+            k = k + 1
+        }
+        legg_til(ut["seksjonar"], {
+            "namn": builtin.join(namn_bytes, ""), "vsize": les_u32_le(buf, h + 8),
+            "rva": les_u32_le(buf, h + 12), "raw": les_u32_le(buf, h + 16),
+            "flagg": les_u32_le(buf, h + 36)
+        })
+        i = i + 1
+    }
+    la imp_rva = les_u32_le(buf, opt + 120)
+    hvis imp_rva != 0 {
+        la d = rva_til_fil(buf, imp_rva)
+        mens les_u32_le(buf, d + 12) != 0 {
+            la dll = les_cstr(buf, rva_til_fil(buf, les_u32_le(buf, d + 12)))
+            la ilt = rva_til_fil(buf, les_u32_le(buf, d))
+            la iat_rva = les_u32_le(buf, d + 16)
+            la j = 0
+            mens les_u64_le(buf, ilt + j * 8) != 0 {
+                la hn = rva_til_fil(buf, les_u32_le(buf, ilt + j * 8))
+                ut["importar"][dll + "!" + les_cstr(buf, hn + 2)] = iat_rva + j * 8
+                j = j + 1
+            }
+            d = d + 20
+        }
+    }
+    returner ut
+}
+
+// ── W0-demo: hello world via IAT (GetStdHandle / WriteFile / ExitProcess) ──
+funksjon hei_importar() {
+    returner [["KERNEL32.dll", ["ExitProcess", "GetStdHandle", "WriteFile"]]]
+}
+
+funksjon bygg_hei_pe(melding: tekst, exit_kode: heiltall) {
+    la base = 4194304                       // 0x400000
+    la imp = bygg_importar(hei_importar(), 12288)   // .idata @ 0x3000
+    la slot = imp["slot"]
+    la msg = []
+    legg_bytes_tekst(msg, melding)
+    la msg_va = base + 8192                 // .rdata @ 0x2000
+
+    la a = asm.ny()
+    asm.sub_i(a, asm.RSP(), 56)             // inngang: rsp ≡ 8 (mod 16) → 16-aligna, 32 B skugge + arg 5 + slot
+    asm.mov_i32(a, asm.RCX(), 0 - 11)       // STD_OUTPUT_HANDLE
+    asm.call_abs(a, base + slot["KERNEL32.dll!GetStdHandle"])
+    asm.mov(a, asm.RCX(), asm.RAX())
+    asm.mov_i64(a, asm.RDX(), msg_va)
+    asm.mov_i32(a, asm.R8(), lengde(msg))
+    asm.lea(a, asm.R9(), asm.RSP(), 48)     // &skrive
+    asm.st_i(a, asm.RSP(), 32, 0)           // lpOverlapped = NULL
+    asm.call_abs(a, base + slot["KERNEL32.dll!WriteFile"])
+    asm.mov_i32(a, asm.RCX(), exit_kode)
+    asm.call_abs(a, base + slot["KERNEL32.dll!ExitProcess"])
+    asm.int3(a)
+    la kode = asm.ferdig(a)
+
+    la spec = {
+        "image_base": base, "entry_rva": 4096,
+        "seksjonar": [
+            seksjon(".text", 4096, lengde(kode), kode, FLAGG_TEXT()),
+            seksjon(".rdata", 8192, lengde(msg) + 1, msg, FLAGG_RDATA()),
+            seksjon(".idata", 12288, lengde(imp["bytes"]), imp["bytes"], FLAGG_DATA())
+        ],
+        "import_rva": imp["import_rva"], "import_size": imp["import_size"],
+        "iat_rva": imp["iat_rva"], "iat_size": imp["iat_size"],
+        "stack_reserve": 1048576, "stack_commit": 65536
+    }
+    returner bygg_pe(spec)
 }
