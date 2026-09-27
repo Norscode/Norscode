@@ -11,6 +11,10 @@ bruk selfhost.ncb_serde som serde
 // kryss-codegen-bunten (A1, NC_BUILTIN_REPORT=1 → uløyste=0). Modulen er x86-gap-målet
 // for builtin.filesystem_write_operation (gap_ruter), so han må vere i bunten.
 bruk std.runtime_filesystem_native som fs_native
+// Som native_codegen_v2 (a12fix): std.desimaltall_tekst i codegen-bunten, so json_parse-atomet i
+// kryss-codegen-ELF-en får den eksakte talkroken (1.0e300 vart elles 1 ULP feil, 1.7976931348623157e308
+// vart inf) — NCB-flyttalskonstantar blir då bit-like VM-en.
+bruk std.desimaltall_tekst som dtt
 
 // Plattformmålet codegenen emitterer for (A2): "linux-arm64" (ELF) eller "macos-arm64"
 // (Mach-O). Same strengar som builtin.native_target() gjev i programmet og som
@@ -1719,11 +1723,47 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     legg_u32(native, 0xF9000620 | val_reg)              // str Xval, [x17, #8]  (oppdater verdi)
     la p_b_done2 = lengde(native)
     legg_u32(native, 0)                                 // b done
-    // --- kart-vekst: nytt mapdata med count+1 par ---
+    // --- kart-vekst (A5: amortisert O(1)) ---
+    // Eit mapdata som alt har vakse, har eit prefiksord [mapdata − 8] = (MAGI40 << 24) | kap
+    // (MAGI40 = "XCPAM"). Er det plass (count < kap), blir paret lagt til på staden; elles
+    // blir kartet kopiert til eit nytt mapdata med kapasitet max(4, 2·count) og prefiks.
+    // Kart frå andre produsentar (BUILD_MAP, json, …) har ikkje prefikset → kopi-vegen.
+    // Før kopierte kvar ny nøkkel HEILE kartet (O(n²) minne utan GC): eit VM-kart med
+    // 16 437 nøklar tømde 4 GiB-heapen.
     la lbl_grow = lengde(native)
     legg_u32(native, 0xF9400400 | (obj_reg << 5) | 9)   // ldr x9, [Xobj, #8] (gammal mapdata)
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (gammal count)
-    legg_u32(native, 0xAA1C03EE)                        // mov x14, x28   (ny mapdata-base)
+    legg_u32(native, 0xF85F8122)                        // ldur x2, [x9, #-8]  (prefiks?)
+    legg_u32(native, 0xD358FC43)                        // lsr x3, x2, #24
+    legg_u32(native, 0xD2886B04)                        // movz x4, #0x4358
+    legg_u32(native, 0xF2A82A04)                        // movk x4, #0x4150, lsl #16
+    legg_u32(native, 0xF2C009A4)                        // movk x4, #0x4D, lsl #32   (MAGI40)
+    legg_u32(native, 0xEB04007F)                        // cmp x3, x4
+    la p_ikkje_prefiks = lengde(native)
+    legg_u32(native, 0)                                 // b.ne kopi
+    legg_u32(native, 0x92405C45)                        // and x5, x2, #0xFFFFFF  (kap)
+    legg_u32(native, 0xEB05015F)                        // cmp x10, x5
+    la p_full = lengde(native)
+    legg_u32(native, 0)                                 // b.hs kopi
+    legg_u32(native, 0x91002121)                        // add x1, x9, #8
+    legg_u32(native, 0x8B0A1021)                        // add x1, x1, x10, lsl #4  (&par[count])
+    legg_u32(native, 0xF9000020 | idx_reg)              // str Xidx, [x1]
+    legg_u32(native, 0xF9000420 | val_reg)              // str Xval, [x1, #8]
+    legg_u32(native, 0x9100054A)                        // add x10, x10, #1
+    legg_u32(native, 0xF900012A)                        // str x10, [x9]  (count++)
+    la p_på_staden_ferdig = lengde(native)
+    legg_u32(native, 0)                                 // b done
+    la lbl_kopi = lengde(native)
+    ncd_bcond(native, p_ikkje_prefiks, lbl_kopi, 1)
+    ncd_bcond(native, p_full, lbl_kopi, 2)
+    legg_u32(native, 0xD37FF945)                        // lsl x5, x10, #1
+    legg_u32(native, 0xF10010BF)                        // cmp x5, #4
+    legg_u32(native, 0x54000042)                        // b.hs +2
+    legg_u32(native, 0xD2800085)                        // movz x5, #4   (ny kap = max(4, 2·count))
+    legg_u32(native, 0xAA1C03ED)                        // mov x13, x28  (prefiks-ord)
+    legg_u32(native, 0xAA0460A6)                        // orr x6, x5, x4, lsl #24
+    legg_u32(native, 0xF90001A6)                        // str x6, [x13]
+    legg_u32(native, 0x910021AE)                        // add x14, x13, #8  (ny mapdata-base)
     legg_u32(native, 0x9100054B)                        // add x11, x10, #1 (ny count)
     legg_u32(native, 0xF90001CB)                        // str x11, [x14]
     legg_u32(native, 0x91002120)                        // add x0, x9, #8  (src)
@@ -1742,8 +1782,8 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     la lbl_copydone = lengde(native)
     legg_u32(native, 0xF9000020 | idx_reg)              // str Xidx, [x1]   (ny nøkkel)
     legg_u32(native, 0xF9000420 | val_reg)              // str Xval, [x1, #8] (ny verdi)
-    legg_u32(native, 0x91004021)                        // add x1, x1, #16
-    legg_u32(native, 0xAA0103FC)                        // mov x28, x1  (bump)
+    legg_u32(native, 0x910021DC)                        // add x28, x14, #8
+    legg_u32(native, 0x8B05139C)                        // add x28, x28, x5, lsl #4  (bump forbi kapasiteten)
     legg_u32(native, 0xF9000400 | (obj_reg << 5) | 14)  // str x14, [Xobj, #8] (peik obj til nytt mapdata)
     la lbl_done = lengde(native)
     skriv_u32(native, p_cbz_null,    0xB4000000 | ((((lbl_done     - p_cbz_null)    / 4) & 0x7FFFF) << 5) | obj_reg)
@@ -1758,6 +1798,7 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     skriv_u32(native, p_b_scan,      0x14000000 |  (((lbl_scan     - p_b_scan)      / 4) & 0x03FFFFFF))
     skriv_u32(native, p_cbz_grow,    0xB4000011 | ((((lbl_grow     - p_cbz_grow)    / 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_done2,     0x14000000 |  (((lbl_done     - p_b_done2)     / 4) & 0x03FFFFFF))
+    ncd_b(native, p_på_staden_ferdig, lbl_done)
     skriv_u32(native, p_cbz_copydone,0xB4000002 | ((((lbl_copydone - p_cbz_copydone)/ 4) & 0x7FFFF) << 5))
     skriv_u32(native, p_b_copy,      0x14000000 |  (((lbl_copy     - p_b_copy)      / 4) & 0x03FFFFFF))
     returner 0
@@ -2389,7 +2430,10 @@ funksjon emit_sha256_core_routine(os: tekst) -> liste_heiltall {
     legg_u32(r, 0xD14007FF)
     legg_u32(r, 0xF90117E2)
     legg_u32(r, 0xAA0103EA)
-    legg_u32(r, 0x910903E7)
+    // A5: meldingsbufferet ligg på heapen (justert x28), ikkje på sp+0x240 i ei 8 KiB-
+    // ramme — meldingar over ~7,5 KB skreiv forbi ramma (SIGSEGV i nc_test.no-hashing).
+    legg_u32(r, 0x91003F87)                        // add x7, x28, #15
+    legg_u32(r, 0x927CECE7)                        // and x7, x7, #~15
     legg_u32(r, 0xD280000C)
     la lc = lengde(r)
     legg_u32(r, 0xEB0A019F)
@@ -2424,6 +2468,7 @@ funksjon emit_sha256_core_routine(os: tekst) -> liste_heiltall {
     legg_u32(r, 0x9100254F)
     legg_u32(r, 0x9100FDEF)
     legg_u32(r, 0x927AE5EF)
+    legg_u32(r, 0x8B0F00FC)                        // add x28, x7, x15  (reserver padda bufferet)
     legg_u32(r, 0xF90113EF)
     legg_u32(r, 0x91000550)
     la lz = lengde(r)
@@ -3319,6 +3364,10 @@ funksjon emit_atomic_operation(native: liste_heiltall, req_reg: heiltall, dst_re
     emit_ncval_str_const(native, "value", 0)
     emit_map_get(native, req_reg, 0, 13, usann)
     legg_u32(native, 0xF94005AA)   // x10 = value
+    // A5: LDAXR/STLXR/LDAR krev justert adresse, men x28 er ikkje alltid justert
+    // (str_concat bumpar med nøyaktig 8 + lengd) → SIGBUS (BUS_ADRALN) i nc_test.no.
+    legg_u32(native, 0x91003F9C)   // add x28, x28, #15
+    legg_u32(native, 0x927CEF9C)   // and x28, x28, #~15
     legg_u32(native, 0xAA1C03E9)   // x9 = word addr = x28
     legg_u32(native, 0xF900012A)   // str value,[x9]
     legg_u32(native, 0x9100439C)   // add x28,#16
@@ -3695,7 +3744,10 @@ funksjon emit_sha256_bytes(native: liste_heiltall, arg_reg: heiltall, dst_reg: h
         legg_u32(native, 0xB9000000 | ((128 + hi) << 10) | (31 << 5) | 9)
         hi = hi + 1
     }
-    legg_u32(native, 0x910903E7)
+    // A5: meldingsbufferet ligg på heapen (justert x28), ikkje på sp+0x240 i ei 8 KiB-
+    // ramme — meldingar over ~7,5 KB skreiv forbi ramma (SIGSEGV i nc_test.no-hashing).
+    legg_u32(native, 0x91003F87)                        // add x7, x28, #15
+    legg_u32(native, 0x927CECE7)                        // and x7, x7, #~15
     legg_u32(native, 0xF9400400 | (arg_reg << 5) | 9)
     legg_u32(native, 0xF940012A)
     legg_u32(native, 0x9100212B)
@@ -3719,6 +3771,7 @@ funksjon emit_sha256_bytes(native: liste_heiltall, arg_reg: heiltall, dst_reg: h
     legg_u32(native, 0x9100254F)
     legg_u32(native, 0x9100FDEF)
     legg_u32(native, 0x927AE5EF)
+    legg_u32(native, 0x8B0F00FC)                        // add x28, x7, x15  (reserver padda bufferet)
     legg_u32(native, 0xF90113EF)
     legg_u32(native, 0x91000550)
     la lz = lengde(native)
@@ -7477,6 +7530,19 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
         pending_val_slot = variabel_antal + 1
         variabel_antal = variabel_antal + 2
     }
+    // A5 (som x86-AOT sin handler-count-slot): ein funksjon med TRY_BEGIN lagrar
+    // __exc_top__ ved inngang og set han tilbake ved RETURN. Utan dette lak kvar
+    // `returner` inne i `prøv` ein 80-byte-handlerpost (TRY_END blir hoppa over); i
+    // VM-en (vm.no) skjer det per tolka kall, og 256-post-regionen rann over i
+    // miljø-overlayet som ligg rett etter (SIGSEGV i miljo_hent).
+    la exc_slot = 0 - 1
+    hvis ikkje is_entry og finnes_nøkkel(globals, "__exc_top__") {
+        la ts = 0
+        mens ts < lengde(kode) {
+            hvis opcode(kode[ts]) == "TRY_BEGIN" { exc_slot = variabel_antal  ts = lengde(kode) } ellers { ts = ts + 1 }
+        }
+        hvis exc_slot >= 0 { variabel_antal = variabel_antal + 1 }
+    }
     // Mem-modus: operandane bur i minne-heimar rett etter lokalvariablane.
     // home_off = tal lokalvariablar; reserver maks operand-djupn (+margin) ekstra slots.
     la home_off = variabel_antal
@@ -7507,6 +7573,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF9000000 | ((np + bci) << 10) | (26 << 5) | 13)     // str x13, [x26, #(np+i)*8]
             bci = bci + 1
         }
+    }
+    hvis exc_slot >= 0 {
+        legg_u32(native, 0xF9400320 | (globals["__exc_top__"] << 10) | 10)  // ldr x10, [x25, #ET*8]
+        legg_u32(native, 0xF9000340 | (exc_slot << 10) | 10)                // str x10, [x26, #slot*8]
     }
     // Fase 8: køyr modul-initialisatorane (STORE_GLOBAL av toppnivå-verdiar) før
     // entry-kroppen. x25/x28 er alt sett opp av entry-prologen.
@@ -8117,6 +8187,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                 legg_u32(native, 0xB9400800 | (topp << 5) | 0)  // ldr w0, [Xtopp, #8]  (utpakka int)
             } ellers {
                 legg_u32(native, 0xAA0003E0 | (topp << 16))     // mov x0, Xtopp        (NcVal*)
+            }
+            hvis exc_slot >= 0 {
+                legg_u32(native, 0xF940034A | (exc_slot << 10))                     // ldr x10, [x26, #slot*8]
+                legg_u32(native, 0xF9000320 | (globals["__exc_top__"] << 10) | 10)  // str x10, [x25, #ET*8]
             }
             emit_fn_epilogue(native)
             ferdig = sann
@@ -8774,6 +8848,10 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                         la p_td_jp = lengde(native)
                         legg_u32(native, 0x94000000)                // bl __throw_dispatch__
                         legg_til(bl_patchar, [p_td_jp, "__throw_dispatch__"])
+                    } ellers {
+                        // Verken fallback eller unnatak i bunten: stopp tydeleg i staden for å
+                        // halde fram med x0 = 0 (gav stille 0 eller SIGSEGV seinare).
+                        emit_fatal_melding(native, "json_parse: desimaltal utanfor snoggvegen krev selfhost.json i bunten\n", 70, os)
                     }
                     skriv_u32(native, p_jp_ok, 0xB5000000 | ((((lengde(native) - p_jp_ok) / 4) & 0x7FFFF) << 5))
                     legg_u32(native, 0xAA0003E0 | r1)          // mov Xtopp, x0
