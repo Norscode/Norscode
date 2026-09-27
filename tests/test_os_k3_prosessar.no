@@ -1,0 +1,138 @@
+// tests/test_os_k3_prosessar.no — Norscode OS K3: prosessar i ring 3.
+//
+// Byggjer os/kjerne/k3_prøve.no og seks UENDRA Norscode-brukarprogram (os/brukar/*.no,
+// linux-x86_64-ELF, GC og ikkje-GC), lastar dei som Multiboot-modular i QEMU -m 256M og krev:
+//   * skrivar (ikkje-GC, nanosleep) og soppel (GC, >300 MiB søppel) køyrer ferdig med
+//     exit 3 og 5, og linjene deira er like dei same ELF-ane køyrde på Linux (Docker/direkte)
+//   * føregriping: skrivar-linjer kjem MELLOM soppel sine framdriftslinjer (soppel gjev
+//     aldri frå seg CPU-en frivillig), og kjernen tel føregripingar > 0
+//   * nullpeikar (skriv til 0x8), vern (write frå kjerneadresse → -14, så skriv til eiga
+//     kode), kjerneles (les 0x101000, supervisor) og nx (køyr heap-kode) blir drepne med
+//     diagnose og exit 139 utan å ta kjernen med seg
+//   * ingen ukjende syscalls, og alle rammer er frigjorde etterpå
+// Hoppar reint over (rc 0, med grunn) når qemu-system-x86_64 manglar.
+
+bruk os.boot.byggjar som byggjar
+bruk os.boot.qemu som qemu
+bruk tools.process_runner som prosess
+
+funksjon krev(s: tekst, linje: tekst) -> heiltall {
+    hvis builtin.index_of(s, linje) < 0 { skriv("MANGLAR: " + linje + "\n") }
+    assert(builtin.index_of(s, linje) >= 0)
+    returner 0
+}
+
+funksjon linjer_med(s: tekst, prefiks: tekst) -> tekst {
+    la ut = ""
+    for l i builtin.split(s, "\n") {
+        hvis builtin.starts_with(l, prefiks) { ut = ut + l + "\n" }
+    }
+    returner ut
+}
+
+// Køyrer ein brukar-ELF på Linux (direkte på Linux x86-64, elles i Docker) → [exit, stdout, kvar].
+funksjon linux(root: tekst, elf_namn: tekst) -> liste_tekst {
+    la mappe = root + "/build/os/brukar"
+    hvis byggjar.er_linux_x86_64() {
+        la r = prosess.køyr_liste(mappe + "/" + elf_namn, [], root, {}, 300000)
+        returner [r[0], r[1], "linux-x86_64 direkte"]
+    }
+    la docker = byggjar.finn_docker(root)
+    hvis docker == "" { returner ["", "", "verken Linux x86-64 eller Docker"] }
+    la r2 = prosess.køyr_liste(docker, ["run", "--rm", "--platform", "linux/amd64", "-v", mappe + ":/b",
+        byggjar.docker_image(), "/b/" + elf_namn], root, {}, 300000)
+    returner [r2[0], r2[1], "Docker " + byggjar.docker_image()]
+}
+
+funksjon normaliser(t: tekst) -> tekst {
+    hvis builtin.index_of(t, "\n") < 0 { returner builtin.replace(t, "\\n", "\n") }
+    returner t
+}
+
+funksjon start() -> heiltall {
+    la q = qemu.finn_qemu()
+    hvis q == "" {
+        skriv("HOPPA: qemu-system-x86_64 finst ikkje (set OS_QEMU eller installer QEMU)\n")
+        returner 0
+    }
+    la root = byggjar.rot()
+    la program: liste_tekst = ["skrivar", "soppel", "nullpeikar", "vern", "kjerneles", "nx"]
+    la modular: liste_tekst = []
+    for p i program {
+        la elf = "build/os/brukar/" + p + ".elf"
+        la f = byggjar.bygg_brukar("os/brukar/" + p + ".no", elf, p != "skrivar")
+        hvis f != "" { skriv("FEIL (bygg " + p + "): " + f + "\n") }
+        assert_eq(f, "")
+        legg_til(modular, root + "/" + elf)
+    }
+    la r = byggjar.bygg_kjerne("os/kjerne/k3_prøve.no", "build/os/test_k3.img", "demand")
+    hvis r["feil"] != "" { skriv("FEIL (bygg kjerne): " + r["feil"] + "\n") }
+    assert_eq(r["feil"], "")
+
+    la k = qemu.køyr_full(q, r["bilete"], "256M", 300000, "", [], modular, root + "/build/os/test_k3.debugcon.txt")
+    fil_skriv(root + "/build/os/test_k3.serie.txt", k["serie"])
+    skriv("status=" + k["status"] + " qemu=" + k["qemu_kode"] + " kjerne=" + k["kjerne_kode"] + " ms=" + k["ms"] + "\n")
+    skriv(k["serie"])
+    skriv("debugcon: " + k["debugcon"])
+    assert_eq(k["status"], "ferdig")
+    assert_eq(k["kjerne_kode"], "0")
+    la s = k["serie"]
+    krev(s, "[k3] modular: 6\n")
+    krev(s, "K3-prøve: ferdig\n")
+
+    // Exit-kodar
+    krev(s, "[k3] prosess 1 (skrivar) exit=3 ")
+    krev(s, "[k3] prosess 2 (soppel) exit=5 ")
+    krev(s, "[k3] prosess 3 (nullpeikar) exit=139 ")
+    krev(s, "[k3] prosess 4 (vern) exit=139 ")
+    krev(s, "[k3] prosess 5 (kjerneles) exit=139 ")
+    krev(s, "[k3] prosess 6 (nx) exit=139 ")
+
+    // Drap med diagnose
+    krev(s, "[kjerne] prosess 3 (nullpeikar) drepen: unnatak v=14 feil=0x6 ")
+    krev(s, "cr2=0x8 ")
+    krev(s, "vern: write(kjerneadresse)=-14\n")
+    krev(s, "[kjerne] prosess 4 (vern) drepen: unnatak v=14 feil=0x7 ")
+    krev(s, "cr2=0x401000 ")
+    krev(s, "[kjerne] prosess 5 (kjerneles) drepen: unnatak v=14 feil=0x5 ")
+    krev(s, "cr2=0x101000 ")
+    krev(s, "[kjerne] prosess 6 (nx) drepen: unnatak v=14 feil=0x15 ")
+    assert(builtin.index_of(s, "skulle ikkje skje") < 0)
+    krev(s, "[k3] ukjende syscalls: 0\n")
+    la i_ramme = builtin.index_of(s, "[k3] rammer frie etter: ")
+    la rammelinje = builtin.slice(s, i_ramme, builtin.index_of(s, "K3-prøve: ferdig"))
+    la del = builtin.split(builtin.trim(builtin.replace(rammelinje, "[k3] rammer frie etter: ", "")), " av ")
+    assert_eq(builtin.trim(del[0]), builtin.trim(del[1]))
+
+    // Føregriping: skrivar-linjer mellom soppel sine framdriftslinjer
+    la i_start = builtin.index_of(s, "soppel: runde 1000 ")
+    la i_slutt = builtin.index_of(s, "soppel: tot=")
+    la midt = builtin.slice(s, i_start, i_slutt)
+    skriv("skrivar-linjer medan soppel reknar: " + tekst(lengde(builtin.split(linjer_med(midt, "skrivar: "), "\n")) - 1) + "\n")
+    assert(i_start >= 0 og i_slutt > i_start)
+    assert(builtin.index_of(midt, "skrivar: linje") >= 0)
+    la i_f = builtin.index_of(s, "[k3] føregripingar=")
+    la f_rest = builtin.slice(s, i_f + lengde("[k3] føregripingar="), lengde(s))
+    la f_tal = builtin.slice(f_rest, 0, builtin.index_of(f_rest, " "))
+    skriv("føregripingar: " + f_tal + "\n")
+    assert(heltall_fra_tekst(f_tal) > 0)
+
+    // Same ELF-ar på Linux
+    la vegar: liste_tekst = ["soppel", "skrivar"]
+    for p2 i vegar {
+        la lx = linux(root, p2 + ".elf")
+        hvis lx[0] == "" {
+            skriv("MERK: Linux-samanlikning hoppa over for " + p2 + " (" + lx[2] + ")\n")
+        } ellers {
+            la venta_kode = "5"
+            hvis p2 == "skrivar" { venta_kode = "3" }
+            assert_eq(lx[0], venta_kode)
+            la l_ut = normaliser(lx[1])
+            la q_ut = linjer_med(s, p2 + ": ")
+            assert_eq(q_ut, l_ut)
+            skriv("OK: " + p2 + " i ring 3 == Linux (" + lx[2] + ", " + tekst(lengde(l_ut)) + " B, exit " + lx[0] + ")\n")
+        }
+    }
+    skriv("OK: K3 prosessar i ring 3\n")
+    returner 0
+}
