@@ -1,39 +1,103 @@
 // tools/completion_gate.no — autoritativ Norscode 1.0-sluttport
 
+// 2026-09-10: migrert bort frå `exec_prosess` (legacy tekstprosess-kall) til den
+// strukturerte prosess-ABI-en. Den gamle forma bygde shellstrengar av typen
+// «cd <root> && <cmd>» og «shasum -a 256 <sti>» med manuell quoting — nettopp
+// det aktiv-flate-porten avviser. Kallstadene her er heilt regelmessige
+// (`./bin/nc <underkommando>` med eventuelle VAR=verdi-prefiks), so dei går rett
+// over til executable + argv + miljøkart, med `cwd` som PARAMETER i staden for
+// eit «cd … &&»-prefiks. To kall trong ikkje prosess i det heile:
+//   shasum/sha256sum → builtin.sha256_bytes(fil_les_binær(...))
+//   pwd              → builtin.system_info()["cwd"]
+
 bruk std.runtime_status som runtime_status
 bruk std.stdlib_status som stdlib_status
 bruk selfhost.ncb_serde som serde
+bruk tools.process_runner som prosess
 
 funksjon env(namn: tekst) -> tekst {
     prøv { returner miljo_hent(namn) } fang (e) { returner "" }
     returner ""
 }
 
-funksjon shell(sti: tekst) -> tekst {
-    returner "'" + builtin.replace(sti, "'", "'\"'\"'") + "'"
+// Strukturert kall: eksplisitt executable, argv-liste, arbeidskatalog og
+// miljø-overlay. Ingen shell, ingen quoting, ingen PATH-oppslag.
+funksjon køyr(exe: tekst, argv: liste_tekst, cwd: tekst, miljø: ordbok_tekst) -> ordbok_tekst {
+    prøv { returner prosess.køyr(exe, argv, cwd, miljø, 3600000) }
+    fang (e) { returner {"status": "feil", "exit_code": "1", "stdout": "", "stderr": tekst(e)} }
 }
 
-funksjon kommando(cmd: tekst) -> liste_tekst {
-    prøv { returner exec_prosess(cmd) } fang (e) { returner ["1", "", tekst(e)] }
+// Den strukturerte ABI-en gjer med VILJE ikkje PATH-oppslag, so eit bart «git»
+// gjev exit 127. Verktøy må peike på ein konkret fil — same problem som
+// gh-oppslaget i platform_readiness_v3600 løyser med ei kandidatliste.
+//
+// MERK at vi IKKJE kan sondere med fil_finnes: disk-capability-en dekkjer
+// repoet, so `fil_finnes("/usr/bin/git")` blir avvist med «path outside disk
+// scope» før vi rekk å svare. Vi prøver difor kandidatane ved å KØYRE dei, og
+// godtek den fyrste som ikkje gjev 127 (finst ikkje). Vinnaren blir mellomlagra
+// fordi sluttporten kallar git fleire gonger.
+// Stage0 gjev stdout med ESCAPA linjeskift: eit `git rev-parse HEAD`-svar er 42
+// teikn (40 + literal «\n» som to teikn), og `trim` fjernar ikkje det — SHA-en
+// ville aldri matcha attestasjonen. Same normalisering som docker_runner.no og
+// nc_test_parallel.no (begge pinna i release_preflight).
+funksjon ut(res: ordbok_tekst) -> tekst {
+    returner trim(builtin.replace(tekst(res["stdout"]), "\\n", "\n"))
 }
 
-funksjon felt(res: liste_tekst, idx: heiltall) -> tekst {
-    hvis lengde(res) > idx { returner tekst(res[idx]) }
-    returner ""
+funksjon manglar_program(res: ordbok_tekst) -> bool {
+    hvis tekst(res["status"]) == "feil" { returner sann }
+    returner heltall_fra_tekst(tekst(res["exit_code"])) == 127
 }
 
-funksjon ok(res: liste_tekst) -> bool { returner felt(res, 0) == "0" }
+funksjon program_kandidatar(namn: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    prøv {
+        la sti = env("PATH")
+        hvis sti != "" {
+            for mappe i builtin.split(sti, ":") {
+                hvis mappe != "" { legg_til(ut, mappe + "/" + namn) }
+            }
+        }
+    } fang (e) { }
+    legg_til(ut, "/usr/bin/" + namn)
+    legg_til(ut, "/opt/homebrew/bin/" + namn)
+    legg_til(ut, "/usr/local/bin/" + namn)
+    returner ut
+}
+
+la GIT_STI: tekst = ""
+
+funksjon git(root: tekst, argv: liste_tekst) -> ordbok_tekst {
+    hvis GIT_STI != "" { returner køyr(GIT_STI, argv, root, {}) }
+    for k i program_kandidatar("git") {
+        la res = køyr(k, argv, root, {})
+        hvis ikkje manglar_program(res) {
+            GIT_STI = k
+            returner res
+        }
+    }
+    returner {"status": "feil", "exit_code": "127", "stdout": "", "stderr": "fann ikkje git"}
+}
+
+funksjon gh(root: tekst, argv: liste_tekst) -> ordbok_tekst {
+    for k i program_kandidatar("gh") {
+        la res = køyr(k, argv, root, {})
+        hvis ikkje manglar_program(res) { returner res }
+    }
+    returner {"status": "feil", "exit_code": "127", "stdout": "", "stderr": "fann ikkje gh"}
+}
 
 funksjon inneheld(data: tekst, needle: tekst) -> bool {
     returner builtin.index_of(data, needle) >= 0
 }
 
-funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: tekst, cmd: tekst) -> bool {
+funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: tekst,
+                   argv: liste_tekst, miljø: ordbok_tekst) -> bool {
     skriv("\n=== " + namn + " ===\n")
-    la res = kommando("cd " + shell(root) + " && " + cmd)
-    hvis felt(res, 1) != "" { skriv(felt(res, 1)) }
-    hvis felt(res, 2) != "" { skriv(felt(res, 2)) }
-    hvis ok(res) {
+    la res = køyr(root + "/bin/nc", argv, root, miljø)
+    hvis tekst(res["stdout"]) != "" { skriv(tekst(res["stdout"])) }
+    hvis tekst(res["stderr"]) != "" { skriv(tekst(res["stderr"])) }
+    hvis prosess.ok(res) {
         rapport[nøkkel] = "green"
         returner sann
     }
@@ -42,18 +106,17 @@ funksjon køyr_steg(root: tekst, rapport: ordbok_tekst, nøkkel: tekst, namn: te
     returner usann
 }
 
+// Rein Norscode-hash: ingen shasum/sha256sum-prosess.
 funksjon sha256(sti: tekst) -> tekst {
-    la res = kommando("shasum -a 256 " + shell(sti))
-    hvis ikkje ok(res) { returner "" }
-    la delar = builtin.split(trim(felt(res, 1)), " ")
-    hvis lengde(delar) == 0 { returner "" }
-    returner delar[0]
+    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) }
+    fang (e) { returner "" }
+    returner ""
 }
 
 funksjon git_rein(root: tekst) -> bool {
-    la res = kommando("cd " + shell(root) + " && git status --porcelain --untracked-files=all")
-    hvis ikkje ok(res) { returner usann }
-    returner trim(felt(res, 1)) == ""
+    la res = git(root, ["status", "--porcelain", "--untracked-files=all"])
+    hvis ikkje prosess.ok(res) { returner usann }
+    returner ut(res) == ""
 }
 
 funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, commit: tekst) -> bool {
@@ -71,7 +134,7 @@ funksjon attestasjon_ok(root: tekst, sti: tekst, platform: tekst, arch: tekst, c
         hvis sha256(candidate) != expected_hash { returner usann }
         la repo = env("GITHUB_REPOSITORY")
         hvis repo == "" { returner usann }
-        returner ok(kommando("cd " + shell(root) + " && gh attestation verify " + shell(sti) + " --repo " + shell(repo)))
+        returner prosess.ok(gh(root, ["attestation", "verify", sti, "--repo", repo]))
     } fang (e) { returner usann }
     returner usann
 }
@@ -100,7 +163,7 @@ funksjon skriv_rapport(sti: tekst, rapport: ordbok_tekst) -> bool {
 
 funksjon start() -> heiltall {
     la root = env("NORSCODE_ROOT")
-    hvis root == "" { root = trim(felt(kommando("pwd"), 1)) }
+    hvis root == "" { prøv { root = tekst(builtin.system_info()["cwd"]) } fang (e) { root = "." } }
     la modus = env("NORSCODE_COMPLETION_MODE")
     hvis modus != "local" og modus != "release" {
         skriv("bruk: ./bin/nc completion-gate --local|--release\n")
@@ -110,7 +173,7 @@ funksjon start() -> heiltall {
     la rapport: ordbok_tekst = {}
     rapport["schema"] = "norscode-completion-gate-v1"
     rapport["mode"] = modus
-    rapport["source_commit"] = trim(felt(kommando("cd " + shell(root) + " && git rev-parse HEAD"), 1))
+    rapport["source_commit"] = ut(git(root, ["rev-parse", "HEAD"]))
     rapport["commit"] = rapport["source_commit"]
     rapport["runtime_sha256"] = sha256(root + "/dist/norscode_native")
     rapport["stage0_macos_sha256"] = sha256(root + "/bootstrap/stage0/norscode-macos-arm64")
@@ -119,18 +182,22 @@ funksjon start() -> heiltall {
     hvis git_rein(root) { rapport["working_tree_clean"] = "true" }
 
     la alle_ok = sann
-    hvis ikkje køyr_steg(root, rapport, "local_green", "Streng lokal grønnliste", "./bin/nc local-green --strict") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "normal_tests", "Normal testsuite", "./bin/nc test") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "release_preflight", "Release-preflight", "./bin/nc release-preflight --strict") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "active_surface", "Aktiv flate", "./bin/nc active-surface") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "phase0", "Fase-0", "./bin/nc phase0-verify") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "selvstendighet", "L1-L6 sjølvstendighet", "./bin/nc selvstendighet") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "bootstrap", "Bootstrap-gate", "./bin/nc selfhost-bootstrap-gate") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "l5_parity", "L5 byte-paritet", "./bin/nc selfcompile-l5") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "l5b_parity", "L5b byte-paritet", "TEST_TIMEOUT=600 ./bin/nc selfcompile-l5b") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "l5b_mini_parity", "L5b-mini byte-paritet", "TEST_TIMEOUT=600 ./bin/nc selfcompile-l5b-mini") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "slow_tests", "Langtidsflate", "NC_SLOW_TESTS=1 SLOW_TEST_TIMEOUT=600 ./bin/nc test") { alle_ok = usann }
-    hvis ikkje køyr_steg(root, rapport, "user_journey", "Pakka brukarferd", "./bin/nc run tools/release_user_journey.no") { alle_ok = usann }
+    // VAR=verdi-prefiksa i dei gamle shellstrengane er no eksplisitte miljøkart.
+    la tomt: ordbok_tekst = {}
+    la t600: ordbok_tekst = {"TEST_TIMEOUT": "600"}
+    la treg: ordbok_tekst = {"NC_SLOW_TESTS": "1", "SLOW_TEST_TIMEOUT": "600"}
+    hvis ikkje køyr_steg(root, rapport, "local_green", "Streng lokal grønnliste", ["local-green", "--strict"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "normal_tests", "Normal testsuite", ["test"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "release_preflight", "Release-preflight", ["release-preflight", "--strict"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "active_surface", "Aktiv flate", ["active-surface"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "phase0", "Fase-0", ["phase0-verify"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "selvstendighet", "L1-L6 sjølvstendighet", ["selvstendighet"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "bootstrap", "Bootstrap-gate", ["selfhost-bootstrap-gate"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5_parity", "L5 byte-paritet", ["selfcompile-l5"], tomt) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5b_parity", "L5b byte-paritet", ["selfcompile-l5b"], t600) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "l5b_mini_parity", "L5b-mini byte-paritet", ["selfcompile-l5b-mini"], t600) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "slow_tests", "Langtidsflate", ["test"], treg) { alle_ok = usann }
+    hvis ikkje køyr_steg(root, rapport, "user_journey", "Pakka brukarferd", ["run", "tools/release_user_journey.no"], tomt) { alle_ok = usann }
 
     // Stable machine-readable aliases for consumers of the versioned report.
     rapport["local_test_status"] = rapport["normal_tests"]

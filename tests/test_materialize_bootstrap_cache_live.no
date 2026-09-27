@@ -1,0 +1,102 @@
+// tools/materialize_bootstrap_cache.no produserer ein kjeldehash-verifisert
+// bootstrap-cache som dei baka krokane (nc_main) brukar via
+// NORSCODE_BOOTSTRAP_CACHE: treff for selfhost- og stdlib-modular, same
+// bytekode som kompilering frå kjelde, og ingen skriving i bootstrap/.
+// Krev ein seed med krokane (Linux x86-64, tools/nc_test.no), sjå
+// test_bootstrap_cache_hooks_live.
+//
+// NC_HOOKS_LIVE_RUNTIME (valfri) peikar compile-barna til ein annan runtime med
+// same CLI. Berre for VM-i-VM-validering før reseed; CI set han ikkje.
+bruk tools.process_runner som prosess
+
+funksjon miljø(root: tekst, cache: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_MODULE": "",
+        "NORSCODE_NATIVE_TOOL_CACHE": "0",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "1",
+        "NORSCODE_USE_PRECOMPILED_STDLIB": "1",
+        "NORSCODE_SELFHOST_CACHE_UNVERIFIED": "",
+        "NORSCODE_BOOTSTRAP_CACHE": cache,
+        "NORSCODE_STDLIB_CACHE_TRACE": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon har(res: ordbok_tekst, bit: tekst) -> boolsk {
+    returner builtin.contains(tekst(res["stdout"]), bit)
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la kompilator = runtime
+    la overstyrt = ""
+    prøv { overstyrt = builtin.trim(tekst(miljo_hent("NC_HOOKS_LIVE_RUNTIME"))) } fang (e) { overstyrt = "" }
+    hvis overstyrt != "" { kompilator = overstyrt }
+    la root = tekst(info["cwd"])
+    la dir = root + "/build/bootstrap-cache-tool-" + builtin.random_hex(8)
+    la arbeid = dir + "/cwd"
+    builtin.mkdir_p(arbeid)
+    la cache = dir + "/cache"
+
+    // Verktøyet nektar den committa bootstrap/-flata.
+    la nekt_miljø = miljø(root, "bootstrap")
+    nekt_miljø["NC_BOOTSTRAP_CACHE_MODULES"] = "selfhost.ast"
+    la nekt = prosess.køyr(runtime, ["run", root + "/tools/materialize_bootstrap_cache.no"], root, nekt_miljø, 300000)
+    assert(ikkje prosess.ok(nekt))
+    assert(har(nekt, "Nektar"))
+
+    la verktøy_miljø = miljø(root, cache)
+    verktøy_miljø["NC_BOOTSTRAP_CACHE_MODULES"] = "selfhost.ast,std.sha256"
+    la v = prosess.køyr(runtime, ["run", root + "/tools/materialize_bootstrap_cache.no"], root, verktøy_miljø, 1200000)
+    hvis ikkje prosess.ok(v) { prosess.skriv_resultat(v) }
+    assert(prosess.ok(v))
+    assert(har(v, "2 OK, 0 feil"))
+
+    la sm = json_parse_raw(fil_les(cache + "/precompiled/manifest.json"))
+    assert_eq(tekst(sm["schema"]), "norscode-selfhost-source-cache-v1|ncb-v1|module-globals-v1")
+    // Manifestet er bunde til kompilatoren (runtime-binær + kompilatorkjelde).
+    assert(finnes_nøkkel(sm, "compiler_fingerprint"))
+    assert_eq(lengde(tekst(sm["compiler_fingerprint"])), 64)
+    la ast_post = sm["modules"]["selfhost/ast.no"]
+    assert_eq(tekst(ast_post["module"]), "selfhost.ast")
+    assert_eq(tekst(ast_post["source_sha256"]), builtin.sha256_bytes(fil_les_binær(root + "/selfhost/ast.no")))
+    assert_eq(tekst(ast_post["artifact"]), "bootstrap/precompiled/selfhost_ast.ncb.json")
+    la stm = json_parse_raw(fil_les(cache + "/stdlib/manifest.json"))
+    assert_eq(tekst(stm["schema"]), "norscode-stdlib-source-cache-v1|ncb-v1|module-globals-v1")
+    assert_eq(tekst(stm["modules"]["std/sha256.no"]["artifact"]), "bootstrap/stdlib/std_sha256.ncb.json")
+
+    la p = dir + "/p.no"
+    fil_skriv(p, "bruk selfhost.ast som ast\nbruk std.sha256 som s\nfunksjon start() -> heiltall { returner 0 }\n")
+    la treff_ut = dir + "/p_treff.ncb.json"
+    la treff = prosess.køyr(kompilator, ["compile", p, treff_ut], arbeid, miljø(root, cache), 900000)
+    hvis ikkje prosess.ok(treff) { prosess.skriv_resultat(treff) }
+    assert(prosess.ok(treff))
+    assert(har(treff, "[stdlib-cache] selfhost-hit selfhost.ast"))
+    assert(har(treff, "[stdlib-cache] hit std/sha256.no"))
+
+    la kjelde_ut = dir + "/p_kjelde.ncb.json"
+    la kjelde = prosess.køyr(kompilator, ["compile", p, kjelde_ut], arbeid, miljø(root, dir + "/tom"), 900000)
+    hvis ikkje prosess.ok(kjelde) { prosess.skriv_resultat(kjelde) }
+    assert(prosess.ok(kjelde))
+    assert(ikkje har(kjelde, "selfhost-hit"))
+    assert(ikkje har(kjelde, "[stdlib-cache] hit"))
+
+    // Treff ≡ kjelde: same bunt, byte for byte.
+    assert_eq(builtin.sha256_bytes(fil_les_binær(treff_ut)), builtin.sha256_bytes(fil_les_binær(kjelde_ut)))
+
+    // Ein cache frå ein annan kompilator (her: feil fingeravtrykk, som etter ein
+    // reseed) blir ein bom, sjølv om kjelde- og artefakthash stemmer.
+    sm["compiler_fingerprint"] = "0000000000000000000000000000000000000000000000000000000000000000"
+    fil_skriv(cache + "/precompiled/manifest.json", json_skriv(sm))
+    la anna = prosess.køyr(kompilator, ["compile", p, dir + "/p_anna.ncb.json"], arbeid, miljø(root, cache), 900000)
+    hvis ikkje prosess.ok(anna) { prosess.skriv_resultat(anna) }
+    assert(prosess.ok(anna))
+    assert(har(anna, "[stdlib-cache] selfhost-miss selfhost.ast compiler"))
+    assert(ikkje har(anna, "selfhost-hit"))
+
+    skriv("test_materialize_bootstrap_cache_live OK")
+    returner 0
+}

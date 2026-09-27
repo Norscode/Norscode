@@ -1,5 +1,7 @@
 # V6400 Bootstrap refresh bisect
 
+> **Historisk dokument.** `tools/bootstrap_refresh_bisect_v6400.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 ## Formål
 Dette steget snevrar inn kvar i bundle-løypa `Stack underflow` først dukkar opp.
 

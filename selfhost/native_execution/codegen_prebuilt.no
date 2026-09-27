@@ -1,0 +1,409 @@
+// selfhost/native_execution/codegen_prebuilt.no — førehandsbygd (kryss-)codegen per mål (F3.7)
+//
+// Tolka codegen (VM-en køyrer codegen-kjelda) brukar 30–95 min og fleire GB på eit fullt
+// nc_main; ein førehandsbygd codegen-binær gjer same jobben på sekund. Modulen er ÉIN stad for
+//   * mållista til `nc bygg-native` (linux-x86_64, linux-arm64, macos-arm64, windows-x86_64),
+//   * codegen-kjelda per mål (tolka fallback, og det hashane dekkjer),
+//   * stien til førehandsbygd codegen for (mål, vert):
+//       bootstrap/native_codegen_<mål>_on_<vert><ending>   (.elf på Linux, .macho på macOS,
+//       .exe på Windows). Legacy: linux-x86_64 på linux-x86_64 heiter framleis
+//       bootstrap/native_codegen_x86_64.elf — committa seedar sin innebakte nc_main les det
+//       namnet og berre .srchash,
+//   * hashporten: binæren blir berre brukt når
+//       .srchash  == sha256(<codegen-kjelde> ++ selfhost/ncb_serde.no)
+//       .depshash == sha256(resten av bruk-lukkinga til codegen-kjelda, DFS-førerekkjefølgje)
+//     .srchash-formelen er uendra (committa seedar). .depshash dekkjer heile lukkinga; for
+//     x86 er det ncb_bin + heap_layout + gap_ruter (før F3.7 mangla ncb_bin, so ei endring
+//     der let ein stale ELF gå gjennom).
+//   * KRYSS-codegen (mål != vert) har i tillegg <binær>.vertcg (A1-review): identiteten til
+//     vert-codegen-en som AOT-kompilerte binæren (sti, sha256, .srchash, .depshash) og sha256
+//     til sjølve kryss-binæren. .srchash/.depshash dekkjer berre mål-kjelda; utan .vertcg
+//     stod ein kryss-binær som «ok» etter at vert-codegen-en (native_codegen_v2 + gap_ruter +
+//     heap_layout) var bygd om, og ein utbytt binær med urørte hashfiler vart brukt utan
+//     åtvaring. Formlane for .srchash/.depshash er uendra, so committa seedar (som ikkje les
+//     .vertcg) godtek dei same filene.
+// Brukt av selfhost/nc_main.no (nc_bygg_native_prebuilt), tools/ncb_to_elf.no og
+// tests/test_native_codegen_srchash.no. Kryss-binærane for linux-arm64 og macos-arm64 på
+// linux-x86_64 finst sidan A1 (tools/build_cross_codegen.no byggjer dei og skriv hashane);
+// windows-x86_64 kjem i W5. Ruta er klar, so dei treng ingen x86-reseed.
+
+funksjon mål_liste() -> liste_tekst {
+    returner ["linux-x86_64", "linux-arm64", "macos-arm64", "windows-x86_64"]
+}
+
+funksjon er_mål(mål: tekst) -> boolsk {
+    la alle = mål_liste()
+    la i: heiltall = 0
+    mens i < lengde(alle) {
+        hvis tekst(alle[i]) == mål { returner sann }
+        i = i + 1
+    }
+    returner usann
+}
+
+// Codegen-kjelda for målet (relativ til root). windows-x86_64 får PE-emisjonen inn i
+// native_codegen_v2 (W2: emit_os), so kjelda er den same; det finst enno ingen tolka
+// Windows-codegen som tek NC_INPUT (windows_codegen.no er ein PE-exit-stubb).
+funksjon codegen_kjelde(mål: tekst) -> tekst {
+    hvis mål == "linux-x86_64" eller mål == "windows-x86_64" { returner "selfhost/native_execution/native_codegen_v2.no" }
+    hvis mål == "linux-arm64" { returner "selfhost/native_execution/elf_arm64_codegen.no" }
+    hvis mål == "macos-arm64" { returner "selfhost/native_execution/macho_arm64_codegen.no" }
+    returner ""
+}
+
+// Kan målet falle tilbake til tolka codegen-kjelde? Nei for windows-x86_64: tolka
+// native_codegen_v2 ville skrive ein Linux-ELF (feil format) — betre å feile tydeleg.
+funksjon tolka_tillaten(mål: tekst) -> boolsk {
+    returner er_mål(mål) og mål != "windows-x86_64"
+}
+
+// Vertsplattforma frå system_info ("linux-x86_64" …); "" når ho er ukjend.
+funksjon vert_plattform() -> tekst {
+    prøv {
+        la info = builtin.system_info()
+        la system = tekst(info["system"])
+        la maskin = tekst(info["machine"])
+        la x86 = maskin == "x86_64" eller maskin == "amd64" eller maskin == "AMD64"
+        la arm = maskin == "aarch64" eller maskin == "arm64"
+        hvis system == "Linux" og x86 { returner "linux-x86_64" }
+        hvis system == "Linux" og arm { returner "linux-arm64" }
+        hvis system == "Darwin" og arm { returner "macos-arm64" }
+        hvis system == "Windows" og x86 { returner "windows-x86_64" }
+    } fang (e) { }
+    returner ""
+}
+
+funksjon vert_ending(vert: tekst) -> tekst {
+    hvis builtin.starts_with(vert, "macos-") { returner ".macho" }
+    hvis builtin.starts_with(vert, "windows-") { returner ".exe" }
+    returner ".elf"
+}
+
+// Kandidatstiar (relative) for førehandsbygd codegen, i prioritert rekkjefølgje.
+funksjon binær_stiar(mål: tekst, vert: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis ikkje er_mål(mål) eller vert == "" { returner ut }
+    legg_til(ut, "bootstrap/native_codegen_" + mål + "_on_" + vert + vert_ending(vert))
+    hvis mål == "linux-x86_64" og vert == "linux-x86_64" { legg_til(ut, "bootstrap/native_codegen_x86_64.elf") }
+    returner ut
+}
+
+// Modulstien i ei (trimma) import-linje utan nøkkelordet: kutt ved «//», så ved «#», fjern
+// avsluttande «;» og « som <alias>» — same førebehandling som kompilatoren
+// (nc_main finn_bruk_imports) og tools/materialize_runtime_payloads.no import_modul.
+funksjon import_rest_modul(rest0: tekst) -> tekst {
+    la rest = builtin.trim(rest0)
+    la kom_idx = builtin.index_of(rest, "//")
+    hvis kom_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, kom_idx)) }
+    la hash_idx = builtin.index_of(rest, "#")
+    hvis hash_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, hash_idx)) }
+    hvis builtin.ends_with(rest, ";") { rest = builtin.trim(builtin.slice(rest, 0, lengde(rest) - 1)) }
+    la som_idx = builtin.index_of(rest, " som ")
+    hvis som_idx >= 0 { rest = builtin.trim(builtin.slice(rest, 0, som_idx)) }
+    returner rest
+}
+
+// Står berre mellomrom/tab/CR mellom førre linjeskift (eller filstart) og posisjon `pos`?
+funksjon linjestart(kjelde: tekst, pos: heiltall) -> boolsk {
+    la j: heiltall = pos
+    mens j > 0 {
+        la c = builtin.slice(kjelde, j - 1, j)
+        hvis c == "\n" { returner sann }
+        hvis c != " " og c != "\t" og c != "\r" { returner usann }
+        j = j - 1
+    }
+    returner sann
+}
+
+// Import-linjer med nøkkelordet `nøkkel` ("bruk " / "importer ") først på linja (etter
+// innrykk). Legg posisjon og modulsti til i pos_ut/mod_ut, i rekkjefølgje.
+// Hoppar frå treff til treff med index_of (få treff) i staden for å dele på "\n":
+// native_codegen_v2 har ~12k linjer, og ei tolka lykkje over dei kosta ~9 s per lukking på
+// C-æra-VM-en (F3.7-review). Ikkje builtin.split på nøkkelordet: den frosne macOS-verten
+// returnerer bitane med «\n»/«\t» escapa som to teikn, so linjestart-sjekken ville bomma.
+funksjon import_treff(kjelde: tekst, nøkkel: tekst, pos_ut: liste_heiltall, mod_ut: liste_tekst) -> heiltall {
+    la rest = kjelde
+    la base: heiltall = 0
+    la nlen: heiltall = lengde(nøkkel)
+    la vidare = sann
+    mens vidare {
+        la k = builtin.index_of(rest, nøkkel)
+        hvis k < 0 {
+            vidare = usann
+        } ellers {
+            la pos: heiltall = base + k
+            rest = builtin.slice(rest, k + nlen, lengde(rest))
+            base = pos + nlen
+            hvis linjestart(kjelde, pos) {
+                la linje = rest
+                la nl = builtin.index_of(rest, "\n")
+                hvis nl >= 0 { linje = builtin.slice(rest, 0, nl) }
+                la modul = import_rest_modul(linje)
+                hvis modul != "" {
+                    legg_til(pos_ut, pos)
+                    legg_til(mod_ut, modul)
+                }
+            }
+        }
+    }
+    returner 0
+}
+
+// Modulstiane frå `bruk`/`importer`-linjene i ei kjelde, i kjelde-rekkjefølgje (same
+// linjeval som kompilatoren: trimma linje som byrjar med nøkkelordet, kvar som helst i fila).
+funksjon bruk_modular(kjelde: tekst) -> liste_tekst {
+    la bp: liste_heiltall = []
+    la bm: liste_tekst = []
+    la ip: liste_heiltall = []
+    la im: liste_tekst = []
+    import_treff(kjelde, "bruk ", bp, bm)
+    import_treff(kjelde, "importer ", ip, im)
+    la ut: liste_tekst = []
+    la a: heiltall = 0
+    la b: heiltall = 0
+    mens a < lengde(bm) eller b < lengde(im) {
+        hvis b >= lengde(im) {
+            legg_til(ut, tekst(bm[a]))
+            a = a + 1
+        } ellers hvis a >= lengde(bm) {
+            legg_til(ut, tekst(im[b]))
+            b = b + 1
+        } ellers hvis bp[a] < ip[b] {
+            legg_til(ut, tekst(bm[a]))
+            a = a + 1
+        } ellers {
+            legg_til(ut, tekst(im[b]))
+            b = b + 1
+        }
+    }
+    returner ut
+}
+
+funksjon finst(sti: tekst) -> boolsk {
+    prøv { returner builtin.fil_finnes(sti) } fang (e) { returner usann }
+    returner usann
+}
+
+funksjon lukking_inn(root: tekst, rel: tekst, sett, ut: liste_tekst) -> heiltall {
+    hvis finnes_nøkkel(sett, rel) { returner 0 }
+    sett[rel] = sann
+    legg_til(ut, rel)
+    la kjelde = ""
+    prøv { kjelde = builtin.fil_les(root + "/" + rel) } fang (e) { returner 0 }
+    la mods = bruk_modular(kjelde)
+    la i: heiltall = 0
+    mens i < lengde(mods) {
+        la dep = builtin.replace(tekst(mods[i]), ".", "/") + ".no"
+        hvis finst(root + "/" + dep) { lukking_inn(root, dep, sett, ut) }
+        i = i + 1
+    }
+    returner 0
+}
+
+// bruk-lukkinga til ei kjelde (relative stiar, DFS-førerekkjefølgje, kjelda først).
+funksjon lukking(root: tekst, rel: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    lukking_inn(root, rel, {}, ut)
+    returner ut
+}
+
+funksjon src_filer(mål: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la kjelde = codegen_kjelde(mål)
+    hvis kjelde == "" { returner ut }
+    legg_til(ut, kjelde)
+    legg_til(ut, "selfhost/ncb_serde.no")
+    returner ut
+}
+
+funksjon deps_filer(root: tekst, mål: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    la kjelde = codegen_kjelde(mål)
+    hvis kjelde == "" { returner ut }
+    la alle = lukking(root, kjelde)
+    la i: heiltall = 0
+    mens i < lengde(alle) {
+        la f = tekst(alle[i])
+        hvis f != kjelde og f != "selfhost/ncb_serde.no" { legg_til(ut, f) }
+        i = i + 1
+    }
+    returner ut
+}
+
+// sha256 over filene sett saman i rekkjefølgje; "" når ei fil ikkje kan lesast.
+funksjon hash_filer(root: tekst, filer: liste_tekst) -> tekst {
+    hvis lengde(filer) == 0 { returner "" }
+    la samla = ""
+    la i: heiltall = 0
+    mens i < lengde(filer) {
+        prøv { samla = samla + builtin.fil_les(root + "/" + tekst(filer[i])) } fang (e) { returner "" }
+        i = i + 1
+    }
+    returner builtin.sha256(samla)
+}
+
+funksjon srchash(root: tekst, mål: tekst) -> tekst { returner hash_filer(root, src_filer(mål)) }
+funksjon depshash(root: tekst, mål: tekst) -> tekst { returner hash_filer(root, deps_filer(root, mål)) }
+// Som depshash, men med ei lukking kallaren alt har rekna ut (deps_filer), so ho ikkje blir
+// skanna på nytt (testen gjenbrukar ho for kvar probe-rot).
+funksjon depshash_av(root: tekst, deps: liste_tekst) -> tekst { returner hash_filer(root, deps) }
+
+funksjon les_hash(sti: tekst) -> tekst {
+    prøv { returner builtin.trim(builtin.fil_les(sti)) } fang (e) { returner "" }
+    returner ""
+}
+
+// sha256 (hex) av innhaldet i ei fil, byte-eksakt; "" når ho ikkje kan lesast.
+// Snøggvegen fil_les_binær + sha256_bytes er atom på fersk seed (2,6 MB på ~80 ms, mot
+// ~1,2 s per 0,5 MB for builtin.sha256 på tekst) og C-builtin på C-æra-seedar. Gjev han
+// ikkje 64 teikn, blir builtin.sha256 på tekst brukt; han er ikkje NUL-trygg på C-æra-seedar,
+// men ein gal hash gjev berre «stale», aldri ein falsk «ok».
+funksjon sha256_fil(sti: tekst) -> tekst {
+    prøv {
+        la h = tekst(builtin.sha256_bytes(builtin.fil_les_binær(sti)))
+        hvis lengde(h) == 64 { returner h }
+    } fang (e) { }
+    prøv { returner builtin.sha256(builtin.fil_les(sti)) } fang (e2) { returner "" }
+    returner ""
+}
+
+// Den førehandsbygde codegen-en for (vert, vert), dvs. den som AOT-kompilerer kryss-codegen
+// på denne verten (relativ sti); "" når han manglar.
+funksjon vert_codegen_rel(root: tekst, vert: tekst) -> tekst {
+    la stiar = binær_stiar(vert, vert)
+    la i: heiltall = 0
+    mens i < lengde(stiar) {
+        hvis finst(root + "/" + tekst(stiar[i])) { returner tekst(stiar[i]) }
+        i = i + 1
+    }
+    returner ""
+}
+
+// Innhaldet i <kryss_rel>.vertcg slik det skal vere for binæren og vert-codegen-en som ligg
+// i treet no. tools/build_cross_codegen.no skriv det rett etter bygget; vel() samanliknar
+// felt for felt (vertcg_sjekk).
+funksjon vertcg_tekst(root: tekst, vert: tekst, kryss_rel: tekst) -> tekst {
+    la vrel = vert_codegen_rel(root, vert)
+    la v_sha = ""
+    hvis vrel != "" { v_sha = sha256_fil(root + "/" + vrel) }
+    returner "vert=" + vert + "\n" +
+        "vert_cg=" + vrel + "\n" +
+        "vert_srchash=" + les_hash(root + "/" + vrel + ".srchash") + "\n" +
+        "vert_depshash=" + les_hash(root + "/" + vrel + ".depshash") + "\n" +
+        "vert_sha256=" + v_sha + "\n" +
+        "sha256=" + sha256_fil(root + "/" + kryss_rel) + "\n"
+}
+
+// Verdien til `nøkkel` i ein .vertcg-tekst (key=value-linjer); "" når feltet manglar.
+// index_of i staden for split på linjeskift (split er ikkje eintydig på alle vertar).
+funksjon vertcg_felt(innhald: tekst, nøkkel: tekst) -> tekst {
+    la t = "\n" + builtin.replace(innhald, "\r", "")
+    la merke = "\n" + nøkkel + "="
+    la k = builtin.index_of(t, merke)
+    hvis k < 0 { returner "" }
+    la rest = builtin.slice(t, k + lengde(merke), lengde(t))
+    la nl = builtin.index_of(rest, "\n")
+    hvis nl >= 0 { rest = builtin.slice(rest, 0, nl) }
+    returner builtin.trim(rest)
+}
+
+// Sjekkar <kryss_rel>.vertcg mot treet. "" = i orden; elles ei forklaring. Billege felt
+// (tekst) først, so dei to binær-hashane berre blir rekna ut når resten stemmer.
+funksjon vertcg_sjekk(root: tekst, vert: tekst, kryss_rel: tekst) -> tekst {
+    la innhald = ""
+    prøv { innhald = builtin.fil_les(root + "/" + kryss_rel + ".vertcg") } fang (e) { innhald = "" }
+    hvis builtin.trim(innhald) == "" {
+        returner kryss_rel + ".vertcg manglar (kven bygde kryss-binæren er ukjent)"
+    }
+    la vrel = vert_codegen_rel(root, vert)
+    hvis vrel == "" { returner "vert-codegen for " + vert + " manglar" }
+    la felt: liste_tekst = ["vert", "vert_cg", "vert_srchash", "vert_depshash"]
+    la venta: liste_tekst = [vert, vrel, les_hash(root + "/" + vrel + ".srchash"),
+                             les_hash(root + "/" + vrel + ".depshash")]
+    la i: heiltall = 0
+    mens i < lengde(felt) {
+        la har = vertcg_felt(innhald, tekst(felt[i]))
+        hvis har == "" eller har != tekst(venta[i]) {
+            returner kryss_rel + ".vertcg: " + tekst(felt[i]) + "=" + har + " svarar ikkje til " +
+                tekst(venta[i]) + " (vert-codegen " + vrel + " er bygd om sidan kryss-binæren vart bygd)"
+        }
+        i = i + 1
+    }
+    la v_sha = sha256_fil(root + "/" + vrel)
+    la har_v = vertcg_felt(innhald, "vert_sha256")
+    hvis v_sha == "" eller har_v != v_sha {
+        returner kryss_rel + ".vertcg: vert_sha256=" + har_v + " svarar ikkje til " + vrel +
+            " (sha256=" + v_sha + "; kryss-binæren er bygd med ein annan vert-codegen)"
+    }
+    la k_sha = sha256_fil(root + "/" + kryss_rel)
+    la har_k = vertcg_felt(innhald, "sha256")
+    hvis k_sha == "" eller har_k != k_sha {
+        returner kryss_rel + " har sha256=" + k_sha + ", men .vertcg seier " + har_k +
+            " (binæren er bytt ut utan nytt bygg)"
+    }
+    returner ""
+}
+
+// Vel førehandsbygd codegen for (mål, vert). Svar:
+//   status "ok"       — sti er ein binær med ferske .srchash/.depshash (og for kryss-codegen
+//                       ein .vertcg som svarar til vert-codegen-en og binæren)
+//   status "manglar"  — ingen binær for (mål, vert)
+//   status "stale"    — binæren finst, men hashane (eller .vertcg) svarar ikkje til treet
+//   status "ukjend"   — ukjent mål eller vert
+// melding er ei lesbar forklaring for åtvaringa når status != "ok".
+funksjon vel(root: tekst, mål: tekst, vert: tekst) -> ordbok_tekst {
+    la svar: ordbok_tekst = {"status": "ukjend", "sti": "", "rel": "", "melding": ""}
+    hvis ikkje er_mål(mål) {
+        svar["melding"] = "ukjent mål " + mål
+        returner svar
+    }
+    hvis vert == "" {
+        svar["melding"] = "ukjend vertsplattform → ingen førehandsbygd codegen for " + mål
+        returner svar
+    }
+    la stiar = binær_stiar(mål, vert)
+    la rel = ""
+    la i: heiltall = 0
+    mens i < lengde(stiar) og rel == "" {
+        hvis finst(root + "/" + tekst(stiar[i])) { rel = tekst(stiar[i]) }
+        i = i + 1
+    }
+    hvis rel == "" {
+        svar["status"] = "manglar"
+        svar["rel"] = tekst(stiar[0])
+        svar["melding"] = tekst(stiar[0]) + " manglar"
+        returner svar
+    }
+    svar["rel"] = rel
+    svar["sti"] = root + "/" + rel
+    // Kryss-codegen: .vertcg først (tekstfelt og to atom-hashar, ~0,1 s), før dei dyre
+    // kjeldehashane.
+    hvis mål != vert {
+        la vk = vertcg_sjekk(root, vert, rel)
+        hvis vk != "" {
+            svar["status"] = "stale"
+            svar["melding"] = vk
+            returner svar
+        }
+    }
+    // .depshash først: lukkinga er små filer (ms), medan .srchash hashar codegen-kjelda
+    // (~0,8 MB, om lag 1 s på committa Linux-seed) — ei stale lukking treng ikkje den.
+    la venta_deps = les_hash(root + "/" + rel + ".depshash")
+    la deps = depshash(root, mål)
+    hvis venta_deps == "" eller deps == "" eller deps != venta_deps {
+        svar["status"] = "stale"
+        svar["melding"] = rel + ".depshash svarar ikkje til bruk-lukkinga til " + codegen_kjelde(mål) +
+            " (depshash=" + deps + ")"
+        returner svar
+    }
+    la venta_src = les_hash(root + "/" + rel + ".srchash")
+    la src = srchash(root, mål)
+    hvis venta_src == "" eller src == "" eller src != venta_src {
+        svar["status"] = "stale"
+        svar["melding"] = rel + ".srchash svarar ikkje til " + codegen_kjelde(mål) +
+            " + selfhost/ncb_serde.no (srchash=" + src + ")"
+        returner svar
+    }
+    svar["status"] = "ok"
+    returner svar
+}

@@ -1,6 +1,11 @@
 bruk selfhost.ncb_serde som serde
 // Materialiser precompiled selfhost-modular frå ein verifisert L5 Gen1.
 //
+// J1b: output er ein GENERERT katalog under build/ (standard
+// build/l5/precompiled, NORSCODE_L5_PRECOMPILED_DIR), aldri committa
+// bootstrap/precompiled. tools/selfcompile_l5b.no køyrer verktøyet sjølv før
+// cache-på-paritetsporten (selvstendighet 7a).
+//
 // Funksjonssettet og funksjonsverdiane blir henta bytekodemessig frå Gen1
 // slik at nye/fjerna funksjonar ikkje kan bli maskerte av ein gammal cachemal.
 
@@ -18,28 +23,32 @@ funksjon oppdater_cache(gen1_sti: tekst, modul_liste: tekst, sti: tekst) -> heil
     la nye_initializers = []
     la nye_global_names = {}
     la tal: heiltall = 0
-    la i: heiltall = 0
-    mens i < lengde(keys) {
-        la nøkkel = keys[i]
-        la fn = gen1_fns[nøkkel]
-        la treff = usann
-        la modul_idx: heiltall = 0
-        mens modul_idx < lengde(modular) og ikkje treff {
+    // Funksjonane blir skrivne gruppert i modul-rekkjefølgja frå spesifikasjonen
+    // (primærmodulen først), ikkje i Gen1-rekkjefølgja. L5b-raw-bundleren
+    // (selfhost/l5b_raw_bundler.no, transformer_funksjonar) deler eit fragment
+    // på prefikset til den FØRSTE funksjonen; med Gen1-rekkjefølgja kunne ein
+    // avhengnad komme først, og då vart primærmodulen (t.d. selfhost.vm med
+    // __module_init__) limt inn i ein annan post og borte i kandidaten.
+    la mi: heiltall = 0
+    mens mi < lengde(modular) {
+        la i: heiltall = 0
+        mens i < lengde(keys) {
+            la nøkkel = keys[i]
+            la fn = gen1_fns[nøkkel]
             // Modulnamn må samanliknast eksakt. Prefikstesting gjorde til
             // dømes std.runtime.process_abi til ein del av std.runtime og
             // endra funksjonsrekkefølgja i ein elles semantisk lik bundle.
-            hvis har_nokkel(fn, "module") og fn["module"] == modular[modul_idx] { treff = sann }
-            modul_idx = modul_idx + 1
+            hvis har_nokkel(fn, "module") og fn["module"] == modular[mi] {
+                // Gen1-verdiane er allereie dekoda Norscode-strengar. Markøren
+                // hindrar VM-i-VM-/AOT-grensa i å tolke tekst som "null", "0"
+                // eller JSON-liknande payload som ein ny literal ved cachelesing.
+                fn["string_encoding"] = "decoded-v1"
+                nye_fns[nøkkel] = fn
+                tal = tal + 1
+            }
+            i = i + 1
         }
-        hvis treff {
-            // Gen1-verdiane er allereie dekoda Norscode-strengar. Markøren
-            // hindrar VM-i-VM-/AOT-grensa i å tolke tekst som "null", "0"
-            // eller JSON-liknande payload som ein ny literal ved cachelesing.
-            fn["string_encoding"] = "decoded-v1"
-            nye_fns[nøkkel] = fn
-            tal = tal + 1
-        }
-        i = i + 1
+        mi = mi + 1
     }
     hvis tal == 0 {
         skriv("Feil: Gen1 manglar modular " + modul_liste + " for " + sti + "\n")
@@ -82,31 +91,82 @@ funksjon oppdater_cache(gen1_sti: tekst, modul_liste: tekst, sti: tekst) -> heil
     returner 0
 }
 
+// Sann når katalog (etter leksikalsk normalisering: tomme segment, «.» og «..»)
+// ligg i eller under ein bootstrap/precompiled-katalog. Segmentvis samanlikning
+// fangar «bootstrap/precompiled/», «./bootstrap//precompiled», absolutte stiar
+// og «bootstrap/x/../precompiled», men ikkje t.d. «bootstrap/precompiled_fragments».
+funksjon er_committa_precompiled(katalog: tekst) -> bool {
+    la delar = builtin.split(katalog, "/")
+    la norm = []
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = delar[i]
+        hvis d == ".." {
+            hvis lengde(norm) > 0 og norm[lengde(norm) - 1] != ".." {
+                fjern_siste(norm)
+            } ellers {
+                legg_til(norm, d)
+            }
+        } ellers hvis d != "" og d != "." {
+            legg_til(norm, d)
+        }
+        i = i + 1
+    }
+    la j: heiltall = 0
+    mens j + 1 < lengde(norm) {
+        hvis norm[j] == "bootstrap" og norm[j + 1] == "precompiled" { returner sann }
+        j = j + 1
+    }
+    returner usann
+}
+
 funksjon start() -> heiltall {
     la gen1_sti = miljo_hent("NORSCODE_L5_GEN1")
     hvis gen1_sti == "" { gen1_sti = "build/l5/compiler_v1.ncb.json" }
+    la raw_sti = miljo_hent("NORSCODE_L5_RAW_BUNDLER")
+    hvis raw_sti == "" { raw_sti = "build/l5/l5b_raw_bundler.ncb.json" }
+    la katalog = miljo_hent("NORSCODE_L5_PRECOMPILED_DIR")
+    hvis katalog == "" { katalog = "build/l5/precompiled" }
+    hvis er_committa_precompiled(katalog) {
+        skriv("Feil: materialize_l5_precompiled skriv ikkje til committa bootstrap/precompiled\n")
+        returner 1
+    }
+    builtin.mkdir_p(katalog)
+    la vm_gruppe = "selfhost.vm,std.runtime_memory,std.runtime.allocator,std.runtime.atomic,std.runtime.memory_abi,std.runtime_security,std.sha256,selfhost.semantic_validation_real,selfhost.ast"
     la spesifikasjonar = builtin.split(
-        "selfhost.lexer.lexer_m1|bootstrap/precompiled/lexer_m1.ncb.json\n" +
-        "selfhost.parser|bootstrap/precompiled/parser.ncb.json\n" +
-        "selfhost.compiler.semantic|bootstrap/precompiled/semantic.ncb.json\n" +
-        "selfhost.compiler.ir_to_bytecode|bootstrap/precompiled/ir_to_bytecode.ncb.json\n" +
-        "selfhost.kompiler|bootstrap/precompiled/kompiler.ncb.json\n" +
-        "selfhost.json|bootstrap/precompiled/json.ncb.json\n" +
-        "selfhost.vm,std.runtime_memory,std.runtime.allocator,std.runtime.atomic,std.runtime.memory_abi,std.runtime_security,std.sha256,selfhost.semantic_validation_real,selfhost.ast|bootstrap/precompiled/vm.ncb.json\n" +
-        "selfhost.bundler,std.runtime_filesystem,std.sched,tools.process_runner,std.runtime.process_abi,selfhost.ncb_stream|bootstrap/precompiled/bundler.ncb.json\n" +
-        "selfhost.l5b_host|bootstrap/precompiled/l5b_host.ncb.json",
+        "selfhost.lexer.lexer_m1|lexer_m1.ncb.json\n" +
+        "selfhost.parser|parser.ncb.json\n" +
+        "selfhost.compiler.semantic|semantic.ncb.json\n" +
+        "selfhost.compiler.ir_to_bytecode|ir_to_bytecode.ncb.json\n" +
+        "selfhost.kompiler|kompiler.ncb.json\n" +
+        "selfhost.json|json.ncb.json\n" +
+        vm_gruppe + "|vm.ncb.json\n" +
+        "selfhost.bundler,std.runtime_filesystem,std.sched,tools.process_runner,std.runtime.process_abi,selfhost.ncb_stream|bundler.ncb.json\n" +
+        "selfhost.l5b_host|l5b_host.ncb.json",
         "\n"
     )
     la i: heiltall = 0
     mens i < lengde(spesifikasjonar) {
         la deler = builtin.split(spesifikasjonar[i], "|")
         hvis lengde(deler) != 2 { returner 1 }
-        hvis oppdater_cache(gen1_sti, deler[0], deler[1]) != 0 { returner 1 }
+        hvis oppdater_cache(gen1_sti, deler[0], katalog + "/" + deler[1]) != 0 { returner 1 }
         i = i + 1
     }
+    // vm-gruppa blir òg skriven som éin del per modul (vm-source-part-N +
+    // vm-source-part-count.txt, same format som kjelde-generasjonane i
+    // selfcompile_l5b). Då ser raw-bundleren kvar avhengnad som eigne
+    // funksjonspostar i staden for å lime dei inn i ein vm-post.
+    la vm_modular = builtin.split(vm_gruppe, ",")
+    la del_tal: heiltall = 0
+    mens del_tal < lengde(vm_modular) {
+        la del_sti = katalog + "/vm-source-part-" + tekst_fra_heltall(del_tal) + ".ncb.json"
+        hvis oppdater_cache(gen1_sti, vm_modular[del_tal], del_sti) != 0 { returner 1 }
+        del_tal = del_tal + 1
+    }
+    fil_skriv(katalog + "/vm-source-part-count.txt", tekst_fra_heltall(del_tal) + "\n")
     // Raw-bundleren er ein byte-verifisert L5-sidecar, ikkje del av den store
     // compiler_v1-bunten. Materialiser han frå si eiga Gen1-sidecar.
-    hvis oppdater_cache("build/l5/l5b_raw_bundler.ncb.json", "selfhost.l5b_raw_bundler", "bootstrap/precompiled/l5b_raw_bundler.ncb.json") != 0 { returner 1 }
+    hvis oppdater_cache(raw_sti, "selfhost.l5b_raw_bundler", katalog + "/l5b_raw_bundler.ncb.json") != 0 { returner 1 }
     skriv("materialize_l5_precompiled OK\n")
     returner 0
 }

@@ -1,0 +1,148 @@
+// tools/build_cross_codegen.no — byggjer førehandsbygd KRYSS-codegen (A1, seeds-plan §8).
+//
+// For kvart mål (standard: linux-arm64 og macos-arm64) blir codegen-kjelda til målet
+// (selfhost.native_execution.codegen_prebuilt: elf_arm64_codegen.no / macho_arm64_codegen.no)
+// bundla til NCB og AOT-kompilert med den førehandsbygde codegen-en for VERTEN (på
+// linux-x86_64: bootstrap/native_codegen_x86_64.elf). Resultatet er ein vert-binær som les
+// ein mål-NCB (NC_INPUT) og skriv mål-binæren (NC_OUTPUT) på sekund i staden for 30–95 min
+// tolka codegen:
+//     bootstrap/native_codegen_<mål>_on_<vert>.elf  + .srchash + .depshash + .vertcg
+// Hashane blir skrivne med same formel som porten (cgp.srchash/cgp.depshash), so
+// tests/test_native_codegen_srchash.no og nc_bygg_native_prebuilt godtek binæren til
+// kjelda endrar seg. .vertcg (cgp.vertcg_tekst) held identiteten til vert-codegen-en
+// (sti, sha256, .srchash, .depshash) og sha256 til kryss-binæren: blir
+// bootstrap/native_codegen_x86_64.elf bygd om, eller kryss-binæren bytt ut, er han stale.
+// Endrar du macho_arm64_codegen.no (A2–A5) eller vert-codegen-en, køyr verktøyet på nytt og
+// commit binærane saman med kjelda (+ ny «godkjend binær»-pin i
+// tools/active_surface_allowlist.txt; test_native_codegen_srchash krev at pinnen er lik
+// sha256 i .vertcg).
+//
+// Bruk (repo-rota, Linux x86-64-vert med fersk seed som dist/norscode_native):
+//   NORSCODE_ROOT=$PWD NORSCODE_VM_CAPABILITIES=env.read,process.exec,disk.read,disk.write \
+//     NORSCODE_VM_DISK_ROOT=$PWD,.,/tmp ./bin/nc run tools/build_cross_codegen.no
+// Miljø:
+//   NC_CROSS_TARGETS   kommaliste over mål (standard "linux-arm64,macos-arm64")
+//   NORSCODE_NATIVE_BIN  runtime for bundle-steget (standard <root>/dist/norscode_native)
+//
+// Portar i verktøyet: vert-codegen må vere fersk (cgp.vel == ok — aldri tolka her),
+// mål-bunten må ha 0 uløyste builtins (NC_BUILTIN_REPORT=1 → exit 3 elles, og ingen
+// binær blir skriven), og til slutt må cgp.vel(root, mål, vert) svare «ok».
+// Kryss-binæren blir bygd utan NORSCODE_GC_ALLOC (bump-heap, som
+// bootstrap/native_codegen_x86_64.elf): nc_main gjennom linux-arm64-codegen tek ~2 s.
+
+bruk selfhost.native_execution.codegen_prebuilt som cgp
+bruk tools.process_runner som prosess
+
+funksjon linje(m: tekst) -> heiltall { skriv(m + "\n") returner 0 }
+
+funksjon env(namn: tekst) -> tekst {
+    prøv { returner miljo_hent(namn) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon mål_frå_miljø() -> liste_tekst {
+    la raa = builtin.trim(env("NC_CROSS_TARGETS"))
+    hvis raa == "" { raa = "linux-arm64,macos-arm64" }
+    la ut: liste_tekst = []
+    la delar = builtin.split(raa, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = builtin.trim(tekst(delar[i]))
+        hvis d != "" { legg_til(ut, d) }
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon køyr(exe: tekst, argv: liste_tekst, root: tekst, miljø: ordbok_tekst) -> ordbok_tekst {
+    // Minne 0 = OS-et eig grensa: seed og codegen reserverer store lat-mappa heapar.
+    la res = prosess.køyr_med_grenser(exe, argv, root, miljø, 1800000, 0, 64)
+    prosess.skriv_resultat(res)
+    returner res
+}
+
+funksjon bygg_ein(root: tekst, native: tekst, vert_cg: tekst, mål: tekst, vert: tekst) -> heiltall {
+    hvis ikkje cgp.er_mål(mål) eller mål == vert {
+        linje("[FEIL] " + mål + " er ikkje eit kryss-mål frå " + vert)
+        returner 1
+    }
+    la kjelde = cgp.codegen_kjelde(mål)
+    la rel = tekst(cgp.binær_stiar(mål, vert)[0])
+    la disk = root + ",.,/tmp,/private/tmp"
+    builtin.mkdir_p(root + "/build/cross_codegen")
+    la ncb = root + "/build/cross_codegen/" + mål + ".ncb"
+    linje("[" + mål + "] 1/3 bundle " + kjelde + " → " + ncb)
+    la r1 = køyr(native, ["bundle", "--output", ncb, kjelde], root, {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_CMD": "",
+        "NORSCODE_FILE": "",
+        "NORSCODE_GC_ALLOC": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": disk
+    })
+    hvis ikkje prosess.ok(r1) eller ikkje builtin.fil_finnes(ncb) {
+        linje("[FEIL] bundle feila (exit " + tekst(r1["exit_code"]) + ")")
+        returner 1
+    }
+    linje("[" + mål + "] 2/3 " + vert_cg + " (NC_BUILTIN_REPORT=1) → " + rel)
+    la ut = root + "/" + rel
+    la r2 = køyr(vert_cg, [], root, {
+        "NORSCODE_ROOT": root,
+        "NC_INPUT": ncb,
+        "NC_OUTPUT": ut,
+        "NC_BUILTIN_REPORT": "1",
+        "NC_BUILTIN_KVITLISTE": "",
+        "NORSCODE_GC_ALLOC": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": disk
+    })
+    hvis ikkje prosess.ok(r2) eller ikkje builtin.fil_finnes(ut) {
+        linje("[FEIL] vert-codegen feila (exit " + tekst(r2["exit_code"]) + "); uløyste builtins gjev exit 3")
+        returner 1
+    }
+    hvis ikkje builtin.fil_sett_kjorbar(ut) {
+        linje("[FEIL] fil_sett_kjorbar feila for " + ut)
+        returner 1
+    }
+    linje("[" + mål + "] 3/3 .srchash/.depshash/.vertcg")
+    fil_skriv(ut + ".srchash", cgp.srchash(root, mål) + "\n")
+    fil_skriv(ut + ".depshash", cgp.depshash(root, mål) + "\n")
+    // Identiteten til vert-codegen-en og binæren (A1-review): vel() gjer kryss-binæren stale
+    // når vert-codegen-en blir bygd om eller binæren blir bytt ut.
+    fil_skriv(ut + ".vertcg", cgp.vertcg_tekst(root, vert, rel))
+    la val = cgp.vel(root, mål, vert)
+    hvis tekst(val["status"]) != "ok" {
+        linje("[FEIL] porten godtek ikkje resultatet: " + tekst(val["melding"]))
+        returner 1
+    }
+    linje("[OK] " + rel + " sha256=" + cgp.sha256_fil(ut))
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la root = env("NORSCODE_ROOT")
+    hvis root == "" { root = tekst(builtin.system_info()["cwd"]) }
+    la native = env("NORSCODE_NATIVE_BIN")
+    hvis native == "" { native = root + "/dist/norscode_native" }
+    hvis ikkje builtin.fil_finnes(native) { linje("[FEIL] manglar runtime: " + native) returner 1 }
+    la vert = cgp.vert_plattform()
+    la vert_val = cgp.vel(root, vert, vert)
+    hvis tekst(vert_val["status"]) != "ok" {
+        linje("[FEIL] vert-codegen for " + vert + " er ikkje brukande: " + tekst(vert_val["melding"]))
+        returner 1
+    }
+    la vert_cg = tekst(vert_val["sti"])
+    la mål = mål_frå_miljø()
+    la feil: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(mål) {
+        hvis bygg_ein(root, native, vert_cg, tekst(mål[i]), vert) != 0 { feil = feil + 1 }
+        i = i + 1
+    }
+    hvis feil > 0 {
+        linje("[FEIL] " + tekst(feil) + " av " + tekst(lengde(mål)) + " kryss-codegen feila")
+        returner 1
+    }
+    linje("=== kryss-codegen bygd for " + builtin.join(mål, ", ") + " på " + vert + " ===")
+    returner 0
+}

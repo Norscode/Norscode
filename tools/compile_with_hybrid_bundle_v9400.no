@@ -21,6 +21,40 @@ funksjon env(namn: tekst) -> tekst {
 
 funksjon trim(t: tekst) -> tekst { returner builtin.trim(t) }
 
+// ── F3.6 (J5.2): NCB-format ──────────────────────────────────────────────────────
+// Utfila følgjer formatregelen i selfhost.ncb_serde (binaer_for_sti): NORSCODE_NCB_BINARY
+// 1/0 overstyrer, elles «….json» → JSON, anna → binær (berre der runtimen har NUL-trygge
+// strengar). Koding og dekoding går gjennom den kompilerte VM-en (builtin.ncb_til_binaer /
+// builtin.ncb_fra_tekst) når runtimen melder det (ncb_binaer_versjon >= 1); elles den
+// tolka tekstvegen i ncb_serde. Barnekompileringane får same format eksplisitt, slik at
+// rask-kopi-vegen for root-NCB-en (sjå slutten av main) gjeld for begge format.
+funksjon vert_ncb_binær() -> bool {
+    la v = 0
+    prøv { v = builtin.ncb_binaer_versjon() } fang (e) { returner usann }
+    returner v >= 1
+}
+
+funksjon les_ncb_tekst(t: tekst) {
+    hvis serde.er_binaer_tekst(t) og vert_ncb_binær() { returner builtin.ncb_fra_tekst(t) }
+    returner serde.deserialiser_tekst(t)
+}
+
+funksjon les_ncb(sti: tekst) {
+    returner les_ncb_tekst(builtin.fil_les(sti))
+}
+
+funksjon til_binær_ncb(ncb) -> tekst {
+    hvis vert_ncb_binær() { returner builtin.ncb_til_binaer(ncb) }
+    returner serde.serialiser_tekst(ncb)
+}
+
+// Format for barnekompileringane (nc compile): binær berre når utfila skal vere binær og
+// runtimen kan lese binær NCB i den kompilerte VM-en.
+funksjon barn_ncb_flagg() -> tekst {
+    hvis env("NORSCODE_NCB_BINARY") == "1" og vert_ncb_binær() { returner "1" }
+    returner "0"
+}
+
 funksjon rask_hash_bytes(data: liste_heiltall) -> tekst {
     prøv { returner builtin.sha256_bytes(data) }
     fang (e) { returner sha256.hash_bytes(data) }
@@ -326,7 +360,11 @@ funksjon er_risikostreng(raw: tekst) -> bool {
 // Stage-0 behandlar newline som setningsskilje og kan feiltolke tekst som ser
 // ut som tal/JSON. Normaliser begge delar utan Node-basert etterprosessering.
 funksjon normaliser_literal_og_semikolon(kjelde: tekst) -> tekst {
-    la ut = ""
+    // Bit-liste + builtin.join i staden for `ut = ut + x`: den reine VM-en kopierer
+    // heile teksten ved kvar konkatenering, so teikn-for-teikn-bygging vart O(n²).
+    // På den 204 KB store tests/test_release_preflight.no ratcheta det heapen til
+    // SOFT_LIMIT → collect-storm → compile-steg-timeout (1200 s) i CI.
+    la ut_delar: liste_tekst = []
     la i: heiltall = 0
     mens i < lengde(kjelde) {
         la ch = builtin.slice(kjelde, i, i + 1)
@@ -334,7 +372,7 @@ funksjon normaliser_literal_og_semikolon(kjelde: tekst) -> tekst {
         hvis i + 1 < lengde(kjelde) { neste = builtin.slice(kjelde, i + 1, i + 2) }
         hvis ch == "#" eller (ch == "/" og neste == "/") {
             mens i < lengde(kjelde) og builtin.slice(kjelde, i, i + 1) != "\n" {
-                ut = ut + builtin.slice(kjelde, i, i + 1)
+                legg_til(ut_delar, builtin.slice(kjelde, i, i + 1))
                 i = i + 1
             }
         } ellers hvis ch == "'" {
@@ -358,9 +396,9 @@ funksjon normaliser_literal_og_semikolon(kjelde: tekst) -> tekst {
                 }
             }
             hvis er_risikostreng(raw_enkel) {
-                ut = ut + "__nclit_decode_v9400('__nclit__" + raw_enkel + "')"
+                legg_til(ut_delar, "__nclit_decode_v9400('__nclit__" + raw_enkel + "')")
             } ellers {
-                ut = ut + "'" + raw_enkel + "'"
+                legg_til(ut_delar, "'" + raw_enkel + "'")
             }
         } ellers hvis ch == "\"" {
             la raw = ""
@@ -387,16 +425,16 @@ funksjon normaliser_literal_og_semikolon(kjelde: tekst) -> tekst {
             hvis er_risikostreng(raw) {
                 // Dekodinga må skje ved runtime. Direkte builtin.slice på ein
                 // konstant blir folda av stage-0 og kan bli tolka som map igjen.
-                ut = ut + "__nclit_decode_v9400(\"__nclit__" + raw + "\")"
+                legg_til(ut_delar, "__nclit_decode_v9400(\"__nclit__" + raw + "\")")
             } ellers {
-                ut = ut + "\"" + raw + "\""
+                legg_til(ut_delar, "\"" + raw + "\"")
             }
         } ellers {
-            hvis ch == ";" { ut = ut + "\n" } ellers { ut = ut + ch }
+            hvis ch == ";" { legg_til(ut_delar, "\n") } ellers { legg_til(ut_delar, ch) }
             i = i + 1
         }
     }
-    returner ut
+    returner builtin.join(ut_delar, "")
 }
 
 funksjon finn_fraa(verdi: tekst, del: tekst, start: heiltall) -> heiltall {
@@ -840,7 +878,11 @@ funksjon normaliser_kjelde(kjelde: tekst) -> tekst {
         literal_hjelpar = "funksjon __nclit_decode_v9400(verdi: tekst) -> tekst { returner builtin.slice(verdi, 9, -1) }\n"
     }
     la linjer = builtin.split(grunnlag, "\n")
-    la ut = ""
+    // Bit-liste + builtin.join i staden for `ut = ut + x`: den reine VM-en kopierer
+    // heile teksten ved kvar konkatenering, so teikn-for-teikn-bygging vart O(n²).
+    // På den 204 KB store tests/test_release_preflight.no ratcheta det heapen til
+    // SOFT_LIMIT → collect-storm → compile-steg-timeout (1200 s) i CI.
+    la ut_delar: liste_tekst = []
     la hjelparar = ""
     la lokale: liste_tekst = []
     la lambda_namn: liste_tekst = []
@@ -878,7 +920,7 @@ funksjon normaliser_kjelde(kjelde: tekst) -> tekst {
         linjeverdi = normaliser_await(linjeverdi)
         linjeverdi = normaliser_slice(linjeverdi)
         linjeverdi = normaliser_felt(linjeverdi)
-        ut = ut + linjeverdi + "\n"
+        legg_til(ut_delar, linjeverdi + "\n")
         hvis map_djupn > 0 {
             map_djupn = map_djupn + klammebalanse_fraa(grunnlinje, 0)
         } ellers {
@@ -888,7 +930,7 @@ funksjon normaliser_kjelde(kjelde: tekst) -> tekst {
         hvis map_djupn < 0 { map_djupn = 0 }
         i = i + 1
     }
-    returner literal_hjelpar + ut + hjelparar
+    returner literal_hjelpar + builtin.join(ut_delar, "") + hjelparar
 }
 
 funksjon merge_listefelt(merged, fragment, namn: tekst) -> heiltall {
@@ -987,7 +1029,7 @@ funksjon merge_source_dir_modul(merged, source_dir: tekst, modul: tekst) -> bool
         mens i < count {
             la sti = source_dir + "/" + prefiks + "-source-part-" + tekst_fra_heiltall(i) + ".ncb.json"
             hvis ikkje builtin.fil_finnes(sti) { returner usann }
-            la fragment = serde.les_fil(sti)
+            la fragment = les_ncb(sti)
             hvis fragment_har_modul(fragment, modul) {
                 merge_fragment(merged, fragment, modul)
                 funne = sann
@@ -1000,7 +1042,7 @@ funksjon merge_source_dir_modul(merged, source_dir: tekst, modul: tekst) -> bool
     }
     la sti = source_dir + "/" + source_kandidat_namn(modul)
     hvis ikkje builtin.fil_finnes(sti) { returner usann }
-    la fragment = serde.les_fil(sti)
+    la fragment = les_ncb(sti)
     hvis ikkje fragment_har_modul(fragment, modul) { returner usann }
     merge_fragment(merged, fragment, modul)
     returner sann
@@ -1032,7 +1074,7 @@ funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src
     la cache_dir = root + "/build/nc-module-cache"
     la cache_abi = "norscode-module-cache-v2|norscode-bytecode-v1|selfhost-compiler-0.31"
     la cache_key = rask_hash(
-        cache_abi + "|" +
+        cache_abi + "|ncb-binary=" + barn_ncb_flagg() + "|" +
         rask_hash_bytes(builtin.fil_les_binær(src)) + "|" +
         rask_hash_bytes(builtin.fil_les_binær(root + "/tools/compile_with_hybrid_bundle_v9400.no"))
     )
@@ -1055,7 +1097,8 @@ funksjon kompiler_modul(root: tekst, project_root: tekst, native_bin: tekst, src
         "NORSCODE_OUTPUT": out,
         "NORSCODE_MODULE": modul,
         "NORSCODE_ROOT": root,
-        "NORSCODE_IMPORT_BASE": project_root
+        "NORSCODE_IMPORT_BASE": project_root,
+        "NORSCODE_NCB_BINARY": barn_ncb_flagg()
     }
     la res = process_runner.køyr(native_bin, [], root, compile_miljø, 900000)
     hvis ikkje process_runner.ok(res) {
@@ -1221,7 +1264,11 @@ funksjon start() -> heiltall {
         }
     }
 
-    la merged = serde.les_fil(root_ncb)
+    la root_tekst = builtin.fil_les(root_ncb)
+    la root_binær = serde.er_binaer_tekst(root_tekst)
+    la merged = les_ncb_tekst(root_tekst)
+    root_tekst = ""
+    la ønsk_binær = serde.binaer_for_sti(out)
     hvis ikkje fragment_har_modul(merged, modul) {
         linje("feil: root-NCB manglar eigarmodulen " + modul)
         rydd_temp(tmpdir)
@@ -1230,7 +1277,7 @@ funksjon start() -> heiltall {
     // Last ein eventuell monolittisk source-bundle først etter root-kompilering.
     // Elles blir heile bunten ei GC-rot gjennom den dyraste strengnormaliseringa.
     hvis source_bundle_sti != "" {
-        source_bundle = serde.les_fil(source_bundle_sti)
+        source_bundle = les_ncb(source_bundle_sti)
         hvis ikkje har_nokkel(source_bundle, "functions") {
             linje("feil: source-bundle manglar functions: " + source_bundle_sti)
             rydd_temp(tmpdir)
@@ -1239,6 +1286,11 @@ funksjon start() -> heiltall {
     }
     la queue = importer_fraa(src)
     la ferdige: liste_tekst = []
+    // Spor om nokon import faktisk endra bunten (source-override, eller ein
+    // modul som root-kompileringa ikkje alt bunta). Blir ingenting endra, er
+    // `merged` innhaldsekvivalent med root-NCB-en og vi kan hoppe over den
+    // dyre tolka reserialiseringa (sjå rask-kopi-vegen nedanfor).
+    la noko_endra = usann
     la i: heiltall = 0
     mens i < lengde(queue) {
         la import_mod = queue[i]
@@ -1267,9 +1319,10 @@ funksjon start() -> heiltall {
                         rydd_temp(tmpdir)
                         returner 1
                     }
-                    fragment = serde.les_fil(import_out)
+                    fragment = les_ncb(import_out)
                     skal_merge_fragment = sann
                 }
+                hvis brukt_source eller skal_merge_fragment { noko_endra = sann }
                 hvis skal_merge_fragment { merge_fragment(merged, fragment, import_mod) }
                 la vidare = importer_fraa(import_abs)
                 la j: heiltall = 0
@@ -1290,13 +1343,34 @@ funksjon start() -> heiltall {
         i = i + 1
     }
 
+    // Rask veg for den reine testlana: ingen source-override merga noko, og
+    // alle importar låg allereie i root-compile-bunten. Då er `merged`
+    // innhaldsekvivalent med den ferdige root-NCB-en på disk, og den tolka
+    // json_stream_skriv_ncb_fil — O(n²) per funksjon på fersk seed — er rein
+    // overhead som dominerer per-test-kostnaden i CI-slow-lana (dominanten når
+    // ein triviell test brukte minutt i staden for sekund). Vi kopierer difor
+    // root-NCB-en direkte i staden for å reserialisere. To vilkår må halde for
+    // at kopien er byte-ekvivalent med det den fulle vegen ville skrive:
+    //   1) ingen import endra bunten (noko_endra == usann), og
+    //   2) vel_entry endra ikkje entry-en compile alt sette i root-NCB-en.
+    // Elles (source-override, ein import utanfor root-bunten, eller ein test
+    // utan start()-entry) fell vi gjennom til den fulle serialiseringa.
+    la entry_før = ""
+    prøv { entry_før = tekst(merged["entry"]) } fang (e) { entry_før = "" }
     vel_entry(merged, modul)
-    // JSON→binær (masterplan «JSON skal vekk»): opt-in binær-NCB via NORSCODE_NCB_BINARY=1
-    // (deterministisk serde.serialiser, magic 0x93). Standard er framleis JSON-stream sidan
-    // committed stage0-seed sin bakte run-ncb-pure-lesar er JSON-berre; harnessen sin
-    // run-entry (kjelde) les begge format.
-    hvis miljo_hent("NORSCODE_NCB_BINARY") == "1" {
-        builtin.fil_skriv_binary(out, builtin.bytes_from_list(serde.serialiser(merged)))
+    la entry_etter = ""
+    prøv { entry_etter = tekst(merged["entry"]) } fang (e) { entry_etter = "" }
+    hvis ikkje noko_endra og entry_etter == entry_før og root_binær == ønsk_binær {
+        hvis filops.kopier(root_ncb, out) {
+            rydd_temp(tmpdir)
+            linje("Norscode compile: " + out)
+            returner 0
+        }
+    }
+    // F3.6: formatregelen (serde.binaer_for_sti) avgjer. Binær går tekstvegen (éin
+    // fil_skriv av binær NCB-tekst, byte-eksakt på sjølvhosta runtime).
+    hvis ønsk_binær {
+        builtin.fil_skriv(out, til_binær_ncb(merged))
     } ellers {
         json_stream_skriv_ncb_fil(out, merged)
     }

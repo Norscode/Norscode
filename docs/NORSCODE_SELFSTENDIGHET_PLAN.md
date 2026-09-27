@@ -6,6 +6,8 @@ levande porten. Kandidatfiler er ikkje det same som promotert stage0.
 
 **Avhukingsstatus 2026-08-06: 71 av 92 punkt er verifiserte, 21 står opne.**
 
+> **Merk (F0.2–F0.5, 2026-09-25):** fleire verktøy som denne loggen viser til, er sletta frå aktiv flate og finst berre i git-historikken (til og med `c555afd`): heile `tools/maint/` (C-materialisatoren, jf. `compose_generated_c_batches.no`), `archive/`-shellskripta, `tools/run_runtime_basics_phase_v4200.no` og random_hex-probane v694/v712. Loggoppføringane er historisk evidens, ikkje køyrbare oppskrifter.
+
 ## Mål og reglar
 
 - [ ] Aktiv utvikling, kompilering, testing, bygging, pakking og CI blir eigd av Norscode `.no`.

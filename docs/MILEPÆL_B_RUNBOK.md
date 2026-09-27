@@ -34,7 +34,7 @@ Køyrt direkte i sky-økta på committed Linux ARM64-stage0:
   (352 `.c`-filer finst, men alle under `build/` som **genererte artefaktar**,
   ikkje kjelde i byggbanen — sjå merknad under.)
 - **Normal Linux x86-64-byggbane er GCC-fri:** `tools/release_preflight.no`
-  handhevar at `tools/build_linux_openssl_candidate_v3604.no` ikkje inneheld
+  handhevar at `tools/build_linux_fullhost_candidate.no` ikkje inneheld
   `/usr/bin/gcc` («Linux full-host brukar ikkje GCC»).
 
 ## Konkrete B-restansar identifiserte i sky-økta

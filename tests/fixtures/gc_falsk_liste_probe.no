@@ -1,0 +1,129 @@
+// GC-probe (v8, 2026-09-26): markøren må ikkje følgje FALSKE liste/map-objekt — sjølvsjekkande,
+// GC-modus.
+//
+// Rotårsaka til collect-stansen i binær-NCB-kodinga (éin collect ~110 s i staden for ~0,1 s,
+// avhengig av lengda på kjeldekatalognamnet): ein daud stakkslot peika på ein gammal liste-boks
+// (framleis type 3) der payloaden sidan var gjenbrukt som element-array full av peikarar til
+// kanon-heiltalsboksen A. Markøren las då len = elem_ptr = A (≈ 8M, under 16M-taket), skanna
+// A·8 byte av låg-heapen som «element», og fann fleire falske objekt (map med count = peikar-
+// verdi, lister med len > cap) — til saman ~10^10 gc_push-kall.
+//
+// Proben byggjer same mønster deterministisk: falske boksar i byte-området til ein stor levande
+// streng (strengbyte blir aldri skanna som peikarar), referert frå ei levande liste r:
+//   type 0: liste [3][FP], FP = [A][A][A][A]           (elem_ptr i kanon-cachen, len = peikar)
+//   type 1: liste [3][FP], FP = [8M][8][H][0]            (len > cap, H = heap-adresse)
+//   type 2: map   [4][FP], FP = [8M][8][H][H][0][0]      (count > cap)
+// Gamal markør (≤ v7): kvar falsk boks kostar 8–16M gc_push → 480 boksar ≈ 5·10^9 kall (~11 s
+// i Docker/Rosetta); v8: HEAP_ALLOC_START-golv for payload/array-peikarar, len ≤ cap og
+// count ≤ cap → avvist, collect ~0 ms.
+// Proben kontrollerer òg at ekte levande data (kanari-lista, strengen) overlever urørt.
+// Exit: 0 = OK · 2 = levande data øydelagde · 3 = for treg (> 1000 ms) · 4 = ugyldig måling.
+funksjon start() -> heiltall {
+    la kanari: liste = []
+    la c: heiltall = 0
+    mens c < 2000 {
+        legg_til(kanari, "k" + tekst(c))
+        c = c + 1
+    }
+    // 128 MiB streng: løftar bump over 9·A, slik at den gamle «elem_ptr + len·8 ≤ bump»-sjekken
+    // slepp dei falske objekta gjennom, og gjev byte-område til dei falske boksane.
+    la s: tekst = "abcdefgh"
+    la d: heiltall = 0
+    mens d < 24 {
+        s = s + s
+        d = d + 1
+    }
+    la slen: heiltall = lengde(s)
+    la a: heiltall = builtin.obj_addr(-32768)
+    hvis a < 7864384 eller a >= 8921184 {
+        skriv("gc_falsk_liste UGYLDIG: -32768 ligg ikkje i kanon-cachen (" + tekst(a) + ")\n")
+        returner 4
+    }
+    la bump: heiltall = builtin.raw_load64(7864320)
+    hvis bump <= 9 * a + 1048576 {
+        skriv("gc_falsk_liste UGYLDIG: bump " + tekst(bump) + " for låg for mønsteret\n")
+        returner 4
+    }
+    la sp: heiltall = builtin.raw_load64(builtin.obj_addr(s) + 8)
+    la base: heiltall = sp + 64 - ((sp + 64) % 16)
+    la h: heiltall = sp + 16777216 - ((sp + 16777216) % 16)
+    la nfalske: heiltall = 480
+    la r: liste = []
+    la i: heiltall = 0
+    mens i < nfalske {
+        legg_til(r, 0)
+        i = i + 1
+    }
+    la rp: heiltall = builtin.raw_load64(builtin.obj_addr(r) + 8)
+    la re: heiltall = builtin.raw_load64(rp + 16)
+    la null_boks: heiltall = builtin.raw_load64(re)
+    la t0: heiltall = tid_ms()
+    i = 0
+    mens i < nfalske {
+        la f: heiltall = base + i * 64
+        la fp: heiltall = f + 16
+        la typ: heiltall = i % 3
+        hvis typ == 0 {
+            builtin.raw_store64(fp, a)
+            builtin.raw_store64(fp + 8, a)
+            builtin.raw_store64(fp + 16, a)
+            builtin.raw_store64(fp + 24, a)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 3)
+        }
+        hvis typ == 1 {
+            builtin.raw_store64(fp, 8000000)
+            builtin.raw_store64(fp + 8, 8)
+            builtin.raw_store64(fp + 16, h)
+            builtin.raw_store64(fp + 24, 0)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 3)
+        }
+        hvis typ == 2 {
+            builtin.raw_store64(fp, 8000000)
+            builtin.raw_store64(fp + 8, 8)
+            builtin.raw_store64(fp + 16, h)
+            builtin.raw_store64(fp + 24, h)
+            builtin.raw_store64(fp + 32, 0)
+            builtin.raw_store64(fp + 40, 0)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 4)
+        }
+        builtin.raw_store64(re + i * 8, f)
+        i = i + 1
+    }
+    builtin.gc_collect_native()
+    la ms: heiltall = tid_ms() - t0
+    // Set r attende til ekte NcVal-ar før lista blir brukt.
+    i = 0
+    mens i < nfalske {
+        builtin.raw_store64(re + i * 8, null_boks)
+        i = i + 1
+    }
+    hvis lengde(r) != nfalske {
+        skriv("gc_falsk_liste FEIL: holdelista har lengd " + tekst(lengde(r)) + "\n")
+        returner 2
+    }
+    c = 0
+    mens c < 2000 {
+        hvis kanari[c] != "k" + tekst(c) {
+            skriv("gc_falsk_liste FEIL: kanari[" + tekst(c) + "] øydelagd\n")
+            returner 2
+        }
+        c = c + 1
+    }
+    hvis lengde(s) != slen {
+        skriv("gc_falsk_liste FEIL: strenglengd endra\n")
+        returner 2
+    }
+    hvis builtin.slice(s, slen - 8, slen) != "abcdefgh" {
+        skriv("gc_falsk_liste FEIL: strenghalen endra\n")
+        returner 2
+    }
+    hvis ms > 1000 {
+        skriv("gc_falsk_liste FEIL: collect med " + tekst(nfalske) + " falske objekt tok " + tekst(ms) + " ms (> 1000 ms: markøren følgde dei)\n")
+        returner 3
+    }
+    skriv("gc_falsk_liste OK: " + tekst(nfalske) + " falske liste/map-boksar avviste, collect " + tekst(ms) + " ms, levande data urørte\n")
+    returner 0
+}

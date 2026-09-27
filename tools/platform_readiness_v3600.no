@@ -1,5 +1,5 @@
 // tools/platform_readiness_v3600.no — shellfri, bevisbunden plattformstatus.
-// Linux-kandidaten kan materialiserast med: ./bin/nc build-linux-stage0-docker
+// Linux-kandidaten blir bygd med: ./bin/nc run tools/build_linux_fullhost_candidate.no
 
 bruk std.runtime_filesystem som native_fs
 bruk std.sha256 som sha256
@@ -31,11 +31,45 @@ funksjon native_executable(root: tekst) -> tekst {
     returner root + "/dist/norscode_native"
 }
 
-funksjon fil_sha256(sti: tekst) -> tekst {
-    prøv { returner builtin.sha256_bytes(builtin.fil_les_binær(sti)) } fang (e) {
-        prøv { returner sha256.hash_bytes(builtin.fil_les_binær(sti)) } fang (e2) { returner "" }
+// Éi lesing per fil: sha256 og innebygd-NCB-markør blir rekna på same byte-buffer
+// og cacha per sti. Tidlegare las fil_sha256 og har_embedded_ncb kvar fil for
+// seg, og fleire filer vart lesne to gonger (rapporter + *_attestasjon_ok). På
+// fersk seed flyttar kvar heil-fil-lesing bump-heapen eit 64 MiB-steg, så etter
+// ~13 lesingar døydde verktøyet med «GC-heap full (1 GiB levande) – exit 199».
+// Filer > 16 MB blir hoppa over (einaste slike er den ikkje-påkravde ARM64-stage0).
+//
+// `cache` er ein LOKAL parameter (ordbok) trådd frå main() — IKKJE ein modulglobal.
+// Modulglobalar er ikkje pålitelege i kjelde-køyrde verktøy på fersk seed: oppslag
+// etter eit kryssmodulkall («prøv { native_fs.… } fang») feilar med «Ukjent
+// (global) variabel: _fil_info» (både «std.runtime_filesystem._fil_info» på Linux
+// og «_fil_info» på macOS-attestasjonen). Ein trådd lokal parameter unngår heile
+// namneoppslaget. cache == null er òg gyldig (les utan memoisering).
+funksjon fil_info(sti: tekst, cache) {
+    hvis cache != null og finnes_nøkkel(cache, sti) { returner cache[sti] }
+    la info = {"sha": "", "emb": usann}
+    la for_stor = usann
+    prøv {
+        la st = native_fs.native_stat_sti(sti)
+        hvis st["status"] == "ok" og heltall_fra_tekst(tekst(st["value"])) > 16777216 { for_stor = sann }
+    } fang (e0) {}
+    hvis ikkje for_stor {
+        prøv {
+            la bytes = builtin.fil_les_binær(sti)
+            prøv { info["sha"] = builtin.sha256_bytes(bytes) } fang (e1) {
+                prøv { info["sha"] = sha256.hash_bytes(bytes) } fang (e2) { info["sha"] = "" }
+            }
+            info["emb"] = sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
+                sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1") eller har_native_seed_ncb(bytes)
+            bytes = []
+        } fang (e) {}
+        prøv { builtin.gc_collect() } fang (e3) {}
     }
-    returner ""
+    hvis cache != null { cache[sti] = info }
+    returner info
+}
+
+funksjon fil_sha256(sti: tekst, cache) -> tekst {
+    returner tekst(fil_info(sti, cache)["sha"])
 }
 
 funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
@@ -49,14 +83,36 @@ funksjon sluttmarkør(bytes, markør: tekst) -> boolsk {
     returner sann
 }
 
-funksjon har_embedded_ncb(sti: tekst) -> boolsk {
+// Same tre format som tools/linux_runtime_attestation.no: NCB-image-/NCB-text-
+// trailer, og den ferske fullhost-seeden sin trailer «NORSCODE_NCB_V1» + 8 byte
+// lengd (little-endian). Utan det siste formatet vart Linux-kandidaten alltid
+// rapportert som «manglar innebygd NCB-image», og linux_attestasjon_ok feila.
+// F3.6: seedar bygde etter F3 har binær trailer «NORSCODE_NCB_V2»; eldre har «…_V1» (JSON).
+funksjon har_native_seed_ncb(bytes) -> boolsk {
+    returner har_native_seed_ncb_magic(bytes, "NORSCODE_NCB_V2") eller har_native_seed_ncb_magic(bytes, "NORSCODE_NCB_V1")
+}
+
+funksjon har_native_seed_ncb_magic(bytes, magic: tekst) -> boolsk {
+    la trailer = lengde(magic) + 8
+    hvis lengde(bytes) < trailer { returner usann }
+    la start = lengde(bytes) - trailer
+    la i = 0
+    mens i < lengde(magic) {
+        hvis bytes[start + i] != (builtin.char_code(magic[i]) & 255) { returner usann }
+        i = i + 1
+    }
+    la n = 0
+    la j = 7
+    mens j >= 0 {
+        n = n * 256 + bytes[lengde(bytes) - 8 + j]
+        j = j - 1
+    }
+    returner n > 0 og n <= start
+}
+
+funksjon har_embedded_ncb(sti: tekst, cache) -> boolsk {
     hvis ikkje executable(sti) { returner usann }
-    prøv {
-        la bytes = builtin.fil_les_binær(sti)
-        returner sluttmarkør(bytes, "NORSCODE_NCB_IMAGE_V1") eller
-            sluttmarkør(bytes, "NORSCODE_NCB_TEXT_V1")
-    } fang (e) { returner usann }
-    returner usann
+    returner fil_info(sti, cache)["emb"] == sann
 }
 
 funksjon runtime_smoke(root: tekst, sti: tekst) -> boolsk {
@@ -134,7 +190,7 @@ funksjon verifiser_github_attestasjon(root: tekst, attestasjon: tekst) -> boolsk
     returner usann
 }
 
-funksjon windows_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst) -> boolsk {
+funksjon windows_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst, cache) -> boolsk {
     hvis attestasjon == "" eller ikkje executable(attestasjon) eller ikkje executable(kandidat) {
         returner usann
     }
@@ -151,12 +207,12 @@ funksjon windows_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst
         }
         la commit = forventa_commit()
         hvis ikkje gyldig_commit(commit) eller tekst(data["source_commit"]) != commit { returner usann }
-        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat)
+        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat, cache)
     } fang (e) { returner usann }
     returner usann
 }
 
-funksjon macos_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst) -> boolsk {
+funksjon macos_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst, cache) -> boolsk {
     hvis attestasjon == "" eller ikkje executable(attestasjon) eller ikkje executable(kandidat) {
         returner usann
     }
@@ -174,13 +230,13 @@ funksjon macos_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst) 
         }
         la commit = forventa_commit()
         hvis ikkje gyldig_commit(commit) eller tekst(data["source_commit"]) != commit { returner usann }
-        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat)
+        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat, cache)
     } fang (e) { returner usann }
     returner usann
 }
 
 funksjon linux_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst,
-                              arkitektur: tekst) -> boolsk {
+                              arkitektur: tekst, cache) -> boolsk {
     hvis attestasjon == "" eller ikkje executable(attestasjon) eller ikkje executable(kandidat) {
         returner usann
     }
@@ -199,15 +255,15 @@ funksjon linux_attestasjon_ok(root: tekst, kandidat: tekst, attestasjon: tekst,
         hvis ikkje gyldig_commit(tekst(data["probe_ncb_sha256"])) { returner usann }
         la commit = forventa_commit()
         hvis ikkje gyldig_commit(commit) eller tekst(data["source_commit"]) != commit { returner usann }
-        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat) og har_embedded_ncb(kandidat)
+        returner tekst(data["runtime_sha256"]) == fil_sha256(kandidat, cache) og har_embedded_ncb(kandidat, cache)
     } fang (e) { returner usann }
     returner usann
 }
 
-funksjon rapporter(sti: tekst, ok_melding: tekst, warn_melding: tekst, sha_label: tekst) -> heiltall {
+funksjon rapporter(sti: tekst, ok_melding: tekst, warn_melding: tekst, sha_label: tekst, cache) -> heiltall {
     hvis executable(sti) {
         linje(ok_melding)
-        la hash = fil_sha256(sti)
+        la hash = fil_sha256(sti, cache)
         hvis hash != "" { linje("[INFO] " + sha_label + "=" + hash) }
     } ellers { linje(warn_melding) }
     returner 0
@@ -270,19 +326,32 @@ funksjon start() -> heiltall {
     la linux_x86_attestasjon = env("NORSCODE_LINUX_X86_64_ATTESTATION")
     la linux_arm64_attestasjon = env("NORSCODE_LINUX_ARM64_ATTESTATION")
     la krev_linux_attestasjon = env("NORSCODE_REQUIRE_LINUX_ATTESTATION") == "1"
+    // ARM64 er eit EIGE krav frå 2026-09-10. Grunn: C.5 fjerna C-arkivet, og den
+    // einaste vegen til ein current-ABI ARM64-runtime gjekk gjennom gcc på
+    // build/v3009/native_candidate_gc.c. Rein Norscode har enno ingen AArch64
+    // full-host runtime, so kravet er reelt umogleg å oppfylle til B2/C.2 landar.
+    // Standard er framleis «arv x86-kravet» — den som ikkje set variabelen merkar
+    // ingen skilnad. Rapportlinja production_ready_linux_arm64 er UENDRA: den seier
+    // framleis false. Vi sluttar å KREVJE det, vi påstår ikkje at det er i orden.
+    la krev_linux_arm64_attestasjon = krev_linux_attestasjon
+    hvis env("NORSCODE_REQUIRE_LINUX_ARM64_ATTESTATION") == "0" { krev_linux_arm64_attestasjon = usann }
+    hvis env("NORSCODE_REQUIRE_LINUX_ARM64_ATTESTATION") == "1" { krev_linux_arm64_attestasjon = sann }
     la windows_attestasjon = env("NORSCODE_WINDOWS_ATTESTATION")
     la krev_windows_attestasjon = env("NORSCODE_REQUIRE_WINDOWS_ATTESTATION") == "1"
     la host_os = systemfelt("system")
     hvis host_os == "" { host_os = systemfelt("os") }
+    // Lokal éin-lesing-per-fil-cache, trådd som parameter (ikkje modulglobal — sjå
+    // fil_info). Held toppminnet under 1 GiB GC-heapen på fersk seed.
+    la cache = {}
     la macos_ready = "false"
-    hvis har_embedded_ncb(macos_candidate) og
-       macos_attestasjon_ok(root, macos_candidate, macos_attestasjon) { macos_ready = "true" }
+    hvis har_embedded_ncb(macos_candidate, cache) og
+       macos_attestasjon_ok(root, macos_candidate, macos_attestasjon, cache) { macos_ready = "true" }
     la linux_x86_attestert = "false"
-    hvis linux_attestasjon_ok(root, linux_candidate, linux_x86_attestasjon, "x86_64") {
+    hvis linux_attestasjon_ok(root, linux_candidate, linux_x86_attestasjon, "x86_64", cache) {
         linux_x86_attestert = "true"
     }
     la linux_arm64_attestert = "false"
-    hvis linux_attestasjon_ok(root, linux_arm64_candidate, linux_arm64_attestasjon, "arm64") {
+    hvis linux_attestasjon_ok(root, linux_arm64_candidate, linux_arm64_attestasjon, "arm64", cache) {
         linux_arm64_attestert = "true"
     }
     la linux_docker_ready = "false"
@@ -290,46 +359,46 @@ funksjon start() -> heiltall {
     la linux_arm64_docker_ready = "false"
     hvis docker_gate(root, linux_arm64_candidate, "linux/arm64") { linux_arm64_docker_ready = "true" }
     la windows_ready = "false"
-    hvis windows_attestasjon_ok(root, windows_candidate, windows_attestasjon) { windows_ready = "true" }
+    hvis windows_attestasjon_ok(root, windows_candidate, windows_attestasjon, cache) { windows_ready = "true" }
 
     linje("== v3600 platform readiness ==")
-    rapporter(macos_dist, "[OK] macOS dist finst: dist/norscode_native", "[WARN] macOS dist manglar eller er ikkje køyrbar", "macOS dist sha256")
-    hvis har_embedded_ncb(macos_dist) { linje("[OK] macOS dist har innebygd NCB-image") }
+    rapporter(macos_dist, "[OK] macOS dist finst: dist/norscode_native", "[WARN] macOS dist manglar eller er ikkje køyrbar", "macOS dist sha256", cache)
+    hvis har_embedded_ncb(macos_dist, cache) { linje("[OK] macOS dist har innebygd NCB-image") }
     ellers { linje("[PENDING] macOS dist manglar innebygd NCB-image") }
-    rapporter(macos_stage0, "[OK] macOS stage0 finst: bootstrap/stage0/norscode-macos-arm64", "[WARN] macOS stage0 manglar eller er ikkje køyrbar", "macOS stage0 sha256")
-    hvis har_embedded_ncb(macos_stage0) { linje("[OK] macOS stage0 har innebygd NCB-image") }
+    rapporter(macos_stage0, "[OK] macOS stage0 finst: bootstrap/stage0/norscode-macos-arm64", "[WARN] macOS stage0 manglar eller er ikkje køyrbar", "macOS stage0 sha256", cache)
+    hvis har_embedded_ncb(macos_stage0, cache) { linje("[OK] macOS stage0 har innebygd NCB-image") }
     ellers { linje("[PENDING] macOS stage0 manglar innebygd NCB-image") }
 
     hvis executable(linux_candidate) {
         linje("[OK] Linux x86_64-kandidat finst: " + linux_candidate)
-        hvis har_embedded_ncb(linux_candidate) { linje("[OK] Linux x86_64-kandidat har innebygd NCB-image") }
+        hvis har_embedded_ncb(linux_candidate, cache) { linje("[OK] Linux x86_64-kandidat har innebygd NCB-image") }
         ellers { linje("[PENDING] Linux x86_64-kandidat manglar innebygd NCB-image") }
-        la hash = fil_sha256(linux_candidate)
+        la hash = fil_sha256(linux_candidate, cache)
         hvis hash != "" { linje("[INFO] Linux candidate sha256=" + hash) }
     } ellers {
         linje("[PENDING] Linux x86_64-kandidat manglar.")
-        linje("[INFO] Køyr: ./bin/nc run tools/build_linux_openssl_candidate_v3604.no")
+        linje("[INFO] Køyr: ./bin/nc run tools/build_linux_fullhost_candidate.no")
     }
     hvis executable(linux_arm64_candidate) {
         linje("[OK] Linux ARM64-kandidat finst: " + linux_arm64_candidate)
-        hvis har_embedded_ncb(linux_arm64_candidate) { linje("[OK] Linux ARM64-kandidat har innebygd NCB-image") }
+        hvis har_embedded_ncb(linux_arm64_candidate, cache) { linje("[OK] Linux ARM64-kandidat har innebygd NCB-image") }
         ellers { linje("[PENDING] Linux ARM64-kandidat manglar innebygd NCB-image") }
-        la hash = fil_sha256(linux_arm64_candidate)
+        la hash = fil_sha256(linux_arm64_candidate, cache)
         hvis hash != "" { linje("[INFO] Linux ARM64 candidate sha256=" + hash) }
         hvis linux_arm64_docker_ready == "true" { linje("[OK] Linux ARM64 runtime-gap køyrd i Docker") }
     } ellers { linje("[PENDING] Linux ARM64-kandidat manglar.") }
 
-    rapporter(linux_stage0, "[OK] Linux x86_64 stage0 finst: bootstrap/stage0/norscode-linux-x86_64", "[PENDING] Linux x86_64 stage0 manglar.", "Linux stage0 sha256")
-    hvis har_embedded_ncb(linux_stage0) { linje("[OK] Linux x86_64 stage0 har innebygd NCB-image") }
+    rapporter(linux_stage0, "[OK] Linux x86_64 stage0 finst: bootstrap/stage0/norscode-linux-x86_64", "[PENDING] Linux x86_64 stage0 manglar.", "Linux stage0 sha256", cache)
+    hvis har_embedded_ncb(linux_stage0, cache) { linje("[OK] Linux x86_64 stage0 har innebygd NCB-image") }
     ellers { linje("[PENDING] Linux x86_64 stage0 manglar innebygd NCB-image") }
-    rapporter(linux_arm64_stage0, "[OK] Linux ARM64 stage0 finst: bootstrap/stage0/norscode-linux-arm64", "[PENDING] Linux ARM64 stage0 manglar.", "Linux ARM64 stage0 sha256")
-    hvis har_embedded_ncb(linux_arm64_stage0) { linje("[OK] Linux ARM64 stage0 har innebygd NCB-image") }
+    rapporter(linux_arm64_stage0, "[OK] Linux ARM64 stage0 finst: bootstrap/stage0/norscode-linux-arm64", "[PENDING] Linux ARM64 stage0 manglar.", "Linux ARM64 stage0 sha256", cache)
+    hvis har_embedded_ncb(linux_arm64_stage0, cache) { linje("[OK] Linux ARM64 stage0 har innebygd NCB-image") }
     ellers { linje("[PENDING] Linux ARM64 stage0 manglar innebygd NCB-image") }
-    rapporter(windows_stage0, "[OK] Windows x86_64 stage0 finst: bootstrap/stage0/norscode-windows-x86_64.exe", "[PENDING] Windows x86_64 stage0 manglar.", "Windows stage0 sha256")
-    hvis har_embedded_ncb(windows_stage0) { linje("[OK] Windows stage0 har innebygd NCB-image") }
+    rapporter(windows_stage0, "[OK] Windows x86_64 stage0 finst: bootstrap/stage0/norscode-windows-x86_64.exe", "[PENDING] Windows x86_64 stage0 manglar.", "Windows stage0 sha256", cache)
+    hvis har_embedded_ncb(windows_stage0, cache) { linje("[OK] Windows stage0 har innebygd NCB-image") }
     ellers { linje("[PENDING] Windows stage0 manglar innebygd NCB-image") }
-    rapporter(windows_candidate, "[OK] Windows x86_64 cross-linka kandidat finst", "[PENDING] Windows x86_64-kandidat manglar.", "Windows candidate sha256")
-    hvis har_embedded_ncb(windows_candidate) { linje("[OK] Windows-kandidat har innebygd NCB-image") }
+    rapporter(windows_candidate, "[OK] Windows x86_64 cross-linka kandidat finst", "[PENDING] Windows x86_64-kandidat manglar.", "Windows candidate sha256", cache)
+    hvis har_embedded_ncb(windows_candidate, cache) { linje("[OK] Windows-kandidat har innebygd NCB-image") }
     ellers { linje("[PENDING] Windows-kandidat manglar innebygd NCB-image") }
 
     linje("")
@@ -372,9 +441,16 @@ funksjon start() -> heiltall {
         linje("[FAIL] macOS-attestasjon er påkravd, men ikkje verifisert.")
         returner 2
     }
-    hvis krev_linux_attestasjon og (linux_x86_attestert != "true" eller linux_arm64_attestert != "true") {
-        linje("[FAIL] Linux x86_64/ARM64-attestasjon er påkravd, men ikkje verifisert.")
+    hvis krev_linux_attestasjon og linux_x86_attestert != "true" {
+        linje("[FAIL] Linux x86_64-attestasjon er påkravd, men ikkje verifisert.")
         returner 2
+    }
+    hvis krev_linux_arm64_attestasjon og linux_arm64_attestert != "true" {
+        linje("[FAIL] Linux ARM64-attestasjon er påkravd, men ikkje verifisert.")
+        returner 2
+    }
+    hvis ikkje krev_linux_arm64_attestasjon og linux_arm64_attestert != "true" {
+        linje("[BLOKKERT] ARM64-attestasjon ventar på ein Norscode-bygd AArch64-runtime (B2/C.2).")
     }
     returner 0
 }

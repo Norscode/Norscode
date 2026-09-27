@@ -2,7 +2,7 @@
 // filsystem-ABI-en (norscode-native-filesystem-v1) for self-hosta AOT-runtimes.
 //
 // Native x86-64-codegen (native_codegen_v2) rutar builtin.filesystem_read_operation
-// og builtin.filesystem_write_operation hit (gap_rute_v2) og emitterer dei små
+// og builtin.filesystem_write_operation hit (gap_ruter.gap_rute) og emitterer dei små
 // primitiva builtin.native_fs_dirents / native_fs_stat / native_fs_unlink /
 // native_fs_rmdir / native_fs_chmod / native_fs_rename / native_fs_symlink som
 // rå syscall-innpakkingar. På VM-/C-runtimes med eigen ABI blir denne modulen
@@ -10,6 +10,205 @@
 // C-runtimen: {abi, status, handle, data, value, error, event_backend}.
 
 funksjon abi_versjon() -> tekst { returner "norscode-native-filesystem-v1" }
+
+// Filhandtak (open/read/write/flush/close) for opne_native, native_les, native_skriv,
+// native_lukk og dermed native_kopier_fil/native_flytt_fil. Var «unsupported in native
+// seed». Handtaka lever i ein modulglobal tabell; skriving går rett til fila med
+// fil_append (flush er difor ein no-op), lesing hentar fila éin gong og deler ut bitar.
+la _fh_tabell = {}
+la _fh_neste: heiltall = 1
+
+// Confinement mot symlenke-flukt: filesystem-ABI-en bind stien til rota og skal
+// avvise både traversal (trygg_relativ over) OG symlenker som kan peike ut av rota.
+// Seed-primitiva har ikkje readlink/realpath, så vi lstat-ar kvar sti-komponent
+// (native_fs_stat med follow=usann) og avviser stiar som går gjennom ei symlenke.
+// Konservativt: ei symlenke vi ikkje kan verifisere blir nekta. (Legitim lesing
+// gjennom in-rot-symlenker går via builtin.fil_les, ikkje dette handtaket.)
+funksjon sti_gjennom_symlenke(root: tekst, rel: tekst) -> boolsk {
+    hvis rel == "" { returner usann }
+    la basis = root
+    hvis basis == "" { basis = "." }
+    la delar = builtin.split(rel, "/")
+    la sti = basis
+    la i: heiltall = 0
+    mens i < lengde(delar) {
+        la d = delar[i]
+        hvis d != "" og d != "." {
+            sti = sett_saman(sti, d)
+            prøv {
+                la st = stat_svar(sti, usann)
+                hvis st["status"] == "ok" og st["kind"] == "symlink" { returner sann }
+            } fang (e) {}
+        }
+        i = i + 1
+    }
+    returner usann
+}
+
+funksjon fh_opne(req, skriv: bool) -> ordbok_tekst {
+    la sti = full_sti(req)
+    hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid path") }
+    hvis sti_gjennom_symlenke(felt(req, "root"), felt(req, "relative")) {
+        returner feilsvar("sti går gjennom symlenke (confinement)")
+    }
+    la mode = felt(req, "mode")
+    // Handhev at operasjonsklassen matchar modusen: read_operation (skriv=usann) kan
+    // ikkje opne i skrive-/append-modus, og write_operation (skriv=sann) kan ikkje opne
+    // i lesemodus. Utan dette gav filesystem_read_operation(open, mode=write) "open" i
+    // staden for "feil" (test_native_filesystem_handles).
+    hvis ikkje skriv og (mode == "write" eller mode == "append") {
+        returner feilsvar("read_operation kan ikkje opne i modus " + mode)
+    }
+    hvis skriv og mode == "read" {
+        returner feilsvar("write_operation kan ikkje opne i modus read")
+    }
+    la innhald = ""
+    la startpos: heiltall = 0
+    hvis ikkje skriv {
+        hvis ikkje builtin.fil_finnes(sti) { returner feilsvar("open feila: " + sti) }
+        // Katalogar blir avviste eksplisitt der stat-primitivet finst (native); elles er
+        // fil_les sjølv barrieren (fil_les_safe har S_IFDIR-sjekk).
+        la er_katalog = usann
+        prøv {
+            la st = stat_svar(sti, sann)
+            hvis st["status"] == "ok" og st["kind"] == "directory" { er_katalog = sann }
+        } fang (e) {}
+        hvis er_katalog { returner feilsvar("ikkje ei vanleg fil: " + sti) }
+        // Les innhaldet ved open, so handtaket berre kan opnast for ei lesbar fil.
+        prøv { innhald = builtin.fil_les(sti) } fang (e) { returner feilsvar("ikkje ei lesbar fil: " + sti) }
+    } ellers hvis mode == "append" {
+        // Append: last eksisterande innhald i bufferen og sett posisjonen til slutten
+        // slik at seek/skriv arbeider mot heile fila (positioned write).
+        prøv { hvis builtin.fil_finnes(sti) { innhald = builtin.fil_les(sti) } } fang (e) { innhald = "" }
+        startpos = lengde(innhald)
+    } ellers {
+        // Trunkér: skrivebufferen er autoritativ og blir persistert ved kvar skriv.
+        prøv { builtin.fil_skriv(sti, "") } fang (e) { returner feilsvar("open feila: " + sti) }
+        innhald = ""
+    }
+    la id = "fh-" + tekst_fra_heltall(_fh_neste)
+    _fh_neste = _fh_neste + 1
+    // lasta=sann: innhald er den autoritative bufferen (lese-handtak lasta ved open,
+    // skrive-handtak held bufferen som blir skriven til fila ved kvar skriv).
+    _fh_tabell[id] = {"sti": sti, "skriv": skriv, "pos": startpos, "lasta": sann, "innhald": innhald}
+    la r = svar("open", "", 0, "")
+    r["handle"] = id
+    returner r
+}
+
+funksjon fh_hent(req) {
+    la id = felt(req, "handle")
+    hvis id == "" eller ikkje finnes_nøkkel(_fh_tabell, id) { returner null }
+    la h = _fh_tabell[id]
+    hvis h == null { returner null }
+    returner h
+}
+
+funksjon fh_les(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis h["skriv"] { returner feilsvar("handtaket er ope for skriving") }
+    hvis ikkje h["lasta"] {
+        prøv { h["innhald"] = builtin.fil_les(h["sti"]) } fang (e) { returner feilsvar("read feila: " + h["sti"]) }
+        h["lasta"] = sann
+    }
+    la maks = heiltall_felt(req, "max", 65536)
+    hvis maks < 1 { maks = 65536 }
+    la innhald: tekst = h["innhald"]
+    la pos: heiltall = h["pos"]
+    la slutt: heiltall = pos + maks
+    hvis slutt > lengde(innhald) { slutt = lengde(innhald) }
+    la data = ""
+    hvis slutt > pos { data = builtin.slice(innhald, pos, slutt) }
+    h["pos"] = slutt
+    la r = svar("ok", data, slutt - pos, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_skriv(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    hvis ikkje h["skriv"] { returner feilsvar("handtaket er ope for lesing") }
+    la data = felt(req, "data")
+    // Posisjonert skriving: skriv `data` inn i bufferen ved pos (overskriv/utvid) i
+    // staden for rein append, so seek + skriv gjev same semantikk som lseek+write.
+    la buf: tekst = h["innhald"]
+    la pos: heiltall = h["pos"]
+    la buflen: heiltall = lengde(buf)
+    la prefiks = ""
+    hvis pos < buflen { prefiks = builtin.slice(buf, 0, pos) }
+    ellers { prefiks = buf pos = buflen }
+    la etter_start: heiltall = pos + lengde(data)
+    la suffiks = ""
+    hvis etter_start < buflen { suffiks = builtin.slice(buf, etter_start, buflen) }
+    la nybuf = prefiks + data + suffiks
+    prøv { builtin.fil_skriv(h["sti"], nybuf) } fang (e) { returner feilsvar("write feila: " + h["sti"]) }
+    h["innhald"] = nybuf
+    h["pos"] = pos + lengde(data)
+    la r = svar("ok", "", lengde(data), "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+// Felles seek/ready/handtak-stat for både lese- og skrive-operasjonar. Native seed
+// har ikkje eit eige seek-primitiv; posisjonen lever i handtaket sin buffer.
+funksjon fh_seek(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la posisjon = heiltall_felt(req, "position", 0 - 1)
+    hvis posisjon < 0 { returner feilsvar("ugyldig seek-posisjon") }
+    h["pos"] = posisjon
+    la r = svar("ok", "", posisjon, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+// Readiness for kooperativ I/O: eit ope buffer-handtak er alltid klart (value=1);
+// eit ukjent/lukka handtak gjev "feil" so future-en feilar deterministisk.
+funksjon fh_ready(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la r = svar("ok", "", 1, "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_stat(req) -> ordbok_tekst {
+    la h = fh_hent(req)
+    hvis h == null { returner feilsvar("ukjent filhandtak") }
+    la r = svar("ok", "", lengde(tekst(h["innhald"])), "")
+    r["handle"] = felt(req, "handle")
+    returner r
+}
+
+funksjon fh_lukk(req) -> ordbok_tekst {
+    la id = felt(req, "handle")
+    hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+    // Nullstill i staden for å fjerne nøkkelen: «fjern» er liste-indeks-fjerning i
+    // native codegen og skal ikkje brukast på ordbøker.
+    _fh_tabell[id] = null
+    la r = svar("closed", "", 0, "")
+    r["handle"] = id
+    returner r
+}
+
+// Plattforma sin readiness-backend, slik nc_filesystem_result i C-runtimen rapporterte
+// han (kqueue på macOS, epoll på Linux, elles poll) — same kontrakt som native_gap sin
+// nettverksveg (event_backend "epoll"). Var plasshaldaren "native", som
+// test_native_filesystem_handles (kqueue/epoll/poll) avviste på fersk Linux-seed.
+la _fs_event_backend = ""
+
+funksjon fs_event_backend() -> tekst {
+    hvis _fs_event_backend != "" { returner _fs_event_backend }
+    la sys = ""
+    prøv { sys = tekst(builtin.system_info()["system"]) } fang (e) { sys = "" }
+    la b = "poll"
+    hvis builtin.starts_with(sys, "Linux") { b = "epoll" }
+    hvis builtin.starts_with(sys, "Darwin") { b = "kqueue" }
+    _fs_event_backend = b
+    returner b
+}
 
 funksjon svar(status: tekst, data: tekst, verdi: heiltall, feil: tekst) -> ordbok_tekst {
     la r: ordbok_tekst = {}
@@ -19,7 +218,7 @@ funksjon svar(status: tekst, data: tekst, verdi: heiltall, feil: tekst) -> ordbo
     r["data"] = data
     r["value"] = verdi
     r["error"] = feil
-    r["event_backend"] = "native"
+    r["event_backend"] = fs_event_backend()
     returner r
 }
 
@@ -44,6 +243,34 @@ funksjon trygg_relativ(rel: tekst) -> bool {
     hvis builtin.starts_with(rel, "/") { returner usann }
     hvis builtin.index_of(rel, "..") >= 0 { returner usann }
     hvis builtin.index_of(rel, "\n") >= 0 eller builtin.index_of(rel, "\r") >= 0 { returner usann }
+    returner sann
+}
+
+// Lenkjemål er relativt til lenkja si foreldremappe. Normaliser mappa + målet
+// segment for segment og avvis mål som er absolutte eller går over rota.
+funksjon lenkjemål_innanfor_rot(rel: tekst, mål: tekst) -> bool {
+    hvis builtin.starts_with(mål, "/") { returner usann }
+    hvis builtin.index_of(mål, "\n") >= 0 eller builtin.index_of(mål, "\r") >= 0 { returner usann }
+    la djupn: heiltall = 0
+    la delar = builtin.split(rel, "/")
+    la i: heiltall = 0
+    mens i < lengde(delar) - 1 {
+        la d = tekst(delar[i])
+        hvis d != "" og d != "." { djupn = djupn + 1 }
+        i = i + 1
+    }
+    la mdelar = builtin.split(mål, "/")
+    la j: heiltall = 0
+    mens j < lengde(mdelar) {
+        la d = tekst(mdelar[j])
+        hvis d == ".." {
+            djupn = djupn - 1
+            hvis djupn < 0 { returner usann }
+        } ellers hvis d != "" og d != "." {
+            djupn = djupn + 1
+        }
+        j = j + 1
+    }
     returner sann
 }
 
@@ -108,14 +335,17 @@ funksjon list_svar(sti: tekst, typa: bool) -> ordbok_tekst {
     la rå = builtin.native_fs_dirents(sti)
     hvis rå == "!" { returner feilsvar("katalog kan ikkje opnast: " + sti) }
     la linjer = del_linjer(tekst(rå))
-    la data = ""
+    // Samla i liste og slå saman éin gong: «data = data + …» per linje var kvadratisk.
+    la delar: liste_tekst = []
     la i: heiltall = 0
     mens i < lengde(linjer) {
         la l = linjer[i]
-        hvis typa { data = data + l + "\n" }
-        ellers { data = data + builtin.slice(l, 2, lengde(l)) + "\n" }
+        hvis typa { legg_til(delar, l) }
+        ellers { legg_til(delar, builtin.slice(l, 2, lengde(l))) }
         i = i + 1
     }
+    la data = ""
+    hvis lengde(delar) > 0 { data = builtin.join(delar, "\n") + "\n" }
     returner svar("ok", data, lengde(linjer), "")
 }
 
@@ -168,12 +398,10 @@ funksjon walk_svar(req) -> ordbok_tekst {
     la ekskluder = del_kommalist(felt(req, "exclude_prefixes"))
     la ut: liste_tekst = []
     gå(root, rel, suffiksar, ekskluder, ut, 0)
+    // Éin join i staden for «data = data + sti + "\n"» per fil: over heile repoet
+    // (tusenvis av stiar, fleire gonger i 0b-porten) var det kvadratisk kopiering.
     la data = ""
-    la i: heiltall = 0
-    mens i < lengde(ut) {
-        data = data + ut[i] + "\n"
-        i = i + 1
-    }
+    hvis lengde(ut) > 0 { data = builtin.join(ut, "\n") + "\n" }
     returner svar("ok", data, lengde(ut), "")
 }
 
@@ -198,12 +426,19 @@ funksjon read_operation(req) -> ordbok_tekst {
         returner list_svar(sti, op == "list_typed")
     }
     hvis op == "walk_files" { returner walk_svar(req) }
+    hvis op == "open" { returner fh_opne(req, usann) }
+    hvis op == "read" { returner fh_les(req) }
+    hvis op == "close" { returner fh_lukk(req) }
+    hvis op == "seek" { returner fh_seek(req) }
+    hvis op == "ready" { returner fh_ready(req) }
+    // Handtak-basert stat (native_stat på eit ope handtak): returner buffer-lengda.
+    hvis op == "stat" og felt(req, "handle") != "" { returner fh_stat(req) }
     hvis op == "stat" eller op == "path_stat" {
         la sti = full_sti(req)
         hvis sti == "" { returner feilsvar("invalid path") }
         returner stat_svar(sti, op == "stat")
     }
-    hvis op == "open" eller op == "read" eller op == "read_binary" eller op == "close" eller op == "seek" eller op == "ready" eller op == "read_async" eller op == "wait_async" eller op == "cancel_async" {
+    hvis op == "read_binary" eller op == "read_async" eller op == "wait_async" eller op == "cancel_async" {
         returner feilsvar("operation " + op + " unsupported in native seed")
     }
     returner feilsvar("operation requires disk.write")
@@ -213,6 +448,15 @@ funksjon write_operation(req) -> ordbok_tekst {
     la op = felt(req, "operation")
     la root = felt(req, "root")
     hvis root == "" { root = "." }
+    hvis op == "open" { returner fh_opne(req, sann) }
+    hvis op == "write" { returner fh_skriv(req) }
+    hvis op == "seek" { returner fh_seek(req) }
+    hvis op == "ready" { returner fh_ready(req) }
+    hvis op == "flush" {
+        hvis fh_hent(req) == null { returner feilsvar("ukjent filhandtak") }
+        returner svar("ok", "", 0, "")
+    }
+    hvis op == "close" { returner fh_lukk(req) }
     hvis op == "mkdir_p" {
         la sti = full_sti(req)
         hvis sti == "" eller felt(req, "relative") == "" { returner feilsvar("invalid directory path") }
@@ -254,13 +498,14 @@ funksjon write_operation(req) -> ordbok_tekst {
         la rel = felt(req, "relative")
         la mål = felt(req, "target")
         hvis ikkje trygg_relativ(rel) eller rel == "" eller mål == "" { returner feilsvar("invalid path") }
+        hvis ikkje lenkjemål_innanfor_rot(rel, mål) { returner feilsvar("symlink target escapes root") }
         la lenkje = sett_saman(root, rel)
         builtin.native_fs_unlink(lenkje)
         la rc: heiltall = builtin.native_fs_symlink(mål, lenkje)
         hvis rc != 0 { returner feilsvar("symlink feila (" + tekst(rc) + ")") }
         returner svar("ok", "", 1, "")
     }
-    hvis op == "open" eller op == "write" eller op == "flush" eller op == "close" eller op == "seek" eller op == "ready" eller op == "write_async" eller op == "wait_async" eller op == "cancel_async" {
+    hvis op == "write_async" eller op == "wait_async" eller op == "cancel_async" {
         returner feilsvar("operation " + op + " unsupported in native seed")
     }
     returner feilsvar("operation requires disk.read")

@@ -1,5 +1,9 @@
 # API Explorer (Interactive API docs)
 
+> **Fjerna (F0.2):** `docs/api-explorer/index.html` (om lag 420 linjer inline JS) er sletta frå
+> treet sidan det ikkje var Norscode og ingenting peika på det. Bruk `std/openapi`-ruta i
+> staden. Den gamle sida finst i git-historikken (`git show c555afd:docs/api-explorer/index.html`).
+
 Denne siden tilbyr en enkel, lokal, interaktiv API-oplevelse:
 
 - Last inn et OpenAPI 3-skjema fra en URL (for eksempel `/openapi.json`)

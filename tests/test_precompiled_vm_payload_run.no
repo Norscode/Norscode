@@ -1,0 +1,133 @@
+// Køyrer den GENERERTE bootstrap/precompiled/vm.ncb.json på verten (J1c / F3, review-funn:
+// test_precompiled_vm_host_compat sjekkar berre teksten). Dei frosne C-æra-vertane
+// (macOS-/Windows-stage0) køyrer payloaden med sin eigen C-executor, som ikkje har
+// modulglobalane til vm.no (LOAD_GLOBAL → «Stack underflow») — difor les den varme vegen
+// ingen globalar (vm_green_på_i). Ingen annan port køyrer payloaden på macOS: pure-lana går
+// til vertens baka VM, hybridlana kompilerer selfhost.vm frå kjelde.
+//
+// Testen lagar ein samansett NCB = payloaden + eit inngangspunkt som kallar payloaden sin
+// __main__.køyr_ncb med eit lite indre program (tests/fixtures/payload_vm_indre.no, kompilert
+// til JSON av verten), og køyrer han gjennom selfhost/tooling/ncb_host_run_entry.no med
+// NORSCODE_HOST_NCB_FILE — same C-executor-veg som pure-lana brukar for vm_executor.
+// Negativ kontroll: ein payload der køyr_ncb les modulglobalen vm_green_rekkje gjev
+// «Stack underflow» (exit 1) på macOS-C-æra-verten; den gode gjev 42. Testen har i tillegg
+// ein innebygd nei-kontroll: eit inngangspunkt som kallar ein funksjon som ikkje finst, skal
+// ikkje gje 42.
+bruk std.tekst som t
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon runtime(root: tekst) -> tekst {
+    la sti = miljo_hent("NORSCODE_NATIVE_BIN")
+    hvis sti != "" { returner sti }
+    prøv {
+        sti = tekst(builtin.system_info()["executable"])
+        hvis sti != "" { returner sti }
+    } fang (e) {}
+    returner root + "/dist/norscode_native"
+}
+
+funksjon vert_system() -> tekst {
+    prøv { returner tekst(builtin.system_info()["system"]) } fang (e) {}
+    returner ""
+}
+
+funksjon miljø(root: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon les_payload(sti: tekst) -> tekst {
+    hvis ikkje fil_finnes(sti) {
+        skriv("FEIL: " + sti + " manglar. Generer han med: ./bin/nc run tools/materialize_runtime_payloads.no\n")
+        assert(usann)
+    }
+    returner fil_les(sti)
+}
+
+// Payloaden med `probe_kall` (eit funksjonsnamn) som nytt inngangspunkt: kallar
+// probe_kall(json_parse_raw(fil_les(indre))) og returnerer resultatet. Skøytt inn som tekst
+// (payloaden er éi JSON-linje; toppfelta entry/functions står fremst, før alle funksjons-
+// kroppane), so talformat og feltrekkjefølgje i payloaden blir urørte.
+funksjon json_str(s: tekst) -> tekst {
+    assert(builtin.index_of(s, "\"") < 0 og builtin.index_of(s, "\\") < 0)
+    returner "\"" + s + "\""
+}
+
+funksjon samansett(payload: tekst, indre_sti: tekst, probe_kall: tekst) -> tekst {
+    la fmarkør = "\"functions\":{"
+    la fi = builtin.index_of(payload, fmarkør)
+    assert(fi > 0 og fi < 400)
+    la emarkør = "\"entry\":\"__main__.start\""
+    la ei = builtin.index_of(payload, emarkør)
+    assert(ei > 0 og ei < fi)
+    la probe = "\"__payloadprobe__.start\":{\"name\":\"start\",\"module\":\"__payloadprobe__\",\"params\":[],\"is_async\":false,\"string_encoding\":\"decoded-v1\",\"code\":[" +
+        "[\"PUSH_CONST\"," + json_str(indre_sti) + "]," +
+        "[\"CALL\",\"builtin.fil_les\",1]," +
+        "[\"CALL\",\"builtin.json_parse_raw\",1]," +
+        "[\"CALL\"," + json_str(probe_kall) + ",1]," +
+        "[\"RETURN\"]]},"
+    la ut = builtin.slice(payload, 0, ei) + "\"entry\":\"__payloadprobe__.start\"" +
+        builtin.slice(payload, ei + lengde(emarkør), fi + lengde(fmarkør)) + probe +
+        builtin.slice(payload, fi + lengde(fmarkør), lengde(payload))
+    returner ut
+}
+
+funksjon køyr_samansett(root: tekst, sti: tekst) -> ordbok_tekst {
+    la m = miljø(root)
+    m["NORSCODE_CMD"] = "run"
+    m["NORSCODE_FILE"] = root + "/selfhost/tooling/ncb_host_run_entry.no"
+    m["NORSCODE_HOST_NCB_FILE"] = sti
+    m["NORSCODE_OUTPUT"] = ""
+    returner prosess.køyr(runtime(root), [], root, m, 300000)
+}
+
+funksjon start() -> heiltall {
+    la root = miljo_hent("NORSCODE_ROOT")
+    hvis root == "" { root = "." }
+    la payload = les_payload(root + "/bootstrap/precompiled/vm.ncb.json")
+    la tmp = "/tmp/norscode_payload_run_" + builtin.random_hex(8)
+    filops.lag_katalogar(tmp)
+    la indre = tmp + "/indre.ncb.json"
+
+    // Indre program → JSON-NCB (C-æra-vertane les berre JSON; payloaden les begge).
+    la komp = miljø(root)
+    komp["NORSCODE_NCB_BINARY"] = "0"
+    la c = prosess.køyr(runtime(root), ["compile", root + "/tests/fixtures/payload_vm_indre.no", indre], root, komp, 300000)
+    hvis tekst(c["status"]) != "ferdig" eller heltall_fra_tekst(tekst(c["exit_code"])) != 0 eller ikkje fil_finnes(indre) {
+        prosess.skriv_resultat(c)
+        assert(usann)
+    }
+
+    // Nei-kontroll: eit kall til ein funksjon som ikkje finst i payloaden skal ikkje gje 42.
+    la nei = tmp + "/nei.ncb.json"
+    fil_skriv(nei, samansett(payload, indre, "__main__.finst_ikkje_payloadprobe"))
+    la rn = køyr_samansett(root, nei)
+    assert(tekst(rn["status"]) != "ferdig" eller heltall_fra_tekst(tekst(rn["exit_code"])) != 42)
+
+    la ja = tmp + "/ja.ncb.json"
+    fil_skriv(ja, samansett(payload, indre, "__main__.køyr_ncb"))
+    la r = køyr_samansett(root, ja)
+    la ut = tekst(r["stdout"]) + tekst(r["stderr"])
+    hvis tekst(r["status"]) != "ferdig" eller heltall_fra_tekst(tekst(r["exit_code"])) != 42 {
+        prosess.skriv_resultat(r)
+        assert_eq(tekst(r["status"]) + "/" + tekst(r["exit_code"]), "ferdig/42")
+    }
+    assert(t.inneholder(ut, "payload-vm indre: sum=7 native_target="))
+    la system = vert_system()
+    hvis system == "Darwin" {
+        assert(t.inneholder(ut, "native_target=macos-"))
+        // C-æra-verten: ikkje NUL-trygge strengar → binærvegen skal vere gata av.
+        assert(t.inneholder(ut, "ncb_binaer_versjon=0"))
+    }
+    hvis system == "Linux" { assert(t.inneholder(ut, "native_target=linux-")) }
+    hvis builtin.starts_with(system, "Windows") { assert(t.inneholder(ut, "native_target=windows-")) }
+    filops.slett_fil(indre)
+    filops.slett_fil(nei)
+    filops.slett_fil(ja)
+    skriv("test_precompiled_vm_payload_run OK\n")
+    returner 0
+}

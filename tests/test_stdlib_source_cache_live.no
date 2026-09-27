@@ -1,43 +1,98 @@
+// J1a: levande prøve av stdlib-cachen utan committa bytekode.
+//   (1) Standard (ingen committa manifest): ingen «[stdlib-cache] hit»; output
+//       er byte-lik med eksplisitt cache av (NORSCODE_USE_PRECOMPILED_STDLIB=0).
+//   (2) Ein GENERERT cache (fragment kompilerte frå kjelde i testen, manifest
+//       under ein eigen NORSCODE_BOOTSTRAP_CACHE-rot) gjev treff for både
+//       std/sha256.no og std/tekst.no, og same output som kjeldevegen.
+//   (3) Eit manifest med feil kjeldehash gjev bom (porten kan seie nei).
+// Testen les ingen committa JSON.
 bruk tools.process_runner som prosess
 
-funksjon kompiler(runtime: tekst, root: tekst, stdlib_cache: tekst, ut: tekst) -> ordbok_tekst {
-    returner prosess.køyr(runtime,
-        ["compile", root + "/tests/fixtures/performance_compile_probe.no", ut],
-        root, {
-            "NORSCODE_ROOT": root,
-            "NORSCODE_NATIVE_TOOL_CACHE": "0",
-            "NORSCODE_USE_PRECOMPILED_SELFHOST": "0",
-            "NORSCODE_USE_PRECOMPILED_STDLIB": stdlib_cache,
-            "NORSCODE_STDLIB_CACHE_TRACE": "1",
-            "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
-            "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
-        }, 120000)
+funksjon miljø(root: tekst, stdlib_cache: tekst, cache_rot: tekst, modul: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_MODULE": modul,
+        "NORSCODE_NATIVE_TOOL_CACHE": "0",
+        "NORSCODE_USE_PRECOMPILED_SELFHOST": "0",
+        "NORSCODE_USE_PRECOMPILED_STDLIB": stdlib_cache,
+        "NORSCODE_BOOTSTRAP_CACHE": cache_rot,
+        "NORSCODE_STDLIB_CACHE_TRACE": "1",
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon kompiler(runtime: tekst, root: tekst, m: ordbok_tekst, src: tekst, ut: tekst) -> ordbok_tekst {
+    la res = prosess.køyr(runtime, ["compile", src, ut], root, m, 300000)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    assert(prosess.ok(res))
+    returner res
+}
+
+funksjon har(res: ordbok_tekst, bit: tekst) -> boolsk {
+    returner builtin.contains(tekst(res["stdout"]), bit)
+}
+
+funksjon fil_hash(sti: tekst) -> tekst {
+    returner builtin.sha256_bytes(fil_les_binær(sti))
+}
+
+funksjon post(root: tekst, kjelde_rel: tekst, modul: tekst, artefakt_rel: tekst, artefakt: tekst) -> ordbok_tekst {
+    returner {
+        "module": modul,
+        "source_sha256": fil_hash(root + "/" + kjelde_rel),
+        "artifact": artefakt_rel,
+        "artifact_sha256": fil_hash(artefakt)
+    }
 }
 
 funksjon start() -> heiltall {
     la info = builtin.system_info()
     la runtime = tekst(info["executable"])
     la root = tekst(info["cwd"])
+    la probe = root + "/tests/fixtures/performance_compile_probe.no"
     la dir = root + "/build/stdlib-source-cache-live-" + builtin.random_hex(12)
     builtin.mkdir_p(dir)
-    la source_out = dir + "/source.ncb.json"
-    la cache_out = dir + "/cache.ncb.json"
-    la source = kompiler(runtime, root, "0", source_out)
-    la cache = kompiler(runtime, root, "1", cache_out)
-    hvis ikkje prosess.ok(source) eller ikkje prosess.ok(cache) {
-        prosess.skriv_resultat(source)
-        prosess.skriv_resultat(cache)
+
+    // (1) Standard og eksplisitt av: kjeldekompilering, byte-like.
+    la standard_ut = dir + "/standard.ncb.json"
+    la av_ut = dir + "/av.ncb.json"
+    la standard = kompiler(runtime, root, miljø(root, "1", "", ""), probe, standard_ut)
+    la av = kompiler(runtime, root, miljø(root, "0", "", ""), probe, av_ut)
+    assert(ikkje har(standard, "[stdlib-cache] hit"))
+    assert(ikkje har(av, "[stdlib-cache] hit"))
+    assert(fil_hash(standard_ut) == fil_hash(av_ut))
+
+    // (2) Generert cache: fragment frå kjelde, manifest under eigen rot.
+    la cache = dir + "/cache"
+    builtin.mkdir_p(cache + "/stdlib")
+    la sha_art = cache + "/stdlib/std_sha256.ncb.json"
+    la tekst_art = cache + "/stdlib/std_tekst.ncb.json"
+    kompiler(runtime, root, miljø(root, "0", "", "std.sha256"), root + "/std/sha256.no", sha_art)
+    kompiler(runtime, root, miljø(root, "0", "", "std.tekst"), root + "/std/tekst.no", tekst_art)
+    la modular = {}
+    modular["std/sha256.no"] = post(root, "std/sha256.no", "std.sha256", "bootstrap/stdlib/std_sha256.ncb.json", sha_art)
+    modular["std/tekst.no"] = post(root, "std/tekst.no", "std.tekst", "bootstrap/stdlib/std_tekst.ncb.json", tekst_art)
+    la schema = "norscode-stdlib-source-cache-v1|ncb-v1|module-globals-v1"
+    fil_skriv(cache + "/stdlib/manifest.json", json_skriv({"schema": schema, "modules": modular}))
+    la treff_ut = dir + "/treff.ncb.json"
+    la treff = kompiler(runtime, root, miljø(root, "1", cache, ""), probe, treff_ut)
+    hvis ikkje har(treff, "[stdlib-cache] hit std/sha256.no") eller ikkje har(treff, "[stdlib-cache] hit std/tekst.no") {
+        prosess.skriv_resultat(treff)
     }
-    hvis ikkje builtin.contains(tekst(cache["stdout"]), "[stdlib-cache] hit std/sha256.no") eller
-       ikkje builtin.contains(tekst(cache["stdout"]), "[stdlib-cache] hit std/tekst.no") {
-        prosess.skriv_resultat(cache)
-    }
-    assert(prosess.ok(source) og prosess.ok(cache))
-    assert(ikkje builtin.contains(tekst(source["stdout"]), "[stdlib-cache] hit"))
-    assert(builtin.contains(tekst(cache["stdout"]), "[stdlib-cache] hit std/sha256.no"))
-    assert(builtin.contains(tekst(cache["stdout"]), "[stdlib-cache] hit std/tekst.no"))
-    assert(builtin.sha256_bytes(fil_les_binær(source_out)) ==
-           builtin.sha256_bytes(fil_les_binær(cache_out)))
+    assert(har(treff, "[stdlib-cache] hit std/sha256.no"))
+    assert(har(treff, "[stdlib-cache] hit std/tekst.no"))
+    assert(fil_hash(treff_ut) == fil_hash(av_ut))
+
+    // (3) Feil kjeldehash → bom for den modulen, treff for den andre.
+    la skeiv = modular["std/sha256.no"]
+    skeiv["source_sha256"] = "0000000000000000000000000000000000000000000000000000000000000000"
+    modular["std/sha256.no"] = skeiv
+    fil_skriv(cache + "/stdlib/manifest.json", json_skriv({"schema": schema, "modules": modular}))
+    la bom = kompiler(runtime, root, miljø(root, "1", cache, ""), probe, dir + "/bom.ncb.json")
+    assert(har(bom, "[stdlib-cache] source-miss std/sha256.no"))
+    assert(ikkje har(bom, "[stdlib-cache] hit std/sha256.no"))
+    assert(har(bom, "[stdlib-cache] hit std/tekst.no"))
     skriv("test_stdlib_source_cache_live OK")
     returner 0
 }

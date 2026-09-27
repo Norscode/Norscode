@@ -1,5 +1,7 @@
 # V5600 Bootstrap migration checklist
 
+> **Historisk dokument.** `tools/check_bootstrap_literal_expectations_v5600.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 ## Formål
 Dette steget pakkar den aktive compile-løypa inn i faste reproduksjonsfiler og forventningssjekkar.
 

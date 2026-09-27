@@ -1,5 +1,7 @@
 # V4400 Selfhost Compile Status
 
+> **Historisk dokument.** `tools/run_selfhost_compile_phase_v4400.no` er sletta frå aktiv `tools/`-flate i F0.5 (2026-09-25) og finst berre i git-historikken (til og med `c555afd`). Kommandoane og stiane under er difor ikkje køyrbare lenger; dokumentet står att som evidens.
+
 Dato: 2026-06-25
 Fase: v4201-v4400 parser og semantic rydding
 

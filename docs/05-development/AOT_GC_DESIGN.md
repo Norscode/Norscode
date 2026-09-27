@@ -228,6 +228,7 @@ ingen gjesteregister).
 9. **CI-seed ≠ lokal seed (2026-09-06).** `b2-seed-direct.yml` sette aldri `NORSCODE_GC_ALLOC=1`
    på bygg-steget → codegen i rein bump-modus (ingen «hex-patcha»-linjer i loggen, 3,83 MB
    ELF) → exit 199 etter 2 s på `selfhost/vm.no`. GC-modus er bakt inn ved codegen-tid.
+   (Etter F3.8 finst ingen «hex-patcha»-linjer lenger; GC-modus er synleg i bytane, sjå 11.)
 10. **Materialize-kandidaten mangla tre modular** (`selfhost.ncb_serde`, `selfhost.ncb_bin`,
     `std.runtime_filesystem_native`): handskriven modulliste vart stale. Ukjende kall får
     codegen sin null-fallback → `ncb = null` → `nøkler(null)` → SIGSEGV i `run-ncb-pure`.
@@ -258,3 +259,23 @@ LESBIN. Port før seed-promotering: `b2-seed-direct.yml` BEVIS-steget (nativ tid
 vs committed på `selfhost/vm.no` + harness-subset med `NC_NATIVE = fersk seed`). Attståande:
 generert kode er ~5× tregare per kompilering enn C-era-seeden (collect-kost ved 400k+ levande
 + naiv codegen), macOS/arm64-seed, og fixpunkt (seed kompilert av seg sjølv → identisk NCB).
+
+## F3.8 (2026-09-25): GC-greina blir emittert direkte
+
+`patch_bump_prologer` og `patch_raw_string_allocs` (mønstersøk i eigen output etter
+emisjon, punkt 4–5 og 7 over) er sletta. `emit_cached_int_runtime`,
+`emit_cached_str_raw_runtime` og `emit_linear_join_runtime` tek `gc_fix` og emitterer
+GC-greina sjølve når `NORSCODE_GC_ALLOC=1` ved codegen-tid:
+
+| Stad (`gc_fix`-namn) | GC-modus | Flagg av |
+|---|---|---|
+| `int_boks`, `str_boks`, `join_boks` | `movabs rax,gc_alloc16; call rax; nop×8` (20 B) | 16 B-bump-prolog |
+| `str_payload` | `lea rcx,[r13+9]; movabs rax,gc_alloc_var; call rax; mov rbx,rax; nop×5` (24 B) | bump len+9 |
+| `join_raw` | `call gc_alloc_str_r11_rbx; mov [r11],rbx; nop×3` (11 B) + `nop×8` for bump-oppdateringa | bump total+9 |
+
+GC-atoma ligg seinare i runtimen enn cache-regionen, so adressene er framover-referansar
+som `gc_fix_løys` skriv inn (same mønster som `patch_jump`). Han er fail-closed: i
+GC-modus må alle fem stadene finnast og vere uskrivne (`tests/fixtures/ncg_f3_gcfix_probe.no`,
+med negativ kontroll). Bytane er **identiske** med det patch-passa laga: 9 GC-probar
+(inkl. 10k-hmac-litmus) og heile nc_main-seeden gav same sha256 med gammal og ny codegen,
+både med og utan GC-flagget.

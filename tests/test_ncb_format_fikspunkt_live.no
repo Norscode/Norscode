@@ -1,0 +1,119 @@
+// F3.6 NCB-fikspunkt (live): same kjelde kompilert som binær NCB og som JSON skal gje
+// SAME program. Kodar-uavhengig kontroll: json_skriv(dekode(binær)) ==
+// json_skriv(json_parse(JSON)), linjetabellane (source_lines/-columns) med, og byte-kontroll:
+// binær == serialiser_tekst(json_parse(JSON)). Fiksturen har heiltal nær i64-grensene
+// (varint-kuttet 2^63-1 -> 63 vart funne slik), flyttal, unicode og nøsta strukturar.
+// På linux-x86_64 skal `bygg-native` frå dei to NCB-ane òg gje byte-like ELF-ar.
+//
+// Runtimar utan F3.6-kodaren (committa seedar før promotering, C-æra-vertane) melder
+// det ved at builtin.ncb_binaer_versjon manglar; der blir berre JSON-vegen kontrollert.
+bruk selfhost.ncb_serde som serde
+bruk std.filops som filops
+bruk tools.process_runner som prosess
+
+funksjon fikstur() -> tekst {
+    returner "funksjon start() -> heiltall {\n" +
+        "    la maks = 9223372036854775807\n" +
+        "    la minst = (0 - maks) - 1\n" +
+        "    la stor = 4611686018427387904\n" +
+        "    la m = {\"blåbær\": \"æøå 😀\", \"n\": 144115188075855871, \"f\": [3.5, 0.1, 0 - 2.25]}\n" +
+        "    hvis maks - 1 < stor { returner 1 }\n" +
+        "    hvis minst + maks != 0 - 1 { returner 2 }\n" +
+        "    hvis m[\"f\"][0] <= 3 { returner 3 }\n" +
+        "    returner 0\n" +
+        "}\n"
+}
+
+funksjon runtime_binær_versjon() -> heiltall {
+    la v = 0
+    prøv { v = builtin.ncb_binaer_versjon() } fang (e) { returner 0 }
+    returner v
+}
+
+funksjon miljø(root: tekst, binær: tekst) -> ordbok_tekst {
+    returner {
+        "NORSCODE_CMD": "", "NORSCODE_FILE": "", "NORSCODE_OUTPUT": "",
+        "NORSCODE_ROOT": root,
+        "NORSCODE_NCB_BINARY": binær,
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+}
+
+funksjon krev_ok(res: ordbok_tekst) -> heiltall {
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    assert(prosess.ok(res))
+    returner 0
+}
+
+funksjon linux_x86_64() -> boolsk {
+    la system = miljo_hent("RUNNER_OS")
+    la maskin = miljo_hent("RUNNER_ARCH")
+    prøv {
+        la info = builtin.system_info()
+        hvis system == "" { system = tekst(info["system"]) }
+        hvis maskin == "" { maskin = tekst(info["machine"]) }
+    } fang (e) {}
+    returner (system == "Linux" eller system == "linux") og
+        (maskin == "X64" eller maskin == "x86_64" eller maskin == "amd64")
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la root = tekst(info["cwd"])
+    la dir = root + "/build/ncb-fikspunkt-" + builtin.random_hex(8)
+    filops.lag_katalogar(dir)
+    la kjelde = dir + "/fikstur.no"
+    fil_skriv(kjelde, fikstur())
+    la ut_json = dir + "/fikstur.ncb.json"
+    la ut_bin = dir + "/fikstur.ncb"
+
+    krev_ok(prosess.køyr(runtime, ["compile", kjelde, ut_json], root, miljø(root, "0"), 300000))
+    la jt = fil_les(ut_json)
+    assert(ikkje serde.er_binaer_tekst(jt))
+    la jobj = json_parse_raw(jt)
+    assert(har_nokkel(jobj, "functions"))
+
+    hvis runtime_binær_versjon() < 1 {
+        skriv("test_ncb_format_fikspunkt_live OK (runtime utan F3.6-kodar: berre JSON)\n")
+        filops.slett_tre(dir)
+        returner 0
+    }
+
+    krev_ok(prosess.køyr(runtime, ["compile", kjelde, ut_bin], root, miljø(root, "1"), 300000))
+    la bt = fil_les(ut_bin)
+    assert(serde.er_binaer_tekst(bt))
+    // Byte: kodaren gjev same bytar frå JSON-objektet som skrivaren i nc compile.
+    assert(serde.serialiser_tekst(json_parse_raw(jt)) == bt)
+    // Kodar-uavhengig: same program etter dekoding.
+    la ja = json_skriv(json_parse_raw(jt))
+    la jb = json_skriv(serde.deserialiser_tekst(bt))
+    hvis ja != jb {
+        skriv("binær og JSON gjev ulike program:\n  json=" + ja + "\n  bin =" + jb + "\n")
+        assert(usann)
+    }
+    assert(builtin.contains(jb, "9223372036854775807"))
+    // Debuggaren/profileraren les linjetabellane: dei skal overleve binærforma.
+    assert(builtin.contains(jb, "\"source_lines\":["))
+    // Porten skal seie nei: éin endra konstant i JSON-objektet.
+    la mutert = json_parse_raw(jt)
+    mutert["functions"]["__main__.start"]["code"][0][1] = 9223372036854775806
+    assert(json_skriv(mutert) != jb)
+
+    hvis linux_x86_64() {
+        la elf_j = dir + "/fikstur_json.elf"
+        la elf_b = dir + "/fikstur_bin.elf"
+        krev_ok(prosess.køyr(runtime, ["bygg-native", "--target", "linux-x86_64", "--ncb", ut_json, elf_j], root, miljø(root, "0"), 300000))
+        krev_ok(prosess.køyr(runtime, ["bygg-native", "--target", "linux-x86_64", "--ncb", ut_bin, elf_b], root, miljø(root, "0"), 300000))
+        la ej = builtin.fil_les_binær(elf_j)
+        la eb = builtin.fil_les_binær(elf_b)
+        assert_eq(lengde(eb), lengde(ej))
+        assert(builtin.sha256_bytes(eb) == builtin.sha256_bytes(ej))
+        // Og programmet køyrer rett (flyttal og i64-grenser): exit 0.
+        krev_ok(prosess.køyr(elf_b, [], root, miljø(root, "0"), 60000))
+    }
+    filops.slett_tre(dir)
+    skriv("test_ncb_format_fikspunkt_live OK\n")
+    returner 0
+}

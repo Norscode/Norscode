@@ -4,13 +4,39 @@ bruk std.tls_http som tls
 
 funksjon handshake_pair(listener: ordbok_tekst, client: ordbok_tekst) -> ordbok_tekst {
     la accept_loop = sched.ny()
-    la accept_future = socket.native_accept_async(accept_loop, listener, 30000)
-    assert(sched.run(accept_loop, 30000) >= 1)
+    la accept_future = socket.native_accept_async(accept_loop, listener, 60000)
+    assert(sched.run(accept_loop, 60000) >= 1)
     la server = sched.future_resultat(accept_loop, accept_future)
     la hs = sched.ny()
-    la client_future = socket.native_tls_handshake_async(hs, client, 30000)
-    la server_future = socket.native_tls_handshake_async(hs, server, 30000)
-    la progressed = sched.run(hs, 30000)
+    // Rein-VM ECC-handshake er treg (~sekund til titals sekund under last/på trege
+    // CI-runnarar). Tenar-sida fullfører fyrst NÅR klient-Finished er motteke (full
+    // rundtur), so ho treng meir slakk enn klienten. 30 s var for knapt: OCSP-good
+    // sin tenar tidsavbraut («TimeoutFeil: I/O tls-handshake») på ~5×-trege runnarar
+    // OG på gateway under moderat last → assert_eq(server,"ferdig") feila. 120 s gjev
+    // rikeleg slakk for legitime handshakar; run-budsjettet må vere > future-timeout
+    // så tenar-timeouten i avvis-scenario (badhost) framleis registrerast (progressed>=2).
+    la client_future = socket.native_tls_handshake_async(hs, client, 120000)
+    la server_future = socket.native_tls_handshake_async(hs, server, 120000)
+    // Ein TLS-part som avviser handshaken (feil vertsnamn, tilbakekalla klientcert)
+    // stengjer tilkoplinga si. Utan det ventar motparten til 120 s-handshake-
+    // timeouten, som kappast med run-budsjettet på trege runnarar (attestasjonen:
+    // «TLS pair stalled: progressed=1 … server=ventende»). Køyr difor i korte bitar
+    // og shutdown-a (IKKJE close: native_lukk seinare eig fd-en) sokkelen til den
+    // sida som feila, so motparten får EOF og resolverer med ein gong.
+    la start_ms = builtin.tid_ms()
+    la progressed = 0
+    la stengd = usann
+    mens sched.har_arbeid(hs) og builtin.tid_ms() - start_ms < 150000 {
+        progressed = progressed + sched.run(hs, 1000)
+        hvis ikkje stengd og sched.future_status(hs, client_future) == "feil" {
+            builtin.network_operation({"abi": socket.native_versjon(), "operation": "shutdown", "handle": client["handle"]})
+            stengd = sann
+        }
+        hvis ikkje stengd og sched.future_status(hs, server_future) == "feil" {
+            builtin.network_operation({"abi": socket.native_versjon(), "operation": "shutdown", "handle": server["handle"]})
+            stengd = sann
+        }
+    }
     hvis progressed < 2 {
         skriv("TLS pair stalled: progressed=" + tekst_fra_heiltall(progressed) + " client=" + sched.future_status(hs, client_future) + ":" + sched.future_feil(hs, client_future) + " server=" + sched.future_status(hs, server_future) + ":" + sched.future_feil(hs, server_future) + "\n")
     }
@@ -19,8 +45,8 @@ funksjon handshake_pair(listener: ordbok_tekst, client: ordbok_tekst) -> ordbok_
 }
 
 funksjon start() -> heiltall {
-    la cert = "tests/fixtures/tls/localhost.crt"
-    la key = "tests/fixtures/tls/localhost.key"
+    la cert = "tests/fixtures/tls/localhost-ed25519.crt"
+    la key = "tests/fixtures/tls/localhost-ed25519.key"
     la secure_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
     la listen_rc = tls.lytt_secure(secure_server)
     hvis listen_rc != 0 og builtin.contains(secure_server["error"], "unavailable") {
@@ -83,10 +109,10 @@ funksjon start() -> heiltall {
     assert_inneholder(mtls_server_tls["peer_subject"], "CN=localhost")
 
     la revoked_server = tls.ny_secure_server(0, tls.load_cert_file(cert), tls.load_key_file(key))
-    tls.krev_klientsertifikat_med_crl(revoked_server, cert, "tests/fixtures/tls/revoked-client.crl.pem")
+    tls.krev_klientsertifikat_med_crl(revoked_server, cert, "tests/fixtures/tls/revoked-client-ed25519.crl.pem")
     assert_eq(tls.lytt_secure(revoked_server), 0)
     la revoked_listener = revoked_server["listener"]
-    la revoked_client = socket.native_tls_tilkoble_med_klientsertifikat("127.0.0.1", heltall_fra_tekst(revoked_listener["port"]), "localhost", cert, "tests/fixtures/tls/revoked-client.crt", "tests/fixtures/tls/revoked-client.key")
+    la revoked_client = socket.native_tls_tilkoble_med_klientsertifikat("127.0.0.1", heltall_fra_tekst(revoked_listener["port"]), "localhost", cert, "tests/fixtures/tls/revoked-client-ed25519.crt", "tests/fixtures/tls/revoked-client-ed25519.key")
     la revoked_pair = handshake_pair(revoked_listener, revoked_client)
     la revoked_hs = revoked_pair["scheduler"]
     hvis sched.future_status(revoked_hs, revoked_pair["client_future"]) != "feil" og sched.future_status(revoked_hs, revoked_pair["server_future"]) != "feil" {
@@ -99,8 +125,8 @@ funksjon start() -> heiltall {
     assert(tls.lukk_secure(revoked_server))
     skriv("CRL opprydding OK\n")
 
-    la ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server.key"))
-    tls.bruk_ocsp_stapling(ocsp_server, "tests/fixtures/tls/ocsp-good.der")
+    la ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server-ed25519.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server-ed25519.key"))
+    tls.bruk_ocsp_stapling(ocsp_server, "tests/fixtures/tls/ocsp-good-ed25519.der")
     la ocsp_listen_rc = tls.lytt_secure(ocsp_server)
     hvis ocsp_listen_rc != 0 { skriv("OCSP listen error: " + ocsp_server["error"] + "\n") }
     assert_eq(ocsp_listen_rc, 0)
@@ -122,8 +148,8 @@ funksjon start() -> heiltall {
     socket.native_lukk(ocsp_pair["server"])
     assert(tls.lukk_secure(ocsp_server))
 
-    la revoked_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/revoked-client.crt"), tls.load_key_file("tests/fixtures/tls/revoked-client.key"))
-    tls.bruk_ocsp_stapling(revoked_ocsp_server, "tests/fixtures/tls/ocsp-revoked.der")
+    la revoked_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/revoked-client-ed25519.crt"), tls.load_key_file("tests/fixtures/tls/revoked-client-ed25519.key"))
+    tls.bruk_ocsp_stapling(revoked_ocsp_server, "tests/fixtures/tls/ocsp-revoked-ed25519.der")
     assert_eq(tls.lytt_secure(revoked_ocsp_server), 0)
     la revoked_ocsp_listener = revoked_ocsp_server["listener"]
     la revoked_ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", heltall_fra_tekst(revoked_ocsp_listener["port"]), "norscode-client", cert)
@@ -135,7 +161,7 @@ funksjon start() -> heiltall {
     socket.native_lukk(revoked_ocsp_pair["server"])
     assert(tls.lukk_secure(revoked_ocsp_server))
 
-    la no_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server.key"))
+    la no_ocsp_server = tls.ny_secure_server(0, tls.load_cert_file("tests/fixtures/tls/ocsp-server-ed25519.crt"), tls.load_key_file("tests/fixtures/tls/ocsp-server-ed25519.key"))
     assert_eq(tls.lytt_secure(no_ocsp_server), 0)
     la no_ocsp_listener = no_ocsp_server["listener"]
     la no_ocsp_client = socket.native_tls_tilkoble_krev_ocsp("127.0.0.1", heltall_fra_tekst(no_ocsp_listener["port"]), "localhost", cert)

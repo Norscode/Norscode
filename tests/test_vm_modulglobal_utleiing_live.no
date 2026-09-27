@@ -1,0 +1,109 @@
+// Åtferdsprøve av utleiinga av modulglobalane i selfhost/vm.no
+// (nc_main: nc_vm_modulglobal_kjelde + nc_parentesbalanse).
+//
+// Funksjonane blir trekte ut ORDRETT frå levande selfhost/nc_main.no og køyrde
+// i ein barneprosess (`<runtime> run`). Då prøver testen den kjelda som står i
+// repoet på alle seedar, ikkje den baka nc_main-en og ikkje det forelda
+// nc_main-fragmentet (`bruk selfhost.nc_main` gav «Ukjent innebygd funksjon»
+// på den committa Linux-seeden etter 521 s).
+//
+// Hovudtilfellet er ein toppnivå-`la` som held fram utan open parentes
+// (`la x = "a" +` + innrykt `"b"`): ei eldre utleiing kutta fortsetjinga, og
+// den utleidde kjelda kompilerte då ikkje.
+bruk tools.process_runner som prosess
+bruk std.tekst som t
+
+// Éin toppnivåfunksjon, frå hovudet til første linje som berre er "}".
+funksjon trekk_ut(kjelde: tekst, hovud: tekst) -> tekst {
+    la s = t.finn(kjelde, hovud)
+    hvis s < 0 { returner "" }
+    la rest = builtin.slice(kjelde, s, lengde(kjelde))
+    la e = t.finn(rest, "\n}\n")
+    hvis e < 0 { returner "" }
+    returner builtin.slice(rest, 0, e + 3)
+}
+
+funksjon tilfelle(inn: liste<tekst>, venta: liste<tekst>, i: tekst, v: tekst) -> heiltall {
+    legg_til(inn, i)
+    legg_til(venta, v)
+    returner 0
+}
+
+// Kjeldetekst for ein strengliteral i det genererte programmet.
+funksjon literal(s: tekst) -> tekst {
+    la ut = builtin.replace(s, "\\", "\\\\")
+    ut = builtin.replace(ut, "\"", "\\\"")
+    ut = builtin.replace(ut, "\n", "\\n")
+    returner "\"" + ut + "\""
+}
+
+funksjon start() -> heiltall {
+    la info = builtin.system_info()
+    la runtime = tekst(info["executable"])
+    la root = tekst(info["cwd"])
+    la nc = fil_les(root + "/selfhost/nc_main.no")
+    la f_bal = trekk_ut(nc, "funksjon nc_parentesbalanse(linje: tekst) -> heiltall {")
+    la f_utl = trekk_ut(nc, "funksjon nc_vm_modulglobal_kjelde(kjelde: tekst) -> tekst {")
+    assert(lengde(f_bal) > 100)
+    assert(lengde(f_utl) > 100)
+
+    // (inndata, venta utleiing). Strengane går som argument til ein
+    // brukarfunksjon: C-æra-seedane unescapar ikkje strengliteralar i
+    // listeliteralar eller som direkte argument til legg_til.
+    la inn: liste<tekst> = []
+    la venta: liste<tekst> = []
+    // 1: fortsetjing utan parentes
+    tilfelle(inn, venta,
+             "bruk std.x som x\nla a: tekst = \"a\" +\n    \"b\"\nla c = 3\n",
+             "bruk std.x som x\nla a: tekst = \"a\" +\n    \"b\"\nla c = 3\n")
+    // 2: parentesar over fleire linjer, innrykt la i funksjon, funksjon og
+    //    kommentar; parentesar i strengar og etter # tel ikkje
+    tilfelle(inn, venta,
+             "la m = {\n    \"k\": [1,\n 2]\n}\nfunksjon f() -> heiltall {\n    la inni = 1\n    returner inni\n}\n// kommentar (\nla b: heiltall = 2  # c (\nla s = \"(\" + \"[\"\nla e = 5\n",
+             "la m = {\n    \"k\": [1,\n 2]\n}\nla b: heiltall = 2  # c (\nla s = \"(\" + \"[\"\nla e = 5\n")
+    // 3: fortsetjing etter at parentesen er lukka, så ny toppnivå-setning
+    tilfelle(inn, venta,
+             "la k = f(1,\n    2) +\n    3\nfunksjon g() {\n    la y = 9\n}\n",
+             "la k = f(1,\n    2) +\n    3\n")
+
+    la dir = root + "/build/vm-modulglobal-utleiing-" + builtin.random_hex(8)
+    builtin.mkdir_p(dir)
+    la drv = f_bal + "\n" + f_utl + "\nfunksjon start() -> heiltall {\n"
+    la i: heiltall = 0
+    mens i < lengde(inn) {
+        // Ikkje tekst(inn[i]): på C-æra-seedane json-escapar tekst() eit
+        // listeelement (linjeskift → \\n). Hent elementet direkte.
+        la kjelde_i = inn[i]
+        drv = drv + "    fil_skriv(" + literal(dir + "/ut" + tekst(i) + ".txt") +
+            ", nc_vm_modulglobal_kjelde(" + literal(kjelde_i) + "))\n"
+        i = i + 1
+    }
+    drv = drv + "    returner 0\n}\n"
+    la drv_sti = dir + "/drv.no"
+    fil_skriv(drv_sti, drv)
+
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NORSCODE_VM_CAPABILITIES": "env.read,disk.read,disk.write",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    la res = prosess.køyr(runtime, ["run", drv_sti], root, miljø, 600000)
+    hvis ikkje prosess.ok(res) { prosess.skriv_resultat(res) }
+    assert(prosess.ok(res))
+
+    la feil: heiltall = 0
+    i = 0
+    mens i < lengde(inn) {
+        la fått = fil_les(dir + "/ut" + tekst(i) + ".txt")
+        la venta_i = venta[i]
+        hvis fått != venta_i {
+            skriv("utleiing " + tekst(i + 1) + " feil (lengd " + tekst(lengde(fått)) + " mot " +
+                  tekst(lengde(venta_i)) + "):\n[" + fått + "]\nventa:\n[" + venta_i + "]\n")
+            feil = feil + 1
+        }
+        i = i + 1
+    }
+    assert_eq(feil, 0)
+    skriv("test_vm_modulglobal_utleiing_live OK")
+    returner 0
+}

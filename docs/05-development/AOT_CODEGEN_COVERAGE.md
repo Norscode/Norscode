@@ -127,7 +127,7 @@ Defektar funne og fiksa i denne runden (kvar med sjølvsjekkande vakt i gc-litmu
 | 31 | GC: levande strengar > 64 KiB, lister > 65536 element og map > 65536 nøklar uverna (kompilatoren har alle tre: kjeldefiler/NCB-JSON, token-lister, VM-heap-bokhald) | mark-DFS «sanity»-tak (`cmp rax,0x10000; ja loop`) klassifiserte dei som falske røter → payload/element-/nøkkelarray ikkje registrert i live-map → sweep frigjorde og gjenbrukte levande minne | tak → 1 GiB (streng) / 16M (liste, map) PLUSS presis ende-test mot bump: payload+8+len, elem_ptr+len*8, keys/vals_ptr+count*8 må liggje under bump (falsk rot elles) |
 | 32 | reuse2-probe hang på 100 % CPU med RSS > 1 GiB etter layout v3 | streng-entry er over-rekna (2*len+11) → siste levande slutt (r9) > bump → «bump ≤ r9»-klampen hoppa over bump-reset → heapen voks til SOFT-taket → collect ved kvart safepoint | sweep klampar kvar entry-ende (og lm[0]-enden) til bump før prev_end/r9 vert oppdatert (gc_sweep_native + gc_sweep_full) |
 
-Diagnose-metoden som verka: 30-linjers probe → `gc_probe_run.sh` + Docker; krasj-PC via
+Diagnose-metoden som verka: 30-linjers probe → `./bin/nc run tools/gc_probe_run.no <probe.no> [label]` (byggjer ELF; køyr i Docker linux/amd64 på macOS) ; krasj-PC via
 `qemu-x86_64 -g 1234` + `gdb-multiarch`, mappa med `.symbols`-sidecar (NC_NATIVE_SYMBOL_MAP);
 break på throw_unwind-atomet (bytemønster) for å sjå kva som blir kasta og kvar det unwindar.
 Attståande før promotering: harness-subset grønt på fersk seed, så committ som stage0 +
@@ -220,12 +220,77 @@ primitiv + rein Norscode:
   `process_operation` (heile «norscode-native-process-v1»-ABI-en: pipe2/fork/dup2/execve/
   waitpid/kill/fcntl/nanosleep — test_native_process_async m/ SIGTERM=143, timeout=124,
   stdin-røyr, attbruk). Handle-tabellen er ein modul-global (module_initializers).
+- **F3 (2026-09-25): plattformlag og éin spawn-veg.** `std/native_sys.no` held systemkallnummer,
+  flagg, errno og struct-layout per mål (i dag `linux-x86_64`), vald ved køyring via
+  `builtin.native_target()` (konstant-atom i codegen; VM-en svarar frå `system_info`).
+  `native_gap` kallar berre `nsys._nr/_flagg/_errno/_layout` — inga rå tal i `sys6`-kall.
+  `builtin.native_envp()` gjev envp-peikaren frå heap-kontrollblokka (heap_layout), so
+  native_gap har inga hardkoda VA. `builtin.process_spawn_argv` går ALLTID via
+  `std.native_gap.process_spawn_argv_gap` (ikkje-blokkerande stdin, SIGPIPE-vern, output-grense,
+  ppoll-venting, peak_rss frå wait4-rusage); utan native_gap i bunten er det kompileringsfeil.
+  Den rå spawn-emisjonen og S1-atomet er sletta i **x86-64-codegenen** (`native_codegen_v2.no`);
+  Mach-O-ARM64-codegenen (`macho_arm64_codegen.no`) har framleis ein rå, minimal spawn for macOS til M0/M3 (Linux-ELF rutar til native_gap sidan A2).
+  Feil før barnet startar gjev same form som den gamle rå-rutina (`feil`/127/«process spawn
+  failed», norsk detalj i `error_detail`, ingen `handle`); tom executable gjev `ferdig`/127.
+  `peak_rss_bytes` er `ru_maxrss` og tek på Linux med RSS-en forelderen hadde ved fork (i dag
+  ~1,8 GB heap-init i kvar native Norscode-prosess) — berre diagnose, ikkje port.
+  Port: `tests/test_native_process_stress.no` (VM-vegen, seeden sin baka motor) og
+  `tests/test_linux_x86_64_aot_prosess_stress.no` (same test AOT-bygd med motoren frå kjelda —
+  CI-dekning før seed-promotering).
 - `socket_*` (AF_INET TCP/UDP, sockaddr_in i mmap-scratch) og `network_operation` (handle-ABI
   «norscode-native-network-v1»: listen/connect/accept/read/write/poll/udp/close, ikkje-blokkerande,
   kontrakt frå archive/legacy_c_backend/nc_native_main.c) er òg reine — test_vm_network_scope,
   socketserver_native/shell_quote, native_network_event_loop grøne. VM-policy: nc_run_policy set
   NORSCODE_VM_TARGET_NET_SCOPE (loopback som standard).
 - Same mønster står att for `dns_lookup`, tls_*, trådar, sandbox-profilar og `db.*`.
+- **A2 (2026-09-26): same plattformlag på linux-arm64.** Følgjande gjeld ARM64-codegenen
+  (`macho_arm64_codegen.no`, som både Linux-ELF og Mach-O brukar):
+  - Nye atom:
+    - `builtin.sys6`: `x8` + `svc #0`. På macOS `x16` + `svc #0x80`, og carry blir til
+      −errno, som M0-struktur.
+    - `raw_load8/64`, `raw_store8/64` og `raw_call`. AArch64 har ikkje koherent I-cache:
+      sjølvskriven kode MÅ synkast med `builtin.icache_sync(adr, n)` før `raw_call`
+      (dc cvau / dsb ish / ic ivau / dsb ish / isb; linjelengd frå CTR_EL0 på Linux, fast
+      64 B på macOS der CTR_EL0 trappar på EL0). Utan sync: SIGILL eller gamle
+      instruksjonar (målt 12 av 20 SIGILL, 8 av 20 feil svar); fixture
+      `tests/fixtures/arm64_icache_probe.no`.
+    - `native_target`: gjev `linux-arm64` eller `macos-arm64`.
+    - `native_envp`: les `[HEAP_VA + ENVP_OFFSET]`.
+    - `random_byte`: 0..255, eller −errno (< 0) når kjernen nektar entropi; EINTR blir
+      prøvd på nytt, 0 lesne byte gjev −EIO. Same kontrakt på x86-64 (`native_codegen_v2`),
+      som før las ein uinitialisert stakkbyte ved feil. `std.native_gap._entropi_byte`
+      kastar på < 0, so `random_hex_secure` og TLS-nonce feilar lukka (fixture
+      `tests/fixtures/aot_rng_failclosed.no`, testen
+      `tests/test_linux_x86_64_aot_rng_failclosed.no` og ARM64-lanen).
+    - `system_info` har dei same fem felta som på x86.
+  - Heapen ligg på ein fast VA frå `heap_layout.HEAP_VA(mål)`, og først kjem ei
+    kontrollblokk:
+    - linux-arm64: `0x10_0000_0000` med `MAP_FIXED_NOREPLACE`.
+    - macos-arm64: `0xC0_0000_0000` som hint. Målt: hintet 64 GiB blir ikkje halde.
+    - Gjev mmap ein annan adresse (eller −EEXIST), skriv programmet «heap-VA opptatt» og
+      avsluttar med exit 198. Feilar mmap sjølv (typisk ENOMEM frå RLIMIT_AS / `ulimit -v`
+      under om lag 4 GiB, sidan heapen er ein lat 4 GiB-reservasjon), skriv han
+      «heap-mmap feila» og avsluttar òg med 198.
+  - `std/native_sys.no` har tabellen for linux-arm64. Han følgjer `asm-generic/unistd.h`,
+    har upakka `epoll_event` på 16 B og `AUDIT_ARCH_AARCH64`. Flagg- og layout-tabellane
+    for arm64 er eigne (ikkje arva frå x86-64) og pinna literalt i testen, med dei
+    arm64-eigne fcntl-verdiane (O_DIRECTORY/O_NOFOLLOW/O_DIRECT/O_LARGEFILE). I tillegg finst
+    `_nr_kompat`: fork → `clone(SIGCHLD)`, dup2 → dup3 og epoll_wait → epoll_pwait.
+  - Linux-ELF rutar desse til `std.native_gap` gjennom `gap_ruter.no`: `socket_*`,
+    `process_spawn_argv`, `process_operation`, `network_operation`, `dns_lookup` og
+    `system_operation`. Manglar native_gap i bunten, blir det kompileringsfeil; er
+    native_gap i bunten men utan målet (t.d. `socket_read`), seier feilmeldinga det. Dei
+    inline OS-emitterane gjeld berre macOS til M0; den pensjonerte `exec_prosess` blir
+    NATIV-GAP-stubben på Linux-ELF (fangbar, som VM-en).
+  - Port: `tools/arm64_diff_lane.no`, som er ein differensial-lane:
+    - VM-referanse frå `nc run` på fersk x86-seed.
+    - AOT-ELF køyrt på ein linux-arm64-vert.
+    - Fixturane `tests/fixtures/arm64_diff_{prosess,tcp,epoll,dns,miljo}.no` skal gje
+      identisk stdout og exit-kode.
+    - `arm64_atom_probe`, `aot_rng_failclosed` og `arm64_icache_probe` blir samanlikna
+      med ein fasit.
+    - Kontrakten for samanlikningssteget: `tests/test_diff_lane_arm64_kontrakt.no`.
+    - Tabellane: `tests/test_native_sys_tabellar.no`.
 
 Seed-porten: `tools/seed_gate_tests.txt` (krev_ny_seed-lista) via harnessen med
 `NC_NATIVE=<fersk seed>` — harnessen slepp desse testane laus berre når `builtin.vent.sov`

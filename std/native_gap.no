@@ -1,6 +1,6 @@
 // std/native_gap.no — reine Norscode-erstatningar for VM-builtins som manglar
 // native rutine i native_codegen_v2 (x86-64). Codegen sin gap-ruting
-// (gap_rute_v2) sender `builtin.X` hit når modulen er med i bunten; nc_main.no
+// (gap_ruter.gap_rute) sender `builtin.X` hit når modulen er med i bunten; nc_main.no
 // importerer han difor eksplisitt slik at den ferske seeden alltid har dei.
 //
 // 2026-09-06 statisk revisjon av fullhost-bunten: bytes_new (~15 seed-testar)
@@ -17,6 +17,18 @@
 // rutar builtin.json_parse hit når modulen er i bunten (gap-fyrst i
 // emit_builtin_or_user_call). Sjølvstendig strikt parser (selfhost.json sin
 // json_tal kallar builtin.desimaltall, som SIGSEGV-ar i frosen runtime).
+// TLS 1.3-over-sokkel (M3): native_gap driv tls13_session over rå fd. network_operation
+// er gap-ruta inn i seeden → heile TLS-stacken kompilerast inn som native (AOT-fart).
+// Krev relayout (DATA_VA 0x700000, .text 3 MB) — sjå tls-over-sokkel-plan.
+bruk std.tls13_session som tls13
+bruk std.rsa som rsa
+bruk std.x509 som x509
+bruk std.ecdsa_p256 som ecdsa
+bruk std.bigint som bn
+// F3.1 (X0.3): systemkallnummer, flagg, errno og struct-layout kjem BERRE frå std.native_sys
+// (tabell per mål, vald ved køyring via builtin.native_target()). Ingen rå tal i sys6-kall her.
+bruk std.native_sys som nsys
+
 funksjon json_parse(t: tekst) {
     hvis builtin.type(t) != "tekst" { returner "null" }
     la st = {"s": t, "p": 0, "feil": usann}
@@ -181,6 +193,38 @@ funksjon _jp_hex(c: tekst) -> heiltall {
     returner -1
 }
 
+// Les nøyaktig fire hex-siffer frå posisjon p. -1 = ugyldig.
+funksjon _jp_hex4(s: tekst, p: heiltall) -> heiltall {
+    la kode: heiltall = 0
+    la i: heiltall = 0
+    mens i < 4 {
+        la h = _jp_hex(builtin.slice(s, p + i, p + i + 1))
+        hvis h < 0 { returner 0 - 1 }
+        kode = kode * 16 + h
+        i = i + 1
+    }
+    returner kode
+}
+
+// Kodepunkt → UTF-8. Den gamle koden gjorde `builtin.chr(kode)` rett, som gjev
+// ÉIN RÅ BYTE — altså Latin-1, ikkje UTF-8. Målt på fersk seed gav
+// json_parse("\"\\u00e6\"") kode [230] der rett UTF-8 for æ er [195 166]:
+// gyldig JSON inn, ugyldig UTF-8 ut. Same trappe som std/js_streng.frå_kodepunkt,
+// men lokal her fordi native_gap er ein lågnivåmodul som ikkje skal dra inn
+// js_streng i buntar.
+funksjon _jp_utf8(k: heiltall) -> tekst {
+    hvis k < 128 { returner builtin.chr(k) }
+    hvis k < 2048 {
+        returner builtin.chr(192 + (k / 64)) + builtin.chr(128 + (k % 64))
+    }
+    hvis k < 65536 {
+        returner builtin.chr(224 + (k / 4096)) + builtin.chr(128 + ((k / 64) % 64)) +
+            builtin.chr(128 + (k % 64))
+    }
+    returner builtin.chr(240 + (k / 262144)) + builtin.chr(128 + ((k / 4096) % 64)) +
+        builtin.chr(128 + ((k / 64) % 64)) + builtin.chr(128 + (k % 64))
+}
+
 funksjon _jp_streng(st) -> tekst {
     la s: tekst = st["s"]
     la p: heiltall = st["p"] + 1
@@ -200,16 +244,20 @@ funksjon _jp_streng(st) -> tekst {
             ellers hvis e == "f" { ut = ut + builtin.chr(12) }
             ellers hvis e == "u" {
                 hvis p + 4 > n { st["feil"] = sann returner "" }
-                la kode: heiltall = 0
-                la i: heiltall = 0
-                mens i < 4 {
-                    la h = _jp_hex(builtin.slice(s, p + i, p + i + 1))
-                    hvis h < 0 { st["feil"] = sann returner "" }
-                    kode = kode * 16 + h
-                    i = i + 1
-                }
+                la kode = _jp_hex4(s, p)
+                hvis kode < 0 { st["feil"] = sann returner "" }
                 p = p + 4
-                ut = ut + builtin.chr(kode)
+                // Surrogatpar: 😀 er EITT kodepunkt (U+1F600), ikkje to.
+                // Utan dette blir emoji og alt over U+FFFF til to ugyldige teikn.
+                hvis kode >= 55296 og kode <= 56319 og p + 6 <= n og
+                   builtin.slice(s, p, p + 2) == "\\u" {
+                    la lav = _jp_hex4(s, p + 2)
+                    hvis lav >= 56320 og lav <= 57343 {
+                        kode = 65536 + (kode - 55296) * 1024 + (lav - 56320)
+                        p = p + 6
+                    }
+                }
+                ut = ut + _jp_utf8(kode)
             }
             ellers { ut = ut + e }
             fortsett
@@ -361,7 +409,78 @@ funksjon system_operation(req) {
     hvis op == "status" {
         returner {"abi": "norscode-system-v1", "status": "ok", "backend": "native-gap-pure"}
     }
+    // ── Linux drift-operasjonar (norscode-linux-ops-v1) over syscall + procfs ──
+    // C-seeden hadde desse i verten; på fersk seed var kallet «feil: ukjent operasjon»
+    // → test_linux_drift_contract feila (venta "ok"/"unsupported", ikkje "feil").
+    hvis op == "procfs_metrics" {
+        la pid = builtin.sys6(nsys._nr("getpid"), 0, 0, 0, 0, 0, 0)
+        la rss: heiltall = 0
+        prøv {
+            // /proc/self/statm: felt 2 = residente sider; × sidestorleik (4096).
+            la statm = builtin.fil_les("/proc/self/statm")
+            la felt = builtin.split(builtin.trim(statm), " ")
+            hvis lengde(felt) >= 2 { rss = heltall_fra_tekst(tekst(felt[1])) * 4096 }
+        } fang (e) { rss = 0 }
+        returner {"abi": "norscode-linux-ops-v1", "status": "ok", "pid": pid, "rss_bytes": rss}
+    }
+    hvis op == "user_lookup" eller op == "group_lookup" {
+        la namn = tekst(req["name"])
+        hvis ikkje _drift_gyldig_namn(namn) { returner _drift_feil("ugyldig namn") }
+        la fil = "/etc/passwd"
+        hvis op == "group_lookup" { fil = "/etc/group" }
+        prøv {
+            la innhald = builtin.fil_les(fil)
+            la linjer = builtin.split(innhald, "\n")
+            la i: heiltall = 0
+            mens i < lengde(linjer) {
+                hvis builtin.starts_with(tekst(linjer[i]), namn + ":") {
+                    la delar = builtin.split(tekst(linjer[i]), ":")
+                    la id_felt: heiltall = 0
+                    hvis lengde(delar) >= 3 { id_felt = heltall_fra_tekst(tekst(delar[2])) }
+                    returner {"abi": "norscode-linux-ops-v1", "status": "ok", "name": namn, "id": id_felt}
+                }
+                i = i + 1
+            }
+            returner _drift_feil("ikkje funnen: " + namn)
+        } fang (e) { returner _drift_feil("kan ikkje lese " + fil) }
+    }
+    hvis op == "systemd_status" eller op == "systemd_start" eller op == "systemd_stop" eller op == "systemd_restart" {
+        la unit = tekst(req["unit"])
+        hvis ikkje _drift_gyldig_unit(unit) { returner _drift_feil("ugyldig unit-namn") }
+        // Ekte systemctl-styring krev root/DBus som testcontaineren ikkje har; meld
+        // uunderstøtta for gyldige unit-namn (kontrakten krev berre at ugyldige gjev feil).
+        returner {"abi": "norscode-linux-ops-v1", "status": "unsupported", "error": "Linux ABI unavailable: systemctl", "unit": unit}
+    }
     returner _sys_feil("ukjent operasjon: " + op)
+}
+
+// Brukar-/gruppenamn: ikkje-tomt, ingen kontrollteikn eller «:» / «/» (hindrar
+// linjeinjeksjon i passwd/group-oppslaget).
+funksjon _drift_gyldig_namn(namn: tekst) -> boolsk {
+    hvis namn == "" { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(namn) {
+        la c = builtin.char_code(builtin.slice(namn, i, i + 1))
+        hvis c < 33 eller c == 58 eller c == 47 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// systemd unit-namn: ikkje-tomt, ingen «/» eller kontrollteikn.
+funksjon _drift_gyldig_unit(unit: tekst) -> boolsk {
+    hvis unit == "" { returner usann }
+    la i: heiltall = 0
+    mens i < lengde(unit) {
+        la c = builtin.char_code(builtin.slice(unit, i, i + 1))
+        hvis c < 33 eller c == 47 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _drift_feil(melding: tekst) {
+    returner {"abi": "norscode-linux-ops-v1", "status": "feil", "error": melding}
 }
 
 funksjon _sys_ok_sti(sti: tekst) {
@@ -372,27 +491,112 @@ funksjon _sys_feil(melding: tekst) {
     returner {"abi": "norscode-system-v1", "status": "feil", "path": "", "error": melding}
 }
 
-// ── builtin.process_operation («norscode-native-process-v1») i REIN Norscode over
-// builtin.sys6 (Linux x86-64: pipe2/fork/dup2/execve/waitpid/kill/read/fcntl/nanosleep).
-// Ingen frosen C-rutine. Handle-tabellen er ein modul-global (init ved seed-start).
+// ── Små OS-hjelparar over builtin.sys6 + std.native_sys (F3.1) ───────────────────
+funksjon _sys_lukk(fd: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("close"), fd, 0, 0, 0, 0, 0)
+}
+
+// Anonym, privat RW-mapping (null-fylt). Negativ retur = −errno.
+funksjon _sys_mmap_rw(n: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("mmap"), 0, n,
+                          nsys._flagg("PROT_READ") | nsys._flagg("PROT_WRITE"),
+                          nsys._flagg("MAP_PRIVATE") | nsys._flagg("MAP_ANONYMOUS"), -1, 0)
+}
+
+funksjon _sys_munmap(adr: heiltall, n: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("munmap"), adr, n, 0, 0, 0, 0)
+}
+
+// W^X: gjer ei skriven kodeside les+køyr (0 = ok).
+funksjon _sys_mprotect_rx(adr: heiltall, n: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("mprotect"), adr, n, nsys._flagg("PROT_READ") | nsys._flagg("PROT_EXEC"), 0, 0, 0)
+}
+
+funksjon _sys_u16(adr: heiltall, v: heiltall) -> heiltall {
+    builtin.raw_store8(adr, v & 255)
+    builtin.raw_store8(adr + 1, (v >> 8) & 255)
+    returner 0
+}
+
+funksjon _sys_u32(adr: heiltall, v: heiltall) -> heiltall {
+    _sys_u16(adr, v & 65535)
+    _sys_u16(adr + 2, (v >> 16) & 65535)
+    returner 0
+}
+
+funksjon _sys_les_u16(adr: heiltall) -> heiltall {
+    returner builtin.raw_load8(adr) | (builtin.raw_load8(adr + 1) << 8)
+}
+
+// struct pollfd {fd, events, revents=0} på adr.
+funksjon _sys_pollfd(adr: heiltall, fd: heiltall, events: heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < nsys._layout("pollfd", "storleik") { builtin.raw_store8(adr + i, 0) i = i + 1 }
+    _sys_u32(adr + nsys._layout("pollfd", "fd"), fd)
+    _sys_u16(adr + nsys._layout("pollfd", "events"), events)
+    returner 0
+}
+
+// ppoll(fds, n, timeout) — ms < 0 = vent utan tak. `ts` er 16 byte scratch til timespec.
+// ppoll (ikkje poll) fordi poll(2) ikkje finst på linux-arm64. n == 0 → rein venting.
+funksjon _sys_poll(fds: heiltall, n: heiltall, ms: heiltall, ts: heiltall) -> heiltall {
+    la tsp: heiltall = 0
+    hvis ms >= 0 {
+        builtin.raw_store64(ts + nsys._layout("timespec", "sec"), ms / 1000)
+        builtin.raw_store64(ts + nsys._layout("timespec", "nsec"), (ms % 1000) * 1000000)
+        tsp = ts
+    }
+    returner builtin.sys6(nsys._nr("ppoll"), fds, n, tsp, 0, nsys._layout("sigset", "storleik"), 0)
+}
+
+// ── builtin.process_spawn_argv («norscode-process-spawn-v1») og builtin.process_operation
+// («norscode-native-process-v1») i REIN Norscode over builtin.sys6 (Linux: pipe2/fork/
+// dup2/execve/wait4/kill/read/write/fcntl/ppoll). F3.2 (S2, 2026-09-25): ALL spawn går hit —
+// codegen krev std.native_gap for builtin.process_spawn_argv, og den tidlegare rå spawn-
+// rutina i codegen (S1-atomet, opphavleg frosen C-æra-maskinkode) er sletta.
+// Handle-tabellen er ein modul-global (init ved seed-start).
 // Operasjonar: spawn_argv (→ status "kjorer" + handle), poll, read (tømer buffera),
 // wait (wait_ms), signal (signal), close (drep om nødvendig, frigjer). Statusar:
 // kjorer / ferdig (exit_code) / signal (128+sig) / timeout (124, drep med SIGKILL når
-// request-timeout_ms er passert) / feil. (2026-09-06)
+// request-timeout_ms er passert) / feil (output-grense: error "output limit", exit 1).
+// Paritet med rå-rutina: stdin blir skriven IKKJE-blokkerande i vente-lykkja (ingen
+// vranglås over 64 KiB), SIGPIPE blir halden unna når barnet lukkar stdin, ventinga
+// er ppoll på røyra (ikkje sleep), og peak_rss_bytes kjem frå rusage i wait4.
+// peak_rss_bytes på Linux = ru_maxrss til barnet, og det er max(RSS-en forelderen hadde ved
+// fork, barnet sin eigen topp etter exec): fork kopierer sidetabellane (og RSS-teljarane),
+// og execve (exec_mmap) legg hiwater-RSS-en til det gamle mm-et inn i signal->maxrss.
+// clone(CLONE_VM|CLONE_VFORK) endrar ikkje dette (det gamle mm-et er då forelderen sitt).
+// Ein native Norscode-forelder rører i dag heile heap-segmentet ved oppstart (~1,8 GB), so
+// verdien seier lite om barnet: bruk han berre som øvre grense / diagnose, ikkje som port.
 la _pg_prosessar = {}
 
+// Scratch per prosess (éi mmap): C-strengar/argv/envp/BPF i [0, _PG_STR_SLUTT), så
+// lesebuffer, stdin-buffer, rusage, pollfd-ar, timespec, wstatus og røyr-fd-ar.
+funksjon _PG_SCRATCH() -> heiltall { returner 131072 }
+funksjon _PG_STR_SLUTT() -> heiltall { returner 61440 }
+funksjon _PG_LESBUF() -> heiltall { returner 65536 }
+funksjon _PG_LESBUF_N() -> heiltall { returner 16384 }
+funksjon _PG_INNBUF() -> heiltall { returner 81920 }
+funksjon _PG_INNBUF_N() -> heiltall { returner 32768 }
+funksjon _PG_RUSAGE() -> heiltall { returner 114688 }   // 512 B plass (linux: 144)
+funksjon _PG_POLLFD() -> heiltall { returner 115200 }   // 3 × pollfd
+funksjon _PG_TS() -> heiltall { returner 115264 }
+funksjon _PG_WSTATUS() -> heiltall { returner 115296 }
+funksjon _PG_ROYR() -> heiltall { returner 115328 }     // 3 × int[2]
+funksjon _PG_SIGSETT() -> heiltall { returner 115392 }  // 2 × sigset (ny, gammal)
+
 funksjon _pg_res(status: tekst, pid: heiltall, handle: tekst, exit_code: heiltall,
-                 ut: tekst, feil: tekst, error: tekst, wall_ms: heiltall) {
+                 ut: tekst, feil: tekst, error: tekst, wall_ms: heiltall, peak_rss: heiltall) {
     returner {
         "abi": "norscode-native-process-v1", "status": status, "pid": tekst_fra_heltall(pid),
         "handle": handle, "exit_code": tekst_fra_heltall(exit_code), "stdout": ut,
         "stderr": feil, "error": error, "wall_ms": tekst_fra_heltall(wall_ms),
-        "peak_rss_bytes": "0"
+        "peak_rss_bytes": tekst_fra_heltall(peak_rss)
     }
 }
 
 funksjon _pg_feil(melding: tekst) {
-    returner _pg_res("feil", -1, "", -1, "", "", melding, 0)
+    returner _pg_res("feil", -1, "", -1, "", "", melding, 0, 0)
 }
 
 funksjon _pg_cstr(adr: heiltall, s: tekst) -> heiltall {
@@ -405,61 +609,193 @@ funksjon _pg_cstr(adr: heiltall, s: tekst) -> heiltall {
     returner adr + lengde(s) + 1
 }
 
-// Set O_NONBLOCK (fcntl F_SETFL=4, O_NONBLOCK=2048) på fd.
+// Set O_NONBLOCK på fd (fcntl F_GETFL/F_SETFL).
 funksjon _pg_nonblock(fd: heiltall) -> heiltall {
-    la flagg = builtin.sys6(72, fd, 3, 0, 0, 0, 0)          // F_GETFL
+    la fcntl = nsys._nr("fcntl")
+    la flagg = builtin.sys6(fcntl, fd, nsys._flagg("F_GETFL"), 0, 0, 0, 0)
     hvis flagg < 0 { flagg = 0 }
-    returner builtin.sys6(72, fd, 4, flagg | 2048, 0, 0, 0)  // F_SETFL
+    returner builtin.sys6(fcntl, fd, nsys._flagg("F_SETFL"), flagg | nsys._flagg("O_NONBLOCK"), 0, 0, 0)
 }
 
-// Les alt tilgjengeleg (ikkje-blokkerande) frå fd til tekst; stoppar ved maks.
+funksjon _pg_legg_til_del(p, felt: tekst, del: tekst) -> heiltall {
+    la l: liste_tekst = p[felt]
+    legg_til(l, del)
+    p[felt] = l
+    returner 0
+}
+
+// Samla tekst for "ut_delar"/"feil_delar"; komprimerer lista til éin del.
+funksjon _pg_tekst(p, felt: tekst) -> tekst {
+    la l: liste_tekst = p[felt]
+    hvis lengde(l) == 0 { returner "" }
+    hvis lengde(l) == 1 { returner l[0] }
+    la t = builtin.join(l, "")
+    p[felt] = [t]
+    returner t
+}
+
+// Les det som er tilgjengeleg (ikkje-blokkerande) frå fd. Grensa (p["maks"]) gjeld summen
+// av stdout og stderr i buffera. Synkron spawn (hard_grense) les éin byte forbi grensa for
+// å oppdage overskriding → _pg_sjekk drep barnet, status "feil"/"output limit" (paritet med
+// rå-rutina). Asynkron spawn sluttar å lese når buffera er fulle (mottrykk: barnet ventar
+// på røyret) til kallaren tømer dei med "read" — ingen output går tapt.
 funksjon _pg_dren(p, felt: tekst, fdfelt: tekst) -> heiltall {
     la fd: heiltall = p[fdfelt]
-    hvis fd < 0 { returner 0 }
-    la buf: heiltall = p["buf"]
+    hvis fd < 0 eller p["grense_naadd"] { returner 0 }
+    la buf: heiltall = p["scratch"] + _PG_LESBUF()
     la maks: heiltall = p["maks"]
+    la hard = p["hard_grense"]
+    la nr_read = nsys._nr("read")
+    la eagain = 0 - nsys._errno("EAGAIN")
+    la eintr = 0 - nsys._errno("EINTR")
     mens sann {
-        la n = builtin.sys6(0, fd, buf, 4096, 0, 0, 0)
+        la rom: heiltall = maks - p["buf_n"]
+        la vil: heiltall = _PG_LESBUF_N()
+        hvis hard {
+            hvis rom + 1 < vil { vil = rom + 1 }
+        } ellers {
+            hvis rom <= 0 { returner 0 }
+            hvis rom < vil { vil = rom }
+        }
+        la n = builtin.sys6(nr_read, fd, buf, vil, 0, 0, 0)
         hvis n <= 0 {
             hvis n == 0 {                                  // EOF → lukk
-                builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+                _sys_lukk(fd)
+                p[fdfelt] = -1
+            } ellers hvis n != eagain og n != eintr {      // anna feil: fd-en er ikkje brukande
                 p[fdfelt] = -1
             }
             returner 0
         }
-        la del = ""
+        // Teikna blir samla i ei liste og slegne saman éin gong per les (byte-eksakt: chr
+        // lagar éin rå byte). Per-byte-lykkja kostar om lag 32 ns/byte i AOT (8 MiB ≈ 0,27 s mot
+        // 0,06 s i den gamle rå-rutina); oppslag i ein chr-tabell gav berre ~3 % og er ikkje med.
+        // Ein bulk-primitiv (rå buffer → tekst, som RT_STR_RAW i den gamle rå-rutina) står
+        // att til F3.6/F7.
+        la teikn: liste_tekst = []
         la i: heiltall = 0
         mens i < n {
-            del = del + builtin.chr(builtin.raw_load8(buf + i))
+            legg_til(teikn, builtin.chr(builtin.raw_load8(buf + i)))
             i = i + 1
         }
-        hvis lengde(p[felt]) + lengde(del) > maks { del = builtin.slice(del, 0, maks - lengde(p[felt])) }
-        p[felt] = p[felt] + del
+        la del = builtin.join(teikn, "")
+        la over = hard og (p["buf_n"] + n > maks)
+        hvis over {
+            la rest: heiltall = maks - p["buf_n"]
+            hvis rest < 0 { rest = 0 }
+            del = builtin.slice(del, 0, rest)
+        }
+        _pg_legg_til_del(p, felt, del)
+        p["buf_n"] = p["buf_n"] + lengde(del)
+        hvis over {
+            p["grense_naadd"] = sann
+            returner 0
+        }
     }
     returner 0
 }
 
-funksjon _pg_sov_ms(p, ms: heiltall) -> heiltall {
-    la ts: heiltall = p["scratch"] + 65536 - 16
-    builtin.raw_store64(ts, ms / 1000)
-    builtin.raw_store64(ts + 8, (ms % 1000) * 1000000)
-    returner builtin.sys6(35, ts, 0, 0, 0, 0, 0)
+funksjon _pg_lukk_stdin(p) -> heiltall {
+    hvis p["fd_inn"] >= 0 {
+        _sys_lukk(p["fd_inn"])
+        p["fd_inn"] = -1
+    }
+    returner 0
 }
 
-// waitpid(pid, WNOHANG=1). Returnerer sann når prosessen er ferdig (og set status).
+// Skriv så mykje av stdin som røyret tek no (fd-en er O_NONBLOCK), lukk når alt er skrive.
+// SIGPIPE blir blokkert rundt skrivinga: har barnet lukka stdin, gjev write EPIPE (og det
+// ventande signalet blir henta ut att) i staden for at heile forelderen døyr.
+funksjon _pg_skriv_stdin(p) -> heiltall {
+    la fd: heiltall = p["fd_inn"]
+    hvis fd < 0 { returner 0 }
+    la t: tekst = p["stdin"]
+    la total: heiltall = lengde(t)
+    hvis p["inn_pos"] >= total {
+        _pg_lukk_stdin(p)
+        returner 0
+    }
+    la buf: heiltall = p["scratch"] + _PG_INNBUF()
+    la nr_write = nsys._nr("write")
+    la eagain = 0 - nsys._errno("EAGAIN")
+    la eintr = 0 - nsys._errno("EINTR")
+    la sett: heiltall = p["scratch"] + _PG_SIGSETT()
+    la sz = nsys._layout("sigset", "storleik")
+    builtin.raw_store64(sett, 1 << (nsys._flagg("SIGPIPE") - 1))
+    builtin.raw_store64(sett + 8, 0)
+    la nr_mask = nsys._nr("rt_sigprocmask")
+    builtin.sys6(nr_mask, nsys._flagg("SIG_BLOCK"), sett, sett + 8, sz, 0, 0)
+    la ferdig = usann
+    la epipe = usann
+    mens ikkje ferdig og p["inn_pos"] < total {
+        hvis p["inn_bit_pos"] >= p["inn_bit_n"] {
+            la start: heiltall = p["inn_pos"]
+            la bit: heiltall = total - start
+            hvis bit > _PG_INNBUF_N() { bit = _PG_INNBUF_N() }
+            la k: heiltall = 0
+            mens k < bit {
+                builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(t, start + k, start + k + 1)))
+                k = k + 1
+            }
+            p["inn_bit_pos"] = 0
+            p["inn_bit_n"] = bit
+        }
+        la bp: heiltall = p["inn_bit_pos"]
+        la w = builtin.sys6(nr_write, fd, buf + bp, p["inn_bit_n"] - bp, 0, 0, 0)
+        hvis w == eagain eller w == eintr {
+            ferdig = sann                                   // røyret er fullt: neste runde
+        } ellers hvis w <= 0 {
+            epipe = w == 0 - nsys._errno("EPIPE")
+            p["inn_pos"] = total                            // barnet les ikkje meir
+        } ellers {
+            p["inn_bit_pos"] = bp + w
+            p["inn_pos"] = p["inn_pos"] + w
+        }
+    }
+    hvis epipe {
+        // Hent ut SIGPIPE-en som write genererte før maska blir sett tilbake.
+        la ts: heiltall = p["scratch"] + _PG_TS()
+        builtin.raw_store64(ts, 0)
+        builtin.raw_store64(ts + 8, 0)
+        builtin.sys6(nsys._nr("rt_sigtimedwait"), sett, 0, ts, sz, 0, 0)
+    }
+    builtin.sys6(nr_mask, nsys._flagg("SIG_SETMASK"), sett + 8, 0, sz, 0, 0)
+    hvis p["inn_pos"] >= total { _pg_lukk_stdin(p) }
+    returner 0
+}
+
+funksjon _pg_drep(p) -> heiltall {
+    returner builtin.sys6(nsys._nr("kill"), p["pid"], nsys._flagg("SIGKILL"), 0, 0, 0, 0)
+}
+
+// Éin runde: skriv ventande stdin, les tilgjengeleg output og sjå etter exit (wait4 med
+// rusage → peak_rss_bytes). Sann når prosessen er ferdig (status sett).
 funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
     hvis p["status"] != "kjorer" { returner sann }
-    _pg_dren(p, "stdout", "fd_ut")
-    _pg_dren(p, "stderr", "fd_feil")
-    la st: heiltall = p["scratch"] + 65536 - 32
+    _pg_skriv_stdin(p)
+    _pg_dren(p, "ut_delar", "fd_ut")
+    _pg_dren(p, "feil_delar", "fd_feil")
+    // Output-grense (synkron spawn): drep barnet og vent på det.
+    hvis p["grense_naadd"] og ikkje p["drept"] {
+        p["drept"] = sann
+        _pg_drep(p)
+        blokker = sann
+    }
+    la st: heiltall = p["scratch"] + _PG_WSTATUS()
     builtin.raw_store64(st, 0)
-    la flagg: heiltall = 1
+    la ru: heiltall = p["scratch"] + _PG_RUSAGE()
+    la flagg: heiltall = nsys._flagg("WNOHANG")
     hvis blokker { flagg = 0 }
-    la r = builtin.sys6(61, p["pid"], st, flagg, 0, 0, 0)
+    la r = builtin.sys6(nsys._nr("wait4"), p["pid"], st, flagg, ru, 0, 0)
     hvis r == p["pid"] {
+        p["peak_rss"] = builtin.raw_load64(ru + nsys._layout("rusage", "maxrss")) * nsys._layout("rusage", "maxrss_skala")
         la status = builtin.raw_load64(st) & 4294967295
         la sig = status & 127
-        hvis p["drept_timeout"] {
+        hvis p["grense_naadd"] {
+            p["status"] = "feil"
+            p["exit_code"] = 1
+            p["error"] = "output limit"
+        } ellers hvis p["drept_timeout"] {
             p["status"] = "timeout"
             p["exit_code"] = 124
         } ellers hvis sig == 0 {
@@ -469,62 +805,199 @@ funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
             p["status"] = "signal"
             p["exit_code"] = 128 + sig
         }
-        _pg_dren(p, "stdout", "fd_ut")
-        _pg_dren(p, "stderr", "fd_feil")
+        _pg_dren(p, "ut_delar", "fd_ut")
+        _pg_dren(p, "feil_delar", "fd_feil")
+        _pg_lukk_stdin(p)
         returner sann
     }
     // Request-timeout → SIGKILL, ventar blokkerande, status timeout
     hvis p["timeout_ms"] > 0 og builtin.now_ms() - p["start_ms"] > p["timeout_ms"] og ikkje p["drept_timeout"] {
         p["drept_timeout"] = sann
-        builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+        _pg_drep(p)
         returner _pg_sjekk(p, sann)
     }
     returner usann
 }
 
-funksjon _pg_svar(p) {
-    returner _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], p["stdout"], p["stderr"], "",
-                     builtin.now_ms() - p["start_ms"])
+// Vent til noko skjer på røyra, maks `ms`: ppoll på stdout/stderr (POLLIN, berre når det er
+// rom i buffera) og stdin (POLLOUT når det står att data å skrive). Utan opne røyr (EOF,
+// men barnet lever) blir ventinga kort, so exit blir sett raskt av neste wait4.
+funksjon _pg_vent(p, ms: heiltall) -> heiltall {
+    la base: heiltall = p["scratch"] + _PG_POLLFD()
+    la sz = nsys._layout("pollfd", "storleik")
+    la inn = nsys._flagg("POLLIN")
+    la n: heiltall = 0
+    la rom = p["hard_grense"] eller (p["buf_n"] < p["maks"])
+    hvis p["fd_ut"] >= 0 og rom { _sys_pollfd(base + n * sz, p["fd_ut"], inn) n = n + 1 }
+    hvis p["fd_feil"] >= 0 og rom { _sys_pollfd(base + n * sz, p["fd_feil"], inn) n = n + 1 }
+    hvis p["fd_inn"] >= 0 { _sys_pollfd(base + n * sz, p["fd_inn"], nsys._flagg("POLLOUT")) n = n + 1 }
+    la t: heiltall = ms
+    hvis n == 0 og t > 2 { t = 2 }
+    hvis p["timeout_ms"] > 0 {
+        la att: heiltall = p["timeout_ms"] - (builtin.now_ms() - p["start_ms"]) + 1
+        hvis att < 0 { att = 0 }
+        hvis att < t { t = att }
+    }
+    hvis t < 0 { t = 0 }
+    returner _sys_poll(base, n, t, p["scratch"] + _PG_TS())
 }
 
-funksjon _pg_spawn(req) {
+funksjon _pg_svar(p) {
+    la r = _pg_res(p["status"], p["pid"], p["handle"], p["exit_code"], _pg_tekst(p, "ut_delar"),
+                   _pg_tekst(p, "feil_delar"), p["error"], builtin.now_ms() - p["start_ms"], p["peak_rss"])
+    hvis finnes_nøkkel(p, "sandbox") og tekst(p["sandbox"]) != "" {
+        r["sandbox"] = p["sandbox"]
+        r["sandbox_backend"] = "seccomp"
+    }
+    returner r
+}
+
+// ── Sandkasse (seccomp-BPF) for spawn ───────────────────────────────────────────
+// Profilar: "" / "none" = inga avgrensing; "no-network" = socket() berre for AF_UNIX;
+// "no-write" = ingen opning for skriving/oppretting/trunkering og ingen endring av
+// katalogtreet; "restricted" = begge. Ukjende profilar blir avviste (fail-closed): eit
+// barn skal aldri køyre utan avgrensinga det bad om.
+funksjon _pg_sandbox_profil(req) -> tekst {
+    hvis ikkje finnes_nøkkel(req, "sandbox") { returner "" }
+    la p = tekst(req["sandbox"])
+    hvis p == "none" { returner "" }
+    returner p
+}
+
+funksjon _pg_sandbox_kjend(p: tekst) -> bool {
+    // «pure» = process_abi sin kombinerte ingen-nett/ingen-skriv-profil (som restricted).
+    returner p == "no-network" eller p == "no-write" eller p == "restricted" eller p == "pure"
+}
+
+// Byggjer struct sock_fprog + sock_filter[] 16-aligna frå `fri` i scratch-området.
+// Kvar instruksjon er éin u64: code | jt<<16 | jf<<24 | k<<32 (little-endian
+// sock_filter). Hoppmål -1 = avslag (EPERM). Returnerer [prog_adr, fri_etter].
+// Systemkall som ikkje finst på målet (nsys._har_nr) blir hoppa over.
+funksjon _pg_bpf(fri: heiltall, profil: tekst) -> liste_heiltall {
+    la nett = profil == "no-network" eller profil == "restricted" eller profil == "pure"
+    la skriv = profil == "no-write" eller profil == "restricted" eller profil == "pure"
+    la avslag_merke: heiltall = 0 - 1
+    la ld: heiltall = nsys._flagg("BPF_LD_W_ABS")
+    la jeq: heiltall = nsys._flagg("BPF_JEQ_K")
+    la jset: heiltall = nsys._flagg("BPF_JSET_K")
+    la ret: heiltall = nsys._flagg("BPF_RET_K")
+    la eperm: heiltall = nsys._flagg("SECCOMP_RET_ERRNO") | nsys._errno("EPERM")
+    la off_nr: heiltall = nsys._layout("seccomp_data", "nr")
+    la off_args: heiltall = nsys._layout("seccomp_data", "args")
+    la ins = []
+    legg_til(ins, [ld, 0, 0, nsys._layout("seccomp_data", "arch")])   // ld [arch]
+    legg_til(ins, [jeq, 1, 0, nsys._flagg("AUDIT_ARCH")])             // jeq AUDIT_ARCH → forbi kill
+    legg_til(ins, [ret, 0, 0, nsys._flagg("SECCOMP_RET_KILL_PROCESS")]) // anna ABI
+    legg_til(ins, [ld, 0, 0, off_nr])                                 // ld [nr]
+    hvis nett {
+        legg_til(ins, [jeq, 0, 4, nsys._nr("socket")])                // jeq socket, elles forbi blokka
+        legg_til(ins, [ld, 0, 0, off_args])                           // ld [args0] (domene)
+        legg_til(ins, [jeq, 1, 0, nsys._flagg("AF_UNIX")])            // AF_UNIX → lokal IPC er lov
+        legg_til(ins, [ret, 0, 0, eperm])                             // ret ERRNO(EPERM)
+        legg_til(ins, [ld, 0, 0, off_nr])                             // ld [nr] att
+    }
+    hvis skriv {
+        la skrivflagg: heiltall = nsys._flagg("O_WRONLY") | nsys._flagg("O_RDWR") | nsys._flagg("O_CREAT") | nsys._flagg("O_TRUNC")
+        hvis nsys._har_nr("open") {
+            legg_til(ins, [jeq, 0, 3, nsys._nr("open")])              // jeq open, elles forbi
+            legg_til(ins, [ld, 0, 0, off_args + 8])                   // ld [args1] (flagg)
+            legg_til(ins, [jset, avslag_merke, 0, skrivflagg])        // jset skriveflagg → avslag
+            legg_til(ins, [ld, 0, 0, off_nr])                         // ld [nr] att
+        }
+        legg_til(ins, [jeq, 0, 3, nsys._nr("openat")])                // jeq openat, elles forbi
+        legg_til(ins, [ld, 0, 0, off_args + 16])                      // ld [args2] (flagg)
+        legg_til(ins, [jset, avslag_merke, 0, skrivflagg])            // jset skriveflagg → avslag
+        legg_til(ins, [ld, 0, 0, off_nr])                             // ld [nr] att
+        la nekta = ["creat", "openat2", "unlink", "unlinkat", "rename", "renameat", "renameat2",
+                    "mkdir", "mkdirat", "rmdir", "truncate", "link", "linkat", "symlink",
+                    "symlinkat", "chmod", "fchmodat", "utimensat", "mknod", "mknodat"]
+        la ni: heiltall = 0
+        mens ni < lengde(nekta) {
+            hvis nsys._har_nr(nekta[ni]) { legg_til(ins, [jeq, avslag_merke, 0, nsys._nr(nekta[ni])]) }
+            ni = ni + 1
+        }
+    }
+    legg_til(ins, [ret, 0, 0, nsys._flagg("SECCOMP_RET_ALLOW")])      // ret ALLOW
+    la avslag: heiltall = lengde(ins)
+    legg_til(ins, [ret, 0, 0, eperm])                                 // avslag: ret ERRNO(EPERM)
+    la prog: heiltall = (fri + 15) & (0 - 16)
+    la filt: heiltall = prog + nsys._layout("sock_fprog", "storleik")
+    la i: heiltall = 0
+    mens i < lengde(ins) {
+        la jt: heiltall = ins[i][1]
+        la jf: heiltall = ins[i][2]
+        hvis jt < 0 { jt = avslag - (i + 1) }
+        hvis jf < 0 { jf = avslag - (i + 1) }
+        la k: heiltall = ins[i][3]
+        builtin.raw_store64(filt + i * 8, ins[i][0] + (jt << 16) + (jf << 24) + ((k & 4294967295) << 32))
+        i = i + 1
+    }
+    builtin.raw_store64(prog + nsys._layout("sock_fprog", "len"), lengde(ins))
+    builtin.raw_store64(prog + nsys._layout("sock_fprog", "filter"), filt)
+    returner [prog, filt + lengde(ins) * 8]
+}
+
+// Startar barnet. synkron = process_spawn_argv (standard timeout 5000 ms og output-grense
+// 4096 B når request-en har 0, grensa klemt til 64 MiB, overskriding → "output limit");
+// asynkron = process_operation spawn_argv (0 = ingen timeout, 1 MiB buffer med mottrykk).
+funksjon _pg_spawn(req, synkron: boolsk) {
     la executable = tekst(req["executable"])
-    hvis executable == "" { returner _pg_feil("tom executable") }
+    // Synkron spawn: tom executable går vidare til execve("") → ENOENT → barnet sluttar med
+    // 127, altså same form som ein executable som ikkje finst (paritet med rå-rutina).
+    hvis executable == "" og ikkje synkron { returner _pg_feil("tom executable") }
+    la profil = _pg_sandbox_profil(req)
+    hvis profil != "" og ikkje _pg_sandbox_kjend(profil) { returner _pg_feil("ukjent sandbox-profil: " + profil) }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
-    la scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+    la scratch = _sys_mmap_rw(_PG_SCRATCH())
     hvis scratch <= 0 { returner _pg_feil("mmap feila") }
+    la str_slutt: heiltall = scratch + _PG_STR_SLUTT() - 64
     // C-strengar: executable, args, cwd, miljø-overstyringar
     la fri: heiltall = scratch
+    la plass_ok = fri + lengde(executable) + 1 <= str_slutt
     la exe_adr = fri
-    fri = _pg_cstr(fri, executable)
+    hvis plass_ok { fri = _pg_cstr(fri, executable) }
     la argv_adr: heiltall = 0
     la arg_adr: liste_heiltall = []
     legg_til(arg_adr, exe_adr)
     la ai: heiltall = 0
-    mens ai < lengde(args) {
-        legg_til(arg_adr, fri)
-        fri = _pg_cstr(fri, tekst(args[ai]))
+    mens ai < lengde(args) og plass_ok {
+        la a = tekst(args[ai])
+        hvis fri + lengde(a) + 1 > str_slutt { plass_ok = usann } ellers {
+            legg_til(arg_adr, fri)
+            fri = _pg_cstr(fri, a)
+        }
         ai = ai + 1
     }
     la cwd_adr: heiltall = 0
     la cwd = ""
     hvis finnes_nøkkel(req, "cwd") { cwd = tekst(req["cwd"]) }
-    hvis cwd != "" { cwd_adr = fri fri = _pg_cstr(fri, cwd) }
-    // envp: eigne overstyringar fyrst, så prosessen sitt envp ([HEAP+8] = 0x600008)
+    hvis cwd != "" og plass_ok {
+        hvis fri + lengde(cwd) + 1 > str_slutt { plass_ok = usann } ellers { cwd_adr = fri fri = _pg_cstr(fri, cwd) }
+    }
+    // envp: eigne overstyringar fyrst, så prosessen sitt envp (builtin.native_envp(): den
+    // native codegenen veit kvar oppstarten la envp; F3.3 — inga hardkoda VA her).
     la miljø = {}
     hvis finnes_nøkkel(req, "environment") og builtin.type(req["environment"]) == "ordbok" { miljø = req["environment"] }
     la env_adr: liste_heiltall = []
     la mk = nøkler(miljø)
     la mi: heiltall = 0
-    mens mi < lengde(mk) {
-        legg_til(env_adr, fri)
-        fri = _pg_cstr(fri, tekst(mk[mi]) + "=" + tekst(miljø[mk[mi]]))
+    mens mi < lengde(mk) og plass_ok {
+        la kv = tekst(mk[mi]) + "=" + tekst(miljø[mk[mi]])
+        hvis fri + lengde(kv) + 1 > str_slutt { plass_ok = usann } ellers {
+            legg_til(env_adr, fri)
+            fri = _pg_cstr(fri, kv)
+        }
         mi = mi + 1
     }
     la arv = sann
     hvis finnes_nøkkel(req, "inherit_env") og tekst(req["inherit_env"]) == "0" { arv = usann }
-    la envp0 = builtin.raw_load64(6291464)
+    // Eit sandkassa barn utan arva miljø får ein minimal, fast PATH (ikkje forelderens).
+    hvis profil != "" og ikkje arv og ikkje finnes_nøkkel(miljø, "PATH") og plass_ok {
+        legg_til(env_adr, fri)
+        fri = _pg_cstr(fri, "PATH=/usr/bin:/bin")
+    }
+    la envp0 = builtin.native_envp()
     hvis arv og envp0 != 0 {
         la ei: heiltall = 0
         mens builtin.raw_load64(envp0 + ei * 8) != 0 og ei < 4096 {
@@ -534,6 +1007,10 @@ funksjon _pg_spawn(req) {
     }
     // peikartabellar (8-aligna)
     fri = (fri + 15) & (0 - 16)
+    hvis ikkje plass_ok eller fri + (lengde(arg_adr) + lengde(env_adr) + 2) * 8 > str_slutt {
+        _sys_munmap(scratch, _PG_SCRATCH())
+        returner _pg_feil("for stor request")
+    }
     argv_adr = fri
     la pi: heiltall = 0
     mens pi < lengde(arg_adr) { builtin.raw_store64(fri, arg_adr[pi]) fri = fri + 8 pi = pi + 1 }
@@ -544,16 +1021,32 @@ funksjon _pg_spawn(req) {
     mens pi < lengde(env_adr) { builtin.raw_store64(fri, env_adr[pi]) fri = fri + 8 pi = pi + 1 }
     builtin.raw_store64(fri, 0)
     fri = fri + 8
-    hvis fri > scratch + 65536 - 4096 - 64 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("for stor request") }
-    // røyr: [0]=inn(les,skriv) [1]=ut [2]=feil — kvart pipe2 skriv to 32-bit fd-ar
-    la pipes: heiltall = scratch + 65536 - 64
+    // Seccomp-filteret blir bygt i forelderen, so barnet berre treng to syscallar.
+    la bpf_prog: heiltall = 0
+    hvis profil != "" {
+        la bpf = _pg_bpf(fri, profil)
+        bpf_prog = bpf[0]
+        fri = bpf[1]
+        hvis fri > str_slutt { _sys_munmap(scratch, _PG_SCRATCH()) returner _pg_feil("for stor request") }
+    }
+    // røyr: [0]=inn(les,skriv) [1]=ut [2]=feil — kvart pipe2 skriv to 32-bit fd-ar.
+    // O_CLOEXEC på røyr-fd-ane: elles lek dei gjennom nøsta execve (fork→exec-barn arvar
+    // forelderens forelder sine røyr-endar utan CLOEXEC), så eit barnebarn held ein
+    // skrive-ende open → forelderens les får aldri EOF → nøsta CI-orkestrering heng.
+    la pipes: heiltall = scratch + _PG_ROYR()
+    la nr_pipe2 = nsys._nr("pipe2")
     la pi2: heiltall = 0
     mens pi2 < 3 {
-        // O_CLOEXEC (0x80000) på røyr-fd-ane: elles lek dei gjennom nøsta execve
-        // (fork→exec-barn arvar forelderens forelder sine røyr-endar utan CLOEXEC),
-        // så eit barnebarn held ein skrive-ende open → forelderens les får aldri EOF
-        // → nøsta CI-orkestrering heng (timeout 124) med foreldrelause prosessar.
-        hvis builtin.sys6(293, pipes + pi2 * 8, 524288, 0, 0, 0, 0) != 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("pipe2 feila") }
+        hvis builtin.sys6(nr_pipe2, pipes + pi2 * 8, nsys._flagg("O_CLOEXEC"), 0, 0, 0, 0) != 0 {
+            la lk: heiltall = 0
+            mens lk < pi2 {
+                _sys_lukk(builtin.raw_load64(pipes + lk * 8) & 4294967295)
+                _sys_lukk((builtin.raw_load64(pipes + lk * 8) >> 32) & 4294967295)
+                lk = lk + 1
+            }
+            _sys_munmap(scratch, _PG_SCRATCH())
+            returner _pg_feil("pipe2 feila")
+        }
         pi2 = pi2 + 1
     }
     la inn_r = builtin.raw_load64(pipes) & 4294967295
@@ -562,59 +1055,87 @@ funksjon _pg_spawn(req) {
     la ut_w = (builtin.raw_load64(pipes + 8) >> 32) & 4294967295
     la feil_r = builtin.raw_load64(pipes + 16) & 4294967295
     la feil_w = (builtin.raw_load64(pipes + 16) >> 32) & 4294967295
-    la pid = builtin.sys6(57, 0, 0, 0, 0, 0, 0)          // fork
+    // Alle nummer barnet treng blir slått opp FØR fork: barnet gjer berre rå syscallar.
+    la nr_dup2 = nsys._nr_kompat("dup2")         // arm64: dup3(a, b, 0)
+    la nr_close = nsys._nr("close")
+    la nr_chdir = nsys._nr("chdir")
+    la nr_prctl = nsys._nr("prctl")
+    la nr_seccomp = nsys._nr("seccomp")
+    la nr_execve = nsys._nr("execve")
+    la nr_exit = nsys._nr("exit")
+    la no_new_privs = nsys._flagg("PR_SET_NO_NEW_PRIVS")
+    la sm_filter = nsys._flagg("SECCOMP_SET_MODE_FILTER")
+    la pid = builtin.sys6(nsys._nr_kompat("fork"), nsys._flagg("FORK_A1"), 0, 0, 0, 0, 0)   // arm64: clone(SIGCHLD, 0, 0, 0, 0)
     hvis pid == 0 {
         // BARN: koplar røyr, chdir, execve; aldri tilbake til Norscode-koden.
-        builtin.sys6(33, inn_r, 0, 0, 0, 0, 0)
-        builtin.sys6(33, ut_w, 1, 0, 0, 0, 0)
-        builtin.sys6(33, feil_w, 2, 0, 0, 0, 0)
-        builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
-        builtin.sys6(3, ut_r, 0, 0, 0, 0, 0)
-        builtin.sys6(3, feil_r, 0, 0, 0, 0, 0)
-        hvis cwd_adr != 0 { builtin.sys6(80, cwd_adr, 0, 0, 0, 0, 0) }
-        builtin.sys6(59, exe_adr, argv_adr, envp_adr, 0, 0, 0)
-        builtin.sys6(60, 127, 0, 0, 0, 0, 0)
+        builtin.sys6(nr_dup2, inn_r, 0, 0, 0, 0, 0)
+        builtin.sys6(nr_dup2, ut_w, 1, 0, 0, 0, 0)
+        builtin.sys6(nr_dup2, feil_w, 2, 0, 0, 0, 0)
+        builtin.sys6(nr_close, inn_w, 0, 0, 0, 0, 0)
+        builtin.sys6(nr_close, ut_r, 0, 0, 0, 0, 0)
+        builtin.sys6(nr_close, feil_r, 0, 0, 0, 0, 0)
+        hvis cwd_adr != 0 { builtin.sys6(nr_chdir, cwd_adr, 0, 0, 0, 0, 0) }
+        hvis bpf_prog != 0 {
+            // prctl(PR_SET_NO_NEW_PRIVS) + seccomp(SET_MODE_FILTER). Feilar det, skal
+            // barnet døy (126) i staden for å køyre utan den avgrensinga det bad om.
+            builtin.sys6(nr_prctl, no_new_privs, 1, 0, 0, 0, 0)
+            hvis builtin.sys6(nr_seccomp, sm_filter, 0, bpf_prog, 0, 0, 0) != 0 { builtin.sys6(nr_exit, 126, 0, 0, 0, 0, 0) }
+        }
+        builtin.sys6(nr_execve, exe_adr, argv_adr, envp_adr, 0, 0, 0)
+        builtin.sys6(nr_exit, 127, 0, 0, 0, 0, 0)
         returner _pg_feil("execve feila")
     }
-    hvis pid < 0 { builtin.sys6(11, scratch, 65536, 0, 0, 0, 0) returner _pg_feil("fork feila") }
-    builtin.sys6(3, inn_r, 0, 0, 0, 0, 0)
-    builtin.sys6(3, ut_w, 0, 0, 0, 0, 0)
-    builtin.sys6(3, feil_w, 0, 0, 0, 0, 0)
-    // stdin: skriv heile teksten (små mengder; røyrbuffer 64 KiB) og lukk
+    hvis pid < 0 {
+        _sys_lukk(inn_r) _sys_lukk(inn_w) _sys_lukk(ut_r) _sys_lukk(ut_w) _sys_lukk(feil_r) _sys_lukk(feil_w)
+        _sys_munmap(scratch, _PG_SCRATCH())
+        returner _pg_feil("fork feila")
+    }
+    _sys_lukk(inn_r)
+    _sys_lukk(ut_w)
+    _sys_lukk(feil_w)
     la stdin_t = ""
     hvis finnes_nøkkel(req, "stdin") { stdin_t = tekst(req["stdin"]) }
-    hvis stdin_t != "" {
-        la sb: heiltall = scratch + 65536 - 4096 - 64
-        la skrive: heiltall = 0
-        mens skrive < lengde(stdin_t) {
-            la bit = lengde(stdin_t) - skrive
-            hvis bit > 4000 { bit = 4000 }
-            la k: heiltall = 0
-            mens k < bit { builtin.raw_store8(sb + k, builtin.char_code(builtin.slice(stdin_t, skrive + k, skrive + k + 1))) k = k + 1 }
-            la w = builtin.sys6(1, inn_w, sb, bit, 0, 0, 0)
-            hvis w <= 0 { skrive = lengde(stdin_t) } ellers { skrive = skrive + w }
-        }
-    }
-    builtin.sys6(3, inn_w, 0, 0, 0, 0, 0)
+    _pg_nonblock(inn_w)
     _pg_nonblock(ut_r)
     _pg_nonblock(feil_r)
     la timeout_ms: heiltall = 0
     hvis finnes_nøkkel(req, "timeout_ms") { timeout_ms = heltall_fra_tekst(tekst(req["timeout_ms"])) }
-    la maks: heiltall = 1048576
+    la maks: heiltall = 0
     hvis finnes_nøkkel(req, "max_output_bytes") { maks = heltall_fra_tekst(tekst(req["max_output_bytes"])) }
-    hvis maks <= 0 { maks = 1048576 }
+    hvis synkron {
+        hvis timeout_ms <= 0 { timeout_ms = 5000 }
+        hvis maks <= 0 { maks = 4096 }
+        hvis maks > 67108864 { maks = 67108864 }
+    } ellers {
+        hvis maks <= 0 { maks = 1048576 }
+    }
     la handle = "np-" + tekst_fra_heltall(pid) + "-" + tekst_fra_heltall(builtin.now_ms())
-    la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "stdout": "", "stderr": "",
-            "fd_ut": ut_r, "fd_feil": feil_r, "scratch": scratch, "buf": scratch + 65536 - 4096 - 64,
-            "maks": maks, "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann}
+    la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "error": "",
+            "ut_delar": [], "feil_delar": [], "buf_n": 0, "peak_rss": 0,
+            "fd_ut": ut_r, "fd_feil": feil_r, "fd_inn": inn_w, "stdin": stdin_t,
+            "inn_pos": 0, "inn_bit_pos": 0, "inn_bit_n": 0, "scratch": scratch,
+            "maks": maks, "hard_grense": synkron, "grense_naadd": usann, "drept": usann,
+            "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann,
+            "sandbox": profil}
+    _pg_skriv_stdin(p)
     _pg_prosessar[handle] = p
     returner _pg_svar(p)
+}
+
+// Frigjer fd-ar og scratch for ein ferdig (eller drepen) prosess og fjernar handle-en.
+funksjon _pg_frigjer(p, handle: tekst) -> heiltall {
+    _pg_lukk_stdin(p)
+    hvis p["fd_ut"] >= 0 { _sys_lukk(p["fd_ut"]) p["fd_ut"] = -1 }
+    hvis p["fd_feil"] >= 0 { _sys_lukk(p["fd_feil"]) p["fd_feil"] = -1 }
+    _sys_munmap(p["scratch"], _PG_SCRATCH())
+    fjern_nokkel(_pg_prosessar, handle)
+    returner 0
 }
 
 funksjon process_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _pg_feil("ugyldig request") }
     la op = tekst(req["operation"])
-    hvis op == "spawn_argv" { returner _pg_spawn(req) }
+    hvis op == "spawn_argv" { returner _pg_spawn(req, usann) }
     la handle = tekst(req["handle"])
     hvis ikkje finnes_nøkkel(_pg_prosessar, handle) { returner _pg_feil("ukjent handle: " + handle) }
     la p = _pg_prosessar[handle]
@@ -623,11 +1144,13 @@ funksjon process_operation(req) {
         returner _pg_svar(p)
     }
     hvis op == "read" {
-        _pg_dren(p, "stdout", "fd_ut")
-        _pg_dren(p, "stderr", "fd_feil")
+        _pg_skriv_stdin(p)
+        _pg_dren(p, "ut_delar", "fd_ut")
+        _pg_dren(p, "feil_delar", "fd_feil")
         la r = _pg_svar(p)
-        p["stdout"] = ""
-        p["stderr"] = ""
+        p["ut_delar"] = []
+        p["feil_delar"] = []
+        p["buf_n"] = 0
         returner r
     }
     hvis op == "wait" {
@@ -635,41 +1158,72 @@ funksjon process_operation(req) {
         hvis finnes_nøkkel(req, "wait_ms") { wait_ms = heltall_fra_tekst(tekst(req["wait_ms"])) }
         la frist = builtin.now_ms() + wait_ms
         mens ikkje _pg_sjekk(p, usann) {
-            hvis builtin.now_ms() >= frist { returner _pg_svar(p) }
-            _pg_sov_ms(p, 10)
+            la att = frist - builtin.now_ms()
+            hvis att <= 0 { returner _pg_svar(p) }
+            hvis att > 10 { att = 10 }
+            _pg_vent(p, att)
         }
         returner _pg_svar(p)
     }
     hvis op == "signal" {
-        la sig: heiltall = 15
+        la sig: heiltall = nsys._flagg("SIGTERM")
         hvis finnes_nøkkel(req, "signal") { sig = heltall_fra_tekst(tekst(req["signal"])) }
-        hvis p["status"] == "kjorer" { builtin.sys6(62, p["pid"], sig, 0, 0, 0, 0) }
+        hvis p["status"] == "kjorer" { builtin.sys6(nsys._nr("kill"), p["pid"], sig, 0, 0, 0, 0) }
         returner _pg_svar(p)
     }
     hvis op == "close" {
         hvis p["status"] == "kjorer" {
-            builtin.sys6(62, p["pid"], 9, 0, 0, 0, 0)
+            _pg_drep(p)
             _pg_sjekk(p, sann)
         }
-        hvis p["fd_ut"] >= 0 { builtin.sys6(3, p["fd_ut"], 0, 0, 0, 0, 0) p["fd_ut"] = -1 }
-        hvis p["fd_feil"] >= 0 { builtin.sys6(3, p["fd_feil"], 0, 0, 0, 0, 0) p["fd_feil"] = -1 }
         la r = _pg_svar(p)
-        builtin.sys6(11, p["scratch"], 65536, 0, 0, 0, 0)
-        fjern_nokkel(_pg_prosessar, handle)
+        _pg_frigjer(p, handle)
         returner r
     }
     returner _pg_feil("ukjent operasjon: " + op)
 }
 
+// Feil før barnet kom i gang (ugyldig request, sandkasseprofil, mmap/pipe2/fork, for stor
+// request): same form som den tidlegare rå spawn-rutina — status "feil", exit_code 127,
+// error "process spawn failed", ingen handle. Den norske detaljen står i error_detail.
+funksjon _pg_synkron_feil(detalj: tekst) {
+    la r = _pg_res("feil", -1, "", 127, "", "", "process spawn failed", 0, 0)
+    r["abi"] = "norscode-process-spawn-v1"
+    r["error_detail"] = detalj
+    fjern_nokkel(r, "handle")
+    returner r
+}
+
+// process_spawn_argv_gap(req): synkron spawn («norscode-process-spawn-v1»). Codegen rutar
+// ALLE builtin.process_spawn_argv-kall hit (kompileringsfeil utan std.native_gap i bunten).
+// Same Norscode-motor som den asynkrone ABI-en, med blokkerande venting på ppoll og
+// seccomp-sandkasse i barnet når request-en ber om ein profil.
+funksjon process_spawn_argv_gap(req) {
+    hvis builtin.type(req) != "ordbok" { returner _pg_synkron_feil("ugyldig request") }
+    la r = _pg_spawn(req, sann)
+    hvis r["status"] == "feil" { returner _pg_synkron_feil(tekst(r["error"])) }
+    la handle = tekst(r["handle"])
+    la p = _pg_prosessar[handle]
+    mens ikkje _pg_sjekk(p, usann) { _pg_vent(p, 10) }
+    la svar = _pg_svar(p)
+    _pg_frigjer(p, handle)
+    // Synkron spawn: resultatet skal validerast som norscode-process-spawn-v1
+    // (process_abi.versjon()), ikkje den asynkrone norscode-native-process-v1 som
+    // _pg_svar stemplar. Handle-en er intern og blir ikkje eksponert.
+    svar["abi"] = "norscode-process-spawn-v1"
+    fjern_nokkel(svar, "handle")
+    returner svar
+}
+
 // ── builtin.socket_* (AF_INET TCP/UDP) i REIN Norscode over builtin.sys6 ─────────
-// socket(41)/connect(42)/bind(49)/listen(50)/accept(43)/sendto(44, MSG_NOSIGNAL)/
-// read(0)/close(3)/setsockopt(54). Vert: "" | "0.0.0.0" | "localhost" | a.b.c.d
+// socket/connect/bind/listen/accept/sendto (MSG_NOSIGNAL)/read/close/setsockopt
+// (nummer frå std.native_sys). Vert: "" | "0.0.0.0" | "localhost" | a.b.c.d
 // (DNS er ikkje med enno → kast). Feil = negativ retur → kast (std.socket fangar).
 la _sk_scratch = 0
 
 funksjon _sk_buf() -> heiltall {
     hvis _sk_scratch == 0 {
-        _sk_scratch = builtin.sys6(9, 0, 65536, 3, 34, -1, 0)
+        _sk_scratch = _sys_mmap_rw(65536)
         hvis _sk_scratch <= 0 { _sk_scratch = 0 kast "socket: mmap feila" }
     }
     returner _sk_scratch
@@ -693,23 +1247,29 @@ funksjon _sk_ip(vert: tekst) -> liste_heiltall {
     returner ut
 }
 
-// sockaddr_in (16 byte) på adr: sin_family=2 (LE), sin_port (BE), sin_addr, 8 null-byte.
+// sockaddr_in på adr (layout frå native_sys): familie AF_INET, port (BE), IPv4-adresse,
+// resten null. «len» finst berre på BSD-mål (-1 = ikkje med). Returnerer storleiken.
 funksjon _sk_sockaddr(adr: heiltall, vert: tekst, port: heiltall) -> heiltall {
     la ip = _sk_ip(vert)
-    builtin.raw_store8(adr, 2)
-    builtin.raw_store8(adr + 1, 0)
-    builtin.raw_store8(adr + 2, (port >> 8) & 255)
-    builtin.raw_store8(adr + 3, port & 255)
-    builtin.raw_store8(adr + 4, ip[0])
-    builtin.raw_store8(adr + 5, ip[1])
-    builtin.raw_store8(adr + 6, ip[2])
-    builtin.raw_store8(adr + 7, ip[3])
-    builtin.raw_store64(adr + 8, 0)
-    returner 16
+    la n: heiltall = nsys._layout("sockaddr_in", "storleik")
+    la i: heiltall = 0
+    mens i < n { builtin.raw_store8(adr + i, 0) i = i + 1 }
+    la lo: heiltall = nsys._layout("sockaddr_in", "len")
+    hvis lo >= 0 { builtin.raw_store8(adr + lo, n) }
+    builtin.raw_store8(adr + nsys._layout("sockaddr_in", "family"), nsys._flagg("AF_INET"))
+    la po: heiltall = nsys._layout("sockaddr_in", "port")
+    builtin.raw_store8(adr + po, (port >> 8) & 255)
+    builtin.raw_store8(adr + po + 1, port & 255)
+    la ao: heiltall = nsys._layout("sockaddr_in", "addr")
+    builtin.raw_store8(adr + ao, ip[0])
+    builtin.raw_store8(adr + ao + 1, ip[1])
+    builtin.raw_store8(adr + ao + 2, ip[2])
+    builtin.raw_store8(adr + ao + 3, ip[3])
+    returner n
 }
 
 funksjon socket_new(af: heiltall, type: heiltall) -> heiltall {
-    la fd = builtin.sys6(41, af, type, 0, 0, 0, 0)
+    la fd = builtin.sys6(nsys._nr("socket"), af, type, 0, 0, 0, 0)
     hvis fd < 0 { kast "socket_new feila: " + tekst_fra_heltall(fd) }
     returner fd
 }
@@ -717,25 +1277,25 @@ funksjon socket_new(af: heiltall, type: heiltall) -> heiltall {
 funksjon socket_connect(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
     la b = _sk_buf()
     _sk_sockaddr(b, vert, port)
-    returner builtin.sys6(42, fd, b, 16, 0, 0, 0)
+    returner builtin.sys6(nsys._nr("connect"), fd, b, nsys._layout("sockaddr_in", "storleik"), 0, 0, 0)
 }
 
 funksjon socket_bind(fd: heiltall, vert: tekst, port: heiltall) -> heiltall {
     la b = _sk_buf()
     builtin.raw_store64(b + 64, 1)
-    builtin.sys6(54, fd, 1, 2, b + 64, 4, 0)      // SO_REUSEADDR
+    builtin.sys6(nsys._nr("setsockopt"), fd, nsys._flagg("SOL_SOCKET"), nsys._flagg("SO_REUSEADDR"), b + 64, 4, 0)
     _sk_sockaddr(b, vert, port)
-    returner builtin.sys6(49, fd, b, 16, 0, 0, 0)
+    returner builtin.sys6(nsys._nr("bind"), fd, b, nsys._layout("sockaddr_in", "storleik"), 0, 0, 0)
 }
 
 funksjon socket_listen(fd: heiltall, etterslep: heiltall) -> heiltall {
-    returner builtin.sys6(50, fd, etterslep, 0, 0, 0, 0)
+    returner builtin.sys6(nsys._nr("listen"), fd, etterslep, 0, 0, 0, 0)
 }
 
 funksjon socket_accept(fd: heiltall) -> heiltall {
     la b = _sk_buf()
     builtin.raw_store64(b + 96, 16)
-    la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
+    la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
     hvis ny < 0 { kast "socket_accept feila: " + tekst_fra_heltall(ny) }
     returner ny
 }
@@ -749,7 +1309,7 @@ funksjon _sk_send_liste(fd: heiltall, data: liste_heiltall) -> heiltall {
         hvis bit > 32768 { bit = 32768 }
         la k: heiltall = 0
         mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
-        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)   // MSG_NOSIGNAL
+        la w = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), 0, 0)   // MSG_NOSIGNAL
         hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
         hvis w == 0 { returner sendt }
         sendt = sendt + w
@@ -766,7 +1326,7 @@ funksjon socket_send(fd: heiltall, data: tekst) -> heiltall {
         hvis bit > 32768 { bit = 32768 }
         la k: heiltall = 0
         mens k < bit { builtin.raw_store8(buf + k, builtin.char_code(builtin.slice(data, sendt + k, sendt + k + 1))) k = k + 1 }
-        la w = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+        la w = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), 0, 0)
         hvis w < 0 { kast "socket_send feila: " + tekst_fra_heltall(w) }
         hvis w == 0 { returner sendt }
         sendt = sendt + w
@@ -785,8 +1345,8 @@ funksjon _sk_recv_liste(fd: heiltall, maks: heiltall) -> liste_heiltall {
     la n_maks = maks
     hvis n_maks > 32768 { n_maks = 32768 }
     hvis n_maks <= 0 { returner [] }
-    la n = builtin.sys6(0, fd, buf, n_maks, 0, 0, 0)
-    hvis n == -11 { returner [] }                      // EAGAIN (timeout)
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, n_maks, 0, 0, 0)
+    hvis n == 0 - nsys._errno("EAGAIN") { returner [] }  // timeout
     hvis n < 0 { kast "socket_recv feila: " + tekst_fra_heltall(n) }
     la ut: liste_heiltall = []
     la i: heiltall = 0
@@ -807,17 +1367,20 @@ funksjon socket_recv_bytes(fd: heiltall, maks: heiltall) -> liste_heiltall {
 }
 
 funksjon socket_close(fd: heiltall) -> heiltall {
-    returner builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+    returner _sys_lukk(fd)
 }
 
 funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
     la b = _sk_buf()
     la tv: heiltall = b + 128
     hvis ms < 0 { ms = 0 }
-    builtin.raw_store64(tv, ms / 1000)
-    builtin.raw_store64(tv + 8, (ms % 1000) * 1000)
-    la r1 = builtin.sys6(54, fd, 1, 20, tv, 16, 0)    // SO_RCVTIMEO
-    la r2 = builtin.sys6(54, fd, 1, 21, tv, 16, 0)    // SO_SNDTIMEO
+    builtin.raw_store64(tv + nsys._layout("timeval", "sec"), ms / 1000)
+    builtin.raw_store64(tv + nsys._layout("timeval", "usec"), (ms % 1000) * 1000)
+    la tvn: heiltall = nsys._layout("timeval", "storleik")
+    la nr_sso = nsys._nr("setsockopt")
+    la sol = nsys._flagg("SOL_SOCKET")
+    la r1 = builtin.sys6(nr_sso, fd, sol, nsys._flagg("SO_RCVTIMEO"), tv, tvn, 0)
+    la r2 = builtin.sys6(nr_sso, fd, sol, nsys._flagg("SO_SNDTIMEO"), tv, tvn, 0)
     hvis r1 < 0 { returner r1 }
     returner r2
 }
@@ -829,10 +1392,18 @@ funksjon socket_settimeout(fd: heiltall, ms: heiltall) -> heiltall {
 // tls_* → «feil» (ingen TLS-backend enno). Handle: "socket:<n>:1".
 la _nw_slots = {}
 la _nw_neste = 0
+la _tls_sess = {}   // handle → {fd, sess, rolle, ch_sendt, etablert, appbuf}
+// Éin epoll-instans per prosess (EPOLL_CLOEXEC, so barn via exec ikkje arvar han).
+la _nw_epoll = 0 - 1
+
+funksjon _nw_epoll_fd() -> heiltall {
+    hvis _nw_epoll < 0 { _nw_epoll = builtin.sys6(nsys._nr("epoll_create1"), nsys._flagg("EPOLL_CLOEXEC"), 0, 0, 0, 0, 0) }
+    returner _nw_epoll
+}
 
 funksjon _nw_res(status: tekst, handle: tekst, data: tekst, verdi: heiltall, port: heiltall, error: tekst) {
     returner {"abi": "norscode-native-network-v1", "status": status, "handle": handle, "data": data,
-              "value": verdi, "port": port, "error": error, "event_backend": "poll",
+              "value": verdi, "port": port, "error": error, "event_backend": "epoll",
               "tls_version": "", "cipher": "", "peer_verified": usann, "peer_cert_present": usann,
               "peer_subject": "", "ocsp_stapled": usann, "ocsp_status": ""}
 }
@@ -862,9 +1433,10 @@ funksjon _nw_tekst(req, felt: tekst, standard: tekst) -> tekst {
 
 funksjon _nw_lokal_port(fd: heiltall) -> heiltall {
     la b = _sk_buf()
-    builtin.raw_store64(b + 160, 16)
-    hvis builtin.sys6(51, fd, b + 176, b + 160, 0, 0, 0) != 0 { returner 0 }
-    returner (builtin.raw_load8(b + 178) << 8) | builtin.raw_load8(b + 179)
+    builtin.raw_store64(b + 160, nsys._layout("sockaddr_in", "storleik"))
+    hvis builtin.sys6(nsys._nr("getsockname"), fd, b + 176, b + 160, 0, 0, 0) != 0 { returner 0 }
+    la po: heiltall = b + 176 + nsys._layout("sockaddr_in", "port")
+    returner (builtin.raw_load8(po) << 8) | builtin.raw_load8(po + 1)
 }
 
 funksjon _nw_hex_kod(l: liste_heiltall) -> tekst {
@@ -906,31 +1478,97 @@ funksjon _nw_tekst_til_liste(t: tekst) -> liste_heiltall {
     returner ut
 }
 
+# acme_sign(alg, privat_nøkkel_pem, signing_input) → hex-signatur.
+# JWS-signering for ACME (tls_acme.jws_request_*). Fersk seed hadde builtin.acme_sign
+# i C-verten; her rein Norscode. RS256 = RSASSA-PKCS1-v1_5-SHA256 (rsa.rsa_sign +
+# x509.rsa_privat_frå_pem). Tom streng ved feil (tls_acme tolkar det som «signatur manglar»).
+funksjon acme_sign(alg: tekst, privat_nokkel_pem: tekst, signing_input: tekst) -> tekst {
+    hvis alg == "RS256" {
+        # Privat RSA-modexp går via std.bigint.modexp → native Montgomery-atom
+        # (builtin.bn_modexp_bytes, ms) med CRT når nøkkelen har p/q/dP/dQ/qInv;
+        # utan atomet rein bigint (korrekt, men sekund per signering).
+        la key = x509.rsa_privat_frå_pem(privat_nokkel_pem)
+        hvis key["status"] != "ok" { returner "" }
+        la sig = rsa.rsa_sign_nokkel(key, _nw_tekst_til_liste(signing_input))
+        hvis lengde(sig) == 0 { returner "" }
+        returner _nw_hex_kod(sig)
+    }
+    hvis alg == "ES256" {
+        la key = x509.ec_privat_frå_pem(privat_nokkel_pem)
+        hvis key["status"] != "ok" { returner "" }
+        la hash = x509._raw_sha256(_nw_tekst_til_liste(signing_input))
+        la res = ecdsa.ecdsa_sign(key["d"], hash)
+        hvis res["status"] != "ok" { returner "" }
+        # JWS ES256-signatur = R (32 byte) || S (32 byte), rå big-endian.
+        la rs: liste_heiltall = []
+        la i = 0
+        mens i < lengde(res["r"]) { legg_til(rs, res["r"][i]) i = i + 1 }
+        i = 0
+        mens i < lengde(res["s"]) { legg_til(rs, res["s"][i]) i = i + 1 }
+        returner _nw_hex_kod(rs)
+    }
+    returner ""
+}
+
+// acme_verify(alg, offentleg_pem, signing_input, signatur_hex) → boolsk. Motstykket
+// til acme_sign: RS256 (RSASSA-PKCS1-v1_5-SHA256) og ES256 (ECDSA P-256, rå R||S à
+// 32 byte). PEM kan vere eit sertifikat eller «BEGIN PUBLIC KEY». Brukt av
+// std.dns.dnssec_verify_rrset og JWS-verifisering. Fail-closed: berre sann ved
+// gyldig signatur. På fersk seed mangla builtinen (null-fallback → alltid usann).
+funksjon acme_verify(alg: tekst, offentleg_pem: tekst, signing_input: tekst, signatur_hex: tekst) -> boolsk {
+    la key = x509.offentleg_nøkkel_frå_pem(offentleg_pem)
+    hvis key["status"] != "ok" { returner usann }
+    la sig = _nw_hex_dekod(signatur_hex)
+    la melding = _nw_tekst_til_liste(signing_input)
+    hvis alg == "RS256" {
+        hvis key["type"] != "rsa" { returner usann }
+        returner rsa.rsa_verify(key["n"], key["e"], melding, sig)
+    }
+    hvis alg == "ES256" {
+        hvis key["type"] != "ec" eller lengde(sig) != 64 { returner usann }
+        la hash_bn = bn.fra_bytes(x509._raw_sha256(melding))
+        la r = bn.fra_bytes(x509._skjer_bytes(sig, 0, 32))
+        la s = bn.fra_bytes(x509._skjer_bytes(sig, 32, 64))
+        returner ecdsa.ecdsa_verify(bn.fra_bytes(key["qx"]), bn.fra_bytes(key["qy"]), hash_bn, r, s)
+    }
+    returner usann
+}
+
 funksjon network_operation(req) {
     hvis builtin.type(req) != "ordbok" { returner _nw_feil("", "invalid request") }
     la op = _nw_tekst(req, "operation", "")
+    hvis op == "tls_connect" { returner _tls_connect(req) }
+    hvis op == "tls_listen" { returner _tls_listen(req) }
+    hvis op == "tls_handshake" { returner _tls_handshake(req) }
     hvis builtin.starts_with(op, "tls_") { returner _nw_feil("", "native TLS backend unavailable") }
+    la _tls_h = _nw_tekst(req, "handle", "")
+    hvis _tls_h != "" og finnes_nøkkel(_tls_sess, _tls_h) {
+        hvis op == "read" eller op == "read_hex" { returner _tls_les(req, _tls_h, op) }
+        hvis op == "write" eller op == "write_hex" { returner _tls_skriv(req, _tls_h, op) }
+        hvis op == "accept" { returner _tls_accept(_tls_h) }
+        hvis op == "close" { returner _tls_lukk(_tls_h) }
+    }
     hvis op == "listen" eller op == "udp_listen" eller op == "udp_connect" {
         la host = _nw_tekst(req, "host", "127.0.0.1")
         la port = _nw_heiltal(req, "port", 0)
-        la type: heiltall = 1
-        hvis op != "listen" { type = 2 }
+        la type: heiltall = nsys._flagg("SOCK_STREAM")
+        hvis op != "listen" { type = nsys._flagg("SOCK_DGRAM") }
         la fd = 0
-        prøv { fd = builtin.sys6(41, 2, type, 0, 0, 0, 0) } fang (e) { fd = -1 }
+        prøv { fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), type, 0, 0, 0, 0) } fang (e) { fd = -1 }
         hvis fd < 0 { returner _nw_feil("", "socket failed") }
         prøv {
             hvis op == "udp_connect" {
                 la r = socket_connect(fd, host, port)
-                hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+                hvis r < 0 { _sys_lukk(fd) returner _nw_feil("", "connect failed") }
             } ellers {
                 la r2 = socket_bind(fd, host, port)
-                hvis r2 < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "bind failed") }
+                hvis r2 < 0 { _sys_lukk(fd) returner _nw_feil("", "bind failed") }
                 hvis op == "listen" {
                     la backlog = _nw_heiltal(req, "backlog", 128)
-                    hvis builtin.sys6(50, fd, backlog, 0, 0, 0, 0) < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "listen failed") }
+                    hvis builtin.sys6(nsys._nr("listen"), fd, backlog, 0, 0, 0, 0) < 0 { _sys_lukk(fd) returner _nw_feil("", "listen failed") }
                 }
             }
-        } fang (e2) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
+        } fang (e2) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
         _pg_nonblock(fd)
         la h = _nw_ny_slot(fd, op)
         la status = "listening"
@@ -941,11 +1579,11 @@ funksjon network_operation(req) {
         la host = _nw_tekst(req, "host", "")
         la port = _nw_heiltal(req, "port", 0)
         hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
-        la fd = builtin.sys6(41, 2, 1, 0, 0, 0, 0)
+        la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
         hvis fd < 0 { returner _nw_feil("", "socket failed") }
         la r = 0
-        prøv { r = socket_connect(fd, host, port) } fang (e) { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "invalid address") }
-        hvis r < 0 { builtin.sys6(3, fd, 0, 0, 0, 0, 0) returner _nw_feil("", "connect failed") }
+        prøv { r = socket_connect(fd, host, port) } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
+        hvis r < 0 { _sys_lukk(fd) returner _nw_feil("", "connect failed") }
         _pg_nonblock(fd)
         la h = _nw_ny_slot(fd, "tcp")
         returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
@@ -955,19 +1593,19 @@ funksjon network_operation(req) {
     la s = _nw_slots[handle]
     la fd: heiltall = s["fd"]
     hvis op == "close" {
-        builtin.sys6(3, fd, 0, 0, 0, 0, 0)
+        _sys_lukk(fd)
         fjern_nokkel(_nw_slots, handle)
         returner _nw_res("closed", handle, "", 0, 0, "")
     }
     hvis op == "shutdown" {
-        builtin.sys6(48, fd, 2, 0, 0, 0, 0)
+        builtin.sys6(nsys._nr("shutdown"), fd, nsys._flagg("SHUT_RDWR"), 0, 0, 0, 0)
         returner _nw_res("ok", handle, "", 0, 0, "")
     }
     hvis op == "accept" {
         la b = _sk_buf()
         builtin.raw_store64(b + 96, 16)
-        la ny = builtin.sys6(43, fd, b + 80, b + 96, 0, 0, 0)
-        hvis ny == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
+        hvis ny == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", handle, "", 0, 0, "") }
         hvis ny < 0 { returner _nw_feil(handle, "accept failed") }
         _pg_nonblock(ny)
         la h2 = _nw_ny_slot(ny, "tcp")
@@ -977,17 +1615,35 @@ funksjon network_operation(req) {
         la events = _nw_heiltal(req, "events", 1)
         la timeout_ms = _nw_heiltal(req, "timeout_ms", 0)
         la b = _sk_buf()
-        la pfd: heiltall = b + 256
+        // Linux: epoll (som C-æra-runtimen). struct epoll_event-layouten (pakka på x86-64:
+        // u32 events @0, u64 data @4) kjem frå native_sys. Fd-en blir registrert for kvar venting og
+        // fjerna etterpå, so ein lukka eller gjenbrukt fd aldri heng att i instansen.
+        la ep = _nw_epoll_fd()
+        hvis ep < 0 { returner _nw_feil(handle, "epoll_create1 failed") }
+        // ABI-bitane (1 = lesbar, 2 = skrivbar) → EPOLLIN/EPOLLOUT.
         la maske: heiltall = 0
-        hvis (events & 1) != 0 { maske = maske | 1 }      // POLLIN
-        hvis (events & 2) != 0 { maske = maske | 4 }      // POLLOUT
-        builtin.raw_store64(pfd, (fd & 4294967295) | (maske << 32))
-        la r = builtin.sys6(7, pfd, 1, timeout_ms, 0, 0, 0)
-        hvis r < 0 { returner _nw_feil(handle, "poll failed") }
-        la revents = (builtin.raw_load64(pfd) >> 48) & 65535
+        hvis (events & 1) != 0 { maske = maske | nsys._flagg("EPOLLIN") }
+        hvis (events & 2) != 0 { maske = maske | nsys._flagg("EPOLLOUT") }
+        la ev: heiltall = b + 256
+        builtin.raw_store64(ev, 0)
+        builtin.raw_store64(ev + 8, 0)
+        _sys_u32(ev + nsys._layout("epoll_event", "events"), maske)
+        _sys_u32(ev + nsys._layout("epoll_event", "data"), fd)
+        la nr_ctl = nsys._nr("epoll_ctl")
+        la c = builtin.sys6(nr_ctl, ep, nsys._flagg("EPOLL_CTL_ADD"), fd, ev, 0, 0)
+        hvis c == 0 - nsys._errno("EEXIST") { c = builtin.sys6(nr_ctl, ep, nsys._flagg("EPOLL_CTL_MOD"), fd, ev, 0, 0) }
+        hvis c < 0 { returner _nw_feil(handle, "epoll_ctl failed") }
+        la ut: heiltall = b + 288
+        builtin.raw_store64(ut, 0)
+        builtin.raw_store64(ut + 8, 0)
+        la r = builtin.sys6(nsys._nr_kompat("epoll_wait"), ep, ut, 1, timeout_ms, 0, 0)   // arm64: epoll_pwait(…, NULL, 0)
+        builtin.sys6(nr_ctl, ep, nsys._flagg("EPOLL_CTL_DEL"), fd, ev, 0, 0)
+        hvis r < 0 { returner _nw_feil(handle, "epoll_wait failed") }
+        la revents: heiltall = 0
+        hvis r > 0 { revents = builtin.raw_load64(ut + nsys._layout("epoll_event", "events")) & 4294967295 }
         la klar: heiltall = 0
-        hvis (revents & 1) != 0 eller (revents & 16) != 0 eller (revents & 8) != 0 { klar = klar | 1 }
-        hvis (revents & 4) != 0 { klar = klar | 2 }
+        hvis (revents & (nsys._flagg("EPOLLIN") | nsys._flagg("EPOLLHUP") | nsys._flagg("EPOLLERR"))) != 0 { klar = klar | 1 }
+        hvis (revents & nsys._flagg("EPOLLOUT")) != 0 { klar = klar | 2 }
         hvis klar == 0 { returner _nw_res("ventende", handle, "", 0, 0, "") }
         returner _nw_res("klar", handle, "", klar, 0, "")
     }
@@ -998,24 +1654,31 @@ funksjon network_operation(req) {
         la buf: heiltall = b + 4096
         hvis maks > 32768 { maks = 32768 }
         la peer: heiltall = b + 512
-        builtin.raw_store64(b + 528, 16)
+        builtin.raw_store64(b + 528, nsys._layout("sockaddr_in", "storleik"))
         la n = 0
-        hvis op == "recvfrom" { n = builtin.sys6(45, fd, buf, maks, 0, peer, b + 528) }
-        ellers { n = builtin.sys6(0, fd, buf, maks, 0, 0, 0) }
-        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+        hvis op == "recvfrom" { n = builtin.sys6(nsys._nr("recvfrom"), fd, buf, maks, 0, peer, b + 528) }
+        ellers { n = builtin.sys6(nsys._nr("read"), fd, buf, maks, 0, 0, 0) }
+        hvis n == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", handle, "", 0, 0, "") }
         hvis n < 0 { returner _nw_feil(handle, "read failed") }
         la l: liste_heiltall = []
         la i: heiltall = 0
         mens i < n { legg_til(l, builtin.raw_load8(buf + i)) i = i + 1 }
+        // TCP-EOF på tekst-read (recv gav 0) er "eof" som i C-kontrakten
+        // (nc_native_main.c), ikkje "closed" (svaret frå close-operasjonen):
+        // protocol_stream.les_chunk → https_front._proxy ventar "eof" og gjorde
+        // "closed" til 502. Ingen lesar av read tolkar "closed". (read_hex held fram
+        // med "ok" + tom data_hex ved EOF — http_download les-til-lukking byggjer på det.)
         hvis op == "read" {
-            hvis n == 0 { returner _nw_res("closed", handle, "", 0, 0, "") }
+            hvis n == 0 { returner _nw_res("eof", handle, "", 0, 0, "") }
             returner _nw_res("ok", handle, _nw_liste_til_tekst(l), n, 0, "")
         }
         la r = _nw_res("ok", handle, "", n, 0, "")
         r["data_hex"] = _nw_hex_kod(l)
         hvis op == "recvfrom" {
-            r["peer_host"] = tekst_fra_heltall(builtin.raw_load8(peer + 4)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 5)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 6)) + "." + tekst_fra_heltall(builtin.raw_load8(peer + 7))
-            r["peer_port"] = (builtin.raw_load8(peer + 2) << 8) | builtin.raw_load8(peer + 3)
+            la pa: heiltall = peer + nsys._layout("sockaddr_in", "addr")
+            la pp: heiltall = peer + nsys._layout("sockaddr_in", "port")
+            r["peer_host"] = tekst_fra_heltall(builtin.raw_load8(pa)) + "." + tekst_fra_heltall(builtin.raw_load8(pa + 1)) + "." + tekst_fra_heltall(builtin.raw_load8(pa + 2)) + "." + tekst_fra_heltall(builtin.raw_load8(pa + 3))
+            r["peer_port"] = (builtin.raw_load8(pp) << 8) | builtin.raw_load8(pp + 1)
             r["port"] = r["peer_port"]
         }
         returner r
@@ -1036,11 +1699,11 @@ funksjon network_operation(req) {
         hvis op == "sendto" og _nw_tekst(req, "peer_host", "") != "" {
             port = _nw_heiltal(req, "peer_port", 0)
             prøv { _sk_sockaddr(b + 640, _nw_tekst(req, "peer_host", ""), port) } fang (e) { returner _nw_feil(handle, "invalid UDP peer") }
-            n = builtin.sys6(44, fd, buf, bit, 16384, b + 640, 16)
+            n = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), b + 640, nsys._layout("sockaddr_in", "storleik"))
         } ellers {
-            n = builtin.sys6(44, fd, buf, bit, 16384, 0, 0)
+            n = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), 0, 0)
         }
-        hvis n == -11 { returner _nw_res("ventende", handle, "", 0, port, "") }
+        hvis n == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", handle, "", 0, port, "") }
         hvis n < 0 { returner _nw_feil(handle, "write failed") }
         returner _nw_res("ok", handle, "", n, port, "")
     }
@@ -1050,10 +1713,13 @@ funksjon network_operation(req) {
 // ── builtin.dns_lookup(host, port_tekst) («norscode-dns-v1») i rein Norscode ────
 // Rekkjefølgje: numerisk IPv4 / localhost → /etc/hosts → UDP A-spørjing (RFC 1035)
 // mot fyrste «nameserver» i /etc/resolv.conf (2 s timeout) via socket_* over sys6.
-// Svar: {"abi","status":"ok"|"feil","error","host","port","addresses":[ip...]}.
+// Svar: {"abi","status":"ok"|"feil","error","host","port","service","addresses":[ip...],
+// "count" (berre ved ok)} — same felt som C-æra-builtinen (test_dns_zone_validation les count).
 funksjon _dns_svar(status: tekst, host: tekst, port: tekst, adresser, error: tekst) {
-    returner {"abi": "norscode-dns-v1", "status": status, "error": error, "host": host,
-              "port": port, "addresses": adresser}
+    la ut = {"abi": "norscode-dns-v1", "status": status, "error": error, "host": host,
+             "port": port, "service": port, "addresses": adresser}
+    hvis status == "ok" { ut["count"] = lengde(adresser) }
+    returner ut
 }
 
 funksjon _dns_er_ipv4(host: tekst) -> boolsk {
@@ -1129,7 +1795,7 @@ funksjon _dns_sporjing(host: tekst, ns: tekst) -> liste_tekst {
     }
     legg_til(pk, 0) legg_til(pk, 0) legg_til(pk, 1) legg_til(pk, 0) legg_til(pk, 1)   // QTYPE A, QCLASS IN
     la fd = -1
-    prøv { fd = socket_new(2, 2) } fang (e) { returner ut }
+    prøv { fd = socket_new(nsys._flagg("AF_INET"), nsys._flagg("SOCK_DGRAM")) } fang (e) { returner ut }
     socket_settimeout(fd, 2000)
     hvis socket_connect(fd, ns, 53) < 0 { socket_close(fd) returner ut }
     prøv { _sk_send_liste(fd, pk) } fang (e2) { socket_close(fd) returner ut }
@@ -1175,19 +1841,30 @@ funksjon dns_lookup(host, port) {
     returner _dns_svar("ok", h, pt, adresser, "")
 }
 
+// Éin byte frå kjernen via random_byte-atomet (x86-64 getrandom #318, linux-arm64
+// getrandom #278, macOS getentropy #500). Atomkontrakten (native_codegen_v2 og
+// macho_arm64_codegen): 0..255, eller −errno (< 0) når kjernen nektar entropi (seccomp/
+// sandkasse: EPERM, ENOSYS, …). FAIL-CLOSED: då kastar vi — ein nekta getrandom skal
+// aldri bli til føreseielege «tilfeldige» byte (token, nonce, MFA-kodar). Tidlegare tok
+// kallarane absoluttverdien (−EPERM → 0x01 kvar gong).
+funksjon _entropi_byte() -> heiltall {
+    la b: heiltall = builtin.random_byte()
+    hvis b < 0 { kast "random_byte: kjernen nekta entropi (errno " + tekst_fra_heltall(0 - b) + "), ingen tilfeldige byte (fail-closed)" }
+    hvis b > 255 { kast "random_byte: ugyldig verdi " + tekst_fra_heltall(b) + " (fail-closed)" }
+    returner b
+}
+
 // builtin.random_hex(n) → 2n hex-teikn frå EKTE entropi. Codegen sin gap-ruta
-// (gap_rute_v2) sender builtin.random_hex hit på fersk seed. Kvar byte kjem frå
-// random_byte-atomet (getrandom(2), x86-64 #318). Erstattar den gamle LCG-ruta
-// std.sha256.random_hex_pure som seeda berre frå tid_ms() → identisk output for
-// kall i same millisekund → duplikate MFA-recovery-kodar/challenge-token/CSRF.
+// (gap_ruter.gap_rute) sender builtin.random_hex hit på fersk seed. Kvar byte kjem frå
+// random_byte-atomet via _entropi_byte (kastar når kjernen nektar entropi). Erstattar den
+// gamle LCG-ruta std.sha256.random_hex_pure som seeda berre frå tid_ms() → identisk output
+// for kall i same millisekund → duplikate MFA-recovery-kodar/challenge-token/CSRF.
 funksjon random_hex_secure(n_bytes: heiltall) -> tekst {
     la hexch = "0123456789abcdef"
     la ut = ""
     la i: heiltall = 0
     mens i < n_bytes {
-        la b: heiltall = builtin.random_byte()
-        hvis b < 0 { b = 0 - b }
-        b = b - (b / 256) * 256
+        la b: heiltall = _entropi_byte()
         la hi: heiltall = b / 16
         la lo: heiltall = b - hi * 16
         ut = ut + builtin.slice(hexch, hi, hi + 1) + builtin.slice(hexch, lo, lo + 1)
@@ -1215,6 +1892,19 @@ funksjon _shx_hex_til_bytes(h: tekst) -> liste_heiltall {
 }
 funksjon sha256_hex_gap(data: liste_heiltall) -> tekst {
     returner builtin.sha256_bytes_hex(data)
+}
+// fil_sett_kjorbar(sti) → bool: chmod 0755 (= 493), same modus som
+// macho_arm64_codegen sitt emit_fil_sett_kjorbar. native_fs_chmod gjev 0 eller −errno.
+funksjon fil_sett_kjorbar_gap(sti: tekst) -> bool {
+    returner builtin.native_fs_chmod(sti, 493) == 0
+}
+// builtin.kompiler_fil_aktiv (bundler.no, NORSCODE_L5B_ACTIVE_GEN1_COMPILER) skal
+// køyre selfhost.kompiler.kompiler_fil frå den AKTIVE Gen1-NCB-en. Det finst berre
+// når bundlaren køyrer inne i ein VM (vm.no ncb_call_fn-armen, L5b-host). Nativt
+// kompilert har kallet ingen slik NCB; å rute til den baka kompilatoren ville
+// maskere kjeldeendringar. Fail-closed i staden for stille null-fallback (R2).
+funksjon kompiler_fil_aktiv(kjelde, modul_namn) {
+    kast "builtin.kompiler_fil_aktiv krev VM-i-VM / L5b-host (aktiv Gen1-NCB); ikkje tilgjengeleg nativt"
 }
 funksjon _shx_hmac_bytes(nøkkel: liste_heiltall, melding: liste_heiltall) -> liste_heiltall {
     la k: liste_heiltall = []
@@ -1277,4 +1967,1357 @@ funksjon pbkdf2_gap(passord: tekst, salt: tekst, iterasjonar: heiltall, dklen: h
         i2 = i2 + 1
     }
     returner ut
+}
+
+// ── JIT-backend (norscode-jit-v1) ────────────────────────────────────────────
+// C-seeden hadde builtin.jit_operation i verten. På fersk x86-64-seed var kallet
+// null-fallback, so VM-en kompilerte aldri noko og jit.status() gav null.
+//
+// Operasjonslista (arg:i, const:v, add/sub/mul/div/neg, eq/ne/lt/le/gt/ge,
+// concat, text_len, jump:L, jump_if_false:L, label:L, return) blir verifisert
+// (stakkdjupn, typar, etikettar) og senka til x86-64 i ei eiga mmap-sone. Sona er
+// skrivbar medan koden blir skriven og blir mprotect-a til les+køyr før første
+// kall — aldri skrivbar og køyrbar samstundes (write-xor-execute).
+//
+// Kallkonvensjon for den genererte funksjonen: rdi = blokk med 8-byte-slots
+//   [0] status (0 ok, 1 feil)  [1] bump-start  [2] bump-grense  [3+i] argument i
+// rax = rått resultat: heiltal, 0/1, IEEE-bit eller peikar til [lengd][byte].
+// Verdiane ligg på maskinstakken; rbp-ramme gjer at feilutgangen kan forlate
+// ein ubalansert stakk.
+
+la _jit_tabell = {}
+la _jit_neste = 0
+la _jit_aktive = 0
+la _jit_skrap = 0
+la _jit_adr = 0
+la _jit_pos = 0
+la _jit_maks = 0
+
+funksjon _jit_feil(melding: tekst) {
+    returner {"status": "feil", "error": melding}
+}
+
+funksjon _jit_ok(v) {
+    returner {"status": "ferdig", "value": v, "backend": "x86_64"}
+}
+
+funksjon _jb(l: liste_heiltall) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(l) {
+        hvis _jit_pos < _jit_maks { builtin.raw_store8(_jit_adr + _jit_pos, l[i]) }
+        _jit_pos = _jit_pos + 1
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _jit_u32_ved(pos: heiltall, v: heiltall) -> heiltall {
+    la u = v
+    hvis u < 0 { u = u + 4294967296 }
+    la k: heiltall = 0
+    mens k < 4 {
+        la q = u / 256
+        builtin.raw_store8(_jit_adr + pos + k, u - q * 256)
+        u = q
+        k = k + 1
+    }
+    returner 0
+}
+
+funksjon _j32(v: heiltall) -> heiltall {
+    hvis _jit_pos + 4 <= _jit_maks { _jit_u32_ved(_jit_pos, v) }
+    _jit_pos = _jit_pos + 4
+    returner 0
+}
+
+funksjon _j64(v: heiltall) -> heiltall {
+    hvis _jit_pos + 8 <= _jit_maks { builtin.raw_store64(_jit_adr + _jit_pos, v) }
+    _jit_pos = _jit_pos + 8
+    returner 0
+}
+
+funksjon _jit_er_heiltal(t: tekst) -> boolsk {
+    hvis lengde(t) == 0 { returner usann }
+    la i: heiltall = 0
+    hvis builtin.slice(t, 0, 1) == "-" { i = 1 }
+    hvis i >= lengde(t) { returner usann }
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c < 48 eller c > 57 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+funksjon _jit_er_desimal(t: tekst) -> boolsk {
+    la siffer: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c >= 48 og c <= 57 { siffer = siffer + 1 }
+        ellers hvis c != 46 og c != 45 og c != 43 og c != 101 og c != 69 { returner usann }
+        i = i + 1
+    }
+    returner siffer > 0
+}
+
+funksjon _jit_tekst_felt(req, felt: tekst, standard: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(req, felt) { returner standard }
+    la v = req[felt]
+    hvis v == null { returner standard }
+    la t = tekst(v)
+    hvis t == "" { returner standard }
+    returner t
+}
+
+funksjon _jit_heiltal_felt(v) -> heiltall {
+    hvis v == null { returner 0 - 1 }
+    hvis builtin.type(v) == "heltall" { returner v }
+    la t = tekst(v)
+    hvis _jit_er_heiltal(t) { returner heltall_fra_tekst(t) }
+    returner 0 - 1
+}
+
+funksjon _jit_setcc(op: tekst) -> heiltall {
+    hvis op == "eq" { returner 0x94 }
+    hvis op == "ne" { returner 0x95 }
+    hvis op == "lt" { returner 0x9C }
+    hvis op == "le" { returner 0x9E }
+    hvis op == "gt" { returner 0x9F }
+    returner 0x9D
+}
+
+// Etikett-signatur = typane på stakken ved inngang. Alle vegar inn må vere like.
+funksjon _jit_merk(lab_sig, lab: tekst, sig: tekst) -> tekst {
+    hvis finnes_nøkkel(lab_sig, lab) {
+        hvis tekst(lab_sig[lab]) != sig { returner "ulik stakk ved etikett " + lab }
+        returner ""
+    }
+    lab_sig[lab] = sig
+    returner ""
+}
+
+funksjon _jit_sig_typar(sig: tekst) -> liste_tekst {
+    la ut: liste_tekst = []
+    hvis sig == "" { returner ut }
+    la delar = builtin.split(sig, ",")
+    la i: heiltall = 0
+    mens i < lengde(delar) { legg_til(ut, tekst(delar[i])) i = i + 1 }
+    returner ut
+}
+
+funksjon _jit_senk(ops, ar: heiltall, nk: tekst, rk: tekst) {
+    la typar: liste_tekst = []
+    la lab_pos = {}
+    la lab_sig = {}
+    la p_pos: liste_heiltall = []
+    la p_lab: liste_tekst = []
+    la p_ut: liste_heiltall = []
+    la p_feil: liste_heiltall = []
+    la rt = ""
+    la levande = sann
+    // push rbp; mov rbp,rsp; push rbx; push r12; push r13; mov rbx,rdi;
+    // mov r12,[rbx+8]; mov r13,[rbx+16]
+    _jb([0x55, 0x48, 0x89, 0xE5, 0x53, 0x41, 0x54, 0x41, 0x55, 0x48, 0x89, 0xFB,
+         0x4C, 0x8B, 0x63, 0x08, 0x4C, 0x8B, 0x6B, 0x10])
+    la i: heiltall = 0
+    mens i < lengde(ops) {
+        la op = tekst(ops[i])
+        la n = lengde(typar)
+        hvis ikkje levande og ikkje builtin.starts_with(op, "label:") {
+            // Hopp etter return/jump (t.d. «hopp til slutt» frå kompilatoren) er daude.
+            hvis builtin.starts_with(op, "jump:") {
+                i = i + 1
+                fortsett
+            }
+            // Anna uoppnåeleg kode er ein ugyldig kontrakt (C-JIT-en avviste òg,
+            // test_native_jit_float invalid_branch). VM-en sin JIT-lowering fjernar
+            // daudkode sjølv (vm_jit_fjern_daudkode) før han kallar backenden.
+            returner _jit_feil("uoppnåeleg operasjon: " + op)
+        }
+        hvis builtin.starts_with(op, "arg:") {
+            la t = builtin.slice(op, 4, lengde(op))
+            hvis ikkje _jit_er_heiltal(t) { returner _jit_feil("invalid argument index") }
+            la idx = heltall_fra_tekst(t)
+            hvis idx < 0 eller idx >= ar { returner _jit_feil("invalid argument index") }
+            _jb([0xFF, 0xB3])                                  // push qword [rbx+disp32]
+            _j32(8 * (3 + idx))
+            legg_til(typar, nk)
+        } ellers hvis builtin.starts_with(op, "const:") {
+            la t = builtin.slice(op, 6, lengde(op))
+            hvis nk == "text" { returner _jit_feil("konstantar er ikkje støtta i tekst-JIT") }
+            la bits: heiltall = 0
+            hvis nk == "int" {
+                hvis ikkje _jit_er_heiltal(t) { returner _jit_feil("ugyldig heiltalskonstant: " + t) }
+                bits = heltall_fra_tekst(t)
+            } ellers {
+                hvis ikkje _jit_er_desimal(t) { returner _jit_feil("ugyldig desimalkonstant: " + t) }
+                bits = builtin.desimal_til_bits(builtin.desimaltall(t))
+            }
+            _jb([0x48, 0xB8])                                  // mov rax,imm64
+            _j64(bits)
+            _jb([0x50])                                        // push rax
+            legg_til(typar, nk)
+        } ellers hvis op == "add" eller op == "sub" eller op == "mul" eller op == "div" {
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis nk == "text" eller typar[n - 1] != nk eller typar[n - 2] != nk { returner _jit_feil("typefeil i " + op) }
+            hvis op == "div" og nk != "float" { returner _jit_feil("div krev desimaltal") }
+            fjern_siste(typar)
+            _jb([0x59, 0x58])                                  // pop rcx; pop rax
+            hvis nk == "int" {
+                hvis op == "add" { _jb([0x48, 0x01, 0xC8]) }        // add rax,rcx
+                ellers hvis op == "sub" { _jb([0x48, 0x29, 0xC8]) } // sub rax,rcx
+                ellers { _jb([0x48, 0x0F, 0xAF, 0xC1]) }            // imul rax,rcx
+            } ellers {
+                // movq xmm0,rax; movq xmm1,rcx; <op>sd xmm0,xmm1; movq rax,xmm0
+                la sd: heiltall = 0x58
+                hvis op == "sub" { sd = 0x5C }
+                hvis op == "mul" { sd = 0x59 }
+                hvis op == "div" { sd = 0x5E }
+                _jb([0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x66, 0x48, 0x0F, 0x6E, 0xC9,
+                     0xF2, 0x0F, sd, 0xC1, 0x66, 0x48, 0x0F, 0x7E, 0xC0])
+            }
+            _jb([0x50])
+        } ellers hvis op == "neg" {
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            hvis nk == "text" eller typar[n - 1] != nk { returner _jit_feil("typefeil i neg") }
+            hvis nk == "int" { _jb([0x58, 0x48, 0xF7, 0xD8, 0x50]) }       // neg rax
+            ellers { _jb([0x58, 0x48, 0x0F, 0xBA, 0xF8, 0x3F, 0x50]) }     // btc rax,63
+        } ellers hvis op == "eq" eller op == "ne" eller op == "lt" eller op == "le" eller op == "gt" eller op == "ge" {
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != nk eller typar[n - 2] != nk { returner _jit_feil("typefeil i " + op) }
+            hvis nk == "text" og op != "eq" og op != "ne" { returner _jit_feil("tekst støttar berre eq/ne") }
+            fjern_siste(typar)
+            fjern_siste(typar)
+            legg_til(typar, "bool")
+            hvis nk == "int" {
+                _jb([0x59, 0x58, 0x48, 0x39, 0xC8, 0x0F, _jit_setcc(op), 0xC0])   // cmp rax,rcx; setcc al
+            } ellers hvis nk == "float" {
+                _jb([0x59, 0x58, 0x66, 0x48, 0x0F, 0x6E, 0xC0, 0x66, 0x48, 0x0F, 0x6E, 0xC9])
+                // NaN (uordna) gjev PF=CF=ZF=1: lt/le/gt/ge blir usann, eq usann, ne sann.
+                hvis op == "lt" eller op == "le" { _jb([0x66, 0x0F, 0x2E, 0xC8]) }  // ucomisd xmm1,xmm0
+                ellers { _jb([0x66, 0x0F, 0x2E, 0xC1]) }                           // ucomisd xmm0,xmm1
+                hvis op == "eq" { _jb([0x0F, 0x94, 0xC0, 0x0F, 0x9B, 0xC1, 0x20, 0xC8]) }       // sete; setnp; and
+                ellers hvis op == "ne" { _jb([0x0F, 0x95, 0xC0, 0x0F, 0x9A, 0xC1, 0x08, 0xC8]) } // setne; setp; or
+                ellers hvis op == "lt" eller op == "gt" { _jb([0x0F, 0x97, 0xC0]) }             // seta
+                ellers { _jb([0x0F, 0x93, 0xC0]) }                                             // setae
+            } ellers {
+                // pop rsi; pop rdi; mov rcx,[rdi]; cmp rcx,[rsi]; jne +10;
+                // lea rdi,[rdi+8]; lea rsi,[rsi+8]; repe cmpsb
+                _jb([0x5E, 0x5F, 0x48, 0x8B, 0x0F, 0x48, 0x3B, 0x0E, 0x75, 0x0A,
+                     0x48, 0x8D, 0x7F, 0x08, 0x48, 0x8D, 0x76, 0x08, 0xF3, 0xA6])
+                hvis op == "eq" { _jb([0x0F, 0x94, 0xC0]) } ellers { _jb([0x0F, 0x95, 0xC0]) }
+            }
+            _jb([0x0F, 0xB6, 0xC0, 0x50])                      // movzx eax,al; push rax
+        } ellers hvis op == "concat" {
+            hvis nk != "text" { returner _jit_feil("concat krev tekst-JIT") }
+            hvis n < 2 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != "text" eller typar[n - 2] != "text" { returner _jit_feil("typefeil i concat") }
+            fjern_siste(typar)
+            // pop rsi(b); pop rdi(a); rcx=|a|+|b|; rax=r12+rcx+8; over r13 → feil
+            _jb([0x5E, 0x5F, 0x48, 0x8B, 0x0F, 0x48, 0x03, 0x0E, 0x49, 0x8D, 0x44, 0x0C, 0x08,
+                 0x4C, 0x39, 0xE8, 0x0F, 0x87])
+            legg_til(p_feil, _jit_pos)
+            _j32(0)
+            // [r12]=lengd; rdx=r12; r8=b; kopier a, så b; r12=rax; push rdx
+            _jb([0x49, 0x89, 0x0C, 0x24, 0x4C, 0x89, 0xE2, 0x49, 0x89, 0xF0,
+                 0x48, 0x8B, 0x0F, 0x48, 0x8D, 0x77, 0x08, 0x49, 0x8D, 0x7C, 0x24, 0x08, 0xF3, 0xA4,
+                 0x49, 0x8B, 0x08, 0x49, 0x8D, 0x70, 0x08, 0xF3, 0xA4,
+                 0x49, 0x89, 0xC4, 0x52])
+        } ellers hvis op == "text_len" {
+            hvis nk != "text" { returner _jit_feil("text_len krev tekst-JIT") }
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            hvis typar[n - 1] != "text" { returner _jit_feil("typefeil i text_len") }
+            fjern_siste(typar)
+            legg_til(typar, "int")
+            _jb([0x58, 0x48, 0x8B, 0x00, 0x50])                // mov rax,[rax]
+        } ellers hvis builtin.starts_with(op, "jump_if_false:") {
+            la lab = builtin.slice(op, 14, lengde(op))
+            hvis n < 1 { returner _jit_feil("expression stack underflow") }
+            // bool ELLER int: JIT-optimalisatoren konstant-foldar t.d. `2 < 1` til
+            // eit int-`const:0`, som blir vilkåret. test/je verkar for begge (0=usann).
+            hvis typar[n - 1] != "bool" og typar[n - 1] != "int" { returner _jit_feil("jump_if_false krev bool/int") }
+            fjern_siste(typar)
+            la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+            hvis fm != "" { returner _jit_feil(fm) }
+            _jb([0x58, 0x48, 0x85, 0xC0, 0x0F, 0x84])          // pop rax; test; je rel32
+            legg_til(p_pos, _jit_pos)
+            legg_til(p_lab, lab)
+            _j32(0)
+        } ellers hvis builtin.starts_with(op, "jump:") {
+            la lab = builtin.slice(op, 5, lengde(op))
+            la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+            hvis fm != "" { returner _jit_feil(fm) }
+            _jb([0xE9])                                        // jmp rel32
+            legg_til(p_pos, _jit_pos)
+            legg_til(p_lab, lab)
+            _j32(0)
+            typar = []
+            levande = usann
+        } ellers hvis builtin.starts_with(op, "label:") {
+            la lab = builtin.slice(op, 6, lengde(op))
+            hvis finnes_nøkkel(lab_pos, lab) { returner _jit_feil("etikett definert to gonger: " + lab) }
+            lab_pos[lab] = _jit_pos
+            hvis levande {
+                la fm = _jit_merk(lab_sig, lab, builtin.join(typar, ","))
+                hvis fm != "" { returner _jit_feil(fm) }
+            } ellers hvis finnes_nøkkel(lab_sig, lab) {
+                typar = _jit_sig_typar(tekst(lab_sig[lab]))
+                levande = sann
+            }
+        } ellers hvis op == "return" {
+            hvis n != 1 { returner _jit_feil("expression must leave one value") }
+            hvis rt != "" og rt != typar[0] { returner _jit_feil("ulike returtypar") }
+            rt = typar[0]
+            _jb([0x58, 0xE9])                                  // pop rax; jmp ut
+            legg_til(p_ut, _jit_pos)
+            _j32(0)
+            typar = []
+            levande = usann
+        } ellers {
+            returner _jit_feil("unsupported JIT operation: " + op)
+        }
+        i = i + 1
+    }
+    hvis levande {
+        hvis lengde(typar) != 1 { returner _jit_feil("expression must leave one value") }
+        hvis rt != "" og rt != typar[0] { returner _jit_feil("ulike returtypar") }
+        rt = typar[0]
+        _jb([0x58, 0xE9])
+        legg_til(p_ut, _jit_pos)
+        _j32(0)
+    }
+    hvis rt == "" { returner _jit_feil("funksjonen returnerer aldri") }
+    la feil_pos = _jit_pos
+    _jb([0x48, 0xC7, 0x03, 0x01, 0x00, 0x00, 0x00, 0x31, 0xC0])  // status=1; xor eax,eax
+    la ut_pos = _jit_pos
+    // lea rsp,[rbp-24]; pop r13; pop r12; pop rbx; pop rbp; ret
+    _jb([0x48, 0x8D, 0x65, 0xE8, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0x5D, 0xC3])
+    hvis _jit_pos > _jit_maks { returner _jit_feil("kodebufferet er for lite") }
+    la k: heiltall = 0
+    mens k < lengde(p_pos) {
+        la lab = p_lab[k]
+        hvis ikkje finnes_nøkkel(lab_pos, lab) { returner _jit_feil("ukjend etikett: " + lab) }
+        la mål: heiltall = lab_pos[lab]
+        _jit_u32_ved(p_pos[k], mål - (p_pos[k] + 4))
+        k = k + 1
+    }
+    k = 0
+    mens k < lengde(p_ut) { _jit_u32_ved(p_ut[k], ut_pos - (p_ut[k] + 4)) k = k + 1 }
+    k = 0
+    mens k < lengde(p_feil) { _jit_u32_ved(p_feil[k], feil_pos - (p_feil[k] + 4)) k = k + 1 }
+    la passar = rk == rt
+    hvis rt == "bool" og (rk == "int" eller rk == "float") { passar = sann }
+    hvis ikkje passar { returner _jit_feil("result_kind " + rk + " passar ikkje med " + rt) }
+    returner {"status": "ferdig", "rt": rt}
+}
+
+funksjon _jit_kompiler(req) {
+    la ops = req["operations"]
+    hvis ops == null { returner _jit_feil("operations mangla") }
+    hvis lengde(ops) == 0 { returner _jit_feil("tom operasjonsliste") }
+    la ar = _jit_heiltal_felt(req["arity"])
+    hvis ar < 0 eller ar > 64 { returner _jit_feil("ugyldig arity") }
+    la nk = _jit_tekst_felt(req, "numeric_kind", "int")
+    hvis nk != "int" og nk != "float" og nk != "text" { returner _jit_feil("ukjend numeric_kind: " + nk) }
+    la rk = _jit_tekst_felt(req, "result_kind", nk)
+    hvis rk != "int" og rk != "float" og rk != "bool" og rk != "text" { returner _jit_feil("ukjend result_kind: " + rk) }
+    la maplen: heiltall = ((lengde(ops) * 64 + 256) / 4096 + 1) * 4096
+    la adr = _sys_mmap_rw(maplen)            // mmap RW
+    hvis adr < 0 { returner _jit_feil("mmap feila") }
+    _jit_adr = adr
+    _jit_pos = 0
+    _jit_maks = maplen
+    la res = _jit_senk(ops, ar, nk, rk)
+    hvis res["status"] != "ferdig" {
+        _sys_munmap(adr, maplen)
+        returner res
+    }
+    hvis _sys_mprotect_rx(adr, maplen) != 0 {          // mprotect R|X
+        _sys_munmap(adr, maplen)
+        returner _jit_feil("mprotect feila")
+    }
+    _jit_neste = _jit_neste + 1
+    la h = "jit-" + tekst_fra_heltall(_jit_neste)
+    _jit_tabell[h] = {"adr": adr, "len": maplen, "arity": ar, "nk": nk, "rk": rk, "rt": res["rt"]}
+    _jit_aktive = _jit_aktive + 1
+    returner {"status": "ferdig", "handle": h, "code_bytes": _jit_pos, "abi": "norscode-jit-v1",
+              "backend": "x86_64", "memory_policy": "write-xor-execute", "result_kind": rk}
+}
+
+funksjon _jit_skrap_adr() -> heiltall {
+    hvis _jit_skrap == 0 {
+        la a = _sys_mmap_rw(4194304)
+        hvis a < 0 { returner 0 }
+        _jit_skrap = a
+    }
+    returner _jit_skrap
+}
+
+funksjon _jit_køyr(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_jit_tabell, h) { returner _jit_feil("ukjent eller frigjort JIT-handle") }
+    la e = _jit_tabell[h]
+    la args = req["arguments"]
+    hvis args == null { returner _jit_feil("arguments mangla") }
+    la ar: heiltall = e["arity"]
+    hvis lengde(args) != ar { returner _jit_feil("feil tal på argument") }
+    la s = _jit_skrap_adr()
+    hvis s == 0 { returner _jit_feil("mmap feila") }
+    la nk = tekst(e["nk"])
+    // Tekstargument ligg i [s+4096, s+1 MiB); resten av sona er bump-plass for concat.
+    la fri: heiltall = s + 4096
+    la i: heiltall = 0
+    mens i < ar {
+        la v = args[i]
+        la t = builtin.type(v)
+        la slot: heiltall = s + 8 * (3 + i)
+        hvis nk == "int" {
+            hvis t != "heltall" { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje heiltal") }
+            builtin.raw_store64(slot, v)
+        } ellers hvis nk == "float" {
+            hvis t == "heltall" { builtin.raw_store64(slot, builtin.desimal_til_bits(builtin.desimal_frå_bits(0) + v)) }
+            ellers hvis t == "desimaltall" { builtin.raw_store64(slot, builtin.desimal_til_bits(v)) }
+            ellers { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje eit tal") }
+        } ellers {
+            hvis t != "tekst" { returner _jit_feil("argument " + tekst_fra_heltall(i) + " er ikkje tekst") }
+            hvis fri + 8 + lengde(v) > s + 1048576 { returner _jit_feil("tekstargument for stort for JIT") }
+            la bl = _nw_tekst_til_liste(v)
+            la bn = lengde(bl)
+            hvis fri + 8 + bn > s + 1048576 { returner _jit_feil("tekstargument for stort for JIT") }
+            builtin.raw_store64(fri, bn)
+            la k: heiltall = 0
+            mens k < bn { builtin.raw_store8(fri + 8 + k, bl[k]) k = k + 1 }
+            builtin.raw_store64(slot, fri)
+            fri = ((fri + 8 + bn + 7) / 8) * 8
+        }
+        i = i + 1
+    }
+    builtin.raw_store64(s, 0)
+    builtin.raw_store64(s + 8, fri)
+    builtin.raw_store64(s + 16, s + 4194304)
+    la r = builtin.raw_call(e["adr"], s)
+    hvis builtin.raw_load64(s) != 0 { returner _jit_feil("JIT-resultatet får ikkje plass") }
+    la rt = tekst(e["rt"])
+    la rk = tekst(e["rk"])
+    hvis rt == "float" { returner _jit_ok(builtin.desimal_frå_bits(r)) }
+    hvis rt == "bool" {
+        hvis rk == "float" {
+            hvis r != 0 { returner _jit_ok(builtin.desimal_frå_bits(4607182418800017408)) }
+            returner _jit_ok(builtin.desimal_frå_bits(0))
+        }
+        hvis rk == "int" { returner _jit_ok(r) }
+        returner _jit_ok(r != 0)
+    }
+    hvis rt == "text" {
+        la n = builtin.raw_load64(r)
+        la ut: liste_heiltall = []
+        la k: heiltall = 0
+        mens k < n { legg_til(ut, builtin.raw_load8(r + 8 + k)) k = k + 1 }
+        returner _jit_ok(_nw_liste_til_tekst(ut))
+    }
+    returner _jit_ok(r)
+}
+
+funksjon _jit_frigjer(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_jit_tabell, h) { returner _jit_feil("ukjent eller frigjort JIT-handle") }
+    la e = _jit_tabell[h]
+    _sys_munmap(e["adr"], e["len"])               // munmap
+    fjern_nokkel(_jit_tabell, h)
+    _jit_aktive = _jit_aktive - 1
+    returner {"status": "ferdig", "handle": h}
+}
+
+// ── Atomvariabel-backend (norscode-atomic-v1) ────────────────────────────────
+// C-seeden hadde builtin.atomic_operation i verten; på fersk seed var kallet
+// null-fallback (std/runtime/atomic.no rapporterte «unsupported»). Denne
+// backenden gjev korrekt eintråds semantikk: eit handtak-bord med verdi og
+// versjon, og minneordens-validering per operasjon. Med den globale VM-låsen
+// (når native trådar landar) er kvar operasjon allereie serialisert, so det
+// same bordet er trådtrygt då.
+
+// ── Delt rå-arena for atomvariablar, mutex/condvar-futex og trådeskriptorar ──
+// clone(2) med CLONE_VM deler heile adresserommet, so ei vanleg mmap er synleg
+// for barnetrådane. Verdiar som må vere trådtrygge (atomteljarar, futex-ord) MÅ
+// liggje her som rå 8-byte-ord, ikkje som boksa NcVal på GC-heapen.
+la _arena = 0
+la _arena_pos = 0
+
+funksjon _arena_addr() -> heiltall {
+    hvis _arena == 0 {
+        la a = _sys_mmap_rw(16777216)   // mmap 16 MiB RW ANON PRIVATE
+        hvis a < 0 { returner 0 }
+        _arena = a
+        _arena_pos = 0
+    }
+    returner _arena
+}
+
+funksjon _arena_alloc(n: heiltall) -> heiltall {
+    hvis _arena_addr() == 0 { returner 0 }
+    la off = ((_arena_pos + 15) / 16) * 16
+    hvis off + n > 16777216 { returner 0 }
+    _arena_pos = off + n
+    la addr = _arena + off
+    builtin.raw_store64(addr, 0)
+    returner addr
+}
+
+la _at_tabell = {}
+la _at_neste = 0
+
+funksjon _at_feil(kode: tekst) {
+    returner {"abi": "norscode-atomic-v1", "status": kode}
+}
+
+// Ordensstyrke: relaxed<consume<acquire<seq_cst og relaxed<release<acq_rel<seq_cst.
+funksjon _at_rank(order: tekst) -> heiltall {
+    hvis order == "relaxed" { returner 0 }
+    hvis order == "consume" { returner 1 }
+    hvis order == "acquire" { returner 2 }
+    hvis order == "release" { returner 2 }
+    hvis order == "acq_rel" { returner 3 }
+    hvis order == "seq_cst" { returner 4 }
+    returner 0 - 1
+}
+
+funksjon _at_kjend(order: tekst) -> boolsk { returner _at_rank(order) >= 0 }
+
+// load kan ikkje bruke release/acq_rel; store kan ikkje bruke consume/acquire/acq_rel.
+funksjon _at_load_ok(order: tekst) -> boolsk {
+    returner order == "relaxed" eller order == "consume" eller order == "acquire" eller order == "seq_cst"
+}
+funksjon _at_store_ok(order: tekst) -> boolsk {
+    returner order == "relaxed" eller order == "release" eller order == "seq_cst"
+}
+
+funksjon _at_svar(handle: tekst, e, ekstra) {
+    la ut = {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle,
+             "value": builtin.raw_load64(e["addr"]), "version": e["version"]}
+    la nøkler_e = builtin.nøkler(ekstra)
+    la i: heiltall = 0
+    mens i < lengde(nøkler_e) { ut[nøkler_e[i]] = ekstra[nøkler_e[i]] i = i + 1 }
+    returner ut
+}
+
+funksjon atomic_operation(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _at_feil("invalid_request") }
+    la op = _jit_tekst_felt(req, "operation", "")
+    la order = _jit_tekst_felt(req, "order", "seq_cst")
+    hvis op != "fence" og op != "destroy" og ikkje _at_kjend(order) { returner _at_feil("invalid_order") }
+
+    hvis op == "create" {
+        la addr = _arena_alloc(8)
+        hvis addr == 0 { returner _at_feil("arena_full") }
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
+        _at_neste = _at_neste + 1
+        la h = "atomic-" + tekst_fra_heltall(_at_neste)
+        _at_tabell[h] = {"addr": addr, "version": 0}
+        returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": h}
+    }
+    hvis op == "fence" { returner {"abi": "norscode-atomic-v1", "status": "ok"} }
+
+    la handle = _jit_tekst_felt(req, "handle", "")
+    hvis handle == "" eller ikkje finnes_nøkkel(_at_tabell, handle) { returner _at_feil("invalid_handle") }
+    la e = _at_tabell[handle]
+    la addr = e["addr"]
+
+    hvis op == "load" {
+        hvis ikkje _at_load_ok(order) { returner _at_feil("invalid_order") }
+        returner _at_svar(handle, e, {"observed": builtin.raw_load64(addr)})
+    }
+    hvis op == "store" {
+        hvis ikkje _at_store_ok(order) { returner _at_feil("invalid_order") }
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {})
+    }
+    hvis op == "exchange" {
+        la gammal = builtin.raw_load64(addr)
+        builtin.raw_store64(addr, _jit_heiltal_felt(req["value"]))
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {"observed": gammal})
+    }
+    hvis op == "fetch_add" {
+        // Atomisk på tvers av clone-trådar (lock xadd).
+        la gammal = builtin.atomic_xadd(addr, _jit_heiltal_felt(req["delta"]))
+        e["version"] = e["version"] + 1
+        returner _at_svar(handle, e, {"observed": gammal})
+    }
+    hvis op == "compare_exchange" {
+        la fail = _jit_tekst_felt(req, "failure_order", "relaxed")
+        hvis ikkje _at_load_ok(fail) eller _at_rank(fail) > _at_rank(order) { returner _at_feil("invalid_order") }
+        la venta = _jit_heiltal_felt(req["expected"])
+        la gammal = builtin.atomic_cas(addr, venta, _jit_heiltal_felt(req["replacement"]))
+        hvis gammal == venta {
+            e["version"] = e["version"] + 1
+            returner _at_svar(handle, e, {"success": "sann", "observed": gammal})
+        }
+        returner _at_svar(handle, e, {"success": "usann", "observed": gammal})
+    }
+    hvis op == "destroy" {
+        fjern_nokkel(_at_tabell, handle)
+        returner {"abi": "norscode-atomic-v1", "status": "ok", "handle": handle}
+    }
+    returner _at_feil("unsupported_operation")
+}
+
+// ── Tensor-backend (norscode-tensor-v1) ─────────────────────────────────────
+// C-seeden hadde builtin.tensor_operation i verten (nc_builtin_tensor_operation,
+// git show 40922f9^:archive/legacy_c_backend/nc_native_main.c:2137-2289). På fersk
+// x86-64-seed var kallet null-fallback → tom status (test_tensor_native raud;
+// std.tensor fall stilt til skalar Norscode). Kontrakt (same feilstrengar og
+// valideringsrekkjefølgje som C):
+//   status     → {"status":"ferdig","backend":"simd-x86_64-sse4.1"|"scalar",
+//                 "vector_lanes":4|1,"metal_available":usann}
+//   matmul_i32 → rows/inner/columns i 1..4096, rows*columns <= 1e6,
+//                rows*inner*columns <= 2e7; left/right liste med rett lengd; kvar
+//                verdi heiltal i [-32768, 32767]; int64-akkumulering;
+//                backend "metal" → feil "metal backend unavailable" (Linux-stubben).
+//
+// SIMD-vegen er EKTE SSE4.1: ein fast kjerne (pmulld 4×i32 → pmovsxdq → paddq i64)
+// blir skriven éin gong i ei mmap-sone, mprotect-a til R|X (W^X, som JIT-backenden)
+// og kalla med builtin.raw_call. CPUID.1:ECX bit 19 avgjer; utan SSE4.1, eller om
+// mmap/mprotect feilar, rapporterer backenden ærleg "scalar"/1 og reknar med same
+// heiltalsløkke i Norscode.
+//
+// Kjerne-ABI (rdi = parameterblokk med 8-byte-slots):
+//   [0] A  (i32, rows × inner_p, radvis)     [8]  BT (i32, columns × inner_p, B transponert)
+//   [16] OUT (i64, rows × columns)           [24] rows  [32] inner_p (fleirtal av 4)  [40] columns
+//   rax = 1 ved fullført køyring. Rader/kolonnar er nullpadda til inner_p, so kjernen
+//   treng inga skalar hale (0·0 endrar ikkje prikkproduktet).
+// CPUID-stubben ligg på offset 178 og gjev 1 viss SSE4.1 finst (rbx blir restaurert).
+
+la _tn_simd = 0            // 0 ukjent, 1 SSE4.1-kjerne klar, 2 ikkje tilgjengeleg (same 0-init-mønster som _jit_skrap/_arena)
+la _tn_kode = 0            // R|X-sida med kjerne + cpuid-stubb
+
+funksjon _tn_kjerne_bytes() -> liste_heiltall {
+    returner [
+        // push rbx; push r12; push r13; push r14; push r15
+        0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+        // mov r8,[rdi]; mov r9,[rdi+8]; mov r10,[rdi+16]; mov r11,[rdi+24]; mov r12,[rdi+32]; mov r13,[rdi+40]
+        0x4C, 0x8B, 0x07, 0x4C, 0x8B, 0x4F, 0x08, 0x4C, 0x8B, 0x57, 0x10,
+        0x4C, 0x8B, 0x5F, 0x18, 0x4C, 0x8B, 0x67, 0x20, 0x4C, 0x8B, 0x6F, 0x28,
+        // xor r14d,r14d                                   (r = 0)
+        0x45, 0x31, 0xF6,
+        // .rad: cmp r14,r11; jge .ferdig
+        0x4D, 0x39, 0xDE, 0x7D, 0x7B,
+        // mov rsi,r14; imul rsi,r12; lea rsi,[r8+rsi*4]; xor r15d,r15d   (arad, c = 0)
+        0x4C, 0x89, 0xF6, 0x49, 0x0F, 0xAF, 0xF4, 0x49, 0x8D, 0x34, 0xB0, 0x45, 0x31, 0xFF,
+        // .kol: cmp r15,r13; jge .neste_rad
+        0x4D, 0x39, 0xEF, 0x7D, 0x63,
+        // mov rdx,r15; imul rdx,r12; lea rdx,[r9+rdx*4]; pxor xmm0,xmm0; xor ecx,ecx
+        0x4C, 0x89, 0xFA, 0x49, 0x0F, 0xAF, 0xD4, 0x49, 0x8D, 0x14, 0x91,
+        0x66, 0x0F, 0xEF, 0xC0, 0x31, 0xC9,
+        // .vek: cmp rcx,r12; jge .hsum
+        0x4C, 0x39, 0xE1, 0x7D, 0x2C,
+        // movdqu xmm1,[rsi+rcx*4]; movdqu xmm2,[rdx+rcx*4]
+        0xF3, 0x0F, 0x6F, 0x0C, 0x8E, 0xF3, 0x0F, 0x6F, 0x14, 0x8A,
+        // pmulld xmm1,xmm2                                (SSE4.1, 4 × i32)
+        0x66, 0x0F, 0x38, 0x40, 0xCA,
+        // pmovsxdq xmm3,xmm1; pshufd xmm1,xmm1,0x4E; pmovsxdq xmm4,xmm1
+        0x66, 0x0F, 0x38, 0x25, 0xD9, 0x66, 0x0F, 0x70, 0xC9, 0x4E, 0x66, 0x0F, 0x38, 0x25, 0xE1,
+        // paddq xmm0,xmm3; paddq xmm0,xmm4; add rcx,4; jmp .vek
+        0x66, 0x0F, 0xD4, 0xC3, 0x66, 0x0F, 0xD4, 0xC4, 0x48, 0x83, 0xC1, 0x04, 0xEB, 0xCF,
+        // .hsum: pshufd xmm1,xmm0,0x4E; paddq xmm0,xmm1; movq rax,xmm0
+        0x66, 0x0F, 0x70, 0xC8, 0x4E, 0x66, 0x0F, 0xD4, 0xC1, 0x66, 0x48, 0x0F, 0x7E, 0xC0,
+        // mov rbx,r14; imul rbx,r13; add rbx,r15; mov [r10+rbx*8],rax
+        0x4C, 0x89, 0xF3, 0x49, 0x0F, 0xAF, 0xDD, 0x4C, 0x01, 0xFB, 0x49, 0x89, 0x04, 0xDA,
+        // inc r15; jmp .kol
+        0x49, 0xFF, 0xC7, 0xEB, 0x98,
+        // .neste_rad: inc r14; jmp .rad
+        0x49, 0xFF, 0xC6, 0xEB, 0x80,
+        // .ferdig: mov eax,1; pop r15; pop r14; pop r13; pop r12; pop rbx; ret
+        0xB8, 0x01, 0x00, 0x00, 0x00, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x5B, 0xC3,
+        // cpuid-stubb (offset 178): push rbx; mov eax,1; xor ecx,ecx; cpuid;
+        // mov eax,ecx; shr eax,19; and eax,1; pop rbx; ret
+        0x53, 0xB8, 0x01, 0x00, 0x00, 0x00, 0x31, 0xC9, 0x0F, 0xA2,
+        0x89, 0xC8, 0xC1, 0xE8, 0x13, 0x83, 0xE0, 0x01, 0x5B, 0xC3
+    ]
+}
+
+funksjon _tn_cpuid_off() -> heiltall { returner 178 }
+
+funksjon _tn_svar(status: tekst, feil: tekst) {
+    returner {"abi": "norscode-tensor-v1", "status": status, "error": feil}
+}
+
+// C: nc_atomic_text_field — berre tekstverdiar, elles standard.
+funksjon _tn_tekst(req, felt: tekst) -> tekst {
+    hvis ikkje finnes_nøkkel(req, felt) { returner "" }
+    la v = req[felt]
+    hvis builtin.type(v) != "tekst" { returner "" }
+    returner v
+}
+
+// C: nc_atomic_int_field(.., -1) — NC_INT → verdien, NC_STR → strtoll(s, NULL, 10),
+// alt anna (desimaltal, boolsk, null, liste) → -1. Eigen tolkar i staden for
+// _jit_heiltal_felt, som godtok 2.0 via tekst(v) og avviste " 2"/"+2"/"2x" (C godtek dei).
+funksjon _tn_heiltal(req, felt: tekst) -> heiltall {
+    hvis ikkje finnes_nøkkel(req, felt) { returner 0 - 1 }
+    la v = req[felt]
+    la t = builtin.type(v)
+    hvis t == "heltall" { returner v }
+    hvis t == "tekst" { returner _tn_strtoll(v) }
+    returner 0 - 1
+}
+
+// strtoll(s, NULL, 10): hopp over ledande kvitt-teikn (C isspace: 9..13 og 32), valfritt
+// forteikn, sifre fram til første ikkje-siffer; ingen sifre → 0. Mettar ved 10^12 i
+// staden for LLONG_MAX (grensene avviser alt over 4096 uansett), so ingen overflyt.
+funksjon _tn_strtoll(s: tekst) -> heiltall {
+    la n: heiltall = lengde(s)
+    la i: heiltall = 0
+    la kvitt = sann
+    mens kvitt og i < n {
+        la c = builtin.char_code(builtin.slice(s, i, i + 1))
+        hvis c == 32 eller (c >= 9 og c <= 13) { i = i + 1 } ellers { kvitt = usann }
+    }
+    la neg = usann
+    hvis i < n {
+        la f = builtin.slice(s, i, i + 1)
+        hvis f == "-" {
+            neg = sann
+            i = i + 1
+        } ellers hvis f == "+" {
+            i = i + 1
+        }
+    }
+    la v: heiltall = 0
+    la siffer = sann
+    mens siffer og i < n {
+        la d = builtin.char_code(builtin.slice(s, i, i + 1)) - 48
+        hvis d >= 0 og d <= 9 {
+            hvis v < 1000000000000 { v = v * 10 + d }
+            i = i + 1
+        } ellers {
+            siffer = usann
+        }
+    }
+    hvis neg { returner 0 - v }
+    returner v
+}
+
+// Legg kjerna i ei R|X-side éin gong og spør CPUID. Ærleg: sann berre når
+// SSE4.1-kjerna faktisk kan køyrast.
+funksjon _tn_simd_klar() -> boolsk {
+    hvis _tn_simd != 0 { returner _tn_simd == 1 }
+    _tn_simd = 2
+    la adr = _sys_mmap_rw(4096)              // mmap RW, anonym
+    hvis adr < 0 { returner usann }
+    la kode = _tn_kjerne_bytes()
+    la i: heiltall = 0
+    mens i < lengde(kode) { builtin.raw_store8(adr + i, kode[i]) i = i + 1 }
+    hvis _sys_mprotect_rx(adr, 4096) != 0 {            // mprotect R|X (W^X)
+        _sys_munmap(adr, 4096)
+        returner usann
+    }
+    // argp er ignorert av stubben; send ein gyldig ikkje-null-verdi.
+    hvis builtin.raw_call(adr + _tn_cpuid_off(), adr) != 1 {
+        _sys_munmap(adr, 4096)
+        returner usann
+    }
+    _tn_kode = adr
+    _tn_simd = 1
+    returner sann
+}
+
+funksjon _tn_backend() -> tekst {
+    hvis _tn_simd_klar() { returner "simd-x86_64-sse4.1" }
+    returner "scalar"
+}
+
+funksjon _tn_int16_liste(l, n: heiltall) -> boolsk {
+    la i: heiltall = 0
+    mens i < n {
+        la v = l[i]
+        hvis builtin.type(v) != "heltall" { returner usann }
+        hvis v < 0 - 32768 eller v > 32767 { returner usann }
+        i = i + 1
+    }
+    returner sann
+}
+
+// Skalar veg (ingen SSE4.1): same heiltalsløkke som std.tensor sin reserve.
+funksjon _tn_matmul_skalar(l, r, rader: heiltall, inner: heiltall, kolonner: heiltall) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < rader {
+        la c: heiltall = 0
+        mens c < kolonner {
+            la sum: heiltall = 0
+            la k: heiltall = 0
+            mens k < inner {
+                sum = sum + l[i * inner + k] * r[k * kolonner + c]
+                k = k + 1
+            }
+            legg_til(ut, sum)
+            c = c + 1
+        }
+        i = i + 1
+    }
+    returner ut
+}
+
+// SSE4.1-veg. Pakkar to i32 per 8-byte-ord (little endian: lågt ord = element k).
+// Verdiane er validerte i int16, so hi * 2^32 + lo_u er eksakt (ingen overflyt).
+// Returnerer [] ved mmap-/kjernefeil (grensene gjev alltid rader*kolonner >= 1, so
+// tom liste er eit utvetydig feilsignal; unngår null-sentinel, jf. rå-null-vs-boksa-0-fella).
+funksjon _tn_matmul_simd(l, r, rader: heiltall, inner: heiltall, kolonner: heiltall) {
+    // Vakt: aldri raw_call til adresse 0 om nokon kallar forbi _tn_simd_klar().
+    hvis _tn_kode == 0 { returner [] }
+    la inner_p: heiltall = ((inner + 3) / 4) * 4
+    la a_len: heiltall = rader * inner_p * 4
+    la b_len: heiltall = kolonner * inner_p * 4
+    la o_len: heiltall = rader * kolonner * 8
+    la total: heiltall = ((64 + a_len + b_len + o_len + 4095) / 4096) * 4096
+    la blokk = _sys_mmap_rw(total)           // mmap RW, anonym (null-fylt)
+    hvis blokk < 0 { returner [] }
+    la a_adr: heiltall = blokk + 64
+    la b_adr: heiltall = a_adr + a_len
+    la o_adr: heiltall = b_adr + b_len
+    la rr: heiltall = 0
+    mens rr < rader {
+        la basis: heiltall = rr * inner
+        la k: heiltall = 0
+        mens k < inner {
+            la lo: heiltall = l[basis + k]
+            la hi: heiltall = 0
+            hvis k + 1 < inner { hi = l[basis + k + 1] }
+            hvis lo < 0 { lo = lo + 4294967296 }
+            builtin.raw_store64(a_adr + (rr * inner_p + k) * 4, hi * 4294967296 + lo)
+            k = k + 2
+        }
+        rr = rr + 1
+    }
+    la c: heiltall = 0
+    mens c < kolonner {
+        la k: heiltall = 0
+        mens k < inner {
+            la lo: heiltall = r[k * kolonner + c]
+            la hi: heiltall = 0
+            hvis k + 1 < inner { hi = r[(k + 1) * kolonner + c] }
+            hvis lo < 0 { lo = lo + 4294967296 }
+            builtin.raw_store64(b_adr + (c * inner_p + k) * 4, hi * 4294967296 + lo)
+            k = k + 2
+        }
+        c = c + 1
+    }
+    builtin.raw_store64(blokk, a_adr)
+    builtin.raw_store64(blokk + 8, b_adr)
+    builtin.raw_store64(blokk + 16, o_adr)
+    builtin.raw_store64(blokk + 24, rader)
+    builtin.raw_store64(blokk + 32, inner_p)
+    builtin.raw_store64(blokk + 40, kolonner)
+    la rc = builtin.raw_call(_tn_kode, blokk)
+    hvis rc != 1 {
+        _sys_munmap(blokk, total)
+        returner []
+    }
+    la ut: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < rader * kolonner {
+        legg_til(ut, builtin.raw_load64(o_adr + i * 8))
+        i = i + 1
+    }
+    _sys_munmap(blokk, total)                    // munmap
+    returner ut
+}
+
+funksjon tensor_operation(req) {
+    hvis builtin.type(req) != "ordbok" { returner _tn_svar("feil", "request must be a map") }
+    hvis _tn_tekst(req, "abi") != "norscode-tensor-v1" { returner _tn_svar("feil", "invalid ABI") }
+    la op = _tn_tekst(req, "operation")
+    hvis op == "status" {
+        la s = _tn_svar("ferdig", "")
+        s["backend"] = _tn_backend()
+        la lanes: heiltall = 1
+        hvis _tn_simd_klar() { lanes = 4 }
+        s["vector_lanes"] = lanes
+        s["metal_available"] = usann
+        returner s
+    }
+    hvis op != "matmul_i32" { returner _tn_svar("feil", "unsupported tensor operation") }
+    la rader = _tn_heiltal(req, "rows")
+    la inner = _tn_heiltal(req, "inner")
+    la kolonner = _tn_heiltal(req, "columns")
+    hvis rader <= 0 eller inner <= 0 eller kolonner <= 0 eller
+       rader > 4096 eller inner > 4096 eller kolonner > 4096 eller
+       rader * kolonner > 1000000 eller rader * inner * kolonner > 20000000 {
+        returner _tn_svar("feil", "tensor limits exceeded")
+    }
+    la l = []
+    la r = []
+    hvis finnes_nøkkel(req, "left") { l = req["left"] }
+    hvis finnes_nøkkel(req, "right") { r = req["right"] }
+    hvis builtin.type(l) != "liste" eller builtin.type(r) != "liste" eller
+       lengde(l) != rader * inner eller lengde(r) != inner * kolonner {
+        returner _tn_svar("feil", "tensor shape mismatch")
+    }
+    hvis ikkje _tn_int16_liste(l, rader * inner) { returner _tn_svar("feil", "left value outside int16 range") }
+    hvis ikkje _tn_int16_liste(r, inner * kolonner) { returner _tn_svar("feil", "right value outside int16 range") }
+    hvis _tn_tekst(req, "backend") == "metal" { returner _tn_svar("feil", "metal backend unavailable") }
+    la data = []
+    la backend = "scalar"
+    hvis _tn_simd_klar() {
+        data = _tn_matmul_simd(l, r, rader, inner, kolonner)
+        hvis lengde(data) > 0 { backend = "simd-x86_64-sse4.1" }
+    }
+    hvis lengde(data) == 0 { data = _tn_matmul_skalar(l, r, rader, inner, kolonner) }
+    la ut = _tn_svar("ferdig", "")
+    ut["data"] = data
+    ut["rows"] = rader
+    ut["columns"] = kolonner
+    ut["backend"] = backend
+    returner ut
+}
+
+// ── Native trådar (norscode-native-thread-v1) ────────────────────────────────
+// thread.*-primitiv køyrer i ein clone(2)-tråd på ein pure-int native veg
+// (thread_dispatch-atomet) — ingen GC, ingen VM. __main__.*-brukarfunksjonar
+// treng VM og er ikkje støtta enno.
+la _th_tabell = {}
+la _th_neste = 0
+la _mx_tabell = {}
+la _mx_neste = 0
+
+funksjon _th_feil(kode: tekst, melding: tekst) {
+    returner {"abi": "norscode-native-thread-v1", "status": kode, "error": melding, "handle": "", "thread_id": "", "value": ""}
+}
+
+// futex(uaddr, op, val, timeout_ptr): FUTEX_WAIT / FUTEX_WAKE (nummer frå native_sys).
+funksjon _futex_wait(addr: heiltall, venta: heiltall, timeout_ms: heiltall) -> heiltall {
+    hvis timeout_ms <= 0 {
+        returner builtin.sys6(nsys._nr("futex"), addr, nsys._flagg("FUTEX_WAIT"), venta, 0, 0, 0)
+    }
+    // timespec i arena
+    la ts = _arena_alloc(nsys._layout("timespec", "storleik"))
+    builtin.raw_store64(ts + nsys._layout("timespec", "sec"), timeout_ms / 1000)
+    builtin.raw_store64(ts + nsys._layout("timespec", "nsec"), (timeout_ms % 1000) * 1000000)
+    returner builtin.sys6(nsys._nr("futex"), addr, nsys._flagg("FUTEX_WAIT"), venta, ts, 0, 0)
+}
+
+funksjon _futex_wake(addr: heiltall, tal: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("futex"), addr, nsys._flagg("FUTEX_WAKE"), tal, 0, 0, 0)
+}
+
+funksjon _th_arg_int(args, felt: tekst) -> heiltall {
+    hvis args == null eller ikkje finnes_nøkkel(args, felt) { returner 0 }
+    returner _jit_heiltal_felt(args[felt])
+}
+
+funksjon thread_spawn(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _th_feil("error", "invalid request") }
+    la fn = _jit_tekst_felt(req, "fn", "")
+    la args = req["args"]
+    la stack_bytes = _jit_heiltal_felt(req["stack_bytes"])
+    hvis stack_bytes < 65536 { stack_bytes = 65536 }
+    stack_bytes = ((stack_bytes + 4095) / 4096) * 4096
+
+    // Deskriptor: [0]op [8]done [16]cancel [24]addr [32]tal
+    la desc = _arena_alloc(64)
+    hvis desc == 0 { returner _th_feil("error", "arena full") }
+    builtin.raw_store64(desc + 8, 0)    // done
+    builtin.raw_store64(desc + 16, 0)   // cancel
+
+    la retverdi = ""
+    hvis fn == "thread.noop" {
+        builtin.raw_store64(desc, 0)
+    } ellers hvis fn == "thread.atomic_increment" {
+        la handle = _jit_tekst_felt(args, "handle", "")
+        hvis handle == "" eller ikkje finnes_nøkkel(_at_tabell, handle) { returner _th_feil("error", "ukjent atomvariabel") }
+        builtin.raw_store64(desc, 1)
+        builtin.raw_store64(desc + 24, _at_tabell[handle]["addr"])
+        builtin.raw_store64(desc + 32, _th_arg_int(args, "iterations"))
+    } ellers hvis fn == "thread.condition_signal" {
+        la ch = _jit_tekst_felt(args, "condition_handle", "")
+        hvis ch == "" eller ikkje finnes_nøkkel(_mx_tabell, ch) { returner _th_feil("error", "ukjent condition") }
+        builtin.raw_store64(desc, 2)
+        builtin.raw_store64(desc + 24, _mx_tabell[ch])
+        builtin.raw_store64(desc + 32, _th_arg_int(args, "delay_ms"))
+        retverdi = "signalled"
+    } ellers {
+        // __main__.*-brukarfunksjonar treng VM — ikkje støtta i den native vegen enno.
+        returner _th_feil("error", "native thread backend støttar berre thread.*-primitiv (fekk " + fn + ")")
+    }
+
+    la stack = _sys_mmap_rw(stack_bytes)   // mmap stack
+    hvis stack < 0 { returner _th_feil("error", "mmap stack feila") }
+    la stack_top = stack + stack_bytes
+    // CLONE_VM|FS|FILES|SIGHAND|THREAD (native_sys: CLONE_TRAAD)
+    la tid = builtin.thread_spawn_native(nsys._flagg("CLONE_TRAAD"), stack_top, desc)
+    _th_neste = _th_neste + 1
+    la h = "thread-" + tekst_fra_heltall(_th_neste)
+    _th_tabell[h] = {"desc": desc, "stack": stack, "stack_bytes": stack_bytes, "tid": tid, "value": retverdi}
+    returner {"abi": "norscode-native-thread-v1", "status": "started", "handle": h, "thread_id": tekst_fra_heltall(tid), "value": ""}
+}
+
+funksjon thread_join(req) {
+    la h = _jit_tekst_felt(req, "handle", "")
+    hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
+    la e = _th_tabell[h]
+    la desc = e["desc"]
+    la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+    // Vent til done-ordet blir 1. FUTEX_WAIT returnerer straks om verdien != venta.
+    hvis builtin.raw_load64(desc + 8) == 0 {
+        hvis timeout_ms == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout", "handle": h, "value": ""} }
+        _futex_wait(desc + 8, 0, timeout_ms)
+        hvis builtin.raw_load64(desc + 8) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "timeout", "handle": h, "value": ""} }
+    }
+    // Handtaket er konsumert etter fullført join — eit nytt join gjev "error".
+    la rv = e["value"]
+    la rtid = e["tid"]
+    fjern_nokkel(_th_tabell, h)
+    returner {"abi": "norscode-native-thread-v1", "status": "finished", "handle": h, "value": rv, "thread_id": tekst_fra_heltall(rtid)}
+}
+
+funksjon thread_sync(req) {
+    la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "cancel" {
+        la h = _jit_tekst_felt(req, "handle", "")
+        hvis h == "" eller ikkje finnes_nøkkel(_th_tabell, h) { returner _th_feil("error", "ukjent tråd") }
+        builtin.raw_store64(_th_tabell[h]["desc"] + 16, 1)
+        returner {"abi": "norscode-native-thread-v1", "status": "cancelled"}
+    }
+    hvis op == "mutex_create" eller op == "condition_create" {
+        la addr = _arena_alloc(8)
+        hvis addr == 0 { returner _th_feil("error", "arena full") }
+        builtin.raw_store64(addr, 0)
+        _mx_neste = _mx_neste + 1
+        la h = "sync-" + tekst_fra_heltall(_mx_neste)
+        _mx_tabell[h] = addr
+        returner {"abi": "norscode-native-thread-v1", "status": "ready", "handle": h}
+    }
+    la mh = _jit_tekst_felt(req, "handle", "")
+    // Ikkje-blokkerande primitiv for grøne trådar (selfhost/vm.no): ein grøn tråd
+    // som futex-ventar ville stoppa heile OS-tråden og dermed alle grøne trådar.
+    hvis op == "mutex_trylock" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
+        hvis builtin.atomic_cas(_mx_tabell[mh], 0, 1) == 0 { returner {"abi": "norscode-native-thread-v1", "status": "ready"} }
+        returner {"abi": "norscode-native-thread-v1", "status": "blocked"}
+    }
+    hvis op == "condition_seq" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent condition") }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": builtin.raw_load64(_mx_tabell[mh])}
+    }
+    hvis op == "mutex_lock" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
+        la addr = _mx_tabell[mh]
+        la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+        mens builtin.atomic_cas(addr, 0, 1) != 0 {
+            la r = _futex_wait(addr, 1, timeout_ms)
+            hvis timeout_ms > 0 og r == 0 - nsys._errno("ETIMEDOUT") { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+        }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "mutex_unlock" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent mutex") }
+        builtin.raw_store64(_mx_tabell[mh], 0)
+        _futex_wake(_mx_tabell[mh], 1)
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "condition_wait" {
+        la cond_h = mh
+        hvis ikkje finnes_nøkkel(_mx_tabell, cond_h) { returner _th_feil("error", "ukjent condition") }
+        la caddr = _mx_tabell[cond_h]
+        la mutex_h = _jit_tekst_felt(req, "mutex_handle", "")
+        la timeout_ms = _jit_heiltal_felt(req["timeout_ms"])
+        // Sekvensteljar: les gjeldande seq FØR mutex slepp; eit signal aukar seq.
+        // Utan dette ville eit gamalt signal frå ein tidlegare runde få neste
+        // wait til å returnere med ein gong (ready) i staden for å tidsavbryte.
+        la seq = builtin.raw_load64(caddr)
+        hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
+            builtin.raw_store64(_mx_tabell[mutex_h], 0)
+            _futex_wake(_mx_tabell[mutex_h], 1)
+        }
+        hvis builtin.raw_load64(caddr) == seq { _futex_wait(caddr, seq, timeout_ms) }
+        la signalisert = builtin.raw_load64(caddr) != seq
+        hvis mutex_h != "" og finnes_nøkkel(_mx_tabell, mutex_h) {
+            mens builtin.atomic_cas(_mx_tabell[mutex_h], 0, 1) != 0 { _futex_wait(_mx_tabell[mutex_h], 1, timeout_ms) }
+        }
+        hvis ikkje signalisert { returner {"abi": "norscode-native-thread-v1", "status": "timeout"} }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "condition_signal" eller op == "condition_broadcast" {
+        hvis ikkje finnes_nøkkel(_mx_tabell, mh) { returner _th_feil("error", "ukjent condition") }
+        builtin.atomic_xadd(_mx_tabell[mh], 1)     // auk sekvensen
+        _futex_wake(_mx_tabell[mh], 2147483647)
+        returner {"abi": "norscode-native-thread-v1", "status": "ready"}
+    }
+    hvis op == "mutex_destroy" eller op == "condition_destroy" {
+        hvis finnes_nøkkel(_mx_tabell, mh) { fjern_nokkel(_mx_tabell, mh) }
+        returner {"abi": "norscode-native-thread-v1", "status": "finished"}
+    }
+    hvis op == "signal_block" eller op == "signal_unblock" eller op == "signal_query" {
+        // SIGUSR1. Bygg sigsett i arena. rt_sigprocmask(how, set, old, sigsetstorleik).
+        la bit: heiltall = 1 << (nsys._flagg("SIGUSR1") - 1)
+        la sz: heiltall = nsys._layout("sigset", "storleik")
+        la nr_mask = nsys._nr("rt_sigprocmask")
+        la maske = _arena_alloc(16)
+        builtin.raw_store64(maske, bit)
+        builtin.raw_store64(maske + 8, 0)
+        hvis op == "signal_block" {
+            builtin.sys6(nr_mask, nsys._flagg("SIG_BLOCK"), maske, 0, sz, 0, 0)
+            returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": "sann"}
+        }
+        hvis op == "signal_unblock" {
+            builtin.sys6(nr_mask, nsys._flagg("SIG_UNBLOCK"), maske, 0, sz, 0, 0)
+            returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": "sann"}
+        }
+        // signal_query: les gjeldande maske (how blir ignorert når set=0), sjekk SIGUSR1-biten.
+        la old = _arena_alloc(16)
+        builtin.sys6(nr_mask, nsys._flagg("SIG_BLOCK"), 0, old, sz, 0, 0)
+        la blokkert = "usann"
+        hvis (builtin.raw_load64(old) & bit) != 0 { blokkert = "sann" }
+        returner {"abi": "norscode-native-thread-v1", "status": "ready", "value": blokkert}
+    }
+    returner _th_feil("error", "ukjend sync-operasjon: " + op)
+}
+
+funksjon thread_current_id() {
+    returner builtin.sys6(nsys._nr("gettid"), 0, 0, 0, 0, 0, 0)
+}
+
+funksjon jit_operation(req) {
+    hvis req == null eller builtin.type(req) != "ordbok" { returner _jit_feil("invalid request") }
+    hvis _jit_tekst_felt(req, "abi", "") != "norscode-jit-v1" { returner _jit_feil("unsupported JIT ABI") }
+    la op = _jit_tekst_felt(req, "operation", "")
+    hvis op == "compile" { returner _jit_kompiler(req) }
+    hvis op == "run" { returner _jit_køyr(req) }
+    hvis op == "free" { returner _jit_frigjer(req) }
+    hvis op == "status" {
+        returner {"status": "ferdig", "abi": "norscode-jit-v1", "memory_policy": "write-xor-execute",
+                  "backend": "x86_64", "active": _jit_aktive, "compiled": _jit_neste}
+    }
+    returner _jit_feil("ukjend JIT-operasjon: " + op)
+}
+
+// ─── TLS 1.3 over sokkel (M3) ───────────────────────────────────────────────
+funksjon _tls_random32() -> liste_heiltall {
+    la r: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < 32 {
+        legg_til(r, _entropi_byte())     // kastar (fail-closed) når kjernen nektar entropi
+        i = i + 1
+    }
+    returner r
+}
+funksjon _tls_fd_les(fd: heiltall) -> ordbok {
+    la b = _sk_buf()
+    la buf: heiltall = b + 4096
+    la n = builtin.sys6(nsys._nr("read"), fd, buf, 32768, 0, 0, 0)
+    hvis n == 0 - nsys._errno("EAGAIN") { returner {"status": "ventende", "data": []} }
+    hvis n < 0 { returner {"status": "feil", "data": []} }
+    hvis n == 0 { returner {"status": "lukka", "data": []} }
+    la l: liste_heiltall = []
+    la i: heiltall = 0
+    mens i < n { legg_til(l, builtin.raw_load8(buf + i)) i = i + 1 }
+    returner {"status": "ok", "data": l}
+}
+funksjon _tls_fd_skriv(fd: heiltall, data: liste_heiltall) -> heiltall {
+    la total = lengde(data)
+    la sendt: heiltall = 0
+    la stall: heiltall = 0
+    mens sendt < total {
+        la b = _sk_buf()
+        la buf: heiltall = b + 4096
+        la bit = total - sendt
+        hvis bit > 32768 { bit = 32768 }
+        la k: heiltall = 0
+        mens k < bit { builtin.raw_store8(buf + k, data[sendt + k] & 255) k = k + 1 }
+        la n = builtin.sys6(nsys._nr("sendto"), fd, buf, bit, nsys._flagg("MSG_NOSIGNAL"), 0, 0)
+        hvis n == 0 - nsys._errno("EAGAIN") {
+            // EAGAIN: sokkelen er ikkje-blokkerande. Vent på skrive-klarheit (POLLOUT)
+            // i staden for tett spinn; gi opp etter gjentekne stall (peer som sluttar
+            // å lese hengjer ikkje kallaren i det uendelege).
+            _sys_pollfd(b, fd, nsys._flagg("POLLOUT"))
+            la pr = _sys_poll(b, 1, 5000, b + 16)            // POLLOUT, 5 s
+            stall = stall + 1
+            hvis pr <= 0 og stall > 3 { returner -1 }
+            fortsett
+        }
+        hvis n < 0 { returner -1 }
+        stall = 0
+        sendt = sendt + n
+    }
+    returner sendt
+}
+funksjon _tls_connect(req: ordbok) -> ordbok {
+    la host = _nw_tekst(req, "host", "")
+    la port = _nw_heiltal(req, "port", 0)
+    la hostname = _nw_tekst(req, "hostname", host)
+    hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
+    la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
+    hvis fd < 0 { returner _nw_feil("", "socket failed") }
+    la r = 0
+    prøv { r = socket_connect(fd, host, port) } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
+    hvis r < 0 { _sys_lukk(fd) returner _nw_feil("", "connect failed") }
+    _pg_nonblock(fd)
+    la h = _nw_ny_slot(fd, "tls")
+    la ca_file = _nw_tekst(req, "ca_file", "")
+    la ca_der: liste_heiltall = []
+    hvis ca_file != "" { prøv { ca_der = x509.pem_til_der(builtin.fil_les(ca_file)) } fang (e) { ca_der = [] } }
+    la cc_file = _nw_tekst(req, "client_cert_file", "")
+    la ck_file = _nw_tekst(req, "client_key_file", "")
+    la cc_der: liste_heiltall = []
+    la ck_seed: liste_heiltall = []
+    hvis cc_file != "" { prøv { cc_der = x509.pem_til_der(builtin.fil_les(cc_file)) } fang (e) { cc_der = [] } }
+    hvis ck_file != "" { prøv { la _ck = x509.ed25519_privat_frå_pem(builtin.fil_les(ck_file)) hvis _ck["status"] == "ok" { ck_seed = _ck["seed"] } } fang (e) { ck_seed = [] } }
+    la krev_ocsp = _nw_tekst(req, "require_ocsp", "") == "1"
+    la sess = tls13.ny_klient({"priv": _tls_random32(), "hostname": hostname, "ca_der": ca_der, "client_cert_der": cc_der, "client_priv_seed": ck_seed, "require_ocsp": krev_ocsp})
+    _tls_sess[h] = {"fd": fd, "sess": sess, "rolle": "klient", "ch_sendt": usann, "etablert": usann, "appbuf": []}
+    returner _nw_res("connected", h, "", 0, _nw_lokal_port(fd), "")
+}
+funksjon _tls_listen(req: ordbok) -> ordbok {
+    la host = _nw_tekst(req, "host", "127.0.0.1")
+    la port = _nw_heiltal(req, "port", 0)
+    la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
+    hvis fd < 0 { returner _nw_feil("", "socket failed") }
+    prøv { hvis socket_bind(fd, host, port) < 0 { _sys_lukk(fd) returner _nw_feil("", "bind failed") } } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
+    la backlog = _nw_heiltal(req, "backlog", 128)
+    hvis builtin.sys6(nsys._nr("listen"), fd, backlog, 0, 0, 0, 0) < 0 { _sys_lukk(fd) returner _nw_feil("", "listen failed") }
+    _pg_nonblock(fd)
+    la h = _nw_ny_slot(fd, "tls-lyttar")
+    la id_seed = _nw_hex_dekod(_nw_tekst(req, "tls_id_hex", ""))
+    la cert_file = _nw_tekst(req, "cert_file", "")
+    la key_file = _nw_tekst(req, "key_file", "")
+    la cert_der: liste_heiltall = []
+    la priv_seed: liste_heiltall = []
+    hvis cert_file != "" { prøv { cert_der = x509.pem_til_der(builtin.fil_les(cert_file)) } fang (e) { cert_der = [] } }
+    hvis key_file != "" { prøv { la _pk = x509.ed25519_privat_frå_pem(builtin.fil_les(key_file)) hvis _pk["status"] == "ok" { priv_seed = _pk["seed"] } } fang (e) { priv_seed = [] } }
+    // Fail-closed på manglande/uleselege filer (C-kontrakten, test_tls_http): ein
+    // lyttar utan sertifikatet han vart beden om skal ikkje starte og svare med
+    // ein tilfeldig identitet. Nøkkeltypen blir ikkje sjekka her (RSA-nøklar vert
+    // framleis handterte av handshake-laget).
+    hvis cert_file != "" og lengde(cert_der) == 0 { _sys_lukk(fd) fjern_nokkel(_nw_slots, h) returner _nw_feil("", "TLS certificate unavailable: " + cert_file) }
+    hvis key_file != "" og ikkje builtin.fil_finnes(key_file) { _sys_lukk(fd) fjern_nokkel(_nw_slots, h) returner _nw_feil("", "TLS key unavailable: " + key_file) }
+    la cca_file = _nw_tekst(req, "client_ca_file", "")
+    la cca_der: liste_heiltall = []
+    hvis cca_file != "" { prøv { cca_der = x509.pem_til_der(builtin.fil_les(cca_file)) } fang (e) { cca_der = [] } }
+    la krev = _nw_tekst(req, "require_client_cert", "") == "1"
+    la crl_file = _nw_tekst(req, "client_crl_file", "")
+    la crl_der: liste_heiltall = []
+    hvis crl_file != "" { prøv { crl_der = x509.crl_pem_til_der(builtin.fil_les(crl_file)) } fang (e) { crl_der = [] } }
+    la ocsp_file = _nw_tekst(req, "ocsp_response_file", "")
+    la ocsp_der: liste_heiltall = []
+    hvis ocsp_file != "" { prøv { ocsp_der = builtin.fil_les_binær(ocsp_file) } fang (e) { ocsp_der = [] } }
+    _tls_sess[h] = {"fd": fd, "rolle": "lyttar", "id_seed": id_seed, "cert_der": cert_der, "priv_seed": priv_seed, "client_ca_der": cca_der, "krev_klient": krev, "crl_der": crl_der, "ocsp_der": ocsp_der}
+    returner _nw_res("listening", h, "", 0, _nw_lokal_port(fd), "")
+}
+funksjon _tls_accept(lh: tekst) -> ordbok {
+    la lyttar = _tls_sess[lh]
+    la fd: heiltall = lyttar["fd"]
+    la b = _sk_buf()
+    builtin.raw_store64(b + 96, 16)
+    la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
+    hvis ny == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", lh, "", 0, 0, "") }
+    hvis ny < 0 { returner _nw_feil(lh, "accept failed") }
+    _pg_nonblock(ny)
+    la h = _nw_ny_slot(ny, "tls")
+    la sess = tls13.ny_tenar({"priv": _tls_random32(), "id_seed": lyttar["id_seed"], "cert_der": lyttar["cert_der"], "priv_seed": lyttar["priv_seed"], "require_client_cert": lyttar["krev_klient"], "client_ca_der": lyttar["client_ca_der"], "crl_der": lyttar["crl_der"], "ocsp_der": lyttar["ocsp_der"]})
+    _tls_sess[h] = {"fd": ny, "sess": sess, "rolle": "tenar", "ch_sendt": usann, "etablert": usann, "appbuf": []}
+    returner _nw_res("connected", h, "", 0, 0, "")
+}
+funksjon _tls_etablert_res(h: tekst, sess: ordbok) -> ordbok {
+    la ut = _nw_res("connected", h, "", 0, 0, "")
+    ut["tls_version"] = sess["tls_version"]
+    ut["cipher"] = sess["cipher"]
+    ut["peer_verified"] = sess["peer_verified"]
+    ut["peer_subject"] = sess["peer_subject"]
+    hvis finnes_nøkkel(sess, "peer_cert_present") { ut["peer_cert_present"] = sess["peer_cert_present"] }
+    hvis finnes_nøkkel(sess, "ocsp_stapled") { ut["ocsp_stapled"] = sess["ocsp_stapled"] }
+    hvis finnes_nøkkel(sess, "ocsp_status") { ut["ocsp_status"] = sess["ocsp_status"] }
+    returner ut
+}
+funksjon _tls_handshake(req: ordbok) -> ordbok {
+    la h = _nw_tekst(req, "handle", "")
+    hvis ikkje finnes_nøkkel(_tls_sess, h) { returner _nw_feil(h, "unknown TLS handle") }
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la fd: heiltall = st["fd"]
+    hvis st["etablert"] { returner _tls_etablert_res(h, sess) }
+    hvis st["rolle"] == "klient" og ikkje st["ch_sendt"] {
+        la ch = tls13.start(sess)
+        hvis _tls_fd_skriv(fd, ch) < 0 { returner _nw_feil(h, "tls write failed") }
+        st["ch_sendt"] = sann
+    }
+    la r = _tls_fd_les(fd)
+    hvis r["status"] == "feil" { returner _nw_feil(h, "tls read failed") }
+    hvis r["status"] == "lukka" { returner _nw_feil(h, "tls peer closed") }
+    hvis lengde(r["data"]) == 0 { returner _nw_res("ventende", h, "", 0, 0, "") }
+    la res = tls13.motta(sess, r["data"])
+    hvis res["status"] == "feil" {
+        # shutdown(SHUT_RDWR), IKKJE close: motparten får EOF og resolverer til feil
+        # med ein gong (i staden for å vente på handshake-timeouten), medan fd-en
+        # framleis er eigd av handle-en til native_lukk. close-on-fail (4ec1394)
+        # lukka fd-en under handle-en → seinare native_lukk lukka same fd-nummer
+        # ein gong til etter gjenbruk (dobbel close → hang, revertert i 86f31e6).
+        builtin.sys6(nsys._nr("shutdown"), fd, nsys._flagg("SHUT_RDWR"), 0, 0, 0, 0)
+        returner _nw_feil(h, "tls handshake: " + res["feil"])
+    }
+    hvis lengde(res["ut"]) > 0 { hvis _tls_fd_skriv(fd, res["ut"]) < 0 { returner _nw_feil(h, "tls write failed") } }
+    hvis res["status"] == "ferdig" { st["etablert"] = sann returner _tls_etablert_res(h, sess) }
+    returner _nw_res("ventende", h, "", 0, 0, "")
+}
+funksjon _tls_les(req: ordbok, h: tekst, op: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la r = _tls_fd_les(st["fd"])
+    hvis r["status"] == "feil" { returner _nw_feil(h, "tls read failed") }
+    hvis r["status"] == "lukka" og lengde(st["appbuf"]) == 0 { returner _nw_res("closed", h, "", 0, 0, "") }
+    hvis lengde(r["data"]) > 0 {
+        la nb: liste_heiltall = st["appbuf"]
+        la i: heiltall = 0
+        mens i < lengde(r["data"]) { legg_til(nb, r["data"][i]) i = i + 1 }
+        st["appbuf"] = nb
+    }
+    # Prosesser komplette records. Post-handshake sender ekte TLS 1.3-tenarar
+    # NewSessionTicket (inner type 22) og evt KeyUpdate før/mellom app-data (23);
+    # hopp over alt som ikkje er app-data, elles ville HTTP-laget fått ticket-bytes.
+    mens sann {
+        la buf: liste_heiltall = st["appbuf"]
+        hvis lengde(buf) < 5 { returner _nw_res("ventende", h, "", 0, 0, "") }
+        la len = (buf[3] << 8) | buf[4]
+        hvis lengde(buf) < 5 + len { returner _nw_res("ventende", h, "", 0, 0, "") }
+        la post: liste_heiltall = []
+        la j: heiltall = 0
+        mens j < 5 + len { legg_til(post, buf[j]) j = j + 1 }
+        la rest: liste_heiltall = []
+        j = 5 + len
+        mens j < lengde(buf) { legg_til(rest, buf[j]) j = j + 1 }
+        st["appbuf"] = rest
+        la dec = tls13.dekrypter_app(sess, post)
+        hvis dec["status"] != "ok" { returner _nw_feil(h, "tls decrypt failed") }
+        la itype = dec["type"]
+        hvis itype == 21 { returner _nw_res("closed", h, "", 0, 0, "") }   # alert (close_notify)
+        hvis itype != 23 { fortsett }   # 22=NewSessionTicket/KeyUpdate osv. → hopp over
+        la l: liste_heiltall = dec["plaintext"]
+        hvis op == "read" { returner _nw_res("ok", h, _nw_liste_til_tekst(l), lengde(l), 0, "") }
+        la ut = _nw_res("ok", h, "", lengde(l), 0, "")
+        ut["data_hex"] = _nw_hex_kod(l)
+        returner ut
+    }
+    returner _nw_res("ventende", h, "", 0, 0, "")
+}
+funksjon _tls_skriv(req: ordbok, h: tekst, op: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    la sess = st["sess"]
+    la data: liste_heiltall = []
+    hvis op == "write" { data = _nw_tekst_til_liste(_nw_tekst(req, "data", "")) }
+    ellers { data = _nw_hex_dekod(_nw_tekst(req, "data_hex", "")) }
+    hvis lengde(data) == 0 { returner _nw_feil(h, "invalid payload") }
+    la post = tls13.krypter_app(sess, data)
+    hvis _tls_fd_skriv(st["fd"], post) < 0 { returner _nw_feil(h, "tls write failed") }
+    returner _nw_res("ok", h, "", lengde(data), 0, "")
+}
+funksjon _tls_lukk(h: tekst) -> ordbok {
+    la st = _tls_sess[h]
+    _sys_lukk(st["fd"])
+    fjern_nokkel(_tls_sess, h)
+    // Fjern òg den generiske sokkel-slot-en. Elles fell eit nytt native_lukk på
+    // same handle gjennom til _nw_slots-vegen og lukkar same fd-NUMMER ein gong til
+    // — etter at kjernen kan ha gjenbrukt det for ein annan sokkel (dobbel close).
+    hvis finnes_nøkkel(_nw_slots, h) { fjern_nokkel(_nw_slots, h) }
+    returner _nw_res("closed", h, "", 0, 0, "")
 }
