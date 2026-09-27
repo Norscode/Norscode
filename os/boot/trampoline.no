@@ -128,7 +128,7 @@ funksjon _emit_inngang32() -> heiltall {
     x86.u8(15) x86.u8(34) x86.u8(216)            // mov cr3, eax
     x86.u8(185) x86.u32(0xC0000080)              // mov ecx, EFER
     x86.u8(15) x86.u8(50)                        // rdmsr
-    x86.u8(13) x86.u32(0x101)                      // or eax, LME|SCE
+    x86.u8(13) x86.u32(0x901)                      // or eax, LME|SCE|NXE (NX for W^X i ring 3)
     x86.u8(15) x86.u8(48)                        // wrmsr
     x86.u8(15) x86.u8(32) x86.u8(192)            // mov eax, cr0
     x86.u8(37) x86.u32(0xFFFFFFFB)               // and eax, ~EM
@@ -685,6 +685,59 @@ funksjon _emit_pool_init() -> heiltall {
     x86.mov32_rm(RSI, RBX, 64)
     _strengslutt_maks()
     x86.etikett(ingen_namn)
+    // Modular (bit 3): kopier {start, slutt, streng} (≤ MODUL_MAKS) og skyv poolen forbi
+    // modul-tabellen, modulinnhaldet og strengane (QEMU legg dei etter bss_end).
+    la ingen_mod = _ny("nomod")
+    la mod_lykkje = _ny("modl")
+    la mod_ferdig = _ny("modf")
+    x86.mov_ri(R12, 0)
+    x86.mov_rr(RCX, R14)
+    x86.and_ri(RCX, 8)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ingen_mod)
+    x86.mov32_rm(R15, RBX, 20)                   // mods_count
+    x86.mov32_rm(R10, RBX, 24)                   // mods_addr (fysisk)
+    x86.mov_rr(RAX, R15)
+    x86.shl_ri(RAX, 4)
+    x86.add_rr(RAX, R10)
+    _maks(R13, RAX)
+    x86.mov_ri(RAX, DIREKTEKART())
+    x86.add_rr(R10, RAX)
+    x86.mov_ri_etikett(R11, "modul_kopi")
+    x86.etikett(mod_lykkje)
+    x86.cmp_rr(R12, R15)
+    x86.jcc(x86.CC_AE(), mod_ferdig)
+    x86.mov32_rm(RAX, R10, 4)                    // mod_end
+    _maks(R13, RAX)
+    x86.cmp_ri(R12, info.MODUL_MAKS())
+    la mod_ikkje_kopi = _ny("modnk")
+    x86.jcc(x86.CC_AE(), mod_ikkje_kopi)
+    x86.mov_mr(R11, 8, RAX)
+    x86.mov32_rm(RAX, R10, 0)                    // mod_start
+    x86.mov_mr(R11, 0, RAX)
+    x86.mov32_rm(RAX, R10, 8)                    // string
+    x86.mov_mr(R11, 16, RAX)
+    x86.add_ri(R11, info.MODUL_POST())
+    x86.etikett(mod_ikkje_kopi)
+    x86.mov32_rm(RSI, R10, 8)
+    x86.cmp_ri(RSI, 0)
+    la utan_streng = _ny("modns")
+    x86.jcc(x86.CC_E(), utan_streng)
+    x86.push(R10)
+    x86.push(R11)
+    _strengslutt_maks()
+    x86.pop(R11)
+    x86.pop(R10)
+    x86.etikett(utan_streng)
+    x86.add_ri(R10, 16)
+    x86.add_ri(R12, 1)
+    x86.jmp(mod_lykkje)
+    x86.etikett(mod_ferdig)
+    x86.cmp_ri(R12, info.MODUL_MAKS())
+    x86.jcc(x86.CC_BE(), ingen_mod)
+    x86.mov_ri(R12, info.MODUL_MAKS())
+    x86.etikett(ingen_mod)
+    x86.mov_abs_r("var_modular_tal", R12)
     x86.mov_abs_r("var_mbi_slutt", R13)
     // pool_første = juster_opp(max(pool_start, mbi_slutt), 4096)
     x86.mov_ri_etikett(RAX, "pool_start")
@@ -710,6 +763,10 @@ funksjon _emit_pool_init() -> heiltall {
 
 funksjon _emit_shim() -> heiltall {
     x86.etikett("shim")
+    // K3: SYSCALL frå ring 3 (var_i_brukar != 0) → lagre prosessen og gå til kjernen.
+    // Kjernen sine eigne CPL0-syscalls (var_i_brukar = 0) går vidare her som før.
+    x86.cmp_abs_i8("var_i_brukar", 0)
+    x86.jcc(x86.CC_NE(), "brukar_syscall")
     x86.mov_abs_r("var_prog_rsp", RSP)
     x86.mov_ri_etikett(RSP, "stakk_shim_topp")
     la lagra: liste_heiltall = [RCX, R11, RBX, RBP, RDI, RSI, RDX, R8, R9, R10, R12, R13, R14, R15]
@@ -886,6 +943,16 @@ funksjon _har_feilkode(v: heiltall) -> boolsk {
 funksjon _emit_sidefeil(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     la s_lo = STAKK_TOPP() - STAKK_STORLEIK()
     x86.etikett("isr_14")
+    // K3: #PF frå ring 3 → kjernen (Norscode) avgjer demand-zero eller drap.
+    x86.push(RAX)
+    x86.mov_rm(RAX, RSP, 24)             // cs
+    x86.and_ri(RAX, 3)
+    x86.cmp_ri(RAX, 0)
+    x86.pop(RAX)
+    x86.jcc(x86.CC_E(), "pf_kjerne")
+    x86.push_i8(14)
+    x86.jmp("brukar_felle")
+    x86.etikett("pf_kjerne")
     x86.push(RAX)
     x86.push(RBX)
     x86.push(RCX)
@@ -979,6 +1046,13 @@ funksjon _emit_unnatak() -> heiltall {
     }
     // [rsp]=vektor [rsp+8]=feilkode [rsp+16]=rip [rsp+24]=cs [rsp+32]=rflags [rsp+40]=rsp
     x86.etikett("unnatak_felles")
+    // K3: unnatak frå ring 3 → kjernen drep prosessen (Norscode), ikkje heile maskina.
+    x86.push(RAX)
+    x86.mov_rm(RAX, RSP, 32)             // cs
+    x86.and_ri(RAX, 3)
+    x86.cmp_ri(RAX, 0)
+    x86.pop(RAX)
+    x86.jcc(x86.CC_NE(), "brukar_felle")
     _skriv_melding("\n[kjerne] unnatak v=")
     x86.mov_rm(RAX, RSP, 0)
     x86.call("skriv_hex")
@@ -1021,6 +1095,7 @@ funksjon _emit_info(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     namn[tekst(info.F_SIDEFEIL())] = "var_sidefeil"
     namn[tekst(info.F_HPET_PERIODE())] = "var_hpet_periode"
     namn[tekst(info.F_MBI_SLUTT())] = "var_mbi_slutt"
+    namn[tekst(info.F_MODULAR_TAL())] = "var_modular_tal"
     la konst: ordbok_heltall = {}
     konst[tekst(info.F_MAGI())] = info.MAGI()
     konst[tekst(info.F_VERSJON())] = info.VERSJON()
@@ -1038,6 +1113,7 @@ funksjon _emit_info(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     peikar[tekst(info.F_MMAP())] = "mmap_kopi"
     peikar[tekst(info.F_ARGBLOKK())] = "argblokk"
     peikar[tekst(info.F_BILETE_SLUTT())] = "bss_slutt"
+    peikar[tekst(info.F_MODULAR())] = "modul_kopi"
     la off = 0
     mens off < info.STORLEIK() {
         la k = tekst(off)
@@ -1058,6 +1134,12 @@ funksjon _emit_info(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     x86.nullar(64)
     x86.etikett("mmap_kopi")
     x86.nullar(info.MMAP_MAKS() * info.MMAP_POST())
+    x86.etikett("modul_kopi")
+    x86.nullar(info.MODUL_MAKS() * info.MODUL_POST())
+    // FPU/SSE-tilstanden til kjernen medan ein prosess køyrer (FXSAVE64, 16-justert)
+    x86.juster(16)
+    x86.etikett("kjerne_fx")
+    x86.nullar(512)
     returner 0
 }
 
@@ -1066,7 +1148,8 @@ funksjon _emit_data(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     stubbar.emit_stubbtabell()
     stubbar.emit_ring()
     x86.juster(16)
-    la variablar: liste_tekst = ["var_mbi", "var_prog_rsp", "var_epoke_ns", "var_rdrand", "var_til_e9"]
+    la variablar: liste_tekst = ["var_mbi", "var_prog_rsp", "var_epoke_ns", "var_rdrand", "var_til_e9",
+        "var_i_brukar", "var_pcb", "var_kjerne_rsp", "var_kjerne_cr3", "var_sc_rax"]
     la i = 0
     mens i < lengde(variablar) {
         x86.etikett(variablar[i])
@@ -1106,9 +1189,11 @@ funksjon _emit_data(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
     x86.u8((tss >> 24) & 255)
     x86.u32((tss >> 32) & 0xFFFFFFFF)
     x86.u32(0)
+    x86.u64(0x00CFF2000000FFFF)        // 0x28 brukardata: P, DPL3
+    x86.u64(0x00AFFA000000FFFF)        // 0x30 brukarkode64: P, DPL3, L=1
     x86.juster(8)
     x86.etikett("gdtr")
-    x86.u16(39)
+    x86.u16(55)
     x86.abs64("gdt")
     x86.juster(8)
     x86.etikett("idtr")
@@ -1287,8 +1372,8 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
     // adresse kan liggje over identitetsområdet når ELF-en er stor).
     la bss = bilete_slutt
     la stakkar: liste_tekst = ["stakk_boot_topp", "stakk_shim_topp", "stakk_ist1_topp", "stakk_ist2_topp",
-        "stakk_ist3_topp", "stakk_ist4_topp"]
-    la storleikar: liste_heiltall = [16384, 16384, 16384, 8192, 16384, 16384]
+        "stakk_ist3_topp", "stakk_ist4_topp", "stakk_overgang_topp"]
+    la storleikar: liste_heiltall = [16384, 16384, 16384, 8192, 16384, 16384, 4096]
     i = 0
     mens i < lengde(stakkar) {
         bss = bss + storleikar[i]

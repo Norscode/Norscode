@@ -20,8 +20,16 @@ la RDX = 2
 la RBX = 3
 la RSI = 6
 la RDI = 7
+la RBP = 5
+la RSP = 4
 la R8 = 8
 la R9 = 9
+la R10 = 10
+la R11 = 11
+la R12 = 12
+la R13 = 13
+la R14 = 14
+la R15 = 15
 
 funksjon _outb_konst(port: heiltall, verdi: heiltall) -> heiltall {
     x86.mov_ri(RDX, port)
@@ -156,6 +164,22 @@ funksjon emit_irq_stubbar() -> heiltall {
         x86.etikett(eoi)
         hvis irq >= 8 { _outb_konst(160, 32) }
         _outb_konst(32, 32)
+        hvis irq == 0 {
+            // Avbrot frå ring 3 (CS på [rsp+48] etter fem push) → føregrip: lagre prosessen
+            // og gå tilbake til kjernen (P_VEKTOR = 32). Frå ring 0: vanleg iretq.
+            x86.mov_rm(RAX, RSP, 48)
+            x86.and_ri(RAX, 3)
+            x86.cmp_ri(RAX, 0)
+            x86.jcc(x86.CC_E(), ut)
+            x86.pop(RDI)
+            x86.pop(RSI)
+            x86.pop(RDX)
+            x86.pop(RCX)
+            x86.pop(RAX)
+            x86.push_i8(0)
+            x86.push_i8(v)
+            x86.jmp("brukar_felle")
+        }
         x86.etikett(ut)
         x86.pop(RDI)
         x86.pop(RSI)
@@ -344,6 +368,148 @@ funksjon emit_stubbar() -> heiltall {
     x86.pushfq()
     x86.pop(RAX)
     x86.ret()
+    // kopier(blk: [dst, src, n])
+    _stubb("kopier")
+    x86.mov_rm(RCX, RDI, 16)
+    x86.mov_rm(RSI, RDI, 8)
+    x86.mov_rm(RDI, RDI, 0)
+    x86.cld()
+    x86.rep_movsb()
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    // skriv_va(blk: [va, n]) → COM1 (same rutine som write-shimmen)
+    _stubb("skriv_va")
+    x86.mov_rm(RCX, RDI, 8)
+    x86.mov_rm(RSI, RDI, 0)
+    x86.call("skriv_buf")
+    x86.mov_ri(RAX, 0)
+    x86.ret()
+    // klokke_ns(0 = sanntid, 1 = monoton)
+    _stubb("klokke_ns")
+    x86.mov_rr(R8, RDI)
+    x86.call("mono_ns")
+    x86.cmp_ri(R8, 0)
+    x86.jcc(x86.CC_NE(), "klokke_mono")
+    x86.mov_r_abs(RCX, "var_epoke_ns")
+    x86.add_rr(RAX, RCX)
+    x86.etikett("klokke_mono")
+    x86.ret()
+    emit_kjor_brukar()
+    returner 0
+}
+
+// ─── Ring 3 (K3) ─────────────────────────────────────────────────────────────
+
+la _gpr_utan_rax: liste_heiltall = [3, 1, 2, 6, 7, 5, 8, 9, 10, 11, 12, 13, 14, 15]
+
+// Lagrar alle GPR-ar unntatt rax (og rsp) i PCB-en som rax peikar på.
+funksjon _lagre_gpr() -> heiltall {
+    for r i _gpr_utan_rax { x86.mov_mr(RAX, info.P_REG(r), r) }
+    returner 0
+}
+
+// kjor_brukar(pcb_va): lagrar kjernekonteksten (callee-saved + rflags + rsp + FPU/SSE),
+// byter til prosessen sin CR3 og går til ring 3 med iretq. «Returnerer» fyrst når
+// prosessen fell tilbake (til_kjerne), med rax = P_GRUNN.
+funksjon emit_kjor_brukar() -> heiltall {
+    _stubb("kjor_brukar")
+    x86.pushfq()
+    x86.push(RBX)
+    x86.push(RBP)
+    x86.push(R12)
+    x86.push(R13)
+    x86.push(R14)
+    x86.push(R15)
+    x86.cli()
+    x86.mov_abs_r("var_kjerne_rsp", RSP)
+    x86.mov_abs_r("var_pcb", RDI)
+    x86.fxsave64_abs("kjerne_fx")
+    x86.fxrstor64_m(RDI, info.P_FX())
+    x86.mov_r_cr(RAX, 3)
+    x86.mov_abs_r("var_kjerne_cr3", RAX)
+    x86.mov_ri(RAX, 1)
+    x86.mov_abs_r("var_i_brukar", RAX)
+    // iretq-ramme på overgangsstakken (mappa i alle CR3, supervisor)
+    x86.mov_ri_etikett(RSP, "stakk_overgang_topp")
+    x86.mov_ri(RAX, info.SEL_BRUKAR_DATA())
+    x86.push(RAX)
+    x86.mov_rm(RAX, RDI, info.P_RSP())
+    x86.push(RAX)
+    x86.mov_rm(RAX, RDI, info.P_RFLAGS())
+    x86.and_ri(RAX, 0xCD5)                 // CF PF AF ZF SF DF OF — aldri IOPL/TF/NT/AC frå brukar
+    x86.or_ri(RAX, 0x202)                  // IF alltid på i ring 3
+    x86.push(RAX)
+    x86.mov_ri(RAX, info.SEL_BRUKAR_KODE())
+    x86.push(RAX)
+    x86.mov_rm(RAX, RDI, info.P_RIP())
+    x86.push(RAX)
+    x86.mov_rm(RAX, RDI, info.P_CR3())
+    x86.mov_cr_r(3, RAX)
+    x86.mov_rm(RAX, RDI, info.P_RAX())
+    for r i _gpr_utan_rax {
+        hvis r != RDI { x86.mov_rm(r, RDI, info.P_REG(r)) }
+    }
+    x86.mov_rm(RDI, RDI, info.P_RDI())
+    x86.iretq()
+
+    // til_kjerne: rax = PCB (GPR-ar, RIP/RSP/RFLAGS og P_GRUNN er lagra). Lagrar FPU/SSE,
+    // tek tilbake kjerne-CR3, -stakk og -FPU og returnerer frå kjor_brukar.
+    x86.etikett("til_kjerne")
+    x86.fxsave64_m(RAX, info.P_FX())
+    x86.mov_r_abs(RCX, "var_kjerne_cr3")
+    x86.mov_cr_r(3, RCX)
+    x86.mov_ri(RCX, 0)
+    x86.mov_abs_r("var_i_brukar", RCX)
+    x86.mov_r_abs(RSP, "var_kjerne_rsp")
+    x86.fxrstor64_abs("kjerne_fx")
+    x86.mov_rm(RAX, RAX, info.P_GRUNN())
+    x86.pop(R15)
+    x86.pop(R14)
+    x86.pop(R13)
+    x86.pop(R12)
+    x86.pop(RBP)
+    x86.pop(RBX)
+    x86.popfq()
+    x86.ret()
+
+    // brukar_felle: unnatak/IRQ0 frå ring 3. Stakk (IST): [vektor, feilkode, rip, cs,
+    // rflags, rsp, ss]; alle GPR-ar har framleis brukarverdiane.
+    x86.etikett("brukar_felle")
+    x86.push(RAX)
+    x86.mov_r_abs(RAX, "var_pcb")
+    _lagre_gpr()
+    x86.pop(RCX)
+    x86.mov_mr(RAX, info.P_RAX(), RCX)
+    x86.mov_rm(RCX, RSP, 0)
+    x86.mov_mr(RAX, info.P_VEKTOR(), RCX)
+    x86.mov_rm(RCX, RSP, 8)
+    x86.mov_mr(RAX, info.P_FEIL(), RCX)
+    x86.mov_rm(RCX, RSP, 16)
+    x86.mov_mr(RAX, info.P_RIP(), RCX)
+    x86.mov_rm(RCX, RSP, 32)
+    x86.mov_mr(RAX, info.P_RFLAGS(), RCX)
+    x86.mov_rm(RCX, RSP, 40)
+    x86.mov_mr(RAX, info.P_RSP(), RCX)
+    x86.mov_r_cr(RCX, 2)
+    x86.mov_mr(RAX, info.P_CR2(), RCX)
+    x86.mov_ri(RCX, info.GRUNN_FELLE())
+    x86.mov_mr(RAX, info.P_GRUNN(), RCX)
+    x86.jmp("til_kjerne")
+
+    // brukar_syscall: SYSCALL frå ring 3 (shimmen hoppar hit når var_i_brukar != 0).
+    // rsp er framleis brukarstakken: ingen push før me har lagra han.
+    x86.etikett("brukar_syscall")
+    x86.mov_abs_r("var_sc_rax", RAX)
+    x86.mov_r_abs(RAX, "var_pcb")
+    x86.mov_mr(RAX, info.P_RSP(), RSP)
+    x86.mov_mr(RAX, info.P_RIP(), RCX)
+    x86.mov_mr(RAX, info.P_RFLAGS(), R11)
+    _lagre_gpr()
+    x86.mov_r_abs(RCX, "var_sc_rax")
+    x86.mov_mr(RAX, info.P_RAX(), RCX)
+    x86.mov_ri(RCX, info.GRUNN_SYSCALL())
+    x86.mov_mr(RAX, info.P_GRUNN(), RCX)
+    x86.jmp("til_kjerne")
     returner 0
 }
 
