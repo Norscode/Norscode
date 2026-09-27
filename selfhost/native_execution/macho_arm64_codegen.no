@@ -848,6 +848,37 @@ funksjon emit_tekst_int(native: liste_heiltall, arg_reg: heiltall, dst_reg: heil
 
 // tekst(x): type-bevisst. Streng (type=3) → identitet (som VM-en); elles →
 // desimalformater heiltalet. Utan dette gjev tekst(streng) strdata-peikaren.
+// A5: tekst() med desimaltall (type 6) → std.desimaltall_tekst.desimal_til_tekst (kortaste
+// tapsfrie form, same som VM-en og x86-kroken). Utan modulen i bunten: emit_tekst_ncval.
+// Kallet er eit vanleg bl: x19–x26 overlever, x0–x17 er daude etter konverteringa.
+funksjon ncd_desimal_tekst_fn() -> tekst { returner "std.desimaltall_tekst.desimal_til_tekst" }
+
+funksjon ncd_emit_tekst_d(native: liste_heiltall, arg_reg: heiltall, dst_reg: heiltall, funksjonar, bl_patchar) -> heiltall {
+    hvis funksjonar == null eller ikkje finnes_nøkkel(funksjonar, ncd_desimal_tekst_fn()) {
+        returner emit_tekst_ncval(native, arg_reg, dst_reg)
+    }
+    la p_null = lengde(native)
+    legg_u32(native, 0)                                  // cbz Xarg, vanleg
+    legg_u32(native, 0xF9400000 | (arg_reg << 5) | 9)    // ldr x9, [Xarg]  (type)
+    legg_u32(native, 0xF100193F)                         // cmp x9, #6
+    la p_ne = lengde(native)
+    legg_u32(native, 0)                                  // b.ne vanleg
+    legg_u32(native, 0xAA0003E0 | (arg_reg << 16))       // mov x0, Xarg
+    la p_bl = lengde(native)
+    legg_u32(native, 0x94000000)                         // bl desimal_til_tekst
+    legg_til(bl_patchar, [p_bl, ncd_desimal_tekst_fn()])
+    legg_u32(native, 0xAA0003E0 | dst_reg)               // mov Xdst, x0
+    la p_ferdig = lengde(native)
+    legg_u32(native, 0)                                  // b ferdig
+    la lbl_vanleg = lengde(native)
+    emit_tekst_ncval(native, arg_reg, dst_reg)
+    la lbl_ferdig = lengde(native)
+    skriv_u32(native, p_null, 0xB4000000 | ((((lbl_vanleg - p_null) / 4) & 0x7FFFF) << 5) | arg_reg)
+    ncd_bcond(native, p_ne, lbl_vanleg, 1)
+    ncd_b(native, p_ferdig, lbl_ferdig)
+    returner 0
+}
+
 funksjon emit_tekst_ncval(native: liste_heiltall, arg_reg: heiltall, dst_reg: heiltall) -> heiltall {
     // A5: null (peikar 0 eller type 0) → "" (VM-en: tekst(null) == "").
     la p_tk_null1 = lengde(native)
@@ -6135,6 +6166,196 @@ funksjon emit_substr(r: liste_heiltall, sreg: heiltall, ereg: heiltall) -> heilt
     returner 0
 }
 
+// A5: verts-funksjonstabell + __host_finst/__host_kall (som x86 emit_verts_funksjonstabell).
+// vm.no løyser bundle-kall det ikkje finn i functions-kartet via builtin.host_finst(namn) /
+// builtin.host_kall(namn, args) — «vertsstyrt selfhost.vm»: vm.*-kall går til VM-en som er
+// kompilert inn i nc_main. Blokka ligg sist i biletet: [finst][kall][oppslag][tabell].
+// Tabell: [count] så [namn_rel][fn_rel][nparams]×count (rel = frå tabellbasen), så namna
+// som strdata ([len][bytes], 8-justert). Alle adresser er PC-relative (adr i oppslaget).
+//   __host_finst(x0 = namn) → x0 = bool
+//   __host_kall(x0 = namn, x1 = arg-liste) → x0 = resultat (ukjent namn → null). Arg 0–7 i
+//     x0–x7, arg 8+ på stakken (same stadar som prologen les), manglande arg → null.
+funksjon ncd_host_blokk(order, funksjonar, fn_start, blokk_start: heiltall) -> ordbok {
+    la r: liste_heiltall = []
+    // ── __host_finst ──
+    la off_finst = lengde(r)
+    legg_u32(r, 0xA9BF7BFD)                          // stp x29, x30, [sp, #-16]!
+    la p_bl_f = lengde(r)
+    legg_u32(r, 0)                                   // bl oppslag
+    legg_u32(r, 0xF10001BF)                          // cmp x13, #0
+    legg_u32(r, 0x1A9F07E9)                          // cset w9, ne
+    emit_ncval_alloc(r, 9, 0, 2)                     // x0 = bool
+    legg_u32(r, 0xA8C17BFD)                          // ldp x29, x30, [sp], #16
+    legg_u32(r, 0xD65F03C0)                          // ret
+    // ── __host_kall ──
+    la off_kall = lengde(r)
+    legg_u32(r, 0xA9BF7BFD)                          // stp x29, x30, [sp, #-16]!
+    legg_u32(r, 0x910003FD)                          // mov x29, sp
+    la p_bl_k = lengde(r)
+    legg_u32(r, 0)                                   // bl oppslag
+    la p_har = lengde(r)
+    legg_u32(r, 0)                                   // cbnz x13, har
+    legg_u32(r, 0xD1004320)                          // sub x0, x25, #16  (null)
+    la p_til_ut = lengde(r)
+    legg_u32(r, 0)                                   // b ut
+    la lbl_har = lengde(r)
+    legg_u32(r, 0xF94005AE)                          // ldr x14, [x13, #8]   (fn_rel)
+    legg_u32(r, 0x8B0E012E)                          // add x14, x9, x14     (fn-adresse)
+    legg_u32(r, 0xF94009AF)                          // ldr x15, [x13, #16]  (nparams)
+    legg_u32(r, 0xF9400430)                          // ldr x16, [x1, #8]    (listdata)
+    legg_u32(r, 0xF9400211)                          // ldr x17, [x16]       (count)
+    legg_u32(r, 0x91002210)                          // add x16, x16, #8     (&arg[0])
+    legg_u32(r, 0xF10021EA)                          // subs x10, x15, #8    (stakk-arg)
+    la p_le = lengde(r)
+    legg_u32(r, 0)                                   // b.le reg_arg
+    legg_u32(r, 0xD37DF14B)                          // lsl x11, x10, #3
+    legg_u32(r, 0x91003D6B)                          // add x11, x11, #15
+    legg_u32(r, 0x927CED6B)                          // and x11, x11, #~15
+    legg_u32(r, 0xCB2B63FF)                          // sub sp, sp, x11
+    legg_u32(r, 0xD280000C)                          // movz x12, #0  (k)
+    la lbl_sl = lengde(r)
+    legg_u32(r, 0xEB0A019F)                          // cmp x12, x10
+    la p_sl_ut = lengde(r)
+    legg_u32(r, 0)                                   // b.hs reg_arg
+    legg_u32(r, 0x9100218D)                          // add x13, x12, #8  (indeks)
+    legg_u32(r, 0xEB1101BF)                          // cmp x13, x17
+    la p_sl_null = lengde(r)
+    legg_u32(r, 0)                                   // b.hs sl_null
+    legg_u32(r, 0xF86D7A03)                          // ldr x3, [x16, x13, lsl #3]
+    la p_sl_lagre = lengde(r)
+    legg_u32(r, 0)                                   // b sl_lagre
+    la lbl_sl_null = lengde(r)
+    legg_u32(r, 0xD1004323)                          // sub x3, x25, #16  (null)
+    la lbl_sl_lagre = lengde(r)
+    legg_u32(r, 0xF82C7BE3)                          // str x3, [sp, x12, lsl #3]
+    legg_u32(r, 0x9100058C)                          // add x12, x12, #1
+    la p_sl_b = lengde(r)
+    legg_u32(r, 0)                                   // b sl
+    la lbl_reg = lengde(r)
+    la ai = 0
+    mens ai < 8 {
+        legg_u32(r, 0xF100023F | (ai << 10))         // cmp x17, #i
+        legg_u32(r, 0x54000069)                      // b.ls null_i (+3)
+        legg_u32(r, 0xF9400200 | (ai << 10) | ai)    // ldr xi, [x16, #i*8]
+        legg_u32(r, 0x14000002)                      // b +2
+        legg_u32(r, 0xD1004320 | ai)                 // null_i: sub xi, x25, #16
+        ai = ai + 1
+    }
+    legg_u32(r, 0xD63F01C0)                          // blr x14
+    la lbl_ut = lengde(r)
+    legg_u32(r, 0x910003BF)                          // mov sp, x29
+    legg_u32(r, 0xA8C17BFD)                          // ldp x29, x30, [sp], #16
+    legg_u32(r, 0xD65F03C0)                          // ret
+    // ── oppslag (x0 = namn) → x13 = post eller 0, x9 = tabellbase. Rører ikkje x0–x2/x5–x8. ──
+    la lbl_opp = lengde(r)
+    la p_adr = lengde(r)
+    legg_u32(r, 0)                                   // adr x9, tabell
+    legg_u32(r, 0xF940040A)                          // ldr x10, [x0, #8]  (namn-strdata)
+    legg_u32(r, 0xF940014B)                          // ldr x11, [x10]     (lengd)
+    legg_u32(r, 0x9100214A)                          // add x10, x10, #8
+    legg_u32(r, 0xF940012C)                          // ldr x12, [x9]      (count)
+    legg_u32(r, 0x9100212D)                          // add x13, x9, #8    (post 0)
+    la lbl_loop = lengde(r)
+    la p_tom = lengde(r)
+    legg_u32(r, 0)                                   // cbz x12, ikkje
+    legg_u32(r, 0xF94001AE)                          // ldr x14, [x13]     (namn_rel)
+    legg_u32(r, 0x8B0E012E)                          // add x14, x9, x14
+    legg_u32(r, 0xF94001CF)                          // ldr x15, [x14]
+    legg_u32(r, 0xEB0B01FF)                          // cmp x15, x11
+    la p_ne1 = lengde(r)
+    legg_u32(r, 0)                                   // b.ne neste
+    legg_u32(r, 0x910021CE)                          // add x14, x14, #8
+    legg_u32(r, 0xAA0A03F0)                          // mov x16, x10
+    legg_u32(r, 0xAA0B03F1)                          // mov x17, x11
+    la lbl_cmp = lengde(r)
+    la p_funne = lengde(r)
+    legg_u32(r, 0)                                   // cbz x17, funne
+    legg_u32(r, 0x384015C3)                          // ldrb w3, [x14], #1
+    legg_u32(r, 0x38401604)                          // ldrb w4, [x16], #1
+    legg_u32(r, 0x6B04007F)                          // cmp w3, w4
+    la p_ne2 = lengde(r)
+    legg_u32(r, 0)                                   // b.ne neste
+    legg_u32(r, 0xD1000631)                          // sub x17, x17, #1
+    la p_b_cmp = lengde(r)
+    legg_u32(r, 0)                                   // b cmp
+    la lbl_neste = lengde(r)
+    legg_u32(r, 0x910061AD)                          // add x13, x13, #24
+    legg_u32(r, 0xD100058C)                          // sub x12, x12, #1
+    la p_b_loop = lengde(r)
+    legg_u32(r, 0)                                   // b loop
+    la lbl_ikkje = lengde(r)
+    legg_u32(r, 0xD280000D)                          // movz x13, #0
+    la lbl_funne = lengde(r)
+    legg_u32(r, 0xD65F03C0)                          // ret
+    // ── tabell ──
+    la tab = lengde(r)
+    la namn_liste: liste_tekst = []
+    for fnm i order {
+        hvis finnes_nøkkel(fn_start, fnm) og finnes_nøkkel(funksjonar, fnm) { legg_til(namn_liste, tekst(fnm)) }
+    }
+    la n = lengde(namn_liste)
+    la namn_base = tab + 8 + n * 24
+    // namneoffset per funksjon (relativt til tabellbasen)
+    la namn_off: liste_heiltall = []
+    la cur = namn_base
+    for nm i namn_liste {
+        legg_til(namn_off, cur - tab)
+        cur = cur + ((8 + lengde(nm) + 7) / 8) * 8
+    }
+    ncd_legg_u64(r, n)
+    la ti = 0
+    mens ti < n {
+        la nm = namn_liste[ti]
+        la p = funksjonar[nm]["params"]
+        la np = 0
+        hvis p != null { np = lengde(p) }
+        ncd_legg_u64(r, namn_off[ti])
+        ncd_legg_u64(r, fn_start[nm] - (blokk_start + tab))
+        ncd_legg_u64(r, np)
+        ti = ti + 1
+    }
+    for nm i namn_liste {
+        la nb = lengde(nm)
+        ncd_legg_u64(r, nb)
+        la bi = 0
+        mens bi < nb {
+            legg_til(r, builtin.char_code(builtin.slice(nm, bi, bi + 1)) & 255)
+            bi = bi + 1
+        }
+        mens ((lengde(r) - tab) % 8) != 0 { legg_til(r, 0) }   // 8-justert relativt til tabellbasen
+    }
+    // lapping
+    la adr_d = tab - p_adr
+    skriv_u32(r, p_adr, 0x10000009 | ((adr_d & 3) << 29) | (((adr_d >> 2) & 0x7FFFF) << 5))  // adr x9, tabell
+    skriv_u32(r, p_bl_f, 0x94000000 | (((lbl_opp - p_bl_f) / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_bl_k, 0x94000000 | (((lbl_opp - p_bl_k) / 4) & 0x03FFFFFF))
+    skriv_u32(r, p_har, 0xB500000D | ((((lbl_har - p_har) / 4) & 0x7FFFF) << 5))
+    ncd_b(r, p_til_ut, lbl_ut)
+    ncd_bcond(r, p_le, lbl_reg, 13)
+    ncd_bcond(r, p_sl_ut, lbl_reg, 2)
+    ncd_bcond(r, p_sl_null, lbl_sl_null, 2)
+    ncd_b(r, p_sl_lagre, lbl_sl_lagre)
+    ncd_b(r, p_sl_b, lbl_sl)
+    skriv_u32(r, p_tom, 0xB400000C | ((((lbl_ikkje - p_tom) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(r, p_ne1, lbl_neste, 1)
+    skriv_u32(r, p_funne, 0xB4000011 | ((((lbl_funne - p_funne) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(r, p_ne2, lbl_neste, 1)
+    ncd_b(r, p_b_cmp, lbl_cmp)
+    ncd_b(r, p_b_loop, lbl_loop)
+    returner {"kode": r, "finst": off_finst, "kall": off_kall}
+}
+
+funksjon ncd_legg_u64(r: liste_heiltall, v: heiltall) -> heiltall {
+    la i = 0
+    la x = v
+    mens i < 8 {
+        legg_til(r, x & 255)
+        x = x >> 8
+        i = i + 1
+    }
+    returner 0
+}
+
 // Fase 8 / A5: rekursiv-fri runtime-rutine __split(x0=streng, x1=delim) → x0=liste av
 // delstrengar. x19=segmentstart, x20=skann-pos, x21=input-end, x22=delim-bytes,
 // x23=delim-len, x24=fyllpeikar i listdata; listdata-basen ligg i [sp,#56].
@@ -6531,6 +6752,43 @@ funksjon emit_throw_dispatch_routine(os: tekst, et: heiltall, ev: heiltall, eb: 
     legg_u32(r, 0xF9400A73)                             // ldr x19, [x19, #16]  (x19 SIST)
     legg_u32(r, 0xD61F01E0)                             // br x15  (til catch)
     la lbl_uncaught = lengde(r)
+    // A5 (som x86-AOT): «norscode: Norscode unntak: <melding>\n» til stderr før exit(1).
+    // Meldinga er unnaket sjølv når det er tekst (nc_main kastar tekst); anna gjev berre prefikset.
+    la writenum = 4
+    hvis os == "linux" { writenum = 64 }
+    legg_u32(r, 0xD10083FF)                             // sub sp, sp, #32
+    la pre_ord: liste_heiltall = [0x65646F6373726F6E, 0x6F6373726F4E203A, 0x61746E6E75206564, 0x00000000203A6B]
+    la pw = 0
+    mens pw < 4 {
+        last_heiltall_64(r, 10, pre_ord[pw])
+        legg_u32(r, 0xF90003EA | (pw << 10))            // str x10, [sp, #pw*8]
+        pw = pw + 1
+    }
+    legg_u32(r, 0xD2800040)                             // movz x0, #2  (stderr)
+    legg_u32(r, 0x910003E1)                             // mov x1, sp
+    legg_u32(r, 0xD2800362)                             // movz x2, #27
+    emit_syscall(r, writenum, os)
+    legg_u32(r, 0xF9400320 | (ev << 10) | 9)            // ldr x9, [x25, #ev*8]  (unnaket)
+    la p_uc_null = lengde(r)
+    legg_u32(r, 0)                                      // cbz x9, nl
+    legg_u32(r, 0xF940012A)                             // ldr x10, [x9]  (type)
+    legg_u32(r, 0xF1000D5F)                             // cmp x10, #3
+    la p_uc_ikkjetekst = lengde(r)
+    legg_u32(r, 0)                                      // b.ne nl
+    legg_u32(r, 0xF940052A)                             // ldr x10, [x9, #8]  (strdata)
+    legg_u32(r, 0x91002141)                             // add x1, x10, #8
+    legg_u32(r, 0xF9400142)                             // ldr x2, [x10]      (lengd)
+    legg_u32(r, 0xD2800040)                             // movz x0, #2
+    emit_syscall(r, writenum, os)
+    la lbl_uc_nl = lengde(r)
+    legg_u32(r, 0x52800149)                             // movz w9, #10
+    legg_u32(r, 0x390003E9)                             // strb w9, [sp]
+    legg_u32(r, 0xD2800040)                             // movz x0, #2
+    legg_u32(r, 0x910003E1)                             // mov x1, sp
+    legg_u32(r, 0xD2800022)                             // movz x2, #1
+    emit_syscall(r, writenum, os)
+    skriv_u32(r, p_uc_null, 0xB4000009 | ((((lbl_uc_nl - p_uc_null) / 4) & 0x7FFFF) << 5))
+    ncd_bcond(r, p_uc_ikkjetekst, lbl_uc_nl, 1)
     legg_u32(r, 0x52800020)                             // movz w0, #1
     emit_syscall(r, exitnum, os)                        // exit(1)  (uråkeleg unnatak)
     // === patch framover-greiner ===
@@ -7577,6 +7835,11 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter, ruting: boolsk)
     la order: liste_tekst = [entry]
     la sett = {}
     sett[entry] = 1
+    // A5: tekst(desimaltall) kallar desimal_til_tekst (ncd_emit_tekst_d) — alltid med når bundla.
+    hvis finnes_nøkkel(funksjonar, ncd_desimal_tekst_fn()) og ikkje finnes_nøkkel(sett, ncd_desimal_tekst_fn()) {
+        sett[ncd_desimal_tekst_fn()] = 1
+        legg_til(order, ncd_desimal_tekst_fn())
+    }
     hvis ekstra_roter != null {
         la r = 0
         mens r < lengde(ekstra_roter) {
@@ -7942,7 +8205,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             la p_ks_ok = lengde(native)
             legg_u32(native, 0)                                 // b.eq ok
             la lbl_ks_konv = lengde(native)
-            emit_tekst_ncval(native, høgre, høgre)
+            ncd_emit_tekst_d(native, høgre, høgre, funksjonar, bl_patchar)
             skriv_u32(native, p_ks_null, 0xB4000000 | ((((lbl_ks_konv - p_ks_null) / 4) & 0x7FFFF) << 5) | høgre)
             ncd_bcond(native, p_ks_ok, lengde(native), 0)
             emit_str_concat(native, venstre, høgre, venstre)    // streng-konkatenering
@@ -8829,7 +9092,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis ncval_er_tekst_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal tekst krev 1 arg", "image": []} }
-                    emit_tekst_ncval(native, r1, r1)
+                    ncd_emit_tekst_d(native, r1, r1, funksjonar, bl_patchar)
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis ncval_er_heltall_kall(kallnamn) og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal heltall krev 1 arg", "image": []} }
@@ -9061,6 +9324,25 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis rk_j == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (json-ruting)", "overflow": "sann", "image": []} }
                     hvis rk_j < 0 { returner {"ok": "usann", "error": "NcVal json-ruting arg-underflyt: " + kallnamn, "image": []} }
                     djupn = rk_j
+                } ellers hvis os == "linux" og (kallnamn == "host_finst" eller kallnamn == "builtin.host_finst") og lengde(instr) == 3 og instr[2] == 1 {
+                    // A5: verts-funksjonstabellen (ncd_host_blokk) — vertsstyrt selfhost.vm.
+                    hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal host_finst krev 1 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r1 << 16))      // mov x0, Xtopp (namn)
+                    la p_bl_hf = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __host_finst
+                    legg_til(bl_patchar, [p_bl_hf, "__host_finst"])
+                    legg_u32(native, 0xAA0003E0 | r1)              // mov Xtopp, x0
+                    opnd_ut(native, djupn - 1, r1, memmode, home_off)
+                } ellers hvis os == "linux" og (kallnamn == "host_kall" eller kallnamn == "builtin.host_kall") og lengde(instr) == 3 og instr[2] == 2 {
+                    hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal host_kall krev 2 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r2 << 16))      // mov x0, Xnamn
+                    legg_u32(native, 0xAA0003E1 | (r1 << 16))      // mov x1, Xargs
+                    la p_bl_hk = lengde(native)
+                    legg_u32(native, 0x94000000)                    // bl __host_kall
+                    legg_til(bl_patchar, [p_bl_hk, "__host_kall"])
+                    legg_u32(native, 0xAA0003E0 | r2)              // mov Xres, x0
+                    opnd_ut(native, djupn - 2, r2, memmode, home_off)
+                    djupn = djupn - 1
                 } ellers hvis (kallnamn == "json_stringify" eller kallnamn == "builtin.json_stringify") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal json_stringify krev 1 arg", "image": []} }
                     legg_u32(native, 0xAA0003E0 | (r1 << 16))  // mov x0, Xtopp
@@ -9530,7 +9812,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                         legg_u32(native, 0x1A9F17E9)                     // cset w9, eq
                         emit_ncval_alloc(native, 9, r1, 2)
                     } ellers {
-                        emit_tekst_ncval(native, r1, r1)                 // til_tekst_native
+                        ncd_emit_tekst_d(native, r1, r1, funksjonar, bl_patchar)   // til_tekst_native
                     }
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
                 } ellers hvis ncval_ruting_aktiv(os) og ncval_gap_rute(kallnamn) != "" og finnes_nøkkel(funksjonar, ncval_gap_rute(kallnamn)) og lengde(instr) == 3 {
@@ -10471,6 +10753,18 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
         fn_start["__split"] = lengde(image)
         la sp2 = 0
         mens sp2 < lengde(ruts) { legg_til(image, ruts[sp2]) sp2 = sp2 + 1 }
+    }
+    // A5: verts-funksjonstabellen (host_finst/host_kall) — sjå ncd_host_blokk.
+    la treng_host = usann
+    for hp i all_patchar {
+        hvis hp[1] == "__host_finst" eller hp[1] == "__host_kall" { treng_host = sann }
+    }
+    hvis treng_host {
+        la hb_start = lengde(image)
+        la hb = ncd_host_blokk(order, funksjonar, fn_start, hb_start)
+        fn_start["__host_finst"] = hb_start + hb["finst"]
+        fn_start["__host_kall"] = hb_start + hb["kall"]
+        for hbyte i hb["kode"] { legg_til(image, hbyte) }
     }
     la treng_join = usann
     la pjn0 = 0
