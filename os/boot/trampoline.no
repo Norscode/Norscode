@@ -7,13 +7,14 @@
 //              ikkje ELF64 og ikkje PT_LOAD >= 2 GiB, men lastar dette flate biletet.
 //   B+0x20     32-bit inngang → long mode; 64-bit init; rutinar; shim; ISR-ar.
 //   ...        data (variablar, TSS, GDT, strengar), IDT (1 side), sidetabellar
-//              (13 sider), stakkar (boot, shim, IST1–3).
+//              (13 sider).
 //   E          heile ELF-fila uendra (segmenta ligg side-justert i fila).
 //   C          kopisider for siste, delvis fylte side i kvart segment (resten null).
+//   bss        stakkar (boot, shim, IST1–3), nådde via direktekartet.
 //   pool_start fysiske rammer for demand-zero (K1) frå Multiboot-minnekartet.
 //
 // Virtuelt (éitt adresserom, ring 0):
-//   0x1000–0x3FFFFF       identitet (trampoline, data, sidetabellar, stakkar). Side 0 umappa.
+//   0x1000–0x3FFFFF       identitet (trampoline, data, sidetabellar). Side 0 umappa.
 //   0x400000–0x7FFFFF     ELF-segmenta (4 KiB-sider → E+offset / kopisider).
 //   heap [0x780000, vaddr+memsz) og stakk [STAKK_TOPP-8 MiB, STAKK_TOPP):
 //       K0 («ivrig»): identitet med 2 MiB-sider (krev ~1,7 GiB RAM, t.d. -m 2G).
@@ -107,7 +108,7 @@ funksjon _emit_hovud() -> heiltall {
     x86.abs32("mb_hovud")        // header_addr
     x86.u32(LAST_ADR())          // load_addr
     x86.abs32("bilete_slutt")    // load_end_addr
-    x86.abs32("bilete_slutt")    // bss_end_addr
+    x86.abs32("bss_slutt")       // bss_end_addr (stakkar; QEMU nullar)
     x86.abs32("inngang32")       // entry_addr
     returner 0
 }
@@ -116,7 +117,6 @@ funksjon _emit_hovud() -> heiltall {
 funksjon _emit_inngang32() -> heiltall {
     x86.etikett("inngang32")
     x86.u8(250)                                  // cli
-    x86.u8(188) x86.abs32("stakk_boot_topp")     // mov esp, imm32
     x86.u8(137) x86.u8(29) x86.abs32("var_mbi")  // mov [var_mbi], ebx
     x86.u8(15) x86.u8(1) x86.u8(21) x86.abs32("gdtr")   // lgdt [gdtr]
     x86.u8(15) x86.u8(32) x86.u8(224)            // mov eax, cr4
@@ -1025,8 +1025,7 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
     // Layout: 13 sider sidetabellar + stakkar, så ELF-fila (E) og kopisider (C).
     x86.juster(4096)
     la pt_start = x86.adr()
-    la stakk_storleik = 16384 + 16384 + 16384 + 8192 + 16384
-    la e_fys = _juster_opp(pt_start + 13 * 4096 + stakk_storleik, 4096)
+    la e_fys = pt_start + 13 * 4096
     la c_fys = _juster_opp(e_fys + lengde(elfb), 4096)
 
     // PT2/PT3: 0x400000–0x7FFFFF (1024 oppføringar)
@@ -1077,12 +1076,25 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
         i = i + 1
     }
     la bilete_slutt = c_fys + tal_kopi * 4096
-    la pool_start = _juster_opp(bilete_slutt, 4096)
+    // bss: stakkar (boot, shim, IST1–3) etter biletet, nådde via direktekartet (fysisk
+    // adresse kan liggje over identitetsområdet når ELF-en er stor).
+    la bss = bilete_slutt
+    la stakkar: liste_tekst = ["stakk_boot_topp", "stakk_shim_topp", "stakk_ist1_topp", "stakk_ist2_topp", "stakk_ist3_topp"]
+    la storleikar: liste_heiltall = [16384, 16384, 16384, 8192, 16384]
+    i = 0
+    mens i < lengde(stakkar) {
+        bss = bss + storleikar[i]
+        x86.sett_etikett(stakkar[i], DIREKTEKART() + bss)
+        i = i + 1
+    }
+    la bss_slutt = _juster_opp(bss, 4096)
+    la pool_start = bss_slutt
     hvis ivrig og pool_start > heap_lo {
         kast "trampoline: ivrig modus krev at biletet sluttar under heapen (identitetskart)"
     }
     x86.sett_etikett("elf_inngang", inngang)
     x86.sett_etikett("bilete_slutt", bilete_slutt)
+    x86.sett_etikett("bss_slutt", bss_slutt)
     x86.sett_etikett("pool_start", pool_start)
 
     // PML4 → PDPT0 (0–512 GiB) og PDPT_DM (direktekart @ 0x8000000000)
@@ -1166,18 +1178,6 @@ funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_helta
     }
     hvis x86.adresse("pd1") != pd1 eller x86.adresse("pdpt_dm") != pdpt_dm { kast "trampoline: sidetabell-layout" }
 
-    // Stakkar (nullbytar i fila; QEMU lastar dei som del av biletet)
-    x86.nullar(16384)
-    x86.etikett("stakk_boot_topp")
-    x86.nullar(16384)
-    x86.etikett("stakk_shim_topp")
-    x86.nullar(16384)
-    x86.etikett("stakk_ist1_topp")
-    x86.nullar(8192)
-    x86.etikett("stakk_ist2_topp")
-    x86.nullar(16384)
-    x86.etikett("stakk_ist3_topp")
-    x86.juster(4096)
     hvis x86.adr() != e_fys { kast "trampoline: intern layoutfeil (E)" }
     x86.løys()
 

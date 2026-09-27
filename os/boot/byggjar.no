@@ -1,0 +1,172 @@
+// os/boot/byggjar.no — byggjekjeda for Norscode OS-kjernebilete (K0/K1).
+//
+//   kjerne.no ──nc compile──▶ kjerne.ncb.json ──bygg-native (GC-modus)──▶ kjerne.elf
+//             ──os.boot.trampoline.bygg──▶ build/os/<namn>.img (Multiboot1, flatt)
+//
+// Codegen (linux-x86_64, NORSCODE_GC_ALLOC=1):
+//   * Linux x86-64-vert: `bin/nc bygg-native` direkte (førehandsbygd codegen, sekund).
+//   * macOS/anna med Docker: same kommando i nc-x86tools (linux/amd64) med den committa
+//     stage0-en montert som /work/dist (kopi under build/os/linux-dist — dist-en i
+//     arbeidstreet blir aldri overskriven).
+//   * Utan Docker (eller OS_BYGG_LOKAL=1): lokal `bin/nc bygg-native` (tolka codegen,
+//     rett men tregare).
+// Alle prosessar går gjennom tools.process_runner (argv, ingen shell, ingen PATH-oppslag).
+
+bruk tools.process_runner som prosess
+bruk std.prosess som system_prosess
+bruk os.boot.trampoline som tramp
+
+funksjon miljø(namn: tekst) -> tekst {
+    prøv { returner tekst(miljo_hent(namn)) } fang (e) { returner "" }
+    returner ""
+}
+
+funksjon rot() -> tekst {
+    la r = miljø("NORSCODE_ROOT")
+    hvis r != "" { returner r }
+    returner tekst(builtin.system_info()["cwd"])
+}
+
+funksjon abs_sti(root: tekst, sti: tekst) -> tekst {
+    hvis builtin.starts_with(sti, "/") { returner sti }
+    returner root + "/" + sti
+}
+
+funksjon er_linux_x86_64() -> boolsk {
+    la info = builtin.system_info()
+    la system = ""
+    la maskin = ""
+    prøv { system = tekst(info["system"]) } fang (e) { }
+    prøv { maskin = tekst(info["machine"]) } fang (e) { }
+    returner builtin.starts_with(system, "Linux") og (maskin == "x86_64" eller maskin == "amd64")
+}
+
+funksjon docker_image() -> tekst {
+    la i = miljø("OS_DOCKER_IMAGE")
+    hvis i != "" { returner i }
+    returner "nc-x86tools:latest"
+}
+
+// Docker-binæren, eller "" når Docker ikkje finst / ikkje svarar.
+funksjon finn_docker(root: tekst) -> tekst {
+    la d = system_prosess.finn_kjorbar("docker")
+    hvis d == "" { returner "" }
+    la r = prosess.køyr(d, ["info"], root, {}, 30000)
+    hvis ikkje prosess.ok(r) { returner "" }
+    returner d
+}
+
+funksjon _nc_miljø(root: tekst) -> ordbok_tekst {
+    la m: ordbok_tekst = {}
+    m["NORSCODE_ROOT"] = root
+    m["NORSCODE_VM_CAPABILITIES"] = "env.read,env.write,process.exec,disk.read,disk.write"
+    m["NORSCODE_VM_DISK_ROOT"] = root + ",.,/tmp,/private/tmp"
+    m["NORSCODE_ENABLE_EXEC_PROSESS"] = "1"
+    m["NORSCODE_VM_FAST"] = "1"
+    returner m
+}
+
+funksjon _meld(r: liste_tekst) -> tekst {
+    returner "exit=" + r[0] + "\n" + builtin.replace(r[1], "\\n", "\n") + builtin.replace(r[2], "\\n", "\n")
+}
+
+// kjelde (.no) → NCB JSON med den lokale nc-en. Returnerer "" eller feilmelding.
+funksjon kompiler_ncb(root: tekst, kjelde: tekst, ncb: tekst) -> tekst {
+    la r = prosess.køyr_liste(root + "/bin/nc", ["compile", kjelde, ncb], root, _nc_miljø(root), 600000)
+    hvis r[0] != "0" { returner "nc compile feila: " + _meld(r) }
+    hvis ikkje builtin.fil_finnes(ncb) { returner "nc compile laga ikkje " + ncb }
+    returner ""
+}
+
+// Sørgjer for build/os/linux-dist/norscode_native = committa Linux x86-64-stage0.
+funksjon _linux_dist(root: tekst) -> tekst {
+    la mappe = root + "/build/os/linux-dist"
+    builtin.mappe_opprett(mappe)
+    la mål = mappe + "/norscode_native"
+    la kjelde = root + "/bootstrap/stage0/norscode-linux-x86_64"
+    la kb = builtin.fil_les_binær(kjelde)
+    la treng = sann
+    hvis builtin.fil_finnes(mål) {
+        prøv { treng = lengde(builtin.fil_les_binær(mål)) != lengde(kb) } fang (e) { treng = sann }
+    }
+    hvis treng {
+        builtin.fil_skriv_binær(mål, kb)
+        builtin.fil_sett_kjorbar(mål)
+    }
+    returner mål
+}
+
+funksjon _i_container(root: tekst, sti: tekst) -> tekst {
+    hvis ikkje builtin.starts_with(sti, root + "/") { kast "os_bygg: Docker-vegen krev stiar under " + root + ": " + sti }
+    returner "/work/" + builtin.slice(sti, lengde(root) + 1, lengde(sti))
+}
+
+// NCB → GC-modus linux-x86_64-ELF. Returnerer "" eller feilmelding; `veg` får kva som vart brukt.
+funksjon codegen(root: tekst, ncb: tekst, elf_ut: tekst) -> tekst {
+    la argv: liste_tekst = ["bygg-native", "--target", "linux-x86_64", "--ncb", ncb, elf_ut]
+    la lokal = miljø("OS_BYGG_LOKAL") == "1"
+    hvis ikkje lokal og ikkje er_linux_x86_64() {
+        la docker = finn_docker(root)
+        hvis docker != "" {
+            _linux_dist(root)
+            la d: liste_tekst = ["run", "--rm", "--platform", "linux/amd64",
+                "-v", root + ":/work", "-v", root + "/build/os/linux-dist:/work/dist", "-w", "/work",
+                "-e", "NORSCODE_ROOT=/work",
+                "-e", "NORSCODE_VM_CAPABILITIES=env.read,env.write,process.exec,disk.read,disk.write",
+                "-e", "NORSCODE_VM_DISK_ROOT=/work,.,/tmp",
+                "-e", "NORSCODE_ENABLE_EXEC_PROSESS=1",
+                "-e", "NORSCODE_GC_ALLOC=1",
+                docker_image(), "/work/dist/norscode_native",
+                "bygg-native", "--target", "linux-x86_64", "--ncb", _i_container(root, ncb), _i_container(root, elf_ut)]
+            skriv("[os_bygg] codegen i Docker (" + docker_image() + ", committa Linux-stage0)\n")
+            la r = prosess.køyr_liste(docker, d, root, {}, 1800000)
+            hvis r[0] != "0" { returner "bygg-native i Docker feila: " + _meld(r) }
+            hvis ikkje builtin.fil_finnes(elf_ut) { returner "bygg-native i Docker laga ikkje " + elf_ut }
+            returner ""
+        }
+        skriv("[os_bygg] ÅTVARING: Docker manglar → lokal (tolka) codegen\n")
+    }
+    la m = _nc_miljø(root)
+    m["NORSCODE_GC_ALLOC"] = "1"
+    la r2 = prosess.køyr_liste(root + "/bin/nc", argv, root, m, 3600000)
+    hvis r2[0] != "0" { returner "bygg-native feila: " + _meld(r2) }
+    hvis ikkje builtin.fil_finnes(elf_ut) { returner "bygg-native laga ikkje " + elf_ut }
+    returner ""
+}
+
+// Heile kjeda. Returnerer kart med "feil" ("" ved suksess), "elf", "bilete" og layout-tal.
+funksjon bygg_kjerne(kjelde: tekst, bilete: tekst, modus: tekst) -> ordbok_tekst {
+    la root = rot()
+    la ut: ordbok_tekst = {}
+    ut["feil"] = ""
+    la kjelde_abs = abs_sti(root, kjelde)
+    la bilete_abs = abs_sti(root, bilete)
+    builtin.mappe_opprett(root + "/build/os")
+    // Mellomfiler ved sida av biletet: build/os/<namn>.ncb.json / .elf
+    la stamme = bilete_abs
+    hvis builtin.ends_with(stamme, ".img") { stamme = builtin.slice(stamme, 0, lengde(stamme) - 4) }
+    la ncb = stamme + ".ncb.json"
+    la elf_sti = stamme + ".elf"
+    ut["elf"] = elf_sti
+    ut["bilete"] = bilete_abs
+    la t0 = builtin.tid_ms()
+    la f = kompiler_ncb(root, kjelde_abs, ncb)
+    hvis f != "" {
+        ut["feil"] = f
+        returner ut
+    }
+    la t1 = builtin.tid_ms()
+    f = codegen(root, ncb, elf_sti)
+    hvis f != "" {
+        ut["feil"] = f
+        returner ut
+    }
+    la t2 = builtin.tid_ms()
+    la info = tramp.bygg(builtin.fil_les_binær(elf_sti), modus, bilete_abs)
+    la t3 = builtin.tid_ms()
+    for k i nøkler(info) { ut[k] = tekst(info[k]) }
+    ut["ms_compile"] = tekst(t1 - t0)
+    ut["ms_codegen"] = tekst(t2 - t1)
+    ut["ms_pakk"] = tekst(t3 - t2)
+    returner ut
+}
