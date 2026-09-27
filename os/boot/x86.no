@@ -1,0 +1,441 @@
+// os/boot/x86.no — liten x86-64-maskinkode-emittar for Norscode OS (K0/K1).
+//
+// Trampolinen, syscall-shimmen og unnataks-/sidefeil-stubbane i Norscode OS er
+// maskinkode som Norscode sjølv emitterer som byte-lister (same prinsipp som atoma
+// i native_codegen_v2 og kernel_v2.no) — ingen C, asm eller eksterne assemblerar.
+//
+// Modellen er éin byte-buffer med fast lastadresse (`ny(base)`), namngjevne
+// etikettar og fiksar (rel8/rel32/abs32/abs64) som blir løyste i `løys()`.
+// Instruksjonskodarane dekkjer berre det delsettet trampolinen treng; minneoperandar
+// er alltid [base+disp32] eller absolutt [disp32] (SIB 0x25), så kvar instruksjon
+// har fast lengd uavhengig av verdiane (deterministisk layout i éin passering).
+//
+// Register: RAX=0 RCX=1 RDX=2 RBX=3 RSP=4 RBP=5 RSI=6 RDI=7 R8..R15=8..15.
+
+la _b: liste_heiltall = []
+la _base = 0
+la _etikettar = {}
+la _fix_pos: liste_heiltall = []
+la _fix_namn: liste_tekst = []
+la _fix_art: liste_heiltall = []
+
+// ─── Buffer og etikettar ─────────────────────────────────────────────────────
+
+funksjon ny(base: heiltall) -> heiltall {
+    _b = []
+    _base = base
+    _etikettar = {}
+    _fix_pos = []
+    _fix_namn = []
+    _fix_art = []
+    returner 0
+}
+
+funksjon pos() -> heiltall { returner lengde(_b) }
+funksjon adr() -> heiltall { returner _base + lengde(_b) }
+funksjon base() -> heiltall { returner _base }
+funksjon bytes() -> liste_heiltall { returner _b }
+
+funksjon u8(v: heiltall) -> heiltall {
+    legg_til(_b, v & 255)
+    returner 0
+}
+
+funksjon u16(v: heiltall) -> heiltall {
+    legg_til(_b, v & 255)
+    legg_til(_b, (v >> 8) & 255)
+    returner 0
+}
+
+funksjon u32(v: heiltall) -> heiltall {
+    legg_til(_b, v & 255)
+    legg_til(_b, (v >> 8) & 255)
+    legg_til(_b, (v >> 16) & 255)
+    legg_til(_b, (v >> 24) & 255)
+    returner 0
+}
+
+funksjon u64(v: heiltall) -> heiltall {
+    la i = 0
+    mens i < 8 {
+        legg_til(_b, (v >> (8 * i)) & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon bytar(l: liste_heiltall) -> heiltall {
+    la i = 0
+    mens i < lengde(l) {
+        legg_til(_b, l[i] & 255)
+        i = i + 1
+    }
+    returner 0
+}
+
+// ASCII-bytane til ein tekst (utan NUL). Trampolinen treng berre ASCII.
+funksjon tekst_bytar(t: tekst) -> liste_heiltall {
+    la ut: liste_heiltall = []
+    la i = 0
+    mens i < lengde(t) {
+        la c = builtin.char_code(builtin.slice(t, i, i + 1))
+        hvis c < 1 eller c > 126 { kast "x86: tekst_bytar godtek berre ASCII" }
+        legg_til(ut, c)
+        i = i + 1
+    }
+    returner ut
+}
+
+funksjon nullar(n: heiltall) -> heiltall {
+    la i = 0
+    mens i < n {
+        legg_til(_b, 0)
+        i = i + 1
+    }
+    returner 0
+}
+
+// Fyll med nullar til posisjonen er eit multiplum av `a`.
+funksjon juster(a: heiltall) -> heiltall {
+    mens (lengde(_b) % a) != 0 { legg_til(_b, 0) }
+    returner 0
+}
+
+funksjon etikett(namn: tekst) -> heiltall {
+    hvis finnes_nøkkel(_etikettar, namn) { kast "x86: etikett definert to gonger: " + namn }
+    _etikettar[namn] = _base + lengde(_b)
+    returner 0
+}
+
+// Etikett med absolutt adresse utanfor bufferen (t.d. ELF-inngang, bilete-slutt).
+funksjon sett_etikett(namn: tekst, adresse: heiltall) -> heiltall {
+    hvis finnes_nøkkel(_etikettar, namn) { kast "x86: etikett definert to gonger: " + namn }
+    _etikettar[namn] = adresse
+    returner 0
+}
+
+funksjon adresse(namn: tekst) -> heiltall {
+    hvis ikkje finnes_nøkkel(_etikettar, namn) { kast "x86: ukjent etikett: " + namn }
+    returner _etikettar[namn]
+}
+
+funksjon har_etikett(namn: tekst) -> boolsk { returner finnes_nøkkel(_etikettar, namn) }
+
+funksjon _fiks(namn: tekst, art: heiltall, storleik: heiltall) -> heiltall {
+    legg_til(_fix_pos, lengde(_b))
+    legg_til(_fix_namn, namn)
+    legg_til(_fix_art, art)
+    nullar(storleik)
+    returner 0
+}
+
+// art: 1 = rel32 (frå slutten av feltet), 2 = abs32, 3 = abs64, 4 = rel8
+funksjon rel32(namn: tekst) -> heiltall { returner _fiks(namn, 1, 4) }
+funksjon abs32(namn: tekst) -> heiltall { returner _fiks(namn, 2, 4) }
+funksjon abs64(namn: tekst) -> heiltall { returner _fiks(namn, 3, 8) }
+funksjon rel8(namn: tekst) -> heiltall { returner _fiks(namn, 4, 1) }
+
+funksjon _skriv_ved(p: heiltall, v: heiltall, n: heiltall) -> heiltall {
+    la i = 0
+    mens i < n {
+        _b[p + i] = (v >> (8 * i)) & 255
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon løys() -> heiltall {
+    la i = 0
+    mens i < lengde(_fix_pos) {
+        la p = _fix_pos[i]
+        la mål = adresse(_fix_namn[i])
+        la art = _fix_art[i]
+        hvis art == 1 {
+            la d = mål - (_base + p + 4)
+            hvis d < -2147483648 eller d > 2147483647 { kast "x86: rel32 utanfor rekkjevidd: " + _fix_namn[i] }
+            _skriv_ved(p, d, 4)
+        } ellers hvis art == 2 {
+            hvis mål < 0 eller mål > 2147483647 { kast "x86: abs32 utanfor rekkjevidd: " + _fix_namn[i] }
+            _skriv_ved(p, mål, 4)
+        } ellers hvis art == 3 {
+            _skriv_ved(p, mål, 8)
+        } ellers {
+            la d8 = mål - (_base + p + 1)
+            hvis d8 < -128 eller d8 > 127 { kast "x86: rel8 utanfor rekkjevidd: " + _fix_namn[i] }
+            _skriv_ved(p, d8, 1)
+        }
+        i = i + 1
+    }
+    returner 0
+}
+
+// ─── Koding ──────────────────────────────────────────────────────────────────
+
+funksjon _rex(w: heiltall, r: heiltall, x: heiltall, b: heiltall) -> heiltall {
+    returner u8(64 | (w << 3) | (((r >> 3) & 1) << 2) | (((x >> 3) & 1) << 1) | ((b >> 3) & 1))
+}
+
+funksjon _modrm_reg(reg: heiltall, rm: heiltall) -> heiltall {
+    returner u8(192 | ((reg & 7) << 3) | (rm & 7))
+}
+
+// [base + disp32]
+funksjon _mem(reg: heiltall, basisreg: heiltall, disp: heiltall) -> heiltall {
+    u8(128 | ((reg & 7) << 3) | (basisreg & 7))
+    hvis (basisreg & 7) == 4 { u8(36) }
+    u32(disp)
+    returner 0
+}
+
+// [disp32] absolutt (ModRM rm=100, SIB base=101 index=100)
+funksjon _abs(reg: heiltall, adresse_verdi: heiltall) -> heiltall {
+    u8(4 | ((reg & 7) << 3))
+    u8(37)
+    u32(adresse_verdi)
+    returner 0
+}
+
+funksjon _abs_etikett(reg: heiltall, namn: tekst) -> heiltall {
+    u8(4 | ((reg & 7) << 3))
+    u8(37)
+    abs32(namn)
+    returner 0
+}
+
+// ─── 64-bit instruksjonar ────────────────────────────────────────────────────
+
+// movabs r64, imm64 (alltid 10 byte)
+funksjon mov_ri(r: heiltall, imm: heiltall) -> heiltall {
+    _rex(1, 0, 0, r)
+    u8(184 + (r & 7))
+    returner u64(imm)
+}
+
+funksjon mov_ri_etikett(r: heiltall, namn: tekst) -> heiltall {
+    _rex(1, 0, 0, r)
+    u8(184 + (r & 7))
+    returner abs64(namn)
+}
+
+funksjon mov_rr(d: heiltall, s: heiltall) -> heiltall {
+    _rex(1, s, 0, d)
+    u8(137)
+    returner _modrm_reg(s, d)
+}
+
+// mov d, [basisreg + disp]
+funksjon mov_rm(d: heiltall, basisreg: heiltall, disp: heiltall) -> heiltall {
+    _rex(1, d, 0, basisreg)
+    u8(139)
+    returner _mem(d, basisreg, disp)
+}
+
+// mov [basisreg + disp], s
+funksjon mov_mr(basisreg: heiltall, disp: heiltall, s: heiltall) -> heiltall {
+    _rex(1, s, 0, basisreg)
+    u8(137)
+    returner _mem(s, basisreg, disp)
+}
+
+// mov d, [etikett]
+funksjon mov_r_abs(d: heiltall, namn: tekst) -> heiltall {
+    _rex(1, d, 0, 0)
+    u8(139)
+    returner _abs_etikett(d, namn)
+}
+
+// mov [etikett], s
+funksjon mov_abs_r(namn: tekst, s: heiltall) -> heiltall {
+    _rex(1, s, 0, 0)
+    u8(137)
+    returner _abs_etikett(s, namn)
+}
+
+// mov d32, [basisreg + disp] (null-utvidar)
+funksjon mov32_rm(d: heiltall, basisreg: heiltall, disp: heiltall) -> heiltall {
+    _rex(0, d, 0, basisreg)
+    u8(139)
+    returner _mem(d, basisreg, disp)
+}
+
+// movzx d, byte [basisreg + disp]
+funksjon movzx8_rm(d: heiltall, basisreg: heiltall, disp: heiltall) -> heiltall {
+    _rex(1, d, 0, basisreg)
+    u8(15)
+    u8(182)
+    returner _mem(d, basisreg, disp)
+}
+
+// mov byte [basisreg + disp], s8 (REX alltid → sil/dil/r8b… er gyldige)
+funksjon mov8_mr(basisreg: heiltall, disp: heiltall, s: heiltall) -> heiltall {
+    _rex(0, s, 0, basisreg)
+    u8(136)
+    returner _mem(s, basisreg, disp)
+}
+
+// ALU r/m64, r64: add=0x01 or=0x09 and=0x21 sub=0x29 xor=0x31 cmp=0x39
+funksjon _alu_rr(op: heiltall, d: heiltall, s: heiltall) -> heiltall {
+    _rex(1, s, 0, d)
+    u8(op)
+    returner _modrm_reg(s, d)
+}
+funksjon add_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(1, d, s) }
+funksjon or_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(9, d, s) }
+funksjon and_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(33, d, s) }
+funksjon sub_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(41, d, s) }
+funksjon xor_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(49, d, s) }
+funksjon cmp_rr(d: heiltall, s: heiltall) -> heiltall { returner _alu_rr(57, d, s) }
+
+// ALU r64, imm32 (forteikn-utvida): add=0 or=1 and=4 sub=5 xor=6 cmp=7
+funksjon _alu_ri(ext: heiltall, d: heiltall, imm: heiltall) -> heiltall {
+    hvis imm < -2147483648 eller imm > 2147483647 { kast "x86: imm32 utanfor rekkjevidd" }
+    _rex(1, 0, 0, d)
+    u8(129)
+    _modrm_reg(ext, d)
+    returner u32(imm)
+}
+funksjon add_ri(d: heiltall, imm: heiltall) -> heiltall { returner _alu_ri(0, d, imm) }
+funksjon or_ri(d: heiltall, imm: heiltall) -> heiltall { returner _alu_ri(1, d, imm) }
+funksjon and_ri(d: heiltall, imm: heiltall) -> heiltall { returner _alu_ri(4, d, imm) }
+funksjon sub_ri(d: heiltall, imm: heiltall) -> heiltall { returner _alu_ri(5, d, imm) }
+funksjon cmp_ri(d: heiltall, imm: heiltall) -> heiltall { returner _alu_ri(7, d, imm) }
+
+// Skift/rotasjon r64, imm8: rol=0 shl=4 shr=5 sar=7
+funksjon _skift(ext: heiltall, r: heiltall, n: heiltall) -> heiltall {
+    _rex(1, 0, 0, r)
+    u8(193)
+    _modrm_reg(ext, r)
+    returner u8(n)
+}
+funksjon rol_ri(r: heiltall, n: heiltall) -> heiltall { returner _skift(0, r, n) }
+funksjon shl_ri(r: heiltall, n: heiltall) -> heiltall { returner _skift(4, r, n) }
+funksjon shr_ri(r: heiltall, n: heiltall) -> heiltall { returner _skift(5, r, n) }
+
+// imul d, s
+funksjon imul_rr(d: heiltall, s: heiltall) -> heiltall {
+    _rex(1, d, 0, s)
+    u8(15)
+    u8(175)
+    returner _modrm_reg(d, s)
+}
+
+// mul s (rdx:rax = rax * s, usignert), div s (rax = rdx:rax / s, rdx = rest)
+funksjon mul_r(s: heiltall) -> heiltall {
+    _rex(1, 0, 0, s)
+    u8(247)
+    returner _modrm_reg(4, s)
+}
+funksjon div_r(s: heiltall) -> heiltall {
+    _rex(1, 0, 0, s)
+    u8(247)
+    returner _modrm_reg(6, s)
+}
+
+funksjon push(r: heiltall) -> heiltall {
+    hvis r >= 8 { u8(65) }
+    returner u8(80 + (r & 7))
+}
+funksjon pop(r: heiltall) -> heiltall {
+    hvis r >= 8 { u8(65) }
+    returner u8(88 + (r & 7))
+}
+
+// push imm8 (forteikn-utvida til 64 bit)
+funksjon push_i8(v: heiltall) -> heiltall {
+    u8(106)
+    returner u8(v)
+}
+
+funksjon jmp(namn: tekst) -> heiltall {
+    u8(233)
+    returner rel32(namn)
+}
+funksjon call(namn: tekst) -> heiltall {
+    u8(232)
+    returner rel32(namn)
+}
+
+// Vilkårskodar for jcc
+funksjon CC_B() -> heiltall { returner 2 }    // usignert <  (CF=1)
+funksjon CC_AE() -> heiltall { returner 3 }   // usignert >= (CF=0)
+funksjon CC_E() -> heiltall { returner 4 }
+funksjon CC_NE() -> heiltall { returner 5 }
+funksjon CC_BE() -> heiltall { returner 6 }
+funksjon CC_A() -> heiltall { returner 7 }
+
+funksjon jcc(cc: heiltall, namn: tekst) -> heiltall {
+    u8(15)
+    u8(128 + cc)
+    returner rel32(namn)
+}
+
+funksjon jmp_r(r: heiltall) -> heiltall {
+    hvis r >= 8 { u8(65) }
+    u8(255)
+    returner _modrm_reg(4, r)
+}
+
+funksjon ret() -> heiltall { returner u8(195) }
+funksjon iretq() -> heiltall { u8(72) returner u8(207) }
+funksjon hlt() -> heiltall { returner u8(244) }
+funksjon cli() -> heiltall { returner u8(250) }
+funksjon cld() -> heiltall { returner u8(252) }
+funksjon pushfq() -> heiltall { returner u8(156) }
+funksjon popfq() -> heiltall { returner u8(157) }
+funksjon in_al_dx() -> heiltall { returner u8(236) }
+funksjon out_dx_al() -> heiltall { returner u8(238) }
+funksjon out_dx_eax() -> heiltall { returner u8(239) }
+funksjon rdmsr() -> heiltall { u8(15) returner u8(50) }
+funksjon wrmsr() -> heiltall { u8(15) returner u8(48) }
+funksjon rdtsc() -> heiltall { u8(15) returner u8(49) }
+funksjon cpuid() -> heiltall { u8(15) returner u8(162) }
+funksjon fninit() -> heiltall { u8(219) returner u8(227) }
+funksjon rep_stosq() -> heiltall { u8(243) u8(72) returner u8(171) }
+
+// rdrand r64 (CF=1 ved suksess)
+funksjon rdrand(r: heiltall) -> heiltall {
+    _rex(1, 0, 0, r)
+    u8(15)
+    u8(199)
+    returner _modrm_reg(6, r)
+}
+
+// mov r64, crN / mov crN, r64 (r < 8)
+funksjon mov_r_cr(r: heiltall, cr: heiltall) -> heiltall {
+    u8(15)
+    u8(32)
+    returner _modrm_reg(cr, r)
+}
+funksjon mov_cr_r(cr: heiltall, r: heiltall) -> heiltall {
+    u8(15)
+    u8(34)
+    returner _modrm_reg(cr, r)
+}
+
+// invlpg [r] (r ∉ {rsp, rbp, r12, r13})
+funksjon invlpg(r: heiltall) -> heiltall {
+    hvis r >= 8 { u8(65) }
+    u8(15)
+    u8(1)
+    returner u8(56 | (r & 7))
+}
+
+// lidt [etikett] i 64-bit modus
+funksjon lidt_abs(namn: tekst) -> heiltall {
+    u8(15)
+    u8(1)
+    returner _abs_etikett(3, namn)
+}
+
+// ltr ax
+funksjon ltr_ax() -> heiltall {
+    u8(15)
+    u8(0)
+    returner u8(216)
+}
+
+// mov sreg, ax: es=0 ss=2 ds=3 fs=4 gs=5
+funksjon mov_seg_ax(sreg: heiltall) -> heiltall {
+    u8(142)
+    returner _modrm_reg(sreg, 0)
+}

@@ -1,0 +1,1214 @@
+// os/boot/trampoline.no — Norscode OS oppstartsbilete (K0/K1): trampoline + syscall-shim
+// + sidefeil-/unnataksstubbar som maskinkode emittert av Norscode, og pakking av eit
+// UENDRA Norscode linux-x86_64 AOT-ELF (GC-modus) til eitt flatt Multiboot1-bilete.
+//
+// Bilete (fysisk = lastadresse, B = 0x100000):
+//   B+0        Multiboot1-hovud med a.out-kludge (flagg bit 16) — QEMU -kernel godtek
+//              ikkje ELF64 og ikkje PT_LOAD >= 2 GiB, men lastar dette flate biletet.
+//   B+0x20     32-bit inngang → long mode; 64-bit init; rutinar; shim; ISR-ar.
+//   ...        data (variablar, TSS, GDT, strengar), IDT (1 side), sidetabellar
+//              (13 sider), stakkar (boot, shim, IST1–3).
+//   E          heile ELF-fila uendra (segmenta ligg side-justert i fila).
+//   C          kopisider for siste, delvis fylte side i kvart segment (resten null).
+//   pool_start fysiske rammer for demand-zero (K1) frå Multiboot-minnekartet.
+//
+// Virtuelt (éitt adresserom, ring 0):
+//   0x1000–0x3FFFFF       identitet (trampoline, data, sidetabellar, stakkar). Side 0 umappa.
+//   0x400000–0x7FFFFF     ELF-segmenta (4 KiB-sider → E+offset / kopisider).
+//   heap [0x780000, vaddr+memsz) og stakk [STAKK_TOPP-8 MiB, STAKK_TOPP):
+//       K0 («ivrig»): identitet med 2 MiB-sider (krev ~1,7 GiB RAM, t.d. -m 2G).
+//       K1 («demand»): umappa; #PF-stubben hentar ei nullstilt 4 KiB-ramme frå poolen.
+//   0x8000000000 + fys    direktekart av 0–4 GiB (2 MiB-sider) for sidetabell-/MMIO-tilgang.
+//
+// Syscall: EFER.SCE + LSTAR → shim. Programmet sin `syscall` i ring 0 hoppar dit; shimmen
+// byter til eigen stakk (rører aldri programstakken → raudsona er trygg), og returnerer med
+// rflags frå r11 og `jmp rcx` (ikkje sysret, som ville gått til CPL3).
+// Avbrot er av heile tida (IF=0); unnatak brukar IST-stakkar av same grunn.
+
+bruk os.boot.x86 som x86
+bruk os.boot.elf som elf
+
+la RAX = 0
+la RCX = 1
+la RDX = 2
+la RBX = 3
+la RSP = 4
+la RBP = 5
+la RSI = 6
+la RDI = 7
+la R8 = 8
+la R9 = 9
+la R10 = 10
+la R11 = 11
+la R12 = 12
+la R13 = 13
+la R14 = 14
+la R15 = 15
+
+la _tal_etikettar = 0
+la _strengar_namn: liste_tekst = []
+la _strengar_tekst: liste_tekst = []
+
+// ─── Faste verdiar ───────────────────────────────────────────────────────────
+
+funksjon LAST_ADR() -> heiltall { returner 0x100000 }
+funksjon STAKK_TOPP() -> heiltall { returner 0x6C000000 }
+funksjon STAKK_STORLEIK() -> heiltall { returner 0x800000 }      // 8 MiB (codegen-vakt: rsp-7 MiB)
+funksjon DIREKTEKART() -> heiltall { returner 0x8000000000 }
+funksjon ELF_VINDAUGE_LÅG() -> heiltall { returner 0x400000 }
+funksjon ELF_VINDAUGE_HØG() -> heiltall { returner 0x800000 }
+funksjon HPET_FYS() -> heiltall { returner 0xFED00000 }
+// Debug-exit-kodar (QEMU returnerer (kode << 1) | 1)
+funksjon FEIL_UNNATAK() -> heiltall { returner 125 }            // → QEMU 251
+funksjon FEIL_MINNE() -> heiltall { returner 126 }              // → QEMU 253
+
+// ─── Hjelparar ───────────────────────────────────────────────────────────────
+
+funksjon _ny(prefiks: tekst) -> tekst {
+    _tal_etikettar = _tal_etikettar + 1
+    returner "." + prefiks + "_" + tekst(_tal_etikettar)
+}
+
+funksjon _streng(t: tekst) -> tekst {
+    la namn = _ny("str")
+    legg_til(_strengar_namn, namn)
+    legg_til(_strengar_tekst, t)
+    returner namn
+}
+
+// Skriv ein fast ASCII-tekst til seriell (øydelegg rax, rcx, rsi).
+funksjon _skriv_melding(t: tekst) -> heiltall {
+    x86.mov_ri_etikett(RSI, _streng(t))
+    x86.mov_ri(RCX, lengde(t))
+    x86.call("skriv_buf")
+    returner 0
+}
+
+funksjon _outb(port: heiltall, verdi: heiltall) -> heiltall {
+    x86.mov_ri(RDX, port)
+    x86.mov_ri(RAX, verdi)
+    x86.out_dx_al()
+    returner 0
+}
+
+funksjon _juster_opp(v: heiltall, a: heiltall) -> heiltall {
+    returner ((v + a - 1) / a) * a
+}
+
+// ─── Multiboot-hovud og 32-bit inngang ───────────────────────────────────────
+
+funksjon _emit_hovud() -> heiltall {
+    x86.etikett("mb_hovud")
+    la magi = 0x1BADB002
+    la flagg = 0x00010002       // minneinfo (bit 1) + adressefelt (bit 16, a.out-kludge)
+    x86.u32(magi)
+    x86.u32(flagg)
+    x86.u32((0 - (magi + flagg)) & 0xFFFFFFFF)
+    x86.abs32("mb_hovud")        // header_addr
+    x86.u32(LAST_ADR())          // load_addr
+    x86.abs32("bilete_slutt")    // load_end_addr
+    x86.abs32("bilete_slutt")    // bss_end_addr
+    x86.abs32("inngang32")       // entry_addr
+    returner 0
+}
+
+// Multiboot: 32-bit verna modus, paging av, EAX=0x2BADB002, EBX=mbi.
+funksjon _emit_inngang32() -> heiltall {
+    x86.etikett("inngang32")
+    x86.u8(250)                                  // cli
+    x86.u8(188) x86.abs32("stakk_boot_topp")     // mov esp, imm32
+    x86.u8(137) x86.u8(29) x86.abs32("var_mbi")  // mov [var_mbi], ebx
+    x86.u8(15) x86.u8(1) x86.u8(21) x86.abs32("gdtr")   // lgdt [gdtr]
+    x86.u8(15) x86.u8(32) x86.u8(224)            // mov eax, cr4
+    x86.u8(13) x86.u32(0x620)                     // or eax, PAE|OSFXSR|OSXMMEXCPT
+    x86.u8(15) x86.u8(34) x86.u8(224)            // mov cr4, eax
+    x86.u8(184) x86.abs32("pml4")                // mov eax, pml4
+    x86.u8(15) x86.u8(34) x86.u8(216)            // mov cr3, eax
+    x86.u8(185) x86.u32(0xC0000080)              // mov ecx, EFER
+    x86.u8(15) x86.u8(50)                        // rdmsr
+    x86.u8(13) x86.u32(0x101)                      // or eax, LME|SCE
+    x86.u8(15) x86.u8(48)                        // wrmsr
+    x86.u8(15) x86.u8(32) x86.u8(192)            // mov eax, cr0
+    x86.u8(37) x86.u32(0xFFFFFFFB)               // and eax, ~EM
+    x86.u8(13) x86.u32(0x80000023)               // or eax, PG|NE|MP|PE
+    x86.u8(15) x86.u8(34) x86.u8(192)            // mov cr0, eax
+    x86.u8(234) x86.abs32("inngang64") x86.u16(8)   // jmp far 0x08:inngang64
+    returner 0
+}
+
+// ─── 64-bit init ─────────────────────────────────────────────────────────────
+
+funksjon _emit_inngang64() -> heiltall {
+    x86.etikett("inngang64")
+    x86.mov_ri(RAX, 16)
+    x86.mov_seg_ax(3)   // ds
+    x86.mov_seg_ax(0)   // es
+    x86.mov_seg_ax(2)   // ss
+    x86.mov_ri(RAX, 0)
+    x86.mov_seg_ax(4)   // fs
+    x86.mov_seg_ax(5)   // gs
+    x86.mov_ri_etikett(RSP, "stakk_boot_topp")
+    x86.lidt_abs("idtr")
+    x86.mov_ri(RAX, 24)
+    x86.ltr_ax()
+    // LSTAR = shim
+    x86.mov_ri(RCX, 0xC0000082)          // LSTAR
+    x86.mov_ri_etikett(RAX, "shim")
+    x86.mov_rr(RDX, RAX)
+    x86.shr_ri(RDX, 32)
+    x86.wrmsr()
+    // STAR: SYSCALL CS=0x08 (SS=0x10)
+    x86.mov_ri(RCX, 0xC0000081)          // STAR
+    x86.mov_ri(RAX, 0)
+    x86.mov_ri(RDX, 0x00100008)
+    x86.wrmsr()
+    // SFMASK: TF|IF|DF|NT|AC
+    x86.mov_ri(RCX, 0xC0000084)          // SFMASK
+    x86.mov_ri(RAX, 0x44700)
+    x86.mov_ri(RDX, 0)
+    x86.wrmsr()
+    x86.fninit()
+    x86.call("serie_init")
+    x86.call("pool_init")
+    x86.call("tid_init")
+    x86.call("rdrand_init")
+    // Linux-startstakk: argc=1, argv[0]="kjerne", NULL, envp[0], NULL, auxv AT_NULL.
+    // (I demand-modus utløyser den fyrste skrivinga sidefeil-stubben.)
+    x86.mov_ri(RDI, STAKK_TOPP() - 64)
+    x86.mov_ri(RAX, 1)
+    x86.mov_mr(RDI, 0, RAX)
+    x86.mov_ri_etikett(RAX, "str_argv0")
+    x86.mov_mr(RDI, 8, RAX)
+    x86.mov_ri(RAX, 0)
+    x86.mov_mr(RDI, 16, RAX)
+    x86.mov_ri_etikett(RAX, "str_env0")
+    x86.mov_mr(RDI, 24, RAX)
+    x86.mov_ri(RAX, 0)
+    x86.mov_mr(RDI, 32, RAX)
+    x86.mov_mr(RDI, 40, RAX)
+    x86.mov_mr(RDI, 48, RAX)
+    x86.mov_rr(RSP, RDI)
+    x86.mov_ri_etikett(RAX, "elf_inngang")
+    la r = 1
+    mens r < 16 {
+        hvis r != RSP { x86.xor_rr(r, r) }
+        r = r + 1
+    }
+    x86.jmp_r(RAX)
+    returner 0
+}
+
+// ─── Rutinar ─────────────────────────────────────────────────────────────────
+
+funksjon _emit_rutinar() -> heiltall {
+    // serie_init: COM1 16550, 115200 8N1, FIFO på.
+    x86.etikett("serie_init")
+    _outb(1017, 0)      // 0x3F9 IER = 0
+    _outb(1019, 128)    // 0x3FB LCR = DLAB
+    _outb(1016, 1)      // 0x3F8 DLL = 1 (115200)
+    _outb(1017, 0)      // 0x3F9 DLM = 0
+    _outb(1019, 3)      // 0x3FB LCR = 8N1
+    _outb(1018, 199)    // 0x3FA FCR = 0xC7
+    _outb(1020, 3)      // 0x3FC MCR = DTR|RTS
+    x86.ret()
+
+    // teikn: al → COM1 (ventar på THRE), eller → port 0xE9 (debugcon) når var_til_e9 != 0.
+    // Tek vare på alle register.
+    x86.etikett("teikn")
+    x86.push(RDX)
+    x86.push(RAX)
+    x86.mov_r_abs(RAX, "var_til_e9")
+    x86.cmp_ri(RAX, 0)
+    la til_e9 = _ny("e9")
+    x86.jcc(x86.CC_NE(), til_e9)
+    la vent = _ny("thre")
+    x86.etikett(vent)
+    x86.mov_ri(RDX, 1021)               // 0x3FD LSR
+    x86.mov_ri(RAX, 0)
+    x86.in_al_dx()
+    x86.and_ri(RAX, 32)
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_E(), vent)
+    x86.pop(RAX)
+    x86.mov_ri(RDX, 1016)               // 0x3F8
+    x86.out_dx_al()
+    x86.pop(RDX)
+    x86.ret()
+    x86.etikett(til_e9)
+    x86.pop(RAX)
+    x86.mov_ri(RDX, 233)                // 0xE9
+    x86.out_dx_al()
+    x86.pop(RDX)
+    x86.ret()
+
+    // skriv_buf: rsi=peikar, rcx=lengd (øydelegg rax, rcx, rsi)
+    x86.etikett("skriv_buf")
+    la sb_l = _ny("sb")
+    la sb_f = _ny("sbf")
+    x86.etikett(sb_l)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), sb_f)
+    x86.movzx8_rm(RAX, RSI, 0)
+    x86.call("teikn")
+    x86.add_ri(RSI, 1)
+    x86.sub_ri(RCX, 1)
+    x86.jmp(sb_l)
+    x86.etikett(sb_f)
+    x86.ret()
+
+    // skriv_hex: rax → 16 hex-siffer (øydelegg rax)
+    x86.etikett("skriv_hex")
+    x86.push(RBX)
+    x86.push(RCX)
+    x86.mov_rr(RBX, RAX)
+    x86.mov_ri(RCX, 16)
+    la sh_l = _ny("sh")
+    la sh_d = _ny("shd")
+    la sh_u = _ny("shu")
+    x86.etikett(sh_l)
+    x86.rol_ri(RBX, 4)
+    x86.mov_rr(RAX, RBX)
+    x86.and_ri(RAX, 15)
+    x86.cmp_ri(RAX, 10)
+    x86.jcc(x86.CC_B(), sh_d)
+    x86.add_ri(RAX, 87)
+    x86.jmp(sh_u)
+    x86.etikett(sh_d)
+    x86.add_ri(RAX, 48)
+    x86.etikett(sh_u)
+    x86.call("teikn")
+    x86.sub_ri(RCX, 1)
+    x86.jcc(x86.CC_NE(), sh_l)
+    x86.pop(RCX)
+    x86.pop(RBX)
+    x86.ret()
+
+    // avslutt: rax = kode → statistikk til debugcon (0xE9), så isa-debug-exit (0xF4) og hlt.
+    x86.etikett("avslutt")
+    x86.push(RAX)
+    x86.mov_ri(RAX, 1)
+    x86.mov_abs_r("var_til_e9", RAX)
+    _skriv_melding("[kjerne] exit=")
+    x86.mov_rm(RAX, RSP, 0)
+    x86.call("skriv_hex")
+    _skriv_melding(" rammer=")
+    x86.mov_r_abs(RAX, "var_pool_neste")
+    x86.mov_ri_etikett(RCX, "pool_start")
+    x86.sub_rr(RAX, RCX)
+    x86.shr_ri(RAX, 12)
+    x86.call("skriv_hex")
+    _skriv_melding(" pool_slutt=")
+    x86.mov_r_abs(RAX, "var_pool_slutt")
+    x86.call("skriv_hex")
+    _skriv_melding(" sidefeil=")
+    x86.mov_r_abs(RAX, "var_sidefeil")
+    x86.call("skriv_hex")
+    _skriv_melding("\n")
+    x86.pop(RAX)
+    x86.mov_ri(RDX, 244)                // 0xF4 isa-debug-exit
+    x86.out_dx_eax()
+    la stopp = _ny("stopp")
+    x86.etikett(stopp)
+    x86.cli()
+    x86.hlt()
+    x86.jmp(stopp)
+
+    // cmos_les: al = register → rax = verdi
+    x86.etikett("cmos_les")
+    x86.push(RDX)
+    x86.mov_ri(RDX, 112)                // 0x70
+    x86.out_dx_al()
+    x86.mov_ri(RDX, 113)                // 0x71
+    x86.mov_ri(RAX, 0)
+    x86.in_al_dx()
+    x86.pop(RDX)
+    x86.ret()
+
+    // bcd_til_bin: rax (BCD) → rax (binær)
+    x86.etikett("bcd_til_bin")
+    x86.push(RCX)
+    x86.push(RDX)
+    x86.mov_rr(RCX, RAX)
+    x86.shr_ri(RCX, 4)
+    x86.and_ri(RAX, 15)
+    x86.mov_ri(RDX, 10)
+    x86.imul_rr(RCX, RDX)
+    x86.add_rr(RAX, RCX)
+    x86.pop(RDX)
+    x86.pop(RCX)
+    x86.ret()
+
+    // mono_ns → rax (øydelegg rcx, rdx). HPET om han finst, elles TSC (1 GHz antatt).
+    x86.etikett("mono_ns")
+    x86.mov_r_abs(RCX, "var_hpet_periode")
+    x86.cmp_ri(RCX, 0)
+    la mono_tsc = _ny("tsc")
+    x86.jcc(x86.CC_E(), mono_tsc)
+    x86.push(RBX)
+    x86.mov_ri(RBX, DIREKTEKART() + HPET_FYS() + 240)   // hovudteljar @ +0xF0
+    x86.mov_rm(RAX, RBX, 0)
+    x86.pop(RBX)
+    x86.mul_r(RCX)                      // rdx:rax = teljar * periode_fs
+    x86.mov_ri(RCX, 1000000)
+    x86.div_r(RCX)                      // → ns
+    x86.ret()
+    x86.etikett(mono_tsc)
+    x86.rdtsc()
+    x86.shl_ri(RDX, 32)
+    x86.or_rr(RAX, RDX)
+    x86.ret()
+
+    _emit_tid_init()
+    _emit_pool_init()
+
+    // rdrand_init: CPUID.1:ECX bit 30
+    x86.etikett("rdrand_init")
+    x86.push(RBX)
+    x86.mov_ri(RAX, 1)
+    x86.mov_ri(RCX, 0)
+    x86.cpuid()
+    x86.pop(RBX)
+    x86.mov_rr(RAX, RCX)
+    x86.shr_ri(RAX, 30)
+    x86.and_ri(RAX, 1)
+    x86.mov_abs_r("var_rdrand", RAX)
+    x86.ret()
+
+    // ta_ramme → rdx = fysisk adresse til ei nullstilt 4 KiB-ramme (tek vare på resten).
+    x86.etikett("ta_ramme")
+    x86.mov_r_abs(RDX, "var_pool_neste")
+    x86.push(RAX)
+    x86.mov_r_abs(RAX, "var_pool_slutt")
+    x86.cmp_rr(RDX, RAX)
+    x86.pop(RAX)
+    x86.jcc(x86.CC_AE(), "ramme_tomt")
+    x86.push(RAX)
+    x86.mov_rr(RAX, RDX)
+    x86.add_ri(RAX, 4096)
+    x86.mov_abs_r("var_pool_neste", RAX)
+    x86.push(RDI)
+    x86.push(RCX)
+    x86.mov_ri(RDI, DIREKTEKART())
+    x86.add_rr(RDI, RDX)
+    x86.mov_ri(RAX, 0)
+    x86.mov_ri(RCX, 512)
+    x86.cld()
+    x86.rep_stosq()
+    x86.pop(RCX)
+    x86.pop(RDI)
+    x86.pop(RAX)
+    x86.ret()
+    x86.etikett("ramme_tomt")
+    _skriv_melding("\n[kjerne] tomt for fysiske sider: cr2=")
+    x86.mov_r_cr(RAX, 2)
+    x86.call("skriv_hex")
+    _skriv_melding(" pool_slutt=")
+    x86.mov_r_abs(RAX, "var_pool_slutt")
+    x86.call("skriv_hex")
+    _skriv_melding("\n")
+    x86.mov_ri(RAX, FEIL_MINNE())
+    x86.jmp("avslutt")
+    returner 0
+}
+
+// tid_init: HPET-periode + CMOS-klokke → var_epoke_ns (realtid = epoke_ns + mono_ns).
+funksjon _emit_tid_init() -> heiltall {
+    x86.etikett("tid_init")
+    x86.mov_ri(RBX, DIREKTEKART() + HPET_FYS())
+    x86.mov32_rm(RAX, RBX, 4)                    // GCAP_ID[63:32] = periode i fs
+    la ingen_hpet = _ny("nohpet")
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_E(), ingen_hpet)
+    x86.mov_ri(RCX, 100000000)                   // > 1e8 fs = 100 ns = ugyldig (t.d. 0xFFFFFFFF)
+    x86.cmp_rr(RAX, RCX)
+    x86.jcc(x86.CC_A(), ingen_hpet)
+    x86.mov_abs_r("var_hpet_periode", RAX)
+    x86.mov_rm(RAX, RBX, 16)                     // GEN_CONF |= ENABLE
+    x86.or_ri(RAX, 1)
+    x86.mov_mr(RBX, 16, RAX)
+    x86.etikett(ingen_hpet)
+    // Vent til CMOS ikkje oppdaterer (reg 0x0A bit 7).
+    la uip = _ny("uip")
+    x86.etikett(uip)
+    x86.mov_ri(RAX, 10)
+    x86.call("cmos_les")
+    x86.and_ri(RAX, 128)
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_NE(), uip)
+    x86.mov_ri(RAX, 11)                          // status B
+    x86.call("cmos_les")
+    x86.mov_rr(R14, RAX)
+    _cmos_felt(0, R8)     // sekund
+    _cmos_felt(2, R9)     // minutt
+    _cmos_felt(4, R10)    // time (24 t-modus)
+    _cmos_felt(7, R11)    // dag
+    _cmos_felt(8, R12)    // månad
+    _cmos_felt(9, R13)    // år (00–99)
+    x86.add_ri(R13, 2000)
+    // days_from_civil (Howard Hinnant): y -= m <= 2
+    la m_ok = _ny("mok")
+    x86.cmp_ri(R12, 2)
+    x86.jcc(x86.CC_A(), m_ok)
+    x86.sub_ri(R13, 1)
+    x86.etikett(m_ok)
+    x86.mov_rr(RAX, R13)
+    x86.mov_ri(RDX, 0)
+    x86.mov_ri(RCX, 400)
+    x86.div_r(RCX)                 // rax = era, rdx = yoe
+    x86.mov_rr(RBX, RAX)
+    x86.mov_rr(R15, RDX)
+    la gt2 = _ny("gt2")
+    la mp_ok = _ny("mp")
+    x86.mov_rr(RSI, R12)
+    x86.cmp_ri(R12, 2)
+    x86.jcc(x86.CC_A(), gt2)
+    x86.add_ri(RSI, 9)
+    x86.jmp(mp_ok)
+    x86.etikett(gt2)
+    x86.sub_ri(RSI, 3)
+    x86.etikett(mp_ok)
+    // doy = (153*mp + 2)/5 + d - 1
+    x86.mov_ri(RCX, 153)
+    x86.mov_rr(RAX, RSI)
+    x86.imul_rr(RAX, RCX)
+    x86.add_ri(RAX, 2)
+    x86.mov_ri(RDX, 0)
+    x86.mov_ri(RCX, 5)
+    x86.div_r(RCX)
+    x86.add_rr(RAX, R11)
+    x86.sub_ri(RAX, 1)
+    x86.mov_rr(RDI, RAX)
+    // doe = yoe*365 + yoe/4 - yoe/100 + doy
+    x86.mov_ri(RCX, 365)
+    x86.mov_rr(RAX, R15)
+    x86.imul_rr(RAX, RCX)
+    x86.add_rr(RDI, RAX)
+    x86.mov_rr(RAX, R15)
+    x86.shr_ri(RAX, 2)
+    x86.add_rr(RDI, RAX)
+    x86.mov_rr(RAX, R15)
+    x86.mov_ri(RDX, 0)
+    x86.mov_ri(RCX, 100)
+    x86.div_r(RCX)
+    x86.sub_rr(RDI, RAX)
+    // dagar = era*146097 + doe - 719468
+    x86.mov_ri(RCX, 146097)
+    x86.mov_rr(RAX, RBX)
+    x86.imul_rr(RAX, RCX)
+    x86.add_rr(RAX, RDI)
+    x86.sub_ri(RAX, 719468)
+    // sekund = dagar*86400 + t*3600 + min*60 + s
+    x86.mov_ri(RCX, 86400)
+    x86.imul_rr(RAX, RCX)
+    x86.mov_ri(RCX, 3600)
+    x86.mov_rr(RDX, R10)
+    x86.imul_rr(RDX, RCX)
+    x86.add_rr(RAX, RDX)
+    x86.mov_ri(RCX, 60)
+    x86.mov_rr(RDX, R9)
+    x86.imul_rr(RDX, RCX)
+    x86.add_rr(RAX, RDX)
+    x86.add_rr(RAX, R8)
+    x86.mov_ri(RCX, 1000000000)
+    x86.imul_rr(RAX, RCX)
+    x86.mov_rr(RBX, RAX)
+    x86.call("mono_ns")
+    x86.sub_rr(RBX, RAX)
+    x86.mov_abs_r("var_epoke_ns", RBX)
+    x86.ret()
+    returner 0
+}
+
+// CMOS-register `reg` → `mål` (BCD → binær når status B bit 2 er 0).
+funksjon _cmos_felt(reg: heiltall, mål: heiltall) -> heiltall {
+    x86.mov_ri(RAX, reg)
+    x86.call("cmos_les")
+    x86.mov_rr(RCX, R14)
+    x86.and_ri(RCX, 4)
+    x86.cmp_ri(RCX, 0)
+    la binær = _ny("bin")
+    x86.jcc(x86.CC_NE(), binær)
+    x86.call("bcd_til_bin")
+    x86.etikett(binær)
+    x86.mov_rr(mål, RAX)
+    returner 0
+}
+
+// pool_init: [pool_start, slutt på RAM-regionen som inneheld pool_start) frå Multiboot-
+// minnekartet (mbi-flagg bit 6), elles mem_upper (bit 0). Avgrensa til 4 GiB (direktekartet).
+funksjon _emit_pool_init() -> heiltall {
+    x86.etikett("pool_init")
+    x86.mov_ri_etikett(RAX, "pool_start")
+    x86.mov_abs_r("var_pool_neste", RAX)
+    x86.mov_ri(RAX, 0)
+    x86.mov_abs_r("var_pool_slutt", RAX)
+    x86.mov_r_abs(RBX, "var_mbi")
+    x86.mov_ri(RAX, DIREKTEKART())
+    x86.add_rr(RBX, RAX)
+    x86.mov32_rm(RAX, RBX, 0)                    // flagg
+    la ingen_mmap = _ny("nommap")
+    la slutt = _ny("poolslutt")
+    x86.mov_rr(RCX, RAX)
+    x86.and_ri(RCX, 64)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ingen_mmap)
+    x86.mov32_rm(RDI, RBX, 44)                   // mmap_length
+    x86.mov32_rm(RSI, RBX, 48)                   // mmap_addr
+    x86.add_rr(RDI, RSI)
+    x86.mov_ri(RAX, DIREKTEKART())
+    x86.add_rr(RSI, RAX)
+    x86.add_rr(RDI, RAX)
+    x86.mov_ri_etikett(R8, "pool_start")
+    la lykkje = _ny("mmap")
+    la neste = _ny("mmapneste")
+    x86.etikett(lykkje)
+    x86.cmp_rr(RSI, RDI)
+    x86.jcc(x86.CC_AE(), slutt)
+    x86.mov32_rm(RAX, RSI, 20)                   // type
+    x86.cmp_ri(RAX, 1)
+    x86.jcc(x86.CC_NE(), neste)
+    x86.mov_rm(R9, RSI, 4)                       // base
+    x86.cmp_rr(R8, R9)
+    x86.jcc(x86.CC_B(), neste)
+    x86.mov_rm(R10, RSI, 12)                     // lengd
+    x86.add_rr(R10, R9)
+    x86.cmp_rr(R8, R10)
+    x86.jcc(x86.CC_AE(), neste)
+    x86.mov_abs_r("var_pool_slutt", R10)
+    x86.etikett(neste)
+    x86.mov32_rm(RAX, RSI, 0)                    // size (utan seg sjølv)
+    x86.add_rr(RSI, RAX)
+    x86.add_ri(RSI, 4)
+    x86.jmp(lykkje)
+    x86.etikett(ingen_mmap)
+    x86.mov_rr(RCX, RAX)
+    x86.and_ri(RCX, 1)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), slutt)
+    x86.mov32_rm(RAX, RBX, 8)                    // mem_upper (KiB over 1 MiB)
+    x86.shl_ri(RAX, 10)
+    x86.add_ri(RAX, 1048576)
+    x86.mov_abs_r("var_pool_slutt", RAX)
+    x86.etikett(slutt)
+    x86.mov_r_abs(RAX, "var_pool_slutt")
+    x86.mov_ri(RCX, 0x100000000)
+    la under4g = _ny("u4g")
+    x86.cmp_rr(RAX, RCX)
+    x86.jcc(x86.CC_BE(), under4g)
+    x86.mov_rr(RAX, RCX)
+    x86.etikett(under4g)
+    x86.and_ri(RAX, -4096)
+    x86.mov_abs_r("var_pool_slutt", RAX)
+    x86.ret()
+    returner 0
+}
+
+// ─── Syscall-shim (LSTAR) ────────────────────────────────────────────────────
+
+funksjon _emit_shim() -> heiltall {
+    x86.etikett("shim")
+    x86.mov_abs_r("var_prog_rsp", RSP)
+    x86.mov_ri_etikett(RSP, "stakk_shim_topp")
+    la lagra: liste_heiltall = [RCX, R11, RBX, RBP, RDI, RSI, RDX, R8, R9, R10, R12, R13, R14, R15]
+    la i = 0
+    mens i < lengde(lagra) {
+        x86.push(lagra[i])
+        i = i + 1
+    }
+    x86.cld()
+    x86.cmp_ri(RAX, 1)
+    x86.jcc(x86.CC_E(), "sys_write")
+    x86.cmp_ri(RAX, 60)
+    x86.jcc(x86.CC_E(), "sys_exit")
+    x86.cmp_ri(RAX, 231)
+    x86.jcc(x86.CC_E(), "sys_exit")
+    x86.cmp_ri(RAX, 10)                 // mprotect (GC-vaktside) → ok
+    x86.jcc(x86.CC_E(), "sys_null")
+    x86.cmp_ri(RAX, 35)                 // nanosleep → ok (éin tråd, ingen tidtakar enno)
+    x86.jcc(x86.CC_E(), "sys_null")
+    x86.cmp_ri(RAX, 228)
+    x86.jcc(x86.CC_E(), "sys_klokke")
+    x86.cmp_ri(RAX, 318)
+    x86.jcc(x86.CC_E(), "sys_tilfeldig")
+    x86.mov_ri(RAX, -38)                // ENOSYS
+    x86.jmp("sys_ret")
+
+    x86.etikett("sys_null")
+    x86.mov_ri(RAX, 0)
+    x86.etikett("sys_ret")
+    i = lengde(lagra) - 1
+    mens i >= 0 {
+        x86.pop(lagra[i])
+        i = i - 1
+    }
+    x86.push(R11)
+    x86.popfq()
+    x86.mov_r_abs(RSP, "var_prog_rsp")
+    x86.jmp_r(RCX)
+
+    // write(fd, buf, n): fd 1/2 → COM1
+    x86.etikett("sys_write")
+    la w_ok = _ny("wok")
+    x86.cmp_ri(RDI, 1)
+    x86.jcc(x86.CC_E(), w_ok)
+    x86.cmp_ri(RDI, 2)
+    x86.jcc(x86.CC_E(), w_ok)
+    x86.mov_ri(RAX, -9)                 // EBADF
+    x86.jmp("sys_ret")
+    x86.etikett(w_ok)
+    x86.mov_rr(R8, RDX)
+    x86.mov_rr(RCX, RDX)
+    x86.call("skriv_buf")
+    x86.mov_rr(RAX, R8)
+    x86.jmp("sys_ret")
+
+    // exit/exit_group(kode)
+    x86.etikett("sys_exit")
+    x86.mov_rr(RAX, RDI)
+    x86.and_ri(RAX, 255)
+    x86.jmp("avslutt")
+
+    // clock_gettime(klokke, ts): REALTIME(0)/REALTIME_COARSE(5)/REALTIME_ALARM(8) = epoke+mono
+    x86.etikett("sys_klokke")
+    x86.call("mono_ns")
+    la rt = _ny("rt")
+    la deltid = _ny("deltid")
+    x86.cmp_ri(RDI, 0)
+    x86.jcc(x86.CC_E(), rt)
+    x86.cmp_ri(RDI, 5)
+    x86.jcc(x86.CC_E(), rt)
+    x86.cmp_ri(RDI, 8)
+    x86.jcc(x86.CC_E(), rt)
+    x86.jmp(deltid)
+    x86.etikett(rt)
+    x86.mov_r_abs(RCX, "var_epoke_ns")
+    x86.add_rr(RAX, RCX)
+    x86.etikett(deltid)
+    x86.mov_ri(RDX, 0)
+    x86.mov_ri(RCX, 1000000000)
+    x86.div_r(RCX)
+    x86.mov_mr(RSI, 0, RAX)
+    x86.mov_mr(RSI, 8, RDX)
+    x86.mov_ri(RAX, 0)
+    x86.jmp("sys_ret")
+
+    // getrandom(buf, n, flagg): RDRAND, fail-closed (ENOSYS utan RDRAND, EIO om han sviktar)
+    x86.etikett("sys_tilfeldig")
+    la r_ok = _ny("rok")
+    la ytre = _ny("rytre")
+    la prov = _ny("rtry")
+    la fekk = _ny("rfekk")
+    la indre = _ny("rindre")
+    la r_ferdig = _ny("rferdig")
+    x86.mov_r_abs(RAX, "var_rdrand")
+    x86.cmp_ri(RAX, 0)
+    x86.jcc(x86.CC_NE(), r_ok)
+    x86.mov_ri(RAX, -38)
+    x86.jmp("sys_ret")
+    x86.etikett(r_ok)
+    x86.mov_rr(R8, RSI)
+    x86.etikett(ytre)
+    x86.cmp_ri(RSI, 0)
+    x86.jcc(x86.CC_E(), r_ferdig)
+    x86.mov_ri(RCX, 64)
+    x86.etikett(prov)
+    x86.rdrand(RAX)
+    x86.jcc(x86.CC_B(), fekk)
+    x86.sub_ri(RCX, 1)
+    x86.jcc(x86.CC_NE(), prov)
+    x86.mov_ri(RAX, -5)                 // EIO
+    x86.jmp("sys_ret")
+    x86.etikett(fekk)
+    x86.mov_ri(RCX, 8)
+    x86.etikett(indre)
+    x86.cmp_ri(RSI, 0)
+    x86.jcc(x86.CC_E(), r_ferdig)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_E(), ytre)
+    x86.mov8_mr(RDI, 0, RAX)
+    x86.shr_ri(RAX, 8)
+    x86.add_ri(RDI, 1)
+    x86.sub_ri(RSI, 1)
+    x86.sub_ri(RCX, 1)
+    x86.jmp(indre)
+    x86.etikett(r_ferdig)
+    x86.mov_rr(RAX, R8)
+    x86.jmp("sys_ret")
+    returner 0
+}
+
+// ─── Unnatak og sidefeil ─────────────────────────────────────────────────────
+
+funksjon _har_feilkode(v: heiltall) -> boolsk {
+    returner v == 8 eller v == 10 eller v == 11 eller v == 12 eller v == 13 eller v == 14 eller
+        v == 17 eller v == 21 eller v == 29 eller v == 30
+}
+
+// #PF (IST1): feil i heap-/stakkvindauget med P=0 → ny nullstilt ramme; resten → diagnose.
+funksjon _emit_sidefeil(heap_lo: heiltall, heap_hi: heiltall) -> heiltall {
+    la s_lo = STAKK_TOPP() - STAKK_STORLEIK()
+    x86.etikett("isr_14")
+    x86.push(RAX)
+    x86.push(RBX)
+    x86.push(RCX)
+    x86.push(RDX)
+    x86.mov_r_cr(RAX, 2)
+    x86.mov_ri(RBX, heap_lo)
+    x86.cmp_rr(RAX, RBX)
+    x86.jcc(x86.CC_B(), "pf_utanfor")
+    x86.mov_ri(RBX, heap_hi)
+    x86.cmp_rr(RAX, RBX)
+    x86.jcc(x86.CC_B(), "pf_innanfor")
+    x86.mov_ri(RBX, s_lo)
+    x86.cmp_rr(RAX, RBX)
+    x86.jcc(x86.CC_B(), "pf_utanfor")
+    x86.mov_ri(RBX, STAKK_TOPP())
+    x86.cmp_rr(RAX, RBX)
+    x86.jcc(x86.CC_AE(), "pf_utanfor")
+    x86.etikett("pf_innanfor")
+    x86.mov_rm(RBX, RSP, 32)             // feilkode
+    x86.and_ri(RBX, 1)                   // P=1 → vernebrot, ikkje manglande side
+    x86.cmp_ri(RBX, 0)
+    x86.jcc(x86.CC_NE(), "pf_utanfor")
+    // PDE: pd0/pd1 ligg etter kvarandre → &PDE = pd0 + (va >> 21) * 8 for va < 2 GiB
+    x86.mov_rr(RBX, RAX)
+    x86.shr_ri(RBX, 21)
+    x86.shl_ri(RBX, 3)
+    x86.mov_ri_etikett(RCX, "pd0")
+    x86.add_rr(RBX, RCX)
+    x86.mov_rm(RCX, RBX, 0)
+    x86.mov_rr(RDX, RCX)
+    x86.and_ri(RDX, 1)
+    x86.cmp_ri(RDX, 0)
+    x86.jcc(x86.CC_NE(), "pf_har_pt")
+    x86.call("ta_ramme")
+    x86.or_ri(RDX, 3)
+    x86.mov_mr(RBX, 0, RDX)
+    x86.mov_rr(RCX, RDX)
+    x86.etikett("pf_har_pt")
+    x86.mov_rr(RDX, RCX)
+    x86.and_ri(RDX, 128)                 // PS (2 MiB-side) skal ikkje finnast i vindauget her
+    x86.cmp_ri(RDX, 0)
+    x86.jcc(x86.CC_NE(), "pf_utanfor")
+    x86.mov_ri(RDX, 0x000FFFFFFFFFF000)
+    x86.and_rr(RCX, RDX)
+    x86.mov_ri(RDX, DIREKTEKART())
+    x86.add_rr(RCX, RDX)
+    x86.mov_rr(RBX, RAX)
+    x86.shr_ri(RBX, 12)
+    x86.and_ri(RBX, 511)
+    x86.shl_ri(RBX, 3)
+    x86.add_rr(RBX, RCX)                 // &PTE (via direktekartet)
+    x86.mov_rm(RCX, RBX, 0)
+    x86.and_ri(RCX, 1)
+    x86.cmp_ri(RCX, 0)
+    x86.jcc(x86.CC_NE(), "pf_ferdig")
+    x86.call("ta_ramme")
+    x86.or_ri(RDX, 3)
+    x86.mov_mr(RBX, 0, RDX)
+    x86.etikett("pf_ferdig")
+    x86.and_ri(RAX, -4096)
+    x86.invlpg(RAX)
+    x86.mov_r_abs(RAX, "var_sidefeil")
+    x86.add_ri(RAX, 1)
+    x86.mov_abs_r("var_sidefeil", RAX)
+    x86.pop(RDX)
+    x86.pop(RCX)
+    x86.pop(RBX)
+    x86.pop(RAX)
+    x86.add_ri(RSP, 8)
+    x86.iretq()
+    x86.etikett("pf_utanfor")
+    x86.pop(RDX)
+    x86.pop(RCX)
+    x86.pop(RBX)
+    x86.pop(RAX)
+    x86.push_i8(14)
+    x86.jmp("unnatak_felles")
+    returner 0
+}
+
+funksjon _emit_unnatak() -> heiltall {
+    la v = 0
+    mens v < 32 {
+        hvis v != 14 {
+            x86.etikett("isr_" + tekst(v))
+            hvis ikkje _har_feilkode(v) { x86.push_i8(0) }
+            x86.push_i8(v)
+            x86.jmp("unnatak_felles")
+        }
+        v = v + 1
+    }
+    // [rsp]=vektor [rsp+8]=feilkode [rsp+16]=rip [rsp+24]=cs [rsp+32]=rflags [rsp+40]=rsp
+    x86.etikett("unnatak_felles")
+    _skriv_melding("\n[kjerne] unnatak v=")
+    x86.mov_rm(RAX, RSP, 0)
+    x86.call("skriv_hex")
+    _skriv_melding(" feil=")
+    x86.mov_rm(RAX, RSP, 8)
+    x86.call("skriv_hex")
+    _skriv_melding(" rip=")
+    x86.mov_rm(RAX, RSP, 16)
+    x86.call("skriv_hex")
+    _skriv_melding(" cr2=")
+    x86.mov_r_cr(RAX, 2)
+    x86.call("skriv_hex")
+    _skriv_melding(" rsp=")
+    x86.mov_rm(RAX, RSP, 40)
+    x86.call("skriv_hex")
+    _skriv_melding("\n")
+    x86.mov_ri(RAX, FEIL_UNNATAK())
+    x86.jmp("avslutt")
+    returner 0
+}
+
+// ─── Data ────────────────────────────────────────────────────────────────────
+
+funksjon _emit_data() -> heiltall {
+    x86.juster(16)
+    la variablar: liste_tekst = ["var_mbi", "var_prog_rsp", "var_pool_neste", "var_pool_slutt",
+        "var_hpet_periode", "var_epoke_ns", "var_rdrand", "var_til_e9", "var_sidefeil"]
+    la i = 0
+    mens i < lengde(variablar) {
+        x86.etikett(variablar[i])
+        x86.u64(0)
+        i = i + 1
+    }
+    // 64-bit TSS: rsp0 @4, ist1..7 @36.., iomap @102
+    x86.juster(16)
+    x86.etikett("tss")
+    x86.u32(0)
+    x86.abs64("stakk_ist3_topp")     // rsp0 (ikkje i bruk før ring 3)
+    x86.u64(0)
+    x86.u64(0)
+    x86.u64(0)
+    x86.abs64("stakk_ist1_topp")     // IST1: #PF
+    x86.abs64("stakk_ist2_topp")     // IST2: #DF
+    x86.abs64("stakk_ist3_topp")     // IST3: andre unnatak
+    x86.u64(0)
+    x86.u64(0)
+    x86.u64(0)
+    x86.u64(0)
+    x86.u64(0)
+    x86.u16(0)
+    x86.u16(104)
+    // GDT: null, 0x08 kode64, 0x10 data, 0x18 TSS (16 byte)
+    x86.juster(16)
+    x86.etikett("gdt")
+    x86.u64(0)
+    x86.u64(0x00AF9A000000FFFF)        // kode64: P, DPL0, L=1
+    x86.u64(0x00CF92000000FFFF)        // data
+    la tss = x86.adresse("tss")
+    x86.u16(103)
+    x86.u16(tss & 65535)
+    x86.u8((tss >> 16) & 255)
+    x86.u8(137)                       // P, type 9 (64-bit TSS ledig)
+    x86.u8(0)
+    x86.u8((tss >> 24) & 255)
+    x86.u32((tss >> 32) & 0xFFFFFFFF)
+    x86.u32(0)
+    x86.juster(8)
+    x86.etikett("gdtr")
+    x86.u16(39)
+    x86.abs64("gdt")
+    x86.juster(8)
+    x86.etikett("idtr")
+    x86.u16(4095)
+    x86.abs64("idt")
+    x86.etikett("str_argv0")
+    x86.bytar(x86.tekst_bytar("kjerne"))
+    x86.u8(0)
+    x86.etikett("str_env0")
+    x86.bytar(x86.tekst_bytar("NORSCODE_OS=1"))
+    x86.u8(0)
+    i = 0
+    mens i < lengde(_strengar_namn) {
+        x86.etikett(_strengar_namn[i])
+        x86.bytar(x86.tekst_bytar(_strengar_tekst[i]))
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _emit_idt() -> heiltall {
+    x86.juster(4096)
+    x86.etikett("idt")
+    la v = 0
+    mens v < 256 {
+        hvis v < 32 {
+            la h = x86.adresse("isr_" + tekst(v))
+            la ist = 3
+            hvis v == 14 { ist = 1 }
+            hvis v == 8 { ist = 2 }
+            x86.u16(h & 65535)
+            x86.u16(8)
+            x86.u8(ist)
+            x86.u8(142)                   // P, DPL0, 64-bit avbrotsport
+            x86.u16((h >> 16) & 65535)
+            x86.u32((h >> 32) & 0xFFFFFFFF)
+            x86.u32(0)
+        } ellers {
+            x86.u64(0)
+            x86.u64(0)
+        }
+        v = v + 1
+    }
+    returner 0
+}
+
+// ─── Sidetabellar ────────────────────────────────────────────────────────────
+
+// Fyller ein sidetabell (512 oppføringar) frå ei liste.
+funksjon _emit_tabell(namn: tekst, oppf: liste_heiltall) -> heiltall {
+    x86.etikett(namn)
+    la i = 0
+    mens i < 512 {
+        x86.u64(oppf[i])
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _tom_tabell() -> liste_heiltall {
+    la t: liste_heiltall = []
+    la i = 0
+    mens i < 512 {
+        legg_til(t, 0)
+        i = i + 1
+    }
+    returner t
+}
+
+// ─── Bilete ──────────────────────────────────────────────────────────────────
+
+// Byggjer biletet for ELF-bytane `elfb`. modus: "ivrig" (K0) eller "demand" (K1).
+// Skriv fila til `ut_sti` og returnerer eit kart med layout-tal.
+funksjon bygg(elfb: liste_heiltall, modus: tekst, ut_sti: tekst) -> ordbok_heltall {
+    hvis modus != "ivrig" og modus != "demand" { kast "trampoline: ukjend modus «" + modus + "»" }
+    la ivrig = modus == "ivrig"
+    la segment = elf.last_segment(elfb)
+    la inngang = elf.inngang(elfb)
+    // Heap-segmentet = det med størst memsz (GC-heapen). Det gjev demand-vindauget.
+    la heap = segment[0]
+    la i = 0
+    mens i < lengde(segment) {
+        hvis segment[i]["memsz"] > heap["memsz"] { heap = segment[i] }
+        i = i + 1
+    }
+    la heap_lo = heap["vaddr"]
+    la heap_hi = heap["vaddr"] + heap["memsz"]
+    la s_lo = STAKK_TOPP() - STAKK_STORLEIK()
+    hvis heap_hi > s_lo { kast "trampoline: heapen overlappar stakkvindauget" }
+    hvis heap_hi > 2147483648 { kast "trampoline: heapen går over 2 GiB (bygg i GC-modus, NORSCODE_GC_ALLOC=1)" }
+    i = 0
+    mens i < lengde(segment) {
+        la s = segment[i]
+        hvis s["vaddr"] < ELF_VINDAUGE_LÅG() { kast "trampoline: segment under 0x400000" }
+        hvis s["vaddr"] + s["filesz"] > ELF_VINDAUGE_HØG() { kast "trampoline: filinnhald over 0x800000 er ikkje støtta" }
+        i = i + 1
+    }
+
+    _tal_etikettar = 0
+    _strengar_namn = []
+    _strengar_tekst = []
+    x86.ny(LAST_ADR())
+    _emit_hovud()
+    _emit_inngang32()
+    _emit_inngang64()
+    _emit_rutinar()
+    _emit_shim()
+    _emit_sidefeil(heap_lo, heap_hi)
+    _emit_unnatak()
+    _emit_data()
+    _emit_idt()
+
+    // Layout: 13 sider sidetabellar + stakkar, så ELF-fila (E) og kopisider (C).
+    x86.juster(4096)
+    la pt_start = x86.adr()
+    la stakk_storleik = 16384 + 16384 + 16384 + 8192 + 16384
+    la e_fys = _juster_opp(pt_start + 13 * 4096 + stakk_storleik, 4096)
+    la c_fys = _juster_opp(e_fys + lengde(elfb), 4096)
+
+    // PT2/PT3: 0x400000–0x7FFFFF (1024 oppføringar)
+    la pt_hog: liste_heiltall = []
+    i = 0
+    mens i < 1024 {
+        legg_til(pt_hog, 0)
+        i = i + 1
+    }
+    la kopi: liste_heiltall = []
+    la tal_kopi = 0
+    i = 0
+    mens i < lengde(segment) {
+        la s = segment[i]
+        la va = s["vaddr"]
+        mens va < s["vaddr"] + s["memsz"] og va < ELF_VINDAUGE_HØG() {
+            la off = va - s["vaddr"]
+            la fys = 0
+            hvis off + 4096 <= s["filesz"] {
+                fys = e_fys + s["offset"] + off
+            } ellers hvis off < s["filesz"] {
+                // Delvis fylt side: kopier filbytane og null resten (etter segmentet
+                // ligg anna innhald i fila, t.d. NCB-tilhengjet etter heap-kontrollblokka).
+                la start_b = s["offset"] + off
+                la slutt_b = s["offset"] + s["filesz"]
+                la bitar = builtin.slice(elfb, start_b, slutt_b)
+                la k = 0
+                mens k < lengde(bitar) {
+                    legg_til(kopi, bitar[k])
+                    k = k + 1
+                }
+                mens k < 4096 {
+                    legg_til(kopi, 0)
+                    k = k + 1
+                }
+                fys = c_fys + tal_kopi * 4096
+                tal_kopi = tal_kopi + 1
+            } ellers hvis ivrig {
+                fys = va
+            }
+            hvis fys != 0 {
+                la idx = (va - ELF_VINDAUGE_LÅG()) / 4096
+                hvis pt_hog[idx] != 0 { kast "trampoline: to segment deler side" }
+                pt_hog[idx] = fys | 3
+            }
+            va = va + 4096
+        }
+        i = i + 1
+    }
+    la bilete_slutt = c_fys + tal_kopi * 4096
+    la pool_start = _juster_opp(bilete_slutt, 4096)
+    hvis ivrig og pool_start > heap_lo {
+        kast "trampoline: ivrig modus krev at biletet sluttar under heapen (identitetskart)"
+    }
+    x86.sett_etikett("elf_inngang", inngang)
+    x86.sett_etikett("bilete_slutt", bilete_slutt)
+    x86.sett_etikett("pool_start", pool_start)
+
+    // PML4 → PDPT0 (0–512 GiB) og PDPT_DM (direktekart @ 0x8000000000)
+    la pml4 = pt_start
+    la pdpt0 = pt_start + 4096
+    la pd0 = pt_start + 8192
+    la pd1 = pt_start + 12288
+    la pt0 = pt_start + 16384
+    la pdpt_dm = pt_start + 32768
+    la pd_dm = pt_start + 36864
+    la t = _tom_tabell()
+    t[0] = pdpt0 | 3
+    t[1] = pdpt_dm | 3
+    _emit_tabell("pml4", t)
+    t = _tom_tabell()
+    t[0] = pd0 | 3
+    t[1] = pd1 | 3
+    _emit_tabell("pdpt0", t)
+    // PD0/PD1: 0–2 GiB. Dei fire første peikar på PT0–PT3 (4 KiB-sider, 0–8 MiB).
+    la pd = 0
+    mens pd < 2 {
+        t = _tom_tabell()
+        la j = 0
+        mens j < 512 {
+            la va2 = (pd * 512 + j) * 2097152
+            hvis pd == 0 og j < 4 {
+                t[j] = (pt0 + j * 4096) | 3
+            } ellers hvis ivrig {
+                la i_heap = va2 < heap_hi og va2 + 2097152 > heap_lo
+                la i_stakk = va2 < STAKK_TOPP() og va2 + 2097152 > s_lo
+                hvis i_heap eller i_stakk { t[j] = va2 | 131 }    // P|RW|PS, identitet
+            }
+            j = j + 1
+        }
+        hvis pd == 0 { _emit_tabell("pd0", t) } ellers { _emit_tabell("pd1", t) }
+        pd = pd + 1
+    }
+    // PT0/PT1: identitet 0x1000–0x3FFFFF (side 0 umappa: null-peikarar gjev #PF-diagnose)
+    la n = 0
+    mens n < 2 {
+        t = _tom_tabell()
+        la j = 0
+        mens j < 512 {
+            la va4 = (n * 512 + j) * 4096
+            hvis va4 != 0 { t[j] = va4 | 3 }
+            j = j + 1
+        }
+        _emit_tabell("pt" + tekst(n), t)
+        n = n + 1
+    }
+    // PT2/PT3: ELF-segmenta
+    n = 0
+    mens n < 2 {
+        t = _tom_tabell()
+        la j = 0
+        mens j < 512 {
+            t[j] = pt_hog[n * 512 + j]
+            j = j + 1
+        }
+        _emit_tabell("pt" + tekst(n + 2), t)
+        n = n + 1
+    }
+    // Direktekart: PDPT_DM[0..3] → PD_DM0..3, 2 MiB-sider over 0–4 GiB
+    t = _tom_tabell()
+    la k = 0
+    mens k < 4 {
+        t[k] = (pd_dm + k * 4096) | 3
+        k = k + 1
+    }
+    _emit_tabell("pdpt_dm", t)
+    k = 0
+    mens k < 4 {
+        t = _tom_tabell()
+        la j = 0
+        mens j < 512 {
+            t[j] = (k * 1073741824 + j * 2097152) | 131
+            j = j + 1
+        }
+        _emit_tabell("pd_dm" + tekst(k), t)
+        k = k + 1
+    }
+    hvis x86.adresse("pd1") != pd1 eller x86.adresse("pdpt_dm") != pdpt_dm { kast "trampoline: sidetabell-layout" }
+
+    // Stakkar (nullbytar i fila; QEMU lastar dei som del av biletet)
+    x86.nullar(16384)
+    x86.etikett("stakk_boot_topp")
+    x86.nullar(16384)
+    x86.etikett("stakk_shim_topp")
+    x86.nullar(16384)
+    x86.etikett("stakk_ist1_topp")
+    x86.nullar(8192)
+    x86.etikett("stakk_ist2_topp")
+    x86.nullar(16384)
+    x86.etikett("stakk_ist3_topp")
+    x86.juster(4096)
+    hvis x86.adr() != e_fys { kast "trampoline: intern layoutfeil (E)" }
+    x86.løys()
+
+    // Fil: boot-området, ELF-fila uendra, utfylling + kopisider.
+    la hale: liste_heiltall = []
+    la pad = c_fys - (e_fys + lengde(elfb))
+    k = 0
+    mens k < pad {
+        legg_til(hale, 0)
+        k = k + 1
+    }
+    k = 0
+    mens k < lengde(kopi) {
+        legg_til(hale, kopi[k])
+        k = k + 1
+    }
+    builtin.fil_skriv_binær(ut_sti, x86.bytes())
+    builtin.fil_append_binær(ut_sti, elfb)
+    hvis lengde(hale) > 0 { builtin.fil_append_binær(ut_sti, hale) }
+
+    la info: ordbok_heltall = {}
+    info["boot_bytes"] = e_fys - LAST_ADR()
+    info["elf_fys"] = e_fys
+    info["elf_bytes"] = lengde(elfb)
+    info["kopisider"] = tal_kopi
+    info["bilete_bytes"] = bilete_slutt - LAST_ADR()
+    info["pool_start"] = pool_start
+    info["inngang"] = inngang
+    info["heap_lo"] = heap_lo
+    info["heap_hi"] = heap_hi
+    info["shim"] = x86.adresse("shim")
+    info["isr_14"] = x86.adresse("isr_14")
+    returner info
+}
