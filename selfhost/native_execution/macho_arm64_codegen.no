@@ -230,30 +230,49 @@ funksjon emit_skriv_int(native: liste_heiltall, arg: heiltall, os: tekst) -> hei
 //
 // mmap er OS-spesifikk: macOS x16=197, svc #0x80, flags MAP_PRIVATE|MAP_ANON
 // =0x1002; Linux x8=222, svc #0, flags MAP_PRIVATE|MAP_ANONYMOUS=0x22.
-// Linux: eigen maskinstakk på 1 GiB (lat: MAP_NORESERVE|MAP_STACK, berre rørde sider
-// kostar) med ei 64 KiB PROT_NONE-vaktsone nedst, og sp flytta til toppen FØR entry lagar
-// ramma si. Lokale ligg i stakkrammer (emit_fn_prologue), so djup rekursjon i den sjølvhosta
-// VM-en (NORSCODE_NATIVE_MAX_DEPTH 1024 VM-kall, kvar med fleire store køyr_funksjon-rammer)
+// Eigen maskinstakk på 1 GiB (lat: berre rørde sider kostar) med ei 64 KiB PROT_NONE-
+// vaktsone nedst, og sp flytta til toppen FØR entry lagar ramma si. Lokale ligg i
+// stakkrammer (emit_fn_prologue), so djup rekursjon i den sjølvhosta VM-en
+// (NORSCODE_NATIVE_MAX_DEPTH 1024 VM-kall, kvar med fleire store køyr_funksjon-rammer)
 // sprengde 8 MiB-hovudstakken → SIGSEGV før VM-en sin fangbare djupnfeil (test_security,
 // test_auth_full_mfa_norsdb). Oppstartsstakken (argv/envp via x27) blir ståande urørt;
-// _start brukar ikkje sp etter `bl main`. Feilar mmap, held vi fram på hovudstakken.
-funksjon emit_eigen_stakk(native: liste_heiltall) -> heiltall {
+// _start (Linux) og dyld (macOS) brukar ikkje sp etter at main returnerer. Feilar mmap,
+// held vi fram på hovudstakken.
+//   Linux: mmap #222 med MAP_PRIVATE|ANONYMOUS|NORESERVE|STACK (0x24022), feil = −errno;
+//          mprotect #226.
+//   macOS: mmap #197 med MAP_PRIVATE|MAP_ANON (0x1002; anonyme sider er alltid late),
+//          feil = carry; mprotect #74.
+funksjon emit_eigen_stakk(native: liste_heiltall, os: tekst) -> heiltall {
     legg_u32(native, 0xD2800000)                    // movz x0, #0        (adr = kjerna vel)
     last_heiltall_64(native, 1, 1073741824)         // x1 = 1 GiB
     legg_u32(native, 0xD2800062)                    // movz x2, #3        (PROT_READ|WRITE)
-    last_heiltall_64(native, 3, 147490)             // x3 = 0x24022 (PRIVATE|ANONYMOUS|NORESERVE|STACK)
+    hvis os == "linux" {
+        last_heiltall_64(native, 3, 147490)         // x3 = 0x24022 (PRIVATE|ANONYMOUS|NORESERVE|STACK)
+    } ellers {
+        legg_u32(native, 0xD2820043)                // movz x3, #0x1002   (MAP_PRIVATE|MAP_ANON)
+    }
     legg_u32(native, 0x92800004)                    // movn x4, #0        (fd = -1)
     legg_u32(native, 0xD2800005)                    // movz x5, #0
-    legg_u32(native, 0xD2801BC8)                    // movz x8, #222      (mmap)
-    legg_u32(native, 0xD4000001)                    // svc #0
-    legg_u32(native, 0xB13FFC1F)                    // cmn x0, #4095      (carry ⇔ −errno)
+    hvis os == "linux" {
+        legg_u32(native, 0xD2801BC8)                // movz x8, #222      (mmap)
+        legg_u32(native, 0xD4000001)                // svc #0
+        legg_u32(native, 0xB13FFC1F)                // cmn x0, #4095      (carry ⇔ −errno)
+    } ellers {
+        legg_u32(native, 0xD28018B0)                // movz x16, #197     (mmap)
+        legg_u32(native, 0xD4001001)                // svc #0x80          (carry = feil)
+    }
     la p_feil = lengde(native)
     legg_u32(native, 0)                             // b.cs ferdig (behald hovudstakken)
     legg_u32(native, 0xAA0003E9)                    // mov x9, x0         (botn)
     legg_u32(native, 0xD2A00021)                    // movz x1, #1, lsl #16  (64 KiB vakt)
     legg_u32(native, 0xD2800002)                    // movz x2, #0        (PROT_NONE)
-    legg_u32(native, 0xD2801C48)                    // movz x8, #226      (mprotect)
-    legg_u32(native, 0xD4000001)                    // svc #0
+    hvis os == "linux" {
+        legg_u32(native, 0xD2801C48)                // movz x8, #226      (mprotect)
+        legg_u32(native, 0xD4000001)                // svc #0
+    } ellers {
+        legg_u32(native, 0xD2800950)                // movz x16, #74      (mprotect)
+        legg_u32(native, 0xD4001001)                // svc #0x80
+    }
     last_heiltall_64(native, 10, 1073741824)
     legg_u32(native, 0x8B0A0129)                    // add x9, x9, x10    (topp, 16-justert)
     legg_u32(native, 0x9100013F)                    // mov sp, x9
@@ -1100,13 +1119,12 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
 // -> "std.sha256.hash_bytes"). Returner "" når ingen ruting finst (då fell
 // gap-greina tilbake til NATIV-GAP-stubben). Rutinga aktiverer seg berre om
 // nøkkelen faktisk finst i `funksjonar` (bundlaren har tvangs-inkludert modulen).
-// Gap-ruting er AV for macOS medan Mach-O-emitteren har 15000-byte-taket
-// (macho_arm64_emitter.bygg_program): ruta drar heile std-målet (t.d.
-// std.sha256.hash) inn i biletet, så program som i dag byggjer og fangar NATIV-
-// GAP ville i staden sprengje taket. Linux-ELF (utan tak) rutar. Slå på att for
-// macOS når M-fasen løfter taket.
+// M1: gap-rutinga er PÅ for begge OS. Ho var av for macOS medan Mach-O-emitteren hadde
+// 15000-byte-taket (ruta drar heile std-målet inn i biletet); taket er løfta
+// (macho_arm64_emitter: __TEXT og signatur følgjer kodestorleiken), og std.native_gap
+// har Darwin-tabellar i std.native_sys ("macos-arm64").
 funksjon ncval_ruting_aktiv(os: tekst) -> boolsk {
-    returner os != "macos"
+    returner os == "linux" eller os == "macos"
 }
 
 // A2: OS-vegane som Linux-ELF rutar til std.native_gap (via den delte tabellen i
@@ -2345,6 +2363,18 @@ funksjon emit_sett_inn(native: liste_heiltall, list_reg: heiltall, idx_reg: heil
     returner 0
 }
 
+// strlen av den NUL-terminerte C-strengen på [sp+128]: x9 = sp+128, x10 = lengd.
+// Rører x9–x11 (sp-relativt, so kallaren må ha same sp som bufferet vart skrive med).
+funksjon emit_c_strlen_sp128(native: liste_heiltall) -> heiltall {
+    legg_u32(native, 0x910203E9)                        // add x9, sp, #128
+    legg_u32(native, 0xD280000A)                        // movz x10, #0
+    legg_u32(native, 0x386A692B)                        // løkke: ldrb w11, [x9, x10]
+    legg_u32(native, 0x3400006B)                        // cbz w11, ferdig (+3)
+    legg_u32(native, 0x9100054A)                        // add x10, x10, #1
+    legg_u32(native, 0x17FFFFFD)                        // b løkke (−3)
+    returner 0
+}
+
 // system_info() → NcVal-kart {"system", "machine", "cwd", "executable", "status"}.
 // system/machine er compile-time-konstantar per målplattform (codegen kjenner OS-et).
 // Scratch: x0–x3, x8/x16, x9–x17 (via str_const/alloc_str_copy); ramme på maskinstakken.
@@ -2397,9 +2427,61 @@ funksjon emit_system_info(native: liste_heiltall, dst_reg: heiltall, os: tekst) 
         emit_alloc_str_copy(native, 11, 0)
         legg_u32(native, 0xF9001FEB)                    // str x11, [sp, #56]  (executable-verdi)
     } ellers {
+        // M1: macOS har ingen getcwd-syscall og ingen /proc. cwd: fd = open(".", O_RDONLY) (#5),
+        // fcntl(fd, F_GETPATH = 50, buf) (#92, MAXPATHLEN-buffer), close(fd) (#6).
+        // executable: proc_info(PROC_INFO_CALL_PIDINFO = 2, getpid() (#20), PROC_PIDPATHINFO = 11,
+        // 0, buf, 1920) (#336) — same kall som libproc sin proc_pidpath. Ved feil (carry) tom streng.
+        legg_u32(native, 0x914007E9)                    // add x9, sp, #4096
+        legg_u32(native, 0xD1200129)                    // sub x9, x9, #2048  (sp+2048)
+        legg_u32(native, 0x528005CA)                    // movz w10, #'.'
+        legg_u32(native, 0xF900012A)                    // str x10, [x9]      (".\0")
+        legg_u32(native, 0xAA0903E0)                    // mov x0, x9
+        legg_u32(native, 0xD2800001)                    // movz x1, #0        (O_RDONLY)
+        legg_u32(native, 0xD2800002)                    // movz x2, #0
+        emit_syscall(native, 5, os)                     // open
+        la p_cwd_open = lengde(native)
+        legg_u32(native, 0)                             // b.cs cwd_tom
+        legg_u32(native, 0xAA0003EC)                    // mov x12, x0        (fd)
+        legg_u32(native, 0xD2800641)                    // movz x1, #50       (F_GETPATH)
+        legg_u32(native, 0x910203E2)                    // add x2, sp, #128
+        emit_syscall(native, 92, os)                    // fcntl
+        legg_u32(native, 0x1A9F37ED)                    // cset w13, cs       (1 = feil)
+        legg_u32(native, 0xAA0C03E0)                    // mov x0, x12
+        emit_syscall(native, 6, os)                     // close
+        la p_cwd_feil = lengde(native)
+        legg_u32(native, 0)                             // cbnz w13, cwd_tom
+        emit_c_strlen_sp128(native)                     // x9 = sp+128, x10 = lengd
+        emit_alloc_str_copy(native, 11, 0)
+        la p_cwd_ferdig = lengde(native)
+        legg_u32(native, 0)                             // b cwd_ferdig
+        la lbl_cwd_tom = lengde(native)
         emit_ncval_str_const(native, "", 11)
-        legg_u32(native, 0xF90017EB)                    // str x11, [sp, #40]
-        legg_u32(native, 0xF9001FEB)                    // str x11, [sp, #56]
+        la lbl_cwd_ferdig = lengde(native)
+        legg_u32(native, 0xF90017EB)                    // str x11, [sp, #40]  (cwd-verdi)
+        ncd_bcond(native, p_cwd_open, lbl_cwd_tom, 2)
+        skriv_u32(native, p_cwd_feil, 0x3500000D | ((((lbl_cwd_tom - p_cwd_feil) / 4) & 0x7FFFF) << 5))
+        ncd_b(native, p_cwd_ferdig, lbl_cwd_ferdig)
+        emit_syscall(native, 20, os)                    // getpid
+        legg_u32(native, 0xAA0003E1)                    // mov x1, x0         (pid)
+        legg_u32(native, 0xD2800040)                    // movz x0, #2        (PROC_INFO_CALL_PIDINFO)
+        legg_u32(native, 0xD2800162)                    // movz x2, #11       (PROC_PIDPATHINFO)
+        legg_u32(native, 0xD2800003)                    // movz x3, #0
+        legg_u32(native, 0x910203E4)                    // add x4, sp, #128
+        legg_u32(native, 0xD280F005)                    // movz x5, #1920
+        legg_u32(native, 0x390203FF)                    // strb wzr, [sp, #128]
+        emit_syscall(native, 336, os)                   // proc_info
+        la p_exe_feil = lengde(native)
+        legg_u32(native, 0)                             // b.cs exe_tom
+        emit_c_strlen_sp128(native)
+        emit_alloc_str_copy(native, 11, 0)
+        la p_exe_ferdig = lengde(native)
+        legg_u32(native, 0)                             // b exe_ferdig
+        la lbl_exe_tom = lengde(native)
+        emit_ncval_str_const(native, "", 11)
+        la lbl_exe_ferdig = lengde(native)
+        legg_u32(native, 0xF9001FEB)                    // str x11, [sp, #56]  (executable-verdi)
+        ncd_bcond(native, p_exe_feil, lbl_exe_tom, 2)
+        ncd_b(native, p_exe_ferdig, lbl_exe_ferdig)
     }
     legg_u32(native, 0xAA1C03EE)                        // mov x14, x28 (mapdata)
     legg_u32(native, 0xD28000A9)                        // movz x9, #5  (count)
@@ -7929,7 +8011,7 @@ funksjon emit_fn_prologue(native: liste_heiltall, is_entry: boolsk, nlocals: hei
         // og passar han i x2 før `bl main`, så begge OS held envp i x2 her.
         legg_u32(native, 0xAA0203FB)                // mov x27, x2  (envp)
         emit_heap_init(native, os)
-        hvis os == "linux" { emit_eigen_stakk(native) }
+        emit_eigen_stakk(native, os)
         hvis sann {
             // A5: bool- og små-heiltal-buffer (sjå emit_ncval_alloc) før null-objektet og
             // globalane: [bool 0, bool 1][int 0..65535][null {0,0}] → x25.
@@ -9697,7 +9779,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis rk_j == -2 { returner {"ok": "usann", "error": "NcVal operand-stakk full (json-ruting)", "overflow": "sann", "image": []} }
                     hvis rk_j < 0 { returner {"ok": "usann", "error": "NcVal json-ruting arg-underflyt: " + kallnamn, "image": []} }
                     djupn = rk_j
-                } ellers hvis os == "linux" og (kallnamn == "host_finst" eller kallnamn == "builtin.host_finst") og lengde(instr) == 3 og instr[2] == 1 {
+                } ellers hvis (kallnamn == "host_finst" eller kallnamn == "builtin.host_finst") og lengde(instr) == 3 og instr[2] == 1 {
                     // A5: verts-funksjonstabellen (ncd_host_blokk) — vertsstyrt selfhost.vm.
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal host_finst krev 1 arg", "image": []} }
                     legg_u32(native, 0xAA0003E0 | (r1 << 16))      // mov x0, Xtopp (namn)
@@ -9706,7 +9788,7 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     legg_til(bl_patchar, [p_bl_hf, "__host_finst"])
                     legg_u32(native, 0xAA0003E0 | r1)              // mov Xtopp, x0
                     opnd_ut(native, djupn - 1, r1, memmode, home_off)
-                } ellers hvis os == "linux" og (kallnamn == "host_kall" eller kallnamn == "builtin.host_kall") og lengde(instr) == 3 og instr[2] == 2 {
+                } ellers hvis (kallnamn == "host_kall" eller kallnamn == "builtin.host_kall") og lengde(instr) == 3 og instr[2] == 2 {
                     hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal host_kall krev 2 arg", "image": []} }
                     legg_u32(native, 0xAA0003E0 | (r2 << 16))      // mov x0, Xnamn
                     legg_u32(native, 0xAA0003E1 | (r1 << 16))      // mov x1, Xargs
@@ -9905,9 +9987,83 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     hvis os == "linux" {
                         legg_u32(native, 0xD4000001)                    // svc #0
                     } ellers {
+                        // M1: to Darwin-kall svarar i BÅDE x0 og x1. Dei blir normaliserte til
+                        // Linux-forma native_gap (std.native_sys) reknar med:
+                        //   fork (#2): barnet får x1 = 1 (x0 = forelderens pid) → x0 = 0 i barnet;
+                        //   pipe (#42): fd-ane kjem i x0/x1 → skrivne som int[2] til [a1] (som
+                        //   pipe2(fds, …) på Linux), resultat 0.
+                        // Og mprotect (#74) med PROT_EXEC synkar I-cachen over [a1, a1+a2) etter
+                        // eit vellukka kall (dc cvau; dsb ish; ic ivau; dsb ish; isb — sjå
+                        // icache_sync): Darwin gjer det ikkje for anonyme sider (målt: SIGILL), og
+                        // native_gap (JIT, NEON-tensorkjerna) skriv kode som data før mprotect R|X.
+                        // Linux arm64 synkar sjølv i mprotect (set_pte_at → __sync_icache_dcache).
+                        legg_u32(native, 0xAA1003EA)                    // mov x10, x16  (nr)
+                        legg_u32(native, 0xAA0003EB)                    // mov x11, x0   (a1)
+                        legg_u32(native, 0xAA0103EC)                    // mov x12, x1   (a2)
+                        legg_u32(native, 0xAA0203ED)                    // mov x13, x2   (a3)
                         legg_u32(native, 0xD4001001)                    // svc #0x80
-                        legg_u32(native, 0x54000043)                    // b.cc +2 (carry clear = ok)
+                        la p_s6_ok = lengde(native)
+                        legg_u32(native, 0)                             // b.cc ok (carry clear)
                         legg_u32(native, 0xCB0003E0)                    // neg x0, x0 (+errno → −errno)
+                        la p_s6_feil = lengde(native)
+                        legg_u32(native, 0)                             // b ferdig
+                        ncd_bcond(native, p_s6_ok, lengde(native), 3)
+                        legg_u32(native, 0xF100095F)                    // cmp x10, #2   (fork)
+                        la p_s6_ikkje_fork = lengde(native)
+                        legg_u32(native, 0)                             // b.ne ikkje_fork
+                        la p_s6_forelder = lengde(native)
+                        legg_u32(native, 0)                             // cbz x1, ferdig (forelder)
+                        legg_u32(native, 0xD2800000)                    // movz x0, #0   (barn)
+                        la p_s6_barn = lengde(native)
+                        legg_u32(native, 0)                             // b ferdig
+                        ncd_bcond(native, p_s6_ikkje_fork, lengde(native), 1)
+                        legg_u32(native, 0xF100A95F)                    // cmp x10, #42  (pipe)
+                        la p_s6_ikkje_pipe = lengde(native)
+                        legg_u32(native, 0)                             // b.ne ikkje_pipe
+                        legg_u32(native, 0xB9000160)                    // str w0, [x11]
+                        legg_u32(native, 0xB9000561)                    // str w1, [x11, #4]
+                        legg_u32(native, 0xD2800000)                    // movz x0, #0
+                        la p_s6_pipe_ut = lengde(native)
+                        legg_u32(native, 0)                             // b ferdig
+                        ncd_bcond(native, p_s6_ikkje_pipe, lengde(native), 1)
+                        legg_u32(native, 0xF101295F)                    // cmp x10, #74  (mprotect)
+                        la p_s6_ikkje_mp = lengde(native)
+                        legg_u32(native, 0)                             // b.ne ferdig
+                        la p_s6_ikkje_x = lengde(native)
+                        legg_u32(native, 0)                             // tbz x13, #2, ferdig (PROT_EXEC?)
+                        legg_u32(native, 0xF100019F)                    // cmp x12, #0
+                        la p_s6_tom = lengde(native)
+                        legg_u32(native, 0)                             // b.le ferdig
+                        legg_u32(native, 0x8B0C016C)                    // add x12, x11, x12  (slutt)
+                        legg_u32(native, 0xD2800809)                    // movz x9, #64       (steg ≤ linja)
+                        legg_u32(native, 0xD28007EF)                    // movz x15, #63
+                        legg_u32(native, 0x8A2F016E)                    // bic x14, x11, x15  (linjestart)
+                        la lbl_s6_d = lengde(native)
+                        legg_u32(native, 0xD50B7B2E)                    // d: dc cvau, x14
+                        legg_u32(native, 0x8B0901CE)                    // add x14, x14, x9
+                        legg_u32(native, 0xEB0C01DF)                    // cmp x14, x12
+                        la p_s6_d = lengde(native)
+                        legg_u32(native, 0)                             // b.lo d
+                        ncd_bcond(native, p_s6_d, lbl_s6_d, 3)
+                        legg_u32(native, 0xD5033B9F)                    // dsb ish
+                        legg_u32(native, 0x8A2F016E)                    // bic x14, x11, x15
+                        la lbl_s6_i = lengde(native)
+                        legg_u32(native, 0xD50B752E)                    // i: ic ivau, x14
+                        legg_u32(native, 0x8B0901CE)                    // add x14, x14, x9
+                        legg_u32(native, 0xEB0C01DF)                    // cmp x14, x12
+                        la p_s6_i = lengde(native)
+                        legg_u32(native, 0)                             // b.lo i
+                        ncd_bcond(native, p_s6_i, lbl_s6_i, 3)
+                        legg_u32(native, 0xD5033B9F)                    // dsb ish
+                        legg_u32(native, 0xD5033FDF)                    // isb
+                        la lbl_s6_ferdig = lengde(native)
+                        ncd_b(native, p_s6_feil, lbl_s6_ferdig)
+                        skriv_u32(native, p_s6_forelder, 0xB4000001 | ((((lbl_s6_ferdig - p_s6_forelder) / 4) & 0x7FFFF) << 5))
+                        ncd_b(native, p_s6_barn, lbl_s6_ferdig)
+                        ncd_b(native, p_s6_pipe_ut, lbl_s6_ferdig)
+                        ncd_bcond(native, p_s6_ikkje_mp, lbl_s6_ferdig, 1)
+                        skriv_u32(native, p_s6_ikkje_x, 0x3610000D | ((((lbl_s6_ferdig - p_s6_ikkje_x) / 4) & 0x3FFF) << 5))
+                        ncd_bcond(native, p_s6_tom, lbl_s6_ferdig, 13)
                     }
                     la s6d = opnd_push_reg(s6b, memmode)
                     emit_ncval_alloc_ptr(native, 0, s6d, 1)             // boks x0 (64-bit)
@@ -11243,21 +11399,25 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
 
 funksjon kompiler_ncb_ncval(ncb, output: tekst, os: tekst) -> ordbok_tekst {
     la res = ncval_compile_program(ncb, os)
+    // M1: den parsa NCB-en trengst ikkje lenger; slepp han før Mach-O-emisjonen, so han ikkje
+    // er ein del av det levande settet saman med biletet (1 GiB-heapen på x86-verten).
+    ncb = null
     hvis res["ok"] != "sann" {
         returner {"ok": "usann", "error": res["error"], "format": "Mach-O arm64", "image": []}
     }
-    // Emitteren kastar for kode over Mach-O-taket (15000 byte); gjer det om til
-    // ok=usann så kallarar (bygg-native, testar) får ein fangbar feil, ikkje eit
-    // ufanga unnatak.
-    la image = []
+    // Emitteren kastar for ugyldig kodelengd; gjer det om til ok=usann så kallarar
+    // (bygg-native, testar) får ein fangbar feil, ikkje eit ufanga unnatak. M1: biletet blir
+    // strøyma til fil i delar (macho.skriv_program: same bytes som bygg_program, utan ein
+    // samla kopi av koden i minnet).
     la emit_ok = sann
     la emitfeil = ""
-    prøv { image = macho.bygg_program(res["image"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
+    la bytes_skrive = 0
+    prøv { bytes_skrive = macho.skriv_program(output, res["image"]) } fang (e) { emit_ok = usann  emitfeil = tekst(e) }
     hvis ikkje emit_ok {
         returner {"ok": "usann", "error": "Mach-O-emitter: " + emitfeil, "format": "Mach-O arm64", "image": []}
     }
-    builtin.fil_skriv_binær(output, image)
-    returner {"ok": "sann", "error": "", "format": "Mach-O arm64", "image": image, "output": output}
+    returner {"ok": "sann", "error": "", "format": "Mach-O arm64", "image": [], "output": output,
+              "bytes": tekst_fra_heltall(bytes_skrive)}
 }
 
 // ─── BATCH-CODEGEN: kompiler-i-batchar + lenk-til-slutt ─────────────────────
@@ -11780,11 +11940,11 @@ funksjon start() -> heiltall {
         skriv("macho_arm64_codegen: NC_INPUT og NC_OUTPUT er påkravde\n")
         returner 2
     }
-    la ncb = les_ncb_fil(input)
     // Fase 4: standardvegen for macOS-arm64 er no den fulle NcVal-maskina (heap-
     // NcVal, strengar, lister, kart). Den runtime-lause registermaskina
-    // (kompiler_ncb) blir berre halden for test_macho_arm64_codegen.
-    la resultat = kompiler_ncb_ncval(ncb, output, "macos")
+    // (kompiler_ncb) blir berre halden for test_macho_arm64_codegen. M1: NCB-en blir
+    // ikkje halden i ein lokal her (kompiler_ncb_ncval slepp han etter kompileringa).
+    la resultat = kompiler_ncb_ncval(les_ncb_fil(input), output, "macos")
     // NC_BUILTIN_REPORT=1: skriv rapporten (heile gapet, sjå ncval_rapport_skriv); exit 3
     // som x86 når noko er uløyst.
     hvis ncval_rapport_på() {

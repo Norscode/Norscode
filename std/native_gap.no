@@ -539,7 +539,13 @@ funksjon _sys_pollfd(adr: heiltall, fd: heiltall, events: heiltall) -> heiltall 
 
 // ppoll(fds, n, timeout) — ms < 0 = vent utan tak. `ts` er 16 byte scratch til timespec.
 // ppoll (ikkje poll) fordi poll(2) ikkje finst på linux-arm64. n == 0 → rein venting.
+// macOS (M1) har ingen ppoll: poll(fds, n, ms) med ms < 0 = INFTIM (−1).
 funksjon _sys_poll(fds: heiltall, n: heiltall, ms: heiltall, ts: heiltall) -> heiltall {
+    hvis ikkje nsys._har_nr("ppoll") {
+        la t: heiltall = ms
+        hvis t < 0 { t = 0 - 1 }
+        returner builtin.sys6(nsys._nr("poll"), fds, n, t, 0, 0, 0)
+    }
     la tsp: heiltall = 0
     hvis ms >= 0 {
         builtin.raw_store64(ts + nsys._layout("timespec", "sec"), ms / 1000)
@@ -615,6 +621,11 @@ funksjon _pg_nonblock(fd: heiltall) -> heiltall {
     la flagg = builtin.sys6(fcntl, fd, nsys._flagg("F_GETFL"), 0, 0, 0, 0)
     hvis flagg < 0 { flagg = 0 }
     returner builtin.sys6(fcntl, fd, nsys._flagg("F_SETFL"), flagg | nsys._flagg("O_NONBLOCK"), 0, 0, 0)
+}
+
+// Set FD_CLOEXEC på fd (fcntl F_SETFD) — for mål utan pipe2/O_CLOEXEC-variantar (macOS).
+funksjon _pg_cloexec(fd: heiltall) -> heiltall {
+    returner builtin.sys6(nsys._nr("fcntl"), fd, nsys._flagg("F_SETFD"), nsys._flagg("FD_CLOEXEC"), 0, 0, 0)
 }
 
 funksjon _pg_legg_til_del(p, felt: tekst, del: tekst) -> heiltall {
@@ -719,12 +730,18 @@ funksjon _pg_skriv_stdin(p) -> heiltall {
     la nr_write = nsys._nr("write")
     la eagain = 0 - nsys._errno("EAGAIN")
     la eintr = 0 - nsys._errno("EINTR")
+    // Linux: SIGPIPE blir maskert rundt skrivinga og ein ventande SIGPIPE henta ut etterpå.
+    // macOS (M1) har ingen rt_sig*-kall; der har skrive-enden F_SETNOSIGPIPE (sett i _pg_spawn).
+    la maskert = nsys._har_nr("rt_sigprocmask")
     la sett: heiltall = p["scratch"] + _PG_SIGSETT()
     la sz = nsys._layout("sigset", "storleik")
-    builtin.raw_store64(sett, 1 << (nsys._flagg("SIGPIPE") - 1))
-    builtin.raw_store64(sett + 8, 0)
-    la nr_mask = nsys._nr("rt_sigprocmask")
-    builtin.sys6(nr_mask, nsys._flagg("SIG_BLOCK"), sett, sett + 8, sz, 0, 0)
+    la nr_mask: heiltall = 0
+    hvis maskert {
+        builtin.raw_store64(sett, 1 << (nsys._flagg("SIGPIPE") - 1))
+        builtin.raw_store64(sett + 8, 0)
+        nr_mask = nsys._nr("rt_sigprocmask")
+        builtin.sys6(nr_mask, nsys._flagg("SIG_BLOCK"), sett, sett + 8, sz, 0, 0)
+    }
     la ferdig = usann
     la epipe = usann
     mens ikkje ferdig og p["inn_pos"] < total {
@@ -752,14 +769,14 @@ funksjon _pg_skriv_stdin(p) -> heiltall {
             p["inn_pos"] = p["inn_pos"] + w
         }
     }
-    hvis epipe {
+    hvis epipe og maskert {
         // Hent ut SIGPIPE-en som write genererte før maska blir sett tilbake.
         la ts: heiltall = p["scratch"] + _PG_TS()
         builtin.raw_store64(ts, 0)
         builtin.raw_store64(ts + 8, 0)
         builtin.sys6(nsys._nr("rt_sigtimedwait"), sett, 0, ts, sz, 0, 0)
     }
-    builtin.sys6(nr_mask, nsys._flagg("SIG_SETMASK"), sett + 8, 0, sz, 0, 0)
+    hvis maskert { builtin.sys6(nr_mask, nsys._flagg("SIG_SETMASK"), sett + 8, 0, sz, 0, 0) }
     hvis p["inn_pos"] >= total { _pg_lukk_stdin(p) }
     returner 0
 }
@@ -947,6 +964,11 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     hvis executable == "" og ikkje synkron { returner _pg_feil("tom executable") }
     la profil = _pg_sandbox_profil(req)
     hvis profil != "" og ikkje _pg_sandbox_kjend(profil) { returner _pg_feil("ukjent sandbox-profil: " + profil) }
+    // macOS (M1): profilane er seccomp-BPF; Darwin har ingen seccomp (Seatbelt krev libsandbox).
+    // Fail-closed: eit barn skal aldri køyre utan avgrensinga det bad om.
+    hvis profil != "" og ikkje nsys._har_nr("seccomp") {
+        returner _pg_feil("sandbox-profil «" + profil + "» er ikkje støtta på " + nsys.mål() + " (ingen seccomp)")
+    }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
     la scratch = _sys_mmap_rw(_PG_SCRATCH())
@@ -1033,11 +1055,20 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     // O_CLOEXEC på røyr-fd-ane: elles lek dei gjennom nøsta execve (fork→exec-barn arvar
     // forelderens forelder sine røyr-endar utan CLOEXEC), så eit barnebarn held ein
     // skrive-ende open → forelderens les får aldri EOF → nøsta CI-orkestrering heng.
+    // macOS (M1) har ikkje pipe2: _nr_kompat gjev pipe(2), som ikkje tek flagg; codegenen
+    // sin sys6 skriv dei to fd-ane (x0/x1) til adressa som for pipe2, og FD_CLOEXEC blir
+    // sett med fcntl etterpå (same effekt utan atomisiteten, som berre trengst med trådar).
     la pipes: heiltall = scratch + _PG_ROYR()
-    la nr_pipe2 = nsys._nr("pipe2")
+    la nr_pipe2 = nsys._nr_kompat("pipe2")
+    la har_pipe2 = nsys._har_nr("pipe2")
     la pi2: heiltall = 0
     mens pi2 < 3 {
-        hvis builtin.sys6(nr_pipe2, pipes + pi2 * 8, nsys._flagg("O_CLOEXEC"), 0, 0, 0, 0) != 0 {
+        la pr = builtin.sys6(nr_pipe2, pipes + pi2 * 8, nsys._flagg("O_CLOEXEC"), 0, 0, 0, 0)
+        hvis pr == 0 og ikkje har_pipe2 {
+            _pg_cloexec(builtin.raw_load64(pipes + pi2 * 8) & 4294967295)
+            _pg_cloexec((builtin.raw_load64(pipes + pi2 * 8) >> 32) & 4294967295)
+        }
+        hvis pr != 0 {
             la lk: heiltall = 0
             mens lk < pi2 {
                 _sys_lukk(builtin.raw_load64(pipes + lk * 8) & 4294967295)
@@ -1055,16 +1086,28 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     la ut_w = (builtin.raw_load64(pipes + 8) >> 32) & 4294967295
     la feil_r = builtin.raw_load64(pipes + 16) & 4294967295
     la feil_w = (builtin.raw_load64(pipes + 16) >> 32) & 4294967295
+    // macOS (M1): skriving til eit lukka røyr gjev EPIPE i staden for SIGPIPE (Linux maskerer
+    // SIGPIPE rundt skrivinga i _pg_skriv_stdin; Darwin har ingen rt_sig*-kall).
+    hvis nsys._har_flagg("F_SETNOSIGPIPE") {
+        builtin.sys6(nsys._nr("fcntl"), inn_w, nsys._flagg("F_SETNOSIGPIPE"), 1, 0, 0, 0)
+    }
     // Alle nummer barnet treng blir slått opp FØR fork: barnet gjer berre rå syscallar.
     la nr_dup2 = nsys._nr_kompat("dup2")         // arm64: dup3(a, b, 0)
     la nr_close = nsys._nr("close")
     la nr_chdir = nsys._nr("chdir")
-    la nr_prctl = nsys._nr("prctl")
-    la nr_seccomp = nsys._nr("seccomp")
     la nr_execve = nsys._nr("execve")
     la nr_exit = nsys._nr("exit")
-    la no_new_privs = nsys._flagg("PR_SET_NO_NEW_PRIVS")
-    la sm_filter = nsys._flagg("SECCOMP_SET_MODE_FILTER")
+    // prctl/seccomp berre med sandkasseprofil (profil utan seccomp er avvist over).
+    la nr_prctl: heiltall = 0
+    la nr_seccomp: heiltall = 0
+    la no_new_privs: heiltall = 0
+    la sm_filter: heiltall = 0
+    hvis bpf_prog != 0 {
+        nr_prctl = nsys._nr("prctl")
+        nr_seccomp = nsys._nr("seccomp")
+        no_new_privs = nsys._flagg("PR_SET_NO_NEW_PRIVS")
+        sm_filter = nsys._flagg("SECCOMP_SET_MODE_FILTER")
+    }
     la pid = builtin.sys6(nsys._nr_kompat("fork"), nsys._flagg("FORK_A1"), 0, 0, 0, 0, 0)   // arm64: clone(SIGCHLD, 0, 0, 0, 0)
     hvis pid == 0 {
         // BARN: koplar røyr, chdir, execve; aldri tilbake til Norscode-koden.
@@ -1229,6 +1272,22 @@ funksjon _sk_buf() -> heiltall {
     returner _sk_scratch
 }
 
+// macOS (M1): sendto har ingen MSG_NOSIGNAL (flagget er 0 i tabellen); SO_NOSIGPIPE på kvar
+// sokkel gjer at write/sendto mot ein lukka peer gjev EPIPE i staden for SIGPIPE, som på
+// Linux. Returnerer fd uendra (òg når han er ein negativ feilkode).
+funksjon _sk_nosigpipe(fd: heiltall) -> heiltall {
+    hvis fd < 0 eller ikkje nsys._har_flagg("SO_NOSIGPIPE") { returner fd }
+    la ein: heiltall = _sk_buf() + 65528   // siste 8 byte: utanfor alle andre _sk_buf-felt
+    builtin.raw_store64(ein, 1)
+    builtin.sys6(nsys._nr("setsockopt"), fd, nsys._flagg("SOL_SOCKET"), nsys._flagg("SO_NOSIGPIPE"), ein, 4, 0)
+    returner fd
+}
+
+// socket(af, type, 0) + SO_NOSIGPIPE der målet treng det; negativ retur = feilkode.
+funksjon _sk_ny(af: heiltall, type: heiltall) -> heiltall {
+    returner _sk_nosigpipe(builtin.sys6(nsys._nr("socket"), af, type, 0, 0, 0, 0))
+}
+
 funksjon _sk_ip(vert: tekst) -> liste_heiltall {
     hvis vert == "" eller vert == "0.0.0.0" eller vert == "*" { returner [0, 0, 0, 0] }
     hvis vert == "localhost" { returner [127, 0, 0, 1] }
@@ -1269,7 +1328,7 @@ funksjon _sk_sockaddr(adr: heiltall, vert: tekst, port: heiltall) -> heiltall {
 }
 
 funksjon socket_new(af: heiltall, type: heiltall) -> heiltall {
-    la fd = builtin.sys6(nsys._nr("socket"), af, type, 0, 0, 0, 0)
+    la fd = _sk_ny(af, type)
     hvis fd < 0 { kast "socket_new feila: " + tekst_fra_heltall(fd) }
     returner fd
 }
@@ -1295,7 +1354,7 @@ funksjon socket_listen(fd: heiltall, etterslep: heiltall) -> heiltall {
 funksjon socket_accept(fd: heiltall) -> heiltall {
     la b = _sk_buf()
     builtin.raw_store64(b + 96, 16)
-    la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
+    la ny = _sk_nosigpipe(builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0))
     hvis ny < 0 { kast "socket_accept feila: " + tekst_fra_heltall(ny) }
     returner ny
 }
@@ -1401,9 +1460,15 @@ funksjon _nw_epoll_fd() -> heiltall {
     returner _nw_epoll
 }
 
+// Readiness-backenden: epoll på Linux; macOS (M1) har ingen epoll og ventar med poll(2).
+funksjon _nw_backend() -> tekst {
+    hvis nsys._har_nr("epoll_create1") { returner "epoll" }
+    returner "poll"
+}
+
 funksjon _nw_res(status: tekst, handle: tekst, data: tekst, verdi: heiltall, port: heiltall, error: tekst) {
     returner {"abi": "norscode-native-network-v1", "status": status, "handle": handle, "data": data,
-              "value": verdi, "port": port, "error": error, "event_backend": "epoll",
+              "value": verdi, "port": port, "error": error, "event_backend": _nw_backend(),
               "tls_version": "", "cipher": "", "peer_verified": usann, "peer_cert_present": usann,
               "peer_subject": "", "ocsp_stapled": usann, "ocsp_status": ""}
 }
@@ -1554,7 +1619,7 @@ funksjon network_operation(req) {
         la type: heiltall = nsys._flagg("SOCK_STREAM")
         hvis op != "listen" { type = nsys._flagg("SOCK_DGRAM") }
         la fd = 0
-        prøv { fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), type, 0, 0, 0, 0) } fang (e) { fd = -1 }
+        prøv { fd = _sk_ny(nsys._flagg("AF_INET"), type) } fang (e) { fd = -1 }
         hvis fd < 0 { returner _nw_feil("", "socket failed") }
         prøv {
             hvis op == "udp_connect" {
@@ -1579,7 +1644,7 @@ funksjon network_operation(req) {
         la host = _nw_tekst(req, "host", "")
         la port = _nw_heiltal(req, "port", 0)
         hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
-        la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
+        la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
         hvis fd < 0 { returner _nw_feil("", "socket failed") }
         la r = 0
         prøv { r = socket_connect(fd, host, port) } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
@@ -1604,7 +1669,7 @@ funksjon network_operation(req) {
     hvis op == "accept" {
         la b = _sk_buf()
         builtin.raw_store64(b + 96, 16)
-        la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
+        la ny = _sk_nosigpipe(builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0))
         hvis ny == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", handle, "", 0, 0, "") }
         hvis ny < 0 { returner _nw_feil(handle, "accept failed") }
         _pg_nonblock(ny)
@@ -1615,6 +1680,23 @@ funksjon network_operation(req) {
         la events = _nw_heiltal(req, "events", 1)
         la timeout_ms = _nw_heiltal(req, "timeout_ms", 0)
         la b = _sk_buf()
+        hvis _nw_backend() == "poll" {
+            // macOS (M1): poll(2) på den eine fd-en, same ABI-bitar og same klar-tolking som epoll.
+            la pmaske: heiltall = 0
+            hvis (events & 1) != 0 { pmaske = pmaske | nsys._flagg("POLLIN") }
+            hvis (events & 2) != 0 { pmaske = pmaske | nsys._flagg("POLLOUT") }
+            la pf: heiltall = b + 256
+            _sys_pollfd(pf, fd, pmaske)
+            la pr = _sys_poll(pf, 1, timeout_ms, b + 288)
+            hvis pr < 0 { returner _nw_feil(handle, "poll failed") }
+            la prev: heiltall = 0
+            hvis pr > 0 { prev = _sys_les_u16(pf + nsys._layout("pollfd", "revents")) }
+            la pklar: heiltall = 0
+            hvis (prev & (nsys._flagg("POLLIN") | nsys._flagg("POLLHUP") | nsys._flagg("POLLERR"))) != 0 { pklar = pklar | 1 }
+            hvis (prev & nsys._flagg("POLLOUT")) != 0 { pklar = pklar | 2 }
+            hvis pklar == 0 { returner _nw_res("ventende", handle, "", 0, 0, "") }
+            returner _nw_res("klar", handle, "", pklar, 0, "")
+        }
         // Linux: epoll (som C-æra-runtimen). struct epoll_event-layouten (pakka på x86-64:
         // u32 events @0, u64 data @4) kjem frå native_sys. Fd-en blir registrert for kvar venting og
         // fjerna etterpå, so ein lukka eller gjenbrukt fd aldri heng att i instansen.
@@ -2106,14 +2188,15 @@ funksjon _jit_sig_typar(sig: tekst) -> liste_tekst {
     returner ut
 }
 
-// ── AArch64-lowering av norscode-jit-v1 (linux-arm64) ────────────────────────
+// ── AArch64-lowering av norscode-jit-v1 (linux-arm64, macos-arm64) ────────────────────────
 // Same operasjonsliste, verifisering og kallkonvensjon som x86-64-vegen over, men
 // x0 = blokk inn / rått resultat ut. x19 = blokk, x20 = bump-start, x21 = bump-grense
 // (callee-saved, lagra i ramma). Verdistakken er maskinstakken med 16-byte-slots
 // (str x, [sp, #-16]! / ldr x, [sp], #16), so sp held AAPCS64-justeringa. Hopp blir
 // lappa som heile instruksjonsord (b / cbz x0 / b.cond) når etikettane er kjende.
 // Kodesida blir mprotect-a til R|X; Linux arm64 synkar I-cachen der (set_pte_at →
-// __sync_icache_dcache), same kontrakt som NEON-tensorkjerna (_tn_simd_klar).
+// __sync_icache_dcache), og på macOS gjer codegen-sys6 det etter mprotect med PROT_EXEC —
+// same kontrakt som NEON-tensorkjerna (_tn_simd_klar).
 funksjon _jit_backend() -> tekst {
     hvis _tn_er_arm64() { returner "aarch64" }
     returner "x86_64"
@@ -2846,11 +2929,13 @@ funksjon _tn_kjerne_bytes() -> liste_heiltall {
 
 funksjon _tn_cpuid_off() -> heiltall { returner 178 }
 
-// linux-arm64: AdvSIMD (NEON) er obligatorisk i ARMv8-A, so ingen CPUID-test. Andre
-// arm64-mål (macOS: MAP_JIT/sys_icache_invalidate) held seg på skalar veg.
+// arm64 (linux og macOS): AdvSIMD (NEON) er obligatorisk i ARMv8-A, so ingen CPUID-test.
+// Kodesider blir skrivne som data og mprotect-a til R|X; Linux synkar I-cachen i
+// mprotect, og på macOS gjer codegenen sin sys6 det etter mprotect med PROT_EXEC.
 funksjon _tn_er_arm64() -> boolsk {
-    prøv { returner builtin.native_target() == "linux-arm64" } fang (e) { returner usann }
-    returner usann
+    la m = ""
+    prøv { m = tekst(builtin.native_target()) } fang (e) { returner usann }
+    returner m == "linux-arm64" eller m == "macos-arm64"
 }
 
 // NEON-kjerne med same parameterblokk-ABI som SSE4.1-kjerna (x0 = blokk, x0 = 1 ut):
@@ -2974,8 +3059,8 @@ funksjon _tn_simd_klar() -> boolsk {
     la adr = _sys_mmap_rw(4096)              // mmap RW, anonym
     hvis adr < 0 { returner usann }
     hvis _tn_er_arm64() {
-        // Linux arm64: mprotect til R|X på ei anonym side synkar I-cachen i kjernen
-        // (set_pte_at → __sync_icache_dcache for køyrbare brukarsider).
+        // mprotect til R|X synkar I-cachen: Linux i kjernen (set_pte_at →
+        // __sync_icache_dcache), macOS i codegen-sys6 (dc cvau/ic ivau etter kallet).
         la ord = _tn_kjerne_arm64()
         la j: heiltall = 0
         mens j < lengde(ord) { _sys_u32(adr + j * 4, ord[j]) j = j + 1 }
@@ -3236,6 +3321,15 @@ funksjon fs_gap_symlink(mål, lenkje) -> heiltall {
     returner r
 }
 
+// Eit stat-felt med breidda frå nsys («stat.<felt>_breidd»: 2, 4 eller 8 byte).
+funksjon _fsg_felt(st: heiltall, felt: tekst) -> heiltall {
+    la v: heiltall = builtin.raw_load64(st + nsys._layout("stat", felt))
+    la breidd = nsys._layout("stat", felt + "_breidd")
+    hvis breidd == 4 { returner v & 4294967295 }
+    hvis breidd == 2 { returner v & 65535 }
+    returner v
+}
+
 funksjon fs_gap_stat(sti, follow) {
     hvis ikkje _fsg_sti_ok(sti) { returner [0 - 1] }
     la b = _sys_mmap_rw(8192)
@@ -3244,19 +3338,19 @@ funksjon fs_gap_stat(sti, follow) {
     la flagg: heiltall = nsys._flagg("AT_SYMLINK_NOFOLLOW")
     hvis _fsg_sann(follow) { flagg = 0 }
     la st = b + 4096
-    la r = builtin.sys6(nsys._nr("newfstatat"), nsys._flagg("AT_FDCWD"), b, st, flagg, 0, 0)
+    la r = builtin.sys6(nsys._nr_kompat("newfstatat"), nsys._flagg("AT_FDCWD"), b, st, flagg, 0, 0)   // macOS: fstatat64
     hvis r != 0 {
         _sys_munmap(b, 8192)
         returner [0 - 1]
     }
-    la nlink: heiltall = builtin.raw_load64(st + nsys._layout("stat", "nlink"))
-    hvis nsys._layout("stat", "nlink_breidd") == 4 { nlink = nlink & 4294967295 }
+    // Feltbreiddene skil seg per mål (x86-64: nlink u64; arm64: nlink u32; Darwin: dev u32,
+    // mode u16, nlink u16), so kvart felt blir lese som 64 bit og maskert til breidda.
     la ut = [
-        _fsg_u32(st + nsys._layout("stat", "mode")),
+        _fsg_felt(st, "mode"),
         builtin.raw_load64(st + nsys._layout("stat", "size")),
         builtin.raw_load64(st + nsys._layout("stat", "ino")),
-        builtin.raw_load64(st + nsys._layout("stat", "dev")),
-        nlink,
+        _fsg_felt(st, "dev"),
+        _fsg_felt(st, "nlink"),
         _fsg_u32(st + nsys._layout("stat", "uid")),
         _fsg_u32(st + nsys._layout("stat", "gid")),
         builtin.raw_load64(st + nsys._layout("stat", "atime")),
@@ -3270,13 +3364,16 @@ funksjon fs_gap_stat(sti, follow) {
 funksjon fs_gap_dirents(sti) -> tekst {
     hvis ikkje _fsg_sti_ok(sti) { returner "!" }
     la buflen: heiltall = 32768
-    la b = _sys_mmap_rw(4096 + buflen)
+    // Siste side: basep for Darwin sin getdirentries64 (fd, buf, n, *basep); Linux sin
+    // getdents64 les ikkje det 4. argumentet.
+    la b = _sys_mmap_rw(8192 + buflen)
     hvis b < 0 { returner "!" }
+    la basep: heiltall = b + 4096 + buflen
     _pg_cstr(b, sti)
     la fd = builtin.sys6(nsys._nr("openat"), nsys._flagg("AT_FDCWD"), b,
                          nsys._flagg("O_DIRECTORY") | nsys._flagg("O_CLOEXEC"), 0, 0, 0)
     hvis fd < 0 {
-        _sys_munmap(b, 4096 + buflen)
+        _sys_munmap(b, 8192 + buflen)
         returner "!"
     }
     la o_reclen = nsys._layout("dirent64", "reclen")
@@ -3289,7 +3386,7 @@ funksjon fs_gap_dirents(sti) -> tekst {
     la total: heiltall = 0
     la meir = sann
     mens meir {
-        la n = builtin.sys6(nsys._nr("getdents64"), fd, b + 4096, buflen, 0, 0, 0)
+        la n = builtin.sys6(nsys._nr_kompat("getdents64"), fd, b + 4096, buflen, basep, 0, 0)   // macOS: getdirentries64
         hvis n <= 0 {
             meir = usann
         } ellers {
@@ -3320,7 +3417,7 @@ funksjon fs_gap_dirents(sti) -> tekst {
         }
     }
     _sys_lukk(fd)
-    _sys_munmap(b, 4096 + buflen)
+    _sys_munmap(b, 8192 + buflen)
     returner builtin.join(delar, "")
 }
 
@@ -3338,7 +3435,15 @@ funksjon _th_feil(kode: tekst, melding: tekst) {
 }
 
 // futex(uaddr, op, val, timeout_ptr): FUTEX_WAIT / FUTEX_WAKE (nummer frå native_sys).
+// macOS (M1) har ingen futex: __ulock_wait(UL_COMPARE_AND_WAIT, addr, val, timeout_us) /
+// __ulock_wake — same 32-bit samanlikn-og-vent; timeout 0 = utan tak, i mikrosekund (u32).
 funksjon _futex_wait(addr: heiltall, venta: heiltall, timeout_ms: heiltall) -> heiltall {
+    hvis ikkje nsys._har_nr("futex") {
+        la us: heiltall = 0
+        hvis timeout_ms > 0 { us = timeout_ms * 1000 }
+        hvis us > 4294967295 { us = 4294967295 }
+        returner builtin.sys6(nsys._nr("ulock_wait"), nsys._flagg("UL_COMPARE_AND_WAIT"), addr, venta & 4294967295, us, 0, 0)
+    }
     hvis timeout_ms <= 0 {
         returner builtin.sys6(nsys._nr("futex"), addr, nsys._flagg("FUTEX_WAIT"), venta, 0, 0, 0)
     }
@@ -3350,6 +3455,11 @@ funksjon _futex_wait(addr: heiltall, venta: heiltall, timeout_ms: heiltall) -> h
 }
 
 funksjon _futex_wake(addr: heiltall, tal: heiltall) -> heiltall {
+    hvis ikkje nsys._har_nr("futex") {
+        la op: heiltall = nsys._flagg("UL_COMPARE_AND_WAIT")
+        hvis tal > 1 { op = op | nsys._flagg("ULF_WAKE_ALL") }
+        returner builtin.sys6(nsys._nr("ulock_wake"), op, addr, 0, 0, 0, 0)
+    }
     returner builtin.sys6(nsys._nr("futex"), addr, nsys._flagg("FUTEX_WAKE"), tal, 0, 0, 0)
 }
 
@@ -3393,6 +3503,10 @@ funksjon thread_spawn(req) {
         returner _th_feil("error", "native thread backend støttar berre thread.*-primitiv (fekk " + fn + ")")
     }
 
+    // macOS (M1): ingen clone(2); trådar krev bsdthread_create via libpthread (ikkje med enno).
+    hvis ikkje nsys._har_flagg("CLONE_TRAAD") {
+        returner _th_feil("error", "native trådar er ikkje støtta på " + nsys.mål() + " enno")
+    }
     la stack = _sys_mmap_rw(stack_bytes)   // mmap stack
     hvis stack < 0 { returner _th_feil("error", "mmap stack feila") }
     la stack_top = stack + stack_bytes
@@ -3527,7 +3641,7 @@ funksjon thread_sync(req) {
 }
 
 funksjon thread_current_id() {
-    returner builtin.sys6(nsys._nr("gettid"), 0, 0, 0, 0, 0, 0)
+    returner builtin.sys6(nsys._nr_kompat("gettid"), 0, 0, 0, 0, 0, 0)   // macOS: thread_selfid
 }
 
 funksjon jit_operation(req) {
@@ -3599,7 +3713,7 @@ funksjon _tls_connect(req: ordbok) -> ordbok {
     la port = _nw_heiltal(req, "port", 0)
     la hostname = _nw_tekst(req, "hostname", host)
     hvis port < 1 eller port > 65535 { returner _nw_feil("", "invalid address") }
-    la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
+    la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
     hvis fd < 0 { returner _nw_feil("", "socket failed") }
     la r = 0
     prøv { r = socket_connect(fd, host, port) } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
@@ -3623,7 +3737,7 @@ funksjon _tls_connect(req: ordbok) -> ordbok {
 funksjon _tls_listen(req: ordbok) -> ordbok {
     la host = _nw_tekst(req, "host", "127.0.0.1")
     la port = _nw_heiltal(req, "port", 0)
-    la fd = builtin.sys6(nsys._nr("socket"), nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"), 0, 0, 0, 0)
+    la fd = _sk_ny(nsys._flagg("AF_INET"), nsys._flagg("SOCK_STREAM"))
     hvis fd < 0 { returner _nw_feil("", "socket failed") }
     prøv { hvis socket_bind(fd, host, port) < 0 { _sys_lukk(fd) returner _nw_feil("", "bind failed") } } fang (e) { _sys_lukk(fd) returner _nw_feil("", "invalid address") }
     la backlog = _nw_heiltal(req, "backlog", 128)
@@ -3661,7 +3775,7 @@ funksjon _tls_accept(lh: tekst) -> ordbok {
     la fd: heiltall = lyttar["fd"]
     la b = _sk_buf()
     builtin.raw_store64(b + 96, 16)
-    la ny = builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0)
+    la ny = _sk_nosigpipe(builtin.sys6(nsys._nr("accept"), fd, b + 80, b + 96, 0, 0, 0))
     hvis ny == 0 - nsys._errno("EAGAIN") { returner _nw_res("ventende", lh, "", 0, 0, "") }
     hvis ny < 0 { returner _nw_feil(lh, "accept failed") }
     _pg_nonblock(ny)
