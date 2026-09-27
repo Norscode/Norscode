@@ -1,0 +1,85 @@
+// os/prosess/adresserom.no — eige adresserom (CR3) per brukarprosess (K3).
+//
+// Layout i kvar brukar-PML4:
+//   PML4[0] → eigen PDPT → eigen PD; PD[0..1] = kjernen sine PT0/PT1 (identitet 0x1000–0x3FFFFF:
+//     trampoline-kode/-data, IDT/GDT/TSS, info-blokk, hendingsring) med U=0 på PD-nivå
+//     → berre supervisor. Brukar-ELF-ane er ET_EXEC frå 0x400000 og rører aldri området.
+//   PML4[1] = kjernen sin (direktekart 0x8000000000 → fysisk 0–4 GiB, supervisor): IST-,
+//     overgangs- og shim-stakkar, PCB-ar.
+//   Alt anna er prosessen sitt: ELF-segment (W^X etter PT_LOAD-flagga), heap- og
+//   stakkvindauge (demand-zero i Norscode, frå os/minne/rammer).
+// Mellomnivå får P|RW|U; bladet avgjer (U, RW, NX).
+
+bruk os.x86.maskin som maskin
+bruk os.minne.rammer som rammer
+
+funksjon P() -> heiltall { returner 1 }
+funksjon RW() -> heiltall { returner 2 }
+funksjon U() -> heiltall { returner 4 }
+funksjon NX() -> heiltall { returner 1 << 63 }
+funksjon ADR_MASKE() -> heiltall { returner 0x000FFFFFFFFFF000 }
+
+funksjon _e(tabell: heiltall, idx: heiltall) -> heiltall {
+    returner maskin.fys_til_va(tabell) + idx * 8
+}
+
+// Nytt adresserom. Rammene som blir brukte blir lagde til i `rammer_ut`.
+funksjon ny(rammer_ut: liste_heiltall) -> heiltall {
+    la kpml4 = maskin.les_cr3() & ADR_MASKE()
+    la kpdpt = builtin.raw_load64(_e(kpml4, 0)) & ADR_MASKE()
+    la kpd = builtin.raw_load64(_e(kpdpt, 0)) & ADR_MASKE()
+    la pml4 = rammer.alloc_null()
+    la pdpt = rammer.alloc_null()
+    la pd = rammer.alloc_null()
+    hvis pml4 < 0 eller pdpt < 0 eller pd < 0 { kast "adresserom: tomt for rammer" }
+    legg_til(rammer_ut, pml4)
+    legg_til(rammer_ut, pdpt)
+    legg_til(rammer_ut, pd)
+    builtin.raw_store64(_e(pml4, 0), pdpt | 7)
+    builtin.raw_store64(_e(pml4, 1), builtin.raw_load64(_e(kpml4, 1)))
+    builtin.raw_store64(_e(pdpt, 0), pd | 7)
+    builtin.raw_store64(_e(pd, 0), builtin.raw_load64(_e(kpd, 0)) & (0 - 5))   // U=0
+    builtin.raw_store64(_e(pd, 1), builtin.raw_load64(_e(kpd, 1)) & (0 - 5))
+    returner pml4
+}
+
+funksjon _idx(va: heiltall, skift: heiltall) -> heiltall { returner (va >> skift) & 511 }
+
+// Adressa (direktekart-VA) til bladoppføringa for va, eller -1. lag=sann lagar tabellar.
+funksjon oppføring(rot: heiltall, va: heiltall, lag: boolsk, rammer_ut: liste_heiltall) -> heiltall {
+    la tabell = rot
+    la skift: liste_heiltall = [39, 30, 21]
+    for s i skift {
+        la a = _e(tabell, _idx(va, s))
+        la e = builtin.raw_load64(a)
+        hvis (e & 1) == 0 {
+            hvis ikkje lag { returner -1 }
+            la ny_t = rammer.alloc_null()
+            hvis ny_t < 0 { returner -2 }
+            legg_til(rammer_ut, ny_t)
+            builtin.raw_store64(a, ny_t | 7)
+            e = ny_t | 7
+        }
+        hvis (e & 128) != 0 { returner -1 }
+        hvis (e & 4) == 0 { returner -1 }        // supervisor-område (t.d. PT0/PT1) er ikkje brukaren sitt
+        tabell = e & ADR_MASKE()
+    }
+    returner _e(tabell, _idx(va, 12))
+}
+
+// Bladoppføringa (rå PTE) for va, eller 0.
+funksjon pte(rot: heiltall, va: heiltall) -> heiltall {
+    la tom: liste_heiltall = []
+    la a = oppføring(rot, va, usann, tom)
+    hvis a < 0 { returner 0 }
+    returner builtin.raw_load64(a)
+}
+
+// Mappar éi 4 KiB-side. Returnerer 0, -1 (alt mappa / ugyldig) eller -2 (tomt for rammer).
+funksjon map(rot: heiltall, va: heiltall, fys: heiltall, flagg: heiltall, rammer_ut: liste_heiltall) -> heiltall {
+    la a = oppføring(rot, va, sann, rammer_ut)
+    hvis a < 0 { returner a }
+    hvis (builtin.raw_load64(a) & 1) != 0 { returner -1 }
+    builtin.raw_store64(a, fys | flagg)
+    returner 0
+}

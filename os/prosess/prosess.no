@@ -1,0 +1,454 @@
+// os/prosess/prosess.no — brukarprosessar i ring 3 (K3): ELF-lastar, prosesstabell,
+// Linux-syscall-personlegdom nivå 1 og round-robin-planleggjar med føregriping.
+//
+// Brukarprogram er UENDRA Norscode linux-x86_64 AOT-ELF-ar (GC- og ikkje-GC-modus), lasta
+// som Multiboot-modular (QEMU `-initrd "a.elf,b.elf"`). Kvar prosess får eige CR3
+// (os/prosess/adresserom), ein PCB (os/x86/info P_*) og FXSAVE-område. Kjernen køyrer
+// prosessen med maskin.kjør_brukar og får kontrollen tilbake ved syscall, unnatak eller
+// IRQ0 (100 Hz føregriping). Ingenting av dette køyrer i avbrotskontekst.
+
+bruk os.x86.info som info
+bruk os.x86.maskin som maskin
+bruk os.minne.rammer som rammer
+bruk os.prosess.adresserom som ar
+bruk os.drivarar.tidtakar som tidtakar
+
+// Tilstandar
+funksjon KLAR() -> heiltall { returner 1 }
+funksjon SØV() -> heiltall { returner 2 }
+funksjon DAUD() -> heiltall { returner 3 }
+
+funksjon STAKK_TOPP() -> heiltall { returner 0x7F00000000 }
+funksjon STAKK_STORLEIK() -> heiltall { returner 0x800000 }   // 8 MiB (AOT-vakta er rsp − 7 MiB)
+
+// Prosesstabellen (parallelle lister, indeks = pid − 1)
+la _namn: liste_tekst = []
+la _pcb: liste_heiltall = []          // direktekart-VA
+la _pcb_fys: liste_heiltall = []
+la _rot: liste_heiltall = []          // CR3 (fysisk)
+la _tilstand: liste_heiltall = []
+la _frist: liste_heiltall = []        // tikk-frist for SØV
+la _kode: liste_heiltall = []         // exit-kode (128 + signal ved drap)
+la _rammer: liste<liste_heiltall> = []
+la _vindauge: liste<liste_heiltall> = []   // flat: [lo, hi, flagg, lo, hi, flagg, …]
+la _syscalls: liste_heiltall = []
+la _sidefeil: liste_heiltall = []
+la _ukjende: liste_tekst = []
+
+// Statistikk
+la føregripingar = 0
+la syscalls_totalt = 0
+la sidefeil_totalt = 0
+
+funksjon tal_føregripingar() -> heiltall { returner føregripingar }
+funksjon tal_syscalls() -> heiltall { returner syscalls_totalt }
+funksjon tal_sidefeil() -> heiltall { returner sidefeil_totalt }
+
+funksjon tal() -> heiltall { returner lengde(_namn) }
+funksjon namn(pid: heiltall) -> tekst { returner _namn[pid - 1] }
+funksjon kode(pid: heiltall) -> heiltall { returner _kode[pid - 1] }
+funksjon tilstand(pid: heiltall) -> heiltall { returner _tilstand[pid - 1] }
+funksjon syscalls(pid: heiltall) -> heiltall { returner _syscalls[pid - 1] }
+funksjon sidefeil(pid: heiltall) -> heiltall { returner _sidefeil[pid - 1] }
+
+funksjon _hex(v: heiltall) -> tekst {
+    la siffer = "0123456789abcdef"
+    hvis v == 0 { returner "0x0" }
+    la t = ""
+    la x = v
+    la n = 0
+    mens n < 16 og x != 0 {
+        t = builtin.slice(siffer, x & 15, (x & 15) + 1) + t
+        x = (x >> 4) & 0x0FFFFFFFFFFFFFFF
+        n = n + 1
+    }
+    returner "0x" + t
+}
+
+// ─── Lesing av ELF-en i modulen (fysisk minne, via direktekartet) ───────────
+
+funksjon _u16(va: heiltall) -> heiltall { returner builtin.raw_load8(va) | (builtin.raw_load8(va + 1) << 8) }
+funksjon _u32(va: heiltall) -> heiltall { returner _u16(va) | (_u16(va + 2) << 16) }
+funksjon _u64(va: heiltall) -> heiltall { returner builtin.raw_load64(va) }
+
+// ─── Oppretting ──────────────────────────────────────────────────────────────
+
+funksjon _pte_flagg(pflagg: heiltall) -> heiltall {
+    la f = ar.P() | ar.U()
+    hvis (pflagg & 2) != 0 { f = f | ar.RW() }
+    hvis (pflagg & 1) == 0 { f = f | ar.NX() }
+    returner f
+}
+
+funksjon _map(idx: heiltall, va: heiltall, fys: heiltall, flagg: heiltall) -> heiltall {
+    la r = ar.map(_rot[idx], va, fys, flagg, _rammer[idx])
+    hvis r == -2 { kast "prosess: tomt for rammer" }
+    hvis r != 0 { kast "prosess: kan ikkje mappe " + _hex(va) }
+    returner 0
+}
+
+funksjon _ny_ramme(idx: heiltall) -> heiltall {
+    la f = rammer.alloc_null()
+    hvis f < 0 { kast "prosess: tomt for rammer" }
+    legg_til(_rammer[idx], f)
+    returner f
+}
+
+// Lagar ein prosess frå ELF-bytane i [start, slutt) (fysisk). Returnerer pid.
+funksjon lag(namn_inn: tekst, start: heiltall, slutt: heiltall) -> heiltall {
+    la e = maskin.fys_til_va(start)
+    hvis slutt - start < 64 eller _u32(e) != 0x464C457F { kast "prosess: " + namn_inn + " er ikkje ELF" }
+    hvis builtin.raw_load8(e + 4) != 2 eller _u16(e + 16) != 2 eller _u16(e + 18) != 62 {
+        kast "prosess: " + namn_inn + " er ikkje ELF64 ET_EXEC x86-64"
+    }
+    la idx = lengde(_namn)
+    legg_til(_namn, namn_inn)
+    legg_til(_rammer, [])
+    legg_til(_vindauge, [])
+    legg_til(_tilstand, KLAR())
+    legg_til(_frist, 0)
+    legg_til(_kode, -1)
+    legg_til(_syscalls, 0)
+    legg_til(_sidefeil, 0)
+    legg_til(_rot, 0)
+    legg_til(_pcb, 0)
+    legg_til(_pcb_fys, 0)
+    _rot[idx] = ar.ny(_rammer[idx])
+
+    la phoff = _u64(e + 32)
+    la phnum = _u16(e + 56)
+    la i = 0
+    mens i < phnum {
+        la ph = e + phoff + i * 56
+        hvis _u32(ph) == 1 {
+            la pflagg = _u32(ph + 4)
+            la off = _u64(ph + 8)
+            la vaddr = _u64(ph + 16)
+            la filesz = _u64(ph + 32)
+            la memsz = _u64(ph + 40)
+            hvis (vaddr % 4096) != 0 { kast "prosess: PT_LOAD er ikkje side-justert" }
+            hvis off + filesz > slutt - start { kast "prosess: PT_LOAD går forbi modulen" }
+            la flagg = _pte_flagg(pflagg)
+            // Ivrig: sider med filinnhald (kopiert; resten av sida null).
+            la side = vaddr
+            mens side < vaddr + filesz {
+                la f = _ny_ramme(idx)
+                la n = vaddr + filesz - side
+                hvis n > 4096 { n = 4096 }
+                maskin.kopier(maskin.fys_til_va(f), e + off + (side - vaddr), n)
+                _map(idx, side, f, flagg)
+                side = side + 4096
+            }
+            // Demand-zero for resten av memsz (t.d. GC-heapen på 1,7 GiB).
+            hvis vaddr + memsz > side {
+                legg_til(_vindauge[idx], side)
+                legg_til(_vindauge[idx], vaddr + memsz)
+                legg_til(_vindauge[idx], flagg)
+            }
+        }
+        i = i + 1
+    }
+
+    // Stakk: vindauge på 8 MiB, øvste side ivrig med Linux-startstakken.
+    la topp = STAKK_TOPP()
+    la sflagg = ar.P() | ar.U() | ar.RW() | ar.NX()
+    legg_til(_vindauge[idx], topp - STAKK_STORLEIK())
+    legg_til(_vindauge[idx], topp - 4096)
+    legg_til(_vindauge[idx], sflagg)
+    la sf = _ny_ramme(idx)
+    _map(idx, topp - 4096, sf, sflagg)
+    la sva = maskin.fys_til_va(sf)
+    // argv[0]-strengen på topp − 128
+    la k = 0
+    mens k < lengde(namn_inn) og k < 100 {
+        builtin.raw_store8(sva + 4096 - 128 + k, builtin.char_code(builtin.slice(namn_inn, k, k + 1)) & 127)
+        k = k + 1
+    }
+    builtin.raw_store8(sva + 4096 - 128 + k, 0)
+    // rsp = topp − 256: argc, argv[0], NULL, envp-NULL, AT_NULL (0, 0)
+    la rsp = topp - 256
+    la b = sva + 4096 - 256
+    builtin.raw_store64(b, 1)
+    builtin.raw_store64(b + 8, topp - 128)
+    builtin.raw_store64(b + 16, 0)
+    builtin.raw_store64(b + 24, 0)
+    builtin.raw_store64(b + 32, 0)
+    builtin.raw_store64(b + 40, 0)
+
+    // PCB
+    la pf = _ny_ramme(idx)
+    la pcb = maskin.fys_til_va(pf)
+    _pcb[idx] = pcb
+    _pcb_fys[idx] = pf
+    builtin.raw_store64(pcb + info.P_RIP(), _u64(e + 24))
+    builtin.raw_store64(pcb + info.P_RSP(), rsp)
+    builtin.raw_store64(pcb + info.P_RFLAGS(), 0x202)
+    builtin.raw_store64(pcb + info.P_CR3(), _rot[idx])
+    builtin.raw_store64(pcb + info.P_FX(), 0x037F)            // FCW (x87 standard)
+    builtin.raw_store64(pcb + info.P_FX() + 24, 0x1F80)       // MXCSR (SSE standard)
+    returner idx + 1
+}
+
+// ─── Brukarminne ─────────────────────────────────────────────────────────────
+
+funksjon _i_vindauge(idx: heiltall, va: heiltall) -> heiltall {
+    la v = _vindauge[idx]
+    la i = 0
+    mens i < lengde(v) {
+        hvis va >= v[i] og va < v[i + 1] { returner v[i + 2] }
+        i = i + 3
+    }
+    returner 0
+}
+
+// Demand-zero: mappar ei nullstilt ramme for va om ho ligg i eit vindauge. sann = mappa.
+funksjon _demand(idx: heiltall, va: heiltall) -> boolsk {
+    la flagg = _i_vindauge(idx, va)
+    hvis flagg == 0 { returner usann }
+    la f = rammer.alloc_null()
+    hvis f < 0 { returner usann }
+    legg_til(_rammer[idx], f)
+    la r = ar.map(_rot[idx], va & -4096, f, flagg, _rammer[idx])
+    hvis r != 0 { returner usann }
+    _sidefeil[idx] = _sidefeil[idx] + 1
+    sidefeil_totalt = sidefeil_totalt + 1
+    returner sann
+}
+
+// Fysisk adresse for brukar-VA-en etter validering (til stades, U, og RW ved skriving;
+// demand-zero-sider blir mappa), eller -1.
+funksjon brukar_fys(idx: heiltall, va: heiltall, skriv: boolsk) -> heiltall {
+    hvis va < 4096 eller va >= 0x800000000000 { returner -1 }
+    la e = ar.pte(_rot[idx], va & -4096)
+    hvis (e & 1) == 0 {
+        hvis ikkje _demand(idx, va) { returner -1 }
+        e = ar.pte(_rot[idx], va & -4096)
+    }
+    hvis (e & 4) == 0 { returner -1 }
+    hvis skriv og (e & 2) == 0 { returner -1 }
+    returner (e & ar.ADR_MASKE()) + (va & 4095)
+}
+
+funksjon _les64(idx: heiltall, va: heiltall) -> heiltall {
+    hvis (va % 8) != 0 { kast "EFAULT" }
+    la f = brukar_fys(idx, va, usann)
+    hvis f < 0 { kast "EFAULT" }
+    returner builtin.raw_load64(maskin.fys_til_va(f))
+}
+
+funksjon _skriv64(idx: heiltall, va: heiltall, v: heiltall) -> heiltall {
+    hvis (va % 8) != 0 { kast "EFAULT" }
+    la f = brukar_fys(idx, va, sann)
+    hvis f < 0 { kast "EFAULT" }
+    builtin.raw_store64(maskin.fys_til_va(f), v)
+    returner 0
+}
+
+// ─── Syscalls (Linux x86-64, nivå 1) ─────────────────────────────────────────
+
+funksjon _reg(idx: heiltall, off: heiltall) -> heiltall { returner builtin.raw_load64(_pcb[idx] + off) }
+
+funksjon _svar(idx: heiltall, v: heiltall) -> heiltall {
+    builtin.raw_store64(_pcb[idx] + info.P_RAX(), v)
+    returner 0
+}
+
+funksjon _avslutt(idx: heiltall, k: heiltall) -> heiltall {
+    _tilstand[idx] = DAUD()
+    _kode[idx] = k
+    for f i _rammer[idx] { rammer.fri(f) }
+    _rammer[idx] = []
+    returner 0
+}
+
+funksjon _sys_write(idx: heiltall) -> heiltall {
+    la fd = _reg(idx, info.P_RDI())
+    la buf = _reg(idx, info.P_RSI())
+    la n = _reg(idx, info.P_RDX())
+    hvis fd != 1 og fd != 2 { returner -9 }
+    hvis n < 0 { returner -22 }
+    la rest = n
+    la va = buf
+    mens rest > 0 {
+        la del = 4096 - (va % 4096)
+        hvis del > rest { del = rest }
+        la f = brukar_fys(idx, va, usann)
+        hvis f < 0 { returner -14 }
+        maskin.skriv_va(maskin.fys_til_va(f), del)
+        va = va + del
+        rest = rest - del
+    }
+    returner n
+}
+
+funksjon _sys_klokke(idx: heiltall) -> heiltall {
+    la klokke = _reg(idx, info.P_RDI())
+    la ts = _reg(idx, info.P_RSI())
+    la sanntid = klokke == 0 eller klokke == 5 eller klokke == 8
+    la ns = maskin.klokke_ns(ikkje sanntid)
+    prøv {
+        _skriv64(idx, ts, ns / 1000000000)
+        _skriv64(idx, ts + 8, ns % 1000000000)
+    } fang e { returner -14 }
+    returner 0
+}
+
+funksjon _sys_getrandom(idx: heiltall) -> heiltall {
+    la buf = _reg(idx, info.P_RDI())
+    la n = _reg(idx, info.P_RSI())
+    hvis n < 0 { returner -22 }
+    la i = 0
+    la ord = 0
+    la igjen = 0
+    mens i < n {
+        hvis igjen == 0 {
+            la r = maskin.rdrand()
+            hvis r[0] != 1 { returner -5 }
+            ord = r[1]
+            igjen = 8
+        }
+        la f = brukar_fys(idx, buf + i, sann)
+        hvis f < 0 { returner -14 }
+        builtin.raw_store8(maskin.fys_til_va(f), ord & 255)
+        ord = (ord >> 8) & 0x00FFFFFFFFFFFFFF
+        igjen = igjen - 1
+        i = i + 1
+    }
+    returner n
+}
+
+// nanosleep: blokker prosessen til tikk-fristen; andre prosessar køyrer imens.
+funksjon _sys_sov(idx: heiltall) -> heiltall {
+    la req = _reg(idx, info.P_RDI())
+    la sek = 0
+    la nsek = 0
+    prøv {
+        sek = _les64(idx, req)
+        nsek = _les64(idx, req + 8)
+    } fang e { returner -14 }
+    hvis sek < 0 eller nsek < 0 eller nsek >= 1000000000 { returner -22 }
+    la hz = tidtakar.hz()
+    la n_tikk = (sek * 1000000000 + nsek) * hz
+    n_tikk = (n_tikk + 999999999) / 1000000000
+    hvis n_tikk < 1 { n_tikk = 1 }
+    _frist[idx] = tidtakar.tikk() + n_tikk
+    _tilstand[idx] = SØV()
+    returner 0
+}
+
+funksjon _syscall(idx: heiltall) -> heiltall {
+    la nr = _reg(idx, info.P_RAX())
+    _syscalls[idx] = _syscalls[idx] + 1
+    syscalls_totalt = syscalls_totalt + 1
+    la r = -38
+    hvis nr == 1 {
+        r = _sys_write(idx)
+    } ellers hvis nr == 60 eller nr == 231 {
+        _avslutt(idx, _reg(idx, info.P_RDI()) & 255)
+        returner 0
+    } ellers hvis nr == 10 {
+        r = 0            // mprotect: alltid 0 (GC-vaktsida blir ikkje handheva; dokumentert)
+    } ellers hvis nr == 228 {
+        r = _sys_klokke(idx)
+    } ellers hvis nr == 318 {
+        r = _sys_getrandom(idx)
+    } ellers hvis nr == 35 {
+        r = _sys_sov(idx)
+    } ellers {
+        la nøkkel = tekst(idx + 1) + ":" + tekst(nr)
+        la sett = usann
+        for u i _ukjende { hvis u == nøkkel { sett = sann } }
+        hvis ikkje sett {
+            legg_til(_ukjende, nøkkel)
+            skriv("[kjerne] prosess " + tekst(idx + 1) + " (" + _namn[idx] + "): ukjent syscall " + tekst(nr) + " → ENOSYS\n")
+        }
+    }
+    _svar(idx, r)
+    returner 0
+}
+
+funksjon ukjende_syscalls() -> liste_tekst { returner _ukjende }
+
+// ─── Unnatak og drap ─────────────────────────────────────────────────────────
+
+funksjon _signal(v: heiltall) -> heiltall {
+    hvis v == 0 { returner 8 }       // #DE → SIGFPE
+    hvis v == 6 { returner 4 }       // #UD → SIGILL
+    hvis v == 3 { returner 5 }       // #BP → SIGTRAP
+    hvis v == 16 eller v == 19 { returner 8 }
+    returner 11                      // #PF/#GP/… → SIGSEGV
+}
+
+funksjon _drep(idx: heiltall) -> heiltall {
+    la v = _reg(idx, info.P_VEKTOR())
+    skriv("[kjerne] prosess " + tekst(idx + 1) + " (" + _namn[idx] + ") drepen: unnatak v=" + tekst(v) +
+        " feil=" + _hex(_reg(idx, info.P_FEIL())) + " rip=" + _hex(_reg(idx, info.P_RIP())) +
+        " cr2=" + _hex(_reg(idx, info.P_CR2())) + " rsp=" + _hex(_reg(idx, info.P_RSP())) + "\n")
+    _avslutt(idx, 128 + _signal(v))
+    returner 0
+}
+
+// Handsamar ei felle. Returnerer sann om prosessen kan halde fram straks (utan å rotere).
+funksjon _felle(idx: heiltall) -> boolsk {
+    la v = _reg(idx, info.P_VEKTOR())
+    hvis v == info.V_TIDTAKAR() {
+        føregripingar = føregripingar + 1
+        returner usann
+    }
+    hvis v == 14 {
+        la feil = _reg(idx, info.P_FEIL())
+        la cr2 = _reg(idx, info.P_CR2())
+        hvis (feil & 1) == 0 og (feil & 4) != 0 og _demand(idx, cr2) { returner sann }
+    }
+    _drep(idx)
+    returner usann
+}
+
+// ─── Planleggjar ─────────────────────────────────────────────────────────────
+
+funksjon _vekk_sovande() -> heiltall {
+    la no = tidtakar.tikk()
+    la i = 0
+    mens i < lengde(_tilstand) {
+        hvis _tilstand[i] == SØV() og no >= _frist[i] { _tilstand[i] = KLAR() }
+        i = i + 1
+    }
+    returner 0
+}
+
+funksjon _levande() -> heiltall {
+    la n = 0
+    for t i _tilstand { hvis t != DAUD() { n = n + 1 } }
+    returner n
+}
+
+// Round-robin: køyrer alle prosessar til dei er ferdige. Kvantum = 1 tikk (IRQ0 føregrip).
+funksjon køyr_alle() -> heiltall {
+    la sist = -1
+    mens _levande() > 0 {
+        _vekk_sovande()
+        la valt = -1
+        la k = 1
+        mens k <= lengde(_tilstand) og valt < 0 {
+            la c = (sist + k) % lengde(_tilstand)
+            hvis _tilstand[c] == KLAR() { valt = c }
+            k = k + 1
+        }
+        hvis valt < 0 {
+            maskin.vent_hending()          // alle søv: hlt til neste tikk
+        } ellers {
+            sist = valt
+            la vidare = sann
+            mens vidare {
+                la grunn = maskin.kjør_brukar(_pcb[valt])
+                hvis grunn == info.GRUNN_SYSCALL() {
+                    _syscall(valt)
+                    vidare = _tilstand[valt] == KLAR()
+                } ellers {
+                    vidare = _felle(valt) og _tilstand[valt] == KLAR()
+                }
+            }
+        }
+    }
+    returner 0
+}
