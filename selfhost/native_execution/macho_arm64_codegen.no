@@ -1570,6 +1570,11 @@ funksjon ncval_delt_rute_ok(n: tekst) -> boolsk {
     // (thread_spawn/thread_join blir ikkje ruta: ARM64 har ikkje clone-atomet
     // thread_spawn_native; selfhost.vm fell då til grøne trådar for thread.*-primitiva.)
     hvis n == "atomic_operation" eller n == "thread_sync" eller n == "thread_current_id" { returner sann }
+    // acme_sign/acme_verify (JWS RS256/ES256, DNSSEC) → std.native_gap.acme_sign/acme_verify, same
+    // mål som x86: rein Norscode over x509/rsa/ecdsa. RSA-modexp går via std.bigint, som fangar
+    // NATIV-GAP frå bn_modexp_bytes (inga ARM64-atom enno) og reknar i rein bigint. Før var
+    // begge NATIV-GAP-stubbar → tom JWS-signatur og DNSSEC-status «feil» på macOS-seeden.
+    hvis n == "acme_sign" eller n == "acme_verify" { returner sann }
     returner n == "kompiler_fil_aktiv" eller n == "host_exec_ncb_json" eller n == "host_exec_ncb"
 }
 
@@ -7541,6 +7546,11 @@ funksjon emit_join_routine() -> liste_heiltall {
     la lbl_skip = lengde(r)
     legg_u32(r, 0x8B170EA9)                          // add x9, x21, x23, lsl #3 (&elem[i])
     legg_u32(r, 0xF9400120)                          // ldr x0, [x9] (elem[i])
+    // Ikkje-tekst-element (heiltal/bool/null/liste) → tekst() først, som VM-en og x86
+    // (join([5, 7], "-") == "5-7"). Før las emit_str_concat payloaden til eit heiltal som
+    // strdata-peikar → SIGSEGV (std.socketserver.tekst_fra_heltall, test_socketserver_native).
+    // emit_tekst_ncval rører berre x9–x15 + sp; x19–x23 overlever.
+    emit_tekst_ncval(r, 0, 0)
     emit_str_concat(r, 19, 0, 19)                    // acc += elem[i]
     legg_u32(r, 0x910006F7)                          // add x23, x23, #1
     la p_bloop = lengde(r)
@@ -9032,8 +9042,29 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter, ruting: boolsk)
             mi = mi + 1
         }
     }
+    // Vertsstyrt selfhost.vm (nc_main.no nc_vm_vertsstyrt_aktiv): eit program som
+    // kallar builtin.host_kall (vm.no sin fallback for kall utanfor functions-kartet)
+    // løyser selfhost.vm.*-kall frå GJESTE-bundlen gjennom verts-funksjonstabellen
+    // (ncd_host_blokk), som berre held funksjonar i order. x86 legg ALLE bundla
+    // funksjonar i tabellen; her vart selfhost.vm-funksjonar som berre gjester kallar
+    // (vm_async_er_suspendert, vm_async_resume …) pruna → «Ukjent innebygd funksjon:
+    // selfhost.vm.vm_async_er_suspendert» (test_sched_vm_await m.fl.). Når host_kall
+    // er nåbar, blir difor heile selfhost.vm-modulen rot, og BFS-en held fram.
+    la brukar_host = usann
+    la host_rot_lagt = usann
     la k = 0
-    mens k < lengde(order) {
+    mens k < lengde(order) eller (brukar_host og ikkje host_rot_lagt) {
+        hvis k >= lengde(order) {
+            host_rot_lagt = sann
+            for hk i builtin.nøkler(funksjonar) {
+                la hnamn = tekst(hk)
+                hvis builtin.starts_with(hnamn, "selfhost.vm.") og ikkje finnes_nøkkel(sett, hnamn) {
+                    sett[hnamn] = 1
+                    legg_til(order, hnamn)
+                }
+            }
+            fortsett
+        }
         la fname = order[k]
         la mål = funksjonar[fname]
         hvis mål != null og mål["code"] != null {
@@ -9043,6 +9074,7 @@ funksjon ncval_reachable(entry: tekst, funksjonar, ekstra_roter, ruting: boolsk)
                 la ins = kode[i]
                 hvis opcode(ins) == "CALL" og lengde(ins) == 3 og builtin.type(ins[1]) == "tekst" {
                     la namn = ins[1]
+                    hvis namn == "builtin.host_kall" eller namn == "host_kall" { brukar_host = sann }
                     hvis finnes_nøkkel(funksjonar, namn) og ikkje er_ncval_builtin(namn) og ikkje finnes_nøkkel(sett, namn) {
                         sett[namn] = 1
                         legg_til(order, namn)
@@ -9568,11 +9600,19 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis djupn < 2 { returner {"ok": "usann", "error": "NcVal stakk underflyt ved " + op, "image": []} }
             la venstre = opnd_les(native, djupn - 2, 0, memmode, home_off)
             la høgre = opnd_les(native, djupn - 1, 1, memmode, home_off)
-            // A2: tekst-ordning (venstre tagg 3) via __str_cmp; elles 64-bit heiltal.
-            legg_u32(native, 0xF9400000 | (venstre << 5) | 9)   // ldr x9, [Xvenstre]  (type)
+            // VM-/x86-paritet (atomics["lt"] + ord_null_guard): desimaltal (tagg 6) på
+            // éi side → flyttal; tekst mot tekst → __str_cmp; heiltal/null (tagg 0/1,
+            // null ≡ 0) mot heiltal/null → 64-bit; ALLE andre typepar (tekst mot heiltal,
+            // bool, liste …) → usann. Før gjekk tekst til venstre alltid til __str_cmp og
+            // alt anna til payload-samanlikning, so `"" > 0` var sann (strdata-peikaren mot
+            // 0) og json_heiltal_tekst("") gav søppel (test_ir_zero_json_number).
+            la p_ord_des = emit_desimal_vakt2(native, venstre, høgre)  // x9/x10 = typane
             legg_u32(native, 0xF1000D3F)                        // cmp x9, #3
-            la p_cmp_int = lengde(native)
-            legg_u32(native, 0)                                 // b.ne int_cmp
+            la p_ikkje_tekst = lengde(native)
+            legg_u32(native, 0)                                 // b.ne ikkje_tekst
+            legg_u32(native, 0xF1000D5F)                        // cmp x10, #3
+            la p_tekst_mix = lengde(native)
+            legg_u32(native, 0)                                 // b.ne usann
             legg_u32(native, 0xAA0003E0 | (venstre << 16) | 0)  // mov x0, Xvenstre
             legg_u32(native, 0xAA0003E0 | (høgre << 16) | 1)    // mov x1, Xhøgre
             la p_bl_scmp = lengde(native)
@@ -9581,20 +9621,24 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             legg_u32(native, 0xF100001F)                        // cmp x0, #0
             la p_cmp_ferdig = lengde(native)
             legg_u32(native, 0)                                 // b cset
-            la lbl_cmp_int = lengde(native)
-            la p_ord_des = emit_desimal_vakt2(native, venstre, høgre)  // A5: type 6 → flyttal
-            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit)
+            la lbl_ikkje_tekst = lengde(native)
+            legg_u32(native, 0xF100053F)                        // cmp x9, #1
+            la p_v_mix = lengde(native)
+            legg_u32(native, 0)                                 // b.hi usann  (tagg > 1)
+            legg_u32(native, 0xF100055F)                        // cmp x10, #1
+            la p_h_mix = lengde(native)
+            legg_u32(native, 0)                                 // b.hi usann
+            legg_u32(native, 0xF9400400 | (venstre << 5) | 9)   // ldr x9, [Xvenstre, #8]  (full 64-bit; null = 0)
             legg_u32(native, 0xF9400400 | (høgre << 5) | 10)    // ldr x10, [Xhøgre, #8]
             legg_u32(native, 0xEB0A013F)                        // cmp x9, x10
             la lbl_cmp_cset = lengde(native)
-            skriv_u32(native, p_cmp_int, 0x54000001 | ((((lbl_cmp_int - p_cmp_int) / 4) & 0x7FFFF) << 5))
-            skriv_u32(native, p_cmp_ferdig, 0x14000000 | (((lbl_cmp_cset - p_cmp_ferdig) / 4) & 0x03FFFFFF))
             la cset = 0x1A9F07E9
             hvis op == "COMPARE_LT" { cset = 0x1A9FA7E9 }
             hvis op == "COMPARE_GE" { cset = 0x1A9FB7E9 }
             hvis op == "COMPARE_LE" { cset = 0x1A9FC7E9 }
             hvis op == "COMPARE_GT" { cset = 0x1A9FD7E9 }
             legg_u32(native, cset)                              // cset w9, cond
+            la lbl_ord_alloc = lengde(native)
             emit_ncval_alloc(native, 9, venstre, 2)
             la ord_kode = 0
             hvis op == "COMPARE_LE" { ord_kode = 1 }
@@ -9602,10 +9646,20 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
             hvis op == "COMPARE_GE" { ord_kode = 3 }
             la p_ord_int_end = lengde(native)
             legg_u32(native, 0)                                 // b ord_end
+            la lbl_ord_usann = lengde(native)
+            legg_u32(native, 0x52800009)                        // movz w9, #0  (ulike typar → usann)
+            la p_usann_alloc = lengde(native)
+            legg_u32(native, 0)                                 // b alloc
             la lbl_ord_des = lengde(native)
             emit_desimal_cmp_kall(native, venstre, høgre, venstre, ord_kode, bl_patchar)
             la lbl_ord_end = lengde(native)
             ncd_bcond(native, p_ord_des, lbl_ord_des, 0)
+            ncd_bcond(native, p_ikkje_tekst, lbl_ikkje_tekst, 1)
+            ncd_bcond(native, p_tekst_mix, lbl_ord_usann, 1)
+            ncd_bcond(native, p_v_mix, lbl_ord_usann, 8)
+            ncd_bcond(native, p_h_mix, lbl_ord_usann, 8)
+            ncd_b(native, p_cmp_ferdig, lbl_cmp_cset)
+            ncd_b(native, p_usann_alloc, lbl_ord_alloc)
             ncd_b(native, p_ord_int_end, lbl_ord_end)
             opnd_ut(native, djupn - 2, venstre, memmode, home_off)
             djupn = djupn - 1
