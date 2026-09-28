@@ -1,0 +1,720 @@
+# std/straum.no — late straumar (Java java.util.stream.Stream).
+#
+# Ein straum er ei kjede av kjelde -> adapterar -> terminaloperasjon. Ingenting
+# blir rekna ut før terminaloperasjonen trekkjer verdiar, og då berre så mange
+# som trengst: ta/finn_første/nokon/alle kortsluttar, så uendelege kjelder
+# (iterer, generer) er trygge så lenge kjeda har ei grense.
+#
+# Bruk:
+#   bruk std.straum som sm
+#   la kvadrat = sm.samle(sm.ta(sm.map(sm.filter(sm.iterer(1, fun(x) -> x + 1),
+#                    fun(x) -> x % 2 == 0), fun(x) -> x * x), 4))    # [4, 16, 36, 64]
+#   sm.reduser(sm.frå_liste([1, 2, 3]), fun(a, x) -> a + x, 0)         # 6
+#
+# Kjelder (Java-motstykke i parentes):
+#   frå_liste(xs)                                     (List.stream / Stream.of)
+#   område(start, stopp) / område_inkl(start, stopp)  [start, stopp) / [start, stopp] (IntStream.range/rangeClosed)
+#   område_steg(start, stopp, skritt)  skritt kan vere negativt, ikkje 0
+#   iterer(frø, f)            frø, f(frø), f(f(frø)), ... uendeleg     (Stream.iterate(seed, f))
+#   iterer_mens(frø, p, f)    som iterer, men stoppar når p(x) er usann (Stream.iterate(seed, hasNext, next))
+#   generer(f)                f(), f(), ... uendeleg                   (Stream.generate)
+#   frå_generator(g)          g() gjev {"ferdig": bool, "verdi": v}; stoppar ved ferdig
+#   frå_iterator(it)          std.iterator-iterator (teljar, område, frå_liste, ...)
+#   tom()                                                               (Stream.empty)
+#
+# Late adapterar (returnerer ein ny straum):
+#   map(s, f) / filter(s, p) / flat_map(s, f)   f i flat_map gjev liste eller straum
+#   ta(s, n) / hopp(s, n)                       (limit / skip)
+#   ta_mens(s, p) / hopp_mens(s, p)             (takeWhile / dropWhile)
+#   distinkt(s)               første førekomst av kvar verdi; likskap = type + tekst(v)
+#   sortert(s) / sortert_synkande(s) / sortert_med(s, komparator)   stabil flettesortering;
+#                             ein barriere som trekkjer heile kjelda ved første trekk
+#   kikk(s, f)                kallar f(v) når v passerer               (peek)
+#   kjede(a, b)               a, så b                                  (Stream.concat)
+#   zip(a, b, f)              f(a_i, b_i) til den kortaste er tom
+#
+# Terminaloperasjonar:
+#   samle(s) / til_liste(s)   liste                                    (toList)
+#   samle_tekst(s, skilje)    tekst(v) skilde med skilje               (Collectors.joining)
+#   tel(s)                                                             (count)
+#   reduser(s, f, start)      f(akk, v)                                (reduce(identity, op))
+#   reduser_valfri(s, f)      std.valfri-verdi, tom når straumen er tom (reduce(op))
+#   sum(s)                    sum av tal, 0 for tom straum
+#   nokon(s, p) / alle(s, p) / ingen(s, p)   kortsluttar  (anyMatch / allMatch / noneMatch)
+#   any(s, p) / all(s, p)     alias for nokon / alle
+#   finn_første(s) / finn(s, p)   std.valfri-verdi                    (findFirst / filter+findFirst)
+#   min(s) / maks(s) / min_med(s, k) / maks_med(s, k)   std.valfri-verdi (min / max)
+#   for_kvar(s, f)                                                     (forEach)
+#   grupper_etter(s, f)       ordbok tekst(f(v)) -> liste, i møterekkjefølgje (groupingBy)
+#   neste(s)                  {"ferdig": bool, "verdi": v} for steg-for-steg-bruk (iterator)
+#
+# Ein straum kan berre brukast éin gong, som i Java: å kople ein ny adapter eller
+# terminaloperasjon på ein straum som alt er brukt, kastar "TilstandsFeil: ...".
+#
+# Implementasjon: ein straum er ei ordbok med ein talkode "k" for typen og
+# tilstanden hans; _trekk(s) går eitt steg og legg verdien i s["cur"]. Brukar-
+# lambdaene blir kalla direkte (fn(v)) frå namngjevne funksjonar, ikkje via
+# builtin.ncb_call_fn og ikkje frå lambda-kroppar, så modulen verkar på VM og i
+# native AOT.
+#
+# Merk for brukarlambdaer: ein lambda-kropp kan ikkje kalle ein FANGA lambda
+# direkte (fun(x) -> g(x) der g er ein fanga variabel blir kompilert som kall
+# til builtin.g). Kall ein namngjeven funksjon som tek g som argument i staden:
+#   funksjon bruk_g(g, x) { returner g(x) }
+#   sm.map(s, fun(x) -> bruk_g(g, x))
+bruk std.valfri som vf
+bruk std.iterator som itr
+
+# Straumtypar (s["k"]):
+#   1 liste   2 område   3 iterer   4 generer   5 generator   6 iterator   7 tom
+#   8 iterer_mens
+#   10 map   11 filter   12 ta   13 hopp   14 ta_mens   15 hopp_mens   16 flat_map
+#   17 distinkt   18 sortert   19 kikk   20 kjede   21 zip
+
+funksjon _ny(k: heiltall) -> ordbok {
+    returner {"__straum__": sann, "k": k, "cur": ingenting, "brukt": usann}
+}
+
+funksjon er_straum(x) -> bool {
+    hvis builtin.type(x) != "ordbok" { returner usann }
+    returner har_nokkel(x, "__straum__")
+}
+
+# Markerer s som brukt (kan ikkje koplast på att).
+funksjon _bruk(s: ordbok) -> ordbok {
+    hvis ikkje er_straum(s) { kast "TypeFeil: venta ein straum" }
+    hvis s["brukt"] { kast "TilstandsFeil: straumen er alt brukt eller lukka" }
+    s["brukt"] = sann
+    returner s
+}
+
+funksjon _adapter(k: heiltall, kjelde: ordbok) -> ordbok {
+    la s = _ny(k)
+    s["src"] = _bruk(kjelde)
+    returner s
+}
+
+# ── Kjelder ──────────────────────────────────────────────────────────────
+
+funksjon frå_liste(xs) -> ordbok {
+    la s = _ny(1)
+    s["xs"] = xs
+    s["i"] = 0
+    returner s
+}
+
+funksjon område_steg(start: heiltall, stopp: heiltall, skritt: heiltall) -> ordbok {
+    hvis skritt == 0 { kast "ArgumentFeil: skritt kan ikkje vere 0" }
+    la s = _ny(2)
+    s["n"] = start
+    s["stopp"] = stopp
+    s["steg"] = skritt
+    returner s
+}
+
+funksjon område(start: heiltall, stopp: heiltall) -> ordbok {
+    returner område_steg(start, stopp, 1)
+}
+
+funksjon område_inkl(start: heiltall, stopp: heiltall) -> ordbok {
+    returner område_steg(start, stopp + 1, 1)
+}
+
+funksjon iterer(frø, f) -> ordbok {
+    la s = _ny(3)
+    s["v"] = frø
+    s["f"] = f
+    s["første"] = sann
+    returner s
+}
+
+funksjon iterer_mens(frø, har_neste, f) -> ordbok {
+    la s = _ny(8)
+    s["v"] = frø
+    s["p"] = har_neste
+    s["f"] = f
+    s["første"] = sann
+    s["ferdig"] = usann
+    returner s
+}
+
+funksjon generer(f) -> ordbok {
+    la s = _ny(4)
+    s["f"] = f
+    returner s
+}
+
+funksjon frå_generator(g) -> ordbok {
+    la s = _ny(5)
+    s["g"] = g
+    s["ferdig"] = usann
+    returner s
+}
+
+funksjon frå_iterator(it) -> ordbok {
+    la s = _ny(6)
+    s["it"] = it
+    s["ferdig"] = usann
+    returner s
+}
+
+funksjon tom() -> ordbok {
+    returner _ny(7)
+}
+
+# ── Late adapterar ───────────────────────────────────────────────────────
+
+funksjon map(s: ordbok, f) -> ordbok {
+    la a = _adapter(10, s)
+    a["f"] = f
+    returner a
+}
+
+funksjon filter(s: ordbok, p) -> ordbok {
+    la a = _adapter(11, s)
+    a["f"] = p
+    returner a
+}
+
+funksjon ta(s: ordbok, n: heiltall) -> ordbok {
+    la a = _adapter(12, s)
+    a["n"] = n
+    returner a
+}
+
+funksjon hopp(s: ordbok, n: heiltall) -> ordbok {
+    la a = _adapter(13, s)
+    a["n"] = n
+    returner a
+}
+
+funksjon ta_mens(s: ordbok, p) -> ordbok {
+    la a = _adapter(14, s)
+    a["f"] = p
+    a["stoppa"] = usann
+    returner a
+}
+
+funksjon hopp_mens(s: ordbok, p) -> ordbok {
+    la a = _adapter(15, s)
+    a["f"] = p
+    a["hoppar"] = sann
+    returner a
+}
+
+funksjon flat_map(s: ordbok, f) -> ordbok {
+    la a = _adapter(16, s)
+    a["f"] = f
+    a["har_indre"] = usann
+    a["indre"] = ingenting
+    returner a
+}
+
+funksjon distinkt(s: ordbok) -> ordbok {
+    la a = _adapter(17, s)
+    a["sett"] = {}
+    returner a
+}
+
+funksjon _sortert(s: ordbok, modus: heiltall, komp) -> ordbok {
+    la a = _adapter(18, s)
+    a["modus"] = modus
+    a["cmp"] = komp
+    a["klar"] = usann
+    returner a
+}
+
+funksjon sortert(s: ordbok) -> ordbok {
+    returner _sortert(s, 0, ingenting)
+}
+
+funksjon sortert_synkande(s: ordbok) -> ordbok {
+    returner _sortert(s, 1, ingenting)
+}
+
+funksjon sortert_med(s: ordbok, komparator) -> ordbok {
+    returner _sortert(s, 2, komparator)
+}
+
+funksjon kikk(s: ordbok, f) -> ordbok {
+    la a = _adapter(19, s)
+    a["f"] = f
+    returner a
+}
+
+funksjon kjede(a_s: ordbok, b_s: ordbok) -> ordbok {
+    la s = _ny(20)
+    s["a"] = _bruk(a_s)
+    s["b"] = _bruk(b_s)
+    s["b_aktiv"] = usann
+    returner s
+}
+
+funksjon zip(a_s: ordbok, b_s: ordbok, f) -> ordbok {
+    la s = _ny(21)
+    s["a"] = _bruk(a_s)
+    s["b"] = _bruk(b_s)
+    s["f"] = f
+    returner s
+}
+
+# ── Hjelparar ────────────────────────────────────────────────────────────
+
+funksjon _nat(a, b) -> heiltall {
+    hvis a < b { returner -1 }
+    hvis a > b { returner 1 }
+    returner 0
+}
+
+funksjon _cmp(modus: heiltall, komp, a, b) -> heiltall {
+    hvis modus == 0 { returner _nat(a, b) }
+    hvis modus == 1 { returner _nat(b, a) }
+    la r = komp(a, b)
+    hvis r < 0 { returner -1 }
+    hvis r > 0 { returner 1 }
+    returner 0
+}
+
+# Stabil flettesortering (botn-opp, ingen rekursjon).
+funksjon _sorter(xs, modus: heiltall, komp) -> liste {
+    la n = lengde(xs)
+    la a = []
+    for x i xs {
+        legg_til(a, x)
+    }
+    la breidd = 1
+    mens breidd < n {
+        la b = []
+        la lo = 0
+        mens lo < n {
+            la midt = lo + breidd
+            hvis midt > n { midt = n }
+            la hi = lo + 2 * breidd
+            hvis hi > n { hi = n }
+            la i = lo
+            la j = midt
+            mens i < midt og j < hi {
+                hvis _cmp(modus, komp, a[j], a[i]) < 0 {
+                    legg_til(b, a[j])
+                    j = j + 1
+                } ellers {
+                    legg_til(b, a[i])
+                    i = i + 1
+                }
+            }
+            mens i < midt {
+                legg_til(b, a[i])
+                i = i + 1
+            }
+            mens j < hi {
+                legg_til(b, a[j])
+                j = j + 1
+            }
+            lo = hi
+        }
+        a = b
+        breidd = breidd * 2
+    }
+    returner a
+}
+
+funksjon _som_straum(r) -> ordbok {
+    hvis builtin.type(r) == "liste" { returner frå_liste(r) }
+    hvis er_straum(r) { returner _bruk(r) }
+    kast "TypeFeil: flat_map-funksjonen må returnere ei liste eller ein straum"
+}
+
+funksjon _distinkt_nøkkel(v) -> tekst {
+    returner builtin.type(v) + ":" + tekst(v)
+}
+
+# ── Motor: eitt steg ─────────────────────────────────────────────────────
+
+# Går eitt steg i s. sann = ny verdi i s["cur"]; usann = straumen er tom.
+funksjon _trekk(s: ordbok) -> bool {
+    la k = s["k"]
+    hvis k == 1 {
+        la xs = s["xs"]
+        la i = s["i"]
+        hvis i >= lengde(xs) { returner usann }
+        s["cur"] = xs[i]
+        s["i"] = i + 1
+        returner sann
+    }
+    hvis k == 2 {
+        la n = s["n"]
+        hvis s["steg"] > 0 {
+            hvis n >= s["stopp"] { returner usann }
+        } ellers {
+            hvis n <= s["stopp"] { returner usann }
+        }
+        s["cur"] = n
+        s["n"] = n + s["steg"]
+        returner sann
+    }
+    hvis k == 3 {
+        hvis s["første"] {
+            s["første"] = usann
+        } ellers {
+            la fn = s["f"]
+            s["v"] = fn(s["v"])
+        }
+        s["cur"] = s["v"]
+        returner sann
+    }
+    hvis k == 8 {
+        hvis s["ferdig"] { returner usann }
+        hvis s["første"] {
+            s["første"] = usann
+        } ellers {
+            la fn = s["f"]
+            s["v"] = fn(s["v"])
+        }
+        la p = s["p"]
+        hvis ikkje p(s["v"]) {
+            s["ferdig"] = sann
+            returner usann
+        }
+        s["cur"] = s["v"]
+        returner sann
+    }
+    hvis k == 4 {
+        la fn = s["f"]
+        s["cur"] = fn()
+        returner sann
+    }
+    hvis k == 5 {
+        hvis s["ferdig"] { returner usann }
+        la g = s["g"]
+        la r = g()
+        hvis r["ferdig"] {
+            s["ferdig"] = sann
+            returner usann
+        }
+        s["cur"] = r["verdi"]
+        returner sann
+    }
+    hvis k == 6 {
+        hvis s["ferdig"] { returner usann }
+        la r = itr.neste(s["it"])
+        hvis r["ferdig"] {
+            s["ferdig"] = sann
+            returner usann
+        }
+        s["cur"] = r["verdi"]
+        returner sann
+    }
+    hvis k == 7 { returner usann }
+    hvis k == 10 {
+        la src = s["src"]
+        hvis ikkje _trekk(src) { returner usann }
+        la fn = s["f"]
+        s["cur"] = fn(src["cur"])
+        returner sann
+    }
+    hvis k == 11 {
+        la src = s["src"]
+        la fn = s["f"]
+        mens _trekk(src) {
+            la v = src["cur"]
+            hvis fn(v) {
+                s["cur"] = v
+                returner sann
+            }
+        }
+        returner usann
+    }
+    hvis k == 12 {
+        la n = s["n"]
+        hvis n <= 0 { returner usann }
+        la src = s["src"]
+        hvis ikkje _trekk(src) {
+            s["n"] = 0
+            returner usann
+        }
+        s["n"] = n - 1
+        s["cur"] = src["cur"]
+        returner sann
+    }
+    hvis k == 13 {
+        la src = s["src"]
+        mens s["n"] > 0 {
+            hvis ikkje _trekk(src) {
+                s["n"] = 0
+                returner usann
+            }
+            s["n"] = s["n"] - 1
+        }
+        hvis ikkje _trekk(src) { returner usann }
+        s["cur"] = src["cur"]
+        returner sann
+    }
+    hvis k == 14 {
+        hvis s["stoppa"] { returner usann }
+        la src = s["src"]
+        hvis ikkje _trekk(src) { returner usann }
+        la v = src["cur"]
+        la fn = s["f"]
+        hvis fn(v) {
+            s["cur"] = v
+            returner sann
+        }
+        s["stoppa"] = sann
+        returner usann
+    }
+    hvis k == 15 {
+        la src = s["src"]
+        la fn = s["f"]
+        mens _trekk(src) {
+            la v = src["cur"]
+            hvis s["hoppar"] {
+                hvis ikkje fn(v) {
+                    s["hoppar"] = usann
+                    s["cur"] = v
+                    returner sann
+                }
+            } ellers {
+                s["cur"] = v
+                returner sann
+            }
+        }
+        returner usann
+    }
+    hvis k == 16 {
+        la src = s["src"]
+        la fn = s["f"]
+        mens sann {
+            hvis s["har_indre"] {
+                la indre = s["indre"]
+                hvis _trekk(indre) {
+                    s["cur"] = indre["cur"]
+                    returner sann
+                }
+                s["har_indre"] = usann
+            }
+            hvis ikkje _trekk(src) { returner usann }
+            s["indre"] = _som_straum(fn(src["cur"]))
+            s["har_indre"] = sann
+        }
+    }
+    hvis k == 17 {
+        la src = s["src"]
+        la sett = s["sett"]
+        mens _trekk(src) {
+            la v = src["cur"]
+            la nk = _distinkt_nøkkel(v)
+            hvis ikkje har_nokkel(sett, nk) {
+                sett[nk] = sann
+                s["cur"] = v
+                returner sann
+            }
+        }
+        returner usann
+    }
+    hvis k == 18 {
+        hvis ikkje s["klar"] {
+            la alle_v = _tøm(s["src"])
+            s["buf"] = _sorter(alle_v, s["modus"], s["cmp"])
+            s["i"] = 0
+            s["klar"] = sann
+        }
+        la buf = s["buf"]
+        la i = s["i"]
+        hvis i >= lengde(buf) { returner usann }
+        s["cur"] = buf[i]
+        s["i"] = i + 1
+        returner sann
+    }
+    hvis k == 19 {
+        la src = s["src"]
+        hvis ikkje _trekk(src) { returner usann }
+        la v = src["cur"]
+        la fn = s["f"]
+        fn(v)
+        s["cur"] = v
+        returner sann
+    }
+    hvis k == 20 {
+        hvis ikkje s["b_aktiv"] {
+            la a = s["a"]
+            hvis _trekk(a) {
+                s["cur"] = a["cur"]
+                returner sann
+            }
+            s["b_aktiv"] = sann
+        }
+        la b = s["b"]
+        hvis _trekk(b) {
+            s["cur"] = b["cur"]
+            returner sann
+        }
+        returner usann
+    }
+    hvis k == 21 {
+        la a = s["a"]
+        la b = s["b"]
+        hvis ikkje _trekk(a) { returner usann }
+        hvis ikkje _trekk(b) { returner usann }
+        la fn = s["f"]
+        s["cur"] = fn(a["cur"], b["cur"])
+        returner sann
+    }
+    kast "TilstandsFeil: ukjend straumtype " + tekst(k)
+}
+
+# Trekkjer resten av s inn i ei liste (utan brukt-sjekk).
+funksjon _tøm(s: ordbok) -> liste {
+    la ut = []
+    mens _trekk(s) {
+        legg_til(ut, s["cur"])
+    }
+    returner ut
+}
+
+# ── Terminaloperasjonar ──────────────────────────────────────────────────
+
+funksjon neste(s: ordbok) -> ordbok {
+    hvis _trekk(s) { returner {"ferdig": usann, "verdi": s["cur"]} }
+    returner {"ferdig": sann, "verdi": ingenting}
+}
+
+funksjon samle(s: ordbok) -> liste {
+    returner _tøm(_bruk(s))
+}
+
+funksjon til_liste(s: ordbok) -> liste {
+    returner samle(s)
+}
+
+funksjon samle_tekst(s: ordbok, skilje: tekst) -> tekst {
+    _bruk(s)
+    la ut = ""
+    la først = sann
+    mens _trekk(s) {
+        hvis ikkje først { ut = ut + skilje }
+        ut = ut + tekst(s["cur"])
+        først = usann
+    }
+    returner ut
+}
+
+funksjon tel(s: ordbok) -> heiltall {
+    _bruk(s)
+    la n = 0
+    mens _trekk(s) {
+        n = n + 1
+    }
+    returner n
+}
+
+funksjon reduser(s: ordbok, f, start) {
+    _bruk(s)
+    la akk = start
+    mens _trekk(s) {
+        akk = f(akk, s["cur"])
+    }
+    returner akk
+}
+
+funksjon reduser_valfri(s: ordbok, f) -> ordbok {
+    _bruk(s)
+    hvis ikkje _trekk(s) { returner vf.tom() }
+    la akk = s["cur"]
+    mens _trekk(s) {
+        akk = f(akk, s["cur"])
+    }
+    returner vf.av_nullbar(akk)
+}
+
+funksjon sum(s: ordbok) {
+    _bruk(s)
+    la akk = 0
+    mens _trekk(s) {
+        akk = akk + s["cur"]
+    }
+    returner akk
+}
+
+funksjon nokon(s: ordbok, p) -> bool {
+    _bruk(s)
+    mens _trekk(s) {
+        hvis p(s["cur"]) { returner sann }
+    }
+    returner usann
+}
+
+funksjon alle(s: ordbok, p) -> bool {
+    _bruk(s)
+    mens _trekk(s) {
+        hvis ikkje p(s["cur"]) { returner usann }
+    }
+    returner sann
+}
+
+funksjon ingen(s: ordbok, p) -> bool {
+    returner ikkje nokon(s, p)
+}
+
+funksjon any(s: ordbok, p) -> bool {
+    returner nokon(s, p)
+}
+
+funksjon all(s: ordbok, p) -> bool {
+    returner alle(s, p)
+}
+
+funksjon finn_første(s: ordbok) -> ordbok {
+    _bruk(s)
+    hvis _trekk(s) { returner vf.av_nullbar(s["cur"]) }
+    returner vf.tom()
+}
+
+funksjon finn(s: ordbok, p) -> ordbok {
+    returner finn_første(filter(s, p))
+}
+
+funksjon _ytterst(s: ordbok, modus: heiltall, komp, teikn: heiltall) -> ordbok {
+    _bruk(s)
+    hvis ikkje _trekk(s) { returner vf.tom() }
+    la best = s["cur"]
+    mens _trekk(s) {
+        la v = s["cur"]
+        hvis _cmp(modus, komp, v, best) * teikn < 0 { best = v }
+    }
+    returner vf.av_nullbar(best)
+}
+
+funksjon min(s: ordbok) -> ordbok {
+    returner _ytterst(s, 0, ingenting, 1)
+}
+
+funksjon maks(s: ordbok) -> ordbok {
+    returner _ytterst(s, 0, ingenting, -1)
+}
+
+funksjon min_med(s: ordbok, komparator) -> ordbok {
+    returner _ytterst(s, 2, komparator, 1)
+}
+
+funksjon maks_med(s: ordbok, komparator) -> ordbok {
+    returner _ytterst(s, 2, komparator, -1)
+}
+
+funksjon for_kvar(s: ordbok, f) {
+    _bruk(s)
+    mens _trekk(s) {
+        f(s["cur"])
+    }
+}
+
+funksjon grupper_etter(s: ordbok, f) -> ordbok {
+    _bruk(s)
+    la ut = {}
+    mens _trekk(s) {
+        la v = s["cur"]
+        la nk = tekst(f(v))
+        hvis ikkje har_nokkel(ut, nk) { ut[nk] = [] }
+        legg_til(ut[nk], v)
+    }
+    returner ut
+}
