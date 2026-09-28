@@ -599,6 +599,7 @@ funksjon _PG_TS() -> heiltall { returner 115264 }
 funksjon _PG_WSTATUS() -> heiltall { returner 115296 }
 funksjon _PG_ROYR() -> heiltall { returner 115328 }     // 3 × int[2]
 funksjon _PG_SIGSETT() -> heiltall { returner 115392 }  // 2 × sigset (ny, gammal)
+funksjon _PG_TASKINFO() -> heiltall { returner 115456 } // struct proc_taskinfo (Darwin, 96 B)
 
 funksjon _pg_res(status: tekst, pid: heiltall, handle: tekst, exit_code: heiltall,
                  ut: tekst, feil: tekst, error: tekst, wall_ms: heiltall, peak_rss: heiltall) {
@@ -794,6 +795,18 @@ funksjon _pg_drep(p) -> heiltall {
     returner builtin.sys6(nsys._nr("kill"), p["pid"], nsys._flagg("SIGKILL"), 0, 0, 0, 0)
 }
 
+// Resident storleik (byte) til barnet no, eller −1 når kjernen ikkje svarar (barnet er
+// alt ferdig/zombie). Darwin: proc_info(PROC_INFO_CALL_PIDINFO, pid, PROC_PIDTASKINFO, 0,
+// buf, sizeof(struct proc_taskinfo)) → pti_resident_size. Berre Seatbelt-vegen brukar han.
+funksjon _pg_rss(p) -> heiltall {
+    la buf: heiltall = p["scratch"] + _PG_TASKINFO()
+    la sz = nsys._layout("proc_taskinfo", "storleik")
+    la r = builtin.sys6(nsys._nr("proc_info"), nsys._flagg("PROC_INFO_CALL_PIDINFO"), p["pid"],
+                        nsys._flagg("PROC_PIDTASKINFO"), 0, buf, sz)
+    hvis r < sz { returner 0 - 1 }
+    returner builtin.raw_load64(buf + nsys._layout("proc_taskinfo", "resident_size"))
+}
+
 // Éin runde: skriv ventande stdin, les tilgjengeleg output og sjå etter exit (wait4 med
 // rusage → peak_rss_bytes). Sann når prosessen er ferdig (status sett).
 funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
@@ -806,6 +819,19 @@ funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
         p["drept"] = sann
         _pg_drep(p)
         blokker = sann
+    }
+    // Minnegrense (Seatbelt-sandkasse; Darwin har ingen kjernegrense som RLIMIT_AS tek på
+    // alvor): resident storleik blir målt kvar runde, og over grensa blir barnet drepe →
+    // status "feil"/"memory limit". Vente-lykkjene (synkron spawn og wait) kallar hit minst
+    // kvart 10. ms.
+    hvis p["minne_grense"] > 0 og ikkje p["drept"] og ikkje p["drept_timeout"] og ikkje p["drept_minne"] {
+        la rss = _pg_rss(p)
+        hvis rss > p["peak_rss"] { p["peak_rss"] = rss }
+        hvis rss > p["minne_grense"] {
+            p["drept_minne"] = sann
+            _pg_drep(p)
+            blokker = sann
+        }
     }
     la st: heiltall = p["scratch"] + _PG_WSTATUS()
     builtin.raw_store64(st, 0)
@@ -821,6 +847,10 @@ funksjon _pg_sjekk(p, blokker: boolsk) -> boolsk {
             p["status"] = "feil"
             p["exit_code"] = 1
             p["error"] = "output limit"
+        } ellers hvis p["drept_minne"] {
+            p["status"] = "feil"
+            p["exit_code"] = 1
+            p["error"] = "memory limit"
         } ellers hvis p["drept_timeout"] {
             p["status"] = "timeout"
             p["exit_code"] = 124
@@ -873,7 +903,7 @@ funksjon _pg_svar(p) {
                    _pg_tekst(p, "feil_delar"), p["error"], builtin.now_ms() - p["start_ms"], p["peak_rss"])
     hvis finnes_nøkkel(p, "sandbox") og tekst(p["sandbox"]) != "" {
         r["sandbox"] = p["sandbox"]
-        r["sandbox_backend"] = "seccomp"
+        r["sandbox_backend"] = p["sandbox_backend"]
     }
     returner r
 }
@@ -893,6 +923,36 @@ funksjon _pg_sandbox_profil(req) -> tekst {
 funksjon _pg_sandbox_kjend(p: tekst) -> bool {
     // «pure» = process_abi sin kombinerte ingen-nett/ingen-skriv-profil (som restricted).
     returner p == "no-network" eller p == "no-write" eller p == "restricted" eller p == "pure"
+}
+
+// Sandkasse-backend på dette målet: "seccomp" (Linux, BPF-filter i barnet), "seatbelt"
+// (Darwin: barnet køyrer under /usr/bin/sandbox-exec med ein SBPL-profil) eller "" (inga
+// backend → profilar blir avviste, fail-closed).
+funksjon _PG_SANDBOX_EXEC() -> tekst { returner "/usr/bin/sandbox-exec" }
+
+funksjon _pg_sandbox_backend() -> tekst {
+    hvis nsys._har_nr("seccomp") { returner "seccomp" }
+    hvis builtin.index_of(nsys.mål(), "macos-") == 0 og lengde(fs_gap_stat(_PG_SANDBOX_EXEC(), sann)) > 1 { returner "seatbelt" }
+    returner ""
+}
+
+// SBPL-profil med same semantikk som seccomp-filteret (_pg_bpf): «no-network» nektar all
+// nettverkstrafikk utanom lokale unix-sokklar (AF_UNIX er lov òg under seccomp);
+// «no-write» nektar all filskriving/-oppretting/-sletting/-endring (utanom /dev/null og
+// liknande einingar og allereie opne fd-ar som røyra); «restricted»/«pure» = begge.
+funksjon _pg_sbpl(profil: tekst) -> tekst {
+    la nett = profil == "no-network" eller profil == "restricted" eller profil == "pure"
+    la skriv = profil == "no-write" eller profil == "restricted" eller profil == "pure"
+    la s = "(version 1)(allow default)"
+    hvis nett {
+        s = s + "(deny network*)(allow network* (local unix-socket))(allow network* (remote unix-socket))"
+    }
+    hvis skriv {
+        s = s + "(deny file-write*)(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\")"
+        s = s + " (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (literal \"/dev/stdout\")"
+        s = s + " (literal \"/dev/stderr\") (regex #\"^/dev/fd/[0-9]+$\"))"
+    }
+    returner s
 }
 
 // Byggjer struct sock_fprog + sock_filter[] 16-aligna frå `fri` i scratch-området.
@@ -973,13 +1033,34 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     hvis executable == "" og ikkje synkron { returner _pg_feil("tom executable") }
     la profil = _pg_sandbox_profil(req)
     hvis profil != "" og ikkje _pg_sandbox_kjend(profil) { returner _pg_feil("ukjent sandbox-profil: " + profil) }
-    // macOS (M1): profilane er seccomp-BPF; Darwin har ingen seccomp (Seatbelt krev libsandbox).
-    // Fail-closed: eit barn skal aldri køyre utan avgrensinga det bad om.
-    hvis profil != "" og ikkje nsys._har_nr("seccomp") {
-        returner _pg_feil("sandbox-profil «" + profil + "» er ikkje støtta på " + nsys.mål() + " (ingen seccomp)")
+    // Linux: seccomp-BPF i barnet. Darwin (M1) har ingen seccomp: der køyrer barnet under
+    // Seatbelt (sandbox-exec + SBPL). Fail-closed: utan backend skal eit barn aldri køyre
+    // utan avgrensinga det bad om.
+    la backend = ""
+    hvis profil != "" {
+        backend = _pg_sandbox_backend()
+        hvis backend == "" {
+            returner _pg_feil("sandbox-profil «" + profil + "» er ikkje støtta på " + nsys.mål() + " (ingen seccomp eller seatbelt)")
+        }
     }
     la args = req["args"]
     hvis builtin.type(args) != "liste" { args = [] }
+    // Seatbelt: execve(sandbox-exec, ["-p", SBPL, executable, args…]). sandbox-exec legg på
+    // profilen og execvp-ar programmet i same prosess (same pid → wait4/kill/proc_info
+    // gjeld barnet sjølv). Eit namn utan «/» får «./» først: execve ville løyst det mot cwd,
+    // execvp ville ha søkt i PATH. Tom executable (synkron) går uendra til execve → 127.
+    hvis backend == "seatbelt" og executable != "" {
+        la indre = executable
+        hvis builtin.index_of(indre, "/") < 0 { indre = "./" + indre }
+        la nye: liste_tekst = ["-p", _pg_sbpl(profil), indre]
+        la si: heiltall = 0
+        mens si < lengde(args) {
+            legg_til(nye, tekst(args[si]))
+            si = si + 1
+        }
+        args = nye
+        executable = _PG_SANDBOX_EXEC()
+    }
     la scratch = _sys_mmap_rw(_PG_SCRATCH())
     hvis scratch <= 0 { returner _pg_feil("mmap feila") }
     la str_slutt: heiltall = scratch + _PG_STR_SLUTT() - 64
@@ -1054,7 +1135,7 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     fri = fri + 8
     // Seccomp-filteret blir bygt i forelderen, so barnet berre treng to syscallar.
     la bpf_prog: heiltall = 0
-    hvis profil != "" {
+    hvis backend == "seccomp" {
         la bpf = _pg_bpf(fri, profil)
         bpf_prog = bpf[0]
         fri = bpf[1]
@@ -1106,7 +1187,7 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     la nr_chdir = nsys._nr("chdir")
     la nr_execve = nsys._nr("execve")
     la nr_exit = nsys._nr("exit")
-    // prctl/seccomp berre med sandkasseprofil (profil utan seccomp er avvist over).
+    // prctl/seccomp berre med seccomp-backend (Seatbelt-vegen køyrer sandbox-exec i staden).
     la nr_prctl: heiltall = 0
     la nr_seccomp: heiltall = 0
     la no_new_privs: heiltall = 0
@@ -1161,6 +1242,12 @@ funksjon _pg_spawn(req, synkron: boolsk) {
     } ellers {
         hvis maks <= 0 { maks = 1048576 }
     }
+    // Minnegrensa blir handheva av Seatbelt-vegen (proc_info-måling i _pg_sjekk); seccomp-
+    // vegen på Linux er uendra.
+    la minne_grense: heiltall = 0
+    hvis backend == "seatbelt" og finnes_nøkkel(req, "max_memory_bytes") {
+        minne_grense = heltall_fra_tekst(tekst(req["max_memory_bytes"]))
+    }
     la handle = "np-" + tekst_fra_heltall(pid) + "-" + tekst_fra_heltall(builtin.now_ms())
     la p = {"pid": pid, "handle": handle, "status": "kjorer", "exit_code": -1, "error": "",
             "ut_delar": [], "feil_delar": [], "buf_n": 0, "peak_rss": 0,
@@ -1168,7 +1255,8 @@ funksjon _pg_spawn(req, synkron: boolsk) {
             "inn_pos": 0, "inn_bit_pos": 0, "inn_bit_n": 0, "scratch": scratch,
             "maks": maks, "hard_grense": synkron, "grense_naadd": usann, "drept": usann,
             "start_ms": builtin.now_ms(), "timeout_ms": timeout_ms, "drept_timeout": usann,
-            "sandbox": profil}
+            "sandbox": profil, "sandbox_backend": backend, "minne_grense": minne_grense,
+            "drept_minne": usann}
     _pg_skriv_stdin(p)
     _pg_prosessar[handle] = p
     returner _pg_svar(p)
