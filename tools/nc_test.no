@@ -9,8 +9,10 @@
 // tools/nc_test_oppdaging.no) når fila har test-blokker, eller test_*-funksjonar
 // utan start(). Kvar test blir køyrd for seg og rapportert («OK: namn» /
 // «FEIL: namn — <assert-melding>», og «x/n bestått»); ei fil er grøn berre når alle
-// testane hennar bestod. Filer utan slike testar køyrer uendra. Dei eksplisitte
-// pure-VM- og native-direkte-listene går utanom køyraren.
+// testane hennar bestod. Døyr prosessen midt i ein test (ufangbar feil, builtin.exit),
+// blir testen FEIL og resten køyrt i ein ny prosess (køyr_testkoyrar). Filer utan slike
+// testar køyrer uendra. Dei eksplisitte pure-VM- og native-direkte-listene går utanom
+// køyraren.
 
 bruk std.liste som liste
 bruk std.filops som filops
@@ -1185,6 +1187,114 @@ funksjon res_tekst(res: liste_tekst) -> tekst {
     returner out
 }
 
+// Køyr ein kompilert test-NCB (hybrid-vegen) med stille-exit-retry.
+funksjon køyr_ncb_steg(root: tekst, native: tekst, namn: tekst, fil: tekst, timeout: tekst, ncb_fil: tekst) -> liste_tekst {
+    la run_miljø = runtime_miljø(root)
+    sett_target_policy(run_miljø, runtime_capabilities(namn), root + ",.,/tmp,/private/tmp")
+    run_miljø["NORSCODE_VM_FAST"] = test_vm_fast(namn)
+    run_miljø["NORSCODE_CMD"] = "run"
+    run_miljø["NORSCODE_FILE"] = root + "/selfhost/tooling/ncb_host_run_entry.no"
+    run_miljø["NORSCODE_NCB_FILE"] = ncb_fil
+    run_miljø["NORSCODE_ROOT"] = root
+    la res = køyr_native(root, native, run_miljø, timeout)
+    la run_retry: heiltall = 0
+    mens ikkje ok(res) og er_stille_feil(res) og run_retry < 2 {
+        run_retry = run_retry + 1
+        linje("  [RETRY " + tekst(run_retry) + "] " + test_namn(fil) + " køyre-steg stille exit " + tekst(res[0]))
+        vent_ms(3000 * run_retry)
+        res = køyr_native(root, native, run_miljø, timeout)
+    }
+    hvis ikkje ok(res) og er_stille_feil(res) { res[2] = "stille exit frå køyre-steg (ingen stdout/stderr)" }
+    returner res
+}
+
+funksjon tel_prefiks(linjer: liste_tekst, prefiks: tekst) -> heiltall {
+    la n: heiltall = 0
+    la i: heiltall = 0
+    mens i < lengde(linjer) {
+        hvis builtin.starts_with(tekst(linjer[i]), prefiks) { n = n + 1 }
+        i = i + 1
+    }
+    returner n
+}
+
+// F38: legg einskildtestane til ei fil (grøn eller raud, ikkje hoppa) til summen i state.
+funksjon tel_testar(state: ordbok_tekst, rapport: liste_tekst, tal: heiltall) -> heiltall {
+    hvis tal <= 0 { returner 0 }
+    legg_til_tal(state, "tb_ok", tel_prefiks(rapport, "OK: "))
+    legg_til_tal(state, "tb_total", tal)
+    returner 0
+}
+
+// F38: køyr testkøyraren (tools/nc_test_oppdaging.no) segment for segment. Døyr prosessen
+// midt i ein test (ufangbar VM-feil som «Ukjent variabel», builtin.exit), blir testen
+// FEIL med den ufanga feillinja, og resten av testane køyrer i ein ny prosess — ein fatal
+// feil i éin test stoppar ikkje dei andre. Fyller `rapport` (visningslinjer + samla
+// «x/n bestått») og returnerer [kode, stdout, stderr]. Fila er grøn berre når alle
+// testane i planen er køyrde og bestod og ingen feil vart melde.
+funksjon køyr_testkoyrar(root: tekst, native: tekst, namn: tekst, fil: tekst,
+                         timeout: tekst, ncb: tekst, koyrar_ncb: tekst, plan: liste_tekst,
+                         rapport: liste_tekst) -> liste_tekst {
+    la res = køyr_ncb_steg(root, native, namn, fil, timeout, koyrar_ncb)
+    la ut: tekst = tekst(res[1])
+    la feil_ut: tekst = tekst(res[2])
+    la kode: tekst = tekst_null()
+    la runde: heiltall = 0
+    la seg = oppdaging.tolk_segment(tekst(res[1]), tekst(res[0]), siste_feillinje(res_tekst(res)), plan)
+    la halde_fram: bool = sann
+    mens halde_fram {
+        la seg_rapport = seg["rapport"]
+        la i: heiltall = 0
+        mens i < lengde(seg_rapport) {
+            legg_til(rapport, tekst(seg_rapport[i]))
+            i = i + 1
+        }
+        la seg_kode = tekst(res[0])
+        hvis seg_kode == "124" {
+            kode = "124"
+        } ellers hvis seg["ferdig"] og seg_kode != tekst_null() {
+            // Segmentet nådde oppsummeringa, men prosessen enda likevel med feilkode.
+            hvis tel_prefiks(seg_rapport, "FEIL: ") == 0 {
+                la krasj = siste_feillinje(res_tekst(res))
+                hvis krasj == "" { krasj = "ingen feillinje" }
+                legg_til(rapport, "FEIL: prosessen enda med exit " + seg_kode + " etter testane — " + krasj)
+            }
+            hvis kode == tekst_null() { kode = seg_kode }
+        }
+        la neste: heiltall = seg["neste"]
+        halde_fram = ikkje seg["ferdig"] og neste >= 0 og neste < lengde(plan) og runde <= lengde(plan)
+        hvis halde_fram {
+            runde = runde + 1
+            la ny_plan: liste_tekst = []
+            prøv {
+                ny_plan = oppdaging.forbered_ncb(ncb, koyrar_ncb, neste, usann)
+            } fang (e) {
+                legg_til(rapport, "FEIL: testkøyrar kunne ikkje byggjast for resten av testane: " + tekst(e))
+                halde_fram = usann
+            }
+            hvis halde_fram og lengde(ny_plan) != lengde(plan) {
+                legg_til(rapport, "FEIL: testplanen endra seg mellom segmenta")
+                halde_fram = usann
+            }
+            hvis halde_fram {
+                res = køyr_ncb_steg(root, native, namn, fil, timeout, koyrar_ncb)
+                ut = ut + "\n[nc-test-segment frå test nr. " + tekst_fra_heltall(neste + 1) + "]\n" + tekst(res[1])
+                feil_ut = feil_ut + "\n" + tekst(res[2])
+                seg = oppdaging.tolk_segment(tekst(res[1]), tekst(res[0]), siste_feillinje(res_tekst(res)), plan)
+            }
+        }
+    }
+    la fullført: bool = seg["ferdig"] eller seg["neste"] == lengde(plan)
+    la ok_tal = tel_prefiks(rapport, "OK: ")
+    hvis ikkje fullført og tel_prefiks(rapport, "FEIL: ") == 0 {
+        legg_til(rapport, "FEIL: testkøyraren nådde ikkje oppsummeringa (testane vart ikkje køyrde til endes)")
+    }
+    legg_til(rapport, tekst_fra_heltall(ok_tal) + "/" + tekst_fra_heltall(lengde(plan)) + " bestått")
+    la grøn: bool = fullført og ok_tal == lengde(plan) og tel_prefiks(rapport, "FEIL: ") == 0
+    hvis kode == tekst_null() og ikkje grøn { kode = "1" }
+    returner [kode, ut, feil_ut]
+}
+
 funksjon klargjer_vm_loader_fixture(root: tekst, native: tekst) -> heiltall {
     // Plugin-NCB-ane og trust-storen blir genererte frå tests/fixtures/vm_loader/*.no
     // med den same runtimen som køyrer testane (ingen committa bytekode). sikre()
@@ -1351,6 +1461,9 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
 
     la res: liste_tekst = []
     la testkoyrar: bool = usann
+    // F38: rapportlinjene frå testkøyraren (fylt av køyr_testkoyrar).
+    la rapport: liste_tekst = []
+    la tb_tal: heiltall = 0
     hvis er_native_direkte(namn) {
         la direkte_miljø = runtime_miljø(root)
         sett_target_policy(direkte_miljø, runtime_capabilities(namn), root + ",.,/tmp,/private/tmp")
@@ -1491,15 +1604,16 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
         hvis kompilert og finst(ncb) {
             // F38: test-blokker / test_*-funksjonar utan start() → køyr ein kopi av NCB-en
             // med testkøyrar (tools/nc_test_oppdaging.no). Cache-NCB-en blir ikkje endra.
-            // Kjelde-førefilteret held NCB-dekodinga borte frå filer utan slike testar.
-            la køyr_ncb = ncb
+            // Kjelde-førefilteret held NCB-dekodinga borte frå filer utan slike testar;
+            // NCB-en avgjer endeleg (m.a. om start() finst).
             la koyrar_ncb = ""
             la koyrar_feil = ""
+            la plan: liste_tekst = []
             hvis oppdaging.kjelde_kan_ha_testar(les_kjelde(absolutt_fil(root, fil))) {
                 filops.lag_katalogar(tmpdir)
-                la kandidat_ncb = tmpdir + "/testkoyrar-" + test_namn(fil) + ncb_ending
+                koyrar_ncb = tmpdir + "/testkoyrar-" + test_namn(fil) + ncb_ending
                 prøv {
-                    hvis oppdaging.forbered_ncb(ncb, kandidat_ncb) > 0 { koyrar_ncb = kandidat_ncb }
+                    plan = oppdaging.forbered_ncb(ncb, koyrar_ncb, 0, sann)
                 } fang (e) {
                     koyrar_feil = tekst(e)
                 }
@@ -1507,28 +1621,13 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
             hvis koyrar_feil != "" {
                 // Fail-closed: test-blokkene kan ikkje køyrast → aldri grønt.
                 res = ["1", "", "testkøyrar kunne ikkje byggjast: " + koyrar_feil]
+            } ellers hvis lengde(plan) > 0 {
+                testkoyrar = sann
+                res = køyr_testkoyrar(root, native, namn, fil, timeout, ncb, koyrar_ncb, plan, rapport)
+                tb_tal = lengde(plan)
+                filops.slett_fil(koyrar_ncb)
             } ellers {
-                hvis koyrar_ncb != "" {
-                    køyr_ncb = koyrar_ncb
-                    testkoyrar = sann
-                }
-                la run_miljø = runtime_miljø(root)
-                sett_target_policy(run_miljø, runtime_capabilities(namn), root + ",.,/tmp,/private/tmp")
-                run_miljø["NORSCODE_VM_FAST"] = test_vm_fast(namn)
-                run_miljø["NORSCODE_CMD"] = "run"
-                run_miljø["NORSCODE_FILE"] = root + "/selfhost/tooling/ncb_host_run_entry.no"
-                run_miljø["NORSCODE_NCB_FILE"] = køyr_ncb
-                run_miljø["NORSCODE_ROOT"] = root
-                res = køyr_native(root, native, run_miljø, timeout)
-                la run_retry: heiltall = 0
-                mens ikkje ok(res) og er_stille_feil(res) og run_retry < 2 {
-                    run_retry = run_retry + 1
-                    linje("  [RETRY " + tekst(run_retry) + "] " + test_namn(fil) + " køyre-steg stille exit " + tekst(res[0]))
-                    vent_ms(3000 * run_retry)
-                    res = køyr_native(root, native, run_miljø, timeout)
-                }
-                hvis ikkje ok(res) og er_stille_feil(res) { res[2] = "stille exit frå køyre-steg (ingen stdout/stderr)" }
-                hvis koyrar_ncb != "" { filops.slett_fil(koyrar_ncb) }
+                res = køyr_ncb_steg(root, native, namn, fil, timeout, ncb)
             }
             hvis ikkje use_cache { filops.slett_fil(ncb) }
         } ellers hvis lengde(res) == 0 {
@@ -1571,29 +1670,9 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
         res = køyr_native(root, native, kjelde_miljø, timeout)
     }
 
-    // F38: rapporten frå testkøyraren. Ei fil er grøn berre når køyraren nådde
-    // oppsummeringa og alle testane bestod — exit 0 utan oppsummering (t.d. at start()
-    // avslutta prosessen før test-blokkene) er ikkje grønt.
-    la rapport: liste_tekst = []
-    la har_oppsummering: bool = usann
-    hvis testkoyrar {
-        rapport = oppdaging.rapportlinjer(tekst(res[1]))
-        la oppsum = oppdaging.oppsummering(rapport)
-        har_oppsummering = oppsum[1] >= 0
-        hvis oppsum[1] >= 0 {
-            legg_til_tal(state, "tb_ok", oppsum[0])
-            legg_til_tal(state, "tb_total", oppsum[1])
-        }
-        hvis ok(res) og (oppsum[1] < 0 eller oppsum[0] != oppsum[1]) {
-            la grunn = "testkøyraren nådde ikkje oppsummeringa (test-blokkene vart ikkje køyrde til endes)"
-            hvis oppsum[1] >= 0 { grunn = "exit 0 trass i feilande testar" }
-            res = ["1", tekst(res[1]), grunn]
-            legg_til(rapport, "FEIL: " + grunn)
-        }
-    }
-
     hvis ok(res) {
         auk(state, "pass")
+        tel_testar(state, rapport, tb_tal)
         hvis env("NC_VERBOSE") == tekst_ein() {
             linje("  OK " + test_namn(fil))
             skriv_testrapport(rapport, "")
@@ -1615,18 +1694,16 @@ funksjon køyr_test_indre(state: ordbok_tekst, cache, fil: tekst, root: tekst, n
         }
     } ellers {
         auk(state, "fail")
+        tel_testar(state, rapport, tb_tal)
         linje("")
         linje("  FEIL " + test_namn(fil))
         hvis env("NC_VERBOSE") == tekst_ein() {
             linje(res_tekst(res))
+            hvis testkoyrar { skriv_testrapport(rapport, " [exit " + tekst(res[0]) + "]") }
         } ellers hvis testkoyrar og lengde(rapport) > 0 {
             // Per test: «OK: namn» / «FEIL: namn — <assert-melding>» og «x/n bestått».
+            // Ein test som døydde fatalt står som FEIL med den ufanga feillinja.
             skriv_testrapport(rapport, " [exit " + tekst(res[0]) + "]")
-            // Utan oppsummering døydde køyraren undervegs: vis den ufanga feilen òg.
-            hvis ikkje har_oppsummering {
-                la krasj = siste_feillinje(res_tekst(res))
-                hvis krasj != "" { linje("    " + krasj) }
-            }
         } ellers {
             // Aldri tom detaljlinje: fall tilbake til fyrste ikkje-tomme linje
             // (òg [nc-vm]/[norscode]-prefiksa) + exit-kode, så CI-loggen alltid
