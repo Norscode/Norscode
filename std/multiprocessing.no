@@ -423,6 +423,21 @@ funksjon lock_locked(l: ordbok_tekst) -> bool {
 # * Kastar f eit unntak i barnet, kastar prosess_map «ProsessPoolFeil: element <i>: …».
 #   Eit barn som døyr, ikkje svarar innan fristen eller manglar resultat gjev òg
 #   ProsessPoolFeil (med stderr).
+# * Frist: prosess_map har inga frist, som parallelStream og Pool.map. Ein bolk kan ta
+#   so lang tid som ein sekvensiell map av dei same verdiane ville teke (barnet får i
+#   praksis 7 døgn, _pp_ingen_frist_ms). Eit barn som heng, held då map-en oppe; vil du
+#   ha ei øvre grense, bruk prosess_map_rapport med frist_ms. Den fristen gjeld KVAR
+#   barneprosess, altså heile bolken hans. Med automatisk bolkdeling er ein bolk om
+#   lag lengde(verdiar)/arbeidarar verdiar, so vel frist_ms etter det eller set
+#   bolk_storleik.
+# * Koordinatoren ventar med aukande pausar (5 ms, dobla for kvar stille runde, tilbake
+#   til 5 ms når eit barn blir ferdig) og hentar output berre når det ligg føre. Taket
+#   på pausen er 200 ms, eller 1/20 av tida map-en har gått (høgst 1 s): ein ferdig bolk
+#   blir oppdaga innan om lag max(200 ms, 5 % av køyretida). Forelderen søv altså medan
+#   arbeidarane reknar, òg på den tolka VM-en utan NORSCODE_VM_FAST (målt på macOS med
+#   to barn som søv 8 s: forelderen brukte 1,7 s CPU inkl. oppstart, om lag 15 % av éin
+#   kjerne, mot 8,9 s / 96 % med fast 5 ms-pause og lesing kvar runde; med
+#   NORSCODE_VM_FAST=1 brukte ein map på 122 s 0,26 s CPU i forelderen).
 # * Plattformar: ekte barneprosessar på VM-en (macOS og Linux), x86-64 AOT og macOS
 #   arm64 AOT når std.native_gap er i bunten (x86-64: `nc bygg-native` frå kjelde legg
 #   han til sjølv når bunten spawnar; frå --ncb og på macOS må programmet ha
@@ -431,6 +446,23 @@ funksjon lock_locked(l: ordbok_tekst) -> bool {
 #   prosessen med same f; prosess_map_rapport seier då backend "lokal" og grunnen.
 
 funksjon _pp_maks_inn() -> heiltall { returner 65536 }
+
+# «Inga frist»: prosess-ABI-en krev ein positiv timeout, so barnet får 7 døgn
+# (under 2^31 ms, trygt for alle heiltalsbreidder på vegen).
+funksjon _pp_ingen_frist_ms() -> heiltall { returner 604800000 }
+
+# Poll-pausar i koordinatoren (ms): start, minste tak, største tak.
+funksjon _pp_poll_min_ms() -> heiltall { returner 5 }
+funksjon _pp_poll_tak_ms() -> heiltall { returner 200 }
+funksjon _pp_poll_maks_ms() -> heiltall { returner 1000 }
+
+# Taket på pausen etter gått_ms: 1/20 av køyretida, mellom _pp_poll_tak_ms og _pp_poll_maks_ms.
+funksjon _pp_poll_tak(gått_ms: heiltall) -> heiltall {
+    la tak: heiltall = gått_ms / 20
+    hvis tak < _pp_poll_tak_ms() { tak = _pp_poll_tak_ms() }
+    hvis tak > _pp_poll_maks_ms() { tak = _pp_poll_maks_ms() }
+    returner tak
+}
 
 funksjon er_prosessarbeidar() -> boolsk {
     prøv {
@@ -638,16 +670,40 @@ funksjon _pp_stopp_alle(køyrande) -> heiltall {
     returner 0
 }
 
+funksjon _pp_felt(svar, namn: tekst) -> tekst {
+    hvis builtin.type(svar) != "ordbok" { returner "" }
+    hvis ikkje har_nokkel(svar, namn) { returner "" }
+    returner tekst(svar[namn])
+}
+
+# Legg stdout/stderr frå eit prosess-svar til barnet; tomme bitar blir ikkje lagra.
+funksjon _pp_samle(barn: ordbok, svar) -> heiltall {
+    la ut = _pp_felt(svar, "stdout")
+    la feil_ut = _pp_felt(svar, "stderr")
+    hvis ut != "" { legg_til(barn["ut"], ut) }
+    hvis feil_ut != "" { legg_til(barn["feil"], feil_ut) }
+    returner lengde(ut) + lengde(feil_ut)
+}
+
 # Som prosess_map, men returnerer { "resultat": liste_tekst, "backend": "prosessar" |
-# "lokal", "prosessar": tal barn starta, "bolkar": tal bolkar, "grunn": tekst }.
-# frist_ms gjeld kvar barneprosess (runda opp til heile sekund; < 1 = 120 s).
+# "lokal", "prosessar": tal barn starta, "bolkar": tal bolkar, "grunn": tekst,
+# "frist_ms": fristen kvar barneprosess fekk (0 = inga frist), "poll_runder": kor mange
+# gonger koordinatoren polla barna (diagnostikk for ventinga, sjå modulhovudet) }.
+# frist_ms gjeld KVAR barneprosess, altså heile bolken hans (runda opp til heile
+# sekund); < 1 = inga frist (som prosess_map). Eit barn over fristen blir drepe, og
+# kallet kastar «ProsessPoolFeil: arbeidaren enda med status timeout …».
 # bolk_storleik = høgst so mange verdiar per barneprosess (chunksize); 0 = automatisk.
 funksjon prosess_map_rapport(f, verdiar, arbeidarar: heiltall, kommando: liste_tekst,
                              frist_ms: heiltall, bolk_storleik: heiltall) -> ordbok {
     hvis arbeidarar < 1 { kast "ProsessPoolFeil: arbeidarar må vere minst 1" }
     hvis lengde(kommando) < 1 { kast "ProsessPoolFeil: tom arbeidarkommando" }
-    hvis frist_ms < 1 { frist_ms = 120000 }
-    la rapport = {"resultat": [], "backend": "prosessar", "prosessar": 0, "bolkar": 0, "grunn": ""}
+    la rapport = {"resultat": [], "backend": "prosessar", "prosessar": 0, "bolkar": 0, "grunn": "",
+                  "frist_ms": 0, "poll_runder": 0}
+    la barn_frist_ms: heiltall = _pp_ingen_frist_ms()
+    hvis frist_ms >= 1 {
+        barn_frist_ms = frist_ms
+        rapport["frist_ms"] = frist_ms
+    }
     la n: heiltall = lengde(verdiar)
     hvis n == 0 { returner rapport }
     la koda: liste_tekst = []
@@ -671,12 +727,14 @@ funksjon prosess_map_rapport(f, verdiar, arbeidarar: heiltall, kommando: liste_t
     prosess.aktiver_køyring(policy)
     la køyrande = []
     la neste: heiltall = 0
+    la pause_ms: heiltall = _pp_poll_min_ms()
+    la t_start: heiltall = builtin.tid_ms()
     mens neste < lengde(bolkar) eller lengde(køyrande) > 0 {
         mens lengde(køyrande) < arbeidarar og neste < lengde(bolkar) {
             la h = null
             la startfeil = ""
             prøv {
-                h = _pp_start(policy, kommando, bolkar[neste], frist_ms)
+                h = _pp_start(policy, kommando, bolkar[neste], barn_frist_ms)
             } fang (e) {
                 startfeil = tekst(e)
             }
@@ -700,31 +758,41 @@ funksjon prosess_map_rapport(f, verdiar, arbeidarar: heiltall, kommando: liste_t
                 kast "ProsessPoolFeil: kunne ikkje starte " + kommando[0] + ": status " + tekst(h["status"]) + " " + detalj
             }
             rapport["prosessar"] = rapport["prosessar"] + 1
-            legg_til(køyrande, {"h": h, "bolk": bolkar[neste], "ut": [], "feil": []})
+            legg_til(køyrande, {"h": h, "bolk": bolkar[neste], "ut": [], "feil": [], "stille": 0})
             neste = neste + 1
         }
+        rapport["poll_runder"] = rapport["poll_runder"] + 1
         la vidare = []
         la ferdige: heiltall = 0
         la k: heiltall = 0
         mens k < lengde(køyrande) {
             la barn = køyrande[k]
-            la st = tekst(prosess.native_async_poll(barn["h"])["status"])
-            la les = prosess.native_async_les(barn["h"])
-            legg_til(barn["ut"], tekst(les["stdout"]))
-            legg_til(barn["feil"], tekst(les["stderr"]))
+            // poll tømer røyra inn i buffera til prosess-runtimen og svarar med det som
+            // ligg der; read hentar og tømer dei. Les berre når noko ligg føre (og kvar
+            // 16. stille runde som vakt for ein backend som ikkje viser output i poll),
+            // so ei runde med arbeidarar som reknar kostar eitt kall per barn.
+            la svar = prosess.native_async_poll(barn["h"])
+            la st = _pp_felt(svar, "status")
             hvis st == "kjorer" {
+                barn["stille"] = barn["stille"] + 1
+                hvis _pp_felt(svar, "stdout") != "" eller _pp_felt(svar, "stderr") != "" eller barn["stille"] >= 16 {
+                    barn["stille"] = 0
+                    _pp_samle(barn, prosess.native_async_les(barn["h"]))
+                }
                 legg_til(vidare, barn)
             } ellers {
                 ferdige = ferdige + 1
+                // close gjev alt som er att i buffera (poll har tømt røyra etter exit).
                 la slutt = prosess.native_async_lukk(barn["h"])
-                legg_til(barn["ut"], tekst(slutt["stdout"]))
-                legg_til(barn["feil"], tekst(slutt["stderr"]))
+                _pp_samle(barn, slutt)
                 la ut = builtin.join(barn["ut"], "")
                 la feil_ut = builtin.join(barn["feil"], "")
                 prøv {
                     hvis st != "ferdig" {
-                        kast "ProsessPoolFeil: arbeidaren enda med status " + st + " (exit " + tekst(slutt["exit_code"]) +
-                            "); stderr: " + _pp_utdrag(feil_ut)
+                        la frist_tekst = "inga frist"
+                        hvis rapport["frist_ms"] > 0 { frist_tekst = "frist " + tekst(rapport["frist_ms"]) + " ms per barneprosess" }
+                        kast "ProsessPoolFeil: arbeidaren enda med status " + st + " (exit " + _pp_felt(slutt, "exit_code") +
+                            ", " + frist_tekst + "); stderr: " + _pp_utdrag(feil_ut)
                     }
                     _pp_tolk(ut, feil_ut, barn["bolk"], resultat, har)
                 } fang (e) {
@@ -740,15 +808,25 @@ funksjon prosess_map_rapport(f, verdiar, arbeidarar: heiltall, kommando: liste_t
             k = k + 1
         }
         køyrande = vidare
-        hvis ferdige == 0 og lengde(køyrande) > 0 { builtin.vent.sov(5) }
+        // Aukande pausar medan ingen blir ferdige (5, 10, 20, … ms opp til _pp_poll_tak);
+        // eit ferdig barn nullstiller pausen og gjev plass til neste bolk med ein gong.
+        hvis ferdige > 0 {
+            pause_ms = _pp_poll_min_ms()
+        } ellers hvis lengde(køyrande) > 0 {
+            builtin.vent.sov(pause_ms)
+            pause_ms = pause_ms * 2
+            la tak = _pp_poll_tak(builtin.tid_ms() - t_start)
+            hvis pause_ms > tak { pause_ms = tak }
+        }
     }
     rapport["resultat"] = resultat
     returner rapport
 }
 
 # parallelStream().map(f).collect(): resultata i same rekkjefølgje som verdiane.
+# Inga frist (sjå «Frist» i modulhovudet); bruk prosess_map_rapport for ei grense.
 funksjon prosess_map(f, verdiar, arbeidarar: heiltall, kommando: liste_tekst) -> liste_tekst {
-    returner prosess_map_rapport(f, verdiar, arbeidarar, kommando, 120000, 0)["resultat"]
+    returner prosess_map_rapport(f, verdiar, arbeidarar, kommando, 0, 0)["resultat"]
 }
 
 # ─── Verktøy ──────────────────────────────────────────────────────────────────
