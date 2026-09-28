@@ -12,6 +12,8 @@
 #   Pipe:    par av fil-baserte kanalar
 #   Event:   fil-basert semafor
 #   Lock:    fil-basert låsing
+#   prosess_map: EKTE parallell map over barneprosessar (fleire kjerner), sjå
+#            «Prosesspool» nedanfor
 #
 # Bruk:
 #   bruk std.multiprocessing som mp
@@ -392,6 +394,362 @@ funksjon lock_locked(l: ordbok_tekst) -> bool {
     returner usann
 }
 
+# ─── Prosesspool: parallell map over ekte barneprosessar ──────────────────────
+#
+# Den einaste vegen til fleire kjerner i dag (VM-trådane er M:1, AOT har ingen
+# brukartrådar, sjå std/samtid.no). Java: parallelStream()/invokeAll over ein
+# ForkJoinPool; Python: multiprocessing.Pool.map med «spawn».
+#
+#   bruk std.multiprocessing som mp
+#   funksjon arbeid(x: tekst) -> tekst { ... }
+#   funksjon start() -> heiltall {
+#       hvis mp.er_prosessarbeidar() { returner mp.prosessarbeidar(fun(x) -> arbeid(x)) }
+#       la ut = mp.prosess_map(fun(x) -> arbeid(x), verdiar, 4, mp.arbeidar_kommando("app.no"))
+#       ...
+#   }
+#
+# * Verdiane blir delte i bolkar (om lag like mange som arbeidarar, fleire når ein bolk
+#   ville bli over 64 KiB), og kvar bolk køyrer i ein eigen barneprosess, høgst
+#   `arbeidarar` samstundes. Resultata kjem i same rekkjefølgje som verdiane.
+# * Barnet er same program (arbeidar_kommando): under VM-en `nc run <skript>`, i AOT
+#   den same binæren. Barnet ser NORSCODE_PROSESSPOOL_ARBEIDAR=1 og skal då berre kalle
+#   prosessarbeidar(f) — som `if __name__ == "__main__"` i Python. Eit eige
+#   arbeidarprogram går òg (kommando = [program, argv...]), når det kallar prosessarbeidar.
+# * Verdiar og resultat er tekst (andre verdiar blir gjorde om med tekst()). Overføringa
+#   er ASCII-trygg (teikn utanfor ASCII og %, @, ", \ blir koda som %<kode>;) inn via
+#   miljøvariabelen NORSCODE_PROSESSPOOL_INN og ut via stdout (@PPR<i>:…@E), so
+#   linjeskift, sitatteikn og æøå kjem fram uendra. Forelder og barn skal vere same
+#   runtime (VM↔VM eller same AOT-binær).
+# * Kastar f eit unntak i barnet, kastar prosess_map «ProsessPoolFeil: element <i>: …».
+#   Eit barn som døyr, ikkje svarar innan fristen eller manglar resultat gjev òg
+#   ProsessPoolFeil (med stderr).
+# * Utan prosess-ABI (macOS AOT: NATIV-GAP:process_operation; x86 AOT bygd frå --ncb
+#   utan `bruk std.native_gap`: builtin.process_operation er null) køyrer map-en
+#   sekvensielt i denne prosessen med same f; prosess_map_rapport seier då
+#   backend "lokal" og grunnen. x86 AOT: `nc bygg-native` frå kjelde legg std.native_gap
+#   til sjølv; frå --ncb må programmet ha `bruk std.native_gap`.
+
+funksjon _pp_maks_inn() -> heiltall { returner 65536 }
+
+funksjon er_prosessarbeidar() -> boolsk {
+    prøv {
+        returner builtin.miljo_hent("NORSCODE_PROSESSPOOL_ARBEIDAR") == "1"
+    } fang (e) { returner usann }
+    returner usann
+}
+
+# Kommandoen som startar ein arbeidar av dette programmet: [nc, "run", skript] under
+# VM-en (køyrbar fil heiter nc/norscode…), elles [denne binæren] (AOT, sjølv-spawn).
+funksjon arbeidar_kommando(skript: tekst) -> liste_tekst {
+    la exe = ""
+    prøv { exe = tekst(builtin.system_info()["executable"]) } fang (e) { exe = "" }
+    hvis exe == "" { kast "ProsessPoolFeil: finn ikkje den køyrbare fila (system_info.executable)" }
+    la delar = builtin.split(exe, "/")
+    la namn = delar[lengde(delar) - 1]
+    hvis namn == "nc" eller builtin.starts_with(namn, "norscode") {
+        returner [exe, "run", skript]
+    }
+    returner [exe]
+}
+
+funksjon _pp_trygt(c: heiltall) -> boolsk {
+    returner c >= 32 og c <= 126 og c != 34 og c != 37 og c != 64 og c != 92
+}
+
+# Kod teikn for teikn (strengane er byte-baserte i VM-en og AOT: æ blir %195;%166;).
+# Trygge løp blir kopierte med slice, so rein ASCII-tekst kostar éin skanning.
+funksjon _pp_koda(s: tekst) -> tekst {
+    la delar: liste_tekst = []
+    la n: heiltall = lengde(s)
+    la løp: heiltall = 0
+    la i: heiltall = 0
+    mens i < n {
+        la c = builtin.char_code(s[i])
+        hvis ikkje _pp_trygt(c) {
+            hvis i > løp { legg_til(delar, builtin.slice(s, løp, i)) }
+            legg_til(delar, "%" + tekst(c) + ";")
+            løp = i + 1
+        }
+        i = i + 1
+    }
+    hvis løp == 0 { returner s }
+    hvis n > løp { legg_til(delar, builtin.slice(s, løp, n)) }
+    returner builtin.join(delar, "")
+}
+
+funksjon _pp_dekoda(s: tekst) -> tekst {
+    hvis builtin.index_of(s, "%") < 0 { returner s }
+    la biter = builtin.split(s, "%")
+    la delar: liste_tekst = [biter[0]]
+    la k: heiltall = 1
+    mens k < lengde(biter) {
+        la b = biter[k]
+        la semi = builtin.index_of(b, ";")
+        hvis semi < 1 { kast "ProsessPoolFeil: ugyldig koding: %" + b }
+        legg_til(delar, builtin.chr(heltall_fra_tekst(builtin.slice(b, 0, semi))))
+        hvis semi + 1 < lengde(b) { legg_til(delar, builtin.slice(b, semi + 1, lengde(b))) }
+        k = k + 1
+    }
+    returner builtin.join(delar, "")
+}
+
+# Barnesida: les bolken frå miljøet, køyr f på kvar verdi, skriv resultata på stdout.
+# Returner verdien frå start() (0 = ok).
+funksjon prosessarbeidar(f) -> heiltall {
+    la inn = ""
+    prøv { inn = tekst(builtin.miljo_hent("NORSCODE_PROSESSPOOL_INN")) } fang (e) { inn = "" }
+    la delar = builtin.split(inn, "@")
+    la n: heiltall = -1
+    prøv { n = heltall_fra_tekst(delar[0]) } fang (e) { n = -1 }
+    hvis n < 0 eller lengde(delar) != n + 1 {
+        skriv("@PPX:" + _pp_koda("ugyldig bolk i NORSCODE_PROSESSPOOL_INN") + "@E")
+        returner 2
+    }
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < n {
+        la v = _pp_dekoda(delar[i + 1])
+        prøv {
+            la r = f(v)
+            legg_til(ut, "@PPR" + tekst(i) + ":" + _pp_koda(tekst(r)) + "@E")
+        } fang (e) {
+            legg_til(ut, "@PPF" + tekst(i) + ":" + _pp_koda(tekst(e)) + "@E")
+        }
+        i = i + 1
+    }
+    legg_til(ut, "@PPSLUTT" + tekst(n) + "@E")
+    skriv(builtin.join(ut, ""))
+    returner 0
+}
+
+# Del verdiane i bolkar på høgst bolk_storleik verdiar (0 = om lag lengde/arbeidarar,
+# éin bolk per arbeidar) og aldri over _pp_maks_inn() koda teikn.
+funksjon _pp_bolkar(koda: liste_tekst, arbeidarar: heiltall, bolk_storleik: heiltall) -> liste {
+    la n: heiltall = lengde(koda)
+    la mål: heiltall = (n + arbeidarar - 1) / arbeidarar
+    hvis bolk_storleik > 0 { mål = bolk_storleik }
+    hvis mål < 1 { mål = 1 }
+    la bolkar = []
+    la fra: heiltall = 0
+    la delar: liste_tekst = []
+    la storleik: heiltall = 0
+    la i: heiltall = 0
+    mens i < n {
+        la e = koda[i]
+        hvis lengde(delar) > 0 og (lengde(delar) >= mål eller storleik + lengde(e) + 12 > _pp_maks_inn()) {
+            legg_til(bolkar, {"fra": fra, "tal": lengde(delar), "inn": tekst(lengde(delar)) + "@" + builtin.join(delar, "@")})
+            fra = i
+            delar = []
+            storleik = 0
+        }
+        legg_til(delar, e)
+        storleik = storleik + lengde(e) + 1
+        i = i + 1
+    }
+    hvis lengde(delar) > 0 {
+        legg_til(bolkar, {"fra": fra, "tal": lengde(delar), "inn": tekst(lengde(delar)) + "@" + builtin.join(delar, "@")})
+    }
+    returner bolkar
+}
+
+funksjon _pp_start(policy: ordbok_tekst, kommando: liste_tekst, bolk: ordbok, frist_ms: heiltall) {
+    la argv: liste_tekst = []
+    la i: heiltall = 1
+    mens i < lengde(kommando) {
+        legg_til(argv, kommando[i])
+        i = i + 1
+    }
+    la plan = prosess.start_argv_plan(kommando[0], argv)
+    prosess.med_miljø(plan, {"NORSCODE_PROSESSPOOL_ARBEIDAR": "1", "NORSCODE_PROSESSPOOL_INN": bolk["inn"]})
+    prosess.med_timeout(plan, (frist_ms + 999) / 1000)
+    prosess.med_maks_output(plan, 67108864)
+    returner prosess.start_argv_async_trygt(policy, plan)
+}
+
+funksjon _pp_utdrag(t: tekst) -> tekst {
+    hvis lengde(t) > 400 { returner builtin.slice(t, 0, 400) + "…" }
+    returner t
+}
+
+# Tolk stdout frå éin bolk inn i resultat/feil. Kastar ProsessPoolFeil når noko manglar.
+funksjon _pp_tolk(ut: tekst, feil_ut: tekst, bolk: ordbok, resultat, har) -> heiltall {
+    la fra: heiltall = bolk["fra"]
+    la tal: heiltall = bolk["tal"]
+    la fann: heiltall = 0
+    la slutt_sett = usann
+    la delar = builtin.split(ut, "@PP")
+    la k: heiltall = 1
+    mens k < lengde(delar) {
+        la d = delar[k]
+        la slutt = builtin.index_of(d, "@E")
+        la kolon = builtin.index_of(d, ":")
+        hvis slutt >= 0 {
+            hvis builtin.starts_with(d, "SLUTT") {
+                slutt_sett = sann
+            } ellers hvis builtin.starts_with(d, "X:") {
+                kast "ProsessPoolFeil: arbeidaren avviste bolken: " + _pp_dekoda(builtin.slice(d, 2, slutt))
+            } ellers hvis kolon > 1 og kolon < slutt og (builtin.starts_with(d, "R") eller builtin.starts_with(d, "F")) {
+                la idx: heiltall = -1
+                prøv { idx = heltall_fra_tekst(builtin.slice(d, 1, kolon)) } fang (e) { idx = -1 }
+                hvis idx >= 0 og idx < tal {
+                    la verdi = _pp_dekoda(builtin.slice(d, kolon + 1, slutt))
+                    hvis builtin.starts_with(d, "F") {
+                        kast "ProsessPoolFeil: element " + tekst(fra + idx) + ": " + verdi
+                    }
+                    hvis har[fra + idx] == 0 { fann = fann + 1 }
+                    resultat[fra + idx] = verdi
+                    har[fra + idx] = 1
+                }
+            }
+        }
+        k = k + 1
+    }
+    hvis fann != tal eller ikkje slutt_sett {
+        kast "ProsessPoolFeil: arbeidaren gav " + tekst(fann) + " av " + tekst(tal) + " resultat (element " +
+            tekst(fra) + "–" + tekst(fra + tal - 1) + "); stderr: " + _pp_utdrag(feil_ut) + " stdout: " + _pp_utdrag(ut)
+    }
+    returner fann
+}
+
+funksjon _pp_lokal(f, verdiar, rapport: ordbok, grunn: tekst) -> ordbok {
+    la ut: liste_tekst = []
+    la i: heiltall = 0
+    mens i < lengde(verdiar) {
+        prøv {
+            legg_til(ut, tekst(f(tekst(verdiar[i]))))
+        } fang (e) {
+            kast "ProsessPoolFeil: element " + tekst(i) + ": " + tekst(e)
+        }
+        i = i + 1
+    }
+    rapport["resultat"] = ut
+    rapport["backend"] = "lokal"
+    rapport["grunn"] = grunn
+    returner rapport
+}
+
+funksjon _pp_stopp_alle(køyrande) -> heiltall {
+    la i: heiltall = 0
+    mens i < lengde(køyrande) {
+        prøv { prosess.native_async_lukk(køyrande[i]["h"]) } fang (e) { }
+        i = i + 1
+    }
+    returner 0
+}
+
+# Som prosess_map, men returnerer { "resultat": liste_tekst, "backend": "prosessar" |
+# "lokal", "prosessar": tal barn starta, "bolkar": tal bolkar, "grunn": tekst }.
+# frist_ms gjeld kvar barneprosess (runda opp til heile sekund; < 1 = 120 s).
+# bolk_storleik = høgst so mange verdiar per barneprosess (chunksize); 0 = automatisk.
+funksjon prosess_map_rapport(f, verdiar, arbeidarar: heiltall, kommando: liste_tekst,
+                             frist_ms: heiltall, bolk_storleik: heiltall) -> ordbok {
+    hvis arbeidarar < 1 { kast "ProsessPoolFeil: arbeidarar må vere minst 1" }
+    hvis lengde(kommando) < 1 { kast "ProsessPoolFeil: tom arbeidarkommando" }
+    hvis frist_ms < 1 { frist_ms = 120000 }
+    la rapport = {"resultat": [], "backend": "prosessar", "prosessar": 0, "bolkar": 0, "grunn": ""}
+    la n: heiltall = lengde(verdiar)
+    hvis n == 0 { returner rapport }
+    la koda: liste_tekst = []
+    la resultat: liste_tekst = []
+    la har = []
+    la i: heiltall = 0
+    mens i < n {
+        la e = _pp_koda(tekst(verdiar[i]))
+        hvis lengde(e) + 12 > _pp_maks_inn() {
+            kast "ProsessPoolFeil: element " + tekst(i) + " er for stort (" + tekst(lengde(e)) + " koda teikn, grense " + tekst(_pp_maks_inn()) + ")"
+        }
+        legg_til(koda, e)
+        legg_til(resultat, "")
+        legg_til(har, 0)
+        i = i + 1
+    }
+    la bolkar = _pp_bolkar(koda, arbeidarar, bolk_storleik)
+    rapport["bolkar"] = lengde(bolkar)
+    la policy = prosess.ny_policy("prosesspool")
+    prosess.tillat(policy, prosess._kommando_namn(kommando[0]))
+    prosess.aktiver_køyring(policy)
+    la køyrande = []
+    la neste: heiltall = 0
+    mens neste < lengde(bolkar) eller lengde(køyrande) > 0 {
+        mens lengde(køyrande) < arbeidarar og neste < lengde(bolkar) {
+            la h = null
+            la startfeil = ""
+            prøv {
+                h = _pp_start(policy, kommando, bolkar[neste], frist_ms)
+            } fang (e) {
+                startfeil = tekst(e)
+            }
+            hvis rapport["prosessar"] == 0 og lengde(køyrande) == 0 {
+                hvis startfeil != "" og builtin.index_of(startfeil, "NATIV-GAP") >= 0 {
+                    returner _pp_lokal(f, verdiar, rapport, startfeil)
+                }
+                hvis startfeil == "" og builtin.type(h) != "ordbok" {
+                    returner _pp_lokal(f, verdiar, rapport, "builtin.process_operation svarte " + builtin.type(h) + " (x86 AOT utan std.native_gap i bunten?)")
+                }
+            }
+            hvis startfeil != "" eller builtin.type(h) != "ordbok" {
+                _pp_stopp_alle(køyrande)
+                kast "ProsessPoolFeil: kunne ikkje starte arbeidar: " + startfeil
+            }
+            hvis tekst(h["status"]) != "kjorer" {
+                _pp_stopp_alle(køyrande)
+                la detalj = ""
+                hvis har_nokkel(h, "error_detail") { detalj = tekst(h["error_detail"]) }
+                hvis detalj == "" og har_nokkel(h, "error") { detalj = tekst(h["error"]) }
+                kast "ProsessPoolFeil: kunne ikkje starte " + kommando[0] + ": status " + tekst(h["status"]) + " " + detalj
+            }
+            rapport["prosessar"] = rapport["prosessar"] + 1
+            legg_til(køyrande, {"h": h, "bolk": bolkar[neste], "ut": [], "feil": []})
+            neste = neste + 1
+        }
+        la vidare = []
+        la ferdige: heiltall = 0
+        la k: heiltall = 0
+        mens k < lengde(køyrande) {
+            la barn = køyrande[k]
+            la st = tekst(prosess.native_async_poll(barn["h"])["status"])
+            la les = prosess.native_async_les(barn["h"])
+            legg_til(barn["ut"], tekst(les["stdout"]))
+            legg_til(barn["feil"], tekst(les["stderr"]))
+            hvis st == "kjorer" {
+                legg_til(vidare, barn)
+            } ellers {
+                ferdige = ferdige + 1
+                la slutt = prosess.native_async_lukk(barn["h"])
+                legg_til(barn["ut"], tekst(slutt["stdout"]))
+                legg_til(barn["feil"], tekst(slutt["stderr"]))
+                la ut = builtin.join(barn["ut"], "")
+                la feil_ut = builtin.join(barn["feil"], "")
+                prøv {
+                    hvis st != "ferdig" {
+                        kast "ProsessPoolFeil: arbeidaren enda med status " + st + " (exit " + tekst(slutt["exit_code"]) +
+                            "); stderr: " + _pp_utdrag(feil_ut)
+                    }
+                    _pp_tolk(ut, feil_ut, barn["bolk"], resultat, har)
+                } fang (e) {
+                    _pp_stopp_alle(vidare)
+                    k = k + 1
+                    mens k < lengde(køyrande) {
+                        prøv { prosess.native_async_lukk(køyrande[k]["h"]) } fang (e2) { }
+                        k = k + 1
+                    }
+                    kast e
+                }
+            }
+            k = k + 1
+        }
+        køyrande = vidare
+        hvis ferdige == 0 og lengde(køyrande) > 0 { builtin.vent.sov(5) }
+    }
+    rapport["resultat"] = resultat
+    returner rapport
+}
+
+# parallelStream().map(f).collect(): resultata i same rekkjefølgje som verdiane.
+funksjon prosess_map(f, verdiar, arbeidarar: heiltall, kommando: liste_tekst) -> liste_tekst {
+    returner prosess_map_rapport(f, verdiar, arbeidarar, kommando, 120000, 0)["resultat"]
+}
+
 # ─── Verktøy ──────────────────────────────────────────────────────────────────
 
 funksjon cpu_count() -> heltall {
@@ -443,6 +801,7 @@ funksjon produksjonsstatus() -> ordbok_tekst {
         lock_contract: "stabil",
         value_contract: "stabil",
         native_runtime: "deterministisk Norscode-kontrakt og native argv-backend",
+        prosesspool: "prosess_map over ekte barneprosessar (async prosess-ABI), lokal reserve utan prosess-ABI",
         shell_free_core: "stabil",
         summary: "process,pool,queue,pipe,event,lock,value"
     }
