@@ -2461,6 +2461,14 @@ funksjon emit_index_get(native: liste_heiltall, cont_reg: heiltall, idx_reg: hei
 // (nytt mapdata med count+1 par, kopier, legg til) og oppdater [Xobj+8]. Obj-
 // NcVal-peikaren blir ståande i Xobj_reg (kompilatoren ventar obj att på stakken).
 // Scratch: x0–x6, x9–x17. Rører ikkje operand-/locals-/heap-registera (utanom x28).
+// GC-kart-vekst (emit_index_set): Xdst = MAGI ^ Xmapdata, første ordet i vaktparet. MAGI har
+// låg nibble 5, so ordet kan aldri vere ein (8-/16-aligna) nøkkelpeikar i eit ekte par.
+funksjon ncd_kart_vakt_ord(native: liste_heiltall, dst: heiltall, mapdata: heiltall) -> heiltall {
+    last_heiltall_64(native, dst, 0x6B61727461A5C3E5)   // "karta" + 0xA5C3E5
+    legg_u32(native, 0xCA000000 | (mapdata << 16) | (dst << 5) | dst)   // eor Xdst, Xdst, Xmapdata
+    returner 0
+}
+
 funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heiltall, val_reg: heiltall) -> heiltall {
     // Null-trygg: hopp over heile skrivinga når containeren er Norscode-null (0).
     // Utan denne skreiv INDEX_SET gjennom nullpeikaren (ldr x9,[Xobj]) og gav
@@ -2552,13 +2560,48 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     legg_u32(native, 0xF940012A)                        // ldr x10, [x9]  (gammal count)
     la gcm = ncval_gc_på()
     la p_på_staden_ferdig = 0 - 1
+    la p_kv_ferdig: liste_heiltall = []
     hvis gcm {
-        // A4 (GC-modus): ingen prefiks-/på-staden-veg. Ny mapdata frå __gc_alloc i
-        // toarpotens-klassen 8 + next_pow2(count+1)·16 (arm64_gc.kart_storleik), som markøren
-        // registrerer for kart; kartet blir kopiert ved kvar ny nøkkel og den gamle mapdataen
-        // blir attvunnen. Prefiksordet over ville ikkje vere med i live-mapen (markøren les
-        // ikkje kapasiteten), og eit gamalt prefiks att i gjenbrukt minne kunne sjå gyldig ut.
-        // x11 er scratch her (blir sett under). x9/x10/Xobj/Xidx/Xval er bevarte.
+        // A4 (GC-modus): ny mapdata frå __gc_alloc i toarpotens-klassen
+        // 8 + next_pow2(count+1)·16 (arm64_gc.kart_storleik) — same storleik som markøren
+        // registrerer for eit kart med count par (8 + next_pow2(count)·16), so heile
+        // kapasiteten ligg i live-mapen. Prefiksordet frå bump-vegen kan ikkje brukast her
+        // (det ligg utanfor blokka markøren registrerer, og eit gamalt prefiks i gjenbrukt
+        // minne kunne sjå gyldig ut). I staden: amortisert vekst med eit VAKTPAR i den første
+        // ledige par-slotten (par[count]) = {MAGI ^ mapdata, (epoke << 32) | kap}, der epoke er
+        // collect-teljaren [HEAP_VA+80]. Innanfor éin epoke blir ingen blokk frigjord eller
+        // gjenbrukt (fri-lister og front blir berre sette ved sweep), so eit vaktpar med rett
+        // mapdata-adresse og NOVERANDE epoke kan berre vere skrive av vekst-vegen for nett
+        // denne blokka; gamle vaktpar i gjenbrukt minne har eldre epoke og blir avviste (då
+        // går kartet til kopi-vegen, éin kopi per kart per collect). Kart frå andre
+        // produsentar (bygg-kart, json, …) har ikkje vaktpar → kopi-vegen, som før.
+        // Scratch: x1–x6 (og x11/x14 i kopi-vegen). x9/x10/Xobj/Xidx/Xval er bevarte.
+        legg_u32(native, 0x91002121)                        // add x1, x9, #8
+        legg_u32(native, 0x8B0A1021)                        // add x1, x1, x10, lsl #4  (&par[count])
+        legg_u32(native, agc.e_ldp(2, 3, 1, 0))             // ldp x2, x3, [x1]  (vaktpar?)
+        ncd_kart_vakt_ord(native, 4, 9)                     // x4 = MAGI ^ mapdata
+        legg_u32(native, agc.e_cmp(2, 4))
+        la p_gc_kopi1 = lengde(native)
+        legg_u32(native, 0)                                 // b.ne kopi
+        agc.heap_va_reg(native, 5, ncval_gc_os)
+        legg_u32(native, agc.e_ldr(5, 5, agc.OFF_COLLECTS()))  // x5 = epoke
+        legg_u32(native, agc.e_lsr(6, 3, 32))
+        legg_u32(native, agc.e_cmp(6, 5))
+        la p_gc_kopi2 = lengde(native)
+        legg_u32(native, 0)                                 // b.ne kopi
+        legg_u32(native, agc.e_stp(idx_reg, val_reg, 1, 0)) // stp Xidx, Xval, [x1]  (på staden)
+        legg_u32(native, 0x9100054A)                        // add x10, x10, #1
+        legg_u32(native, 0xF900012A)                        // str x10, [x9]  (count++)
+        legg_u32(native, agc.e_mov_w(6, 3))                 // x6 = kap
+        legg_u32(native, agc.e_cmp(10, 6))
+        legg_til(p_kv_ferdig, lengde(native))
+        legg_u32(native, 0)                                 // b.hs done  (full: ikkje nytt vaktpar)
+        legg_u32(native, agc.e_stp(2, 3, 1, 16))            // stp x2, x3, [x1, #16]  (vaktpar vidare)
+        legg_til(p_kv_ferdig, lengde(native))
+        legg_u32(native, 0)                                 // b done
+        la lbl_gc_kopi = lengde(native)
+        ncd_bcond(native, p_gc_kopi1, lbl_gc_kopi, 1)
+        ncd_bcond(native, p_gc_kopi2, lbl_gc_kopi, 1)
         agc.kart_storleik(native, 10, 14, 11)
         agc.alloc_kall(native, 14, ncval_gc_os)
     } ellers {
@@ -2615,9 +2658,29 @@ funksjon emit_index_set(native: liste_heiltall, obj_reg: heiltall, idx_reg: heil
     hvis ikkje gcm {
         legg_u32(native, 0x910021DC)                        // add x28, x14, #8
         legg_u32(native, 0x8B05139C)                        // add x28, x28, x5, lsl #4  (bump forbi kapasiteten)
+    } ellers {
+        // Vaktpar i par[count+1] når den nye blokka har plass (count+1 < kap = next_pow2(count+1)).
+        legg_u32(native, agc.e_sub_i(2, 11, 1))
+        legg_u32(native, agc.e_clz(2, 2))
+        legg_u32(native, agc.e_neg(2, 2))
+        legg_u32(native, agc.e_movz(3, 1, 0))
+        legg_u32(native, agc.e_lslv(3, 3, 2))               // x3 = kap
+        legg_u32(native, agc.e_cmp(11, 3))
+        la p_utan_vakt = lengde(native)
+        legg_u32(native, 0)                                 // b.hs utan_vakt
+        ncd_kart_vakt_ord(native, 4, 14)                    // x4 = MAGI ^ ny mapdata
+        agc.heap_va_reg(native, 5, ncval_gc_os)
+        legg_u32(native, agc.e_ldr(5, 5, agc.OFF_COLLECTS()))
+        legg_u32(native, 0xAA058063)                        // orr x3, x3, x5, lsl #32
+        legg_u32(native, agc.e_stp(4, 3, 1, 16))            // stp x4, x3, [x1, #16]
+        ncd_bcond(native, p_utan_vakt, lengde(native), 2)
     }
     legg_u32(native, 0xF9000400 | (obj_reg << 5) | 14)  // str x14, [Xobj, #8] (peik obj til nytt mapdata)
     la lbl_done = lengde(native)
+    hvis lengde(p_kv_ferdig) == 2 {
+        ncd_bcond(native, p_kv_ferdig[0], lbl_done, 2)
+        ncd_b(native, p_kv_ferdig[1], lbl_done)
+    }
     skriv_u32(native, p_cbz_null,    0xB4000000 | ((((lbl_done     - p_cbz_null)    / 4) & 0x7FFFF) << 5) | obj_reg)
     ncd_bcond(native, p_bne_ikkjekart, lbl_done, 1)
     ncd_lapp_kart_nokkel(native, idx_reg, kn_hopp_s, lbl_done)
