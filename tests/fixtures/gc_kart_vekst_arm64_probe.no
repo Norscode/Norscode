@@ -1,0 +1,188 @@
+// gc_kart_vekst_arm64_probe.no — amortisert kart-vekst i AArch64-GC-modus (emit_index_set,
+// vaktpar {MAGI ^ mapdata, (epoke << 32) | kap} i par[count]). Sjølvsjekkande; køyr med
+// NORSCODE_GC_ALLOC=1 ved codegen og gjerne NORSCODE_GC_TERSKEL_BYTES=4194304 (mange collects).
+//
+// Dekkjer: (1) eitt stort kart som veks gjennom mange collects (vaktpar blir ugyldige ved kvar
+// collect → éin kopi, så på staden att), (2) mange små kart frå kart-literal (eksakt storleik,
+// utan vaktpar) som veks medan naboobjekt (tekstar) blir allokerte tett inntil — ei feilaktig
+// på-staden-innsetjing ville skrive over naboane, (3) fjern_nøkkel midt i veksten (count går
+// ned; vaktparet ligg då ikkje i par[count]) og vidare vekst, (4) json_parse-kart som veks,
+// (5) at alle verdiar og nøkkelrekkjefølgja er rette etter kvar fase.
+// Exit: 0 = OK · 2 = feil verdi · 3 = feil lengde · 4 = nabo øydelagd · 5 = feil rekkjefølgje
+// · 6 = færre enn 2 collects (proben har ikkje prøvd epoke-vegen) · 7 = eksakt kart vakse på staden
+// (vaktpar feilaktig godteke) · 8 = ingen vekst på staden (amortiseringa verkar ikkje).
+funksjon heap_va() -> heiltall {
+    la hb: heiltall = builtin.heap_bump()
+    returner hb - (hb % 68719476736)
+}
+
+funksjon collects() -> heiltall {
+    la c: heiltall = builtin.raw_load64(heap_va() + 80)
+    returner c
+}
+
+funksjon søppel(n: heiltall) -> heiltall {
+    la s = 0
+    la i = 0
+    mens i < n {
+        la t = "søppel-" + tekst(i) + "-" + tekst(s)
+        s = s + lengde(t)
+        i = i + 1
+    }
+    returner s
+}
+
+funksjon start() -> heiltall {
+    la c0: heiltall = collects()
+    // (1) stort kart
+    la m: ordbok_tekst = {}
+    la i = 0
+    mens i < 30000 {
+        m["k" + tekst(i)] = "v" + tekst(i * 3)
+        hvis i % 1000 == 0 { søppel(200) }
+        i = i + 1
+    }
+    hvis lengde(m) != 30000 { skriv("lengde " + tekst(lengde(m)) + "\n") returner 3 }
+    i = 0
+    mens i < 30000 {
+        hvis m["k" + tekst(i)] != "v" + tekst(i * 3) { skriv("verdi " + tekst(i) + "\n") returner 2 }
+        i = i + 1
+    }
+    la nk = nøkler(m)
+    hvis nk[0] != "k0" eller nk[12345] != "k12345" eller nk[29999] != "k29999" { returner 5 }
+    // (2) mange små kart frå literal, med naboar
+    la kart: liste = []
+    la naboar: liste = []
+    i = 0
+    mens i < 3000 {
+        la lit = {"a": "A" + tekst(i)}
+        legg_til(kart, lit)
+        legg_til(naboar, "nabo-" + tekst(i) + "-xxxxxxxxxxxxxxxx")
+        i = i + 1
+    }
+    la runde = 0
+    mens runde < 9 {
+        i = 0
+        mens i < 3000 {
+            la km = kart[i]
+            km["r" + tekst(runde)] = tekst(i + runde)
+            i = i + 1
+        }
+        søppel(500)
+        runde = runde + 1
+    }
+    i = 0
+    mens i < 3000 {
+        la km = kart[i]
+        hvis lengde(km) != 10 { skriv("lite kart " + tekst(i) + " lengde " + tekst(lengde(km)) + "\n") returner 3 }
+        hvis km["a"] != "A" + tekst(i) { returner 2 }
+        la r = 0
+        mens r < 9 {
+            hvis km["r" + tekst(r)] != tekst(i + r) { skriv("lite kart " + tekst(i) + " r" + tekst(r) + "\n") returner 2 }
+            r = r + 1
+        }
+        hvis naboar[i] != "nabo-" + tekst(i) + "-xxxxxxxxxxxxxxxx" { skriv("nabo " + tekst(i) + "\n") returner 4 }
+        la kn = nøkler(km)
+        hvis kn[0] != "a" eller kn[1] != "r0" eller kn[9] != "r8" { returner 5 }
+        i = i + 1
+    }
+    // (3) fjern midt i veksten
+    la f: ordbok_tekst = {}
+    i = 0
+    mens i < 5000 {
+        f["f" + tekst(i)] = tekst(i)
+        hvis i % 7 == 3 { fjern_nøkkel(f, "f" + tekst(i - 1)) }
+        i = i + 1
+    }
+    i = 0
+    la venta = 0
+    mens i < 5000 {
+        la fjerna = (i + 1) % 7 == 3 og i + 1 < 5000
+        hvis fjerna {
+            hvis finnes_nøkkel(f, "f" + tekst(i)) { skriv("fjerna finst " + tekst(i) + "\n") returner 2 }
+        } ellers {
+            hvis f["f" + tekst(i)] != tekst(i) { skriv("f " + tekst(i) + "\n") returner 2 }
+            venta = venta + 1
+        }
+        i = i + 1
+    }
+    hvis lengde(f) != venta { skriv("f lengde " + tekst(lengde(f)) + " venta " + tekst(venta) + "\n") returner 3 }
+    // (4) json-kart som veks
+    la j = json_parse("{\"x\": 1, \"y\": 2}")
+    i = 0
+    mens i < 100 { j["j" + tekst(i)] = i i = i + 1 }
+    hvis lengde(j) != 102 eller j["x"] != 1 eller j["j99"] != 99 { returner 2 }
+    // (6) Direkte observasjon av mapdata-peikaren ([boks + 8]) utan safepoint imellom:
+    // eit eksakt kart (literal) MÅ kopierast ved ny nøkkel; eit vakse kart med ledig kapasitet
+    // skal veksa på staden (amortiseringa verkar). Stale vaktpar: vaks eit kart til 3 par (kap 4,
+    // vaktpar i par[3]), slepp det, collect, lag eit eksakt 3-pars-kart (kan hamne på same
+    // adresse) og vaks det — det MÅ kopierast.
+    la på_staden = 0
+    la forsøk = 0
+    mens forsøk < 200 {
+        la g: ordbok_tekst = {}
+        g["a"] = "1"
+        g["b"] = "2"
+        g["c"] = "3"
+        la gm1: heiltall = builtin.raw_load64(builtin.obj_addr(g) + 8)
+        g["d"] = "4"
+        la gm2: heiltall = builtin.raw_load64(builtin.obj_addr(g) + 8)
+        hvis gm1 == gm2 { på_staden = på_staden + 1 }
+        hvis g["a"] != "1" eller g["d"] != "4" eller lengde(g) != 4 { returner 2 }
+        la v: ordbok_tekst = {}
+        v["x"] = "1"
+        v["y"] = "2"
+        v["z"] = "3"
+        v = {"tom": "t"}
+        builtin.gc_collect_native()
+        la e = {"p": "1", "q": "2", "r": "3"}
+        la em1: heiltall = builtin.raw_load64(builtin.obj_addr(e) + 8)
+        e["s"] = "4"
+        la em2: heiltall = builtin.raw_load64(builtin.obj_addr(e) + 8)
+        hvis em1 == em2 { skriv("eksakt kart vakse på staden (forsøk " + tekst(forsøk) + ")\n") returner 7 }
+        hvis e["p"] != "1" eller e["s"] != "4" eller lengde(e) != 4 { returner 2 }
+        forsøk = forsøk + 1
+    }
+    // (7) Same, i bulk: 2000 vaksne 3-pars-kart (vaktpar i par[3]) døyr saman; etter collect
+    // blir 2000 eksakte 3-pars-kart lagde i det frigjorde området og vaksne.
+    la bulk: liste = []
+    la bi = 0
+    mens bi < 2000 {
+        la bg: ordbok_tekst = {}
+        bg["a"] = "1"
+        bg["b"] = "2"
+        bg["c"] = "3"
+        legg_til(bulk, bg)
+        bi = bi + 1
+    }
+    bulk = []
+    builtin.gc_collect_native()
+    la eksakte: liste = []
+    bi = 0
+    mens bi < 2000 {
+        la be = {"p": "1", "q": "2", "r": "3"}
+        la bm1: heiltall = builtin.raw_load64(builtin.obj_addr(be) + 8)
+        be["s"] = "4"
+        la bm2: heiltall = builtin.raw_load64(builtin.obj_addr(be) + 8)
+        hvis bm1 == bm2 { skriv("eksakt kart vakse på staden (bulk " + tekst(bi) + ")\n") returner 7 }
+        legg_til(eksakte, be)
+        bi = bi + 1
+    }
+    bi = 0
+    mens bi < 2000 {
+        la bx = eksakte[bi]
+        hvis bx["p"] != "1" eller bx["s"] != "4" eller lengde(bx) != 4 { returner 2 }
+        bi = bi + 1
+    }
+    hvis på_staden == 0 { skriv("ingen vekst på staden — amortiseringa verkar ikkje\n") returner 8 }
+    // (1) på nytt etter alt: det store kartet er urørt
+    i = 0
+    mens i < 30000 {
+        hvis m["k" + tekst(i)] != "v" + tekst(i * 3) { skriv("verdi2 " + tekst(i) + "\n") returner 2 }
+        i = i + 97
+    }
+    la c1: heiltall = collects()
+    hvis c1 - c0 < 2 { skriv("collects " + tekst(c1 - c0) + "\n") returner 6 }
+    skriv("gc_kart_vekst_arm64 OK: " + tekst(c1 - c0) + " collects, " + tekst(på_staden) + "/200 på staden\n")
+    returner 0
+}
