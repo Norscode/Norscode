@@ -8,6 +8,13 @@
 # — medan resultatet er det same som Java/Perl sin prioritet (venstre-først,
 # grådig/lat). Tomme løkker (t.d. (a*)*) terminerer.
 #
+# Lookahead (?=..)/(?!..) er eit delsøk med eigen memo og stakk per nestenivå,
+# gjenbrukt mellom evalueringane: memoen blir nullstilt (ny generasjon) berre
+# etter eit delsøk som lukkast, så mislukka evalueringar deler arbeid og
+# x(?=y+) / \d+(?!px) er lineære. Eit mønster der lookahead lukkast på mange
+# posisjonar etter å ha skanna langt (t.d. \w(?=\w*!)) kan bli kvadratisk,
+# som i Java.
+#
 # Teksten blir dekoda frå UTF-8 til kodepunkt, så «.» og [æøå] tek heile
 # teikn, og start/slutt-posisjonar er kodepunkt-indeksar.
 #
@@ -25,7 +32,8 @@
 #   (...)          fangande gruppe
 #   (?:...)        ikkje-fangande gruppe
 #   (?P<namn>...) (?<namn>...)    namngjeven gruppe
-#   (?=...) (?!...)               lookahead (positiv/negativ)
+#   (?=...) (?!...)               lookahead (positiv/negativ); fangstar inni
+#                  ein positiv lookahead blir behaldne, som i Java/Python
 #   (?i) (?m) (?s) (?x) (?-i) (?i:...)   flagg (gjeld ut gruppa, som Java;
 #                  (?i) fold ASCII og Latin-1, inkl. ÆØÅ/æøå)
 #   (?#...)        kommentar
@@ -900,14 +908,19 @@ funksjon kompiler(mønster: tekst) -> liste {
 
 # ─── Matching ─────────────────────────────────────────────────────────────────
 
-funksjon _i_klasse(kl: liste_heltall, o: heltall, c: heltall) -> bool {
+# Ligg c i områda til klassen ved o (utan å sjå på negasjonen)?
+funksjon _i_område(kl: liste_heltall, o: heltall, c: heltall) -> bool {
     la i: heltall = o + 2
     la slutt: heltall = i + 2 * kl[o + 1]
     mens (i < slutt) {
-        hvis (c >= kl[i] og c <= kl[i + 1]) { returner kl[o] == 0 }
+        hvis (c >= kl[i] og c <= kl[i + 1]) { returner sann }
         i = i + 2
     }
-    returner kl[o] == 1
+    returner usann
+}
+
+funksjon _i_klasse(kl: liste_heltall, o: heltall, c: heltall) -> bool {
+    returner _i_område(kl, o, c) != (kl[o] == 1)
 }
 
 funksjon _atom_ok(kl: liste_heltall, op: heltall, arg: heltall, c: heltall) -> bool {
@@ -918,19 +931,24 @@ funksjon _atom_ok(kl: liste_heltall, op: heltall, arg: heltall, c: heltall) -> b
     hvis (op == 10) { returner (c == 32 eller (c >= 9 og c <= 13)) != (arg == 1) }
     hvis (op == 4) { returner _i_klasse(kl, arg, c) }
     hvis (op == 20) {
+        # (?i): c er med når ein av kasusvariantane ligg i områda; negasjonen
+        # gjeld heile unionen ((?i)[^a] tek verken a eller A, som Java).
         la f: heltall = _fold(c)
-        hvis (_i_klasse(kl, arg, f)) { returner sann }
-        la s: heltall = _stor(f)
-        hvis (s != f) { returner _i_klasse(kl, arg, s) }
-        returner usann
+        la inni: bool = _i_område(kl, arg, f)
+        hvis (ikkje inni) {
+            la s: heltall = _stor(f)
+            hvis (s != f) { inni = _i_område(kl, arg, s) }
+        }
+        returner inni != (kl[arg] == 1)
     }
     returner sann
 }
 
 # Køyr programmet frå instruksjon pc0 ved posisjon start.
 # caps: fangstposisjonar (skrivne ved treff; attende til utgangsverdiane når
-# det ikkje blir treff). tilstand = [vis, [gen], [sp, sv], _]: memo for
-# (SPLIT, pos) og gjenbrukt stakk. krev_slutt: MATCH godtek berre pos == n
+# det ikkje blir treff). tilstand = [vis, [gen], [sp, sv, under], _]: memo for
+# (SPLIT, pos), gjenbrukt stakk og (i under) deltilstanden for lookahead på
+# neste nestenivå. krev_slutt: MATCH godtek berre pos == n
 # (fullsamsvar). Returnerer sluttposisjon eller -1.
 # (Maks åtte parametrar: x86-64-AOT sender 13+ argument feil i dag.)
 funksjon _kjør(pg, koder: liste_heltall, n: heltall, pc0: heltall, start: heltall,
@@ -1044,17 +1062,48 @@ funksjon _kjør(pg, koder: liste_heltall, n: heltall, pc0: heltall, start: helta
                     la grense: bool = før != etter
                     hvis (grense == (op == 16)) { pc = pc + 1 } ellers { går = usann }
                 } ellers hvis (op == 18) {
-                    # Lookahead: eige søk med eiga memo og stakk; fangstar inni
-                    # blir ikkje behaldne.
-                    la kopi: liste_heltall = []
+                    # Lookahead: delsøk med deltilstanden til dette nestenivået
+                    # (stakk[2], laga ved første bruk og gjenbrukt). Memoen der
+                    # får ny generasjon berre etter eit treff: tilstandar som
+                    # eit mislukka delsøk har vitja, feilar frå kva start som
+                    # helst, så dei blir ikkje prøvde på nytt.
+                    la under = stakk[2]
+                    hvis (lengde(under) == 0) { legg_til(under, _ny_tilstand(pg)) }
+                    la dt = under[0]
+                    la kopi: liste_heltall = dt[3]
                     la ci: heltall = 0
                     mens (ci < lengde(caps)) {
-                        legg_til(kopi, caps[ci])
+                        kopi[ci] = caps[ci]
                         ci = ci + 1
                     }
-                    la r: heltall = _kjør(pg, koder, n, pa[pc], pos, kopi, _ny_tilstand(pg), usann)
+                    la r: heltall = _kjør(pg, koder, n, pa[pc], pos, kopi, dt, usann)
                     la treff: bool = r >= 0
-                    hvis (treff != (pb[pc] == 1)) { pc = pc + 1 } ellers { går = usann }
+                    hvis (treff) {
+                        la dg: liste_heltall = dt[1]
+                        dg[0] = dg[0] + 1
+                    }
+                    hvis (treff != (pb[pc] == 1)) {
+                        hvis (treff) {
+                            # Positiv lookahead: behald fangstane frå innsida
+                            # (Java/Python), med attenderulling som for SAVE.
+                            ci = 0
+                            mens (ci < lengde(caps)) {
+                                hvis (kopi[ci] != caps[ci]) {
+                                    hvis (topp < lengde(sp)) {
+                                        sp[topp] = 0 - ci - 1
+                                        sv[topp] = caps[ci]
+                                    } ellers {
+                                        legg_til(sp, 0 - ci - 1)
+                                        legg_til(sv, caps[ci])
+                                    }
+                                    topp = topp + 1
+                                    caps[ci] = kopi[ci]
+                                }
+                                ci = ci + 1
+                            }
+                        }
+                        pc = pc + 1
+                    } ellers { går = usann }
                 } ellers {
                     går = usann
                 }
@@ -1083,9 +1132,10 @@ funksjon _neste_kandidat(kl: liste_heltall, fop: heltall, farg: heltall,
     returner -1
 }
 
-# Søketilstand for éin tekst: [vis, [gen], [sp, sv], caps]. Blir delt mellom
-# påfølgjande søk (finn_alle, erstatt_alle, del_på) så ingenting blir allokert
-# per startposisjon.
+# Søketilstand for éin tekst: [vis, [gen], [sp, sv, under], caps]. Blir delt
+# mellom påfølgjande søk (finn_alle, erstatt_alle, del_på) så ingenting blir
+# allokert per startposisjon. under er tom til første lookahead, og held då
+# deltilstanden for det neste nestenivået.
 funksjon _ny_tilstand(pg) -> liste {
     la ng: heltall = pg[2][0]
     la caps: liste_heltall = []
@@ -1097,6 +1147,7 @@ funksjon _ny_tilstand(pg) -> liste {
     la stakk: liste = []
     legg_til(stakk, [0])
     legg_til(stakk, [0])
+    legg_til(stakk, [])
     la t: liste = []
     legg_til(t, [])
     legg_til(t, [1])
