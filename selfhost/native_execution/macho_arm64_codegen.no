@@ -5,6 +5,7 @@
 bruk selfhost.native_execution.macho_arm64_emitter som macho
 bruk selfhost.native_execution.heap_layout som hl
 bruk selfhost.native_execution.arm64_gc som agc
+bruk selfhost.native_execution.arm64_krypto som akr
 bruk selfhost.native_execution.gap_ruter som gr
 bruk selfhost.ncb_serde som serde
 // Berre filsystem-ABI-en, ikkje std.runtime_filesystem: den dreg inn std.sched
@@ -1495,9 +1496,8 @@ funksjon ncval_gap_stub(namn: tekst) -> boolsk {
     hvis builtin.starts_with(n, "semantic_") { returner sann }
     // A5: native_fs_* (x86 har inline-atom) rutar til std.native_gap.fs_gap_* (sys6).
     hvis builtin.starts_with(n, "native_fs_") { returner sann }
-    // x86-64-krypto-atom utan ARM64-emitter (bn_modexp_bytes, argon2_compress,
-    // blake2b_compress): kallarane (std.bigint._modexp_native, std.argon2id_pure,
-    // std.blake2b) fangar unnataket og fell til rein kode.
+    // bn_modexp_bytes, argon2_compress og blake2b_compress har AArch64-rutinar (arm64_krypto,
+    // CALL-dispatch med rett arietet); stubben gjeld berre andre arietetar (som sha256_bytes).
     returner n == "argv_list_v1" eller n == "argv_operation" eller
         n == "host_exec_ncb_json" eller n == "system_operation" eller
         n == "sha256_bytes" eller n == "sha256" eller
@@ -10354,6 +10354,39 @@ funksjon kompiler_arm64_ncval(kode, os, funksjonar, params, is_entry: boolsk, bl
                     emit_pbkdf2(native, r4, r3, r2, r1, r4, os, bl_patchar)
                     opnd_ut(native, djupn - 4, r4, memmode, home_off)
                     djupn = djupn - 3
+                } ellers hvis (kallnamn == "argon2_compress" eller kallnamn == "builtin.argon2_compress" eller
+                               kallnamn == "blake2b_compress" eller kallnamn == "builtin.blake2b_compress") og lengde(instr) == 3 og instr[2] == 4 {
+                    // AArch64-krypto-atom (selfhost/native_execution/arm64_krypto.no): delt rutine,
+                    // argument i x0..x3, resultat (ny u32-liste eller null) i x0. Før var dei
+                    // NATIV-GAP-stubbar, og std.argon2id_pure/std.blake2b fall til rein Norscode.
+                    hvis djupn < 4 { returner {"ok": "usann", "error": "NcVal " + kallnamn + " krev 4 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r4 << 16))           // mov x0, Xa
+                    legg_u32(native, 0xAA0003E1 | (r3 << 16))           // mov x1, Xb
+                    legg_u32(native, 0xAA0003E2 | (r2 << 16))           // mov x2, Xc
+                    legg_u32(native, 0xAA0003E3 | (r1 << 16))           // mov x3, Xd
+                    la p_bl_kr = lengde(native)
+                    legg_u32(native, 0x94000000)                        // bl __argon2_compress / __blake2b_compress
+                    hvis ncval_avkort_builtin(kallnamn) == "argon2_compress" {
+                        legg_til(bl_patchar, [p_bl_kr, "__argon2_compress"])
+                    } ellers {
+                        legg_til(bl_patchar, [p_bl_kr, "__blake2b_compress"])
+                    }
+                    legg_u32(native, 0xAA0003E0 | r4)                   // mov Xres, x0
+                    opnd_ut(native, djupn - 4, r4, memmode, home_off)
+                    djupn = djupn - 3
+                } ellers hvis (kallnamn == "bn_modexp_bytes" eller kallnamn == "builtin.bn_modexp_bytes") og lengde(instr) == 3 og instr[2] == 3 {
+                    // AArch64 Montgomery-modexp (arm64_krypto.modexp_rutine): byteliste eller null
+                    // (std.bigint._modexp_native fell då til modexp_rein).
+                    hvis djupn < 3 { returner {"ok": "usann", "error": "NcVal bn_modexp_bytes krev 3 arg", "image": []} }
+                    legg_u32(native, 0xAA0003E0 | (r3 << 16))           // mov x0, base
+                    legg_u32(native, 0xAA0003E1 | (r2 << 16))           // mov x1, eksponent
+                    legg_u32(native, 0xAA0003E2 | (r1 << 16))           // mov x2, modul
+                    la p_bl_me = lengde(native)
+                    legg_u32(native, 0x94000000)                        // bl __bn_modexp
+                    legg_til(bl_patchar, [p_bl_me, "__bn_modexp"])
+                    legg_u32(native, 0xAA0003E0 | r3)                   // mov Xres, x0
+                    opnd_ut(native, djupn - 3, r3, memmode, home_off)
+                    djupn = djupn - 2
                 } ellers hvis (kallnamn == "fil_finnes" eller kallnamn == "builtin.fil_finnes") og lengde(instr) == 3 og instr[2] == 1 {
                     hvis djupn < 1 { returner {"ok": "usann", "error": "NcVal fil_finnes krev 1 arg", "image": []} }
                     emit_fil_finnes(native, r1, r1, os)
@@ -12153,6 +12186,7 @@ funksjon ncval_compile_program(ncb, os) -> ordbok_tekst {
     }
     // A4: GC-rutinane (__gc_alloc / __gc_collect) sist, når eit bl-/lamaddr-mål peikar dit.
     agc.legg_til_rutinar(all_patchar, image, fn_start, os)
+    akr.legg_til_rutinar(all_patchar, image, fn_start, os, ncval_gc_på())
     la pk = 0
     mens pk < lengde(all_patchar) {
         la pe = all_patchar[pk]
@@ -12494,6 +12528,7 @@ funksjon ncval_link(os: tekst, entries, globals) -> ordbok_tekst {
     }
     // A4: GC-rutinane (__gc_alloc / __gc_collect) sist, når eit bl-/lamaddr-mål peikar dit.
     agc.legg_til_rutinar(all_patchar, image, fn_start, os)
+    akr.legg_til_rutinar(all_patchar, image, fn_start, os, ncval_gc_på())
     // O(n)-patch-resolve UTAN per-byte-alloc (native no-GC-heap-trygt): indeksert
     // skriv (kode[pos]=) er O(n) i tolken → per-patch skriv_u32 vart O(n²) (12t+ CPU);
     // eit tekst-nøkla kart gav i staden ~2M tekst()-allokeringar som sprengde den
@@ -12666,6 +12701,7 @@ funksjon ncval_link_flat(os: tekst, image, fn_meta, globals) -> ordbok_tekst {
     }
     // A4: GC-rutinane (__gc_alloc / __gc_collect) sist, når eit bl-/lamaddr-mål peikar dit.
     agc.legg_til_rutinar(all_patchar, image, fn_start, os)
+    akr.legg_til_rutinar(all_patchar, image, fn_start, os, ncval_gc_på())
     la pk = 0
     mens pk < lengde(all_patchar) {
         la pe = all_patchar[pk]
