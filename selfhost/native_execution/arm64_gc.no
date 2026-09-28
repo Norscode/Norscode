@@ -1,0 +1,1096 @@
+// selfhost/native_execution/arm64_gc.no
+// AArch64-GC (A4, 2026-09-26): konservativ mark-sweep for ARM64-codegen
+// (macho_arm64_codegen, delt av linux-arm64-ELF og macos-arm64-Mach-O). Same design som
+// x86-GC-en i native_codegen_v2 (fasit): kontrollblokk på HEAP_VA, allokeringsteljar mot
+// ein dynamisk port (golv 64 MiB, 8 MiB soft-budsjett), safepoints i prologar og på
+// bakoverhopp, konservativ rot-skann (statisk region + heile maskinstakken, der
+// safepoint-stubben har lagt alle register), mark med strukturvalidering, live-map +
+// heapsort, sweep_full UTAN prefiks-lekk (prev_end startar på gc_lo, j = 0) og 16-aligna
+// blokker. Avvik frå x86: fri-lista er segregert (små hol + storleiksklassar for hol på
+// minst 1 KiB + ein skjer-region, sjå STOR_GRENSE), og kart-vekst går i toarpotens-klassar
+// (kart_storleik) — ARM64-kart er lineære og blir kopierte ved kvar ny nøkkel, og med éi
+// first-fit-liste ratcheta fronten då til exit 199. Berre aktiv når codegen køyrer med
+// NORSCODE_GC_ALLOC=1 (same flagg som x86); utan flagget er ARM64-output byte-uendra.
+//
+// Port til #204 (gc-integ): heapstorleiken er ikkje lenger fast. Heap-init (macho_arm64_codegen
+// emit_heap_init_gc) reknar ut grensa G som bump-heapen gjer — halve fysiske minnet (sysinfo /
+// hw.memsize), klemt til [4, 64] GiB — reserverer G + metadata og skriv G til [HEAP_VA+88]
+// (OFF_GRENSE). Alt som før var faste offsettar (vakt, bitmap, live-map, mark-stakk, soft/hard-
+// grensene og OOM-grensa i __gc_alloc) blir rekna ut frå G ved køyretid. Live-map-entryane er
+// 16 byte (adresse, storleik) i staden for pakka 8 byte, sidan offsettar over 4 GiB ikkje får
+// plass i 32 bit. Closures har tagg 6 på denne greina (same som desimaltal; sjå TAGG_CLOSURE).
+//
+// Modulen importerer berre heap_layout (ingen sirkulær import): macho_arm64_codegen kallar
+// hit, ikkje omvendt. x86-lukkinga (native_codegen_v2) rører ikkje denne fila, so
+// x86-codegen-ELF-en og .depshash-en hans er uendra.
+//
+// ── Register-design (ARM64 har bump-peikaren i x28) ────────────────────────────────────
+// x28 held fram som bump-register («fronten»). Grunnen: fleire hundre emitterar byggjer
+// payloadar ope ved fronten (`mov xN, x28 … mov x28, slutt`) utan å kjenne storleiken på
+// førehand (json, fil_les, miljo_hent, …). Dei er framleis korrekte under GC: fronten er
+// alltid ledig minne, og collect skjer ALDRI inni ein emitter (berre ved safepoints, der
+// ingen rå payload-peikar er levande). Allokeringar med kjend storleik (alle NcVal-boksar,
+// strengkonstantar, konkatenering, strengkopiar, liste-/kart-vekst, bygg-liste/-kart,
+// closures, …) går i GC-modus via __gc_alloc, som tek frå fri-lista (hol under x28) og
+// fell til fronten berre når ingen blokk passar. Sweepen set x28 = slutten på det høgaste
+// levande objektet (halen attvunnen). [HEAP_VA+0] er ein spegel av x28 ved collect.
+// Allokeringsvolumet sidan siste collect = [HEAP+32] (fri-liste-bytar, talde av
+// __gc_alloc) + (x28 − [HEAP+24]) (frontvekst: bump-vegen i __gc_alloc OG dei opne
+// emitterane) — so òg ope-bygde payloadar driv porten.
+//
+// __gc_alloc blir kalla indirekte via [HEAP_VA+72] (adressa blir skriven éin gong i
+// entry-prologen med lamaddr-patchen): då treng ingen emitter bl-patchar, og rutinar som
+// blir bygde utanfor funksjonskompileringa (json/split/join/throw-dispatch) kan allokere
+// likt. Kallesekvensen tek storleiken i Xdst og gjev blokka i Xdst; ALLE andre register
+// og NZCV er bevarte (x30 via stakken).
+
+bruk selfhost.native_execution.heap_layout som hl
+
+// ── Layout (offsettar frå HEAP_VA(mål); same kontrollblokk-felt som x86) ──────────────
+// Kontrollblokk [0, 64): bump-spegel @0, envp @8, port_dyn @16, sist (bump etter collect)
+// @24, allokerte fri-liste-bytar @32, fri-liste-hovud (små hol) @40, stack_base @48, live-
+// map-entryar @56. GC-utviding [64, 128): gc_lo @64 (start på den sweepa heapen, etter den
+// statiske regionen), __gc_alloc-adresse @72, tal collects @80, heapgrensa G @88 (sjå under),
+// diagnose @96–127 (berre med NORSCODE_GC_SPOR=1). Klassetabell [128, 256): hovud for
+// fri-listene til dei store hola, éi per storleiksklasse (sjå KLASSAR). Statisk region
+// [256, gc_lo): hurtigbufferet for bool/heiltal 0..65535 og null-objektet (entry-prologen),
+// modul-globalar, unnatak-handlar-regionen og cleanup-stakken — aldri sweepa, men skanna
+// konservativt som røter (klassetabellen blir ikkje skanna: han peikar berre på frie hol).
+funksjon OFF_BUMP() -> heiltall { returner 0 }
+funksjon OFF_PORT() -> heiltall { returner 16 }
+funksjon OFF_SIST() -> heiltall { returner 24 }
+funksjon OFF_ALLOC() -> heiltall { returner hl.GC_SAFEPOINT_OFFSET() }        // 32
+funksjon OFF_FRI() -> heiltall { returner 40 }
+funksjon OFF_STAKKBASE() -> heiltall { returner 48 }
+funksjon OFF_LIVE_N() -> heiltall { returner 56 }
+funksjon OFF_GC_LO() -> heiltall { returner 64 }
+funksjon OFF_ALLOCFN() -> heiltall { returner 72 }
+funksjon OFF_COLLECTS() -> heiltall { returner 80 }
+funksjon OFF_GRENSE() -> heiltall { returner 88 }                             // G (byte frå HEAP_VA til vaktsona)
+// Diagnose (berre med NORSCODE_GC_SPOR=1): frontvekst og fri-liste-bytar i førre syklus,
+// tal hol og hol-bytar etter sweepen.
+funksjon OFF_D_FRONT() -> heiltall { returner 96 }
+funksjon OFF_D_FL() -> heiltall { returner 104 }
+funksjon OFF_D_HOL() -> heiltall { returner 112 }
+funksjon OFF_D_HOLB() -> heiltall { returner 120 }
+funksjon KLASSE_OFF() -> heiltall { returner 128 }                            // klassetabell (KLASSAR × 8 B)
+funksjon OFF_SKJER() -> heiltall { returner 240 }                             // skjer-region: cur @240, slutt @248
+funksjon STATISK_OFF() -> heiltall { returner 256 }                           // x28 etter heap-init i GC-modus
+
+// Heapen [HEAP_VA, HEAP_VA + G) (inkl. kontrollblokk og statisk region), så ei vaktsone
+// (PROT_NONE) på 1 MiB: ope-bygde payloadar som renn over, treff ho (SIGSEGV) i staden for
+// å skrive inn i GC-metadataen. Metadata over, alt relativt til G (lesen frå [HEAP_VA+88]):
+//   bitmap    [G + vakt, + G/128)              1 bit per 16 B-slot
+//   live-map  [bitmap-slutt, + G)              16 B-entryar (adresse, storleik), ≤ G/16 stk.
+//   mark-stakk[live-map-slutt, + G/2)          8 B-peikarar, ≤ G/16 stk.
+// Live-map og mark-stakk er dimensjonerte for VERSTE fall — heile heapen full av 16 B-boksar
+// (G/16 objekt) — so ein full heap alltid endar som «GC-heap full» (exit 199) og aldri som
+// metadata-overflow (sjå gc_soft_oom_probe). Begge har likevel overflow-sjekk (exit 198).
+// Heapsorten sorterer entryane etter adresse (første u64). Totalt 2,5·G + G/128 + 1 MiB lat
+// VA (VA_TOTAL). G kjem frå minnet (heap-init); fell den store reservasjonen gjennom
+// (RLIMIT_AS, qemu-user), prøver heap-init G = RESERVE_GRENSE (1 GiB, ~2,5 GiB VA).
+funksjon VAKT_BYTES() -> heiltall { returner 1048576 }
+funksjon RESERVE_GRENSE() -> heiltall { returner 1073741824 }                 // 1 GiB
+funksjon VA_TOTAL(g: heiltall) -> heiltall { returner g + VAKT_BYTES() + g / 128 + g + g / 2 }
+// Soft-sona: over SOFT blir porten klemd til max(8 MiB, SOFT − bump) → collect minst kvar
+// 8 MiB (budsjett, ingen storm). HARD: bump over dette ETTER collect → exit 199. Same avstand
+// til taket som x86 (GC_SOFT_LIMIT = tak − 64 MiB, GC_HARD_LIMIT = tak − 32 MiB): med eit
+// stort levande sett kostar kvar collect sekund, og eit breiare band (−256/−128 MiB, 16
+// collects à 8 MiB) gjorde at gc_soft_oom_probe (60M levande entryar) ikkje nådde exit 199
+// på 400 s. Begge er relative til G (grense_minus).
+funksjon SOFT_AVSTAND() -> heiltall { returner 67108864 }                     // G − 64 MiB
+funksjon HARD_AVSTAND() -> heiltall { returner 33554432 }                     // G − 32 MiB
+funksjon PORT_GOLV() -> heiltall {
+    // Same standard og same overstyring som x86 (gc_port_bytes / NORSCODE_GC_TERSKEL_BYTES).
+    la t = ""
+    prøv { t = miljo_hent("NORSCODE_GC_TERSKEL_BYTES") } fang (e) { t = "" }
+    hvis t != "" { returner heltall_fra_tekst(t) }
+    returner 67108864
+}
+funksjon VANDRINGSTAK() -> heiltall { returner 512 }                         // per liste
+// Segregerte fri-lister. Hol under STOR_GRENSE går i éi lista (@40, synkande adresser som
+// x86); hol på minst 1 KiB går i storleiksklassar etter toarpotens: klasse c held hol i
+// [2^(c+10), 2^(c+11)) for c < KLASSAR − 1, og den siste klassen alle frå 2^(KLASSAR+9) (8
+// MiB) og oppover. Ein førespurnad på s byte vandrar lista til sin eigen klasse (hol der kan
+// vere mindre enn s; tak VANDRINGSTAK) og så dei høgare klassane (der passar første hol).
+// Ein liten førespurnad vandrar den små lista; finst ikkje noko der, blir han teken frå
+// skjer-regionen: eit heilt stort hol (det første i den lågaste ikkje-tomme klassen) blir
+// teke ut av lista og bump-allokert frå (cur/slutt @240/@248, nullstilt ved kvar collect;
+// resten av regionen blir eit vanleg hol att ved neste sweep). Utan klassane låg dei store hola bak tusenvis av små (og
+// mellomstore) i éi liste, vandringstaket vart nådd før dei, og store allokeringar (vaksande
+// kart/tekst) gjekk alltid til fronten: gc_hashmap_probe hadde 1 GiB ledige hol men tok
+// berre ~1 MiB/syklus frå fri-lista og 64 MiB frå fronten, til exit 199.
+funksjon STOR_GRENSE() -> heiltall { returner 1024 }
+funksjon KLASSAR() -> heiltall { returner 14 }                                // [128, 240)
+
+// NcVal-taggane markøren skil på. På denne greina (#204) har closures og desimaltal BEGGE
+// tagg 6 i ARM64-codegen-en (BUILD_LAMBDA: emit_ncval_alloc_ptr(…, 6); desimal: IEEE-bitane
+// som payload). a34-greina flytta closures til tagg 8; det har ikkje skjedd her. Markøren
+// behandlar difor tagg 6 som ein MOGLEG closure: payloaden blir berre følgd når han er ein
+// 16-aligna peikar i [gc_lo, bump) med minst 16 byte fram til bump (validering i
+// collect_rutine). Desimal-bitar som ser slik ut er subnormale tal (eksponent 0) i
+// heap-VA-området — i verste fall held dei eit objekt konservativt i live, som ein
+// stakk-verdi.
+funksjon TAGG_TEKST() -> heiltall { returner 3 }
+funksjon TAGG_LISTE() -> heiltall { returner 4 }
+funksjon TAGG_KART() -> heiltall { returner 5 }
+funksjon TAGG_CLOSURE() -> heiltall { returner 6 }
+// bytes (NC_BYTES, som x86): same layout som liste ([tal][elem-peikarar]); markøren følgjer
+// elementa som for ei liste.
+funksjon TAGG_BYTES() -> heiltall { returner 7 }
+
+funksjon mål_frå_os(os: tekst) -> tekst {
+    hvis os == "linux" { returner "linux-arm64" }
+    returner "macos-arm64"
+}
+funksjon heap_va(os: tekst) -> heiltall { returner hl.HEAP_VA(mål_frå_os(os)) }
+
+// ── Enkodarar (verifiserte mot clang -target aarch64 + llvm-objdump; sjå a4-rapporten) ──
+funksjon w32(k: liste_heiltall, v: heiltall) -> heiltall {
+    legg_til(k, v & 255)
+    legg_til(k, (v >> 8) & 255)
+    legg_til(k, (v >> 16) & 255)
+    legg_til(k, (v >> 24) & 255)
+    returner 0
+}
+funksjon p32(k: liste_heiltall, pos: heiltall, v: heiltall) -> heiltall {
+    k[pos] = v & 255
+    k[pos + 1] = (v >> 8) & 255
+    k[pos + 2] = (v >> 16) & 255
+    k[pos + 3] = (v >> 24) & 255
+    returner 0
+}
+funksjon e_movz(rd: heiltall, imm: heiltall, hw: heiltall) -> heiltall { returner 0xD2800000 | (hw << 21) | ((imm & 0xFFFF) << 5) | rd }
+funksjon e_movk(rd: heiltall, imm: heiltall, hw: heiltall) -> heiltall { returner 0xF2800000 | (hw << 21) | ((imm & 0xFFFF) << 5) | rd }
+funksjon e_mov(rd: heiltall, rm: heiltall) -> heiltall { returner 0xAA0003E0 | (rm << 16) | rd }
+funksjon e_mov_sp(rd: heiltall) -> heiltall { returner 0x910003E0 | rd }                          // mov rd, sp
+funksjon e_add_i(rd: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0x91000000 | (imm << 10) | (rn << 5) | rd }
+funksjon e_sub_i(rd: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xD1000000 | (imm << 10) | (rn << 5) | rd }
+funksjon e_subs_i(rd: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xF1000000 | (imm << 10) | (rn << 5) | rd }
+funksjon e_cmp_i(rn: heiltall, imm: heiltall) -> heiltall { returner 0xF100001F | (imm << 10) | (rn << 5) }
+funksjon e_add(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x8B000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_add_lsl(rd: heiltall, rn: heiltall, rm: heiltall, sh: heiltall) -> heiltall { returner 0x8B000000 | (rm << 16) | (sh << 10) | (rn << 5) | rd }
+funksjon e_sub(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xCB000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_subs(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xEB000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_cmp(rn: heiltall, rm: heiltall) -> heiltall { returner 0xEB00001F | (rm << 16) | (rn << 5) }
+funksjon e_orr(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xAA000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_tst(rn: heiltall, rm: heiltall) -> heiltall { returner 0xEA00001F | (rm << 16) | (rn << 5) }
+funksjon e_and_not15(rd: heiltall, rn: heiltall) -> heiltall { returner 0x927CEC00 | (rn << 5) | rd }  // and rd, rn, #~15
+funksjon e_and7(rd: heiltall, rn: heiltall) -> heiltall { returner 0x92400800 | (rn << 5) | rd }       // and rd, rn, #7
+funksjon e_tst15(rn: heiltall) -> heiltall { returner 0xF2400C1F | (rn << 5) }                       // tst rn, #15
+funksjon e_lsr(rd: heiltall, rn: heiltall, sh: heiltall) -> heiltall { returner 0xD340FC00 | (sh << 16) | (rn << 5) | rd }
+funksjon e_lsl(rd: heiltall, rn: heiltall, sh: heiltall) -> heiltall { returner 0xD3400000 | (((64 - sh) & 63) << 16) | ((63 - sh) << 10) | (rn << 5) | rd }
+funksjon e_lslv(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9AC02000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_clz(rd: heiltall, rn: heiltall) -> heiltall { returner 0xDAC01000 | (rn << 5) | rd }
+funksjon e_neg(rd: heiltall, rm: heiltall) -> heiltall { returner 0xCB0003E0 | (rm << 16) | rd }
+funksjon e_csel(rd: heiltall, rn: heiltall, rm: heiltall, cond: heiltall) -> heiltall { returner 0x9A800000 | (rm << 16) | (cond << 12) | (rn << 5) | rd }
+funksjon e_ldr(rt: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xF9400000 | ((off / 8) << 10) | (rn << 5) | rt }
+funksjon e_str(rt: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xF9000000 | ((off / 8) << 10) | (rn << 5) | rt }
+funksjon e_ldrb(rt: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0x39400000 | (off << 10) | (rn << 5) | rt }
+funksjon e_strb(rt: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0x39000000 | (off << 10) | (rn << 5) | rt }
+funksjon e_ldp(rt: heiltall, rt2: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xA9400000 | (((off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt }
+funksjon e_stp(rt: heiltall, rt2: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xA9000000 | (((off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt }
+funksjon e_stp_pre(rt: heiltall, rt2: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xA9800000 | (((off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt }
+funksjon e_stp_post(rt: heiltall, rt2: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xA8800000 | (((off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt }
+funksjon e_ldp_post(rt: heiltall, rt2: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xA8C00000 | (((off / 8) & 0x7F) << 15) | (rt2 << 10) | (rn << 5) | rt }
+funksjon e_ldr_post(rt: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xF8400400 | ((imm & 0x1FF) << 12) | (rn << 5) | rt }
+funksjon e_str_post(rt: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xF8000400 | ((imm & 0x1FF) << 12) | (rn << 5) | rt }
+funksjon e_ldr_pre(rt: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xF8400C00 | ((imm & 0x1FF) << 12) | (rn << 5) | rt }
+funksjon e_ldr_reg3(rt: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xF8607800 | (rm << 16) | (rn << 5) | rt }   // ldr xt, [xn, xm, lsl #3]
+funksjon e_str_reg3(rt: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xF8207800 | (rm << 16) | (rn << 5) | rt }   // str xt, [xn, xm, lsl #3]
+funksjon e_mov_w(rd: heiltall, rm: heiltall) -> heiltall { returner 0x2A0003E0 | (rm << 16) | rd }                               // mov wd, wm (null-utvidar)
+funksjon e_blr(rn: heiltall) -> heiltall { returner 0xD63F0000 | (rn << 5) }
+funksjon e_ret() -> heiltall { returner 0xD65F03C0 }
+funksjon e_mrs_nzcv(rt: heiltall) -> heiltall { returner 0xD53B4200 | rt }
+funksjon e_msr_nzcv(rt: heiltall) -> heiltall { returner 0xD51B4200 | rt }
+funksjon e_sub_sp(imm: heiltall) -> heiltall { returner 0xD10003FF | (imm << 10) }             // sub sp, sp, #imm
+funksjon e_add_sp(imm: heiltall) -> heiltall { returner 0x910003FF | (imm << 10) }             // add sp, sp, #imm
+funksjon e_sub_sp_reg(rm: heiltall) -> heiltall { returner 0xCB2063FF | (rm << 16) }            // sub sp, sp, xm (uxtx)
+funksjon e_add_sp_reg(rm: heiltall) -> heiltall { returner 0x8B2063FF | (rm << 16) }            // add sp, sp, xm (uxtx)
+// Vilkårskodar
+funksjon C_EQ() -> heiltall { returner 0 }
+funksjon C_NE() -> heiltall { returner 1 }
+funksjon C_HS() -> heiltall { returner 2 }
+funksjon C_LO() -> heiltall { returner 3 }
+funksjon C_HI() -> heiltall { returner 8 }
+funksjon C_LS() -> heiltall { returner 9 }
+funksjon C_LT() -> heiltall { returner 11 }
+funksjon C_LE() -> heiltall { returner 13 }
+
+// Greiner: placeholder (0) no, patch seinare med målposisjonen (byte-offset i k).
+funksjon plass(k: liste_heiltall) -> heiltall {
+    la p = lengde(k)
+    w32(k, 0)
+    returner p
+}
+funksjon patch_b(k: liste_heiltall, p: heiltall, mål: heiltall) -> heiltall { returner p32(k, p, 0x14000000 | (((mål - p) / 4) & 0x03FFFFFF)) }
+funksjon patch_bl(k: liste_heiltall, p: heiltall, mål: heiltall) -> heiltall { returner p32(k, p, 0x94000000 | (((mål - p) / 4) & 0x03FFFFFF)) }
+funksjon patch_bc(k: liste_heiltall, p: heiltall, mål: heiltall, cond: heiltall) -> heiltall { returner p32(k, p, 0x54000000 | ((((mål - p) / 4) & 0x7FFFF) << 5) | cond) }
+funksjon patch_cbz(k: liste_heiltall, p: heiltall, mål: heiltall, rt: heiltall) -> heiltall { returner p32(k, p, 0xB4000000 | ((((mål - p) / 4) & 0x7FFFF) << 5) | rt) }
+funksjon patch_cbnz(k: liste_heiltall, p: heiltall, mål: heiltall, rt: heiltall) -> heiltall { returner p32(k, p, 0xB5000000 | ((((mål - p) / 4) & 0x7FFFF) << 5) | rt) }
+// Grein bakover til ein kjend posisjon (emit direkte).
+funksjon b_til(k: liste_heiltall, mål: heiltall) -> heiltall { la p = plass(k) returner patch_b(k, p, mål) }
+funksjon bc_til(k: liste_heiltall, mål: heiltall, cond: heiltall) -> heiltall { la p = plass(k) returner patch_bc(k, p, mål, cond) }
+
+// 64-bit konstant (≥ 0) med færrast moglege movz/movk.
+funksjon konst(k: liste_heiltall, rd: heiltall, v: heiltall) -> heiltall {
+    la bits = v & 0xFFFFFFFFFFFFFFFF
+    la første = sann
+    la hw = 0
+    mens hw < 4 {
+        la del = (bits >> (hw * 16)) & 0xFFFF
+        hvis del != 0 {
+            hvis første { w32(k, e_movz(rd, del, hw)) første = usann } ellers { w32(k, e_movk(rd, del, hw)) }
+        }
+        hw = hw + 1
+    }
+    hvis første { w32(k, e_movz(rd, 0, 0)) }
+    returner 0
+}
+
+// Xrd = HEAP_VA (éin movz på begge mål: 0x10_0000_0000 / 0xC0_0000_0000).
+funksjon heap_va_reg(k: liste_heiltall, rd: heiltall, os: tekst) -> heiltall { returner konst(k, rd, heap_va(os)) }
+
+funksjon svc(k: liste_heiltall, os: tekst) -> heiltall {
+    hvis os == "linux" { returner w32(k, 0xD4000001) }
+    returner w32(k, 0xD4001001)
+}
+funksjon syscall(k: liste_heiltall, nr_linux: heiltall, nr_macos: heiltall, os: tekst) -> heiltall {
+    hvis os == "linux" { konst(k, 8, nr_linux) } ellers { konst(k, 16, nr_macos) }
+    returner svc(k, os)
+}
+
+// Skriv ein ASCII-melding til stderr og avslutt med `kode` (aldri retur). Meldinga blir
+// bygd på maskinstakken i 8-byte-bitar. Scratch: x0–x2, x8/x16, x10.
+funksjon fatal(k: liste_heiltall, melding: tekst, kode: heiltall, os: tekst) -> heiltall {
+    la n = lengde(melding)
+    la ramme = ((n + 15) / 16) * 16
+    w32(k, e_sub_sp(ramme))
+    la off = 0
+    mens off < n {
+        la v = 0
+        la j = 7
+        mens j >= 0 {
+            v = v * 256
+            hvis off + j < n { v = v + (builtin.char_code(builtin.slice(melding, off + j, off + j + 1)) & 127) }
+            j = j - 1
+        }
+        konst(k, 10, v)
+        w32(k, 0xF90003EA | ((off / 8) << 10))                 // str x10, [sp, #off]
+        off = off + 8
+    }
+    w32(k, e_movz(0, 2, 0))                                     // x0 = 2 (stderr)
+    w32(k, e_mov_sp(1))                                         // x1 = sp
+    konst(k, 2, n)
+    syscall(k, 64, 4, os)                                       // write
+    konst(k, 0, kode)
+    syscall(k, 94, 1, os)                                       // exit_group / exit
+    returner 0
+}
+
+// ── Kallesekvensar (emittert inline i funksjonar og rutinar) ─────────────────────────
+// Storleiken ligg i Xdst; etterpå ligg blokka (16-aligna, round16(storleik) byte) i Xdst.
+// Alle andre register og NZCV er bevarte. Xdst ∉ {x28, x30, sp}.
+funksjon alloc_kall(k: liste_heiltall, dst: heiltall, os: tekst) -> heiltall {
+    w32(k, e_stp_pre(dst, 30, 31, -16))                         // stp Xdst, x30, [sp, #-16]!
+    heap_va_reg(k, dst, os)                                     // Xdst = HEAP_VA
+    w32(k, e_ldr(dst, dst, OFF_ALLOCFN()))                      // Xdst = &__gc_alloc
+    w32(k, e_blr(dst))                                          // blr Xdst
+    w32(k, e_ldp_post(dst, 30, 31, 16))                         // ldp Xdst, x30, [sp], #16
+    returner 0
+}
+funksjon alloc_imm(k: liste_heiltall, n: heiltall, dst: heiltall, os: tekst) -> heiltall {
+    konst(k, dst, n)
+    returner alloc_kall(k, dst, os)
+}
+// Xut = 8 + next_pow2(Xcount)·8 (count 0 → 16), same kapasitet som
+// emit_liste_reserver_kapasitet reserverer ved fronten (legg_til-invarianten). Xut og
+// Xtmp kan ikkje vere Xcount med mindre ut == count (tmp må vere ein annan).
+funksjon liste_storleik(k: liste_heiltall, count: heiltall, ut: heiltall, tmp: heiltall) -> heiltall {
+    w32(k, e_sub_i(tmp, count, 1))                              // tmp = count − 1
+    w32(k, e_clz(tmp, tmp))
+    w32(k, e_neg(tmp, tmp))                                     // lslv tek mod 64
+    w32(k, e_movz(ut, 1, 0))
+    w32(k, e_lslv(ut, ut, tmp))                                 // ut = cap
+    w32(k, e_lsl(ut, ut, 3))
+    w32(k, e_add_i(ut, ut, 8))                                  // 8 + cap·8
+    returner 0
+}
+
+// Xut = 8 + next_pow2(Xcount + 1)·16: blokka til ny mapdata når kart-vekst (INDEX_SET med ny
+// nøkkel) legg til eitt par. Kartet blir framleis kopiert ved kvar innsetjing (ingen plass-
+// innsetjing), men storleiken går i toarpotens-klassar: ei daud mapdata etterlet eit hol
+// som ei seinare mapdata i same klasse passar i. Med eksakt storleik (8 + (count+1)·16) var
+// kvar ny mapdata 16 B større enn alle hola etter dei førre, dei levande nøkkel-/verdi-
+// strengane mellom hindra samanslåing, og fronten ratcheta ~ein port per collect
+// (gc_hashmap_probe: 78k levande entryar, front 1,38 GiB → exit 199). Markøren registrerer
+// kart med same klasse (8 + next_pow2(count)·16), so heile blokka ligg i live-mapen.
+// Xut, Xcount og Xtmp må vere ulike.
+funksjon kart_storleik(k: liste_heiltall, count: heiltall, ut: heiltall, tmp: heiltall) -> heiltall {
+    w32(k, e_clz(tmp, count))                                   // tmp = clz((count+1) − 1)
+    w32(k, e_neg(tmp, tmp))                                     // lslv tek mod 64
+    w32(k, e_movz(ut, 1, 0))
+    w32(k, e_lslv(ut, ut, tmp))                                 // ut = next_pow2(count+1)
+    w32(k, e_lsl(ut, ut, 4))
+    w32(k, e_add_i(ut, ut, 8))                                  // 8 + kap·16
+    returner 0
+}
+
+// Safepoint (prolog etter parametrane, og før kvart bakoverhopp): samle når
+// fri-liste-bytar + frontvekst sidan siste collect ≥ port_dyn. Scratch x15–x17 (daude på
+// alle safepoint-stader). bl-målet __gc_collect blir lagt i bl_patchar.
+funksjon safepoint(k: liste_heiltall, bl_patchar, os: tekst) -> heiltall {
+    heap_va_reg(k, 17, os)                                      // x17 = HEAP_VA
+    w32(k, e_ldr(16, 17, OFF_SIST()))                           // x16 = sist
+    w32(k, e_ldr(15, 17, OFF_ALLOC()))                          // x15 = fri-liste-bytar
+    w32(k, e_sub(16, 28, 16))                                   // x16 = frontvekst
+    w32(k, e_add(16, 16, 15))                                   // x16 = allokert sidan collect
+    w32(k, e_ldr(15, 17, OFF_PORT()))                           // x15 = port_dyn
+    w32(k, e_cmp(16, 15))
+    w32(k, 0x54000043)                                          // b.lo +2 (over bl)
+    la p_bl = lengde(k)
+    w32(k, 0x94000000)                                          // bl __gc_collect (patch)
+    legg_til(bl_patchar, [p_bl, "__gc_collect"])
+    returner 0
+}
+
+// Eksplisitt collect (builtin.gc_collect / gc_collect_native): same stubb som safepointen.
+funksjon collect_kall(k: liste_heiltall, bl_patchar) -> heiltall {
+    la p_bl = lengde(k)
+    w32(k, 0x94000000)                                          // bl __gc_collect (patch)
+    legg_til(bl_patchar, [p_bl, "__gc_collect"])
+    returner 0
+}
+
+// Heap-init-tillegg (etter mmap, x0 = HEAP_VA, Xg = heapgrensa G som heap-init valde):
+// G → [HEAP+88] og x28 over GC-utvidinga. stack_base blir IKKJE sett her: entry byter til
+// ein eigen maskinstakk etter heap-init (emit_eigen_stakk), sjå stakkbase.
+funksjon heap_init_tillegg(k: liste_heiltall, g: heiltall) -> heiltall {
+    w32(k, e_str(g, 0, OFF_GRENSE()))                           // [HEAP+88] = G
+    w32(k, e_add_i(28, 0, STATISK_OFF()))                       // x28 = HEAP_VA + STATISK_OFF (256)
+    returner 0
+}
+
+// stack_base = sp (øvre grense for stakk-skannet) → [HEAP+48]. Blir emittert i entry ETTER
+// bytet til den eigne maskinstakken og FØR entry-ramma, so heile stakken som kan halde
+// røter ligg i [sp, stack_base). Scratch: x9, x10.
+funksjon stakkbase(k: liste_heiltall, os: tekst) -> heiltall {
+    heap_va_reg(k, 10, os)
+    w32(k, e_mov_sp(9))                                         // mov x9, sp
+    w32(k, e_str(9, 10, OFF_STAKKBASE()))                       // [HEAP+48] = stack_base
+    returner 0
+}
+
+// Xrd = HEAP_VA + G − minus (Xheap = HEAP_VA). Xtmp blir klobba; alle tre må vere ulike.
+funksjon grense_minus(k: liste_heiltall, rd: heiltall, heap: heiltall, tmp: heiltall, minus: heiltall) -> heiltall {
+    w32(k, e_ldr(rd, heap, OFF_GRENSE()))
+    w32(k, e_add(rd, rd, heap))
+    hvis minus > 0 {
+        konst(k, tmp, minus)
+        w32(k, e_sub(rd, rd, tmp))
+    }
+    returner 0
+}
+
+// GC-init i entry, rett etter den statiske regionen (globalar, handlar-, cleanup-region):
+// gc_lo = round16(x28), sist = gc_lo, teljar 0, fri-liste tom, port = GC_INIT_PORT,
+// __gc_alloc-adressa → [HEAP+72] (lamaddr-patch: adr x9 / movz+movk x10 / add), vaktsone.
+// Scratch: x0–x2, x8/x16, x9–x12 (ingen argument er levande her).
+funksjon init(k: liste_heiltall, bl_patchar, os: tekst) -> heiltall {
+    // gc_lo = round16(x28) + 16: 16 B luke mellom den statiske regionen og GC-heapen, so
+    // globals-basen (x25, alltid på stakken/i register) aldri er lik gc_lo når programmet
+    // ikkje har globalar — elles pinna han det første heap-objektet for alltid (målt:
+    // lågaste levande = HEAP_VA+0x80 i kvar collect, maskerte prefiks-kontrollen).
+    w32(k, e_add_i(28, 28, 31))
+    w32(k, e_and_not15(28, 28))                                 // x28 = round16(x28) + 16
+    heap_va_reg(k, 11, os)                                      // x11 = HEAP_VA
+    w32(k, e_str(28, 11, OFF_GC_LO()))
+    w32(k, e_str(28, 11, OFF_SIST()))
+    w32(k, e_str(28, 11, OFF_BUMP()))
+    w32(k, e_str(31, 11, OFF_ALLOC()))                          // str xzr
+    w32(k, e_str(31, 11, OFF_FRI()))
+    nullstill_klassar(k, 11)
+    w32(k, e_str(31, 11, OFF_COLLECTS()))
+    konst(k, 12, hl.GC_INIT_PORT())
+    w32(k, e_str(12, 11, OFF_PORT()))
+    w32(k, 0x10000009)                                          // adr x9, #0
+    la p_lam = lengde(k)
+    w32(k, 0xD280000A)                                          // movz x10, #0        (patch: delta lo16)
+    w32(k, 0xF2A0000A)                                          // movk x10, #0, lsl16 (patch: delta hi16)
+    w32(k, e_add(9, 9, 10))                                     // x9 = &__gc_alloc
+    legg_til(bl_patchar, [p_lam, "__gc_alloc", "lamaddr"])
+    w32(k, e_str(9, 11, OFF_ALLOCFN()))
+    // Vaktsone: mprotect(HEAP_VA + G, 1 MiB, PROT_NONE). Linux 226, macOS 74. G er eit
+    // multiplum av 1 GiB, so adressa er sidejustert på begge OS.
+    grense_minus(k, 0, 11, 12, 0)                               // x0 = HEAP_VA + G
+    konst(k, 1, VAKT_BYTES())
+    w32(k, e_movz(2, 0, 0))
+    syscall(k, 226, 74, os)
+    returner 0
+}
+
+// ── __gc_alloc: first-fit på dei segregerte fri-listene (tak 512 per liste) / skjer-regionen, elles fronten (x28)
+// Inngang: [sp] = storleik, [sp+8] = kallaren sin x30 (urørt), x30 = retur. Utgang: [sp] =
+// blokk. Bevarer alle register og NZCV (lagrar x9–x17 + nzcv i ei 80 B-ramme).
+funksjon alloc_rutine(os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    w32(k, e_stp_pre(9, 10, 31, -80))
+    w32(k, e_stp(11, 12, 31, 16))
+    w32(k, e_stp(13, 14, 31, 32))
+    w32(k, e_stp(15, 16, 31, 48))
+    w32(k, e_mrs_nzcv(9))
+    w32(k, e_stp(17, 9, 31, 64))
+    w32(k, e_ldr(9, 31, 80))                                    // x9 = storleik
+    w32(k, e_add_i(9, 9, 15))
+    w32(k, e_and_not15(9, 9))                                   // round16
+    w32(k, 0xB5000049)                                          // cbnz x9, +2
+    w32(k, e_movz(9, 16, 0))                                    // storleik 0 → 16
+    heap_va_reg(k, 10, os)                                      // x10 = HEAP_VA
+    // Segregerte fri-lister (sjå STOR_GRENSE/KLASSAR): x17 = adressa til hovud-slotten for
+    // lista som blir vandra. Små førespurnad: den små lista (@40), så klasse 0, 1, … Stor
+    // førespurnad: klasse(s), så høgare klassar. Kvar liste med tak VANDRINGSTAK.
+    w32(k, e_add_i(17, 10, OFF_FRI()))                          // x17 = &små-hovud
+    konst(k, 13, STOR_GRENSE())
+    w32(k, e_cmp(9, 13))
+    la p_liten = plass(k)                                       // b.lo pass
+    klasse_slot(k, 9, 17, 10, 13)                               // x17 = &klasse[klasse(s)]
+    la l_pass = lengde(k)
+    patch_bc(k, p_liten, l_pass, C_LO())
+    w32(k, e_ldr(11, 17, 0))                                    // x11 = hovud
+    w32(k, e_movz(12, 0, 0))                                    // x12 = førre (0 = hovud)
+    konst(k, 13, VANDRINGSTAK())                                // x13 = tak
+    la l_walk = lengde(k)
+    la p_tom = plass(k)                                         // cbz x11, neste liste
+    w32(k, e_ldr(14, 11, 8))                                    // x14 = S
+    w32(k, e_cmp(14, 9))
+    la p_found = plass(k)                                       // b.hs found
+    w32(k, e_subs_i(13, 13, 1))
+    la p_tak = plass(k)                                         // b.eq bump
+    w32(k, e_mov(12, 11))
+    w32(k, e_ldr(11, 11, 0))                                    // x11 = neste
+    b_til(k, l_walk)
+    la l_found = lengde(k)
+    patch_bc(k, p_found, l_found, C_HS())
+    w32(k, e_ldr(15, 11, 0))                                    // x15 = neste
+    w32(k, e_sub(14, 14, 9))                                    // x14 = rest
+    w32(k, e_cmp_i(14, 16))
+    la p_nosplit = plass(k)                                     // b.lo nosplit
+    w32(k, e_add(16, 11, 9))                                    // x16 = rest-node
+    w32(k, e_stp(15, 14, 16, 0))                                // [rest] = {neste, rest}
+    w32(k, e_mov(15, 16))
+    la l_nosplit = lengde(k)
+    patch_bc(k, p_nosplit, l_nosplit, C_LO())
+    la p_sethead = plass(k)                                     // cbz x12, sethead
+    w32(k, e_str(15, 12, 0))                                    // førre.neste = etterfølgjar
+    la p_linked = plass(k)
+    la l_sethead = lengde(k)
+    patch_cbz(k, p_sethead, l_sethead, 12)
+    w32(k, e_str(15, 17, 0))                                    // hovud = etterfølgjar
+    la l_linked = lengde(k)
+    patch_b(k, p_linked, l_linked)
+    w32(k, e_ldr(14, 10, OFF_ALLOC()))
+    w32(k, e_add(14, 14, 9))
+    w32(k, e_str(14, 10, OFF_ALLOC()))                          // fri-liste-bytar += storleik
+    la p_ret1 = plass(k)                                        // b ret (x11 = blokk)
+    // Lista er tom eller taket nådd. Stor førespurnad → neste klasse (etter den siste →
+    // fronten). Liten førespurnad → skjer-regionen.
+    la l_neste = lengde(k)
+    patch_cbz(k, p_tom, l_neste, 11)
+    patch_bc(k, p_tak, l_neste, C_EQ())
+    w32(k, e_add_i(16, 10, OFF_FRI()))
+    w32(k, e_cmp(17, 16))
+    la p_skjer = plass(k)                                       // b.eq skjer (liten førespurnad)
+    w32(k, e_add_i(17, 17, 8))                                  // klasse + 1
+    w32(k, e_add_i(16, 10, KLASSE_OFF() + KLASSAR() * 8))
+    w32(k, e_cmp(17, 16))
+    la p_tilbump = plass(k)                                     // b.hs bump (alle klassar vandra)
+    b_til(k, l_pass)
+    // Skjer-regionen: [cur, slutt) i [HEAP+240, HEAP+248]. Passar ikkje førespurnaden (eller
+    // regionen er tom: cur = slutt = 0), blir det første holet i den lågaste ikkje-tomme
+    // klassen teke heilt ut av lista og gjort til ny region; finst ingen → fronten.
+    la l_skjer = lengde(k)
+    patch_bc(k, p_skjer, l_skjer, C_EQ())
+    w32(k, e_ldp(11, 12, 10, OFF_SKJER()))                      // x11 = cur, x12 = slutt
+    w32(k, e_add(14, 11, 9))
+    w32(k, e_cmp(14, 12))
+    la p_nyreg = plass(k)                                       // b.hi ny region
+    w32(k, e_str(14, 10, OFF_SKJER()))                          // cur += storleik
+    w32(k, e_ldr(14, 10, OFF_ALLOC()))
+    w32(k, e_add(14, 14, 9))
+    w32(k, e_str(14, 10, OFF_ALLOC()))                          // fri-liste-bytar += storleik
+    la p_ret2 = plass(k)                                        // b ret (x11 = blokk)
+    patch_bc(k, p_nyreg, lengde(k), C_HI())
+    w32(k, e_add_i(17, 10, KLASSE_OFF()))                       // x17 = &klasse[0]
+    w32(k, e_add_i(16, 10, KLASSE_OFF() + KLASSAR() * 8))
+    la l_kl = lengde(k)
+    w32(k, e_ldr(11, 17, 0))
+    la p_fann = plass(k)                                        // cbnz x11, fann
+    w32(k, e_add_i(17, 17, 8))
+    w32(k, e_cmp(17, 16))
+    bc_til(k, l_kl, C_LO())
+    la p_tilbump2 = plass(k)                                    // b bump (ingen store hol)
+    patch_cbnz(k, p_fann, lengde(k), 11)
+    w32(k, e_ldr(15, 11, 0))
+    w32(k, e_str(15, 17, 0))                                    // klasse-hovud = neste
+    w32(k, e_ldr(12, 11, 8))
+    w32(k, e_add(12, 11, 12))                                   // slutt = hol + storleik
+    w32(k, e_stp(11, 12, 10, OFF_SKJER()))                      // region = heile holet
+    b_til(k, l_skjer)
+    la l_bump = lengde(k)
+    patch_bc(k, p_tilbump, l_bump, C_HS())
+    patch_b(k, p_tilbump2, l_bump)
+    w32(k, e_add_i(28, 28, 15))
+    w32(k, e_and_not15(28, 28))                                 // fronten 16-aligna
+    w32(k, e_mov(11, 28))
+    w32(k, e_add(28, 28, 9))
+    grense_minus(k, 14, 10, 15, 0)                              // x14 = HEAP_VA + G (x10 = HEAP_VA; x15 scratch)
+    w32(k, e_cmp(28, 14))
+    la p_oom = plass(k)                                         // b.hi oom
+    la l_ret = lengde(k)
+    patch_b(k, p_ret1, l_ret)
+    patch_b(k, p_ret2, l_ret)
+    w32(k, e_str(11, 31, 80))                                   // [sp] = blokk
+    w32(k, e_ldp(17, 9, 31, 64))
+    w32(k, e_msr_nzcv(9))
+    w32(k, e_ldp(15, 16, 31, 48))
+    w32(k, e_ldp(13, 14, 31, 32))
+    w32(k, e_ldp(11, 12, 31, 16))
+    w32(k, e_ldp_post(9, 10, 31, 80))
+    w32(k, e_ret())
+    la l_oom = lengde(k)
+    patch_bc(k, p_oom, l_oom, C_HI())
+    fatal(k, "norscode: GC-heap full (arm64) - avsluttar (exit 199)\n", 199, os)
+    returner k
+}
+
+// ── __gc_collect: safepoint-stubb + mark + sort + sweep + port ─────────────────────────
+// Lagrar x0–x27, x29, x30 og NZCV i ei 256 B-ramme (x28 = bump er levande og blir sett av
+// sweepen, difor ikkje lagra/gjenoppretta). Stakk-skannet startar på sp etter lagringa,
+// so alle register er røter. Register under collect: x19 = HEAP_VA, x20 = gc_lo,
+// x21 = bitmap, x22/x23 = mark-stakk topp/slutt, x26 = mark-stakk-base, x24/x25 = live-
+// map skrivepeikar/slutt, x27 = live-map-base. gc_push (bl) brukar x0–x4.
+funksjon collect_rutine(os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    w32(k, e_sub_sp(256))
+    la r = 0
+    mens r < 28 {
+        w32(k, e_stp(r, r + 1, 31, r * 8))                      // stp x(r), x(r+1), [sp, #r*8]
+        r = r + 2
+    }
+    w32(k, e_stp(29, 30, 31, 224))
+    w32(k, e_mrs_nzcv(9))
+    w32(k, e_str(9, 31, 240))
+    heap_va_reg(k, 19, os)
+    w32(k, e_ldr(20, 19, OFF_GC_LO()))
+    w32(k, e_str(28, 19, OFF_BUMP()))
+    hvis spor_på() {
+        w32(k, e_ldr(9, 19, OFF_SIST()))
+        w32(k, e_sub(9, 28, 9))
+        w32(k, e_str(9, 19, OFF_D_FRONT()))                    // frontvekst i syklusen
+        w32(k, e_ldr(9, 19, OFF_ALLOC()))
+        w32(k, e_str(9, 19, OFF_D_FL()))                       // fri-liste-bytar i syklusen
+    }
+    w32(k, e_str(31, 19, OFF_FRI()))                            // fri-lista blir bygd på nytt
+    nullstill_klassar(k, 19)
+    // Metadata-layout frå G = [HEAP+88] (sjå VA_TOTAL): x21 = bitmap = HEAP_VA + G + vakt,
+    // x27 = live-map = bitmap + G/128, x25 = live-map-slutt = x27 + G (16 B-entryar),
+    // x26 = mark-stakk = x25, x23 = mark-stakk-slutt = x26 + G/2.
+    w32(k, e_ldr(9, 19, OFF_GRENSE()))                          // x9 = G
+    w32(k, e_add(21, 19, 9))
+    konst(k, 10, VAKT_BYTES())
+    w32(k, e_add(21, 21, 10))                                   // x21 = bitmap
+    w32(k, e_lsr(10, 9, 7))
+    w32(k, e_add(27, 21, 10))                                   // x27 = live-map
+    w32(k, e_add(25, 27, 9))                                    // x25 = live-map-slutt
+    w32(k, e_mov(26, 25))                                       // x26 = mark-stakk
+    w32(k, e_lsr(10, 9, 1))
+    w32(k, e_add(23, 26, 10))                                   // x23 = mark-stakk-slutt
+    w32(k, e_mov(22, 26))
+    w32(k, e_mov(24, 27))
+    // Nullstill bitmapen for [HEAP_VA, x28): (x28 − HEAP_VA)/128 byte, i 16 B-steg (+1).
+    w32(k, e_sub(9, 28, 19))
+    w32(k, e_lsr(9, 9, 11))
+    w32(k, e_add_i(9, 9, 1))
+    w32(k, e_mov(10, 21))
+    la l_bc = lengde(k)
+    w32(k, e_stp_post(31, 31, 10, 16))                          // stp xzr, xzr, [x10], #16
+    w32(k, e_subs_i(9, 9, 1))
+    bc_til(k, l_bc, C_NE())
+    // Rot-skann 1: statisk region [HEAP_VA+STATISK_OFF, gc_lo) (globalar, handlar-/cleanup-postar).
+    la push_kall: liste_heiltall = []
+    w32(k, e_add_i(11, 19, STATISK_OFF()))
+    la l_rs1 = lengde(k)
+    w32(k, e_cmp(11, 20))
+    la p_rs1d = plass(k)                                        // b.hs rs1d
+    w32(k, e_ldr_post(0, 11, 8))
+    legg_til(push_kall, plass(k))                               // bl gc_push
+    b_til(k, l_rs1)
+    patch_bc(k, p_rs1d, lengde(k), C_HS())
+    // Rot-skann 2: maskinstakken [sp, stack_base) — inkl. registera lagra over.
+    w32(k, e_mov_sp(11))
+    w32(k, e_ldr(12, 19, OFF_STAKKBASE()))
+    la l_rs2 = lengde(k)
+    w32(k, e_cmp(11, 12))
+    la p_rs2d = plass(k)
+    w32(k, e_ldr_post(0, 11, 8))
+    legg_til(push_kall, plass(k))
+    b_til(k, l_rs2)
+    patch_bc(k, p_rs2d, lengde(k), C_HS())
+    // DFS-drenering.
+    la lm_ovf: liste_heiltall = []                              // b.hs lm_ovf-stader
+    la l_drain = lengde(k)
+    w32(k, e_cmp(22, 26))
+    la p_drained = plass(k)                                     // b.ls drained
+    w32(k, e_ldr_pre(9, 22, -8))                                // x9 = boks (pop)
+    w32(k, e_movz(10, 16, 0))
+    rek(k, 9, 10, lm_ovf)                                       // live-map: (boks, 16)
+    w32(k, e_ldp(10, 11, 9, 0))                                 // x10 = type, x11 = payload
+    w32(k, e_cmp_i(10, TAGG_TEKST()))
+    la p_str = plass(k)
+    w32(k, e_cmp_i(10, TAGG_LISTE()))
+    la p_lst = plass(k)
+    w32(k, e_cmp_i(10, TAGG_KART()))
+    la p_map = plass(k)
+    w32(k, e_cmp_i(10, TAGG_CLOSURE()))
+    la p_clo = plass(k)
+    w32(k, e_cmp_i(10, TAGG_BYTES()))
+    la p_byt = plass(k)
+    b_til(k, l_drain)                                           // int/bool/desimal/ukjend: blad
+    // Felles payload-prolog: x11 ∈ [gc_lo, bump) og minst `min` byte fram til bump.
+    // Etterpå: x12 = rom (bump − x11 − 8), x13 = [x11] (lengd/tal).
+    la l_str = lengde(k)
+    patch_bc(k, p_str, l_str, C_EQ())
+    payload_prolog(k, l_drain, 8)
+    w32(k, e_cmp(13, 12))
+    bc_til(k, l_drain, C_HI())                                  // VALIDERING: lengd > rom → falsk streng
+    w32(k, e_add_i(13, 13, 8))
+    rek(k, 11, 13, lm_ovf)                                      // live-map: (strdata, 8+lengd)
+    b_til(k, l_drain)
+    la l_lst = lengde(k)
+    patch_bc(k, p_lst, l_lst, C_EQ())
+    patch_bc(k, p_byt, l_lst, C_EQ())
+    payload_prolog(k, l_drain, 8)
+    w32(k, e_lsr(14, 12, 3))                                    // x14 = maks slots
+    w32(k, e_cmp(13, 14))
+    bc_til(k, l_drain, C_HI())                                  // VALIDERING: tal > rom/8 → falsk liste
+    w32(k, e_movz(15, 0, 0))
+    la p_lcap0 = plass(k)                                       // cbz x13, lcap
+    w32(k, e_sub_i(15, 13, 1))
+    w32(k, e_clz(15, 15))
+    w32(k, e_neg(15, 15))
+    w32(k, e_movz(16, 1, 0))
+    w32(k, e_lslv(15, 16, 15))                                  // x15 = next_pow2(tal)
+    w32(k, e_cmp(15, 14))
+    w32(k, e_csel(15, 14, 15, C_HI()))                          // kapasitet ≤ rom
+    la l_lcap = lengde(k)
+    patch_cbz(k, p_lcap0, l_lcap, 13)
+    w32(k, e_lsl(15, 15, 3))
+    w32(k, e_add_i(15, 15, 8))
+    rek(k, 11, 15, lm_ovf)                                      // live-map: (listdata, 8+kap·8)
+    w32(k, e_add_i(16, 11, 8))                                  // x16 = &elem[0]
+    la l_elem = lengde(k)
+    la p_eldone = plass(k)                                      // cbz x13, drain
+    w32(k, e_ldr_post(0, 16, 8))
+    legg_til(push_kall, plass(k))
+    w32(k, e_sub_i(13, 13, 1))
+    b_til(k, l_elem)
+    patch_cbz(k, p_eldone, l_drain, 13)
+    la l_map = lengde(k)
+    patch_bc(k, p_map, l_map, C_EQ())
+    payload_prolog(k, l_drain, 8)
+    w32(k, e_lsr(14, 12, 4))                                    // x14 = maks par
+    w32(k, e_cmp(13, 14))
+    bc_til(k, l_drain, C_HI())                                  // VALIDERING: tal > rom/16 → falskt kart
+    // Registrer toarpotens-klassen (sjå kart_storleik): 8 + min(next_pow2(tal), rom/16)·16.
+    // For kart som er bygde med eksakt storleik (bygg-kart, json) er det meir enn blokka —
+    // det held berre litt ekstra minne i live (aldri for lite, som ville frigjort ein bit
+    // av ei levande mapdata).
+    w32(k, e_movz(15, 0, 0))
+    la p_mcap0 = plass(k)                                       // cbz x13, mcap
+    w32(k, e_sub_i(15, 13, 1))
+    w32(k, e_clz(15, 15))
+    w32(k, e_neg(15, 15))
+    w32(k, e_movz(16, 1, 0))
+    w32(k, e_lslv(15, 16, 15))                                  // x15 = next_pow2(tal)
+    w32(k, e_cmp(15, 14))
+    w32(k, e_csel(15, 14, 15, C_HI()))                          // kapasitet ≤ rom
+    la l_mcap = lengde(k)
+    patch_cbz(k, p_mcap0, l_mcap, 13)
+    w32(k, e_lsl(15, 15, 4))
+    w32(k, e_add_i(15, 15, 8))
+    rek(k, 11, 15, lm_ovf)                                      // live-map: (mapdata, 8+kap·16)
+    w32(k, e_add_i(16, 11, 8))
+    w32(k, e_lsl(13, 13, 1))                                    // 2·tal slots (nøkkel, verdi)
+    b_til(k, l_elem)
+    la l_clo = lengde(k)
+    patch_bc(k, p_clo, l_clo, C_EQ())
+    payload_prolog(k, l_drain, 16)
+    w32(k, e_tst15(11))
+    bc_til(k, l_drain, C_NE())                                  // VALIDERING: closure-data frå __gc_alloc er 16-aligna
+    w32(k, e_movz(15, 16, 0))
+    rek(k, 11, 15, lm_ovf)                                      // live-map: (closure_data, 16)
+    w32(k, e_ldr(0, 11, 8))                                     // capture-kartet
+    legg_til(push_kall, plass(k))
+    b_til(k, l_drain)
+    la l_drained = lengde(k)
+    patch_bc(k, p_drained, l_drained, C_LS())
+    w32(k, e_sub(13, 24, 27))
+    w32(k, e_lsr(13, 13, 4))                                    // n = live-map-entryar (16 B)
+    w32(k, e_str(13, 19, OFF_LIVE_N()))
+    // ── Heapsort av live-map[0..n) (16 B-entryar, sorterer etter adresse; x27 = base) ──
+    la sd_kall: liste_heiltall = []
+    w32(k, e_cmp_i(13, 2))
+    la p_sorted0 = plass(k)                                     // b.lo sorted
+    w32(k, e_lsr(5, 13, 1))
+    w32(k, e_sub_i(5, 5, 1))                                    // i = n/2 − 1
+    la l_build = lengde(k)
+    w32(k, e_cmp_i(5, 0))
+    la p_built = plass(k)                                       // b.lt built
+    w32(k, e_mov(6, 5))
+    w32(k, e_mov(7, 13))
+    legg_til(sd_kall, plass(k))                                 // bl siftdown(i, n)
+    w32(k, e_sub_i(5, 5, 1))
+    b_til(k, l_build)
+    patch_bc(k, p_built, lengde(k), C_LT())
+    w32(k, e_sub_i(5, 13, 1))                                   // slutt = n − 1
+    la l_ext = lengde(k)
+    w32(k, e_cmp_i(5, 0))
+    la p_sorted1 = plass(k)                                     // b.le sorted
+    lm_adr(k, 16, 5)                                            // x16 = &lm[slutt]
+    w32(k, e_ldp(10, 11, 27, 0))
+    w32(k, e_ldp(14, 15, 16, 0))
+    w32(k, e_stp(14, 15, 27, 0))
+    w32(k, e_stp(10, 11, 16, 0))                                // byt lm[0] ↔ lm[slutt]
+    w32(k, e_movz(6, 0, 0))
+    w32(k, e_mov(7, 5))
+    legg_til(sd_kall, plass(k))                                 // bl siftdown(0, slutt)
+    w32(k, e_sub_i(5, 5, 1))
+    b_til(k, l_ext)
+    la l_sorted = lengde(k)
+    patch_bc(k, p_sorted0, l_sorted, C_LO())
+    patch_bc(k, p_sorted1, l_sorted, C_LE())
+    // ── Sweep (full, UTAN prefiks-lekk): prev_end = gc_lo, j = 0 ──
+    w32(k, e_ldr(13, 19, OFF_LIVE_N()))
+    // prev_end startar på gc_lo og j på 0, so holet [gc_lo, lm[0].adr) òg blir frigjort
+    // (x86-feilen i minnet gc-sweep-prefix-leak: prev_end = lm[0].slutt, j = 1 → prefikset
+    // under det lågaste levande objektet lak ein port per collect).
+    w32(k, e_mov(9, 20))                                        // prev_end = gc_lo
+    w32(k, e_movz(10, 0, 0))                                    // j = 0
+    // Segregerte fri-lister (sjå STOR_GRENSE/KLASSAR): små hol (< 1 KiB) i x11-lista, store
+    // i klasselista si (klassetabellen, nullstilt over). Alle med hovud-innsetjing, so
+    // listene står i synkande adresserekkjefølgje (som x86).
+    w32(k, e_movz(11, 0, 0))
+    konst(k, 2, STOR_GRENSE())
+    hvis spor_på() { w32(k, e_movz(3, 0, 0)) w32(k, e_movz(4, 0, 0)) }   // diagnose: tal hol, hol-bytar
+    la l_sw = lengde(k)
+    w32(k, e_cmp(10, 13))
+    la p_swd = plass(k)                                         // b.hs swd
+    pakk_ut(k)                                                  // x14 = adr, x15 = storleik
+    w32(k, e_cmp(14, 9))
+    la p_skip0 = plass(k)                                       // b.ls skip (overlapp/tett)
+    w32(k, e_add_i(17, 9, 15))
+    w32(k, e_and_not15(17, 17))                                 // hol-start = round16(prev_end)
+    w32(k, e_and_not15(12, 14))                                 // hol-slutt = adr & ~15
+    w32(k, e_cmp(12, 17))
+    la p_skip1 = plass(k)                                       // b.ls skip
+    w32(k, e_sub(12, 12, 17))
+    w32(k, e_cmp_i(12, 16))
+    la p_skip2 = plass(k)                                       // b.lo skip
+    w32(k, e_stp(31, 12, 17, 0))                                // node = {neste = 0, storleik}
+    hvis spor_på() { w32(k, e_add_i(3, 3, 1)) w32(k, e_add(4, 4, 12)) }
+    w32(k, e_cmp(12, 2))
+    la p_stor = plass(k)                                        // b.hs stor
+    w32(k, e_str(11, 17, 0))                                    // små: hovud-innsetjing (synkande)
+    w32(k, e_mov(11, 17))
+    la p_innsett = plass(k)                                     // b innsett
+    patch_bc(k, p_stor, lengde(k), C_HS())
+    klasse_slot(k, 12, 5, 19, 6)                                // store: x5 = &klasse[klasse(storleik)]
+    w32(k, e_ldr(6, 5, 0))
+    w32(k, e_str(6, 17, 0))                                     // node.neste = hovud
+    w32(k, e_str(17, 5, 0))                                     // hovud = node
+    patch_b(k, p_innsett, lengde(k))
+    la l_skip = lengde(k)
+    patch_bc(k, p_skip0, l_skip, C_LS())
+    patch_bc(k, p_skip1, l_skip, C_LS())
+    patch_bc(k, p_skip2, l_skip, C_LO())
+    w32(k, e_add(15, 14, 15))                                   // slutt
+    w32(k, e_cmp(15, 28))
+    w32(k, e_csel(15, 28, 15, C_HI()))                          // klamp til bump
+    w32(k, e_cmp(15, 9))
+    w32(k, e_csel(9, 15, 9, C_HI()))                            // prev_end = max
+    w32(k, e_add_i(10, 10, 1))
+    b_til(k, l_sw)
+    la l_swd = lengde(k)
+    patch_bc(k, p_swd, l_swd, C_HS())
+    hvis spor_på() { w32(k, e_str(3, 19, OFF_D_HOL())) w32(k, e_str(4, 19, OFF_D_HOLB())) }
+    w32(k, e_str(11, 19, OFF_FRI()))
+    w32(k, e_cmp(9, 28))
+    w32(k, 0x54000042)                                          // b.hs +2 (ingen hale-reset)
+    w32(k, e_mov(28, 9))                                        // bump = slutten på høgaste levande
+    // ── Port og teljarar ──
+    w32(k, e_str(28, 19, OFF_BUMP()))
+    w32(k, e_str(28, 19, OFF_SIST()))
+    w32(k, e_str(31, 19, OFF_ALLOC()))
+    w32(k, e_ldr(9, 19, OFF_LIVE_N()))
+    w32(k, e_lsl(9, 9, 6))                                      // 64 B × live-entryar
+    konst(k, 10, PORT_GOLV())
+    w32(k, e_cmp(9, 10))
+    w32(k, e_csel(9, 9, 10, C_HI()))                            // port = max(64·n, golv)
+    grense_minus(k, 11, 19, 10, SOFT_AVSTAND())                 // x11 = SOFT (x10 blir sett under)
+    w32(k, e_subs(12, 11, 28))
+    w32(k, e_csel(12, 12, 31, C_HI()))                          // rom = SOFT − bump (0 over SOFT)
+    konst(k, 10, hl.GC_SOFT_BUDGET())
+    w32(k, e_cmp(12, 10))
+    w32(k, e_csel(12, 12, 10, C_HI()))                          // max(rom, 8 MiB)
+    w32(k, e_cmp(9, 12))
+    w32(k, e_csel(9, 12, 9, C_HI()))                            // port = min(port, max(rom, budsjett))
+    w32(k, e_str(9, 19, OFF_PORT()))
+    w32(k, e_ldr(9, 19, OFF_COLLECTS()))
+    w32(k, e_add_i(9, 9, 1))
+    w32(k, e_str(9, 19, OFF_COLLECTS()))
+    hvis spor_på() { spor(k, os) }
+    grense_minus(k, 11, 19, 10, HARD_AVSTAND())                 // x11 = HARD
+    w32(k, e_cmp(28, 11))
+    la p_hard = plass(k)                                        // b.hs oom
+    // ── Gjenopprett ──
+    w32(k, e_ldr(9, 31, 240))
+    w32(k, e_msr_nzcv(9))
+    r = 0
+    mens r < 28 {
+        w32(k, e_ldp(r, r + 1, 31, r * 8))
+        r = r + 2
+    }
+    w32(k, e_ldp(29, 30, 31, 224))
+    w32(k, e_add_sp(256))
+    w32(k, e_ret())
+    // ── gc_push(x0): range/alignment-filter + mark-bit test-og-set VED PUSH (dedup) ──
+    la l_push = lengde(k)
+    w32(k, e_cmp(0, 20))
+    la p_pr1 = plass(k)                                         // b.lo ret
+    w32(k, e_cmp(0, 28))
+    la p_pr2 = plass(k)                                         // b.hs ret
+    w32(k, e_tst15(0))
+    la p_pr3 = plass(k)                                         // b.ne ret (berre 16-aligna er boksar)
+    w32(k, e_sub(1, 0, 19))
+    w32(k, e_lsr(1, 1, 4))                                      // slot
+    w32(k, e_lsr(2, 1, 3))
+    w32(k, e_add(2, 2, 21))                                     // byte-adresse i bitmapen
+    w32(k, e_ldrb(3, 2, 0))
+    w32(k, e_and7(1, 1))
+    w32(k, e_movz(4, 1, 0))
+    w32(k, e_lslv(4, 4, 1))
+    w32(k, e_tst(3, 4))
+    la p_pr4 = plass(k)                                         // b.ne ret (alt merkt)
+    w32(k, e_orr(3, 3, 4))
+    w32(k, e_strb(3, 2, 0))
+    w32(k, e_cmp(22, 23))
+    la p_msovf = plass(k)                                       // b.hs mark-stakk-overflow
+    w32(k, e_str_post(0, 22, 8))
+    la l_pret = lengde(k)
+    patch_bc(k, p_pr1, l_pret, C_LO())
+    patch_bc(k, p_pr2, l_pret, C_HS())
+    patch_bc(k, p_pr3, l_pret, C_NE())
+    patch_bc(k, p_pr4, l_pret, C_NE())
+    w32(k, e_ret())
+    for pk i push_kall { patch_bl(k, pk, l_push) }
+    // ── siftdown(x6 = rot, x7 = slutt) over live-map (x27, 16 B-entryar, nøkkel = adresse) ──
+    // Scratch: x1–x4 (gc_push er ikkje i bruk under sorteringa), x8, x10, x14–x17.
+    la l_sd = lengde(k)
+    w32(k, e_lsl(8, 6, 1))
+    w32(k, e_add_i(8, 8, 1))                                    // barn = 2·rot + 1
+    w32(k, e_cmp(8, 7))
+    la p_sdret0 = plass(k)                                      // b.hs ret
+    w32(k, e_add_i(10, 8, 1))
+    w32(k, e_cmp(10, 7))
+    la p_nosib0 = plass(k)                                      // b.hs nosib
+    lm_adr(k, 16, 10)
+    w32(k, e_ldr(14, 16, 0))
+    lm_adr(k, 17, 8)
+    w32(k, e_ldr(15, 17, 0))
+    w32(k, e_cmp(14, 15))
+    la p_nosib1 = plass(k)                                      // b.ls nosib
+    w32(k, e_mov(8, 10))
+    la l_nosib = lengde(k)
+    patch_bc(k, p_nosib0, l_nosib, C_HS())
+    patch_bc(k, p_nosib1, l_nosib, C_LS())
+    lm_adr(k, 16, 6)
+    w32(k, e_ldr(14, 16, 0))
+    lm_adr(k, 17, 8)
+    w32(k, e_ldr(15, 17, 0))
+    w32(k, e_cmp(14, 15))
+    la p_sdret1 = plass(k)                                      // b.hs ret (rot ≥ barn)
+    w32(k, e_ldp(1, 2, 16, 0))
+    w32(k, e_ldp(3, 4, 17, 0))
+    w32(k, e_stp(3, 4, 16, 0))
+    w32(k, e_stp(1, 2, 17, 0))                                  // byt lm[rot] ↔ lm[barn]
+    w32(k, e_mov(6, 8))
+    b_til(k, l_sd)
+    la l_sdret = lengde(k)
+    patch_bc(k, p_sdret0, l_sdret, C_HS())
+    patch_bc(k, p_sdret1, l_sdret, C_HS())
+    w32(k, e_ret())
+    for sk i sd_kall { patch_bl(k, sk, l_sd) }
+    // ── Fatale utgangar (aldri stille korrupsjon) ──
+    la l_lmovf = lengde(k)
+    for lp i lm_ovf { patch_bc(k, lp, l_lmovf, C_HS()) }
+    fatal(k, "FEIL: GC live-map overflow (arm64, > G/16 entryar) - exit 198\n", 198, os)
+    la l_msovf = lengde(k)
+    patch_bc(k, p_msovf, l_msovf, C_HS())
+    fatal(k, "FEIL: GC mark-stakk overflow (arm64) - exit 198\n", 198, os)
+    la l_hard = lengde(k)
+    patch_bc(k, p_hard, l_hard, C_HS())
+    fatal(k, "norscode: GC-heap full (arm64, levande over hard grense etter collect) - avsluttar (exit 199)\n", 199, os)
+    returner k
+}
+
+// Felles validering av payload-peikaren i x11 (etter `ldp x10, x11, [boks]`): x11 ∈
+// [gc_lo, bump) og minst `min` byte fram til bump; set x12 = rom etter 8 B-hovudet og
+// x13 = [x11]. Feil → tilbake til drain (boksen er registrert, payloaden ikkje følgd).
+funksjon payload_prolog(k: liste_heiltall, l_drain: heiltall, min: heiltall) -> heiltall {
+    w32(k, e_cmp(11, 20))
+    bc_til(k, l_drain, C_LO())
+    w32(k, e_cmp(11, 28))
+    bc_til(k, l_drain, C_HS())
+    w32(k, e_sub(12, 28, 11))
+    w32(k, e_cmp_i(12, min))
+    bc_til(k, l_drain, C_LO())
+    w32(k, e_sub_i(12, 12, 8))
+    w32(k, e_ldr(13, 11, 0))
+    returner 0
+}
+
+// Xut = &klasse[klasse(Xs)] (klassetabellen ved Xheap + KLASSE_OFF): klasse = min(⌊log2 s⌋ − 10,
+// KLASSAR − 1) for s ≥ STOR_GRENSE. Xtmp blir klobba. Alle fire register må vere ulike.
+funksjon klasse_slot(k: liste_heiltall, s: heiltall, ut: heiltall, heap: heiltall, tmp: heiltall) -> heiltall {
+    w32(k, e_clz(tmp, s))
+    w32(k, e_movz(ut, 53, 0))
+    w32(k, e_sub(tmp, ut, tmp))                                 // c = 53 − clz(s) = ⌊log2 s⌋ − 10
+    w32(k, e_cmp_i(tmp, KLASSAR() - 1))
+    w32(k, e_movz(ut, KLASSAR() - 1, 0))
+    w32(k, e_csel(tmp, ut, tmp, C_HI()))                        // c = min(c, KLASSAR − 1)
+    w32(k, e_add_i(ut, heap, KLASSE_OFF()))
+    w32(k, e_add_lsl(ut, ut, tmp, 3))                           // ut = &klasse[c]
+    returner 0
+}
+
+// Tøm klassetabellen og skjer-regionen [Xheap + KLASSE_OFF, Xheap + OFF_SKJER + 16).
+funksjon nullstill_klassar(k: liste_heiltall, heap: heiltall) -> heiltall {
+    la i = 0
+    mens i < KLASSAR() + 2 {
+        w32(k, e_stp(31, 31, heap, KLASSE_OFF() + i * 8))
+        i = i + 2
+    }
+    returner 0
+}
+
+// Live-map-entry (16 B): {Xadr, Xstorleik} → [x24], x24 += 16, med overflow-sjekk (b.hs
+// lm_ovf, patcha seinare). (a34 pakka entryen i 8 B med offset << 32, som krev ein heap under
+// 4 GiB; her er heapen G ≤ 64 GiB.)
+funksjon rek(k: liste_heiltall, adr: heiltall, storleik: heiltall, lm_ovf) -> heiltall {
+    w32(k, e_cmp(24, 25))
+    legg_til(lm_ovf, plass(k))
+    w32(k, e_stp_post(adr, storleik, 24, 16))
+    returner 0
+}
+// Xut = &live-map[Xi] = x27 + Xi·16.
+funksjon lm_adr(k: liste_heiltall, ut: heiltall, i: heiltall) -> heiltall {
+    returner w32(k, e_add_lsl(ut, 27, i, 4))
+}
+// Live-map[x10] → x14 = adr, x15 = storleik (scratch x16).
+funksjon pakk_ut(k: liste_heiltall) -> heiltall {
+    lm_adr(k, 16, 10)
+    w32(k, e_ldp(14, 15, 16, 0))
+    returner 0
+}
+
+// DIAGNOSE (NORSCODE_GC_SPOR=1 ved codegen, som x86): etter kvar collect skriv stubben
+// «gc <collects> bump+<hex> live=<hex>\n» til stderr (bump som offset frå HEAP_VA).
+funksjon spor_på() -> boolsk {
+    la v = ""
+    prøv { v = miljo_hent("NORSCODE_GC_SPOR") } fang (e) { v = "" }
+    returner v == "1"
+}
+// Skriv teksten `s` byte for byte gjennom skrivepeikaren x0 (scratch x1).
+funksjon spor_tekst(k: liste_heiltall, s: tekst) -> heiltall {
+    la ci = 0
+    mens ci < lengde(s) {
+        w32(k, e_movz(1, builtin.char_code(builtin.slice(s, ci, ci + 1)), 0))
+        w32(k, 0x38001401)                                      // strb w1, [x0], #1
+        ci = ci + 1
+    }
+    returner 0
+}
+// Skriv [HEAP+off] (off 0 → bump − HEAP_VA; off −1 → lm[0].adr − HEAP_VA, det lågaste
+// levande objektet etter sorteringa) som 8 hex-siffer gjennom x0 (scratch x1, x2).
+funksjon spor_hex(k: liste_heiltall, off: heiltall) -> heiltall {
+    hvis off < 0 {
+        w32(k, e_ldr(1, 27, 0))
+        w32(k, e_sub(1, 1, 19))                                 // x1 = lm[0].adr − HEAP_VA
+    } ellers {
+        w32(k, e_ldr(1, 19, off))
+    }
+    hvis off == 0 { w32(k, e_sub(1, 1, 19)) }
+    la h = 7
+    mens h >= 0 {
+        w32(k, e_lsr(2, 1, h * 4))
+        w32(k, 0x92400C42)                                      // and x2, x2, #15
+        w32(k, e_cmp_i(2, 10))
+        w32(k, e_add_i(2, 2, 48))                               // '0' + d (flagga frå cmp står)
+        w32(k, 0x54000043)                                      // b.lo +2
+        w32(k, e_add_i(2, 2, 39))                               // → 'a' + d − 10
+        w32(k, 0x38001402)                                      // strb w2, [x0], #1
+        h = h - 1
+    }
+    returner 0
+}
+funksjon spor(k: liste_heiltall, os: tekst) -> heiltall {
+    // 113 byte i ei 128 B-ramme på stakken: "gc " + 8 hex (collects) + " bump+" + 8 hex +
+    // " live=" + 8 hex + " lav+" + 8 hex (lågaste levande − HEAP_VA; prefiks-holet er
+    // [gc_lo, lav)) + " fr+"/" fl+" (frontvekst / fri-liste-bytar i syklusen) + " hol="/" holb="
+    // (tal hol / hol-bytar etter sweepen), 8 hex kvar, + "\n".
+    w32(k, e_sub_sp(128))
+    w32(k, e_mov_sp(0))
+    spor_tekst(k, "gc ")
+    spor_hex(k, OFF_COLLECTS())
+    spor_tekst(k, " bump+")
+    spor_hex(k, 0)
+    spor_tekst(k, " live=")
+    spor_hex(k, OFF_LIVE_N())
+    spor_tekst(k, " lav+")
+    spor_hex(k, -1)
+    spor_tekst(k, " fr+")
+    spor_hex(k, OFF_D_FRONT())
+    spor_tekst(k, " fl+")
+    spor_hex(k, OFF_D_FL())
+    spor_tekst(k, " hol=")
+    spor_hex(k, OFF_D_HOL())
+    spor_tekst(k, " holb=")
+    spor_hex(k, OFF_D_HOLB())
+    spor_tekst(k, "\n")
+    w32(k, e_mov_sp(1))
+    w32(k, e_sub(2, 0, 1))                                      // lengd
+    w32(k, e_movz(0, 2, 0))                                     // stderr
+    syscall(k, 64, 4, os)
+    w32(k, e_add_sp(128))
+    returner 0
+}
+
+// Legg __gc_alloc / __gc_collect til imaget når eit bl-/lamaddr-mål peikar dit (felles
+// for dei tre link-vegane i macho_arm64_codegen, som __str_cmp).
+funksjon legg_til_rutinar(all_patchar, image: liste_heiltall, fn_start, os: tekst) -> heiltall {
+    la treng_alloc = usann
+    la treng_collect = usann
+    for pt i all_patchar {
+        hvis pt[1] == "__gc_alloc" { treng_alloc = sann }
+        hvis pt[1] == "__gc_collect" { treng_collect = sann }
+    }
+    hvis treng_alloc {
+        fn_start["__gc_alloc"] = lengde(image)
+        for b i alloc_rutine(os) { legg_til(image, b) }
+    }
+    hvis treng_collect {
+        fn_start["__gc_collect"] = lengde(image)
+        for b i collect_rutine(os) { legg_til(image, b) }
+    }
+    returner 0
+}

@@ -1,0 +1,115 @@
+// GC-probe (A4, AArch64): markøren må ikkje følgje FALSKE liste/kart/streng-objekt —
+// sjølvsjekkande, GC-modus (NORSCODE_GC_ALLOC=1 ved codegen). ARM64-spegelen av
+// gc_falsk_liste_probe.no (x86, fdda014): same mønster, ARM64-layout.
+//
+// ARM64-layout: boks = [tagg][val] (3 = tekst, 4 = liste, 5 = kart), strdata = [lengd][byte],
+// listdata = [tal][peikarar …], mapdata = [tal][nøkkel, verdi …]. Heapen ligg på HEAP_VA
+// (linux-arm64 0x10_0000_0000, macos-arm64 0xC0_0000_0000), so ein PEIKAR-verdi lesen som
+// «tal» er ≥ 2^36. Proben plantar 480 falske boksar i byte-området til ein stor levande streng
+// (strengbyte blir aldri skanna som peikarar) og lèt ei levande liste r peike på dei:
+//   type 0: liste [4][FP], FP = [HEAP_VA][…]        (tal = peikar-verdi)
+//   type 1: kart  [5][FP], FP = [HEAP_VA + 8][…]    (tal = peikar-verdi)
+//   type 2: tekst [3][FP], FP = [HEAP_VA][…]        (lengd = peikar-verdi)
+// Med strukturvalideringa (tal/lengd mot rommet opp til bump) blir dei avviste og collect tek
+// ~0 ms. Utan ho følgjer markøren 2^36 «element» gjennom heapen til vaktsona ved HEAP_VA +
+// 1,5 GiB (SIGSEGV) — negativ kontroll i a4-rapporten: kryss-codegen bygd frå ei arm64_gc.no
+// utan dei fire VALIDERING-sjekkane gjev exit 139.
+// Proben kontrollerer òg at ekte levande data (kanari-lista, strengen) overlever urørt.
+// Exit: 0 = OK · 2 = levande data øydelagde · 3 = for treg (> 1000 ms) · 4 = ugyldig måling.
+funksjon start() -> heiltall {
+    la kanari: liste = []
+    la c: heiltall = 0
+    mens c < 2000 {
+        legg_til(kanari, "k" + tekst(c))
+        c = c + 1
+    }
+    // 64 KiB streng: byte-område til dei falske boksane.
+    la s: tekst = "abcdefgh"
+    la d: heiltall = 0
+    mens d < 13 {
+        s = s + s
+        d = d + 1
+    }
+    la slen: heiltall = lengde(s)
+    la hb: heiltall = builtin.heap_bump()
+    la hv: heiltall = hb - (hb % 68719476736)
+    hvis hv != 68719476736 og hv != 824633720832 {
+        skriv("gc_falsk_liste_arm64 UGYLDIG: HEAP_VA " + tekst(hv) + " er ikkje ein arm64-heap\n")
+        returner 4
+    }
+    la sp: heiltall = builtin.raw_load64(builtin.obj_addr(s) + 8)
+    hvis sp < hv eller sp >= builtin.heap_bump() {
+        skriv("gc_falsk_liste_arm64 UGYLDIG: strdata " + tekst(sp) + " ligg ikkje i heapen\n")
+        returner 4
+    }
+    la base: heiltall = sp + 32 - ((sp + 32) % 16)
+    la nfalske: heiltall = 480
+    la r: liste = []
+    la i: heiltall = 0
+    mens i < nfalske {
+        legg_til(r, 0)
+        i = i + 1
+    }
+    la rp: heiltall = builtin.raw_load64(builtin.obj_addr(r) + 8)
+    la null_boks: heiltall = builtin.raw_load64(rp + 8)
+    la t0: heiltall = tid_ms()
+    i = 0
+    mens i < nfalske {
+        la f: heiltall = base + i * 64
+        la fp: heiltall = f + 16
+        la typ: heiltall = i % 3
+        hvis typ == 0 {
+            builtin.raw_store64(fp, hv)
+            builtin.raw_store64(fp + 8, hv)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 4)
+        }
+        hvis typ == 1 {
+            builtin.raw_store64(fp, hv + 8)
+            builtin.raw_store64(fp + 8, hv)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 5)
+        }
+        hvis typ == 2 {
+            builtin.raw_store64(fp, hv)
+            builtin.raw_store64(f + 8, fp)
+            builtin.raw_store64(f, 3)
+        }
+        builtin.raw_store64(rp + 8 + i * 8, f)
+        i = i + 1
+    }
+    builtin.gc_collect_native()
+    la ms: heiltall = tid_ms() - t0
+    // Set r attende til ekte NcVal-ar før lista blir brukt.
+    i = 0
+    mens i < nfalske {
+        builtin.raw_store64(rp + 8 + i * 8, null_boks)
+        i = i + 1
+    }
+    hvis lengde(r) != nfalske {
+        skriv("gc_falsk_liste_arm64 FEIL: holdelista har lengd " + tekst(lengde(r)) + "\n")
+        returner 2
+    }
+    c = 0
+    mens c < 2000 {
+        hvis kanari[c] != "k" + tekst(c) {
+            skriv("gc_falsk_liste_arm64 FEIL: kanari[" + tekst(c) + "] øydelagd\n")
+            returner 2
+        }
+        c = c + 1
+    }
+    hvis lengde(s) != slen {
+        skriv("gc_falsk_liste_arm64 FEIL: strenglengd endra\n")
+        returner 2
+    }
+    hvis builtin.slice(s, slen - 8, slen) != "abcdefgh" {
+        skriv("gc_falsk_liste_arm64 FEIL: strenghalen endra\n")
+        returner 2
+    }
+    hvis ms > 1000 {
+        skriv("gc_falsk_liste_arm64 FEIL: collect med " + tekst(nfalske) + " falske objekt tok " + tekst(ms) + " ms (> 1000 ms: markøren følgde dei)\n")
+        returner 3
+    }
+    skriv("gc_falsk_liste_arm64 OK: " + tekst(nfalske) + " falske liste/kart/tekst-boksar avviste, collect " + tekst(ms) + " ms, levande data urørte\n")
+    returner 0
+}

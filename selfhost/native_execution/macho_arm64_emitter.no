@@ -147,16 +147,14 @@ funksjon signatur_blob(code_hashar: liste_heiltall, code_limit: heiltall, code_s
     returner ut
 }
 
-funksjon byte_omraade(bytes: liste_heiltall, start: heiltall, slutt: heiltall) -> liste_heiltall {
-    la ut: liste_heiltall = []
-    la i = start
-    mens i < slutt { u8(ut, bytes[i]) i = i + 1 }
-    returner ut
-}
-
 // Bruk native SHA-256 når runtime-ABI-en har den, men behold rein Norscode
 // som bootstrap-/pure-VM-fallback. Bytes-vegen er bytebevarande også for NUL.
+// M1: sha256_bytes_hex fyrst — det er det native x86-atomet (native_codegen_v2), og kryss-
+// codegen-en (bygd utan std.native_gap i bunten) rutar elles builtin.sha256_bytes til den
+// reine std.sha256.hash_bytes. Då kosta sidehashane for eit 12 MB nc_main (3000 sider) fleire
+// GB søppel på bump-heapen (GC-heap full, 88 s); med atomet tek dei under eitt sekund.
 funksjon hash_bytes_rask(bytes: liste_heiltall) -> tekst {
+    prøv { returner builtin.sha256_bytes_hex(bytes) } fang (e) { }
     prøv { returner builtin.sha256_bytes(bytes) } fang (e) { }
     returner sha256.hash_bytes(bytes)
 }
@@ -191,7 +189,44 @@ funksjon exports_trie_exit() -> liste_heiltall {
     ]
 }
 
-funksjon bygg_program(kode: liste_heiltall) -> liste_heiltall {
+// M1: Mach-O-biletet er hode ‖ kode ‖ hale ‖ signatur:
+//   hode      mach_header_64 + load commands (kode_offset byte);
+//   hale      __TEXT-fyll etter koden + __LINKEDIT-innhaldet fram til signaturen;
+//   signatur  ad-hoc SuperBlob med SHA-256 per 4 KiB-side over hode ‖ kode ‖ hale.
+// Sidehashane blir rekna over den virtuelle samankoplinga (virtuell_side), so store program
+// ikkje treng ein kopi av koden i minnet: skriv_program strøymer delane til fil. Før bygde
+// bygg_program eit nytt 12 M-element-bilete av nc_main, og samla levande sett (kode, kopien
+// og veksten hans) sprengde 1 GiB-heapen til kryss-codegen-en på x86 (GC-heap full).
+funksjon virtuell_side(hode: liste_heiltall, kode: liste_heiltall, hale: liste_heiltall, start: heiltall, slutt: heiltall) -> liste_heiltall {
+    la ko = lengde(hode)
+    la ke = ko + lengde(kode)
+    hvis start >= ko og slutt <= ke {
+        // Heile sida ligg i koden: éin native delliste-kopi (list_slice). Runtimar der
+        // slice på lister ikkje gjev ei liste, fell til byte-løkka under.
+        la del = []
+        la del_ok = usann
+        prøv {
+            del = builtin.slice(kode, start - ko, slutt - ko)
+            del_ok = builtin.type(del) == "liste" og lengde(del) == slutt - start
+        } fang (e) { del_ok = usann }
+        hvis del_ok { returner del }
+    }
+    la ut: liste_heiltall = []
+    la p = start
+    mens p < slutt {
+        hvis p < ko {
+            u8(ut, hode[p])
+        } ellers hvis p < ke {
+            u8(ut, kode[p - ko])
+        } ellers {
+            u8(ut, hale[p - ke])
+        }
+        p = p + 1
+    }
+    returner ut
+}
+
+funksjon bygg_delar(kode: liste_heiltall) -> ordbok {
     la ut: liste_heiltall = []
     la base: heiltall = 0x100000000
     la header_lengd = 32
@@ -366,28 +401,30 @@ funksjon bygg_program(kode: liste_heiltall) -> liste_heiltall {
 
     hvis lengde(ut) != kode_offset { kast "Mach-O header/load-command-lengd er inkonsistent" }
     la i = 0
-    mens i < lengde(kode) { u8(ut, kode[i]) i = i + 1 }
-    pad(ut, tekst_seg)
+    // Halen: __TEXT-fyll etter koden + __LINKEDIT-innhaldet fram til signaturen.
+    la kode_slutt = kode_offset + lengde(kode)
+    la hale: liste_heiltall = []
+    pad(hale, tekst_seg - kode_slutt)
     la fixups = chained_fixups_tom()
     i = 0
-    mens i < lengde(fixups) { u8(ut, fixups[i]) i = i + 1 }
+    mens i < lengde(fixups) { u8(hale, fixups[i]) i = i + 1 }
     la exports = exports_trie_exit()
     i = 0
-    mens i < lengde(exports) { u8(ut, exports[i]) i = i + 1 }
-    pad(ut, tekst_seg + 104)
+    mens i < lengde(exports) { u8(hale, exports[i]) i = i + 1 }
+    pad(hale, tekst_seg + 104 - kode_slutt)
     // To eksternt definerte symbol: __mh_execute_header og _main.
-    u32(ut, 2)
-    u8(ut, 0x0F)
-    u8(ut, 1)
-    u8(ut, 0x10)
-    u8(ut, 0)
-    u64(ut, base)
-    u32(ut, 22)
-    u8(ut, 0x0F)
-    u8(ut, 1)
-    u8(ut, 0)
-    u8(ut, 0)
-    u64(ut, base + kode_offset)
+    u32(hale, 2)
+    u8(hale, 0x0F)
+    u8(hale, 1)
+    u8(hale, 0x10)
+    u8(hale, 0)
+    u64(hale, base)
+    u32(hale, 22)
+    u8(hale, 0x0F)
+    u8(hale, 1)
+    u8(hale, 0)
+    u8(hale, 0)
+    u64(hale, base + kode_offset)
     // 32-byte stringtabell, same indeksar som nlist_64 over.
     la strtab: liste_heiltall = [
         0x20, 0x00, 0x5F, 0x5F, 0x6D, 0x68, 0x5F, 0x65,
@@ -396,26 +433,78 @@ funksjon bygg_program(kode: liste_heiltall) -> liste_heiltall {
         0x61, 0x69, 0x6E, 0x00, 0x00, 0x00, 0x00, 0x00
     ]
     i = 0
-    mens i < lengde(strtab) { u8(ut, strtab[i]) i = i + 1 }
+    mens i < lengde(strtab) { u8(hale, strtab[i]) i = i + 1 }
     // ULEB128-delta 696 til _main, deretter sluttmarkør.
-    u8(ut, 0xB8)
-    u8(ut, 0x05)
-    u8(ut, 0)
-    pad(ut, tekst_seg + 176)
-    pad(ut, signatur_offset)
+    u8(hale, 0xB8)
+    u8(hale, 0x05)
+    u8(hale, 0)
+    pad(hale, tekst_seg + 176 - kode_slutt)
+    pad(hale, signatur_offset - kode_slutt)
     la hashar: liste_heiltall = []
     la side = 0
     mens side < sider {
-        la side_hash = hex_til_bytes(hash_bytes_rask(byte_omraade(ut, side * 4096, (side + 1) * 4096)))
+        la side_hash = hex_til_bytes(hash_bytes_rask(virtuell_side(ut, kode, hale, side * 4096, (side + 1) * 4096)))
         i = 0
         mens i < lengde(side_hash) { u8(hashar, side_hash[i]) i = i + 1 }
         side = side + 1
     }
     la signatur = signatur_blob(hashar, signatur_offset, sider, lengde(kode))
     hvis lengde(signatur) != signatur_lengd { kast "Mach-O signaturlengd er inkonsistent" }
-    i = 0
-    mens i < lengde(signatur) { u8(ut, signatur[i]) i = i + 1 }
+    returner {"hode": ut, "hale": hale, "signatur": signatur}
+}
+
+funksjon bygg_program(kode: liste_heiltall) -> liste_heiltall {
+    la delar = bygg_delar(kode)
+    la ut: liste_heiltall = []
+    for b i delar["hode"] { u8(ut, b) }
+    // O(n): for-iterasjon, ikkje kode[i] (indeksert lese er O(n) i tolken).
+    for b i kode { u8(ut, b) }
+    for b i delar["hale"] { u8(ut, b) }
+    for b i delar["signatur"] { u8(ut, b) }
     returner ut
+}
+
+// Legg bytes til fila i bitar på 512 KiB: fil_append_binær på x86-verten går via
+// bytes_to_text, som klemmer til 1 MiB (stakkbuffer) — eitt kall med heile koden skreiv
+// berre den første MiB-en.
+funksjon append_i_bitar(sti: tekst, bytes: liste_heiltall) -> heiltall {
+    la bit = 524288
+    la n = lengde(bytes)
+    hvis n <= bit {
+        builtin.fil_append_binær(sti, bytes)
+        returner n
+    }
+    la a = 0
+    mens a < n {
+        la b = a + bit
+        hvis b > n { b = n }
+        la del = []
+        la del_ok = usann
+        prøv {
+            del = builtin.slice(bytes, a, b)
+            del_ok = builtin.type(del) == "liste" og lengde(del) == b - a
+        } fang (e) { del_ok = usann }
+        hvis ikkje del_ok {
+            del = []
+            la p = a
+            mens p < b { u8(del, bytes[p]) p = p + 1 }
+        }
+        builtin.fil_append_binær(sti, del)
+        a = b
+    }
+    returner n
+}
+
+// Skriv Mach-O-biletet direkte til fil i fire delar (same bytes som bygg_program), utan
+// ein samla kopi av koden. Returnerer talet på byte.
+funksjon skriv_program(sti: tekst, kode: liste_heiltall) -> heiltall {
+    la delar = bygg_delar(kode)
+    builtin.fil_skriv_binær(sti, delar["hode"])
+    la n = lengde(delar["hode"])
+    n = n + append_i_bitar(sti, kode)
+    n = n + append_i_bitar(sti, delar["hale"])
+    n = n + append_i_bitar(sti, delar["signatur"])
+    returner n
 }
 
 funksjon bygg_exit(exitkode: heiltall) -> liste_heiltall {

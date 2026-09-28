@@ -1,0 +1,866 @@
+// selfhost/native_execution/arm64_krypto.no
+// AArch64-krypto-atom for ARM64-codegen-en (macho_arm64_codegen, delt av linux-arm64-ELF og
+// macos-arm64-Mach-O): argon2_compress, blake2b_compress og bn_modexp_bytes. Same kontrakt som
+// x86-64-atoma i native_codegen_v2 (fasit er dei reine Norscode-implementasjonane
+// std.argon2id_pure._compress_pure, std.blake2b._compress_pure og std.bigint.modexp_rein):
+//
+//   builtin.argon2_compress(x, y, gammel, xor_gammel) → ny 256-u32-liste (RFC 9106 §3.5 G)
+//   builtin.blake2b_compress(h, blokk, total, siste)  → ny 16-u32-liste (RFC 7693 F)
+//   builtin.bn_modexp_bytes(base_be, exp_be, mod_be)   → byteliste (big-endian, signifikante
+//                                                        modulbytar lang)
+//
+// Utan desse var dei NATIV-GAP-stubbar på ARM64 (kallarane fanga unnataket og fall til rein
+// Norscode i VM-en). Ugyldig inndata gjev null (argon2/blake2b: ikkje liste, for kort) eller tom
+// liste (modexp: partal/null-modul, > 4096 bit, element utanfor [0, 255]), og kallarane fell
+// då til den reine vegen som før.
+//
+// Kvar atom er ei delt rutine (bl-mål "__argon2_compress", "__blake2b_compress", "__bn_modexp")
+// som blir lagd til imaget berre når eit kall peikar dit (legg_til_rutinar). Kallkonvensjon:
+// argument (NcVal-peikarar) i x0..x3, resultat i x0. Rutinane rører berre x0–x17 (og x28 i
+// bump-modus) — x19–x27 (operandregister, globalar), x28 i GC-modus og x29/x30 er bevarte.
+// Allokering skjer berre ved slutten (resultatlista), via __gc_alloc i GC-modus (agc.alloc_*,
+// bevarer alle andre register) eller ved fronten (x28) utan GC. Ingen safepoint inni → ingen
+// collect medan rå peikarar er levande.
+
+bruk selfhost.native_execution.arm64_gc som agc
+
+funksjon w(k: liste_heiltall, v: heiltall) -> heiltall { returner agc.w32(k, v) }
+
+// ── Enkodarar som arm64_gc ikkje har ────────────────────────────────────────────────
+funksjon e_eor(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xCA000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_and(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x8A000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_orr_lsl(rd: heiltall, rn: heiltall, rm: heiltall, sh: heiltall) -> heiltall { returner 0xAA000000 | (rm << 16) | (sh << 10) | (rn << 5) | rd }
+funksjon e_add_lsl(rd: heiltall, rn: heiltall, rm: heiltall, sh: heiltall) -> heiltall { returner 0x8B000000 | (rm << 16) | (sh << 10) | (rn << 5) | rd }
+funksjon e_ror(rd: heiltall, rn: heiltall, n: heiltall) -> heiltall { returner 0x93C00000 | (rn << 16) | (n << 10) | (rn << 5) | rd }   // extr rd, rn, rn, #n
+funksjon e_umull(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9BA07C00 | (rm << 16) | (rn << 5) | rd }        // umaddl xd, wn, wm, xzr
+funksjon e_mul(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9B007C00 | (rm << 16) | (rn << 5) | rd }
+funksjon e_umulh(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9BC07C00 | (rm << 16) | (rn << 5) | rd }
+funksjon e_adds(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xAB000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_adc(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9A000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_adcs(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xBA000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_sbcs(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0xFA000000 | (rm << 16) | (rn << 5) | rd }
+funksjon e_cset(rd: heiltall, cond: heiltall) -> heiltall { returner 0x9A9F07E0 | ((cond ^ 1) << 12) | rd }
+funksjon e_csetm(rd: heiltall, cond: heiltall) -> heiltall { returner 0xDA9F03E0 | ((cond ^ 1) << 12) | rd }
+funksjon e_ccmp7_ne(rn: heiltall) -> heiltall { returner 0xFA471800 | (rn << 5) | 4 }                                             // ccmp xn, #7, #4, ne
+funksjon e_ldr_w(rt: heiltall, rn: heiltall, off: heiltall) -> heiltall { returner 0xB9400000 | ((off / 4) << 10) | (rn << 5) | rt }
+funksjon e_add_i12(rd: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0x91400000 | (imm << 10) | (rn << 5) | rd }  // add rd, rn, #imm, lsl #12
+funksjon e_sub_i12(rd: heiltall, rn: heiltall, imm: heiltall) -> heiltall { returner 0xD1400000 | (imm << 10) | (rn << 5) | rd }
+funksjon e_and_ff(rd: heiltall, rn: heiltall) -> heiltall { returner 0x92401C00 | (rn << 5) | rd }
+funksjon e_and_f(rd: heiltall, rn: heiltall) -> heiltall { returner 0x92400C00 | (rn << 5) | rd }
+funksjon e_lsrv(rd: heiltall, rn: heiltall, rm: heiltall) -> heiltall { returner 0x9AC02400 | (rm << 16) | (rn << 5) | rd }
+funksjon e_mvn(rd: heiltall, rm: heiltall) -> heiltall { returner 0xAA2003E0 | (rm << 16) | rd }
+funksjon e_cmp_zz() -> heiltall { returner 0xEB1F03FF }      // subs xzr, xzr, xzr → C = 1
+funksjon e_nop() -> heiltall { returner 0xD503201F }
+
+// Xrd = lo | hi << 32 (fire instruksjonar, ingen 64-bit-aritmetikk i generatoren).
+funksjon konst_lohi(k: liste_heiltall, rd: heiltall, lo: heiltall, hi: heiltall) -> heiltall {
+    w(k, agc.e_movz(rd, lo & 0xFFFF, 0))
+    w(k, agc.e_movk(rd, (lo >> 16) & 0xFFFF, 1))
+    w(k, agc.e_movk(rd, hi & 0xFFFF, 2))
+    w(k, agc.e_movk(rd, (hi >> 16) & 0xFFFF, 3))
+    returner 0
+}
+
+// Xrd = sp + off (off < 16 MiB).
+funksjon sp_adr(k: liste_heiltall, rd: heiltall, off: heiltall) -> heiltall {
+    hvis off < 4096 { returner w(k, agc.e_add_i(rd, 31, off)) }
+    w(k, e_add_i12(rd, 31, off >> 12))
+    hvis (off & 4095) != 0 { w(k, agc.e_add_i(rd, rd, off & 4095)) }
+    returner 0
+}
+
+// Listevakt: Xreg må vere ei liste/bytes (tagg 4/7) med minst `minst` element. Etterpå:
+// Xelem = &elem[0], Xcnt = tal. Klobbar x9. Hopp til feil blir lagde i `fh`
+// ([pos, "cbz", reg] / [pos, "bc", cond]).
+funksjon liste_vakt(k: liste_heiltall, reg: heiltall, minst: heiltall, elem: heiltall, cnt: heiltall, fh) -> heiltall {
+    legg_til(fh, [agc.plass(k), "cbz", reg])                  // cbz Xreg, feil
+    w(k, agc.e_ldr(9, reg, 0))                                  // x9 = tagg
+    w(k, agc.e_cmp_i(9, 4))
+    w(k, e_ccmp7_ne(9))                                         // liste eller bytes?
+    legg_til(fh, [agc.plass(k), "bc", agc.C_NE()])
+    w(k, agc.e_ldr(elem, reg, 8))                               // listdata
+    w(k, agc.e_ldr(cnt, elem, 0))                               // tal
+    hvis minst > 0 {
+        w(k, agc.e_cmp_i(cnt, minst))
+        legg_til(fh, [agc.plass(k), "bc", agc.C_LO()])
+    }
+    w(k, agc.e_add_i(elem, elem, 8))                            // &elem[0]
+    returner 0
+}
+
+funksjon lapp_feil(k: liste_heiltall, fh, mål: heiltall) -> heiltall {
+    for f i fh {
+        hvis f[1] == "cbz" { agc.patch_cbz(k, f[0], mål, f[2]) } ellers { agc.patch_bc(k, f[0], mål, f[2]) }
+    }
+    returner 0
+}
+
+// Null-resultat: x0 = det kanoniske null-objektet (x25 − 16, sjå ncd_emit_null).
+funksjon emit_null_x0(k: liste_heiltall) -> heiltall { returner w(k, agc.e_sub_i(0, 25, 16)) }
+
+// Boks heiltalet i Xval (64-bit, usignert u32 her) som NcVal-int i Xdst. x13 MÅ halde 1
+// (int-taggen). GC: __gc_alloc (bevarer alt anna); bump: ved x28.
+funksjon boks_int(k: liste_heiltall, val: heiltall, dst: heiltall, gc: boolsk, os: tekst) -> heiltall {
+    hvis gc {
+        agc.alloc_imm(k, 16, dst, os)
+        w(k, agc.e_stp(13, val, dst, 0))                        // stp x13, Xval, [Xdst]
+    } ellers {
+        w(k, agc.e_mov(dst, 28))
+        w(k, agc.e_stp_post(13, val, 28, 16))                   // stp x13, Xval, [x28], #16
+    }
+    returner 0
+}
+
+// x0 = liste-NcVal (tagg 4) rundt listdata i x9. Klobbar x13.
+funksjon boks_liste_x9(k: liste_heiltall, gc: boolsk, os: tekst) -> heiltall {
+    w(k, agc.e_movz(13, 4, 0))
+    hvis gc {
+        agc.alloc_imm(k, 16, 0, os)
+        w(k, agc.e_stp(13, 9, 0, 0))
+    } ellers {
+        w(k, agc.e_mov(0, 28))
+        w(k, agc.e_stp_post(13, 9, 28, 16))
+    }
+    returner 0
+}
+
+// x0 = ny liste med 2·nord u32-element frå 64-bit-orda på [sp+ord_off …): element 2i = lo32,
+// 2i+1 = hi32 av ord i (same flate [lo, hi]-layout som dei reine implementasjonane). 2·nord
+// må vere ein toarpotens (listekapasitet-invarianten). Klobbar x4, x5, x9–x15.
+funksjon bygg_u32_liste(k: liste_heiltall, ord_off: heiltall, nord: heiltall, gc: boolsk, os: tekst) -> heiltall {
+    la tal = nord * 2
+    la storleik = 8 + tal * 8
+    hvis gc {
+        agc.alloc_imm(k, storleik, 9, os)
+    } ellers {
+        w(k, agc.e_mov(9, 28))
+        w(k, agc.e_add_i(28, 28, storleik))
+    }
+    w(k, agc.e_movz(10, tal, 0))
+    w(k, agc.e_str(10, 9, 0))                                   // tal
+    w(k, agc.e_add_i(11, 9, 8))                                 // x11 = &elem[0]
+    sp_adr(k, 15, ord_off)
+    w(k, agc.e_movz(12, nord, 0))
+    w(k, agc.e_movz(13, 1, 0))                                  // int-tagg
+    la l = lengde(k)
+    w(k, agc.e_ldr_post(4, 15, 8))                              // x4 = ord
+    w(k, agc.e_mov_w(5, 4))                                     // lo32
+    boks_int(k, 5, 10, gc, os)
+    w(k, agc.e_str_post(10, 11, 8))
+    w(k, agc.e_lsr(5, 4, 32))                                   // hi32
+    boks_int(k, 5, 10, gc, os)
+    w(k, agc.e_str_post(10, 11, 8))
+    w(k, agc.e_sub_i(12, 12, 1))
+    agc.patch_cbnz(k, agc.plass(k), l, 12)
+    returner boks_liste_x9(k, gc, os)
+}
+
+// ── argon2_compress ─────────────────────────────────────────────────────────────────
+// fBlaMka: Xa = Xa + Xb + 2·lo32(Xa)·lo32(Xb) (x16 scratch).
+funksjon blamka(k: liste_heiltall, a: heiltall, b: heiltall) -> heiltall {
+    w(k, e_umull(16, a, b))
+    w(k, agc.e_add(a, a, b))
+    w(k, e_add_lsl(a, a, 16, 1))
+    returner 0
+}
+
+funksjon argon_gb(k: liste_heiltall, a: heiltall, b: heiltall, c: heiltall, d: heiltall) -> heiltall {
+    blamka(k, a, b) w(k, e_eor(d, d, a)) w(k, e_ror(d, d, 32))
+    blamka(k, c, d) w(k, e_eor(b, b, c)) w(k, e_ror(b, b, 24))
+    blamka(k, a, b) w(k, e_eor(d, d, a)) w(k, e_ror(d, d, 16))
+    blamka(k, c, d) w(k, e_eor(b, b, c)) w(k, e_ror(b, b, 63))
+    returner 0
+}
+
+// Permutasjonen P over 16 ord (ordindeksane idx, ord på [sp + 8·i]) i x0..x15.
+funksjon argon_p(k: liste_heiltall, idx: liste_heiltall) -> heiltall {
+    la j = 0
+    mens j < 16 { w(k, agc.e_ldr(j, 31, idx[j] * 8)) j = j + 1 }
+    argon_gb(k, 0, 4, 8, 12)
+    argon_gb(k, 1, 5, 9, 13)
+    argon_gb(k, 2, 6, 10, 14)
+    argon_gb(k, 3, 7, 11, 15)
+    argon_gb(k, 0, 5, 10, 15)
+    argon_gb(k, 1, 6, 11, 12)
+    argon_gb(k, 2, 7, 8, 13)
+    argon_gb(k, 3, 4, 9, 14)
+    j = 0
+    mens j < 16 { w(k, agc.e_str(j, 31, idx[j] * 8)) j = j + 1 }
+    returner 0
+}
+
+// __argon2_compress(x0 = x, x1 = y, x2 = gammel, x3 = xor_gammel) → x0.
+// Ramme: Z = sp[0, 1024) (128 ord), R = sp[1024, 2048).
+funksjon argon2_rutine(gc: boolsk, os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    la fh = []
+    w(k, agc.e_sub_sp(2048))
+    liste_vakt(k, 0, 256, 10, 12, fh)                         // x10 = &x[0]
+    liste_vakt(k, 1, 256, 11, 12, fh)                         // x11 = &y[0]
+    // x17 = &gammel[0] når xor_gammel er sann, elles 0.
+    w(k, agc.e_movz(17, 0, 0))
+    la p_utan1 = agc.plass(k)                                   // cbz x3, utan
+    w(k, agc.e_ldr(9, 3, 8))
+    la p_utan2 = agc.plass(k)                                   // cbz x9, utan
+    liste_vakt(k, 2, 256, 17, 12, fh)
+    la l_utan = lengde(k)
+    agc.patch_cbz(k, p_utan1, l_utan, 3)
+    agc.patch_cbz(k, p_utan2, l_utan, 9)
+    // Z[i] = R[i] = (x[2i] ^ y[2i]) | (x[2i+1] ^ y[2i+1]) << 32
+    w(k, agc.e_mov_sp(15))
+    w(k, agc.e_movz(12, 128, 0))
+    la l_bygg = lengde(k)
+    w(k, agc.e_ldp_post(4, 5, 10, 16))
+    w(k, agc.e_ldp_post(6, 7, 11, 16))
+    w(k, e_ldr_w(4, 4, 8))
+    w(k, e_ldr_w(5, 5, 8))
+    w(k, e_ldr_w(6, 6, 8))
+    w(k, e_ldr_w(7, 7, 8))
+    w(k, e_eor(4, 4, 6))
+    w(k, e_eor(5, 5, 7))
+    w(k, e_orr_lsl(4, 4, 5, 32))
+    w(k, agc.e_str(4, 15, 1024))
+    w(k, agc.e_str_post(4, 15, 8))
+    w(k, agc.e_sub_i(12, 12, 1))
+    agc.patch_cbnz(k, agc.plass(k), l_bygg, 12)
+    // 8 rad-permutasjonar, så 8 kolonne-permutasjonar (same indeksar som _compress_pure).
+    la rad = 0
+    mens rad < 8 {
+        la idx: liste_heiltall = []
+        la i = 0
+        mens i < 16 { legg_til(idx, rad * 16 + i) i = i + 1 }
+        argon_p(k, idx)
+        rad = rad + 1
+    }
+    la kol = 0
+    mens kol < 8 {
+        la idx2: liste_heiltall = []
+        la r2 = 0
+        mens r2 < 8 { legg_til(idx2, r2 * 16 + kol * 2) legg_til(idx2, r2 * 16 + kol * 2 + 1) r2 = r2 + 1 }
+        argon_p(k, idx2)
+        kol = kol + 1
+    }
+    // Z ^= R; Z ^= gammel når x17 != 0.
+    w(k, agc.e_mov_sp(15))
+    w(k, agc.e_movz(12, 128, 0))
+    la l_fin = lengde(k)
+    w(k, agc.e_ldr(4, 15, 0))
+    w(k, agc.e_ldr(5, 15, 1024))
+    w(k, e_eor(4, 4, 5))
+    la p_utan_g = agc.plass(k)                                  // cbz x17, lagre
+    w(k, agc.e_ldp_post(6, 7, 17, 16))
+    w(k, e_ldr_w(6, 6, 8))
+    w(k, e_ldr_w(7, 7, 8))
+    w(k, e_orr_lsl(6, 6, 7, 32))
+    w(k, e_eor(4, 4, 6))
+    agc.patch_cbz(k, p_utan_g, lengde(k), 17)
+    w(k, agc.e_str_post(4, 15, 8))
+    w(k, agc.e_sub_i(12, 12, 1))
+    agc.patch_cbnz(k, agc.plass(k), l_fin, 12)
+    bygg_u32_liste(k, 0, 128, gc, os)
+    w(k, agc.e_add_sp(2048))
+    w(k, agc.e_ret())
+    lapp_feil(k, fh, lengde(k))
+    emit_null_x0(k)
+    w(k, agc.e_add_sp(2048))
+    w(k, agc.e_ret())
+    returner k
+}
+
+// ── blake2b_compress ────────────────────────────────────────────────────────────────
+funksjon blake_sigma() {
+    returner [
+        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+        [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3],
+        [11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4],
+        [7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8],
+        [9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13],
+        [2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9],
+        [12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11],
+        [13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10],
+        [6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5],
+        [10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0],
+        [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15],
+        [14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3]
+    ]
+}
+
+// IV som [lo32, hi32]-par (std.blake2b._iv).
+funksjon blake_iv() -> liste_heiltall {
+    returner [
+        4089235720,1779033703, 2227873595,3144134277,
+        4271175723,1013904242, 1595750129,2773480762,
+        2917565137,1359893119, 725511199,2600822924,
+        4215389547,528734635, 327033209,1541459225
+    ]
+}
+
+// G(a, b, c, d, m[x], m[y]); v i x0..x15, m på [sp + 8·i], x16 scratch.
+funksjon blake_g(k: liste_heiltall, a: heiltall, b: heiltall, c: heiltall, d: heiltall, x: heiltall, y: heiltall) -> heiltall {
+    w(k, agc.e_ldr(16, 31, x * 8))
+    w(k, agc.e_add(a, a, b)) w(k, agc.e_add(a, a, 16))
+    w(k, e_eor(d, d, a)) w(k, e_ror(d, d, 32))
+    w(k, agc.e_add(c, c, d))
+    w(k, e_eor(b, b, c)) w(k, e_ror(b, b, 24))
+    w(k, agc.e_ldr(16, 31, y * 8))
+    w(k, agc.e_add(a, a, b)) w(k, agc.e_add(a, a, 16))
+    w(k, e_eor(d, d, a)) w(k, e_ror(d, d, 16))
+    w(k, agc.e_add(c, c, d))
+    w(k, e_eor(b, b, c)) w(k, e_ror(b, b, 63))
+    returner 0
+}
+
+// __blake2b_compress(x0 = h, x1 = blokk, x2 = total, x3 = siste) → x0 = ny 16-u32 h.
+// Ramme: m = sp[0, 128), h/h' = sp[128, 192). total: berre låge 32 bit (som _compress_pure).
+funksjon blake2b_rutine(gc: boolsk, os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    la fh = []
+    w(k, agc.e_sub_sp(192))
+    liste_vakt(k, 0, 16, 11, 12, fh)                          // x11 = &h[0]
+    liste_vakt(k, 1, 128, 10, 12, fh)                         // x10 = &blokk[0]
+    w(k, agc.e_movz(16, 0, 0))
+    la p_t0 = agc.plass(k)                                      // cbz x2, t0
+    w(k, e_ldr_w(16, 2, 8))                                     // x16 = total (lo32)
+    agc.patch_cbz(k, p_t0, lengde(k), 2)
+    w(k, agc.e_movz(17, 0, 0))
+    la p_s0 = agc.plass(k)                                      // cbz x3, s0
+    w(k, agc.e_ldr(17, 3, 8))                                   // x17 = siste (0/1)
+    agc.patch_cbz(k, p_s0, lengde(k), 3)
+    // m[i] = little-endian 64-bit av blokk[8i .. 8i+8)
+    w(k, agc.e_mov_sp(15))
+    w(k, agc.e_movz(12, 16, 0))
+    la l_m = lengde(k)
+    w(k, agc.e_movz(5, 0, 0))
+    la j = 0
+    mens j < 8 {
+        w(k, agc.e_ldr_post(4, 10, 8))
+        w(k, agc.e_ldr(4, 4, 8))
+        w(k, e_and_ff(4, 4))
+        w(k, e_orr_lsl(5, 5, 4, j * 8))
+        j = j + 1
+    }
+    w(k, agc.e_str_post(5, 15, 8))
+    w(k, agc.e_sub_i(12, 12, 1))
+    agc.patch_cbnz(k, agc.plass(k), l_m, 12)
+    // v[0..7] = h (x0..x7, kopi på sp+128), v[8..15] = IV
+    la i = 0
+    mens i < 8 {
+        w(k, agc.e_ldp_post(8, 9, 11, 16))
+        w(k, e_ldr_w(8, 8, 8))
+        w(k, e_ldr_w(9, 9, 8))
+        w(k, e_orr_lsl(i, 8, 9, 32))
+        w(k, agc.e_str(i, 31, 128 + i * 8))
+        i = i + 1
+    }
+    la iv = blake_iv()
+    i = 0
+    mens i < 8 { konst_lohi(k, 8 + i, iv[i * 2], iv[i * 2 + 1]) i = i + 1 }
+    w(k, e_eor(12, 12, 16))                                     // v12 ^= total
+    la p_ikkje_siste = agc.plass(k)                             // cbz x17, …
+    w(k, e_mvn(14, 14))                                         // v14 ^= ~0
+    agc.patch_cbz(k, p_ikkje_siste, lengde(k), 17)
+    la sig = blake_sigma()
+    la r = 0
+    mens r < 12 {
+        la s = sig[r]
+        blake_g(k, 0, 4, 8, 12, s[0], s[1])
+        blake_g(k, 1, 5, 9, 13, s[2], s[3])
+        blake_g(k, 2, 6, 10, 14, s[4], s[5])
+        blake_g(k, 3, 7, 11, 15, s[6], s[7])
+        blake_g(k, 0, 5, 10, 15, s[8], s[9])
+        blake_g(k, 1, 6, 11, 12, s[10], s[11])
+        blake_g(k, 2, 7, 8, 13, s[12], s[13])
+        blake_g(k, 3, 4, 9, 14, s[14], s[15])
+        r = r + 1
+    }
+    i = 0
+    mens i < 8 {
+        w(k, agc.e_ldr(16, 31, 128 + i * 8))
+        w(k, e_eor(16, 16, i))
+        w(k, e_eor(16, 16, i + 8))
+        w(k, agc.e_str(16, 31, 128 + i * 8))
+        i = i + 1
+    }
+    bygg_u32_liste(k, 128, 8, gc, os)
+    w(k, agc.e_add_sp(192))
+    w(k, agc.e_ret())
+    lapp_feil(k, fh, lengde(k))
+    emit_null_x0(k)
+    w(k, agc.e_add_sp(192))
+    w(k, agc.e_ret())
+    returner k
+}
+
+// ── bn_modexp_bytes ─────────────────────────────────────────────────────────────────
+// Montgomery (CIOS, 64-bit limbar, L ≤ 64 → modul ≤ 4096 bit, odde), fast 4-bit vindauge
+// med konstant-tid tabelloppslag (alle 16 oppføringane blir lesne for kvart nibble) og
+// konstant-tid slutt-subtraksjon. R mod n og R² mod n ved 2·64·L modulære doblingar.
+// Ramme (sp etter stp x29/x30): 24 buffer à BUF byte + skalarar.
+funksjon BUF() -> heiltall { returner 528 }                   // 66 limbar (L+2 ≤ 66)
+funksjon B_N() -> heiltall { returner 0 }
+funksjon B_ACC() -> heiltall { returner 1 }
+funksjon B_BASE() -> heiltall { returner 2 }
+funksjon B_T() -> heiltall { returner 3 }
+funksjon B_D() -> heiltall { returner 4 }
+funksjon B_ONE() -> heiltall { returner 5 }                   // R mod n (1 i Montgomery-form)
+funksjon B_R2() -> heiltall { returner 6 }
+funksjon B_P1() -> heiltall { returner 7 }                    // vanleg 1
+funksjon B_TAB() -> heiltall { returner 8 }                   // 16 oppføringar
+funksjon S_BASE() -> heiltall { returner 24 * 528 }           // 12672
+funksjon S_L() -> heiltall { returner S_BASE() }
+funksjon S_N0() -> heiltall { returner S_BASE() + 8 }
+funksjon S_EP() -> heiltall { returner S_BASE() + 16 }
+funksjon S_EC() -> heiltall { returner S_BASE() + 24 }
+funksjon S_K() -> heiltall { returner S_BASE() + 32 }
+funksjon S_BP() -> heiltall { returner S_BASE() + 40 }
+funksjon S_BC() -> heiltall { returner S_BASE() + 48 }
+funksjon S_V() -> heiltall { returner S_BASE() + 56 }
+funksjon RAMME() -> heiltall { returner S_BASE() + 64 }       // 12736 (16-aligna)
+
+funksjon buf(k: liste_heiltall, rd: heiltall, b: heiltall) -> heiltall { returner sp_adr(k, rd, b * BUF()) }
+
+// Nullstill Xn limbar frå Xp (klobbar x9, x10).
+funksjon nullstill(k: liste_heiltall, p: heiltall, n: heiltall) -> heiltall {
+    w(k, agc.e_mov(9, p))
+    w(k, agc.e_mov(10, n))
+    la l = lengde(k)
+    w(k, agc.e_str_post(31, 9, 8))                              // str xzr, [x9], #8
+    w(k, agc.e_sub_i(10, 10, 1))
+    agc.patch_cbnz(k, agc.plass(k), l, 10)
+    returner 0
+}
+
+// Kopier L (x4) limbar frå Xsrc til Xdst (klobbar x9, x17).
+funksjon kopi(k: liste_heiltall, src: heiltall, dst: heiltall) -> heiltall {
+    w(k, agc.e_movz(17, 0, 0))
+    la l = lengde(k)
+    w(k, agc.e_ldr_reg3(9, src, 17))
+    w(k, agc.e_str_reg3(9, dst, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_cmp(17, 4))
+    agc.bc_til(k, l, agc.C_LO())
+    returner 0
+}
+
+// out (x7) = t (x6) − n (x3) når (x9 != 0 eller t ≥ n), elles t. L = x4. Konstant tid.
+// Klobbar x10–x13, x15, x17.
+funksjon sub_cond(k: liste_heiltall) -> heiltall {
+    w(k, e_cmp_zz())                                            // C = 1 (ingen lån)
+    w(k, agc.e_movz(17, 0, 0))
+    la l1 = lengde(k)
+    w(k, agc.e_ldr_reg3(10, 6, 17))
+    w(k, agc.e_ldr_reg3(11, 3, 17))
+    w(k, e_sbcs(12, 10, 11))
+    w(k, agc.e_str_reg3(12, 7, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_sub(13, 4, 17))
+    agc.patch_cbnz(k, agc.plass(k), l1, 13)                     // (cbnz rører ikkje flagga)
+    w(k, e_cset(15, agc.C_HS()))                                // 1 = ingen lån (t ≥ n)
+    w(k, agc.e_orr(15, 15, 9))
+    w(k, agc.e_movz(17, 0, 0))
+    la l2 = lengde(k)
+    w(k, agc.e_ldr_reg3(10, 7, 17))
+    w(k, agc.e_ldr_reg3(11, 6, 17))
+    w(k, agc.e_cmp_i(15, 0))
+    w(k, agc.e_csel(10, 10, 11, agc.C_NE()))
+    w(k, agc.e_str_reg3(10, 7, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_cmp(17, 4))
+    agc.bc_til(k, l2, agc.C_LO())
+    returner 0
+}
+
+// Lokal subrutine mm: out (x7) = a (x1) · b (x2) · R⁻¹ mod n (x3); L = x4, n0' = x5,
+// t = x6 (L+2 limbar). out kan vere a eller b (blir skriven først etter løkka).
+// Bevarer x0–x7; klobbar x8–x17.
+funksjon mm_rutine(k: liste_heiltall) -> heiltall {
+    w(k, agc.e_add_i(9, 4, 2))
+    w(k, agc.e_mov(10, 6))
+    la lz = lengde(k)
+    w(k, agc.e_str_post(31, 10, 8))
+    w(k, agc.e_sub_i(9, 9, 1))
+    agc.patch_cbnz(k, agc.plass(k), lz, 9)
+    w(k, agc.e_movz(16, 0, 0))                                  // i
+    la l_ytre = lengde(k)
+    w(k, agc.e_ldr_reg3(8, 2, 16))                              // b[i]
+    w(k, agc.e_movz(9, 0, 0))                                   // C
+    w(k, agc.e_movz(17, 0, 0))                                  // j
+    la l_in1 = lengde(k)
+    w(k, agc.e_ldr_reg3(10, 1, 17))
+    w(k, e_mul(11, 10, 8))
+    w(k, e_umulh(12, 10, 8))
+    w(k, agc.e_ldr_reg3(13, 6, 17))
+    w(k, e_adds(11, 11, 13))
+    w(k, e_adc(12, 12, 31))
+    w(k, e_adds(11, 11, 9))
+    w(k, e_adc(9, 12, 31))
+    w(k, agc.e_str_reg3(11, 6, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_cmp(17, 4))
+    agc.bc_til(k, l_in1, agc.C_LO())
+    // t[L] += C; t[L+1] = carry
+    w(k, agc.e_ldr_reg3(13, 6, 17))
+    w(k, e_adds(13, 13, 9))
+    w(k, agc.e_str_reg3(13, 6, 17))
+    w(k, e_cset(9, agc.C_HS()))
+    w(k, agc.e_add_i(15, 17, 1))
+    w(k, agc.e_str_reg3(9, 6, 15))
+    // m = t[0]·n0'; (C, _) = t[0] + m·n[0]
+    w(k, agc.e_ldr(13, 6, 0))
+    w(k, e_mul(14, 13, 5))
+    w(k, agc.e_ldr(10, 3, 0))
+    w(k, e_mul(11, 14, 10))
+    w(k, e_umulh(12, 14, 10))
+    w(k, e_adds(11, 11, 13))
+    w(k, e_adc(9, 12, 31))
+    w(k, agc.e_movz(17, 1, 0))
+    la l_in2 = lengde(k)
+    w(k, agc.e_cmp(17, 4))
+    la p_in2d = agc.plass(k)                                    // b.hs in2d
+    w(k, agc.e_ldr_reg3(10, 3, 17))
+    w(k, e_mul(11, 14, 10))
+    w(k, e_umulh(12, 14, 10))
+    w(k, agc.e_ldr_reg3(13, 6, 17))
+    w(k, e_adds(11, 11, 13))
+    w(k, e_adc(12, 12, 31))
+    w(k, e_adds(11, 11, 9))
+    w(k, e_adc(9, 12, 31))
+    w(k, agc.e_sub_i(15, 17, 1))
+    w(k, agc.e_str_reg3(11, 6, 15))                             // t[j−1]
+    w(k, agc.e_add_i(17, 17, 1))
+    agc.b_til(k, l_in2)
+    agc.patch_bc(k, p_in2d, lengde(k), agc.C_HS())
+    // (C2, t[L−1]) = t[L] + C; t[L] = t[L+1] + C2
+    w(k, agc.e_ldr_reg3(13, 6, 17))
+    w(k, e_adds(13, 13, 9))
+    w(k, agc.e_sub_i(15, 17, 1))
+    w(k, agc.e_str_reg3(13, 6, 15))
+    w(k, e_cset(9, agc.C_HS()))
+    w(k, agc.e_add_i(15, 17, 1))
+    w(k, agc.e_ldr_reg3(13, 6, 15))
+    w(k, agc.e_add(13, 13, 9))
+    w(k, agc.e_str_reg3(13, 6, 17))
+    w(k, agc.e_add_i(16, 16, 1))
+    w(k, agc.e_cmp(16, 4))
+    agc.bc_til(k, l_ytre, agc.C_LO())
+    w(k, agc.e_ldr_reg3(9, 6, 4))                               // topp = t[L]
+    sub_cond(k)
+    w(k, agc.e_ret())
+    returner 0
+}
+
+// Set opp mm-argumenta og kall mm (posisjonen blir lagd i mm_kall for lapping).
+funksjon mm_kall(k: liste_heiltall, a: heiltall, b: heiltall, ut: heiltall, mmk) -> heiltall {
+    buf(k, 1, a)
+    buf(k, 2, b)
+    buf(k, 3, B_N())
+    w(k, agc.e_ldr(4, 31, S_L()))
+    w(k, agc.e_ldr(5, 31, S_N0()))
+    buf(k, 6, B_T())
+    buf(k, 7, ut)
+    legg_til(mmk, agc.plass(k))                             // bl mm
+    returner 0
+}
+
+// Last big-endian byteliste (x1 = &elem[0], x2 = tal) inn i limbar på x3 (L = x4 limbar,
+// nullstilte først). Krev tal ≤ 8·L. Klobbar x9–x15.
+funksjon last_be(k: liste_heiltall) -> heiltall {
+    nullstill(k, 3, 4)
+    w(k, agc.e_movz(10, 0, 0))                                  // p
+    la p_ferdig0 = agc.plass(k)                                 // cbz x2, ferdig
+    la l = lengde(k)
+    w(k, agc.e_sub(11, 2, 10))
+    w(k, agc.e_sub_i(11, 11, 1))                                // tal − 1 − p
+    w(k, agc.e_ldr_reg3(12, 1, 11))
+    w(k, agc.e_ldr(12, 12, 8))
+    w(k, e_and_ff(12, 12))
+    w(k, agc.e_and7(13, 10))
+    w(k, agc.e_lsl(13, 13, 3))
+    w(k, agc.e_lslv(12, 12, 13))
+    w(k, agc.e_lsr(14, 10, 3))
+    w(k, agc.e_ldr_reg3(15, 3, 14))
+    w(k, agc.e_orr(15, 15, 12))
+    w(k, agc.e_str_reg3(15, 3, 14))
+    w(k, agc.e_add_i(10, 10, 1))
+    w(k, agc.e_cmp(10, 2))
+    agc.bc_til(k, l, agc.C_LO())
+    agc.patch_cbz(k, p_ferdig0, lengde(k), 2)
+    returner 0
+}
+
+// Doble x7 (L limbar) modulo n: t = 2·x7 (x6), så sub_cond(topp = carry) → x7.
+funksjon dobbel(k: liste_heiltall) -> heiltall {
+    w(k, 0xAB1F03FF)                                            // cmn xzr, xzr → C = 0
+    w(k, agc.e_movz(17, 0, 0))
+    la l = lengde(k)
+    w(k, agc.e_ldr_reg3(10, 7, 17))
+    w(k, e_adcs(10, 10, 10))
+    w(k, agc.e_str_reg3(10, 6, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_sub(11, 4, 17))
+    agc.patch_cbnz(k, agc.plass(k), l, 11)
+    w(k, e_cset(9, agc.C_HS()))
+    sub_cond(k)
+    returner 0
+}
+
+// Kvadrer ACC fire gonger, vel TAB[nibble] i konstant tid (x9 = nibble), ACC ·= valet.
+funksjon nibble_steg(k: liste_heiltall, skift: heiltall, mmk) -> heiltall {
+    la q = 0
+    mens q < 4 { mm_kall(k, B_ACC(), B_ACC(), B_ACC(), mmk) q = q + 1 }
+    w(k, agc.e_ldr(4, 31, S_L()))
+    buf(k, 7, B_D())
+    nullstill(k, 7, 4)                                          // (klobbar x9, x10)
+    w(k, agc.e_ldr(9, 31, S_V()))
+    hvis skift > 0 { w(k, agc.e_lsr(9, 9, skift)) }
+    w(k, e_and_f(9, 9))
+    buf(k, 12, B_TAB())
+    w(k, agc.e_movz(11, 0, 0))                                  // t
+    la l_t = lengde(k)
+    w(k, agc.e_cmp(9, 11))
+    w(k, e_csetm(13, agc.C_EQ()))                               // maske
+    w(k, agc.e_movz(17, 0, 0))
+    la l_j = lengde(k)
+    w(k, agc.e_ldr_reg3(14, 12, 17))
+    w(k, e_and(14, 14, 13))
+    w(k, agc.e_ldr_reg3(15, 7, 17))
+    w(k, agc.e_orr(15, 15, 14))
+    w(k, agc.e_str_reg3(15, 7, 17))
+    w(k, agc.e_add_i(17, 17, 1))
+    w(k, agc.e_cmp(17, 4))
+    agc.bc_til(k, l_j, agc.C_LO())
+    w(k, agc.e_add_i(12, 12, BUF()))
+    w(k, agc.e_add_i(11, 11, 1))
+    w(k, agc.e_cmp_i(11, 16))
+    agc.bc_til(k, l_t, agc.C_LO())
+    mm_kall(k, B_ACC(), B_D(), B_ACC(), mmk)
+    returner 0
+}
+
+// Kvart element i lista (Xelem, Xcnt) må vere eit boksa heiltal i [0, 255], elles feil.
+// Klobbar x5–x7.
+funksjon bytevakt(k: liste_heiltall, elem: heiltall, cnt: heiltall, fh) -> heiltall {
+    w(k, agc.e_movz(5, 0, 0))
+    la p_tom = agc.plass(k)                                     // cbz Xcnt, ferdig
+    la l = lengde(k)
+    w(k, agc.e_ldr_reg3(6, elem, 5))
+    legg_til(fh, [agc.plass(k), "cbz", 6])
+    w(k, agc.e_ldr(7, 6, 0))
+    w(k, agc.e_cmp_i(7, 1))
+    legg_til(fh, [agc.plass(k), "bc", agc.C_NE()])            // ikkje heiltal
+    w(k, agc.e_ldr(7, 6, 8))
+    w(k, agc.e_cmp_i(7, 255))
+    legg_til(fh, [agc.plass(k), "bc", agc.C_HI()])            // > 255 eller negativ (usignert)
+    w(k, agc.e_add_i(5, 5, 1))
+    w(k, agc.e_cmp(5, cnt))
+    agc.bc_til(k, l, agc.C_LO())
+    agc.patch_cbz(k, p_tom, lengde(k), cnt)
+    returner 0
+}
+
+// Hopp over leiande nullbytar: Xelem += 8, Xcnt −= 1 så lenge elem[0] == 0. Klobbar x6.
+funksjon hopp_nullar(k: liste_heiltall, elem: heiltall, cnt: heiltall) -> heiltall {
+    la l = lengde(k)
+    la p_tom = agc.plass(k)                                     // cbz Xcnt, ferdig
+    w(k, agc.e_ldr(6, elem, 0))
+    w(k, agc.e_ldr(6, 6, 8))
+    la p_ikkje0 = agc.plass(k)                                  // cbnz x6, ferdig
+    w(k, agc.e_add_i(elem, elem, 8))
+    w(k, agc.e_sub_i(cnt, cnt, 1))
+    agc.b_til(k, l)
+    la l_ferdig = lengde(k)
+    agc.patch_cbz(k, p_tom, l_ferdig, cnt)
+    agc.patch_cbnz(k, p_ikkje0, l_ferdig, 6)
+    returner 0
+}
+
+// __bn_modexp(x0 = base_be, x1 = exp_be, x2 = mod_be) → x0 = byteliste (signifikante
+// modulbytar lang) eller tom liste («ikkje handtert»).
+funksjon modexp_rutine(gc: boolsk, os: tekst) -> liste_heiltall {
+    la k: liste_heiltall = []
+    la fh = []
+    la mmk: liste_heiltall = []
+    w(k, agc.e_stp_pre(29, 30, 31, -16))
+    w(k, e_sub_i12(31, 31, RAMME() >> 12))
+    w(k, agc.e_sub_sp(RAMME() & 4095))
+    // Validering og skalarar (same kontrakt som x86-atomet): alle element må vere heiltal i
+    // [0, 255]; leiande nullbytar blir hoppa over (k = signifikante modulbytar, som òg er
+    // lengda på resultatet); tom/null-modul, partal modul, > 4096 bit og base ≥ 2^(64·L)
+    // gjev tom liste («ikkje handtert» → std.bigint fell til modexp_rein).
+    liste_vakt(k, 2, 0, 10, 11, fh)                           // x10 = &mod[0], x11 = tal
+    bytevakt(k, 10, 11, fh)
+    hopp_nullar(k, 10, 11)
+    legg_til(fh, [agc.plass(k), "cbz", 11])                   // modul 0 / tom
+    w(k, agc.e_add_i(12, 11, 7))
+    w(k, agc.e_lsr(12, 12, 3))                                  // L = (k + 7) / 8
+    w(k, agc.e_cmp_i(12, 64))
+    legg_til(fh, [agc.plass(k), "bc", agc.C_HI()])            // > 4096 bit
+    w(k, agc.e_str(11, 31, S_K()))
+    w(k, agc.e_str(12, 31, S_L()))
+    liste_vakt(k, 0, 0, 13, 14, fh)                           // base
+    bytevakt(k, 13, 14, fh)
+    hopp_nullar(k, 13, 14)
+    w(k, agc.e_lsl(9, 12, 3))
+    w(k, agc.e_cmp(14, 9))
+    legg_til(fh, [agc.plass(k), "bc", agc.C_HI()])            // base-bytar > 8·L
+    w(k, agc.e_str(13, 31, S_BP()))
+    w(k, agc.e_str(14, 31, S_BC()))
+    liste_vakt(k, 1, 0, 15, 16, fh)                           // eksponent
+    bytevakt(k, 15, 16, fh)
+    w(k, agc.e_str(15, 31, S_EP()))
+    w(k, agc.e_str(16, 31, S_EC()))
+    // N frå modul-bytane.
+    w(k, agc.e_mov(1, 10))
+    w(k, agc.e_mov(2, 11))
+    buf(k, 3, B_N())
+    w(k, agc.e_mov(4, 12))
+    last_be(k)
+    w(k, agc.e_ldr(9, 3, 0))
+    w(k, 0xF240013F)                                            // tst x9, #1
+    legg_til(fh, [agc.plass(k), "bc", agc.C_EQ()])            // partal modul
+    // n0' = −n⁻¹ mod 2⁶⁴ (Newton, 6 steg frå n: 3 → 96 bit)
+    w(k, agc.e_mov(10, 9))
+    la nr = 0
+    mens nr < 6 {
+        w(k, e_mul(11, 9, 10))
+        w(k, agc.e_movz(12, 2, 0))
+        w(k, agc.e_sub(11, 12, 11))
+        w(k, e_mul(10, 10, 11))
+        nr = nr + 1
+    }
+    w(k, agc.e_neg(10, 10))
+    w(k, agc.e_str(10, 31, S_N0()))
+    // ACC = 1; 64·L doblingar → R mod n (ONE); 64·L til → R² mod n (R2).
+    w(k, agc.e_ldr(4, 31, S_L()))
+    buf(k, 7, B_ACC())
+    nullstill(k, 7, 4)
+    w(k, agc.e_movz(9, 1, 0))
+    w(k, agc.e_str(9, 7, 0))
+    buf(k, 3, B_N())
+    buf(k, 6, B_T())
+    la fase = 0
+    mens fase < 2 {
+        w(k, agc.e_lsl(0, 4, 6))                                // x0 = 64·L
+        la l_d = lengde(k)
+        dobbel(k)
+        w(k, agc.e_sub_i(0, 0, 1))
+        agc.patch_cbnz(k, agc.plass(k), l_d, 0)
+        hvis fase == 0 { buf(k, 8, B_ONE()) } ellers { buf(k, 8, B_R2()) }
+        kopi(k, 7, 8)
+        fase = fase + 1
+    }
+    // P1 = 1, BASE frå base-bytane.
+    buf(k, 7, B_P1())
+    nullstill(k, 7, 4)
+    w(k, agc.e_movz(9, 1, 0))
+    w(k, agc.e_str(9, 7, 0))
+    w(k, agc.e_ldr(1, 31, S_BP()))
+    w(k, agc.e_ldr(2, 31, S_BC()))
+    buf(k, 3, B_BASE())
+    last_be(k)
+    // TAB[0] = ONE, TAB[1] = base·R, TAB[i] = TAB[i−1]·TAB[1]; ACC = ONE.
+    buf(k, 7, B_ONE())
+    buf(k, 8, B_TAB())
+    kopi(k, 7, 8)
+    buf(k, 8, B_ACC())
+    kopi(k, 7, 8)
+    mm_kall(k, B_BASE(), B_R2(), B_TAB() + 1, mmk)
+    la ti = 2
+    mens ti < 16 { mm_kall(k, B_TAB() + ti - 1, B_TAB() + 1, B_TAB() + ti, mmk) ti = ti + 1 }
+    // Eksponent-bytane, MSB først: to nibble-steg per byte.
+    w(k, agc.e_movz(0, 0, 0))
+    w(k, agc.e_ldr(9, 31, S_EC()))
+    la p_eks0 = agc.plass(k)                                    // cbz x9, eks_ferdig
+    la l_eks = lengde(k)
+    w(k, agc.e_ldr(9, 31, S_EP()))
+    w(k, agc.e_ldr_reg3(9, 9, 0))
+    w(k, agc.e_ldr(9, 9, 8))
+    w(k, e_and_ff(9, 9))
+    w(k, agc.e_str(9, 31, S_V()))
+    nibble_steg(k, 4, mmk)
+    nibble_steg(k, 0, mmk)
+    w(k, agc.e_add_i(0, 0, 1))
+    w(k, agc.e_ldr(9, 31, S_EC()))
+    w(k, agc.e_cmp(0, 9))
+    agc.bc_til(k, l_eks, agc.C_LO())
+    agc.patch_cbz(k, p_eks0, lengde(k), 9)
+    // Ut av Montgomery-form: ACC = ACC · 1 · R⁻¹.
+    mm_kall(k, B_ACC(), B_P1(), B_ACC(), mmk)
+    // Resultat: k bytar big-endian, boksa frå int-hurtigbufferet (x25 − 1 MiB − 16 + v·16).
+    w(k, agc.e_ldr(14, 31, S_K()))
+    agc.liste_storleik(k, 14, 10, 11)                           // x10 = 8 + next_pow2(k)·8
+    hvis gc {
+        agc.alloc_kall(k, 10, os)
+        w(k, agc.e_mov(9, 10))
+    } ellers {
+        w(k, agc.e_mov(9, 28))
+        w(k, agc.e_add(28, 28, 10))
+    }
+    w(k, agc.e_str(14, 9, 0))
+    buf(k, 7, B_ACC())
+    w(k, agc.e_movz(0, 0, 0))
+    la l_ut = lengde(k)
+    w(k, agc.e_sub(11, 14, 0))
+    w(k, agc.e_sub_i(11, 11, 1))                                // p = k − 1 − b
+    w(k, agc.e_lsr(12, 11, 3))
+    w(k, agc.e_ldr_reg3(12, 7, 12))
+    w(k, agc.e_and7(13, 11))
+    w(k, agc.e_lsl(13, 13, 3))
+    w(k, e_lsrv(12, 12, 13))
+    w(k, e_and_ff(12, 12))
+    w(k, 0xD1440320 | 13)                                       // sub x13, x25, #0x100, lsl #12
+    w(k, agc.e_sub_i(13, 13, 16))
+    w(k, e_add_lsl(13, 13, 12, 4))
+    w(k, agc.e_add_i(15, 0, 1))
+    w(k, agc.e_str_reg3(13, 9, 15))
+    w(k, agc.e_add_i(0, 0, 1))
+    w(k, agc.e_cmp(0, 14))
+    agc.bc_til(k, l_ut, agc.C_LO())
+    boks_liste_x9(k, gc, os)
+    la l_slutt = lengde(k)
+    w(k, agc.e_add_sp(RAMME() & 4095))
+    w(k, e_add_i12(31, 31, RAMME() >> 12))
+    w(k, agc.e_ldp_post(29, 30, 31, 16))
+    w(k, agc.e_ret())
+    lapp_feil(k, fh, lengde(k))
+    // Tom liste (tal 0).
+    hvis gc {
+        agc.alloc_imm(k, 16, 9, os)
+    } ellers {
+        w(k, agc.e_mov(9, 28))
+        w(k, agc.e_add_i(28, 28, 16))
+    }
+    w(k, agc.e_str(31, 9, 0))
+    boks_liste_x9(k, gc, os)
+    agc.b_til(k, l_slutt)
+    // Lokal subrutine mm.
+    la l_mm = lengde(k)
+    mm_rutine(k)
+    for p i mmk { agc.patch_bl(k, p, l_mm) }
+    returner k
+}
+
+// Legg til dei rutinane som eit bl-mål peikar på (sjå arm64_gc.legg_til_rutinar).
+funksjon legg_til_rutinar(all_patchar, image: liste_heiltall, fn_start, os: tekst, gc: boolsk) -> heiltall {
+    la treng_a = usann
+    la treng_b = usann
+    la treng_m = usann
+    for pt i all_patchar {
+        hvis pt[1] == "__argon2_compress" { treng_a = sann }
+        hvis pt[1] == "__blake2b_compress" { treng_b = sann }
+        hvis pt[1] == "__bn_modexp" { treng_m = sann }
+    }
+    hvis treng_a {
+        fn_start["__argon2_compress"] = lengde(image)
+        for b i argon2_rutine(gc, os) { legg_til(image, b) }
+    }
+    hvis treng_b {
+        fn_start["__blake2b_compress"] = lengde(image)
+        for b i blake2b_rutine(gc, os) { legg_til(image, b) }
+    }
+    hvis treng_m {
+        fn_start["__bn_modexp"] = lengde(image)
+        for b i modexp_rutine(gc, os) { legg_til(image, b) }
+    }
+    returner 0
+}

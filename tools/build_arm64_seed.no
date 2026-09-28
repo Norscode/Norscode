@@ -1,18 +1,24 @@
-// tools/build_arm64_seed.no — byggjer ein Linux ARM64-nc_main-kandidat frå levande
-// kjelde med Norscode sin eigen AArch64-codegen, køyrt som kryss-codegen på x86_64.
-// Ingen C-kompilator, ingen Python.
+// tools/build_arm64_seed.no — byggjer ein ARM64-nc_main-kandidat (Linux ELF eller macOS
+// Mach-O) frå levande kjelde med Norscode sin eigen AArch64-codegen, køyrt som kryss-codegen
+// på x86_64. Ingen C-kompilator, ingen Python. NC_ARM64_OS = linux (standard) | macos.
 //
 // To steg, begge spawna med EKSPLISITT miljø (omgår ci_shell_runner-whitelista):
 //   1) tools/materialize_nc_main_fullhost_candidate.no → full-host nc_main-NCB
 //      (build/fullhost/nc_main_fullhost_candidate.ncb.json). NORSCODE_SEED_NCB = ferdig
 //      NCB hoppar over steget.
-//   2) bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf (elf_arm64_codegen bygd
-//      til x86_64, pinna i tools/active_surface_allowlist.txt) med NC_INPUT/NC_OUTPUT
-//      → ELF64/AArch64. Codegen-en er deterministisk: same NCB gjev same bytes.
+//   2) bootstrap/native_codegen_<os>-arm64_on_linux-x86_64.elf (elf_arm64_codegen /
+//      macho_arm64_codegen bygd til x86_64, pinna i tools/active_surface_allowlist.txt) med
+//      NC_INPUT/NC_OUTPUT → ELF64/AArch64 eller Mach-O arm64 (ad hoc-signert). Codegen-en er
+//      deterministisk: same NCB gjev same bytes.
+//      Kandidatane blir bygde i GC-modus: NORSCODE_GC_ALLOC=1 i miljøet til kryss-codegen-en
+//      (han les flagget med miljo_hent ved kvar kompilering, macho_arm64_codegen.ncval_gc_flagg)
+//      → AArch64-GC-en i selfhost/native_execution/arm64_gc.no blir emittert. Utan GC gjekk
+//      shard-orkestratoren (tools/nc_test.no i seeden) tom for bump-heapen på macOS.
+//      NC_ARM64_GC=0 byggjer den gamle bump-heap-varianten (samanlikning/feilsøk).
 //
-// Utdata: build/arm64/nc_main_arm64 (NC_ARM64_OUT overstyrer), med .symbols-kart.
-// Køyring og seed-port skjer på ein ekte ubuntu-24.04-arm-runner
-// (.github/workflows/arm64-seed.yml).
+// Utdata: build/arm64/nc_main_arm64 (linux) eller build/arm64/nc_main_macos_arm64 (macos);
+// NC_ARM64_OUT overstyrer. Køyring og seed-port skjer på ekte arm64-runnarar
+// (.github/workflows/arm64-seed.yml: ubuntu-24.04-arm og macos-14).
 
 bruk std.runtime.process_abi som process_abi
 
@@ -48,10 +54,16 @@ funksjon start() -> heiltall {
     la native = env("NORSCODE_NATIVE_BIN")
     hvis native == "" { native = root + "/dist/norscode_native" }
     hvis ikkje builtin.fil_finnes(native) { linje("Feil: manglar native runtime: " + native) returner 1 }
-    la codegen = root + "/bootstrap/native_codegen_linux-arm64_on_linux-x86_64.elf"
+    la os = env("NC_ARM64_OS")
+    hvis os == "" { os = "linux" }
+    hvis os != "linux" og os != "macos" { linje("Feil: NC_ARM64_OS må vere linux eller macos (fekk " + os + ")") returner 1 }
+    la format = "ELF64/AArch64"
+    hvis os == "macos" { format = "Mach-O arm64" }
+    la codegen = root + "/bootstrap/native_codegen_" + os + "-arm64_on_linux-x86_64.elf"
     hvis ikkje builtin.fil_finnes(codegen) { linje("Feil: manglar kryss-codegen: " + codegen) returner 1 }
     la ut = env("NC_ARM64_OUT")
-    hvis ut == "" { ut = root + "/build/arm64/nc_main_arm64" }
+    hvis ut == "" og os == "linux" { ut = root + "/build/arm64/nc_main_arm64" }
+    hvis ut == "" { ut = root + "/build/arm64/nc_main_" + os + "_arm64" }
     la ncb = env("NORSCODE_SEED_NCB")
     la disk = root + ",.,/tmp,/private/tmp," + root + "/build"
     builtin.mkdir_p(root + "/build/arm64")
@@ -102,12 +114,18 @@ funksjon start() -> heiltall {
     hvis ikkje builtin.fil_finnes(ncb) { linje("[FEIL] manglar NCB: " + ncb) returner 1 }
     linje("[OK] NCB " + bytes(ncb) + " bytes")
 
-    linje("[2/2] Kryss-codegen NCB → ELF64/AArch64 ...")
+    la gc_merke = " (GC)"
+    hvis env("NC_ARM64_GC") == "0" { gc_merke = " (utan GC)" }
+    linje("[2/2] Kryss-codegen NCB → " + format + gc_merke + " ...")
+    // A4: nc_main-kandidaten i GC-modus (sjå toppen); NC_ARM64_GC=0 slår det av.
+    la gc_flagg = "1"
+    hvis env("NC_ARM64_GC") == "0" { gc_flagg = "" }
     la m2 = {
         "NC_INPUT": ncb,
         "NC_OUTPUT": ut,
         "NC_NATIVE_SYMBOL_MAP": ut + ".symbols",
         "NC_BUILTIN_REPORT": "1",
+        "NORSCODE_GC_ALLOC": gc_flagg,
         "PATH": env("PATH"),
         "TMPDIR": "/tmp"
     }
@@ -117,21 +135,21 @@ funksjon start() -> heiltall {
               " error=" + tekst(r2["error"]))
         returner 1
     }
-    hvis ikkje builtin.fil_finnes(ut) { linje("[FEIL] ELF ikkje skriven: " + ut) returner 1 }
+    hvis ikkje builtin.fil_finnes(ut) { linje("[FEIL] " + format + " ikkje skriven: " + ut) returner 1 }
     prøv { builtin.fil_sett_kjorbar(ut) } fang (e) {}
-    linje("[OK] linux-arm64 nc_main " + bytes(ut) + " bytes → " + ut)
+    linje("[OK] " + os + "-arm64 nc_main " + bytes(ut) + " bytes → " + ut)
     // NC_ARM64_KREV_LIK=1: den committa stage0-seeden MÅ vere byte-lik det kjelda byggjer
     // (reproduserbarheit etter promotering; CI-kryssbygget køyrer med denne).
     hvis env("NC_ARM64_KREV_LIK") == "1" {
-        la seed = root + "/bootstrap/stage0/norscode-linux-arm64"
+        la seed = root + "/bootstrap/stage0/norscode-" + os + "-arm64"
         la lik = usann
         prøv { lik = builtin.fil_les(seed) == builtin.fil_les(ut) } fang (e) { lik = usann }
         hvis ikkje lik {
-            linje("[FEIL] bootstrap/stage0/norscode-linux-arm64 er IKKJE byte-lik kandidaten frå kjelda (" +
+            linje("[FEIL] bootstrap/stage0/norscode-" + os + "-arm64 er IKKJE byte-lik kandidaten frå kjelda (" +
                   bytes(seed) + " vs " + bytes(ut) + " bytes). Bygg og promoter på nytt.")
             returner 1
         }
-        linje("[OK] bootstrap/stage0/norscode-linux-arm64 er byte-lik kandidaten frå kjelda")
+        linje("[OK] bootstrap/stage0/norscode-" + os + "-arm64 er byte-lik kandidaten frå kjelda")
     }
     returner 0
 }
