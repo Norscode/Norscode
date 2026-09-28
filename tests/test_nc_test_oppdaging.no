@@ -1,0 +1,228 @@
+// F38: `nc test` køyrer test-blokker (`test "namn" { ... }`) og test_*-funksjonar med
+// rapport per test og assert-melding (tools/nc_test_oppdaging.no + tools/nc_test.no).
+//
+// Del 1 testar oppdaginga direkte (kjelde-førefilter, testplan og køyrar-installasjon på
+// syntetiske NCB-ar, tolking av rapportlinjer). Del 2 køyrer `bin/nc test` som
+// underprosess på tests/fixtures/nc_test/ og sjekkar utskrift og exit-kode. Før F38 gav
+// testblokker.no «OK: Alle testar bestått» (falsk grønt), og testfunksjonar_utan_start.no
+// køyrde ingenting.
+bruk tools.nc_test_oppdaging som oppdaging
+bruk tools.process_runner som prosess
+
+funksjon repo_root() -> tekst {
+    prøv {
+        la root = miljo_hent("NORSCODE_ROOT")
+        hvis root != "" { returner root }
+    } fang (e) {}
+    prøv { returner tekst(builtin.system_info()["cwd"]) } fang (e) { returner "." }
+    returner "."
+}
+
+funksjon sjekk(feil: liste_tekst, vilkår: bool, melding: tekst) -> heiltall {
+    hvis ikkje vilkår {
+        legg_til(feil, melding)
+        skriv("FEIL: " + melding + "\n")
+    }
+    returner 0
+}
+
+funksjon inneheld(t: tekst, del: tekst) -> bool {
+    returner builtin.index_of(t, del) >= 0
+}
+
+// ── Del 1: oppdaging utan underprosess ──────────────────────────────────────────
+
+funksjon funksjon_def(namn: tekst, params, linje: heiltall) {
+    la def = {}
+    def["name"] = namn
+    def["module"] = "__main__"
+    def["params"] = params
+    def["is_async"] = usann
+    def["code"] = [["PUSH_CONST", 0], ["RETURN"]]
+    def["source_lines"] = [linje]
+    returner def
+}
+
+funksjon lag_testblokk(namn: tekst, modul: tekst) {
+    la t = {}
+    t["name"] = namn
+    t["module"] = modul
+    t["kind"] = "test"
+    t["params"] = []
+    t["code"] = [["PUSH_CONST", 0], ["RETURN"]]
+    returner t
+}
+
+funksjon sjekk_førefilter(feil: liste_tekst) -> heiltall {
+    sjekk(feil, oppdaging.kjelde_kan_ha_testar("funksjon start() {}\ntest \"a\" {\n}\n"),
+          "førefilter: test-blokk ved sida av start() skal gje treff")
+    sjekk(feil, oppdaging.kjelde_kan_ha_testar("funksjon test_a() {\n}\n"),
+          "førefilter: test_*-funksjon utan start() skal gje treff")
+    sjekk(feil, ikkje oppdaging.kjelde_kan_ha_testar("funksjon test_a() {\n}\nfunksjon start() -> heiltall {\n    returner 0\n}\n"),
+          "førefilter: test_*-funksjon MED start() skal ikkje gje treff")
+    sjekk(feil, ikkje oppdaging.kjelde_kan_ha_testar("funksjon start() -> heiltall {\n    la s = \"test \\\"x\\\"\"\n    returner 0\n}\n"),
+          "førefilter: vanleg test utan blokker skal ikkje gje treff")
+    returner 0
+}
+
+funksjon sjekk_installasjon(feil: liste_tekst) -> heiltall {
+    // (a) Vanleg start()-test utan blokker: NCB-en skal vere urørd.
+    la vanleg_fn = {}
+    vanleg_fn["__main__.start"] = funksjon_def("start", [], 1)
+    la vanleg = {"entry": "__main__.start", "tests": [], "functions": vanleg_fn}
+    sjekk(feil, oppdaging.installer_koyrar(vanleg) == 0, "vanleg test: ingen køyrar")
+    sjekk(feil, tekst(vanleg["entry"]) == "__main__.start", "vanleg test: entry urørd")
+
+    // (b) Blokker i hovudmodulen blir køyrde; blokker frå importerte modular ikkje.
+    la blokker_fn = {}
+    blokker_fn["__main__.start"] = funksjon_def("start", [], 1)
+    la blokker = {"entry": "__main__.start", "functions": blokker_fn}
+    blokker["tests"] = [lag_testblokk("a", "__main__"), lag_testblokk("frå modul", "std.anna"), lag_testblokk("b", "__main__")]
+    sjekk(feil, oppdaging.installer_koyrar(blokker) == 2, "blokker: 2 testar i hovudmodulen")
+    sjekk(feil, tekst(blokker["entry"]) == "__main__.__nc_testkoyrar__", "blokker: entry er køyraren")
+    sjekk(feil, finnes_nøkkel(blokker["functions"], "__main__.__nc_testblokk_0__"), "blokker: blokk 0 er funksjon")
+    sjekk(feil, finnes_nøkkel(blokker["functions"], "__main__.__nc_testblokk_1__"), "blokker: blokk 1 er funksjon")
+    sjekk(feil, ikkje finnes_nøkkel(blokker["functions"], "__main__.__nc_testblokk_2__"), "blokker: importert blokk ikkje med")
+    sjekk(feil, finnes_nøkkel(blokker["functions"], "__main__.start"), "blokker: start() finst framleis")
+    la koyrar = blokker["functions"]["__main__.__nc_testkoyrar__"]
+    la kode = koyrar["code"]
+    la kallar_start = usann
+    la i: heiltall = 0
+    mens i < lengde(kode) {
+        la ins = kode[i]
+        hvis tekst(ins[0]) == "CALL" og tekst(ins[1]) == "__main__.start" { kallar_start = sann }
+        i = i + 1
+    }
+    sjekk(feil, kallar_start, "blokker: køyraren kallar start()")
+
+    // (c) test_*-funksjonar utan start(): berre toppnivå, utan parametrar, i kjeldeorden.
+    la fn_fn = {}
+    fn_fn["__main__.test_seinare"] = funksjon_def("test_seinare", [], 9)
+    fn_fn["__main__.test_fyrst"] = funksjon_def("test_fyrst", [], 3)
+    fn_fn["__main__.test_med_param"] = funksjon_def("test_med_param", ["x"], 5)
+    fn_fn["__main__.hjelp"] = funksjon_def("hjelp", [], 1)
+    la fn = {"entry": "__main__.start", "tests": [], "functions": fn_fn}
+    sjekk(feil, oppdaging.installer_koyrar(fn) == 2, "test_*: 2 funksjonar oppdaga")
+    la rekkjefølgje = oppdaging.testfunksjonar(fn, "__main__")
+    sjekk(feil, lengde(rekkjefølgje) == 2, "test_*: to i planen")
+    hvis lengde(rekkjefølgje) == 2 {
+        sjekk(feil, tekst(rekkjefølgje[0]) == "__main__.test_fyrst", "test_*: kjeldeorden (fyrst)")
+        sjekk(feil, tekst(rekkjefølgje[1]) == "__main__.test_seinare", "test_*: kjeldeorden (seinare)")
+    }
+
+    // (d) test_*-funksjonar MED start(): konservativt — ikkje køyrde.
+    la ms_fn = {}
+    ms_fn["__main__.start"] = funksjon_def("start", [], 1)
+    ms_fn["__main__.test_hjelpar"] = funksjon_def("test_hjelpar", [], 5)
+    la med_start = {"entry": "__main__.start", "tests": [], "functions": ms_fn}
+    sjekk(feil, oppdaging.installer_koyrar(med_start) == 0, "test_* med start(): ingen køyrar")
+    returner 0
+}
+
+funksjon sjekk_rapporttolking(feil: liste_tekst) -> heiltall {
+    la ut = "start\n[nc-test] OK: a\n[nc-test] FEIL: b — assert_eq feilet: 4 != 5\n[nc-test] 1/2 bestått\n[vm] entry returned\n"
+    la linjer = oppdaging.rapportlinjer(ut)
+    sjekk(feil, lengde(linjer) == 3, "rapport: tre linjer")
+    hvis lengde(linjer) == 3 {
+        sjekk(feil, tekst(linjer[1]) == "FEIL: b — assert_eq feilet: 4 != 5", "rapport: FEIL-linja")
+    }
+    la oppsum = oppdaging.oppsummering(linjer)
+    sjekk(feil, oppsum[0] == 1 og oppsum[1] == 2, "rapport: oppsummering 1/2")
+    // Escapa linjeskift (prosess-ABI-en på somme vertar).
+    la esc = oppdaging.rapportlinjer("[nc-test] OK: a\\n[nc-test] 1/1 bestått\\n")
+    sjekk(feil, lengde(esc) == 2, "rapport: escapa linjeskift gjev to linjer")
+    hvis lengde(esc) == 2 { sjekk(feil, tekst(esc[0]) == "OK: a", "rapport: escapa OK-linje") }
+    la ingen = oppdaging.oppsummering(oppdaging.rapportlinjer("[nc-test] OK: a\n"))
+    sjekk(feil, ingen[1] == -1, "rapport: manglande oppsummering blir -1")
+    returner 0
+}
+
+// ── Del 2: `bin/nc test` som underprosess ───────────────────────────────────────
+
+funksjon nc_test(root: tekst, filer: liste_tekst) {
+    la liste = ""
+    la i: heiltall = 0
+    mens i < lengde(filer) {
+        liste = liste + root + "/tests/fixtures/nc_test/" + tekst(filer[i]) + "\n"
+        i = i + 1
+    }
+    // Nullstill alt ein testshard kan ha arva (einskildfil, shard, lane-filter, framgang),
+    // so barnet køyrer nøyaktig fixture-lista.
+    la miljø = {
+        "NORSCODE_ROOT": root,
+        "NC_NATIVE": root + "/dist/norscode_native",
+        "NC_TEST_FILE": "",
+        "NC_TEST_FILES": liste,
+        "NC_TEST_LIST_FILE": "",
+        "NC_TEST_BERRE_UTSETTE": "",
+        "NC_TEST_SHARD": "",
+        "NC_TEST_SHARDS": "",
+        "NC_TEST_ALL": "1",
+        "NC_SLOW_TESTS": "",
+        "NC_TEST_TMPDIR": "",
+        "NC_TEST_PROGRESS_FILE": "",
+        "NC_VERBOSE": "",
+        "NORSCODE_VM_CAPABILITIES": "env.read,env.write,process.exec,disk.read,disk.write,thread.spawn",
+        "NORSCODE_VM_DISK_ROOT": root + ",.,/tmp,/private/tmp"
+    }
+    returner prosess.køyr(root + "/bin/nc", ["test"], root, miljø, 600000)
+}
+
+funksjon exit_kode(res) -> heiltall {
+    prøv { returner heltall_fra_tekst(tekst(res["exit_code"])) } fang (e) { returner -1 }
+    returner -1
+}
+
+funksjon sjekk_underprosess(feil: liste_tekst, root: tekst) -> heiltall {
+    // (a) Blanda: to feilande filer med test-testar, éi grøn med blokker, éi med
+    //     test_*-hjelparar under start(), og éi der start() avsluttar før blokkene.
+    la res = nc_test(root, ["testblokker.no", "testfunksjonar_utan_start.no", "testblokker_gronne.no",
+                            "testfunksjonar_med_start.no", "start_avsluttar.no"])
+    la ut = tekst(res["stdout"]) + "\n" + tekst(res["stderr"])
+    sjekk(feil, exit_kode(res) != 0, "blanda: exit-koden skal vere ≠ 0 (var " + tekst(exit_kode(res)) + ")")
+    sjekk(feil, inneheld(ut, "OK: dobbel gir rett svar"), "blanda: test-blokk OK rapportert")
+    sjekk(feil, inneheld(ut, "FEIL: denne skal feile — assert_eq feilet: 4 != 5"),
+          "blanda: test-blokk FEIL med assert-melding")
+    sjekk(feil, inneheld(ut, "OK: test_ok"), "blanda: test_ok rapportert")
+    sjekk(feil, inneheld(ut, "FEIL: test_feil — assert_eq feilet: 1 != 2"), "blanda: test_feil med assert-melding")
+    sjekk(feil, inneheld(ut, "OK: les modulglobal"), "blanda: modulglobal lesen frå test-blokk")
+    sjekk(feil, inneheld(ut, "OK testblokker_gronne"), "blanda: grøn blokk-fil er grøn")
+    sjekk(feil, ikkje inneheld(ut, "test_ikkje_sjolvstendig"), "blanda: test_* under start() ikkje køyrd")
+    sjekk(feil, ikkje inneheld(ut, "FEIL testfunksjonar_med_start"), "blanda: fil med start() og test_*-hjelparar grøn")
+    sjekk(feil, inneheld(ut, "FEIL start_avsluttar"), "blanda: start() som avsluttar før blokkene er raud")
+    sjekk(feil, inneheld(ut, "nådde ikkje oppsummeringa"), "blanda: manglande oppsummering forklart")
+    sjekk(feil, inneheld(ut, "Test-blokker/test_*-funksjonar: 4/6 bestått"), "blanda: sum 4/6 over filene")
+    sjekk(feil, inneheld(ut, "FEIL: Testane feilet (3 av 5)"), "blanda: 3 av 5 filer raude")
+    sjekk(feil, inneheld(ut, "Totalt:   5"), "blanda: fil-totalen er uendra (5)")
+    hvis lengde(feil) > 0 {
+        skriv("--- utskrift frå nc test (blanda) ---\n")
+        prosess.skriv_resultat(res)
+    }
+
+    // (b) Berre grøne filer: exit 0 og same OK-format som CI les.
+    la før = lengde(feil)
+    la gronn = nc_test(root, ["testblokker_gronne.no", "testfunksjonar_med_start.no"])
+    la gut = tekst(gronn["stdout"]) + "\n" + tekst(gronn["stderr"])
+    sjekk(feil, exit_kode(gronn) == 0, "grøn: exit-koden skal vere 0 (var " + tekst(exit_kode(gronn)) + ")")
+    sjekk(feil, inneheld(gut, "OK: Alle testar bestått (2/2)"), "grøn: OK-linja CI les")
+    sjekk(feil, inneheld(gut, "Test-blokker/test_*-funksjonar: 2/2 bestått"), "grøn: sum 2/2")
+    hvis lengde(feil) > før {
+        skriv("--- utskrift frå nc test (grøn) ---\n")
+        prosess.skriv_resultat(gronn)
+    }
+    returner 0
+}
+
+funksjon start() -> heiltall {
+    la feil: liste_tekst = []
+    sjekk_førefilter(feil)
+    sjekk_installasjon(feil)
+    sjekk_rapporttolking(feil)
+    sjekk_underprosess(feil, repo_root())
+    hvis lengde(feil) > 0 {
+        skriv("test_nc_test_oppdaging: " + tekst_fra_heltall(lengde(feil)) + " feil\n")
+        returner 1
+    }
+    skriv("test_nc_test_oppdaging OK\n")
+    returner 0
+}
